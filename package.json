@@ -16,6 +16,7 @@
     "test": "node --test",
     "tape": "node bin/cobra.js tape run",
     "ui": "node ui/server.js",
+    "fly": "node fly.js",
     "cobra": "node bin/cobra.js"
   },
   "dependencies": {}
