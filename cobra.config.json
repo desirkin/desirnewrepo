@@ -13,7 +13,7 @@
   },
   "tape": {
     "wsUrl": "wss://ws.kraken.com/v2",
-    "bookDepth": 25,
+    "bookDepth": 100,
     "snapshotIntervalSec": 5,
     "staleFeedSec": 10,
     "dataDir": "data"
