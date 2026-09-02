@@ -1,0 +1,38 @@
+{
+  "venue": "kraken",
+  "universe": ["BTC", "ETH", "SOL", "XRP", "DOGE"],
+  "quote": "USD",
+  "locks": {
+    "selectivePct": 5,
+    "protectPct": 8,
+    "hardPct": 11
+  },
+  "timezone": "America/New_York",
+  "paper": {
+    "bankrollUsd": 10000
+  },
+  "tape": {
+    "wsUrl": "wss://ws.kraken.com/v2",
+    "bookDepth": 25,
+    "snapshotIntervalSec": 5,
+    "staleFeedSec": 10,
+    "dataDir": "data"
+  },
+  "cost": {
+    "sizeLadderUsd": [100, 500, 1000, 2500, 5000],
+    "maxBookAgeSec": 10
+  },
+  "fees": {
+    "version": "2026-09-02",
+    "kraken": {
+      "tier": "base ($0+ 30-day volume)",
+      "maker": 0.004,
+      "taker": 0.008
+    },
+    "coinbase_advanced": {
+      "tier": "entry (<$10k 30-day volume)",
+      "maker": 0.004,
+      "taker": 0.006
+    }
+  }
+}

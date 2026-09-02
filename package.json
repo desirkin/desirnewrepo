@@ -1,0 +1,21 @@
+{
+  "name": "cobra-engine",
+  "version": "0.1.0",
+  "description": "COBRA (Ophiophagus) — automated long/flat crypto research & paper-trading engine. PAPER-FANGED.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "cobra": "./bin/cobra.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "drill": "node index.js && npm test",
+    "test": "node --test",
+    "tape": "node bin/cobra.js tape run",
+    "cobra": "node bin/cobra.js"
+  },
+  "dependencies": {}
+}
