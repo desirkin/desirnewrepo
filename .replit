@@ -1,7 +1,13 @@
-modules = ["nodejs-20"]
+run = "npm run fly"
+entrypoint = "fly.js"
+modules = ["nodejs-22"]
 
 [nix]
 channel = "stable-25_05"
 
 [agent]
 expertMode = true
+
+[[ports]]
+localPort = 3000
+externalPort = 80
