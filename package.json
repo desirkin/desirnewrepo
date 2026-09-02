@@ -15,6 +15,7 @@
     "drill": "node index.js && npm test",
     "test": "node --test",
     "tape": "node bin/cobra.js tape run",
+    "ui": "node ui/server.js",
     "cobra": "node bin/cobra.js"
   },
   "dependencies": {}
