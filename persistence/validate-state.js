@@ -22,32 +22,12 @@ function allNumbersFinite(v) {
   return v !== undefined;
 }
 
-// ---- CONTROL STATE: {kill, cage, vetoes} ---------------------------------
-// kill/cage: null OR {active: true, ts: valid ISO}. Anything else is invalid
-// and must never be read as CLEAR. Vetoes: array of {prediction_id, ts}.
-export function validateControlState(s) {
-  const errors = [];
-  if (!isPlainObject(s)) return { ok: false, errors: ['not an object'] };
-  if (!allNumbersFinite(s)) errors.push('non-finite number present');
-  for (const latch of ['kill', 'cage']) {
-    const v = s[latch];
-    if (v === null || v === undefined) continue;
-    if (!isPlainObject(v) || v.active !== true || !isIsoTs(v.ts)) {
-      errors.push(`${latch} is neither null nor {active:true, valid ts}`);
-    }
-  }
-  if (!Array.isArray(s.vetoes)) {
-    errors.push('vetoes is not an array');
-  } else {
-    for (const v of s.vetoes) {
-      if (!isPlainObject(v) || !isNonEmptyString(v.prediction_id) || !isIsoTs(v.ts)) {
-        errors.push('veto without valid prediction_id + timestamp');
-        break;
-      }
-    }
-  }
-  return { ok: errors.length === 0, errors };
-}
+// ---- CONTROL STATE -------------------------------------------------------
+// PERSIST-0C: the control-state validator is PURE and lives BELOW
+// persistence (state/control-validate.js) so the local control store can
+// judge its own truth without PostgreSQL existing. Re-exported here so the
+// persistence layer keeps one import surface.
+export { validateControlState } from '../state/control-validate.js';
 
 // ---- POSTURE: {posture: known enum, ts: valid ISO, cause?} ---------------
 export function validatePostureState(s) {

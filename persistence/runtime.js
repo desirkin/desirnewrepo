@@ -25,13 +25,13 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from '
 import { dataDir } from '../lib/config.js';
 import { atomicWriteJson } from '../lib/jsonl.js';
 import { Tail } from '../memory/mirror.js';
+import * as controlStore from '../state/control-store.js';
 import { Db } from './db.js';
-import { Repository, mostRestrictiveControls } from './repository.js';
+import { Repository } from './repository.js';
 import { runMigrations, FutureSchemaError } from './migrate.js';
 import { persistenceHealth, durabilityRequired } from './health.js';
 import { canonicalJson } from './schema.js';
 import {
-  validateControlState,
   validatePostureState,
   validateSimState,
   validateLedgerRow,
@@ -220,33 +220,22 @@ function quarantineCopy(file, rawText, log) {
 async function restoreDurableCore(state, log) {
   const { repo } = state;
 
-  // ---- controls -----------------------------------------------------------
-  const controlsFile = path.join(dataDir(), 'state', 'controls.json');
-  let local = { kill: null, cage: null, vetoes: [] };
-  if (existsSync(controlsFile)) {
-    const rawText = readFileSync(controlsFile, 'utf8');
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      parsed = null;
-    }
-    if (parsed && validateControlState(parsed).ok) {
-      local = parsed;
-    } else {
-      state.pump.spoolParseErrors++;
-      quarantineCopy(controlsFile, rawText, log);
-      log('PERSISTENCE DEGRADED: local controls.json malformed/invalid — treated as adding no permission and no restriction; durable truth stands');
-    }
-  }
+  // ---- controls (through THE local control store, PERSIST-0C §12) --------
   const durable = await repo.loadControlState();
   if (durable?.invalid) {
     // an invalid durable control row is NEVER interpreted as CLEAR: restore
     // fails, the permission lock holds, CLEAR refuses, retries continue
     throw new InvalidDurableStateError(`durable control state invalid: ${durable.errors.join('; ')}`);
   }
-  const merged = mostRestrictiveControls(durable?.state ?? {}, local);
-  atomicWriteJson(controlsFile, merged, { pretty: true }); // local mirror follows the merged truth
+  // the store re-reads local truth under its own inter-process lock and
+  // fail-closes a corrupt mirror into KILL + quarantine + integrity marker
+  const { state: merged } = controlStore.mergeRestrictive(durable?.state ?? {}, 'persistence-restore');
+  if (controlStore.integrityStatus().locked) {
+    // corrupt local control truth resolved toward restriction — the body
+    // must never emerge CLEAR/unlocked on top of quarantined uncertainty
+    state.integrityLock = true;
+    log('PERSISTENCE INTEGRITY LOCK: local control state was corrupt — fail-closed KILL stands; CLEAR refused until the integrity marker is resolved');
+  }
   const saved = await repo.saveControlState(merged, durable?.revision ?? null);
   if (saved.refused) throw new InvalidDurableStateError(`control restore refused: ${saved.reason}`);
   state.controlRevision = saved.revision;
@@ -535,26 +524,8 @@ function startPump(state, log) {
   // and a durable restriction discovered from another instance is adopted
   // locally. MOST RESTRICTIVE STATE WINS in both directions, always.
   async function syncCurrentControls() {
-    const file = path.join(dataDir(), 'state', 'controls.json');
-    let local = { kill: null, cage: null, vetoes: [] };
-    if (existsSync(file)) {
-      let ok = false;
-      try {
-        const parsed = JSON.parse(readFileSync(file, 'utf8'));
-        if (validateControlState(parsed).ok) {
-          local = parsed;
-          ok = true;
-        }
-      } catch {
-        ok = false;
-      }
-      if (!ok) {
-        state.pump.spoolParseErrors++;
-        log('PERSISTENCE DEGRADED: local controls.json malformed/invalid — control sync withheld this cycle');
-        return;
-      }
-    }
     try {
+      // durable read FIRST, holding no filesystem lock (PERSIST-0C §12)
       const durable = await state.repo.loadControlState();
       if (durable?.invalid) {
         state.integrityLock = true;
@@ -562,13 +533,16 @@ function startPump(state, log) {
         log('PERSISTENCE INTEGRITY LOCK: durable control row invalid during sync — never read as CLEAR; manual resolution required');
         return;
       }
-      const merged = mostRestrictiveControls(durable?.state ?? {}, local);
-      if (canonicalJson(merged) !== canonicalJson(local)) {
-        // another instance (or an earlier outage) holds a restriction we
-        // lack locally: adopt it — a durable restriction is never ignored
-        atomicWriteJson(file, merged, { pretty: true });
-        log('PERSISTENCE control sync: durable restriction adopted locally (most restrictive wins)');
+      // the store acquires the local lock, RE-READS local truth under it,
+      // merges MOST RESTRICTIVE, and writes only on change — a restriction
+      // that landed while we read the database can never be overwritten
+      const { state: merged, changed } = controlStore.mergeRestrictive(durable?.state ?? {}, 'persistence-sync');
+      if (controlStore.integrityStatus().locked && !state.integrityLock) {
+        state.integrityLock = true;
+        log('PERSISTENCE INTEGRITY LOCK: local control state was corrupt during sync — fail-closed KILL stands');
       }
+      if (changed) log('PERSISTENCE control sync: durable restriction adopted locally (most restrictive wins)');
+      // local lock is released before this network write
       if (!durable || canonicalJson(merged) !== canonicalJson(durable.state)) {
         const r = await state.repo.saveControlState(merged, durable?.revision ?? null);
         if (r.refused) {
@@ -611,14 +585,22 @@ function startPump(state, log) {
       try {
         parsed = JSON.parse(raw);
       } catch {
+        // PERSIST-0C §16: malformed CURRENT safety state locks permission
         state.pump.spoolParseErrors++;
-        log(`PERSISTENCE DEGRADED: local ${path.basename(file)} unparseable — current-state snapshot withheld`);
+        state.integrityLock = true;
+        quarantineCopy(file, raw, log);
+        log(`PERSISTENCE INTEGRITY LOCK: current ${path.basename(file)} unparseable mid-run — quarantined; permission locked`);
         slot.digest = digest; // counted once; a rewrite re-triggers
         continue;
       }
       if (!validate(parsed).ok) {
+        // PERSIST-0C §16: CURRENT safety/permission state went invalid
+        // mid-run — quarantine the evidence and LOCK permission; never
+        // interpret it as COILED / no lock, never keep running permissively
         state.pump.spoolParseErrors++;
-        log(`PERSISTENCE DEGRADED: local ${path.basename(file)} invalid — current-state snapshot withheld`);
+        state.integrityLock = true;
+        quarantineCopy(file, raw, log);
+        log(`PERSISTENCE INTEGRITY LOCK: current ${path.basename(file)} invalid mid-run — quarantined; permission locked`);
         slot.digest = digest;
         continue;
       }

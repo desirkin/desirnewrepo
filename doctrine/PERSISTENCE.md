@@ -115,6 +115,57 @@ restrictive snapshot remains pending (`pendingControlSync`), persistence
 health never claims complete durability. Disagreement never resolves
 toward more permission.
 
+## LOCAL CONTROL INTEGRITY & ATOMICITY (PERSIST-0C)
+
+**Local control corruption is uncertainty about permission. Uncertainty
+resolves toward restriction.** A corrupt `controls.json` never crashes
+KILL, is never read as CLEAR, and is never silently repaired toward
+permission: the raw evidence is quarantined, a VALID fail-closed KILL is
+materialized (audited explicitly as `INTEGRITY_FAIL_CLOSED`, never
+presented as a human KILL), an integrity marker
+(`state/control_integrity.json`, reason `LOCAL_CONTROL_STATE_INVALID`)
+engages the persistence integrity/permission lock, and the fail-closed
+restriction becomes durable through normal reconciliation. Defensive
+controls keep working on top of the fail-closed state; CLEAR refuses until
+the marker is resolved (inspect the quarantine, then remove the marker —
+the documented recovery condition).
+
+**Local control mutations are serialized across processes before
+read-modify-write. Database transactions protect durable state; the local
+control lock protects the current-process mirror. Both are required.**
+`state/control-store.js` is the ONE local authority (reads, validation,
+mutation, locking, atomic replacement, corruption fail-closed); the
+public functions in `state/controls.js` are compatibility wrappers, and
+persistence coordinates through the same store. The inter-process lock is
+an exclusive lock directory with an inspectable owner record; only the
+tiny local mutation section is locked (never a database/network wait);
+stale recovery is conservative (a provably dead owner AND an aged lock) —
+a live lock is never casually deleted. If even the lock fails during a
+restriction, the current process still restricts itself (emergency KILL
+overlay) and reports honestly — a control action never disappears.
+
+**Concurrent permission-reducing actions merge. A restriction may never
+be lost because another restriction arrived simultaneously.** KILL+CAGE
+racing becomes KILL+CAGE; KILL+VETO becomes KILL+VETO; CAGE+VETO becomes
+CAGE+VETO. A mutation returns the EXACT snapshot it produced, and that
+snapshot — not a later re-read — is what gets persisted durably.
+
+**Concurrent restriction beats CLEAR.** CLEAR is two-phase: the state it
+approves is fingerprinted before the durable transaction and re-checked
+under the local lock afterward; any change refuses with
+`CLEAR_RACED_WITH_RESTRICTION` and the restrictive truth is immediately
+reasserted durably. A local latch-write failure after a durable CLEAR is
+`LOCAL_CLEAR_FAILED`, never success — the restrictive state stands and is
+reasserted. Malformed CURRENT posture/sim state discovered mid-run is
+likewise quarantined and locks permission — current safety state is not
+ordinary evidence.
+
+**Fixed temporary filenames are forbidden for atomic state replacement.**
+Every atomic write uses a unique same-directory temp (pid + counter +
+random) renamed into place; a writer cleans up only its own temp. Unique
+temps prevent rename collisions; the control lock prevents lost updates —
+both are required.
+
 ## ONE CONTROL DOOR (PERSIST-0B)
 
 `persistence/control-plane.js` is THE control-coordination layer: the

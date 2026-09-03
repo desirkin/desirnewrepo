@@ -3,59 +3,51 @@
 // These are latches, not suggestions: they persist to disk (atomically),
 // survive restarts, and every action is appended to a permanent log with
 // its timestamp and source (cli / ui).
+//
+// PERSIST-0C: the actual read/validate/lock/mutate semantics live in ONE
+// authority — state/control-store.js. These public functions remain as the
+// compatibility surface; a corrupt local mirror can no longer crash KILL
+// (it fail-closes toward restriction instead), and mutations are
+// serialized across processes so concurrent restrictions merge rather
+// than cancel each other.
 import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
-import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { dataDir } from '../lib/config.js';
-import { nowIso } from '../lib/time.js';
+import {
+  readControls as storeRead,
+  killLocal,
+  cageLocal,
+  vetoLocal,
+  clearLatchesLocal,
+} from './control-store.js';
 
-const controlsFile = () => path.join(dataDir(), 'state', 'controls.json');
 const controlLogFile = () => path.join(dataDir(), 'state', 'controls_log.jsonl');
 
-const DEFAULTS = { kill: null, cage: null, vetoes: [] };
-
 export function readControls() {
-  const file = controlsFile();
-  if (!existsSync(file)) return { ...DEFAULTS };
-  return { ...DEFAULTS, ...JSON.parse(readFileSync(file, 'utf8')) };
-}
-
-function writeControls(controls, action, source, detail = {}) {
-  atomicWriteJson(controlsFile(), controls, { pretty: true });
-  appendJsonl(controlLogFile(), { ts: nowIso(), action, source, ...detail }, { sync: true });
-  return controls;
+  return storeRead();
 }
 
 export function kill(source = 'cli') {
-  const c = readControls();
-  c.kill = { active: true, ts: nowIso() };
-  return writeControls(c, 'KILL', source);
+  return killLocal(source).state;
 }
 
 export function cage(source = 'cli') {
-  const c = readControls();
-  c.cage = { active: true, ts: nowIso() };
-  return writeControls(c, 'CAGE', source);
+  return cageLocal(source).state;
 }
 
 export function veto(predictionId, source = 'cli') {
-  const c = readControls();
-  if (!c.vetoes.some((v) => v.prediction_id === predictionId)) {
-    c.vetoes.push({ prediction_id: predictionId, ts: nowIso() });
-  }
-  return writeControls(c, 'VETO', source, { prediction_id: predictionId });
+  return vetoLocal(predictionId, source).state;
 }
 
 export function isVetoed(predictionId) {
   return readControls().vetoes.some((v) => v.prediction_id === predictionId);
 }
 
-// Human-only reset of KILL/CAGE latches (vetoes stay — a denied trade stays denied).
+// Human-only reset of KILL/CAGE latches (vetoes stay — a denied trade stays
+// denied). This is the raw LOCAL primitive; the durable permission-increase
+// gate lives in persistence/control-plane.js requestClear().
 export function clearLatches(source = 'cli') {
-  const c = readControls();
-  c.kill = null;
-  c.cage = null;
-  return writeControls(c, 'CLEAR_LATCHES', source);
+  return clearLatchesLocal(source).state;
 }
 
 export function readControlLog() {

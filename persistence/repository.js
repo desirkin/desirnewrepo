@@ -29,15 +29,10 @@ const LEDGER_TABLES = {
 
 // MOST RESTRICTIVE STATE WINS (doctrine/PERSISTENCE.md): disagreements
 // between two control states resolve toward less permission, always.
-export function mostRestrictiveControls(a = {}, b = {}) {
-  const kill = a.kill?.active ? a.kill : b.kill?.active ? b.kill : null;
-  const cage = a.cage?.active ? a.cage : b.cage?.active ? b.cage : null;
-  const byId = new Map();
-  for (const v of [...(a.vetoes ?? []), ...(b.vetoes ?? [])]) {
-    if (v?.prediction_id && !byId.has(v.prediction_id)) byId.set(v.prediction_id, v);
-  }
-  return { kill, cage, vetoes: [...byId.values()] };
-}
+// PERSIST-0C: the implementation is pure and lives below persistence in
+// state/control-validate.js; re-exported here for existing importers.
+import { mostRestrictiveControls } from '../state/control-validate.js';
+export { mostRestrictiveControls };
 
 // PERSIST-0A: less-permission reconciliation for runtime ("current") state.
 // A stale or unproven writer can never regress a restriction; junk can never

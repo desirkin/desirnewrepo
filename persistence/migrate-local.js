@@ -11,7 +11,8 @@ import { validateEnvelope } from '../memory/validate.js';
 import { Db } from './db.js';
 import { Repository, mostRestrictiveControls } from './repository.js';
 import { runMigrations } from './migrate.js';
-import { validateControlState, validatePostureState, validateSimState } from './validate-state.js';
+import { validatePostureState, validateSimState } from './validate-state.js';
+import { readControls as readLocalControls } from '../state/controls.js';
 import { canonicalJson } from './schema.js';
 
 const canonicalMatch = (a, b) => canonicalJson(a) === canonicalJson(b);
@@ -39,26 +40,19 @@ export async function migrateLocalData({ db, log = console.log } = {}) {
   };
   const tally = () => ({ accepted: 0, duplicates: 0, invalid: 0, conflicts: 0 });
 
-  // ---- control state (validated; merge toward restriction, never regress)
+  // ---- control state (merge toward restriction, never regress). The read
+  // goes through THE local control store (PERSIST-0C §4): a corrupt local
+  // mirror fail-closes into KILL there rather than being interpreted here.
   const controlsFile = path.join(d, 'state', 'controls.json');
   if (existsSync(controlsFile)) {
     report.filesInspected.push('state/controls.json');
-    let local = null;
-    try {
-      local = JSON.parse(readFileSync(controlsFile, 'utf8'));
-    } catch {
-      local = null;
-    }
-    if (local && validateControlState(local).ok) {
-      const durable = await repo.loadControlState();
-      if (durable?.invalid) {
-        report.subsystems.controlState = { merged: false, refused: 'durable control state invalid — manual resolution required' };
-      } else {
-        await repo.saveControlState(mostRestrictiveControls(durable?.state ?? {}, local), durable?.revision ?? null);
-        report.subsystems.controlState = { merged: true };
-      }
+    const local = readLocalControls(); // validated; corrupt -> fail-closed KILL
+    const durable = await repo.loadControlState();
+    if (durable?.invalid) {
+      report.subsystems.controlState = { merged: false, refused: 'durable control state invalid — manual resolution required' };
     } else {
-      report.subsystems.controlState = { merged: false, refused: 'local controls.json malformed/invalid' };
+      const saved = await repo.saveControlState(mostRestrictiveControls(durable?.state ?? {}, local), durable?.revision ?? null);
+      report.subsystems.controlState = saved.refused ? { merged: false, refused: saved.reason } : { merged: true };
     }
   } else report.missingFiles.push('state/controls.json');
 
