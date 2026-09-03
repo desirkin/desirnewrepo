@@ -15,6 +15,8 @@ import { bookFeatures } from '../tape/features.js';
 import { openPositions, allPredictions, allFills } from '../ledger/ledger.js';
 import { ledgerSummary } from '../ledger/summary.js';
 import { kill, cage, veto, clearLatches, isVetoed, readControls } from '../state/controls.js';
+import { existsSync, readFileSync as readFs } from 'node:fs';
+import { dataDir } from '../lib/config.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -71,6 +73,25 @@ function pendingStrikes() {
   }
 }
 
+// RUMINT poller status (read-only passthrough of its atomic status file).
+function rumintReport() {
+  const file = path.join(dataDir(), 'rumint', 'status.json');
+  if (!existsSync(file)) return { enabled: false };
+  try {
+    const s = JSON.parse(readFs(file, 'utf8'));
+    return {
+      enabled: s.enabled === true,
+      symbolsPolled: s.symbolsPolled ?? 0,
+      hourCount: s.hourCount ?? 0,
+      backoff: Boolean(s.backoffUntil && s.backoffUntil > Date.now()),
+      hyped: s.hyped ?? [],
+      fresh: Date.now() - (s.tsMs ?? 0) < 30_000,
+    };
+  } catch {
+    return { enabled: false };
+  }
+}
+
 function statusPayload() {
   const engine = getEngineState(); // syncs + logs posture transitions
   let open = 0;
@@ -96,6 +117,8 @@ function statusPayload() {
     universe: config.universe,
     openPositions: open,
     pendingStrikes: pendingStrikes(),
+    stalking: Object.keys(engine.stalking ?? {}),
+    rumint: rumintReport(),
     controls: {
       kill: readControls().kill?.active ?? false,
       cage: readControls().cage?.active ?? false,

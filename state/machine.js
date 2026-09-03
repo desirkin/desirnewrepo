@@ -5,6 +5,7 @@
 // in retreat: COILED, with strikes independently refused by cost/ledger.
 import { readControls } from './controls.js';
 import { dailyLockStatus } from './locks.js';
+import { pruneStalking } from './stalking.js';
 import { readTapeStatus, TAPE_STATES } from '../tape/store.js';
 import { PostureMachine, POSTURES } from './posture.js';
 
@@ -49,34 +50,54 @@ function assess() {
 }
 
 // Sync the persisted machine with reality; logs any transition it causes.
+// Precedence: RETREAT causes > live stalk set (RUMINT nominations, arming
+// only) > COILED, the resting truth. Nothing here can reach STRIKE.
 export function syncPosture() {
   const { retreatCauses, advisories, controls, locks, tape } = assess();
+  const stalking = pruneStalking();
+  const stalkSymbols = Object.keys(stalking);
   const machine = new PostureMachine();
   let transition = null;
-  if (retreatCauses.length && machine.posture !== STATES.RETREAT) {
-    transition = machine.transition(STATES.RETREAT, retreatCauses.map((c) => c.detail).join('; '));
-  } else if (!retreatCauses.length && machine.posture === STATES.RETREAT) {
-    transition = machine.transition(STATES.COILED, 'all retreat causes cleared');
-  }
-  // Postures beyond COILED/RETREAT cannot be entered by any path here in C-2;
-  // if a stale posture file claims one, stand down to the resting truth.
-  if (!REACHABLE(machine.posture)) {
+
+  // A persisted posture beyond what any real path can enter is stood down.
+  if (machine.posture === STATES.STRIKE || machine.posture === STATES.DIGESTING) {
     transition = machine.transition(STATES.RETREAT, `unreachable posture ${machine.posture} found persisted`);
   }
-  return { machine, transition, retreatCauses, advisories, controls, locks, tape };
-}
 
-const REACHABLE = (p) => p === STATES.COILED || p === STATES.RETREAT;
+  const target = retreatCauses.length
+    ? STATES.RETREAT
+    : stalkSymbols.length
+      ? STATES.STALKING
+      : STATES.COILED;
+
+  if (machine.posture !== target) {
+    if (target === STATES.RETREAT) {
+      transition = machine.transition(STATES.RETREAT, retreatCauses.map((c) => c.detail).join('; '));
+    } else if (target === STATES.STALKING) {
+      if (machine.posture === STATES.RETREAT) {
+        transition = machine.transition(STATES.COILED, 'all retreat causes cleared');
+      }
+      transition = machine.transition(STATES.STALKING, `stalking: ${stalkSymbols.join(', ')}`);
+    } else {
+      transition = machine.transition(
+        STATES.COILED,
+        machine.posture === STATES.RETREAT ? 'all retreat causes cleared' : 'stalk set empty — back to rest'
+      );
+    }
+  }
+  return { machine, transition, retreatCauses, advisories, controls, locks, tape, stalking };
+}
 
 // Same shape C-1 callers (index.js, CLI) already rely on.
 export function getEngineState() {
-  const { machine, retreatCauses, advisories, controls, locks, tape } = syncPosture();
+  const { machine, retreatCauses, advisories, controls, locks, tape, stalking } = syncPosture();
   return {
     state: machine.posture,
     reasons: [...retreatCauses.map((c) => c.detail), ...advisories],
     retreatCauses,
     controls,
     locks,
+    stalking,
     tape: tape?.state ?? 'ABSENT',
     tapeStatus: tape ?? null,
   };

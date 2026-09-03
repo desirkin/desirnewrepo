@@ -62,11 +62,16 @@ test('illegal transitions throw even in demo mode', () => {
   assert.equal(m.posture, 'RETREAT'); // failed transitions change nothing
 });
 
-test('STALKING/STRIKE/DIGESTING are unreachable outside demo mode', () => {
+test('STRIKE/DIGESTING are unreachable outside demo; STALKING opened by S-2b', () => {
   const m = new PostureMachine();
   assert.equal(m.demo, false);
-  assert.throws(() => m.transition('STALKING', 'no signal engine exists'), NotYetImplemented);
-  assert.equal(m.posture, 'COILED');
+  // S-2b: RUMINT nomination may arm — STALKING is now a real, logged transition.
+  m.transition('STALKING', 'test arm');
+  assert.equal(m.posture, 'STALKING');
+  // But there is still NO path to a strike anywhere in the codebase.
+  assert.throws(() => m.transition('STRIKE', 'no confirmation engine exists'), NotYetImplemented);
+  assert.equal(m.posture, 'STALKING');
+  m.transition('COILED', 'test disarm');
   // The full enum is still declared — C-3 inherits the map.
   assert.deepEqual(POSTURES, ['COILED', 'STALKING', 'STRIKE', 'DIGESTING', 'RETREAT']);
 });

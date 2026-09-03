@@ -22,8 +22,11 @@ const LEGAL = Object.freeze({
   RETREAT: ['COILED'],
 });
 
-// The only postures any real code path may enter in C-2.
-const REACHABLE_C2 = Object.freeze(new Set(['COILED', 'RETREAT']));
+// Postures a real code path may enter. S-2b opened STALKING to exactly one
+// door: RUMINT nomination (arming only). STRIKE and DIGESTING stay locked
+// until a real confirmation engine exists — there is still no path to a
+// strike anywhere in this codebase.
+const REACHABLE = Object.freeze(new Set(['COILED', 'STALKING', 'RETREAT']));
 
 export class IllegalTransition extends Error {}
 export class NotYetImplemented extends Error {}
@@ -57,9 +60,9 @@ export class PostureMachine {
     if (!LEGAL[from].includes(to)) {
       throw new IllegalTransition(`illegal transition ${from} -> ${to}`);
     }
-    if (!this.demo && !REACHABLE_C2.has(to)) {
+    if (!this.demo && !REACHABLE.has(to)) {
       throw new NotYetImplemented(
-        `${to} is defined but unreachable in C-2 — no signal engine exists yet (demo mode only)`
+        `${to} is defined but unreachable — no confirmation/strike engine exists yet (demo mode only)`
       );
     }
     this.posture = to;

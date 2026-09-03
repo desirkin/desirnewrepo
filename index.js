@@ -10,6 +10,8 @@ const state = getEngineState();
 
 if (state.state === 'COILED') {
   console.log('COBRA COILED — NO TRADE');
+} else if (state.state === 'STALKING') {
+  console.log(`COBRA STALKING — ARMED, NO STRIKE (${Object.keys(state.stalking ?? {}).join(', ')})`);
 } else {
   console.log(`COBRA ${state.state} — STANDING DOWN (${state.retreatCauses.map((c) => c.key).join(', ')})`);
 }

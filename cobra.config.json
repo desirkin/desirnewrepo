@@ -12,7 +12,14 @@
     "baseBalanceUsd": 100
   },
   "rumint": {
-    "enabled": false
+    "enabled": true,
+    "zThreshold": 3,
+    "stalkTtlMin": 60,
+    "pollHotSec": 300,
+    "pollWarmSec": 1200,
+    "hourlyBudget": 120,
+    "spacingMs": 2100,
+    "backoffMin": 15
   },
   "universeExpansion": {
     "enabled": true,

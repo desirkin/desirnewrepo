@@ -1,9 +1,19 @@
 # RUMINT DOCTRINE — social chatter intelligence
 
-**Status: DARK.** `rumint.enabled: false` in config (env `RUMINT_ENABLED` can
-override, and env `RUMINT_ENABLED=false` force-disables regardless of config).
-While dark, the module makes **zero network calls** — every analytic runs on
-persisted baselines only. Nothing in the engine or UI consumes it yet.
+**Status: ARMED (S-2b).** `rumint.enabled: true` in config (env
+`RUMINT_ENABLED=false` force-disables regardless of config; when disabled the
+module makes **zero network calls**). The tiered poller runs inside `fly.js`
+within the S-1 budget. Exactly two consumers exist:
+
+1. **Nomination** — `zVelocity ≥ 3 AND acceleration > 0` arms that symbol
+   into the stalk set (60-min TTL; an unconfirmed rumor decays). The global
+   posture shows STALKING while the set is non-empty. Logged as
+   `RUMINT NOMINATION <symbol> z=<x>`.
+2. **HYPED** — top-decile overnight chatter, logged `HYPED <symbol>` at
+   session start; strictness marker for the future confirmation engine.
+
+STRIKE and DIGESTING remain unreachable (`NotYetImplemented`); a unit test
+statically proves no strike-capable module imports RUMINT or the stalk set.
 
 ## What RUMINT may and may not do
 
