@@ -29,7 +29,6 @@ const log = (m) => console.log(`[${nowIso()}] ${m}`);
 
 const config = loadConfig();
 const wideCfg = config.wideeye;
-const retrievedTs = nowIso();
 const gaps = [
   'Kraken OHLC serves ~720 candles/interval: 1m history limited to ~12h, 5m to ~2.5d, 15m to ~7.5d — no 30d density below 1h (verified live)',
   'No public L2 history exists: absorption/refill/cancel = UNKNOWN_HISTORICALLY outside trades enrichment',
@@ -56,21 +55,28 @@ const TRACKS = [
   { intervalMin: 1, coins: deepCoins, role: 'PARITY_SCOUT' },
 ];
 const stores = new Map();
+const retrievalIso = new Map(); // intervalMin -> Map(coin -> ACTUAL retrieval ISO of that fetch)
 let sourceLatestTs = 0;
 for (const t of TRACKS) {
   const m = new Map();
   stores.set(t.intervalMin, m);
+  retrievalIso.set(t.intervalMin, new Map());
   let done = 0;
   for (const coin of t.coins) {
     try {
       const { candles, retrievedSec } = await fetchOhlc(pairKeys.get(coin), t.intervalMin);
       if (candles.length >= 20) {
-        m.set(coin, new CandleStore(coin, t.intervalMin * 60, candles));
+        // coverage extends through retrieval time: REST serves the complete
+        // series to now, so bar-less final minutes mean "no trades", not
+        // "dataset ended" (B-0B.1 §1). Retrieval provenance is the ACTUAL
+        // per-fetch timestamp, never a build-start stamp (§4).
+        m.set(coin, new CandleStore(coin, t.intervalMin * 60, candles, { coverageEndSec: retrievedSec }));
+        retrievalIso.get(t.intervalMin).set(coin, new Date(retrievedSec * 1000).toISOString());
         sourceLatestTs = Math.max(sourceLatestTs, candles.at(-1)[0] + t.intervalMin * 60);
         appendJsonl(path.join(STAGING(), `candles-${t.intervalMin}m.jsonl`), {
           symbol: coin,
           intervalMin: t.intervalMin,
-          retrievedTs,
+          retrievedTs: new Date(retrievedSec * 1000).toISOString(),
           retrievedSec,
           candles,
         });
@@ -134,6 +140,7 @@ function buildContextFns(trackStores, intervalSec) {
     if (fwdCache.has(ts)) return fwdCache.get(ts);
     const rets = [];
     for (const s of trackStores.values()) {
+      if (!s.coversHorizon(ts, 3600)) continue; // full-horizon discipline (B-0B.1 §1)
       const now = s.atOrBefore(ts);
       const later = s.future(ts, 3600).at(-1);
       if (!now || !later) continue;
@@ -180,13 +187,20 @@ for (const t of TRACKS) {
           symbol: coin,
           cfg: wideCfg,
           contextAt,
-          retrievedTs,
+          retrievedTs: retrievalIso.get(t.intervalMin).get(coin),
           aggression: agg ? { imbalance: agg.imbalance, bucketSec: 900 } : null,
         })
       );
     } else {
       allObs.push(
-        ...replayContext({ replayViews: store.replayViews(), symbol: coin, intervalSec, track: trackName, contextAt, retrievedTs })
+        ...replayContext({
+          replayViews: store.replayViews(),
+          symbol: coin,
+          intervalSec,
+          track: trackName,
+          contextAt,
+          retrievedTs: retrievalIso.get(t.intervalMin).get(coin),
+        })
       );
     }
   }
@@ -238,10 +252,16 @@ gaps.push(...gov.gaps);
 const lockCounts = {};
 for (const r of gov.records) lockCounts[r.lock.status] = (lockCounts[r.lock.status] ?? 0) + 1;
 let incidentCount = 0;
+let incidentOutcomeCount = 0;
 try {
-  const incidents = await fetchIncidentHistory(stores.get(60));
+  // WALL: incident facts and their post-hoc price outcomes go to SEPARATE
+  // files, linked by incidentId (B-0B.1 §8) — the future never sits inside
+  // an object replay could consume as contemporary evidence.
+  const { incidents, incidentOutcomes } = await fetchIncidentHistory(stores.get(60));
   for (const i of incidents) appendJsonl(path.join(STAGING(), 'incidents.jsonl'), i);
+  for (const o of incidentOutcomes) appendJsonl(path.join(STAGING(), 'incident-outcomes.jsonl'), o);
   incidentCount = incidents.length;
+  incidentOutcomeCount = incidentOutcomes.length;
 } catch (err) {
   gaps.push(`incident archive failed: ${err.message}`);
 }
@@ -265,7 +285,12 @@ const manifest = {
   schemaVersion: EXPECTED_SCHEMA_VERSION,
   childhoodVersion: 'B0B',
   wideEyeLiveLogicVersion: `eyecore-1 (z>=${wideCfg.zVolThreshold}/|z|>=${wideCfg.zRetThreshold}/ext<=${wideCfg.extensionCapPct}%, minSamples=${wideCfg.minSamples}, cooldown=${wideCfg.rippleCooldownMin}m, add-then-score, 7d retention)`,
-  wideEyeReplayParityVersion: 'parity-1 (shared eyecore; true 1m grid; rolling-24h volRate; live cooldown; no coarse-track wide-eye output)',
+  wideEyeReplayParityVersion: 'parity-2 (shared eyecore incl. feature derivers; true 1m grid; rolling-24h volRate; live cooldown; no coarse-track wide-eye output)',
+  // Live sweeps run on a wall-clock ~60s cadence (not calendar-minute
+  // aligned) and select trailing samples with small slack; replay walks a
+  // true calendar-minute grid. The FORMULAS are shared (eyecore); the
+  // sampling phase is not identical and is not claimed to be.
+  parityScope: 'SEMANTIC_PARITY_ON_60S_SAMPLING_GRID',
   fastMemoryParityStatus: FAST_MEMORY_PARITY_STATUS,
   fastMemoryParityBlocker: PARITY_BLOCKER,
   historicalSourceType: 'kraken REST OHLC (720-candle cap per interval), completed bars only',
@@ -324,6 +349,7 @@ const manifest = {
     governanceTimelinesUnavailable: gov.voteStats.timelinesUnavailable,
     governanceLocks: lockCounts,
     incidents: incidentCount,
+    incidentOutcomes: incidentOutcomeCount,
   },
   splits: splitBoundaries,
   embargoHorizonSec: MAX_HORIZON_SEC,

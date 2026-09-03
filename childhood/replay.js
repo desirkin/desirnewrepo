@@ -18,7 +18,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { retBetween } from './store.js';
 import { knowableAt } from './knowledge.js';
-import { evaluateTick, zScore, pooledStats, pruneBaselineBuckets } from '../survey/eyecore.js';
+import { evaluateTick, pruneBaselineBuckets, logReturn, extensionPct, volumeRate } from '../survey/eyecore.js';
 import { etHourKey, sessionDate } from '../lib/time.js';
 
 export const RANDOM_SEED = 'B0A-seed-1'; // deterministic; recorded in manifest
@@ -134,14 +134,14 @@ export function replayParity({ minuteSamples, symbol, cfg, contextAt, retrievedT
     // Serpent reads the venue's own 24h figure; historical Serpent must
     // earn it. Until then: UNKNOWN, zVol null, no signal.
     const volWarm = volRing.length >= DAY_MIN && prevRoll24 !== null;
-    const volRate = volWarm ? Math.max(0, roll24 - prevRoll24) : null;
+    // shared eyecore derivers (B-0B.1): identical formulas to the live sweep
+    const volRate = volWarm ? volumeRate(roll24, prevRoll24) : null;
     if (volRing.length >= DAY_MIN) prevRoll24 = roll24;
 
     const pAt = (minAgo) => (prices.length > minAgo ? prices[prices.length - 1 - minAgo] : null);
-    const ret1 = retBetween(s.price, pAt(1));
-    const ret5 = retBetween(s.price, pAt(5));
-    const p15 = pAt(15);
-    const ret15Pct = p15 ? (s.price / p15 - 1) * 100 : null;
+    const ret1 = logReturn(s.price, pAt(1));
+    const ret5 = logReturn(s.price, pAt(5));
+    const ret15Pct = extensionPct(s.price, pAt(15));
     if (ret1 === null) continue;
 
     // 7-day retention, live semantics, applied as replay time advances.
@@ -273,6 +273,7 @@ export function replayParity({ minuteSamples, symbol, cfg, contextAt, retrievedT
         volumeState: prov('rolling 24h sum of 1m traded volume (live-definition volRate)', replayTs, replayTs, retrievedTs),
         marketContext: prov('cross-symbol closed bars, trailing only', replayTs, replayTs, retrievedTs),
         scoutSignals: prov('shared eyecore (live ordering, live minSamples)', replayTs, replayTs, retrievedTs),
+        externalSignals: prov('none (no historical RUMINT/gateway archive exists)', 'UNKNOWN', 'UNKNOWN', retrievedTs, 'raw'),
         microstructure: prov(
           aggressionAvailable === 'KNOWN' ? 'kraken REST Trades (fully elapsed bucket)' : 'none (no public L2/trades history)',
           replayTs,
@@ -347,6 +348,11 @@ export function replayContext({ replayViews, symbol, intervalSec, track, context
         priceState: prov(`kraken REST OHLC ${track} (closed bar)`, bar[0], replayTs, retrievedTs, 'raw'),
         volumeState: prov(`kraken REST OHLC ${track} raw bar volume (context only)`, bar[0], replayTs, retrievedTs, 'raw'),
         marketContext: prov('cross-symbol closed bars, trailing only', bar[0], replayTs, retrievedTs),
+        // UNAVAILABLE evidence still carries truthful provenance saying WHY
+        // (B-0B.1 §3) — it never silently disappears.
+        scoutSignals: prov('not computable on a context track (no live-definition features at this resolution)', 'UNKNOWN', 'UNKNOWN', retrievedTs),
+        externalSignals: prov('none (no historical RUMINT/gateway archive exists)', 'UNKNOWN', 'UNKNOWN', retrievedTs, 'raw'),
+        microstructure: prov('none (no public L2/trades history on context tracks)', 'UNKNOWN', 'UNKNOWN', retrievedTs, 'raw'),
       },
       setupClassification: 'CONTEXT_SAMPLE',
     });

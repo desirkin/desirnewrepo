@@ -206,14 +206,80 @@ test('REPRODUCIBILITY: identical inputs + seed produce identical selection and c
   assert.ok(a.length > 0);
 });
 
-// carried-over B-0 math drills
-test('MFE/MAE math uses highs and lows over the window', () => {
-  const fut = [
+// carried-over B-0 math drills, B-0B.1 long-only semantics:
+// MFE = max(0, best excursion above entry); MAE = min(0, worst below).
+test('MFE/MAE math: long-only definition over mixed, rising, falling and flat paths', () => {
+  // mixed path: highs above and lows below entry
+  const mixed = [
     [1, 0, 105, 98, 100, 1],
     [2, 0, 110, 96, 97, 1],
   ];
-  assert.deepEqual(mfeMae(100, fut), { mfe: 10, mae: -4 });
+  assert.deepEqual(mfeMae(100, mixed), { mfe: 10, mae: -4 });
+  // rising-only path: never below entry -> MAE is 0, NOT a positive number
+  const rising = [
+    [1, 0, 103, 101, 102, 1],
+    [2, 0, 106, 102, 105, 1],
+  ];
+  assert.deepEqual(mfeMae(100, rising), { mfe: 6, mae: 0 });
+  // falling-only path: never above entry -> MFE is 0, NOT a negative number
+  const falling = [
+    [1, 0, 99, 96, 97, 1],
+    [2, 0, 97, 94, 95, 1],
+  ];
+  assert.deepEqual(mfeMae(100, falling), { mfe: 0, mae: -6 });
+  // flat path: both zero
+  assert.deepEqual(mfeMae(100, [[1, 0, 100, 100, 100, 1]]), { mfe: 0, mae: 0 });
   assert.deepEqual(mfeMae(100, []), { mfe: null, mae: null });
+});
+
+// B-0B.1 §1 — FULL-HORIZON OUTCOME TRUTH (adversarial): only 10 minutes of
+// future history exist after the observation.
+test('FULL-HORIZON: a horizon the source does not fully cover is null — no label from a partial window', () => {
+  const rows = candles(200, { mutate: (i) => ({ close: 100 + i * 0.05 }) }); // steadily rising
+  const store = new CandleStore('TST', 60, rows); // coverage = last close (dataset ENDS there)
+  const obs = { id: 'x', eventId: 'e', ts: rows[189][0] + 60, symbol: 'TST', priceState: { close: rows[189][4], extensionPct: 0 } };
+  const out = labelObservation(obs, store, {});
+  // resolvable inside the remaining 10 minutes
+  assert.notEqual(out.mfe['1m'], null);
+  assert.notEqual(out.mfe['5m'], null);
+  // NOT fully observable -> null, even though partial bars exist
+  for (const h of ['15m', '30m', '60m', '240m']) {
+    assert.equal(out.mfe[h], null, `mfe ${h} labeled from a partial window`);
+    assert.equal(out.mae[h], null, `mae ${h} labeled from a partial window`);
+  }
+  assert.equal(out.ret1hPct, null);
+  assert.equal(out.ret4hPct, null);
+  assert.equal(out.moveRemainingPct, null);
+  // and no tag can be minted from an unobservable horizon — the old code
+  // would have reported a ret1hPct measured over only 10 minutes of data
+  assert.deepEqual(out.outcomeTags, ['UNLABELED_INSUFFICIENT_FUTURE']);
+});
+
+test('FULL-HORIZON: "no trades" is not "dataset ended" — REST coverage through retrieval keeps the horizon labelable', () => {
+  const rows = candles(200, { mutate: (i) => ({ close: 100 + i * 0.05 }) });
+  const obsTs = rows[189][0] + 60;
+  // same bars, but the SOURCE is known to cover a further 4h (retrieval-time
+  // coverage): the sparse final stretch means no trades printed, not that
+  // history stopped — 1h/4h horizons are honestly labelable.
+  const covered = new CandleStore('TST', 60, rows, { coverageEndSec: obsTs + 4 * 3600 });
+  const out = labelObservation({ id: 'x', eventId: 'e', ts: obsTs, symbol: 'TST', priceState: { close: rows[189][4], extensionPct: 0 } }, covered, {});
+  assert.notEqual(out.ret1hPct, null);
+  assert.notEqual(out.mfe['60m'], null);
+  assert.notDeepEqual(out.outcomeTags, ['UNLABELED_INSUFFICIENT_FUTURE']);
+});
+
+test('FULL-HORIZON: BTC/ETH comparison returns obey the same coverage discipline', () => {
+  const rows = candles(2000, { mutate: (i) => ({ close: 100 + i * 0.01 }) });
+  const store = new CandleStore('TST', 60, rows);
+  const obsTs = rows[500][0] + 60;
+  const obs = { id: 'x', eventId: 'e', ts: obsTs, symbol: 'TST', priceState: { close: rows[500][4], extensionPct: 0 } };
+  // BTC store has bars past the observation but its COVERAGE ends 30 min in
+  const btcShort = new CandleStore('BTC', 60, rows.slice(0, 560), { coverageEndSec: obsTs + 1800 });
+  const short = labelObservation(obs, store, { BTC: btcShort });
+  assert.equal(short.abnormalReturn.vsBtc, null); // partial comparison window -> null
+  const btcFull = new CandleStore('BTC', 60, rows);
+  const full = labelObservation(obs, store, { BTC: btcFull });
+  assert.notEqual(full.abnormalReturn.vsBtc, null);
 });
 
 test('horizons finer than the track resolution stay null, never interpolated', () => {

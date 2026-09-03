@@ -205,6 +205,12 @@ export function firstPublicTsOf(incident) {
   return new Date(Math.min(...candidates)).toISOString();
 }
 
+// THE WALL APPLIES TO INCIDENTS TOO (B-0B.1 §8): incident FACTS (what was
+// public, when) and incident OUTCOMES (what prices did afterward) are
+// SEPARATE records in SEPARATE files, linked by incidentId. A point-in-time
+// learner reading incidents.jsonl can never accidentally consume the future
+// as contemporary evidence. Outcome horizons obey full-horizon coverage
+// discipline (§1): a horizon the source does not fully cover is null.
 export async function fetchIncidentHistory(stores60m) {
   const res = await fetch('https://status.kraken.com/api/v2/incidents.json', {
     signal: AbortSignal.timeout(25000),
@@ -213,39 +219,53 @@ export async function fetchIncidentHistory(stores60m) {
   if (!res.ok) throw new Error(`incidents HTTP ${res.status}`);
   const body = await res.json();
   const events = parseStatuspage('kraken', { incidents: body.incidents ?? [] }, nowIso());
-  return events.map((e) => {
+  const incidents = [];
+  const incidentOutcomes = [];
+  for (const e of events) {
     const raw = (body.incidents ?? []).find((i) => i.id === e.sourceId);
     const firstPublicTs = firstPublicTsOf(raw) ?? e.announcedAt ?? null;
+    incidents.push({
+      ...e,
+      incidentId: e.sourceId,
+      firstPublicTs, // earliest defensible public knowledge time
+      sourceTs: e.announcedAt ?? null,
+      retrievedTs: nowIso(),
+      provenance: { source: 'status.kraken.com incident archive', sourceTs: e.announcedAt ?? null, availableTs: firstPublicTs, retrievedTs: nowIso(), kind: 'historical', form: 'raw' },
+    });
     const outcomes = {};
     for (const asset of e.assets) {
       const store = stores60m.get(asset);
       const t0 = firstPublicTs ? Date.parse(firstPublicTs) / 1000 : null;
       if (!store || !t0) {
-        outcomes[asset] = { available: false, reason: store ? 'no first-public ts' : 'asset outside candle coverage' };
+        outcomes[asset] = { available: false, reason: t0 ? 'asset outside candle coverage' : 'no first-public ts' };
         continue;
       }
       const entry = store.atOrBefore(t0)?.[4];
-      const fut1h = store.future(t0, 3600);
-      const fut4h = store.future(t0, 14400);
-      if (!entry || !fut1h.length) {
-        outcomes[asset] = { available: false, reason: 'incident outside candle window' };
+      if (!entry) {
+        outcomes[asset] = { available: false, reason: 'incident precedes candle coverage' };
         continue;
       }
+      if (!store.coversHorizon(t0, 3600)) {
+        outcomes[asset] = { available: false, reason: 'source coverage ends before the 1h horizon completes' };
+        continue;
+      }
+      const fut1h = store.future(t0, 3600);
+      const covers4h = store.coversHorizon(t0, 14400);
+      const fut4h = covers4h ? store.future(t0, 14400) : [];
       outcomes[asset] = {
         available: true,
-        ret1hPct: Number(((retBetween(fut1h.at(-1)[4], entry) ?? 0) * 100).toFixed(3)),
-        ret4hPct: fut4h.length ? Number(((retBetween(fut4h.at(-1)[4], entry) ?? 0) * 100).toFixed(3)) : null,
+        ret1hPct: fut1h.length ? Number(((retBetween(fut1h.at(-1)[4], entry) ?? 0) * 100).toFixed(3)) : null,
+        ret4hPct: covers4h && fut4h.length ? Number(((retBetween(fut4h.at(-1)[4], entry) ?? 0) * 100).toFixed(3)) : null,
         mfe1hPct: mfeMae(entry, fut1h).mfe,
         mae1hPct: mfeMae(entry, fut1h).mae,
       };
     }
-    return {
-      ...e,
-      firstPublicTs, // earliest defensible public knowledge time
-      sourceTs: e.announcedAt ?? null,
-      retrievedTs: nowIso(),
-      historicalOutcomes: outcomes,
-      provenance: { source: 'status.kraken.com incident archive', sourceTs: e.announcedAt ?? null, availableTs: firstPublicTs, retrievedTs: nowIso(), kind: 'historical', form: 'raw' },
-    };
-  });
+    incidentOutcomes.push({
+      incidentId: e.sourceId,
+      firstPublicTs,
+      outcomes,
+      provenance: { source: 'labeler: kraken 60m candles after firstPublicTs (full-horizon gated)', sourceTs: firstPublicTs, availableTs: 'POST_HOC_LABEL_NEVER_REPLAY_VISIBLE', retrievedTs: nowIso(), kind: 'historical', form: 'derived' },
+    });
+  }
+  return { incidents, incidentOutcomes };
 }

@@ -4,6 +4,35 @@
 // extracted from survey/wideeye.js verbatim; no statistical choice was
 // redesigned here. No network, no disk, no thresholds of its own.
 
+// ---- FEATURE DERIVATION (B-0B.1 §6): the definitions of the wide eye's
+// features live HERE, once, and are consumed by both the live sweep and
+// historical parity replay. What differs between the two is only WHICH
+// samples they hand in (live selects trailing sweeps on a wall-clock ~60s
+// cadence; replay walks a true calendar-minute grid) — the math cannot
+// drift. That residual sampling-phase difference is documented as
+// SEMANTIC_PARITY_ON_60S_SAMPLING_GRID, never claimed as tick-for-tick
+// reproduction.
+
+// Log return between two prices; null when either side is unusable.
+export function logReturn(pNow, pThen) {
+  if (!pNow || !pThen || pNow <= 0 || pThen <= 0) return null;
+  return Math.log(pNow / pThen);
+}
+
+// Percentage extension between two prices (the 15m extension feature).
+export function extensionPct(pNow, pThen) {
+  if (!pNow || !pThen || pNow <= 0 || pThen <= 0) return null;
+  return (pNow / pThen - 1) * 100;
+}
+
+// Volume-rate feature: non-negative delta of a rolling-24h volume figure
+// between consecutive samples (live: the venue's own 24h field; replay: a
+// ring-reconstructed 24h sum). null when either side is not a finite number.
+export function volumeRate(cum, prevCum) {
+  if (!Number.isFinite(cum) || !Number.isFinite(prevCum)) return null;
+  return Math.max(0, cum - prevCum);
+}
+
 // Welford-style pooled aggregates per ET-hour bucket: {n, sum, sumSq}.
 export function bucketAdd(bucket, x) {
   bucket.n += 1;

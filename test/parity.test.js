@@ -14,7 +14,7 @@ process.env.COBRA_DATA_DIR = TEST_DATA;
 
 const eyecore = await import('../survey/eyecore.js');
 const wideeye = await import('../survey/wideeye.js');
-const { evaluateTick, zScore, pooledStats, bucketAdd, pruneBaselineBuckets, classifyRipple } = eyecore;
+const { evaluateTick, zScore, pooledStats, bucketAdd, pruneBaselineBuckets, classifyRipple, logReturn, extensionPct: extPct, volumeRate } = eyecore;
 const { completedCandlesOnly, fetchOhlc } = await import('../childhood/fetch.js');
 const { replayParity, replayContext, buildMinuteGrid } = await import('../childhood/replay.js');
 const { CandleStore } = await import('../childhood/store.js');
@@ -90,6 +90,11 @@ test('ONE SHARED CORE: the live wide eye re-exports are the SAME function object
   assert.equal(wideeye.bucketAdd, bucketAdd);
   assert.equal(wideeye.classifyRipple, classifyRipple);
   assert.equal(wideeye.pruneBaselineBuckets, pruneBaselineBuckets);
+  // B-0B.1 §6: the feature DERIVERS are shared too — one definition of
+  // ret1/ret5/extension/volRate for both minds
+  assert.equal(wideeye.logReturn, logReturn);
+  assert.equal(wideeye.extensionPct, extPct);
+  assert.equal(wideeye.volumeRate, volumeRate);
 });
 
 // ---------------------------------------------------------------------
@@ -249,6 +254,51 @@ test('COARSE TRACK PARITY PROHIBITION: context tracks emit no wide-eye classific
 });
 
 // ---------------------------------------------------------------------
+// B-0B.1 §3+§4 — every observation carries provenance for ALL six evidence
+// families, and its retrievedTs is the ACTUAL source retrieval time passed
+// in — never an earlier stamp, never silently absent for UNAVAILABLE data.
+// ---------------------------------------------------------------------
+test('PER-FIELD PROVENANCE: both replay engines emit all six families, carrying the real retrieval time', () => {
+  const FAMILIES = ['priceState', 'volumeState', 'marketContext', 'scoutSignals', 'externalSignals', 'microstructure'];
+  const sourceRetrievedTs = '2026-09-03T15:00:00.000Z';
+  const check = (obsList) => {
+    assert.ok(obsList.length > 0);
+    for (const o of obsList) {
+      for (const fam of FAMILIES) {
+        const p = o.provenance[fam];
+        assert.ok(p, `${o.trackRole}: missing ${fam} provenance`);
+        assert.ok(p.source && 'sourceTs' in p && 'availableTs' in p, `${fam} provenance incomplete`);
+        assert.ok(['historical', 'live'].includes(p.kind) && ['raw', 'derived'].includes(p.form), `${fam} kind/form invalid`);
+        // retrieval time is the source's ACTUAL retrieval — the exact value
+        // handed in, so an archive can never claim retrieval before it happened
+        assert.equal(p.retrievedTs, sourceRetrievedTs);
+      }
+    }
+  };
+  check(
+    replayParity({
+      minuteSamples: buildMinuteGrid(rowsOf(3000, (i) => 100 + 0.01 * (i % 9), (i) => 10 + (i % 7))),
+      symbol: 'TST',
+      cfg: CFG,
+      contextAt: ctx0,
+      retrievedTs: sourceRetrievedTs,
+    })
+  );
+  const bars = [];
+  for (let i = 0; i < 600; i++) bars.push([T0 + i * 3600, 100, 100, 100, 100, 50]);
+  check(
+    replayContext({
+      replayViews: new CandleStore('TST', 3600, bars).replayViews(),
+      symbol: 'TST',
+      intervalSec: 3600,
+      track: '60m',
+      contextAt: ctx0,
+      retrievedTs: sourceRetrievedTs,
+    })
+  );
+});
+
+// ---------------------------------------------------------------------
 // §19.7/8/9/11/12 — THE GOLDEN SEQUENCE: same tape through the live pure
 // path and the childhood replay path => identical features, baselines,
 // z-scores, verdicts and cooldown decisions.
@@ -277,11 +327,13 @@ function liveFeatures(n) {
     for (let j = i - 1439; j <= i; j++) s += vols[j];
     return s;
   });
+  // B-0B.1: the SHARED eyecore derivers — the same functions the real live
+  // sweep calls — applied to live-selected samples (venue 24h figure).
   return prices.map((p, i) => ({
-    ret1: i >= 1 ? Math.log(p / prices[i - 1]) : null,
-    ret5: i >= 5 ? Math.log(p / prices[i - 5]) : null,
-    ret15Pct: i >= 15 ? (p / prices[i - 15] - 1) * 100 : null,
-    volRate: i >= 1 && Number.isFinite(cum24[i]) && Number.isFinite(cum24[i - 1]) ? Math.max(0, cum24[i] - cum24[i - 1]) : null,
+    ret1: logReturn(p, prices[i - 1]),
+    ret5: logReturn(p, prices[i - 5]),
+    ret15Pct: extPct(p, prices[i - 15]),
+    volRate: volumeRate(cum24[i], cum24[i - 1]),
   }));
 }
 
@@ -298,12 +350,13 @@ function replayFeatures(n) {
     roll += vols[i];
     if (ring.length > 1440) roll -= ring.shift();
     const warm = ring.length >= 1440 && prev !== null;
-    const volRate = warm ? Math.max(0, roll - prev) : null;
+    // the SHARED derivers again — this time on replay-reconstructed inputs
+    const volRate = warm ? volumeRate(roll, prev) : null;
     if (ring.length >= 1440) prev = roll;
     return {
-      ret1: i >= 1 ? Math.log(p / prices[i - 1]) : null,
-      ret5: i >= 5 ? Math.log(p / prices[i - 5]) : null,
-      ret15Pct: i >= 15 ? (p / prices[i - 15] - 1) * 100 : null,
+      ret1: logReturn(p, prices[i - 1]),
+      ret5: logReturn(p, prices[i - 5]),
+      ret15Pct: extPct(p, prices[i - 15]),
       volRate,
     };
   });

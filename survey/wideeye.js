@@ -31,8 +31,8 @@ export function wideeyeEnabled(config = loadConfig()) {
 // Extracted VERBATIM to survey/eyecore.js (B-0B) so live and historical
 // replay share one implementation and cannot drift. Re-exported here so
 // every existing import path keeps working. Live behavior unchanged.
-import { bucketAdd, pooledStats, zScore, classifyRipple, evaluateTick, pruneBaselineBuckets } from './eyecore.js';
-export { bucketAdd, pooledStats, zScore, classifyRipple, evaluateTick, pruneBaselineBuckets };
+import { bucketAdd, pooledStats, zScore, classifyRipple, evaluateTick, pruneBaselineBuckets, logReturn, extensionPct, volumeRate } from './eyecore.js';
+export { bucketAdd, pooledStats, zScore, classifyRipple, evaluateTick, pruneBaselineBuckets, logReturn, extensionPct, volumeRate };
 
 // (Deep-tape cap/shed lives in tape/universe.js mergeNominationsAndCap —
 // the tape verifies; the wide eye only proposes.)
@@ -125,12 +125,14 @@ export function startWideEye({ log = console.log } = {}) {
       const p5 = at(5);
       const p15 = at(15);
       const prev = s[s.length - 2];
-      const ret1 = p1 ? Math.log(price / p1.price) : null;
-      const ret5 = p5 ? Math.log(price / p5.price) : null;
-      const ret15Pct = p15 ? (price / p15.price - 1) * 100 : null;
+      // shared eyecore derivers (B-0B.1): the FORMULAS live in one place;
+      // only sample selection (trailing wall-clock sweeps) is live's own.
+      const ret1 = p1 ? logReturn(price, p1.price) : null;
+      const ret5 = p5 ? logReturn(price, p5.price) : null;
+      const ret15Pct = p15 ? extensionPct(price, p15.price) : null;
       // 24h-cumulative delta per sweep — a flow PROXY (roll-off included);
       // z-scored against its own baseline the proxy stays self-consistent.
-      const volRate = Number.isFinite(cumVol) && Number.isFinite(prev.cumVol) ? Math.max(0, cumVol - prev.cumVol) : null;
+      const volRate = volumeRate(cumVol, prev.cumVol);
 
       const b = (baselines[coin] ??= { ret1: {}, ret5: {}, volRate: {} });
       // shared core, live ordering: sample joins baseline, then z, then verdict

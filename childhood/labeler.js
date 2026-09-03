@@ -1,6 +1,14 @@
 // The labeler — the only code allowed to open the future, and only AFTER
 // observations are frozen. Writes Outcomes to a separate file keyed by
 // observation id. Horizons the track cannot honestly resolve stay null.
+//
+// FULL-HORIZON DISCIPLINE (B-0B.1 §1): an outcome value for horizon H exists
+// only when the SOURCE provably covers the entire interval
+// [observationTs, observationTs + H] (CandleStore.coversHorizon). A dataset
+// that simply ends mid-horizon yields null — a partial window is NEVER
+// reported as the full horizon's result. "There were no trades" (source
+// covers, no bars printed) and "the dataset ended" (source stops) are
+// different facts; only the former may still produce values.
 import { mfeMae, retBetween } from './store.js';
 
 export const HORIZONS_MIN = [1, 3, 5, 15, 30, 60, 240];
@@ -10,8 +18,9 @@ export function labelObservation(obs, store, contextStores) {
   const mfe = {};
   const mae = {};
   for (const h of HORIZONS_MIN) {
-    if (h * 60 < store.intervalSec) {
-      // a 15m track cannot resolve a 1m horizon — null, never interpolated
+    if (h * 60 < store.intervalSec || !store.coversHorizon(obs.ts, h * 60)) {
+      // a 15m track cannot resolve a 1m horizon, and NO track may label a
+      // horizon its source does not fully cover — null, never interpolated
       mfe[`${h}m`] = null;
       mae[`${h}m`] = null;
       continue;
@@ -23,6 +32,7 @@ export function labelObservation(obs, store, contextStores) {
   }
 
   const retAtMin = (min) => {
+    if (!store.coversHorizon(obs.ts, min * 60)) return null; // horizon not fully observable
     const fut = store.future(obs.ts, min * 60);
     if (!fut.length) return null;
     const r = retBetween(fut.at(-1)[4], entry);
@@ -33,7 +43,7 @@ export function labelObservation(obs, store, contextStores) {
 
   const ctxRet = (sym) => {
     const s = contextStores[sym];
-    if (!s) return null;
+    if (!s || !s.coversHorizon(obs.ts, 3600)) return null; // comparison needs the SAME full horizon
     const now = s.atOrBefore(obs.ts);
     const later = s.future(obs.ts, 3600).at(-1);
     if (!now || !later) return null;
@@ -71,6 +81,8 @@ export function labelObservation(obs, store, contextStores) {
 // convenience metadata, MULTI-LABEL, each with a deterministic mechanical
 // definition (doctrine/CHILDHOOD.md). No narrative labeling, ever.
 // A move can RUN in the first hour and REVERSE by the fourth.
+// B-0B.1: a tag can only exist when its full horizon was observable —
+// mfe1h/ret1h null (incomplete coverage) => UNLABELED_INSUFFICIENT_FUTURE.
 export function classifyOutcome({ mfe1h, ret1h, ret4h, abnormalVsMedian }) {
   if (mfe1h === null || ret1h === null) return ['UNLABELED_INSUFFICIENT_FUTURE'];
   const tags = [];

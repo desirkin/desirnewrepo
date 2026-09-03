@@ -17,6 +17,18 @@ test.after(() => rmSync(ROOT, { recursive: true, force: true }));
 let n = 0;
 const jsonl = (rows) => rows.map((r) => JSON.stringify(r)).join('\n') + '\n';
 
+// full six-family provenance (B-0B.1 §3); retrievedTs (2400s epoch) is
+// AFTER the candle fixture's retrievedSec of 2000 (§4 ordering)
+const RETRIEVED = '1970-01-01T00:40:00.000Z';
+const fullProvenance = (retrievedTs = RETRIEVED) => ({
+  priceState: { source: 'fixture bar', sourceTs: 940, availableTs: 1000, retrievedTs, kind: 'historical', form: 'raw' },
+  volumeState: { source: 'fixture volume', sourceTs: 1000, availableTs: 1000, retrievedTs, kind: 'historical', form: 'derived' },
+  marketContext: { source: 'fixture context', sourceTs: 1000, availableTs: 1000, retrievedTs, kind: 'historical', form: 'derived' },
+  scoutSignals: { source: 'fixture eyecore', sourceTs: 1000, availableTs: 1000, retrievedTs, kind: 'historical', form: 'derived' },
+  externalSignals: { source: 'none (no historical archive)', sourceTs: 'UNKNOWN', availableTs: 'UNKNOWN', retrievedTs, kind: 'historical', form: 'raw' },
+  microstructure: { source: 'none (no L2 history)', sourceTs: 'UNKNOWN', availableTs: 'UNKNOWN', retrievedTs, kind: 'historical', form: 'raw' },
+});
+
 const obsRow = ({ id = 1, ...over } = {}) => ({
   id: `o${id}`,
   ts: 1000,
@@ -27,7 +39,7 @@ const obsRow = ({ id = 1, ...over } = {}) => ({
   eventId: 'e1',
   setupClassification: 'BASELINE_SAMPLE',
   split: 'DISCOVERY',
-  provenance: { priceState: { source: 'fixture', sourceTs: 940, availableTs: 1000, retrievedTs: 'T', kind: 'historical', form: 'raw' } },
+  provenance: fullProvenance(),
   ...over,
 });
 
@@ -41,11 +53,21 @@ function makeStaging(mutate = () => {}) {
       { id: 'o2', eventId: 'e2', outcomeTags: ['RUN'] },
     ]),
     'governance.jsonl': jsonl([{ proposalId: 'p1', lock: { status: 'INEVITABILITY_UNKNOWN' } }]),
-    'incidents.jsonl': jsonl([{ sourceId: 'i1', firstPublicTs: '2026-01-01T00:00:00.000Z' }]),
+    'incidents.jsonl': jsonl([{ sourceId: 'i1', incidentId: 'i1', firstPublicTs: '2026-01-01T00:00:00.000Z' }]),
+    'incident-outcomes.jsonl': jsonl([{ incidentId: 'i1', firstPublicTs: '2026-01-01T00:00:00.000Z', outcomes: {} }]),
     'candles-1m.jsonl': jsonl([{ symbol: 'TST', intervalMin: 1, retrievedSec: 2000, candles: [[900, 1, 1, 1, 1, 1]] }]),
     'manifest.json': JSON.stringify({
       schemaVersion: EXPECTED_SCHEMA_VERSION,
-      counts: { byTrack: { '1m': 2 }, governanceProposals: 1, incidents: 1 },
+      counts: {
+        byTrack: { '1m': 2 },
+        byPopulation: { BASELINE: 2 },
+        bySplit: { DISCOVERY: 2 },
+        byTrackRole: { PARITY_SCOUT: 2 },
+        byTag: { FIZZLE: 1, RUN: 1 },
+        governanceProposals: 1,
+        incidents: 1,
+        incidentOutcomes: 1,
+      },
       splits: { '1m': { nominalSplitTs: 20000 } },
     }),
   };
@@ -128,10 +150,52 @@ test('VALIDATOR REJECTION: corrupted stagings are named and refused', () => {
       'availableTs after observation ts',
       (f) =>
         (f['observations.jsonl'] = jsonl([
-          obsRow({ id: 1, provenance: { priceState: { source: 'fixture', sourceTs: 940, availableTs: 1060, retrievedTs: 'T' } } }),
+          obsRow({ id: 1, provenance: { ...fullProvenance(), priceState: { source: 'fixture bar', sourceTs: 940, availableTs: 1060, retrievedTs: RETRIEVED, kind: 'historical', form: 'raw' } } }),
           obsRow({ id: 2, eventId: 'e2' }),
         ])),
     ],
+    // B-0B.1 §3: provenance on priceState alone is NOT enough
+    [
+      'volumeState provenance incomplete',
+      (f) =>
+        (f['observations.jsonl'] = jsonl([
+          obsRow({ id: 1, provenance: { priceState: fullProvenance().priceState } }),
+          obsRow({ id: 2, eventId: 'e2' }),
+        ])),
+    ],
+    // B-0B.1 §4: an observation cannot claim retrieval before its source's
+    // actual retrieval time (candles retrievedSec = 2000s; claim = 1200s)
+    [
+      'claims retrieval before source retrieval',
+      (f) =>
+        (f['observations.jsonl'] = jsonl([
+          obsRow({ id: 1, provenance: fullProvenance('1970-01-01T00:20:00.000Z') }),
+          obsRow({ id: 2, eventId: 'e2' }),
+        ])),
+    ],
+    // B-0B.1 §7: EVERY candle is checked, not just the final row
+    [
+      'not closed by retrieval time',
+      (f) =>
+        (f['candles-1m.jsonl'] = jsonl([
+          { symbol: 'TST', intervalMin: 1, retrievedSec: 2000, candles: [[900, 1, 1, 1, 1, 1], [1980, 1, 1, 1, 1, 1], [700, 1, 1, 1, 1, 1]] },
+        ])),
+    ],
+    // B-0B.1 §7: per-key counter reconciliation
+    ['byPopulation', (f) => (f['manifest.json'] = f['manifest.json'].replace('"byPopulation":{"BASELINE":2}', '"byPopulation":{"BASELINE":1,"TRIGGER":1}'))],
+    ['bySplit', (f) => (f['manifest.json'] = f['manifest.json'].replace('"bySplit":{"DISCOVERY":2}', '"bySplit":{"DISCOVERY":1,"VALIDATION":1}'))],
+    ['byTrackRole', (f) => (f['manifest.json'] = f['manifest.json'].replace('"byTrackRole":{"PARITY_SCOUT":2}', '"byTrackRole":{"PARITY_SCOUT":5}'))],
+    ['byTag', (f) => (f['manifest.json'] = f['manifest.json'].replace('"byTag":{"FIZZLE":1,"RUN":1}', '"byTag":{"FIZZLE":2}'))],
+    // B-0B.1 §8: the incident wall — facts never carry the future
+    [
+      'future field',
+      (f) => (f['incidents.jsonl'] = jsonl([{ sourceId: 'i1', incidentId: 'i1', firstPublicTs: '2026-01-01T00:00:00.000Z', historicalOutcomes: { BTC: { ret1hPct: 1 } } }])),
+    ],
+    [
+      'references unknown incident',
+      (f) => (f['incident-outcomes.jsonl'] = jsonl([{ incidentId: 'iGHOST', firstPublicTs: '2026-01-01T00:00:00.000Z', outcomes: {} }])),
+    ],
+    ['incidentOutcomes count mismatch', (f) => (f['manifest.json'] = f['manifest.json'].replace('"incidentOutcomes":1', '"incidentOutcomes":3'))],
     [
       'appears in both',
       (f) => (f['observations.jsonl'] = jsonl([obsRow({ id: 1, split: 'DISCOVERY' }), obsRow({ id: 2, split: 'VALIDATION' })])), // same eventId e1
@@ -165,6 +229,37 @@ test('VALIDATOR REJECTION: corrupted stagings are named and refused', () => {
   }
 });
 
+// B-0B.1 §2 — OUTCOME ONE-TO-ONE: the exact adversarial shape from the
+// ticket: Observations A and B, Outcomes A and A (duplicate A, missing B).
+test('OUTCOME ONE-TO-ONE: duplicate Outcome A + missing Outcome B is named and never promoted', () => {
+  const dir = makeStaging((f) => {
+    f['outcomes.jsonl'] = jsonl([
+      { id: 'o1', eventId: 'e1', outcomeTags: ['FIZZLE'] },
+      { id: 'o1', eventId: 'e1', outcomeTags: ['RUN'] }, // duplicate A
+      // no Outcome for o2 (B)
+    ]);
+  });
+  const v = validateChildhood(dir);
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.some((e) => e.includes('duplicate outcome id o1')));
+  assert.ok(v.errors.some((e) => e.includes('observation o2 has no outcome')));
+  const auth = makeAuthoritative();
+  assert.equal(promoteStaging(dir, auth).promoted, false);
+  assert.equal(existsSync(path.join(auth, 'marker.json')), true); // untouched
+  // and EXTRA outcomes fail too
+  const extra = makeStaging((f) => {
+    f['outcomes.jsonl'] = jsonl([
+      { id: 'o1', eventId: 'e1', outcomeTags: ['FIZZLE'] },
+      { id: 'o2', eventId: 'e2', outcomeTags: ['RUN'] },
+      { id: 'oEXTRA', eventId: 'eX', outcomeTags: ['FIZZLE'] },
+    ]);
+  });
+  const v2 = validateChildhood(extra);
+  assert.equal(v2.ok, false);
+  assert.ok(v2.errors.some((e) => e.includes('references unknown observation oEXTRA')));
+  assert.ok(v2.errors.some((e) => e.includes('outcomes (3) != observations (2)')));
+});
+
 // §19.20 SCHEMA CONTRACT — one authoritative schema, version-checked.
 test('SCHEMA CONTRACT: the single authoritative B-0B schema version is enforced', () => {
   assert.equal(EXPECTED_SCHEMA_VERSION, 'childhood-observation-3-b0b');
@@ -182,5 +277,5 @@ test('SCHEMA CONTRACT: the single authoritative B-0B schema version is enforced'
   const v2 = validateChildhood(clean);
   assert.deepEqual(v2.errors, []);
   assert.equal(v2.ok, true);
-  assert.deepEqual(v2.stats, { observations: 2, outcomes: 2, governance: 1, incidents: 1 });
+  assert.deepEqual(v2.stats, { observations: 2, outcomes: 2, governance: 1, incidents: 1, incidentOutcomes: 1 });
 });

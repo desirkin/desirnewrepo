@@ -60,7 +60,8 @@ keyed by observation id, never readable during Observation construction:
 ```
 { id, eventId,
   mfe: {1m,3m,5m,15m,30m,1h,4h}, mae: {same},   // null where the track's resolution cannot honestly resolve the horizon
-  ret1hPct, ret4hPct,
+                                                // OR the source does not provably cover the ENTIRE horizon (B-0B.1)
+  ret1hPct, ret4hPct,                           // same full-horizon rule
   moveAlreadySpentPct,                          // the frozen extensionPct at T (parity tracks only; else null) — trailing anchor,
                                                 // provably invariant to whatever the future does
   moveRemainingPct,                             // MFE 1h
@@ -71,7 +72,30 @@ keyed by observation id, never readable during Observation construction:
 **Outcome tags** (mechanical; precedence-free, independent predicates; FIZZLE
 only when nothing else applies): RUN (MFE₁ₕ≥2 ∧ ret₁ₕ≥1) · PUMP_LIKE
 (MFE₁ₕ≥3 ∧ ret₄ₕ≤0.5) · REVERSAL (MFE₁ₕ≥1.5 ∧ (ret₁ₕ≤−0.5 ∨ ret₄ₕ≤−0.5)) ·
-BETA_DRAG (ret₁ₕ≥1 ∧ abnormal-vs-median<0.3) · FIZZLE.
+BETA_DRAG (ret₁ₕ≥1 ∧ abnormal-vs-median<0.3) · FIZZLE. A tag can exist only
+when its full horizon was observable; anything less is
+UNLABELED_INSUFFICIENT_FUTURE.
+
+**MFE/MAE definition (long-only, B-0B.1):**
+`MFE = max(0, maximum favorable % excursion above entry)` ·
+`MAE = min(0, maximum adverse % excursion below entry)`. A path that only
+rises has MAE = 0, never a positive number; a path that only falls has
+MFE = 0, never a negative number. Signed highest/lowest excursion is a
+different concept and is not called MFE/MAE anywhere in Serpent.
+
+## FULL-HORIZON OUTCOME TRUTH (B-0B.1)
+
+An Outcome value for horizon H exists only when the source provably covers
+the ENTIRE interval `[observationTs, observationTs + H]`. `CandleStore`
+carries `coverageEndSec` — the timestamp through which the SOURCE is known
+to cover the market, distinct from its last candle's close. For REST data,
+coverage defensibly extends to the actual retrieval time (a bar-less final
+stretch means **no trades occurred**, not that **the dataset ended** — two
+different facts, never confused). Where full coverage cannot be proven:
+MFE/MAE/ret at that horizon are null, and no RUN/PUMP_LIKE/REVERSAL label
+can arise from a partially observed horizon. The same discipline applies to
+BTC/ETH comparison returns, the universe-median future return, and incident
+historical outcomes.
 
 ---
 
@@ -87,6 +111,21 @@ and every update — never array position), governance (proposal existence at
 creation; final scores and any lock analysis at voting close; each vote at
 its own public timestamp; un-retrieved timelines → UNAVAILABLE).
 
+**Provenance covers every evidence family (B-0B.1):** priceState,
+volumeState, marketContext, scoutSignals, externalSignals, microstructure —
+each with `source, sourceTs, availableTs, retrievedTs, kind
+(historical|live), form (raw|derived)`. Evidence that is UNKNOWN/UNAVAILABLE
+still carries provenance truthfully explaining WHY (its timestamps may
+honestly be `UNKNOWN`); provenance never silently disappears, and
+timestamps are never fabricated for genuinely unavailable information.
+
+**Retrieval time is real (B-0B.1):** every source record carries the ACTUAL
+timestamp of its own retrieval, and derived observation fields carry a
+construction/retrieval timestamp no earlier than the underlying source
+retrieval. `sourceTs`, `availableTs` and `retrievedTs` keep their three
+distinct meanings; the validator rejects an archive whose observations
+claim retrieval before their source was actually retrieved.
+
 ## CLOSED BARS, AT THE SOURCE
 
 Kraken's REST OHLC ends with the current **uncommitted** candle. It is
@@ -95,10 +134,18 @@ any row whose close time exceeds retrieval time is rejected as not yet
 knowable. `CandleStore` never sees an unfinished row. Visibility everywhere
 is judged by bar **close** time; intrabar ordering is never inferred.
 
-## LIVE/REPLAY PARITY (B-0B)
+## LIVE/REPLAY PARITY (B-0B, hardened B-0B.1)
 
 Live Wide Eye is the source of truth for feature semantics. Live and
-parity replay share ONE pure calculation module (`survey/eyecore.js`):
+parity replay share ONE pure calculation module (`survey/eyecore.js`) —
+including the feature DERIVERS themselves (`logReturn`, `extensionPct`,
+`volumeRate`), so the definitions of ret1/ret5/ret15 extension/volRate
+cannot drift between minds. **Parity scope:**
+`SEMANTIC_PARITY_ON_60S_SAMPLING_GRID` — live sweeps run on a wall-clock
+~60s cadence (not calendar-minute aligned) and select trailing samples with
+small slack, while replay walks a true calendar-minute grid; the formulas
+are identical, the sampling phase is not, and tick-for-tick historical
+reproduction is not claimed. Live sampling cadence is unchanged.
 
 - **1m/5m returns and 15m extension at true minutes** — only a genuine
   1-minute grid may produce them.
@@ -192,14 +239,27 @@ Observation builders receive forward iterators / frozen grids — the future
 is structurally unreachable, not filtered. The labeler alone opens post-T
 history, into a separate file. Adversarially tested.
 
+## THE INCIDENT WALL (B-0B.1)
+
+Incident FACTS (`incidents.jsonl`: what was public, and when) and incident
+OUTCOMES (`incident-outcomes.jsonl`: what prices did after firstPublicTs)
+are separate records in separate files, linked by `incidentId`. The future
+never sits inside an object a point-in-time learner could consume as
+contemporary evidence; the validator rejects a fact record carrying outcome
+fields. Incident outcomes obey full-horizon coverage discipline.
+
 ## STAGING, VALIDATION, PROMOTION
 
 A new childhood builds in `data/childhood-staging-<runId>` while the
 authoritative archive stays untouched. A post-build validator checks parse
-integrity, id uniqueness, outcome references, wall violations, knowledge
-time, uncommitted-candle absence, event/split isolation, embargo rules,
-context-track output prohibition, governance honesty, manifest-vs-content
-counts, and schema version. **Promotion fails closed.** On success the old
+integrity, id uniqueness, strict one-to-one Observation↔Outcome pairing
+(duplicates, missing and extras all fail), per-family provenance
+completeness, retrieval-time ordering, wall violations, knowledge time,
+uncommitted-candle absence across EVERY stored candle, event/split
+isolation, embargo rules, context-track output prohibition, the incident
+wall, governance honesty, manifest-vs-content counter reconciliation
+(totals AND per-key population/split/track-role/tag maps), and schema
+version. **Promotion fails closed.** On success the old
 archive is superseded (clearly named, never merged); a failed promotion
 rolls back. The reproducibility manifest records versions, sources,
 checksums, seed, commit, boundaries, counts, parity status, and gaps — so

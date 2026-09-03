@@ -6,10 +6,24 @@
 //   iterator yielding one closed bar + a wall-bound view at a time. The
 //   future is not filtered away — it is structurally unreachable.
 export class CandleStore {
-  constructor(symbol, intervalSec, candles /* [[openTs,o,h,l,c,v],...] ascending */) {
+  // coverageEndSec (B-0B.1 §1): the timestamp through which the SOURCE is
+  // known to cover the market — not merely the last candle's close. For REST
+  // data this defensibly extends to retrieval time (Kraken serves the full
+  // series; an absent bar up to retrieval means no trades occurred, not that
+  // the dataset ended). Defaults conservatively to the last candle's close.
+  // "There were no trades" and "the dataset ended" are different facts and
+  // are never confused.
+  constructor(symbol, intervalSec, candles /* [[openTs,o,h,l,c,v],...] ascending */, { coverageEndSec = null } = {}) {
     this.symbol = symbol;
     this.intervalSec = intervalSec;
     this.candles = candles;
+    this.coverageEndSec = coverageEndSec ?? (candles.length ? candles.at(-1)[0] + intervalSec : null);
+  }
+
+  // TRUE only when the source provably covers the ENTIRE interval
+  // [ts, ts + horizonSec]. Outcome horizons that fail this are null.
+  coversHorizon(ts, horizonSec) {
+    return this.coverageEndSec !== null && ts + horizonSec <= this.coverageEndSec;
   }
 
   closeTs(i) {
@@ -89,6 +103,12 @@ export function retBetween(pNow, pThen) {
 }
 
 // MFE/MAE over a window of future candles relative to an entry price.
+// LONG-ONLY DEFINITION (B-0B.1 §5, doctrine/CHILDHOOD.md):
+//   MFE = max(0, maximum favorable % excursion ABOVE entry)
+//   MAE = min(0, maximum adverse % excursion BELOW entry)
+// A path that only rises has MAE = 0 (never a positive number); a path that
+// only falls has MFE = 0 (never a negative number). Signed highest/lowest
+// excursions are a different concept and are not called MFE/MAE here.
 export function mfeMae(entry, futureCandles) {
   if (!entry || entry <= 0 || !futureCandles.length) return { mfe: null, mae: null };
   let hi = -Infinity;
@@ -97,5 +117,5 @@ export function mfeMae(entry, futureCandles) {
     if (c[2] > hi) hi = c[2];
     if (c[3] < lo) lo = c[3];
   }
-  return { mfe: ((hi - entry) / entry) * 100, mae: ((lo - entry) / entry) * 100 };
+  return { mfe: Math.max(0, ((hi - entry) / entry) * 100), mae: Math.min(0, ((lo - entry) / entry) * 100) };
 }
