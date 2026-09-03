@@ -11,6 +11,13 @@
   "paper": {
     "baseBalanceUsd": 100
   },
+  "gateway": {
+    "enabled": false,
+    "pollSec": 60,
+    "backoffMaxSec": 300,
+    "contagionWindowMin": 30,
+    "sources": { "kraken": true, "krakenSystem": true, "coinbase": true, "okx": true }
+  },
   "rumint": {
     "enabled": true,
     "zThreshold": 3,
