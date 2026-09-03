@@ -11,3 +11,7 @@ expertMode = true
 [[ports]]
 localPort = 3000
 externalPort = 80
+
+[deployment]
+run = ["node", "fly.js"]
+deploymentTarget = "vm"
