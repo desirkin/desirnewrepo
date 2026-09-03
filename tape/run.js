@@ -1,11 +1,15 @@
-// The cobra's tongue: continuous market taste from Kraken WebSocket v2.
-// Subscribes ticker + trades + L2 book for the coin universe, maintains live
-// books with checksum validation, persists trades/snapshots/events, and
-// forces NO TRADE — DATA INTEGRITY whenever the feed goes stale.
-import { loadConfig, venueSymbol, coinFromSymbol } from '../lib/config.js';
-import { nowIso } from '../lib/time.js';
+// The cobra's tongue, wide: continuous market taste for every liquid
+// USD-quoted Kraken pair, selected daily by the liquidity floor. Majors keep
+// deep books (engine-grade); minors run shallow. One pair going quiet marks
+// itself STALE/UNAVAILABLE and never blocks the rest of the tape; the
+// engine's NO TRADE — DATA INTEGRITY stays tied to the connection and the
+// majors, which are the only pairs the engine may ever trade.
+import { loadConfig, coinFromSymbol } from '../lib/config.js';
+import { nowIso, sessionDate } from '../lib/time.js';
 import { OrderBook, decimalsOf } from './book.js';
 import { TradeFlow, bookFeatures } from './features.js';
+import { classifyTape, PAIR_STATES } from './health.js';
+import { selectUniverse } from './universe.js';
 import {
   TAPE_STATES,
   writeTrade,
@@ -15,89 +19,156 @@ import {
   writeTapeStatus,
 } from './store.js';
 
-export function runTape({ minutes = null, chaosAfterSec = null, log = console.log } = {}) {
+export async function runTape({ minutes = null, chaosAfterSec = null, log = console.log } = {}) {
   const config = loadConfig();
-  const symbols = config.universe.map((c) => venueSymbol(c, config));
-  const books = new Map(symbols.map((s) => [s, new OrderBook(s, config.tape.bookDepth)]));
-  const flows = new Map(symbols.map((s) => [s, new TradeFlow()]));
-  const lastMsgMs = new Map(symbols.map((s) => [s, null]));
+  const xp = config.universeExpansion ?? {};
+  const staleMs = config.tape.staleFeedSec * 1000;
+  const snapIntervalSec = config.tape.snapshotIntervalSec;
+  const minorEvery = Math.max(1, Math.round((xp.minorsSnapshotIntervalSec ?? 30) / snapIntervalSec));
+  const batchSize = xp.subscribeBatchSize ?? 50;
 
+  // ---- universe (selected now, refreshed at ET session reset, never intraday)
+  let universeDate = sessionDate();
+  const pairs = new Map(); // symbol -> {coin, symbol, major, depth, usdVol24h}
+  const books = new Map(); // symbol -> OrderBook
+  const flows = new Map(); // symbol -> TradeFlow
+  const lastMsgMs = {}; // symbol -> ms
+  const unavailable = new Set(); // subscribe-failed or shed symbols
+  const subFailures = new Map(); // symbol -> attempt count
+  let lastAnyMsgMs = null;
+
+  function adoptPair(p) {
+    pairs.set(p.symbol, p);
+    books.set(p.symbol, new OrderBook(p.symbol, p.depth));
+    flows.set(p.symbol, new TradeFlow());
+    lastMsgMs[p.symbol] = null;
+  }
+
+  function dropPair(symbol) {
+    pairs.delete(symbol);
+    books.delete(symbol);
+    flows.delete(symbol);
+    delete lastMsgMs[symbol];
+    unavailable.delete(symbol);
+    subFailures.delete(symbol);
+  }
+
+  async function loadUniverse(reason) {
+    const selection = await selectUniverse(config);
+    const incoming = new Map(selection.pairs.map((p) => [p.symbol, p]));
+    const added = [];
+    const removed = [];
+    for (const symbol of pairs.keys()) {
+      if (!incoming.has(symbol)) removed.push(symbol);
+    }
+    for (const [symbol, p] of incoming) {
+      if (!pairs.has(symbol)) added.push(p);
+    }
+    for (const s of removed) {
+      unsubscribePair(s);
+      dropPair(s);
+    }
+    for (const p of added) adoptPair(p);
+    writeEvent('UNIVERSE_SELECTED', {
+      reason,
+      date: selection.date,
+      source: selection.source,
+      count: pairs.size,
+      floorUsd: xp.minUsdVolume24h ?? null,
+    });
+    log(`[${nowIso()}] universe (${reason}): ${pairs.size} pairs via ${selection.source}`);
+    log(`  ${[...pairs.values()].map((p) => p.coin + (p.major ? '*' : '')).join(' ')}`);
+    return { added, removed };
+  }
+
+  // ---- websocket
   let ws = null;
   let tapeState = TAPE_STATES.OFFLINE;
   let reconnectDelayMs = 1000;
-  let reconnectBlockedUntil = 0; // chaos mode holds reconnection to prove DEGRADED fires
+  let reconnectBlockedUntil = 0;
   let stopping = false;
-  let chaosArmed = chaosAfterSec !== null;
-
-  const staleMs = config.tape.staleFeedSec * 1000;
-
-  function setTapeState(next, detail = {}) {
-    if (next === tapeState) return;
-    const prev = tapeState;
-    tapeState = next;
-    writeEvent('TAPE_STATE', { from: prev, to: next, ...detail });
-    if (next === TAPE_STATES.DEGRADED) {
-      writeEvent('ENGINE_FORCED', { reason: 'NO TRADE — DATA INTEGRITY' });
-      log(`[${nowIso()}] TAPE ${next} — NO TRADE — DATA INTEGRITY`);
-    } else {
-      log(`[${nowIso()}] TAPE ${next}`);
-    }
-    publishStatus();
-  }
-
-  function publishStatus() {
-    writeTapeStatus({
-      state: tapeState,
-      staleFeedSec: config.tape.staleFeedSec,
-      coins: Object.fromEntries(
-        symbols.map((s) => [
-          coinFromSymbol(s),
-          { lastMsgMs: lastMsgMs.get(s), synced: books.get(s).synced },
-        ])
-      ),
-    });
-  }
-
-  function touch(symbol) {
-    if (lastMsgMs.has(symbol)) lastMsgMs.set(symbol, Date.now());
-  }
-
-  function subscribeAll() {
-    send({ method: 'subscribe', params: { channel: 'instrument' } });
-    send({ method: 'subscribe', params: { channel: 'ticker', symbol: symbols } });
-    send({ method: 'subscribe', params: { channel: 'trade', symbol: symbols } });
-    send({
-      method: 'subscribe',
-      params: { channel: 'book', symbol: symbols, depth: config.tape.bookDepth, snapshot: true },
-    });
-  }
+  let lastErrorLogMs = 0;
 
   function send(msg) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   }
 
+  function batches(arr, n) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+    return out;
+  }
+
+  function subscribeSymbols(symbolList) {
+    if (!symbolList.length) return;
+    for (const b of batches(symbolList, batchSize)) {
+      send({ method: 'subscribe', params: { channel: 'ticker', symbol: b } });
+      send({ method: 'subscribe', params: { channel: 'trade', symbol: b } });
+    }
+    // book subscriptions are grouped by depth (depth is a subscription param)
+    const byDepth = new Map();
+    for (const s of symbolList) {
+      const p = pairs.get(s);
+      if (!p) continue;
+      if (!byDepth.has(p.depth)) byDepth.set(p.depth, []);
+      byDepth.get(p.depth).push(s);
+    }
+    for (const [depth, syms] of byDepth) {
+      for (const b of batches(syms, batchSize)) {
+        send({ method: 'subscribe', params: { channel: 'book', symbol: b, depth, snapshot: true } });
+      }
+    }
+  }
+
+  function unsubscribePair(symbol) {
+    const p = pairs.get(symbol);
+    if (!p) return;
+    send({ method: 'unsubscribe', params: { channel: 'ticker', symbol: [symbol] } });
+    send({ method: 'unsubscribe', params: { channel: 'trade', symbol: [symbol] } });
+    send({ method: 'unsubscribe', params: { channel: 'book', symbol: [symbol], depth: p.depth } });
+  }
+
+  function subscribeAll() {
+    send({ method: 'subscribe', params: { channel: 'instrument' } });
+    subscribeSymbols([...pairs.keys()].filter((s) => !unavailable.has(s)));
+  }
+
+  function onSubscribeFailure(symbol, channel, error) {
+    const attempts = (subFailures.get(symbol) ?? 0) + 1;
+    subFailures.set(symbol, attempts);
+    writeEvent('SUBSCRIBE_FAILED', { symbol, channel, error, attempts });
+    if (attempts >= 3) {
+      unavailable.add(symbol);
+      writeEvent('PAIR_UNAVAILABLE', { symbol, reason: `subscribe failed ${attempts}x: ${error}` });
+      log(`[${nowIso()}] ${symbol} UNAVAILABLE after ${attempts} subscribe failures — no invented data`);
+      return;
+    }
+    const delay = 5000 * 3 ** (attempts - 1); // 5s / 15s / 45s
+    setTimeout(() => {
+      if (!stopping && pairs.has(symbol) && !unavailable.has(symbol)) subscribeSymbols([symbol]);
+    }, delay);
+  }
+
   function resyncBook(symbol, reason) {
     const book = books.get(symbol);
+    if (!book) return;
     book.desync();
     writeEvent('TAPE_INTEGRITY', { symbol, reason });
     log(`[${nowIso()}] TAPE_INTEGRITY ${symbol}: ${reason} — resyncing`);
-    send({ method: 'unsubscribe', params: { channel: 'book', symbol: [symbol], depth: config.tape.bookDepth } });
-    send({
-      method: 'subscribe',
-      params: { channel: 'book', symbol: [symbol], depth: config.tape.bookDepth, snapshot: true },
-    });
+    const p = pairs.get(symbol);
+    send({ method: 'unsubscribe', params: { channel: 'book', symbol: [symbol], depth: p.depth } });
+    send({ method: 'subscribe', params: { channel: 'book', symbol: [symbol], depth: p.depth, snapshot: true } });
   }
 
-  function onMessage(raw) {
-    let msg;
-    try {
-      msg = JSON.parse(raw);
-    } catch {
-      return;
-    }
+  function touch(symbol) {
+    if (symbol in lastMsgMs) lastMsgMs[symbol] = Date.now();
+  }
+
+  function handleMessage(msg) {
     if (msg.method === 'subscribe' && msg.success === false) {
-      writeEvent('SUBSCRIBE_FAILED', { result: msg });
-      log(`[${nowIso()}] subscribe failed: ${JSON.stringify(msg)}`);
+      const symbol = msg.result?.symbol ?? msg.symbol ?? null;
+      if (symbol) onSubscribeFailure(symbol, msg.result?.channel ?? '?', msg.error ?? 'unknown');
+      else writeEvent('SUBSCRIBE_FAILED', { result: msg });
       return;
     }
     switch (msg.channel) {
@@ -118,9 +189,9 @@ export function runTape({ minutes = null, chaosAfterSec = null, log = console.lo
       case 'trade': {
         for (const t of msg.data ?? []) {
           touch(t.symbol);
-          if (!books.has(t.symbol)) continue;
-          const ts = Date.parse(t.timestamp);
-          flows.get(t.symbol).add({ ts, side: t.side, qty: t.qty, price: t.price });
+          const flow = flows.get(t.symbol);
+          if (!flow) continue;
+          flow.add({ ts: Date.parse(t.timestamp), side: t.side, qty: t.qty, price: t.price });
           if (msg.type !== 'snapshot') {
             writeTrade({
               ts: t.timestamp,
@@ -143,7 +214,7 @@ export function runTape({ minutes = null, chaosAfterSec = null, log = console.lo
           if (msg.type === 'snapshot') {
             book.applySnapshot(d);
           } else {
-            if (!book.synced) continue; // ignore updates until a fresh snapshot arrives
+            if (!book.synced) continue;
             const check = book.applyUpdate(d);
             if (check.ok === false) {
               resyncBook(d.symbol, `checksum mismatch (computed=${check.computed} expected=${check.expected})`);
@@ -157,6 +228,139 @@ export function runTape({ minutes = null, chaosAfterSec = null, log = console.lo
     }
   }
 
+  function onMessage(raw) {
+    lastAnyMsgMs = Date.now();
+    let msg;
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    try {
+      handleMessage(msg);
+    } catch (err) {
+      // Never crash the tape on one bad message — log (rate-limited) and keep tasting.
+      if (Date.now() - lastErrorLogMs > 60_000) {
+        lastErrorLogMs = Date.now();
+        writeEvent('TAPE_ERROR', { error: err.message, channel: msg?.channel ?? null });
+        log(`[${nowIso()}] tape error (non-fatal): ${err.message}`);
+      }
+    }
+  }
+
+  function setTapeState(next, detail = {}) {
+    if (next === tapeState) return;
+    const prev = tapeState;
+    tapeState = next;
+    writeEvent('TAPE_STATE', { from: prev, to: next, ...detail });
+    if (next === TAPE_STATES.DEGRADED) {
+      writeEvent('ENGINE_FORCED', { reason: 'NO TRADE — DATA INTEGRITY' });
+      log(`[${nowIso()}] TAPE ${next} — NO TRADE — DATA INTEGRITY`);
+    } else {
+      log(`[${nowIso()}] TAPE ${next}`);
+    }
+  }
+
+  function publishStatus(health) {
+    writeTapeStatus({
+      state: tapeState,
+      staleFeedSec: config.tape.staleFeedSec,
+      universe: { date: universeDate, ...health.counts },
+      coins: Object.fromEntries(
+        [...pairs.values()].map((p) => [
+          p.coin,
+          {
+            lastMsgMs: lastMsgMs[p.symbol],
+            synced: books.get(p.symbol)?.synced ?? false,
+            state: health.pairStates[p.symbol],
+            major: p.major,
+          },
+        ])
+      ),
+    });
+  }
+
+  // ---- heartbeat: connection + per-pair health, daily universe refresh
+  let refreshing = false;
+  const heartbeatTimer = setInterval(() => {
+    const health = classifyTape({
+      pairs: [...pairs.values()],
+      lastMsgMs,
+      unavailable,
+      lastAnyMsgMs,
+      now: Date.now(),
+      staleMs,
+    });
+    if (health.anyData) {
+      if (health.state === 'DEGRADED') {
+        setTapeState(TAPE_STATES.DEGRADED, {
+          connectionDead: health.connectionDead,
+          staleMajors: health.staleMajors,
+        });
+      } else {
+        setTapeState(TAPE_STATES.LIVE);
+      }
+    }
+    publishStatus(health);
+
+    const today = sessionDate();
+    if (today !== universeDate && !refreshing && !stopping) {
+      refreshing = true;
+      universeDate = today;
+      loadUniverse('ET session reset')
+        .then(({ added }) => {
+          if (ws?.readyState === WebSocket.OPEN) subscribeSymbols(added.map((p) => p.symbol));
+        })
+        .catch((err) => writeEvent('UNIVERSE_REFRESH_FAILED', { error: err.message }))
+        .finally(() => {
+          refreshing = false;
+        });
+    }
+  }, 1000);
+
+  // ---- snapshots: majors every tick, minors on a slower cadence
+  let snapTick = 0;
+  const snapshotTimer = setInterval(() => {
+    snapTick++;
+    for (const p of pairs.values()) {
+      if (!p.major && snapTick % minorEvery !== 0) continue;
+      const book = books.get(p.symbol);
+      if (!book?.synced) continue;
+      const bf = bookFeatures(book);
+      if (!bf) continue;
+      writeSnapshot({ ts: nowIso(), coin: p.coin, tapeState, ...bf, ...flows.get(p.symbol).features() });
+      writeCurrentBook(p.coin, book);
+    }
+  }, snapIntervalSec * 1000);
+
+  // ---- resource safety: shed lowest-volume minors before ever falling over
+  let lastResourceCheck = Date.now();
+  const resourceTimer = setInterval(() => {
+    const now = Date.now();
+    const lagMs = now - lastResourceCheck - 15_000;
+    lastResourceCheck = now;
+    const heapMb = process.memoryUsage().heapUsed / 1024 / 1024;
+    const limits = xp.resource ?? {};
+    if (heapMb > (limits.maxHeapMb ?? 512) || lagMs > (limits.maxLoopLagMs ?? 1000)) {
+      const sheddable = [...pairs.values()]
+        .filter((p) => !p.major && !unavailable.has(p.symbol))
+        .sort((a, b) => (a.usdVol24h ?? 0) - (b.usdVol24h ?? 0));
+      const count = Math.max(1, Math.ceil(sheddable.length * (limits.shedFraction ?? 0.15)));
+      const shed = sheddable.slice(0, count);
+      writeEvent('RESOURCE_WARNING', {
+        heapMb: Math.round(heapMb),
+        loopLagMs: Math.round(lagMs),
+        shedding: shed.map((p) => p.symbol),
+      });
+      log(`[${nowIso()}] RESOURCE_WARNING heap=${heapMb.toFixed(0)}MB lag=${lagMs.toFixed(0)}ms — shedding ${shed.length} lowest-volume pairs: ${shed.map((p) => p.coin).join(' ')}`);
+      for (const p of shed) {
+        unsubscribePair(p.symbol);
+        unavailable.add(p.symbol);
+        writeEvent('PAIR_UNAVAILABLE', { symbol: p.symbol, reason: 'shed under resource pressure' });
+      }
+    }
+  }, 15_000);
+
   function connect() {
     if (stopping) return;
     ws = new WebSocket(config.tape.wsUrl);
@@ -167,7 +371,7 @@ export function runTape({ minutes = null, chaosAfterSec = null, log = console.lo
       subscribeAll();
     };
     ws.onmessage = (e) => onMessage(e.data);
-    ws.onerror = () => {}; // close handler owns recovery
+    ws.onerror = () => {};
     ws.onclose = () => {
       if (stopping) return;
       for (const book of books.values()) book.desync();
@@ -180,42 +384,8 @@ export function runTape({ minutes = null, chaosAfterSec = null, log = console.lo
     };
   }
 
-  const heartbeatTimer = setInterval(() => {
-    const now = Date.now();
-    const stamps = symbols.map((s) => lastMsgMs.get(s));
-    const anyData = stamps.some((t) => t !== null);
-    const allFresh = stamps.every((t) => t !== null && now - t <= staleMs);
-    if (allFresh) {
-      setTapeState(TAPE_STATES.LIVE);
-    } else if (anyData) {
-      const staleCoins = symbols.filter((s) => {
-        const t = lastMsgMs.get(s);
-        return t === null || now - t > staleMs;
-      });
-      if (staleCoins.length) setTapeState(TAPE_STATES.DEGRADED, { staleCoins });
-    }
-    publishStatus();
-  }, 1000);
-
-  const snapshotTimer = setInterval(() => {
-    for (const symbol of symbols) {
-      const book = books.get(symbol);
-      if (!book.synced) continue;
-      const bf = bookFeatures(book);
-      if (!bf) continue;
-      writeSnapshot({
-        ts: nowIso(),
-        coin: coinFromSymbol(symbol),
-        tapeState,
-        ...bf,
-        ...flows.get(symbol).features(),
-      });
-      writeCurrentBook(coinFromSymbol(symbol), book);
-    }
-  }, config.tape.snapshotIntervalSec * 1000);
-
   let chaosTimer = null;
-  if (chaosArmed) {
+  if (chaosAfterSec !== null) {
     chaosTimer = setTimeout(() => {
       log(`[${nowIso()}] CHAOS DRILL — killing socket, holding reconnect ${config.tape.staleFeedSec + 5}s`);
       writeEvent('CHAOS_DRILL', { action: 'socket kill' });
@@ -231,9 +401,11 @@ export function runTape({ minutes = null, chaosAfterSec = null, log = console.lo
       stopping = true;
       clearInterval(heartbeatTimer);
       clearInterval(snapshotTimer);
+      clearInterval(resourceTimer);
       if (chaosTimer) clearTimeout(chaosTimer);
       if (durationTimer) clearTimeout(durationTimer);
       setTapeState(TAPE_STATES.OFFLINE, { reason });
+      writeTapeStatus({ state: TAPE_STATES.OFFLINE, staleFeedSec: config.tape.staleFeedSec, coins: {} });
       writeEvent('TAPE_STOPPED', { reason });
       if (ws) ws.close();
       resolve(reason);
@@ -243,8 +415,9 @@ export function runTape({ minutes = null, chaosAfterSec = null, log = console.lo
     process.once('SIGTERM', () => stop('SIGTERM'));
   });
 
-  writeEvent('TAPE_STARTED', { symbols, depth: config.tape.bookDepth, minutes, chaosAfterSec });
-  log(`[${nowIso()}] tape starting: ${symbols.join(', ')} depth=${config.tape.bookDepth}`);
+  await loadUniverse('startup');
+  writeEvent('TAPE_STARTED', { pairs: pairs.size, minutes, chaosAfterSec });
+  log(`[${nowIso()}] tape starting: ${pairs.size} pairs (majors at depth ${xp.majorsDepth ?? config.tape.bookDepth}, minors at ${xp.defaultDepth ?? 25})`);
   connect();
   return done;
 }

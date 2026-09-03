@@ -230,6 +230,8 @@
 </div>
 
 <div id="tapechip" class="chip"><div id="tapedot"></div><span id="tapetext">TAPE —</span></div>
+<div id="universechip" class="chip" hidden
+     style="top:calc(max(10px, env(safe-area-inset-top)) + 42px);left:12px;color:#5c6b7a"></div>
 <div id="clockchip" class="chip">ET --:-- · SESSION ----------</div>
 <div id="controls">
   <button id="btnKill">KILL</button>
@@ -508,6 +510,12 @@ function renderStatus(s) {
   const label = { LIVE: 'TAPE LIVE', DEGRADED: 'TAPE DEGRADED', OFFLINE: 'TAPE OFFLINE',
                   FROZEN: 'TAPE FROZEN', ABSENT: 'NO TAPE' }[t.effective] || 'TAPE ?';
   $('#tapetext').textContent = label + (t.effective === 'LIVE' ? age : '');
+  const u = t.universe;
+  $('#universechip').hidden = !u;
+  if (u) {
+    const off = (u.stale ?? 0) + (u.unavailable ?? 0);
+    $('#universechip').textContent = `UNIVERSE ${u.total} · LIVE ${u.live}` + (off ? ` · OFF ${off}` : '');
+  }
   renderLockRing(s.locks);
   renderSession(s.session);
 }

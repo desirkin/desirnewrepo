@@ -31,10 +31,12 @@ function tapeReport() {
   for (const [coin, c] of Object.entries(status.coins ?? {})) {
     coins[coin] = {
       synced: c.synced,
+      state: c.state ?? null,
+      major: c.major ?? true,
       ageSec: c.lastMsgMs ? (Date.now() - c.lastMsgMs) / 1000 : null,
     };
   }
-  return { effective, ageSec, staleFeedSec, coins };
+  return { effective, ageSec, staleFeedSec, coins, universe: status.universe ?? null };
 }
 
 const ET_CLOCK = new Intl.DateTimeFormat('en-US', {

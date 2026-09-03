@@ -11,6 +11,20 @@
   "paper": {
     "bankrollUsd": 10000
   },
+  "universeExpansion": {
+    "enabled": true,
+    "minUsdVolume24h": 5000000,
+    "majorsDepth": 100,
+    "defaultDepth": 25,
+    "minorsSnapshotIntervalSec": 30,
+    "subscribeBatchSize": 50,
+    "excludeBases": ["USDT", "USDC", "DAI", "TUSD", "PYUSD", "USDS", "RLUSD", "FDUSD", "USDG", "EURT", "USDR", "EUR", "GBP", "AUD", "CHF", "CAD", "JPY", "EURR"],
+    "resource": {
+      "maxHeapMb": 512,
+      "maxLoopLagMs": 1000,
+      "shedFraction": 0.15
+    }
+  },
   "tape": {
     "wsUrl": "wss://ws.kraken.com/v2",
     "bookDepth": 100,
