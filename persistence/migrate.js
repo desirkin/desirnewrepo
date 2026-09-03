@@ -24,9 +24,12 @@ export async function runMigrations(db, { log = () => {} } = {}) {
   }
   for (const m of MIGRATIONS) {
     if (applied.has(m.version)) continue;
-    await db.tx(async (q) => {
+    await db.tx(async (q, helpers) => {
       // q already schema-qualifies table names (test isolation) — raw SQL here
       for (const s of m.statements) await q(s);
+      // optional JS step in the SAME transaction (e.g. node-side backfills
+      // that need hashing without pgcrypto) — all-or-nothing with the DDL
+      if (m.post) await m.post(q, helpers);
       await q('INSERT INTO serpent_schema_migrations (version, name) VALUES ($1, $2)', [m.version, m.name]);
     });
     log(`PERSISTENCE migration ${m.version} applied: ${m.name}`);

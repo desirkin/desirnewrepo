@@ -11,6 +11,10 @@ import { validateEnvelope } from '../memory/validate.js';
 import { Db } from './db.js';
 import { Repository, mostRestrictiveControls } from './repository.js';
 import { runMigrations } from './migrate.js';
+import { validateControlState, validatePostureState, validateSimState } from './validate-state.js';
+import { canonicalJson } from './schema.js';
+
+const canonicalMatch = (a, b) => canonicalJson(a) === canonicalJson(b);
 
 export async function migrateLocalData({ db, log = console.log } = {}) {
   const repo = new Repository(db, { log });
@@ -35,25 +39,49 @@ export async function migrateLocalData({ db, log = console.log } = {}) {
   };
   const tally = () => ({ accepted: 0, duplicates: 0, invalid: 0, conflicts: 0 });
 
-  // ---- control state (merge toward restriction, never regress)
+  // ---- control state (validated; merge toward restriction, never regress)
   const controlsFile = path.join(d, 'state', 'controls.json');
   if (existsSync(controlsFile)) {
     report.filesInspected.push('state/controls.json');
-    const local = JSON.parse(readFileSync(controlsFile, 'utf8'));
-    const durable = await repo.loadControlState();
-    await repo.saveControlState(mostRestrictiveControls(durable?.state ?? {}, local), durable?.revision ?? null);
-    report.subsystems.controlState = { merged: true };
+    let local = null;
+    try {
+      local = JSON.parse(readFileSync(controlsFile, 'utf8'));
+    } catch {
+      local = null;
+    }
+    if (local && validateControlState(local).ok) {
+      const durable = await repo.loadControlState();
+      if (durable?.invalid) {
+        report.subsystems.controlState = { merged: false, refused: 'durable control state invalid — manual resolution required' };
+      } else {
+        await repo.saveControlState(mostRestrictiveControls(durable?.state ?? {}, local), durable?.revision ?? null);
+        report.subsystems.controlState = { merged: true };
+      }
+    } else {
+      report.subsystems.controlState = { merged: false, refused: 'local controls.json malformed/invalid' };
+    }
   } else report.missingFiles.push('state/controls.json');
 
-  // ---- current posture + sim/lock state
-  for (const [id, file] of [
-    ['posture', path.join(d, 'state', 'posture.json')],
-    ['sim_pnl', path.join(d, 'state', 'sim_pnl.json')],
+  // ---- current posture + sim/lock state (validated; saveRuntimeState with
+  // no proven revision reconciles toward LESS PERMISSION, never overwrites)
+  for (const [id, file, validate] of [
+    ['posture', path.join(d, 'state', 'posture.json'), validatePostureState],
+    ['sim_pnl', path.join(d, 'state', 'sim_pnl.json'), validateSimState],
   ]) {
     if (existsSync(file)) {
       report.filesInspected.push(path.relative(d, file));
-      await repo.saveRuntimeState(id, JSON.parse(readFileSync(file, 'utf8')));
-      report.subsystems[id] = { imported: true };
+      let parsed = null;
+      try {
+        parsed = JSON.parse(readFileSync(file, 'utf8'));
+      } catch {
+        parsed = null;
+      }
+      if (parsed && validate(parsed).ok) {
+        const r = await repo.saveRuntimeState(id, parsed, null);
+        report.subsystems[id] = { imported: true, reconciled: canonicalMatch(r.state, parsed) ? false : true };
+      } else {
+        report.subsystems[id] = { imported: false, refused: 'malformed/invalid local state' };
+      }
     } else report.missingFiles.push(path.relative(d, file));
   }
 
@@ -73,6 +101,7 @@ export async function migrateLocalData({ db, log = console.log } = {}) {
       }
       const r = await save(row.rec, row.line);
       if (r.accepted) t.accepted++;
+      else if (r.conflict) t.conflicts++;
       else t.duplicates++;
     }
     report.subsystems[key] = t;
@@ -94,6 +123,8 @@ export async function migrateLocalData({ db, log = console.log } = {}) {
       }
       const r = await repo.upsertLedgerRow(kind, row.rec);
       if (r.accepted) t.accepted++;
+      else if (r.conflict) t.conflicts++;
+      else if (r.invalid) t.invalid++;
       else t.duplicates++;
     }
     report.subsystems[`ledger_${kind}`] = t;

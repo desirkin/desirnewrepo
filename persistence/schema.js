@@ -2,7 +2,31 @@
 // transactionally, tracked in serpent_schema_migrations. No external
 // migration framework. An UNKNOWN FUTURE schema version is refused, never
 // silently downgraded.
-export const SCHEMA_VERSION = 1; // PERSIST-0 / schema 1
+import { createHash } from 'node:crypto';
+
+export const SCHEMA_VERSION = 2; // PERSIST-0A / schema 2
+
+// Canonical key-sorted JSON — the stable content form durable event
+// identities are computed over (independent of key order and whitespace).
+export const canonicalJson = (v) => {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(v)
+    .sort()
+    .map((k) => (v[k] === undefined ? null : `${JSON.stringify(k)}:${canonicalJson(v[k])}`))
+    .filter(Boolean)
+    .join(',')}}`;
+};
+
+// PERSIST-0A §13 — deterministic durable event identity. Line numbers in
+// ephemeral local files restart at 1 on every fresh deployment, so they can
+// NEVER be global identity; content + stream type is. Where an upstream
+// event already carries an id, that id is preserved as the identity.
+export function durableEventId(streamType, event) {
+  const upstream = event?.event_id ?? event?.eventId;
+  if (typeof upstream === 'string' && upstream.length > 0) return upstream;
+  return createHash('sha1').update(`${streamType}|${canonicalJson(event)}`).digest('hex');
+}
 
 export const MIGRATIONS = [
   {
@@ -90,5 +114,49 @@ export const MIGRATIONS = [
         recorded_at timestamptz NOT NULL DEFAULT now()
       )`,
     ],
+  },
+  {
+    version: 2,
+    name: 'PERSIST-0A durable event identity',
+    // Line numbers in local files restart at 1 on every fresh deployment —
+    // (source_file, line_no) can never be global durable identity. Replace
+    // it with a deterministic content-derived event_id; keep source_file +
+    // line_no as provenance/debug metadata ONLY.
+    statements: [
+      `ALTER TABLE serpent_control_audit ADD COLUMN IF NOT EXISTS event_id text`,
+      `ALTER TABLE serpent_posture_transitions ADD COLUMN IF NOT EXISTS event_id text`,
+    ],
+    // Backfill + constraint swap needs node:crypto hashes and dynamic
+    // constraint names, so it runs as JS inside the same transaction.
+    post: async (q, { raw, db }) => {
+      for (const table of ['serpent_control_audit', 'serpent_posture_transitions']) {
+        const rel = db.qualifiedName(table);
+        const eventCol = table === 'serpent_control_audit' ? 'event' : 'transition';
+        // compute deterministic identities for existing rows
+        const { rows } = await raw(`SELECT seq, source_file, ${eventCol} AS body FROM ${rel} WHERE event_id IS NULL ORDER BY seq`);
+        const seen = new Set();
+        for (const r of rows) {
+          const id = durableEventId(r.source_file, r.body);
+          if (seen.has(id)) {
+            // literally identical content in the same stream — the
+            // deterministic-duplicate rule collapses it to one truth
+            await raw(`DELETE FROM ${rel} WHERE seq = $1`, [r.seq]);
+            continue;
+          }
+          seen.add(id);
+          await raw(`UPDATE ${rel} SET event_id = $1 WHERE seq = $2`, [id, r.seq]);
+        }
+        // drop the old ephemeral line-identity unique constraints, whatever
+        // their generated names are
+        const cons = await raw(`SELECT conname FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'u'`, [rel]);
+        for (const c of cons.rows) {
+          await raw(`ALTER TABLE ${rel} DROP CONSTRAINT "${c.conname}"`);
+        }
+      }
+      await q(`ALTER TABLE serpent_control_audit ALTER COLUMN event_id SET NOT NULL`);
+      await q(`ALTER TABLE serpent_posture_transitions ALTER COLUMN event_id SET NOT NULL`);
+      await q(`CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_event ON serpent_control_audit (event_id)`);
+      await q(`CREATE UNIQUE INDEX IF NOT EXISTS uq_transition_event ON serpent_posture_transitions (event_id)`);
+    },
   },
 ];

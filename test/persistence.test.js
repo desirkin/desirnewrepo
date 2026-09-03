@@ -107,8 +107,8 @@ if (!TEST_URL) {
   test('database reachable; migrations apply once and are idempotent', async () => {
     assert.equal(await db.connect(), true);
     const first = await runMigrations(db);
-    assert.equal(first.schemaVersion, 1);
-    assert.deepEqual(first.appliedNow, [1]);
+    assert.equal(first.schemaVersion, 2);
+    assert.deepEqual(first.appliedNow, [1, 2]);
     const second = await runMigrations(db);
     assert.deepEqual(second.appliedNow, []); // idempotent
   });
@@ -149,7 +149,7 @@ if (!TEST_URL) {
   test('posture + sim/lock round-trip; transitions idempotent by source line', async () => {
     await repo.saveRuntimeState('posture', { posture: 'STALKING', ts: ISO, cause: 'fixture' });
     assert.equal((await repo.loadRuntimeState('posture')).state.posture, 'STALKING');
-    await repo.saveRuntimeState('sim_pnl', { date: '2026-09-03', pnlPct: -1.2, simulated: true });
+    await repo.saveRuntimeState('sim_pnl', { date: '2026-09-03', pnlPct: -1.2, ts: ISO, simulated: true });
     assert.equal((await repo.loadRuntimeState('sim_pnl')).state.pnlPct, -1.2);
     await repo.appendPostureTransition('transitions.jsonl', 1, { ts: ISO, from: 'COILED', to: 'STALKING', cause: 'fixture' });
     await repo.appendPostureTransition('transitions.jsonl', 1, { ts: ISO, from: 'COILED', to: 'STALKING', cause: 'fixture' }); // replay
@@ -158,14 +158,15 @@ if (!TEST_URL) {
   });
 
   test('ledger round-trip: deterministic ids, idempotent replay never duplicates a fill', async () => {
-    const pred = { prediction_id: 'pred-1', ts: ISO, coin: 'BTC', size_usd: 100 };
+    const pred = { prediction_id: 'pred-1', timestamp_prediction_persisted: ISO, coin: 'BTC', size_usd: 100 };
+    const fill = { prediction_id: 'pred-1', ts: ISO, coin: 'BTC', size_usd: 100, base_qty: 1, avg_price: 100.2, fee_usd: 0.4 };
     assert.equal((await repo.upsertLedgerRow('prediction', pred)).accepted, true);
     assert.equal((await repo.upsertLedgerRow('prediction', pred)).duplicate, true);
-    assert.equal((await repo.upsertLedgerRow('fill', { prediction_id: 'pred-1', ts: ISO, px: 100.2 })).accepted, true);
-    assert.equal((await repo.upsertLedgerRow('fill', { prediction_id: 'pred-1', ts: ISO, px: 100.2 })).duplicate, true);
+    assert.equal((await repo.upsertLedgerRow('fill', fill)).accepted, true);
+    assert.equal((await repo.upsertLedgerRow('fill', structuredClone(fill))).duplicate, true);
     const fills = await repo.loadLedger('fill');
     assert.equal(fills.length, 1);
-    assert.equal(fills[0].px, 100.2);
+    assert.equal(fills[0].avg_price, 100.2);
     assert.equal((await repo.upsertLedgerRow('prediction', { ts: ISO })).accepted, false); // no id, no row
   });
 
@@ -230,7 +231,10 @@ if (!TEST_URL) {
     writeFileSync(path.join(dirA, 'state', 'controls.json'), JSON.stringify({ kill: { active: true, ts: ISO }, cage: { active: true, ts: ISO }, vetoes: [] }));
     writeFileSync(path.join(dirA, 'state', 'posture.json'), JSON.stringify({ posture: 'COILED', ts: ISO, cause: 'redeploy fixture' }));
     writeFileSync(path.join(dirA, 'state', 'transitions.jsonl'), JSON.stringify({ ts: ISO, from: 'COILED', to: 'COILED', cause: 'fixture' }) + '\n');
-    writeFileSync(path.join(dirA, 'ledger', 'predictions.jsonl'), JSON.stringify({ prediction_id: 'redeploy-pred', ts: ISO, coin: 'ETH', size_usd: 50 }) + '\n');
+    writeFileSync(
+      path.join(dirA, 'ledger', 'predictions.jsonl'),
+      JSON.stringify({ prediction_id: 'redeploy-pred', timestamp_prediction_persisted: ISO, coin: 'ETH', size_usd: 50 }) + '\n'
+    );
     const memFix = mkEnv({ ts: NOW_SEC - 80, symbol: 'XRP', correlation: { eventId: 'redeploy-ev' } });
     writeFileSync(path.join(dirA, 'memory', 'events.jsonl'), JSON.stringify(memFix) + '\n');
     const a = await startPersistence({ log: () => {}, dbOverrides: { url: TEST_URL, schema: SCHEMA } });
@@ -301,7 +305,10 @@ if (!TEST_URL) {
     mkdirSync(path.join(dirM, 'memory'), { recursive: true });
     writeFileSync(path.join(dirM, 'state', 'controls.json'), JSON.stringify({ kill: null, cage: null, vetoes: [{ prediction_id: 'mig-v', ts: ISO }] }));
     writeFileSync(path.join(dirM, 'state', 'posture.json'), JSON.stringify({ posture: 'COILED', ts: ISO, cause: 'mig' }));
-    writeFileSync(path.join(dirM, 'ledger', 'fills.jsonl'), JSON.stringify({ prediction_id: 'mig-fill', ts: ISO, px: 1 }) + '\n' + '{broken json\n');
+    writeFileSync(
+      path.join(dirM, 'ledger', 'fills.jsonl'),
+      JSON.stringify({ prediction_id: 'mig-fill', ts: ISO, coin: 'BTC', size_usd: 10, base_qty: 0.1, avg_price: 100, fee_usd: 0.04 }) + '\n' + '{broken json\n'
+    );
     const good = mkEnv({ ts: NOW_SEC - 60, symbol: 'UNI' });
     writeFileSync(
       path.join(dirM, 'memory', 'events.jsonl'),

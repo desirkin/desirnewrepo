@@ -3,7 +3,6 @@
 // entry point; the display still never decides, and the default is NO TRADE.
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import './ui/server.js'; // starts listening on PORT (default 3000)
 import { dataDir } from './lib/config.js';
 import { runTape } from './tape/run.js';
 import { startRumint } from './rumint/poller.js';
@@ -33,13 +32,19 @@ try {
 
 try {
   // PERSIST-0: connect the durable core and restore protective state FIRST
-  // (most restrictive wins) — before memory, before sensors, before
-  // anything that could ever grant permission. Unreachable-but-configured
-  // engages PERSISTENCE_PERMISSION_LOCK; failure never stops observation.
+  // (most restrictive wins) — before the cockpit listens, before memory,
+  // before sensors, before anything that could ever grant permission.
+  // Unreachable-but-configured engages PERSISTENCE_PERMISSION_LOCK;
+  // failure never stops observation (startPersistence itself never throws
+  // past installing a fail-closed state — PERSIST-0A §3).
   await startPersistence({ log: console.log });
 } catch (err) {
   console.error(`PERSIST-0 failed to start (observation continues; permission-increasing behavior locked): ${err.message}`);
 }
+// PERSIST-0A §2: the cockpit begins listening only AFTER the persistence
+// bootstrap state is established — no boot window where CLEAR could see
+// "no persistence" as permission. (ui/server.js listens on import.)
+await import('./ui/server.js');
 try {
   // MEMORY-0 dark mirror opens BEFORE the live sensors begin writing
   // (MEMORY-0A §8), so their startup records are remembered too. It

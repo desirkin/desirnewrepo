@@ -2,14 +2,30 @@
 // All SQL lives behind this boundary. The database is durable AUTHORITY
 // for the durable core, but never magical truth: canonical Memory restored
 // from here re-earns its way through digest + validator before it is
-// served, and safety rows are revision-guarded so the most restrictive
-// state can never be lost to a last-write-wins race.
+// served, structured safety state re-earns its way through the strict
+// validators (PERSIST-0A), and safety rows are revision-guarded so the most
+// restrictive state can never be lost to a last-write-wins race.
 import { createHash } from 'node:crypto';
 import { validateEnvelope } from '../memory/validate.js';
+import { canonicalJson, durableEventId } from './schema.js';
+import {
+  validateControlState,
+  validatePostureState,
+  validateSimState,
+  validateLedgerRow,
+  lessPermissivePosture,
+  lessPermissiveSim,
+} from './validate-state.js';
 
 const MAX_QUERY_LIMIT = 500;
 const clamp = (n) => Math.max(1, Math.min(Number.isFinite(n) ? n : 50, MAX_QUERY_LIMIT));
 const sha1 = (s) => createHash('sha1').update(s).digest('hex');
+
+const LEDGER_TABLES = {
+  prediction: 'serpent_ledger_predictions',
+  fill: 'serpent_ledger_fills',
+  exit: 'serpent_ledger_exits',
+};
 
 // MOST RESTRICTIVE STATE WINS (doctrine/PERSISTENCE.md): disagreements
 // between two control states resolve toward less permission, always.
@@ -23,18 +39,51 @@ export function mostRestrictiveControls(a = {}, b = {}) {
   return { kill, cage, vetoes: [...byId.values()] };
 }
 
+// PERSIST-0A: less-permission reconciliation for runtime ("current") state.
+// A stale or unproven writer can never regress a restriction; junk can never
+// replace a valid durable safety row.
+function reconcileRuntimeState(id, dbState, incoming) {
+  if (id === 'posture') {
+    const dbOk = validatePostureState(dbState).ok;
+    const inOk = validatePostureState(incoming).ok;
+    if (dbOk && inOk) return lessPermissivePosture(dbState, incoming);
+    return dbOk ? dbState : inOk ? incoming : dbState;
+  }
+  if (id === 'sim_pnl') {
+    const dbOk = validateSimState(dbState).ok;
+    const inOk = validateSimState(incoming).ok;
+    if (dbOk && inOk) return lessPermissiveSim(dbState, incoming);
+    return dbOk ? dbState : inOk ? incoming : dbState;
+  }
+  return dbState; // unknown runtime id: durable authority stands
+}
+
 export class Repository {
   constructor(db, { log = () => {} } = {}) {
     this.db = db;
     this.log = log;
     this.memoryIdConflicts = 0;
     this.invalidDurableRecords = 0;
+    this.ledgerIdConflicts = 0;
+    this.auditIdConflicts = 0; // audit AND posture-transition identity conflicts
+    this.runtimeStateConflicts = 0; // revision races resolved toward restriction
   }
 
   // ---------------- controls (revision-guarded) ----------------
+  // Returns null (no row), {revision, state} for a VALID row, or
+  // {revision, state, invalid: true, errors} for a row that failed the
+  // strict validator — which the caller must NEVER interpret as CLEAR.
   async loadControlState() {
     const { rows } = await this.db.query(`SELECT revision, state FROM serpent_control_state WHERE id = 'current'`);
-    return rows[0] ? { revision: Number(rows[0].revision), state: rows[0].state } : null;
+    if (!rows[0]) return null;
+    const out = { revision: Number(rows[0].revision), state: rows[0].state };
+    const v = validateControlState(out.state);
+    if (!v.ok) {
+      this.invalidDurableRecords++;
+      this.log(`PERSISTENCE DEGRADED: durable control state invalid (${v.errors.join('; ')}) — never interpreted as CLEAR`);
+      return { ...out, invalid: true, errors: v.errors };
+    }
+    return out;
   }
 
   // Save with optimistic revision check; on a concurrent write, reload,
@@ -48,8 +97,8 @@ export class Repository {
       }
       const dbRev = Number(cur.rows[0].revision);
       let next = state;
-      if (expectedRevision !== null && dbRev !== expectedRevision) {
-        // someone else wrote concurrently: merge toward restriction
+      if (expectedRevision === null || dbRev !== expectedRevision) {
+        // unproven freshness or a concurrent write: merge toward restriction
         next = mostRestrictiveControls(cur.rows[0].state, state);
       }
       await q(`UPDATE serpent_control_state SET revision = $1, state = $2, updated_at = now() WHERE id = 'current'`, [dbRev + 1, next]);
@@ -75,60 +124,145 @@ export class Repository {
     });
   }
 
-  async appendControlAudit(sourceFile, lineNo, event) {
+  // ---------------- control/security audit + posture transitions ----------
+  // PERSIST-0A §13: durable identity is the deterministic content-derived
+  // event_id, NEVER the ephemeral (source_file, line_no) — a fresh
+  // deployment restarts at line 1 and must not collide with old history.
+  // source_file/line_no survive as provenance/debug metadata only.
+  async #appendIdentifiedEvent(table, col, streamType, lineNo, body) {
+    const eventId = durableEventId(streamType, body);
     const r = await this.db.query(
-      `INSERT INTO serpent_control_audit (ts, source_file, line_no, event) VALUES ($1, $2, $3, $4)
-       ON CONFLICT (source_file, line_no) DO NOTHING`,
-      [event.ts ?? new Date().toISOString(), sourceFile, lineNo, event],
+      `INSERT INTO ${table} (ts, source_file, line_no, ${col}, event_id) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (event_id) DO NOTHING`,
+      [body.ts ?? new Date().toISOString(), streamType, lineNo, body, eventId],
       { write: true }
     );
-    return { accepted: r.rowCount === 1, duplicate: r.rowCount === 0 };
+    if (r.rowCount === 1) return { accepted: true, duplicate: false, eventId };
+    const existing = await this.db.query(`SELECT ${col} AS body FROM ${table} WHERE event_id = $1`, [eventId]);
+    if (existing.rows[0] && canonicalJson(existing.rows[0].body) === canonicalJson(body)) {
+      return { accepted: false, duplicate: true, eventId };
+    }
+    // only reachable with upstream-supplied ids: same identity, different
+    // content — corruption, not replay; first truth stands
+    this.auditIdConflicts++;
+    this.log(`PERSISTENCE DEGRADED: EVENT_ID_CONTENT_CONFLICT in ${table} for ${eventId} — first truth stands`);
+    return { accepted: false, duplicate: false, conflict: true, outcome: 'EVENT_ID_CONTENT_CONFLICT', eventId };
   }
 
-  // ---------------- posture / runtime state ----------------
-  async saveRuntimeState(id, state) {
-    await this.db.tx(async (q) => {
-      const cur = await q(`SELECT revision FROM serpent_runtime_state WHERE id = $1 FOR UPDATE`, [id]);
-      if (cur.rows.length) {
-        await q(`UPDATE serpent_runtime_state SET revision = revision + 1, state = $2, updated_at = now() WHERE id = $1`, [id, state]);
-      } else {
+  async appendControlAudit(streamType, lineNo, event) {
+    return this.#appendIdentifiedEvent('serpent_control_audit', 'event', streamType, lineNo, event);
+  }
+
+  async appendPostureTransition(streamType, lineNo, transition) {
+    return this.#appendIdentifiedEvent('serpent_posture_transitions', 'transition', streamType, lineNo, transition);
+  }
+
+  // ---------------- posture / runtime state (revision-guarded) -------------
+  // expectedRevision must match the current durable revision for a trusted
+  // overwrite. Anything else (stale, or null = unproven) reconciles toward
+  // LESS PERMISSION — no last-write-wins path exists for safety state.
+  async saveRuntimeState(id, state, expectedRevision = null) {
+    return this.db.tx(async (q) => {
+      const cur = await q(`SELECT revision, state FROM serpent_runtime_state WHERE id = $1 FOR UPDATE`, [id]);
+      if (!cur.rows.length) {
         await q(`INSERT INTO serpent_runtime_state (id, revision, state) VALUES ($1, 1, $2)`, [id, state]);
+        return { revision: 1, state, conflict: false };
       }
+      const dbRev = Number(cur.rows[0].revision);
+      let next = state;
+      let conflict = false;
+      if (expectedRevision === null || dbRev !== expectedRevision) {
+        next = reconcileRuntimeState(id, cur.rows[0].state, state);
+        conflict = expectedRevision !== null; // a stale writer actually lost a race
+        if (conflict) {
+          this.runtimeStateConflicts++;
+          this.log(`PERSISTENCE: runtime state '${id}' concurrent write reconciled toward less permission`);
+        }
+      }
+      await q(`UPDATE serpent_runtime_state SET revision = $1, state = $2, updated_at = now() WHERE id = $3`, [dbRev + 1, next, id]);
+      return { revision: dbRev + 1, state: next, conflict };
     });
   }
 
+  // Returns null, {revision, state}, or {revision, state, invalid, errors}
+  // when the durable row fails its strict validator — the caller must treat
+  // invalid as "permission remains restricted", never as absence of a lock.
   async loadRuntimeState(id) {
     const { rows } = await this.db.query(`SELECT revision, state FROM serpent_runtime_state WHERE id = $1`, [id]);
-    return rows[0] ? { revision: Number(rows[0].revision), state: rows[0].state } : null;
-  }
-
-  async appendPostureTransition(sourceFile, lineNo, transition) {
-    const r = await this.db.query(
-      `INSERT INTO serpent_posture_transitions (ts, source_file, line_no, transition) VALUES ($1, $2, $3, $4)
-       ON CONFLICT (source_file, line_no) DO NOTHING`,
-      [transition.ts ?? new Date().toISOString(), sourceFile, lineNo, transition],
-      { write: true }
-    );
-    return { accepted: r.rowCount === 1, duplicate: r.rowCount === 0 };
+    if (!rows[0]) return null;
+    const out = { revision: Number(rows[0].revision), state: rows[0].state };
+    const v = id === 'posture' ? validatePostureState(out.state) : id === 'sim_pnl' ? validateSimState(out.state) : { ok: true };
+    if (!v.ok) {
+      this.invalidDurableRecords++;
+      this.log(`PERSISTENCE DEGRADED: durable runtime state '${id}' invalid (${v.errors.join('; ')}) — withheld`);
+      return { ...out, invalid: true, errors: v.errors };
+    }
+    return out;
   }
 
   // ---------------- paper ledger (idempotent by upstream ids) ----------------
+  // PERSIST-0A §14: an id collision with DIFFERENT content is corruption,
+  // not harmless replay. First durable truth stands; the conflict is counted
+  // and refused, never retried into an overwrite.
   async upsertLedgerRow(kind, row) {
-    const table = { prediction: 'serpent_ledger_predictions', fill: 'serpent_ledger_fills', exit: 'serpent_ledger_exits' }[kind];
+    const table = LEDGER_TABLES[kind];
     if (!table) throw new Error(`unknown ledger kind ${kind}`);
-    if (!row.prediction_id) return { accepted: false, reason: 'missing prediction_id' };
+    const v = validateLedgerRow(kind, row);
+    if (!v.ok) return { accepted: false, invalid: true, reason: v.errors.join('; ') };
     const r = await this.db.query(
       `INSERT INTO ${table} (prediction_id, ts, row) VALUES ($1, $2, $3) ON CONFLICT (prediction_id) DO NOTHING`,
       [row.prediction_id, row.ts ?? null, row],
       { write: true }
     );
-    return { accepted: r.rowCount === 1, duplicate: r.rowCount === 0 };
+    if (r.rowCount === 1) return { accepted: true, duplicate: false };
+    const existing = await this.db.query(`SELECT row FROM ${table} WHERE prediction_id = $1`, [row.prediction_id]);
+    if (existing.rows[0] && canonicalJson(existing.rows[0].row) === canonicalJson(row)) {
+      return { accepted: false, duplicate: true };
+    }
+    this.ledgerIdConflicts++;
+    this.log(`PERSISTENCE DEGRADED: LEDGER_ID_CONTENT_CONFLICT (${kind} ${row.prediction_id}) — first truth stands`);
+    return { accepted: false, duplicate: false, conflict: true, outcome: 'LEDGER_ID_CONTENT_CONFLICT' };
   }
 
+  // Bounded recent view (display); rows re-earn validation before serving.
   async loadLedger(kind, { limit } = {}) {
-    const table = { prediction: 'serpent_ledger_predictions', fill: 'serpent_ledger_fills', exit: 'serpent_ledger_exits' }[kind];
+    const table = LEDGER_TABLES[kind];
     const { rows } = await this.db.query(`SELECT row FROM ${table} ORDER BY durable_at DESC LIMIT $1`, [clamp(limit)]);
-    return rows.map((r) => r.row);
+    return this.#reviveLedgerRows(kind, rows);
+  }
+
+  // COMPLETE validated durable ledger for operational restore — chunked
+  // keyset pagination, never truncated to the display bound (PERSIST-0A §10).
+  async loadLedgerAll(kind) {
+    const table = LEDGER_TABLES[kind];
+    if (!table) throw new Error(`unknown ledger kind ${kind}`);
+    const out = [];
+    let after = '';
+    for (;;) {
+      const { rows } = await this.db.query(
+        `SELECT prediction_id, row FROM ${table} WHERE prediction_id > $1 ORDER BY prediction_id LIMIT ${MAX_QUERY_LIMIT}`,
+        [after]
+      );
+      if (!rows.length) break;
+      out.push(...this.#reviveLedgerRows(kind, rows));
+      after = rows[rows.length - 1].prediction_id;
+      if (rows.length < MAX_QUERY_LIMIT) break;
+    }
+    return out;
+  }
+
+  #reviveLedgerRows(kind, rows) {
+    const out = [];
+    for (const r of rows) {
+      const v = validateLedgerRow(kind, r.row);
+      if (!v.ok) {
+        this.invalidDurableRecords++;
+        this.log(`PERSISTENCE DEGRADED: durable ${kind} row failed validation (${v.errors.join('; ')}) — withheld`);
+        continue;
+      }
+      out.push(r.row);
+    }
+    return out;
   }
 
   // ---------------- canonical memory (MEMORY-0C model, durable) ----------------

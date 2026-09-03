@@ -58,6 +58,23 @@ Childhood manifest identity (metadata only). NOT in the database: bulk
 Childhood archives, tape books/ticks, raw sensor streams — PERSIST-1 / App
 Storage territory. Auth sessions: never.
 
+## WHEN DURABILITY IS REQUIRED (PERSIST-0A)
+
+`durabilityRequired()` is TRUE when `REPLIT_DEPLOYMENT=1` (a published
+Replit deployment) or `SERPENT_DURABLE_REQUIRED=1` (explicit override for
+development/testing). **A published deployment can never override this to
+false — no disable knob exists.** A durability-required process without
+`DATABASE_URL` is *PERSISTENCE REQUIRED BUT UNCONFIGURED*
+(`PERSISTENCE_REQUIRED_UNCONFIGURED`): health `UNAVAILABLE`,
+`permissionLock: true`, CLEAR / RE-ARM and every future
+permission-increasing action refuse, while KILL/CAGE/VETO still restrict
+the current process and read-only research continues. Only an explicitly
+local development workspace (no `DATABASE_URL`, durability not required)
+keeps pre-PERSIST-0 local-only behavior — honest development mode with
+health `UNAVAILABLE` and `databaseConfigured: false`; no durable authority
+exists to disagree with. Production setup therefore REQUIRES
+`DATABASE_URL`.
+
 ## STARTUP SAFETY & THE PERMISSION LOCK
 
 On startup, durable protective state is restored BEFORE anything that
@@ -65,11 +82,22 @@ could ever grant permission. **PERSISTENCE_PERMISSION_LOCK** holds
 whenever a CONFIGURED database is unreachable or its state has not been
 restored this run: CLEAR / RE-ARM refuses, future permission-increasing
 behavior refuses, while defensive KILL/CAGE/VETO still restrict the
-current process and read-only research continues. An UNCONFIGURED
-database (no `DATABASE_URL`) preserves pre-PERSIST-0 local-only behavior —
-honest development mode with health `UNAVAILABLE` and
-`databaseConfigured: false`; no durable authority exists to disagree with.
-Production setup therefore REQUIRES `DATABASE_URL`.
+current process and read-only research continues.
+
+**No boot window exists (PERSIST-0A).** `getPersistence()` is never null:
+from module import onward a fail-closed BOOTING state answers, refusing
+CLEAR whenever durability is required or a database is configured;
+`fly.js` starts persistence BEFORE the cockpit begins listening; and
+`startPersistence()` never throws past installing a fail-closed API — a
+migration/restore failure leaves a valid locked persistence state behind
+with a safe `failureCategory` (never connection details). The startup
+retry loop stops only after connect + migration compatibility + migration
+application + durable state validation + restore/reconciliation ALL
+succeed, at a bounded 30s interval (no reconnect storm); `connect()`
+re-probes the existing pool on every retry, so an outage that ends is
+actually noticed. A durable content conflict
+(`LEDGER_ID_CONTENT_CONFLICT`) also locks permission until manually
+resolved.
 
 ## THE CONTROL ASYMMETRY (non-negotiable)
 
@@ -91,6 +119,81 @@ succeeds. Disagreement never resolves toward more permission
 automatically. Revision-guarded compare-and-update prevents concurrent
 mutations from silently overwriting each other; a lost race re-merges
 toward restriction and retries.
+
+**Validation precedes application (PERSIST-0A).** Every durable
+structured safety row (controls, posture, sim/lock, ledger rows) re-earns
+its way through a strict pure validator before it may be applied or
+served. An invalid durable CONTROL row is NEVER interpreted as CLEAR — it
+fails the restore, locks permission, and is never silently repaired; an
+invalid durable posture/sim row is never written locally and permission
+stays restricted; invalid durable ledger rows are withheld and counted.
+
+**Local files never automatically override durable current state.** The
+exact startup rules for posture and sim/lock: durable invalid → restore
+fails, permission locked; no local + durable valid → adopt durable; local
+valid + no durable → push local durable; both valid and equal → nothing
+rewritten; both valid and different → **LESS PERMISSION WINS** and the
+winner becomes both truths via a revision-guarded write; local
+malformed/invalid → quarantined (`*.quarantine-<ts>` copy, nothing
+deleted) and durable truth adopted. Posture permission ranking:
+RETREAT < COILED < DIGESTING < STALKING < STRIKE (RETREAT grants least
+permission and wins any ambiguity; unreachable STRIKE/DIGESTING remain
+fail-closed by the posture machine itself). Sim/lock ambiguity resolves to
+whichever state trips the HIGHER lock level for today's session; a sim row
+for another date is inert; ties keep the durable authority.
+
+**Runtime state has no last-write-wins path.** `saveRuntimeState`
+requires a proven-fresh `expectedRevision` for a trusted overwrite;
+anything stale or unproven reconciles toward less permission inside the
+row-locked transaction and is counted (`runtimeStateConflicts`). After
+startup, a bounded snapshot watcher in the pump keeps the durable CURRENT
+`posture.json` / `sim_pnl.json` true: content-digest change detection (no
+gratuitous writes), validation before persisting, and DURABLE_CONFIRMED
+only after the database acks.
+
+## DURABLE EVENT IDENTITY (schema 2)
+
+Local file line numbers restart at 1 on every fresh deployment, so
+`(source_file, line_no)` can never be global durable identity — a new
+deployment's line 1 must not vanish as the old deployment's "duplicate".
+Control/security audit rows and posture transitions are identified by a
+deterministic `event_id = sha1(streamType | canonical key-sorted JSON)`
+computed with node:crypto before insert (an upstream event id, where one
+exists, is preserved as the identity); `source_file`/`line_no` survive as
+provenance/debug metadata only. Same event_id + identical content →
+deterministic duplicate; same event_id + different content →
+`EVENT_ID_CONTENT_CONFLICT`, refused, counted, health degraded. Ledger
+rows follow the same truth: an `prediction_id` collision with different
+content is `LEDGER_ID_CONTENT_CONFLICT` — corruption, not replay; first
+durable truth stands, permission locks pending manual resolution.
+
+## THE OPERATIONAL LEDGER SEES ITS DURABLE HISTORY
+
+The running app's ledger consumers (allPredictions/allFills/allExits,
+openPositions, realized P&L, daily locks, the cockpit summary) read local
+JSONL. A durable database Serpent does not consult is an archive — so on
+startup the COMPLETE validated durable ledger (chunked keyset pagination,
+never truncated to the 500 display bound) is merged with validated local
+pending rows and atomically materialized into the reconciled canonical
+local mirror files BEFORE ledger consumers run. Merge rule per
+`prediction_id`: identical content → one truth; durable-only → restored
+locally; valid local-only → preserved and queued for durable persistence;
+different content → conflict (above). Pre-reconciliation local files with
+malformed/invalid/conflicting rows are preserved as quarantine copies —
+local pending evidence is never blindly overwritten, and nothing is
+deleted.
+
+## THE MEMORY CONSUMER FACADE
+
+`persistence/memory-view.js` is THE canonical Memory read facade for
+future consumers (UI-1, BRAIN, PHILOSOPHER); they consume it rather than
+choosing a storage implementation. It lives outside closed MEMORY-0C and
+rewrites nothing inside it. Durable configured + restored → durable
+PostgreSQL Memory is authoritative, merged with validated current-process
+PENDING local records, deduped by canonical id, with durability status
+preserved separately (`meta.durable` / `meta.pendingLocal`); durable
+history is never hidden because a fresh process's local `events.jsonl` is
+empty. Explicit local-only development mode → the local MEMORY view.
 
 ## DURABILITY STATES & THE PUMP
 
@@ -136,6 +239,32 @@ existing local `data/state`, `data/ledger`, `data/memory`, validates every
 record (Memory through the canonical validator), imports idempotently
 (re-run safe), refuses invalid rows, reports counts per subsystem, and
 deletes nothing.
+
+## SPOOL INTEGRITY IS HEALTH
+
+A malformed complete spool line is LOST SOURCE EVIDENCE: it is counted
+(`spoolParseErrors`), logged loudly, and the tail advances past it —
+never invented, never repaired, never rewritten in the source, and never
+pretended durable. A pump read exception counts (`pumpReadErrors`) and
+degrades health. `ledgerIdConflicts`, `auditIdConflicts` and
+`runtimeStateConflicts` are likewise surfaced; any non-zero
+evidence-integrity counter degrades health. Connection failures are
+classified by ONE shared classifier across connect/probe, `query()` and
+`tx()` — a connection that dies inside a transaction marks the database
+unreachable exactly as a dead query does, so the permission lock always
+tells the truth. A stopped persistence runtime clears its retry timer and
+pump; no background retries or duplicate loops survive `stop()`.
+
+## STALKING / HYPED — SAFE_TO_FORGET (classified)
+
+`state/stalking.json` and `rumint/hyped.json` are explicitly classified
+**SAFE_TO_FORGET / RECONSTRUCTABLE_TRANSIENT** and are NOT persisted to
+PostgreSQL: forgetting them on redeploy REDUCES trading permission rather
+than increasing it (an un-stalked symbol cannot arm anything), entries
+carry TTLs and decay by design, and the live RUMINT/WideEye sensors
+re-nominate from current evidence. A fresh deployment therefore begins
+with an empty stalk set; expired rumors are never restored merely for
+continuity.
 
 ## FAIL CLOSED, ALWAYS
 

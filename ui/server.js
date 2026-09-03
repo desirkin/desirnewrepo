@@ -21,6 +21,7 @@ import { appendJsonl } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
 import { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_MS } from './auth.js';
 import { getPersistence } from '../persistence/runtime.js';
+import { durabilityRequired } from '../persistence/health.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -356,8 +357,16 @@ const server = http.createServer((req, res) => {
           const action = String(controlBody.action ?? '').toLowerCase();
           // PERSIST-0 asymmetry: CLEAR is permission-INCREASING — the
           // durable transaction must succeed BEFORE the local latch drops.
-          if (action === 'clear' && p) {
-            const durable = await p.durableClearOrRefuse();
+          // PERSIST-0A §2: this gate is UNCONDITIONAL. getPersistence()
+          // is never null (a fail-closed BOOTING state exists from module
+          // import), and even if it somehow were, absence of a persistence
+          // object is refusal, not permission.
+          if (action === 'clear') {
+            const durable = p
+              ? await p.durableClearOrRefuse()
+              : durabilityRequired() || process.env.DATABASE_URL
+                ? { allow: false, reason: 'PERSISTENCE_BOOTING' }
+                : { allow: true, mode: 'LOCAL_ONLY_UNCONFIGURED' };
             if (!durable.allow) {
               json(res, 503, { ok: false, reason: durable.reason });
               return;
