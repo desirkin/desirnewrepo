@@ -54,7 +54,9 @@ export function labelObservation(obs, store, contextStores) {
     mae,
     ret1hPct: ret1h === null ? null : round4(ret1h),
     ret4hPct: ret4h === null ? null : round4(ret4h),
-    moveAlreadySpentPct: obs.priceState.extensionPct,
+    // extensionPct exists only on parity-capable tracks; a coarse context
+    // track has no honest live-definition 15m extension -> null, never faked.
+    moveAlreadySpentPct: obs.priceState.extensionPct ?? null,
     moveRemainingPct: mfe['60m'],
     abnormalReturn: {
       vsBtc: ret1h !== null && btc1h !== null ? round4(ret1h - btc1h) : null,

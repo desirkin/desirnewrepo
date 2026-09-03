@@ -1,10 +1,12 @@
-// B-0 + B-0A orchestrator: fetch layered history politely, replay forward on
-// CLOSED bars only, freeze observations (with knowledge-time provenance),
-// then label outcomes separately. Event-aware DISCOVERY/EMBARGO/VALIDATION
-// splits. A pre-existing archive is superseded, never mixed.
+// B-0/B-0A/B-0B orchestrator. Builds a candidate childhood in a STAGING
+// directory (the authoritative archive is untouched throughout), validates
+// it, and promotes only on a clean validation. Coarse tracks are
+// CONTEXT_ONLY; the 1m track runs the true PARITY_SCOUT engine — but REST 1m
+// depth (~12h) is below the 24h volume warm-up, so no live-equivalent signal
+// can be scored from it and fastMemoryParityStatus records exactly that.
 // Run: node childhood/build.js
 import path from 'node:path';
-import { existsSync, renameSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { loadConfig, dataDir } from '../lib/config.js';
@@ -12,62 +14,73 @@ import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
 import { readCurrentUniverse } from '../tape/universe.js';
 import { CandleStore, retBetween } from './store.js';
-import { replaySymbol, RANDOM_SEED, BASELINE_STRATA } from './replay.js';
+import { replayContext, replayParity, buildMinuteGrid, RANDOM_SEED, BASELINE_STRATA } from './replay.js';
 import { labelObservation } from './labeler.js';
 import { assignSplits, MAX_HORIZON_SEC } from './splits.js';
 import { fetchUsdPairs, fetchOhlc, fetchAggression } from './fetch.js';
 import { fetchGovernance, fetchIncidentHistory } from './deepmemory.js';
+import { validateChildhood, EXPECTED_SCHEMA_VERSION } from './validate.js';
+import { promoteStaging } from './promote.js';
 
-const OUT = () => path.join(dataDir(), 'childhood');
+const AUTHORITATIVE = () => path.join(dataDir(), 'childhood');
+const runId = Date.now();
+const STAGING = () => path.join(dataDir(), `childhood-staging-${runId}`);
 const log = (m) => console.log(`[${nowIso()}] ${m}`);
 
 const config = loadConfig();
 const wideCfg = config.wideeye;
 const retrievedTs = nowIso();
 const gaps = [
-  'Kraken OHLC serves ~720 candles/interval: 1m history limited to ~12h, 5m to ~2.5d, 15m to ~7.5d — no 30d density below 1h (verified live; see doctrine/CHILDHOOD.md)',
+  'Kraken OHLC serves ~720 candles/interval: 1m history limited to ~12h, 5m to ~2.5d, 15m to ~7.5d — no 30d density below 1h (verified live)',
   'No public L2 history exists: absorption/refill/cancel = UNKNOWN_HISTORICALLY outside trades enrichment',
   'Point-in-time listing status not served by any public endpoint: eligibility is candle-evidenced (TRADED_AT_TS) or UNKNOWN',
+  'Universe reconstruction starts from TODAY\'s AssetPairs: pairs delisted before today are invisible — SURVIVORSHIP_LIMITED_CURRENT_PAIR_SET',
 ];
+const FAST_MEMORY_PARITY_STATUS = 'UNAVAILABLE_WITH_CURRENT_SOURCE';
+const PARITY_BLOCKER =
+  'REST 1m depth (~12h) < 24h rolling-volume warm-up + 7d baseline; Kraken downloadable OHLCVT is quarterly via Google Drive (recon 2026-09-03): latest data ends at the prior quarter boundary and cannot cover a current 30-day window; multi-GB unauthenticated Drive retrieval is operationally unreasonable here. PARITY_SCOUT engine implemented and fixture-proven; awaiting an adequate source.';
 
-// ---- supersede any earlier archive: never mix rule generations
-if (existsSync(OUT())) {
-  const dev = `${OUT()}-superseded-${Date.now()}`;
-  renameSync(OUT(), dev);
-  log(`existing archive superseded -> ${path.basename(dev)} (development artifact only; never merged)`);
-}
+log(`building into staging: ${path.basename(STAGING())} (authoritative untouched until validated promotion)`);
 
-// ---- universe
+// ---- universe (today's; survivorship limitation recorded, never hidden)
 const pairKeys = await fetchUsdPairs(config.universeExpansion.excludeBases);
 const allCoins = [...pairKeys.keys()];
 const deepCoins = (readCurrentUniverse()?.pairs ?? config.universe.map((c) => ({ coin: c }))).map((p) => p.coin).filter((c) => pairKeys.has(c));
-log(`universe today: ${allCoins.length} USD pairs; deep tape: ${deepCoins.length}; majors: ${config.universe.join(',')}`);
+log(`universe today: ${allCoins.length} USD pairs; deep tape: ${deepCoins.length}`);
 
-// ---- fetch tracks
+// ---- fetch tracks (completed candles only; retrievedSec recorded per line)
 const TRACKS = [
-  { intervalMin: 60, coins: allCoins },
-  { intervalMin: 15, coins: allCoins },
-  { intervalMin: 5, coins: deepCoins },
-  { intervalMin: 1, coins: deepCoins },
+  { intervalMin: 60, coins: allCoins, role: 'CONTEXT_ONLY' },
+  { intervalMin: 15, coins: allCoins, role: 'CONTEXT_ONLY' },
+  { intervalMin: 5, coins: deepCoins, role: 'CONTEXT_ONLY' },
+  { intervalMin: 1, coins: deepCoins, role: 'PARITY_SCOUT' },
 ];
 const stores = new Map();
+let sourceLatestTs = 0;
 for (const t of TRACKS) {
   const m = new Map();
   stores.set(t.intervalMin, m);
   let done = 0;
   for (const coin of t.coins) {
     try {
-      const candles = await fetchOhlc(pairKeys.get(coin), t.intervalMin);
+      const { candles, retrievedSec } = await fetchOhlc(pairKeys.get(coin), t.intervalMin);
       if (candles.length >= 20) {
         m.set(coin, new CandleStore(coin, t.intervalMin * 60, candles));
-        appendJsonl(path.join(OUT(), `candles-${t.intervalMin}m.jsonl`), { symbol: coin, intervalMin: t.intervalMin, retrievedTs, candles });
+        sourceLatestTs = Math.max(sourceLatestTs, candles.at(-1)[0] + t.intervalMin * 60);
+        appendJsonl(path.join(STAGING(), `candles-${t.intervalMin}m.jsonl`), {
+          symbol: coin,
+          intervalMin: t.intervalMin,
+          retrievedTs,
+          retrievedSec,
+          candles,
+        });
       }
     } catch (err) {
       gaps.push(`OHLC ${coin}@${t.intervalMin}m failed: ${err.message}`);
     }
     if (++done % 100 === 0) log(`  ${t.intervalMin}m track: ${done}/${t.coins.length} fetched`);
   }
-  log(`${t.intervalMin}m track: ${m.size} symbols with candles`);
+  log(`${t.intervalMin}m track (${t.role}): ${m.size} symbols with completed candles`);
 }
 
 // ---- trades enrichment (majors, hard budget)
@@ -79,7 +92,6 @@ for (const coin of config.universe) {
     const since = Math.floor(Date.now() / 1000) - 6 * 3600;
     const r = await fetchAggression(pairKeys.get(coin), since, budget);
     aggression.set(coin, r);
-    log(`trades ${coin}: ${r.coverage.requests} requests, coverage from ${r.coverage.fromSec ? new Date(r.coverage.fromSec * 1000).toISOString() : 'none'}`);
     if (r.coverage.toSec && Date.now() / 1000 - r.coverage.toSec > 120) {
       gaps.push(`trades ${coin}: budget exhausted before catching up (coverage ends ${new Date(r.coverage.toSec * 1000).toISOString()})`);
     }
@@ -88,8 +100,8 @@ for (const coin of config.universe) {
   }
 }
 
-// ---- per-track context, closed-bar keyed (ts = bar CLOSE time)
-function buildContext(trackStores, intervalSec) {
+// ---- per-track trailing context (closed-bar keyed) + labeler-only forward median
+function buildContextFns(trackStores, intervalSec) {
   const perTs = new Map();
   for (const s of trackStores.values()) {
     for (let i = 1; i < s.candles.length; i++) {
@@ -135,16 +147,18 @@ function buildContext(trackStores, intervalSec) {
   return { contextAt, median1hAt };
 }
 
-// ---- replay + label
-const obsFile = path.join(OUT(), 'observations.jsonl');
-const outFile = path.join(OUT(), 'outcomes.jsonl');
+// ---- replay + label into staging
+const obsFile = path.join(STAGING(), 'observations.jsonl');
+const outFile = path.join(STAGING(), 'outcomes.jsonl');
 const counts = {
   byPopulation: {},
   byClassification: {},
   byTag: {},
   byTrack: {},
+  byTrackRole: {},
   bySplit: {},
   byAvailability: {},
+  wouldEmitLive: { true: 0, false: 0 },
   tradeEnriched: 0,
 };
 const splitBoundaries = {};
@@ -154,23 +168,27 @@ for (const t of TRACKS) {
   const trackStores = stores.get(t.intervalMin);
   if (!trackStores.size) continue;
   const intervalSec = t.intervalMin * 60;
-  const { contextAt, median1hAt } = buildContext(trackStores, intervalSec);
+  const { contextAt, median1hAt } = buildContextFns(trackStores, intervalSec);
   const trackName = `${t.intervalMin}m`;
   const allObs = [];
   for (const [coin, store] of trackStores) {
-    const agg = aggression.get(coin);
-    allObs.push(
-      ...replaySymbol({
-        replayViews: store.replayViews(),
-        symbol: coin,
-        intervalSec,
-        track: trackName,
-        cfg: wideCfg,
-        contextAt,
-        retrievedTs,
-        aggression: agg ? { imbalance: agg.imbalance, bucketSec: 900 } : null,
-      })
-    );
+    if (t.role === 'PARITY_SCOUT') {
+      const agg = aggression.get(coin);
+      allObs.push(
+        ...replayParity({
+          minuteSamples: buildMinuteGrid(store.candles),
+          symbol: coin,
+          cfg: wideCfg,
+          contextAt,
+          retrievedTs,
+          aggression: agg ? { imbalance: agg.imbalance, bucketSec: 900 } : null,
+        })
+      );
+    } else {
+      allObs.push(
+        ...replayContext({ replayViews: store.replayViews(), symbol: coin, intervalSec, track: trackName, contextAt, retrievedTs })
+      );
+    }
   }
   allObs.sort((a, b) => a.ts - b.ts);
   if (!allObs.length) continue;
@@ -180,6 +198,7 @@ for (const t of TRACKS) {
   const { uniqueEvents } = assignSplits(allObs, nominal);
   totalUniqueEvents += uniqueEvents;
   splitBoundaries[trackName] = {
+    role: t.role,
     from: t0,
     to: t1,
     nominalSplitTs: nominal,
@@ -197,7 +216,9 @@ for (const t of TRACKS) {
     counts.byPopulation[obs.population] = (counts.byPopulation[obs.population] ?? 0) + 1;
     counts.byClassification[obs.setupClassification] = (counts.byClassification[obs.setupClassification] ?? 0) + 1;
     counts.byTrack[trackName] = (counts.byTrack[trackName] ?? 0) + 1;
+    counts.byTrackRole[obs.trackRole] = (counts.byTrackRole[obs.trackRole] ?? 0) + 1;
     counts.bySplit[obs.split] = (counts.bySplit[obs.split] ?? 0) + 1;
+    if (obs.wouldEmitLive !== null && obs.wouldEmitLive !== undefined) counts.wouldEmitLive[String(obs.wouldEmitLive)]++;
     for (const [f, state] of Object.entries(obs.dataAvailability)) {
       counts.byAvailability[`${f}:${state}`] = (counts.byAvailability[`${f}:${state}`] ?? 0) + 1;
     }
@@ -206,26 +227,26 @@ for (const t of TRACKS) {
     appendJsonl(outFile, outcome);
     for (const tag of outcome.outcomeTags) counts.byTag[tag] = (counts.byTag[tag] ?? 0) + 1;
   }
-  log(`${trackName} replay: ${allObs.length} observations (${uniqueEvents} unique events) frozen & labeled`);
+  log(`${trackName} (${t.role}): ${allObs.length} observations (${uniqueEvents} unique events) frozen & labeled`);
 }
 
 // ---- deep memory
-log('deep memory: governance (snapshot) + incident archive');
-const gov = await fetchGovernance(allCoins);
-for (const r of gov.records) appendJsonl(path.join(OUT(), 'governance.jsonl'), r);
+log('deep memory: governance (paginated, with vote timelines) + incident archive');
+const gov = await fetchGovernance(allCoins, { log });
+for (const r of gov.records) appendJsonl(path.join(STAGING(), 'governance.jsonl'), r);
 gaps.push(...gov.gaps);
-const lockCounts = { MATHEMATICALLY_LOCKED: 0, STATISTICALLY_NEAR_CERTAIN: 0, UNKNOWN: 0 };
+const lockCounts = {};
 for (const r of gov.records) lockCounts[r.lock.status] = (lockCounts[r.lock.status] ?? 0) + 1;
 let incidentCount = 0;
 try {
   const incidents = await fetchIncidentHistory(stores.get(60));
-  for (const i of incidents) appendJsonl(path.join(OUT(), 'incidents.jsonl'), i);
+  for (const i of incidents) appendJsonl(path.join(STAGING(), 'incidents.jsonl'), i);
   incidentCount = incidents.length;
 } catch (err) {
   gaps.push(`incident archive failed: ${err.message}`);
 }
 
-// ---- reproducibility manifest (B-0A §6)
+// ---- reproducibility manifest (B-0B §18)
 const sha = (file) => {
   try {
     return createHash('sha256').update(readFileSync(file)).digest('hex').slice(0, 16);
@@ -239,13 +260,43 @@ try {
 } catch {
   // not a git checkout on deployment
 }
+const totalObs = Object.values(counts.byTrack).reduce((s, v) => s + v, 0);
 const manifest = {
-  schemaVersion: 'childhood-observation-2',
-  childhoodVersion: 'B0A-1',
-  wideEyeLogicVersion: `wideeye-1 (z>=${wideCfg.zVolThreshold}/|z|>=${wideCfg.zRetThreshold}/ext<=${wideCfg.extensionCapPct}%, unchanged from live)`,
-  labelerVersion: 'outcome-tags-1 (multi-label deterministic)',
-  universeRuleVersion: 'candle-evidenced-eligibility-1',
-  provenanceRuleVersion: 'availableTs-1 (knowledge time distinct from source time)',
+  schemaVersion: EXPECTED_SCHEMA_VERSION,
+  childhoodVersion: 'B0B',
+  wideEyeLiveLogicVersion: `eyecore-1 (z>=${wideCfg.zVolThreshold}/|z|>=${wideCfg.zRetThreshold}/ext<=${wideCfg.extensionCapPct}%, minSamples=${wideCfg.minSamples}, cooldown=${wideCfg.rippleCooldownMin}m, add-then-score, 7d retention)`,
+  wideEyeReplayParityVersion: 'parity-1 (shared eyecore; true 1m grid; rolling-24h volRate; live cooldown; no coarse-track wide-eye output)',
+  fastMemoryParityStatus: FAST_MEMORY_PARITY_STATUS,
+  fastMemoryParityBlocker: PARITY_BLOCKER,
+  historicalSourceType: 'kraken REST OHLC (720-candle cap per interval), completed bars only',
+  historicalSourceCoverage: Object.fromEntries(
+    TRACKS.map((t) => {
+      const m = stores.get(t.intervalMin);
+      const spans = [...m.values()].map((s) => [s.candles[0][0], s.candles.at(-1)[0] + t.intervalMin * 60]);
+      return [
+        `${t.intervalMin}m`,
+        {
+          role: t.role,
+          symbols: m.size,
+          from: spans.length ? new Date(Math.min(...spans.map((s) => s[0])) * 1000).toISOString() : null,
+          to: spans.length ? new Date(Math.max(...spans.map((s) => s[1])) * 1000).toISOString() : null,
+        },
+      ];
+    })
+  ),
+  sourceLatestTs: sourceLatestTs ? new Date(sourceLatestTs * 1000).toISOString() : null,
+  warmupFromTs: null, // no parity-capable source: no warm-up window exists
+  archivedChildhoodFromTs: null, // parity childhood not generated (see blocker)
+  archivedChildhoodToTs: null,
+  universeCoverageStatus: 'SURVIVORSHIP_LIMITED_CURRENT_PAIR_SET',
+  universeCoverageExplanation:
+    "The pair list comes from today's AssetPairs; pairs delisted before today cannot appear, so historical completeness of the universe is NOT claimed. TRADED_AT_TS proves trading occurred; KNOWN_ONLINE_AT_TS and LIVE_RULES_ELIGIBLE_AT_TS are unavailable historically -> UNKNOWN.",
+  liveMinSamples: wideCfg.minSamples,
+  historicalMinSamples: wideCfg.minSamples, // exact parity — no relaxation
+  baselineWindowDays: 7,
+  volumeFeatureDefinition:
+    'max(0, delta of rolling 24h base volume between consecutive 1m samples); reconstructed from 1m bars on PARITY_SCOUT; raw bar volume on CONTEXT_ONLY is stored as barVolume and never called volRate',
+  cooldownMin: wideCfg.rippleCooldownMin,
   sourceDatasetIdentifiers: [
     'https://api.kraken.com/0/public/OHLC',
     'https://api.kraken.com/0/public/Trades',
@@ -254,7 +305,7 @@ const manifest = {
     'https://status.kraken.com/api/v2/incidents.json',
   ],
   sourceChecksumsSha256_16: Object.fromEntries(
-    TRACKS.map((t) => [`candles-${t.intervalMin}m.jsonl`, sha(path.join(OUT(), `candles-${t.intervalMin}m.jsonl`))])
+    TRACKS.map((t) => [`candles-${t.intervalMin}m.jsonl`, sha(path.join(STAGING(), `candles-${t.intervalMin}m.jsonl`))])
   ),
   randomSeed: RANDOM_SEED,
   samplingStrata: BASELINE_STRATA,
@@ -263,27 +314,33 @@ const manifest = {
   charter: 'doctrine/CHILDHOOD.md',
   universeToday: allCoins.length,
   deepUniverse: deepCoins,
-  tracks: Object.fromEntries(
-    TRACKS.map((t) => {
-      const m = stores.get(t.intervalMin);
-      const spans = [...m.values()].map((s) => [s.candles[0][0], s.candles.at(-1)[0]]);
-      return [
-        `${t.intervalMin}m`,
-        {
-          symbols: m.size,
-          from: spans.length ? new Date(Math.min(...spans.map((s) => s[0])) * 1000).toISOString() : null,
-          to: spans.length ? new Date(Math.max(...spans.map((s) => s[1])) * 1000).toISOString() : null,
-        },
-      ];
-    })
-  ),
-  counts: { ...counts, uniqueEvents: totalUniqueEvents, governanceProposals: gov.records.length, governanceLocks: lockCounts, incidents: incidentCount },
+  counts: {
+    ...counts,
+    observations: totalObs,
+    uniqueEvents: totalUniqueEvents,
+    governanceProposals: gov.records.length,
+    governanceVotesRetrieved: gov.voteStats.votesRetrieved,
+    governanceTimelinesComplete: gov.voteStats.timelinesComplete,
+    governanceTimelinesUnavailable: gov.voteStats.timelinesUnavailable,
+    governanceLocks: lockCounts,
+    incidents: incidentCount,
+  },
   splits: splitBoundaries,
   embargoHorizonSec: MAX_HORIZON_SEC,
   tradesCoverage: Object.fromEntries([...aggression.entries()].map(([c, r]) => [c, r.coverage])),
   knownGaps: gaps,
-  note: 'B-0/B-0A builds memory; it proves nothing. No performance numbers are reported here by design.',
+  note: 'B-0/B-0A/B-0B builds memory; it proves nothing. No performance numbers are reported here by design.',
 };
-atomicWriteJson(path.join(OUT(), 'manifest.json'), manifest, { pretty: true });
-log('manifest written');
-console.log(JSON.stringify({ counts: manifest.counts, splits: splitBoundaries, knownGaps: gaps.length }, null, 2));
+atomicWriteJson(path.join(STAGING(), 'manifest.json'), manifest, { pretty: true });
+log('staging manifest written — validating before promotion');
+
+// ---- validate, then promote (fail closed)
+const promotion = promoteStaging(STAGING(), AUTHORITATIVE(), { validate: validateChildhood });
+if (!promotion.promoted) {
+  log(`PROMOTION REFUSED at ${promotion.stage}: authoritative archive untouched`);
+  for (const e of promotion.errors.slice(0, 20)) log(`  validator: ${e}`);
+  process.exitCode = 1;
+} else {
+  log(`promoted: staging -> data/childhood${promotion.supersededPath ? `; previous archive superseded at ${path.basename(promotion.supersededPath)}` : ''}`);
+  console.log(JSON.stringify({ counts: manifest.counts, splits: splitBoundaries, fastMemoryParityStatus: FAST_MEMORY_PARITY_STATUS, knownGaps: gaps.length }, null, 2));
+}

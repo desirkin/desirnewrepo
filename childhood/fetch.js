@@ -46,12 +46,28 @@ export async function fetchUsdPairs(excludeBases) {
   return out;
 }
 
-// One OHLC call: [[t,o,h,l,c,v],...] ascending, numeric. Venue serves at
-// most ~720 candles per interval — that cap is a recorded fact, not fought.
+// COMPLETED bars only (B-0B §2). Kraken's REST OHLC response ends with the
+// CURRENT, NOT-YET-COMMITTED candle; its final OHLCV values are not yet
+// knowable and must never enter historical replay. Defense in depth: drop
+// the documented uncommitted final row AND any row whose close time hasn't
+// occurred by retrieval time (covers abnormal/out-of-order rows too).
+// Pure and unit-tested at the ingestion boundary — CandleStore never sees
+// an unfinished row and is never asked to "fix" one.
+export function completedCandlesOnly(rows, intervalSec, retrievedSec) {
+  if (!rows.length) return [];
+  const withoutCurrent = rows.slice(0, -1); // documented contract: last row is the open candle
+  return withoutCurrent.filter((c) => c[0] + intervalSec <= retrievedSec);
+}
+
+// One OHLC call: [[t,o,h,l,c,v],...] ascending, numeric, COMPLETED bars only.
+// Venue serves at most ~720 candles per interval — a recorded fact, not fought.
+// Returns { candles, retrievedSec } so provenance can carry knowledge time.
 export async function fetchOhlc(pairKey, intervalMin) {
   const r = await politeGet(`${OHLC_URL}?pair=${pairKey}&interval=${intervalMin}`);
+  const retrievedSec = Math.floor(Date.now() / 1000); // recorded at response time
   const key = Object.keys(r).find((k) => k !== 'last');
-  return (r[key] ?? []).map((c) => [Number(c[0]), Number(c[1]), Number(c[2]), Number(c[3]), Number(c[4]), Number(c[6])]);
+  const rows = (r[key] ?? []).map((c) => [Number(c[0]), Number(c[1]), Number(c[2]), Number(c[3]), Number(c[4]), Number(c[6])]);
+  return { candles: completedCandlesOnly(rows, intervalMin * 60, retrievedSec), retrievedSec };
 }
 
 // Trades enrichment for majors: pages forward from `sinceSec` under a hard

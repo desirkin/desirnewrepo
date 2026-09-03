@@ -27,45 +27,12 @@ export function wideeyeEnabled(config = loadConfig()) {
   return config.wideeye?.enabled === true;
 }
 
-// ---------- pure math core (exported for tests) ----------
-
-// Welford-style pooled aggregates per ET-hour bucket: {n, sum, sumSq}.
-export function bucketAdd(bucket, x) {
-  bucket.n += 1;
-  bucket.sum += x;
-  bucket.sumSq += x * x;
-  return bucket;
-}
-
-export function pooledStats(buckets) {
-  let n = 0;
-  let sum = 0;
-  let sumSq = 0;
-  for (const b of Object.values(buckets)) {
-    n += b.n;
-    sum += b.sum;
-    sumSq += b.sumSq;
-  }
-  if (n < 2) return { n, mean: null, std: null };
-  const mean = sum / n;
-  const variance = Math.max(0, sumSq / n - mean * mean);
-  return { n, mean, std: Math.sqrt(variance) };
-}
-
-export function zScore(x, stats, minSamples) {
-  if (x === null || stats.n < minSamples || !stats.std || stats.std <= 0) return null;
-  return (x - stats.mean) / stats.std;
-}
-
-// RIPPLE vs MISSED vs null. Independent cheap measures must co-fire, and the
-// move must still be FORMING: an already-extended symbol is a missed boat,
-// not an invitation.
-export function classifyRipple({ zVol, zRet5, ret15Pct }, cfg) {
-  if (zVol === null || zRet5 === null || ret15Pct === null) return null;
-  const cofire = zVol >= cfg.zVolThreshold && Math.abs(zRet5) >= cfg.zRetThreshold;
-  if (!cofire) return null;
-  return Math.abs(ret15Pct) <= cfg.extensionCapPct ? 'RIPPLE' : 'MISSED';
-}
+// ---------- pure math core ----------
+// Extracted VERBATIM to survey/eyecore.js (B-0B) so live and historical
+// replay share one implementation and cannot drift. Re-exported here so
+// every existing import path keeps working. Live behavior unchanged.
+import { bucketAdd, pooledStats, zScore, classifyRipple, evaluateTick, pruneBaselineBuckets } from './eyecore.js';
+export { bucketAdd, pooledStats, zScore, classifyRipple, evaluateTick, pruneBaselineBuckets };
 
 // (Deep-tape cap/shed lives in tape/universe.js mergeNominationsAndCap —
 // the tape verifies; the wide eye only proposes.)
@@ -126,12 +93,8 @@ export function startWideEye({ log = console.log } = {}) {
     logEvent('WIDEEYE_UNIVERSE', { scanned: keyToCoin.size });
   }
 
-  function pruneBuckets(metricBuckets, now) {
-    const cutoffDate = sessionDate(new Date(now - 7 * 86_400_000));
-    for (const key of Object.keys(metricBuckets)) {
-      if (key.slice(0, 10) < cutoffDate) delete metricBuckets[key];
-    }
-  }
+  // 7-day retention now lives in the shared core (same semantics, one home).
+  const pruneBuckets = (metricBuckets, now) => pruneBaselineBuckets(metricBuckets, now, sessionDate);
 
   function sweep(tickers) {
     const now = Date.now();
@@ -170,13 +133,8 @@ export function startWideEye({ log = console.log } = {}) {
       const volRate = Number.isFinite(cumVol) && Number.isFinite(prev.cumVol) ? Math.max(0, cumVol - prev.cumVol) : null;
 
       const b = (baselines[coin] ??= { ret1: {}, ret5: {}, volRate: {} });
-      if (ret1 !== null) bucketAdd((b.ret1[hourKey] ??= { n: 0, sum: 0, sumSq: 0 }), ret1);
-      if (ret5 !== null) bucketAdd((b.ret5[hourKey] ??= { n: 0, sum: 0, sumSq: 0 }), ret5);
-      if (volRate !== null) bucketAdd((b.volRate[hourKey] ??= { n: 0, sum: 0, sumSq: 0 }), volRate);
-
-      const zVol = zScore(volRate, pooledStats(b.volRate), cfg.minSamples);
-      const zRet5 = zScore(ret5, pooledStats(b.ret5), cfg.minSamples);
-      const verdict = classifyRipple({ zVol, zRet5, ret15Pct }, cfg);
+      // shared core, live ordering: sample joins baseline, then z, then verdict
+      const { zVol, zRet5, verdict } = evaluateTick({ ret1, ret5, ret15Pct, volRate }, b, cfg, hourKey);
       if (!verdict) continue;
       if (now - (lastRipple.get(coin) ?? 0) < cfg.rippleCooldownMin * 60_000) continue;
       lastRipple.set(coin, now);

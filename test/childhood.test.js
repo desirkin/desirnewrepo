@@ -1,6 +1,10 @@
-// B-0 + B-0A drills: knowledge time, the wall (adversarial), closed bars,
-// split embargo, event isolation, move-spent invariance, multi-tag outcomes,
-// near-miss frozen-only, UNKNOWN discipline, reproducibility.
+// B-0 + B-0A + B-0B drills: knowledge time, the wall (adversarial), closed
+// bars, split embargo, event isolation, move-spent invariance, multi-tag
+// outcomes, near-miss frozen-only, UNKNOWN discipline, reproducibility.
+// B-0B replaced replaySymbol with replayParity (true 1m grid, live
+// semantics) + replayContext (coarse tracks, honest names) — these drills
+// now run against the PARITY engine; parity-specific drills live in
+// test/parity.test.js.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -12,7 +16,7 @@ process.env.COBRA_DATA_DIR = TEST_DATA;
 
 const { CandleStore, WallViolation, mfeMae } = await import('../childhood/store.js');
 const { knowableAt, visibleFields } = await import('../childhood/knowledge.js');
-const { replaySymbol, nearMissAssessment, sampleDecision, RANDOM_SEED } = await import('../childhood/replay.js');
+const { replayParity, buildMinuteGrid, nearMissAssessment, sampleDecision, RANDOM_SEED } = await import('../childhood/replay.js');
 const { classifyOutcome, labelObservation } = await import('../childhood/labeler.js');
 const { assignSplits } = await import('../childhood/splits.js');
 const { loadConfig } = await import('../lib/config.js');
@@ -33,12 +37,10 @@ function candles(n, { t0 = 1_700_000_000, price = 100, vol = 10, mutate = () => 
   return out;
 }
 
-function runReplay(store, overrides = {}) {
-  return replaySymbol({
-    replayViews: store.replayViews(),
-    symbol: store.symbol,
-    intervalSec: store.intervalSec,
-    track: 'test',
+function runParity(candleRows, overrides = {}) {
+  return replayParity({
+    minuteSamples: buildMinuteGrid(candleRows),
+    symbol: 'TST',
     cfg: CFG,
     contextAt: ctx0,
     retrievedTs: 'test',
@@ -67,7 +69,7 @@ test('OUTCOME-WALL: builders cannot reach or receive the future', () => {
   assert.throws(() => view.candlesUpTo(T + 60), WallViolation);
   assert.equal(view.future, undefined); // no future accessor exists on the view
   assert.equal(view.candles, undefined); // no raw candle array either
-  const obs = runReplay(new CandleStore('TST', 60, candles(3000, { mutate: (i) => ({ vol: 10 + (i % 7) }) })));
+  const obs = runParity(candles(3000, { mutate: (i) => ({ vol: 10 + (i % 7) }) }));
   assert.ok(obs.length > 0);
   const forbidden = ['mfe', 'mae', 'outcomeTags', 'label', 'moveRemainingPct', 'abnormalReturn', 'outcome'];
   for (const o of obs) for (const k of forbidden) assert.ok(!(k in o), `observation leaked ${k}`);
@@ -85,6 +87,11 @@ test('CLOSED-BAR: an unfinished candle is invisible; replay acts at bar close', 
   // and the replay iterator only ever presents bars at their close time
   for (const { replayTs, bar } of store.replayViews()) {
     assert.equal(replayTs, bar[0] + 60);
+  }
+  // the 1m parity grid uses close-time keys too: sample ts = openTs + 60
+  const grid = buildMinuteGrid(store.candles);
+  for (let i = 0; i < grid.length; i++) {
+    if (grid[i].form === 'REAL_OHLCVT_BAR') assert.equal(grid[i].ts, grid[i].barOpenTs + 60);
   }
 });
 
@@ -111,7 +118,7 @@ test('SPLIT-EMBARGO + EVENT-ISOLATION: horizons cannot cross into validation; ev
 
 // 6. MOVE-SPENT TEST: invariant to the future.
 test('MOVE-SPENT: moveAlreadySpent is identical under different futures', () => {
-  const past = candles(200, { mutate: (i) => ({ vol: 10 + (i % 5), close: 100 + i * 0.01 }) });
+  const past = candles(2000, { mutate: (i) => ({ vol: 10 + (i % 5), close: 100 + i * 0.01 }) });
   const futures = [
     (i, p) => ({ close: p * 1.02 }), // future rockets
     (i, p) => ({ close: p * 0.98 }), // future collapses
@@ -119,8 +126,7 @@ test('MOVE-SPENT: moveAlreadySpent is identical under different futures', () => 
   ];
   const spentAt = (future) => {
     const fut = candles(50, { t0: past.at(-1)[0] + 60, price: past.at(-1)[4], mutate: future });
-    const store = new CandleStore('TST', 60, [...past, ...fut]);
-    const obs = runReplay(store);
+    const obs = runParity([...past, ...fut]);
     // compare the observation frozen at the last PAST bar across scenarios
     const cutoff = past.at(-1)[0] + 60;
     return obs.filter((o) => o.ts <= cutoff).map((o) => [o.ts, o.priceState.extensionPct]);
@@ -157,8 +163,8 @@ test('NEAR-MISS: classified from T-state only, 2/3 rule, thresholds untouched', 
 
 // 9. UNKNOWN TEST.
 test('UNKNOWN: missing L2 stays UNKNOWN_HISTORICALLY; provenance carries availableTs', () => {
-  const store = new CandleStore('TST', 60, candles(3000, { mutate: (i) => ({ vol: 10 + (i % 7) }) }));
-  const obs = runReplay(store);
+  const obs = runParity(candles(3000, { mutate: (i) => ({ vol: 10 + (i % 7) }) }));
+  assert.ok(obs.length > 0);
   for (const o of obs) {
     assert.equal(o.microstructure.absorption, 'UNKNOWN_HISTORICALLY');
     assert.equal(o.microstructure.aggressionImbalance, 'UNKNOWN_HISTORICALLY'); // no trades enrichment given
@@ -175,10 +181,11 @@ test('UNKNOWN: missing L2 stays UNKNOWN_HISTORICALLY; provenance carries availab
 
 test('trades enrichment consumes only the last FULLY ELAPSED bucket', () => {
   const t0 = 1_700_000_000 - (1_700_000_000 % 900); // bucket-aligned
-  const store = new CandleStore('TST', 60, candles(3000, { t0, mutate: (i) => ({ vol: 10 + (i % 7) }) }));
+  const rows = candles(3000, { t0, mutate: (i) => ({ vol: 10 + (i % 7) }) });
   const imbalance = {};
   for (let b = t0 - 900; b < t0 + 3000 * 60 + 900; b += 900) imbalance[b] = 0.5;
-  const obs = runReplay(store, { aggression: { imbalance, bucketSec: 900 } });
+  const obs = runParity(rows, { aggression: { imbalance, bucketSec: 900 } });
+  assert.ok(obs.length > 0);
   for (const o of obs) {
     assert.equal(o.microstructure.aggressionImbalance, 0.5);
     // the bucket used ended at or before replayTs — never the live bucket
@@ -191,10 +198,10 @@ test('REPRODUCIBILITY: identical inputs + seed produce identical selection and c
   const d1 = sampleDecision({ symbol: 'AAA', ts: 12345, stratum: 'ordinary' }, RANDOM_SEED);
   const d2 = sampleDecision({ symbol: 'AAA', ts: 12345, stratum: 'ordinary' }, RANDOM_SEED);
   assert.deepEqual(d1, d2);
-  const mk = () => new CandleStore('TST', 60, candles(3000, { mutate: (i) => ({ vol: 10 + (i % 7) }) }));
+  const mk = () => candles(3000, { mutate: (i) => ({ vol: 10 + (i % 7) }) });
   const strip = (o) => { const { id, ...rest } = o; return rest; }; // id is expected to differ
-  const a = runReplay(mk()).map(strip);
-  const b = runReplay(mk()).map(strip);
+  const a = runParity(mk()).map(strip);
+  const b = runParity(mk()).map(strip);
   assert.deepEqual(a, b);
   assert.ok(a.length > 0);
 });
@@ -217,4 +224,8 @@ test('horizons finer than the track resolution stay null, never interpolated', (
   assert.equal(out.mfe['5m'], null);
   assert.notEqual(out.mfe['15m'], undefined);
   assert.ok(Array.isArray(out.outcomeTags));
+  // a context observation has no live-definition extension: moveAlreadySpent
+  // must be null, never faked from a coarse tick (B-0B)
+  const ctxObs = { id: 'y', eventId: 'e', ts: store.candles[100][0] + 900, symbol: 'TST', priceState: { close: 100, retTick1: 0, trackTickMinutes: 15 } };
+  assert.equal(labelObservation(ctxObs, store, {}).moveAlreadySpentPct, null);
 });

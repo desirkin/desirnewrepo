@@ -1,203 +1,206 @@
-# CHILDHOOD DOCTRINE — point-in-time memory construction (B-0)
+# CHILDHOOD DOCTRINE — point-in-time memory construction (B-0 · B-0A · B-0B)
 
-## Charter
+## Charter (B-0, controlling)
 
 "B-0 is not a backtest whose purpose is to prove Serpent works. It is a point-in-time memory-construction system whose purpose is to let Serpent wake with calibrated expectations. At every historical timestamp, Serpent may see only information that existed at that timestamp. Future price action is used exclusively to label the frozen observation afterward. Preserve failures, missing data, delisted/changed markets, market context, and provenance. Never infer unavailable historical features. Thirty days is the dense-market warm-start window; rare-event modules use deeper reliable history where available. Historical and live observations must share the same schema so that Serpent cannot learn under rules different from those it will actually trade under."
-
-## The wall, in code
-
-`childhood/store.js` exposes candles only through an `asOf(T)` view whose
-every accessor refuses timestamps beyond T. The replay engine
-(`childhood/replay.js`) builds and freezes Observations through that view —
-it cannot see the future even by bug, because the future is not reachable
-from the object it holds. A separate labeler (`childhood/labeler.js`) opens
-the full store afterward and writes Outcomes to a different file. The wall
-is unit-tested: view access beyond T throws; frozen Observations contain no
-Outcome fields.
-
-## Shared schema
-
-**Observation** `data/childhood/observations.jsonl` (one per frozen moment):
-
-```
-{ id, ts, symbol, track,                      // track: 60m|15m|5m|1m replay lane
-  eligibleAtTime,                             // TRADED_AT_TS (candle-evidenced) | UNKNOWN — never today's universe assumed backward
-  priceState:  { close, ret1, ret5m?, ret15m?, ret1h?, extensionPct },
-  volumeState: { vol, volRateZ },
-  marketContext: { btcRet, ethRet, universeMedianRet, atHorizon },
-  scoutSignals: { zVol, zRet, extensionPct }, // the wide-eye math, replayed point-in-time
-  externalSignals: { rumint: "UNAVAILABLE_HISTORICALLY", gateway: "UNAVAILABLE_HISTORICALLY" },
-  microstructure: { absorption: "UNKNOWN_HISTORICALLY", refill: "UNKNOWN_HISTORICALLY", cancels: "UNKNOWN_HISTORICALLY",
-                    aggressionImbalance }     // real value only where trades enrichment covers the ts; else UNKNOWN_HISTORICALLY
-  dataAvailability: { <field>: KNOWN|UNKNOWN|UNAVAILABLE },
-  provenance: { <field>: { source, sourceTs, retrievedTs, kind: historical|live, form: raw|derived } },
-  setupClassification }                       // RIPPLE | MISSED | BASELINE_SAMPLE
-```
-
-**Outcome** `data/childhood/outcomes.jsonl` (separate object, written by the
-labeler only, keyed by observation id — never readable during construction):
-
-```
-{ id, mfe: {1m,3m,5m,15m,30m,1h,4h}, mae: {same horizons},   // null where the track's resolution cannot honestly resolve the horizon
-  moveAlreadySpentPct, moveRemainingPct,
-  abnormalReturn: { vsBtc, vsEth, vsUniverseMedian },        // at 1h
-  label }                                                    // run | fizzle | reversal | pump | beta-drag
-```
-
-**Label rules** (precedence: pump → reversal → run → beta-drag → fizzle), on
-the 1h/4h horizon where the track resolves it:
-
-- **pump**: MFE₁ₕ ≥ 3% and ret₄ₕ ≤ 0.5% — the spike that round-trips.
-- **reversal**: MFE₁ₕ ≥ 1.5% and ret₁ₕ ≤ −0.5% — beautiful, then betrayed.
-- **run**: MFE₁ₕ ≥ 2% and ret₁ₕ ≥ 1% — the real thing.
-- **beta-drag**: ret₁ₕ ≥ 1% but abnormal-vs-universe-median < 0.3% — the tide, not the fish.
-- **fizzle**: everything else — the jar must be large, and it is.
-
-## Layered density (a venue fact, not a choice)
-
-Kraken's public OHLC endpoint returns **at most ~720 candles per interval
-regardless of `since`** (verified live 2026-09-03: 721 candles at every
-interval). The venue therefore does not serve 30 days of 1m history, and
-reconstructing it from the Trades endpoint for 600+ pairs would take days of
-polite polling. Per this charter, the gap is preserved, not papered over:
-
-| Track | Span served | Coverage |
-|---|---|---|
-| 60m | ~30 days | full point-in-time USD universe |
-| 15m | ~7.5 days | full point-in-time USD universe |
-| 5m | ~2.5 days | deep-tape universe |
-| 1m | ~12 hours | deep-tape universe |
-| Trades (time-and-sales) | bounded request budget | majors only, coverage window recorded per symbol |
-
-**KNOWN GAP: no 1m density beyond ~12h, no 5m density beyond ~2.5d.** L2
-depth/absorption/refill/cancel history does not exist publicly at all →
-those fields are UNKNOWN_HISTORICALLY everywhere trades enrichment does not
-reach. Point-in-time listing status is not served by any public Kraken
-endpoint → `eligibleAtTime` is TRADED_AT_TS only where candles evidence
-actual trading at that timestamp, UNKNOWN otherwise; today's universe is
-never assumed backward.
-
-## Deep memory (rare events)
-
-- **Governance**: Snapshot hub (public GraphQL) proposals for universe
-  tokens with curated, verified space mappings; full proposal timelines
-  (created/start/end/state, scores, quorum). Lock analysis:
-  **MATHEMATICALLY_LOCKED** requires knowing remaining eligible voting
-  power, which Snapshot does not expose → where that basis is absent the
-  label is **STATISTICALLY_NEAR_CERTAIN** (with the margin basis recorded)
-  or **LOCK_TIME=UNKNOWN** — never an estimate dressed as fact. Tally
-  requires an API key; this project holds no keys → **UNAVAILABLE**,
-  recorded as a gap.
-- **Exchange incidents**: Kraken's public status archive (recent incident
-  history) under the same Observation/Outcome discipline where incident
-  windows overlap candle coverage.
-
-## Splits
-
-All archived memory is partitioned temporally per track: first ~70%
-**DISCOVERY**, last ~30% **VALIDATION**, boundaries recorded in
-`data/childhood/manifest.json`. Live paper trading remains a further,
-untouched test. **No analysis in B-0 may report "performance." B-0 builds
-memory; it proves nothing.**
-
----
-
-# B-0A HARDENING AMENDMENT
 
 > **Serpent is allowed to remember only what he could have known. The future
 > may judge a memory, but it may never help create one.**
 >
+> **Historical Serpent must also think with the same definitions as Live
+> Serpent. A leak-free replay that measures a different phenomenon is not
+> parity.**
+>
+> **When exact historical reconstruction of a live feature is impossible,
+> record the feature as unavailable. Never substitute a different timescale
+> or metric and give it the same name.**
+>
 > Childhood is not evidence of intelligence. Childhood is the evidence from
 > which intelligence may later be tested.
 
+---
+
+## THE AUTHORITATIVE SCHEMA (one, current: `childhood-observation-3-b0b`)
+
+Everything older is obsolete. There is no second schema.
+
+**Observation** — `data/childhood/observations.jsonl`, one per frozen moment:
+
+```
+{ id, ts, symbol, track,                    // ts = the moment values became knowable (bar close / sample time)
+  trackRole,                                // PARITY_SCOUT | CONTEXT_ONLY
+  population,                               // TRIGGER | NEAR_MISS | BASELINE
+  wouldEmitLive,                            // PARITY triggers only: false = COOLDOWN_SUPPRESSED, not a live event
+  eventId, eventSymbol, firstTriggerTs, triggerTs, triggerSequence,
+  eligibleAtTime,                           // TRADED_AT_TS (candle-evidenced) | UNKNOWN.
+                                            // KNOWN_ONLINE_AT_TS / LIVE_RULES_ELIGIBLE_AT_TS are NOT historically
+                                            // establishable and are never claimed.
+  priceState,                               // PARITY: {close, ret1, ret5, extensionPct} — LIVE definitions at true minutes.
+                                            // CONTEXT: {close, retTick1, retTick5, trackTickMinutes} — named by TRACK TICKS,
+                                            // never by live feature names. Five hours is never called five minutes.
+  volumeState,                              // PARITY: {volRate (live definition), rolling24hVolume | UNKNOWN_INSUFFICIENT_WARMUP, barVolume}
+                                            // CONTEXT: {barVolume} only — raw candle volume is NOT volRate.
+  marketContext: { btcRet, ethRet, universeMedianRet, atHorizon },   // trailing closed bars only
+  scoutSignals,                             // PARITY: {zVol, zRet, extensionPct} via the SHARED live core.
+                                            // CONTEXT: the string 'UNAVAILABLE_ON_CONTEXT_TRACK'.
+  nearMissDetail?,                          // NEAR_MISS only: promotionScore/threshold/distance, failed/passed requirements
+  samplingMeta?,                            // BASELINE only: {stratum, inclusionProbability, seed}
+  externalSignals: { rumint, gateway },     // UNAVAILABLE_HISTORICALLY
+  microstructure: { absorption, refill, cancels, aggressionImbalance },  // UNKNOWN_HISTORICALLY unless trades-enriched
+  dataAvailability: { <field>: KNOWN|UNKNOWN|UNAVAILABLE },
+  provenance: { <field>: { source, sourceTs, availableTs, retrievedTs, kind: historical|live, form: raw|derived } },
+  setupClassification,                      // PARITY: RIPPLE | MISSED | NEAR_MISS | COOLDOWN_SUPPRESSED | BASELINE_SAMPLE
+                                            // CONTEXT: CONTEXT_SAMPLE — a context track can NEVER carry a wide-eye classification
+  split }                                   // DISCOVERY | EMBARGOED | VALIDATION (event-level, embargoed 4h around the boundary)
+```
+
+**Outcome** — `data/childhood/outcomes.jsonl`, written by the labeler only,
+keyed by observation id, never readable during Observation construction:
+
+```
+{ id, eventId,
+  mfe: {1m,3m,5m,15m,30m,1h,4h}, mae: {same},   // null where the track's resolution cannot honestly resolve the horizon
+  ret1hPct, ret4hPct,
+  moveAlreadySpentPct,                          // the frozen extensionPct at T (parity tracks only; else null) — trailing anchor,
+                                                // provably invariant to whatever the future does
+  moveRemainingPct,                             // MFE 1h
+  abnormalReturn: { vsBtc, vsEth, vsUniverseMedian },
+  outcomeTags[] }                               // multi-label, deterministic, numeric fields are the primary truth
+```
+
+**Outcome tags** (mechanical; precedence-free, independent predicates; FIZZLE
+only when nothing else applies): RUN (MFE₁ₕ≥2 ∧ ret₁ₕ≥1) · PUMP_LIKE
+(MFE₁ₕ≥3 ∧ ret₄ₕ≤0.5) · REVERSAL (MFE₁ₕ≥1.5 ∧ (ret₁ₕ≤−0.5 ∨ ret₄ₕ≤−0.5)) ·
+BETA_DRAG (ret₁ₕ≥1 ∧ abnormal-vs-median<0.3) · FIZZLE.
+
+---
+
 ## KNOWLEDGE TIME
 
-`sourceTs` is when a fact happened. `availableTs` is the earliest defensible
-moment it was **publicly observable**. They are different concepts and are
-never silently equated (an incident that began 10:01 but was first posted
-10:07 reaches replay at 10:07, not 10:01). Replay may consume a field only
-when `availableTs <= replayTs`; where the source cannot establish first
-public observability, the field is UNKNOWN/UNAVAILABLE for point-in-time
-reconstruction — never guessed. Applied to: OHLC bars (available at bar
-close), trades buckets (available when the bucket fully elapses), incident
-history (anchored at the first public status update), governance (proposal
-existence at creation; final scores and any lock claim at voting close;
-un-retrieved vote timelines → UNKNOWN).
+`sourceTs` = when a fact happened. `availableTs` = the earliest defensible
+moment it was **publicly observable**. Never silently equated. Replay
+consumes a field only when `availableTs ≤ replayTs`; unestablishable
+availability ⇒ the field is UNKNOWN/UNAVAILABLE, never guessed. Applied to:
+OHLC bars (knowable at bar close), trades buckets (at bucket elapse),
+incidents (at the **earliest** public publication timestamp across creation
+and every update — never array position), governance (proposal existence at
+creation; final scores and any lock analysis at voting close; each vote at
+its own public timestamp; un-retrieved timelines → UNAVAILABLE).
 
-## CLOSED-BAR REPLAY
+## CLOSED BARS, AT THE SOURCE
 
-An OHLCV candle does not reveal its intrabar sequence, so replay decisions
-use **fully closed bars only**: at 10:32:00 the replay may consume the
-closed 10:31 bar, never the still-forming one. The store's `asOf` views
-judge visibility by bar **close** time, and replay code consumes a forward
-iterator of closed bars — it never holds the store. No intrabar ordering is
-ever interpolated. Trades-level enrichment uses true trade timestamps.
+Kraken's REST OHLC ends with the current **uncommitted** candle. It is
+excluded at ingestion, defensively: the documented final row is dropped AND
+any row whose close time exceeds retrieval time is rejected as not yet
+knowable. `CandleStore` never sees an unfinished row. Visibility everywhere
+is judged by bar **close** time; intrabar ordering is never inferred.
 
-## OBSERVATION/OUTCOME WALL
+## LIVE/REPLAY PARITY (B-0B)
 
-Unchanged and strengthened: observation builders receive only the closed-bar
-iterator (the future is unreachable, not filtered); the labeler alone opens
-post-T history, into a separate file. Adversarially tested.
+Live Wide Eye is the source of truth for feature semantics. Live and
+parity replay share ONE pure calculation module (`survey/eyecore.js`):
 
-## EVENT CLUSTERING
+- **1m/5m returns and 15m extension at true minutes** — only a genuine
+  1-minute grid may produce them.
+- **volRate** = max(0, Δ rolling-24h base volume between consecutive 1m
+  samples), reconstructed from real 1m bars; **raw candle volume is never
+  called volRate**. Until a full 24h of prior samples exists: UNKNOWN,
+  zVol null, no signal.
+- **minSamples**: the exact live configured value. History gets no easier
+  standard.
+- **Ordering**: the current sample joins its baseline BEFORE the z-score is
+  computed — the live ordering, mirrored exactly. (Whether that ordering is
+  ideal is a separate, later question; B-0B changes nothing live.)
+- **7-day baseline retention**, identical pruner.
+- **Cooldown**: a co-fire inside `rippleCooldownMin` is archived as
+  `COOLDOWN_SUPPRESSED` with `wouldEmitLive=false` — never counted as a
+  live-equivalent RIPPLE; the cooldown timer refreshes only on emission,
+  as live does.
+- **Warm-up**: replay never has more trailing information at its first
+  scored point than live would; nothing scores before the 24h volume window
+  and the live minimum-sample baseline are both genuinely earned.
 
-Repeated triggers during one continuous episode share one `eventId`
-(deterministic rule: same symbol+track, successive trigger/near-miss
-observations within `max(30min, 2 bars)`; baselines stand alone). Future
-profitability plays no part in clustering. Analysis must distinguish
-observation counts from **unique event** counts; one event never splits
-across partitions.
+**Track roles.** Only `PARITY_SCOUT` (true 1m) may emit RIPPLE / MISSED /
+NEAR_MISS / COOLDOWN_SUPPRESSED. `CONTEXT_ONLY` (60m/15m/5m) exists for
+context, regime memory, and outcome labeling at horizons it honestly
+resolves — with tick-named features and no wide-eye output, ever.
 
-## SPLIT EMBARGO
+**NO-TRADE MINUTES.** Kraken 1m data omits minutes without trades; live Wide
+Eye still surveys them. The grid represents them as explicit
+`NO_TRADE_SAMPLING_POINT`s: last price carries unchanged, traded volume is
+zero, rolling-24h volume may decay, provenance distinguishes them from
+`REAL_OHLCVT_BAR`s. A sampling representation — never a fabricated trade.
 
-The maximum labeling horizon is 4h, so a DISCOVERY event's entire horizon
-must end **before** the nominal boundary: events whose window + 4h crosses
-it are **EMBARGOED** (archived, excluded from both learning populations).
-The manifest records nominal split, discovery-last-usable, embargo start/end,
-and validation-first-usable timestamps per track.
+**Parity source status:** `FAST_MEMORY_PARITY_STATUS =
+UNAVAILABLE_WITH_CURRENT_SOURCE`. REST 1m (~12h) is below the 24h volume
+warm-up; Kraken's downloadable OHLCVT (1m, full history) is distributed as a
+multi-GB Google Drive ZIP updated **quarterly**, so its freshest data ends at
+the prior quarter boundary and cannot cover a current 30-day window (nor is
+that retrieval operationally reasonable here). The parity engine is
+implemented and fixture-proven; a true parity childhood (≈8 days warm-up +
+30 days archive) awaits an adequate source. **No coarse-track substitute is
+permitted.**
+
+## EVENT CLUSTERING & SPLIT EMBARGO
+
+Repeated triggers within `max(30min, 2 bars)` share one `eventId`
+(deterministic; future-blind). Analysis distinguishes observations from
+unique events. One event never straddles partitions; a DISCOVERY event's
+full 4h labeling horizon must end before the nominal boundary, else
+EMBARGOED (archived, excluded from both). Boundaries recorded per track.
 
 ## NEAR MISSES
 
-A third population beside TRIGGER and BASELINE: observations at least 2/3 of
-the way to **every** live promotion gate that still failed one or more.
-Stored with promotionScore/threshold/distance and the exact failed/passed
-requirements — determined entirely from the frozen state at T; outcome
-information can never define a near miss. **No live threshold was changed to
-collect them.**
+≥2/3 of the way to every unchanged live gate, still failing at least one —
+with promotionScore/distance and exact failed/passed requirements, from the
+frozen T-state only. No threshold was changed to collect them.
 
-## OUTCOME TAGS
+## UNIVERSE / SURVIVORSHIP HONESTY
 
-Numeric outcome fields (MFE/MAE ladder, returns, abnormal returns, move
-spent/remaining) are the primary truth. Tags are multi-label convenience
-metadata with deterministic mechanical definitions — no narrative labeling:
+The pair list starts from TODAY's AssetPairs, so pairs delisted before today
+are invisible: `universeCoverageStatus =
+SURVIVORSHIP_LIMITED_CURRENT_PAIR_SET`, stated in plain English in the
+manifest. `TRADED_AT_TS` proves trading occurred at that timestamp — it does
+NOT prove online status or live-rules eligibility, which are historically
+unavailable → UNKNOWN. Today's universe is never projected backward as a
+claim of completeness.
 
-- **RUN**: MFE₁ₕ ≥ 2 and ret₁ₕ ≥ 1
-- **PUMP_LIKE**: MFE₁ₕ ≥ 3 and ret₄ₕ ≤ 0.5
-- **REVERSAL**: MFE₁ₕ ≥ 1.5 and (ret₁ₕ ≤ −0.5 or ret₄ₕ ≤ −0.5)
-- **BETA_DRAG**: ret₁ₕ ≥ 1 and abnormal-vs-universe-median < 0.3
-- **FIZZLE**: no other tag applies
+## GOVERNANCE HONESTY
 
-One outcome may validly carry several tags (a move can RUN in hour one and
-REVERSE by hour four). `moveAlreadySpent` anchors to the close of the last
-bar fully closed 15 minutes before replayTs — trailing information only,
-provably invariant to whatever the future does.
+Snapshot proposals are **paginated to exhaustion** (or a documented ceiling,
+manifested as a gap — never silent truncation). Vote timelines are retrieved
+where the public API serves them, each vote timestamped as its own
+availableTs; `QUORUM_REACHED_TS` is reconstructed deterministically where
+quorum and per-vote power permit. **`STATISTICALLY_NEAR_CERTAIN` is not
+produced** — the old final-margin heuristic was uncalibrated and is gone;
+inevitability is `INEVITABILITY_UNKNOWN` unless `MATHEMATICALLY_LOCKED` can
+actually be proven (it cannot, from Snapshot data alone). Descriptive final
+facts (margin, margin % of cast power, quorum met,
+`FINAL_MARGIN_DECISIVE_UNCALIBRATED`) are preserved as facts, never as
+probabilities. Tally: UNAVAILABLE (no keys).
 
 ## UNKNOWN DISCIPLINE
 
-Reinforced everywhere: no manufactured absorption, no cancel velocity
-inferred from OHLCV, no eligibility projected backward, no lock time
-estimated, no first-public timestamp substituted by event timestamp. No
-fallback converts UNKNOWN into YES or NO. A smaller honest childhood beats a
-larger fictional one.
+No manufactured absorption; no cancel velocity from OHLCV; no eligibility
+projected backward; no lock time estimated; no first-public timestamp
+substituted by event timestamp; no fallback converting UNKNOWN into YES or
+NO. A smaller honest childhood beats a larger fictional one.
 
-## REPRODUCIBILITY
+## THE WALL, IN CODE
 
-Every archive's manifest records schema/childhood/wide-eye/labeler/universe/
-provenance rule versions, source dataset identifiers and checksums, the
-deterministic random seed and sampling strata table, the code commit, split
-and embargo boundaries, counts by population/tag/availability, observation
-and unique-event counts, and known gaps — so "did Serpent improve, or did
-his childhood change?" is always answerable. Sampling is stratified
-(near-threshold / off-hours / market-moving / ordinary) with per-row
-inclusion probabilities stored; prevalence is never pretended. Superseded
-archives are renamed as development artifacts and never merged.
+Observation builders receive forward iterators / frozen grids — the future
+is structurally unreachable, not filtered. The labeler alone opens post-T
+history, into a separate file. Adversarially tested.
+
+## STAGING, VALIDATION, PROMOTION
+
+A new childhood builds in `data/childhood-staging-<runId>` while the
+authoritative archive stays untouched. A post-build validator checks parse
+integrity, id uniqueness, outcome references, wall violations, knowledge
+time, uncommitted-candle absence, event/split isolation, embargo rules,
+context-track output prohibition, governance honesty, manifest-vs-content
+counts, and schema version. **Promotion fails closed.** On success the old
+archive is superseded (clearly named, never merged); a failed promotion
+rolls back. The reproducibility manifest records versions, sources,
+checksums, seed, commit, boundaries, counts, parity status, and gaps — so
+"did Serpent improve, or did his childhood change?" is always answerable.
