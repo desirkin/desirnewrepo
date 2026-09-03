@@ -9,7 +9,7 @@
   },
   "timezone": "America/New_York",
   "paper": {
-    "bankrollUsd": 10000
+    "baseBalanceUsd": 100
   },
   "rumint": {
     "enabled": false

@@ -13,6 +13,7 @@ import { getEngineState } from '../state/machine.js';
 import { readCurrentBook, readTapeStatus, TAPE_STATES } from '../tape/store.js';
 import { bookFeatures } from '../tape/features.js';
 import { openPositions, allPredictions, allFills } from '../ledger/ledger.js';
+import { ledgerSummary } from '../ledger/summary.js';
 import { kill, cage, veto, clearLatches, isVetoed, readControls } from '../state/controls.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -195,6 +196,8 @@ const server = http.createServer((req, res) => {
       res.end(readFileSync(path.join(UI_DIR, 'index.html')));
     } else if (url.pathname === '/api/status') {
       json(res, 200, statusPayload());
+    } else if (url.pathname === '/api/ledger/summary') {
+      json(res, 200, ledgerSummary()); // read-only: computed from disk, changes nothing
     } else if (url.pathname.startsWith('/api/coin/')) {
       json(res, 200, coinPayload(url.pathname.split('/')[3]?.toUpperCase() ?? ''));
     } else {

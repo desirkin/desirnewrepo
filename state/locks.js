@@ -42,7 +42,7 @@ function readSimulatedPnl(date) {
 export function dailyLockStatus(date = sessionDate()) {
   const config = loadConfig();
   const sim = readSimulatedPnl(date);
-  const bankroll = config.paper.bankrollUsd;
+  const bankroll = config.paper.baseBalanceUsd;
   const pnlUsd = sim ? (sim.pnlPct / 100) * bankroll : realizedPnlUsd(date);
   const pnlPct = (pnlUsd / bankroll) * 100;
   const level = lockLevelForPnlPct(pnlPct, config.locks);

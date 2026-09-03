@@ -136,6 +136,7 @@
   #btnCage  { color: #ffb454; border: 1px solid #7a5526; }
   #btnVeto  { color: #69d2ff; border: 1px solid #2a5a78; }
   #btnClear { color: #9fb4c8; border: 1px solid #3a4a62; }
+  #btnLedger { color: #7fc7de; border: 1px solid #2c4a5c; } /* neutral slate-cyan: display, not danger */
   #controls button.armed { color: #06090f; }
   #btnKill.armed  { background: #ff6b52; box-shadow: 0 0 16px rgba(255,107,82,.7); }
   #btnCage.armed  { background: #ffb454; box-shadow: 0 0 16px rgba(255,180,84,.7); }
@@ -183,6 +184,43 @@
   #card .drow .ask { background: #b0543f; }
   #card .drow .mid { width: 46px; text-align: center; letter-spacing: .1em; flex: none; }
   #card .demoNote { margin-top: 10px; font-size: 10px; color: #b8860b; letter-spacing: .14em; }
+
+  /* ============ ledger panel (read-only; can never place or cancel anything) ============ */
+  #ledger {
+    position: fixed; left: 50%; bottom: -110%; transform: translateX(-50%);
+    width: min(94vw, 430px); max-height: 80vh; overflow-y: auto; z-index: 70;
+    background: rgba(7, 12, 24, .94); border: 1px solid #29394f; border-radius: 16px 16px 0 0;
+    padding: 16px 18px calc(20px + env(safe-area-inset-bottom));
+    transition: bottom .35s cubic-bezier(.3,.9,.3,1); backdrop-filter: blur(10px);
+  }
+  #ledger.open { bottom: 0; }
+  #ledger h2 { font-size: 13px; letter-spacing: .34em; color: #7fc7de; }
+  #ledger .close { position: absolute; top: 10px; right: 14px; color: var(--dim); font-size: 18px; cursor: pointer; }
+  #ledger .net { margin-top: 10px; font-size: clamp(20px, 6vw, 26px); font-weight: 700;
+                 font-variant-numeric: tabular-nums; letter-spacing: .04em; }
+  #ledger .net .pos, #ledger .trow .pos { color: #4fd598; }
+  #ledger .net .neg, #ledger .trow .neg { color: #ff7a6b; }
+  #ledger .line { margin-top: 6px; font-size: 12px; color: var(--ink); opacity: .85;
+                  font-variant-numeric: tabular-nums; letter-spacing: .06em; }
+  #ledger .line span { color: var(--dim); }
+  #ledger .trades { margin-top: 12px; border-top: 1px solid #1c2942; }
+  #ledger .trow { display: flex; gap: 8px; align-items: baseline; padding: 7px 0;
+                  border-bottom: 1px solid #14203a; font-size: 11px;
+                  font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #ledger .trow .t { color: var(--dim); width: 66px; flex: none; }
+  #ledger .trow .sym { width: 44px; flex: none; font-weight: 600; }
+  #ledger .trow .px { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+  #ledger .trow .net { margin: 0 0 0 auto; font-size: 11px; font-weight: 700; flex: none; }
+  #ledger .trow .wl { width: 12px; flex: none; text-align: center; }
+  #ledger .trow .rsn { color: var(--dim); font-size: 9px; letter-spacing: .08em; flex: none; }
+  #ledger .symstrip { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  #ledger .symstrip div { font-size: 10px; letter-spacing: .1em; padding: 4px 9px; border-radius: 12px;
+                          border: 1px solid #22334c; color: var(--dim); font-variant-numeric: tabular-nums; }
+  #ledger .fees { margin-top: 12px; font-size: 11px; letter-spacing: .18em; color: #c7a15a; }
+  #ledger .empty { margin: 18px 0 8px; text-align: center; }
+  #ledger .empty .big { font-size: 14px; letter-spacing: .18em; color: var(--ink); }
+  #ledger .empty .sub { margin-top: 8px; font-size: 11px; color: var(--dim); letter-spacing: .12em; }
+  #ledger .openpos { margin-top: 10px; border-top: 1px solid #1c2942; padding-top: 6px; }
 
   /* ============ boot ============ */
   #boot { position: fixed; inset: 0; background: #01030a; z-index: 100;
@@ -238,6 +276,13 @@
   <button id="btnCage">CAGE</button>
   <button id="btnVeto" hidden>VETO</button>
   <button id="btnClear" hidden>CLEAR</button>
+  <button id="btnLedger">LEDGER</button>
+</div>
+
+<div id="ledger">
+  <div class="close">✕</div>
+  <h2>LEDGER</h2>
+  <div id="ledgerBody"></div>
 </div>
 <button id="motion" title="Toggle reduced motion">≋ MOTION</button>
 <div id="demobadge" title="Tap to exit demo">DEMO</div>
@@ -492,6 +537,67 @@ function openVetoSheet() {
   $('#card').classList.add('open');
 }
 
+/* ---------- ledger panel: read-only mirror of the paper ledger ---------- */
+const fmt$ = (v) => (v < 0 ? '-$' : '$') + Math.abs(v).toFixed(2);
+const fmtPct = (v) => (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
+const cls = (v) => (v >= 0 ? 'pos' : 'neg');
+function renderLedger(L) {
+  const b = $('#ledgerBody');
+  if (!L) { b.innerHTML = '<div class="line"><span>ledger unreadable — shell link lost</span></div>'; return; }
+  if (L.totalTrades === 0 && !L.openPositions.length) {
+    b.innerHTML = `
+      <div class="net">$${L.startingBalance.toFixed(2)} <span style="color:var(--dim)">— untouched</span></div>
+      <div class="empty">
+        <div class="big">NO STRIKES YET</div>
+        <div class="sub">the snake declines bad meals</div>
+        <div class="sub">ON WATCH · ${L.daysOnWatch} SESSION${L.daysOnWatch === 1 ? '' : 'S'}</div>
+      </div>`;
+    return;
+  }
+  const rows = L.lastTrades.map((t) => `
+    <div class="trow">
+      <span class="t">${t.etTime}</span>
+      <span class="sym">${t.symbol}</span>
+      <span class="px">$${t.sizeUsd} · ${t.entry.toPrecision(6)}→${t.exit.toPrecision(6)}</span>
+      <span class="net ${cls(t.netUsd)}">${fmt$(t.netUsd)}</span>
+      <span class="wl ${cls(t.netUsd)}">${t.result}</span>
+      <span class="rsn">${t.exitReason}</span>
+    </div>`).join('');
+  const syms = Object.entries(L.perSymbol).map(([sym, p]) =>
+    `<div>${sym} · ${p.trades} · <span class="${cls(p.netUsd)}" style="color:${p.netUsd >= 0 ? '#4fd598' : '#ff7a6b'}">${fmt$(p.netUsd)}</span></div>`).join('');
+  const openRows = L.openPositions.map((p) => `
+    <div class="trow">
+      <span class="sym">${p.symbol}</span>
+      <span class="px">OPEN · $${p.sizeUsd} @ ${p.entry.toPrecision(6)} · mark ${p.mark ? p.mark.toPrecision(6) : '—'}</span>
+      <span class="net ${p.unrealizedUsd == null ? '' : cls(p.unrealizedUsd)}">${p.unrealizedUsd == null ? 'UNAVAIL' : fmt$(p.unrealizedUsd)}</span>
+    </div>`).join('');
+  const stats = [
+    L.avgWinUsd != null ? `avg W <b>${fmt$(L.avgWinUsd)}</b>` : null,
+    L.avgLossUsd != null ? `avg L <b>${fmt$(L.avgLossUsd)}</b>` : null,
+    L.largestWinUsd != null ? `best <b>${fmt$(L.largestWinUsd)}</b>` : null,
+    L.largestLossUsd != null ? `worst <b>${fmt$(L.largestLossUsd)}</b>` : null,
+  ].filter(Boolean).join(' <span>·</span> ');
+  b.innerHTML = `
+    <div class="net">$${L.startingBalance.toFixed(2)} → $${L.currentBalance.toFixed(2)}
+      <span class="${cls(L.netPnl.usd)}">· ${fmtPct(L.netPnl.pct)}</span></div>
+    <div class="line"><span>TODAY</span> <span class="${cls(L.todayPnl.usd)}" style="color:${L.todayPnl.usd >= 0 ? '#4fd598' : '#ff7a6b'}">${fmt$(L.todayPnl.usd)} (${fmtPct(L.todayPnl.pct)})</span></div>
+    <div class="line">${L.wins}W – ${L.losses}L <span>·</span> win rate ${L.winRatePct != null ? L.winRatePct.toFixed(0) + '%' : '—'}</div>
+    ${stats ? `<div class="line">${stats}</div>` : ''}
+    ${openRows ? `<div class="openpos">${openRows}</div>` : ''}
+    <div class="trades">${rows}</div>
+    ${syms ? `<div class="symstrip">${syms}</div>` : ''}
+    <div class="fees">COSTS PAID ${fmt$(L.totalFeesPaid)}</div>`;
+}
+async function refreshLedger() {
+  try {
+    renderLedger(await (await fetch('/api/ledger/summary', { cache: 'no-store' })).json());
+  } catch {
+    renderLedger(null);
+  }
+}
+$('#btnLedger').addEventListener('click', () => { $('#ledger').classList.add('open'); refreshLedger(); });
+$('#ledger .close').addEventListener('click', () => $('#ledger').classList.remove('open'));
+
 function renderStatus(s) {
   lastStatus = s;
   universeCheck(s.universe);
@@ -526,6 +632,7 @@ async function poll() {
   try {
     const s = await (await fetch('/api/status', { cache: 'no-store' })).json();
     renderStatus(s);
+    if ($('#ledger').classList.contains('open')) refreshLedger(); // piggyback, no extra loop
   } catch {
     const dot = $('#tapedot'); dot.className = ''; dot.classList.add('LOST');
     $('#tapetext').textContent = 'SHELL LINK LOST';
@@ -586,6 +693,7 @@ async function openCard(coin) {
 $('#card .close').addEventListener('click', () => $('#card').classList.remove('open'));
 $('#scene').addEventListener('click', (e) => {
   if (!e.target.closest('.planet') && !e.target.closest('#card')) $('#card').classList.remove('open');
+  if (!e.target.closest('#ledger')) $('#ledger').classList.remove('open');
 });
 
 /* ---------- demo mode: staged tour, sealed off from all real state ---------- */
