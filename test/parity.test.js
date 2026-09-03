@@ -378,6 +378,74 @@ test('PROVENANCE CLOCKS — KNOWN microstructure carries the Trades clock; UNKNO
   }
 });
 
+// ---------------------------------------------------------------------
+// B-0B.2A §8/§9 — EXACT DEPENDENCY CLOCKS: target retrieved 10:00, BTC
+// 10:04, ETH 10:05, actual median contributors through 10:06; an unrelated
+// symbol on the same track was fetched at 10:12 and contributed nothing.
+// ---------------------------------------------------------------------
+const CLOCKS = {
+  target: '2026-09-03T10:00:00.000Z',
+  btc: '2026-09-03T10:04:00.000Z',
+  eth: '2026-09-03T10:05:00.000Z',
+  contributorsLatest: '2026-09-03T10:06:00.000Z',
+  unrelated: '2026-09-03T10:12:00.000Z',
+};
+
+const exactDepContext = (medianDeps) => () => ({
+  btcRet: 0.001,
+  ethRet: 0.0008,
+  universeMedianRet: 0.003,
+  atHorizon: '1tick-trailing-closed-bar',
+  dependencies: {
+    btcRet: { contributors: ['BTC'], retrievedTs: CLOCKS.btc },
+    ethRet: { contributors: ['ETH'], retrievedTs: CLOCKS.eth },
+    universeMedianRet: medianDeps,
+  },
+});
+
+test('EXACT DEPENDENCIES — false lateness: an unrelated 10:12 source cannot delay the marketContext clock', () => {
+  const obs = replayParity({
+    minuteSamples: buildMinuteGrid(rowsOf(2000, (i) => 100 + 0.01 * (i % 9), (i) => 10 + (i % 7))),
+    symbol: 'TST',
+    cfg: CFG,
+    // the 10:12 symbol is NOT among the actual contributors
+    contextAt: exactDepContext({ contributors: ['AAA', 'BTC', 'ETH', 'TST'], contributorCount: 4, eligibleCandidateCount: 5, retrievedTs: CLOCKS.contributorsLatest }),
+    retrievedTs: CLOCKS.target,
+    contextRetrievedTs: CLOCKS.unrelated, // the coarse track-wide max — must be IGNORED when exact deps exist
+  });
+  assert.ok(obs.length > 0);
+  for (const o of obs) {
+    const p = o.provenance.marketContext;
+    assert.equal(p.retrievedTs, CLOCKS.contributorsLatest); // 10:06 — NOT 10:12, NOT 10:00
+    assert.ok(!p.sourceInputs.includes('ZZZ'), 'a non-contributor leaked into sourceInputs');
+    assert.deepEqual(p.sourceInputs, ['AAA', 'BTC', 'ETH', 'TST']); // the exact dependency set
+    // per-component clocks preserved for finer reasoning later (§10)
+    assert.equal(p.components.btcRet.retrievedTs, CLOCKS.btc);
+    assert.equal(p.components.ethRet.retrievedTs, CLOCKS.eth);
+    assert.equal(p.components.universeMedianRet.contributorCount, 4);
+    assert.equal(p.components.universeMedianRet.eligibleCandidateCount, 5);
+    assert.equal(o.provenance.priceState.retrievedTs, CLOCKS.target); // target keeps its own clock
+    assert.ok(!('dependencies' in o.marketContext)); // values stay values; metadata lives in provenance
+  }
+});
+
+test('EXACT DEPENDENCIES — true late contributor: when the 10:12 source ACTUALLY contributes, the clock waits for it', () => {
+  const obs = replayParity({
+    minuteSamples: buildMinuteGrid(rowsOf(2000, (i) => 100 + 0.01 * (i % 9), (i) => 10 + (i % 7))),
+    symbol: 'TST',
+    cfg: CFG,
+    contextAt: exactDepContext({ contributors: ['AAA', 'BTC', 'ETH', 'TST', 'ZZZ'], contributorCount: 5, eligibleCandidateCount: 5, retrievedTs: CLOCKS.unrelated }),
+    retrievedTs: CLOCKS.target,
+  });
+  assert.ok(obs.length > 0);
+  for (const o of obs) {
+    const p = o.provenance.marketContext;
+    assert.ok(Date.parse(p.retrievedTs) >= Date.parse(CLOCKS.unrelated), 'an actual late contributor must move the clock');
+    assert.equal(p.retrievedTs, CLOCKS.unrelated);
+    assert.ok(p.sourceInputs.includes('ZZZ')); // now it IS a dependency, and says so
+  }
+});
+
 test('deriveProvenance: latest valid input clock wins; nothing retrieved -> NOT_RETRIEVED', () => {
   const p = deriveProvenance({
     source: 'composite',

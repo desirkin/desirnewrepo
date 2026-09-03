@@ -108,14 +108,19 @@ for (const coin of config.universe) {
 }
 
 // ---- per-track trailing context (closed-bar keyed) + labeler-only forward median
-function buildContextFns(trackStores, intervalSec) {
-  const perTs = new Map();
+// EXACT DEPENDENCY CLOCKS (B-0B.2A): contextAt reports, per component, the
+// exact source observations that ACTUALLY contributed to that value at that
+// timestamp — with each contributor's own retrieval clock. A symbol fetched
+// on the track but excluded from the median (no valid point-in-time value)
+// is NOT a dependency and cannot delay the derived clock.
+function buildContextFns(trackStores, intervalSec, trackRetrievalIso) {
+  const perTs = new Map(); // closeTs -> [{symbol, r}]
   for (const s of trackStores.values()) {
     for (let i = 1; i < s.candles.length; i++) {
       const r = retBetween(s.candles[i][4], s.candles[i - 1][4]);
       if (r === null) continue;
       const closeTs = s.candles[i][0] + intervalSec;
-      (perTs.get(closeTs) ?? perTs.set(closeTs, []).get(closeTs)).push(r);
+      (perTs.get(closeTs) ?? perTs.set(closeTs, []).get(closeTs)).push({ symbol: s.symbol, r });
     }
   }
   const median = (arr) => {
@@ -130,12 +135,35 @@ function buildContextFns(trackStores, intervalSec) {
     if (i < 1) return null;
     return retBetween(s.candles[i][4], s.candles[i - 1][4]);
   };
-  const contextAt = (closeTs) => ({
-    btcRet: tick('BTC', closeTs),
-    ethRet: tick('ETH', closeTs),
-    universeMedianRet: median(perTs.get(closeTs)),
-    atHorizon: '1tick-trailing-closed-bar',
-  });
+  const iso = (sym) => trackRetrievalIso.get(sym);
+  const contextAt = (closeTs) => {
+    const entries = perTs.get(closeTs) ?? [];
+    const btcRet = tick('BTC', closeTs);
+    const ethRet = tick('ETH', closeTs);
+    const med = median(entries.map((e) => e.r));
+    const contributors = entries.map((e) => e.symbol).sort();
+    return {
+      btcRet,
+      ethRet,
+      universeMedianRet: med,
+      atHorizon: '1tick-trailing-closed-bar',
+      // per-component exact dependency sets; only ACTUAL contributors vote
+      // in the derived clock (B-0B.2A §1-§6)
+      dependencies: {
+        btcRet: btcRet !== null ? { contributors: ['BTC'], retrievedTs: iso('BTC') } : 'UNAVAILABLE',
+        ethRet: ethRet !== null ? { contributors: ['ETH'], retrievedTs: iso('ETH') } : 'UNAVAILABLE',
+        universeMedianRet:
+          med !== null
+            ? {
+                contributors,
+                contributorCount: contributors.length,
+                eligibleCandidateCount: trackStores.size,
+                retrievedTs: latestRetrievedTs(contributors.map(iso)),
+              }
+            : 'UNAVAILABLE',
+      },
+    };
+  };
   const fwdCache = new Map();
   const median1hAt = (ts) => {
     if (fwdCache.has(ts)) return fwdCache.get(ts);
@@ -176,12 +204,11 @@ for (const t of TRACKS) {
   const trackStores = stores.get(t.intervalMin);
   if (!trackStores.size) continue;
   const intervalSec = t.intervalMin * 60;
-  const { contextAt, median1hAt } = buildContextFns(trackStores, intervalSec);
+  // contextAt carries exact per-component dependency clocks (B-0B.2A); no
+  // coarse track-wide context clock exists any more — only actual
+  // contributors vote in each derived field's retrieval time.
+  const { contextAt, median1hAt } = buildContextFns(trackStores, intervalSec, retrievalIso.get(t.intervalMin));
   const trackName = `${t.intervalMin}m`;
-  // marketContext is built from EVERY store on this track (BTC/ETH/universe
-  // median), so its provenance clock is the LATEST retrieval among all of
-  // them — never the target symbol's earlier fetch (B-0B.2 §3).
-  const contextRetrievedTs = latestRetrievedTs([...retrievalIso.get(t.intervalMin).values()]);
   const allObs = [];
   for (const [coin, store] of trackStores) {
     if (t.role === 'PARITY_SCOUT') {
@@ -193,7 +220,6 @@ for (const t of TRACKS) {
           cfg: wideCfg,
           contextAt,
           retrievedTs: retrievalIso.get(t.intervalMin).get(coin),
-          contextRetrievedTs,
           aggression: agg ? { imbalance: agg.imbalance, bucketSec: 900, retrievedTs: agg.retrievedTs } : null,
         })
       );
@@ -206,7 +232,6 @@ for (const t of TRACKS) {
           track: trackName,
           contextAt,
           retrievedTs: retrievalIso.get(t.intervalMin).get(coin),
-          contextRetrievedTs,
         })
       );
     }

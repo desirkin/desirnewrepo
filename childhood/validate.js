@@ -6,7 +6,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { MAX_HORIZON_SEC } from './splits.js';
 
 export const EXPECTED_SCHEMA_VERSION = 'childhood-observation-3-b0b';
-export const CHILDHOOD_VERSION = 'B0B.2'; // the hardened generation this validator enforces
+export const CHILDHOOD_VERSION = 'B0B.2A'; // the hardened generation this validator enforces
 const FORBIDDEN_IN_OBS = ['mfe', 'mae', 'outcomeTags', 'label', 'moveRemainingPct', 'abnormalReturn', 'outcome'];
 // incident FACT records must never carry the future (B-0B.1 §8)
 const FORBIDDEN_IN_INCIDENT = ['historicalOutcomes', 'outcomes', 'ret1hPct', 'ret4hPct', 'mfe1hPct', 'mae1hPct'];
@@ -124,17 +124,67 @@ export function validateChildhood(dir) {
       errors.push(`observation ${o.id} claims retrieval before source retrieval`);
     }
 
-    // DERIVED CLOCK TRUTH (B-0B.2 §7): a derived field's retrieval time is
-    // chronologically defensible against its actual source dependencies.
-    // marketContext is built from EVERY source on its track — its clock may
-    // not precede the LATEST of them.
-    const trackMax = trackLatestRetrieval.get(o.track);
-    const mcRetrieved = Date.parse(o.provenance?.marketContext?.retrievedTs);
-    if (o.provenance?.marketContext && trackMax) {
-      if (!Number.isFinite(mcRetrieved)) {
-        errors.push(`observation ${o.id} marketContext retrievedTs is not a parseable timestamp`);
-      } else if (mcRetrieved < trackMax * 1000) {
-        errors.push(`observation ${o.id} marketContext claims retrieval before its latest source input`);
+    // DERIVED CLOCK TRUTH (B-0B.2 §7, exact dependencies B-0B.2A §7):
+    // a derived field's retrieval time is chronologically defensible against
+    // the sources that ACTUALLY contributed — not earlier than any actual
+    // contributor, and not inherited from a later source that contributed
+    // nothing. Only actual contributors get a vote in the clock.
+    const mc = o.provenance?.marketContext;
+    const mcRetrieved = Date.parse(mc?.retrievedTs);
+    if (mc?.components) {
+      const union = new Set();
+      let contributorMaxMs = null;
+      for (const [name, comp] of Object.entries(mc.components)) {
+        if (comp === 'UNAVAILABLE') continue;
+        if (!Array.isArray(comp.contributors) || !comp.contributors.length) {
+          errors.push(`observation ${o.id} marketContext component ${name} lists no contributors`);
+          continue;
+        }
+        if (comp.contributorCount !== undefined && comp.contributorCount !== comp.contributors.length) {
+          errors.push(`observation ${o.id} marketContext component ${name} contributorCount does not match its contributor list`);
+        }
+        let compMaxMs = null;
+        for (const sym of comp.contributors) {
+          union.add(sym);
+          const srcSec = sourceRetrieval.get(`${o.track}:${sym}`);
+          if (!srcSec) {
+            errors.push(`observation ${o.id} marketContext component ${name} lists contributor ${sym} with no source record`);
+            continue;
+          }
+          compMaxMs = Math.max(compMaxMs ?? 0, srcSec * 1000);
+        }
+        if (compMaxMs !== null) {
+          contributorMaxMs = Math.max(contributorMaxMs ?? 0, compMaxMs);
+          const compRetrieved = Date.parse(comp.retrievedTs);
+          if (!Number.isFinite(compRetrieved) || compRetrieved !== compMaxMs) {
+            errors.push(`observation ${o.id} marketContext component ${name} clock does not match its actual contributors`);
+          }
+        }
+      }
+      // sourceInputs must be EXACTLY the contributor union (B-0B.2A §5)
+      const inputs = new Set(mc.sourceInputs ?? []);
+      if (inputs.size !== union.size || [...union].some((s) => !inputs.has(s))) {
+        errors.push(`observation ${o.id} marketContext sourceInputs do not match the actual contributor set`);
+      }
+      if (contributorMaxMs !== null) {
+        if (!Number.isFinite(mcRetrieved)) {
+          errors.push(`observation ${o.id} marketContext retrievedTs is not a parseable timestamp`);
+        } else if (mcRetrieved < contributorMaxMs) {
+          errors.push(`observation ${o.id} marketContext claims retrieval before its latest actual contributor`);
+        } else if (mcRetrieved > contributorMaxMs) {
+          errors.push(`observation ${o.id} marketContext inherits a retrieval clock later than its actual contributors`);
+        }
+      }
+    } else if (mc) {
+      // no exact dependency metadata (legacy/fixture shape): conservative
+      // track-wide bound still applies
+      const trackMax = trackLatestRetrieval.get(o.track);
+      if (trackMax) {
+        if (!Number.isFinite(mcRetrieved)) {
+          errors.push(`observation ${o.id} marketContext retrievedTs is not a parseable timestamp`);
+        } else if (mcRetrieved < trackMax * 1000) {
+          errors.push(`observation ${o.id} marketContext claims retrieval before its latest source input`);
+        }
       }
     }
     // KNOWN microstructure came from a Trades retrieval with its own clock —

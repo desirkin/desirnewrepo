@@ -126,14 +126,25 @@ retrieval. `sourceTs`, `availableTs` and `retrievedTs` keep their three
 distinct meanings; the validator rejects an archive whose observations
 claim retrieval before their source was actually retrieved.
 
-**Provenance clocks are closed (B-0B.2).** *A derived field may not claim a
-retrieval timestamp earlier than any source input required to construct
-that field.* Concretely:
+**Provenance clocks are closed (B-0B.2, exact dependencies B-0B.2A).**
+*A derived field may not claim a retrieval timestamp earlier than any
+source input actually required to construct that field, and must not
+inherit a later timestamp from source inputs that did not contribute to
+that field.* Truthful memory means both: not before it was knowable, and
+not artificially after it was knowable. Only actual contributors get a
+vote in the clock. Concretely:
 
 - priceState/volumeState carry the target symbol's OWN OHLC retrieval time;
-- marketContext is derived from cross-symbol sources (BTC, ETH, every
-  universe-median contributor), so its `retrievedTs` is the LATEST actual
-  retrieval among all of them — never the target's earlier fetch;
+- marketContext's clock is the LATEST retrieval among the sources that
+  ACTUALLY contributed at that timestamp: its provenance carries
+  per-component dependency metadata (`components.btcRet/ethRet/
+  universeMedianRet`, each with its exact contributor list and its own
+  clock; the median additionally records `contributorCount` and
+  `eligibleCandidateCount` — 37 valid contributors out of 50 candidates
+  means those 37, never all 50), `sourceInputs` is exactly the deduped
+  contributor union, and a symbol fetched later on the same track that
+  contributed nothing can never delay the derived clock. Unavailable
+  contributors stay UNAVAILABLE — never treated as zero, never a guess;
 - KNOWN microstructure derives from the separate Trades retrieval and
   carries the Trades clock (recorded per symbol in the manifest's
   `tradesCoverage`), never the earlier OHLC clock;
@@ -146,10 +157,15 @@ that field.* Concretely:
 - `childhood/provenance.js` (`deriveProvenance`) computes derived clocks as
   the latest valid input retrieval time and preserves input identity in
   `sourceInputs`;
-- the validator enforces this chronology: marketContext against the latest
-  candle-source retrieval of its track, KNOWN microstructure against the
-  manifest's Trades retrieval clock, and the manifest must identify
-  `childhoodVersion` as the enforced generation.
+- the validator enforces this chronology in BOTH directions: every listed
+  marketContext contributor must resolve to a real source record; each
+  component's clock must equal its actual contributors' latest retrieval;
+  the envelope clock must equal the latest actual contributor across
+  components (earlier = knew too soon, later = false lateness — both fail);
+  `sourceInputs` must match the actual contributor set; KNOWN
+  microstructure is checked against the manifest's Trades retrieval clock;
+  and the manifest must identify `childhoodVersion` as the enforced
+  generation.
 
 ## CLOSED BARS, AT THE SOURCE
 

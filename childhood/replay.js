@@ -84,6 +84,49 @@ const prov = (source, sourceTs, availableTs, retrievedTs, form = 'derived') => (
   form,
 });
 
+// marketContext provenance (B-0B.2A): when contextAt reports exact
+// per-component dependency sets, ONLY actual contributors vote in the
+// derived clock — the envelope retrievedTs is the latest clock among the
+// components actually used, per-component clocks are preserved, and
+// sourceInputs is the exact deduped contributor union. A source fetched on
+// the track that contributed to nothing cannot delay this field. Without
+// dependency metadata (fixtures), the coarse conservative fallback of
+// B-0B.2 applies.
+function marketContextProvenance(ctx, { sourceTs, availableTs, retrievedTs, contextRetrievedTs }) {
+  const dep = ctx.dependencies;
+  if (!dep) {
+    return deriveProvenance({
+      source: 'cross-symbol closed bars, trailing only',
+      sourceTs,
+      availableTs,
+      inputs: [retrievedTs, contextRetrievedTs],
+      sourceInputs: ['target OHLC', 'context-track OHLC (BTC/ETH/universe contributors)'],
+    });
+  }
+  const clocks = [];
+  const union = new Set();
+  const components = {};
+  for (const [name, d] of Object.entries(dep)) {
+    if (!d || d === 'UNAVAILABLE') {
+      components[name] = 'UNAVAILABLE';
+      continue;
+    }
+    components[name] = d;
+    clocks.push(d.retrievedTs);
+    for (const c of d.contributors) union.add(c);
+  }
+  return {
+    ...deriveProvenance({
+      source: 'cross-symbol closed bars, trailing only (exact contributors only)',
+      sourceTs,
+      availableTs: clocks.length ? availableTs : 'UNKNOWN',
+      inputs: clocks,
+      sourceInputs: [...union].sort(),
+    }),
+    components,
+  };
+}
+
 // ---- 1-minute sampling grid (B-0B §7). Kraken OHLCVT omits minutes with no
 // trades, but live Wide Eye still surveys every minute. Grid minutes without
 // a bar become explicit NO_TRADE_SAMPLING_POINTs: last price carries
@@ -186,7 +229,7 @@ export function replayParity({ minuteSamples, symbol, cfg, contextAt, retrievedT
       classification = 'NEAR_MISS';
     }
 
-    const ctx = contextAt(replayTs);
+    const { dependencies: ctxDependencies, ...ctx } = contextAt(replayTs);
     let samplingMeta;
     if (!population) {
       const stratum = baselineStratum({ zVol, zRet: zRet5, etHour: Number(hourKey.slice(11)), medianRet: ctx.universeMedianRet });
@@ -280,14 +323,11 @@ export function replayParity({ minuteSamples, symbol, cfg, contextAt, retrievedT
         ),
         volumeState: prov('rolling 24h sum of 1m traded volume (live-definition volRate)', replayTs, replayTs, retrievedTs),
         // marketContext is derived from CROSS-SYMBOL sources; its clock is
-        // the latest retrieval among everything actually used (B-0B.2 §1/§3)
-        marketContext: deriveProvenance({
-          source: 'cross-symbol closed bars, trailing only',
-          sourceTs: replayTs,
-          availableTs: replayTs,
-          inputs: [retrievedTs, contextRetrievedTs],
-          sourceInputs: ['target OHLC', 'context-track OHLC (BTC/ETH/universe contributors)'],
-        }),
+        // the latest retrieval among the sources ACTUALLY used (B-0B.2/2A)
+        marketContext: marketContextProvenance(
+          { ...ctx, dependencies: ctxDependencies },
+          { sourceTs: replayTs, availableTs: replayTs, retrievedTs, contextRetrievedTs }
+        ),
         scoutSignals: prov('shared eyecore (live ordering, live minSamples)', replayTs, replayTs, retrievedTs),
         // never retrieved -> NO retrieval clock is invented (B-0B.2 §5)
         externalSignals: prov('none (no historical RUMINT/gateway archive exists)', 'UNKNOWN', 'UNKNOWN', NOT_RETRIEVED, 'raw'),
@@ -324,7 +364,7 @@ export function replayContext({ replayViews, symbol, intervalSec, track, context
     const retTick1 = retBetween(close, prevCloses.at(-2));
     const retTick5 = prevCloses.length >= 6 ? retBetween(close, prevCloses[0]) : null;
 
-    const ctx = contextAt(replayTs);
+    const { dependencies: ctxDependencies, ...ctx } = contextAt(replayTs);
     const hourKey = etHourKey(new Date(replayTs * 1000));
     const stratum = baselineStratum({ zVol: null, zRet: null, etHour: Number(hourKey.slice(11)), medianRet: ctx.universeMedianRet });
     const d = sampleDecision({ symbol, ts: replayTs, stratum });
@@ -368,13 +408,10 @@ export function replayContext({ replayViews, symbol, intervalSec, track, context
       provenance: {
         priceState: prov(`kraken REST OHLC ${track} (closed bar)`, bar[0], replayTs, retrievedTs, 'raw'),
         volumeState: prov(`kraken REST OHLC ${track} raw bar volume (context only)`, bar[0], replayTs, retrievedTs, 'raw'),
-        marketContext: deriveProvenance({
-          source: 'cross-symbol closed bars, trailing only',
-          sourceTs: bar[0],
-          availableTs: replayTs,
-          inputs: [retrievedTs, contextRetrievedTs],
-          sourceInputs: ['target OHLC', 'context-track OHLC (BTC/ETH/universe contributors)'],
-        }),
+        marketContext: marketContextProvenance(
+          { ...ctx, dependencies: ctxDependencies },
+          { sourceTs: bar[0], availableTs: replayTs, retrievedTs, contextRetrievedTs }
+        ),
         // UNAVAILABLE evidence still carries truthful provenance saying WHY
         // (B-0B.1 §3) — but never a fabricated retrieval clock (B-0B.2 §5).
         scoutSignals: prov('not computable on a context track (no live-definition features at this resolution)', 'UNKNOWN', 'UNKNOWN', NOT_RETRIEVED),

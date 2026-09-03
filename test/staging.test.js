@@ -291,10 +291,90 @@ test('OUTCOME ONE-TO-ONE: duplicate Outcome A + missing Outcome B is named and n
   assert.ok(v2.errors.some((e) => e.includes('outcomes (3) != observations (2)')));
 });
 
+// B-0B.2A §7 — EXACT DEPENDENCY VALIDATION: the validator independently
+// verifies derived marketContext clocks against the ACTUAL contributor set.
+// Fixture clocks: the only candle source (TST) was retrieved at 2000s.
+test('EXACT DEPENDENCY VALIDATION: contributor clocks are enforced in BOTH directions', () => {
+  const CONTRIB_CLOCK = '1970-01-01T00:33:20.000Z'; // 2000s — the TST candle retrieval
+  const exactMc = (over = {}) => ({
+    source: 'cross-symbol closed bars, trailing only (exact contributors only)',
+    sourceTs: 1000,
+    availableTs: 1000,
+    retrievedTs: CONTRIB_CLOCK,
+    kind: 'historical',
+    form: 'derived',
+    sourceInputs: ['TST'],
+    components: {
+      btcRet: 'UNAVAILABLE',
+      ethRet: 'UNAVAILABLE',
+      universeMedianRet: { contributors: ['TST'], contributorCount: 1, eligibleCandidateCount: 2, retrievedTs: CONTRIB_CLOCK },
+    },
+    ...over,
+  });
+  const withMc = (mc) => (f) =>
+    (f['observations.jsonl'] = jsonl([obsRow({ id: 1, provenance: { ...fullProvenance(), marketContext: mc } }), obsRow({ id: 2, eventId: 'e2' })]));
+
+  // exact provenance validates cleanly
+  const clean = makeStaging(withMc(exactMc()));
+  assert.deepEqual(validateChildhood(clean).errors, []);
+
+  const cases = [
+    // FALSE LATENESS: envelope claims 2400s though the only actual contributor was retrieved at 2000s
+    ['inherits a retrieval clock later than its actual contributors', exactMc({ retrievedTs: RETRIEVED })],
+    // knew too soon: envelope predates its contributor
+    ['claims retrieval before its latest actual contributor', exactMc({ retrievedTs: '1970-01-01T00:20:00.000Z' })],
+    // a listed contributor with no source record is unresolvable
+    [
+      'lists contributor GHOST with no source record',
+      exactMc({
+        components: {
+          btcRet: 'UNAVAILABLE',
+          ethRet: 'UNAVAILABLE',
+          universeMedianRet: { contributors: ['TST', 'GHOST'], contributorCount: 2, eligibleCandidateCount: 2, retrievedTs: CONTRIB_CLOCK },
+        },
+        sourceInputs: ['GHOST', 'TST'],
+      }),
+    ],
+    // sourceInputs must be exactly the contributor union — no padding
+    ['sourceInputs do not match the actual contributor set', exactMc({ sourceInputs: ['TST', 'ZZZ'] })],
+    // metadata must be internally consistent
+    [
+      'contributorCount does not match its contributor list',
+      exactMc({
+        components: {
+          btcRet: 'UNAVAILABLE',
+          ethRet: 'UNAVAILABLE',
+          universeMedianRet: { contributors: ['TST'], contributorCount: 3, eligibleCandidateCount: 5, retrievedTs: CONTRIB_CLOCK },
+        },
+      }),
+    ],
+    // a component clock that disagrees with its contributors' source records
+    [
+      'component universeMedianRet clock does not match its actual contributors',
+      exactMc({
+        components: {
+          btcRet: 'UNAVAILABLE',
+          ethRet: 'UNAVAILABLE',
+          universeMedianRet: { contributors: ['TST'], contributorCount: 1, eligibleCandidateCount: 2, retrievedTs: '1970-01-01T00:40:00.000Z' },
+        },
+      }),
+    ],
+  ];
+  for (const [needle, mc] of cases) {
+    const dir = makeStaging(withMc(mc));
+    const v = validateChildhood(dir);
+    assert.equal(v.ok, false, `"${needle}" was not caught`);
+    assert.ok(v.errors.some((e) => e.includes(needle)), `no error names "${needle}": ${JSON.stringify(v.errors)}`);
+    const auth = makeAuthoritative();
+    assert.equal(promoteStaging(dir, auth).promoted, false);
+    assert.equal(existsSync(path.join(auth, 'marker.json')), true);
+  }
+});
+
 // §19.20 SCHEMA CONTRACT — one authoritative schema, version-checked.
 test('SCHEMA CONTRACT: the single authoritative B-0B schema version is enforced', () => {
   assert.equal(EXPECTED_SCHEMA_VERSION, 'childhood-observation-3-b0b');
-  assert.equal(CHILDHOOD_VERSION, 'B0B.2'); // the hardened generation the manifest must report (B-0B.2 §11)
+  assert.equal(CHILDHOOD_VERSION, 'B0B.2A'); // the provenance-precision generation the manifest must report (B-0B.2A §13)
   const stale = makeStaging((f) => {
     f['manifest.json'] = f['manifest.json'].replace(EXPECTED_SCHEMA_VERSION, 'childhood-observation-2');
   });
