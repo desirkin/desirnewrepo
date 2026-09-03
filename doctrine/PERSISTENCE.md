@@ -99,6 +99,37 @@ actually noticed. A durable content conflict
 (`LEDGER_ID_CONTENT_CONFLICT`) also locks permission until manually
 resolved.
 
+## RESTRICTIVE STATE RECOVERS BY ITSELF (PERSIST-0B)
+
+A restrictive control action taken during a database outage becomes
+durable AUTOMATICALLY after recovery — no second human action, no restart,
+no republish. The pump runs `syncCurrentControls()` every cycle: local
+`controls.json` and the durable control row are both strictly validated,
+merged MOST RESTRICTIVE (kill/cage active anywhere is active everywhere;
+vetoes union), a durable restriction missing locally is adopted locally
+(this is also how a restriction propagates across overlapping instances —
+no leader election, just "another process discovered a durable
+restriction", which may never be ignored), and a local restriction missing
+durably is persisted transactionally with its revision tracked. While a
+restrictive snapshot remains pending (`pendingControlSync`), persistence
+health never claims complete durability. Disagreement never resolves
+toward more permission.
+
+## ONE CONTROL DOOR (PERSIST-0B)
+
+`persistence/control-plane.js` is THE control-coordination layer: the
+authenticated HTTP cockpit and the local CLI both walk through it, so the
+durable permission-increase gate cannot be bypassed by picking a different
+door. The requirement is DURABILITY, not HTTP authentication — the CLI
+keeps its local trust model. CLI KILL/CAGE/VETO: local latch FIRST, then
+durable attempt; failure leaves the restriction standing for the control
+sync. CLI CLEAR: persistence decision FIRST — outage, boot, and
+required-unconfigured all refuse; only explicit local-only development
+(no DATABASE_URL, durability not required) keeps documented local CLEAR.
+The simulated-P&L drill hook (`cobra state simulate`) is development-only:
+it refuses outright whenever durability is required (published
+deployment), with no override.
+
 ## THE CONTROL ASYMMETRY (non-negotiable)
 
 Permission-REDUCING (KILL/CAGE/VETO): applied to the current process
@@ -222,6 +253,17 @@ invalid durable Memory is withheld and counted. All durable queries are
 bounded (limit clamp 500, indexed by ts/symbol/module/event/cluster);
 there is no "select the lifetime of Memory into RAM."
 
+## PRODUCTION PREPARATION WARNING — SHARED DATABASE_URL (PERSIST-0B §18)
+
+**Remove the manually Shared DATABASE_URL before binding/provisioning the
+managed Production database. Development will continue receiving its
+managed Development DATABASE_URL; Production must receive its own managed
+Production DATABASE_URL.** A manually maintained Shared-scoped
+DATABASE_URL must never override Replit's environment-specific managed
+bindings — the accidental publish from `d6b1814` inherited exactly such a
+Shared value, could not resolve it, and (correctly) spent its life inside
+PERSISTENCE_PERMISSION_LOCK. The URL itself is never logged or printed.
+
 ## DEVELOPMENT vs PRODUCTION
 
 PERSIST-0 is exercised against DEVELOPMENT PostgreSQL only. Tests isolate
@@ -239,6 +281,27 @@ existing local `data/state`, `data/ledger`, `data/memory`, validates every
 record (Memory through the canonical validator), imports idempotently
 (re-run safe), refuses invalid rows, reports counts per subsystem, and
 deletes nothing.
+
+## RESTORED MEANS EVERYTHING STARTED (PERSIST-0B)
+
+`restored` becomes true only after connect, migrations, durable-state
+validation, restore/reconciliation AND the durability pump / current-state
+sync machinery have ALL initialized. Any startup failure leaves
+`restored=false` with the retry loop armed, and a configured/required
+durable process carrying an unresolved `failureCategory` can never have
+`permissionLock=false` — restored never launders a failure into
+permission. The row-locked CLEAR transaction revalidates the durable
+control row it is about to clear (a corrupt row refuses CLEAR, engages the
+integrity lock, and is never rewritten into permission), and the
+restrictive-snapshot path likewise never silently repairs or overwrites a
+malformed durable control row. Operational full-ledger restore is
+COMPLETE_VALID or locked: a withheld corrupt durable row (which could BE
+the open position), a runtime ledger id/content conflict, or unreadable
+local pending ledger evidence each engage the integrity/permission lock —
+missing or corrupt position history is never interpreted as "no
+position". The ephemeral pump cursor file is not durable truth: a
+malformed `cursors.json` is quarantined for audit and the spools replay
+from byte 0, idempotent identities collapsing the duplicates.
 
 ## SPOOL INTEGRITY IS HEALTH
 

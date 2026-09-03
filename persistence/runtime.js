@@ -71,6 +71,9 @@ function bootstrapApi() {
     durableConfirmedWrites: 0,
     spoolParseErrors: 0,
     pumpReadErrors: 0,
+    cursorRecoveries: 0,
+    integrityLock: false,
+    pendingControlSync: false,
   };
   return {
     booting: true,
@@ -97,7 +100,7 @@ function bootstrapApi() {
 let singleton = bootstrapApi();
 export const getPersistence = () => singleton;
 
-export async function startPersistence({ log = console.log, dbOverrides = {} } = {}) {
+export async function startPersistence({ log = console.log, dbOverrides = {}, _test = {} } = {}) {
   const db = new Db({ log, ...dbOverrides });
   const repo = new Repository(db, { log });
   const state = {
@@ -107,15 +110,17 @@ export async function startPersistence({ log = console.log, dbOverrides = {} } =
     migrationVersion: null,
     restored: false,
     failureCategory: null,
-    conflictLock: false,
+    integrityLock: false,
+    pendingControlSync: false,
     controlRevision: null,
     runtime: { posture: { digest: null, revision: null }, sim_pnl: { digest: null, revision: null } },
     resetCursorKeys: new Set(),
-    pump: { pendingWrites: 0, confirmedWrites: 0, spoolParseErrors: 0, pumpReadErrors: 0 },
+    pump: { pendingWrites: 0, confirmedWrites: 0, spoolParseErrors: 0, pumpReadErrors: 0, cursorRecoveries: 0 },
     retryTimer: null,
     pumpTimer: null,
     attemptInFlight: false,
     stopped: false,
+    _test,
   };
 
   // the fail-closed API is installed BEFORE anything can fail (§3)
@@ -153,9 +158,13 @@ async function attemptStartup(state, log) {
     const m = await runMigrations(state.db, { log });
     state.migrationVersion = m.schemaVersion;
     await restoreDurableCore(state, log);
+    // PERSIST-0B §7: restored may become TRUE only after ALL startup steps
+    // succeed, INCLUDING the durability pump / current-state sync machinery.
+    // "Restore reported true but durability machinery never started" is
+    // forbidden — a startPump failure leaves restored=false and retry armed.
+    startPump(state, log);
     state.restored = true;
     state.failureCategory = null;
-    startPump(state, log);
     log(`PERSISTENCE: durable core connected (schema ${state.migrationVersion}); restore complete; pump running`);
     return true;
   } catch (err) {
@@ -239,6 +248,7 @@ async function restoreDurableCore(state, log) {
   const merged = mostRestrictiveControls(durable?.state ?? {}, local);
   atomicWriteJson(controlsFile, merged, { pretty: true }); // local mirror follows the merged truth
   const saved = await repo.saveControlState(merged, durable?.revision ?? null);
+  if (saved.refused) throw new InvalidDurableStateError(`control restore refused: ${saved.reason}`);
   state.controlRevision = saved.revision;
   if (durable && canonicalJson(durable.state) !== canonicalJson(merged)) {
     log('PERSISTENCE reconciliation: control state merged toward MOST RESTRICTIVE');
@@ -368,7 +378,15 @@ const LEDGER_KINDS = [
 async function reconcileLedgerFiles(state, log) {
   const { repo } = state;
   for (const { kind, name, pumpKey, tsOf } of LEDGER_KINDS) {
-    const durableRows = await repo.loadLedgerAll(kind); // validated, chunked, complete
+    const durable = await repo.loadLedgerAll(kind); // validated, chunked, complete-or-reported
+    if (!durable.complete) {
+      // PERSIST-0B §12: a withheld corrupt durable row could BE the open
+      // position — the operational ledger is NOT safely restored; missing
+      // history is never interpreted as "no position"
+      state.integrityLock = true;
+      log(`PERSISTENCE INTEGRITY LOCK: ${durable.invalid} corrupt durable ${kind} row(s) — operational ledger restore INCOMPLETE; permission locked pending manual resolution`);
+    }
+    const durableRows = durable.rows;
     const file = path.join(dataDir(), 'ledger', name);
     const rawText = existsSync(file) ? readFileSync(file, 'utf8') : '';
     let malformed = 0;
@@ -400,13 +418,17 @@ async function reconcileLedgerFiles(state, log) {
       }
     }
     if (conflicts > 0) {
-      state.conflictLock = true;
+      state.integrityLock = true;
       repo.ledgerIdConflicts += conflicts;
-      log(`PERSISTENCE DEGRADED: ${conflicts} LEDGER_ID_CONTENT_CONFLICT in ${name} — first durable truth stands; permission locked pending manual resolution`);
+      log(`PERSISTENCE INTEGRITY LOCK: ${conflicts} LEDGER_ID_CONTENT_CONFLICT in ${name} — first durable truth stands; permission locked pending manual resolution`);
     }
     if (malformed + invalidLocal > 0) {
+      // PERSIST-0B §15: an unreadable local pending ledger row could be a
+      // prediction/fill/exit that never reached durable storage — never
+      // assumed to mean "no position"; evidence quarantined, permission locked
+      state.integrityLock = true;
       state.pump.spoolParseErrors += malformed + invalidLocal;
-      log(`PERSISTENCE DEGRADED: ${name} carried ${malformed} malformed + ${invalidLocal} invalid local rows — counted, quarantined, never invented`);
+      log(`PERSISTENCE INTEGRITY LOCK: ${name} carried ${malformed} malformed + ${invalidLocal} invalid local pending rows — quarantined, never invented, permission locked pending manual resolution`);
     }
     const mergedRows = [...byId.values()].sort((a, b) => String(tsOf(a)).localeCompare(String(tsOf(b))));
     const newText = mergedRows.map((r) => JSON.stringify(r)).join('\n') + (mergedRows.length ? '\n' : '');
@@ -435,7 +457,28 @@ function pumpSources() {
 
 function startPump(state, log) {
   if (state.pumpTimer) return; // recovery must never double the pump
-  const cursors = existsSync(CURSORS_FILE()) ? JSON.parse(readFileSync(CURSORS_FILE(), 'utf8')) : {};
+  if (state._test?.failPumpStart) throw new Error('injected pump bootstrap failure (test seam)');
+  // PERSIST-0B §8: the cursor file is ephemeral bookkeeping, NOT durable
+  // truth. A malformed cursor file is quarantined for audit and the spools
+  // replay from byte 0 — idempotent durable identities collapse the
+  // duplicates; positions are never invented and records are never lost.
+  let cursors = {};
+  if (existsSync(CURSORS_FILE())) {
+    const rawCursors = readFileSync(CURSORS_FILE(), 'utf8');
+    try {
+      const parsed = JSON.parse(rawCursors);
+      const numMap = (o) => o === undefined || (o !== null && typeof o === 'object' && Object.values(o).every((v) => Number.isInteger(v) && v >= 0));
+      if (parsed === null || typeof parsed !== 'object' || !numMap(parsed.offsets) || !numMap(parsed.lineCounts)) {
+        throw new Error('invalid cursor shape');
+      }
+      cursors = parsed;
+    } catch {
+      quarantineCopy(CURSORS_FILE(), rawCursors, log);
+      state.pump.cursorRecoveries++;
+      log('PERSISTENCE: cursors.json malformed — quarantined; replaying spools from byte 0 (idempotent identities collapse duplicates; no permission change)');
+      cursors = {};
+    }
+  }
   const tails = new Map();
   const lineCounts = { ...(cursors.lineCounts ?? {}) };
   for (const s of pumpSources()) {
@@ -468,14 +511,81 @@ function startPump(state, log) {
       const kind = { predictions: 'prediction', fills: 'fill', exits: 'exit' }[key];
       const r = await repo.upsertLedgerRow(kind, rec);
       if (r.invalid) {
-        // an invalid spool row is lost evidence, counted loudly — never
-        // invented, never repaired, never claimed durable
+        // PERSIST-0B §15: an unreadable possible position is never assumed
+        // to mean "no position" — evidence stays in the spool, permission locks
         state.pump.spoolParseErrors++;
-        log(`PERSISTENCE DEGRADED: invalid ${kind} spool row refused (${r.reason})`);
+        state.integrityLock = true;
+        log(`PERSISTENCE INTEGRITY LOCK: invalid ${kind} spool row refused (${r.reason})`);
       }
-      return true; // accepted, duplicate, conflict (counted) and invalid are all handled
+      if (r.conflict) {
+        // PERSIST-0B §14: a runtime LEDGER_ID_CONTENT_CONFLICT means the
+        // local synchronous ledger may disagree with durable first truth —
+        // permission locks IMMEDIATELY; the corrupt row is not retried forever
+        state.integrityLock = true;
+        log(`PERSISTENCE INTEGRITY LOCK: runtime LEDGER_ID_CONTENT_CONFLICT (${kind} ${rec.prediction_id}) — first durable truth stands; permission locked`);
+      }
+      return true; // accepted, duplicate, conflict (locked+counted) and invalid (locked+counted) are all handled
     }
     return true;
+  }
+
+  // PERSIST-0B §2 — current-control reconciliation on every pump cycle:
+  // a restrictive action whose immediate durable write failed becomes
+  // durable automatically after DB recovery (no second action, no restart),
+  // and a durable restriction discovered from another instance is adopted
+  // locally. MOST RESTRICTIVE STATE WINS in both directions, always.
+  async function syncCurrentControls() {
+    const file = path.join(dataDir(), 'state', 'controls.json');
+    let local = { kill: null, cage: null, vetoes: [] };
+    if (existsSync(file)) {
+      let ok = false;
+      try {
+        const parsed = JSON.parse(readFileSync(file, 'utf8'));
+        if (validateControlState(parsed).ok) {
+          local = parsed;
+          ok = true;
+        }
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        state.pump.spoolParseErrors++;
+        log('PERSISTENCE DEGRADED: local controls.json malformed/invalid — control sync withheld this cycle');
+        return;
+      }
+    }
+    try {
+      const durable = await state.repo.loadControlState();
+      if (durable?.invalid) {
+        state.integrityLock = true;
+        state.pendingControlSync = true;
+        log('PERSISTENCE INTEGRITY LOCK: durable control row invalid during sync — never read as CLEAR; manual resolution required');
+        return;
+      }
+      const merged = mostRestrictiveControls(durable?.state ?? {}, local);
+      if (canonicalJson(merged) !== canonicalJson(local)) {
+        // another instance (or an earlier outage) holds a restriction we
+        // lack locally: adopt it — a durable restriction is never ignored
+        atomicWriteJson(file, merged, { pretty: true });
+        log('PERSISTENCE control sync: durable restriction adopted locally (most restrictive wins)');
+      }
+      if (!durable || canonicalJson(merged) !== canonicalJson(durable.state)) {
+        const r = await state.repo.saveControlState(merged, durable?.revision ?? null);
+        if (r.refused) {
+          state.integrityLock = true;
+          state.pendingControlSync = true;
+          return;
+        }
+        state.controlRevision = r.revision;
+        log('PERSISTENCE control sync: local restriction persisted durably (revision advanced)');
+      } else {
+        state.controlRevision = durable.revision;
+      }
+      state.pendingControlSync = false;
+    } catch (err) {
+      state.pendingControlSync = true;
+      log(`PERSISTENCE: control sync not yet durable (${err.code ?? err.message}) — retried next cycle`);
+    }
   }
 
   // PERSIST-0A §7 — the durable CURRENT posture/lock snapshots must stay
@@ -529,6 +639,7 @@ function startPump(state, log) {
     if (!state.db.reachable) {
       if (!(await state.db.connect())) return; // spool holds; health shows pending
     }
+    await syncCurrentControls(); // protective state first, every cycle
     let pendingNow = 0;
     for (const s of pumpSources()) {
       const t = tails.get(s.key);
@@ -602,7 +713,8 @@ function api(state, log) {
       restored: state.restored,
       pump: state.pump,
       failureCategory: state.failureCategory,
-      conflictLock: state.conflictLock,
+      integrityLock: state.integrityLock,
+      pendingControlSync: state.pendingControlSync,
     });
 
   // stop() tears down EVERYTHING: retry loop first (no background retry
@@ -644,6 +756,12 @@ function api(state, log) {
       if (h.permissionLock) return { allow: false, reason: 'PERSISTENCE_PERMISSION_LOCK' };
       try {
         const r = await state.repo.durableClear();
+        if (r.refused) {
+          // PERSIST-0B §10: the row-locked revalidation found corrupt durable
+          // truth — CLEAR refused, row untouched, integrity lock engaged
+          state.integrityLock = true;
+          return { allow: false, reason: r.reason };
+        }
         state.controlRevision = r.revision;
         return { allow: true, mode: 'DURABLE_FIRST', revision: r.revision };
       } catch (err) {
@@ -657,11 +775,22 @@ function api(state, log) {
       if (!state.db.configured()) return { durable: false, reason: 'UNCONFIGURED' };
       try {
         const r = await state.repo.saveControlState(controls, state.controlRevision);
+        if (r.refused) {
+          // corrupt durable control truth (PERSIST-0B §11): never repaired,
+          // never overwritten; local restriction stands; integrity lock holds
+          state.integrityLock = true;
+          state.pendingControlSync = true;
+          return { durable: false, reason: r.reason };
+        }
         state.controlRevision = r.revision;
         return { durable: true, revision: r.revision };
       } catch (err) {
+        // PERSIST-0B §2: the failed restrictive snapshot enters the pending
+        // control-sync state — the pump's syncCurrentControls() persists it
+        // automatically after DB recovery (no second action, no restart)
+        state.pendingControlSync = true;
         state.pump.pendingWrites++;
-        log(`PERSISTENCE: control snapshot not yet durable (${err.code ?? err.message}) — restriction stays active locally`);
+        log(`PERSISTENCE: control snapshot not yet durable (${err.code ?? err.message}) — restriction stays active locally; pending control sync armed`);
         return { durable: false, reason: 'WRITE_FAILED' };
       }
     },

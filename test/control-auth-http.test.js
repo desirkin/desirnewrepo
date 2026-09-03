@@ -14,6 +14,13 @@ const PORT = 39000 + Math.floor(Math.random() * 500);
 process.env.PORT = String(PORT);
 const PW = 'http-test-owner-password-7715';
 delete process.env.SERPENT_CONTROL_PASSWORD; // start UNCONFIGURED
+// PERSIST-0B §16: this suite drills the AUTH layer in the documented
+// local-only development mode — explicitly remove any ambient managed
+// DATABASE_URL so the persistence gates behave identically on a bare
+// machine and on Replit. Persistence-gate behavior has its own suites.
+delete process.env.DATABASE_URL;
+delete process.env.REPLIT_DEPLOYMENT;
+delete process.env.SERPENT_DURABLE_REQUIRED;
 
 const { server } = await import('../ui/server.js'); // listens on PORT
 const BASE = `http://127.0.0.1:${PORT}`;

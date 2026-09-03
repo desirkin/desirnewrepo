@@ -80,7 +80,9 @@ test('A. REPLIT_DEPLOYMENT=1 + missing DATABASE_URL: durability required, permis
   process.env.REPLIT_DEPLOYMENT = '1';
   try {
     assert.equal(durabilityRequired(), true);
-    const p = await startPersistence({ log: () => {}, dbOverrides: { url: undefined } });
+    // explicit url: '' = unconfigured, deterministic even where an ambient
+    // DATABASE_URL exists (managed Replit workspace) — PERSIST-0B §16
+    const p = await startPersistence({ log: () => {}, dbOverrides: { url: '' } });
     const h = p.health();
     assert.equal(h.databaseConfigured, false);
     assert.equal(h.durabilityRequired, true);
@@ -306,7 +308,7 @@ if (!TEST_URL) {
     assert.equal(r.outcome, 'LEDGER_ID_CONTENT_CONFLICT');
     assert.equal(r.duplicate, false);
     assert.ok(repo.ledgerIdConflicts >= 1);
-    const stored = (await repo.loadLedgerAll('prediction')).find((x) => x.prediction_id === 'conflict-pred');
+    const stored = (await repo.loadLedgerAll('prediction')).rows.find((x) => x.prediction_id === 'conflict-pred');
     assert.equal(stored.size_usd, 100); // first durable truth untouched
     assert.equal((await repo.upsertLedgerRow('prediction', structuredClone(truth))).duplicate, true); // exact replay is still a duplicate
     await db.query(`DELETE FROM serpent_ledger_predictions WHERE prediction_id = 'conflict-pred'`, [], { write: true });

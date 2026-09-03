@@ -18,7 +18,8 @@ export function persistenceHealth({
   restored = false,
   pump = null,
   failureCategory = null,
-  conflictLock = false,
+  integrityLock = false,
+  pendingControlSync = false,
 }) {
   const configured = db?.configured() ?? false;
   const reachable = configured && (db?.reachable ?? false);
@@ -31,11 +32,12 @@ export function persistenceHealth({
     (pump?.pendingWrites ?? 0) > 0 ||
     (pump?.spoolParseErrors ?? 0) > 0 ||
     (pump?.pumpReadErrors ?? 0) > 0 ||
-    (db?.transactionErrors ?? 0) > 0;
+    (db?.transactionErrors ?? 0) > 0 ||
+    pendingControlSync;
   let status;
   if (!configured) status = 'UNAVAILABLE'; // not configured: no durable authority exists
   else if (!reachable) status = 'UNAVAILABLE';
-  else if (!restored || failureCategory || conflictLock || degradedCounters) status = 'DEGRADED';
+  else if (!restored || failureCategory || integrityLock || degradedCounters) status = 'DEGRADED';
   else status = 'HEALTHY';
   return {
     status,
@@ -44,12 +46,21 @@ export function persistenceHealth({
     durabilityRequired: required,
     // permission-increasing behavior locks whenever (a) a CONFIGURED durable
     // authority is unreachable or its state was never restored this run,
-    // (b) durability is REQUIRED but no authority is configured/restored, or
-    // (c) an unresolved durable content conflict demands manual resolution
-    permissionLock: (configured && (!reachable || !restored)) || (required && (!configured || !restored)) || conflictLock,
+    // (b) durability is REQUIRED but no authority is configured/restored,
+    // (c) a configured/required durable process carries an UNRESOLVED
+    // startup failure category (PERSIST-0B §9 — restored may never launder
+    // a failure into permission), or (d) a durable integrity violation
+    // demands manual resolution
+    permissionLock:
+      (configured && (!reachable || !restored)) ||
+      (required && (!configured || !restored)) ||
+      ((configured || required) && failureCategory !== null) ||
+      integrityLock,
     restored,
     migrationVersion,
     failureCategory, // safe category only — never connection details
+    integrityLock,
+    pendingControlSync,
     lastSuccessfulReadTs: db?.lastSuccessfulReadTs ?? null,
     lastSuccessfulWriteTs: db?.lastSuccessfulWriteTs ?? null,
     connectionErrors: db?.connectionErrors ?? 0,
@@ -63,5 +74,6 @@ export function persistenceHealth({
     durableConfirmedWrites: pump?.confirmedWrites ?? 0,
     spoolParseErrors: pump?.spoolParseErrors ?? 0,
     pumpReadErrors: pump?.pumpReadErrors ?? 0,
+    cursorRecoveries: pump?.cursorRecoveries ?? 0,
   };
 }

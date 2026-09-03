@@ -13,9 +13,12 @@ import {
   EXIT_REASONS,
 } from '../ledger/ledger.js';
 import { dailyRollup } from '../ledger/rollup.js';
-import { kill, cage, veto, isVetoed, readControls, clearLatches } from '../state/controls.js';
+import { isVetoed, readControls } from '../state/controls.js';
 import { dailyLockStatus, injectSimulatedPnlPct, clearSimulatedPnl } from '../state/locks.js';
 import { getEngineState, STATES } from '../state/machine.js';
+import { applyRestriction, requestClear } from '../persistence/control-plane.js';
+import { startPersistence } from '../persistence/runtime.js';
+import { durabilityRequired } from '../persistence/health.js';
 
 const argv = process.argv.slice(2);
 const [command, ...rest] = argv;
@@ -29,6 +32,30 @@ function flag(name) {
 
 function fmtUsd(v) {
   return `$${v.toFixed(2)}`;
+}
+
+// PERSIST-0B §5: the CLI is not an alternate door around durability. When a
+// database is configured (or durability is required), control commands
+// start the persistence runtime so the durable gate/snapshot is real; a
+// pure local-only development workspace keeps its documented behavior.
+async function ensurePersistence() {
+  if (!process.env.DATABASE_URL && !durabilityRequired()) return null;
+  return startPersistence({ log: () => {} });
+}
+
+// Restriction path: the local latch is ALREADY active (applied before this
+// runs) — this only reports/attempts durability, honestly.
+async function reportRestrictionDurability(first) {
+  if (first.durable?.durable) {
+    console.log('  durable: confirmed');
+    return;
+  }
+  const p = await ensurePersistence();
+  if (!p) return; // explicit local-only development: nothing to claim
+  const retry = await p.persistControlSnapshot(readControls());
+  if (retry.durable) console.log('  durable: confirmed');
+  else console.log(`  durable: PENDING (${retry.reason}) — restriction stands locally; control sync will persist it after recovery`);
+  await p.stop();
 }
 
 function refuseStrikeIfCaged(predictionId) {
@@ -151,27 +178,38 @@ async function main() {
     }
 
     case 'kill': {
-      kill();
+      const r = await applyRestriction('kill', { source: 'cli' }); // local latch FIRST
       const engine = getEngineState(config);
       console.log(`KILL ENGAGED — flat everything, halt. Engine state: ${engine.state}`);
+      await reportRestrictionDurability(r);
       return;
     }
     case 'cage': {
-      cage();
+      const r = await applyRestriction('cage', { source: 'cli' });
       console.log('CAGE ENGAGED — no new strikes, exits still managed.');
+      await reportRestrictionDurability(r);
       return;
     }
     case 'veto': {
       const id = rest[0];
       if (!id) return usage();
-      veto(id);
+      const r = await applyRestriction('veto', { predictionId: id, source: 'cli' });
       console.log(`VETO recorded for prediction ${id} — that trade is denied.`);
+      await reportRestrictionDurability(r);
       return;
     }
 
     case 'state': {
       const sub = rest[0];
       if (sub === 'simulate') {
+        // PERSIST-0B §6: the simulated-P&L hook is a DEVELOPMENT drill. A
+        // published/durability-required Serpent refuses it — a shell command
+        // may never remove a lock by rewriting simulated state. No override.
+        if (durabilityRequired()) {
+          console.error('SIMULATION REFUSED — development-only drill hook; disabled when durability is required (published deployment)');
+          process.exitCode = 1;
+          return;
+        }
         if (rest.includes('--clear')) {
           clearSimulatedPnl();
           console.log('simulated P&L cleared');
@@ -185,8 +223,18 @@ async function main() {
         return;
       }
       if (sub === 'clear') {
-        clearLatches();
-        console.log('KILL/CAGE latches cleared by human. Vetoes remain.');
+        // PERSIST-0B §5: CLEAR is permission-INCREASING — the persistence
+        // decision comes FIRST, through the same coordination layer as the
+        // cockpit. Outage, boot, and required-unconfigured all refuse.
+        const p = await ensurePersistence();
+        const r = await requestClear({ source: 'cli' });
+        if (!r.ok) {
+          console.error(`CLEAR REFUSED (${r.reason}) — KILL/CAGE latches stand`);
+          process.exitCode = 1;
+        } else {
+          console.log('KILL/CAGE latches cleared by human. Vetoes remain.');
+        }
+        await p?.stop();
         return;
       }
       return usage();

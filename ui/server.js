@@ -14,14 +14,14 @@ import { readCurrentBook, readTapeStatus, TAPE_STATES } from '../tape/store.js';
 import { bookFeatures } from '../tape/features.js';
 import { openPositions, allPredictions, allFills } from '../ledger/ledger.js';
 import { ledgerSummary } from '../ledger/summary.js';
-import { kill, cage, veto, clearLatches, isVetoed, readControls } from '../state/controls.js';
+import { isVetoed, readControls } from '../state/controls.js';
+import { applyRestriction, requestClear } from '../persistence/control-plane.js';
 import { existsSync, readFileSync as readFs } from 'node:fs';
 import { dataDir } from '../lib/config.js';
 import { appendJsonl } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
 import { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_MS } from './auth.js';
 import { getPersistence } from '../persistence/runtime.js';
-import { durabilityRequired } from '../persistence/health.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -189,34 +189,10 @@ function statusPayload() {
   };
 }
 
-// The three human controls (plus the human-only latch clear). Persisted
-// atomically, every action appended to the control log with source 'ui'.
-// This is the ONLY write path the server exposes, and it can only ever
-// remove permission to trade — it cannot originate a strike.
-function handleControl(body) {
-  const action = String(body.action ?? '').toLowerCase();
-  switch (action) {
-    case 'kill':
-      kill('ui');
-      break;
-    case 'cage':
-      cage('ui');
-      break;
-    case 'veto': {
-      const id = String(body.predictionId ?? '');
-      if (!id) return { ok: false, error: 'veto requires predictionId' };
-      veto(id, 'ui');
-      break;
-    }
-    case 'clear':
-      clearLatches('ui');
-      break;
-    default:
-      return { ok: false, error: `unknown control action "${body.action}"` };
-  }
-  return { ok: true, action: action.toUpperCase(), status: statusPayload() };
-}
-
+// The three human controls (plus the human-only latch clear) go through
+// persistence/control-plane.js — the ONE coordination layer shared with the
+// CLI. This is the ONLY write path the server exposes, and it can only
+// ever remove permission to trade — it cannot originate a strike.
 function coinPayload(coin) {
   if (!config.universe.includes(coin)) return { available: false, reason: `UNAVAILABLE — ${coin} not in universe` };
   const tape = tapeReport();
@@ -353,33 +329,37 @@ const server = http.createServer((req, res) => {
         // the action fields it always saw
         const { password, confirmPhrase, ...controlBody } = body;
         (async () => {
-          const p = getPersistence();
           const action = String(controlBody.action ?? '').toLowerCase();
-          // PERSIST-0 asymmetry: CLEAR is permission-INCREASING — the
-          // durable transaction must succeed BEFORE the local latch drops.
-          // PERSIST-0A §2: this gate is UNCONDITIONAL. getPersistence()
-          // is never null (a fail-closed BOOTING state exists from module
-          // import), and even if it somehow were, absence of a persistence
-          // object is refusal, not permission.
+          // PERSIST-0B §5: BOTH control doors (this cockpit and the CLI)
+          // share ONE control-coordination layer, so the durable
+          // permission-increase gate cannot be bypassed by picking a door.
+          // CLEAR: persistence decision FIRST (PERSIST-0/0A semantics,
+          // unconditional — boot/outage/required-unconfigured all refuse).
+          // KILL/CAGE/VETO: local restriction FIRST, then durable snapshot;
+          // a failed write leaves the restriction standing and the pump's
+          // control sync persists it after recovery.
           if (action === 'clear') {
-            const durable = p
-              ? await p.durableClearOrRefuse()
-              : durabilityRequired() || process.env.DATABASE_URL
-                ? { allow: false, reason: 'PERSISTENCE_BOOTING' }
-                : { allow: true, mode: 'LOCAL_ONLY_UNCONFIGURED' };
-            if (!durable.allow) {
-              json(res, 503, { ok: false, reason: durable.reason });
+            const r = await requestClear({ source: 'ui' });
+            if (!r.ok) {
+              json(res, 503, { ok: false, reason: r.reason });
               return;
             }
+            json(res, 200, { ok: true, action: 'CLEAR', status: statusPayload() });
+            return;
           }
-          const result = handleControl(controlBody);
-          // permission-REDUCING actions applied locally above; persist the
-          // snapshot durably now — a failure leaves the restriction active
-          // and is reported through persistence health, never as fake success
-          if (result.ok && p && action !== 'clear') {
-            p.persistControlSnapshot(readControls()).catch(() => {});
+          if (action === 'kill' || action === 'cage' || action === 'veto') {
+            const r = await applyRestriction(action, {
+              predictionId: String(controlBody.predictionId ?? '') || null,
+              source: 'ui',
+            });
+            if (!r.ok) {
+              json(res, 400, { ok: false, error: r.error });
+              return;
+            }
+            json(res, 200, { ok: true, action: action.toUpperCase(), status: statusPayload() });
+            return;
           }
-          json(res, result.ok ? 200 : 400, result);
+          json(res, 400, { ok: false, error: `unknown control action "${controlBody.action}"` });
         })().catch((err) => {
           console.error(`[api/control] ${err.constructor.name}: ${err.message}`);
           json(res, 500, { ok: false, reason: 'CONTROL_PERSISTENCE_ERROR' });

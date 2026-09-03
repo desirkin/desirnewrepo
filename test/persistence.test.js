@@ -44,7 +44,9 @@ const mkEnv = (over = {}) =>
 
 // ---------------- unit truths (no database required) ----------------
 test('DATABASE_URL absent: unconfigured, health UNAVAILABLE, no permission lock invented', async () => {
-  const db = new Db({ url: undefined });
+  // PERSIST-0B §16: an explicit empty url MEANS unconfigured — the test
+  // never depends on the host machine lacking an ambient DATABASE_URL
+  const db = new Db({ url: '' });
   assert.equal(db.configured(), false);
   assert.equal(await db.connect(), false);
   const h = persistenceHealth({ db, restored: false });
@@ -52,7 +54,7 @@ test('DATABASE_URL absent: unconfigured, health UNAVAILABLE, no permission lock 
   assert.equal(h.databaseConfigured, false);
   assert.equal(h.permissionLock, false); // no durable authority exists to disagree with
   // and the runtime says so honestly, preserving legacy local behavior
-  const p = await startPersistence({ log: () => {}, dbOverrides: { url: undefined } });
+  const p = await startPersistence({ log: () => {}, dbOverrides: { url: '' } });
   const r = await p.durableClearOrRefuse();
   assert.equal(r.allow, true);
   assert.equal(r.mode, 'LOCAL_ONLY_UNCONFIGURED');
@@ -158,7 +160,7 @@ if (!TEST_URL) {
   });
 
   test('ledger round-trip: deterministic ids, idempotent replay never duplicates a fill', async () => {
-    const pred = { prediction_id: 'pred-1', timestamp_prediction_persisted: ISO, coin: 'BTC', size_usd: 100 };
+    const pred = { prediction_id: 'pred-1', timestamp_prediction_persisted: ISO, coin: 'BTC', thesis: 'fixture thesis', size_usd: 100, predicted_horizon_min: 30, predicted_net_move_pct: 1 };
     const fill = { prediction_id: 'pred-1', ts: ISO, coin: 'BTC', size_usd: 100, base_qty: 1, avg_price: 100.2, fee_usd: 0.4 };
     assert.equal((await repo.upsertLedgerRow('prediction', pred)).accepted, true);
     assert.equal((await repo.upsertLedgerRow('prediction', pred)).duplicate, true);
@@ -233,7 +235,7 @@ if (!TEST_URL) {
     writeFileSync(path.join(dirA, 'state', 'transitions.jsonl'), JSON.stringify({ ts: ISO, from: 'COILED', to: 'COILED', cause: 'fixture' }) + '\n');
     writeFileSync(
       path.join(dirA, 'ledger', 'predictions.jsonl'),
-      JSON.stringify({ prediction_id: 'redeploy-pred', timestamp_prediction_persisted: ISO, coin: 'ETH', size_usd: 50 }) + '\n'
+      JSON.stringify({ prediction_id: 'redeploy-pred', timestamp_prediction_persisted: ISO, coin: 'ETH', thesis: 'redeploy fixture', size_usd: 50, predicted_horizon_min: null, predicted_net_move_pct: null }) + '\n'
     );
     const memFix = mkEnv({ ts: NOW_SEC - 80, symbol: 'XRP', correlation: { eventId: 'redeploy-ev' } });
     writeFileSync(path.join(dirA, 'memory', 'events.jsonl'), JSON.stringify(memFix) + '\n');

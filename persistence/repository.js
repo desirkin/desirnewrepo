@@ -88,12 +88,25 @@ export class Repository {
 
   // Save with optimistic revision check; on a concurrent write, reload,
   // merge MOST RESTRICTIVE, retry once. Restriction is never lost.
+  // PERSIST-0B §11: BOTH sides are validated inside the row lock — a
+  // malformed durable row is never silently repaired/overwritten (integrity
+  // lock instead), and malformed incoming state is refused outright.
   async saveControlState(state, expectedRevision = null) {
+    const vIn = validateControlState(state);
+    if (!vIn.ok) return { refused: true, reason: 'INVALID_CONTROL_STATE', errors: vIn.errors };
     return this.db.tx(async (q) => {
       const cur = await q(`SELECT revision, state FROM serpent_control_state WHERE id = 'current' FOR UPDATE`);
       if (!cur.rows.length) {
         await q(`INSERT INTO serpent_control_state (id, revision, state) VALUES ('current', 1, $1)`, [state]);
         return { revision: 1, state };
+      }
+      const vDb = validateControlState(cur.rows[0].state);
+      if (!vDb.ok) {
+        // corrupt durable truth: not absence of restriction, not repairable
+        // here — manual/restart audit required; local restriction stands
+        this.invalidDurableRecords++;
+        this.log(`PERSISTENCE DEGRADED: durable control row invalid at snapshot time (${vDb.errors.join('; ')}) — not repaired, not overwritten`);
+        return { refused: true, reason: 'DURABLE_CONTROL_INVALID', errors: vDb.errors };
       }
       const dbRev = Number(cur.rows[0].revision);
       let next = state;
@@ -109,9 +122,19 @@ export class Repository {
   // CLEAR is permission-INCREASING: the durable transaction must succeed
   // FIRST (row-locked, revision-advanced) or CLEAR fails and latches stand.
   // Vetoes are preserved — a denied trade stays denied (existing semantics).
+  // PERSIST-0B §10: the row is revalidated INSIDE the same lock — CLEAR
+  // never transforms an untrusted row into permission.
   async durableClear() {
     return this.db.tx(async (q) => {
       const cur = await q(`SELECT revision, state FROM serpent_control_state WHERE id = 'current' FOR UPDATE`);
+      if (cur.rows.length) {
+        const vDb = validateControlState(cur.rows[0].state);
+        if (!vDb.ok) {
+          this.invalidDurableRecords++;
+          this.log(`PERSISTENCE DEGRADED: durable control row invalid at CLEAR time (${vDb.errors.join('; ')}) — CLEAR refused, row untouched`);
+          return { refused: true, reason: 'DURABLE_CONTROL_INVALID', errors: vDb.errors };
+        }
+      }
       const prior = cur.rows[0]?.state ?? { kill: null, cage: null, vetoes: [] };
       const rev = cur.rows[0] ? Number(cur.rows[0].revision) : 0;
       const next = { ...prior, kill: null, cage: null };
@@ -231,12 +254,16 @@ export class Repository {
     return this.#reviveLedgerRows(kind, rows);
   }
 
-  // COMPLETE validated durable ledger for operational restore — chunked
-  // keyset pagination, never truncated to the display bound (PERSIST-0A §10).
+  // COMPLETE durable ledger for operational restore — chunked keyset
+  // pagination, never truncated to the display bound (PERSIST-0A §10).
+  // PERSIST-0B §12: the result distinguishes COMPLETE_VALID from
+  // INCOMPLETE — a withheld corrupt row is REPORTED, because a missing
+  // open position must never be mistaken for "no position".
   async loadLedgerAll(kind) {
     const table = LEDGER_TABLES[kind];
     if (!table) throw new Error(`unknown ledger kind ${kind}`);
     const out = [];
+    let invalid = 0;
     let after = '';
     for (;;) {
       const { rows } = await this.db.query(
@@ -244,11 +271,13 @@ export class Repository {
         [after]
       );
       if (!rows.length) break;
+      const before = this.invalidDurableRecords;
       out.push(...this.#reviveLedgerRows(kind, rows));
+      invalid += this.invalidDurableRecords - before;
       after = rows[rows.length - 1].prediction_id;
       if (rows.length < MAX_QUERY_LIMIT) break;
     }
-    return out;
+    return { rows: out, invalid, complete: invalid === 0 };
   }
 
   #reviveLedgerRows(kind, rows) {

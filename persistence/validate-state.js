@@ -82,8 +82,13 @@ export function validateSimState(s) {
 }
 
 // ---- LEDGER ROWS by kind --------------------------------------------------
-// Identity, timestamps and the numeric fields the rollups actually consume
-// must be sane before a row may enter operational ledger state.
+// The CURRENT canonical fields written by ledger.js and consumed by
+// openPositions/realizedPnlUsd/dailyRollup/ledgerSummary must all be sane
+// before a row may enter operational ledger state (PERSIST-0B §13). No
+// future fields are invented; fields the writer sometimes records as null
+// (prediction horizon/move via the CLI) accept null but never NaN/garbage.
+const nullOrFinite = (v) => v === undefined || v === null || isFiniteNum(v);
+
 export function validateLedgerRow(kind, row) {
   const errors = [];
   if (!isPlainObject(row)) return { ok: false, errors: ['not an object'] };
@@ -92,19 +97,27 @@ export function validateLedgerRow(kind, row) {
   if (kind === 'prediction') {
     if (!isIsoTs(row.timestamp_prediction_persisted)) errors.push('invalid prediction timestamp');
     if (!isNonEmptyString(row.coin)) errors.push('missing coin');
-    if (row.size_usd !== undefined && !isFiniteNum(row.size_usd)) errors.push('invalid size_usd');
+    if (!isNonEmptyString(row.thesis)) errors.push('missing thesis — no thesis, no trade');
+    if (!isFiniteNum(row.size_usd)) errors.push('invalid size_usd');
+    if (!nullOrFinite(row.predicted_horizon_min)) errors.push('invalid predicted_horizon_min');
+    if (!nullOrFinite(row.predicted_net_move_pct)) errors.push('invalid predicted_net_move_pct');
   } else if (kind === 'fill') {
     if (!isIsoTs(row.ts)) errors.push('invalid fill ts');
     if (!isNonEmptyString(row.coin)) errors.push('missing coin');
     if (!isFiniteNum(row.size_usd)) errors.push('invalid size_usd');
+    if (!isFiniteNum(row.base_qty)) errors.push('invalid base_qty');
     if (!isFiniteNum(row.avg_price)) errors.push('invalid avg_price');
     if (!isFiniteNum(row.fee_usd)) errors.push('invalid fee_usd');
   } else if (kind === 'exit') {
     if (!isIsoTs(row.ts)) errors.push('invalid exit ts');
     if (!isNonEmptyString(row.coin)) errors.push('missing coin');
     if (!isNonEmptyString(row.reason_code)) errors.push('missing reason_code');
-    if (!isFiniteNum(row.realized_net_usd)) errors.push('invalid realized_net_usd');
+    if (!isFiniteNum(row.base_qty)) errors.push('invalid base_qty');
+    if (!isFiniteNum(row.avg_price)) errors.push('invalid avg_price');
     if (!isFiniteNum(row.proceeds_usd)) errors.push('invalid proceeds_usd');
+    if (!isFiniteNum(row.fee_usd)) errors.push('invalid fee_usd');
+    if (!isFiniteNum(row.realized_net_usd)) errors.push('invalid realized_net_usd');
+    if (!isFiniteNum(row.realized_net_pct)) errors.push('invalid realized_net_pct');
   } else {
     errors.push(`unknown ledger kind ${String(kind)}`);
   }
