@@ -4,7 +4,7 @@
 // mutated; nothing flows back. Names carry no direction the source did not
 // establish — an abnormal co-fire is an abnormal co-fire, never a prophecy.
 import { nowIso } from '../lib/time.js';
-import { envelope } from './schema.js';
+import { envelope, sourceFingerprint } from './schema.js';
 
 const sec = (iso) => Math.floor(Date.parse(iso) / 1000);
 const SYMBOL_RE = /^[A-Z0-9]{1,15}$/;
@@ -56,6 +56,7 @@ export function fromWideeyeEvent(rec, observedTs = nowIso()) {
       : { type: rec.type, detail: strip(rec, 'ts') },
     dataAvailability: { zVol: rec.zVol !== undefined ? 'KNOWN' : 'UNAVAILABLE', zRet: rec.zRet !== undefined ? 'KNOWN' : 'UNAVAILABLE' },
     provenance: liveProv('survey/events.jsonl (live wide eye)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'survey/events.jsonl'),
   });
 }
 
@@ -76,6 +77,7 @@ export function fromRumintEvent(rec, observedTs = nowIso()) {
     payload: { type: rec.type, detail: strip(rec, 'ts') },
     dataAvailability: { chatterVelocity: failed ? 'UNAVAILABLE' : rec.velocity !== undefined || rec.z !== undefined ? 'KNOWN' : 'UNKNOWN' },
     provenance: liveProv('rumint/events.jsonl (stocktwits chatter poller)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'rumint/events.jsonl'),
   });
 }
 
@@ -103,6 +105,7 @@ export function fromGatewayTransition(rec, observedTs = nowIso()) {
     },
     correlation: { eventId: rec.key ?? null, sourceEventId: rec.key ?? null },
     sourceEventId: rec.key ? `${rec.key}:${rec.to ?? ''}:${rec.observedAt}` : null,
+    identity: sourceFingerprint(rec, 'gateway/transitions.jsonl'),
   });
 }
 
@@ -117,12 +120,14 @@ export function fromTapeSnapshot(rec, observedTs = nowIso()) {
     ts: sec(rec.ts),
     symbol: canonSymbol(rec.coin),
     families: ['MARKET_PRICE', 'LIQUIDITY', 'ORDER_FLOW'],
-    // tape's healthy states are LIVE (and legacy CLEAN); anything else —
-    // DEGRADED, OFFLINE, integrity holds — is remembered as degraded data
-    observationState: rec.tapeState === 'LIVE' || rec.tapeState === 'CLEAN' || rec.tapeState === undefined ? 'KNOWN' : 'DEGRADED',
+    // FAIL CLOSED (MEMORY-0A §7): LIVE (and legacy CLEAN) -> KNOWN; an
+    // explicit non-healthy state -> DEGRADED; ABSENT health is UNKNOWN —
+    // memory never infers health from the absence of health data.
+    observationState: rec.tapeState === 'LIVE' || rec.tapeState === 'CLEAN' ? 'KNOWN' : rec.tapeState === undefined ? 'UNKNOWN' : 'DEGRADED',
     payload: strip(rec, 'ts', 'coin'),
-    dataAvailability: { book: rec.tapeState ? 'KNOWN' : 'UNKNOWN' },
+    dataAvailability: { book: rec.tapeState === 'LIVE' || rec.tapeState === 'CLEAN' ? 'KNOWN' : rec.tapeState === undefined ? 'UNKNOWN' : 'DEGRADED' },
     provenance: liveProv('tape session snapshots.jsonl (kraken WS L2 features)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'tape/snapshots.jsonl'),
   });
 }
 
@@ -141,6 +146,7 @@ export function fromCostEvaluation(rec, observedTs = nowIso()) {
     payload: strip(rec, 'ts', 'coin'),
     dataAvailability: { roundTripCost: Array.isArray(rec.rungs) && rec.rungs.length ? 'KNOWN' : 'UNKNOWN' },
     provenance: liveProv('cost/evaluations.jsonl (execution cost model)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'cost/evaluations.jsonl'),
   });
 }
 
@@ -159,6 +165,7 @@ export function fromStateTransition(rec, observedTs = nowIso()) {
     payload: strip(rec, 'ts'),
     dataAvailability: { posture: rec.to ? 'KNOWN' : 'UNKNOWN' },
     provenance: liveProv('state/transitions.jsonl (posture machine)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'state/transitions.jsonl'),
   });
 }
 
@@ -173,5 +180,6 @@ export function fromControlAction(rec, observedTs = nowIso()) {
     payload: strip(rec, 'ts'),
     dataAvailability: { control: 'KNOWN' },
     provenance: liveProv('state/controls_log.jsonl (human controls)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'state/controls_log.jsonl'),
   });
 }

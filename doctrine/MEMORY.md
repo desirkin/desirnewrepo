@@ -71,6 +71,14 @@ NO PATH FROM MEMORY-0 TO EXECUTION.
   lifecycle }        // { createdTs, lastUpdatedTs, expiresTs|null, ttlSec|null, supersedesId|null }
 ```
 
+**Identity (MEMORY-0A):** where an upstream natural id exists it is
+incorporated; otherwise identity derives from a stable FINGERPRINT of the
+original source record (canonical key-sorted hash plus stream identity) —
+never the whole-second timestamp alone. Two different records inside the
+same second get distinct memories; the byte-identical record replayed after
+a restart deduplicates. No randomness, no Date.now(), no observation time
+in identity.
+
 **Source modules:** TAPE · WIDEEYE · RUMINT · GATEWAY · COST · STATE ·
 CHILDHOOD — reserved for future senses (names only, nothing implemented):
 MICROSTRUCTURE · GOVERNANCE · GHOST · INFRASTRUCTURE · FLOW · PHILOSOPHER.
@@ -116,14 +124,28 @@ temp+rename, throttled) records schemaVersion, memoryVersion, record count,
 counts by module/family/availability, duplicates suppressed, invalid
 rejected, and known gaps. **Deduplication** is deterministic-id based and
 restart-safe: the id index is rebuilt from the file at startup, so a
-restart can never write the same source event twice. **Corruption policy
-(documented, fail-loud):** a line that does not parse at startup is COPIED
-to `events.quarantine.jsonl` with its position, the original file is left
-untouched, health becomes DEGRADED and the failure is logged — evidence is
-never silently repaired and never silently discarded. **Retention:** nothing
-is auto-deleted; retention/compaction is a later operational ticket. Startup
-loads only bounded metadata (ids + a 500-record recent cache), never the
-whole store.
+restart can never write the same source event twice. **Recovery is
+streamed** (MEMORY-0A): fixed-size chunks split only at newline bytes —
+lines and multibyte characters spanning chunk boundaries reassemble
+exactly, and the full JSONL store is never materialized into RAM; only the
+id index and the 500-record recent cache are retained. **Every recovered
+record is RE-VALIDATED** through the same canonical validator new evidence
+faces: valid JSON with an invalid envelope is quarantined as
+`SCHEMA_INVALID` (with its validator errors), a torn line as
+`JSON_PARSE_CORRUPT` — either way COPIED to `events.quarantine.jsonl` with
+its position, the original file untouched, health DEGRADED, the failure
+logged. Quarantined records never enter indexes, counts, or query results
+(query fallbacks are gated on the validated id index). Evidence is never
+silently repaired and never silently discarded. **Manifest identity
+survives restarts:** `createdTs`, `lastWriteTs`, and the lifetime counters
+(`duplicateSuppressedCount`, `invalidRejectedCount`) are cumulative and
+preserved via the manifest; evidence-derived counts are always rebuilt from
+the events themselves; if records exist but the manifest is lost, the
+creation time is honestly `null` — never invented. `persistenceErrors` and
+ingestion counters are session-local. **Retention:** nothing is
+auto-deleted; retention/compaction is a later operational ticket, and the
+id-only dedup index remains the documented growth limitation until then (no
+probabilistic dedup — a false positive would silently lose evidence).
 
 ## FAILURE — MEMORY FAILS DARK
 
@@ -145,8 +167,12 @@ schemaVersion, memoryVersion.
 `getRecent({symbol, sourceModule, limit})`, `getByEventId`,
 `getByClusterId`, `getSince(ts, filters)`, `getLatestBySource`. Default
 limit 50; hard maximum 500 — larger requests are clamped, never honored.
-Scans touch the bounded recent cache, then at most an 8MB file tail. There
-is no "load entire memory into RAM" call, deliberately.
+Search order (MEMORY-0A): the recent cache first; only when the match set
+is unsaturated AND older records exist does the query widen to at most the
+last 8MB of file tail — results merge without duplication, ordered
+deterministically ascending by ts, newest N kept. An event older than the
+recent 500 but inside the tail window IS found. There is no "load entire
+memory into RAM" call, deliberately.
 
 ## CHILDHOOD BRIDGE — READ-ONLY
 
@@ -162,7 +188,17 @@ ranking, no learning here.
 Existing behavior is authoritative. Adapters observe the sensors' own
 already-written event streams (file tails); they import nothing from any
 sensor and feed nothing back into nomination, posture, stalking, risk,
-strike, UI decision state, or thresholds. The architectural test asserts,
+strike, UI decision state, or thresholds. **Startup capture boundary
+(MEMORY-0A):** the mirror opens BEFORE the live sensors start writing, so
+their startup records are remembered; streams that already existed at
+mirror open are anchored at EOF (pre-existing history is Childhood's
+domain), while a file born after the mirror opened — a new daily tape
+session, say — is new live evidence and is read from byte zero.
+**Ingestion honesty:** a malformed sensor line is skipped (sensor-owned
+files are never rewritten or quarantined by memory), counted
+(`sourceParseErrors`, alongside `adapterErrors` and `mirrorReadErrors` in
+health), logged loudly, and degrades memory health — ingestion loss is
+never pretended away, and it never alters trading state. The architectural test asserts,
 from source, that no module outside `memory/` (except the `fly.js`
 composition root) references memory, and that no `memory/` module imports
 any sensor or state-mutating module. Memory observes state; it can never

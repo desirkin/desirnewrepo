@@ -30,16 +30,18 @@ try {
   );
 }
 
-startRumint(); // no-ops (zero network) unless rumint is enabled
-startGateway(); // no-ops (zero network) unless gateway is enabled — collector only
-startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
 try {
-  // MEMORY-0 dark mirror: observes the sensors' own event streams; NO
-  // return path exists, and a memory failure fails dark — never the ship.
+  // MEMORY-0 dark mirror opens BEFORE the live sensors begin writing
+  // (MEMORY-0A §8), so their startup records are remembered too. It
+  // observes the sensors' own event streams; NO return path exists, and a
+  // memory failure fails dark — the sensors below start regardless.
   startMemoryMirror({ log: console.log });
 } catch (err) {
   console.error(`MEMORY-0 failed to start (dark; nothing else affected): ${err.message}`);
 }
+startRumint(); // no-ops (zero network) unless rumint is enabled
+startGateway(); // no-ops (zero network) unless gateway is enabled — collector only
+startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
 try {
   await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
   process.exit(0);

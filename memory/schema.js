@@ -80,15 +80,41 @@ export const FORBIDDEN_INSTRUCTION_KEYS = Object.freeze([
 
 // Deterministic identity: the same source event survives restarts as ONE
 // memory. Where a natural source event id exists it is incorporated;
-// periodic observations derive identity from module+symbol+type+time.
+// otherwise identity comes from a FINGERPRINT of the actual source record
+// (MEMORY-0A §1) — never from the whole-second timestamp alone, so two
+// different records inside the same second can never collide, while the
+// byte-identical record replayed after a restart still deduplicates.
 export function deterministicId({ sourceModule, symbol, eventType, ts, sourceEventId = null }) {
   const basis = `${sourceModule}|${symbol ?? 'NONE'}|${eventType}|${sourceEventId ?? ts}`;
   return `mem-${createHash('sha1').update(basis).digest('hex')}`;
 }
 
+// Canonical JSON: recursively key-sorted, so logically identical records
+// fingerprint identically regardless of key order.
+const canonicalJson = (v) => {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(v)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`)
+    .join(',')}}`;
+};
+
+// Source-record fingerprint: a stable hash of the ORIGINAL source record
+// plus its stream identity. No randomness, no Date.now(), no observation
+// time — the same record always fingerprints the same; different records
+// never share one merely because they share a second.
+export function sourceFingerprint(rec, streamId = '') {
+  return createHash('sha1').update(`${streamId}:${canonicalJson(rec)}`).digest('hex');
+}
+
 // Envelope skeleton helper used by adapters: fills the invariant fields so
 // every sense speaks the same dialect. `families` may be one family or a
 // small coherent set (still ONE source observation, not N confirmations).
+// `sourceEventId` is a NATURAL upstream id (kept in correlation);
+// `identity` is a derived source-record fingerprint used for id derivation
+// only — it is our computation, not the upstream's identity, so it never
+// masquerades as a sourceEventId.
 export function envelope({
   sourceModule,
   eventType,
@@ -102,10 +128,11 @@ export function envelope({
   correlation = {},
   lifecycle = {},
   sourceEventId = null,
+  identity = null,
 }) {
   const nowMs = Date.now();
   return {
-    id: deterministicId({ sourceModule, symbol, eventType, ts, sourceEventId }),
+    id: deterministicId({ sourceModule, symbol, eventType, ts, sourceEventId: sourceEventId ?? identity }),
     schemaVersion: MEMORY_SCHEMA_VERSION,
     ts,
     symbol,

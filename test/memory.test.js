@@ -342,6 +342,170 @@ test('ADAPTERS: pure transforms — frozen inputs unmutated, outputs canonical a
   assert.deepEqual(st.evidenceFamily, ['STATE_CONTROL']);
 });
 
+// MEMORY-0A §1 — same-second distinct records never collide; exact
+// duplicates still deduplicate.
+test('IDENTITY: two different records in the same second are two memories; the same record twice is one', () => {
+  const { bus } = mkBus();
+  const sameSecond = new Date(NOW - 30_000).toISOString();
+  // A. RUMINT_POLL then RUMINT_NOMINATION for BTC, same second
+  const rumintPoll = { ts: sameSecond, type: 'RUMINT_POLL', symbol: 'BTC', velocity: 9, z: 2.1 };
+  const rumintNom = { ts: sameSecond, type: 'RUMINT_NOMINATION', symbol: 'BTC', z: 3.4, acceleration: 0.5 };
+  // B. two COST BTC evaluations with different requested sizes, same second
+  const cost1 = { ts: sameSecond, coin: 'BTC', side: 'buy', requestedSizeUsd: 100, ladder: false, bookRef: { ts: sameSecond, ageSec: 0.2 }, feeSchedule: { venue: 'kraken' }, rungs: [{ usd: 100, costBps: 9 }] };
+  const cost2 = { ...cost1, requestedSizeUsd: 250, rungs: [{ usd: 250, costBps: 11 }] };
+  // C. two STATE transitions with different from/to/cause, same second
+  const state1 = { ts: sameSecond, from: 'COILED', to: 'STALKING', cause: 'nomination', demo: false };
+  const state2 = { ts: sameSecond, from: 'STALKING', to: 'COILED', cause: 'stand down', demo: false };
+  const envs = [
+    adapters.fromRumintEvent(rumintPoll, ISO),
+    adapters.fromRumintEvent(rumintNom, ISO),
+    adapters.fromCostEvaluation(cost1, ISO),
+    adapters.fromCostEvaluation(cost2, ISO),
+    adapters.fromStateTransition(state1, ISO),
+    adapters.fromStateTransition(state2, ISO),
+  ];
+  assert.equal(new Set(envs.map((e) => e.id)).size, 6, 'same-second records collided');
+  for (const e of envs) {
+    const r = bus.publish(e);
+    assert.equal(r.accepted, true, `same-second record suppressed: ${JSON.stringify(r)}`);
+  }
+  assert.equal(bus.health().duplicateSuppressedCount, 0);
+  // the EXACT same source record encountered again (restart/replay) IS one memory
+  const replay = bus.publish(adapters.fromRumintEvent(structuredClone(rumintPoll), new Date(NOW + 60_000).toISOString()));
+  assert.equal(replay.accepted, false);
+  assert.equal(replay.reason, 'duplicate'); // identity ignores observation time
+});
+
+// MEMORY-0A §2 — recovery revalidates: valid JSON with an invalid envelope
+// never re-enters usable memory.
+test('RECOVERY REVALIDATION: a parseable-but-invalid old record is quarantined as SCHEMA_INVALID, not indexed', () => {
+  const d = dir();
+  const store = new MemoryStore({ dir: d });
+  new MemoryBus({ store }).publish(mkEnv());
+  const impostor = { id: 'mem-fake', schemaVersion: 'serpent-memory-1', ts: NOW_SEC, sourceModule: 'HACKED_MODULE', eventType: 'X', payload: {} };
+  appendFileSync(store.eventsFile, JSON.stringify(impostor) + '\n');
+  const reopened = new MemoryStore({ dir: d });
+  assert.equal(reopened.recordCount, 1); // excluded from counts
+  assert.equal(reopened.invalidRecovered, 1);
+  assert.equal(reopened.status, 'DEGRADED'); // health does not stay quiet
+  assert.equal(reopened.hasId('mem-fake'), false);
+  // not queryable — neither from cache nor through the tail fallback
+  assert.equal(reopened.getRecent({ limit: 500 }).some((e) => e.id === 'mem-fake'), false);
+  const q = readFileSync(reopened.quarantineFile, 'utf8');
+  assert.ok(q.includes('SCHEMA_INVALID'));
+  assert.ok(q.includes('HACKED_MODULE')); // raw content preserved, bounded
+  assert.ok(q.includes('sourceModule')); // validator errors recorded
+});
+
+// MEMORY-0A §4 — streaming recovery across chunk boundaries.
+test('CHUNKED RECOVERY: lines spanning tiny chunks, torn JSON and invalid envelopes all land correctly', () => {
+  const d = dir();
+  const seed = new MemoryStore({ dir: d });
+  const seedBus = new MemoryBus({ store: seed });
+  for (let i = 0; i < 12; i++) {
+    // long payloads guarantee single lines span multiple 64-byte chunks
+    seedBus.publish(mkEnv({ ts: NOW_SEC - 900 + i, payload: { note: 'x'.repeat(200), i } }));
+  }
+  appendFileSync(seed.eventsFile, '{"torn": tru\n'); // JSON_PARSE_CORRUPT
+  appendFileSync(seed.eventsFile, JSON.stringify({ id: 'mem-bad', schemaVersion: 'serpent-memory-1', ts: NOW_SEC, sourceModule: 'NOPE', payload: {} }) + '\n'); // SCHEMA_INVALID
+  const reopened = new MemoryStore({ dir: d, recoveryChunkBytes: 64 });
+  assert.equal(reopened.recordCount, 12);
+  assert.equal(reopened.corruptLines, 1);
+  assert.equal(reopened.invalidRecovered, 1);
+  assert.equal(reopened.status, 'DEGRADED');
+  assert.equal(reopened.recent.length, 12); // recent cache rebuilt from validated records only
+  assert.equal(reopened.recent.at(-1).payload.i, 11); // order preserved through chunking
+  // byte-identical replay after chunked recovery still deduplicates
+  const bus = new MemoryBus({ store: reopened });
+  assert.equal(bus.publish(mkEnv({ ts: NOW_SEC - 900 + 3, payload: { note: 'x'.repeat(200), i: 3 } })).accepted, false);
+});
+
+// MEMORY-0A §3 — the tail fallback actually exists beyond the recent cache.
+test('BOUNDED TAIL: an event older than the recent 500 but inside the 8MB tail is found', () => {
+  const { store, bus } = mkBus();
+  for (let i = 0; i < 700; i++) {
+    bus.publish(
+      mkEnv({
+        ts: NOW_SEC - 7000 + i,
+        correlation: i === 50 ? { eventId: 'needle-event', clusterId: 'needle-cluster' } : {},
+        payload: { i },
+      })
+    );
+  }
+  assert.equal(store.recent.length, 500); // the needle (record 50) has left the cache
+  const byEvent = store.getByEventId('needle-event');
+  assert.equal(byEvent.length, 1);
+  assert.equal(byEvent[0].payload.i, 50);
+  assert.equal(store.getByClusterId('needle-cluster').length, 1);
+  const since = store.getSince(NOW_SEC - 7000, { limit: 500 });
+  assert.equal(since.length, 500); // hard cap holds even when more match
+  assert.ok(since.every((e, k) => k === 0 || e.ts >= since[k - 1].ts)); // deterministic chronological order
+  // a query satisfiable from recent memory alone never needs the tail:
+  // point the tail at nothing and the recent-served query still answers
+  const realFile = store.eventsFile;
+  store.eventsFile = path.join(TEST_DATA, 'no-such-file.jsonl');
+  assert.equal(store.getRecent({ limit: 5 }).length, 5);
+  store.eventsFile = realFile;
+});
+
+// MEMORY-0A §5 — restart preserves manifest identity.
+test('MANIFEST IDENTITY: createdTs and lifetime counters survive a restart with no new appends', () => {
+  const d = dir();
+  const store = new MemoryStore({ dir: d });
+  const bus = new MemoryBus({ store });
+  bus.publish(mkEnv());
+  bus.publish(mkEnv()); // duplicate -> lifetime counter 1
+  bus.close();
+  const first = JSON.parse(readFileSync(store.manifestFile, 'utf8'));
+  assert.ok(Number.isFinite(first.createdTs));
+  // reopen, close WITHOUT any new append
+  const reopened = new MemoryStore({ dir: d });
+  new MemoryBus({ store: reopened }).close();
+  const second = JSON.parse(readFileSync(reopened.manifestFile, 'utf8'));
+  assert.equal(second.createdTs, first.createdTs); // identity preserved, not nulled
+  assert.equal(second.recordCount, 1);
+  assert.equal(second.duplicateSuppressedCount, 1); // cumulative lifetime counter
+  assert.equal(second.lastWriteTs, first.lastWriteTs);
+  // and a lost manifest never invents a creation time
+  rmSync(path.join(d, 'manifest.json'));
+  const amnesiac = new MemoryStore({ dir: d });
+  assert.equal(amnesiac.createdTs, null);
+  assert.equal(amnesiac.unknownCreation, true);
+  assert.ok(amnesiac.manifest().knownGaps.some((g) => g.includes('createdTs unknowable')));
+});
+
+// MEMORY-0A §6 — the sanity walk covers the WHOLE envelope.
+test('FULL-ENVELOPE SANITATION: non-finite and non-serializable values are refused wherever they hide', () => {
+  const { bus } = mkBus();
+  const derived = (sourceInputs) => ({ source: 'composite', sourceTs: NOW_SEC - 60, availableTs: NOW_SEC - 60, retrievedTs: ISO, kind: 'live', form: 'derived', sourceInputs });
+  const cases = [
+    ['Infinity in lifecycle', mkEnv({ lifecycle: { createdTs: NOW, expiresTs: Infinity } })],
+    ['-Infinity in lifecycle', mkEnv({ lifecycle: { createdTs: NOW, ttlSec: -Infinity } })],
+    // injected into the FINISHED envelope — the builder's defaults must not
+    // be the only line of defense against undefined
+    ['undefined in lifecycle', (() => { const e = mkEnv(); e.lifecycle.supersedesId = undefined; return e; })()],
+    ['NaN in provenance.sourceInputs', mkEnv({ provenance: derived(['tape BTC', NaN]) })],
+    ['function in provenance.sourceInputs', mkEnv({ provenance: derived([() => {}]) })],
+  ];
+  for (const [name, env] of cases) {
+    assert.equal(bus.publish(env).accepted, false, `${name} was accepted`);
+  }
+});
+
+// MEMORY-0A §7 — tape health is never inferred from absence.
+test('TAPE FAIL-CLOSED: LIVE/CLEAN are KNOWN, explicit non-live is DEGRADED, ABSENT health is UNKNOWN', () => {
+  const snap = (tapeState) => adapters.fromTapeSnapshot({ ts: ISO, coin: 'BTC', ...(tapeState !== undefined ? { tapeState } : {}), mid: 100 }, ISO);
+  assert.equal(snap('LIVE').observationState, 'KNOWN');
+  assert.equal(snap('CLEAN').observationState, 'KNOWN');
+  assert.equal(snap('DEGRADED').observationState, 'DEGRADED');
+  assert.equal(snap('OFFLINE').observationState, 'DEGRADED');
+  const absent = snap(undefined);
+  assert.equal(absent.observationState, 'UNKNOWN'); // missing health is not health
+  assert.equal(absent.dataAvailability.book, 'UNKNOWN');
+  assert.equal(snap('LIVE').dataAvailability.book, 'KNOWN');
+  assert.equal(snap('OFFLINE').dataAvailability.book, 'DEGRADED');
+});
+
 // §23.24 — manifest counters reconcile with the actual accepted records
 test('MANIFEST: counters reconcile exactly with the persisted records', () => {
   const { store, bus } = mkBus();

@@ -125,6 +125,90 @@ test('TAPE SAMPLING: high-frequency snapshots are bounded, not duplicated wholes
   }
 });
 
+// MEMORY-0A §8 — the startup capture boundary: pre-existing history is not
+// replayed; records written after the mirror opens (sensor STARTED lines
+// included) are captured; sensor files stay untouched.
+test('STARTUP BOUNDARY: pre-existing records skipped, post-open startup records captured', () => {
+  const d3 = mkdtempSync(path.join(tmpdir(), 'cobra-mirror3-'));
+  process.env.COBRA_DATA_DIR = d3;
+  try {
+    const oldIso = new Date(Date.now() - 3600_000).toISOString();
+    const file = path.join(d3, 'rumint', 'events.jsonl');
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, j({ ts: oldIso, type: 'RUMINT_STARTED', budget: 60 })); // yesterday's boot
+    const mirror = startMemoryMirror({ log: () => {} });
+    appendFileSync(file, j({ ts: nowIso(), type: 'RUMINT_STARTED', budget: 60 })); // THIS boot, after mirror opened
+    const sensorBytes = readFileSync(file, 'utf8');
+    mirror.poll();
+    const mem = readFileSync(path.join(d3, 'memory', 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(mem.length, 1); // the new startup record — not the historical one
+    assert.equal(mem[0].sourceModule, 'RUMINT');
+    assert.ok(Math.abs(mem[0].ts * 1000 - Date.now()) < 60_000);
+    assert.equal(readFileSync(file, 'utf8'), sensorBytes); // sensor file untouched by the mirror
+    mirror.stop();
+  } finally {
+    process.env.COBRA_DATA_DIR = TEST_DATA;
+    rmSync(d3, { recursive: true, force: true });
+  }
+});
+
+// MEMORY-0A §9 — daily tape rollover: a session file born after the mirror
+// opened is NEW live evidence and is read from byte zero.
+test('DAILY ROLLOVER: the new day tape file starts at byte zero; the old day is not replayed', () => {
+  const d4 = mkdtempSync(path.join(tmpdir(), 'cobra-mirror4-'));
+  process.env.COBRA_DATA_DIR = d4;
+  try {
+    let day = 'day1';
+    const ISO = nowIso();
+    const day1File = path.join(d4, 'tape', 'day1', 'snapshots.jsonl');
+    mkdirSync(path.dirname(day1File), { recursive: true });
+    writeFileSync(day1File, j({ ts: ISO, coin: 'BTC', tapeState: 'LIVE', mid: 1 })); // history before mirror open
+    const mirror = startMemoryMirror({ log: () => {}, sessionDateOf: () => day });
+    mirror.poll();
+    assert.ok(!existsSync(path.join(d4, 'memory', 'events.jsonl'))); // day1 history anchored at EOF, not replayed
+    // the date rolls; tape writes into the NEW session file before the next poll
+    day = 'day2';
+    const day2File = path.join(d4, 'tape', 'day2', 'snapshots.jsonl');
+    mkdirSync(path.dirname(day2File), { recursive: true });
+    writeFileSync(day2File, j({ ts: nowIso(), coin: 'BTC', tapeState: 'LIVE', mid: 2 }) + j({ ts: nowIso(), coin: 'ETH', tapeState: 'LIVE', mid: 3 }));
+    mirror.poll();
+    const mem = readFileSync(path.join(d4, 'memory', 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(mem.length, 2); // BOTH first records of the new day captured from byte zero
+    assert.deepEqual(mem.map((e) => e.payload.mid).sort(), [2, 3]);
+    mirror.stop();
+  } finally {
+    process.env.COBRA_DATA_DIR = TEST_DATA;
+    rmSync(d4, { recursive: true, force: true });
+  }
+});
+
+// MEMORY-0A §10 — ingestion loss is counted and degrades health; sensor
+// files are never rewritten.
+test('SOURCE INGESTION HONESTY: a malformed sensor line degrades memory health and touches nothing else', () => {
+  const d5 = mkdtempSync(path.join(tmpdir(), 'cobra-mirror5-'));
+  process.env.COBRA_DATA_DIR = d5;
+  try {
+    const file = path.join(d5, 'survey', 'events.jsonl');
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, '');
+    const mirror = startMemoryMirror({ log: () => {} });
+    appendFileSync(file, '{this is not json}\n' + j({ ts: nowIso(), type: 'RIPPLE', symbol: 'BTC', verdict: 'RIPPLE', zVol: 4, zRet: 2.2, extension: 1 }));
+    const sensorBytes = readFileSync(file, 'utf8');
+    mirror.poll();
+    const h = mirror.health();
+    assert.equal(h.status, 'DEGRADED'); // ingestion loss is never pretended away
+    assert.equal(h.sourceParseErrors, 1);
+    assert.equal(h.adapterErrors, 0);
+    assert.equal(h.acceptedCount, 1); // the good line still flowed
+    assert.equal(readFileSync(file, 'utf8'), sensorBytes); // sensor-owned file untouched — no rewrite, no quarantine
+    assert.ok(!existsSync(path.join(d5, 'survey', 'events.quarantine.jsonl')));
+    mirror.stop();
+  } finally {
+    process.env.COBRA_DATA_DIR = TEST_DATA;
+    rmSync(d5, { recursive: true, force: true });
+  }
+});
+
 // THE ARCHITECTURAL PROOF: no return path exists in the source graph.
 test('NO RETURN PATH: only fly.js touches memory/, and memory/ imports no sensor or state machinery', () => {
   const root = path.join(import.meta.dirname, '..');
@@ -149,7 +233,13 @@ test('NO RETURN PATH: only fly.js touches memory/, and memory/ imports no sensor
     // and no dynamic escape hatches over evidence
     assert.ok(!/\beval\s*\(/.test(src) && !/new Function/.test(src), `${f} contains dynamic code execution`);
   }
-  // 3) the composition root wires the mirror inside its own containment
+  // 3) the composition root wires the mirror inside its own containment,
+  // and opens it BEFORE the live sensors begin writing (MEMORY-0A §8)
   const fly = readFileSync(path.join(root, 'fly.js'), 'utf8');
   assert.ok(fly.includes("./memory/mirror.js"));
+  const mirrorAt = fly.indexOf('startMemoryMirror(');
+  assert.ok(mirrorAt > 0);
+  for (const sensor of ['startRumint()', 'startGateway()', 'startWideEye()', 'runTape(']) {
+    assert.ok(mirrorAt < fly.indexOf(sensor), `${sensor} starts before the memory mirror opens`);
+  }
 });

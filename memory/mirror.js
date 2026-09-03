@@ -1,10 +1,13 @@
-// MEMORY-0 DARK MIRROR. Existing Serpent behavior remains authoritative;
-// this runtime TAILS the append-only event streams the sensors already
-// write, transforms new lines through the pure adapters, and publishes
-// canonical envelopes onto the memory bus. There is NO return arrow: this
-// module imports nothing from any sensor, calls nothing in any sensor, and
-// no sensor knows it exists. If memory fails, it fails DARK — loudly
-// unhealthy, never crashing collection, never touching trading state.
+// MEMORY-0 DARK MIRROR, hardened by MEMORY-0A. Existing Serpent behavior
+// remains authoritative; this runtime TAILS the append-only event streams
+// the sensors already write, transforms new lines through the pure
+// adapters, and publishes canonical envelopes onto the memory bus. There is
+// NO return arrow: this module imports nothing from any sensor, calls
+// nothing in any sensor, and no sensor knows it exists. If memory fails, it
+// fails DARK — loudly unhealthy, never crashing collection, never touching
+// trading state — and it never PRETENDS ingestion was perfect: source
+// parse failures, adapter failures and read failures are counted and
+// degrade memory health (§10). Sensor-owned files are never rewritten.
 import path from 'node:path';
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { dataDir } from '../lib/config.js';
@@ -26,22 +29,25 @@ const POLL_MS = 5000;
 // window — bounded memory, not a second copy of the tape (doctrine/MEMORY.md)
 const TAPE_SAMPLE_SEC = 60;
 
-// Tail one JSONL file: remembers its byte offset, reads only appended
-// bytes, and starts at end-of-file on first sight so a restart does not
-// republish history (deterministic ids would suppress duplicates anyway —
-// this simply avoids re-reading old bytes).
-class Tail {
-  constructor(file) {
+// Tail one JSONL file, remembering its byte offset and reading only
+// appended bytes. Anchor semantics (MEMORY-0A §8/§9):
+//   fromStart=false — a file that already existed when the mirror OPENED:
+//     anchor at EOF; its history predates memory and is not replayed.
+//   fromStart=true — a file first seen AFTER the mirror opened (e.g. a new
+//     daily tape session): it is new live evidence; read from byte zero.
+// A malformed line is skipped and COUNTED — never repaired, never silent.
+export class Tail {
+  constructor(file, { fromStart = false } = {}) {
     this.file = file;
-    this.offset = existsSync(file) ? statSync(file).size : 0;
+    this.offset = fromStart ? 0 : existsSync(file) ? statSync(file).size : 0;
     this.partial = '';
   }
 
   readNew() {
-    if (!existsSync(this.file)) return [];
+    if (!existsSync(this.file)) return { records: [], parseErrors: 0 };
     const size = statSync(this.file).size;
     if (size < this.offset) this.offset = 0; // rotated/replaced: start over
-    if (size === this.offset) return [];
+    if (size === this.offset) return { records: [], parseErrors: 0 };
     const fd = openSync(this.file, 'r');
     let chunk;
     try {
@@ -55,28 +61,31 @@ class Tail {
     const text = this.partial + chunk;
     const lines = text.split('\n');
     this.partial = lines.pop() ?? ''; // an unterminated final line waits for its newline
-    const out = [];
+    const records = [];
+    let parseErrors = 0;
     for (const l of lines) {
       const t = l.trim();
       if (!t) continue;
       try {
-        out.push(JSON.parse(t));
+        records.push(JSON.parse(t));
       } catch {
-        // a torn sensor line is the sensor's own stream concern; skipped here
+        parseErrors++; // lost source evidence is COUNTED, never pretended away
       }
     }
-    return out;
+    return { records, parseErrors };
   }
 }
 
-export function startMemoryMirror({ log = console.log } = {}) {
+export function startMemoryMirror({ log = console.log, sessionDateOf = sessionDate } = {}) {
   const store = new MemoryStore({ log });
   const bus = new MemoryBus({ store, log });
   const d = dataDir();
   const tails = new Map(); // path -> Tail
   const tapeLastSample = new Map(); // coin -> last sampled envelope ts (sec)
+  const ingestion = { sourceParseErrors: 0, adapterErrors: 0, mirrorReadErrors: 0 };
+  let opened = false; // files first seen after this flips are NEW live evidence
   const tail = (file) => {
-    if (!tails.has(file)) tails.set(file, new Tail(file));
+    if (!tails.has(file)) tails.set(file, new Tail(file, { fromStart: opened }));
     return tails.get(file);
   };
 
@@ -87,24 +96,32 @@ export function startMemoryMirror({ log = console.log } = {}) {
     { file: path.join(d, 'cost', 'evaluations.jsonl'), adapt: fromCostEvaluation },
     { file: path.join(d, 'state', 'transitions.jsonl'), adapt: fromStateTransition },
     { file: path.join(d, 'state', 'controls_log.jsonl'), adapt: fromControlAction },
-    // tape session directory rolls daily; resolve it each poll
-    { file: path.join(d, 'tape', sessionDate(), 'snapshots.jsonl'), adapt: fromTapeSnapshot, sampled: true },
+    // tape session directory rolls daily; resolve it each poll — a session
+    // file born after the mirror opened is read from byte zero (§9)
+    { file: path.join(d, 'tape', sessionDateOf(), 'snapshots.jsonl'), adapt: fromTapeSnapshot, sampled: true },
   ];
 
-  // anchor every known stream at its CURRENT end right now: the mirror
-  // observes from the moment it opens; it does not replay history
+  // anchor every stream that exists RIGHT NOW at its current end: the
+  // mirror observes from the moment it opens; pre-existing history is not
+  // replayed. Anything created after this moment starts at byte zero.
   for (const s of sources()) tail(s.file);
+  opened = true;
 
   function poll() {
     for (const s of sources()) {
-      let records;
+      let result;
       try {
-        records = tail(s.file).readNew();
+        result = tail(s.file).readNew();
       } catch (err) {
+        ingestion.mirrorReadErrors++;
         log(`MEMORY mirror read failed for ${path.basename(s.file)} (contained): ${err.message}`);
         continue;
       }
-      for (const rec of records) {
+      if (result.parseErrors) {
+        ingestion.sourceParseErrors += result.parseErrors;
+        log(`MEMORY DEGRADED: ${result.parseErrors} malformed line(s) in ${path.basename(s.file)} — skipped, counted, source file untouched`);
+      }
+      for (const rec of result.records) {
         try {
           if (s.sampled && rec.coin) {
             const t = Math.floor(Date.parse(rec.ts) / 1000);
@@ -114,16 +131,30 @@ export function startMemoryMirror({ log = console.log } = {}) {
           }
           bus.publish(s.adapt(rec, nowIso()));
         } catch (err) {
+          ingestion.adapterErrors++;
           log(`MEMORY adapter error (contained): ${err.message}`);
         }
       }
     }
   }
 
+  // Health merges the bus/store view with ingestion truth: lost or failed
+  // source lines degrade memory health even while persistence is fine.
+  const health = () => {
+    const base = bus.health();
+    const ingestionTrouble = ingestion.sourceParseErrors + ingestion.adapterErrors + ingestion.mirrorReadErrors > 0;
+    return Object.freeze({
+      ...base,
+      ...ingestion,
+      status: base.status !== 'HEALTHY' ? base.status : ingestionTrouble ? 'DEGRADED' : 'HEALTHY',
+    });
+  };
+
   const timer = setInterval(() => {
     try {
       poll();
     } catch (err) {
+      ingestion.mirrorReadErrors++;
       log(`MEMORY mirror poll failed (contained): ${err.message}`);
     }
   }, POLL_MS);
@@ -143,5 +174,5 @@ export function startMemoryMirror({ log = console.log } = {}) {
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
 
-  return { bus, store, stop, poll, health: () => bus.health() };
+  return { bus, store, stop, poll, health };
 }

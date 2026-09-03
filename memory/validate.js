@@ -128,8 +128,12 @@ export function validateEnvelope(env) {
     errors.push('lifecycle.createdTs missing');
   }
 
-  walk(env.payload, 'payload', errors);
-  walk(env.correlation ?? null, 'correlation', errors);
+  // MEMORY-0A §6: the deep sanity walk covers the ENTIRE canonical
+  // envelope — payload, dataAvailability, provenance (sourceInputs
+  // included), correlation, lifecycle, everything. NaN/Infinity/undefined/
+  // functions corrupt truth in serialization and are refused wherever they
+  // hide. String VALUES remain data and are never inspected as code.
+  walk(env, 'envelope', errors);
 
   return { ok: errors.length === 0, errors };
 }
