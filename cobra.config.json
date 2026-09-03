@@ -11,6 +11,9 @@
   "paper": {
     "baseBalanceUsd": 100
   },
+  "childhood": {
+    "tradesRequestBudgetPerMajor": 30
+  },
   "wideeye": {
     "enabled": true,
     "sweepSec": 60,
