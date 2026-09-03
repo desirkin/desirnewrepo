@@ -17,9 +17,33 @@ import { ledgerSummary } from '../ledger/summary.js';
 import { kill, cage, veto, clearLatches, isVetoed, readControls } from '../state/controls.js';
 import { existsSync, readFileSync as readFs } from 'node:fs';
 import { dataDir } from '../lib/config.js';
+import { appendJsonl } from '../lib/jsonl.js';
+import { nowIso } from '../lib/time.js';
+import { ControlAuth, gateControl, parseCookies, SESSION_LIFETIME_MS } from './auth.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
+
+// CONTROL-0: server-side authority for every control mutation. Audit
+// events carry categories and non-reversible session tags — never a
+// password, CSRF token, cookie, or full session id (doctrine/CONTROL.md).
+const authLogFile = () => path.join(dataDir(), 'state', 'control_auth_log.jsonl');
+const auth = new ControlAuth({
+  audit: (event) => {
+    try {
+      appendJsonl(authLogFile(), { ts: nowIso(), ...event });
+    } catch {
+      // audit write failure never blocks the auth decision itself
+    }
+  },
+});
+console.log(auth.configured() ? 'CONTROL AUTH: CONFIGURED' : 'CONTROL AUTH: UNCONFIGURED — control mutations fail closed');
+
+const SESSION_COOKIE = 'serpent_session';
+const setSessionCookie = (req, id, maxAgeSec) => {
+  const secure = String(req.headers['x-forwarded-proto'] ?? '').includes('https') ? '; Secure' : '';
+  return `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSec}${secure}`;
+};
 
 // Effective tape state, staleness included: a dead tape process leaves a
 // frozen LIVE file behind, and frozen is not LIVE.
@@ -141,6 +165,8 @@ function statusPayload() {
       kill: readControls().kill?.active ?? false,
       cage: readControls().cage?.active ?? false,
     },
+    // CONTROL AUTH configuration state only — never implies armed-to-trade
+    controlAuth: auth.configured() ? 'CONFIGURED' : 'UNCONFIGURED',
     paperFanged: true,
   };
 }
@@ -207,28 +233,109 @@ function coinPayload(coin) {
   };
 }
 
-function json(res, code, obj) {
+function json(res, code, obj, extraHeaders = {}) {
   const body = JSON.stringify(obj);
-  res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', ...extraHeaders });
   res.end(body);
+}
+
+function readBody(req, res, cb) {
+  let raw = '';
+  req.on('data', (chunk) => {
+    raw += chunk;
+    if (raw.length > 4096) req.destroy(); // auth/control bodies are tiny
+  });
+  req.on('end', () => {
+    try {
+      cb(JSON.parse(raw || '{}'));
+    } catch {
+      json(res, 400, { ok: false, error: 'invalid JSON body' });
+    }
+  });
 }
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
-    if (req.method === 'POST' && url.pathname === '/api/control') {
-      let raw = '';
-      req.on('data', (chunk) => {
-        raw += chunk;
-        if (raw.length > 4096) req.destroy(); // control bodies are tiny
-      });
-      req.on('end', () => {
-        try {
-          const result = handleControl(JSON.parse(raw || '{}'));
-          json(res, result.ok ? 200 : 400, result);
-        } catch (err) {
-          json(res, 400, { ok: false, error: err.message });
+    // ---- CONTROL-0 auth endpoints ----
+    // LOGIN is the one deliberate CSRF exception: no session exists yet to
+    // carry a token. It is protected by SameSite=Strict cookie scoping,
+    // no permissive CORS, the password itself, and the failed-auth limiter.
+    // Every OTHER mutation (logout and controls included) needs session+CSRF.
+    if (req.method === 'POST' && url.pathname === '/api/auth/login') {
+      readBody(req, res, (body) => {
+        const r = auth.login(body.password);
+        if (!r.authenticated) {
+          const code = r.reason === 'RATE_LIMITED' ? 429 : r.reason === 'CONTROL_AUTH_UNCONFIGURED' ? 503 : 401;
+          json(res, code, { authenticated: false, reason: r.reason, ...(r.retryAfterSec ? { retryAfterSec: r.retryAfterSec } : {}) });
+          return;
         }
+        json(
+          res,
+          200,
+          { authenticated: true, csrfToken: r.csrfToken, expiresAt: r.expiresAt },
+          { 'set-cookie': setSessionCookie(req, r.sessionId, SESSION_LIFETIME_MS / 1000) }
+        );
+      });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/auth/status') {
+      const s = auth.status(parseCookies(req.headers.cookie)[SESSION_COOKIE]);
+      json(res, 200, {
+        ...s,
+        controlAuth: !s.configured ? 'CONTROL_AUTH_UNCONFIGURED' : s.authenticated ? 'CONTROL_AUTHENTICATED' : 'CONTROL_LOCKED',
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
+      const r = auth.logout(parseCookies(req.headers.cookie)[SESSION_COOKIE], req.headers['x-serpent-csrf']);
+      if (!r.ok) {
+        json(res, r.code, { ok: false, reason: r.reason });
+        return;
+      }
+      json(res, 200, { ok: true }, { 'set-cookie': setSessionCookie(req, '', 0) });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/control') {
+      readBody(req, res, (body) => {
+        // AUTHORIZE FIRST, fail closed — the control implementation is
+        // never invoked before the gate answers (doctrine/CONTROL.md).
+        const gate = gateControl(auth, {
+          cookieHeader: req.headers.cookie,
+          csrfHeader: req.headers['x-serpent-csrf'],
+          originHeader: req.headers.origin,
+          hostHeader: req.headers.host,
+          body,
+        });
+        if (!gate.allow) {
+          try {
+            appendJsonl(authLogFile(), {
+              ts: nowIso(),
+              event: 'CONTROL_REFUSED',
+              action: String(body.action ?? '').toUpperCase().slice(0, 16),
+              reason: gate.reason,
+            });
+          } catch {
+            // audit best-effort; the refusal stands regardless
+          }
+          json(res, gate.code, { ok: false, reason: gate.reason, ...(gate.retryAfterSec ? { retryAfterSec: gate.retryAfterSec } : {}) });
+          return;
+        }
+        try {
+          appendJsonl(authLogFile(), {
+            ts: nowIso(),
+            event: 'CONTROL_AUTHORIZED',
+            action: String(body.action ?? '').toUpperCase().slice(0, 16),
+            sessionTag: gate.sessionTag,
+          });
+        } catch {
+          // audit best-effort
+        }
+        // secrets never travel past the gate: the control layer sees only
+        // the action fields it always saw
+        const { password, confirmPhrase, ...controlBody } = body;
+        const result = handleControl(controlBody);
+        json(res, result.ok ? 200 : 400, result);
       });
       return;
     }
@@ -269,3 +376,5 @@ server.listen(PORT, '0.0.0.0', () => {
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.once(sig, () => server.close());
 }
+
+export { server }; // for endpoint tests; fly.js keeps the side-effect import

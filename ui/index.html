@@ -240,6 +240,7 @@
   #serpent path.coil { animation: drawCoil 1.5s ease .25s forwards; }
   @keyframes drawCoil { to { stroke-dashoffset: 0; } }
   body.reduced #serpent path.coil { animation: none; stroke-dasharray: none; }
+#card input{width:100%;margin:8px 0;padding:10px;background:rgba(10,14,20,.9);border:1px solid #223;color:inherit;font:inherit;border-radius:6px}
 </style>
 </head>
 <body class="booting" data-posture="COILED">
@@ -279,6 +280,8 @@
      style="top:calc(max(10px, env(safe-area-inset-top)) + 74px);left:12px;color:#5c6b7a"></div>
 <div id="eyechip" class="chip" hidden
      style="top:calc(max(10px, env(safe-area-inset-top)) + 106px);left:12px;color:#5c6b7a"></div>
+<div id="authchip" class="chip" hidden
+     style="top:calc(max(10px, env(safe-area-inset-top)) + 138px);left:12px;color:#5c6b7a"></div>
 <div id="clockchip" class="chip">ET --:-- · SESSION ----------</div>
 <div id="controls">
   <button id="btnKill">KILL</button>
@@ -491,6 +494,78 @@ function applyPosture(posture, { why = '', sub = null } = {}) {
 }
 
 /* ---------- real status ---------- */
+/* ---------- CONTROL-0: the interface is not authority ---------- */
+/* csrfToken lives only in this page's memory — never localStorage, never a
+   query string. The session rides an HttpOnly SameSite=Strict cookie the
+   script cannot read. The server re-authorizes every mutation. */
+let csrfToken = null;
+async function refreshAuth() {
+  try {
+    const r = await fetch('/api/auth/status');
+    const d = await r.json();
+    csrfToken = d.authenticated ? d.csrfToken : null;
+    const chip = $('#authchip');
+    chip.hidden = false;
+    chip.textContent = d.controlAuth === 'CONTROL_AUTH_UNCONFIGURED' ? 'CONTROL AUTH UNCONFIGURED'
+      : d.authenticated ? 'CONTROL AUTHENTICATED' : 'CONTROL LOCKED';
+  } catch { /* link loss is reported by the tape chip */ }
+}
+function openAuthCard(then) {
+  $('#cardTitle').textContent = 'CONTROL AUTH';
+  $('#cardBody').innerHTML = `
+    <div class="rows"><span>server authorization required</span></div>
+    <input id="authPw" type="password" placeholder="control password" autocomplete="current-password">
+    <button id="authGo">AUTHENTICATE</button>
+    <div id="authMsg" class="rows"></div>`;
+  $('#authGo').addEventListener('click', async () => {
+    const pw = $('#authPw').value;
+    $('#authPw').value = '';
+    try {
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password: pw }),
+      });
+      const d = await r.json();
+      if (d.authenticated) {
+        csrfToken = d.csrfToken;
+        $('#card').classList.remove('open');
+        refreshAuth();
+        if (then) then();
+      } else {
+        $('#authMsg').textContent =
+          d.reason === 'RATE_LIMITED' ? `LOCKED OUT — retry in ${d.retryAfterSec ?? '?'}s`
+          : d.reason === 'CONTROL_AUTH_UNCONFIGURED' ? 'CONTROL AUTH UNCONFIGURED'
+          : 'AUTHENTICATION FAILED';
+      }
+    } catch { $('#authMsg').textContent = 'SHELL LINK LOST'; }
+  });
+  $('#card').classList.add('open');
+}
+function ensureAuth(fire) { if (csrfToken) fire(); else openAuthCard(fire); }
+function openClearCard() {
+  $('#cardTitle').textContent = 'CLEAR / RE-ARM';
+  $('#cardBody').innerHTML = `
+    <div class="rows"><span>restoring permission requires fresh intent — password again, and the exact phrase</span></div>
+    <input id="clrPw" type="password" placeholder="control password" autocomplete="off">
+    <input id="clrPhrase" type="text" placeholder="type: CLEAR SERPENT" autocomplete="off" autocapitalize="characters">
+    <button id="clrGo">CLEAR</button>
+    <div id="clrMsg" class="rows"></div>`;
+  $('#clrGo').addEventListener('click', async () => {
+    const password = $('#clrPw').value;
+    const confirmPhrase = $('#clrPhrase').value;
+    $('#clrPw').value = '';
+    const d = await postControl('clear', { password, confirmPhrase });
+    if (d.ok) $('#card').classList.remove('open');
+    else $('#clrMsg').textContent =
+      d.reason === 'RATE_LIMITED' ? `LOCKED OUT — retry in ${d.retryAfterSec ?? '?'}s`
+      : d.reason === 'UNAUTHENTICATED' ? 'AUTHENTICATE FIRST'
+      : 'CLEAR REFUSED';
+  });
+  $('#card').classList.add('open');
+}
+refreshAuth();
+setInterval(refreshAuth, 60_000);
 /* ---------- human controls: confirm-tap, POST, honest feedback ---------- */
 const armTimers = new Map();
 function armThen(btn, label, fire) {
@@ -512,10 +587,11 @@ async function postControl(action, extra = {}) {
   try {
     const r = await fetch('/api/control', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...(csrfToken ? { 'X-Serpent-CSRF': csrfToken } : {}) },
       body: JSON.stringify({ action, ...extra }),
     });
     const d = await r.json();
+    if (r.status === 401) { csrfToken = null; refreshAuth(); }
     if (d.ok && d.status) renderStatus(d.status);
     return d;
   } catch {
@@ -523,9 +599,9 @@ async function postControl(action, extra = {}) {
     return { ok: false };
   }
 }
-$('#btnKill').addEventListener('click', () => armThen($('#btnKill'), 'KILL', () => postControl('kill')));
-$('#btnCage').addEventListener('click', () => armThen($('#btnCage'), 'CAGE', () => postControl('cage')));
-$('#btnClear').addEventListener('click', () => armThen($('#btnClear'), 'CLEAR', () => postControl('clear')));
+$('#btnKill').addEventListener('click', () => armThen($('#btnKill'), 'KILL', () => ensureAuth(() => postControl('kill'))));
+$('#btnCage').addEventListener('click', () => armThen($('#btnCage'), 'CAGE', () => ensureAuth(() => postControl('cage'))));
+$('#btnClear').addEventListener('click', () => ensureAuth(openClearCard));
 $('#btnVeto').addEventListener('click', () => openVetoSheet());
 
 function openVetoSheet() {
@@ -538,10 +614,10 @@ function openVetoSheet() {
     : '<div class="rows"><span>no pending strikes to deny</span></div>';
   for (const b of $('#cardBody').querySelectorAll('[data-veto]')) {
     b.addEventListener('click', () =>
-      armThen(b, 'VETO', async () => {
+      armThen(b, 'VETO', () => ensureAuth(async () => {
         await postControl('veto', { predictionId: b.dataset.veto });
         openVetoSheet(); // re-render the remaining pending list
-      })
+      }))
     );
   }
   $('#card').classList.add('open');
