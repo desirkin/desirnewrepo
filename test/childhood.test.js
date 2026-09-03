@@ -184,12 +184,15 @@ test('trades enrichment consumes only the last FULLY ELAPSED bucket', () => {
   const rows = candles(3000, { t0, mutate: (i) => ({ vol: 10 + (i % 7) }) });
   const imbalance = {};
   for (let b = t0 - 900; b < t0 + 3000 * 60 + 900; b += 900) imbalance[b] = 0.5;
-  const obs = runParity(rows, { aggression: { imbalance, bucketSec: 900 } });
+  const tradesClock = '2026-09-03T10:09:00.000Z'; // the Trades fetch's OWN retrieval time (B-0B.2)
+  const obs = runParity(rows, { aggression: { imbalance, bucketSec: 900, retrievedTs: tradesClock } });
   assert.ok(obs.length > 0);
   for (const o of obs) {
     assert.equal(o.microstructure.aggressionImbalance, 0.5);
     // the bucket used ended at or before replayTs — never the live bucket
     assert.equal(o.dataAvailability.microstructure, 'KNOWN');
+    // and its provenance carries the Trades clock, not the OHLC clock
+    assert.equal(o.provenance.microstructure.retrievedTs, tradesClock);
   }
 });
 

@@ -19,7 +19,8 @@ import { labelObservation } from './labeler.js';
 import { assignSplits, MAX_HORIZON_SEC } from './splits.js';
 import { fetchUsdPairs, fetchOhlc, fetchAggression } from './fetch.js';
 import { fetchGovernance, fetchIncidentHistory } from './deepmemory.js';
-import { validateChildhood, EXPECTED_SCHEMA_VERSION } from './validate.js';
+import { validateChildhood, EXPECTED_SCHEMA_VERSION, CHILDHOOD_VERSION } from './validate.js';
+import { latestRetrievedTs } from './provenance.js';
 import { promoteStaging } from './promote.js';
 
 const AUTHORITATIVE = () => path.join(dataDir(), 'childhood');
@@ -177,6 +178,10 @@ for (const t of TRACKS) {
   const intervalSec = t.intervalMin * 60;
   const { contextAt, median1hAt } = buildContextFns(trackStores, intervalSec);
   const trackName = `${t.intervalMin}m`;
+  // marketContext is built from EVERY store on this track (BTC/ETH/universe
+  // median), so its provenance clock is the LATEST retrieval among all of
+  // them — never the target symbol's earlier fetch (B-0B.2 §3).
+  const contextRetrievedTs = latestRetrievedTs([...retrievalIso.get(t.intervalMin).values()]);
   const allObs = [];
   for (const [coin, store] of trackStores) {
     if (t.role === 'PARITY_SCOUT') {
@@ -188,7 +193,8 @@ for (const t of TRACKS) {
           cfg: wideCfg,
           contextAt,
           retrievedTs: retrievalIso.get(t.intervalMin).get(coin),
-          aggression: agg ? { imbalance: agg.imbalance, bucketSec: 900 } : null,
+          contextRetrievedTs,
+          aggression: agg ? { imbalance: agg.imbalance, bucketSec: 900, retrievedTs: agg.retrievedTs } : null,
         })
       );
     } else {
@@ -200,6 +206,7 @@ for (const t of TRACKS) {
           track: trackName,
           contextAt,
           retrievedTs: retrievalIso.get(t.intervalMin).get(coin),
+          contextRetrievedTs,
         })
       );
     }
@@ -283,7 +290,7 @@ try {
 const totalObs = Object.values(counts.byTrack).reduce((s, v) => s + v, 0);
 const manifest = {
   schemaVersion: EXPECTED_SCHEMA_VERSION,
-  childhoodVersion: 'B0B',
+  childhoodVersion: CHILDHOOD_VERSION,
   wideEyeLiveLogicVersion: `eyecore-1 (z>=${wideCfg.zVolThreshold}/|z|>=${wideCfg.zRetThreshold}/ext<=${wideCfg.extensionCapPct}%, minSamples=${wideCfg.minSamples}, cooldown=${wideCfg.rippleCooldownMin}m, add-then-score, 7d retention)`,
   wideEyeReplayParityVersion: 'parity-2 (shared eyecore incl. feature derivers; true 1m grid; rolling-24h volRate; live cooldown; no coarse-track wide-eye output)',
   // Live sweeps run on a wall-clock ~60s cadence (not calendar-minute
@@ -353,7 +360,9 @@ const manifest = {
   },
   splits: splitBoundaries,
   embargoHorizonSec: MAX_HORIZON_SEC,
-  tradesCoverage: Object.fromEntries([...aggression.entries()].map(([c, r]) => [c, r.coverage])),
+  // per-symbol Trades retrieval clock recorded so the validator can verify
+  // KNOWN microstructure never claims retrieval before the Trades fetch
+  tradesCoverage: Object.fromEntries([...aggression.entries()].map(([c, r]) => [c, { ...r.coverage, retrievedTs: r.retrievedTs }])),
   knownGaps: gaps,
   note: 'B-0/B-0A/B-0B builds memory; it proves nothing. No performance numbers are reported here by design.',
 };

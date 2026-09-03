@@ -6,6 +6,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { MAX_HORIZON_SEC } from './splits.js';
 
 export const EXPECTED_SCHEMA_VERSION = 'childhood-observation-3-b0b';
+export const CHILDHOOD_VERSION = 'B0B.2'; // the hardened generation this validator enforces
 const FORBIDDEN_IN_OBS = ['mfe', 'mae', 'outcomeTags', 'label', 'moveRemainingPct', 'abnormalReturn', 'outcome'];
 // incident FACT records must never carry the future (B-0B.1 §8)
 const FORBIDDEN_IN_INCIDENT = ['historicalOutcomes', 'outcomes', 'ret1hPct', 'ret4hPct', 'mfe1hPct', 'mae1hPct'];
@@ -53,6 +54,9 @@ export function validateChildhood(dir) {
   if (manifest.schemaVersion !== EXPECTED_SCHEMA_VERSION) {
     errors.push(`schemaVersion ${manifest.schemaVersion} != ${EXPECTED_SCHEMA_VERSION}`);
   }
+  if (manifest.childhoodVersion !== CHILDHOOD_VERSION) {
+    errors.push(`childhoodVersion ${manifest.childhoodVersion} != ${CHILDHOOD_VERSION}`);
+  }
 
   const observations = readJsonlStrict(path.join(dir, 'observations.jsonl'), errors);
   const outcomes = readJsonlStrict(path.join(dir, 'outcomes.jsonl'), errors);
@@ -64,6 +68,7 @@ export function validateChildhood(dir) {
   // retrieval time (B-0B.1 §7 — not just the final row), and a per-track
   // retrieval map for observation retrieval-ordering checks (§4).
   const sourceRetrieval = new Map(); // `${track}:${symbol}` -> retrievedSec
+  const trackLatestRetrieval = new Map(); // track -> max retrievedSec of ALL its sources (context contributors)
   for (const f of readdirSync(dir).filter((f) => f.startsWith('candles-') && f.endsWith('.jsonl'))) {
     const track = f.slice('candles-'.length, -'.jsonl'.length);
     const rows = readJsonlStrict(path.join(dir, f), errors);
@@ -74,6 +79,7 @@ export function validateChildhood(dir) {
         continue;
       }
       sourceRetrieval.set(`${track}:${row.symbol}`, row.retrievedSec);
+      trackLatestRetrieval.set(track, Math.max(trackLatestRetrieval.get(track) ?? 0, row.retrievedSec));
       for (const c of row.candles ?? []) {
         if (c[0] + intervalSec > row.retrievedSec) {
           errors.push(`${f}: ${row.symbol} contains a candle not closed by retrieval time`);
@@ -116,6 +122,33 @@ export function validateChildhood(dir) {
       errors.push(`observation ${o.id} priceState retrievedTs is not a parseable timestamp`);
     } else if (Number.isFinite(priceRetrieved) && srcRetrievedSec && priceRetrieved < srcRetrievedSec * 1000) {
       errors.push(`observation ${o.id} claims retrieval before source retrieval`);
+    }
+
+    // DERIVED CLOCK TRUTH (B-0B.2 §7): a derived field's retrieval time is
+    // chronologically defensible against its actual source dependencies.
+    // marketContext is built from EVERY source on its track — its clock may
+    // not precede the LATEST of them.
+    const trackMax = trackLatestRetrieval.get(o.track);
+    const mcRetrieved = Date.parse(o.provenance?.marketContext?.retrievedTs);
+    if (o.provenance?.marketContext && trackMax) {
+      if (!Number.isFinite(mcRetrieved)) {
+        errors.push(`observation ${o.id} marketContext retrievedTs is not a parseable timestamp`);
+      } else if (mcRetrieved < trackMax * 1000) {
+        errors.push(`observation ${o.id} marketContext claims retrieval before its latest source input`);
+      }
+    }
+    // KNOWN microstructure came from a Trades retrieval with its own clock —
+    // recorded in the manifest — and may not claim an earlier one.
+    if (o.dataAvailability?.microstructure === 'KNOWN') {
+      const tradesRetrieved = Date.parse(manifest.tradesCoverage?.[o.symbol]?.retrievedTs);
+      const microRetrieved = Date.parse(o.provenance?.microstructure?.retrievedTs);
+      if (!Number.isFinite(tradesRetrieved)) {
+        errors.push(`observation ${o.id} has KNOWN microstructure but no trades retrieval clock in the manifest for ${o.symbol}`);
+      } else if (!Number.isFinite(microRetrieved)) {
+        errors.push(`observation ${o.id} microstructure retrievedTs is not a parseable timestamp`);
+      } else if (microRetrieved < tradesRetrieved) {
+        errors.push(`observation ${o.id} KNOWN microstructure claims retrieval before the trades retrieval`);
+      }
     }
 
     if (o.trackRole === 'CONTEXT_ONLY' && WIDEEYE_CLASSIFICATIONS.has(o.setupClassification)) {

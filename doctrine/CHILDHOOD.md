@@ -126,6 +126,31 @@ retrieval. `sourceTs`, `availableTs` and `retrievedTs` keep their three
 distinct meanings; the validator rejects an archive whose observations
 claim retrieval before their source was actually retrieved.
 
+**Provenance clocks are closed (B-0B.2).** *A derived field may not claim a
+retrieval timestamp earlier than any source input required to construct
+that field.* Concretely:
+
+- priceState/volumeState carry the target symbol's OWN OHLC retrieval time;
+- marketContext is derived from cross-symbol sources (BTC, ETH, every
+  universe-median contributor), so its `retrievedTs` is the LATEST actual
+  retrieval among all of them — never the target's earlier fetch;
+- KNOWN microstructure derives from the separate Trades retrieval and
+  carries the Trades clock (recorded per symbol in the manifest's
+  `tradesCoverage`), never the earlier OHLC clock;
+- evidence that was NEVER retrieved (externalSignals; microstructure and
+  scoutSignals where no source exists) carries the `NOT_RETRIEVED` sentinel
+  — a retrieval timestamp is never invented for it, and its
+  sourceTs/availableTs stay `UNKNOWN`;
+- a build-start timestamp may appear in run/archive metadata only, never as
+  evidence retrieval provenance;
+- `childhood/provenance.js` (`deriveProvenance`) computes derived clocks as
+  the latest valid input retrieval time and preserves input identity in
+  `sourceInputs`;
+- the validator enforces this chronology: marketContext against the latest
+  candle-source retrieval of its track, KNOWN microstructure against the
+  manifest's Trades retrieval clock, and the manifest must identify
+  `childhoodVersion` as the enforced generation.
+
 ## CLOSED BARS, AT THE SOURCE
 
 Kraken's REST OHLC ends with the current **uncommitted** candle. It is

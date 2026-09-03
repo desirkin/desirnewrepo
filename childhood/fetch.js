@@ -103,5 +103,9 @@ export async function fetchAggression(pairKey, sinceSec, maxRequests) {
     const total = b.buy + b.sell;
     imbalance[ts] = total > 0 ? Number(((b.buy - b.sell) / total).toFixed(4)) : null;
   }
-  return { imbalance, coverage: { fromSec: firstTradeSec, toSec: lastTradeSec, requests } };
+  // Trades retrieval carries ITS OWN clock (B-0B.2 §4): recorded at paging
+  // completion, so microstructure derived from it can never claim the
+  // earlier OHLC retrieval time.
+  const retrievedTs = new Date().toISOString();
+  return { imbalance, coverage: { fromSec: firstTradeSec, toSec: lastTradeSec, requests }, retrievedTs };
 }

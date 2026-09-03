@@ -17,6 +17,7 @@ const wideeye = await import('../survey/wideeye.js');
 const { evaluateTick, zScore, pooledStats, bucketAdd, pruneBaselineBuckets, classifyRipple, logReturn, extensionPct: extPct, volumeRate } = eyecore;
 const { completedCandlesOnly, fetchOhlc } = await import('../childhood/fetch.js');
 const { replayParity, replayContext, buildMinuteGrid } = await import('../childhood/replay.js');
+const { deriveProvenance, latestRetrievedTs } = await import('../childhood/provenance.js');
 const { CandleStore } = await import('../childhood/store.js');
 const { loadConfig } = await import('../lib/config.js');
 const { etHourKey, sessionDate } = await import('../lib/time.js');
@@ -258,10 +259,10 @@ test('COARSE TRACK PARITY PROHIBITION: context tracks emit no wide-eye classific
 // families, and its retrievedTs is the ACTUAL source retrieval time passed
 // in — never an earlier stamp, never silently absent for UNAVAILABLE data.
 // ---------------------------------------------------------------------
-test('PER-FIELD PROVENANCE: both replay engines emit all six families, carrying the real retrieval time', () => {
+test('PER-FIELD PROVENANCE: all six families present; retrieved evidence carries its real clock, unretrieved carries NOT_RETRIEVED', () => {
   const FAMILIES = ['priceState', 'volumeState', 'marketContext', 'scoutSignals', 'externalSignals', 'microstructure'];
   const sourceRetrievedTs = '2026-09-03T15:00:00.000Z';
-  const check = (obsList) => {
+  const check = (obsList, expectedClock) => {
     assert.ok(obsList.length > 0);
     for (const o of obsList) {
       for (const fam of FAMILIES) {
@@ -269,9 +270,9 @@ test('PER-FIELD PROVENANCE: both replay engines emit all six families, carrying 
         assert.ok(p, `${o.trackRole}: missing ${fam} provenance`);
         assert.ok(p.source && 'sourceTs' in p && 'availableTs' in p, `${fam} provenance incomplete`);
         assert.ok(['historical', 'live'].includes(p.kind) && ['raw', 'derived'].includes(p.form), `${fam} kind/form invalid`);
-        // retrieval time is the source's ACTUAL retrieval — the exact value
-        // handed in, so an archive can never claim retrieval before it happened
-        assert.equal(p.retrievedTs, sourceRetrievedTs);
+        // retrieved evidence carries its ACTUAL retrieval clock; evidence
+        // that was never retrieved carries NO clock at all (B-0B.2 §5)
+        assert.equal(p.retrievedTs, expectedClock[fam], `${o.trackRole} ${fam} clock`);
       }
     }
   };
@@ -282,7 +283,15 @@ test('PER-FIELD PROVENANCE: both replay engines emit all six families, carrying 
       cfg: CFG,
       contextAt: ctx0,
       retrievedTs: sourceRetrievedTs,
-    })
+    }),
+    {
+      priceState: sourceRetrievedTs,
+      volumeState: sourceRetrievedTs,
+      scoutSignals: sourceRetrievedTs,
+      marketContext: sourceRetrievedTs, // single-source fixture: context defaults to the same clock
+      externalSignals: 'NOT_RETRIEVED', // no historical archive was ever fetched
+      microstructure: 'NOT_RETRIEVED', // no trades enrichment supplied
+    }
   );
   const bars = [];
   for (let i = 0; i < 600; i++) bars.push([T0 + i * 3600, 100, 100, 100, 100, 50]);
@@ -294,8 +303,97 @@ test('PER-FIELD PROVENANCE: both replay engines emit all six families, carrying 
       track: '60m',
       contextAt: ctx0,
       retrievedTs: sourceRetrievedTs,
-    })
+    }),
+    {
+      priceState: sourceRetrievedTs,
+      volumeState: sourceRetrievedTs,
+      marketContext: sourceRetrievedTs,
+      scoutSignals: 'NOT_RETRIEVED',
+      externalSignals: 'NOT_RETRIEVED',
+      microstructure: 'NOT_RETRIEVED',
+    }
   );
+});
+
+// ---------------------------------------------------------------------
+// B-0B.2 §8 — MARKET CONTEXT CLOCK: target OHLC retrieved 10:00; BTC 10:04,
+// ETH 10:05, latest universe contributor 10:06 -> marketContext claims a
+// clock no earlier than 10:06, while priceState honestly keeps 10:00.
+// ---------------------------------------------------------------------
+test('PROVENANCE CLOCKS — marketContext carries the LATEST source retrieval, never the target symbol clock', () => {
+  const target = '2026-09-03T10:00:00.000Z';
+  const btc = '2026-09-03T10:04:00.000Z';
+  const eth = '2026-09-03T10:05:00.000Z';
+  const universe = '2026-09-03T10:06:00.000Z';
+  // the derived clock is the max over ALL context inputs actually used
+  const contextRetrievedTs = latestRetrievedTs([target, btc, eth, universe]);
+  assert.equal(contextRetrievedTs, universe);
+  const obs = replayParity({
+    minuteSamples: buildMinuteGrid(rowsOf(2000, (i) => 100 + 0.01 * (i % 9), (i) => 10 + (i % 7))),
+    symbol: 'TST',
+    cfg: CFG,
+    contextAt: ctx0,
+    retrievedTs: target,
+    contextRetrievedTs,
+  });
+  assert.ok(obs.length > 0);
+  for (const o of obs) {
+    assert.equal(o.provenance.priceState.retrievedTs, target); // the target's own clock, preserved
+    assert.ok(Date.parse(o.provenance.marketContext.retrievedTs) >= Date.parse(universe), 'marketContext clock precedes its latest source');
+    assert.equal(o.provenance.marketContext.retrievedTs, universe);
+    assert.ok(o.provenance.marketContext.sourceInputs.length >= 2); // input identity not flattened away
+  }
+});
+
+// ---------------------------------------------------------------------
+// B-0B.2 §9 — MICROSTRUCTURE CLOCK: OHLC retrieved 10:00, Trades retrieved
+// 10:09 -> KNOWN microstructure claims >= 10:09; without a Trades retrieval
+// no clock is invented.
+// ---------------------------------------------------------------------
+test('PROVENANCE CLOCKS — KNOWN microstructure carries the Trades clock; UNKNOWN fabricates nothing', () => {
+  const ohlcClock = '2026-09-03T10:00:00.000Z';
+  const tradesClock = '2026-09-03T10:09:00.000Z';
+  const t0 = T0 - (T0 % 900);
+  const rows = rowsOf(2000, (i) => 100 + 0.01 * (i % 9), (i) => 10 + (i % 7), t0);
+  const imbalance = {};
+  for (let b = t0 - 900; b < t0 + 2000 * 60 + 900; b += 900) imbalance[b] = 0.25;
+  const run = (aggression) =>
+    replayParity({ minuteSamples: buildMinuteGrid(rows), symbol: 'TST', cfg: CFG, contextAt: ctx0, retrievedTs: ohlcClock, aggression });
+  const known = run({ imbalance, bucketSec: 900, retrievedTs: tradesClock });
+  assert.ok(known.length > 0);
+  for (const o of known) {
+    assert.equal(o.dataAvailability.microstructure, 'KNOWN');
+    assert.ok(Date.parse(o.provenance.microstructure.retrievedTs) >= Date.parse(tradesClock), 'microstructure clock precedes the Trades retrieval');
+    assert.equal(o.provenance.microstructure.retrievedTs, tradesClock); // never the earlier OHLC clock
+    assert.equal(o.provenance.priceState.retrievedTs, ohlcClock);
+  }
+  const unknown = run(null);
+  assert.ok(unknown.length > 0);
+  for (const o of unknown) {
+    assert.equal(o.microstructure.aggressionImbalance, 'UNKNOWN_HISTORICALLY');
+    const p = o.provenance.microstructure;
+    assert.equal(p.retrievedTs, 'NOT_RETRIEVED'); // no fake Trades retrieval time
+    assert.equal(p.sourceTs, 'UNKNOWN');
+    assert.equal(p.availableTs, 'UNKNOWN');
+  }
+});
+
+test('deriveProvenance: latest valid input clock wins; nothing retrieved -> NOT_RETRIEVED', () => {
+  const p = deriveProvenance({
+    source: 'composite',
+    sourceTs: 1,
+    availableTs: 2,
+    inputs: ['2026-09-03T10:04:00.000Z', { retrievedTs: '2026-09-03T10:06:00.000Z' }, '2026-09-03T10:00:00.000Z'],
+    sourceInputs: ['a', 'b', 'c'],
+  });
+  assert.equal(p.retrievedTs, '2026-09-03T10:06:00.000Z'); // the LATEST, never the earliest
+  assert.equal(p.form, 'derived');
+  assert.equal(p.sourceTs, 1); // meanings preserved separately
+  assert.equal(p.availableTs, 2);
+  assert.deepEqual(p.sourceInputs, ['a', 'b', 'c']);
+  // no valid input clock -> the sentinel, never an invented timestamp
+  assert.equal(deriveProvenance({ source: 'x', inputs: [] }).retrievedTs, 'NOT_RETRIEVED');
+  assert.equal(deriveProvenance({ source: 'x', inputs: ['not-a-time', undefined] }).retrievedTs, 'NOT_RETRIEVED');
 });
 
 // ---------------------------------------------------------------------

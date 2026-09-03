@@ -9,7 +9,7 @@ import path from 'node:path';
 const ROOT = mkdtempSync(path.join(tmpdir(), 'cobra-staging-'));
 process.env.COBRA_DATA_DIR = ROOT;
 
-const { validateChildhood, EXPECTED_SCHEMA_VERSION } = await import('../childhood/validate.js');
+const { validateChildhood, EXPECTED_SCHEMA_VERSION, CHILDHOOD_VERSION } = await import('../childhood/validate.js');
 const { promoteStaging } = await import('../childhood/promote.js');
 
 test.after(() => rmSync(ROOT, { recursive: true, force: true }));
@@ -58,6 +58,8 @@ function makeStaging(mutate = () => {}) {
     'candles-1m.jsonl': jsonl([{ symbol: 'TST', intervalMin: 1, retrievedSec: 2000, candles: [[900, 1, 1, 1, 1, 1]] }]),
     'manifest.json': JSON.stringify({
       schemaVersion: EXPECTED_SCHEMA_VERSION,
+      childhoodVersion: CHILDHOOD_VERSION,
+      tradesCoverage: { TST: { retrievedTs: '1970-01-01T00:50:00.000Z' } }, // trades clock: 3000s
       counts: {
         byTrack: { '1m': 2 },
         byPopulation: { BASELINE: 2 },
@@ -196,6 +198,35 @@ test('VALIDATOR REJECTION: corrupted stagings are named and refused', () => {
       (f) => (f['incident-outcomes.jsonl'] = jsonl([{ incidentId: 'iGHOST', firstPublicTs: '2026-01-01T00:00:00.000Z', outcomes: {} }])),
     ],
     ['incidentOutcomes count mismatch', (f) => (f['manifest.json'] = f['manifest.json'].replace('"incidentOutcomes":1', '"incidentOutcomes":3'))],
+    // B-0B.2 §8: marketContext corrupted to a clock BEFORE its latest source
+    // input (e.g. a build-start stamp taken before the fetches) must fail —
+    // track's latest candle retrieval is 2000s, the claim is 1200s
+    [
+      'marketContext claims retrieval before its latest source input',
+      (f) =>
+        (f['observations.jsonl'] = jsonl([
+          obsRow({
+            id: 1,
+            provenance: {
+              ...fullProvenance(),
+              marketContext: { source: 'fixture context', sourceTs: 1000, availableTs: 1000, retrievedTs: '1970-01-01T00:20:00.000Z', kind: 'historical', form: 'derived' },
+            },
+          }),
+          obsRow({ id: 2, eventId: 'e2' }),
+        ])),
+    ],
+    // B-0B.2 §9: KNOWN microstructure corrupted to the earlier OHLC clock
+    // (2400s) while the manifest records the Trades retrieval at 3000s
+    [
+      'KNOWN microstructure claims retrieval before the trades retrieval',
+      (f) =>
+        (f['observations.jsonl'] = jsonl([
+          obsRow({ id: 1, dataAvailability: { microstructure: 'KNOWN' } }),
+          obsRow({ id: 2, eventId: 'e2' }),
+        ])),
+    ],
+    // B-0B.2 §11: the manifest must identify the enforced generation
+    ['childhoodVersion', (f) => (f['manifest.json'] = f['manifest.json'].replace(`"childhoodVersion":"${CHILDHOOD_VERSION}"`, '"childhoodVersion":"B0B"'))],
     [
       'appears in both',
       (f) => (f['observations.jsonl'] = jsonl([obsRow({ id: 1, split: 'DISCOVERY' }), obsRow({ id: 2, split: 'VALIDATION' })])), // same eventId e1
@@ -263,6 +294,7 @@ test('OUTCOME ONE-TO-ONE: duplicate Outcome A + missing Outcome B is named and n
 // §19.20 SCHEMA CONTRACT — one authoritative schema, version-checked.
 test('SCHEMA CONTRACT: the single authoritative B-0B schema version is enforced', () => {
   assert.equal(EXPECTED_SCHEMA_VERSION, 'childhood-observation-3-b0b');
+  assert.equal(CHILDHOOD_VERSION, 'B0B.2'); // the hardened generation the manifest must report (B-0B.2 §11)
   const stale = makeStaging((f) => {
     f['manifest.json'] = f['manifest.json'].replace(EXPECTED_SCHEMA_VERSION, 'childhood-observation-2');
   });

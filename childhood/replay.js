@@ -20,6 +20,7 @@ import { retBetween } from './store.js';
 import { knowableAt } from './knowledge.js';
 import { evaluateTick, pruneBaselineBuckets, logReturn, extensionPct, volumeRate } from '../survey/eyecore.js';
 import { etHourKey, sessionDate } from '../lib/time.js';
+import { deriveProvenance, NOT_RETRIEVED } from './provenance.js';
 
 export const RANDOM_SEED = 'B0A-seed-1'; // deterministic; recorded in manifest
 export const EVENT_GAP_FACTOR = 2;
@@ -110,7 +111,14 @@ export function buildMinuteGrid(candles) {
 // =====================================================================
 // PARITY_SCOUT replay — live Wide-Eye semantics on a true 1m grid.
 // =====================================================================
-export function replayParity({ minuteSamples, symbol, cfg, contextAt, retrievedTs, aggression = null }) {
+// retrievedTs: the ACTUAL retrieval time of THIS symbol's OHLC source.
+// contextRetrievedTs: the LATEST retrieval time among the cross-symbol
+//   sources feeding contextAt (B-0B.2 §3) — marketContext provenance may
+//   never claim the target's earlier clock. Defaults to retrievedTs for
+//   single-source fixtures.
+// aggression.retrievedTs: the ACTUAL Trades retrieval completion time —
+//   required whenever aggression data is supplied (B-0B.2 §4).
+export function replayParity({ minuteSamples, symbol, cfg, contextAt, retrievedTs, contextRetrievedTs = retrievedTs, aggression = null }) {
   const observations = [];
   const baselines = { ret1: {}, ret5: {}, volRate: {} };
   const prices = []; // trailing prices, one per minute
@@ -271,15 +279,28 @@ export function replayParity({ minuteSamples, symbol, cfg, contextAt, retrievedT
           s.form === 'REAL_OHLCVT_BAR' ? 'raw' : 'derived'
         ),
         volumeState: prov('rolling 24h sum of 1m traded volume (live-definition volRate)', replayTs, replayTs, retrievedTs),
-        marketContext: prov('cross-symbol closed bars, trailing only', replayTs, replayTs, retrievedTs),
+        // marketContext is derived from CROSS-SYMBOL sources; its clock is
+        // the latest retrieval among everything actually used (B-0B.2 §1/§3)
+        marketContext: deriveProvenance({
+          source: 'cross-symbol closed bars, trailing only',
+          sourceTs: replayTs,
+          availableTs: replayTs,
+          inputs: [retrievedTs, contextRetrievedTs],
+          sourceInputs: ['target OHLC', 'context-track OHLC (BTC/ETH/universe contributors)'],
+        }),
         scoutSignals: prov('shared eyecore (live ordering, live minSamples)', replayTs, replayTs, retrievedTs),
-        externalSignals: prov('none (no historical RUMINT/gateway archive exists)', 'UNKNOWN', 'UNKNOWN', retrievedTs, 'raw'),
-        microstructure: prov(
-          aggressionAvailable === 'KNOWN' ? 'kraken REST Trades (fully elapsed bucket)' : 'none (no public L2/trades history)',
-          replayTs,
-          aggressionAvailable === 'KNOWN' ? Math.floor(replayTs / 900) * 900 : 'UNKNOWN',
-          retrievedTs
-        ),
+        // never retrieved -> NO retrieval clock is invented (B-0B.2 §5)
+        externalSignals: prov('none (no historical RUMINT/gateway archive exists)', 'UNKNOWN', 'UNKNOWN', NOT_RETRIEVED, 'raw'),
+        microstructure:
+          aggressionAvailable === 'KNOWN'
+            ? deriveProvenance({
+                source: 'kraken REST Trades (fully elapsed bucket)',
+                sourceTs: replayTs,
+                availableTs: Math.floor(replayTs / 900) * 900,
+                inputs: [aggression.retrievedTs], // the TRADES clock, never the OHLC one (B-0B.2 §4)
+                sourceInputs: ['kraken REST Trades'],
+              })
+            : prov('none (no public L2/trades history)', 'UNKNOWN', 'UNKNOWN', NOT_RETRIEVED, 'raw'),
       },
       setupClassification: classification,
     });
@@ -290,7 +311,7 @@ export function replayParity({ minuteSamples, symbol, cfg, contextAt, retrievedT
 // =====================================================================
 // CONTEXT_ONLY replay — coarse tracks. Honest names, no Wide-Eye output.
 // =====================================================================
-export function replayContext({ replayViews, symbol, intervalSec, track, contextAt, retrievedTs }) {
+export function replayContext({ replayViews, symbol, intervalSec, track, contextAt, retrievedTs, contextRetrievedTs = retrievedTs }) {
   const observations = [];
   const tickMin = intervalSec / 60;
   let prevCloses = [];
@@ -347,12 +368,18 @@ export function replayContext({ replayViews, symbol, intervalSec, track, context
       provenance: {
         priceState: prov(`kraken REST OHLC ${track} (closed bar)`, bar[0], replayTs, retrievedTs, 'raw'),
         volumeState: prov(`kraken REST OHLC ${track} raw bar volume (context only)`, bar[0], replayTs, retrievedTs, 'raw'),
-        marketContext: prov('cross-symbol closed bars, trailing only', bar[0], replayTs, retrievedTs),
+        marketContext: deriveProvenance({
+          source: 'cross-symbol closed bars, trailing only',
+          sourceTs: bar[0],
+          availableTs: replayTs,
+          inputs: [retrievedTs, contextRetrievedTs],
+          sourceInputs: ['target OHLC', 'context-track OHLC (BTC/ETH/universe contributors)'],
+        }),
         // UNAVAILABLE evidence still carries truthful provenance saying WHY
-        // (B-0B.1 §3) — it never silently disappears.
-        scoutSignals: prov('not computable on a context track (no live-definition features at this resolution)', 'UNKNOWN', 'UNKNOWN', retrievedTs),
-        externalSignals: prov('none (no historical RUMINT/gateway archive exists)', 'UNKNOWN', 'UNKNOWN', retrievedTs, 'raw'),
-        microstructure: prov('none (no public L2/trades history on context tracks)', 'UNKNOWN', 'UNKNOWN', retrievedTs, 'raw'),
+        // (B-0B.1 §3) — but never a fabricated retrieval clock (B-0B.2 §5).
+        scoutSignals: prov('not computable on a context track (no live-definition features at this resolution)', 'UNKNOWN', 'UNKNOWN', NOT_RETRIEVED),
+        externalSignals: prov('none (no historical RUMINT/gateway archive exists)', 'UNKNOWN', 'UNKNOWN', NOT_RETRIEVED, 'raw'),
+        microstructure: prov('none (no public L2/trades history on context tracks)', 'UNKNOWN', 'UNKNOWN', NOT_RETRIEVED, 'raw'),
       },
       setupClassification: 'CONTEXT_SAMPLE',
     });
