@@ -12,7 +12,8 @@ import { sessionDate } from '../lib/time.js';
 import { getEngineState } from '../state/machine.js';
 import { readCurrentBook, readTapeStatus, TAPE_STATES } from '../tape/store.js';
 import { bookFeatures } from '../tape/features.js';
-import { openPositions } from '../ledger/ledger.js';
+import { openPositions, allPredictions, allFills } from '../ledger/ledger.js';
+import { kill, cage, veto, clearLatches, isVetoed, readControls } from '../state/controls.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -55,6 +56,18 @@ function sessionClock() {
   };
 }
 
+// Predictions persisted but not yet entered: the only trades VETO can deny.
+function pendingStrikes() {
+  try {
+    const filled = new Set(allFills().map((f) => f.prediction_id));
+    return allPredictions()
+      .filter((p) => !filled.has(p.prediction_id) && !isVetoed(p.prediction_id))
+      .map((p) => ({ id: p.prediction_id, coin: p.coin, sizeUsd: p.size_usd }));
+  } catch {
+    return [];
+  }
+}
+
 function statusPayload() {
   const engine = getEngineState(); // syncs + logs posture transitions
   let open = 0;
@@ -79,8 +92,41 @@ function statusPayload() {
     session: sessionClock(),
     universe: config.universe,
     openPositions: open,
+    pendingStrikes: pendingStrikes(),
+    controls: {
+      kill: readControls().kill?.active ?? false,
+      cage: readControls().cage?.active ?? false,
+    },
     paperFanged: true,
   };
+}
+
+// The three human controls (plus the human-only latch clear). Persisted
+// atomically, every action appended to the control log with source 'ui'.
+// This is the ONLY write path the server exposes, and it can only ever
+// remove permission to trade — it cannot originate a strike.
+function handleControl(body) {
+  const action = String(body.action ?? '').toLowerCase();
+  switch (action) {
+    case 'kill':
+      kill('ui');
+      break;
+    case 'cage':
+      cage('ui');
+      break;
+    case 'veto': {
+      const id = String(body.predictionId ?? '');
+      if (!id) return { ok: false, error: 'veto requires predictionId' };
+      veto(id, 'ui');
+      break;
+    }
+    case 'clear':
+      clearLatches('ui');
+      break;
+    default:
+      return { ok: false, error: `unknown control action "${body.action}"` };
+  }
+  return { ok: true, action: action.toUpperCase(), status: statusPayload() };
 }
 
 function coinPayload(coin) {
@@ -126,6 +172,22 @@ function json(res, code, obj) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
+    if (req.method === 'POST' && url.pathname === '/api/control') {
+      let raw = '';
+      req.on('data', (chunk) => {
+        raw += chunk;
+        if (raw.length > 4096) req.destroy(); // control bodies are tiny
+      });
+      req.on('end', () => {
+        try {
+          const result = handleControl(JSON.parse(raw || '{}'));
+          json(res, result.ok ? 200 : 400, result);
+        } catch (err) {
+          json(res, 400, { ok: false, error: err.message });
+        }
+      });
+      return;
+    }
     if (url.pathname === '/' || url.pathname === '/index.html') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       res.end(readFileSync(path.join(UI_DIR, 'index.html')));
@@ -144,5 +206,11 @@ const server = http.createServer((req, res) => {
 
 const PORT = Number(process.env.PORT) || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`COBRA SHELL — http://localhost:${PORT}  (read-only cockpit; display may never cause trading)`);
+  console.log(`COBRA SHELL — http://localhost:${PORT}  (cockpit; controls can only remove permission to trade)`);
 });
+
+// Graceful shutdown: stop accepting connections; the tape (when co-running
+// via fly.js) handles its own websocket close and final status write.
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.once(sig, () => server.close());
+}

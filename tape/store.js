@@ -1,8 +1,8 @@
 // Tape persistence: rolling JSONL per ET session date, plus a "current book"
 // file per coin that the cost model reads (atomically replaced, never torn).
-import { mkdirSync, renameSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { appendJsonl } from '../lib/jsonl.js';
+import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { dataDir } from '../lib/config.js';
 import { nowIso, sessionDate } from '../lib/time.js';
 
@@ -24,13 +24,6 @@ export function writeEvent(type, detail = {}) {
   const event = { ts: nowIso(), type, ...detail };
   appendJsonl(path.join(sessionDir(), 'events.jsonl'), event);
   return event;
-}
-
-function atomicWriteJson(file, obj) {
-  mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, JSON.stringify(obj));
-  renameSync(tmp, file);
 }
 
 function bookFile(coin) {

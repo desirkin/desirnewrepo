@@ -2,8 +2,7 @@
 // Excursions are measured from persisted tape snapshots between entry and
 // exit — if the tape wasn't recording, the excursion is null, not guessed.
 import path from 'node:path';
-import { writeFileSync, mkdirSync } from 'node:fs';
-import { readJsonl } from '../lib/jsonl.js';
+import { readJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { dataDir } from '../lib/config.js';
 import { sessionDate, nowIso } from '../lib/time.js';
 import { allPredictions, allFills, allExits } from './ledger.js';
@@ -78,9 +77,7 @@ export function dailyRollup(date = sessionDate()) {
     trade_log: trades,
   };
 
-  const outDir = path.join(dataDir(), 'ledger', 'rollups');
-  mkdirSync(outDir, { recursive: true });
-  writeFileSync(path.join(outDir, `${date}.json`), JSON.stringify(rollup, null, 2));
+  atomicWriteJson(path.join(dataDir(), 'ledger', 'rollups', `${date}.json`), rollup, { pretty: true });
   return rollup;
 }
 

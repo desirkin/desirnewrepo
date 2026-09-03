@@ -5,4 +5,5 @@ import './ui/server.js'; // starts listening on PORT (default 3000)
 import { runTape } from './tape/run.js';
 
 console.log('COBRA FLYING — tape + cockpit. Default answer is NO TRADE.');
-await runTape({});
+await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
+process.exit(0);

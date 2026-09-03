@@ -122,6 +122,30 @@
   #tapedot.OFFLINE, #tapedot.FROZEN, #tapedot.ABSENT, #tapedot.LOST { background: #56607a; box-shadow: none; }
   #clockchip { bottom: max(12px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
                color: var(--dim); white-space: nowrap; }
+
+  /* human controls: confirm-tap buttons. They only remove permission to trade. */
+  #controls { position: fixed; bottom: calc(max(12px, env(safe-area-inset-bottom)) + 40px);
+              left: 50%; transform: translateX(-50%); display: flex; gap: 10px; z-index: 35; }
+  body.demo #controls { display: none; }
+  #controls button {
+    font-size: 11px; font-weight: 700; letter-spacing: .2em; padding: 8px 14px;
+    border-radius: 20px; cursor: pointer; background: rgba(8,14,28,.75);
+    backdrop-filter: blur(4px); transition: all .2s;
+  }
+  #btnKill  { color: #ff6b52; border: 1px solid #7c2f22; }
+  #btnCage  { color: #ffb454; border: 1px solid #7a5526; }
+  #btnVeto  { color: #69d2ff; border: 1px solid #2a5a78; }
+  #btnClear { color: #9fb4c8; border: 1px solid #3a4a62; }
+  #controls button.armed { color: #06090f; }
+  #btnKill.armed  { background: #ff6b52; box-shadow: 0 0 16px rgba(255,107,82,.7); }
+  #btnCage.armed  { background: #ffb454; box-shadow: 0 0 16px rgba(255,180,84,.7); }
+  #btnClear.armed { background: #9fb4c8; }
+  #controls button[hidden] { display: none; }
+  #card .vrow { display: flex; justify-content: space-between; align-items: center;
+                padding: 8px 4px; border-bottom: 1px solid #1c2942; font-size: 12px; }
+  #card .vrow button { font-size: 10px; letter-spacing: .16em; padding: 5px 10px; border-radius: 14px;
+                       color: #69d2ff; border: 1px solid #2a5a78; background: transparent; cursor: pointer; }
+  #card .vrow button.armed { background: #69d2ff; color: #06090f; }
   #motion { position: fixed; top: max(10px, env(safe-area-inset-top)); right: 12px; z-index: 40;
             background: rgba(8,14,28,.68); color: var(--dim); border: 1px solid #223048;
             border-radius: 20px; font-size: 11px; letter-spacing: .1em; padding: 6px 11px; cursor: pointer; }
@@ -207,6 +231,12 @@
 
 <div id="tapechip" class="chip"><div id="tapedot"></div><span id="tapetext">TAPE —</span></div>
 <div id="clockchip" class="chip">ET --:-- · SESSION ----------</div>
+<div id="controls">
+  <button id="btnKill">KILL</button>
+  <button id="btnCage">CAGE</button>
+  <button id="btnVeto" hidden>VETO</button>
+  <button id="btnClear" hidden>CLEAR</button>
+</div>
 <button id="motion" title="Toggle reduced motion">≋ MOTION</button>
 <div id="demobadge" title="Tap to exit demo">DEMO</div>
 
@@ -404,9 +434,70 @@ function applyPosture(posture, { why = '', sub = null } = {}) {
 }
 
 /* ---------- real status ---------- */
+/* ---------- human controls: confirm-tap, POST, honest feedback ---------- */
+const armTimers = new Map();
+function armThen(btn, label, fire) {
+  if (btn.classList.contains('armed')) {
+    clearTimeout(armTimers.get(btn));
+    btn.classList.remove('armed');
+    btn.textContent = label;
+    fire();
+    return;
+  }
+  btn.classList.add('armed');
+  btn.textContent = 'CONFIRM?';
+  armTimers.set(btn, setTimeout(() => {
+    btn.classList.remove('armed');
+    btn.textContent = label;
+  }, 3000));
+}
+async function postControl(action, extra = {}) {
+  try {
+    const r = await fetch('/api/control', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action, ...extra }),
+    });
+    const d = await r.json();
+    if (d.ok && d.status) renderStatus(d.status);
+    return d;
+  } catch {
+    $('#tapetext').textContent = 'SHELL LINK LOST';
+    return { ok: false };
+  }
+}
+$('#btnKill').addEventListener('click', () => armThen($('#btnKill'), 'KILL', () => postControl('kill')));
+$('#btnCage').addEventListener('click', () => armThen($('#btnCage'), 'CAGE', () => postControl('cage')));
+$('#btnClear').addEventListener('click', () => armThen($('#btnClear'), 'CLEAR', () => postControl('clear')));
+$('#btnVeto').addEventListener('click', () => openVetoSheet());
+
+function openVetoSheet() {
+  const pending = lastStatus?.pendingStrikes ?? [];
+  $('#cardTitle').textContent = 'VETO';
+  $('#cardBody').innerHTML = pending.length
+    ? pending.map((p) => `
+        <div class="vrow"><span>${p.coin} · $${p.sizeUsd} · <span style="color:var(--dim)">${p.id.slice(0, 8)}…</span></span>
+        <button data-veto="${p.id}">VETO</button></div>`).join('')
+    : '<div class="rows"><span>no pending strikes to deny</span></div>';
+  for (const b of $('#cardBody').querySelectorAll('[data-veto]')) {
+    b.addEventListener('click', () =>
+      armThen(b, 'VETO', async () => {
+        await postControl('veto', { predictionId: b.dataset.veto });
+        openVetoSheet(); // re-render the remaining pending list
+      })
+    );
+  }
+  $('#card').classList.add('open');
+}
+
 function renderStatus(s) {
   lastStatus = s;
   universeCheck(s.universe);
+  const latched = s.controls && (s.controls.kill || s.controls.cage);
+  $('#btnClear').hidden = !latched;
+  $('#btnKill').hidden = Boolean(s.controls?.kill);
+  $('#btnCage').hidden = Boolean(s.controls?.cage);
+  $('#btnVeto').hidden = !(s.pendingStrikes && s.pendingStrikes.length);
   if (!demo) {
     const why = s.posture === 'RETREAT' ? s.retreatCauses.map((c) => c.key).join(' · ') : (s.advisories[0] || '');
     applyPosture(s.posture, { why });

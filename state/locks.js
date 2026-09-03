@@ -2,7 +2,8 @@
 // NEVER CAUSE TRADING. Locks only ever remove permission to strike; they
 // reset at the next ET session date because daily P&L does.
 import path from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { atomicWriteJson } from '../lib/jsonl.js';
 import { loadConfig, dataDir } from '../lib/config.js';
 import { sessionDate, nowIso } from '../lib/time.js';
 import { realizedPnlUsd } from '../ledger/rollup.js';
@@ -23,12 +24,11 @@ const simFile = () => path.join(dataDir(), 'state', 'sim_pnl.json');
 // additive to nothing — while a simulation is set for today, it REPLACES the
 // ledger number so lock trips can be proven without fabricating trades.
 export function injectSimulatedPnlPct(pnlPct, date = sessionDate()) {
-  mkdirSync(path.dirname(simFile()), { recursive: true });
-  writeFileSync(simFile(), JSON.stringify({ date, pnlPct, ts: nowIso(), simulated: true }, null, 2));
+  atomicWriteJson(simFile(), { date, pnlPct, ts: nowIso(), simulated: true }, { pretty: true });
 }
 
 export function clearSimulatedPnl() {
-  if (existsSync(simFile())) writeFileSync(simFile(), JSON.stringify({ cleared: true, ts: nowIso() }));
+  if (existsSync(simFile())) atomicWriteJson(simFile(), { cleared: true, ts: nowIso() });
 }
 
 function readSimulatedPnl(date) {

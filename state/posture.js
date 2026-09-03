@@ -5,8 +5,8 @@
 // enter them until a signal engine exists: outside demo mode they throw
 // NotYetImplemented. Demo mode is a sealed terrarium — it never touches disk.
 import path from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { appendJsonl } from '../lib/jsonl.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { dataDir } from '../lib/config.js';
 import { nowIso } from '../lib/time.js';
 
@@ -65,8 +65,7 @@ export class PostureMachine {
     this.posture = to;
     const event = { ts: nowIso(), from, to, cause, demo: this.demo };
     if (!this.demo) {
-      mkdirSync(path.dirname(postureFile()), { recursive: true });
-      writeFileSync(postureFile(), JSON.stringify({ posture: to, ts: event.ts, cause }, null, 2));
+      atomicWriteJson(postureFile(), { posture: to, ts: event.ts, cause }, { pretty: true });
       appendJsonl(transitionsFile(), event);
     }
     return event;
