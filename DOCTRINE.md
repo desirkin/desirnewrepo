@@ -10,6 +10,15 @@ Price-blind ordering: every prediction is persisted BEFORE any market price is f
 
 ---
 
+## MISSION
+
+The constitution above all of this: [`doctrine/MISSION.md`](doctrine/MISSION.md) —
+David's mission statement, verbatim. Every future ticket must answer: does this
+help NOTICE the ripple, VERIFY the ripple, or TAKE a clean piece and LEAVE?
+If none, it does not belong.
+
+---
+
 ## PRIME DIRECTIVES
 
 1. **Default answer is NO TRADE.** Only overwhelming, multi-source evidence changes it.
