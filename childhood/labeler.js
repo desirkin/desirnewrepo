@@ -45,12 +45,15 @@ export function labelObservation(obs, store, contextStores) {
   const median1h = contextStores.median1hAt ? contextStores.median1hAt(obs.ts) : null;
 
   const abnormalVsMedian = ret1h !== null && median1h !== null ? ret1h - median1h : null;
-  const label = classifyOutcome({ mfe1h: mfe['60m'], ret1h, ret4h, abnormalVsMedian });
+  const outcomeTags = classifyOutcome({ mfe1h: mfe['60m'], ret1h, ret4h, abnormalVsMedian });
 
   return {
     id: obs.id,
+    eventId: obs.eventId,
     mfe,
     mae,
+    ret1hPct: ret1h === null ? null : round4(ret1h),
+    ret4hPct: ret4h === null ? null : round4(ret4h),
     moveAlreadySpentPct: obs.priceState.extensionPct,
     moveRemainingPct: mfe['60m'],
     abnormalReturn: {
@@ -58,19 +61,22 @@ export function labelObservation(obs, store, contextStores) {
       vsEth: ret1h !== null && eth1h !== null ? round4(ret1h - eth1h) : null,
       vsUniverseMedian: abnormalVsMedian === null ? null : round4(abnormalVsMedian),
     },
-    label,
+    outcomeTags,
   };
 }
 
-// Label precedence: pump > reversal > run > beta-drag > fizzle.
-// Rules documented in doctrine/CHILDHOOD.md; unit-tested at the boundaries.
+// B-0A §2: numeric outcome fields are the primary truth; tags are
+// convenience metadata, MULTI-LABEL, each with a deterministic mechanical
+// definition (doctrine/CHILDHOOD.md). No narrative labeling, ever.
+// A move can RUN in the first hour and REVERSE by the fourth.
 export function classifyOutcome({ mfe1h, ret1h, ret4h, abnormalVsMedian }) {
-  if (mfe1h === null || ret1h === null) return 'UNLABELED_INSUFFICIENT_FUTURE';
-  if (mfe1h >= 3 && ret4h !== null && ret4h <= 0.5) return 'pump';
-  if (mfe1h >= 1.5 && ret1h <= -0.5) return 'reversal';
-  if (mfe1h >= 2 && ret1h >= 1) return 'run';
-  if (ret1h >= 1 && abnormalVsMedian !== null && abnormalVsMedian < 0.3) return 'beta-drag';
-  return 'fizzle';
+  if (mfe1h === null || ret1h === null) return ['UNLABELED_INSUFFICIENT_FUTURE'];
+  const tags = [];
+  if (mfe1h >= 2 && ret1h >= 1) tags.push('RUN');
+  if (mfe1h >= 3 && ret4h !== null && ret4h <= 0.5) tags.push('PUMP_LIKE');
+  if (mfe1h >= 1.5 && (ret1h <= -0.5 || (ret4h !== null && ret4h <= -0.5))) tags.push('REVERSAL');
+  if (ret1h >= 1 && abnormalVsMedian !== null && abnormalVsMedian < 0.3) tags.push('BETA_DRAG');
+  return tags.length ? tags : ['FIZZLE'];
 }
 
 const round4 = (v) => Number(v.toFixed(4));

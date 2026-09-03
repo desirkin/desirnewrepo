@@ -1,27 +1,46 @@
-// Candle store with the WALL built into its shape: replay code receives an
-// AsOfView bound to a timestamp T, and every accessor on that view refuses
-// the future. The full store is handed only to the labeler, afterward.
+// Candle store with the WALL built into its shape, hardened by B-0A:
+// - CLOSED-BAR semantics: a bar whose interval has not fully elapsed is
+//   invisible. All visibility is judged by bar CLOSE time, because a bar's
+//   high/low/close/volume are only knowable once it closes.
+// - Replay code never holds the store: it consumes replayViews(), a forward
+//   iterator yielding one closed bar + a wall-bound view at a time. The
+//   future is not filtered away — it is structurally unreachable.
 export class CandleStore {
-  constructor(symbol, intervalSec, candles /* [[t,o,h,l,c,v],...] ascending */) {
+  constructor(symbol, intervalSec, candles /* [[openTs,o,h,l,c,v],...] ascending */) {
     this.symbol = symbol;
     this.intervalSec = intervalSec;
     this.candles = candles;
   }
 
-  // The only face replay code is allowed to hold.
+  closeTs(i) {
+    return this.candles[i][0] + this.intervalSec;
+  }
+
+  // The face handed to replay code: yields {replayTs, bar, view} where
+  // replayTs is the bar's CLOSE time — the earliest moment its values were
+  // knowable — and view walls off everything not closed by replayTs.
+  *replayViews() {
+    for (let i = 0; i < this.candles.length; i++) {
+      const replayTs = this.closeTs(i);
+      yield { replayTs, bar: this.candles[i], view: new AsOfView(this, replayTs) };
+    }
+  }
+
   asOf(ts) {
     return new AsOfView(this, ts);
   }
 
-  // Labeler-only: candles strictly after ts, up to horizonSec ahead.
+  // Labeler-only: bars that OPEN at or after ts (i.e. begin after the
+  // decision moment) within horizonSec.
   future(ts, horizonSec) {
-    return this.candles.filter((c) => c[0] > ts && c[0] <= ts + horizonSec);
+    return this.candles.filter((c) => c[0] >= ts && c[0] < ts + horizonSec);
   }
 
+  // Last bar fully CLOSED by ts (closed-bar discipline for anchors too).
   atOrBefore(ts) {
     let last = null;
     for (const c of this.candles) {
-      if (c[0] > ts) break;
+      if (c[0] + this.intervalSec > ts) break;
       last = c;
     }
     return last;
@@ -39,24 +58,24 @@ export class AsOfView {
     this.intervalSec = store.intervalSec;
   }
 
-  // Candles with timestamp <= T only. Asking beyond T throws — the future
-  // is not merely filtered, it is unreachable from this object.
+  // Bars fully CLOSED by T only. An unfinished bar — even one that has
+  // opened — does not exist yet from this view. Asking beyond T throws.
   candlesUpTo(ts = this.ts) {
     if (ts > this.ts) throw new WallViolation(`asOf(${this.ts}) asked for ${ts} — the future is walled off`);
-    return this.#store.candles.filter((c) => c[0] <= ts);
+    return this.#store.candles.filter((c) => c[0] + this.#store.intervalSec <= ts);
   }
 
   last(n = 1) {
-    const past = this.candlesUpTo();
-    return past.slice(-n);
+    return this.candlesUpTo().slice(-n);
   }
 
+  // Close of the last bar fully closed at (T - minutesAgo).
   closeAt(minutesAgo = 0) {
+    if (minutesAgo < 0) throw new WallViolation('negative minutesAgo reaches the future');
     const target = this.ts - minutesAgo * 60;
-    if (target > this.ts) throw new WallViolation('negative minutesAgo reaches the future');
     let last = null;
     for (const c of this.#store.candles) {
-      if (c[0] > target) break;
+      if (c[0] + this.#store.intervalSec > target) break;
       last = c;
     }
     return last ? last[4] : null;
@@ -69,15 +88,14 @@ export function retBetween(pNow, pThen) {
   return Math.log(pNow / pThen);
 }
 
-// MFE/MAE over a window of future candles relative to an entry price:
-// max favorable excursion uses highs, max adverse uses lows, as percentages.
+// MFE/MAE over a window of future candles relative to an entry price.
 export function mfeMae(entry, futureCandles) {
   if (!entry || entry <= 0 || !futureCandles.length) return { mfe: null, mae: null };
   let hi = -Infinity;
   let lo = Infinity;
   for (const c of futureCandles) {
-    if (c[2] > hi) hi = c[2]; // high
-    if (c[3] < lo) lo = c[3]; // low
+    if (c[2] > hi) hi = c[2];
+    if (c[3] < lo) lo = c[3];
   }
   return { mfe: ((hi - entry) / entry) * 100, mae: ((lo - entry) / entry) * 100 };
 }

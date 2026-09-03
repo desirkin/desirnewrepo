@@ -49,7 +49,16 @@ export async function fetchGovernance(universeCoins) {
           scoresTotal: p.scores_total ?? null,
           choices: p.choices ?? null,
           lock: analyzeLock(p),
-          provenance: { source: 'snapshot.org graphql', retrievedTs: nowIso(), kind: 'historical', form: 'raw' },
+          // KNOWLEDGE TIME (B-0A §11): a fact may only reach a replay after it
+          // was publicly observable. Proposal existence is knowable at
+          // creation; final scores and any lock claim only at voting close;
+          // the vote-by-vote timeline was not retrieved -> UNKNOWN.
+          provenance: {
+            proposalExistence: { source: 'snapshot.org graphql', sourceTs: p.created, availableTs: p.created, retrievedTs: nowIso(), kind: 'historical', form: 'raw' },
+            finalScores: { source: 'snapshot.org graphql', sourceTs: p.end, availableTs: p.end, retrievedTs: nowIso(), kind: 'historical', form: 'derived' },
+            lockStatus: { source: 'derived from final scores', sourceTs: p.end, availableTs: p.end, retrievedTs: nowIso(), kind: 'historical', form: 'derived' },
+            voteTimeline: { source: 'not retrieved', sourceTs: 'UNKNOWN', availableTs: 'UNKNOWN', retrievedTs: nowIso(), kind: 'historical', form: 'raw' },
+          },
         });
       }
       if (!proposals.length) gaps.push(`${coin}: space ${space} returned 0 proposals`);
@@ -99,10 +108,15 @@ export async function fetchIncidentHistory(stores60m) {
   const body = await res.json();
   const events = parseStatuspage('kraken', { incidents: body.incidents ?? [] }, nowIso());
   return events.map((e) => {
+    // KNOWLEDGE TIME: the first PUBLIC status update is when Serpent could
+    // have known — outcomes anchor there, never at any earlier begin time an
+    // incident body may describe. Statuspage created_at IS first publication.
+    const raw = (body.incidents ?? []).find((i) => i.id === e.sourceId);
+    const firstPublicTs = raw?.incident_updates?.at(-1)?.created_at ?? raw?.created_at ?? e.announcedAt;
     const outcomes = {};
     for (const asset of e.assets) {
       const store = stores60m.get(asset);
-      const t0 = e.announcedAt ? Date.parse(e.announcedAt) / 1000 : null;
+      const t0 = firstPublicTs ? Date.parse(firstPublicTs) / 1000 : null;
       if (!store || !t0) {
         outcomes[asset] = { available: false, reason: store ? 'no announce ts' : 'asset outside candle coverage' };
         continue;
