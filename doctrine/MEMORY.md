@@ -55,6 +55,7 @@ NO PATH FROM MEMORY-0 TO EXECUTION.
                      // sha1 — a restart cannot duplicate the same source event
   schemaVersion,     // 'serpent-memory-1'
   ts,                // the market/event time the observation applies to (NOT retrievedTs)
+                     //   EPOCH SECONDS, enforced — milliseconds are rejected, never guessed
   symbol,            // canonical Kraken/Serpent symbol, or null — never invented
   sourceModule,      // documented enum below
   eventType,         // UPPER_SNAKE, descriptive, never directional beyond the source
@@ -69,7 +70,24 @@ NO PATH FROM MEMORY-0 TO EXECUTION.
                      //   form: raw|derived, sourceInputs (required when derived) }
   correlation,       // { eventId, parentEventId, sourceEventId, clusterId } — nullable
   lifecycle }        // { createdTs, lastUpdatedTs, expiresTs|null, ttlSec|null, supersedesId|null }
+                     //   implementation clocks in epoch MILLISECONDS (documented unit);
+                     //   chronology enforced: lastUpdatedTs >= createdTs, expiresTs >= createdTs,
+                     //   ttlSec >= 0; expiresTs and ttlSec are INDEPENDENT optional source
+                     //   facts — no equality between them is required or invented
 ```
+
+**The trust boundary (MEMORY-0B).** The Bus is the normal entry point, but
+the Store independently refuses non-canonical evidence. No persistence API
+is trusted merely because an upstream caller was expected to validate
+first. Canonical envelope ts is epoch seconds; lifecycle implementation
+clocks retain their explicitly documented unit; mixed timestamp units are
+rejected, never guessed. A record re-read from the bounded disk tail is
+revalidated at query time — an id validated at startup does not authorize
+mutated bytes forever. And any evidence lost to canonical rejection
+degrades Memory health: a system that knows it rejected evidence may not
+call itself HEALTHY. `sourceTs` is validated like every other clock (a
+real timestamp or an honest sentinel), and information can never be
+publicly available before the source event it describes occurred.
 
 **Identity (MEMORY-0A):** where an upstream natural id exists it is
 incorporated; otherwise identity derives from a stable FINGERPRINT of the
@@ -157,10 +175,14 @@ timer is unref'd: memory cannot even keep the process alive.
 
 ## HEALTH
 
-`bus.health()` (read-only, frozen): status, lastAcceptedTs,
-lastPersistedTs, queueDepth, acceptedCount, rejectedCount,
-duplicateSuppressedCount, persistenceErrors, subscriberErrors,
-schemaVersion, memoryVersion.
+`bus.health()` / `mirror.health()` (read-only, frozen): status,
+lastAcceptedTs, lastPersistedTs, queueDepth, acceptedCount, rejectedCount,
+canonicalRejectedErrors, duplicateSuppressedCount, sourceParseErrors,
+adapterErrors, mirrorReadErrors, queryIntegrityErrors, persistenceErrors,
+subscriberErrors, schemaVersion, memoryVersion. HEALTHY only when no
+integrity, persistence, ingestion, or canonical-rejection failure has
+occurred this session and the recovered store was healthy. Deterministic
+duplicate suppression is normal operation, never degradation.
 
 ## QUERY INTERFACE — ALWAYS BOUNDED
 

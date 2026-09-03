@@ -76,15 +76,43 @@ function checkProvenance(p, errors) {
   if (p.form === 'derived' && (!Array.isArray(p.sourceInputs) || !p.sourceInputs.length)) {
     errors.push('derived provenance requires sourceInputs');
   }
+  const src = timeOf(p.sourceTs);
   const avail = timeOf(p.availableTs);
   const retr = timeOf(p.retrievedTs);
+  // MEMORY-0B §3: sourceTs is validated like the other clocks — a real
+  // timestamp or an honest sentinel, never a garbage string
+  if (Number.isNaN(src)) errors.push('provenance.sourceTs is not a timestamp or honest sentinel');
   if (Number.isNaN(avail)) errors.push('provenance.availableTs is not a timestamp or honest sentinel');
   if (Number.isNaN(retr)) errors.push('provenance.retrievedTs is not a timestamp or honest sentinel');
   // B-0B.2A clock doctrine: nothing is retrieved before it was available
   if (avail !== null && retr !== null && !Number.isNaN(avail) && !Number.isNaN(retr) && retr < avail) {
     errors.push('provenance claims retrieval before availability');
   }
+  // and nothing is publicly available before the source event it describes
+  // occurred (same documented clock-skew tolerance)
+  if (src !== null && avail !== null && !Number.isNaN(src) && !Number.isNaN(avail) && src > avail + FUTURE_SLACK_MS) {
+    errors.push('provenance claims availability before the source event occurred');
+  }
   return { avail, retr };
+}
+
+// Lifecycle chronology (MEMORY-0B §6): impossible clocks never enter
+// memory. Null stays valid; expiresTs and ttlSec are documented as
+// INDEPENDENT optional source facts — no equality is required between them.
+function checkLifecycle(l, errors) {
+  if (!l || typeof l !== 'object' || !Number.isFinite(l.createdTs)) {
+    errors.push('lifecycle.createdTs missing');
+    return;
+  }
+  if (Number.isFinite(l.lastUpdatedTs) && l.lastUpdatedTs < l.createdTs) {
+    errors.push('lifecycle.lastUpdatedTs precedes createdTs');
+  }
+  if (l.expiresTs !== null && l.expiresTs !== undefined && Number.isFinite(l.expiresTs) && l.expiresTs < l.createdTs) {
+    errors.push('lifecycle.expiresTs precedes createdTs');
+  }
+  if (l.ttlSec !== null && l.ttlSec !== undefined && (!Number.isFinite(l.ttlSec) || l.ttlSec < 0)) {
+    errors.push('lifecycle.ttlSec must be a non-negative number or null');
+  }
 }
 
 export function validateEnvelope(env) {
@@ -93,7 +121,11 @@ export function validateEnvelope(env) {
 
   if (env.schemaVersion !== MEMORY_SCHEMA_VERSION) errors.push(`schemaVersion must be ${MEMORY_SCHEMA_VERSION}`);
   if (typeof env.id !== 'string' || !env.id) errors.push('id missing');
-  if (!Number.isFinite(env.ts)) errors.push('ts must be a finite epoch timestamp');
+  // MEMORY-0B §4: the canonical timeline is EPOCH SECONDS, explicitly.
+  // A milliseconds-scale value (Date.now()) is ambiguity, and ambiguity is
+  // rejected — never silently converted.
+  if (!Number.isFinite(env.ts) || env.ts < 0) errors.push('ts must be a finite non-negative epoch-seconds timestamp');
+  else if (env.ts >= 1e12) errors.push('ts must be epoch SECONDS, not milliseconds — mixed units are rejected, never guessed');
   if (!MODULES.has(env.sourceModule)) errors.push(`sourceModule ${env.sourceModule} is not in the documented enum`);
   if (typeof env.eventType !== 'string' || !/^[A-Z][A-Z0-9_]*$/.test(env.eventType ?? '')) {
     errors.push('eventType must be an UPPER_SNAKE name');
@@ -118,15 +150,12 @@ export function validateEnvelope(env) {
 
   const clocks = checkProvenance(env.provenance, errors);
   // no future-known evidence: the observation time cannot exceed retrieval
-  if (clocks && clocks.retr !== null && !Number.isNaN(clocks.retr) && Number.isFinite(env.ts)) {
-    const tsMs = env.ts < 1e12 ? env.ts * 1000 : env.ts;
-    if (tsMs > clocks.retr + FUTURE_SLACK_MS) errors.push('envelope ts is in the future relative to retrievedTs');
+  if (clocks && clocks.retr !== null && !Number.isNaN(clocks.retr) && Number.isFinite(env.ts) && env.ts < 1e12) {
+    if (env.ts * 1000 > clocks.retr + FUTURE_SLACK_MS) errors.push('envelope ts is in the future relative to retrievedTs');
   }
 
   if (!env.correlation || typeof env.correlation !== 'object') errors.push('correlation missing');
-  if (!env.lifecycle || typeof env.lifecycle !== 'object' || !Number.isFinite(env.lifecycle?.createdTs)) {
-    errors.push('lifecycle.createdTs missing');
-  }
+  checkLifecycle(env.lifecycle, errors);
 
   // MEMORY-0A §6: the deep sanity walk covers the ENTIRE canonical
   // envelope — payload, dataAvailability, provenance (sourceInputs

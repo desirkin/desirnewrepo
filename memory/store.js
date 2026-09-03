@@ -43,6 +43,7 @@ export class MemoryStore {
     this.duplicateSuppressedCount = 0; // cumulative (preserved across restarts)
     this.invalidRejectedCount = 0; // cumulative (preserved across restarts)
     this.persistenceErrors = 0; // session-local
+    this.queryIntegrityErrors = 0; // session-local: post-recovery on-disk mutation caught at query time
     this.corruptLines = 0; // JSON_PARSE_CORRUPT quarantined this recovery
     this.invalidRecovered = 0; // SCHEMA_INVALID quarantined this recovery
     this.createdTs = null;
@@ -170,10 +171,23 @@ export class MemoryStore {
     return this.ids.has(id);
   }
 
-  // Append one validated envelope. One JSON.stringify + one synchronous
-  // append call per record — no partial lines from in-process interleaving;
-  // a clean SIGTERM cannot tear a record.
-  append(env) {
+  // Append one envelope. DEFENSE IN DEPTH (MEMORY-0B §2): the persistence
+  // boundary itself refuses non-canonical evidence — no caller is trusted
+  // merely because it was expected to validate first. The bus remains the
+  // normal publish path (it validates and owns that rejection count); a
+  // direct caller's invalid append is counted HERE, so one invalid publish
+  // counts exactly once wherever it is caught. One JSON.stringify + one
+  // synchronous append call per record — a clean SIGTERM cannot tear one.
+  append(env, { validatedByBus = false } = {}) {
+    if (!validatedByBus) {
+      const v = validateEnvelope(env);
+      if (!v.ok) {
+        this.invalidRejectedCount++;
+        if (this.status === 'HEALTHY') this.status = 'DEGRADED';
+        this.log(`MEMORY DEGRADED: store refused non-canonical evidence (${v.errors[0] ?? 'invalid'})`);
+        return { accepted: false, reason: 'invalid', errors: v.errors };
+      }
+    }
     if (this.ids.has(env.id)) {
       this.duplicateSuppressedCount++;
       return { accepted: false, reason: 'duplicate' };
@@ -224,6 +238,7 @@ export class MemoryStore {
       // lifetime counters: cumulative across restarts (preserved via manifest)
       duplicateSuppressedCount: this.duplicateSuppressedCount,
       invalidRejectedCount: this.invalidRejectedCount,
+      queryIntegrityErrors: this.queryIntegrityErrors,
       corruptLinesQuarantined: this.corruptLines,
       invalidRecoveredQuarantined: this.invalidRecovered,
       knownGaps: gaps,
@@ -258,9 +273,18 @@ export class MemoryStore {
       if (!l) continue;
       try {
         const env = JSON.parse(l);
-        // gate on the VALIDATED id index: a quarantined or invalid record
-        // can never resurface through a query fallback
-        if (env.id && this.ids.has(env.id)) out.push(env);
+        // gate on the VALIDATED id index — necessary but NOT sufficient
+        // (MEMORY-0B §5): an id validated at startup does not authorize
+        // mutated bytes forever. The CURRENT record must pass the canonical
+        // validator again before a caller may see it.
+        if (!env.id || !this.ids.has(env.id)) continue;
+        if (!validateEnvelope(env).ok) {
+          this.queryIntegrityErrors++;
+          if (this.status === 'HEALTHY') this.status = 'DEGRADED';
+          this.log(`MEMORY DEGRADED: on-disk record ${env.id} mutated since recovery — withheld from query; restart owns quarantine`);
+          continue; // never returned, never rewritten here
+        }
+        out.push(env);
       } catch {
         // corrupt/partial tail line: skipped for the query; recovery owns quarantine
       }

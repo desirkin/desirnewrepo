@@ -23,6 +23,7 @@ export class MemoryBus {
     this.log = log;
     this.acceptedCount = 0;
     this.rejectedCount = 0;
+    this.canonicalRejectedErrors = 0; // schema/provenance rejections THIS session — lost evidence
     this.subscriberErrors = 0;
     this.lastAcceptedTs = null;
     this.closed = false;
@@ -39,11 +40,17 @@ export class MemoryBus {
     if (this.closed) return { accepted: false, reason: 'bus closed' };
     const v = validateEnvelope(envelope);
     if (!v.ok) {
+      // MEMORY-0B §1: rejected evidence is LOST evidence — memory may not
+      // call itself HEALTHY after knowingly losing it. Counting ownership:
+      // the bus owns this rejection; the store's own guard (below) fires
+      // only for direct callers, so one invalid publish counts exactly once.
       this.rejectedCount++;
+      this.canonicalRejectedErrors++;
       this.store.invalidRejectedCount++;
+      this.log(`MEMORY DEGRADED: canonical envelope rejected (${v.errors[0] ?? 'invalid'})`);
       return { accepted: false, reason: 'invalid', errors: v.errors };
     }
-    const r = this.store.append(envelope);
+    const r = this.store.append(envelope, { validatedByBus: true });
     if (!r.accepted) return r;
     this.acceptedCount++;
     this.lastAcceptedTs = Date.now();
@@ -59,16 +66,23 @@ export class MemoryBus {
     return { accepted: true };
   }
 
-  // Read-only health object (§20) — memory never claims health it lacks.
+  // Read-only health object (§20, MEMORY-0B §7) — memory never claims
+  // health it lacks: HEALTHY requires zero integrity/persistence failures
+  // this session AND a healthy recovered store. Deterministic duplicate
+  // suppression is normal operation, never degradation.
   health() {
+    const status =
+      this.store.status !== 'HEALTHY' ? this.store.status : this.canonicalRejectedErrors > 0 ? 'DEGRADED' : 'HEALTHY';
     return deepFreeze({
-      status: this.store.status,
+      status,
       lastAcceptedTs: this.lastAcceptedTs,
       lastPersistedTs: this.store.lastWriteTs,
       queueDepth: 0, // synchronous in-process bus: nothing queues
       acceptedCount: this.acceptedCount,
       rejectedCount: this.rejectedCount,
+      canonicalRejectedErrors: this.canonicalRejectedErrors,
       duplicateSuppressedCount: this.store.duplicateSuppressedCount,
+      queryIntegrityErrors: this.store.queryIntegrityErrors,
       persistenceErrors: this.store.persistenceErrors,
       subscriberErrors: this.subscriberErrors,
       schemaVersion: MEMORY_SCHEMA_VERSION,

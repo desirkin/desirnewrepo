@@ -209,6 +209,41 @@ test('SOURCE INGESTION HONESTY: a malformed sensor line degrades memory health a
   }
 });
 
+// MEMORY-0B §1 — a parseable source record whose adapter output fails
+// canonical validation is LOST evidence: health degrades, nothing else moves.
+test('CANONICAL REJECTION IN THE MIRROR: invalid source timestamp degrades health; Serpent state untouched', () => {
+  const d6 = mkdtempSync(path.join(tmpdir(), 'cobra-mirror6-'));
+  process.env.COBRA_DATA_DIR = d6;
+  try {
+    const file = path.join(d6, 'rumint', 'events.jsonl');
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, '');
+    const postureFile = path.join(d6, 'state', 'posture.json');
+    mkdirSync(path.dirname(postureFile), { recursive: true });
+    writeFileSync(postureFile, JSON.stringify({ posture: 'COILED', cause: 'boot' }));
+    const mirror = startMemoryMirror({ log: () => {} });
+    // parseable JSON, but its ts is not a time — the adapter's envelope
+    // will carry an invalid canonical ts and the bus must refuse it
+    appendFileSync(file, j({ ts: 'NOT A TIME', type: 'RUMINT_POLL', symbol: 'BTC', velocity: 3 }));
+    const sensorBytes = readFileSync(file, 'utf8');
+    const postureBytes = readFileSync(postureFile, 'utf8');
+    mirror.poll();
+    const h = mirror.health();
+    assert.equal(h.acceptedCount, 0);
+    assert.ok(h.rejectedCount >= 1);
+    assert.ok(h.canonicalRejectedErrors >= 1);
+    assert.equal(h.status, 'DEGRADED'); // memory does not call itself HEALTHY after losing evidence
+    assert.equal(h.sourceParseErrors, 0); // the failure class is distinguished
+    assert.equal(readFileSync(file, 'utf8'), sensorBytes); // sensor untouched
+    assert.equal(readFileSync(postureFile, 'utf8'), postureBytes); // trading state untouched
+    assert.ok(!existsSync(path.join(d6, 'memory', 'events.jsonl'))); // nothing invalid persisted
+    mirror.stop();
+  } finally {
+    process.env.COBRA_DATA_DIR = TEST_DATA;
+    rmSync(d6, { recursive: true, force: true });
+  }
+});
+
 // THE ARCHITECTURAL PROOF: no return path exists in the source graph.
 test('NO RETURN PATH: only fly.js touches memory/, and memory/ imports no sensor or state machinery', () => {
   const root = path.join(import.meta.dirname, '..');

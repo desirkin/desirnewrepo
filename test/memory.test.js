@@ -506,6 +506,104 @@ test('TAPE FAIL-CLOSED: LIVE/CLEAN are KNOWN, explicit non-live is DEGRADED, ABS
   assert.equal(snap('OFFLINE').dataAvailability.book, 'DEGRADED');
 });
 
+// MEMORY-0B §1 — rejected evidence is lost evidence: health may not stay
+// HEALTHY after a canonical rejection; duplicates never degrade.
+test('CANONICAL REJECTION HEALTH: an invalid envelope degrades health; a suppressed duplicate does not', () => {
+  const { bus } = mkBus();
+  assert.equal(bus.publish(mkEnv()).accepted, true);
+  assert.equal(bus.publish(structuredClone(mkEnv())).accepted, false); // deterministic duplicate
+  assert.equal(bus.health().status, 'HEALTHY'); // duplicate suppression is normal operation
+  assert.equal(bus.publish(mkEnv({ ts: NOW_SEC - 10, observationState: 'BULLISH' })).accepted, false);
+  const h = bus.health();
+  assert.equal(h.status, 'DEGRADED'); // memory knows it lost evidence and says so
+  assert.equal(h.canonicalRejectedErrors, 1);
+  assert.equal(h.acceptedCount, 1);
+});
+
+// MEMORY-0B §2 — the persistence boundary refuses non-canonical evidence
+// even when the bus is bypassed.
+test('STORE DEFENSE IN DEPTH: a direct invalid append is refused, counted once, and degrades health', () => {
+  const { store } = mkBus();
+  const r = store.append({ id: 'x', sourceModule: 'HACKED' });
+  assert.equal(r.accepted, false);
+  assert.equal(r.reason, 'invalid');
+  assert.ok(r.errors.length > 0);
+  assert.equal(existsSync(store.eventsFile), false); // nothing was persisted
+  assert.equal(store.recordCount, 0);
+  assert.equal(store.status, 'DEGRADED'); // not HEALTHY after refusing evidence
+  assert.equal(store.invalidRejectedCount, 1); // exactly once — no bus double-count
+  // and normal behavior is unchanged: a valid direct append still works
+  assert.equal(store.append(mkEnv()).accepted, true);
+  assert.equal(store.recordCount, 1);
+});
+
+// MEMORY-0B §3 — sourceTs is a clock, not a free-text field.
+test('SOURCETS VALIDATION: real timestamps and honest sentinels pass; garbage and impossible chronology fail', () => {
+  const { bus } = mkBus();
+  const prov = (sourceTs, availableTs = NOW_SEC - 60) => ({ source: 'fixture', sourceTs, availableTs, retrievedTs: ISO, kind: 'live', form: 'raw' });
+  assert.equal(bus.publish(mkEnv({ provenance: prov(NOW_SEC - 120) })).accepted, true); // valid epoch
+  assert.equal(bus.publish(mkEnv({ ts: NOW_SEC - 59, provenance: prov('UNKNOWN') })).accepted, true); // honest sentinel
+  const garbage = bus.publish(mkEnv({ ts: NOW_SEC - 58, provenance: prov('NOT A TIME') }));
+  assert.equal(garbage.accepted, false);
+  assert.ok(garbage.errors.some((e) => e.includes('sourceTs')));
+  // information cannot be publicly available before the source event occurred
+  const backwards = bus.publish(mkEnv({ ts: NOW_SEC - 57, provenance: prov(NOW_SEC - 60, NOW_SEC - 3600) }));
+  assert.equal(backwards.accepted, false);
+  assert.ok(backwards.errors.some((e) => e.includes('availability before the source event')));
+});
+
+// MEMORY-0B §4 — the canonical timeline is epoch SECONDS, explicitly.
+test('TS UNIT: epoch seconds accepted; Date.now() milliseconds, negatives and non-finites rejected', () => {
+  const { bus } = mkBus();
+  assert.equal(bus.publish(mkEnv({ ts: NOW_SEC - 5 })).accepted, true); // seconds: the one true unit
+  const ms = bus.publish(mkEnv({ ts: Date.now() })); // a future sensor's accidental milliseconds
+  assert.equal(ms.accepted, false);
+  assert.ok(ms.errors.some((e) => e.includes('SECONDS, not milliseconds')));
+  assert.equal(bus.publish(mkEnv({ ts: -5 })).accepted, false);
+  assert.equal(bus.publish(mkEnv({ ts: NaN })).accepted, false);
+  assert.equal(bus.publish(mkEnv({ ts: Infinity })).accepted, false);
+});
+
+// MEMORY-0B §5 — an id validated at startup does not authorize mutated
+// bytes forever: tail records are revalidated at query time.
+test('TAIL REVALIDATION: a record corrupted on disk after recovery is withheld, counted, and degrades health', () => {
+  const { store, bus } = mkBus();
+  for (let i = 0; i < 700; i++) {
+    bus.publish(mkEnv({ ts: NOW_SEC - 7000 + i, correlation: i === 50 ? { eventId: 'target-event' } : {}, payload: { i } }));
+  }
+  assert.equal(store.getByEventId('target-event').length, 1); // reachable via the honest tail
+  // disk mutation AFTER recovery: same id, hostile sourceModule
+  const lines = readFileSync(store.eventsFile, 'utf8').split('\n');
+  const idx = lines.findIndex((l) => l.includes('target-event'));
+  const mutated = JSON.parse(lines[idx]);
+  mutated.sourceModule = 'HACKED_MODULE'; // id preserved — the startup index still trusts it
+  lines[idx] = JSON.stringify(mutated);
+  writeFileSync(store.eventsFile, lines.join('\n'));
+  const bytesAfterMutation = readFileSync(store.eventsFile, 'utf8');
+  const result = store.getByEventId('target-event');
+  assert.equal(result.length, 0); // the corrupted record never reaches a caller
+  assert.ok(store.queryIntegrityErrors >= 1);
+  assert.equal(store.status, 'DEGRADED');
+  assert.equal(readFileSync(store.eventsFile, 'utf8'), bytesAfterMutation); // no live rewrite — restart owns quarantine
+});
+
+// MEMORY-0B §6 — impossible lifecycle chronology never enters memory.
+test('LIFECYCLE CHRONOLOGY: clocks must be internally possible; null stays valid', () => {
+  const { bus } = mkBus();
+  const life = (over) => ({ createdTs: NOW - 60_000, lastUpdatedTs: NOW - 30_000, expiresTs: NOW + 60_000, ttlSec: 120, ...over });
+  assert.equal(bus.publish(mkEnv({ lifecycle: life({}) })).accepted, true); // normal, ordered clocks
+  assert.equal(bus.publish(mkEnv({ ts: NOW_SEC - 10, lifecycle: life({ expiresTs: null, ttlSec: null }) })).accepted, true); // null remains valid
+  const backdated = bus.publish(mkEnv({ ts: NOW_SEC - 9, lifecycle: life({ lastUpdatedTs: NOW - 120_000 }) }));
+  assert.equal(backdated.accepted, false);
+  assert.ok(backdated.errors.some((e) => e.includes('lastUpdatedTs precedes')));
+  const expiredAtBirth = bus.publish(mkEnv({ ts: NOW_SEC - 8, lifecycle: life({ expiresTs: NOW - 120_000 }) }));
+  assert.equal(expiredAtBirth.accepted, false);
+  assert.ok(expiredAtBirth.errors.some((e) => e.includes('expiresTs precedes')));
+  const negativeTtl = bus.publish(mkEnv({ ts: NOW_SEC - 7, lifecycle: life({ ttlSec: -30 }) }));
+  assert.equal(negativeTtl.accepted, false);
+  assert.ok(negativeTtl.errors.some((e) => e.includes('ttlSec')));
+});
+
 // §23.24 — manifest counters reconcile with the actual accepted records
 test('MANIFEST: counters reconcile exactly with the persisted records', () => {
   const { store, bus } = mkBus();
