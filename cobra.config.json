@@ -11,6 +11,9 @@
   "paper": {
     "bankrollUsd": 10000
   },
+  "rumint": {
+    "enabled": false
+  },
   "universeExpansion": {
     "enabled": true,
     "minUsdVolume24h": 5000000,
