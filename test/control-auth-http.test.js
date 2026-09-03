@@ -67,6 +67,7 @@ test('LOGIN: wrong password generic 401; correct password sets an HttpOnly SameS
   assert.match(setCookie, /SameSite=Strict/);
   assert.match(setCookie, /Path=\//);
   assert.match(setCookie, /Max-Age=28800/); // 8 hours
+  assert.ok(!setCookie.includes('Secure')); // 127.0.0.1 plain-HTTP development: the intentional exception
   assert.equal(ok.headers.get('cache-control'), 'no-store');
   const body = await ok.json();
   assert.equal(body.authenticated, true);
@@ -159,6 +160,27 @@ test('SECRETS STAY OUT OF LOGS: the audit trail names events and tags, never cre
   assert.ok(!log.includes('nope'));
   assert.ok(!log.includes(csrf)); // no CSRF tokens
   assert.ok(!log.includes(cookie.split('=')[1])); // no full session id
+});
+
+// CONTROL-0A §G/H — creation and deletion cookies share ONE policy,
+// Secure determination included, with every other attribute intact.
+test('SECURE COOKIE over HTTP: forwarded https makes BOTH the login and logout cookies Secure', async () => {
+  const proto = { 'x-forwarded-proto': 'https' };
+  const login = await post('/api/auth/login', { password: PW }, proto);
+  const setCookie = login.headers.get('set-cookie');
+  assert.match(setCookie, /Secure/);
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /SameSite=Strict/);
+  assert.match(setCookie, /Path=\//);
+  assert.match(setCookie, /Max-Age=28800/);
+  const body = await login.json();
+  const c = setCookie.split(';')[0];
+  const out = await post('/api/auth/logout', {}, { ...proto, cookie: c, 'X-Serpent-CSRF': body.csrfToken });
+  const delCookie = out.headers.get('set-cookie');
+  assert.match(delCookie, /Secure/); // same policy on deletion
+  assert.match(delCookie, /HttpOnly/);
+  assert.match(delCookie, /SameSite=Strict/);
+  assert.match(delCookie, /Max-Age=0/);
 });
 
 // LAST on purpose: the limiter is process-wide and this locks it.

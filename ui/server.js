@@ -19,7 +19,7 @@ import { existsSync, readFileSync as readFs } from 'node:fs';
 import { dataDir } from '../lib/config.js';
 import { appendJsonl } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
-import { ControlAuth, gateControl, parseCookies, SESSION_LIFETIME_MS } from './auth.js';
+import { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_MS } from './auth.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -40,8 +40,17 @@ const auth = new ControlAuth({
 console.log(auth.configured() ? 'CONTROL AUTH: CONFIGURED' : 'CONTROL AUTH: UNCONFIGURED — control mutations fail closed');
 
 const SESSION_COOKIE = 'serpent_session';
+// ONE cookie policy for creation AND deletion (CONTROL-0A): Secure is
+// decided defensively (encrypted socket, https forwarded-proto, or any
+// non-local Host), never by an unverified proxy header alone.
 const setSessionCookie = (req, id, maxAgeSec) => {
-  const secure = String(req.headers['x-forwarded-proto'] ?? '').includes('https') ? '; Secure' : '';
+  const secure = cookieSecure({
+    encrypted: req.socket?.encrypted === true,
+    forwardedProto: req.headers['x-forwarded-proto'],
+    host: req.headers.host,
+  })
+    ? '; Secure'
+    : '';
   return `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSec}${secure}`;
 };
 

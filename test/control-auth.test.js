@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 
 delete process.env.SERPENT_CONTROL_PASSWORD; // this file controls its own configuration
 
-const { ControlAuth, gateControl, parseCookies, SESSION_LIFETIME_MS, CLEAR_PHRASE, RATE_LIMIT } = await import('../ui/auth.js');
+const { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_MS, CLEAR_PHRASE, RATE_LIMIT } = await import('../ui/auth.js');
 
 const PW = 'test-owner-password-9182';
 const mk = (over = {}) => {
@@ -167,6 +167,29 @@ test('AUDIT SECRECY: no password, session id, or CSRF token ever reaches audit e
   assert.ok(!dump.includes(s.csrfToken));
   assert.ok(events.some((e) => e.event === 'AUTH_OK' && /^[0-9a-f]{8}$/.test(e.sessionTag))); // short non-reversible tag only
   assert.ok(events.some((e) => e.event === 'CLEAR_AUTHORIZED'));
+});
+
+// CONTROL-0A — the Secure decision fails toward Secure; only defensible
+// loopback development hosts stay plain-HTTP friendly.
+test('SECURE COOKIE DECISION: non-local hosts force Secure; loopback development does not', () => {
+  // A/B: local development over plain HTTP — Secure not required
+  assert.equal(cookieSecure({ host: 'localhost:3000' }), false);
+  assert.equal(cookieSecure({ host: 'localhost' }), false);
+  assert.equal(cookieSecure({ host: '127.0.0.1:3000' }), false);
+  assert.equal(cookieSecure({ host: '[::1]:3000' }), false);
+  // C: published Replit hostname, NO forwarded header — still Secure
+  assert.equal(cookieSecure({ host: 'example.replit.app' }), true);
+  // D: workspace-style non-local hostname, no forwarded header — Secure
+  assert.equal(cookieSecure({ host: 'abc123-cobra.picard.replit.dev' }), true);
+  // E: forwarded https — Secure regardless of host
+  assert.equal(cookieSecure({ host: 'localhost:3000', forwardedProto: 'https' }), true);
+  assert.equal(cookieSecure({ host: '127.0.0.1', forwardedProto: 'https,http' }), true);
+  // F: encrypted socket — Secure
+  assert.equal(cookieSecure({ host: 'localhost:3000', encrypted: true }), true);
+  // fail closed: an absent or arbitrary Host is NOT treated as local
+  assert.equal(cookieSecure({}), true);
+  assert.equal(cookieSecure({ host: 'evil.internal' }), true);
+  assert.equal(cookieSecure({ host: 'localhost.evil.com' }), true); // not a loopback form
 });
 
 test('cookie parsing is boring and exact', () => {

@@ -165,6 +165,20 @@ export class ControlAuth {
 
 // ---- request-level helpers (pure; the server wires them) ----
 
+// CONTROL-0A: control-session cookies FAIL TOWARD Secure transport. A
+// reverse-proxy header may strengthen the determination but is never the
+// sole evidence: an encrypted socket, a defensible https forwarded-proto,
+// OR simply a non-local Host each force Secure. Only defensible loopback
+// development hosts stay non-Secure so plain-HTTP local testing works. A
+// spoofed non-local Host over plain HTTP yields a Secure cookie the
+// browser will refuse to send insecurely — acceptable fail-closed behavior.
+const LOCAL_HOST_RE = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+export function cookieSecure({ encrypted = false, forwardedProto, host } = {}) {
+  if (encrypted === true) return true;
+  if (String(forwardedProto ?? '').toLowerCase().includes('https')) return true;
+  return !LOCAL_HOST_RE.test(String(host ?? '')); // unknown or non-local host -> Secure
+}
+
 export function parseCookies(header) {
   const out = {};
   for (const part of String(header ?? '').split(';')) {

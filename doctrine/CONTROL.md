@@ -36,8 +36,18 @@ stored, or forwarded past the gate.
 
 A successful login creates an opaque 256-bit random session id held in a
 server-side in-memory Map — no credentials inside the cookie. Cookie:
-`serpent_session`, HttpOnly, **SameSite=Strict**, Path=/, Max-Age 8h,
-plus Secure when served over HTTPS. Absolute lifetime: **8 hours**.
+`serpent_session`, HttpOnly, **SameSite=Strict**, Path=/, Max-Age 8h.
+**Serpent control-session cookies fail toward Secure transport
+(CONTROL-0A):** reverse-proxy headers may strengthen the determination but
+are not the sole evidence that a non-local browser session requires Secure
+— an encrypted socket, an https forwarded-proto, OR any non-loopback Host
+each independently force Secure. The one intentional development
+exception: defensible loopback forms (`localhost`, `127.0.0.1`, `[::1]`,
+with or without a port) over plain HTTP stay non-Secure so local testing
+works; an absent or arbitrary Host is never treated as local, and a
+spoofed non-local Host over plain HTTP just yields a cookie the browser
+refuses to send insecurely — fail-closed. One cookie-policy helper serves
+both creation and deletion. Absolute lifetime: **8 hours**.
 Sessions are deliberately ephemeral: a restart/redeploy invalidates them
 (preferred over pretending they persist), and PERSIST-0 must NOT later
 make auth sessions durable. Expired sessions are pruned on access and
