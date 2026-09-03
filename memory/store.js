@@ -14,6 +14,7 @@
 // the retention/compaction ticket. No probabilistic structures — a false
 // positive would silently lose evidence, which is unacceptable.
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { dataDir } from '../lib/config.js';
@@ -28,6 +29,10 @@ const MANIFEST_EVERY = 25; // manifest refresh cadence (also on flush/close)
 const RECOVERY_CHUNK_BYTES = 1 << 20; // 1MB streaming-recovery chunks
 
 const clamp = (limit) => Math.max(1, Math.min(Number.isFinite(limit) ? limit : DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT));
+// compact persisted-content digest (MEMORY-0C §3): sha1 of the exact
+// persisted JSON line — same-runtime byte/content integrity, not a signed
+// audit ledger, and NOT part of source-event dedup semantics.
+const lineDigest = (line) => createHash('sha1').update(line).digest('hex');
 
 export class MemoryStore {
   constructor({ dir = path.join(dataDir(), 'memory'), log = () => {}, recoveryChunkBytes = RECOVERY_CHUNK_BYTES } = {}) {
@@ -36,14 +41,15 @@ export class MemoryStore {
     this.eventsFile = path.join(dir, 'events.jsonl');
     this.manifestFile = path.join(dir, 'manifest.json');
     this.quarantineFile = path.join(dir, 'events.quarantine.jsonl');
-    this.ids = new Set(); // bounded id index (ids only, never full records)
+    this.ids = new Map(); // id -> persisted-content digest (the documented in-memory growth limitation)
     this.recent = []; // bounded ring of the newest VALIDATED envelopes
     this.counts = { bySourceModule: {}, byEvidenceFamily: {}, byAvailability: {} };
     this.recordCount = 0;
     this.duplicateSuppressedCount = 0; // cumulative (preserved across restarts)
     this.invalidRejectedCount = 0; // cumulative (preserved across restarts)
     this.persistenceErrors = 0; // session-local
-    this.queryIntegrityErrors = 0; // session-local: post-recovery on-disk mutation caught at query time
+    this.queryIntegrityErrors = 0; // session-local: post-recovery on-disk mutation/corruption caught at query time
+    this.idConflicts = 0; // ID_CONTENT_CONFLICT quarantined this recovery
     this.corruptLines = 0; // JSON_PARSE_CORRUPT quarantined this recovery
     this.invalidRecovered = 0; // SCHEMA_INVALID quarantined this recovery
     this.createdTs = null;
@@ -78,6 +84,7 @@ export class MemoryStore {
   #quarantine(reason, lineNo, raw, errors = undefined) {
     this.status = 'DEGRADED';
     if (reason === 'JSON_PARSE_CORRUPT') this.corruptLines++;
+    else if (reason === 'ID_CONTENT_CONFLICT') this.idConflicts++;
     else this.invalidRecovered++;
     try {
       appendJsonl(this.quarantineFile, {
@@ -110,8 +117,16 @@ export class MemoryStore {
       this.#quarantine('SCHEMA_INVALID', lineNo, t, v.errors);
       return;
     }
-    if (this.ids.has(env.id)) return; // restart-safe dedup continuity
-    this.#index(env);
+    const digest = lineDigest(t);
+    const known = this.ids.get(env.id);
+    if (known !== undefined) {
+      if (known === digest) return; // identical persisted duplicate: one memory, silently
+      // MEMORY-0C §4: one deterministic id may never point to two different
+      // persisted truths — the conflicting line is quarantined, not chosen
+      this.#quarantine('ID_CONTENT_CONFLICT', lineNo, t, [`id ${env.id} already maps to different persisted content`]);
+      return;
+    }
+    this.#index(env, digest);
   }
 
   // STREAMING recovery (MEMORY-0A §4): fixed-size chunks; the byte buffer
@@ -155,8 +170,8 @@ export class MemoryStore {
     }
   }
 
-  #index(env) {
-    this.ids.add(env.id);
+  #index(env, digest) {
+    this.ids.set(env.id, digest);
     this.recordCount++;
     this.counts.bySourceModule[env.sourceModule] = (this.counts.bySourceModule[env.sourceModule] ?? 0) + 1;
     for (const f of Array.isArray(env.evidenceFamily) ? env.evidenceFamily : [env.evidenceFamily]) {
@@ -171,22 +186,22 @@ export class MemoryStore {
     return this.ids.has(id);
   }
 
-  // Append one envelope. DEFENSE IN DEPTH (MEMORY-0B §2): the persistence
-  // boundary itself refuses non-canonical evidence — no caller is trusted
-  // merely because it was expected to validate first. The bus remains the
-  // normal publish path (it validates and owns that rejection count); a
-  // direct caller's invalid append is counted HERE, so one invalid publish
-  // counts exactly once wherever it is caught. One JSON.stringify + one
-  // synchronous append call per record — a clean SIGTERM cannot tear one.
-  append(env, { validatedByBus = false } = {}) {
-    if (!validatedByBus) {
-      const v = validateEnvelope(env);
-      if (!v.ok) {
-        this.invalidRejectedCount++;
-        if (this.status === 'HEALTHY') this.status = 'DEGRADED';
-        this.log(`MEMORY DEGRADED: store refused non-canonical evidence (${v.errors[0] ?? 'invalid'})`);
-        return { accepted: false, reason: 'invalid', errors: v.errors };
-      }
+  // Append one envelope. DEFENSE IN DEPTH (MEMORY-0B §2, sealed by
+  // MEMORY-0C §1): the persistence boundary ALWAYS validates for itself —
+  // there is no trust-bypass flag, and no caller can request trust. The bus
+  // remains the normal publish path: when the bus rejects, the store is
+  // never called (bus owns that count); when the bus accepts and the store
+  // refuses, the store owns the count — one bad publish, one rejection.
+  // The double-validation cost is accepted; correctness outranks it.
+  // One JSON.stringify + one synchronous append call per record — a clean
+  // SIGTERM cannot tear one.
+  append(env) {
+    const v = validateEnvelope(env);
+    if (!v.ok) {
+      this.invalidRejectedCount++;
+      if (this.status === 'HEALTHY') this.status = 'DEGRADED';
+      this.log(`MEMORY DEGRADED: store refused non-canonical evidence (${v.errors[0] ?? 'invalid'})`);
+      return { accepted: false, reason: 'invalid', errors: v.errors };
     }
     if (this.ids.has(env.id)) {
       this.duplicateSuppressedCount++;
@@ -203,7 +218,7 @@ export class MemoryStore {
     }
     if (this.createdTs === null && !this.unknownCreation) this.createdTs = Date.now();
     this.lastWriteTs = Date.now();
-    this.#index(env);
+    this.#index(env, lineDigest(JSON.stringify(env)));
     if (++this.sinceManifest >= MANIFEST_EVERY) this.flush();
     return { accepted: true };
   }
@@ -222,7 +237,7 @@ export class MemoryStore {
   manifest() {
     const gaps = [
       'retention/compaction is a later operational ticket — nothing is auto-deleted in MEMORY-0',
-      'the id-only dedup index grows with the store until the retention/compaction ticket (no probabilistic dedup: a false positive would silently lose evidence)',
+      'the in-memory dedup/integrity index (id + compact persisted-content digest) grows with the store until the retention/compaction ticket (no probabilistic structures: a false positive would silently lose evidence)',
       'tape MARKET_SNAPSHOT envelopes are sampled (bounded), not every raw book tick — high-frequency microstructure storage is a later dedicated design',
     ];
     if (this.unknownCreation) gaps.push('createdTs unknowable: records predate the oldest surviving manifest; a creation time is never invented');
@@ -241,6 +256,7 @@ export class MemoryStore {
       queryIntegrityErrors: this.queryIntegrityErrors,
       corruptLinesQuarantined: this.corruptLines,
       invalidRecoveredQuarantined: this.invalidRecovered,
+      idContentConflictsQuarantined: this.idConflicts,
       knownGaps: gaps,
     };
   }
@@ -271,23 +287,32 @@ export class MemoryStore {
     for (let i = start === 0 ? 0 : 1; i < lines.length; i++) {
       const l = lines[i].trim();
       if (!l) continue;
+      let env;
       try {
-        const env = JSON.parse(l);
-        // gate on the VALIDATED id index — necessary but NOT sufficient
-        // (MEMORY-0B §5): an id validated at startup does not authorize
-        // mutated bytes forever. The CURRENT record must pass the canonical
-        // validator again before a caller may see it.
-        if (!env.id || !this.ids.has(env.id)) continue;
-        if (!validateEnvelope(env).ok) {
-          this.queryIntegrityErrors++;
-          if (this.status === 'HEALTHY') this.status = 'DEGRADED';
-          this.log(`MEMORY DEGRADED: on-disk record ${env.id} mutated since recovery — withheld from query; restart owns quarantine`);
-          continue; // never returned, never rewritten here
-        }
-        out.push(env);
+        env = JSON.parse(l);
       } catch {
-        // corrupt/partial tail line: skipped for the query; recovery owns quarantine
+        // a COMPLETE persisted line that no longer parses is disappeared
+        // evidence (MEMORY-0C §2) — the intentionally skipped first partial
+        // line of the tail window never reaches this point
+        this.queryIntegrityErrors++;
+        if (this.status === 'HEALTHY') this.status = 'DEGRADED';
+        this.log('MEMORY DEGRADED: unparseable persisted record in tail read — withheld; restart owns quarantine');
+        continue;
       }
+      // gate on the VALIDATED id index — necessary but NOT sufficient
+      // (MEMORY-0B §5): an id validated at startup does not authorize
+      // mutated bytes forever. The CURRENT record must pass the canonical
+      // validator AND match the persisted-content digest recorded when it
+      // was accepted/recovered (MEMORY-0C §3) before a caller may see it.
+      const acceptedDigest = env.id ? this.ids.get(env.id) : undefined;
+      if (acceptedDigest === undefined) continue;
+      if (!validateEnvelope(env).ok || lineDigest(l) !== acceptedDigest) {
+        this.queryIntegrityErrors++;
+        if (this.status === 'HEALTHY') this.status = 'DEGRADED';
+        this.log(`MEMORY DEGRADED: on-disk record ${env.id} mutated since recovery — withheld from query; restart owns quarantine`);
+        continue; // never returned, never rewritten here
+      }
+      out.push(env);
     }
     return out;
   }

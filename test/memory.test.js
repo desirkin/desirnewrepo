@@ -440,6 +440,9 @@ test('BOUNDED TAIL: an event older than the recent 500 but inside the 8MB tail i
   const since = store.getSince(NOW_SEC - 7000, { limit: 500 });
   assert.equal(since.length, 500); // hard cap holds even when more match
   assert.ok(since.every((e, k) => k === 0 || e.ts >= since[k - 1].ts)); // deterministic chronological order
+  // honest reads never degrade: no false integrity alarms from clean tails
+  assert.equal(store.queryIntegrityErrors, 0);
+  assert.equal(store.status, 'HEALTHY');
   // a query satisfiable from recent memory alone never needs the tail:
   // point the tail at nothing and the recent-served query still answers
   const realFile = store.eventsFile;
@@ -602,6 +605,110 @@ test('LIFECYCLE CHRONOLOGY: clocks must be internally possible; null stays valid
   const negativeTtl = bus.publish(mkEnv({ ts: NOW_SEC - 7, lifecycle: life({ ttlSec: -30 }) }));
   assert.equal(negativeTtl.accepted, false);
   assert.ok(negativeTtl.errors.some((e) => e.includes('ttlSec')));
+});
+
+// MEMORY-0C §1 — the Store gets no secret "trust me" switch.
+test('NO TRUST BYPASS: the store validates for itself even when a caller claims prior validation', () => {
+  const { store } = mkBus();
+  const r = store.append({ id: 'evil', sourceModule: 'HACKED' }, { validatedByBus: true }); // the old bypass attempt
+  assert.equal(r.accepted, false);
+  assert.equal(r.reason, 'invalid');
+  assert.equal(existsSync(store.eventsFile), false); // nothing persisted
+  assert.equal(store.recordCount, 0);
+  assert.equal(store.status, 'DEGRADED');
+  assert.equal(store.invalidRejectedCount, 1); // counted exactly once
+  // a VALID envelope with the ignored flag still lands normally
+  assert.equal(store.append(mkEnv(), { validatedByBus: true }).accepted, true);
+  assert.equal(store.recordCount, 1);
+});
+
+// MEMORY-0C §2 — a complete persisted line that no longer parses is
+// disappeared evidence, and memory says so.
+test('MALFORMED TAIL RECORD: unparseable persisted evidence degrades health, is withheld, and is never rewritten', () => {
+  const { store, bus } = mkBus();
+  for (let i = 0; i < 700; i++) {
+    bus.publish(mkEnv({ ts: NOW_SEC - 7000 + i, correlation: i === 50 ? { eventId: 'vanishing-event' } : {}, payload: { i } }));
+  }
+  const lines = readFileSync(store.eventsFile, 'utf8').split('\n');
+  const idx = lines.findIndex((l) => l.includes('vanishing-event'));
+  lines[idx] = lines[idx].slice(0, 40) + '### DISK ROT ###'; // complete line, no longer JSON
+  writeFileSync(store.eventsFile, lines.join('\n'));
+  const bytesAfterMutation = readFileSync(store.eventsFile, 'utf8');
+  assert.equal(store.getByEventId('vanishing-event').length, 0);
+  assert.ok(store.queryIntegrityErrors >= 1); // memory KNOWS evidence disappeared
+  assert.equal(store.status, 'DEGRADED');
+  assert.equal(readFileSync(store.eventsFile, 'utf8'), bytesAfterMutation); // append-only source untouched by query
+});
+
+// MEMORY-0C §3 — a schema-valid record whose persisted content changed is
+// corrupted evidence, not a new truth: the persisted digest catches it.
+test('DIGEST SEAL: schema-valid payload tampering is withheld; unchanged old records still serve', () => {
+  const { store, bus } = mkBus();
+  for (let i = 0; i < 700; i++) {
+    bus.publish(
+      mkEnv({
+        ts: NOW_SEC - 7000 + i,
+        correlation: i === 50 ? { eventId: 'tamper-target' } : i === 60 ? { eventId: 'honest-target' } : {},
+        payload: { i },
+      })
+    );
+  }
+  assert.equal(store.getByEventId('tamper-target')[0].payload.i, 50); // reachable before tampering
+  // disk mutation: same id, valid schema, valid provenance — ONLY the payload lies
+  const lines = readFileSync(store.eventsFile, 'utf8').split('\n');
+  const idx = lines.findIndex((l) => l.includes('tamper-target'));
+  const mutated = JSON.parse(lines[idx]);
+  mutated.payload = { i: 999999, tampered: true };
+  lines[idx] = JSON.stringify(mutated);
+  writeFileSync(store.eventsFile, lines.join('\n'));
+  const bytesAfterMutation = readFileSync(store.eventsFile, 'utf8');
+  const result = store.getByEventId('tamper-target');
+  assert.equal(result.length, 0); // the altered "valid" record never reaches a caller
+  assert.ok(store.queryIntegrityErrors >= 1);
+  assert.equal(store.status, 'DEGRADED');
+  assert.equal(readFileSync(store.eventsFile, 'utf8'), bytesAfterMutation); // no live rewrite
+  // an UNCHANGED old record in the same tail still serves normally
+  const honest = store.getByEventId('honest-target');
+  assert.equal(honest.length, 1);
+  assert.equal(honest[0].payload.i, 60);
+});
+
+// MEMORY-0C §4 — one deterministic id, one persisted truth.
+test('ID CONTENT CONFLICT: identical persisted duplicates merge silently; divergent content is quarantined', () => {
+  const d = dir();
+  const store = new MemoryStore({ dir: d });
+  new MemoryBus({ store }).publish(mkEnv());
+  const line = readFileSync(store.eventsFile, 'utf8').trim();
+  // same id + IDENTICAL record: one memory, health untouched
+  appendFileSync(store.eventsFile, line + '\n');
+  const twin = new MemoryStore({ dir: d });
+  assert.equal(twin.recordCount, 1);
+  assert.equal(twin.idConflicts, 0);
+  assert.equal(twin.status, 'HEALTHY');
+  // same id + DIFFERENT valid content: never silently chosen
+  const divergent = JSON.parse(line);
+  divergent.payload = { zVol: 99, zRet: 99, extensionPct: 99 };
+  appendFileSync(store.eventsFile, JSON.stringify(divergent) + '\n');
+  const conflicted = new MemoryStore({ dir: d });
+  assert.equal(conflicted.recordCount, 1); // the original truth stands
+  assert.equal(conflicted.idConflicts, 1);
+  assert.equal(conflicted.status, 'DEGRADED');
+  const q = readFileSync(conflicted.quarantineFile, 'utf8');
+  assert.ok(q.includes('ID_CONTENT_CONFLICT'));
+  assert.ok(q.includes('different persisted content'));
+  // and the surviving record is the ORIGINAL, not the impostor
+  assert.equal(conflicted.getRecent({ limit: 5 })[0].payload.zVol, 4.2);
+});
+
+// MEMORY-0C §5 — canonical ids have one shape.
+test('ID SHAPE: only mem-<40 hex sha1> identifiers enter canonical memory', () => {
+  assert.deepEqual(validateEnvelope(mkEnv()).errors, []); // real generated ids pass
+  const withId = (id) => validateEnvelope({ ...mkEnv(), id });
+  for (const bad of ['x', 'f47ac10b-58cc-4372-a567-0e02b2c3d479', 'mem-abc', `mem-${'a'.repeat(39)}`, `mem-${'A'.repeat(40)}`]) {
+    const v = withId(bad);
+    assert.equal(v.ok, false, `id "${bad}" was accepted`);
+    assert.ok(v.errors.some((e) => e.includes('canonical mem-')), JSON.stringify(v.errors));
+  }
 });
 
 // §23.24 — manifest counters reconcile with the actual accepted records

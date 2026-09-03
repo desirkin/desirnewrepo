@@ -120,7 +120,12 @@ export function validateEnvelope(env) {
   if (!env || typeof env !== 'object') return { ok: false, errors: ['envelope is not an object'] };
 
   if (env.schemaVersion !== MEMORY_SCHEMA_VERSION) errors.push(`schemaVersion must be ${MEMORY_SCHEMA_VERSION}`);
-  if (typeof env.id !== 'string' || !env.id) errors.push('id missing');
+  // MEMORY-0C §5: canonical memory ids have one shape — mem-<40 hex sha1>.
+  // Arbitrary id namespaces never enter canonical memory. (The validator
+  // does not reconstruct the source fingerprint — shape only.)
+  if (typeof env.id !== 'string' || !/^mem-[0-9a-f]{40}$/.test(env.id)) {
+    errors.push('id must be a canonical mem-<40 hex sha1> identifier');
+  }
   // MEMORY-0B §4: the canonical timeline is EPOCH SECONDS, explicitly.
   // A milliseconds-scale value (Date.now()) is ambiguity, and ambiguity is
   // rejected — never silently converted.

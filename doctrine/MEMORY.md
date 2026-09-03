@@ -76,10 +76,25 @@ NO PATH FROM MEMORY-0 TO EXECUTION.
                      //   facts — no equality between them is required or invented
 ```
 
-**The trust boundary (MEMORY-0B).** The Bus is the normal entry point, but
-the Store independently refuses non-canonical evidence. No persistence API
-is trusted merely because an upstream caller was expected to validate
-first. Canonical envelope ts is epoch seconds; lifecycle implementation
+**The trust boundary (MEMORY-0B, sealed MEMORY-0C).** The Bus is the
+normal entry point, but the Store validates every envelope independently
+even when the Bus already validated it — there is no public trust-bypass
+flag, and no persistence API is trusted merely because an upstream caller
+was expected to validate first. Rejection counting stays single-owner: a
+Bus rejection never reaches the Store; a Store rejection means the Bus had
+accepted — one bad publish, one count. During a process lifetime, Memory
+retains a compact persisted-content digest (sha1 of the exact persisted
+JSON line) alongside each accepted id; bounded-tail records must match
+both the canonical schema and the digest of the record Memory
+accepted/recovered before a caller may see them. A schema-valid record
+whose persisted content changes is corrupted evidence, not a new truth —
+and an unparseable complete tail line is disappeared evidence: both are
+withheld, counted in `queryIntegrityErrors`, and degrade health (the
+intentionally skipped first partial line of a tail window never counts).
+On recovery, a second persisted line with the same id and identical
+content is one memory; the same id over DIFFERENT content is an
+`ID_CONTENT_CONFLICT` — quarantined, never silently chosen. Canonical ids
+have one enforced shape: `mem-<40 hex sha1>`. Canonical envelope ts is epoch seconds; lifecycle implementation
 clocks retain their explicitly documented unit; mixed timestamp units are
 rejected, never guessed. A record re-read from the bounded disk tail is
 revalidated at query time — an id validated at startup does not authorize
@@ -162,8 +177,9 @@ the events themselves; if records exist but the manifest is lost, the
 creation time is honestly `null` — never invented. `persistenceErrors` and
 ingestion counters are session-local. **Retention:** nothing is
 auto-deleted; retention/compaction is a later operational ticket, and the
-id-only dedup index remains the documented growth limitation until then (no
-probabilistic dedup — a false positive would silently lose evidence).
+in-memory dedup/integrity index (id plus a compact persisted-content
+digest, MEMORY-0C) remains the documented growth limitation until then (no
+probabilistic structures — a false positive would silently lose evidence).
 
 ## FAILURE — MEMORY FAILS DARK
 

@@ -50,7 +50,9 @@ export class MemoryBus {
       this.log(`MEMORY DEGRADED: canonical envelope rejected (${v.errors[0] ?? 'invalid'})`);
       return { accepted: false, reason: 'invalid', errors: v.errors };
     }
-    const r = this.store.append(envelope, { validatedByBus: true });
+    // the store validates AGAIN for itself (MEMORY-0C §1): there is no
+    // trust-bypass flag, and the tiny double-validation cost is accepted
+    const r = this.store.append(envelope);
     if (!r.accepted) return r;
     this.acceptedCount++;
     this.lastAcceptedTs = Date.now();
