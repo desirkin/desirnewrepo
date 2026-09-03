@@ -19,5 +19,7 @@
     "fly": "node fly.js",
     "cobra": "node bin/cobra.js"
   },
-  "dependencies": {}
+  "dependencies": {
+    "pg": "^8.23.0"
+  }
 }

@@ -20,6 +20,7 @@ import { dataDir } from '../lib/config.js';
 import { appendJsonl } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
 import { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_MS } from './auth.js';
+import { getPersistence } from '../persistence/runtime.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -176,6 +177,13 @@ function statusPayload() {
     },
     // CONTROL AUTH configuration state only — never implies armed-to-trade
     controlAuth: auth.configured() ? 'CONFIGURED' : 'UNCONFIGURED',
+    // PERSIST-0: safe persistence-health summary only (no URLs, no secrets)
+    persistence: (() => {
+      const p = getPersistence();
+      if (!p) return { status: 'UNAVAILABLE', permissionLock: false, databaseConfigured: false };
+      const h = p.health();
+      return { status: h.status, permissionLock: h.permissionLock, databaseConfigured: h.databaseConfigured };
+    })(),
     paperFanged: true,
   };
 }
@@ -343,8 +351,30 @@ const server = http.createServer((req, res) => {
         // secrets never travel past the gate: the control layer sees only
         // the action fields it always saw
         const { password, confirmPhrase, ...controlBody } = body;
-        const result = handleControl(controlBody);
-        json(res, result.ok ? 200 : 400, result);
+        (async () => {
+          const p = getPersistence();
+          const action = String(controlBody.action ?? '').toLowerCase();
+          // PERSIST-0 asymmetry: CLEAR is permission-INCREASING — the
+          // durable transaction must succeed BEFORE the local latch drops.
+          if (action === 'clear' && p) {
+            const durable = await p.durableClearOrRefuse();
+            if (!durable.allow) {
+              json(res, 503, { ok: false, reason: durable.reason });
+              return;
+            }
+          }
+          const result = handleControl(controlBody);
+          // permission-REDUCING actions applied locally above; persist the
+          // snapshot durably now — a failure leaves the restriction active
+          // and is reported through persistence health, never as fake success
+          if (result.ok && p && action !== 'clear') {
+            p.persistControlSnapshot(readControls()).catch(() => {});
+          }
+          json(res, result.ok ? 200 : 400, result);
+        })().catch((err) => {
+          console.error(`[api/control] ${err.constructor.name}: ${err.message}`);
+          json(res, 500, { ok: false, reason: 'CONTROL_PERSISTENCE_ERROR' });
+        });
       });
       return;
     }

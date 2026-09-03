@@ -10,6 +10,7 @@ import { startRumint } from './rumint/poller.js';
 import { startGateway } from './gateway/collector.js';
 import { startWideEye } from './survey/wideeye.js';
 import { startMemoryMirror } from './memory/mirror.js';
+import { startPersistence } from './persistence/runtime.js';
 
 console.log('COBRA FLYING — tape + cockpit. Default answer is NO TRADE.');
 
@@ -30,6 +31,15 @@ try {
   );
 }
 
+try {
+  // PERSIST-0: connect the durable core and restore protective state FIRST
+  // (most restrictive wins) — before memory, before sensors, before
+  // anything that could ever grant permission. Unreachable-but-configured
+  // engages PERSISTENCE_PERMISSION_LOCK; failure never stops observation.
+  await startPersistence({ log: console.log });
+} catch (err) {
+  console.error(`PERSIST-0 failed to start (observation continues; permission-increasing behavior locked): ${err.message}`);
+}
 try {
   // MEMORY-0 dark mirror opens BEFORE the live sensors begin writing
   // (MEMORY-0A §8), so their startup records are remembered too. It
