@@ -61,6 +61,51 @@ export function selectFromRaw(assetPairs, tickers, config = loadConfig()) {
   return deduped;
 }
 
+// Wide-eye nominations proposed for the next session (written by /survey).
+// Read as a plain file to keep the tape free of survey imports.
+function readWideEyeNominations() {
+  const file = path.join(dataDir(), 'survey', 'nominations-current.json');
+  if (!existsSync(file)) return [];
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')).nominations ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// Merge nominated symbols that clear the RELAXED floor, then enforce the hard
+// deep-universe cap: majors always ride; minors compete by volume; lowest shed
+// first. The wide eye can propose — only this selection (and then the deep
+// tape itself) verifies.
+export function mergeNominationsAndCap(pairs, nominations, assetPairs, tickers, config = loadConfig()) {
+  const x = config.universeExpansion;
+  const w = config.wideeye ?? {};
+  const floor = w.nominationFloorUsd ?? 2_000_000;
+  const cap = w.deepUniverseCap ?? 30;
+  const out = [...pairs];
+  const have = new Set(pairs.map((p) => p.coin));
+  for (const nom of nominations) {
+    if (have.has(nom.coin)) continue;
+    // re-verify against the venue's own data, never the nomination's claim
+    const entry = Object.entries(assetPairs).find(([, p]) => {
+      if (p.status !== 'online' || (p.quote !== 'ZUSD' && p.quote !== 'USD') || !p.wsname?.endsWith('/USD')) return false;
+      const raw = p.wsname.split('/')[0];
+      return (BASE_ALIASES[raw] ?? raw) === nom.coin;
+    });
+    if (!entry) continue;
+    const t = tickers[entry[0]];
+    const usdVol24h = t ? Number(t.v?.[1]) * Number(t.p?.[1]) : null;
+    if (!Number.isFinite(usdVol24h) || usdVol24h < floor) continue;
+    out.push({ coin: nom.coin, symbol: `${nom.coin}/USD`, major: false, depth: x.defaultDepth, usdVol24h: Math.round(usdVol24h), nominated: true });
+    have.add(nom.coin);
+  }
+  const majors = out.filter((p) => p.major);
+  const minors = out.filter((p) => !p.major).sort((a, b) => (b.usdVol24h ?? 0) - (a.usdVol24h ?? 0));
+  const kept = minors.slice(0, Math.max(0, cap - majors.length));
+  const shed = minors.slice(Math.max(0, cap - majors.length)).map((p) => p.coin);
+  return { pairs: [...majors, ...kept].sort((a, b) => (b.usdVol24h ?? 0) - (a.usdVol24h ?? 0)), shed };
+}
+
 function fallbackUniverse(config) {
   const x = config.universeExpansion;
   return config.universe.map((coin) => ({
@@ -89,7 +134,10 @@ export async function selectUniverse(config = loadConfig()) {
   }
   try {
     const [assetPairs, tickers] = await Promise.all([fetchJson(ASSET_PAIRS_URL), fetchJson(TICKER_URL)]);
-    const pairs = selectFromRaw(assetPairs, tickers, config);
+    const base = selectFromRaw(assetPairs, tickers, config);
+    const noms = readWideEyeNominations();
+    const { pairs, shed } = mergeNominationsAndCap(base, noms, assetPairs, tickers, config);
+    if (shed.length) console.log(`[universe] deep cap ${config.wideeye?.deepUniverseCap ?? 30}: shed lowest-volume ${shed.join(', ')}`);
     const record = {
       date,
       selectedAt: nowIso(),

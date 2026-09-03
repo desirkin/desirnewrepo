@@ -11,6 +11,18 @@
   "paper": {
     "baseBalanceUsd": 100
   },
+  "wideeye": {
+    "enabled": true,
+    "sweepSec": 60,
+    "persistSec": 600,
+    "zVolThreshold": 3,
+    "zRetThreshold": 2,
+    "extensionCapPct": 3,
+    "minSamples": 60,
+    "rippleCooldownMin": 60,
+    "nominationFloorUsd": 2000000,
+    "deepUniverseCap": 30
+  },
   "gateway": {
     "enabled": false,
     "pollSec": 60,

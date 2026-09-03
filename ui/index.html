@@ -277,6 +277,8 @@
      style="top:calc(max(10px, env(safe-area-inset-top)) + 42px);left:12px;color:#5c6b7a"></div>
 <div id="earschip" class="chip" hidden
      style="top:calc(max(10px, env(safe-area-inset-top)) + 74px);left:12px;color:#5c6b7a"></div>
+<div id="eyechip" class="chip" hidden
+     style="top:calc(max(10px, env(safe-area-inset-top)) + 106px);left:12px;color:#5c6b7a"></div>
 <div id="clockchip" class="chip">ET --:-- · SESSION ----------</div>
 <div id="controls">
   <button id="btnKill">KILL</button>
@@ -664,6 +666,11 @@ function renderStatus(s) {
   if (u) {
     const off = (u.stale ?? 0) + (u.unavailable ?? 0);
     $('#universechip').textContent = `UNIVERSE ${u.total} · LIVE ${u.live}` + (off ? ` · OFF ${off}` : '');
+  }
+  const w = s.wideeye;
+  $('#eyechip').hidden = !(w && w.enabled && w.fresh);
+  if (w && w.enabled && w.fresh) {
+    $('#eyechip').textContent = `WIDE EYE ${w.scanned} scanned · ${w.ripplesToday} ripple${w.ripplesToday === 1 ? '' : 's'} today`;
   }
   renderLockRing(s.locks);
   renderSession(s.session);

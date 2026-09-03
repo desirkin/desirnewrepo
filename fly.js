@@ -8,6 +8,7 @@ import { dataDir } from './lib/config.js';
 import { runTape } from './tape/run.js';
 import { startRumint } from './rumint/poller.js';
 import { startGateway } from './gateway/collector.js';
+import { startWideEye } from './survey/wideeye.js';
 
 console.log('COBRA FLYING — tape + cockpit. Default answer is NO TRADE.');
 
@@ -30,6 +31,7 @@ try {
 
 startRumint(); // no-ops (zero network) unless rumint is enabled
 startGateway(); // no-ops (zero network) unless gateway is enabled — collector only
+startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
 try {
   await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
   process.exit(0);

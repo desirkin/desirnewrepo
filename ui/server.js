@@ -92,6 +92,23 @@ function rumintReport() {
   }
 }
 
+// Wide-eye survey status (read-only passthrough; notice-only tier).
+function wideeyeReport() {
+  const file = path.join(dataDir(), 'survey', 'status.json');
+  if (!existsSync(file)) return { enabled: false };
+  try {
+    const s = JSON.parse(readFs(file, 'utf8'));
+    return {
+      enabled: s.enabled === true,
+      scanned: s.scanned ?? 0,
+      ripplesToday: s.ripplesToday ?? 0,
+      fresh: Date.now() - (s.tsMs ?? 0) < 180_000,
+    };
+  } catch {
+    return { enabled: false };
+  }
+}
+
 function statusPayload() {
   const engine = getEngineState(); // syncs + logs posture transitions
   let open = 0;
@@ -119,6 +136,7 @@ function statusPayload() {
     pendingStrikes: pendingStrikes(),
     stalking: Object.keys(engine.stalking ?? {}),
     rumint: rumintReport(),
+    wideeye: wideeyeReport(),
     controls: {
       kill: readControls().kill?.active ?? false,
       cage: readControls().cage?.active ?? false,
