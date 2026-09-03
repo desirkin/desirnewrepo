@@ -220,7 +220,15 @@ const server = http.createServer((req, res) => {
     } else if (url.pathname === '/api/status') {
       json(res, 200, statusPayload());
     } else if (url.pathname === '/api/ledger/summary') {
-      json(res, 200, ledgerSummary()); // read-only: computed from disk, changes nothing
+      // Read-only, computed from disk; an empty or missing ledger is a valid
+      // empty-state summary, never an error. Real failures get logged with
+      // their class and stack so the deployment logs name the truth.
+      try {
+        json(res, 200, ledgerSummary());
+      } catch (err) {
+        console.error(`[ledger/summary] ${err.constructor.name}: ${err.message}\n${err.stack}`);
+        json(res, 500, { error: err.message, errorClass: err.constructor.name });
+      }
     } else if (url.pathname.startsWith('/api/coin/')) {
       json(res, 200, coinPayload(url.pathname.split('/')[3]?.toUpperCase() ?? ''));
     } else {
@@ -228,7 +236,8 @@ const server = http.createServer((req, res) => {
       res.end('COILED. Nothing here.');
     }
   } catch (err) {
-    json(res, 500, { error: err.message });
+    console.error(`[${url.pathname}] ${err.constructor.name}: ${err.message}\n${err.stack}`);
+    json(res, 500, { error: err.message, errorClass: err.constructor.name });
   }
 });
 

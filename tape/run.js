@@ -239,11 +239,17 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     try {
       handleMessage(msg);
     } catch (err) {
-      // Never crash the tape on one bad message — log (rate-limited) and keep tasting.
+      // Never crash the tape on one bad message — log (rate-limited) and keep
+      // tasting. The event write itself may fail on a broken disk; that must
+      // not take the socket handler down either.
       if (Date.now() - lastErrorLogMs > 60_000) {
         lastErrorLogMs = Date.now();
-        writeEvent('TAPE_ERROR', { error: err.message, channel: msg?.channel ?? null });
-        log(`[${nowIso()}] tape error (non-fatal): ${err.message}`);
+        try {
+          writeEvent('TAPE_ERROR', { error: err.message, channel: msg?.channel ?? null });
+        } catch {
+          // disk refused the log — the console line below is the record
+        }
+        log(`[${nowIso()}] tape error (non-fatal, ${err.constructor.name}): ${err.message}`);
       }
     }
   }

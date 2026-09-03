@@ -596,11 +596,36 @@ function renderLedger(L) {
     ${syms ? `<div class="symstrip">${syms}</div>` : ''}
     <div class="fees">COSTS PAID ${fmt$(L.totalFeesPaid)}</div>`;
 }
+function ledgerError(msg) {
+  $('#ledgerBody').innerHTML = `<div class="line"><span>${msg}</span></div>`;
+}
 async function refreshLedger() {
+  // Distinguish the failure classes instead of swallowing them: the real
+  // error goes to the console (and thus VM logs), the panel names the class.
+  let res;
   try {
-    renderLedger(await (await fetch('/api/ledger/summary', { cache: 'no-store' })).json());
-  } catch {
-    renderLedger(null);
+    res = await fetch('/api/ledger/summary', { cache: 'no-store' });
+  } catch (err) {
+    console.error('LEDGER fetch failed (server unreachable):', err);
+    return ledgerError('SHELL LINK LOST — server unreachable');
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.error(`LEDGER HTTP ${res.status}:`, body.slice(0, 300));
+    return ledgerError(`LEDGER ERROR — HTTP ${res.status}${res.status === 404 ? ' (deployed build predates the ledger — redeploy)' : ''}`);
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch (err) {
+    console.error('LEDGER bad JSON:', err);
+    return ledgerError('LEDGER ERROR — bad response (stale build?)');
+  }
+  try {
+    renderLedger(data);
+  } catch (err) {
+    console.error('LEDGER render error:', err, data);
+    ledgerError('LEDGER RENDER ERROR — see console');
   }
 }
 $('#btnLedger').addEventListener('click', () => { $('#ledger').classList.add('open'); refreshLedger(); });

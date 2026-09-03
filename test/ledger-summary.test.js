@@ -2,7 +2,7 @@
 // data dir. Display math only — nothing here touches trading logic.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -90,6 +90,43 @@ test('open position without a live tape shows null mark/unrealized, never a gues
   assert.equal(s.openPositions[0].mark, null);
   assert.equal(s.openPositions[0].unrealizedUsd, null);
   assert.equal(s.totalTrades, 4); // open position is not a closed trade
+});
+
+test('a data dir that does not exist at all yields the valid empty-state summary, never an error', () => {
+  const saved = process.env.COBRA_DATA_DIR;
+  process.env.COBRA_DATA_DIR = path.join(TEST_DATA, 'never-created', 'nested', 'deploy-disk');
+  try {
+    const s = ledgerSummary();
+    assert.equal(s.startingBalance, BASE);
+    assert.equal(s.currentBalance, BASE);
+    assert.equal(s.totalTrades, 0);
+    assert.equal(s.winRatePct, null);
+    assert.deepEqual(s.lastTrades, []);
+    assert.deepEqual(s.openPositions, []);
+    assert.equal(s.daysOnWatch, 0);
+    // read path must not have created anything on a disk it doesn't own
+    assert.equal(existsSync(path.join(TEST_DATA, 'never-created')), false);
+  } finally {
+    process.env.COBRA_DATA_DIR = saved;
+  }
+});
+
+test('empty-but-present ledger files (zero-byte) also yield the empty state', () => {
+  const saved = process.env.COBRA_DATA_DIR;
+  const dir = path.join(TEST_DATA, 'empty-files');
+  process.env.COBRA_DATA_DIR = dir;
+  try {
+    mkdirSync(path.join(dir, 'ledger'), { recursive: true });
+    writeFileSync(path.join(dir, 'ledger', 'fills.jsonl'), '');
+    writeFileSync(path.join(dir, 'ledger', 'exits.jsonl'), '');
+    writeFileSync(path.join(dir, 'ledger', 'predictions.jsonl'), '\n'); // torn/blank lines tolerated
+    const s = ledgerSummary();
+    assert.equal(s.totalTrades, 0);
+    assert.equal(s.currentBalance, BASE);
+    assert.equal(s.pendingPredictions, 0);
+  } finally {
+    process.env.COBRA_DATA_DIR = saved;
+  }
 });
 
 test.after(() => rmSync(TEST_DATA, { recursive: true, force: true }));
