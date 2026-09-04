@@ -169,6 +169,40 @@ export function fromStateTransition(rec, observedTs = nowIso()) {
   });
 }
 
+// ---------------------------------------------------------------------
+// G. MICROSTRUCTURE — micro/observations.jsonl lines (MICRO-1). Order-flow
+// and liquidity evidence measured from aggregate L2 + direct Kraken taker
+// side. MARKET_PRICE joins the families only when the observation carries
+// an actual measured price-response window. Everything liquidity-shaped is
+// a PROXY (AGGREGATE_L2_UNATTRIBUTED) and stays one here. A sense, not a
+// strategy: nothing downstream may read this as permission.
+// ---------------------------------------------------------------------
+export function fromMicrostructureObservation(rec, observedTs = nowIso()) {
+  const hasPriceResponse =
+    rec.priceResponse && typeof rec.priceResponse === 'object'
+      ? Object.values(rec.priceResponse).some((w) => w && typeof w === 'object' && Number.isFinite(w.midReturnPct))
+      : false;
+  const proxyState = rec.absorptionProxy && typeof rec.absorptionProxy === 'object' ? rec.absorptionProxy.state : null;
+  return envelope({
+    sourceModule: 'MICROSTRUCTURE',
+    eventType: 'MICROSTRUCTURE_OBSERVATION',
+    ts: sec(rec.ts),
+    symbol: canonSymbol(rec.coin),
+    families: hasPriceResponse ? ['ORDER_FLOW', 'LIQUIDITY', 'MARKET_PRICE'] : ['ORDER_FLOW', 'LIQUIDITY'],
+    observationState: rec.bookState === 'FRESH' ? 'KNOWN' : rec.bookState === 'STALE' ? 'DEGRADED' : 'UNKNOWN',
+    payload: strip(rec, 'ts', 'coin'),
+    dataAvailability: {
+      aggressiveFlow: rec.flow ? 'KNOWN' : 'UNAVAILABLE',
+      priceResponse: hasPriceResponse ? 'KNOWN' : rec.bookState === 'STALE' ? 'STALE' : 'UNKNOWN',
+      depthPressure: rec.bookState === 'FRESH' ? 'KNOWN' : 'STALE',
+      recoveryAsymmetry: rec.recoveryAsymmetry50 && typeof rec.recoveryAsymmetry50 === 'object' ? 'KNOWN' : 'UNKNOWN',
+      absorptionProxy: proxyState === 'PRESENT' || proxyState === 'NOT_PRESENT' ? 'KNOWN' : proxyState === 'DEGRADED' ? 'DEGRADED' : 'UNAVAILABLE',
+    },
+    provenance: liveProv('micro/observations.jsonl (kraken WS v2 microstructure tracker, aggregate L2 unattributed)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'micro/observations.jsonl'),
+  });
+}
+
 export function fromControlAction(rec, observedTs = nowIso()) {
   return envelope({
     sourceModule: 'STATE',

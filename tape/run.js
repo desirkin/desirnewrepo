@@ -18,6 +18,12 @@ import {
   writeCurrentBook,
   writeTapeStatus,
 } from './store.js';
+import {
+  MicrostructureTracker,
+  readStalkingCoins,
+  writeMicroObservation,
+  MICRO_LIMITS,
+} from './microstructure.js';
 
 export async function runTape({ minutes = null, chaosAfterSec = null, log = console.log } = {}) {
   const config = loadConfig();
@@ -36,6 +42,24 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   const unavailable = new Set(); // subscribe-failed or shed symbols
   const subFailures = new Map(); // symbol -> attempt count
   let lastAnyMsgMs = null;
+
+  // MICRO-1: the dark microstructure sense. OBSERVES ONLY — nothing here
+  // may influence posture, stalking, controls, ledger or eligibility. Every
+  // call is failure-isolated: a tracker fault degrades MICRO, never tape.
+  const micro = new MicrostructureTracker({ bookStaleMs: staleMs, log });
+  let microEmitsThisMinute = 0;
+  let microMinuteStart = Date.now();
+  let microLastErrLogMs = 0;
+  const microGuard = (fn) => {
+    try {
+      fn();
+    } catch (err) {
+      if (Date.now() - microLastErrLogMs > 60_000) {
+        microLastErrLogMs = Date.now();
+        log(`[${nowIso()}] MICRO degraded (tape unaffected): ${err.message}`);
+      }
+    }
+  };
 
   function adoptPair(p) {
     pairs.set(p.symbol, p);
@@ -192,6 +216,8 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
           const flow = flows.get(t.symbol);
           if (!flow) continue;
           flow.add({ ts: Date.parse(t.timestamp), side: t.side, qty: t.qty, price: t.price });
+          // MICRO-1: direct Kraken taker side, verbatim — never re-inferred
+          microGuard(() => micro.onTrade(t.symbol, { ts: Date.parse(t.timestamp), side: t.side, qty: t.qty, price: t.price }));
           if (msg.type !== 'snapshot') {
             writeTrade({
               ts: t.timestamp,
@@ -218,8 +244,11 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
             const check = book.applyUpdate(d);
             if (check.ok === false) {
               resyncBook(d.symbol, `checksum mismatch (computed=${check.computed} expected=${check.expected})`);
+              continue;
             }
           }
+          // MICRO-1: sample the applied book (rate-limited inside; local clock)
+          microGuard(() => micro.onBook(d.symbol, book));
         }
         break;
       }
@@ -309,6 +338,21 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     }
     publishStatus(health);
 
+    // MICRO-1 tracking bound: ACTIVE STALKING ∩ SUBSCRIBED ∩ SYNCED — all
+    // three or nothing. Not a UI attention set; fallback majors on screen
+    // are never MICRO targets. Grace/discard handled inside the tracker.
+    microGuard(() => {
+      const stalkCoins = readStalkingCoins();
+      const eligible = new Set();
+      for (const p of pairs.values()) {
+        if (!stalkCoins.has(p.coin)) continue;
+        if (unavailable.has(p.symbol)) continue; // not subscribed
+        if (!books.get(p.symbol)?.synced) continue; // not synchronized
+        eligible.add(p.symbol);
+      }
+      micro.setTrackingSet(eligible);
+    });
+
     const today = sessionDate();
     if (today !== universeDate && !refreshing && !stopping) {
       refreshing = true;
@@ -338,6 +382,29 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       writeCurrentBook(p.coin, book);
     }
   }, snapIntervalSec * 1000);
+
+  // ---- MICRO-1 emission: one observation per tracked symbol per ~5s,
+  // hard-capped per minute. A write failure degrades MICRO, never tape.
+  const microTimer = setInterval(() => {
+    microGuard(() => {
+      const now = Date.now();
+      if (now - microMinuteStart >= 60_000) {
+        microMinuteStart = now;
+        microEmitsThisMinute = 0;
+      }
+      for (const symbol of micro.tracked()) {
+        if (microEmitsThisMinute >= MICRO_LIMITS.maxObservationsPerMinute) break; // documented hard cap
+        const p = pairs.get(symbol);
+        const book = books.get(symbol);
+        if (!p || !book?.synced) continue;
+        const obs = micro.observe(symbol, book, p.coin, now);
+        if (obs) {
+          writeMicroObservation(obs);
+          microEmitsThisMinute++;
+        }
+      }
+    });
+  }, MICRO_LIMITS.emitIntervalMs);
 
   // ---- resource safety: shed lowest-volume minors before ever falling over
   let lastResourceCheck = Date.now();
@@ -408,6 +475,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       clearInterval(heartbeatTimer);
       clearInterval(snapshotTimer);
       clearInterval(resourceTimer);
+      clearInterval(microTimer);
       if (chaosTimer) clearTimeout(chaosTimer);
       if (durationTimer) clearTimeout(durationTimer);
       setTapeState(TAPE_STATES.OFFLINE, { reason });
