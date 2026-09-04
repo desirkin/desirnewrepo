@@ -82,6 +82,11 @@
      muscle, not sci-fi wire. Restrained on purpose. */
   .ringScales { fill: none; stroke: var(--bg); stroke-width: 5.4; opacity: .1;
                 stroke-dasharray: 2.2 6.2; }
+  /* UI-1C: faint concentric orbit guides — the field reads as a system */
+  .orbitGuide { fill: none; stroke: #1d2b40; stroke-width: .8; opacity: .55; }
+  .orbitGuide.dashed { stroke-dasharray: 1.6 6; opacity: .45; }
+  /* the flick of a forked tongue at the nose — geometry, not cartoon */
+  #coilTongue { fill: none; stroke: #ff6b52; stroke-width: .9; stroke-linecap: round; opacity: .8; }
   .ringPulse  { fill: none; stroke: var(--accent2); stroke-width: 2.4; opacity: .38;
                 stroke-dasharray: 46 607; stroke-linecap: round;
                 filter: blur(1.1px) drop-shadow(0 0 5px var(--accent2));
@@ -96,20 +101,34 @@
   .sess    { fill: none; stroke: #35435c; stroke-width: 1; opacity: .6; }
   .sessFill{ fill: none; stroke: var(--accent2); stroke-width: 1.4; stroke-linecap: round; opacity: .7;
              transition: stroke 1.2s ease; }
-  /* UI-1B2: the outer serpent presence — restrained, eerie, never loud */
+  /* UI-1B2/UI-1C: the outer serpent presence — the hood of something huge
+     framing the top of the field, with two slit-pupil reddish eyes. Louder
+     than before (the concept frame), still framing and never the subject. */
   #lurk { position: fixed; inset: 0; pointer-events: none; z-index: 1; }
-  .lurkShade { position: absolute; left: 0; right: 0; top: 0; height: 30vh;
+  .lurkShade { position: absolute; left: 0; right: 0; top: 0; height: 34vh;
     background:
-      radial-gradient(60% 120% at 8% -20%, rgba(6, 22, 20, .85), transparent 65%),
-      radial-gradient(60% 120% at 92% -20%, rgba(6, 22, 20, .85), transparent 65%); }
-  .lurkEye { position: absolute; top: 11vh; width: 30px; height: 8px; border-radius: 50%;
-    background: radial-gradient(closest-side, rgba(255, 92, 60, .8), rgba(150, 30, 18, .45) 60%, transparent);
-    filter: blur(1px) drop-shadow(0 0 7px rgba(255, 70, 40, .35)); opacity: .4; }
-  .lurkEye.left { left: 9%; transform: rotate(-16deg); }
-  .lurkEye.right { right: 9%; transform: rotate(16deg); }
+      radial-gradient(58% 130% at 6% -24%, rgba(4, 18, 16, .96), transparent 68%),
+      radial-gradient(58% 130% at 94% -24%, rgba(4, 18, 16, .96), transparent 68%),
+      radial-gradient(90% 60% at 50% -30%, rgba(3, 10, 12, .8), transparent 75%); }
+  .lurkEye { position: absolute; top: 10.5vh; width: 54px; height: 20px; border-radius: 50%;
+    background: radial-gradient(ellipse at 50% 55%, rgba(255, 138, 92, .95), rgba(214, 68, 38, .8) 36%, rgba(110, 22, 8, .55) 62%, transparent 80%);
+    filter: blur(.5px) drop-shadow(0 0 14px rgba(255, 70, 40, .45)); opacity: .5; }
+  .lurkEye::after { content: ''; position: absolute; left: 50%; top: 50%; width: 5px; height: 17px;
+    transform: translate(-50%, -50%); background: #0a0302; border-radius: 50%; } /* the slit pupil */
+  .lurkEye.left { left: 8%; transform: rotate(-15deg); }
+  .lurkEye.right { right: 8%; transform: rotate(15deg); }
   body:not(.reduced) .lurkEye { animation: lurkGlow 9s ease-in-out infinite; }
-  @keyframes lurkGlow { 50% { opacity: .22; } }
+  @keyframes lurkGlow { 50% { opacity: .26; } }
   body.killed .lurkEye { opacity: .12; animation: none; }
+  /* UI-1C: the nameplate — between the capsules and the eyes */
+  #brand { position: fixed; top: calc(max(10px, env(safe-area-inset-top)) + 52px);
+    left: 0; right: 0; text-align: center; z-index: 2; pointer-events: none; }
+  #brand .b1 { font-size: 15px; font-weight: 600; letter-spacing: .52em; text-indent: .52em;
+    color: var(--ink); text-shadow: 0 0 12px rgba(89, 230, 198, .35); }
+  #brand .b1::before, #brand .b1::after { content: '—'; letter-spacing: 0; text-indent: 0;
+    color: var(--dim); opacity: .7; margin: 0 10px; }
+  #brand .b2 { margin-top: 3px; font-size: 8px; letter-spacing: .46em; text-indent: .46em;
+    color: var(--dim); }
 
   /* ============ verdict ============ */
   #verdict {
@@ -130,6 +149,8 @@
     margin-top: 8px; font-size: 11px; letter-spacing: .12em; color: var(--dim);
     text-transform: uppercase;
   }
+  #verdict .orn { margin-top: 7px; font-size: 9px; color: var(--accent); opacity: .65;
+                  transition: color 1.2s ease; }
 
   /* ============ planets ============ */
   .planet { position: absolute; left: 0; top: 0; width: 46px; height: 58px;
@@ -137,7 +158,20 @@
   .planet .body {
     width: 30px; height: 30px; border-radius: 50%; margin: 0 auto;
     opacity: .82; transition: opacity .6s, box-shadow .6s;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: inset -3px -4px 8px rgba(0, 0, 0, .35);
   }
+  /* UI-1C: the coin badge glyph — presentation only, drawn from the symbol */
+  .planet .glyph { font-size: 13px; font-weight: 800; color: rgba(255, 255, 255, .94);
+                   text-shadow: 0 1px 3px rgba(0, 0, 0, .6); pointer-events: none; }
+  .planet.focal .glyph { font-size: 17px; }
+  .planet.quiet .glyph { font-size: 10px; opacity: .8; }
+  /* UI-1C: the comet trail — orbit direction made visible; decoration only */
+  .planet .trail { position: absolute; left: 50%; top: 15px; width: 42px; height: 3px;
+    transform-origin: 100% 50%; pointer-events: none; border-radius: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent2)); opacity: .26; filter: blur(1px); }
+  .planet.quiet .trail { opacity: .1; }
+  body.reduced .trail { visibility: hidden; }
   .planet .lbl { margin-top: 5px; font-size: 10px; letter-spacing: .22em; color: var(--dim); }
   .planet.stalked .body { opacity: 1; animation: pulse 1.6s ease-in-out infinite; }
   .planet.stalked .lbl { color: #ffb454; }
@@ -197,16 +231,26 @@
   #stripdot { width: 7px; height: 7px; border-radius: 50%; background: #56607a; flex: none; }
   #stripdot.LIVE { background: #3aa981; box-shadow: 0 0 8px #3aa981; }
   #stripdot.STALE, #stripdot.DEGRADED { background: #ffb454; box-shadow: 0 0 8px #ffb454; }
+  /* UI-1C: heartbeat glyph — visible only while the tape is genuinely LIVE
+     (renderStrip toggles it from the same freshness truth as the dot) */
+  #pulse { flex: none; display: none; }
+  #clockchip.live #pulse { display: block; }
+  #pulse path { fill: none; stroke: #3aa981; stroke-width: 1.4; stroke-linecap: round; opacity: .6; }
+  body:not(.reduced) #clockchip.live #pulse path {
+    stroke-dasharray: 12 52; animation: pulseRun 2.6s linear infinite; }
+  @keyframes pulseRun { to { stroke-dashoffset: -64; } }
 
   /* human controls: confirm-tap buttons. They only remove permission to trade. */
   #controls { position: fixed; bottom: calc(max(12px, env(safe-area-inset-bottom)) + 40px);
               left: 50%; transform: translateX(-50%); display: flex; gap: 10px; z-index: 35; }
   body.demo #controls { display: none; }
   #controls button {
-    font-size: 11px; font-weight: 700; letter-spacing: .2em; padding: 8px 14px;
+    font-size: 11px; font-weight: 700; letter-spacing: .2em; padding: 9px 15px;
     border-radius: 20px; cursor: pointer; background: rgba(8,14,28,.75);
     backdrop-filter: blur(4px); transition: all .2s;
+    display: inline-flex; align-items: center; gap: 7px;
   }
+  #controls button svg { flex: none; opacity: .9; }
   #btnKill  { color: #ff6b52; border: 1px solid #7c2f22; }
   #btnCage  { color: #ffb454; border: 1px solid #7a5526; }
   #btnVeto  { color: #69d2ff; border: 1px solid #2a5a78; }
@@ -375,10 +419,19 @@
   <div class="lurkEye left"></div>
   <div class="lurkEye right"></div>
 </div>
+<!-- UI-1C: the nameplate, set into the hood between the watching eyes -->
+<div id="brand" aria-hidden="true">
+  <div class="b1">SERPENT</div>
+  <div class="b2">WATCHES EVERYTHING</div>
+</div>
 <div id="flash"></div>
 
 <div id="scene">
   <svg id="core" viewBox="-170 -170 340 340" aria-hidden="true">
+    <!-- UI-1C: concentric orbit guides under everything — quiet structure -->
+    <circle class="orbitGuide" r="72"></circle>
+    <circle class="orbitGuide dashed" r="126"></circle>
+    <circle class="orbitGuide" r="146"></circle>
     <!-- ET session ring (outer, thin): progress through the trading day -->
     <circle class="sess" r="158"></circle>
     <path id="sessArc" class="sessFill" d=""></path>
@@ -407,6 +460,7 @@
         <path id="coilCasing" d=""></path>
         <path id="coilHead" class="coilFill" d=""></path>
         <path id="coilHighlight" d=""></path>
+        <path id="coilTongue" d=""></path>
         <circle id="coilEye" r="2.1"></circle>
         <circle class="ringScales" r="104"></circle>
       </g>
@@ -417,6 +471,7 @@
     <div class="word">WATCHING</div>
     <div class="sub">NO TRADE</div>
     <div class="why"></div>
+    <div class="orn" aria-hidden="true">◆</div>
   </div>
   <div id="planets"></div>
 </div>
@@ -444,13 +499,13 @@
 </button>
 <div id="authwarn" class="chip">CONTROL AUTH UNCONFIGURED</div>
 <!-- UI-1A: the ONE quiet operational strip — tape freshness + clock + session -->
-<div id="clockchip" class="chip"><span id="stripdot"></span><span id="striptext">— · ET --:-- · SESSION ----------</span></div>
+<div id="clockchip" class="chip"><span id="stripdot"></span><span id="striptext">— · ET --:-- · SESSION ----------</span><svg id="pulse" viewBox="0 0 40 12" width="34" height="11" aria-hidden="true"><path d="M0 6 H11 L15 2.5 L19 9.5 L23 6 H40"></path></svg></div>
 <div id="controls">
-  <button id="btnKill">KILL</button>
-  <button id="btnCage">CAGE</button>
-  <button id="btnVeto" hidden>VETO</button>
-  <button id="btnClear" hidden>CLEAR</button>
-  <button id="btnLedger">LEDGER</button>
+  <button id="btnKill"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M12 1.5 V6 M12 18 V22.5 M1.5 12 H6 M18 12 H22.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg><span>KILL</span></button>
+  <button id="btnCage"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect><path d="M8.7 5 V20 M15.3 5 V20" stroke="currentColor" stroke-width="1.6"></path></svg><span>CAGE</span></button>
+  <button id="btnVeto" hidden><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M6 6 L18 18" stroke="currentColor" stroke-width="2"></path></svg><span>VETO</span></button>
+  <button id="btnClear" hidden><span>CLEAR</span></button>
+  <button id="btnLedger"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4.5" y="3.5" width="15" height="17" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect><path d="M8.5 8 H15.5 M8.5 12 H15.5 M8.5 16 H13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg><span>LEDGER</span></button>
 </div>
 
 <!-- UI-1B: one full-screen backdrop behind any open drawer — tapping it
@@ -500,7 +555,23 @@ const PLANET_STYLE = {
   SOL:  'radial-gradient(circle at 34% 30%, #b9ffe9, #14f195 55%, #0b6a52)',
   XRP:  'radial-gradient(circle at 34% 30%, #bfe7ff, #25a4e8 55%, #114b6e)',
   DOGE: 'radial-gradient(circle at 34% 30%, #f4e6b8, #cba635 55%, #6b5312)',
+  // UI-1C: recognisable badge colors for common prey — presentation only
+  SUI:  'radial-gradient(circle at 34% 30%, #c8e6ff, #4da2ff 55%, #1a4a86)',
+  AVAX: 'radial-gradient(circle at 34% 30%, #ffc4c1, #e84142 55%, #6e1414)',
+  LINK: 'radial-gradient(circle at 34% 30%, #c3d2ff, #2a5ada 55%, #12275e)',
+  ADA:  'radial-gradient(circle at 34% 30%, #b8ccff, #2456d8 55%, #0d2a6e)',
+  TON:  'radial-gradient(circle at 34% 30%, #bfe9ff, #0098ea 55%, #044a70)',
+  MATIC:'radial-gradient(circle at 34% 30%, #dcc9ff, #8247e5 55%, #3a1d6e)',
+  POL:  'radial-gradient(circle at 34% 30%, #dcc9ff, #8247e5 55%, #3a1d6e)',
+  PEPE: 'radial-gradient(circle at 34% 30%, #c9f0b8, #3d8130 55%, #1b3a14)',
+  BNB:  'radial-gradient(circle at 34% 30%, #ffe9b0, #f3ba2f 55%, #7a5a10)',
+  LTC:  'radial-gradient(circle at 34% 30%, #e6ecf2, #a5b3c2 55%, #4a5563)',
+  DOT:  'radial-gradient(circle at 34% 30%, #ffc4d8, #e6007a 55%, #6e0038)',
 };
+// badge glyph: a currency mark where one exists, else the first character.
+// Pure presentation drawn FROM the symbol — never data about the coin.
+const PLANET_GLYPH = { BTC: '₿', ETH: 'Ξ', DOGE: 'Ð', XRP: '✕', LTC: 'Ł', ADA: '₳' };
+const planetGlyph = (coin) => PLANET_GLYPH[coin] ?? coin[0] ?? '';
 
 /* ---------- state ---------- */
 let universe = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
@@ -630,6 +701,17 @@ function buildCoilRing() {
   const [ex, ey, ea] = centre(0.968);
   $('#coilEye').setAttribute('cx', (ex + halfW(0.968) * 0.28 * Math.cos(ea)).toFixed(1));
   $('#coilEye').setAttribute('cy', (ey + halfW(0.968) * 0.28 * Math.sin(ea)).toFixed(1));
+  // UI-1C: the forked tongue — a short flick ahead of the nose, along the
+  // direction of travel. Geometry only.
+  const [nx, ny, na] = centre(0.9995);
+  const tdx = -Math.sin(na), tdy = Math.cos(na); // tangent = direction of travel
+  const t1x = nx + tdx * 4.4, t1y = ny + tdy * 4.4;
+  const fork = (side) => {
+    const fa = Math.atan2(tdy, tdx) + side * 0.42;
+    return `L${(t1x + Math.cos(fa) * 2.6).toFixed(1)},${(t1y + Math.sin(fa) * 2.6).toFixed(1)}`;
+  };
+  $('#coilTongue').setAttribute('d',
+    `M${nx.toFixed(1)},${ny.toFixed(1)} L${t1x.toFixed(1)},${t1y.toFixed(1)} ${fork(1)} M${t1x.toFixed(1)},${t1y.toFixed(1)} ${fork(-1)}`);
 }
 
 /* ---------- arcs (lock ring + ET session) ---------- */
@@ -686,15 +768,17 @@ function makePlanet(coin) {
               stroke-dasharray="6 5" opacity=".9"></circle>
       <ellipse cx="30" cy="30" rx="2.2" ry="8" fill="#ffb454" opacity=".95"></ellipse>
     </svg>
-    <div class="body" style="background:${planetStyle(coin)}"></div>
+    <div class="trail" aria-hidden="true"></div>
+    <div class="body" style="background:${planetStyle(coin)}"><span class="glyph"></span></div>
     <div class="lbl"></div>
     <div class="nomdot"></div>`;
   el.querySelector('.lbl').textContent = coin; // symbol is data, not markup
+  el.querySelector('.glyph').textContent = planetGlyph(coin); // ditto
   el.addEventListener('click', () => openCard(coin));
   el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCard(coin); } });
   $('#planets').appendChild(el);
   const p = {
-    el, coin, lblEl: el.querySelector('.lbl'),
+    el, coin, lblEl: el.querySelector('.lbl'), trailEl: el.querySelector('.trail'),
     phase: Math.random() * Math.PI * 2,
     // §4: visibly alive — obvious progress within 10-15s, still elegant
     speed: 0.07 + (planets.size % 6) * 0.012,
@@ -784,6 +868,13 @@ function layoutPlanets(t, dtMs = 16) {
     p.el.classList.toggle('focal', focal);
     p.el.classList.toggle('nominated', !demo && p.meta?.tier === 3);
     p.el.classList.toggle('quiet', !demo && Boolean(p.meta?.fallback)); // fallback never poses as prey
+    // UI-1C: the comet trail lies along the actual velocity, tail behind —
+    // decoration derived from real motion, hidden entirely under reduced
+    if (!reduced) {
+      const vx = -rx * Math.sin(p.phase), vy = rx * 0.55 * Math.cos(p.phase);
+      p.trailEl.style.transform =
+        `translate(-100%,-50%) rotate(${((Math.atan2(vy, vx) * 180) / Math.PI).toFixed(1)}deg)`;
+    }
     p.sx = x; p.sy = y; p.focal = focal; // screen position for label layout
   }
   // §12: collision-aware labels — priority to the focal prey, verdict kept clear
@@ -801,7 +892,8 @@ function layoutPlanets(t, dtMs = 16) {
 // §37: attention arriving is truth; attention failing falls back to the
 // configured majors — nothing invented, nothing stale left focal forever.
 function majorsFallback() {
-  return universe.map((symbol) => ({ symbol, tier: 4, fallback: true, reason: 'configured major — quiet fallback' }));
+  // tier 5 matches the server's snapshot tiers (4 = remembered attention)
+  return universe.map((symbol) => ({ symbol, tier: 5, fallback: true, reason: 'configured major — quiet fallback' }));
 }
 function applyAttention(a) {
   if (a && Array.isArray(a.orbit)) {
@@ -924,19 +1016,21 @@ refreshAuth();
 setInterval(refreshAuth, 60_000);
 /* ---------- human controls: confirm-tap, POST, honest feedback ---------- */
 const armTimers = new Map();
+// UI-1C: the label lives in a <span> beside the icon — rewrite only the span
+const btnLabel = (btn) => btn.querySelector('span') ?? btn;
 function armThen(btn, label, fire) {
   if (btn.classList.contains('armed')) {
     clearTimeout(armTimers.get(btn));
     btn.classList.remove('armed');
-    btn.textContent = label;
+    btnLabel(btn).textContent = label;
     fire();
     return;
   }
   btn.classList.add('armed');
-  btn.textContent = 'CONFIRM?';
+  btnLabel(btn).textContent = 'CONFIRM?';
   armTimers.set(btn, setTimeout(() => {
     btn.classList.remove('armed');
-    btn.textContent = label;
+    btnLabel(btn).textContent = label;
   }, 3000));
 }
 async function postControl(action, extra = {}) {
@@ -952,6 +1046,7 @@ async function postControl(action, extra = {}) {
     return d;
   } catch {
     $('#striptext').textContent = 'SHELL LINK LOST';
+    $('#clockchip').classList.remove('live'); // a dead link never keeps a heartbeat
     return { ok: false };
   }
 }
@@ -1136,6 +1231,8 @@ function renderStrip(t, sess) {
   if (t) dot.classList.add(t.effective === 'FROZEN' ? 'STALE' : t.effective);
   const clock = sess ? `ET ${sess.etTime} · SESSION ${sess.etDate}` : 'ET --:--';
   $('#striptext').textContent = `${stripLabel(t?.effective)} · ${clock}`;
+  // UI-1C: heartbeat glyph rides the SAME freshness truth as the dot
+  $('#clockchip').classList.toggle('live', t?.effective === 'LIVE');
   if (sess) $('#sessArc').setAttribute('d', sess.dayFraction > 0.003 ? arcPath(158, 0, sess.dayFraction * 359.9) : '');
 }
 async function poll() {
@@ -1146,6 +1243,7 @@ async function poll() {
   } catch {
     const dot = $('#stripdot'); dot.className = '';
     $('#striptext').textContent = 'SHELL LINK LOST';
+    $('#clockchip').classList.remove('live'); // a dead link never keeps a heartbeat
   }
   // display attention rides the SAME cadence — no extra polling loop; a
   // failure falls back to the configured majors, never a broken screen
