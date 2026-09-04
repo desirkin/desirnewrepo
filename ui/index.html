@@ -259,17 +259,38 @@
   }
   body.demo #demobadge { display: block; }
 
-  /* ============ detail card ============ */
+  /* ============ shared drawer shell (UI-1B) ============
+     Two answers at all times: WHAT AM I LOOKING AT (the sticky identity
+     header) and HOW DO I GET OUT (permanent 44px Close + backdrop +
+     Escape + Back). The header never scrolls away; the body scrolls
+     inside a phone-bounded sheet. */
+  #backdrop { position: fixed; inset: 0; z-index: 50; background: rgba(1, 3, 10, .45); }
+  #backdrop[hidden] { display: none; }
+  .dhead { flex: none; display: flex; align-items: center; justify-content: space-between;
+           gap: 10px; padding: 10px 12px 8px 18px; border-bottom: 1px solid #1c2942;
+           touch-action: none; /* the header is also the swipe-down handle */ }
+  .dtitle { min-width: 0; }
+  .dtitle .kicker { display: block; font-size: 9px; letter-spacing: .3em; color: var(--dim); }
+  .dhead h2 { font-size: 15px; letter-spacing: .3em; color: var(--accent); margin-top: 2px;
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* the selected coin ticker is UNMISSABLE — larger than any section head */
+  #card.coin .dhead h2 { font-size: 26px; letter-spacing: .18em; }
+  .dclose { flex: none; width: 44px; height: 44px; border-radius: 12px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            background: rgba(20, 30, 50, .8); border: 1px solid #33445f; color: var(--ink); }
+  .dclose:active { background: rgba(40, 55, 82, .9); }
+  .dbody { flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch;
+           padding: 10px 18px calc(18px + env(safe-area-inset-bottom)); overscroll-behavior: contain; }
+
   #card {
-    position: fixed; left: 50%; bottom: -100%; transform: translateX(-50%);
+    position: fixed; left: 50%; bottom: -110%; transform: translateX(-50%);
     width: min(94vw, 420px); z-index: 60;
+    max-height: 82vh; max-height: 84dvh; /* never taller than the phone */
+    display: flex; flex-direction: column; padding: 0;
     background: rgba(8, 14, 28, .92); border: 1px solid #2a3a58; border-radius: 16px 16px 0 0;
-    padding: 16px 18px calc(18px + env(safe-area-inset-bottom));
     transition: bottom .35s cubic-bezier(.3,.9,.3,1); backdrop-filter: blur(8px);
   }
   #card.open { bottom: 0; }
-  #card h2 { font-size: 15px; letter-spacing: .3em; color: var(--accent); }
-  #card .close { position: absolute; top: 10px; right: 14px; color: var(--dim); font-size: 18px; cursor: pointer; }
   #card .rows { margin-top: 10px; font-size: 13px; line-height: 1.9; }
   #card .rows b { color: var(--ink); font-weight: 600; float: right; font-variant-numeric: tabular-nums; }
   #card .rows span { color: var(--dim); letter-spacing: .08em; }
@@ -285,14 +306,14 @@
   /* ============ ledger panel (read-only; can never place or cancel anything) ============ */
   #ledger {
     position: fixed; left: 50%; bottom: -110%; transform: translateX(-50%);
-    width: min(94vw, 430px); max-height: 80vh; overflow-y: auto; z-index: 70;
+    width: min(94vw, 430px); z-index: 70;
+    max-height: 80vh; max-height: 84dvh;
+    display: flex; flex-direction: column; padding: 0;
     background: rgba(7, 12, 24, .94); border: 1px solid #29394f; border-radius: 16px 16px 0 0;
-    padding: 16px 18px calc(20px + env(safe-area-inset-bottom));
     transition: bottom .35s cubic-bezier(.3,.9,.3,1); backdrop-filter: blur(10px);
   }
   #ledger.open { bottom: 0; }
-  #ledger h2 { font-size: 13px; letter-spacing: .34em; color: #7fc7de; }
-  #ledger .close { position: absolute; top: 10px; right: 14px; color: var(--dim); font-size: 18px; cursor: pointer; }
+  #ledger .dhead h2 { color: #7fc7de; font-size: 13px; letter-spacing: .34em; }
   #ledger .net { margin-top: 10px; font-size: clamp(20px, 6vw, 26px); font-weight: 700;
                  font-variant-numeric: tabular-nums; letter-spacing: .04em; }
   #ledger .net .pos, #ledger .trow .pos { color: #4fd598; }
@@ -417,17 +438,36 @@
   <button id="btnLedger">LEDGER</button>
 </div>
 
-<div id="ledger">
-  <div class="close">✕</div>
-  <h2>LEDGER</h2>
-  <div id="ledgerBody"></div>
+<!-- UI-1B: one full-screen backdrop behind any open drawer — tapping it
+     always closes; taps inside a drawer never do. -->
+<div id="backdrop" hidden></div>
+
+<div id="ledger" role="dialog" aria-modal="true" aria-label="Ledger">
+  <div class="dhead">
+    <div class="dtitle"><span class="kicker">PAPER LEDGER</span><h2>LEDGER</h2></div>
+    <button type="button" id="ledgerClose" class="dclose" aria-label="Close">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path d="M6 6 L18 18 M18 6 L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path>
+      </svg>
+    </button>
+  </div>
+  <div id="ledgerBody" class="dbody"></div>
 </div>
 <div id="demobadge" title="Tap to exit demo">DEMO</div>
 
-<div id="card">
-  <div class="close">✕</div>
-  <h2 id="cardTitle">—</h2>
-  <div id="cardBody"></div>
+<!-- UI-1B: every detail view answers WHAT AM I LOOKING AT (sticky identity
+     header, big ticker for coins) and HOW DO I GET OUT (permanent 44px
+     Close, backdrop, Escape, Back) at all times. -->
+<div id="card" role="dialog" aria-modal="true" aria-label="Detail">
+  <div class="dhead">
+    <div class="dtitle"><span class="kicker" id="cardKicker"></span><h2 id="cardTitle">—</h2></div>
+    <button type="button" id="cardClose" class="dclose" aria-label="Close">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path d="M6 6 L18 18 M18 6 L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path>
+      </svg>
+    </button>
+  </div>
+  <div id="cardBody" class="dbody"></div>
 </div>
 
 <div id="boot"><span>COBRA</span></div>
@@ -802,7 +842,7 @@ async function refreshAuth() {
 }
 $('#authdot').addEventListener('click', () => { if (!csrfToken) openAuthCard(); });
 function openAuthCard(then) {
-  $('#cardTitle').textContent = 'CONTROL AUTH';
+  showCard({ kicker: 'CONTROL', title: 'CONTROL AUTH' });
   $('#cardBody').innerHTML = `
     <div class="rows"><span>server authorization required</span></div>
     <input id="authPw" type="password" placeholder="control password" autocomplete="current-password">
@@ -820,7 +860,7 @@ function openAuthCard(then) {
       const d = await r.json();
       if (d.authenticated) {
         csrfToken = d.csrfToken;
-        $('#card').classList.remove('open');
+        closeSheets();
         refreshAuth();
         if (then) then();
       } else {
@@ -831,11 +871,10 @@ function openAuthCard(then) {
       }
     } catch { $('#authMsg').textContent = 'SHELL LINK LOST'; }
   });
-  $('#card').classList.add('open');
 }
 function ensureAuth(fire) { if (csrfToken) fire(); else openAuthCard(fire); }
 function openClearCard() {
-  $('#cardTitle').textContent = 'CLEAR / RE-ARM';
+  showCard({ kicker: 'CONTROL', title: 'CLEAR / RE-ARM' });
   $('#cardBody').innerHTML = `
     <div class="rows"><span>restoring permission requires fresh intent — password again, and the exact phrase</span></div>
     <input id="clrPw" type="password" placeholder="control password" autocomplete="off">
@@ -847,13 +886,12 @@ function openClearCard() {
     const confirmPhrase = $('#clrPhrase').value;
     $('#clrPw').value = '';
     const d = await postControl('clear', { password, confirmPhrase });
-    if (d.ok) $('#card').classList.remove('open');
+    if (d.ok) closeSheets();
     else $('#clrMsg').textContent =
       d.reason === 'RATE_LIMITED' ? `LOCKED OUT — retry in ${d.retryAfterSec ?? '?'}s`
       : d.reason === 'UNAUTHENTICATED' ? 'AUTHENTICATE FIRST'
       : 'CLEAR REFUSED';
   });
-  $('#card').classList.add('open');
 }
 refreshAuth();
 setInterval(refreshAuth, 60_000);
@@ -897,7 +935,7 @@ $('#btnVeto').addEventListener('click', () => openVetoSheet());
 
 function openVetoSheet() {
   const pending = lastStatus?.pendingStrikes ?? [];
-  $('#cardTitle').textContent = 'VETO';
+  showCard({ kicker: 'CONTROL', title: 'VETO' });
   $('#cardBody').innerHTML = pending.length
     ? pending.map((p) => `
         <div class="vrow"><span>${p.coin} · $${p.sizeUsd} · <span style="color:var(--dim)">${p.id.slice(0, 8)}…</span></span>
@@ -911,7 +949,6 @@ function openVetoSheet() {
       }))
     );
   }
-  $('#card').classList.add('open');
 }
 
 /* ---------- ledger panel: read-only mirror of the paper ledger ---------- */
@@ -1024,8 +1061,7 @@ async function refreshLedger() {
     ledgerError('LEDGER RENDER ERROR — see console');
   }
 }
-$('#btnLedger').addEventListener('click', () => { $('#ledger').classList.add('open'); refreshLedger(); });
-$('#ledger .close').addEventListener('click', () => $('#ledger').classList.remove('open'));
+$('#btnLedger').addEventListener('click', () => { showLedger(); refreshLedger(); });
 
 function renderStatus(s) {
   lastStatus = s;
@@ -1208,7 +1244,7 @@ function renderMemorySection(bodyEl, memory) {
   }
 }
 async function openCard(coin) {
-  $('#cardTitle').textContent = coin;
+  showCard({ kicker: 'COIN DETAIL', title: coin, coin: true }); // the ticker is unmissable and stays put
   const bodyEl = $('#cardBody');
   if (demo) {
     bodyEl.replaceChildren();
@@ -1217,11 +1253,9 @@ async function openCard(coin) {
       const r = el('div'); r.append(el('span', null, k), el('b', null, '—')); rows.append(r);
     }
     bodyEl.append(rows, el('div', 'demoNote', 'DEMO — STAGED VISUALS. THESE ARE NOT MARKET VALUES.'));
-    $('#card').classList.add('open');
     return;
   }
   bodyEl.replaceChildren(el('div', 'quiet', 'reading tape…'));
-  $('#card').classList.add('open');
   try {
     const d = await (await fetch('/api/coin/' + encodeURIComponent(coin), { cache: 'no-store' })).json();
     bodyEl.replaceChildren();
@@ -1237,7 +1271,7 @@ async function openCard(coin) {
 
 /* ---------- Hunt drawer: WHAT SERPENT IS WATCHING (never a buy list) ---------- */
 function openHuntCard() {
-  $('#cardTitle').textContent = 'WATCHING';
+  showCard({ kicker: 'SERPENT', title: 'WATCHING' });
   const bodyEl = $('#cardBody');
   bodyEl.replaceChildren();
   const a = lastAttention;
@@ -1272,15 +1306,13 @@ function openHuntCard() {
     }
   }
   bodyEl.append(el('div', 'quiet', 'WHAT SERPENT IS WATCHING — NOT ADVICE, NOT ELIGIBILITY'));
-  $('#card').classList.add('open');
 }
 
 /* ---------- EARS: the rumor room (read-only; nulls stay honest) ---------- */
 async function openEarsCard() {
-  $('#cardTitle').textContent = 'RUMOR ROOM';
+  showCard({ kicker: 'EARS', title: 'RUMOR ROOM' });
   const bodyEl = $('#cardBody');
   bodyEl.replaceChildren(el('div', 'quiet', 'listening…'));
-  $('#card').classList.add('open');
   try {
     const d = await (await fetch('/api/ears', { cache: 'no-store' })).json();
     bodyEl.replaceChildren();
@@ -1316,10 +1348,9 @@ async function openEarsCard() {
 
 /* ---------- WIDE EYE: bounded recent scanner view ---------- */
 async function openEyeCard() {
-  $('#cardTitle').textContent = 'WIDE EYE';
+  showCard({ kicker: 'SCANNER', title: 'WIDE EYE' });
   const bodyEl = $('#cardBody');
   bodyEl.replaceChildren(el('div', 'quiet', 'scanning…'));
-  $('#card').classList.add('open');
   try {
     const d = await (await fetch('/api/wideeye', { cache: 'no-store' })).json();
     bodyEl.replaceChildren();
@@ -1352,11 +1383,58 @@ async function openEyeCard() {
 $('#capUniverse').addEventListener('click', () => { if (!demo) openHuntCard(); });
 $('#capEars').addEventListener('click', () => { if (!demo) openEarsCard(); });
 $('#capEye').addEventListener('click', () => { if (!demo) openEyeCard(); });
-$('#card .close').addEventListener('click', () => $('#card').classList.remove('open'));
-$('#scene').addEventListener('click', (e) => {
-  if (!e.target.closest('.planet') && !e.target.closest('#card')) $('#card').classList.remove('open');
-  if (!e.target.closest('#ledger')) $('#ledger').classList.remove('open');
-});
+/* ---------- UI-1B: the shared safe drawer shell ----------
+   Opening shows the backdrop and arms ONE lightweight history entry (device
+   Back closes the drawer instead of leaving Serpent). Closing is ALWAYS
+   possible: 44px Close button, backdrop tap, Escape, Back, or a swipe down
+   on the header. Closing an auth/CLEAR/VETO card merely cancels the UI —
+   it never posts anything and can never authorize anything. */
+let drawerPushed = false;
+const anySheetOpen = () => $('#card').classList.contains('open') || $('#ledger').classList.contains('open');
+function armDrawerHistory() {
+  if (!drawerPushed && !anySheetOpen()) {
+    try { history.pushState({ serpentDrawer: true }, ''); drawerPushed = true; } catch { /* history optional */ }
+  }
+}
+function showCard({ kicker = '', title = '', coin = false } = {}) {
+  armDrawerHistory();
+  $('#cardKicker').textContent = kicker;
+  if (title) $('#cardTitle').textContent = title;
+  $('#card').classList.toggle('coin', coin);
+  $('#card').classList.add('open');
+  $('#backdrop').hidden = false;
+}
+function showLedger() {
+  armDrawerHistory();
+  $('#ledger').classList.add('open');
+  $('#backdrop').hidden = false;
+}
+function closeSheets({ viaHistory = false } = {}) {
+  $('#card').classList.remove('open');
+  $('#ledger').classList.remove('open');
+  $('#backdrop').hidden = true;
+  if (drawerPushed && !viaHistory) {
+    drawerPushed = false;
+    try { history.back(); } catch { /* history optional */ }
+  } else {
+    drawerPushed = false;
+  }
+}
+addEventListener('popstate', () => { if (anySheetOpen()) closeSheets({ viaHistory: true }); else drawerPushed = false; });
+$('#cardClose').addEventListener('click', () => closeSheets());
+$('#ledgerClose').addEventListener('click', () => closeSheets());
+$('#backdrop').addEventListener('click', () => closeSheets()); // tap outside always exits
+// taps INSIDE a drawer never dismiss it (the backdrop is a sibling behind)
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && anySheetOpen()) closeSheets(); });
+// restrained swipe-down on the HEADER only — never fights body scrolling
+for (const head of document.querySelectorAll('.dhead')) {
+  let y0 = null;
+  head.addEventListener('touchstart', (e) => { y0 = e.touches[0]?.clientY ?? null; }, { passive: true });
+  head.addEventListener('touchmove', (e) => {
+    if (y0 != null && (e.touches[0]?.clientY ?? 0) - y0 > 70) { y0 = null; closeSheets(); }
+  }, { passive: true });
+  head.addEventListener('touchend', () => { y0 = null; }, { passive: true });
+}
 
 /* ---------- demo mode: staged tour, sealed off from all real state ---------- */
 const DEMO_SEQ = [
@@ -1377,7 +1455,7 @@ function setDemo(on) {
   demo = on;
   body.classList.toggle('demo', on);
   clearTimeout(demoTimer); demoTimer = null; demoTarget = null; demoIdx = 0;
-  $('#card').classList.remove('open');
+  closeSheets();
   if (on) { syncOrbit(majorsFallback(), null); demoStep(); } // staged tour uses the majors
   else if (lastStatus) { renderStatus(lastStatus); poll(); } // true state, immediately
   else poll();

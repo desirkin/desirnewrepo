@@ -200,7 +200,7 @@ test('10. attention/social/memory rendering never uses innerHTML — untrusted t
   assert.ok(start > 0 && end > start, 'drawer section renderers exist');
   const sectionCode = HTML.slice(start, end);
   assert.ok(!sectionCode.includes('innerHTML'), 'prey drawer sections build DOM with textContent only');
-  const hunt = HTML.slice(end, HTML.indexOf('$(\'#card .close\')'));
+  const hunt = HTML.slice(end, HTML.indexOf('function openEarsCard'));
   assert.ok(!hunt.includes('innerHTML'), 'hunt drawer builds DOM with textContent only');
 });
 
