@@ -8,6 +8,7 @@ import { runTape } from './tape/run.js';
 import { startRumint } from './rumint/poller.js';
 import { startGateway } from './gateway/collector.js';
 import { startWideEye } from './survey/wideeye.js';
+import { startGovernance } from './governance/collector.js';
 import { startMemoryMirror } from './memory/mirror.js';
 import { startPersistence } from './persistence/runtime.js';
 
@@ -57,6 +58,7 @@ try {
 startRumint(); // no-ops (zero network) unless rumint is enabled
 startGateway(); // no-ops (zero network) unless gateway is enabled — collector only
 startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
+startGovernance(); // GOV-1 dark governance sense — no-ops (zero network) unless governance is enabled
 try {
   await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
   process.exit(0);

@@ -23,6 +23,7 @@ import {
   fromStateTransition,
   fromControlAction,
   fromMicrostructureObservation,
+  fromGovernanceEvent,
 } from './adapters.js';
 
 const POLL_MS = 5000;
@@ -99,6 +100,8 @@ export function startMemoryMirror({ log = console.log, sessionDateOf = sessionDa
     { file: path.join(d, 'state', 'controls_log.jsonl'), adapt: fromControlAction },
     // MICRO-1: bounded microstructure observations (≤144/min by contract)
     { file: path.join(d, 'micro', 'observations.jsonl'), adapt: fromMicrostructureObservation },
+    // GOV-1: low-frequency bounded governance observations (dark sense)
+    { file: path.join(d, 'governance', 'events.jsonl'), adapt: fromGovernanceEvent },
     // tape session directory rolls daily; resolve it each poll — a session
     // file born after the mirror opened is read from byte zero (§9)
     { file: path.join(d, 'tape', sessionDateOf(), 'snapshots.jsonl'), adapt: fromTapeSnapshot, sampled: true },

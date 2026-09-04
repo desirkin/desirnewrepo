@@ -41,6 +41,11 @@ export const EVIDENCE_FAMILIES = Object.freeze([
   'EXECUTION_QUALITY',
   'STATE_CONTROL',
   'HISTORICAL_CONTEXT',
+  // GOV-1: deliberate schema-contract promotion of the reserved GOVERNANCE
+  // family — one governance observation carrying several correlated metrics
+  // (quorum, margin, concentration, state) is still ONE family, never four
+  // independent confirmations.
+  'GOVERNANCE',
 ]);
 
 // Reserved for future sensors — coherent names only, nothing implemented.
@@ -48,7 +53,6 @@ export const RESERVED_EVIDENCE_FAMILIES = Object.freeze([
   'DERIVATIVES',
   'ON_CHAIN',
   'CAPITAL_FLOW',
-  'GOVERNANCE',
   'EXCHANGE_INTEGRATION',
   'NETWORK_INFRASTRUCTURE',
   'OFFICIAL_NEWS',

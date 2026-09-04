@@ -212,6 +212,60 @@ export function fromMicrostructureObservation(rec, observedTs = nowIso()) {
   });
 }
 
+// ---------------------------------------------------------------------
+// H. GOVERNANCE — governance/events.jsonl lines (GOV-1). A verified
+// decision process is changing: here is exactly what we know, when we knew
+// it, how complete the evidence is, and what remains unknown. Snapshot
+// records are OFF-CHAIN voting evidence; a passed vote is never execution
+// truth. One observation with several correlated governance metrics is
+// still ONE evidence family. Symbol comes only from the verified registry
+// (already resolved by the collector) — null is honest and allowed.
+// Proposal text is untrusted data carried as bounded strings, never
+// interpreted. A sense, not a strategy: zero trading authority.
+// ---------------------------------------------------------------------
+export function fromGovernanceEvent(rec, observedTs = nowIso()) {
+  const isObservation = rec.type === 'GOVERNANCE_OBSERVATION';
+  const quorumKnown = rec.quorum && typeof rec.quorum === 'object';
+  const traj = rec.trajectory && typeof rec.trajectory === 'object' ? rec.trajectory : null;
+  const conc = rec.voterConcentration && typeof rec.voterConcentration === 'object' ? rec.voterConcentration : null;
+  const providerNote =
+    rec.provider === 'TALLY'
+      ? 'governance/events.jsonl (tally api — INDEXED on-chain governance data, not direct chain verification)'
+      : 'governance/events.jsonl (snapshot hub graphql — OFF-CHAIN governance/voting evidence)';
+  return envelope({
+    sourceModule: 'GOVERNANCE',
+    eventType: 'GOVERNANCE_OBSERVATION',
+    ts: sec(rec.ts),
+    symbol: canonSymbol(rec.symbol), // registry-resolved or null; never guessed here
+    families: ['GOVERNANCE'],
+    observationState: isObservation ? 'KNOWN' : 'UNAVAILABLE',
+    payload: strip(rec, 'ts'),
+    dataAvailability: {
+      proposalState: typeof rec.proposalState === 'string' ? 'KNOWN' : 'UNKNOWN',
+      voteTotals: rec.voteTotals && Number.isFinite(rec.voteTotals.scoresTotal) ? 'KNOWN' : 'UNKNOWN',
+      quorum: quorumKnown ? 'KNOWN' : 'UNKNOWN',
+      trajectory: traj ? 'KNOWN' : 'UNKNOWN',
+      voterConcentration: conc?.coverage === 'COMPLETE' ? 'KNOWN' : conc?.coverage === 'PARTIAL' ? 'DEGRADED' : 'UNAVAILABLE',
+      timelock: 'UNKNOWN', // no timelock evidence in GOV-1 snapshot data
+      executionState: 'UNKNOWN',
+    },
+    provenance: {
+      source: providerNote,
+      sourceTs: rec.retrievedTs ?? rec.ts, // provider truth became knowable at retrieval
+      availableTs: rec.retrievedTs ?? rec.ts,
+      retrievedTs: observedTs,
+      kind: 'live',
+      form: 'raw',
+      collectorVersion: rec.collectorVersion ?? null,
+      mappingVersion: rec.mappingVersion ?? null,
+      coverage: rec.coverage ?? null,
+    },
+    // every observation of ONE proposal clusters under a stable event id
+    correlation: { eventId: rec.proposalId ? `${rec.provider}:${rec.spaceId ?? rec.governorId ?? '?'}:${rec.proposalId}` : null },
+    identity: sourceFingerprint(rec, 'governance/events.jsonl'),
+  });
+}
+
 export function fromControlAction(rec, observedTs = nowIso()) {
   return envelope({
     sourceModule: 'STATE',
