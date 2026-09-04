@@ -21,7 +21,6 @@ import {
 import {
   MicrostructureTracker,
   readStalkingCoins,
-  writeMicroObservation,
   MICRO_LIMITS,
 } from './microstructure.js';
 
@@ -381,17 +380,20 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     }
   }, snapIntervalSec * 1000);
 
-  // ---- MICRO-1A evaluation tick: internal sensing stays fast; the
-  // tracker itself decides what deserves PERMANENT memory (30s periodic
-  // baseline + prompt latched transitions, capped at 36/min globally).
-  // A write failure degrades MICRO, never tape.
+  // ---- MICRO-1A/1B evaluation tick: internal sensing stays fast; the
+  // tracker decides what deserves PERMANENT memory (30s periodic baseline
+  // + prompt latched transitions, capped at 36/min globally) and performs
+  // the append ITSELF behind its acknowledgement boundary — counters and
+  // clocks move only after a write truly lands. A write failure keeps the
+  // record pending, degrades MICRO health only, and never blocks the
+  // remaining symbols (evaluate never throws).
   const microTimer = setInterval(() => {
     microGuard(() => {
       for (const symbol of micro.tracked()) {
         const p = pairs.get(symbol);
         const book = books.get(symbol);
         if (!p || !book) continue;
-        for (const obs of micro.evaluate(symbol, book, p.coin)) writeMicroObservation(obs);
+        micro.evaluate(symbol, book, p.coin);
       }
     });
   }, MICRO_LIMITS.evaluationIntervalMs);

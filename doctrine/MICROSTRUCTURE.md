@@ -213,7 +213,20 @@ Broader canonical Memory retention/archive/compaction remains a **separate
 architecture issue**; MICRO-1A's responsibility is that this sensor does
 not unnecessarily accelerate it.
 
-## 12a. Episode clock and window (MICRO-1A)
+### 12b. Durable acknowledgement boundary (MICRO-1B)
+
+**Serpent may say "I remembered this" only after it actually hit durable
+storage.** Emission is two-phase: PREPARE freezes at most one record per
+symbol; only a SUCCESSFUL append acknowledges it. Durable counters, byte
+accounting and the periodic baseline clock move on ACK alone. A failed
+append keeps the frozen record pending and retries it VERBATIM on later
+ticks — so even an ambiguous outcome cannot duplicate: the identical
+content carries one Memory identity and collapses. Write failures are
+counted (`durableWriteFailures`, `lastDurableWriteError`,
+`lastDurableWriteFailureTs`), degrade MICRO health, and never touch the
+Kraken tape or the other tracked symbols.
+
+## 12a. Episode clock and window (MICRO-1A/1B)
 
 Every time field of one episode — depletion, 50 %/90 % milestones and
 closure — derives from the SAME supplied observation/replay clock;
@@ -224,7 +237,12 @@ record a milestone; a sample strictly later closes the episode FIRST with
 outcome `RECOVERY_UNOBSERVED_WITHIN_WINDOW` — meaning recovery was not
 observed inside the defined window, never that the market definitely never
 recovered. No milestone is ever manufactured from a sample outside the
-window.
+window. **An observation window ends when its clock ends** (MICRO-1B): the
+evaluation path closes an overdue episode on the same supplied clock even
+if the book has fallen silent — the market does not get to keep an episode
+"active" by simply not sending another message. One episode closes once;
+one `EPISODE_WINDOW_EXPIRED` transition latches once; a later
+recovery-shaped sample neither reopens it nor retroactively counts.
 
 ## 13. Failure isolation
 

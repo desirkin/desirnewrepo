@@ -125,4 +125,112 @@ test('1A-6. one transition => one durable event; the same latched transition nev
   }
 });
 
+
+// ---------------- MICRO-1B drills ----------------
+
+test('1B-A/C. durable ACK boundary: a failed append keeps every truth; retry writes exactly once', async () => {
+  const { fromMicrostructureObservation } = await import('../memory/adapters.js');
+  const { MemoryStore } = await import('../memory/store.js');
+  const { MemoryBus } = await import('../memory/bus.js');
+  const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+  tr.setTrackingSet(new Set(['X/USD', 'Y/USD']), T0);
+  const mk = (q, ts) => fakeBook({ bids: [lvl(99.99, q), lvl(99.5, 500)], asks: [lvl(100.01, 100), lvl(100.5, 500)], ts });
+  for (const s of ['X/USD', 'Y/USD']) {
+    tr.onBook(s, mk(100, T0), T0);
+    tr.onBook(s, mk(40, T0 + 1000), T0 + 1000); // real depletion transition latched
+  }
+  // 1-3. prepare + FORCE the append to fail for X
+  const failing = () => { throw new Error('disk full (drill)'); };
+  const out = tr.evaluate('X/USD', mk(40, T0 + 5000), 'X', T0 + 5000, failing);
+  const stX = tr.symbols.get('X/USD');
+  // 4. nothing was falsely acknowledged
+  assert.deepEqual(out, [], 'no observation claimed durable');
+  assert.ok(stX.pendingWrite, 'the frozen record stays pending/retryable');
+  assert.ok(stX.pendingWrite.obs.emitReason.transitions.some((t) => t.kind === 'DEPLETION_OPENED'), 'the transition is inside the pending record');
+  const h1 = tr.health();
+  assert.equal(h1.durableObservationsEmitted, 0);
+  assert.equal(h1.transitionObservationsEmitted, 0);
+  assert.equal(h1.approxBytesWritten, 0);
+  assert.equal(stX.lastPeriodicEmitMs, 0, 'periodic clock NOT falsely reset');
+  assert.equal(h1.status, 'DEGRADED', 'write failure degrades MICRO health');
+  assert.equal(h1.durableWriteFailures, 1);
+  assert.ok(h1.lastDurableWriteError.includes('disk full'));
+  assert.equal(h1.lastDurableWriteFailureTs, T0 + 5000);
+  // one symbol's failed write does not rob the others of their evaluation
+  const writtenY = [];
+  const outY = tr.evaluate('Y/USD', mk(40, T0 + 5000), 'Y', T0 + 5000, (o) => writtenY.push(o));
+  assert.equal(outY.length, 1, 'Y still evaluates and writes despite X failing');
+  assert.equal(writtenY.length, 1);
+  // 5-7. restore the writer, retry: exactly ONE record, VERBATIM
+  const frozen = stX.pendingWrite.obs;
+  const writtenX = [];
+  const retry = tr.evaluate('X/USD', mk(40, T0 + 10_000), 'X', T0 + 10_000, (o) => writtenX.push(o));
+  assert.equal(writtenX.length, 1, 'exactly one source observation ultimately written');
+  assert.equal(writtenX[0], frozen, 'retried VERBATIM — the same frozen record');
+  assert.equal(retry.length, 1);
+  assert.equal(stX.pendingWrite, null, 'acknowledged exactly once');
+  const h2 = tr.health();
+  assert.equal(h2.durableObservationsEmitted, 2); // X + Y
+  assert.equal(h2.transitionObservationsEmitted, 2);
+  assert.equal(stX.lastPeriodicEmitMs, T0 + 10_000, 'periodic clock moves only on ack');
+  assert.ok(h2.approxBytesWritten > 0);
+  // canonical Memory receives exactly ONE memory even if an ambiguous
+  // outcome makes the caller hand the same line over twice: the verbatim
+  // record has ONE content identity — the duplicate collapses, no conflict
+  const dir = path.join(TEST_DATA, 'memory-ack');
+  const store = new MemoryStore({ dir });
+  const bus = new MemoryBus({ store });
+  const iso = new Date().toISOString();
+  assert.equal(bus.publish(fromMicrostructureObservation(writtenX[0], iso)).accepted, true);
+  const again = bus.publish(fromMicrostructureObservation(writtenX[0], iso));
+  assert.equal(again.accepted, false);
+  assert.equal(again.reason, 'duplicate');
+  assert.equal(store.duplicateSuppressedCount, 1, 'no duplicate, no conflict');
+});
+
+test('1B-D/F. silent book: the window closes on the clock, not on the next message', () => {
+  const run = () => {
+    const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+    tr.setTrackingSet(new Set(['X/USD']), T0);
+    const mk = (q, ts) => fakeBook({ bids: [lvl(99.99, q), lvl(99.5, 500)], asks: [lvl(100.01, 100), lvl(100.5, 500)], ts });
+    tr.onBook('X/USD', mk(100, T0 - 1000), T0 - 1000);
+    tr.onBook('X/USD', mk(40, T0), T0); // depletion at synthetic T0 — then the book falls SILENT
+    const st = tr.symbols.get('X/USD');
+    const emitted = [];
+    const collect = (o) => emitted.push(o);
+    const book = mk(40, T0);
+    tr.evaluate('X/USD', book, 'X', T0 + 119_000, collect); // before deadline
+    assert.ok(st.activeEpisodes.bid, 'episode remains active before the deadline');
+    tr.evaluate('X/USD', book, 'X', T0 + 120_000, collect); // inclusive endpoint
+    assert.ok(st.activeEpisodes.bid, 'exactly 120,000ms is still within the window');
+    tr.evaluate('X/USD', book, 'X', T0 + 120_001, collect); // strictly past
+    assert.equal(st.activeEpisodes.bid, null, 'the window closed on the CLOCK — no book message needed');
+    const closed = st.completedEpisodes.at(-1);
+    assert.equal(closed.outcome, 'RECOVERY_UNOBSERVED_WITHIN_WINDOW');
+    assert.equal(closed.depthRecovery50Ms, null);
+    assert.equal(closed.depthRecovery90Ms, null);
+    assert.equal(closed.closedTs, T0 + 120_001, 'closure on the same supplied clock');
+    // a late book sample showing recovered depth changes NOTHING
+    tr.onBook('X/USD', mk(97, T0 + 125_000), T0 + 125_000);
+    assert.equal(st.activeEpisodes.bid, null, 'no reopen from a recovery-shaped sample');
+    assert.equal(st.completedEpisodes.length, 1, 'one episode closes once');
+    assert.equal(closed.depthRecovery90Ms, null, 'late recovery is not retroactively counted');
+    tr.evaluate('X/USD', mk(97, T0 + 125_000), 'X', T0 + 125_000, collect);
+    const expiredKeys = emitted
+      .filter((o) => o.emitReason.kind === 'TRANSITION')
+      .flatMap((o) => o.emitReason.transitions)
+      .filter((t) => t.kind === 'EPISODE_WINDOW_EXPIRED')
+      .map((t) => t.transitionKey);
+    assert.equal(expiredKeys.length, 1, 'EPISODE_WINDOW_EXPIRED latched exactly once');
+    return { episode: closed, expiredKeys, transitions: emitted.filter((o) => o.emitReason.kind === 'TRANSITION').length };
+  };
+  const a = run();
+  const b = run();
+  assert.deepEqual(a, b, 'same fixture twice => identical result');
+  const wallNow = Date.now();
+  for (const v of Object.values(a.episode)) {
+    if (typeof v === 'number' && v > 1e12) assert.ok(Math.abs(v - wallNow) > 30 * 24 * 3600_000, 'no wall clock in the episode');
+  }
+});
+
 test.after(() => rmSync(TEST_DATA, { recursive: true, force: true }));

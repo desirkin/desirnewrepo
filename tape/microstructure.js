@@ -310,6 +310,10 @@ export class MicrostructureTracker {
     this.approxBytesWritten = 0;
     this.emitMinuteStart = 0;
     this.emitsThisMinute = 0;
+    // MICRO-1B write-health truth: prepared != durable
+    this.durableWriteFailures = 0;
+    this.lastDurableWriteError = null;
+    this.lastDurableWriteFailureTs = null;
   }
 
   #fresh(symbol, now) {
@@ -322,9 +326,10 @@ export class MicrostructureTracker {
       activeEpisodes: { bid: null, ask: null }, // one per side, EPISODE_BAND only
       completedEpisodes: [], // capped ring of finished episodes
       trackedSince: now,
-      // MICRO-1A durable-emission state
+      // MICRO-1A/1B durable-emission state
       pendingTransitions: [], // latched meaningful transitions, capped
-      lastPeriodicEmitMs: 0, // first evaluation emits the baseline immediately
+      pendingWrite: null, // MICRO-1B: one frozen record awaiting durable ACK (retried verbatim)
+      lastPeriodicEmitMs: 0, // first evaluation emits the baseline immediately; moves ONLY on ack
       lastProxyPresent: false, // ABSORPTION_PROXY edge detection (latched, never re-fired)
       lastBookState: null, // FRESH/STALE edge detection
       transitionMinuteStart: 0,
@@ -576,20 +581,44 @@ export class MicrostructureTracker {
     }
   }
 
-  // MICRO-1A: THE durable-emission decision. Called on the evaluation tick
-  // (~5s). Internal sensing stays fast; permanent Memory receives:
+  // MICRO-1B: the observation window ends when its CLOCK ends — not only
+  // when the market sends another book message. The lifecycle path closes
+  // overdue episodes on the SAME supplied clock; a book sample arriving
+  // later finds the episode already closed (one close, one latched
+  // EPISODE_WINDOW_EXPIRED, no retroactive milestones).
+  #expireOverdueEpisodes(st, now) {
+    for (const side of ['bid', 'ask']) {
+      const active = st.activeEpisodes[side];
+      if (active && now - active.depletionTs > this.limits.episodeMaxAgeMs) {
+        this.#closeEpisode(st, side, 'RECOVERY_UNOBSERVED_WITHIN_WINDOW', now);
+      }
+    }
+  }
+
+  // MICRO-1A/1B: THE durable-emission decision. Called on the evaluation
+  // tick (~5s). Internal sensing stays fast; permanent Memory receives:
   //   - a TRANSITION observation promptly when latched transitions exist
   //     (episode open / 50% milestone / close / proxy edge / book-state
   //     edge) — a persisting condition emits its transition ONCE, then
   //     only periodic baselines describe its persistence;
   //   - otherwise a PERIODIC baseline observation once per periodicEmitMs.
-  // Rate caps (per-symbol transition cap + global durable ceiling) may
-  // suppress an emission: suppression is COUNTED and surfaced in health —
-  // never silently pretended persisted. Returns 0..1 observations.
-  evaluate(symbol, book, coin, now = Date.now()) {
+  //
+  // MICRO-1B ACKNOWLEDGEMENT BOUNDARY: "I remembered this" is true only
+  // after the append actually hit durable storage. PREPARE freezes at most
+  // one record per symbol; only a SUCCESSFUL append acknowledges it —
+  // counters, byte accounting and the periodic clock move on ACK alone. A
+  // failed append keeps the frozen record pending and retries it VERBATIM,
+  // so an ambiguous earlier outcome deduplicates in Memory (identical
+  // content => identical identity) instead of duplicating. A failure
+  // degrades MICRO health and never touches the tape or other symbols.
+  // Rate caps may suppress an attempt: suppression is COUNTED — never
+  // silently pretended persisted. Returns the observations actually
+  // durably written this call (0..1).
+  evaluate(symbol, book, coin, now = Date.now(), write = writeMicroObservation) {
     const st = this.symbols.get(symbol);
     if (!st || this.failed.has(symbol)) return [];
     try {
+      this.#expireOverdueEpisodes(st, now);
       const obs = this.observe(symbol, book, coin, now);
       if (!obs) return [];
       // proxy/book-state EDGES are meaningful transitions (edges only —
@@ -606,48 +635,64 @@ export class MicrostructureTracker {
       // minute windows
       if (now - this.emitMinuteStart >= 60_000) { this.emitMinuteStart = now; this.emitsThisMinute = 0; }
       if (now - st.transitionMinuteStart >= 60_000) { st.transitionMinuteStart = now; st.transitionEmitsThisMinute = 0; }
-      if (st.pendingTransitions.length) {
-        if (this.emitsThisMinute >= this.limits.maxDurablePerMinute ||
-            st.transitionEmitsThisMinute >= this.limits.maxTransitionEmitsPerSymbolPerMinute) {
-          this.observationsSuppressedByRateLimit++; // transitions stay latched for the next tick
-          return [];
+      // PREPARE: freeze at most one record awaiting durable acknowledgement
+      if (!st.pendingWrite) {
+        if (st.pendingTransitions.length) {
+          if (st.transitionEmitsThisMinute >= this.limits.maxTransitionEmitsPerSymbolPerMinute) {
+            this.observationsSuppressedByRateLimit++; // transitions stay latched for the next tick
+          } else {
+            st.transitionEmitsThisMinute++; // the slot is granted at prepare — bounded even across retries
+            st.pendingWrite = {
+              kind: 'transition',
+              obs: { ...obs, emitReason: { kind: 'TRANSITION', transitions: st.pendingTransitions.splice(0) } },
+            };
+          }
+        } else if (now - st.lastPeriodicEmitMs >= this.limits.periodicEmitMs) {
+          st.pendingWrite = { kind: 'periodic', obs: { ...obs, emitReason: { kind: 'PERIODIC' } } };
         }
-        const transitions = st.pendingTransitions.splice(0);
-        st.transitionEmitsThisMinute++;
-        st.lastPeriodicEmitMs = now; // a transition record IS a fresh baseline
-        return [this.#emit({ ...obs, emitReason: { kind: 'TRANSITION', transitions } }, 'transition')];
       }
-      if (now - st.lastPeriodicEmitMs >= this.limits.periodicEmitMs) {
-        if (this.emitsThisMinute >= this.limits.maxDurablePerMinute) {
-          this.observationsSuppressedByRateLimit++;
-          return [];
-        }
-        st.lastPeriodicEmitMs = now;
-        return [this.#emit({ ...obs, emitReason: { kind: 'PERIODIC' } }, 'periodic')];
+      if (!st.pendingWrite) return [];
+      if (this.emitsThisMinute >= this.limits.maxDurablePerMinute) {
+        this.observationsSuppressedByRateLimit++; // stays prepared; retried when budget allows
+        return [];
       }
-      return [];
+      // APPEND — the acknowledgement boundary
+      try {
+        write(st.pendingWrite.obs);
+      } catch (err) {
+        this.#writeFailed(err, now); // record stays frozen for a verbatim retry; tape unaffected
+        return [];
+      }
+      // ACK SUCCESS — only now does "remembered" become true
+      const done = st.pendingWrite;
+      st.pendingWrite = null;
+      this.emitsThisMinute++;
+      this.durableObservationsEmitted++;
+      if (done.kind === 'periodic') this.periodicObservationsEmitted++;
+      else this.transitionObservationsEmitted++;
+      st.lastPeriodicEmitMs = now; // the baseline clock moves only on a real durable write
+      try {
+        this.approxBytesWritten += JSON.stringify(done.obs).length;
+      } catch {
+        // byte accounting is best-effort; the observation is already durable
+      }
+      return [done.obs];
     } catch (err) {
       this.#isolate(symbol, err);
       return [];
     }
   }
 
-  #emit(finalObs, kind) {
-    this.emitsThisMinute++;
-    this.durableObservationsEmitted++;
-    if (kind === 'periodic') this.periodicObservationsEmitted++;
-    else this.transitionObservationsEmitted++;
-    try {
-      this.approxBytesWritten += JSON.stringify(finalObs).length;
-    } catch {
-      // byte accounting is best-effort; the observation itself still emits
-    }
-    return finalObs;
+  #writeFailed(err, now) {
+    this.durableWriteFailures++;
+    this.lastDurableWriteError = err?.message ?? String(err);
+    this.lastDurableWriteFailureTs = now;
+    this.log(`MICRO durable write failed (record kept pending, tape unaffected): ${this.lastDurableWriteError}`);
   }
 
   health() {
     return {
-      status: this.failed.size || this.isolatedErrors ? 'DEGRADED' : 'HEALTHY',
+      status: this.failed.size || this.isolatedErrors || this.durableWriteFailures ? 'DEGRADED' : 'HEALTHY',
       trackedCount: this.tracked().length,
       failedSymbols: [...this.failed.keys()],
       isolatedErrors: this.isolatedErrors,
@@ -659,6 +704,9 @@ export class MicrostructureTracker {
       observationsSuppressedByRateLimit: this.observationsSuppressedByRateLimit,
       transitionsDroppedAtCap: this.transitionsDroppedAtCap,
       approxBytesWritten: this.approxBytesWritten,
+      durableWriteFailures: this.durableWriteFailures,
+      lastDurableWriteError: this.lastDurableWriteError,
+      lastDurableWriteFailureTs: this.lastDurableWriteFailureTs,
     };
   }
 }
