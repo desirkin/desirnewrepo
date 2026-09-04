@@ -164,6 +164,83 @@ export function attentionSnapshot({ now = Date.now(), config = loadConfig() } = 
   };
 }
 
+// ---- EARS drawer: the rumor room (UI-1A §6) ------------------------------
+// Bounded, read-only, existing social truth only. Null social math stays
+// null (INSUFFICIENT HISTORY on the client), never zero.
+const EARS_LIMIT = 10;
+export function earsRoom({ now = Date.now() } = {}) {
+  const status = readJsonSafe(path.join(dataDir(), 'rumint', 'status.json')) ?? {};
+  const bySym = new Map();
+  const note = (sym, patch) => bySym.set(sym, { symbol: sym, hyped: false, nomination: null, stalkCause: null, ...bySym.get(sym), ...patch });
+  for (const e of rumintEntries(now)) {
+    if (e.kind === 'HYPED') note(e.symbol, { hyped: true });
+    else if (e.kind === 'RUMINT_NOMINATION') note(e.symbol, { nomination: { z: e.z, ts: e.ts, reason: e.reason } });
+  }
+  for (const e of stalkingEntries(now)) {
+    if (/RUMINT/i.test(e.reason)) note(e.symbol, { stalkCause: e.reason, stalkSince: e.since, stalkExpiresMs: e.expiresMs });
+  }
+  const symbols = [...bySym.values()].slice(0, EARS_LIMIT).map((s) => {
+    let signal = null;
+    try {
+      const baseline = readBaseline(`${s.symbol}.X`);
+      if (baseline && Object.keys(baseline.buckets ?? {}).length > 0) {
+        const sig = computeSignal(`${s.symbol}.X`, baseline, new Date(now));
+        signal = {
+          velocity: sig.velocity ?? null,
+          zVelocity: sig.zVelocity ?? null,
+          acceleration: sig.acceleration ?? null,
+          sentimentShift: sig.sentimentShift ?? null,
+        };
+      }
+    } catch {
+      signal = null;
+    }
+    return { ...s, signal };
+  });
+  return {
+    status: {
+      enabled: status.enabled === true,
+      symbolsPolled: status.symbolsPolled ?? 0,
+      backoff: Boolean(status.backoffUntil && status.backoffUntil > now),
+      fresh: now - (status.tsMs ?? 0) < 30_000,
+      hypedCount: Array.isArray(status.hyped) ? status.hyped.length : 0,
+    },
+    symbols,
+  };
+}
+
+// ---- WIDE EYE drawer (UI-1A §7): bounded recent scanner view -------------
+const EYE_RIPPLE_LIMIT = 8;
+export function wideEyeRoom({ now = Date.now() } = {}) {
+  const status = readJsonSafe(path.join(dataDir(), 'survey', 'status.json')) ?? {};
+  const ripples = [];
+  for (const ev of tailJsonl(path.join(dataDir(), 'survey', 'events.jsonl'))) {
+    if (ev.type !== 'RIPPLE') continue;
+    const sym = cleanSymbol(ev.symbol);
+    const ts = Date.parse(ev.ts);
+    if (!sym || !Number.isFinite(ts)) continue;
+    ripples.push({
+      symbol: sym,
+      ts,
+      zVol: ev.zVol ?? null,
+      zRet: ev.zRet ?? null,
+      extension: ev.extension ?? null,
+      liquidityNote: typeof ev.liquidityNote === 'string' ? ev.liquidityNote : null,
+      inDeepTape: ev.inDeepTape ?? null,
+    });
+  }
+  ripples.sort((a, b) => b.ts - a.ts);
+  return {
+    status: {
+      enabled: status.enabled === true,
+      scanned: status.scanned ?? 0,
+      ripplesToday: status.ripplesToday ?? 0,
+      fresh: now - (status.tsMs ?? 0) < 180_000,
+    },
+    ripples: ripples.slice(0, EYE_RIPPLE_LIMIT), // bounded — never every scanned row
+  };
+}
+
 // ---- per-coin attention detail for the prey drawer -----------------------
 export function attentionForCoin(coin, { now = Date.now() } = {}) {
   const sym = cleanSymbol(coin);

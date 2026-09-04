@@ -28,7 +28,10 @@ writeFileSync(path.join(TEST_DATA, 'state', 'stalking.json'), JSON.stringify({
 }));
 writeFileSync(path.join(TEST_DATA, 'survey', 'events.jsonl'),
   JSON.stringify({ ts: iso(NOW - 3 * 60_000), type: 'RIPPLE', symbol: 'SUI', zVol: 3.4, zRet: 2.2, extension: 1.8 }) + '\n' +
-  JSON.stringify({ ts: iso(NOW - 5 * 60_000), type: 'RIPPLE', symbol: 'PEPE', zVol: 4.1, zRet: 1.9, extension: 2.4 }) + '\n');
+  JSON.stringify({ ts: iso(NOW - 5 * 60_000), type: 'RIPPLE', symbol: 'PEPE', zVol: 4.1, zRet: 1.9, extension: 2.4, liquidityNote: '$2.10M 24h', inDeepTape: false }) + '\n');
+writeFileSync(path.join(TEST_DATA, 'survey', 'status.json'), JSON.stringify({ enabled: true, scanned: 629, ripplesToday: 2, tsMs: NOW }));
+writeFileSync(path.join(TEST_DATA, 'rumint', 'status.json'), JSON.stringify({ enabled: true, symbolsPolled: 15, tsMs: NOW, hyped: ['SUI'] }));
+writeFileSync(path.join(TEST_DATA, 'rumint', 'hyped.json'), JSON.stringify({ date: iso(NOW).slice(0, 10), symbols: ['SUI'] }));
 
 const { server } = await import('../ui/server.js');
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -98,6 +101,50 @@ test('19b. dynamic APIs all answer no-store (nothing offline-cacheable)', async 
   for (const p of ['/api/status', '/api/attention', '/api/ledger/summary', '/api/coin/BTC']) {
     const r = await fetch(BASE + p);
     assert.equal(r.headers.get('cache-control'), 'no-store', p);
+  }
+});
+
+test('UI-1A §6. /api/ears: the rumor room is bounded, truthful, and null-preserving', async () => {
+  const r = await fetch(BASE + '/api/ears');
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('cache-control'), 'no-store');
+  const d = await r.json();
+  assert.equal(d.status.enabled, true);
+  assert.equal(d.status.symbolsPolled, 15);
+  assert.equal(d.status.hypedCount, 1);
+  const sui = d.symbols.find((s) => s.symbol === 'SUI');
+  assert.ok(sui, 'HYPED + RUMINT-stalked SUI appears in the room');
+  assert.equal(sui.hyped, true);
+  assert.equal(sui.stalkCause, 'RUMINT NOMINATION z=3.52');
+  assert.equal(sui.signal, null); // no baseline history: null, never zero
+  assert.ok(d.symbols.length <= 10); // bounded
+  assert.ok(!/score|confidence|BUY|SELL/i.test(JSON.stringify(d)));
+});
+
+test('UI-1A §7. /api/wideeye: bounded recent ripples + truthful coverage figure', async () => {
+  const d = await (await fetch(BASE + '/api/wideeye')).json();
+  assert.equal(d.status.scanned, 629); // the real coverage figure, not 629 rows
+  assert.equal(d.status.ripplesToday, 2);
+  assert.ok(d.ripples.length <= 8);
+  assert.equal(d.ripples[0].symbol, 'SUI'); // newest first
+  assert.equal(d.ripples[1].symbol, 'PEPE');
+  assert.equal(d.ripples[1].zVol, 4.1);
+  assert.equal(d.ripples[1].liquidityNote, '$2.10M 24h');
+});
+
+test('UI-1A §21. every read route is explicitly GET-only: wrong method gets 405', async () => {
+  for (const [method, p] of [
+    ['POST', '/api/attention'],
+    ['POST', '/api/coin/BTC'],
+    ['POST', '/api/ears'],
+    ['DELETE', '/api/wideeye'],
+    ['PUT', '/api/status'],
+    ['POST', '/api/ledger/summary'],
+  ]) {
+    const r = await fetch(BASE + p, { method });
+    assert.equal(r.status, 405, `${method} ${p}`);
+    assert.equal((await r.json()).error, 'METHOD_NOT_ALLOWED');
+    assert.equal(r.headers.get('allow'), 'GET');
   }
 });
 

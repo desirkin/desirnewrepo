@@ -50,9 +50,11 @@
 
   /* ============ core ============ */
   #scene { position: fixed; inset: 0; }
+  /* UI-1A §14: the freed top space feeds the hunting field — larger, and
+     balanced a touch higher so the dead zone above the controls shrinks */
   #core {
-    position: absolute; left: 50%; top: 46%;
-    width: min(88vmin, 360px); height: min(88vmin, 360px);
+    position: absolute; left: 50%; top: 44%;
+    width: min(96vmin, 400px); height: min(96vmin, 400px);
     transform: translate(-50%, -50%);
   }
   /* UI-1: breathing is state-reactive — slowest at rest, tighter while
@@ -64,12 +66,18 @@
   body.killed #scene { filter: saturate(.22) brightness(.68); }
   body.killed #ringGroup, body.killed .ringPulse, body.killed #serpent .eye { animation: none; }
   @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.018); } }
-  .ring    { fill: none; stroke: var(--accent); stroke-width: 1.6; opacity: .85;
-             filter: drop-shadow(0 0 6px var(--accent)); transition: stroke 1.2s ease; }
-  /* the coil made body-like: faint segment hint + a slow highlight moving
-     through the ring — muscle, not sci-fi wire. Restrained on purpose. */
-  .ringScales { fill: none; stroke: var(--accent); stroke-width: 3.1; opacity: .14;
-                stroke-dasharray: 2.6 4.6; transition: stroke 1.2s ease; }
+  /* UI-1A: the coil is a BODY — gradient-lit tapered band, not a wire */
+  .cg1 { stop-color: var(--accent2); stop-opacity: .95; }
+  .cg2 { stop-color: var(--accent); stop-opacity: .88; }
+  .cg3 { stop-color: var(--accent); stop-opacity: .5; }
+  .coilFill { fill: url(#coilGrad); filter: drop-shadow(0 0 7px var(--accent)); }
+  #coilCasing { fill: none; stroke: var(--bg); stroke-linecap: round; opacity: .92; }
+  #coilHighlight { fill: none; stroke: #eafffa; stroke-width: 1.1; opacity: .26; stroke-linecap: round; }
+  #coilEye { fill: #06090f; stroke: #eafffa; stroke-width: .8; opacity: .95; }
+  /* faint segment hint + a slow highlight moving through the body —
+     muscle, not sci-fi wire. Restrained on purpose. */
+  .ringScales { fill: none; stroke: var(--bg); stroke-width: 5.4; opacity: .1;
+                stroke-dasharray: 2.2 6.2; }
   .ringPulse  { fill: none; stroke: var(--accent2); stroke-width: 2.4; opacity: .38;
                 stroke-dasharray: 46 607; stroke-linecap: round;
                 filter: blur(1.1px) drop-shadow(0 0 5px var(--accent2));
@@ -97,12 +105,13 @@
 
   /* ============ verdict ============ */
   #verdict {
-    position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%);
+    position: absolute; left: 50%; top: 44%; transform: translate(-50%, -50%);
     text-align: center; width: 78vw; pointer-events: auto; cursor: default;
   }
+  /* UI-1A §13: ~15% smaller — the animal and its prey carry the story */
   #verdict .word {
-    font-size: clamp(26px, 8.4vw, 42px); font-weight: 700; letter-spacing: .14em;
-    color: var(--accent); text-shadow: 0 0 18px var(--accent), 0 0 2px var(--accent);
+    font-size: clamp(22px, 7.1vw, 36px); font-weight: 700; letter-spacing: .14em;
+    color: var(--accent); text-shadow: 0 0 16px var(--accent), 0 0 2px var(--accent);
     transition: color 1.2s ease, text-shadow 1.2s ease;
   }
   #verdict .sub {
@@ -127,9 +136,12 @@
   /* UI-1: the CURRENT FOCUS — prey closest to the animal, larger and
      sharper, never covering the cobra. The animal stays the center. */
   .planet .body { transition: opacity .6s, box-shadow .6s, width .8s ease, height .8s ease; }
-  .planet.focal .body { width: 38px; height: 38px; opacity: 1;
-                        box-shadow: 0 0 16px 3px rgba(89,230,198,.30); }
-  .planet.focal .lbl { color: var(--ink); font-weight: 600; letter-spacing: .26em; }
+  .planet .lbl { will-change: transform; }
+  /* §11: the current focus is unmistakable — closest, bigger, ringed, named */
+  .planet.focal .body { width: 40px; height: 40px; opacity: 1;
+                        box-shadow: 0 0 0 2px rgba(89,230,198,.55), 0 0 20px 5px rgba(89,230,198,.30); }
+  .planet.focal .lbl { color: #eafffa; font-weight: 700; letter-spacing: .26em; font-size: 11px;
+                       text-shadow: 0 0 8px rgba(89,230,198,.8); }
   /* real RUMINT nomination: a quiet amber dot, distinct from demo's full treatment */
   .planet .nomdot { display: none; width: 6px; height: 6px; border-radius: 50%;
                     background: #ffb454; box-shadow: 0 0 7px #ffb454; margin: 3px auto 0; }
@@ -153,12 +165,27 @@
     background: rgba(8, 14, 28, .68); border: 1px solid #223048; border-radius: 20px;
     padding: 6px 12px; backdrop-filter: blur(4px); z-index: 30;
   }
-  #tapechip { top: max(10px, env(safe-area-inset-top)); left: 12px; display: flex; gap: 7px; align-items: center; }
-  #tapedot { width: 8px; height: 8px; border-radius: 50%; background: #3aa981; box-shadow: 0 0 8px #3aa981; }
-  #tapedot.DEGRADED { background: #ffb454; box-shadow: 0 0 8px #ffb454; }
-  #tapedot.OFFLINE, #tapedot.FROZEN, #tapedot.ABSENT, #tapedot.LOST { background: #56607a; box-shadow: none; }
+  /* UI-1A: top capsule family — three small real controls, no dead pills */
+  #capsules { position: fixed; top: max(10px, env(safe-area-inset-top)); left: 12px; right: 52px;
+              display: flex; gap: 8px; z-index: 30; }
+  .capsule { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+             font-family: inherit; background: rgba(8,14,28,.62); border: 1px solid #223048; border-radius: 12px;
+             padding: 6px 10px; color: var(--ink); cursor: pointer; backdrop-filter: blur(4px);
+             text-align: left; transition: border-color .6s; }
+  .capsule .ck { font-size: 8px; letter-spacing: .26em; color: var(--dim); }
+  .capsule .ck::after { content: ' ›'; letter-spacing: 0; opacity: .7; }
+  .capsule .cv { font-size: 10.5px; letter-spacing: .1em; font-variant-numeric: tabular-nums;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .capsule.off .cv { color: var(--dim); }
+  .capsule.hot { border-color: #7a5526; } /* faint amber edge — e.g. EARS with HYPED, never a casino */
+  body.demo #capsules { display: none; }
+
+  /* UI-1A: the ONE bottom operational strip — freshness + clock + session */
   #clockchip { bottom: max(12px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
-               color: var(--dim); white-space: nowrap; }
+               color: var(--dim); white-space: nowrap; display: flex; gap: 7px; align-items: center; }
+  #stripdot { width: 7px; height: 7px; border-radius: 50%; background: #56607a; flex: none; }
+  #stripdot.LIVE { background: #3aa981; box-shadow: 0 0 8px #3aa981; }
+  #stripdot.STALE, #stripdot.DEGRADED { background: #ffb454; box-shadow: 0 0 8px #ffb454; }
 
   /* human controls: confirm-tap buttons. They only remove permission to trade. */
   #controls { position: fixed; bottom: calc(max(12px, env(safe-area-inset-bottom)) + 40px);
@@ -184,23 +211,20 @@
   #card .vrow button { font-size: 10px; letter-spacing: .16em; padding: 5px 10px; border-radius: 14px;
                        color: #69d2ff; border: 1px solid #2a5a78; background: transparent; cursor: pointer; }
   #card .vrow button.armed { background: #69d2ff; color: #06090f; }
-  #motion { position: fixed; top: max(10px, env(safe-area-inset-top)); right: 12px; z-index: 40;
-            background: rgba(8,14,28,.68); color: var(--dim); border: 1px solid #223048;
-            border-radius: 20px; font-size: 11px; letter-spacing: .1em; padding: 6px 11px; cursor: pointer; }
-  body.reduced #motion { color: var(--accent); border-color: var(--accent); }
-  body.demo #motion { top: calc(max(10px, env(safe-area-inset-top)) + 88px); }
+  /* reduced motion: decoration stops, information stays (system preference
+     drives this — no permanent cockpit button needed) */
   body.reduced #ringGroup, body.reduced .planet.stalked .body { animation: none; }
 
   /* UI-1: tiny auth indicator (browser-side state only; server is the
      boundary). No giant pill over the serpent. */
-  #authdot { position: fixed; top: calc(max(10px, env(safe-area-inset-top)) + 40px); right: 12px; z-index: 40;
+  #authdot { position: fixed; top: max(10px, env(safe-area-inset-top)); right: 12px; z-index: 40;
              width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
              background: rgba(8,14,28,.68); border: 1px solid #223048; color: var(--dim); cursor: pointer; }
   #authdot.authed { color: var(--accent); border-color: rgba(89,230,198,.55); }
   #authdot.warn { color: #ffb454; border-color: #7a5526; }
   body:not(.reduced) #authdot.warn { animation: authPulse 2.2s ease-in-out infinite; }
   @keyframes authPulse { 50% { box-shadow: 0 0 12px rgba(255,180,84,.6); } }
-  #authwarn { top: calc(max(10px, env(safe-area-inset-top)) + 78px); right: 12px; left: auto; color: #ffb454;
+  #authwarn { top: calc(max(10px, env(safe-area-inset-top)) + 40px); right: 12px; left: auto; color: #ffb454;
               border-color: #7a5526; display: none; font-size: 9px; max-width: 46vw; text-align: right; }
   #authwarn.show { display: block; }
 
@@ -328,13 +352,27 @@
       <path id="lockFill" class="arcFill" d=""></path>
       <g id="lockTicks"></g>
     </g>
+    <defs>
+      <!-- UI-1A: dimensional body lighting — stops styled from CSS vars so
+           the coil keeps following posture temperature -->
+      <radialGradient id="coilGrad" cx="32%" cy="24%" r="95%">
+        <stop offset="0" class="cg1"></stop>
+        <stop offset=".55" class="cg2"></stop>
+        <stop offset="1" class="cg3"></stop>
+      </radialGradient>
+    </defs>
     <!-- the serpent, coiled about the verdict -->
     <g id="serpent" class="idle"></g>
-    <!-- verdict ring — UI-1: layered so the coil feels like body, not wire.
-         The main ring is a JS-built path with faint organic irregularity;
-         ringScales hints at segments; ringPulse is a slow moving highlight. -->
+    <!-- UI-1A: the hunting ring IS a serpent body now — a tapered, wobbling
+         muscle band whose head end passes OVER its tail (casing gap), with
+         a restrained widened head + eye. Scales + moving highlight ride on
+         top. Built in JS; pure SVG, no artwork. -->
     <g id="ringGroup">
-      <path id="verdictRing" class="ring" d=""></path>
+      <path id="coilTail" class="coilFill" d=""></path>
+      <path id="coilCasing" d=""></path>
+      <path id="coilHead" class="coilFill" d=""></path>
+      <path id="coilHighlight" d=""></path>
+      <circle id="coilEye" r="1.9"></circle>
       <circle class="ringScales" r="104"></circle>
       <circle class="ringPulse" r="104"></circle>
     </g>
@@ -347,13 +385,19 @@
   <div id="planets"></div>
 </div>
 
-<div id="tapechip" class="chip"><div id="tapedot"></div><span id="tapetext">TAPE —</span></div>
-<div id="universechip" class="chip" hidden
-     style="top:calc(max(10px, env(safe-area-inset-top)) + 42px);left:12px;color:#5c6b7a"></div>
-<div id="earschip" class="chip" hidden
-     style="top:calc(max(10px, env(safe-area-inset-top)) + 74px);left:12px;color:#5c6b7a"></div>
-<div id="eyechip" class="chip" hidden
-     style="top:calc(max(10px, env(safe-area-inset-top)) + 106px);left:12px;color:#5c6b7a"></div>
+<!-- UI-1A: three real controls, one quiet family. If it looks tappable it
+     rewards the tap — each opens a read-only drawer. -->
+<div id="capsules">
+  <button class="capsule" id="capUniverse" aria-label="universe status — tap for details">
+    <span class="ck">UNIVERSE</span><span class="cv" id="capUniverseV">—</span>
+  </button>
+  <button class="capsule" id="capEars" aria-label="rumor ears status — tap for the rumor room">
+    <span class="ck">EARS</span><span class="cv" id="capEarsV">—</span>
+  </button>
+  <button class="capsule" id="capEye" aria-label="wide eye scanner status — tap for recent ripples">
+    <span class="ck">WIDE EYE</span><span class="cv" id="capEyeV">—</span>
+  </button>
+</div>
 <!-- UI-1: the tiny auth indicator. Browser-side state only — the security
      boundary stays on the server. No giant pill over the animal. -->
 <button id="authdot" aria-label="control authentication status" title="control auth">
@@ -363,7 +407,8 @@
   </svg>
 </button>
 <div id="authwarn" class="chip">CONTROL AUTH UNCONFIGURED</div>
-<div id="clockchip" class="chip">ET --:-- · SESSION ----------</div>
+<!-- UI-1A: the ONE quiet operational strip — tape freshness + clock + session -->
+<div id="clockchip" class="chip"><span id="stripdot"></span><span id="striptext">— · ET --:-- · SESSION ----------</span></div>
 <div id="controls">
   <button id="btnKill">KILL</button>
   <button id="btnCage">CAGE</button>
@@ -377,7 +422,6 @@
   <h2>LEDGER</h2>
   <div id="ledgerBody"></div>
 </div>
-<button id="motion" title="Toggle reduced motion">≋ MOTION</button>
 <div id="demobadge" title="Tap to exit demo">DEMO</div>
 
 <div id="card">
@@ -468,15 +512,58 @@ function buildSerpent() {
   $('#serpent').innerHTML =
     `<path class="coil" d="${d}"></path><path d="${head}"></path>` +
     `<circle class="eye" cx="${hx - 4 * Math.cos(angH)}" cy="${hy - 4 * Math.sin(angH)}" r="1.7"></circle>`;
-  // UI-1: the verdict ring gets faint organic irregularity — a closed path
-  // with a barely-perceptible radial wobble instead of a perfect circle.
-  const rp = [];
-  for (let i = 0; i <= 180; i++) {
-    const a = (i / 180) * 2 * Math.PI;
-    const r = 104 + Math.sin(a * 7 + 0.8) * 0.9 + Math.sin(a * 3 - 1.2) * 0.6;
-    rp.push(`${(r * Math.cos(a)).toFixed(1)},${(r * Math.sin(a)).toFixed(1)}`);
-  }
-  $('#verdictRing').setAttribute('d', 'M' + rp.join(' L') + ' Z');
+  buildCoilRing();
+}
+
+/* UI-1A §9: the hunting ring as SERPENT BODY. A closed tapered band with
+   organic wobble; the head end (thicker, subtly widened, with an eye)
+   passes OVER the thinner tail through a background-colored casing gap.
+   All geometry, no artwork. */
+function buildCoilRing() {
+  const N = 260;
+  const centre = (p) => {
+    const a = -Math.PI / 2 + p * 2 * Math.PI;
+    const r = 104 + Math.sin(a * 5 + 0.8) * 1.2 + Math.sin(a * 3 - 1.2) * 0.8;
+    return [r * Math.cos(a), r * Math.sin(a), a];
+  };
+  // body half-width: thin tail -> muscular body -> widened head -> nose tip
+  const halfW = (p) => {
+    if (p > 0.985) return Math.max(0.4, 4.4 * (1 - (p - 0.985) / 0.015)); // rounded nose
+    if (p > 0.90) return 3.1 + (p - 0.90) / 0.085 * 1.6; // the head swells slightly
+    return 1.3 + p * 1.9; // tail 1.3 -> body ~3.0
+  };
+  const band = (p0, p1) => {
+    const outer = [], inner = [];
+    const steps = Math.max(8, Math.round((p1 - p0) * N));
+    for (let i = 0; i <= steps; i++) {
+      const p = p0 + ((p1 - p0) * i) / steps;
+      const [x, y, a] = centre(p);
+      const w = halfW(p);
+      outer.push(`${(x + w * Math.cos(a)).toFixed(1)},${(y + w * Math.sin(a)).toFixed(1)}`);
+      inner.push(`${(x - w * Math.cos(a)).toFixed(1)},${(y - w * Math.sin(a)).toFixed(1)}`);
+    }
+    return 'M' + outer.join(' L') + ' L' + inner.reverse().join(' L') + ' Z';
+  };
+  const line = (p0, p1, offset) => {
+    const pts = [];
+    const steps = Math.max(8, Math.round((p1 - p0) * N));
+    for (let i = 0; i <= steps; i++) {
+      const p = p0 + ((p1 - p0) * i) / steps;
+      const [x, y, a] = centre(p);
+      const o = offset(p);
+      pts.push(`${(x + o * Math.cos(a)).toFixed(1)},${(y + o * Math.sin(a)).toFixed(1)}`);
+    }
+    return 'M' + pts.join(' L');
+  };
+  $('#coilTail').setAttribute('d', band(0, 0.915));
+  $('#coilCasing').setAttribute('d', line(0.9, 1, () => 0));
+  $('#coilCasing').setAttribute('stroke-width', '13');
+  $('#coilHead').setAttribute('d', band(0.9, 1));
+  // a thin light along the upper body — dimensional, not glossy
+  $('#coilHighlight').setAttribute('d', line(0.05, 0.86, (p) => -halfW(p) * 0.45));
+  const [ex, ey, ea] = centre(0.968);
+  $('#coilEye').setAttribute('cx', (ex + halfW(0.968) * 0.28 * Math.cos(ea)).toFixed(1));
+  $('#coilEye').setAttribute('cy', (ey + halfW(0.968) * 0.28 * Math.sin(ea)).toFixed(1));
 }
 
 /* ---------- arcs (lock ring + ET session) ---------- */
@@ -502,11 +589,6 @@ function renderLockRing(locks) {
   $('#lockTicks').innerHTML = ticks.join('');
   const frac = Math.max(0, Math.min(locks.pnlPct, hard)) / hard;
   $('#lockFill').setAttribute('d', frac > 0.004 ? arcPath(LOCK_R, LOCK_FROM, LOCK_FROM + frac * LOCK_SWEEP) : '');
-}
-function renderSession(sess) {
-  if (!sess) return;
-  $('#sessArc').setAttribute('d', sess.dayFraction > 0.003 ? arcPath(158, 0, sess.dayFraction * 359.9) : '');
-  $('#clockchip').textContent = `ET ${sess.etTime} · SESSION ${sess.etDate}`;
 }
 
 /* ---------- planets: the hunting orbit (UI-1: dynamic display attention) ----------
@@ -546,13 +628,41 @@ function makePlanet(coin) {
   el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCard(coin); } });
   $('#planets').appendChild(el);
   const p = {
-    el, coin,
+    el, coin, lblEl: el.querySelector('.lbl'),
     phase: Math.random() * Math.PI * 2,
     speed: 0.041 + (planets.size % 7) * 0.010,
-    rank: planets.size, pull: 1.28, fade: 0, dying: false, meta: null,
+    rank: planets.size, pull: 1.28, fade: 0, dying: false, meta: null, lblDy: 0,
   };
   planets.set(coin, p);
   return p;
+}
+
+/* UI-1A §12 — PURE collision solver for coin labels. Given label boxes
+   ({x,y,w,h,priority}; y = box top) and the verdict box (center rect), it
+   returns a bounded vertical offset per label: focal/high-priority labels
+   place first, later labels dodge the verdict and already-placed labels
+   through a small candidate set. Offsets never exceed ±24px, so labels
+   stay glued to their coin and inside mobile bounds. */
+function resolveLabelOffsets(labels, verdict) {
+  const out = new Array(labels.length).fill(0);
+  const rect = (l, dy) => ({ l: l.x - l.w / 2, r: l.x + l.w / 2, t: l.y + dy, b: l.y + dy + l.h });
+  const hit = (a, b) => a.l < b.r && a.r > b.l && a.t < b.b && a.b > b.t;
+  const vrect = { l: verdict.x - verdict.w / 2, r: verdict.x + verdict.w / 2, t: verdict.y - verdict.h / 2, b: verdict.y + verdict.h / 2 };
+  const order = labels.map((_, i) => i).sort((a, b) => (labels[b].priority ?? 0) - (labels[a].priority ?? 0));
+  const placed = [];
+  for (const i of order) {
+    let chosen = 0;
+    for (const dy of [0, -24, 14, -14, 24]) {
+      const r = rect(labels[i], dy);
+      if (hit(r, vrect)) continue;
+      if (placed.some((j) => hit(r, rect(labels[j], out[j])))) continue;
+      chosen = dy;
+      break;
+    }
+    out[i] = chosen;
+    placed.push(i);
+  }
+  return out;
 }
 // Reconcile displayed prey with the attention snapshot — additions drift in
 // from the outside, departures fade out, focus docks on the inner coil.
@@ -599,7 +709,19 @@ function layoutPlanets(t) {
     p.el.classList.toggle('stalked', (demo && demoTarget === coin) || (!demo && p.meta?.tier === 1));
     p.el.classList.toggle('focal', focal);
     p.el.classList.toggle('nominated', !demo && p.meta?.tier === 3);
+    p.sx = x; p.sy = y; p.focal = focal; // screen position for label layout
   }
+  // §12: collision-aware labels — priority to the focal prey, verdict kept clear
+  const live = [...planets.values()].filter((p) => !p.dying);
+  const labels = live.map((p) => ({
+    x: p.sx ?? 0, y: (p.sy ?? 0) + 12, w: 50, h: 14,
+    priority: p.focal ? 3 : p.meta?.tier === 1 ? 2 : p.meta && !p.meta.fallback ? 1 : 0,
+  }));
+  const offsets = resolveLabelOffsets(labels, { x: cx, y: cy, w: Math.min(innerWidth * 0.62, 300), h: 86 });
+  live.forEach((p, i) => {
+    p.lblDy += (offsets[i] - p.lblDy) * (reduced ? 1 : 0.2);
+    p.lblEl.style.transform = `translateY(${p.lblDy.toFixed(1)}px)`;
+  });
 }
 // §37: attention arriving is truth; attention failing falls back to the
 // configured majors — nothing invented, nothing stale left focal forever.
@@ -764,7 +886,7 @@ async function postControl(action, extra = {}) {
     if (d.ok && d.status) renderStatus(d.status);
     return d;
   } catch {
-    $('#tapetext').textContent = 'SHELL LINK LOST';
+    $('#striptext').textContent = 'SHELL LINK LOST';
     return { ok: false };
   }
 }
@@ -794,7 +916,7 @@ function openVetoSheet() {
 
 /* ---------- ledger panel: read-only mirror of the paper ledger ---------- */
 const fmt$ = (v) => (v < 0 ? '-$' : '$') + Math.abs(v).toFixed(2);
-const fmtPct = (v) => (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
+const fmtPct = (v) => (v == null || !Number.isFinite(v) ? '—' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%'); // null pct = N/A, never NaN%
 const cls = (v) => (v >= 0 ? 'pos' : 'neg');
 function renderLedger(L) {
   const b = $('#ledgerBody');
@@ -921,32 +1043,38 @@ function renderStatus(s) {
     const sub = s.posture === 'STALKING' && s.stalking?.length ? s.stalking.join(' · ') : null;
     applyPosture(s.posture, { why, ...(sub ? { sub } : {}) });
   }
+  // UI-1A: top capsules — small, honest, always rewarding the tap
   const r = s.rumint;
-  $('#earschip').hidden = !(r && r.enabled && r.fresh);
-  if (r && r.enabled && r.fresh) {
-    $('#earschip').textContent = r.backoff
-      ? 'EARS BACK-OFF'
-      : `EARS ON · ${r.symbolsPolled}` + (r.hyped?.length ? ` · HYPED ${r.hyped.length}` : '');
-  }
+  const earsCap = $('#capEars');
+  earsCap.classList.toggle('off', !(r && r.enabled && r.fresh));
+  earsCap.classList.toggle('hot', Boolean(r?.hyped?.length)); // faint amber edge, never a casino
+  $('#capEarsV').textContent = r && r.enabled && r.fresh
+    ? (r.backoff ? 'BACK-OFF' : `ON · ${r.symbolsPolled}` + (r.hyped?.length ? ` · H${r.hyped.length}` : ''))
+    : 'OFF';
   const t = s.tape;
-  const dot = $('#tapedot'); dot.className = ''; dot.classList.add(t.effective);
-  const age = t.ageSec != null ? ` · ${t.ageSec < 99 ? t.ageSec.toFixed(1) : Math.round(t.ageSec)}s` : '';
-  const label = { LIVE: 'TAPE LIVE', DEGRADED: 'TAPE DEGRADED', OFFLINE: 'TAPE OFFLINE',
-                  FROZEN: 'TAPE FROZEN', ABSENT: 'NO TAPE' }[t.effective] || 'TAPE ?';
-  $('#tapetext').textContent = label + (t.effective === 'LIVE' ? age : '');
   const u = t.universe;
-  $('#universechip').hidden = !u;
-  if (u) {
-    const off = (u.stale ?? 0) + (u.unavailable ?? 0);
-    $('#universechip').textContent = `UNIVERSE ${u.total} · LIVE ${u.live}` + (off ? ` · OFF ${off}` : '');
-  }
+  $('#capUniverse').classList.toggle('off', !u);
+  $('#capUniverseV').textContent = u ? `${u.total} · LIVE ${u.live}` : `${universe.length} watched`;
   const w = s.wideeye;
-  $('#eyechip').hidden = !(w && w.enabled && w.fresh);
-  if (w && w.enabled && w.fresh) {
-    $('#eyechip').textContent = `WIDE EYE ${w.scanned} scanned · ${w.ripplesToday} ripple${w.ripplesToday === 1 ? '' : 's'} today`;
-  }
+  $('#capEye').classList.toggle('off', !(w && w.enabled && w.fresh));
+  $('#capEyeV').textContent = w && w.enabled && w.fresh
+    ? `${w.scanned} · ${w.ripplesToday} ripple${w.ripplesToday === 1 ? '' : 's'}`
+    : 'OFF';
+  renderStrip(t, s.session);
   renderLockRing(s.locks);
-  renderSession(s.session);
+}
+/* UI-1A §2/§17: the ONE bottom strip carries tape freshness truthfully —
+   LIVE only when the existing freshness rules say LIVE. */
+function stripLabel(effective) {
+  return { LIVE: 'LIVE', DEGRADED: 'DEGRADED', FROZEN: 'STALE', OFFLINE: 'OFFLINE', ABSENT: 'NO TAPE', LOST: 'LINK LOST' }[effective] || '—';
+}
+function renderStrip(t, sess) {
+  const dot = $('#stripdot');
+  dot.className = '';
+  if (t) dot.classList.add(t.effective === 'FROZEN' ? 'STALE' : t.effective);
+  const clock = sess ? `ET ${sess.etTime} · SESSION ${sess.etDate}` : 'ET --:--';
+  $('#striptext').textContent = `${stripLabel(t?.effective)} · ${clock}`;
+  if (sess) $('#sessArc').setAttribute('d', sess.dayFraction > 0.003 ? arcPath(158, 0, sess.dayFraction * 359.9) : '');
 }
 async function poll() {
   try {
@@ -954,8 +1082,8 @@ async function poll() {
     renderStatus(s);
     if ($('#ledger').classList.contains('open')) refreshLedger(); // piggyback, no extra loop
   } catch {
-    const dot = $('#tapedot'); dot.className = ''; dot.classList.add('LOST');
-    $('#tapetext').textContent = 'SHELL LINK LOST';
+    const dot = $('#stripdot'); dot.className = '';
+    $('#striptext').textContent = 'SHELL LINK LOST';
   }
   // display attention rides the SAME cadence — no extra polling loop; a
   // failure falls back to the configured majors, never a broken screen
@@ -1132,9 +1260,98 @@ function openHuntCard() {
       bodyEl.append(row);
     }
   }
+  // §5: the quiet fallback majors, truthfully separated from real attention
+  const quiet = (a?.orbit ?? []).filter((e) => e.fallback);
+  if (quiet.length) {
+    bodyEl.append(el('h3', 'sec', 'QUIET / FALLBACK'));
+    for (const e of quiet) {
+      const row = el('div', 'obs');
+      row.append(el('span', 'm', e.symbol));
+      row.append(el('span', 'v', 'quiet fallback major'));
+      bodyEl.append(row);
+    }
+  }
   bodyEl.append(el('div', 'quiet', 'WHAT SERPENT IS WATCHING — NOT ADVICE, NOT ELIGIBILITY'));
   $('#card').classList.add('open');
 }
+
+/* ---------- EARS: the rumor room (read-only; nulls stay honest) ---------- */
+async function openEarsCard() {
+  $('#cardTitle').textContent = 'RUMOR ROOM';
+  const bodyEl = $('#cardBody');
+  bodyEl.replaceChildren(el('div', 'quiet', 'listening…'));
+  $('#card').classList.add('open');
+  try {
+    const d = await (await fetch('/api/ears', { cache: 'no-store' })).json();
+    bodyEl.replaceChildren();
+    const st = d.status ?? {};
+    bodyEl.append(el('div', 'quiet', st.enabled
+      ? (st.backoff ? 'EARS IN BACK-OFF' : `EARS ON · ${st.symbolsPolled} symbols polled${st.fresh ? '' : ' · NOT FRESH'}`)
+      : 'EARS OFF'));
+    if (!d.symbols?.length) {
+      bodyEl.append(el('div', 'quiet', 'NO MEANINGFUL SOCIAL SIGNAL'));
+      return;
+    }
+    for (const s of d.symbols) {
+      bodyEl.append(el('h3', 'sec', s.symbol + (s.hyped ? ' · HYPED' : '')));
+      if (s.stalkCause) bodyEl.append(obsRow('active stalk', s.stalkCause));
+      if (s.nomination) {
+        bodyEl.append(obsRow('nomination', s.nomination.reason));
+        bodyEl.append(obsRow('observed', agoStr(s.nomination.ts)));
+      }
+      const sig = s.signal;
+      if (sig) {
+        bodyEl.append(obsRow('chatter velocity', sig.velocity != null ? `${sig.velocity}/hr` : 'UNAVAILABLE'));
+        bodyEl.append(obsRow('velocity z', sig.zVelocity != null ? sig.zVelocity.toFixed(2) : 'INSUFFICIENT HISTORY'));
+        bodyEl.append(obsRow('acceleration', sig.acceleration != null ? sig.acceleration : 'INSUFFICIENT HISTORY'));
+        bodyEl.append(obsRow('sentiment shift', sig.sentimentShift != null ? sig.sentimentShift.toFixed(2) : 'INSUFFICIENT HISTORY'));
+      } else {
+        bodyEl.append(el('div', 'quiet', 'INSUFFICIENT HISTORY'));
+      }
+    }
+  } catch {
+    bodyEl.replaceChildren(el('div', 'unavail', 'UNAVAILABLE — shell link lost'));
+  }
+}
+
+/* ---------- WIDE EYE: bounded recent scanner view ---------- */
+async function openEyeCard() {
+  $('#cardTitle').textContent = 'WIDE EYE';
+  const bodyEl = $('#cardBody');
+  bodyEl.replaceChildren(el('div', 'quiet', 'scanning…'));
+  $('#card').classList.add('open');
+  try {
+    const d = await (await fetch('/api/wideeye', { cache: 'no-store' })).json();
+    bodyEl.replaceChildren();
+    const st = d.status ?? {};
+    bodyEl.append(el('div', 'quiet', st.enabled
+      ? `${st.scanned} SCANNED · ${st.ripplesToday} RIPPLE${st.ripplesToday === 1 ? '' : 'S'} TODAY${st.fresh ? '' : ' · NOT FRESH'}`
+      : 'WIDE EYE OFF'));
+    if (!d.ripples?.length) {
+      bodyEl.append(el('div', 'quiet', 'NO RECENT RIPPLES'));
+      return;
+    }
+    bodyEl.append(el('h3', 'sec', 'RECENT RIPPLES'));
+    for (const rp of d.ripples) {
+      const row = el('div', 'obs');
+      row.append(el('span', 'm', rp.symbol));
+      const facts = [
+        rp.zVol != null ? `zVol ${rp.zVol}` : null,
+        rp.zRet != null ? `zRet ${rp.zRet}` : null,
+        rp.extension != null ? `ext ${rp.extension}%` : null,
+        agoStr(rp.ts),
+      ].filter(Boolean).join(' · ');
+      row.append(el('span', 'v', facts));
+      bodyEl.append(row);
+      if (rp.liquidityNote) bodyEl.append(el('div', 'quiet', rp.liquidityNote + (rp.inDeepTape ? ' · in deep tape' : '')));
+    }
+  } catch {
+    bodyEl.replaceChildren(el('div', 'unavail', 'UNAVAILABLE — shell link lost'));
+  }
+}
+$('#capUniverse').addEventListener('click', () => { if (!demo) openHuntCard(); });
+$('#capEars').addEventListener('click', () => { if (!demo) openEarsCard(); });
+$('#capEye').addEventListener('click', () => { if (!demo) openEyeCard(); });
 $('#card .close').addEventListener('click', () => $('#card').classList.remove('open'));
 $('#scene').addEventListener('click', (e) => {
   if (!e.target.closest('.planet') && !e.target.closest('#card')) $('#card').classList.remove('open');
@@ -1179,9 +1396,10 @@ $('#verdict').addEventListener('click', () => {
 });
 $('#demobadge').addEventListener('click', () => setDemo(false));
 
-/* ---------- reduced motion ---------- */
+/* ---------- reduced motion: driven by the system preference alone (UI-1A —
+   no permanent cockpit button; information never depends on animation) */
 function setReduced(on) { reduced = on; body.classList.toggle('reduced', on); }
-$('#motion').addEventListener('click', () => setReduced(!reduced));
+matchMedia('(prefers-reduced-motion: reduce)').addEventListener?.('change', (e) => setReduced(e.matches));
 
 /* ---------- boot ---------- */
 function endBoot() { body.classList.remove('booting'); }

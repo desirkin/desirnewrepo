@@ -12,7 +12,7 @@ const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-ui1-'));
 process.env.COBRA_DATA_DIR = TEST_DATA;
 
 const { attentionSnapshot, attentionForCoin } = await import('../ui/attention-view.js');
-const { ledgerSummary } = await import('../ledger/summary.js');
+const { ledgerSummary, pnlPct } = await import('../ledger/summary.js');
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const HTML = readFileSync(path.join(REPO, 'ui', 'index.html'), 'utf8');
@@ -165,11 +165,26 @@ test('14+15+16. ledger summary metrics match the fixture exactly; unrealized P&L
   assert.equal(L.openPositions[0].unrealizedUsd, null); // never computed from stale/absent price
   assert.equal(L.openPositions[0].entryFeeUsd, 0.16);
   assert.ok(L.openPositions[0].ageMin > 19 && L.openPositions[0].ageMin < 21);
+  // UI-1A §22A: the summary uses ITS supplied as-of clock — deterministic
+  const asOf = new Date(now + 10 * 60_000);
+  const L2 = ledgerSummary(asOf);
+  assert.ok(Math.abs(L2.openPositions[0].ageMin - 30) < 1e-6); // exactly (asOf − entry) minutes
+  assert.deepEqual(ledgerSummary(asOf).openPositions[0].ageMin, L2.openPositions[0].ageMin); // repeatable
   // no-loss profit factor is honestly null (rendered N/A)
   writeFileSync(path.join(d, 'ledger', 'exits.jsonl'), JSON.stringify(exits[0]) + '\n');
   assert.equal(ledgerSummary().profitFactor, null);
   rmSync(d, { recursive: true, force: true });
   process.env.COBRA_DATA_DIR = TEST_DATA;
+});
+
+test('UI-1A §22B. percentage math never emits Infinity/NaN: invalid starting balance -> null', () => {
+  assert.equal(pnlPct(5, 100), 5);
+  assert.equal(pnlPct(-1, 100), -1);
+  assert.equal(pnlPct(5, 0), null); // zero balance: N/A, never Infinity
+  assert.equal(pnlPct(5, -10), null);
+  assert.equal(pnlPct(5, Number.NaN), null);
+  assert.equal(pnlPct(Number.NaN, 100), null);
+  for (const v of [pnlPct(5, 0), pnlPct(0, 0)]) assert.ok(v === null || Number.isFinite(v)); // JSON-safe always
 });
 
 // ---------------- static page truths (tests 10/11/13/17/18/19/20) ----------------

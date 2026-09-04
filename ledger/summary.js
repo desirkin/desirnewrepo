@@ -28,10 +28,17 @@ function daysOnWatch() {
   return readdirSync(dir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).length;
 }
 
+// UI-1A §22: percentage math can never emit Infinity/NaN — an invalid or
+// zero starting balance yields an honest null (rendered as N/A/—).
+export function pnlPct(usd, base) {
+  return Number.isFinite(usd) && Number.isFinite(base) && base > 0 ? (usd / base) * 100 : null;
+}
+
 export function ledgerSummary(now = new Date()) {
   const config = loadConfig();
   const startingBalance = config.paper.baseBalanceUsd;
   const today = sessionDate(now);
+  const nowMs = now.getTime(); // one as-of clock for every age in this summary
 
   const fills = new Map(allFills().map((f) => [f.prediction_id, f]));
   const exits = allExits().sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
@@ -80,7 +87,7 @@ export function ledgerSummary(now = new Date()) {
   // Open positions marked against the live book mid; stale/missing book -> null mark.
   const tape = readTapeStatus();
   const tapeLive =
-    tape && tape.state === TAPE_STATES.LIVE && (Date.now() - tape.tsMs) / 1000 <= (tape.staleFeedSec ?? 10) * 2;
+    tape && tape.state === TAPE_STATES.LIVE && (nowMs - tape.tsMs) / 1000 <= (tape.staleFeedSec ?? 10) * 2;
   const exited = new Set(exits.map((e) => e.prediction_id));
   const open = [...fills.values()]
     .filter((f) => !exited.has(f.prediction_id))
@@ -89,7 +96,7 @@ export function ledgerSummary(now = new Date()) {
       let unrealizedUsd = null;
       if (tapeLive) {
         const book = readCurrentBook(f.coin);
-        if (book?.synced && (Date.now() - book.tsMs) / 1000 <= config.cost.maxBookAgeSec) {
+        if (book?.synced && (nowMs - book.tsMs) / 1000 <= config.cost.maxBookAgeSec) {
           const bid = book.bids[0]?.price;
           const ask = book.asks[0]?.price;
           if (bid && ask) {
@@ -105,7 +112,7 @@ export function ledgerSummary(now = new Date()) {
         entry: f.avg_price,
         entryTs: f.ts ?? null,
         entryFeeUsd: f.fee_usd ?? null,
-        ageMin: f.ts && Number.isFinite(Date.parse(f.ts)) ? Math.max(0, (Date.now() - Date.parse(f.ts)) / 60_000) : null,
+        ageMin: f.ts && Number.isFinite(Date.parse(f.ts)) ? Math.max(0, (nowMs - Date.parse(f.ts)) / 60_000) : null,
         mark,
         unrealizedUsd,
       };
@@ -128,8 +135,8 @@ export function ledgerSummary(now = new Date()) {
     profitFactor,
     avgNetPerClosedUsd: closed.length ? netPnl / closed.length : null,
     exitReasons,
-    netPnl: { usd: netPnl, pct: (netPnl / startingBalance) * 100 },
-    todayPnl: { usd: todayPnl, pct: (todayPnl / startingBalance) * 100 },
+    netPnl: { usd: netPnl, pct: pnlPct(netPnl, startingBalance) },
+    todayPnl: { usd: todayPnl, pct: pnlPct(todayPnl, startingBalance) },
     totalTrades: closed.length,
     wins: winsArr.length,
     losses: lossArr.length,

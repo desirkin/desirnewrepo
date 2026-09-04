@@ -22,7 +22,7 @@ import { appendJsonl } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
 import { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_MS } from './auth.js';
 import { getPersistence } from '../persistence/runtime.js';
-import { attentionSnapshot, attentionForCoin } from './attention-view.js';
+import { attentionSnapshot, attentionForCoin, earsRoom, wideEyeRoom } from './attention-view.js';
 import { MemoryView } from '../persistence/memory-view.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -405,9 +405,31 @@ const server = http.createServer((req, res) => {
       });
       return;
     }
+    // UI-1A §21: everything below is READ-ONLY and explicitly GET-only —
+    // a non-GET request to a read route is refused, never quietly served.
+    if (req.method !== 'GET') {
+      json(res, 405, { error: 'METHOD_NOT_ALLOWED' }, { allow: 'GET' });
+      return;
+    }
     if (url.pathname === '/' || url.pathname === '/index.html') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       res.end(readFileSync(path.join(UI_DIR, 'index.html')));
+    } else if (url.pathname === '/api/ears') {
+      // UI-1A: the rumor room — bounded, read-only, nulls stay null
+      try {
+        json(res, 200, earsRoom());
+      } catch (err) {
+        console.error(`[api/ears] ${err.constructor.name}: ${err.message}`);
+        json(res, 200, { status: { enabled: false, fresh: false }, symbols: [], degraded: true });
+      }
+    } else if (url.pathname === '/api/wideeye') {
+      // UI-1A: bounded recent scanner view — never every scanned row
+      try {
+        json(res, 200, wideEyeRoom());
+      } catch (err) {
+        console.error(`[api/wideeye] ${err.constructor.name}: ${err.message}`);
+        json(res, 200, { status: { enabled: false, fresh: false }, ripples: [], degraded: true });
+      }
     } else if (url.pathname === '/api/status') {
       json(res, 200, statusPayload());
     } else if (url.pathname === '/api/ledger/summary') {
