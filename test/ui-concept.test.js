@@ -25,8 +25,11 @@ test('2. the lurk eyes gained slit pupils and stay restrained + killable', () =>
 });
 
 test('3. concentric orbit guides sit under the scene', () => {
+  // UI-1C9: the outermost guide and the session ring are gone — a quieter
+  // frame; two inner guides remain, and no stray circle rings the animal
   const guides = HTML.match(/class="orbitGuide/g) ?? [];
-  assert.ok(guides.length >= 3, `>=3 guide rings (got ${guides.length})`);
+  assert.equal(guides.length, 2, `exactly 2 guide rings (got ${guides.length})`);
+  assert.ok(!HTML.includes('class="sess"') && !HTML.includes('sessArc'), 'session ring removed');
 });
 
 test('4. badge glyph is pure presentation drawn FROM the symbol, via textContent', () => {
@@ -128,8 +131,8 @@ test('16. UI-1C7 — predator life: bounded weave sway + honest glance targets',
     maxAbs = Math.max(maxAbs, Math.abs(v));
     varies.add(Math.round(v * 10));
   }
-  assert.ok(maxAbs <= 4.5, `sway stays subtle (max ${maxAbs.toFixed(2)} deg)`);
-  assert.ok(maxAbs >= 2, 'and is actually visible');
+  assert.ok(maxAbs <= 6.5, `sway stays bounded (max ${maxAbs.toFixed(2)} deg)`);
+  assert.ok(maxAbs >= 3, 'and is unmistakably visible');
   assert.ok(varies.size > 20, 'organic, not a fixed offset');
   // glances only at coins truly on display, and never under reduced motion
   assert.ok(SCRIPT.includes('[...planets.values()].filter((q) => !q.dying && q.sx != null'),

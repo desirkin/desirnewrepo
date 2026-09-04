@@ -55,7 +55,7 @@
   /* UI-1B2 §9: the whole hunting composition sits lower — capsules breathe,
      the animal is centered, the dead zone above the controls shrinks */
   #core {
-    position: absolute; left: 50%; top: 48%;
+    position: absolute; left: 50%; top: 51%;
     width: min(96vmin, 400px); height: min(96vmin, 400px);
     transform: translate(-50%, -50%);
   }
@@ -120,9 +120,6 @@
              filter: drop-shadow(0 0 4px var(--accent)); transition: stroke 1.2s ease; }
   .tick    { stroke: #62718a; stroke-width: 2; }
   .tick.hot { stroke: #ff7a5c; }
-  .sess    { fill: none; stroke: #35435c; stroke-width: 1; opacity: .6; }
-  .sessFill{ fill: none; stroke: var(--accent2); stroke-width: 1.4; stroke-linecap: round; opacity: .7;
-             transition: stroke 1.2s ease; }
   /* UI-1B2/UI-1C: the outer serpent presence — the hood of something huge
      framing the top of the field, with two slit-pupil reddish eyes. Louder
      than before (the concept frame), still framing and never the subject. */
@@ -135,7 +132,7 @@
   /* UI-1C2: the eyes up top are BIG — glaring hooded almonds, outer corners
      raised, burning iris under a dark scale brow. Still decoration, still
      dimmed under KILL, never over the working field. */
-  .lurkEye { position: absolute; top: 8.5vh;
+  .lurkEye { position: absolute; top: calc(max(10px, env(safe-area-inset-top)) + 54px);
     width: clamp(84px, 23vw, 150px); height: clamp(28px, 7.6vw, 50px); border-radius: 50%;
     background: radial-gradient(ellipse at 50% 58%, #ffd0a6 0%, #ff8a4a 20%, #d63c1e 46%, #6e1206 70%, transparent 84%);
     filter: drop-shadow(0 0 26px rgba(255, 70, 30, .5)); opacity: .58; }
@@ -162,7 +159,7 @@
 
   /* ============ verdict ============ */
   #verdict {
-    position: absolute; left: 50%; top: 48%; transform: translate(-50%, -50%);
+    position: absolute; left: 50%; top: 51%; transform: translate(-50%, -50%);
     text-align: center; width: 78vw; pointer-events: auto; cursor: default;
   }
   /* UI-1A §13: ~15% smaller — the animal and its prey carry the story */
@@ -461,10 +458,6 @@
     <!-- UI-1C: concentric orbit guides under everything — quiet structure -->
     <circle class="orbitGuide" r="72"></circle>
     <circle class="orbitGuide dashed" r="126"></circle>
-    <circle class="orbitGuide" r="146"></circle>
-    <!-- ET session ring (outer, thin): progress through the trading day -->
-    <circle class="sess" r="158"></circle>
-    <path id="sessArc" class="sessFill" d=""></path>
     <!-- daily lock ring: 0..+11% sweep with ticks at +5/+8/+11 -->
     <g id="lockRing" style="display:none">
       <path id="lockBase" class="arcBase" d=""></path>
@@ -674,18 +667,18 @@ function coilAim(currentDeg, targetDeg, dtMs) {
   const d = ((targetDeg - currentDeg + 540) % 360) - 180;
   return currentDeg + d * Math.min(1, dtMs / 900);
 }
-const COIL_IDLE_DEG_S = 16; // idle crawl: a full turn in ~22s — unmistakably alive
+const COIL_IDLE_DEG_S = 22; // idle crawl: a full turn in ~16s — unmistakably alive
 const HEAD_HOME_DEG = -34.5; // where the painted head sits in the unrotated artwork
 let coilAngle = 0;
 let coilClock = 0; // ms — drives the weave sway and the sniff rhythm
 // UI-1C7: predator life. (pure) organic side-to-side weave laid over the
 // aim — the sniffing sway of a head that is never perfectly still.
 function coilWeave(tMs) {
-  return 2.6 * Math.sin(tMs / 1400) + 1.4 * Math.sin(tMs / 530 + 1.7);
+  return 4.0 * Math.sin(tMs / 1400) + 2.0 * Math.sin(tMs / 530 + 1.7);
 }
 // the sniff cycle: mostly locked on its prey, but every few seconds the
 // head swings to CHECK another coin actually on display, then returns.
-const GLANCE_EVERY_MS = 7000, GLANCE_HOLD_MS = 1700;
+const GLANCE_EVERY_MS = 5200, GLANCE_HOLD_MS = 1700;
 let glanceCoin = null, glanceUntil = 0, nextGlanceAt = GLANCE_EVERY_MS, glanceIdx = 0;
 let lastPrimary = null, lockFlashUntil = 0; // the hard stare when NEW prey is acquired
 function pickGlance(primary) {
@@ -716,7 +709,7 @@ function updateCoil(dtMs) {
   let target;
   if (p && p.sx != null) {
     // aim the head at the prey's apparent position — "watching THAT coin"
-    const cx = innerWidth / 2, cy = innerHeight * 0.48;
+    const cx = innerWidth / 2, cy = innerHeight * 0.51;
     target = (Math.atan2(p.sy - cy, p.sx - cx) * 180) / Math.PI - HEAD_HOME_DEG;
   } else if (!reduced) {
     target = coilAngle + (COIL_IDLE_DEG_S * dtMs) / 1000; // alive even at rest
@@ -737,7 +730,7 @@ function updateCoil(dtMs) {
     const ha = ((HEAD_HOME_DEG + shown) * Math.PI) / 180;
     const l = $('#gazeLine');
     l.setAttribute('x1', (innerWidth / 2 + hr * Math.cos(ha)).toFixed(1));
-    l.setAttribute('y1', (innerHeight * 0.48 + hr * Math.sin(ha)).toFixed(1));
+    l.setAttribute('y1', (innerHeight * 0.51 + hr * Math.sin(ha)).toFixed(1));
     l.setAttribute('x2', p.sx.toFixed(1));
     l.setAttribute('y2', p.sy.toFixed(1));
     gaze.classList.add('on');
@@ -931,7 +924,7 @@ function tierRadiusFactor(tier, rank) {
   return band + (rank % 3) * 0.045;
 }
 function layoutPlanets(t, dtMs = 16) {
-  const cx = innerWidth / 2, cy = innerHeight * 0.48;
+  const cx = innerWidth / 2, cy = innerHeight * 0.51;
   // keep the widest orbit + planet body inside the viewport edge
   const baseR = Math.min((innerWidth / 2 - 30) / 1.2, innerHeight * 0.34, 185);
   for (const [coin, p] of planets) {
@@ -1323,7 +1316,6 @@ function renderStrip(t, sess) {
   $('#striptext').textContent = `${stripLabel(t?.effective)} · ${clock}`;
   // UI-1C: heartbeat glyph rides the SAME freshness truth as the dot
   $('#clockchip').classList.toggle('live', t?.effective === 'LIVE');
-  if (sess) $('#sessArc').setAttribute('d', sess.dayFraction > 0.003 ? arcPath(158, 0, sess.dayFraction * 359.9) : '');
 }
 async function poll() {
   try {
