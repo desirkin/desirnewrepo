@@ -125,14 +125,14 @@ test('10+11. the dominant serpent moves and its head converges on the focal prey
   // shortest-arc: never the long way round
   assert.ok(coilAim(350, 10, 100) > 350); // through 360, not backwards through 180
   // idle: the body still crawls visibly when nothing is focal
-  assert.ok(SCRIPT.includes('COIL_IDLE_DEG_S = 9'));
+  assert.ok(SCRIPT.includes('COIL_IDLE_DEG_S = 16'));
 });
 
 test('12. head tracking is REAL-mode, not demo-gated', () => {
-  const update = SCRIPT.slice(SCRIPT.indexOf('function updateCoil'), SCRIPT.indexOf('const COIL_IDLE_DEG_S') + 200);
-  assert.ok(SCRIPT.includes('const targetCoin = demo ? demoTarget : focusSymbol'),
+  assert.ok(SCRIPT.includes('const primary = demo ? demoTarget : focusSymbol'),
     'real mode aims at the real focal prey; demo aims at the staged target');
-  void update;
+  assert.ok(SCRIPT.includes('const targetCoin = glanceCoin ?? primary'),
+    'a brief glance may interpose, but the prey is always the fallback');
 });
 
 test('13+24. reduced-motion keeps information; still zero fake intelligence', () => {

@@ -118,6 +118,26 @@ test('14. UI-1C2 — the eyes up top are big hooded almonds, still killable deco
   assert.ok(HTML.includes('body.killed .lurkEye'), 'KILL still dims them');
 });
 
+test('16. UI-1C7 — predator life: bounded weave sway + honest glance targets', () => {
+  const m = SCRIPT.match(/function coilWeave\([\s\S]*?\n}/);
+  assert.ok(m, 'coilWeave exists');
+  const coilWeave = new Function(`return ${m[0]}`)();
+  let maxAbs = 0, varies = new Set();
+  for (let t = 0; t < 60_000; t += 97) {
+    const v = coilWeave(t);
+    maxAbs = Math.max(maxAbs, Math.abs(v));
+    varies.add(Math.round(v * 10));
+  }
+  assert.ok(maxAbs <= 4.5, `sway stays subtle (max ${maxAbs.toFixed(2)} deg)`);
+  assert.ok(maxAbs >= 2, 'and is actually visible');
+  assert.ok(varies.size > 20, 'organic, not a fixed offset');
+  // glances only at coins truly on display, and never under reduced motion
+  assert.ok(SCRIPT.includes('[...planets.values()].filter((q) => !q.dying && q.sx != null'),
+    'glance targets come from the live orbit only');
+  assert.ok(SCRIPT.includes('glanceCoin = null; // reduced motion: information only, no theatrics'),
+    'reduced motion disables theatrics');
+});
+
 test('11. verdict ornament + brand never intercept taps', () => {
   assert.ok(/class="orn" aria-hidden="true"/.test(HTML));
   assert.ok(/#brand \{[^}]*pointer-events: none/.test(HTML));

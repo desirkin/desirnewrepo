@@ -659,12 +659,41 @@ function coilAim(currentDeg, targetDeg, dtMs) {
   const d = ((targetDeg - currentDeg + 540) % 360) - 180;
   return currentDeg + d * Math.min(1, dtMs / 900);
 }
-const COIL_IDLE_DEG_S = 9; // idle crawl: a full turn in ~40s — visible in seconds
+const COIL_IDLE_DEG_S = 16; // idle crawl: a full turn in ~22s — unmistakably alive
 const HEAD_HOME_DEG = -34.5; // where the painted head sits in the unrotated artwork
 let coilAngle = 0;
+let coilClock = 0; // ms — drives the weave sway and the sniff rhythm
+// UI-1C7: predator life. (pure) organic side-to-side weave laid over the
+// aim — the sniffing sway of a head that is never perfectly still.
+function coilWeave(tMs) {
+  return 2.6 * Math.sin(tMs / 1400) + 1.4 * Math.sin(tMs / 530 + 1.7);
+}
+// the sniff cycle: mostly locked on its prey, but every few seconds the
+// head swings to CHECK another coin actually on display, then returns.
+const GLANCE_EVERY_MS = 7000, GLANCE_HOLD_MS = 1700;
+let glanceCoin = null, glanceUntil = 0, nextGlanceAt = GLANCE_EVERY_MS, glanceIdx = 0;
+function pickGlance(primary) {
+  // only coins truly on display — never an invented target
+  const live = [...planets.values()].filter((q) => !q.dying && q.sx != null && q.coin !== primary);
+  if (!live.length) return null;
+  live.sort((a, b) => (a.meta?.tier ?? 9) - (b.meta?.tier ?? 9) || a.rank - b.rank);
+  return live[glanceIdx++ % live.length].coin;
+}
 function updateCoil(dtMs) {
   if (body.classList.contains('killed')) { $('#gaze').classList.remove('on'); return; } // dormant under KILL
-  const targetCoin = demo ? demoTarget : focusSymbol;
+  coilClock += dtMs;
+  const primary = demo ? demoTarget : focusSymbol;
+  if (!reduced) {
+    if (coilClock >= nextGlanceAt) {
+      glanceCoin = pickGlance(primary);
+      glanceUntil = coilClock + GLANCE_HOLD_MS;
+      nextGlanceAt = coilClock + GLANCE_EVERY_MS + (coilClock % 2600); // organic, not metronomic
+    }
+    if (coilClock > glanceUntil) glanceCoin = null;
+  } else {
+    glanceCoin = null; // reduced motion: information only, no theatrics
+  }
+  const targetCoin = glanceCoin ?? primary;
   const p = targetCoin ? planets.get(targetCoin) : null;
   let target;
   if (p && p.sx != null) {
@@ -678,14 +707,15 @@ function updateCoil(dtMs) {
   }
   coilAngle = reduced ? target : coilAim(coilAngle, target, dtMs);
   coilAngle = ((coilAngle % 360) + 360) % 360;
-  $('#coilSpin').setAttribute('transform', `rotate(${coilAngle.toFixed(2)} 0 0)`); // explicit pivot: the coil's center
+  const shown = coilAngle + (reduced ? 0 : coilWeave(coilClock));
+  $('#coilSpin').setAttribute('transform', `rotate(${shown.toFixed(2)} 0 0)`); // explicit pivot: the coil's center
   // UI-1C6: the HUNT made legible — a faint marching sight-line from the
-  // head to the one coin it is checking. Drawn only for a real focal prey
-  // (or demo's staged target); never invented, gone under KILL.
+  // head to the coin it is checking right now (its prey, or a brief
+  // glance target). Never invented, gone under KILL.
   const gaze = $('#gaze');
   if (p && p.sx != null) {
     const hr = (Math.min(0.96 * Math.min(innerWidth, innerHeight), 400) / 340) * 104;
-    const ha = ((HEAD_HOME_DEG + coilAngle) * Math.PI) / 180;
+    const ha = ((HEAD_HOME_DEG + shown) * Math.PI) / 180;
     const l = $('#gazeLine');
     l.setAttribute('x1', (innerWidth / 2 + hr * Math.cos(ha)).toFixed(1));
     l.setAttribute('y1', (innerHeight * 0.48 + hr * Math.sin(ha)).toFixed(1));
