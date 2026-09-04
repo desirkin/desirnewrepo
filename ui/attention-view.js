@@ -16,6 +16,7 @@ import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } fro
 import { dataDir, loadConfig } from '../lib/config.js';
 import { readStalking } from '../state/stalking.js';
 import { readBaseline, computeSignal } from '../rumint/stocktwits.js';
+import { MemoryView } from '../persistence/memory-view.js';
 
 const FRESH_RIPPLE_MS = 15 * 60_000; // a ripple is "fresh attention" for 15m
 const FRESH_NOMINATION_MS = 30 * 60_000;
@@ -132,14 +133,56 @@ function rumintEntries(now) {
   return out;
 }
 
+// ---- TIER 4: DISPLAY CONTINUITY from recent DURABLE Memory ----------------
+// A republish or transient sensor reset must not instantly make the visual
+// attention system forget what recently attracted Serpent. DISPLAY ONLY —
+// never permission, never eligibility, never a score. Only durable records
+// whose meaning clearly says "recently worth watching", conservatively
+// windowed, expire from display like everything else.
+const MEMORY_CONTINUITY_MS = 2 * 60 * 60_000; // conservative 2h window
+const MEMORY_CONTINUITY_SCAN = 120; // bounded durable read
+let _defaultMemView = null;
+async function defaultMemorySource() {
+  _defaultMemView ??= new MemoryView();
+  const got = await _defaultMemView.getRecent({ limit: MEMORY_CONTINUITY_SCAN });
+  return got.records;
+}
+// the ONLY durable event meanings display continuity may read as attention
+function continuityMeaning(rec) {
+  if (rec.observationState !== 'KNOWN' || !rec.symbol) return null;
+  if (rec.eventType === 'WIDEEYE_RIPPLE') return 'remembered Wide Eye ripple';
+  if (rec.eventType === 'RUMOR_OBSERVATION' && rec.payload?.type === 'RUMINT_NOMINATION') return 'remembered RUMINT nomination';
+  return null;
+}
+async function memoryContinuityEntries(now, memorySource) {
+  let records = [];
+  try {
+    records = await memorySource();
+  } catch {
+    return []; // durable memory unreachable: continuity simply absent
+  }
+  const out = [];
+  for (const rec of records) {
+    const meaning = continuityMeaning(rec);
+    if (!meaning) continue;
+    const ts = rec.ts * 1000; // canonical envelopes carry epoch seconds
+    if (!Number.isFinite(ts) || now - ts > MEMORY_CONTINUITY_MS || ts > now + 60_000) continue;
+    const sym = cleanSymbol(rec.symbol);
+    if (!sym) continue;
+    out.push({ symbol: sym, tier: 4, kind: 'MEMORY_CONTINUITY', reason: meaning, ts });
+  }
+  return out;
+}
+
 // ---- the snapshot the home screen renders --------------------------------
-export function attentionSnapshot({ now = Date.now(), config = loadConfig() } = {}) {
+export async function attentionSnapshot({ now = Date.now(), config = loadConfig(), memorySource = defaultMemorySource } = {}) {
   let entries = [];
   try {
     entries = [...stalkingEntries(now), ...wideEyeEntries(now), ...rumintEntries(now)];
   } catch {
     entries = []; // a broken source never breaks the home screen (§37)
   }
+  entries.push(...(await memoryContinuityEntries(now, memorySource)));
   // dedupe by symbol: highest tier wins, then freshest observation
   const bySymbol = new Map();
   for (const e of entries) {
@@ -149,13 +192,14 @@ export function attentionSnapshot({ now = Date.now(), config = loadConfig() } = 
   const attention = [...bySymbol.values()].sort((a, b) => a.tier - b.tier || b.ts - a.ts);
   // FOCUS: genuine evidence only — a fallback major is never focal
   const focus = attention[0] ?? null;
-  // orbit: attention first, then configured majors as quiet fallback
+  // orbit: attention first, then configured majors as quiet TIER-5 fallback
+  // (visually quiet — never implied to be real current prey)
   const orbit = attention.slice(0, ORBIT_SIZE).map((e) => ({ ...e, fallback: false }));
   for (const major of config.universe) {
     if (orbit.length >= ORBIT_SIZE) break;
     const sym = cleanSymbol(major);
     if (!sym || orbit.some((o) => o.symbol === sym)) continue;
-    orbit.push({ symbol: sym, tier: 4, kind: 'MAJOR', reason: 'configured major — quiet fallback', ts: 0, fallback: true });
+    orbit.push({ symbol: sym, tier: 5, kind: 'MAJOR', reason: 'configured major — quiet fallback', ts: 0, fallback: true });
   }
   return {
     generatedTs: now,

@@ -443,19 +443,20 @@ const server = http.createServer((req, res) => {
         json(res, 500, { error: err.message, errorClass: err.constructor.name });
       }
     } else if (url.pathname === '/api/attention') {
-      // UI-1: read-only DISPLAY attention. A failure here must never break
-      // the home screen — fall back to the configured majors honestly.
-      try {
-        json(res, 200, attentionSnapshot());
-      } catch (err) {
-        console.error(`[api/attention] ${err.constructor.name}: ${err.message}`);
-        json(res, 200, {
-          generatedTs: Date.now(),
-          degraded: true,
-          focus: null,
-          orbit: config.universe.map((symbol) => ({ symbol, tier: 4, kind: 'MAJOR', reason: 'configured major — quiet fallback', ts: 0, fallback: true })),
+      // UI-1: read-only DISPLAY attention (async — durable Memory
+      // continuity rides in). A failure here must never break the home
+      // screen — fall back to the configured majors honestly.
+      attentionSnapshot()
+        .then((a) => json(res, 200, a))
+        .catch((err) => {
+          console.error(`[api/attention] ${err.constructor.name}: ${err.message}`);
+          json(res, 200, {
+            generatedTs: Date.now(),
+            degraded: true,
+            focus: null,
+            orbit: config.universe.map((symbol) => ({ symbol, tier: 5, kind: 'MAJOR', reason: 'configured major — quiet fallback', ts: 0, fallback: true })),
+          });
         });
-      }
     } else if (url.pathname === '/manifest.webmanifest') {
       res.writeHead(200, { 'content-type': 'application/manifest+json', 'cache-control': 'max-age=3600' });
       res.end(readFileSync(path.join(UI_DIR, 'manifest.webmanifest')));

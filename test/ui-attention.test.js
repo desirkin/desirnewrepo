@@ -27,13 +27,13 @@ function seedDir() {
   return d;
 }
 
-test('1+2. an active stalk on a NON-major appears in the orbit and beats the configured fallback for focus', () => {
+test('1+2. an active stalk on a NON-major appears in the orbit and beats the configured fallback for focus', async () => {
   const d = seedDir();
   process.env.COBRA_DATA_DIR = d;
   writeFileSync(path.join(d, 'state', 'stalking.json'), JSON.stringify({
     SUI: { since: iso(NOW - 4 * 60_000), refreshed: iso(NOW - 2 * 60_000), cause: 'RUMINT NOMINATION z=3.52', z: 3.52, expiresMs: NOW + 7 * 60_000 },
   }));
-  const snap = attentionSnapshot({ now: NOW });
+  const snap = await attentionSnapshot({ now: NOW });
   assert.equal(snap.focus.symbol, 'SUI'); // dynamic attention wins focus
   assert.equal(snap.focus.tier, 1);
   assert.ok(snap.orbit.some((e) => e.symbol === 'SUI' && !e.fallback)); // no BTC/ETH/SOL/XRP/DOGE whitelist
@@ -41,25 +41,25 @@ test('1+2. an active stalk on a NON-major appears in the orbit and beats the con
   rmSync(d, { recursive: true, force: true });
 });
 
-test('3. no genuine attention: configured majors are the honest fallback; nothing is invented as focus', () => {
+test('3. no genuine attention: configured majors are the honest fallback; nothing is invented as focus', async () => {
   const d = seedDir();
   process.env.COBRA_DATA_DIR = d;
-  const snap = attentionSnapshot({ now: NOW });
+  const snap = await attentionSnapshot({ now: NOW });
   assert.equal(snap.focus, null); // no fake focal prey merely because the UI wants one
   assert.ok(snap.orbit.length >= 5);
-  assert.ok(snap.orbit.every((e) => e.fallback === true && e.tier === 4));
+  assert.ok(snap.orbit.every((e) => e.fallback === true && e.tier === 5));
   assert.deepEqual(snap.orbit.map((e) => e.symbol).slice(0, 5), ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']);
   rmSync(d, { recursive: true, force: true });
 });
 
-test('4. the same symbol from RUMINT + Wide Eye is deduped — shown once at its highest tier', () => {
+test('4. the same symbol from RUMINT + Wide Eye is deduped — shown once at its highest tier', async () => {
   const d = seedDir();
   process.env.COBRA_DATA_DIR = d;
   writeFileSync(path.join(d, 'survey', 'events.jsonl'),
     JSON.stringify({ ts: iso(NOW - 3 * 60_000), type: 'RIPPLE', symbol: 'PEPE', zVol: 3.4, zRet: 2.2, extension: 1.8 }) + '\n');
   writeFileSync(path.join(d, 'rumint', 'events.jsonl'),
     JSON.stringify({ ts: iso(NOW - 60_000), type: 'RUMINT_NOMINATION', symbol: 'PEPE', z: 3.1 }) + '\n');
-  const snap = attentionSnapshot({ now: NOW });
+  const snap = await attentionSnapshot({ now: NOW });
   const pepes = snap.orbit.filter((e) => e.symbol === 'PEPE');
   assert.equal(pepes.length, 1);
   assert.equal(pepes[0].tier, 2); // Wide Eye (tier 2) outranks social (tier 3)
@@ -67,7 +67,7 @@ test('4. the same symbol from RUMINT + Wide Eye is deduped — shown once at its
   rmSync(d, { recursive: true, force: true });
 });
 
-test('5. expired stalking and stale ripples cannot remain focal prey', () => {
+test('5. expired stalking and stale ripples cannot remain focal prey', async () => {
   const d = seedDir();
   process.env.COBRA_DATA_DIR = d;
   writeFileSync(path.join(d, 'state', 'stalking.json'), JSON.stringify({
@@ -75,19 +75,19 @@ test('5. expired stalking and stale ripples cannot remain focal prey', () => {
   }));
   writeFileSync(path.join(d, 'survey', 'events.jsonl'),
     JSON.stringify({ ts: iso(NOW - 2 * 3600_000), type: 'RIPPLE', symbol: 'WIF', zVol: 4 }) + '\n');
-  const snap = attentionSnapshot({ now: NOW });
+  const snap = await attentionSnapshot({ now: NOW });
   assert.equal(snap.focus, null); // freshness gates both tiers
   assert.ok(!snap.orbit.some((e) => e.symbol === 'SUI' || e.symbol === 'WIF'));
   rmSync(d, { recursive: true, force: true });
 });
 
-test('6. no numeric trading/confidence score exists anywhere in the attention payloads', () => {
+test('6. no numeric trading/confidence score exists anywhere in the attention payloads', async () => {
   const d = seedDir();
   process.env.COBRA_DATA_DIR = d;
   writeFileSync(path.join(d, 'state', 'stalking.json'), JSON.stringify({
     SUI: { since: iso(NOW), refreshed: iso(NOW), cause: 'RUMINT NOMINATION z=3.5', z: 3.5, expiresMs: NOW + 600_000 },
   }));
-  const text = JSON.stringify(attentionSnapshot({ now: NOW })) + JSON.stringify(attentionForCoin('SUI', { now: NOW }));
+  const text = JSON.stringify(await attentionSnapshot({ now: NOW })) + JSON.stringify(attentionForCoin('SUI', { now: NOW }));
   assert.ok(!/score|confidence|probability|conviction|edge/i.test(text), 'display attention must never look like a brain');
   rmSync(d, { recursive: true, force: true });
 });
@@ -108,9 +108,9 @@ test('8. a coin with no rumor history reports truthful absence — null stays nu
   rmSync(d, { recursive: true, force: true });
 });
 
-test('21. a broken/missing attention source falls back to the majors without crashing', () => {
+test('21. a broken/missing attention source falls back to the majors without crashing', async () => {
   process.env.COBRA_DATA_DIR = path.join(tmpdir(), 'cobra-ui1-definitely-missing-' + Date.now());
-  const snap = attentionSnapshot({ now: NOW });
+  const snap = await attentionSnapshot({ now: NOW });
   assert.equal(snap.focus, null);
   assert.ok(snap.orbit.every((e) => e.fallback));
   process.env.COBRA_DATA_DIR = TEST_DATA;

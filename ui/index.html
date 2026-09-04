@@ -52,8 +52,10 @@
   #scene { position: fixed; inset: 0; }
   /* UI-1A §14: the freed top space feeds the hunting field — larger, and
      balanced a touch higher so the dead zone above the controls shrinks */
+  /* UI-1B2 §9: the whole hunting composition sits lower — capsules breathe,
+     the animal is centered, the dead zone above the controls shrinks */
   #core {
-    position: absolute; left: 50%; top: 44%;
+    position: absolute; left: 50%; top: 48%;
     width: min(96vmin, 400px); height: min(96vmin, 400px);
     transform: translate(-50%, -50%);
   }
@@ -64,7 +66,7 @@
   body.caged { --breath: 13s; }
   body.caged #scene { filter: saturate(.62) brightness(.86); }
   body.killed #scene { filter: saturate(.22) brightness(.68); }
-  body.killed #ringGroup, body.killed .ringPulse, body.killed #serpent .eye { animation: none; }
+  body.killed #ringGroup, body.killed .ringPulse { animation: none; }
   @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.018); } }
   /* UI-1A: the coil is a BODY — gradient-lit tapered band, not a wire */
   .cg1 { stop-color: var(--accent2); stop-opacity: .95; }
@@ -73,7 +75,9 @@
   .coilFill { fill: url(#coilGrad); filter: drop-shadow(0 0 7px var(--accent)); }
   #coilCasing { fill: none; stroke: var(--bg); stroke-linecap: round; opacity: .92; }
   #coilHighlight { fill: none; stroke: #eafffa; stroke-width: 1.1; opacity: .26; stroke-linecap: round; }
-  #coilEye { fill: #06090f; stroke: #eafffa; stroke-width: .8; opacity: .95; }
+  /* the eye: pointed, faint reddish threat — focused, never Halloween */
+  #coilEye { fill: #140505; stroke: #ff6b52; stroke-width: 1;
+             filter: drop-shadow(0 0 4px rgba(255, 70, 40, .75)); opacity: .95; }
   /* faint segment hint + a slow highlight moving through the body —
      muscle, not sci-fi wire. Restrained on purpose. */
   .ringScales { fill: none; stroke: var(--bg); stroke-width: 5.4; opacity: .1;
@@ -84,8 +88,6 @@
                 transform-origin: center; transition: stroke 1.2s ease; }
   body:not(.reduced) .ringPulse { animation: coilPulse 26s linear infinite; }
   @keyframes coilPulse { to { transform: rotate(360deg); } }
-  body:not(.reduced) #serpent .eye { animation: eyeGlow 7s ease-in-out infinite; }
-  @keyframes eyeGlow { 50% { opacity: .5; } }
   .arcBase { fill: none; stroke: #2a3547; stroke-width: 2; opacity: .55; }
   .arcFill { fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round;
              filter: drop-shadow(0 0 4px var(--accent)); transition: stroke 1.2s ease; }
@@ -94,18 +96,24 @@
   .sess    { fill: none; stroke: #35435c; stroke-width: 1; opacity: .6; }
   .sessFill{ fill: none; stroke: var(--accent2); stroke-width: 1.4; stroke-linecap: round; opacity: .7;
              transition: stroke 1.2s ease; }
-  #serpent path {
-    fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-linecap: round;
-    opacity: .5; filter: drop-shadow(0 0 3px var(--accent)); transition: stroke 1.2s ease;
-  }
-  #serpent .eye { fill: var(--accent); stroke: none; opacity: .9; }
-  #serpent { transform-origin: center; transition: transform 1.6s cubic-bezier(.4,0,.2,1); }
-  body:not(.reduced) #serpent.idle { animation: coilTurn 90s linear infinite; }
-  @keyframes coilTurn { to { transform: rotate(360deg); } }
+  /* UI-1B2: the outer serpent presence — restrained, eerie, never loud */
+  #lurk { position: fixed; inset: 0; pointer-events: none; z-index: 1; }
+  .lurkShade { position: absolute; left: 0; right: 0; top: 0; height: 30vh;
+    background:
+      radial-gradient(60% 120% at 8% -20%, rgba(6, 22, 20, .85), transparent 65%),
+      radial-gradient(60% 120% at 92% -20%, rgba(6, 22, 20, .85), transparent 65%); }
+  .lurkEye { position: absolute; top: 11vh; width: 30px; height: 8px; border-radius: 50%;
+    background: radial-gradient(closest-side, rgba(255, 92, 60, .8), rgba(150, 30, 18, .45) 60%, transparent);
+    filter: blur(1px) drop-shadow(0 0 7px rgba(255, 70, 40, .35)); opacity: .4; }
+  .lurkEye.left { left: 9%; transform: rotate(-16deg); }
+  .lurkEye.right { right: 9%; transform: rotate(16deg); }
+  body:not(.reduced) .lurkEye { animation: lurkGlow 9s ease-in-out infinite; }
+  @keyframes lurkGlow { 50% { opacity: .22; } }
+  body.killed .lurkEye { opacity: .12; animation: none; }
 
   /* ============ verdict ============ */
   #verdict {
-    position: absolute; left: 50%; top: 44%; transform: translate(-50%, -50%);
+    position: absolute; left: 50%; top: 48%; transform: translate(-50%, -50%);
     text-align: center; width: 78vw; pointer-events: auto; cursor: default;
   }
   /* UI-1A §13: ~15% smaller — the animal and its prey carry the story */
@@ -142,6 +150,9 @@
                         box-shadow: 0 0 0 2px rgba(89,230,198,.55), 0 0 20px 5px rgba(89,230,198,.30); }
   .planet.focal .lbl { color: #eafffa; font-weight: 700; letter-spacing: .26em; font-size: 11px;
                        text-shadow: 0 0 8px rgba(89,230,198,.8); }
+  /* quiet fallback majors: present, but clearly NOT current prey */
+  .planet.quiet .body { width: 24px; height: 24px; opacity: .5; }
+  .planet.quiet .lbl { opacity: .55; font-size: 9px; }
   /* real RUMINT nomination: a quiet amber dot, distinct from demo's full treatment */
   .planet .nomdot { display: none; width: 6px; height: 6px; border-radius: 50%;
                     background: #ffb454; box-shadow: 0 0 7px #ffb454; margin: 3px auto 0; }
@@ -174,8 +185,8 @@
              text-align: left; transition: border-color .6s; }
   .capsule .ck { font-size: 8px; letter-spacing: .26em; color: var(--dim); }
   .capsule .ck::after { content: ' ›'; letter-spacing: 0; opacity: .7; }
-  .capsule .cv { font-size: 10.5px; letter-spacing: .1em; font-variant-numeric: tabular-nums;
-                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .capsule .cv { font-size: 10px; letter-spacing: .05em; font-variant-numeric: tabular-nums;
+                 white-space: nowrap; max-width: 100%; }
   .capsule.off .cv { color: var(--dim); }
   .capsule.hot { border-color: #7a5526; } /* faint amber edge — e.g. EARS with HYPED, never a casino */
   body.demo #capsules { display: none; }
@@ -349,10 +360,6 @@
   body:not(.booting) #boot { opacity: 0; pointer-events: none; }
   body.booting #verdict, body.booting .planet { opacity: 0; }
   #verdict, .planet { transition: opacity 1s ease .2s; opacity: 1; }
-  body.booting #serpent path.coil { stroke-dasharray: 2400; stroke-dashoffset: 2400; }
-  #serpent path.coil { animation: drawCoil 1.5s ease .25s forwards; }
-  @keyframes drawCoil { to { stroke-dashoffset: 0; } }
-  body.reduced #serpent path.coil { animation: none; stroke-dasharray: none; }
 #card input{width:100%;margin:8px 0;padding:10px;background:rgba(10,14,20,.9);border:1px solid #223;color:inherit;font:inherit;border-radius:6px}
 </style>
 </head>
@@ -360,6 +367,14 @@
 
 <canvas id="stars"></canvas>
 <div id="vignette"></div>
+<!-- UI-1B2: the outer serpent presence — a faint dark framing and two
+     narrow reddish eye slits high in the field. Eerie, intentional, very
+     low dominance; purely decorative. -->
+<div id="lurk" aria-hidden="true">
+  <div class="lurkShade"></div>
+  <div class="lurkEye left"></div>
+  <div class="lurkEye right"></div>
+</div>
 <div id="flash"></div>
 
 <div id="scene">
@@ -382,19 +397,19 @@
         <stop offset="1" class="cg3"></stop>
       </radialGradient>
     </defs>
-    <!-- the serpent, coiled about the verdict -->
-    <g id="serpent" class="idle"></g>
-    <!-- UI-1A: the hunting ring IS a serpent body now — a tapered, wobbling
-         muscle band whose head end passes OVER its tail (casing gap), with
-         a restrained widened head + eye. Scales + moving highlight ride on
-         top. Built in JS; pure SVG, no artwork. -->
+    <!-- UI-1B2: THE serpent — one strong tapered muscle band whose head
+         passes OVER its tail. #coilSpin rotates every frame so the whole
+         visible body moves and the head tracks the focal prey. Built in
+         JS; pure SVG, no artwork. -->
     <g id="ringGroup">
-      <path id="coilTail" class="coilFill" d=""></path>
-      <path id="coilCasing" d=""></path>
-      <path id="coilHead" class="coilFill" d=""></path>
-      <path id="coilHighlight" d=""></path>
-      <circle id="coilEye" r="1.9"></circle>
-      <circle class="ringScales" r="104"></circle>
+      <g id="coilSpin">
+        <path id="coilTail" class="coilFill" d=""></path>
+        <path id="coilCasing" d=""></path>
+        <path id="coilHead" class="coilFill" d=""></path>
+        <path id="coilHighlight" d=""></path>
+        <circle id="coilEye" r="2.1"></circle>
+        <circle class="ringScales" r="104"></circle>
+      </g>
       <circle class="ringPulse" r="104"></circle>
     </g>
   </svg>
@@ -533,26 +548,37 @@ function drawStars(t) {
   ctx.globalAlpha = 1;
 }
 
-/* ---------- serpent glyph (spiral coiled around the verdict ring) ---------- */
-function buildSerpent() {
-  const pts = [];
-  const turns = 2.6, a0 = -Math.PI / 2;
-  for (let i = 0; i <= 220; i++) {
-    const p = i / 220;
-    const ang = a0 + p * turns * 2 * Math.PI;
-    const r = 96 + p * 26 + Math.sin(p * 26) * 1.6; // organic wobble
-    pts.push([(r * Math.cos(ang)).toFixed(1), (r * Math.sin(ang)).toFixed(1)]);
+/* UI-1B2: ONE strong serpent. The old thin inner spiral is gone (no
+   spaghetti coils) — the coil band IS the animal, and it MOVES: the whole
+   visible body rotates so its head tracks the focal prey in REAL mode
+   (idle: a slow continuous crawl). Pure functions are extracted for tests. */
+// per-frame orbital advance (pure): rad = rad/s * seconds
+function orbitStep(speed, dtMs) { return speed * (dtMs / 1000); }
+// head aim smoothing (pure): shortest-arc approach, ~0.9s settle
+function coilAim(currentDeg, targetDeg, dtMs) {
+  const d = ((targetDeg - currentDeg + 540) % 360) - 180;
+  return currentDeg + d * Math.min(1, dtMs / 900);
+}
+const COIL_IDLE_DEG_S = 9; // idle crawl: a full turn in ~40s — visible in seconds
+const HEAD_HOME_DEG = -90; // the built head sits at the top of the band
+let coilAngle = 0;
+function updateCoil(dtMs) {
+  if (body.classList.contains('killed')) return; // dormant under KILL
+  const targetCoin = demo ? demoTarget : focusSymbol;
+  const p = targetCoin ? planets.get(targetCoin) : null;
+  let target;
+  if (p && p.sx != null) {
+    // aim the head at the prey's apparent position — "watching THAT coin"
+    const cx = innerWidth / 2, cy = innerHeight * 0.48;
+    target = (Math.atan2(p.sy - cy, p.sx - cx) * 180) / Math.PI - HEAD_HOME_DEG;
+  } else if (!reduced) {
+    target = coilAngle + (COIL_IDLE_DEG_S * dtMs) / 1000; // alive even at rest
+  } else {
+    target = coilAngle;
   }
-  const d = 'M' + pts.map((p) => p.join(',')).join(' L');
-  const [hx, hy] = pts[pts.length - 1].map(Number);
-  const [px, py] = pts[pts.length - 4].map(Number);
-  const angH = Math.atan2(hy - py, hx - px);
-  const head = `M${hx},${hy} l${(7 * Math.cos(angH - 2.6)).toFixed(1)},${(7 * Math.sin(angH - 2.6)).toFixed(1)}
-                M${hx},${hy} l${(7 * Math.cos(angH + 2.6)).toFixed(1)},${(7 * Math.sin(angH + 2.6)).toFixed(1)}`;
-  $('#serpent').innerHTML =
-    `<path class="coil" d="${d}"></path><path d="${head}"></path>` +
-    `<circle class="eye" cx="${hx - 4 * Math.cos(angH)}" cy="${hy - 4 * Math.sin(angH)}" r="1.7"></circle>`;
-  buildCoilRing();
+  coilAngle = reduced ? target : coilAim(coilAngle, target, dtMs);
+  coilAngle = ((coilAngle % 360) + 360) % 360;
+  $('#coilSpin').setAttribute('transform', `rotate(${coilAngle.toFixed(2)} 0 0)`); // explicit pivot: the coil's center
 }
 
 /* UI-1A §9: the hunting ring as SERPENT BODY. A closed tapered band with
@@ -568,9 +594,9 @@ function buildCoilRing() {
   };
   // body half-width: thin tail -> muscular body -> widened head -> nose tip
   const halfW = (p) => {
-    if (p > 0.985) return Math.max(0.4, 4.4 * (1 - (p - 0.985) / 0.015)); // rounded nose
-    if (p > 0.90) return 3.1 + (p - 0.90) / 0.085 * 1.6; // the head swells slightly
-    return 1.3 + p * 1.9; // tail 1.3 -> body ~3.0
+    if (p > 0.985) return Math.max(0.5, 5.6 * (1 - (p - 0.985) / 0.015)); // rounded nose
+    if (p > 0.90) return 3.6 + (p - 0.90) / 0.085 * 2.0; // the head swells
+    return 1.6 + p * 2.2; // tail 1.6 -> body ~3.6 — muscular, not wire
   };
   const band = (p0, p1) => {
     const outer = [], inner = [];
@@ -670,7 +696,8 @@ function makePlanet(coin) {
   const p = {
     el, coin, lblEl: el.querySelector('.lbl'),
     phase: Math.random() * Math.PI * 2,
-    speed: 0.041 + (planets.size % 7) * 0.010,
+    // §4: visibly alive — obvious progress within 10-15s, still elegant
+    speed: 0.07 + (planets.size % 6) * 0.012,
     rank: planets.size, pull: 1.28, fade: 0, dying: false, meta: null, lblDy: 0,
   };
   planets.set(coin, p);
@@ -716,25 +743,32 @@ function syncOrbit(list, focus) {
     p.rank = i;
     p.dying = false;
     const what = entry.tier === 1 ? 'active stalking' : entry.tier === 2 ? 'wide eye ripple'
-      : entry.tier === 3 ? 'social attention' : 'watched major';
+      : entry.tier === 3 ? 'social attention' : entry.tier === 4 ? 'remembered attention' : 'watched major';
     p.el.setAttribute('aria-label', `${entry.symbol} — ${what} — tap for details`);
   });
   for (const p of planets.values()) if (!want.has(p.coin)) p.dying = true;
   focusSymbol = focus && SYM_RE.test(focus) ? focus : null;
 }
-function layoutPlanets(t) {
-  const cx = innerWidth / 2, cy = innerHeight * 0.46;
+/* UI-1B2 §3 (pure): importance is SPATIAL — genuine attention orbits the
+   inner band, remembered attention the middle, quiet fallback majors the
+   outer rim. Display tier only — never a trading score. */
+function tierRadiusFactor(tier, rank) {
+  const band = tier <= 2 ? 0.74 : tier <= 4 ? 0.95 : 1.15;
+  return band + (rank % 3) * 0.045;
+}
+function layoutPlanets(t, dtMs = 16) {
+  const cx = innerWidth / 2, cy = innerHeight * 0.48;
   // keep the widest orbit + planet body inside the viewport edge
-  const baseR = Math.min((innerWidth / 2 - 30) / 1.06, innerHeight * 0.36, 200);
+  const baseR = Math.min((innerWidth / 2 - 30) / 1.2, innerHeight * 0.34, 185);
   for (const [coin, p] of planets) {
-    if (!reduced) p.phase += p.speed * 0.016;
+    if (!reduced) p.phase += orbitStep(p.speed, dtMs);
     p.fade += ((p.dying ? 0 : 1) - p.fade) * (reduced ? 1 : 0.05);
     if (p.dying && p.fade < 0.03) { p.el.remove(); planets.delete(coin); continue; }
     const focal = !demo && coin === focusSymbol;
-    const fac = 0.72 + p.rank * 0.075;
+    const fac = tierRadiusFactor(p.meta?.tier ?? 5, p.rank);
     // the focal prey docks ON the innermost hunting ring — closest to the
     // animal, never covering the verdict at the center
-    const ringPx = Math.min(0.88 * Math.min(innerWidth, innerHeight), 360) * (104 / 340) + 12;
+    const ringPx = Math.min(0.96 * Math.min(innerWidth, innerHeight), 400) * (104 / 340) + 12;
     const target = (demo && demoTarget === coin) ? 0.52
       : focal ? Math.min(1, Math.max(0.4, ringPx / (baseR * fac))) : 1;
     p.pull += (target - p.pull) * (reduced ? 1 : 0.04);
@@ -749,6 +783,7 @@ function layoutPlanets(t) {
     p.el.classList.toggle('stalked', (demo && demoTarget === coin) || (!demo && p.meta?.tier === 1));
     p.el.classList.toggle('focal', focal);
     p.el.classList.toggle('nominated', !demo && p.meta?.tier === 3);
+    p.el.classList.toggle('quiet', !demo && Boolean(p.meta?.fallback)); // fallback never poses as prey
     p.sx = x; p.sy = y; p.focal = focal; // screen position for label layout
   }
   // §12: collision-aware labels — priority to the focal prey, verdict kept clear
@@ -799,16 +834,8 @@ function applyPosture(posture, { why = '', sub = null } = {}) {
   if (posture === 'STRIKE' && prev !== 'STRIKE' && !reduced) {
     const f = $('#flash'); f.classList.remove('hit'); void f.offsetWidth; f.classList.add('hit');
   }
-  // the serpent leans toward the hunt; at rest it simply turns
-  const serp = $('#serpent');
-  if (demo && demoTarget && (posture === 'STALKING' || posture === 'STRIKE')) {
-    const p = planets.get(demoTarget);
-    const deg = p ? (p.phase * 180 / Math.PI) : 0;
-    serp.classList.remove('idle');
-    serp.style.transform = `rotate(${(deg + 90).toFixed(0)}deg) scale(1.05)`;
-  } else {
-    serp.style.transform = ''; serp.classList.add('idle');
-  }
+  // (the serpent's aim lives in updateCoil — the head tracks the focal
+  // prey in REAL mode, demo target in demo; no posture side effects here)
 }
 
 /* ---------- real status ---------- */
@@ -1090,12 +1117,11 @@ function renderStatus(s) {
   const t = s.tape;
   const u = t.universe;
   $('#capUniverse').classList.toggle('off', !u);
-  $('#capUniverseV').textContent = u ? `${u.total} · LIVE ${u.live}` : `${universe.length} watched`;
+  $('#capUniverseV').textContent = u ? `${u.total} · ${u.live} LIVE` : `${universe.length} WATCHED`;
   const w = s.wideeye;
   $('#capEye').classList.toggle('off', !(w && w.enabled && w.fresh));
-  $('#capEyeV').textContent = w && w.enabled && w.fresh
-    ? `${w.scanned} · ${w.ripplesToday} ripple${w.ripplesToday === 1 ? '' : 's'}`
-    : 'OFF';
+  // truthful abbreviation beats truncation ("3R", never "3 r…")
+  $('#capEyeV').textContent = w && w.enabled && w.fresh ? `${w.scanned} · ${w.ripplesToday}R` : 'OFF';
   renderStrip(t, s.session);
   renderLockRing(s.locks);
 }
@@ -1275,7 +1301,7 @@ function openHuntCard() {
   const bodyEl = $('#cardBody');
   bodyEl.replaceChildren();
   const a = lastAttention;
-  const tierWord = (t) => (t === 1 ? 'active stalk' : t === 2 ? 'wide eye ripple' : t === 3 ? 'social attention' : 'quiet fallback');
+  const tierWord = (t) => (t === 1 ? 'active stalk' : t === 2 ? 'wide eye ripple' : t === 3 ? 'social attention' : t === 4 ? 'remembered attention' : 'quiet fallback');
   if (a?.focus) {
     bodyEl.append(el('h3', 'sec', 'FOCUS'));
     bodyEl.append(el('div', 'tierline', a.focus.symbol));
@@ -1485,13 +1511,21 @@ $('#boot').addEventListener('click', endBoot);
 setTimeout(endBoot, 1900);
 
 /* ---------- main loop ---------- */
-buildSerpent();
+buildCoilRing();
 seedStars();
 syncOrbit(majorsFallback(), null); // quiet majors until real attention arrives
 setReduced(reduced);
 if (demo) setDemo(true);
 addEventListener('resize', seedStars);
-function frame(t) { drawStars(t); layoutPlanets(t); requestAnimationFrame(frame); }
+let lastFrameT = null;
+function frame(t) {
+  const dtMs = lastFrameT == null ? 16 : Math.min(100, t - lastFrameT); // tab-return safe
+  lastFrameT = t;
+  drawStars(t);
+  layoutPlanets(t, dtMs);
+  updateCoil(dtMs); // the animal moves — and watches the focal prey
+  requestAnimationFrame(frame);
+}
 requestAnimationFrame(frame);
 poll();
 setInterval(poll, 2500);
