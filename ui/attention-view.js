@@ -16,6 +16,7 @@
 import path from 'node:path';
 import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { dataDir, loadConfig } from '../lib/config.js';
+import { sessionDate } from '../lib/time.js';
 import { readStalking } from '../state/stalking.js';
 import { readBaseline, computeSignal } from '../rumint/stocktwits.js';
 import { MemoryView, attentionContinuityMeaning } from '../persistence/memory-view.js';
@@ -121,18 +122,41 @@ function rumintEntries(now) {
     if (!sym) continue;
     out.push({ symbol: sym, tier: 3, kind: 'RUMINT_NOMINATION', reason: `RUMINT nomination z=${Number(ev.z ?? 0).toFixed(2)}`, ts, z: ev.z ?? null });
   }
-  const hyped = readJsonSafe(path.join(dataDir(), 'rumint', 'hyped.json'));
+  // RUMINT-R1: HYPED comes from the ONE canonical snapshot the poller wrote
+  // (hyped.json === status.json.hyped === checkpoint). Only a READY snapshot
+  // for TODAY'S ET session date promotes Tier-3 entries — BUILDING is never
+  // promoted early, and PARTIAL/UNAVAILABLE never masquerade as attention.
+  // (The old code compared against the UTC date, one of the two truths
+  // behind the Production H1-vs-empty-room contradiction.)
+  const hyped = readHypedSnapshot(now);
   const status = readJsonSafe(path.join(dataDir(), 'rumint', 'status.json'));
-  const today = new Date(now).toISOString().slice(0, 10);
-  if (hyped?.date === today && Array.isArray(hyped.symbols)) {
+  if (hyped.state === 'READY') {
     for (const s of hyped.symbols) {
       const sym = cleanSymbol(s);
       if (!sym) continue;
       // hyped is a daily set; its "observation" clock is the poller's status
-      out.push({ symbol: sym, tier: 3, kind: 'HYPED', reason: 'HYPED — elevated social attention', ts: status?.tsMs ?? 0, hyped: true });
+      out.push({ symbol: sym, tier: 3, kind: 'HYPED', reason: 'HYPED — elevated overnight social attention', ts: status?.tsMs ?? 0, hyped: true });
     }
   }
   return out;
+}
+
+// The canonical HYPED snapshot for the CURRENT ET session date, with honest
+// states. An unreadable/absent/stale-date snapshot is UNAVAILABLE-shaped —
+// never an invented empty set, never yesterday's set worn as today's.
+export function readHypedSnapshot(now = Date.now()) {
+  const raw = readJsonSafe(path.join(dataDir(), 'rumint', 'hyped.json'));
+  const today = sessionDate(new Date(now));
+  if (!raw || typeof raw.state !== 'string') {
+    return { sessionDate: today, state: 'UNAVAILABLE', symbols: [], count: null };
+  }
+  if (raw.sessionDate !== today) {
+    // a snapshot from another session date means today's is not yet written
+    return { sessionDate: today, state: 'UNAVAILABLE', symbols: [], count: null };
+  }
+  const symbols = Array.isArray(raw.symbols) ? raw.symbols.map(cleanSymbol).filter(Boolean) : [];
+  const count = raw.state === 'READY' || raw.state === 'EMPTY' ? symbols.length : null; // null = H? — never a false H0
+  return { sessionDate: raw.sessionDate, state: raw.state, symbols, count, coverage: raw.coverage ?? null };
 }
 
 // ---- TIER 4: DISPLAY CONTINUITY from recent DURABLE Memory ----------------
@@ -231,9 +255,12 @@ export async function attentionSnapshot({ now = Date.now(), config = loadConfig(
 const EARS_LIMIT = 10;
 export function earsRoom({ now = Date.now() } = {}) {
   const status = readJsonSafe(path.join(dataDir(), 'rumint', 'status.json')) ?? {};
+  const hyped = readHypedSnapshot(now); // the SAME canonical snapshot as header/attention (§61)
   const bySym = new Map();
   const note = (sym, patch) => bySym.set(sym, { symbol: sym, hyped: false, nomination: null, stalkCause: null, ...bySym.get(sym), ...patch });
   for (const e of rumintEntries(now)) {
+    // a HYPED coin is OVERNIGHT ATTENTION — visibly distinct from a rumor
+    // nomination (§40); the room labels come from `hyped` vs `nomination`
     if (e.kind === 'HYPED') note(e.symbol, { hyped: true });
     else if (e.kind === 'RUMINT_NOMINATION') note(e.symbol, { nomination: { z: e.z, ts: e.ts, reason: e.reason } });
   }
@@ -249,7 +276,9 @@ export function earsRoom({ now = Date.now() } = {}) {
         signal = {
           velocity: sig.velocity ?? null,
           zVelocity: sig.zVelocity ?? null,
+          zReason: sig.zReason ?? null,
           acceleration: sig.acceleration ?? null,
+          accelerationReason: sig.accelerationReason ?? null,
           sentimentShift: sig.sentimentShift ?? null,
         };
       }
@@ -261,10 +290,18 @@ export function earsRoom({ now = Date.now() } = {}) {
   return {
     status: {
       enabled: status.enabled === true,
-      symbolsPolled: status.symbolsPolled ?? 0,
-      backoff: Boolean(status.backoffUntil && status.backoffUntil > now),
+      statusWord: typeof status.status === 'string' ? status.status : null,
+      initState: typeof status.initState === 'string' ? status.initState : null,
+      symbolsPolled: status.symbolsTracked ?? status.symbolsPolled ?? 0,
+      symbolsReady: status.symbolsReady ?? null,
+      symbolsWarming: status.symbolsWarming ?? null,
+      symbolsUnavailable: status.symbolsUnavailable ?? null,
+      pendingEvidence: status.pendingEvidence ?? null,
+      deploymentDurability: status.deploymentDurability ?? null,
+      backoff: Boolean((status.globalBackoffUntil ?? status.backoffUntil) && (status.globalBackoffUntil ?? status.backoffUntil) > now),
       fresh: now - (status.tsMs ?? 0) < 30_000,
-      hypedCount: Array.isArray(status.hyped) ? status.hyped.length : 0,
+      hyped, // canonical snapshot: {sessionDate, state, symbols, count}
+      hypedCount: hyped.count ?? 0, // compat; count stays null->0 ONLY here, state carries the truth
     },
     symbols,
   };

@@ -19,6 +19,7 @@ delete process.env.SERPENT_CONTROL_PASSWORD;
 
 const NOW = Date.now();
 const iso = (ms) => new Date(ms).toISOString();
+const { sessionDate } = await import('../lib/time.js');
 mkdirSync(path.join(TEST_DATA, 'state'), { recursive: true });
 mkdirSync(path.join(TEST_DATA, 'survey'), { recursive: true });
 mkdirSync(path.join(TEST_DATA, 'rumint'), { recursive: true });
@@ -30,8 +31,11 @@ writeFileSync(path.join(TEST_DATA, 'survey', 'events.jsonl'),
   JSON.stringify({ ts: iso(NOW - 3 * 60_000), type: 'RIPPLE', symbol: 'SUI', zVol: 3.4, zRet: 2.2, extension: 1.8 }) + '\n' +
   JSON.stringify({ ts: iso(NOW - 5 * 60_000), type: 'RIPPLE', symbol: 'PEPE', zVol: 4.1, zRet: 1.9, extension: 2.4, liquidityNote: '$2.10M 24h', inDeepTape: false }) + '\n');
 writeFileSync(path.join(TEST_DATA, 'survey', 'status.json'), JSON.stringify({ enabled: true, scanned: 629, ripplesToday: 2, tsMs: NOW }));
-writeFileSync(path.join(TEST_DATA, 'rumint', 'status.json'), JSON.stringify({ enabled: true, symbolsPolled: 15, tsMs: NOW, hyped: ['SUI'] }));
-writeFileSync(path.join(TEST_DATA, 'rumint', 'hyped.json'), JSON.stringify({ date: iso(NOW).slice(0, 10), symbols: ['SUI'] }));
+// RUMINT-R1: status.json and hyped.json both carry the ONE canonical HYPED
+// snapshot (same object, same truth); the session date is the ET date.
+const HYPED_SNAP = { sessionDate: sessionDate(new Date(NOW)), state: 'READY', symbols: ['SUI'], finalizedTs: iso(NOW), identity: 'a'.repeat(40), coverage: { eligibleSymbols: 3, insufficientSymbols: 0, nonzeroEligible: 1, reason: null } };
+writeFileSync(path.join(TEST_DATA, 'rumint', 'status.json'), JSON.stringify({ enabled: true, status: 'HEALTHY', symbolsTracked: 15, symbolsPolled: 15, tsMs: NOW, hyped: HYPED_SNAP }));
+writeFileSync(path.join(TEST_DATA, 'rumint', 'hyped.json'), JSON.stringify(HYPED_SNAP));
 
 const { server } = await import('../ui/server.js');
 const BASE = `http://127.0.0.1:${PORT}`;

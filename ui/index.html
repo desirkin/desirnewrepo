@@ -1301,9 +1301,14 @@ function renderStatus(s) {
   const r = s.rumint;
   const earsCap = $('#capEars');
   earsCap.classList.toggle('off', !(r && r.enabled && r.fresh));
-  earsCap.classList.toggle('hot', Boolean(r?.hyped?.length)); // faint amber edge, never a casino
+  // RUMINT-R1 §39/§61: the header H is the canonical HYPED snapshot's count.
+  // count is null (rendered H?) when HYPED could not be computed, H… while
+  // BUILDING overnight — a false H0 is never displayed.
+  const hy = r?.hyped && typeof r.hyped === 'object' ? r.hyped : null;
+  const hTxt = !hy ? '' : hy.count !== null && hy.count !== undefined ? ` · H${hy.count}` : hy.state === 'BUILDING' ? ' · H…' : ' · H?';
+  earsCap.classList.toggle('hot', Boolean(hy && hy.state === 'READY' && hy.count > 0)); // faint amber edge, never a casino
   $('#capEarsV').textContent = r && r.enabled && r.fresh
-    ? (r.backoff ? 'BACK-OFF' : `ON · ${r.symbolsPolled}` + (r.hyped?.length ? ` · H${r.hyped.length}` : ''))
+    ? (r.backoff ? 'BACK-OFF' : `ON · ${r.symbolsPolled}${hTxt}`)
     : 'OFF';
   const t = s.tape;
   const u = t.universe;
@@ -1536,15 +1541,37 @@ async function openEarsCard() {
     const d = await (await fetch('/api/ears', { cache: 'no-store' })).json();
     bodyEl.replaceChildren();
     const st = d.status ?? {};
+    /* RUMINT-R1 §59: the room states its readiness truthfully, so "quiet"
+       can never again be confused with "unable to calculate". */
     bodyEl.append(el('div', 'quiet', st.enabled
-      ? (st.backoff ? 'EARS IN BACK-OFF' : `EARS ON · ${st.symbolsPolled} symbols polled${st.fresh ? '' : ' · NOT FRESH'}`)
+      ? (st.backoff ? 'EARS IN BACK-OFF' : `EARS ON · ${st.symbolsPolled} POLLED${st.fresh ? '' : ' · NOT FRESH'}`)
       : 'EARS OFF'));
+    if (st.enabled) {
+      if (st.symbolsReady != null) bodyEl.append(el('div', 'quiet', `BASELINES READY · ${st.symbolsReady}/${st.symbolsPolled}` + (st.symbolsWarming ? ` / WARMING · ${st.symbolsWarming}` : '') + (st.symbolsUnavailable ? ` / UNAVAILABLE · ${st.symbolsUnavailable}` : '')));
+      const hy = st.hyped;
+      if (hy) {
+        const hLine = hy.state === 'READY' ? `HYPED · H${hy.count}${hy.symbols?.length ? ' · ' + hy.symbols.join(' ') : ''}`
+          : hy.state === 'EMPTY' ? 'HYPED · H0'
+          : hy.state === 'BUILDING' ? 'HYPED · BUILDING (overnight window open)'
+          : hy.state === 'PARTIAL' ? 'HYPED · PARTIAL — INSUFFICIENT OVERNIGHT COVERAGE'
+          : 'HYPED · UNAVAILABLE';
+        bodyEl.append(el('div', 'quiet', hLine));
+      }
+      if (st.statusWord && st.statusWord !== 'HEALTHY') bodyEl.append(el('div', 'quiet', `EAR STATUS · ${st.statusWord}`));
+    }
     if (!d.symbols?.length) {
-      bodyEl.append(el('div', 'quiet', 'NO MEANINGFUL SOCIAL SIGNAL'));
+      /* truthful only when the ear is actually ready and HYPED is a known
+         (READY/EMPTY) state — otherwise the honest words are warming or
+         unavailable, shown above, never a false "no signal" */
+      const hyKnown = st.hyped && (st.hyped.state === 'READY' || st.hyped.state === 'EMPTY');
+      bodyEl.append(el('div', 'quiet', st.enabled && st.statusWord === 'HEALTHY' && hyKnown
+        ? 'NO QUALIFYING SOCIAL SIGNAL'
+        : st.enabled ? 'NO SYMBOLS TO SHOW — SEE EAR STATE ABOVE' : 'EARS OFF'));
       return;
     }
     for (const s of d.symbols) {
-      bodyEl.append(el('h3', 'sec', s.symbol + (s.hyped ? ' · HYPED' : '')));
+      /* §40: OVERNIGHT ATTENTION is not a rumor nomination and is labeled apart */
+      bodyEl.append(el('h3', 'sec', s.symbol + (s.hyped ? ' · OVERNIGHT ATTENTION' : '')));
       if (s.stalkCause) bodyEl.append(obsRow('active stalk', s.stalkCause));
       if (s.nomination) {
         bodyEl.append(obsRow('nomination', s.nomination.reason));
@@ -1552,12 +1579,12 @@ async function openEarsCard() {
       }
       const sig = s.signal;
       if (sig) {
-        bodyEl.append(obsRow('chatter velocity', sig.velocity != null ? `${sig.velocity}/hr` : 'UNAVAILABLE'));
-        bodyEl.append(obsRow('velocity z', sig.zVelocity != null ? sig.zVelocity.toFixed(2) : 'INSUFFICIENT HISTORY'));
-        bodyEl.append(obsRow('acceleration', sig.acceleration != null ? sig.acceleration : 'INSUFFICIENT HISTORY'));
-        bodyEl.append(obsRow('sentiment shift', sig.sentimentShift != null ? sig.sentimentShift.toFixed(2) : 'INSUFFICIENT HISTORY'));
+        bodyEl.append(obsRow('chatter velocity', sig.velocity != null ? `${sig.velocity}/hr` : 'HOUR NOT OBSERVED'));
+        bodyEl.append(obsRow('velocity z', sig.zVelocity != null ? sig.zVelocity.toFixed(2) : (sig.zReason === 'ZERO_VARIANCE' ? 'ZERO VARIANCE' : 'INSUFFICIENT HISTORY')));
+        bodyEl.append(obsRow('acceleration', sig.acceleration != null ? sig.acceleration : 'COVERAGE UNAVAILABLE'));
+        bodyEl.append(obsRow('sentiment shift', sig.sentimentShift != null ? sig.sentimentShift.toFixed(2) : 'INSUFFICIENT LABELS'));
       } else {
-        bodyEl.append(el('div', 'quiet', 'INSUFFICIENT HISTORY'));
+        bodyEl.append(el('div', 'quiet', 'BASELINE UNAVAILABLE'));
       }
     }
   } catch {

@@ -488,6 +488,52 @@ export class Repository {
     return rows[0]?.state ?? null;
   }
 
+  // ---------------- RUMINT-R1 rumor-ear checkpoint (storage only) ----------------
+  // Same contract as the GOV collector checkpoint: one revision-counted
+  // bounded snapshot, validated strictly by its collector before trust,
+  // carrying no control/posture semantics and no decision return path.
+  async saveRumintCheckpoint(state) {
+    await this.db.query(
+      `INSERT INTO serpent_rumint_checkpoint (id, revision, state) VALUES ('current', 1, $1)
+       ON CONFLICT (id) DO UPDATE SET revision = serpent_rumint_checkpoint.revision + 1, state = $1, saved_at = now()`,
+      [state],
+      { write: true }
+    );
+  }
+
+  async loadRumintCheckpoint() {
+    const { rows } = await this.db.query(`SELECT state FROM serpent_rumint_checkpoint WHERE id = 'current'`);
+    return rows[0]?.state ?? null;
+  }
+
+  // RUMINT-R1 bootstrap facts (§13-14): the PROVEN per-hour observation
+  // history already inside durable canonical Memory — for each provider
+  // symbol and absolute hour, the maximum cumulative hourly velocity a
+  // successful RUMINT poll actually reported. Bounded structurally (one row
+  // per symbol-hour, 7-day window, hard LIMIT of 64 symbols x 176 hours);
+  // the jsonb casts are guarded by `IS JSON` and a numeric regex so a
+  // corrupt row is excluded, never a crash. Read-only; carries no bull/bear
+  // detail, no message ids, no provider bodies — those facts were never
+  // recorded and are not invented here.
+  async rumintPollHourFacts({ sinceTs } = {}) {
+    const { rows } = await this.db.query(
+      `SELECT sym AS provider_symbol, hour_ts, max(vel) AS velocity FROM (
+         SELECT CASE WHEN envelope IS JSON THEN envelope::jsonb #>> '{payload,detail,symbol}' END AS sym,
+                (ts / 3600) * 3600 AS hour_ts,
+                CASE WHEN envelope IS JSON
+                      AND (envelope::jsonb #>> '{payload,detail,velocity}') ~ '^[0-9]{1,9}$'
+                     THEN (envelope::jsonb #>> '{payload,detail,velocity}')::bigint END AS vel
+         FROM serpent_memory_events
+         WHERE source_module = 'RUMINT' AND event_type = 'RUMOR_OBSERVATION'
+           AND observation_state = 'KNOWN' AND ts >= $1
+           AND CASE WHEN envelope IS JSON THEN envelope::jsonb #>> '{payload,type}' END = 'RUMINT_POLL'
+       ) q WHERE sym IS NOT NULL AND vel IS NOT NULL
+       GROUP BY sym, hour_ts ORDER BY hour_ts DESC LIMIT 11264`,
+      [Math.floor(sinceTs ?? 0)]
+    );
+    return rows.map((r) => ({ providerSymbol: r.provider_symbol, hourTsSec: Number(r.hour_ts), velocity: Number(r.velocity) }));
+  }
+
   // ---------------- childhood manifest identity (metadata only) ----------------
   async recordChildhoodManifest(summary) {
     await this.db.query(

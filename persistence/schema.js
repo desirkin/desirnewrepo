@@ -4,7 +4,7 @@
 // silently downgraded.
 import { createHash } from 'node:crypto';
 
-export const SCHEMA_VERSION = 3; // GOV-1B / schema 3
+export const SCHEMA_VERSION = 4; // RUMINT-R1 / schema 4
 
 // Canonical key-sorted JSON — the stable content form durable event
 // identities are computed over (independent of key order and whitespace).
@@ -169,6 +169,24 @@ export const MIGRATIONS = [
     // prevents governance history rewrites must survive a republish.
     statements: [
       `CREATE TABLE IF NOT EXISTS serpent_governance_checkpoint (
+        id text PRIMARY KEY,
+        revision bigint NOT NULL DEFAULT 0,
+        state jsonb NOT NULL,
+        saved_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ],
+  },
+  {
+    version: 4,
+    name: 'RUMINT-R1 durable rumor-ear checkpoint',
+    // Same narrow storage-only pattern as the GOV collector checkpoint: one
+    // bounded revision-counted JSONB row carrying the StockTwits ear's
+    // baselines, watermarks, HYPED session state, provider health and owed
+    // evidence — so a republish restarts the process WITHOUT erasing the
+    // ear's statistical memory. No control/posture/trading semantics, no
+    // decision return path; the collector validates strictly before trust.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_rumint_checkpoint (
         id text PRIMARY KEY,
         revision bigint NOT NULL DEFAULT 0,
         state jsonb NOT NULL,

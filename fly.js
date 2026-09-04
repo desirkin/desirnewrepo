@@ -10,6 +10,7 @@ import { startGateway } from './gateway/collector.js';
 import { startWideEye } from './survey/wideeye.js';
 import { startGovernance } from './governance/collector.js';
 import { govCheckpointStore } from './persistence/gov-checkpoint.js';
+import { rumintCheckpointStore, rumintBootstrapSource } from './persistence/rumint-checkpoint.js';
 import { startMemoryMirror } from './memory/mirror.js';
 import { startPersistence } from './persistence/runtime.js';
 
@@ -56,7 +57,11 @@ try {
 } catch (err) {
   console.error(`MEMORY-0 failed to start (dark; nothing else affected): ${err.message}`);
 }
-startRumint(); // no-ops (zero network) unless rumint is enabled
+// RUMINT-R1: no-ops (zero network) unless rumint is enabled. The durable
+// checkpoint store and the one-time bootstrap reader are injected here from
+// the persistence layer (composition-root wiring; STORAGE ONLY, no return
+// path) so a republish cannot erase the ear's statistical memory.
+startRumint({ checkpointStore: rumintCheckpointStore(), memoryBootstrapSource: rumintBootstrapSource() });
 startGateway(); // no-ops (zero network) unless gateway is enabled — collector only
 startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
 // GOV-1 dark governance sense — no-ops (zero network) unless governance is

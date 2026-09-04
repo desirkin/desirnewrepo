@@ -369,16 +369,36 @@ unreachable exactly as a dead query does, so the permission lock always
 tells the truth. A stopped persistence runtime clears its retry timer and
 pump; no background retries or duplicate loops survive `stop()`.
 
-## STALKING / HYPED — SAFE_TO_FORGET (classified)
+## STALKING — SAFE_TO_FORGET (classified); RUMINT MEMORY — DURABLE (RUMINT-R1)
 
-`state/stalking.json` and `rumint/hyped.json` are explicitly classified
-**SAFE_TO_FORGET / RECONSTRUCTABLE_TRANSIENT** and are NOT persisted to
-PostgreSQL: forgetting them on redeploy REDUCES trading permission rather
-than increasing it (an un-stalked symbol cannot arm anything), entries
-carry TTLs and decay by design, and the live RUMINT/WideEye sensors
-re-nominate from current evidence. A fresh deployment therefore begins
-with an empty stalk set; expired rumors are never restored merely for
-continuity.
+`state/stalking.json` remains explicitly classified **SAFE_TO_FORGET /
+RECONSTRUCTABLE_TRANSIENT** and is NOT persisted to PostgreSQL: forgetting
+it on redeploy REDUCES trading permission rather than increasing it (an
+un-stalked symbol cannot arm anything), entries carry TTLs and decay by
+design, and the live RUMINT/WideEye sensors re-nominate from current
+evidence. A fresh deployment therefore begins with an empty stalk set;
+expired rumors are never restored merely for continuity. A durable
+historical RUMINT nomination is EVIDENCE, never permission to re-arm
+stalking automatically.
+
+RUMINT's *statistical memory* is different (RUMINT-R1): baselines, message
+watermarks and dedupe state, hourly observed buckets, the canonical HYPED
+session snapshot, provider health/backoff, the rolling request budget and
+bounded pending source-event debt live in the durable
+`serpent_rumint_checkpoint` (migration 4) — one bounded revision-counted
+JSONB row, the same narrow storage-only pattern as the GOV collector's
+`serpent_governance_checkpoint` (migration 3). `hyped.json` on disk is a
+display mirror of the canonical snapshot the checkpoint carries. The store
+(`persistence/rumint-checkpoint.js`) answers with the tri-state truth
+contract — LOADED / NOT_FOUND / UNAVAILABLE / NOT_CONFIGURED on load,
+durable-vs-not with reason on save — so "I could not read RUMINT history"
+is never converted into "RUMINT has no history". The same module exposes
+the one-time bootstrap read (`rumintBootstrapSource`): when the durable
+checkpoint is honestly NOT_FOUND, the collector may reconstruct PROVEN
+per-hour observation facts from canonical durable RUMINT_POLL Memory
+(`rumintPollHourFacts`, bounded, guarded jsonb casts) instead of throwing
+observation history away. A republish may restart the process; it may not
+erase the ear's memory.
 
 ## FAIL CLOSED, ALWAYS
 

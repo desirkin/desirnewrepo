@@ -56,13 +56,29 @@ export function clearStalking() {
   atomicWriteJson(stalkFile(), {});
 }
 
-// HYPED set for a session date: {date, symbols: [...]}.
-export function writeHyped(date, symbols) {
-  atomicWriteJson(hypedFile(), { date, symbols: [...symbols], ts: nowIso() }, { pretty: true });
+// RUMINT-R1 — hyped.json carries the ONE canonical HYPED snapshot the
+// poller computed ({sessionDate, state, symbols, finalizedTs, identity,
+// coverage}); every consumer (header, Rumor Room, Attention) reads the same
+// object, so the two-truths divergence (status vs file) cannot recur.
+export function writeHyped(snapshot) {
+  atomicWriteJson(hypedFile(), { ...snapshot, ts: nowIso() }, { pretty: true });
 }
 
+export function readHypedSnapshot() {
+  try {
+    if (!existsSync(hypedFile())) return null;
+    const h = JSON.parse(readFileSync(hypedFile(), 'utf8'));
+    return h && typeof h === 'object' ? h : null;
+  } catch {
+    return null; // unreadable is UNAVAILABLE for the caller — never an invented empty set
+  }
+}
+
+// Compat view: the finalized non-empty HYPED coins for a session date.
+// Only a READY snapshot for that exact date yields symbols; BUILDING,
+// PARTIAL and UNAVAILABLE truthfully yield none here (their state is
+// visible through readHypedSnapshot, never disguised as a valid H0).
 export function readHyped(date) {
-  if (!existsSync(hypedFile())) return [];
-  const h = JSON.parse(readFileSync(hypedFile(), 'utf8'));
-  return h.date === date ? h.symbols : [];
+  const h = readHypedSnapshot();
+  return h && h.sessionDate === date && h.state === 'READY' && Array.isArray(h.symbols) ? h.symbols : [];
 }

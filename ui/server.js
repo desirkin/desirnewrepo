@@ -111,17 +111,30 @@ function pendingStrikes() {
 }
 
 // RUMINT poller status (read-only passthrough of its atomic status file).
+// RUMINT-R1: hyped is the ONE canonical snapshot {state, count, symbols,
+// sessionDate} — count is null (H?) whenever the state is not READY/EMPTY,
+// so the header can never show a false H0 while the room shows nothing.
 function rumintReport() {
   const file = path.join(dataDir(), 'rumint', 'status.json');
   if (!existsSync(file)) return { enabled: false };
   try {
     const s = JSON.parse(readFs(file, 'utf8'));
+    const h = s.hyped && typeof s.hyped === 'object' && !Array.isArray(s.hyped) ? s.hyped : null;
+    const state = typeof h?.state === 'string' ? h.state : 'UNAVAILABLE';
+    const symbols = Array.isArray(h?.symbols) ? h.symbols : [];
     return {
       enabled: s.enabled === true,
-      symbolsPolled: s.symbolsPolled ?? 0,
-      hourCount: s.hourCount ?? 0,
-      backoff: Boolean(s.backoffUntil && s.backoffUntil > Date.now()),
-      hyped: s.hyped ?? [],
+      status: typeof s.status === 'string' ? s.status : null,
+      symbolsPolled: s.symbolsTracked ?? s.symbolsPolled ?? 0,
+      symbolsReady: s.symbolsReady ?? null,
+      hourCount: s.recentRequestCount ?? s.hourCount ?? 0,
+      backoff: Boolean((s.globalBackoffUntil ?? s.backoffUntil) && (s.globalBackoffUntil ?? s.backoffUntil) > Date.now()),
+      hyped: {
+        state,
+        sessionDate: h?.sessionDate ?? null,
+        symbols,
+        count: state === 'READY' || state === 'EMPTY' ? symbols.length : null, // null renders H? — never a fake H0
+      },
       fresh: Date.now() - (s.tsMs ?? 0) < 30_000,
     };
   } catch {

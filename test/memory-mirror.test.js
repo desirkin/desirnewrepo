@@ -274,7 +274,7 @@ test('NO RETURN PATH: only fly.js touches memory/, and memory/ imports no sensor
   assert.ok(fly.includes("./memory/mirror.js"));
   const mirrorAt = fly.indexOf('startMemoryMirror(');
   assert.ok(mirrorAt > 0);
-  for (const sensor of ['startRumint()', 'startGateway()', 'startWideEye()', 'startGovernance(', 'runTape(']) {
+  for (const sensor of ['startRumint(', 'startGateway()', 'startWideEye()', 'startGovernance(', 'runTape(']) {
     assert.ok(mirrorAt < fly.indexOf(sensor), `${sensor} starts before the memory mirror opens`);
   }
 });

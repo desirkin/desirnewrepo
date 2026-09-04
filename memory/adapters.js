@@ -67,6 +67,13 @@ export function fromWideeyeEvent(rec, observedTs = nowIso()) {
 // ---------------------------------------------------------------------
 export function fromRumintEvent(rec, observedTs = nowIso()) {
   const failed = rec.type === 'RUMINT_POLL_FAILED' || rec.type === 'RUMINT_UNAVAILABLE';
+  // RUMINT-R1: expanded poll diagnostics ride through UNTOUCHED inside the
+  // payload detail — every null keeps its stated reason (zReason,
+  // accelerationReason, decision), so a 12-hour forensic query can answer
+  // "why no signal?" from durable Memory alone. Availability is read from
+  // the record's own reasons, never inferred from silence.
+  const zKnown = rec.zReason === 'KNOWN' || (rec.zReason === undefined && rec.z !== undefined && rec.z !== null);
+  const accelKnown = rec.accelerationReason === 'KNOWN' || (rec.accelerationReason === undefined && rec.acceleration !== undefined && rec.acceleration !== null);
   return envelope({
     sourceModule: 'RUMINT',
     eventType: 'RUMOR_OBSERVATION',
@@ -75,8 +82,18 @@ export function fromRumintEvent(rec, observedTs = nowIso()) {
     families: ['RUMOR', 'SOCIAL_ATTENTION'],
     observationState: failed ? 'UNAVAILABLE' : 'KNOWN',
     payload: { type: rec.type, detail: strip(rec, 'ts') },
-    dataAvailability: { chatterVelocity: failed ? 'UNAVAILABLE' : rec.velocity !== undefined || rec.z !== undefined ? 'KNOWN' : 'UNKNOWN' },
+    dataAvailability: {
+      chatterVelocity: failed ? 'UNAVAILABLE' : rec.velocity !== undefined || rec.z !== undefined ? 'KNOWN' : 'UNKNOWN',
+      zVelocity: failed ? 'UNAVAILABLE' : zKnown ? 'KNOWN' : rec.zReason ? 'UNAVAILABLE' : 'UNKNOWN',
+      acceleration: failed ? 'UNAVAILABLE' : accelKnown ? 'KNOWN' : rec.accelerationReason ? 'UNAVAILABLE' : 'UNKNOWN',
+    },
     provenance: liveProv('rumint/events.jsonl (stocktwits chatter poller)', rec.ts, observedTs),
+    // RUMINT-R1 §43: polls, nominations and HYPED sessions carry semantic
+    // deterministic sourceEventIds — a pending replay of the exact prepared
+    // record keeps its exact identity, so restarts dedupe instead of
+    // minting second memories (fingerprint remains the fallback).
+    correlation: { eventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null, sourceEventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null },
+    sourceEventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null,
     identity: sourceFingerprint(rec, 'rumint/events.jsonl'),
   });
 }

@@ -101,7 +101,11 @@ test('8. a coin with no rumor history reports truthful absence — null stays nu
   assert.equal(att.rumint.hyped, false);
   // a thin baseline yields null z (insufficient history), not 0
   mkdirSync(path.join(d, 'rumint'), { recursive: true });
-  writeFileSync(path.join(d, 'rumint', 'PEPE.X.json'), JSON.stringify({ symbol: 'PEPE.X', lastMsgId: 1, buckets: { '2026-09-03T10': { count: 2, bull: 1, bear: 0 } } }));
+  // RUMINT-R1: baselines live in the single local checkpoint the poller owns
+  writeFileSync(path.join(d, 'rumint', 'checkpoint.json'), JSON.stringify({ baselines: { 'PEPE.X': {
+    providerSymbol: 'PEPE.X', canonicalCoin: 'PEPE', lastMsgId: '1', recentSeenMessageIds: ['1'], seenIdEvictions: 0, baselineRevision: 1,
+    buckets: { '2026-09-03T10': { count: 2, bull: 1, bear: 0, successfulPolls: 1, firstPollTs: '2026-09-03T10:05:00.000Z', lastPollTs: '2026-09-03T10:05:00.000Z', coverage: 'SAMPLED_SINGLE_PAGE' } },
+  } } }));
   const att2 = attentionForCoin('PEPE', { now: NOW });
   assert.equal(att2.rumint.signal.zVelocity, null);
   assert.notEqual(att2.rumint.signal.zVelocity, 0);
