@@ -77,12 +77,22 @@
   .cg3 { stop-color: var(--accent); stop-opacity: .55; }
   .cg3 { stop-color: color-mix(in srgb, var(--accent) 14%, #050d09); stop-opacity: .97; }
   .coilFill { fill: url(#coilGrad); filter: drop-shadow(0 0 9px var(--accent)); }
+  /* the skull is lit — the face of the animal, never a silhouette */
+  .hg1 { stop-color: var(--accent2); stop-opacity: .92; }
+  .hg2 { stop-color: var(--accent); stop-opacity: .85; }
+  .hg2 { stop-color: color-mix(in srgb, var(--accent) 52%, #0a1710); stop-opacity: .97; }
+  .hg3 { stop-color: var(--accent); stop-opacity: .5; }
+  .hg3 { stop-color: color-mix(in srgb, var(--accent) 22%, #06100a); stop-opacity: .97; }
+  #coilHead { fill: url(#headGrad); }
   #coilCasing { fill: none; stroke: var(--bg); stroke-linecap: round; opacity: .92; }
   #coilHighlight { fill: none; stroke: #eafffa; stroke-width: 1.4; opacity: .3; stroke-linecap: round; }
   /* UI-1C2: the eye BURNS — glowing iris, dark slit pupil. Fixed reds. */
   #coilEye { fill: url(#eyeGrad); stroke: rgba(30, 6, 3, .9); stroke-width: .7;
              filter: drop-shadow(0 0 6px rgba(255, 70, 30, .9)); }
   #coilPupil { fill: #0a0302; opacity: .92; }
+  /* UI-1C3: skull detail — brow ridge catchlight and a nostril pit */
+  #headBrow { fill: none; stroke: #bfeee0; stroke-width: 1.2; opacity: .28; stroke-linecap: round; }
+  #headNostril { fill: #041008; opacity: .65; }
   /* segment hint across the wider body + a slow highlight moving through —
      muscle and scale, not sci-fi wire. */
   .ringScales { fill: none; stroke: var(--bg); stroke-width: 4.6; opacity: .14;
@@ -91,7 +101,7 @@
   .orbitGuide { fill: none; stroke: #1d2b40; stroke-width: .8; opacity: .55; }
   .orbitGuide.dashed { stroke-dasharray: 1.6 6; opacity: .45; }
   /* the flick of a forked tongue at the nose — geometry, not cartoon */
-  #coilTongue { fill: none; stroke: #ff6b52; stroke-width: .9; stroke-linecap: round; opacity: .8; }
+  #coilTongue { fill: none; stroke: #ff6b52; stroke-width: 1.1; stroke-linecap: round; opacity: .85; }
   .ringPulse  { fill: none; stroke: var(--accent2); stroke-width: 2.4; opacity: .38;
                 stroke-dasharray: 46 607; stroke-linecap: round;
                 filter: blur(1.1px) drop-shadow(0 0 5px var(--accent2));
@@ -462,6 +472,13 @@
         <stop offset=".55" class="cg2"></stop>
         <stop offset="1" class="cg3"></stop>
       </radialGradient>
+      <!-- UI-1C3: skull lighting — brighter than the body so the head reads
+           as the face of the animal, not a silhouette -->
+      <radialGradient id="headGrad" cx="30%" cy="28%" r="90%">
+        <stop offset="0" class="hg1"></stop>
+        <stop offset=".5" class="hg2"></stop>
+        <stop offset="1" class="hg3"></stop>
+      </radialGradient>
       <!-- UI-1C2: the burning iris — fixed reds; menace does not follow posture -->
       <radialGradient id="eyeGrad" cx="40%" cy="35%" r="78%">
         <stop offset="0" stop-color="#ffd9b0"></stop>
@@ -477,14 +494,27 @@
     <g id="ringGroup">
       <g id="coilSpin">
         <path id="coilTail" class="coilFill" d=""></path>
-        <path id="coilCasing" d=""></path>
-        <path id="coilHead" class="coilFill" d=""></path>
         <path id="coilHighlight" d=""></path>
-        <path id="coilTongue" d=""></path>
-        <circle id="coilEye" r="3.4"></circle>
-        <ellipse id="coilPupil" rx="1.05" ry="2.6"></ellipse>
         <circle class="ringScales" r="100.5"></circle>
         <circle class="ringScales" r="107.5"></circle>
+        <path id="coilCasing" d=""></path>
+        <!-- UI-1C3: a SCULPTED head — its own shape (brow, burning eye,
+             slit pupil, nostril, tongue) in local coords, snout at +x.
+             buildCoilRing mounts the whole group on the ring; it rotates
+             with the body and the head crosses OVER the tapered tail. -->
+        <g id="headG">
+          <path id="coilTongue" d="M25,0.5 L36,2 L41.5,-0.8 M36,2 L40.5,5.2"></path>
+          <path id="coilHead" class="coilFill" d="M24,0
+            C21,-7 13,-12.5 3,-14.5
+            C-8,-16.5 -18,-13.5 -22,-7.5
+            C-24.5,-3.5 -24.5,3.5 -22,7.5
+            C-18,13.5 -8,16.5 3,14.5
+            C13,12.5 21,7 24,0 Z"></path>
+          <path id="headBrow" d="M-4,-11.5 C3,-13.5 10,-11.5 15,-6.5"></path>
+          <circle id="headNostril" cx="18.5" cy="-2.6" r="1"></circle>
+          <circle id="coilEye" cx="5.5" cy="-6.6" r="3.7"></circle>
+          <ellipse id="coilPupil" cx="5.5" cy="-6.6" rx="1.1" ry="2.9"></ellipse>
+        </g>
       </g>
       <circle class="ringPulse" r="104"></circle>
     </g>
@@ -653,7 +683,7 @@ function coilAim(currentDeg, targetDeg, dtMs) {
   return currentDeg + d * Math.min(1, dtMs / 900);
 }
 const COIL_IDLE_DEG_S = 9; // idle crawl: a full turn in ~40s — visible in seconds
-const HEAD_HOME_DEG = -90; // the built head sits at the top of the band
+const HEAD_HOME_DEG = -95.4; // the sculpted head is mounted at p=0.985 on the band
 let coilAngle = 0;
 function updateCoil(dtMs) {
   if (body.classList.contains('killed')) return; // dormant under KILL
@@ -685,13 +715,14 @@ function buildCoilRing() {
     const r = 104 + Math.sin(a * 5 + 0.8) * 1.2 + Math.sin(a * 3 - 1.2) * 0.8;
     return [r * Math.cos(a), r * Math.sin(a), a];
   };
-  // UI-1C2: body half-width, MUCH wider — a heavy muscle, not a wire.
-  // thick tail -> heavier body -> narrowed neck -> flared hood -> snout
+  // UI-1C3: body half-width at the concept frame's proportion — the band
+  // is ~a quarter of the ring radius. Pointed tail tip (it slides under
+  // the head), heavy body, neck easing into the sculpted skull.
   const halfW = (p) => {
-    if (p > 0.98) return Math.max(0.9, 14 * (1 - (p - 0.98) / 0.02)); // rounded snout
-    if (p > 0.94) return 7.4 + ((p - 0.94) / 0.04) * 6.6; // hood flares 7.4 -> 14
-    if (p > 0.90) return 8.3 - ((p - 0.90) / 0.04) * 0.9; // the neck draws in
-    return 4.2 + p * 4.6; // tail 4.2 -> body ~8.3
+    if (p < 0.06) return 1.6 + (p / 0.06) * 4.9; // tail tip tapers to a point
+    if (p > 0.9) return 12 - ((p - 0.9) / 0.1) * 4; // neck eases INTO the skull
+    const t = Math.min((p - 0.06) / 0.74, 1);
+    return 6.5 + t * 5.5; // body swells 6.5 -> 12
   };
   const band = (p0, p1) => {
     const outer = [], inner = [];
@@ -716,34 +747,25 @@ function buildCoilRing() {
     }
     return 'M' + pts.join(' L');
   };
-  $('#coilTail').setAttribute('d', band(0, 0.915));
-  $('#coilCasing').setAttribute('d', line(0.9, 1, () => 0));
-  $('#coilCasing').setAttribute('stroke-width', '32'); // gap wide enough for the hood crossing
-  $('#coilHead').setAttribute('d', band(0.9, 1));
+  $('#coilTail').setAttribute('d', band(0, 0.985));
+  // the casing is only a sliver directly beneath the skull, so the head
+  // pops off the band — the thin tail tip stays VISIBLE, sliding behind
+  // the neck exactly like the concept frame (centre() accepts p > 1)
+  $('#coilCasing').setAttribute('d', line(0.972, 1.005, () => 0));
+  $('#coilCasing').setAttribute('stroke-width', '28');
   // a thin light along the upper body — dimensional, not glossy
-  $('#coilHighlight').setAttribute('d', line(0.05, 0.86, (p) => -halfW(p) * 0.45));
-  // UI-1C2: the eye BURNS — glowing red iris on the hood, with a dark
-  // vertical slit pupil aligned to the head
-  const [ex0, ey0, ea] = centre(0.962);
-  const eyeOff = halfW(0.962) * 0.4;
-  const ex = ex0 + eyeOff * Math.cos(ea), ey = ey0 + eyeOff * Math.sin(ea);
-  $('#coilEye').setAttribute('cx', ex.toFixed(1));
-  $('#coilEye').setAttribute('cy', ey.toFixed(1));
-  const pupil = $('#coilPupil');
-  pupil.setAttribute('cx', ex.toFixed(1));
-  pupil.setAttribute('cy', ey.toFixed(1));
-  pupil.setAttribute('transform', `rotate(${((ea * 180) / Math.PI - 90).toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)})`);
-  // the forked tongue — a longer flick ahead of the snout, along the
-  // direction of travel. Geometry only.
-  const [nx, ny, na] = centre(0.9995);
-  const tdx = -Math.sin(na), tdy = Math.cos(na); // tangent = direction of travel
-  const t1x = nx + tdx * 7, t1y = ny + tdy * 7;
-  const fork = (side) => {
-    const fa = Math.atan2(tdy, tdx) + side * 0.42;
-    return `L${(t1x + Math.cos(fa) * 3.8).toFixed(1)},${(t1y + Math.sin(fa) * 3.8).toFixed(1)}`;
-  };
-  $('#coilTongue').setAttribute('d',
-    `M${nx.toFixed(1)},${ny.toFixed(1)} L${t1x.toFixed(1)},${t1y.toFixed(1)} ${fork(1)} M${t1x.toFixed(1)},${t1y.toFixed(1)} ${fork(-1)}`);
+  $('#coilHighlight').setAttribute('d', line(0.08, 0.9, (p) => -halfW(p) * 0.45));
+  // UI-1C3: mount the sculpted head on the ring. The whole group (skull,
+  // brow, burning eye, slit pupil, nostril, tongue) is drawn in local
+  // coords with the snout at +x; here it is translated to the head
+  // station and rotated to face the direction of travel, tilted a touch
+  // toward the centre so it reads as looking INTO the hunting field.
+  const [hx, hy, ha] = centre(0.985);
+  const travelDeg = (Math.atan2(Math.cos(ha), -Math.sin(ha)) * 180) / Math.PI;
+  const HEAD_TILT_IN = 100; // the skull doubles back off the band to glare INTO the field
+  const HEAD_SCALE = 1.25; // wider than the body — like the concept frame
+  $('#headG').setAttribute('transform',
+    `translate(${(hx * 0.96).toFixed(1)} ${(hy * 0.96).toFixed(1)}) rotate(${(travelDeg + HEAD_TILT_IN).toFixed(1)}) scale(${HEAD_SCALE})`);
 }
 
 /* ---------- arcs (lock ring + ET session) ---------- */

@@ -78,25 +78,27 @@ test('9. the heartbeat glyph shows only when the tape is truthfully LIVE', () =>
     'both SHELL LINK LOST strip paths also stop the heartbeat');
 });
 
-test('10. the serpent gained a forked tongue at the nose (geometry, inside the rotating body)', () => {
-  assert.ok(HTML.includes('id="coilTongue"'));
-  const spin = HTML.match(/<g id="coilSpin">([\s\S]*?)<\/g>/)[1];
-  assert.ok(spin.includes('coilTongue'), 'the tongue rotates with the body');
-  assert.ok(SCRIPT.includes(`$('#coilTongue').setAttribute('d'`));
+test('10. the forked tongue flicks from the sculpted snout, inside the rotating body', () => {
+  const spin = HTML.match(/<g id="coilSpin">([\s\S]*?)<circle class="ringPulse"/)[0];
+  assert.ok(spin.includes('id="coilTongue"'), 'the tongue rotates with the body');
+  assert.ok(/id="coilTongue" d="M2\d/.test(HTML), 'a static forked path in head-local coords');
 });
 
-test('12. UI-1C2 — the body is WIDE: heavy tail, drawn neck, flared hood', () => {
-  assert.ok(SCRIPT.includes('hood flares 7.4 -> 14'), 'hood reaches 14 half-width units');
-  assert.ok(SCRIPT.includes('4.2 + p * 4.6'), 'tail starts heavy, not a wire');
-  assert.ok(SCRIPT.includes(`setAttribute('stroke-width', '32')`), 'casing gap fits the hood crossing');
+test('12. UI-1C3 — the body carries the concept proportion: heavy band, pointed tail', () => {
+  assert.ok(SCRIPT.includes('body swells 6.5 -> 12'), 'the band is a quarter of the ring radius');
+  assert.ok(SCRIPT.includes('tail tip tapers to a point'), 'the tail thins where the head crosses it');
+  assert.ok(SCRIPT.includes(`setAttribute('stroke-width', '28')`), 'only a sliver casing under the skull');
+  assert.ok(SCRIPT.includes('tail tip stays VISIBLE'), 'the tail slides behind the neck, no torn band');
 });
 
-test('13. UI-1C2 — the head eye burns red with a slit pupil that rotates with the body', () => {
+test('13. UI-1C3 — a sculpted head with burning eye, pupil, brow and nostril rides the ring', () => {
   assert.ok(HTML.includes('id="eyeGrad"'), 'burning iris gradient');
   assert.ok(HTML.includes('fill: url(#eyeGrad)'));
-  const spin = HTML.match(/<g id="coilSpin">([\s\S]*?)<\/g>/)[1];
-  assert.ok(spin.includes('coilPupil'), 'pupil lives inside the rotating body');
-  assert.ok(SCRIPT.includes(`$('#coilPupil')`) || SCRIPT.includes(`('#coilPupil')`));
+  const spin = HTML.match(/<g id="coilSpin">([\s\S]*?)<circle class="ringPulse"/)[0];
+  for (const part of ['id="headG"', 'coilHead', 'coilEye', 'coilPupil', 'headBrow', 'headNostril']) {
+    assert.ok(spin.includes(part), `${part} lives inside the rotating body`);
+  }
+  assert.ok(SCRIPT.includes(`$('#headG').setAttribute('transform'`), 'the whole skull is mounted on the ring');
   // menace stays red regardless of posture: fixed stops, no var(--accent)
   const grad = HTML.match(/id="eyeGrad"[\s\S]*?<\/radialGradient>/)[0];
   assert.ok(!grad.includes('var(--accent)'));
