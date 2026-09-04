@@ -143,7 +143,8 @@ test('16. UI-1C10 — slither wobble undulates; rotation NEVER goes backwards', 
   }
   assert.equal(coilAim(10, 8, 100), 10, 'a target just behind is HELD, not chased in reverse');
   // rate cap: a long forward sweep glides instead of snapping
-  assert.ok(coilAim(0, 340, 100) - 0 <= 14.001, 'sweep speed capped');
+  // (UI-1C11: cap halved to 70°/s — a deliberate glide, not a whip)
+  assert.ok(coilAim(0, 340, 100) - 0 <= 7.001, 'sweep speed capped');
   // the wobble rides translate; the rotate stays pure coilAngle
   assert.ok(SCRIPT.includes('translate(${(sway.dx * amp).toFixed(2)}'));
   // glances only at coins truly on display, and never under reduced motion
@@ -151,6 +152,26 @@ test('16. UI-1C10 — slither wobble undulates; rotation NEVER goes backwards', 
     'glance targets come from the live orbit only');
   assert.ok(SCRIPT.includes('glanceCoin = null; // reduced motion: information only, no theatrics'),
     'reduced motion disables theatrics');
+});
+
+test('19. UI-1C11 — the surge gait: speed breathes, rotation still never reverses', () => {
+  const m = SCRIPT.match(/function coilGait\([\s\S]*?\n}/);
+  assert.ok(m, 'coilGait exists');
+  const coilGait = new Function(`return ${m[0]}`)();
+  let min = Infinity, max = -Infinity;
+  for (let t = 0; t < 120_000; t += 83) {
+    const g = coilGait(t);
+    assert.ok(Number.isFinite(g) && g > 0, `gait strictly positive (t=${t}, g=${g}) — forward only`);
+    min = Math.min(min, g); max = Math.max(max, g);
+  }
+  assert.ok(min < 0.6, `it genuinely creeps (min ${min.toFixed(2)})`);
+  assert.ok(max > 1.4, `it genuinely surges (max ${max.toFixed(2)})`);
+  assert.ok(max < 2.2, `surges stay serpentine, not frantic (max ${max.toFixed(2)})`);
+  // the gait drives BOTH the idle crawl and the sweep rate…
+  assert.ok(SCRIPT.includes('COIL_IDLE_DEG_S * gait * dtMs'), 'idle crawl surges');
+  assert.ok(SCRIPT.includes('coilAim(coilAngle, target, dtMs, 70 * gait)'), 'prey sweeps surge');
+  // …and reduced motion pins it flat: information, no theatrics
+  assert.ok(SCRIPT.includes('const gait = reduced ? 1 : coilGait(coilClock)'));
 });
 
 test('18. UI-1C10 — no stray circles ring the animal', () => {
