@@ -5,18 +5,20 @@
 // RUMINT nominations/hyped, social baselines) and the configured majors as
 // FALLBACK ONLY. Display attention != biteable.
 //
-// DISPLAY hierarchy (deterministic, doctrine'd in the ticket):
+// DISPLAY hierarchy (deterministic, doctrine'd in the ticket; ATTENTION-1A
+// corrected this header to match the implemented tiers):
 //   TIER 1  active stalking symbol
 //   TIER 2  fresh Wide Eye RIPPLE
 //   TIER 3  fresh RUMINT nomination / HYPED social attention
-//   TIER 4  configured major fallback (quiet, never focal)
+//   TIER 4  remembered durable attention continuity (recent Memory)
+//   TIER 5  configured major fallback (quiet, never focal, fallback: true)
 // Within a tier the most recent valid observation wins; dedupe by symbol.
 import path from 'node:path';
 import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { dataDir, loadConfig } from '../lib/config.js';
 import { readStalking } from '../state/stalking.js';
 import { readBaseline, computeSignal } from '../rumint/stocktwits.js';
-import { MemoryView } from '../persistence/memory-view.js';
+import { MemoryView, attentionContinuityMeaning } from '../persistence/memory-view.js';
 
 const FRESH_RIPPLE_MS = 15 * 60_000; // a ripple is "fresh attention" for 15m
 const FRESH_NOMINATION_MS = 30 * 60_000;
@@ -140,24 +142,39 @@ function rumintEntries(now) {
 // whose meaning clearly says "recently worth watching", conservatively
 // windowed, expire from display like everything else.
 const MEMORY_CONTINUITY_MS = 2 * 60 * 60_000; // conservative 2h window
-const MEMORY_CONTINUITY_SCAN = 120; // bounded durable read
+// ATTENTION-1A: bounded overfetch of DISTINCT qualifying symbols — enough to
+// fill all six orbit slots even when several durable candidates are
+// superseded by live tier-1/2/3 symbols; never a global recency tail.
+const MEMORY_CONTINUITY_SYMBOLS = 16;
 let _defaultMemView = null;
-async function defaultMemorySource() {
+// ATTENTION-1A: ask the memory the ACTUAL question — recent QUALIFYING
+// attention envelopes inside the declared 2h window, newest per symbol —
+// instead of the old "newest 120 records of everything" global tail, which
+// high-rate unrelated TAPE/RUMINT traffic crowded qualifying events out of
+// long before their declared freshness expired (seen in Production).
+// Cutoff semantics: the window is INCLUSIVE at exactly 2h old (now - ts ===
+// MEMORY_CONTINUITY_MS is still remembered); strictly older is excluded.
+async function defaultMemorySource(now) {
   _defaultMemView ??= new MemoryView();
-  const got = await _defaultMemView.getRecent({ limit: MEMORY_CONTINUITY_SCAN });
+  const got = await _defaultMemView.getRecentAttention({
+    sinceTs: Math.floor((now - MEMORY_CONTINUITY_MS) / 1000),
+    untilTs: Math.floor(now / 1000) + 60, // existing future-nonsense guard, in envelope seconds
+    limit: MEMORY_CONTINUITY_SYMBOLS,
+  });
   return got.records;
 }
 // the ONLY durable event meanings display continuity may read as attention
+// (the same shared gate the purpose-specific query itself enforces)
 function continuityMeaning(rec) {
-  if (rec.observationState !== 'KNOWN' || !rec.symbol) return null;
-  if (rec.eventType === 'WIDEEYE_RIPPLE') return 'remembered Wide Eye ripple';
-  if (rec.eventType === 'RUMOR_OBSERVATION' && rec.payload?.type === 'RUMINT_NOMINATION') return 'remembered RUMINT nomination';
+  const m = attentionContinuityMeaning(rec);
+  if (m === 'WIDEEYE_RIPPLE') return 'remembered Wide Eye ripple';
+  if (m === 'RUMINT_NOMINATION') return 'remembered RUMINT nomination';
   return null;
 }
 async function memoryContinuityEntries(now, memorySource) {
   let records = [];
   try {
-    records = await memorySource();
+    records = await memorySource(now);
   } catch {
     return []; // durable memory unreachable: continuity simply absent
   }

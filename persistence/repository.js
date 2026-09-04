@@ -7,6 +7,7 @@
 // restrictive state can never be lost to a last-write-wins race.
 import { createHash } from 'node:crypto';
 import { validateEnvelope } from '../memory/validate.js';
+import { attentionContinuityMeaning } from '../memory/attention.js';
 import { canonicalJson, durableEventId } from './schema.js';
 import {
   validateControlState,
@@ -405,6 +406,33 @@ export class Repository {
   async memoryLatestBySource(symbol, sourceModule) {
     const r = await this.memoryRecent({ symbol, sourceModule, limit: 1 });
     return r.at(-1) ?? null;
+  }
+
+  // ATTENTION-1A — purpose-specific bounded attention-continuity read.
+  // Asks the ACTUAL question ("newest qualifying attention memory per symbol
+  // inside the declared window"), never "the newest N rows of everything":
+  // time-bounded on the indexed ts column ([sinceTs, untilTs] inclusive,
+  // envelope epoch seconds), narrowed to the qualifying event_type values,
+  // DISTINCT ON (symbol) newest-first, at most `limit` distinct symbols.
+  // The envelope LIKE clause is only a cheap SQL prefilter for the RUMINT
+  // nomination meaning (payload lives inside the canonical JSON text); the
+  // exact meaning check re-runs in JS after digest+validator revival, so a
+  // prefilter false-positive can only withhold, never invent.
+  async memoryRecentAttention({ sinceTs, untilTs, limit } = {}) {
+    const { rows } = await this.db.query(
+      `SELECT envelope, digest FROM (
+         SELECT DISTINCT ON (symbol) symbol, ts, envelope, digest
+         FROM serpent_memory_events
+         WHERE ts >= $1 AND ts <= $2 AND symbol IS NOT NULL
+           AND observation_state = 'KNOWN'
+           AND (event_type = 'WIDEEYE_RIPPLE'
+                OR (event_type = 'RUMOR_OBSERVATION' AND envelope LIKE '%"type":"RUMINT_NOMINATION"%'))
+         ORDER BY symbol, ts DESC
+       ) q ORDER BY ts DESC LIMIT $3`,
+      [Math.floor(sinceTs ?? 0), Math.floor(untilTs ?? Number.MAX_SAFE_INTEGER), clamp(limit)]
+    );
+    // newest first; revived rows still face the exact shared meaning gate
+    return this.#reviveMemoryRows(rows).filter((env) => attentionContinuityMeaning(env) !== null);
   }
 
   async memoryCount() {

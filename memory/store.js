@@ -20,10 +20,18 @@ import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { dataDir } from '../lib/config.js';
 import { MEMORY_SCHEMA_VERSION, MEMORY_VERSION } from './schema.js';
 import { validateEnvelope } from './validate.js';
+import { attentionContinuityMeaning } from './attention.js';
 
 export const MAX_QUERY_LIMIT = 500; // hard ceiling; unbounded requests are clamped
 export const DEFAULT_QUERY_LIMIT = 50;
 const RECENT_CACHE_SIZE = 500; // bounded in-RAM tail
+// ATTENTION-1A: bounded read-side projection — newest QUALIFYING attention
+// envelope per symbol (see memory/attention.js). Display continuity must not
+// depend on how many unrelated records arrived after a valid attention event,
+// and must not rescan the events file on every UI poll. On overflow the
+// stalest symbol is evicted — a small, honest display bound, never a rewrite
+// of canonical Memory.
+const ATTENTION_PROJECTION_MAX_SYMBOLS = 64;
 const TAIL_SCAN_BYTES = 8 * 1024 * 1024; // queries beyond the cache scan at most this much file tail
 const MANIFEST_EVERY = 25; // manifest refresh cadence (also on flush/close)
 const RECOVERY_CHUNK_BYTES = 1 << 20; // 1MB streaming-recovery chunks
@@ -43,6 +51,7 @@ export class MemoryStore {
     this.quarantineFile = path.join(dir, 'events.quarantine.jsonl');
     this.ids = new Map(); // id -> persisted-content digest (the documented in-memory growth limitation)
     this.recent = []; // bounded ring of the newest VALIDATED envelopes
+    this.attentionProjection = new Map(); // symbol -> newest qualifying attention envelope (read-side only)
     this.counts = { bySourceModule: {}, byEvidenceFamily: {}, byAvailability: {} };
     this.recordCount = 0;
     this.duplicateSuppressedCount = 0; // cumulative (preserved across restarts)
@@ -180,6 +189,19 @@ export class MemoryStore {
     this.counts.byAvailability[env.observationState] = (this.counts.byAvailability[env.observationState] ?? 0) + 1;
     this.recent.push(env);
     if (this.recent.length > RECENT_CACHE_SIZE) this.recent.shift();
+    // ATTENTION-1A read projection: only VALIDATED records reach #index (both
+    // recovery and append), so nothing corrupt/invalid can enter here.
+    if (attentionContinuityMeaning(env)) {
+      const cur = this.attentionProjection.get(env.symbol);
+      if (!cur || env.ts >= cur.ts) this.attentionProjection.set(env.symbol, env);
+      if (this.attentionProjection.size > ATTENTION_PROJECTION_MAX_SYMBOLS) {
+        let stalest = null;
+        for (const [sym, e] of this.attentionProjection) {
+          if (!stalest || e.ts < this.attentionProjection.get(stalest).ts) stalest = sym;
+        }
+        this.attentionProjection.delete(stalest);
+      }
+    }
   }
 
   hasId(id) {
@@ -368,5 +390,22 @@ export class MemoryStore {
   getLatestBySource(symbol, sourceModule) {
     const r = this.#filtered((e) => e.symbol === symbol && e.sourceModule === sourceModule, 1);
     return r.at(-1) ?? null;
+  }
+
+  // ATTENTION-1A — purpose-specific bounded read: the newest QUALIFYING
+  // attention envelope per symbol inside [sinceTs, untilTs] (envelope epoch
+  // SECONDS, both bounds inclusive), newest first, at most `limit` distinct
+  // symbols. Served from the maintained read projection — never a file
+  // rescan, and never dependent on how much unrelated traffic followed.
+  // Freshness is applied at read time; the projection itself keeps the
+  // newest qualifying record per symbol regardless of window.
+  getRecentAttention({ sinceTs = 0, untilTs = Infinity, limit } = {}) {
+    const n = clamp(limit);
+    const out = [];
+    for (const env of this.attentionProjection.values()) {
+      if (env.ts >= sinceTs && env.ts <= untilTs) out.push(env);
+    }
+    out.sort((a, b) => b.ts - a.ts);
+    return out.slice(0, n).map((e) => structuredClone(e));
   }
 }

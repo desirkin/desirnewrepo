@@ -212,6 +212,20 @@ deterministically ascending by ts, newest N kept. An event older than the
 recent 500 but inside the tail window IS found. There is no "load entire
 memory into RAM" call, deliberately.
 
+ATTENTION-1A adds one purpose-specific read:
+`getRecentAttention({sinceTs, untilTs, limit})` — the newest QUALIFYING
+attention envelope per symbol inside the inclusive window (envelope epoch
+seconds), newest first, at most `limit` distinct symbols. Qualifying
+meanings are defined ONCE in `memory/attention.js` (WIDEEYE_RIPPLE, and
+RUMOR_OBSERVATION whose payload.type is RUMINT_NOMINATION; KNOWN state and
+a real symbol required) and shared by every layer. Locally it is served
+from a small maintained read-side projection (newest qualifying envelope
+per symbol, bounded to 64 symbols, populated during recovery and on
+accept — canonical Memory is never altered); durably it is a time-bounded
+`DISTINCT ON (symbol)` query over the indexed ts column, never a global
+recency tail. Display continuity must not depend on how many unrelated
+records arrived after a valid attention event.
+
 ## CHILDHOOD BRIDGE — READ-ONLY
 
 `memory/childhood.js`: `getChildhoodManifest()`, `getObservationById(id)`,
