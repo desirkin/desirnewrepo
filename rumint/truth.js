@@ -87,6 +87,19 @@ const HOUR_KEY_RE = /^\d{4}-\d{2}-\d{2}T\d{2}$/;
 export const PROVIDER_SYMBOL_RE = /^[A-Z0-9]{1,15}\.X$/;
 export const COIN_RE = /^[A-Z0-9]{1,15}$/;
 
+// Provider symbol mapping (§53, hardened by R1A): the `${coin}.X` convention
+// plus ONE bounded explicit verified override table. No fuzzy matching,
+// ever. The SAME mapping is the checkpoint-validation invariant: a stored
+// baseline claiming providerSymbol BTC.X with canonicalCoin ETH is an
+// identity violation and is refused, so BTC.X evidence can never become
+// HYPED ETH or ETH attention.
+export const PROVIDER_SYMBOL_OVERRIDES = Object.freeze({});
+export function providerSymbolFor(coin) {
+  if (typeof coin !== 'string' || !COIN_RE.test(coin)) return null;
+  return PROVIDER_SYMBOL_OVERRIDES[coin] ?? `${coin}.X`;
+}
+export const mappingConsistent = (coin, providerSymbol) => providerSymbolFor(coin) === providerSymbol;
+
 export function emptyBaseline(providerSymbol, canonicalCoin) {
   return {
     providerSymbol,
@@ -123,6 +136,7 @@ export function ingestPage(baseline, messages, nowMs) {
   const stats = {
     returned: Array.isArray(messages) ? messages.length : 0,
     accepted: 0,
+    acceptedIds: [], // the EXACT canonical ids counted — bound into the R1A poll transaction
     duplicateSamePage: 0,
     alreadySeen: 0,
     invalidId: 0,
@@ -218,6 +232,7 @@ export function ingestPage(baseline, messages, nowMs) {
     }
     remember(id);
     stats.accepted += 1;
+    stats.acceptedIds.push(id);
   }
 
   if (watermarkUnknown) {
@@ -400,7 +415,7 @@ export function hypedSnapshot({ baselines, atMs }) {
     nonzeroEligible: nonzero.length,
     reason: eligibleSymbols === 0 ? 'INSUFFICIENT_OVERNIGHT_COVERAGE' : null,
   };
-  const identity = rumintIdentity({ kind: 'HYPED_SESSION', v: 1, provider: PROVIDER, sessionDate: date, state, symbols });
+  const identity = hypedSessionIdentity({ sessionDate: date, state, symbols });
   return { sessionDate: date, state, symbols, finalizedTs: null, identity, coverage };
 }
 
@@ -410,6 +425,107 @@ export const pollEventIdentity = ({ providerSymbol, retrievedTs, baselineRevisio
 
 export const nominationEventIdentity = ({ pollSourceEventId }) =>
   rumintIdentity({ kind: 'RUMINT_NOMINATION', v: 1, provider: PROVIDER, pollSourceEventId });
+
+export const hypedSessionIdentity = ({ sessionDate, state, symbols }) =>
+  rumintIdentity({ kind: 'HYPED_SESSION', v: 1, provider: PROVIDER, sessionDate, state, symbols });
+
+// Poll-level coverage labels (R1A §blocker-5): each names EXACTLY why
+// retrieval stopped — a continuation failure is never disguised as a page
+// cap, and a page cap is claimed only when the cap was genuinely reached.
+export const POLL_COVERAGES = Object.freeze([
+  COVERAGE_SAMPLED, // intentionally one page (watermark-init / no cursor)
+  'COMPLETE_TO_WATERMARK', // prior boundary proven
+  'SAMPLED_PAGE_CAP', // hard page cap reached with more still available
+  'PARTIAL_CONTINUATION_SCHEMA_FAILURE',
+  'PARTIAL_CONTINUATION_NETWORK_FAILURE',
+  'PARTIAL_CONTINUATION_RATE_LIMIT',
+  'PARTIAL_CONTINUATION_BUDGET_EXHAUSTED',
+]);
+
+// ---- ONE strict RUMINT source contract (R1A §blocker-2) -------------------
+// The single validator for every truth-bearing RUMINT source record — newly
+// prepared events, restored pending debt, crash-transaction reconciliation,
+// and any source-log record used to settle a transaction. Event-specific
+// semantics are validated INCLUDING identity recomputation: parseable JSON
+// with a plausible 40-hex id is not trusted social evidence.
+const Z_REASONS = new Set(['KNOWN', 'INSUFFICIENT_HISTORY', 'ZERO_VARIANCE', 'UNOBSERVED_CURRENT_HOUR']);
+const ACCEL_REASONS = new Set(['KNOWN', 'INSUFFICIENT_CONTIGUOUS_OBSERVATION']);
+const DECISIONS = new Set([
+  'INSUFFICIENT_HISTORY',
+  'ZERO_VARIANCE',
+  'UNOBSERVED_CURRENT_HOUR',
+  'Z_BELOW_THRESHOLD',
+  'ACCELERATION_UNAVAILABLE',
+  'ACCELERATION_NOT_POSITIVE',
+  'NOMINATED',
+]);
+const isIsoTs = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v));
+const nni = (v) => Number.isInteger(v) && v >= 0;
+const numOrNull = (v) => v === null || Number.isFinite(v);
+const SEID_RE = /^[0-9a-f]{40}$/;
+
+export function validateSourceRecord(rec) {
+  if (!rec || typeof rec !== 'object') return 'record not an object';
+  if (!isIsoTs(rec.ts)) return 'invalid ts';
+  if (typeof rec.sourceEventId !== 'string' || !SEID_RE.test(rec.sourceEventId)) return 'invalid sourceEventId';
+  if (rec.type === 'RUMINT_POLL') {
+    if (rec.provider !== PROVIDER) return 'poll: wrong provider';
+    if (typeof rec.canonicalCoin !== 'string' || !COIN_RE.test(rec.canonicalCoin)) return 'poll: invalid canonicalCoin';
+    if (!mappingConsistent(rec.canonicalCoin, rec.providerSymbol)) return 'poll: provider/coin mapping violation';
+    if (!isIsoTs(rec.retrievedTs)) return 'poll: invalid retrievedTs';
+    if (!POLL_COVERAGES.includes(rec.coverage)) return 'poll: invalid coverage';
+    if (!Number.isInteger(rec.pagesFetched) || rec.pagesFetched < 1) return 'poll: invalid pagesFetched';
+    for (const k of ['messagesReturned', 'accepted', 'duplicateSamePage', 'alreadySeen', 'invalidId', 'invalidTimestamp', 'ancientRejected', 'bootstrappedHourRejected']) {
+      if (!nni(rec[k])) return `poll: invalid counter ${k}`;
+    }
+    if (typeof rec.watermarkInitialized !== 'boolean') return 'poll: invalid watermarkInitialized';
+    if (!(rec.velocity === null || nni(rec.velocity))) return 'poll: invalid velocity';
+    for (const k of ['currentHourCount', 'previousHourCount', 'twoHoursPriorCount']) {
+      if (!(rec[k] === null || nni(rec[k]))) return `poll: invalid ${k}`;
+    }
+    if (!nni(rec.historyBucketCount)) return 'poll: invalid historyBucketCount';
+    if (!numOrNull(rec.historyMean) || !numOrNull(rec.historyStd)) return 'poll: invalid history stats';
+    if (!Z_REASONS.has(rec.zReason)) return 'poll: invalid zReason';
+    if ((rec.z === null) !== (rec.zReason !== 'KNOWN')) return 'poll: z/zReason null semantics violated';
+    if (rec.z !== null && !Number.isFinite(rec.z)) return 'poll: invalid z';
+    if (!Number.isFinite(rec.zThreshold)) return 'poll: invalid zThreshold';
+    if (!ACCEL_REASONS.has(rec.accelerationReason)) return 'poll: invalid accelerationReason';
+    if ((rec.acceleration === null) !== (rec.accelerationReason !== 'KNOWN')) return 'poll: acceleration null semantics violated';
+    if (rec.acceleration !== null && !Number.isFinite(rec.acceleration)) return 'poll: invalid acceleration';
+    if (!rec.gates || typeof rec.gates !== 'object') return 'poll: gates missing';
+    for (const g of ['zAvailable', 'zPass', 'accelerationAvailable', 'accelerationPass']) {
+      if (typeof rec.gates[g] !== 'boolean') return `poll: invalid gate ${g}`;
+    }
+    if (!DECISIONS.has(rec.decision)) return 'poll: invalid decision';
+    if (!Number.isInteger(rec.baselineRevision) || rec.baselineRevision < 1) return 'poll: invalid baselineRevision';
+    const expected = pollEventIdentity({ providerSymbol: rec.providerSymbol, retrievedTs: rec.retrievedTs, baselineRevision: rec.baselineRevision });
+    if (rec.sourceEventId !== expected) return 'poll: sourceEventId does not match its semantic basis';
+    return null;
+  }
+  if (rec.type === 'RUMINT_NOMINATION') {
+    if (rec.provider !== PROVIDER) return 'nomination: wrong provider';
+    if (typeof rec.symbol !== 'string' || !COIN_RE.test(rec.symbol)) return 'nomination: invalid symbol';
+    if (!mappingConsistent(rec.symbol, rec.providerSymbol)) return 'nomination: provider/coin mapping violation';
+    if (typeof rec.pollSourceEventId !== 'string' || !SEID_RE.test(rec.pollSourceEventId)) return 'nomination: invalid pollSourceEventId';
+    if (!Number.isFinite(rec.z) || !Number.isFinite(rec.acceleration) || !Number.isFinite(rec.zThreshold)) return 'nomination: invalid numbers';
+    if (rec.sourceEventId !== nominationEventIdentity({ pollSourceEventId: rec.pollSourceEventId })) return 'nomination: sourceEventId does not match its poll';
+    return null;
+  }
+  if (rec.type === 'HYPED_SESSION') {
+    if (rec.provider !== PROVIDER) return 'hyped: wrong provider';
+    if (typeof rec.sessionDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(rec.sessionDate)) return 'hyped: invalid sessionDate';
+    if (!['READY', 'EMPTY', 'PARTIAL'].includes(rec.state)) return 'hyped: invalid finalized state';
+    if (!Array.isArray(rec.symbols) || rec.symbols.length > MAX_SYMBOLS) return 'hyped: symbols invalid or over bound';
+    for (const s of rec.symbols) if (typeof s !== 'string' || !COIN_RE.test(s)) return 'hyped: invalid symbol';
+    if (rec.coverage !== null && (typeof rec.coverage !== 'object' || Array.isArray(rec.coverage))) return 'hyped: invalid coverage';
+    if (rec.sourceEventId !== hypedSessionIdentity({ sessionDate: rec.sessionDate, state: rec.state, symbols: rec.symbols }))
+      return 'hyped: sourceEventId does not match its semantic basis';
+    return null;
+  }
+  return `unknown truth-bearing type ${rec.type}`;
+}
+
+export const PENDING_KIND_TYPES = Object.freeze({ POLL: 'RUMINT_POLL', NOMINATION: 'RUMINT_NOMINATION', HYPED: 'HYPED_SESSION' });
 
 // ---- strict checkpoint validation (§10) -----------------------------------
 const isIso = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v));
@@ -422,6 +538,9 @@ function baselineError(sym, b) {
   if (b.providerSymbol !== sym) return 'providerSymbol key mismatch';
   if (typeof sym !== 'string' || !/^[A-Za-z0-9._-]{1,20}$/.test(sym)) return 'invalid provider symbol';
   if (typeof b.canonicalCoin !== 'string' || !COIN_RE.test(b.canonicalCoin)) return 'invalid canonicalCoin';
+  // R1A identity invariant (§2B): the checkpoint must prove the SAME mapping
+  // the live collector uses — BTC.X evidence may never wear another coin
+  if (!mappingConsistent(b.canonicalCoin, b.providerSymbol)) return 'provider/coin mapping violation';
   if (b.lastMsgId !== null && canonicalMessageId(b.lastMsgId) !== b.lastMsgId) return 'invalid lastMsgId';
   if (!Array.isArray(b.recentSeenMessageIds) || b.recentSeenMessageIds.length > MAX_SEEN_IDS) return 'seen-ID cache invalid or over bound';
   for (const id of b.recentSeenMessageIds) if (canonicalMessageId(id) !== id) return 'non-canonical seen id';
@@ -473,6 +592,35 @@ export function validateCheckpoint(state) {
   }
   const hypedErr = validateHypedState(state.hyped);
   if (hypedErr) return hypedErr;
+  // R1A §2A: restored HYPED cannot be trusted from shape alone. Recompute
+  // the snapshot from the validated restored baselines at the checkpoint's
+  // own saved instant and demand exact semantic agreement — sessionDate,
+  // state, ordered symbols, coverage AND identity. A fake READY ["DOGE"]
+  // riding one BTC.X baseline, or a plausible-looking wrong 40-hex
+  // identity, is refused here, before anything could be published.
+  // UNAVAILABLE (a recorded compute failure) and the never-rolled
+  // placeholder carry no semantic claim and are exempt; runtime re-rolls.
+  const h = state.hyped;
+  const neverRolled = h.sessionDate === null && h.state === 'BUILDING' && h.symbols.length === 0;
+  if (h.state !== 'UNAVAILABLE' && !neverRolled) {
+    let expected;
+    try {
+      expected = hypedSnapshot({ baselines: state.baselines, atMs: Date.parse(state.savedTs) });
+    } catch {
+      return 'hyped semantic recompute failed';
+    }
+    // canonical (key-sorted) comparison: a jsonb round-trip reorders object
+    // keys without changing meaning — key order is never semantic truth
+    if (
+      h.sessionDate !== expected.sessionDate ||
+      h.state !== expected.state ||
+      canonicalJson(h.symbols) !== canonicalJson(expected.symbols) ||
+      canonicalJson(h.coverage ?? null) !== canonicalJson(expected.coverage ?? null) ||
+      h.identity !== expected.identity
+    ) {
+      return 'hyped snapshot contradicts its own baselines (semantic recompute mismatch)';
+    }
+  }
   const ph = state.providerHealth;
   if (!ph || typeof ph !== 'object') return 'providerHealth missing';
   if (!nonNegInt(ph.globalBackoffUntil)) return 'invalid globalBackoffUntil';
@@ -488,17 +636,61 @@ export function validateCheckpoint(state) {
     if (!Number.isInteger(h.cooldownLevel) || h.cooldownLevel < 0 || h.cooldownLevel > 2) return 'invalid cooldownLevel';
     if (h.lastError !== null && (typeof h.lastError !== 'string' || h.lastError.length > MAX_ERROR_CHARS)) return 'invalid lastError';
     if (h.lastErrorTs !== null && !isIso(h.lastErrorTs)) return 'invalid lastErrorTs';
+    if (h.lastContinuationFailure !== undefined && h.lastContinuationFailure !== null) {
+      const c = h.lastContinuationFailure;
+      if (!c || typeof c !== 'object') return 'invalid lastContinuationFailure';
+      if (typeof c.kind !== 'string' || c.kind.length > 64) return 'invalid continuation failure kind';
+      if (!nonNegInt(c.tsMs)) return 'invalid continuation failure tsMs';
+      if (c.error !== null && (typeof c.error !== 'string' || c.error.length > MAX_ERROR_CHARS)) return 'invalid continuation failure error';
+    }
   }
+  // R1A §2C: pending debt is validated by the ONE strict source contract —
+  // a record shaped only like {ts, type, 40-hex id} is not owed truth, and
+  // a kind/type mismatch is refused before it could ever append.
   if (!Array.isArray(state.pendingEvents) || state.pendingEvents.length > MAX_PENDING_EVENTS) return 'pendingEvents invalid or over bound';
   for (const p of state.pendingEvents) {
     if (!p || typeof p !== 'object') return 'pending entry not an object';
     if (!PENDING_KINDS.has(p.kind)) return 'invalid pending kind';
-    const r = p.record;
-    if (!r || typeof r !== 'object') return 'pending record missing';
-    if (typeof r.type !== 'string' || !isIso(r.ts)) return 'pending record shape invalid';
-    if (!(typeof r.sourceEventId === 'string' && HEX40.test(r.sourceEventId))) return 'pending record identity invalid';
+    if (!p.record || typeof p.record !== 'object') return 'pending record missing';
+    if (p.record.type !== PENDING_KIND_TYPES[p.kind]) return 'pending kind/type mismatch';
+    const err = validateSourceRecord(p.record);
+    if (err) return `pending ${p.kind}: ${err}`;
   }
+  // R1A §blocker-1: the prepared poll transaction, when present, binds one
+  // exact recoverable advancement — validated as strictly as everything else.
+  const txnErr = validatePollTransaction(state.pollTransaction);
+  if (txnErr) return txnErr;
   if (!state.counters || typeof state.counters !== 'object') return 'counters missing';
   for (const [k, v] of Object.entries(state.counters)) if (!nonNegInt(v)) return `invalid counter ${k}`;
+  return null;
+}
+
+export function validatePollTransaction(t) {
+  if (t === null || t === undefined) return null;
+  if (typeof t !== 'object') return 'pollTransaction not an object';
+  if (t.version !== 1) return 'pollTransaction: unknown version';
+  if (t.state !== 'PREPARED') return 'pollTransaction: invalid state';
+  if (t.provider !== PROVIDER) return 'pollTransaction: wrong provider';
+  if (typeof t.canonicalCoin !== 'string' || !COIN_RE.test(t.canonicalCoin)) return 'pollTransaction: invalid canonicalCoin';
+  if (!mappingConsistent(t.canonicalCoin, t.providerSymbol)) return 'pollTransaction: provider/coin mapping violation';
+  if (!nonNegInt(t.prePollBaselineRevision)) return 'pollTransaction: invalid prePollBaselineRevision';
+  if (t.candidateBaselineRevision !== t.prePollBaselineRevision + 1) return 'pollTransaction: revision progression violated';
+  if (!Array.isArray(t.acceptedIds) || t.acceptedIds.length > 512) return 'pollTransaction: acceptedIds invalid or over bound';
+  for (const id of t.acceptedIds) if (canonicalMessageId(id) !== id) return 'pollTransaction: non-canonical accepted id';
+  const recErr = validateSourceRecord(t.record);
+  if (recErr) return `pollTransaction record: ${recErr}`;
+  if (t.record.type !== 'RUMINT_POLL') return 'pollTransaction: record is not a poll';
+  if (t.record.sourceEventId !== t.sourceEventId) return 'pollTransaction: identity mismatch with its record';
+  if (t.record.providerSymbol !== t.providerSymbol) return 'pollTransaction: symbol mismatch with its record';
+  if (t.record.baselineRevision !== t.candidateBaselineRevision) return 'pollTransaction: revision mismatch with its record';
+  const bErr = baselineError(t.providerSymbol, t.candidateBaseline);
+  if (bErr) return `pollTransaction candidate baseline: ${bErr}`;
+  if (t.candidateBaseline.baselineRevision !== t.candidateBaselineRevision) return 'pollTransaction: candidate revision mismatch';
+  if (t.nominationRecord !== null && t.nominationRecord !== undefined) {
+    const nErr = validateSourceRecord(t.nominationRecord);
+    if (nErr) return `pollTransaction nomination: ${nErr}`;
+    if (t.nominationRecord.type !== 'RUMINT_NOMINATION') return 'pollTransaction: nomination record wrong type';
+    if (t.nominationRecord.pollSourceEventId !== t.sourceEventId) return 'pollTransaction: nomination not linked to this poll';
+  }
   return null;
 }

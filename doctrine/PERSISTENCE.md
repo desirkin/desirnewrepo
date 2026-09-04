@@ -400,6 +400,19 @@ per-hour observation facts from canonical durable RUMINT_POLL Memory
 observation history away. A republish may restart the process; it may not
 erase the ear's memory.
 
+RUMINT-R1A adds crash consistency on top: the checkpoint also carries the
+one in-flight *prepared poll transaction* (write-ahead, persisted BEFORE
+the corresponding source event may exist), so a crash between source
+append and checkpoint save is finished deterministically on restart —
+the same provider messages can never be counted twice and an emitted poll
+can never be orphaned. Restored checkpoints are validated SEMANTICALLY,
+not just structurally: provider/coin mapping is proven, the stored HYPED
+snapshot must equal a recompute from its own baselines at its own saved
+instant (identity included), and pending debt passes the one strict RUMINT
+source contract. The local checkpoint cache load distinguishes LOADED /
+NOT_FOUND / INVALID — a corrupt cache with no durable authority withholds
+and reports rather than posing as a fresh start.
+
 ## FAIL CLOSED, ALWAYS
 
 Rows are validated before being applied; an internally inconsistent

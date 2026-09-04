@@ -83,6 +83,33 @@ if (!TEST_URL) {
       assert.equal(map.get(`ETH.X@${hour / 1000}`), 7);
       assert.ok(![...map.keys()].some((k) => k.startsWith('DOGE.X')), 'non-numeric velocity contributes nothing');
       assert.ok(![...map.values()].includes(999) && ![...map.values()].includes(888), 'failures and nominations contribute nothing');
+
+      // D3 (R1A): a REAL collector checkpoint — hyped snapshot, transaction
+      // and all — must still validate after the jsonb round-trip, whose key
+      // reordering is not a semantic change. (Regression: the semantic
+      // HYPED recompute once compared key-order-sensitively and withheld
+      // every restart from PostgreSQL.)
+      const { validateCheckpoint, hypedSnapshot, RUMINT_CHECKPOINT_VERSION, emptyBaseline, ingestPage } = await import('../rumint/truth.js');
+      const atMs = 1_750_000_000_000;
+      let b = emptyBaseline('BTC.X', 'BTC');
+      ({ baseline: b } = ingestPage(b, [{ id: 100, created_at: new Date(atMs - 120_000).toISOString() }], atMs - 60_000));
+      const baselines = { 'BTC.X': b };
+      const hy = hypedSnapshot({ baselines, atMs });
+      const full = {
+        version: RUMINT_CHECKPOINT_VERSION,
+        savedTs: new Date(atMs).toISOString(),
+        provider: 'STOCKTWITS',
+        baselines,
+        hyped: { ...hy, finalizedTs: hy.state === 'BUILDING' ? null : new Date(atMs).toISOString() },
+        providerHealth: { globalBackoffUntil: 0, recentRequestTimestamps: [atMs - 5000], symbols: {} },
+        pendingEvents: [],
+        pollTransaction: null,
+        counters: { polls: 1 },
+      };
+      assert.equal(validateCheckpoint(full), null, 'validates in memory');
+      await store.save(full);
+      const roundTripped = (await store.load()).state;
+      assert.equal(validateCheckpoint(roundTripped), null, 'STILL validates after the jsonb round-trip reorders keys');
     } finally {
       try {
         await db.query(`DROP SCHEMA ${SCHEMA} CASCADE`);

@@ -66,7 +66,7 @@ export function fromWideeyeEvent(rec, observedTs = nowIso()) {
 // rumor-propagation graph is inferred — the module does not know one.
 // ---------------------------------------------------------------------
 export function fromRumintEvent(rec, observedTs = nowIso()) {
-  const failed = rec.type === 'RUMINT_POLL_FAILED' || rec.type === 'RUMINT_UNAVAILABLE';
+  const failed = rec.type === 'RUMINT_POLL_FAILED' || rec.type === 'RUMINT_UNAVAILABLE' || rec.type === 'RUMINT_CONTINUATION_FAILED';
   // RUMINT-R1: expanded poll diagnostics ride through UNTOUCHED inside the
   // payload detail — every null keeps its stated reason (zReason,
   // accelerationReason, decision), so a 12-hour forensic query can answer

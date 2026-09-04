@@ -142,10 +142,16 @@ function rumintEntries(now) {
 }
 
 // The canonical HYPED snapshot for the CURRENT ET session date, with honest
-// states. An unreadable/absent/stale-date snapshot is UNAVAILABLE-shaped —
-// never an invented empty set, never yesterday's set worn as today's.
+// states. R1A single-truth invariant (§B4/§61): EVERY consumer — the header
+// (via the status passthrough), the Rumor Room and Attention Tier-3 — reads
+// the SAME field of the SAME atomically-written file, status.json.hyped, so
+// a write failure of any secondary mirror (hyped.json) can never split the
+// truth again. An unreadable/absent/stale-date snapshot is UNAVAILABLE-
+// shaped — never an invented empty set, never yesterday's set worn as
+// today's.
 export function readHypedSnapshot(now = Date.now()) {
-  const raw = readJsonSafe(path.join(dataDir(), 'rumint', 'hyped.json'));
+  const status = readJsonSafe(path.join(dataDir(), 'rumint', 'status.json'));
+  const raw = status?.hyped && typeof status.hyped === 'object' && !Array.isArray(status.hyped) ? status.hyped : null;
   const today = sessionDate(new Date(now));
   if (!raw || typeof raw.state !== 'string') {
     return { sessionDate: today, state: 'UNAVAILABLE', symbols: [], count: null };

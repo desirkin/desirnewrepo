@@ -1,6 +1,6 @@
 # RUMINT DOCTRINE — social chatter intelligence
 
-**Status: ARMED + DURABLE (RUMINT-R1).** `rumint.enabled: true` in config
+**Status: ARMED + DURABLE + CRASH-SEALED (RUMINT-R1A).** `rumint.enabled: true` in config
 (env `RUMINT_ENABLED=false` force-disables regardless of config; when
 disabled the module makes **zero network calls**). The tiered poller runs
 inside `fly.js` within the S-1 budget, with its statistical memory anchored
@@ -198,6 +198,81 @@ state, labels HYPED coins as **OVERNIGHT ATTENTION** (distinct from a
 nomination), and says `NO QUALIFYING SOCIAL SIGNAL` only when the ear is
 healthy and HYPED is a known READY/EMPTY state — "quiet" and "unable to
 calculate" can no longer be confused.
+
+## RUMINT-R1A — crash consistency and publication truth
+
+R1A seals five audit-reproduced windows. No threshold, formula or provider
+changed.
+
+**Prepared poll transaction (write-ahead).** Before a truth-bearing poll
+event may exist independently, a bounded transaction is persisted into the
+checkpoint binding the exact prepared record, sourceEventId, accepted
+provider IDs, pre/candidate baseline revisions and the exact candidate
+baseline. The invariant: *a successfully emitted poll must never exist
+without a recoverable way to finish its baseline advancement.* On restart
+the transaction reconciles against the local source stream by exact
+identity: evidence present → finalize the bound candidate (no re-fetch, no
+re-count); evidence absent → replay the EXACT prepared record with the SAME
+identity, then finalize. retrievedTs, sourceEventId, the accepted-ID set
+and the baseline delta are never regenerated during recovery. If the
+write-ahead can be persisted nowhere, nothing is appended — the evidence
+falls to pending debt under FAILED_DURABILITY honesty instead of becoming
+an unrecoverable claim.
+
+**One strict source contract.** `validateSourceRecord` is the single
+validator for newly prepared events, restored pending debt and crash
+reconciliation: per-type semantics (RUMINT_POLL's full diagnostic field
+list, RUMINT_NOMINATION's poll linkage, HYPED_SESSION's session basis),
+provider/coin mapping consistency against the one verified override table,
+null-reason coherence, and sourceEventId RECOMPUTATION from each record's
+semantic basis. Malformed internal evidence is withheld and counted
+(`internalIntegrityFailures`) — never appended, never used to settle debt.
+
+**Deep checkpoint validation.** Beyond shape: every baseline must prove the
+live mapping (BTC.X can never wear ETH); the stored HYPED snapshot is
+RECOMPUTED from the restored baselines at the checkpoint's own saved
+instant and must agree exactly (sessionDate, state, ordered symbols,
+coverage AND identity) — a fake READY set or a forged 40-hex identity is
+refused before anything could publish; pending debt passes the full source
+contract with kind/type correspondence; a stored transaction validates as
+strictly as everything else. The tick re-rolls HYPED after each poll so
+every saved checkpoint is self-consistent by construction. A rejected
+checkpoint adopts nothing, writes nothing, stalks nothing.
+
+**Safe queue-cap policy.** The pending queue NEVER evicts: evidence whose
+baseline effect was adopted is untouchable. At the hard cap (256 default),
+observation pauses — no poll requests, no baseline advancement, no
+canonical HYPED mutation, no new stalking — status becomes
+`FAILED_EVIDENCE_BACKLOG`, draining continues, and polling resumes only
+when capacity exists. State/evidence atomicity is preserved exactly.
+
+**Independent HYPED publication ACK + single consumer truth.**
+`hypedPublication` (NOT_ATTEMPTED/SAVED/FAILED) tracks the hyped.json
+mirror on its own state — an unrelated checkpoint success can no longer
+overwrite a publication failure, an unchanged snapshot still retries a
+failed publication, and a restore-time failure is visible and retryable;
+RUMINT is DEGRADED while the mirror is unpublished. Structurally, the split
+cannot recur: the header, the Rumor Room and Attention Tier-3 all consume
+the SAME `status.json.hyped` field of the same atomically-written file
+(hyped.json remains a mirror, not a consumer truth, and no third truth
+exists). HEADER H == ROOM SET == ATTENTION SET, for the same publication.
+
+**Explicit partial-continuation coverage.** A continuation page that fails
+after a valid first page keeps the first page's evidence and names the stop
+cause: `PARTIAL_CONTINUATION_SCHEMA_FAILURE` / `_NETWORK_FAILURE` /
+`_RATE_LIMIT` (with the full 429/Retry-After behavior) /
+`_BUDGET_EXHAUSTED`. `SAMPLED_PAGE_CAP` is claimed only when the four-page
+cap was genuinely reached; `COMPLETE_TO_WATERMARK` only when the boundary
+was proven. Each partial failure is counted, recorded as bounded evidence
+(`RUMINT_CONTINUATION_FAILED`), noted in per-symbol health, and keeps the
+cycle DEGRADED for a bounded window — never "HEALTHY as if nothing
+happened", never an observed-zero failure.
+
+**Local checkpoint tri-state.** The local cache load distinguishes LOADED /
+NOT_FOUND / INVALID. With no durable authority, a corrupt local cache is
+`WITHHELD_INVALID_LOCAL_CHECKPOINT` — reported, retried, never silently
+called a fresh start. A valid durable authority overrides a corrupt local
+cache.
 
 ## Signal contract
 

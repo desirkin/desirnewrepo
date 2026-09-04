@@ -319,17 +319,68 @@ test('R1 §92: the two 01:00 ET hours of a fall-back night stay distinct buckets
   assert.equal(b.buckets[k2].count, 1);
 });
 
-// ---- §10 strict checkpoint validation -------------------------------------
+// ---- §10 strict checkpoint validation (deepened by R1A) -------------------
+// A pending record must be a COMPLETE producer-shaped truth-bearing event
+// with a recomputable identity — the exact shape pollOne emits.
+function validPendingPoll(providerSymbol = 'CK.X', baselineRevision = 2) {
+  const retrievedTs = new Date(NOW).toISOString();
+  return {
+    ts: retrievedTs,
+    type: 'RUMINT_POLL',
+    sourceEventId: pollEventIdentity({ providerSymbol, retrievedTs, baselineRevision }),
+    provider: 'STOCKTWITS',
+    canonicalCoin: providerSymbol.replace(/\.X$/, ''),
+    providerSymbol,
+    symbol: providerSymbol,
+    retrievedTs,
+    coverage: 'SAMPLED_SINGLE_PAGE',
+    pagesFetched: 1,
+    messagesReturned: 1,
+    accepted: 1,
+    duplicateSamePage: 0,
+    alreadySeen: 0,
+    invalidId: 0,
+    invalidTimestamp: 0,
+    ancientRejected: 0,
+    bootstrappedHourRejected: 0,
+    watermarkInitialized: false,
+    velocity: 1,
+    currentHourCount: 1,
+    previousHourCount: null,
+    twoHoursPriorCount: null,
+    historyBucketCount: 1,
+    historyMean: null,
+    historyStd: null,
+    z: null,
+    zReason: 'INSUFFICIENT_HISTORY',
+    zThreshold: 3,
+    acceleration: null,
+    accelerationReason: 'INSUFFICIENT_CONTIGUOUS_OBSERVATION',
+    recentBull: 0,
+    recentBear: 0,
+    labeledTotal: 0,
+    sentimentShift: null,
+    gates: { zAvailable: false, zPass: false, accelerationAvailable: false, accelerationPass: false },
+    decision: 'INSUFFICIENT_HISTORY',
+    baselineRevision,
+  };
+}
 function validState() {
   const b = wm100('CK.X');
+  const savedTs = new Date(NOW).toISOString();
+  // R1A: the stored HYPED snapshot must agree with a semantic recompute
+  // from its own baselines at its own saved instant — so the fixture
+  // carries exactly that truth, never an asserted one.
+  const hyped = { ...hypedSnapshot({ baselines: { 'CK.X': b }, atMs: NOW }), finalizedTs: savedTs };
   return {
     version: RUMINT_CHECKPOINT_VERSION,
-    savedTs: new Date(NOW).toISOString(),
+    savedTs,
     provider: 'STOCKTWITS',
     baselines: { 'CK.X': b },
-    hyped: { sessionDate: '2026-09-02', state: 'READY', symbols: ['BTC'], finalizedTs: new Date(NOW).toISOString(), identity: 'a'.repeat(40), coverage: null },
+    hyped,
     providerHealth: { globalBackoffUntil: 0, recentRequestTimestamps: [NOW - 1000], symbols: { 'CK.X': { failureStreak: 0, unavailableUntil: 0, cooldownLevel: 0, lastError: null, lastErrorTs: null, lastFailureKind: null } } },
-    pendingEvents: [{ kind: 'POLL', record: { ts: new Date(NOW).toISOString(), type: 'RUMINT_POLL', sourceEventId: 'b'.repeat(40) } }],
+    pendingEvents: [{ kind: 'POLL', record: validPendingPoll() }],
+    pollTransaction: null,
     counters: { polls: 1 },
   };
 }

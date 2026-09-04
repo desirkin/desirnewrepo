@@ -18,6 +18,7 @@
 //   - failure is never permanent deafness: bounded 15/30/60m cooldowns with
 //     probes and RECOVERED transitions, persisted across republish (§48-49).
 import path from 'node:path';
+import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { loadConfig, dataDir } from '../lib/config.js';
 import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
@@ -30,7 +31,6 @@ import {
   MAX_REQUEST_STAMPS,
   MAX_SYMBOLS,
   MAX_BUCKET_HOURS,
-  COIN_RE,
   COVERAGE_SAMPLED,
   COVERAGE_BOOTSTRAPPED,
   canonicalMessageId,
@@ -44,10 +44,16 @@ import {
   nominationEventIdentity,
   utcHourKey,
   validateCheckpoint,
+  validateSourceRecord,
+  providerSymbolFor,
+  canonicalJson,
 } from './truth.js';
 import { stalk, readStalking, writeHyped } from '../state/stalking.js';
 
-export const RUMINT_COLLECTOR_VERSION = 'RUMINT-R1';
+export const RUMINT_COLLECTOR_VERSION = 'RUMINT-R1A';
+// The mapping now lives in the pure truth core (it is a checkpoint
+// invariant, not a poller detail); re-exported here for existing consumers.
+export { providerSymbolFor } from './truth.js';
 
 const eventsFile = () => path.join(dataDir(), 'rumint', 'events.jsonl');
 const statusFile = () => path.join(dataDir(), 'rumint', 'status.json');
@@ -133,14 +139,9 @@ export class Budget {
   }
 }
 
-// Provider symbol mapping (§53): the `${coin}.X` convention plus a bounded
-// explicit override table. No fuzzy matching, ever — an unmappable coin gets
-// an explicit UNMAPPED_PROVIDER_SYMBOL status instead of a lookalike stream.
-const PROVIDER_SYMBOL_OVERRIDES = Object.freeze({});
-export function providerSymbolFor(coin) {
-  if (typeof coin !== 'string' || !COIN_RE.test(coin)) return null;
-  return PROVIDER_SYMBOL_OVERRIDES[coin] ?? `${coin}.X`;
-}
+// R1A: a recent partial-continuation failure keeps the cycle honestly
+// DEGRADED for this long — bounded, so one blip never degrades forever.
+const CONTINUATION_DEGRADE_MS = 15 * 60_000;
 
 export function startRumint({
   log = console.log,
@@ -151,6 +152,7 @@ export function startRumint({
   intervalMs = 1000,
   checkpointStore = null,
   memoryBootstrapSource = null,
+  maxPendingEvents = MAX_PENDING_EVENTS,
 } = {}) {
   if (!rumintEnabled(config)) {
     log(`[${nowIso()}] RUMINT dark — ears off, zero network`);
@@ -174,6 +176,8 @@ export function startRumint({
     hyped: null, // the ONE canonical HYPED snapshot (§38)
     symbolHealth: {}, // providerSymbol -> {failureStreak, unavailableUntil, cooldownLevel, lastError, lastErrorTs, lastFailureKind}
     pending: [], // owed source-event debt: {kind, record, armStalkCoin?}
+    pollTransaction: null, // R1A write-ahead: one in-flight recoverable poll advancement
+    hypedPublication: 'NOT_ATTEMPTED', // R1A: hyped.json mirror ACK — NOT_ATTEMPTED | SAVED | FAILED
     counters: {
       polls: 0,
       nominations: 0,
@@ -181,9 +185,13 @@ export function startRumint({
       durableCheckpointFailures: 0,
       providerSchemaFailures: 0,
       providerIntegrityFailures: 0,
+      internalIntegrityFailures: 0, // R1A: malformed INTERNAL evidence withheld, never appended
+      continuationFailures: 0, // R1A: continuation pages that failed after a valid first page
+      backlogRefusals: 0, // R1A: advancements refused because pending debt was at its hard cap
       evidenceDrops: 0,
     },
     lastEvidenceDrop: null,
+    lastIntegrityFailure: null,
     lastPollTs: null,
     lastSuccessTs: null,
     localSave: 'NOT_YET_SAVED', // NOT_YET_SAVED | SAVED | FAILED
@@ -202,24 +210,62 @@ export function startRumint({
     }
   }
 
-  function recordDrop(record) {
-    S.counters.evidenceDrops += 1;
-    S.lastEvidenceDrop = { ts: iso(), type: record.type, sourceEventId: record.sourceEventId ?? null };
+  function recordIntegrityFailure(record, err) {
+    S.counters.internalIntegrityFailures += 1;
+    S.lastIntegrityFailure = { ts: iso(), type: record?.type ?? null, error: boundedError(err) };
+  }
+
+  // R1A crash reconciliation: does the local source stream already carry a
+  // record with this exact identity? Bounded 1MB tail scan — cheap string
+  // check first, JSON confirmation second. An unreadable stream reads as
+  // absent (a same-identity re-append is deduplicated downstream by Memory).
+  const SOURCE_TAIL_BYTES = 1 << 20;
+  function sourceHasEvent(sourceEventId) {
+    try {
+      const f = eventsFile();
+      if (!existsSync(f)) return false;
+      const size = statSync(f).size;
+      const start = Math.max(0, size - SOURCE_TAIL_BYTES);
+      const fd = openSync(f, 'r');
+      let text;
+      try {
+        const buf = Buffer.alloc(size - start);
+        readSync(fd, buf, 0, buf.length, start);
+        text = buf.toString('utf8');
+      } finally {
+        closeSync(fd);
+      }
+      if (!text.includes(sourceEventId)) return false;
+      for (const line of text.split('\n')) {
+        if (!line.includes(sourceEventId)) continue;
+        try {
+          if (JSON.parse(line).sourceEventId === sourceEventId) return true;
+        } catch {
+          // torn tail line — never confirmation
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   // Durable ACK for truth-bearing evidence (POLL / NOMINATION / HYPED):
-  // append now, or hold the EXACT prepared record as bounded pending debt so
-  // a restart replays the same identity — never a regenerated timestamp (§44).
+  // validated by the ONE strict source contract, then appended now or held
+  // as bounded pending debt replaying the EXACT identity (§44). R1A: the
+  // queue NEVER evicts — owed evidence whose baseline effect was adopted is
+  // untouchable; at the hard cap new advancement is REFUSED instead (§B3).
   function emitEvidence(kind, record, { armStalkCoin = null } = {}) {
     if (S.stopped) return 'CANCELLED_STOPPED';
+    const invalid = validateSourceRecord(record);
+    if (invalid) {
+      recordIntegrityFailure(record, invalid); // malformed internal evidence: WITHHELD, never appended
+      return 'WITHHELD_INVALID';
+    }
     if (tryAppend(record)) return 'ACKED';
-    if (S.pending.length >= MAX_PENDING_EVENTS) {
-      const i = S.pending.findIndex((p) => p.kind === 'POLL'); // descriptive polls yield before nominations/HYPED
-      if (i >= 0) recordDrop(S.pending.splice(i, 1)[0].record);
-      else {
-        recordDrop(record); // counted data loss, never silent
-        return 'DROPPED';
-      }
+    if (S.pending.length >= maxPendingEvents) {
+      S.counters.backlogRefusals += 1;
+      return 'BACKLOG_FULL'; // the caller must NOT advance truth past this
     }
     S.pending.push({ kind, record, armStalkCoin });
     return 'QUEUED';
@@ -233,6 +279,15 @@ export function startRumint({
   async function drainPending() {
     while (S.pending.length > 0 && !S.stopped) {
       const head = S.pending[0];
+      // R1A: owed debt settles ONLY through the strict source contract — a
+      // malformed entry (however it got here) is dropped as an integrity
+      // failure, never appended, never used to settle anything.
+      const invalid = validateSourceRecord(head.record);
+      if (invalid) {
+        recordIntegrityFailure(head.record, invalid);
+        S.pending.shift();
+        continue;
+      }
       if (!tryAppend(head.record)) return;
       S.pending.shift();
       // Only a SAME-PROCESS owed nomination may arm stalking once its
@@ -241,6 +296,39 @@ export function startRumint({
       // local and deliberately stripped from the persisted checkpoint.
       if (head.armStalkCoin && !S.stopped) doStalk(head.armStalkCoin, head.record);
     }
+  }
+
+  // ---- R1A prepared-poll transaction recovery (§blocker-1) ----------------
+  // The invariant: a successfully emitted poll must never exist without a
+  // recoverable way to finish its baseline advancement. The transaction was
+  // persisted (write-ahead) BEFORE its event could exist; on restart we
+  // reconcile against the local source stream by exact identity and FINISH
+  // the advancement deterministically — never re-fetching, never re-counting,
+  // never regenerating retrievedTs/sourceEventId/accepted-ID set.
+  function recoverTransaction() {
+    const t = S.pollTransaction;
+    if (!t) return true;
+    const invalid = validateSourceRecord(t.record);
+    if (invalid) {
+      // malformed transactions settle NOTHING (validateCheckpoint should
+      // have refused the whole checkpoint; this is defense in depth)
+      recordIntegrityFailure(t.record, invalid);
+      S.pollTransaction = null;
+      return true;
+    }
+    if (!sourceHasEvent(t.sourceEventId)) {
+      // the event never made it (crash between transaction persist and
+      // append): replay the EXACT prepared record with the SAME identity
+      if (!tryAppend(t.record)) return false; // writer down: keep the transaction, retry, no polling meanwhile
+    }
+    S.baselines[t.providerSymbol] = t.candidateBaseline; // finalize exactly the bound candidate
+    S.counters.polls += 1;
+    if (t.nominationRecord && validateSourceRecord(t.nominationRecord) === null && !sourceHasEvent(t.nominationRecord.sourceEventId)) {
+      tryAppend(t.nominationRecord); // best-effort evidence completion — recovery NEVER arms stalking (§46/§81)
+    }
+    S.pollTransaction = null;
+    log(`[${iso()}] RUMINT recovered an interrupted poll transaction for ${t.providerSymbol} (rev ${t.candidateBaselineRevision}) — no re-count`);
+    return true;
   }
 
   // ---- checkpoint build / adopt -------------------------------------------
@@ -254,8 +342,22 @@ export function startRumint({
       hyped: S.hyped ?? { sessionDate: null, state: 'BUILDING', symbols: [], finalizedTs: null, identity: null, coverage: null },
       providerHealth: { ...budget.snapshot(now()), symbols: S.symbolHealth },
       pendingEvents: S.pending.map(({ kind, record }) => ({ kind, record })), // armStalk stripped: restart never re-arms
+      pollTransaction: S.pollTransaction, // R1A: the one in-flight recoverable advancement, if any
       counters: S.counters,
     };
+  }
+
+  // R1A publication ACK (§blocker-4): hyped.json is the display MIRROR of
+  // the canonical snapshot; its write success is tracked on its OWN state,
+  // never conflated with checkpoint durability — an unrelated checkpoint
+  // success can no longer overwrite a HYPED publication failure.
+  function writeHypedSafe(snap) {
+    try {
+      writeHyped(snap);
+      S.hypedPublication = 'SAVED';
+    } catch {
+      S.hypedPublication = 'FAILED'; // visible, retried even while the snapshot itself is unchanged
+    }
   }
 
   function adoptCheckpoint(state) {
@@ -264,14 +366,9 @@ export function startRumint({
     S.symbolHealth = state.providerHealth.symbols ?? {};
     budget.restore(state.providerHealth, now());
     S.pending = (state.pendingEvents ?? []).map(({ kind, record }) => ({ kind, record, armStalkCoin: null }));
+    S.pollTransaction = state.pollTransaction ?? null;
     for (const [k, v] of Object.entries(state.counters ?? {})) if (k in S.counters) S.counters[k] = v;
-    if (S.hyped) {
-      try {
-        writeHyped(S.hyped); // republish the restored canonical snapshot to disk consumers
-      } catch {
-        // display file write failure never blocks initialization; status will degrade via localSave
-      }
-    }
+    if (S.hyped) writeHypedSafe(S.hyped); // restore-time publication failure is visible AND retryable
   }
 
   // ---- one-time bootstrap from durable RUMINT_POLL Memory (§13-14) --------
@@ -338,11 +435,14 @@ export function startRumint({
       return true;
     }
     // No durable row (or no durable core): a VALID local checkpoint from a
-    // same-VM restart is real validated authority.
+    // same-VM restart is real validated authority. R1A: ABSENT and
+    // UNREADABLE/CORRUPT local caches are DIFFERENT truths — a corrupt local
+    // cache with no durable authority is never silently called fresh.
     const local = readLocalCheckpoint();
-    const localErr = local ? validateCheckpoint(local) : 'absent';
-    if (local && !localErr) {
-      adoptCheckpoint(local);
+    const localErr = local.outcome === 'LOADED' ? validateCheckpoint(local.state) : local.outcome === 'INVALID' ? local.error : null;
+    const localCorrupt = local.outcome === 'INVALID' || (local.outcome === 'LOADED' && localErr !== null);
+    if (local.outcome === 'LOADED' && !localErr) {
+      adoptCheckpoint(local.state);
       S.initState = outcome.outcome === 'UNAVAILABLE' ? 'RESTORED_LOCAL_DURABLE_UNAVAILABLE' : 'RESTORED_LOCAL';
       S.initialized = true;
       return true;
@@ -351,7 +451,14 @@ export function startRumint({
       // configured durable truth exists but cannot be read: "I could not
       // read RUMINT history" is NEVER "RUMINT has no history" — withhold
       S.initState = 'WITHHELD_DURABLE_UNAVAILABLE';
-      S.initDetail = boundedError(outcome.error ?? 'durable checkpoint unavailable');
+      S.initDetail = boundedError(localCorrupt ? `durable unavailable AND local checkpoint corrupt: ${localErr}` : outcome.error ?? 'durable checkpoint unavailable');
+      return false;
+    }
+    if (localCorrupt) {
+      // durable authority is honestly absent and the local cache is corrupt:
+      // report the truth and withhold rather than inventing a fresh start
+      S.initState = 'WITHHELD_INVALID_LOCAL_CHECKPOINT';
+      S.initDetail = boundedError(localErr);
       return false;
     }
     if (outcome.outcome === 'NOT_FOUND' && memoryBootstrapSource) {
@@ -420,23 +527,35 @@ export function startRumint({
       };
     }
     const cur = S.hyped;
+    // R1A: identity participates in the change comparison — a stored
+    // identity disagreeing with the recomputed one can never survive as-is.
+    // Comparisons are canonical (key-sorted): a jsonb-restored snapshot with
+    // reordered keys is the same truth, not a change.
     const changed =
       !cur ||
       cur.sessionDate !== snap.sessionDate ||
       cur.state !== snap.state ||
-      JSON.stringify(cur.symbols) !== JSON.stringify(snap.symbols) ||
-      JSON.stringify(cur.coverage ?? null) !== JSON.stringify(snap.coverage ?? null);
-    if (!changed) return;
+      cur.identity !== snap.identity ||
+      canonicalJson(cur.symbols) !== canonicalJson(snap.symbols) ||
+      canonicalJson(cur.coverage ?? null) !== canonicalJson(snap.coverage ?? null);
+    if (!changed) {
+      // §B4: an unchanged snapshot still RETRIES a failed publication —
+      // the mirror converges without requiring a semantic HYPED change
+      if (S.hypedPublication === 'FAILED' && cur) writeHypedSafe(cur);
+      return;
+    }
+    // §B3: while owed evidence sits at its hard cap, canonical HYPED does
+    // not mutate (baselines are frozen too); publication retries continue
+    if (S.pending.length >= maxPendingEvents) {
+      if (S.hypedPublication === 'FAILED' && cur) writeHypedSafe(cur);
+      return;
+    }
     const finalized = snap.state === 'READY' || snap.state === 'EMPTY' || snap.state === 'PARTIAL';
     // finalizedTs marks when THIS identity finalized; a coverage-detail
     // refresh under the same identity keeps the original finalization time
     snap.finalizedTs = finalized ? (cur && cur.identity === snap.identity && cur.finalizedTs ? cur.finalizedTs : iso()) : null;
     S.hyped = snap;
-    try {
-      writeHyped(snap); // hyped.json carries the same canonical object as status.json — one truth
-    } catch {
-      S.localSave = 'FAILED';
-    }
+    writeHypedSafe(snap); // hyped.json mirrors the same canonical object as status.json — one truth
     if (finalized && snap.identity && snap.identity !== cur?.identity) {
       // deterministic session identity (§42): same finalized date+state+set
       // replays to the same id (restart dedupes); a different set is new
@@ -543,17 +662,33 @@ export function startRumint({
       handleFailure(coin, providerSymbol, { message: page.detail, classification: 'PROVIDER_SCHEMA_ERROR' });
       return;
     }
-    // ---- bounded cursor continuation (§28-§30) ----------------------------
+    // ---- bounded cursor continuation (§28-§30, R1A §B5) -------------------
     // With a KNOWN watermark, keep paging older (?max=<oldest id>) until the
     // page provably reaches the previous boundary (an id <= watermark, or
     // the provider says nothing older exists) or the hard page cap/budget
-    // stops us. The coverage label states exactly which happened; an unknown
-    // watermark takes only the first page (watermark-only initialization).
+    // stops us. R1A: the coverage label names EXACTLY why retrieval stopped
+    // — a failed continuation page is a recorded partial-coverage failure
+    // (counted, health-noted), never disguised as a page cap; the valid
+    // first page's evidence is always preserved. An unknown watermark takes
+    // only the first page (watermark-only initialization).
     const allMessages = [...page.messages];
     const validIds = (msgs) => msgs.map((m) => canonicalMessageId(m?.id)).filter(Boolean);
     const reachedBoundary = (msgs, cursor) => {
       if (prev.lastMsgId !== null && validIds(msgs).some((id) => !idGreater(id, prev.lastMsgId))) return true;
       return cursor ? cursor.more === false : false;
+    };
+    const continuationFailure = (kind, error) => {
+      S.counters.continuationFailures += 1;
+      const h = (S.symbolHealth[providerSymbol] ??= {
+        failureStreak: 0,
+        unavailableUntil: 0,
+        cooldownLevel: 0,
+        lastError: null,
+        lastErrorTs: null,
+        lastFailureKind: null,
+      });
+      h.lastContinuationFailure = { kind, tsMs: now(), error: boundedError(error) };
+      tryAppend({ ts: iso(), type: 'RUMINT_CONTINUATION_FAILED', symbol: providerSymbol, coin, classification: kind, error: boundedError(error) });
     };
     let pagesFetched = 1;
     let coverage;
@@ -561,23 +696,47 @@ export function startRumint({
       coverage = COVERAGE_SAMPLED; // watermark init: one page, by design
     } else if (reachedBoundary(page.messages, page.cursor)) {
       coverage = 'COMPLETE_TO_WATERMARK';
+    } else if (!page.cursor) {
+      coverage = COVERAGE_SAMPLED; // provider offered no cursor: intentionally one page
+    } else if (page.cursor.more === true && !canonicalMessageId(page.cursor.max)) {
+      coverage = 'PARTIAL_CONTINUATION_SCHEMA_FAILURE'; // cursor promises more but is unusable
+      continuationFailure('PARTIAL_CONTINUATION_SCHEMA_FAILURE', 'cursor.max is not a canonical message id');
+    } else if (page.cursor.more !== true) {
+      coverage = COVERAGE_SAMPLED; // no more pages claimed and boundary unproven: an honest single-page sample
     } else {
-      coverage = page.cursor?.more === true ? 'SAMPLED_PAGE_CAP' : COVERAGE_SAMPLED;
+      coverage = 'SAMPLED_PAGE_CAP'; // provisional: proven below, or reclassified by the exact stop cause
       let cursor = page.cursor;
-      while (cursor?.more === true && canonicalMessageId(cursor.max) && pagesFetched < MAX_POLL_PAGES && !S.stopped) {
+      while (cursor?.more === true && canonicalMessageId(cursor.max) && !S.stopped) {
+        if (pagesFetched >= MAX_POLL_PAGES) break; // genuine page cap: SAMPLED_PAGE_CAP stands
         await sleepImpl(budget.spacingMs); // politeness floor holds inside one poll too
-        if (S.stopped || !budget.canRequest(now())) break;
+        if (S.stopped) break;
+        if (!budget.canRequest(now())) {
+          coverage = 'PARTIAL_CONTINUATION_BUDGET_EXHAUSTED';
+          break;
+        }
         budget.recordRequest(now());
         let more;
         try {
           more = await fetchSymbolPage(providerSymbol, { config, fetchImpl, signal: abort.signal, maxId: canonicalMessageId(cursor.max) });
         } catch (err) {
           if (S.stopped) return;
-          if (err.status === 429) handleFailure(coin, providerSymbol, err); // global backoff engages; partial evidence is kept
-          break;
+          if (err.status === 429) {
+            coverage = 'PARTIAL_CONTINUATION_RATE_LIMIT';
+            handleFailure(coin, providerSymbol, err); // global backoff + Retry-After behavior preserved
+            continuationFailure('PARTIAL_CONTINUATION_RATE_LIMIT', err.message);
+          } else {
+            coverage = 'PARTIAL_CONTINUATION_NETWORK_FAILURE';
+            continuationFailure('PARTIAL_CONTINUATION_NETWORK_FAILURE', err.message);
+          }
+          break; // the valid first-page evidence stands
         }
         if (S.stopped) return;
-        if (!more?.ok) break; // an unusable continuation page ends continuation; the first page's evidence stands
+        if (!more?.ok) {
+          coverage = 'PARTIAL_CONTINUATION_SCHEMA_FAILURE';
+          S.counters.providerSchemaFailures += 1;
+          continuationFailure('PARTIAL_CONTINUATION_SCHEMA_FAILURE', more?.detail ?? 'unusable continuation page');
+          break; // never an observed-zero failure; the first page's evidence stands
+        }
         pagesFetched += 1;
         allMessages.push(...more.messages);
         if (reachedBoundary(more.messages, more.cursor)) {
@@ -585,6 +744,11 @@ export function startRumint({
           break;
         }
         cursor = more.cursor;
+        if (cursor?.more === true && !canonicalMessageId(cursor.max)) {
+          coverage = 'PARTIAL_CONTINUATION_SCHEMA_FAILURE';
+          continuationFailure('PARTIAL_CONTINUATION_SCHEMA_FAILURE', 'continuation cursor.max is not a canonical message id');
+          break;
+        }
       }
     }
     if (S.stopped) return;
@@ -632,13 +796,78 @@ export function startRumint({
       decision: sig.decision,
       baselineRevision: candidate.baselineRevision,
     };
+    const nomRecord =
+      sig.decision === 'NOMINATED' && shouldNominate({ zVelocity: sig.zVelocity, acceleration: sig.acceleration }, config)
+        ? {
+            ts: iso(),
+            type: 'RUMINT_NOMINATION',
+            sourceEventId: nominationEventIdentity({ pollSourceEventId: pollRecord.sourceEventId }),
+            pollSourceEventId: pollRecord.sourceEventId,
+            provider: PROVIDER,
+            symbol: coin,
+            providerSymbol,
+            z: sig.zVelocity,
+            acceleration: sig.acceleration,
+            zThreshold: sig.zThreshold,
+          }
+        : null;
+    // ---- R1A prepared-poll transaction (§blocker-1) -----------------------
+    // WRITE-AHEAD: before the truth-bearing event may exist independently,
+    // persist a bounded transaction binding the exact record, identity,
+    // accepted ids and candidate baseline — so a crash between source
+    // append and checkpoint save can always be finished deterministically,
+    // and the same provider messages can never be counted twice.
+    S.pollTransaction = {
+      version: 1,
+      state: 'PREPARED',
+      provider: PROVIDER,
+      canonicalCoin: coin,
+      providerSymbol,
+      prePollBaselineRevision: prev.baselineRevision ?? 0,
+      candidateBaselineRevision: candidate.baselineRevision,
+      acceptedIds: stats.acceptedIds,
+      record: pollRecord,
+      sourceEventId: pollRecord.sourceEventId,
+      candidateBaseline: candidate,
+      nominationRecord: nomRecord,
+    };
+    const persisted = await saveCheckpoint();
+    if (S.stopped) return; // the persisted transaction recovers on the next start — nothing mutates now
+    if (!persisted.localOk && !persisted.durableOk) {
+      // the write-ahead could not be recorded ANYWHERE: an emitted poll
+      // would be unrecoverable after a crash, so nothing is appended. The
+      // evidence is held as pending debt (RAM until a save lands) and the
+      // advancement stays honest under FAILED_DURABILITY semantics (§84).
+      S.pollTransaction = null;
+      if (S.pending.length >= maxPendingEvents) {
+        S.counters.backlogRefusals += 1;
+        return; // no capacity for the debt either: no advancement at all
+      }
+      if (validateSourceRecord(pollRecord)) {
+        recordIntegrityFailure(pollRecord, 'self-built poll record failed the source contract');
+        return;
+      }
+      S.pending.push({ kind: 'POLL', record: pollRecord, armStalkCoin: null });
+      if (nomRecord && S.pending.length < maxPendingEvents && validateSourceRecord(nomRecord) === null) {
+        S.pending.push({ kind: 'NOMINATION', record: nomRecord, armStalkCoin: coin });
+      }
+      S.baselines[providerSymbol] = candidate;
+      S.lastSuccessTs = iso();
+      S.counters.polls += 1;
+      return;
+    }
     const disposition = emitEvidence('POLL', pollRecord);
-    if (disposition === 'DROPPED' || disposition === 'CANCELLED_STOPPED') {
-      // baseline ACK discipline (§45): with no durable representation of
-      // the evidence, the baseline advancement is NOT adopted
+    if (disposition !== 'ACKED' && disposition !== 'QUEUED') {
+      // WITHHELD_INVALID / BACKLOG_FULL / CANCELLED_STOPPED: no durable
+      // representation of the evidence -> the advancement is NOT adopted
+      // (§45), and the persisted write-ahead is retracted so a restart
+      // cannot recover an advancement the live process refused.
+      S.pollTransaction = null;
+      if (disposition !== 'CANCELLED_STOPPED') await saveCheckpoint();
       return;
     }
     S.baselines[providerSymbol] = candidate;
+    S.pollTransaction = null; // completed in-process; the tick-end save persists the finished truth
     S.lastSuccessTs = iso();
     S.counters.polls += 1;
     const h = S.symbolHealth[providerSymbol];
@@ -649,19 +878,7 @@ export function startRumint({
         log(`[${iso()}] RUMINT ${coin} RECOVERED — normal polling restored`);
       }
     }
-    if (sig.decision === 'NOMINATED' && shouldNominate({ zVelocity: sig.zVelocity, acceleration: sig.acceleration }, config)) {
-      const nomRecord = {
-        ts: iso(),
-        type: 'RUMINT_NOMINATION',
-        sourceEventId: nominationEventIdentity({ pollSourceEventId: pollRecord.sourceEventId }),
-        pollSourceEventId: pollRecord.sourceEventId,
-        provider: PROVIDER,
-        symbol: coin,
-        providerSymbol,
-        z: sig.zVelocity,
-        acceleration: sig.acceleration,
-        zThreshold: sig.zThreshold,
-      };
+    if (nomRecord) {
       // §47: evidence lands (or is durably owed) BEFORE any stalking exists
       const nd = emitEvidence('NOMINATION', nomRecord, { armStalkCoin: coin });
       if (nd === 'ACKED') {
@@ -669,7 +886,7 @@ export function startRumint({
         doStalk(coin, nomRecord);
       }
       // QUEUED: stalking waits until drainPending appends the owed record;
-      // DROPPED/CANCELLED: an unrecorded claim never arms stalking
+      // BACKLOG_FULL/WITHHELD/CANCELLED: an unrecorded claim never arms stalking
     }
   }
 
@@ -701,10 +918,23 @@ export function startRumint({
         else counts.UNAVAILABLE += 1;
       }
       const failedDurability = S.pending.length > 0 && S.localSave === 'FAILED' && S.durableSave !== 'DURABLE' && S.durableSave !== 'NOT_CONFIGURED';
+      const backlogFull = S.pending.length >= maxPendingEvents;
+      const recentContinuationFailure = Object.values(S.symbolHealth).some(
+        (h) => h?.lastContinuationFailure && nowMs - h.lastContinuationFailure.tsMs < CONTINUATION_DEGRADE_MS
+      );
       let status;
       if (!S.initialized) status = S.initState; // INITIALIZING / WITHHELD_*
       else if (failedDurability) status = 'FAILED_DURABILITY';
-      else if (S.durableSave === 'AT_RISK' || S.localSave === 'FAILED' || S.hyped?.state === 'UNAVAILABLE' || S.counters.evidenceDrops > 0)
+      else if (backlogFull) status = 'FAILED_EVIDENCE_BACKLOG'; // §B3: observation paused behind owed evidence
+      else if (
+        S.durableSave === 'AT_RISK' ||
+        S.localSave === 'FAILED' ||
+        S.hyped?.state === 'UNAVAILABLE' ||
+        S.hypedPublication === 'FAILED' || // §B4: canonical HYPED not successfully published to its mirror
+        S.counters.evidenceDrops > 0 ||
+        S.counters.internalIntegrityFailures > 0 ||
+        recentContinuationFailure // §B5: a recent partial-coverage failure is not "nothing happened"
+      )
         status = 'DEGRADED';
       else status = 'HEALTHY';
       const hyped = S.hyped ?? { sessionDate: null, state: S.initialized ? 'BUILDING' : 'UNAVAILABLE', symbols: [], finalizedTs: null, identity: null, coverage: null };
@@ -729,14 +959,21 @@ export function startRumint({
         globalBackoffUntil: budget.backoffUntil > nowMs ? budget.backoffUntil : null,
         localDurability: S.localSave,
         deploymentDurability: S.durableSave,
+        hypedPublication: S.hypedPublication, // §B4: independent mirror ACK, never checkpoint durability
         pendingEvidence: S.pending.length,
+        pendingCapacity: maxPendingEvents,
+        pollTransactionOutstanding: Boolean(S.pollTransaction),
         unpersistedPendingEvidence: failedDurability ? S.pending.length : 0,
         evidenceDrops: S.counters.evidenceDrops,
         lastEvidenceDrop: S.lastEvidenceDrop,
+        backlogRefusals: S.counters.backlogRefusals,
         sourceWriteFailures: S.counters.sourceWriteFailures,
         durableCheckpointFailures: S.counters.durableCheckpointFailures,
         providerSchemaFailures: S.counters.providerSchemaFailures,
         providerIntegrityFailures: S.counters.providerIntegrityFailures,
+        internalIntegrityFailures: S.counters.internalIntegrityFailures,
+        lastIntegrityFailure: S.lastIntegrityFailure,
+        continuationFailures: S.counters.continuationFailures,
         hyped, // the same canonical snapshot hyped.json carries — ONE truth (§38/§61)
         stalking: Object.keys(readStalking(nowMs)),
         // legacy display compatibility
@@ -756,9 +993,16 @@ export function startRumint({
     running = true;
     try {
       if (!(await ensureInit())) return;
+      // R1A §B1: an interrupted poll transaction is finished FIRST — no new
+      // observation while an accepted advancement is still owed its finish
+      if (!recoverTransaction()) return;
       await drainPending();
       rollHyped();
       if (S.stopped) return;
+      // R1A §B3: at the pending hard cap, observation pauses — no new
+      // baseline/HYPED advancement may outrun its owed evidence; draining
+      // continues above and polling resumes only when capacity exists
+      if (S.pending.length >= maxPendingEvents) return;
       if (!budget.canRequest(now())) return;
       const nowMs = now();
       const stalking = readStalking(nowMs);
@@ -772,9 +1016,14 @@ export function startRumint({
           pick = coin;
         }
       }
-      if (!pick) return;
-      nextDue.set(pick, nowMs + cadenceSec(pick, stalking) * 1000);
-      await pollOne(pick);
+      if (pick) {
+        nextDue.set(pick, nowMs + cadenceSec(pick, stalking) * 1000);
+        await pollOne(pick);
+      }
+      // R1A: re-roll AFTER the poll so the checkpoint saved below always
+      // carries a HYPED snapshot consistent with its own baselines — the
+      // semantic recompute validation depends on exactly this invariant
+      rollHyped();
     } finally {
       // save-then-publish: durability failures must be visible in the same
       // status the failure happened in; no checkpoint save while withheld

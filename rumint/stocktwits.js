@@ -78,19 +78,30 @@ export async function fetchSymbolPage(providerSymbol, { config = loadConfig(), f
 // (BASELINE_UNAVAILABLE for the caller), never as an invented empty history.
 const checkpointPath = () => path.join(dataDir(), 'rumint', 'checkpoint.json');
 
+// R1A: local load distinguishes three DISTINCT outcomes — ABSENT is an
+// answered "nothing here"; UNREADABLE/CORRUPT is a different truth and is
+// never silently collapsed into a fresh start:
+//   { outcome: 'LOADED', state } | { outcome: 'NOT_FOUND' } |
+//   { outcome: 'INVALID', error }
 export function readLocalCheckpoint() {
+  const file = checkpointPath();
   try {
-    const file = checkpointPath();
-    if (!existsSync(file)) return null;
-    return JSON.parse(readFileSync(file, 'utf8'));
-  } catch {
-    return null;
+    if (!existsSync(file)) return { outcome: 'NOT_FOUND' };
+  } catch (err) {
+    return { outcome: 'INVALID', error: boundedError(err.message) };
+  }
+  try {
+    const state = JSON.parse(readFileSync(file, 'utf8'));
+    if (!state || typeof state !== 'object') return { outcome: 'INVALID', error: 'not an object' };
+    return { outcome: 'LOADED', state };
+  } catch (err) {
+    return { outcome: 'INVALID', error: boundedError(err.message) };
   }
 }
 
 export function readBaseline(providerSymbol) {
   const cp = readLocalCheckpoint();
-  const b = cp?.baselines?.[providerSymbol];
+  const b = cp.outcome === 'LOADED' ? cp.state?.baselines?.[providerSymbol] : null;
   return b && typeof b === 'object' ? b : null;
 }
 
