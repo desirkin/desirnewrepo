@@ -138,6 +138,18 @@ test('16. UI-1C7 — predator life: bounded weave sway + honest glance targets',
     'reduced motion disables theatrics');
 });
 
+test('17. UI-1C8 — living eyes on the art + a truth-gated lock flash', () => {
+  const spin = HTML.match(/<g id="coilSpin">([\s\S]*?)<circle class="ringPulse"/)[0];
+  const glows = spin.match(/class="eyeGlow"/g) ?? [];
+  assert.equal(glows.length, 2, 'two eye glows, riding the painted irises inside the rotating body');
+  assert.ok(spin.indexOf('coilHead') < spin.indexOf('eyeGlow'), 'glows render OVER the artwork');
+  assert.ok(HTML.includes('body.killed .eyeGlow'), 'KILL snuffs the eyes');
+  assert.ok(HTML.includes('body:not(.reduced) .eyeGlow'), 'flicker pauses under reduced motion');
+  // the hard stare fires only on a REAL focus change, and dies with the gaze
+  assert.ok(SCRIPT.includes('primary !== lastPrimary'), 'lock flash gated on genuine acquisition');
+  assert.ok(SCRIPT.includes(`gaze.classList.remove('lock')`));
+});
+
 test('11. verdict ornament + brand never intercept taps', () => {
   assert.ok(/class="orn" aria-hidden="true"/.test(HTML));
   assert.ok(/#brand \{[^}]*pointer-events: none/.test(HTML));
