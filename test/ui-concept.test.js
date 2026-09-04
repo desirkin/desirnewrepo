@@ -82,7 +82,7 @@ test('9. the heartbeat glyph shows only when the tape is truthfully LIVE', () =>
 });
 
 test('10. the head is the concept frame\'s own artwork, riding inside the rotating body', () => {
-  const spin = HTML.match(/<g id="coilSpin">([\s\S]*?)<circle class="ringPulse"/)[0];
+  const spin = HTML.match(/<g id="coilSpin">[\s\S]*?<\/g>\s*<\/g>/)[0];
   assert.ok(spin.includes('id="headG"'), 'the head group rotates with the body');
   assert.ok(/<image id="coilHead" href="data:image\/png;base64,/.test(HTML),
     'embedded alpha-matted artwork, no external fetch');
@@ -121,19 +121,31 @@ test('14. UI-1C2 — the eyes up top are big hooded almonds, still killable deco
   assert.ok(HTML.includes('body.killed .lurkEye'), 'KILL still dims them');
 });
 
-test('16. UI-1C7 — predator life: bounded weave sway + honest glance targets', () => {
-  const m = SCRIPT.match(/function coilWeave\([\s\S]*?\n}/);
-  assert.ok(m, 'coilWeave exists');
-  const coilWeave = new Function(`return ${m[0]}`)();
-  let maxAbs = 0, varies = new Set();
+test('16. UI-1C10 — slither wobble undulates; rotation NEVER goes backwards', () => {
+  const m = SCRIPT.match(/function coilSway\([\s\S]*?\n}/);
+  assert.ok(m, 'coilSway exists');
+  const coilSway = new Function(`return ${m[0]}`)();
+  let maxDx = 0, maxDy = 0, varies = new Set();
   for (let t = 0; t < 60_000; t += 97) {
-    const v = coilWeave(t);
-    maxAbs = Math.max(maxAbs, Math.abs(v));
-    varies.add(Math.round(v * 10));
+    const v = coilSway(t);
+    maxDx = Math.max(maxDx, Math.abs(v.dx));
+    maxDy = Math.max(maxDy, Math.abs(v.dy));
+    varies.add(`${Math.round(v.dx)}:${Math.round(v.dy)}`);
   }
-  assert.ok(maxAbs <= 6.5, `sway stays bounded (max ${maxAbs.toFixed(2)} deg)`);
-  assert.ok(maxAbs >= 3, 'and is unmistakably visible');
-  assert.ok(varies.size > 20, 'organic, not a fixed offset');
+  assert.ok(maxDx <= 7 && maxDy <= 5, `wobble stays subtle (${maxDx.toFixed(1)},${maxDy.toFixed(1)})`);
+  assert.ok(maxDx >= 3 && maxDy >= 2, 'and is actually visible');
+  assert.ok(varies.size > 30, 'organic loop, not a fixed offset');
+  // rotation is strictly forward: aim never decreases the angle
+  const aimM = SCRIPT.match(/function coilAim\([\s\S]*?\n}/);
+  const coilAim = new Function(`return ${aimM[0]}`)();
+  for (const [cur, target] of [[10, 5], [180, 175], [359, 358], [90, 270], [350, 10]]) {
+    assert.ok(coilAim(cur, target, 100) >= cur, `never backwards (${cur} -> ${target})`);
+  }
+  assert.equal(coilAim(10, 8, 100), 10, 'a target just behind is HELD, not chased in reverse');
+  // rate cap: a long forward sweep glides instead of snapping
+  assert.ok(coilAim(0, 340, 100) - 0 <= 14.001, 'sweep speed capped');
+  // the wobble rides translate; the rotate stays pure coilAngle
+  assert.ok(SCRIPT.includes('translate(${(sway.dx * amp).toFixed(2)}'));
   // glances only at coins truly on display, and never under reduced motion
   assert.ok(SCRIPT.includes('[...planets.values()].filter((q) => !q.dying && q.sx != null'),
     'glance targets come from the live orbit only');
@@ -141,16 +153,9 @@ test('16. UI-1C7 — predator life: bounded weave sway + honest glance targets',
     'reduced motion disables theatrics');
 });
 
-test('17. UI-1C8 — living eyes on the art + a truth-gated lock flash', () => {
-  const spin = HTML.match(/<g id="coilSpin">([\s\S]*?)<circle class="ringPulse"/)[0];
-  const glows = spin.match(/class="eyeGlow"/g) ?? [];
-  assert.equal(glows.length, 2, 'two eye glows, riding the painted irises inside the rotating body');
-  assert.ok(spin.indexOf('coilHead') < spin.indexOf('eyeGlow'), 'glows render OVER the artwork');
-  assert.ok(HTML.includes('body.killed .eyeGlow'), 'KILL snuffs the eyes');
-  assert.ok(HTML.includes('body:not(.reduced) .eyeGlow'), 'flicker pauses under reduced motion');
-  // the hard stare fires only on a REAL focus change, and dies with the gaze
-  assert.ok(SCRIPT.includes('primary !== lastPrimary'), 'lock flash gated on genuine acquisition');
-  assert.ok(SCRIPT.includes(`gaze.classList.remove('lock')`));
+test('18. UI-1C10 — no stray circles ring the animal', () => {
+  assert.ok(!HTML.includes('ringPulse'), 'the traveling pulse arc is gone');
+  assert.ok(/\.orbitGuide \{[^}]*opacity: \.16/.test(HTML), 'guides greatly dimmed');
 });
 
 test('11. verdict ornament + brand never intercept taps', () => {

@@ -55,7 +55,7 @@
   /* UI-1B2 §9: the whole hunting composition sits lower — capsules breathe,
      the animal is centered, the dead zone above the controls shrinks */
   #core {
-    position: absolute; left: 50%; top: 51%;
+    position: absolute; left: 50%; top: 53%;
     width: min(96vmin, 400px); height: min(96vmin, 400px);
     transform: translate(-50%, -50%);
   }
@@ -66,7 +66,7 @@
   body.caged { --breath: 13s; }
   body.caged #scene { filter: saturate(.62) brightness(.86); }
   body.killed #scene { filter: saturate(.22) brightness(.68); }
-  body.killed #ringGroup, body.killed .ringPulse { animation: none; }
+  body.killed #ringGroup { animation: none; }
   @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.018); } }
   /* UI-1A/UI-1C2: the coil is a BODY — dark, heavy, rim-lit. The mass is
      near-black scale green; posture temperature survives in the rim glow
@@ -107,14 +107,8 @@
   .ringScales { fill: none; stroke: var(--bg); stroke-width: 4.6; opacity: .14;
                 stroke-dasharray: 2.6 7.4; }
   /* UI-1C: faint concentric orbit guides — the field reads as a system */
-  .orbitGuide { fill: none; stroke: #1d2b40; stroke-width: .8; opacity: .55; }
-  .orbitGuide.dashed { stroke-dasharray: 1.6 6; opacity: .45; }
-  .ringPulse  { fill: none; stroke: var(--accent2); stroke-width: 2.4; opacity: .38;
-                stroke-dasharray: 46 607; stroke-linecap: round;
-                filter: blur(1.1px) drop-shadow(0 0 5px var(--accent2));
-                transform-origin: center; transition: stroke 1.2s ease; }
-  body:not(.reduced) .ringPulse { animation: coilPulse 26s linear infinite; }
-  @keyframes coilPulse { to { transform: rotate(360deg); } }
+  .orbitGuide { fill: none; stroke: #1d2b40; stroke-width: .8; opacity: .16; }
+  .orbitGuide.dashed { stroke-dasharray: 1.6 6; opacity: .12; }
   .arcBase { fill: none; stroke: #2a3547; stroke-width: 2; opacity: .55; }
   .arcFill { fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round;
              filter: drop-shadow(0 0 4px var(--accent)); transition: stroke 1.2s ease; }
@@ -159,7 +153,7 @@
 
   /* ============ verdict ============ */
   #verdict {
-    position: absolute; left: 50%; top: 51%; transform: translate(-50%, -50%);
+    position: absolute; left: 50%; top: 53%; transform: translate(-50%, -50%);
     text-align: center; width: 78vw; pointer-events: auto; cursor: default;
   }
   /* UI-1A §13: ~15% smaller — the animal and its prey carry the story */
@@ -498,7 +492,6 @@
           <circle class="eyeGlow" cx="102.4" cy="-45.2" r="3"></circle>
         </g>
       </g>
-      <circle class="ringPulse" r="104"></circle>
     </g>
   </svg>
   <div id="verdict">
@@ -662,19 +655,26 @@ function drawStars(t) {
    (idle: a slow continuous crawl). Pure functions are extracted for tests. */
 // per-frame orbital advance (pure): rad = rad/s * seconds
 function orbitStep(speed, dtMs) { return speed * (dtMs / 1000); }
-// head aim smoothing (pure): shortest-arc approach, ~0.9s settle
+// head aim smoothing (pure): FORWARD-ONLY arc — a serpent never backs
+// up. A target just behind the head is HELD (the prey orbits forward
+// into the gaze); long forward sweeps are rate-capped into a glide.
 function coilAim(currentDeg, targetDeg, dtMs) {
-  const d = ((targetDeg - currentDeg + 540) % 360) - 180;
-  return currentDeg + d * Math.min(1, dtMs / 900);
+  const d = (((targetDeg - currentDeg) % 360) + 360) % 360;
+  if (d > 345) return currentDeg; // just behind: hold — never reverse
+  return currentDeg + Math.min(d * Math.min(1, dtMs / 900), (140 * dtMs) / 1000);
 }
 const COIL_IDLE_DEG_S = 22; // idle crawl: a full turn in ~16s — unmistakably alive
 const HEAD_HOME_DEG = -34.5; // where the painted head sits in the unrotated artwork
 let coilAngle = 0;
 let coilClock = 0; // ms — drives the weave sway and the sniff rhythm
-// UI-1C7: predator life. (pure) organic side-to-side weave laid over the
-// aim — the sniffing sway of a head that is never perfectly still.
-function coilWeave(tMs) {
-  return 4.0 * Math.sin(tMs / 1400) + 2.0 * Math.sin(tMs / 530 + 1.7);
+// UI-1C10: predator life. (pure) the slither wobble — the whole coil,
+// head and body together, drifts in a small organic loop while the
+// ROTATION itself stays strictly forward. Undulation without reversal.
+function coilSway(tMs) {
+  return {
+    dx: 3.4 * Math.sin(tMs / 950) + 1.4 * Math.sin(tMs / 410 + 0.8),
+    dy: 2.4 * Math.sin(tMs / 700 + 1.3) + 1.1 * Math.sin(tMs / 330 + 2.1),
+  };
 }
 // the sniff cycle: mostly locked on its prey, but every few seconds the
 // head swings to CHECK another coin actually on display, then returns.
@@ -709,7 +709,7 @@ function updateCoil(dtMs) {
   let target;
   if (p && p.sx != null) {
     // aim the head at the prey's apparent position — "watching THAT coin"
-    const cx = innerWidth / 2, cy = innerHeight * 0.51;
+    const cx = innerWidth / 2, cy = innerHeight * 0.53;
     target = (Math.atan2(p.sy - cy, p.sx - cx) * 180) / Math.PI - HEAD_HOME_DEG;
   } else if (!reduced) {
     target = coilAngle + (COIL_IDLE_DEG_S * dtMs) / 1000; // alive even at rest
@@ -718,19 +718,22 @@ function updateCoil(dtMs) {
   }
   coilAngle = reduced ? target : coilAim(coilAngle, target, dtMs);
   coilAngle = ((coilAngle % 360) + 360) % 360;
-  // searching sways wider than stalking: amplitude grows when nothing is held
-  const shown = coilAngle + (reduced ? 0 : coilWeave(coilClock) * (p ? 1 : 1.5));
-  $('#coilSpin').setAttribute('transform', `rotate(${shown.toFixed(2)} 0 0)`); // explicit pivot: the coil's center
+  // slither wobble: searching sways wider than stalking; rotation itself
+  // stays strictly forward — snakes do not go backwards
+  const amp = p ? 1 : 1.4;
+  const sway = reduced ? { dx: 0, dy: 0 } : coilSway(coilClock);
+  $('#coilSpin').setAttribute('transform',
+    `translate(${(sway.dx * amp).toFixed(2)} ${(sway.dy * amp).toFixed(2)}) rotate(${coilAngle.toFixed(2)} 0 0)`);
   // UI-1C6: the HUNT made legible — a faint marching sight-line from the
   // head to the coin it is checking right now (its prey, or a brief
   // glance target). Never invented, gone under KILL.
   const gaze = $('#gaze');
   if (p && p.sx != null) {
     const hr = (Math.min(0.96 * Math.min(innerWidth, innerHeight), 400) / 340) * 104;
-    const ha = ((HEAD_HOME_DEG + shown) * Math.PI) / 180;
+    const ha = ((HEAD_HOME_DEG + coilAngle) * Math.PI) / 180;
     const l = $('#gazeLine');
     l.setAttribute('x1', (innerWidth / 2 + hr * Math.cos(ha)).toFixed(1));
-    l.setAttribute('y1', (innerHeight * 0.51 + hr * Math.sin(ha)).toFixed(1));
+    l.setAttribute('y1', (innerHeight * 0.53 + hr * Math.sin(ha)).toFixed(1));
     l.setAttribute('x2', p.sx.toFixed(1));
     l.setAttribute('y2', p.sy.toFixed(1));
     gaze.classList.add('on');
@@ -924,7 +927,7 @@ function tierRadiusFactor(tier, rank) {
   return band + (rank % 3) * 0.045;
 }
 function layoutPlanets(t, dtMs = 16) {
-  const cx = innerWidth / 2, cy = innerHeight * 0.51;
+  const cx = innerWidth / 2, cy = innerHeight * 0.53;
   // keep the widest orbit + planet body inside the viewport edge
   const baseR = Math.min((innerWidth / 2 - 30) / 1.2, innerHeight * 0.34, 185);
   for (const [coin, p] of planets) {
