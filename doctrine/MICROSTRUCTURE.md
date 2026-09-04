@@ -79,8 +79,10 @@ Per `MICRO_LIMITS` in `tape/microstructure.js`:
 | completed episodes kept | 12/symbol |
 | episode max age | 120 s (then closed EXPIRED, milestones stay null) |
 | grace after leaving set | 30 s |
-| emission cadence | one observation/symbol/5 s |
-| emission hard cap | 144 observations/minute |
+| internal evaluation tick | 5 s (transition detection — NOT a write cadence) |
+| durable periodic baseline | one observation/symbol/**30 s** (≤2/min/symbol) |
+| transition emissions | ≤6/min/symbol, latched queue capped at 12 (overflow counted) |
+| global durable ceiling | **36 observations/minute** — an emergency cap, not a target |
 
 ## 7. What is measured
 
@@ -164,7 +166,67 @@ DIGESTING, prediction creation, ledger, cost, KILL/CAGE/VETO/CLEAR, trade
 eligibility, entry, exit, or sizing. No trading or control module imports
 it; no subscriber turns it into permission. MICRO listens and remembers.
 
-## 12. Failure isolation
+## 12. Durable cadence and storage (MICRO-1A)
+
+**Serpent may watch fast. He does not write the same thought into permanent
+memory every five seconds.** Sensing cadence and Memory cadence are
+explicitly different things:
+
+- **Internal sensing** stays fast: book samples up to 2/s, rolling
+  5/15/60/300 s windows continuously maintained, episodes tracked live.
+- **Durable periodic baseline**: one observation per tracked symbol every
+  **30 s** (`emitReason.kind = PERIODIC`), still describing the current
+  rolling windows — future learning sees ordinary conditions, not only
+  drama.
+- **Transition observations** (`emitReason.kind = TRANSITION`) emit
+  promptly when something real changes: a depletion episode opens, the 50 %
+  recovery milestone is first reached, an episode closes (recovered or
+  window-expired), `absorptionProxy` enters or leaves PRESENT, or the book
+  crosses FRESH↔STALE. Each transition is latched exactly once, carries a
+  deterministic `transitionKey` (`symbol|kind|side|anchor-clock`), and a
+  persisting condition **never re-emits** — periodic baselines describe its
+  persistence. A transition record also resets that symbol's periodic clock.
+- **Rate caps**: ≤6 transition emissions/min/symbol; global ceiling **36
+  durable observations/minute**. A suppressed record is counted
+  (`observationsSuppressedByRateLimit`) and surfaced in MICRO health —
+  never silently pretended persisted. Suppressed transitions stay latched
+  (bounded queue, overflow counted) for the next tick.
+- **Storage health counters**: `durableObservationsEmitted`,
+  `periodicObservationsEmitted`, `transitionObservationsEmitted`,
+  `observationsSuppressedByRateLimit`, `transitionsDroppedAtCap`,
+  `approxBytesWritten`.
+
+**Approximate storage projection** (representative records measured at
+~3.8 KB source JSONL + ~4.7 KB canonical envelope ≈ 8.5 KB combined before
+database overhead — an estimate, not an exact figure):
+
+- typical (2 tracked symbols, quiet): ~4/min ≈ **~1.5 GB/month combined**
+- full saturation (12 symbols, 24/min periodic + transitions):
+  ≈ 24–36/min ⇒ **~8.8–13.2 GB/month combined** at the ceiling
+- versus MICRO-1's prior worst case of 144/min ≈ ~53 GB/month combined
+
+The one-hour deterministic simulation in `test/micro-emission.test.js`
+measured 242 observations for two symbols (240 periodic, 2 transition),
+avg 3.97/min, max 4/min — two orders of magnitude below internal sensing.
+
+Broader canonical Memory retention/archive/compaction remains a **separate
+architecture issue**; MICRO-1A's responsibility is that this sensor does
+not unnecessarily accelerate it.
+
+## 12a. Episode clock and window (MICRO-1A)
+
+Every time field of one episode — depletion, 50 %/90 % milestones and
+closure — derives from the SAME supplied observation/replay clock;
+`Date.now()` never appears inside episode handling, so historical replay is
+deterministic. The episode window is an **observation-window policy** with
+an **inclusive** endpoint: a sample at exactly `episodeMaxAgeMs` may still
+record a milestone; a sample strictly later closes the episode FIRST with
+outcome `RECOVERY_UNOBSERVED_WITHIN_WINDOW` — meaning recovery was not
+observed inside the defined window, never that the market definitely never
+recovered. No milestone is ever manufactured from a sample outside the
+window.
+
+## 13. Failure isolation
 
 A tracker failure never kills tape: the failing symbol is isolated, MICRO
 health degrades, the fault is logged safely (rate-limited), the OrderBook

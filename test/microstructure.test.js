@@ -131,7 +131,7 @@ test('14-15. recovery episode: depletion opens, 50%/90% milestones timed, expiry
   assert.ok(st.activeEpisodes.bid);
   tr.onBook('X/USD', mk(30), NOW + 6000 + MICRO_LIMITS.episodeMaxAgeMs + 1000);
   const expired = st.completedEpisodes.at(-1);
-  assert.equal(expired.outcome, 'EXPIRED');
+  assert.equal(expired.outcome, 'RECOVERY_UNOBSERVED_WITHIN_WINDOW');
   assert.equal(expired.depthRecovery90Ms, null, 'unreached milestone stays null — never zero');
 });
 
@@ -282,6 +282,102 @@ test('stalking read is guarded: corrupt state file yields the empty set, never a
     OLD: { expiresMs: Date.now() - 60_000 },
   }));
   assert.deepEqual([...readStalkingCoins()], ['SOL'], 'expired entries excluded');
+});
+
+
+// ---------------- MICRO-1A hardening drills ----------------
+
+test('1A-12. replay determinism: one synthetic clock rules every episode field', () => {
+  const T = 1_700_000_000_000; // synthetic historical timeline, far from wall time
+  const run = () => {
+    const tr = new MicrostructureTracker();
+    tr.setTrackingSet(new Set(['X/USD']), T);
+    const mk = (q) => fakeBook({ bids: [lvl(99.99, q)], asks: [lvl(100.01, 100)], ts: T });
+    tr.onBook('X/USD', mk(100), T - 1000);
+    tr.onBook('X/USD', mk(40), T); // depletion at T
+    tr.onBook('X/USD', mk(75), T + 2000); // 50% at T+2s
+    tr.onBook('X/USD', mk(97), T + 4000); // 90% at T+4s -> closed
+    return tr.symbols.get('X/USD').completedEpisodes.at(-1);
+  };
+  const a = run();
+  const b = run();
+  assert.deepEqual(a, b, 'same fixture twice => identical episode');
+  assert.equal(a.depletionTs, T);
+  assert.equal(a.depthRecovery50Ms, 2000);
+  assert.equal(a.depthRecovery90Ms, 4000);
+  assert.equal(a.closedTs, T + 4000, 'closure belongs to the synthetic timeline');
+  // real wall-clock time appears NOWHERE in the episode
+  const wallNow = Date.now();
+  for (const v of Object.values(a)) {
+    if (typeof v === 'number' && v > 1e12) {
+      assert.ok(Math.abs(v - wallNow) > 30 * 24 * 3600_000, `episode field ${v} is not wall time`);
+    }
+  }
+});
+
+test('1A-14. expiry order + inclusive endpoint: 119.999s counts, 120s counts, 120.001s expires first', () => {
+  const T = 1_700_000_000_000;
+  const mk = (q, ts) => fakeBook({ bids: [lvl(99.99, q)], asks: [lvl(100.01, 100)], ts });
+  const open = () => {
+    const tr = new MicrostructureTracker();
+    tr.setTrackingSet(new Set(['X/USD']), T);
+    tr.onBook('X/USD', mk(100), T - 1000);
+    tr.onBook('X/USD', mk(40), T); // depletion at T
+    return tr;
+  };
+  // 119.999s: inside the window — recovery milestone recorded
+  let tr = open();
+  tr.onBook('X/USD', mk(97), T + 119_999);
+  assert.equal(tr.symbols.get('X/USD').completedEpisodes.at(-1).outcome, 'RECOVERED_90');
+  assert.equal(tr.symbols.get('X/USD').completedEpisodes.at(-1).depthRecovery90Ms, 119_999);
+  // exactly 120s: the endpoint is INCLUSIVE — still counts
+  tr = open();
+  tr.onBook('X/USD', mk(97), T + MICRO_LIMITS.episodeMaxAgeMs);
+  assert.equal(tr.symbols.get('X/USD').completedEpisodes.at(-1).outcome, 'RECOVERED_90');
+  // just over: the window controls — the episode closes FIRST, no milestone
+  // is manufactured from the late sample, even though depth looks recovered
+  tr = open();
+  tr.onBook('X/USD', mk(97), T + MICRO_LIMITS.episodeMaxAgeMs + 1);
+  const late = tr.symbols.get('X/USD').completedEpisodes.at(-1);
+  assert.equal(late.outcome, 'RECOVERY_UNOBSERVED_WITHIN_WINDOW');
+  assert.equal(late.depthRecovery50Ms, null);
+  assert.equal(late.depthRecovery90Ms, null);
+  assert.equal(late.closedTs, T + MICRO_LIMITS.episodeMaxAgeMs + 1);
+});
+
+test('1A-15. absorption proxy fails DARK on missing/malformed coverage — never throws, never assumes', () => {
+  const strongBuy = { notionalImbalance: 0.9, aggressiveBuyNotionalUsd: 50_000, aggressiveSellNotionalUsd: 2_000, signedNotionalUsd: 48_000 };
+  const base = { flow60: strongBuy, response60: { midReturnPct: 0.01 }, depth60: { askDepthChangePct: -2, bidDepthChangePct: 1 }, bookFresh: true };
+  for (const bad of [undefined, null, 'COMPLETE', 42, []]) {
+    const r = absorptionProxy({ ...base, opposingCoverage: bad === undefined ? undefined : bad });
+    assert.equal(r.state, 'UNAVAILABLE', `coverage ${JSON.stringify(bad)} => UNAVAILABLE`);
+  }
+  assert.equal(absorptionProxy({ ...base, opposingCoverage: {} }).state, 'UNAVAILABLE', 'empty coverage never assumed COMPLETE');
+});
+
+test('1A-16. malformed trade side is REFUSED by the pure flow window — never becomes selling', () => {
+  const trades = [
+    T(1000, 'buy', 2, 100),
+    T(2000, 'SELL', 1, 100), // wrong case: refused
+    T(3000, 'unknown', 5, 100), // garbage: refused
+    T(4000, null, 3, 100), // missing: refused
+    T(5000, 'sell', 1, 100), // the ONE real sell
+  ];
+  const f = flowWindow(trades, 60_000, NOW);
+  assert.equal(f.aggressiveSellQty, 1);
+  assert.equal(f.aggressiveSellNotionalUsd, 100);
+  assert.equal(f.aggressiveSellTradeCount, 1);
+  assert.equal(f.signedQty, 1); // 2 buys - 1 sell, garbage contributed nothing
+});
+
+test('1A-17. band coverage exact boundary: a level ON the boundary is visible => COMPLETE', () => {
+  // mid 100, 10bps: bid boundary 99.90, ask boundary 100.10 (exact decimals)
+  assert.equal(bandCoverage([lvl(99.99, 1), lvl(99.85, 1)], 100, 10, 'bid'), 'COMPLETE'); // below boundary
+  assert.equal(bandCoverage([lvl(99.99, 1), lvl(99.90, 1)], 100, 10, 'bid'), 'COMPLETE'); // exactly boundary
+  assert.equal(bandCoverage([lvl(99.99, 1), lvl(99.95, 1)], 100, 10, 'bid'), 'PARTIAL'); // strictly inside
+  assert.equal(bandCoverage([lvl(100.01, 1), lvl(100.15, 1)], 100, 10, 'ask'), 'COMPLETE'); // above boundary
+  assert.equal(bandCoverage([lvl(100.01, 1), lvl(100.10, 1)], 100, 10, 'ask'), 'COMPLETE'); // exactly boundary
+  assert.equal(bandCoverage([lvl(100.01, 1), lvl(100.05, 1)], 100, 10, 'ask'), 'PARTIAL'); // strictly inside
 });
 
 test.after(() => rmSync(TEST_DATA, { recursive: true, force: true }));

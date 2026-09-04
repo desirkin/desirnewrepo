@@ -47,8 +47,6 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   // may influence posture, stalking, controls, ledger or eligibility. Every
   // call is failure-isolated: a tracker fault degrades MICRO, never tape.
   const micro = new MicrostructureTracker({ bookStaleMs: staleMs, log });
-  let microEmitsThisMinute = 0;
-  let microMinuteStart = Date.now();
   let microLastErrLogMs = 0;
   const microGuard = (fn) => {
     try {
@@ -383,28 +381,20 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     }
   }, snapIntervalSec * 1000);
 
-  // ---- MICRO-1 emission: one observation per tracked symbol per ~5s,
-  // hard-capped per minute. A write failure degrades MICRO, never tape.
+  // ---- MICRO-1A evaluation tick: internal sensing stays fast; the
+  // tracker itself decides what deserves PERMANENT memory (30s periodic
+  // baseline + prompt latched transitions, capped at 36/min globally).
+  // A write failure degrades MICRO, never tape.
   const microTimer = setInterval(() => {
     microGuard(() => {
-      const now = Date.now();
-      if (now - microMinuteStart >= 60_000) {
-        microMinuteStart = now;
-        microEmitsThisMinute = 0;
-      }
       for (const symbol of micro.tracked()) {
-        if (microEmitsThisMinute >= MICRO_LIMITS.maxObservationsPerMinute) break; // documented hard cap
         const p = pairs.get(symbol);
         const book = books.get(symbol);
-        if (!p || !book?.synced) continue;
-        const obs = micro.observe(symbol, book, p.coin, now);
-        if (obs) {
-          writeMicroObservation(obs);
-          microEmitsThisMinute++;
-        }
+        if (!p || !book) continue;
+        for (const obs of micro.evaluate(symbol, book, p.coin)) writeMicroObservation(obs);
       }
     });
-  }, MICRO_LIMITS.emitIntervalMs);
+  }, MICRO_LIMITS.evaluationIntervalMs);
 
   // ---- resource safety: shed lowest-volume minors before ever falling over
   let lastResourceCheck = Date.now();

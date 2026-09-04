@@ -25,7 +25,7 @@ import { dataDir } from '../lib/config.js';
 import { nowIso } from '../lib/time.js';
 import { bookFeatures } from './features.js';
 
-export const MICRO_VERSION = 'MICRO-1';
+export const MICRO_VERSION = 'MICRO-1A';
 
 // Every per-symbol structure is bounded by these documented limits.
 export const MICRO_LIMITS = Object.freeze({
@@ -38,8 +38,14 @@ export const MICRO_LIMITS = Object.freeze({
   maxCompletedEpisodesPerSymbol: 12, // bounded completed-episode memory
   episodeMaxAgeMs: 120_000, // an unrecovered episode expires (milestones stay honest nulls)
   graceMs: 30_000, // symbol leaving the tracking set keeps state this long, then discarded
-  emitIntervalMs: 5_000, // one observation per tracked symbol per ~5s
-  maxObservationsPerMinute: 144, // hard emission cap: 12 symbols × 12/min
+  // MICRO-1A: SENSING cadence and DURABLE cadence are different things.
+  // The tracker keeps feeling the market at high frequency; permanent
+  // Memory receives a controlled trickle.
+  evaluationIntervalMs: 5_000, // internal evaluation tick (transition detection)
+  periodicEmitMs: 30_000, // durable baseline: one observation/symbol/30s (≤2/min/symbol)
+  maxTransitionEmitsPerSymbolPerMinute: 6, // transition observations bounded separately
+  maxPendingTransitionsPerSymbol: 12, // latched-transition queue cap (overflow counted)
+  maxDurablePerMinute: 36, // global durable ceiling — an emergency cap, not a target
 });
 
 export const FLOW_WINDOWS_MS = Object.freeze([5_000, 15_000, 60_000, 300_000]);
@@ -67,8 +73,10 @@ export function flowWindow(trades, windowMs, now) {
   let buyQty = 0, sellQty = 0, buyUsd = 0, sellUsd = 0, buyN = 0, sellN = 0;
   for (const t of trades) {
     if (t.ts < from || t.ts > now) continue;
+    // MICRO-1A: only the two direct Kraken sides may contribute. A
+    // malformed side is REFUSED — it never becomes aggressive selling.
     if (t.side === 'buy') { buyQty += t.qty; buyUsd += t.notionalUsd; buyN++; }
-    else { sellQty += t.qty; sellUsd += t.notionalUsd; sellN++; }
+    else if (t.side === 'sell') { sellQty += t.qty; sellUsd += t.notionalUsd; sellN++; }
   }
   const totalQty = buyQty + sellQty;
   const totalUsd = buyUsd + sellUsd;
@@ -168,15 +176,18 @@ export function depthDynamics(samples, windowMs, now, band) {
   };
 }
 
-// Band coverage: COMPLETE when the subscribed levels extend past the band
-// boundary on that side (the band is fully visible); PARTIAL when the
-// subscribed book ends inside the band — a lower-bound observation.
+// Band coverage: COMPLETE when the subscribed levels reach AT OR PAST the
+// band boundary on that side — a level landing exactly on the boundary
+// price is itself visible, so exact-boundary coverage is truthfully
+// COMPLETE (inclusive comparison, no floating-point slop). PARTIAL when
+// the subscribed book ends strictly inside the band — a lower-bound
+// observation, never presented as complete depth.
 export function bandCoverage(levels, mid, bps, side) {
   if (!Array.isArray(levels) || !levels.length || !fin(mid) || mid <= 0) return null;
   const limit = side === 'bid' ? mid * (1 - bps / 1e4) : mid * (1 + bps / 1e4);
   const deepest = levels[levels.length - 1].price;
-  const extendsPast = side === 'bid' ? deepest < limit : deepest > limit;
-  return extendsPast ? 'COMPLETE' : 'PARTIAL';
+  const reachesBoundary = side === 'bid' ? deepest <= limit : deepest >= limit;
+  return reachesBoundary ? 'COMPLETE' : 'PARTIAL';
 }
 
 // Median helper for recovery comparison (small bounded arrays only).
@@ -227,6 +238,11 @@ export function absorptionProxy({ flow60, response60, depth60, bookFresh, opposi
   const buying = imb >= ABSORPTION_MIN_IMBALANCE && flow60.aggressiveBuyNotionalUsd >= ABSORPTION_MIN_NOTIONAL_USD;
   const selling = imb <= -ABSORPTION_MIN_IMBALANCE && flow60.aggressiveSellNotionalUsd >= ABSORPTION_MIN_NOTIONAL_USD;
   if (!buying && !selling) return { state: 'NOT_PRESENT', reason: 'flow below proxy definition' };
+  // MICRO-1A: a pure truth function fails DARK. Missing or malformed
+  // opposing coverage is UNAVAILABLE — never assumed COMPLETE, never a throw.
+  if (!opposingCoverage || typeof opposingCoverage !== 'object') {
+    return { state: 'UNAVAILABLE', reason: 'opposing band coverage unknown' };
+  }
   const cov = buying ? opposingCoverage.ask : opposingCoverage.bid;
   if (cov !== 'COMPLETE') return { state: 'UNAVAILABLE', reason: `opposing ${EPISODE_BAND} band coverage ${cov ?? 'unknown'}` };
   const responseSmall = Math.abs(response60.midReturnPct) <= ABSORPTION_MAX_RESPONSE_PCT;
@@ -284,7 +300,16 @@ export class MicrostructureTracker {
     this.failed = new Map(); // symbol -> last isolated error message
     this.isolatedErrors = 0;
     this.droppedTrades = 0;
-    this.observationsBuilt = 0;
+    this.observationsBuilt = 0; // internal builds (sensing) — NOT durable writes
+    // MICRO-1A storage-health counters (durable-emission truth)
+    this.durableObservationsEmitted = 0;
+    this.periodicObservationsEmitted = 0;
+    this.transitionObservationsEmitted = 0;
+    this.observationsSuppressedByRateLimit = 0;
+    this.transitionsDroppedAtCap = 0;
+    this.approxBytesWritten = 0;
+    this.emitMinuteStart = 0;
+    this.emitsThisMinute = 0;
   }
 
   #fresh(symbol, now) {
@@ -297,6 +322,13 @@ export class MicrostructureTracker {
       activeEpisodes: { bid: null, ask: null }, // one per side, EPISODE_BAND only
       completedEpisodes: [], // capped ring of finished episodes
       trackedSince: now,
+      // MICRO-1A durable-emission state
+      pendingTransitions: [], // latched meaningful transitions, capped
+      lastPeriodicEmitMs: 0, // first evaluation emits the baseline immediately
+      lastProxyPresent: false, // ABSORPTION_PROXY edge detection (latched, never re-fired)
+      lastBookState: null, // FRESH/STALE edge detection
+      transitionMinuteStart: 0,
+      transitionEmitsThisMinute: 0,
     };
   }
 
@@ -382,6 +414,18 @@ export class MicrostructureTracker {
   // Visible depletion/recovery episodes on EPISODE_BAND, one per side.
   // "Recovery" is a DEPTH RECOVERY PROXY: visible aggregate depth returned;
   // it does not prove the same order, maker or provider came back.
+  //
+  // MICRO-1A EPISODE CLOCK: every time field of one episode derives from
+  // the SAME supplied observation/replay clock — depletion, milestones and
+  // closure alike. Date.now() never appears inside episode handling.
+  //
+  // MICRO-1A EXPIRY SEMANTICS: the episode window is an OBSERVATION-WINDOW
+  // policy. A sample whose elapsed time is <= episodeMaxAgeMs (INCLUSIVE
+  // endpoint: exactly 120s still counts) may record milestones; a sample
+  // arriving strictly after the window closes the episode FIRST — no
+  // milestone is ever recorded outside the window. The outcome means
+  // "recovery was not observed within the defined episode window", never
+  // "the market never recovered".
   #episodeStep(st, sample, now) {
     const prev = st.samples.length >= 2 ? st.samples[st.samples.length - 2] : null;
     for (const side of ['bid', 'ask']) {
@@ -389,15 +433,19 @@ export class MicrostructureTracker {
       const depthNow = sample.depth?.[EPISODE_BAND]?.[side];
       if (!fin(depthNow)) continue;
       if (active) {
+        // window check FIRST: beyond the horizon no milestone may be taken
+        if (now - active.depletionTs > this.limits.episodeMaxAgeMs) {
+          this.#closeEpisode(st, side, 'RECOVERY_UNOBSERVED_WITHIN_WINDOW', now); // unreached milestones stay null — honest, not zero
+          continue;
+        }
         const recovered = depthNow - active.postDepletionDepth;
         if (active.depthRecovery50Ms === null && recovered >= 0.5 * active.depletedAmount) {
           active.depthRecovery50Ms = now - active.depletionTs;
+          this.#latch(st, { kind: 'RECOVERY_50_REACHED', side, anchorMs: active.depletionTs, atMs: now });
         }
         if (recovered >= 0.9 * active.depletedAmount) {
           active.depthRecovery90Ms = now - active.depletionTs;
-          this.#closeEpisode(st, side, 'RECOVERED_90');
-        } else if (now - active.depletionTs > this.limits.episodeMaxAgeMs) {
-          this.#closeEpisode(st, side, 'EXPIRED'); // unreached milestones stay null — honest, not zero
+          this.#closeEpisode(st, side, 'RECOVERED_90', now);
         }
         continue;
       }
@@ -417,16 +465,43 @@ export class MicrostructureTracker {
           depthRecovery90Ms: null,
           attribution: L2_ATTRIBUTION,
         };
+        this.#latch(st, { kind: 'DEPLETION_OPENED', side, anchorMs: now });
       }
     }
   }
 
-  #closeEpisode(st, side, outcome) {
+  #closeEpisode(st, side, outcome, now) {
     const e = st.activeEpisodes[side];
     if (!e) return;
     st.activeEpisodes[side] = null;
-    st.completedEpisodes.push({ ...e, outcome, closedTs: Date.now() });
+    st.completedEpisodes.push({ ...e, outcome, closedTs: now }); // same clock as the episode itself
     while (st.completedEpisodes.length > this.limits.maxCompletedEpisodesPerSymbol) st.completedEpisodes.shift();
+    this.#latch(st, {
+      kind: outcome === 'RECOVERED_90' ? 'EPISODE_RECOVERED_90' : 'EPISODE_WINDOW_EXPIRED',
+      side,
+      anchorMs: e.depletionTs,
+      atMs: now,
+    });
+  }
+
+  // MICRO-1A: latch a meaningful transition for durable emission. Each
+  // transition is latched EXACTLY ONCE by construction (open/milestone/
+  // close/proxy-edge code paths fire once), carries a deterministic key
+  // tied to the transition itself, and waits — bounded — for the next
+  // evaluation to be persisted. A persisting condition never re-latches.
+  #latch(st, { kind, side = null, anchorMs, atMs = anchorMs }) {
+    if (st.pendingTransitions.length >= this.limits.maxPendingTransitionsPerSymbol) {
+      st.pendingTransitions.shift();
+      this.transitionsDroppedAtCap++;
+    }
+    st.pendingTransitions.push({
+      kind,
+      side,
+      band: EPISODE_BAND,
+      anchorMs,
+      atMs,
+      transitionKey: `${st.symbol}|${kind}|${side ?? ''}|${anchorMs}`,
+    });
   }
 
   // Build one bounded observation for a tracked symbol. Book-derived
@@ -501,6 +576,75 @@ export class MicrostructureTracker {
     }
   }
 
+  // MICRO-1A: THE durable-emission decision. Called on the evaluation tick
+  // (~5s). Internal sensing stays fast; permanent Memory receives:
+  //   - a TRANSITION observation promptly when latched transitions exist
+  //     (episode open / 50% milestone / close / proxy edge / book-state
+  //     edge) — a persisting condition emits its transition ONCE, then
+  //     only periodic baselines describe its persistence;
+  //   - otherwise a PERIODIC baseline observation once per periodicEmitMs.
+  // Rate caps (per-symbol transition cap + global durable ceiling) may
+  // suppress an emission: suppression is COUNTED and surfaced in health —
+  // never silently pretended persisted. Returns 0..1 observations.
+  evaluate(symbol, book, coin, now = Date.now()) {
+    const st = this.symbols.get(symbol);
+    if (!st || this.failed.has(symbol)) return [];
+    try {
+      const obs = this.observe(symbol, book, coin, now);
+      if (!obs) return [];
+      // proxy/book-state EDGES are meaningful transitions (edges only —
+      // the same persisting state never re-latches)
+      const proxyPresent = obs.absorptionProxy?.state === 'PRESENT';
+      if (proxyPresent !== st.lastProxyPresent) {
+        this.#latch(st, { kind: proxyPresent ? 'ABSORPTION_PROXY_ENTERED' : 'ABSORPTION_PROXY_LEFT', anchorMs: now });
+        st.lastProxyPresent = proxyPresent;
+      }
+      if (st.lastBookState !== null && obs.bookState !== st.lastBookState) {
+        this.#latch(st, { kind: `BOOK_${st.lastBookState}_TO_${obs.bookState}`, anchorMs: now });
+      }
+      st.lastBookState = obs.bookState;
+      // minute windows
+      if (now - this.emitMinuteStart >= 60_000) { this.emitMinuteStart = now; this.emitsThisMinute = 0; }
+      if (now - st.transitionMinuteStart >= 60_000) { st.transitionMinuteStart = now; st.transitionEmitsThisMinute = 0; }
+      if (st.pendingTransitions.length) {
+        if (this.emitsThisMinute >= this.limits.maxDurablePerMinute ||
+            st.transitionEmitsThisMinute >= this.limits.maxTransitionEmitsPerSymbolPerMinute) {
+          this.observationsSuppressedByRateLimit++; // transitions stay latched for the next tick
+          return [];
+        }
+        const transitions = st.pendingTransitions.splice(0);
+        st.transitionEmitsThisMinute++;
+        st.lastPeriodicEmitMs = now; // a transition record IS a fresh baseline
+        return [this.#emit({ ...obs, emitReason: { kind: 'TRANSITION', transitions } }, 'transition')];
+      }
+      if (now - st.lastPeriodicEmitMs >= this.limits.periodicEmitMs) {
+        if (this.emitsThisMinute >= this.limits.maxDurablePerMinute) {
+          this.observationsSuppressedByRateLimit++;
+          return [];
+        }
+        st.lastPeriodicEmitMs = now;
+        return [this.#emit({ ...obs, emitReason: { kind: 'PERIODIC' } }, 'periodic')];
+      }
+      return [];
+    } catch (err) {
+      this.#isolate(symbol, err);
+      return [];
+    }
+  }
+
+  #emit(finalObs, kind) {
+    this.emitsThisMinute++;
+    this.durableObservationsEmitted++;
+    if (kind === 'periodic') this.periodicObservationsEmitted++;
+    else this.transitionObservationsEmitted++;
+    try {
+      this.approxBytesWritten += JSON.stringify(finalObs).length;
+    } catch {
+      // byte accounting is best-effort; the observation itself still emits
+    }
+    return finalObs;
+  }
+
   health() {
     return {
       status: this.failed.size || this.isolatedErrors ? 'DEGRADED' : 'HEALTHY',
@@ -509,6 +653,12 @@ export class MicrostructureTracker {
       isolatedErrors: this.isolatedErrors,
       droppedTrades: this.droppedTrades,
       observationsBuilt: this.observationsBuilt,
+      durableObservationsEmitted: this.durableObservationsEmitted,
+      periodicObservationsEmitted: this.periodicObservationsEmitted,
+      transitionObservationsEmitted: this.transitionObservationsEmitted,
+      observationsSuppressedByRateLimit: this.observationsSuppressedByRateLimit,
+      transitionsDroppedAtCap: this.transitionsDroppedAtCap,
+      approxBytesWritten: this.approxBytesWritten,
     };
   }
 }

@@ -60,7 +60,7 @@ test('33a. canonical adapter succeeds; families and provenance are correct', () 
   assert.ok(p.bookChannel.includes('kraken-ws-v2 book'));
   assert.deepEqual(p.flowWindowsMs, [5000, 15000, 60000, 300000]);
   assert.ok(env.payload.limitations.includes('AGGREGATE_L2_UNATTRIBUTED'));
-  assert.equal(env.payload.trackerVersion, 'MICRO-1');
+  assert.equal(env.payload.trackerVersion, 'MICRO-1A');
   // availability language preserved — insufficient history was never zeroed
   assert.ok(['KNOWN', 'UNKNOWN', 'UNAVAILABLE', 'STALE', 'DEGRADED'].includes(env.dataAvailability.recoveryAsymmetry));
 });

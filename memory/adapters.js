@@ -183,6 +183,13 @@ export function fromMicrostructureObservation(rec, observedTs = nowIso()) {
       ? Object.values(rec.priceResponse).some((w) => w && typeof w === 'object' && Number.isFinite(w.midReturnPct))
       : false;
   const proxyState = rec.absorptionProxy && typeof rec.absorptionProxy === 'object' ? rec.absorptionProxy.state : null;
+  // MICRO-1A: a TRANSITION observation carries deterministic transition
+  // keys tied to the transition itself (symbol|kind|side|anchor clock) —
+  // the same transition handled again collapses; a new one never can.
+  const firstTransition =
+    rec.emitReason?.kind === 'TRANSITION' && Array.isArray(rec.emitReason.transitions)
+      ? rec.emitReason.transitions[0] ?? null
+      : null;
   return envelope({
     sourceModule: 'MICROSTRUCTURE',
     eventType: 'MICROSTRUCTURE_OBSERVATION',
@@ -199,6 +206,8 @@ export function fromMicrostructureObservation(rec, observedTs = nowIso()) {
       absorptionProxy: proxyState === 'PRESENT' || proxyState === 'NOT_PRESENT' ? 'KNOWN' : proxyState === 'DEGRADED' ? 'DEGRADED' : 'UNAVAILABLE',
     },
     provenance: liveProv('micro/observations.jsonl (kraken WS v2 microstructure tracker, aggregate L2 unattributed)', rec.ts, observedTs),
+    correlation: { eventId: firstTransition?.transitionKey ?? null, sourceEventId: firstTransition?.transitionKey ?? null },
+    sourceEventId: firstTransition?.transitionKey ?? null,
     identity: sourceFingerprint(rec, 'micro/observations.jsonl'),
   });
 }
