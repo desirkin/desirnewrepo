@@ -32,13 +32,25 @@ const RECENT_CACHE_SIZE = 500; // bounded in-RAM tail
 // symbol with the stalest NEWEST entry is evicted — a small, honest display
 // bound, never a rewrite of canonical Memory.
 // ATTENTION-1B: a single newest-record slot was insufficient — the newest
-// record is not necessarily the newest VALID record for the caller's window
-// (e.g. a future-dated envelope must not erase valid in-window history), so
-// each symbol keeps a SMALL bounded history ordered by the deterministic
-// winner rule. Up to HISTORY-1 out-of-window/future records per symbol are
-// tolerated before older in-window truth is displaced — bounded honesty.
+// record is not necessarily the newest VALID record for the caller's window.
+// ATTENTION-1C: currently-usable history and FUTURE-DATED evidence must not
+// compete for the same retention slots — four future-dated records could
+// otherwise occupy the whole history and erase valid present truth. Each
+// symbol therefore keeps TWO small bounded lanes, both winner-ordered:
+//   hist — current/historical qualifying attention (ts within the future
+//          guard of the projection clock when indexed)
+//   fut  — future-dated qualifying attention, waiting for its time
+// Future evidence can never evict history; it waits in its own bounded lane
+// and competes normally once the caller's window reaches it. On lane
+// overflow the lane keeps its NEWEST entries (winner order) — bounded
+// honesty: not every future record is retained forever, but future overflow
+// can never erase valid present history.
 const ATTENTION_PROJECTION_MAX_SYMBOLS = 64;
 const ATTENTION_HISTORY_PER_SYMBOL = 4;
+const ATTENTION_FUTURE_PER_SYMBOL = 4;
+// same slack as the attention future guard: more than 60s ahead of the
+// projection clock is "evidence about the future"
+const ATTENTION_FUTURE_GUARD_MS = 60_000;
 const TAIL_SCAN_BYTES = 8 * 1024 * 1024; // queries beyond the cache scan at most this much file tail
 const MANIFEST_EVERY = 25; // manifest refresh cadence (also on flush/close)
 const RECOVERY_CHUNK_BYTES = 1 << 20; // 1MB streaming-recovery chunks
@@ -50,15 +62,20 @@ const clamp = (limit) => Math.max(1, Math.min(Number.isFinite(limit) ? limit : D
 const lineDigest = (line) => createHash('sha1').update(line).digest('hex');
 
 export class MemoryStore {
-  constructor({ dir = path.join(dataDir(), 'memory'), log = () => {}, recoveryChunkBytes = RECOVERY_CHUNK_BYTES } = {}) {
+  // `now` is the projection clock (ms) used ONLY to classify qualifying
+  // attention records as current vs future-dated at index time — supplied
+  // deterministic clocks in tests, wall clock in production. It never
+  // affects canonical Memory, validation, or any other query.
+  constructor({ dir = path.join(dataDir(), 'memory'), log = () => {}, recoveryChunkBytes = RECOVERY_CHUNK_BYTES, now = Date.now } = {}) {
     this.dir = dir;
     this.log = log;
+    this.now = now;
     this.eventsFile = path.join(dir, 'events.jsonl');
     this.manifestFile = path.join(dir, 'manifest.json');
     this.quarantineFile = path.join(dir, 'events.quarantine.jsonl');
     this.ids = new Map(); // id -> persisted-content digest (the documented in-memory growth limitation)
     this.recent = []; // bounded ring of the newest VALIDATED envelopes
-    this.attentionProjection = new Map(); // symbol -> bounded qualifying history, winner-ordered (read-side only)
+    this.attentionProjection = new Map(); // symbol -> { hist, fut } bounded winner-ordered lanes (read-side only)
     this.counts = { bySourceModule: {}, byEvidenceFamily: {}, byAvailability: {} };
     this.recordCount = 0;
     this.duplicateSuppressedCount = 0; // cumulative (preserved across restarts)
@@ -196,21 +213,35 @@ export class MemoryStore {
     this.counts.byAvailability[env.observationState] = (this.counts.byAvailability[env.observationState] ?? 0) + 1;
     this.recent.push(env);
     if (this.recent.length > RECENT_CACHE_SIZE) this.recent.shift();
-    // ATTENTION-1A/1B read projection: only VALIDATED records reach #index
-    // (both recovery and append), so nothing corrupt/invalid can enter here.
+    // ATTENTION-1A/1B/1C read projection: only VALIDATED records reach
+    // #index (both recovery and append), so nothing corrupt/invalid enters.
     if (attentionContinuityMeaning(env)) {
-      const hist = this.attentionProjection.get(env.symbol) ?? [];
-      if (!hist.some((e) => e.id === env.id)) {
-        hist.push(env);
-        hist.sort(attentionWinnerOrder); // deterministic: ts desc, then id desc
-        hist.length = Math.min(hist.length, ATTENTION_HISTORY_PER_SYMBOL);
-        this.attentionProjection.set(env.symbol, hist);
+      const nowMs = this.now();
+      const lanes = this.attentionProjection.get(env.symbol) ?? { hist: [], fut: [] };
+      // future evidence whose time has ARRIVED graduates into history first
+      // (its slots free up; as current truth it may now displace older
+      // history under the normal winner rule, never the other way round)
+      const matured = lanes.fut.filter((e) => e.ts * 1000 <= nowMs + ATTENTION_FUTURE_GUARD_MS);
+      if (matured.length) {
+        lanes.fut = lanes.fut.filter((e) => e.ts * 1000 > nowMs + ATTENTION_FUTURE_GUARD_MS);
+        lanes.hist.push(...matured);
+        lanes.hist.sort(attentionWinnerOrder);
+        lanes.hist.length = Math.min(lanes.hist.length, ATTENTION_HISTORY_PER_SYMBOL);
       }
+      const lane = env.ts * 1000 > nowMs + ATTENTION_FUTURE_GUARD_MS ? 'fut' : 'hist';
+      const cap = lane === 'fut' ? ATTENTION_FUTURE_PER_SYMBOL : ATTENTION_HISTORY_PER_SYMBOL;
+      if (!lanes.hist.some((e) => e.id === env.id) && !lanes.fut.some((e) => e.id === env.id)) {
+        lanes[lane].push(env);
+        lanes[lane].sort(attentionWinnerOrder); // deterministic: ts desc, then id desc
+        lanes[lane].length = Math.min(lanes[lane].length, cap); // lane keeps its newest
+      }
+      this.attentionProjection.set(env.symbol, lanes);
       if (this.attentionProjection.size > ATTENTION_PROJECTION_MAX_SYMBOLS) {
-        // evict the symbol whose NEWEST entry is stalest (deterministic)
+        // evict the symbol whose best (newest) entry across lanes is stalest
+        const best = ({ hist, fut }) => (hist[0] && fut[0] ? (attentionWinnerOrder(hist[0], fut[0]) <= 0 ? hist[0] : fut[0]) : hist[0] ?? fut[0]);
         let stalest = null;
-        for (const [sym, h] of this.attentionProjection) {
-          if (!stalest || attentionWinnerOrder(h[0], this.attentionProjection.get(stalest)[0]) > 0) stalest = sym;
+        for (const [sym, l] of this.attentionProjection) {
+          if (!stalest || attentionWinnerOrder(best(l), best(this.attentionProjection.get(stalest))) > 0) stalest = sym;
         }
         this.attentionProjection.delete(stalest);
       }
@@ -416,9 +447,14 @@ export class MemoryStore {
   // record that actually qualifies inside the requested window.
   getRecentAttention({ sinceTs = 0, untilTs = Infinity, limit } = {}) {
     const n = clamp(limit);
+    const inWindow = (e) => e.ts >= sinceTs && e.ts <= untilTs;
     const out = [];
-    for (const hist of this.attentionProjection.values()) {
-      const winner = hist.find((e) => e.ts >= sinceTs && e.ts <= untilTs); // history is winner-ordered
+    for (const { hist, fut } of this.attentionProjection.values()) {
+      // both lanes are winner-ordered; a retained future record competes the
+      // moment the caller's window reaches it — winner rule, no arrival bias
+      const h = hist.find(inWindow);
+      const f = fut.find(inWindow);
+      const winner = h && f ? (attentionWinnerOrder(h, f) <= 0 ? h : f) : h ?? f;
       if (winner) out.push(winner);
     }
     out.sort(attentionWinnerOrder);

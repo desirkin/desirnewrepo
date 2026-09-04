@@ -416,18 +416,25 @@ export class Repository {
   // inside the declared window"), never "the newest N rows of everything":
   // time-bounded on the indexed ts column ([sinceTs, untilTs] inclusive,
   // envelope epoch seconds), narrowed to the qualifying event_type values.
-  // The envelope LIKE clause is only a cheap SQL prefilter for the RUMINT
-  // nomination meaning (payload lives inside the canonical JSON text) — it
-  // can neither invent prey NOR select the winner: ATTENTION-1B moved the
-  // newest-per-symbol decision AFTER the complete truth boundary. SQL
-  // returns a BOUNDED candidate set (up to ATTENTION_CANDIDATES_PER_SYMBOL
-  // newest plausible rows per symbol, overall row cap limit×perSymbol);
-  // each candidate is revived (digest + canonical validator) and must pass
-  // the exact shared meaning gate; only then is the newest VALID envelope
-  // per symbol chosen, under the deterministic winner rule (ts desc, equal
-  // timestamps break by greater canonical id). A false-positive, corrupt,
-  // or invalid newest row therefore cannot erase older valid truth — up to
-  // perSymbol-1 such rows per symbol are tolerated (bounded honesty).
+  // The RUMINT nomination branch keeps the cheap LIKE prefilter and then
+  // (ATTENTION-1C) inspects the ACTUAL canonical payload.type in SQL — the
+  // jsonb cast is guarded by a CASE on `IS JSON` (evaluated first, so a
+  // corrupt/non-JSON row is simply excluded from that branch and can never
+  // crash the query; a corrupt ripple row still flows to revival and fails
+  // dark there). JavaScript validation remains authoritative either way:
+  // the prefilter can neither invent prey NOR select the winner —
+  // ATTENTION-1B moved the newest-per-symbol decision AFTER the complete
+  // truth boundary. SQL returns a BOUNDED candidate set (up to
+  // ATTENTION_CANDIDATES_PER_SYMBOL newest plausible rows per symbol,
+  // overall row cap limit×perSymbol); each candidate is revived (digest +
+  // canonical validator) and must pass the exact shared meaning gate; only
+  // then is the newest VALID envelope per symbol chosen, under the
+  // deterministic winner rule (ts desc, equal timestamps break by greater
+  // canonical id). BOUNDED CORRUPTION TOLERANCE, documented honestly: up to
+  // perSymbol-1 invalid/false-positive newer rows per symbol are absorbed
+  // before an older valid record could be pushed out of the candidate set —
+  // ordinary bad newer rows cannot immediately erase older valid attention,
+  // but no infinite scan is promised against an unbounded corrupt sequence.
   async memoryRecentAttention({ sinceTs, untilTs, limit } = {}) {
     const nSymbols = clamp(limit);
     const perSymbol = ATTENTION_CANDIDATES_PER_SYMBOL;
@@ -439,7 +446,11 @@ export class Repository {
          WHERE ts >= $1 AND ts <= $2 AND symbol IS NOT NULL
            AND observation_state = 'KNOWN'
            AND (event_type = 'WIDEEYE_RIPPLE'
-                OR (event_type = 'RUMOR_OBSERVATION' AND envelope LIKE '%"type":"RUMINT_NOMINATION"%'))
+                OR (event_type = 'RUMOR_OBSERVATION'
+                    AND envelope LIKE '%"type":"RUMINT_NOMINATION"%'
+                    AND CASE WHEN envelope IS JSON
+                          THEN (envelope::jsonb #>> '{payload,type}') = 'RUMINT_NOMINATION'
+                          ELSE false END))
        ) q WHERE rn <= $3 ORDER BY ts DESC, id DESC LIMIT $4`,
       [Math.floor(sinceTs ?? 0), Math.floor(untilTs ?? Number.MAX_SAFE_INTEGER), perSymbol, nSymbols * perSymbol]
     );

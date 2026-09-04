@@ -78,7 +78,9 @@ const microObs = (symbol, tsMs) =>
     provenance: prov('micro/observations.jsonl', sec(tsMs)),
   });
 
-const freshStore = () => new MemoryStore({ dir: mkdtempSync(path.join(tmpdir(), 'cobra-att1a-mem-')) });
+// stores get the deterministic projection clock (defaults to the fixture NOW;
+// pass a supplier to advance it mid-test)
+const freshStore = (now = () => NOW) => new MemoryStore({ dir: mkdtempSync(path.join(tmpdir(), 'cobra-att1a-mem-')), now });
 const localView = (store) => new MemoryView({ localStore: store, persistence: () => null });
 // the same purpose-specific ask the production defaultMemorySource makes
 const sourceFor = (view) => async (now) =>
@@ -236,7 +238,7 @@ test('21. LOCAL PROJECTION: populates on recovery, updates on newer arrival, ref
     JSON.stringify({ id: 'mem-0000000000000000000000000000000000000000', eventType: 'WIDEEYE_RIPPLE', symbol: 'FAKE', observationState: 'KNOWN', ts: sec(NOW) }), // SCHEMA_INVALID
   ];
   writeFileSync(path.join(dir, 'events.jsonl'), lines.join('\n') + '\n');
-  const store = new MemoryStore({ dir });
+  const store = new MemoryStore({ dir, now: () => NOW });
   const q = () => store.getRecentAttention({ sinceTs: sec(NOW - WINDOW_MS), untilTs: sec(NOW) + 60, limit: 16 });
   assert.deepEqual(q().map((e) => e.symbol), ['KERNEL'], 'recovery populated the projection; corrupt/invalid never admitted');
   assert.ok(!store.attentionProjection.has('FAKE'));
@@ -301,13 +303,93 @@ test('1B-9. BOUNDS: per-symbol history is hard bounded and keeps the newest entr
   const ages = [110, 100, 90, 70, 50, 30]; // minutes
   const envs = ages.map((m) => ripple('KERNEL', NOW - m * 60_000));
   for (const e of envs) assert.equal(store.append(e).accepted, true);
-  const hist = store.attentionProjection.get('KERNEL');
+  const { hist } = store.attentionProjection.get('KERNEL');
   assert.equal(hist.length, 4, 'history depth hard bounded');
   assert.deepEqual(hist.map((e) => e.id), envs.slice(2).reverse().map((e) => e.id), 'the 4 NEWEST kept, winner-ordered');
   // and the reproduction bound still holds: unrelated traffic adds nothing
   for (let i = 0; i < 200; i++) store.append(tapeSnap('BTC', NOW - 10 * 60_000 + i * 1000, i));
-  assert.equal(store.attentionProjection.get('KERNEL').length, 4);
+  assert.equal(store.attentionProjection.get('KERNEL').hist.length, 4);
   assert.ok(store.attentionProjection.size <= 64);
+});
+
+// ---------------- ATTENTION-1C: future-poisoning closeout ----------------
+
+// a qualifying future ripple written by a skewed clock whose own provenance
+// is self-consistent (passes the canonical validator; future only relative
+// to the reader/projection clock)
+const futureRipple = (symbol, tsMs, extra = {}) =>
+  ripple(symbol, tsMs, {
+    provenance: prov('survey/events.jsonl (live wide eye)', sec(tsMs), new Date(tsMs).toISOString()),
+    ...extra,
+  });
+const winQ = (store, now = NOW) =>
+  store.getRecentAttention({ sinceTs: sec(now - WINDOW_MS), untilTs: sec(now) + 60, limit: 16 });
+
+test('1C-1. FOUR FUTURE RECORDS cannot evict the valid 90-minute record; clock advance frees them', async () => {
+  const store = freshStore();
+  const valid = ripple('KERNEL', NOW - 90 * 60_000);
+  assert.equal(store.append(valid).accepted, true);
+  const futures = [61, 62, 63, 64].map((s) => futureRipple('KERNEL', NOW + s * 1000));
+  for (const f of futures) assert.equal(store.append(f).accepted, true);
+  // at the current supplied clock: all four futures unavailable, truth stands
+  const got = winQ(store);
+  assert.equal(got.length, 1, 'all future records unavailable to current attention');
+  assert.equal(got[0].id, valid.id, 'the 90-minute record still exists — original identity');
+  assert.equal(got[0].ts, valid.ts, 'original timestamp');
+  const d = seedDir();
+  const snap = await attentionSnapshot({ now: NOW, memorySource: sourceFor(localView(store)) });
+  const k = snap.orbit.find((e) => e.symbol === 'KERNEL');
+  assert.equal(k?.tier, 4, 'KERNEL remains Tier 4');
+  assert.equal(k?.ts, valid.ts * 1000);
+  restoreDir(d);
+  // advance the supplied clock: the retained future records become eligible
+  const later = winQ(store, NOW + 5 * 60_000);
+  assert.equal(later.length, 1);
+  assert.equal(later[0].id, futures[3].id, 'the newest eligible record wins after its time arrives');
+});
+
+test('1C-2. FUTURE-LANE OVERFLOW stays bounded and cannot touch present history', () => {
+  const store = freshStore();
+  const valid = ripple('KERNEL', NOW - 90 * 60_000);
+  store.append(valid);
+  // exceed the future retention bound for one symbol
+  const futures = [61, 62, 63, 64, 65, 66].map((s) => futureRipple('KERNEL', NOW + s * 1000));
+  for (const f of futures) assert.equal(store.append(f).accepted, true);
+  const lanes = store.attentionProjection.get('KERNEL');
+  assert.equal(lanes.fut.length, 4, 'future storage remains hard bounded');
+  assert.deepEqual(lanes.fut.map((e) => e.id), [futures[5], futures[4], futures[3], futures[2]].map((e) => e.id),
+    'the lane keeps its NEWEST future records');
+  assert.deepEqual(lanes.hist.map((e) => e.id), [valid.id], 'overflow never evicted present history');
+  assert.equal(winQ(store)[0].id, valid.id, 'current KERNEL memory remains available');
+  // advance the clock past every future record
+  const later = winQ(store, NOW + 10 * 60_000);
+  assert.equal(later[0].id, futures[5].id, 'newest RETAINED future record wins');
+  // the two discarded futures (+61s, +62s) do not magically reappear
+  const all = new Set([...lanes.hist, ...lanes.fut].map((e) => e.id));
+  assert.ok(!all.has(futures[0].id) && !all.has(futures[1].id));
+});
+
+test('1C-3. LANE TRANSITION: matured future evidence graduates and the winner rule stays deterministic', () => {
+  let clock = NOW;
+  const store = freshStore(() => clock);
+  store.append(ripple('KERNEL', NOW - 90 * 60_000));
+  // two future records with EQUAL timestamps, different ids
+  const t = NOW + 90_000;
+  const fa = futureRipple('KERNEL', t, { identity: '1c-tie-a' });
+  const fb = futureRipple('KERNEL', t, { identity: '1c-tie-b' });
+  const expected = fa.id > fb.id ? fa : fb;
+  store.append(fa);
+  store.append(fb);
+  assert.equal(store.attentionProjection.get('KERNEL').fut.length, 2);
+  // their time arrives; the next indexed record graduates them into history
+  clock = NOW + 10 * 60_000;
+  store.append(nomination('OTHER', clock - 60_000)); // unrelated symbol still triggers no KERNEL touch
+  assert.equal(winQ(store, clock)[0].id, expected.id, 'eligible tie resolves by greater canonical id');
+  store.append(nomination('KERNEL', NOW - 30 * 60_000)); // touching KERNEL migrates matured futures
+  const lanes = store.attentionProjection.get('KERNEL');
+  assert.equal(lanes.fut.length, 0, 'matured evidence left the future lane');
+  assert.ok(lanes.hist.some((e) => e.id === expected.id), 'and now competes as history');
+  assert.equal(winQ(store, clock)[0].id, expected.id, 'same deterministic winner after the lane transition');
 });
 
 // ---------------- durable PostgreSQL integration (own schema) ----------------
@@ -435,7 +517,14 @@ if (!TEST_URL) {
     for (let i = 0; i < 10; i++) {
       assert.equal((await repo.insertMemoryEvent(ripple('DEEP', NOW - (24 - i) * 60_000))).durable, true);
     }
+    // ATTENTION-1C: a NON-JSON corrupt row that matches the text prefilter
+    // must fail dark inside the guarded exact-type inspection — excluded
+    // from the nomination branch, never crashing the whole attention query
+    const husk = nomination('HUSK', NOW - 12 * 60_000);
+    assert.equal((await repo.insertMemoryEvent(husk)).durable, true);
+    await db.query(`UPDATE serpent_memory_events SET envelope = '{"type":"RUMINT_NOMINATION" torn' WHERE id = $1`, [husk.id], { write: true });
     const got = await attnQ();
+    assert.ok(!got.some((e) => e.symbol === 'HUSK'), 'the corrupt row is simply withheld');
     const deep = got.filter((e) => e.symbol === 'DEEP');
     assert.equal(deep.length, 1);
     assert.equal(deep[0].ts, sec(NOW - 15 * 60_000), 'newest DEEP row wins');

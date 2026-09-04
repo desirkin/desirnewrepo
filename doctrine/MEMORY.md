@@ -223,23 +223,37 @@ not depend on how many unrelated records arrived after a valid attention
 event.
 
 ATTENTION-1B closes winner selection: THE NEWEST RECORD IS NOT NECESSARILY
-THE NEWEST VALID RECORD. Locally, the read-side projection keeps a SMALL
-per-symbol history (4 entries, 64 symbols, populated during recovery and
-on accept — canonical Memory never altered) so an out-of-window or
-future-dated envelope cannot erase valid in-window truth; the window is
-applied at read time against that history. Durably, SQL (time-bounded on
-the indexed ts column, event-type narrowed, with a cheap LIKE prefilter
-for the nomination meaning) returns a BOUNDED candidate set — up to 4
+THE NEWEST VALID RECORD. Durably, SQL (time-bounded on the indexed ts
+column, event-type narrowed) returns a BOUNDED candidate set — up to 4
 newest plausible rows per symbol, overall capped at limit×4 — and the
 newest-per-symbol decision happens ONLY among rows that survive the
 complete truth boundary: digest, canonical validator, exact meaning gate.
 A prefilter false positive, corrupt row, or invalid newest candidate can
-therefore neither become prey nor suppress genuine older prey (up to 3
-such rows per symbol tolerated — bounded honesty). One deterministic
-winner rule everywhere (local projection, durable query, durable/local
-merge): newest ts wins; EQUAL timestamps break by canonical id,
-lexicographically greater id first — content-derived, never arrival order.
-Same-id records in both stores are deduped with the durable copy standing.
+therefore neither become prey nor suppress genuine older prey. BOUNDED
+CORRUPTION TOLERANCE, stated honestly: up to 3 invalid/false-positive
+newer rows per symbol are absorbed before an older valid record could
+leave the candidate set; no infinite scan is promised against an
+unbounded corrupt sequence. One deterministic winner rule everywhere
+(local projection, durable query, durable/local merge): newest ts wins;
+EQUAL timestamps break by canonical id, lexicographically greater id
+first — content-derived, never arrival order. Same-id records in both
+stores are deduped with the durable copy standing.
+
+ATTENTION-1C separates the local lanes: FUTURE EVIDENCE MAY WAIT FOR ITS
+TIME, BUT MAY NOT ERASE A VALID MEMORY. Currently-usable history and
+future-dated evidence no longer compete for the same retention slots —
+per symbol the projection keeps a bounded HISTORY lane (4 entries) and a
+bounded FUTURE lane (4 entries; more than 60s ahead of the projection
+clock — supplied deterministically in tests, wall clock in production),
+64 symbols total, populated during recovery and on accept, canonical
+Memory never altered, no per-poll file scans. Future overflow keeps the
+lane's newest records and can never touch history; when the clock
+advances, a retained future record graduates and competes normally under
+the same winner rule. The durable RUMINT nomination branch keeps its
+cheap LIKE prefilter and then inspects the ACTUAL canonical payload.type
+in SQL, guarded by CASE WHEN envelope IS JSON (PostgreSQL 16) so a
+corrupt row fails dark out of that branch instead of crashing the query;
+JavaScript validation remains authoritative.
 
 ## CHILDHOOD BRIDGE — READ-ONLY
 
