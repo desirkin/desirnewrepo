@@ -40,16 +40,22 @@ export function ledgerSummary(now = new Date()) {
     .map((exit) => {
       const fill = fills.get(exit.prediction_id);
       if (!fill) return null;
+      const entryMs = Date.parse(fill.ts);
+      const exitMs = Date.parse(exit.ts);
       return {
         prediction_id: exit.prediction_id,
         etTime: etStamp(exit.ts),
+        entryTs: fill.ts,
         exitTs: exit.ts,
+        // holding time only where both timestamps actually parse — never invented
+        holdMin: Number.isFinite(entryMs) && Number.isFinite(exitMs) ? Math.max(0, (exitMs - entryMs) / 60_000) : null,
         symbol: exit.coin,
         side: 'LONG',
         sizeUsd: fill.size_usd,
         entry: fill.avg_price,
         exit: exit.avg_price,
         netUsd: exit.realized_net_usd,
+        netPct: exit.realized_net_pct ?? null,
         result: exit.realized_net_usd > 0 ? 'W' : 'L',
         exitReason: exit.reason_code,
         feesUsd: fill.fee_usd + exit.fee_usd,
@@ -97,15 +103,31 @@ export function ledgerSummary(now = new Date()) {
         symbol: f.coin,
         sizeUsd: f.size_usd,
         entry: f.avg_price,
+        entryTs: f.ts ?? null,
+        entryFeeUsd: f.fee_usd ?? null,
+        ageMin: f.ts && Number.isFinite(Date.parse(f.ts)) ? Math.max(0, (Date.now() - Date.parse(f.ts)) / 60_000) : null,
         mark,
         unrealizedUsd,
       };
     });
 
+  // UI-1 quality metrics — exact arithmetic over existing records only.
+  // Profit factor with no losses is honestly null (rendered N/A), never ∞.
+  const grossWinUsd = winsArr.reduce((s, t) => s + t.netUsd, 0);
+  const grossLossUsd = lossArr.reduce((s, t) => s + t.netUsd, 0); // ≤ 0
+  const profitFactor = grossLossUsd < 0 ? grossWinUsd / Math.abs(grossLossUsd) : null;
+  const exitReasons = {};
+  for (const t of closed) exitReasons[t.exitReason] = (exitReasons[t.exitReason] ?? 0) + 1;
+
   return {
     generatedAt: nowIso(),
     startingBalance,
     currentBalance: startingBalance + netPnl,
+    grossWinUsd,
+    grossLossUsd,
+    profitFactor,
+    avgNetPerClosedUsd: closed.length ? netPnl / closed.length : null,
+    exitReasons,
     netPnl: { usd: netPnl, pct: (netPnl / startingBalance) * 100 },
     todayPnl: { usd: todayPnl, pct: (todayPnl / startingBalance) * 100 },
     totalTrades: closed.length,

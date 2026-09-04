@@ -3,7 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>COBRA — Spaceship Shell</title>
+<title>Serpent</title>
+<!-- UI-1: iPhone standalone presentation — installable, no URL-bar hacks -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Serpent">
+<meta name="theme-color" content="#030612">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
   /* ============ deep space ============ */
   :root {
@@ -48,10 +55,29 @@
     width: min(88vmin, 360px); height: min(88vmin, 360px);
     transform: translate(-50%, -50%);
   }
-  #ringGroup { animation: breathe 8s ease-in-out infinite; transform-origin: center; }
+  /* UI-1: breathing is state-reactive — slowest at rest, tighter while
+     stalking, quieted when caged, dormant under KILL. Real state only. */
+  #ringGroup { animation: breathe var(--breath, 8s) ease-in-out infinite; transform-origin: center; }
+  body[data-posture="STALKING"] { --breath: 4.6s; }
+  body.caged { --breath: 13s; }
+  body.caged #scene { filter: saturate(.62) brightness(.86); }
+  body.killed #scene { filter: saturate(.22) brightness(.68); }
+  body.killed #ringGroup, body.killed .ringPulse, body.killed #serpent .eye { animation: none; }
   @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.018); } }
   .ring    { fill: none; stroke: var(--accent); stroke-width: 1.6; opacity: .85;
              filter: drop-shadow(0 0 6px var(--accent)); transition: stroke 1.2s ease; }
+  /* the coil made body-like: faint segment hint + a slow highlight moving
+     through the ring — muscle, not sci-fi wire. Restrained on purpose. */
+  .ringScales { fill: none; stroke: var(--accent); stroke-width: 3.1; opacity: .14;
+                stroke-dasharray: 2.6 4.6; transition: stroke 1.2s ease; }
+  .ringPulse  { fill: none; stroke: var(--accent2); stroke-width: 2.4; opacity: .38;
+                stroke-dasharray: 46 607; stroke-linecap: round;
+                filter: blur(1.1px) drop-shadow(0 0 5px var(--accent2));
+                transform-origin: center; transition: stroke 1.2s ease; }
+  body:not(.reduced) .ringPulse { animation: coilPulse 26s linear infinite; }
+  @keyframes coilPulse { to { transform: rotate(360deg); } }
+  body:not(.reduced) #serpent .eye { animation: eyeGlow 7s ease-in-out infinite; }
+  @keyframes eyeGlow { 50% { opacity: .5; } }
   .arcBase { fill: none; stroke: #2a3547; stroke-width: 2; opacity: .55; }
   .arcFill { fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round;
              filter: drop-shadow(0 0 4px var(--accent)); transition: stroke 1.2s ease; }
@@ -98,6 +124,12 @@
   .planet .lbl { margin-top: 5px; font-size: 10px; letter-spacing: .22em; color: var(--dim); }
   .planet.stalked .body { opacity: 1; animation: pulse 1.6s ease-in-out infinite; }
   .planet.stalked .lbl { color: #ffb454; }
+  /* UI-1: the CURRENT FOCUS — prey closest to the animal, larger and
+     sharper, never covering the cobra. The animal stays the center. */
+  .planet .body { transition: opacity .6s, box-shadow .6s, width .8s ease, height .8s ease; }
+  .planet.focal .body { width: 38px; height: 38px; opacity: 1;
+                        box-shadow: 0 0 16px 3px rgba(89,230,198,.30); }
+  .planet.focal .lbl { color: var(--ink); font-weight: 600; letter-spacing: .26em; }
   /* real RUMINT nomination: a quiet amber dot, distinct from demo's full treatment */
   .planet .nomdot { display: none; width: 6px; height: 6px; border-radius: 50%;
                     background: #ffb454; box-shadow: 0 0 7px #ffb454; margin: 3px auto 0; }
@@ -158,6 +190,42 @@
   body.reduced #motion { color: var(--accent); border-color: var(--accent); }
   body.demo #motion { top: calc(max(10px, env(safe-area-inset-top)) + 88px); }
   body.reduced #ringGroup, body.reduced .planet.stalked .body { animation: none; }
+
+  /* UI-1: tiny auth indicator (browser-side state only; server is the
+     boundary). No giant pill over the serpent. */
+  #authdot { position: fixed; top: calc(max(10px, env(safe-area-inset-top)) + 40px); right: 12px; z-index: 40;
+             width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+             background: rgba(8,14,28,.68); border: 1px solid #223048; color: var(--dim); cursor: pointer; }
+  #authdot.authed { color: var(--accent); border-color: rgba(89,230,198,.55); }
+  #authdot.warn { color: #ffb454; border-color: #7a5526; }
+  body:not(.reduced) #authdot.warn { animation: authPulse 2.2s ease-in-out infinite; }
+  @keyframes authPulse { 50% { box-shadow: 0 0 12px rgba(255,180,84,.6); } }
+  #authwarn { top: calc(max(10px, env(safe-area-inset-top)) + 78px); right: 12px; left: auto; color: #ffb454;
+              border-color: #7a5526; display: none; font-size: 9px; max-width: 46vw; text-align: right; }
+  #authwarn.show { display: block; }
+
+  /* UI-1: prey drawer sections + hunt drawer rows (all text set via
+     textContent — external/social strings are DATA, never HTML) */
+  #card h3.sec { margin-top: 13px; font-size: 10px; letter-spacing: .3em; color: var(--dim);
+                 border-bottom: 1px solid #1c2942; padding-bottom: 4px; font-weight: 600; }
+  #card .obs { font-size: 11.5px; color: var(--ink); padding: 4px 0; display: flex; gap: 8px; align-items: baseline; }
+  #card .obs .m { color: var(--dim); flex: none; letter-spacing: .08em; }
+  #card .obs .v { margin-left: auto; font-variant-numeric: tabular-nums; text-align: right; }
+  #card .quiet { font-size: 11px; color: var(--dim); letter-spacing: .14em; padding: 6px 0; }
+  #card .tierline { font-size: 12px; color: var(--accent); letter-spacing: .1em; padding: 5px 0; }
+
+  /* UI-1: ledger performance console */
+  #ledger .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 10px; }
+  #ledger .kcard { border: 1px solid #22334c; border-radius: 10px; padding: 8px 10px; background: rgba(12,20,36,.5); }
+  #ledger .kcard .k { font-size: 9px; letter-spacing: .22em; color: var(--dim); }
+  #ledger .kcard .v { margin-top: 3px; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #ledger .kcard .v small { font-size: 10px; font-weight: 400; color: var(--dim); }
+  #ledger .reasons { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  #ledger .reasons div { font-size: 9px; letter-spacing: .12em; padding: 3px 8px; border-radius: 10px;
+                         border: 1px solid #22334c; color: var(--dim); }
+  #ledger .trow { cursor: pointer; flex-wrap: wrap; }
+  #ledger .trow .detail { flex-basis: 100%; color: var(--dim); font-size: 9.5px; letter-spacing: .06em;
+                          padding-top: 3px; white-space: normal; }
 
   #demobadge {
     display: none; position: fixed; top: 46px; right: -34px; z-index: 50; cursor: pointer;
@@ -262,8 +330,14 @@
     </g>
     <!-- the serpent, coiled about the verdict -->
     <g id="serpent" class="idle"></g>
-    <!-- verdict ring -->
-    <g id="ringGroup"><circle class="ring" r="104"></circle></g>
+    <!-- verdict ring — UI-1: layered so the coil feels like body, not wire.
+         The main ring is a JS-built path with faint organic irregularity;
+         ringScales hints at segments; ringPulse is a slow moving highlight. -->
+    <g id="ringGroup">
+      <path id="verdictRing" class="ring" d=""></path>
+      <circle class="ringScales" r="104"></circle>
+      <circle class="ringPulse" r="104"></circle>
+    </g>
   </svg>
   <div id="verdict">
     <div class="word">WATCHING</div>
@@ -280,8 +354,15 @@
      style="top:calc(max(10px, env(safe-area-inset-top)) + 74px);left:12px;color:#5c6b7a"></div>
 <div id="eyechip" class="chip" hidden
      style="top:calc(max(10px, env(safe-area-inset-top)) + 106px);left:12px;color:#5c6b7a"></div>
-<div id="authchip" class="chip" hidden
-     style="top:calc(max(10px, env(safe-area-inset-top)) + 138px);left:12px;color:#5c6b7a"></div>
+<!-- UI-1: the tiny auth indicator. Browser-side state only — the security
+     boundary stays on the server. No giant pill over the animal. -->
+<button id="authdot" aria-label="control authentication status" title="control auth">
+  <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+    <rect x="5" y="10" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect>
+    <path d="M8 10 V7 a4 4 0 0 1 8 0 v3" fill="none" stroke="currentColor" stroke-width="2"></path>
+  </svg>
+</button>
+<div id="authwarn" class="chip">CONTROL AUTH UNCONFIGURED</div>
 <div id="clockchip" class="chip">ET --:-- · SESSION ----------</div>
 <div id="controls">
   <button id="btnKill">KILL</button>
@@ -387,6 +468,15 @@ function buildSerpent() {
   $('#serpent').innerHTML =
     `<path class="coil" d="${d}"></path><path d="${head}"></path>` +
     `<circle class="eye" cx="${hx - 4 * Math.cos(angH)}" cy="${hy - 4 * Math.sin(angH)}" r="1.7"></circle>`;
+  // UI-1: the verdict ring gets faint organic irregularity — a closed path
+  // with a barely-perceptible radial wobble instead of a perfect circle.
+  const rp = [];
+  for (let i = 0; i <= 180; i++) {
+    const a = (i / 180) * 2 * Math.PI;
+    const r = 104 + Math.sin(a * 7 + 0.8) * 0.9 + Math.sin(a * 3 - 1.2) * 0.6;
+    rp.push(`${(r * Math.cos(a)).toFixed(1)},${(r * Math.sin(a)).toFixed(1)}`);
+  }
+  $('#verdictRing').setAttribute('d', 'M' + rp.join(' L') + ' Z');
 }
 
 /* ---------- arcs (lock ring + ET session) ---------- */
@@ -419,29 +509,68 @@ function renderSession(sess) {
   $('#clockchip').textContent = `ET ${sess.etTime} · SESSION ${sess.etDate}`;
 }
 
-/* ---------- planets ---------- */
+/* ---------- planets: the hunting orbit (UI-1: dynamic display attention) ----------
+   The orbit shows what Serpent is actually WATCHING (stalks, ripples,
+   social attention) with the configured majors as quiet fallback. DISPLAY
+   ATTENTION != BITEABLE — appearing here never implies eligibility.
+   Symbols come from our own server, are strict tokens (validated), and are
+   rendered as text only. Focus changes glide; the page never rebuilds. */
+const SYM_RE = /^[A-Z0-9]{1,12}$/;
+function planetStyle(coin) {
+  if (PLANET_STYLE[coin]) return PLANET_STYLE[coin];
+  let h = 0;
+  for (const ch of coin) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `radial-gradient(circle at 34% 30%, hsl(${h} 82% 84%), hsl(${h} 72% 55%) 55%, hsl(${h} 60% 22%))`;
+}
 const planets = new Map();
-function buildPlanets() {
-  const wrap = $('#planets'); wrap.innerHTML = ''; planets.clear();
-  universe.forEach((coin, i) => {
-    const el = document.createElement('div');
-    el.className = 'planet';
-    el.innerHTML = `
-      <svg class="reticle" viewBox="0 0 60 60">
-        <circle cx="30" cy="30" r="26" fill="none" stroke="#ffb454" stroke-width="1.4"
-                stroke-dasharray="6 5" opacity=".9"></circle>
-        <ellipse cx="30" cy="30" rx="2.2" ry="8" fill="#ffb454" opacity=".95"></ellipse>
-      </svg>
-      <div class="body" style="background:${PLANET_STYLE[coin] || PLANET_STYLE.BTC}"></div>
-      <div class="lbl">${coin}</div>
-      <div class="nomdot"></div>`;
-    el.addEventListener('click', () => openCard(coin));
-    wrap.appendChild(el);
-    planets.set(coin, {
-      el, phase: (i / universe.length) * Math.PI * 2 + 0.6,
-      speed: 0.045 + i * 0.011, rFac: 0.72 + i * 0.085, pull: 1, // pull<1 = stalked, drawn closer
-    });
+let focusSymbol = null;
+let lastAttention = null; // last good snapshot for the hunt drawer
+let attentionAtMs = 0;
+const ATTENTION_STALE_MS = 60_000; // stale focal prey never lingers (§37)
+function makePlanet(coin) {
+  const el = document.createElement('div');
+  el.className = 'planet';
+  el.setAttribute('role', 'button');
+  el.setAttribute('tabindex', '0');
+  el.innerHTML = `
+    <svg class="reticle" viewBox="0 0 60 60" aria-hidden="true">
+      <circle cx="30" cy="30" r="26" fill="none" stroke="#ffb454" stroke-width="1.4"
+              stroke-dasharray="6 5" opacity=".9"></circle>
+      <ellipse cx="30" cy="30" rx="2.2" ry="8" fill="#ffb454" opacity=".95"></ellipse>
+    </svg>
+    <div class="body" style="background:${planetStyle(coin)}"></div>
+    <div class="lbl"></div>
+    <div class="nomdot"></div>`;
+  el.querySelector('.lbl').textContent = coin; // symbol is data, not markup
+  el.addEventListener('click', () => openCard(coin));
+  el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCard(coin); } });
+  $('#planets').appendChild(el);
+  const p = {
+    el, coin,
+    phase: Math.random() * Math.PI * 2,
+    speed: 0.041 + (planets.size % 7) * 0.010,
+    rank: planets.size, pull: 1.28, fade: 0, dying: false, meta: null,
+  };
+  planets.set(coin, p);
+  return p;
+}
+// Reconcile displayed prey with the attention snapshot — additions drift in
+// from the outside, departures fade out, focus docks on the inner coil.
+function syncOrbit(list, focus) {
+  const want = new Set();
+  list.forEach((entry, i) => {
+    if (!SYM_RE.test(entry.symbol)) return;
+    want.add(entry.symbol);
+    const p = planets.get(entry.symbol) ?? makePlanet(entry.symbol);
+    p.meta = entry;
+    p.rank = i;
+    p.dying = false;
+    const what = entry.tier === 1 ? 'active stalking' : entry.tier === 2 ? 'wide eye ripple'
+      : entry.tier === 3 ? 'social attention' : 'watched major';
+    p.el.setAttribute('aria-label', `${entry.symbol} — ${what} — tap for details`);
   });
+  for (const p of planets.values()) if (!want.has(p.coin)) p.dying = true;
+  focusSymbol = focus && SYM_RE.test(focus) ? focus : null;
 }
 function layoutPlanets(t) {
   const cx = innerWidth / 2, cy = innerHeight * 0.46;
@@ -449,17 +578,44 @@ function layoutPlanets(t) {
   const baseR = Math.min((innerWidth / 2 - 30) / 1.06, innerHeight * 0.36, 200);
   for (const [coin, p] of planets) {
     if (!reduced) p.phase += p.speed * 0.016;
-    const target = (demo && demoTarget === coin) ? 0.52 : 1;
-    p.pull += (target - p.pull) * 0.04;
-    const rx = baseR * p.rFac * p.pull;
+    p.fade += ((p.dying ? 0 : 1) - p.fade) * (reduced ? 1 : 0.05);
+    if (p.dying && p.fade < 0.03) { p.el.remove(); planets.delete(coin); continue; }
+    const focal = !demo && coin === focusSymbol;
+    const fac = 0.72 + p.rank * 0.075;
+    // the focal prey docks ON the innermost hunting ring — closest to the
+    // animal, never covering the verdict at the center
+    const ringPx = Math.min(0.88 * Math.min(innerWidth, innerHeight), 360) * (104 / 340) + 12;
+    const target = (demo && demoTarget === coin) ? 0.52
+      : focal ? Math.min(1, Math.max(0.4, ringPx / (baseR * fac))) : 1;
+    p.pull += (target - p.pull) * (reduced ? 1 : 0.04);
+    const rx = baseR * fac * p.pull;
     const x = cx + rx * Math.cos(p.phase);
     const y = cy + rx * 0.55 * Math.sin(p.phase);
     const depth = (Math.sin(p.phase) + 1) / 2;            // 0 back, 1 front
-    const sc = 0.82 + depth * 0.3;
+    const sc = (0.82 + depth * 0.3) * (focal ? 1.12 : 1);
     p.el.style.transform = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0) scale(${sc.toFixed(3)})`;
-    p.el.style.zIndex = String(10 + Math.round(depth * 9));
-    p.el.style.opacity = (0.62 + depth * 0.38).toFixed(2);
-    p.el.classList.toggle('stalked', demo && demoTarget === coin);
+    p.el.style.zIndex = String(10 + Math.round(depth * 9) + (focal ? 5 : 0));
+    p.el.style.opacity = ((0.62 + depth * 0.38) * p.fade).toFixed(2);
+    p.el.classList.toggle('stalked', (demo && demoTarget === coin) || (!demo && p.meta?.tier === 1));
+    p.el.classList.toggle('focal', focal);
+    p.el.classList.toggle('nominated', !demo && p.meta?.tier === 3);
+  }
+}
+// §37: attention arriving is truth; attention failing falls back to the
+// configured majors — nothing invented, nothing stale left focal forever.
+function majorsFallback() {
+  return universe.map((symbol) => ({ symbol, tier: 4, fallback: true, reason: 'configured major — quiet fallback' }));
+}
+function applyAttention(a) {
+  if (a && Array.isArray(a.orbit)) {
+    lastAttention = a;
+    attentionAtMs = Date.now();
+    syncOrbit(a.orbit, a.focus?.symbol ?? null);
+    return;
+  }
+  if (Date.now() - attentionAtMs > ATTENTION_STALE_MS) {
+    lastAttention = null;
+    syncOrbit(majorsFallback(), null);
   }
 }
 
@@ -499,17 +655,30 @@ function applyPosture(posture, { why = '', sub = null } = {}) {
    query string. The session rides an HttpOnly SameSite=Strict cookie the
    script cannot read. The server re-authorizes every mutation. */
 let csrfToken = null;
+/* UI-1: the auth indicator is a tiny glyph, not an overlay pill. Ordinary
+   locked = quiet dim padlock; authenticated = accent; a REAL problem
+   (unconfigured/error) = compact amber warning that demands attention. */
+function renderAuthDot(state) {
+  const dot = $('#authdot');
+  dot.classList.toggle('authed', state === 'authed');
+  dot.classList.toggle('warn', state === 'warn');
+  dot.setAttribute('aria-label',
+    state === 'authed' ? 'control authenticated'
+    : state === 'warn' ? 'control auth unavailable — attention required'
+    : 'control locked — tap to authenticate');
+  $('#authwarn').classList.toggle('show', state === 'warn');
+}
 async function refreshAuth() {
   try {
     const r = await fetch('/api/auth/status');
     const d = await r.json();
     csrfToken = d.authenticated ? d.csrfToken : null;
-    const chip = $('#authchip');
-    chip.hidden = false;
-    chip.textContent = d.controlAuth === 'CONTROL_AUTH_UNCONFIGURED' ? 'CONTROL AUTH UNCONFIGURED'
-      : d.authenticated ? 'CONTROL AUTHENTICATED' : 'CONTROL LOCKED';
-  } catch { /* link loss is reported by the tape chip */ }
+    renderAuthDot(d.controlAuth === 'CONTROL_AUTH_UNCONFIGURED' ? 'warn' : d.authenticated ? 'authed' : 'locked');
+  } catch {
+    renderAuthDot('warn'); // an auth endpoint we cannot read is a real problem
+  }
 }
+$('#authdot').addEventListener('click', () => { if (!csrfToken) openAuthCard(); });
 function openAuthCard(then) {
   $('#cardTitle').textContent = 'CONTROL AUTH';
   $('#cardBody').innerHTML = `
@@ -640,39 +809,66 @@ function renderLedger(L) {
       </div>`;
     return;
   }
-  const rows = L.lastTrades.map((t) => `
-    <div class="trow">
+  // UI-1 performance console — every figure from existing ledger records.
+  const holdStr = (m) => (m == null ? null : m < 90 ? `${Math.round(m)}m` : `${(m / 60).toFixed(1)}h`);
+  const rows = L.lastTrades.map((t, i) => `
+    <div class="trow" data-trade="${i}">
       <span class="t">${t.etTime}</span>
       <span class="sym">${t.symbol}</span>
       <span class="px">$${t.sizeUsd} · ${t.entry.toPrecision(6)}→${t.exit.toPrecision(6)}</span>
-      <span class="net ${cls(t.netUsd)}">${fmt$(t.netUsd)}</span>
+      <span class="net ${cls(t.netUsd)}">${fmt$(t.netUsd)}${t.netPct != null ? ` <small style="font-weight:400">${fmtPct(t.netPct)}</small>` : ''}</span>
       <span class="wl ${cls(t.netUsd)}">${t.result}</span>
-      <span class="rsn">${t.exitReason}</span>
+      <span class="rsn">${t.exitReason}${t.holdMin != null ? ` · ${holdStr(t.holdMin)}` : ''}</span>
     </div>`).join('');
   const syms = Object.entries(L.perSymbol).map(([sym, p]) =>
     `<div>${sym} · ${p.trades} · <span class="${cls(p.netUsd)}" style="color:${p.netUsd >= 0 ? '#4fd598' : '#ff7a6b'}">${fmt$(p.netUsd)}</span></div>`).join('');
   const openRows = L.openPositions.map((p) => `
     <div class="trow">
       <span class="sym">${p.symbol}</span>
-      <span class="px">OPEN · $${p.sizeUsd} @ ${p.entry.toPrecision(6)} · mark ${p.mark ? p.mark.toPrecision(6) : '—'}</span>
-      <span class="net ${p.unrealizedUsd == null ? '' : cls(p.unrealizedUsd)}">${p.unrealizedUsd == null ? 'UNAVAIL' : fmt$(p.unrealizedUsd)}</span>
+      <span class="px">OPEN · $${p.sizeUsd} @ ${p.entry.toPrecision(6)}${p.entryFeeUsd != null ? ` · fee ${fmt$(p.entryFeeUsd)}` : ''}${p.ageMin != null ? ` · ${holdStr(p.ageMin)}` : ''}</span>
+      <span class="net ${p.unrealizedUsd == null ? '' : cls(p.unrealizedUsd)}">${p.unrealizedUsd == null ? 'UNAVAILABLE' : fmt$(p.unrealizedUsd)}</span>
     </div>`).join('');
+  const card = (k, v) => `<div class="kcard"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  const cards = [
+    card('REALIZED BALANCE', `$${L.currentBalance.toFixed(2)}`),
+    card('TOTAL NET P&amp;L', `<span class="${cls(L.netPnl.usd)}">${fmt$(L.netPnl.usd)}</span> <small>${fmtPct(L.netPnl.pct)}</small>`),
+    card('TODAY', `<span class="${cls(L.todayPnl.usd)}">${fmt$(L.todayPnl.usd)}</span> <small>${fmtPct(L.todayPnl.pct)}</small>`),
+    card('CLOSED TRADES', `${L.totalTrades} <small>${L.wins}W–${L.losses}L</small>`),
+    card('WIN RATE', L.winRatePct != null ? `${L.winRatePct.toFixed(0)}%` : '—'),
+    card('PROFIT FACTOR', L.profitFactor != null ? L.profitFactor.toFixed(2) : 'N/A'),
+    card('TOTAL FEES', fmt$(L.totalFeesPaid)),
+    card('OPEN / PENDING', `${L.openPositions.length} <small>open</small> ${L.pendingPredictions} <small>pending</small>`),
+  ].join('');
   const stats = [
     L.avgWinUsd != null ? `avg W <b>${fmt$(L.avgWinUsd)}</b>` : null,
     L.avgLossUsd != null ? `avg L <b>${fmt$(L.avgLossUsd)}</b>` : null,
+    L.avgNetPerClosedUsd != null ? `avg net <b>${fmt$(L.avgNetPerClosedUsd)}</b>` : null,
     L.largestWinUsd != null ? `best <b>${fmt$(L.largestWinUsd)}</b>` : null,
     L.largestLossUsd != null ? `worst <b>${fmt$(L.largestLossUsd)}</b>` : null,
   ].filter(Boolean).join(' <span>·</span> ');
+  const reasons = Object.entries(L.exitReasons ?? {}).map(([r, n]) => `<div>${r} × ${n}</div>`).join('');
   b.innerHTML = `
     <div class="net">$${L.startingBalance.toFixed(2)} → $${L.currentBalance.toFixed(2)}
       <span class="${cls(L.netPnl.usd)}">· ${fmtPct(L.netPnl.pct)}</span></div>
-    <div class="line"><span>TODAY</span> <span class="${cls(L.todayPnl.usd)}" style="color:${L.todayPnl.usd >= 0 ? '#4fd598' : '#ff7a6b'}">${fmt$(L.todayPnl.usd)} (${fmtPct(L.todayPnl.pct)})</span></div>
-    <div class="line">${L.wins}W – ${L.losses}L <span>·</span> win rate ${L.winRatePct != null ? L.winRatePct.toFixed(0) + '%' : '—'}</div>
+    <div class="cards">${cards}</div>
     ${stats ? `<div class="line">${stats}</div>` : ''}
+    ${reasons ? `<div class="reasons">${reasons}</div>` : ''}
     ${openRows ? `<div class="openpos">${openRows}</div>` : ''}
     <div class="trades">${rows}</div>
     ${syms ? `<div class="symstrip">${syms}</div>` : ''}
     <div class="fees">COSTS PAID ${fmt$(L.totalFeesPaid)}</div>`;
+  // tap a closed trade for its prediction → entry → exit lifecycle line
+  for (const rowEl of b.querySelectorAll('[data-trade]')) {
+    rowEl.addEventListener('click', () => {
+      const t = L.lastTrades[Number(rowEl.dataset.trade)];
+      const existing = rowEl.querySelector('.detail');
+      if (existing) { existing.remove(); return; }
+      const d = document.createElement('div');
+      d.className = 'detail';
+      d.textContent = `prediction ${t.prediction_id} · entered ${t.entryTs ?? '—'} · exited ${t.exitTs} · fees ${fmt$(t.feesUsd)}${t.holdMin != null ? ` · held ${holdStr(t.holdMin)}` : ''}`;
+      rowEl.appendChild(d);
+    });
+  }
 }
 function ledgerError(msg) {
   $('#ledgerBody').innerHTML = `<div class="line"><span>${msg}</span></div>`;
@@ -711,7 +907,10 @@ $('#ledger .close').addEventListener('click', () => $('#ledger').classList.remov
 
 function renderStatus(s) {
   lastStatus = s;
-  universeCheck(s.universe);
+  if (Array.isArray(s.universe) && s.universe.length) universe = s.universe; // fallback majors
+  // the animal's quiet: KILL = dormant, CAGE = restrained (real state only)
+  body.classList.toggle('killed', Boolean(s.controls?.kill));
+  body.classList.toggle('caged', Boolean(s.controls?.cage) && !s.controls?.kill);
   const latched = s.controls && (s.controls.kill || s.controls.cage);
   $('#btnClear').hidden = !latched;
   $('#btnKill').hidden = Boolean(s.controls?.kill);
@@ -722,8 +921,6 @@ function renderStatus(s) {
     const sub = s.posture === 'STALKING' && s.stalking?.length ? s.stalking.join(' · ') : null;
     applyPosture(s.posture, { why, ...(sub ? { sub } : {}) });
   }
-  // amber nomination dots on planets the RUMINT ears are stalking
-  for (const [coin, p] of planets) p.el.classList.toggle('nominated', Boolean(s.stalking?.includes(coin)));
   const r = s.rumint;
   $('#earschip').hidden = !(r && r.enabled && r.fresh);
   if (r && r.enabled && r.fresh) {
@@ -751,9 +948,6 @@ function renderStatus(s) {
   renderLockRing(s.locks);
   renderSession(s.session);
 }
-function universeCheck(u) {
-  if (u && u.join() !== universe.join()) { universe = u; buildPlanets(); }
-}
 async function poll() {
   try {
     const s = await (await fetch('/api/status', { cache: 'no-store' })).json();
@@ -763,58 +957,183 @@ async function poll() {
     const dot = $('#tapedot'); dot.className = ''; dot.classList.add('LOST');
     $('#tapetext').textContent = 'SHELL LINK LOST';
   }
+  // display attention rides the SAME cadence — no extra polling loop; a
+  // failure falls back to the configured majors, never a broken screen
+  if (!demo) {
+    try {
+      applyAttention(await (await fetch('/api/attention', { cache: 'no-store' })).json());
+    } catch {
+      applyAttention(null);
+    }
+  }
 }
 
-/* ---------- detail card (real data only, or UNAVAILABLE, or demo dashes) ---------- */
+/* ---------- detail card (real data only, or UNAVAILABLE, or demo dashes) ----------
+   UI-1: "WHY AM I WATCHING THIS?" — four compact sections. Every dynamic
+   string (stalk causes, social text, reasons) is DATA rendered via
+   textContent; external text can never become HTML or instruction. */
 function fmtUsd(v) { return v >= 1000 ? '$' + (v / 1000).toFixed(1) + 'k' : '$' + v.toFixed(0); }
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = String(text); // safe by construction
+  return n;
+}
+function obsRow(label, value) {
+  const d = el('div', 'obs');
+  d.append(el('span', 'm', label), el('span', 'v', value));
+  return d;
+}
+function agoStr(ts) {
+  const ms = Date.now() - (typeof ts === 'string' ? Date.parse(ts) : ts);
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const m = ms / 60_000;
+  if (m < 1) return 'just now';
+  if (m < 90) return `${Math.round(m)}m ago`;
+  return `${(m / 60).toFixed(1)}h ago`;
+}
+function renderAttractionSection(bodyEl, att) {
+  bodyEl.append(el('h3', 'sec', 'ATTRACTION'));
+  if (att?.stalking) {
+    bodyEl.append(el('div', 'tierline', 'ACTIVE STALK'));
+    bodyEl.append(obsRow('cause', att.stalking.reason));
+    if (att.stalking.since) bodyEl.append(obsRow('first seen', agoStr(att.stalking.since)));
+    if (att.stalking.expiresMs) {
+      const left = Math.max(0, (att.stalking.expiresMs - Date.now()) / 60_000);
+      bodyEl.append(obsRow('expires', `${Math.round(left)}m`));
+    }
+  } else if (att?.wideEye) {
+    bodyEl.append(el('div', 'tierline', 'WIDE EYE RIPPLE'));
+    if (att.wideEye.zVol != null) bodyEl.append(obsRow('volume z', att.wideEye.zVol));
+    if (att.wideEye.zRet != null) bodyEl.append(obsRow('return z', att.wideEye.zRet));
+    if (att.wideEye.extension != null) bodyEl.append(obsRow('extension', `${att.wideEye.extension}%`));
+    bodyEl.append(obsRow('observed', agoStr(att.wideEye.ts)));
+  } else if (att?.rumint?.nomination || att?.rumint?.hyped) {
+    bodyEl.append(el('div', 'tierline', 'SOCIAL ATTENTION'));
+    if (att.rumint.nomination) {
+      bodyEl.append(obsRow('cause', att.rumint.nomination.reason));
+      bodyEl.append(obsRow('observed', agoStr(att.rumint.nomination.ts)));
+    }
+    if (att.rumint.hyped) bodyEl.append(obsRow('status', 'HYPED'));
+  } else {
+    bodyEl.append(el('div', 'quiet', 'NO CURRENT ATTENTION — QUIET WATCH'));
+  }
+}
+function renderSocialSection(bodyEl, rumint) {
+  bodyEl.append(el('h3', 'sec', 'SOCIAL / RUMORS'));
+  const sig = rumint?.signal;
+  if (!sig && !rumint?.hyped && !rumint?.nomination) {
+    bodyEl.append(el('div', 'quiet', 'NO MEANINGFUL SOCIAL SIGNAL'));
+    return;
+  }
+  if (sig) {
+    bodyEl.append(obsRow('chatter velocity', sig.velocity != null ? `${sig.velocity}/hr` : 'UNAVAILABLE'));
+    bodyEl.append(obsRow('velocity z', sig.zVelocity != null ? sig.zVelocity.toFixed(2) : 'INSUFFICIENT HISTORY'));
+    bodyEl.append(obsRow('acceleration', sig.acceleration != null ? sig.acceleration : 'INSUFFICIENT HISTORY'));
+    bodyEl.append(obsRow('sentiment shift', sig.sentimentShift != null ? sig.sentimentShift.toFixed(2) : 'INSUFFICIENT HISTORY'));
+    bodyEl.append(obsRow('source', sig.source ?? 'RUMINT'));
+  }
+  if (rumint?.hyped) bodyEl.append(obsRow('today', 'HYPED'));
+}
+function renderMarketSection(bodyEl, d) {
+  bodyEl.append(el('h3', 'sec', 'MARKET'));
+  if (!d.available) {
+    bodyEl.append(el('div', 'quiet', d.reason || 'UNAVAILABLE — NO TRADE'));
+    return;
+  }
+  const rows = el('div', 'rows');
+  const mk = (label, val) => { const r = el('div'); r.append(el('span', null, label), el('b', null, val)); return r; };
+  rows.append(
+    mk('MID', d.mid.toLocaleString('en-US', { maximumFractionDigits: 6 })),
+    mk('BID / ASK', `${d.bestBid} / ${d.bestAsk}`),
+    mk('SPREAD', `${d.spreadBps.toFixed(2)} bps`),
+    mk('BOOK AGE', `${d.ageSec.toFixed(1)} s`),
+    mk('LEVELS', `${d.levels.bids} bid / ${d.levels.asks} ask`)
+  );
+  bodyEl.append(rows);
+  const bands = ['5bps', '10bps', '25bps'];
+  const maxD = Math.max(...bands.flatMap((b) => [d.depthUsd[b].bid, d.depthUsd[b].ask]));
+  const depth = el('div', 'depth');
+  for (const b of bands) {
+    const row = el('div', 'drow');
+    const bidLbl = el('span', null, fmtUsd(d.depthUsd[b].bid)); bidLbl.style.cssText = 'width:74px;text-align:right';
+    const bid = el('div', 'bar bid'); bid.style.width = `${Math.max(3, (d.depthUsd[b].bid / maxD) * 92)}px`;
+    const ask = el('div', 'bar ask'); ask.style.width = `${Math.max(3, (d.depthUsd[b].ask / maxD) * 92)}px`;
+    const askLbl = el('span', null, fmtUsd(d.depthUsd[b].ask)); askLbl.style.width = '74px';
+    row.append(bidLbl, bid, el('div', 'mid', `±${b.replace('bps', '')}bp`), ask, askLbl);
+    depth.append(row);
+  }
+  bodyEl.append(depth);
+}
+function renderMemorySection(bodyEl, memory) {
+  bodyEl.append(el('h3', 'sec', 'MEMORY'));
+  const records = memory?.records ?? [];
+  if (!records.length) {
+    bodyEl.append(el('div', 'quiet', memory?.meta?.mode === 'LOCAL_ONLY' ? 'LOCAL SESSION MEMORY ONLY — NOTHING RECENT' : 'NO RECENT MEMORY'));
+    return;
+  }
+  for (const rec of [...records].reverse()) {
+    const row = el('div', 'obs');
+    row.append(el('span', 'm', `${rec.sourceModule} · ${rec.eventType}`));
+    row.append(el('span', 'v', `${rec.observationState} · ${agoStr(rec.ts * 1000)}`));
+    bodyEl.append(row);
+  }
+}
 async function openCard(coin) {
   $('#cardTitle').textContent = coin;
   const bodyEl = $('#cardBody');
   if (demo) {
-    bodyEl.innerHTML = `
-      <div class="rows">
-        <div><span>PRICE</span><b>—</b></div>
-        <div><span>SPREAD</span><b>—</b></div>
-        <div><span>BOOK AGE</span><b>—</b></div>
-        <div><span>DEPTH</span><b>—</b></div>
-      </div>
-      <div class="demoNote">DEMO — STAGED VISUALS. THESE ARE NOT MARKET VALUES.</div>`;
+    bodyEl.replaceChildren();
+    const rows = el('div', 'rows');
+    for (const k of ['PRICE', 'SPREAD', 'BOOK AGE', 'DEPTH']) {
+      const r = el('div'); r.append(el('span', null, k), el('b', null, '—')); rows.append(r);
+    }
+    bodyEl.append(rows, el('div', 'demoNote', 'DEMO — STAGED VISUALS. THESE ARE NOT MARKET VALUES.'));
     $('#card').classList.add('open');
     return;
   }
-  bodyEl.innerHTML = '<div class="rows"><span>reading tape…</span></div>';
+  bodyEl.replaceChildren(el('div', 'quiet', 'reading tape…'));
   $('#card').classList.add('open');
   try {
-    const d = await (await fetch('/api/coin/' + coin, { cache: 'no-store' })).json();
-    if (!d.available) {
-      bodyEl.innerHTML = `<div class="unavail">${d.reason || 'UNAVAILABLE — NO TRADE'}</div>`;
-      return;
-    }
-    const bands = ['5bps', '10bps', '25bps'];
-    const maxD = Math.max(...bands.flatMap((b) => [d.depthUsd[b].bid, d.depthUsd[b].ask]));
-    const depthRows = bands.map((b) => {
-      const bw = Math.max(3, (d.depthUsd[b].bid / maxD) * 92);
-      const aw = Math.max(3, (d.depthUsd[b].ask / maxD) * 92);
-      return `<div class="drow">
-        <span style="width:74px;text-align:right">${fmtUsd(d.depthUsd[b].bid)}</span>
-        <div class="bar bid" style="width:${bw}px"></div>
-        <div class="mid">±${b.replace('bps', '')}bp</div>
-        <div class="bar ask" style="width:${aw}px"></div>
-        <span style="width:74px">${fmtUsd(d.depthUsd[b].ask)}</span>
-      </div>`;
-    }).join('');
-    bodyEl.innerHTML = `
-      <div class="rows">
-        <div><span>MID</span><b>${d.mid.toLocaleString('en-US', { maximumFractionDigits: 6 })}</b></div>
-        <div><span>BID / ASK</span><b>${d.bestBid} / ${d.bestAsk}</b></div>
-        <div><span>SPREAD</span><b>${d.spreadBps.toFixed(2)} bps</b></div>
-        <div><span>BOOK AGE</span><b>${d.ageSec.toFixed(1)} s</b></div>
-        <div><span>LEVELS</span><b>${d.levels.bids} bid / ${d.levels.asks} ask</b></div>
-      </div>
-      <div class="depth">${depthRows}</div>`;
+    const d = await (await fetch('/api/coin/' + encodeURIComponent(coin), { cache: 'no-store' })).json();
+    bodyEl.replaceChildren();
+    bodyEl.append(el('div', 'quiet', 'WHY AM I WATCHING THIS?'));
+    renderAttractionSection(bodyEl, d.attention);
+    renderSocialSection(bodyEl, d.attention?.rumint);
+    renderMarketSection(bodyEl, d);
+    renderMemorySection(bodyEl, d.memory);
   } catch {
-    bodyEl.innerHTML = `<div class="unavail">UNAVAILABLE — shell link lost</div>`;
+    bodyEl.replaceChildren(el('div', 'unavail', 'UNAVAILABLE — shell link lost'));
   }
+}
+
+/* ---------- Hunt drawer: WHAT SERPENT IS WATCHING (never a buy list) ---------- */
+function openHuntCard() {
+  $('#cardTitle').textContent = 'WATCHING';
+  const bodyEl = $('#cardBody');
+  bodyEl.replaceChildren();
+  const a = lastAttention;
+  const tierWord = (t) => (t === 1 ? 'active stalk' : t === 2 ? 'wide eye ripple' : t === 3 ? 'social attention' : 'quiet fallback');
+  if (a?.focus) {
+    bodyEl.append(el('h3', 'sec', 'FOCUS'));
+    bodyEl.append(el('div', 'tierline', a.focus.symbol));
+    bodyEl.append(obsRow(tierWord(a.focus.tier), a.focus.reason));
+    if (a.focus.ts) bodyEl.append(obsRow('refreshed', agoStr(a.focus.ts)));
+  } else {
+    bodyEl.append(el('div', 'quiet', 'NO CURRENT FOCUS — WATCHING THE MAJORS'));
+  }
+  const others = (a?.orbit ?? []).filter((e) => !e.fallback && e.symbol !== a?.focus?.symbol);
+  if (others.length) {
+    bodyEl.append(el('h3', 'sec', 'OTHER ATTENTION'));
+    for (const e of others) {
+      const row = el('div', 'obs');
+      row.append(el('span', 'm', e.symbol));
+      row.append(el('span', 'v', `${tierWord(e.tier)} · ${e.ts ? agoStr(e.ts) : '—'}`));
+      bodyEl.append(row);
+    }
+  }
+  bodyEl.append(el('div', 'quiet', 'WHAT SERPENT IS WATCHING — NOT ADVICE, NOT ELIGIBILITY'));
+  $('#card').classList.add('open');
 }
 $('#card .close').addEventListener('click', () => $('#card').classList.remove('open'));
 $('#scene').addEventListener('click', (e) => {
@@ -842,15 +1161,21 @@ function setDemo(on) {
   body.classList.toggle('demo', on);
   clearTimeout(demoTimer); demoTimer = null; demoTarget = null; demoIdx = 0;
   $('#card').classList.remove('open');
-  if (on) demoStep();
-  else if (lastStatus) renderStatus(lastStatus); // true state, immediately
+  if (on) { syncOrbit(majorsFallback(), null); demoStep(); } // staged tour uses the majors
+  else if (lastStatus) { renderStatus(lastStatus); poll(); } // true state, immediately
   else poll();
 }
+/* UI-1: WATCHING is tappable — a single tap opens the Hunt drawer (what
+   Serpent is watching, not what to buy). The triple-tap demo toggle stays:
+   the drawer only opens once it's clear no more taps are coming. */
 let taps = [];
+let huntTapTimer = null;
 $('#verdict').addEventListener('click', () => {
   const now = Date.now();
   taps = taps.filter((t) => now - t < 650); taps.push(now);
-  if (taps.length >= 3) { taps = []; setDemo(!demo); }
+  clearTimeout(huntTapTimer);
+  if (taps.length >= 3) { taps = []; setDemo(!demo); return; }
+  huntTapTimer = setTimeout(() => { taps = []; if (!demo) openHuntCard(); }, 500);
 });
 $('#demobadge').addEventListener('click', () => setDemo(false));
 
@@ -866,7 +1191,7 @@ setTimeout(endBoot, 1900);
 /* ---------- main loop ---------- */
 buildSerpent();
 seedStars();
-buildPlanets();
+syncOrbit(majorsFallback(), null); // quiet majors until real attention arrives
 setReduced(reduced);
 if (demo) setDemo(true);
 addEventListener('resize', seedStars);

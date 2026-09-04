@@ -22,6 +22,8 @@ import { appendJsonl } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
 import { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_MS } from './auth.js';
 import { getPersistence } from '../persistence/runtime.js';
+import { attentionSnapshot, attentionForCoin } from './attention-view.js';
+import { MemoryView } from '../persistence/memory-view.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -193,8 +195,12 @@ function statusPayload() {
 // persistence/control-plane.js — the ONE coordination layer shared with the
 // CLI. This is the ONLY write path the server exposes, and it can only
 // ever remove permission to trade — it cannot originate a strike.
+// UI-1: display attention means a non-universe coin can be tapped. Market
+// data stays honest — a coin the tape doesn't deep-watch reports
+// UNAVAILABLE rather than pretending; nothing here implies eligibility.
+const COIN_RE = /^[A-Z0-9]{1,12}$/;
 function coinPayload(coin) {
-  if (!config.universe.includes(coin)) return { available: false, reason: `UNAVAILABLE — ${coin} not in universe` };
+  if (!COIN_RE.test(coin)) return { available: false, reason: 'UNAVAILABLE — invalid symbol' };
   const tape = tapeReport();
   if (tape.effective !== TAPE_STATES.LIVE) {
     return { available: false, coin, reason: `UNAVAILABLE — NO TRADE (tape ${tape.effective})` };
@@ -225,6 +231,38 @@ function coinPayload(coin) {
     depthUsd: f.depthUsd,
     levels: { bids: book.bids.length, asks: book.asks.length },
   };
+}
+
+// UI-1 prey drawer payload: existing market fields stay flat (backward
+// compatible), plus bounded read-only attention + Memory sections. No
+// secrets, no scores, no mutation.
+const memView = new MemoryView(); // durable when restored; honest empty in local-only mode
+const MEMORY_DRAWER_LIMIT = 8;
+async function coinDetail(coin) {
+  const market = coinPayload(coin);
+  let attention = { stalking: null, wideEye: null, rumint: null, focusTier: null, focusReason: null };
+  try {
+    attention = attentionForCoin(coin);
+  } catch {
+    // attention is decorative truth; its failure never hides the market
+  }
+  let memory = { records: [], meta: { mode: 'UNAVAILABLE', durable: 0, pendingLocal: 0 } };
+  try {
+    const got = await memView.getRecent({ symbol: coin, limit: MEMORY_DRAWER_LIMIT });
+    memory = {
+      records: got.records.slice(-MEMORY_DRAWER_LIMIT).map((e) => ({
+        sourceModule: e.sourceModule,
+        eventType: e.eventType,
+        ts: e.ts,
+        evidenceFamily: e.evidenceFamily,
+        observationState: e.observationState,
+      })),
+      meta: got.meta,
+    };
+  } catch {
+    // durable memory unreachable: the drawer says so via mode UNAVAILABLE
+  }
+  return { ...market, attention, memory };
 }
 
 function json(res, code, obj, extraHeaders = {}) {
@@ -382,8 +420,34 @@ const server = http.createServer((req, res) => {
         console.error(`[ledger/summary] ${err.constructor.name}: ${err.message}\n${err.stack}`);
         json(res, 500, { error: err.message, errorClass: err.constructor.name });
       }
+    } else if (url.pathname === '/api/attention') {
+      // UI-1: read-only DISPLAY attention. A failure here must never break
+      // the home screen — fall back to the configured majors honestly.
+      try {
+        json(res, 200, attentionSnapshot());
+      } catch (err) {
+        console.error(`[api/attention] ${err.constructor.name}: ${err.message}`);
+        json(res, 200, {
+          generatedTs: Date.now(),
+          degraded: true,
+          focus: null,
+          orbit: config.universe.map((symbol) => ({ symbol, tier: 4, kind: 'MAJOR', reason: 'configured major — quiet fallback', ts: 0, fallback: true })),
+        });
+      }
+    } else if (url.pathname === '/manifest.webmanifest') {
+      res.writeHead(200, { 'content-type': 'application/manifest+json', 'cache-control': 'max-age=3600' });
+      res.end(readFileSync(path.join(UI_DIR, 'manifest.webmanifest')));
+    } else if (url.pathname === '/apple-touch-icon.png') {
+      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'max-age=86400' });
+      res.end(readFileSync(path.join(UI_DIR, 'apple-touch-icon.png')));
     } else if (url.pathname.startsWith('/api/coin/')) {
-      json(res, 200, coinPayload(url.pathname.split('/')[3]?.toUpperCase() ?? ''));
+      const coin = url.pathname.split('/')[3]?.toUpperCase() ?? '';
+      coinDetail(coin)
+        .then((d) => json(res, 200, d))
+        .catch((err) => {
+          console.error(`[api/coin] ${err.constructor.name}: ${err.message}`);
+          json(res, 500, { available: false, reason: 'UNAVAILABLE — server error' });
+        });
     } else {
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('COILED. Nothing here.');
