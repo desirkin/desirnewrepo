@@ -14,7 +14,7 @@
 //   meta.durable        how many served records came from the durable store
 //   meta.pendingLocal   how many are local-only (PENDING_DURABLE)
 import { getPersistence } from './runtime.js';
-import { attentionContinuityMeaning } from '../memory/attention.js';
+import { attentionContinuityMeaning, attentionWinnerOrder, attentionWinnerBeats } from '../memory/attention.js';
 // UI consumers reach Memory ONLY through this facade (no ui -> memory/
 // return path in the source graph); the shared attention gate rides along.
 export { attentionContinuityMeaning };
@@ -83,14 +83,16 @@ export class MemoryView {
     for (const e of durable) byId.set(e.id, { env: e, durable: true });
     for (const e of local) if (!byId.has(e.id)) byId.set(e.id, { env: e, durable: false });
     // newest qualifying record per SYMBOL across both stores (a fresher
-    // pending-local nomination may outrank an older durable ripple)
+    // pending-local nomination may outrank an older durable ripple), under
+    // the ONE deterministic winner rule (ts desc; equal ts -> greater
+    // canonical id). The same event in both stores was already deduped by
+    // id above with the durable copy standing — durable authority preserved.
     const bySymbol = new Map();
     for (const x of byId.values()) {
       if (attentionContinuityMeaning(x.env) === null) continue;
-      const cur = bySymbol.get(x.env.symbol);
-      if (!cur || x.env.ts > cur.env.ts || (x.env.ts === cur.env.ts && x.durable)) bySymbol.set(x.env.symbol, x);
+      if (attentionWinnerBeats(x.env, bySymbol.get(x.env.symbol)?.env)) bySymbol.set(x.env.symbol, x);
     }
-    const bounded = [...bySymbol.values()].sort((a, b) => b.env.ts - a.env.ts).slice(0, limit ?? Infinity);
+    const bounded = [...bySymbol.values()].sort((a, b) => attentionWinnerOrder(a.env, b.env)).slice(0, limit ?? Infinity);
     return {
       records: bounded.map((x) => x.env),
       meta: {

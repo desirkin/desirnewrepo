@@ -16,6 +16,19 @@
 // exact meaning check below remains the final truth gate for both stores.
 export const ATTENTION_CONTINUITY_EVENT_TYPES = Object.freeze(['WIDEEYE_RIPPLE', 'RUMOR_OBSERVATION']);
 
+// ATTENTION-1B — THE deterministic winner rule, applied identically by the
+// local projection, the durable query, and the durable/local merge:
+// newest ts wins; EQUAL timestamps break by canonical id, lexicographically
+// GREATER id first. The id is content-derived, so this is stable and never
+// invents semantic priority from arrival order.
+export function attentionWinnerOrder(a, b) {
+  return b.ts - a.ts || (a.id === b.id ? 0 : a.id > b.id ? -1 : 1);
+}
+// true when `a` beats `b` under the same rule (b may be absent)
+export function attentionWinnerBeats(a, b) {
+  return !b || attentionWinnerOrder(a, b) < 0;
+}
+
 // returns 'WIDEEYE_RIPPLE' | 'RUMINT_NOMINATION' | null — never invents.
 // Only KNOWN evidence with a real symbol can carry remembered attention.
 export function attentionContinuityMeaning(env) {

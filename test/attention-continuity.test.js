@@ -30,7 +30,7 @@ const WINDOW_MS = 2 * HOUR;
 const sec = (ms) => Math.floor(ms / 1000);
 const ISO = new Date(NOW).toISOString();
 
-const prov = (src, tsSec) => ({ source: src, sourceTs: tsSec, availableTs: tsSec, retrievedTs: ISO, kind: 'live', form: 'raw' });
+const prov = (src, tsSec, retrievedIso = ISO) => ({ source: src, sourceTs: tsSec, availableTs: tsSec, retrievedTs: retrievedIso, kind: 'live', form: 'raw' });
 const ripple = (symbol, tsMs, extra = {}) =>
   envelope({
     sourceModule: 'WIDEEYE', eventType: 'WIDEEYE_RIPPLE', ts: sec(tsMs), symbol,
@@ -250,6 +250,66 @@ test('21. LOCAL PROJECTION: populates on recovery, updates on newer arrival, ref
   rmSync(dir, { recursive: true, force: true });
 });
 
+// ---------------- ATTENTION-1B: exact qualifying winner closeout ----------------
+
+test('1B-3. FUTURE SUPPRESSION: a future record cannot erase valid in-window history', async () => {
+  const store = freshStore();
+  const valid = ripple('KERNEL', NOW - 90 * 60_000); // A: valid, in-window
+  // B: qualifying but future relative to the READER's clock (> now + 60s) —
+  // written by a skewed clock whose own provenance is self-consistent, so it
+  // passes the canonical validator and reaches the projection
+  const future = ripple('KERNEL', NOW + 61_000, {
+    provenance: prov('survey/events.jsonl (live wide eye)', sec(NOW + 61_000), new Date(NOW + 61_000).toISOString()),
+  });
+  assert.equal(store.append(valid).accepted, true);
+  assert.equal(store.append(future).accepted, true);
+  const got = store.getRecentAttention({ sinceTs: sec(NOW - WINDOW_MS), untilTs: sec(NOW) + 60, limit: 16 });
+  assert.equal(got.length, 1, 'future record rejected from the current window');
+  assert.equal(got[0].id, valid.id, 'the 90-minute record SURVIVES — true identity preserved');
+  assert.equal(got[0].ts, valid.ts, 'true timestamp preserved');
+  // and through the full display path KERNEL remains Tier 4
+  const d = seedDir();
+  const snap = await attentionSnapshot({ now: NOW, memorySource: sourceFor(localView(store)) });
+  const k = snap.orbit.find((e) => e.symbol === 'KERNEL');
+  assert.equal(k?.tier, 4, 'KERNEL remains remembered attention');
+  assert.equal(k?.ts, valid.ts * 1000);
+  restoreDir(d);
+  // move the supplied clock forward: the future record becomes the newest VALID
+  const LATER = NOW + 5 * 60_000;
+  const later = store.getRecentAttention({ sinceTs: sec(LATER - WINDOW_MS), untilTs: sec(LATER) + 60, limit: 16 });
+  assert.equal(later.length, 1);
+  assert.equal(later[0].id, future.id, 'once inside the window it may win — newest valid record');
+});
+
+test('1B-8. DETERMINISTIC TIE BREAK: equal timestamps resolve by greater canonical id, arrival-independent', async () => {
+  const t = NOW - 30 * 60_000;
+  const a = ripple('TIEBRK', t, { identity: 'tie-a' });
+  const b = ripple('TIEBRK', t, { identity: 'tie-b' });
+  assert.notEqual(a.id, b.id);
+  const expected = a.id > b.id ? a : b;
+  for (const order of [[a, b], [b, a]]) { // both arrival orders
+    const store = freshStore();
+    for (const e of order) assert.equal(store.append(e).accepted, true);
+    const got = store.getRecentAttention({ sinceTs: sec(NOW - WINDOW_MS), untilTs: sec(NOW) + 60, limit: 16 });
+    assert.equal(got.length, 1);
+    assert.equal(got[0].id, expected.id, 'greater canonical id wins the tie, whatever the arrival order');
+  }
+});
+
+test('1B-9. BOUNDS: per-symbol history is hard bounded and keeps the newest entries', () => {
+  const store = freshStore();
+  const ages = [110, 100, 90, 70, 50, 30]; // minutes
+  const envs = ages.map((m) => ripple('KERNEL', NOW - m * 60_000));
+  for (const e of envs) assert.equal(store.append(e).accepted, true);
+  const hist = store.attentionProjection.get('KERNEL');
+  assert.equal(hist.length, 4, 'history depth hard bounded');
+  assert.deepEqual(hist.map((e) => e.id), envs.slice(2).reverse().map((e) => e.id), 'the 4 NEWEST kept, winner-ordered');
+  // and the reproduction bound still holds: unrelated traffic adds nothing
+  for (let i = 0; i < 200; i++) store.append(tapeSnap('BTC', NOW - 10 * 60_000 + i * 1000, i));
+  assert.equal(store.attentionProjection.get('KERNEL').length, 4);
+  assert.ok(store.attentionProjection.size <= 64);
+});
+
 // ---------------- durable PostgreSQL integration (own schema) ----------------
 if (!TEST_URL) {
   test('20. ATTENTION-1A postgres integration', (t) => t.skip('no PERSIST_TEST_DATABASE_URL / DATABASE_URL configured'));
@@ -313,6 +373,75 @@ if (!TEST_URL) {
     assert.equal(kernel.length, 1, 'no double copy for a symbol present in both stores');
     assert.equal(kernel[0].id, pendingLocal.id, 'a fresher pending-local nomination outranks the older durable ripple');
     assert.ok(got.meta.pendingLocal >= 1);
+  });
+
+  // the 1B drills share one schema with the earlier inserts, so they query
+  // with the production overfetch bound (16 distinct symbols) — still small
+  const attnQ = (over = {}) =>
+    repo.memoryRecentAttention({ sinceTs: sec(NOW - WINDOW_MS), untilTs: sec(NOW) + 60, limit: 16, ...over });
+
+  test('1B-6. SQL FALSE POSITIVE: a prefilter-matching non-nomination can neither become prey nor suppress the real one', async () => {
+    const genuine = nomination('FPOS', NOW - 60 * 60_000);
+    // NEWER ordinary poll whose canonical text contains the literal
+    // "type":"RUMINT_NOMINATION" in a nested object — passes the SQL LIKE
+    // prefilter, fails the exact payload.type meaning
+    const impostor = envelope({
+      sourceModule: 'RUMINT', eventType: 'RUMOR_OBSERVATION', ts: sec(NOW - 30 * 60_000), symbol: 'FPOS',
+      families: ['RUMOR', 'SOCIAL_ATTENTION'], observationState: 'KNOWN',
+      payload: { type: 'RUMINT_POLL', detail: { quoted: { type: 'RUMINT_NOMINATION' } } },
+      dataAvailability: { chatterVelocity: 'KNOWN' },
+      provenance: prov('rumint/events.jsonl (stocktwits chatter poller)', sec(NOW - 30 * 60_000)),
+    });
+    assert.ok(JSON.stringify(impostor).includes('"type":"RUMINT_NOMINATION"'), 'fixture really trips the prefilter');
+    assert.equal(attentionContinuityMeaning(impostor), null, 'and really is not a nomination');
+    assert.equal((await repo.insertMemoryEvent(genuine)).durable, true);
+    assert.equal((await repo.insertMemoryEvent(impostor)).durable, true);
+    const got = await attnQ();
+    const fpos = got.filter((e) => e.symbol === 'FPOS');
+    assert.equal(fpos.length, 1);
+    assert.equal(fpos[0].id, genuine.id, 'the OLDER genuine nomination is still returned');
+    assert.ok(!got.some((e) => e.id === impostor.id), 'the impostor never becomes prey');
+  });
+
+  test('1B-7. INVALID NEWEST ROW: corrupt newest durable evidence cannot erase older valid truth', async () => {
+    const older = nomination('CORRY', NOW - 70 * 60_000);
+    const newest = ripple('CORRY', NOW - 20 * 60_000);
+    assert.equal((await repo.insertMemoryEvent(older)).durable, true);
+    assert.equal((await repo.insertMemoryEvent(newest)).durable, true);
+    // corrupt the NEWEST row on disk (test-only, own schema): digest now fails
+    await db.query(`UPDATE serpent_memory_events SET envelope = envelope || ' ' WHERE id = $1`, [newest.id], { write: true });
+    const before = repo.invalidDurableRecords;
+    const got = await attnQ();
+    const corry = got.filter((e) => e.symbol === 'CORRY');
+    assert.equal(corry.length, 1);
+    assert.equal(corry[0].id, older.id, 'older valid qualifying record remains eligible');
+    assert.ok(repo.invalidDurableRecords > before, 'the corrupt row was withheld, not silently skipped');
+  });
+
+  test('1B-8b. POSTGRES TIE BREAK: equal timestamps resolve by greater canonical id', async () => {
+    const t = NOW - 40 * 60_000;
+    const a = ripple('TIEDB', t, { identity: 'db-tie-a' });
+    const b = ripple('TIEDB', t, { identity: 'db-tie-b' });
+    assert.equal((await repo.insertMemoryEvent(a)).durable, true);
+    assert.equal((await repo.insertMemoryEvent(b)).durable, true);
+    const got = await attnQ();
+    const tied = got.filter((e) => e.symbol === 'TIEDB');
+    assert.equal(tied.length, 1);
+    assert.equal(tied[0].id, a.id > b.id ? a.id : b.id, 'same rule as the local path');
+  });
+
+  test('1B-9b. POSTGRES BOUNDS: candidate depth and distinct-symbol limit stay enforced', async () => {
+    // many qualifying rows for one symbol: result still ONE winner for it
+    for (let i = 0; i < 10; i++) {
+      assert.equal((await repo.insertMemoryEvent(ripple('DEEP', NOW - (24 - i) * 60_000))).durable, true);
+    }
+    const got = await attnQ();
+    const deep = got.filter((e) => e.symbol === 'DEEP');
+    assert.equal(deep.length, 1);
+    assert.equal(deep[0].ts, sec(NOW - 15 * 60_000), 'newest DEEP row wins');
+    assert.ok(got.length <= 16, 'distinct-symbol bound honored');
+    // and a tight limit is still honored exactly
+    assert.equal((await attnQ({ limit: 3 })).length, 3);
   });
 }
 

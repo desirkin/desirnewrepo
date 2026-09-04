@@ -218,13 +218,28 @@ attention envelope per symbol inside the inclusive window (envelope epoch
 seconds), newest first, at most `limit` distinct symbols. Qualifying
 meanings are defined ONCE in `memory/attention.js` (WIDEEYE_RIPPLE, and
 RUMOR_OBSERVATION whose payload.type is RUMINT_NOMINATION; KNOWN state and
-a real symbol required) and shared by every layer. Locally it is served
-from a small maintained read-side projection (newest qualifying envelope
-per symbol, bounded to 64 symbols, populated during recovery and on
-accept — canonical Memory is never altered); durably it is a time-bounded
-`DISTINCT ON (symbol)` query over the indexed ts column, never a global
-recency tail. Display continuity must not depend on how many unrelated
-records arrived after a valid attention event.
+a real symbol required) and shared by every layer. Display continuity must
+not depend on how many unrelated records arrived after a valid attention
+event.
+
+ATTENTION-1B closes winner selection: THE NEWEST RECORD IS NOT NECESSARILY
+THE NEWEST VALID RECORD. Locally, the read-side projection keeps a SMALL
+per-symbol history (4 entries, 64 symbols, populated during recovery and
+on accept — canonical Memory never altered) so an out-of-window or
+future-dated envelope cannot erase valid in-window truth; the window is
+applied at read time against that history. Durably, SQL (time-bounded on
+the indexed ts column, event-type narrowed, with a cheap LIKE prefilter
+for the nomination meaning) returns a BOUNDED candidate set — up to 4
+newest plausible rows per symbol, overall capped at limit×4 — and the
+newest-per-symbol decision happens ONLY among rows that survive the
+complete truth boundary: digest, canonical validator, exact meaning gate.
+A prefilter false positive, corrupt row, or invalid newest candidate can
+therefore neither become prey nor suppress genuine older prey (up to 3
+such rows per symbol tolerated — bounded honesty). One deterministic
+winner rule everywhere (local projection, durable query, durable/local
+merge): newest ts wins; EQUAL timestamps break by canonical id,
+lexicographically greater id first — content-derived, never arrival order.
+Same-id records in both stores are deduped with the durable copy standing.
 
 ## CHILDHOOD BRIDGE — READ-ONLY
 

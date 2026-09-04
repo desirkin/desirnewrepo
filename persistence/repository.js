@@ -7,7 +7,7 @@
 // restrictive state can never be lost to a last-write-wins race.
 import { createHash } from 'node:crypto';
 import { validateEnvelope } from '../memory/validate.js';
-import { attentionContinuityMeaning } from '../memory/attention.js';
+import { attentionContinuityMeaning, attentionWinnerOrder, attentionWinnerBeats } from '../memory/attention.js';
 import { canonicalJson, durableEventId } from './schema.js';
 import {
   validateControlState,
@@ -20,6 +20,9 @@ import {
 
 const MAX_QUERY_LIMIT = 500;
 const clamp = (n) => Math.max(1, Math.min(Number.isFinite(n) ? n : 50, MAX_QUERY_LIMIT));
+// ATTENTION-1B: newest plausible rows fetched per symbol before exact
+// validation picks the winner — bounded candidate depth, never a lifetime scan
+const ATTENTION_CANDIDATES_PER_SYMBOL = 4;
 const sha1 = (s) => createHash('sha1').update(s).digest('hex');
 
 const LEDGER_TABLES = {
@@ -408,31 +411,46 @@ export class Repository {
     return r.at(-1) ?? null;
   }
 
-  // ATTENTION-1A — purpose-specific bounded attention-continuity read.
+  // ATTENTION-1A/1B — purpose-specific bounded attention-continuity read.
   // Asks the ACTUAL question ("newest qualifying attention memory per symbol
   // inside the declared window"), never "the newest N rows of everything":
   // time-bounded on the indexed ts column ([sinceTs, untilTs] inclusive,
-  // envelope epoch seconds), narrowed to the qualifying event_type values,
-  // DISTINCT ON (symbol) newest-first, at most `limit` distinct symbols.
+  // envelope epoch seconds), narrowed to the qualifying event_type values.
   // The envelope LIKE clause is only a cheap SQL prefilter for the RUMINT
-  // nomination meaning (payload lives inside the canonical JSON text); the
-  // exact meaning check re-runs in JS after digest+validator revival, so a
-  // prefilter false-positive can only withhold, never invent.
+  // nomination meaning (payload lives inside the canonical JSON text) — it
+  // can neither invent prey NOR select the winner: ATTENTION-1B moved the
+  // newest-per-symbol decision AFTER the complete truth boundary. SQL
+  // returns a BOUNDED candidate set (up to ATTENTION_CANDIDATES_PER_SYMBOL
+  // newest plausible rows per symbol, overall row cap limit×perSymbol);
+  // each candidate is revived (digest + canonical validator) and must pass
+  // the exact shared meaning gate; only then is the newest VALID envelope
+  // per symbol chosen, under the deterministic winner rule (ts desc, equal
+  // timestamps break by greater canonical id). A false-positive, corrupt,
+  // or invalid newest row therefore cannot erase older valid truth — up to
+  // perSymbol-1 such rows per symbol are tolerated (bounded honesty).
   async memoryRecentAttention({ sinceTs, untilTs, limit } = {}) {
+    const nSymbols = clamp(limit);
+    const perSymbol = ATTENTION_CANDIDATES_PER_SYMBOL;
     const { rows } = await this.db.query(
       `SELECT envelope, digest FROM (
-         SELECT DISTINCT ON (symbol) symbol, ts, envelope, digest
+         SELECT envelope, digest, ts, symbol, id,
+                row_number() OVER (PARTITION BY symbol ORDER BY ts DESC, id DESC) AS rn
          FROM serpent_memory_events
          WHERE ts >= $1 AND ts <= $2 AND symbol IS NOT NULL
            AND observation_state = 'KNOWN'
            AND (event_type = 'WIDEEYE_RIPPLE'
                 OR (event_type = 'RUMOR_OBSERVATION' AND envelope LIKE '%"type":"RUMINT_NOMINATION"%'))
-         ORDER BY symbol, ts DESC
-       ) q ORDER BY ts DESC LIMIT $3`,
-      [Math.floor(sinceTs ?? 0), Math.floor(untilTs ?? Number.MAX_SAFE_INTEGER), clamp(limit)]
+       ) q WHERE rn <= $3 ORDER BY ts DESC, id DESC LIMIT $4`,
+      [Math.floor(sinceTs ?? 0), Math.floor(untilTs ?? Number.MAX_SAFE_INTEGER), perSymbol, nSymbols * perSymbol]
     );
-    // newest first; revived rows still face the exact shared meaning gate
-    return this.#reviveMemoryRows(rows).filter((env) => attentionContinuityMeaning(env) !== null);
+    // the complete truth boundary FIRST (digest + validator + exact meaning),
+    // the winner decision only among survivors
+    const bySymbol = new Map();
+    for (const env of this.#reviveMemoryRows(rows)) {
+      if (attentionContinuityMeaning(env) === null) continue;
+      if (attentionWinnerBeats(env, bySymbol.get(env.symbol))) bySymbol.set(env.symbol, env);
+    }
+    return [...bySymbol.values()].sort(attentionWinnerOrder).slice(0, nSymbols);
   }
 
   async memoryCount() {

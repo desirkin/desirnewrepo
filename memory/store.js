@@ -20,18 +20,25 @@ import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { dataDir } from '../lib/config.js';
 import { MEMORY_SCHEMA_VERSION, MEMORY_VERSION } from './schema.js';
 import { validateEnvelope } from './validate.js';
-import { attentionContinuityMeaning } from './attention.js';
+import { attentionContinuityMeaning, attentionWinnerOrder } from './attention.js';
 
 export const MAX_QUERY_LIMIT = 500; // hard ceiling; unbounded requests are clamped
 export const DEFAULT_QUERY_LIMIT = 50;
 const RECENT_CACHE_SIZE = 500; // bounded in-RAM tail
-// ATTENTION-1A: bounded read-side projection — newest QUALIFYING attention
-// envelope per symbol (see memory/attention.js). Display continuity must not
+// ATTENTION-1A: bounded read-side projection of QUALIFYING attention
+// envelopes per symbol (see memory/attention.js). Display continuity must not
 // depend on how many unrelated records arrived after a valid attention event,
 // and must not rescan the events file on every UI poll. On overflow the
-// stalest symbol is evicted — a small, honest display bound, never a rewrite
-// of canonical Memory.
+// symbol with the stalest NEWEST entry is evicted — a small, honest display
+// bound, never a rewrite of canonical Memory.
+// ATTENTION-1B: a single newest-record slot was insufficient — the newest
+// record is not necessarily the newest VALID record for the caller's window
+// (e.g. a future-dated envelope must not erase valid in-window history), so
+// each symbol keeps a SMALL bounded history ordered by the deterministic
+// winner rule. Up to HISTORY-1 out-of-window/future records per symbol are
+// tolerated before older in-window truth is displaced — bounded honesty.
 const ATTENTION_PROJECTION_MAX_SYMBOLS = 64;
+const ATTENTION_HISTORY_PER_SYMBOL = 4;
 const TAIL_SCAN_BYTES = 8 * 1024 * 1024; // queries beyond the cache scan at most this much file tail
 const MANIFEST_EVERY = 25; // manifest refresh cadence (also on flush/close)
 const RECOVERY_CHUNK_BYTES = 1 << 20; // 1MB streaming-recovery chunks
@@ -51,7 +58,7 @@ export class MemoryStore {
     this.quarantineFile = path.join(dir, 'events.quarantine.jsonl');
     this.ids = new Map(); // id -> persisted-content digest (the documented in-memory growth limitation)
     this.recent = []; // bounded ring of the newest VALIDATED envelopes
-    this.attentionProjection = new Map(); // symbol -> newest qualifying attention envelope (read-side only)
+    this.attentionProjection = new Map(); // symbol -> bounded qualifying history, winner-ordered (read-side only)
     this.counts = { bySourceModule: {}, byEvidenceFamily: {}, byAvailability: {} };
     this.recordCount = 0;
     this.duplicateSuppressedCount = 0; // cumulative (preserved across restarts)
@@ -189,15 +196,21 @@ export class MemoryStore {
     this.counts.byAvailability[env.observationState] = (this.counts.byAvailability[env.observationState] ?? 0) + 1;
     this.recent.push(env);
     if (this.recent.length > RECENT_CACHE_SIZE) this.recent.shift();
-    // ATTENTION-1A read projection: only VALIDATED records reach #index (both
-    // recovery and append), so nothing corrupt/invalid can enter here.
+    // ATTENTION-1A/1B read projection: only VALIDATED records reach #index
+    // (both recovery and append), so nothing corrupt/invalid can enter here.
     if (attentionContinuityMeaning(env)) {
-      const cur = this.attentionProjection.get(env.symbol);
-      if (!cur || env.ts >= cur.ts) this.attentionProjection.set(env.symbol, env);
+      const hist = this.attentionProjection.get(env.symbol) ?? [];
+      if (!hist.some((e) => e.id === env.id)) {
+        hist.push(env);
+        hist.sort(attentionWinnerOrder); // deterministic: ts desc, then id desc
+        hist.length = Math.min(hist.length, ATTENTION_HISTORY_PER_SYMBOL);
+        this.attentionProjection.set(env.symbol, hist);
+      }
       if (this.attentionProjection.size > ATTENTION_PROJECTION_MAX_SYMBOLS) {
+        // evict the symbol whose NEWEST entry is stalest (deterministic)
         let stalest = null;
-        for (const [sym, e] of this.attentionProjection) {
-          if (!stalest || e.ts < this.attentionProjection.get(stalest).ts) stalest = sym;
+        for (const [sym, h] of this.attentionProjection) {
+          if (!stalest || attentionWinnerOrder(h[0], this.attentionProjection.get(stalest)[0]) > 0) stalest = sym;
         }
         this.attentionProjection.delete(stalest);
       }
@@ -392,20 +405,23 @@ export class MemoryStore {
     return r.at(-1) ?? null;
   }
 
-  // ATTENTION-1A — purpose-specific bounded read: the newest QUALIFYING
-  // attention envelope per symbol inside [sinceTs, untilTs] (envelope epoch
-  // SECONDS, both bounds inclusive), newest first, at most `limit` distinct
-  // symbols. Served from the maintained read projection — never a file
-  // rescan, and never dependent on how much unrelated traffic followed.
-  // Freshness is applied at read time; the projection itself keeps the
-  // newest qualifying record per symbol regardless of window.
+  // ATTENTION-1A/1B — purpose-specific bounded read: the newest QUALIFYING
+  // attention envelope per symbol INSIDE [sinceTs, untilTs] (envelope epoch
+  // SECONDS, both bounds inclusive), winner-ordered (ts desc, id desc), at
+  // most `limit` distinct symbols. Served from the maintained read
+  // projection — never a file rescan, and never dependent on how much
+  // unrelated traffic followed. Freshness is applied at read time against
+  // the small per-symbol history, so an out-of-window (e.g. future-dated)
+  // record cannot suppress a valid in-window one: the winner is the newest
+  // record that actually qualifies inside the requested window.
   getRecentAttention({ sinceTs = 0, untilTs = Infinity, limit } = {}) {
     const n = clamp(limit);
     const out = [];
-    for (const env of this.attentionProjection.values()) {
-      if (env.ts >= sinceTs && env.ts <= untilTs) out.push(env);
+    for (const hist of this.attentionProjection.values()) {
+      const winner = hist.find((e) => e.ts >= sinceTs && e.ts <= untilTs); // history is winner-ordered
+      if (winner) out.push(winner);
     }
-    out.sort((a, b) => b.ts - a.ts);
+    out.sort(attentionWinnerOrder);
     return out.slice(0, n).map((e) => structuredClone(e));
   }
 }
