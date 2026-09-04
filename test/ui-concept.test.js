@@ -169,7 +169,7 @@ test('19. UI-1C11 — the surge gait: speed breathes, rotation still never rever
   assert.ok(max < 2.2, `surges stay serpentine, not frantic (max ${max.toFixed(2)})`);
   // the gait drives BOTH the idle crawl and the sweep rate…
   assert.ok(SCRIPT.includes('COIL_IDLE_DEG_S * gait * dtMs'), 'idle crawl surges');
-  assert.ok(SCRIPT.includes('coilAim(coilAngle, target, dtMs, 70 * gait)'), 'prey sweeps surge');
+  assert.ok(SCRIPT.includes('coilAim(coilAngle, target, dtMs, 60 * gait)'), 'prey sweeps surge');
   // …and reduced motion pins it flat: information, no theatrics
   assert.ok(SCRIPT.includes('const gait = reduced ? 1 : coilGait(coilClock)'));
 });

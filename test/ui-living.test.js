@@ -125,7 +125,7 @@ test('10+11. the dominant serpent moves and its head converges on the focal prey
   // shortest-arc: never the long way round
   assert.ok(coilAim(350, 10, 100) > 350); // through 360, not backwards through 180
   // idle: the body still crawls visibly when nothing is focal
-  assert.ok(SCRIPT.includes('COIL_IDLE_DEG_S = 10')); // UI-1C11: a prowl, not a spin
+  assert.ok(SCRIPT.includes('COIL_IDLE_DEG_S = 7.5')); // UI-1C12: an even slower prowl, never a spin
 });
 
 test('12. head tracking is REAL-mode, not demo-gated', () => {
