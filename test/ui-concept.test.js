@@ -85,6 +85,30 @@ test('10. the serpent gained a forked tongue at the nose (geometry, inside the r
   assert.ok(SCRIPT.includes(`$('#coilTongue').setAttribute('d'`));
 });
 
+test('12. UI-1C2 — the body is WIDE: heavy tail, drawn neck, flared hood', () => {
+  assert.ok(SCRIPT.includes('hood flares 7.4 -> 14'), 'hood reaches 14 half-width units');
+  assert.ok(SCRIPT.includes('4.2 + p * 4.6'), 'tail starts heavy, not a wire');
+  assert.ok(SCRIPT.includes(`setAttribute('stroke-width', '32')`), 'casing gap fits the hood crossing');
+});
+
+test('13. UI-1C2 — the head eye burns red with a slit pupil that rotates with the body', () => {
+  assert.ok(HTML.includes('id="eyeGrad"'), 'burning iris gradient');
+  assert.ok(HTML.includes('fill: url(#eyeGrad)'));
+  const spin = HTML.match(/<g id="coilSpin">([\s\S]*?)<\/g>/)[1];
+  assert.ok(spin.includes('coilPupil'), 'pupil lives inside the rotating body');
+  assert.ok(SCRIPT.includes(`$('#coilPupil')`) || SCRIPT.includes(`('#coilPupil')`));
+  // menace stays red regardless of posture: fixed stops, no var(--accent)
+  const grad = HTML.match(/id="eyeGrad"[\s\S]*?<\/radialGradient>/)[0];
+  assert.ok(!grad.includes('var(--accent)'));
+});
+
+test('14. UI-1C2 — the eyes up top are big hooded almonds, still killable decoration', () => {
+  assert.ok(/\.lurkEye \{[\s\S]*?clamp\(84px, 23vw, 150px\)/.test(HTML), 'eye width scales with the viewport');
+  assert.ok(HTML.includes('.lurkEye::before'), 'the hooded brow exists');
+  assert.ok(HTML.includes('.lurkEye::after'), 'the slit pupil exists');
+  assert.ok(HTML.includes('body.killed .lurkEye'), 'KILL still dims them');
+});
+
 test('11. verdict ornament + brand never intercept taps', () => {
   assert.ok(/class="orn" aria-hidden="true"/.test(HTML));
   assert.ok(/#brand \{[^}]*pointer-events: none/.test(HTML));

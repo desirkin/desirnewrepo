@@ -68,20 +68,25 @@
   body.killed #scene { filter: saturate(.22) brightness(.68); }
   body.killed #ringGroup, body.killed .ringPulse { animation: none; }
   @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.018); } }
-  /* UI-1A: the coil is a BODY — gradient-lit tapered band, not a wire */
-  .cg1 { stop-color: var(--accent2); stop-opacity: .95; }
-  .cg2 { stop-color: var(--accent); stop-opacity: .88; }
-  .cg3 { stop-color: var(--accent); stop-opacity: .5; }
-  .coilFill { fill: url(#coilGrad); filter: drop-shadow(0 0 7px var(--accent)); }
+  /* UI-1A/UI-1C2: the coil is a BODY — dark, heavy, rim-lit. The mass is
+     near-black scale green; posture temperature survives in the rim glow
+     and the lit flank (color-mix override, with a plain fallback first). */
+  .cg1 { stop-color: var(--accent2); stop-opacity: .9; }
+  .cg2 { stop-color: var(--accent); stop-opacity: .9; }
+  .cg2 { stop-color: color-mix(in srgb, var(--accent) 38%, #08130e); stop-opacity: .97; }
+  .cg3 { stop-color: var(--accent); stop-opacity: .55; }
+  .cg3 { stop-color: color-mix(in srgb, var(--accent) 14%, #050d09); stop-opacity: .97; }
+  .coilFill { fill: url(#coilGrad); filter: drop-shadow(0 0 9px var(--accent)); }
   #coilCasing { fill: none; stroke: var(--bg); stroke-linecap: round; opacity: .92; }
-  #coilHighlight { fill: none; stroke: #eafffa; stroke-width: 1.1; opacity: .26; stroke-linecap: round; }
-  /* the eye: pointed, faint reddish threat — focused, never Halloween */
-  #coilEye { fill: #140505; stroke: #ff6b52; stroke-width: 1;
-             filter: drop-shadow(0 0 4px rgba(255, 70, 40, .75)); opacity: .95; }
-  /* faint segment hint + a slow highlight moving through the body —
-     muscle, not sci-fi wire. Restrained on purpose. */
-  .ringScales { fill: none; stroke: var(--bg); stroke-width: 5.4; opacity: .1;
-                stroke-dasharray: 2.2 6.2; }
+  #coilHighlight { fill: none; stroke: #eafffa; stroke-width: 1.4; opacity: .3; stroke-linecap: round; }
+  /* UI-1C2: the eye BURNS — glowing iris, dark slit pupil. Fixed reds. */
+  #coilEye { fill: url(#eyeGrad); stroke: rgba(30, 6, 3, .9); stroke-width: .7;
+             filter: drop-shadow(0 0 6px rgba(255, 70, 30, .9)); }
+  #coilPupil { fill: #0a0302; opacity: .92; }
+  /* segment hint across the wider body + a slow highlight moving through —
+     muscle and scale, not sci-fi wire. */
+  .ringScales { fill: none; stroke: var(--bg); stroke-width: 4.6; opacity: .14;
+                stroke-dasharray: 2.6 7.4; }
   /* UI-1C: faint concentric orbit guides — the field reads as a system */
   .orbitGuide { fill: none; stroke: #1d2b40; stroke-width: .8; opacity: .55; }
   .orbitGuide.dashed { stroke-dasharray: 1.6 6; opacity: .45; }
@@ -105,20 +110,28 @@
      framing the top of the field, with two slit-pupil reddish eyes. Louder
      than before (the concept frame), still framing and never the subject. */
   #lurk { position: fixed; inset: 0; pointer-events: none; z-index: 1; }
-  .lurkShade { position: absolute; left: 0; right: 0; top: 0; height: 34vh;
+  .lurkShade { position: absolute; left: 0; right: 0; top: 0; height: 38vh;
     background:
-      radial-gradient(58% 130% at 6% -24%, rgba(4, 18, 16, .96), transparent 68%),
-      radial-gradient(58% 130% at 94% -24%, rgba(4, 18, 16, .96), transparent 68%),
-      radial-gradient(90% 60% at 50% -30%, rgba(3, 10, 12, .8), transparent 75%); }
-  .lurkEye { position: absolute; top: 10.5vh; width: 54px; height: 20px; border-radius: 50%;
-    background: radial-gradient(ellipse at 50% 55%, rgba(255, 138, 92, .95), rgba(214, 68, 38, .8) 36%, rgba(110, 22, 8, .55) 62%, transparent 80%);
-    filter: blur(.5px) drop-shadow(0 0 14px rgba(255, 70, 40, .45)); opacity: .5; }
-  .lurkEye::after { content: ''; position: absolute; left: 50%; top: 50%; width: 5px; height: 17px;
-    transform: translate(-50%, -50%); background: #0a0302; border-radius: 50%; } /* the slit pupil */
-  .lurkEye.left { left: 8%; transform: rotate(-15deg); }
-  .lurkEye.right { right: 8%; transform: rotate(15deg); }
+      radial-gradient(62% 150% at 4% -28%, rgba(4, 20, 16, .98), rgba(5, 16, 13, .55) 52%, transparent 72%),
+      radial-gradient(62% 150% at 96% -28%, rgba(4, 20, 16, .98), rgba(5, 16, 13, .55) 52%, transparent 72%),
+      radial-gradient(95% 65% at 50% -32%, rgba(3, 12, 12, .88), transparent 78%); }
+  /* UI-1C2: the eyes up top are BIG — glaring hooded almonds, outer corners
+     raised, burning iris under a dark scale brow. Still decoration, still
+     dimmed under KILL, never over the working field. */
+  .lurkEye { position: absolute; top: 8.5vh;
+    width: clamp(84px, 23vw, 150px); height: clamp(28px, 7.6vw, 50px); border-radius: 50%;
+    background: radial-gradient(ellipse at 50% 58%, #ffd0a6 0%, #ff8a4a 20%, #d63c1e 46%, #6e1206 70%, transparent 84%);
+    filter: drop-shadow(0 0 26px rgba(255, 70, 30, .5)); opacity: .58; }
+  .lurkEye::before { content: ''; position: absolute; left: -10%; right: -10%; top: -58%; height: 112%;
+    background: radial-gradient(55% 95% at 50% 8%, rgba(4, 15, 12, .98), rgba(4, 15, 12, .72) 55%, transparent 80%);
+    border-radius: 50%; } /* the hooded brow */
+  .lurkEye::after { content: ''; position: absolute; left: 50%; top: 52%; width: 8%; height: 84%;
+    transform: translate(-50%, -50%); background: #070202; border-radius: 50%;
+    box-shadow: 0 0 6px 1px rgba(0, 0, 0, .8); } /* the slit pupil */
+  .lurkEye.left { left: 5%; transform: rotate(9deg); }
+  .lurkEye.right { right: 5%; transform: rotate(-9deg); }
   body:not(.reduced) .lurkEye { animation: lurkGlow 9s ease-in-out infinite; }
-  @keyframes lurkGlow { 50% { opacity: .26; } }
+  @keyframes lurkGlow { 50% { opacity: .34; } }
   body.killed .lurkEye { opacity: .12; animation: none; }
   /* UI-1C: the nameplate — between the capsules and the eyes */
   #brand { position: fixed; top: calc(max(10px, env(safe-area-inset-top)) + 52px);
@@ -167,10 +180,10 @@
   .planet.focal .glyph { font-size: 17px; }
   .planet.quiet .glyph { font-size: 10px; opacity: .8; }
   /* UI-1C: the comet trail — orbit direction made visible; decoration only */
-  .planet .trail { position: absolute; left: 50%; top: 15px; width: 42px; height: 3px;
+  .planet .trail { position: absolute; left: 50%; top: 15px; width: 54px; height: 3px;
     transform-origin: 100% 50%; pointer-events: none; border-radius: 2px;
-    background: linear-gradient(90deg, transparent, var(--accent2)); opacity: .26; filter: blur(1px); }
-  .planet.quiet .trail { opacity: .1; }
+    background: linear-gradient(90deg, transparent, var(--accent2)); opacity: .34; filter: blur(1px); }
+  .planet.quiet .trail { opacity: .14; }
   body.reduced .trail { visibility: hidden; }
   .planet .lbl { margin-top: 5px; font-size: 10px; letter-spacing: .22em; color: var(--dim); }
   .planet.stalked .body { opacity: 1; animation: pulse 1.6s ease-in-out infinite; }
@@ -449,6 +462,13 @@
         <stop offset=".55" class="cg2"></stop>
         <stop offset="1" class="cg3"></stop>
       </radialGradient>
+      <!-- UI-1C2: the burning iris — fixed reds; menace does not follow posture -->
+      <radialGradient id="eyeGrad" cx="40%" cy="35%" r="78%">
+        <stop offset="0" stop-color="#ffd9b0"></stop>
+        <stop offset=".35" stop-color="#ff8a4a"></stop>
+        <stop offset=".7" stop-color="#e2482a"></stop>
+        <stop offset="1" stop-color="#6e1206"></stop>
+      </radialGradient>
     </defs>
     <!-- UI-1B2: THE serpent — one strong tapered muscle band whose head
          passes OVER its tail. #coilSpin rotates every frame so the whole
@@ -461,8 +481,10 @@
         <path id="coilHead" class="coilFill" d=""></path>
         <path id="coilHighlight" d=""></path>
         <path id="coilTongue" d=""></path>
-        <circle id="coilEye" r="2.1"></circle>
-        <circle class="ringScales" r="104"></circle>
+        <circle id="coilEye" r="3.4"></circle>
+        <ellipse id="coilPupil" rx="1.05" ry="2.6"></ellipse>
+        <circle class="ringScales" r="100.5"></circle>
+        <circle class="ringScales" r="107.5"></circle>
       </g>
       <circle class="ringPulse" r="104"></circle>
     </g>
@@ -663,11 +685,13 @@ function buildCoilRing() {
     const r = 104 + Math.sin(a * 5 + 0.8) * 1.2 + Math.sin(a * 3 - 1.2) * 0.8;
     return [r * Math.cos(a), r * Math.sin(a), a];
   };
-  // body half-width: thin tail -> muscular body -> widened head -> nose tip
+  // UI-1C2: body half-width, MUCH wider — a heavy muscle, not a wire.
+  // thick tail -> heavier body -> narrowed neck -> flared hood -> snout
   const halfW = (p) => {
-    if (p > 0.985) return Math.max(0.5, 5.6 * (1 - (p - 0.985) / 0.015)); // rounded nose
-    if (p > 0.90) return 3.6 + (p - 0.90) / 0.085 * 2.0; // the head swells
-    return 1.6 + p * 2.2; // tail 1.6 -> body ~3.6 — muscular, not wire
+    if (p > 0.98) return Math.max(0.9, 14 * (1 - (p - 0.98) / 0.02)); // rounded snout
+    if (p > 0.94) return 7.4 + ((p - 0.94) / 0.04) * 6.6; // hood flares 7.4 -> 14
+    if (p > 0.90) return 8.3 - ((p - 0.90) / 0.04) * 0.9; // the neck draws in
+    return 4.2 + p * 4.6; // tail 4.2 -> body ~8.3
   };
   const band = (p0, p1) => {
     const outer = [], inner = [];
@@ -694,21 +718,29 @@ function buildCoilRing() {
   };
   $('#coilTail').setAttribute('d', band(0, 0.915));
   $('#coilCasing').setAttribute('d', line(0.9, 1, () => 0));
-  $('#coilCasing').setAttribute('stroke-width', '13');
+  $('#coilCasing').setAttribute('stroke-width', '32'); // gap wide enough for the hood crossing
   $('#coilHead').setAttribute('d', band(0.9, 1));
   // a thin light along the upper body — dimensional, not glossy
   $('#coilHighlight').setAttribute('d', line(0.05, 0.86, (p) => -halfW(p) * 0.45));
-  const [ex, ey, ea] = centre(0.968);
-  $('#coilEye').setAttribute('cx', (ex + halfW(0.968) * 0.28 * Math.cos(ea)).toFixed(1));
-  $('#coilEye').setAttribute('cy', (ey + halfW(0.968) * 0.28 * Math.sin(ea)).toFixed(1));
-  // UI-1C: the forked tongue — a short flick ahead of the nose, along the
+  // UI-1C2: the eye BURNS — glowing red iris on the hood, with a dark
+  // vertical slit pupil aligned to the head
+  const [ex0, ey0, ea] = centre(0.962);
+  const eyeOff = halfW(0.962) * 0.4;
+  const ex = ex0 + eyeOff * Math.cos(ea), ey = ey0 + eyeOff * Math.sin(ea);
+  $('#coilEye').setAttribute('cx', ex.toFixed(1));
+  $('#coilEye').setAttribute('cy', ey.toFixed(1));
+  const pupil = $('#coilPupil');
+  pupil.setAttribute('cx', ex.toFixed(1));
+  pupil.setAttribute('cy', ey.toFixed(1));
+  pupil.setAttribute('transform', `rotate(${((ea * 180) / Math.PI - 90).toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)})`);
+  // the forked tongue — a longer flick ahead of the snout, along the
   // direction of travel. Geometry only.
   const [nx, ny, na] = centre(0.9995);
   const tdx = -Math.sin(na), tdy = Math.cos(na); // tangent = direction of travel
-  const t1x = nx + tdx * 4.4, t1y = ny + tdy * 4.4;
+  const t1x = nx + tdx * 7, t1y = ny + tdy * 7;
   const fork = (side) => {
     const fa = Math.atan2(tdy, tdx) + side * 0.42;
-    return `L${(t1x + Math.cos(fa) * 2.6).toFixed(1)},${(t1y + Math.sin(fa) * 2.6).toFixed(1)}`;
+    return `L${(t1x + Math.cos(fa) * 3.8).toFixed(1)},${(t1y + Math.sin(fa) * 3.8).toFixed(1)}`;
   };
   $('#coilTongue').setAttribute('d',
     `M${nx.toFixed(1)},${ny.toFixed(1)} L${t1x.toFixed(1)},${t1y.toFixed(1)} ${fork(1)} M${t1x.toFixed(1)},${t1y.toFixed(1)} ${fork(-1)}`);
