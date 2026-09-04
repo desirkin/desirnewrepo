@@ -92,12 +92,23 @@ test('12. UI-1C3 — the body carries the concept proportion: heavy band, pointe
   assert.ok(SCRIPT.includes('tail tip stays VISIBLE'), 'the tail slides behind the neck, no torn band');
 });
 
-test('13. UI-1C5 — the artwork skull is mounted on the ring by the build step', () => {
-  assert.ok(SCRIPT.includes(`$('#headG').setAttribute('transform'`), 'the skull is mounted on the ring');
-  assert.ok(SCRIPT.includes('HEAD_TILT_IN'), 'neck aligned to the band tangent');
+test('13. UI-1C6 — one artwork animal: the painted head aims via the body rotation', () => {
+  assert.ok(SCRIPT.includes('HEAD_HOME_DEG = -34.5'), 'home angle matches the painted head');
   // the art participates in tracking: it sits inside #coilSpin, which
   // updateCoil rotates toward the focal prey every frame
   assert.ok(SCRIPT.includes(`$('#coilSpin').setAttribute('transform'`));
+});
+
+test('15. UI-1C6 — the hunt is legible: a sight-line to the checked coin, truth-gated', () => {
+  assert.ok(HTML.includes('id="gaze"') && HTML.includes('id="gazeLine"'));
+  assert.ok(/id="gaze" aria-hidden="true"/.test(HTML), 'decorative overlay');
+  // drawn only when a real focal prey (or demo target) exists; off otherwise and under KILL
+  const upd = SCRIPT.slice(SCRIPT.indexOf('function updateCoil'), SCRIPT.indexOf('function buildCoilRing'));
+  assert.ok(upd.includes(`gaze.classList.add('on')`) && upd.includes(`gaze.classList.remove('on')`));
+  assert.ok(upd.indexOf(`$('#gaze').classList.remove('on'); return;`) < upd.indexOf('targetCoin'),
+    'KILL clears the gaze before anything else');
+  assert.ok(HTML.includes('body:not(.reduced) #gaze.on #gazeLine'), 'march pauses under reduced motion');
+  assert.ok(HTML.includes('body.killed #gazeLine'));
 });
 
 test('14. UI-1C2 — the eyes up top are big hooded almonds, still killable decoration', () => {
