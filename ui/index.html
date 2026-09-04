@@ -77,22 +77,27 @@
   .cg3 { stop-color: var(--accent); stop-opacity: .55; }
   .cg3 { stop-color: color-mix(in srgb, var(--accent) 14%, #050d09); stop-opacity: .97; }
   .coilFill { fill: url(#coilGrad); filter: drop-shadow(0 0 9px var(--accent)); }
-  /* the skull is lit — the face of the animal, never a silhouette */
-  .hg1 { stop-color: var(--accent2); stop-opacity: .92; }
-  .hg2 { stop-color: var(--accent); stop-opacity: .85; }
-  .hg2 { stop-color: color-mix(in srgb, var(--accent) 52%, #0a1710); stop-opacity: .97; }
+  /* UI-1C4: the skull — dark scale mass with a lit rim, never a bright egg */
+  .hg1 { stop-color: var(--accent2); stop-opacity: .8; }
+  .hg2 { stop-color: var(--accent); stop-opacity: .8; }
+  .hg2 { stop-color: color-mix(in srgb, var(--accent) 34%, #081209); stop-opacity: .97; }
   .hg3 { stop-color: var(--accent); stop-opacity: .5; }
-  .hg3 { stop-color: color-mix(in srgb, var(--accent) 22%, #06100a); stop-opacity: .97; }
-  #coilHead { fill: url(#headGrad); }
+  .hg3 { stop-color: color-mix(in srgb, var(--accent) 14%, #050c07); stop-opacity: .98; }
+  #coilHead { fill: url(#headGrad); stroke: rgba(150, 240, 214, .32); stroke-width: .7;
+              filter: drop-shadow(0 0 8px var(--accent)); }
+  #headTop { fill: rgba(3, 9, 6, .55); } /* dorsal scale plate */
+  #headJaw { fill: none; stroke: #a9f0d8; stroke-width: 1.1; opacity: .25; stroke-linecap: round; }
+  #headLid { fill: none; stroke: #06110c; stroke-width: 2; opacity: .9; stroke-linecap: round; }
+  #headGlint { fill: #ffe9d2; opacity: .85; }
   #coilCasing { fill: none; stroke: var(--bg); stroke-linecap: round; opacity: .92; }
   #coilHighlight { fill: none; stroke: #eafffa; stroke-width: 1.4; opacity: .3; stroke-linecap: round; }
   /* UI-1C2: the eye BURNS — glowing iris, dark slit pupil. Fixed reds. */
   #coilEye { fill: url(#eyeGrad); stroke: rgba(30, 6, 3, .9); stroke-width: .7;
              filter: drop-shadow(0 0 6px rgba(255, 70, 30, .9)); }
   #coilPupil { fill: #0a0302; opacity: .92; }
-  /* UI-1C3: skull detail — brow ridge catchlight and a nostril pit */
-  #headBrow { fill: none; stroke: #bfeee0; stroke-width: 1.2; opacity: .28; stroke-linecap: round; }
-  #headNostril { fill: #041008; opacity: .65; }
+  /* UI-1C4: skull detail — the ANGRY brow over the eye, and a nostril pit */
+  #headBrow { fill: none; stroke: #cffff0; stroke-width: 1.7; opacity: .5; stroke-linecap: round; }
+  #headNostril { fill: #041008; opacity: .7; }
   /* segment hint across the wider body + a slow highlight moving through —
      muscle and scale, not sci-fi wire. */
   .ringScales { fill: none; stroke: var(--bg); stroke-width: 4.6; opacity: .14;
@@ -101,7 +106,7 @@
   .orbitGuide { fill: none; stroke: #1d2b40; stroke-width: .8; opacity: .55; }
   .orbitGuide.dashed { stroke-dasharray: 1.6 6; opacity: .45; }
   /* the flick of a forked tongue at the nose — geometry, not cartoon */
-  #coilTongue { fill: none; stroke: #ff6b52; stroke-width: 1.1; stroke-linecap: round; opacity: .85; }
+  #coilTongue { fill: none; stroke: #ff6b52; stroke-width: .95; stroke-linecap: round; opacity: .85; }
   .ringPulse  { fill: none; stroke: var(--accent2); stroke-width: 2.4; opacity: .38;
                 stroke-dasharray: 46 607; stroke-linecap: round;
                 filter: blur(1.1px) drop-shadow(0 0 5px var(--accent2));
@@ -498,22 +503,35 @@
         <circle class="ringScales" r="100.5"></circle>
         <circle class="ringScales" r="107.5"></circle>
         <path id="coilCasing" d=""></path>
-        <!-- UI-1C3: a SCULPTED head — its own shape (brow, burning eye,
-             slit pupil, nostril, tongue) in local coords, snout at +x.
-             buildCoilRing mounts the whole group on the ring; it rotates
-             with the body and the head crosses OVER the tapered tail. -->
+        <!-- UI-1C4: the VIPER skull — an angular arrowhead in local coords
+             (snout at +x): concave waist before the snout, temple/hood
+             flare, dark dorsal plate, lit jaw line, angry brow and lid
+             over an almond burning eye. buildCoilRing mounts the whole
+             group on the ring; it rotates with the body. -->
         <g id="headG">
-          <path id="coilTongue" d="M25,0.5 L36,2 L41.5,-0.8 M36,2 L40.5,5.2"></path>
-          <path id="coilHead" class="coilFill" d="M24,0
-            C21,-7 13,-12.5 3,-14.5
-            C-8,-16.5 -18,-13.5 -22,-7.5
-            C-24.5,-3.5 -24.5,3.5 -22,7.5
-            C-18,13.5 -8,16.5 3,14.5
-            C13,12.5 21,7 24,0 Z"></path>
-          <path id="headBrow" d="M-4,-11.5 C3,-13.5 10,-11.5 15,-6.5"></path>
-          <circle id="headNostril" cx="18.5" cy="-2.6" r="1"></circle>
-          <circle id="coilEye" cx="5.5" cy="-6.6" r="3.7"></circle>
-          <ellipse id="coilPupil" cx="5.5" cy="-6.6" rx="1.1" ry="2.9"></ellipse>
+          <path id="coilTongue" d="M27.5,0.5 C33,1.2 36,2 39,1.2 L45.5,-1.2 M39,1.2 L44.5,4.2"></path>
+          <path id="coilHead" d="M27,0
+            C24,-3 20,-5.5 14,-7
+            C10,-8 7,-9 3,-11
+            C-3,-14.5 -12,-16 -18,-13.5
+            C-24,-11 -27,-6 -27,0
+            C-27,6 -24,11 -18,13.5
+            C-12,16 -3,14.5 3,11
+            C7,9 10,8 14,7
+            C20,5.5 24,3 27,0 Z"></path>
+          <path id="headTop" d="M22,-1.5
+            C15,-4.5 8,-6.5 2,-9
+            C-5,-12 -13,-13.5 -19,-11.5
+            C-24,-9.5 -26,-5 -26,-1
+            C-20,-3 -10,-3.5 0,-3
+            C10,-2.5 17,-2 22,-1.5 Z"></path>
+          <path id="headJaw" d="M24,3 C18,6 10,8.5 2,10.5 C-6,12.5 -14,13 -19,11"></path>
+          <path id="headBrow" d="M12,-5.8 C6,-8.6 0,-10.4 -8,-12.2"></path>
+          <circle id="headNostril" cx="21.5" cy="-2.2" r="0.8"></circle>
+          <ellipse id="coilEye" cx="4.6" cy="-6.9" rx="4.6" ry="3.1" transform="rotate(-14 4.6 -6.9)"></ellipse>
+          <ellipse id="coilPupil" cx="4.6" cy="-6.9" rx="1.05" ry="2.6" transform="rotate(-14 4.6 -6.9)"></ellipse>
+          <circle id="headGlint" cx="3.3" cy="-8.1" r="0.75"></circle>
+          <path id="headLid" d="M8.4,-8.1 C6,-9.4 2.6,-9.6 0.6,-8.4"></path>
         </g>
       </g>
       <circle class="ringPulse" r="104"></circle>
@@ -762,10 +780,10 @@ function buildCoilRing() {
   // toward the centre so it reads as looking INTO the hunting field.
   const [hx, hy, ha] = centre(0.985);
   const travelDeg = (Math.atan2(Math.cos(ha), -Math.sin(ha)) * 180) / Math.PI;
-  const HEAD_TILT_IN = 100; // the skull doubles back off the band to glare INTO the field
-  const HEAD_SCALE = 1.25; // wider than the body — like the concept frame
+  const HEAD_TILT_IN = 24; // forward along the coil with a mild inward lean — alert, chasing the tail
+  const HEAD_SCALE = 1.2; // wider than the body — like the concept frame
   $('#headG').setAttribute('transform',
-    `translate(${(hx * 0.96).toFixed(1)} ${(hy * 0.96).toFixed(1)}) rotate(${(travelDeg + HEAD_TILT_IN).toFixed(1)}) scale(${HEAD_SCALE})`);
+    `translate(${hx.toFixed(1)} ${hy.toFixed(1)}) rotate(${(travelDeg + HEAD_TILT_IN).toFixed(1)}) scale(${HEAD_SCALE})`);
 }
 
 /* ---------- arcs (lock ring + ET session) ---------- */
