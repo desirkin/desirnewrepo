@@ -115,6 +115,6 @@ test('coil body: the ring is a built serpent body, not a plain circle', () => {
   assert.ok(HTML.includes('id="coilTail"'));
   assert.ok(HTML.includes('id="coilHead"'));
   assert.ok(HTML.includes('id="coilCasing"')); // the head passes OVER the tail
-  assert.ok(HTML.includes('id="coilEye"'));
+  assert.ok(HTML.includes('id="headG"')); // the mounted skull
   assert.ok(HTML.includes('coilGrad')); // dimensional lighting
 });

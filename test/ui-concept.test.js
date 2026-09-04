@@ -78,10 +78,11 @@ test('9. the heartbeat glyph shows only when the tape is truthfully LIVE', () =>
     'both SHELL LINK LOST strip paths also stop the heartbeat');
 });
 
-test('10. the forked tongue flicks from the sculpted snout, inside the rotating body', () => {
+test('10. the head is the concept frame\'s own artwork, riding inside the rotating body', () => {
   const spin = HTML.match(/<g id="coilSpin">([\s\S]*?)<circle class="ringPulse"/)[0];
-  assert.ok(spin.includes('id="coilTongue"'), 'the tongue rotates with the body');
-  assert.ok(/id="coilTongue" d="M2\d/.test(HTML), 'a static forked path in head-local coords');
+  assert.ok(spin.includes('id="headG"'), 'the head group rotates with the body');
+  assert.ok(/<image id="coilHead" href="data:image\/png;base64,/.test(HTML),
+    'embedded alpha-matted artwork, no external fetch');
 });
 
 test('12. UI-1C3 — the body carries the concept proportion: heavy band, pointed tail', () => {
@@ -91,17 +92,12 @@ test('12. UI-1C3 — the body carries the concept proportion: heavy band, pointe
   assert.ok(SCRIPT.includes('tail tip stays VISIBLE'), 'the tail slides behind the neck, no torn band');
 });
 
-test('13. UI-1C3 — a sculpted head with burning eye, pupil, brow and nostril rides the ring', () => {
-  assert.ok(HTML.includes('id="eyeGrad"'), 'burning iris gradient');
-  assert.ok(HTML.includes('fill: url(#eyeGrad)'));
-  const spin = HTML.match(/<g id="coilSpin">([\s\S]*?)<circle class="ringPulse"/)[0];
-  for (const part of ['id="headG"', 'coilHead', 'coilEye', 'coilPupil', 'headBrow', 'headNostril']) {
-    assert.ok(spin.includes(part), `${part} lives inside the rotating body`);
-  }
-  assert.ok(SCRIPT.includes(`$('#headG').setAttribute('transform'`), 'the whole skull is mounted on the ring');
-  // menace stays red regardless of posture: fixed stops, no var(--accent)
-  const grad = HTML.match(/id="eyeGrad"[\s\S]*?<\/radialGradient>/)[0];
-  assert.ok(!grad.includes('var(--accent)'));
+test('13. UI-1C5 — the artwork skull is mounted on the ring by the build step', () => {
+  assert.ok(SCRIPT.includes(`$('#headG').setAttribute('transform'`), 'the skull is mounted on the ring');
+  assert.ok(SCRIPT.includes('HEAD_TILT_IN'), 'neck aligned to the band tangent');
+  // the art participates in tracking: it sits inside #coilSpin, which
+  // updateCoil rotates toward the focal prey every frame
+  assert.ok(SCRIPT.includes(`$('#coilSpin').setAttribute('transform'`));
 });
 
 test('14. UI-1C2 — the eyes up top are big hooded almonds, still killable decoration', () => {
