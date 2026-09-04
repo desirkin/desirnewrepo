@@ -226,6 +226,34 @@ counted (`durableWriteFailures`, `lastDurableWriteError`,
 `lastDurableWriteFailureTs`), degrade MICRO health, and never touch the
 Kraken tape or the other tracked symbols.
 
+**MICRO-1C — prepared evidence is HISTORY.** The PREPARE snapshot is a
+deeply frozen structured clone, fully detached from live episodes, depth,
+flow and coverage: once Serpent prepares a memory of what it saw at time
+T, the market changing at T+5 cannot change it. Serialized bytes at the
+first write attempt are identical at every retry — a retry retries
+history, never rewrites it. New transitions occurring behind a failed
+write queue separately and get their own truthful record afterwards.
+
+**Durability drain.** A symbol leaving stalking stops all new sensing, but
+already-prepared evidence (and already-latched transitions, frozen into
+one final minimal record marked `SENSING_STOPPED_BEFORE_EMISSION`)
+continues draining under bounds: at most 6 draining former symbols, at
+most grace+120 s of drain age. Beyond the bound, evidence is dropped
+EXPLICITLY — `pendingEvidenceDropped` counts it, the reason is recorded,
+health degrades — never silently.
+
+**Write-health recovery.** Historical failure counts never erase; current
+health is separate: `writeImpaired` is true while the latest write outcome
+is a failure or any failed record still awaits its ACK, and clears when
+writes succeed again with nothing failed left pending — MICRO then returns
+HEALTHY while `durableWriteFailures` keeps its history. The per-symbol
+transition window (≤6/min) counts successful ACKs — preparing or retrying
+an unacknowledged record is not an emission.
+`observationsSuppressedByRateLimit` counts suppressed ATTEMPTS (a blocked
+retry counts each time), not unique observations lost. Repeated identical
+write-failure logging is coalesced (≥60 s apart) while counting never
+stops.
+
 ## 12a. Episode clock and window (MICRO-1A/1B)
 
 Every time field of one episode — depletion, 50 %/90 % milestones and

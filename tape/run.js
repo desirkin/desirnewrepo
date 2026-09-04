@@ -395,6 +395,10 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
         if (!p || !book) continue;
         micro.evaluate(symbol, book, p.coin);
       }
+      // MICRO-1C: symbols that left tracking still DRAIN their already-
+      // prepared evidence (bounded) — leaving prey status never silently
+      // discards what was observed
+      micro.drain();
     });
   }, MICRO_LIMITS.evaluationIntervalMs);
 

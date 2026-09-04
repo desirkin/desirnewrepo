@@ -60,7 +60,7 @@ test('33a. canonical adapter succeeds; families and provenance are correct', () 
   assert.ok(p.bookChannel.includes('kraken-ws-v2 book'));
   assert.deepEqual(p.flowWindowsMs, [5000, 15000, 60000, 300000]);
   assert.ok(env.payload.limitations.includes('AGGREGATE_L2_UNATTRIBUTED'));
-  assert.equal(env.payload.trackerVersion, 'MICRO-1A');
+  assert.equal(env.payload.trackerVersion, 'MICRO-1C');
   // availability language preserved — insufficient history was never zeroed
   assert.ok(['KNOWN', 'UNKNOWN', 'UNAVAILABLE', 'STALE', 'DEGRADED'].includes(env.dataAvailability.recoveryAsymmetry));
 });
@@ -68,7 +68,7 @@ test('33a. canonical adapter succeeds; families and provenance are correct', () 
 test('33b. MARKET_PRICE only where price response is actually measured; STALE degrades', () => {
   const obs = buildObservation();
   const stale = { ...obs, bookState: 'STALE', priceResponse: { '5s': 'STALE', '15s': 'STALE', '60s': 'STALE' } };
-  const env = fromMicrostructureObservation(stale);
+  const env = fromMicrostructureObservation(stale, new Date(NOW + 1000).toISOString());
   assert.ok(!env.evidenceFamily.includes('MARKET_PRICE'), 'no invented price evidence');
   assert.equal(env.observationState, 'DEGRADED');
   assert.equal(env.dataAvailability.depthPressure, 'STALE');

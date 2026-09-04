@@ -233,4 +233,172 @@ test('1B-D/F. silent book: the window closes on the clock, not on the next messa
   }
 });
 
+
+// ---------------- MICRO-1C drills ----------------
+
+const mkX = (q, ts) => fakeBook({ bids: [lvl(99.99, q), lvl(99.5, 500)], asks: [lvl(100.01, 100), lvl(100.5, 500)], ts });
+
+test('1C-5. AMBIGUOUS WRITE: first-attempt bytes === retry bytes, byte for byte', async () => {
+  const { fromMicrostructureObservation } = await import('../memory/adapters.js');
+  const run = () => {
+    const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+    tr.setTrackingSet(new Set(['X/USD']), T0);
+    // A. open a depletion episode
+    tr.onBook('X/USD', mkX(100, T0), T0);
+    tr.onBook('X/USD', mkX(40, T0 + 1000), T0 + 1000);
+    // B-D. prepare DEPLETION_OPENED; writer captures EXACT serialized bytes,
+    // then throws — "append may have succeeded, acknowledgement failed"
+    let firstBytes = null;
+    tr.evaluate('X/USD', mkX(40, T0 + 1000), 'X', T0 + 5000, (o) => {
+      firstBytes = JSON.stringify(o);
+      throw new Error('ack lost (drill)');
+    });
+    const st = tr.symbols.get('X/USD');
+    assert.ok(st.pendingWrite, 'E. pending durable record remains');
+    assert.ok(firstBytes.includes('DEPLETION_OPENED'));
+    // the frozen snapshot says exactly what was known at PREPARE time
+    assert.equal(st.pendingWrite.obs.episodes.activeBid.depthRecovery50Ms, null);
+    // F. the market moves on: live episode reaches 50% AND 90% recovery
+    tr.onBook('X/USD', mkX(75, T0 + 7000), T0 + 7000);
+    tr.onBook('X/USD', mkX(97, T0 + 9000), T0 + 9000);
+    assert.equal(st.activeEpisodes.bid, null, 'live episode recovered and closed');
+    assert.equal(st.completedEpisodes.at(-1).depthRecovery90Ms, 8000, 'later recovery belongs to later evidence');
+    // the pending record NEVER acquires later recovery fields
+    assert.equal(st.pendingWrite.obs.episodes.activeBid.depthRecovery50Ms, null, 'history did not move');
+    assert.equal(st.pendingWrite.obs.episodes.activeBid.depthRecovery90Ms, null);
+    // G-H. retry; capture retry bytes
+    let retryBytes = null;
+    const out = tr.evaluate('X/USD', mkX(97, T0 + 10_000), 'X', T0 + 10_000, (o) => { retryBytes = JSON.stringify(o); });
+    assert.equal(firstBytes, retryBytes, 'FIRST-ATTEMPT BYTES === RETRY BYTES');
+    assert.equal(out.length, 1);
+    return { firstBytes, retryBytes };
+  };
+  const a = run();
+  const b = run();
+  assert.deepEqual(a, b, 'fixture twice => identical');
+  // identical content => identical Memory identity: an ambiguous double
+  // arrival collapses as a duplicate — never two versions of one transition
+  const rec = JSON.parse(a.firstBytes);
+  const iso = new Date(T0 + 11_000).toISOString();
+  const e1 = fromMicrostructureObservation(JSON.parse(a.firstBytes), iso);
+  const e2 = fromMicrostructureObservation(JSON.parse(a.retryBytes), iso);
+  assert.equal(e1.id, e2.id, 'one transition, one identity — no content conflict possible');
+  assert.equal(e1.sourceEventId, e2.sourceEventId);
+  void rec;
+});
+
+test('1C-6. new transitions queue BEHIND a failed write; past evidence never absorbs future knowledge', () => {
+  const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+  tr.setTrackingSet(new Set(['X/USD']), T0);
+  tr.onBook('X/USD', mkX(100, T0), T0);
+  tr.onBook('X/USD', mkX(40, T0 + 1000), T0 + 1000); // DEPLETION_OPENED latched
+  const failing = () => { throw new Error('storage down (drill)'); };
+  tr.evaluate('X/USD', mkX(40, T0 + 1000), 'X', T0 + 5000, failing); // frozen, unacked
+  const st = tr.symbols.get('X/USD');
+  const frozenKinds = st.pendingWrite.obs.emitReason.transitions.map((t) => t.kind);
+  assert.deepEqual(frozenKinds, ['DEPLETION_OPENED']);
+  // while the write is failing, sensing continues: 50% then 90% recovery
+  tr.onBook('X/USD', mkX(75, T0 + 7000), T0 + 7000);
+  tr.onBook('X/USD', mkX(97, T0 + 9000), T0 + 9000);
+  const queued = st.pendingTransitions.map((t) => t.kind);
+  assert.deepEqual(queued, ['RECOVERY_50_REACHED', 'EPISODE_RECOVERED_90'], 'later transitions queue separately');
+  assert.deepEqual(st.pendingWrite.obs.emitReason.transitions.map((t) => t.kind), ['DEPLETION_OPENED'], 'old frozen record untouched');
+  // ACK the old record: later transitions survive and get their own record
+  const written = [];
+  const ack1 = tr.evaluate('X/USD', mkX(97, T0 + 10_000), 'X', T0 + 10_000, (o) => written.push(o));
+  assert.deepEqual(ack1[0].emitReason.transitions.map((t) => t.kind), ['DEPLETION_OPENED']);
+  assert.deepEqual(st.pendingTransitions.map((t) => t.kind), ['RECOVERY_50_REACHED', 'EPISODE_RECOVERED_90'], 'ACK of old evidence does not destroy the queue');
+  const ack2 = tr.evaluate('X/USD', mkX(97, T0 + 15_000), 'X', T0 + 15_000, (o) => written.push(o));
+  assert.deepEqual(ack2[0].emitReason.transitions.map((t) => t.kind), ['RECOVERY_50_REACHED', 'EPISODE_RECOVERED_90'], 'later transitions receive their own truthful observation');
+  assert.equal(written.length, 2, 'deterministic order: history first, then the later evidence');
+});
+
+test('1C-8. UNTRACK DURING FAILURE: evidence drains after the coin stops being prey', () => {
+  const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+  tr.setTrackingSet(new Set(['X/USD']), T0);
+  tr.onBook('X/USD', mkX(100, T0), T0);
+  tr.onBook('X/USD', mkX(40, T0 + 1000), T0 + 1000);
+  const failing = () => { throw new Error('storage down (drill)'); };
+  tr.evaluate('X/USD', mkX(40, T0 + 1000), 'X', T0 + 5000, failing);
+  const frozen = tr.symbols.get('X/USD').pendingWrite.obs;
+  const frozenBytes = JSON.stringify(frozen);
+  // symbol leaves stalking; grace expires — evidence must NOT be deleted
+  tr.setTrackingSet(new Set(), T0 + 6000);
+  tr.setTrackingSet(new Set(), T0 + 6000 + MICRO_LIMITS.graceMs + 1000);
+  assert.ok(tr.symbols.has('X/USD'), 'pending evidence survives untracking');
+  assert.ok(tr.symbols.get('X/USD').draining, 'symbol is in durability-drain state');
+  assert.ok(!tr.tracked().includes('X/USD'), 'but no longer prey — no new sensing');
+  tr.onBook('X/USD', mkX(100, T0 + 40_000), T0 + 40_000);
+  assert.equal(tr.symbols.get('X/USD').samples.length, 0, 'drain state senses nothing new');
+  // drain still failing => still owed
+  tr.drain(T0 + 40_000, failing);
+  assert.ok(tr.symbols.has('X/USD'));
+  assert.equal(tr.health().status, 'DEGRADED');
+  // writer restored: drains exactly once with the ORIGINAL immutable bytes
+  const written = [];
+  tr.drain(T0 + 45_000, (o) => written.push(JSON.stringify(o)));
+  assert.equal(written.length, 1, 'drains exactly once');
+  assert.equal(written[0], frozenBytes, 'original immutable bytes');
+  assert.ok(!tr.symbols.has('X/USD'), 'former-symbol state then safely discarded');
+  // bounded emergency drop: a symbol stuck beyond grace+maxDrainAgeMs is
+  // dropped EXPLICITLY — counted, reasoned, degraded — never silently
+  const tr2 = new MicrostructureTracker({ bookStaleMs: 15_000 });
+  tr2.setTrackingSet(new Set(['Y/USD']), T0);
+  tr2.onBook('Y/USD', mkX(100, T0), T0);
+  tr2.onBook('Y/USD', mkX(40, T0 + 1000), T0 + 1000);
+  tr2.evaluate('Y/USD', mkX(40, T0 + 1000), 'Y', T0 + 5000, failing);
+  tr2.setTrackingSet(new Set(), T0 + 6000);
+  tr2.setTrackingSet(new Set(), T0 + 6000 + MICRO_LIMITS.graceMs + 1000);
+  tr2.drain(T0 + 6000 + MICRO_LIMITS.graceMs + MICRO_LIMITS.maxDrainAgeMs + 2000, failing);
+  assert.ok(!tr2.symbols.has('Y/USD'), 'dropped at the documented bound');
+  const h2 = tr2.health();
+  assert.equal(h2.pendingEvidenceDropped, 1, 'explicit drop counter');
+  assert.ok(h2.lastEvidenceDropReason.includes('DRAIN_AGE_EXCEEDED'), 'reason recorded');
+  assert.equal(h2.status, 'DEGRADED', 'lost evidence degrades health');
+});
+
+test('1C-10. WRITE HEALTH RECOVERS; historical failure counts never erase', () => {
+  const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+  tr.setTrackingSet(new Set(['X/USD']), T0);
+  tr.onBook('X/USD', mkX(100, T0), T0);
+  tr.onBook('X/USD', mkX(40, T0 + 1000), T0 + 1000);
+  assert.equal(tr.health().status, 'HEALTHY');
+  tr.evaluate('X/USD', mkX(40, T0 + 1000), 'X', T0 + 5000, () => { throw new Error('blip (drill)'); });
+  const mid = tr.health();
+  assert.equal(mid.status, 'DEGRADED');
+  assert.equal(mid.writeImpaired, true);
+  assert.equal(mid.pendingWriteCount, 1);
+  // a SIBLING success alone must not fake recovery while the failed record is unresolved
+  tr.setTrackingSet(new Set(['X/USD', 'Z/USD']), T0 + 5500);
+  tr.onBook('Z/USD', mkX(100, T0 + 5500), T0 + 5500);
+  tr.evaluate('Z/USD', mkX(100, T0 + 6000), 'Z', T0 + 6000, () => {});
+  assert.equal(tr.health().status, 'DEGRADED', 'failed pending write still unresolved');
+  assert.equal(tr.health().writeImpaired, true);
+  // successful retry of the failed record => truthful recovery
+  tr.evaluate('X/USD', mkX(40, T0 + 10_000), 'X', T0 + 10_000, () => {});
+  const after = tr.health();
+  assert.equal(after.status, 'HEALTHY', 'current health recovers');
+  assert.equal(after.writeImpaired, false);
+  assert.equal(after.pendingWriteCount, 0);
+  assert.equal(after.durableWriteFailures, 1, 'historical truth remains');
+  assert.equal(after.lastDurableWriteFailureTs, T0 + 5000, 'historical timestamp remains');
+  assert.ok(after.lastDurableWriteSuccessTs >= T0 + 6000);
+});
+
+test('1C-11. per-symbol transition cap counts ACKS across a minute boundary', () => {
+  const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+  tr.setTrackingSet(new Set(['X/USD']), T0);
+  tr.onBook('X/USD', mkX(100, T0), T0);
+  tr.onBook('X/USD', mkX(40, T0 + 1000), T0 + 1000);
+  // prepared in minute 1, but the write keeps failing across the boundary
+  tr.evaluate('X/USD', mkX(40, T0 + 1000), 'X', T0 + 5000, () => { throw new Error('down (drill)'); });
+  const st = tr.symbols.get('X/USD');
+  assert.equal(st.transitionEmitsThisMinute, 0, 'preparing/retrying is NOT an emission');
+  // ACK lands in minute 2 => it counts in minute 2's ACK window
+  const out = tr.evaluate('X/USD', mkX(40, T0 + 65_000), 'X', T0 + 65_000, () => {});
+  assert.equal(out.length, 1);
+  assert.equal(st.transitionEmitsThisMinute, 1, 'the ACK is what consumes the per-symbol slot');
+  assert.equal(tr.health().transitionObservationsEmitted, 1);
+});
+
 test.after(() => rmSync(TEST_DATA, { recursive: true, force: true }));
