@@ -50,9 +50,12 @@ export function validateRegistryEntry(e) {
 }
 
 // Load a registry: validate every entry, reject the malformed loudly, and
-// enforce the hard entity cap (entries beyond it are refused, not trimmed
-// silently — the refusal is reported).
-export function loadRegistry(entries = VERIFIED_MAPPINGS) {
+// enforce the entity cap (entries beyond it are refused, not trimmed
+// silently — the refusal is reported). GOV-1A: a configured cap
+// (governance.maxMappedSymbols) narrows the limit; the absolute system
+// ceiling MAX_MAPPED_ENTITIES always stands.
+export function loadRegistry(entries = VERIFIED_MAPPINGS, { cap = MAX_MAPPED_ENTITIES } = {}) {
+  const effectiveCap = Math.min(Number.isInteger(cap) && cap > 0 ? cap : MAX_MAPPED_ENTITIES, MAX_MAPPED_ENTITIES);
   const accepted = [];
   const rejected = [];
   for (const e of entries) {
@@ -61,8 +64,8 @@ export function loadRegistry(entries = VERIFIED_MAPPINGS) {
       rejected.push({ entry: e, errors: v.errors });
       continue;
     }
-    if (accepted.length >= MAX_MAPPED_ENTITIES) {
-      rejected.push({ entry: e, errors: [`registry cap ${MAX_MAPPED_ENTITIES} reached — entry refused`] });
+    if (accepted.length >= effectiveCap) {
+      rejected.push({ entry: e, errors: [`registry cap ${effectiveCap} reached — entry refused`] });
       continue;
     }
     accepted.push(Object.freeze({ ...e }));

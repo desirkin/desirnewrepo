@@ -459,4 +459,355 @@ test('B2. stop() is idempotent; a poll finishing during shutdown writes nothing 
   cleanupDir(d, gov);
 });
 
+// ==================== GOV-1A: COLLECTOR TRUTH HARDENING ====================
+
+const { mkdirSync } = await import('node:fs');
+const linesOf = (d, kind) => eventLines(d).filter((e) => e.lifecycleTransition === kind);
+
+test('H1. EVENT-CAP DEBT: suppressed-at-cap discoveries stay owed and drain — each exactly once', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  const four = [1, 2, 3, 4].map((i) => prop({ id: `cap-${i}` }));
+  const fetchImpl = gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply(four) },
+    { match: isRefresh, reply: () => proposalsReply(four) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  const cfg = { governance: { ...GOV_CFG.governance, maxEventsPerPoll: 2 } };
+  const gov = startGovernance({ log: () => {}, config: cfg, fetchImpl, now, intervalMs: 3_600_000 });
+  await gov.pollOnce();
+  assert.equal(linesOf(d, 'PROPOSAL_DISCOVERED').length, 2, 'only the cap number written this poll');
+  assert.equal(gov._pending.length, 2, 'the unwritten discoveries remain PENDING, not lost');
+  assert.equal(gov._tracked.size, 4, 'tracking may advance — the evidence is safely owed');
+  clock += 60_000;
+  await gov.pollOnce();
+  const discs = linesOf(d, 'PROPOSAL_DISCOVERED');
+  assert.equal(discs.length, 4, 'the debt drained');
+  assert.equal(gov._pending.length, 0);
+  assert.equal(new Set(discs.map((e) => e.sourceEventId)).size, 4, 'each source event wrote exactly once');
+  // and a further unchanged poll adds nothing
+  clock += 60_000;
+  await gov.pollOnce();
+  assert.equal(eventLines(d).length, 4, 'no duplicate lifecycle evidence, ever');
+  cleanupDir(d, gov);
+});
+
+test('H2. FINAL ACROSS THE CAP: VOTING_ENDED + FINAL_TALLY both ultimately append; finality only after ACK', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  let state = 'active';
+  const fetchImpl = gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply(state === 'active' ? [prop()] : []) },
+    { match: isRefresh, reply: () => proposalsReply([prop({ state })]) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  const cfg = { governance: { ...GOV_CFG.governance, maxEventsPerPoll: 1 } };
+  const gov = startGovernance({ log: () => {}, config: cfg, fetchImpl, now, intervalMs: 3_600_000 });
+  await gov.pollOnce(); // 1 event: PROPOSAL_DISCOVERED
+  clock += 60_000;
+  state = 'closed';
+  await gov.pollOnce(); // cap 1: VOTING_ENDED written, FINAL queued
+  assert.equal(linesOf(d, 'VOTING_ENDED').length, 1);
+  assert.equal(linesOf(d, 'FINAL_TALLY_OBSERVED').length, 0, 'final evidence not yet written');
+  assert.equal(gov._finalIds.size, 0, 'the proposal is NOT acknowledged final past unwritten evidence');
+  assert.equal(gov._pending.length, 1);
+  clock += 60_000;
+  await gov.pollOnce(); // drain
+  assert.equal(linesOf(d, 'FINAL_TALLY_OBSERVED').length, 1, 'final tally ultimately appended exactly once');
+  assert.equal(gov._finalIds.size, 1, 'finality acknowledged only after the append succeeded');
+  assert.equal(gov._tracked.size, 0, 'heavy tracked state released after final ACK');
+  cleanupDir(d, gov);
+});
+
+test('H3. SPACING VS PAGINATION: page 2 is reached by WAITING, never by bursting, never falsely budget-denied', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => clock; // spacing advances ONLY through sleeps
+  const sleepImpl = async (ms) => {
+    clock += ms;
+  };
+  const fetchImpl = gqlFetch([
+    { match: (q) => isDiscovery(q) && q.includes('skip: 0'), reply: () => proposalsReply([prop({ id: 'sp-1' }), prop({ id: 'sp-2' })]) },
+    { match: (q) => isDiscovery(q) && q.includes('skip: 2'), reply: () => proposalsReply([prop({ id: 'sp-3' })]) },
+    { match: isRefresh, reply: () => proposalsReply([]) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  const cfg = { governance: { ...GOV_CFG.governance, minSpacingMs: 3000, proposalPageSize: 2, maxProposalPagesPerCycle: 2 } };
+  const gov = startGovernance({ log: () => {}, config: cfg, fetchImpl, now, sleepImpl, intervalMs: 3_600_000 });
+  await gov.pollOnce();
+  const activeCalls = fetchImpl.calls.filter((c) => isDiscovery(c.q));
+  assert.equal(activeCalls.length, 2, 'page 2 was actually retrieved');
+  assert.equal(linesOf(d, 'PROPOSAL_DISCOVERED').length, 3, 'both pages of proposals observed');
+  // spacing respected: every consecutive request at least minSpacingMs apart
+  const stamps = gov.budget.stamps;
+  for (let i = 1; i < stamps.length; i++) assert.ok(stamps[i] - stamps[i - 1] >= 3000, `no burst (${stamps[i] - stamps[i - 1]}ms)`);
+  assert.ok(!eventLines(d).some((e) => e.coverage.proposalPages === 'PARTIAL_REQUEST_BUDGET'), 'spacing never masquerades as budget exhaustion');
+  cleanupDir(d, gov);
+});
+
+test('H4. PARTIAL VOTE EVIDENCE IS KEPT: page-1 votes yield PARTIAL concentration with the exact stop reason', async () => {
+  // A) provider error on page 2
+  {
+    const d = freshDir();
+    let clock = T0;
+    const now = () => (clock += 25);
+    let total = 1_210_000;
+    const fetchImpl = gqlFetch([
+      { match: isDiscovery, reply: () => proposalsReply([prop()]) }, // discovery always sees the base state
+      { match: isRefresh, reply: () => proposalsReply([prop({ scores_total: total })]) }, // only refresh sees the moved tally
+      { match: (q) => isVotes(q) && q.includes('skip: 0'), reply: () => votesReply([vote(700), vote(300)]) },
+      { match: (q) => isVotes(q) && q.includes('skip: 2'), reply: () => res({}, { status: 500 }) },
+    ]);
+    const cfg = { governance: { ...GOV_CFG.governance, votePageSize: 2, maxVotePagesPerProposal: 3 } };
+    const gov = startGovernance({ log: () => {}, config: cfg, fetchImpl, now, intervalMs: 3_600_000 });
+    await gov.pollOnce();
+    clock += 60_000;
+    total = 2_000_000; // force a TALLY_CHANGED emission carrying the concentration
+    await gov.pollOnce();
+    const ev = eventLines(d).findLast((e) => e.emitReason === 'TALLY_CHANGED');
+    assert.ok(ev, 'changed tally emitted');
+    assert.equal(ev.voterConcentration.coverage, 'PARTIAL', 'retrieved evidence is DESCRIBED, never discarded');
+    assert.equal(ev.voterConcentration.coverageReason, 'PROVIDER_ERROR', 'exact stop reason preserved');
+    assert.equal(ev.voterConcentration.observedVoterCount, 2, 'concentration computed over the votes actually fetched');
+    assert.equal(ev.voterConcentration.top1VotingPowerShare, 0.7);
+    cleanupDir(d, gov);
+  }
+  // B) hourly budget exhausted before page 2
+  {
+    const d = freshDir();
+    let clock = T0;
+    const now = () => (clock += 25);
+    const fetchImpl = gqlFetch([
+      { match: isDiscovery, reply: () => proposalsReply([prop()]) },
+      { match: isRefresh, reply: () => proposalsReply([prop({ scores_total: 9_999_999 })]) },
+      { match: isVotes, reply: () => votesReply([vote(500)]) },
+    ]);
+    const cfg = { governance: { ...GOV_CFG.governance, requestsPerHour: 4, votePageSize: 1, maxVotePagesPerProposal: 3 } };
+    const gov = startGovernance({ log: () => {}, config: cfg, fetchImpl, now, intervalMs: 3_600_000 });
+    await gov.pollOnce(); // pending+active discovery(2) + refresh(1) + vote page1(1) + vote page2 denied at 5
+    const ev = eventLines(d).findLast((e) => e.emitReason === 'TALLY_CHANGED' || e.lifecycleTransition === 'PROPOSAL_DISCOVERED');
+    const conc = eventLines(d).map((e) => e.voterConcentration).find((c) => c?.coverage === 'PARTIAL');
+    assert.ok(conc, `a PARTIAL concentration exists (${JSON.stringify(ev?.voterConcentration)})`);
+    assert.equal(conc.coverageReason, 'REQUEST_BUDGET', 'true budget exhaustion is named truthfully');
+    assert.equal(conc.observedVoterCount, 1);
+    cleanupDir(d, gov);
+  }
+});
+
+test('H5. RESTART: checkpoint prevents rediscovery; identity stays canonical; cadence and deltas restore truthfully', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  let total = 1_210_000;
+  const routes = [
+    { match: isDiscovery, reply: () => proposalsReply([prop({ scores_total: total })]) },
+    { match: isRefresh, reply: () => proposalsReply([prop({ scores_total: total })]) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ];
+  const govA = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: gqlFetch(routes), now, intervalMs: 3_600_000 });
+  await govA.pollOnce();
+  assert.equal(linesOf(d, 'PROPOSAL_DISCOVERED').length, 1);
+  govA.stop(); // checkpoint saved
+  // fresh collector, same directory, provider unchanged
+  const govB = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: gqlFetch(routes), now, intervalMs: 3_600_000 });
+  await govB.pollOnce();
+  assert.equal(linesOf(d, 'PROPOSAL_DISCOVERED').length, 1, 'NO second discovery after restart');
+  assert.equal(eventLines(d).length, 1, 'no premature snapshot either — cadence state restored');
+  // ACTIVE_SNAPSHOT happens only when its actual cadence becomes due
+  clock += GOV_CFG.governance.activeSnapshotSec * 1000 + 60_000;
+  total = 1_500_000;
+  await govB.pollOnce();
+  const snap = eventLines(d).findLast((e) => e.emitReason === 'TALLY_CHANGED' || e.emitReason === 'ACTIVE_SNAPSHOT');
+  assert.ok(snap, 'later snapshot emitted when due');
+  assert.equal(snap.trajectory.votingPowerDelta, 290_000, 'trajectory delta measured against the RESTORED prior state');
+  // canonical identity: re-retrieving the same provider event never mints a
+  // new Memory id (the deterministic sourceEventId anchors it)
+  const { fromGovernanceEvent } = await import('../memory/adapters.js');
+  const disc = linesOf(d, 'PROPOSAL_DISCOVERED')[0];
+  const later = { ...disc, ts: new Date(T0 + 9_999_000).toISOString(), retrievedTs: new Date(T0 + 9_999_000).toISOString() };
+  assert.equal(fromGovernanceEvent(disc).id, fromGovernanceEvent(later).id, 'restart cannot rewrite history');
+  cleanupDir(d, govB);
+});
+
+test('H6. PENDING -> ACTIVE: discovery sees pre-voting proposals; VOTING_STARTED is real and happens exactly once', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  let phase = 'pending';
+  const isPendingQ = (q) => q.includes('state: "pending"');
+  const fetchImpl = gqlFetch([
+    { match: isPendingQ, reply: () => proposalsReply(phase === 'pending' ? [prop({ state: 'pending' })] : []) },
+    { match: isDiscovery, reply: () => proposalsReply(phase === 'active' ? [prop({ state: 'active' })] : []) },
+    { match: isRefresh, reply: () => proposalsReply([prop({ state: phase === 'pending' ? 'pending' : 'active' })]) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  const gov = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl, now, intervalMs: 3_600_000 });
+  await gov.pollOnce();
+  const disc = linesOf(d, 'PROPOSAL_DISCOVERED');
+  assert.equal(disc.length, 1, 'discovered BEFORE voting starts');
+  assert.equal(disc[0].proposalState, 'pending');
+  assert.equal(linesOf(d, 'VOTING_STARTED').length, 0, 'no voting-start before the provider says active');
+  clock += 60_000;
+  phase = 'active';
+  await gov.pollOnce();
+  assert.equal(linesOf(d, 'VOTING_STARTED').length, 1, 'the ordinary pending->active chronology yields a REAL VOTING_STARTED');
+  clock += 60_000;
+  await gov.pollOnce();
+  assert.equal(linesOf(d, 'VOTING_STARTED').length, 1, 'exactly once');
+  cleanupDir(d, gov);
+});
+
+test('H7. ACTIVE-PROPOSAL CAP: omission is labeled and counted — never a claim of exhaustive coverage', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  const fetchImpl = gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply([prop({ id: 'cap-a' }), prop({ id: 'cap-b' })]) },
+    { match: isRefresh, reply: () => proposalsReply([]) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  const cfg = { governance: { ...GOV_CFG.governance, maxActiveProposals: 1 } };
+  const gov = startGovernance({ log: () => {}, config: cfg, fetchImpl, now, intervalMs: 3_600_000 });
+  await gov.pollOnce();
+  assert.equal(gov._tracked.size, 1, 'cap enforced');
+  assert.equal(gov.counters.proposalsSkippedAtActiveCap, 1, 'skipped count explicit');
+  const ev = linesOf(d, 'PROPOSAL_DISCOVERED')[0];
+  assert.equal(ev.coverage.proposalPages, 'PARTIAL_ACTIVE_PROPOSAL_CAP', 'the cycle is marked PARTIAL');
+  const st = statusOf(d);
+  assert.equal(st.proposalsSkippedAtActiveCap, 1, 'status reports the gap');
+  assert.ok(st.partialCoverageCount >= 1);
+  cleanupDir(d, gov);
+});
+
+test('H8. EXACT CANONICAL CHOICE SET: any extra/duplicate/mismatched choice forces ratios UNKNOWN', () => {
+  const t = (choices, scores) => voteTrajectory(normalizeProposal(prop({ choices, scores, scores_total: scores.reduce((a, b) => a + b, 0) })), T0s);
+  assert.ok(t(['For', 'Against'], [60, 40]).supportRatio === 0.6, 'For/Against => known');
+  assert.ok(t(['For', 'Against', 'Abstain'], [60, 30, 10]).supportRatio === 0.6, 'For/Against/Abstain => known');
+  assert.equal(t(['For', 'Against', 'Other'], [60, 30, 10]).supportRatio, 'UNKNOWN', 'noncanonical extra choice => UNKNOWN');
+  assert.equal(t(['For', 'Yes', 'Against'], [50, 10, 40]).supportRatio, 'UNKNOWN', 'duplicate FOR semantics => UNKNOWN');
+  assert.equal(t(['For', 'Against', 'No'], [50, 40, 10]).supportRatio, 'UNKNOWN', 'duplicate AGAINST semantics => UNKNOWN');
+  const mismatch = voteTrajectory(normalizeProposal(prop({ choices: ['For', 'Against'], scores: [60], scores_total: 60 })), T0s);
+  assert.equal(mismatch.supportRatio, 'UNKNOWN', 'length mismatch => UNKNOWN');
+  // raw observed scores are ALWAYS preserved
+  assert.deepEqual(t(['For', 'Against', 'Other'], [60, 30, 10]).scoresByChoice, { For: 60, Against: 30, Other: 10 });
+});
+
+test('H9. STRICT CONFIG: types enforced, maxMappedSymbols applied, absolute ceiling stands', () => {
+  for (const bad of [
+    { enabled: true, snapshotEnabled: 'yes' },
+    { enabled: true, maxMappedSymbols: 1.5 },
+    { enabled: true, proposalPageSize: 2.5 },
+    { enabled: true, maxMappedSymbols: 100 }, // above the absolute ceiling 64: refused, fail closed
+    { enabled: 'true' },
+  ]) {
+    assert.equal(governanceConfig({ governance: bad }).enabled, false, JSON.stringify(bad));
+  }
+  // maxMappedSymbols actually limits the loaded registry
+  const d = freshDir();
+  const fetchImpl = gqlFetch([{ match: () => true, reply: () => proposalsReply([]) }]);
+  const gov = startGovernance({
+    log: () => {},
+    config: { governance: { ...GOV_CFG.governance, maxMappedSymbols: 1 } },
+    fetchImpl,
+    now: () => T0,
+    intervalMs: 3_600_000,
+  });
+  assert.equal(gov.registry.entries.length, 1, 'configured mapping cap enforced');
+  assert.ok(gov.registry.rejected.length >= 4);
+  cleanupDir(d, gov);
+});
+
+test('H10. FINALIZED STATE IS BOUNDED: hundreds of finished proposals release their heavy state', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  let batch = [];
+  let state = 'active';
+  const fetchImpl = gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply(state === 'active' ? batch : []) },
+    { match: isRefresh, reply: () => proposalsReply(batch.map((p) => ({ ...p, state }))) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  const cfg = { governance: { ...GOV_CFG.governance, maxEventsPerPoll: 200, maxActiveProposals: 20 } };
+  const gov = startGovernance({ log: () => {}, config: cfg, fetchImpl, now, intervalMs: 3_600_000 });
+  for (let round = 0; round < 15; round++) {
+    batch = Array.from({ length: 20 }, (_, i) => prop({ id: `fin-${round}-${i}` }));
+    state = 'active';
+    clock += 60_000;
+    await gov.pollOnce(); // discover 20
+    state = 'closed';
+    clock += 60_000;
+    await gov.pollOnce(); // close + finalize 20
+  }
+  assert.equal(gov.counters.finalizedReleased, 300, 'every finalized proposal released its full state');
+  assert.equal(gov._tracked.size, 0, 'no immortal tracked entries');
+  assert.equal(gov._finalIds.size, 256, 'final-ID dedupe cache hard bounded');
+  assert.equal(gov._pending.length, 0, 'no evidence owed');
+  const st = statusOf(d);
+  assert.equal(st.finalizedReleased, 300);
+  assert.equal(st.finalIdCacheSize, 256);
+  // a recently finalized proposal offered again by the provider is NOT rediscovered
+  const before = eventLines(d).length;
+  batch = [prop({ id: 'fin-14-0' })];
+  state = 'active';
+  clock += 60_000;
+  await gov.pollOnce();
+  assert.equal(eventLines(d).length, before, 'final truth already captured — no rediscovery');
+  cleanupDir(d, gov);
+});
+
+test('H11. TALLY SCAFFOLD TRUTH: key + verified governor => collector-not-implemented, zero tally requests', async () => {
+  const d = freshDir();
+  const SECRET = 'tally-secret-zzz';
+  const governorEntry = { symbol: 'UNI', provider: 'TALLY', governorId: 'eip155:1:0xGovernor', scope: 'TOKEN_GOVERNANCE', verified: true, mappingVersion: 1 };
+  const urls = [];
+  const fetchImpl = async (url, opts) => {
+    urls.push(url);
+    return proposalsReply([]);
+  };
+  const gov = startGovernance({
+    log: () => {},
+    config: GOV_CFG,
+    fetchImpl,
+    now: () => T0,
+    intervalMs: 3_600_000,
+    env: { TALLY_API_KEY: SECRET },
+    registryEntries: [...VERIFIED_MAPPINGS, governorEntry],
+  });
+  await gov.pollOnce();
+  assert.equal(statusOf(d).providers.tally, 'UNAVAILABLE_COLLECTOR_NOT_IMPLEMENTED', 'status never suggests collection will occur');
+  assert.ok(urls.every((u) => !String(u).includes('tally')), 'zero Tally network requests');
+  assert.ok(!readFileSync(path.join(d, 'governance', 'status.json'), 'utf8').includes(SECRET), 'key never persisted');
+  assert.ok(!eventLines(d).some((e) => e.provider === 'TALLY'), 'no fake Tally observation');
+  cleanupDir(d, gov);
+});
+
+test('H12. SOURCE WRITE FAILURE: evidence stays pending and retryable; health degrades; nothing is lost', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  const fetchImpl = gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply([prop({ id: 'wf-1' })]) },
+    { match: isRefresh, reply: () => proposalsReply([prop({ id: 'wf-1' })]) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  // make the events file unwritable by occupying its path with a DIRECTORY
+  mkdirSync(path.join(d, 'governance', 'events.jsonl'), { recursive: true });
+  const gov = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl, now, intervalMs: 3_600_000 });
+  await gov.pollOnce();
+  assert.ok(gov.counters.sourceWriteFailures >= 1, 'append failure counted');
+  assert.equal(gov.counters.eventsEmitted, 0, 'a failed append is NEVER a successful observation');
+  assert.equal(gov._pending.length, 1, 'the evidence is owed, not lost');
+  assert.equal(statusOf(d).status, 'DEGRADED', 'GOV health degrades');
+  // storage recovers; the debt drains
+  rmSync(path.join(d, 'governance', 'events.jsonl'), { recursive: true, force: true });
+  clock += 60_000;
+  await gov.pollOnce();
+  assert.equal(linesOf(d, 'PROPOSAL_DISCOVERED').length, 1, 'the owed discovery ultimately wrote exactly once');
+  assert.equal(gov._pending.length, 0);
+  cleanupDir(d, gov);
+});
+
 test.after(() => rmSync(TEST_DATA, { recursive: true, force: true }));

@@ -121,25 +121,40 @@ export function quorumTruth(p) {
 }
 
 // VOTE TRAJECTORY (pure, descriptive): measurements only — never momentum,
-// never confidence, never a prediction. Support/opposition ratios exist
-// ONLY when the choice labels are exactly canonical For/Against(/Abstain);
-// otherwise the verbatim per-choice scores stand alone.
+// never confidence, never a prediction. GOV-1A: support/opposition ratios
+// exist ONLY when the ENTIRE choice set is canonical — exactly one
+// FOR-class choice, exactly one AGAINST-class choice, at most one
+// ABSTAIN-class choice, NO other/noncanonical choices, no duplicate
+// semantics, and matching choices/scores lengths. Anything else keeps the
+// verbatim per-choice scores and ratios UNKNOWN — a partial recognition
+// of a mixed choice set is a guess, and guesses are refused.
 export function voteTrajectory(p, nowSec, prev = null) {
   if (!p || !Array.isArray(p.choices) || !Array.isArray(p.scores)) return 'UNKNOWN';
   const byChoice = {};
   for (let i = 0; i < p.choices.length; i++) byChoice[p.choices[i]] = p.scores[i] ?? null;
   const total = Number.isFinite(p.scoresTotal) ? p.scoresTotal : null;
-  let forPower = null;
-  let againstPower = null;
-  let abstainPower = null;
+  const forIdx = [];
+  const againstIdx = [];
+  const abstainIdx = [];
+  let otherCount = 0;
   for (let i = 0; i < p.choices.length; i++) {
     const label = String(p.choices[i]).trim().toLowerCase();
-    if (CANONICAL_FOR.has(label)) forPower = p.scores[i] ?? null;
-    else if (CANONICAL_AGAINST.has(label)) againstPower = p.scores[i] ?? null;
-    else if (CANONICAL_ABSTAIN.has(label)) abstainPower = p.scores[i] ?? null;
+    if (CANONICAL_FOR.has(label)) forIdx.push(i);
+    else if (CANONICAL_AGAINST.has(label)) againstIdx.push(i);
+    else if (CANONICAL_ABSTAIN.has(label)) abstainIdx.push(i);
+    else otherCount++;
   }
+  const canonicalSet =
+    p.choices.length === p.scores.length &&
+    forIdx.length === 1 &&
+    againstIdx.length === 1 &&
+    abstainIdx.length <= 1 &&
+    otherCount === 0;
+  const forPower = canonicalSet ? p.scores[forIdx[0]] ?? null : null;
+  const againstPower = canonicalSet ? p.scores[againstIdx[0]] ?? null : null;
+  const abstainPower = canonicalSet && abstainIdx.length === 1 ? p.scores[abstainIdx[0]] ?? null : null;
   const ratios =
-    forPower !== null && againstPower !== null && total > 0
+    canonicalSet && Number.isFinite(forPower) && Number.isFinite(againstPower) && total > 0
       ? { supportRatio: Number((forPower / total).toFixed(6)), oppositionRatio: Number((againstPower / total).toFixed(6)) }
       : { supportRatio: 'UNKNOWN', oppositionRatio: 'UNKNOWN' };
   return {

@@ -119,6 +119,55 @@ config bounds fail closed: the sensor disables itself and says why.
   Deterministic identity (source-record fingerprint) makes replay
   deduplicate while any meaningful state change mints a new identity.
 
+## 7b. Collector truth hardening (GOV-1A)
+
+- **Durable acknowledgement.** A governance event counts only after its
+  source JSONL append actually succeeded. The per-poll event cap and
+  write failures POSTPONE evidence into a bounded pending queue (512
+  entries; snapshot-kind entries are evicted before lifecycle evidence)
+  — they never erase it, and proposal state/finality never advances past
+  evidence that was neither written nor safely queued. A proposal is
+  acknowledged final only after its final evidence is appended; only then
+  is its heavy state released into a compact bounded final-ID cache
+  (256 ids) that also prevents rediscovery.
+- **Spacing is not budget.** Minimum request spacing decides WHEN a
+  permitted request happens (bounded waits); only the hourly budget and
+  backoff deny. Partial vote evidence already retrieved is kept and
+  described as PARTIAL with its exact stop reason (PAGE_LIMIT,
+  REQUEST_BUDGET, BACKOFF_ACTIVE, PROVIDER_ERROR); UNAVAILABLE means
+  nothing usable was retrieved.
+- **Restart-safe.** A small bounded atomic checkpoint
+  (`data/governance/checkpoint.json`: per-proposal state/fingerprint/
+  cadence/measured tallies, pending evidence, final-ID cache) survives
+  restarts, so the same proposal is never rediscovered and trajectory
+  deltas restore truthfully. A malformed checkpoint degrades and starts
+  empty — never guessed, never fatal to the rest of Serpent. Source
+  events carry deterministic `sourceEventId` values (proposal + lifecycle,
+  or fingerprint + retrieval for snapshots), so a restart can never mint
+  a new canonical Memory identity for the same provider event, while a
+  genuinely changed state remains a genuinely new observation.
+- **Pending proposals are observed.** Discovery covers Snapshot's
+  `pending` state as well as `active`, so the ordinary pending → active
+  chronology produces a real VOTING_STARTED.
+- **Cap honesty.** Proposals skipped at the active-proposal cap mark the
+  cycle `PARTIAL_ACTIVE_PROPOSAL_CAP` with explicit
+  proposalsObserved/proposalsSkippedAtActiveCap counters — a complete
+  provider page never implies complete processing.
+- **Exact canonical choice set.** Support/opposition ratios require the
+  ENTIRE choice set to be canonical: exactly one FOR-class label, exactly
+  one AGAINST-class label, at most one ABSTAIN-class label, no other
+  choices, no duplicate semantics, matching choices/scores lengths.
+  Anything else keeps verbatim scoresByChoice and ratios UNKNOWN.
+- **Strict config.** Booleans must be booleans; integer bounds must be
+  positive integers inside documented hard maxima;
+  `governance.maxMappedSymbols` is enforced on the loaded registry under
+  the absolute 64 ceiling. Malformed config fails GOV closed; nothing
+  else in Serpent fails.
+- **Tally is scaffolding.** No Tally collector exists in GOV-1: with a
+  key and a verified governor mapping the status truthfully reads
+  `UNAVAILABLE_COLLECTOR_NOT_IMPLEMENTED` — never a suggestion that
+  collection will occur.
+
 ## 8. Point-in-time truth
 
 `ts`/`retrievedTs` on every source record mark when Serpent could actually

@@ -260,8 +260,12 @@ export function fromGovernanceEvent(rec, observedTs = nowIso()) {
       mappingVersion: rec.mappingVersion ?? null,
       coverage: rec.coverage ?? null,
     },
-    // every observation of ONE proposal clusters under a stable event id
+    // every observation of ONE proposal clusters under a stable event id;
+    // GOV-1A: the collector's deterministic sourceEventId anchors canonical
+    // identity, so a restart re-retrieving the same provider event never
+    // mints a second memory (fingerprint remains the fallback)
     correlation: { eventId: rec.proposalId ? `${rec.provider}:${rec.spaceId ?? rec.governorId ?? '?'}:${rec.proposalId}` : null },
+    sourceEventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null,
     identity: sourceFingerprint(rec, 'governance/events.jsonl'),
   });
 }

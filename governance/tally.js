@@ -19,10 +19,15 @@ export function tallyCredential(env = process.env) {
   return typeof key === 'string' && key.length > 0 ? key : null;
 }
 
+// GOV-1A truth: the Tally COLLECTOR is not implemented in GOV-1 — this
+// module is scaffolding (credential/status/GraphQL/normalizer helpers).
+// Even a key plus a verified governor mapping performs ZERO Tally
+// collection today, and the status must say exactly that rather than
+// suggesting collection will occur.
 export function tallyStatus(env = process.env, registry = null) {
   if (!tallyCredential(env)) return 'UNAVAILABLE_MISSING_CREDENTIAL';
   if (!registry || registry.tallyGovernors.length === 0) return 'IDLE_NO_VERIFIED_GOVERNOR_MAPPING';
-  return 'CONFIGURED';
+  return 'UNAVAILABLE_COLLECTOR_NOT_IMPLEMENTED';
 }
 
 // One bounded Tally GraphQL POST. Callers MUST have checked the credential;
