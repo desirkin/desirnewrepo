@@ -28,9 +28,10 @@ const RECENT_CACHE_SIZE = 500; // bounded in-RAM tail
 // ATTENTION-1A: bounded read-side projection of QUALIFYING attention
 // envelopes per symbol (see memory/attention.js). Display continuity must not
 // depend on how many unrelated records arrived after a valid attention event,
-// and must not rescan the events file on every UI poll. On overflow the
-// symbol with the stalest NEWEST entry is evicted — a small, honest display
-// bound, never a rewrite of canonical Memory.
+// and must not rescan the events file on every UI poll. On overflow of the
+// symbol cap, FUTURE-ONLY symbols are evicted first (ATTENTION-1D), then the
+// symbol with the stalest NEWEST entry — a small, honest display bound,
+// never a rewrite of canonical Memory.
 // ATTENTION-1B: a single newest-record slot was insufficient — the newest
 // record is not necessarily the newest VALID record for the caller's window.
 // ATTENTION-1C: currently-usable history and FUTURE-DATED evidence must not
@@ -237,13 +238,36 @@ export class MemoryStore {
       }
       this.attentionProjection.set(env.symbol, lanes);
       if (this.attentionProjection.size > ATTENTION_PROJECTION_MAX_SYMBOLS) {
-        // evict the symbol whose best (newest) entry across lanes is stalest
+        // ATTENTION-1D global eviction rule: CURRENT TRUTH MUST NOT BE
+        // SACRIFICED TO CURRENTLY UNUSABLE FUTURE EVIDENCE. A symbol is
+        // FUTURE-ONLY when every retained record is still beyond the
+        // future allowance of the projection clock — judged by TIMESTAMP
+        // eligibility, never by lane name, so matured future evidence
+        // still parked in the fut lane counts as currently usable. When
+        // the cap is exceeded, future-only symbols are evicted FIRST;
+        // only when none exist may a usable-bearing symbol be evicted.
+        // Within a category the existing deterministic rule applies: the
+        // symbol whose best (newest) entry is stalest goes.
+        const usable = (e) => e.ts * 1000 <= nowMs + ATTENTION_FUTURE_GUARD_MS;
         const best = ({ hist, fut }) => (hist[0] && fut[0] ? (attentionWinnerOrder(hist[0], fut[0]) <= 0 ? hist[0] : fut[0]) : hist[0] ?? fut[0]);
-        let stalest = null;
+        let victim = null, victimFutureOnly = false;
         for (const [sym, l] of this.attentionProjection) {
-          if (!stalest || attentionWinnerOrder(best(l), best(this.attentionProjection.get(stalest))) > 0) stalest = sym;
+          const futureOnly = !l.hist.some(usable) && !l.fut.some(usable);
+          if (!victim) {
+            victim = sym;
+            victimFutureOnly = futureOnly;
+            continue;
+          }
+          if (futureOnly !== victimFutureOnly) {
+            if (futureOnly) {
+              victim = sym; // future-only outranks usable-bearing for eviction
+              victimFutureOnly = true;
+            }
+            continue;
+          }
+          if (attentionWinnerOrder(best(l), best(this.attentionProjection.get(victim))) > 0) victim = sym;
         }
-        this.attentionProjection.delete(stalest);
+        this.attentionProjection.delete(victim);
       }
     }
   }

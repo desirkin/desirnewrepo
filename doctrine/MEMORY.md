@@ -249,7 +249,15 @@ clock — supplied deterministically in tests, wall clock in production),
 Memory never altered, no per-poll file scans. Future overflow keeps the
 lane's newest records and can never touch history; when the clock
 advances, a retained future record graduates and competes normally under
-the same winner rule. The durable RUMINT nomination branch keeps its
+the same winner rule. At the GLOBAL symbol cap (ATTENTION-1D), current
+truth is never sacrificed to currently unusable future evidence:
+FUTURE-ONLY symbols — every retained record still beyond the future
+allowance, judged by timestamp eligibility against the projection clock,
+never by lane name — are evicted first, and only when none exist may a
+symbol carrying currently usable attention be evicted; within a category
+the deterministic stalest-best-entry rule decides. Bounded future
+retention is accepted: future evidence may use spare memory, but may not
+push out a valid memory Serpent can use right now. The durable RUMINT nomination branch keeps its
 cheap LIKE prefilter and then inspects the ACTUAL canonical payload.type
 in SQL, guarded by CASE WHEN envelope IS JSON (PostgreSQL 16) so a
 corrupt row fails dark out of that branch instead of crashing the query;

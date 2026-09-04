@@ -392,6 +392,72 @@ test('1C-3. LANE TRANSITION: matured future evidence graduates and the winner ru
   assert.equal(winQ(store, clock)[0].id, expected.id, 'same deterministic winner after the lane transition');
 });
 
+// ---------------- ATTENTION-1D: global future-poisoning closeout ----------------
+
+test('1D-1. SIXTY-FOUR FUTURE-ONLY SYMBOLS cannot evict valid KERNEL history at the global cap', async () => {
+  const store = freshStore();
+  const valid = ripple('KERNEL', NOW - 90 * 60_000);
+  assert.equal(store.append(valid).accepted, true);
+  // 64 DISTINCT symbols carrying ONLY future attention (all beyond now + 60s)
+  for (let i = 0; i < 64; i++) {
+    assert.equal(store.append(futureRipple(`F${i}`, NOW + 5 * 60_000 + i * 1000)).accepted, true);
+  }
+  assert.ok(store.attentionProjection.size <= 64, 'projection remains within its hard symbol limit');
+  assert.ok(store.attentionProjection.has('KERNEL'), 'KERNEL remains retained');
+  const got = winQ(store);
+  assert.equal(got.length, 1, 'no future-only symbol becomes current prey');
+  assert.equal(got[0].id, valid.id, 'current attention still returns KERNEL');
+  const d = seedDir();
+  const snap = await attentionSnapshot({ now: NOW, memorySource: sourceFor(localView(store)) });
+  assert.equal(snap.orbit.find((e) => e.symbol === 'KERNEL')?.tier, 4);
+  restoreDir(d);
+});
+
+test('1D-2. MATURED future evidence is protected as currently usable at the cap', () => {
+  let clock = NOW;
+  const store = freshStore(() => clock);
+  store.append(ripple('KERNEL', NOW - 90 * 60_000));
+  // ten future-only symbols (they will mature when the clock advances)
+  const matured = [];
+  for (let i = 0; i < 10; i++) matured.push(futureRipple(`M${i}`, NOW + 5 * 60_000 + i * 1000));
+  for (const e of matured) assert.equal(store.append(e).accepted, true);
+  // their time arrives — timestamps now eligible even though the records
+  // still physically sit in the future lane
+  clock = NOW + 20 * 60_000;
+  // flood with NEW future-only symbols far beyond the advanced clock,
+  // enough to exceed the global cap several times over
+  for (let i = 0; i < 60; i++) {
+    assert.equal(store.append(futureRipple(`G${i}`, clock + 10 * 60_000 + i * 1000)).accepted, true);
+  }
+  assert.ok(store.attentionProjection.size <= 64, 'bounded');
+  assert.ok(store.attentionProjection.has('KERNEL'), 'history survives');
+  for (let i = 0; i < 10; i++) {
+    assert.ok(store.attentionProjection.has(`M${i}`), `matured M${i} no longer sits in the future-only eviction class`);
+  }
+  // normal newest-valid winner rules apply to the matured evidence
+  const got = winQ(store, clock);
+  assert.equal(got[0].id, matured[9].id, 'newest matured record wins');
+  assert.ok(got.some((e) => e.symbol === 'KERNEL'), 'KERNEL still eligible behind it');
+});
+
+test('1D-3. MIXED CAP: future-only symbols are evicted before history AND matured-future symbols', () => {
+  let clock = NOW;
+  const store = freshStore(() => clock);
+  // 30 currently usable history symbols
+  for (let i = 0; i < 30; i++) store.append(ripple(`H${i}`, NOW - 30 * 60_000 + i * 1000));
+  // 20 future symbols that will mature
+  for (let i = 0; i < 20; i++) store.append(futureRipple(`M${i}`, NOW + 5 * 60_000 + i * 1000));
+  clock = NOW + 20 * 60_000; // the M symbols mature (still in their future lane)
+  // 20 still-future-only symbols push the projection past the 64-symbol cap
+  for (let i = 0; i < 20; i++) store.append(futureRipple(`S${i}`, clock + 10 * 60_000 + i * 1000));
+  assert.equal(store.attentionProjection.size, 64, 'projection remains bounded');
+  for (let i = 0; i < 30; i++) assert.ok(store.attentionProjection.has(`H${i}`), `history H${i} survives`);
+  for (let i = 0; i < 20; i++) assert.ok(store.attentionProjection.has(`M${i}`), `matured M${i} survives`);
+  // exactly the six stalest future-only symbols were evicted, deterministically
+  for (let i = 0; i < 6; i++) assert.ok(!store.attentionProjection.has(`S${i}`), `future-only S${i} evicted first`);
+  for (let i = 6; i < 20; i++) assert.ok(store.attentionProjection.has(`S${i}`), `retained future S${i} still waiting`);
+});
+
 // ---------------- durable PostgreSQL integration (own schema) ----------------
 if (!TEST_URL) {
   test('20. ATTENTION-1A postgres integration', (t) => t.skip('no PERSIST_TEST_DATABASE_URL / DATABASE_URL configured'));
