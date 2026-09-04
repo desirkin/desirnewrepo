@@ -45,8 +45,8 @@ import {
 } from './snapshot.js';
 import { tallyStatus } from './tally.js';
 
-export const GOVERNANCE_COLLECTOR_VERSION = 'GOV-1B';
-export const GOV_CHECKPOINT_VERSION = 2;
+export const GOVERNANCE_COLLECTOR_VERSION = 'GOV-1C';
+export const GOV_CHECKPOINT_VERSION = 3; // GOV-1C: full provider proposal keys
 // startup reconciliation reads at most this much of the source log tail —
 // the checkpoint saves every poll, so a larger lag is not reachable in
 // ordinary operation (documented limitation if it ever were)
@@ -215,6 +215,79 @@ export function governanceEventIdentity(basis) {
   return `govev-${createHash('sha1').update(canonicalJson(basis)).digest('hex')}`;
 }
 
+// GOV-1C §16-17 — A PROPOSAL ID IS NOT AN IDENTITY WITHOUT ITS GOVERNANCE
+// ENTITY. All internal collector state (tracked, final cache, pending meta,
+// checkpoint entries, discovery dedupe, finalization, reconciliation) keys
+// on the FULL provider identity. JSON-array encoding is injective — two
+// spaces returning the same proposalId can never collapse. The raw
+// proposalId stays preserved in every record as provider evidence.
+export function proposalKey(provider, entityId, proposalId) {
+  return JSON.stringify([provider, entityId, proposalId]);
+}
+const keyOf = (rec) => proposalKey(rec.provider, rec.spaceId ?? rec.governorId ?? '', rec.proposalId);
+const parseKey = (k) => {
+  try {
+    const a = JSON.parse(k);
+    return Array.isArray(a) && a.length === 3 && a.every((s) => typeof s === 'string') ? a : null;
+  } catch {
+    return null;
+  }
+};
+
+// GOV-1C §11 — THE ONE GOVERNANCE SOURCE VALIDATOR. Shared by live event
+// preparation, checkpoint pending restore, and source-log reconciliation:
+// parseable JSON is NOT verified evidence. Returns an error string or null.
+const LIFECYCLES = new Set(['PROPOSAL_DISCOVERED', 'VOTING_STARTED', 'STATE_CHANGED', 'VOTING_ENDED', 'FINAL_TALLY_OBSERVED', 'PROPOSAL_CANCELLED']);
+const EMIT_REASONS = new Set(['LIFECYCLE_TRANSITION', 'TALLY_CHANGED', 'ACTIVE_SNAPSHOT']);
+const PROVIDERS = new Set(['SNAPSHOT', 'TALLY']);
+const isoOk = (s) => typeof s === 'string' && Number.isFinite(Date.parse(s));
+const nonNegOrNull = (v) => v === null || v === undefined || (Number.isFinite(v) && v >= 0);
+export function validateGovernanceSourceRecord(rec, { requireSeq = false } = {}) {
+  if (!rec || typeof rec !== 'object') return 'record is not an object';
+  if (rec.type !== 'GOVERNANCE_OBSERVATION') return 'uncontrolled event type';
+  if (!PROVIDERS.has(rec.provider)) return 'unknown provider';
+  const entityId = rec.spaceId ?? rec.governorId;
+  if (typeof entityId !== 'string' || !entityId.length || entityId.length > 128) return 'governance entity identity missing/unbounded';
+  if (typeof rec.proposalId !== 'string' || !rec.proposalId.length || rec.proposalId.length > 256) return 'proposal identity missing/unbounded';
+  if (!isoOk(rec.ts) || !isoOk(rec.retrievedTs)) return 'timestamps invalid';
+  if (typeof rec.proposalState !== 'string' || !rec.proposalState.length || rec.proposalState.length > 32) return 'proposal state invalid';
+  const lc = rec.lifecycleTransition;
+  if (lc !== null && !LIFECYCLES.has(lc)) return 'uncontrolled lifecycle transition';
+  if (!EMIT_REASONS.has(rec.emitReason)) return 'uncontrolled emit reason';
+  if ((lc !== null) !== (rec.emitReason === 'LIFECYCLE_TRANSITION')) return 'lifecycle/emitReason inconsistent';
+  // provider semantics: finalizing/state consistency
+  if (lc === 'FINAL_TALLY_OBSERVED' && rec.proposalState !== 'closed') return 'final tally requires provider state closed';
+  if (lc === 'PROPOSAL_CANCELLED' && rec.proposalState !== 'cancelled') return 'cancellation requires provider state cancelled';
+  if (lc === 'VOTING_STARTED' && rec.proposalState !== 'active') return 'voting start requires provider state active';
+  if (lc === 'VOTING_ENDED' && rec.proposalState !== 'closed') return 'voting end requires provider state closed';
+  if (typeof rec.stateFingerprint !== 'string' || !rec.stateFingerprint.length) return 'state fingerprint missing';
+  if (requireSeq && (!Number.isInteger(rec.seq) || rec.seq <= 0)) return 'sequence invalid';
+  // numeric truth invariants hold in the durable record too
+  const vt = rec.voteTotals;
+  if (vt !== undefined && vt !== null) {
+    if (typeof vt !== 'object') return 'voteTotals invalid';
+    if (!nonNegOrNull(vt.scoresTotal)) return 'voteTotals.scoresTotal violates numeric truth';
+    if (!nonNegOrNull(vt.voteCount)) return 'voteTotals.voteCount violates numeric truth';
+    if (vt.scores !== null && vt.scores !== undefined && (!Array.isArray(vt.scores) || !vt.scores.every((s) => nonNegOrNull(s)))) {
+      return 'voteTotals.scores violate numeric truth';
+    }
+  }
+  // the recorded identity must MATCH its canonical basis — a copied or
+  // fabricated sourceEventId cannot impersonate real evidence
+  const expected = governanceEventIdentity({
+    provider: rec.provider,
+    entityId,
+    proposalId: rec.proposalId,
+    kind: lc ? 'LIFECYCLE' : 'SNAPSHOT',
+    lifecycle: lc ?? null,
+    state: rec.proposalState,
+    stateFingerprint: rec.stateFingerprint,
+    observedTs: rec.retrievedTs,
+  });
+  if (rec.sourceEventId !== expected) return 'sourceEventId does not match its canonical identity basis';
+  return null;
+}
+
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export function startGovernance({
@@ -280,8 +353,14 @@ export function startGovernance({
   let reconciledEvents = 0;
   let localCheckpointFailures = 0;
   let durableCheckpointFailures = 0;
+  let durableReadFailures = 0; // GOV-1C: a read failure is NEVER "no checkpoint"
   let lastCheckpointPersisted = true; // at least one representation (local or durable) succeeded
   let lastDurableCheckpointTs = null;
+  // GOV-1C §5: LOCAL_PROCESS_DURABILITY vs DEPLOYMENT_DURABILITY are
+  // different truths — a local VM copy does not survive a republish
+  let durableSaveState = checkpointStore ? 'NOT_YET_SAVED' : 'NOT_CONFIGURED';
+  let initState = 'PENDING'; // PENDING | READY | WITHHELD_DURABLE_UNAVAILABLE
+  let sourceIntegrityErrors = 0; // parseable-but-invalid source/pending records withheld
   let lastEvidenceDrop = null; // { kind, reason, ts } — explicit, counted data loss
 
   // ---------- restart checkpoint (GOV-1A §7 / GOV-1B §7-9) ----------
@@ -291,20 +370,32 @@ export function startGovernance({
   const validEntry = (e) =>
     e && typeof e === 'object' && typeof e.state === 'string' && typeof e.fingerprint === 'string' &&
     Number.isFinite(e.lastSnapshotEmitMs) && (e.measured === null || typeof e.measured === 'object') &&
-    typeof e.spaceId === 'string' && typeof (e.finalObserved ?? false) === 'boolean';
+    typeof e.spaceId === 'string' && typeof e.proposalId === 'string' && typeof (e.finalObserved ?? false) === 'boolean';
+  // GOV-1C §8: a restored pending entry must be a legitimate GOVERNANCE
+  // source observation under the SAME contract the live collector writes,
+  // and its metadata must be consistent with the record it claims to carry.
+  function pendingEntryError(p) {
+    if (!p || typeof p !== 'object' || !p.record || typeof p.record !== 'object' || !p.meta || typeof p.meta !== 'object') return 'pending entry shape invalid';
+    const bad = validateGovernanceSourceRecord(p.record);
+    if (bad) return `pending record invalid: ${bad}`;
+    const rec = p.record;
+    if (p.meta.key !== keyOf(rec)) return 'pending metadata proposal identity does not match its record';
+    const expectedKind = rec.lifecycleTransition ? 'LIFECYCLE' : 'SNAPSHOT';
+    if (p.meta.kind !== expectedKind) return 'pending metadata kind does not match its record';
+    const genuinelyFinalizing = rec.lifecycleTransition === 'FINAL_TALLY_OBSERVED' || rec.lifecycleTransition === 'PROPOSAL_CANCELLED';
+    if (p.meta.finalizes === true && !genuinelyFinalizing) return 'pending metadata claims finalization for a non-finalizing transition';
+    return null;
+  }
   function validateCheckpoint(cp) {
     if (!cp || typeof cp !== 'object') return 'checkpoint missing/not an object';
     if (cp.version !== GOV_CHECKPOINT_VERSION) return `checkpoint version ${cp.version} unsupported`;
     if (typeof cp.proposals !== 'object' || cp.proposals === null) return 'proposals invalid';
-    if (!Array.isArray(cp.finalIds) || cp.finalIds.some((id) => typeof id !== 'string')) return 'finalIds invalid';
+    if (!Array.isArray(cp.finalIds) || cp.finalIds.some((id) => typeof id !== 'string' || !parseKey(id))) return 'finalIds invalid';
     if (!Array.isArray(cp.pending)) return 'pending invalid';
     if (!Number.isInteger(cp.lastSeq) || cp.lastSeq < 0) return 'lastSeq cursor invalid';
     if (typeof cp.savedTs !== 'string') return 'savedTs invalid';
-    for (const [id, e] of Object.entries(cp.proposals)) {
-      if (typeof id !== 'string' || !validEntry(e)) return `proposal entry ${id} invalid`;
-    }
-    for (const p of cp.pending) {
-      if (!p || typeof p !== 'object' || !p.record || typeof p.record !== 'object' || !p.meta || typeof p.meta !== 'object') return 'pending entry invalid';
+    for (const [key, e] of Object.entries(cp.proposals)) {
+      if (!parseKey(key) || !validEntry(e)) return `proposal entry ${key} invalid`;
     }
     return null;
   }
@@ -312,9 +403,20 @@ export function startGovernance({
     tracked.clear();
     finalIds.clear();
     pendingEvents.length = 0;
-    for (const [id, e] of Object.entries(cp.proposals).slice(0, cfg.maxActiveProposals)) tracked.set(id, { finalObserved: false, ...e });
-    for (const id of cp.finalIds.slice(-finalIdCacheMax)) finalIds.set(id, true);
-    for (const p of cp.pending.slice(0, maxPendingEvents)) pendingEvents.push(p);
+    for (const [key, e] of Object.entries(cp.proposals).slice(0, cfg.maxActiveProposals)) tracked.set(key, { finalObserved: false, ...e });
+    for (const key of cp.finalIds.slice(-finalIdCacheMax)) finalIds.set(key, true);
+    // pending evidence re-earns its way in through the full source contract;
+    // an invalid entry is withheld and can neither append nor finalize
+    for (const p of cp.pending.slice(0, maxPendingEvents)) {
+      const bad = pendingEntryError(p);
+      if (bad) {
+        sourceIntegrityErrors++;
+        checkpointInvalid = true;
+        log(`[${nowIso()}] GOVERNANCE checkpoint pending entry WITHHELD (DEGRADED): ${bad}`);
+        continue;
+      }
+      pendingEvents.push(p);
+    }
     seqCounter = cp.lastSeq;
   }
   function buildCheckpointState() {
@@ -342,13 +444,26 @@ export function startGovernance({
     const localOk = saveCheckpointLocal(cp);
     let durableOk = false;
     if (checkpointStore) {
+      let res;
       try {
-        durableOk = (await checkpointStore.save(cp))?.durable === true;
+        res = await checkpointStore.save(cp);
       } catch {
-        durableOk = false;
+        res = { durable: false, reason: 'UNAVAILABLE' };
       }
-      if (durableOk) lastDurableCheckpointTs = now();
-      else durableCheckpointFailures++;
+      durableOk = res?.durable === true;
+      if (durableOk) {
+        lastDurableCheckpointTs = now();
+        durableSaveState = 'DURABLE';
+      } else if (res?.reason === 'NOT_CONFIGURED') {
+        durableSaveState = 'NOT_CONFIGURED'; // no durable core exists — local-only development
+      } else {
+        // GOV-1C §4-5: the local VM copy protects a process restart, NOT a
+        // republish. A failed durable save degrades GOV even when the local
+        // atomic checkpoint succeeded and even with zero pending events.
+        durableCheckpointFailures++;
+        durableSaveState = 'AT_RISK';
+        log(`[${nowIso()}] GOVERNANCE durable checkpoint save FAILED — deployment durability AT RISK (local copy only)`);
+      }
     }
     // HONEST DURABILITY LIMIT (GOV-1B §14): restart-safe pending debt is
     // guaranteed only once at least one durable representation succeeded.
@@ -393,32 +508,48 @@ export function startGovernance({
       return [];
     }
   }
+  // GOV-1C §10-11: reconciliation trusts NOTHING that fails the full source
+  // contract. An invalid parseable line is counted and withheld — it cannot
+  // advance the trusted cursor, settle pending debt, finalize a proposal,
+  // or enter the tracked/final caches. Returns how many VALID records were
+  // applied (an authority signal for withheld-init decisions).
   function reconcileFromSource() {
     const replayedIds = new Set();
+    let applied = 0;
     const records = readSourceTail()
-      .filter((r) => r && r.type === 'GOVERNANCE_OBSERVATION' && typeof r.proposalId === 'string' && Number.isInteger(r.seq) && r.seq > seqCounter)
+      .filter((r) => r && typeof r === 'object' && Number.isInteger(r.seq) && r.seq > seqCounter)
       .sort((a, b) => a.seq - b.seq);
     for (const r of records) {
+      const bad = validateGovernanceSourceRecord(r, { requireSeq: true });
+      if (bad) {
+        sourceIntegrityErrors++;
+        log(`[${nowIso()}] GOVERNANCE source record WITHHELD at reconciliation (DEGRADED): ${bad}`);
+        continue; // the poison advances nothing
+      }
       seqCounter = Math.max(seqCounter, r.seq);
       reconciledEvents++;
-      if (typeof r.sourceEventId === 'string') replayedIds.add(r.sourceEventId);
+      applied++;
+      replayedIds.add(r.sourceEventId);
+      const key = keyOf(r);
       const lc = r.lifecycleTransition;
       if (lc === 'FINAL_TALLY_OBSERVED' || lc === 'PROPOSAL_CANCELLED') {
-        finalizeProposal(r.proposalId); // final truth already durably appended
+        finalizeProposal(key); // final truth already durably appended
         continue;
       }
-      if (finalIds.has(r.proposalId)) continue;
-      const prev = tracked.get(r.proposalId);
-      tracked.set(r.proposalId, {
-        state: typeof r.proposalState === 'string' ? r.proposalState : prev?.state ?? 'active',
-        spaceId: typeof r.spaceId === 'string' ? r.spaceId : prev?.spaceId ?? '',
-        fingerprint: typeof r.stateFingerprint === 'string' ? r.stateFingerprint : prev?.fingerprint ?? '',
+      if (finalIds.has(key)) continue;
+      const prev = tracked.get(key);
+      tracked.set(key, {
+        state: r.proposalState,
+        spaceId: r.spaceId ?? r.governorId ?? '',
+        proposalId: r.proposalId,
+        fingerprint: r.stateFingerprint,
         lastSnapshotEmitMs: Date.parse(r.ts) || prev?.lastSnapshotEmitMs || 0,
         measured: { scoresTotal: r.voteTotals?.scoresTotal ?? null, voteCount: r.voteTotals?.voteCount ?? null },
         finalObserved: false,
       });
     }
-    // owed evidence the log already proves durable is no longer owed
+    // owed evidence the log already proves durable is no longer owed —
+    // settled ONLY by VALIDATED replayed identities, never a copied string
     if (replayedIds.size) {
       const before = pendingEvents.length;
       const kept = pendingEvents.filter((p) => !replayedIds.has(p.record?.sourceEventId));
@@ -426,29 +557,36 @@ export function startGovernance({
       pendingEvents.push(...kept);
       if (before !== pendingEvents.length) log(`[${nowIso()}] GOVERNANCE reconciliation settled ${before - pendingEvents.length} already-appended pending event(s)`);
     }
+    return applied;
   }
 
+  // GOV-1C §2: "no checkpoint" and "I could not read the checkpoint" are
+  // NOT the same truth. Returns true when polling may proceed; false means
+  // WITHHELD — no provider polling, init retried on the next tick.
   async function ensureInit() {
-    if (initialized) return;
-    initialized = true;
-    // durable checkpoint is the restart/redeploy authority when configured
-    // and valid; the local atomic file is the fast fallback copy
+    if (initialized) return true;
     let adopted = false;
+    let durableOutcome = 'NOT_CONFIGURED';
     if (checkpointStore) {
+      let res;
       try {
-        const cp = await checkpointStore.load();
-        if (cp !== null) {
-          const bad = validateCheckpoint(cp);
-          if (bad) {
-            checkpointInvalid = true;
-            log(`[${nowIso()}] GOVERNANCE durable checkpoint withheld (DEGRADED): ${bad}`);
-          } else {
-            adoptCheckpoint(cp);
-            adopted = true;
-          }
-        }
+        res = await checkpointStore.load();
       } catch (err) {
-        log(`[${nowIso()}] GOVERNANCE durable checkpoint load failed (falling back): ${err.message}`);
+        res = { outcome: 'UNAVAILABLE', error: err.message };
+      }
+      durableOutcome = res?.outcome ?? 'UNAVAILABLE';
+      if (durableOutcome === 'LOADED') {
+        const bad = validateCheckpoint(res.state);
+        if (bad) {
+          checkpointInvalid = true;
+          log(`[${nowIso()}] GOVERNANCE durable checkpoint withheld (DEGRADED): ${bad}`);
+        } else {
+          adoptCheckpoint(res.state);
+          adopted = true;
+        }
+      } else if (durableOutcome === 'UNAVAILABLE') {
+        durableReadFailures++;
+        log(`[${nowIso()}] GOVERNANCE durable checkpoint UNREADABLE (${res?.error ?? 'unknown'}) — this is NOT "no checkpoint"`);
       }
     }
     if (!adopted && existsSync(checkpointFile())) {
@@ -465,7 +603,18 @@ export function startGovernance({
     }
     // the checkpoint may LAG the source log; it may not rewrite what the
     // log already proved — reconcile forward before any provider polling
-    reconcileFromSource();
+    const applied = reconcileFromSource();
+    if (durableOutcome === 'UNAVAILABLE' && !adopted && applied === 0 && tracked.size === 0 && finalIds.size === 0 && pendingEvents.length === 0) {
+      // the durable authority is unreadable and NO other validated authority
+      // proved state: FAIL DARK and WITHHOLD polling rather than rediscover
+      // history from zero. Initialization retries on the next tick.
+      initState = 'WITHHELD_DURABLE_UNAVAILABLE';
+      log(`[${nowIso()}] GOVERNANCE polling WITHHELD — historical authority unavailable; retrying initialization`);
+      return false;
+    }
+    initialized = true;
+    initState = 'READY';
+    return true;
   }
 
   // ---------- durable ACK + bounded pending debt (GOV-1A §1-3, §24) ----------
@@ -493,10 +642,10 @@ export function startGovernance({
   }
 
   function ackMeta(meta) {
-    if (meta.finalizes) finalizeProposal(meta.proposalId);
+    if (meta.finalizes) finalizeProposal(meta.key);
   }
 
-  function finalizeProposal(proposalId) {
+  function finalizeProposal(key) {
     // final truth safely appended: release the heavy tracked state, keep a
     // compact bounded final-ID record for restart/dedupe (GOV-1A §18).
     // The cache is BOUNDED, so its guarantee is bounded too: a proposal is
@@ -505,8 +654,8 @@ export function startGovernance({
     // anyway. If a provider resurfaces one after eviction, it is treated as
     // a new re-observed fact with its own honest identity — old canonical
     // history is never overwritten and no id/content conflict can result.
-    if (tracked.delete(proposalId)) counters.finalizedReleased++;
-    finalIds.set(proposalId, true);
+    if (tracked.delete(key)) counters.finalizedReleased++;
+    finalIds.set(key, true);
     while (finalIds.size > finalIdCacheMax) finalIds.delete(finalIds.keys().next().value);
   }
 
@@ -519,8 +668,17 @@ export function startGovernance({
     counters.eventsDroppedAtPendingCap++;
     lastEvidenceDrop = { kind, reason: 'PENDING_CAP', ts: new Date(now()).toISOString() };
   }
-  // returns 'ACKED' | 'QUEUED' | 'DROPPED'
+  // returns 'ACKED' | 'QUEUED' | 'DROPPED' | 'CANCELLED_STOPPED' | 'WITHHELD_INVALID'
   function emitObservation(record, meta) {
+    if (stopped) return 'CANCELLED_STOPPED'; // GOV-1C §14: post-stop work is inert, never new evidence
+    // live self-check against the one source contract: a record this
+    // collector cannot itself validate must never reach the truth log
+    const bad = validateGovernanceSourceRecord(record);
+    if (bad) {
+      sourceIntegrityErrors++;
+      log(`[${nowIso()}] GOVERNANCE live record WITHHELD (collector bug guard): ${bad}`);
+      return 'WITHHELD_INVALID';
+    }
     if (tryAppend(record)) {
       ackMeta(meta);
       return 'ACKED';
@@ -598,6 +756,9 @@ export function startGovernance({
     // containing separators can never collapse two different tuples into
     // one identity. The exact same source record reproduces the same id;
     // crash-window dedupe is owned by source-log reconciliation.
+    // basis mirrors validateGovernanceSourceRecord exactly, so every live
+    // record is verifiable against its own recorded identity forever
+    // (providerUpdatedTs is already inside the state fingerprint)
     const sourceEventId = governanceEventIdentity({
       provider: norm.provider,
       entityId: norm.spaceId,
@@ -606,7 +767,6 @@ export function startGovernance({
       lifecycle: lifecycle ?? null,
       state: norm.state,
       stateFingerprint,
-      providerUpdatedTs: norm.updatedTs ?? null,
       observedTs: retrievedIso,
     });
     return {
@@ -700,10 +860,12 @@ export function startGovernance({
     return { concentration, votesCoverage: concentration.coverage === 'COMPLETE' ? 'COMPLETE' : 'PARTIAL' };
   }
 
-  // ---------- proposal ingestion (ACK-aware) ----------
+  // ---------- proposal ingestion (ACK-aware, FULL provider key) ----------
   function ingestProposal(norm, proposalPagesCoverage, { withConcentration = null } = {}) {
-    if (finalIds.has(norm.proposalId)) return; // final truth already captured and acknowledged
-    const known = tracked.get(norm.proposalId);
+    if (stopped) return; // cancel-first shutdown: a delayed response creates nothing
+    const key = proposalKey(norm.provider, norm.spaceId, norm.proposalId);
+    if (finalIds.has(key)) return; // final truth already captured and acknowledged
+    const known = tracked.get(key);
     const isNew = !known;
     const prevMeasured = known?.measured ?? null;
     const lifecycles = lifecyclesFor(known?.state, norm, isNew);
@@ -729,13 +891,13 @@ export function startGovernance({
       for (const lc of lifecycles) {
         records.push({
           record: buildObservation(norm, { lifecycle: lc, emitReason: 'LIFECYCLE_TRANSITION', ...conc }, prevMeasured),
-          meta: { proposalId: norm.proposalId, kind: 'LIFECYCLE', finalizes: finalizing && lc === lifecycles.at(-1) },
+          meta: { key, kind: 'LIFECYCLE', finalizes: finalizing && lc === lifecycles.at(-1) },
         });
       }
     } else if ((norm.state === 'active' || norm.state === 'pending') && (changed || snapshotDue)) {
       records.push({
         record: buildObservation(norm, { lifecycle: null, emitReason: changed ? 'TALLY_CHANGED' : 'ACTIVE_SNAPSHOT', ...conc }, prevMeasured),
-        meta: { proposalId: norm.proposalId, kind: 'SNAPSHOT', finalizes: false },
+        meta: { key, kind: 'SNAPSHOT', finalizes: false },
       });
     } else {
       counters.eventsSuppressedAsDuplicate++;
@@ -743,9 +905,10 @@ export function startGovernance({
     // advance tracked state BEFORE emission so a synchronous final ACK can
     // release it; revert if any evidence could be neither written nor queued
     const prevEntry = known ? { ...known } : null;
-    tracked.set(norm.proposalId, {
+    tracked.set(key, {
       state: norm.state,
       spaceId: norm.spaceId,
+      proposalId: norm.proposalId,
       fingerprint: fp,
       lastSnapshotEmitMs: records.length ? now() : known?.lastSnapshotEmitMs ?? 0,
       measured: { scoresTotal: norm.scoresTotal ?? null, voteCount: norm.voteCount ?? null },
@@ -754,13 +917,14 @@ export function startGovernance({
     let placedAll = true;
     for (const r of records) {
       const st = emitObservation(r.record, r.meta);
-      if (st === 'DROPPED') placedAll = false;
+      if (st === 'DROPPED' || st === 'CANCELLED_STOPPED') placedAll = false;
     }
     if (!placedAll) {
-      // evidence lost even to the queue (bounded-overflow extreme): do NOT
-      // advance past it — restore the prior view so the next poll re-derives
-      if (prevEntry) tracked.set(norm.proposalId, prevEntry);
-      else tracked.delete(norm.proposalId);
+      // evidence lost even to the queue (bounded-overflow extreme) or work
+      // cancelled by shutdown: do NOT advance past it — restore the prior
+      // view so the next poll (of a future process) re-derives
+      if (prevEntry) tracked.set(key, prevEntry);
+      else tracked.delete(key);
       return;
     }
     counters.proposalsObserved++;
@@ -792,21 +956,27 @@ export function startGovernance({
         }
       }
     }
+    if (stopped) return; // cancel-first shutdown
     // normalize first, THEN decide admission, so the active-proposal cap is
-    // reflected in the coverage label of everything written this cycle
+    // reflected in the coverage label of everything written this cycle.
+    // Dedupe and admission use the FULL provider key: two spaces returning
+    // the same proposalId are two independent governance facts.
     const seen = new Set();
     const norms = [];
     for (const r of rows) {
       const norm = normalizeProposal(r, textOpts);
-      if (!norm || seen.has(norm.proposalId)) continue; // malformed refused; duplicates collapsed
-      seen.add(norm.proposalId);
+      if (!norm) continue; // malformed refused
+      const key = proposalKey(norm.provider, norm.spaceId, norm.proposalId);
+      if (seen.has(key)) continue; // duplicates collapsed
+      seen.add(key);
       norms.push(norm);
     }
     let admitted = [];
     let skipped = 0;
     let headroom = cfg.maxActiveProposals - activeCount();
     for (const norm of norms) {
-      if (tracked.has(norm.proposalId) || finalIds.has(norm.proposalId)) {
+      const key = proposalKey(norm.provider, norm.spaceId, norm.proposalId);
+      if (tracked.has(key) || finalIds.has(key)) {
         admitted.push(norm);
       } else if (headroom > 0) {
         headroom--;
@@ -824,13 +994,18 @@ export function startGovernance({
   }
 
   async function refresh() {
-    const ids = [...tracked.entries()]
-      .filter(([, t]) => t.state === 'active' || t.state === 'pending')
-      .map(([id]) => id)
-      .slice(0, cfg.maxActiveProposals);
+    // raw provider proposal ids for the id_in query (deduped); the response
+    // maps back to full keys naturally through each row's own space
+    const ids = [
+      ...new Set(
+        [...tracked.values()]
+          .filter((t) => t.state === 'active' || t.state === 'pending')
+          .map((t) => t.proposalId)
+      ),
+    ].slice(0, cfg.maxActiveProposals);
     if (!ids.length) return;
     const slot = await acquireSlot();
-    if (!slot.ok) return;
+    if (!slot.ok || stopped) return;
     // one batched id_in query keeps refresh at a single request
     const raw = await request(async () => {
       const idList = ids.map((i) => `"${String(i).replace(/[\\"]/g, '')}"`).join(', ');
@@ -840,6 +1015,7 @@ export function startGovernance({
       return data?.proposals ?? [];
     });
     for (const r of raw) {
+      if (stopped) return; // cancel-first shutdown
       const norm = normalizeProposal(r, textOpts);
       if (!norm) continue;
       let withConcentration = null;
@@ -856,7 +1032,17 @@ export function startGovernance({
 
   function publishStatus() {
     if (stopped) return;
-    const degraded = counters.sourceWriteFailures > 0 || counters.eventsDroppedAtPendingCap > 0 || checkpointInvalid || !lastCheckpointPersisted;
+    // GOV-1C: "safe on this VM" and "survives a republish" are different
+    // durabilities — a configured-but-failing durable save degrades GOV
+    // even when the local checkpoint succeeded and nothing is pending.
+    const degraded =
+      counters.sourceWriteFailures > 0 ||
+      counters.eventsDroppedAtPendingCap > 0 ||
+      checkpointInvalid ||
+      !lastCheckpointPersisted ||
+      sourceIntegrityErrors > 0 ||
+      durableSaveState === 'AT_RISK' ||
+      initState === 'WITHHELD_DURABLE_UNAVAILABLE';
     // HONEST DURABILITY LIMIT (§14): when every checkpoint representation
     // failed while evidence is owed, the debt exists only in RAM — say so.
     const failedDurability = !lastCheckpointPersisted && pendingEvents.length > 0;
@@ -865,12 +1051,16 @@ export function startGovernance({
       tsMs: now(),
       enabled: true,
       status: failedDurability ? 'FAILED_DURABILITY' : degraded ? 'DEGRADED' : 'HEALTHY',
+      initState,
       unpersistedPendingEvidence: lastCheckpointPersisted ? 0 : pendingEvents.length,
       lastEvidenceDrop,
       lastSeq: seqCounter,
       reconciledEvents,
+      sourceIntegrityErrors,
       localCheckpointFailures,
       durableCheckpointFailures,
+      durableReadFailures,
+      deploymentDurability: durableSaveState, // NOT_CONFIGURED | NOT_YET_SAVED | DURABLE | AT_RISK
       durableCheckpoint: checkpointStore ? (lastDurableCheckpointTs ? 'SAVED' : 'NOT_YET_SAVED') : 'NOT_CONFIGURED',
       lastDurableCheckpointTs,
       collectorVersion: GOVERNANCE_COLLECTOR_VERSION,
@@ -911,7 +1101,10 @@ export function startGovernance({
     eventsThisPoll = 0;
     lastPollTs = now();
     try {
-      await ensureInit(); // checkpoint restore + source reconciliation FIRST
+      // checkpoint restore + source reconciliation FIRST; when the durable
+      // authority is unreadable and nothing else proves state, polling is
+      // WITHHELD and initialization retries on the next tick (GOV-1C §2)
+      if (!(await ensureInit())) return;
       drainPending(); // owed evidence next — debt drains before new work
       const t = now();
       if (force || t >= nextDiscoveryMs) {
@@ -926,7 +1119,8 @@ export function startGovernance({
       // request() already logged, counted, and armed backoff — the sensor
       // fails dark; nothing above it is affected
     } finally {
-      if (!stopped) await saveCheckpoint(); // durability truth first…
+      // never overwrite a possibly-good checkpoint with a withheld/empty view
+      if (!stopped && initialized) await saveCheckpoint(); // durability truth first…
       publishStatus(); // …so status reports it honestly
       inFlight = false;
     }
@@ -937,15 +1131,19 @@ export function startGovernance({
   }, intervalMs);
   timer.unref?.();
 
+  // GOV-1C §14 — QUIESCENT SHUTDOWN, OPTION A (CANCEL): stopped flips FIRST,
+  // so any in-flight provider work becomes inert (no source writes, no
+  // tracked/pending mutation, no accepted evidence) BEFORE the final
+  // checkpoint snapshot is taken. Nothing newer than the snapshot can exist.
   const stop = () => {
     if (stopped) return; // idempotent
+    stopped = true;
+    clearInterval(timer);
     if (initialized) {
       const cp = buildCheckpointState();
       saveCheckpointLocal(cp); // synchronous local save
       if (checkpointStore) Promise.resolve(checkpointStore.save(cp)).catch(() => {}); // best-effort durable
     }
-    stopped = true;
-    clearInterval(timer);
   };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);

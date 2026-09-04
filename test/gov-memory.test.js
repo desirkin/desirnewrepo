@@ -246,19 +246,30 @@ if (!TEST_URL) {
       assert.equal(m.schemaVersion, 3, 'GOV-1B schema landed');
       const repo = new Repository(db);
       const store = govCheckpointStore({ persistence: () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) }) });
-      assert.equal(await store.load(), null, 'empty store is null, never invented');
-      const cp = { version: 2, savedTs: new Date(T0).toISOString(), lastSeq: 7, proposals: {}, finalIds: ['p1'], pending: [] };
+      // GOV-1C tri-state contract: absence is NOT_FOUND, an answered read
+      assert.deepEqual(await store.load(), { outcome: 'NOT_FOUND' }, 'an empty store answers NOT_FOUND, never invented');
+      const cp = { version: 3, savedTs: new Date(T0).toISOString(), lastSeq: 7, proposals: {}, finalIds: [], pending: [] };
       assert.equal((await store.save(cp)).durable, true);
-      assert.deepEqual(await store.load(), cp, 'round-trip exact');
+      assert.deepEqual(await store.load(), { outcome: 'LOADED', state: cp }, 'round-trip exact');
       const cp2 = { ...cp, lastSeq: 9 };
       await store.save(cp2);
-      assert.equal((await store.load()).lastSeq, 9, 'latest revision wins');
+      assert.equal((await store.load()).state.lastSeq, 9, 'latest revision wins');
       const { rows } = await db.query(`SELECT revision FROM serpent_governance_checkpoint WHERE id = 'current'`);
       assert.equal(Number(rows[0].revision), 2, 'revision counted');
-      // a dead durable core degrades to { durable: false }, never throws out
+      // no durable core at all is NOT_CONFIGURED — never confused with a read failure
       const dead = govCheckpointStore({ persistence: () => null });
-      assert.equal(await dead.load(), null);
-      assert.equal((await dead.save(cp)).durable, false);
+      assert.deepEqual(await dead.load(), { outcome: 'NOT_CONFIGURED' });
+      assert.deepEqual(await dead.save(cp), { durable: false, reason: 'NOT_CONFIGURED' });
+      // a configured core whose read THROWS answers UNAVAILABLE — a read
+      // failure is never "no checkpoint"
+      const broken = govCheckpointStore({
+        persistence: () => ({
+          repo: { loadGovernanceCheckpoint: async () => { throw new Error('db down'); }, saveGovernanceCheckpoint: async () => { throw new Error('db down'); } },
+          health: () => ({ databaseConfigured: true, restored: true }),
+        }),
+      });
+      assert.equal((await broken.load()).outcome, 'UNAVAILABLE');
+      assert.deepEqual(await broken.save(cp), { durable: false, reason: 'UNAVAILABLE' });
     } finally {
       try {
         await db.query(`DROP SCHEMA ${SCHEMA} CASCADE`);

@@ -159,6 +159,42 @@ config bounds fail closed: the sensor disables itself and says why.
   The durable copy is the restart/redeploy authority when configured and
   valid; the local atomic file remains the fast fallback. STORAGE ONLY —
   it is not, and must never become, a decision return path.
+- **Durable load has THREE outcomes (GOV-1C).** "No checkpoint" and "I
+  could not read the checkpoint" are not the same truth: the store
+  answers LOADED, NOT_FOUND, or UNAVAILABLE (plus NOT_CONFIGURED), and a
+  read failure is never collapsed into absence. When the durable
+  authority is unreadable and no other validated authority (valid local
+  checkpoint, or validated source-log records) proves state, GOV FAILS
+  DARK and WITHHOLDS provider polling — initialization retries on the
+  next tick rather than rediscovering history from zero.
+- **Local save is not republish durability (GOV-1C).** "Safe on this VM"
+  and "survives a republish" are different durabilities, tracked
+  separately: a configured-but-failing durable save marks
+  deploymentDurability AT_RISK and degrades GOV health even when the
+  local atomic checkpoint succeeded and zero events are pending — a
+  proposal-state advancement alone matters for dedupe after redeploy.
+- **One source validator (GOV-1C).** Parseable JSON is not verified
+  evidence. A single strict contract
+  (validateGovernanceSourceRecord: controlled type/provider/lifecycle,
+  full provider identity, valid timestamps and state, provider
+  semantics, numeric truth, and a sourceEventId that must match its
+  recomputed canonical basis) gates live emission, checkpoint pending
+  restore, and source-log reconciliation alike. An invalid record is
+  counted and withheld: it advances no cursor, settles no debt (a
+  copied sourceEventId string impersonates nothing), finalizes nothing,
+  and mutates no tracked state.
+- **Quiescent shutdown (GOV-1C, CANCEL contract).** `stopped` flips
+  before the final checkpoint snapshot, so an in-flight provider
+  response that returns after shutdown becomes inert — no source
+  writes, no tracked/pending mutation, no accepted evidence newer than
+  the final checkpoint. A restart cannot lose an accepted observation.
+- **Full provider proposal key (GOV-1C).** A proposal ID is not an
+  identity without its governance entity: all internal collector state
+  (tracked, final cache, pending metadata, checkpoint entries,
+  discovery dedupe, finalization, reconciliation) keys on the injective
+  [provider, entity, proposalId] triple, so two spaces returning the
+  same proposalId are two independent truths. The raw proposalId stays
+  preserved in every record as provider evidence.
 - **Honest durability boundary.** Restart-safe pending debt is guaranteed
   only once at least one durable representation succeeded. When the
   source append, the local checkpoint, AND the durable checkpoint all
