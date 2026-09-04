@@ -136,16 +136,43 @@ config bounds fail closed: the sensor disables itself and says why.
   described as PARTIAL with its exact stop reason (PAGE_LIMIT,
   REQUEST_BUDGET, BACKOFF_ACTIVE, PROVIDER_ERROR); UNAVAILABLE means
   nothing usable was retrieved.
-- **Restart-safe.** A small bounded atomic checkpoint
-  (`data/governance/checkpoint.json`: per-proposal state/fingerprint/
-  cadence/measured tallies, pending evidence, final-ID cache) survives
-  restarts, so the same proposal is never rediscovered and trajectory
-  deltas restore truthfully. A malformed checkpoint degrades and starts
-  empty — never guessed, never fatal to the rest of Serpent. Source
-  events carry deterministic `sourceEventId` values (proposal + lifecycle,
-  or fingerprint + retrieval for snapshots), so a restart can never mint
-  a new canonical Memory identity for the same provider event, while a
-  genuinely changed state remains a genuinely new observation.
+- **Restart-safe (GOV-1B).** The SOURCE STREAM IS A WRITE-AHEAD TRUTH
+  LOG: every appended event carries a monotonic `seq` cursor and a hashed
+  structured `sourceEventId` (canonical key-sorted basis over provider,
+  entity, proposal, kind, lifecycle, state, state fingerprint, provider
+  update time, observation time — no delimiter joining, so provider ids
+  containing separators can never collapse two tuples into one identity).
+  The checkpoint (per-proposal state/fingerprint/cadence/measured tallies,
+  pending evidence, final-ID cache, and the `lastSeq` cursor) is an
+  acceleration snapshot that MAY LAG the log but may never rewrite it: at
+  startup the collector restores the checkpoint, then reconciles forward
+  by replaying validated source records beyond the cursor (bounded to the
+  log tail; torn lines counted; provider truth never invented) before any
+  polling. A crash between a successful append and the checkpoint save
+  therefore cannot re-create an already-appended lifecycle as a different
+  historical record. Checkpoints are STRICTLY validated before use; a
+  malformed one is withheld, DEGRADED is reported, and state rebuilds
+  from source truth — never guessed, never fatal to the rest of Serpent.
+- **Durable checkpoint.** Deployment disk is ephemeral, so the checkpoint
+  is also written to the durable PostgreSQL core through a tiny injected
+  store (composition-root wiring; the collector knows only load()/save()).
+  The durable copy is the restart/redeploy authority when configured and
+  valid; the local atomic file remains the fast fallback. STORAGE ONLY —
+  it is not, and must never become, a decision return path.
+- **Honest durability boundary.** Restart-safe pending debt is guaranteed
+  only once at least one durable representation succeeded. When the
+  source append, the local checkpoint, AND the durable checkpoint all
+  fail while evidence is owed, that evidence exists only in RAM: status
+  reports `FAILED_DURABILITY` with `unpersistedPendingEvidence` — GOV
+  says "I have unpersisted evidence", never "don't worry, I remembered
+  it". No third store exists; a hard crash at that exact moment loses it.
+- **Bounded loss is named.** At sustained durability failure the hard
+  pending cap may force dropping a lower-priority observation
+  (snapshot-kind before lifecycle). That is DATA LOSS even when explicit:
+  it is counted, identified by kind and reason (`lastEvidenceDrop`),
+  degrades health, is never called successfully remembered, never lets
+  tracked state advance past it, and can never create an id/content
+  conflict when provider truth is observed again later.
 - **Pending proposals are observed.** Discovery covers Snapshot's
   `pending` state as well as `active`, so the ordinary pending → active
   chronology produces a real VOTING_STARTED.
@@ -158,6 +185,26 @@ config bounds fail closed: the sensor disables itself and says why.
   one AGAINST-class label, at most one ABSTAIN-class label, no other
   choices, no duplicate semantics, matching choices/scores lengths.
   Anything else keeps verbatim scoresByChoice and ratios UNKNOWN.
+- **Numeric truth (GOV-1B).** Vote power, scores, totals, counts, and
+  quorum are non-negative quantities: an impossible finite negative from
+  the provider is INVALID and becomes UNKNOWN, never preserved or
+  repaired. Ratios additionally require internal consistency (powers not
+  above the total beyond a 1e-6 relative tolerance, results in [0,1]);
+  inconsistent provider totals keep their raw values with ratios UNKNOWN.
+  Quorum progress legitimately exceeds 1 when quorum is surpassed — it is
+  never clamped.
+- **Unique provider identity (GOV-1B).** One Snapshot space or Tally
+  governor maps to at most one registry entry; a conflicting duplicate is
+  rejected explicitly (first verified mapping stands, deterministically)
+  — no silent overwrite, and lookups never depend on input order.
+- **Final-cache guarantee, stated exactly.** A finalized proposal is not
+  re-discovered WHILE its id is retained in the bounded final-ID cache
+  (256). Discovery only queries pending/active states, so a closed
+  proposal normally never resurfaces anyway. If a provider resurfaces one
+  after eviction, the new observation is a new re-observed fact with its
+  own honest identity: old canonical history is never overwritten and no
+  id/content conflict can result. Unlimited final-proposal retention does
+  not exist and is not claimed.
 - **Strict config.** Booleans must be booleans; integer bounds must be
   positive integers inside documented hard maxima;
   `governance.maxMappedSymbols` is enforced on the loaded registry under

@@ -228,4 +228,46 @@ test('M6. ZERO TRADING WEIGHT: governance observation changes no trading state; 
   }
 });
 
+// ---------------- GOV-1B durable checkpoint (real PostgreSQL) ----------------
+const TEST_URL = process.env.PERSIST_TEST_DATABASE_URL ?? process.env.DATABASE_URL;
+if (!TEST_URL) {
+  test('M7. GOV-1B durable checkpoint integration', (t) => t.skip('no PERSIST_TEST_DATABASE_URL / DATABASE_URL configured'));
+} else {
+  test('M7. durable governance checkpoint: schema 3 applies; round-trip + revision bump; storage only', async () => {
+    const { Db } = await import('../persistence/db.js');
+    const { Repository } = await import('../persistence/repository.js');
+    const { runMigrations } = await import('../persistence/migrate.js');
+    const { govCheckpointStore } = await import('../persistence/gov-checkpoint.js');
+    const SCHEMA = `gov1b_${Date.now().toString(36)}`;
+    const db = new Db({ url: TEST_URL, schema: SCHEMA });
+    try {
+      assert.equal(await db.connect(), true);
+      const m = await runMigrations(db);
+      assert.equal(m.schemaVersion, 3, 'GOV-1B schema landed');
+      const repo = new Repository(db);
+      const store = govCheckpointStore({ persistence: () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) }) });
+      assert.equal(await store.load(), null, 'empty store is null, never invented');
+      const cp = { version: 2, savedTs: new Date(T0).toISOString(), lastSeq: 7, proposals: {}, finalIds: ['p1'], pending: [] };
+      assert.equal((await store.save(cp)).durable, true);
+      assert.deepEqual(await store.load(), cp, 'round-trip exact');
+      const cp2 = { ...cp, lastSeq: 9 };
+      await store.save(cp2);
+      assert.equal((await store.load()).lastSeq, 9, 'latest revision wins');
+      const { rows } = await db.query(`SELECT revision FROM serpent_governance_checkpoint WHERE id = 'current'`);
+      assert.equal(Number(rows[0].revision), 2, 'revision counted');
+      // a dead durable core degrades to { durable: false }, never throws out
+      const dead = govCheckpointStore({ persistence: () => null });
+      assert.equal(await dead.load(), null);
+      assert.equal((await dead.save(cp)).durable, false);
+    } finally {
+      try {
+        await db.query(`DROP SCHEMA ${SCHEMA} CASCADE`);
+      } catch {
+        // schema may already be gone
+      }
+      await db.end();
+    }
+  });
+}
+
 test.after(() => rmSync(TEST_DATA, { recursive: true, force: true }));

@@ -82,6 +82,11 @@ export function normalizeProposal(raw, { maxTitleBytes = 256, maxBodyBytes = 204
   if (typeof spaceId !== 'string' || !spaceId.length) return null;
   if (typeof raw.state !== 'string') return null;
   const num = (v) => (Number.isFinite(v) ? v : null);
+  // GOV-1B: vote power, scores, totals, counts, and quorum are NON-NEGATIVE
+  // quantities. An impossible finite negative from the provider is INVALID
+  // evidence and becomes null (UNKNOWN downstream) — never preserved as a
+  // valid measurement, never "repaired" into a positive.
+  const nonNeg = (v) => (Number.isFinite(v) && v >= 0 ? v : null);
   const body = typeof raw.body === 'string' ? raw.body : '';
   return {
     provider: SNAPSHOT_PROVIDER,
@@ -94,11 +99,11 @@ export function normalizeProposal(raw, { maxTitleBytes = 256, maxBodyBytes = 204
     endTs: num(raw.end),
     snapshotBlock: raw.snapshot ?? null,
     updatedTs: num(raw.updated),
-    quorumRaw: num(raw.quorum),
+    quorumRaw: nonNeg(raw.quorum),
     choices: Array.isArray(raw.choices) ? raw.choices.slice(0, 32).map((c) => String(c).slice(0, 100)) : null,
-    scores: Array.isArray(raw.scores) ? raw.scores.slice(0, 32).map((s) => (Number.isFinite(s) ? s : null)) : null,
-    scoresTotal: num(raw.scores_total),
-    voteCount: num(raw.votes),
+    scores: Array.isArray(raw.scores) ? raw.scores.slice(0, 32).map((s) => nonNeg(s)) : null,
+    scoresTotal: nonNeg(raw.scores_total),
+    voteCount: nonNeg(raw.votes),
     title: boundedText(raw.title ?? '', maxTitleBytes),
     bodyExcerpt: boundedText(body, maxBodyBytes),
     textHash: createHash('sha1').update(`${raw.title ?? ''}\n${body}`).digest('hex'),
@@ -153,10 +158,25 @@ export function voteTrajectory(p, nowSec, prev = null) {
   const forPower = canonicalSet ? p.scores[forIdx[0]] ?? null : null;
   const againstPower = canonicalSet ? p.scores[againstIdx[0]] ?? null : null;
   const abstainPower = canonicalSet && abstainIdx.length === 1 ? p.scores[abstainIdx[0]] ?? null : null;
-  const ratios =
-    canonicalSet && Number.isFinite(forPower) && Number.isFinite(againstPower) && total > 0
-      ? { supportRatio: Number((forPower / total).toFixed(6)), oppositionRatio: Number((againstPower / total).toFixed(6)) }
-      : { supportRatio: 'UNKNOWN', oppositionRatio: 'UNKNOWN' };
+  // GOV-1B numeric consistency: ratios require finite NON-NEGATIVE powers,
+  // a finite positive total, no individual power above the total beyond a
+  // tiny documented tolerance (1e-6 relative), and results inside [0, 1].
+  // Internally inconsistent provider totals keep their raw values but the
+  // DERIVED ratio is UNKNOWN — provider numbers are never repaired.
+  const tol = total > 0 ? total * 1e-6 : 0;
+  const consistent =
+    canonicalSet &&
+    Number.isFinite(forPower) && forPower >= 0 &&
+    Number.isFinite(againstPower) && againstPower >= 0 &&
+    Number.isFinite(total) && total > 0 &&
+    forPower <= total + tol &&
+    againstPower <= total + tol;
+  let ratios = { supportRatio: 'UNKNOWN', oppositionRatio: 'UNKNOWN' };
+  if (consistent) {
+    const s = Number((forPower / total).toFixed(6));
+    const o = Number((againstPower / total).toFixed(6));
+    if (s >= 0 && s <= 1 && o >= 0 && o <= 1) ratios = { supportRatio: s, oppositionRatio: o };
+  }
   return {
     scoresByChoice: byChoice,
     totalObservedPower: total,

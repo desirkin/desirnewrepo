@@ -109,8 +109,8 @@ if (!TEST_URL) {
   test('database reachable; migrations apply once and are idempotent', async () => {
     assert.equal(await db.connect(), true);
     const first = await runMigrations(db);
-    assert.equal(first.schemaVersion, 2);
-    assert.deepEqual(first.appliedNow, [1, 2]);
+    assert.equal(first.schemaVersion, 3); // GOV-1B adds the governance checkpoint table
+    assert.deepEqual(first.appliedNow, [1, 2, 3]);
     const second = await runMigrations(db);
     assert.deepEqual(second.appliedNow, []); // idempotent
   });

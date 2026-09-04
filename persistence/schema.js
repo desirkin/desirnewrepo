@@ -4,7 +4,7 @@
 // silently downgraded.
 import { createHash } from 'node:crypto';
 
-export const SCHEMA_VERSION = 2; // PERSIST-0A / schema 2
+export const SCHEMA_VERSION = 3; // GOV-1B / schema 3
 
 // Canonical key-sorted JSON — the stable content form durable event
 // identities are computed over (independent of key order and whitespace).
@@ -158,5 +158,22 @@ export const MIGRATIONS = [
       await q(`CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_event ON serpent_control_audit (event_id)`);
       await q(`CREATE UNIQUE INDEX IF NOT EXISTS uq_transition_event ON serpent_posture_transitions (event_id)`);
     },
+  },
+  {
+    version: 3,
+    name: 'GOV-1B durable governance collector checkpoint',
+    // The narrowest dedicated store for the GOV collector checkpoint: one
+    // revision-counted row, STORAGE ONLY. It carries no control/posture/sim
+    // semantics, participates in no most-restrictive reconciliation, and
+    // grants nothing — deployment disk is ephemeral, so the checkpoint that
+    // prevents governance history rewrites must survive a republish.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_governance_checkpoint (
+        id text PRIMARY KEY,
+        revision bigint NOT NULL DEFAULT 0,
+        state jsonb NOT NULL,
+        saved_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ],
   },
 ];

@@ -239,7 +239,10 @@ export function fromGovernanceEvent(rec, observedTs = nowIso()) {
     symbol: canonSymbol(rec.symbol), // registry-resolved or null; never guessed here
     families: ['GOVERNANCE'],
     observationState: isObservation ? 'KNOWN' : 'UNAVAILABLE',
-    payload: strip(rec, 'ts'),
+    // GOV-1B: `seq` is the collector's LOCAL source-log cursor, assigned at
+    // append time — stripping it keeps a legitimately re-appended owed
+    // record byte-equivalent here, so it deduplicates instead of colliding
+    payload: strip(rec, 'ts', 'seq'),
     dataAvailability: {
       proposalState: typeof rec.proposalState === 'string' ? 'KNOWN' : 'UNKNOWN',
       voteTotals: rec.voteTotals && Number.isFinite(rec.voteTotals.scoresTotal) ? 'KNOWN' : 'UNKNOWN',

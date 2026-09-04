@@ -810,4 +810,321 @@ test('H12. SOURCE WRITE FAILURE: evidence stays pending and retryable; health de
   cleanupDir(d, gov);
 });
 
+// ==================== GOV-1B: IDENTITY + CRASH CONSISTENCY ====================
+
+const { governanceEventIdentity } = await import('../governance/collector.js');
+const { fromGovernanceEvent } = await import('../memory/adapters.js');
+const { copyFileSync, writeFileSync } = await import('node:fs');
+const cpFile = (d) => path.join(d, 'governance', 'checkpoint.json');
+const memStore = () => {
+  const s = { cp: null, saves: 0 };
+  s.load = async () => s.cp;
+  s.save = async (state) => {
+    s.cp = structuredClone(state);
+    s.saves++;
+    return { durable: true };
+  };
+  return s;
+};
+
+test('I1. COLLISION-SAFE IDENTITY: delimiter-crafted tuples cannot collapse; exact replay still dedupes', () => {
+  // the classic joined-string collision: "a" + "b:c" vs "a:b" + "c"
+  const idA = governanceEventIdentity({ provider: 'SNAPSHOT', entityId: 'a', proposalId: 'b:c', kind: 'LIFECYCLE', lifecycle: 'PROPOSAL_DISCOVERED', state: 'active', stateFingerprint: 'f', providerUpdatedTs: null, observedTs: 't' });
+  const idB = governanceEventIdentity({ provider: 'SNAPSHOT', entityId: 'a:b', proposalId: 'c', kind: 'LIFECYCLE', lifecycle: 'PROPOSAL_DISCOVERED', state: 'active', stateFingerprint: 'f', providerUpdatedTs: null, observedTs: 't' });
+  assert.notEqual(idA, idB, 'two different source tuples never share an identity');
+  // identical basis reproduces identically, key order irrelevant
+  assert.equal(idA, governanceEventIdentity({ observedTs: 't', state: 'active', provider: 'SNAPSHOT', proposalId: 'b:c', entityId: 'a', lifecycle: 'PROPOSAL_DISCOVERED', kind: 'LIFECYCLE', stateFingerprint: 'f', providerUpdatedTs: null }));
+  // canonical Memory ids differ too, and both records survive side by side
+  const rec = (sid, pid, space) => ({
+    ts: new Date(T0).toISOString(), type: 'GOVERNANCE_OBSERVATION', provider: 'SNAPSHOT', sourceEventId: sid,
+    spaceId: space, proposalId: pid, symbol: null, proposalState: 'active', retrievedTs: new Date(T0).toISOString(),
+  });
+  const envA = fromGovernanceEvent(rec(idA, 'b:c', 'a'), new Date(T0 + 1000).toISOString());
+  const envB = fromGovernanceEvent(rec(idB, 'c', 'a:b'), new Date(T0 + 1000).toISOString());
+  assert.notEqual(envA.id, envB.id, 'canonical Memory IDs differ');
+  // exact replay of the same source line dedupes to ONE memory
+  assert.equal(envA.id, fromGovernanceEvent(rec(idA, 'b:c', 'a'), new Date(T0 + 9000).toISOString()).id);
+});
+
+test('I2. CRASH AFTER APPEND, BEFORE CHECKPOINT: the source log repairs the stale checkpoint forward', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  let state = 'active';
+  const routes = () => gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply(state === 'active' ? [prop()] : []) },
+    { match: isRefresh, reply: () => proposalsReply([prop({ state })]) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  const govA = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes(), now, intervalMs: 3_600_000 });
+  await govA.pollOnce(); // PROPOSAL_DISCOVERED; checkpoint cp1 saved
+  copyFileSync(cpFile(d), cpFile(d) + '.stale');
+  clock += 60_000;
+  state = 'closed';
+  await govA.pollOnce(); // VOTING_ENDED + FINAL_TALLY appended; cp2 saved
+  govA.stop();
+  assert.equal(linesOf(d, 'VOTING_ENDED').length, 1);
+  assert.equal(linesOf(d, 'FINAL_TALLY_OBSERVED').length, 1);
+  copyFileSync(cpFile(d) + '.stale', cpFile(d)); // CRASH SIMULATION: cp2 never persisted
+  // brand-new collector, stale checkpoint, provider still reports closed
+  const govB = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes(), now, intervalMs: 3_600_000 });
+  await govB.pollOnce();
+  assert.equal(linesOf(d, 'VOTING_ENDED').length, 1, 'no duplicate VOTING_ENDED');
+  assert.equal(linesOf(d, 'FINAL_TALLY_OBSERVED').length, 1, 'no duplicate FINAL_TALLY_OBSERVED');
+  assert.equal(govB._finalIds.size, 1, 'reconciled state KNOWS the proposal is final');
+  assert.equal(govB._tracked.size, 0, 'heavy tracked state remains released');
+  // canonical ids stable and conflict-free: every source line adapts uniquely
+  const envs = eventLines(d).map((e) => fromGovernanceEvent(e, new Date(clock).toISOString()));
+  assert.equal(new Set(envs.map((e) => e.id)).size, envs.length, 'no same-ID/different-content event exists');
+  cleanupDir(d, govB);
+});
+
+test('I3. CORRUPT LOCAL CHECKPOINT: durable copy or source truth prevents history-from-zero', async () => {
+  // variant A: durable checkpoint is the redeploy authority
+  {
+    const d = freshDir();
+    let clock = T0;
+    const now = () => (clock += 25);
+    const store = memStore();
+    const routes = () => gqlFetch([
+      { match: isDiscovery, reply: () => proposalsReply([prop()]) },
+      { match: isRefresh, reply: () => proposalsReply([prop()]) },
+      { match: isVotes, reply: () => votesReply([vote(10)]) },
+    ]);
+    const a = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes(), now, intervalMs: 3_600_000, checkpointStore: store });
+    await a.pollOnce();
+    a.stop();
+    writeFileSync(cpFile(d), '{ corrupt'); // local damage
+    const b = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes(), now, intervalMs: 3_600_000, checkpointStore: store });
+    await b.pollOnce();
+    assert.equal(linesOf(d, 'PROPOSAL_DISCOVERED').length, 1, 'no false rediscovery');
+    cleanupDir(d, b);
+  }
+  // variant B: no durable store — validated SOURCE truth rebuilds state,
+  // and the damage is truthfully reported
+  {
+    const d = freshDir();
+    let clock = T0;
+    const now = () => (clock += 25);
+    const routes = () => gqlFetch([
+      { match: isDiscovery, reply: () => proposalsReply([prop()]) },
+      { match: isRefresh, reply: () => proposalsReply([prop()]) },
+      { match: isVotes, reply: () => votesReply([vote(10)]) },
+    ]);
+    const a = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes(), now, intervalMs: 3_600_000 });
+    await a.pollOnce();
+    a.stop();
+    writeFileSync(cpFile(d), '{ corrupt');
+    const b = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes(), now, intervalMs: 3_600_000 });
+    clock += 60_000;
+    await b.pollOnce();
+    assert.equal(linesOf(d, 'PROPOSAL_DISCOVERED').length, 1, 'source reconciliation rebuilt the tracked state');
+    assert.equal(statusOf(d).checkpointInvalid, true, 'checkpoint damage truthfully recorded');
+    assert.equal(statusOf(d).status, 'DEGRADED');
+    // normal observation resumes: a later tally change emits normally
+    cleanupDir(d, b);
+  }
+});
+
+test('I4. FRESH DEPLOYMENT: the durable checkpoint restores across an empty local disk', async () => {
+  const store = memStore();
+  let clock = T0;
+  const now = () => (clock += 25);
+  let total = 1_210_000;
+  const routes = () => gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply([prop({ scores_total: total })]) },
+    { match: isRefresh, reply: () => proposalsReply([prop({ scores_total: total })]) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  const d1 = freshDir();
+  const a = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes(), now, intervalMs: 3_600_000, checkpointStore: store });
+  await a.pollOnce();
+  assert.equal(linesOf(d1, 'PROPOSAL_DISCOVERED').length, 1);
+  a.stop();
+  assert.ok(store.cp, 'durable checkpoint saved');
+  process.env.COBRA_DATA_DIR = TEST_DATA;
+  rmSync(d1, { recursive: true, force: true });
+  // brand-new deployment: local files GONE, durable checkpoint remains
+  const d2 = freshDir();
+  const b = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes(), now, intervalMs: 3_600_000, checkpointStore: store });
+  await b.pollOnce();
+  assert.equal(linesOf(d2, 'PROPOSAL_DISCOVERED').length, 0, 'no second discovery on the fresh deployment');
+  assert.equal(b._tracked.size, 1, 'prior proposal state restored');
+  // snapshot cadence + trajectory truth survive the redeploy
+  clock += GOV_CFG.governance.activeSnapshotSec * 1000 + 60_000;
+  total = 1_500_000;
+  await b.pollOnce();
+  const snap = eventLines(d2).findLast((e) => e.emitReason === 'TALLY_CHANGED' || e.emitReason === 'ACTIVE_SNAPSHOT');
+  assert.ok(snap, 'snapshot only when its cadence became due');
+  assert.equal(snap.trajectory.votingPowerDelta, 290_000, 'trajectory delta measured against durable-restored state');
+  cleanupDir(d2, b);
+});
+
+test('I5. PENDING DEBT SURVIVES RESTART once a durable representation succeeded', async () => {
+  const store = memStore();
+  let clock = T0;
+  const now = () => (clock += 25);
+  const routes = () => gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply([prop({ id: 'debt-1' })]) },
+    { match: isRefresh, reply: () => proposalsReply([]) },
+  ]);
+  const d1 = freshDir();
+  mkdirSync(path.join(d1, 'governance', 'events.jsonl'), { recursive: true }); // source append fails
+  const a = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes(), now, intervalMs: 3_600_000, checkpointStore: store });
+  await a.pollOnce();
+  assert.equal(a._pending.length, 1, 'evidence owed');
+  const owedId = a._pending[0].record.sourceEventId;
+  a.stop();
+  assert.equal(store.cp.pending.length, 1, 'debt persisted durably');
+  process.env.COBRA_DATA_DIR = TEST_DATA;
+  rmSync(d1, { recursive: true, force: true });
+  // restart on a fresh disk with a healthy writer
+  const d2 = freshDir();
+  const b = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes(), now, intervalMs: 3_600_000, checkpointStore: store });
+  clock += 60_000;
+  await b.pollOnce();
+  const discs = linesOf(d2, 'PROPOSAL_DISCOVERED');
+  assert.equal(discs.length, 1, 'the exact owed event wrote once');
+  assert.equal(discs[0].sourceEventId, owedId, 'the SAME evidence, not a reinvention');
+  assert.equal(b._pending.length, 0);
+  cleanupDir(d2, b);
+});
+
+test('I6. CATASTROPHIC DURABILITY FAILURE: GOV says "I have unpersisted evidence", never "I remembered it"', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  mkdirSync(path.join(d, 'governance', 'events.jsonl'), { recursive: true }); // source append fails
+  mkdirSync(cpFile(d), { recursive: true }); // local checkpoint fails
+  const failingStore = { load: async () => null, save: async () => ({ durable: false }) }; // durable fails
+  const routes = gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply([prop()]) },
+    { match: isRefresh, reply: () => proposalsReply([]) },
+  ]);
+  const gov = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes, now, intervalMs: 3_600_000, checkpointStore: failingStore });
+  await gov.pollOnce();
+  const st = statusOf(d);
+  assert.equal(st.status, 'FAILED_DURABILITY', 'every durable representation failed while evidence is owed');
+  assert.equal(st.unpersistedPendingEvidence, 1, 'the RAM-only debt is named explicitly');
+  assert.ok(st.localCheckpointFailures >= 1 && st.durableCheckpointFailures >= 1);
+  cleanupDir(d, gov);
+});
+
+test('I7. PENDING-CAP DROP IS EXPLICIT DATA LOSS: counted, identified, state never advances past it', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  mkdirSync(path.join(d, 'governance', 'events.jsonl'), { recursive: true }); // writer down
+  const routes = gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply([prop({ id: 'dl-1' }), prop({ id: 'dl-2' })]) },
+    { match: isRefresh, reply: () => proposalsReply([prop({ id: 'dl-1' }), prop({ id: 'dl-2' })]) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  const gov = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes, now, intervalMs: 3_600_000, maxPendingEvents: 1 });
+  await gov.pollOnce();
+  assert.equal(gov._pending.length, 1, 'queue hard bounded');
+  assert.ok(gov.counters.eventsDroppedAtPendingCap >= 1, 'the drop is COUNTED as loss');
+  const st = statusOf(d);
+  assert.equal(st.lastEvidenceDrop.kind, 'LIFECYCLE');
+  assert.equal(st.lastEvidenceDrop.reason, 'PENDING_CAP');
+  assert.notEqual(st.status, 'HEALTHY', 'data loss is never healthy');
+  assert.equal(gov._tracked.size, 1, 'tracked state did NOT silently advance past the dropped discovery');
+  // the writer recovers: owed evidence drains, the dropped proposal is
+  // re-observed under a fresh honest identity — no conflict
+  rmSync(path.join(d, 'governance', 'events.jsonl'), { recursive: true, force: true });
+  clock += 60_000;
+  await gov.pollOnce();
+  const discs = linesOf(d, 'PROPOSAL_DISCOVERED');
+  assert.equal(discs.length, 2, 'both proposals ultimately observed, each once');
+  assert.equal(new Set(discs.map((e) => e.sourceEventId)).size, 2);
+  cleanupDir(d, gov);
+});
+
+test('I8. NUMERIC TRUTH: impossible negatives become UNKNOWN; quorum progress may honestly exceed 1', () => {
+  const t = (over) => voteTrajectory(normalizeProposal(prop(over)), T0s);
+  // negative choice score -> ratios UNKNOWN (and the score itself is refused)
+  const neg = t({ choices: ['For', 'Against'], scores: [-10, 20], scores_total: 10 });
+  assert.equal(neg.supportRatio, 'UNKNOWN');
+  assert.equal(neg.forPower, null, 'an impossible measurement is never preserved as valid');
+  // negative total -> total-derived metrics UNKNOWN
+  assert.equal(t({ scores_total: -5 }).totalObservedPower, null);
+  assert.equal(t({ scores_total: -5 }).supportRatio, 'UNKNOWN');
+  // negative vote count -> voter count UNKNOWN
+  assert.equal(t({ votes: -3 }).observedVoterCount, null);
+  // negative quorum -> quorum UNKNOWN
+  assert.equal(quorumTruth(normalizeProposal(prop({ quorum: -100 }))), 'UNKNOWN');
+  // choice power beyond total -> internally inconsistent -> ratios UNKNOWN,
+  // raw values retained
+  const over = t({ choices: ['For', 'Against'], scores: [100, 5], scores_total: 50 });
+  assert.equal(over.supportRatio, 'UNKNOWN');
+  assert.deepEqual(over.scoresByChoice, { For: 100, Against: 5 }, 'provider numbers are never repaired');
+  // normal valid values unchanged
+  assert.equal(t({ choices: ['For', 'Against'], scores: [60, 40], scores_total: 100 }).supportRatio, 0.6);
+  // surpassed quorum: progress truthfully exceeds 1, never clamped
+  const q = quorumTruth(normalizeProposal(prop({ quorum: 100, scores_total: 250 })));
+  assert.equal(q.quorumProgressRatio, 2.5);
+});
+
+test('I9. REGISTRY PROVIDER IDENTITY IS UNIQUE: conflicting duplicates rejected, order-independent', () => {
+  const row = (symbol, spaceId) => ({ symbol, provider: 'SNAPSHOT', spaceId, scope: 'TOKEN_GOVERNANCE', verified: true, mappingVersion: 1 });
+  const tallyRow = (symbol, governorId) => ({ symbol, provider: 'TALLY', governorId, scope: 'TOKEN_GOVERNANCE', verified: true, mappingVersion: 1 });
+  // same snapshot space, two symbols -> conflict rejected, first stands
+  const r1 = loadRegistry([row('AAA', 'x.eth'), row('BBB', 'x.eth')]);
+  assert.equal(r1.entries.length, 1);
+  assert.equal(r1.entryForSpace('x.eth').symbol, 'AAA');
+  assert.ok(r1.rejected[0].errors[0].includes('duplicate provider identity'));
+  // same tally governor, two symbols -> conflict rejected
+  const r2 = loadRegistry([tallyRow('AAA', 'gov-1'), tallyRow('BBB', 'gov-1')]);
+  assert.equal(r2.entries.length, 1);
+  assert.equal(r2.entryForGovernor('gov-1').symbol, 'AAA');
+  // exact duplicate row -> second deterministically rejected
+  const r3 = loadRegistry([row('AAA', 'x.eth'), row('AAA', 'x.eth')]);
+  assert.equal(r3.entries.length, 1);
+  assert.equal(r3.rejected.length, 1);
+  // lookup never depends on input order for DISTINCT identities
+  const r4 = loadRegistry([row('BBB', 'y.eth'), row('AAA', 'x.eth')]);
+  assert.equal(r4.entryForSpace('x.eth').symbol, 'AAA');
+  assert.equal(r4.entryForSpace('y.eth').symbol, 'BBB');
+});
+
+test('I10. FINAL-CACHE EVICTION: a resurfaced proposal becomes a NEW honest observation, never a conflict', async () => {
+  const d = freshDir();
+  let clock = T0;
+  const now = () => (clock += 25);
+  let batch = [];
+  let state = 'active';
+  const routes = gqlFetch([
+    { match: isDiscovery, reply: () => proposalsReply(state === 'active' ? batch : []) },
+    { match: isRefresh, reply: () => proposalsReply(batch.map((p) => ({ ...p, state }))) },
+    { match: isVotes, reply: () => votesReply([vote(10)]) },
+  ]);
+  const gov = startGovernance({ log: () => {}, config: GOV_CFG, fetchImpl: routes, now, intervalMs: 3_600_000, finalIdCacheMax: 2 });
+  // finalize three proposals: the cache (bound 2) evicts the oldest
+  for (const id of ['ev-a', 'ev-b', 'ev-c']) {
+    batch = [prop({ id })];
+    state = 'active';
+    clock += 60_000;
+    await gov.pollOnce();
+    state = 'closed';
+    clock += 60_000;
+    await gov.pollOnce();
+  }
+  assert.equal(gov._finalIds.size, 2, 'final cache stays bounded');
+  assert.ok(!gov._finalIds.has('ev-a'), 'the oldest final id was evicted under the documented bound');
+  const historyBefore = readFileSync(path.join(d, 'governance', 'events.jsonl'), 'utf8');
+  const firstDiscovery = linesOf(d, 'PROPOSAL_DISCOVERED').find((e) => e.proposalId === 'ev-a');
+  // the provider unexpectedly resurfaces ev-a as active
+  batch = [prop({ id: 'ev-a' })];
+  state = 'active';
+  clock += 60_000;
+  await gov.pollOnce();
+  assert.ok(readFileSync(path.join(d, 'governance', 'events.jsonl'), 'utf8').startsWith(historyBefore), 'old canonical history untouched');
+  const rediscovery = linesOf(d, 'PROPOSAL_DISCOVERED').filter((e) => e.proposalId === 'ev-a');
+  assert.equal(rediscovery.length, 2, 'the re-observation is a new fact, not a denial of the old one');
+  assert.notEqual(rediscovery[0].sourceEventId, rediscovery[1].sourceEventId, 'honest DISTINCT identity');
+  const envs = eventLines(d).map((e) => fromGovernanceEvent(e, new Date(clock).toISOString()));
+  assert.equal(new Set(envs.map((e) => e.id)).size, envs.length, 'no same-ID/different-content conflict anywhere');
+  cleanupDir(d, gov);
+});
+
 test.after(() => rmSync(TEST_DATA, { recursive: true, force: true }));
