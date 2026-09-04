@@ -340,71 +340,88 @@ export class MicrostructureTracker {
     this.pendingEvidenceDropped = 0;
     this.lastEvidenceDropReason = null;
     this.lastWriteFailureLogMs = 0; // coalesced outage logging (counting never stops)
+    // MICRO-1D: old durable DEBT lives apart from active sensing — a
+    // bounded ledger of departed symbols' frozen evidence, so drain debt
+    // can never occupy an active tracking slot or blind current prey.
+    this.debts = []; // [{symbol, coin, since, pendingWrite, pendingTransitions}]
+    // ONE per-symbol transition-ACK window shared by the active path and
+    // the drain path (only successful ACKs count; self-pruning, bounded)
+    this.transitionAckWindows = new Map();
   }
 
   #fresh(symbol, now) {
     return {
       symbol,
-      leftAt: null, // set when the symbol leaves the eligible set (grace)
       trades: [], // {ts, side, qty, price, notionalUsd} — Kraken ts, pruned+capped
       samples: [], // {ts(local), mid, spreadBps, depth, obi, coverage} — capped
       lastSampleTs: 0,
       activeEpisodes: { bid: null, ask: null }, // one per side, EPISODE_BAND only
       completedEpisodes: [], // capped ring of finished episodes
       trackedSince: now,
-      // MICRO-1A/1B/1C durable-emission state
-      coin: null, // remembered for drain records after the symbol leaves tracking
-      draining: false, // MICRO-1C: left tracking but pending evidence must still drain
+      coin: null, // remembered so drain records stay attributable
       pendingTransitions: [], // latched meaningful transitions, capped
       pendingWrite: null, // one deeply-frozen snapshot awaiting durable ACK (retried byte-identical)
       lastPeriodicEmitMs: 0, // first evaluation emits the baseline immediately; moves ONLY on ack
       lastProxyPresent: false, // ABSORPTION_PROXY edge detection (latched, never re-fired)
       lastBookState: null, // FRESH/STALE edge detection
-      transitionMinuteStart: 0,
-      transitionEmitsThisMinute: 0,
     };
   }
 
+  // MICRO-1D LIFECYCLE — explicit, testable, zombie-free:
+  //   ACTIVE   — an entry in this.symbols. The ONLY state that senses.
+  //   DRAINING — an entry in this.debts: the symbol departed with durable
+  //              evidence still owed. It senses NOTHING; its frozen record
+  //              keeps retrying. The first graceMs of a debt's life is the
+  //              grace phase of cleanup; the whole debt lives at most
+  //              graceMs + maxDrainAgeMs before the explicit drop policy.
+  //   REMOVED  — in neither structure.
+  // Old durable debt and new active sensing are SEPARATE OBJECTS: when a
+  // departed symbol becomes prey again it receives a brand-new active
+  // state (no stale buffers, no manufactured continuity across the
+  // observation gap) while its old frozen debt drains untouched beside
+  // it. Contradictory zombie combinations cannot be expressed.
+  //
   // Tracking set = ACTIVE STALKING ∩ SUBSCRIBED ∩ SYNCED, computed by the
-  // caller (the tape runner owns those facts). Enforces the tracked cap
-  // deterministically and applies the documented grace before discarding.
+  // caller (the tape runner owns those facts).
   setTrackingSet(trackingSet, now = Date.now()) {
     const wanted = [...trackingSet].sort().slice(0, this.limits.maxTrackedSymbols);
     const wantedSet = new Set(wanted);
-    for (const s of wanted) {
-      const st = this.symbols.get(s);
-      if (st) st.leftAt = null; // back in the set: grace cancelled
-      else if (this.symbols.size < this.limits.maxTrackedSymbols) {
-        this.symbols.set(s, this.#fresh(s, now));
-        this.failed.delete(s); // a re-tracked symbol gets a clean slate
-      }
-    }
-    for (const [s, st] of this.symbols) {
+    // departures FIRST: sensing stops IMMEDIATELY (the grace interval is
+    // never an extra sensing period); owed evidence becomes a drain debt;
+    // state owing nothing is removed outright
+    for (const [s, st] of [...this.symbols]) {
       if (wantedSet.has(s)) continue;
-      if (st.leftAt === null) st.leftAt = now;
-      else if (!st.draining && now - st.leftAt > this.limits.graceMs) {
-        // MICRO-1C: leaving prey status stops NEW sensing, but evidence
-        // already prepared or latched must be allowed to DRAIN — a coin
-        // does not have to remain prey to finish persisting what was
-        // already observed. Bounded: capacity- and age-limited.
-        if (!st.pendingWrite && !st.pendingTransitions.length) {
-          this.symbols.delete(s); // nothing owed; discard as before
-        } else {
-          const drainingNow = [...this.symbols.values()].filter((x) => x.draining).length;
-          if (drainingNow >= this.limits.maxDrainingSymbols) {
-            this.#dropEvidence(s, st, 'DRAIN_CAPACITY_EXCEEDED', now);
-          } else {
-            st.draining = true;
-            st.trades = []; // heavy sensing state released; only the debt remains
-            st.samples = [];
-          }
-        }
-      }
+      if (st.pendingWrite || st.pendingTransitions.length) this.#carveDebt(st, now);
+      this.symbols.delete(s);
+    }
+    // admissions: the ACTIVE cap counts ACTIVE symbols only — drain debt
+    // never starves current prey of tracking slots (§4)
+    for (const s of wanted) {
+      if (this.symbols.has(s)) continue;
+      if (this.symbols.size >= this.limits.maxTrackedSymbols) continue;
+      this.symbols.set(s, this.#fresh(s, now)); // clean lifecycle — re-entry included
+      this.failed.delete(s); // a re-tracked symbol gets a clean slate
     }
   }
 
+  // move owed evidence into the bounded drain ledger (capacity-checked;
+  // the frozen pendingWrite object crosses over UNTOUCHED — immutable)
+  #carveDebt(st, now) {
+    if (this.debts.length >= this.limits.maxDrainingSymbols) {
+      this.#dropEvidence(st.symbol, 'DRAIN_CAPACITY_EXCEEDED', now);
+      return;
+    }
+    this.debts.push({
+      symbol: st.symbol,
+      coin: st.coin,
+      since: now, // departure time — total drain life <= graceMs + maxDrainAgeMs
+      pendingWrite: st.pendingWrite,
+      pendingTransitions: st.pendingTransitions,
+    });
+  }
+
   tracked() {
-    return [...this.symbols.keys()].filter((s) => this.symbols.get(s).leftAt === null && !this.failed.has(s));
+    return [...this.symbols.keys()].filter((s) => !this.failed.has(s));
   }
 
   #isolate(symbol, err) {
@@ -414,8 +431,10 @@ export class MicrostructureTracker {
   }
 
   onTrade(symbol, { ts, side, qty, price }, now = Date.now()) {
+    // only ACTIVE symbols exist in the map — departed/draining symbols
+    // are simply absent and can never ingest new evidence (§1)
     const st = this.symbols.get(symbol);
-    if (!st || st.draining || this.failed.has(symbol)) return; // drain state senses nothing new
+    if (!st || this.failed.has(symbol)) return;
     try {
       // non-finite input is refused — never stored, never zeroed
       if (!fin(ts) || !fin(qty) || !fin(price) || qty <= 0 || price <= 0) return;
@@ -434,7 +453,7 @@ export class MicrostructureTracker {
 
   onBook(symbol, book, now = Date.now()) {
     const st = this.symbols.get(symbol);
-    if (!st || st.draining || this.failed.has(symbol)) return; // drain state senses nothing new
+    if (!st || this.failed.has(symbol)) return; // absent = departed = senses nothing
     try {
       if (!book?.synced) return;
       if (now - st.lastSampleTs < this.limits.sampleMinIntervalMs) return;
@@ -678,64 +697,67 @@ export class MicrostructureTracker {
         this.#latch(st, { kind: `BOOK_${st.lastBookState}_TO_${obs.bookState}`, anchorMs: now });
       }
       st.lastBookState = obs.bookState;
-      // minute windows
-      if (now - this.emitMinuteStart >= 60_000) { this.emitMinuteStart = now; this.emitsThisMinute = 0; }
-      if (now - st.transitionMinuteStart >= 60_000) { st.transitionMinuteStart = now; st.transitionEmitsThisMinute = 0; }
       // PREPARE: freeze at most one record awaiting durable acknowledgement.
       // MICRO-1C: the snapshot is a DEEPLY FROZEN structured clone — fully
       // detached from live episodes/depth/flow. It is history; the market
       // changing at T+5 cannot change what was prepared at T.
       if (!st.pendingWrite) {
         if (st.pendingTransitions.length) {
-          // the per-symbol cap counts successful ACKs in the window (§11);
-          // it gates preparing so retries can never mint extra emissions
-          if (st.transitionEmitsThisMinute >= this.limits.maxTransitionEmitsPerSymbolPerMinute) {
-            this.observationsSuppressedByRateLimit++; // suppressed ATTEMPT; transitions stay latched
-          } else {
-            st.pendingWrite = {
-              kind: 'transition',
-              failedAttempts: 0,
-              obs: freezeSnapshot({ ...obs, emitReason: { kind: 'TRANSITION', transitions: st.pendingTransitions.splice(0) } }),
-            };
-          }
+          st.pendingWrite = {
+            kind: 'transition',
+            failedAttempts: 0,
+            obs: freezeSnapshot({ ...obs, emitReason: { kind: 'TRANSITION', transitions: st.pendingTransitions.splice(0) } }),
+          };
         } else if (now - st.lastPeriodicEmitMs >= this.limits.periodicEmitMs) {
           st.pendingWrite = { kind: 'periodic', failedAttempts: 0, obs: freezeSnapshot({ ...obs, emitReason: { kind: 'PERIODIC' } }) };
         }
       }
-      return this.#attemptPending(st, now, write);
+      return this.#attemptPending(st, symbol, now, write);
     } catch (err) {
       this.#isolate(symbol, err);
       return [];
     }
   }
 
-  // MICRO-1C: attempt the ONE frozen pending record (retry retries HISTORY
-  // — never rebuilt from current book/flow/episodes). ACK alone moves
-  // counters, the per-symbol transition window, and the periodic clock.
-  #attemptPending(st, now, write) {
-    if (!st.pendingWrite) return [];
+  // MICRO-1C/1D: attempt the ONE frozen pending record (retry retries
+  // HISTORY — never rebuilt from current book/flow/episodes). ACK alone
+  // moves counters, the shared per-symbol transition-ACK window, and the
+  // periodic clock. The SAME accounting path serves active evaluate()
+  // and durability drain — no cross-path cap escape exists (§6).
+  #attemptPending(holder, symbol, now, write) {
+    if (!holder.pendingWrite) return [];
+    if (now - this.emitMinuteStart >= 60_000) { this.emitMinuteStart = now; this.emitsThisMinute = 0; }
     if (this.emitsThisMinute >= this.limits.maxDurablePerMinute) {
       this.observationsSuppressedByRateLimit++; // suppressed ATTEMPT; stays prepared for later budget
       return [];
     }
+    // per-symbol transition window: only successful ACKs count, at most
+    // the documented limit per minute — regardless of which path ACKs
+    if (
+      holder.pendingWrite.kind === 'transition' &&
+      this.transitionAcksInWindow(symbol, now) >= this.limits.maxTransitionEmitsPerSymbolPerMinute
+    ) {
+      this.observationsSuppressedByRateLimit++; // suppressed ATTEMPT; evidence stays pending
+      return [];
+    }
     try {
-      write(st.pendingWrite.obs);
+      write(holder.pendingWrite.obs);
     } catch (err) {
-      this.#writeFailed(st, err, now); // frozen record stays pending for a byte-identical retry
+      this.#writeFailed(holder, err, now); // frozen record stays pending for a byte-identical retry
       return [];
     }
     // ACK SUCCESS — only now does "remembered" become true
-    const done = st.pendingWrite;
-    st.pendingWrite = null;
+    const done = holder.pendingWrite;
+    holder.pendingWrite = null;
     this.emitsThisMinute++;
     this.durableObservationsEmitted++;
     this.lastDurableWriteSuccessTs = now;
     if (done.kind === 'periodic') this.periodicObservationsEmitted++;
     else {
       this.transitionObservationsEmitted++;
-      st.transitionEmitsThisMinute++; // §11: the per-symbol window counts ACKS, not prepares
+      this.#countTransitionAck(symbol, now);
     }
-    st.lastPeriodicEmitMs = now; // the baseline clock moves only on a real durable write
+    if ('lastPeriodicEmitMs' in holder) holder.lastPeriodicEmitMs = now; // baseline clock moves only on a real durable write
     try {
       this.approxBytesWritten += JSON.stringify(done.obs).length;
     } catch {
@@ -744,53 +766,68 @@ export class MicrostructureTracker {
     return [done.obs];
   }
 
-  // MICRO-1C: durability drain. Symbols that left tracking (grace or
-  // drain state) with evidence still owed keep retrying their frozen
-  // record — new sensing stays stopped — until ACK, or until the bounded
-  // drain policy forces an explicit, counted drop. Latched-but-unprepared
-  // transitions are frozen into one final minimal record (the book is no
-  // longer sensed, so it carries the transitions and says so honestly).
+  // successful transition ACKs for this symbol in the current minute window
+  transitionAcksInWindow(symbol, now) {
+    const w = this.transitionAckWindows.get(symbol);
+    if (!w || now - w.start >= 60_000) return 0;
+    return w.count;
+  }
+
+  #countTransitionAck(symbol, now) {
+    const w = this.transitionAckWindows.get(symbol);
+    if (!w || now - w.start >= 60_000) this.transitionAckWindows.set(symbol, { start: now, count: 1 });
+    else w.count++;
+    if (this.transitionAckWindows.size > 64) {
+      for (const [k, v] of this.transitionAckWindows) if (now - v.start >= 60_000) this.transitionAckWindows.delete(k);
+    }
+  }
+
+  // MICRO-1C/1D: durability drain over the DEBT ledger. Departed symbols'
+  // frozen evidence keeps retrying — new sensing stays stopped, current
+  // prey is never blinded — until ACK, or until the bounded drop policy
+  // forces an explicit, counted drop. Latched-but-unprepared transitions
+  // are frozen into one final minimal record (the book is no longer
+  // sensed, so it carries the transitions and says so honestly).
   drain(now = Date.now(), write = writeMicroObservation) {
     const drained = [];
-    for (const [symbol, st] of [...this.symbols]) {
-      if (st.leftAt === null) continue; // active symbols drain through evaluate()
-      const owes = st.pendingWrite || st.pendingTransitions.length;
-      if (!owes) {
-        if (st.draining) this.symbols.delete(symbol); // debt cleared — discard former-symbol state
-        continue;
-      }
+    for (const debt of [...this.debts]) {
       try {
-        if (now - st.leftAt > this.limits.graceMs + this.limits.maxDrainAgeMs) {
-          this.#dropEvidence(symbol, st, 'DRAIN_AGE_EXCEEDED', now);
+        if (now - debt.since > this.limits.graceMs + this.limits.maxDrainAgeMs) {
+          this.#dropEvidence(debt.symbol, 'DRAIN_AGE_EXCEEDED', now);
+          this.#settleDebt(debt);
           continue;
         }
-        if (!st.pendingWrite && st.pendingTransitions.length) {
-          st.pendingWrite = {
+        if (!debt.pendingWrite && debt.pendingTransitions.length) {
+          debt.pendingWrite = {
             kind: 'transition',
             failedAttempts: 0,
             obs: freezeSnapshot({
               ts: new Date(now).toISOString(),
               trackerVersion: MICRO_VERSION,
-              coin: st.coin ?? st.symbol.split('/')[0],
-              symbol: st.symbol,
+              coin: debt.coin ?? debt.symbol.split('/')[0],
+              symbol: debt.symbol,
               bookState: 'UNTRACKED_DRAIN', // sensing stopped; adapter maps this to UNKNOWN
-              emitReason: { kind: 'TRANSITION', transitions: st.pendingTransitions.splice(0) },
+              emitReason: { kind: 'TRANSITION', transitions: debt.pendingTransitions.splice(0) },
               drainedAfterUntrack: true,
               limitations: [L2_ATTRIBUTION, 'LOCAL_BOOK_APPLICATION_CLOCK', 'SENSING_STOPPED_BEFORE_EMISSION'],
             }),
           };
         }
-        if (now - this.emitMinuteStart >= 60_000) { this.emitMinuteStart = now; this.emitsThisMinute = 0; }
-        const out = this.#attemptPending(st, now, write);
+        const out = this.#attemptPending(debt, debt.symbol, now, write);
         drained.push(...out);
-        if (out.length && !st.pendingWrite && !st.pendingTransitions.length && st.draining) {
-          this.symbols.delete(symbol); // drained — former-symbol state safely discarded
-        }
+        if (!debt.pendingWrite && !debt.pendingTransitions.length) this.#settleDebt(debt); // paid — discarded
       } catch (err) {
-        this.#isolate(symbol, err);
+        // never poison the failed-map: the symbol may be ACTIVE prey again
+        this.isolatedErrors++;
+        this.log(`MICRO drain error for ${debt.symbol} (contained): ${err?.message ?? err}`);
       }
     }
     return drained;
+  }
+
+  #settleDebt(debt) {
+    const i = this.debts.indexOf(debt);
+    if (i >= 0) this.debts.splice(i, 1);
   }
 
   #writeFailed(st, err, now) {
@@ -808,11 +845,10 @@ export class MicrostructureTracker {
 
   // MICRO-1C bounded emergency drop: the durability system stayed broken
   // beyond the drain bound. NEVER silent — counted, reasoned, degraded.
-  #dropEvidence(symbol, st, reason, now) {
+  #dropEvidence(symbol, reason, now) {
     this.pendingEvidenceDropped++;
     this.lastEvidenceDropReason = `${symbol}: ${reason}`;
     this.log(`MICRO pending evidence DROPPED for ${symbol} (${reason}) at ${new Date(now).toISOString()} — durable memory did not receive it`);
-    this.symbols.delete(symbol);
   }
 
   health() {
@@ -820,16 +856,19 @@ export class MicrostructureTracker {
     // is separated from CURRENT write health. writeImpaired is true while
     // the latest write outcome is a failure, or while any failed record is
     // still awaiting its durable acknowledgement.
-    const pendings = [...this.symbols.values()].filter((x) => x.pendingWrite);
+    const pendings = [
+      ...[...this.symbols.values()].filter((x) => x.pendingWrite).map((x) => x.pendingWrite),
+      ...this.debts.filter((d) => d.pendingWrite).map((d) => d.pendingWrite),
+    ];
     const writeImpaired =
       (this.lastDurableWriteFailureTs !== null &&
         (this.lastDurableWriteSuccessTs === null || this.lastDurableWriteFailureTs > this.lastDurableWriteSuccessTs)) ||
-      pendings.some((x) => (x.pendingWrite.failedAttempts ?? 0) > 0);
+      pendings.some((w) => (w.failedAttempts ?? 0) > 0);
     return {
       status: this.failed.size || this.isolatedErrors || writeImpaired || this.pendingEvidenceDropped ? 'DEGRADED' : 'HEALTHY',
       writeImpaired,
       pendingWriteCount: pendings.length,
-      drainingCount: [...this.symbols.values()].filter((x) => x.draining).length,
+      drainingCount: this.debts.length,
       lastDurableWriteSuccessTs: this.lastDurableWriteSuccessTs,
       pendingEvidenceDropped: this.pendingEvidenceDropped,
       lastEvidenceDropReason: this.lastEvidenceDropReason,

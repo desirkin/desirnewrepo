@@ -239,12 +239,12 @@ test('35. tracking bound: eligibility, grace, discard, cap; ineligible symbols i
   // symbols simply never reach the eligible set — and feeding one is a no-op)
   tr.onTrade('C/USD', { ts: NOW, side: 'buy', qty: 1, price: 1 }, NOW);
   assert.ok(!tr.symbols.has('C/USD'));
-  // leaves the set: grace first, then discarded
+  // leaves the set: sensing state removed IMMEDIATELY (MICRO-1D) — the
+  // symbol owed no durable evidence, so nothing enters the drain ledger
   tr.setTrackingSet(new Set(['A/USD']), NOW + 1000);
-  assert.ok(tr.symbols.has('B/USD'), 'grace: state kept briefly');
-  assert.ok(!tr.tracked().includes('B/USD'), 'but no longer tracked');
-  tr.setTrackingSet(new Set(['A/USD']), NOW + 1000 + MICRO_LIMITS.graceMs + 1000);
-  assert.ok(!tr.symbols.has('B/USD'), 'discarded after documented grace');
+  assert.ok(!tr.symbols.has('B/USD'), 'departed symbol keeps no sensing state');
+  assert.ok(!tr.tracked().includes('B/USD'), 'no longer tracked');
+  assert.equal(tr.health().drainingCount, 0, 'no debt owed => no drain entry');
   // hard cap on tracked symbols
   const many = new Set(Array.from({ length: 40 }, (_, i) => `S${String(i).padStart(2, '0')}/USD`));
   const tr2 = new MicrostructureTracker();

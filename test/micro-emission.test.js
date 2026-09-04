@@ -320,27 +320,25 @@ test('1C-8. UNTRACK DURING FAILURE: evidence drains after the coin stops being p
   tr.onBook('X/USD', mkX(40, T0 + 1000), T0 + 1000);
   const failing = () => { throw new Error('storage down (drill)'); };
   tr.evaluate('X/USD', mkX(40, T0 + 1000), 'X', T0 + 5000, failing);
-  const frozen = tr.symbols.get('X/USD').pendingWrite.obs;
-  const frozenBytes = JSON.stringify(frozen);
-  // symbol leaves stalking; grace expires — evidence must NOT be deleted
+  const frozenBytes = JSON.stringify(tr.symbols.get('X/USD').pendingWrite.obs);
+  // symbol leaves stalking: sensing state goes, evidence enters the drain
   tr.setTrackingSet(new Set(), T0 + 6000);
-  tr.setTrackingSet(new Set(), T0 + 6000 + MICRO_LIMITS.graceMs + 1000);
-  assert.ok(tr.symbols.has('X/USD'), 'pending evidence survives untracking');
-  assert.ok(tr.symbols.get('X/USD').draining, 'symbol is in durability-drain state');
-  assert.ok(!tr.tracked().includes('X/USD'), 'but no longer prey — no new sensing');
-  tr.onBook('X/USD', mkX(100, T0 + 40_000), T0 + 40_000);
-  assert.equal(tr.symbols.get('X/USD').samples.length, 0, 'drain state senses nothing new');
-  // drain still failing => still owed
+  assert.ok(!tr.symbols.has('X/USD'), 'no zombie sensing state remains');
+  assert.equal(tr.health().drainingCount, 1, 'pending evidence survives as drain debt');
+  tr.onBook('X/USD', mkX(100, T0 + 7000), T0 + 7000);
+  tr.onTrade('X/USD', { ts: T0 + 7000, side: 'buy', qty: 1, price: 100 }, T0 + 7000);
+  assert.equal(tr.health().drainingCount, 1, 'drain debt senses nothing new');
+  // drain still failing => still owed, health degraded
   tr.drain(T0 + 40_000, failing);
-  assert.ok(tr.symbols.has('X/USD'));
+  assert.equal(tr.health().drainingCount, 1);
   assert.equal(tr.health().status, 'DEGRADED');
   // writer restored: drains exactly once with the ORIGINAL immutable bytes
   const written = [];
   tr.drain(T0 + 45_000, (o) => written.push(JSON.stringify(o)));
   assert.equal(written.length, 1, 'drains exactly once');
   assert.equal(written[0], frozenBytes, 'original immutable bytes');
-  assert.ok(!tr.symbols.has('X/USD'), 'former-symbol state then safely discarded');
-  // bounded emergency drop: a symbol stuck beyond grace+maxDrainAgeMs is
+  assert.equal(tr.health().drainingCount, 0, 'debt settled and discarded');
+  // bounded emergency drop: a debt stuck beyond grace+maxDrainAgeMs is
   // dropped EXPLICITLY — counted, reasoned, degraded — never silently
   const tr2 = new MicrostructureTracker({ bookStaleMs: 15_000 });
   tr2.setTrackingSet(new Set(['Y/USD']), T0);
@@ -348,10 +346,9 @@ test('1C-8. UNTRACK DURING FAILURE: evidence drains after the coin stops being p
   tr2.onBook('Y/USD', mkX(40, T0 + 1000), T0 + 1000);
   tr2.evaluate('Y/USD', mkX(40, T0 + 1000), 'Y', T0 + 5000, failing);
   tr2.setTrackingSet(new Set(), T0 + 6000);
-  tr2.setTrackingSet(new Set(), T0 + 6000 + MICRO_LIMITS.graceMs + 1000);
   tr2.drain(T0 + 6000 + MICRO_LIMITS.graceMs + MICRO_LIMITS.maxDrainAgeMs + 2000, failing);
-  assert.ok(!tr2.symbols.has('Y/USD'), 'dropped at the documented bound');
   const h2 = tr2.health();
+  assert.equal(h2.drainingCount, 0, 'dropped at the documented bound');
   assert.equal(h2.pendingEvidenceDropped, 1, 'explicit drop counter');
   assert.ok(h2.lastEvidenceDropReason.includes('DRAIN_AGE_EXCEEDED'), 'reason recorded');
   assert.equal(h2.status, 'DEGRADED', 'lost evidence degrades health');
@@ -392,13 +389,148 @@ test('1C-11. per-symbol transition cap counts ACKS across a minute boundary', ()
   tr.onBook('X/USD', mkX(40, T0 + 1000), T0 + 1000);
   // prepared in minute 1, but the write keeps failing across the boundary
   tr.evaluate('X/USD', mkX(40, T0 + 1000), 'X', T0 + 5000, () => { throw new Error('down (drill)'); });
-  const st = tr.symbols.get('X/USD');
-  assert.equal(st.transitionEmitsThisMinute, 0, 'preparing/retrying is NOT an emission');
+  assert.equal(tr.transitionAcksInWindow('X/USD', T0 + 5000), 0, 'preparing/retrying is NOT an emission');
   // ACK lands in minute 2 => it counts in minute 2's ACK window
   const out = tr.evaluate('X/USD', mkX(40, T0 + 65_000), 'X', T0 + 65_000, () => {});
   assert.equal(out.length, 1);
-  assert.equal(st.transitionEmitsThisMinute, 1, 'the ACK is what consumes the per-symbol slot');
+  assert.equal(tr.transitionAcksInWindow('X/USD', T0 + 65_000), 1, 'the ACK is what consumes the per-symbol slot');
   assert.equal(tr.health().transitionObservationsEmitted, 1);
+});
+
+
+// ---------------- MICRO-1D drills ----------------
+
+test('1D-8. IMMEDIATE UNTRACK: sensing stops the instant eligibility ends', () => {
+  const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+  tr.setTrackingSet(new Set(['X/USD']), T0);
+  tr.onBook('X/USD', mkX(100, T0), T0);
+  tr.onBook('X/USD', mkX(40, T0 + 1000), T0 + 1000); // depletion => pending evidence exists
+  tr.onTrade('X/USD', { ts: T0 + 1500, side: 'buy', qty: 1, price: 100 }, T0 + 1500);
+  tr.evaluate('X/USD', mkX(40, T0 + 1000), 'X', T0 + 5000, () => { throw new Error('down'); });
+  const debtBefore = tr.health().pendingWriteCount;
+  // remove from the eligible set, then hammer callbacks during what was grace
+  tr.setTrackingSet(new Set(), T0 + 6000);
+  for (let t = 6100; t < 30_000; t += 1000) {
+    tr.onBook('X/USD', mkX(5, T0 + t), T0 + t); // would open new episodes if sensed
+    tr.onTrade('X/USD', { ts: T0 + t, side: 'sell', qty: 9, price: 100 }, T0 + t);
+  }
+  assert.ok(!tr.symbols.has('X/USD'), 'no sensing state exists after departure');
+  assert.equal(tr.health().drainingCount, 1, 'only the debt remains');
+  assert.equal(tr.health().pendingWriteCount, debtBefore, 'no new evidence originated after eligibility ended');
+  const debt = tr.debts[0];
+  assert.equal(debt.pendingTransitions.length, 0, 'no new transitions latched post-departure');
+});
+
+test('1D-3. RE-ENTRY FROM DRAIN: old debt drains beside a clean new active life', () => {
+  const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+  tr.setTrackingSet(new Set(['X/USD']), T0);
+  // A-C: active, important transition, write fails
+  tr.onBook('X/USD', mkX(100, T0), T0);
+  tr.onBook('X/USD', mkX(40, T0 + 1000), T0 + 1000);
+  const failing = () => { throw new Error('storage down (drill)'); };
+  tr.evaluate('X/USD', mkX(40, T0 + 1000), 'X', T0 + 5000, failing);
+  const frozenBytes = JSON.stringify(tr.symbols.get('X/USD').pendingWrite.obs);
+  // D-E: leaves stalking -> drain
+  tr.setTrackingSet(new Set(), T0 + 6000);
+  assert.equal(tr.health().drainingCount, 1);
+  tr.drain(T0 + 10_000, failing); // still failing
+  // F: becomes stalking AGAIN before the old debt clears
+  tr.setTrackingSet(new Set(['X/USD']), T0 + 15_000);
+  assert.ok(tr.tracked().includes('X/USD'), 'actively tracked again');
+  assert.equal(tr.health().drainingCount, 1, 'old frozen evidence remains owed');
+  const st = tr.symbols.get('X/USD');
+  assert.equal(st.trades.length, 0, 'new sensing starts CLEAN — no stale buffers');
+  assert.equal(st.samples.length, 0);
+  assert.equal(st.activeEpisodes.bid, null, 'no old episode contaminates the new stalking period');
+  assert.equal(st.pendingWrite, null, 'old debt is a separate object, not the new state');
+  // new sensing WORKS: book + trade land in the fresh state
+  tr.onBook('X/USD', mkX(100, T0 + 16_000), T0 + 16_000);
+  tr.onTrade('X/USD', { ts: T0 + 16_100, side: 'buy', qty: 2, price: 100 }, T0 + 16_100);
+  assert.equal(st.samples.length, 1, 'NEW book data is sensed again — no zombie');
+  assert.equal(st.trades.length, 1, 'NEW trade data is sensed again');
+  assert.equal(JSON.stringify(tr.debts[0].pendingWrite.obs), frozenBytes, 'old frozen bytes unchanged');
+  // writer restored: old evidence ACKs exactly once with original bytes
+  const written = [];
+  tr.drain(T0 + 20_000, (o) => written.push(JSON.stringify(o)));
+  assert.equal(written.length, 1, 'old evidence ACKs exactly once');
+  assert.equal(written[0], frozenBytes, 'the ACK used the original immutable bytes');
+  assert.equal(tr.health().drainingCount, 0, 'debt settled');
+  assert.ok(tr.tracked().includes('X/USD'), 'active symbol remains fully functional');
+  tr.onBook('X/USD', mkX(99, T0 + 21_000), T0 + 21_000);
+  assert.equal(st.samples.length, 2, 'tracked() truth matches actual sensing ability');
+});
+
+test('1D-5. CAP SEPARATION: 6 draining debts + 12 fresh active symbols coexist', () => {
+  const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+  const failing = () => { throw new Error('down (drill)'); };
+  // build 6 drain-only debts
+  const old = Array.from({ length: 6 }, (_, i) => `OLD${i}/USD`);
+  tr.setTrackingSet(new Set(old), T0);
+  for (const s of old) {
+    tr.onBook(s, mkX(100, T0), T0);
+    tr.onBook(s, mkX(40, T0 + 1000), T0 + 1000);
+    tr.evaluate(s, mkX(40, T0 + 1000), s.slice(0, 4), T0 + 5000, failing);
+  }
+  tr.setTrackingSet(new Set(), T0 + 6000);
+  assert.equal(tr.health().drainingCount, 6, 'six drain-only former symbols');
+  // request 12 fresh eligible symbols: ALL must be admitted and sensed
+  const fresh = Array.from({ length: 12 }, (_, i) => `NEW${String(i).padStart(2, '0')}/USD`);
+  tr.setTrackingSet(new Set(fresh), T0 + 10_000);
+  assert.equal(tr.tracked().length, 12, 'drain debt never starves active tracking slots');
+  for (const s of fresh) {
+    tr.onBook(s, mkX(100, T0 + 11_000), T0 + 11_000);
+    assert.equal(tr.symbols.get(s).samples.length, 1, `${s} is genuinely sensed`);
+  }
+  assert.equal(tr.health().drainingCount, 6, 'drain count stays bounded at its own cap');
+  assert.ok(tr.symbols.size <= MICRO_LIMITS.maxTrackedSymbols, 'active map bounded');
+  assert.ok(tr.debts.length <= MICRO_LIMITS.maxDrainingSymbols, 'debt ledger bounded');
+  // a 7th debt would exceed drain capacity => explicit counted drop
+  tr.setTrackingSet(new Set(fresh.slice(1)), T0 + 12_000); // NEW00 leaves... no debt => plain removal
+  assert.equal(tr.health().pendingEvidenceDropped, 0);
+  tr.setTrackingSet(new Set(fresh), T0 + 13_000); // NEW00 re-admitted fresh
+  tr.onBook('NEW00/USD', mkX(100, T0 + 14_000), T0 + 14_000);
+  tr.onBook('NEW00/USD', mkX(40, T0 + 15_000), T0 + 15_000); // owes a transition now
+  tr.setTrackingSet(new Set(fresh.slice(1)), T0 + 16_000); // leaves owing, drain full
+  const h = tr.health();
+  assert.equal(h.drainingCount, 6, 'capacity held');
+  assert.equal(h.pendingEvidenceDropped, 1, 'over-capacity debt dropped explicitly');
+  assert.ok(h.lastEvidenceDropReason.includes('DRAIN_CAPACITY_EXCEEDED'));
+  // old drain debts still follow the age policy
+  tr.drain(T0 + 6000 + MICRO_LIMITS.graceMs + MICRO_LIMITS.maxDrainAgeMs + 5000, failing);
+  assert.equal(tr.health().drainingCount, 0, 'age policy still drops broken debts');
+});
+
+test('1D-7. DRAIN ACK LIMIT: the seventh transition ACK waits for the next minute', () => {
+  const tr = new MicrostructureTracker({ bookStaleMs: 15_000 });
+  tr.setTrackingSet(new Set(['X/USD']), T0);
+  tr.onBook('X/USD', mkX(100, T0), T0);
+  // six successfully ACKed transition records for X in one minute: flap
+  // book freshness on each evaluation to mint one real transition each time
+  let acked = 0;
+  for (let i = 0; i < 8 && acked < 6; i++) {
+    const now = T0 + 2000 + i * 5000;
+    const book = i % 2 === 0 ? mkX(100, now - 60_000) : mkX(100, now); // FRESH<->STALE edges
+    acked += tr.evaluate('X/USD', book, 'X', now, () => {}).filter((o) => o.emitReason.kind === 'TRANSITION').length;
+  }
+  assert.equal(acked, 6, 'six transition ACKs consumed the window');
+  assert.equal(tr.transitionAcksInWindow('X/USD', T0 + 40_000), 6);
+  // X moves into drain with ANOTHER transition owed
+  tr.onBook('X/USD', mkX(100, T0 + 41_000), T0 + 41_000);
+  tr.onBook('X/USD', mkX(40, T0 + 42_000), T0 + 42_000); // DEPLETION_OPENED latched
+  tr.setTrackingSet(new Set(), T0 + 43_000);
+  assert.equal(tr.health().drainingCount, 1);
+  // same window: the seventh must NOT ACK through the drain path
+  const written = [];
+  tr.drain(T0 + 45_000, (o) => written.push(o));
+  assert.equal(written.length, 0, 'cross-path escape closed: 7th transition ACK refused in-window');
+  assert.equal(tr.health().drainingCount, 1, 'evidence remains pending');
+  assert.ok(tr.health().observationsSuppressedByRateLimit > 0, 'suppressed attempt counted');
+  // next transition minute: the pending drain record ACKs as count 1
+  const nextMinute = T0 + 2000 + 61_000 + 40_000; // safely past the ACK window start + 60s
+  tr.drain(nextMinute, (o) => written.push(o));
+  assert.equal(written.length, 1, 'ACKs once the window rolls');
+  assert.equal(tr.transitionAcksInWindow('X/USD', nextMinute), 1, 'count 1 of the new minute');
+  assert.equal(tr.health().drainingCount, 0);
 });
 
 test.after(() => rmSync(TEST_DATA, { recursive: true, force: true }));

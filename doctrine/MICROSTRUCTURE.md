@@ -234,13 +234,25 @@ first write attempt are identical at every retry — a retry retries
 history, never rewrites it. New transitions occurring behind a failed
 write queue separately and get their own truthful record afterwards.
 
-**Durability drain.** A symbol leaving stalking stops all new sensing, but
-already-prepared evidence (and already-latched transitions, frozen into
-one final minimal record marked `SENSING_STOPPED_BEFORE_EMISSION`)
-continues draining under bounds: at most 6 draining former symbols, at
-most grace+120 s of drain age. Beyond the bound, evidence is dropped
-EXPLICITLY — `pendingEvidenceDropped` counts it, the reason is recorded,
-health degrades — never silently.
+**Durability drain (MICRO-1D lifecycle).** The lifecycle is explicit and
+zombie-free: **ACTIVE** (the only state that senses) → **DRAINING** (a
+departed symbol's owed evidence, held in a separate bounded debt ledger —
+it senses nothing; its first 30 s is the grace phase of cleanup) →
+**REMOVED**. Sensing stops the INSTANT eligibility ends — the grace
+interval is never an extra sensing period; no trade, sample, episode or
+transition may originate after departure. Old durable debt and new active
+sensing are SEPARATE OBJECTS: a re-stalked symbol receives a brand-new
+clean active state (no stale buffers, no manufactured continuity across
+the observation gap) while its old frozen debt drains untouched beside
+it. The ACTIVE cap (12) and the DRAIN cap (6) are separate bounds — drain
+debt never occupies an active tracking slot. Latched-but-unprepared
+transitions freeze into one final minimal record marked
+`SENSING_STOPPED_BEFORE_EMISSION`. Debts live at most grace+120 s; beyond
+capacity or age, evidence is dropped EXPLICITLY — `pendingEvidenceDropped`
+counts it, the reason is recorded, health degrades — never silently. The
+per-symbol transition limit (≤6/min) counts successful durable ACKs
+through ONE shared accounting path covering both the active evaluate()
+path and the drain path — no cross-path escape exists.
 
 **Write-health recovery.** Historical failure counts never erase; current
 health is separate: `writeImpaired` is true while the latest write outcome
