@@ -605,9 +605,18 @@ function validatePacketInner(packet) {
       if (!claimIds.has(ref)) fail(`${tag}: dangling claimRef ${String(ref).slice(0, 48)}`);
   }
 
-  // claim links — explicit claim/source relations; echoes stay echoes
+  // claim links — explicit claim/source relations; echoes stay echoes.
+  // 0B corroboration law: ONE SOURCE CANNOT CORROBORATE ITSELF. An
+  // independenceGroup is a provenance label, never a multiplier — so a
+  // given claim+source pair may carry AT MOST ONE non-ECHO support
+  // relation (ORIGIN or INDEPENDENT_SUPPORT), and a second one rejects
+  // the packet outright, never a silent collapse. Other relation kinds
+  // (ECHO, PRIMARY_CONFIRMATION, CONTRADICTION, RETRACTION) keep their
+  // own independent semantics on the same pair.
   dupSetCheck('claimLinks');
-  const supportByClaim = new Map(); // claimId -> Set of independence groups with non-echo support
+  const supportGroupsByClaim = new Map(); // claimId -> distinct independence groups of qualifying support
+  const supportSourcesByClaim = new Map(); // claimId -> distinct source identities of qualifying support
+  const supportPairs = new Set(); // claimRef|sourceRef pairs already carrying non-ECHO support
   const primaryByClaim = new Map(); // claimId -> has OFFICIAL primary confirmation
   const kindsByClaim = new Map(); // claimId -> Set of link kinds bound to it
   for (const l of arr('claimLinks')) {
@@ -625,28 +634,45 @@ function validatePacketInner(packet) {
     if (l.observedTs !== null) inTime(l.observedTs, `${tag}: observedTs`);
     if (claimIds.has(l.claimRef) && sourceIds.has(l.sourceRef)) {
       if (!kindsByClaim.has(l.claimRef)) kindsByClaim.set(l.claimRef, new Set());
-      if (CLAIM_LINK_KINDS.includes(l.kind)) kindsByClaim.get(l.claimRef).add(l.kind);
-      if ((l.kind === 'ORIGIN' || l.kind === 'INDEPENDENT_SUPPORT') && typeof l.independenceGroup === 'string') {
-        if (!supportByClaim.has(l.claimRef)) supportByClaim.set(l.claimRef, new Set());
-        supportByClaim.get(l.claimRef).add(l.independenceGroup);
+      kindsByClaim.get(l.claimRef).add(l.kind);
+      if (l.kind === 'ORIGIN' || l.kind === 'INDEPENDENT_SUPPORT') {
+        const pair = `${l.claimRef}|${l.sourceRef}`;
+        if (supportPairs.has(pair))
+          fail(`${tag}: at most one non-ECHO support relation per claim+source — one source is one source`);
+        else supportPairs.add(pair);
+        // qualifying support = non-ECHO support with a known provenance
+        // group; it contributes ONE source identity and ONE group
+        if (typeof l.independenceGroup === 'string') {
+          if (!supportGroupsByClaim.has(l.claimRef)) supportGroupsByClaim.set(l.claimRef, new Set());
+          supportGroupsByClaim.get(l.claimRef).add(l.independenceGroup);
+          if (!supportSourcesByClaim.has(l.claimRef)) supportSourcesByClaim.set(l.claimRef, new Set());
+          supportSourcesByClaim.get(l.claimRef).add(l.sourceRef);
+        }
       }
       if (l.kind === 'PRIMARY_CONFIRMATION') {
+        // separate semantics — a primary confirmation never counts as
+        // ordinary independent corroboration
         const src = arr('sources').find((s) => isPlainObject(s) && s.sourceId === l.sourceRef);
         if (src && src.authorityClass === 'OFFICIAL') primaryByClaim.set(l.claimRef, true);
       }
     }
   }
   // Status is a conclusion that needs structure, never the other way
-  // around: CORROBORATED needs independence, PRIMARY_CONFIRMED needs an
-  // official confirmation, and (0A, completing the symmetry) RETRACTED and
-  // CONTRADICTED need the relation that proves them. A producer may stay
-  // conservative, but may not assert the stronger status without proof.
+  // around: CORROBORATED needs genuinely independent support — at least
+  // TWO distinct source identities AND two distinct provenance groups
+  // (0B) — PRIMARY_CONFIRMED needs an official confirmation, and RETRACTED
+  // and CONTRADICTED need the relation that proves them. A producer may
+  // stay conservative, but may not assert the stronger status without
+  // proof.
   for (const c of arr('claims')) {
     if (!isPlainObject(c) || !claimIds.has(c.claimId)) continue;
     const tag = `claim ${String(c.claimId).slice(0, 24)}`;
     const kinds = kindsByClaim.get(c.claimId) ?? new Set();
-    if (c.status === 'CORROBORATED' && (supportByClaim.get(c.claimId)?.size ?? 0) < 2)
-      fail(`${tag}: CORROBORATED requires non-ECHO support from >=2 distinct independenceGroups`);
+    if (
+      c.status === 'CORROBORATED' &&
+      ((supportSourcesByClaim.get(c.claimId)?.size ?? 0) < 2 || (supportGroupsByClaim.get(c.claimId)?.size ?? 0) < 2)
+    )
+      fail(`${tag}: CORROBORATED requires non-ECHO support from >=2 distinct sources AND >=2 distinct independenceGroups`);
     if (c.status === 'PRIMARY_CONFIRMED' && !primaryByClaim.get(c.claimId))
       fail(`${tag}: PRIMARY_CONFIRMED requires a PRIMARY_CONFIRMATION link from an OFFICIAL source`);
     if (c.status === 'RETRACTED' && !kinds.has('RETRACTION'))

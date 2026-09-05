@@ -219,6 +219,36 @@ CONTRADICTED only when a RETRACTION or CONTRADICTION relation proves it,
 a source cannot be retrieved before it was published, and an observation
 cannot be known before it was observed.
 
+## Independence and withholding are sealed (SOCRATES-CONTRACT-0B)
+
+ONE SOURCE CANNOT CORROBORATE ITSELF.
+
+CORROBORATION REQUIRES DISTINCT SOURCES AND DISTINCT PROVENANCE GROUPS.
+
+INDEPENDENCE GROUPS ARE PROVENANCE LABELS, NOT MULTIPLIERS.
+
+WITHHELD_INVALID_PACKET CARRIES NO INTERPRETATION.
+
+INVALID EVIDENCE MAY NOT BECOME ANALYSIS BY HIDING INSIDE A WITHHELD STATE.
+
+A given claim+source pair may carry at most ONE non-ECHO support relation
+(ORIGIN or INDEPENDENT_SUPPORT) — a second one rejects the packet, never a
+silent collapse — so a producer cannot manufacture independence by
+assigning one source multiple group names. `CORROBORATED` requires
+qualifying non-ECHO support from at least two distinct source identities
+AND at least two distinct independence groups; echoes never count, and a
+PRIMARY_CONFIRMATION stays separate confirmation semantics, never ordinary
+corroboration. There is still no numeric authority weighting.
+
+When the supplied packet fails validation, the only truthful analysis is a
+`WITHHELD_INVALID_PACKET` diagnostic envelope: thesis, mechanism,
+implication and stage null; support, contradictions, missingEvidence,
+falsifiers, watchNext, unknowns, securityNotes and limitations all empty;
+`untrustedTextSeen` and `promptInjectionSuspected` both false — the packet
+was rejected before consumption, so Socrates saw nothing and says nothing.
+Symmetrically, a VALID packet must never be labeled
+`WITHHELD_INVALID_PACKET`: state names mean what they say.
+
 ## Closed book
 
 Future SOCRATES-0 operates CLOSED BOOK: it reasons only over the supplied

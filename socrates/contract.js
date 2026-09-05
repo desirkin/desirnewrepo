@@ -266,9 +266,14 @@ function validateAnalysisInner(analysis, packet) {
 
   // The packet binding: exact identity, and the packet must itself be valid
   // — the ONLY analysis allowed over an invalid packet is a withholding.
+  // 0B makes the relationship symmetric: state names mean what they say,
+  // so a VALID packet can never truthfully be labeled WITHHELD_INVALID_PACKET.
+  const withheld = analysis.analysisState === 'WITHHELD_INVALID_PACKET';
   const packetCheck = isPlainObject(packet) ? validateEvidencePacket(packet) : { valid: false, reasons: ['no packet'] };
-  if (!packetCheck.valid && analysis.analysisState !== 'WITHHELD_INVALID_PACKET')
+  if (!packetCheck.valid && !withheld)
     fail('analysis: packet is invalid — only WITHHELD_INVALID_PACKET may be emitted over it');
+  if (packetCheck.valid && withheld)
+    fail('analysis: packet is valid — WITHHELD_INVALID_PACKET must not be claimed over valid evidence');
   if (isPlainObject(packet) && analysis.packetId !== packet.packetId)
     fail(`analysis: packetId ${String(analysis.packetId).slice(0, 48)} does not match the supplied packet`);
 
@@ -385,6 +390,15 @@ function validateAnalysisInner(analysis, packet) {
     if (analysis.marketImplication !== null) fail(`marketImplication: must be null when ${analysis.analysisState}`);
     if (analysis.stage !== null) fail(`stage: must be null when ${analysis.analysisState}`);
     if (arr('falsifiers').length !== 0) fail(`falsifiers: must be empty when ${analysis.analysisState}`);
+    // 0B: WITHHELD MEANS WITHHELD. A packet that failed the truth contract
+    // gave Socrates no authority to interpret its contents, so the
+    // withholding is a diagnostic state envelope ONLY — no support, no
+    // contradictions, no guidance, no citations into invalid members.
+    // (INSUFFICIENT_EVIDENCE and MODEL_UNAVAILABLE keep their existing
+    // bounded diagnostic semantics over a VALID packet.)
+    if (withheld)
+      for (const key of ['support', 'contradictions', 'missingEvidence', 'watchNext', 'unknowns', 'securityNotes', 'limitations'])
+        if (arr(key).length !== 0) fail(`${key}: must be empty when WITHHELD_INVALID_PACKET — withheld means withheld`);
   }
 
   // support statements — FACT_REFERENCE vs INFERENCE, both cited
@@ -455,7 +469,15 @@ function validateAnalysisInner(analysis, packet) {
     if (typeof analysis.security.untrustedTextSeen !== 'boolean') fail('security: untrustedTextSeen must be boolean');
     if (typeof analysis.security.promptInjectionSuspected !== 'boolean')
       fail('security: promptInjectionSuspected must be boolean');
-    if (
+    if (withheld) {
+      // 0B: a withheld packet was rejected BEFORE model consumption —
+      // Socrates saw nothing, so it may not claim to have seen untrusted
+      // text or suspected an injection inside evidence it never read.
+      if (analysis.security.untrustedTextSeen !== false)
+        fail('security: untrustedTextSeen must be false when WITHHELD_INVALID_PACKET — the packet was never consumed');
+      if (analysis.security.promptInjectionSuspected !== false)
+        fail('security: promptInjectionSuspected must be false when WITHHELD_INVALID_PACKET — the packet was never consumed');
+    } else if (
       isPlainObject(packet) &&
       isPlainObject(packet.security) &&
       packet.security.untrustedTextPresent === true &&
