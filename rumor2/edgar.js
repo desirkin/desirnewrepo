@@ -69,6 +69,17 @@ const boundedStr = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
 // number: the same filing re-encountered tomorrow, after a restart, or
 // through a reordered response is the SAME source observation; an
 // amendment is a different accession and stays a distinct observation.
+//
+// LOGICAL IDENTITY LAW (B1 closeout): ONE SEC FILING IS ONE LOGICAL SOURCE
+// OBSERVATION. Every identity-bearing field of an item (title, summary,
+// guid, link, publishedTs) is built ONLY from immutable filing-specific
+// facts — CIK, accession, form, filing/acceptance clocks, stated items,
+// primary document, and the stable archive link. The issuer's CURRENT
+// display name (root.name) is mutable presentation metadata the SEC
+// updates in place: it is deliberately excluded, so a company rename can
+// never manufacture a "new" filing. The prepared transaction still binds
+// all preserved immutable facts through the recomputed source identity, so
+// an accession cannot be reused over silently altered filing facts.
 export function parseEdgarSubmissions(text, { cik, forms }) {
   let root;
   try {
@@ -79,7 +90,6 @@ export function parseEdgarSubmissions(text, { cik, forms }) {
   if (root === null || typeof root !== 'object' || Array.isArray(root)) return { ok: false, reason: 'submissions root not an object' };
   const gotCik = String(root.cik ?? '').padStart(10, '0');
   if (gotCik !== cik) return { ok: false, reason: `submissions CIK ${gotCik.slice(0, 12)} disagrees with requested ${cik}` };
-  const entity = boundedStr(root.name, 200) || `CIK ${cik}`;
   const recent = root.filings?.recent;
   if (recent === null || typeof recent !== 'object' || Array.isArray(recent)) return { ok: false, reason: 'filings.recent missing' };
   const acc = recent.accessionNumber;
@@ -114,12 +124,12 @@ export function parseEdgarSubmissions(text, { cik, forms }) {
     const link = `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${a.replace(/-/g, '')}/${doc || `${a}-index.htm`}`.slice(0, 500);
     const filingItems = boundedStr(itemsCol?.[i], 200);
     items.push({
-      title: `SEC EDGAR filing ${boundedStr(form[i], 24)}: ${entity} (CIK ${cik})`.slice(0, MAX_TITLE_CHARS),
+      // immutable filing facts ONLY — never the issuer's mutable display name
+      title: `SEC EDGAR filing ${boundedStr(form[i], 24)} accession ${a} (CIK ${cik})`.slice(0, MAX_TITLE_CHARS),
       summary: [
         `accession=${a}`,
         `form=${boundedStr(form[i], 24)}`,
         `cik=${cik}`,
-        `entity=${entity}`,
         `filed=${filed || 'UNKNOWN'}`,
         `accepted=${accepted || 'UNKNOWN'}`,
         `items=${filingItems || 'NONE_STATED'}`,
@@ -133,5 +143,5 @@ export function parseEdgarSubmissions(text, { cik, forms }) {
     });
   }
   items.reverse();
-  return { ok: true, items, entity };
+  return { ok: true, items };
 }

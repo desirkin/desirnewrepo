@@ -122,9 +122,12 @@ test('X-1. an EDGAR bundle cannot impersonate OFAC provenance (and vice versa)',
   ]) {
     const cp = await captureOwed(from);
     assert.equal(V(cp), null, 'legitimate bundle validates');
-    // rewrite EVERY provider binding consistently — txn, facts, events —
-    // exactly what an internally consistent forgery would do
-    const forged = JSON.parse(JSON.stringify(cp).replaceAll(`"${from}"`, `"${to}"`));
+    // rewrite EVERY provider binding inside the TRANSACTION consistently —
+    // txn, facts, events — exactly what an internally consistent forgery
+    // would do (the provider map itself stays intact: the closed provider
+    // SET rule would refuse a mangled map before the bundle is even read)
+    const forged = structuredClone(cp);
+    forged.txn = JSON.parse(JSON.stringify(cp.txn).replaceAll(`"${from}"`, `"${to}"`));
     const err = V(forged);
     assert.ok(err.includes('forged provenance'), `${from}->${to}: the recomputed identity refuses the disguise (${err})`);
   }

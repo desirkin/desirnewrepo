@@ -572,7 +572,9 @@ export function startRumor2({
           r.lastDiffCounts = upd.counts;
           if (upd.kind !== 'UNCHANGED')
             snapshotCommit = {
-              anchor: { hash: upd.datasetHash, acceptedTs: now(), recordCount: ds.records.size },
+              // seq is the monotonic causal clock of accepted snapshots —
+              // it is what keeps a recurrent dataset state a NEW transition
+              anchor: { hash: upd.datasetHash, acceptedTs: now(), recordCount: ds.records.size, seq: upd.seq },
               payload: ofacSnapshotPayload(ds.records, upd.datasetHash),
             };
         }

@@ -261,9 +261,39 @@ coin-resolution withholding into its bundle. EDGAR and OFAC are separate
 source families (`US_SEC`, `US_TREASURY_OFAC`); a downstream article
 repeating both is echo, not corroboration.
 
+Closeout hardening (B1 certification):
+
+- THE ATTEMPT DEADLINE BOUNDS THE WHOLE OPERATION. One watchdog covers
+  connection, redirect hops, headers, AND full body consumption — headers
+  arriving is not completion, and a 200 whose body stalls terminates
+  exactly like a hung connection, adopting zero items, zero truth, zero
+  snapshot, zero cursor, zero provider success.
+- ONE SEC FILING IS ONE LOGICAL SOURCE OBSERVATION. EDGAR identity-bearing
+  content derives ONLY from immutable filing facts (CIK, accession, form,
+  filing/acceptance clocks, stated items, primary document, archive link);
+  the issuer's mutable current display name is excluded, so a company
+  rename can never manufacture a new filing, while the recomputed identity
+  still binds every preserved immutable fact against forgery.
+- AN OFAC CHANGE IS A TEMPORAL TRANSITION, not a record state. Its
+  identity binds the prior accepted snapshot's monotonic sequence number
+  (the causal clock of accepted snapshots) plus uid, change type, and the
+  prior/new record hashes — no wall clock, no randomness. Retries and
+  crash replays of the same owed transition derive the same identity;
+  a recurrent dataset state (A -> B -> A -> B) is a NEW transition.
+- PROVIDER STATE IS A CLOSED SCHEMA OVER A CLOSED SET. Exactly the
+  enumerated base fields, no undeclared extras; the snapshot anchor is
+  legal on the OFAC ear alone; and the provider map must be either the
+  complete current registry or EXACTLY the pre-B1 legacy trio (which
+  restores with the B1 ears born fresh) — any other subset lost durable
+  truth and fails closed.
+
 Roadmap unchanged: RUMOR-2B may later add authorized social ears and
 propagation reasoning; SOCRATES remains separate; GHOST remains separate;
 derivatives and on-chain senses remain separate. None of those exist yet.
+The SEC_OFFICIAL / EDGAR_OFFICIAL common-organization provenance question
+(one U.S. SEC, two provider ids) remains reserved for RUMOR-2B propagation
+work: it is inert today because filings can produce no claims, and a
+regression drill pins that inertness.
 
 ## What RUMOR-2A is not
 

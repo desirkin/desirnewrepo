@@ -289,16 +289,10 @@ test('OFAC-addr. digital-currency extraction is verbatim, bounded, and never nor
   assert.deepEqual(extractDigitalCurrencyAddresses('no addresses here'), []);
 });
 
-test('OFAC-snap-cp. the snapshot anchor is a CLOSED validated shape — undeclared provider state fails closed', () => {
-  const cpOk = {
-    checkpointVersion: 3,
-    revision: 1,
-    savedTs: T1,
-    providers: { OFAC_OFFICIAL: { seenIds: [], etag: null, lastModified: null, backoffUntil: null, consecutiveFailures: 0, lastSuccessTs: null, bootstrapped: true, snapshot: { hash: 'a'.repeat(40), acceptedTs: T1, recordCount: 5 } } },
-    counters: { sourcesObserved: 1, claimsObserved: 0, packetsProduced: 0, packetsWithheld: 0, duplicates: 0 },
-    graph: { claims: {} },
-    txn: null,
-  };
+test('OFAC-snap-cp. the snapshot anchor is a CLOSED validated shape — undeclared provider state fails closed', async () => {
+  const { emptyCheckpoint } = await import('../rumor2/truth.js');
+  const cpOk = emptyCheckpoint([...PROVIDER_IDS], T1);
+  cpOk.providers.OFAC_OFFICIAL.snapshot = { hash: 'a'.repeat(40), acceptedTs: T1, recordCount: 5, seq: 2 };
   assert.equal(V(cpOk), null);
   const extra = structuredClone(cpOk);
   extra.providers.OFAC_OFFICIAL.snapshot.smuggledField = 'x';
@@ -309,4 +303,10 @@ test('OFAC-snap-cp. the snapshot anchor is a CLOSED validated shape — undeclar
   const negCount = structuredClone(cpOk);
   negCount.providers.OFAC_OFFICIAL.snapshot.recordCount = -1;
   assert.ok(V(negCount).includes('recordCount invalid'));
+  const badSeq = structuredClone(cpOk);
+  badSeq.providers.OFAC_OFFICIAL.snapshot.seq = -1;
+  assert.ok(V(badSeq).includes('snapshot seq invalid'));
+  const noSeq = structuredClone(cpOk);
+  delete noSeq.providers.OFAC_OFFICIAL.snapshot.seq;
+  assert.ok(V(noSeq).includes('undeclared or missing fields'), 'the causal snapshot clock is mandatory');
 });

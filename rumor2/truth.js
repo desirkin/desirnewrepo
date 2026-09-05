@@ -240,6 +240,17 @@ export const PROVIDER_COVERAGE_STATES = Object.freeze([
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isTs = (v) => Number.isSafeInteger(v) && v > 0;
 
+// The CLOSED provider-state schema (B1 closeout): exactly these base
+// fields, no undeclared extras; ONLY the OFAC snapshot/diff ear may carry
+// the additional validated `snapshot` anchor. And the provider-key SET is
+// itself closed: either the complete current registry, or EXACTLY the
+// pre-B1 legacy trio (the one historically legitimate elder shape — new
+// ears are then born fresh on restore). Any other subset lost a provider's
+// durable truth and fails closed.
+const PROVIDER_STATE_KEYS = Object.freeze(['seenIds', 'etag', 'lastModified', 'backoffUntil', 'consecutiveFailures', 'lastSuccessTs', 'bootstrapped']);
+const SNAPSHOT_PROVIDER_IDS = Object.freeze(['OFAC_OFFICIAL']);
+export const LEGACY_PRE_B1_PROVIDERS = Object.freeze(['CFTC_OFFICIAL', 'KRAKEN_OFFICIAL', 'SEC_OFFICIAL']);
+
 export function validateRumor2Checkpoint(cp, { providerIds }) {
   if (!isPlainObject(cp)) return 'checkpoint: not an object';
   if (cp.checkpointVersion !== RUMOR2_CHECKPOINT_VERSION) return `checkpoint: unsupported version ${cp.checkpointVersion}`;
@@ -249,6 +260,9 @@ export function validateRumor2Checkpoint(cp, { providerIds }) {
   for (const [id, p] of Object.entries(cp.providers)) {
     if (!providerIds.includes(id)) return `checkpoint: unknown provider ${id}`;
     if (!isPlainObject(p)) return `checkpoint: provider ${id} not an object`;
+    const allowedKeys = SNAPSHOT_PROVIDER_IDS.includes(id) ? [...PROVIDER_STATE_KEYS, 'snapshot'] : PROVIDER_STATE_KEYS;
+    for (const k of Object.keys(p)) if (!allowedKeys.includes(k)) return `checkpoint: provider ${id} carries undeclared field '${k}'`;
+    for (const k of PROVIDER_STATE_KEYS) if (!(k in p)) return `checkpoint: provider ${id} missing field '${k}'`;
     if (!Array.isArray(p.seenIds) || p.seenIds.length > MAX_SEEN_IDS) return `checkpoint: provider ${id} seenIds invalid`;
     for (const s of p.seenIds) if (typeof s !== 'string' || !/^r2s-[0-9a-f]{40}$/.test(s)) return `checkpoint: provider ${id} bad seen id`;
     if (new Set(p.seenIds).size !== p.seenIds.length) return `checkpoint: provider ${id} duplicate seen ids`;
@@ -260,21 +274,33 @@ export function validateRumor2Checkpoint(cp, { providerIds }) {
     if (p.lastSuccessTs !== null && !isTs(p.lastSuccessTs)) return `checkpoint: provider ${id} lastSuccessTs invalid`;
     if (p.bootstrapped !== true && p.bootstrapped !== false) return `checkpoint: provider ${id} bootstrapped invalid`;
     // RUMOR-2B1: the ONLY additional provider-state field — an explicitly
-    // validated dataset-snapshot anchor for snapshot/diff ears (OFAC). It
-    // is a bounded truth anchor, never a blob: the bulky snapshot detail
-    // lives outside the checkpoint and must re-derive this exact hash
-    // before it may serve as a diff basis. Absent or null on every other
-    // provider; anything else in the slot fails closed.
+    // validated dataset-snapshot anchor, permitted on the OFAC snapshot/
+    // diff ear ALONE (the key-closure above already refuses it anywhere
+    // else). It is a bounded truth anchor, never a blob: the bulky snapshot
+    // detail lives outside the checkpoint and must re-derive this exact
+    // hash before it may serve as a diff basis; seq is the monotonic causal
+    // clock of accepted snapshots that keeps recurrent dataset states
+    // distinct temporal transitions.
     if (p.snapshot !== undefined && p.snapshot !== null) {
       const s = p.snapshot;
       if (!isPlainObject(s)) return `checkpoint: provider ${id} snapshot invalid`;
       const keys = Object.keys(s).sort();
-      if (keys.join(',') !== 'acceptedTs,hash,recordCount') return `checkpoint: provider ${id} snapshot carries undeclared or missing fields`;
+      if (keys.join(',') !== 'acceptedTs,hash,recordCount,seq') return `checkpoint: provider ${id} snapshot carries undeclared or missing fields`;
       if (typeof s.hash !== 'string' || !/^[0-9a-f]{40}$/.test(s.hash)) return `checkpoint: provider ${id} snapshot hash invalid`;
       if (!isTs(s.acceptedTs)) return `checkpoint: provider ${id} snapshot acceptedTs invalid`;
       if (!Number.isSafeInteger(s.recordCount) || s.recordCount < 0) return `checkpoint: provider ${id} snapshot recordCount invalid`;
+      if (!Number.isSafeInteger(s.seq) || s.seq < 0) return `checkpoint: provider ${id} snapshot seq invalid`;
     }
   }
+  // CLOSED provider-key SET: the complete current registry, or exactly the
+  // pre-B1 legacy trio. A checkpoint that lost one provider's durable
+  // truth — or gained a partial B1 shape that never legitimately existed —
+  // is corrupt and fails closed rather than being silently repaired over.
+  const idSet = Object.keys(cp.providers).sort().join(',');
+  const fullSet = [...providerIds].sort().join(',');
+  const legacySet = [...LEGACY_PRE_B1_PROVIDERS].sort().join(',');
+  if (idSet !== fullSet && idSet !== legacySet)
+    return 'checkpoint: provider set is neither the complete current registry nor the exact pre-B1 legacy set';
   if (!isPlainObject(cp.counters)) return 'checkpoint: counters missing';
   for (const k of ['sourcesObserved', 'claimsObserved', 'packetsProduced', 'packetsWithheld', 'duplicates'])
     if (!Number.isSafeInteger(cp.counters[k]) || cp.counters[k] < 0) return `checkpoint: counter ${k} invalid`;

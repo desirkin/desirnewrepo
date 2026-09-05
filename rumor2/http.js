@@ -42,33 +42,70 @@ const readHeader = (res, name) => {
 
 // Bounded body read: honors Content-Length when present, streams with a
 // hard cap when a reader exists, and length-checks the text fallback.
-// Never allocates from an attacker-declared length.
-async function boundedBody(res, maxBytes = MAX_FEED_BYTES) {
-  const declared = Number(readHeader(res, 'content-length'));
-  if (Number.isFinite(declared) && declared > maxBytes) return { error: `response ${declared} bytes exceeds ${maxBytes}` };
-  if (res.body && typeof res.body.getReader === 'function') {
-    const reader = res.body.getReader();
-    const chunks = [];
-    let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength ?? value.length ?? 0;
-      if (total > maxBytes) {
+// Never allocates from an attacker-declared length. HARDENING (B1
+// closeout): the body read races the SAME attempt deadline that bounds the
+// connection — headers arriving does not satisfy the deadline, so a server
+// that answers 200 and then stalls the body (before the first chunk,
+// mid-stream, or inside a hanging text() fallback) is cut off exactly like
+// a hung connection. Every read is raced against the abort signal because
+// a hostile or broken transport cannot be trusted to honor cancellation.
+async function boundedBody(res, maxBytes = MAX_FEED_BYTES, signal = null, timeoutMs = HTTP_TIMEOUT_MS) {
+  const timedOut = () => ({ error: `body read exceeded the ${timeoutMs}ms attempt deadline`, timedOut: true });
+  if (signal?.aborted) return timedOut();
+  let onAbort = null;
+  const abortP = signal
+    ? new Promise((_, reject) => {
+        onAbort = () => reject(Object.assign(new Error('attempt deadline expired during body read'), { name: 'AbortError' }));
+        signal.addEventListener('abort', onAbort, { once: true });
+      })
+    : null;
+  abortP?.catch(() => {}); // the race may settle first — this rejection must never surface unhandled
+  const raced = (p) => (abortP ? Promise.race([p, abortP]) : p);
+  try {
+    const declared = Number(readHeader(res, 'content-length'));
+    if (Number.isFinite(declared) && declared > maxBytes) return { error: `response ${declared} bytes exceeds ${maxBytes}` };
+    if (res.body && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader();
+      const cancelReader = () => {
+        // fire-and-forget: never await a hostile stream's cancel, never leak
         try {
-          await reader.cancel();
+          const c = reader.cancel();
+          c?.catch?.(() => {});
         } catch {
-          // stream already broken — the oversize rejection stands either way
+          // stream already broken — the rejection stands either way
         }
-        return { error: `response stream exceeds ${maxBytes} bytes — aborted` };
+      };
+      try {
+        const chunks = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await raced(reader.read());
+          if (done) break;
+          total += value.byteLength ?? value.length ?? 0;
+          if (total > maxBytes) {
+            cancelReader();
+            return { error: `response stream exceeds ${maxBytes} bytes — aborted` };
+          }
+          chunks.push(Buffer.from(value));
+        }
+        return { text: Buffer.concat(chunks).toString('utf8') };
+      } catch (err) {
+        cancelReader(); // no zombie reader survives a failed or timed-out body
+        if (err?.name === 'AbortError' || signal?.aborted) return timedOut();
+        return { error: `body read failed: ${err.message}` };
       }
-      chunks.push(Buffer.from(value));
     }
-    return { text: Buffer.concat(chunks).toString('utf8') };
+    try {
+      const text = await raced(res.text());
+      if (text.length > maxBytes) return { error: `response ${text.length} chars exceeds ${maxBytes}` };
+      return { text };
+    } catch (err) {
+      if (err?.name === 'AbortError' || signal?.aborted) return timedOut();
+      return { error: `body read failed: ${err.message}` };
+    }
+  } finally {
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
   }
-  const text = await res.text();
-  if (text.length > maxBytes) return { error: `response ${text.length} chars exceeds ${maxBytes}` };
-  return { text };
 }
 
 // fetchProviderFeed — one guarded conditional GET of the provider's fixed
@@ -85,54 +122,75 @@ export async function fetchProviderFeed({ provider, fetchImpl = fetch, userAgent
   const effectiveTimeout = timeoutMs ?? provider.timeoutMs ?? HTTP_TIMEOUT_MS;
   const maxBytes = Number.isSafeInteger(provider.maxBytes) && provider.maxBytes > 0 ? provider.maxBytes : MAX_FEED_BYTES;
   let url = urlOverride ?? provider.feedUrl;
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const policyErr = urlPolicyError(url, provider);
-    if (policyErr) return { outcome: 'FAILED', reason: boundedError(policyErr) };
-    // the watchdog stays ref'd while a request is in flight: it is what
-    // guarantees the wait is bounded even against a hung transport, and it
-    // is always cleared on completion
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), effectiveTimeout);
-    let res;
-    try {
-      const headers = { 'user-agent': userAgent, accept: provider.accept ?? 'application/rss+xml, application/atom+xml, application/xml, text/xml' };
-      if (etag) headers['if-none-match'] = etag;
-      if (lastModified) headers['if-modified-since'] = lastModified;
-      res = await fetchImpl(url, { headers, redirect: 'manual', signal: controller.signal });
-    } catch (err) {
-      clearTimeout(timer);
-      const timedOut = err?.name === 'AbortError' || controller.signal.aborted;
-      return { outcome: 'FAILED', reason: boundedError(timedOut ? `timeout after ${effectiveTimeout}ms` : `network: ${err.message}`) };
-    }
-    clearTimeout(timer);
-    const status = res.status;
-    if (status === 304) return { outcome: 'NOT_MODIFIED', status };
-    if (status >= 300 && status < 400) {
-      const location = readHeader(res, 'location');
-      if (!location) return { outcome: 'FAILED', reason: 'redirect without location', status };
-      let next;
+  // HARDENING (B1 closeout): ONE attempt deadline bounds the ENTIRE network
+  // operation — connection, redirect hops, headers, AND full body
+  // consumption. The watchdog stays ref'd and armed until the attempt
+  // resolves; it is cleared exactly once in the finally below, so neither
+  // success nor any failure path leaks a timer, and a 200 whose body then
+  // stalls is terminated exactly like a hung connection. Policy rejections
+  // (blocked redirect, non-200) still fail immediately — they never wait
+  // out the deadline.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), effectiveTimeout);
+  // the deadline holds even against a transport that IGNORES the abort
+  // signal: the fetch itself is raced against the deadline, so a promise
+  // that simply never settles cannot outlive the attempt
+  let onAbort = null;
+  const deadlineP = new Promise((_, reject) => {
+    onAbort = () => reject(Object.assign(new Error('attempt deadline expired'), { name: 'AbortError' }));
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+  });
+  deadlineP.catch(() => {}); // settled races leave this rejection intentionally observed
+  try {
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      const policyErr = urlPolicyError(url, provider);
+      if (policyErr) return { outcome: 'FAILED', reason: boundedError(policyErr) };
+      let res;
       try {
-        next = new URL(location, url).toString();
-      } catch {
-        return { outcome: 'FAILED', reason: 'unparseable redirect location', status };
+        const headers = { 'user-agent': userAgent, accept: provider.accept ?? 'application/rss+xml, application/atom+xml, application/xml, text/xml' };
+        if (etag) headers['if-none-match'] = etag;
+        if (lastModified) headers['if-modified-since'] = lastModified;
+        const fp = fetchImpl(url, { headers, redirect: 'manual', signal: controller.signal });
+        fp?.catch?.(() => {}); // a losing aborted fetch may still reject later — never unhandled
+        res = await Promise.race([fp, deadlineP]);
+      } catch (err) {
+        const timedOut = err?.name === 'AbortError' || controller.signal.aborted;
+        return { outcome: 'FAILED', reason: boundedError(timedOut ? `timeout after ${effectiveTimeout}ms` : `network: ${err.message}`) };
       }
-      const redirectErr = urlPolicyError(next, provider);
-      if (redirectErr) return { outcome: 'FAILED', reason: boundedError(`redirect blocked: ${redirectErr}`), status };
-      if (hop === MAX_REDIRECTS) return { outcome: 'FAILED', reason: `redirect chain exceeds ${MAX_REDIRECTS}`, status };
-      url = next;
-      continue;
+      const status = res.status;
+      if (status === 304) return { outcome: 'NOT_MODIFIED', status };
+      if (status >= 300 && status < 400) {
+        const location = readHeader(res, 'location');
+        if (!location) return { outcome: 'FAILED', reason: 'redirect without location', status };
+        let next;
+        try {
+          next = new URL(location, url).toString();
+        } catch {
+          return { outcome: 'FAILED', reason: 'unparseable redirect location', status };
+        }
+        const redirectErr = urlPolicyError(next, provider);
+        if (redirectErr) return { outcome: 'FAILED', reason: boundedError(`redirect blocked: ${redirectErr}`), status };
+        if (hop === MAX_REDIRECTS) return { outcome: 'FAILED', reason: `redirect chain exceeds ${MAX_REDIRECTS}`, status };
+        url = next;
+        continue;
+      }
+      if (status === 429) return { outcome: 'RATE_LIMITED', status, retryAfter: readHeader(res, 'retry-after') };
+      if (status !== 200) return { outcome: 'FAILED', reason: `http ${status}`, status };
+      // the attempt deadline remains armed through the whole body read:
+      // headers are not truth, and a stalled body adopts nothing
+      const body = await boundedBody(res, maxBytes, controller.signal, effectiveTimeout);
+      if (body.error) return { outcome: 'FAILED', reason: boundedError(body.error), status };
+      return {
+        outcome: 'OK',
+        status,
+        text: body.text,
+        etag: readHeader(res, 'etag'),
+        lastModified: readHeader(res, 'last-modified'),
+      };
     }
-    if (status === 429) return { outcome: 'RATE_LIMITED', status, retryAfter: readHeader(res, 'retry-after') };
-    if (status !== 200) return { outcome: 'FAILED', reason: `http ${status}`, status };
-    const body = await boundedBody(res, maxBytes);
-    if (body.error) return { outcome: 'FAILED', reason: boundedError(body.error), status };
-    return {
-      outcome: 'OK',
-      status,
-      text: body.text,
-      etag: readHeader(res, 'etag'),
-      lastModified: readHeader(res, 'last-modified'),
-    };
+    return { outcome: 'FAILED', reason: 'redirect loop' };
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) controller.signal.removeEventListener('abort', onAbort);
   }
-  return { outcome: 'FAILED', reason: 'redirect loop' };
 }

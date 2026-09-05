@@ -24,7 +24,12 @@ const sha1 = (s) => createHash('sha1').update(s).digest('hex');
 
 export const OFAC_MAX_RECORDS = 100_000; // structural sanity bound on the dataset
 export const OFAC_MAX_LINE_CHARS = 8_000;
-export const OFAC_MAX_CHANGES = 512; // beyond this a "diff" is a rewrite — fail closed, never a flood
+// Beyond this a "diff" is a rewrite — fail closed, never a flood. Kept
+// safely BELOW the bounded seen-id window (512) so a multi-poll diff can
+// always hold every one of its settled transition identities resident
+// simultaneously: convergence is guaranteed, and no owed transition can be
+// evicted mid-diff and re-emitted as duplicate truth.
+export const OFAC_MAX_CHANGES = 400;
 export const OFAC_SNAPSHOT_FILE = 'ofac-snapshot.json';
 export const OFAC_SDN_COLUMNS = 12; // classic SDN.CSV: ent_num..remarks, no header row
 
@@ -123,15 +128,17 @@ export function extractDigitalCurrencyAddresses(remarks) {
 
 // deterministic explicit changes between the previously ACCEPTED snapshot
 // (uid -> {name, hash}) and a newly parsed dataset — sorted by kind then
-// uid so replays and reorders always yield the same sequence
+// uid so replays and reorders always yield the same sequence; MODIFY and
+// REMOVE carry the prior record hash, because a transition's identity
+// binds where it came FROM as well as where it went
 export function diffSdnSnapshots(prev, next) {
   const changes = [];
   for (const [uid, rec] of next) {
     const old = prev.get(uid);
     if (!old) changes.push({ change: 'ADD', uid, record: rec });
-    else if (old.hash !== rec.hash) changes.push({ change: 'MODIFY', uid, record: rec });
+    else if (old.hash !== rec.hash) changes.push({ change: 'MODIFY', uid, record: rec, priorHash: old.hash });
   }
-  for (const [uid, old] of prev) if (!next.has(uid)) changes.push({ change: 'REMOVE', uid, priorName: old.name });
+  for (const [uid, old] of prev) if (!next.has(uid)) changes.push({ change: 'REMOVE', uid, priorName: old.name, priorHash: old.hash });
   const order = { ADD: 0, MODIFY: 1, REMOVE: 2 };
   changes.sort((a, b) => order[a.change] - order[b.change] || a.uid - b.uid);
   return changes;
@@ -139,15 +146,21 @@ export function diffSdnSnapshots(prev, next) {
 
 const shortHash = (h) => String(h).slice(0, 12);
 
-function changeItem(chg, datasetHash, listUrl) {
+// TEMPORAL TRANSITION IDENTITY (B1 closeout): an OFAC change is an event
+// FROM one accepted snapshot TO the next, so its identity binds the prior
+// accepted snapshot's monotonic sequence number plus the causal record
+// facts — uid, change type, prior record hash (MODIFY/REMOVE), new record
+// hash (ADD/MODIFY). No wall clock, no randomness: every retry or crash
+// replay of the SAME owed transition (same prior anchor) derives the SAME
+// identity, while a recurrent state (A -> B -> A -> B) is a NEW transition
+// because the prior anchor's sequence has advanced.
+function changeItem(chg, { prevSeq, datasetHash, listUrl }) {
   if (chg.change === 'REMOVE') {
     return {
       title: `OFAC SDN REMOVE: ${chg.priorName}`.slice(0, MAX_TITLE_CHARS),
-      summary: `uid=${chg.uid}; change=REMOVE; name=${chg.priorName}; note=record no longer present in official dataset ${shortHash(datasetHash)}`.slice(0, MAX_SUMMARY_CHARS),
+      summary: `uid=${chg.uid}; change=REMOVE; name=${chg.priorName}; fromSnapshotSeq=${prevSeq}; note=record no longer present in official dataset ${shortHash(datasetHash)}`.slice(0, MAX_SUMMARY_CHARS),
       link: listUrl,
-      // the removal identity is anchored to the dataset version that
-      // removed it: re-diffing the same transition is the SAME observation
-      guid: `sdn-${chg.uid}@removed-${shortHash(datasetHash)}`,
+      guid: `sdn-${chg.uid}@${prevSeq}-rem-${shortHash(chg.priorHash)}`,
       publishedTs: null, // the CSV states no per-record clock — UNKNOWN stays unknown
     };
   }
@@ -162,16 +175,17 @@ function changeItem(chg, datasetHash, listUrl) {
       `name=${r.name}`,
       `type=${r.sdnType ?? 'NONE_STATED'}`,
       `programs=${r.programs ?? 'NONE_STATED'}`,
+      `fromSnapshotSeq=${prevSeq}`,
       `digitalCurrencyAddresses=${addrText}`,
       `remarks=${r.remarks ?? 'NONE_STATED'}`,
     ]
       .join('; ')
       .slice(0, MAX_SUMMARY_CHARS),
     link: listUrl,
-    // content-versioned record identity: the same record content is the
-    // same observation across polls, restarts, and reordered responses; a
-    // true modification is a NEW observation that never impersonates the old
-    guid: `sdn-${chg.uid}@${shortHash(r.hash)}`,
+    guid:
+      chg.change === 'MODIFY'
+        ? `sdn-${chg.uid}@${prevSeq}-mod-${shortHash(chg.priorHash)}-${shortHash(r.hash)}`
+        : `sdn-${chg.uid}@${prevSeq}-add-${shortHash(r.hash)}`,
     publishedTs: null,
   };
 }
@@ -183,12 +197,18 @@ function changeItem(chg, datasetHash, listUrl) {
 // snapshot detail (uid -> {name, hash}) or null when unavailable.
 export function buildOfacUpdate({ prevAnchor, prevRecords, records, listUrl }) {
   const datasetHash = sdnDatasetIdentity(records);
+  // the prior anchor's monotonic sequence: the causal clock of accepted
+  // snapshots. The dataset this update accepts will carry prevSeq + 1, so
+  // a later return to a previously seen state is a NEW transition context.
+  const prevSeq = prevAnchor && Number.isSafeInteger(prevAnchor.seq) && prevAnchor.seq >= 0 ? prevAnchor.seq : null;
+  const seq = prevSeq === null ? 0 : prevSeq + 1;
   // structural sanity: a dataset that silently vanishes half the accepted
   // list is refused no matter what HTTP said — fail closed, keep truth
   if (prevAnchor && prevAnchor.recordCount >= 10 && records.size < prevAnchor.recordCount / 2)
     return { ok: false, reason: `suspicious mass deletion: ${records.size} records vs accepted ${prevAnchor.recordCount} — fail closed` };
-  if (prevAnchor && prevAnchor.hash === datasetHash) return { ok: true, kind: 'UNCHANGED', items: [], datasetHash, counts: { adds: 0, modifies: 0, removes: 0 } };
-  if (!prevAnchor || !prevRecords) {
+  if (prevAnchor && prevAnchor.hash === datasetHash)
+    return { ok: true, kind: 'UNCHANGED', items: [], datasetHash, seq: prevSeq ?? 0, counts: { adds: 0, modifies: 0, removes: 0 } };
+  if (!prevAnchor || prevSeq === null || !prevRecords) {
     // BASELINE: first accepted snapshot (or snapshot detail honestly
     // unavailable — the diff basis is gone, so the ear re-baselines rather
     // than inventing changes). ONE bounded observation, zero per-record events.
@@ -197,13 +217,14 @@ export function buildOfacUpdate({ prevAnchor, prevRecords, records, listUrl }) {
       ok: true,
       kind: 'BASELINE',
       datasetHash,
+      seq,
       counts: { adds: 0, modifies: 0, removes: 0 },
       items: [
         {
           title: 'OFAC SDN baseline snapshot accepted',
-          summary: `datasetHash=${datasetHash}; records=${records.size}; note=${note}`.slice(0, MAX_SUMMARY_CHARS),
+          summary: `datasetHash=${datasetHash}; records=${records.size}; snapshotSeq=${seq}; note=${note}`.slice(0, MAX_SUMMARY_CHARS),
           link: listUrl,
-          guid: `sdn-baseline@${shortHash(datasetHash)}`,
+          guid: `sdn-baseline@${seq}-${shortHash(datasetHash)}`,
           publishedTs: null,
         },
       ],
@@ -217,7 +238,7 @@ export function buildOfacUpdate({ prevAnchor, prevRecords, records, listUrl }) {
     modifies: changes.filter((c) => c.change === 'MODIFY').length,
     removes: changes.filter((c) => c.change === 'REMOVE').length,
   };
-  return { ok: true, kind: 'DIFF', datasetHash, counts, items: changes.map((c) => changeItem(c, datasetHash, listUrl)) };
+  return { ok: true, kind: 'DIFF', datasetHash, seq, counts, items: changes.map((c) => changeItem(c, { prevSeq, datasetHash, listUrl })) };
 }
 
 // snapshot persistence payload (bounded detail needed to diff the NEXT

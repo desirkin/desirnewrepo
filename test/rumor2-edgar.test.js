@@ -112,7 +112,10 @@ test('EDGAR-1. a whitelisted filing ingests as evidence through the authoritativ
   const src = sourceEvents(stream);
   assert.equal(src.length, 1, 'one filing, one source observation');
   assert.equal(src[0].provider, 'EDGAR_OFFICIAL');
-  assert.ok(src[0].title.includes('8-K') && src[0].title.includes('Test Filer Inc'), src[0].title);
+  // identity-bearing content is IMMUTABLE filing facts only — the mutable
+  // issuer display name is deliberately absent (B1 closeout, defect 2)
+  assert.ok(src[0].title.includes('8-K') && src[0].title.includes(EIGHT_K.acc), src[0].title);
+  assert.ok(!src[0].title.includes('Test Filer Inc') && !src[0].summary.includes('Test Filer Inc'), 'mutable issuer name never enters identity-bearing content');
   assert.ok(src[0].summary.includes(`accession=${EIGHT_K.acc}`), 'accession preserved as metadata');
   assert.ok(src[0].guid === EIGHT_K.acc, 'SEC-native accession is the guid');
   const cp = store.state.saved;
