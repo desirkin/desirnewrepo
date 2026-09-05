@@ -4,7 +4,7 @@
 // silently downgraded.
 import { createHash } from 'node:crypto';
 
-export const SCHEMA_VERSION = 6; // RUMOR-2 event-root journal / schema 6
+export const SCHEMA_VERSION = 7; // RUMOR-2 writer-epoch fencing / schema 7
 
 // Canonical key-sorted JSON — the stable content form durable event
 // identities are computed over (independent of key order and whitespace).
@@ -238,6 +238,26 @@ export const MIGRATIONS = [
       )`,
       `CREATE UNIQUE INDEX IF NOT EXISTS uq_rumor2_event_identity
         ON serpent_rumor2_events (stream, event_type, event_id) WHERE event_id IS NOT NULL`,
+    ],
+  },
+  {
+    version: 7,
+    name: 'RUMOR-2 writer epoch: database fencing token',
+    // The advisory lock names the ACTIVE writer; a monotonic per-stream
+    // writer epoch is the STALE-WRITER fence. Acquiring writer authority (it
+    // already holds the advisory lock) advances this epoch by one; every
+    // authoritative RUMOR mutation then verifies current_epoch == caller
+    // epoch INSIDE the same database transaction that performs the write, so
+    // a delayed cross-session operation from a writer that has since lost the
+    // lock is rejected by PostgreSQL itself — closing the time-of-check/
+    // time-of-use race the application-level fence checks alone cannot. One
+    // row per stream; the epoch only ever increases.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_rumor2_writer_epoch (
+        stream text PRIMARY KEY,
+        epoch bigint NOT NULL DEFAULT 0,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
     ],
   },
 ];

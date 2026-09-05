@@ -247,6 +247,7 @@ export function startRumor2({
   let lifecycle = 'INITIALIZING'; // FRESH_START | RESTORED | REBUILT_FROM_EVENT_HISTORY | WITHHELD_INVALID_CHECKPOINT | FAILED_DURABILITY | STANDBY_WRITER
   let durability = 'UNKNOWN'; // DURABLE | NOT_CONFIGURED | UNAVAILABLE
   let writerFenced = false; // this process holds RUMOR-2 writer authority (when the journal exposes a fence)
+  let writerEpoch = null; // the DB-assigned monotonic writer epoch this process owns (durable fenced mode)
   let withholdReason = null;
   let restoreNote = null; // e.g. SEEN_STATE_REBUILT — derived cache rebuilt from canonical settled truth
   let cp = null;
@@ -278,6 +279,7 @@ export function startRumor2({
     if (a === 'HELD' || a === 'UNFENCED') return true;
     if (writerFenced || lifecycle !== 'STANDBY_WRITER') {
       writerFenced = false;
+      writerEpoch = null; // a fresh acquisition must mint a new epoch
       lifecycle = 'STANDBY_WRITER';
       withholdReason = 'writer authority lost mid-tick — standing by to reacquire';
     }
@@ -462,6 +464,13 @@ export function startRumor2({
         return false;
       } else {
         writerFenced = true;
+        // §10: the DB-assigned epoch every durable mutation must present. A
+        // durable journal that acquires the advisory lock but cannot
+        // establish an epoch never reaches here — acquireRumor2WriterLock
+        // releases the lock and the store reports UNAVAILABLE (→ the !w.ok
+        // branch above). A number means durable epoch fencing; undefined
+        // means a lock-only journal with no epoch domain (test/mem doubles).
+        writerEpoch = typeof w.epoch === 'number' ? w.epoch : null;
         withholdReason = null; // a standby reason must not outlive the acquisition
       }
     }
@@ -513,10 +522,19 @@ export function startRumor2({
     cp.revision += 1;
     cp.savedTs = now();
     if (!checkpointStore) return;
-    const r = await checkpointStore.save(cp);
+    // present the DB-assigned writer epoch: the checkpoint write commits only
+    // if this epoch is still current, verified inside the write transaction
+    const r = await checkpointStore.save(cp, writerEpoch);
     if (r.durable) durability = 'DURABLE';
     else if (r.reason === 'NOT_CONFIGURED') durability = 'NOT_CONFIGURED';
-    else {
+    else if (r.stale || r.reason === 'STALE_WRITER') {
+      // PostgreSQL rejected a stale writer at the mutation boundary — a newer
+      // writer owns the epoch. Drop to standby; never retry as this epoch.
+      writerFenced = false;
+      writerEpoch = null;
+      lifecycle = 'STANDBY_WRITER';
+      withholdReason = 'writer epoch is stale — a newer writer holds authority';
+    } else {
       durability = 'UNAVAILABLE';
       lifecycle = 'FAILED_DURABILITY'; // stop polling until durable truth is representable again
       withholdReason = 'checkpoint save unavailable';
@@ -755,10 +773,15 @@ export function startRumor2({
         withholdReason = boundedError(`EVENT_HISTORY_INVALID: ${res.reason}`);
         return false;
       }
-      if (String(res.reason ?? '') === 'WRITER_FENCE_LOST') {
-        // the journal's own defense-in-depth refused: authority is gone.
-        // The batch did not land; leave the transaction owed and stand by.
-        fenceHeld(); // flip to standby
+      if (String(res.reason ?? '') === 'WRITER_FENCE_LOST' || String(res.reason ?? '') === 'STALE_WRITER') {
+        // the journal refused at the durable boundary: authority is gone
+        // (fence lost, or the DB rejected a stale epoch — the TOCTOU wall).
+        // The batch did not land and consumed no sequence; leave the
+        // transaction owed and drop to standby. Never retry as this epoch.
+        writerFenced = false;
+        writerEpoch = null;
+        lifecycle = 'STANDBY_WRITER';
+        withholdReason = res.reason === 'STALE_WRITER' ? 'writer epoch is stale — a newer writer holds authority' : 'writer authority lost — standing by to reacquire';
         return false;
       }
       r.appendFailures += 1;
@@ -1062,6 +1085,7 @@ export function startRumor2({
       // STATUS MUST NOT LIE (§12): derived from the LIVE fence, and a failed
       // live check downgrades the cached authority so ACTIVE is never stale.
       writerAuthority: writerAuthorityStatus(),
+      writerEpoch, // DB-assigned monotonic writer epoch (diagnostic; null when unfenced)
     };
     try {
       atomicWriteJson(path.join(dir(), 'status.json'), status);
@@ -1108,6 +1132,9 @@ export function startRumor2({
     let halted = false;
     for (const p of PROVIDERS) {
       if (closed || halted) break;
+      // §18: confirm live authority BEFORE each provider request — a fence
+      // lost after the previous provider must not start another network call.
+      if (!fenceHeld()) break;
       try {
         if (!(await pollProvider(p))) halted = true; // owed truth — stop every ear this tick
       } catch (err) {
@@ -1139,6 +1166,7 @@ export function startRumor2({
     // release it server-side anyway)
     if (writerFenced && activeJournal?.releaseWriter) {
       writerFenced = false;
+      writerEpoch = null;
       await activeJournal.releaseWriter().catch(() => {});
     }
   }

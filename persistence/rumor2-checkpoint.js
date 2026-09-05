@@ -39,12 +39,21 @@ export function rumor2CheckpointStore({ persistence = getPersistence } = {}) {
         return { outcome: 'UNAVAILABLE', error: err.message }; // a read failure is NEVER "no checkpoint"
       }
     },
-    async save(state) {
+    // Writer-epoch fence (DB-enforced): a fenced save carries the caller's
+    // writer epoch, verified inside the same transaction that writes the
+    // checkpoint. A stale epoch is rejected with ZERO mutation — never a
+    // last-write-wins overwrite of a newer writer. expectedEpoch null is the
+    // unfenced path (no fence domain); the collector, the sole caller,
+    // supplies a real epoch whenever writer fencing is active (it fails
+    // closed on acquisition otherwise), so a null epoch never means "bypass
+    // fencing in durable fenced mode".
+    async save(state, expectedEpoch = null) {
       const c = classify();
       if (c.kind === 'NOT_CONFIGURED') return { durable: false, reason: 'NOT_CONFIGURED' };
       if (c.kind === 'UNAVAILABLE') return { durable: false, reason: 'UNAVAILABLE' };
       try {
-        await c.p.repo.saveRumor2Checkpoint(state);
+        const r = await c.p.repo.saveRumor2Checkpoint(state, expectedEpoch);
+        if (r?.stale) return { durable: false, reason: 'STALE_WRITER', stale: true };
         return { durable: true };
       } catch {
         return { durable: false, reason: 'UNAVAILABLE' };

@@ -243,7 +243,7 @@ if (!TEST_URL) {
     try {
       assert.equal(await db.connect(), true);
       const m = await runMigrations(db);
-      assert.equal(m.schemaVersion, 6, 'GOV-1B schema (and later) landed');
+      assert.equal(m.schemaVersion, 7, 'GOV-1B schema (and later) landed');
       const repo = new Repository(db);
       const store = govCheckpointStore({ persistence: () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) }) });
       // GOV-1C tri-state contract: absence is NOT_FOUND, an answered read

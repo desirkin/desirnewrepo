@@ -33,20 +33,24 @@ export function rumor2JournalStore({ persistence = getPersistence } = {}) {
   // writes. The server releases the lock automatically when the winning
   // session dies, so failover needs no lease bookkeeping.
   let fence = null;
+  let fenceEpoch = null; // the DB-assigned writer epoch this fence owns
   return {
     async acquireWriter() {
       const c = classify();
       if (c.kind === 'NOT_CONFIGURED') return { ok: false, reason: 'NOT_CONFIGURED', notConfigured: true };
       if (c.kind === 'UNAVAILABLE') return { ok: false, reason: 'UNAVAILABLE' };
-      if (fence?.held()) return { ok: true };
+      if (fence?.held()) return { ok: true, epoch: fenceEpoch };
       if (fence) {
         // the previous fence's session died: return its client, then retry
         await fence.release().catch(() => {});
         fence = null;
+        fenceEpoch = null;
       }
       try {
         fence = await c.p.repo.acquireRumor2WriterLock();
-        return fence ? { ok: true } : { ok: false, reason: 'HELD' };
+        if (!fence) return { ok: false, reason: 'HELD' };
+        fenceEpoch = fence.epoch ?? null;
+        return { ok: true, epoch: fenceEpoch };
       } catch {
         return { ok: false, reason: 'UNAVAILABLE' };
       }
@@ -54,9 +58,13 @@ export function rumor2JournalStore({ persistence = getPersistence } = {}) {
     writerHeld() {
       return fence ? fence.held() : null;
     },
+    writerEpoch() {
+      return fenceEpoch;
+    },
     async releaseWriter() {
       const f = fence;
       fence = null;
+      fenceEpoch = null;
       if (f) await f.release().catch(() => {});
     },
     async read() {
@@ -78,10 +86,15 @@ export function rumor2JournalStore({ persistence = getPersistence } = {}) {
       // held. A collector bug can never bypass one-active-writer, and a
       // direct append without authority is refused outright.
       if (!fence || !fence.held()) return { ok: false, reason: 'WRITER_FENCE_LOST' };
+      // and in durable mode a valid epoch is REQUIRED — no escape hatch (§20)
+      if (fenceEpoch === null) return { ok: false, reason: 'WRITER_FENCE_LOST' };
       try {
-        const r = await c.p.repo.appendRumor2Events(STREAM, records);
+        // the epoch is verified INSIDE the append transaction (DB-enforced
+        // stale-writer rejection); a lost lock cannot commit a delayed batch
+        const r = await c.p.repo.appendRumor2Events(STREAM, records, fenceEpoch);
         return { ok: true, lastSeq: r.lastSeq };
       } catch (err) {
+        if (err.staleWriter) return { ok: false, reason: 'STALE_WRITER' };
         if (err.journalCorruption) return { ok: false, reason: `CORRUPTION: ${err.message}` };
         return { ok: false, reason: 'UNAVAILABLE' };
       }

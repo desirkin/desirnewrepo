@@ -196,7 +196,7 @@ if (!TEST_URL) {
   test('schema 5 applies; migrations remain idempotent', async () => {
     assert.equal(await db.connect(), true);
     const first = await runMigrations(db);
-    assert.equal(first.schemaVersion, 6); // RUMOR-2 event-root seal adds the append-only event journal table
+    assert.equal(first.schemaVersion, 7); // RUMOR-2 writer-epoch fencing adds the writer-epoch table
     const again = await runMigrations(db);
     assert.deepEqual(again.appliedNow, []);
   });

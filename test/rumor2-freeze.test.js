@@ -498,7 +498,7 @@ if (!TEST_URL) {
     await withDb(async ({ mkStores, db }) => {
       const A = mkStores();
       const B = mkStores();
-      assert.deepEqual(await A.journal.acquireWriter(), { ok: true });
+      { const w = await A.journal.acquireWriter(); assert.equal(w.ok, true); assert.ok(Number.isInteger(w.epoch), 'acquisition returns a writer epoch'); }
       assert.deepEqual(await B.journal.acquireWriter(), { ok: false, reason: 'HELD' });
       // kill A's fence SESSION from outside — the crash-failover law
       const { rows } = await db.query(

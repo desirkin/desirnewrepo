@@ -496,6 +496,28 @@ Sealed at this pass:
   collector takes over safely with no lease bookkeeping; a rightful restart
   restores from journal + checkpoint exactly, with no truth duplication.
   Lock recovery never touches the journal sequence.
+  The advisory lock alone leaves a cross-session time-of-check/time-of-use
+  gap — the lock is held on one session while checkpoint and journal writes
+  run on other pooled sessions, so a lock lost mid-write could still let a
+  delayed cross-session write commit. So the DATABASE enforces the fence too:
+  a monotonic per-stream WRITER EPOCH (serpent_rumor2_writer_epoch) advances
+  by one on every acquisition (only a process that already holds the advisory
+  lock advances it; a failed contender never does; it never rewinds). Every
+  authoritative RUMOR mutation — the checkpoint upsert and the journal append
+  — verifies current_epoch == the caller's epoch INSIDE the same database
+  transaction that performs the write, taking the epoch row FOR UPDATE so a
+  concurrent acquisition serializes against it. A stale writer is rejected by
+  PostgreSQL at the mutation boundary (STALE_WRITER): it consumes no event
+  sequence, writes no rows, and can never overwrite a newer writer's
+  checkpoint (no unconditional last-write-wins upsert remains). The checkpoint
+  and journal thus have no cross-session TOCTOU. Events and checkpoints
+  written under an OLD epoch stay valid history — the epoch governs only NEW
+  writes, never restore or replay — so a legitimate crash tail from a prior
+  epoch is recovered and an owed transaction is settled by the next writer
+  under its own epoch. If the epoch cannot be established or confirmed, the
+  mutation fails closed — safety over liveness, never a fall back to a cached
+  application boolean. The writer epoch is a persistence-authority mechanism
+  only: it carries zero evidentiary or trading authority.
   Writer authority is checked LIVE, never trusted from a boolean captured
   when the tick began: NO RUMOR DURABLE MUTATION MAY BEGIN OR COMPLETE
   unless the collector currently holds the fence. The live check runs at

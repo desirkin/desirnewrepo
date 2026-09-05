@@ -109,8 +109,8 @@ if (!TEST_URL) {
   test('database reachable; migrations apply once and are idempotent', async () => {
     assert.equal(await db.connect(), true);
     const first = await runMigrations(db);
-    assert.equal(first.schemaVersion, 6); // RUMOR-2 event-root seal adds the append-only event journal table
-    assert.deepEqual(first.appliedNow, [1, 2, 3, 4, 5, 6]);
+    assert.equal(first.schemaVersion, 7); // RUMOR-2 writer-epoch fencing adds the writer-epoch table
+    assert.deepEqual(first.appliedNow, [1, 2, 3, 4, 5, 6, 7]);
     const second = await runMigrations(db);
     assert.deepEqual(second.appliedNow, []); // idempotent
   });

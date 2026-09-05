@@ -375,7 +375,7 @@ if (!TEST_URL) {
       assert.equal(noFence.ok, false);
       assert.equal(noFence.reason, 'WRITER_FENCE_LOST', 'no fence held => append refused');
       // acquire, then §23: killing the exact session flips writerHeld() false
-      assert.deepEqual(await journal.acquireWriter(), { ok: true });
+      { const w = await journal.acquireWriter(); assert.equal(w.ok, true); assert.ok(Number.isInteger(w.epoch), 'acquisition returns a writer epoch'); }
       assert.equal(journal.writerHeld(), true);
       assert.ok((await killAdvisoryBackends(admin)) >= 1, 'the advisory fence is visible and killed');
       assert.equal(await waitFor(() => journal.writerHeld() === false), true, 'writerHeld() detects the dead session');
@@ -426,7 +426,7 @@ if (!TEST_URL) {
     await runMigrations(db);
     const repo = new Repository(db);
     const journal = rumor2JournalStore({ persistence: () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) }) });
-    assert.deepEqual(await journal.acquireWriter(), { ok: true });
+    { const w = await journal.acquireWriter(); assert.equal(w.ok, true); assert.ok(Number.isInteger(w.epoch), 'acquisition returns a writer epoch'); }
     await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
     // the freeze-seal Db.end lock-release must still hold: this returns, never hangs
     await db.end();

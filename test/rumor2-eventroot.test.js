@@ -520,7 +520,7 @@ if (!TEST_URL) {
     try {
       assert.equal(await db.connect(), true);
       const m = await runMigrations(db);
-      assert.equal(m.schemaVersion, 6, 'the event-root journal schema landed');
+      assert.equal(m.schemaVersion, 7, 'the event-root + writer-epoch schema landed');
       const repo = new Repository(db);
       const persistence = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       await fn({ db, repo, checkpointStore: rumor2CheckpointStore({ persistence }), journal: rumor2JournalStore({ persistence }) });
@@ -551,7 +551,7 @@ if (!TEST_URL) {
 
   test('JOURNAL-1..4. append assigns contiguous seqs; batches are atomic; the duplicate law lives at the durable door', async () => {
     await withDb(async ({ journal }) => {
-      assert.deepEqual(await journal.acquireWriter(), { ok: true }); // append now requires a held writer fence
+      { const w = await journal.acquireWriter(); assert.equal(w.ok, true); assert.ok(Number.isInteger(w.epoch) && w.epoch >= 1, 'acquisition returns a monotonic writer epoch'); }
       const mkEv = (n) => {
         const facts = { provider: 'KRAKEN_OFFICIAL', guid: `g${n}`, link: null, publishedTs: null, title: `t${n}`, summary: '' };
         return {
@@ -584,7 +584,7 @@ if (!TEST_URL) {
 
   test('JOURNAL-5. destroyed rows are detected: a gapped sequence reads as corruption, never as absence', async () => {
     await withDb(async ({ db, journal }) => {
-      assert.deepEqual(await journal.acquireWriter(), { ok: true }); // append now requires a held writer fence
+      { const w = await journal.acquireWriter(); assert.equal(w.ok, true); assert.ok(Number.isInteger(w.epoch) && w.epoch >= 1, 'acquisition returns a monotonic writer epoch'); }
       const facts = { provider: 'KRAKEN_OFFICIAL', guid: 'g1', link: null, publishedTs: null, title: 't1', summary: '' };
       const ev = {
         type: 'RUMOR2_SOURCE_OBSERVED', ts: new Date(T1).toISOString(), sourceEventId: sourceObservationIdentity(facts),

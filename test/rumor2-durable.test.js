@@ -47,7 +47,7 @@ if (!TEST_URL) {
     try {
       assert.equal(await db.connect(), true);
       const m = await runMigrations(db);
-      assert.equal(m.schemaVersion, 6, 'RUMOR-2 event-root schema landed in Development PostgreSQL');
+      assert.equal(m.schemaVersion, 7, 'RUMOR-2 event-root schema (and later) landed in Development PostgreSQL');
       const repo = new Repository(db);
       const alive = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       const store = rumor2CheckpointStore({ persistence: alive });
