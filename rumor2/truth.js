@@ -8,13 +8,16 @@
 // execution authority. Existing StockTwits RUMINT is NOT this module and
 // is not touched by it.
 import { createHash } from 'node:crypto';
+import { validateEvidencePacket } from '../evidence/contract.js';
 
-export const RUMOR2_VERSION = 'RUMOR-2A1';
-// A1: checkpoint v2 — graph keyed by proposition identities and a
-// write-ahead item transaction slot. RUMOR-2 has never been published, so
-// there is no production v1 truth to migrate: an old/incompatible
+export const RUMOR2_VERSION = 'RUMOR-2A2';
+// A2: checkpoint v3 — the prepared-transaction slot is a CLOSED semantic
+// schema, proven (packets re-validated under serpent-evidence-1, every
+// event bound to its source item and proposition, counters exact) before
+// restart may trust and replay it. RUMOR-2 has never been published, so
+// there is no production v1/v2 truth to migrate: an old/incompatible
 // checkpoint fails closed (WITHHELD), never silently reinterpreted.
-export const RUMOR2_CHECKPOINT_VERSION = 2;
+export const RUMOR2_CHECKPOINT_VERSION = 3;
 export const MAX_TXN_EVENTS = 32; // 1 source + <=5 coins x (claim+packet/withheld) fits far below
 // bounded source reconciliation: recovery proves an owed event present by
 // scanning ONLY the trailing bytes of the event stream — a transaction is
@@ -263,23 +266,145 @@ export function validateRumor2Checkpoint(cp, { providerIds }) {
   if (Object.keys(cp.graph.claims).length > MAX_ACTIVE_CLAIMS) return 'checkpoint: graph exceeds active-claim bound';
   // A1: graph nodes are keyed by proposition identity, never by category
   for (const k of Object.keys(cp.graph.claims)) if (!/^r2c-[0-9a-f]{40}$/.test(k)) return `checkpoint: graph key ${k.slice(0, 24)} is not a proposition identity`;
-  // A1: the write-ahead item transaction slot — explicitly null, or a
-  // bounded prepared transaction the collector must settle before polling
+  // A2: the write-ahead item transaction slot — explicitly null, or a
+  // prepared transaction that passes the CLOSED semantic schema below.
+  // A persisted transaction is TRUSTED and replayed verbatim on restart,
+  // so nothing may ride in it that has not been proven.
   if (cp.txn === undefined) return 'checkpoint: txn slot missing (must be null or a prepared transaction)';
   if (cp.txn !== null) {
-    const t = cp.txn;
-    if (!isPlainObject(t)) return 'checkpoint: txn invalid';
-    if (t.txnVersion !== 1) return 'checkpoint: txn unsupported version';
-    if (!providerIds.includes(t.provider)) return 'checkpoint: txn unknown provider';
-    if (typeof t.sourceObservationId !== 'string' || !/^r2s-[0-9a-f]{40}$/.test(t.sourceObservationId)) return 'checkpoint: txn bad source id';
-    if (!Array.isArray(t.events) || t.events.length === 0 || t.events.length > MAX_TXN_EVENTS) return 'checkpoint: txn events invalid';
-    for (const e of t.events)
-      if (!isPlainObject(e) || typeof e.type !== 'string' || typeof e.sourceEventId !== 'string') return 'checkpoint: txn event malformed';
-    if (!isPlainObject(t.candidate)) return 'checkpoint: txn candidate missing';
-    if (!Array.isArray(t.candidate.seenIds) || t.candidate.seenIds.length > MAX_SEEN_IDS) return 'checkpoint: txn candidate seenIds invalid';
-    if (!isPlainObject(t.candidate.graphClaims)) return 'checkpoint: txn candidate graphClaims invalid';
-    if (!isPlainObject(t.candidate.counterDeltas)) return 'checkpoint: txn candidate counterDeltas invalid';
+    const txnErr = validateRumor2Txn(cp.txn, { providerIds, graph: cp.graph });
+    if (txnErr) return txnErr;
   }
+  return null;
+}
+
+// ---- prepared-transaction trust (A2) ---------------------------------------
+// The only truth-bearing event types a transaction may owe. Arbitrary
+// uppercase strings that merely look like event names fail closed.
+export const RUMOR2_TXN_EVENT_TYPES = Object.freeze([
+  'RUMOR2_SOURCE_OBSERVED',
+  'RUMOR2_CLAIM_OBSERVED',
+  'RUMOR2_PACKET',
+  'RUMOR2_WITHHELD',
+]);
+
+const exactKeys = (obj, allowed, label) => {
+  for (const k of Object.keys(obj)) if (!allowed.includes(k)) return `${label}: undeclared field '${k}'`;
+  for (const k of allowed) if (!(k in obj)) return `${label}: missing field '${k}'`;
+  return null;
+};
+const R2S_RE = /^r2s-[0-9a-f]{40}$/;
+const R2C_RE = /^r2c-[0-9a-f]{40}$/;
+const isBounded = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+
+// Closed semantic validation of one prepared item transaction. Restart may
+// replay a transaction ONLY when every field, clock, identity binding,
+// packet, and counter delta here proves out — a malformed packet is never
+// appended merely because its outer record says RUMOR2_PACKET.
+export function validateRumor2Txn(t, { providerIds, graph }) {
+  if (!isPlainObject(t)) return 'txn: not an object';
+  const keyErr = exactKeys(t, ['txnVersion', 'provider', 'sourceObservationId', 'clocks', 'events', 'candidate', 'preparedTs'], 'txn');
+  if (keyErr) return keyErr;
+  if (t.txnVersion !== 1) return 'txn: unsupported version';
+  if (!providerIds.includes(t.provider)) return 'txn: unknown provider';
+  if (typeof t.sourceObservationId !== 'string' || !R2S_RE.test(t.sourceObservationId)) return 'txn: bad source observation id';
+  // exact clocks with causal coherence — published <= retrieved <= knownAt
+  if (!isPlainObject(t.clocks)) return 'txn: clocks missing';
+  const cErr = exactKeys(t.clocks, ['publishedTs', 'retrievedTs', 'knownAtTs'], 'txn.clocks');
+  if (cErr) return cErr;
+  const { publishedTs, retrievedTs, knownAtTs } = t.clocks;
+  if (publishedTs !== null && !isTs(publishedTs)) return 'txn: publishedTs invalid';
+  if (!isTs(retrievedTs) || !isTs(knownAtTs)) return 'txn: retrieval/knowledge clock invalid';
+  if (publishedTs !== null && publishedTs > retrievedTs) return 'txn: publishedTs after retrievedTs — causally impossible';
+  if (retrievedTs > knownAtTs) return 'txn: retrievedTs after knownAtTs — causally impossible';
+  if (t.preparedTs !== knownAtTs) return 'txn: preparedTs disagrees with the prepared knowledge clock';
+  const expectedTs = new Date(knownAtTs).toISOString();
+
+  if (!Array.isArray(t.events) || t.events.length === 0 || t.events.length > MAX_TXN_EVENTS) return 'txn: events invalid';
+  let sourceEvents = 0;
+  let claimEvents = 0;
+  let packetEvents = 0;
+  let withheldEvents = 0;
+  for (const e of t.events) {
+    if (!isPlainObject(e)) return 'txn: event not an object';
+    if (!RUMOR2_TXN_EVENT_TYPES.includes(e.type)) return `txn: event type ${String(e.type).slice(0, 40)} not allowed`;
+    if (e.provider !== t.provider) return 'txn: event provider disagrees with transaction provider';
+    if (e.ts !== expectedTs) return 'txn: event clock disagrees with the prepared knowledge clock';
+    if (typeof e.sourceEventId !== 'string' || e.sourceEventId.length === 0) return 'txn: event missing sourceEventId';
+    if (e.type === 'RUMOR2_SOURCE_OBSERVED') {
+      sourceEvents += 1;
+      if (e.sourceEventId !== t.sourceObservationId) return 'txn: source event identity disagrees with transaction source';
+      if (e.publishedTs !== publishedTs || e.retrievedTs !== retrievedTs || e.knownAtTs !== knownAtTs)
+        return 'txn: source event clocks disagree with immutable transaction clocks';
+    } else if (e.type === 'RUMOR2_CLAIM_OBSERVED') {
+      claimEvents += 1;
+      if (typeof e.propositionId !== 'string' || !R2C_RE.test(e.propositionId)) return 'txn: claim event lacks a valid proposition identity';
+      if (e.claimKey !== e.propositionId) return 'txn: claim event claimKey/propositionId disagree';
+      if (e.sourceEventId !== `${t.sourceObservationId}|claim|${e.propositionId}`)
+        return 'txn: claim event identity not bound to source and proposition';
+      if (!RUMOR2_CLAIM_TYPES.includes(e.claimType)) return 'txn: claim event carries unknown claimType';
+    } else if (e.type === 'RUMOR2_PACKET') {
+      packetEvents += 1;
+      if (typeof e.propositionId !== 'string' || !R2C_RE.test(e.propositionId)) return 'txn: packet event lacks a valid proposition identity';
+      if (!isPlainObject(e.packet)) return 'txn: packet event lacks a packet';
+      // THE trust gate: the accepted evidence contract validator runs over
+      // every prepared packet — the contract itself recomputes packetId
+      // against semantic content, so a forged identity dies here too.
+      const check = validateEvidencePacket(e.packet);
+      if (!check.valid) return boundedError(`txn: prepared packet fails serpent-evidence-1 (${check.reasons[0] ?? 'invalid'})`);
+      if (e.packetId !== e.packet.packetId) return 'txn: packet event packetId disagrees with the packet itself';
+      if (e.sourceEventId !== `${t.sourceObservationId}|packet|${e.packetId}`)
+        return 'txn: packet event identity not bound to source and packet';
+    } else {
+      withheldEvents += 1;
+      const hasReason = isBounded(e.reason, MAX_ERROR_CHARS);
+      const hasReasons = Array.isArray(e.reasons) && e.reasons.length > 0 && e.reasons.length <= 8 && e.reasons.every((x) => isBounded(x, MAX_ERROR_CHARS));
+      if (!hasReason && !hasReasons) return 'txn: withheld event lacks a bounded reason';
+      if (!e.sourceEventId.startsWith(`${t.sourceObservationId}|withheld|`)) return 'txn: withheld event not bound to the transaction source';
+      const suffix = e.sourceEventId.slice(`${t.sourceObservationId}|withheld|`.length);
+      if (e.propositionId !== undefined) {
+        if (typeof e.propositionId !== 'string' || !R2C_RE.test(e.propositionId)) return 'txn: withheld event proposition invalid';
+        if (suffix !== e.propositionId) return 'txn: withheld event identity/proposition disagree';
+      } else if (suffix !== 'coin-resolution') return 'txn: withheld event has an unrecognized binding';
+    }
+  }
+  if (sourceEvents !== 1) return 'txn: exactly one source-observed event is required';
+
+  // candidate — closed schema, consistent with settling THIS source item
+  if (!isPlainObject(t.candidate)) return 'txn: candidate missing';
+  const candErr = exactKeys(t.candidate, ['seenIds', 'graphClaims', 'graphRemovals', 'counterDeltas', 'lastNewItemTs'], 'txn.candidate');
+  if (candErr) return candErr;
+  const cand = t.candidate;
+  if (!Array.isArray(cand.seenIds) || cand.seenIds.length === 0 || cand.seenIds.length > MAX_SEEN_IDS) return 'txn: candidate seenIds invalid';
+  for (const s of cand.seenIds) if (typeof s !== 'string' || !R2S_RE.test(s)) return 'txn: candidate seenIds carry a bad id';
+  if (new Set(cand.seenIds).size !== cand.seenIds.length) return 'txn: candidate seenIds duplicated';
+  if (!cand.seenIds.includes(t.sourceObservationId)) return 'txn: candidate does not settle this source item';
+  if (!isPlainObject(cand.graphClaims)) return 'txn: candidate graphClaims invalid';
+  for (const [k, node] of Object.entries(cand.graphClaims)) {
+    if (!R2C_RE.test(k)) return 'txn: candidate graph key is not a proposition identity';
+    if (!isPlainObject(node) || node.propositionId !== k || node.claimKey !== k) return 'txn: candidate node disagrees with its proposition key';
+  }
+  if (!Array.isArray(cand.graphRemovals) || cand.graphRemovals.length > MAX_ACTIVE_CLAIMS) return 'txn: candidate graphRemovals invalid';
+  for (const k of cand.graphRemovals) if (typeof k !== 'string' || !R2C_RE.test(k)) return 'txn: candidate removal is not a proposition identity';
+  // adoption may never push the graph beyond its accepted bound
+  if (isPlainObject(graph) && isPlainObject(graph.claims)) {
+    const after = new Set(Object.keys(graph.claims));
+    for (const k of cand.graphRemovals) after.delete(k);
+    for (const k of Object.keys(cand.graphClaims)) after.add(k);
+    if (after.size > MAX_ACTIVE_CLAIMS) return 'txn: candidate adoption exceeds the active-claim bound';
+  }
+  // counters — EXACT keys, nonnegative safe integers, corresponding
+  // one-for-one to the actual prepared bundle: never a decrement, never a
+  // manufactured counter, never an increment for an unowed event
+  const dErr = exactKeys(cand.counterDeltas, ['sourcesObserved', 'claimsObserved', 'packetsProduced', 'packetsWithheld'], 'txn.counterDeltas');
+  if (dErr) return dErr;
+  for (const [k, v] of Object.entries(cand.counterDeltas))
+    if (!Number.isSafeInteger(v) || v < 0) return `txn: counter delta ${k} must be a nonnegative safe integer`;
+  if (cand.counterDeltas.sourcesObserved !== sourceEvents) return 'txn: sourcesObserved delta disagrees with the prepared bundle';
+  if (cand.counterDeltas.claimsObserved !== claimEvents) return 'txn: claimsObserved delta disagrees with the prepared bundle';
+  if (cand.counterDeltas.packetsProduced !== packetEvents) return 'txn: packetsProduced delta disagrees with the prepared bundle';
+  if (cand.counterDeltas.packetsWithheld !== withheldEvents) return 'txn: packetsWithheld delta disagrees with the prepared bundle';
+  if (cand.lastNewItemTs !== knownAtTs) return 'txn: candidate lastNewItemTs disagrees with the knowledge clock';
   return null;
 }
 

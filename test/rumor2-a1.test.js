@@ -383,17 +383,19 @@ test('A1-30. explicit relation attachment targets one exact proposition — neve
 
 // ---- checkpoint version discipline ------------------------------------------
 
-test('A1-cp. checkpoint v2 fails closed on the obsolete v1 shape — no silent reinterpretation', () => {
-  assert.equal(RUMOR2_CHECKPOINT_VERSION, 2);
-  const v2 = emptyCheckpoint([...PROVIDER_IDS], T1);
-  assert.equal(validateRumor2Checkpoint(v2, { providerIds: [...PROVIDER_IDS] }), null);
-  // a v1-era checkpoint (version 1, category graph keys, no txn slot)
-  const v1 = { ...structuredClone(v2), checkpointVersion: 1 };
-  assert.ok(validateRumor2Checkpoint(v1, { providerIds: [...PROVIDER_IDS] }).includes('unsupported version'));
-  const oldKeys = structuredClone(v2);
+test('A1-cp. obsolete checkpoint shapes fail closed — no silent reinterpretation', () => {
+  assert.equal(RUMOR2_CHECKPOINT_VERSION, 3); // A2: prepared-transaction trust bump
+  const cur = emptyCheckpoint([...PROVIDER_IDS], T1);
+  assert.equal(validateRumor2Checkpoint(cur, { providerIds: [...PROVIDER_IDS] }), null);
+  // v1- and v2-era checkpoints are never silently reinterpreted as trusted
+  for (const oldVersion of [1, 2]) {
+    const old = { ...structuredClone(cur), checkpointVersion: oldVersion };
+    assert.ok(validateRumor2Checkpoint(old, { providerIds: [...PROVIDER_IDS] }).includes('unsupported version'), `v${oldVersion} withheld`);
+  }
+  const oldKeys = structuredClone(cur);
   oldKeys.graph.claims['EXCHANGE_LISTING|BTC'] = { claimText: 'old shape' };
   assert.ok(validateRumor2Checkpoint(oldKeys, { providerIds: [...PROVIDER_IDS] }).includes('not a proposition identity'));
-  const noTxn = structuredClone(v2);
+  const noTxn = structuredClone(cur);
   delete noTxn.txn;
   assert.ok(validateRumor2Checkpoint(noTxn, { providerIds: [...PROVIDER_IDS] }).includes('txn slot missing'));
 });

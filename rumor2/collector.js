@@ -40,6 +40,7 @@ import {
   classifyOfficialItem,
   itemClocks,
   validateRumor2Checkpoint,
+  validateRumor2Txn,
   emptyCheckpoint,
   rememberSeen,
   propositionIdentity,
@@ -384,6 +385,15 @@ export function startRumor2({
   function settlePendingTxn() {
     const txn = cp.txn;
     if (!txn) return true;
+    // A2 TRUST GATE: no prepared event appends until the ENTIRE transaction
+    // passes the closed semantic schema — a fabricated or malformed record
+    // in a durable slot withholds the ear instead of becoming Memory truth.
+    const trustErr = validateRumor2Txn(txn, { providerIds: [...PROVIDER_IDS], graph: cp.graph });
+    if (trustErr) {
+      lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+      withholdReason = boundedError(trustErr);
+      return false;
+    }
     const r = runtime[txn.provider];
     for (const ev of txn.events) {
       if (proven(ev)) continue; // already durably represented — ACKED
@@ -483,16 +493,33 @@ export function startRumor2({
       providerFailure(p, r, cps, `feed rejected: ${parsed.reason}`, { http: res.status });
       return true;
     }
+    // OBSERVATION truth is immediate: the fetch genuinely succeeded, so
+    // health resets and coverage may truthfully say OBSERVED at this clock.
     cps.consecutiveFailures = 0;
     cps.backoffUntil = null;
     cps.lastSuccessTs = now();
-    cps.etag = typeof res.etag === 'string' ? res.etag.slice(0, 300) : cps.etag;
-    cps.lastModified = typeof res.lastModified === 'string' ? res.lastModified.slice(0, 100) : cps.lastModified;
     r.lastFailureReason = null;
+    // CURSOR-CONSUMPTION truth is NOT immediate (A2): the new ETag /
+    // Last-Modified / bootstrap-complete state is anything that could make
+    // a later conditional request suppress THIS response — so it is held
+    // locally and committed to the checkpoint ONLY after every selected
+    // item from this response has completely settled. A per-item
+    // write-ahead save therefore always carries the OLD cursor: if any
+    // item fails (owed transaction, unavailable durability), the durable
+    // cursor still re-fetches the full response, settled siblings dedupe
+    // by semantic identity, and no item can vanish behind a 304.
+    const newCursor = {
+      etag: typeof res.etag === 'string' ? res.etag.slice(0, 300) : cps.etag,
+      lastModified: typeof res.lastModified === 'string' ? res.lastModified.slice(0, 100) : cps.lastModified,
+    };
     const items = cps.bootstrapped ? parsed.items : parsed.items.slice(0, MAX_BOOTSTRAP_ITEMS);
     for (const item of items.slice(0, MAX_FEED_ITEMS)) {
-      if (!(await processItem(p, r, cps, item))) return false; // owed truth halts ALL new processing
+      if (!(await processItem(p, r, cps, item))) return false; // owed truth halts ALL new processing; cursor stays OLD
     }
+    // CURSOR COMMIT: every selected item from this response is durably
+    // settled — only now may a future conditional GET legitimately 304 it.
+    cps.etag = newCursor.etag;
+    cps.lastModified = newCursor.lastModified;
     cps.bootstrapped = true;
     return true;
   }

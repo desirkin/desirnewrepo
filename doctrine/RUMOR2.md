@@ -128,6 +128,25 @@ when the COMPLETE bundle (source, claim, packet, withheld) is durably
 settled; a failed append retains the whole transaction, halts new
 polling, and is truthfully exposed as `pendingTransaction`.
 
+Cursor law (A2): NO PROVIDER RESPONSE CURSOR MAY BECOME DURABLE BEFORE
+EVERY ITEM SERPENT INTENDS TO CONSUME FROM THAT RESPONSE IS DURABLY
+SETTLED. A response cursor is anything that could make a later request
+suppress the original response — ETag, Last-Modified, bootstrap-complete
+state — and it is held locally through item processing, committing to the
+checkpoint only after the last selected item settles; per-item write-ahead
+saves always carry the OLD cursor, so a failed item forces a full
+re-fetch in which settled siblings dedupe by semantic identity and
+nothing can vanish behind a 304. Provider OBSERVATION truth
+(lastSuccessTs, health resets) is separate from cursor-CONSUMPTION truth
+and stays immediate — coverage never lies in either direction. Trust law
+(A2): a persisted prepared transaction is replayed verbatim on restart,
+so it is a CLOSED semantic schema proven before recovery may touch it —
+exact keys, causal clocks, the four allowed event types only, every event
+bound to its source item and proposition, every prepared packet
+re-validated under serpent-evidence-1 (a fabricated packet withholds the
+ear instead of becoming KNOWN Memory), and counter deltas corresponding
+one-for-one to the prepared bundle.
+
 Graph nodes are PROPOSITIONS: `r2c-` identities over (claimType,
 canonicalCoin, origin sourceObservationId). Two unrelated enforcement
 actions about one coin are two claims; the same official item — repeated,
