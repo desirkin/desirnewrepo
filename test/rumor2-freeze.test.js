@@ -534,17 +534,26 @@ if (!TEST_URL) {
         assert.equal(await db1.connect(), true);
         const repo1 = new R(db1);
         const repo2 = new R(db2);
+        // establish the current writer epoch via a real acquisition, then
+        // both clients append under that SAME current epoch (the append is
+        // always epoch-guarded now — no null bypass)
+        const lock = await repo1.acquireRumor2WriterLock();
+        const epoch = lock.epoch;
         const mkEv = (n) => ({ type: 'RUMOR2_PROVIDER_FAILURE', ts: new Date(T1 + n).toISOString(), provider: 'SEC_OFFICIAL', reason: `r${n}`, httpStatus: 500, consecutiveFailures: 1 });
-        const results = await Promise.allSettled([repo1.appendRumor2Events('rumor2', [mkEv(1), mkEv(2)]), repo2.appendRumor2Events('rumor2', [mkEv(3), mkEv(4)])]);
+        const results = await Promise.allSettled([
+          repo1.appendRumor2Events('rumor2', [mkEv(1), mkEv(2)], epoch),
+          repo2.appendRumor2Events('rumor2', [mkEv(3), mkEv(4)], epoch),
+        ]);
         const okCount = results.filter((r) => r.status === 'fulfilled').length;
         assert.ok(okCount >= 1, 'at least one writer lands');
         // the loser (if any) failed WHOLE — retry it and it lands cleanly
         for (let i = 0; i < results.length; i++) {
           if (results[i].status === 'rejected') {
             const repo = i === 0 ? repo1 : repo2;
-            await repo.appendRumor2Events('rumor2', i === 0 ? [mkEv(1), mkEv(2)] : [mkEv(3), mkEv(4)]);
+            await repo.appendRumor2Events('rumor2', i === 0 ? [mkEv(1), mkEv(2)] : [mkEv(3), mkEv(4)], epoch);
           }
         }
+        await lock.release();
         const jr = await repo1.loadRumor2Events('rumor2');
         assert.ok(!jr.corrupt, 'the sequence stayed contiguous under contention');
         assert.equal(jr.lastSeq, 4, 'all four records landed exactly once');

@@ -534,6 +534,21 @@ Sealed at this pass:
   applied. The durable journal enforces this too — its append refuses to
   allocate a sequence or write a row (WRITER_FENCE_LOST) unless the fence is
   held, so no collector bug and no direct call can bypass one-writer.
+  The fence is a CAPABILITY, not a convention: there is no way to spend RUMOR
+  write authority without holding it. NO EPOCH = NO WRITE. The low-level
+  PostgreSQL mutations require a valid writer epoch — a positive safe integer
+  (null, undefined, NaN, Infinity, zero, negatives, fractions, and strings are
+  refused, never coerced) — and there is NO null-epoch or omitted-epoch write
+  path: a caller that omits or supplies an invalid token is refused
+  (MISSING_WRITER_EPOCH / invalidEpoch) BEFORE any transaction opens, never
+  granted an unfenced write. Omitting the token can never mean "skip the
+  check". The epoch advances on the SAME session that owns the advisory lock,
+  inside acquisition itself — there is no public epoch-advance API for any
+  Repository caller, so a dead or non-owner session cannot advance the global
+  epoch to falsely stale a live writer, and an epoch-advance failure aborts the
+  acquisition (releasing the lock, advancing nothing) rather than handing out
+  half-authority. Concurrent acquisitions yield exactly one winner and advance
+  the epoch exactly once.
 
 - LOCAL DURABILITY IS EXPLICIT AND LABELED. The local events.jsonl file is
   honest development/research storage, never deployment-grade durability,

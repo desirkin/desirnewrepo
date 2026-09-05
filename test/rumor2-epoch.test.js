@@ -99,21 +99,28 @@ if (!TEST_URL) {
     });
   });
 
-  test('EPOCH-CP-4+5. a save whose epoch became stale after it was chosen is rejected at the write boundary (TOCTOU)', async () => {
-    await withDb(async ({ mkStores, db, repo }) => {
-      const A = mkStores();
-      const a = await A.journal.acquireWriter(); // epoch 1
-      const chosenEpoch = a.epoch; // A "chose" epoch 1 for an in-flight save
-      // the epoch advances underneath A (a takeover) before A's guarded write
-      // reaches its mutation — simulate the concurrent advance directly
-      await repo.advanceRumor2WriterEpoch('rumor2'); // now 2
-      // A's save carrying the now-stale epoch is rejected inside the same
-      // transaction that would perform the write — no mutation commits
-      const r = await A.checkpointStore.save(CP('A-TOCTOU', 5), chosenEpoch);
-      assert.equal(r.reason, 'STALE_WRITER');
-      const cp = await repo.loadRumor2Checkpoint();
-      assert.equal(cp, null, 'the stale save committed nothing');
-      await A.journal.releaseWriter();
+  // advance the DB writer epoch by one real acquisition/release (the ONLY
+  // legitimate way it moves now — no public advance helper exists)
+  const bumpEpoch = async (mkStores) => {
+    const s = mkStores();
+    const w = await s.journal.acquireWriter();
+    await s.journal.releaseWriter();
+    return w.epoch;
+  };
+
+  test('EPOCH-CP-4+5. a checkpoint carrying an epoch that is no longer current is rejected at the write boundary (TOCTOU)', async () => {
+    await withDb(async ({ mkStores, repo }) => {
+      const e1 = await bumpEpoch(mkStores); // A held epoch 1 then released
+      const e2 = await bumpEpoch(mkStores); // B advanced to epoch 2
+      assert.equal(e1, 1);
+      assert.equal(e2, 2);
+      // a delayed save carrying the now-stale epoch e1 — the DB fence reads
+      // the current epoch (2) inside the write transaction and rejects it
+      const r = await repo.saveRumor2Checkpoint(CP('A-TOCTOU', 5), e1);
+      assert.equal(r.stale, true);
+      assert.equal(await repo.loadRumor2Checkpoint(), null, 'the stale save committed nothing');
+      // the current epoch still saves
+      assert.deepEqual(await repo.saveRumor2Checkpoint(CP('B', 6), e2), { ok: true });
     });
   });
 
@@ -122,21 +129,18 @@ if (!TEST_URL) {
     await withDb(async ({ mkStores, db, repo }) => {
       const A = mkStores();
       const a = await A.journal.acquireWriter(); // epoch 1
-      // J-1: current-epoch append works
-      const ok = await A.journal.append([ev(1), ev(2)]);
-      assert.deepEqual(ok, { ok: true, lastSeq: 2 });
-      // the epoch advances underneath A (takeover)
-      await repo.advanceRumor2WriterEpoch('rumor2'); // now 2
+      // J-1: current-epoch append works through the store
+      assert.deepEqual(await A.journal.append([ev(1), ev(2)]), { ok: true, lastSeq: 2 });
+      await A.journal.releaseWriter();
+      const e2 = await bumpEpoch(mkStores); // epoch advances to 2 via real takeover
+      assert.equal(e2, 2);
       const seqBefore = Number((await db.query(`SELECT COALESCE(MAX(event_seq),0) AS n FROM serpent_rumor2_events`)).rows[0].n);
-      // J-2..5: a stale append (A still thinks it holds epoch 1) is rejected;
-      // a batch mixing a duplicate and a new event still lands nothing
-      const stale = await A.journal.append([ev(1), ev(3)]);
-      assert.equal(stale.ok, false);
-      assert.equal(stale.reason, 'STALE_WRITER');
+      // J-2..5: a stale append carrying epoch 1 — batch mixing a duplicate and
+      // a new event — lands nothing (the repo DB fence rejects it whole)
+      await assert.rejects(() => repo.appendRumor2Events('rumor2', [ev(1), ev(3)], 1), (e) => e.staleWriter === true);
       const seqAfter = Number((await db.query(`SELECT COALESCE(MAX(event_seq),0) AS n FROM serpent_rumor2_events`)).rows[0].n);
       assert.equal(seqAfter, seqBefore, 'a stale append consumed zero event sequence');
-      assert.ok(!(await A.journal.read()).events.some((e) => e.reason === 'r3'), 'the new event never landed');
-      await A.journal.releaseWriter();
+      assert.ok(!(await repo.loadRumor2Events('rumor2')).events.some((e) => e.reason === 'r3'), 'the new event never landed');
     });
   });
 
@@ -227,6 +231,156 @@ if (!TEST_URL) {
       const r = await A.checkpointStore.save(CP('x', 1), 1);
       assert.equal(r.durable, false);
       assert.equal(r.reason, 'STALE_WRITER', 'no confirmable epoch => no durable mutation');
+    });
+  });
+
+  // =========================================================================
+  // WRITER-EPOCH CAPABILITY SEAL (#79): there is NO low-level PostgreSQL RUMOR
+  // mutation path that accepts a null/omitted/invalid epoch, and the epoch
+  // advances ONLY on the lock-owning session — no public advance API, no
+  // half-authoritative acquisition. Baseline 34d75e3 accepted every one of
+  // these (see scratchpad/capability-red.mjs: BYPASS OPEN on all three).
+  // =========================================================================
+  const NOARG = Symbol('noarg');
+  // every value a legitimate writer epoch is NOT — refused, never coerced
+  const BAD_EPOCHS = [
+    ['omitted', NOARG], ['null', null], ['undefined', undefined], ['zero', 0],
+    ['negative', -1], ['NaN', NaN], ['Infinity', Infinity], ['fraction', 1.5],
+    ['string-1', '1'], ['boolean', true],
+  ];
+
+  test('LOWLEVEL-CP. the low-level checkpoint mutation refuses every non-(positive-safe-integer) epoch — zero rows; the correct epoch passes', async () => {
+    await withDb(async ({ repo, db }) => {
+      for (const [label, bad] of BAD_EPOCHS) {
+        const r = bad === NOARG ? await repo.saveRumor2Checkpoint(CP('bad')) : await repo.saveRumor2Checkpoint(CP('bad'), bad);
+        assert.deepEqual(r, { invalidEpoch: true }, `checkpoint refused for epoch=${label}`);
+      }
+      assert.equal(Number((await db.query(`SELECT count(*)::int c FROM serpent_rumor2_checkpoint`)).rows[0].c), 0, 'no invalid-epoch checkpoint touched the durable core');
+      // LOWLEVEL green: a real acquisition mints a valid epoch and the save commits
+      const lock = await repo.acquireRumor2WriterLock();
+      assert.ok(Number.isInteger(lock.epoch) && lock.epoch >= 1);
+      assert.deepEqual(await repo.saveRumor2Checkpoint(CP('ok'), lock.epoch), { ok: true });
+      assert.equal((await repo.loadRumor2Checkpoint()).tag, 'ok');
+      await lock.release();
+    });
+  });
+
+  test('LOWLEVEL-J. the low-level append refuses every non-(positive-safe-integer) epoch — zero rows, zero sequence; the correct epoch passes', async () => {
+    await withDb(async ({ repo, db }) => {
+      for (const [label, bad] of BAD_EPOCHS) {
+        await assert.rejects(
+          () => (bad === NOARG ? repo.appendRumor2Events(STREAM, [ev(1)]) : repo.appendRumor2Events(STREAM, [ev(1)], bad)),
+          (e) => e.invalidEpoch === true,
+          `append refused for epoch=${label}`
+        );
+      }
+      assert.equal(Number((await db.query(`SELECT COALESCE(MAX(event_seq),0) n FROM serpent_rumor2_events`)).rows[0].n), 0, 'no invalid-epoch append consumed any sequence');
+      assert.equal(Number((await db.query(`SELECT count(*)::int c FROM serpent_rumor2_events WHERE stream = 'rumor2'`)).rows[0].c), 0, 'no invalid-epoch append inserted any row');
+      // LOWLEVEL green: a real acquisition mints a valid epoch and the append commits
+      const lock = await repo.acquireRumor2WriterLock();
+      assert.equal((await repo.appendRumor2Events(STREAM, [ev(1), ev(2)], lock.epoch)).lastSeq, 2, 'the correct epoch appends');
+      await lock.release();
+    });
+  });
+
+  test('CAP-OMIT. omitting the epoch is refused even while a live fence is held — no stale-omit bypass (§18)', async () => {
+    await withDb(async ({ repo }) => {
+      const lock = await repo.acquireRumor2WriterLock(); // a live epoch exists
+      assert.deepEqual(await repo.saveRumor2Checkpoint(CP('omit')), { invalidEpoch: true }, 'omitting the token never means "skip the check"');
+      await assert.rejects(() => repo.appendRumor2Events(STREAM, [ev(1)]), (e) => e.invalidEpoch === true);
+      // the live writer's real token still commits
+      assert.deepEqual(await repo.saveRumor2Checkpoint(CP('ok'), lock.epoch), { ok: true });
+      await lock.release();
+    });
+  });
+
+  test('CAP-NO-ADVANCE. there is no public epoch-advance API on the repository or the journal store', async () => {
+    await withDb(async ({ repo, mkStores }) => {
+      assert.equal(typeof repo.advanceRumor2WriterEpoch, 'undefined', 'the repository exposes no advance method');
+      const { journal } = mkStores();
+      assert.equal(typeof journal.advanceRumor2WriterEpoch, 'undefined', 'the journal store exposes no advance method');
+      assert.equal(typeof journal.advanceWriterEpoch, 'undefined', 'no aliased advance method either');
+    });
+  });
+
+  test('CAP-EPOCH-FAIL. an epoch-advance failure aborts acquisition, releases the lock, and advances nothing (§29 / RED-ACQUIRE-1,3)', async () => {
+    await withDb(async ({ db, repo, SCHEMA }) => {
+      // force the epoch INSERT — which runs on the lock-owning session — to
+      // fail, standing in for a session death between lock grant and epoch
+      // establishment. The acquisition must abort, not hand out authority.
+      await db.query(`DROP TABLE serpent_rumor2_writer_epoch`, [], { write: true });
+      await assert.rejects(() => repo.acquireRumor2WriterLock(), 'a failed epoch advance aborts the acquisition');
+      // restore the table: a COMPLETELY FRESH session must now acquire — which
+      // proves the aborted attempt (a) released its advisory lock and (b) left
+      // the epoch un-advanced (a fresh epoch is 1, not 2).
+      await db.query(
+        `CREATE TABLE serpent_rumor2_writer_epoch (stream text PRIMARY KEY, epoch bigint NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now())`,
+        [], { write: true }
+      );
+      const db2 = new Db({ url: TEST_URL, schema: SCHEMA });
+      try {
+        assert.equal(await db2.connect(), true);
+        const lock = await new Repository(db2).acquireRumor2WriterLock();
+        assert.ok(lock, 'a fresh session acquires — the aborted attempt left no dangling advisory lock');
+        assert.equal(lock.epoch, 1, 'the aborted attempt advanced the epoch by nothing');
+        await lock.release();
+      } finally {
+        await db2.end();
+      }
+    });
+  });
+
+  test('CAP-CONCURRENT. concurrent acquisitions yield exactly one winner and advance the epoch exactly once (§30)', async () => {
+    await withDb(async ({ db, SCHEMA }) => {
+      const dbs = [];
+      try {
+        for (let i = 0; i < 6; i++) { const d = new Db({ url: TEST_URL, schema: SCHEMA }); assert.equal(await d.connect(), true); dbs.push(d); }
+        const results = await Promise.all(dbs.map((d) => new Repository(d).acquireRumor2WriterLock().catch(() => null)));
+        const winners = results.filter((r) => r && typeof r.epoch === 'number');
+        assert.equal(winners.length, 1, 'exactly one concurrent contender wins the advisory lock');
+        assert.equal(winners[0].epoch, 1, 'the sole winner advanced the epoch exactly once (0 → 1)');
+        assert.equal(Number((await db.query(`SELECT epoch FROM serpent_rumor2_writer_epoch WHERE stream = 'rumor2'`)).rows[0].epoch), 1, 'the losing contenders advanced the epoch by nothing');
+        await winners[0].release();
+      } finally {
+        for (const d of dbs) await d.end();
+      }
+    });
+  });
+
+  test('CAP-ADVERSARIAL. eight capability attacks on the writer-epoch authority are all refused (§36)', async () => {
+    await withDb(async ({ mkStores, repo, db }) => {
+      // 1. null epoch checkpoint → refused
+      assert.deepEqual(await repo.saveRumor2Checkpoint(CP('a1'), null), { invalidEpoch: true });
+      // 2. undefined epoch append → refused
+      await assert.rejects(() => repo.appendRumor2Events(STREAM, [ev(1)], undefined), (e) => e.invalidEpoch === true);
+      // 3. string "1" → refused (never coerced to a number)
+      assert.deepEqual(await repo.saveRumor2Checkpoint(CP('a3'), '1'), { invalidEpoch: true });
+      // 4. fractional epoch → refused
+      assert.deepEqual(await repo.saveRumor2Checkpoint(CP('a4'), 1.5), { invalidEpoch: true });
+      // 5. zero / negative → refused
+      assert.deepEqual(await repo.saveRumor2Checkpoint(CP('a5'), 0), { invalidEpoch: true });
+      assert.deepEqual(await repo.saveRumor2Checkpoint(CP('a5b'), -1), { invalidEpoch: true });
+      // ... and none of 1–5 touched the durable core
+      assert.equal(Number((await db.query(`SELECT count(*)::int c FROM serpent_rumor2_checkpoint`)).rows[0].c), 0, 'no refused checkpoint landed');
+      assert.equal(Number((await db.query(`SELECT count(*)::int c FROM serpent_rumor2_events WHERE stream = 'rumor2'`)).rows[0].c), 0, 'no refused append landed');
+      // 6. omit-token while a live fence is held → still refused (no skip-the-check bypass)
+      const A = mkStores();
+      const a = await A.journal.acquireWriter(); // epoch 1 live
+      assert.equal(a.epoch, 1);
+      assert.deepEqual(await repo.saveRumor2Checkpoint(CP('a6')), { invalidEpoch: true });
+      // 7. a delayed stale epoch after failover → refused; the newer truth survives
+      assert.deepEqual(await A.checkpointStore.save(CP('A', 1), a.epoch), { durable: true });
+      await A.journal.releaseWriter();
+      const B = mkStores();
+      const b = await B.journal.acquireWriter(); // epoch 2
+      assert.equal(b.epoch, 2);
+      assert.deepEqual(await B.checkpointStore.save(CP('B-NEW', 2), b.epoch), { durable: true });
+      assert.equal((await repo.saveRumor2Checkpoint(CP('A-STALE', 9), a.epoch)).stale, true);
+      assert.equal((await repo.loadRumor2Checkpoint()).tag, 'B-NEW', 'a stale writer cannot overwrite newer truth');
+      // 8. no public advance API → a non-owner cannot force-stale a live writer
+      assert.equal(typeof repo.advanceRumor2WriterEpoch, 'undefined');
+      assert.equal(Number((await db.query(`SELECT epoch FROM serpent_rumor2_writer_epoch WHERE stream = 'rumor2'`)).rows[0].epoch), 2, 'the epoch moved only for the two real acquisitions — no attack advanced it');
+      await B.journal.releaseWriter();
     });
   });
 }

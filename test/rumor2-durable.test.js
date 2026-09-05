@@ -7,7 +7,6 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { memJournal } from './helpers/rumor2-journal.js';
 
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-r2dur-'));
 process.env.COBRA_DATA_DIR = TEST_DATA;
@@ -21,6 +20,7 @@ if (!TEST_URL) {
   const { Repository } = await import('../persistence/repository.js');
   const { runMigrations } = await import('../persistence/migrate.js');
   const { rumor2CheckpointStore } = await import('../persistence/rumor2-checkpoint.js');
+  const { rumor2JournalStore } = await import('../persistence/rumor2-journal.js');
   const { startRumor2 } = await import('../rumor2/collector.js');
   const { emptyCheckpoint } = await import('../rumor2/truth.js');
   const { PROVIDER_IDS } = await import('../rumor2/registry.js');
@@ -51,23 +51,31 @@ if (!TEST_URL) {
       const repo = new Repository(db);
       const alive = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       const store = rumor2CheckpointStore({ persistence: alive });
+      const journal = rumor2JournalStore({ persistence: alive });
+      // a durable checkpoint mutation is only reachable under a held writer
+      // epoch — there is no null-epoch bypass. Acquire the fence first.
+      const w = await journal.acquireWriter();
+      assert.equal(w.ok, true);
+      assert.ok(Number.isInteger(w.epoch) && w.epoch >= 1, 'acquisition yields a writer epoch');
+      const epoch = w.epoch;
       // four-outcome contract: absence is NOT_FOUND, never invented state
       assert.deepEqual(await store.load(), { outcome: 'NOT_FOUND' });
       const cp = emptyCheckpoint([...PROVIDER_IDS], T0);
       cp.providers.KRAKEN_OFFICIAL.seenIds = [`r2s-${'a'.repeat(40)}`];
       cp.providers.KRAKEN_OFFICIAL.backoffUntil = T0 + 900_000;
       cp.providers.KRAKEN_OFFICIAL.etag = '"e-77"';
-      assert.deepEqual(await store.save(cp), { durable: true });
+      assert.deepEqual(await store.save(cp, epoch), { durable: true });
       const r1 = await store.load();
       assert.equal(r1.outcome, 'LOADED');
       assert.deepEqual(r1.state.providers.KRAKEN_OFFICIAL.seenIds, [`r2s-${'a'.repeat(40)}`], 'seen IDs persist (D66)');
       assert.equal(r1.state.providers.KRAKEN_OFFICIAL.backoffUntil, T0 + 900_000, 'backoff persists (D67)');
       assert.equal(r1.state.providers.KRAKEN_OFFICIAL.etag, '"e-77"');
-      // DB-side revision counter is monotonic across saves
-      await store.save({ ...cp, revision: cp.revision + 1 });
-      await store.save({ ...cp, revision: cp.revision + 2 });
+      // DB-side revision counter is monotonic across saves under the same epoch
+      await store.save({ ...cp, revision: cp.revision + 1 }, epoch);
+      await store.save({ ...cp, revision: cp.revision + 2 }, epoch);
       const rev = await db.query(`SELECT revision FROM serpent_rumor2_checkpoint WHERE id = 'current'`);
       assert.equal(Number(rev.rows[0].revision), 3, 'revision strictly increases; nothing rewinds');
+      await journal.releaseWriter();
     } finally {
       await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
       await db.end();
@@ -83,7 +91,14 @@ if (!TEST_URL) {
       const repo = new Repository(db);
       const alive = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       const store = rumor2CheckpointStore({ persistence: alive });
-      await store.save({ checkpointVersion: 99, corrupt: true });
+      const journal = rumor2JournalStore({ persistence: alive });
+      // seed a malformed durable checkpoint under a real writer epoch, then
+      // release the fence — the corrupt row is the truth the collector must
+      // withhold over, never overwrite (there is no null-epoch write path)
+      const seed = await journal.acquireWriter();
+      assert.equal(seed.ok, true);
+      await store.save({ checkpointVersion: 99, corrupt: true }, seed.epoch);
+      await journal.releaseWriter();
       const clock = { ms: T0 };
       const fetchCalls = [];
       const c = startRumor2({
@@ -93,7 +108,7 @@ if (!TEST_URL) {
         now: () => clock.ms,
         intervalMs: 2_147_000_000,
         checkpointStore: store,
-        journal: memJournal([]),
+        journal,
         contact: null,
         enabled: true,
         timeoutMs: 50,
@@ -121,12 +136,15 @@ if (!TEST_URL) {
       const repo = new Repository(db);
       const alive = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       const store = rumor2CheckpointStore({ persistence: alive });
+      const journal = rumor2JournalStore({ persistence: alive });
       const feed = () => mkRes(200, rss([{ title: 'historic post', guid: 'h1', desc: 'nothing coin-specific' }]));
-      // ONE durable append-only event log across restarts — it is the
-      // restore witness the checkpoint's derived state is proven against
-      const log = [];
+      // ONE durable append-only event log across restarts — the real
+      // PostgreSQL journal is the restore witness the checkpoint's derived
+      // state is proven against. Each run acquires the writer fence afresh.
+      const observed = async () =>
+        (await journal.read()).events.filter((e) => e.type === 'RUMOR2_SOURCE_OBSERVED').length;
       const run = async () => {
-        const before = log.length;
+        const before = await observed();
         const clock = { ms: T0 };
         const c = startRumor2({
           log: () => {},
@@ -135,7 +153,7 @@ if (!TEST_URL) {
           now: () => clock.ms,
           intervalMs: 2_147_000_000,
           checkpointStore: store,
-          journal: memJournal(log),
+          journal,
           contact: null,
           enabled: true,
           timeoutMs: 50,
@@ -144,13 +162,13 @@ if (!TEST_URL) {
         await c.tickOnce();
         const dup = c.internals.runtime.KRAKEN_OFFICIAL.duplicates;
         await c.stop();
-        return { dup, appended: log.slice(before) };
+        return { dup, appended: (await observed()) - before };
       };
       const run1 = await run();
-      assert.equal(run1.appended.filter((e) => e.type === 'RUMOR2_SOURCE_OBSERVED').length, 1);
+      assert.equal(run1.appended, 1);
       assert.equal(run1.dup, 0);
-      const run2 = await run(); // full restart over the durable checkpoint + durable log
-      assert.equal(run2.appended.filter((e) => e.type === 'RUMOR2_SOURCE_OBSERVED').length, 0, 'history is remembered, not replayed');
+      const run2 = await run(); // full restart over the durable checkpoint + durable journal
+      assert.equal(run2.appended, 0, 'history is remembered, not replayed');
       assert.equal(run2.dup, 1, 'the replayed feed item is a counted duplicate');
     } finally {
       await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});

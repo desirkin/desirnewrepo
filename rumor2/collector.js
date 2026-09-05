@@ -527,13 +527,16 @@ export function startRumor2({
     const r = await checkpointStore.save(cp, writerEpoch);
     if (r.durable) durability = 'DURABLE';
     else if (r.reason === 'NOT_CONFIGURED') durability = 'NOT_CONFIGURED';
-    else if (r.stale || r.reason === 'STALE_WRITER') {
-      // PostgreSQL rejected a stale writer at the mutation boundary — a newer
-      // writer owns the epoch. Drop to standby; never retry as this epoch.
+    else if (r.stale || r.reason === 'STALE_WRITER' || r.reason === 'MISSING_WRITER_EPOCH') {
+      // PostgreSQL rejected the write at the mutation boundary — a newer
+      // writer owns the epoch, or this process holds no valid epoch. Drop to
+      // standby; never retry as this epoch. (MISSING_WRITER_EPOCH cannot
+      // arise in durable mode, where acquisition always yields a valid
+      // epoch — it is a fail-closed guard, never a silent bypass.)
       writerFenced = false;
       writerEpoch = null;
       lifecycle = 'STANDBY_WRITER';
-      withholdReason = 'writer epoch is stale — a newer writer holds authority';
+      withholdReason = r.reason === 'MISSING_WRITER_EPOCH' ? 'no valid writer epoch — standing by to reacquire' : 'writer epoch is stale — a newer writer holds authority';
     } else {
       durability = 'UNAVAILABLE';
       lifecycle = 'FAILED_DURABILITY'; // stop polling until durable truth is representable again

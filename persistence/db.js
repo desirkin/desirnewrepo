@@ -229,7 +229,22 @@ export class Db {
         // already released/destroyed — nothing leaks either way
       }
     };
-    return { held: () => !lost, release };
+    // A query bound to THIS lock-owning session (schema-qualified like
+    // db.query). It is how the writer epoch is advanced ON the very session
+    // that holds the advisory lock: if that session dies, this query cannot
+    // succeed, so a non-owner can never advance the epoch. A dead session
+    // throws; a connection failure marks the pool unreachable exactly as
+    // db.query does.
+    const query = async (text, params = []) => {
+      if (lost) throw Object.assign(new Error('lock session lost'), { code: 'LOCK_SESSION_LOST' });
+      try {
+        return await client.query(this.#qualify(text), params);
+      } catch (err) {
+        this.#markConnectionFailure(err);
+        throw err;
+      }
+    };
+    return { held: () => !lost, release, query };
   }
 
   async end() {

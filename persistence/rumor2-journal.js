@@ -15,6 +15,8 @@
 import { getPersistence } from './runtime.js';
 
 const STREAM = 'rumor2';
+// a legitimate writer epoch is a positive safe integer
+const isValidWriterEpoch = (e) => typeof e === 'number' && Number.isSafeInteger(e) && e > 0;
 
 const classifyWith = (persistence) => () => {
   const p = persistence();
@@ -86,8 +88,10 @@ export function rumor2JournalStore({ persistence = getPersistence } = {}) {
       // held. A collector bug can never bypass one-active-writer, and a
       // direct append without authority is refused outright.
       if (!fence || !fence.held()) return { ok: false, reason: 'WRITER_FENCE_LOST' };
-      // and in durable mode a valid epoch is REQUIRED — no escape hatch (§20)
-      if (fenceEpoch === null) return { ok: false, reason: 'WRITER_FENCE_LOST' };
+      // and a valid current writer epoch (positive safe integer) is REQUIRED —
+      // no null/invalid escape hatch (§9/§20). Defense in depth: the repository
+      // independently requires and verifies the epoch inside its transaction.
+      if (!isValidWriterEpoch(fenceEpoch)) return { ok: false, reason: 'WRITER_FENCE_LOST' };
       try {
         // the epoch is verified INSIDE the append transaction (DB-enforced
         // stale-writer rejection); a lost lock cannot commit a delayed batch

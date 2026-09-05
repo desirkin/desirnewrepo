@@ -674,7 +674,10 @@ if (!TEST_URL) {
       let saves = 0;
       const crashingStore = {
         load: () => checkpointStore.load(),
-        save: async (state) => (saves++ === 0 ? checkpointStore.save(state) : { durable: true }),
+        // forward the writer epoch: the fenced checkpoint save is verified
+        // against it inside the write transaction. The crash window keeps only
+        // the first (write-ahead) save; every later save is silently lost.
+        save: async (state, epoch) => (saves++ === 0 ? checkpointStore.save(state, epoch) : { durable: true }),
       };
       const b1 = pgBoot({ checkpointStore: crashingStore, journal, clockMs: T1 - 4_000_000 });
       await b1.tick();

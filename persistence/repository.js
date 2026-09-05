@@ -20,6 +20,10 @@ import {
 
 const MAX_QUERY_LIMIT = 500;
 const clamp = (n) => Math.max(1, Math.min(Number.isFinite(n) ? n : 50, MAX_QUERY_LIMIT));
+// RUMOR-2 writer-epoch capability seal: a legitimate writer epoch is a
+// positive safe integer. null, undefined, NaN, Infinity, 0, negatives,
+// fractions, and strings are NOT authority — they are refused, never coerced.
+const isValidWriterEpoch = (e) => typeof e === 'number' && Number.isSafeInteger(e) && e > 0;
 // ATTENTION-1B: newest plausible rows fetched per symbol before exact
 // validation picks the winner — bounded candidate depth, never a lifetime scan
 const ATTENTION_CANDIDATES_PER_SYMBOL = 4;
@@ -510,23 +514,17 @@ export class Repository {
   // Same contract as the GOV/RUMINT checkpoints: one revision-counted
   // bounded snapshot, validated strictly by its collector before trust,
   // carrying no control/posture semantics and no decision return path.
-  // RUMOR-2 writer-epoch fence (DB-enforced): when expectedEpoch is a number
-  // (durable fenced mode), the epoch check and the checkpoint write share ONE
-  // transaction — `SELECT ... FOR UPDATE` locks the writer-epoch row so a
-  // concurrent acquisition's advance serializes against it, and a stale
-  // writer whose epoch no longer matches is rejected at the write boundary
-  // with ZERO mutation (no last-write-wins overwrite of a newer writer).
-  // expectedEpoch null is the unfenced/local path (no durable fence domain).
-  async saveRumor2Checkpoint(state, expectedEpoch = null) {
-    if (expectedEpoch === null) {
-      await this.db.query(
-        `INSERT INTO serpent_rumor2_checkpoint (id, revision, state) VALUES ('current', 1, $1)
-         ON CONFLICT (id) DO UPDATE SET revision = serpent_rumor2_checkpoint.revision + 1, state = $1, saved_at = now()`,
-        [state],
-        { write: true }
-      );
-      return { ok: true };
-    }
+  // RUMOR-2 writer-epoch fence (DB-enforced): the durable checkpoint write is
+  // ALWAYS epoch-guarded — there is NO unfenced PostgreSQL mutation path. A
+  // caller must present a valid current writer epoch (positive safe integer);
+  // null, undefined, or any invalid value is refused BEFORE any write, never
+  // treated as "skip fencing". The epoch check and the checkpoint write share
+  // ONE transaction — `SELECT ... FOR UPDATE` locks the writer-epoch row so a
+  // concurrent acquisition serializes against it, and a stale writer whose
+  // epoch no longer matches is rejected at the write boundary with ZERO
+  // mutation (no last-write-wins overwrite of a newer writer).
+  async saveRumor2Checkpoint(state, expectedEpoch) {
+    if (!isValidWriterEpoch(expectedEpoch)) return { invalidEpoch: true };
     return this.db.tx(async (q) => {
       const cur = await q(`SELECT epoch FROM serpent_rumor2_writer_epoch WHERE stream = 'rumor2' FOR UPDATE`);
       const current = cur.rows[0] ? Number(cur.rows[0].epoch) : null;
@@ -555,22 +553,28 @@ export class Repository {
   // lands) as corruption. The caller validates event semantics strictly
   // before append and on every restore; this layer guarantees ordering,
   // atomicity, and identity uniqueness.
-  async appendRumor2Events(stream, records, expectedEpoch = null) {
+  async appendRumor2Events(stream, records, expectedEpoch) {
+    // WRITER-EPOCH FENCE (DB-enforced): the durable append is ALWAYS
+    // epoch-guarded — a valid current writer epoch is REQUIRED; null,
+    // undefined, or any invalid value is refused before any transaction
+    // opens, never a bypass.
+    if (!isValidWriterEpoch(expectedEpoch)) {
+      const err = new Error('missing or invalid writer epoch');
+      err.invalidEpoch = true;
+      throw err;
+    }
     return this.db.tx(async (q) => {
-      // WRITER-EPOCH FENCE (DB-enforced): in durable fenced mode, lock the
-      // writer-epoch row and confirm the caller still owns the current epoch
-      // BEFORE allocating any sequence — a stale writer's batch consumes no
-      // event_seq and inserts no rows (the tx rolls back). This shares the
-      // SAME transaction/session as the inserts, so no cross-session TOCTOU
-      // remains around the append.
-      if (expectedEpoch !== null) {
-        const e = await q(`SELECT epoch FROM serpent_rumor2_writer_epoch WHERE stream = $1 FOR UPDATE`, [stream]);
-        const current = e.rows[0] ? Number(e.rows[0].epoch) : null;
-        if (current === null || current !== expectedEpoch) {
-          const err = new Error(`stale writer epoch ${expectedEpoch} (current ${current})`);
-          err.staleWriter = true;
-          throw err;
-        }
+      // lock the writer-epoch row and confirm the caller still owns the
+      // current epoch BEFORE allocating any sequence — a stale writer's
+      // batch consumes no event_seq and inserts no rows (the tx rolls back).
+      // This shares the SAME transaction/session as the inserts, so no
+      // cross-session TOCTOU remains around the append.
+      const e = await q(`SELECT epoch FROM serpent_rumor2_writer_epoch WHERE stream = $1 FOR UPDATE`, [stream]);
+      const current = e.rows[0] ? Number(e.rows[0].epoch) : null;
+      if (current === null || current !== expectedEpoch) {
+        const err = new Error(`stale writer epoch ${expectedEpoch} (current ${current})`);
+        err.staleWriter = true;
+        throw err;
       }
       const cur = await q(`SELECT COALESCE(MAX(event_seq), 0) AS last FROM serpent_rumor2_events WHERE stream = $1`, [stream]);
       let seq = Number(cur.rows[0].last);
@@ -609,37 +613,37 @@ export class Repository {
   // schema (test schemas share one database, so the lock name carries the
   // schema) held for the active collector's lifetime; the returned handle
   // is the fence. null means another writer owns RUMOR-2 truth right now.
-  // Writer-epoch fencing: a successful acquisition (it holds the advisory
-  // lock, so no contender races it) atomically ADVANCES and returns the
-  // monotonic stream writer epoch. The returned handle carries { epoch };
-  // every later authoritative mutation must present it. A contender that
-  // fails the advisory lock never reaches here, so a failed attempt never
-  // advances the epoch. If the epoch cannot be established, the lock is
-  // released — no half-authoritative writer.
+  //
+  // Writer-epoch fencing (capability seal): a successful acquisition ADVANCES
+  // and returns the monotonic stream writer epoch. The advance runs ON THE
+  // SAME PostgreSQL SESSION that owns the advisory lock — so a process whose
+  // lock session has died cannot execute it, and a non-owner can never
+  // advance the writer generation. A contender that fails the advisory lock
+  // never reaches the advance. The returned handle carries { epoch }; every
+  // later authoritative mutation must present it. If the epoch cannot be
+  // established, or is not a positive safe integer, or the lock session was
+  // lost by the time it returns, the lock is released — no half-authoritative
+  // writer, no ambiguous token. There is NO public epoch-advance method: the
+  // ONLY way the epoch moves is a real advisory-lock acquisition.
   async acquireRumor2WriterLock() {
     const lock = await this.db.acquireSessionLock(`serpent_rumor2_writer:${this.db.schema ?? 'public'}`);
     if (!lock) return null;
     try {
-      const epoch = await this.advanceRumor2WriterEpoch('rumor2');
+      const { rows } = await lock.query(
+        `INSERT INTO serpent_rumor2_writer_epoch (stream, epoch) VALUES ('rumor2', 1)
+         ON CONFLICT (stream) DO UPDATE SET epoch = serpent_rumor2_writer_epoch.epoch + 1, updated_at = now()
+         RETURNING epoch`
+      );
+      const epoch = Number(rows[0]?.epoch);
+      if (!isValidWriterEpoch(epoch)) throw new Error(`invalid writer epoch ${rows[0]?.epoch}`);
+      // §22: the advance ran on the lock session, but recheck that the lock is
+      // still held before handing out authority (defense against event timing)
+      if (!lock.held()) throw new Error('lock session lost during epoch establishment');
       return { ...lock, epoch };
     } catch (err) {
       await lock.release().catch(() => {});
       throw err;
     }
-  }
-
-  // Advance-and-return the monotonic writer epoch for a stream. Only ever
-  // called by a process that already holds the advisory lock, so the
-  // increment is uncontended; the epoch strictly increases and never rewinds.
-  async advanceRumor2WriterEpoch(stream) {
-    const { rows } = await this.db.query(
-      `INSERT INTO serpent_rumor2_writer_epoch (stream, epoch) VALUES ($1, 1)
-       ON CONFLICT (stream) DO UPDATE SET epoch = serpent_rumor2_writer_epoch.epoch + 1, updated_at = now()
-       RETURNING epoch`,
-      [stream],
-      { write: true }
-    );
-    return Number(rows[0].epoch);
   }
 
   // Complete ordered history — chunked keyset pagination, contiguity of the

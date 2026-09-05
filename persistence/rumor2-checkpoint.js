@@ -16,6 +16,10 @@
 // republish".
 import { getPersistence } from './runtime.js';
 
+// a legitimate writer epoch is a positive safe integer — never null,
+// undefined, NaN, 0, negative, fractional, or a string
+const isValidWriterEpoch = (e) => typeof e === 'number' && Number.isSafeInteger(e) && e > 0;
+
 const classifyWith = (persistence) => () => {
   const p = persistence();
   if (!p?.repo) return { kind: 'NOT_CONFIGURED' };
@@ -39,20 +43,24 @@ export function rumor2CheckpointStore({ persistence = getPersistence } = {}) {
         return { outcome: 'UNAVAILABLE', error: err.message }; // a read failure is NEVER "no checkpoint"
       }
     },
-    // Writer-epoch fence (DB-enforced): a fenced save carries the caller's
-    // writer epoch, verified inside the same transaction that writes the
-    // checkpoint. A stale epoch is rejected with ZERO mutation — never a
-    // last-write-wins overwrite of a newer writer. expectedEpoch null is the
-    // unfenced path (no fence domain); the collector, the sole caller,
-    // supplies a real epoch whenever writer fencing is active (it fails
-    // closed on acquisition otherwise), so a null epoch never means "bypass
-    // fencing in durable fenced mode".
-    async save(state, expectedEpoch = null) {
+    // Writer-epoch fence (DB-enforced): a durable save ALWAYS carries the
+    // caller's writer epoch, verified inside the same transaction that writes
+    // the checkpoint. A stale epoch is rejected with ZERO mutation — never a
+    // last-write-wins overwrite of a newer writer. There is NO null/unfenced
+    // write path: a missing or invalid epoch is refused (MISSING_WRITER_EPOCH)
+    // before any mutation. The collector, the sole caller, supplies a real
+    // epoch whenever it holds writer authority (it fails closed on acquisition
+    // otherwise), so omitting the token never means "bypass fencing".
+    async save(state, expectedEpoch) {
       const c = classify();
       if (c.kind === 'NOT_CONFIGURED') return { durable: false, reason: 'NOT_CONFIGURED' };
       if (c.kind === 'UNAVAILABLE') return { durable: false, reason: 'UNAVAILABLE' };
+      // in a durable core, no write without a current writer epoch — a
+      // missing/invalid epoch is refused, never a null bypass (§8)
+      if (!isValidWriterEpoch(expectedEpoch)) return { durable: false, reason: 'MISSING_WRITER_EPOCH' };
       try {
         const r = await c.p.repo.saveRumor2Checkpoint(state, expectedEpoch);
+        if (r?.invalidEpoch) return { durable: false, reason: 'MISSING_WRITER_EPOCH' };
         if (r?.stale) return { durable: false, reason: 'STALE_WRITER', stale: true };
         return { durable: true };
       } catch {
