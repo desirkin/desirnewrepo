@@ -368,12 +368,22 @@ export function validateRumor2Txn(t, { providerIds, graph, priorSeenIds = [] }) 
     return 'txn: source identity is not the semantic hash of the preserved facts — forged provenance';
 
   if (!Array.isArray(t.events) || t.events.length === 0 || t.events.length > MAX_TXN_EVENTS) return 'txn: events invalid';
+  // Bundle law: the prepared events are a semantic SET, not a list of
+  // individually plausible records. Each proposition may be claimed at most
+  // once, each packet identity may appear at most once, each withholding is
+  // unique, and outcomes are mutually exclusive — enforced here, at the one
+  // shared trust gate, so a duplicate (byte-identical or cosmetically
+  // altered around the same recomputed identity) can never be legitimized
+  // by adjusting the counters to match the malformed bundle. Memory
+  // deduplication downstream is a safety net, never permission to append
+  // duplicate or mutually contradictory raw truth.
   let sourceEvents = 0;
-  let packetEvents = 0;
-  let withheldEvents = 0;
+  let coinResolutionWithheld = 0;
   const claimSpecs = [];
   const packetsByProp = new Map();
   const claimStatusByProp = new Map();
+  const packetIds = new Set();
+  const withheldProps = new Set();
   for (const e of t.events) {
     if (!isPlainObject(e)) return 'txn: event not an object';
     if (!RUMOR2_TXN_EVENT_TYPES.includes(e.type)) return `txn: event type ${String(e.type).slice(0, 40)} not allowed`;
@@ -405,6 +415,10 @@ export function validateRumor2Txn(t, { providerIds, graph, priorSeenIds = [] }) 
       // the proposition identity must itself be the recomputed semantic hash
       if (propositionIdentity({ claimType: e.claimType, canonicalCoin: e.symbol, originSourceObservationId: t.sourceObservationId }) !== e.propositionId)
         return 'txn: claim event proposition identity is not the semantic hash of its content';
+      // the recomputed identity IS the claim's semantic identity, so any
+      // second claim for one proposition — byte-identical or altered in a
+      // non-identity field — is the same duplicate, rejected the same way
+      if (claimStatusByProp.has(e.propositionId)) return 'txn: duplicate claim event for one proposition — the bundle must be true';
       if (!NODE_STATUSES.includes(e.status)) return 'txn: claim event status invalid';
       if (e.title !== facts.title) return 'txn: claim event title disagrees with identity facts';
       claimSpecs.push({ propositionId: e.propositionId, claimType: e.claimType, symbol: e.symbol });
@@ -412,8 +426,8 @@ export function validateRumor2Txn(t, { providerIds, graph, priorSeenIds = [] }) 
     } else if (e.type === 'RUMOR2_PACKET') {
       const kErr = exactKeys(e, EVENT_KEYS.RUMOR2_PACKET, 'txn.packetEvent');
       if (kErr) return kErr;
-      packetEvents += 1;
       if (typeof e.propositionId !== 'string' || !R2C_RE.test(e.propositionId)) return 'txn: packet event lacks a valid proposition identity';
+      if (packetsByProp.has(e.propositionId)) return 'txn: duplicate packet event for one proposition — the bundle must be true';
       if (!isPlainObject(e.packet)) return 'txn: packet event lacks a packet';
       // the accepted evidence contract validator runs over every prepared
       // packet — the contract itself recomputes packetId against semantic
@@ -423,15 +437,18 @@ export function validateRumor2Txn(t, { providerIds, graph, priorSeenIds = [] }) 
       if (e.packetId !== e.packet.packetId) return 'txn: packet event packetId disagrees with the packet itself';
       if (e.sourceEventId !== `${t.sourceObservationId}|packet|${e.packetId}`)
         return 'txn: packet event identity not bound to source and packet';
+      if (packetIds.has(e.packetId)) return 'txn: duplicate packet identity in one bundle — the bundle must be true';
+      packetIds.add(e.packetId);
       if (typeof e.symbol !== 'string' || e.packet.subject?.canonicalCoin !== e.symbol) return 'txn: packet event symbol/packet subject disagree';
       packetsByProp.set(e.propositionId, e.packet);
     } else {
-      withheldEvents += 1;
       if (!e.sourceEventId.startsWith(`${t.sourceObservationId}|withheld|`)) return 'txn: withheld event not bound to the transaction source';
       const suffix = e.sourceEventId.slice(`${t.sourceObservationId}|withheld|`.length);
       if (suffix === 'coin-resolution') {
         const kErr = exactKeys(e, EVENT_KEYS.RUMOR2_WITHHELD_COIN, 'txn.withheldEvent');
         if (kErr) return kErr;
+        if (coinResolutionWithheld > 0) return 'txn: duplicate coin-resolution withholding — the bundle must be true';
+        coinResolutionWithheld += 1;
         if (e.reason !== 'COIN_RESOLUTION_WITHHELD') return 'txn: coin-resolution withholding carries the wrong reason';
         if (!RUMOR2_CLAIM_TYPES.includes(e.claimType)) return 'txn: withheld event carries unknown claimType';
         if (e.title !== facts.title) return 'txn: withheld event title disagrees with identity facts';
@@ -444,12 +461,32 @@ export function validateRumor2Txn(t, { providerIds, graph, priorSeenIds = [] }) 
         if (typeof e.symbol !== 'string' || !COIN_SYMBOL_RE.test(e.symbol)) return 'txn: withheld event symbol invalid';
         if (propositionIdentity({ claimType: e.claimType, canonicalCoin: e.symbol, originSourceObservationId: t.sourceObservationId }) !== e.propositionId)
           return 'txn: withheld event proposition identity is not the semantic hash of its content';
+        if (withheldProps.has(e.propositionId)) return 'txn: duplicate withheld event for one proposition — the bundle must be true';
+        withheldProps.add(e.propositionId);
         if (!Array.isArray(e.reasons) || e.reasons.length === 0 || e.reasons.length > 8 || !e.reasons.every((x) => isBounded(x, MAX_ERROR_CHARS)))
           return 'txn: withheld event lacks bounded reasons';
       }
     }
   }
   if (sourceEvents !== 1) return 'txn: exactly one source-observed event is required';
+
+  // Outcome exclusivity — one truthful terminal outcome per proposition and
+  // per source item. A packet asserts "valid evidence was produced"; a
+  // proposition withholding asserts "no valid evidence could be produced"
+  // for that SAME proposition — both cannot be true at once. A
+  // coin-resolution withholding asserts the source item resolved to NO
+  // coin, so it cannot coexist with any resolved claim path. Internally
+  // consistent contradiction is still contradiction.
+  for (const spec of claimSpecs) {
+    const hasPacket = packetsByProp.has(spec.propositionId);
+    const hasWithheld = withheldProps.has(spec.propositionId);
+    if (hasPacket && hasWithheld) return 'txn: proposition carries both a packet and a withholding — contradictory outcomes';
+    if (!hasPacket && !hasWithheld) return 'txn: claim event lacks its one packet-or-withheld outcome';
+  }
+  for (const propId of withheldProps)
+    if (!claimStatusByProp.has(propId)) return 'txn: withheld event has no corresponding claim event';
+  if (coinResolutionWithheld > 0 && claimSpecs.length > 0)
+    return 'txn: coin-resolution withholding contradicts a resolved claim path for the same source';
 
   // candidate — closed schema, and CAUSALLY DERIVED, never asserted
   if (!isPlainObject(t.candidate)) return 'txn: candidate missing';
@@ -520,17 +557,19 @@ export function validateRumor2Txn(t, { providerIds, graph, priorSeenIds = [] }) 
   for (const k of cand.graphRemovals) after.delete(k);
   for (const k of Object.keys(cand.graphClaims)) after.add(k);
   if (after.size > MAX_ACTIVE_CLAIMS) return 'txn: candidate adoption exceeds the active-claim bound';
-  // counters — EXACT keys, nonnegative safe integers, corresponding
-  // one-for-one to the actual prepared bundle: never a decrement, never a
-  // manufactured counter, never an increment for an unowed event
+  // counters — EXACT keys, nonnegative safe integers, DERIVED from the
+  // proven-unique validated bundle (never from raw event-array length):
+  // never a decrement, never a manufactured counter, never an increment
+  // for a duplicate or unowed event. A delta can never legitimize a
+  // malformed bundle, because uniqueness was proven before it is compared.
   const dErr = exactKeys(cand.counterDeltas, ['sourcesObserved', 'claimsObserved', 'packetsProduced', 'packetsWithheld'], 'txn.counterDeltas');
   if (dErr) return dErr;
   for (const [k, v] of Object.entries(cand.counterDeltas))
     if (!Number.isSafeInteger(v) || v < 0) return `txn: counter delta ${k} must be a nonnegative safe integer`;
   if (cand.counterDeltas.sourcesObserved !== sourceEvents) return 'txn: sourcesObserved delta disagrees with the prepared bundle';
-  if (cand.counterDeltas.claimsObserved !== claimSpecs.length) return 'txn: claimsObserved delta disagrees with the prepared bundle';
-  if (cand.counterDeltas.packetsProduced !== packetEvents) return 'txn: packetsProduced delta disagrees with the prepared bundle';
-  if (cand.counterDeltas.packetsWithheld !== withheldEvents) return 'txn: packetsWithheld delta disagrees with the prepared bundle';
+  if (cand.counterDeltas.claimsObserved !== claimStatusByProp.size) return 'txn: claimsObserved delta disagrees with the prepared bundle';
+  if (cand.counterDeltas.packetsProduced !== packetsByProp.size) return 'txn: packetsProduced delta disagrees with the prepared bundle';
+  if (cand.counterDeltas.packetsWithheld !== withheldProps.size + coinResolutionWithheld) return 'txn: packetsWithheld delta disagrees with the prepared bundle';
   if (cand.lastNewItemTs !== knownAtTs) return 'txn: candidate lastNewItemTs disagrees with the knowledge clock';
   return null;
 }

@@ -150,7 +150,17 @@ provenance (A2R): the source identity is RECOMPUTED from immutable
 identity facts preserved in the transaction, every truth-bearing event is
 an exact-key closed shape, and candidate seen/graph state must be the
 deterministic consequence of prior durable truth plus this exact bundle —
-re-derived through the one shared pure transition, never asserted.
+re-derived through the one shared pure transition, never asserted. THE
+BUNDLE ITSELF MUST BE TRUE: the prepared events are a semantic SET, not a
+list of individually plausible records — one source observation, at most
+one claim per proposition, exactly one packet-XOR-withheld outcome per
+proposition, each packet identity at most once, and a coin-resolution
+withholding exclusive of any resolved claim path for the same item.
+Counter deltas are DERIVED from that proven-unique bundle; a delta may
+never legitimize a duplicated or self-contradictory bundle. Memory
+deduplication downstream is a safety net, never permission to append
+duplicate or mutually contradictory raw truth — internally consistent
+contradiction is still contradiction.
 
 Graph nodes are PROPOSITIONS: `r2c-` identities over (claimType,
 canonicalCoin, origin sourceObservationId). Two unrelated enforcement
