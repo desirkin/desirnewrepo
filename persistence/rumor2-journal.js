@@ -73,6 +73,11 @@ export function rumor2JournalStore({ persistence = getPersistence } = {}) {
       const c = classify();
       if (c.kind === 'NOT_CONFIGURED') return { ok: false, reason: 'NOT_CONFIGURED', notConfigured: true };
       if (c.kind === 'UNAVAILABLE') return { ok: false, reason: 'UNAVAILABLE' };
+      // DEFENSE IN DEPTH (§9/§22): the durable journal refuses to allocate a
+      // sequence or write a single row unless the writer fence is CURRENTLY
+      // held. A collector bug can never bypass one-active-writer, and a
+      // direct append without authority is refused outright.
+      if (!fence || !fence.held()) return { ok: false, reason: 'WRITER_FENCE_LOST' };
       try {
         const r = await c.p.repo.appendRumor2Events(STREAM, records);
         return { ok: true, lastSeq: r.lastSeq };

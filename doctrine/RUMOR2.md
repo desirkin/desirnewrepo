@@ -486,16 +486,32 @@ Sealed at this pass:
   evidentiary truth and cannot reach Attention, HYPED, eligibility, score,
   sizing, or execution.
 
-- ONE ACTIVE RUMOR WRITER. In the durable core, journal-writer authority is
-  fenced by a session-scoped PostgreSQL advisory lock held for the active
-  collector's lifetime. A second collector cannot acquire it: it stands by
-  (lifecycle STANDBY_WRITER) and performs zero fetches, zero appends, zero
-  checkpoint writes, zero packets — read-only status inspection at most. The
-  server releases the lock automatically when the winning session dies
-  (crash, connection loss, termination), so the next collector takes over
-  safely with no lease bookkeeping; a rightful restart restores from
-  journal + checkpoint exactly, with no truth duplication. Lock recovery
-  never touches the journal sequence.
+- ONE ACTIVE RUMOR WRITER, ENFORCED LIVE. In the durable core, journal-writer
+  authority is fenced by a session-scoped PostgreSQL advisory lock held for
+  the active collector's lifetime. A second collector cannot acquire it: it
+  stands by (lifecycle STANDBY_WRITER) and performs zero fetches, zero
+  appends, zero checkpoint writes, zero packets — read-only status
+  inspection at most. The server releases the lock automatically when the
+  winning session dies (crash, connection loss, termination), so the next
+  collector takes over safely with no lease bookkeeping; a rightful restart
+  restores from journal + checkpoint exactly, with no truth duplication.
+  Lock recovery never touches the journal sequence.
+  Writer authority is checked LIVE, never trusted from a boolean captured
+  when the tick began: NO RUMOR DURABLE MUTATION MAY BEGIN OR COMPLETE
+  unless the collector currently holds the fence. The live check runs at
+  every truth-changing boundary — after each awaited provider fetch, before
+  the write-ahead save, before the journal append, before adopting the
+  appended bundle, before every checkpoint save, and before OFAC snapshot
+  adoption. A fence lost mid-tick halts the tick and drops to standby with
+  no further provider processing; status never keeps reporting ACTIVE after
+  a failed live check; and uncertainty (a fence the database cannot confirm)
+  fails closed — safety over liveness. If the fence dies in the window after
+  a journal batch has durably committed but before the collector adopts it,
+  the collector does NOT adopt: the journal-ahead tail is left for the next
+  legitimate writer's event-root recovery, never compensated or double-
+  applied. The durable journal enforces this too — its append refuses to
+  allocate a sequence or write a row (WRITER_FENCE_LOST) unless the fence is
+  held, so no collector bug and no direct call can bypass one-writer.
 
 - LOCAL DURABILITY IS EXPLICIT AND LABELED. The local events.jsonl file is
   honest development/research storage, never deployment-grade durability,

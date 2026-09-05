@@ -254,6 +254,46 @@ export function startRumor2({
   let closed = false;
   let inFlight = Promise.resolve();
 
+  // ---- LIVE WRITER FENCE (writer-fence closeout) ---------------------------
+  // ONE authoritative live check. Writer authority is NEVER trusted from a
+  // boolean captured when the tick began: after any async gap the advisory
+  // lock may have died, so every truth-changing boundary re-consults the
+  // LIVE fence. writerHeld() is a cheap in-memory read of the dedicated
+  // lock session's health (no DB round-trip). Returns 'HELD' (own it now),
+  // 'NOT_HELD' (lost — another process may legitimately write), or
+  // 'UNFENCED' (the journal has no fence domain: local/test single-writer).
+  function writerAuthorityLive() {
+    if (typeof activeJournal?.writerHeld !== 'function') return 'UNFENCED';
+    const h = activeJournal.writerHeld();
+    if (h === true) return 'HELD';
+    if (h === false) return 'NOT_HELD';
+    return 'UNFENCED'; // null: no fence domain (unfenced local/NOT_CONFIGURED mode)
+  }
+  // The mutation gate. true only when this collector positively holds (or
+  // needs no) writer authority RIGHT NOW. On loss it fails CLOSED — it flips
+  // to standby immediately, so neither status nor later logic can keep
+  // claiming ACTIVE, and the next tick re-attempts acquisition.
+  function fenceHeld() {
+    const a = writerAuthorityLive();
+    if (a === 'HELD' || a === 'UNFENCED') return true;
+    if (writerFenced || lifecycle !== 'STANDBY_WRITER') {
+      writerFenced = false;
+      lifecycle = 'STANDBY_WRITER';
+      withholdReason = 'writer authority lost mid-tick — standing by to reacquire';
+    }
+    return false;
+  }
+
+  // status view of writer authority: UNFENCED where no fence domain exists,
+  // else ACTIVE only when a LIVE check still confirms ownership. A failed
+  // live check flips the cached state (via fenceHeld) so status can never
+  // keep reporting ACTIVE after the fence is gone.
+  function writerAuthorityStatus() {
+    if (typeof activeJournal?.acquireWriter !== 'function') return 'UNFENCED';
+    if (!writerFenced) return 'STANDBY';
+    return fenceHeld() ? 'ACTIVE' : 'STANDBY';
+  }
+
   // process-local per-provider runtime truth (rebuilt each boot; durable
   // truth lives in the checkpoint)
   const runtime = {};
@@ -466,6 +506,10 @@ export function startRumor2({
   }
 
   async function saveCheckpoint() {
+    // NO UNFENCED CHECKPOINT MUTATION: a collector that has lost writer
+    // authority may never persist RUMOR truth (boundaries D/G/§10). Fails
+    // closed and flips to standby; the durable checkpoint is left untouched.
+    if (!fenceHeld()) return;
     cp.revision += 1;
     cp.savedTs = now();
     if (!checkpointStore) return;
@@ -699,6 +743,9 @@ export function startRumor2({
       return false;
     }
     const r = runtime[txn.provider];
+    // BEFORE JOURNAL APPEND (boundary E): confirm live authority — a lost
+    // fence appends nothing and leaves the transaction owed.
+    if (!fenceHeld()) return false;
     const res = await activeJournal.append(txn.events);
     if (!res.ok) {
       if (String(res.reason ?? '').startsWith('CORRUPTION')) {
@@ -708,10 +755,24 @@ export function startRumor2({
         withholdReason = boundedError(`EVENT_HISTORY_INVALID: ${res.reason}`);
         return false;
       }
+      if (String(res.reason ?? '') === 'WRITER_FENCE_LOST') {
+        // the journal's own defense-in-depth refused: authority is gone.
+        // The batch did not land; leave the transaction owed and stand by.
+        fenceHeld(); // flip to standby
+        return false;
+      }
       r.appendFailures += 1;
       log(`RUMOR2 journal append failed (zero truth advances, will retry): ${boundedError(res.reason ?? 'unknown')}`);
       return false; // retained whole; retried next tick/restart
     }
+    // AFTER JOURNAL COMMIT, BEFORE ADOPTION (boundary F / §7): the crash-like
+    // window. If the fence died the instant after commit, the journal is
+    // already durable and ahead of the checkpoint — but this collector no
+    // longer has authority to adopt candidate graph/seen/counters or advance
+    // the watermark. Leave the journal-ahead tail for the next legitimate
+    // writer's event-root recovery (the owed txn is still durably recorded);
+    // NEVER adopt unfenced, NEVER compensate the durable journal.
+    if (!fenceHeld()) return false;
     cp.lastSettledEventSeq = res.lastSeq; // settled truth now extends this far
     for (const ev of txn.events) mirrorSafe(ev);
     const cps = cp.providers[txn.provider];
@@ -751,14 +812,18 @@ export function startRumor2({
       counters().duplicates += 1;
       return true; // exact same official item — a duplicate, never new evidence
     }
+    // BEFORE WRITE-AHEAD (boundary C): a fence lost during this item's own
+    // clock/identity work must not begin a durable transaction.
+    if (!fenceHeld()) return false;
     // WRITE AHEAD: the exact prepared truth persists durably BEFORE any
     // truth-bearing append. A crash before this save leaves no event — the
     // item is an ordinary future observation.
     cp.txn = prepareItemTxn(p, cps, item, clocks, id);
     await saveCheckpoint();
-    if (lifecycle === 'FAILED_DURABILITY') {
-      // the transaction could not be durably represented: no event may
-      // append; the local slot is discarded so nothing half-known survives
+    if (lifecycle === 'FAILED_DURABILITY' || lifecycle === 'STANDBY_WRITER') {
+      // the transaction could not be durably represented (no durability, or
+      // the fence was lost before/at the WAL save): no event may append; the
+      // local slot is discarded so nothing half-known survives.
       cp.txn = null;
       return false;
     }
@@ -819,6 +884,11 @@ export function startRumor2({
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(edgarCik !== null ? { url: edgarSubmissionsUrl(edgarCik) } : {}),
     });
+    // AFTER THE AWAITED PROVIDER FETCH (boundary B / the reproduced defect):
+    // the network gap is exactly when the advisory-lock session can die, so
+    // re-confirm live authority BEFORE any returned data becomes candidate
+    // truth. A lost fence processes nothing and halts the tick.
+    if (!fenceHeld()) return false;
     r.lastHttpStatus = res.status ?? null;
     if (res.outcome === 'NOT_MODIFIED') {
       // a truthful 304 is a SUCCESSFUL observation with zero changed bytes
@@ -906,6 +976,9 @@ export function startRumor2({
     if (snapshotCommit) {
       const allSettled = parsed.items.every((it) => cps.seenIds.includes(itemIdentity(p, it)));
       if (allSettled) {
+        // BEFORE OFAC SNAPSHOT/ANCHOR ADOPTION (boundary H): snapshot state is
+        // durable truth — never adopt it unfenced.
+        if (!fenceHeld()) return false;
         try {
           atomicWriteJson(path.join(dir(), OFAC_SNAPSHOT_FILE), snapshotCommit.payload);
         } catch (err) {
@@ -986,7 +1059,9 @@ export function startRumor2({
       durabilityMode: journalKind === 'LOCAL_FILE' ? 'LOCAL_NON_DURABLE' : journalKind === 'INJECTED' && durability === 'DURABLE' ? 'DURABLE_CORE' : journalKind ? durability : null,
       authoritativeJournal: journalKind, // 'INJECTED' (durable core / test-injected) | 'LOCAL_FILE' | null
       durableAcrossRedeploy: journalKind === 'INJECTED' && durability === 'DURABLE',
-      writerAuthority: activeJournal?.acquireWriter ? (writerFenced ? 'ACTIVE' : 'STANDBY') : 'UNFENCED',
+      // STATUS MUST NOT LIE (§12): derived from the LIVE fence, and a failed
+      // live check downgrades the cached authority so ACTIVE is never stale.
+      writerAuthority: writerAuthorityStatus(),
     };
     try {
       atomicWriteJson(path.join(dir(), 'status.json'), status);
@@ -998,14 +1073,10 @@ export function startRumor2({
 
   async function tickOnce() {
     if (closed) return;
-    // fence-loss check: if this process no longer holds writer authority
-    // (its fence session died), stop advancing truth IMMEDIATELY and drop
-    // back to standby — the next ensureInit re-attempts acquisition.
-    if (writerFenced && activeJournal?.writerHeld && activeJournal.writerHeld() === false) {
-      writerFenced = false;
-      lifecycle = 'STANDBY_WRITER';
-      withholdReason = 'writer authority lost — standing by to reacquire';
-    }
+    // BEFORE ANYTHING (boundary A): if this process already lost its fence
+    // between ticks, drop to standby immediately so ensureInit re-attempts
+    // acquisition rather than proceeding as a stale writer.
+    if (writerFenced) fenceHeld();
     const ok = await ensureInit();
     if (!startedAnnounced && cp) {
       startedAnnounced = true;

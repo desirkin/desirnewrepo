@@ -551,6 +551,7 @@ if (!TEST_URL) {
 
   test('JOURNAL-1..4. append assigns contiguous seqs; batches are atomic; the duplicate law lives at the durable door', async () => {
     await withDb(async ({ journal }) => {
+      assert.deepEqual(await journal.acquireWriter(), { ok: true }); // append now requires a held writer fence
       const mkEv = (n) => {
         const facts = { provider: 'KRAKEN_OFFICIAL', guid: `g${n}`, link: null, publishedTs: null, title: `t${n}`, summary: '' };
         return {
@@ -583,6 +584,7 @@ if (!TEST_URL) {
 
   test('JOURNAL-5. destroyed rows are detected: a gapped sequence reads as corruption, never as absence', async () => {
     await withDb(async ({ db, journal }) => {
+      assert.deepEqual(await journal.acquireWriter(), { ok: true }); // append now requires a held writer fence
       const facts = { provider: 'KRAKEN_OFFICIAL', guid: 'g1', link: null, publishedTs: null, title: 't1', summary: '' };
       const ev = {
         type: 'RUMOR2_SOURCE_OBSERVED', ts: new Date(T1).toISOString(), sourceEventId: sourceObservationIdentity(facts),
