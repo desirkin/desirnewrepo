@@ -1,9 +1,21 @@
-// RUMOR-2A — the bounded deterministic claim graph. It connects claims,
-// sources, relations, provenance groups, and the timeline — and NOTHING
-// else. No Socrates reasoning, no scores, no likelihoods, no authority.
+// RUMOR-2A/A1 — the bounded deterministic claim graph. It connects
+// PROPOSITIONS, sources, relations, provenance groups, and the timeline —
+// and NOTHING else. No Socrates reasoning, no scores, no likelihoods, no
+// authority.
+//
+// Proposition doctrine (A1): a graph node is one SPECIFIC assertion, never
+// a category bucket. The caller supplies an explicit propositionId
+// (see truth.js propositionIdentity — claimType + canonicalCoin + origin
+// sourceObservationId for official-primary 2A assertions); the graph NEVER
+// guesses that two observations are the same proposition. Two unrelated
+// enforcement actions about one coin are two nodes; a later contradiction
+// or retraction attaches only to the exact proposition it targets. The
+// graph is storage of proven relationships — it is not the fuzzy grouping
+// algorithm (that is RUMOR-2B's problem, and it must PROVE sameness before
+// attaching to an existing proposition).
 //
 // Independence doctrine (0B, inherited whole): a source receives ONE
-// deterministic provenance group per claim — in 2A the group is the
+// deterministic provenance group per proposition — in 2A the group is the
 // publishing ORGANIZATION (the provider id), so two articles from the same
 // official body can never masquerade as two independent witnesses, and
 // repeated retrievals of one article never multiply anything. One source
@@ -13,12 +25,7 @@ import { createHash } from 'node:crypto';
 
 const sha1 = (s) => createHash('sha1').update(s).digest('hex');
 
-// One graph claim per (claimType, canonicalCoin): repeated official items
-// about the same typed assertion converge on one claim node instead of
-// minting parallel truths.
-export const graphClaimKey = (claimType, canonicalCoin) => `${claimType}|${canonicalCoin}`;
-
-// deterministic provenance group for a source on a claim — the organization
+// deterministic provenance group for a source on a proposition — the organization
 export const independenceGroupFor = (providerId) => `org:${providerId}`;
 
 export function emptyGraph() {
@@ -26,21 +33,26 @@ export function emptyGraph() {
 }
 
 // Record one observed official source asserting (or contradicting/
-// retracting) one typed claim. PURE on inputs: returns a NEW graph object;
-// the caller owns persistence. relation ∈ ORIGIN | PRIMARY_CONFIRMATION |
-// CONTRADICTION | RETRACTION | ECHO (2A produces ECHO only for proven
-// derived duplicates, which conservative identity already collapses — the
-// slot exists for RUMOR-2B).
-export function observeClaim(graph, { claimType, canonicalCoin, providerId, sourceObservationId, title, relationKinds, knownAtTs }) {
-  const key = graphClaimKey(claimType, canonicalCoin);
-  const prior = graph.claims[key];
+// retracting) one SPECIFIC proposition. PURE on inputs: returns a NEW
+// graph object plus the touched node and any pruned keys; the caller owns
+// persistence. relation ∈ ORIGIN | PRIMARY_CONFIRMATION | CONTRADICTION |
+// RETRACTION | ECHO | INDEPENDENT_SUPPORT (2A itself emits only
+// ORIGIN/PRIMARY_CONFIRMATION; the other slots exist for explicitly
+// targeted future relations).
+export function observeClaim(
+  graph,
+  { propositionId, claimType, canonicalCoin, providerId, sourceObservationId, title, relationKinds, knownAtTs }
+) {
+  const prior = graph.claims[propositionId];
   const node = prior
     ? { ...prior }
     : {
-        claimKey: key,
+        propositionId,
+        claimKey: propositionId, // stable node key — the proposition, never a category
         claimType,
         canonicalCoin,
-        normalizedSubject: `${canonicalCoin}:${claimType}`,
+        originSourceObservationId: sourceObservationId,
+        normalizedSubject: `${canonicalCoin}:${claimType}:${sourceObservationId}`,
         claimText: String(title ?? '').slice(0, MAX_TITLE_CHARS),
         firstKnownTs: knownAtTs,
         status: 'UNVERIFIED',
@@ -51,6 +63,7 @@ export function observeClaim(graph, { claimType, canonicalCoin, providerId, sour
         contradictionSourceIds: [],
         retractionSourceIds: [],
         independenceGroups: [],
+        observations: [],
         lastUpdateTs: knownAtTs,
       };
   const addOnce = (arr, v) => (arr.includes(v) || arr.length >= MAX_SOURCES_PER_CLAIM ? arr : [...arr, v]);
@@ -75,16 +88,16 @@ export function observeClaim(graph, { claimType, canonicalCoin, providerId, sour
   else node.status = 'UNVERIFIED';
   node.lastUpdateTs = knownAtTs;
 
-  const claims = { ...graph.claims, [key]: node };
+  const claims = { ...graph.claims, [propositionId]: node };
   // bounded: beyond the cap, the stalest node is dropped deterministically
   const keys = Object.keys(claims);
-  let pruned = 0;
+  const prunedKeys = [];
   if (keys.length > MAX_ACTIVE_CLAIMS) {
     const oldest = keys.sort((a, b) => claims[a].lastUpdateTs - claims[b].lastUpdateTs || (a < b ? -1 : 1))[0];
     delete claims[oldest];
-    pruned = 1;
+    prunedKeys.push(oldest);
   }
-  return { graph: { claims }, node, pruned };
+  return { graph: { claims }, node, prunedKeys, pruned: prunedKeys.length };
 }
 
 // Semantic identity of the whole graph — canonical, key-order immune; used

@@ -16,13 +16,14 @@ import {
   validateRumor2Checkpoint,
   emptyCheckpoint,
   rememberSeen,
+  propositionIdentity,
   MAX_SEEN_IDS,
   MAX_ACTIVE_CLAIMS,
   cooldownMs,
   boundedRetryAfterMs,
   stripMarkup,
 } from '../rumor2/truth.js';
-import { observeClaim, emptyGraph, independenceGroupFor, graphClaimKey } from '../rumor2/graph.js';
+import { observeClaim, emptyGraph, independenceGroupFor } from '../rumor2/graph.js';
 import { buildClaimPacket } from '../rumor2/packet.js';
 import { PROVIDER_IDS } from '../rumor2/registry.js';
 import { EVIDENCE_SCHEMA_VERSION, validateEvidencePacket } from '../evidence/contract.js';
@@ -57,11 +58,17 @@ const obs = (over = {}) => ({
   ...over,
 });
 
-function claimNodeFrom(observations) {
+function claimNodeFrom(observations, propId) {
+  // A1: propositions are explicit — anchored to the FIRST observation's
+  // official assertion unless the caller targets an existing proposition
+  const propositionId =
+    propId ??
+    propositionIdentity({ claimType: 'EXCHANGE_LISTING', canonicalCoin: 'BTC', originSourceObservationId: observations[0].sourceObservationId });
   let g = emptyGraph();
   let node = null;
   for (const o of observations) {
     const r = observeClaim(g, {
+      propositionId,
       claimType: 'EXCHANGE_LISTING',
       canonicalCoin: 'BTC',
       providerId: o.providerId,
@@ -172,8 +179,10 @@ test('R2-39. multi-asset official article shares ONE source identity', () => {
 test('R2-40. multi-asset article creates independent coin claims WITHOUT duplicating source independence', () => {
   const id = sourceObservationIdentity(item({ title: 'Kraken lists BTC and ETH' }));
   let g = emptyGraph();
+  const propOf = (coin) => propositionIdentity({ claimType: 'EXCHANGE_LISTING', canonicalCoin: coin, originSourceObservationId: id });
   for (const coin of ['BTC', 'ETH']) {
     const r = observeClaim(g, {
+      propositionId: propOf(coin),
       claimType: 'EXCHANGE_LISTING',
       canonicalCoin: coin,
       providerId: 'KRAKEN_OFFICIAL',
@@ -184,8 +193,9 @@ test('R2-40. multi-asset article creates independent coin claims WITHOUT duplica
     });
     g = r.graph;
   }
-  const btc = g.claims[graphClaimKey('EXCHANGE_LISTING', 'BTC')];
-  const eth = g.claims[graphClaimKey('EXCHANGE_LISTING', 'ETH')];
+  assert.notEqual(propOf('BTC'), propOf('ETH'), 'separate coin propositions from one shared source');
+  const btc = g.claims[propOf('BTC')];
+  const eth = g.claims[propOf('ETH')];
   assert.ok(btc && eth, 'two independent coin claims exist');
   assert.deepEqual(btc.originSourceIds, [id]);
   assert.deepEqual(eth.originSourceIds, [id], 'the SAME source id — never a copied source pretending independence');
@@ -285,8 +295,10 @@ test('R2-49. claim graph observation order does not change semantic truth', () =
   const a = obs();
   const b = obs({ title: 'Kraken lists BTC — margin enabled', summary: 'BTC margin trading starts.', relationKinds: ['ORIGIN', 'PRIMARY_CONFIRMATION'] });
   const b2 = { ...b, sourceObservationId: sourceObservationIdentity(item({ title: b.title, summary: b.summary, guid: 'p2' })) };
-  const n1 = claimNodeFrom([a, b2]);
-  const n2 = claimNodeFrom([b2, a]);
+  // both orders target the SAME explicit proposition — order is not truth
+  const propId = propositionIdentity({ claimType: 'EXCHANGE_LISTING', canonicalCoin: 'BTC', originSourceObservationId: a.sourceObservationId });
+  const n1 = claimNodeFrom([a, b2], propId);
+  const n2 = claimNodeFrom([b2, a], propId);
   assert.equal(n1.status, n2.status);
   assert.deepEqual([...n1.originSourceIds].sort(), [...n2.originSourceIds].sort());
   assert.deepEqual([...n1.independenceGroups].sort(), [...n2.independenceGroups].sort());
@@ -296,11 +308,13 @@ test('R2-50. graph bounds enforced', () => {
   let g = emptyGraph();
   let prunedTotal = 0;
   for (let i = 0; i < MAX_ACTIVE_CLAIMS + 5; i++) {
+    const srcId = sourceObservationIdentity(item({ guid: `g${i}` }));
     const r = observeClaim(g, {
+      propositionId: propositionIdentity({ claimType: 'REGULATORY_ACTION', canonicalCoin: `C${String(i).padStart(3, '0')}`, originSourceObservationId: srcId }),
       claimType: 'REGULATORY_ACTION',
       canonicalCoin: `C${String(i).padStart(3, '0')}`,
       providerId: 'SEC_OFFICIAL',
-      sourceObservationId: sourceObservationIdentity(item({ guid: `g${i}` })),
+      sourceObservationId: srcId,
       title: `item ${i}`,
       relationKinds: ['ORIGIN'],
       knownAtTs: T + i,

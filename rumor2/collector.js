@@ -7,13 +7,20 @@
 // exposes no return path. Existing StockTwits RUMINT is untouched and
 // unreplaced.
 //
-// Crash consistency (the invariant RUMINT taught us): source evidence is
-// APPENDED to the durable event stream BEFORE the checkpoint may remember
-// the item as seen. A crash between append and checkpoint save replays the
-// item on restart, but its exact semantic identity (sourceEventId) makes
-// canonical Memory collapse the replay instead of minting a second truth.
-// A failed append never advances seen-state — the item is retried.
+// Crash consistency (A1 — the full write-ahead law): before ANY
+// truth-bearing event from a new official item may append, a bounded
+// immutable item TRANSACTION carrying the EXACT prepared events (original
+// clocks, original packetId, original sourceEventIds) and the candidate
+// checkpoint state is persisted durably. Recovery settles the owed
+// transaction FIRST — proving each exact event present in the bounded
+// stream tail or appending the exact prepared record, never regenerating
+// clocks or identities — then adopts the candidate exactly once. Seen
+// state, graph state, and counters advance ONLY when the complete evidence
+// bundle is durably settled: an event that failed to persist is never
+// remembered as complete, and one source item survives a crash as the
+// same knowledge event.
 import path from 'node:path';
+import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { loadConfig, dataDir } from '../lib/config.js';
 import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { PROVIDERS, PROVIDER_IDS, userAgentFor } from './registry.js';
@@ -35,7 +42,9 @@ import {
   validateRumor2Checkpoint,
   emptyCheckpoint,
   rememberSeen,
+  propositionIdentity,
   MAX_SEEN_IDS,
+  RECONCILE_TAIL_BYTES,
 } from './truth.js';
 import { observeClaim } from './graph.js';
 import { buildClaimPacket } from './packet.js';
@@ -51,6 +60,7 @@ export function startRumor2({
   intervalMs = 15_000,
   checkpointStore = null,
   appendEvent = null,
+  hasEvent = null, // (record) => boolean — injectable bounded source reconciliation
   contact = process.env.SERPENT_HTTP_CONTACT ?? null,
   enabled = process.env.RUMOR2_ENABLED === 'true',
   timeoutMs = undefined,
@@ -66,6 +76,42 @@ export function startRumor2({
     ((record) => {
       appendJsonl(path.join(dir(), 'events.jsonl'), record);
     });
+  // Bounded source reconciliation (RECONCILE_TAIL_BYTES): an owed event is
+  // proven present by exact (type, sourceEventId) match within the stream
+  // TAIL only — a transaction settles within a tick of its creation, so its
+  // events live at the tail; anything unprovable is re-appended and
+  // canonical Memory's semantic dedupe makes the exact replay harmless.
+  const defaultHasEvent = (record) => {
+    try {
+      const file = path.join(dir(), 'events.jsonl');
+      if (!existsSync(file)) return false;
+      const size = statSync(file).size;
+      const start = Math.max(0, size - RECONCILE_TAIL_BYTES);
+      const fd = openSync(file, 'r');
+      let text;
+      try {
+        const buf = Buffer.alloc(size - start);
+        readSync(fd, buf, 0, buf.length, start);
+        text = buf.toString('utf8');
+      } finally {
+        closeSync(fd);
+      }
+      for (const line of text.split('\n')) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          const rec = JSON.parse(t);
+          if (rec.type === record.type && rec.sourceEventId === record.sourceEventId) return true;
+        } catch {
+          // a torn tail line proves nothing — keep scanning
+        }
+      }
+      return false;
+    } catch {
+      return false; // unprovable => re-append the exact record; dedupe absorbs it
+    }
+  };
+  const proven = hasEvent ?? defaultHasEvent;
 
   const registry = buildCoinRegistry(config.universe);
   let lifecycle = 'INITIALIZING'; // FRESH_START | RESTORED | WITHHELD_INVALID_CHECKPOINT | FAILED_DURABILITY
@@ -189,30 +235,16 @@ export function startRumor2({
     safeAppend({ type: 'RUMOR2_PROVIDER_FAILURE', ts: iso(now()), provider: p.id, reason: boundedError(reason), httpStatus: http, consecutiveFailures: cps.consecutiveFailures }, r);
   }
 
-  function processItem(p, r, cps, item) {
-    const clocks = itemClocks({ publishedTs: item.publishedTs, nowMs: now() });
-    if (clocks.error) {
-      r.withheldItems += 1;
-      safeAppend({ type: 'RUMOR2_WITHHELD', ts: iso(now()), provider: p.id, reason: clocks.error, title: item.title }, r);
-      return;
-    }
-    const id = sourceObservationIdentity({
-      provider: p.id,
-      guid: item.guid,
-      link: item.link,
-      publishedTs: clocks.publishedTs,
-      title: item.title,
-      summary: item.summary,
-    });
-    r.itemsObserved += 1;
-    if (cps.seenIds.includes(id)) {
-      r.duplicates += 1;
-      counters().duplicates += 1;
-      return; // exact same official item — a duplicate, never new evidence
-    }
-    // DURABLE ACK BEFORE SEEN: the observation is appended first; only a
-    // successful append may advance the seen set.
-    const observed = {
+  // ---- A1 write-ahead item transactions ------------------------------------
+  // PREPARE (pure): build the EXACT truth this item will emit — every event
+  // record with its final clocks and semantic identities (the packetId is
+  // computed HERE, once, forever), plus the candidate checkpoint state
+  // (seen set, touched graph nodes, counter deltas). Nothing is appended
+  // and nothing in cp is mutated.
+  function prepareItemTxn(p, cps, item, clocks, id) {
+    const events = [];
+    const deltas = { sourcesObserved: 1, claimsObserved: 0, packetsProduced: 0, packetsWithheld: 0 };
+    events.push({
       type: 'RUMOR2_SOURCE_OBSERVED',
       ts: iso(clocks.knownAtTs),
       sourceEventId: id,
@@ -224,27 +256,33 @@ export function startRumor2({
       publishedTs: clocks.publishedTs,
       retrievedTs: clocks.retrievedTs,
       knownAtTs: clocks.knownAtTs,
-    };
-    if (!safeAppend(observed, r)) return;
-    cps.seenIds = rememberSeen(cps.seenIds, id);
-    r.newItems += 1;
-    r.lastNewItemTs = clocks.knownAtTs;
-    counters().sourcesObserved += 1;
-
+    });
+    const graphClaims = {};
+    const graphRemovals = [];
+    let workGraph = cp.graph;
     // deterministic claim path — no guessing, no sentiment, no model
     const claimType = classifyOfficialItem({ providerKind: p.providerKind, title: item.title, summary: item.summary });
-    const coins = resolveCoins(`${item.title}\n${item.summary}`, registry);
-    if (claimType === null) return; // source stored; no typed claim exists
-    if (coins.length === 0) {
+    const coins = claimType === null ? [] : resolveCoins(`${item.title}\n${item.summary}`, registry);
+    if (claimType !== null && coins.length === 0) {
       // typed structure but no unambiguous canonical coin: resolution withheld
-      safeAppend({ type: 'RUMOR2_WITHHELD', ts: iso(now()), provider: p.id, reason: 'COIN_RESOLUTION_WITHHELD', sourceEventId: id, claimType, title: item.title }, r);
-      return;
+      events.push({
+        type: 'RUMOR2_WITHHELD',
+        ts: iso(clocks.knownAtTs),
+        sourceEventId: `${id}|withheld|coin-resolution`,
+        provider: p.id,
+        reason: 'COIN_RESOLUTION_WITHHELD',
+        claimType,
+        title: item.title,
+      });
+      deltas.packetsWithheld += 1;
     }
-    // one shared source identity; one claim path per unambiguous coin —
-    // the source is never duplicated into fake independence
+    // one shared source identity; one PROPOSITION per unambiguous coin —
+    // anchored to this exact official assertion, never to a category
     for (const coin of coins) {
       const relationKinds = ['ORIGIN', 'PRIMARY_CONFIRMATION']; // an official publication directly asserting the claim
-      const res = observeClaim(cp.graph, {
+      const propId = propositionIdentity({ claimType, canonicalCoin: coin, originSourceObservationId: id });
+      const res = observeClaim(workGraph, {
+        propositionId: propId,
         claimType,
         canonicalCoin: coin,
         providerId: p.id,
@@ -253,9 +291,8 @@ export function startRumor2({
         relationKinds,
         knownAtTs: clocks.knownAtTs,
       });
-      cp.graph = res.graph;
+      workGraph = res.graph;
       const node = res.node;
-      // bounded packet-building observations ride on the node
       const obs = {
         sourceObservationId: id,
         providerId: p.id,
@@ -270,38 +307,150 @@ export function startRumor2({
         relationKinds,
       };
       node.observations = [...(node.observations ?? []).filter((o) => o.sourceObservationId !== id), obs].slice(-OBS_PER_CLAIM);
-      cp.graph.claims[node.claimKey] = node;
-      counters().claimsObserved += 1;
-      safeAppend(
-        { type: 'RUMOR2_CLAIM_OBSERVED', ts: iso(clocks.knownAtTs), sourceEventId: `${id}|claim|${node.claimKey}`, provider: p.id, symbol: coin, claimKey: node.claimKey, claimType, status: node.status, title: item.title },
-        r
-      );
-      const asOfTs = now();
-      const built = buildClaimPacket({ node, observations: node.observations, coverage: coverageEntries(asOfTs), asOfTs });
+      workGraph.claims[propId] = node;
+      graphClaims[propId] = node;
+      for (const k of res.prunedKeys) if (!(k in graphClaims)) graphRemovals.push(k);
+      deltas.claimsObserved += 1;
+      events.push({
+        type: 'RUMOR2_CLAIM_OBSERVED',
+        ts: iso(clocks.knownAtTs),
+        sourceEventId: `${id}|claim|${propId}`,
+        provider: p.id,
+        symbol: coin,
+        propositionId: propId,
+        claimKey: propId,
+        claimType,
+        status: node.status,
+        title: item.title,
+      });
+      // packet truth is fixed at PREPARE time: asOfTs is the knowledge
+      // clock, and the packetId computed here survives any crash verbatim
+      const built = buildClaimPacket({
+        node,
+        observations: node.observations,
+        coverage: coverageEntries(clocks.knownAtTs),
+        asOfTs: clocks.knownAtTs,
+      });
       if (built.outcome === 'VALID') {
-        counters().packetsProduced += 1;
-        safeAppend(
-          { type: 'RUMOR2_PACKET', ts: iso(asOfTs), sourceEventId: `${id}|packet|${built.packet.packetId}`, provider: p.id, symbol: coin, claimType, packetId: built.packet.packetId, packet: built.packet },
-          r
-        );
+        deltas.packetsProduced += 1;
+        events.push({
+          type: 'RUMOR2_PACKET',
+          ts: iso(clocks.knownAtTs),
+          sourceEventId: `${id}|packet|${built.packet.packetId}`,
+          provider: p.id,
+          symbol: coin,
+          propositionId: propId,
+          claimType,
+          packetId: built.packet.packetId,
+          packet: built.packet,
+        });
       } else {
         // WITHHOLD: bounded diagnostic truth, never a fixed-up packet
-        counters().packetsWithheld += 1;
-        safeAppend({ type: 'RUMOR2_WITHHELD', ts: iso(asOfTs), sourceEventId: `${id}|withheld|${node.claimKey}`, provider: p.id, symbol: coin, claimType, reasons: built.reasons.slice(0, 8) }, r);
+        deltas.packetsWithheld += 1;
+        events.push({
+          type: 'RUMOR2_WITHHELD',
+          ts: iso(clocks.knownAtTs),
+          sourceEventId: `${id}|withheld|${propId}`,
+          provider: p.id,
+          symbol: coin,
+          propositionId: propId,
+          claimType,
+          reasons: built.reasons.slice(0, 8),
+        });
       }
     }
+    return {
+      txnVersion: 1,
+      provider: p.id,
+      sourceObservationId: id,
+      clocks,
+      events,
+      candidate: {
+        seenIds: rememberSeen(cps.seenIds, id),
+        graphClaims,
+        graphRemovals,
+        counterDeltas: deltas,
+        lastNewItemTs: clocks.knownAtTs,
+      },
+      preparedTs: clocks.knownAtTs,
+    };
+  }
+
+  // SETTLE: every prepared event either proves present in the bounded
+  // stream tail (ACKED) or the EXACT prepared record is appended. Only when
+  // the complete bundle is durable does the candidate state get adopted —
+  // exactly once — and the transaction clear. A failed append retains the
+  // transaction whole; nothing is regenerated, nothing partial advances.
+  function settlePendingTxn() {
+    const txn = cp.txn;
+    if (!txn) return true;
+    const r = runtime[txn.provider];
+    for (const ev of txn.events) {
+      if (proven(ev)) continue; // already durably represented — ACKED
+      if (!safeAppend(ev, r)) return false; // retained; retried next tick/restart
+    }
+    const cps = cp.providers[txn.provider];
+    cps.seenIds = txn.candidate.seenIds;
+    for (const k of txn.candidate.graphRemovals ?? []) delete cp.graph.claims[k];
+    for (const [k, node] of Object.entries(txn.candidate.graphClaims)) cp.graph.claims[k] = node;
+    for (const [k, v] of Object.entries(txn.candidate.counterDeltas)) counters()[k] += v;
+    r.newItems += 1;
+    r.lastNewItemTs = txn.candidate.lastNewItemTs ?? r.lastNewItemTs;
+    cp.txn = null;
+    return true;
+  }
+
+  // returns true when the item fully settled (or was a duplicate/withheld
+  // pre-transaction); false means STOP all further item/provider processing
+  // this tick — truth ordering must never become ambiguous.
+  async function processItem(p, r, cps, item) {
+    const clocks = itemClocks({ publishedTs: item.publishedTs, nowMs: now() });
+    if (clocks.error) {
+      // a causally impossible item never earns an identity or a transaction;
+      // it is refused outright with a bounded diagnostic
+      r.withheldItems += 1;
+      safeAppend({ type: 'RUMOR2_WITHHELD', ts: iso(now()), provider: p.id, reason: clocks.error, title: item.title }, r);
+      return true;
+    }
+    const id = sourceObservationIdentity({
+      provider: p.id,
+      guid: item.guid,
+      link: item.link,
+      publishedTs: clocks.publishedTs,
+      title: item.title,
+      summary: item.summary,
+    });
+    r.itemsObserved += 1;
+    if (cps.seenIds.includes(id)) {
+      r.duplicates += 1;
+      counters().duplicates += 1;
+      return true; // exact same official item — a duplicate, never new evidence
+    }
+    // WRITE AHEAD: the exact prepared truth persists durably BEFORE any
+    // truth-bearing append. A crash before this save leaves no event — the
+    // item is an ordinary future observation.
+    cp.txn = prepareItemTxn(p, cps, item, clocks, id);
+    await saveCheckpoint();
+    if (lifecycle === 'FAILED_DURABILITY') {
+      // the transaction could not be durably represented: no event may
+      // append; the local slot is discarded so nothing half-known survives
+      cp.txn = null;
+      return false;
+    }
+    if (!settlePendingTxn()) return false; // owed evidence — no new polling until it settles
+    return true;
   }
 
   async function pollProvider(p) {
     const r = runtime[p.id];
     const cps = cp.providers[p.id];
     const { requiresContact, hasContact } = providerCfg(p);
-    if (requiresContact && !hasContact) return; // truthfully NOT_QUERIED — never an invented contact
+    if (requiresContact && !hasContact) return true; // truthfully NOT_QUERIED — never an invented contact
     const t = now();
-    if (cps.backoffUntil !== null && t < cps.backoffUntil) return;
-    if (r.lastAttemptTs !== null && t - r.lastAttemptTs < p.cadenceSec * 1000) return;
+    if (cps.backoffUntil !== null && t < cps.backoffUntil) return true;
+    if (r.lastAttemptTs !== null && t - r.lastAttemptTs < p.cadenceSec * 1000) return true;
     r.requestStamps = r.requestStamps.filter((s) => t - s < 3_600_000);
-    if (r.requestStamps.length >= p.hourlyBudget) return; // hard request ceiling
+    if (r.requestStamps.length >= p.hourlyBudget) return true; // hard request ceiling
     r.requestStamps.push(t);
     r.lastAttemptTs = t;
     const res = await fetchProviderFeed({
@@ -319,20 +468,20 @@ export function startRumor2({
       cps.backoffUntil = null;
       cps.lastSuccessTs = now();
       r.lastFailureReason = null;
-      return;
+      return true;
     }
     if (res.outcome === 'RATE_LIMITED') {
       providerFailure(p, r, cps, 'rate limited (429)', { retryAfter: res.retryAfter, http: 429 });
-      return;
+      return true;
     }
     if (res.outcome === 'FAILED') {
       providerFailure(p, r, cps, res.reason, { http: res.status ?? null });
-      return;
+      return true;
     }
     const parsed = parseFeed(res.text);
     if (!parsed.ok) {
       providerFailure(p, r, cps, `feed rejected: ${parsed.reason}`, { http: res.status });
-      return;
+      return true;
     }
     cps.consecutiveFailures = 0;
     cps.backoffUntil = null;
@@ -341,8 +490,11 @@ export function startRumor2({
     cps.lastModified = typeof res.lastModified === 'string' ? res.lastModified.slice(0, 100) : cps.lastModified;
     r.lastFailureReason = null;
     const items = cps.bootstrapped ? parsed.items : parsed.items.slice(0, MAX_BOOTSTRAP_ITEMS);
-    for (const item of items.slice(0, MAX_FEED_ITEMS)) processItem(p, r, cps, item);
+    for (const item of items.slice(0, MAX_FEED_ITEMS)) {
+      if (!(await processItem(p, r, cps, item))) return false; // owed truth halts ALL new processing
+    }
     cps.bootstrapped = true;
+    return true;
   }
 
   function writeStatus() {
@@ -381,6 +533,9 @@ export function startRumor2({
       activeClaims: cp ? Object.keys(cp.graph.claims).length : null,
       counters: cp ? { ...cp.counters } : null,
       checkpointRevision: cp?.revision ?? null,
+      // owed evidence truth: a prepared transaction awaiting settlement
+      pendingTransaction: cp ? cp.txn !== null : null,
+      pendingTransactionProvider: cp?.txn?.provider ?? null,
       pendingAppendFailures: Object.values(runtime).reduce((n, r) => n + r.appendFailures, 0),
       seenIdCap: MAX_SEEN_IDS,
     };
@@ -415,10 +570,21 @@ export function startRumor2({
         return;
       }
     }
+    // A1 RECOVERY ORDER: an owed item transaction settles BEFORE any new
+    // provider polling — no new feed items while exact evidence is owed.
+    if (cp.txn !== null) {
+      const settled = settlePendingTxn();
+      await saveCheckpoint();
+      if (!settled) {
+        writeStatus();
+        return;
+      }
+    }
+    let halted = false;
     for (const p of PROVIDERS) {
-      if (closed) break;
+      if (closed || halted) break;
       try {
-        await pollProvider(p);
+        if (!(await pollProvider(p))) halted = true; // owed truth — stop every ear this tick
       } catch (err) {
         // one ear's failure never silences the others
         providerFailure(p, runtime[p.id], cp.providers[p.id], `internal: ${err.message}`);

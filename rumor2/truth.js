@@ -9,8 +9,19 @@
 // is not touched by it.
 import { createHash } from 'node:crypto';
 
-export const RUMOR2_VERSION = 'RUMOR-2A';
-export const RUMOR2_CHECKPOINT_VERSION = 1;
+export const RUMOR2_VERSION = 'RUMOR-2A1';
+// A1: checkpoint v2 — graph keyed by proposition identities and a
+// write-ahead item transaction slot. RUMOR-2 has never been published, so
+// there is no production v1 truth to migrate: an old/incompatible
+// checkpoint fails closed (WITHHELD), never silently reinterpreted.
+export const RUMOR2_CHECKPOINT_VERSION = 2;
+export const MAX_TXN_EVENTS = 32; // 1 source + <=5 coins x (claim+packet/withheld) fits far below
+// bounded source reconciliation: recovery proves an owed event present by
+// scanning ONLY the trailing bytes of the event stream — a transaction is
+// always settled within a tick of its creation, so its events live at the
+// tail; an unprovable event is re-appended and canonical Memory's semantic
+// dedupe makes the exact replay harmless.
+export const RECONCILE_TAIL_BYTES = 1_048_576;
 
 // ---- hard bounds -----------------------------------------------------------
 export const MAX_FEED_BYTES = 1_048_576; // 1 MiB response body cap
@@ -76,6 +87,20 @@ export function sourceObservationIdentity({ provider, guid, link, publishedTs, t
     contentHash: contentHash(`${title ?? ''}\n${summary ?? ''}`),
   };
   return `r2s-${sha1(canonicalJson(basis))}`;
+}
+
+// ---- proposition identity (A1) ---------------------------------------------
+// A CLAIM TYPE IS A CATEGORY, NOT A PROPOSITION. Two unrelated enforcement
+// actions about the same coin are two different claims. A RUMOR-2A
+// proposition is anchored to the specific official assertion that
+// originated it: (claimType, canonicalCoin, origin sourceObservationId).
+// The same official item — repeated retrieval, crash replay, restart —
+// always yields the SAME proposition; distinct official items are never
+// merged merely for sharing a category and a coin. RUMOR-2B may attach a
+// later source to an EXISTING proposition only through explicit proven
+// relation targeting, never by type+coin search.
+export function propositionIdentity({ claimType, canonicalCoin, originSourceObservationId }) {
+  return `r2c-${sha1(canonicalJson({ claimType, canonicalCoin, originSourceObservationId }))}`;
 }
 
 // ---- claim vocabulary (closed for 2A) --------------------------------------
@@ -236,6 +261,25 @@ export function validateRumor2Checkpoint(cp, { providerIds }) {
     if (!Number.isSafeInteger(cp.counters[k]) || cp.counters[k] < 0) return `checkpoint: counter ${k} invalid`;
   if (!isPlainObject(cp.graph) || !isPlainObject(cp.graph.claims)) return 'checkpoint: graph missing';
   if (Object.keys(cp.graph.claims).length > MAX_ACTIVE_CLAIMS) return 'checkpoint: graph exceeds active-claim bound';
+  // A1: graph nodes are keyed by proposition identity, never by category
+  for (const k of Object.keys(cp.graph.claims)) if (!/^r2c-[0-9a-f]{40}$/.test(k)) return `checkpoint: graph key ${k.slice(0, 24)} is not a proposition identity`;
+  // A1: the write-ahead item transaction slot — explicitly null, or a
+  // bounded prepared transaction the collector must settle before polling
+  if (cp.txn === undefined) return 'checkpoint: txn slot missing (must be null or a prepared transaction)';
+  if (cp.txn !== null) {
+    const t = cp.txn;
+    if (!isPlainObject(t)) return 'checkpoint: txn invalid';
+    if (t.txnVersion !== 1) return 'checkpoint: txn unsupported version';
+    if (!providerIds.includes(t.provider)) return 'checkpoint: txn unknown provider';
+    if (typeof t.sourceObservationId !== 'string' || !/^r2s-[0-9a-f]{40}$/.test(t.sourceObservationId)) return 'checkpoint: txn bad source id';
+    if (!Array.isArray(t.events) || t.events.length === 0 || t.events.length > MAX_TXN_EVENTS) return 'checkpoint: txn events invalid';
+    for (const e of t.events)
+      if (!isPlainObject(e) || typeof e.type !== 'string' || typeof e.sourceEventId !== 'string') return 'checkpoint: txn event malformed';
+    if (!isPlainObject(t.candidate)) return 'checkpoint: txn candidate missing';
+    if (!Array.isArray(t.candidate.seenIds) || t.candidate.seenIds.length > MAX_SEEN_IDS) return 'checkpoint: txn candidate seenIds invalid';
+    if (!isPlainObject(t.candidate.graphClaims)) return 'checkpoint: txn candidate graphClaims invalid';
+    if (!isPlainObject(t.candidate.counterDeltas)) return 'checkpoint: txn candidate counterDeltas invalid';
+  }
   return null;
 }
 
@@ -261,6 +305,7 @@ export function emptyCheckpoint(providerIds, nowMs) {
     providers,
     counters: { sourcesObserved: 0, claimsObserved: 0, packetsProduced: 0, packetsWithheld: 0, duplicates: 0 },
     graph: { claims: {} },
+    txn: null, // write-ahead item transaction slot — one at a time, settled before new polling
   };
 }
 

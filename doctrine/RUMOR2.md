@@ -106,6 +106,39 @@ And the Socrates boundary stands whole:
   durable-core outage degrades RUMOR-2 (FAILED_DURABILITY) without
   touching Tape, Wide Eye, RUMINT, or MICRO.
 
+## Crash law and propositions (RUMOR-2A1)
+
+ONE SOURCE ITEM MUST SURVIVE A CRASH AS THE SAME KNOWLEDGE EVENT.
+
+AN EVENT THAT FAILED TO PERSIST MAY NOT BE REMEMBERED AS COMPLETE.
+
+A CLAIM TYPE IS A CATEGORY. IT IS NOT A PROPOSITION.
+
+Before any truth-bearing event from a new official item may append, a
+bounded immutable ITEM TRANSACTION — the exact prepared events with their
+original clocks, packetIds and semantic identities, plus the candidate
+checkpoint state — is persisted durably (WRITE AHEAD). Recovery settles
+the owed transaction before any new polling: each exact event is proven
+present in the bounded stream tail (RECONCILE_TAIL_BYTES = 1 MiB) or the
+exact prepared record is appended — retrievedTs, knownAtTs, asOfTs,
+packetId and sourceEventId are NEVER regenerated, so a crash replay is
+the same knowledge event with the same canonical Memory identity. Seen
+state, graph state, and counters adopt the candidate exactly once, only
+when the COMPLETE bundle (source, claim, packet, withheld) is durably
+settled; a failed append retains the whole transaction, halts new
+polling, and is truthfully exposed as `pendingTransaction`.
+
+Graph nodes are PROPOSITIONS: `r2c-` identities over (claimType,
+canonicalCoin, origin sourceObservationId). Two unrelated enforcement
+actions about one coin are two claims; the same official item — repeated,
+replayed, or restarted — is always the same proposition; a contradiction
+or retraction attaches only to the exact proposition it targets, never
+found by type+coin search. RUMOR-2B may attach a source to an EXISTING
+proposition only when it can prove sameness. Checkpoint v2 carries the
+transaction slot and proposition-keyed graph; an obsolete checkpoint
+fails closed (RUMOR-2 was never published, so no production truth
+migrates).
+
 ## Point-in-time truth
 
 Every source observation distinguishes `publishedTs` (the publisher's
