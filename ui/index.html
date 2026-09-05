@@ -313,6 +313,13 @@
   #card .obs .v { margin-left: auto; font-variant-numeric: tabular-nums; text-align: right; }
   #card .quiet { font-size: 11px; color: var(--dim); letter-spacing: .14em; padding: 6px 0; }
   #card .tierline { font-size: 12px; color: var(--accent); letter-spacing: .1em; padding: 5px 0; }
+  /* UI-1C13 — StockTwits attention quick peek: an .obs row that is a real
+     button (comfortable tap target, no layout jump), a subtle chevron, and
+     a compact NOW line beneath — information under a scale, not a dashboard */
+  #card button.stPeekBtn { width: 100%; min-height: 38px; background: none; border: 0; font: inherit; cursor: pointer; text-align: left; }
+  #card .stPeekBtn .chev { flex: none; color: var(--dim); margin-left: 2px; transition: transform .18s ease; display: inline-block; }
+  #card .stPeekBtn[aria-expanded="true"] .chev { transform: rotate(90deg); }
+  #card .stPeekBody { font-size: 11px; color: var(--dim); letter-spacing: .06em; font-variant-numeric: tabular-nums; padding: 0 0 6px 2px; overflow-wrap: anywhere; }
 
   /* UI-1: ledger performance console */
   #ledger .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 10px; }
@@ -923,7 +930,7 @@ function syncOrbit(list, focus) {
     p.rank = i;
     p.dying = false;
     const what = entry.tier === 1 ? 'active stalking' : entry.tier === 2 ? 'wide eye ripple'
-      : entry.tier === 3 ? 'social attention' : entry.tier === 4 ? 'remembered attention' : 'watched major';
+      : entry.tier === 3 ? 'StockTwits attention' : entry.tier === 4 ? 'remembered attention' : 'watched major';
     p.el.setAttribute('aria-label', `${entry.symbol} — ${what} — tap for details`);
   });
   for (const p of planets.values()) if (!want.has(p.coin)) p.dying = true;
@@ -1494,16 +1501,64 @@ async function openCard(coin) {
 }
 
 /* ---------- Hunt drawer: WHAT SERPENT IS WATCHING (never a buy list) ---------- */
+/* UI-1C13 — StockTwits attention quick peek. Pure formatters first, so the
+   truth rules are drillable: unavailable is —/worded, NEVER zero; zero
+   acceleration is 0 →, never a manufactured + or -; the numeric value
+   always stays visible next to any arrow. Displaying evidence, not making
+   a trading decision — a HYPED coin may honestly be cooling right now. */
+function stAccelText(a) {
+  if (a === null || a === undefined) return '—';
+  return a > 0 ? `+${a} ↑` : a < 0 ? `${a} ↓` : '0 →';
+}
+function stZText(z, zReason) {
+  if (z !== null && z !== undefined) return `z ${z.toFixed(2)}`;
+  if (zReason === 'INSUFFICIENT_HISTORY') return 'z warming';
+  if (zReason === 'ZERO_VARIANCE') return 'z flat history';
+  return 'z unavailable';
+}
+function stPeekLine(sig) {
+  const v = sig.velocity === null || sig.velocity === undefined ? '—' : `${sig.velocity}/hr`;
+  return `NOW · ${v} · ${stZText(sig.zVelocity, sig.zReason)} · accel ${stAccelText(sig.acceleration)}`;
+}
+/* one tap expands, the second collapses — no modal, no navigation */
+function stTogglePeek(btn, body) {
+  const open = body.hidden === true;
+  body.hidden = !open;
+  btn.setAttribute('aria-expanded', String(open));
+  return open;
+}
+let stPeekSeq = 0;
+function stPeekRow(label, value, sig) {
+  const wrap = el('div', 'stWrap');
+  const btn = el('button', 'obs stPeekBtn');
+  btn.type = 'button';
+  btn.setAttribute('aria-expanded', 'false');
+  const id = `stPeek${++stPeekSeq}`;
+  btn.setAttribute('aria-controls', id);
+  btn.append(el('span', 'm', label), el('span', 'v', value), el('span', 'chev', '›'));
+  const body = el('div', 'stPeekBody', stPeekLine(sig));
+  body.id = id;
+  body.hidden = true;
+  btn.addEventListener('click', () => stTogglePeek(btn, body));
+  wrap.append(btn, body);
+  return wrap;
+}
 function openHuntCard() {
   showCard({ kicker: 'SERPENT', title: 'WATCHING' });
   const bodyEl = $('#cardBody');
   bodyEl.replaceChildren();
   const a = lastAttention;
-  const tierWord = (t) => (t === 1 ? 'active stalk' : t === 2 ? 'wide eye ripple' : t === 3 ? 'social attention' : t === 4 ? 'remembered attention' : 'quiet fallback');
+  // presentation truth (UI-1C13): the current social source is StockTwits
+  // only, and the tier label says so until RUMOR-2 exists
+  const tierWord = (t) => (t === 1 ? 'active stalk' : t === 2 ? 'wide eye ripple' : t === 3 ? 'StockTwits attention' : t === 4 ? 'remembered attention' : 'quiet fallback');
   if (a?.focus) {
     bodyEl.append(el('h3', 'sec', 'FOCUS'));
     bodyEl.append(el('div', 'tierline', a.focus.symbol));
-    bodyEl.append(obsRow(tierWord(a.focus.tier), a.focus.reason));
+    // HYPED stays the overnight classification; the quick peek adds the NOW
+    // metrics beneath — both truths coexist. The disclosure exists only
+    // when current StockTwits metrics actually exist for this coin.
+    if (a.focus.stocktwits) bodyEl.append(stPeekRow(tierWord(a.focus.tier), a.focus.reason, a.focus.stocktwits));
+    else bodyEl.append(obsRow(tierWord(a.focus.tier), a.focus.reason));
     if (a.focus.ts) bodyEl.append(obsRow('refreshed', agoStr(a.focus.ts)));
   } else {
     bodyEl.append(el('div', 'quiet', 'NO CURRENT FOCUS — WATCHING THE MAJORS'));
@@ -1512,6 +1567,10 @@ function openHuntCard() {
   if (others.length) {
     bodyEl.append(el('h3', 'sec', 'OTHER ATTENTION'));
     for (const e of others) {
+      if (e.stocktwits) {
+        bodyEl.append(stPeekRow(e.symbol, `${tierWord(e.tier)} · ${e.ts ? agoStr(e.ts) : '—'}`, e.stocktwits));
+        continue;
+      }
       const row = el('div', 'obs');
       row.append(el('span', 'm', e.symbol));
       row.append(el('span', 'v', `${tierWord(e.tier)} · ${e.ts ? agoStr(e.ts) : '—'}`));

@@ -112,6 +112,27 @@ function wideEyeEntries(now) {
   return out;
 }
 
+// UI-1C13 quick peek: the CURRENT StockTwits metrics for one coin, read
+// through the SAME canonical functions the Rumor Room and prey drawer use
+// (readBaseline + computeSignal over the poller's own checkpoint) — no
+// second formula, no second truth, no extra network. Null stays null with
+// its reason attached; absence of a baseline yields null, never zeros.
+function stocktwitsNow(sym, now) {
+  try {
+    const baseline = readBaseline(`${sym}.X`);
+    if (!baseline || Object.keys(baseline.buckets ?? {}).length === 0) return null;
+    const s = computeSignal(`${sym}.X`, baseline, new Date(now));
+    return {
+      velocity: s.velocity ?? null,
+      zVelocity: s.zVelocity ?? null,
+      zReason: s.zReason ?? null,
+      acceleration: s.acceleration ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function rumintEntries(now) {
   const out = [];
   for (const ev of tailJsonl(path.join(dataDir(), 'rumint', 'events.jsonl'))) {
@@ -120,7 +141,15 @@ function rumintEntries(now) {
     if (!Number.isFinite(ts) || now - ts > FRESH_NOMINATION_MS) continue;
     const sym = cleanSymbol(ev.symbol);
     if (!sym) continue;
-    out.push({ symbol: sym, tier: 3, kind: 'RUMINT_NOMINATION', reason: `RUMINT nomination z=${Number(ev.z ?? 0).toFixed(2)}`, ts, z: ev.z ?? null });
+    out.push({
+      symbol: sym,
+      tier: 3,
+      kind: 'RUMINT_NOMINATION',
+      reason: `RUMINT nomination z=${Number(ev.z ?? 0).toFixed(2)}`,
+      ts,
+      z: ev.z ?? null,
+      stocktwits: stocktwitsNow(sym, now),
+    });
   }
   // RUMINT-R1: HYPED comes from the ONE canonical snapshot the poller wrote
   // (hyped.json === status.json.hyped === checkpoint). Only a READY snapshot
@@ -134,8 +163,10 @@ function rumintEntries(now) {
     for (const s of hyped.symbols) {
       const sym = cleanSymbol(s);
       if (!sym) continue;
-      // hyped is a daily set; its "observation" clock is the poller's status
-      out.push({ symbol: sym, tier: 3, kind: 'HYPED', reason: 'HYPED — elevated overnight social attention', ts: status?.tsMs ?? 0, hyped: true });
+      // hyped is a daily set; its "observation" clock is the poller's status.
+      // UI-1C13 presentation truth: the current social source is StockTwits
+      // only, and the wording says so until RUMOR-2 exists.
+      out.push({ symbol: sym, tier: 3, kind: 'HYPED', reason: 'HYPED — elevated overnight StockTwits attention', ts: status?.tsMs ?? 0, hyped: true, stocktwits: stocktwitsNow(sym, now) });
     }
   }
   return out;
@@ -250,7 +281,9 @@ export async function attentionSnapshot({ now = Date.now(), config = loadConfig(
   }
   return {
     generatedTs: now,
-    focus: focus ? { symbol: focus.symbol, tier: focus.tier, kind: focus.kind, reason: focus.reason, ts: focus.ts } : null,
+    focus: focus
+      ? { symbol: focus.symbol, tier: focus.tier, kind: focus.kind, reason: focus.reason, ts: focus.ts, stocktwits: focus.stocktwits ?? null }
+      : null,
     orbit,
   };
 }
@@ -375,7 +408,7 @@ export function attentionForCoin(coin, { now = Date.now() } = {}) {
   } catch {
     signal = null;
   }
-  const best = stalk ?? ripple ?? nomination ?? (hyped ? { tier: 3, reason: 'HYPED — elevated social attention' } : null);
+  const best = stalk ?? ripple ?? nomination ?? (hyped ? { tier: 3, reason: 'HYPED — elevated overnight StockTwits attention' } : null);
   return {
     stalking: stalk,
     wideEye: ripple,
