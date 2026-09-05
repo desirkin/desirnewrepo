@@ -145,7 +145,12 @@ exact keys, causal clocks, the four allowed event types only, every event
 bound to its source item and proposition, every prepared packet
 re-validated under serpent-evidence-1 (a fabricated packet withholds the
 ear instead of becoming KNOWN Memory), and counter deltas corresponding
-one-for-one to the prepared bundle.
+one-for-one to the prepared bundle. Internally consistent forgery is not
+provenance (A2R): the source identity is RECOMPUTED from immutable
+identity facts preserved in the transaction, every truth-bearing event is
+an exact-key closed shape, and candidate seen/graph state must be the
+deterministic consequence of prior durable truth plus this exact bundle —
+re-derived through the one shared pure transition, never asserted.
 
 Graph nodes are PROPOSITIONS: `r2c-` identities over (claimType,
 canonicalCoin, origin sourceObservationId). Two unrelated enforcement

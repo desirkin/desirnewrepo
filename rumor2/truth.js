@@ -9,6 +9,7 @@
 // is not touched by it.
 import { createHash } from 'node:crypto';
 import { validateEvidencePacket } from '../evidence/contract.js';
+import { providerById } from './registry.js';
 
 export const RUMOR2_VERSION = 'RUMOR-2A2';
 // A2: checkpoint v3 — the prepared-transaction slot is a CLOSED semantic
@@ -272,7 +273,11 @@ export function validateRumor2Checkpoint(cp, { providerIds }) {
   // so nothing may ride in it that has not been proven.
   if (cp.txn === undefined) return 'checkpoint: txn slot missing (must be null or a prepared transaction)';
   if (cp.txn !== null) {
-    const txnErr = validateRumor2Txn(cp.txn, { providerIds, graph: cp.graph });
+    const txnErr = validateRumor2Txn(cp.txn, {
+      providerIds,
+      graph: cp.graph,
+      priorSeenIds: cp.providers?.[cp.txn?.provider]?.seenIds ?? [],
+    });
     if (txnErr) return txnErr;
   }
   return null;
@@ -297,16 +302,41 @@ const R2S_RE = /^r2s-[0-9a-f]{40}$/;
 const R2C_RE = /^r2c-[0-9a-f]{40}$/;
 const isBounded = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
 
-// Closed semantic validation of one prepared item transaction. Restart may
-// replay a transaction ONLY when every field, clock, identity binding,
-// packet, and counter delta here proves out — a malformed packet is never
-// appended merely because its outer record says RUMOR2_PACKET.
-export function validateRumor2Txn(t, { providerIds, graph }) {
+// A2R exact-key schemas for the four truth-bearing event types — the ONLY
+// records a transaction may owe, each a closed shape: every required field
+// present, no undeclared field, ever. RUMOR2_WITHHELD has two legitimate
+// variants (coin-resolution vs proposition/packet withholding), each its
+// own exact schema — never a permissive union.
+const EVENT_KEYS = Object.freeze({
+  RUMOR2_SOURCE_OBSERVED: ['type', 'ts', 'sourceEventId', 'provider', 'title', 'summary', 'link', 'guid', 'publishedTs', 'retrievedTs', 'knownAtTs'],
+  RUMOR2_CLAIM_OBSERVED: ['type', 'ts', 'sourceEventId', 'provider', 'symbol', 'propositionId', 'claimKey', 'claimType', 'status', 'title'],
+  RUMOR2_PACKET: ['type', 'ts', 'sourceEventId', 'provider', 'symbol', 'propositionId', 'claimType', 'packetId', 'packet'],
+  RUMOR2_WITHHELD_COIN: ['type', 'ts', 'sourceEventId', 'provider', 'reason', 'claimType', 'title'],
+  RUMOR2_WITHHELD_PROP: ['type', 'ts', 'sourceEventId', 'provider', 'symbol', 'propositionId', 'claimType', 'reasons'],
+});
+const COIN_SYMBOL_RE = /^[A-Z0-9]{1,15}$/;
+const NODE_STATUSES = Object.freeze(['UNVERIFIED', 'CORROBORATED', 'PRIMARY_CONFIRMED', 'CONTRADICTED', 'RETRACTED']);
+
+// Closed semantic validation of one prepared item transaction (A2R). A
+// persisted transaction is replayed VERBATIM on restart, so restart may
+// trust it only when everything proves out:
+//   - the source identity is RECOMPUTED from durably preserved immutable
+//     identity facts — a syntactically valid forged r2s id dies here;
+//   - every event matches its exact closed schema and its semantic
+//     bindings (proposition identities recomputed, packets re-validated
+//     under serpent-evidence-1);
+//   - candidate seen state is EXACTLY rememberSeen(prior, source) — the
+//     causal transition from prior durable truth, never an assertion;
+//   - the candidate graph delta is EXACTLY re-derived by the same pure
+//     transition used at preparation over the actual prior graph.
+export function validateRumor2Txn(t, { providerIds, graph, priorSeenIds = [] }) {
   if (!isPlainObject(t)) return 'txn: not an object';
-  const keyErr = exactKeys(t, ['txnVersion', 'provider', 'sourceObservationId', 'clocks', 'events', 'candidate', 'preparedTs'], 'txn');
+  const keyErr = exactKeys(t, ['txnVersion', 'provider', 'sourceObservationId', 'identityFacts', 'clocks', 'events', 'candidate', 'preparedTs'], 'txn');
   if (keyErr) return keyErr;
   if (t.txnVersion !== 1) return 'txn: unsupported version';
   if (!providerIds.includes(t.provider)) return 'txn: unknown provider';
+  const providerMeta = providerById(t.provider);
+  if (!providerMeta) return 'txn: provider not in the registry';
   if (typeof t.sourceObservationId !== 'string' || !R2S_RE.test(t.sourceObservationId)) return 'txn: bad source observation id';
   // exact clocks with causal coherence — published <= retrieved <= knownAt
   if (!isPlainObject(t.clocks)) return 'txn: clocks missing';
@@ -320,11 +350,30 @@ export function validateRumor2Txn(t, { providerIds, graph }) {
   if (t.preparedTs !== knownAtTs) return 'txn: preparedTs disagrees with the prepared knowledge clock';
   const expectedTs = new Date(knownAtTs).toISOString();
 
+  // BLOCKER-1 repair: the immutable identity facts are preserved in the
+  // transaction in closed bounded form, and the source identity must be
+  // the RECOMPUTED semantic hash of exactly those facts — never trusted
+  // from its shape, never proven by a self-asserted expected id.
+  if (!isPlainObject(t.identityFacts)) return 'txn: identityFacts missing';
+  const fErr = exactKeys(t.identityFacts, ['provider', 'guid', 'link', 'publishedTs', 'title', 'summary'], 'txn.identityFacts');
+  if (fErr) return fErr;
+  const facts = t.identityFacts;
+  if (facts.provider !== t.provider) return 'txn: identityFacts provider disagrees with transaction provider';
+  if (facts.publishedTs !== publishedTs) return 'txn: identityFacts publication clock disagrees with transaction clocks';
+  if (!isBounded(facts.title, MAX_TITLE_CHARS)) return 'txn: identityFacts title invalid';
+  if (typeof facts.summary !== 'string' || facts.summary.length > MAX_SUMMARY_CHARS) return 'txn: identityFacts summary invalid';
+  if (facts.guid !== null && !isBounded(facts.guid, 500)) return 'txn: identityFacts guid invalid';
+  if (facts.link !== null && !isBounded(facts.link, 2000)) return 'txn: identityFacts link invalid';
+  if (sourceObservationIdentity(facts) !== t.sourceObservationId)
+    return 'txn: source identity is not the semantic hash of the preserved facts — forged provenance';
+
   if (!Array.isArray(t.events) || t.events.length === 0 || t.events.length > MAX_TXN_EVENTS) return 'txn: events invalid';
   let sourceEvents = 0;
-  let claimEvents = 0;
   let packetEvents = 0;
   let withheldEvents = 0;
+  const claimSpecs = [];
+  const packetsByProp = new Map();
+  const claimStatusByProp = new Map();
   for (const e of t.events) {
     if (!isPlainObject(e)) return 'txn: event not an object';
     if (!RUMOR2_TXN_EVENT_TYPES.includes(e.type)) return `txn: event type ${String(e.type).slice(0, 40)} not allowed`;
@@ -332,53 +381,88 @@ export function validateRumor2Txn(t, { providerIds, graph }) {
     if (e.ts !== expectedTs) return 'txn: event clock disagrees with the prepared knowledge clock';
     if (typeof e.sourceEventId !== 'string' || e.sourceEventId.length === 0) return 'txn: event missing sourceEventId';
     if (e.type === 'RUMOR2_SOURCE_OBSERVED') {
+      const kErr = exactKeys(e, EVENT_KEYS.RUMOR2_SOURCE_OBSERVED, 'txn.sourceEvent');
+      if (kErr) return kErr;
       sourceEvents += 1;
       if (e.sourceEventId !== t.sourceObservationId) return 'txn: source event identity disagrees with transaction source';
       if (e.publishedTs !== publishedTs || e.retrievedTs !== retrievedTs || e.knownAtTs !== knownAtTs)
         return 'txn: source event clocks disagree with immutable transaction clocks';
+      // BLOCKER-1: the source event must carry exactly the preserved facts
+      // (the event summary is the bounded 1,000-char excerpt of them)
+      if (e.title !== facts.title) return 'txn: source event title disagrees with identity facts';
+      if (e.summary !== facts.summary.slice(0, 1000)) return 'txn: source event summary disagrees with identity facts';
+      if (e.guid !== facts.guid) return 'txn: source event guid disagrees with identity facts';
+      if (e.link !== facts.link) return 'txn: source event link disagrees with identity facts';
     } else if (e.type === 'RUMOR2_CLAIM_OBSERVED') {
-      claimEvents += 1;
+      const kErr = exactKeys(e, EVENT_KEYS.RUMOR2_CLAIM_OBSERVED, 'txn.claimEvent');
+      if (kErr) return kErr;
       if (typeof e.propositionId !== 'string' || !R2C_RE.test(e.propositionId)) return 'txn: claim event lacks a valid proposition identity';
       if (e.claimKey !== e.propositionId) return 'txn: claim event claimKey/propositionId disagree';
       if (e.sourceEventId !== `${t.sourceObservationId}|claim|${e.propositionId}`)
         return 'txn: claim event identity not bound to source and proposition';
       if (!RUMOR2_CLAIM_TYPES.includes(e.claimType)) return 'txn: claim event carries unknown claimType';
+      if (typeof e.symbol !== 'string' || !COIN_SYMBOL_RE.test(e.symbol)) return 'txn: claim event symbol invalid';
+      // the proposition identity must itself be the recomputed semantic hash
+      if (propositionIdentity({ claimType: e.claimType, canonicalCoin: e.symbol, originSourceObservationId: t.sourceObservationId }) !== e.propositionId)
+        return 'txn: claim event proposition identity is not the semantic hash of its content';
+      if (!NODE_STATUSES.includes(e.status)) return 'txn: claim event status invalid';
+      if (e.title !== facts.title) return 'txn: claim event title disagrees with identity facts';
+      claimSpecs.push({ propositionId: e.propositionId, claimType: e.claimType, symbol: e.symbol });
+      claimStatusByProp.set(e.propositionId, e.status);
     } else if (e.type === 'RUMOR2_PACKET') {
+      const kErr = exactKeys(e, EVENT_KEYS.RUMOR2_PACKET, 'txn.packetEvent');
+      if (kErr) return kErr;
       packetEvents += 1;
       if (typeof e.propositionId !== 'string' || !R2C_RE.test(e.propositionId)) return 'txn: packet event lacks a valid proposition identity';
       if (!isPlainObject(e.packet)) return 'txn: packet event lacks a packet';
-      // THE trust gate: the accepted evidence contract validator runs over
-      // every prepared packet — the contract itself recomputes packetId
-      // against semantic content, so a forged identity dies here too.
+      // the accepted evidence contract validator runs over every prepared
+      // packet — the contract itself recomputes packetId against semantic
+      // content, so a forged identity dies here too.
       const check = validateEvidencePacket(e.packet);
       if (!check.valid) return boundedError(`txn: prepared packet fails serpent-evidence-1 (${check.reasons[0] ?? 'invalid'})`);
       if (e.packetId !== e.packet.packetId) return 'txn: packet event packetId disagrees with the packet itself';
       if (e.sourceEventId !== `${t.sourceObservationId}|packet|${e.packetId}`)
         return 'txn: packet event identity not bound to source and packet';
+      if (typeof e.symbol !== 'string' || e.packet.subject?.canonicalCoin !== e.symbol) return 'txn: packet event symbol/packet subject disagree';
+      packetsByProp.set(e.propositionId, e.packet);
     } else {
       withheldEvents += 1;
-      const hasReason = isBounded(e.reason, MAX_ERROR_CHARS);
-      const hasReasons = Array.isArray(e.reasons) && e.reasons.length > 0 && e.reasons.length <= 8 && e.reasons.every((x) => isBounded(x, MAX_ERROR_CHARS));
-      if (!hasReason && !hasReasons) return 'txn: withheld event lacks a bounded reason';
       if (!e.sourceEventId.startsWith(`${t.sourceObservationId}|withheld|`)) return 'txn: withheld event not bound to the transaction source';
       const suffix = e.sourceEventId.slice(`${t.sourceObservationId}|withheld|`.length);
-      if (e.propositionId !== undefined) {
+      if (suffix === 'coin-resolution') {
+        const kErr = exactKeys(e, EVENT_KEYS.RUMOR2_WITHHELD_COIN, 'txn.withheldEvent');
+        if (kErr) return kErr;
+        if (e.reason !== 'COIN_RESOLUTION_WITHHELD') return 'txn: coin-resolution withholding carries the wrong reason';
+        if (!RUMOR2_CLAIM_TYPES.includes(e.claimType)) return 'txn: withheld event carries unknown claimType';
+        if (e.title !== facts.title) return 'txn: withheld event title disagrees with identity facts';
+      } else {
+        const kErr = exactKeys(e, EVENT_KEYS.RUMOR2_WITHHELD_PROP, 'txn.withheldEvent');
+        if (kErr) return kErr;
         if (typeof e.propositionId !== 'string' || !R2C_RE.test(e.propositionId)) return 'txn: withheld event proposition invalid';
         if (suffix !== e.propositionId) return 'txn: withheld event identity/proposition disagree';
-      } else if (suffix !== 'coin-resolution') return 'txn: withheld event has an unrecognized binding';
+        if (!RUMOR2_CLAIM_TYPES.includes(e.claimType)) return 'txn: withheld event carries unknown claimType';
+        if (typeof e.symbol !== 'string' || !COIN_SYMBOL_RE.test(e.symbol)) return 'txn: withheld event symbol invalid';
+        if (propositionIdentity({ claimType: e.claimType, canonicalCoin: e.symbol, originSourceObservationId: t.sourceObservationId }) !== e.propositionId)
+          return 'txn: withheld event proposition identity is not the semantic hash of its content';
+        if (!Array.isArray(e.reasons) || e.reasons.length === 0 || e.reasons.length > 8 || !e.reasons.every((x) => isBounded(x, MAX_ERROR_CHARS)))
+          return 'txn: withheld event lacks bounded reasons';
+      }
     }
   }
   if (sourceEvents !== 1) return 'txn: exactly one source-observed event is required';
 
-  // candidate — closed schema, consistent with settling THIS source item
+  // candidate — closed schema, and CAUSALLY DERIVED, never asserted
   if (!isPlainObject(t.candidate)) return 'txn: candidate missing';
   const candErr = exactKeys(t.candidate, ['seenIds', 'graphClaims', 'graphRemovals', 'counterDeltas', 'lastNewItemTs'], 'txn.candidate');
   if (candErr) return candErr;
   const cand = t.candidate;
-  if (!Array.isArray(cand.seenIds) || cand.seenIds.length === 0 || cand.seenIds.length > MAX_SEEN_IDS) return 'txn: candidate seenIds invalid';
-  for (const s of cand.seenIds) if (typeof s !== 'string' || !R2S_RE.test(s)) return 'txn: candidate seenIds carry a bad id';
-  if (new Set(cand.seenIds).size !== cand.seenIds.length) return 'txn: candidate seenIds duplicated';
-  if (!cand.seenIds.includes(t.sourceObservationId)) return 'txn: candidate does not settle this source item';
+  // BLOCKER-3 repair: the ONLY valid seen set is the deterministic
+  // rememberSeen transition from the actual prior durable provider state —
+  // membership, ordering, and truncation included.
+  if (!Array.isArray(cand.seenIds)) return 'txn: candidate seenIds invalid';
+  const expectedSeen = rememberSeen(Array.isArray(priorSeenIds) ? priorSeenIds : [], t.sourceObservationId);
+  if (JSON.stringify(cand.seenIds) !== JSON.stringify(expectedSeen))
+    return 'txn: candidate seenIds is not the causal rememberSeen transition from prior durable state';
   if (!isPlainObject(cand.graphClaims)) return 'txn: candidate graphClaims invalid';
   for (const [k, node] of Object.entries(cand.graphClaims)) {
     if (!R2C_RE.test(k)) return 'txn: candidate graph key is not a proposition identity';
@@ -386,13 +470,56 @@ export function validateRumor2Txn(t, { providerIds, graph }) {
   }
   if (!Array.isArray(cand.graphRemovals) || cand.graphRemovals.length > MAX_ACTIVE_CLAIMS) return 'txn: candidate graphRemovals invalid';
   for (const k of cand.graphRemovals) if (typeof k !== 'string' || !R2C_RE.test(k)) return 'txn: candidate removal is not a proposition identity';
-  // adoption may never push the graph beyond its accepted bound
-  if (isPlainObject(graph) && isPlainObject(graph.claims)) {
-    const after = new Set(Object.keys(graph.claims));
-    for (const k of cand.graphRemovals) after.delete(k);
-    for (const k of Object.keys(cand.graphClaims)) after.add(k);
-    if (after.size > MAX_ACTIVE_CLAIMS) return 'txn: candidate adoption exceeds the active-claim bound';
+  // BLOCKER-4 repair: re-derive the exact graph delta from the actual
+  // prior graph + the validated claim events, through the SAME pure
+  // transition used at preparation — node contents, pruning and all.
+  const priorGraph = isPlainObject(graph) && isPlainObject(graph.claims) ? graph : { claims: {} };
+  let derived;
+  try {
+    derived = deriveTxnGraphDelta({
+      graph: priorGraph,
+      providerId: t.provider,
+      sourceType: providerMeta.sourceType,
+      authorityClass: providerMeta.authorityClass,
+      sourceObservationId: t.sourceObservationId,
+      clocks: t.clocks,
+      identityFacts: facts,
+      claims: claimSpecs,
+    });
+  } catch (err) {
+    return boundedError(`txn: graph derivation rejected (${err.message})`);
   }
+  if (canonicalJson(cand.graphClaims) !== canonicalJson(derived.graphClaims))
+    return 'txn: candidate graph state is not the deterministic consequence of prior truth plus this bundle';
+  if (canonicalJson([...cand.graphRemovals].sort()) !== canonicalJson([...derived.graphRemovals].sort()))
+    return 'txn: candidate graph removals are not the deterministic pruning of prior truth plus this bundle';
+  // every claim event's stated status and every packet's claim must match
+  // the derived node truth exactly
+  for (const spec of claimSpecs) {
+    const node = derived.graphClaims[spec.propositionId];
+    if (!node) return 'txn: claim event proposition missing from the derived graph delta';
+    if (claimStatusByProp.get(spec.propositionId) !== node.status) return 'txn: claim event status disagrees with derived node truth';
+    const packet = packetsByProp.get(spec.propositionId);
+    if (packet) {
+      const pc = Array.isArray(packet.claims) ? packet.claims[0] : null;
+      if (
+        !pc ||
+        pc.claimText !== node.claimText ||
+        pc.status !== node.status ||
+        pc.normalizedSubject !== node.normalizedSubject ||
+        pc.firstObservedTs !== node.firstKnownTs ||
+        packet.subject?.canonicalCoin !== node.canonicalCoin
+      )
+        return 'txn: prepared packet claim disagrees with derived node truth';
+    }
+  }
+  for (const propId of packetsByProp.keys())
+    if (!claimSpecs.some((s) => s.propositionId === propId)) return 'txn: packet event has no corresponding claim event';
+  // the adopted graph may never exceed the accepted bound
+  const after = new Set(Object.keys(priorGraph.claims));
+  for (const k of cand.graphRemovals) after.delete(k);
+  for (const k of Object.keys(cand.graphClaims)) after.add(k);
+  if (after.size > MAX_ACTIVE_CLAIMS) return 'txn: candidate adoption exceeds the active-claim bound';
   // counters — EXACT keys, nonnegative safe integers, corresponding
   // one-for-one to the actual prepared bundle: never a decrement, never a
   // manufactured counter, never an increment for an unowed event
@@ -401,7 +528,7 @@ export function validateRumor2Txn(t, { providerIds, graph }) {
   for (const [k, v] of Object.entries(cand.counterDeltas))
     if (!Number.isSafeInteger(v) || v < 0) return `txn: counter delta ${k} must be a nonnegative safe integer`;
   if (cand.counterDeltas.sourcesObserved !== sourceEvents) return 'txn: sourcesObserved delta disagrees with the prepared bundle';
-  if (cand.counterDeltas.claimsObserved !== claimEvents) return 'txn: claimsObserved delta disagrees with the prepared bundle';
+  if (cand.counterDeltas.claimsObserved !== claimSpecs.length) return 'txn: claimsObserved delta disagrees with the prepared bundle';
   if (cand.counterDeltas.packetsProduced !== packetEvents) return 'txn: packetsProduced delta disagrees with the prepared bundle';
   if (cand.counterDeltas.packetsWithheld !== withheldEvents) return 'txn: packetsWithheld delta disagrees with the prepared bundle';
   if (cand.lastNewItemTs !== knownAtTs) return 'txn: candidate lastNewItemTs disagrees with the knowledge clock';
@@ -439,4 +566,124 @@ export function rememberSeen(seenIds, id) {
   if (seenIds.includes(id)) return seenIds;
   const next = [...seenIds, id];
   return next.length > MAX_SEEN_IDS ? next.slice(next.length - MAX_SEEN_IDS) : next;
+}
+
+// ---- deterministic graph transition (A2R: ONE authoritative path) ----------
+// observeClaim is the ONLY way a proposition node changes. It lives here —
+// beside the transaction trust validator — so preparation and validation
+// literally share the same pure function, never two subtly different
+// algorithms. graph.js re-exports this surface unchanged.
+export const OBS_PER_CLAIM = 6; // bounded packet-building observations kept per claim
+
+export const independenceGroupFor = (providerId) => `org:${providerId}`;
+
+export function emptyGraph() {
+  return { claims: {} };
+}
+
+export function observeClaim(
+  graph,
+  { propositionId, claimType, canonicalCoin, providerId, sourceObservationId, title, relationKinds, knownAtTs }
+) {
+  const prior = graph.claims[propositionId];
+  const node = prior
+    ? { ...prior }
+    : {
+        propositionId,
+        claimKey: propositionId, // stable node key — the proposition, never a category
+        claimType,
+        canonicalCoin,
+        originSourceObservationId: sourceObservationId,
+        normalizedSubject: `${canonicalCoin}:${claimType}:${sourceObservationId}`,
+        claimText: String(title ?? '').slice(0, MAX_TITLE_CHARS),
+        firstKnownTs: knownAtTs,
+        status: 'UNVERIFIED',
+        originSourceIds: [],
+        supportSourceIds: [],
+        echoSourceIds: [],
+        primaryConfirmationSourceIds: [],
+        contradictionSourceIds: [],
+        retractionSourceIds: [],
+        independenceGroups: [],
+        observations: [],
+        lastUpdateTs: knownAtTs,
+      };
+  const addOnce = (arr, v) => (arr.includes(v) || arr.length >= MAX_SOURCES_PER_CLAIM ? arr : [...arr, v]);
+  for (const kind of relationKinds) {
+    if (kind === 'ORIGIN') node.originSourceIds = addOnce(node.originSourceIds, sourceObservationId);
+    else if (kind === 'PRIMARY_CONFIRMATION')
+      node.primaryConfirmationSourceIds = addOnce(node.primaryConfirmationSourceIds, sourceObservationId);
+    else if (kind === 'INDEPENDENT_SUPPORT') node.supportSourceIds = addOnce(node.supportSourceIds, sourceObservationId);
+    else if (kind === 'ECHO') node.echoSourceIds = addOnce(node.echoSourceIds, sourceObservationId);
+    else if (kind === 'CONTRADICTION') node.contradictionSourceIds = addOnce(node.contradictionSourceIds, sourceObservationId);
+    else if (kind === 'RETRACTION') node.retractionSourceIds = addOnce(node.retractionSourceIds, sourceObservationId);
+  }
+  node.independenceGroups = addOnce(node.independenceGroups, independenceGroupFor(providerId));
+  // Structural status, honestly: an OFFICIAL primary assertion is
+  // PRIMARY_CONFIRMED; contradiction/retraction relations flip the status
+  // the contract can prove; nothing here ever claims CORROBORATED — one
+  // organization is one provenance family, and one family can never
+  // corroborate itself.
+  if (node.retractionSourceIds.length > 0) node.status = 'RETRACTED';
+  else if (node.contradictionSourceIds.length > 0) node.status = 'CONTRADICTED';
+  else if (node.primaryConfirmationSourceIds.length > 0) node.status = 'PRIMARY_CONFIRMED';
+  else node.status = 'UNVERIFIED';
+  node.lastUpdateTs = knownAtTs;
+
+  const claims = { ...graph.claims, [propositionId]: node };
+  // bounded: beyond the cap, the stalest node is dropped deterministically
+  const keys = Object.keys(claims);
+  const prunedKeys = [];
+  if (keys.length > MAX_ACTIVE_CLAIMS) {
+    const oldest = keys.sort((a, b) => claims[a].lastUpdateTs - claims[b].lastUpdateTs || (a < b ? -1 : 1))[0];
+    delete claims[oldest];
+    prunedKeys.push(oldest);
+  }
+  return { graph: { claims }, node, prunedKeys, pruned: prunedKeys.length };
+}
+
+// The shared item→graph delta: given the prior graph, the item's immutable
+// identity facts and clocks, and the claim specs (proposition, type, coin),
+// derive the EXACT candidate graph mutation — nodes with their bounded
+// packet-building observations, plus any deterministic pruning. Used
+// verbatim by transaction preparation AND by transaction trust validation:
+// candidate graph state must be the deterministic consequence of prior
+// durable truth plus this exact bundle, never an assertion.
+export function deriveTxnGraphDelta({ graph, providerId, sourceType, authorityClass, sourceObservationId, clocks, identityFacts, claims }) {
+  let work = graph;
+  const graphClaims = {};
+  const graphRemovals = [];
+  const relationKinds = ['ORIGIN', 'PRIMARY_CONFIRMATION']; // an official publication directly asserting the claim
+  for (const spec of claims) {
+    const res = observeClaim(work, {
+      propositionId: spec.propositionId,
+      claimType: spec.claimType,
+      canonicalCoin: spec.symbol,
+      providerId,
+      sourceObservationId,
+      title: identityFacts.title,
+      relationKinds,
+      knownAtTs: clocks.knownAtTs,
+    });
+    work = res.graph;
+    const node = res.node;
+    const obs = {
+      sourceObservationId,
+      providerId,
+      sourceType,
+      authorityClass,
+      publishedTs: clocks.publishedTs,
+      retrievedTs: clocks.retrievedTs,
+      knownAtTs: clocks.knownAtTs,
+      title: identityFacts.title,
+      summary: identityFacts.summary.slice(0, 1000),
+      link: identityFacts.link,
+      relationKinds,
+    };
+    node.observations = [...(node.observations ?? []).filter((o) => o.sourceObservationId !== sourceObservationId), obs].slice(-OBS_PER_CLAIM);
+    work.claims[spec.propositionId] = node;
+    graphClaims[spec.propositionId] = node;
+    for (const k of res.prunedKeys) if (!(k in graphClaims)) graphRemovals.push(k);
+  }
+  return { graphClaims, graphRemovals };
 }

@@ -44,14 +44,13 @@ import {
   emptyCheckpoint,
   rememberSeen,
   propositionIdentity,
+  deriveTxnGraphDelta,
   MAX_SEEN_IDS,
   RECONCILE_TAIL_BYTES,
 } from './truth.js';
-import { observeClaim } from './graph.js';
 import { buildClaimPacket } from './packet.js';
 
 const iso = (ms) => new Date(ms).toISOString();
-const OBS_PER_CLAIM = 6; // bounded packet-building observations kept per claim
 
 export function startRumor2({
   log = console.log,
@@ -243,6 +242,17 @@ export function startRumor2({
   // (seen set, touched graph nodes, counter deltas). Nothing is appended
   // and nothing in cp is mutated.
   function prepareItemTxn(p, cps, item, clocks, id) {
+    // A2R: the EXACT bounded immutable facts that define the source
+    // identity ride in the transaction, so restart can RECOMPUTE (not
+    // trust) the r2s identity after a crash.
+    const identityFacts = {
+      provider: p.id,
+      guid: item.guid,
+      link: item.link,
+      publishedTs: clocks.publishedTs,
+      title: item.title,
+      summary: item.summary,
+    };
     const events = [];
     const deltas = { sourcesObserved: 1, claimsObserved: 0, packetsProduced: 0, packetsWithheld: 0 };
     events.push({
@@ -258,9 +268,6 @@ export function startRumor2({
       retrievedTs: clocks.retrievedTs,
       knownAtTs: clocks.knownAtTs,
     });
-    const graphClaims = {};
-    const graphRemovals = [];
-    let workGraph = cp.graph;
     // deterministic claim path — no guessing, no sentiment, no model
     const claimType = classifyOfficialItem({ providerKind: p.providerKind, title: item.title, summary: item.summary });
     const coins = claimType === null ? [] : resolveCoins(`${item.title}\n${item.summary}`, registry);
@@ -278,48 +285,34 @@ export function startRumor2({
       deltas.packetsWithheld += 1;
     }
     // one shared source identity; one PROPOSITION per unambiguous coin —
-    // anchored to this exact official assertion, never to a category
-    for (const coin of coins) {
-      const relationKinds = ['ORIGIN', 'PRIMARY_CONFIRMATION']; // an official publication directly asserting the claim
-      const propId = propositionIdentity({ claimType, canonicalCoin: coin, originSourceObservationId: id });
-      const res = observeClaim(workGraph, {
-        propositionId: propId,
-        claimType,
-        canonicalCoin: coin,
-        providerId: p.id,
-        sourceObservationId: id,
-        title: item.title,
-        relationKinds,
-        knownAtTs: clocks.knownAtTs,
-      });
-      workGraph = res.graph;
-      const node = res.node;
-      const obs = {
-        sourceObservationId: id,
-        providerId: p.id,
-        sourceType: p.sourceType,
-        authorityClass: p.authorityClass,
-        publishedTs: clocks.publishedTs,
-        retrievedTs: clocks.retrievedTs,
-        knownAtTs: clocks.knownAtTs,
-        title: item.title,
-        summary: item.summary.slice(0, 1000),
-        link: item.link,
-        relationKinds,
-      };
-      node.observations = [...(node.observations ?? []).filter((o) => o.sourceObservationId !== id), obs].slice(-OBS_PER_CLAIM);
-      workGraph.claims[propId] = node;
-      graphClaims[propId] = node;
-      for (const k of res.prunedKeys) if (!(k in graphClaims)) graphRemovals.push(k);
+    // the graph delta comes from the SAME pure derivation the trust
+    // validator re-runs, so candidate state is causal by construction
+    const claimSpecs = coins.map((coin) => ({
+      propositionId: propositionIdentity({ claimType, canonicalCoin: coin, originSourceObservationId: id }),
+      claimType,
+      symbol: coin,
+    }));
+    const { graphClaims, graphRemovals } = deriveTxnGraphDelta({
+      graph: cp.graph,
+      providerId: p.id,
+      sourceType: p.sourceType,
+      authorityClass: p.authorityClass,
+      sourceObservationId: id,
+      clocks,
+      identityFacts,
+      claims: claimSpecs,
+    });
+    for (const spec of claimSpecs) {
+      const node = graphClaims[spec.propositionId];
       deltas.claimsObserved += 1;
       events.push({
         type: 'RUMOR2_CLAIM_OBSERVED',
         ts: iso(clocks.knownAtTs),
-        sourceEventId: `${id}|claim|${propId}`,
+        sourceEventId: `${id}|claim|${spec.propositionId}`,
         provider: p.id,
-        symbol: coin,
-        propositionId: propId,
-        claimKey: propId,
+        symbol: spec.symbol,
+        propositionId: spec.propositionId,
+        claimKey: spec.propositionId,
         claimType,
         status: node.status,
         title: item.title,
@@ -339,8 +332,8 @@ export function startRumor2({
           ts: iso(clocks.knownAtTs),
           sourceEventId: `${id}|packet|${built.packet.packetId}`,
           provider: p.id,
-          symbol: coin,
-          propositionId: propId,
+          symbol: spec.symbol,
+          propositionId: spec.propositionId,
           claimType,
           packetId: built.packet.packetId,
           packet: built.packet,
@@ -351,10 +344,10 @@ export function startRumor2({
         events.push({
           type: 'RUMOR2_WITHHELD',
           ts: iso(clocks.knownAtTs),
-          sourceEventId: `${id}|withheld|${propId}`,
+          sourceEventId: `${id}|withheld|${spec.propositionId}`,
           provider: p.id,
-          symbol: coin,
-          propositionId: propId,
+          symbol: spec.symbol,
+          propositionId: spec.propositionId,
           claimType,
           reasons: built.reasons.slice(0, 8),
         });
@@ -364,6 +357,7 @@ export function startRumor2({
       txnVersion: 1,
       provider: p.id,
       sourceObservationId: id,
+      identityFacts,
       clocks,
       events,
       candidate: {
@@ -386,9 +380,16 @@ export function startRumor2({
     const txn = cp.txn;
     if (!txn) return true;
     // A2 TRUST GATE: no prepared event appends until the ENTIRE transaction
-    // passes the closed semantic schema — a fabricated or malformed record
-    // in a durable slot withholds the ear instead of becoming Memory truth.
-    const trustErr = validateRumor2Txn(txn, { providerIds: [...PROVIDER_IDS], graph: cp.graph });
+    // passes the closed semantic proof — identity recomputed from preserved
+    // facts, exact event schemas, and candidate state re-derived causally
+    // from the prior durable seen/graph truth. A fabricated or malformed
+    // record in a durable slot withholds the ear instead of becoming
+    // Memory truth.
+    const trustErr = validateRumor2Txn(txn, {
+      providerIds: [...PROVIDER_IDS],
+      graph: cp.graph,
+      priorSeenIds: cp.providers[txn.provider]?.seenIds ?? [],
+    });
     if (trustErr) {
       lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
       withholdReason = boundedError(trustErr);
