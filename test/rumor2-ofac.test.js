@@ -134,8 +134,11 @@ test('OFAC-3+4+5+6. ADD / MODIFY / REMOVE detected explicitly; digital-currency 
   assert.ok(byChange.ADD.title.includes('NEW SANCTIONED ENTITY'));
   assert.ok(byChange.ADD.summary.includes('digitalCurrencyAddresses=ETH 0xAbCd1234eF5678901234567890AbCdEf12345678'), 'address preserved VERBATIM — case untouched');
   assert.ok(byChange.MODIFY.title.includes('BANCO NACIONAL DE CUBA'));
-  assert.ok(byChange.REMOVE.title.includes('CASA DE CUBA'));
-  assert.ok(byChange.REMOVE.summary.includes('no longer present'));
+  // REMOVE evidence names the record by its authoritative uid — never by
+  // unauthenticated cached display text (closeout #2)
+  assert.ok(byChange.REMOVE.title.includes('uid 475'), byChange.REMOVE.title);
+  assert.ok(!byChange.REMOVE.title.includes('CASA') && !byChange.REMOVE.summary.includes('CASA'), 'no cache-derived name in truth');
+  assert.ok(byChange.REMOVE.summary.includes('no longer present') && byChange.REMOVE.summary.includes('priorRowHash='));
   const cp = store.state.saved;
   assert.equal(cp.providers.OFAC_OFFICIAL.snapshot.recordCount, 5, 'the new snapshot committed after the diff settled');
   assert.deepEqual(cp.graph.claims, {}, 'sanctions truth never invents a claim-graph proposition');

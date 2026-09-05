@@ -18,6 +18,8 @@ import {
   MAX_SEEN_IDS,
   MAX_ACTIVE_CLAIMS,
   emptyCheckpoint,
+  propositionIdentity,
+  deriveTxnGraphDelta,
 } from '../rumor2/truth.js';
 import { PROVIDER_IDS } from '../rumor2/registry.js';
 
@@ -107,6 +109,25 @@ async function capture(feedItems, priorState = null) {
 const V = (cp) => validateRumor2Checkpoint(cp, { providerIds: [...PROVIDER_IDS] });
 const hexId = (prefix, i) => `${prefix}-${i.toString(16).padStart(40, '0')}`;
 const truthBearing = (stream) => stream.filter((e) => e.type !== 'RUMOR2_STARTED');
+
+// a REAL durable graph node, generated through the authoritative production
+// transition (never a hand-built shortcut — the checkpoint graph validator
+// admits only states production code can actually create)
+const realPriorNode = (i, ts) => {
+  const originId = hexId('r2s', i);
+  const propId = propositionIdentity({ claimType: 'EXCHANGE_LISTING', canonicalCoin: 'BTC', originSourceObservationId: originId });
+  const { graphClaims } = deriveTxnGraphDelta({
+    graph: { claims: {} },
+    providerId: 'KRAKEN_OFFICIAL',
+    sourceType: 'EXCHANGE_OFFICIAL',
+    authorityClass: 'OFFICIAL',
+    sourceObservationId: originId,
+    clocks: { publishedTs: null, retrievedTs: ts, knownAtTs: ts },
+    identityFacts: { title: `old claim ${i}`, summary: 'x', link: null },
+    claims: [{ propositionId: propId, claimType: 'EXCHANGE_LISTING', symbol: 'BTC' }],
+  });
+  return [propId, graphClaims[propId]];
+};
 
 // ---- BLOCKER 1 — forged source identity -------------------------------------
 
@@ -261,22 +282,25 @@ test('A2R-4. candidate graph mutations must be the deterministic consequence of 
   const [kMut] = Object.keys(mut.txn.candidate.graphClaims);
   mut.txn.candidate.graphClaims[kMut].claimText = 'a different assertion entirely';
   assert.ok(V(mut).includes(CAUSAL_G), 'node contents are derived truth, not matching strings');
-  // (d) remove an unrelated prior proposition
+  // (d) remove an unrelated prior proposition (a REAL prior node — the
+  // graph validator would refuse a hand-built impossible shape first)
   const del = await capture([LISTING]);
-  const priorKey = `r2c-${'e'.repeat(40)}`;
-  del.graph.claims[priorKey] = { propositionId: priorKey, claimKey: priorKey, lastUpdateTs: 1, claimText: 'prior unrelated truth' };
+  const [priorKey, priorNode] = realPriorNode(0xe, 1);
+  del.graph.claims[priorKey] = priorNode;
   del.txn.candidate.graphRemovals = [priorKey];
   assert.ok(V(del).includes(CAUSAL_R), 'no unrelated prior node can be removed');
 });
 
 test('A2R-4b. legitimate graph-at-capacity pruning validates and recovers exactly', async () => {
-  // durable prior graph at the bound: 64 propositions, ascending staleness
+  // durable prior graph at the bound: 64 REAL propositions (production
+  // transition, ascending staleness) — the graph validator admits nothing less
   const prior = emptyCheckpoint([...PROVIDER_IDS], T1 - 10_000_000);
+  let oldest = null;
   for (let i = 1; i <= MAX_ACTIVE_CLAIMS; i++) {
-    const k = hexId('r2c', i);
-    prior.graph.claims[k] = { propositionId: k, claimKey: k, lastUpdateTs: i, claimText: `old claim ${i}`, observations: [] };
+    const [k, node] = realPriorNode(i, i);
+    prior.graph.claims[k] = node;
+    if (i === 1) oldest = k;
   }
-  const oldest = hexId('r2c', 1);
   const cp = await capture([LISTING], prior);
   assert.deepEqual(cp.txn.candidate.graphRemovals, [oldest], 'the deterministic pruning removes exactly the stalest node');
   assert.equal(V(cp), null, 'capacity pruning validates under the causal proof');

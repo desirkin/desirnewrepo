@@ -127,18 +127,20 @@ export function extractDigitalCurrencyAddresses(remarks) {
 }
 
 // deterministic explicit changes between the previously ACCEPTED snapshot
-// (uid -> {name, hash}) and a newly parsed dataset — sorted by kind then
+// (uid -> prior row hash) and a newly parsed dataset — sorted by kind then
 // uid so replays and reorders always yield the same sequence; MODIFY and
 // REMOVE carry the prior record hash, because a transition's identity
-// binds where it came FROM as well as where it went
+// binds where it came FROM as well as where it went. The prior snapshot
+// contributes NOTHING but uid + hash: no cached display text can ever
+// enter a truth event (truth-boundary closeout #2).
 export function diffSdnSnapshots(prev, next) {
   const changes = [];
   for (const [uid, rec] of next) {
-    const old = prev.get(uid);
-    if (!old) changes.push({ change: 'ADD', uid, record: rec });
-    else if (old.hash !== rec.hash) changes.push({ change: 'MODIFY', uid, record: rec, priorHash: old.hash });
+    const oldHash = prev.get(uid);
+    if (oldHash === undefined) changes.push({ change: 'ADD', uid, record: rec });
+    else if (oldHash !== rec.hash) changes.push({ change: 'MODIFY', uid, record: rec, priorHash: oldHash });
   }
-  for (const [uid, old] of prev) if (!next.has(uid)) changes.push({ change: 'REMOVE', uid, priorName: old.name, priorHash: old.hash });
+  for (const [uid, oldHash] of prev) if (!next.has(uid)) changes.push({ change: 'REMOVE', uid, priorHash: oldHash });
   const order = { ADD: 0, MODIFY: 1, REMOVE: 2 };
   changes.sort((a, b) => order[a.change] - order[b.change] || a.uid - b.uid);
   return changes;
@@ -156,9 +158,13 @@ const shortHash = (h) => String(h).slice(0, 12);
 // because the prior anchor's sequence has advanced.
 function changeItem(chg, { prevSeq, datasetHash, listUrl }) {
   if (chg.change === 'REMOVE') {
+    // AUTHORITATIVE BOUND FACTS ONLY: the cache detail behind the anchor
+    // proves uid + prior row hash and nothing more, so REMOVE evidence
+    // names the record by uid — an unauthenticated cached display name can
+    // never be quoted into truth. Truth integrity beats pretty text.
     return {
-      title: `OFAC SDN REMOVE: ${chg.priorName}`.slice(0, MAX_TITLE_CHARS),
-      summary: `uid=${chg.uid}; change=REMOVE; name=${chg.priorName}; fromSnapshotSeq=${prevSeq}; note=record no longer present in official dataset ${shortHash(datasetHash)}`.slice(0, MAX_SUMMARY_CHARS),
+      title: `OFAC SDN REMOVE: uid ${chg.uid}`.slice(0, MAX_TITLE_CHARS),
+      summary: `uid=${chg.uid}; change=REMOVE; fromSnapshotSeq=${prevSeq}; priorRowHash=${shortHash(chg.priorHash)}; note=record no longer present in official dataset ${shortHash(datasetHash)}`.slice(0, MAX_SUMMARY_CHARS),
       link: listUrl,
       guid: `sdn-${chg.uid}@${prevSeq}-rem-${shortHash(chg.priorHash)}`,
       publishedTs: null, // the CSV states no per-record clock — UNKNOWN stays unknown
@@ -241,31 +247,43 @@ export function buildOfacUpdate({ prevAnchor, prevRecords, records, listUrl }) {
   return { ok: true, kind: 'DIFF', datasetHash, seq, counts, items: changes.map((c) => changeItem(c, { prevSeq, datasetHash, listUrl })) };
 }
 
-// snapshot persistence payload (bounded detail needed to diff the NEXT
-// dataset); its truth anchor — the dataset hash — lives in the validated
-// durable checkpoint, so a payload that fails to re-derive that exact hash
-// is honestly discarded and the ear re-baselines instead of trusting it
+// snapshot persistence payload — a CACHE, never truth authority
+// (truth-boundary closeout #2). It carries ONLY what a later diff needs
+// and what the durable checkpoint anchor deterministically binds: uid and
+// prior row hash, nothing else. No display text is stored, because no
+// unauthenticated cached text may ever enter a truth event. The truth
+// anchor — dataset hash, record count, seq — lives in the validated
+// durable checkpoint; a payload that fails to re-derive the exact anchored
+// hash and count is honestly discarded and the ear re-baselines.
 export function ofacSnapshotPayload(records, datasetHash) {
   return {
-    version: 1,
+    version: 2,
     datasetHash,
-    records: [...records.entries()].map(([uid, r]) => [uid, r.name, r.hash]).sort((a, b) => a[0] - b[0]),
+    records: [...records.entries()].map(([uid, r]) => [uid, r.hash]).sort((a, b) => a[0] - b[0]),
   };
 }
 
-export function verifyOfacSnapshotPayload(payload, expectedHash) {
+export function verifyOfacSnapshotPayload(payload, anchor) {
   try {
-    if (payload === null || typeof payload !== 'object' || payload.version !== 1 || !Array.isArray(payload.records)) return null;
+    if (anchor === null || typeof anchor !== 'object' || typeof anchor.hash !== 'string') return null;
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    // exact closed payload schema — no undeclared fields, correct version
+    const keys = Object.keys(payload).sort();
+    if (keys.join(',') !== 'datasetHash,records,version') return null;
+    if (payload.version !== 2 || !Array.isArray(payload.records)) return null;
+    if (payload.datasetHash !== anchor.hash) return null; // detail from some OTHER dataset
+    if (Number.isSafeInteger(anchor.recordCount) && payload.records.length !== anchor.recordCount) return null;
     const records = new Map();
     for (const row of payload.records) {
-      if (!Array.isArray(row) || row.length !== 3) return null;
-      const [uid, name, hash] = row;
-      if (!Number.isSafeInteger(uid) || uid < 0 || typeof name !== 'string' || typeof hash !== 'string') return null;
+      if (!Array.isArray(row) || row.length !== 2) return null;
+      const [uid, hash] = row;
+      if (!Number.isSafeInteger(uid) || uid < 0) return null;
+      if (typeof hash !== 'string' || !/^[0-9a-f]{40}$/.test(hash)) return null;
       if (records.has(uid)) return null;
-      records.set(uid, { name, hash });
+      records.set(uid, hash);
     }
-    const derived = sha1(JSON.stringify([...records.entries()].map(([uid, r]) => [uid, r.hash]).sort((a, b) => a[0] - b[0])));
-    if (derived !== expectedHash) return null; // stale or tampered detail — not the accepted snapshot
+    const derived = sha1(JSON.stringify([...records.entries()].sort((a, b) => a[0] - b[0])));
+    if (derived !== anchor.hash) return null; // stale or tampered detail — not the accepted snapshot
     return records;
   } catch {
     return null;

@@ -24,6 +24,10 @@ export function urlPolicyError(rawUrl, provider) {
     return 'unparseable URL';
   }
   if (u.protocol !== 'https:') return `scheme ${u.protocol} rejected — https only`;
+  // exact official ORIGIN, not merely the right hostname: no embedded
+  // credentials, no alternate port (an explicit :443 normalizes away)
+  if (u.username !== '' || u.password !== '') return 'URL credentials rejected';
+  if (u.port !== '') return `non-default HTTPS port ${u.port} rejected`;
   const host = u.hostname.toLowerCase();
   if (PRIVATE_HOST_RE.test(host)) return 'loopback/private/link-local target rejected';
   const allowedHosts = [provider.host, ...(Array.isArray(provider.redirectHosts) ? provider.redirectHosts : [])];
@@ -37,6 +41,25 @@ const readHeader = (res, name) => {
     return res.headers?.get?.(name) ?? res.headers?.[name.toLowerCase()] ?? null;
   } catch {
     return null;
+  }
+};
+
+// Abandoned-response hygiene: when a response is discarded without its body
+// being consumed (redirect, 429, other non-success), the body stream is
+// cancelled fire-and-forget — never awaited (a hostile stream's cancel may
+// itself hang), never allowed to surface an unhandled rejection, and never
+// applied to the successful bounded-body path.
+const discardBody = (res) => {
+  try {
+    if (res?.body && typeof res.body.cancel === 'function') {
+      const c = res.body.cancel();
+      c?.catch?.(() => {});
+    } else if (res?.body && typeof res.body.getReader === 'function') {
+      const c = res.body.getReader().cancel();
+      c?.catch?.(() => {});
+    }
+  } catch {
+    // an already-broken stream needs no further discarding
   }
 };
 
@@ -97,7 +120,13 @@ async function boundedBody(res, maxBytes = MAX_FEED_BYTES, signal = null, timeou
     }
     try {
       const text = await raced(res.text());
-      if (text.length > maxBytes) return { error: `response ${text.length} chars exceeds ${maxBytes}` };
+      // BYTES, not JavaScript characters: multibyte content must not slip
+      // under the advertised byte cap. (The fallback cannot bound the
+      // transport's own allocation before text() returns — that is why the
+      // streaming reader is the primary path; the fallback still refuses to
+      // hand oversized content onward.)
+      const bytes = Buffer.byteLength(text, 'utf8');
+      if (bytes > maxBytes) return { error: `response ${bytes} bytes exceeds ${maxBytes}` };
       return { text };
     } catch (err) {
       if (err?.name === 'AbortError' || signal?.aborted) return timedOut();
@@ -160,6 +189,7 @@ export async function fetchProviderFeed({ provider, fetchImpl = fetch, userAgent
       const status = res.status;
       if (status === 304) return { outcome: 'NOT_MODIFIED', status };
       if (status >= 300 && status < 400) {
+        discardBody(res); // the redirect response's own body is never consumed
         const location = readHeader(res, 'location');
         if (!location) return { outcome: 'FAILED', reason: 'redirect without location', status };
         let next;
@@ -174,8 +204,14 @@ export async function fetchProviderFeed({ provider, fetchImpl = fetch, userAgent
         url = next;
         continue;
       }
-      if (status === 429) return { outcome: 'RATE_LIMITED', status, retryAfter: readHeader(res, 'retry-after') };
-      if (status !== 200) return { outcome: 'FAILED', reason: `http ${status}`, status };
+      if (status === 429) {
+        discardBody(res);
+        return { outcome: 'RATE_LIMITED', status, retryAfter: readHeader(res, 'retry-after') };
+      }
+      if (status !== 200) {
+        discardBody(res);
+        return { outcome: 'FAILED', reason: `http ${status}`, status };
+      }
       // the attempt deadline remains armed through the whole body read:
       // headers are not truth, and a stalled body adopts nothing
       const body = await boundedBody(res, maxBytes, controller.signal, effectiveTimeout);

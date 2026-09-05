@@ -239,25 +239,25 @@ test('X-7. closeout laws hold for the new ears: source uniqueness, outcome exclu
   await b.c.stop();
 });
 
-test('X-8. a pre-B1 checkpoint restores intact: new ears are honestly born fresh, old truth preserved verbatim', async () => {
-  // a durable checkpoint written when only the three 2A providers existed
+test('X-8. a legacy pre-B1 checkpoint is WITHHELD as incompatible — never silently upgraded (closeout #2)', async () => {
+  // a durable checkpoint written when only the three 2A providers existed:
+  // structurally indistinguishable from a CURRENT checkpoint that lost both
+  // B1 ears, so runtime never guesses — explicit operator migration only
   const old = emptyCheckpoint(['KRAKEN_OFFICIAL', 'SEC_OFFICIAL', 'CFTC_OFFICIAL'], T1 - 50_000_000);
   old.providers.KRAKEN_OFFICIAL.seenIds = [`r2s-${'c'.repeat(40)}`];
   old.providers.KRAKEN_OFFICIAL.bootstrapped = true;
   old.providers.KRAKEN_OFFICIAL.etag = '"kraken-old"';
   old.counters.sourcesObserved = 7;
-  assert.equal(V(old), null, 'the elder checkpoint is valid — providers are a subset, never unknown');
-  const store = memStore(old);
+  const err = V(old);
+  assert.ok(err.includes('legacy pre-B1'), `recognized and refused explicitly: ${err}`);
+  const store = memStore(structuredClone(old));
   const stream = [];
   const b = boot({ store, stream, responses: {} });
   await b.tick();
-  assert.equal(b.c.internals.lifecycle, 'RESTORED', 'no false WITHHELD, no silent fresh-start');
-  const cp = store.state.saved;
-  assert.deepEqual(cp.providers.KRAKEN_OFFICIAL.seenIds, [`r2s-${'c'.repeat(40)}`], 'prior durable truth preserved verbatim');
-  assert.equal(cp.providers.KRAKEN_OFFICIAL.etag, '"kraken-old"');
-  assert.equal(cp.counters.sourcesObserved, 7);
-  assert.ok(cp.providers.EDGAR_OFFICIAL && cp.providers.EDGAR_OFFICIAL.seenIds.length === 0, 'EDGAR born fresh');
-  assert.ok(cp.providers.OFAC_OFFICIAL && cp.providers.OFAC_OFFICIAL.bootstrapped === false, 'OFAC born fresh');
+  assert.equal(b.c.internals.lifecycle, 'WITHHELD_INVALID_CHECKPOINT', 'withheld, not silently fresh-started or upgraded');
+  assert.equal(b.fetchCalls.length, 0, 'a withheld ear consumes nothing');
+  assert.equal(truthBearing(stream).length, 0, 'zero truth from ambiguous durable state');
+  assert.deepEqual(store.state.saved, old, 'the elder truth itself is left untouched for the operator');
   await b.c.stop();
 });
 

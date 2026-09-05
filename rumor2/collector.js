@@ -44,7 +44,8 @@ import {
   validateRumor2Checkpoint,
   validateRumor2Txn,
   emptyCheckpoint,
-  emptyProviderState,
+  MAX_ETAG_CHARS,
+  MAX_LAST_MODIFIED_CHARS,
   rememberSeen,
   propositionIdentity,
   deriveTxnGraphDelta,
@@ -175,10 +176,9 @@ export function startRumor2({
         return false;
       }
       cp = r.state;
-      // a provider registered AFTER this checkpoint was written honestly
-      // starts fresh — that is new-ear birth, not rewritten history; every
-      // provider the checkpoint already carries is preserved verbatim
-      for (const id of PROVIDER_IDS) if (!cp.providers[id]) cp.providers[id] = emptyProviderState();
+      // truth-boundary closeout #2: the validator admits ONLY the complete
+      // current provider set, so no runtime top-up or automatic legacy
+      // upgrade exists — an elder or partial provider map is WITHHELD above
       lifecycle = 'RESTORED';
       durability = 'DURABLE';
       return true;
@@ -500,11 +500,13 @@ export function startRumor2({
   // (the dataset hash) lives in the VALIDATED durable checkpoint, so a
   // payload that cannot re-derive that exact hash is honestly discarded
   // and the ear re-baselines instead of trusting stale or foreign detail
-  const loadOfacSnapshot = (expectedHash) => {
+  const loadOfacSnapshot = (anchor) => {
     try {
       const f = path.join(dir(), OFAC_SNAPSHOT_FILE);
       if (!existsSync(f)) return null;
-      return verifyOfacSnapshotPayload(JSON.parse(readFileSync(f, 'utf8')), expectedHash);
+      // the cache must re-derive the COMPLETE durable anchor (hash and
+      // record count) before a single field of it may serve as a diff basis
+      return verifyOfacSnapshotPayload(JSON.parse(readFileSync(f, 'utf8')), anchor);
     } catch {
       return null;
     }
@@ -564,7 +566,7 @@ export function startRumor2({
       if (!ds.ok) parsed = ds;
       else {
         const prevAnchor = cps.snapshot ?? null;
-        const prevRecords = prevAnchor ? loadOfacSnapshot(prevAnchor.hash) : null;
+        const prevRecords = prevAnchor ? loadOfacSnapshot(prevAnchor) : null;
         const upd = buildOfacUpdate({ prevAnchor, prevRecords, records: ds.records, listUrl: p.feedUrl });
         if (!upd.ok) parsed = upd;
         else {
@@ -602,8 +604,8 @@ export function startRumor2({
     const newCursor = p.noConditional
       ? { etag: null, lastModified: null } // rotating-URL ears never store a suppressing cursor
       : {
-          etag: typeof res.etag === 'string' ? res.etag.slice(0, 300) : cps.etag,
-          lastModified: typeof res.lastModified === 'string' ? res.lastModified.slice(0, 100) : cps.lastModified,
+          etag: typeof res.etag === 'string' ? res.etag.replace(/[\r\n]/g, '').slice(0, MAX_ETAG_CHARS) : cps.etag,
+          lastModified: typeof res.lastModified === 'string' ? res.lastModified.replace(/[\r\n]/g, '').slice(0, MAX_LAST_MODIFIED_CHARS) : cps.lastModified,
         };
     let items = cps.bootstrapped ? parsed.items : parsed.items.slice(0, MAX_BOOTSTRAP_ITEMS);
     // snapshot-diff ears converge over multiple polls when a diff exceeds

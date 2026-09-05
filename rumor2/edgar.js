@@ -61,6 +61,31 @@ export function formMatches(form, whitelist) {
 
 const ACCESSION_RE = /^\d{10}-\d{2}-\d{6}$/;
 const boundedStr = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+const ACCEPTANCE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?(Z|[+-]\d{2}:\d{2})$/;
+const FILING_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// STRUCTURALLY MALFORMED != UNKNOWN. UNKNOWN is acceptable only where the
+// SEC source legitimately provides no value (an empty string in a column);
+// a wrong type, a misaligned column, or an unparseable clock is corrupt
+// structure and rejects the WHOLE response — corruption is never converted
+// into legitimate-looking unknown information. Every column consumed for
+// identity-bearing content is a REQUIRED aligned array in the official
+// submissions schema.
+const EDGAR_REQUIRED_COLUMNS = Object.freeze(['filingDate', 'acceptanceDateTime', 'primaryDocument', 'items']);
+
+// primaryDocument is a SAFE SEC ARCHIVE LOCATOR or empty — never a
+// traversal, an absolute URL, a protocol-relative reference, a query or
+// fragment payload, a backslash trick, or control characters. Each path
+// segment must start alphanumeric (which also excludes '.', '..', and
+// empty segments) and stay in a closed safe charset, so the resolved
+// document can never escape the filing's own archive directory.
+export function safePrimaryDocument(doc) {
+  if (typeof doc !== 'string') return null;
+  if (doc === '') return ''; // legitimately absent — the accession index is used instead
+  if (doc.length > 200) return null;
+  for (const seg of doc.split('/')) if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(seg)) return null;
+  return doc;
+}
 
 // Strict fail-closed parse of one submissions document into bounded items
 // for the whitelisted forms. A response for the wrong CIK, mismatched
@@ -95,11 +120,17 @@ export function parseEdgarSubmissions(text, { cik, forms }) {
   const acc = recent.accessionNumber;
   const form = recent.form;
   if (!Array.isArray(acc) || !Array.isArray(form) || acc.length !== form.length) return { ok: false, reason: 'filings.recent columnar arrays invalid' };
-  const col = (name) => (Array.isArray(recent[name]) && recent[name].length === acc.length ? recent[name] : null);
-  const filingDate = col('filingDate');
-  const acceptance = col('acceptanceDateTime');
-  const primaryDoc = col('primaryDocument');
-  const itemsCol = col('items');
+  // every identity-bearing column is REQUIRED and must align EXACTLY with
+  // accessionNumber — a short, missing, or non-array auxiliary column is
+  // structural corruption and rejects the whole response, so a partial
+  // document can never mint a different identity for the same filing
+  for (const name of EDGAR_REQUIRED_COLUMNS)
+    if (!Array.isArray(recent[name]) || recent[name].length !== acc.length)
+      return { ok: false, reason: `filings.recent.${name} missing or misaligned with accessionNumber` };
+  const filingDate = recent.filingDate;
+  const acceptance = recent.acceptanceDateTime;
+  const primaryDoc = recent.primaryDocument;
+  const itemsCol = recent.items;
   const items = [];
   // newest-first in the document; select the newest whitelisted filings,
   // then emit oldest-first so the evidence stream reads chronologically
@@ -107,22 +138,32 @@ export function parseEdgarSubmissions(text, { cik, forms }) {
     if (!formMatches(form[i], forms)) continue; // unlisted form: safely ignored, never guessed at
     const a = acc[i];
     if (typeof a !== 'string' || !ACCESSION_RE.test(a)) return { ok: false, reason: `selected filing carries malformed accession '${String(a).slice(0, 24)}'` };
-    const accepted = boundedStr(acceptance?.[i], 40);
-    const filed = boundedStr(filingDate?.[i], 20);
+    // selected-row strictness: wrong JS types and unparseable clocks are
+    // corruption; ONLY the empty string is the SEC's legitimate "no value"
+    const accepted = acceptance[i];
+    if (typeof accepted !== 'string' || accepted.length > 40) return { ok: false, reason: `selected filing acceptanceDateTime wrong type or oversized` };
+    if (accepted !== '' && !ACCEPTANCE_RE.test(accepted)) return { ok: false, reason: `selected filing carries malformed acceptanceDateTime '${accepted.slice(0, 32)}'` };
+    const filed = filingDate[i];
+    if (typeof filed !== 'string' || filed.length > 20) return { ok: false, reason: 'selected filing filingDate wrong type or oversized' };
+    if (filed !== '' && !FILING_DATE_RE.test(filed)) return { ok: false, reason: `selected filing carries malformed filingDate '${filed.slice(0, 16)}'` };
     // point-in-time: publishedTs is the SEC's own stated clock (acceptance
     // datetime, else the filing date at UTC midnight); Serpent's knownAtTs
     // is assigned at observation by the collector and is NEVER backdated.
     let publishedTs = null;
-    if (accepted && /^\d{4}-\d{2}-\d{2}T/.test(accepted)) {
+    if (accepted !== '') {
       const t = Date.parse(accepted);
-      if (Number.isSafeInteger(t) && t > 0) publishedTs = t;
-    } else if (/^\d{4}-\d{2}-\d{2}$/.test(filed)) {
+      if (!Number.isSafeInteger(t) || t <= 0) return { ok: false, reason: 'selected filing acceptanceDateTime unparseable' };
+      publishedTs = t;
+    } else if (filed !== '') {
       const t = Date.parse(`${filed}T00:00:00Z`);
-      if (Number.isSafeInteger(t) && t > 0) publishedTs = t;
+      if (!Number.isSafeInteger(t) || t <= 0) return { ok: false, reason: 'selected filing filingDate unparseable' };
+      publishedTs = t;
     }
-    const doc = boundedStr(primaryDoc?.[i], 200);
+    const doc = safePrimaryDocument(primaryDoc[i]);
+    if (doc === null) return { ok: false, reason: `selected filing primaryDocument is not a safe SEC archive locator` };
     const link = `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${a.replace(/-/g, '')}/${doc || `${a}-index.htm`}`.slice(0, 500);
-    const filingItems = boundedStr(itemsCol?.[i], 200);
+    if (typeof itemsCol[i] !== 'string') return { ok: false, reason: 'selected filing items wrong type' };
+    const filingItems = itemsCol[i].slice(0, 200);
     items.push({
       // immutable filing facts ONLY — never the issuer's mutable display name
       title: `SEC EDGAR filing ${boundedStr(form[i], 24)} accession ${a} (CIK ${cik})`.slice(0, MAX_TITLE_CHARS),

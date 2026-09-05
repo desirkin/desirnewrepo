@@ -245,7 +245,9 @@ test('EDGAR-ID-9. forged identity facts in a prepared transaction stay validator
 // DEFECT 3 — OFAC temporal transition identity
 // ---------------------------------------------------------------------------
 const recsOf = (text) => parseSdnCsv(text).records;
-const lite = (recs) => new Map([...recs.entries()].map(([u, r]) => [u, { name: r.name, hash: r.hash }]));
+// the prior-snapshot diff basis: uid -> prior row hash ONLY (closeout #2 —
+// no cached display text may ever enter a truth event)
+const lite = (recs) => new Map([...recs.entries()].map(([u, r]) => [u, r.hash]));
 const anchorOf = (recs, seq) => ({ hash: sdnDatasetIdentity(recs), acceptedTs: T1, recordCount: recs.size, seq });
 const LIST_URL = 'https://sanctionslistservice.ofac.treas.gov/api/download/sdn.csv';
 
@@ -367,18 +369,20 @@ test('CP-1..17. the provider map is a CLOSED schema over a CLOSED set', () => {
   const unknown = full();
   unknown.providers.EVIL_MIRROR = emptyProviderState();
   assert.ok(V(unknown).includes('unknown provider EVIL_MIRROR'));
-  // CP-13: the EXACT legacy pre-B1 trio restores
-  assert.equal(V(emptyCheckpoint([...LEGACY_PRE_B1_PROVIDERS], T1)), null, 'the one legitimate elder shape');
-  // CP-14: legacy minus any one member is corrupt
+  // CP-13 (closeout #2): the EXACT legacy pre-B1 trio is recognized and
+  // WITHHELD as incompatible — indistinguishable from a current checkpoint
+  // that lost both B1 ears, so it is never silently upgraded
+  assert.ok(V(emptyCheckpoint([...LEGACY_PRE_B1_PROVIDERS], T1)).includes('legacy pre-B1'), 'elder shape refused explicitly');
+  // CP-14: legacy minus any one member is plain corruption
   for (const missing of LEGACY_PRE_B1_PROVIDERS) {
     const cp = emptyCheckpoint(LEGACY_PRE_B1_PROVIDERS.filter((id) => id !== missing), T1);
-    assert.ok(V(cp).includes('provider set is neither'), `legacy without ${missing}`);
+    assert.ok(V(cp).includes('not the complete current registry'), `legacy without ${missing}`);
   }
   // CP-15/16/17: a B1 checkpoint that silently lost one provider is corrupt
   for (const missing of ['EDGAR_OFFICIAL', 'OFAC_OFFICIAL', 'SEC_OFFICIAL']) {
     const cp = full();
     delete cp.providers[missing];
-    assert.ok(V(cp).includes('provider set is neither'), `full without ${missing}`);
+    assert.ok(V(cp).includes('not the complete current registry'), `full without ${missing}`);
   }
   // provider state missing a required base field is corrupt
   const gone = full();

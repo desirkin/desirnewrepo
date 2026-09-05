@@ -287,6 +287,46 @@ Closeout hardening (B1 certification):
   restores with the B1 ears born fresh) — any other subset lost durable
   truth and fails closed.
 
+Truth-boundary closeout #2 (final seal):
+
+- STRUCTURALLY MALFORMED IS NOT UNKNOWN. An EDGAR response whose required
+  identity-bearing columns are missing, misaligned, wrong-typed, or
+  unparseable is rejected WHOLE — corruption is never converted into
+  legitimate-looking unknown information, so a partial document can never
+  mint a second identity for the same filing. UNKNOWN is only the SEC's
+  own legitimate empty value. primaryDocument is a safe SEC archive
+  locator or empty: no traversal, no absolute or protocol-relative URL,
+  no query/fragment, no control characters, no escape from the filing's
+  own archive directory.
+- THE OFAC SNAPSHOT CACHE IS NEVER TRUTH AUTHORITY. It stores uid + prior
+  row hash and nothing else, and is trusted only after re-deriving the
+  COMPLETE durable checkpoint anchor (hash and record count). REMOVE
+  evidence names the record by its authoritative uid and anchored prior
+  row hash — no cached display text can ever be quoted into a truth
+  event. Truth integrity beats pretty text.
+- THE GRAPH IS TRUTH, SO THE GRAPH IS VALIDATED. One authoritative graph
+  validator, at both gates: closed container and node schemas, proposition
+  identity and normalizedSubject re-derived, STATUS derived from relation
+  arrays (never trusted — the unreachable CORROBORATED can never ride in),
+  observation providers pinned to the registry with source-only ears
+  (EDGAR, OFAC) refused as claim evidence, relation kinds closed, and all
+  graph clocks causal and at or before the checkpoint's own clock.
+- THE WHOLE CHECKPOINT IS CLOSED. Top-level fields, counters, providers,
+  graph, and transaction are all exact schemas; durable truth can never
+  claim future success, future snapshot acceptance, future preparation, or
+  decades of backoff; persisted ETag/Last-Modified obey the same bounds
+  runtime adoption enforces, with no header-injection characters.
+- NO AMBIGUOUS LEGACY RESTORE. Only the complete current provider set
+  restores. The historical pre-B1 trio is structurally indistinguishable
+  from a current checkpoint that lost both B1 ears, so it is recognized
+  and truthfully WITHHELD as incompatible — reviving an elder developer
+  checkpoint is an explicit offline operator migration, never automatic
+  runtime inference.
+- HTTP bounds are BYTES, not characters, on every path; abandoned response
+  bodies (redirects, 429, other non-success) are cancelled fire-and-forget;
+  and only the exact official HTTPS origin is ever spoken to — no
+  alternate ports, no embedded credentials.
+
 Roadmap unchanged: RUMOR-2B may later add authorized social ears and
 propagation reasoning; SOCRATES remains separate; GHOST remains separate;
 derivatives and on-chain senses remain separate. None of those exist yet.
