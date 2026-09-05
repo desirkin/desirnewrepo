@@ -193,10 +193,10 @@ if (!TEST_URL) {
     rmSync(TEST_DATA, { recursive: true, force: true });
   });
 
-  test('schema 4 applies; migrations remain idempotent', async () => {
+  test('schema 5 applies; migrations remain idempotent', async () => {
     assert.equal(await db.connect(), true);
     const first = await runMigrations(db);
-    assert.equal(first.schemaVersion, 4); // RUMINT-R1 adds the rumor-ear checkpoint table
+    assert.equal(first.schemaVersion, 5); // RUMOR-2A adds the multi-source rumor checkpoint table
     const again = await runMigrations(db);
     assert.deepEqual(again.appliedNow, []);
   });

@@ -506,6 +506,24 @@ export class Repository {
     return rows[0]?.state ?? null;
   }
 
+  // ---------------- RUMOR-2A multi-source rumor checkpoint (storage only) --------
+  // Same contract as the GOV/RUMINT checkpoints: one revision-counted
+  // bounded snapshot, validated strictly by its collector before trust,
+  // carrying no control/posture semantics and no decision return path.
+  async saveRumor2Checkpoint(state) {
+    await this.db.query(
+      `INSERT INTO serpent_rumor2_checkpoint (id, revision, state) VALUES ('current', 1, $1)
+       ON CONFLICT (id) DO UPDATE SET revision = serpent_rumor2_checkpoint.revision + 1, state = $1, saved_at = now()`,
+      [state],
+      { write: true }
+    );
+  }
+
+  async loadRumor2Checkpoint() {
+    const { rows } = await this.db.query(`SELECT state FROM serpent_rumor2_checkpoint WHERE id = 'current'`);
+    return rows[0]?.state ?? null;
+  }
+
   // RUMINT-R1 bootstrap facts (§13-14): the PROVEN per-hour observation
   // history already inside durable canonical Memory — for each provider
   // symbol and absolute hour, the maximum cumulative hourly velocity a

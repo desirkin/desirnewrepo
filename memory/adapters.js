@@ -290,6 +290,52 @@ export function fromGovernanceEvent(rec, observedTs = nowIso()) {
   });
 }
 
+// ---------------------------------------------------------------------
+// I. RUMOR-2 — rumor2/events.jsonl lines (RUMOR-2A). Multi-source rumor
+// intelligence OBSERVATION evidence only: official-source observations,
+// deterministic claim-graph updates, valid serpent-evidence-1 packets,
+// provider failures, and honest withholdings. Every record's
+// sourceEventId is a semantic identity over immutable provider facts, so
+// a crash-window replay of the same official item collapses to ONE memory
+// instead of minting a second truth. NOTHING here maps to STRIKE,
+// eligibility, position, or execution — a claim is not a fact, and an
+// official announcement is not trading permission.
+// ---------------------------------------------------------------------
+export function fromRumor2Event(rec, observedTs = nowIso()) {
+  const failed = rec.type === 'RUMOR2_PROVIDER_FAILURE';
+  const withheld = rec.type === 'RUMOR2_WITHHELD';
+  return envelope({
+    sourceModule: 'RUMOR2',
+    eventType: typeof rec.type === 'string' && /^[A-Z][A-Z0-9_]*$/.test(rec.type) ? rec.type : 'RUMOR2_OBSERVATION',
+    ts: sec(rec.ts),
+    symbol: canonSymbol(rec.symbol), // present only on coin-bound claim/packet records; never invented
+    families: ['RUMOR', 'OFFICIAL_NEWS'],
+    // a provider failure is UNAVAILABLE evidence about that ear, not silence
+    observationState: failed ? 'UNAVAILABLE' : 'KNOWN',
+    payload: { type: rec.type, detail: strip(rec, 'ts') },
+    dataAvailability: {
+      sourceObservation: rec.type === 'RUMOR2_SOURCE_OBSERVED' || rec.type === 'RUMOR2_CLAIM_OBSERVED' ? 'KNOWN' : failed ? 'UNAVAILABLE' : 'UNKNOWN',
+      evidencePacket: rec.type === 'RUMOR2_PACKET' ? 'KNOWN' : withheld ? 'UNAVAILABLE' : 'UNKNOWN',
+    },
+    provenance: {
+      source: 'rumor2/events.jsonl (official-feed multi-source rumor collector)',
+      // point-in-time truth rides through: the publisher's clock stays the
+      // publisher's clock; Serpent's knowledge clock is when it fetched
+      sourceTs: rec.publishedTs ? new Date(rec.publishedTs).toISOString() : rec.ts,
+      availableTs: rec.ts,
+      retrievedTs: observedTs,
+      kind: 'live',
+      form: 'raw',
+    },
+    correlation: {
+      eventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null,
+      sourceEventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null,
+    },
+    sourceEventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null,
+    identity: sourceFingerprint(rec, 'rumor2/events.jsonl'),
+  });
+}
+
 export function fromControlAction(rec, observedTs = nowIso()) {
   return envelope({
     sourceModule: 'STATE',

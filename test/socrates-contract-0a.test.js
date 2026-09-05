@@ -632,10 +632,13 @@ test('0A-52. no runtime module imports the Socrates/evidence contracts', () => {
   assert.ok(runtime.length > 50, 'the runtime scan actually covers the codebase');
   for (const f of runtime) {
     const src = readFileSync(path.join(REPO, f), 'utf8');
-    assert.ok(
-      !/evidence\/contract|socrates\/contract|from\s+['"][^'"]*socrates/.test(src),
-      `${f} must not import the Socrates/evidence contracts — zero live behavior change`
-    );
+    // RUMOR-2A: rumor2/ is the ONE authorized evidence-packet PRODUCER and
+    // may import evidence/contract.js; the Socrates analysis contract
+    // remains un-importable by any runtime module — producing evidence
+    // grants zero interpretation authority.
+    assert.ok(!/socrates\/contract|from\s+['"][^'"]*socrates/.test(src), `${f} must not import the Socrates contract`);
+    if (!f.startsWith('rumor2/'))
+      assert.ok(!/evidence\/contract/.test(src), `${f} must not import the evidence contract — only rumor2/ produces packets`);
   }
 });
 

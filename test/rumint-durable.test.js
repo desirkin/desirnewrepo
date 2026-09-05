@@ -27,7 +27,7 @@ if (!TEST_URL) {
     try {
       assert.equal(await db.connect(), true);
       const m = await runMigrations(db);
-      assert.equal(m.schemaVersion, 4, 'RUMINT-R1 schema landed');
+      assert.equal(m.schemaVersion, 5, 'RUMINT-R1 schema (and later) landed');
       const repo = new Repository(db);
       const alive = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       const store = rumintCheckpointStore({ persistence: alive });

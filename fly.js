@@ -9,8 +9,10 @@ import { startRumint } from './rumint/poller.js';
 import { startGateway } from './gateway/collector.js';
 import { startWideEye } from './survey/wideeye.js';
 import { startGovernance } from './governance/collector.js';
+import { startRumor2 } from './rumor2/collector.js';
 import { govCheckpointStore } from './persistence/gov-checkpoint.js';
 import { rumintCheckpointStore, rumintBootstrapSource } from './persistence/rumint-checkpoint.js';
+import { rumor2CheckpointStore } from './persistence/rumor2-checkpoint.js';
 import { startMemoryMirror } from './memory/mirror.js';
 import { startPersistence } from './persistence/runtime.js';
 
@@ -68,6 +70,11 @@ startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen 
 // enabled. GOV-1B: the durable checkpoint store is injected here from the
 // persistence layer (composition-root wiring; STORAGE ONLY, no return path).
 startGovernance({ checkpointStore: govCheckpointStore() });
+// RUMOR-2A dark multi-source rumor ear — no-ops (zero network, zero timers)
+// unless RUMOR2_ENABLED=true. Observation and memory ONLY: zero attention,
+// HYPED, stalking, eligibility, or execution authority; the durable
+// checkpoint store is injected here (composition-root wiring; STORAGE ONLY).
+startRumor2({ checkpointStore: rumor2CheckpointStore() });
 try {
   await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
   process.exit(0);

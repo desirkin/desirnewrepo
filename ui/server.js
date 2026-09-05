@@ -443,6 +443,18 @@ const server = http.createServer((req, res) => {
         console.error(`[api/wideeye] ${err.constructor.name}: ${err.message}`);
         json(res, 200, { status: { enabled: false, fresh: false }, ripples: [], degraded: true });
       }
+    } else if (url.pathname === '/api/rumor2') {
+      // RUMOR-2A: read-only passthrough of the dark rumor layer's atomic
+      // status file — bounded operational truth only (provider health,
+      // claim counts, packet counts). No secrets, no credentials, no raw
+      // external text dump; the layer stays DARK and carries no authority.
+      try {
+        const file = path.join(dataDir(), 'rumor2', 'status.json');
+        json(res, 200, existsSync(file) ? JSON.parse(readFs(file, 'utf8')) : { enabled: false, state: 'DARK', lifecycle: 'DISABLED' });
+      } catch (err) {
+        console.error(`[api/rumor2] ${err.constructor.name}: ${err.message}`);
+        json(res, 200, { enabled: false, state: 'DARK', degraded: true });
+      }
     } else if (url.pathname === '/api/status') {
       json(res, 200, statusPayload());
     } else if (url.pathname === '/api/ledger/summary') {

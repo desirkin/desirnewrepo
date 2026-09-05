@@ -21,6 +21,10 @@ export const SOURCE_MODULES = Object.freeze([
   // reserved for future senses (names only):
   'MICROSTRUCTURE',
   'GOVERNANCE',
+  // RUMOR-2A: the multi-source rumor intelligence layer (official primary
+  // ears + claim graph). Distinct from RUMINT, which remains the
+  // StockTwits statistical ear.
+  'RUMOR2',
   'GHOST',
   'INFRASTRUCTURE',
   'FLOW',
@@ -46,6 +50,11 @@ export const EVIDENCE_FAMILIES = Object.freeze([
   // (quorum, margin, concentration, state) is still ONE family, never four
   // independent confirmations.
   'GOVERNANCE',
+  // RUMOR-2A: deliberate schema-contract promotion of the reserved
+  // OFFICIAL_NEWS family — an official exchange/regulator publication is
+  // ONE evidence family however many fields it carries, and an official
+  // announcement is primary evidence, never automatic trading permission.
+  'OFFICIAL_NEWS',
 ]);
 
 // Reserved for future sensors — coherent names only, nothing implemented.
@@ -55,7 +64,6 @@ export const RESERVED_EVIDENCE_FAMILIES = Object.freeze([
   'CAPITAL_FLOW',
   'EXCHANGE_INTEGRATION',
   'NETWORK_INFRASTRUCTURE',
-  'OFFICIAL_NEWS',
   'DEVELOPER_ACTIVITY',
   'BLOCKSPACE',
   'MACRO',

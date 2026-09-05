@@ -4,7 +4,7 @@
 // silently downgraded.
 import { createHash } from 'node:crypto';
 
-export const SCHEMA_VERSION = 4; // RUMINT-R1 / schema 4
+export const SCHEMA_VERSION = 5; // RUMOR-2A / schema 5
 
 // Canonical key-sorted JSON — the stable content form durable event
 // identities are computed over (independent of key order and whitespace).
@@ -187,6 +187,25 @@ export const MIGRATIONS = [
     // decision return path; the collector validates strictly before trust.
     statements: [
       `CREATE TABLE IF NOT EXISTS serpent_rumint_checkpoint (
+        id text PRIMARY KEY,
+        revision bigint NOT NULL DEFAULT 0,
+        state jsonb NOT NULL,
+        saved_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ],
+  },
+  {
+    version: 5,
+    name: 'RUMOR-2A durable multi-source rumor checkpoint',
+    // Same narrow storage-only pattern as the GOV/RUMINT checkpoints: one
+    // bounded revision-counted JSONB row carrying RUMOR-2 provider states,
+    // recent seen identities, counters, and the bounded active claim graph
+    // — so a republish restarts the process WITHOUT replaying history as
+    // new evidence. Historical evidence itself belongs in append-only
+    // Memory, never in this row. No control/posture/trading semantics; no
+    // decision return path; the collector validates strictly before trust.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_rumor2_checkpoint (
         id text PRIMARY KEY,
         revision bigint NOT NULL DEFAULT 0,
         state jsonb NOT NULL,
