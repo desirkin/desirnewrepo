@@ -78,7 +78,15 @@ test('R2A-78. no network/model call exists outside the explicit official feed cl
 });
 
 test('R2A-79+80+81. no X, Reddit, or news-media adapter exists', () => {
-  assert.deepEqual([...PROVIDER_IDS].sort(), ['CFTC_OFFICIAL', 'KRAKEN_OFFICIAL', 'SEC_OFFICIAL'], 'exactly the three official ears');
+  // the CLOSED set of official primary ears: 2A's three plus 2B1's two
+  // dark evidence-only ears (SEC EDGAR filings, OFAC sanctions list) —
+  // still zero social, zero media, zero unofficial mirrors
+  assert.deepEqual(
+    [...PROVIDER_IDS].sort(),
+    ['CFTC_OFFICIAL', 'EDGAR_OFFICIAL', 'KRAKEN_OFFICIAL', 'OFAC_OFFICIAL', 'SEC_OFFICIAL'],
+    'exactly the five official ears'
+  );
+  assert.equal(new Set(PROVIDER_IDS).size, PROVIDER_IDS.length, 'provider identities are unique');
   for (const p of PROVIDERS) {
     assert.equal(p.authorityClass, 'OFFICIAL');
     assert.ok(p.feedUrl.startsWith('https://'), 'HTTPS only');

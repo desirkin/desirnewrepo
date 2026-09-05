@@ -7,8 +7,13 @@
 import { KRAKEN_OFFICIAL } from './providers/kraken-official.js';
 import { SEC_OFFICIAL } from './providers/sec-official.js';
 import { CFTC_OFFICIAL } from './providers/cftc-official.js';
+// RUMOR-2B1: two additional DARK official-primary-evidence ears — SEC EDGAR
+// filings and the OFAC sanctions list. Evidence only: no claims, no coins,
+// no Attention/HYPED/trading authority, config-gated OFF by default.
+import { EDGAR_OFFICIAL } from './providers/edgar-official.js';
+import { OFAC_OFFICIAL } from './providers/ofac-official.js';
 
-export const PROVIDERS = Object.freeze([KRAKEN_OFFICIAL, SEC_OFFICIAL, CFTC_OFFICIAL]);
+export const PROVIDERS = Object.freeze([KRAKEN_OFFICIAL, SEC_OFFICIAL, CFTC_OFFICIAL, EDGAR_OFFICIAL, OFAC_OFFICIAL]);
 export const PROVIDER_IDS = Object.freeze(PROVIDERS.map((p) => p.id));
 export const providerById = (id) => PROVIDERS.find((p) => p.id === id) ?? null;
 

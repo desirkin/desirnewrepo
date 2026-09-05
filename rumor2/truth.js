@@ -259,6 +259,21 @@ export function validateRumor2Checkpoint(cp, { providerIds }) {
       return `checkpoint: provider ${id} consecutiveFailures invalid`;
     if (p.lastSuccessTs !== null && !isTs(p.lastSuccessTs)) return `checkpoint: provider ${id} lastSuccessTs invalid`;
     if (p.bootstrapped !== true && p.bootstrapped !== false) return `checkpoint: provider ${id} bootstrapped invalid`;
+    // RUMOR-2B1: the ONLY additional provider-state field — an explicitly
+    // validated dataset-snapshot anchor for snapshot/diff ears (OFAC). It
+    // is a bounded truth anchor, never a blob: the bulky snapshot detail
+    // lives outside the checkpoint and must re-derive this exact hash
+    // before it may serve as a diff basis. Absent or null on every other
+    // provider; anything else in the slot fails closed.
+    if (p.snapshot !== undefined && p.snapshot !== null) {
+      const s = p.snapshot;
+      if (!isPlainObject(s)) return `checkpoint: provider ${id} snapshot invalid`;
+      const keys = Object.keys(s).sort();
+      if (keys.join(',') !== 'acceptedTs,hash,recordCount') return `checkpoint: provider ${id} snapshot carries undeclared or missing fields`;
+      if (typeof s.hash !== 'string' || !/^[0-9a-f]{40}$/.test(s.hash)) return `checkpoint: provider ${id} snapshot hash invalid`;
+      if (!isTs(s.acceptedTs)) return `checkpoint: provider ${id} snapshot acceptedTs invalid`;
+      if (!Number.isSafeInteger(s.recordCount) || s.recordCount < 0) return `checkpoint: provider ${id} snapshot recordCount invalid`;
+    }
   }
   if (!isPlainObject(cp.counters)) return 'checkpoint: counters missing';
   for (const k of ['sourcesObserved', 'claimsObserved', 'packetsProduced', 'packetsWithheld', 'duplicates'])
@@ -366,6 +381,12 @@ export function validateRumor2Txn(t, { providerIds, graph, priorSeenIds = [] }) 
   if (facts.link !== null && !isBounded(facts.link, 2000)) return 'txn: identityFacts link invalid';
   if (sourceObservationIdentity(facts) !== t.sourceObservationId)
     return 'txn: source identity is not the semantic hash of the preserved facts — forged provenance';
+  // RUMOR-2B1 tightening: the claim TYPE is itself the deterministic
+  // consequence of the preserved facts (the same closed pattern tables the
+  // preparer ran), never an assertion. An unclassifiable item — every
+  // EDGAR filing and OFAC record by construction — can therefore never
+  // smuggle a typed claim or a coin-resolution withholding into its bundle.
+  const derivedClaimType = classifyOfficialItem({ providerKind: providerMeta.providerKind, title: facts.title, summary: facts.summary });
 
   if (!Array.isArray(t.events) || t.events.length === 0 || t.events.length > MAX_TXN_EVENTS) return 'txn: events invalid';
   // Bundle law: the prepared events are a semantic SET, not a list of
@@ -411,6 +432,7 @@ export function validateRumor2Txn(t, { providerIds, graph, priorSeenIds = [] }) 
       if (e.sourceEventId !== `${t.sourceObservationId}|claim|${e.propositionId}`)
         return 'txn: claim event identity not bound to source and proposition';
       if (!RUMOR2_CLAIM_TYPES.includes(e.claimType)) return 'txn: claim event carries unknown claimType';
+      if (e.claimType !== derivedClaimType) return 'txn: claim event claimType is not the deterministic classification of the preserved facts';
       if (typeof e.symbol !== 'string' || !COIN_SYMBOL_RE.test(e.symbol)) return 'txn: claim event symbol invalid';
       // the proposition identity must itself be the recomputed semantic hash
       if (propositionIdentity({ claimType: e.claimType, canonicalCoin: e.symbol, originSourceObservationId: t.sourceObservationId }) !== e.propositionId)
@@ -451,6 +473,7 @@ export function validateRumor2Txn(t, { providerIds, graph, priorSeenIds = [] }) 
         coinResolutionWithheld += 1;
         if (e.reason !== 'COIN_RESOLUTION_WITHHELD') return 'txn: coin-resolution withholding carries the wrong reason';
         if (!RUMOR2_CLAIM_TYPES.includes(e.claimType)) return 'txn: withheld event carries unknown claimType';
+        if (e.claimType !== derivedClaimType) return 'txn: coin-resolution withholding claimType is not the deterministic classification of the preserved facts';
         if (e.title !== facts.title) return 'txn: withheld event title disagrees with identity facts';
       } else {
         const kErr = exactKeys(e, EVENT_KEYS.RUMOR2_WITHHELD_PROP, 'txn.withheldEvent');

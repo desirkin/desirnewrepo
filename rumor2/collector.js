@@ -20,12 +20,14 @@
 // remembered as complete, and one source item survives a crash as the
 // same knowledge event.
 import path from 'node:path';
-import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { existsSync, statSync, openSync, readSync, closeSync, readFileSync } from 'node:fs';
 import { loadConfig, dataDir } from '../lib/config.js';
 import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { PROVIDERS, PROVIDER_IDS, userAgentFor } from './registry.js';
 import { fetchProviderFeed } from './http.js';
 import { parseFeed } from './feed.js';
+import { parseEdgarConfig, parseEdgarSubmissions, edgarSubmissionsUrl } from './edgar.js';
+import { parseSdnCsv, buildOfacUpdate, ofacSnapshotPayload, verifyOfacSnapshotPayload, OFAC_SNAPSHOT_FILE } from './ofac.js';
 import {
   RUMOR2_VERSION,
   MAX_BOOTSTRAP_ITEMS,
@@ -42,6 +44,7 @@ import {
   validateRumor2Checkpoint,
   validateRumor2Txn,
   emptyCheckpoint,
+  emptyProviderState,
   rememberSeen,
   propositionIdentity,
   deriveTxnGraphDelta,
@@ -64,6 +67,12 @@ export function startRumor2({
   contact = process.env.SERPENT_HTTP_CONTACT ?? null,
   enabled = process.env.RUMOR2_ENABLED === 'true',
   timeoutMs = undefined,
+  // RUMOR-2B1 dark ears — OFF by default, each behind its own explicit gate;
+  // a public source does not mean "always on"
+  edgarEnabled = process.env.RUMOR2_EDGAR_ENABLED === 'true',
+  edgarCiks = process.env.RUMOR2_EDGAR_CIKS ?? '',
+  edgarForms = process.env.RUMOR2_EDGAR_FORMS ?? '',
+  ofacEnabled = process.env.RUMOR2_OFAC_ENABLED === 'true',
 } = {}) {
   if (!enabled) {
     // dark and silent: zero network, zero timers, zero authority
@@ -114,6 +123,10 @@ export function startRumor2({
   const proven = hasEvent ?? defaultHasEvent;
 
   const registry = buildCoinRegistry(config.universe);
+  // RUMOR-2B1: EDGAR whitelist configuration is parsed strictly ONCE — one
+  // bad token unconfigures the ear with a truthful reason, never a silently
+  // narrowed universe
+  const edgarCfg = parseEdgarConfig(edgarCiks, edgarForms);
   let lifecycle = 'INITIALIZING'; // FRESH_START | RESTORED | WITHHELD_INVALID_CHECKPOINT | FAILED_DURABILITY
   let durability = 'UNKNOWN'; // DURABLE | NOT_CONFIGURED | UNAVAILABLE
   let withholdReason = null;
@@ -137,6 +150,8 @@ export function startRumor2({
       withheldItems: 0,
       appendFailures: 0,
       lastNewItemTs: null,
+      cikCursor: 0, // EDGAR whitelist rotation (process-local; restart just re-fetches, identity dedupes)
+      lastDiffCounts: null, // OFAC: {adds, modifies, removes} of the last accepted dataset comparison
     };
 
   const counters = () => cp.counters;
@@ -160,6 +175,10 @@ export function startRumor2({
         return false;
       }
       cp = r.state;
+      // a provider registered AFTER this checkpoint was written honestly
+      // starts fresh — that is new-ear birth, not rewritten history; every
+      // provider the checkpoint already carries is preserved verbatim
+      for (const id of PROVIDER_IDS) if (!cp.providers[id]) cp.providers[id] = emptyProviderState();
       lifecycle = 'RESTORED';
       durability = 'DURABLE';
       return true;
@@ -197,14 +216,26 @@ export function startRumor2({
     }
   }
 
-  const providerCfg = (p) => ({ requiresContact: p.requiresContact, hasContact: typeof contact === 'string' && contact.length > 0 });
+  // One truthful readiness gate per provider: a missing contact, a missing
+  // enable flag, or an invalid whitelist means the ear is NOT_QUERIED with
+  // the honest reason — never a crash, never an invented configuration.
+  function providerGate(p) {
+    const hasContact = typeof contact === 'string' && contact.length > 0;
+    if (p.id === 'EDGAR_OFFICIAL') {
+      if (!edgarEnabled) return { ready: false, detail: 'disabled (RUMOR2_EDGAR_ENABLED)' };
+      if (!edgarCfg.ok) return { ready: false, detail: `EDGAR config invalid: ${edgarCfg.reason}` };
+      if (edgarCfg.ciks.length === 0) return { ready: false, detail: 'CIK whitelist not configured (RUMOR2_EDGAR_CIKS)' };
+    }
+    if (p.id === 'OFAC_OFFICIAL' && !ofacEnabled) return { ready: false, detail: 'disabled (RUMOR2_OFAC_ENABLED)' };
+    if (p.requiresContact && !hasContact) return { ready: false, detail: 'contact not configured (SERPENT_HTTP_CONTACT)' };
+    return { ready: true, detail: null };
+  }
 
   function coverageEntries(atMs) {
     return PROVIDERS.map((p) => {
       const r = runtime[p.id];
-      const { requiresContact, hasContact } = providerCfg(p);
-      if (requiresContact && !hasContact)
-        return { provider: p.id, state: 'NOT_QUERIED', checkedTs: null, detail: 'contact not configured (SERPENT_HTTP_CONTACT)' };
+      const gate = providerGate(p);
+      if (!gate.ready) return { provider: p.id, state: 'NOT_QUERIED', checkedTs: null, detail: gate.detail };
       if (r.lastAttemptTs === null) return { provider: p.id, state: 'NOT_QUERIED', checkedTs: null, detail: 'not yet polled' };
       const cps = cp.providers[p.id];
       if (cps.lastSuccessTs !== null && atMs - cps.lastSuccessTs > FRESHNESS_BOUND_MS)
@@ -452,11 +483,37 @@ export function startRumor2({
     return true;
   }
 
+  // the same semantic identity processItem will compute — used only to
+  // pre-filter already-settled snapshot-diff items and to prove a diff
+  // fully settled before its snapshot cursor may commit
+  const itemIdentity = (p, item) =>
+    sourceObservationIdentity({
+      provider: p.id,
+      guid: item.guid,
+      link: item.link,
+      publishedTs: Number.isSafeInteger(item.publishedTs) && item.publishedTs > 0 ? item.publishedTs : null,
+      title: item.title,
+      summary: item.summary,
+    });
+
+  // OFAC snapshot detail lives beside the event stream; its truth anchor
+  // (the dataset hash) lives in the VALIDATED durable checkpoint, so a
+  // payload that cannot re-derive that exact hash is honestly discarded
+  // and the ear re-baselines instead of trusting stale or foreign detail
+  const loadOfacSnapshot = (expectedHash) => {
+    try {
+      const f = path.join(dir(), OFAC_SNAPSHOT_FILE);
+      if (!existsSync(f)) return null;
+      return verifyOfacSnapshotPayload(JSON.parse(readFileSync(f, 'utf8')), expectedHash);
+    } catch {
+      return null;
+    }
+  };
+
   async function pollProvider(p) {
     const r = runtime[p.id];
     const cps = cp.providers[p.id];
-    const { requiresContact, hasContact } = providerCfg(p);
-    if (requiresContact && !hasContact) return true; // truthfully NOT_QUERIED — never an invented contact
+    if (!providerGate(p).ready) return true; // truthfully NOT_QUERIED — never an invented configuration
     const t = now();
     if (cps.backoffUntil !== null && t < cps.backoffUntil) return true;
     if (r.lastAttemptTs !== null && t - r.lastAttemptTs < p.cadenceSec * 1000) return true;
@@ -464,13 +521,18 @@ export function startRumor2({
     if (r.requestStamps.length >= p.hourlyBudget) return true; // hard request ceiling
     r.requestStamps.push(t);
     r.lastAttemptTs = t;
+    // EDGAR polls exactly one whitelisted CIK's submissions document per
+    // cycle; conditional caching is off for it (rotating URLs — a cursor
+    // from one CIK must never suppress another CIK's response)
+    const edgarCik = p.adapter === 'EDGAR_SUBMISSIONS' ? edgarCfg.ciks[r.cikCursor % edgarCfg.ciks.length] : null;
     const res = await fetchProviderFeed({
       provider: p,
       fetchImpl,
       userAgent: userAgentFor(p, contact),
-      etag: cps.etag,
-      lastModified: cps.lastModified,
+      etag: p.noConditional ? null : cps.etag,
+      lastModified: p.noConditional ? null : cps.lastModified,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(edgarCik !== null ? { url: edgarSubmissionsUrl(edgarCik) } : {}),
     });
     r.lastHttpStatus = res.status ?? null;
     if (res.outcome === 'NOT_MODIFIED') {
@@ -489,7 +551,33 @@ export function startRumor2({
       providerFailure(p, r, cps, res.reason, { http: res.status ?? null });
       return true;
     }
-    const parsed = parseFeed(res.text);
+    // fetch success is not parse success, and parse success is not evidence
+    // acceptance: every item below still passes the ONE authoritative
+    // prepared-transaction trust gate before it may become durable truth
+    let parsed;
+    let snapshotCommit = null; // OFAC: committed only after EVERY diff item durably settles
+    if (p.adapter === 'EDGAR_SUBMISSIONS') {
+      parsed = parseEdgarSubmissions(res.text, { cik: edgarCik, forms: edgarCfg.forms });
+      if (parsed.ok) r.cikCursor += 1; // rotation advances only past an accepted document
+    } else if (p.adapter === 'OFAC_SDN_CSV') {
+      const ds = parseSdnCsv(res.text);
+      if (!ds.ok) parsed = ds;
+      else {
+        const prevAnchor = cps.snapshot ?? null;
+        const prevRecords = prevAnchor ? loadOfacSnapshot(prevAnchor.hash) : null;
+        const upd = buildOfacUpdate({ prevAnchor, prevRecords, records: ds.records, listUrl: p.feedUrl });
+        if (!upd.ok) parsed = upd;
+        else {
+          parsed = { ok: true, items: upd.items };
+          r.lastDiffCounts = upd.counts;
+          if (upd.kind !== 'UNCHANGED')
+            snapshotCommit = {
+              anchor: { hash: upd.datasetHash, acceptedTs: now(), recordCount: ds.records.size },
+              payload: ofacSnapshotPayload(ds.records, upd.datasetHash),
+            };
+        }
+      }
+    } else parsed = parseFeed(res.text);
     if (!parsed.ok) {
       providerFailure(p, r, cps, `feed rejected: ${parsed.reason}`, { http: res.status });
       return true;
@@ -509,13 +597,38 @@ export function startRumor2({
     // item fails (owed transaction, unavailable durability), the durable
     // cursor still re-fetches the full response, settled siblings dedupe
     // by semantic identity, and no item can vanish behind a 304.
-    const newCursor = {
-      etag: typeof res.etag === 'string' ? res.etag.slice(0, 300) : cps.etag,
-      lastModified: typeof res.lastModified === 'string' ? res.lastModified.slice(0, 100) : cps.lastModified,
-    };
-    const items = cps.bootstrapped ? parsed.items : parsed.items.slice(0, MAX_BOOTSTRAP_ITEMS);
+    const newCursor = p.noConditional
+      ? { etag: null, lastModified: null } // rotating-URL ears never store a suppressing cursor
+      : {
+          etag: typeof res.etag === 'string' ? res.etag.slice(0, 300) : cps.etag,
+          lastModified: typeof res.lastModified === 'string' ? res.lastModified.slice(0, 100) : cps.lastModified,
+        };
+    let items = cps.bootstrapped ? parsed.items : parsed.items.slice(0, MAX_BOOTSTRAP_ITEMS);
+    // snapshot-diff ears converge over multiple polls when a diff exceeds
+    // one tick's bounded processing: already-settled changes are skipped by
+    // their semantic identity, so the SAME uncommitted snapshot re-diffs
+    // without re-emitting truth
+    if (p.adapter === 'OFAC_SDN_CSV') items = parsed.items.filter((it) => !cps.seenIds.includes(itemIdentity(p, it)));
     for (const item of items.slice(0, MAX_FEED_ITEMS)) {
       if (!(await processItem(p, r, cps, item))) return false; // owed truth halts ALL new processing; cursor stays OLD
+    }
+    // SNAPSHOT COMMIT (cursor law): the accepted dataset becomes the new
+    // diff basis ONLY when every change it implied is durably settled —
+    // until then the durable anchor still names the OLD snapshot and the
+    // next poll honestly re-diffs the full dataset.
+    if (snapshotCommit) {
+      const allSettled = parsed.items.every((it) => cps.seenIds.includes(itemIdentity(p, it)));
+      if (allSettled) {
+        try {
+          atomicWriteJson(path.join(dir(), OFAC_SNAPSHOT_FILE), snapshotCommit.payload);
+        } catch (err) {
+          // detail not persistable => the anchor must NOT advance; the next
+          // poll re-fetches and retries — no partial snapshot truth
+          providerFailure(p, r, cps, `snapshot persist failed: ${err.message}`, { http: res.status });
+          return true;
+        }
+        cps.snapshot = snapshotCommit.anchor;
+      } else return true; // diff not fully settled this tick — keep the OLD snapshot AND the old cursor
     }
     // CURSOR COMMIT: every selected item from this response is durably
     // settled — only now may a future conditional GET legitimately 304 it.
@@ -531,8 +644,10 @@ export function startRumor2({
     for (const p of PROVIDERS) {
       const r = runtime[p.id];
       const cps = cp?.providers?.[p.id];
+      const gate = providerGate(p);
       providers[p.id] = {
-        enabled: true,
+        enabled: gate.ready,
+        gateDetail: gate.detail, // why a dark ear is not listening — never a secret, never a header
         coverage: cp ? coverageEntries(t).find((c) => c.provider === p.id) : null,
         lastAttemptTs: r.lastAttemptTs,
         lastSuccessTs: cps?.lastSuccessTs ?? null,
@@ -548,6 +663,13 @@ export function startRumor2({
         duplicates: r.duplicates,
         withheldItems: r.withheldItems,
         appendFailures: r.appendFailures,
+        // RUMOR-2B1 snapshot ears: the accepted dataset anchor (short) and
+        // the last accepted comparison's change counts — research status
+        // only, zero authority
+        snapshot: cps?.snapshot
+          ? { hash: cps.snapshot.hash.slice(0, 12), recordCount: cps.snapshot.recordCount, acceptedTs: cps.snapshot.acceptedTs }
+          : null,
+        lastDiffCounts: r.lastDiffCounts,
       };
     }
     const status = {

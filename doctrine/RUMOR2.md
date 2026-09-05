@@ -209,6 +209,62 @@ and excerpts are hostile DATA — bounded, content-hashed, marked
 `untrusted: true` in packets, and never interpreted as instruction, no
 matter what characters they contain.
 
+## RUMOR-2B1 — official primary-evidence ears (EDGAR + OFAC)
+
+RUMOR-2B1 adds two DARK official-primary-evidence ears to the closed
+registry. Both are EVIDENCE ONLY and DARK ONLY: zero Attention authority,
+zero HYPED authority, zero stalking, zero trading authority, no Socrates
+or model runtime, no prompt interpretation, no sentiment. They observe and
+record; they never act. Both default OFF and arm only through explicit
+environment gates; a public source does not mean "always on".
+
+- **EDGAR_OFFICIAL** — SEC EDGAR primary filings through the SEC's own
+  documented machine-readable API
+  (`data.sec.gov/submissions/CIK##########.json`, per the official "EDGAR
+  application programming interfaces" documentation), behind a configured
+  CIK whitelist and form whitelist (`RUMOR2_EDGAR_ENABLED`,
+  `RUMOR2_EDGAR_CIKS`, `RUMOR2_EDGAR_FORMS`; contact-bearing User-Agent
+  required, like the existing SEC ear). The accession number is the
+  filing's immutable identity: restarts, repolls, and reordered responses
+  are the SAME observation; an amendment is a DISTINCT filing. A form type
+  is evidence metadata, never a conclusion — the deterministic classifier
+  has no pattern table for filings, so no typed claim, no coin, and no
+  proposition is ever invented from one. UNRESOLVED ENTITY-LEVEL EVIDENCE
+  IS A VALID RESULT; false certainty is not.
+
+- **OFAC_OFFICIAL** — the U.S. Treasury / OFAC SDN list through the
+  official Sanctions List Service
+  (`sanctionslistservice.ofac.treas.gov/api/download/sdn.csv`, per
+  ofac.treasury.gov; the service's one redirect to Treasury's fixed
+  publication bucket is pinned as an explicit closed allowlist), behind
+  `RUMOR2_OFAC_ENABLED`. Deterministic snapshot/diff: the first accepted
+  dataset is a BASELINE (one bounded observation — bootstrap is never an
+  event explosion), later datasets yield explicit ADD / MODIFY / REMOVE
+  evidence, and an order-immune dataset identity makes replayed or
+  reordered downloads the same knowledge. Digital-currency addresses are
+  preserved EXACTLY as the official record supplies them — never
+  lowercased, re-encoded, or expanded into wallets, clusters, or
+  ownership. OFAC TRUTH, NOT BLOCKCHAIN ATTRIBUTION, and never an
+  automatic market conclusion. A malformed, truncated, or
+  mass-deleting dataset is refused whole — accepted truth is never erased
+  by one HTTP 200.
+
+Point-in-time law binds both ears absolutely: SOURCE TIMESTAMP IS NOT
+SERPENT KNOWLEDGE TIMESTAMP. A filing accepted at 10:01:12 that Serpent
+first fetched at 10:01:19 is known at 10:01:19; a backfilled record is
+known when it was actually acquired, never earlier. Both ears flow through
+the ONE authoritative prepared-transaction trust boundary (the same
+validator at restore and settle) — and that validator now also re-derives
+the claim TYPE from the preserved facts through the same closed pattern
+tables, so an unclassifiable item can never smuggle a typed claim or a
+coin-resolution withholding into its bundle. EDGAR and OFAC are separate
+source families (`US_SEC`, `US_TREASURY_OFAC`); a downstream article
+repeating both is echo, not corroboration.
+
+Roadmap unchanged: RUMOR-2B may later add authorized social ears and
+propagation reasoning; SOCRATES remains separate; GHOST remains separate;
+derivatives and on-chain senses remain separate. None of those exist yet.
+
 ## What RUMOR-2A is not
 
 No X. No Reddit. No Reuters/Bloomberg/CNBC/FT/CoinDesk/any publisher. No
