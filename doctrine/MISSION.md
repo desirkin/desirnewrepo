@@ -66,9 +66,15 @@ Maybe 700 of them are completely uninteresting.
 
 Throw them away.
 
-Maybe another 70 show meaningless movement, pump behavior, terrible liquidity, ridiculous spreads, or weak evidence.
+Maybe another 70 show meaningless movement, late-stage or exhausted pump behavior with no remaining executable edge, terrible liquidity, ridiculous spreads, or weak evidence.
 
 Throw them away.
+
+Early or expanding pump behavior is not disqualifying. A pump-like move can be exactly the kind of developing movement Serpent wants to investigate when evidence indicates that a meaningful executable portion of the move may still remain.
+
+The question is not whether a move is a pump. The question is what stage the pump is in, how much executable edge may remain, and whether Serpent is early enough to capture a worthwhile slice without becoming exit liquidity.
+
+We do not reject pumps. We reject pump-like moves whose remaining executable edge has disappeared.
 
 Maybe 25 become interesting enough for deeper observation.
 
@@ -143,6 +149,10 @@ MOVEMENT versus OPPORTUNITY.
 A coin being +12% does not mean opportunity.
 
 It may mean we missed it.
+
+But price extension is context, not an automatic veto. A coin that is already up several percent — even substantially — may still contain a valuable continuation if the evidence shows that the move remains in ignition or acceleration, liquidity remains executable, and a meaningful portion of the move may still be ahead.
+
+Conversely, a coin that has moved only a small amount may already be a poor opportunity if the underlying impulse is exhausted or distribution has begun.
 
 A coin being +0.6% might be far more interesting if underneath that tiny move we see:
 
