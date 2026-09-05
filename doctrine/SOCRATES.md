@@ -188,6 +188,37 @@ execution authority at any depth: `buy`, `sell`, `trade`, `strike`,
 `stopLoss`, `takeProfit`, `execute`, and kin. An analysis that attempts to
 carry execution authority fails validation.
 
+## The contract is closed (SOCRATES-CONTRACT-0A)
+
+THE CONTRACT IS CLOSED.
+
+UNDECLARED FIELDS ARE INVALID.
+
+MEMBER IDENTITIES ARE RECOMPUTED, NOT TRUSTED.
+
+MODEL OUTPUT CANNOT EXTEND ITS OWN SCHEMA.
+
+STRUCTURED EVIDENCE VALUES MUST BE JSON-SAFE AND BOUNDED.
+
+SEMANTIC SET ORDER DOES NOT CREATE DIFFERENT TRUTH.
+
+Every object layer in both contracts carries an exact allowed-key
+whitelist; a field the schema did not declare fails validation at any
+depth, so no producer or future model can smuggle a `recommendation`, an
+`instructions` string, or an unbounded `body` past the excerpt bounds. A
+claim/source/evidence id must be the recomputed semantic hash of its own
+content — a correctly shaped forged id fails. Evidence values admit only
+null, booleans, finite numbers, bounded strings, and bounded plain
+arrays/objects (no NaN, Infinity, BigInt, undefined, cycles, or class
+instances), and whole packets and analyses have aggregate canonical size
+caps. The validators never throw on hostile input and never normalize it
+into validity — they reject. Nested `sourceRefs`/`claimRefs`/
+`evidenceRefs` arrays are unordered sets: order never changes identity,
+and duplicate members are invalid. A claim may state RETRACTED or
+CONTRADICTED only when a RETRACTION or CONTRADICTION relation proves it,
+a source cannot be retrieved before it was published, and an observation
+cannot be known before it was observed.
+
 ## Closed book
 
 Future SOCRATES-0 operates CLOSED BOOK: it reasons only over the supplied
