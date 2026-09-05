@@ -422,6 +422,7 @@ test('FILE-1. the default file log is the witness: real-file restart restores; c
       contact: null,
       enabled: true,
       timeoutMs: 100,
+      allowLocalJournal: true, // freeze seal: the local file journal is explicit intent, never a silent fallback
     });
   const c1 = mk();
   clock.ms += 4_000_000;

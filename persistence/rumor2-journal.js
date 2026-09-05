@@ -27,7 +27,38 @@ const classifyWith = (persistence) => () => {
 
 export function rumor2JournalStore({ persistence = getPersistence } = {}) {
   const classify = classifyWith(persistence);
+  // ONE ACTIVE RUMOR WRITER (freeze seal): the session-scoped advisory lock
+  // held for the collector's lifetime. A second collector gets { reason:
+  // 'HELD' } and must stand by — no polling, no appends, no checkpoint
+  // writes. The server releases the lock automatically when the winning
+  // session dies, so failover needs no lease bookkeeping.
+  let fence = null;
   return {
+    async acquireWriter() {
+      const c = classify();
+      if (c.kind === 'NOT_CONFIGURED') return { ok: false, reason: 'NOT_CONFIGURED', notConfigured: true };
+      if (c.kind === 'UNAVAILABLE') return { ok: false, reason: 'UNAVAILABLE' };
+      if (fence?.held()) return { ok: true };
+      if (fence) {
+        // the previous fence's session died: return its client, then retry
+        await fence.release().catch(() => {});
+        fence = null;
+      }
+      try {
+        fence = await c.p.repo.acquireRumor2WriterLock();
+        return fence ? { ok: true } : { ok: false, reason: 'HELD' };
+      } catch {
+        return { ok: false, reason: 'UNAVAILABLE' };
+      }
+    },
+    writerHeld() {
+      return fence ? fence.held() : null;
+    },
+    async releaseWriter() {
+      const f = fence;
+      fence = null;
+      if (f) await f.release().catch(() => {});
+    },
     async read() {
       const c = classify();
       if (c.kind === 'NOT_CONFIGURED') return { notConfigured: true };

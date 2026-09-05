@@ -448,3 +448,76 @@ item-link crawling. No Socrates call, no model, no prompt, no key. No
 GHOST. Zero Attention weight, zero HYPED authority, zero stalking, zero
 eligibility, zero Brain, zero STRIKE, zero execution. Those boundaries
 are enforced by tests, not comments.
+
+## RUMOR-2 IS FROZEN
+
+Final freeze seal — the last closeout pass. RUMOR-2's source, claim,
+packet, event, journal, checkpoint, graph, seen-state, counter, coverage,
+durability, and writer-authority contracts have all passed closeout. This
+layer has earned stability.
+
+FROZEN means: stable, a trusted foundation — no casual refactors, no silent
+schema expansion, no new provider becomes claim-capable by default, no new
+event type is accepted by replay by default. Any future extension requires
+an explicit, versioned ticket with its own tests. FROZEN does NOT mean
+abandoned, disabled, or finished-as-a-product — it means good to go, and
+safe to design the next Serpent layer on top of.
+
+Sealed at this pass:
+
+- PROVIDER HEALTH IS NOT EVIDENCE. providerCoverage records what Serpent's
+  ears were DOING at packet-build time (OBSERVED / FAILED / NOT_QUERIED /
+  STALE). It is OPERATIONAL DIAGNOSTIC metadata, classified as such in the
+  frozen PACKET_FIELD_SEMANTICS contract, and it can never satisfy an
+  evidence requirement, count as corroboration or independent support,
+  change a claim or graph status, or alter proposition identity. "A
+  provider was reachable" is not "a provider supplied evidence." Support,
+  corroboration, independence, and provenance derive ONLY from the settled
+  evidence structure — sources, claimLinks (their relation kinds and
+  independence groups), and evidence items — which already records which
+  providers actually contributed evidence (the providers of the referenced
+  sources). A future Socrates must read evidence there, never from provider
+  health. providerCoverage is a full-snapshot field of the immutable
+  packet, so it participates in packetId (which identifies the complete
+  point-in-time snapshot, diagnostics included) but in no evidentiary
+  identity: a coverage change yields a different snapshot id while every
+  evidentiary member — claims, sources, evidence, claimLinks, subject,
+  statuses, independence groups — stays byte-identical, so it changes zero
+  evidentiary truth and cannot reach Attention, HYPED, eligibility, score,
+  sizing, or execution.
+
+- ONE ACTIVE RUMOR WRITER. In the durable core, journal-writer authority is
+  fenced by a session-scoped PostgreSQL advisory lock held for the active
+  collector's lifetime. A second collector cannot acquire it: it stands by
+  (lifecycle STANDBY_WRITER) and performs zero fetches, zero appends, zero
+  checkpoint writes, zero packets — read-only status inspection at most. The
+  server releases the lock automatically when the winning session dies
+  (crash, connection loss, termination), so the next collector takes over
+  safely with no lease bookkeeping; a rightful restart restores from
+  journal + checkpoint exactly, with no truth duplication. Lock recovery
+  never touches the journal sequence.
+
+- LOCAL DURABILITY IS EXPLICIT AND LABELED. The local events.jsonl file is
+  honest development/research storage, never deployment-grade durability,
+  and it NEVER activates by silent fallback: a missing durable journal
+  without the explicit RUMOR2_ALLOW_LOCAL_JOURNAL opt-in (or an injected
+  journal, explicit by construction) is FAILED_DURABILITY, not quiet local
+  authority a redeploy would erase. When local mode is intentionally on,
+  status says so unmistakably: durabilityMode = LOCAL_NON_DURABLE,
+  authoritativeJournal = LOCAL_FILE, durableAcrossRedeploy = false. In
+  durable mode the local file is only the best-effort mirror
+  (durabilityMode = DURABLE_CORE, authoritativeJournal = INJECTED) — never
+  the authority.
+
+- HISTORY-LEVEL CONSISTENCY. Individually-valid but mutually-impossible
+  histories fail replay: one source root cannot both settle a claim and
+  withhold coin resolution; one proposition gets exactly one terminal
+  outcome (packet XOR withheld) in either order, and never two packets;
+  lifecycle events (PROVIDER_FAILURE, STARTED) are truth-inert wherever
+  they appear and reset nothing. Event-journal injection can never bypass
+  the transaction-level exclusivity laws.
+
+- NO NEW DURABLE VERSION. This pass adds writer fencing, the explicit
+  local-mode gate, and the coverage-semantics seal without changing the
+  durable packet, event, checkpoint, or schema structure — so checkpoint
+  version 4 and schema version 6 stand unchanged.

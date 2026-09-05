@@ -162,6 +162,8 @@ export function buildClaimPacket({ node, observations, coverage, asOfTs }) {
     sources,
     evidence,
     claimLinks,
+    // OPERATIONAL DIAGNOSTIC ONLY (PACKET_FIELD_SEMANTICS): what the ears
+    // were doing at build time — never evidence, corroboration, or support
     providerCoverage: coverage,
     contradictions: [],
     missingEvidence,

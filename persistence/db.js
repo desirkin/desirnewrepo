@@ -43,6 +43,7 @@ export class Db {
   #poolFactory;
   #retries;
   #everConnected = false;
+  #lockClients = new Set(); // advisory-lock sessions checked out for their lifetime
 
   constructor({ url = process.env.DATABASE_URL, schema = null, log = () => {}, poolFactory = null, retries = STARTUP_RETRIES } = {}) {
     this.#url = url;
@@ -177,7 +178,72 @@ export class Db {
     }
   }
 
+  // RUMOR-2 freeze seal — one named session-scoped advisory lock. Advisory
+  // locks belong to a PostgreSQL SESSION, and the pool reaps idle sessions,
+  // so the winning client stays CHECKED OUT for the lock's whole lifetime
+  // (one of the pool's five slots, deliberately long-lived). The server
+  // releases the lock automatically when the session dies — process crash,
+  // connection loss, pg_terminate_backend — which is exactly the failover
+  // law the writer fence needs. Returns null when another session holds the
+  // lock; otherwise a handle: held() turns false when the underlying
+  // connection dies, release() unlocks and returns the client to the pool.
+  async acquireSessionLock(name) {
+    if (!this.#pool) throw new Error('database not connected');
+    let client;
+    try {
+      client = await this.#pool.connect();
+    } catch (err) {
+      this.#markConnectionFailure(err);
+      throw err;
+    }
+    try {
+      const { rows } = await client.query('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [name]);
+      if (!rows[0].ok) {
+        client.release();
+        return null; // another writer holds authority — fail safely, no busy loop
+      }
+    } catch (err) {
+      client.release();
+      this.#markConnectionFailure(err);
+      throw err;
+    }
+    let lost = false;
+    const onDeath = () => {
+      lost = true;
+    };
+    client.on('error', onDeath);
+    client.once('end', onDeath);
+    this.#lockClients.add(client); // so end() can never hang on a held lock
+    const release = async () => {
+      client.removeListener('error', onDeath);
+      client.removeListener('end', onDeath);
+      this.#lockClients.delete(client);
+      try {
+        if (!lost) await client.query('SELECT pg_advisory_unlock(hashtext($1))', [name]);
+      } catch {
+        // a dead session already released the lock server-side
+      }
+      try {
+        client.release();
+      } catch {
+        // already released/destroyed — nothing leaks either way
+      }
+    };
+    return { held: () => !lost, release };
+  }
+
   async end() {
+    // A held advisory-lock client is checked out for its lifetime, and
+    // pool.end() waits for every client to return — so release the locks
+    // FIRST or shutdown would hang (and the process would never exit).
+    for (const client of this.#lockClients) {
+      try {
+        client.release(true); // destroy: the session (and its locks) end with it
+      } catch {
+        // already gone — nothing to reclaim
+      }
+    }
+    this.#lockClients.clear();
     if (this.#pool) {
       const p = this.#pool;
       this.#pool = null;

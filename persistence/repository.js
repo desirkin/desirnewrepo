@@ -569,6 +569,14 @@ export class Repository {
     });
   }
 
+  // RUMOR-2 freeze seal — the single-writer fence. One advisory lock per
+  // schema (test schemas share one database, so the lock name carries the
+  // schema) held for the active collector's lifetime; the returned handle
+  // is the fence. null means another writer owns RUMOR-2 truth right now.
+  async acquireRumor2WriterLock() {
+    return this.db.acquireSessionLock(`serpent_rumor2_writer:${this.db.schema ?? 'public'}`);
+  }
+
   // Complete ordered history — chunked keyset pagination, contiguity of the
   // sequence proven as it streams: a gap, duplicate, or non-positive start
   // means rows were destroyed or rewritten under the INSERT-only law, which

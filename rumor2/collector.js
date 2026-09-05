@@ -92,6 +92,10 @@ export function startRumor2({
   // mirror's events.jsonl tail). A mirror failure NEVER rolls back
   // authoritative truth; a missing or forged mirror file affects nothing.
   mirrorEvent = undefined,
+  // FREEZE SEAL: the local file journal is honest development/research
+  // storage, NOT deployment-grade durability — so it never activates by
+  // silent fallback. Explicit opt-in only.
+  allowLocalJournal = process.env.RUMOR2_ALLOW_LOCAL_JOURNAL === 'true',
 } = {}) {
   if (!enabled) {
     // dark and silent: zero network, zero timers, zero authority
@@ -197,19 +201,33 @@ export function startRumor2({
     };
   };
 
-  // journal + mirror selection is sticky for the life of the collector; the
-  // fallback to the local file journal happens once, at first init, when no
-  // durable journal is configured at all
+  // journal + mirror selection is sticky for the life of the collector.
+  // FREEZE SEAL: the local file journal is NEVER a silent fallback — it
+  // requires explicit intent (the RUMOR2_ALLOW_LOCAL_JOURNAL opt-in, or an
+  // injected journal, which is explicit by construction). A missing durable
+  // journal without that intent is FAILED_DURABILITY, not quiet local
+  // authority that a redeploy would erase.
   let activeJournal = null;
+  let journalKind = null; // 'INJECTED' | 'LOCAL_FILE'
   let mirror = null;
   let mirrorFailures = 0;
-  const chooseJournal = (useFileFallback) => {
+  const useFileJournal = () => {
+    activeJournal = fileJournal();
+    journalKind = 'LOCAL_FILE';
+    // the file IS the journal here — mirroring would double-write
+    mirror = mirrorEvent !== undefined ? mirrorEvent : null;
+  };
+  const chooseJournal = () => {
     if (activeJournal) return;
-    activeJournal = !useFileFallback && journal ? journal : fileJournal();
-    const journalIsFile = activeJournal !== journal;
-    // default mirror: the events.jsonl tail (Memory mirror food) — unless
-    // the file IS the journal, in which case mirroring would double-write
-    mirror = mirrorEvent !== undefined ? mirrorEvent : journalIsFile ? null : (rec) => appendJsonl(eventsFile(), rec);
+    if (journal) {
+      activeJournal = journal;
+      journalKind = 'INJECTED';
+      // default mirror: the events.jsonl tail (Memory mirror food)
+      mirror = mirrorEvent !== undefined ? mirrorEvent : (rec) => appendJsonl(eventsFile(), rec);
+      return;
+    }
+    if (allowLocalJournal) useFileJournal();
+    // else: no journal authority exists — ensureInit fails durability closed
   };
   const mirrorSafe = (record) => {
     if (!mirror) return;
@@ -226,8 +244,9 @@ export function startRumor2({
   // bad token unconfigures the ear with a truthful reason, never a silently
   // narrowed universe
   const edgarCfg = parseEdgarConfig(edgarCiks, edgarForms);
-  let lifecycle = 'INITIALIZING'; // FRESH_START | RESTORED | WITHHELD_INVALID_CHECKPOINT | FAILED_DURABILITY
+  let lifecycle = 'INITIALIZING'; // FRESH_START | RESTORED | REBUILT_FROM_EVENT_HISTORY | WITHHELD_INVALID_CHECKPOINT | FAILED_DURABILITY | STANDBY_WRITER
   let durability = 'UNKNOWN'; // DURABLE | NOT_CONFIGURED | UNAVAILABLE
+  let writerFenced = false; // this process holds RUMOR-2 writer authority (when the journal exposes a fence)
   let withholdReason = null;
   let restoreNote = null; // e.g. SEEN_STATE_REBUILT — derived cache rebuilt from canonical settled truth
   let cp = null;
@@ -374,17 +393,52 @@ export function startRumor2({
 
   async function ensureInit() {
     if (lifecycle === 'FRESH_START' || lifecycle === 'RESTORED' || lifecycle === 'REBUILT_FROM_EVENT_HISTORY') return true;
-    chooseJournal(false);
+    chooseJournal();
+    if (!activeJournal) {
+      // no journal authority exists AND local mode was not explicitly
+      // enabled — refuse to run rather than quietly keep erasable truth
+      lifecycle = 'FAILED_DURABILITY';
+      durability = 'NOT_CONFIGURED';
+      withholdReason = 'no event journal: durable core not configured and local journal not explicitly enabled (RUMOR2_ALLOW_LOCAL_JOURNAL)';
+      return false;
+    }
+    // WRITER FENCE (freeze seal): where the journal store exposes writer
+    // authority, this process must OWN it before any poll, append, settle,
+    // or checkpoint write. A losing collector stands by — read-only status,
+    // zero network, zero truth — and retries on later ticks; the fence
+    // releases automatically when the winning session dies.
+    if (activeJournal.acquireWriter && !writerFenced) {
+      const w = await activeJournal.acquireWriter();
+      if (w.notConfigured) {
+        // no durable core: no fence domain exists — handled below
+      } else if (!w.ok) {
+        if (w.reason === 'HELD') {
+          lifecycle = 'STANDBY_WRITER';
+          withholdReason = 'another collector holds RUMOR-2 writer authority';
+          return false;
+        }
+        lifecycle = 'FAILED_DURABILITY';
+        withholdReason = 'writer fence unavailable';
+        return false;
+      } else {
+        writerFenced = true;
+        withholdReason = null; // a standby reason must not outlive the acquisition
+      }
+    }
     const r = checkpointStore ? await checkpointStore.load() : { outcome: 'NOT_CONFIGURED' };
     if (r.outcome === 'NOT_CONFIGURED') {
-      // no durable core at all — run local-only, honestly labeled; if the
-      // injected journal has no durable core either, the local file journal
-      // serves (the one-time fallback)
+      // no durable core at all — local-only, honestly labeled; the injected
+      // journal reporting NOT_CONFIGURED may fall back to the local file
+      // ONLY under the same explicit opt-in
       durability = 'NOT_CONFIGURED';
       let jr = await activeJournal.read();
       if (jr.notConfigured) {
-        activeJournal = null;
-        chooseJournal(true);
+        if (!allowLocalJournal) {
+          lifecycle = 'FAILED_DURABILITY';
+          withholdReason = 'no event journal: durable core not configured and local journal not explicitly enabled (RUMOR2_ALLOW_LOCAL_JOURNAL)';
+          return false;
+        }
+        useFileJournal();
         jr = await activeJournal.read();
       }
       return initFromJournal(jr);
@@ -926,6 +980,13 @@ export function startRumor2({
       // journal, and best-effort mirror health (never truth-bearing)
       lastSettledEventSeq: cp?.lastSettledEventSeq ?? null,
       mirrorFailures,
+      // freeze seal: durability mode and writer authority, stated so no
+      // later reader can mistake local research storage for deployment
+      // durability, or a standby process for the active writer
+      durabilityMode: journalKind === 'LOCAL_FILE' ? 'LOCAL_NON_DURABLE' : journalKind === 'INJECTED' && durability === 'DURABLE' ? 'DURABLE_CORE' : journalKind ? durability : null,
+      authoritativeJournal: journalKind, // 'INJECTED' (durable core / test-injected) | 'LOCAL_FILE' | null
+      durableAcrossRedeploy: journalKind === 'INJECTED' && durability === 'DURABLE',
+      writerAuthority: activeJournal?.acquireWriter ? (writerFenced ? 'ACTIVE' : 'STANDBY') : 'UNFENCED',
     };
     try {
       atomicWriteJson(path.join(dir(), 'status.json'), status);
@@ -937,6 +998,14 @@ export function startRumor2({
 
   async function tickOnce() {
     if (closed) return;
+    // fence-loss check: if this process no longer holds writer authority
+    // (its fence session died), stop advancing truth IMMEDIATELY and drop
+    // back to standby — the next ensureInit re-attempts acquisition.
+    if (writerFenced && activeJournal?.writerHeld && activeJournal.writerHeld() === false) {
+      writerFenced = false;
+      lifecycle = 'STANDBY_WRITER';
+      withholdReason = 'writer authority lost — standing by to reacquire';
+    }
     const ok = await ensureInit();
     if (!startedAnnounced && cp) {
       startedAnnounced = true;
@@ -989,11 +1058,26 @@ export function startRumor2({
   async function stop() {
     closed = true; // no new poll starts after shutdown begins
     clearInterval(timer);
+    // release the signal handlers so a long-lived process (or a test host
+    // that starts many collectors) never accumulates listeners
+    process.removeListener('SIGINT', onSignal);
+    process.removeListener('SIGTERM', onSignal);
     await inFlight; // settle the in-flight tick (its own bounds keep this finite)
     writeStatus();
+    // normal shutdown hands writer authority back promptly (a crash would
+    // release it server-side anyway)
+    if (writerFenced && activeJournal?.releaseWriter) {
+      writerFenced = false;
+      await activeJournal.releaseWriter().catch(() => {});
+    }
   }
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
+  // one shared signal handler, registered once and removed on stop — never a
+  // per-collector leak of process listeners
+  const onSignal = () => {
+    stop();
+  };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
 
   return {
     enabled: true,

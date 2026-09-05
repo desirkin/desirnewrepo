@@ -196,6 +196,38 @@ export const EVIDENCE_ALLOWED_KEYS = Object.freeze({
 });
 const KEY_SETS = Object.fromEntries(Object.entries(EVIDENCE_ALLOWED_KEYS).map(([k, v]) => [k, new Set(v)]));
 
+// ---- packet field semantics (RUMOR-2 freeze seal) --------------------------
+// THE CONTRACT SAYS WHAT EACH FIELD MEANS, so no future interpreter — human
+// or Socrates — has to guess. In particular: PROVIDER HEALTH IS NOT
+// EVIDENCE. providerCoverage records what Serpent's ears were DOING at
+// packet-build time (reachable, failed, not queried, stale); it is runtime
+// operational diagnostics, not reconstructible from settled history and
+// carrying ZERO evidentiary weight. "SEC_OFFICIAL = OBSERVED" means "the
+// SEC ear was healthy", NEVER "the SEC supplied evidence for this
+// proposition". Support, corroboration, independence, and provenance may
+// only ever be derived from the actual settled evidence structure —
+// sources, claimLinks (with their relation kinds and independence groups),
+// and evidence items — which is where "which providers actually contributed
+// settled evidence" already lives (source.provider on referenced sources).
+// A field classified OPERATIONAL_DIAGNOSTIC can never satisfy an evidence
+// requirement, flip a claim status, or count as a corroborating source.
+export const PACKET_FIELD_SEMANTICS = Object.freeze({
+  schemaVersion: 'IDENTITY',
+  packetId: 'IDENTITY', // identity of the COMPLETE immutable packet snapshot, diagnostics included
+  asOfTs: 'TIMESTAMP',
+  subject: 'EVIDENCE',
+  trigger: 'DERIVED_EVIDENCE_METADATA',
+  claims: 'EVIDENCE',
+  sources: 'EVIDENCE',
+  evidence: 'EVIDENCE',
+  claimLinks: 'EVIDENCE',
+  providerCoverage: 'OPERATIONAL_DIAGNOSTIC',
+  contradictions: 'DERIVED_EVIDENCE_METADATA',
+  missingEvidence: 'OPERATIONAL_DIAGNOSTIC',
+  analogs: 'DERIVED_EVIDENCE_METADATA',
+  security: 'OPERATIONAL_DIAGNOSTIC',
+});
+
 // ---- canonical identity ---------------------------------------------------
 // Deterministic serialization: object keys sorted, undefined dropped, no
 // whitespace. Two semantically identical objects serialize identically no

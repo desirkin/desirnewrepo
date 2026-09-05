@@ -396,6 +396,7 @@ test('R2P-e2e. a real listing item flows to claim, packet, and the events file',
     contact: null,
     enabled: true,
     timeoutMs: 50,
+    allowLocalJournal: true, // freeze seal: the local file journal is explicit intent, never a silent fallback
   });
   clock.ms += 121_000;
   await c.tickOnce();
