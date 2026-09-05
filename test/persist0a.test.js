@@ -196,7 +196,7 @@ if (!TEST_URL) {
   test('schema 5 applies; migrations remain idempotent', async () => {
     assert.equal(await db.connect(), true);
     const first = await runMigrations(db);
-    assert.equal(first.schemaVersion, 5); // RUMOR-2A adds the multi-source rumor checkpoint table
+    assert.equal(first.schemaVersion, 6); // RUMOR-2 event-root seal adds the append-only event journal table
     const again = await runMigrations(db);
     assert.deepEqual(again.appliedNow, []);
   });

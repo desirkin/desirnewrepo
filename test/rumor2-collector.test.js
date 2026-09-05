@@ -15,6 +15,7 @@ import { KRAKEN_OFFICIAL } from '../rumor2/providers/kraken-official.js';
 import { MAX_BOOTSTRAP_ITEMS, RETRY_AFTER_MIN_MS, RETRY_AFTER_MAX_MS } from '../rumor2/truth.js';
 import { fromRumor2Event } from '../memory/adapters.js';
 import { readJsonl } from '../lib/jsonl.js';
+import { memJournal } from './helpers/rumor2-journal.js';
 
 const dirs = [];
 function seedDir() {
@@ -77,7 +78,7 @@ function scriptedFetch(handlers) {
   return fn;
 }
 
-function harness({ handlers = {}, contact = null, store = memStore(), appendEvent, startMs = T0, events = [] } = {}) {
+function harness({ handlers = {}, contact = null, store = memStore(), journal, startMs = T0, events = [] } = {}) {
   seedDir();
   const clock = { ms: startMs };
   const fetchImpl = scriptedFetch(handlers);
@@ -88,14 +89,9 @@ function harness({ handlers = {}, contact = null, store = memStore(), appendEven
     now: () => clock.ms,
     intervalMs: 2_147_000_000, // scheduler never fires in tests; ticks are manual
     checkpointStore: store,
-    appendEvent:
-      appendEvent ??
-      ((rec) => {
-        events.push(rec);
-      }),
-    // the durable log IS the restore witness — a restart pair sharing a
-    // store must share its append-only event history too (closeout #3)
-    readEvents: async () => ({ events: structuredClone(events) }),
+    // the durable journal IS the authority and the restore witness — a
+    // restart pair sharing a store must share its journal too (closeout #4)
+    journal: journal ?? memJournal(events),
     contact,
     enabled: true,
     timeoutMs: 50,
@@ -350,11 +346,8 @@ test('R2P-31. crash after append before checkpoint: restart does not double-writ
 test('R2P-32+33. failed append never marks seen; the retry writes exactly once', async () => {
   let failAppends = true;
   const captured = [];
-  const appendEvent = (rec) => {
-    if (failAppends && rec.type === 'RUMOR2_SOURCE_OBSERVED') throw new Error('disk full');
-    captured.push(rec);
-  };
-  const h = harness({ handlers: { 'blog.kraken.com': mkRes(200, rss([{ title: 'retry post', guid: 'g1' }])), 'www.cftc.gov': mkRes(304, '') }, appendEvent });
+  const journal = memJournal(captured, { failAppends: (records) => failAppends && records.some((rec) => rec.type === 'RUMOR2_SOURCE_OBSERVED') });
+  const h = harness({ handlers: { 'blog.kraken.com': mkRes(200, rss([{ title: 'retry post', guid: 'g1' }])), 'www.cftc.gov': mkRes(304, '') }, journal });
   await tick(h);
   assert.equal(h.c.internals.checkpoint.providers.KRAKEN_OFFICIAL.seenIds.length, 0, 'not durably acknowledged => not seen');
   assert.equal(h.c.internals.checkpoint.counters.sourcesObserved, 0);

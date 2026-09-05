@@ -14,6 +14,7 @@ import { startRumor2 } from '../rumor2/collector.js';
 import { replayRumor2SettledTruth, rememberSeen, canonicalJson, sourceObservationIdentity, emptyCheckpoint, independenceGroupFor, MAX_SEEN_IDS } from '../rumor2/truth.js';
 import { PROVIDER_IDS } from '../rumor2/registry.js';
 import { parseEdgarSubmissions } from '../rumor2/edgar.js';
+import { memJournal } from './helpers/rumor2-journal.js';
 
 const dirs = [];
 function seedDir() {
@@ -61,7 +62,7 @@ function memStore(saved = null) {
   };
 }
 
-function boot({ store, stream, feedItems = [LISTING], edgar = false, dir = null, clockMs = T1, failAll = false, readEventsOverride = null }) {
+function boot({ store, stream, feedItems = [LISTING], edgar = false, dir = null, clockMs = T1, failAll = false, journalOverride = null }) {
   const d = dir ?? seedDir();
   process.env.COBRA_DATA_DIR = d;
   const failTypes = failAll ? new Set(['RUMOR2_SOURCE_OBSERVED', 'RUMOR2_CLAIM_OBSERVED', 'RUMOR2_PACKET', 'RUMOR2_WITHHELD']) : new Set();
@@ -80,12 +81,8 @@ function boot({ store, stream, feedItems = [LISTING], edgar = false, dir = null,
     now: () => clock.ms,
     intervalMs: 2_147_000_000,
     checkpointStore: store,
-    appendEvent: (rec) => {
-      if (failTypes.has(rec.type)) throw new Error(`append refused: ${rec.type}`);
-      stream.push(structuredClone(rec));
-    },
-    hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
-    readEvents: readEventsOverride ?? (async () => ({ events: structuredClone(stream) })),
+    // the durable journal IS the authority and the restore witness (closeout #4)
+    journal: journalOverride ?? memJournal(stream, { failAppends: (records) => records.some((rec) => failTypes.has(rec.type)) }),
     contact: 'ops@example.com',
     enabled: true,
     timeoutMs: 100,
@@ -247,19 +244,22 @@ test('SEEN-4+5+6+7+8. missing, cross-provider, duplicated, and reordered seen st
 });
 
 test('SEEN-9+10. replay FIFO matches live rememberSeen exactly at the capacity boundary', () => {
-  const hexId = (i) => `r2s-${i.toString(16).padStart(40, '0')}`;
+  // closeout #4: source events must re-derive their own identity from their
+  // stored facts — the fixture speaks production truth, never shortcut ids
+  const realId = (i) =>
+    sourceObservationIdentity({ provider: 'KRAKEN_OFFICIAL', guid: `g${i}`, link: null, publishedTs: null, title: `t${i}`, summary: 's' });
   const mkSrc = (i) => ({
-    type: 'RUMOR2_SOURCE_OBSERVED', ts: new Date(T1 + i).toISOString(), sourceEventId: hexId(i), provider: 'KRAKEN_OFFICIAL',
-    title: `t${i}`, summary: 's', link: null, guid: null, publishedTs: null, retrievedTs: T1 + i, knownAtTs: T1 + i,
+    type: 'RUMOR2_SOURCE_OBSERVED', ts: new Date(T1 + i).toISOString(), sourceEventId: realId(i), provider: 'KRAKEN_OFFICIAL',
+    title: `t${i}`, summary: 's', link: null, guid: `g${i}`, publishedTs: null, retrievedTs: T1 + i, knownAtTs: T1 + i,
   });
   for (const n of [MAX_SEEN_IDS - 1, MAX_SEEN_IDS, MAX_SEEN_IDS + 1, MAX_SEEN_IDS + 2]) {
     const events = Array.from({ length: n }, (_, i) => mkSrc(i + 1));
     const replayed = replayRumor2SettledTruth(events, { providerIds: [...PROVIDER_IDS] });
     assert.equal(replayed.ok, true);
     let live = [];
-    for (let i = 1; i <= n; i++) live = rememberSeen(live, hexId(i));
+    for (let i = 1; i <= n; i++) live = rememberSeen(live, realId(i));
     assert.deepEqual(replayed.seenIds.KRAKEN_OFFICIAL, live, `boundary ${n}: replay IS the live FIFO law`);
-    if (n > MAX_SEEN_IDS) assert.equal(replayed.seenIds.KRAKEN_OFFICIAL[0], hexId(n - MAX_SEEN_IDS + 1), 'exactly the same eviction');
+    if (n > MAX_SEEN_IDS) assert.equal(replayed.seenIds.KRAKEN_OFFICIAL[0], realId(n - MAX_SEEN_IDS + 1), 'exactly the same eviction');
   }
 });
 
@@ -300,8 +300,10 @@ test('CRASH-DERIVED-6 + PASS 11. graph and seen corrupted CONSISTENTLY with each
 // ---------------------------------------------------------------------------
 test('HIST-1. unreadable, unknown-typed, orphan-claim, and source-only-claim histories fail closed', async () => {
   const { cp, stream } = await settledWorld();
-  // reader error
-  const r1 = await restore(cp, stream, { readEventsOverride: async () => ({ error: 'disk gone' }) });
+  // corrupt journal read (closeout #4 journal contract)
+  const r1 = await restore(cp, stream, {
+    journalOverride: { read: async () => ({ corrupt: 'disk gone' }), append: async () => ({ ok: false, reason: 'UNAVAILABLE' }) },
+  });
   assert.equal(r1.lifecycle, 'WITHHELD_INVALID_CHECKPOINT');
   assert.ok(r1.reason.includes('EVENT_HISTORY_INVALID'));
   // unknown event type
@@ -326,12 +328,25 @@ test('HIST-1. unreadable, unknown-typed, orphan-claim, and source-only-claim his
   assert.ok(r4.reason.includes('source-only ear') || r4.reason.includes('EVENT_HISTORY_INVALID') || r4.reason.includes('MISMATCH'), r4.reason);
 });
 
-test('HIST-2 + §40. duplicated settled events replay as the SAME knowledge — no double application', async () => {
-  const { cp, stream } = await settledWorld();
-  const doubled = [...structuredClone(stream), ...structuredClone(truthBearing(stream))];
-  const r = await restore(cp, doubled);
-  assert.equal(r.lifecycle, 'RESTORED', 'the exact crash re-append is the same knowledge event');
-  assert.equal(r.note, null, 'no rebuild needed — replay dedupe mirrors live settlement');
+test('HIST-2 + §43. duplicate identity: byte-identical collapses to ONE knowledge event; an altered payload is corruption', async () => {
+  const { stream } = await settledWorld();
+  const truth = truthBearing(stream);
+  // the pure replay law: an exact crash re-append is the SAME knowledge
+  // event — applied once, never doubled (the journal's append-side dedupe
+  // makes such rows unreachable in the durable authority, but the replay
+  // law holds independently)
+  const once = replayRumor2SettledTruth(structuredClone(stream), { providerIds: [...PROVIDER_IDS] });
+  const twice = replayRumor2SettledTruth([...structuredClone(stream), ...structuredClone(truth)], { providerIds: [...PROVIDER_IDS] });
+  assert.equal(twice.ok, true);
+  assert.equal(canonicalJson(twice.counters), canonicalJson(once.counters), 'no double application');
+  assert.equal(canonicalJson(twice.graph), canonicalJson(once.graph), 'the graph is the same settled truth');
+  // §43: the SAME identity over an ALTERED payload is corruption — the
+  // conflict is never resolved by picking first or last
+  const altered = structuredClone(truth.find((e) => e.type === 'RUMOR2_SOURCE_OBSERVED'));
+  altered.title = 'rewritten later';
+  const r = replayRumor2SettledTruth([...structuredClone(stream), altered], { providerIds: [...PROVIDER_IDS] });
+  assert.equal(r.ok, false);
+  assert.ok(r.error.includes('altered payload'), r.error);
 });
 
 test('DET-1 + §38+39. replay is deterministic across fresh parses and timezones, and follows SETTLEMENT order, never publication order', async () => {
@@ -392,7 +407,7 @@ test('FUZZ-DERIVED. seeded single-field mutations of settled derived state never
 });
 
 test('FILE-1. the default file log is the witness: real-file restart restores; corruption withholds; a torn tail is tolerated', async () => {
-  // NO injected append/read/hasEvent — the collector's own events.jsonl path
+  // NO injected journal — the collector's own local file journal (events.jsonl)
   const d = seedDir();
   const store = memStore();
   const clock = { ms: T1 - 4_000_000 };

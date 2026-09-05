@@ -13,6 +13,7 @@ import { startRumor2 } from './rumor2/collector.js';
 import { govCheckpointStore } from './persistence/gov-checkpoint.js';
 import { rumintCheckpointStore, rumintBootstrapSource } from './persistence/rumint-checkpoint.js';
 import { rumor2CheckpointStore } from './persistence/rumor2-checkpoint.js';
+import { rumor2JournalStore } from './persistence/rumor2-journal.js';
 import { startMemoryMirror } from './memory/mirror.js';
 import { startPersistence } from './persistence/runtime.js';
 
@@ -73,8 +74,10 @@ startGovernance({ checkpointStore: govCheckpointStore() });
 // RUMOR-2A dark multi-source rumor ear — no-ops (zero network, zero timers)
 // unless RUMOR2_ENABLED=true. Observation and memory ONLY: zero attention,
 // HYPED, stalking, eligibility, or execution authority; the durable
-// checkpoint store is injected here (composition-root wiring; STORAGE ONLY).
-startRumor2({ checkpointStore: rumor2CheckpointStore() });
+// checkpoint store AND the authoritative event journal are injected here
+// (composition-root wiring; STORAGE ONLY — the local events.jsonl survives
+// only as the best-effort mirror the Memory tail consumes).
+startRumor2({ checkpointStore: rumor2CheckpointStore(), journal: rumor2JournalStore() });
 try {
   await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
   process.exit(0);

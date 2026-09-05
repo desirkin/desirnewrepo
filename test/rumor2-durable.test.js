@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { memJournal } from './helpers/rumor2-journal.js';
 
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-r2dur-'));
 process.env.COBRA_DATA_DIR = TEST_DATA;
@@ -40,13 +41,13 @@ if (!TEST_URL) {
       .join('') +
     `</channel></rss>`;
 
-  test('D61-63. migration 5 applies; rumor2 checkpoint round-trips with monotonic revisions', async () => {
+  test('D61-63. migrations apply (schema 6 with the event journal); rumor2 checkpoint round-trips with monotonic revisions', async () => {
     const SCHEMA = `r2a_${Date.now().toString(36)}`;
     const db = new Db({ url: TEST_URL, schema: SCHEMA });
     try {
       assert.equal(await db.connect(), true);
       const m = await runMigrations(db);
-      assert.equal(m.schemaVersion, 5, 'RUMOR-2A schema landed in Development PostgreSQL');
+      assert.equal(m.schemaVersion, 6, 'RUMOR-2 event-root schema landed in Development PostgreSQL');
       const repo = new Repository(db);
       const alive = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       const store = rumor2CheckpointStore({ persistence: alive });
@@ -92,7 +93,7 @@ if (!TEST_URL) {
         now: () => clock.ms,
         intervalMs: 2_147_000_000,
         checkpointStore: store,
-        appendEvent: () => {},
+        journal: memJournal([]),
         contact: null,
         enabled: true,
         timeoutMs: 50,
@@ -134,8 +135,7 @@ if (!TEST_URL) {
           now: () => clock.ms,
           intervalMs: 2_147_000_000,
           checkpointStore: store,
-          appendEvent: (r) => log.push(structuredClone(r)),
-          readEvents: async () => ({ events: structuredClone(log) }),
+          journal: memJournal(log),
           contact: null,
           enabled: true,
           timeoutMs: 50,

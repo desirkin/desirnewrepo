@@ -14,6 +14,7 @@ import { startRumor2 } from '../rumor2/collector.js';
 import { validateRumor2Checkpoint, validateRumor2Txn, sourceObservationIdentity } from '../rumor2/truth.js';
 import { PROVIDER_IDS } from '../rumor2/registry.js';
 import { parseEdgarConfig, parseEdgarSubmissions, formMatches, EDGAR_DEFAULT_FORMS } from '../rumor2/edgar.js';
+import { memJournal } from './helpers/rumor2-journal.js';
 
 const dirs = [];
 function seedDir() {
@@ -81,12 +82,8 @@ function boot({ store, stream, edgarRes, clockMs = T1, failAll = false, opts = {
     now: () => clock.ms,
     intervalMs: 2_147_000_000,
     checkpointStore: store,
-    appendEvent: (rec) => {
-      if (failTypes.has(rec.type)) throw new Error(`append refused: ${rec.type}`);
-      stream.push(structuredClone(rec));
-    },
-    hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
-    readEvents: async () => ({ events: structuredClone(stream) }), // the durable log IS the restore witness
+    // the durable journal IS the authority and the restore witness (closeout #4)
+    journal: memJournal(stream, { failAppends: (records) => records.some((rec) => failTypes.has(rec.type)) }),
     contact: 'ops@example.com',
     enabled: true,
     timeoutMs: 200,

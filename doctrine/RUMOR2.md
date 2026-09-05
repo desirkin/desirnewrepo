@@ -330,7 +330,8 @@ Truth-boundary closeout #2 (final seal):
 Derived-truth closeout #3 (the freeze seal):
 
 - DERIVED STATE MUST NOT AUTHENTICATE ITSELF. The append-only settled
-  event stream (rumor2/events.jsonl, or the injected equivalent) is the
+  event stream (the durable event journal since closeout #4; formerly
+  rumor2/events.jsonl, now the best-effort mirror) is the
   authoritative causal record; the checkpoint's graph, counters, and seen
   state are DERIVED caches of it. On every restore, ONE pure replay walks
   the settled events in actual settlement order — through the SAME
@@ -366,6 +367,71 @@ Derived-truth closeout #3 (the freeze seal):
   live production forbids. A corrupt event line fails the history closed
   (EVENT_HISTORY_INVALID); only a torn FINAL line — the legitimate
   crash-window artifact — is tolerated.
+
+Event-root seal, closeout #4 (the root of truth itself):
+
+- THE EVENT HISTORY IS THE ROOT OF TRUTH, SO THE EVENT HISTORY IS
+  VALIDATED AND DURABLE. A root of truth cannot be considered
+  authoritative if it can disappear independently of the checkpoint that
+  depends on it: the authoritative event journal therefore lives in the
+  SAME durable core as the checkpoint (PostgreSQL, serpent_rumor2_events —
+  append-only rows under one monotonic contiguous per-stream sequence,
+  INSERT-only, no UPDATE/DELETE path in the repository at all). The local
+  rumor2/events.jsonl survives ONLY as a best-effort mirror/export feeding
+  the Memory tail: a mirror write failure never rolls back authoritative
+  truth, and a missing or forged mirror file affects nothing.
+- ONE AUTHORITATIVE EVENT VALIDATOR. No replay branch trusts event.type
+  alone. Every event type the stream may carry — SOURCE_OBSERVED,
+  CLAIM_OBSERVED, PACKET, both WITHHELD variants, the pre-transaction
+  clock refusal, PROVIDER_FAILURE, STARTED — has a closed exact-key
+  schema; unknown types and undeclared fields fail the history closed.
+  Source events carry their COMPLETE identity-bearing facts (the full
+  bounded summary, not an excerpt), and the r2s identity must be the
+  recomputed semantic hash of exactly those stored facts — never a hash
+  stored beside them, never trusted from its shape. Clock laws hold per
+  event (published <= retrieved <= knownAt; the event stamp IS its
+  knowledge clock). Claim events re-derive their proposition identity,
+  their claimType as the deterministic classification of the stored
+  source facts, and their coin from the text under the exact resolution
+  law; their status must equal derived node truth. Packet events
+  re-validate under serpent-evidence-1 AND must equal, byte for byte,
+  what the production builder derives from settled node truth at that
+  point of the replay — a forgery that recomputes every identity still
+  dies against the builder.
+- THE DUPLICATE LAW IS DECISIVE. One identity, one truth: a
+  byte-identical re-append of a (type, sourceEventId) identity is the
+  legitimate crash window and collapses to one knowledge event — at the
+  replay, at the journal door, and in the schema (a partial unique index
+  pins each truth-bearing identity to one durable payload); the same
+  identity over an ALTERED payload is corruption, refused whole, never
+  resolved by picking first or last.
+- THE WATERMARK MAKES RECONCILIATION DETERMINISTIC. Checkpoint v4 names
+  how far settled truth extends in the journal (lastSettledEventSeq). A
+  journal that ends before the watermark lost history the checkpoint
+  depends on: WITHHELD (EVENT_HISTORY_MISSING), never guessed over.
+  Truth-bearing events beyond the watermark must belong to the still-owed
+  write-ahead transaction (appended-but-unadopted truth the A1 settle
+  gate adopts exactly once); an unexplained tail is corruption. Settle
+  appends the whole prepared bundle as ONE atomic journal batch — a
+  refused batch advances ZERO truth and the transaction stays owed.
+- THE CHECKPOINT IS A CACHE OF THE JOURNAL, NEVER THE REVERSE. A missing
+  checkpoint over a valid non-empty journal REBUILDS the derived caches
+  from the authority (REBUILT_FROM_EVENT_HISTORY) — no fresh start over
+  existing truth, no history loss, no re-minted evidence (the
+  non-replayable duplicates tally honestly restarts at zero). Only both
+  absences together are an honest FRESH_START. Old checkpoint versions
+  (v3 and earlier) describe a materially different authority model and
+  are WITHHELD for explicit operator migration, never reinterpreted.
+- NO HASH CHAIN, BY EXPLICIT DECISION. Every truth-bearing event is
+  semantically self-authenticating (identities re-derive from stored
+  facts, packets re-derive through the builder), the database enforces
+  sequence and identity uniqueness structurally, and the restore gate
+  binds checkpoint to journal by full semantic replay — a chain would add
+  tamper-evidence only against an adversary with durable-core write
+  access, who could rewrite any chain lacking an external trust anchor;
+  reorders and edits that change settlement truth already change the
+  graph or counters and are refused, and packet providerCoverage remains
+  recorded runtime health with zero truth authority.
 
 Roadmap unchanged: RUMOR-2B may later add authorized social ears and
 propagation reasoning; SOCRATES remains separate; GHOST remains separate;

@@ -16,6 +16,7 @@ import { propositionIdentity, sourceObservationIdentity, RUMOR2_CHECKPOINT_VERSI
 import { observeClaim, emptyGraph } from '../rumor2/graph.js';
 import { PROVIDER_IDS } from '../rumor2/registry.js';
 import { fromRumor2Event } from '../memory/adapters.js';
+import { memJournal } from './helpers/rumor2-journal.js';
 
 const dirs = [];
 function seedDir() {
@@ -87,12 +88,8 @@ function world({ feedItems = [LISTING], startMs = T1 } = {}) {
       now: () => clock.ms,
       intervalMs: 2_147_000_000,
       checkpointStore: store,
-      appendEvent: (rec) => {
-        if (failTypes.has(rec.type)) throw new Error(`append refused: ${rec.type}`);
-        stream.push(structuredClone(rec));
-      },
-      hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
-      readEvents: async () => ({ events: structuredClone(stream) }), // the durable log IS the restore witness
+      // the durable journal IS the authority and the restore witness (closeout #4)
+      journal: memJournal(stream, { failAppends: (records) => records.some((rec) => failTypes.has(rec.type)) }),
       contact: null,
       enabled: true,
       timeoutMs: 50,
@@ -145,7 +142,10 @@ test('A1-7+8. claim append fails: transaction retained; restart appends the exac
   w.failTypes.add('RUMOR2_CLAIM_OBSERVED');
   const b1 = w.boot(T1 - 121_000);
   await b1.tick();
-  assert.equal(ofType(w.stream, 'RUMOR2_SOURCE_OBSERVED').length, 1, 'source landed');
+  // closeout #4: the journal batch is ATOMIC — a refused claim append means
+  // NOTHING from the bundle lands (strictly stronger than the old per-event
+  // medium, where a partial bundle could exist behind the owed transaction)
+  assert.equal(ofType(w.stream, 'RUMOR2_SOURCE_OBSERVED').length, 0, 'nothing lands unless the whole bundle does');
   assert.equal(ofType(w.stream, 'RUMOR2_CLAIM_OBSERVED').length, 0);
   assert.ok(w.store.state.saved.txn, 'transaction retained (7)');
   assert.equal(w.store.state.saved.providers.KRAKEN_OFFICIAL.seenIds.length, 0, 'seen has NOT advanced');
@@ -153,7 +153,7 @@ test('A1-7+8. claim append fails: transaction retained; restart appends the exac
   w.failTypes.clear();
   const b2 = w.boot(T1 + 600_000);
   await b2.tick();
-  assert.equal(ofType(w.stream, 'RUMOR2_SOURCE_OBSERVED').length, 1, 'source ACKED, not re-appended (14)');
+  assert.equal(ofType(w.stream, 'RUMOR2_SOURCE_OBSERVED').length, 1, 'exact source appended once (14)');
   assert.equal(ofType(w.stream, 'RUMOR2_CLAIM_OBSERVED').length, 1, 'exact claim appended once (8, 15)');
   assert.equal(ofType(w.stream, 'RUMOR2_CLAIM_OBSERVED')[0].ts, new Date(T1).toISOString(), 'claim keeps its original clock');
   assert.equal(w.store.state.saved.txn, null, 'transaction cleared after full settlement');
@@ -165,8 +165,10 @@ test('A1-9+10. packet append fails: transaction retained; restart appends the ex
   w.failTypes.add('RUMOR2_PACKET');
   const b1 = w.boot(T1 - 121_000);
   await b1.tick();
-  assert.equal(ofType(w.stream, 'RUMOR2_SOURCE_OBSERVED').length, 1);
-  assert.equal(ofType(w.stream, 'RUMOR2_CLAIM_OBSERVED').length, 1);
+  // closeout #4: atomic batch — the refused packet append keeps the WHOLE
+  // bundle out of the journal until the retry lands it together
+  assert.equal(ofType(w.stream, 'RUMOR2_SOURCE_OBSERVED').length, 0);
+  assert.equal(ofType(w.stream, 'RUMOR2_CLAIM_OBSERVED').length, 0);
   assert.equal(ofType(w.stream, 'RUMOR2_PACKET').length, 0);
   assert.ok(w.store.state.saved.txn, 'transaction retained (9)');
   const preparedPacket = w.store.state.saved.txn.events.find((e) => e.type === 'RUMOR2_PACKET');
@@ -280,8 +282,7 @@ async function cftcWorld() {
     now: () => clock.ms,
     intervalMs: 2_147_000_000,
     checkpointStore: store,
-    appendEvent: (rec) => stream.push(structuredClone(rec)),
-    hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
+    journal: memJournal(stream),
     contact: null,
     enabled: true,
     timeoutMs: 50,
@@ -385,11 +386,11 @@ test('A1-30. explicit relation attachment targets one exact proposition — neve
 // ---- checkpoint version discipline ------------------------------------------
 
 test('A1-cp. obsolete checkpoint shapes fail closed — no silent reinterpretation', () => {
-  assert.equal(RUMOR2_CHECKPOINT_VERSION, 3); // A2: prepared-transaction trust bump
+  assert.equal(RUMOR2_CHECKPOINT_VERSION, 4); // closeout #4: event-root authority bump
   const cur = emptyCheckpoint([...PROVIDER_IDS], T1);
   assert.equal(validateRumor2Checkpoint(cur, { providerIds: [...PROVIDER_IDS] }), null);
-  // v1- and v2-era checkpoints are never silently reinterpreted as trusted
-  for (const oldVersion of [1, 2]) {
+  // v1/v2/v3-era checkpoints are never silently reinterpreted as trusted
+  for (const oldVersion of [1, 2, 3]) {
     const old = { ...structuredClone(cur), checkpointVersion: oldVersion };
     assert.ok(validateRumor2Checkpoint(old, { providerIds: [...PROVIDER_IDS] }).includes('unsupported version'), `v${oldVersion} withheld`);
   }

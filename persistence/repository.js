@@ -524,6 +524,81 @@ export class Repository {
     return rows[0]?.state ?? null;
   }
 
+  // ---------------- RUMOR-2 event-root journal (append-only, storage only) ----
+  // The AUTHORITATIVE settled event history. INSERT-only under one monotonic
+  // contiguous per-stream sequence; no UPDATE or DELETE path exists here.
+  // The duplicate law lives at this door too: a byte-identical re-append of
+  // a truth-bearing (type, sourceEventId) identity is the legitimate crash
+  // window and collapses to the FIRST durable truth; the same identity over
+  // an ALTERED payload refuses the WHOLE batch (transactional — nothing
+  // lands) as corruption. The caller validates event semantics strictly
+  // before append and on every restore; this layer guarantees ordering,
+  // atomicity, and identity uniqueness.
+  async appendRumor2Events(stream, records) {
+    return this.db.tx(async (q) => {
+      const cur = await q(`SELECT COALESCE(MAX(event_seq), 0) AS last FROM serpent_rumor2_events WHERE stream = $1`, [stream]);
+      let seq = Number(cur.rows[0].last);
+      for (const rec of records) {
+        const eventId = typeof rec.sourceEventId === 'string' && rec.sourceEventId.length > 0 ? rec.sourceEventId : null;
+        if (eventId !== null) {
+          const ex = await q(`SELECT event FROM serpent_rumor2_events WHERE stream = $1 AND event_type = $2 AND event_id = $3`, [
+            stream,
+            rec.type,
+            eventId,
+          ]);
+          if (ex.rows[0]) {
+            if (canonicalJson(JSON.parse(ex.rows[0].event)) !== canonicalJson(rec)) {
+              // first truth stands; the transaction rolls back untouched
+              const err = new Error(`duplicate event identity with an altered payload (${rec.type})`);
+              err.journalCorruption = true;
+              throw err;
+            }
+            continue; // exact crash re-append — already durable
+          }
+        }
+        seq += 1;
+        await q(`INSERT INTO serpent_rumor2_events (stream, event_seq, event_type, event_id, event) VALUES ($1, $2, $3, $4, $5)`, [
+          stream,
+          seq,
+          rec.type,
+          eventId,
+          JSON.stringify(rec),
+        ]);
+      }
+      return { lastSeq: seq };
+    });
+  }
+
+  // Complete ordered history — chunked keyset pagination, contiguity of the
+  // sequence proven as it streams: a gap, duplicate, or non-positive start
+  // means rows were destroyed or rewritten under the INSERT-only law, which
+  // is corruption the caller must fail closed on, never absence.
+  async loadRumor2Events(stream) {
+    const out = [];
+    let after = 0;
+    for (;;) {
+      const { rows } = await this.db.query(
+        `SELECT event_seq, event FROM serpent_rumor2_events WHERE stream = $1 AND event_seq > $2 ORDER BY event_seq LIMIT ${MAX_QUERY_LIMIT}`,
+        [stream, after]
+      );
+      if (!rows.length) break;
+      for (const r of rows) {
+        const seq = Number(r.event_seq);
+        if (seq !== out.length + 1) return { corrupt: `journal sequence broken at ${seq} (expected ${out.length + 1})` };
+        let parsed;
+        try {
+          parsed = JSON.parse(r.event);
+        } catch {
+          return { corrupt: `journal payload unparseable at seq ${seq}` };
+        }
+        out.push(parsed);
+        after = seq;
+      }
+      if (rows.length < MAX_QUERY_LIMIT) break;
+    }
+    return { events: out, lastSeq: out.length };
+  }
+
   // RUMINT-R1 bootstrap facts (§13-14): the PROVEN per-hour observation
   // history already inside durable canonical Memory — for each provider
   // symbol and absolute hour, the maximum cumulative hourly velocity a

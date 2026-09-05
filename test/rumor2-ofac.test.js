@@ -15,6 +15,7 @@ import { startRumor2 } from '../rumor2/collector.js';
 import { validateRumor2Checkpoint, validateRumor2Txn } from '../rumor2/truth.js';
 import { PROVIDER_IDS } from '../rumor2/registry.js';
 import { parseSdnCsv, sdnDatasetIdentity, extractDigitalCurrencyAddresses, OFAC_SNAPSHOT_FILE } from '../rumor2/ofac.js';
+import { memJournal } from './helpers/rumor2-journal.js';
 
 const dirs = [];
 function seedDir() {
@@ -69,12 +70,8 @@ function boot({ store, stream, ofacRes, dir = null, clockMs = T1, failAll = fals
     now: () => clock.ms,
     intervalMs: 2_147_000_000,
     checkpointStore: store,
-    appendEvent: (rec) => {
-      if (failTypes.has(rec.type)) throw new Error(`append refused: ${rec.type}`);
-      stream.push(structuredClone(rec));
-    },
-    hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
-    readEvents: async () => ({ events: structuredClone(stream) }), // the durable log IS the restore witness
+    // the durable journal IS the authority and the restore witness (closeout #4)
+    journal: memJournal(stream, { failAppends: (records) => records.some((rec) => failTypes.has(rec.type)) }),
     contact: null,
     enabled: true,
     timeoutMs: 200,

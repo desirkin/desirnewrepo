@@ -4,7 +4,7 @@
 // silently downgraded.
 import { createHash } from 'node:crypto';
 
-export const SCHEMA_VERSION = 5; // RUMOR-2A / schema 5
+export const SCHEMA_VERSION = 6; // RUMOR-2 event-root journal / schema 6
 
 // Canonical key-sorted JSON — the stable content form durable event
 // identities are computed over (independent of key order and whitespace).
@@ -211,6 +211,33 @@ export const MIGRATIONS = [
         state jsonb NOT NULL,
         saved_at timestamptz NOT NULL DEFAULT now()
       )`,
+    ],
+  },
+  {
+    version: 6,
+    name: 'RUMOR-2 event-root seal: authoritative append-only event journal',
+    // The RUMOR-2 settled event history IS the root of truth its durable
+    // checkpoint is derived from, so it must be at least as durable as that
+    // checkpoint: append-only rows in the durable core, one monotonic
+    // contiguous per-stream sequence, INSERT-only (no UPDATE/DELETE path
+    // exists in the repository at all). The event payload is stored as the
+    // exact JSON text so byte truth never depends on jsonb normalization,
+    // and a partial unique index pins each truth-bearing identity
+    // (type, sourceEventId) to ONE durable payload — the duplicate law in
+    // the schema itself. Local events.jsonl survives only as a best-effort
+    // mirror/export; it is not, and can never again be, the authority.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_rumor2_events (
+        stream text NOT NULL,
+        event_seq bigint NOT NULL,
+        event_type text NOT NULL,
+        event_id text,
+        event text NOT NULL,
+        appended_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (stream, event_seq)
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_rumor2_event_identity
+        ON serpent_rumor2_events (stream, event_type, event_id) WHERE event_id IS NOT NULL`,
     ],
   },
 ];

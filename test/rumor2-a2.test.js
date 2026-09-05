@@ -13,6 +13,7 @@ import { startRumor2 } from '../rumor2/collector.js';
 import { validateRumor2Checkpoint, validateRumor2Txn, RUMOR2_CHECKPOINT_VERSION } from '../rumor2/truth.js';
 import { PROVIDER_IDS } from '../rumor2/registry.js';
 import { fromRumor2Event } from '../memory/adapters.js';
+import { memJournal } from './helpers/rumor2-journal.js';
 
 const dirs = [];
 function seedDir() {
@@ -85,12 +86,8 @@ function world({ feedItems = [ITEM_1], etag = '"v1"' } = {}) {
       now: () => clock.ms,
       intervalMs: 2_147_000_000,
       checkpointStore: store,
-      appendEvent: (rec) => {
-        if (failTypes.has(rec.type)) throw new Error(`append refused: ${rec.type}`);
-        stream.push(structuredClone(rec));
-      },
-      hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
-      readEvents: async () => ({ events: structuredClone(stream) }), // the durable log IS the restore witness
+      // the durable journal IS the authority and the restore witness (closeout #4)
+      journal: memJournal(stream, { failAppends: (records) => records.some((rec) => failTypes.has(rec.type)) }),
       contact: null,
       enabled: true,
       timeoutMs: 50,
@@ -247,8 +244,7 @@ test('A2-TXN-1. fabricated packet in a durable transaction: withheld, zero fabri
     now: () => clock.ms,
     intervalMs: 2_147_000_000,
     checkpointStore: store,
-    appendEvent: (rec) => stream.push(rec),
-    hasEvent: () => false,
+    journal: memJournal(stream),
     contact: null,
     enabled: true,
     timeoutMs: 50,
@@ -335,8 +331,7 @@ test('A2-TXN-9. a legitimate prepared transaction still validates and recovers c
     now: () => clock.ms,
     intervalMs: 2_147_000_000,
     checkpointStore: store,
-    appendEvent: (rec) => stream.push(rec),
-    hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
+    journal: memJournal(stream),
     contact: null,
     enabled: true,
     timeoutMs: 50,
@@ -351,12 +346,14 @@ test('A2-TXN-9. a legitimate prepared transaction still validates and recovers c
   await c.stop();
 });
 
-test('A2-version. v2 withheld; legitimate v3 valid; malformed v3 fails closed', async () => {
-  assert.equal(RUMOR2_CHECKPOINT_VERSION, 3);
-  const cp = await capturedTxn(); // legitimate v3 state, txn included
+test('A2-version. elder versions withheld; legitimate v4 valid; malformed v4 fails closed', async () => {
+  assert.equal(RUMOR2_CHECKPOINT_VERSION, 4); // closeout #4: event-root authority bump
+  const cp = await capturedTxn(); // legitimate v4 state, txn included
   assert.equal(V(cp), null);
-  const v2 = { ...structuredClone(cp), checkpointVersion: 2 };
-  assert.ok(V(v2).includes('unsupported version'), 'v2 is never silently reinterpreted as trusted v3 state');
+  for (const elder of [2, 3]) {
+    const old = { ...structuredClone(cp), checkpointVersion: elder };
+    assert.ok(V(old).includes('unsupported version'), `v${elder} is never silently reinterpreted as trusted v4 state`);
+  }
   const bad = structuredClone(cp);
   bad.txn.clocks.retrievedTs = bad.txn.clocks.knownAtTs + 1; // causally impossible
   assert.ok(V(bad).includes('causally impossible'));

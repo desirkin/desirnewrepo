@@ -25,6 +25,7 @@ import {
 import { PROVIDER_IDS } from '../rumor2/registry.js';
 import { parseEdgarSubmissions, safePrimaryDocument } from '../rumor2/edgar.js';
 import { parseSdnCsv, sdnDatasetIdentity, ofacSnapshotPayload, verifyOfacSnapshotPayload, buildOfacUpdate } from '../rumor2/ofac.js';
+import { memJournal } from './helpers/rumor2-journal.js';
 
 const dirs = [];
 function seedDir() {
@@ -132,8 +133,7 @@ test('EDGAR-STRUCT-8..10 + CRASH-K. a malformed partial response creates ZERO tr
     now: () => clock.ms,
     intervalMs: 2_147_000_000,
     checkpointStore: store,
-    appendEvent: (rec) => stream.push(structuredClone(rec)),
-    hasEvent: () => false,
+    journal: memJournal(stream),
     contact: 'ops@example.com',
     enabled: true,
     timeoutMs: 100,
@@ -414,10 +414,7 @@ test('STATUS. source-acquisition success and durable settlement are visibly dist
     now: () => clock.ms,
     intervalMs: 2_147_000_000,
     checkpointStore: store,
-    appendEvent: (rec) => {
-      if (rec.type !== 'RUMOR2_STARTED') throw new Error('append refused');
-    },
-    hasEvent: () => false,
+    journal: memJournal([], { failAppends: (records) => records.some((rec) => rec.type !== 'RUMOR2_STARTED') }),
     contact: null,
     enabled: true,
     timeoutMs: 100,

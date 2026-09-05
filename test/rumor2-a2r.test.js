@@ -20,8 +20,10 @@ import {
   emptyCheckpoint,
   propositionIdentity,
   deriveTxnGraphDelta,
+  sourceObservationIdentity,
 } from '../rumor2/truth.js';
 import { PROVIDER_IDS } from '../rumor2/registry.js';
+import { memJournal } from './helpers/rumor2-journal.js';
 
 const dirs = [];
 function seedDir() {
@@ -83,12 +85,8 @@ function boot({ store, stream, feedItems, failAll = false, clockMs = T1 }) {
     now: () => clock.ms,
     intervalMs: 2_147_000_000,
     checkpointStore: store,
-    appendEvent: (rec) => {
-      if (failTypes.has(rec.type)) throw new Error(`append refused: ${rec.type}`);
-      stream.push(structuredClone(rec));
-    },
-    hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
-    readEvents: async () => ({ events: structuredClone(stream) }), // the durable log IS the restore witness
+    // the durable journal IS the authority and the restore witness (closeout #4)
+    journal: memJournal(stream, { failAppends: (records) => records.some((rec) => failTypes.has(rec.type)) }),
     contact: null,
     enabled: true,
     timeoutMs: 50,
@@ -115,7 +113,13 @@ const truthBearing = (stream) => stream.filter((e) => e.type !== 'RUMOR2_STARTED
 // transition (never a hand-built shortcut — the checkpoint graph validator
 // admits only states production code can actually create)
 const realPriorNode = (i, ts) => {
-  const originId = hexId('r2s', i);
+  // closeout #4: the settled source event must RE-DERIVE its own identity
+  // from its stored facts, its title must deterministically classify, and
+  // its coin must resolve from the text — so the fixture speaks exactly the
+  // truth production would have written, never a shortcut id
+  const title = `BTC trading starts today (batch ${i})`;
+  const facts = { provider: 'KRAKEN_OFFICIAL', guid: `old-${i}`, link: null, publishedTs: null, title, summary: 'x' };
+  const originId = sourceObservationIdentity(facts);
   const propId = propositionIdentity({ claimType: 'EXCHANGE_LISTING', canonicalCoin: 'BTC', originSourceObservationId: originId });
   const { graphClaims } = deriveTxnGraphDelta({
     graph: { claims: {} },
@@ -124,7 +128,7 @@ const realPriorNode = (i, ts) => {
     authorityClass: 'OFFICIAL',
     sourceObservationId: originId,
     clocks: { publishedTs: null, retrievedTs: ts, knownAtTs: ts },
-    identityFacts: { title: `old claim ${i}`, summary: 'x', link: null },
+    identityFacts: { title, summary: 'x', link: null },
     claims: [{ propositionId: propId, claimType: 'EXCHANGE_LISTING', symbol: 'BTC' }],
   });
   // the SETTLED durable events this node is the consequence of — derived
@@ -135,10 +139,10 @@ const realPriorNode = (i, ts) => {
       ts: new Date(ts).toISOString(),
       sourceEventId: originId,
       provider: 'KRAKEN_OFFICIAL',
-      title: `old claim ${i}`,
+      title,
       summary: 'x',
       link: null,
-      guid: null,
+      guid: `old-${i}`,
       publishedTs: null,
       retrievedTs: ts,
       knownAtTs: ts,
@@ -153,7 +157,7 @@ const realPriorNode = (i, ts) => {
       claimKey: propId,
       claimType: 'EXCHANGE_LISTING',
       status: graphClaims[propId].status,
-      title: `old claim ${i}`,
+      title,
     },
   ];
   return [propId, graphClaims[propId], events];
@@ -336,6 +340,7 @@ test('A2R-4b. legitimate graph-at-capacity pruning validates and recovers exactl
   }
   prior.counters.sourcesObserved = MAX_ACTIVE_CLAIMS;
   prior.counters.claimsObserved = MAX_ACTIVE_CLAIMS;
+  prior.lastSettledEventSeq = priorEvents.length; // settled truth extends through the fixture history
   const cp = await capture([LISTING], prior, priorEvents);
   assert.deepEqual(cp.txn.candidate.graphRemovals, [oldest], 'the deterministic pruning removes exactly the stalest node');
   assert.equal(V(cp), null, 'capacity pruning validates under the causal proof');

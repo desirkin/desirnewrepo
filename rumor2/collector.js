@@ -65,8 +65,6 @@ export function startRumor2({
   now = () => Date.now(),
   intervalMs = 15_000,
   checkpointStore = null,
-  appendEvent = null,
-  hasEvent = null, // (record) => boolean — injectable bounded source reconciliation
   contact = process.env.SERPENT_HTTP_CONTACT ?? null,
   enabled = process.env.RUMOR2_ENABLED === 'true',
   timeoutMs = undefined,
@@ -76,10 +74,24 @@ export function startRumor2({
   edgarCiks = process.env.RUMOR2_EDGAR_CIKS ?? '',
   edgarForms = process.env.RUMOR2_EDGAR_FORMS ?? '',
   ofacEnabled = process.env.RUMOR2_OFAC_ENABLED === 'true',
-  // derived-truth closeout #3: injectable reader of the FULL append-only
-  // settled event history — the authoritative witness restore replays to
-  // prove the checkpoint's derived caches. Returns { events } or { error }.
-  readEvents = null,
+  // Event-root seal (closeout #4): the AUTHORITATIVE append-only event
+  // journal, injected from application composition (fly.js wires the
+  // PostgreSQL-backed store). Contract:
+  //   append(records) -> { ok: true, lastSeq } — atomic batch; an exact
+  //     byte-identical re-append of a (type, sourceEventId) identity is
+  //     collapsed (crash window); the same identity over an ALTERED
+  //     payload refuses the WHOLE batch with reason 'CORRUPTION: ...';
+  //     other failures return { ok: false, reason } and NOTHING lands.
+  //   read() -> { events, lastSeq } (full history in settlement order,
+  //     seq of events[i] is i+1, contiguity proven by the store) |
+  //     { corrupt } | { unavailable } | { notConfigured }.
+  // When absent, a local file journal over events.jsonl serves — honestly
+  // non-durable, exactly as local-only checkpointing already is.
+  journal = null,
+  // best-effort local mirror of every journaled event (feeds the Memory
+  // mirror's events.jsonl tail). A mirror failure NEVER rolls back
+  // authoritative truth; a missing or forged mirror file affects nothing.
+  mirrorEvent = undefined,
 } = {}) {
   if (!enabled) {
     // dark and silent: zero network, zero timers, zero authority
@@ -87,20 +99,16 @@ export function startRumor2({
   }
 
   const dir = () => path.join(dataDir(), 'rumor2');
-  const append =
-    appendEvent ??
-    ((record) => {
-      appendJsonl(path.join(dir(), 'events.jsonl'), record);
-    });
-  // Bounded source reconciliation (RECONCILE_TAIL_BYTES): an owed event is
-  // proven present by exact (type, sourceEventId) match within the stream
-  // TAIL only — a transaction settles within a tick of its creation, so its
-  // events live at the tail; anything unprovable is re-appended and
-  // canonical Memory's semantic dedupe makes the exact replay harmless.
-  const defaultHasEvent = (record) => {
+  const eventsFile = () => path.join(dir(), 'events.jsonl');
+
+  // Bounded tail lookup (RECONCILE_TAIL_BYTES) for the LOCAL FILE journal:
+  // a transaction settles within a tick of its creation, so its events live
+  // at the tail; the found record is returned so the duplicate law can
+  // compare payloads (first truth stands, an altered payload is corruption).
+  const tailFind = (record) => {
     try {
-      const file = path.join(dir(), 'events.jsonl');
-      if (!existsSync(file)) return false;
+      const file = eventsFile();
+      if (!existsSync(file)) return undefined;
       const size = statSync(file).size;
       const start = Math.max(0, size - RECONCILE_TAIL_BYTES);
       const fd = openSync(file, 'r');
@@ -117,42 +125,99 @@ export function startRumor2({
         if (!t) continue;
         try {
           const rec = JSON.parse(t);
-          if (rec.type === record.type && rec.sourceEventId === record.sourceEventId) return true;
+          if (rec.type === record.type && rec.sourceEventId === record.sourceEventId) return rec;
         } catch {
           // a torn tail line proves nothing — keep scanning
         }
       }
-      return false;
+      return undefined;
     } catch {
-      return false; // unprovable => re-append the exact record; dedupe absorbs it
+      return undefined; // unprovable => append the exact record; the duplicate law absorbs an exact replay
     }
   };
-  const proven = hasEvent ?? defaultHasEvent;
 
-  // full-history reader for restore replay: the whole append-only log, in
-  // append (settlement) order. A torn FINAL line is the legitimate
-  // crash-window artifact and is tolerated per the existing durability
-  // law; a malformed line anywhere else is corrupt history — fail closed.
-  const defaultReadEvents = () => {
-    try {
-      const file = path.join(dir(), 'events.jsonl');
-      if (!existsSync(file)) return { events: [] };
-      const lines = readFileSync(file, 'utf8').split('\n');
-      const events = [];
-      for (let i = 0; i < lines.length; i++) {
-        const t = lines[i].trim();
-        if (!t) continue;
-        try {
-          events.push(JSON.parse(t));
-        } catch {
-          const laterContent = lines.slice(i + 1).some((l) => l.trim() !== '');
-          if (laterContent) return { error: `event history corrupt at line ${i + 1}` };
-          // torn tail from a crash mid-append — proves nothing, invalidates nothing
+  // The LOCAL FILE journal — the fallback authority when no durable journal
+  // is injected (local-only runs), and the exact same closed contract the
+  // durable store speaks. A torn FINAL line is the legitimate crash-window
+  // artifact and is tolerated; a malformed line anywhere else is corrupt
+  // history — fail closed. Unlike the PostgreSQL journal its batches are
+  // not atomic; the write-ahead transaction slot plus the duplicate law
+  // make a torn batch settle cleanly on restart, exactly as before.
+  const fileJournal = () => {
+    let count = null; // lazily proven from a full read, advanced per append
+    const read = async () => {
+      try {
+        const file = eventsFile();
+        if (!existsSync(file)) return { events: [], lastSeq: 0 };
+        const lines = readFileSync(file, 'utf8').split('\n');
+        const events = [];
+        for (let i = 0; i < lines.length; i++) {
+          const t = lines[i].trim();
+          if (!t) continue;
+          try {
+            events.push(JSON.parse(t));
+          } catch {
+            const laterContent = lines.slice(i + 1).some((l) => l.trim() !== '');
+            if (laterContent) return { corrupt: `event history corrupt at line ${i + 1}` };
+            // torn tail from a crash mid-append — proves nothing, invalidates nothing
+          }
         }
+        return { events, lastSeq: events.length };
+      } catch (err) {
+        return { unavailable: boundedError(err.message) };
       }
-      return { events };
+    };
+    return {
+      read,
+      async append(records) {
+        if (count === null) {
+          const r = await read();
+          if (r.corrupt) return { ok: false, reason: `CORRUPTION: ${r.corrupt}` };
+          if (r.unavailable) return { ok: false, reason: `UNAVAILABLE: ${r.unavailable}` };
+          count = r.lastSeq;
+        }
+        try {
+          for (const rec of records) {
+            if (typeof rec.sourceEventId === 'string') {
+              const existing = tailFind(rec);
+              if (existing !== undefined) {
+                if (canonicalJson(existing) !== canonicalJson(rec))
+                  return { ok: false, reason: 'CORRUPTION: duplicate event identity with an altered payload' };
+                continue; // exact crash re-append — already durable
+              }
+            }
+            appendJsonl(eventsFile(), rec);
+            count += 1;
+          }
+          return { ok: true, lastSeq: count };
+        } catch (err) {
+          return { ok: false, reason: `UNAVAILABLE: ${boundedError(err.message)}` };
+        }
+      },
+    };
+  };
+
+  // journal + mirror selection is sticky for the life of the collector; the
+  // fallback to the local file journal happens once, at first init, when no
+  // durable journal is configured at all
+  let activeJournal = null;
+  let mirror = null;
+  let mirrorFailures = 0;
+  const chooseJournal = (useFileFallback) => {
+    if (activeJournal) return;
+    activeJournal = !useFileFallback && journal ? journal : fileJournal();
+    const journalIsFile = activeJournal !== journal;
+    // default mirror: the events.jsonl tail (Memory mirror food) — unless
+    // the file IS the journal, in which case mirroring would double-write
+    mirror = mirrorEvent !== undefined ? mirrorEvent : journalIsFile ? null : (rec) => appendJsonl(eventsFile(), rec);
+  };
+  const mirrorSafe = (record) => {
+    if (!mirror) return;
+    try {
+      mirror(record);
     } catch (err) {
-      return { error: boundedError(err.message) };
+      mirrorFailures += 1; // the mirror is best-effort by law: truth never rolls back
+      log(`RUMOR2 mirror write failed (authoritative truth unaffected): ${boundedError(err.message)}`);
     }
   };
 
@@ -191,97 +256,159 @@ export function startRumor2({
 
   const counters = () => cp.counters;
 
-  async function ensureInit() {
-    if (lifecycle === 'FRESH_START' || lifecycle === 'RESTORED') return true;
-    if (!checkpointStore) {
-      // no durable authority wired at all — run local-only, honestly labeled
-      if (!cp) cp = emptyCheckpoint(PROVIDER_IDS, now());
-      lifecycle = 'FRESH_START';
-      durability = 'NOT_CONFIGURED';
+  // a journal read that is not a history: connectivity degrades (retryable),
+  // corruption withholds (never guessed over)
+  function journalReadFailure(jr) {
+    if (jr.unavailable) {
+      lifecycle = 'FAILED_DURABILITY';
+      withholdReason = boundedError(jr.unavailable);
       return true;
     }
-    const r = await checkpointStore.load();
-    if (r.outcome === 'LOADED') {
-      const err = validateRumor2Checkpoint(r.state, { providerIds: [...PROVIDER_IDS] });
-      if (err) {
-        // corrupt durable truth is WITHHELD — never silently fresh-started over
-        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
-        withholdReason = boundedError(err);
-        return false;
-      }
-      // truth-boundary closeout #2: the validator admits ONLY the complete
-      // current provider set, so no runtime top-up or automatic legacy
-      // upgrade exists — an elder or partial provider map is WITHHELD above.
-      //
-      // Derived-truth closeout #3: DERIVED STATE MUST NOT AUTHENTICATE
-      // ITSELF. Replay the append-only settled event history through the
-      // same production transitions and cross-check the checkpoint's
-      // derived caches. The still-owed transaction's events (if any) are
-      // excluded — they are appended-but-unadopted truth the A1 settle
-      // path will adopt through the transaction gate.
-      //  - graph and counters must EQUAL their replay: a mismatch could be
-      //    a forged checkpoint OR a truncated log, and neither may be
-      //    guessed over — WITHHELD with a truthful reason;
-      //  - seenIds are purely derivable, and rebuilding them from settled
-      //    truth is safe in both failure directions (a fabricated id is
-      //    dropped so real evidence is never suppressed; a missing id is
-      //    restored so no duplicate truth is minted) — so seen state is
-      //    DERIVED ON RESTORE, with the checkpoint copy kept only as an
-      //    integrity diagnostic.
-      const hist = await (readEvents ?? defaultReadEvents)();
-      if (hist.error) {
-        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
-        withholdReason = boundedError(`EVENT_HISTORY_INVALID: ${hist.error}`);
-        return false;
-      }
-      const replayed = replayRumor2SettledTruth(hist.events ?? [], {
-        providerIds: [...PROVIDER_IDS],
-        excludeSourceId: r.state.txn?.sourceObservationId ?? null,
-      });
-      if (!replayed.ok) {
-        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
-        withholdReason = boundedError(replayed.error);
-        return false;
-      }
-      if (canonicalJson(r.state.graph) !== canonicalJson(replayed.graph)) {
-        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
-        withholdReason = 'GRAPH_REPLAY_MISMATCH: durable graph is not the consequence of settled evidence';
-        return false;
-      }
-      for (const k of ['sourcesObserved', 'claimsObserved', 'packetsProduced', 'packetsWithheld']) {
-        if (r.state.counters[k] !== replayed.counters[k]) {
-          lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
-          withholdReason = `COUNTER_REPLAY_MISMATCH: ${k} disagrees with settled evidence`;
-          return false;
-        }
-      }
-      cp = r.state;
-      for (const pid of PROVIDER_IDS) {
-        if (JSON.stringify(cp.providers[pid].seenIds) !== JSON.stringify(replayed.seenIds[pid]))
-          restoreNote = 'SEEN_STATE_REBUILT: checkpoint seen state disagreed with settled evidence and was derived from canonical replay';
-        cp.providers[pid].seenIds = replayed.seenIds[pid]; // seen state is DERIVED, never self-declared
-      }
-      lifecycle = 'RESTORED';
-      durability = 'DURABLE';
+    if (jr.corrupt) {
+      lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+      withholdReason = boundedError(`EVENT_HISTORY_INVALID: ${jr.corrupt}`);
       return true;
     }
-    if (r.outcome === 'NOT_FOUND') {
-      cp = emptyCheckpoint(PROVIDER_IDS, now());
-      lifecycle = 'FRESH_START'; // honest fresh start: the database answered "none exists"
-      durability = 'DURABLE';
-      return true;
-    }
-    if (r.outcome === 'NOT_CONFIGURED') {
-      if (!cp) cp = emptyCheckpoint(PROVIDER_IDS, now());
-      lifecycle = 'FRESH_START';
-      durability = 'NOT_CONFIGURED';
-      return true;
-    }
-    // UNAVAILABLE: the durable authority exists but cannot be read — degrade,
-    // do not consume sources while pretending state is safe
-    lifecycle = 'FAILED_DURABILITY';
-    withholdReason = boundedError(r.error ?? 'durable core unavailable');
     return false;
+  }
+
+  // No checkpoint exists (NOT_FOUND / NOT_CONFIGURED). The checkpoint is a
+  // DERIVED CACHE of the event journal, so its absence never erases settled
+  // truth: a non-empty valid journal REBUILDS the caches; only a genuinely
+  // empty journal is an honest fresh start.
+  function initFromJournal(jr) {
+    if (journalReadFailure(jr)) return false;
+    if (jr.lastSeq === 0) {
+      cp = emptyCheckpoint(PROVIDER_IDS, now());
+      lifecycle = 'FRESH_START'; // honest: no checkpoint AND no history exist
+      return true;
+    }
+    const replayed = replayRumor2SettledTruth(jr.events, { providerIds: [...PROVIDER_IDS], excludeSourceId: null });
+    if (!replayed.ok) {
+      lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+      withholdReason = boundedError(replayed.error);
+      return false;
+    }
+    cp = emptyCheckpoint(PROVIDER_IDS, now());
+    cp.graph = replayed.graph;
+    // `duplicates` is an operational tally that appends no event by design —
+    // it is not replayable and honestly restarts at zero
+    for (const k of Object.keys(replayed.counters)) cp.counters[k] = replayed.counters[k];
+    for (const pid of PROVIDER_IDS) cp.providers[pid].seenIds = replayed.seenIds[pid];
+    cp.lastSettledEventSeq = jr.lastSeq;
+    lifecycle = 'REBUILT_FROM_EVENT_HISTORY';
+    restoreNote = 'REBUILT_FROM_EVENT_HISTORY: no durable checkpoint existed; derived caches were rebuilt from the authoritative event journal';
+    return true;
+  }
+
+  function initFromCheckpoint(state, jr) {
+    // truth-boundary closeout #2: the validator admits ONLY the complete
+    // current provider set and (v4) the event-root watermark — an elder or
+    // partial checkpoint is WITHHELD pending explicit operator migration.
+    const err = validateRumor2Checkpoint(state, { providerIds: [...PROVIDER_IDS] });
+    if (err) {
+      lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+      withholdReason = boundedError(err);
+      return false;
+    }
+    if (journalReadFailure(jr)) return false;
+    // EVENT-ROOT SEAL: the watermark names how far settled truth extends in
+    // the authoritative journal. A journal that ends before it LOST history
+    // this checkpoint depends on — WITHHELD, never guessed over.
+    if (jr.lastSeq < state.lastSettledEventSeq) {
+      lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+      withholdReason = `EVENT_HISTORY_MISSING: journal ends at ${jr.lastSeq} but settled truth extends to ${state.lastSettledEventSeq}`;
+      return false;
+    }
+    // deterministic tail reconciliation (the write-order law): every
+    // truth-bearing event beyond the watermark must belong to the still-owed
+    // transaction — appended-but-not-yet-adopted truth the A1 settle path
+    // adopts exactly once. An unexplained truth-bearing tail is corruption.
+    const owedRoot = state.txn?.sourceObservationId ?? null;
+    for (let i = state.lastSettledEventSeq; i < jr.events.length; i++) {
+      const ev = jr.events[i];
+      if (!ev || typeof ev !== 'object' || typeof ev.type !== 'string') break; // replay below fails closed on shape
+      if (ev.type === 'RUMOR2_STARTED' || ev.type === 'RUMOR2_PROVIDER_FAILURE') continue;
+      if (ev.type === 'RUMOR2_WITHHELD' && typeof ev.sourceEventId !== 'string') continue;
+      const root = typeof ev.sourceEventId === 'string' ? ev.sourceEventId.split('|')[0] : null;
+      if (root === null || root !== owedRoot) {
+        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+        withholdReason = 'EVENT_HISTORY_INVALID: truth beyond the checkpoint watermark belongs to no owed transaction';
+        return false;
+      }
+    }
+    // Derived-truth closeout #3: DERIVED STATE MUST NOT AUTHENTICATE
+    // ITSELF. Replay the validated settled history through the same
+    // production transitions and cross-check the checkpoint's derived
+    // caches; graph/counter disagreement is WITHHELD (a mismatch could be a
+    // forged checkpoint OR lost history — neither may be guessed over),
+    // while purely-derivable seen state is DERIVED ON RESTORE.
+    const replayed = replayRumor2SettledTruth(jr.events, { providerIds: [...PROVIDER_IDS], excludeSourceId: owedRoot });
+    if (!replayed.ok) {
+      lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+      withholdReason = boundedError(replayed.error);
+      return false;
+    }
+    if (canonicalJson(state.graph) !== canonicalJson(replayed.graph)) {
+      lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+      withholdReason = 'GRAPH_REPLAY_MISMATCH: durable graph is not the consequence of settled evidence';
+      return false;
+    }
+    for (const k of ['sourcesObserved', 'claimsObserved', 'packetsProduced', 'packetsWithheld']) {
+      if (state.counters[k] !== replayed.counters[k]) {
+        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+        withholdReason = `COUNTER_REPLAY_MISMATCH: ${k} disagrees with settled evidence`;
+        return false;
+      }
+    }
+    cp = state;
+    for (const pid of PROVIDER_IDS) {
+      if (JSON.stringify(cp.providers[pid].seenIds) !== JSON.stringify(replayed.seenIds[pid]))
+        restoreNote = 'SEEN_STATE_REBUILT: checkpoint seen state disagreed with settled evidence and was derived from canonical replay';
+      cp.providers[pid].seenIds = replayed.seenIds[pid]; // seen state is DERIVED, never self-declared
+    }
+    lifecycle = 'RESTORED';
+    durability = 'DURABLE';
+    return true;
+  }
+
+  async function ensureInit() {
+    if (lifecycle === 'FRESH_START' || lifecycle === 'RESTORED' || lifecycle === 'REBUILT_FROM_EVENT_HISTORY') return true;
+    chooseJournal(false);
+    const r = checkpointStore ? await checkpointStore.load() : { outcome: 'NOT_CONFIGURED' };
+    if (r.outcome === 'NOT_CONFIGURED') {
+      // no durable core at all — run local-only, honestly labeled; if the
+      // injected journal has no durable core either, the local file journal
+      // serves (the one-time fallback)
+      durability = 'NOT_CONFIGURED';
+      let jr = await activeJournal.read();
+      if (jr.notConfigured) {
+        activeJournal = null;
+        chooseJournal(true);
+        jr = await activeJournal.read();
+      }
+      return initFromJournal(jr);
+    }
+    if (r.outcome === 'UNAVAILABLE') {
+      // the durable authority exists but cannot be read — degrade, do not
+      // consume sources while pretending state is safe
+      lifecycle = 'FAILED_DURABILITY';
+      withholdReason = boundedError(r.error ?? 'durable core unavailable');
+      return false;
+    }
+    const jr = await activeJournal.read();
+    if (jr.notConfigured) {
+      // a durable checkpoint authority without a durable event journal is a
+      // composition fault — never guess over it
+      lifecycle = 'FAILED_DURABILITY';
+      withholdReason = 'event journal not configured while the durable core is';
+      return false;
+    }
+    if (r.outcome === 'LOADED') return initFromCheckpoint(r.state, jr);
+    // NOT_FOUND — the database answered: no checkpoint exists. The event
+    // journal, not the checkpoint, decides between rebuild and fresh start.
+    durability = 'DURABLE';
+    return initFromJournal(jr);
   }
 
   async function saveCheckpoint() {
@@ -329,23 +456,28 @@ export function startRumor2({
     });
   }
 
-  const safeAppend = (record, r) => {
+  // one non-truth-bearing record into the authoritative journal (health/
+  // lifecycle/diagnostic events) — best-effort: a failure is counted and
+  // logged, never invents or blocks truth
+  const safeAppend = async (record, r) => {
     try {
-      append(record);
+      const res = await activeJournal.append([record]);
+      if (!res.ok) throw new Error(res.reason ?? 'append failed');
+      mirrorSafe(record);
       return true;
     } catch (err) {
-      r.appendFailures += 1;
-      log(`RUMOR2 append failed (item stays unseen, will retry): ${boundedError(err.message)}`);
+      if (r) r.appendFailures += 1;
+      log(`RUMOR2 append failed (contained): ${boundedError(err.message)}`);
       return false;
     }
   };
 
-  function providerFailure(p, r, cps, reason, { retryAfter = null, http = null } = {}) {
+  async function providerFailure(p, r, cps, reason, { retryAfter = null, http = null } = {}) {
     cps.consecutiveFailures += 1;
     cps.backoffUntil = now() + (retryAfter !== null ? boundedRetryAfterMs(retryAfter) : cooldownMs(cps.consecutiveFailures));
     r.lastFailureReason = boundedError(reason);
     r.lastHttpStatus = http;
-    safeAppend({ type: 'RUMOR2_PROVIDER_FAILURE', ts: iso(now()), provider: p.id, reason: boundedError(reason), httpStatus: http, consecutiveFailures: cps.consecutiveFailures }, r);
+    await safeAppend({ type: 'RUMOR2_PROVIDER_FAILURE', ts: iso(now()), provider: p.id, reason: boundedError(reason), httpStatus: http, consecutiveFailures: cps.consecutiveFailures }, r);
   }
 
   // ---- A1 write-ahead item transactions ------------------------------------
@@ -374,7 +506,10 @@ export function startRumor2({
       sourceEventId: id,
       provider: p.id,
       title: item.title,
-      summary: item.summary.slice(0, 1000),
+      // event-root seal: the durable event carries the FULL bounded summary
+      // — the complete identity-bearing facts — so the settled history alone
+      // can re-derive its own r2s identity forever
+      summary: item.summary,
       link: item.link,
       guid: item.guid,
       publishedTs: clocks.publishedTs,
@@ -484,12 +619,13 @@ export function startRumor2({
     };
   }
 
-  // SETTLE: every prepared event either proves present in the bounded
-  // stream tail (ACKED) or the EXACT prepared record is appended. Only when
-  // the complete bundle is durable does the candidate state get adopted —
-  // exactly once — and the transaction clear. A failed append retains the
-  // transaction whole; nothing is regenerated, nothing partial advances.
-  function settlePendingTxn() {
+  // SETTLE: the complete prepared bundle is appended to the AUTHORITATIVE
+  // journal as one batch (the journal collapses exact crash re-appends and
+  // refuses altered payloads as corruption). Only when the whole bundle is
+  // durable does the candidate state get adopted — exactly once — the
+  // event-root watermark advance, and the transaction clear. A failed
+  // append retains the transaction whole; ZERO truth advances.
+  async function settlePendingTxn() {
     const txn = cp.txn;
     if (!txn) return true;
     // A2 TRUST GATE: no prepared event appends until the ENTIRE transaction
@@ -509,10 +645,21 @@ export function startRumor2({
       return false;
     }
     const r = runtime[txn.provider];
-    for (const ev of txn.events) {
-      if (proven(ev)) continue; // already durably represented — ACKED
-      if (!safeAppend(ev, r)) return false; // retained; retried next tick/restart
+    const res = await activeJournal.append(txn.events);
+    if (!res.ok) {
+      if (String(res.reason ?? '').startsWith('CORRUPTION')) {
+        // the durable journal contradicts the validated transaction — the
+        // root of truth is corrupt; fail closed, never overwrite
+        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+        withholdReason = boundedError(`EVENT_HISTORY_INVALID: ${res.reason}`);
+        return false;
+      }
+      r.appendFailures += 1;
+      log(`RUMOR2 journal append failed (zero truth advances, will retry): ${boundedError(res.reason ?? 'unknown')}`);
+      return false; // retained whole; retried next tick/restart
     }
+    cp.lastSettledEventSeq = res.lastSeq; // settled truth now extends this far
+    for (const ev of txn.events) mirrorSafe(ev);
     const cps = cp.providers[txn.provider];
     cps.seenIds = txn.candidate.seenIds;
     for (const k of txn.candidate.graphRemovals ?? []) delete cp.graph.claims[k];
@@ -533,7 +680,7 @@ export function startRumor2({
       // a causally impossible item never earns an identity or a transaction;
       // it is refused outright with a bounded diagnostic
       r.withheldItems += 1;
-      safeAppend({ type: 'RUMOR2_WITHHELD', ts: iso(now()), provider: p.id, reason: clocks.error, title: item.title }, r);
+      await safeAppend({ type: 'RUMOR2_WITHHELD', ts: iso(now()), provider: p.id, reason: clocks.error, title: item.title }, r);
       return true;
     }
     const id = sourceObservationIdentity({
@@ -561,7 +708,7 @@ export function startRumor2({
       cp.txn = null;
       return false;
     }
-    if (!settlePendingTxn()) return false; // owed evidence — no new polling until it settles
+    if (!(await settlePendingTxn())) return false; // owed evidence — no new polling until it settles
     return true;
   }
 
@@ -628,11 +775,11 @@ export function startRumor2({
       return true;
     }
     if (res.outcome === 'RATE_LIMITED') {
-      providerFailure(p, r, cps, 'rate limited (429)', { retryAfter: res.retryAfter, http: 429 });
+      await providerFailure(p, r, cps, 'rate limited (429)', { retryAfter: res.retryAfter, http: 429 });
       return true;
     }
     if (res.outcome === 'FAILED') {
-      providerFailure(p, r, cps, res.reason, { http: res.status ?? null });
+      await providerFailure(p, r, cps, res.reason, { http: res.status ?? null });
       return true;
     }
     // fetch success is not parse success, and parse success is not evidence
@@ -665,7 +812,7 @@ export function startRumor2({
       }
     } else parsed = parseFeed(res.text);
     if (!parsed.ok) {
-      providerFailure(p, r, cps, `feed rejected: ${parsed.reason}`, { http: res.status });
+      await providerFailure(p, r, cps, `feed rejected: ${parsed.reason}`, { http: res.status });
       return true;
     }
     // OBSERVATION truth is immediate: the fetch genuinely succeeded, so
@@ -710,7 +857,7 @@ export function startRumor2({
         } catch (err) {
           // detail not persistable => the anchor must NOT advance; the next
           // poll re-fetches and retries — no partial snapshot truth
-          providerFailure(p, r, cps, `snapshot persist failed: ${err.message}`, { http: res.status });
+          await providerFailure(p, r, cps, `snapshot persist failed: ${err.message}`, { http: res.status });
           return true;
         }
         cps.snapshot = snapshotCommit.anchor;
@@ -775,6 +922,10 @@ export function startRumor2({
       pendingTransactionProvider: cp?.txn?.provider ?? null,
       pendingAppendFailures: Object.values(runtime).reduce((n, r) => n + r.appendFailures, 0),
       seenIdCap: MAX_SEEN_IDS,
+      // event-root seal: how far settled truth extends in the authoritative
+      // journal, and best-effort mirror health (never truth-bearing)
+      lastSettledEventSeq: cp?.lastSettledEventSeq ?? null,
+      mirrorFailures,
     };
     try {
       atomicWriteJson(path.join(dir(), 'status.json'), status);
@@ -789,11 +940,8 @@ export function startRumor2({
     const ok = await ensureInit();
     if (!startedAnnounced && cp) {
       startedAnnounced = true;
-      try {
-        append({ type: 'RUMOR2_STARTED', ts: iso(now()), lifecycle, durability, checkpointRevision: cp.revision });
-      } catch {
-        // startup announcement is best-effort; observation truth is per-item
-      }
+      // startup announcement is best-effort; observation truth is per-item
+      await safeAppend({ type: 'RUMOR2_STARTED', ts: iso(now()), lifecycle, durability, checkpointRevision: cp.revision }, null);
     }
     if (!ok) {
       writeStatus();
@@ -810,7 +958,7 @@ export function startRumor2({
     // A1 RECOVERY ORDER: an owed item transaction settles BEFORE any new
     // provider polling — no new feed items while exact evidence is owed.
     if (cp.txn !== null) {
-      const settled = settlePendingTxn();
+      const settled = await settlePendingTxn();
       await saveCheckpoint();
       if (!settled) {
         writeStatus();
@@ -824,7 +972,7 @@ export function startRumor2({
         if (!(await pollProvider(p))) halted = true; // owed truth — stop every ear this tick
       } catch (err) {
         // one ear's failure never silences the others
-        providerFailure(p, runtime[p.id], cp.providers[p.id], `internal: ${err.message}`);
+        await providerFailure(p, runtime[p.id], cp.providers[p.id], `internal: ${err.message}`);
       }
     }
     await saveCheckpoint();
