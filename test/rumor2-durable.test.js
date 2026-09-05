@@ -121,7 +121,11 @@ if (!TEST_URL) {
       const alive = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       const store = rumor2CheckpointStore({ persistence: alive });
       const feed = () => mkRes(200, rss([{ title: 'historic post', guid: 'h1', desc: 'nothing coin-specific' }]));
-      const run = async (events) => {
+      // ONE durable append-only event log across restarts — it is the
+      // restore witness the checkpoint's derived state is proven against
+      const log = [];
+      const run = async () => {
+        const before = log.length;
         const clock = { ms: T0 };
         const c = startRumor2({
           log: () => {},
@@ -130,7 +134,8 @@ if (!TEST_URL) {
           now: () => clock.ms,
           intervalMs: 2_147_000_000,
           checkpointStore: store,
-          appendEvent: (r) => events.push(r),
+          appendEvent: (r) => log.push(structuredClone(r)),
+          readEvents: async () => ({ events: structuredClone(log) }),
           contact: null,
           enabled: true,
           timeoutMs: 50,
@@ -139,16 +144,14 @@ if (!TEST_URL) {
         await c.tickOnce();
         const dup = c.internals.runtime.KRAKEN_OFFICIAL.duplicates;
         await c.stop();
-        return dup;
+        return { dup, appended: log.slice(before) };
       };
-      const events1 = [];
-      const dup1 = await run(events1);
-      assert.equal(events1.filter((e) => e.type === 'RUMOR2_SOURCE_OBSERVED').length, 1);
-      assert.equal(dup1, 0);
-      const events2 = [];
-      const dup2 = await run(events2); // full restart over the durable checkpoint
-      assert.equal(events2.filter((e) => e.type === 'RUMOR2_SOURCE_OBSERVED').length, 0, 'history is remembered, not replayed');
-      assert.equal(dup2, 1, 'the replayed feed item is a counted duplicate');
+      const run1 = await run();
+      assert.equal(run1.appended.filter((e) => e.type === 'RUMOR2_SOURCE_OBSERVED').length, 1);
+      assert.equal(run1.dup, 0);
+      const run2 = await run(); // full restart over the durable checkpoint + durable log
+      assert.equal(run2.appended.filter((e) => e.type === 'RUMOR2_SOURCE_OBSERVED').length, 0, 'history is remembered, not replayed');
+      assert.equal(run2.dup, 1, 'the replayed feed item is a counted duplicate');
     } finally {
       await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
       await db.end();

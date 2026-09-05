@@ -84,6 +84,7 @@ function boot({ store, stream, responses = {}, clockMs = T1, failAll = false, op
       stream.push(structuredClone(rec));
     },
     hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
+    readEvents: async () => ({ events: structuredClone(stream) }), // the durable log IS the restore witness
     contact: 'ops@example.com',
     enabled: true,
     timeoutMs: 200,

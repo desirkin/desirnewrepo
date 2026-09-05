@@ -46,6 +46,8 @@ import {
   emptyCheckpoint,
   MAX_ETAG_CHARS,
   MAX_LAST_MODIFIED_CHARS,
+  canonicalJson,
+  replayRumor2SettledTruth,
   rememberSeen,
   propositionIdentity,
   deriveTxnGraphDelta,
@@ -74,6 +76,10 @@ export function startRumor2({
   edgarCiks = process.env.RUMOR2_EDGAR_CIKS ?? '',
   edgarForms = process.env.RUMOR2_EDGAR_FORMS ?? '',
   ofacEnabled = process.env.RUMOR2_OFAC_ENABLED === 'true',
+  // derived-truth closeout #3: injectable reader of the FULL append-only
+  // settled event history — the authoritative witness restore replays to
+  // prove the checkpoint's derived caches. Returns { events } or { error }.
+  readEvents = null,
 } = {}) {
   if (!enabled) {
     // dark and silent: zero network, zero timers, zero authority
@@ -123,6 +129,33 @@ export function startRumor2({
   };
   const proven = hasEvent ?? defaultHasEvent;
 
+  // full-history reader for restore replay: the whole append-only log, in
+  // append (settlement) order. A torn FINAL line is the legitimate
+  // crash-window artifact and is tolerated per the existing durability
+  // law; a malformed line anywhere else is corrupt history — fail closed.
+  const defaultReadEvents = () => {
+    try {
+      const file = path.join(dir(), 'events.jsonl');
+      if (!existsSync(file)) return { events: [] };
+      const lines = readFileSync(file, 'utf8').split('\n');
+      const events = [];
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        if (!t) continue;
+        try {
+          events.push(JSON.parse(t));
+        } catch {
+          const laterContent = lines.slice(i + 1).some((l) => l.trim() !== '');
+          if (laterContent) return { error: `event history corrupt at line ${i + 1}` };
+          // torn tail from a crash mid-append — proves nothing, invalidates nothing
+        }
+      }
+      return { events };
+    } catch (err) {
+      return { error: boundedError(err.message) };
+    }
+  };
+
   const registry = buildCoinRegistry(config.universe);
   // RUMOR-2B1: EDGAR whitelist configuration is parsed strictly ONCE — one
   // bad token unconfigures the ear with a truthful reason, never a silently
@@ -131,6 +164,7 @@ export function startRumor2({
   let lifecycle = 'INITIALIZING'; // FRESH_START | RESTORED | WITHHELD_INVALID_CHECKPOINT | FAILED_DURABILITY
   let durability = 'UNKNOWN'; // DURABLE | NOT_CONFIGURED | UNAVAILABLE
   let withholdReason = null;
+  let restoreNote = null; // e.g. SEEN_STATE_REBUILT — derived cache rebuilt from canonical settled truth
   let cp = null;
   let startedAnnounced = false;
   let closed = false;
@@ -175,10 +209,58 @@ export function startRumor2({
         withholdReason = boundedError(err);
         return false;
       }
-      cp = r.state;
       // truth-boundary closeout #2: the validator admits ONLY the complete
       // current provider set, so no runtime top-up or automatic legacy
-      // upgrade exists — an elder or partial provider map is WITHHELD above
+      // upgrade exists — an elder or partial provider map is WITHHELD above.
+      //
+      // Derived-truth closeout #3: DERIVED STATE MUST NOT AUTHENTICATE
+      // ITSELF. Replay the append-only settled event history through the
+      // same production transitions and cross-check the checkpoint's
+      // derived caches. The still-owed transaction's events (if any) are
+      // excluded — they are appended-but-unadopted truth the A1 settle
+      // path will adopt through the transaction gate.
+      //  - graph and counters must EQUAL their replay: a mismatch could be
+      //    a forged checkpoint OR a truncated log, and neither may be
+      //    guessed over — WITHHELD with a truthful reason;
+      //  - seenIds are purely derivable, and rebuilding them from settled
+      //    truth is safe in both failure directions (a fabricated id is
+      //    dropped so real evidence is never suppressed; a missing id is
+      //    restored so no duplicate truth is minted) — so seen state is
+      //    DERIVED ON RESTORE, with the checkpoint copy kept only as an
+      //    integrity diagnostic.
+      const hist = await (readEvents ?? defaultReadEvents)();
+      if (hist.error) {
+        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+        withholdReason = boundedError(`EVENT_HISTORY_INVALID: ${hist.error}`);
+        return false;
+      }
+      const replayed = replayRumor2SettledTruth(hist.events ?? [], {
+        providerIds: [...PROVIDER_IDS],
+        excludeSourceId: r.state.txn?.sourceObservationId ?? null,
+      });
+      if (!replayed.ok) {
+        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+        withholdReason = boundedError(replayed.error);
+        return false;
+      }
+      if (canonicalJson(r.state.graph) !== canonicalJson(replayed.graph)) {
+        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+        withholdReason = 'GRAPH_REPLAY_MISMATCH: durable graph is not the consequence of settled evidence';
+        return false;
+      }
+      for (const k of ['sourcesObserved', 'claimsObserved', 'packetsProduced', 'packetsWithheld']) {
+        if (r.state.counters[k] !== replayed.counters[k]) {
+          lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+          withholdReason = `COUNTER_REPLAY_MISMATCH: ${k} disagrees with settled evidence`;
+          return false;
+        }
+      }
+      cp = r.state;
+      for (const pid of PROVIDER_IDS) {
+        if (JSON.stringify(cp.providers[pid].seenIds) !== JSON.stringify(replayed.seenIds[pid]))
+          restoreNote = 'SEEN_STATE_REBUILT: checkpoint seen state disagreed with settled evidence and was derived from canonical replay';
+        cp.providers[pid].seenIds = replayed.seenIds[pid]; // seen state is DERIVED, never self-declared
+      }
       lifecycle = 'RESTORED';
       durability = 'DURABLE';
       return true;
@@ -683,6 +765,7 @@ export function startRumor2({
       lifecycle,
       durability,
       withholdReason,
+      restoreNote, // a derived cache rebuilt from canonical settled truth, or null
       providers,
       activeClaims: cp ? Object.keys(cp.graph.claims).length : null,
       counters: cp ? { ...cp.counters } : null,

@@ -803,6 +803,112 @@ export function rememberSeen(seenIds, id) {
   return next.length > MAX_SEEN_IDS ? next.slice(next.length - MAX_SEEN_IDS) : next;
 }
 
+// ---- canonical settled-truth replay (derived-truth closeout #3) ------------
+// DERIVED STATE MUST NOT AUTHENTICATE ITSELF. The append-only settled event
+// stream is the authoritative causal record; the checkpoint's graph, seen
+// state, and counters are DERIVED caches of it. This ONE pure replay walks
+// the settled events in their actual durable settlement order and derives
+// the canonical state through the SAME production transitions live settle
+// uses — rememberSeen for seen state, deriveTxnGraphDelta/observeClaim for
+// the graph, the same counting laws for counters — so restore can prove a
+// persisted derived cache is the consequence of truth actually adopted,
+// and rebuild the purely-derivable seen state from evidence rather than
+// trusting a checkpoint's self-declaration.
+//
+// Replay laws:
+//  - actual event order only (Serpent knowledge order) — never sorted by
+//    publication clock; point-in-time truth cannot be re-ordered;
+//  - the exact live uniqueness rule: a crash re-append of the same
+//    (type, sourceEventId) is the SAME knowledge event, applied once;
+//  - only truth-bearing settled events count: RUMOR2_STARTED and
+//    RUMOR2_PROVIDER_FAILURE are lifecycle/health, and a pre-transaction
+//    withholding (no sourceEventId) was never counted truth;
+//  - events of the checkpoint's still-OWED transaction (excludeSourceId)
+//    are excluded: they are appended-but-not-yet-adopted truth that the A1
+//    settle path will adopt through the transaction gate, not replay;
+//  - a claim event must follow its own settled source observation and must
+//    come from a claim-capable ear — replay can never manufacture claim
+//    authority that live production forbids;
+//  - the `duplicates` counter is an operational tally of suppressed
+//    re-observations that appends NO event by design, so it is NOT
+//    replayable and stays non-authoritative (bounded-validated only).
+export function replayRumor2SettledTruth(events, { providerIds, excludeSourceId = null }) {
+  const fail = (msg) => ({ ok: false, error: boundedError(msg) });
+  if (!Array.isArray(events)) return fail('EVENT_HISTORY_INVALID: history is not a list');
+  const seenIds = {};
+  for (const id of providerIds) seenIds[id] = [];
+  const counters = { sourcesObserved: 0, claimsObserved: 0, packetsProduced: 0, packetsWithheld: 0 };
+  const graph = { claims: {} };
+  const applied = new Set(); // (type|sourceEventId) — the live reconcile uniqueness law
+  // bundle settle is strictly sequential (A1: an owed bundle settles before
+  // any new polling), so a claim's source facts are always among the most
+  // recent source events; the window is bounded, never the whole history
+  const sourceFacts = new Map();
+  for (const e of events) {
+    if (e === null || typeof e !== 'object' || Array.isArray(e) || typeof e.type !== 'string')
+      return fail('EVENT_HISTORY_INVALID: malformed event record');
+    if (e.type === 'RUMOR2_STARTED' || e.type === 'RUMOR2_PROVIDER_FAILURE') continue;
+    if (!RUMOR2_TXN_EVENT_TYPES.includes(e.type)) return fail(`EVENT_HISTORY_INVALID: unknown event type ${String(e.type).slice(0, 40)}`);
+    if (e.type === 'RUMOR2_WITHHELD' && typeof e.sourceEventId !== 'string') continue; // pre-transaction refusal — never counted truth
+    if (typeof e.sourceEventId !== 'string' || e.sourceEventId.length === 0) return fail('EVENT_HISTORY_INVALID: event missing its identity');
+    const rootId = e.sourceEventId.split('|')[0];
+    if (excludeSourceId !== null && rootId === excludeSourceId) continue; // the owed, not-yet-adopted bundle
+    const key = `${e.type}|${e.sourceEventId}`;
+    if (applied.has(key)) continue; // exact crash re-append — the same knowledge event
+    applied.add(key);
+    if (!providerIds.includes(e.provider)) return fail(`EVENT_HISTORY_INVALID: unknown provider ${String(e.provider).slice(0, 40)}`);
+    if (e.type === 'RUMOR2_SOURCE_OBSERVED') {
+      if (!R2S_RE.test(e.sourceEventId)) return fail('EVENT_HISTORY_INVALID: source event identity malformed');
+      if (typeof e.title !== 'string' || typeof e.summary !== 'string' || (e.link !== null && typeof e.link !== 'string'))
+        return fail('EVENT_HISTORY_INVALID: source event facts malformed');
+      if ((e.publishedTs !== null && !isTs(e.publishedTs)) || !isTs(e.retrievedTs) || !isTs(e.knownAtTs))
+        return fail('EVENT_HISTORY_INVALID: source event clocks malformed');
+      // the settled source event's summary IS the canonical bounded graph
+      // excerpt, so the replayed observation is byte-equal to live truth
+      sourceFacts.set(e.sourceEventId, {
+        provider: e.provider,
+        identityFacts: { title: e.title, summary: e.summary, link: e.link },
+        clocks: { publishedTs: e.publishedTs, retrievedTs: e.retrievedTs, knownAtTs: e.knownAtTs },
+      });
+      if (sourceFacts.size > 64) sourceFacts.delete(sourceFacts.keys().next().value);
+      seenIds[e.provider] = rememberSeen(seenIds[e.provider], e.sourceEventId);
+      counters.sourcesObserved += 1;
+    } else if (e.type === 'RUMOR2_CLAIM_OBSERVED') {
+      const src = sourceFacts.get(rootId);
+      if (!src || src.provider !== e.provider) return fail('EVENT_HISTORY_INVALID: claim event without its settled source observation');
+      const meta = providerById(e.provider);
+      if (!meta || !CLAIM_CAPABLE_PROVIDER_KINDS.includes(meta.providerKind))
+        return fail('EVENT_HISTORY_INVALID: claim event from a source-only ear');
+      if (typeof e.symbol !== 'string' || !RUMOR2_CLAIM_TYPES.includes(e.claimType)) return fail('EVENT_HISTORY_INVALID: claim event facts malformed');
+      if (propositionIdentity({ claimType: e.claimType, canonicalCoin: e.symbol, originSourceObservationId: rootId }) !== e.propositionId)
+        return fail('EVENT_HISTORY_INVALID: claim event proposition identity does not re-derive');
+      let delta;
+      try {
+        delta = deriveTxnGraphDelta({
+          graph,
+          providerId: e.provider,
+          sourceType: meta.sourceType,
+          authorityClass: meta.authorityClass,
+          sourceObservationId: rootId,
+          clocks: src.clocks,
+          identityFacts: src.identityFacts,
+          claims: [{ propositionId: e.propositionId, claimType: e.claimType, symbol: e.symbol }],
+        });
+      } catch (err) {
+        return fail(`EVENT_HISTORY_INVALID: graph transition rejected (${err.message})`);
+      }
+      for (const k of delta.graphRemovals) delete graph.claims[k];
+      for (const [k, node] of Object.entries(delta.graphClaims)) graph.claims[k] = node;
+      counters.claimsObserved += 1;
+    } else if (e.type === 'RUMOR2_PACKET') {
+      counters.packetsProduced += 1;
+    } else {
+      counters.packetsWithheld += 1;
+    }
+  }
+  return { ok: true, graph, seenIds, counters };
+}
+
 // ---- deterministic graph transition (A2R: ONE authoritative path) ----------
 // observeClaim is the ONLY way a proposition node changes. It lives here —
 // beside the transaction trust validator — so preparation and validation

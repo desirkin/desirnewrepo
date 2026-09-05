@@ -327,6 +327,46 @@ Truth-boundary closeout #2 (final seal):
   and only the exact official HTTPS origin is ever spoken to — no
   alternate ports, no embedded credentials.
 
+Derived-truth closeout #3 (the freeze seal):
+
+- DERIVED STATE MUST NOT AUTHENTICATE ITSELF. The append-only settled
+  event stream (rumor2/events.jsonl, or the injected equivalent) is the
+  authoritative causal record; the checkpoint's graph, counters, and seen
+  state are DERIVED caches of it. On every restore, ONE pure replay walks
+  the settled events in actual settlement order — through the SAME
+  production transitions live settle uses (rememberSeen, observeClaim /
+  deriveTxnGraphDelta, the same counting and uniqueness laws) — and the
+  persisted derived caches are proven against it. The still-owed
+  transaction's events are excluded from replay: they are appended-but-
+  unadopted truth the A1 settle gate adopts, which is exactly the
+  watermark that makes the comparison unambiguous.
+- THE GRAPH MUST EQUAL ITS REPLAY. A fabricated contradiction, an erased
+  confirmation, rewritten claim text, rewritten observation text or
+  clocks, or swapped provenance groups — however internally consistent —
+  is a GRAPH_REPLAY_MISMATCH and the store is WITHHELD. Replayable
+  counters must equal their replay (COUNTER_REPLAY_MISMATCH otherwise);
+  the duplicates tally counts suppressed re-observations that append no
+  event by design and stays a bounded non-authoritative operational
+  number. Graph and counters are never rebuilt by guessing: a mismatch
+  cannot distinguish a forged checkpoint from a truncated log, so it
+  withholds.
+- SEEN STATE IS DERIVED ON RESTORE. providers.*.seenIds never carries its
+  own authority: replay of SETTLED source observations (pending, failed,
+  or unsettled work never counts) derives the canonical per-provider FIFO
+  through the same rememberSeen law, and that derivation IS the restored
+  seen state — the checkpoint copy is only an integrity diagnostic
+  (SEEN_STATE_REBUILT is reported when it lied). A fabricated seen id can
+  therefore never suppress real future evidence, and a deleted one can
+  never mint duplicate truth.
+- REPLAY IS DETERMINISTIC AND POINT-IN-TIME HONEST: settlement order
+  only, never publication order; timezone- and process-independent; the
+  exact live (type, sourceEventId) uniqueness law absorbs crash
+  re-appends; a claim event must follow its own settled source and come
+  from a claim-capable ear, so replay can never manufacture authority
+  live production forbids. A corrupt event line fails the history closed
+  (EVENT_HISTORY_INVALID); only a torn FINAL line — the legitimate
+  crash-window artifact — is tolerated.
+
 Roadmap unchanged: RUMOR-2B may later add authorized social ears and
 propagation reasoning; SOCRATES remains separate; GHOST remains separate;
 derivatives and on-chain senses remain separate. None of those exist yet.

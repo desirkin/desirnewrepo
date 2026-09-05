@@ -92,6 +92,7 @@ function world({ feedItems = [LISTING], startMs = T1 } = {}) {
         stream.push(structuredClone(rec));
       },
       hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
+      readEvents: async () => ({ events: structuredClone(stream) }), // the durable log IS the restore witness
       contact: null,
       enabled: true,
       timeoutMs: 50,

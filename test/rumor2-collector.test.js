@@ -77,10 +77,9 @@ function scriptedFetch(handlers) {
   return fn;
 }
 
-function harness({ handlers = {}, contact = null, store = memStore(), appendEvent, startMs = T0 } = {}) {
+function harness({ handlers = {}, contact = null, store = memStore(), appendEvent, startMs = T0, events = [] } = {}) {
   seedDir();
   const clock = { ms: startMs };
-  const events = [];
   const fetchImpl = scriptedFetch(handlers);
   const c = startRumor2({
     log: () => {},
@@ -94,6 +93,9 @@ function harness({ handlers = {}, contact = null, store = memStore(), appendEven
       ((rec) => {
         events.push(rec);
       }),
+    // the durable log IS the restore witness — a restart pair sharing a
+    // store must share its append-only event history too (closeout #3)
+    readEvents: async () => ({ events: structuredClone(events) }),
     contact,
     enabled: true,
     timeoutMs: 50,
@@ -216,7 +218,8 @@ test('R2P-15+16+17. 304 is a successful observation; ETag/Last-Modified survive 
     mode === 'full'
       ? mkRes(200, rss([{ title: 'plain post', guid: 'g1' }]), { etag: '"abc123"', 'last-modified': 'Fri, 05 Sep 2026 10:00:00 GMT' })
       : mkRes(304, '');
-  const h = harness({ handlers: { 'blog.kraken.com': kraken, 'www.cftc.gov': mkRes(200, rss([{ title: 'cftc note', guid: 'c1' }])) }, store });
+  const log = []; // the durable append-only history survives the restart
+  const h = harness({ handlers: { 'blog.kraken.com': kraken, 'www.cftc.gov': mkRes(200, rss([{ title: 'cftc note', guid: 'c1' }])) }, store, events: log });
   await tick(h);
   mode = '304';
   await tick(h);
@@ -227,7 +230,7 @@ test('R2P-15+16+17. 304 is a successful observation; ETag/Last-Modified survive 
   assert.equal(cov.state, 'OBSERVED', 'zero changed bytes is still a successful observation');
   await h.c.stop();
   // restart: the conditional headers ride out of the durable checkpoint
-  const h2 = harness({ handlers: { 'blog.kraken.com': () => mkRes(304, ''), 'www.cftc.gov': mkRes(304, '') }, store });
+  const h2 = harness({ handlers: { 'blog.kraken.com': () => mkRes(304, ''), 'www.cftc.gov': mkRes(304, '') }, store, events: log });
   await tick(h2);
   const krakenCall = h2.fetchImpl.calls.find((c) => c.url.includes('kraken'));
   assert.equal(krakenCall.opts.headers['if-none-match'], '"abc123"');
@@ -299,11 +302,12 @@ test('R2P-25. first bootstrap accepts a bounded slice and never claims prior kno
 
 test('R2P-26. restart preserves provider clocks and cursors', async () => {
   const store = memStore();
-  const h = harness({ handlers: { 'blog.kraken.com': mkRes(200, rss([{ title: 'one post', guid: 'g1' }]), { etag: '"e1"' }), 'www.cftc.gov': mkRes(304, '') }, store });
+  const log = []; // the durable append-only history survives the restart
+  const h = harness({ handlers: { 'blog.kraken.com': mkRes(200, rss([{ title: 'one post', guid: 'g1' }]), { etag: '"e1"' }), 'www.cftc.gov': mkRes(304, '') }, store, events: log });
   await tick(h);
   const before = structuredClone(h.c.internals.checkpoint.providers.KRAKEN_OFFICIAL);
   await h.c.stop();
-  const h2 = harness({ handlers: { 'blog.kraken.com': mkRes(304, ''), 'www.cftc.gov': mkRes(304, '') }, store });
+  const h2 = harness({ handlers: { 'blog.kraken.com': mkRes(304, ''), 'www.cftc.gov': mkRes(304, '') }, store, events: log });
   await tick(h2);
   const after = h2.c.internals.checkpoint.providers.KRAKEN_OFFICIAL;
   assert.equal(after.etag, before.etag);

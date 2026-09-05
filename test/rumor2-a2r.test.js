@@ -88,6 +88,7 @@ function boot({ store, stream, feedItems, failAll = false, clockMs = T1 }) {
       stream.push(structuredClone(rec));
     },
     hasEvent: (rec) => stream.some((e) => e.type === rec.type && e.sourceEventId === rec.sourceEventId),
+    readEvents: async () => ({ events: structuredClone(stream) }), // the durable log IS the restore witness
     contact: null,
     enabled: true,
     timeoutMs: 50,
@@ -96,9 +97,9 @@ function boot({ store, stream, feedItems, failAll = false, clockMs = T1 }) {
 }
 
 // capture one LEGITIMATE owed transaction as durable checkpoint state
-async function capture(feedItems, priorState = null) {
+async function capture(feedItems, priorState = null, priorEvents = []) {
   const store = memStore(priorState);
-  const stream = [];
+  const stream = structuredClone(priorEvents);
   const b = boot({ store, stream, feedItems, failAll: true, clockMs: T1 - 121_000 });
   await b.tick();
   await b.c.stop();
@@ -126,7 +127,36 @@ const realPriorNode = (i, ts) => {
     identityFacts: { title: `old claim ${i}`, summary: 'x', link: null },
     claims: [{ propositionId: propId, claimType: 'EXCHANGE_LISTING', symbol: 'BTC' }],
   });
-  return [propId, graphClaims[propId]];
+  // the SETTLED durable events this node is the consequence of — derived
+  // state must be witnessed by canonical event truth (closeout #3)
+  const events = [
+    {
+      type: 'RUMOR2_SOURCE_OBSERVED',
+      ts: new Date(ts).toISOString(),
+      sourceEventId: originId,
+      provider: 'KRAKEN_OFFICIAL',
+      title: `old claim ${i}`,
+      summary: 'x',
+      link: null,
+      guid: null,
+      publishedTs: null,
+      retrievedTs: ts,
+      knownAtTs: ts,
+    },
+    {
+      type: 'RUMOR2_CLAIM_OBSERVED',
+      ts: new Date(ts).toISOString(),
+      sourceEventId: `${originId}|claim|${propId}`,
+      provider: 'KRAKEN_OFFICIAL',
+      symbol: 'BTC',
+      propositionId: propId,
+      claimKey: propId,
+      claimType: 'EXCHANGE_LISTING',
+      status: graphClaims[propId].status,
+      title: `old claim ${i}`,
+    },
+  ];
+  return [propId, graphClaims[propId], events];
 };
 
 // ---- BLOCKER 1 — forged source identity -------------------------------------
@@ -293,20 +323,26 @@ test('A2R-4. candidate graph mutations must be the deterministic consequence of 
 
 test('A2R-4b. legitimate graph-at-capacity pruning validates and recovers exactly', async () => {
   // durable prior graph at the bound: 64 REAL propositions (production
-  // transition, ascending staleness) — the graph validator admits nothing less
+  // transition, ascending staleness) WITH their settled event history —
+  // derived state must be witnessed by canonical event truth
   const prior = emptyCheckpoint([...PROVIDER_IDS], T1 - 10_000_000);
+  const priorEvents = [];
   let oldest = null;
   for (let i = 1; i <= MAX_ACTIVE_CLAIMS; i++) {
-    const [k, node] = realPriorNode(i, i);
+    const [k, node, events] = realPriorNode(i, i);
     prior.graph.claims[k] = node;
+    priorEvents.push(...events);
     if (i === 1) oldest = k;
   }
-  const cp = await capture([LISTING], prior);
+  prior.counters.sourcesObserved = MAX_ACTIVE_CLAIMS;
+  prior.counters.claimsObserved = MAX_ACTIVE_CLAIMS;
+  const cp = await capture([LISTING], prior, priorEvents);
   assert.deepEqual(cp.txn.candidate.graphRemovals, [oldest], 'the deterministic pruning removes exactly the stalest node');
   assert.equal(V(cp), null, 'capacity pruning validates under the causal proof');
   // and it settles: the pruned node is gone, the new proposition present
+  // (the durable log carries the SAME settled history the state derives from)
   const store = memStore(cp);
-  const stream = [];
+  const stream = structuredClone(priorEvents);
   const b = boot({ store, stream, feedItems: [LISTING], clockMs: T1 + 600_000 });
   await b.tick();
   const durable = store.state.saved;
