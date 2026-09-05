@@ -274,6 +274,49 @@ NOT_FOUND / INVALID. With no durable authority, a corrupt local cache is
 called a fresh start. A valid durable authority overrides a corrupt local
 cache.
 
+## RUMINT-R1B — nomination + pending semantic closeout
+
+**The ONE nomination rule.** `nominationQualifies(z, acceleration,
+zThreshold)` in the pure core is the single predicate: z KNOWN and ≥
+threshold AND acceleration KNOWN and > 0 (unchanged). The live producer
+(`signalFromBaseline`'s decision, `shouldNominate`) and
+`validateSourceRecord(RUMINT_NOMINATION)` call the SAME predicate, so a
+record that never met the rule — z 2.99, acceleration 0 — is NOT a
+nomination: rejected everywhere, never downgraded into nomination-shaped
+evidence, never appended, never canonicalized into Memory. Poll records are
+held to the same coherence: gates and decision are recomputed from the
+record's own numbers through the shared rule and must agree.
+
+**Poll ↔ nomination cross-consistency.** Wherever a nomination is bound —
+the write-ahead transaction or persisted pending debt — the binding is
+proven (`nominationBindingError`): the triggering poll must itself validate,
+must have decided NOMINATED (with coherent gates), the nomination must point
+at exactly that poll, and symbol/providerSymbol/z/zThreshold/acceleration
+must agree exactly. A nominating poll stripped of its nomination, or a
+non-nominating poll wearing one, poisons the checkpoint.
+
+**Pending debt carries its proof.** A pending NOMINATION persists its exact
+triggering poll record as `cause`; a pending HYPED_SESSION persists the
+immutable semantic `basis` (per-symbol observed overnight labels + counts —
+the same basis the ONE finalized-HYPED formula now computes from), and the
+owed snapshot must recompute from that basis exactly (sessionDate, state,
+ordered symbols, coverage, identity). A self-consistent fabrication that
+contradicts its evidence can never append; a legitimate OLDER transition
+stays provable by its own basis even after the canonical set changed —
+history is never rejected by a naive current-state comparison.
+
+**Recovered nominations are durable debt.** `recoverTransaction` settles a
+bound nomination through the same `emitEvidence` mechanism as the live path
+(never `armStalkCoin` — recovery never restores stalking). The transaction
+clears ONLY when the poll advancement is settled AND the nomination exists
+in source truth, was ACKED, or is durably represented as pending debt (with
+its cause). BACKLOG_FULL, WITHHELD_INVALID or a failed write retain the
+transaction — never "try once and forget". Settlement is idempotent
+(baseline revision comparison), the drain path dedupes against the source
+stream by exact identity, and the nominations counter counts exactly one
+increment per successfully emitted nomination event — none for merely owed
+debt, none twice after replay.
+
 ## Signal contract
 
 ```json

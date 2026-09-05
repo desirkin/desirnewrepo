@@ -263,6 +263,25 @@ export function ingestPage(baseline, messages, nowMs) {
   return { baseline: next, stats };
 }
 
+// ---- the ONE nomination rule (R1B §blocker-1) -----------------------------
+// The single pure predicate shared by the live producer (signal decision /
+// shouldNominate) and the source-record validator. A record that does not
+// satisfy this is NOT a nomination, whatever its shape claims. UNCHANGED
+// semantics: z KNOWN and >= threshold AND acceleration KNOWN and > 0.
+export function nominationQualifies(z, acceleration, zThreshold = 3) {
+  return (
+    z !== null &&
+    z !== undefined &&
+    Number.isFinite(z) &&
+    acceleration !== null &&
+    acceleration !== undefined &&
+    Number.isFinite(acceleration) &&
+    Number.isFinite(zThreshold) &&
+    z >= zThreshold &&
+    acceleration > 0
+  );
+}
+
 // ---- signal math (§16–§21) ------------------------------------------------
 export function signalFromBaseline(baseline, nowMs, { zThreshold = 3 } = {}) {
   const buckets = baseline?.buckets ?? {};
@@ -336,10 +355,10 @@ export function signalFromBaseline(baseline, nowMs, { zThreshold = 3 } = {}) {
   const accelerationPass = accelerationAvailable && acceleration > 0;
   let decision;
   if (!zAvailable) decision = zReason; // INSUFFICIENT_HISTORY | ZERO_VARIANCE | UNOBSERVED_CURRENT_HOUR — never disguised
+  else if (nominationQualifies(zVelocity, acceleration, zThreshold)) decision = 'NOMINATED'; // the ONE rule, shared with the validator
   else if (!zPass) decision = 'Z_BELOW_THRESHOLD';
   else if (!accelerationAvailable) decision = 'ACCELERATION_UNAVAILABLE';
-  else if (!accelerationPass) decision = 'ACCELERATION_NOT_POSITIVE';
-  else decision = 'NOMINATED';
+  else decision = 'ACCELERATION_NOT_POSITIVE';
 
   return {
     providerSymbol: baseline?.providerSymbol ?? null,
@@ -370,14 +389,15 @@ export function signalFromBaseline(baseline, nowMs, { zThreshold = 3 } = {}) {
 // 06:00 ET the session is BUILDING (never promoted); at/after 06:00 the set
 // finalizes from COMPLETE observed overnight evidence and holds unless the
 // underlying observed evidence itself legitimately changes.
-export function hypedSnapshot({ baselines, atMs }) {
-  const at = new Date(atMs);
-  const date = sessionDate(at);
-  if (etHour(at) < 6) {
-    return { sessionDate: date, state: 'BUILDING', symbols: [], finalizedTs: null, identity: null, coverage: null };
-  }
-  const scored = [];
-  let insufficientSymbols = 0;
+// The exact observation facts a finalized HYPED snapshot is derived from —
+// per considered symbol: which overnight ET hour labels were genuinely
+// observed, and the summed observed overnight chatter. R1B persists this
+// bounded immutable basis alongside pending HYPED debt so a restored owed
+// snapshot can be PROVEN by recomputation, and a legitimate older
+// transition stays provable even after the canonical set later changed.
+export function hypedBasisFromBaselines({ baselines, atMs }) {
+  const date = sessionDate(new Date(atMs));
+  const entries = [];
   for (const baseline of Object.values(baselines ?? {})) {
     const labels = new Set();
     let overnight = 0;
@@ -390,13 +410,21 @@ export function hypedSnapshot({ baselines, atMs }) {
       labels.add(h);
       overnight += b.count;
     }
-    // Full eligibility requires observation in EACH of the six overnight ET
-    // hour labels (a fall-back duplicate 01:00 satisfies label 1 via either
-    // of its two distinct absolute hours). Partial coverage never ranks and
-    // its missing hours are never imagined as zero (§36).
-    if (labels.size === 6) scored.push({ coin: baseline.canonicalCoin, overnight });
-    else insufficientSymbols += 1;
+    entries.push({ coin: baseline.canonicalCoin, observedLabels: [...labels].sort((a, b) => a - b), overnight });
   }
+  entries.sort((a, b) => (a.coin < b.coin ? -1 : a.coin > b.coin ? 1 : 0));
+  return { v: 1, sessionDate: date, entries };
+}
+
+// The ONE finalized-HYPED formula, computed from a basis — used by the live
+// snapshot AND by pending-debt proof, so the rule cannot fork.
+export function hypedSnapshotFromBasis(basis) {
+  // Full eligibility requires observation in EACH of the six overnight ET
+  // hour labels (a fall-back duplicate 01:00 satisfies label 1 via either
+  // of its two distinct absolute hours). Partial coverage never ranks and
+  // its missing hours are never imagined as zero (§36).
+  const scored = basis.entries.filter((e) => e.observedLabels.length === 6).map((e) => ({ coin: e.coin, overnight: e.overnight }));
+  const insufficientSymbols = basis.entries.length - scored.length;
   const eligibleSymbols = scored.length;
   const nonzero = scored.filter((s) => s.overnight > 0).sort((a, b) => b.overnight - a.overnight || (a.coin < b.coin ? -1 : 1));
   let state;
@@ -415,8 +443,33 @@ export function hypedSnapshot({ baselines, atMs }) {
     nonzeroEligible: nonzero.length,
     reason: eligibleSymbols === 0 ? 'INSUFFICIENT_OVERNIGHT_COVERAGE' : null,
   };
-  const identity = hypedSessionIdentity({ sessionDate: date, state, symbols });
-  return { sessionDate: date, state, symbols, finalizedTs: null, identity, coverage };
+  const identity = hypedSessionIdentity({ sessionDate: basis.sessionDate, state, symbols });
+  return { sessionDate: basis.sessionDate, state, symbols, finalizedTs: null, identity, coverage };
+}
+
+export function validateHypedBasis(basis) {
+  if (!basis || typeof basis !== 'object') return 'hyped basis not an object';
+  if (basis.v !== 1) return 'hyped basis: unknown version';
+  if (typeof basis.sessionDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(basis.sessionDate)) return 'hyped basis: invalid sessionDate';
+  if (!Array.isArray(basis.entries) || basis.entries.length > MAX_SYMBOLS) return 'hyped basis: entries invalid or over bound';
+  for (const e of basis.entries) {
+    if (!e || typeof e !== 'object') return 'hyped basis: entry not an object';
+    if (typeof e.coin !== 'string' || !COIN_RE.test(e.coin)) return 'hyped basis: invalid coin';
+    if (!Array.isArray(e.observedLabels) || e.observedLabels.length > 6) return 'hyped basis: invalid observedLabels';
+    if (new Set(e.observedLabels).size !== e.observedLabels.length) return 'hyped basis: duplicate labels';
+    for (const l of e.observedLabels) if (!Number.isInteger(l) || l < 0 || l > 5) return 'hyped basis: label out of range';
+    if (!Number.isInteger(e.overnight) || e.overnight < 0) return 'hyped basis: invalid overnight count';
+  }
+  return null;
+}
+
+export function hypedSnapshot({ baselines, atMs }) {
+  const at = new Date(atMs);
+  const date = sessionDate(at);
+  if (etHour(at) < 6) {
+    return { sessionDate: date, state: 'BUILDING', symbols: [], finalizedTs: null, identity: null, coverage: null };
+  }
+  return hypedSnapshotFromBasis(hypedBasisFromBaselines({ baselines, atMs }));
 }
 
 // ---- semantic source identities (§43) -------------------------------------
@@ -497,6 +550,30 @@ export function validateSourceRecord(rec) {
       if (typeof rec.gates[g] !== 'boolean') return `poll: invalid gate ${g}`;
     }
     if (!DECISIONS.has(rec.decision)) return 'poll: invalid decision';
+    // R1B: gates and decision are FUNCTIONS of the record's own numbers —
+    // recompute them through the one shared rule and demand agreement, so a
+    // fabricated NOMINATED poll (or forged gates) cannot validate.
+    const zAvailable = rec.z !== null;
+    const zPass = zAvailable && rec.z >= rec.zThreshold;
+    const accelerationAvailable = rec.acceleration !== null;
+    const accelerationPass = accelerationAvailable && rec.acceleration > 0;
+    if (
+      rec.gates.zAvailable !== zAvailable ||
+      rec.gates.zPass !== zPass ||
+      rec.gates.accelerationAvailable !== accelerationAvailable ||
+      rec.gates.accelerationPass !== accelerationPass
+    )
+      return 'poll: gates contradict the record numbers';
+    const expectedDecision = !zAvailable
+      ? rec.zReason
+      : nominationQualifies(rec.z, rec.acceleration, rec.zThreshold)
+        ? 'NOMINATED'
+        : !zPass
+          ? 'Z_BELOW_THRESHOLD'
+          : !accelerationAvailable
+            ? 'ACCELERATION_UNAVAILABLE'
+            : 'ACCELERATION_NOT_POSITIVE';
+    if (rec.decision !== expectedDecision) return 'poll: decision contradicts the record numbers';
     if (!Number.isInteger(rec.baselineRevision) || rec.baselineRevision < 1) return 'poll: invalid baselineRevision';
     const expected = pollEventIdentity({ providerSymbol: rec.providerSymbol, retrievedTs: rec.retrievedTs, baselineRevision: rec.baselineRevision });
     if (rec.sourceEventId !== expected) return 'poll: sourceEventId does not match its semantic basis';
@@ -507,7 +584,12 @@ export function validateSourceRecord(rec) {
     if (typeof rec.symbol !== 'string' || !COIN_RE.test(rec.symbol)) return 'nomination: invalid symbol';
     if (!mappingConsistent(rec.symbol, rec.providerSymbol)) return 'nomination: provider/coin mapping violation';
     if (typeof rec.pollSourceEventId !== 'string' || !SEID_RE.test(rec.pollSourceEventId)) return 'nomination: invalid pollSourceEventId';
-    if (!Number.isFinite(rec.z) || !Number.isFinite(rec.acceleration) || !Number.isFinite(rec.zThreshold)) return 'nomination: invalid numbers';
+    if (!Number.isFinite(rec.z) || !Number.isFinite(rec.acceleration)) return 'nomination: invalid numbers';
+    if (!Number.isFinite(rec.zThreshold) || rec.zThreshold <= 0) return 'nomination: invalid zThreshold';
+    // R1B blocker-1: a record that does not satisfy the ONE nomination rule
+    // is NOT a nomination — it is rejected, never downgraded into a
+    // nomination-shaped observation.
+    if (!nominationQualifies(rec.z, rec.acceleration, rec.zThreshold)) return 'nomination: does not satisfy the nomination rule';
     if (rec.sourceEventId !== nominationEventIdentity({ pollSourceEventId: rec.pollSourceEventId })) return 'nomination: sourceEventId does not match its poll';
     return null;
   }
@@ -526,6 +608,58 @@ export function validateSourceRecord(rec) {
 }
 
 export const PENDING_KIND_TYPES = Object.freeze({ POLL: 'RUMINT_POLL', NOMINATION: 'RUMINT_NOMINATION', HYPED: 'HYPED_SESSION' });
+
+// R1B: the exact agreement a nomination must have with its triggering poll.
+// Used wherever a nomination is BOUND to a poll — the write-ahead
+// transaction and persisted pending debt. An arbitrary 40-hex link is not
+// proof; the cause itself must be a valid NOMINATED poll and every shared
+// number must agree.
+export function nominationBindingError(nom, poll) {
+  const pollErr = validateSourceRecord(poll);
+  if (pollErr) return `binding: triggering poll invalid (${pollErr})`;
+  if (poll.type !== 'RUMINT_POLL') return 'binding: cause is not a poll';
+  if (poll.decision !== 'NOMINATED') return 'binding: triggering poll did not decide NOMINATED';
+  if (nom.pollSourceEventId !== poll.sourceEventId) return 'binding: nomination does not point at its cause';
+  if (nom.symbol !== poll.canonicalCoin || nom.providerSymbol !== poll.providerSymbol) return 'binding: symbol disagrees with cause';
+  if (nom.z !== poll.z || nom.zThreshold !== poll.zThreshold || nom.acceleration !== poll.acceleration) return 'binding: numbers disagree with cause';
+  return null;
+}
+
+// R1B: one strict validator for a pending debt ENTRY — the record through
+// the source contract, PLUS its proof: a nomination carries the exact
+// triggering poll (cause); a HYPED session carries the immutable semantic
+// basis it was derived from, and the snapshot must RECOMPUTE from that
+// basis exactly — so a self-consistent fabrication that contradicts its
+// own evidence can never append, while a legitimate OLDER transition stays
+// provable even after the canonical set later changed.
+export function validatePendingEntry(p) {
+  if (!p || typeof p !== 'object') return 'pending entry not an object';
+  if (!PENDING_KINDS.has(p.kind)) return 'invalid pending kind';
+  if (!p.record || typeof p.record !== 'object') return 'pending record missing';
+  if (p.record.type !== PENDING_KIND_TYPES[p.kind]) return 'pending kind/type mismatch';
+  const err = validateSourceRecord(p.record);
+  if (err) return `pending ${p.kind}: ${err}`;
+  if (p.kind === 'NOMINATION') {
+    if (!p.cause || typeof p.cause !== 'object') return 'pending NOMINATION: missing its triggering poll proof';
+    const bindErr = nominationBindingError(p.record, p.cause);
+    if (bindErr) return `pending NOMINATION: ${bindErr}`;
+  }
+  if (p.kind === 'HYPED') {
+    const basisErr = validateHypedBasis(p.basis);
+    if (basisErr) return `pending HYPED: ${basisErr}`;
+    const proven = hypedSnapshotFromBasis(p.basis);
+    if (
+      proven.sessionDate !== p.record.sessionDate ||
+      proven.state !== p.record.state ||
+      canonicalJson(proven.symbols) !== canonicalJson(p.record.symbols) ||
+      canonicalJson(proven.coverage ?? null) !== canonicalJson(p.record.coverage ?? null) ||
+      proven.identity !== p.record.sourceEventId
+    ) {
+      return 'pending HYPED: snapshot contradicts its own semantic basis';
+    }
+  }
+  return null;
+}
 
 // ---- strict checkpoint validation (§10) -----------------------------------
 const isIso = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v));
@@ -644,17 +778,15 @@ export function validateCheckpoint(state) {
       if (c.error !== null && (typeof c.error !== 'string' || c.error.length > MAX_ERROR_CHARS)) return 'invalid continuation failure error';
     }
   }
-  // R1A §2C: pending debt is validated by the ONE strict source contract —
-  // a record shaped only like {ts, type, 40-hex id} is not owed truth, and
-  // a kind/type mismatch is refused before it could ever append.
+  // R1A §2C / R1B: pending debt is validated by the ONE strict source
+  // contract PLUS its proof — a nomination must carry its exact triggering
+  // poll; a HYPED session must carry (and recompute from) its immutable
+  // semantic basis. A record shaped only like {ts, type, 40-hex id} is not
+  // owed truth, and a kind/type mismatch is refused before it could append.
   if (!Array.isArray(state.pendingEvents) || state.pendingEvents.length > MAX_PENDING_EVENTS) return 'pendingEvents invalid or over bound';
   for (const p of state.pendingEvents) {
-    if (!p || typeof p !== 'object') return 'pending entry not an object';
-    if (!PENDING_KINDS.has(p.kind)) return 'invalid pending kind';
-    if (!p.record || typeof p.record !== 'object') return 'pending record missing';
-    if (p.record.type !== PENDING_KIND_TYPES[p.kind]) return 'pending kind/type mismatch';
-    const err = validateSourceRecord(p.record);
-    if (err) return `pending ${p.kind}: ${err}`;
+    const err = validatePendingEntry(p);
+    if (err) return err;
   }
   // R1A §blocker-1: the prepared poll transaction, when present, binds one
   // exact recoverable advancement — validated as strictly as everything else.
@@ -686,11 +818,19 @@ export function validatePollTransaction(t) {
   const bErr = baselineError(t.providerSymbol, t.candidateBaseline);
   if (bErr) return `pollTransaction candidate baseline: ${bErr}`;
   if (t.candidateBaseline.baselineRevision !== t.candidateBaselineRevision) return 'pollTransaction: candidate revision mismatch';
-  if (t.nominationRecord !== null && t.nominationRecord !== undefined) {
+  // R1B cross-consistency: a nomination exists in the transaction exactly
+  // when its poll decided NOMINATED, and every shared value must agree —
+  // a corrupt checkpoint cannot attach a fabricated nomination to a valid
+  // poll, and cannot strip a real one from a nominating poll.
+  if (t.record.decision === 'NOMINATED') {
+    if (!t.nominationRecord || typeof t.nominationRecord !== 'object') return 'pollTransaction: nominating poll is missing its bound nomination';
     const nErr = validateSourceRecord(t.nominationRecord);
     if (nErr) return `pollTransaction nomination: ${nErr}`;
     if (t.nominationRecord.type !== 'RUMINT_NOMINATION') return 'pollTransaction: nomination record wrong type';
-    if (t.nominationRecord.pollSourceEventId !== t.sourceEventId) return 'pollTransaction: nomination not linked to this poll';
+    const bindErr = nominationBindingError(t.nominationRecord, t.record);
+    if (bindErr) return `pollTransaction: ${bindErr}`;
+  } else if (t.nominationRecord !== null && t.nominationRecord !== undefined) {
+    return 'pollTransaction: nomination bound to a poll that did not decide NOMINATED';
   }
   return null;
 }

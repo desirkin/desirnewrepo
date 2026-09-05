@@ -45,6 +45,9 @@ import {
   utcHourKey,
   validateCheckpoint,
   validateSourceRecord,
+  validatePendingEntry,
+  nominationQualifies,
+  hypedBasisFromBaselines,
   providerSymbolFor,
   canonicalJson,
 } from './truth.js';
@@ -59,18 +62,11 @@ const eventsFile = () => path.join(dataDir(), 'rumint', 'events.jsonl');
 const statusFile = () => path.join(dataDir(), 'rumint', 'status.json');
 const checkpointFile = () => path.join(dataDir(), 'rumint', 'checkpoint.json');
 
-// Nomination rule — the one and only arming trigger, UNCHANGED by R1:
-// z KNOWN and >= threshold AND acceleration KNOWN and > 0. Exported for tests.
+// Nomination rule — the one and only arming trigger, UNCHANGED semantics.
+// R1B: the producer shares the SAME pure predicate the source validator
+// enforces (rumint/truth.js nominationQualifies) — the rule cannot fork.
 export function shouldNominate(signal, config = loadConfig()) {
-  const z = config.rumint?.zThreshold ?? 3;
-  return (
-    signal.zVelocity !== null &&
-    signal.zVelocity !== undefined &&
-    signal.zVelocity >= z &&
-    signal.acceleration !== null &&
-    signal.acceleration !== undefined &&
-    signal.acceleration > 0
-  );
+  return nominationQualifies(signal.zVelocity, signal.acceleration, config.rumint?.zThreshold ?? 3);
 }
 
 // Bounded cooldown ladder after consecutive transient failures (§49).
@@ -255,7 +251,10 @@ export function startRumint({
   // as bounded pending debt replaying the EXACT identity (§44). R1A: the
   // queue NEVER evicts — owed evidence whose baseline effect was adopted is
   // untouchable; at the hard cap new advancement is REFUSED instead (§B3).
-  function emitEvidence(kind, record, { armStalkCoin = null } = {}) {
+  // R1B: pending debt carries its PROOF — a nomination's exact triggering
+  // poll (cause), a HYPED session's immutable semantic basis — so restored
+  // debt is semantically provable, never merely well-shaped.
+  function emitEvidence(kind, record, { armStalkCoin = null, cause = null, basis = null } = {}) {
     if (S.stopped) return 'CANCELLED_STOPPED';
     const invalid = validateSourceRecord(record);
     if (invalid) {
@@ -267,7 +266,7 @@ export function startRumint({
       S.counters.backlogRefusals += 1;
       return 'BACKLOG_FULL'; // the caller must NOT advance truth past this
     }
-    S.pending.push({ kind, record, armStalkCoin });
+    S.pending.push({ kind, record, cause, basis, armStalkCoin });
     return 'QUEUED';
   }
 
@@ -279,16 +278,24 @@ export function startRumint({
   async function drainPending() {
     while (S.pending.length > 0 && !S.stopped) {
       const head = S.pending[0];
-      // R1A: owed debt settles ONLY through the strict source contract — a
-      // malformed entry (however it got here) is dropped as an integrity
-      // failure, never appended, never used to settle anything.
-      const invalid = validateSourceRecord(head.record);
+      // R1A/R1B: owed debt settles ONLY through the strict contract WITH its
+      // proof (nomination cause, HYPED basis) — a malformed or unproven
+      // entry (however it got here) is dropped as an integrity failure,
+      // never appended, never used to settle anything.
+      const invalid = validatePendingEntry({ kind: head.kind, record: head.record, cause: head.cause ?? null, basis: head.basis ?? null });
       if (invalid) {
         recordIntegrityFailure(head.record, invalid);
         S.pending.shift();
         continue;
       }
-      if (!tryAppend(head.record)) return;
+      // exactly-once: debt that already reached the source stream (a crash
+      // between append and checkpoint save) settles without a second line
+      if (!sourceHasEvent(head.record.sourceEventId)) {
+        if (!tryAppend(head.record)) return;
+        // one successfully emitted nomination event = one counter increment
+        // (queued nominations were deliberately not counted at queue time)
+        if (head.kind === 'NOMINATION') S.counters.nominations += 1;
+      }
       S.pending.shift();
       // Only a SAME-PROCESS owed nomination may arm stalking once its
       // evidence lands (§80). Replayed-after-restart debt writes evidence
@@ -321,10 +328,38 @@ export function startRumint({
       // append): replay the EXACT prepared record with the SAME identity
       if (!tryAppend(t.record)) return false; // writer down: keep the transaction, retry, no polling meanwhile
     }
-    S.baselines[t.providerSymbol] = t.candidateBaseline; // finalize exactly the bound candidate
-    S.counters.polls += 1;
-    if (t.nominationRecord && validateSourceRecord(t.nominationRecord) === null && !sourceHasEvent(t.nominationRecord.sourceEventId)) {
-      tryAppend(t.nominationRecord); // best-effort evidence completion — recovery NEVER arms stalking (§46/§81)
+    // finalize the bound candidate — idempotent across retries and across a
+    // restart from a checkpoint saved after settlement: adopt and count the
+    // poll only when the baseline has not already reached the candidate
+    if (S.baselines[t.providerSymbol]?.baselineRevision !== t.candidateBaselineRevision) {
+      S.baselines[t.providerSymbol] = t.candidateBaseline;
+      S.counters.polls += 1;
+    }
+    // R1B blocker-2: a bound nomination is NOT best-effort evidence. It
+    // settles through the SAME durable debt mechanism as the live path —
+    // and the transaction is cleared ONLY once the nomination exists in
+    // source truth, was ACKED, or is durably represented as pending debt.
+    // Recovery NEVER arms stalking (§46/§81).
+    if (t.nominationRecord) {
+      const nomId = t.nominationRecord.sourceEventId;
+      const alreadyOwed = S.pending.some((p) => p.record?.sourceEventId === nomId);
+      if (!alreadyOwed && !sourceHasEvent(nomId)) {
+        const nd = emitEvidence('NOMINATION', t.nominationRecord, { armStalkCoin: null, cause: t.record });
+        if (nd === 'ACKED') {
+          S.counters.nominations += 1; // the one emission of this nomination
+        } else if (nd === 'QUEUED') {
+          // safe: the exact debt (with its cause) rides the next checkpoint
+        } else {
+          // BACKLOG_FULL / WITHHELD_INVALID / CANCELLED_STOPPED: the bound
+          // nomination is not yet durably represented — RETAIN the
+          // transaction and retry; never "try once and forget"
+          return false;
+        }
+      } else if (!alreadyOwed) {
+        // the nomination already reached source truth before the crash; the
+        // persisted counter (from the write-ahead save) never captured it
+        S.counters.nominations += 1;
+      }
     }
     S.pollTransaction = null;
     log(`[${iso()}] RUMINT recovered an interrupted poll transaction for ${t.providerSymbol} (rev ${t.candidateBaselineRevision}) — no re-count`);
@@ -341,7 +376,9 @@ export function startRumint({
       baselines: S.baselines,
       hyped: S.hyped ?? { sessionDate: null, state: 'BUILDING', symbols: [], finalizedTs: null, identity: null, coverage: null },
       providerHealth: { ...budget.snapshot(now()), symbols: S.symbolHealth },
-      pendingEvents: S.pending.map(({ kind, record }) => ({ kind, record })), // armStalk stripped: restart never re-arms
+      // armStalk stripped: restart never re-arms. R1B: each entry's PROOF
+      // (nomination cause poll / HYPED semantic basis) persists with it.
+      pendingEvents: S.pending.map(({ kind, record, cause, basis }) => ({ kind, record, cause: cause ?? null, basis: basis ?? null })),
       pollTransaction: S.pollTransaction, // R1A: the one in-flight recoverable advancement, if any
       counters: S.counters,
     };
@@ -365,7 +402,7 @@ export function startRumint({
     S.hyped = state.hyped?.state ? state.hyped : null;
     S.symbolHealth = state.providerHealth.symbols ?? {};
     budget.restore(state.providerHealth, now());
-    S.pending = (state.pendingEvents ?? []).map(({ kind, record }) => ({ kind, record, armStalkCoin: null }));
+    S.pending = (state.pendingEvents ?? []).map(({ kind, record, cause, basis }) => ({ kind, record, cause: cause ?? null, basis: basis ?? null, armStalkCoin: null }));
     S.pollTransaction = state.pollTransaction ?? null;
     for (const [k, v] of Object.entries(state.counters ?? {})) if (k in S.counters) S.counters[k] = v;
     if (S.hyped) writeHypedSafe(S.hyped); // restore-time publication failure is visible AND retryable
@@ -511,9 +548,10 @@ export function startRumint({
 
   // ---- the ONE canonical HYPED snapshot (§34-§43, §61) --------------------
   function rollHyped() {
+    const atMs = now();
     let snap;
     try {
-      snap = hypedSnapshot({ baselines: S.baselines, atMs: now() });
+      snap = hypedSnapshot({ baselines: S.baselines, atMs });
     } catch (err) {
       // §93: a HYPED failure is UNAVAILABLE — never a fake valid H0
       snap = {
@@ -558,17 +596,29 @@ export function startRumint({
     writeHypedSafe(snap); // hyped.json mirrors the same canonical object as status.json — one truth
     if (finalized && snap.identity && snap.identity !== cur?.identity) {
       // deterministic session identity (§42): same finalized date+state+set
-      // replays to the same id (restart dedupes); a different set is new
-      emitEvidence('HYPED', {
-        ts: iso(),
-        type: 'HYPED_SESSION',
-        sourceEventId: snap.identity,
-        provider: PROVIDER,
-        sessionDate: snap.sessionDate,
-        state: snap.state,
-        symbols: snap.symbols,
-        coverage: snap.coverage,
-      });
+      // replays to the same id (restart dedupes); a different set is new.
+      // R1B: the exact semantic basis (same baselines, same instant the
+      // snapshot was derived from) rides along as the debt's proof.
+      let basis = null;
+      try {
+        basis = hypedBasisFromBaselines({ baselines: S.baselines, atMs });
+      } catch {
+        basis = null; // a basis failure only affects queued-debt provability
+      }
+      emitEvidence(
+        'HYPED',
+        {
+          ts: iso(),
+          type: 'HYPED_SESSION',
+          sourceEventId: snap.identity,
+          provider: PROVIDER,
+          sessionDate: snap.sessionDate,
+          state: snap.state,
+          symbols: snap.symbols,
+          coverage: snap.coverage,
+        },
+        { basis }
+      );
       if (snap.symbols.length) log(`[${iso()}] HYPED ${snap.symbols.join(' ')} (${snap.sessionDate})`);
     }
   }
@@ -847,9 +897,9 @@ export function startRumint({
         recordIntegrityFailure(pollRecord, 'self-built poll record failed the source contract');
         return;
       }
-      S.pending.push({ kind: 'POLL', record: pollRecord, armStalkCoin: null });
+      S.pending.push({ kind: 'POLL', record: pollRecord, cause: null, basis: null, armStalkCoin: null });
       if (nomRecord && S.pending.length < maxPendingEvents && validateSourceRecord(nomRecord) === null) {
-        S.pending.push({ kind: 'NOMINATION', record: nomRecord, armStalkCoin: coin });
+        S.pending.push({ kind: 'NOMINATION', record: nomRecord, cause: pollRecord, basis: null, armStalkCoin: coin });
       }
       S.baselines[providerSymbol] = candidate;
       S.lastSuccessTs = iso();
@@ -879,8 +929,9 @@ export function startRumint({
       }
     }
     if (nomRecord) {
-      // §47: evidence lands (or is durably owed) BEFORE any stalking exists
-      const nd = emitEvidence('NOMINATION', nomRecord, { armStalkCoin: coin });
+      // §47: evidence lands (or is durably owed) BEFORE any stalking exists;
+      // R1B: the exact triggering poll rides along as the debt's proof
+      const nd = emitEvidence('NOMINATION', nomRecord, { armStalkCoin: coin, cause: pollRecord });
       if (nd === 'ACKED') {
         S.counters.nominations += 1;
         doStalk(coin, nomRecord);
