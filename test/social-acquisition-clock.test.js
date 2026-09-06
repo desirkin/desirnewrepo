@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { normalizeSocialObservation, socialProvenanceFacts, socialDiagnosticFacts, buildSocialFilter } from '../rumor2/social.js';
-import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_TYPE } from '../rumor2/social-settle.js';
+import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_TYPE, SOCIAL_OBSERVATION_TYPES } from '../rumor2/social-settle.js';
 import { socialIntake } from '../rumor2/social-stream.js';
 import { createSocialRuntime } from '../rumor2/social-runtime.js';
 import { jetstreamCommitToRaw, jetstreamCursorOf, BLUESKY_OFFICIAL } from '../rumor2/providers/bluesky-official.js';
@@ -59,7 +59,14 @@ test('PIT-3 (PASS 2). the same immutable version redelivered later: same socialV
 });
 
 test('PIT-5. sourceDeclaredTs / providerEventTs can NEVER reduce knownAtTs', () => {
-  const o = normalizeSocialObservation({ ...jetstreamCommitToRaw(frame()).raw, sourceDeclaredTs: T - 3_600_000, providerEventTs: T - 3_600_000 }, { nowMs: T }).observation;
+  // SOCIAL-4D COMPLETION: a witnessed raw whose numbers disagree with their own witnesses is REFUSED
+  // (no adapter may smuggle a different number past its witness); the point-in-time law is proven on
+  // a genuinely earlier declaration instead
+  assert.equal(normalizeSocialObservation({ ...jetstreamCommitToRaw(frame()).raw, sourceDeclaredTs: T - 3_600_000, providerEventTs: T - 3_600_000 }, { nowMs: T }).reject, true);
+  const f = frame(); f.payload.record.createdAt = iso(T - 3_600_000); f.payload.time = iso(T - 3_600_000);
+  const early = jetstreamCommitToRaw(f).raw;
+  const o = normalizeSocialObservation(early, { nowMs: T }).observation;
+  assert.equal(o.sourceDeclaredTs, T - 3_600_000); assert.equal(o.providerEventTs, T - 3_600_000);
   assert.equal(o.knownAtTs, T); assert.equal(o.retrievedTs, T);
   const w = reconstructSocialWitness(socialObservationToEvent(o).event);
   assert.equal(w.knownAtTs, T); assert.ok(w.knownAtTs > w.sourceDeclaredTs && w.knownAtTs > w.providerEventTs);
@@ -88,7 +95,7 @@ if (!TEST_URL) {
       const B = boot(T + 300_000); assert.equal(B.hydrate((await jB.read()).events).durableIds, 1); B.start();
       assert.equal(B._intake().stats().durableDeduped, 1);
       assert.equal((await settle(B, jB)).appended, 0, 'no altered payload, no corruption');
-      const soc = (await jB.read()).events.filter((e) => e.type === SOCIAL_EVENT_TYPE);
+      const soc = (await jB.read()).events.filter((e) => SOCIAL_OBSERVATION_TYPES.includes(e.type));
       assert.equal(soc.length, 1);
       assert.equal(soc[0].retrievedTs, T); assert.equal(soc[0].knownAtTs, T); assert.equal(soc[0].ts, iso(T), 'the FIRST durable acquisition clock stands');
       assert.equal(validateSocialEvent(soc[0], V), null);

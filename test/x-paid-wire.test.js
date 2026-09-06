@@ -12,7 +12,7 @@ import { buildSocialFilter } from '../rumor2/social.js';
 import { createXRuntime, xGate, xSmokeLaw, xConfigFromEnv, canonicalUnownedRules, unownedSnapshotHash, X_IN_FLIGHT_POST_HEADROOM, X_SMOKE_STOP_REASONS, X_RUNTIME_STATES } from '../rumor2/x-runtime.js';
 import { startXStream } from '../rumor2/x-stream.js';
 import { X_OFFICIAL, xRuleTag, isSerpentTag } from '../rumor2/providers/x-official.js';
-import { SOCIAL_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_GAP_REASONS, validateXGapEvent, replaySocialHistory } from '../rumor2/social-settle.js';
+import { SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_GAP_REASONS, validateXGapEvent, replaySocialHistory } from '../rumor2/social-settle.js';
 import { memJournal } from './helpers/rumor2-journal.js';
 
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-xpw-'));
@@ -225,7 +225,7 @@ test('SMOKE-TARGET (PASS 2 / §13). target 10 / max 35 / headroom 25 connects; a
   assert.equal((await rt.start()).reason, 'WITHHELD_GAP', 'the explicit gap settles first');
   const r = await settle(rt, j); assert.equal(r.ok, true);
   const gap = ofType(arr, X_GAP_EVENT_TYPE)[0]; assert.equal(gap.reason, 'SMOKE_TARGET_REACHED'); assert.equal(validateXGapEvent(gap), null);
-  assert.equal(ofType(arr, X_METER_EVENT_TYPE)[0].deliveredPostReads, 10); assert.equal(ofType(arr, SOCIAL_EVENT_TYPE).length, 10);
+  assert.equal(ofType(arr, X_METER_EVENT_TYPE)[0].deliveredPostReads, 10); assert.equal(ofType(arr, SOCIAL_EVENT_V2_TYPE).length, 10);
   const again = await rt.start();
   assert.equal(again.ok, false); assert.equal(again.reason, 'SMOKE_RUN_ALREADY_COMPLETE', 'no automatic paid reconnect after a completed smoke — the completion is DURABLE');
   assert.equal(api.state.streams.length, 1); assert.equal(stream().reads, 10);
@@ -242,7 +242,7 @@ test('X-FINAL-CHUNK (PASS 3 / §7/§8/§11). the target is hit at Post 1 of a 3-
   assert.equal(st.state, 'SMOKE_COMPLETE'); assert.equal(st.smoke.overrunPosts, 0, '3 <= 26: within the reserve');
   assert.equal(stream().reads, 1, 'ONE read; the stop was finalized before any next read'); assert.equal(stream().aborted, true);
   const r = await settle(rt, j); assert.equal(r.ok, true); assert.equal(r.appended, 3);
-  const evidence = ofType(arr, SOCIAL_EVENT_TYPE); const gap = ofType(arr, X_GAP_EVENT_TYPE)[0]; const progress = ofType(arr, X_PROGRESS_EVENT_TYPE)[0];
+  const evidence = ofType(arr, SOCIAL_EVENT_V2_TYPE); const gap = ofType(arr, X_GAP_EVENT_TYPE)[0]; const progress = ofType(arr, X_PROGRESS_EVENT_TYPE)[0];
   assert.equal(evidence.length, 3);
   const lastReceipt = Math.max(...evidence.map((e) => e.retrievedTs));
   assert.ok(lastReceipt > before + 1, 'the incrementing clock separates the three receipts');
@@ -283,7 +283,7 @@ test('BUDGET-CHUNK (§8/§21). a plain daily-cap stop obeys the same chunk law: 
   assert.equal(st.state, 'SMOKE_ABORTED'); assert.equal(st.smoke.status, 'ABORTED'); assert.equal(st.smoke.terminalReason, 'BUDGET_DAILY', 'a cap stop during a run is a recorded non-target interruption: the run ABORTS, never COMPLETES');
   assert.equal(stream().reads, 1);
   await settle(rt, j);
-  const gap = ofType(arr, X_GAP_EVENT_TYPE)[0]; const ev = ofType(arr, SOCIAL_EVENT_TYPE);
+  const gap = ofType(arr, X_GAP_EVENT_TYPE)[0]; const ev = ofType(arr, SOCIAL_EVENT_V2_TYPE);
   assert.equal(gap.reason, 'BUDGET_DAILY'); assert.equal(ev.length, 4); assert.equal(gap.gapStartTs, Math.max(...ev.map((e) => e.retrievedTs)));
 });
 

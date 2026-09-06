@@ -9,7 +9,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { normalizeSocialObservation, socialAuthorIdentity, estimateSocialStage, coordinationFeatures } from '../rumor2/social.js';
 import { classifyOfficialItem } from '../rumor2/truth.js';
-import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_TYPE } from '../rumor2/social-settle.js';
+import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_TYPE, SOCIAL_OBSERVATION_TYPES } from '../rumor2/social-settle.js';
 import { jetstreamCommitToRaw } from '../rumor2/providers/bluesky-official.js';
 import { SOCIAL_PROVIDER_IDS } from '../rumor2/social-registry.js';
 
@@ -79,7 +79,7 @@ if (!TEST_URL) {
     finally { await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}); await db.end(); }
   };
   const settle = async (journal, events) => { const w = await journal.acquireWriter(); assert.equal(w.ok, true); const r = await journal.append(events); await journal.releaseWriter(); return r; };
-  const witnesses = async (journal) => (await journal.read()).events.filter((e) => e.type === SOCIAL_EVENT_TYPE).map(reconstructSocialWitness);
+  const witnesses = async (journal) => (await journal.read()).events.filter((e) => SOCIAL_OBSERVATION_TYPES.includes(e.type)).map(reconstructSocialWitness);
 
   test('PASS 2 — SOCIAL SOURCE ROUND TRIP: provenance survives normalization -> journal -> replay', async () => {
     await withDb(async ({ db, SCHEMA }) => {

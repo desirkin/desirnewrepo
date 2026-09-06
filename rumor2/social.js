@@ -27,6 +27,7 @@
 //     nativePostId); an author is (provider, nativeAuthorId). Handles change;
 //     they are never the durable identity. (§8/§9)
 import { canonicalJson, contentHash } from './truth.js';
+import { validateTemporalWitness, compareWitnessToReference } from './social-time.js';
 
 // ---- bounds (closed; no unbounded provider blobs ever enter durable truth) --
 export const MAX_SOCIAL_TEXT_CHARS = 4_000; // preserved original post text
@@ -267,6 +268,28 @@ export function classifySourceClock({ sourceDeclaredTs, retrievedTs }) {
   const skew = Math.min(MAX_SOURCE_CLOCK_SKEW_MS, declared - retrievedTs);
   return { sourceCreatedTs: null, sourceClockStatus: 'FUTURE_QUARANTINED', sourceClockSkewMs: skew };
 }
+// SOCIAL-4D COMPLETION — the WITNESSED clock law (schema version 2 observations).
+// The adapter supplies a bounded temporal witness (rumor2/social-time.js); the
+// verdict is derived from the witness's PROJECTION AND its exact sub-millisecond
+// remainder against Serpent's integer-millisecond acquisition reference:
+//   BEFORE/EQUAL  => TRUSTED (temporally admissible, NOT independently certified)
+//   AFTER         => FUTURE_QUARANTINED (evidence kept, no causal authority, bounded skew)
+//   UNRESOLVED    => ORDER_UNRESOLVED (the declaration lies inside the acquisition
+//                    millisecond — a floored projection may NOT call it earlier)
+//   UNKNOWN       => UNKNOWN (no usable instant: absent, malformed, offset-less,
+//                    unsupported precision/range — the observation is kept)
+// Serpent measured integer milliseconds only; no sub-millisecond arrival, no
+// synchronized-UTC accuracy, and no clock-error tolerance is claimed.
+export const SOURCE_CLOCK_STATES_V2 = Object.freeze([...SOURCE_CLOCK_STATES, 'ORDER_UNRESOLVED']);
+export function classifyWitnessedSourceClock({ witness, retrievedTs }) {
+  const order = compareWitnessToReference(witness, retrievedTs);
+  if (order === 'UNKNOWN') return { sourceCreatedTs: null, sourceClockStatus: 'UNKNOWN', sourceClockSkewMs: null };
+  if (order === 'BEFORE' || order === 'EQUAL') return { sourceCreatedTs: witness.projectionMs, sourceClockStatus: 'TRUSTED', sourceClockSkewMs: null };
+  if (order === 'AFTER') return { sourceCreatedTs: null, sourceClockStatus: 'FUTURE_QUARANTINED', sourceClockSkewMs: Math.min(MAX_SOURCE_CLOCK_SKEW_MS, witness.projectionMs - retrievedTs) };
+  return { sourceCreatedTs: null, sourceClockStatus: 'ORDER_UNRESOLVED', sourceClockSkewMs: null };
+}
+// the witness-binding hash of a version-2 observation: both closed witnesses, canonical
+export const socialWitnessHash = (o) => contentHash(canonicalJson({ sourceClockWitness: o.sourceClockWitness ?? null, providerEventWitness: o.providerEventWitness ?? null }));
 // CONTENT / VERSION HASH — binds the immutable content/provenance facts only.
 export const socialVersionHash = (f) => contentHash(canonicalJson(socialProvenanceFacts(f)));
 // DIAGNOSTIC / META HASH — binds the first-known mutable diagnostic snapshot
@@ -432,10 +455,28 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   const rawProviderTs = raw.providerEventTs ?? null;
   if (rawProviderTs !== null && !Number.isFinite(rawProviderTs)) return { reject: true, reason: 'providerEventTs must be a finite ms or null' };
   const providerEventTs = rawProviderTs === null ? null : Math.floor(rawProviderTs);
+  // SOCIAL-4D COMPLETION: an adapter that carries bounded TEMPORAL WITNESSES yields a
+  // schema-version-2 observation. The witnesses are closed, re-derivable objects; the
+  // numeric fields MUST equal their projections (no adapter may smuggle a different
+  // number past its own witness). A raw without witnesses stays the LEGACY (v1) shape.
+  const sourceClockWitness = raw.sourceClockWitness ?? null;
+  const providerEventWitness = raw.providerEventWitness ?? null;
+  const witnessed = sourceClockWitness !== null || providerEventWitness !== null;
+  if (witnessed) {
+    if (sourceClockWitness === null) return { reject: true, reason: 'a witnessed observation must carry sourceClockWitness' };
+    const werr = validateTemporalWitness(sourceClockWitness);
+    if (werr) return { reject: true, reason: `sourceClockWitness invalid: ${werr}` };
+    if ((sourceClockWitness.projectionMs ?? null) !== sourceDeclaredTs) return { reject: true, reason: 'sourceDeclaredTs disagrees with its witness projection' };
+    if (providerEventWitness !== null) {
+      const perr = validateTemporalWitness(providerEventWitness);
+      if (perr) return { reject: true, reason: `providerEventWitness invalid: ${perr}` };
+      if ((providerEventWitness.projectionMs ?? null) !== providerEventTs) return { reject: true, reason: 'providerEventTs disagrees with its witness projection' };
+    } else if (providerEventTs !== null) return { reject: true, reason: 'a witnessed observation cannot carry an unwitnessed providerEventTs' };
+  }
   const retrievedTs = Number.isFinite(nowMs) ? Math.floor(nowMs) : Date.now();
   const knownAtTs = retrievedTs; // NEVER backdated to any source/provider clock
   if (retrievedTs > knownAtTs) return { reject: true, reason: 'retrieved after known' };
-  const { sourceCreatedTs, sourceClockStatus, sourceClockSkewMs } = classifySourceClock({ sourceDeclaredTs, retrievedTs });
+  const { sourceCreatedTs, sourceClockStatus, sourceClockSkewMs } = witnessed ? classifyWitnessedSourceClock({ witness: sourceClockWitness, retrievedTs }) : classifySourceClock({ sourceDeclaredTs, retrievedTs });
   // provider admission tags (X matching_rules) — bounded closed strings only
   const rawTags = raw.ingressTags ?? [];
   if (!Array.isArray(rawTags) || rawTags.length > MAX_INGRESS_TAGS || rawTags.some((t) => typeof t !== 'string' || t.length === 0 || t.length > MAX_INGRESS_TAG_CHARS)) return { reject: true, reason: 'ingressTags invalid' };
@@ -465,9 +506,12 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   };
   const metaHash = socialMetaHash(facts);
   const socialVersionId = socialVersionIdentity(facts);
+  const schemaVersion = witnessed ? 2 : 1;
+  const witnessHash = witnessed ? socialWitnessHash({ sourceClockWitness, providerEventWitness }) : null;
   return {
     ok: true,
     observation: Object.freeze({
+      schemaVersion, sourceClockWitness, providerEventWitness, witnessHash,
       provider, providerKind, nativePostId, nativeAuthorId,
       socialSourceId, socialAuthorId, handle, displayName,
       text: raw.text, normalizedText: normalized, textHash: hash,

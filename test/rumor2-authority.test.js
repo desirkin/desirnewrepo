@@ -65,7 +65,13 @@ test('R2A-73+74 (frozen core). the frozen non-social core does not arm stalking 
 });
 
 test('R2A-75. RUMOR-2 imports no STRIKE/execution/trading module', () => {
-  const allowed = /^(node:[a-z_/]+|\.\.\/lib\/(config|jsonl)\.js|\.\.\/evidence\/contract\.js|\.\/[a-z0-9./-]+|\.\/providers\/[a-z-]+\.js)$/;
+  // SOCIAL-4D: providers may import EXACTLY the pure temporal boundary `../social-time.js` — proven
+  // below to have no imports and no network/storage/model/execution capability (a lexical allowance
+  // for one file, never a widening of the directory rule)
+  const allowed = /^(node:[a-z_/]+|\.\.\/lib\/(config|jsonl)\.js|\.\.\/evidence\/contract\.js|\.\/[a-z0-9./-]+|\.\/providers\/[a-z-]+\.js|\.\.\/social-time\.js)$/;
+  const timeSrc = read('rumor2/social-time.js');
+  assert.equal([...timeSrc.matchAll(/from\s+'([^']+)'/g)].length, 0, 'social-time.js imports nothing at all');
+  for (const cap of ['fetch(', 'WebSocket', 'EventSource', 'setTimeout', 'setInterval', 'node:', 'process.', 'Date.now', 'Date.parse', 'require(', 'import(']) assert.ok(!code('rumor2/social-time.js').includes(cap), `social-time.js carries no capability marker ${cap}`);
   for (const f of rumor2Files) {
     for (const m of read(f).matchAll(/from\s+'([^']+)'/g)) {
       assert.ok(allowed.test(m[1]), `${f}: import ${m[1]} outside the rumor layer's narrow allowance`);

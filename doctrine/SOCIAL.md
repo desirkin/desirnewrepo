@@ -324,7 +324,7 @@ explicitly distinct clocks on every social observation/event:
 
 | Clock | Field | Meaning |
 |---|---|---|
-| A. source-declared | `sourceDeclaredTs` | the provider-record creation time (Bluesky `record.createdAt`, Farcaster cast timestamp) as an integer-millisecond number: client-supplied, immutable record content, **not** an authoritative clock. SOCIAL-4D: the adapters still derive it with `Date.parse` (a demonstrated defect — host-zone dependence, calendar rollover, bare-number acceptance, sub-millisecond floor called "exact"); the validated boundary exists and its wiring is BLOCKED at the durable-identity stop gate (§5H) |
+| A. source-declared | `sourceDeclaredTs` | the provider-record creation time (Bluesky `record.createdAt`, Farcaster cast timestamp) as an integer-millisecond PROJECTION of the declaration: client-supplied, immutable record content, **not** an authoritative clock. SOCIAL-4D COMPLETION (§5I): every adapter derives it from a bounded temporal witness under the field's documented grammar (never `Date.parse`, never the host zone); the witness retains the declaration and its exact sub-millisecond remainder, and the verdict may be `ORDER_UNRESOLVED` |
 | B. provider event | `providerEventTs` | the transport/provider event clock (Jetstream `payload.time`), RFC3339-parsed or `null`; never original creation, never knowledge time |
 | C. Serpent knowledge | `retrievedTs` / `knownAtTs` | the ONLY causal truth; **never backdated** by any source or provider clock |
 
@@ -989,20 +989,11 @@ invalidate the record with a field-specific blocker. Results are identical in ev
 Live and durable permissions stay false; classification stays UNRESOLVED. Both entry paths
 (direct record and the env reader's empty-as-unsupplied rule) are tested.
 
-**Adapters — BLOCKED at the durable-identity stop gate.** The six provider paths were wired to
-the boundary in a candidate and passed every parser test, and every VALID supported input kept
-byte-identical normalized facts, numeric clocks, `socialSourceId`/`socialAuthorId`/
-`socialVersionId`, `sourceEventId`, version hash, and diagnostic hash against a baseline-produced
-(809a139, TZ=UTC) journal fixture of 74 cases (45 valid cases proven). But `sourceDeclaredTs` is
-inside `socialProvenanceFacts`, so for the 26 formerly ambiguous or grammar-invalid declarations
-(offset-less, February 30, `'0'`, extended year on all five record paths; lowercase and `-00:00`
-on the Bluesky and X paths) the corrected parser yields `null` where the baseline stored a
-host-zone-dependent number — a redelivery of such an already-durable event would be enqueued as a
-DIFFERENT version. Preserving that boundary would require a settlement/dedupe or cutover change;
-per the mandatory gate the adapters therefore stay on the baseline parser, the divergence is not
-described as acceptable, no history is edited, and the decision is returned to the operator
-(§7 remaining work). Historical rows hold only parsed numbers; the original declaration text is
-not recoverable, so no retrospective repair is claimed.
+**Adapters — resolved in the SOCIAL-4D COMPLETION (§5I).** At d5db393 the six provider paths
+stayed on the baseline parser because the corrected parser changed `sourceDeclaredTs` — a
+provenance-identity fact — for formerly ambiguous declarations, so a naive redelivery would have
+minted a different version. §5I closes that gate with an explicit event evolution and ONE
+native-event reconciler, not with a duplicate source and not with a post-id-only match.
 
 **Census corrections (facts, not authorization).** Farcaster: a published Free plan is not this
 project's plan; terms retrieval failed; mapper present, no transport, key presence is
@@ -1011,6 +1002,92 @@ classification asserted. TikTok: products distinguished; the Research route's 48
 is route-specific; the current decision is inactive with operator review pending — no permanent
 exclusion was approved on the operator's behalf. Roadmap: the v5 migration reference was
 obsolete (v4 retained, journal cursor events); the X paid smoke has not occurred.
+
+---
+
+## 5I. SOCIAL-4D COMPLETION — history-safe provider clock integration
+
+**Witnesses (`rumor2/social-time.js`).** Each of the six clock paths (Bluesky `record.createdAt`
+on posts and reposts, Jetstream `payload.time`, Neynar cast and recast `timestamp`, X Post
+`created_at`) now produces a CLOSED, versioned `temporalWitness`: the declaration exactly as
+received (≤ 64 chars; an oversized value keeps a prefix, its true length, and
+`declaredComplete=false`, and is never parsed), a presence/type status (`STRING`, `ABSENT`,
+`NON_STRING`, `OVERSIZED`) distinct from parse success, the policy id and immutable
+`policyVersion`, the outcome, the millisecond PROJECTION (labelled as such), the fraction digit
+count, and the exact bounded `subMillisecondRemainder` (a decimal digit string, never a float or
+BigInt). Role policies are pinned per provider and field (`SOCIAL_CLOCK_POLICY_BY_PROVIDER`):
+Bluesky records `AT_DATETIME`, Jetstream event time `JETSTREAM_EVENT_TIME` (pinned separately from
+the record profile), Neynar `RFC3339`, X `ISO8601_PROFILE`. A valid protocol year outside Serpent's
+supported range is `UNSUPPORTED_RANGE`, not "invalid syntax"; the post is kept in every case.
+
+**Witnessed verdict.** Version-2 observations classify the source clock from the witness's
+projection AND remainder against Serpent's integer-millisecond acquisition reference: BEFORE/EQUAL
+⇒ `TRUSTED` (temporally admissible, never independently certified); AFTER ⇒ `FUTURE_QUARANTINED`
+(+28 ms, +87 s, +1 day all retain the observation with bounded skew and no causal authority);
+inside the acquisition millisecond ⇒ `ORDER_UNRESOLVED` (a floored projection may not call
+T+0.5 ms earlier); no usable instant ⇒ `UNKNOWN`. Serpent measured integer milliseconds only; no
+sub-millisecond arrival, synchronized-UTC accuracy, or clock-error tolerance is claimed. Zero
+padding beyond milliseconds is not precision loss; non-zero digits survive into the witness and the
+identity-independent `witnessHash`. `compareSocialInstants` orders two witnesses exactly and a
+witness against an integer reference conservatively (`UNRESOLVED`, never a guessed earlier time).
+
+**Event evolution.** The legacy `RUMOR2_SOCIAL_OBSERVED` shape, identity recipe, and diagnostic
+hash are UNCHANGED and validate exactly the history they represent. New ingestion emits the
+discriminated `RUMOR2_SOCIAL_OBSERVED_V2`: the legacy keys plus `schemaVersion: 2`,
+`sourceClockWitness`, `providerEventWitness`, and `witnessHash`; its validator re-derives both
+witnesses under the provider's role policies, requires the numeric clocks to equal their
+projections, re-derives the witnessed verdict, and re-runs every legacy law. The version identity
+recipe is unchanged (it binds the millisecond projection), so a valid exact instant keeps its
+legacy `sourceEventId`; a v2 event cannot lose its witness fields and pass as legacy. Two closed
+non-source types ride the same journal under the same writer authority and are validated on live
+append and replay: `RUMOR2_SOCIAL_CLOCK_INTERPRETATION` (a dated annotation bound to one durable
+target by type, id, full payload digest, native key, immutable-fact digest, role, basis, witness,
+prior and re-derived interpretation, evidence acquisition time, and its own `knownAtTs`; identity
+`r2si-` over target + role + policy version + interpretation digest, so retries and redeliveries
+never mint another) and `RUMOR2_SOCIAL_RECONCILIATION_PENDING` (a bounded record of a candidate
+whose identity/time match is genuinely unresolved: reason, native key, immutable digest,
+candidate facts, witnesses, the candidate ids considered; identity `r2sp-` over provider + native
+key + immutable digest + witness hash + reason). Neither counts as a social source, origin, author,
+or propagation; both refuse retention-prohibited providers.
+
+**ONE matcher (`rumor2/social-reconcile.js`).** Settlement in both runtimes reconciles every
+witnessed candidate against the version-aware derived index (rooted only in validated replay and
+maintained only after successful append) PLUS the earlier candidates of the same batch:
+`NEW` (append one v2 source), `KNOWN` (keep-first; diagnostics, acquisition time, and verdict
+changes never fork a version), `ANNOTATE` (a unique native-event match on exact retained text and
+every immutable non-clock fact whose strict witness changes the interpretation: append only the
+dated annotation(s)), `PENDING` (several candidates, insufficient occurrence identity,
+conflicting immutable facts, or non-equivalent retained declarations). The native key is
+provider + post + author + lifecycle + native version id + provider sequence: Bluesky commits with
+different `seq` stay distinct (CREATE→DELETE→RECREATE→DELETE keeps both tombstones) and a
+sequence-less Bluesky candidate facing candidates is `OCCURRENCE_IDENTITY_INSUFFICIENT`; X keeps the
+stable post id and the current delivered Post id (a genuine edit is a new version); a Farcaster
+cast hash + FID is a supported match while a recast edge (reactor+target only) with a changed clock
+is retained as unresolved, never merged. Equivalent instants written with different offsets or
+padding are the same instant under the documented rule while the first recorded string stays
+intact; near-duplicate text, handles, or engagement never authorize a match. The cheap intake path
+absorbs only exact, already-reconciled current-format redeliveries; a legacy-format durable row
+facing a witnessed candidate always reaches settlement. Lookups are per event type; a lookup
+failure is never "not found": the drained envelopes are retained and retried, nothing advances.
+
+**As-of view (`rumor2/social-view.js`).** `socialTemporalView({ event, annotations, asOfTs })`
+returns `ORIGINAL_RECORDED` (the immutable event; a legacy numeric clock is
+`LEGACY_NUMERIC_UNVERIFIED`, never precision-verified) and `EFFECTIVE_AS_OF` (only annotations
+whose own `knownAtTs ≤ asOfTs`, latest per role, ties by id). First-known time never moves; a
+correction known at T1 is invisible before T1; nothing is mutated. The witness reconstruction
+carries `schemaVersion`, `clockProvenance`, and both witnesses.
+
+**Legacy corpus and proofs.** `test/fixtures/social-4d-legacy-d5db393-{UTC,America_New_York,
+Asia_Kolkata}.json` were produced by the UNTOUCHED d5db393 code in an isolated worktree (78 cases
+each: valid, offset, micro, padded, T+0.5 ms, three future offsets, offset-less, February 30, `'0'`,
+lowercase, `-00:00`, missing, reply, seq 10/20, delete cycles, X edit, other cast hash, event
+time). `test/social-4d-completion.test.js` drives the real adapter → intake → reconciler →
+journal → replay/view chain over them, with PostgreSQL sections for legacy restore, append
+failure, crash-before-adoption, stale-epoch takeover, and the collector validating Social history
+with the provider gate OFF (a later enablement can never reveal unchecked history). The
+redelivery of a legacy row keeps the row byte-identical and adds no logical source; physical
+journal growth from annotations/pending records is legitimate and reported separately in status.
+Production state remains unobserved: nothing was scanned, migrated, repaired, or activated.
 
 ---
 
@@ -1050,14 +1127,13 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   additional terms, reviewed raw-content/author retention with a compatible durable design,
   explicit downstream-use permissions, rate/pricing scope, credentials, and the
   single-acquisition/two-projection migration proof — none assumed.
-- **SOCIAL-4D follow-up (operator decision required):** wire the six provider clock paths to
-  `rumor2/social-time.js` (candidate proven, §5H) once the durable-identity policy for formerly
-  ambiguous declarations is decided — either accept a one-time UNKNOWN-clock version for such
-  redeliveries within the replay window, or add a narrow keep-first absorption keyed on
-  (provider, nativePostId, nativeVersionId, lifecycle) at settlement. Neither is adopted here.
-  Farcaster activation additionally needs this account's Neynar plan/credits, readable terms,
-  retention/deletion answers, an acquisition path (search polling proposed), overlap/gap law,
-  and first-known diagnostics — none assumed.
+- **SOCIAL-4D COMPLETION — DONE (§5I):** the six provider clock paths are wired to the pure
+  boundary through bounded temporal witnesses; legacy history is reconciled by ONE native-event
+  matcher (annotate or hold, never remint); the as-of view separates what was recorded from what
+  is supported now. Not a live rollout: no provider gate, budget, or credential changed. Farcaster
+  activation still needs this account's Neynar plan/credits, readable terms, retention/deletion
+  answers, an acquisition path (search polling proposed), overlap/gap law, and first-known
+  diagnostics — none assumed.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

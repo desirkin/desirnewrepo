@@ -12,6 +12,8 @@
 //   editable (delete+republish); deletes are tombstones; a recast is a
 //   reaction of type RECAST (an explicit echo).
 
+import { temporalWitness, SOCIAL_TIME_POLICIES } from '../social-time.js';
+
 export const FARCASTER_OFFICIAL = Object.freeze({
   id: 'FARCASTER_OFFICIAL',
   providerKind: 'SOCIAL_MICROBLOG',
@@ -46,7 +48,7 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
     const parentHash = isStr(d.parent_hash) ? d.parent_hash : null;
     // the cast's provider-supplied creation time; absent/invalid => null/UNKNOWN,
     // never Date.now() (§8/§11)
-    const created = isStr(d.timestamp) ? Date.parse(d.timestamp) : NaN;
+    const sourceClockWitness = temporalWitness(d.timestamp, SOCIAL_TIME_POLICIES.RFC3339); // SOCIAL-4D COMPLETION: Neynar RFC 3339 date-time; projection or null
     const reactions = d.reactions ?? {};
     return {
       raw: {
@@ -57,8 +59,8 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
         threadId: isStr(d.root_parent_url) ? d.root_parent_url : (isStr(d.thread_hash) ? d.thread_hash : hash),
         handle: isStr(d.author?.username) ? d.author.username : null,
         displayName: isStr(d.author?.display_name) ? d.author.display_name : null,
-        sourceDeclaredTs: Number.isFinite(created) ? created : null, // client-declared cast time; classified at normalization
-        providerEventTs: null, // Neynar exposes no separate provider event clock
+        sourceDeclaredTs: sourceClockWitness.projectionMs, sourceClockWitness, // client-declared cast time; classified at normalization
+        providerEventTs: null, providerEventWitness: null, // Neynar exposes no separate provider event clock
         engagement: {
           likes: Number.isSafeInteger(reactions.likes_count) ? reactions.likes_count : null,
           reposts: Number.isSafeInteger(reactions.recasts_count) ? reactions.recasts_count : null,
@@ -91,7 +93,7 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
         canonicalUrl: null, threadId: null, handle: null,
         // a delete's timestamp is when the deletion was emitted, NOT the cast's
         // original creation — never fabricate the original clock from it (§9)
-        sourceDeclaredTs: null, providerEventTs: null,
+        sourceDeclaredTs: null, sourceClockWitness: temporalWitness(null, SOCIAL_TIME_POLICIES.RFC3339), providerEventTs: null, providerEventWitness: null,
         engagement: null, authorMeta: null,
       },
     };
@@ -103,7 +105,7 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
     if (!isStr(targetHash) || !reactorFid) return { skip: true, reason: 'recast without target/reactor' };
     // a recast has no cast hash of its own — derive a deterministic native id
     // for the echo edge (reactor + target), so re-delivery dedupes correctly
-    const recastCreated = isStr(d.timestamp) ? Date.parse(d.timestamp) : NaN;
+    const sourceClockWitness = temporalWitness(d.timestamp, SOCIAL_TIME_POLICIES.RFC3339); // the recast's own declared time; projection or null
     return {
       raw: {
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId: `recast:${reactorFid}:${targetHash}`, nativeAuthorId: reactorFid,
@@ -111,7 +113,7 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
         canonicalUrl: null, threadId: null, handle: null,
         // the recast's own creation time; absent/invalid => null/UNKNOWN, never
         // Date.now() (§8/§11)
-        sourceDeclaredTs: Number.isFinite(recastCreated) ? recastCreated : null, providerEventTs: null,
+        sourceDeclaredTs: sourceClockWitness.projectionMs, sourceClockWitness, providerEventTs: null, providerEventWitness: null,
         engagement: null, authorMeta: null,
       },
     };

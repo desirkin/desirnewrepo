@@ -23,6 +23,7 @@
 // X IS NOT THE WHOLE FIREHOSE (§6): X server-side rules are the FIRST cost/noise
 // boundary, Serpent's universe filter the SECOND, RUMOR analysis the THIRD.
 import { createHash } from 'node:crypto';
+import { temporalWitness, SOCIAL_TIME_POLICIES } from '../social-time.js';
 
 // Local, dependency-free hashing: the provider layer imports nothing from the
 // rumor core (R2A-75). Same canonical form + sha1-hex as rumor2/truth.js.
@@ -185,7 +186,7 @@ export function xPostToRaw(line, { provider = 'X_OFFICIAL' } = {}) {
     relation = map[refs[0].type] ?? 'UNKNOWN';
     parentNativePostId = relation === 'UNKNOWN' ? null : refs[0].id;
   } else if (refs.length > 1) relation = 'UNKNOWN';
-  const created = isStr(d.created_at) ? Date.parse(d.created_at) : NaN;
+  const sourceClockWitness = temporalWitness(d.created_at, SOCIAL_TIME_POLICIES.ISO8601_PROFILE); // SOCIAL-4D COMPLETION: X ISO 8601 created_at; projection or null
   const pm = d.public_metrics && typeof d.public_metrics === 'object' ? d.public_metrics : {};
   const count = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
   // INGRESS TAGS (§27): only the tags X actually returned; Serpent-owned tags
@@ -202,10 +203,10 @@ export function xPostToRaw(line, { provider = 'X_OFFICIAL' } = {}) {
       threadId: isIdStr(d.conversation_id) ? d.conversation_id : originalId,
       nativeVersionId: d.id,
       providerEventSeq: null, // X has no sequence cursor — never invented (§28)
-      providerEventTs: null, // the stream payload carries no distinct provider event clock (§25)
+      providerEventTs: null, providerEventWitness: null, // the stream payload carries no distinct provider event clock (§25)
       handle: null, // no User resource is requested in SOCIAL-2B (§23/§42)
       displayName: null,
-      sourceDeclaredTs: Number.isFinite(created) ? created : null, // client/source-declared; quarantine law applies
+      sourceDeclaredTs: sourceClockWitness.projectionMs, sourceClockWitness, // client/source-declared (validated grammar or null); witnessed quarantine law applies
       engagement: { likes: count(pm.like_count), reposts: count(pm.retweet_count), replies: count(pm.reply_count), quotes: count(pm.quote_count), views: count(pm.impression_count) },
       authorMeta: null, // no $0.010 User reads in SOCIAL-2B (§42)
       ingressTags,

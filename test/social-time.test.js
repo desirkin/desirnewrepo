@@ -1,9 +1,9 @@
 // SOCIAL-4D — social temporal-input integrity. ONE repeated parsing flaw (generic
 // Date.parse on external strings) reproduced at 809a139 across the Reddit access
-// record and six provider clock paths. This ticket ships the pure boundary
-// (rumor2/social-time.js) and the Reddit repair; the six adapter paths are BLOCKED
-// at the §7 durable-identity stop gate (doctrine §5H) and stay on the baseline
-// parser until an explicit history/precision decision. Wholly synthetic values.
+// record and six provider clock paths. d5db393 shipped the pure boundary
+// (rumor2/social-time.js) and the Reddit repair; the SOCIAL-4D COMPLETION wires the six
+// adapter paths through bounded temporal witnesses with history-safe reconciliation
+// (test/social-4d-completion.test.js). Wholly synthetic values.
 // Cross-zone checks run fresh child processes under three TZ settings with the
 // SAME explicit nowMs.
 import test from 'node:test';
@@ -35,7 +35,7 @@ test('TIME-1. the boundary is pure and closed: no imports, no capability, closed
   for (const cap of ['fetch(', 'WebSocket', 'setTimeout', 'setInterval', 'node:', 'process.', 'Date.now', 'Date.parse', 'Date.UTC', 'require(', 'import(']) assert.ok(!code.includes(cap), `no ${cap}`);
   assert.deepEqual([...SOCIAL_TIME_OUTCOMES], ['INSTANT', 'DATE_ONLY', 'ABSENT', 'OFFSET_MISSING', 'UNSUPPORTED_PRECISION', 'UNSUPPORTED_RANGE', 'MALFORMED']);
   assert.deepEqual([...SOCIAL_ACCESS_DATE_KINDS], ['ABSENT', 'INSTANT', 'DATE_ONLY', 'INVALID']);
-  assert.deepEqual(Object.keys(P), ['AT_DATETIME', 'RFC3339', 'ISO8601_PROFILE', 'ACCESS_DATE']);
+  assert.deepEqual(Object.keys(P), ['AT_DATETIME', 'RFC3339', 'ISO8601_PROFILE', 'JETSTREAM_EVENT_TIME', 'ACCESS_DATE']);
   for (const v of [undefined, null, '', 0, 1, -1, 1.5, NaN, true, false, [], {}, ['2026-09-06T12:00:00Z'], { toString: () => '2026-09-06T12:00:00Z' }, 20260906n, Symbol.iterator, () => '2026-09-06T12:00:00Z']) for (const pol of Object.values(P)) { const r = parseSocialTime(v, pol); assert.ok(SOCIAL_TIME_OUTCOMES.includes(r.outcome)); assert.equal(r.instantMs, null, `${String(v)} under ${pol.id}`); assert.ok(r.outcome === 'ABSENT' || r.outcome === 'MALFORMED'); }
   assert.throws(() => parseSocialTime('2026-09-06T12:00:00Z'), TypeError, 'a policy is mandatory — no default guessing');
   assert.equal(parseSocialTime('x'.repeat(MAX_SOCIAL_TIME_CHARS + 1), P.RFC3339).outcome, 'MALFORMED'); assert.equal(parseSocialTime('x'.repeat(MAX_SOCIAL_TIME_CHARS + 1), P.RFC3339).declared.length, MAX_SOCIAL_TIME_CHARS, 'bounded, not rewritten');
@@ -156,10 +156,8 @@ test('RD-TIME-3. byte-identical Reddit readiness under UTC, America/New_York, an
 });
 
 // =========================================================================================
-// C. PROVIDER CLOCK POLICIES — the pure boundary is READY for the six provider paths
-// (Farcaster cast/recast, Bluesky post/repost/event time, X Post); wiring them is
-// BLOCKED at the §7 durable-identity stop gate (see doctrine §5H) and awaits an explicit
-// history/precision decision. These tests pin the policy the adapters will consume.
+// C. PROVIDER CLOCK POLICIES — the per-role policies the six adapter paths consume
+// (Farcaster cast/recast, Bluesky post/repost/event time, X Post).
 // =========================================================================================
 test('PV-POLICY-1. the provider policies already answer the RED B inputs deterministically: no instant for offset-less, impossible, bare-numeric, or extended-year declarations; exact instants for documented forms; sub-millisecond digits floored and flagged', () => {
   for (const pol of [P.AT_DATETIME, P.RFC3339, P.ISO8601_PROFILE]) {
@@ -173,24 +171,23 @@ test('PV-POLICY-1. the provider policies already answer the RED B inputs determi
   }
   // provider-specific grammar: Neynar RFC 3339 admits lowercase and -00:00; AT datetime (Bluesky) and X's ISO profile do not
   assert.equal(providerRecordTimeMs('2026-09-06t12:00:00z', P.RFC3339), T_MS); assert.equal(providerRecordTimeMs('2026-09-06T12:00:00-00:00', P.RFC3339), T_MS);
-  for (const pol of [P.AT_DATETIME, P.ISO8601_PROFILE]) { assert.equal(providerRecordTimeMs('2026-09-06t12:00:00z', pol), null, pol.id); assert.equal(providerRecordTimeMs('2026-09-06T12:00:00-00:00', pol), null, pol.id); }
+  for (const pol of [P.AT_DATETIME, P.ISO8601_PROFILE, P.JETSTREAM_EVENT_TIME]) { assert.equal(providerRecordTimeMs('2026-09-06t12:00:00z', pol), null, pol.id); assert.equal(providerRecordTimeMs('2026-09-06T12:00:00-00:00', pol), null, pol.id); }
   // identical results under three host zones for the same inputs
   const inputs = ['2026-09-06T12:00:00Z', '2026-09-06T08:00:00-04:00', '2026-09-06T12:00:00.123456Z', '2026-09-06T12:00:00', '2026-02-30T12:00:00Z', '0', '2026-09-06t12:00:00z', '2026-09-06T12:00:00-00:00', '0050-01-01T00:00:00Z', ''];
   const script = `import { parseSocialTime, SOCIAL_TIME_POLICIES as P } from ${JSON.stringify(path.join(REPO, 'rumor2/social-time.js'))}; const out = []; for (const pol of Object.values(P)) for (const v of ${JSON.stringify(inputs)}) out.push([pol.id, v, parseSocialTime(v, pol)]); process.stdout.write(JSON.stringify(out));`;
   const utc = runIn('UTC', script); for (const z of ZONES.slice(1)) assert.equal(runIn(z, script), utc, z);
-  assert.equal(JSON.parse(utc).length, 4 * inputs.length);
+  assert.equal(JSON.parse(utc).length, 5 * inputs.length);
 });
 
 // =========================================================================================
 // D. NO ACTIVATION / NO AUTHORITY CHANGE
 // =========================================================================================
-test('NO-ACT-TIME. the repair changes no capability: Farcaster still has no transport or collector path; key presence is configuration only; retention firewalls hold; Reddit imports only the shared contract and the pure boundary; the adapters are untouched pending the §7 decision', () => {
+test('NO-ACT-TIME. the repair changes no capability: Farcaster still has no transport or collector path; key presence is configuration only; retention firewalls hold; the six adapter clock paths are wired to the boundary with no Date.parse left', () => {
   assert.equal(farcasterConfigured({}), false); assert.equal(farcasterConfigured({ NEYNAR_API_KEY: 'fixture-not-real' }), true, 'configuration only');
-  for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/social-stream.js', 'rumor2/x-runtime.js', 'fly.js']) { const src = readFileSync(path.join(REPO, f), 'utf8'); assert.ok(!src.includes('farcaster-official') && !src.includes('neynar'), `${f} never wires Farcaster`); assert.ok(!src.includes('social-time'), `${f} does not consume the boundary`); }
+  for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/social-stream.js', 'rumor2/x-runtime.js', 'fly.js']) { const src = readFileSync(path.join(REPO, f), 'utf8'); assert.ok(!src.includes('farcaster-official') && !src.includes('neynar'), `${f} never wires Farcaster`); }
   const reddit = readFileSync(path.join(REPO, 'rumor2/social-reddit.js'), 'utf8'); assert.ok(!/Date\.parse\((?!')/.test(reddit.replace(/\/\/.*$/gm, '')), 'social-reddit.js: no Date.parse on external input (fixed UTC literals excepted)');
   assert.deepEqual([...reddit.matchAll(/from '([^']+)'/g)].map((m) => m[1]), ['./social.js', './social-time.js']);
-  // the six adapter clock paths still carry the baseline Date.parse (documented, BLOCKED at the stop gate — not silently patched)
-  for (const f of ['rumor2/providers/bluesky-official.js', 'rumor2/providers/farcaster-official.js', 'rumor2/providers/x-official.js']) assert.ok(!readFileSync(path.join(REPO, f), 'utf8').includes('social-time'), `${f} is not yet wired to the boundary`);
+  for (const f of ['rumor2/providers/bluesky-official.js', 'rumor2/providers/farcaster-official.js', 'rumor2/providers/x-official.js']) { const src = readFileSync(path.join(REPO, f), 'utf8').replace(/\/\/.*$/gm, ''); assert.ok(!src.includes('Date.parse(') && !/new Date\((?!0\))/.test(src), `${f}: no heuristic Date.parse / new Date(string)`); assert.ok(src.includes("from '../social-time.js'"), `${f} is wired to the boundary`); }
   for (const provider of ['REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL']) { const n = normalizeSocialObservation({ provider, providerKind: 'SOCIAL_FORUM', nativePostId: 't3_x', nativeAuthorId: 't2_y', text: 'x', relation: 'ORIGINAL', parentNativePostId: null, editState: 'ORIGINAL', canonicalUrl: null, threadId: null, handle: null, sourceDeclaredTs: T_MS, providerEventTs: null, engagement: null, authorMeta: null }, { nowMs: NOW }); assert.equal(n.reject, true); assert.match(n.reason, /^RETENTION_NOT_APPROVED/); }
   const mission = readFileSync(path.join(REPO, 'doctrine/MISSION.md'), 'utf8'); assert.ok(mission.includes('We do not reject pumps')); assert.ok(mission.includes('price extension is context'));
 });

@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startRumor2 } from '../rumor2/collector.js';
-import { SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE } from '../rumor2/social-settle.js';
+import { SOCIAL_EVENT_TYPE, SOCIAL_OBSERVATION_TYPES, SOCIAL_CURSOR_EVENT_TYPE } from '../rumor2/social-settle.js';
 import { BLUESKY_OFFICIAL } from '../rumor2/providers/bluesky-official.js';
 
 const dirs = [];
@@ -70,7 +70,7 @@ if (!TEST_URL) {
     return { c, clock, tick: async (adv = 4_000_000) => ((clock.ms += adv), await c.tickOnce()) };
   };
   const hist = async (journal) => (await journal.read()).events;
-  const social = (events) => events.filter((e) => e.type === SOCIAL_EVENT_TYPE);
+  const social = (events) => events.filter((e) => SOCIAL_OBSERVATION_TYPES.includes(e.type));
   const cursors = (events) => events.filter((e) => e.type === SOCIAL_CURSOR_EVENT_TYPE).map((e) => e.durableCursor);
 
   test('COL-1 (§27). the Bluesky ear is OFF by default — no runtime, no stream, no social events', async () => {

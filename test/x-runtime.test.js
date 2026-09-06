@@ -13,7 +13,7 @@ import { buildSocialFilter } from '../rumor2/social.js';
 import { createXRuntime, xGate, xConfigFromEnv, X_IN_FLIGHT_POST_HEADROOM, X_SAFE_GAP_MS } from '../rumor2/x-runtime.js';
 import { startXStream } from '../rumor2/x-stream.js';
 import { X_OFFICIAL, xRuleTag, compileXRuleManifest, isSerpentTag } from '../rumor2/providers/x-official.js';
-import { SOCIAL_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_GAP_EVENT_TYPE, replaySocialHistory, validateXMeterEvent, validateXProgressEvent, validateXRuleSetEvent, validateXGapEvent, xMeterEvent, xProgressEvent, xRuleSetEvent, xGapEvent } from '../rumor2/social-settle.js';
+import { SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_GAP_EVENT_TYPE, replaySocialHistory, validateXMeterEvent, validateXProgressEvent, validateXRuleSetEvent, validateXGapEvent, xMeterEvent, xProgressEvent, xRuleSetEvent, xGapEvent } from '../rumor2/social-settle.js';
 import { memJournal } from './helpers/rumor2-journal.js';
 
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-xrt-'));
@@ -305,7 +305,7 @@ test('X-ATOMIC-1 (§30/§34). one batch = [ruleset] [evidence...] [meter] [progr
   fail = false;
   const r2 = await settle(rt, j);
   assert.equal(r2.ok, true); assert.equal(r2.appended, 1);
-  assert.deepEqual(arr.map((e) => e.type), [X_RULESET_EVENT_TYPE, SOCIAL_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE], 'authoritative order');
+  assert.deepEqual(arr.map((e) => e.type), [X_RULESET_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE], 'authoritative order');
   assert.equal(validateXRuleSetEvent(arr[0]), null); assert.equal(validateXMeterEvent(arr[2]), null); assert.equal(validateXProgressEvent(arr[3]), null);
   assert.equal(arr[0].coverageEpoch, 1); assert.equal(arr[0].activatedKnownAtTs, T, 'activation is point-in-time (now), never backdated');
   assert.equal(arr[2].deliveredPostReads, 2); assert.equal(arr[3].throughKnownAtTs, clock.ms, 'progress through the last receipt once every line is terminal');
@@ -346,7 +346,7 @@ test('REC-3 (PASS 11 / §31). restart after 3 minutes: reconnect with backfill_m
   assert.equal(B.rt.status().meter.deliveredPostReads, 3, '1 before + 2 backfilled (the duplicate is metered again)');
   assert.equal(B.rt._intake().stats().durableDeduped, 1, 'the overlap is durable-deduped');
   const r = await settle(B.rt, j); assert.equal(r.appended, 1);
-  assert.equal(ofType(arr, SOCIAL_EVENT_TYPE).length, 2); assert.equal(ofType(arr, X_RULESET_EVENT_TYPE).length, 1, 'same rule set, same coverage epoch — no new activation');
+  assert.equal(ofType(arr, SOCIAL_EVENT_V2_TYPE).length, 2); assert.equal(ofType(arr, X_RULESET_EVENT_TYPE).length, 1, 'same rule set, same coverage epoch — no new activation');
   B.rt.stop();
 });
 
@@ -456,7 +456,7 @@ if (!TEST_URL) {
       const r = await settle(B.rt, jB); assert.equal(r.ok, true); assert.equal(r.appended, 1);
       B.rt.stop(); await jB.releaseWriter(); // REC-2: atomic batch committed, immediate crash
       const hist = (await jB.read()).events;
-      assert.deepEqual(hist.map((e) => e.type), [X_RULESET_EVENT_TYPE, SOCIAL_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE]);
+      assert.deepEqual(hist.map((e) => e.type), [X_RULESET_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE]);
       const jC = mkJournal(); assert.equal((await jC.acquireWriter()).ok, true);
       const C = await liveRuntime({ journalEvents: hist, nowMs: T + 120_000 });
       const st = C.rt.status();

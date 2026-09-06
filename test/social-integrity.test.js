@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { normalizeSocialObservation, socialMetaHash, socialVersionIdentity } from '../rumor2/social.js';
-import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_TYPE } from '../rumor2/social-settle.js';
+import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_TYPE, SOCIAL_OBSERVATION_TYPES } from '../rumor2/social-settle.js';
 import { jetstreamCommitToRaw } from '../rumor2/providers/bluesky-official.js';
 import { SOCIAL_PROVIDER_IDS } from '../rumor2/social-registry.js';
 
@@ -132,7 +132,7 @@ if (!TEST_URL) {
     finally { await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}); await db.end(); }
   };
   const settle = async (journal, events) => { const w = await journal.acquireWriter(); assert.equal(w.ok, true); const r = await journal.append(events); await journal.releaseWriter(); return r; };
-  const witnesses = async (journal) => (await journal.read()).events.filter((e) => e.type === SOCIAL_EVENT_TYPE).map(reconstructSocialWitness);
+  const witnesses = async (journal) => (await journal.read()).events.filter((e) => SOCIAL_OBSERVATION_TYPES.includes(e.type)).map(reconstructSocialWitness);
   const bd = (over) => jetstreamCommitToRaw({ payload: { $type: 'x#commit', did: over.did ?? 'did:plc:fan', seq: over.seq ?? 1, time: iso(over.time ?? C), operation: over.op ?? 'create', collection: over.collection ?? 'app.bsky.feed.post', rkey: over.rkey ?? 'r', cid: over.cid, record: over.record } }).raw;
   const ev = (raw, nowMs = NOW) => socialObservationToEvent(normalizeSocialObservation(raw, { nowMs }).observation).event;
 

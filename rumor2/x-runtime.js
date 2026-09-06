@@ -58,9 +58,10 @@ import { createHash } from 'node:crypto';
 import { buildSocialFilter, canonicalIngressTags } from './social.js';
 import { socialIntake } from './social-stream.js';
 import {
-  socialObservationToEvent, validateSocialEvent, replaySocialHistory, emptyXState,
+  validateSocialEvent, replaySocialHistory, emptyXState, SOCIAL_OBSERVATION_TYPES,
   xRuleSetEvent, xMeterEvent, xProgressEvent, xGapEvent, xSmokeEvent, SOCIAL_EVENT_TYPE, X_SMOKE_RUN_ID_RE,
 } from './social-settle.js';
+import { createSocialReconciler } from './social-reconcile.js';
 import { startXStream } from './x-stream.js';
 import {
   X_OFFICIAL, xPostToRaw, xStreamUrl, xRulesUrl, xRulesCountsUrl, xUsageUrl, xCreditsUrl,
@@ -160,13 +161,15 @@ export function createXRuntime({
 } = {}) {
   const pricing = provider.pricing;
   const universeFilter = filter ?? buildSocialFilter({});
-  const durableIds = new Set();
+  const reconciler = createSocialReconciler({ provider }); // SOCIAL-4D COMPLETION: version-aware index + ONE native-event matcher
+  const durableIds = { has: (id) => reconciler.isDurable(id), add: (id) => reconciler._markDurableId(id), get size() { return reconciler.size(); } };
   let x = emptyXState(); // durable X state from the journal
   let state = 'DARK';
   let hydrated = false;
   let intake = null;
   let stream = null;
   let pendingBatch = null;
+  let retainedEnvelopes = [];
   let lastError = null;
   // local conservative meter (durable snapshot + in-flight)
   const meter = { period: null, delivered: 0, monthPeriod: null, monthDelivered: 0, durablePeriod: null, durableDelivered: 0, durableMonthPeriod: null, durableMonthDelivered: 0, session: 0, byLane: {} };
@@ -404,7 +407,7 @@ export function createXRuntime({
   function hydrate(events) {
     const r = replaySocialHistory(events);
     if (!r.ok) { state = 'WITHHELD'; lastError = r.error; hydrated = false; return { ok: false, error: r.error }; }
-    durableIds.clear(); for (const id of r.durableIds) durableIds.add(id);
+    reconciler.hydrate(r);
     x = r.x;
     if (x.meter) {
       meter.durablePeriod = x.meter.period; meter.durableDelivered = x.meter.deliveredPostReads;
@@ -537,7 +540,7 @@ export function createXRuntime({
       }
     }
     backfillNext = backfill;
-    intake = intake ?? socialIntake({ provider, mapCommit: xPostToRaw, filter: universeFilter, now, cursorOf: null, isDurable: (id) => durableIds.has(id), ...intakeOptions });
+    intake = intake ?? socialIntake({ provider, mapCommit: xPostToRaw, filter: universeFilter, now, cursorOf: null, isDurable: (id, o) => reconciler.isFastDurable(id, o), ...intakeOptions });
     const s = startXStream({
       provider, bearer: config.bearer, fetchImpl: fetchImpl ?? globalThis.fetch, now, log,
       buildUrl: ({ backfillMinutes }) => xStreamUrl({ backfillMinutes }),
@@ -587,6 +590,7 @@ export function createXRuntime({
   // Writer loss / shutdown: stop the transport IMMEDIATELY; nothing durable is
   // adopted; no meter/progress/evidence mutation. Frames are redelivered via backfill.
   function stop(reason = 'stopped') {
+    retainedEnvelopes = [];
     if (stream) { stream.stop(reason); stream = null; }
     if (intake) { intake.clear(); intake = null; }
     pendingBatch = null;
@@ -603,7 +607,7 @@ export function createXRuntime({
     if (pendingBatch) return pendingBatch;
     const knownAtTs = Math.floor(now());
     const events = [];
-    const envelopes = intake ? intake.drain(maxDrain) : [];
+    const envelopes = [...retainedEnvelopes, ...(intake ? intake.drain(Math.max(0, maxDrain - retainedEnvelopes.length)) : [])]; retainedEnvelopes = []; // SOCIAL-4D COMPLETION: no drain-and-loss across a failed lookup
     let epoch = x.coverageEpoch; let hash = x.ruleSetHash;
     if (pendingActivation && !pendingActivation.afterGap) { events.push(xRuleSetEvent({ provider: provider.id, ruleSetHash: pendingActivation.ruleSetHash, ruleTags: pendingActivation.ruleTags, coverageEpoch: pendingActivation.coverageEpoch, activatedKnownAtTs: pendingActivation.activatedKnownAtTs, knownAtTs })); epoch = pendingActivation.coverageEpoch; hash = pendingActivation.ruleSetHash; }
     const smokeTerminalEvent = (t) => { const r = x.smoke.runs[t.smokeRunId]; return xSmokeEvent({ provider: provider.id, smokeRunId: r.smokeRunId, status: t.status, targetPostReads: r.targetPostReads, maxPostReads: r.maxPostReads, headroomPosts: r.headroomPosts, unitPriceUsd: r.unitPriceUsd, ruleSetHash: r.ruleSetHash, coverageEpoch: r.coverageEpoch, baselinePeriod: r.baselinePeriod, baselineDailyDeliveredPostReads: r.baselineDailyDeliveredPostReads, baselineMonthlyDeliveredPostReads: r.baselineMonthlyDeliveredPostReads, baselineServerProjectUsage: r.baselineServerProjectUsage, activatedKnownAtTs: r.activatedKnownAtTs, deliveredPostReadsForRun: t.deliveredPostReadsForRun, overrunPosts: t.overrunPosts, terminalReason: t.terminalReason, completedKnownAtTs: Math.min(Math.max(t.completedKnownAtTs, r.activatedKnownAtTs), Math.max(knownAtTs, r.activatedKnownAtTs)), knownAtTs: Math.max(knownAtTs, r.activatedKnownAtTs) }); };
@@ -615,18 +619,29 @@ export function createXRuntime({
       events.push(xSmokeEvent({ provider: provider.id, smokeRunId: a.smokeRunId, status: 'ACTIVE', targetPostReads: a.targetPostReads, maxPostReads: a.maxPostReads, headroomPosts: a.headroomPosts, unitPriceUsd: a.unitPriceUsd, ruleSetHash: a.ruleSetHash, coverageEpoch: a.coverageEpoch, baselinePeriod: a.baselinePeriod, baselineDailyDeliveredPostReads: a.baselineDailyDeliveredPostReads, baselineMonthlyDeliveredPostReads: a.baselineMonthlyDeliveredPostReads, baselineServerProjectUsage: a.baselineServerProjectUsage, activatedKnownAtTs: a.activatedKnownAtTs, knownAtTs }));
       smokeActivation = { ...a };
     }
-    const candidates = []; const inBatch = new Set();
+    // SOCIAL-4D COMPLETION: ONE deterministic native-event reconciliation per envelope (the
+    // durable index + earlier candidates of this batch). A delivered Post was ALREADY metered
+    // at the wire; "not a new rumor" never means "not a billable Post".
+    const scope = reconciler.batch({ knownAtTs });
+    const candidates = [];
     for (const env of envelopes) {
-      const { event } = socialObservationToEvent(env.observation);
-      const verr = validateSocialEvent(event);
-      if (verr) { stats.invalid += 1; continue; }
-      if (durableIds.has(event.sourceEventId) || inBatch.has(event.sourceEventId)) { stats.durableDuplicates += 1; continue; }
-      inBatch.add(event.sourceEventId); candidates.push(event);
+      const rc = reconciler.reconcile(env.observation, scope);
+      if (rc.kind === 'INVALID') { stats.invalid += 1; continue; }
+      if (rc.kind === 'KNOWN') { stats.durableDuplicates += 1; continue; }
+      if (rc.kind === 'NEW') { candidates.push(rc.event); continue; }
+      if (rc.kind === 'ANNOTATE') { candidates.push(...rc.events); continue; }
+      candidates.push(rc.event); // PENDING
     }
     if (candidates.length > 0 && typeof lookup === 'function') {
-      const r = await lookup(SOCIAL_EVENT_TYPE, candidates.map((e) => e.sourceEventId));
-      if (!r?.ok) return { error: `durable lookup unavailable: ${r?.reason ?? 'unknown'}` };
-      for (const e of candidates) { if (r.existing.has(e.sourceEventId)) { stats.durableDuplicates += 1; durableIds.add(e.sourceEventId); continue; } events.push(e); }
+      const byType = new Map();
+      for (const e of candidates) { if (!byType.has(e.type)) byType.set(e.type, []); byType.get(e.type).push(e); }
+      const existing = new Set();
+      for (const [type, list] of byType) {
+        const r = await lookup(type, list.map((e) => e.sourceEventId));
+        if (!r?.ok) { retainedEnvelopes = envelopes; return { error: `durable lookup unavailable: ${r?.reason ?? 'unknown'}` }; }
+        for (const id of r.existing) existing.add(`${type}|${id}`);
+      }
+      for (const e of candidates) { if (existing.has(`${e.type}|${e.sourceEventId}`)) { stats.durableDuplicates += 1; if (SOCIAL_OBSERVATION_TYPES.includes(e.type)) durableIds.add(e.sourceEventId); continue; } events.push(e); }
     } else events.push(...candidates);
     // meter: only when the conservative count (or the server snapshot) moved
     rollPeriods(knownAtTs);
@@ -672,7 +687,7 @@ export function createXRuntime({
     if (!r?.ok) { stats.appendFailures += 1; lastError = r?.reason ?? 'append failed'; return { ok: false, reason: r?.reason ?? 'UNAVAILABLE' }; }
     // AFTER the durable commit: adopt exactly once, evidence + meter + progress together
     let appended = 0;
-    for (const e of batch.events) if (e.type === SOCIAL_EVENT_TYPE) { durableIds.add(e.sourceEventId); appended += 1; }
+    { const adopted = reconciler.adopt(batch.events); appended = adopted.sources; stats.annotations = (stats.annotations ?? 0) + adopted.annotated; stats.pendingRecords = (stats.pendingRecords ?? 0) + adopted.pendings; }
     if (batch.activation) {
       x.ruleSetHash = batch.activation.ruleSetHash; x.coverageEpoch = batch.activation.coverageEpoch; x.activatedKnownAtTs = batch.activation.activatedKnownAtTs; x.ruleTags = batch.activation.ruleTags; x.progressThroughTs = null;
       pendingActivation = null; stats.rulesetEvents += 1;

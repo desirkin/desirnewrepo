@@ -32,8 +32,9 @@
 // order, execution, or Socrates path exists here.
 import { buildSocialFilter } from './social.js';
 import { socialIntake, startSocialStream } from './social-stream.js';
+import { createSocialReconciler } from './social-reconcile.js';
 import {
-  socialObservationToEvent, validateSocialEvent, socialCursorEvent, replaySocialHistory,
+  validateSocialEvent, socialCursorEvent, replaySocialHistory, SOCIAL_OBSERVATION_TYPES, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE,
   SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE,
 } from './social-settle.js';
 import { BLUESKY_OFFICIAL, jetstreamCommitToRaw, jetstreamCursorOf, jetstreamUrl } from './providers/bluesky-official.js';
@@ -74,15 +75,18 @@ export function createSocialRuntime({
   streamOptions = {},
 } = {}) {
   const universe = filter ?? buildSocialFilter({});
-  const durableIds = new Set(); // the DURABLE version index (authoritative keep-first)
+  // SOCIAL-4D COMPLETION: the version-aware derived index + the ONE native-event matcher
+  const reconciler = createSocialReconciler({ provider });
+  const durableIds = { has: (id) => reconciler.isDurable(id), add: (id) => reconciler._markDurableId(id), get size() { return reconciler.size(); } };
   let durableCursor = null; // the ONLY cursor a (re)connect may resume from
   let state = 'DARK';
   let hydrated = false;
   let intake = null;
   let stream = null;
   let pendingBatch = null; // { envelopes, events, projected, knownAtTs } retained whole until settled
+  let retainedEnvelopes = []; // SOCIAL-4D COMPLETION: envelopes drained before a FAILED lookup stay owed — never drain-and-loss
   let lastCursorOnlyTs = null;
-  const stats = { hydrations: 0, settles: 0, appended: 0, cursorAdvances: 0, durableDuplicates: 0, invalid: 0, appendFailures: 0, stops: 0 };
+  const stats = { hydrations: 0, settles: 0, appended: 0, cursorAdvances: 0, durableDuplicates: 0, invalid: 0, appendFailures: 0, stops: 0, annotations: 0, pendingRecords: 0, knownSameEvent: 0 };
   let lastError = null;
 
   const urlFor = ({ cursor }) => (buildUrl ? buildUrl({ cursor }) : jetstreamUrl({ host, cursor }));
@@ -92,8 +96,7 @@ export function createSocialRuntime({
   function hydrate(events) {
     const r = replaySocialHistory(events);
     if (!r.ok) { state = 'WITHHELD'; lastError = r.error; hydrated = false; return { ok: false, error: r.error }; }
-    durableIds.clear();
-    for (const id of r.durableIds) durableIds.add(id);
+    reconciler.hydrate(r);
     const c = r.cursors[provider.id];
     // never regress an already-known cursor within one process (§24)
     durableCursor = Number.isSafeInteger(c) ? (durableCursor === null ? c : Math.max(durableCursor, c)) : durableCursor;
@@ -108,7 +111,7 @@ export function createSocialRuntime({
   function start() {
     if (!hydrated) return { ok: false, reason: 'not hydrated from the authoritative journal' };
     if (stream) return { ok: true, already: true };
-    intake = socialIntake({ provider, mapCommit, filter: universe, now, cursorOf, isDurable: (id) => durableIds.has(id), ...intakeOptions });
+    intake = socialIntake({ provider, mapCommit, filter: universe, now, cursorOf, isDurable: (id, o) => reconciler.isFastDurable(id, o), ...intakeOptions });
     stream = startSocialStream({
       provider, intake, mode, fixtures, now, log,
       buildUrl: urlFor,
@@ -126,7 +129,7 @@ export function createSocialRuntime({
   function stop(reason = 'stopped') {
     if (stream) { stream.stop(); stream = null; stats.stops += 1; }
     if (intake) { intake.clear(); intake = null; }
-    pendingBatch = null;
+    pendingBatch = null; retainedEnvelopes = [];
     if (state === 'ACTIVE') state = 'STANDBY';
     log(`social-runtime: ${provider.id} stopped (${reason})`);
   }
@@ -136,29 +139,41 @@ export function createSocialRuntime({
   // event LAST. Pure with respect to durable state.
   async function buildBatch(lookup) {
     if (pendingBatch) return pendingBatch;
-    const envelopes = intake.drain(maxDrain);
+    const envelopes = [...retainedEnvelopes, ...intake.drain(Math.max(0, maxDrain - retainedEnvelopes.length))]; retainedEnvelopes = [];
     const events = [];
-    const inBatch = new Set();
+    const knownAtTs = Math.floor(now());
+    // SOCIAL-4D COMPLETION: ONE deterministic native-event reconciliation per envelope, over
+    // the durable index PLUS earlier candidates of this same batch. Outcomes: NEW (append the
+    // strict v2 observation), KNOWN (keep-first, terminal), ANNOTATE (append only dated
+    // interpretation annotations bound to the existing event), PENDING (append one explicit
+    // reconciliation-pending record). No parser change may remint a durable post.
+    const scope = reconciler.batch({ knownAtTs });
     const candidates = [];
     for (const env of envelopes) {
-      const { event } = socialObservationToEvent(env.observation);
-      const verr = validateSocialEvent(event);
-      if (verr) { stats.invalid += 1; env.terminalReason = `invalid: ${verr}`; continue; } // refused, never appended (terminal)
-      if (durableIds.has(event.sourceEventId) || inBatch.has(event.sourceEventId)) { stats.durableDuplicates += 1; env.terminalReason = 'duplicate'; continue; } // keep-first
-      inBatch.add(event.sourceEventId);
-      candidates.push(event);
+      const rc = reconciler.reconcile(env.observation, scope);
+      if (rc.kind === 'INVALID') { stats.invalid += 1; env.terminalReason = `invalid: ${rc.error}`; continue; } // refused, never appended (terminal)
+      if (rc.kind === 'KNOWN') { stats.durableDuplicates += 1; if (rc.sameEvent) stats.knownSameEvent += 1; env.terminalReason = 'duplicate'; continue; } // keep-first
+      if (rc.kind === 'NEW') { candidates.push(rc.event); continue; }
+      if (rc.kind === 'ANNOTATE') { candidates.push(...rc.events); env.terminalReason = 'annotated'; continue; }
+      candidates.push(rc.event); env.terminalReason = `pending: ${rc.reason}`; // PENDING
     }
-    // authoritative fallback for ids the in-memory index may not carry
+    // authoritative fallback, PER TYPE, for ids the in-memory index may not carry: a lookup
+    // failure is never "not found" and never a reason to advance
     if (candidates.length > 0 && typeof lookup === 'function') {
-      const r = await lookup(SOCIAL_EVENT_TYPE, candidates.map((e) => e.sourceEventId));
-      if (!r?.ok) return { error: `durable lookup unavailable: ${r?.reason ?? 'unknown'}`, envelopes };
+      const byType = new Map();
+      for (const e of candidates) { if (!byType.has(e.type)) byType.set(e.type, []); byType.get(e.type).push(e); }
+      const existing = new Set();
+      for (const [type, list] of byType) {
+        const r = await lookup(type, list.map((e) => e.sourceEventId));
+        if (!r?.ok) { retainedEnvelopes = envelopes; return { error: `durable lookup unavailable: ${r?.reason ?? 'unknown'}`, envelopes }; }
+        for (const id of r.existing) existing.add(`${type}|${id}`);
+      }
       for (const e of candidates) {
-        if (r.existing.has(e.sourceEventId)) { stats.durableDuplicates += 1; durableIds.add(e.sourceEventId); continue; }
+        if (existing.has(`${e.type}|${e.sourceEventId}`)) { stats.durableDuplicates += 1; if (SOCIAL_OBSERVATION_TYPES.includes(e.type)) durableIds.add(e.sourceEventId); continue; }
         events.push(e);
       }
     } else events.push(...candidates);
     const projected = intake.projectedCursor(envelopes);
-    const knownAtTs = Math.floor(now());
     let advances = Number.isSafeInteger(projected) && (durableCursor === null || projected > durableCursor);
     if (advances && events.length === 0 && lastCursorOnlyTs !== null && knownAtTs - lastCursorOnlyTs < cursorOnlyIntervalMs) advances = false; // rate-limit cursor-only progress
     if (advances) events.push(socialCursorEvent({ provider: provider.id, durableCursor: projected, knownAtTs })); // ALWAYS LAST
@@ -193,9 +208,8 @@ export function createSocialRuntime({
     }
     // AFTER the durable commit — adopt exactly once
     let appended = 0;
-    for (const e of batch.events) {
-      if (e.type === SOCIAL_EVENT_TYPE) { durableIds.add(e.sourceEventId); appended += 1; }
-    }
+    const adopted = reconciler.adopt(batch.events);
+    appended = adopted.sources; stats.annotations += adopted.annotated; stats.pendingRecords += adopted.pendings;
     if (batch.projected !== null) { durableCursor = batch.projected; stats.cursorAdvances += 1; if (appended === 0) lastCursorOnlyTs = batch.knownAtTs; }
     stats.appended += appended;
     intake.settled(batch.envelopes);
@@ -213,6 +227,7 @@ export function createSocialRuntime({
     settle,
     isActive: () => state === 'ACTIVE' && stream !== null,
     isDurable: (id) => durableIds.has(id),
+    reconciler: () => reconciler,
     durableCursor: () => durableCursor,
     durableIndexSize: () => durableIds.size,
     // test/diagnostic hook: feed one raw frame into the live intake
@@ -225,8 +240,9 @@ export function createSocialRuntime({
         pendingBatch: pendingBatch ? { envelopes: pendingBatch.envelopes.length, events: pendingBatch.events.length, projectedCursor: pendingBatch.projected } : null,
         stream: stream ? stream.status() : null,
         stats: { ...stats }, lastError,
+        reconciliation: reconciler.status(), // physical journal growth (annotations/pending) is NOT logical source growth
         authority: 'NONE', // source-only: no claim/trade authority, ever
-        eventTypes: [SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE],
+        eventTypes: [...SOCIAL_OBSERVATION_TYPES, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE],
       };
     },
   };

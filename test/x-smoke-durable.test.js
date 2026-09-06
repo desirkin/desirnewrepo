@@ -11,7 +11,7 @@ import path from 'node:path';
 import { buildSocialFilter } from '../rumor2/social.js';
 import { createXRuntime, xGate, xSmokeLaw, xConfigFromEnv, smokeRunIdHash, X_IN_FLIGHT_POST_HEADROOM, X_RUNTIME_STATES } from '../rumor2/x-runtime.js';
 import { X_OFFICIAL, xRuleTag } from '../rumor2/providers/x-official.js';
-import { SOCIAL_EVENT_TYPE, X_METER_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_SMOKE_RUN_ID_RE, X_SMOKE_STATUSES, SOCIAL_EVENT_TYPES, xSmokeEvent, validateXSmokeEvent, replaySocialHistory } from '../rumor2/social-settle.js';
+import { SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, X_METER_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_SMOKE_RUN_ID_RE, X_SMOKE_STATUSES, SOCIAL_EVENT_TYPES, xSmokeEvent, validateXSmokeEvent, replaySocialHistory } from '../rumor2/social-settle.js';
 import { memJournal } from './helpers/rumor2-journal.js';
 
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-xsd-'));
@@ -140,7 +140,7 @@ test('SMOKE-DUR-1 (RED #1 / §11 / PASS 4). a completed smoke stays COMPLETE aft
   assert.equal(A.rt.status().state, 'SMOKE_COMPLETE'); assert.equal(A.rt.status().smoke.latched, true); assert.equal(A.rt.status().meter.sessionPostReads, 1);
   assert.equal((await settle(A.rt, A.j)).ok, true);
   const types = arr.map((e) => e.type);
-  assert.deepEqual(types, [X_RULESET_EVENT_TYPE, X_SMOKE_EVENT_TYPE, SOCIAL_EVENT_TYPE, X_METER_EVENT_TYPE, 'RUMOR2_SOCIAL_X_PROGRESS', X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE], 'terminal smoke truth settles WITH the final evidence/meter/progress/gap');
+  assert.deepEqual(types, [X_RULESET_EVENT_TYPE, X_SMOKE_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, X_METER_EVENT_TYPE, 'RUMOR2_SOCIAL_X_PROGRESS', X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE], 'terminal smoke truth settles WITH the final evidence/meter/progress/gap');
   const term = ofType(arr, X_SMOKE_EVENT_TYPE)[1];
   assert.equal(term.status, 'COMPLETE'); assert.equal(term.terminalReason, 'SMOKE_TARGET_REACHED'); assert.equal(term.deliveredPostReadsForRun, 1); assert.equal(term.overrunPosts, 0); assert.equal(validateXSmokeEvent(term), null);
   A.rt.stop(); // destroy A

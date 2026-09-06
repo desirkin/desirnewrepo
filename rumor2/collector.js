@@ -58,7 +58,7 @@ import { buildClaimPacket } from './packet.js';
 // SOCIAL-2A: the Bluesky Social ear runs INSIDE this collector's single-writer
 // authority domain — same journal, same epoch, same fence. Social events are
 // SOURCE-ONLY: they never enter the frozen replay, graph, claims, or packets.
-import { isSocialEventType } from './social-settle.js';
+import { isSocialEventType, replaySocialHistory } from './social-settle.js';
 import { createSocialRuntime } from './social-runtime.js';
 import { buildSocialFilter } from './social.js';
 // SOCIAL-2B: the X filtered-stream ear — same writer, same epoch, same journal;
@@ -485,10 +485,21 @@ export function startRumor2({
   let socialHydratedForInit = false;
   async function ensureInit() {
     const ok = await ensureInitCore();
-    if (!ok || socialRuntimes.length === 0) return ok;
+    if (!ok) return ok;
     if (socialHydratedForInit) return true;
     const jr = await activeJournal.read();
     if (journalReadFailure(jr)) return false;
+    // SOCIAL-4D COMPLETION (Q): Social history is validated on EVERY restore, with the
+    // provider gates on OR off — a later-enabled provider can never reveal history that was
+    // silently treated as valid without ever being checked. Fail-closed, like the core.
+    if (socialRuntimes.length === 0) {
+      if (jr.events.some((e) => e && typeof e === 'object' && isSocialEventType(e.type))) {
+        const sr = replaySocialHistory(jr.events);
+        if (!sr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(sr.error); return false; }
+      }
+      socialHydratedForInit = true;
+      return true;
+    }
     for (const rt of socialRuntimes) {
       const hr = rt.hydrate(jr.events);
       if (!hr.ok) {

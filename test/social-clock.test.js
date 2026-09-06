@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { normalizeSocialObservation, classifySourceClock, SOURCE_CLOCK_STATES, MAX_SOURCE_CLOCK_SKEW_MS, socialProvenanceFacts, socialDiagnosticFacts, buildSocialFilter } from '../rumor2/social.js';
-import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_KEYS, SOCIAL_EVENT_TYPE } from '../rumor2/social-settle.js';
+import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_KEYS, SOCIAL_EVENT_TYPE, SOCIAL_OBSERVATION_TYPES } from '../rumor2/social-settle.js';
 import { socialIntake } from '../rumor2/social-stream.js';
 import { createSocialRuntime } from '../rumor2/social-runtime.js';
 import { jetstreamCommitToRaw, jetstreamCursorOf, BLUESKY_OFFICIAL } from '../rumor2/providers/bluesky-official.js';
@@ -60,12 +60,17 @@ test('CLK-4 (§19 / PASS 3). +1 day: evidence retained, bounded skew, no tempora
   const o = norm(T + 86_400_000).observation;
   assert.equal(o.sourceClockStatus, 'FUTURE_QUARANTINED'); assert.equal(o.sourceCreatedTs, null); assert.equal(o.sourceClockSkewMs, 86_400_000);
   assert.ok(Number.isSafeInteger(o.sourceClockSkewMs));
-  // the far edge of Date: still a bounded safe integer, still quarantined, still accepted
-  const far = norm('+275760-09-13T00:00:00.000Z');
+  // the far edge of the FOUR-DIGIT calendar: still a bounded safe integer, still quarantined, still accepted
+  const far = norm('9999-12-31T23:59:59.999Z');
   assert.equal(far.ok, true); assert.equal(far.observation.sourceClockStatus, 'FUTURE_QUARANTINED');
   assert.equal(far.observation.sourceClockSkewMs, MAX_SOURCE_CLOCK_SKEW_MS, 'clamped to the bound');
   assert.ok(Number.isSafeInteger(far.observation.sourceDeclaredTs));
   assert.equal(validateSocialEvent(socialObservationToEvent(far.observation).event, V), null);
+  // SOCIAL-4D: an ISO extended six-digit year is outside the AT Protocol datetime grammar (four-digit
+  // years only) — it is an UNUSABLE clock, never an overflow and never a discarded post
+  const ext = norm('+275760-09-13T00:00:00.000Z');
+  assert.equal(ext.ok, true); assert.equal(ext.observation.sourceDeclaredTs, null); assert.equal(ext.observation.sourceClockStatus, 'UNKNOWN');
+  assert.equal(validateSocialEvent(socialObservationToEvent(ext.observation).event, V), null);
 });
 
 test('CLK-5 (§20). malformed record.createdAt: sourceDeclaredTs = null / UNKNOWN, evidence kept, never Date.now', () => {
@@ -187,7 +192,7 @@ if (!TEST_URL) {
       B.start();
       assert.equal(B._intake().stats().durableDeduped, 1, 'same immutable version recognized as durable');
       const r2 = await settle(B, jB); assert.equal(r2.ok, true); assert.equal(r2.appended, 0, 'no altered payload, no corruption');
-      const soc = (await jB.read()).events.filter((e) => e.type === SOCIAL_EVENT_TYPE);
+      const soc = (await jB.read()).events.filter((e) => SOCIAL_OBSERVATION_TYPES.includes(e.type));
       assert.equal(soc.length, 1, 'ONE durable social event');
       const w = reconstructSocialWitness(soc[0]);
       assert.equal(w.sourceClockStatus, 'FUTURE_QUARANTINED', 'first-known verdict stands');

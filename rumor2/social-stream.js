@@ -52,7 +52,7 @@ export function socialIntake({
     // SOURCE-CLOCK QUARANTINE SEAL (§25): observability counters over every
     // normalized observation (before the universe filter) — provider/client
     // clock quality during soaks; information only, never authority
-    sourceClockTrusted: 0, sourceClockFutureQuarantined: 0, sourceClockUnknown: 0,
+    sourceClockTrusted: 0, sourceClockFutureQuarantined: 0, sourceClockUnknown: 0, sourceClockOrderUnresolved: 0,
   };
 
   const remember = (id) => {
@@ -89,6 +89,7 @@ export function socialIntake({
     const o = norm.observation;
     if (o.sourceClockStatus === 'TRUSTED') stats.sourceClockTrusted += 1;
     else if (o.sourceClockStatus === 'FUTURE_QUARANTINED') stats.sourceClockFutureQuarantined += 1;
+    else if (o.sourceClockStatus === 'ORDER_UNRESOLVED') stats.sourceClockOrderUnresolved += 1;
     else stats.sourceClockUnknown += 1;
     // bounded universe filter — no silent all-network intake (§24)
     const fm = socialFilterMatches(filter, { text: o.text, nativeAuthorId: o.nativeAuthorId });
@@ -98,7 +99,10 @@ export function socialIntake({
     // already settled in the journal is a duplicate here whatever its current
     // handle/followers/engagement, so no altered payload can ever reach the
     // journal as a re-append (§4/§5). The local LRU is only the fast path.
-    if (typeof isDurable === 'function' && isDurable(o.socialVersionId)) { stats.durableDeduped += 1; return done('deduped', { durable: true }); }
+    // SOCIAL-4D COMPLETION: the cheap path receives the OBSERVATION too, so a durable index can
+    // limit it to already-reconciled current-format redeliveries; a legacy-format durable record
+    // facing a witnessed candidate must reach settlement (temporal compatibility runs first)
+    if (typeof isDurable === 'function' && isDurable(o.socialVersionId, o)) { stats.durableDeduped += 1; return done('deduped', { durable: true }); }
     if (seen.has(o.socialVersionId)) { stats.deduped += 1; return done('deduped'); }
     if (queue.length >= maxQueue) {
       // NOT terminal: the frame is pinned as pending so the contiguous cursor

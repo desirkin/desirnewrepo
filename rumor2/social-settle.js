@@ -23,12 +23,22 @@ import {
   socialSourceIdentity, socialAuthorIdentity, socialVersionIdentity, socialMetaHash,
   normalizeSocialText, SOCIAL_RELATION_KINDS, ECHO_RELATIONS, SOCIAL_LIFECYCLE_STATES,
   R2SS_RE, R2SA_RE, R2SV_RE, MAX_SOCIAL_TEXT_CHARS, MAX_NATIVE_ID_CHARS, MAX_SOCIAL_HANDLE_CHARS,
-  SOURCE_CLOCK_STATES, classifySourceClock, canonicalIngressTags, MAX_INGRESS_TAGS, MAX_INGRESS_TAG_CHARS,
+  SOURCE_CLOCK_STATES, SOURCE_CLOCK_STATES_V2, classifySourceClock, classifyWitnessedSourceClock, socialWitnessHash,
+  canonicalIngressTags, MAX_INGRESS_TAGS, MAX_INGRESS_TAG_CHARS,
   socialRetentionRefusal,
 } from './social.js';
 import { socialProviderById } from './social-registry.js';
+import { validateTemporalWitness, witnessesEquivalent, TEMPORAL_POLICY_VERSION } from './social-time.js';
 
 export const SOCIAL_EVENT_TYPE = 'RUMOR2_SOCIAL_OBSERVED';
+// SOCIAL-4D COMPLETION — the explicitly discriminated WITNESSED observation format.
+// The legacy RUMOR2_SOCIAL_OBSERVED shape, its identity recipe, and its diagnostic-hash
+// recipe stay EXACTLY as they were for the history they represent. New ingestion from
+// the strict adapters emits RUMOR2_SOCIAL_OBSERVED_V2: the legacy keys PLUS a schema
+// version, the two bounded temporal witnesses, and their binding hash. A v2 event can
+// never lose its witness fields and pass as legacy (closed keys, per-type validators).
+export const SOCIAL_EVENT_V2_TYPE = 'RUMOR2_SOCIAL_OBSERVED_V2';
+export const SOCIAL_EVENT_SCHEMA_VERSION = 2;
 
 // the CLOSED durable schema — no undeclared field ever enters the journal.
 // handle + authorMeta + engagement are Serpent's FIRST-KNOWN mutable DIAGNOSTIC
@@ -45,6 +55,33 @@ export const SOCIAL_EVENT_KEYS = Object.freeze([
   'ingressTags', // SOCIAL-2B: bounded first-known provider admission tags (diagnostic only)
   'retrievedTs', 'knownAtTs',
 ]);
+export const SOCIAL_EVENT_V2_KEYS = Object.freeze([...SOCIAL_EVENT_KEYS, 'schemaVersion', 'sourceClockWitness', 'providerEventWitness', 'witnessHash']);
+// the FIELD-ROLE parser policy each provider's witnesses must carry (pinned here so a
+// forged or mismatched policy dies in validation; adapters read the same map)
+export const SOCIAL_CLOCK_POLICY_BY_PROVIDER = Object.freeze({
+  BLUESKY_OFFICIAL: Object.freeze({ source: 'AT_DATETIME', event: 'JETSTREAM_EVENT_TIME' }),
+  FARCASTER_OFFICIAL: Object.freeze({ source: 'RFC3339', event: null }),
+  X_OFFICIAL: Object.freeze({ source: 'ISO8601_PROFILE', event: null }),
+});
+// SOCIAL-4D COMPLETION — the dated TIME-INTERPRETATION annotation: a closed, non-source
+// record that says "this later-known, supported interpretation applies to that exact
+// durable observation", carrying its own knowledge clock. It changes no stored row and
+// counts as no social source, origin, author, or propagation.
+export const SOCIAL_CLOCK_INTERPRETATION_TYPE = 'RUMOR2_SOCIAL_CLOCK_INTERPRETATION';
+export const SOCIAL_CLOCK_INTERPRETATION_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'schemaVersion', 'targetType', 'targetEventId', 'targetDigest', 'nativeKey', 'immutableDigest', 'clockRole', 'basis', 'witness', 'priorInterpretation', 'interpretation', 'evidenceRetrievedTs', 'knownAtTs']);
+export const SOCIAL_CLOCK_ROLES = Object.freeze(['SOURCE_DECLARATION', 'PROVIDER_EVENT']);
+export const SOCIAL_INTERPRETATION_BASES = Object.freeze(['RETAINED_ORIGINAL_DECLARATION', 'NEW_DELIVERY_SAME_EVENT']);
+export const SOCIAL_CLOCK_PROVENANCE = Object.freeze(['LEGACY_NUMERIC_UNVERIFIED', 'WITNESSED_DECLARATION']);
+export const R2SI_RE = /^r2si-[0-9a-f]{40}$/;
+// SOCIAL-4D COMPLETION — the explicit RECONCILIATION-PENDING record: relevant, structurally
+// valid input whose identity/time match against durable history is genuinely unresolved.
+// Retained in the same journal, clearly NOT an accepted source, version, corroboration,
+// or propagation event; never a reason to guess, discard, or stop other providers.
+export const SOCIAL_RECONCILIATION_PENDING_TYPE = 'RUMOR2_SOCIAL_RECONCILIATION_PENDING';
+export const SOCIAL_RECONCILIATION_PENDING_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'schemaVersion', 'reason', 'nativeKey', 'immutableDigest', 'candidateVersionId', 'candidateIds', 'witnessHash', 'sourceClockWitness', 'providerEventWitness', 'candidate', 'knownAtTs']);
+export const SOCIAL_RECONCILIATION_REASONS = Object.freeze(['MULTIPLE_CANDIDATES', 'OCCURRENCE_IDENTITY_INSUFFICIENT', 'IMMUTABLE_FACT_CONFLICT', 'DECLARATION_CONFLICT']);
+export const MAX_RECONCILIATION_CANDIDATE_IDS = 16;
+export const R2SP_RE = /^r2sp-[0-9a-f]{40}$/;
 
 // SOCIAL-2A: providers whose adapter supplies a native commit/event sequence.
 // Any other social provider MUST carry providerEventSeq = null — a seq is never
@@ -94,7 +131,9 @@ export const X_SMOKE_TERMINAL_STATUSES = Object.freeze(['COMPLETE', 'HEADROOM_OV
 export const X_SMOKE_EXTRA_REASONS = Object.freeze(['SMOKE_RUN_RULESET_MISMATCH', 'SMOKE_RUN_PRICING_CHANGED', 'SMOKE_USAGE_RESET', 'SMOKE_RUN_SUPERSEDED']);
 export const X_SMOKE_RUN_ID_RE = /^[A-Za-z0-9._:-]{8,64}$/;
 export const X_STATE_PROVIDERS = Object.freeze(['X_OFFICIAL']);
-export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE]);
+export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE]);
+// the SOURCE observation types (legacy + witnessed) — the only types that count as social sources
+export const SOCIAL_OBSERVATION_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE]);
 export const xSmokeIdentity = ({ provider, smokeRunId, status }) => `r2xk-${contentHash(canonicalJson({ provider, smokeRunId, status }))}`;
 export const xRuleSetIdentity = ({ provider, ruleSetHash, coverageEpoch }) => `r2xr-${contentHash(canonicalJson({ provider, ruleSetHash, coverageEpoch }))}`;
 // a meter snapshot is identified by its counts AND its knowledge clock: two
@@ -156,7 +195,154 @@ export function socialObservationToEvent(observation) {
     retrievedTs: observation.retrievedTs,
     knownAtTs: observation.knownAtTs,
   };
+  // SOCIAL-4D COMPLETION: a witnessed (schema-version-2) observation becomes the
+  // discriminated v2 event; the identity recipe is UNCHANGED (sourceEventId binds the
+  // same provenance facts), so a valid exact instant keeps its legacy identity and the
+  // witnesses ride alongside, bound by witnessHash.
+  if (observation.schemaVersion === SOCIAL_EVENT_SCHEMA_VERSION) {
+    event.type = SOCIAL_EVENT_V2_TYPE;
+    event.schemaVersion = SOCIAL_EVENT_SCHEMA_VERSION;
+    event.sourceClockWitness = observation.sourceClockWitness;
+    event.providerEventWitness = observation.providerEventWitness ?? null;
+    event.witnessHash = observation.witnessHash;
+  }
   return { event, socialSourceId: observation.socialSourceId, socialAuthorId: observation.socialAuthorId, versionId: observation.socialVersionId };
+}
+
+// ---- SOCIAL-4D COMPLETION: native-event identity + immutable non-clock facts -------------
+// The ONE provider-native event key shared by settlement and replay. It names the exact
+// provider occurrence this route can identify: post + author + lifecycle + native version
+// (X current Post id / Bluesky CID) + provider sequence (Bluesky seq). Two Bluesky commits
+// with different seq are DIFFERENT keys whatever their CID/text; a Farcaster recast edge
+// carries no occurrence identity beyond reactor+target (see the reconciler).
+export const socialNativeKey = (e) => ({ provider: e.provider, nativePostId: e.nativePostId, nativeAuthorId: e.nativeAuthorId, lifecycle: e.lifecycle, nativeVersionId: e.nativeVersionId ?? null, providerEventSeq: e.providerEventSeq ?? null });
+export const socialNativeKeyDigest = (e) => contentHash(canonicalJson(socialNativeKey(e)));
+// EXACT retained text and every immutable non-clock content fact — never the folded
+// similarity textHash alone, never handle/engagement/followers
+export const socialImmutableDigest = (e) => contentHash(canonicalJson({ providerKind: e.providerKind, nativePostId: e.nativePostId, nativeAuthorId: e.nativeAuthorId, lifecycle: e.lifecycle, relation: e.relation, parentNativePostId: e.parentNativePostId ?? null, threadId: e.threadId ?? null, nativeVersionId: e.nativeVersionId ?? null, providerEventSeq: e.providerEventSeq ?? null, text: e.text }));
+// the bounded temporal interpretation of ONE clock role, derived deterministically from a
+// witness and the TARGET's recorded acquisition clock (never a wall clock)
+export function deriveClockInterpretation({ witness, clockRole, retrievedTs }) {
+  if (witness === null) return { established: false, projectionMs: null, sourceCreatedTs: null, sourceClockStatus: null, reason: 'NO_WITNESS' };
+  if (clockRole === 'PROVIDER_EVENT') return { established: witness.outcome === 'INSTANT', projectionMs: witness.projectionMs, sourceCreatedTs: null, sourceClockStatus: null, reason: witness.outcome === 'INSTANT' ? 'WITNESSED_DECLARATION' : witness.outcome };
+  const c = classifyWitnessedSourceClock({ witness, retrievedTs });
+  return { established: witness.outcome === 'INSTANT', projectionMs: witness.projectionMs, sourceCreatedTs: c.sourceCreatedTs, sourceClockStatus: c.sourceClockStatus, reason: witness.outcome === 'INSTANT' ? 'WITNESSED_DECLARATION' : witness.outcome };
+}
+// the ONE derived-index entry recipe shared by replay and live adoption (never a second truth)
+export const socialIndexEntry = (e) => Object.freeze({ id: e.sourceEventId, type: e.type, format: e.type === SOCIAL_EVENT_V2_TYPE ? 2 : 1, provider: e.provider, nativeKeyDigest: socialNativeKeyDigest(e), immutableDigest: socialImmutableDigest(e), retrievedTs: e.retrievedTs, knownAtTs: e.knownAtTs, sourceDeclaredTs: e.sourceDeclaredTs, sourceCreatedTs: e.sourceCreatedTs, sourceClockStatus: e.sourceClockStatus, providerEventTs: e.providerEventTs, witnessHash: e.type === SOCIAL_EVENT_V2_TYPE ? e.witnessHash : null, sourceClockWitness: e.type === SOCIAL_EVENT_V2_TYPE ? e.sourceClockWitness : null, providerEventWitness: e.type === SOCIAL_EVENT_V2_TYPE ? (e.providerEventWitness ?? null) : null, relation: e.relation });
+export const socialInterpretationIdentity = ({ targetType, targetEventId, clockRole, witness, interpretation }) => `r2si-${contentHash(canonicalJson({ targetType, targetEventId, clockRole, policy: witness.policy, policyVersion: witness.policyVersion, interpretationDigest: contentHash(canonicalJson({ witness, interpretation })) }))}`;
+// Build the annotation for an already-durable TARGET event. `evidence` is the witnessed
+// candidate observation that carries the new declaration (basis NEW_DELIVERY_SAME_EVENT),
+// or the target itself when its own retained declaration is re-read under a newer policy
+// (basis RETAINED_ORIGINAL_DECLARATION). knownAtTs is when THIS interpretation became known.
+export function socialClockInterpretationEvent({ target, clockRole, basis, witness, evidenceRetrievedTs, knownAtTs }) {
+  const legacy = target.type === SOCIAL_EVENT_TYPE;
+  const priorInterpretation = clockRole === 'SOURCE_DECLARATION'
+    ? { sourceDeclaredTs: target.sourceDeclaredTs ?? null, sourceCreatedTs: target.sourceCreatedTs ?? null, sourceClockStatus: target.sourceClockStatus ?? 'UNKNOWN', provenance: legacy ? 'LEGACY_NUMERIC_UNVERIFIED' : 'WITNESSED_DECLARATION' }
+    : { sourceDeclaredTs: target.providerEventTs ?? null, sourceCreatedTs: null, sourceClockStatus: null, provenance: legacy ? 'LEGACY_NUMERIC_UNVERIFIED' : 'WITNESSED_DECLARATION' };
+  const interpretation = deriveClockInterpretation({ witness, clockRole, retrievedTs: target.retrievedTs });
+  const ev = {
+    type: SOCIAL_CLOCK_INTERPRETATION_TYPE, ts: iso(knownAtTs), sourceEventId: null, provider: target.provider, schemaVersion: 1,
+    targetType: target.type, targetEventId: target.sourceEventId, targetDigest: contentHash(canonicalJson(target)),
+    nativeKey: socialNativeKey(target), immutableDigest: socialImmutableDigest(target),
+    clockRole, basis, witness, priorInterpretation, interpretation, evidenceRetrievedTs, knownAtTs,
+  };
+  ev.sourceEventId = socialInterpretationIdentity({ targetType: ev.targetType, targetEventId: ev.targetEventId, clockRole, witness, interpretation });
+  return ev;
+}
+// Validate an annotation AGAINST ITS TARGET (the caller supplies the durable target event
+// from the validated index or replay): target existence/type/provider, exact digest
+// binding, native key + immutable digest agreement, witness re-derivation under the
+// provider's role policy, interpretation re-derivation, clocks, identity.
+export function validateSocialClockInterpretation(ev, { target = null } = {}) {
+  if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'clock interpretation: not an object';
+  const kErr = exactKeys(ev, SOCIAL_CLOCK_INTERPRETATION_KEYS); if (kErr) return `clock interpretation: ${kErr}`;
+  if (ev.type !== SOCIAL_CLOCK_INTERPRETATION_TYPE) return 'clock interpretation: wrong type';
+  if (ev.schemaVersion !== 1) return 'clock interpretation: unsupported schema version';
+  const meta = isStr(ev.provider, 100) ? socialProviderById(ev.provider) : null;
+  if (!meta) return 'clock interpretation: provider not in the authoritative social registry';
+  if (meta.retentionProhibited || socialRetentionRefusal(ev.provider)) return `clock interpretation: RETENTION_NOT_APPROVED: ${ev.provider}`;
+  if (!SOCIAL_OBSERVATION_TYPES.includes(ev.targetType)) return 'clock interpretation: target type is not a social observation';
+  if (!R2SV_RE.test(ev.targetEventId)) return 'clock interpretation: target id malformed';
+  if (!SOCIAL_CLOCK_ROLES.includes(ev.clockRole)) return 'clock interpretation: unknown clock role';
+  if (!SOCIAL_INTERPRETATION_BASES.includes(ev.basis)) return 'clock interpretation: unknown basis';
+  const policies = SOCIAL_CLOCK_POLICY_BY_PROVIDER[ev.provider];
+  if (!policies) return 'clock interpretation: provider has no witnessed clock policy';
+  const expectedPolicy = ev.clockRole === 'SOURCE_DECLARATION' ? policies.source : policies.event;
+  if (!expectedPolicy) return 'clock interpretation: this provider has no clock of that role';
+  const werr = validateTemporalWitness(ev.witness, { expectedPolicyId: expectedPolicy }); if (werr) return `clock interpretation: ${werr}`;
+  if (!isTs(ev.evidenceRetrievedTs) || !isTs(ev.knownAtTs)) return 'clock interpretation: clock invalid';
+  if (ev.evidenceRetrievedTs > ev.knownAtTs) return 'clock interpretation: evidence acquired after the interpretation became known';
+  if (ev.ts !== iso(ev.knownAtTs)) return 'clock interpretation: ts disagrees with knownAtTs';
+  if (target === null) return 'clock interpretation: target not durable (unknown, unsettled, or later than this record)';
+  if (target.type !== ev.targetType || target.sourceEventId !== ev.targetEventId) return 'clock interpretation: target does not match';
+  if (target.provider !== ev.provider) return 'clock interpretation: cross-provider target';
+  if (contentHash(canonicalJson(target)) !== ev.targetDigest) return 'clock interpretation: target digest does not bind the durable target';
+  if (canonicalJson(ev.nativeKey) !== canonicalJson(socialNativeKey(target))) return 'clock interpretation: native key does not match the target';
+  if (ev.immutableDigest !== socialImmutableDigest(target)) return 'clock interpretation: immutable facts do not match the target';
+  if (ev.knownAtTs < target.knownAtTs) return 'clock interpretation: known before its target';
+  if (ev.basis === 'RETAINED_ORIGINAL_DECLARATION') {
+    if (target.type !== SOCIAL_EVENT_V2_TYPE) return 'clock interpretation: a legacy target retained no declaration';
+    const retained = ev.clockRole === 'SOURCE_DECLARATION' ? target.sourceClockWitness : target.providerEventWitness;
+    if (!retained || retained.declared !== ev.witness.declared || retained.declaredStatus !== ev.witness.declaredStatus) return 'clock interpretation: the retained declaration differs';
+  }
+  const expected = socialClockInterpretationEvent({ target, clockRole: ev.clockRole, basis: ev.basis, witness: ev.witness, evidenceRetrievedTs: ev.evidenceRetrievedTs, knownAtTs: ev.knownAtTs });
+  if (canonicalJson(expected.priorInterpretation) !== canonicalJson(ev.priorInterpretation)) return 'clock interpretation: prior interpretation is not the target\'s recorded interpretation';
+  if (canonicalJson(expected.interpretation) !== canonicalJson(ev.interpretation)) return 'clock interpretation: interpretation is not the re-derived one';
+  if (!R2SI_RE.test(ev.sourceEventId) || ev.sourceEventId !== expected.sourceEventId) return 'clock interpretation: sourceEventId is not the derived identity';
+  return null;
+}
+// ---- SOCIAL-4D COMPLETION: the reconciliation-pending record --------------------------------
+export const socialReconciliationIdentity = ({ provider, nativeKeyDigest, immutableDigest, witnessHash, reason }) => `r2sp-${contentHash(canonicalJson({ provider, nativeKeyDigest, immutableDigest, witnessHash, reason }))}`;
+const PENDING_CANDIDATE_KEYS = Object.freeze(['providerKind', 'nativePostId', 'nativeAuthorId', 'lifecycle', 'relation', 'parentNativePostId', 'threadId', 'nativeVersionId', 'providerEventSeq', 'text', 'textHash', 'sourceDeclaredTs', 'sourceCreatedTs', 'sourceClockStatus', 'sourceClockSkewMs', 'providerEventTs', 'retrievedTs']);
+export function socialReconciliationPendingEvent({ observation, reason, candidateIds, knownAtTs }) {
+  const o = observation;
+  const candidate = {}; for (const k of PENDING_CANDIDATE_KEYS) candidate[k] = o[k] ?? null;
+  const ev = {
+    type: SOCIAL_RECONCILIATION_PENDING_TYPE, ts: iso(knownAtTs), sourceEventId: null, provider: o.provider, schemaVersion: 1, reason,
+    nativeKey: socialNativeKey(o), immutableDigest: socialImmutableDigest(o), candidateVersionId: o.socialVersionId,
+    candidateIds: [...new Set(candidateIds)].sort().slice(0, MAX_RECONCILIATION_CANDIDATE_IDS),
+    witnessHash: o.witnessHash, sourceClockWitness: o.sourceClockWitness, providerEventWitness: o.providerEventWitness ?? null, candidate, knownAtTs,
+  };
+  ev.sourceEventId = socialReconciliationIdentity({ provider: ev.provider, nativeKeyDigest: contentHash(canonicalJson(ev.nativeKey)), immutableDigest: ev.immutableDigest, witnessHash: ev.witnessHash, reason });
+  return ev;
+}
+export function validateSocialReconciliationPending(ev) {
+  if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'reconciliation pending: not an object';
+  const kErr = exactKeys(ev, SOCIAL_RECONCILIATION_PENDING_KEYS); if (kErr) return `reconciliation pending: ${kErr}`;
+  if (ev.type !== SOCIAL_RECONCILIATION_PENDING_TYPE) return 'reconciliation pending: wrong type';
+  if (ev.schemaVersion !== 1) return 'reconciliation pending: unsupported schema version';
+  const meta = isStr(ev.provider, 100) ? socialProviderById(ev.provider) : null;
+  if (!meta) return 'reconciliation pending: provider not in the authoritative social registry';
+  if (meta.retentionProhibited || socialRetentionRefusal(ev.provider)) return `reconciliation pending: RETENTION_NOT_APPROVED: ${ev.provider}`;
+  if (!SOCIAL_RECONCILIATION_REASONS.includes(ev.reason)) return 'reconciliation pending: unknown reason';
+  const c = ev.candidate;
+  if (c === null || typeof c !== 'object' || Array.isArray(c)) return 'reconciliation pending: candidate invalid';
+  const cErr = exactKeys(c, PENDING_CANDIDATE_KEYS); if (cErr) return `reconciliation pending: candidate ${cErr}`;
+  if (c.providerKind !== meta.providerKind) return 'reconciliation pending: providerKind disagrees with the social registry';
+  if (!isStr(c.nativePostId, MAX_NATIVE_ID_CHARS) || !isStr(c.nativeAuthorId, MAX_NATIVE_ID_CHARS)) return 'reconciliation pending: native identity invalid';
+  if (!SOCIAL_LIFECYCLE_STATES.includes(c.lifecycle) || !SOCIAL_RELATION_KINDS.includes(c.relation)) return 'reconciliation pending: lifecycle/relation invalid';
+  if (typeof c.text !== 'string' || c.text.length > MAX_SOCIAL_TEXT_CHARS || c.textHash !== contentHash(normalizeSocialText(c.text))) return 'reconciliation pending: text invalid';
+  if (c.providerEventSeq !== null && (!Number.isSafeInteger(c.providerEventSeq) || !PROVIDER_EVENT_SEQ_PROVIDERS.includes(ev.provider))) return 'reconciliation pending: providerEventSeq invalid';
+  if (!isTs(c.retrievedTs) || !isTs(ev.knownAtTs) || c.retrievedTs > ev.knownAtTs) return 'reconciliation pending: clock invalid';
+  if (ev.ts !== iso(ev.knownAtTs)) return 'reconciliation pending: ts disagrees with knownAtTs';
+  const policies = SOCIAL_CLOCK_POLICY_BY_PROVIDER[ev.provider]; if (!policies) return 'reconciliation pending: provider has no witnessed clock policy';
+  const werr = validateTemporalWitness(ev.sourceClockWitness, { expectedPolicyId: policies.source }); if (werr) return `reconciliation pending: ${werr}`;
+  if (ev.providerEventWitness !== null) { if (!policies.event) return 'reconciliation pending: provider has no event clock'; const perr = validateTemporalWitness(ev.providerEventWitness, { expectedPolicyId: policies.event }); if (perr) return `reconciliation pending: ${perr}`; }
+  if ((ev.sourceClockWitness.projectionMs ?? null) !== c.sourceDeclaredTs) return 'reconciliation pending: sourceDeclaredTs disagrees with its witness';
+  if ((ev.providerEventWitness?.projectionMs ?? null) !== c.providerEventTs) return 'reconciliation pending: providerEventTs disagrees with its witness';
+  const cl = classifyWitnessedSourceClock({ witness: ev.sourceClockWitness, retrievedTs: c.retrievedTs });
+  if (cl.sourceClockStatus !== c.sourceClockStatus || cl.sourceCreatedTs !== c.sourceCreatedTs || cl.sourceClockSkewMs !== c.sourceClockSkewMs) return 'reconciliation pending: clock verdict is not the re-derived one';
+  if (ev.witnessHash !== socialWitnessHash({ sourceClockWitness: ev.sourceClockWitness, providerEventWitness: ev.providerEventWitness })) return 'reconciliation pending: witnessHash is not the re-derived binding';
+  const keyOf = { ...c, provider: ev.provider };
+  if (canonicalJson(ev.nativeKey) !== canonicalJson(socialNativeKey(keyOf))) return 'reconciliation pending: native key does not match the candidate';
+  if (ev.immutableDigest !== socialImmutableDigest(keyOf)) return 'reconciliation pending: immutable digest does not match the candidate';
+  const facts = { ...keyOf, socialSourceId: socialSourceIdentity({ provider: ev.provider, nativePostId: c.nativePostId }) };
+  if (!R2SV_RE.test(ev.candidateVersionId) || ev.candidateVersionId !== socialVersionIdentity(facts)) return 'reconciliation pending: candidateVersionId is not the derived identity';
+  if (!Array.isArray(ev.candidateIds) || ev.candidateIds.length > MAX_RECONCILIATION_CANDIDATE_IDS || ev.candidateIds.some((id) => !R2SV_RE.test(id))) return 'reconciliation pending: candidateIds invalid';
+  if (canonicalJson([...new Set(ev.candidateIds)].sort()) !== canonicalJson(ev.candidateIds)) return 'reconciliation pending: candidateIds not canonical';
+  if (!R2SP_RE.test(ev.sourceEventId) || ev.sourceEventId !== socialReconciliationIdentity({ provider: ev.provider, nativeKeyDigest: contentHash(canonicalJson(ev.nativeKey)), immutableDigest: ev.immutableDigest, witnessHash: ev.witnessHash, reason: ev.reason })) return 'reconciliation pending: sourceEventId is not the derived identity';
+  return null;
 }
 
 const exactKeys = (obj, allowed) => {
@@ -200,6 +386,9 @@ const okAuthorMeta = (m, retrievedTs) => {
 // social event can never claim a claim-capable kind. (§9/§15/§22)
 export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
   if (event === null || typeof event !== 'object' || Array.isArray(event)) return 'social event: not an object';
+  // SOCIAL-4D COMPLETION: the witnessed format has its own closed validator; the legacy
+  // branch below is the UNCHANGED historical validator for the shape it represents
+  if (event.type === SOCIAL_EVENT_V2_TYPE) return validateSocialEventV2(event, { socialProviderIds });
   const kErr = exactKeys(event, SOCIAL_EVENT_KEYS);
   if (kErr) return `social event: ${kErr}`;
   if (event.type !== SOCIAL_EVENT_TYPE) return 'social event: wrong type';
@@ -298,6 +487,54 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
   return null;
 }
 
+// SOCIAL-4D COMPLETION — the witnessed (v2) validator. Every legacy check applies (the
+// legacy validator is invoked on a projection of this event with the witness fields
+// removed and the legacy type restored, so the shared identity/diagnostic recipes are
+// re-derived by ONE code path), plus: closed v2 keys, schema version, both witnesses
+// re-derived under the provider's ROLE policy, numeric clocks equal to their projections,
+// the binding witnessHash, and the WITNESSED verdict (which may be ORDER_UNRESOLVED).
+export function validateSocialEventV2(event, { socialProviderIds = null } = {}) {
+  if (event === null || typeof event !== 'object' || Array.isArray(event)) return 'social event v2: not an object';
+  const kErr = exactKeys(event, SOCIAL_EVENT_V2_KEYS); if (kErr) return `social event v2: ${kErr}`;
+  if (event.type !== SOCIAL_EVENT_V2_TYPE) return 'social event v2: wrong type';
+  if (event.schemaVersion !== SOCIAL_EVENT_SCHEMA_VERSION) return 'social event v2: unsupported schema version';
+  if (!isStr(event.provider, 100)) return 'social event v2: provider invalid';
+  const metaV2 = socialProviderById(event.provider);
+  if (!metaV2) return `social event v2: ${event.provider} is not in the authoritative social registry`;
+  if (metaV2.retentionProhibited || socialRetentionRefusal(event.provider)) return `social event v2: RETENTION_NOT_APPROVED: ${socialRetentionRefusal(event.provider) ?? `${event.provider} durable content is not approved`}`;
+  const policies = SOCIAL_CLOCK_POLICY_BY_PROVIDER[event.provider];
+  if (!policies) return `social event v2: ${event.provider} has no witnessed clock policy`;
+  const werr = validateTemporalWitness(event.sourceClockWitness, { expectedPolicyId: policies.source }); if (werr) return `social event v2: ${werr}`;
+  if (event.providerEventWitness !== null) {
+    if (!policies.event) return 'social event v2: this provider has no provider event clock';
+    const perr = validateTemporalWitness(event.providerEventWitness, { expectedPolicyId: policies.event }); if (perr) return `social event v2: ${perr}`;
+  }
+  if ((event.sourceClockWitness.projectionMs ?? null) !== event.sourceDeclaredTs) return 'social event v2: sourceDeclaredTs is not the witness projection';
+  if ((event.providerEventWitness?.projectionMs ?? null) !== event.providerEventTs) return 'social event v2: providerEventTs is not the witness projection';
+  if (event.witnessHash !== socialWitnessHash({ sourceClockWitness: event.sourceClockWitness, providerEventWitness: event.providerEventWitness })) return 'social event v2: witnessHash is not the re-derived binding';
+  if (!SOURCE_CLOCK_STATES_V2.includes(event.sourceClockStatus)) return 'social event v2: sourceClockStatus unknown';
+  if (!isTs(event.retrievedTs)) return 'social event v2: clock invalid';
+  const c = classifyWitnessedSourceClock({ witness: event.sourceClockWitness, retrievedTs: event.retrievedTs });
+  if (c.sourceClockStatus !== event.sourceClockStatus) return 'social event v2: sourceClockStatus is not the re-derived witnessed verdict';
+  if (c.sourceCreatedTs !== event.sourceCreatedTs) return 'social event v2: sourceCreatedTs disagrees with the witnessed clock law';
+  if (c.sourceClockSkewMs !== event.sourceClockSkewMs) return 'social event v2: sourceClockSkewMs is not the re-derived skew';
+  // every remaining law is the legacy law, re-derived by the legacy validator over the
+  // legacy projection of this event (the verdict fields are re-set to a legacy-admissible
+  // shape ONLY for that shared structural/identity check — the witnessed verdict above is
+  // the one that binds this event)
+  const legacyView = {}; for (const k of SOCIAL_EVENT_KEYS) legacyView[k] = event[k];
+  legacyView.type = SOCIAL_EVENT_TYPE;
+  const lc = classifySourceClock({ sourceDeclaredTs: event.sourceDeclaredTs, retrievedTs: event.retrievedTs });
+  legacyView.sourceCreatedTs = lc.sourceCreatedTs; legacyView.sourceClockStatus = lc.sourceClockStatus; legacyView.sourceClockSkewMs = lc.sourceClockSkewMs;
+  legacyView.metaHash = socialMetaHash({ ...legacyView, socialSourceId: event.socialSourceId });
+  const lerr = validateSocialEvent(legacyView, { socialProviderIds });
+  if (lerr) return lerr.replace('social event:', 'social event v2:');
+  // the diagnostic hash of the v2 event binds ITS witnessed verdict
+  const facts = { ...legacyView, sourceClockStatus: event.sourceClockStatus, sourceClockSkewMs: event.sourceClockSkewMs, socialSourceId: event.socialSourceId };
+  if (event.metaHash !== socialMetaHash(facts)) return 'social event v2: metaHash is not the re-derived diagnostic hash';
+  return null;
+}
+
 // Reconstruct the canonical social provenance witness from a durable event —
 // what replay hands SOCIAL-5. No important identity/relationship/version/
 // lifecycle fact is lost across the journal boundary. (§16)
@@ -333,6 +570,13 @@ export function reconstructSocialWitness(event) {
     // first-known author metadata survives the journal exactly (§20/§21) —
     // information-only research context, never identity or trade authority
     authorMeta: event.authorMeta ?? null,
+    // SOCIAL-4D COMPLETION: the format and the retained temporal witnesses. A legacy row
+    // holds only a parsed number: its clock provenance is UNVERIFIED (the declaration was
+    // never retained), never "precision-verified"; a v2 row retains the declaration itself.
+    schemaVersion: event.type === SOCIAL_EVENT_V2_TYPE ? event.schemaVersion : 1,
+    clockProvenance: event.type === SOCIAL_EVENT_V2_TYPE ? 'WITNESSED_DECLARATION' : 'LEGACY_NUMERIC_UNVERIFIED',
+    sourceClockWitness: event.type === SOCIAL_EVENT_V2_TYPE ? event.sourceClockWitness : null,
+    providerEventWitness: event.type === SOCIAL_EVENT_V2_TYPE ? (event.providerEventWitness ?? null) : null,
   };
 }
 
@@ -509,6 +753,24 @@ export function replaySocialHistory(events) {
   const cursors = {}; // provider -> durableCursor
   let observed = 0;
   let cursorEvents = 0;
+  // SOCIAL-4D COMPLETION: the version-aware DERIVED index, rooted only in validated durable
+  // history — per source id the facts the reconciler needs; per native key the ids that
+  // share it; annotations per target; pending ids. Never a second source of truth.
+  const index = new Map(); // sourceEventId -> entry
+  const byNativeKey = new Map(); // nativeKeyDigest -> Set(sourceEventId)
+  const targets = new Map(); // sourceEventId -> the durable observation event (for annotation binding)
+  const annotations = new Map(); // targetEventId -> [annotation]
+  const annotationIds = new Set();
+  const pendingIds = new Set();
+  const pendingDigests = new Map();
+  let annotated = 0; let pending = 0;
+  const indexObservation = (e) => {
+    const entry = socialIndexEntry(e);
+    index.set(e.sourceEventId, entry);
+    if (!byNativeKey.has(entry.nativeKeyDigest)) byNativeKey.set(entry.nativeKeyDigest, new Set());
+    byNativeKey.get(entry.nativeKeyDigest).add(e.sourceEventId);
+    targets.set(e.sourceEventId, e);
+  };
   const x = emptyXState(); // SOCIAL-2B X operational state (source-only)
   const xDigests = new Map();
   const xDup = (e, err) => {
@@ -521,7 +783,7 @@ export function replaySocialHistory(events) {
   };
   for (const e of events) {
     if (e === null || typeof e !== 'object' || Array.isArray(e) || typeof e.type !== 'string') return fail('SOCIAL_HISTORY_INVALID: malformed event record');
-    if (e.type === SOCIAL_EVENT_TYPE) {
+    if (e.type === SOCIAL_EVENT_TYPE || e.type === SOCIAL_EVENT_V2_TYPE) {
       const err = validateSocialEvent(e);
       if (err) return fail(`SOCIAL_HISTORY_INVALID: ${err}`);
       const digest = contentHash(canonicalJson(e));
@@ -532,7 +794,33 @@ export function replaySocialHistory(events) {
       }
       digests.set(e.sourceEventId, digest);
       durableIds.add(e.sourceEventId);
+      indexObservation(e);
       observed += 1;
+      continue;
+    }
+    if (e.type === SOCIAL_CLOCK_INTERPRETATION_TYPE) {
+      // an annotation binds an ALREADY-DURABLE target that precedes it in history
+      const err = validateSocialClockInterpretation(e, { target: targets.get(e.targetEventId) ?? null });
+      if (err) return fail(`SOCIAL_HISTORY_INVALID: ${err}`);
+      const digest = contentHash(canonicalJson(e));
+      const prior = digests.get(e.sourceEventId);
+      if (prior !== undefined) { if (prior !== digest) return fail('SOCIAL_HISTORY_INVALID: duplicate clock interpretation identity with an altered payload — corruption, not replay'); continue; }
+      digests.set(e.sourceEventId, digest);
+      annotationIds.add(e.sourceEventId);
+      if (!annotations.has(e.targetEventId)) annotations.set(e.targetEventId, []);
+      annotations.get(e.targetEventId).push(e);
+      annotated += 1;
+      continue;
+    }
+    if (e.type === SOCIAL_RECONCILIATION_PENDING_TYPE) {
+      const err = validateSocialReconciliationPending(e);
+      if (err) return fail(`SOCIAL_HISTORY_INVALID: ${err}`);
+      const digest = contentHash(canonicalJson(e));
+      const prior = pendingDigests.get(e.sourceEventId);
+      if (prior !== undefined) { if (prior !== digest) return fail('SOCIAL_HISTORY_INVALID: duplicate reconciliation-pending identity with an altered payload — corruption, not replay'); continue; }
+      pendingDigests.set(e.sourceEventId, digest);
+      pendingIds.add(e.sourceEventId); // NOT a durable source id — never a social source
+      pending += 1;
       continue;
     }
     if (e.type === SOCIAL_CURSOR_EVENT_TYPE) {
@@ -600,5 +888,5 @@ export function replaySocialHistory(events) {
     }
     // any other type belongs to the frozen core's own replay/validator
   }
-  return { ok: true, durableIds, cursors, observed, cursorEvents, x };
+  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, annotated, pending };
 }

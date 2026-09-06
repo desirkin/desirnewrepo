@@ -56,6 +56,11 @@ export const SOCIAL_TIME_POLICIES = Object.freeze({
   // 2019-12-31T19:26:16.000Z, accessed 2026-09-06): uppercase, explicit offset,
   // -00:00 not part of ISO 8601, arbitrary fraction tolerated with FLOOR.
   ISO8601_PROFILE: Object.freeze({ id: 'ISO8601_PROFILE', lowercase: false, negativeZero: false, dateOnly: false, minYear: 1, maxYear: 9999, maxFractionDigits: null, subMillisecond: 'FLOOR' }),
+  // Jetstream provider EVENT clock (`payload.time`, the transport's own emission time —
+  // a server-generated RFC 3339 string; pinned SEPARATELY from the record profile so a
+  // future contract difference between record and transport clocks is a policy edit,
+  // never an assumption): uppercase, explicit offset, no -00:00, arbitrary fraction.
+  JETSTREAM_EVENT_TIME: Object.freeze({ id: 'JETSTREAM_EVENT_TIME', lowercase: false, negativeZero: false, dateOnly: false, minYear: 1, maxYear: 9999, maxFractionDigits: null, subMillisecond: 'FLOOR' }),
   // Operator access/review dates (the semantics sealed for StockTwits in 809a139,
   // carried to every Social access record): calendar-valid YYYY-MM-DD as a day
   // LABEL, or an explicit-offset instant with at most millisecond precision.
@@ -154,3 +159,82 @@ export function accessDate(v) {
 }
 const DAY_MS = 86_400_000;
 export const utcDayStart = (ms) => ms - (((ms % DAY_MS) + DAY_MS) % DAY_MS);
+
+// =====================================================================================
+// SOCIAL-4D COMPLETION — the bounded TEMPORAL WITNESS and precision-aware comparison
+// =====================================================================================
+// A witness is the CLOSED, versioned record of ONE declared clock exactly as received:
+// the declaration text (when within the bound), its presence/type status, whether the
+// retained text is complete, the parser policy + immutable policy version, the parse
+// outcome, the millisecond PROJECTION (explicitly a projection, never "the exact time"),
+// and the exact bounded sub-millisecond remainder so comparisons never depend on a
+// floored number alone. It survives normalization, event construction, validation,
+// durable storage, reconstruction, and replay unchanged.
+export const TEMPORAL_WITNESS_VERSION = 1;
+export const TEMPORAL_POLICY_VERSION = 1; // bump ONLY with a documented grammar change
+export const TEMPORAL_DECLARED_STATUSES = Object.freeze(['STRING', 'ABSENT', 'NON_STRING', 'OVERSIZED']);
+export const TEMPORAL_WITNESS_KEYS = Object.freeze(['v', 'policy', 'policyVersion', 'declared', 'declaredStatus', 'declaredComplete', 'declaredLength', 'outcome', 'projectionMs', 'fractionDigits', 'subMillisecondRemainder']);
+const MAX_REMAINDER_CHARS = MAX_SOCIAL_TIME_CHARS; // a remainder can never exceed the bounded declaration
+// the exact digits beyond the millisecond (trailing zeros stripped) or null when none —
+// a bounded decimal string, never a float, never a BigInt
+const remainderOf = (v) => {
+  const m = typeof v === 'string' ? v.match(/^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}\.(\d+)([Zz]|[+-]\d{2}:\d{2})$/) : null;
+  if (!m || m[1].length <= 3) return null;
+  const rest = m[1].slice(3).replace(/0+$/, '');
+  return rest.length === 0 ? null : rest.slice(0, MAX_REMAINDER_CHARS);
+};
+export function temporalWitness(v, policy) {
+  if (policy === null || typeof policy !== 'object' || typeof policy.id !== 'string') throw new TypeError('temporalWitness: a SOCIAL_TIME_POLICIES entry is required');
+  const base = { v: TEMPORAL_WITNESS_VERSION, policy: policy.id, policyVersion: TEMPORAL_POLICY_VERSION };
+  if (v === null || v === undefined) return Object.freeze({ ...base, declared: null, declaredStatus: 'ABSENT', declaredComplete: false, declaredLength: null, outcome: 'ABSENT', projectionMs: null, fractionDigits: null, subMillisecondRemainder: null });
+  if (typeof v !== 'string') return Object.freeze({ ...base, declared: null, declaredStatus: 'NON_STRING', declaredComplete: false, declaredLength: null, outcome: 'MALFORMED', projectionMs: null, fractionDigits: null, subMillisecondRemainder: null });
+  if (v.length === 0) return Object.freeze({ ...base, declared: '', declaredStatus: 'STRING', declaredComplete: true, declaredLength: 0, outcome: 'MALFORMED', projectionMs: null, fractionDigits: null, subMillisecondRemainder: null });
+  if (v.length > MAX_SOCIAL_TIME_CHARS) {
+    // a bounded diagnostic PREFIX — never labelled complete, never parsed as if it were the original
+    return Object.freeze({ ...base, declared: v.slice(0, MAX_SOCIAL_TIME_CHARS), declaredStatus: 'OVERSIZED', declaredComplete: false, declaredLength: v.length, outcome: 'MALFORMED', projectionMs: null, fractionDigits: null, subMillisecondRemainder: null });
+  }
+  const p = parseSocialTime(v, policy);
+  return Object.freeze({ ...base, declared: v, declaredStatus: 'STRING', declaredComplete: true, declaredLength: v.length, outcome: p.outcome, projectionMs: p.instantMs, fractionDigits: p.fractionDigits, subMillisecondRemainder: p.outcome === 'INSTANT' ? remainderOf(v) : null });
+}
+// Closed validation + RE-DERIVATION: a witness is trusted only if re-parsing its own
+// retained declaration under its own policy reproduces every field. A forged outcome,
+// projection, precision flag, or policy version dies here. `expectedPolicyId` pins the
+// field-role policy (the caller knows which provider field this witness describes).
+export function validateTemporalWitness(w, { expectedPolicyId = null } = {}) {
+  if (w === null || typeof w !== 'object' || Array.isArray(w)) return 'temporal witness: not an object';
+  for (const k of Object.keys(w)) if (!TEMPORAL_WITNESS_KEYS.includes(k)) return `temporal witness: undeclared field '${k}'`;
+  for (const k of TEMPORAL_WITNESS_KEYS) if (!(k in w)) return `temporal witness: missing field '${k}'`;
+  if (w.v !== TEMPORAL_WITNESS_VERSION) return 'temporal witness: unsupported witness version';
+  const policy = SOCIAL_TIME_POLICIES[w.policy];
+  if (!policy || policy.id !== w.policy) return 'temporal witness: unknown policy';
+  if (expectedPolicyId !== null && w.policy !== expectedPolicyId) return `temporal witness: policy ${w.policy} is not the ${expectedPolicyId} role policy`;
+  if (w.policyVersion !== TEMPORAL_POLICY_VERSION) return 'temporal witness: unsupported policy version';
+  if (!TEMPORAL_DECLARED_STATUSES.includes(w.declaredStatus)) return 'temporal witness: unknown declared status';
+  if (!SOCIAL_TIME_OUTCOMES.includes(w.outcome)) return 'temporal witness: unknown outcome';
+  const expected = w.declaredStatus === 'ABSENT' ? temporalWitness(null, policy)
+    : w.declaredStatus === 'NON_STRING' ? temporalWitness(0, policy)
+      : w.declaredStatus === 'OVERSIZED' ? null : temporalWitness(w.declared, policy);
+  if (expected) { for (const k of TEMPORAL_WITNESS_KEYS) if (w[k] !== expected[k]) return `temporal witness: ${k} is not the re-derived value`; return null; }
+  // OVERSIZED: a bounded prefix with an honest length; nothing parsed, nothing projected
+  if (typeof w.declared !== 'string' || w.declared.length !== MAX_SOCIAL_TIME_CHARS) return 'temporal witness: oversized prefix must be exactly the bound';
+  if (w.declaredComplete !== false || !Number.isSafeInteger(w.declaredLength) || w.declaredLength <= MAX_SOCIAL_TIME_CHARS) return 'temporal witness: oversized length invalid';
+  if (w.outcome !== 'MALFORMED' || w.projectionMs !== null || w.fractionDigits !== null || w.subMillisecondRemainder !== null) return 'temporal witness: an oversized declaration cannot carry a projection';
+  return null;
+}
+// Two witnesses denote the SAME instant when both are usable and agree on projection AND
+// exact remainder — the documented equivalence rule for different offsets / zero padding.
+// Their retained declaration strings may differ; the first recorded string stays intact.
+export const witnessesEquivalent = (a, b) => !!a && !!b && a.outcome === 'INSTANT' && b.outcome === 'INSTANT' && a.projectionMs === b.projectionMs && a.subMillisecondRemainder === b.subMillisecondRemainder;
+// Precision-aware ordering of a witnessed instant against an INTEGER-MILLISECOND recorded
+// reference (Serpent's acquisition clock has millisecond resolution; nothing finer was
+// measured). Strictly earlier / later millisecond => BEFORE / AFTER; equal millisecond with
+// no remainder => EQUAL; equal millisecond with a non-zero remainder => UNRESOLVED (the
+// declaration lies inside the reference's own millisecond — order cannot be established,
+// and a floored projection is never allowed to call it earlier); no usable instant => UNKNOWN.
+export const TEMPORAL_ORDER = Object.freeze(['BEFORE', 'EQUAL', 'AFTER', 'UNRESOLVED', 'UNKNOWN']);
+export function compareWitnessToReference(w, referenceMs) {
+  if (!w || w.outcome !== 'INSTANT' || !Number.isSafeInteger(w.projectionMs) || !Number.isSafeInteger(referenceMs)) return 'UNKNOWN';
+  if (w.projectionMs < referenceMs) return 'BEFORE';
+  if (w.projectionMs > referenceMs) return 'AFTER';
+  return w.subMillisecondRemainder === null ? 'EQUAL' : 'UNRESOLVED';
+}

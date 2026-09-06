@@ -19,6 +19,8 @@
 //   server event timestamp; neither is the post's client-supplied record.createdAt.
 //   A DELETE carries no record and no cid.
 
+import { temporalWitness, SOCIAL_TIME_POLICIES } from '../social-time.js';
+
 export const BLUESKY_OFFICIAL = Object.freeze({
   id: 'BLUESKY_OFFICIAL',
   providerKind: 'SOCIAL_MICROBLOG',
@@ -65,7 +67,10 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
   const providerEventSeq = jetstreamCursorOf(message);
   // SOURCE-CLOCK QUARANTINE SEAL (§7): payload.time is the provider EVENT clock —
   // parsed RFC3339 or null; never fabricated, never the post's creation time
-  const providerEventTs = isStr(payload.time) && Number.isFinite(Date.parse(payload.time)) ? Date.parse(payload.time) : null;
+  // SOCIAL-4D COMPLETION: the transport clock's bounded witness (JETSTREAM_EVENT_TIME role
+  // policy — never Date.parse, never the host zone); the number is its explicit projection
+  const providerEventWitness = temporalWitness(payload.time, SOCIAL_TIME_POLICIES.JETSTREAM_EVENT_TIME);
+  const providerEventTs = providerEventWitness.projectionMs;
   if (!isStr(did) || !isStr(collection) || !isStr(rkey) || !isStr(operation)) return { skip: true, reason: 'incomplete commit' };
   if (collection !== BLUESKY_OFFICIAL.postCollection && collection !== BLUESKY_OFFICIAL.repostCollection) return { skip: true, reason: `collection ${collection} not wanted` };
 
@@ -89,8 +94,8 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
         text: '', relation: 'UNKNOWN',
         parentNativePostId: null, editState: 'TOMBSTONED',
-        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null, providerEventSeq, providerEventTs,
-        sourceDeclaredTs: null, // a delete carries no record.createdAt — UNKNOWN, never the commit time
+        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null, providerEventSeq, providerEventTs, providerEventWitness,
+        sourceDeclaredTs: null, sourceClockWitness: temporalWitness(null, SOCIAL_TIME_POLICIES.AT_DATETIME), // a delete carries no record.createdAt — UNKNOWN, never the commit time
         engagement: null, authorMeta: null,
       },
     };
@@ -105,14 +110,14 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
     // the repost's own createdAt is its source-created clock, from the immutable
     // record (deterministic across replay). Absent => null/UNKNOWN, never the
     // firehose delivery time and never Date.now() (§8/§11).
-    const created = isStr(record.createdAt) ? Date.parse(record.createdAt) : NaN;
+    const sourceClockWitness = temporalWitness(record.createdAt, SOCIAL_TIME_POLICIES.AT_DATETIME); // AT datetime grammar; projection or null
     return {
       raw: {
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
         text: '', relation: 'REPOST', parentNativePostId: subjUri,
         editState: operation === 'update' ? 'EDITED' : 'ORIGINAL',
-        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null, providerEventSeq, providerEventTs,
-        sourceDeclaredTs: Number.isFinite(created) ? created : null, // client-declared; Serpent classifies it
+        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null, providerEventSeq, providerEventTs, providerEventWitness,
+        sourceDeclaredTs: sourceClockWitness.projectionMs, sourceClockWitness, // client-declared; Serpent classifies it
         engagement: null, authorMeta: null,
       },
     };
@@ -124,7 +129,7 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
   // record.createdAt is the post's immutable source-created clock (deterministic
   // across replay). Absent => null/UNKNOWN, never the firehose delivery time and
   // never Date.now() (§8/§11).
-  const created = isStr(record.createdAt) ? Date.parse(record.createdAt) : NaN;
+  const sourceClockWitness = temporalWitness(record.createdAt, SOCIAL_TIME_POLICIES.AT_DATETIME); // AT datetime grammar; projection or null
   const replyParent = record.reply?.parent?.uri ?? null;
   const replyRoot = record.reply?.root?.uri ?? null;
   const embedType = record.embed?.$type ?? '';
@@ -142,12 +147,12 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
       threadId: isStr(replyRoot) ? replyRoot : nativePostId,
       nativeVersionId: isStr(cid) ? cid : null, // the record CID = this post's immutable version
       providerEventSeq,
-      providerEventTs,
+      providerEventTs, providerEventWitness,
       handle: null, // Jetstream commits carry the DID, not the handle; resolved elsewhere if needed
       // the SOURCE-DECLARED clock: client-supplied record.createdAt (a malformed
       // value maps to null/UNKNOWN — the evidence is kept, never Date.now());
       // normalization decides whether it is TRUSTED or FUTURE_QUARANTINED
-      sourceDeclaredTs: Number.isFinite(created) ? created : null,
+      sourceDeclaredTs: sourceClockWitness.projectionMs, sourceClockWitness,
       engagement: null, // Jetstream post commits carry no engagement counts
       authorMeta: null,
     },

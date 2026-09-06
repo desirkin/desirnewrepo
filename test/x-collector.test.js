@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startRumor2 } from '../rumor2/collector.js';
-import { SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_SMOKE_EVENT_TYPE } from '../rumor2/social-settle.js';
+import { SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_SMOKE_EVENT_TYPE } from '../rumor2/social-settle.js';
 import { xRuleTag } from '../rumor2/providers/x-official.js';
 
 const dirs = [];
@@ -123,7 +123,7 @@ if (!TEST_URL) {
       await tick();
       await b.tick();
       const ev = await hist(stores.journal);
-      const soc = ofType(ev, SOCIAL_EVENT_TYPE);
+      const soc = ofType(ev, SOCIAL_EVENT_V2_TYPE);
       assert.deepEqual(soc.map((e) => e.provider).sort(), ['BLUESKY_OFFICIAL', 'X_OFFICIAL'], 'both ears settled evidence');
       assert.equal(ofType(ev, SOCIAL_CURSOR_EVENT_TYPE).length, 1, 'Bluesky durable cursor');
       assert.equal(ofType(ev, X_RULESET_EVENT_TYPE).length, 1); assert.equal(ofType(ev, X_METER_EVENT_TYPE)[0].deliveredPostReads, 2, 'X metered BOTH delivered Posts (one was filtered)'); assert.equal(ofType(ev, X_PROGRESS_EVENT_TYPE).length, 1);
@@ -144,7 +144,7 @@ if (!TEST_URL) {
       api.state.streams[0].push(xLine(500, '$ETH upgrade live')); await tick(); await a.tick();
       await a.c.stop();
       const before = await hist(s1.journal);
-      assert.equal(ofType(before, SOCIAL_EVENT_TYPE).length, 2);
+      assert.equal(ofType(before, SOCIAL_EVENT_V2_TYPE).length, 2);
       const s2 = mkStores();
       const b = boot({ ...s2, clockMs: a.clock.ms + 60_000, social: { socialBlueskyEnabled: true, socialMode: 'REPLAY', socialFixtures: [bskyCommit(100, 'BTC is listing')], socialXEnabled: true, socialXConfig: XCFG(), socialXFetchImpl: api.fetchImpl, socialXOptions: { streamOptions: { setTimeoutImpl: () => 1, clearTimeoutImpl: () => {} } } } });
       await b.tick();
@@ -156,7 +156,7 @@ if (!TEST_URL) {
       assert.equal(st.social.stream.intake.durableDeduped, 1, 'the Bluesky redelivery was recognized');
       api.state.streams[1].push(xLine(500, '$ETH upgrade live')); await tick(); await b.tick();
       const after = await hist(s2.journal);
-      assert.equal(ofType(after, SOCIAL_EVENT_TYPE).length, 2, 'the backfilled X Post is one durable truth');
+      assert.equal(ofType(after, SOCIAL_EVENT_V2_TYPE).length, 2, 'the backfilled X Post is one durable truth');
       assert.equal(b.c.status().socialX.meter.deliveredPostReads, 2, 'but it was metered again (soft billing dedupe is never relied on)');
       assert.equal(ofType(after, X_RULESET_EVENT_TYPE).length, 1, 'same rule set => same coverage epoch');
       await b.c.stop();

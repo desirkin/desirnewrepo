@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { normalizeSocialObservation } from '../rumor2/social.js';
-import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_TYPE } from '../rumor2/social-settle.js';
+import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_TYPE, SOCIAL_OBSERVATION_TYPES } from '../rumor2/social-settle.js';
 import { jetstreamCommitToRaw } from '../rumor2/providers/bluesky-official.js';
 import { neynarEventToRaw } from '../rumor2/providers/farcaster-official.js';
 import { SOCIAL_PROVIDER_IDS } from '../rumor2/social-registry.js';
@@ -67,7 +67,7 @@ if (!TEST_URL) {
     await journal.releaseWriter();
     return r;
   };
-  const readWitnesses = async (journal) => (await journal.read()).events.filter((e) => e.type === SOCIAL_EVENT_TYPE).map(reconstructSocialWitness);
+  const readWitnesses = async (journal) => (await journal.read()).events.filter((e) => SOCIAL_OBSERVATION_TYPES.includes(e.type)).map(reconstructSocialWitness);
 
   test('SOC-DUR-1 (§16/§17). a Bluesky post round-trips with every provenance fact intact and re-derivable', async () => {
     await withDb(async ({ journal }) => {
@@ -202,10 +202,10 @@ if (!TEST_URL) {
       // sanity: the social event type is distinct from RUMOR2_SOURCE_OBSERVED,
       // so the frozen source path is untouched by social evidence
       const { event } = socialObservationToEvent(obsFrom(bskyPost({ record: postRecord() })));
-      assert.equal(event.type, 'RUMOR2_SOCIAL_OBSERVED');
+      assert.equal(event.type, 'RUMOR2_SOCIAL_OBSERVED_V2'); // SOCIAL-4D COMPLETION: strict adapters emit the witnessed format
       assert.notEqual(event.type, 'RUMOR2_SOURCE_OBSERVED');
       await settle(journal, [event]);
-      assert.equal((await journal.read()).events[0].type, 'RUMOR2_SOCIAL_OBSERVED');
+      assert.equal((await journal.read()).events[0].type, 'RUMOR2_SOCIAL_OBSERVED_V2');
     });
   });
 }

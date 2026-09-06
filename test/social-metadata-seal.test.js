@@ -15,7 +15,7 @@ import {
   socialProvenanceFacts, socialDiagnosticFacts, canonicalAuthorMeta,
   buildSocialFilter,
 } from '../rumor2/social.js';
-import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_KEYS, SOCIAL_EVENT_TYPE } from '../rumor2/social-settle.js';
+import { socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, SOCIAL_EVENT_KEYS, SOCIAL_EVENT_TYPE, SOCIAL_OBSERVATION_TYPES } from '../rumor2/social-settle.js';
 import { classifyOfficialItem } from '../rumor2/truth.js';
 import { socialIntake } from '../rumor2/social-stream.js';
 import { neynarEventToRaw, FARCASTER_OFFICIAL } from '../rumor2/providers/farcaster-official.js';
@@ -206,7 +206,7 @@ if (!TEST_URL) {
     finally { await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}); await db.end(); }
   };
   const settle = async (journal, events) => { const w = await journal.acquireWriter(); assert.equal(w.ok, true); const r = await journal.append(events); await journal.releaseWriter(); return r; };
-  const witnesses = async (journal) => (await journal.read()).events.filter((e) => e.type === SOCIAL_EVENT_TYPE).map(reconstructSocialWitness);
+  const witnesses = async (journal) => (await journal.read()).events.filter((e) => SOCIAL_OBSERVATION_TYPES.includes(e.type)).map(reconstructSocialWitness);
 
   test('SEAL-DUR-1 (§21/§20). first-known authorMeta survives journal + restart exactly, as information only', async () => {
     await withDb(async ({ db, SCHEMA }) => {
@@ -226,7 +226,7 @@ if (!TEST_URL) {
         // information only — no claim/trade authority materialized
         for (const k of ['propositionId', 'claimType', 'packet', 'order', 'eligibility', 'size', 'hyped'])
           assert.ok(!(k in w), `witness has no ${k}`);
-        assert.equal(validateSocialEvent((await mkJournal(db2).read()).events.find((e) => e.type === SOCIAL_EVENT_TYPE), V), null, 'the restored event re-derives both hashes');
+        assert.equal(validateSocialEvent((await mkJournal(db2).read()).events.find((e) => SOCIAL_OBSERVATION_TYPES.includes(e.type)), V), null, 'the restored event re-derives both hashes');
       } finally { await db2.end(); }
     });
   });

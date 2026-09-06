@@ -11,7 +11,7 @@ import path from 'node:path';
 import { buildSocialFilter } from '../rumor2/social.js';
 import { socialIntake, startSocialStream } from '../rumor2/social-stream.js';
 import { createSocialRuntime } from '../rumor2/social-runtime.js';
-import { SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE, reconstructSocialWitness, socialObservationToEvent } from '../rumor2/social-settle.js';
+import { SOCIAL_EVENT_TYPE, SOCIAL_OBSERVATION_TYPES, SOCIAL_CURSOR_EVENT_TYPE, reconstructSocialWitness, socialObservationToEvent } from '../rumor2/social-settle.js';
 import { jetstreamCommitToRaw, jetstreamCursorOf, BLUESKY_OFFICIAL } from '../rumor2/providers/bluesky-official.js';
 import { neynarEventToRaw, FARCASTER_OFFICIAL } from '../rumor2/providers/farcaster-official.js';
 import { normalizeSocialObservation } from '../rumor2/social.js';
@@ -28,7 +28,7 @@ const FOO = buildSocialFilter({ terms: ['FOO'] });
 const commit = (seq, text = '$FOO post', { rkey = `r${seq}`, op = 'create', did = 'did:plc:a' } = {}) =>
   ({ $type: 'message', payload: { $type: 'x#commit', did, seq, time: iso(C), operation: op, collection: 'app.bsky.feed.post', rkey, cid: op === 'delete' ? undefined : `cid${seq}`, record: op === 'delete' ? undefined : { $type: 'app.bsky.feed.post', text, createdAt: iso(C) } } });
 const castV = (username, followers, likes) => ({ type: 'cast.created', data: { object: 'cast', hash: '0xV', author: { fid: 7, username, follower_count: followers, following_count: 50, power_badge: true }, text: '$FOO news', timestamp: iso(C), reactions: { likes_count: likes } } });
-const socialOf = (events) => events.filter((e) => e.type === SOCIAL_EVENT_TYPE);
+const socialOf = (events) => events.filter((e) => SOCIAL_OBSERVATION_TYPES.includes(e.type));
 const cursorsOf = (events) => events.filter((e) => e.type === SOCIAL_CURSOR_EVENT_TYPE).map((e) => e.durableCursor);
 
 function fakeTimers() { const q = []; let id = 1; return { setTimeoutImpl: (cb, ms) => { q.push({ id, cb, ms }); return id++; }, clearTimeoutImpl: (t) => { const i = q.findIndex((x) => x.id === t); if (i >= 0) q.splice(i, 1); }, runAll: () => { let g = 0; while (q.length && g++ < 1000) q.shift().cb(); }, pending: () => q.length }; }
