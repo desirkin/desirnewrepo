@@ -52,7 +52,9 @@ test('CENSUS-4 (SOCIAL-2B §7). Bluesky is credential-free live; X is durable bu
 test('CENSUS-5. StockTwits stays HIGH PRIORITY though access-blocked; TikTok is a FINAL exclusion, not a TODO', () => {
   assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').highPriority, true, 'blocked by entitlement/terms review, not by importance');
   assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').routes.SELF_SERVE_REGISTRATION.status, 'PAUSED', 'the registration pause is route-specific');
-  assert.equal(socialProviderById('TIKTOK_PUBLIC').finalDecision, 'EXCLUDED_FROM_REALTIME_RUMOR');
+  assert.equal(socialProviderById('TIKTOK_PUBLIC').currentDecision, 'INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED'); assert.equal(socialProviderById('TIKTOK_PUBLIC').decisionStatus, 'OPERATOR_REVIEW_PENDING'); assert.ok(!('finalDecision' in socialProviderById('TIKTOK_PUBLIC')), 'no permanent exclusion is claimed on the operator\'s behalf');
+  assert.equal(socialProviderById('META_PUBLIC').eligibilityForThisProject, 'NOT_ESTABLISHED'); assert.equal(socialProviderById('FARCASTER_OFFICIAL').account.thisProjectPlan, 'UNKNOWN');
+  for (const id of ['META_PUBLIC', 'TIKTOK_PUBLIC']) { const p = socialProviderById(id); assert.equal(p.implemented, false); assert.equal(p.durable, false); assert.ok(!/commercial trading|bars commercial use/i.test(p.reason), `${id}: no commercial classification asserted`); }
 });
 
 test('CENSUS-6. no credential/secret value is ever embedded — only env var NAMES', () => {

@@ -27,6 +27,7 @@
 //     approval confers nothing. Approval for retrieval never silently expands
 //     to inference, model training, derived features, or redistribution.
 import { classifySourceClock, MAX_NATIVE_ID_CHARS, MAX_SOCIAL_TEXT_CHARS, MAX_SOCIAL_HANDLE_CHARS, MAX_SOCIAL_URL_CHARS } from './social.js';
+import { accessDate, utcDayStart, SOCIAL_ACCESS_DATE_KINDS } from './social-time.js';
 
 export const REDDIT_OFFICIAL = Object.freeze({
   id: 'REDDIT_OFFICIAL',
@@ -102,8 +103,25 @@ export function redditApprovalRecordFromEnv(env = process.env) {
   };
 }
 
+// SOCIAL-4D — operator-supplied approval dates: ONE deterministic interpretation
+// (rumor2/social-time.js `accessDate`, the semantics sealed for StockTwits in
+// 809a139) shared by record validation AND readiness evaluation, parsed once per
+// evaluation. ABSENT = not supplied; INSTANT = explicit-offset instant; DATE_ONLY =
+// a UTC calendar-day label; INVALID = anything else supplied (never absent, never
+// repaired, never the host zone). No Date.parse on operator input.
+export const REDDIT_ACCESS_DATE_KINDS = SOCIAL_ACCESS_DATE_KINDS;
+export const redditAccessDate = accessDate;
+function inspectApprovalRecord(r) {
+  const dates = { reviewedOn: accessDate(r?.reviewedOn), validUntil: accessDate(r?.validUntil) };
+  return { error: validateApprovalRecordShape(r, dates), dates };
+}
+
 // Closed validation of the record SHAPE. Any unknown enum fails closed (§7 J).
 export function validateRedditApprovalRecord(r) {
+  return inspectApprovalRecord(r).error;
+}
+
+function validateApprovalRecordShape(r, dates) {
   if (r === null || typeof r !== 'object' || Array.isArray(r)) return 'approval record: not an object';
   const allowed = ['approvalRef', 'status', 'application', 'useCaseVersion', 'classification', 'permittedUses', 'additionalAgreement', 'additionalAgreementSatisfied', 'validUntil', 'retentionCompatibility', 'reviewedOn'];
   for (const k of Object.keys(r)) if (!allowed.includes(k)) return `approval record: undeclared field '${k}'`;
@@ -115,9 +133,9 @@ export function validateRedditApprovalRecord(r) {
   if (!Array.isArray(r.permittedUses) || r.permittedUses.length > REDDIT_PERMITTED_USES.length || r.permittedUses.some((u) => !REDDIT_PERMITTED_USES.includes(u))) return 'approval record: permittedUses outside the closed vocabulary';
   if (!REDDIT_RECORD_AGREEMENTS.includes(r.additionalAgreement)) return `approval record: unknown additionalAgreement '${r.additionalAgreement}'`;
   if (typeof r.additionalAgreementSatisfied !== 'boolean') return 'approval record: additionalAgreementSatisfied must be boolean';
-  if (r.validUntil !== null && r.validUntil !== undefined && (typeof r.validUntil !== 'string' || !Number.isFinite(Date.parse(r.validUntil)))) return 'approval record: validUntil is not a parseable date';
+  if (dates.validUntil.kind === 'INVALID') return `approval record: validUntil ${dates.validUntil.error}`;
   if (!REDDIT_RETENTION_STATES.includes(r.retentionCompatibility)) return `approval record: unknown retentionCompatibility '${r.retentionCompatibility}'`;
-  if (r.reviewedOn !== null && r.reviewedOn !== undefined && (typeof r.reviewedOn !== 'string' || !Number.isFinite(Date.parse(r.reviewedOn)))) return 'approval record: reviewedOn is not a parseable date';
+  if (dates.reviewedOn.kind === 'INVALID') return `approval record: reviewedOn ${dates.reviewedOn.error}`;
   // internal consistency: a classification that carries additional terms cannot claim none are required
   if ((r.classification === 'REQUIRES_ADDITIONAL_TERMS' || r.classification === 'COMMERCIAL') && r.additionalAgreement === 'NOT_REQUIRED') return 'approval record: classification requires additional terms but additionalAgreement says NOT_REQUIRED';
   if (r.classification === 'NON_COMMERCIAL_PERSONAL' && r.additionalAgreement === 'REQUIRED' && r.status === 'APPROVED') return null; // representable: an approved personal use that still carries a separate agreement
@@ -163,13 +181,17 @@ export function evaluateRedditAccess({ record = null, env = process.env, nowMs =
   if (description !== null) advisories.push('SELF_DESCRIPTION_IS_NOT_PERMISSION');
   if (record === null) blockers.push('APPROVAL_RECORD_MISSING');
   else {
-    recordError = validateRedditApprovalRecord(record);
+    const inspected = inspectApprovalRecord(record); // parsed ONCE; validation and readiness share it
+    recordError = inspected.error;
     if (recordError) blockers.push(`APPROVAL_RECORD_INVALID: ${recordError}`);
     else if (!clockKnown) { /* nothing time-dependent (expiry, review date) can be judged: the attestation stays NOT_VERIFIED */ }
     else {
-      // a supplied review date must already have happened relative to the evaluation clock; it is never rewritten
-      const reviewedMs = record.reviewedOn ? Date.parse(record.reviewedOn) : null;
-      reviewOk = reviewedMs === null || reviewedMs <= nowMs;
+      // reviewedOn: an INSTANT is compared exactly; a DATE_ONLY label is compared to the UTC calendar
+      // day of nowMs (a later day cannot establish readiness; the label never proves the exact review
+      // instant); ABSENT keeps the pre-existing optionality and is labelled, not assumed. Never rewritten.
+      const rv = inspected.dates.reviewedOn;
+      reviewOk = rv.kind === 'ABSENT' || (rv.kind === 'INSTANT' ? rv.instantMs <= nowMs : rv.dayStartMs <= utcDayStart(nowMs));
+      if (rv.kind === 'ABSENT') advisories.push('REVIEW_DATE_NOT_SUPPLIED');
       if (!reviewOk) blockers.push('REVIEW_DATE_IN_FUTURE');
       const inScope = record.application === REDDIT_APPLICATION_ID && record.useCaseVersion === REDDIT_USE_CASE_VERSION;
       if (!inScope) { approvalStatus = 'OUT_OF_SCOPE'; blockers.push('APPROVAL_OUT_OF_SCOPE: the record covers another application or use-case version'); }
@@ -177,8 +199,12 @@ export function evaluateRedditAccess({ record = null, env = process.env, nowMs =
       else if (record.status === 'DENIED') { approvalStatus = 'DENIED'; useCaseClassification = 'DENIED'; blockers.push('APPROVAL_DENIED'); }
       else if (record.status === 'PENDING') { approvalStatus = 'NOT_VERIFIED'; blockers.push('APPROVAL_PENDING'); }
       else if (record.status === 'APPROVED') {
-        const exp = record.validUntil ? Date.parse(record.validUntil) : null; // null = no supplied expiry (never invented)
-        if (exp !== null && !(nowMs < exp)) { approvalStatus = 'EXPIRED'; blockers.push('APPROVAL_EXPIRED'); }
+        // validUntil: ABSENT = no supplied expiry (never invented, never perpetual authorization); INSTANT =
+        // exact boundary, valid only while nowMs < expiry; DATE_ONLY names no expiry instant or zone, so
+        // readiness is blocked rather than guessed (no start/end-of-day, no +24h, no host zone).
+        const vu = inspected.dates.validUntil;
+        if (vu.kind === 'INSTANT' && !(nowMs < vu.instantMs)) { approvalStatus = 'EXPIRED'; blockers.push('APPROVAL_EXPIRED'); }
+        else if (vu.kind === 'DATE_ONLY') { approvalStatus = 'NOT_VERIFIED'; blockers.push('VALID_UNTIL_PRECISION_UNRESOLVED'); }
         else if (record.classification === 'UNRESOLVED') { approvalStatus = 'NOT_VERIFIED'; blockers.push('APPROVAL_WITHOUT_CLASSIFICATION: Reddit\'s classification of the use is not recorded'); }
         else if (!reviewOk) { approvalStatus = 'NOT_VERIFIED'; }
         else {

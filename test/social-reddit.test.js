@@ -286,7 +286,11 @@ test('REDDIT-NO-LIVE (§3/§16). the Reddit surface is exactly one fixture-only 
   const codeOnly = src.replace(/\/\/.*$/gm, '');
   for (const authority of [/\bledger\b/i, /\bstrike\b/i, /\bexecut(e|ion)\b/i, /\border(s|Book)?\b/i, /\bsocrates\b/i, /\battention\b/i, /\bhyped\b/i, /\beligib/i, /\banthropic\b/i, /\bopenai\b/i, /\bcompletions?\b/i, /\bmessages\.create\b/, /\bpaperTrade|placeOrder|submitOrder\b/]) assert.ok(!authority.test(codeOnly), `no ${authority} token in code`);
   const imports = [...src.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
-  assert.deepEqual(imports, ['./social.js'], 'imports only the shared social contract — no model, execution, or network module');
+  assert.deepEqual(imports, ['./social.js', './social-time.js'], 'imports only the shared social contract and the pure temporal boundary — no model, execution, or network module');
+  // SOCIAL-4D: the temporal boundary is itself pure — no imports, no network/storage/timer/wall-clock capability
+  const timeSrc = readFileSync(path.join(REPO, 'rumor2/social-time.js'), 'utf8');
+  assert.equal([...timeSrc.matchAll(/from '([^']+)'/g)].length, 0, 'social-time.js imports nothing');
+  for (const forbidden of ['fetch(', 'WebSocket', 'setTimeout', 'setInterval', 'node:', 'process.env', 'Date.now', 'Date.parse', 'new Date(v', 'require(']) assert.ok(!timeSrc.replace(/\/\/.*$/gm, '').includes(forbidden), `social-time.js must not contain ${forbidden}`);
   // permissive-looking flags change nothing: there is no transport to enable
   const a = evaluateRedditAccess({ record: RECORD({ retentionCompatibility: 'COMPATIBLE_REVIEWED' }), env: { ...CREDS, REDDIT_ENABLED: 'true', RUMOR2_SOCIAL_REDDIT_ENABLED: 'true', REDDIT_COMMERCIAL_APPROVED: 'true', REDDIT_LIVE: 'true' }, nowMs: T });
   assert.equal(a.liveAllowed, false); assert.equal(a.durableContentAllowed, false);

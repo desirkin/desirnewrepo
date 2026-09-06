@@ -53,19 +53,26 @@ The machine-readable census lives in `rumor2/social-registry.js` and is pinned b
 | Provider | Kind | Access state | Why (summary) |
 |---|---|---|---|
 | **BLUESKY_OFFICIAL** | microblog | `AVAILABLE_AUTHORIZED` | Free, public, unauthenticated Jetstream v2 real-time firehose with collection/DID filtering + replay. The first live ear. |
-| **FARCASTER_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Neynar hosted API (x-api-key, free tier) gives real-time webhooks + cast search. Hub/Snapchain path needs a full syncing node (not lightweight). Dark until `NEYNAR_API_KEY`. |
+| **FARCASTER_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Neynar hosted API (x-api-key) documents event webhooks, cast search, a Kafka stream, and gRPC hub access; Neynar **publishes** a Free plan with per-endpoint limits (docs, 2026-09-06). THIS project's plan, credits, entitlement, terms (retrieval failed 2026-09-06), retention, and cost are **UNKNOWN/UNVERIFIED**. Mapper present; **no live transport or collector wiring**; a configured `NEYNAR_API_KEY` is configuration only. Hub/Snapchain needs a full node. Acquisition path is a proposal pending terms/plan/recovery/scope (§5H). |
 | **X_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Pay-per-use filtered stream (~4–5s P99), OAuth2 App-Only bearer. Hard read/USD budget under the 3M-post-read/month self-serve cap ($0.005/read; usage via `/2/usage/tweets`; UTC-day dedupe is SOFT). Operational, runtime-gated ear since SOCIAL-2B (§5C). |
 | **REDDIT_OFFICIAL** | forum | `AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION` | Official OAuth2 Data API is a documented path; API data access requires Reddit's explicit approval with honest disclosure. Serpent's private single-user personal-trading use is **UNRESOLVED** (not assumed commercial, not assumed exempt); any separate-agreement requirement and retention compatibility are unresolved. Scraping is prohibited. Fixture-only foundation (SOCIAL-3, §5F) — not an operational ear. |
 | **STOCKTWITS_OFFICIAL** | finance | `AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW` | ONE platform, several routes (SOCIAL-4B, §5G). Self-service registration is **paused** (route-specific). Firestream message/activity/reference/backup routes are documented for stream-authorized accounts (HTTP Basic); general Terms (revised 2026-07-10) permit only authorized API/developer access and let offering terms prevail. This account's entitlement, Serpent's permitted use, additional terms, and raw-content/author retention are **UNRESOLVED**. A **legacy aggregate RUMINT ear exists separately** (config-enabled; deployment unobserved; entitlement unresolved). New raw Social path: fixture-only, retention-blocked. **High priority, blocked by entitlement/terms review — not by importance.** |
-| **META_PUBLIC** (FB Page) | microblog | `AVAILABLE_REQUIRES_APP_REVIEW` | Page Public Content Access reads public Page posts but requires Meta App Review + Business Verification. |
-| **TIKTOK_PUBLIC** | microblog | `NOT_AUTHORIZED` | Only organic-content API (Research API) bars commercial use + is archival/day-granular with no streaming; Commercial Content API is ads/EU only; Display API is own-content only. **Final decision: `EXCLUDED_FROM_REALTIME_RUMOR`** — not a TODO. |
+| **META_PUBLIC** (Facebook + Instagram routes) | microblog | `AVAILABLE_REQUIRES_APP_REVIEW` | Route-specific (SOCIAL-4D, docs 2026-09-06): Page Public Content Access (public posts/comments of unmanaged Pages; App Review + Business Verification); Page Public Metadata Access (metadata only); managed Pages (own Pages only); Instagram Login (own professional account); Instagram with Facebook Login (capped hashtag search 30/7 days + business discovery; professional account + Page + App Review; no realtime delivery documented); Content Library (research archive; academic/not-for-profit affiliation reviewed by a partner — **not established for this project**); Ad Library (ads only); Groups API removed 2024-04-22. No firehose; latency unmeasured; eligibility for this project **NOT ESTABLISHED**; no application made or denied; retention/inference need route-specific review. |
+| **TIKTOK_PUBLIC** | microblog | `NOT_AUTHORIZED` (no authorized route established on the supplied facts) | Product-by-product (SOCIAL-4D, docs 2026-09-06): Research Tools require an eligible academic/not-for-profit affiliation, non-commercial public-interest research, ethics review, and project approval — **not established for this project**; on THAT route new videos take up to 48 h to enter search and some metrics up to 10 days (route-specific, not every product). Display API reads only the authorizing user's own videos. Commercial Content API is an ads/commercial dataset (EU data in this phase, open application) — a dataset name, not a classification of Serpent's use. **Current decision:** `INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED`, `OPERATOR_REVIEW_PENDING` — no application, no denial, no permanent exclusion approved. |
 
-Sub-decisions recorded but not built as separate providers:
-- **Instagram (Graph API)** → `NOT_SUITABLE_REALTIME`: no public firehose, only capped
-  hashtag search on business tokens.
-- **Meta Content Library** → `AVAILABLE_RESTRICTED_RESEARCH`: near-real-time FB/IG/Threads/
-  WhatsApp-Channel public content, but academic/non-profit research only (CASD-vetted, secure
-  enclave, export blocked) — a commercial trading-research system is ineligible.
+Sub-decisions recorded but not built as separate providers (SOCIAL-4D wording; no route enabled):
+- **Instagram** is reviewed separately from Facebook: Instagram Login reads only the authorizing
+  professional account; Instagram with Facebook Login adds hashtag search (30 unique hashtags per
+  7 days) and business discovery for an eligible business app; no realtime delivery is documented.
+  A bounded authorized read is not broad minutes-scale discovery, and no firehose does not by
+  itself prove zero research value — utility is an unmeasured hypothesis. No professional
+  account, Page linkage, app, or review exists for this project.
+- **Meta Content Library / API** → `AVAILABLE_RESTRICTED_RESEARCH`: FB/IG/Threads public content
+  in a controlled research environment; eligibility is an academic or not-for-profit affiliation
+  reviewed by a partner (CASD/ICPSR), with export restricted. That affiliation is **not
+  established for this project**; Serpent is not thereby classified as commercial. Retention,
+  deletion, and inference permissions require their own route-specific review (Reddit's terms are
+  never imported into Meta).
 
 Official sources: bsky.network/docs/jetstream · docs.neynar.com · dev.neynar.com/pricing ·
 docs.farcaster.xyz · docs.x.com/x-api · support.reddithelp.com (Data API / Public Content Policy) ·
@@ -317,7 +324,7 @@ explicitly distinct clocks on every social observation/event:
 
 | Clock | Field | Meaning |
 |---|---|---|
-| A. source-declared | `sourceDeclaredTs` | the exact parsed provider-record creation time (Bluesky `record.createdAt`, Farcaster cast timestamp): client-supplied, immutable record content, **not** an authoritative clock |
+| A. source-declared | `sourceDeclaredTs` | the provider-record creation time (Bluesky `record.createdAt`, Farcaster cast timestamp) as an integer-millisecond number: client-supplied, immutable record content, **not** an authoritative clock. SOCIAL-4D: the adapters still derive it with `Date.parse` (a demonstrated defect — host-zone dependence, calendar rollover, bare-number acceptance, sub-millisecond floor called "exact"); the validated boundary exists and its wiring is BLOCKED at the durable-identity stop gate (§5H) |
 | B. provider event | `providerEventTs` | the transport/provider event clock (Jetstream `payload.time`), RFC3339-parsed or `null`; never original creation, never knowledge time |
 | C. Serpent knowledge | `retrievedTs` / `knownAtTs` | the ONLY causal truth; **never backdated** by any source or provider clock |
 
@@ -375,7 +382,7 @@ RUMOR evidence → RUMOR analysis (third). Serpent never subscribes to the whole
 capability), `implemented`/`durable` (implementation capability), `runtimeGated` (runtime
 authorization = enable gate + bearer + hard budget + usage preflight + reconciled rules +
 collector writer fence). A static flag never implies a credential. X is not in the frozen
-five claim-capable ears; it is classifier-null.
+frozen core's five official providers (EDGAR and OFAC among them are source-only, not claim-capable); it is classifier-null.
 
 **Gates — default cost zero (§8).** `RUMOR2_SOCIAL_X_ENABLED` (false), `X_BEARER_TOKEN`,
 `RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS`, `RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS` (≤ 3M),
@@ -940,6 +947,73 @@ legacy poll, paid probe, support email, or application occurred.
 
 ---
 
+## 5H. SOCIAL-4D — social temporal-input integrity + classification-neutral census
+
+**The defect (independent review, reproduced at 809a139).** Every string-to-time entry point in
+the Social layer used the generic `Date.parse` heuristic. Per the ECMAScript specification an
+offset-less date-time is interpreted in the HOST time zone, a bare number is a year, and
+impossible calendar dates roll forward. Reproduced with synthetic input under UTC, America/
+New_York, and Asia/Kolkata: (a) Reddit access records — `reviewedOn` `'2026-09-06T12:00:00'`
+was ready under UTC/Kolkata and `REVIEW_DATE_IN_FUTURE` under New York; the same string as
+`validUntil` flipped the other way; `'2026-02-30'` and `'0'` were accepted as review dates;
+(b) six provider clock paths (Farcaster cast + recast, Bluesky post + repost + `payload.time`,
+X Post `created_at`) — `'2026-09-06T12:00:00'` became 12:00Z TRUSTED, 16:00Z
+FUTURE_QUARANTINED, or 06:30Z TRUSTED by zone, changing the content-version identity;
+February 30 became March 2; `'0'` became the year 2000; all reached valid durable events.
+
+**The boundary (`rumor2/social-time.js`).** One pure module (no imports, no network/storage/
+timer/wall-clock capability) validates BEFORE constructing any number: primitive string,
+bounded length, complete grammar, leap-year and month-length calendar checks, time-of-day and
+offset ranges, then UTC construction via `setUTCFullYear`/`setUTCHours` (years 0001–0099 stay
+literal). Closed outcomes: `INSTANT`, `DATE_ONLY`, `ABSENT`, `OFFSET_MISSING`,
+`UNSUPPORTED_PRECISION`, `UNSUPPORTED_RANGE`, `MALFORMED`. Policies are per producer, never
+blind ISO acceptance: `AT_DATETIME` (atproto lexicon datetime: uppercase T/Z, no `-00:00`,
+four-digit year ≥ 0001, arbitrary fraction), `RFC3339` (Neynar `format: date-time`: lowercase
+and `-00:00` permitted), `ISO8601_PROFILE` (X `created_at`), `ACCESS_DATE` (operator dates:
+day label or explicit-offset instant with ≤ 3 fraction digits). Sub-millisecond digits are
+never silently "exact": under FLOOR policies the instant is the millisecond floor and
+`subMillisecondRemainder` is flagged (`precision: MILLISECOND_FLOOR`); leap seconds and years
+outside 0001–9999 are `UNSUPPORTED_RANGE`; extended six-digit years are outside every documented
+grammar. A usable instant proves syntax only — TRUSTED remains "temporally usable under the
+quarantine law", never authenticated publication time.
+
+**Reddit (repaired here).** `reviewedOn`/`validUntil` share the `accessDate` interpretation,
+parsed once per evaluation and used identically by `validateRedditApprovalRecord` and
+`evaluateRedditAccess`: ABSENT (not supplied), INSTANT, DATE_ONLY (UTC day label), INVALID
+(anything else supplied — never absent, never repaired). A day-label review passes only when no
+later than the UTC day of `nowMs`; an instant compares exactly; absence keeps its optionality with
+the advisory `REVIEW_DATE_NOT_SUPPLIED`. An instant expiry is valid only while `nowMs < expiry`;
+a day-label expiry blocks readiness as `VALID_UNTIL_PRECISION_UNRESOLVED` (no start/end-of-day,
++24 h, host-zone, or perpetual-licence guess); `null` means no expiry supplied. Invalid dates
+invalidate the record with a field-specific blocker. Results are identical in every host zone.
+Live and durable permissions stay false; classification stays UNRESOLVED. Both entry paths
+(direct record and the env reader's empty-as-unsupplied rule) are tested.
+
+**Adapters — BLOCKED at the durable-identity stop gate.** The six provider paths were wired to
+the boundary in a candidate and passed every parser test, and every VALID supported input kept
+byte-identical normalized facts, numeric clocks, `socialSourceId`/`socialAuthorId`/
+`socialVersionId`, `sourceEventId`, version hash, and diagnostic hash against a baseline-produced
+(809a139, TZ=UTC) journal fixture of 74 cases (45 valid cases proven). But `sourceDeclaredTs` is
+inside `socialProvenanceFacts`, so for the 26 formerly ambiguous or grammar-invalid declarations
+(offset-less, February 30, `'0'`, extended year on all five record paths; lowercase and `-00:00`
+on the Bluesky and X paths) the corrected parser yields `null` where the baseline stored a
+host-zone-dependent number — a redelivery of such an already-durable event would be enqueued as a
+DIFFERENT version. Preserving that boundary would require a settlement/dedupe or cutover change;
+per the mandatory gate the adapters therefore stay on the baseline parser, the divergence is not
+described as acceptable, no history is edited, and the decision is returned to the operator
+(§7 remaining work). Historical rows hold only parsed numbers; the original declaration text is
+not recoverable, so no retrospective repair is claimed.
+
+**Census corrections (facts, not authorization).** Farcaster: a published Free plan is not this
+project's plan; terms retrieval failed; mapper present, no transport, key presence is
+configuration only. Meta: routes distinguished; eligibility NOT ESTABLISHED; no commercial
+classification asserted. TikTok: products distinguished; the Research route's 48 h indexing delay
+is route-specific; the current decision is inactive with operator review pending — no permanent
+exclusion was approved on the operator's behalf. Roadmap: the v5 migration reference was
+obsolete (v4 retained, journal cursor events); the X paid smoke has not occurred.
+
+---
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -953,13 +1027,16 @@ legacy poll, paid probe, support email, or application occurred.
 
 SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
 
-- **SOCIAL-1 completion (into SOCIAL-2):** register the active social provider in
-  the checkpoint provider set via an explicit checkpoint v4→v5 migration, and
-  auto-drain the Bluesky ear inside the single-writer collector tick so social
-  evidence settles operationally (not just via the proven journal bridge). Add a
-  bounded live Bluesky smoke test.
-- **SOCIAL-2:** X / Twitter operational collector (filtered-stream + hard cost gate
-  against the 3M/month cap and `/2/usage/tweets`).
+- **SOCIAL-1 completion — DONE in SOCIAL-2A (§5A), current state (SOCIAL-4D):** this
+  checkout retains checkpoint **v4**; the Social resume position lives in journal
+  `RUMOR2_SOCIAL_CURSOR` events (no v5 migration exists or is required); the Bluesky
+  ear is drained inside the single-writer collector tick under `RUMOR2_SOCIAL_BLUESKY_ENABLED`
+  (default off); the source-clock quarantine law is sealed (§5B). One real live Bluesky
+  smoke informed §5B. Production gate state remains **unobserved** here.
+- **SOCIAL-2 — DONE in SOCIAL-2B (§5C–§5E):** X operational collector with the hard cost
+  governor, chunk-atomic stop, and the durable paid-smoke run-ID law. The authorized
+  **paid X smoke has NOT been performed**; X stays dark without the explicit run ID,
+  budget, bearer, and enable gate.
 - **SOCIAL-3 (foundation done, §5F):** Reddit remains fixture-only. A separate
   live-activation ticket requires Reddit's actual approval + classification of the
   private single-user personal-trading use, any separate agreement it establishes,
@@ -973,6 +1050,14 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   additional terms, reviewed raw-content/author retention with a compatible durable design,
   explicit downstream-use permissions, rate/pricing scope, credentials, and the
   single-acquisition/two-projection migration proof — none assumed.
+- **SOCIAL-4D follow-up (operator decision required):** wire the six provider clock paths to
+  `rumor2/social-time.js` (candidate proven, §5H) once the durable-identity policy for formerly
+  ambiguous declarations is decided — either accept a one-time UNKNOWN-clock version for such
+  redeliveries within the replay window, or add a narrow keep-first absorption keyed on
+  (provider, nativePostId, nativeVersionId, lifecycle) at settlement. Neither is adopted here.
+  Farcaster activation additionally needs this account's Neynar plan/credits, readable terms,
+  retention/deletion answers, an acquisition path (search polling proposed), overlap/gap law,
+  and first-known diagnostics — none assumed.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

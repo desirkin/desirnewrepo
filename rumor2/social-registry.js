@@ -21,7 +21,7 @@ export const SOCIAL_ACCESS_STATES = Object.freeze([
   'AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION', // SOCIAL-3: a documented official path exists, but the platform must approve THIS use case and classify it; nothing is assumed either way
   'AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW', // SOCIAL-4B: documented routes exist; whether THIS account is entitled to a route and whether the applicable offering terms permit this use are unresolved; implies no live/durable capability
   'NOT_ACCEPTING_NEW_ACCESS', // program paused/closed to new consumers
-  'NOT_AUTHORIZED', // this system is categorically ineligible
+  'NOT_AUTHORIZED', // no authorized route for this system's intended use is established on the supplied facts (SOCIAL-4D wording; not a claim of platform denial)
   'NOT_SUITABLE_REALTIME', // an API exists but cannot serve timely organic signal
   'UNAVAILABLE', // no legitimate machine path at all
 ]);
@@ -75,7 +75,10 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     durable: false,
     highPriority: true,
     docUrl: 'https://docs.neynar.com/',
-    reason: 'Neynar hosted API (free tier, x-api-key) gives real-time webhooks + cast search; the hub/Snapchain path needs a full node (not lightweight). Dark until NEYNAR_API_KEY is configured.',
+    // SOCIAL-4D census correction: mapper present; live transport / collector wiring ABSENT; a
+    // configured key is configuration only, never proof a feed runs or an account is entitled
+    account: Object.freeze({ publishedPlan: 'FREE_PLAN_DOCUMENTED', thisProjectPlan: 'UNKNOWN', credits: 'UNKNOWN', entitlement: 'UNVERIFIED', termsRetrieval: 'FAILED_2026-09-06', retention: 'UNRESOLVED' }),
+    reason: 'Neynar hosted API (x-api-key) documents event webhooks, cast search, a Kafka stream, and gRPC hub access; Neynar publishes a Free plan with per-endpoint limits (docs, 2026-09-06). This project\'s plan, credits, entitlement, terms (retrieval failed), retention, and actual cost are UNKNOWN/UNVERIFIED. The hub/Snapchain path needs a full node (not lightweight). The normalization mapper exists; NO live transport or collector wiring exists; NEYNAR_API_KEY presence is configuration only. Acquisition path selection (search polling vs webhooks) is a PROPOSAL pending terms, plan, recovery, and scope.',
   }),
   Object.freeze({
     id: 'X_OFFICIAL',
@@ -193,7 +196,22 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     durable: false,
     highPriority: false,
     docUrl: 'https://developers.facebook.com/docs/features-reference/page-public-content-access/',
-    reason: 'Facebook Page Public Content Access reads public Page posts but only after Meta App Review + Business Verification. Instagram Graph has no realtime public firehose (NOT_SUITABLE_REALTIME); the Meta Content Library is non-profit research only (AVAILABLE_RESTRICTED_RESEARCH). See doctrine/SOCIAL.md.',
+    // SOCIAL-4D census correction (first-party docs, 2026-09-06): routes have DIFFERENT
+    // prerequisites and scopes; none is a firehose; latency is unmeasured; eligibility for THIS
+    // project is NOT ESTABLISHED (no app, token, Page, professional account, or institutional
+    // affiliation supplied). No application was made and none was denied. Utility is a hypothesis.
+    routes: Object.freeze({
+      PAGE_PUBLIC_CONTENT: 'public posts/comments of Pages the app does not manage; App Review + Business Verification (+ possible contracts); use limited to analysis/display',
+      PAGE_PUBLIC_METADATA: 'Page metadata only — never feed or comments',
+      MANAGED_PAGES: 'content of Pages the operator administers (Page permissions) — not platform listening',
+      INSTAGRAM_LOGIN: 'own professional-account media/comments/mentions only',
+      INSTAGRAM_FACEBOOK_LOGIN: 'own media + hashtag search (30 unique hashtags / 7 days) + business discovery; professional account + Page linkage + App Review; no realtime delivery documented',
+      CONTENT_LIBRARY: 'FB/IG/Threads research archive in a controlled environment; academic or not-for-profit affiliation reviewed by a partner (CASD/ICPSR) — NOT ESTABLISHED FOR THIS PROJECT',
+      AD_LIBRARY: 'archived ads only — promotion data, not organic evidence',
+      GROUPS: 'Groups API deprecated (v19.0, removed 2024-04-22) — no sanctioned route',
+    }),
+    eligibilityForThisProject: 'NOT_ESTABLISHED', retention: 'UNRESOLVED_ROUTE_SPECIFIC_REVIEW_REQUIRED', latencyMeasured: false,
+    reason: 'Route-specific (SOCIAL-4D): Page Public Content Access reads public Page posts/comments only after Meta App Review + Business Verification; Page Public Metadata Access is metadata only; Instagram routes read an authorizing professional account (Instagram Login) or add capped hashtag search and business discovery (Facebook Login) with no realtime delivery documented; the Meta Content Library requires an academic/not-for-profit affiliation reviewed by a partner — not established for this project. No route is a firehose; latency is unmeasured; delete/retention and inference permissions need their own route-specific review. See doctrine/SOCIAL.md §2/§5H.',
   }),
   Object.freeze({
     id: 'TIKTOK_PUBLIC',
@@ -208,10 +226,19 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     implemented: false,
     durable: false,
     highPriority: false,
-    // a FINISHED architectural decision, not a TODO (§3/§32)
-    finalDecision: 'EXCLUDED_FROM_REALTIME_RUMOR',
+    // SOCIAL-4D census correction (first-party docs, 2026-09-06): the CURRENT decision is
+    // inactive because no authorized minutes-scale organic route is established on the supplied
+    // facts. No application was made and none was denied; this is not a permanent exclusion
+    // approved by the operator, and it classifies Serpent neither as commercial nor as exempt.
+    currentDecision: 'INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED',
+    decisionStatus: 'OPERATOR_REVIEW_PENDING',
+    routes: Object.freeze({
+      RESEARCH: 'Research Tools/API: affiliation with an eligible academic or not-for-profit institution, non-commercial public-interest research, ethics review, project approval — NOT ESTABLISHED FOR THIS PROJECT; on THIS route new videos take up to 48 h to enter search and some metrics up to 10 days to refresh (route-specific)',
+      DISPLAY: 'Display API: the authorizing user\'s own videos only — not organic discovery',
+      COMMERCIAL_CONTENT: 'Commercial Content API: paid ads, advertiser data, and other commercial content (EU data in this phase, open application) — an ad/commercial dataset, not the organic feed and not a classification of Serpent\'s use',
+    }),
     docUrl: 'https://developers.tiktok.com/products/research-api/',
-    reason: 'The only organic-content API (Research API) bars commercial use and is archival/day-granular with no streaming; Commercial Content API is ads/EU only; Display API is own-content only. No authorized, commercial, real-time organic path exists. Excluded — a final decision, not a pending task.',
+    reason: 'Product-by-product (SOCIAL-4D): Research Tools require an eligible institutional affiliation and project approval this project has not supplied, and that route indexes new videos with up to 48 h delay; the Display API reads only an authorizing user\'s own videos; the Commercial Content API is an ads/commercial dataset. No appropriate authorized minutes-scale organic route is established on the supplied facts. Inactive; operator review of any permanent decision is pending.',
   }),
 ]);
 
