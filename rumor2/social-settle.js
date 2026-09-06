@@ -23,6 +23,7 @@ import {
   socialSourceIdentity, socialAuthorIdentity, socialVersionIdentity, socialMetaHash,
   normalizeSocialText, SOCIAL_RELATION_KINDS, ECHO_RELATIONS, SOCIAL_LIFECYCLE_STATES,
   R2SS_RE, R2SA_RE, R2SV_RE, MAX_SOCIAL_TEXT_CHARS, MAX_NATIVE_ID_CHARS, MAX_SOCIAL_HANDLE_CHARS,
+  SOURCE_CLOCK_STATES, classifySourceClock,
 } from './social.js';
 import { socialProviderById } from './social-registry.js';
 
@@ -37,7 +38,10 @@ export const SOCIAL_EVENT_KEYS = Object.freeze([
   'socialSourceId', 'nativePostId', 'nativeAuthorId', 'socialAuthorId',
   'lifecycle', 'relation', 'parentNativePostId', 'threadId', 'nativeVersionId', 'providerEventSeq', 'handle',
   'text', 'textHash', 'metaHash', 'engagement', 'authorMeta',
-  'sourceCreatedTs', 'retrievedTs', 'knownAtTs',
+  // SOURCE-CLOCK QUARANTINE SEAL (§14): declared vs trusted source clock, the
+  // closed clock verdict + bounded skew diagnostic, and the provider event clock
+  'sourceDeclaredTs', 'sourceCreatedTs', 'sourceClockStatus', 'sourceClockSkewMs', 'providerEventTs',
+  'retrievedTs', 'knownAtTs',
 ]);
 
 // SOCIAL-2A: providers whose adapter supplies a native commit/event sequence.
@@ -96,7 +100,11 @@ export function socialObservationToEvent(observation) {
     // never claim/trade authority. Retained through the journal + witness so
     // SOCIAL-5/6 need not reconstruct facts SOCIAL-1 already knew.
     authorMeta: observation.authorMeta ?? null,
+    sourceDeclaredTs: observation.sourceDeclaredTs ?? null,
     sourceCreatedTs: observation.sourceCreatedTs,
+    sourceClockStatus: observation.sourceClockStatus ?? 'UNKNOWN',
+    sourceClockSkewMs: observation.sourceClockSkewMs ?? null,
+    providerEventTs: observation.providerEventTs ?? null,
     retrievedTs: observation.retrievedTs,
     knownAtTs: observation.knownAtTs,
   };
@@ -186,15 +194,25 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
   }
   if (event.threadId !== null && !isStr(event.threadId, MAX_NATIVE_ID_CHARS)) return 'social event: threadId invalid';
   if (event.handle !== null && !isStr(event.handle, MAX_SOCIAL_HANDLE_CHARS)) return 'social event: handle invalid';
-  // point-in-time (§8/§10): sourceCreatedTs is EITHER a safe-integer ms OR null
-  // (UNKNOWN — a provider that supplied no source-created time, never fabricated
-  // from local wall clock). retrieved/known are always present. When source time
-  // is known enforce created <= retrieved <= known; when unknown enforce only
-  // retrieved <= known.
+  // SOURCE-CLOCK QUARANTINE LAW (§5-§11): retrieved/known are Serpent's
+  // acquisition truth (knownAt never backdated); sourceDeclaredTs is the exact
+  // provider-record clock or null; the stored verdict must be EXACTLY what
+  // re-classifying the declared clock against retrievedTs yields — a forged
+  // TRUSTED over a future clock, a fabricated sourceCreatedTs, or a rewritten
+  // skew all die here. providerEventTs is a separate finite ms or null.
   if (!isTs(event.retrievedTs) || !isTs(event.knownAtTs)) return 'social event: clock invalid';
-  if (event.sourceCreatedTs !== null && !isTs(event.sourceCreatedTs)) return 'social event: sourceCreatedTs invalid';
-  if (event.sourceCreatedTs !== null && event.sourceCreatedTs > event.retrievedTs) return 'social event: created after retrieved';
   if (event.retrievedTs > event.knownAtTs) return 'social event: retrieved after known';
+  if (event.sourceDeclaredTs !== null && !isTs(event.sourceDeclaredTs)) return 'social event: sourceDeclaredTs invalid';
+  if (event.sourceCreatedTs !== null && !isTs(event.sourceCreatedTs)) return 'social event: sourceCreatedTs invalid';
+  if (!SOURCE_CLOCK_STATES.includes(event.sourceClockStatus)) return 'social event: sourceClockStatus unknown';
+  if (event.sourceClockSkewMs !== null && (!isTs(event.sourceClockSkewMs) || event.sourceClockSkewMs <= 0)) return 'social event: sourceClockSkewMs invalid';
+  {
+    const c = classifySourceClock({ sourceDeclaredTs: event.sourceDeclaredTs, retrievedTs: event.retrievedTs });
+    if (c.sourceClockStatus !== event.sourceClockStatus) return 'social event: sourceClockStatus is not the re-derived verdict for the declared clock';
+    if (c.sourceCreatedTs !== event.sourceCreatedTs) return 'social event: sourceCreatedTs disagrees with the trusted-clock law';
+    if (c.sourceClockSkewMs !== event.sourceClockSkewMs) return 'social event: sourceClockSkewMs is not the re-derived skew';
+  }
+  if (event.providerEventTs !== null && !isTs(event.providerEventTs)) return 'social event: providerEventTs invalid';
   if (event.ts !== iso(event.knownAtTs)) return 'social event: ts disagrees with knownAtTs';
   if (!okEngagement(event.engagement)) return 'social event: engagement invalid';
   if (!okAuthorMeta(event.authorMeta, event.retrievedTs)) return 'social event: authorMeta invalid';
@@ -212,8 +230,9 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
     provider: event.provider, providerKind: event.providerKind, nativePostId: event.nativePostId,
     nativeAuthorId: event.nativeAuthorId, lifecycle: event.lifecycle, relation: event.relation,
     parentNativePostId: event.parentNativePostId, threadId: event.threadId, nativeVersionId: event.nativeVersionId,
-    providerEventSeq: event.providerEventSeq, textHash: event.textHash, sourceCreatedTs: event.sourceCreatedTs,
+    providerEventSeq: event.providerEventSeq, textHash: event.textHash, sourceDeclaredTs: event.sourceDeclaredTs,
     handle: event.handle, authorMeta: event.authorMeta, engagement: event.engagement,
+    sourceClockStatus: event.sourceClockStatus, sourceClockSkewMs: event.sourceClockSkewMs, providerEventTs: event.providerEventTs,
     socialSourceId: event.socialSourceId,
   };
   if (event.metaHash !== socialMetaHash(facts)) return 'social event: metaHash is not the re-derived diagnostic hash';
@@ -242,7 +261,14 @@ export function reconstructSocialWitness(event) {
     versionId: event.sourceEventId,
     handle: event.handle,
     text: event.text,
+    // the three clocks, explicit (SOURCE-CLOCK QUARANTINE SEAL): declared
+    // (provider record), trusted (null when quarantined/unknown), verdict + skew,
+    // provider event clock, and Serpent's acquisition clocks
+    sourceDeclaredTs: event.sourceDeclaredTs ?? null,
     sourceCreatedTs: event.sourceCreatedTs,
+    sourceClockStatus: event.sourceClockStatus ?? 'UNKNOWN',
+    sourceClockSkewMs: event.sourceClockSkewMs ?? null,
+    providerEventTs: event.providerEventTs ?? null,
     retrievedTs: event.retrievedTs,
     knownAtTs: event.knownAtTs,
     engagement: event.engagement,

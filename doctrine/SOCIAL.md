@@ -31,7 +31,8 @@ parallel rumor engine, a parallel truth table, or a social-specific checkpoint.
 - **Point-in-time.** `sourceCreatedTs` (posted) ≤ `retrievedTs` (fetched) ≤
   `knownAtTs` (when Serpent actually knew). `knownAt` is never backdated to the
   post's creation; replay preserves the old creation clock and uses the replay
-  acquisition time as knowledge time. A future source clock fails closed.
+  acquisition time as knowledge time. A future source-declared clock is
+  QUARANTINED from causal use (§5B) — the evidence is kept, knownAt never moves.
 - **Identity is provider-native and immutable.** A post is `(provider,
   nativePostId)`; an author is `(provider, nativeAuthorId)`. Handles/usernames
   change and are never the durable identity. Identities are never merged across
@@ -83,9 +84,10 @@ API blobs, no unbounded fields. Key pieces:
   part of post identity, so an altered re-delivery of the same native id is caught
   as corruption at the ear, never accepted as a new post.
 - **Point-in-time** — normalization enforces `sourceCreatedTs ≤ retrieved = knownAt`
-  when the source clock is **known**, or only `retrieved = knownAt` when it is
-  UNKNOWN (`null`); a known future source clock is rejected. `sourceCreatedTs` is
-  provider-supplied or `null`/UNKNOWN — never fabricated from the local wall clock.
+  when the source clock is TRUSTED, or only `retrieved = knownAt` when it is
+  UNKNOWN or FUTURE_QUARANTINED (`sourceCreatedTs = null`, declared value kept —
+  §5B). `sourceDeclaredTs` is provider-supplied or `null`/UNKNOWN — never
+  fabricated from the local wall clock.
 - **Relationships** — `SOCIAL_RELATION_KINDS` (ORIGINAL/REPLY/REPOST/QUOTE/
   CROSSPOST/POSSIBLE_COPY/UNKNOWN); `ECHO_RELATIONS` (REPOST/QUOTE/CROSSPOST) can
   never be independent provenance.
@@ -301,6 +303,49 @@ Crash matrix (`test/social-runtime.test.js`, real PostgreSQL): crash before norm
 before append, evidence-without-cursor (torn), atomic-then-crash, cursor-before-evidence
 (impossible by construction), writer loss before/after append, and diagnostic-changed
 redelivery after restart — all replay safely with evidence exactly once.
+
+---
+
+## 5B. SOURCE-CLOCK QUARANTINE SEAL — three clocks, no discarded evidence
+
+The first real Bluesky live smoke showed ~6% of posts carrying a client-supplied
+`record.createdAt` ahead of Serpent's wall clock (28 ms – 87 s); the old law dropped
+them. A bad client clock must never discard valid social evidence — and must never
+make Serpent believe it knew something earlier than it did. Serpent now keeps three
+explicitly distinct clocks on every social observation/event:
+
+| Clock | Field | Meaning |
+|---|---|---|
+| A. source-declared | `sourceDeclaredTs` | the exact parsed provider-record creation time (Bluesky `record.createdAt`, Farcaster cast timestamp): client-supplied, immutable record content, **not** an authoritative clock |
+| B. provider event | `providerEventTs` | the transport/provider event clock (Jetstream `payload.time`), RFC3339-parsed or `null`; never original creation, never knowledge time |
+| C. Serpent knowledge | `retrievedTs` / `knownAtTs` | the ONLY causal truth; **never backdated** by any source or provider clock |
+
+`sourceCreatedTs` is the **trusted** source clock: equal to `sourceDeclaredTs` when
+`sourceDeclaredTs ≤ retrievedTs`, else `null`. The closed verdict `sourceClockStatus`
+∈ {`TRUSTED`, `FUTURE_QUARANTINED`, `UNKNOWN`} says why: TRUSTED (declared ≤ retrieved),
+FUTURE_QUARANTINED (declared > retrieved — the declared value is preserved as
+evidence, `sourceCreatedTs = null`, and `sourceClockSkewMs = sourceDeclaredTs −
+retrievedTs`, ONE definition, clamped to ±10 years as a safe integer), UNKNOWN (no
+valid declared clock; a malformed provider timestamp maps to `null` at the adapter —
+the evidence is kept, never `Date.now()`). Deletes: `sourceDeclaredTs = null`, UNKNOWN,
+but `providerEventTs`/`providerEventSeq` preserved. Forbidden: clamping the source
+clock to retrieval, pretending creation = retrieval, backdating knownAt, rewriting the
+provider's value, or trusting a future clock for ordering/lead-time/anything.
+
+Identity: `sourceDeclaredTs` is immutable record content and is bound into the
+CONTENT/VERSION identity (a different declared clock on the same CID is a different
+immutable record). The acquisition-dependent verdict/skew and `providerEventTs` are
+FIRST-KNOWN diagnostics bound by `metaHash`: a later redelivery after wall time
+caught up dedupes keep-first and can never rewrite the first-known quarantine. The
+validator re-derives the verdict from the stored declared clock and `retrievedTs`, so
+a forged TRUSTED, a fabricated `sourceCreatedTs`, or a rewritten skew is rejected.
+
+Contract for later layers (SOCIAL-5+): primary causal ordering = `knownAtTs`;
+provider-native ordering = `providerEventSeq`; provider timing = `providerEventTs`;
+`sourceCreatedTs` only when `TRUSTED`; a quarantined `sourceDeclaredTs` is descriptive
+only. No clock anomaly rejects an asset, a pump, an author, or a trade — that is
+future research, not a rule. Operational counters (`sourceClockTrusted` /
+`sourceClockFutureQuarantined` / `sourceClockUnknown`) are observability only.
 
 ---
 

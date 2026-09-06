@@ -76,9 +76,12 @@ test('PASS 6 — MALFORMED PROVIDER PAYLOAD: zero truth', () => {
   assert.equal(intake.size(), 0);
 });
 
-test('PASS 7 — FUTURE CLOCK: fail closed', () => {
+test('PASS 7 — FUTURE CLOCK: fail closed FOR CLOCK USE — the source clock is quarantined, the evidence survives, knownAt never moves', () => {
   const intake = mkIntake();
-  assert.equal(intake.offer(commit({ rkey: 'f', record: postRec({ text: '$FOO', createdAt: iso(NOW + 60_000) }) })).outcome, 'rejected');
+  const r = intake.offer(commit({ rkey: 'f', record: postRec({ text: '$FOO', createdAt: iso(NOW + 60_000) }) }));
+  assert.equal(r.outcome, 'enqueued');
+  assert.equal(r.observation.sourceClockStatus, 'FUTURE_QUARANTINED'); assert.equal(r.observation.sourceCreatedTs, null);
+  assert.equal(r.observation.knownAtTs, NOW, 'no backdating, no manufactured lead time');
 });
 
 test('PASS 8 — STREAM RECONNECT: reconnect does not duplicate truth', () => {

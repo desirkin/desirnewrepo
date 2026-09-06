@@ -57,7 +57,8 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
         threadId: isStr(d.root_parent_url) ? d.root_parent_url : (isStr(d.thread_hash) ? d.thread_hash : hash),
         handle: isStr(d.author?.username) ? d.author.username : null,
         displayName: isStr(d.author?.display_name) ? d.author.display_name : null,
-        sourceCreatedTs: Number.isFinite(created) ? created : null,
+        sourceDeclaredTs: Number.isFinite(created) ? created : null, // client-declared cast time; classified at normalization
+        providerEventTs: null, // Neynar exposes no separate provider event clock
         engagement: {
           likes: Number.isSafeInteger(reactions.likes_count) ? reactions.likes_count : null,
           reposts: Number.isSafeInteger(reactions.recasts_count) ? reactions.recasts_count : null,
@@ -90,7 +91,7 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
         canonicalUrl: null, threadId: null, handle: null,
         // a delete's timestamp is when the deletion was emitted, NOT the cast's
         // original creation — never fabricate the original clock from it (§9)
-        sourceCreatedTs: null,
+        sourceDeclaredTs: null, providerEventTs: null,
         engagement: null, authorMeta: null,
       },
     };
@@ -110,7 +111,7 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
         canonicalUrl: null, threadId: null, handle: null,
         // the recast's own creation time; absent/invalid => null/UNKNOWN, never
         // Date.now() (§8/§11)
-        sourceCreatedTs: Number.isFinite(recastCreated) ? recastCreated : null,
+        sourceDeclaredTs: Number.isFinite(recastCreated) ? recastCreated : null, providerEventTs: null,
         engagement: null, authorMeta: null,
       },
     };

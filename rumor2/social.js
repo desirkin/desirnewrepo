@@ -150,7 +150,12 @@ export function socialProvenanceFacts(f) {
     // providers with no such concept. NOT part of socialSourceId. (§9-§13)
     providerEventSeq: f.providerEventSeq ?? null,
     textHash: f.textHash,
-    sourceCreatedTs: f.sourceCreatedTs ?? null,
+    // SOURCE-CLOCK QUARANTINE SEAL (§13): the version binds the SOURCE-DECLARED
+    // clock — the exact provider-record createdAt, immutable record content —
+    // never the acquisition-derived trusted sourceCreatedTs (which is null when
+    // quarantined and would otherwise make the same immutable record a
+    // different version depending on when Serpent happened to fetch it).
+    sourceDeclaredTs: f.sourceDeclaredTs ?? null,
   };
 }
 // canonical bounded engagement snapshot (first-known) — a stable 6-key shape so
@@ -186,7 +191,44 @@ export function socialDiagnosticFacts(f) {
     handle: f.handle ?? null,
     authorMeta: canonicalAuthorMeta(f.authorMeta),
     engagement: canonicalEngagement(f.engagement),
+    // SOURCE-CLOCK QUARANTINE SEAL (§8/§9/§13/§15): the acquisition-dependent
+    // clock verdict is a FIRST-KNOWN historical diagnostic — bound here so a
+    // stored verdict cannot be silently rewritten, but never part of the content
+    // version, so a later redelivery (after wall time caught up) dedupes instead
+    // of forking. providerEventTs is provider transport timing evidence, kept
+    // out of the content identity for replay safety and bound here first-known.
+    sourceClockStatus: f.sourceClockStatus ?? 'UNKNOWN',
+    sourceClockSkewMs: f.sourceClockSkewMs ?? null,
+    providerEventTs: f.providerEventTs ?? null,
   };
+}
+// ---- SOURCE-CLOCK QUARANTINE SEAL — the three clocks ------------------------
+// A. sourceDeclaredTs — the exact parsed provider-record creation time (Bluesky
+//    record.createdAt, Farcaster cast timestamp): CLIENT-SUPPLIED, useful, but
+//    not an authoritative synchronized clock. Immutable record content.
+// B. providerEventTs — the transport/provider event clock (Jetstream payload.time):
+//    provider timing evidence, NOT original creation, NOT knowledge time.
+// C. retrievedTs / knownAtTs — Serpent's acquisition clocks: the ONLY causal
+//    truth. Serpent NEVER knew an event before knownAtTs; knownAt is never
+//    backdated by any source or provider clock.
+// sourceCreatedTs is the TRUSTED source clock: equal to sourceDeclaredTs when
+// the declared clock is causally possible (<= retrievedTs), else null — the
+// declared value is preserved as evidence but QUARANTINED from causal ordering,
+// lead-time, and any authority. A bad client clock never discards the post and
+// never makes Serpent believe it knew something earlier than it did. (§4-§11)
+export const SOURCE_CLOCK_STATES = Object.freeze(['TRUSTED', 'FUTURE_QUARANTINED', 'UNKNOWN']);
+// bound on the recorded skew diagnostic (safe-integer ms; ±10 years) — an absurd
+// client clock is recorded as a clamped, bounded number, never an overflow
+export const MAX_SOURCE_CLOCK_SKEW_MS = 10 * 365 * 24 * 3_600_000;
+export function classifySourceClock({ sourceDeclaredTs, retrievedTs }) {
+  if (!Number.isFinite(sourceDeclaredTs)) return { sourceCreatedTs: null, sourceClockStatus: 'UNKNOWN', sourceClockSkewMs: null };
+  const declared = Math.floor(sourceDeclaredTs);
+  if (declared <= retrievedTs) return { sourceCreatedTs: declared, sourceClockStatus: 'TRUSTED', sourceClockSkewMs: null };
+  // sourceClockSkewMs = sourceDeclaredTs - retrievedTs: exactly why Serpent
+  // quarantined the source clock at acquisition (ONE definition, never a
+  // different reference clock). Diagnostic only.
+  const skew = Math.min(MAX_SOURCE_CLOCK_SKEW_MS, declared - retrievedTs);
+  return { sourceCreatedTs: null, sourceClockStatus: 'FUTURE_QUARANTINED', sourceClockSkewMs: skew };
 }
 // CONTENT / VERSION HASH — binds the immutable content/provenance facts only.
 export const socialVersionHash = (f) => contentHash(canonicalJson(socialProvenanceFacts(f)));
@@ -330,23 +372,30 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   // integer supplied by the provider, or null/UNKNOWN. Never invented. (§9/§13)
   const providerEventSeq = raw.providerEventSeq ?? null;
   if (providerEventSeq !== null && (!Number.isSafeInteger(providerEventSeq) || providerEventSeq < 0)) return { reject: true, reason: 'providerEventSeq invalid' };
-  // point-in-time (§8/§10/§11): sourceCreatedTs is EITHER a provider-supplied
-  // finite ms OR UNKNOWN (null). Serpent NEVER fabricates a source-created clock
-  // from its own processing time — a missing/absent value is null, never
-  // Date.now()/retrieved/known. retrievedTs/knownAtTs are Serpent's acquisition
-  // clocks (nowMs); knownAt is never backdated to creation.
-  const rawCreated = raw.sourceCreatedTs;
-  let sourceCreatedTs;
-  if (rawCreated === null || rawCreated === undefined) sourceCreatedTs = null;
-  else if (Number.isFinite(rawCreated)) sourceCreatedTs = Math.floor(rawCreated);
-  else return { reject: true, reason: 'sourceCreatedTs must be a finite ms or null (UNKNOWN)' };
+  // SOURCE-CLOCK QUARANTINE SEAL (§4-§11). The adapter supplies the exact
+  // parsed provider-record creation time as `sourceDeclaredTs` (raw
+  // `sourceCreatedTs` is accepted as the same declared clock for adapters/
+  // fixtures on the older field name) — a finite ms or null/UNKNOWN, NEVER
+  // Date.now(). Serpent then CLASSIFIES it against its own acquisition clock:
+  // causally possible => TRUSTED (sourceCreatedTs = declared); ahead of
+  // retrieval => FUTURE_QUARANTINED (sourceCreatedTs = null, declared value
+  // preserved, skew recorded) — the observation is NOT discarded; absent =>
+  // UNKNOWN. A malformed provider timestamp is the adapter's to map to null
+  // (never fabricated); a non-number here is a raw-contract violation.
+  const rawDeclared = raw.sourceDeclaredTs !== undefined ? raw.sourceDeclaredTs : raw.sourceCreatedTs;
+  let sourceDeclaredTs;
+  if (rawDeclared === null || rawDeclared === undefined) sourceDeclaredTs = null;
+  else if (Number.isFinite(rawDeclared)) sourceDeclaredTs = Math.floor(rawDeclared);
+  else return { reject: true, reason: 'sourceDeclaredTs must be a finite ms or null (UNKNOWN)' };
+  // provider transport/event clock (Jetstream payload.time): finite ms or null;
+  // never fabricated, never copied into sourceCreatedTs or knownAtTs
+  const rawProviderTs = raw.providerEventTs ?? null;
+  if (rawProviderTs !== null && !Number.isFinite(rawProviderTs)) return { reject: true, reason: 'providerEventTs must be a finite ms or null' };
+  const providerEventTs = rawProviderTs === null ? null : Math.floor(rawProviderTs);
   const retrievedTs = Number.isFinite(nowMs) ? Math.floor(nowMs) : Date.now();
-  const knownAtTs = retrievedTs;
-  // If the source time is KNOWN, enforce the full ordering (a future source clock
-  // fails closed — it cannot postdate retrieval, §42). If UNKNOWN, enforce only
-  // the acquisition ordering; sourceCreatedTs stays null (§10).
-  if (sourceCreatedTs !== null && sourceCreatedTs > retrievedTs) return { reject: true, reason: 'sourceCreatedTs after retrieval — future clock' };
+  const knownAtTs = retrievedTs; // NEVER backdated to any source/provider clock
   if (retrievedTs > knownAtTs) return { reject: true, reason: 'retrieved after known' };
+  const { sourceCreatedTs, sourceClockStatus, sourceClockSkewMs } = classifySourceClock({ sourceDeclaredTs, retrievedTs });
   // engagement is PROPAGATION metadata only (never confirmation) — bounded ints or null
   const engagement = normalizeEngagement(raw.engagement);
   if (engagement === undefined) return { reject: true, reason: 'engagement invalid' };
@@ -367,8 +416,8 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   // mapper/settle/validator.
   const facts = {
     provider, providerKind, nativePostId, nativeAuthorId, lifecycle, relation, parentNativePostId,
-    threadId, nativeVersionId, providerEventSeq, textHash: hash, sourceCreatedTs,
-    handle, authorMeta, engagement, socialSourceId,
+    threadId, nativeVersionId, providerEventSeq, textHash: hash, sourceDeclaredTs,
+    handle, authorMeta, engagement, sourceClockStatus, sourceClockSkewMs, providerEventTs, socialSourceId,
   };
   const metaHash = socialMetaHash(facts);
   const socialVersionId = socialVersionIdentity(facts);
@@ -380,7 +429,8 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
       text: raw.text, normalizedText: normalized, textHash: hash,
       canonicalUrl, threadId, parentNativePostId, relation, editState, lifecycle,
       nativeVersionId, providerEventSeq, socialVersionId,
-      sourceCreatedTs, retrievedTs, knownAtTs,
+      sourceDeclaredTs, sourceCreatedTs, sourceClockStatus, sourceClockSkewMs, providerEventTs,
+      retrievedTs, knownAtTs,
       engagement, authorMeta, metaHash,
     }),
   };

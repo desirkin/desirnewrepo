@@ -115,10 +115,14 @@ test('BSKY-INTAKE-7 (§19 edit). an update with a NEW cid is a new version, admi
   assert.equal(intake.stats().corrupt, 0);
 });
 
-test('BSKY-INTAKE-4 (§42). a future source clock fails closed', () => {
+test('BSKY-INTAKE-4 (§42 / SOURCE-CLOCK QUARANTINE). a future client clock is quarantined, never a reason to drop the post', () => {
   const intake = mkIntake();
   const future = commit({ rkey: 'f', record: postRecord({ text: '$FOO soon', createdAt: iso(NOW + 60_000) }) });
-  assert.equal(intake.offer(future).outcome, 'rejected');
+  const r = intake.offer(future);
+  assert.equal(r.outcome, 'enqueued', 'the evidence is retained');
+  assert.equal(r.observation.sourceClockStatus, 'FUTURE_QUARANTINED'); assert.equal(r.observation.sourceCreatedTs, null);
+  assert.equal(r.observation.knownAtTs, NOW);
+  assert.equal(intake.stats().sourceClockFutureQuarantined, 1);
 });
 
 test('BSKY-INTAKE-5. drain hands observations to the durable writer and empties the queue', () => {

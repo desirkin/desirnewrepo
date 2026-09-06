@@ -132,19 +132,22 @@ const V2_COMMIT = {
     cid: 'bafyreiv2cid', record: { $type: 'app.bsky.feed.post', createdAt: '2026-09-05T12:00:00.000Z', text: '$FOO listing rumor' },
   },
 };
-test('V2-4. the current official v2 wrapped commit maps: seq->providerEventSeq/cursor, DID->author, collection+rkey->post id, CID->version, createdAt->sourceCreatedTs (never `time`)', () => {
+test('V2-4. the current official v2 wrapped commit maps: seq->providerEventSeq/cursor, DID->author, collection+rkey->post id, CID->version, createdAt->sourceDeclaredTs (never `time`)', () => {
   assert.equal(jetstreamCursorOf(V2_COMMIT), 12345, 'seq is the provider cursor');
   const r = jetstreamCommitToRaw(V2_COMMIT);
   assert.equal(r.raw.providerEventSeq, 12345);
   assert.equal(r.raw.nativeAuthorId, 'did:plc:v2author');
   assert.equal(r.raw.nativePostId, 'at://did:plc:v2author/app.bsky.feed.post/3l5ihkeyv2');
   assert.equal(r.raw.nativeVersionId, 'bafyreiv2cid');
-  assert.equal(r.raw.sourceCreatedTs, Date.parse('2026-09-05T12:00:00.000Z'), 'record.createdAt');
-  assert.notEqual(r.raw.sourceCreatedTs, Date.parse(V2_COMMIT.payload.time), 'the server `time` field is NOT the source-created clock');
-  assert.notEqual(r.raw.sourceCreatedTs, 12345, 'seq is NOT a timestamp');
+  assert.equal(r.raw.sourceDeclaredTs, Date.parse('2026-09-05T12:00:00.000Z'), 'record.createdAt is the SOURCE-DECLARED clock');
+  assert.equal(r.raw.providerEventTs, Date.parse(V2_COMMIT.payload.time), 'payload.time is the PROVIDER EVENT clock');
+  assert.notEqual(r.raw.sourceDeclaredTs, Date.parse(V2_COMMIT.payload.time), 'the server `time` field is NOT the source-declared clock');
+  assert.notEqual(r.raw.sourceDeclaredTs, 12345, 'seq is NOT a timestamp');
   const o = normalizeSocialObservation(r.raw, { nowMs: NOW }).observation;
   assert.equal(o.normalizedText, '$foo listing rumor');
   assert.equal(o.providerEventSeq, 12345); assert.equal(o.relation, 'ORIGINAL');
+  assert.equal(o.sourceCreatedTs, Date.parse('2026-09-05T12:00:00.000Z'), 'a past declared clock is TRUSTED'); assert.equal(o.sourceClockStatus, 'TRUSTED');
+  assert.equal(o.providerEventTs, Date.parse(V2_COMMIT.payload.time)); assert.notEqual(o.sourceCreatedTs, o.providerEventTs, 'providerEventTs is never copied into sourceCreatedTs');
   const { event } = socialObservationToEvent(o);
   assert.equal(validateSocialEvent(event, V), null, 'the v2 fixture settles through the closed durable contract');
 });
@@ -153,7 +156,8 @@ test('V2-5. the current v2 delete maps a tombstone with providerEventSeq and UNK
   const del = { $type: 'message', payload: { $type: 'network.bsky.jetstream.subscribeEvents#commit', seq: 12346, did: 'did:plc:v2author', time: '2026-09-05T12:00:10.000Z', rev: '3l5ihl2v80', operation: 'delete', collection: 'app.bsky.feed.post', rkey: '3l5ihkeyv2' } };
   const r = jetstreamCommitToRaw(del);
   assert.equal(r.raw.editState, 'TOMBSTONED'); assert.equal(r.raw.providerEventSeq, 12346);
-  assert.equal(r.raw.sourceCreatedTs, null, 'the delete commit `time` is never the original creation');
+  assert.equal(r.raw.sourceDeclaredTs, null, 'the delete commit `time` is never the original creation');
+  assert.equal(r.raw.providerEventTs, Date.parse('2026-09-05T12:00:10.000Z'), 'but the provider event clock is preserved');
   assert.equal(r.raw.nativePostId, 'at://did:plc:v2author/app.bsky.feed.post/3l5ihkeyv2');
   assert.equal(r.raw.parentNativePostId, null); assert.equal(r.raw.nativeVersionId, null);
 });
@@ -162,7 +166,7 @@ test('V2-6. the current v2 repost maps an explicit REPOST with its parent and se
   const rp = { $type: 'message', payload: { $type: 'network.bsky.jetstream.subscribeEvents#commit', seq: 12347, did: 'did:plc:fan', time: '2026-09-05T12:00:11.000Z', rev: '3l5ihl2v81', operation: 'create', collection: 'app.bsky.feed.repost', rkey: '3l5ihrepost', cid: 'bafyrepost', record: { $type: 'app.bsky.feed.repost', createdAt: '2026-09-05T12:00:05.000Z', subject: { uri: 'at://did:plc:v2author/app.bsky.feed.post/3l5ihkeyv2', cid: 'bafyreiv2cid' } } } };
   const r = jetstreamCommitToRaw(rp);
   assert.equal(r.raw.relation, 'REPOST'); assert.equal(r.raw.parentNativePostId, 'at://did:plc:v2author/app.bsky.feed.post/3l5ihkeyv2');
-  assert.equal(r.raw.providerEventSeq, 12347); assert.equal(r.raw.sourceCreatedTs, Date.parse('2026-09-05T12:00:05.000Z'));
+  assert.equal(r.raw.providerEventSeq, 12347); assert.equal(r.raw.sourceDeclaredTs, Date.parse('2026-09-05T12:00:05.000Z'));
 });
 
 test('V2-7. identity / account / sync frames are skipped safely if ever presented to the mapper', () => {

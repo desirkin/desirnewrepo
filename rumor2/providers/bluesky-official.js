@@ -63,6 +63,9 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
   // CREATE/DELETE/RECREATE/DELETE distinct. Provider-supplied only — never
   // invented. (§9)
   const providerEventSeq = jetstreamCursorOf(message);
+  // SOURCE-CLOCK QUARANTINE SEAL (§7): payload.time is the provider EVENT clock —
+  // parsed RFC3339 or null; never fabricated, never the post's creation time
+  const providerEventTs = isStr(payload.time) && Number.isFinite(Date.parse(payload.time)) ? Date.parse(payload.time) : null;
   if (!isStr(did) || !isStr(collection) || !isStr(rkey) || !isStr(operation)) return { skip: true, reason: 'incomplete commit' };
   if (collection !== BLUESKY_OFFICIAL.postCollection && collection !== BLUESKY_OFFICIAL.repostCollection) return { skip: true, reason: `collection ${collection} not wanted` };
 
@@ -86,8 +89,8 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
         text: '', relation: 'UNKNOWN',
         parentNativePostId: null, editState: 'TOMBSTONED',
-        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null, providerEventSeq,
-        sourceCreatedTs: null,
+        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null, providerEventSeq, providerEventTs,
+        sourceDeclaredTs: null, // a delete carries no record.createdAt — UNKNOWN, never the commit time
         engagement: null, authorMeta: null,
       },
     };
@@ -108,8 +111,8 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
         text: '', relation: 'REPOST', parentNativePostId: subjUri,
         editState: operation === 'update' ? 'EDITED' : 'ORIGINAL',
-        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null, providerEventSeq,
-        sourceCreatedTs: Number.isFinite(created) ? created : null,
+        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null, providerEventSeq, providerEventTs,
+        sourceDeclaredTs: Number.isFinite(created) ? created : null, // client-declared; Serpent classifies it
         engagement: null, authorMeta: null,
       },
     };
@@ -139,8 +142,12 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
       threadId: isStr(replyRoot) ? replyRoot : nativePostId,
       nativeVersionId: isStr(cid) ? cid : null, // the record CID = this post's immutable version
       providerEventSeq,
+      providerEventTs,
       handle: null, // Jetstream commits carry the DID, not the handle; resolved elsewhere if needed
-      sourceCreatedTs: Number.isFinite(created) ? created : null,
+      // the SOURCE-DECLARED clock: client-supplied record.createdAt (a malformed
+      // value maps to null/UNKNOWN — the evidence is kept, never Date.now());
+      // normalization decides whether it is TRUSTED or FUTURE_QUARANTINED
+      sourceDeclaredTs: Number.isFinite(created) ? created : null,
       engagement: null, // Jetstream post commits carry no engagement counts
       authorMeta: null,
     },

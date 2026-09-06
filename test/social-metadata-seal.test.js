@@ -130,7 +130,7 @@ test('SEAL-TAMPER (§18/§25). rewriting any stored first-known diagnostic fails
 // ---- §7-§13 unknown / never-fabricated source-created clock -----------------
 test('SEAL-BSKY-DELETE-CLOCK (§9/§12). a Bluesky delete without a create clock is UNKNOWN and deterministic', () => {
   const delRaw = () => jetstreamCommitToRaw({ payload: { $type: 'x#commit', did: 'did:plc:z', seq: 1, time: iso(C), operation: 'delete', collection: 'app.bsky.feed.post', rkey: 'r1', cid: undefined, record: undefined } }).raw;
-  assert.equal(delRaw().sourceCreatedTs, null, 'the ear never fabricates the original creation clock for a delete');
+  assert.equal(delRaw().sourceDeclaredTs, null, 'the ear never fabricates the original creation clock for a delete');
   const d1 = normalizeSocialObservation(delRaw(), { nowMs: C + 1_000 }).observation;
   const d2 = normalizeSocialObservation(delRaw(), { nowMs: C + 9_999 }).observation;
   assert.equal(d1.socialSourceId, d2.socialSourceId, 'same stable post identity');
@@ -143,7 +143,7 @@ test('SEAL-BSKY-DELETE-CLOCK (§9/§12). a Bluesky delete without a create clock
 
 test('SEAL-FC-MISSING-CLOCK (§13). a Farcaster cast with a missing timestamp is UNKNOWN and deterministic', () => {
   const missRaw = () => neynarEventToRaw({ type: 'cast.created', data: { object: 'cast', hash: '0xmiss', author: { fid: 9, username: 'x' }, text: '$FOO' } }).raw;
-  assert.equal(missRaw().sourceCreatedTs, null, 'no Date.now fabrication for a missing source clock');
+  assert.equal(missRaw().sourceDeclaredTs, null, 'no Date.now fabrication for a missing source clock');
   const f1 = normalizeSocialObservation(missRaw(), { nowMs: C + 1_000 }).observation;
   const f2 = normalizeSocialObservation(missRaw(), { nowMs: C + 5_000 }).observation;
   assert.equal(f1.sourceCreatedTs, null);
@@ -151,12 +151,16 @@ test('SEAL-FC-MISSING-CLOCK (§13). a Farcaster cast with a missing timestamp is
   assert.notEqual(f1.retrievedTs, f2.retrievedTs);
 });
 
-test('SEAL-CLOCK-LAW (§10). a known future source clock still fails closed; unknown clock passes', () => {
+test('SEAL-CLOCK-LAW (§10 / SOURCE-CLOCK QUARANTINE). a future declared clock is QUARANTINED, not dropped; unknown clock passes', () => {
   const future = normalizeSocialObservation(castRaw({ timestamp: iso(NOW + 60_000) }), { nowMs: NOW });
-  assert.equal(future.reject, true, 'a known source clock cannot postdate retrieval');
-  const unknown = normalizeSocialObservation({ provider: 'BLUESKY_OFFICIAL', providerKind: 'SOCIAL_MICROBLOG', nativePostId: 'at://x/p/1', nativeAuthorId: 'did:x', text: 't' /* no sourceCreatedTs */ }, { nowMs: NOW });
+  assert.equal(future.reject, undefined, 'the evidence is retained');
+  assert.equal(future.observation.sourceClockStatus, 'FUTURE_QUARANTINED');
+  assert.equal(future.observation.sourceCreatedTs, null, 'a future declared clock never becomes the trusted source clock');
+  assert.equal(future.observation.sourceDeclaredTs, NOW + 60_000); assert.equal(future.observation.sourceClockSkewMs, 60_000);
+  assert.equal(future.observation.knownAtTs, NOW, 'knownAt is never backdated');
+  const unknown = normalizeSocialObservation({ provider: 'BLUESKY_OFFICIAL', providerKind: 'SOCIAL_MICROBLOG', nativePostId: 'at://x/p/1', nativeAuthorId: 'did:x', text: 't' /* no source clock */ }, { nowMs: NOW });
   assert.equal(unknown.reject, undefined, 'an absent source clock is accepted as UNKNOWN, not rejected');
-  assert.equal(unknown.observation.sourceCreatedTs, null);
+  assert.equal(unknown.observation.sourceCreatedTs, null); assert.equal(unknown.observation.sourceClockStatus, 'UNKNOWN');
 });
 
 // ---- §26 the durable event validator re-derives BOTH hashes -----------------

@@ -47,7 +47,13 @@ export function socialIntake({
   const seen = new Map(); // socialVersionId -> true (bounded, insertion-order LRU)
   const pending = new Map(); // providerCursor -> 'enqueued' | 'dropped' (non-terminal frames only)
   const cursor = { received: null, contiguous: null };
-  const stats = { received: 0, enqueued: 0, deduped: 0, durableDeduped: 0, filtered: 0, skipped: 0, rejected: 0, corrupt: 0, dropped: 0, settled: 0 };
+  const stats = {
+    received: 0, enqueued: 0, deduped: 0, durableDeduped: 0, filtered: 0, skipped: 0, rejected: 0, corrupt: 0, dropped: 0, settled: 0,
+    // SOURCE-CLOCK QUARANTINE SEAL (§25): observability counters over every
+    // normalized observation (before the universe filter) — provider/client
+    // clock quality during soaks; information only, never authority
+    sourceClockTrusted: 0, sourceClockFutureQuarantined: 0, sourceClockUnknown: 0,
+  };
 
   const remember = (id) => {
     seen.set(id, true);
@@ -78,6 +84,9 @@ export function socialIntake({
     const norm = normalizeSocialObservation(mapped.raw, { nowMs: now() });
     if (norm.reject) { stats.rejected += 1; return done('rejected', { reason: norm.reason }); }
     const o = norm.observation;
+    if (o.sourceClockStatus === 'TRUSTED') stats.sourceClockTrusted += 1;
+    else if (o.sourceClockStatus === 'FUTURE_QUARANTINED') stats.sourceClockFutureQuarantined += 1;
+    else stats.sourceClockUnknown += 1;
     // bounded universe filter — no silent all-network intake (§24)
     const fm = socialFilterMatches(filter, { text: o.text, nativeAuthorId: o.nativeAuthorId });
     if (!fm.match) { stats.filtered += 1; return done('filtered'); }

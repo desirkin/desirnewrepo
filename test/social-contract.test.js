@@ -84,10 +84,14 @@ test('SOC-PIT-1. knownAt equals retrieval, never the post creation; replay prese
   assert.ok(r.observation.knownAtTs > r.observation.sourceCreatedTs);
 });
 
-test('SOC-PIT-2. a future source clock fails closed', () => {
+test('SOC-PIT-2 (SOURCE-CLOCK QUARANTINE). a future source clock is quarantined from causal use — the evidence is kept, knownAt never backdated', () => {
   const r = normalizeSocialObservation(post({ sourceCreatedTs: Date.parse('2026-09-05T12:00:10Z') }), { nowMs: Date.parse('2026-09-05T12:00:00Z') });
-  assert.equal(r.reject, true);
-  assert.match(r.reason, /future clock/);
+  assert.equal(r.ok, true, 'a bad client clock never discards the post');
+  assert.equal(r.observation.sourceClockStatus, 'FUTURE_QUARANTINED');
+  assert.equal(r.observation.sourceCreatedTs, null, 'quarantined: no trusted source time');
+  assert.equal(r.observation.sourceDeclaredTs, Date.parse('2026-09-05T12:00:10Z'), 'the declared value is preserved as evidence');
+  assert.equal(r.observation.sourceClockSkewMs, 10_000);
+  assert.equal(r.observation.knownAtTs, Date.parse('2026-09-05T12:00:00Z'));
 });
 
 // ---- normalization rejects (closed shape, no blobs) ------------------------
