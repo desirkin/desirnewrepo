@@ -15,6 +15,13 @@
 //     => CONNECTION_LIMIT (stop boundedly), other non-200 => bounded reconnect;
 //   * pause() (backpressure) aborts the read and schedules nothing — the runtime
 //     resumes through the governor. No credential is stored beyond the closure.
+//   * CHUNK-ATOMIC STOP LAW (paid-wire seal): one reader.read() returns one
+//     network chunk; every complete newline-delimited item already present in
+//     that chunk is delivered (the runtime meters each one — X already sent it),
+//     a stop()/pause() requested from inside the chunk is only PENDING until the
+//     chunk's last complete line is processed, `onChunkEnd` then lets the
+//     governor finalize, and the transport is closed BEFORE any further
+//     reader.read(). A finalized stop never asks the wire for another chunk.
 import { X_OFFICIAL, assertXHost } from './providers/x-official.js';
 
 export const X_STREAM_DEFAULTS = Object.freeze({
@@ -35,6 +42,7 @@ export function startXStream({
   shouldConnect = () => ({ ok: true }),
   onLine = () => {}, // (obj, { receivedTs })
   onKeepalive = () => {},
+  onChunkEnd = () => {}, // ({ receivedTs, lines, keepalives, stopPending, pausePending }) — after the chunk's last complete line, before any next read
   onOpen = () => {},
   onClose = () => {},
   now = () => Date.now(),
@@ -55,6 +63,7 @@ export function startXStream({
     reconnects: 0, opens: 0, lastHttpStatus: null, lastPostTs: null, lastKeepaliveTs: null, lastReceiptTs: null,
     backfillMinutes: 0, linesDelivered: 0, keepalives: 0, oversizedLines: 0, badJson: 0, stalls: 0, tainted: false,
     lastCloseReason: null, refusedReason: null, connectionLimitHits: 0,
+    chunks: 0, reads: 0, inChunk: false, stopPending: null, pausePending: null, readsAfterStop: 0,
   };
   let controller = null;
   let stallTimer = null;
@@ -63,6 +72,17 @@ export function startXStream({
   const clearStall = () => { if (stallTimer) { clearTimeoutImpl(stallTimer); stallTimer = null; } };
   const armStall = () => { clearStall(); stallTimer = setTimeoutImpl(() => { if (!state.stopped && state.connected) { state.stalls += 1; log('x-stream: stall (no Post/keepalive for the stall window) — reconnecting'); abort('stall'); } }, stallMs); };
   const abort = (why) => { state.lastCloseReason = why; try { controller?.abort(); } catch { /* already aborted */ } };
+  // finalize a stop: from here on no reader.read() is ever issued again
+  const finalizeStop = (reason) => {
+    state.stopped = true; state.stopReason = state.stopReason ?? reason; state.stopPending = null; state.pausePending = null; clearStall();
+    if (reconnectTimer) { clearTimeoutImpl(reconnectTimer); reconnectTimer = null; }
+    abort(reason);
+  };
+  const finalizePause = (reason) => {
+    state.paused = true; state.pausePending = null;
+    if (reconnectTimer) { clearTimeoutImpl(reconnectTimer); reconnectTimer = null; }
+    abort(reason);
+  };
 
   function scheduleReconnect(why, delayOverride = null) {
     if (state.stopped || state.paused) return;
@@ -131,9 +151,17 @@ export function startXStream({
     if (!reader) { closeWith('no-body'); return; }
     try {
       for (;;) {
+        // PRE-READ STOP CHECK: a finalized stop/pause never asks the wire for another chunk
+        if (state.stopped || state.paused) break;
+        state.reads += 1;
         const { value, done } = await reader.read();
         if (done) break;
-        if (state.stopped || state.paused) break;
+        // a chunk that still arrived on a read issued BEFORE a stop/pause finalized is
+        // real delivery: it is processed (and metered by the runtime) like any other,
+        // counted here, and the loop then exits at its end without another read
+        if (state.stopped || state.paused) state.readsAfterStop += 1;
+        state.chunks += 1;
+        state.inChunk = true;
         buffer += decoder.decode(value, { stream: true });
         if (buffer.length > maxLineBytes * 2) {
           // a line longer than the bound: drop up to the next newline, taint
@@ -142,29 +170,40 @@ export function startXStream({
           overflow = true;
           state.oversizedLines += 1;
           state.tainted = true;
+          state.inChunk = false;
           abort('tainted'); // the dropped line is OWED: close so backfill redelivers it
           break;
         }
-        let idx;
+        // every COMPLETE line already present in this received chunk is delivered —
+        // a stop/pause requested by a callback stays PENDING until the chunk ends
+        let idx; let lines = 0; let keepalives = 0;
         while ((idx = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, idx).replace(/\r$/, '');
           buffer = buffer.slice(idx + 1);
           const receivedTs = now();
           state.lastReceiptTs = receivedTs;
           armStall();
-          if (line.trim().length === 0) { state.keepalives += 1; state.lastKeepaliveTs = receivedTs; onKeepalive({ receivedTs }); continue; } // keepalive: zero Post reads
+          if (line.trim().length === 0) { state.keepalives += 1; keepalives += 1; state.lastKeepaliveTs = receivedTs; onKeepalive({ receivedTs }); continue; } // keepalive: zero Post reads
           if (line.length > maxLineBytes) { state.oversizedLines += 1; state.tainted = true; continue; }
           let obj;
           try { obj = JSON.parse(line); } catch { state.badJson += 1; state.tainted = true; continue; }
-          state.linesDelivered += 1;
+          state.linesDelivered += 1; lines += 1;
           state.lastPostTs = receivedTs;
           onLine(obj, { receivedTs });
         }
+        state.inChunk = false;
+        // CHUNK END: the governor finalizes (meter truth, gap boundary) before any transport decision
+        onChunkEnd({ receivedTs: state.lastReceiptTs, lines, keepalives, stopPending: state.stopPending, pausePending: state.pausePending });
+        if (state.stopPending !== null) { finalizeStop(state.stopPending); break; }
+        if (state.pausePending !== null) { finalizePause(state.pausePending); break; }
+        if (state.stopped || state.paused) break;
         if (state.tainted) { abort('tainted'); break; } // a lost line is owed: reconnect with backfill redelivers it
       }
     } catch (err) {
       // abort / network end
     } finally {
+      state.inChunk = false;
+      if (state.stopPending !== null) finalizeStop(state.stopPending);
       try { reader.releaseLock?.(); } catch { /* noop */ }
     }
     const why = state.lastCloseReason ?? (overflow ? 'tainted' : 'ended');
@@ -175,13 +214,10 @@ export function startXStream({
   return {
     start() { connect(); return this; },
     // BACKPRESSURE (§37): abort the read; nothing is scheduled. resume() re-asks the governor.
-    pause(reason = 'paused') { state.paused = true; abort(reason); if (reconnectTimer) { clearTimeoutImpl(reconnectTimer); reconnectTimer = null; } },
-    resume() { if (state.stopped) return; state.paused = false; connect(); },
-    stop(reason = 'stopped') {
-      state.stopped = true; state.stopReason = state.stopReason ?? reason; clearStall();
-      if (reconnectTimer) { clearTimeoutImpl(reconnectTimer); reconnectTimer = null; }
-      abort(reason);
-    },
+    // Inside a chunk both are PENDING (chunk-atomic law); outside they apply at once.
+    pause(reason = 'paused') { if (state.stopped || state.paused) return; if (state.inChunk) { state.pausePending = state.pausePending ?? reason; return; } finalizePause(reason); },
+    resume() { if (state.stopped) return; state.paused = false; state.pausePending = null; connect(); },
+    stop(reason = 'stopped') { if (state.stopped) return; if (state.inChunk) { state.stopPending = state.stopPending ?? reason; return; } finalizeStop(reason); },
     isConnected: () => state.connected,
     status() {
       return {
@@ -190,6 +226,7 @@ export function startXStream({
         lastHttpStatus: state.lastHttpStatus, lastPostTs: state.lastPostTs, lastKeepaliveTs: state.lastKeepaliveTs, lastReceiptTs: state.lastReceiptTs,
         backfillMinutes: state.backfillMinutes, linesDelivered: state.linesDelivered, keepalives: state.keepalives,
         oversizedLines: state.oversizedLines, badJson: state.badJson, stalls: state.stalls, tainted: state.tainted, lastCloseReason: state.lastCloseReason,
+        chunks: state.chunks, reads: state.reads, readsAfterStop: state.readsAfterStop, inChunk: state.inChunk, stopPending: state.stopPending, pausePending: state.pausePending,
       };
     },
   };

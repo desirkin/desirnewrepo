@@ -20,6 +20,25 @@
 // HEADROOM: the stream stops BEFORE the remaining allowance reaches zero,
 // reserving X_IN_FLIGHT_POST_HEADROOM Posts for what the server may already have
 // buffered. The reserve is pinned in code and shown in status — never hidden.
+//
+// PAID-WIRE SAFETY SEAL:
+//   * SMOKE TARGET vs MAX: RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS is the
+//     delivered count at which a controlled smoke shutdown begins;
+//     RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS is the operator's OUTER envelope
+//     INCLUDING the in-flight reserve. TARGET + HEADROOM <= MAX is required; one
+//     without the other is SMOKE_BUDGET_INCOMPLETE; too small is
+//     SMOKE_BUDGET_TOO_SMALL. An entered value is never reinterpreted.
+//   * CHUNK-ATOMIC STOP: a budget stop decided inside a received network chunk is
+//     STOP_PENDING until that chunk's last complete line is processed — every
+//     Post X already delivered is metered and offered to intake — then the gap
+//     starts at the chunk's last receipt and the transport closes before any
+//     further read. A reserve overrun in that final chunk is recorded exactly
+//     (SMOKE_HEADROOM_OVERRUN), never clamped, and latches: no automatic paid
+//     reconnect — a fresh operator-authorized runtime is required.
+//   * UNOWNED RULES: a canonical {id,value,tag} snapshot of every non-Serpent
+//     rule is taken before mutation and required deep-equal after; a change is
+//     UNOWNED_RULESET_CHANGED_DURING_RECONCILE => no paid stream, never repaired.
+import { createHash } from 'node:crypto';
 import { buildSocialFilter, canonicalIngressTags } from './social.js';
 import { socialIntake } from './social-stream.js';
 import {
@@ -36,7 +55,30 @@ export const X_IN_FLIGHT_POST_HEADROOM = 25; // Posts reserved for server-side b
 export const X_SAFE_GAP_MS = 4 * 60_000; // unexplained gap <= 4 min => backfill_minutes=5
 export const X_BACKFILL_MINUTES = 5;
 export const X_USAGE_MAX_AGE_MS = 6 * 3_600_000; // a server usage snapshot older than this is stale => no paid stream
-export const X_RUNTIME_STATES = Object.freeze(['DARK', 'HYDRATED', 'PREFLIGHT', 'ACTIVE', 'STANDBY', 'BUDGET_STOPPED', 'WITHHELD_GAP', 'WITHHELD']);
+export const X_RUNTIME_STATES = Object.freeze(['DARK', 'HYDRATED', 'PREFLIGHT', 'ACTIVE', 'STANDBY', 'BUDGET_STOPPED', 'SMOKE_COMPLETE', 'SMOKE_HEADROOM_OVERRUN', 'WITHHELD_GAP', 'WITHHELD']);
+export const X_SMOKE_STOP_REASONS = Object.freeze(['SMOKE_TARGET_REACHED', 'SMOKE_HEADROOM_OVERRUN', 'BUDGET_SMOKE_MAX']);
+
+// Canonical closed snapshot of the rules Serpent does NOT own: { id, value, tag }
+// sorted by id, then value, then tag. Deep equality — never count equality —
+// is what proves an external rule survived reconciliation unchanged.
+export function canonicalUnownedRules(rules) {
+  const str = (v) => (typeof v === 'string' ? v : null);
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  return (Array.isArray(rules) ? rules : [])
+    .map((r) => ({ id: str(r?.id), value: str(r?.value), tag: str(r?.tag) }))
+    .sort((a, b) => cmp(String(a.id), String(b.id)) || cmp(String(a.value), String(b.value)) || cmp(String(a.tag), String(b.tag)));
+}
+export const unownedSnapshotHash = (snapshot) => createHash('sha1').update(JSON.stringify(snapshot)).digest('hex');
+
+// The smoke envelope arithmetic, closed: both or neither; TARGET + HEADROOM <= MAX.
+export function xSmokeLaw({ liveSmokeTargetPostReads: target, liveSmokeMaxPostReads: max } = {}, headroom = X_IN_FLIGHT_POST_HEADROOM) {
+  const has = (v) => v !== null && v !== undefined;
+  if (!has(target) && !has(max)) return { ok: true, configured: false, target: null, max: null, headroom, minMaxForTarget: null };
+  if (!has(target) || !has(max)) return { ok: false, configured: true, reason: 'SMOKE_BUDGET_INCOMPLETE', detail: 'RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS and RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS are required together', target: has(target) ? target : null, max: has(max) ? max : null, headroom };
+  if (!posInt(target) || !posInt(max)) return { ok: false, configured: true, reason: 'BUDGET_INVALID', detail: 'smoke target/max must be positive integers', target, max, headroom };
+  if (target + headroom > max) return { ok: false, configured: true, reason: 'SMOKE_BUDGET_TOO_SMALL', detail: `smoke target ${target} + in-flight headroom ${headroom} = ${target + headroom} exceeds smoke max ${max}; raise MAX to at least ${target + headroom} or lower TARGET`, target, max, headroom, minMaxForTarget: target + headroom };
+  return { ok: true, configured: true, target, max, headroom, minMaxForTarget: target + headroom };
+}
 
 const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 const utcMonth = (ms) => new Date(ms).toISOString().slice(0, 7);
@@ -54,6 +96,7 @@ export function xConfigFromEnv(env = process.env) {
     maxMonthlyPostReads: parseEnvInt(env.RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS),
     maxEstimatedDailyUsd: parseEnvNum(env.RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD),
     maxSessionPostReads: parseEnvInt(env.RUMOR2_SOCIAL_X_MAX_SESSION_POST_READS),
+    liveSmokeTargetPostReads: parseEnvInt(env.RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS),
     liveSmokeMaxPostReads: parseEnvInt(env.RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS),
     priorityAccounts: csv(env.RUMOR2_SOCIAL_X_PRIORITY_ACCOUNTS),
     propagationFocus: csv(env.RUMOR2_SOCIAL_X_PROPAGATION_FOCUS),
@@ -62,7 +105,7 @@ export function xConfigFromEnv(env = process.env) {
 
 // The closed gate decision: every element must hold; the reason names the
 // first missing one. A bearer VALUE is never returned or logged.
-export function xGate(config, { pricing = X_OFFICIAL.pricing } = {}) {
+export function xGate(config, { pricing = X_OFFICIAL.pricing, headroom = X_IN_FLIGHT_POST_HEADROOM } = {}) {
   if (!config?.enabled) return { ok: false, reason: 'DISABLED', detail: 'RUMOR2_SOCIAL_X_ENABLED is not true' };
   if (!config.bearer) return { ok: false, reason: 'CREDENTIAL_MISSING', detail: `${X_OFFICIAL.credentialEnv} not configured` };
   const { maxDailyPostReads: d, maxMonthlyPostReads: m, maxEstimatedDailyUsd: usd } = config;
@@ -71,7 +114,8 @@ export function xGate(config, { pricing = X_OFFICIAL.pricing } = {}) {
   if (m > pricing.monthlyPostReadCap) return { ok: false, reason: 'BUDGET_INVALID', detail: `monthly cap ${m} exceeds the X self-serve cap ${pricing.monthlyPostReadCap}` };
   if (d > m) return { ok: false, reason: 'BUDGET_INVALID', detail: 'daily cap exceeds monthly cap' };
   if (config.maxSessionPostReads !== null && config.maxSessionPostReads !== undefined && !posInt(config.maxSessionPostReads)) return { ok: false, reason: 'BUDGET_INVALID', detail: 'session cap invalid' };
-  if (config.liveSmokeMaxPostReads !== null && config.liveSmokeMaxPostReads !== undefined && !posInt(config.liveSmokeMaxPostReads)) return { ok: false, reason: 'BUDGET_INVALID', detail: 'smoke cap invalid' };
+  const smoke = xSmokeLaw(config, headroom);
+  if (!smoke.ok) return { ok: false, reason: smoke.reason, detail: smoke.detail };
   return { ok: true, reason: null, detail: null };
 }
 
@@ -105,7 +149,7 @@ export function createXRuntime({
   const meter = { period: null, delivered: 0, monthPeriod: null, monthDelivered: 0, durablePeriod: null, durableDelivered: 0, durableMonthPeriod: null, durableMonthDelivered: 0, session: 0, byLane: {} };
   let serverUsage = null; // latest CLOSED parsed snapshot
   let credits = { capability: 'NOT_PROBED', value: null, status: null };
-  const rules = { owned: [], unownedCount: 0, desiredHash: null, desiredTags: [], reconciledAt: null, dryRunOk: null, capacity: null };
+  const rules = { owned: [], unownedCount: 0, unownedSnapshotHash: null, unownedChanged: false, lastFailure: null, desiredHash: null, desiredTags: [], reconciledAt: null, dryRunOk: null, capacity: null };
   let pendingActivation = null; // { ruleSetHash, ruleTags, coverageEpoch, activatedKnownAtTs, afterGap? }
   let pendingGap = null; // { gapStartTs, reason, coverageEpoch, ruleSetHash }
   let lastReceiptTs = null;
@@ -113,6 +157,10 @@ export function createXRuntime({
   let preflightOk = false;
   let backfillNext = 0; // the backfill window the NEXT (re)connect presents — set by the gap law
   let owedSince = null; // receipt time of the earliest queue-full DROPPED Post: progress may never pass it until a backfill covers it
+  let stopPending = null; // { reason, detail, receivedTs } — a budget stop decided inside a chunk, finalized at chunk end
+  // the smoke latch: once the target is reached (or the reserve overruns) this
+  // runtime never reconnects; a fresh operator-authorized runtime is required
+  const smoke = { latched: false, status: null, reason: null, overrunPosts: 0, deliveredAtStop: null, stoppedAtTs: null };
   const stats = { settles: 0, appended: 0, meterEvents: 0, progressEvents: 0, gapEvents: 0, rulesetEvents: 0, durableDuplicates: 0, invalid: 0, appendFailures: 0, deliveredPosts: 0, keepalives: 0 };
 
   const api = async (url, { method = 'GET', body = null } = {}) => {
@@ -141,8 +189,9 @@ export function createXRuntime({
   // ---- budget decision: the STRICTEST remaining allowance --------------------
   function allowance(ts = now()) {
     rollPeriods(ts);
-    const g = xGate(config, { pricing });
+    const g = xGate(config, { pricing, headroom });
     if (!g.ok) return { ok: false, reason: g.reason, detail: g.detail, remaining: 0 };
+    if (smoke.latched) return { ok: false, reason: smoke.reason, detail: `smoke ${smoke.status}: no automatic paid reconnect; a fresh operator-authorized start is required`, remaining: 0 };
     if (!serverUsage) return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'no verified server usage snapshot', remaining: 0 };
     if (ts - serverUsage.observedTs > usageMaxAgeMs) return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'server usage snapshot is stale', remaining: 0 };
     if (credits.value && credits.value.totalBalance <= 0) return { ok: false, reason: 'NO_CREDITS', detail: 'credit balance is zero or negative', remaining: 0 };
@@ -155,7 +204,13 @@ export function createXRuntime({
       ['BUDGET_MONTHLY', serverUsage.projectCap - observedMonth], // COST-7: the platform cap itself
     ];
     if (posInt(config.maxSessionPostReads)) candidates.push(['BUDGET_SESSION', config.maxSessionPostReads - meter.session]);
-    if (posInt(config.liveSmokeMaxPostReads)) candidates.push(['BUDGET_SESSION', config.liveSmokeMaxPostReads - meter.session]);
+    const sl = xSmokeLaw(config, headroom);
+    if (sl.configured) {
+      // TARGET is the controlled-shutdown trigger itself (not headroom-subtracted);
+      // MAX is the outer envelope and joins the strictest-boundary law below
+      if (meter.session >= sl.target) return { ok: false, reason: 'SMOKE_TARGET_REACHED', detail: `smoke target ${sl.target} reached (${meter.session} delivered this session; outer max ${sl.max})`, remaining: sl.max - meter.session, limiting: 'SMOKE_TARGET_REACHED' };
+      candidates.push(['BUDGET_SMOKE_MAX', sl.max - meter.session]);
+    }
     let limiting = null; let remaining = Infinity;
     for (const [reason, left] of candidates) if (left < remaining) { remaining = left; limiting = reason; }
     const usable = remaining - headroom; // COST-6: the reserve is subtracted, never hidden
@@ -167,7 +222,7 @@ export function createXRuntime({
   async function preflight() {
     preflightOk = false;
     state = 'PREFLIGHT';
-    const g = xGate(config, { pricing });
+    const g = xGate(config, { pricing, headroom });
     if (!g.ok) { state = 'DARK'; return { ok: false, reason: g.reason, detail: g.detail }; }
     // 1. server usage — mandatory, closed parse, fresh
     try {
@@ -198,9 +253,13 @@ export function createXRuntime({
     if (verr) { lastError = verr; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: verr }; }
     const cur = await api(xRulesUrl());
     if (cur.status !== 200) { lastError = `rules GET http ${cur.status}`; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
-    const current = Array.isArray(cur.json?.data) ? cur.json.data.filter((r) => r && typeof r.id === 'string' && typeof r.value === 'string') : [];
+    const rawCurrent = Array.isArray(cur.json?.data) ? cur.json.data.filter((r) => r && typeof r === 'object') : [];
+    const current = rawCurrent.filter((r) => typeof r.id === 'string' && typeof r.value === 'string');
     const owned = current.filter((r) => isSerpentTag(r.tag));
-    const unowned = current.filter((r) => !isSerpentTag(r.tag));
+    // EVERY non-Serpent rule (well-formed or not) belongs to someone else: snapshot it canonically
+    const unowned = rawCurrent.filter((r) => !isSerpentTag(r.tag));
+    const beforeUnownedSnapshot = canonicalUnownedRules(unowned);
+    rules.unownedChanged = false; rules.lastFailure = null;
     // capacity: prefer the counts endpoint's cap when present, else the pinned platform limit
     let cap = provider.limits.rulesPerProject;
     try { const c = await api(xRulesCountsUrl()); const n = c.status === 200 ? Number(c.json?.data?.cap_per_project) : NaN; if (Number.isSafeInteger(n) && n > 0) cap = n; } catch { /* optional */ }
@@ -230,12 +289,22 @@ export function createXRuntime({
     // 8. verify the final Serpent set exactly (and that unowned rules survived)
     const after = await api(xRulesUrl());
     if (after.status !== 200) { lastError = `rules verify http ${after.status}`; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
-    const finalRules = Array.isArray(after.json?.data) ? after.json.data : [];
-    const finalOwned = finalRules.filter((r) => isSerpentTag(r?.tag));
+    const finalRules = Array.isArray(after.json?.data) ? after.json.data.filter((r) => r && typeof r === 'object') : [];
+    const finalOwned = finalRules.filter((r) => isSerpentTag(r?.tag) && typeof r.id === 'string' && typeof r.value === 'string');
     const finalUnowned = finalRules.filter((r) => !isSerpentTag(r?.tag));
     const finalKeys = new Set(finalOwned.map(key));
-    if (finalKeys.size !== want.size || [...want.keys()].some((k) => !finalKeys.has(k))) { lastError = 'final Serpent rule set does not match the desired manifest'; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
-    if (finalUnowned.length !== unowned.length) { lastError = 'unowned rule count changed during reconciliation'; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
+    if (finalKeys.size !== want.size || [...want.keys()].some((k) => !finalKeys.has(k))) { lastError = 'final Serpent rule set does not match the desired manifest'; rules.lastFailure = 'OWNED_RULESET_MISMATCH'; return { ok: false, reason: 'RULE_RECONCILE_FAILED', code: 'OWNED_RULESET_MISMATCH', detail: lastError }; }
+    // UNOWNED-RULE IMMUTABILITY: canonical deep equality, never count equality. A
+    // difference means someone else changed the project's rules while Serpent was
+    // reconciling — not corruption, but not a verified surface either: no paid
+    // stream, and the external rule is never deleted, restored, or "repaired".
+    const afterUnownedSnapshot = canonicalUnownedRules(finalUnowned);
+    if (JSON.stringify(afterUnownedSnapshot) !== JSON.stringify(beforeUnownedSnapshot)) {
+      rules.unownedChanged = true; rules.lastFailure = 'UNOWNED_RULESET_CHANGED_DURING_RECONCILE';
+      lastError = `UNOWNED_RULESET_CHANGED_DURING_RECONCILE: ${beforeUnownedSnapshot.length} unowned rule(s) before, ${afterUnownedSnapshot.length} after, canonical snapshot differs (hash ${unownedSnapshotHash(beforeUnownedSnapshot).slice(0, 12)} -> ${unownedSnapshotHash(afterUnownedSnapshot).slice(0, 12)}); a later preflight retries from the actual project state`;
+      return { ok: false, reason: 'RULE_RECONCILE_FAILED', code: 'UNOWNED_RULESET_CHANGED_DURING_RECONCILE', detail: lastError };
+    }
+    rules.unownedSnapshotHash = unownedSnapshotHash(afterUnownedSnapshot);
     rules.owned = finalOwned.map((r) => ({ id: r.id, value: r.value, tag: r.tag }));
     rules.desiredHash = manifest.hash; rules.desiredTags = manifest.rules.map((r) => r.tag).sort(); rules.reconciledAt = now();
     // a NEW rule set starts a NEW coverage epoch, activated NOW (never backdated)
@@ -289,11 +358,35 @@ export function createXRuntime({
     return (x.progressThroughTs !== null || owedSince !== null) ? X_BACKFILL_MINUTES : 0;
   }
 
+  // CHUNK END: finalize a pending budget stop. The gap begins at the last fully
+  // processed line of the received chunk (never before evidence Serpent received);
+  // a smoke reserve overrun is recorded exactly and latches this runtime.
+  function finalizeBudgetStop(s, chunkEndTs) {
+    const sl = xSmokeLaw(config, headroom);
+    let reason = stopPending.reason;
+    if (sl.configured && meter.session > sl.max) {
+      smoke.overrunPosts = meter.session - sl.max; // never clamped, never discarded
+      reason = 'SMOKE_HEADROOM_OVERRUN';
+      smoke.latched = true; smoke.status = 'SMOKE_HEADROOM_OVERRUN'; smoke.reason = reason;
+      log(`x-runtime: SMOKE_HEADROOM_OVERRUN — the final received chunk delivered ${meter.session} Posts against smoke max ${sl.max} (overrun ${smoke.overrunPosts}); latched, no reconnect`);
+    } else if (X_SMOKE_STOP_REASONS.includes(reason)) {
+      smoke.latched = true; smoke.status = 'SMOKE_COMPLETE'; smoke.reason = reason;
+    }
+    if (sl.configured) { smoke.deliveredAtStop = meter.session; smoke.stoppedAtTs = chunkEndTs; }
+    recordGap(reason, chunkEndTs);
+    if (stream === s) stream = null;
+    state = smoke.latched ? smoke.status : 'BUDGET_STOPPED';
+    lastStopReason = reason;
+    stopPending = null;
+    log(`x-runtime: ${reason}; stream stopped at chunk end (headroom ${headroom})`);
+  }
+
   async function start() {
     if (!hydrated) return { ok: false, reason: 'NOT_HYDRATED' };
     if (stream && !stream.status().paused) return { ok: true, already: true };
     if (pendingGap || (pendingActivation && pendingActivation.afterGap)) return { ok: false, reason: 'WITHHELD_GAP', detail: 'the coverage gap must settle durably before a new coverage epoch opens' };
-    const g = xGate(config, { pricing });
+    const g = xGate(config, { pricing, headroom });
+    if (smoke.latched) return { ok: false, reason: smoke.reason, detail: `smoke ${smoke.status}: no automatic paid reconnect; a fresh operator-authorized start is required` };
     if (!g.ok) { state = 'DARK'; lastStopReason = g.reason; return { ok: false, reason: g.reason, detail: g.detail }; }
     if (stream && stream.status().paused) {
       // resume after backpressure: the earlier queued work has settled; replay
@@ -342,7 +435,7 @@ export function createXRuntime({
         // BILL AT THE WIRE: a delivered Post is metered BEFORE any Serpent filter
         const isPost = obj && typeof obj === 'object' && obj.data && typeof obj.data === 'object' && typeof obj.data.id === 'string';
         if (isPost) meterPost(receivedTs, canonicalIngressTags((obj.matching_rules ?? []).map((m) => m?.tag)));
-        const r = intake.offer(obj);
+        const r = intake.offer(obj, { receivedTs }); // evidence knownAt == transport receipt == watermark clock
         if (r.outcome === 'dropped') {
           if (owedSince === null || receivedTs < owedSince) owedSince = receivedTs; // progress may never pass the owed Post
           s.pause('backpressure'); state = 'STANDBY'; lastStopReason = 'BACKPRESSURE';
@@ -350,7 +443,18 @@ export function createXRuntime({
           return;
         }
         const al = allowance(receivedTs);
-        if (!al.ok) { recordGap(al.reason, receivedTs); s.stop(al.reason); stream = null; state = 'BUDGET_STOPPED'; lastStopReason = al.reason; log(`x-runtime: ${al.reason}; stream stopped with headroom ${headroom} (${al.detail})`); }
+        if (!al.ok && stopPending === null) {
+          // STOP_PENDING (chunk-atomic law): the transport finishes the already-received
+          // chunk — every later Post in it is still metered above — then onChunkEnd
+          // finalizes the gap at the chunk's last receipt and closes before any next read
+          stopPending = { reason: al.reason, detail: al.detail, receivedTs };
+          s.stop(al.reason);
+          log(`x-runtime: ${al.reason}; stop pending until the received chunk ends (headroom ${headroom}; ${al.detail})`);
+        }
+      },
+      onChunkEnd: ({ receivedTs }) => {
+        if (stopPending === null) return;
+        finalizeBudgetStop(s, receivedTs ?? lastReceiptTs ?? now());
       },
       onClose: ({ reason }) => { if (reason === 'AUTH_REJECTED' || reason === 'CONNECTION_LIMIT') { recordGap(reason); if (stream === s) stream = null; state = 'WITHHELD'; lastStopReason = reason; } },
       ...streamOptions,
@@ -367,6 +471,7 @@ export function createXRuntime({
     if (stream) { stream.stop(reason); stream = null; }
     if (intake) { intake.clear(); intake = null; }
     pendingBatch = null;
+    stopPending = null;
     owedSince = null; // durable progress already stops before the owed Post; a fresh start replays from it
     if (state === 'ACTIVE') state = 'STANDBY';
     lastStopReason = reason;
@@ -462,28 +567,38 @@ export function createXRuntime({
     if (!intake) return null;
     lastReceiptTs = receivedTs;
     if (obj && typeof obj === 'object' && obj.data && typeof obj.data.id === 'string') meterPost(receivedTs, canonicalIngressTags((obj.matching_rules ?? []).map((m) => m?.tag)));
-    return intake.offer(obj);
+    return intake.offer(obj, { receivedTs });
   }
 
   return {
     provider, hydrate, start, stop, settle, preflight, allowance,
     isActive: () => state === 'ACTIVE' && stream !== null,
     isDurable: (id) => durableIds.has(id),
-    gate: () => xGate(config, { pricing }),
+    gate: () => xGate(config, { pricing, headroom }),
+    smokeLaw: () => xSmokeLaw(config, headroom),
     _intake: () => intake, _stream: () => stream, _feedLine,
     status() {
-      const g = xGate(config, { pricing });
+      const g = xGate(config, { pricing, headroom });
       const al = hydrated && serverUsage ? allowance() : null;
+      const sl = xSmokeLaw(config, headroom);
       return {
         provider: provider.id, accessState: 'AVAILABLE_REQUIRES_CREDENTIAL', enabled: !!config.enabled, credentialPresent: !!config.bearer,
         gate: g.ok ? 'OPEN' : g.reason, gateDetail: g.detail, state, hydrated, authority: 'NONE',
         ruleSetHash: x.ruleSetHash, coverageEpoch: x.coverageEpoch, ownedRuleCount: rules.owned.length, unownedRuleCount: rules.unownedCount, ruleCapacity: rules.capacity, dryRunOk: rules.dryRunOk,
+        rules: { unownedSnapshotHash: rules.unownedSnapshotHash, unownedChanged: rules.unownedChanged, lastFailure: rules.lastFailure },
+        smoke: {
+          configured: sl.configured, ok: sl.ok, reason: sl.ok ? null : sl.reason, targetPostReads: sl.target ?? null, maxPostReads: sl.max ?? null, headroomPosts: headroom,
+          minMaxForTarget: sl.minMaxForTarget ?? null, sessionPostReads: meter.session, status: smoke.status, latched: smoke.latched, overrunPosts: smoke.overrunPosts,
+          deliveredAtStop: smoke.deliveredAtStop, stoppedAtTs: smoke.stoppedAtTs, stopPending: stopPending ? { reason: stopPending.reason } : null,
+          nominalUsdAtMax: sl.max ? estimatedUsd(sl.max) : null, // pricing census value — the usage preflight, not this number, is authoritative
+        },
         pendingActivation: pendingActivation ? { ruleSetHash: pendingActivation.ruleSetHash, coverageEpoch: pendingActivation.coverageEpoch } : null,
         stream: stream ? stream.status() : null, lastReceiptTs,
         progressThroughTs: x.progressThroughTs, lastGap: x.lastGap, pendingGap: pendingGap ? { reason: pendingGap.reason, gapStartTs: pendingGap.gapStartTs } : null, lastStopReason,
         meter: { period: meter.period, deliveredPostReads: meter.delivered, monthPeriod: meter.monthPeriod, monthDeliveredPostReads: meter.monthDelivered, sessionPostReads: meter.session, durableDeliveredPostReads: meter.durableDelivered, durableMonthDeliveredPostReads: meter.durableMonthDelivered, byLane: { ...meter.byLane } },
         budget: {
-          maxDailyPostReads: config.maxDailyPostReads ?? null, maxMonthlyPostReads: config.maxMonthlyPostReads ?? null, maxEstimatedDailyUsd: config.maxEstimatedDailyUsd ?? null, maxSessionPostReads: config.maxSessionPostReads ?? null, liveSmokeMaxPostReads: config.liveSmokeMaxPostReads ?? null,
+          maxDailyPostReads: config.maxDailyPostReads ?? null, maxMonthlyPostReads: config.maxMonthlyPostReads ?? null, maxEstimatedDailyUsd: config.maxEstimatedDailyUsd ?? null, maxSessionPostReads: config.maxSessionPostReads ?? null,
+          liveSmokeTargetPostReads: config.liveSmokeTargetPostReads ?? null, liveSmokeMaxPostReads: config.liveSmokeMaxPostReads ?? null,
           headroomPosts: headroom,
           dailyRemainingLocal: posInt(config.maxDailyPostReads) ? Math.max(0, config.maxDailyPostReads - meter.delivered) : null,
           monthlyRemainingLocal: posInt(config.maxMonthlyPostReads) ? Math.max(0, config.maxMonthlyPostReads - meter.monthDelivered) : null,

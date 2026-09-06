@@ -379,7 +379,8 @@ five claim-capable ears; it is classifier-null.
 **Gates — default cost zero (§8).** `RUMOR2_SOCIAL_X_ENABLED` (false), `X_BEARER_TOKEN`,
 `RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS`, `RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS` (≤ 3M),
 `RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD`; optional `…_MAX_SESSION_POST_READS`,
-`…_LIVE_SMOKE_MAX_POST_READS`, `…_PRIORITY_ACCOUNTS`, `…_PROPAGATION_FOCUS`. Missing bearer ⇒
+`…_LIVE_SMOKE_TARGET_POST_READS` + `…_LIVE_SMOKE_MAX_POST_READS` (a pair — see §5D),
+`…_PRIORITY_ACCOUNTS`, `…_PROPAGATION_FOCUS`. Missing bearer ⇒
 CREDENTIAL_MISSING; missing/zero/negative/absurd budget ⇒ BUDGET_NOT_CONFIGURED / BUDGET_INVALID.
 No default paid budget exists; `RUMOR2_SOCIAL_X_ENABLED=true` alone spends nothing.
 
@@ -438,6 +439,99 @@ under the same writer fence, epoch, and journal; restore hydrates both from the 
 set/epoch, stream, progress, gaps, meter, budget (remaining reads/USD, headroom), server usage,
 credits, reads by lane. Zero authority is unchanged: no claim, proposition, Attention, HYPED,
 eligibility, score, size, order, execution, or model call.
+
+---
+
+## 5D. PAID-WIRE SAFETY SEAL — smoke envelope, chunk-atomic stop, unowned-rule immutability
+
+Three bounded defects were audited in the SOCIAL-2B tree (`fdff69a`) and sealed before an
+operator is told to run the first paid smoke. Nothing about the pump doctrine, Bluesky, or
+the frozen RUMOR-2 core changed.
+
+**RED #1 — the documented smoke could not start.** The allowance law subtracts the pinned
+in-flight reserve (`X_IN_FLIGHT_POST_HEADROOM = 25`) from EVERY limiting cap, including the
+smoke cap. A `RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS=20` smoke therefore computed
+`remaining 20 − headroom 25 = −5` and was refused (`BUDGET_SESSION`) before any connection.
+The reserve is correct and stays: a stop request cannot un-send Posts the server already
+buffered. The smoke budget now distinguishes TARGET from hard authorization:
+
+| variable | meaning |
+|---|---|
+| `RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS` | the conservative delivered-Post count at which Serpent begins a controlled smoke shutdown |
+| `RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS` | the operator's OUTER authorization envelope for the smoke, INCLUDING the in-flight reserve |
+
+Law (`xSmokeLaw`): `TARGET > 0`, `MAX > 0`, `TARGET + X_IN_FLIGHT_POST_HEADROOM ≤ MAX`.
+One variable without the other ⇒ `SMOKE_BUDGET_INCOMPLETE`; `TARGET + headroom > MAX` ⇒
+`SMOKE_BUDGET_TOO_SMALL` (the detail names the minimum MAX). Both fail closed in the gate,
+before the usage preflight, before any request. An operator-entered value is never
+reinterpreted (20 is never silently 45); `status.socialX.smoke` shows target, max, headroom,
+`minMaxForTarget`, session reads, and the nominal USD at MAX. TARGET is the stop trigger
+itself (`SMOKE_TARGET_REACHED`, not headroom-subtracted); MAX joins the strictest-boundary
+law as `BUDGET_SMOKE_MAX`. The daily / monthly / USD caps, `/2/usage/tweets` preflight,
+project cap, credit handling, and writer fence all remain required — the smoke pair is an
+ADDITIONAL limit, and the strictest boundary always wins.
+
+Valid example envelopes at the pinned census price ($0.005 / Post read, observed
+2026-09-06; prices change — the usage preflight, not this table, is authoritative):
+
+| TARGET | minimum MAX (TARGET + 25) | nominal USD at MAX |
+|---|---|---|
+| 10 | 35 | $0.175 |
+| 20 | 45 | $0.225 |
+
+A TARGET=20 smoke has NO mathematically hard $0.10 ceiling; its outer envelope is 45 reads
+nominal, and the Developer Console spending limit / finite credit balance remain the
+recommended independent account-level backstop.
+
+**Zero-spend default is absolute.** No smoke request unless ALL of: `RUMOR2_SOCIAL_X_ENABLED=true`,
+`X_BEARER_TOKEN`, daily cap, monthly cap, daily USD cap, `LIVE_SMOKE_TARGET_POST_READS`,
+`LIVE_SMOKE_MAX_POST_READS`, plus a green usage preflight, credit capability handling, rule
+reconciliation, and a held writer fence. A token that merely exists authorizes nothing.
+
+**RED #2 — a stop inside `onLine` did not end the current decoded chunk.** One `reader.read()`
+carrying three complete Posts with `stop()` called at Post 1 delivered all three AND the loop
+issued another `reader.read()` before noticing the stop. Delivering the three is CORRECT (X
+already sent them; hiding them would violate BILL AT THE WIRE); the extra read was not. The
+transport now implements the **chunk-atomic stop law**:
+
+1. one `reader.read()` = one network chunk; every complete newline-delimited item already in
+   it is parsed and delivered; the runtime meters every complete Post resource;
+2. a `stop()` / `pause()` requested from inside the chunk is only PENDING (`stopPending` /
+   `pausePending` in status) — the remaining already-received lines are still delivered
+   and metered, offered to intake, and settled if admitted;
+3. at CHUNK END the transport calls `onChunkEnd({ receivedTs, lines, keepalives, stopPending,
+   pausePending })`; the runtime finalizes the stop reason and records the coverage gap at the
+   chunk's LAST fully processed line (never before evidence it actually received — the
+   watermark, the evidence `retrievedTs`, and `gapStartTs` share the transport receipt clock);
+4. then the transport closes/aborts and the loop exits; the read loop checks
+   `stopped || paused` BEFORE every `reader.read()`, so a finalized stop never asks the wire
+   for another chunk (`status.reads` / `readsAfterStop` prove it).
+
+**Hard MAX overrun truth.** The local reserve reduces risk; it cannot control how many Posts
+X placed in a chunk before Serpent could react. If the final received chunk drives the
+conservative meter past the smoke MAX, Serpent meters every delivered Post (never clamps or
+discards the count), stops before any new read, sets `SMOKE_HEADROOM_OVERRUN`, records the
+exact `overrunPosts`, records the gap with that reason, and LATCHES: `start()` and the
+allowance refuse (`no automatic paid reconnect; a fresh operator-authorized start is
+required`). A completed smoke (`SMOKE_TARGET_REACHED`) latches the same way.
+
+**RED #3 — unowned rules were verified by count only.** `finalUnowned.length ===
+unowned.length` passed a same-count mutation (an external rule's value changed during
+Serpent's add). Reconciliation now takes a canonical closed snapshot of EVERY non-Serpent
+rule — `{ id, value, tag: tag ?? null }`, sorted by id, value, tag — before mutation and
+requires deep canonical equality after. Any disappearance, unexpected addition, id/value/tag
+change ⇒ `RULE_RECONCILE_FAILED` with code `UNOWNED_RULESET_CHANGED_DURING_RECONCILE`, NO paid
+stream, and no attempt to delete, restore, or "repair" someone else's rule. A concurrent
+external change is not treated as corruption: a later preflight simply retries from the new
+actual project state. Serpent ownership (`serpent:v1:<lane>:<hash>`), dry-run before
+additions, capacity check, deletion of Serpent-owned ids only, the exact final Serpent set,
+and reconciliation only while disconnected are all preserved — this seal strengthens
+verification only.
+
+Tests: `test/x-paid-wire.test.js` (SMOKE-RED-1, SMOKE-LAW-1, SMOKE-IMPOSSIBLE, SMOKE-ZERO,
+X-CHUNK-RED-2, X-CHUNK-2/3, SMOKE-TARGET, X-FINAL-CHUNK, SMOKE-OVERRUN, BUDGET-CHUNK,
+X-WRITER-LOSS-CHUNK, RULE-RED-3, RULE-SNAPSHOT, RULE-SEAL-1..6). Live paid smoke: NOT RUN
+here — no bearer and no smoke pair were present, which is the expected safe result.
 
 ---
 

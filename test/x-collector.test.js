@@ -116,6 +116,7 @@ if (!TEST_URL) {
       assert.equal(b.c.status().writerAuthority, 'ACTIVE');
       assert.equal(sockets.length, 1, 'Bluesky opened'); assert.equal(api.state.streams.length, 1, 'X opened ONE paid stream after preflight');
       assert.equal(b.c.status().socialX.state, 'ACTIVE'); assert.equal(b.c.status().socialX.credentialPresent, true);
+      assert.equal(b.c.status().socialX.smoke.configured, false, 'no default smoke budget'); assert.equal(b.c.status().socialX.smoke.headroomPosts, 25); assert.equal(b.c.status().socialX.rules.unownedChanged, false);
       assert.ok(!JSON.stringify(b.c.status()).includes(BEARER), 'status never carries the bearer');
       sockets[0].emit('open'); sockets[0].emit('message', JSON.stringify(bskyCommit(100, 'BTC is listing')));
       api.state.streams[0].push(xLine(500, '$ETH upgrade live')); api.state.streams[0].push(xLine(501, 'nothing relevant')); api.state.streams[0].push('\r\n');

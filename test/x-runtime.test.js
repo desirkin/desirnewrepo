@@ -89,7 +89,8 @@ test('X-GATE-1 (§8). X is OFF by default; enable alone spends nothing; missing 
   assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS: '3000001' })).reason, 'BUDGET_INVALID', 'monthly never exceeds the X self-serve cap');
   assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS: '5000' })).reason, 'BUDGET_INVALID', 'daily > monthly');
   assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD: 'lots' })).reason, 'BUDGET_INVALID');
-  assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS: '0' })).reason, 'BUDGET_INVALID');
+  assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS: '0' })).reason, 'SMOKE_BUDGET_INCOMPLETE', 'a smoke MAX without its TARGET fails closed');
+  assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS: '0', RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS: '0' })).reason, 'BUDGET_INVALID');
   const g = xGate(xConfigFromEnv(full)); assert.ok(!JSON.stringify(g).includes('b"'), 'the gate never returns the bearer value');
 });
 

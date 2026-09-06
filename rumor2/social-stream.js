@@ -71,8 +71,11 @@ export function socialIntake({
 
   // Offer ONE already-JSON-parsed message object. Returns the outcome so the
   // transport and tests can assert on it. Never throws on adversarial input.
-  function offer(message) {
+  // An explicit `receivedTs` (the transport's receipt clock) lets a caller keep
+  // evidence knownAt, the progress watermark, and any gap boundary on ONE clock.
+  function offer(message, { receivedTs = null } = {}) {
     stats.received += 1;
+    const nowMs = Number.isFinite(receivedTs) ? receivedTs : now();
     let cur = null;
     try { cur = typeof cursorOf === 'function' ? cursorOf(message) : null; } catch { cur = null; }
     if (cur !== null && (cursor.received === null || cur > cursor.received)) cursor.received = cur;
@@ -81,7 +84,7 @@ export function socialIntake({
     try { mapped = mapCommit(message, { provider: provider?.id }); }
     catch { stats.skipped += 1; return done('skipped', { reason: 'mapper threw' }); }
     if (!mapped || mapped.skip) { stats.skipped += 1; return done('skipped', { reason: mapped?.reason ?? 'skip' }); }
-    const norm = normalizeSocialObservation(mapped.raw, { nowMs: now() });
+    const norm = normalizeSocialObservation(mapped.raw, { nowMs });
     if (norm.reject) { stats.rejected += 1; return done('rejected', { reason: norm.reason }); }
     const o = norm.observation;
     if (o.sourceClockStatus === 'TRUSTED') stats.sourceClockTrusted += 1;
