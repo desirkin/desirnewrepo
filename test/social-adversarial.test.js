@@ -130,7 +130,7 @@ test('PASS 10 — CRASH/RESTART: settlement is idempotent (durable PG restore is
 
 test('PASS 11 — ACCESS FAILURE: providers report truthfully; there is no scraping fallback', () => {
   // unavailable ears carry an honest state + reason, never a scrape path
-  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').accessState, 'NOT_ACCEPTING_NEW_ACCESS');
+  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW'); assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').access.liveStatus, 'DISABLED');
   assert.equal(socialProviderById('TIKTOK_PUBLIC').accessState, 'NOT_AUTHORIZED');
   // Farcaster's live ear is dark without a credential — it does not fall back to scraping
   assert.equal(farcasterConfigured({}), false);

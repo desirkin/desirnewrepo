@@ -133,6 +133,21 @@ test('R2A-SOCIAL-5 (SOCIAL-3). the Reddit surface is an explicit filename allowl
   for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/social-stream.js']) assert.ok(!/reddit/i.test(read(f)), `${f} has no Reddit wiring`);
 });
 
+test('R2A-SOCIAL-6 (SOCIAL-4B). the StockTwits raw-Social surface is an explicit filename allowlist; fixture-only, never fetches, never imports legacy or authority; no collector wires it', () => {
+  // EXPLICIT allowlist of rumor2 files whose CODE may name StockTwits (the legacy
+  // rumint/* subsystem is a separate tier audited by R2A-rumint, untouched here)
+  const ST_ALLOWLIST = ['rumor2/social-stocktwits.js', 'rumor2/social-registry.js', 'rumor2/social.js'];
+  const mentions = rumor2Files.filter((f) => /stocktwits/i.test(code(f)));
+  assert.deepEqual(mentions.sort(), [...ST_ALLOWLIST].sort(), `StockTwits may only be named in ${ST_ALLOWLIST.join(', ')}`);
+  assert.ok(tracked.includes('rumor2/social-stocktwits.js'), 'the foundation is tracked (Git-index-aware)');
+  assert.ok(SOCIAL_FILE_RE.test('rumor2/social-stocktwits.js'), 'audited in the social tier, never as frozen core');
+  const src = read('rumor2/social-stocktwits.js');
+  for (const forbidden of ['fetch(', 'WebSocket', 'EventSource', 'setInterval', 'node:http', 'node:https', 'node:net', 'node:fs', 'child_process', 'zlib', 'Authorization', 'Date.now', 'randomUUID']) assert.ok(!src.includes(forbidden), `social-stocktwits.js: ${forbidden}`);
+  assert.ok(!/from '\.\.\//.test(src), 'imports nothing outside rumor2'); assert.ok(!/rumint|state\/|ui\/|persistence/.test(src.replace(/\/\/.*$/gm, '')), 'no legacy/state/ui/persistence import (inventory is reporting, not a bridge)');
+  assert.ok(!/ledger|cost\/|tape|strike|exec|socrates|attention|hyped|stalk|nominat/i.test(src.replace(/\/\/.*$/gm, '')), 'social-stocktwits.js touches no authority');
+  for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/social-stream.js']) assert.ok(!/social-stocktwits|STOCKTWITS/.test(read(f)), `${f} has no StockTwits wiring`);
+});
+
 test('R2A-82+83. SOCRATES-0 and GHOST-1 remain absent', () => {
   // no socrates caller anywhere in the runtime (the contract scans in the
   // socrates suites stay authoritative; this re-pins the rumor layer)

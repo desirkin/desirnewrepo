@@ -129,9 +129,13 @@ export const SOCIAL_LIFECYCLE_STATES = Object.freeze(['CREATE', 'EDIT', 'DELETE'
 // application boundary (normalize, event build, validate, replay, settle) —
 // never a wrapper comment, never widened by a caller-provided list. The social
 // registry asserts its `retentionProhibited` flags agree with this set.
-export const SOCIAL_RETENTION_PROHIBITED_PROVIDERS = Object.freeze(['REDDIT_OFFICIAL']);
+// SOCIAL-4B: STOCKTWITS_OFFICIAL joins for the NEW raw Social path only — the
+// legacy aggregate RUMINT ear (rumint/*) is a separate subsystem this constant
+// never reaches. Its route entitlement, permitted downstream use, and raw
+// content/author retention compatibility are not established for this project.
+export const SOCIAL_RETENTION_PROHIBITED_PROVIDERS = Object.freeze(['REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL']);
 export const socialRetentionRefusal = (provider) => (SOCIAL_RETENTION_PROHIBITED_PROVIDERS.includes(provider)
-  ? `${provider}: durable content and author-identifying retention are not approved (access approval, use-case classification, and retention compatibility unresolved)`
+  ? `${provider}: durable content and author-identifying retention are not approved (entitlement/access approval, use-case classification, and retention compatibility unresolved)`
   : null);
 const LIFECYCLE_BY_EDIT = Object.freeze({ ORIGINAL: 'CREATE', EDITED: 'EDIT', DELETED: 'DELETE', TOMBSTONED: 'TOMBSTONE' });
 export const lifecycleForEditState = (e) => LIFECYCLE_BY_EDIT[e] ?? 'CREATE';

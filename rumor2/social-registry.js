@@ -10,6 +10,7 @@
 // doctrine/SOCIAL.md for citations, gathered 2026-09-05). The system knows WHY
 // each ear is or is not available — never a vague "disabled". (§2/§33)
 import { SOCIAL_PROVIDER_KINDS, SOCIAL_RETENTION_PROHIBITED_PROVIDERS } from './social.js';
+import { STOCKTWITS_LEGACY_RUMINT, STOCKTWITS_ROUTES, STOCKTWITS_SOURCES, STOCKTWITS_USE_CASE, STOCKTWITS_OFFICIAL as ST } from './social-stocktwits.js';
 
 // §2 access taxonomy — the closed set of truthful states.
 export const SOCIAL_ACCESS_STATES = Object.freeze([
@@ -18,6 +19,7 @@ export const SOCIAL_ACCESS_STATES = Object.freeze([
   'AVAILABLE_REQUIRES_APP_REVIEW', // usable only after a platform app-review/approval
   'AVAILABLE_RESTRICTED_RESEARCH', // usable only under non-commercial/research or a commercial contract
   'AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION', // SOCIAL-3: a documented official path exists, but the platform must approve THIS use case and classify it; nothing is assumed either way
+  'AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW', // SOCIAL-4B: documented routes exist; whether THIS account is entitled to a route and whether the applicable offering terms permit this use are unresolved; implies no live/durable capability
   'NOT_ACCEPTING_NEW_ACCESS', // program paused/closed to new consumers
   'NOT_AUTHORIZED', // this system is categorically ineligible
   'NOT_SUITABLE_REALTIME', // an API exists but cannot serve timely organic signal
@@ -142,18 +144,40 @@ export const SOCIAL_PROVIDERS = Object.freeze([
   Object.freeze({
     id: 'STOCKTWITS_OFFICIAL',
     providerKind: 'SOCIAL_FINANCE',
-    accessState: 'NOT_ACCEPTING_NEW_ACCESS',
+    // SOCIAL-4B (corrected): ONE originating platform with several documented
+    // routes/products. Self-service registration is paused (route-specific);
+    // the Firestream routes are documented and need a stream-authorized
+    // account; the applicable offering terms and this account's entitlement
+    // are unresolved. NOT "docs offline", NOT blanket NOT_ACCEPTING_NEW_ACCESS.
+    accessState: 'AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW',
     transport: 'FIRESTREAM_HTTP',
-    hosts: Object.freeze(['api.stocktwits.com', 'firestream-portal.stocktwits.com']),
-    streamPath: null,
+    hosts: ST.candidateDataHosts, // candidate DATA hosts — no host entry confers permission to send a request
+    documentationHosts: ST.documentationHosts, // documentation only; the portal is NOT the data stream
+    streamPath: '/stream', // FIRESTREAM_MESSAGES (documented; not implemented here)
     subprotocol: null,
     requiresCredential: true,
-    credentialEnv: 'STOCKTWITS_STREAM_USER', // + STOCKTWITS_STREAM_PASS (Firestream HTTP Basic)
-    implemented: false,
+    credentialEnv: 'STOCKTWITS_STREAM_USER', // + STOCKTWITS_STREAM_PASS (Firestream HTTP Basic); presence is not entitlement
+    implemented: true, // the NEW Social foundation only: fixture-only Firestream preview + access summary (rumor2/social-stocktwits.js); NOT the legacy RUMINT ear, NOT a transport
     durable: false,
-    highPriority: true, // a high-value intended ear — unavailable by ACCESS, not by judgement
-    docUrl: 'https://api.stocktwits.com/developers',
-    reason: 'Self-serve dev program paused ("won\'t be accepting new registrations"); public API docs offline (404). The Firestream enterprise firehose is partner-gated with no self-serve terms. High priority, blocked by access.',
+    runtimeGated: false, // no runtime exists that an environment flag could activate
+    retentionProhibited: true, // SOCIAL-4B: the NEW raw Social path retains nothing until entitlement, permitted use, and retention are established
+    highPriority: true, // a high-value intended ear — blocked by entitlement/terms review, not by importance
+    routes: STOCKTWITS_ROUTES, // SELF_SERVE_REGISTRATION (paused) · LEGACY_SYMBOL_REST · FIRESTREAM_MESSAGES · FIRESTREAM_SYMBOL_ACTIVITY · FIRESTREAM_REFERENCE · FIRESTREAM_BACKUPS — routes, not six sources
+    legacy: STOCKTWITS_LEGACY_RUMINT, // the EXISTING aggregate ear, described (reporting only, no authority bridge)
+    access: Object.freeze({
+      platformPath: 'DOCUMENTED_FIRESTREAM_PATH',
+      useCaseClassification: 'UNRESOLVED',
+      entitlementStatus: 'NOT_VERIFIED',
+      additionalTermsRequirement: 'UNRESOLVED',
+      retentionCompatibility: 'UNRESOLVED',
+      liveStatus: 'DISABLED',
+      durableContentAllowed: false,
+      durableAuthorIdentityAllowed: false,
+    }),
+    useCase: STOCKTWITS_USE_CASE,
+    sources: STOCKTWITS_SOURCES,
+    docUrl: 'https://firestream-portal.stocktwits.com/documentation/stream',
+    reason: 'One platform, several routes. Self-service registration is paused (S1, route-specific). Firestream message/activity/reference/backup routes are documented (S2-S6) for stream-authorized accounts under HTTP Basic; general Terms (S7, revised 2026-07-10) require authorized API/developer access and let offering-specific terms prevail. This account\'s entitlement, Serpent\'s permitted use, additional terms, and raw-content/author retention are UNRESOLVED. A legacy aggregate RUMINT ear exists separately (config-enabled; deployment unobserved; entitlement unresolved). New raw Social path: fixture-only, retention-blocked, not an operational ear.',
   }),
   Object.freeze({
     id: 'META_PUBLIC',

@@ -30,7 +30,7 @@ test('CENSUS-3. the recorded access decisions match the verified census', () => 
   assert.equal(socialProviderById('FARCASTER_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
   assert.equal(socialProviderById('X_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
   assert.equal(socialProviderById('REDDIT_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION', 'SOCIAL-3: classification-neutral — approval and use-case review pending, nothing assumed');
-  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').accessState, 'NOT_ACCEPTING_NEW_ACCESS');
+  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW', 'SOCIAL-4B: route-specific — registration paused, Firestream documented, entitlement/terms unresolved');
   assert.equal(socialProviderById('META_PUBLIC').accessState, 'AVAILABLE_REQUIRES_APP_REVIEW');
   assert.equal(socialProviderById('TIKTOK_PUBLIC').accessState, 'NOT_AUTHORIZED');
 });
@@ -50,7 +50,8 @@ test('CENSUS-4 (SOCIAL-2B §7). Bluesky is credential-free live; X is durable bu
 });
 
 test('CENSUS-5. StockTwits stays HIGH PRIORITY though access-blocked; TikTok is a FINAL exclusion, not a TODO', () => {
-  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').highPriority, true, 'unavailable by access, not by importance');
+  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').highPriority, true, 'blocked by entitlement/terms review, not by importance');
+  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').routes.SELF_SERVE_REGISTRATION.status, 'PAUSED', 'the registration pause is route-specific');
   assert.equal(socialProviderById('TIKTOK_PUBLIC').finalDecision, 'EXCLUDED_FROM_REALTIME_RUMOR');
 });
 

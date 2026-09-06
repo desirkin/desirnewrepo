@@ -49,7 +49,7 @@ test('REDDIT-CENSUS (§5). the census records a documented official path with UN
   assert.ok(!ACTIVE_SOCIAL_PROVIDER_IDS.includes('REDDIT_OFFICIAL')); assert.equal(isLiveActivatable(r.accessState), false); assert.equal(isPlatformCapable(r.accessState), false, 'a documented path is not a capability until approved');
   assert.ok(!/research-only|definitely commercial|exempt/i.test(r.reason));
   assert.deepEqual(REDDIT_USE_CASE.intendedUses, r.useCase.intendedUses); assert.equal(REDDIT_USE_CASE.version, r.useCase.version);
-  for (const p of SOCIAL_PROVIDERS) if (p.id !== 'REDDIT_OFFICIAL') assert.notEqual(p.retentionProhibited, true, `${p.id} is unaffected`);
+  for (const p of SOCIAL_PROVIDERS) if (p.id !== 'REDDIT_OFFICIAL' && p.id !== 'STOCKTWITS_OFFICIAL') assert.notEqual(p.retentionProhibited, true, `${p.id} is unaffected`); // SOCIAL-4B: StockTwits' NEW raw path joins the firewall
 });
 
 // =====================================================================================
@@ -153,7 +153,7 @@ const forgedRedditEvent = () => {
 };
 
 test('REDDIT-FIREWALL-1 (§9). normalized Reddit observation -> durable Social event: refused at normalization AND at event construction', () => {
-  assert.deepEqual([...SOCIAL_RETENTION_PROHIBITED_PROVIDERS], ['REDDIT_OFFICIAL']);
+  assert.ok(SOCIAL_RETENTION_PROHIBITED_PROVIDERS.includes('REDDIT_OFFICIAL')); assert.deepEqual([...SOCIAL_RETENTION_PROHIBITED_PROVIDERS], ['REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL']);
   const n = normalizeSocialObservation(redditRaw(), NOW);
   assert.equal(n.reject, true); assert.match(n.reason, /^RETENTION_NOT_APPROVED: REDDIT_OFFICIAL/);
   // even a hand-built "observation" that skipped normalization cannot become an event

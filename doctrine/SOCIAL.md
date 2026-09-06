@@ -56,7 +56,7 @@ The machine-readable census lives in `rumor2/social-registry.js` and is pinned b
 | **FARCASTER_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Neynar hosted API (x-api-key, free tier) gives real-time webhooks + cast search. Hub/Snapchain path needs a full syncing node (not lightweight). Dark until `NEYNAR_API_KEY`. |
 | **X_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Pay-per-use filtered stream (~4–5s P99), OAuth2 App-Only bearer. Hard read/USD budget under the 3M-post-read/month self-serve cap ($0.005/read; usage via `/2/usage/tweets`; UTC-day dedupe is SOFT). Operational, runtime-gated ear since SOCIAL-2B (§5C). |
 | **REDDIT_OFFICIAL** | forum | `AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION` | Official OAuth2 Data API is a documented path; API data access requires Reddit's explicit approval with honest disclosure. Serpent's private single-user personal-trading use is **UNRESOLVED** (not assumed commercial, not assumed exempt); any separate-agreement requirement and retention compatibility are unresolved. Scraping is prohibited. Fixture-only foundation (SOCIAL-3, §5F) — not an operational ear. |
-| **STOCKTWITS_OFFICIAL** | finance | `NOT_ACCEPTING_NEW_ACCESS` | Self-serve dev program paused ("won't be accepting new registrations"); public API docs offline (404). Firestream enterprise firehose is partner-gated with no self-serve terms. **High priority, blocked by access — not by importance.** |
+| **STOCKTWITS_OFFICIAL** | finance | `AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW` | ONE platform, several routes (SOCIAL-4B, §5G). Self-service registration is **paused** (route-specific). Firestream message/activity/reference/backup routes are documented for stream-authorized accounts (HTTP Basic); general Terms (revised 2026-07-10) permit only authorized API/developer access and let offering terms prevail. This account's entitlement, Serpent's permitted use, additional terms, and raw-content/author retention are **UNRESOLVED**. A **legacy aggregate RUMINT ear exists separately** (config-enabled; deployment unobserved; entitlement unresolved). New raw Social path: fixture-only, retention-blocked. **High priority, blocked by entitlement/terms review — not by importance.** |
 | **META_PUBLIC** (FB Page) | microblog | `AVAILABLE_REQUIRES_APP_REVIEW` | Page Public Content Access reads public Page posts but requires Meta App Review + Business Verification. |
 | **TIKTOK_PUBLIC** | microblog | `NOT_AUTHORIZED` | Only organic-content API (Research API) bars commercial use + is archival/day-granular with no streaming; Commercial Content API is ads/EU only; Display API is own-content only. **Final decision: `EXCLUDED_FROM_REALTIME_RUMOR`** — not a TODO. |
 
@@ -69,7 +69,8 @@ Sub-decisions recorded but not built as separate providers:
 
 Official sources: bsky.network/docs/jetstream · docs.neynar.com · dev.neynar.com/pricing ·
 docs.farcaster.xyz · docs.x.com/x-api · support.reddithelp.com (Data API / Public Content Policy) ·
-api.stocktwits.com/developers · firestream-portal.stocktwits.com · developers.facebook.com
+api.stocktwits.com/developers · firestream-portal.stocktwits.com · stocktwits.com/about/legal (terms,
+privacy) · developers.facebook.com
 (page-public-content-access, content-library-and-api) · developers.tiktok.com (research-api,
 commercial-content-api, display-api).
 
@@ -771,6 +772,135 @@ are unchanged.
 
 ---
 
+## 5G. SOCIAL-4B — StockTwits: inventory truth, route-specific access/retention firewall, fixture-only Firestream foundation
+
+**Two different things exist for StockTwits, and the inventory now says so.**
+
+1. **The legacy aggregate RUMINT ear** (`rumint/*`, `persistence/rumint-checkpoint.js`, wired in
+   `fly.js`). Status: **CONFIG-ENABLED LEGACY IMPLEMENTATION; DEPLOYED STATE UNOBSERVED.** The
+   committed `cobra.config.json` has `rumint.enabled: true`; `RUMINT_ENABLED`, when defined,
+   overrides it. It polls the legacy symbol REST route into hourly statistics, reading only
+   message id, `created_at`, and the author's sentiment label; it stores no post bodies or
+   author profiles, but does keep a bounded recent message-id cache and poll evidence — an
+   identifier is not permission-free merely because text is discarded. Its documented outputs
+   are preserved exactly (RUMINT.md): qualifying statistics **nominate** a symbol into the stalk
+   set (posture COILED→STALKING, the microstructure tracking set, cockpit attention) and the
+   canonical **HYPED** snapshot exists as future confirmation-strictness metadata. Neither is
+   order or strike permission. Preserving this code is not a new endorsement of its unresolved
+   route; this ticket neither switches it on nor authorizes continued access. It is described in
+   a small immutable descriptor (`STOCKTWITS_LEGACY_RUMINT`) — reporting only, no imports of
+   rumint/state/ui/persistence — and is **not** relabeled "not built", "verified live", or
+   "approved".
+2. **The NEW raw Social path** (`rumor2/social-stocktwits.js`): fixture-only, zero nomination,
+   attention, HYPED, claim, proposition, order, or execution output; no runtime acquisition; no
+   durable raw content or author retention. Its documented legacy effects are not inherited.
+
+**Route-specific census (retrieved 2026-09-06; short paraphrases, no copied terms).**
+
+| route | fact | uncertainty |
+|---|---|---|
+| SELF_SERVE_REGISTRATION (S1) | new registrations paused pending review; contact by email | silent on existing entitlements, other products, pricing, terms |
+| LEGACY_SYMBOL_REST | used by legacy RUMINT (`/api/2/streams/symbol/<sym>.json`) | documentation `UNVERIFIED_IN_THIS_ENVIRONMENT`; entitlement and permitted use unresolved |
+| FIRESTREAM_MESSAGES (S2/S3) | `firestream.stocktwits.com/stream`, HTTP Basic with a stream-authorized account; envelope `{object, action create/destroy, data, time, seq_id}`; objects Message, Friendship, Block, LikeMessage; `seq_id` opaque, recovery up to 24 h | no completeness/SLA; a destroy signal is documented (correcting the read-only report) but complete deletion delivery, retention rights, and edit semantics are not established |
+| FIRESTREAM_SYMBOL_ACTIVITY (S5) | activity events (pageview, watchlist, message, like) | not originating message content; not corroboration |
+| FIRESTREAM_REFERENCE (S4) | `symbol_id`, `ticker`, `exchange`, `country`, `asset_class`, `delisted` (+isin/cusip); current-state snapshot | no point-in-time history; never used to improve an older observation retroactively |
+| FIRESTREAM_BACKUPS (S6) | daily gzip NDJSON, 302 to a presigned link; `seq_id` absent | retention window, completeness, lifecycle coverage, id equivalence unstated; never downloaded here |
+
+General Terms (S7, "Last Revised: July 10, 2026"): §1 offering-specific terms prevail; §5 no
+unauthorized automated or scraping access, authorized APIs/developer offerings permitted; §8
+users own content, the platform holds a broad license and may license public content (including
+usernames where applicable) to institutions, and deletion does not remove prior grants from
+backups, archives, and deidentified datasets; §18 suspension/termination. Privacy (S8, July
+2026): public content may be visible to API users and partners; platform retention "as reasonably
+necessary". Neither page is this account's Firestream entitlement nor a license for Serpent's
+storage or inference; the platform's own retention never authorizes Serpent to retain the same
+data. The read-only report's "no StockTwits terms were readable" is withdrawn.
+
+**Private use, classification UNRESOLVED.** Private single-user personal prototype; not sold or
+offered to customers; personal research, autonomous paper trading, possibly later automated
+trading of the owner's own funds; no claimed affiliation. Not assumed commercial, not assumed
+exempt. Separate questions, never derived from one another: documentation exists; an account is
+entitled to a particular route; Serpent's use is permitted; additional terms are required/not
+required/unresolved; content and identifier retention is compatible; derived features,
+inference, training, and redistribution are separately permitted; rate/pricing scope is known;
+credentials are available. No probe is authorized to test any of them.
+
+**Access summary (`evaluateStocktwitsAccess`).** A closed bounded operator record (reference
+label, route, attested status, application, use-case version, permitted uses, additional terms,
+validity, retention compatibility, reviewed date; no credentials, correspondence, account
+identity, or contract body) yields at best `OPERATOR_ATTESTED` — never platform proof. The clock
+is an explicit validated input (no wall clock; missing ⇒ `CLOCK_UNAVAILABLE`, invalid ⇒
+`CLOCK_INVALID`); a future review date is `REVIEW_DATE_IN_FUTURE`; an absent expiry stays absent.
+Readiness = every prerequisite AND zero blockers; informational notes are advisories. Even a
+fully permissive synthetic record leaves `liveAllowed=false`, `liveStatus=DISABLED`,
+`liveReason=FOUNDATION_ONLY_NO_LIVE_PATH`, `durableContentAllowed=false`,
+`durableAuthorIdentityAllowed=false`, and returns no transport or writer.
+
+**Raw Social retention firewall.** `STOCKTWITS_OFFICIAL` joins `SOCIAL_RETENTION_PROHIBITED_PROVIDERS`
+(the registry flag `retentionProhibited` is asserted to agree). Before this ticket every generic
+Social boundary accepted a StockTwits-shaped raw observation (normalize, event build, validate,
+replay, intake). Now all five refuse with `RETENTION_NOT_APPROVED: STOCKTWITS_OFFICIAL …` before
+any append callback; no caller allowlist, enabled flag, credential, attestation boolean,
+"personal use" or "source-only" label, or content hash bypasses it. The reason is that route
+entitlement, permitted downstream use, and raw-content/author retention compatibility are not
+established for this project — NOT a claim that StockTwits imposes Reddit's deletion rule, and
+the documented destroy action is not a retention license. The block never reaches the legacy
+aggregate subsystem: `rumint/*` imports nothing from `rumor2/`, and no legacy baseline or
+message-id cache is touched. The PostgreSQL journal API is unchanged; the guarantee is at the
+supported application boundaries, not against a database administrator inserting JSON.
+
+**Fixture-only Firestream preview (`firestreamEnvelopeToPreview`).** Input: a Firestream-shaped
+envelope plus an explicit validated acquisition clock (no default). Dispatch on BOTH `object` and
+`action`: `Message/create` → an in-memory MESSAGE preview; `Message/destroy` → a MESSAGE_REMOVAL
+preview holding only the message id, with no prior body, author, thread, or creation time
+recreated and no prior create required (`deletionDeliveryGuarantee: UNPROVEN`);
+`LikeMessage`/`Friendship`/`Block` → `NOT_A_MESSAGE_LIFECYCLE_EVENT` (never a tombstone or post);
+unknown object/action → `UNKNOWN_OBJECT_OR_ACTION`. Edit semantics are `UNRESOLVED`; no revision
+id or content-hash guarantee is invented. Message, user, and symbol ids are canonical decimal
+strings; numeric fixtures only when positive safe integers (an unsafe number is rejected, never
+stringified); no coercion from booleans, arrays, objects, hex, exponent, or blanks. `seq_id` is an
+opaque string preserved byte-for-byte within a syntax bound — never `Number()`, never
+incremented, never a timestamp, never trimmed — carried in `delivery`, never in the frozen
+numeric `providerEventSeq`. Cross-route id equivalence (REST vs Firestream vs backups) is
+UNVERIFIED: no histories are merged and no provenance groups are manufactured. Text: bounded
+original kept separate from a derived display preview; absence is null. Relationships:
+`in_reply_to_message_id` → REPLY, `parent_message_id` → root, `reshare_message.id` → RESHARE
+(an id, never a second observation); conflicting or malformed evidence → UNKNOWN. Reshare
+counts and resharer id counts are propagation metadata only. Profile context is bounded (user id,
+handle, join declaration, follower/following counts, provider `official`/`identity`/
+`classification` flags — a flag is never verification or corroboration); avatars, bios,
+locations, links, prices, and media are ignored, not copied. Sentiment is the author's label,
+descriptive only. Symbols keep provider `symbol_id` and observed ticker separately; there is no
+`.X` inference and the legacy `${coin}.X` mapping is untouched; `resolveSymbolReference` matches
+an explicitly supplied snapshot only when it was known no later than the observation
+(`REFERENCE_KNOWN_LATER` otherwise), reports `TICKER_CONFLICT`/`NOT_IN_REFERENCE`, and never
+labels anything tradeable. Clocks: source declaration (instant, DATE_ONLY without invented
+millisecond precision, MALFORMED preserved as declared, ABSENT), envelope lifecycle time, and
+Serpent acquisition time stay distinct; the source clock is classified by the shared quarantine
+law (TRUSTED / FUTURE_QUARANTINED / UNKNOWN). Backups are historical provider data, not proof
+Serpent knew it then. No resume cursor, gap repair, gzip, SSE framing, archive download, backoff,
+or transport exists; a parsed fixture never claims a complete feed.
+
+**Future single-acquisition / two-projection boundary (documented, not implemented).** After
+entitlement and retention are resolved, ONE selected upstream acquisition may feed two separate
+projections: the legacy RUMINT statistical calculation and source-only Social evidence for later
+provenance analysis. Both descend from the same platform observation and can never count as two
+independent corroborating sources. Only one acquisition path may feed a given legacy baseline: no
+second symbol poller, no REST-to-Firestream replacement, no dual-run collectors, no change to the
+legacy nomination threshold or cadence. Any migration must verify route identity/symbol/lifecycle
+equivalence, prove statistical parity on controlled fixtures, preserve historical baseline and
+coverage labels, record the collection-regime change, never mix full-stream counts with
+sampled-poll baselines as if identical, preserve the nomination-versus-execution distinction,
+resolve retention before retaining raw text, and recover without double counting. This section
+authorizes none of that wiring.
+
+Tests: `test/social-stocktwits.test.js` (ST-INVENTORY-1/2, ST-ACCESS-1..3, ST-FIREWALL-1..3,
+ST-PREVIEW-1..6, ST-NO-LIVE), `R2A-SOCIAL-6` (explicit Git-index-aware allowlist), CENSUS-3/5 and
+adversarial pins. No StockTwits network request, credential exchange, stream, archive download,
+legacy poll, paid probe, support email, or application occurred.
+
+---
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -796,8 +926,14 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   private single-user personal-trading use, any separate agreement it establishes,
   reviewed retention/deletion compatibility with a compatible durable design, explicit
   downstream-use permissions, an approved rate scope, and credentials — none assumed.
-- **SOCIAL-4:** StockTwits operational collector **iff** legitimate API access
-  becomes available (Firestream), else a formal exclusion/access decision.
+- **SOCIAL-4 (4A review + 4B foundation done, §5G):** StockTwits stays two things — the
+  legacy aggregate RUMINT ear (config-enabled, deployment unobserved, route entitlement
+  unresolved, unchanged) and a fixture-only, retention-blocked raw Social foundation. A
+  route-specific live-activation ticket requires the account's actual entitlement to a
+  named route, the applicable offering terms confirming Serpent's permitted use and any
+  additional terms, reviewed raw-content/author retention with a compatible durable design,
+  explicit downstream-use permissions, rate/pricing scope, credentials, and the
+  single-acquisition/two-projection migration proof — none assumed.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.
