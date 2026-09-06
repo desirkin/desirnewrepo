@@ -6,11 +6,18 @@
 // network. The bounded WebSocket transport lives in rumor2/social-stream.js.
 //
 // Verified against official docs (bsky.network/docs/jetstream, 2026-09-05):
-//   endpoint  wss://jetstream.us-east.bsky.network/xrpc/network.bsky.jetstream.subscribeEvents
-//   subproto  xrpc.v1.json ; params collections<=100, dids<=10000, kinds, cursor(seq, inclusive, at-least-once)
-//   message   { $type:'message', payload:{ $type:'...#commit', did, seq, time,
-//               operation:create|update|delete, collection, rkey, rev, cid, record } }
-//   a DELETE carries no record and no cid.
+//   endpoint  wss://jetstream.us-east.bsky.network/xrpc/network.bsky.jetstream.subscribeEvents (v2 XRPC)
+//   subproto  xrpc.v1.json
+//   v2 query  kinds=commit (commit events only — without it identity/account/sync
+//             events may still be delivered), collections=<nsid> (repeatable; filters
+//             COMMIT collections), cursor=<monotonic seq> (inclusive, at-least-once).
+//             LEGACY v1 names (wantedCollections, wantedDids, requireHello,
+//             options_update) are REJECTED by the v2 endpoint — never sent.
+//   message   { $type:'message', payload:{ $type:'...#commit', seq, did, time, rev,
+//               operation:create|update|delete, collection, rkey, cid, record } }
+//   `seq` is the monotonic per-event sequence number / resume cursor; `time` is the
+//   server event timestamp; neither is the post's client-supplied record.createdAt.
+//   A DELETE carries no record and no cid.
 
 export const BLUESKY_OFFICIAL = Object.freeze({
   id: 'BLUESKY_OFFICIAL',
@@ -21,7 +28,10 @@ export const BLUESKY_OFFICIAL = Object.freeze({
   subprotocol: 'xrpc.v1.json',
   postCollection: 'app.bsky.feed.post',
   repostCollection: 'app.bsky.feed.repost',
-  wantedCollections: Object.freeze(['app.bsky.feed.post', 'app.bsky.feed.repost']),
+  // the CLOSED v2 subscription contract: commit events only, post + repost
+  // collections only — immutable provider configuration, never caller-supplied
+  kinds: Object.freeze(['commit']),
+  collections: Object.freeze(['app.bsky.feed.post', 'app.bsky.feed.repost']),
 });
 
 const isStr = (v) => typeof v === 'string' && v.length > 0;
@@ -45,10 +55,13 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
   const operation = payload.operation ?? payload.commit?.operation;
   const record = payload.record ?? payload.commit?.record ?? null;
   const cid = payload.cid ?? payload.commit?.cid ?? null; // content id = the immutable record VERSION (changes on edit)
-  // SOCIAL-2A: Jetstream `seq` is the provider-native commit/event identity
-  // (the event's time_us — stable per commit across cursor replay). It is the
-  // lifecycle identity that keeps CREATE/DELETE/RECREATE/DELETE distinct and
-  // the resume cursor unit. Provider-supplied only — never invented. (§9)
+  // SOCIAL-2A: Jetstream v2 `seq` is the provider-native monotonic per-event
+  // sequence number — the commit/event identity AND the resume cursor unit,
+  // stable per event across cursor replay. It is NOT a timestamp: the server
+  // event time is the separate `time` field, and neither is the post's own
+  // record.createdAt (sourceCreatedTs). It is the lifecycle identity that keeps
+  // CREATE/DELETE/RECREATE/DELETE distinct. Provider-supplied only — never
+  // invented. (§9)
   const providerEventSeq = jetstreamCursorOf(message);
   if (!isStr(did) || !isStr(collection) || !isStr(rkey) || !isStr(operation)) return { skip: true, reason: 'incomplete commit' };
   if (collection !== BLUESKY_OFFICIAL.postCollection && collection !== BLUESKY_OFFICIAL.repostCollection) return { skip: true, reason: `collection ${collection} not wanted` };
@@ -142,12 +155,22 @@ export function jetstreamCursorOf(message) {
   return Number.isSafeInteger(seq) && seq >= 0 ? seq : null;
 }
 
-// The exact approved Jetstream subscribe URL for a host, wanted collections,
-// and an optional inclusive resume cursor (at-least-once replay). Only the
-// registered hosts are ever used; a non-integer cursor is omitted (live tail).
+// The exact approved Jetstream v2 subscribe URL: deterministic parameter order
+//   kinds=commit & collections=<post> & collections=<repost> [& cursor=<seq>]
+// Commit-only, post/repost-only — never the whole network's identity/account/
+// sync surface. Only the registered hosts are ever used (no caller host); the
+// closed provider config supplies kinds/collections (no caller list). A cursor
+// is included ONLY when it is a non-negative safe integer (the durable resume
+// seq — inclusive, at-least-once); anything else is refused as resume truth and
+// omitted. No legacy v1 name (wantedCollections/wantedDids/requireHello) is
+// ever emitted — the v2 endpoint rejects them with HTTP 400.
+export const JETSTREAM_LEGACY_PARAMS = Object.freeze(['wantedCollections', 'wantedDids', 'requireHello', 'options_update']);
 export function jetstreamUrl({ host = BLUESKY_OFFICIAL.hosts[0], cursor = null } = {}) {
   if (!BLUESKY_OFFICIAL.hosts.includes(host)) throw new Error('jetstreamUrl: host not in the approved Bluesky host allowlist');
-  const params = BLUESKY_OFFICIAL.wantedCollections.map((c) => `wantedCollections=${encodeURIComponent(c)}`);
+  const params = [
+    ...BLUESKY_OFFICIAL.kinds.map((k) => `kinds=${encodeURIComponent(k)}`),
+    ...BLUESKY_OFFICIAL.collections.map((c) => `collections=${encodeURIComponent(c)}`),
+  ];
   if (Number.isSafeInteger(cursor) && cursor >= 0) params.push(`cursor=${cursor}`);
   return `wss://${host}${BLUESKY_OFFICIAL.streamPath}?${params.join('&')}`;
 }

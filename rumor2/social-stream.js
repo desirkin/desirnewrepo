@@ -171,6 +171,14 @@ export function startSocialStream({
     mode, connected: false, stopped: false, reconnects: 0, receivedCursor: null,
     lastMessageTs: null, lastEventTs: null, oversized: 0, badJson: 0, badHost: 0, connectErrors: 0, opens: 0,
     backpressureEvents: 0, paused: false,
+    // CURSOR-RESUME LAW (§11): a connect attempted WITH a resume cursor that
+    // fails before 'open' (e.g. the v2 endpoint refusing an old cursor —
+    // CursorTooOld — as an HTTP 400 handshake failure) is recorded here and
+    // the NEXT attempt still presents the SAME durable cursor. Never fall back
+    // to an uncursored live tail, never drop the cursor, never skip the gap.
+    // The global WebSocket API exposes no HTTP 400 body, so the XRPC error
+    // name cannot be read here — the failure is surfaced structurally.
+    cursorResumeFailures: 0, lastConnectCursor: null, lastCloseCode: null, lastCloseReason: null,
   };
   let socket = null;
   let stallTimer = null;
@@ -214,6 +222,7 @@ export function startSocialStream({
     if (mode === 'REPLAY') { replay(); return; }
     if (typeof socketFactory !== 'function') { log('social-stream: no socketFactory; cannot connect'); return; }
     const cursor = typeof resumeCursor === 'function' ? resumeCursor() : state.receivedCursor;
+    state.lastConnectCursor = cursor ?? null;
     const url = buildUrl ? buildUrl({ cursor }) : null;
     const host = hostOf(url);
     if (!host || !hosts.includes(host)) { state.badHost += 1; log(`social-stream: refusing non-allowlisted host ${host}`); return; } // §23 exact host allowlist
@@ -221,10 +230,22 @@ export function startSocialStream({
       socket = socketFactory({ url, subprotocol: provider?.subprotocol ?? null });
     } catch (err) { state.connectErrors += 1; scheduleReconnect('connect-throw'); return; }
     const mine = socket;
-    socket.on('open', () => { if (mine !== socket) return; state.connected = true; state.opens += 1; armStall(); log('social-stream: open'); });
+    let opened = false;
+    socket.on('open', () => { if (mine !== socket) return; opened = true; state.connected = true; state.opens += 1; armStall(); log('social-stream: open'); });
     socket.on('message', (data) => { if (mine === socket) handleRaw(data); });
     socket.on('error', () => { if (mine === socket) state.connectErrors += 1; });
-    socket.on('close', () => { if (mine !== socket) return; state.connected = false; clearStall(); if (!state.stopped) scheduleReconnect('close'); });
+    socket.on('close', (ev) => {
+      if (mine !== socket) return;
+      state.lastCloseCode = Number.isFinite(ev?.code) ? ev.code : null;
+      state.lastCloseReason = typeof ev?.reason === 'string' && ev.reason.length > 0 ? ev.reason.slice(0, 200) : null;
+      if (!opened && cursor !== null && cursor !== undefined) {
+        // the handshake failed while presenting a resume cursor: fail closed —
+        // the durable cursor is NOT advanced or dropped; the reconnect re-presents it
+        state.cursorResumeFailures += 1;
+        log(`social-stream: connect with resume cursor ${cursor} failed before open (${state.lastCloseReason ?? 'no reason exposed'}) — keeping the durable cursor, no live-tail fallback`);
+      }
+      state.connected = false; clearStall(); if (!state.stopped) scheduleReconnect('close');
+    });
   }
 
   function replay() {
@@ -274,6 +295,8 @@ export function startSocialStream({
         lastMessageTs: state.lastMessageTs, lastEventTs: state.lastEventTs,
         oversized: state.oversized, badJson: state.badJson, badHost: state.badHost, connectErrors: state.connectErrors, opens: state.opens,
         backpressureEvents: state.backpressureEvents,
+        cursorResumeFailures: state.cursorResumeFailures, lastConnectCursor: state.lastConnectCursor,
+        lastCloseCode: state.lastCloseCode, lastCloseReason: state.lastCloseReason,
         intake: intake.stats(),
       };
     },

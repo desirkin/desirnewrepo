@@ -8,8 +8,8 @@ import {
   socialObservationToEvent, validateSocialEvent, reconstructSocialWitness, socialCursorEvent, validateSocialCursorEvent,
   replaySocialHistory, socialCursorIdentity, SOCIAL_EVENT_KEYS, SOCIAL_CURSOR_EVENT_KEYS, isSocialEventType,
 } from '../rumor2/social-settle.js';
-import { socialIntake } from '../rumor2/social-stream.js';
-import { jetstreamCommitToRaw, jetstreamCursorOf, jetstreamUrl, BLUESKY_OFFICIAL } from '../rumor2/providers/bluesky-official.js';
+import { socialIntake, startSocialStream } from '../rumor2/social-stream.js';
+import { jetstreamCommitToRaw, jetstreamCursorOf, jetstreamUrl, JETSTREAM_LEGACY_PARAMS, BLUESKY_OFFICIAL } from '../rumor2/providers/bluesky-official.js';
 import { neynarEventToRaw } from '../rumor2/providers/farcaster-official.js';
 import { SOCIAL_PROVIDER_IDS } from '../rumor2/social-registry.js';
 
@@ -92,14 +92,120 @@ test('LIFE-5 (§13). providerEventSeq is closed-validated: type, range, provider
   assert.equal(normalizeSocialObservation({ provider: 'BLUESKY_OFFICIAL', providerKind: 'SOCIAL_MICROBLOG', nativePostId: 'at://x/p/1', nativeAuthorId: 'did:x', text: 't', providerEventSeq: 'x' }, { nowMs: NOW }).reject, true, 'normalization refuses a malformed seq');
 });
 
-test('LIFE-6. the approved Jetstream URL builder: exact hosts, wanted collections, inclusive resume cursor', () => {
-  const u = jetstreamUrl({ cursor: 12345 });
-  assert.ok(u.startsWith(`wss://${BLUESKY_OFFICIAL.hosts[0]}${BLUESKY_OFFICIAL.streamPath}?`));
-  assert.ok(u.includes('wantedCollections=app.bsky.feed.post') && u.includes('wantedCollections=app.bsky.feed.repost'));
-  assert.ok(u.endsWith('cursor=12345'));
-  assert.ok(!jetstreamUrl({ cursor: null }).includes('cursor='), 'no cursor => live tail');
-  assert.throws(() => jetstreamUrl({ host: 'evil.example.com' }), /allowlist/);
+// ---- SOCIAL-2A LIVE-WIRE PROTOCOL SEAL: the current Jetstream v2 contract ----
+test('V2-1/V2-3. jetstreamUrl (no cursor): kinds=commit + two collections=, deterministic order, NO legacy v1 names', () => {
+  const u = jetstreamUrl({ cursor: null });
+  assert.equal(u, `wss://${BLUESKY_OFFICIAL.hosts[0]}${BLUESKY_OFFICIAL.streamPath}?kinds=commit&collections=app.bsky.feed.post&collections=app.bsky.feed.repost`, 'exact deterministic v2 URL');
+  assert.ok(u.includes('kinds=commit'), 'commit events only');
+  assert.equal((u.match(/collections=/g) ?? []).length, 2, 'exactly two collections filters');
+  assert.ok(!u.includes('cursor='), 'no cursor => live tail');
+  for (const legacy of JETSTREAM_LEGACY_PARAMS) assert.ok(!u.includes(legacy), `legacy v1 parameter ${legacy} is never sent to the v2 endpoint`);
+  assert.deepEqual([...BLUESKY_OFFICIAL.kinds], ['commit']);
+  assert.deepEqual([...BLUESKY_OFFICIAL.collections], ['app.bsky.feed.post', 'app.bsky.feed.repost']);
+  assert.equal('wantedCollections' in BLUESKY_OFFICIAL, false, 'no misleading v1 property');
+  assert.ok(Object.isFrozen(BLUESKY_OFFICIAL.collections) && Object.isFrozen(BLUESKY_OFFICIAL.kinds), 'closed immutable provider configuration');
+  assert.equal(BLUESKY_OFFICIAL.streamPath, '/xrpc/network.bsky.jetstream.subscribeEvents');
+  assert.equal(BLUESKY_OFFICIAL.subprotocol, 'xrpc.v1.json');
 });
+
+test('V2-2/V2-9. jetstreamUrl (cursor): the durable seq is appended LAST; an invalid cursor is never resume truth', () => {
+  const u = jetstreamUrl({ cursor: 12345 });
+  assert.equal(u, `wss://${BLUESKY_OFFICIAL.hosts[0]}${BLUESKY_OFFICIAL.streamPath}?kinds=commit&collections=app.bsky.feed.post&collections=app.bsky.feed.repost&cursor=12345`);
+  for (const bad of [-1, 1.5, '12345', NaN, Infinity, undefined, null, {}])
+    assert.ok(!jetstreamUrl({ cursor: bad }).includes('cursor='), `invalid cursor ${String(bad)} is omitted, never sent as resume truth`);
+  for (const legacy of JETSTREAM_LEGACY_PARAMS) for (const host of BLUESKY_OFFICIAL.hosts) assert.ok(!jetstreamUrl({ host, cursor: 1 }).includes(legacy));
+});
+
+test('V2-8. host allowlist is exact — an evil host is refused, no caller-controlled host', () => {
+  assert.throws(() => jetstreamUrl({ host: 'evil.example.com' }), /allowlist/);
+  assert.throws(() => jetstreamUrl({ host: 'jetstream.us-east.bsky.network.evil.com' }), /allowlist/);
+  for (const host of BLUESKY_OFFICIAL.hosts) assert.ok(jetstreamUrl({ host }).startsWith(`wss://${host}/`));
+});
+
+// the CURRENT official v2 wrapped message shape (§8)
+const V2_COMMIT = {
+  $type: 'message',
+  payload: {
+    $type: 'network.bsky.jetstream.subscribeEvents#commit',
+    seq: 12345, did: 'did:plc:v2author', time: '2026-09-05T12:00:09.000Z', rev: '3l5ihl2v7z',
+    operation: 'create', collection: 'app.bsky.feed.post', rkey: '3l5ihkeyv2',
+    cid: 'bafyreiv2cid', record: { $type: 'app.bsky.feed.post', createdAt: '2026-09-05T12:00:00.000Z', text: '$FOO listing rumor' },
+  },
+};
+test('V2-4. the current official v2 wrapped commit maps: seq->providerEventSeq/cursor, DID->author, collection+rkey->post id, CID->version, createdAt->sourceCreatedTs (never `time`)', () => {
+  assert.equal(jetstreamCursorOf(V2_COMMIT), 12345, 'seq is the provider cursor');
+  const r = jetstreamCommitToRaw(V2_COMMIT);
+  assert.equal(r.raw.providerEventSeq, 12345);
+  assert.equal(r.raw.nativeAuthorId, 'did:plc:v2author');
+  assert.equal(r.raw.nativePostId, 'at://did:plc:v2author/app.bsky.feed.post/3l5ihkeyv2');
+  assert.equal(r.raw.nativeVersionId, 'bafyreiv2cid');
+  assert.equal(r.raw.sourceCreatedTs, Date.parse('2026-09-05T12:00:00.000Z'), 'record.createdAt');
+  assert.notEqual(r.raw.sourceCreatedTs, Date.parse(V2_COMMIT.payload.time), 'the server `time` field is NOT the source-created clock');
+  assert.notEqual(r.raw.sourceCreatedTs, 12345, 'seq is NOT a timestamp');
+  const o = normalizeSocialObservation(r.raw, { nowMs: NOW }).observation;
+  assert.equal(o.normalizedText, '$foo listing rumor');
+  assert.equal(o.providerEventSeq, 12345); assert.equal(o.relation, 'ORIGINAL');
+  const { event } = socialObservationToEvent(o);
+  assert.equal(validateSocialEvent(event, V), null, 'the v2 fixture settles through the closed durable contract');
+});
+
+test('V2-5. the current v2 delete maps a tombstone with providerEventSeq and UNKNOWN source time', () => {
+  const del = { $type: 'message', payload: { $type: 'network.bsky.jetstream.subscribeEvents#commit', seq: 12346, did: 'did:plc:v2author', time: '2026-09-05T12:00:10.000Z', rev: '3l5ihl2v80', operation: 'delete', collection: 'app.bsky.feed.post', rkey: '3l5ihkeyv2' } };
+  const r = jetstreamCommitToRaw(del);
+  assert.equal(r.raw.editState, 'TOMBSTONED'); assert.equal(r.raw.providerEventSeq, 12346);
+  assert.equal(r.raw.sourceCreatedTs, null, 'the delete commit `time` is never the original creation');
+  assert.equal(r.raw.nativePostId, 'at://did:plc:v2author/app.bsky.feed.post/3l5ihkeyv2');
+  assert.equal(r.raw.parentNativePostId, null); assert.equal(r.raw.nativeVersionId, null);
+});
+
+test('V2-6. the current v2 repost maps an explicit REPOST with its parent and seq', () => {
+  const rp = { $type: 'message', payload: { $type: 'network.bsky.jetstream.subscribeEvents#commit', seq: 12347, did: 'did:plc:fan', time: '2026-09-05T12:00:11.000Z', rev: '3l5ihl2v81', operation: 'create', collection: 'app.bsky.feed.repost', rkey: '3l5ihrepost', cid: 'bafyrepost', record: { $type: 'app.bsky.feed.repost', createdAt: '2026-09-05T12:00:05.000Z', subject: { uri: 'at://did:plc:v2author/app.bsky.feed.post/3l5ihkeyv2', cid: 'bafyreiv2cid' } } } };
+  const r = jetstreamCommitToRaw(rp);
+  assert.equal(r.raw.relation, 'REPOST'); assert.equal(r.raw.parentNativePostId, 'at://did:plc:v2author/app.bsky.feed.post/3l5ihkeyv2');
+  assert.equal(r.raw.providerEventSeq, 12347); assert.equal(r.raw.sourceCreatedTs, Date.parse('2026-09-05T12:00:05.000Z'));
+});
+
+test('V2-7. identity / account / sync frames are skipped safely if ever presented to the mapper', () => {
+  for (const kind of ['identity', 'account', 'sync']) {
+    const m = { $type: 'message', payload: { $type: `network.bsky.jetstream.subscribeEvents#${kind}`, seq: 99, did: 'did:plc:x', time: iso(C), kind } };
+    const r = jetstreamCommitToRaw(m);
+    assert.equal(r.skip, true, `${kind} skipped`); assert.equal(r.raw, undefined);
+    assert.equal(jetstreamCursorOf(m), 99, 'its seq still counts toward the received cursor diagnostic');
+  }
+});
+
+test('V2-10. an inclusive replay of the same seq (cursor=N redelivers N) dedupes safely', () => {
+  const intake = socialIntake({ provider: BLUESKY_OFFICIAL, mapCommit: jetstreamCommitToRaw, cursorOf: jetstreamCursorOf, filter: buildSocialFilter({ terms: ['FOO'] }), now: () => NOW });
+  assert.equal(intake.offer(V2_COMMIT).outcome, 'enqueued');
+  intake.settled(intake.drain());
+  assert.equal(intake.cursor().contiguous, 12345);
+  assert.equal(intake.offer(V2_COMMIT).outcome, 'deduped', 'the inclusive redelivery at cursor N is one truth');
+  assert.equal(intake.cursor().contiguous, 12345, 'no regression, no duplicate');
+});
+
+test('V2-11 (§11 CursorTooOld law). a connect that fails while presenting a resume cursor is surfaced and the SAME cursor is re-presented — never a live-tail fallback', () => {
+  const timers = fakeTimers();
+  const intake = socialIntake({ provider: BLUESKY_OFFICIAL, mapCommit: jetstreamCommitToRaw, cursorOf: jetstreamCursorOf, filter: buildSocialFilter({ terms: ['FOO'] }), now: () => NOW });
+  const urls = []; const sockets = [];
+  const s = startSocialStream({
+    provider: BLUESKY_OFFICIAL, intake, mode: 'LIVE',
+    buildUrl: ({ cursor }) => { urls.push(cursor); return jetstreamUrl({ cursor }); },
+    resumeCursor: () => 500,
+    socketFactory: () => { const k = fakeSocket(); sockets.push(k); return k; },
+    setTimeoutImpl: timers.setTimeoutImpl, clearTimeoutImpl: timers.clearTimeoutImpl, backoffBaseMs: 1, maxReconnects: 3,
+  }).start();
+  // the v2 endpoint refuses the handshake (HTTP 400 CursorTooOld) — the socket closes before 'open'
+  sockets[0].emit('close', { code: 1006, reason: '' });
+  const st = s.status();
+  assert.equal(st.cursorResumeFailures, 1); assert.equal(st.lastConnectCursor, 500); assert.equal(st.lastCloseCode, 1006);
+  assert.equal(st.resumeCursor, 500, 'the durable cursor is untouched');
+  timers.runAll();
+  assert.equal(urls[1], 500, 'the reconnect re-presents the SAME durable cursor — no uncursored live tail, no gap skip');
+  assert.ok(jetstreamUrl({ cursor: urls[1] }).endsWith('cursor=500'));
+  s.stop();
+});
+function fakeTimers() { const q = []; let id = 1; return { setTimeoutImpl: (cb, ms) => { q.push({ id, cb, ms }); return id++; }, clearTimeoutImpl: (t) => { const i = q.findIndex((x) => x.id === t); if (i >= 0) q.splice(i, 1); }, runAll: () => { let g = 0; while (q.length && g++ < 1000) q.shift().cb(); } }; }
+function fakeSocket() { const h = {}; return { on(e, c) { h[e] = c; }, emit(e, d) { h[e]?.(d); }, close() { this.closed = true; h.close?.(); }, closed: false }; }
 
 // ---- cursor event + social replay --------------------------------------------
 test('CURSOR-1 (§16). the durable cursor event is closed, deterministic, and validated', () => {

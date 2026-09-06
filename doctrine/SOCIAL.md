@@ -117,7 +117,21 @@ API blobs, no unbounded fields. Key pieces:
 
 - **Bluesky (live, first ear).** `rumor2/providers/bluesky-official.js` maps
   Jetstream v2 commit messages (post/repost/reply/quote/delete) to the shared
-  contract; `rumor2/social-stream.js` is the bounded transport: exact host
+  contract. **Live wire (SOCIAL-2A protocol seal):** the subscription is the
+  current v2 XRPC contract — `/xrpc/network.bsky.jetstream.subscribeEvents`,
+  subprotocol `xrpc.v1.json`, query `kinds=commit&collections=app.bsky.feed.post&
+  collections=app.bsky.feed.repost[&cursor=<durable seq>]` (deterministic order;
+  commit events only, post/repost only). Legacy v1 names (`wantedCollections`,
+  `wantedDids`, `requireHello`, `options_update`) are rejected by v2 and are never
+  sent. Jetstream `seq` is the monotonic per-event sequence / resume cursor
+  (inclusive, at-least-once); the server `time` field is a separate clock; neither
+  is the post's `record.createdAt` (`sourceCreatedTs`). A connect that fails while
+  presenting a resume cursor (e.g. v2 `CursorTooOld`, an HTTP 400 handshake) is
+  surfaced in stream status (`cursorResumeFailures`, `lastConnectCursor`,
+  `lastCloseCode/Reason`) and the same durable cursor is re-presented — never a
+  live-tail fallback, never a skipped gap (the global WebSocket API exposes no HTTP
+  400 body, so the XRPC error name itself is not readable; archive backfill is
+  future work); `rumor2/social-stream.js` is the bounded transport: exact host
   allowlist, one connection, bounded reconnect with exponential backoff,
   heartbeat/stall detection, max message size, closed JSON parse, bounded
   backpressured queue, clean shutdown, LIVE + fixture REPLAY modes. Injected
