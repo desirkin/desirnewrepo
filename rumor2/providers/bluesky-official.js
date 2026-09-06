@@ -56,10 +56,15 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
   // DELETE / tombstone — no record, no content. Preserve as a deletion
   // observation; original knowledge is never rewritten (§17).
   if (operation === 'delete') {
+    // A Jetstream delete carries no prior record: no text, no subject/parent,
+    // no thread. Do NOT fabricate the deleted post's relationship (§17/§18) —
+    // relation is UNKNOWN and parent is null, never a REPOST with a null
+    // parent (which the CREATE invariant would reject, dropping the tombstone).
+    // The stable socialSourceId ties this DELETE back to the earlier CREATE.
     return {
       raw: {
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
-        text: '', relation: collection === BLUESKY_OFFICIAL.repostCollection ? 'REPOST' : 'ORIGINAL',
+        text: '', relation: 'UNKNOWN',
         parentNativePostId: null, editState: 'TOMBSTONED',
         canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null,
         sourceCreatedTs: Number.isFinite(eventMs) ? eventMs : Date.now(),

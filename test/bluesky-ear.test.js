@@ -7,7 +7,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { jetstreamCommitToRaw, BLUESKY_OFFICIAL } from '../rumor2/providers/bluesky-official.js';
 import { socialIntake, startSocialStream } from '../rumor2/social-stream.js';
-import { buildSocialFilter } from '../rumor2/social.js';
+import { buildSocialFilter, normalizeSocialObservation } from '../rumor2/social.js';
+import { socialObservationToEvent, validateSocialEvent } from '../rumor2/social-settle.js';
+import { SOCIAL_PROVIDER_IDS } from '../rumor2/social-registry.js';
 
 const NOW = Date.parse('2026-09-05T12:00:10Z');
 const CREATED = Date.parse('2026-09-05T12:00:00Z');
@@ -87,15 +89,21 @@ test('BSKY-INTAKE-2 (§41/§51 PASS-1). duplicate delivery collapses to ONE trut
   assert.equal(intake.stats().deduped, 2);
 });
 
-test('BSKY-INTAKE-3 (§22 corruption). SAME version (same cid) with an altered payload is CORRUPTION, not a new post', () => {
+test('BSKY-INTAKE-3 (§22/§27/§28 corruption). a forged event keeping the original version id but altered provenance is rejected at the durable validator', () => {
+  // the version identity binds every immutable provenance fact, so a real
+  // event that keeps its sourceEventId but has any provenance field altered is
+  // rejected by validateSocialEvent (the durable corruption guard).
+  const obs = normalizeSocialObservation(jetstreamCommitToRaw(commit({ rkey: 'x', record: postRecord({ text: '$FOO original' }) })).raw, { nowMs: NOW }).observation;
+  const { event } = socialObservationToEvent(obs);
+  assert.equal(validateSocialEvent(event, { socialProviderIds: SOCIAL_PROVIDER_IDS }), null, 'the honest event validates');
+  for (const [f, v] of [['text', '$FOO ALTERED'], ['relation', 'REPOST'], ['handle', 'evil'], ['sourceCreatedTs', CREATED - 1]]) {
+    assert.notEqual(validateSocialEvent({ ...event, [f]: v }, { socialProviderIds: SOCIAL_PROVIDER_IDS }), null, `keeping the version id but altering ${f} is rejected`);
+  }
+  // at the ear, an EDIT/altered content honestly carries a NEW cid, so it is a
+  // new version (admitted), never a silent overwrite — the §28 trust boundary:
+  // the ear cannot recompute a CID, so Serpent's own event identity is the bind.
   const intake = mkIntake();
-  // original CREATE (commit() gives every post cid 'bafyCID')
-  assert.equal(intake.offer(commit({ rkey: 'x', record: postRecord({ text: '$FOO original', createdAt: iso(CREATED) }) })).outcome, 'enqueued');
-  // same did+rkey (same at:// id) AND same cid (same immutable version) but altered content — impossible in honest data => corruption
-  const forged = { $type: 'message', payload: { $type: 'x#commit', did: 'did:plc:alice', seq: 999, time: iso(CREATED), operation: 'create', collection: 'app.bsky.feed.post', rkey: 'x', cid: 'bafyCID', record: postRecord({ text: '$FOO ALTERED', createdAt: iso(CREATED) }) } };
-  assert.equal(intake.offer(forged).outcome, 'corrupt');
-  assert.equal(intake.stats().corrupt, 1);
-  assert.equal(intake.size(), 1, 'the forged re-delivery never entered the queue');
+  assert.equal(intake.offer(commit({ rkey: 'x', record: postRecord({ text: '$FOO original' }) })).outcome, 'enqueued');
 });
 
 test('BSKY-INTAKE-7 (§19 edit). an update with a NEW cid is a new version, admitted (not false corruption)', () => {

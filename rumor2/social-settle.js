@@ -20,7 +20,7 @@
 // version is corruption (caught by the journal's identity/payload law).
 import { contentHash, canonicalJson } from './truth.js';
 import {
-  socialSourceIdentity, socialAuthorIdentity, socialVersionIdentity, lifecycleForEditState,
+  socialSourceIdentity, socialAuthorIdentity, socialVersionIdentity, socialMetaHash,
   normalizeSocialText, SOCIAL_RELATION_KINDS, ECHO_RELATIONS, SOCIAL_LIFECYCLE_STATES,
   R2SS_RE, R2SA_RE, R2SV_RE, MAX_SOCIAL_TEXT_CHARS, MAX_NATIVE_ID_CHARS, MAX_SOCIAL_HANDLE_CHARS,
 } from './social.js';
@@ -103,9 +103,15 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
   if (kErr) return `social event: ${kErr}`;
   if (event.type !== SOCIAL_EVENT_TYPE) return 'social event: wrong type';
   if (!isStr(event.provider, 100)) return 'social event: provider invalid';
-  if (socialProviderIds && !socialProviderIds.includes(event.provider)) return `social event: ${event.provider} not a registered social provider`;
+  // AUTHORITATIVE registry, CLOSED BY DEFAULT (§13): the provider MUST exist in
+  // the social registry and its kind MUST match — validation never depends on a
+  // caller remembering to pass an allowlist. An optional caller list may only
+  // NARROW this authoritative set; it can NEVER authorize an unregistered
+  // provider (authoritative ∩ optional, never optional-replaces-authoritative).
   const meta = socialProviderById(event.provider);
-  if (meta && event.providerKind !== meta.providerKind) return 'social event: providerKind disagrees with the social registry';
+  if (!meta) return `social event: ${event.provider} is not in the authoritative social registry`;
+  if (event.providerKind !== meta.providerKind) return 'social event: providerKind disagrees with the social registry';
+  if (socialProviderIds && !socialProviderIds.includes(event.provider)) return `social event: ${event.provider} excluded by the caller narrowing allowlist`;
   if (!isStr(event.nativePostId, MAX_NATIVE_ID_CHARS)) return 'social event: nativePostId invalid';
   if (!isStr(event.nativeAuthorId, MAX_NATIVE_ID_CHARS)) return 'social event: nativeAuthorId invalid';
   // identities RE-DERIVED from immutable facts — forged ids die here
@@ -114,19 +120,18 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
   if (!R2SA_RE.test(event.socialAuthorId) || event.socialAuthorId !== socialAuthorIdentity({ provider: event.provider, nativeAuthorId: event.nativeAuthorId }))
     return 'social event: socialAuthorId is not the derived author identity';
   if (!SOCIAL_LIFECYCLE_STATES.includes(event.lifecycle)) return 'social event: unknown lifecycle';
-  if (event.lifecycle !== lifecycleForEditState(({ CREATE: 'ORIGINAL', EDIT: 'EDITED', DELETE: 'DELETED', TOMBSTONE: 'TOMBSTONED' })[event.lifecycle]))
-    return 'social event: lifecycle not a canonical value';
   if (event.nativeVersionId !== null && !isStr(event.nativeVersionId, MAX_NATIVE_ID_CHARS)) return 'social event: nativeVersionId invalid';
   if (typeof event.text !== 'string' || event.text.length > MAX_SOCIAL_TEXT_CHARS) return 'social event: text invalid';
   if (event.textHash !== contentHash(normalizeSocialText(event.text))) return 'social event: textHash is not the derived content hash';
-  // version identity RE-DERIVED — an altered version basis cannot ride a real id
-  if (!R2SV_RE.test(event.sourceEventId) || event.sourceEventId !== socialVersionIdentity({ socialSourceId: event.socialSourceId, lifecycle: event.lifecycle, nativeVersionId: event.nativeVersionId, textHash: event.textHash }))
-    return 'social event: sourceEventId is not the derived version identity';
-  if (!/^[0-9a-f]{40}$/.test(event.metaHash)) return 'social event: metaHash invalid';
   if (!SOCIAL_RELATION_KINDS.includes(event.relation)) return 'social event: unknown relation';
   if (event.parentNativePostId !== null && !isStr(event.parentNativePostId, MAX_NATIVE_ID_CHARS)) return 'social event: parentNativePostId invalid';
-  if (ECHO_RELATIONS.includes(event.relation) || event.relation === 'REPLY') {
-    if (event.parentNativePostId === null) return `social event: ${event.relation} without a parent`;
+  // lifecycle-aware relationship law (§19): CREATE/EDIT echoes need a parent and
+  // an ORIGINAL forbids one; a DELETE/TOMBSTONE may legitimately omit both.
+  const deletion = event.lifecycle === 'DELETE' || event.lifecycle === 'TOMBSTONE';
+  if (!deletion) {
+    if ((ECHO_RELATIONS.includes(event.relation) || event.relation === 'REPLY') && event.parentNativePostId === null)
+      return `social event: ${event.relation} without a parent`;
+    if (event.relation === 'ORIGINAL' && event.parentNativePostId !== null) return 'social event: ORIGINAL relation cannot carry a parent';
   }
   if (event.threadId !== null && !isStr(event.threadId, MAX_NATIVE_ID_CHARS)) return 'social event: threadId invalid';
   if (event.handle !== null && !isStr(event.handle, MAX_SOCIAL_HANDLE_CHARS)) return 'social event: handle invalid';
@@ -135,6 +140,22 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
   if (event.retrievedTs > event.knownAtTs) return 'social event: retrieved after known';
   if (event.ts !== iso(event.knownAtTs)) return 'social event: ts disagrees with knownAtTs';
   if (!okEngagement(event.engagement)) return 'social event: engagement invalid';
+  if (!/^[0-9a-f]{40}$/.test(event.metaHash)) return 'social event: metaHash malformed';
+  // BIND every immutable durable fact: metaHash and sourceEventId are BOTH
+  // re-derived from the ONE canonical fact set (§4/§5/§6). relation, parent,
+  // thread, handle, source time, native version, text, lifecycle, and the
+  // first-known engagement snapshot cannot change without either producing a
+  // legitimately re-derived NEW version identity or being rejected here.
+  const facts = {
+    provider: event.provider, providerKind: event.providerKind, nativePostId: event.nativePostId,
+    nativeAuthorId: event.nativeAuthorId, lifecycle: event.lifecycle, relation: event.relation,
+    parentNativePostId: event.parentNativePostId, threadId: event.threadId, nativeVersionId: event.nativeVersionId,
+    handle: event.handle, textHash: event.textHash, sourceCreatedTs: event.sourceCreatedTs,
+    engagement: event.engagement, socialSourceId: event.socialSourceId,
+  };
+  if (event.metaHash !== socialMetaHash(facts)) return 'social event: metaHash is not the re-derived canonical hash';
+  if (!R2SV_RE.test(event.sourceEventId) || event.sourceEventId !== socialVersionIdentity(facts))
+    return 'social event: sourceEventId is not the derived version identity';
   return null;
 }
 

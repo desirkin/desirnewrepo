@@ -149,15 +149,28 @@ Durable facts preserved: `socialSourceId` (stable post identity), `provider`,
 clocks. Every identity is **re-derived** on validation — a forged id cannot
 authenticate altered facts.
 
-**Post identity vs version (§10):** `socialSourceId` is the stable post identity
-(`provider`+`nativePostId`); the event's `sourceEventId` is a distinct **version
-identity** derived from the native version id (CID) when present, else the content
-hash. A legitimate edit (new CID) is a new version; an altered re-delivery of the
-**same** version collapses to the same id and is caught as corruption by the ear
-and the journal. Edits/deletions are appended as new lifecycle versions —
-original truth is never rewritten. Engagement is the **first-known snapshot only**
-(diagnostic propagation metadata, never confirmation, never trade authority);
-later mutation is deferred to a future versioned metrics event.
+**Post identity vs version (§10), and the integrity seal:** `socialSourceId` is
+the stable post identity (`provider`+`nativePostId`); the event's `sourceEventId`
+is a distinct **version identity** that BINDS every immutable provenance fact —
+lifecycle, relation, parent, thread, native version id (CID) where supplied,
+handle, text hash, and source-creation time — via one canonical
+`socialProvenanceFacts` recipe shared by mapper, settle, and validator. `metaHash`
+re-derives that same set plus the first-known engagement snapshot. Validation
+re-derives BOTH, so no stored provenance/diagnostic fact can be altered under the
+same event identity: changing any of them either yields a legitimately re-derived
+new version or is rejected. A legitimate edit (new CID/content) is a new version;
+a delete is a new lifecycle version; original truth is never rewritten. Engagement
+is the **first-known snapshot only** (diagnostic propagation metadata, never
+confirmation, never trade authority; a metrics re-delivery dedupes to the first,
+never forks a version); later mutation is deferred to a future versioned metrics
+event. Trust boundary (§28): Serpent does not retain enough AT-record bytes to
+recompute a Bluesky CID, so the CID is native version *evidence* while Serpent's
+own event identity provides the immutable journal binding — no field is trusted
+merely because a valid CID accompanies it. Deletions never fabricate a missing
+parent/target (relation `UNKNOWN`, parent `null`); the stable `socialSourceId`
+ties a DELETE back to its earlier CREATE. `validateSocialEvent` is closed by
+default against the authoritative social registry — an optional caller allowlist
+can only narrow it, never authorize an unregistered provider.
 
 `test/social-durable.test.js` (real PostgreSQL) proves: round-trip with all facts
 intact + identities re-derived; the writer-epoch fence applies (no epoch → refused);

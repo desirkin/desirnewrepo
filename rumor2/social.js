@@ -121,15 +121,50 @@ export const R2SA_RE = /^r2sa-[0-9a-f]{40}$/;
 export const SOCIAL_LIFECYCLE_STATES = Object.freeze(['CREATE', 'EDIT', 'DELETE', 'TOMBSTONE']);
 const LIFECYCLE_BY_EDIT = Object.freeze({ ORIGINAL: 'CREATE', EDITED: 'EDIT', DELETED: 'DELETE', TOMBSTONED: 'TOMBSTONE' });
 export const lifecycleForEditState = (e) => LIFECYCLE_BY_EDIT[e] ?? 'CREATE';
-// Version/lifecycle identity. Basis is the provider-native IMMUTABLE version id
-// (e.g. a Bluesky record CID) when present, else the content hash. So a
-// legitimate EDIT (new cid / new content) is a NEW version, while an altered
-// re-delivery of the SAME version (same cid, different payload) collapses to
-// the same version id and is caught as corruption by the journal / ear. This
-// is deterministic and replay-stable — it never uses wall-clock. (§10/§19/§22)
-export function socialVersionIdentity({ socialSourceId, lifecycle, nativeVersionId, textHash }) {
-  const basis = typeof nativeVersionId === 'string' && nativeVersionId.length > 0 ? `cid:${nativeVersionId}` : `txt:${textHash ?? ''}`;
-  return `r2sv-${contentHash(canonicalJson({ socialSourceId, lifecycle, basis }))}`;
+// The ONE canonical set of IMMUTABLE durable social provenance facts (§4).
+// Every field here is historical truth for a version and is bound into both the
+// version identity and the metaHash — the single source of truth, so no
+// duplicate hash recipe drifts across mapper/settle/validator. Engagement and
+// the retrieved/known clocks are DELIBERATELY excluded from the version facts:
+// engagement is a mutable provider counter (bound separately via metaHash so a
+// stored snapshot can't be altered, but not part of the version id so a
+// legitimate metrics re-delivery dedupes rather than forking a new version —
+// §8); retrieved/known are Serpent's acquisition clocks, validated by the
+// point-in-time law, never part of immutable post truth.
+export function socialProvenanceFacts(f) {
+  return {
+    provider: f.provider, providerKind: f.providerKind,
+    nativePostId: f.nativePostId, nativeAuthorId: f.nativeAuthorId,
+    lifecycle: f.lifecycle, relation: f.relation,
+    parentNativePostId: f.parentNativePostId ?? null,
+    threadId: f.threadId ?? null,
+    nativeVersionId: f.nativeVersionId ?? null,
+    handle: f.handle ?? null,
+    textHash: f.textHash,
+    sourceCreatedTs: f.sourceCreatedTs,
+  };
+}
+// canonical bounded engagement snapshot (first-known) — a stable 6-key shape so
+// metaHash re-derivation is order/shape independent
+export function canonicalEngagement(e) {
+  if (e === null || e === undefined) return null;
+  return { likes: e.likes ?? null, reposts: e.reposts ?? null, replies: e.replies ?? null, quotes: e.quotes ?? null, views: e.views ?? null, upvotes: e.upvotes ?? null };
+}
+export const socialVersionHash = (f) => contentHash(canonicalJson(socialProvenanceFacts(f)));
+// metaHash binds ALL immutable durable facts INCLUDING the first-known
+// engagement snapshot — re-derived and verified in validation so no stored
+// provenance/diagnostic fact can be silently altered later (§5).
+export const socialMetaHash = (f) => contentHash(canonicalJson({ ...socialProvenanceFacts(f), engagement: canonicalEngagement(f.engagement) }));
+
+// Version/lifecycle identity. It BINDS the stable post identity plus EVERY
+// immutable provenance fact (via socialVersionHash): a change to lifecycle,
+// relation, parent, thread, native version id, handle, text, or source time
+// yields a DIFFERENT version — so "same sourceEventId + changed immutable
+// provenance fact" is impossible; keeping the old id makes validation reject
+// (§6). Deterministic and replay-stable — never wall-clock. A legitimate edit
+// (new content/CID) is a new version; a delete is a new lifecycle version.
+export function socialVersionIdentity(f) {
+  return `r2sv-${contentHash(canonicalJson({ socialSourceId: f.socialSourceId, versionHash: socialVersionHash(f) }))}`;
 }
 export const R2SV_RE = /^r2sv-[0-9a-f]{40}$/;
 
@@ -218,11 +253,21 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   if (!SOCIAL_RELATION_KINDS.includes(relation)) return { reject: true, reason: 'relation not a known kind' };
   const editState = raw.editState ?? 'ORIGINAL';
   if (!SOCIAL_EDIT_STATES.includes(editState)) return { reject: true, reason: 'editState not a known kind' };
-  // an echo/reply/quote must name the parent it derives from
   const parentNativePostId = raw.parentNativePostId ?? null;
   if (parentNativePostId !== null && !isNonEmptyStr(parentNativePostId, MAX_NATIVE_ID_CHARS)) return { reject: true, reason: 'parentNativePostId invalid' };
-  if ((relation === 'REPOST' || relation === 'QUOTE' || relation === 'REPLY' || relation === 'CROSSPOST') && parentNativePostId === null)
-    return { reject: true, reason: `${relation} without a parent native id` };
+  // LIFECYCLE-AWARE relationship law (§19): a CREATE/EDIT echo (repost/quote/
+  // reply/crosspost) must name its parent, and an ORIGINAL must not carry one
+  // (contradictory relationship data is never silently ignored). A DELETE/
+  // TOMBSTONE may legitimately omit prior relationship data — the provider
+  // deletion payload need not repeat it (relation UNKNOWN, parent null) — so it
+  // is NOT held to the create-time invariants and its tombstone is never dropped.
+  const isDeletion = editState === 'DELETED' || editState === 'TOMBSTONED';
+  if (!isDeletion) {
+    if ((relation === 'REPOST' || relation === 'QUOTE' || relation === 'REPLY' || relation === 'CROSSPOST') && parentNativePostId === null)
+      return { reject: true, reason: `${relation} without a parent native id` };
+    if (relation === 'ORIGINAL' && parentNativePostId !== null)
+      return { reject: true, reason: 'ORIGINAL relation cannot carry a parent — contradictory relationship data' };
+  }
   const handle = raw.handle ?? null;
   if (handle !== null && !isNonEmptyStr(handle, MAX_SOCIAL_HANDLE_CHARS)) return { reject: true, reason: 'handle invalid' };
   const displayName = raw.displayName ?? null;
@@ -255,12 +300,16 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   if (!socialSourceId || !socialAuthorId) return { reject: true, reason: 'identity derivation failed' };
   // a bounded deterministic hash of the immutable native metadata — lets a
   // re-delivery with altered facts be detected as corruption downstream
-  const metaHash = contentHash(canonicalJson({
-    provider, providerKind, nativePostId, nativeAuthorId, relation, parentNativePostId,
-    sourceCreatedTs: clocks.sourceCreatedTs, textHash: hash, editState, nativeVersionId,
-  }));
   const lifecycle = lifecycleForEditState(editState);
-  const socialVersionId = socialVersionIdentity({ socialSourceId, lifecycle, nativeVersionId, textHash: hash });
+  // ONE canonical fact set feeds BOTH the metaHash and the version identity —
+  // no duplicate hash recipe (§4). Every immutable durable fact is bound.
+  const facts = {
+    provider, providerKind, nativePostId, nativeAuthorId, lifecycle, relation, parentNativePostId,
+    threadId, nativeVersionId, handle, textHash: hash, sourceCreatedTs: clocks.sourceCreatedTs,
+    engagement, socialSourceId,
+  };
+  const metaHash = socialMetaHash(facts);
+  const socialVersionId = socialVersionIdentity(facts);
   return {
     ok: true,
     observation: Object.freeze({

@@ -49,14 +49,15 @@ export function socialIntake({ provider, mapCommit, filter, now = () => Date.now
     // bounded universe filter — no silent all-network intake (§24)
     const fm = socialFilterMatches(filter, { text: o.text, nativeAuthorId: o.nativeAuthorId });
     if (!fm.match) { stats.filtered += 1; return { outcome: 'filtered' }; }
-    // dedupe by VERSION identity: the same version re-delivered collapses to
-    // one truth; a legitimate EDIT is a new version (new id) and is admitted; an
-    // altered re-delivery of the SAME version (same id, different metaHash) is
-    // CORRUPTION, never silently accepted (§10/§19/§22/§41).
-    if (seen.has(o.socialVersionId)) {
-      if (seen.get(o.socialVersionId) !== o.metaHash) { stats.corrupt += 1; return { outcome: 'corrupt', reason: 'same version, altered payload' }; }
-      stats.deduped += 1; return { outcome: 'deduped' };
-    }
+    // dedupe by VERSION identity, which BINDS every immutable provenance fact
+    // (relation/parent/thread/handle/text/source-time/native version/lifecycle).
+    // A repeat is the same version → keep the FIRST accepted snapshot, so a
+    // legitimate metrics re-delivery with updated engagement collapses rather
+    // than forking a version or being mis-flagged as corruption (§8). A changed
+    // provenance fact produces a DIFFERENT version id (a new event); a forged
+    // same-id/altered-payload is caught downstream at the durable validator
+    // (metaHash + sourceEventId re-derivation) and by the journal's identity law.
+    if (seen.has(o.socialVersionId)) { stats.deduped += 1; return { outcome: 'deduped' }; }
     if (queue.length >= maxQueue) { stats.dropped += 1; return { outcome: 'dropped', reason: 'queue full (backpressure)' }; }
     remember(o.socialVersionId, o.metaHash);
     queue.push(o);
