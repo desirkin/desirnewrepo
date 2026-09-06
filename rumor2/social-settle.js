@@ -24,6 +24,7 @@ import {
   normalizeSocialText, SOCIAL_RELATION_KINDS, ECHO_RELATIONS, SOCIAL_LIFECYCLE_STATES,
   R2SS_RE, R2SA_RE, R2SV_RE, MAX_SOCIAL_TEXT_CHARS, MAX_NATIVE_ID_CHARS, MAX_SOCIAL_HANDLE_CHARS,
   SOURCE_CLOCK_STATES, classifySourceClock, canonicalIngressTags, MAX_INGRESS_TAGS, MAX_INGRESS_TAG_CHARS,
+  socialRetentionRefusal,
 } from './social.js';
 import { socialProviderById } from './social-registry.js';
 
@@ -113,6 +114,9 @@ const iso = (ms) => new Date(ms).toISOString();
 // version identity, so the journal collapses exact re-appends and rejects an
 // altered re-delivery of the same version, while an edit is a new version.
 export function socialObservationToEvent(observation) {
+  // SOCIAL-3: never build durable truth for a retention-prohibited provider
+  const refusal = socialRetentionRefusal(observation?.provider);
+  if (refusal) return { event: null, refused: `RETENTION_NOT_APPROVED: ${refusal}`, socialSourceId: null, socialAuthorId: null, versionId: null };
   const event = {
     type: SOCIAL_EVENT_TYPE,
     ts: iso(observation.knownAtTs),
@@ -207,6 +211,9 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
   // provider (authoritative ∩ optional, never optional-replaces-authoritative).
   const meta = socialProviderById(event.provider);
   if (!meta) return `social event: ${event.provider} is not in the authoritative social registry`;
+  // SOCIAL-3 retention firewall: BOTH the closed code constant and the registry
+  // flag refuse — neither a caller list nor a registry edit alone can open it
+  if (meta.retentionProhibited || socialRetentionRefusal(event.provider)) return `social event: RETENTION_NOT_APPROVED: ${socialRetentionRefusal(event.provider) ?? `${event.provider} durable content is not approved`}`;
   if (event.providerKind !== meta.providerKind) return 'social event: providerKind disagrees with the social registry';
   if (socialProviderIds && !socialProviderIds.includes(event.provider)) return `social event: ${event.provider} excluded by the caller narrowing allowlist`;
   if (!isStr(event.nativePostId, MAX_NATIVE_ID_CHARS)) return 'social event: nativePostId invalid';

@@ -118,6 +118,21 @@ test('R2A-79+80+81. no X, Reddit, or news-media adapter exists', () => {
   }
 });
 
+test('R2A-SOCIAL-5 (SOCIAL-3). the Reddit surface is an explicit filename allowlist; it is fixture-only, never fetches, never imports authority, and the frozen core stays free of it', () => {
+  // EXPLICIT allowlist: the only rumor2 files whose CODE may name Reddit
+  const REDDIT_ALLOWLIST = ['rumor2/social-reddit.js', 'rumor2/social-registry.js', 'rumor2/social.js'];
+  const mentions = rumor2Files.filter((f) => /reddit/i.test(code(f)));
+  assert.deepEqual(mentions.sort(), [...REDDIT_ALLOWLIST].sort(), `Reddit may only be named in ${REDDIT_ALLOWLIST.join(', ')}`);
+  assert.ok(tracked.includes('rumor2/social-reddit.js'), 'the Reddit foundation is tracked (Git-index-aware)');
+  assert.ok(SOCIAL_FILE_RE.test('rumor2/social-reddit.js'), 'audited in the social tier, never as frozen core');
+  const src = read('rumor2/social-reddit.js');
+  for (const forbidden of ['fetch(', 'WebSocket', 'setInterval', 'node:http', 'node:https', 'node:net', 'child_process', 'access_token=', 'grant_type', 'randomUUID', 'Date.now()']) assert.ok(!src.includes(forbidden), `social-reddit.js: ${forbidden}`);
+  assert.ok(!/from '\.\.\//.test(src), 'social-reddit.js imports nothing outside rumor2');
+  assert.ok(!/ledger|state\/|cost\/|tape|strike|exec|socrates|attention|hyped/i.test(src.replace(/\/\/.*$/gm, '')), 'social-reddit.js touches no authority');
+  // Reddit is never wired into the collector or any runtime
+  for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/social-stream.js']) assert.ok(!/reddit/i.test(read(f)), `${f} has no Reddit wiring`);
+});
+
 test('R2A-82+83. SOCRATES-0 and GHOST-1 remain absent', () => {
   // no socrates caller anywhere in the runtime (the contract scans in the
   // socrates suites stay authoritative; this re-pins the rumor layer)

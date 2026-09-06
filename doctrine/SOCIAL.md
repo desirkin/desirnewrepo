@@ -55,7 +55,7 @@ The machine-readable census lives in `rumor2/social-registry.js` and is pinned b
 | **BLUESKY_OFFICIAL** | microblog | `AVAILABLE_AUTHORIZED` | Free, public, unauthenticated Jetstream v2 real-time firehose with collection/DID filtering + replay. The first live ear. |
 | **FARCASTER_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Neynar hosted API (x-api-key, free tier) gives real-time webhooks + cast search. Hub/Snapchain path needs a full syncing node (not lightweight). Dark until `NEYNAR_API_KEY`. |
 | **X_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Pay-per-use filtered stream (~4–5s P99), OAuth2 App-Only bearer. Hard read/USD budget under the 3M-post-read/month self-serve cap ($0.005/read; usage via `/2/usage/tweets`; UTC-day dedupe is SOFT). Operational, runtime-gated ear since SOCIAL-2B (§5C). |
-| **REDDIT_OFFICIAL** | forum | `AVAILABLE_RESTRICTED_RESEARCH` | Official Data API (OAuth2, 100 QPM/client) is usable, but **commercial** use requires a written contract; scraping is prohibited. Contract-gated for this system. |
+| **REDDIT_OFFICIAL** | forum | `AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION` | Official OAuth2 Data API is a documented path; API data access requires Reddit's explicit approval with honest disclosure. Serpent's private single-user personal-trading use is **UNRESOLVED** (not assumed commercial, not assumed exempt); any separate-agreement requirement and retention compatibility are unresolved. Scraping is prohibited. Fixture-only foundation (SOCIAL-3, §5F) — not an operational ear. |
 | **STOCKTWITS_OFFICIAL** | finance | `NOT_ACCEPTING_NEW_ACCESS` | Self-serve dev program paused ("won't be accepting new registrations"); public API docs offline (404). Firestream enterprise firehose is partner-gated with no self-serve terms. **High priority, blocked by access — not by importance.** |
 | **META_PUBLIC** (FB Page) | microblog | `AVAILABLE_REQUIRES_APP_REVIEW` | Page Public Content Access reads public Page posts but requires Meta App Review + Business Verification. |
 | **TIKTOK_PUBLIC** | microblog | `NOT_AUTHORIZED` | Only organic-content API (Research API) bars commercial use + is archival/day-granular with no streaming; Commercial Content API is ads/EU only; Display API is own-content only. **Final decision: `EXCLUDED_FROM_REALTIME_RUMOR`** — not a TODO. |
@@ -638,6 +638,132 @@ the expected safe result.
 
 ---
 
+## 5F. SOCIAL-3 — Reddit: classification-neutral access foundation + retention firewall
+
+**This is a provider-foundation and policy-boundary ticket, not activation.** No Reddit API
+request, OAuth exchange, scraping, application, payment, or production change is authorized
+or performed. Reddit is NOT an operational ear. A blocked provider foundation is not proof
+that the intelligence layer is complete.
+
+**Accurate project description (recorded, machine-readable in `REDDIT_USE_CASE`).** Serpent is
+a private, single-user personal prototype. It is not offered to customers or sold as an
+application or service. Its intended progression includes personal research, autonomous
+paper trading, and possibly later autonomous trading of the owner's own funds — that
+financial objective is disclosed, never omitted. No business, academic, nonprofit,
+research-program, or moderator affiliation is claimed. "Theoretical prototype" establishes
+no permission to retrieve or retain a third party's data.
+
+**Classification is UNRESOLVED — not invented.** Neither "Serpent is definitely commercial"
+nor "Serpent is private, therefore exempt" is assumed. The census entry separates the
+questions and answers each on its own:
+
+| question | recorded state |
+|---|---|
+| platformPath | `DOCUMENTED_OFFICIAL_PATH` |
+| useCaseClassification | `UNRESOLVED` (only Reddit's use-case review classifies it) |
+| approvalStatus | `NOT_VERIFIED` |
+| additionalAgreementRequirement | `UNRESOLVED` (a requirement only when applicable terms or Reddit's decision establish it) |
+| retentionCompatibility | `UNRESOLVED` |
+| liveStatus | `DISABLED` |
+| durableContentAllowed / durableAuthorIdentityAllowed | `false` / `false` |
+
+No `requiresCommercialContract: true` and no `nonCommercialExempt: true` is hard-coded. An
+approved non-commercial personal-use path (`APPROVED_NON_COMMERCIAL_PERSONAL`), an approved
+use that carries additional terms (`APPROVED_WITH_ADDITIONAL_TERMS`), and an approved
+commercial use (`APPROVED_COMMERCIAL`) are all representable; no valid approval is rejected
+merely because it is not called "commercial".
+
+**Sources reviewed (accessed 2026-09-06; summaries, not policy text).**
+[R1] Responsible Builder Policy — API data access requires explicit approval and honest
+disclosure of purpose and scope; "personal" or "research" confers no approval by itself.
+[R2] Developer Platform & Accessing Reddit Data — app/use-case review determines eligibility
+and commercial vs non-commercial approval; the published examples do not settle this
+single-user personal-trading scenario, and no academic research route is assumed.
+[R3] Developer Terms §4.1 — direct/indirect revenue and business/monetized-product
+restrictions; whether personal trading falls within them is not resolved here.
+[R4] Data API Terms §§2.4, 3.1, 3.2, 6 — a separate agreement may be required; permission is
+use-specific (a token is not a license for every downstream use); storage, derived uses,
+termination, and model-training rights are separate checks.
+[R5] Reddit Data API Wiki — OAuth + descriptive User-Agent; free-eligible reference rate 100
+QPM per OAuth client id averaged over ten minutes (technical context, NOT an entitlement);
+deleted content and deleted-account identifying data must be removed; the routine 48-hour
+deletion window is guidance, not a license to retain anything for 48 hours.
+
+**Approval is evidence, not a magic boolean.** There is no `REDDIT_COMMERCIAL_APPROVED`
+gate. A small closed operator record (`RUMOR2_SOCIAL_REDDIT_APPROVAL_*`: reference label,
+status, application, reviewed use-case version, classification, permitted uses, additional
+agreement + satisfied, validity, retention compatibility, reviewed-on) is evaluated by
+`evaluateRedditAccess`. Its best outcome is `OPERATOR_ATTESTED` — an operator attestation,
+never machine proof that Reddit issued permission. Missing, pending, expired, revoked,
+denied, out-of-scope (another application or use-case version), unclassified, or malformed
+records confer nothing; an unknown enum fails closed. Retrieval permission never expands to
+inference, model training, derived features, or redistribution (separate `permittedUses`).
+Private correspondence and contract text stay out of Git, logs, the journal, and status.
+This foundation contains NO live networking that a record or flag could switch on
+(`liveAllowed` is always false, `FOUNDATION_ONLY_NO_LIVE_PATH`); activation is a later ticket.
+
+**Retention is a separate boundary (§8/§9).** The immutable RUMOR journal cannot erase an
+individual user's retained content, so a Reddit integration must not assume its permitted
+retention fits that storage model. Until the applicable permissions and a compatible design
+are reviewed: immutable content journal allowed = false; immutable author-identifying
+journal allowed = false; live ingestion = false. Credentials, a personal-use description, or
+a generic access approval never turn these true; a future agreement does not automatically
+waive erasure requirements; hashes, pseudonyms, embeddings, derived features, and encryption
+are not compliance loopholes. Enforcement is at every application boundary, by TWO
+independent locks — the closed code constant `SOCIAL_RETENTION_PROHIBITED_PROVIDERS` in
+`rumor2/social.js` and the registry flag `retentionProhibited` (asserted to agree):
+`normalizeSocialObservation` refuses, `socialObservationToEvent` refuses,
+`validateSocialEvent` refuses (a caller allowlist can only narrow, never authorize),
+`replaySocialHistory` fails closed, and Social intake rejects before anything reaches an
+append callback. This is the supported application boundary; it makes no claim about a
+privileged database administrator inserting raw SQL. No UPDATE/DELETE of journal history,
+no content vault, and no purge of existing history were added.
+
+**Fixture-only preview adapter (`rumor2/social-reddit.js`, §10–§12).** Wholly synthetic
+fixtures shaped like official Data API things (`t3` posts, `t1` comments) map to an
+IN-MEMORY preview distinct from the durable Social observation: native fullname identity
+(post and comment namespaces distinct; never a content hash), subreddit context, title and
+body, parent/link/crosspost references (ambiguity stays `UNKNOWN`), `created_utc` as the
+source-declared clock classified by the SAME quarantine law as every other ear (malformed ⇒
+UNKNOWN, ahead of retrieval ⇒ FUTURE_QUARANTINED, no wall-clock fallback; retrieval/known-at
+are caller-supplied acquisition facts), available engagement (score, ups, comment count,
+upvote ratio; absent ⇒ null), provider-supplied edit state without any invented version id,
+and deletion/removal that reveals content is gone without reconstructing text or inferring a
+reason beyond the provider's own category. Author identity is the immutable account fullname
+when supplied, otherwise `UNKNOWN`; a username is display metadata; no profile is fetched.
+Original fixture text is kept separate from the deterministic derived preview. No raw blob,
+live fetch, timer, subscription, credential exchange, or persistent cache exists.
+
+**OAuth / rate-limit foundation (§13).** Pure request description (host `oauth.reddit.com`,
+`/r/<subreddit>/<listing>`, bounded query, documented descriptive User-Agent shape,
+credential NAMED never valued) and a rate-header parser. The future runtime allowance law is
+pinned: min(approved scope cap, configured cap, observed remaining); malformed or missing
+headers or caps yield zero; the published 100 QPM reference is never a default. No token
+exchange, no polling loop.
+
+**DRAFT ONLY — the question Reddit must actually answer (not a submission):**
+"Private application for one owner, not sold or offered as a paid service. It would analyze a
+bounded set of crypto-related public posts/comments for the owner's personal research and
+paper trading, with possible later use for automated trading of the owner's own funds.
+Please confirm the permitted access route, classification, downstream analysis/model-use
+permissions, and applicable storage/deletion requirements."
+Inference, model training, data redistribution, and persistent derived features are
+separate proposed uses; approval for retrieval must not be silently expanded to cover them.
+
+**Outstanding before any live-activation ticket:** (1) Reddit's actual approval of this
+use case with its classification; (2) whether a separate agreement is required and, if so,
+satisfied; (3) the permitted retention/deletion obligations and a compatible durable design
+(the current immutable journal cannot erase individual content); (4) the permitted downstream
+uses (analysis, inference, derived features) confirmed explicitly; (5) an approved rate scope
+and configured caps; (6) credentials. None of these is inferred from the others.
+
+Tests: `test/social-reddit.test.js` (REDDIT-CENSUS, REDDIT-A..J, REDDIT-FIREWALL-1..4,
+REDDIT-FIXTURE-1..4, REDDIT-REQUEST, REDDIT-NO-LIVE), `R2A-SOCIAL-5` (explicit filename
+allowlist, Git-index-aware), CENSUS-3 pin. Bluesky, X, the frozen core, and the pump doctrine
+are unchanged.
+
+---
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -658,7 +784,11 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   bounded live Bluesky smoke test.
 - **SOCIAL-2:** X / Twitter operational collector (filtered-stream + hard cost gate
   against the 3M/month cap and `/2/usage/tweets`).
-- **SOCIAL-3:** Reddit operational collector (only under a commercial agreement).
+- **SOCIAL-3 (foundation done, §5F):** Reddit remains fixture-only. A separate
+  live-activation ticket requires Reddit's actual approval + classification of the
+  private single-user personal-trading use, any separate agreement it establishes,
+  reviewed retention/deletion compatibility with a compatible durable design, explicit
+  downstream-use permissions, an approved rate scope, and credentials — none assumed.
 - **SOCIAL-4:** StockTwits operational collector **iff** legitimate API access
   becomes available (Firestream), else a formal exclusion/access decision.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine

@@ -9,7 +9,7 @@
 // The census below is verified against CURRENT official documentation (see
 // doctrine/SOCIAL.md for citations, gathered 2026-09-05). The system knows WHY
 // each ear is or is not available — never a vague "disabled". (§2/§33)
-import { SOCIAL_PROVIDER_KINDS } from './social.js';
+import { SOCIAL_PROVIDER_KINDS, SOCIAL_RETENTION_PROHIBITED_PROVIDERS } from './social.js';
 
 // §2 access taxonomy — the closed set of truthful states.
 export const SOCIAL_ACCESS_STATES = Object.freeze([
@@ -17,6 +17,7 @@ export const SOCIAL_ACCESS_STATES = Object.freeze([
   'AVAILABLE_REQUIRES_CREDENTIAL', // usable with an API key/token we do not necessarily hold
   'AVAILABLE_REQUIRES_APP_REVIEW', // usable only after a platform app-review/approval
   'AVAILABLE_RESTRICTED_RESEARCH', // usable only under non-commercial/research or a commercial contract
+  'AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION', // SOCIAL-3: a documented official path exists, but the platform must approve THIS use case and classify it; nothing is assumed either way
   'NOT_ACCEPTING_NEW_ACCESS', // program paused/closed to new consumers
   'NOT_AUTHORIZED', // this system is categorically ineligible
   'NOT_SUITABLE_REALTIME', // an API exists but cannot serve timely organic signal
@@ -96,19 +97,47 @@ export const SOCIAL_PROVIDERS = Object.freeze([
   Object.freeze({
     id: 'REDDIT_OFFICIAL',
     providerKind: 'SOCIAL_FORUM',
-    accessState: 'AVAILABLE_RESTRICTED_RESEARCH',
+    // SOCIAL-3 (corrected): a documented official path exists (OAuth2 Data API);
+    // whether THIS private single-user personal-trading use is permitted, how
+    // Reddit classifies it, whether a separate agreement is required, and what
+    // retention it permits are all UNRESOLVED until Reddit's actual review.
+    // Neither "definitely commercial" nor "private, so exempt" is assumed.
+    accessState: 'AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION',
     transport: 'REST_POLL',
-    hosts: Object.freeze(['oauth.reddit.com']),
+    hosts: Object.freeze(['oauth.reddit.com', 'www.reddit.com']), // API host; OAuth token endpoint host
     streamPath: null,
     subprotocol: null,
     requiresCredential: true,
-    credentialEnv: 'REDDIT_CLIENT_ID', // + REDDIT_CLIENT_SECRET
-    implemented: false,
+    credentialEnv: 'REDDIT_CLIENT_ID', // + REDDIT_CLIENT_SECRET; a credential is NOT an approval
+    implemented: true, // SOCIAL-3: fixture-only preview adapter + pure request/limit helpers (rumor2/social-reddit.js); NO live transport
     durable: false,
+    runtimeGated: false, // no runtime exists that could open a live path by flipping fields
+    retentionProhibited: true, // SOCIAL-3: no durable content / author-identifying journal until retention compatibility is reviewed
     highPriority: false,
-    cost: Object.freeze({ model: 'QPM', qpmPerClient: 100, window: '10min-avg', commercialContractRequired: true }),
-    docUrl: 'https://support.reddithelp.com/hc/en-us/articles/14945211791892',
-    reason: 'Official Data API (OAuth2, 100 QPM/client) is technically usable but COMMERCIAL use requires a written contract; unauthorized scraping is prohibited. Contract-gated for this system.',
+    // separate questions, separate closed answers (§5) — none is inferred from another
+    access: Object.freeze({
+      platformPath: 'DOCUMENTED_OFFICIAL_PATH',
+      useCaseClassification: 'UNRESOLVED',
+      approvalStatus: 'NOT_VERIFIED',
+      additionalAgreementRequirement: 'UNRESOLVED',
+      retentionCompatibility: 'UNRESOLVED',
+      liveStatus: 'DISABLED',
+      durableContentAllowed: false,
+      durableAuthorIdentityAllowed: false,
+    }),
+    // the truthful description Reddit must actually review (see doctrine/SOCIAL.md §5F)
+    useCase: Object.freeze({ audience: 'PRIVATE_SINGLE_USER', offeredToCustomers: false, soldAsService: false, intendedUses: Object.freeze(['PERSONAL_RESEARCH', 'PAPER_TRADING', 'POSSIBLE_OWN_FUNDS_AUTOMATED_TRADING']), affiliationClaimed: 'NONE', classificationSource: 'REDDIT_USE_CASE_REVIEW', version: 'serpent-reddit-use-case-v1' }),
+    // technical context only — NOT an entitlement and NOT proof this system qualifies for free access
+    cost: Object.freeze({ model: 'QPM', freeEligibleQpmReference: 100, window: '10min-avg', entitlement: 'NOT_ESTABLISHED', reference: 'R5', observedOn: '2026-09-06' }),
+    sources: Object.freeze([
+      Object.freeze({ ref: 'R1', title: 'Responsible Builder Policy', url: 'https://support.reddithelp.com/hc/en-us/articles/42728983564564-Responsible-Builder-Policy', accessedOn: '2026-09-06' }),
+      Object.freeze({ ref: 'R2', title: 'Developer Platform & Accessing Reddit Data', url: 'https://support.reddithelp.com/hc/en-us/articles/14945211791892-Developer-Platform-Accessing-Reddit-Data', accessedOn: '2026-09-06' }),
+      Object.freeze({ ref: 'R3', title: 'Developer Terms (esp. 4.1)', url: 'https://redditinc.com/policies/developer-terms', accessedOn: '2026-09-06' }),
+      Object.freeze({ ref: 'R4', title: 'Data API Terms (esp. 2.4, 3.1, 3.2, 6)', url: 'https://redditinc.com/policies/data-api-terms', accessedOn: '2026-09-06' }),
+      Object.freeze({ ref: 'R5', title: 'Reddit Data API Wiki', url: 'https://support.reddithelp.com/hc/en-us/articles/16160319875092-Reddit-Data-API-Wiki', accessedOn: '2026-09-06' }),
+    ]),
+    docUrl: 'https://support.reddithelp.com/hc/en-us/articles/14945211791892-Developer-Platform-Accessing-Reddit-Data',
+    reason: 'Official OAuth2 Data API exists (documented path); API data access requires explicit Reddit approval with honest disclosure of purpose and scope. Serpent is a private single-user personal project with intended personal research, paper trading, and possibly automated trading of the owner\'s own funds — its classification, any separate-agreement requirement, and retention compatibility are UNRESOLVED pending Reddit review. Scraping is prohibited. Fixture-only foundation; not an operational ear.',
   }),
   Object.freeze({
     id: 'STOCKTWITS_OFFICIAL',
@@ -172,6 +201,11 @@ export const ACTIVE_SOCIAL_PROVIDER_IDS = Object.freeze(SOCIAL_PROVIDERS.filter(
 // Structural invariants — asserted by tests too, so drift is caught.
 for (const p of SOCIAL_PROVIDERS) {
   if (!SOCIAL_ACCESS_STATES.includes(p.accessState)) throw new Error(`social-registry: ${p.id} has an unknown accessState`);
+  // SOCIAL-3: the registry flag and the closed code constant must agree, and a
+  // retention-prohibited provider can never be durable, live, or content-allowed
+  const prohibited = SOCIAL_RETENTION_PROHIBITED_PROVIDERS.includes(p.id);
+  if (prohibited !== (p.retentionProhibited === true)) throw new Error(`social-registry: ${p.id} retentionProhibited disagrees with SOCIAL_RETENTION_PROHIBITED_PROVIDERS`);
+  if (prohibited && (p.durable || p.access?.durableContentAllowed !== false || p.access?.durableAuthorIdentityAllowed !== false || p.access?.liveStatus !== 'DISABLED')) throw new Error(`social-registry: ${p.id} is retention-prohibited but claims durable/live capability`);
   if (!SOCIAL_PROVIDER_KINDS.includes(p.providerKind)) throw new Error(`social-registry: ${p.id} has a non-social providerKind`);
   if (p.durable && !isPlatformCapable(p.accessState)) throw new Error(`social-registry: ${p.id} is durable but the platform is not capable`);
   if (p.durable && !isLiveActivatable(p.accessState) && p.runtimeGated !== true) throw new Error(`social-registry: ${p.id} needs a credential — it must be runtime-gated`);

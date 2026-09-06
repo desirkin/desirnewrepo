@@ -121,6 +121,18 @@ export const R2SA_RE = /^r2sa-[0-9a-f]{40}$/;
 // A native post keeps a STABLE post identity (socialSourceId) across its life,
 // while each CREATE / EDIT / DELETE / TOMBSTONE is a distinct VERSION event.
 export const SOCIAL_LIFECYCLE_STATES = Object.freeze(['CREATE', 'EDIT', 'DELETE', 'TOMBSTONE']);
+
+// SOCIAL-3 RETENTION / ACCESS FIREWALL. Providers whose content may NOT enter
+// the immutable Social journal until their access approval, permitted use, and
+// retention compatibility are reviewed (the journal cannot erase individual
+// retained user content). This is a CLOSED code constant, enforced at every
+// application boundary (normalize, event build, validate, replay, settle) —
+// never a wrapper comment, never widened by a caller-provided list. The social
+// registry asserts its `retentionProhibited` flags agree with this set.
+export const SOCIAL_RETENTION_PROHIBITED_PROVIDERS = Object.freeze(['REDDIT_OFFICIAL']);
+export const socialRetentionRefusal = (provider) => (SOCIAL_RETENTION_PROHIBITED_PROVIDERS.includes(provider)
+  ? `${provider}: durable content and author-identifying retention are not approved (access approval, use-case classification, and retention compatibility unresolved)`
+  : null);
 const LIFECYCLE_BY_EDIT = Object.freeze({ ORIGINAL: 'CREATE', EDITED: 'EDIT', DELETED: 'DELETE', TOMBSTONED: 'TOMBSTONE' });
 export const lifecycleForEditState = (e) => LIFECYCLE_BY_EDIT[e] ?? 'CREATE';
 // CONTENT / VERSION FACTS (§4/§26). The ONE canonical set of IMMUTABLE provider
@@ -351,6 +363,9 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   for (const k of REQUIRED_RAW) if (!(k in raw)) return { reject: true, reason: `missing field ${k}` };
   const { provider, providerKind, nativePostId, nativeAuthorId } = raw;
   if (!isNonEmptyStr(provider, 100)) return { reject: true, reason: 'provider invalid' };
+  // SOCIAL-3: an unapproved-retention provider never yields a durable observation
+  const refusal = socialRetentionRefusal(provider);
+  if (refusal) return { reject: true, reason: `RETENTION_NOT_APPROVED: ${refusal}` };
   if (!SOCIAL_PROVIDER_KINDS.includes(providerKind)) return { reject: true, reason: 'providerKind not a social kind' };
   if (!isNonEmptyStr(nativePostId, MAX_NATIVE_ID_CHARS)) return { reject: true, reason: 'nativePostId invalid' };
   if (!isNonEmptyStr(nativeAuthorId, MAX_NATIVE_ID_CHARS)) return { reject: true, reason: 'nativeAuthorId invalid' };

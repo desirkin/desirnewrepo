@@ -29,7 +29,7 @@ test('CENSUS-3. the recorded access decisions match the verified census', () => 
   assert.equal(socialProviderById('BLUESKY_OFFICIAL').accessState, 'AVAILABLE_AUTHORIZED');
   assert.equal(socialProviderById('FARCASTER_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
   assert.equal(socialProviderById('X_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
-  assert.equal(socialProviderById('REDDIT_OFFICIAL').accessState, 'AVAILABLE_RESTRICTED_RESEARCH');
+  assert.equal(socialProviderById('REDDIT_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION', 'SOCIAL-3: classification-neutral — approval and use-case review pending, nothing assumed');
   assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').accessState, 'NOT_ACCEPTING_NEW_ACCESS');
   assert.equal(socialProviderById('META_PUBLIC').accessState, 'AVAILABLE_REQUIRES_APP_REVIEW');
   assert.equal(socialProviderById('TIKTOK_PUBLIC').accessState, 'NOT_AUTHORIZED');
