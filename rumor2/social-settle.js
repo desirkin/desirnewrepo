@@ -69,6 +69,10 @@ export const SOCIAL_CLOCK_POLICY_BY_PROVIDER = Object.freeze({
 // counts as no social source, origin, author, or propagation.
 export const SOCIAL_CLOCK_INTERPRETATION_TYPE = 'RUMOR2_SOCIAL_CLOCK_INTERPRETATION';
 export const SOCIAL_CLOCK_INTERPRETATION_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'schemaVersion', 'targetType', 'targetEventId', 'targetDigest', 'nativeKey', 'immutableDigest', 'clockRole', 'basis', 'witness', 'priorInterpretation', 'interpretation', 'evidenceRetrievedTs', 'knownAtTs']);
+// SOCIAL-4D RECORD INTEGRITY: version-2 records add the closed first-known SNAPSHOT binding
+export const SOCIAL_CLOCK_INTERPRETATION_KEYS_V2 = Object.freeze([...SOCIAL_CLOCK_INTERPRETATION_KEYS, 'snapshotHash']);
+export const SOCIAL_RECORD_SCHEMA_VERSION = 2; // annotations + pending records emitted now
+export const SOCIAL_RECORD_SCHEMA_VERSIONS = Object.freeze([1, 2]); // 1 = legacy unsealed (accepted under its own contract), 2 = sealed
 export const SOCIAL_CLOCK_ROLES = Object.freeze(['SOURCE_DECLARATION', 'PROVIDER_EVENT']);
 export const SOCIAL_INTERPRETATION_BASES = Object.freeze(['RETAINED_ORIGINAL_DECLARATION', 'NEW_DELIVERY_SAME_EVENT']);
 export const SOCIAL_CLOCK_PROVENANCE = Object.freeze(['LEGACY_NUMERIC_UNVERIFIED', 'WITNESSED_DECLARATION']);
@@ -79,6 +83,7 @@ export const R2SI_RE = /^r2si-[0-9a-f]{40}$/;
 // or propagation event; never a reason to guess, discard, or stop other providers.
 export const SOCIAL_RECONCILIATION_PENDING_TYPE = 'RUMOR2_SOCIAL_RECONCILIATION_PENDING';
 export const SOCIAL_RECONCILIATION_PENDING_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'schemaVersion', 'reason', 'nativeKey', 'immutableDigest', 'candidateVersionId', 'candidateIds', 'witnessHash', 'sourceClockWitness', 'providerEventWitness', 'candidate', 'knownAtTs']);
+export const SOCIAL_RECONCILIATION_PENDING_KEYS_V2 = Object.freeze([...SOCIAL_RECONCILIATION_PENDING_KEYS, 'candidateTotal', 'snapshotHash']);
 export const SOCIAL_RECONCILIATION_REASONS = Object.freeze(['MULTIPLE_CANDIDATES', 'OCCURRENCE_IDENTITY_INSUFFICIENT', 'IMMUTABLE_FACT_CONFLICT', 'DECLARATION_CONFLICT']);
 export const MAX_RECONCILIATION_CANDIDATE_IDS = 16;
 export const R2SP_RE = /^r2sp-[0-9a-f]{40}$/;
@@ -257,6 +262,15 @@ export function assessSocialEquivalence(existing, candidate) {
 export const sameDeclaration = (a, b) => witnessesEquivalent(a, b) || (!!a && !!b && a.declared === b.declared && a.declaredStatus === b.declaredStatus && a.policy === b.policy && a.policyVersion === b.policyVersion);
 // the compact first-seen record a bounded process-local cache keeps per version id
 export const socialSeenRecord = (o) => Object.freeze({ format: o.schemaVersion === SOCIAL_EVENT_SCHEMA_VERSION ? 2 : 1, immutableDigest: socialImmutableDigest(o), witnessHash: o.witnessHash ?? null, sourceClockWitness: o.sourceClockWitness ?? null, providerEventWitness: o.providerEventWitness ?? null });
+// SOCIAL-4D RECORD INTEGRITY — the immutable FIRST-KNOWN SNAPSHOT binding of a version-2
+// correction/conflict record: a locally re-derived hash over EVERY field the settled record
+// states (its clocks, target membership, matching basis, witnesses) except the hash itself. The
+// semantic identity (sourceEventId) says WHICH correction/conflict this is and dedupes
+// redelivery keep-first; the snapshot says exactly what the durable record stated when it was
+// settled. It detects an altered payload that retains its prior binding and enforces internal
+// consistency. It is NOT a signature, NOT an external timestamp attestation, and proves nothing
+// against an adversary able to rewrite authoritative history and every hash consistently.
+export const socialRecordSnapshotHash = (ev) => { const { snapshotHash: _omit, ...rest } = ev; return contentHash(canonicalJson(rest)); };
 // the bounded temporal interpretation of ONE clock role, derived deterministically from a
 // witness and the TARGET's recorded acquisition clock (never a wall clock)
 export function deriveClockInterpretation({ witness, clockRole, retrievedTs }) {
@@ -279,12 +293,13 @@ export function socialClockInterpretationEvent({ target, clockRole, basis, witne
     : { sourceDeclaredTs: target.providerEventTs ?? null, sourceCreatedTs: null, sourceClockStatus: null, provenance: legacy ? 'LEGACY_NUMERIC_UNVERIFIED' : 'WITNESSED_DECLARATION' };
   const interpretation = deriveClockInterpretation({ witness, clockRole, retrievedTs: target.retrievedTs });
   const ev = {
-    type: SOCIAL_CLOCK_INTERPRETATION_TYPE, ts: iso(knownAtTs), sourceEventId: null, provider: target.provider, schemaVersion: 1,
+    type: SOCIAL_CLOCK_INTERPRETATION_TYPE, ts: iso(knownAtTs), sourceEventId: null, provider: target.provider, schemaVersion: SOCIAL_RECORD_SCHEMA_VERSION,
     targetType: target.type, targetEventId: target.sourceEventId, targetDigest: contentHash(canonicalJson(target)),
     nativeKey: socialNativeKey(target), immutableDigest: socialImmutableDigest(target),
-    clockRole, basis, witness, priorInterpretation, interpretation, evidenceRetrievedTs, knownAtTs,
+    clockRole, basis, witness, priorInterpretation, interpretation, evidenceRetrievedTs, knownAtTs, snapshotHash: null,
   };
   ev.sourceEventId = socialInterpretationIdentity({ targetType: ev.targetType, targetEventId: ev.targetEventId, clockRole, witness, interpretation });
+  ev.snapshotHash = socialRecordSnapshotHash(ev);
   return ev;
 }
 // Validate an annotation AGAINST ITS TARGET (the caller supplies the durable target event
@@ -293,9 +308,10 @@ export function socialClockInterpretationEvent({ target, clockRole, basis, witne
 // provider's role policy, interpretation re-derivation, clocks, identity.
 export function validateSocialClockInterpretation(ev, { target = null } = {}) {
   if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'clock interpretation: not an object';
-  const kErr = exactKeys(ev, SOCIAL_CLOCK_INTERPRETATION_KEYS); if (kErr) return `clock interpretation: ${kErr}`;
+  if (!SOCIAL_RECORD_SCHEMA_VERSIONS.includes(ev.schemaVersion)) return 'clock interpretation: unsupported schema version';
+  const sealed = ev.schemaVersion === 2;
+  const kErr = exactKeys(ev, sealed ? SOCIAL_CLOCK_INTERPRETATION_KEYS_V2 : SOCIAL_CLOCK_INTERPRETATION_KEYS); if (kErr) return `clock interpretation: ${kErr}`;
   if (ev.type !== SOCIAL_CLOCK_INTERPRETATION_TYPE) return 'clock interpretation: wrong type';
-  if (ev.schemaVersion !== 1) return 'clock interpretation: unsupported schema version';
   const meta = isStr(ev.provider, 100) ? socialProviderById(ev.provider) : null;
   if (!meta) return 'clock interpretation: provider not in the authoritative social registry';
   if (meta.retentionProhibited || socialRetentionRefusal(ev.provider)) return `clock interpretation: RETENTION_NOT_APPROVED: ${ev.provider}`;
@@ -327,28 +343,102 @@ export function validateSocialClockInterpretation(ev, { target = null } = {}) {
   if (canonicalJson(expected.priorInterpretation) !== canonicalJson(ev.priorInterpretation)) return 'clock interpretation: prior interpretation is not the target\'s recorded interpretation';
   if (canonicalJson(expected.interpretation) !== canonicalJson(ev.interpretation)) return 'clock interpretation: interpretation is not the re-derived one';
   if (!R2SI_RE.test(ev.sourceEventId) || ev.sourceEventId !== expected.sourceEventId) return 'clock interpretation: sourceEventId is not the derived identity';
+  // version 2: the first-known snapshot (clocks included) must be exactly what was settled
+  if (sealed && ev.snapshotHash !== socialRecordSnapshotHash(ev)) return 'clock interpretation: snapshotHash is not the re-derived first-known snapshot (altered clocks or fields under an existing identity)';
+  return null;
+}
+// ---- SOCIAL-4D RECORD INTEGRITY: the ONE target-context / reason law -------------------------
+// A pending record's candidateIds are ASSERTED relationships. This law — shared by live
+// settlement (the reconciler self-checks every record it emits), replay (before a record may be
+// applied to any target), and the standalone temporal view (before a record may affect the
+// event it is asked about) — verifies each assertion against the ACTUAL already-known target(s)
+// and their preserved immutable facts, per reason:
+//   DECLARATION_CONFLICT        exactly one target; the same native occurrence; immutable facts
+//                               agree; the target RETAINED a declaration (a v2 source witness or an
+//                               earlier valid SOURCE_DECLARATION annotation — a legacy numeric clock
+//                               is NOT one) and the candidate's declaration disagrees with all of them
+//   IMMUTABLE_FACT_CONFLICT     exactly one target; the same native occurrence; immutable facts DIFFER
+//   OCCURRENCE_IDENTITY_INSUFFICIENT  ≥1 target; each shares the documented COARSE key with the
+//                               candidate and at least one side lacks its sequence discriminator (or
+//                               the candidate is a Farcaster recast edge); never a merge of sequences
+//   MULTIPLE_CANDIDATES         ≥2 targets, each the same native occurrence
+// Shape-level constraints (counts) are checked by the validator; link-level constraints need the
+// targets and are checked here. A target id alone is never evidence of a relation.
+const socialPendingShapeError = (ev) => {
+  const n = ev.candidateIds.length;
+  if ((ev.reason === 'DECLARATION_CONFLICT' || ev.reason === 'IMMUTABLE_FACT_CONFLICT') && n !== 1) return `${ev.reason} names exactly one target`;
+  if (ev.reason === 'MULTIPLE_CANDIDATES' && n < 2) return 'MULTIPLE_CANDIDATES names at least two targets';
+  if (ev.reason === 'OCCURRENCE_IDENTITY_INSUFFICIENT' && n < 1) return 'OCCURRENCE_IDENTITY_INSUFFICIENT names at least one potential occurrence';
+  return null;
+};
+// the relation between ONE pending record and ONE asserted target; `annotations` are the target's
+// own retained interpretation annotations (needed only for DECLARATION_CONFLICT)
+export function socialPendingLinkError(ev, target, annotations = []) {
+  if (!target || typeof target !== 'object') return 'target not durable (unknown, unsettled, or later than this record)';
+  if (!SOCIAL_OBSERVATION_TYPES.includes(target.type)) return 'target is not a social observation';
+  if (target.provider !== ev.provider) return 'cross-provider target';
+  if (target.knownAtTs > ev.knownAtTs) return 'target known after this record (causally later target)';
+  const c = { ...ev.candidate, provider: ev.provider };
+  const nativeKeyDigest = contentHash(canonicalJson(ev.nativeKey));
+  if (ev.reason === 'OCCURRENCE_IDENTITY_INSUFFICIENT') {
+    if (socialCoarseKeyDigest(target) !== socialCoarseKeyDigest(c)) return 'target is not a coarse-key occurrence of the candidate';
+    const recast = ev.provider === 'FARCASTER_OFFICIAL' && c.relation === 'REPOST';
+    if (!recast && c.providerEventSeq !== null && (target.providerEventSeq ?? null) !== null) return 'both sides carry their sequence discriminator — not an insufficient-identity relation';
+    return null;
+  }
+  if (socialNativeKeyDigest(target) !== nativeKeyDigest) return 'target is not the same native occurrence';
+  if (ev.reason === 'IMMUTABLE_FACT_CONFLICT') return socialImmutableDigest(target) === ev.immutableDigest ? 'immutable facts agree — no immutable conflict' : null;
+  if (ev.reason === 'DECLARATION_CONFLICT') {
+    if (socialImmutableDigest(target) !== ev.immutableDigest) return 'immutable facts differ — not a declaration conflict';
+    const retained = [...(target.type === SOCIAL_EVENT_V2_TYPE ? [target.sourceClockWitness] : []), ...(Array.isArray(annotations) ? annotations : []).filter((a) => a && a.clockRole === 'SOURCE_DECLARATION' && a.targetEventId === target.sourceEventId).map((a) => a.witness)];
+    if (retained.length === 0) return 'target retained no original declaration to conflict with (a legacy numeric clock is not one)';
+    if (retained.some((w) => sameDeclaration(w, ev.sourceClockWitness))) return 'the candidate declaration is equivalent to a retained declaration — no conflict';
+    return null;
+  }
+  return null; // MULTIPLE_CANDIDATES: the same native occurrence suffices
+}
+// the whole asserted target SET against actual history: targetOf(id) -> durable observation event
+// or null; annotationsOf(id) -> that target's retained annotations. null when every link holds.
+export function validateSocialPendingContext(ev, { targetOf, annotationsOf = () => [] } = {}) {
+  if (typeof targetOf !== 'function') return 'reconciliation pending: no target context supplied';
+  const shape = socialPendingShapeError(ev); if (shape) return `reconciliation pending: ${shape}`;
+  for (const id of ev.candidateIds) {
+    const target = targetOf(id) ?? null;
+    const err = socialPendingLinkError(ev, target, annotationsOf(id));
+    if (err) return `reconciliation pending: ${ev.reason} link to ${id}: ${err}`;
+  }
   return null;
 }
 // ---- SOCIAL-4D COMPLETION: the reconciliation-pending record --------------------------------
-export const socialReconciliationIdentity = ({ provider, nativeKeyDigest, immutableDigest, witnessHash, reason }) => `r2sp-${contentHash(canonicalJson({ provider, nativeKeyDigest, immutableDigest, witnessHash, reason }))}`;
+// SEMANTIC identity. Version 1 (legacy) bound provider / native key / immutable digest / witness
+// hash / reason only. Version 2 ALSO binds the canonical (bounded, sorted) target set and its
+// true size, so a later association over a grown candidate set is a NEW immutable record with
+// its own knownAt (never a rewrite of the earlier one), and a substituted or erased target set
+// can never keep an existing identity.
+export const socialReconciliationIdentity = ({ provider, nativeKeyDigest, immutableDigest, witnessHash, reason, candidateIds, candidateTotal }) => (candidateIds === undefined
+  ? `r2sp-${contentHash(canonicalJson({ provider, nativeKeyDigest, immutableDigest, witnessHash, reason }))}`
+  : `r2sp-${contentHash(canonicalJson({ v: 2, provider, nativeKeyDigest, immutableDigest, witnessHash, reason, candidateIds, candidateTotal }))}`);
 const PENDING_CANDIDATE_KEYS = Object.freeze(['providerKind', 'nativePostId', 'nativeAuthorId', 'lifecycle', 'relation', 'parentNativePostId', 'threadId', 'nativeVersionId', 'providerEventSeq', 'text', 'textHash', 'sourceDeclaredTs', 'sourceCreatedTs', 'sourceClockStatus', 'sourceClockSkewMs', 'providerEventTs', 'retrievedTs']);
 export function socialReconciliationPendingEvent({ observation, reason, candidateIds, knownAtTs }) {
   const o = observation;
   const candidate = {}; for (const k of PENDING_CANDIDATE_KEYS) candidate[k] = o[k] ?? null;
+  const all = [...new Set(candidateIds)].sort();
   const ev = {
-    type: SOCIAL_RECONCILIATION_PENDING_TYPE, ts: iso(knownAtTs), sourceEventId: null, provider: o.provider, schemaVersion: 1, reason,
+    type: SOCIAL_RECONCILIATION_PENDING_TYPE, ts: iso(knownAtTs), sourceEventId: null, provider: o.provider, schemaVersion: SOCIAL_RECORD_SCHEMA_VERSION, reason,
     nativeKey: socialNativeKey(o), immutableDigest: socialImmutableDigest(o), candidateVersionId: o.socialVersionId,
-    candidateIds: [...new Set(candidateIds)].sort().slice(0, MAX_RECONCILIATION_CANDIDATE_IDS),
-    witnessHash: o.witnessHash, sourceClockWitness: o.sourceClockWitness, providerEventWitness: o.providerEventWitness ?? null, candidate, knownAtTs,
+    candidateIds: all.slice(0, MAX_RECONCILIATION_CANDIDATE_IDS), candidateTotal: all.length, // a bounded list never claims completeness: candidateTotal > candidateIds.length reports truncation
+    witnessHash: o.witnessHash, sourceClockWitness: o.sourceClockWitness, providerEventWitness: o.providerEventWitness ?? null, candidate, knownAtTs, snapshotHash: null,
   };
-  ev.sourceEventId = socialReconciliationIdentity({ provider: ev.provider, nativeKeyDigest: contentHash(canonicalJson(ev.nativeKey)), immutableDigest: ev.immutableDigest, witnessHash: ev.witnessHash, reason });
+  ev.sourceEventId = socialReconciliationIdentity({ provider: ev.provider, nativeKeyDigest: contentHash(canonicalJson(ev.nativeKey)), immutableDigest: ev.immutableDigest, witnessHash: ev.witnessHash, reason, candidateIds: ev.candidateIds, candidateTotal: ev.candidateTotal });
+  ev.snapshotHash = socialRecordSnapshotHash(ev);
   return ev;
 }
 export function validateSocialReconciliationPending(ev) {
   if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'reconciliation pending: not an object';
-  const kErr = exactKeys(ev, SOCIAL_RECONCILIATION_PENDING_KEYS); if (kErr) return `reconciliation pending: ${kErr}`;
+  if (!SOCIAL_RECORD_SCHEMA_VERSIONS.includes(ev.schemaVersion)) return 'reconciliation pending: unsupported schema version';
+  const sealed = ev.schemaVersion === 2;
+  const kErr = exactKeys(ev, sealed ? SOCIAL_RECONCILIATION_PENDING_KEYS_V2 : SOCIAL_RECONCILIATION_PENDING_KEYS); if (kErr) return `reconciliation pending: ${kErr}`;
   if (ev.type !== SOCIAL_RECONCILIATION_PENDING_TYPE) return 'reconciliation pending: wrong type';
-  if (ev.schemaVersion !== 1) return 'reconciliation pending: unsupported schema version';
   const meta = isStr(ev.provider, 100) ? socialProviderById(ev.provider) : null;
   if (!meta) return 'reconciliation pending: provider not in the authoritative social registry';
   if (meta.retentionProhibited || socialRetentionRefusal(ev.provider)) return `reconciliation pending: RETENTION_NOT_APPROVED: ${ev.provider}`;
@@ -378,7 +468,15 @@ export function validateSocialReconciliationPending(ev) {
   if (!R2SV_RE.test(ev.candidateVersionId) || ev.candidateVersionId !== socialVersionIdentity(facts)) return 'reconciliation pending: candidateVersionId is not the derived identity';
   if (!Array.isArray(ev.candidateIds) || ev.candidateIds.length > MAX_RECONCILIATION_CANDIDATE_IDS || ev.candidateIds.some((id) => !R2SV_RE.test(id))) return 'reconciliation pending: candidateIds invalid';
   if (canonicalJson([...new Set(ev.candidateIds)].sort()) !== canonicalJson(ev.candidateIds)) return 'reconciliation pending: candidateIds not canonical';
-  if (!R2SP_RE.test(ev.sourceEventId) || ev.sourceEventId !== socialReconciliationIdentity({ provider: ev.provider, nativeKeyDigest: contentHash(canonicalJson(ev.nativeKey)), immutableDigest: ev.immutableDigest, witnessHash: ev.witnessHash, reason: ev.reason })) return 'reconciliation pending: sourceEventId is not the derived identity';
+  const shape = socialPendingShapeError(ev); if (shape) return `reconciliation pending: ${shape}`;
+  if (sealed) {
+    if (!Number.isSafeInteger(ev.candidateTotal) || ev.candidateTotal < ev.candidateIds.length || (ev.candidateTotal > ev.candidateIds.length && ev.candidateIds.length !== MAX_RECONCILIATION_CANDIDATE_IDS)) return 'reconciliation pending: candidateTotal does not describe the bounded target set';
+  }
+  const expectedId = sealed
+    ? socialReconciliationIdentity({ provider: ev.provider, nativeKeyDigest: contentHash(canonicalJson(ev.nativeKey)), immutableDigest: ev.immutableDigest, witnessHash: ev.witnessHash, reason: ev.reason, candidateIds: ev.candidateIds, candidateTotal: ev.candidateTotal })
+    : socialReconciliationIdentity({ provider: ev.provider, nativeKeyDigest: contentHash(canonicalJson(ev.nativeKey)), immutableDigest: ev.immutableDigest, witnessHash: ev.witnessHash, reason: ev.reason });
+  if (!R2SP_RE.test(ev.sourceEventId) || ev.sourceEventId !== expectedId) return 'reconciliation pending: sourceEventId is not the derived identity';
+  if (sealed && ev.snapshotHash !== socialRecordSnapshotHash(ev)) return 'reconciliation pending: snapshotHash is not the re-derived first-known snapshot (altered clocks, targets, or fields under an existing identity)';
   return null;
 }
 
@@ -800,7 +898,10 @@ export function replaySocialHistory(events) {
   const annotationIds = new Set();
   const pendingIds = new Set();
   const pendingDigests = new Map();
-  const pendingByTarget = new Map(); // candidate target id -> [pending record] (the as-of view's conflict context)
+  const pendingByTarget = new Map(); // candidate target id -> [pending record] whose links HOLD (the as-of view's conflict context)
+  const pendingRecords = new Map(); // sourceEventId -> pending record (every retained one, linked or not)
+  const pendingUnlinked = []; // legacy (unsealed) pending records whose asserted links do not hold against actual history: retained, never applied
+  const recordVersions = { annotations: { 1: 0, 2: 0 }, pending: { 1: 0, 2: 0 } };
   let annotated = 0; let pending = 0;
   const indexObservation = (e) => {
     const entry = socialIndexEntry(e);
@@ -847,6 +948,7 @@ export function replaySocialHistory(events) {
       annotationIds.add(e.sourceEventId);
       if (!annotations.has(e.targetEventId)) annotations.set(e.targetEventId, []);
       annotations.get(e.targetEventId).push(e);
+      recordVersions.annotations[e.schemaVersion] += 1;
       annotated += 1;
       continue;
     }
@@ -858,6 +960,19 @@ export function replaySocialHistory(events) {
       if (prior !== undefined) { if (prior !== digest) return fail('SOCIAL_HISTORY_INVALID: duplicate reconciliation-pending identity with an altered payload — corruption, not replay'); continue; }
       pendingDigests.set(e.sourceEventId, digest);
       pendingIds.add(e.sourceEventId); // NOT a durable source id — never a social source
+      pendingRecords.set(e.sourceEventId, e);
+      recordVersions.pending[e.schemaVersion] += 1;
+      // SOCIAL-4D RECORD INTEGRITY: every asserted target link is checked against the ACTUAL
+      // already-durable targets (they precede this record). A sealed record whose links do not hold
+      // is corruption/forgery: the history fails closed. A legacy (unsealed) record whose links do not
+      // hold is retained as an unlinked unresolved observation — never applied to any target.
+      const ctx = validateSocialPendingContext(e, { targetOf: (id) => targets.get(id) ?? null, annotationsOf: (id) => annotations.get(id) ?? [] });
+      if (ctx) {
+        if (e.schemaVersion === 2) return fail(`SOCIAL_HISTORY_INVALID: ${ctx}`);
+        pendingUnlinked.push({ sourceEventId: e.sourceEventId, reason: ctx.slice(0, 300) });
+        pending += 1;
+        continue;
+      }
       for (const cid of e.candidateIds) { if (!pendingByTarget.has(cid)) pendingByTarget.set(cid, []); pendingByTarget.get(cid).push(e); }
       pending += 1;
       continue;
@@ -937,5 +1052,5 @@ export function replaySocialHistory(events) {
       if (ofRole.length > 1 && ofRole.some((a) => !sameDeclaration(a.witness, ofRole[0].witness))) annotationConflicts.push({ targetEventId, clockRole, annotationIds: ofRole.map((a) => a.sourceEventId).sort() });
     }
   }
-  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingByTarget, annotationConflicts, annotated, pending };
+  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingRecords, pendingByTarget, pendingUnlinked, recordVersions, annotationConflicts, annotated, pending };
 }

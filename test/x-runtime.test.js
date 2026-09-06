@@ -469,3 +469,25 @@ if (!TEST_URL) {
     } finally { await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}); await db.end(); }
   });
 }
+
+// ---- SOCIAL-4D RECORD INTEGRITY: the supported INDEX_DIVERGENCE recovery sequence for X ------
+test('X-DIVERGENCE. a journal Post unknown to a stale index is INDEX_DIVERGENCE: nothing appended (no evidence, meter, or progress), the line stays owed; a restart re-hydrated from the journal settles it exactly once; the local unmetered delta of the stale process is NOT recovered locally (server usage at preflight is the spend authority)', async () => {
+  const arr = []; const j = memJournal(arr);
+  const lookup = async (type, ids) => ({ ok: true, existing: new Set(arr.filter((e) => e.type === type && ids.includes(e.sourceEventId)).map((e) => e.sourceEventId)) });
+  const A = await liveRuntime(); await tick(); A.stream().push(postLine(1, '$BTC first')); A.stream().push(KEEPALIVE); await tick();
+  const r1 = await A.rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup }); assert.equal(r1.ok, true); assert.equal(r1.appended, 1); A.rt.stop();
+  const len = arr.length; assert.equal(ofType(arr, X_METER_EVENT_TYPE).length, 1); assert.equal(ofType(arr, X_METER_EVENT_TYPE)[0].deliveredPostReads, 1);
+  // a STALE runtime (index hydrated before the durable commit) receives the same Post again plus a new one
+  const B = await liveRuntime({ journalEvents: [] }); await tick(); B.stream().push(postLine(1, '$BTC first')); B.stream().push(postLine(2, '$BTC second')); B.stream().push(KEEPALIVE); await tick();
+  assert.equal(B.rt.status().meter.deliveredPostReads, 2, 'billed at the wire in the stale process');
+  const d = await B.rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup });
+  assert.equal(d.ok, false); assert.equal(d.reason, 'INDEX_DIVERGENCE'); assert.equal(arr.length, len, 'nothing appended: no evidence, no meter, no progress'); assert.equal(B.rt.status().stats.indexDivergences, 1); assert.equal(B.rt.status().pendingBatch, null); assert.equal(B.rt._intake().size(), 0, 'the drained lines are retained by the runtime (owed), not lost');
+  assert.equal((await B.rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup })).reason, 'INDEX_DIVERGENCE', 'retrying without re-hydration cannot advance; no automatic recovery exists');
+  B.rt.stop(); // the supported route: stop the paid ear, restart, re-hydrate from the authoritative journal, preflight
+  const C = await liveRuntime({ journalEvents: arr }); await tick(); assert.equal(C.rt.status().meter.deliveredPostReads, 1, 'restored from the durable meter — the stale process\'s 2 unmetered deliveries are not recovered locally (stated limit; server usage is re-read at preflight)');
+  C.stream().push(postLine(1, '$BTC first')); C.stream().push(postLine(2, '$BTC second')); C.stream().push(KEEPALIVE); await tick();
+  const r3 = await C.rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup }); assert.equal(r3.ok, true); assert.equal(r3.appended, 1, 'only the genuinely new Post; the known one is keep-first');
+  assert.equal(ofType(arr, SOCIAL_EVENT_V2_TYPE).length, 2); assert.equal(ofType(arr, X_METER_EVENT_TYPE).at(-1).deliveredPostReads, 3); assert.equal(replaySocialHistory(arr).ok, true);
+  assert.equal((await C.rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup })).ok, true); assert.equal(ofType(arr, SOCIAL_EVENT_V2_TYPE).length, 2, 'idempotent afterwards');
+  C.rt.stop();
+});

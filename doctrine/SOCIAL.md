@@ -1166,6 +1166,82 @@ no cursor event); group J and N count every lawful duplicate route; group M no l
 withheld-annotation id list; RT-PG-3 expects the honest INDEX_DIVERGENCE refusal followed by a
 KNOWN settle after re-hydration instead of a silent "learned" duplicate.
 
+## 5K. SOCIAL-4D CORRECTION/CONFLICT RECORD INTEGRITY — target binding, first-known seal, history-safe replay
+
+A repair of the §5I/§5J record families, reproduced RED on the untouched 32434e8 runtime with the
+review's synthetic probe (in-memory journal, no provider data) before any fix. Source rows, their
+identities, the journal duplicate law, writer epoch, schema, providers, MISSION, pump doctrine,
+retention firewalls, and trading authority are unchanged.
+
+**Two bindings, one discipline (`rumor2/social-settle.js`).** A correction/conflict record has a
+SEMANTIC identity (`sourceEventId`) and, from record version 2, an immutable FIRST-KNOWN SNAPSHOT
+(`snapshotHash`). The semantic identity says WHICH correction / conflict / asserted association this
+is and dedupes redelivery keep-first (no `Date.now()` in identities; a repeated delivery is not new
+evidence). The snapshot is a locally re-derived hash over EVERY field the settled record states —
+its first-known clocks (`knownAtTs`, `ts`, `evidenceRetrievedTs`, `candidate.retrievedTs`), target
+membership, matching basis, witnesses — so an altered payload that keeps its prior binding is
+refused by the validator and by replay. A redelivered record with different clocks would be an
+altered payload under an existing journal identity; reconciliation therefore never presents it
+(keep-first). Honest scope: the seal detects altered payloads that retain their binding and
+enforces internal consistency; it is NOT a signature, NOT an external timestamp attestation, and
+proves nothing against an adversary who rewrites authoritative history and every hash together.
+
+**Version-2 pending identity binds the target set.** `RUMOR2_SOCIAL_RECONCILIATION_PENDING`
+version 2 adds `candidateTotal` and `snapshotHash`; its identity binds provider, native key,
+immutable digest, witness hash, reason, the canonical bounded `candidateIds`, and
+`candidateTotal`. A substituted, erased, or over-filled target set can never keep an existing
+identity. A grown candidate set (a second potential occurrence learned later) is a NEW later
+association record with its own knownAt — the earlier record is never rewritten, an earlier as-of
+view never sees the later set, no native events are merged, and logical source counts do not grow.
+An unchanged set is keep-first. A bounded list never claims completeness: `candidateTotal >
+candidateIds.length` reports truncation at the cap. The intake forgets a version that settled as
+unresolved so a later redelivery reaches settlement again (settlement still dedupes an unchanged
+association); the local cache never suppresses a justified later association.
+
+**The ONE target-context / reason law (`socialPendingLinkError`, `validateSocialPendingContext`).**
+A record's `candidateIds` are asserted relationships, verified against the ACTUAL already-durable
+targets and their preserved facts, per reason: DECLARATION_CONFLICT — exactly one target, the same
+native occurrence, equal immutable facts, and a declaration the target actually RETAINED (a v2
+source witness or an earlier valid SOURCE_DECLARATION annotation; a legacy numeric clock is not
+one) that genuinely disagrees under the same comparison law; IMMUTABLE_FACT_CONFLICT — one target,
+the same native occurrence, immutable facts that DIFFER; OCCURRENCE_IDENTITY_INSUFFICIENT — every
+target shares the documented coarse key and at least one side lacks its sequence (or the candidate
+is a Farcaster recast edge), never a merge; MULTIPLE_CANDIDATES — at least two targets, each the
+same native occurrence. A target id alone is never evidence; a causally later target, a cross-
+provider target, or an unknown id fails the link. Call sites: the reconciler self-checks every
+record it emits (durable index + this batch's new sources), replay checks every record before it
+may be applied to any target, and the standalone temporal view checks the record's relation to the
+event it is asked about. The view is not a weaker back door: a caller-supplied object saying
+DECLARATION_CONFLICT proves nothing; with insufficient or inconsistent context the view returns
+`ok:false` with the precise reason rather than guessing.
+
+**History compatibility — no silent reinterpretation.** Version-1 (unsealed) annotation and pending
+records written before this closeout stay byte-identical and are validated under their own
+contract: no snapshot, no set-binding identity. Replay applies a version-1 pending record only when
+its links hold against actual history; a version-1 record whose links cannot be verified is retained
+as an unlinked unresolved observation (`pendingUnlinked`, with the reason) and never applied to any
+target. A version-2 record whose links do not hold is corruption and fails the history closed.
+Nothing is manufactured for old rows — no snapshot, no observation time, no matching proof — and a
+version-1 record's backdated clocks or substituted targets cannot be detected by the record alone
+(stated limit). The view labels `effective.clockIntegrity` as `ORIGINAL_ONLY`, `SEALED` (every
+applied record is version 2), or `LEGACY_UNSEALED` (a version-1 record applied under its contract),
+so legacy claims are never promoted to sealed truth. A candidate redelivery of a conflict already
+retained by a version-1 record over the same target set is keep-first (no sealed twin). Predecessor
+fixtures: `test/fixtures/social-4d-legacy-32434e8-records.json`, produced by the untouched 32434e8
+runtime, never regenerated.
+
+**INDEX_DIVERGENCE — the existing limitation, kept honest.** A journal-held id unknown to the
+hydrated index makes settlement refuse with `INDEX_DIVERGENCE`: nothing appends, no cursor, meter,
+or progress adopts, the drained envelopes stay owed in the runtime, and the collector logs and
+retries each tick without advancing. There is NO automatic recovery. The supported sequence is
+manual: stop the ear (the paid X connection closes; intake bounds and backpressure limit further
+work), re-hydrate from the validated authoritative journal (a process restart does this), then
+settle — the owed candidates reconcile exactly once (keep-first for the known one, the genuinely
+new one appends). Bluesky: cursor obligations and resume cursor are preserved. X: the durable meter,
+ruleset epoch, and smoke-run state restore from the journal; the stale process's deliveries metered
+locally but never persisted are NOT recovered locally — server project usage re-read at preflight is
+the spend authority (existing COST law). This is an operational limitation, not a cosmetic one.
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -1212,6 +1288,10 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
 - **SOCIAL-4D CLOSEOUT — DONE (§5J):** cursor obligations owned by envelopes, one equivalence law
   on every duplicate route, missing-discriminator uncertainty, no last-wins corrections, as-of
   base-event admissibility, detached views. A repair, not a rollout; further defects may exist.
+- **SOCIAL-4D RECORD INTEGRITY — DONE (§5K):** sealed version-2 correction/conflict records, target-
+  set-bound pending identity, one target-context law across settlement/replay/view, legacy
+  version-1 records under their own contract, INDEX_DIVERGENCE recovery documented as manual.
+  Further defects may exist.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

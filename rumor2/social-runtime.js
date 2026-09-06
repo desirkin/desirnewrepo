@@ -216,6 +216,7 @@ export function createSocialRuntime({
     appended = adopted.sources; stats.annotations += adopted.annotated; stats.pendingRecords += adopted.pendings;
     if (batch.projected !== null) { durableCursor = batch.projected; stats.cursorAdvances += 1; if (appended === 0) lastCursorOnlyTs = batch.knownAtTs; }
     stats.appended += appended;
+    for (const env of batch.envelopes) if (typeof env.terminalReason === 'string' && env.terminalReason.startsWith('pending')) intake.forget(env.observation.socialVersionId); // an unresolved version may be re-associated later
     intake.settled(batch.envelopes);
     const events = batch.events;
     pendingBatch = null;

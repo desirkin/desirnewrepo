@@ -19,13 +19,14 @@
 // A legacy numeric-only clock is labelled UNVERIFIED (its declaration was not retained) —
 // never "precision-verified". This is the record/view contract later consumers may use; it
 // is not a dashboard, a model, or a decision rule.
-import { validateSocialEvent, validateSocialClockInterpretation, validateSocialReconciliationPending, sameDeclaration, SOCIAL_EVENT_V2_TYPE } from './social-settle.js';
+import { validateSocialEvent, validateSocialClockInterpretation, validateSocialReconciliationPending, socialPendingLinkError, sameDeclaration, SOCIAL_EVENT_V2_TYPE } from './social-settle.js';
 import { compareWitnessToReference, TEMPORAL_ORDER } from './social-time.js';
 
 export const SOCIAL_VIEW_MODES = Object.freeze(['ORIGINAL_RECORDED', 'EFFECTIVE_AS_OF']);
 export const SOCIAL_VIEW_STATUSES = Object.freeze(['NOT_YET_KNOWN', 'EFFECTIVE']);
 export const SOCIAL_CLOCK_PROVENANCE_VIEW = Object.freeze(['LEGACY_NUMERIC_UNVERIFIED', 'WITNESSED_DECLARATION', 'LATER_EVIDENCE_SAME_EVENT', 'CONFLICTING_DECLARATIONS']);
 export const SOCIAL_VIEW_CONFLICT_STATE = 'UNRESOLVED_CONFLICT';
+export const SOCIAL_VIEW_CLOCK_INTEGRITY = Object.freeze(['ORIGINAL_ONLY', 'SEALED', 'LEGACY_UNSEALED']);
 
 const deepFreeze = (v) => { if (v !== null && typeof v === 'object' && !Object.isFrozen(v)) { Object.freeze(v); for (const k of Object.keys(v)) deepFreeze(v[k]); } return v; };
 const detach = (v) => structuredClone(v); // a caller-owned object is never aliased, frozen, or mutated
@@ -58,6 +59,11 @@ export function socialTemporalView({ event, annotations = [], pending = [], asOf
     const perr = validateSocialReconciliationPending(p);
     if (perr) return { ok: false, error: perr };
     if (p.provider !== ev.provider || !p.candidateIds.includes(ev.sourceEventId)) return { ok: false, error: 'reconciliation pending: record does not name this event as a candidate' };
+    // SOCIAL-4D RECORD INTEGRITY: the ONE target-context law — a record affects this event only when
+    // its asserted relation to THIS event actually holds against the event and its retained
+    // annotations; a caller-supplied object saying DECLARATION_CONFLICT proves nothing by itself
+    const lerr = socialPendingLinkError(p, event, anns);
+    if (lerr) return { ok: false, error: `reconciliation pending: context invalid for ${p.reason} against this event: ${lerr}` };
     pends.push(detach(p));
   }
   // base-event admissibility precedes everything else
@@ -88,6 +94,11 @@ export function socialTemporalView({ event, annotations = [], pending = [], asOf
   const pev = eligibleAnns.find((a) => a.clockRole === 'PROVIDER_EVENT') ?? null;
   if (pev) { eff.providerEventTs = pev.interpretation.projectionMs; eff.providerEventWitness = pev.witness; eff.appliedProviderEventInterpretationId = pev.sourceEventId; eff.interpretationKnownAtTs = Math.max(eff.interpretationKnownAtTs ?? 0, pev.knownAtTs); }
   eff.conflict = conflict;
+  // which later records shaped this effective answer, and whether each carries the version-2
+  // first-known snapshot seal; a legacy (version-1) record is applied under its own contract and is
+  // labelled UNSEALED — its clocks were never bound, and no seal is manufactured for it
+  const applied = [...srcAnns.filter((a) => a.sourceEventId === eff.appliedSourceInterpretationId), ...(pev ? [pev] : []), ...(conflict ? [...srcAnns, ...eligibleConflicts] : [])];
+  eff.clockIntegrity = applied.length === 0 ? 'ORIGINAL_ONLY' : applied.every((r) => r.schemaVersion === 2) ? 'SEALED' : 'LEGACY_UNSEALED';
   return deepFreeze({ ok: true, status: 'EFFECTIVE', admissible: true, asOfTs, original, effective: eff, appliedAnnotations: [eff.appliedSourceInterpretationId, eff.appliedProviderEventInterpretationId].filter(Boolean).sort(), conflict });
 }
 

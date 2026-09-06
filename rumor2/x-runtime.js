@@ -630,7 +630,7 @@ export function createXRuntime({
       if (rc.kind === 'KNOWN') { stats.durableDuplicates += 1; continue; }
       if (rc.kind === 'NEW') { candidates.push(rc.event); continue; }
       if (rc.kind === 'ANNOTATE') { candidates.push(...rc.events); continue; }
-      candidates.push(rc.event); // PENDING
+      candidates.push(rc.event); env.terminalReason = `pending: ${rc.reason}`; // PENDING
     }
     if (candidates.length > 0 && typeof lookup === 'function') {
       const byType = new Map();
@@ -702,6 +702,7 @@ export function createXRuntime({
       stats.meterEvents += 1;
     }
     if (batch.progress) { x.progressThroughTs = batch.progress.throughKnownAtTs; stats.progressEvents += 1; }
+    for (const env of batch.envelopes) if (typeof env.terminalReason === 'string' && env.terminalReason.startsWith('pending')) intake?.forget(env.observation.socialVersionId); // an unresolved version may be re-associated later
     if (batch.gap) { x.lastGap = { gapStartTs: batch.gap.gapStartTs, reason: batch.gap.reason, knownAtTs: batch.knownAtTs, coverageEpoch: batch.gap.coverageEpoch }; pendingGap = null; owedSince = null; stats.gapEvents += 1; }
     if (batch.smokeTerminal) {
       const t = batch.smokeTerminal; const r = x.smoke.runs[t.smokeRunId];

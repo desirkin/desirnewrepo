@@ -180,6 +180,11 @@ export function socialIntake({
     pendingCount() { return pending.size; },
     // the owed units and drop flag of one cursor (diagnostic)
     obligation(cur) { const e = pending.get(cur); return e ? { owed: e.owed, dropped: e.dropped } : null; },
+    // SOCIAL-4D RECORD INTEGRITY: a version that settled as an UNRESOLVED (pending) observation is
+    // forgotten by the local cache so a later redelivery reaches settlement again — the durable
+    // history may then hold more potential occurrences, and that later association must not be
+    // suppressed as "already seen" (settlement still dedupes an unchanged association keep-first)
+    forget(versionId) { seen.delete(versionId); },
     // SOCIAL-2B: knowledge clocks of the still-queued observations — the X
     // time-window progress law needs the oldest unsettled acquisition time
     _peekKnownAts() { return queue.map((e) => e.observation.knownAtTs); },

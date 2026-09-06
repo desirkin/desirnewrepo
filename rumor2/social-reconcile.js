@@ -27,8 +27,9 @@
 import {
   socialObservationToEvent, validateSocialEvent, validateSocialClockInterpretation, validateSocialReconciliationPending,
   socialClockInterpretationEvent, socialReconciliationPendingEvent, socialNativeKeyDigest, socialCoarseKeyDigest, socialImmutableDigest, socialIndexEntry,
-  assessSocialEquivalence, sameDeclaration, deriveClockInterpretation, SOCIAL_OBSERVATION_TYPES, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE,
+  assessSocialEquivalence, sameDeclaration, deriveClockInterpretation, validateSocialPendingContext, socialReconciliationIdentity, SOCIAL_OBSERVATION_TYPES, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE,
 } from './social-settle.js';
+import { contentHash, canonicalJson } from './truth.js';
 
 export const RECONCILE_OUTCOMES = Object.freeze(['NEW', 'KNOWN', 'ANNOTATE', 'PENDING', 'INVALID']);
 export { assessSocialEquivalence };
@@ -41,6 +42,7 @@ export function createSocialReconciler({ provider } = {}) {
   const annotations = new Map(); // targetEventId -> [annotation]
   const annotationIds = new Set();
   const pendingIds = new Set();
+  const pendingSets = new Map(); // pending id -> its retained candidateIds (legacy version-1 records bind no set in their identity)
   // legacy targets already reconciled against a given witness in THIS process or through a
   // durable annotation: the cheap intake path may treat that exact redelivery as processed
   const reconciledLegacy = new Map(); // targetId -> Set(role|declared)
@@ -62,10 +64,10 @@ export function createSocialReconciler({ provider } = {}) {
 
   // Rebuild from an authoritative replay result (replaySocialHistory). Never partial.
   function hydrate(replay) {
-    index.clear(); byNativeKey.clear(); byCoarseKey.clear(); targets.clear(); annotations.clear(); annotationIds.clear(); pendingIds.clear(); reconciledLegacy.clear();
+    index.clear(); byNativeKey.clear(); byCoarseKey.clear(); targets.clear(); annotations.clear(); annotationIds.clear(); pendingIds.clear(); pendingSets.clear(); reconciledLegacy.clear();
     for (const e of replay.targets.values()) addIndex(e);
     for (const [, list] of replay.annotations) for (const a of list) { addAnnotation(a); markReconciled(a.targetEventId, a.witness?.declared ?? null, a.clockRole); }
-    for (const id of replay.pendingIds) pendingIds.add(id);
+    for (const id of replay.pendingIds) { pendingIds.add(id); const rec = replay.pendingRecords?.get(id); if (rec) pendingSets.set(id, rec.candidateIds); }
     stats.hydrations += 1;
     return { ok: true, index: index.size, annotations: annotationIds.size, pending: pendingIds.size };
   }
@@ -79,7 +81,7 @@ export function createSocialReconciler({ provider } = {}) {
     for (const e of events) {
       if (SOCIAL_OBSERVATION_TYPES.includes(e.type)) { addIndex(e); sources += 1; }
       else if (e.type === SOCIAL_CLOCK_INTERPRETATION_TYPE) { addAnnotation(e); annotated += 1; markReconciled(e.targetEventId, e.witness?.declared ?? null, e.clockRole); }
-      else if (e.type === SOCIAL_RECONCILIATION_PENDING_TYPE) { pendingIds.add(e.sourceEventId); pendings += 1; }
+      else if (e.type === SOCIAL_RECONCILIATION_PENDING_TYPE) { pendingIds.add(e.sourceEventId); pendingSets.set(e.sourceEventId, e.candidateIds); pendings += 1; }
     }
     for (const m of scope?.marks ?? []) markReconciled(m.targetId, m.declared, m.role);
     return { sources, annotated, pendings };
@@ -111,11 +113,11 @@ export function createSocialReconciler({ provider } = {}) {
 
   // A batch scope: candidates decided earlier in the SAME pending batch are visible to later ones.
   function batch({ knownAtTs }) {
-    return { knownAtTs, ids: new Map(), byKey: new Map(), byCoarse: new Map(), annotationIds: new Set(), annotationsByTarget: new Map(), pendingIds: new Set(), marks: [] };
+    return { knownAtTs, ids: new Map(), byKey: new Map(), byCoarse: new Map(), targets: new Map(), annotationIds: new Set(), annotationsByTarget: new Map(), pendingIds: new Set(), marks: [] };
   }
   const scopeCandidates = (map, key) => map.get(key) ?? [];
   const noteSource = (scope, e) => {
-    const entry = socialIndexEntry(e); scope.ids.set(e.sourceEventId, entry);
+    const entry = socialIndexEntry(e); scope.ids.set(e.sourceEventId, entry); scope.targets.set(e.sourceEventId, e);
     if (!scope.byKey.has(entry.nativeKeyDigest)) scope.byKey.set(entry.nativeKeyDigest, []); scope.byKey.get(entry.nativeKeyDigest).push(entry);
     if (!scope.byCoarse.has(entry.coarseKeyDigest)) scope.byCoarse.set(entry.coarseKeyDigest, []); scope.byCoarse.get(entry.coarseKeyDigest).push(entry);
   };
@@ -218,7 +220,17 @@ export function createSocialReconciler({ provider } = {}) {
     const ev = socialReconciliationPendingEvent({ observation: o, reason, candidateIds, knownAtTs: scope.knownAtTs });
     const err = validateSocialReconciliationPending(ev);
     if (err) { stats.invalid += 1; return { kind: 'INVALID', error: err }; }
+    // SOCIAL-4D RECORD INTEGRITY: the record self-checks its asserted target set under the ONE
+    // target-context law, against the durable index and this batch's own new sources
+    const ctx = validateSocialPendingContext(ev, { targetOf: (id) => targets.get(id) ?? scope.targets.get(id) ?? null, annotationsOf: (id) => [...(annotations.get(id) ?? []), ...(scope.annotationsByTarget.get(id) ?? [])] });
+    if (ctx) { stats.invalid += 1; return { kind: 'INVALID', error: ctx }; }
+    // the identity binds the canonical target set: an unchanged set is the SAME record (keep-first);
+    // a grown/changed set is a NEW later association record with its own knownAt
     if (pendingIds.has(ev.sourceEventId) || scope.pendingIds.has(ev.sourceEventId)) { stats.known += 1; return { kind: 'KNOWN', id: ev.sourceEventId, durable: pendingIds.has(ev.sourceEventId), pending: true }; }
+    // a LEGACY (version-1, unsealed) record of the same semantic conflict over the SAME target set is
+    // already retained: keep-first, no duplicate representation, and no seal is manufactured for it
+    const legacyId = socialReconciliationIdentity({ provider: ev.provider, nativeKeyDigest: contentHash(canonicalJson(ev.nativeKey)), immutableDigest: ev.immutableDigest, witnessHash: ev.witnessHash, reason });
+    if (pendingIds.has(legacyId) && canonicalJson(pendingSets.get(legacyId) ?? null) === canonicalJson(ev.candidateIds)) { stats.known += 1; return { kind: 'KNOWN', id: legacyId, durable: true, pending: true, legacyRecord: true }; }
     scope.pendingIds.add(ev.sourceEventId);
     stats.pending += 1;
     return { kind: 'PENDING', reason, event: ev, candidateIds };

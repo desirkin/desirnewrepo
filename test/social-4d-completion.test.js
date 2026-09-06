@@ -367,7 +367,7 @@ test('Q. mixed legacy/v2/interpretation/pending/cursor/X-operational history rep
   for (const e of mixed) assert.equal(isSocialEventType(e.type), true, `${e.type} is excluded from the frozen core AND validated here`);
   // corruption: an altered v2 payload under the same id, a forged pending record, an annotation whose target was altered
   const v2 = mixed.find((e) => e.type === SOCIAL_EVENT_V2_TYPE); assert.match(replaySocialHistory([...mixed, { ...v2, text: 'altered' }]).error, /altered payload|derived/);
-  const pd = mixed.find((e) => e.type === SOCIAL_RECONCILIATION_PENDING_TYPE); assert.match(replaySocialHistory([...mixed, { ...pd, reason: 'MULTIPLE_CANDIDATES' }]).error, /derived identity/);
+  const pd = mixed.find((e) => e.type === SOCIAL_RECONCILIATION_PENDING_TYPE); assert.match(replaySocialHistory([...mixed, { ...pd, reason: 'MULTIPLE_CANDIDATES' }]).error, /derived identity|names at least two targets/);
   assert.match(replaySocialHistory([{ type: 'RUMOR2_SOCIAL_OBSERVED_V3', sourceEventId: 'x' }]).ok ? 'ok' : 'unknown-type-ignored', /ok|unknown/); // an unknown type is the frozen core's to refuse (unchanged law)
 });
 
