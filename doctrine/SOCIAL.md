@@ -863,10 +863,19 @@ opaque string preserved byte-for-byte within a syntax bound — never `Number()`
 incremented, never a timestamp, never trimmed — carried in `delivery`, never in the frozen
 numeric `providerEventSeq`. Cross-route id equivalence (REST vs Firestream vs backups) is
 UNVERIFIED: no histories are merged and no provenance groups are manufactured. Text: bounded
-original kept separate from a derived display preview; absence is null. Relationships:
-`in_reply_to_message_id` → REPLY, `parent_message_id` → root, `reshare_message.id` → RESHARE
-(an id, never a second observation); conflicting or malformed evidence → UNKNOWN. Reshare
-counts and resharer id counts are propagation metadata only. Profile context is bounded (user id,
+original kept separate from a derived display preview; absence is null. Relationships
+(fixture-truth correction of 504c85c): `in_reply_to_message_id` → REPLY, `parent_message_id` →
+root, and the documented singular example `reshare_message.message.id` → RESHARE (only the
+bounded target id is kept; the nested original body/profile is never a second observation; a
+container-level `reshare_message.id` is not a supported variant and may only agree with the
+nested target). A relationship-bearing field that is present but malformed (array, string,
+boolean, number, invalid id, non-boolean `parent`), a reshare container without a target,
+disagreeing variants, a self-reshare, a non-root signal without a reply target, or reply and
+reshare evidence together → UNKNOWN with a `relationReason` — never ORIGINAL. ORIGINAL is a
+structural label only (no well-formed reply/reshare relation, or a root explicitly established
+by `parent: true` / a `parent_message_id` equal to the message's own id); it is never proof of
+independent confirmation. Separately valid root facts are preserved; targets are never invented.
+Reshare counts and resharer id counts are propagation metadata only. Profile context is bounded (user id,
 handle, join declaration, follower/following counts, provider `official`/`identity`/
 `classification` flags — a flag is never verification or corroboration); avatars, bios,
 locations, links, prices, and media are ignored, not copied. Sentiment is the author's label,
@@ -874,10 +883,23 @@ descriptive only. Symbols keep provider `symbol_id` and observed ticker separate
 `.X` inference and the legacy `${coin}.X` mapping is untouched; `resolveSymbolReference` matches
 an explicitly supplied snapshot only when it was known no later than the observation
 (`REFERENCE_KNOWN_LATER` otherwise), reports `TICKER_CONFLICT`/`NOT_IN_REFERENCE`, and never
-labels anything tradeable. Clocks: source declaration (instant, DATE_ONLY without invented
-millisecond precision, MALFORMED preserved as declared, ABSENT), envelope lifecycle time, and
-Serpent acquisition time stay distinct; the source clock is classified by the shared quarantine
-law (TRUSTED / FUTURE_QUARANTINED / UNKNOWN). Backups are historical provider data, not proof
+labels anything tradeable. The snapshot is validated WHOLE before any matching: every row must be
+a well-formed object with a canonical `symbol_id` and a valid ticker (optional `asset_class`
+string / `delisted` boolean or absent), one canonical `symbol_id` per snapshot, bounded row count.
+A duplicate `symbol_id` — identical or contradictory — refuses the whole snapshot as
+`REFERENCE_CONFLICT`; a malformed row refuses it as `REFERENCE_ROW_MALFORMED` (offending row
+index reported); nothing is ever selected by array order, first-wins, last-wins, or majority, and
+no subset is described as a verified reference. Clocks: one small local parser (never
+`Date.parse`) accepts a full instant only as calendar-validated `YYYY-MM-DDTHH:MM:SS[.fff]`
+with an explicit `Z` or `±HH:MM` offset; a calendar-valid `YYYY-MM-DD` is DATE_ONLY with no
+instant; an offset-less date-time is OFFSET_MISSING (the host zone is never assumed); more than
+three fraction digits is UNSUPPORTED_PRECISION (never truncated); bare numbers, impossible dates,
+leap seconds, and prose are MALFORMED — each preserved as declared with a null instant and an
+UNKNOWN source-clock status, and the message evidence still survives. The same parser governs
+`created_at`, envelope `time`, and `join_date`, which remain distinct clocks. Source declaration,
+envelope lifecycle time, and Serpent acquisition time stay distinct; a valid explicit-offset
+future instant is classified by the shared quarantine law (TRUSTED / FUTURE_QUARANTINED /
+UNKNOWN), never rejected. Backups are historical provider data, not proof
 Serpent knew it then. No resume cursor, gap repair, gzip, SSE framing, archive download, backoff,
 or transport exists; a parsed fixture never claims a complete feed.
 

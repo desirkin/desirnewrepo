@@ -215,14 +215,43 @@ const MAX_SYMBOL_REFS = 16; const MAX_CLASSIFICATIONS = 8;
 const TICKER_RE = /^[A-Za-z0-9._-]{1,20}$/;
 const PREVIEW_TEXT_CHARS = 280;
 const derivePreviewText = (text) => (typeof text === 'string' ? text.replace(/\s+/g, ' ').trim().slice(0, PREVIEW_TEXT_CHARS) : null);
-const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const INSTANT_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
+const OFFSETLESS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+const MAX_DECLARED_CHARS = 40;
+// the closed precision vocabulary of a declared StockTwits clock (local to this preview)
+export const STOCKTWITS_DECLARED_PRECISIONS = Object.freeze(['INSTANT', 'DATE_ONLY', 'OFFSET_MISSING', 'UNSUPPORTED_PRECISION', 'MALFORMED', 'ABSENT']);
 const nnInt = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
-// a declared source clock: full instant => ms; date-only => declaration preserved, instant unknown; malformed => null
+const isLeapYear = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+const daysInMonth = (y, m) => [31, isLeapYear(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1];
+const validCalendarDate = (y, m, d) => y >= 1000 && y <= 9999 && m >= 1 && m <= 12 && d >= 1 && d <= daysInMonth(y, m);
+// A declared source clock, parsed by ONE small local parser (never Date.parse):
+//   full instant  = calendar-valid YYYY-MM-DDTHH:MM:SS[.fff] + explicit offset (Z or ±HH:MM) => epoch ms
+//   date-only     = calendar-valid YYYY-MM-DD => declaration preserved, instant unknown
+//   offset-less   = a date-time with no offset => OFFSET_MISSING, instant unknown (the host zone is never assumed)
+//   sub-ms/other  = more than 3 fraction digits => UNSUPPORTED_PRECISION, instant unknown (no silent truncation)
+//   anything else = MALFORMED (bare numbers, impossible dates, leap seconds, prose), instant unknown
+// The declaration text is kept (bounded) so a preview never rewrites what the provider said.
 function declaredClock(v) {
-  if (typeof v !== 'string' || v.length === 0 || v.length > 40) return { declared: null, instantMs: null, precision: 'ABSENT' };
-  if (DATE_ONLY_RE.test(v)) return { declared: v, instantMs: null, precision: 'DATE_ONLY' };
-  const ms = Date.parse(v);
-  return Number.isFinite(ms) ? { declared: v, instantMs: ms, precision: 'INSTANT' } : { declared: v, instantMs: null, precision: 'MALFORMED' };
+  if (typeof v !== 'string' || v.length === 0) return { declared: null, instantMs: null, precision: 'ABSENT' };
+  const declared = v.slice(0, MAX_DECLARED_CHARS);
+  if (v.length > MAX_DECLARED_CHARS) return { declared, instantMs: null, precision: 'MALFORMED' };
+  const dateOnly = v.match(DATE_ONLY_RE);
+  if (dateOnly) return { declared, instantMs: null, precision: validCalendarDate(+dateOnly[1], +dateOnly[2], +dateOnly[3]) ? 'DATE_ONLY' : 'MALFORMED' };
+  const m = v.match(INSTANT_RE);
+  if (!m) return { declared, instantMs: null, precision: OFFSETLESS_RE.test(v) ? 'OFFSET_MISSING' : 'MALFORMED' };
+  const [y, mo, d, h, mi, sec] = [+m[1], +m[2], +m[3], +m[4], +m[5], +m[6]];
+  if (!validCalendarDate(y, mo, d) || h > 23 || mi > 59 || sec > 59) return { declared, instantMs: null, precision: 'MALFORMED' };
+  if (m[7] !== undefined && m[7].length > 3) return { declared, instantMs: null, precision: 'UNSUPPORTED_PRECISION' };
+  const frac = m[7] === undefined ? 0 : +m[7].padEnd(3, '0');
+  let offsetMs = 0;
+  if (m[8] !== 'Z') {
+    const oh = +m[8].slice(1, 3); const om = +m[8].slice(4, 6);
+    if (oh > 23 || om > 59) return { declared, instantMs: null, precision: 'MALFORMED' };
+    offsetMs = (m[8][0] === '-' ? -1 : 1) * (oh * 3_600_000 + om * 60_000);
+  }
+  const dt = new Date(0); dt.setUTCFullYear(y, mo - 1, d); dt.setUTCHours(h, mi, sec, frac);
+  return { declared, instantMs: dt.getTime() - offsetMs, precision: 'INSTANT' };
 }
 function symbolRefs(list) {
   if (!Array.isArray(list)) return Object.freeze([]);
@@ -250,6 +279,45 @@ function userContext(u, retrievedTs) {
     official: typeof u.official === 'boolean' ? u.official : null, // a provider flag — never verified-source status or corroboration
     identity: typeof u.identity === 'string' && u.identity.length <= 40 ? u.identity : null, classification,
   });
+}
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const absent = (v) => v === undefined || v === null;
+// conversation {parent_message_id, in_reply_to_message_id, parent, replies} (S3). A present but
+// invalid container, id, or parent flag is UNKNOWN — never silently the same as an absent field.
+function conversationRelation(raw, messageId) {
+  const none = { kind: 'ABSENT', reason: null, replyToId: null, rootId: null, replies: null };
+  if (absent(raw)) return none;
+  const unknown = (reason, extra = {}) => ({ kind: 'UNKNOWN', reason, replyToId: null, rootId: null, replies: null, ...extra });
+  if (!isPlainObject(raw)) return unknown('CONVERSATION_MALFORMED');
+  const replies = nnInt(raw.replies);
+  if (!absent(raw.parent) && typeof raw.parent !== 'boolean') return unknown('CONVERSATION_MALFORMED', { replies });
+  const replyToId = absent(raw.in_reply_to_message_id) ? null : canonicalDecimalId(raw.in_reply_to_message_id);
+  if (!absent(raw.in_reply_to_message_id) && replyToId === null) return unknown('REPLY_TARGET_MALFORMED', { replies });
+  const rootId = absent(raw.parent_message_id) ? null : canonicalDecimalId(raw.parent_message_id);
+  if (!absent(raw.parent_message_id) && rootId === null) return unknown('ROOT_MALFORMED', { replies });
+  if (replyToId !== null) {
+    if (raw.parent === true || replyToId === messageId) return unknown('REPLY_CONTRADICTS_ROOT', { rootId, replies });
+    return { kind: 'REPLY', reason: null, replyToId, rootId, replies };
+  }
+  const namesAnotherRoot = rootId !== null && rootId !== messageId;
+  if (raw.parent === true) return namesAnotherRoot ? unknown('ROOT_CONTRADICTION', { rootId, replies }) : { kind: 'ROOT', reason: null, replyToId: null, rootId, replies };
+  if (raw.parent === false || namesAnotherRoot) return unknown('NON_ROOT_WITHOUT_REPLY_TARGET', { rootId, replies }); // a non-root signal with no target: no invented reply, no asserted origin
+  return rootId === null ? { ...none, replies } : { kind: 'ROOT', reason: null, replyToId: null, rootId, replies };
+}
+// reshare_message per the documented singular example (S3): the target is reshare_message.message.id.
+// Only the bounded target id is kept — the nested original body/profile is never a second observation.
+// A container-level `id` is NOT a supported variant: it may only agree with the nested target, never replace it.
+function reshareRelation(raw, messageId) {
+  if (absent(raw)) return { kind: 'ABSENT', reason: null, resharedMessageId: null };
+  const unknown = (reason) => ({ kind: 'UNKNOWN', reason, resharedMessageId: null });
+  if (!isPlainObject(raw)) return unknown('RESHARE_MALFORMED');
+  if (absent(raw.message)) return unknown('RESHARE_TARGET_MISSING');
+  if (!isPlainObject(raw.message)) return unknown('RESHARE_TARGET_MALFORMED');
+  const target = canonicalDecimalId(raw.message.id);
+  if (target === null) return unknown('RESHARE_TARGET_MALFORMED');
+  if (!absent(raw.id) && canonicalDecimalId(raw.id) !== target) return unknown('RESHARE_VARIANT_DISAGREEMENT');
+  if (target === messageId) return unknown('RESHARE_OF_SELF');
+  return { kind: 'RESHARE', reason: null, resharedMessageId: target };
 }
 const base = ({ envelope, retrievedTs, action }) => ({
   provider: STOCKTWITS_OFFICIAL.id, providerKind: STOCKTWITS_OFFICIAL.providerKind, route: 'FIRESTREAM_MESSAGES',
@@ -286,26 +354,25 @@ export function firestreamEnvelopeToPreview(envelope, { retrievedTs } = {}) {
   const text = typeof d.body === 'string' ? d.body.slice(0, MAX_SOCIAL_TEXT_CHARS) : null;
   const created = declaredClock(d.created_at);
   const clock = created.instantMs === null ? { sourceCreatedTs: null, sourceClockStatus: 'UNKNOWN', sourceClockSkewMs: null } : classifySourceClock({ sourceDeclaredTs: created.instantMs, retrievedTs: Math.floor(retrievedTs) });
-  const conv = d.conversation !== null && typeof d.conversation === 'object' && !Array.isArray(d.conversation) ? d.conversation : null;
-  const replyToId = conv ? canonicalDecimalId(conv.in_reply_to_message_id) : null;
-  const rootId = conv ? canonicalDecimalId(conv.parent_message_id) : null;
-  const replyMalformed = conv !== null && conv.in_reply_to_message_id !== undefined && conv.in_reply_to_message_id !== null && replyToId === null;
-  const rm = d.reshare_message !== null && typeof d.reshare_message === 'object' && !Array.isArray(d.reshare_message) ? d.reshare_message : null;
-  const resharedMessageId = rm ? canonicalDecimalId(rm.id) : null;
-  const reshareMalformed = rm !== null && resharedMessageId === null;
-  const reshares = d.reshares !== null && typeof d.reshares === 'object' && !Array.isArray(d.reshares) ? d.reshares : null;
-  const propagation = Object.freeze({ resharedCount: reshares ? nnInt(reshares.reshared_count) : null, resharerIdCount: reshares && Array.isArray(reshares.user_ids) ? reshares.user_ids.filter((id) => canonicalDecimalId(id) !== null).length : null, replies: conv ? nnInt(conv.replies) : null });
-  let relation;
-  if (replyMalformed || reshareMalformed) relation = 'UNKNOWN';
-  else if (replyToId !== null && resharedMessageId !== null) relation = 'UNKNOWN'; // conflicting evidence — no guessed precedence
-  else if (replyToId !== null) relation = 'REPLY';
-  else if (resharedMessageId !== null) relation = 'RESHARE';
+  const conv = conversationRelation(d.conversation, messageId);
+  const rs = reshareRelation(d.reshare_message, messageId);
+  const reshares = isPlainObject(d.reshares) ? d.reshares : null;
+  const propagation = Object.freeze({ resharedCount: reshares ? nnInt(reshares.reshared_count) : null, resharerIdCount: reshares && Array.isArray(reshares.user_ids) ? reshares.user_ids.filter((id) => canonicalDecimalId(id) !== null).length : null, replies: conv.replies });
+  // ONE relation per message. ORIGINAL is a STRUCTURAL label (no well-formed reply/reshare relation,
+  // or an explicitly established root) — never independent confirmation of anything.
+  let relation; let relationReason = null;
+  if (conv.kind === 'UNKNOWN') { relation = 'UNKNOWN'; relationReason = conv.reason; }
+  else if (rs.kind === 'UNKNOWN') { relation = 'UNKNOWN'; relationReason = rs.reason; }
+  else if (conv.kind === 'REPLY' && rs.kind === 'RESHARE') { relation = 'UNKNOWN'; relationReason = 'REPLY_AND_RESHARE_EVIDENCE'; } // no guessed precedence
+  else if (conv.kind === 'REPLY') relation = 'REPLY';
+  else if (rs.kind === 'RESHARE') relation = 'RESHARE';
   else relation = 'ORIGINAL';
+  const replyToId = conv.replyToId; const rootId = conv.rootId; const resharedMessageId = rs.resharedMessageId;
   const sentiment = d.entities?.sentiment?.basic;
   return { preview: Object.freeze({
     ...base({ envelope, retrievedTs, action }), kind: 'MESSAGE', nativeMessageId: messageId,
     author, originalText: text, previewText: derivePreviewText(text), contentAvailable: text !== null,
-    relation, replyToMessageId: replyToId, rootMessageId: rootId, resharedMessageId,
+    relation, relationReason, replyToMessageId: replyToId, rootMessageId: rootId, resharedMessageId,
     propagation, // metadata only — never new observations, never corroboration
     symbols: symbolRefs(d.symbols), sentiment: sentiment === 'Bullish' || sentiment === 'Bearish' ? sentiment : null, // the author's label, descriptive only
     sourceDeclared: created.declared, sourceDeclaredPrecision: created.precision, sourceDeclaredTs: created.instantMs, sourceCreatedTs: clock.sourceCreatedTs, sourceClockStatus: clock.sourceClockStatus, sourceClockSkewMs: clock.sourceClockSkewMs,
@@ -316,14 +383,33 @@ export function firestreamEnvelopeToPreview(envelope, { retrievedTs } = {}) {
 // ---- symbol reference matching (in-memory, snapshot-aware) ---------------------------
 // reference = { knownAtTs, rows: [{ symbol_id, ticker, asset_class?, delisted? }] }. A snapshot
 // only known LATER than the observation is refused for that observation. No tradeable label.
+const MAX_REFERENCE_ROWS = 20_000;
+function validateReferenceRows(rows) {
+  if (rows.length > MAX_REFERENCE_ROWS) return { reason: 'REFERENCE_MALFORMED', row: MAX_REFERENCE_ROWS };
+  const seen = new Set();
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i];
+    if (!isPlainObject(r)) return { reason: 'REFERENCE_ROW_MALFORMED', row: i };
+    const id = canonicalDecimalId(r.symbol_id);
+    if (id === null || typeof r.ticker !== 'string' || !TICKER_RE.test(r.ticker)) return { reason: 'REFERENCE_ROW_MALFORMED', row: i };
+    if (!absent(r.asset_class) && !(typeof r.asset_class === 'string' && r.asset_class.length > 0 && r.asset_class.length <= 40)) return { reason: 'REFERENCE_ROW_MALFORMED', row: i };
+    if (!absent(r.delisted) && typeof r.delisted !== 'boolean') return { reason: 'REFERENCE_ROW_MALFORMED', row: i };
+    if (seen.has(id)) return { reason: 'REFERENCE_CONFLICT', row: i }; // duplicate symbol_id — identical or not — is refused, never merged or ordered
+    seen.add(id);
+  }
+  return null;
+}
 export function resolveSymbolReference(symbols, reference, { asOfTs } = {}) {
   const refs = Array.isArray(symbols) ? symbols : [];
   if (!isSupportedClock(asOfTs)) return Object.freeze(refs.map((s) => Object.freeze({ ...s, status: 'UNRESOLVED', reason: 'AS_OF_CLOCK_INVALID' })));
   if (reference === null || reference === undefined) return Object.freeze(refs.map((s) => Object.freeze({ ...s, status: 'UNRESOLVED', reason: 'NO_REFERENCE' })));
   if (!isSupportedClock(reference.knownAtTs) || !Array.isArray(reference.rows)) return Object.freeze(refs.map((s) => Object.freeze({ ...s, status: 'UNRESOLVED', reason: 'REFERENCE_MALFORMED' })));
   if (reference.knownAtTs > asOfTs) return Object.freeze(refs.map((s) => Object.freeze({ ...s, status: 'UNRESOLVED', reason: 'REFERENCE_KNOWN_LATER' })));
-  const byId = new Map();
-  for (const r of reference.rows) { const id = r && canonicalDecimalId(r.symbol_id); if (id && typeof r.ticker === 'string' && TICKER_RE.test(r.ticker)) byId.set(id, r); }
+  // validate the WHOLE snapshot before any matching: one canonical symbol_id per snapshot, every row
+  // well-formed. A malformed or conflicting snapshot resolves nothing — never one row chosen by array order.
+  const issue = validateReferenceRows(reference.rows);
+  if (issue) return Object.freeze(refs.map((s) => Object.freeze({ ...s, status: 'UNRESOLVED', reason: issue.reason, referenceIssueRow: issue.row })));
+  const byId = new Map(reference.rows.map((r) => [canonicalDecimalId(r.symbol_id), r]));
   return Object.freeze(refs.map((s) => {
     if (s.symbolId === null) return Object.freeze({ ...s, status: 'UNRESOLVED', reason: 'NO_SYMBOL_ID' });
     const row = byId.get(s.symbolId);

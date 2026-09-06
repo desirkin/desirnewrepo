@@ -4,12 +4,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   STOCKTWITS_OFFICIAL, STOCKTWITS_FOUNDATION, STOCKTWITS_ROUTES, STOCKTWITS_ROUTE_IDS, STOCKTWITS_LEGACY_RUMINT, STOCKTWITS_SOURCES, STOCKTWITS_USE_CASE,
   STOCKTWITS_APPLICATION_ID, STOCKTWITS_USE_CASE_VERSION, STOCKTWITS_PERMITTED_USES, stocktwitsAccessRecordFromEnv, validateStocktwitsAccessRecord, evaluateStocktwitsAccess, stocktwitsCredentialsPresent,
-  canonicalDecimalId, opaqueSeqId, firestreamEnvelopeToPreview, resolveSymbolReference, FIRESTREAM_OBJECTS, FIRESTREAM_ACTIONS,
+  canonicalDecimalId, opaqueSeqId, firestreamEnvelopeToPreview, resolveSymbolReference, FIRESTREAM_OBJECTS, FIRESTREAM_ACTIONS, STOCKTWITS_DECLARED_PRECISIONS,
 } from '../rumor2/social-stocktwits.js';
 import { SOCIAL_PROVIDERS, SOCIAL_ACCESS_STATES, socialProviderById, ACTIVE_SOCIAL_PROVIDER_IDS, isLiveActivatable, isPlatformCapable } from '../rumor2/social-registry.js';
 import { normalizeSocialObservation, SOCIAL_RETENTION_PROHIBITED_PROVIDERS, socialRetentionRefusal, socialSourceIdentity, socialAuthorIdentity, socialVersionIdentity, socialMetaHash, buildSocialFilter } from '../rumor2/social.js';
@@ -170,11 +171,14 @@ test('ST-PREVIEW-2. Message/destroy with only an id retains an unknown-content r
 test('ST-PREVIEW-3. relationships: direct reply, root, reshare evidence, ambiguity, absence; reshare counts synthesize no authors or posts', () => {
   const reply = firestreamEnvelopeToPreview(create({ conversation: { parent_message_id: '800', in_reply_to_message_id: '850', parent: false, replies: 4 } }), { retrievedTs: T }).preview;
   assert.equal(reply.relation, 'REPLY'); assert.equal(reply.replyToMessageId, '850'); assert.equal(reply.rootMessageId, '800'); assert.equal(reply.propagation.replies, 4);
-  const reshare = firestreamEnvelopeToPreview(create({ reshare_message: { id: 700, body: 'original text that must not leak', user: user({ id: 1 }) } }), { retrievedTs: T }).preview;
+  // the documented singular example (S3) nests the target: reshare_message.message.id
+  const reshare = firestreamEnvelopeToPreview(create({ reshare_message: { reshared_count: 1, message: { id: 700, body: 'original text that must not leak', user: user({ id: 1 }) } } }), { retrievedTs: T }).preview;
   assert.equal(reshare.relation, 'RESHARE'); assert.equal(reshare.resharedMessageId, '700'); assert.ok(!JSON.stringify(reshare).includes('must not leak'), 'the referenced message is an id, never a second observation');
-  const both = firestreamEnvelopeToPreview(create({ conversation: { in_reply_to_message_id: '850' }, reshare_message: { id: 700 } }), { retrievedTs: T }).preview; assert.equal(both.relation, 'UNKNOWN', 'conflicting evidence, no guessed precedence');
+  const both = firestreamEnvelopeToPreview(create({ conversation: { in_reply_to_message_id: '850' }, reshare_message: { message: { id: 700 } } }), { retrievedTs: T }).preview; assert.equal(both.relation, 'UNKNOWN', 'conflicting evidence, no guessed precedence'); assert.equal(both.relationReason, 'REPLY_AND_RESHARE_EVIDENCE');
   const malformed = firestreamEnvelopeToPreview(create({ conversation: { in_reply_to_message_id: 'abc' } }), { retrievedTs: T }).preview; assert.equal(malformed.relation, 'UNKNOWN'); assert.equal(malformed.replyToMessageId, null);
-  const badReshare = firestreamEnvelopeToPreview(create({ reshare_message: { id: 'nope' } }), { retrievedTs: T }).preview; assert.equal(badReshare.relation, 'UNKNOWN');
+  const badReshare = firestreamEnvelopeToPreview(create({ reshare_message: { message: { id: 'nope' } } }), { retrievedTs: T }).preview; assert.equal(badReshare.relation, 'UNKNOWN'); assert.equal(badReshare.relationReason, 'RESHARE_TARGET_MALFORMED');
+  // a container-level id alone is NOT a supported variant (undocumented; it may not even name the target): never positive proof
+  const flatOnly = firestreamEnvelopeToPreview(create({ reshare_message: { id: 700 } }), { retrievedTs: T }).preview; assert.equal(flatOnly.relation, 'UNKNOWN'); assert.equal(flatOnly.relationReason, 'RESHARE_TARGET_MISSING'); assert.equal(flatOnly.resharedMessageId, null);
   const none = firestreamEnvelopeToPreview(create({ conversation: null, reshares: null, reshare_message: null }), { retrievedTs: T }).preview; assert.equal(none.relation, 'ORIGINAL'); assert.deepEqual(none.propagation, { resharedCount: null, resharerIdCount: null, replies: null });
   const counts = firestreamEnvelopeToPreview(create({ reshares: { reshared_count: 99, user_ids: [1, 2, 'bad', -3] } }), { retrievedTs: T }).preview; assert.equal(counts.propagation.resharedCount, 99); assert.equal(counts.propagation.resharerIdCount, 2); assert.ok(!('resharers' in counts) && !('resharerIds' in counts), 'no user list copied');
   assert.equal(firestreamEnvelopeToPreview(create({ reshares: { reshared_count: -1 } }), { retrievedTs: T }).preview.propagation.resharedCount, null, 'unknown is null, never fake zero');
@@ -223,8 +227,124 @@ test('ST-PREVIEW-6. profile/engagement changes never change stable ids; symbol i
   assert.equal(res[2].reason, 'NOT_IN_REFERENCE'); assert.equal(res[3].reason, 'NO_SYMBOL_ID');
   assert.equal(resolveSymbolReference(many.symbols, { ...ref, knownAtTs: T + 1 }, { asOfTs: T })[0].reason, 'REFERENCE_KNOWN_LATER', 'a newer snapshot never improves an older observation');
   assert.equal(resolveSymbolReference(many.symbols, null, { asOfTs: T })[0].reason, 'NO_REFERENCE'); assert.equal(resolveSymbolReference(many.symbols, ref, {})[0].reason, 'AS_OF_CLOCK_INVALID'); assert.equal(resolveSymbolReference(many.symbols, { rows: [] }, { asOfTs: T })[0].reason, 'REFERENCE_MALFORMED');
-  assert.ok(!JSON.stringify(many).includes('.X"') || many.symbols.every((s) => s.ticker === null || !s.ticker.endsWith('.X') || true), 'no automatic .X inference: tickers are preserved as observed only');
+  // no .X inference, no id from a ticker, no eligibility from a match (concrete, not vacuous)
+  const plain = firestreamEnvelopeToPreview(create({ symbols: [{ id: 11, symbol: 'BTC' }, { symbol: 'ETH' }, { id: 14, symbol: 'AAPL' }] }), { retrievedTs: T }).preview;
+  assert.deepEqual([...plain.symbols], [{ symbolId: '11', ticker: 'BTC' }, { symbolId: null, ticker: 'ETH' }, { symbolId: '14', ticker: 'AAPL' }], 'observed tickers are preserved exactly; no suffix is invented');
+  const plainRes = resolveSymbolReference(plain.symbols, ref, { asOfTs: T });
+  assert.equal(plainRes[0].reason, 'TICKER_CONFLICT', 'BTC is not silently read as BTC.X'); assert.equal(plainRes[0].referenceTicker, 'BTC.X');
+  assert.equal(plainRes[1].symbolId, null); assert.equal(plainRes[1].reason, 'NO_SYMBOL_ID', 'no symbol id is invented from a ticker, even one present in the reference');
+  assert.equal(plainRes[2].reason, 'NOT_IN_REFERENCE');
+  for (const r of [...res, ...plainRes]) { assert.equal(r.tradeable ?? null, null); assert.ok(!('eligible' in r) && !('coinId' in r) && !('asset' in r), 'a match never mints eligibility or a shared coin identity'); }
   assert.equal(many.symbols.length <= 16, true);
+});
+
+// =====================================================================================
+// FIXTURE-TRUTH CORRECTIONS (independent review of 504c85c): documented reshare mapping,
+// malformed relationships never become origin evidence, honest declared clocks, and
+// conflict-safe reference snapshots. Wholly synthetic values.
+// =====================================================================================
+const rel = (over) => { const r = firestreamEnvelopeToPreview(create(over), { retrievedTs: T }); return r.preview ? { relation: r.preview.relation, reason: r.preview.relationReason, replyTo: r.preview.replyToMessageId, root: r.preview.rootMessageId, reshared: r.preview.resharedMessageId } : r; };
+
+test('ST-FIX-A. documented nested reshare keeps its target; malformed, partial, or contradictory relationship data is UNKNOWN with a reason, never ORIGINAL; nested originals are never duplicated', () => {
+  // RED at 504c85c: relation UNKNOWN, resharedMessageId null for the documented shape
+  const doc = firestreamEnvelopeToPreview({ object: 'Message', action: 'create', time: iso(T - 5_000), seq_id: SEQ, data: { id: '900000001', body: 'Synthetic message', created_at: '2026-09-06T11:59:00Z', user: { id: '7000001', username: 'synthetic' }, reshare_message: { reshared_count: 1, message: { id: '700', body: 'Synthetic referenced message', user: { id: '7000009', username: 'referenced_author' } } } } }, { retrievedTs: T }).preview;
+  assert.equal(doc.relation, 'RESHARE'); assert.equal(doc.resharedMessageId, '700'); assert.equal(doc.relationReason, null); assert.equal(doc.replyToMessageId, null); assert.equal(doc.rootMessageId, null);
+  const blob = JSON.stringify(doc); assert.ok(!blob.includes('Synthetic referenced message')); assert.ok(!blob.includes('referenced_author')); assert.ok(!blob.includes('7000009'), 'only the bounded target id survives; no second message, author, or confirmation');
+  assert.equal(doc.author.nativeAuthorId, '7000001'); assert.equal(doc.originalText, 'Synthetic message');
+  // valid direct reply
+  assert.deepEqual(rel({ conversation: { parent_message_id: '800', in_reply_to_message_id: '850', parent: false, replies: 2 } }), { relation: 'REPLY', reason: null, replyTo: '850', root: '800', reshared: null });
+  // simultaneous reply + reshare evidence: no precedence
+  assert.equal(rel({ conversation: { in_reply_to_message_id: '850' }, reshare_message: { message: { id: '700' } } }).reason, 'REPLY_AND_RESHARE_EVIDENCE');
+  // RED at 504c85c: every one of these was ORIGINAL
+  for (const [k, v, reason] of [['conversation', [], 'CONVERSATION_MALFORMED'], ['conversation', 'bad', 'CONVERSATION_MALFORMED'], ['conversation', true, 'CONVERSATION_MALFORMED'], ['conversation', 7, 'CONVERSATION_MALFORMED'], ['reshare_message', [], 'RESHARE_MALFORMED'], ['reshare_message', 'bad', 'RESHARE_MALFORMED'], ['reshare_message', false, 'RESHARE_MALFORMED'], ['reshare_message', 5, 'RESHARE_MALFORMED']]) {
+    const r = rel({ [k]: v }); assert.equal(r.relation, 'UNKNOWN', `${k}=${JSON.stringify(v)} is not origin evidence`); assert.equal(r.reason, reason); assert.equal(r.replyTo, null); assert.equal(r.reshared, null);
+  }
+  // malformed nested target / missing target / disagreeing variants / self-reshare
+  assert.equal(rel({ reshare_message: { message: [] } }).reason, 'RESHARE_TARGET_MALFORMED'); assert.equal(rel({ reshare_message: { message: { id: 2 ** 60 } } }).reason, 'RESHARE_TARGET_MALFORMED'); assert.equal(rel({ reshare_message: { message: 'x' } }).reason, 'RESHARE_TARGET_MALFORMED');
+  assert.equal(rel({ reshare_message: {} }).reason, 'RESHARE_TARGET_MISSING'); assert.equal(rel({ reshare_message: { reshared_count: 1 } }).reason, 'RESHARE_TARGET_MISSING');
+  assert.equal(rel({ reshare_message: { id: '701', message: { id: '700' } } }).reason, 'RESHARE_VARIANT_DISAGREEMENT', 'never whichever appears first or last');
+  assert.deepEqual(rel({ reshare_message: { id: '700', message: { id: '700' } } }), { relation: 'RESHARE', reason: null, replyTo: null, root: null, reshared: '700' }, 'an agreeing container id does not contradict the documented target');
+  assert.equal(rel({ reshare_message: { message: { id: 900000001 } } }).reason, 'RESHARE_OF_SELF');
+  // conversation partial/contradictory forms: no invented target, no asserted origin
+  assert.deepEqual(rel({ conversation: { parent_message_id: '800', in_reply_to_message_id: null, parent: false } }), { relation: 'UNKNOWN', reason: 'NON_ROOT_WITHOUT_REPLY_TARGET', replyTo: null, root: '800', reshared: null }, 'the separately valid root fact is preserved');
+  assert.equal(rel({ conversation: { parent_message_id: '800' } }).reason, 'NON_ROOT_WITHOUT_REPLY_TARGET', 'naming another root without a target is not origin');
+  assert.equal(rel({ conversation: { parent: false } }).reason, 'NON_ROOT_WITHOUT_REPLY_TARGET');
+  assert.equal(rel({ conversation: { parent: 'yes' } }).reason, 'CONVERSATION_MALFORMED'); assert.equal(rel({ conversation: { parent_message_id: 'x' } }).reason, 'ROOT_MALFORMED'); assert.equal(rel({ conversation: { in_reply_to_message_id: [] } }).reason, 'REPLY_TARGET_MALFORMED');
+  assert.equal(rel({ conversation: { parent: true, parent_message_id: '800' } }).reason, 'ROOT_CONTRADICTION'); assert.equal(rel({ conversation: { parent: true, in_reply_to_message_id: '850' } }).reason, 'REPLY_CONTRADICTS_ROOT'); assert.equal(rel({ conversation: { in_reply_to_message_id: '900000001' } }).reason, 'REPLY_CONTRADICTS_ROOT');
+  // legitimate ORIGINAL: genuinely absent relations, or an explicitly established root per the documented contract
+  for (const c of [{ conversation: null, reshare_message: null }, { conversation: undefined }, { conversation: {} }, { conversation: { replies: 3 } }, { conversation: { parent: true } }, { conversation: { parent: true, parent_message_id: '900000001' } }, { conversation: { parent_message_id: '900000001' } }]) { const r = rel(c); assert.equal(r.relation, 'ORIGINAL', JSON.stringify(c)); assert.equal(r.reason, null); assert.equal(r.replyTo, null); }
+  assert.equal(rel({ conversation: { parent: true, replies: 5 }, reshare_message: { message: { id: '700' } } }).relation, 'RESHARE', 'a reshare that roots its own conversation is still a reshare');
+  assert.equal(firestreamEnvelopeToPreview(create({ conversation: { parent_message_id: '800', in_reply_to_message_id: null, parent: false, replies: 9 } }), { retrievedTs: T }).preview.propagation.replies, 9, 'reply counts survive an UNKNOWN relation');
+  // removals and non-message objects are untouched by relationship rules
+  const gone = firestreamEnvelopeToPreview(env('Message', 'destroy', { id: '900000001', conversation: 'bad', reshare_message: [] }), { retrievedTs: T }).preview; assert.equal(gone.kind, 'MESSAGE_REMOVAL'); assert.ok(!('relation' in gone)); assert.equal(gone.priorCreateRequired, false);
+  assert.equal(firestreamEnvelopeToPreview(env('LikeMessage', 'destroy', { id: '5', message_id: '900000001' }), { retrievedTs: T }).unsupported.affectsMessage, false);
+});
+
+const clockOf = (created_at) => { const p = firestreamEnvelopeToPreview(create({ created_at }), { retrievedTs: T }).preview; return { precision: p.sourceDeclaredPrecision, ts: p.sourceDeclaredTs, createdTs: p.sourceCreatedTs, status: p.sourceClockStatus, declared: p.sourceDeclared, text: p.originalText }; };
+
+test('ST-FIX-B. declared clocks: explicit-offset instants only; calendar-validated; offset-less, bare-numeric, impossible, and sub-millisecond declarations never gain invented precision; identical in every host zone', () => {
+  assert.deepEqual([...STOCKTWITS_DECLARED_PRECISIONS], ['INSTANT', 'DATE_ONLY', 'OFFSET_MISSING', 'UNSUPPORTED_PRECISION', 'MALFORMED', 'ABSENT']);
+  // documented forms (S3): Z suffix and numeric offset
+  assert.deepEqual(clockOf('2026-09-06T11:59:00Z'), { precision: 'INSTANT', ts: T - 60_000, createdTs: T - 60_000, status: 'TRUSTED', declared: '2026-09-06T11:59:00Z', text: 'synthetic  $BTC  fixture body' });
+  const off = clockOf('2026-09-06T07:59:00.000-04:00'); assert.equal(off.precision, 'INSTANT'); assert.equal(off.ts, T - 60_000, 'a nonzero offset denotes the same instant'); assert.equal(clockOf('2026-09-06T17:29:00+05:30').ts, T - 60_000);
+  assert.equal(clockOf('2024-02-29T12:00:00Z').ts, Date.UTC(2024, 1, 29, 12), 'a valid leap day is accepted');
+  // RED at 504c85c: '0' => INSTANT 2000-01-01 TRUSTED; Feb 30 => rolled to Mar 2 TRUSTED; 2023-02-29 => Mar 1
+  for (const bad of ['0', '2026-02-30T12:00:00Z', '2023-02-29T12:00:00Z', '2026-13-01T00:00:00Z', '2026-09-05T24:00:00Z', '2026-09-05T23:60:00Z', '2026-09-05T23:59:60Z', '2026-09-05T12:00:00+24:00', '2026-09-05T12:00:00+05:60', '1700000000000', '1e12', 'yesterday', '2026-09-05 12:00:00Z', '2026-9-5T12:00:00Z', '20260905T120000Z', 'x'.repeat(41)]) {
+    const c = clockOf(bad); assert.equal(c.precision, 'MALFORMED', `${bad}`); assert.equal(c.ts, null); assert.equal(c.createdTs, null); assert.equal(c.status, 'UNKNOWN', `${bad} never TRUSTED`); assert.equal(c.text, 'synthetic  $BTC  fixture body', 'the message evidence survives'); assert.equal(c.declared, bad.slice(0, 40));
+  }
+  // RED at 504c85c: offset-less time parsed in the HOST zone and marked TRUSTED
+  for (const bare of ['2026-09-05T12:00:00', '2026-09-05T12:00:00.000', '2026-09-05T12:00']) { const c = clockOf(bare); assert.equal(c.precision, 'OFFSET_MISSING', bare); assert.equal(c.ts, null); assert.equal(c.status, 'UNKNOWN'); assert.equal(c.declared, bare); }
+  // date-only: valid stays DATE_ONLY with no instant; impossible dates are MALFORMED, not DATE_ONLY certainty (RED: 2026-02-30 => DATE_ONLY)
+  assert.deepEqual(clockOf('2026-09-05'), { precision: 'DATE_ONLY', ts: null, createdTs: null, status: 'UNKNOWN', declared: '2026-09-05', text: 'synthetic  $BTC  fixture body' }); assert.equal(clockOf('2024-02-29').precision, 'DATE_ONLY');
+  for (const bad of ['2026-02-30', '2023-02-29', '2026-13-01', '2026-00-10', '2026-09-00', '0999-01-01']) assert.equal(clockOf(bad).precision, 'MALFORMED', bad);
+  // finer than milliseconds is not silently truncated; up to three fraction digits are exact
+  const fine = clockOf('2026-09-06T11:59:00.1234567Z'); assert.equal(fine.precision, 'UNSUPPORTED_PRECISION'); assert.equal(fine.ts, null); assert.equal(fine.status, 'UNKNOWN');
+  assert.equal(clockOf('2026-09-06T11:59:00.5Z').ts, T - 60_000 + 500); assert.equal(clockOf('2026-09-06T11:59:00.05Z').ts, T - 60_000 + 50); assert.equal(clockOf('2026-09-06T11:59:00.123Z').ts, T - 60_000 + 123);
+  assert.equal(clockOf(undefined).precision, 'ABSENT'); assert.equal(clockOf('').precision, 'ABSENT'); assert.equal(firestreamEnvelopeToPreview(create({ created_at: 0 }), { retrievedTs: T }).preview.sourceDeclaredPrecision, 'ABSENT', 'a non-string is not a declaration');
+  // a valid explicit-offset FUTURE instant is still quarantined, never rejected
+  const fut = clockOf('2026-09-06T13:00:00Z'); assert.equal(fut.precision, 'INSTANT'); assert.equal(fut.ts, T + 3_600_000); assert.equal(fut.createdTs, null); assert.equal(fut.status, 'FUTURE_QUARANTINED'); assert.equal(fut.text, 'synthetic  $BTC  fixture body');
+  assert.equal(clockOf('2026-09-06T09:00:00-04:00').status, 'FUTURE_QUARANTINED', 'the offset is honoured before the future test');
+  // envelope time and user join_date obey the same parser; none is copied into creation/knownAt; the caller supplies acquisition
+  const p = firestreamEnvelopeToPreview(create({ created_at: '2026-09-05', user: user({ join_date: '2024-02-03T10:00:00' }) }, { time: '2026-09-06T11:59:55' }), { retrievedTs: T }).preview;
+  assert.equal(p.delivery.envelopeTs, null, 'offset-less envelope time is unknown'); assert.equal(p.author.joinTs, null); assert.equal(p.author.joinDeclared, '2024-02-03T10:00:00'); assert.equal(p.sourceDeclaredTs, null); assert.equal(p.knownAtTs, T); assert.equal(p.retrievedTs, T);
+  const q = firestreamEnvelopeToPreview(create({ user: user({ join_date: '2024-02-03T10:00:00-05:00' }) }, { time: '2026-09-06T06:59:55.250-05:00' }), { retrievedTs: T }).preview;
+  assert.equal(q.delivery.envelopeTs, T - 4_750); assert.equal(q.author.joinTs, Date.UTC(2024, 1, 3, 15)); assert.equal(firestreamEnvelopeToPreview(create({ user: user({ join_date: '2024-02-30T10:00:00Z' }) }), { retrievedTs: T }).preview.author.joinTs, null);
+  assert.equal(firestreamEnvelopeToPreview(env('Message', 'destroy', { id: '900000001', created_at: '2026-09-06T11:00:00' }), { retrievedTs: T }).preview.sourceDeclaredTs, null, 'removals use the same parser');
+  // the same input and acquisition clock yield byte-identical previews under UTC and America/New_York (RED: 12:00 vs 16:00)
+  const script = `import { firestreamEnvelopeToPreview } from ${JSON.stringify(path.join(REPO, 'rumor2/social-stocktwits.js'))}; const T = ${T}; const out = []; for (const c of ['2026-09-05T12:00:00', '2026-09-05T12:00:00.000-04:00', '2026-09-05T12:00:00+05:30', '2026-09-05', '2026-02-30T12:00:00Z', '0']) { const p = firestreamEnvelopeToPreview({ object: 'Message', action: 'create', seq_id: 'fx', time: '2026-09-05T12:00:00', data: { id: '900000001', body: 'b', created_at: c, user: { id: '7000001', username: 's', join_date: '2024-02-03T10:00:00' } } }, { retrievedTs: T }).preview; out.push([p.sourceDeclaredPrecision, p.sourceDeclaredTs, p.sourceClockStatus, p.delivery.envelopeTs, p.author.joinTs]); } process.stdout.write(JSON.stringify(out));`;
+  const runIn = (TZ) => execFileSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, TZ }, encoding: 'utf8' });
+  const utc = runIn('UTC'); assert.equal(runIn('America/New_York'), utc); assert.equal(runIn('Asia/Kolkata'), utc);
+  assert.deepEqual(JSON.parse(utc), [['OFFSET_MISSING', null, 'UNKNOWN', null, null], ['INSTANT', Date.UTC(2026, 8, 5, 16), 'TRUSTED', null, null], ['INSTANT', Date.UTC(2026, 8, 5, 6, 30), 'TRUSTED', null, null], ['DATE_ONLY', null, 'UNKNOWN', null, null], ['MALFORMED', null, 'UNKNOWN', null, null], ['MALFORMED', null, 'UNKNOWN', null, null]]);
+  const src = readFileSync(path.join(REPO, 'rumor2/social-stocktwits.js'), 'utf8'); assert.ok(!src.includes('Date.now')); assert.ok(!/function declaredClock[\s\S]*?\n}\n/.exec(src)[0].includes('Date.parse'), 'the preview parser never falls back to Date.parse');
+});
+
+test('ST-FIX-C. reference snapshots are validated whole before matching: duplicate or contradictory symbol_id rows are refused in every order; malformed rows refuse the snapshot; valid unique rows match order-independently; nothing tradeable', () => {
+  const sy = [{ symbolId: '11', ticker: null }, { symbolId: '12', ticker: 'ETH.X' }];
+  const res = (rows, over = {}) => resolveSymbolReference(sy, { knownAtTs: T - 1000, rows, ...over }, { asOfTs: T });
+  const ok = [{ symbol_id: '11', ticker: 'BTC.X', asset_class: 'Crypto', delisted: false }, { symbol_id: '12', ticker: 'ETH.X', asset_class: 'Crypto', delisted: false }, { symbol_id: '13', ticker: 'SOL.X' }];
+  const fwd = res(ok); const rev = res([...ok].reverse());
+  assert.deepEqual(fwd, rev, 'valid unique rows resolve identically in any order'); assert.equal(fwd[0].status, 'MATCHED'); assert.equal(fwd[0].referenceTicker, 'BTC.X'); assert.equal(fwd[0].assetClass, 'Crypto'); assert.equal(fwd[0].delisted, false); assert.equal(fwd[1].status, 'MATCHED'); assert.equal(fwd[0].tradeable, null);
+  assert.equal(resolveSymbolReference([{ symbolId: '13', ticker: null }], { knownAtTs: T - 1000, rows: ok }, { asOfTs: T })[0].assetClass, null, 'unavailable class stays null');
+  // RED at 504c85c: MATCHED to ETH.X forward, BTC.X reversed
+  const dupTicker = [{ symbol_id: '11', ticker: 'BTC.X', asset_class: 'Crypto', delisted: false }, { symbol_id: '11', ticker: 'ETH.X', asset_class: 'Crypto', delisted: false }];
+  for (const rows of [dupTicker, [...dupTicker].reverse()]) { const r = res(rows); assert.equal(r[0].status, 'UNRESOLVED'); assert.equal(r[0].reason, 'REFERENCE_CONFLICT'); assert.equal(r[0].referenceIssueRow, 1); assert.ok(!('referenceTicker' in r[0])); assert.equal(r[1].reason, 'REFERENCE_CONFLICT', 'a conflicting snapshot resolves nothing, not even ids outside the conflict'); }
+  // RED at 504c85c: final row's class/delisted reported as MATCHED; reversal flipped it
+  const dupClass = [{ symbol_id: '11', ticker: 'BTC.X', asset_class: 'Crypto', delisted: false }, { symbol_id: '11', ticker: 'BTC.X', asset_class: 'Equity', delisted: true }];
+  for (const rows of [dupClass, [...dupClass].reverse()]) { const r = res(rows); assert.equal(r[0].reason, 'REFERENCE_CONFLICT'); assert.ok(!('assetClass' in r[0]) && !('delisted' in r[0])); }
+  // declared policy: exact duplicate rows are refused too (one canonical symbol_id per snapshot)
+  assert.equal(res([ok[0], { ...ok[0] }])[0].reason, 'REFERENCE_CONFLICT'); assert.equal(res([ok[0], { ...ok[0] }])[0].referenceIssueRow, 1);
+  assert.equal(res([ok[0], { symbol_id: 11, ticker: 'BTC.X' }])[0].reason, 'REFERENCE_CONFLICT', 'numeric and string forms of one id are one id');
+  // malformed rows refuse the whole snapshot with the offending row; no silent subset
+  for (const [bad, row] of [[{ symbol_id: 'x', ticker: 'BTC.X' }, 1], [{ symbol_id: '14' }, 1], [{ symbol_id: '14', ticker: 'bad sym!' }, 1], [{ symbol_id: '14', ticker: 'OK', asset_class: 7 }, 1], [{ symbol_id: '14', ticker: 'OK', delisted: 'yes' }, 1], [null, 1], ['row', 1], [['11', 'BTC.X'], 1]]) {
+    const r = res([ok[0], bad]); assert.equal(r[0].status, 'UNRESOLVED', JSON.stringify(bad)); assert.equal(r[0].reason, 'REFERENCE_ROW_MALFORMED'); assert.equal(r[0].referenceIssueRow, row); assert.equal(r[1].reason, 'REFERENCE_ROW_MALFORMED');
+  }
+  assert.equal(res(Array.from({ length: 20_001 }, (_, i) => ({ symbol_id: String(i + 1), ticker: 'T' + i })))[0].reason, 'REFERENCE_MALFORMED', 'bounded input');
+  // unchanged refusals
+  assert.equal(res(ok, { knownAtTs: T + 1 })[0].reason, 'REFERENCE_KNOWN_LATER'); assert.equal(resolveSymbolReference(sy, null, { asOfTs: T })[0].reason, 'NO_REFERENCE'); assert.equal(resolveSymbolReference(sy, undefined, { asOfTs: T })[1].reason, 'NO_REFERENCE');
+  assert.equal(resolveSymbolReference(sy, { knownAtTs: T - 1, rows: 'rows' }, { asOfTs: T })[0].reason, 'REFERENCE_MALFORMED'); assert.equal(res(ok, {}).length, 2);
+  assert.equal(resolveSymbolReference([{ symbolId: null, ticker: 'BTC.X' }], { knownAtTs: T - 1, rows: ok }, { asOfTs: T })[0].reason, 'NO_SYMBOL_ID', 'a ticker alone never maps to an id');
+  assert.equal(resolveSymbolReference([{ symbolId: '11', ticker: 'BTC' }], { knownAtTs: T - 1, rows: ok }, { asOfTs: T })[0].reason, 'TICKER_CONFLICT');
+  for (const r of [...fwd, ...res(dupTicker)]) { assert.equal(r.tradeable ?? null, null); assert.ok(!('eligible' in r) && !('coinId' in r)); }
 });
 
 // =====================================================================================
