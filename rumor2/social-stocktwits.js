@@ -112,7 +112,41 @@ export function stocktwitsAccessRecordFromEnv(env = process.env) {
   return { ref: g('REF'), route: g('ROUTE'), status: g('STATUS'), application: g('APPLICATION'), useCaseVersion: g('USE_CASE_VERSION'), permittedUses: csv(g('PERMITTED_USES')), additionalTerms: g('ADDITIONAL_TERMS') ?? 'UNRESOLVED', additionalTermsSatisfied: g('ADDITIONAL_TERMS_SATISFIED') === 'true', validUntil: g('VALID_UNTIL'), retentionCompatibility: g('RETENTION_COMPATIBILITY') ?? 'UNRESOLVED', reviewedOn: g('REVIEWED_ON') };
 }
 
+// ---- operator-supplied access dates: ONE deterministic interpretation ----------------------
+// Shared by record validation AND evaluation (a field is parsed once per evaluation through the
+// same closed semantics). Reuses the preview's local calendar parser: never Date.parse, never
+// new Date(string), never the host zone, never numeric/prose coercion, never calendar rollover.
+//   ABSENT    = null/undefined (the field was not supplied — NOT a fabricated value)
+//   INSTANT   = calendar-valid YYYY-MM-DDTHH:MM:SS[.f|.ff|.fff] with explicit Z or ±HH:MM => exact epoch ms
+//   DATE_ONLY = calendar-valid YYYY-MM-DD => a UTC calendar-day LABEL (dayStartMs), no instant claimed
+//   INVALID   = anything supplied that is not one of the above (offset-less date-time, impossible date,
+//               bare number, prose, sub-millisecond fraction, wrong type, empty/oversized) — never absent
+export const STOCKTWITS_ACCESS_DATE_KINDS = Object.freeze(['ABSENT', 'INSTANT', 'DATE_ONLY', 'INVALID']);
+const ACCESS_DATE_ERRORS = Object.freeze({
+  OFFSET_MISSING: 'a date-time without an explicit Z or numeric offset is ambiguous',
+  UNSUPPORTED_PRECISION: 'fractions finer than milliseconds are unsupported',
+  MALFORMED: 'not a calendar-valid YYYY-MM-DD or explicit-offset date-time',
+});
+export function stocktwitsAccessDate(v) {
+  if (absent(v)) return Object.freeze({ kind: 'ABSENT', declared: null, instantMs: null, dayStartMs: null, error: null });
+  if (typeof v !== 'string') return Object.freeze({ kind: 'INVALID', declared: null, instantMs: null, dayStartMs: null, error: 'must be a string' });
+  const c = declaredClock(v);
+  if (c.precision === 'INSTANT') return Object.freeze({ kind: 'INSTANT', declared: c.declared, instantMs: c.instantMs, dayStartMs: null, error: null });
+  if (c.precision === 'DATE_ONLY') { const [y, m, d] = c.declared.split('-').map(Number); return Object.freeze({ kind: 'DATE_ONLY', declared: c.declared, instantMs: null, dayStartMs: Date.UTC(y, m - 1, d), error: null }); }
+  return Object.freeze({ kind: 'INVALID', declared: c.declared, instantMs: null, dayStartMs: null, error: ACCESS_DATE_ERRORS[c.precision] ?? ACCESS_DATE_ERRORS.MALFORMED });
+}
+const DAY_MS = 86_400_000;
+const utcDayStart = (ms) => ms - (((ms % DAY_MS) + DAY_MS) % DAY_MS);
+// validation + the parsed dates, computed once
+function inspectAccessRecord(r) {
+  const dates = { reviewedOn: stocktwitsAccessDate(r?.reviewedOn), validUntil: stocktwitsAccessDate(r?.validUntil) };
+  return { error: validateAccessRecordShape(r, dates), dates };
+}
 export function validateStocktwitsAccessRecord(r) {
+  return inspectAccessRecord(r).error;
+}
+
+function validateAccessRecordShape(r, dates) {
   if (r === null || typeof r !== 'object' || Array.isArray(r)) return 'access record: not an object';
   const allowed = ['ref', 'route', 'status', 'application', 'useCaseVersion', 'permittedUses', 'additionalTerms', 'additionalTermsSatisfied', 'validUntil', 'retentionCompatibility', 'reviewedOn'];
   for (const k of Object.keys(r)) if (!allowed.includes(k)) return `access record: undeclared field '${k}'`;
@@ -123,9 +157,9 @@ export function validateStocktwitsAccessRecord(r) {
   if (!Array.isArray(r.permittedUses) || r.permittedUses.length > STOCKTWITS_PERMITTED_USES.length || r.permittedUses.some((u) => !STOCKTWITS_PERMITTED_USES.includes(u))) return 'access record: permittedUses outside the closed vocabulary';
   if (!STOCKTWITS_RECORD_TERMS.includes(r.additionalTerms)) return `access record: unknown additionalTerms '${r.additionalTerms}'`;
   if (typeof r.additionalTermsSatisfied !== 'boolean') return 'access record: additionalTermsSatisfied must be boolean';
-  if (r.validUntil !== null && r.validUntil !== undefined && (typeof r.validUntil !== 'string' || !Number.isFinite(Date.parse(r.validUntil)))) return 'access record: validUntil is not a parseable date';
+  if (dates.validUntil.kind === 'INVALID') return `access record: validUntil ${dates.validUntil.error}`;
   if (!STOCKTWITS_RETENTION_STATES.includes(r.retentionCompatibility)) return `access record: unknown retentionCompatibility '${r.retentionCompatibility}'`;
-  if (r.reviewedOn !== null && r.reviewedOn !== undefined && (typeof r.reviewedOn !== 'string' || !Number.isFinite(Date.parse(r.reviewedOn)))) return 'access record: reviewedOn is not a parseable date';
+  if (dates.reviewedOn.kind === 'INVALID') return `access record: reviewedOn ${dates.reviewedOn.error}`;
   return null;
 }
 
@@ -145,13 +179,17 @@ export function evaluateStocktwitsAccess({ record = null, env = process.env, now
   if (description !== null) advisories.push('SELF_DESCRIPTION_IS_NOT_PERMISSION');
   if (record === null) blockers.push('ACCESS_RECORD_MISSING');
   else {
-    const err = validateStocktwitsAccessRecord(record);
+    const { error: err, dates } = inspectAccessRecord(record);
     if (err) blockers.push(`ACCESS_RECORD_INVALID: ${err}`);
     else if (!clockKnown) { /* nothing time-dependent can be judged */ }
     else {
       route = record.route;
-      const reviewedMs = record.reviewedOn ? Date.parse(record.reviewedOn) : null;
-      reviewOk = reviewedMs === null || reviewedMs <= nowMs;
+      // reviewedOn: an INSTANT is compared exactly; a DATE_ONLY label is compared to the UTC calendar day of
+      // nowMs (a later day cannot establish readiness; the label never proves the exact review instant);
+      // ABSENT keeps the pre-existing optionality and is labelled, not assumed.
+      const rv = dates.reviewedOn;
+      reviewOk = rv.kind === 'ABSENT' || (rv.kind === 'INSTANT' ? rv.instantMs <= nowMs : rv.dayStartMs <= utcDayStart(nowMs));
+      if (rv.kind === 'ABSENT') advisories.push('REVIEW_DATE_NOT_SUPPLIED');
       if (!reviewOk) blockers.push('REVIEW_DATE_IN_FUTURE');
       const inScope = record.application === STOCKTWITS_APPLICATION_ID && record.useCaseVersion === STOCKTWITS_USE_CASE_VERSION;
       if (!inScope) { entitlementStatus = 'OUT_OF_SCOPE'; blockers.push('ENTITLEMENT_OUT_OF_SCOPE: the record covers another application or use-case version'); }
@@ -159,8 +197,12 @@ export function evaluateStocktwitsAccess({ record = null, env = process.env, now
       else if (record.status === 'DENIED') { entitlementStatus = 'DENIED'; blockers.push('ENTITLEMENT_DENIED'); }
       else if (record.status === 'PENDING') { blockers.push('ENTITLEMENT_PENDING'); }
       else if (record.status === 'ATTESTED') {
-        const exp = record.validUntil ? Date.parse(record.validUntil) : null; // null = no supplied expiry, never invented
-        if (exp !== null && !(nowMs < exp)) { entitlementStatus = 'EXPIRED'; blockers.push('ENTITLEMENT_EXPIRED'); }
+        // validUntil: ABSENT = no supplied expiry (never invented); INSTANT = exact boundary, valid only while
+        // nowMs < expiry; DATE_ONLY names no expiry instant or zone, so readiness is blocked rather than
+        // guessed (no end-of-day, no +24h, no host zone, no UTC-midnight assumption on the platform's behalf).
+        const vu = dates.validUntil;
+        if (vu.kind === 'INSTANT' && !(nowMs < vu.instantMs)) { entitlementStatus = 'EXPIRED'; blockers.push('ENTITLEMENT_EXPIRED'); }
+        else if (vu.kind === 'DATE_ONLY') blockers.push('VALID_UNTIL_PRECISION_UNRESOLVED');
         else if (!reviewOk) { /* stays NOT_VERIFIED */ }
         else { entitlementStatus = 'OPERATOR_ATTESTED'; permittedUses = [...record.permittedUses]; }
       }

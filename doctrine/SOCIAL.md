@@ -831,6 +831,23 @@ validity, retention compatibility, reviewed date; no credentials, correspondence
 identity, or contract body) yields at best `OPERATOR_ATTESTED` — never platform proof. The clock
 is an explicit validated input (no wall clock; missing ⇒ `CLOCK_UNAVAILABLE`, invalid ⇒
 `CLOCK_INVALID`); a future review date is `REVIEW_DATE_IN_FUTURE`; an absent expiry stays absent.
+Access-date precision law (seal of b86278f): `reviewedOn` and `validUntil` share ONE strict
+interpretation (`stocktwitsAccessDate`, the same local calendar parser as the preview — never
+`Date.parse`, never the host zone, never numeric/prose coercion, never calendar rollover), parsed
+once per evaluation and used identically by validation and readiness. A calendar-valid
+`YYYY-MM-DD` is a UTC calendar-day LABEL; an explicit-offset `YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`
+is an exact instant; anything else supplied (offset-less date-time, impossible date, bare number,
+prose, sub-millisecond fraction, wrong type, empty/oversized) is `ACCESS_RECORD_INVALID` naming the
+field — never treated as absent, never repaired. `reviewedOn`: a day label passes only when it is
+no later than the UTC calendar day of `nowMs` (it never proves the review instant); an instant is
+compared exactly; absence keeps the pre-existing optionality and is labelled by the advisory
+`REVIEW_DATE_NOT_SUPPLIED`. `validUntil`: an instant is valid only while `nowMs < expiry`
+(equality is expired, no grace, no rounding); a day label names no expiry instant or zone, so the
+declaration is kept and readiness is blocked as `VALID_UNTIL_PRECISION_UNRESOLVED` — Serpent does
+not assume end-of-day, +24h, the host zone, or UTC midnight on the platform's behalf (a
+conservative readiness decision, not a platform or legal claim; an approved live contract must
+supply its own expiry interpretation); `null` means no expiry supplied, not an everlasting licence.
+Results are identical in every host time zone. No date grants entitlement.
 Readiness = every prerequisite AND zero blockers; informational notes are advisories. Even a
 fully permissive synthetic record leaves `liveAllowed=false`, `liveStatus=DISABLED`,
 `liveReason=FOUNDATION_ONLY_NO_LIVE_PATH`, `durableContentAllowed=false`,

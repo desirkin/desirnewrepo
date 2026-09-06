@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   STOCKTWITS_OFFICIAL, STOCKTWITS_FOUNDATION, STOCKTWITS_ROUTES, STOCKTWITS_ROUTE_IDS, STOCKTWITS_LEGACY_RUMINT, STOCKTWITS_SOURCES, STOCKTWITS_USE_CASE,
   STOCKTWITS_APPLICATION_ID, STOCKTWITS_USE_CASE_VERSION, STOCKTWITS_PERMITTED_USES, stocktwitsAccessRecordFromEnv, validateStocktwitsAccessRecord, evaluateStocktwitsAccess, stocktwitsCredentialsPresent,
-  canonicalDecimalId, opaqueSeqId, firestreamEnvelopeToPreview, resolveSymbolReference, FIRESTREAM_OBJECTS, FIRESTREAM_ACTIONS, STOCKTWITS_DECLARED_PRECISIONS,
+  canonicalDecimalId, opaqueSeqId, firestreamEnvelopeToPreview, resolveSymbolReference, FIRESTREAM_OBJECTS, FIRESTREAM_ACTIONS, STOCKTWITS_DECLARED_PRECISIONS, stocktwitsAccessDate, STOCKTWITS_ACCESS_DATE_KINDS,
 } from '../rumor2/social-stocktwits.js';
 import { SOCIAL_PROVIDERS, SOCIAL_ACCESS_STATES, socialProviderById, ACTIVE_SOCIAL_PROVIDER_IDS, isLiveActivatable, isPlatformCapable } from '../rumor2/social-registry.js';
 import { normalizeSocialObservation, SOCIAL_RETENTION_PROHIBITED_PROVIDERS, socialRetentionRefusal, socialSourceIdentity, socialAuthorIdentity, socialVersionIdentity, socialMetaHash, buildSocialFilter } from '../rumor2/social.js';
@@ -345,6 +345,70 @@ test('ST-FIX-C. reference snapshots are validated whole before matching: duplica
   assert.equal(resolveSymbolReference([{ symbolId: null, ticker: 'BTC.X' }], { knownAtTs: T - 1, rows: ok }, { asOfTs: T })[0].reason, 'NO_SYMBOL_ID', 'a ticker alone never maps to an id');
   assert.equal(resolveSymbolReference([{ symbolId: '11', ticker: 'BTC' }], { knownAtTs: T - 1, rows: ok }, { asOfTs: T })[0].reason, 'TICKER_CONFLICT');
   for (const r of [...fwd, ...res(dupTicker)]) { assert.equal(r.tradeable ?? null, null); assert.ok(!('eligible' in r) && !('coinId' in r)); }
+});
+
+test('ST-FIX-D. access-record dates: one strict shared interpretation for reviewedOn and validUntil; offset-less, impossible, numeric, and prose values are invalid (never absent); date-only review is a UTC day label; date-only expiry is precision-unresolved; exact expiry boundary; identical in every host zone; no permission from any date', () => {
+  const NOW = Date.parse('2026-09-06T14:00:00.000Z');
+  const REC = (over = {}) => ({ ref: 'audit-synthetic', route: 'FIRESTREAM_MESSAGES', status: 'ATTESTED', application: STOCKTWITS_APPLICATION_ID, useCaseVersion: STOCKTWITS_USE_CASE_VERSION, permittedUses: ['RETRIEVAL', 'PERSONAL_RESEARCH'], additionalTerms: 'NOT_REQUIRED', additionalTermsSatisfied: false, retentionCompatibility: 'COMPATIBLE_REVIEWED', reviewedOn: '2026-09-05', validUntil: null, ...over });
+  const ev = (over, nowMs = NOW, e = CREDS) => evaluateStocktwitsAccess({ record: REC(over), env: e, nowMs });
+  const envRec = (over) => { const e = { RUMOR2_SOCIAL_STOCKTWITS_ACCESS_REF: 'audit-synthetic', RUMOR2_SOCIAL_STOCKTWITS_ACCESS_ROUTE: 'FIRESTREAM_MESSAGES', RUMOR2_SOCIAL_STOCKTWITS_ACCESS_STATUS: 'ATTESTED', RUMOR2_SOCIAL_STOCKTWITS_ACCESS_APPLICATION: STOCKTWITS_APPLICATION_ID, RUMOR2_SOCIAL_STOCKTWITS_ACCESS_USE_CASE_VERSION: STOCKTWITS_USE_CASE_VERSION, RUMOR2_SOCIAL_STOCKTWITS_ACCESS_PERMITTED_USES: 'RETRIEVAL,PERSONAL_RESEARCH', RUMOR2_SOCIAL_STOCKTWITS_ACCESS_ADDITIONAL_TERMS: 'NOT_REQUIRED', RUMOR2_SOCIAL_STOCKTWITS_ACCESS_RETENTION_COMPATIBILITY: 'COMPATIBLE_REVIEWED', RUMOR2_SOCIAL_STOCKTWITS_ACCESS_REVIEWED_ON: '2026-09-05', ...over }; return stocktwitsAccessRecordFromEnv(e); };
+  const invalid = (a, field) => { assert.equal(a.activationPrerequisitesMet, false); assert.equal(a.entitlementStatus, 'NOT_VERIFIED'); assert.equal(a.blockers.length, 1, JSON.stringify(a.blockers)); assert.match(a.blockers[0], new RegExp(`^ACCESS_RECORD_INVALID: access record: ${field} `)); assert.equal(a.prerequisites.review, false); assert.equal(a.prerequisites.entitlement, false); noAuthority(a); };
+  assert.deepEqual([...STOCKTWITS_ACCESS_DATE_KINDS], ['ABSENT', 'INSTANT', 'DATE_ONLY', 'INVALID']);
+  // RED A at b86278f: ready under UTC and Asia/Kolkata, REVIEW_DATE_IN_FUTURE under America/New_York
+  invalid(ev({ reviewedOn: '2026-09-06T12:00:00' }), 'reviewedOn'); assert.match(ev({ reviewedOn: '2026-09-06T12:00:00' }).blockers[0], /without an explicit Z or numeric offset/);
+  // RED B at b86278f: EXPIRED under UTC and Asia/Kolkata, ready under America/New_York
+  invalid(ev({ validUntil: '2026-09-06T12:00:00' }), 'validUntil');
+  // RED C at b86278f: February 30 accepted (review ready; expiry silently read as a later date)
+  invalid(ev({ reviewedOn: '2026-02-30' }), 'reviewedOn'); invalid(ev({ reviewedOn: '2026-02-27', validUntil: '2026-02-30T12:00:00Z' }, Date.parse('2026-02-28T12:00:00Z')), 'validUntil');
+  // RED D at b86278f: '0' accepted as a review date
+  invalid(ev({ reviewedOn: '0' }), 'reviewedOn'); invalid(ev({ validUntil: '0' }), 'validUntil');
+  // both fields: impossible calendar values, bad time/offset components, precision, type, prose, locale, whitespace, size
+  const junk = ['2026-02-30', '2023-02-29', '2026-00-10', '2026-09-00', '2026-13-01', '2026-02-30T12:00:00Z', '2023-02-29T00:00:00Z', '2026-09-05T24:00:00Z', '2026-09-05T12:60:00Z', '2026-09-05T12:00:60Z', '2026-09-05T12:00:00+24:00', '2026-09-05T12:00:00-05:60', '2026-09-05T12:00:00.1234Z', '2026-09-05T12:00', '2026-09-05 12:00:00Z', '0', '1', '1700000000000', 'yesterday', 'next week', 'Sept 5, 2026', '09/05/2026', '05.09.2026', '', ' ', ' 2026-09-05', '2026-09-05 ', '2026-9-5', '20260905', 'x'.repeat(41), '2026-09-05T12:00:00Z'.padEnd(41, '0')];
+  for (const v of junk) { invalid(ev({ reviewedOn: v }), 'reviewedOn'); invalid(ev({ validUntil: v }), 'validUntil'); assert.equal(stocktwitsAccessDate(v).kind, 'INVALID', JSON.stringify(v)); assert.equal(stocktwitsAccessDate(v).instantMs, null); assert.equal(stocktwitsAccessDate(v).dayStartMs, null); }
+  for (const v of [true, false, 0, 1, 1788696000000, 1.5, [], ['2026-09-05'], {}, { date: '2026-09-05' }, 20260905n]) { invalid(ev({ reviewedOn: v }), 'reviewedOn'); invalid(ev({ validUntil: v }), 'validUntil'); assert.equal(stocktwitsAccessDate(v).kind, 'INVALID'); assert.equal(stocktwitsAccessDate(v).error, 'must be a string'); }
+  // env-derived values go through the same validation; an empty env value is "not supplied", not a date
+  invalid(evaluateStocktwitsAccess({ record: envRec({ RUMOR2_SOCIAL_STOCKTWITS_ACCESS_REVIEWED_ON: '2026-09-06T12:00:00' }), env: CREDS, nowMs: NOW }), 'reviewedOn');
+  invalid(evaluateStocktwitsAccess({ record: envRec({ RUMOR2_SOCIAL_STOCKTWITS_ACCESS_VALID_UNTIL: '2026-02-30' }), env: CREDS, nowMs: NOW }), 'validUntil');
+  invalid(evaluateStocktwitsAccess({ record: envRec({ RUMOR2_SOCIAL_STOCKTWITS_ACCESS_VALID_UNTIL: '0' }), env: CREDS, nowMs: NOW }), 'validUntil');
+  const envOk = envRec({ RUMOR2_SOCIAL_STOCKTWITS_ACCESS_VALID_UNTIL: '2026-09-07T00:00:00Z' }); assert.equal(validateStocktwitsAccessRecord(envOk), null); assert.equal(evaluateStocktwitsAccess({ record: envOk, env: CREDS, nowMs: NOW }).activationPrerequisitesMet, true);
+  assert.equal(envRec({ RUMOR2_SOCIAL_STOCKTWITS_ACCESS_VALID_UNTIL: '' }).validUntil, null, 'empty env = not supplied (pre-existing env law)');
+  // reviewedOn: a validated UTC day label — later day blocks, same/earlier day passes this one prerequisite; it never proves an instant
+  assert.equal(ev({ reviewedOn: '2026-09-07' }).blockers.includes('REVIEW_DATE_IN_FUTURE'), true); assert.equal(ev({ reviewedOn: '2026-09-07' }).activationPrerequisitesMet, false);
+  assert.equal(ev({ reviewedOn: '2026-09-06' }, Date.parse('2026-09-06T00:00:00.000Z')).activationPrerequisitesMet, true, 'same UTC day at 00:00Z passes'); assert.equal(ev({ reviewedOn: '2026-09-06' }, Date.parse('2026-09-05T23:59:59.999Z')).blockers.includes('REVIEW_DATE_IN_FUTURE'), true, 'the day before is a future day');
+  assert.equal(ev({ reviewedOn: '2026-09-05' }).activationPrerequisitesMet, true); assert.equal(ev({ reviewedOn: '2024-02-29' }).activationPrerequisitesMet, true, 'valid leap day');
+  assert.deepEqual(stocktwitsAccessDate('2026-09-05'), { kind: 'DATE_ONLY', declared: '2026-09-05', instantMs: null, dayStartMs: Date.UTC(2026, 8, 5), error: null });
+  // reviewedOn: explicit-offset instants compared exactly; equivalent instants agree; a future instant blocks
+  for (const v of ['2026-09-06T14:00:00Z', '2026-09-06T10:00:00-04:00', '2026-09-06T19:30:00+05:30', '2026-09-06T13:59:59.999Z']) assert.equal(ev({ reviewedOn: v }).activationPrerequisitesMet, true, v);
+  for (const v of ['2026-09-06T14:00:00.001Z', '2026-09-06T10:00:01-04:00', '2026-09-06T19:31:00+05:30']) { const a = ev({ reviewedOn: v }); assert.deepEqual([...a.blockers], ['REVIEW_DATE_IN_FUTURE'], v); assert.equal(a.entitlementStatus, 'NOT_VERIFIED'); }
+  assert.equal(stocktwitsAccessDate('2026-09-06T10:00:00-04:00').instantMs, NOW); assert.equal(stocktwitsAccessDate('2026-09-06T19:30:00+05:30').instantMs, NOW); assert.equal(stocktwitsAccessDate('2026-09-06T14:00:00.250Z').instantMs, NOW + 250);
+  // validUntil: exact one-millisecond boundary (valid only while nowMs < expiry); equivalent instants agree
+  for (const v of ['2026-09-06T14:00:00.001Z', '2026-09-06T10:00:00.001-04:00', '2026-09-06T19:30:00.001+05:30']) { const a = ev({ validUntil: v }); assert.equal(a.activationPrerequisitesMet, true, v); assert.equal(a.entitlementStatus, 'OPERATOR_ATTESTED'); }
+  for (const v of ['2026-09-06T14:00:00.000Z', '2026-09-06T14:00:00Z', '2026-09-06T10:00:00-04:00', '2026-09-06T19:30:00+05:30', '2026-09-06T13:59:59.999Z']) { const a = ev({ validUntil: v }); assert.equal(a.activationPrerequisitesMet, false, v); assert.equal(a.entitlementStatus, 'EXPIRED'); assert.deepEqual([...a.blockers], ['ENTITLEMENT_EXPIRED']); }
+  // validUntil: date-only names no expiry instant or zone — declaration kept, readiness blocked, nothing assumed
+  for (const v of ['2026-09-06', '2026-09-07', '2027-01-01', '2024-02-29']) { const a = ev({ validUntil: v }); assert.equal(a.activationPrerequisitesMet, false, v); assert.deepEqual([...a.blockers], ['VALID_UNTIL_PRECISION_UNRESOLVED']); assert.equal(a.entitlementStatus, 'NOT_VERIFIED'); assert.equal(a.prerequisites.entitlement, false); assert.equal(validateStocktwitsAccessRecord(REC({ validUntil: v })), null, 'a valid label is a valid record; only readiness is withheld'); }
+  // absent expiry = no expiry supplied; absent review keeps the pre-existing optionality and is labelled
+  const noExp = ev({ validUntil: null }); assert.equal(noExp.activationPrerequisitesMet, true); assert.ok(!noExp.advisories.includes('REVIEW_DATE_NOT_SUPPLIED'));
+  assert.equal(ev({ validUntil: undefined }).activationPrerequisitesMet, true); assert.equal(stocktwitsAccessDate(null).kind, 'ABSENT'); assert.equal(stocktwitsAccessDate(undefined).kind, 'ABSENT');
+  const noRev = ev({ reviewedOn: null }); assert.equal(noRev.activationPrerequisitesMet, true); assert.deepEqual([...noRev.advisories], ['REVIEW_DATE_NOT_SUPPLIED']); assert.equal(noRev.blockers.length, 0);
+  // supplied input is never mutated or rewritten
+  const frozenIn = REC({ reviewedOn: '2026-02-30', validUntil: '2026-09-06T12:00:00' }); const snapshot = JSON.stringify(frozenIn); ev({ reviewedOn: '2026-02-30', validUntil: '2026-09-06T12:00:00' }); evaluateStocktwitsAccess({ record: frozenIn, env: CREDS, nowMs: NOW }); assert.equal(JSON.stringify(frozenIn), snapshot);
+  assert.equal(stocktwitsAccessDate('2026-02-30').declared, '2026-02-30'); assert.equal(stocktwitsAccessDate('x'.repeat(50)).declared, 'x'.repeat(40), 'bounded, not rewritten');
+  // missing/invalid nowMs: readiness false without any wall clock, even with valid dates
+  for (const bad of [undefined, null, NaN, '1788696000000', 0, 1.5]) { const a = evaluateStocktwitsAccess({ record: REC({ reviewedOn: '2026-09-05', validUntil: '2026-09-07T00:00:00Z' }), env: CREDS, nowMs: bad }); assert.equal(a.activationPrerequisitesMet, false); assert.ok(a.blockers[0] === 'CLOCK_UNAVAILABLE' || a.blockers[0] === 'CLOCK_INVALID'); assert.equal(a.prerequisites.review, false); noAuthority(a); }
+  // invalid date + permissive flags/credentials still grants nothing; readiness/blockers stay consistent
+  const perm = evaluateStocktwitsAccess({ record: REC({ reviewedOn: '0', permittedUses: [...STOCKTWITS_PERMITTED_USES] }), env: { ...CREDS, RUMINT_ENABLED: 'true', STOCKTWITS_LIVE: 'true', RUMOR2_SOCIAL_STOCKTWITS_ACCESS_STATUS: 'ATTESTED' }, nowMs: NOW }); invalid(perm, 'reviewedOn'); assert.deepEqual([...perm.permittedUses], []); assert.equal(perm.useCaseClassification, 'UNRESOLVED'); assert.equal(perm.evidence, 'OPERATOR_ATTESTATION_NOT_PLATFORM_PROOF');
+  for (const a of [noExp, noRev, ev({ validUntil: '2026-09-07' }), ev({ reviewedOn: '2026-09-07' })]) { noAuthority(a); assert.equal(a.activationPrerequisitesMet, a.blockers.length === 0 && Object.values(a.prerequisites).every(Boolean)); }
+  // byte-identical results under UTC, America/New_York, and Asia/Kolkata for the same records and nowMs (RED A/B flipped by zone)
+  const script = `import { evaluateStocktwitsAccess, STOCKTWITS_APPLICATION_ID as A, STOCKTWITS_USE_CASE_VERSION as U } from ${JSON.stringify(path.join(REPO, 'rumor2/social-stocktwits.js'))}; const rec = (o) => ({ ref: 'audit-synthetic', route: 'FIRESTREAM_MESSAGES', status: 'ATTESTED', application: A, useCaseVersion: U, permittedUses: ['RETRIEVAL', 'PERSONAL_RESEARCH'], additionalTerms: 'NOT_REQUIRED', additionalTermsSatisfied: false, retentionCompatibility: 'COMPATIBLE_REVIEWED', reviewedOn: '2026-09-05', validUntil: null, ...o }); const env = { STOCKTWITS_STREAM_USER: 'fixture-user-not-real', STOCKTWITS_STREAM_PASS: 'fixture-pass-not-real' }; const out = []; for (const o of [{ reviewedOn: '2026-09-06T12:00:00' }, { validUntil: '2026-09-06T12:00:00' }, { reviewedOn: '2026-02-30' }, { reviewedOn: '0' }, { reviewedOn: '2026-09-06' }, { validUntil: '2026-09-06' }, { reviewedOn: '2026-09-06T14:00:00Z' }, { reviewedOn: '2026-09-06T10:00:00-04:00' }, { reviewedOn: '2026-09-06T19:30:00+05:30' }, { validUntil: '2026-09-06T14:00:00.001Z' }, { validUntil: '2026-09-06T10:00:00-04:00' }, { validUntil: '2026-09-06T19:30:00.001+05:30' }]) { const a = evaluateStocktwitsAccess({ record: rec(o), env, nowMs: ${NOW} }); out.push([a.activationPrerequisitesMet, a.entitlementStatus, a.blockers, a.advisories, a.liveAllowed, a.durableContentAllowed]); } process.stdout.write(JSON.stringify(out));`;
+  const runIn = (TZ) => execFileSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, TZ }, encoding: 'utf8' });
+  const utc = runIn('UTC'); assert.equal(runIn('America/New_York'), utc); assert.equal(runIn('Asia/Kolkata'), utc);
+  const rows = JSON.parse(utc); assert.equal(rows.length, 12);
+  assert.deepEqual(rows.map((r) => [r[0], r[1]]), [[false, 'NOT_VERIFIED'], [false, 'NOT_VERIFIED'], [false, 'NOT_VERIFIED'], [false, 'NOT_VERIFIED'], [true, 'OPERATOR_ATTESTED'], [false, 'NOT_VERIFIED'], [true, 'OPERATOR_ATTESTED'], [true, 'OPERATOR_ATTESTED'], [true, 'OPERATOR_ATTESTED'], [true, 'OPERATOR_ATTESTED'], [false, 'EXPIRED'], [true, 'OPERATOR_ATTESTED']]);
+  assert.ok(rows.every((r) => r[4] === false && r[5] === false), 'no fixture in any zone grants live or durable permission');
+  // the access helper never reaches for Date.parse on supplied strings; the preview's date-only source declaration stays an unknown instant
+  const src = readFileSync(path.join(REPO, 'rumor2/social-stocktwits.js'), 'utf8'); const access = src.slice(src.indexOf('export function stocktwitsAccessDate'), src.indexOf('// ---- identifiers'));
+  assert.ok(!access.includes('Date.parse') && !access.includes('new Date('), 'access dates use the local calendar parser only');
+  assert.equal(firestreamEnvelopeToPreview(create({ created_at: '2026-09-05' }), { retrievedTs: T }).preview.sourceDeclaredTs, null);
 });
 
 // =====================================================================================
