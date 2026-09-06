@@ -696,7 +696,12 @@ agreement + satisfied, validity, retention compatibility, reviewed-on) is evalua
 `evaluateRedditAccess`. Its best outcome is `OPERATOR_ATTESTED` — an operator attestation,
 never machine proof that Reddit issued permission. Missing, pending, expired, revoked,
 denied, out-of-scope (another application or use-case version), unclassified, or malformed
-records confer nothing; an unknown enum fails closed. Retrieval permission never expands to
+records confer nothing; an unknown enum fails closed. The evaluation clock is an explicit,
+validated input (a supported epoch-ms integer; the helper never substitutes a wall clock), a
+supplied review date must not lie in the future of that clock, and the readiness summary
+`activationPrerequisitesMet` is derived by one rule — every recorded prerequisite true AND
+zero blockers — so a blocking reason can never coexist with readiness; informational notes
+are `advisories`, never blockers. Retrieval permission never expands to
 inference, model training, derived features, or redistribution (separate `permittedUses`).
 Private correspondence and contract text stay out of Git, logs, the journal, and status.
 This foundation contains NO live networking that a record or flag could switch on
@@ -737,9 +742,11 @@ live fetch, timer, subscription, credential exchange, or persistent cache exists
 **OAuth / rate-limit foundation (§13).** Pure request description (host `oauth.reddit.com`,
 `/r/<subreddit>/<listing>`, bounded query, documented descriptive User-Agent shape,
 credential NAMED never valued) and a rate-header parser. The future runtime allowance law is
-pinned: min(approved scope cap, configured cap, observed remaining); malformed or missing
-headers or caps yield zero; the published 100 QPM reference is never a default. No token
-exchange, no polling loop.
+pinned: min(approved scope cap, configured cap, observed remaining). Only documented decimal
+header strings (or finite non-negative numeric fixtures) are accepted; booleans, arrays,
+objects, empty strings, exponent/hex/signed syntax, NaN, Infinity, negatives, out-of-bound
+values, and missing headers or caps yield zero; the published 100 QPM reference is never a
+default. No token exchange, no polling loop.
 
 **DRAFT ONLY — the question Reddit must actually answer (not a submission):**
 "Private application for one owner, not sold or offered as a paid service. It would analyze a

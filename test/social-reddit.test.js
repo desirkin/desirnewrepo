@@ -59,7 +59,7 @@ test('REDDIT-A/C. a personal/single-user or "theoretical prototype" description 
   for (const description of ['private single-user personal prototype', 'theoretical prototype only', 'research']) {
     const a = evaluateRedditAccess({ record: null, env: {}, description, nowMs: T });
     assert.equal(a.useCaseClassification, 'UNRESOLVED'); assert.equal(a.approvalStatus, 'NOT_VERIFIED'); assert.equal(a.liveAllowed, false); assert.equal(a.durableContentAllowed, false);
-    assert.ok(a.blockers.includes('SELF_DESCRIPTION_IS_NOT_PERMISSION')); assert.ok(a.blockers.includes('APPROVAL_RECORD_MISSING'));
+    assert.ok(a.advisories.includes('SELF_DESCRIPTION_IS_NOT_PERMISSION'), 'informational, never mistaken for a blocker'); assert.ok(a.blockers.includes('APPROVAL_RECORD_MISSING')); assert.equal(a.activationPrerequisitesMet, false);
   }
   assert.equal(REDDIT_FOUNDATION.liveTransport, false); assert.equal(REDDIT_FOUNDATION.oauthExchange, false); assert.equal(REDDIT_FOUNDATION.pollingLoop, false); assert.equal(REDDIT_FOUNDATION.scraping, false);
 });
@@ -293,4 +293,92 @@ test('REDDIT-NO-LIVE (§3/§16). the Reddit surface is exactly one fixture-only 
   assert.equal(REDDIT_FOUNDATION.fixtureOnly, true);
   // the collector has no Reddit runtime wiring at all
   assert.ok(!/reddit/i.test(readFileSync(path.join(REPO, 'rumor2/collector.js'), 'utf8')), 'collector never mentions Reddit');
+});
+
+// =====================================================================================
+// READINESS CONSISTENCY + RATE-HEADER VALIDATION (SOCIAL-3 correction)
+// =====================================================================================
+const READY = (over = {}) => RECORD({ permittedUses: ['RETRIEVAL'], validUntil: null, retentionCompatibility: 'COMPATIBLE_REVIEWED', reviewedOn: '2026-09-06', ...over });
+const noAuthority = (a) => { assert.equal(a.liveAllowed, false); assert.equal(a.liveStatus, 'DISABLED'); assert.equal(a.liveReason, 'FOUNDATION_ONLY_NO_LIVE_PATH'); assert.equal(a.durableContentAllowed, false); assert.equal(a.durableAuthorIdentityAllowed, false); };
+const consistent = (a) => { if (a.blockers.length > 0) assert.equal(a.activationPrerequisitesMet, false, `blockers ${JSON.stringify(a.blockers)} cannot coexist with readiness`); if (a.activationPrerequisitesMet) assert.deepEqual([...a.blockers], []); };
+
+test('READINESS-A1/A2 (RED A). a known clock with a valid attestation reviewed in the past and no supplied expiry is ready-on-paper but never live; the SAME record without a clock is not ready, with a precise reason', () => {
+  const ok = evaluateRedditAccess({ record: READY(), env: CREDS, nowMs: T });
+  assert.equal(ok.approvalStatus, 'OPERATOR_ATTESTED'); assert.equal(ok.activationPrerequisitesMet, true); assert.deepEqual([...ok.blockers], []); assert.equal(ok.prerequisites.clock, true); assert.equal(ok.prerequisites.review, true); noAuthority(ok);
+  const none = evaluateRedditAccess({ record: READY(), env: CREDS });
+  assert.equal(none.activationPrerequisitesMet, false, 'RED A: readiness cannot be true beside CLOCK_UNAVAILABLE'); assert.ok(none.blockers.includes('CLOCK_UNAVAILABLE')); assert.equal(none.prerequisites.clock, false);
+  assert.equal(none.approvalStatus, 'NOT_VERIFIED', 'an attestation cannot be evaluated without a clock'); consistent(none); noAuthority(none);
+  // present-time review is fine; a null validUntil is "no supplied expiry", never an invented one
+  const today = evaluateRedditAccess({ record: READY({ reviewedOn: '2026-09-06T12:00:00Z' }), env: CREDS, nowMs: T }); assert.equal(today.activationPrerequisitesMet, true); assert.equal(today.approvalStatus, 'OPERATOR_ATTESTED');
+});
+
+test('READINESS-A3. clock null, NaN, Infinity, string, negative, or out-of-range: not ready, no coercion, no wall-clock substitution', () => {
+  for (const bad of [null, undefined, NaN, Infinity, -Infinity, '1788696000000', String(T), -1, 0, 1.5, 4102444800000 * 10, -T, true, {}, [T]]) {
+    const a = evaluateRedditAccess({ record: READY(), env: CREDS, nowMs: bad });
+    assert.equal(a.activationPrerequisitesMet, false, `clock ${String(bad)}`); assert.ok(a.blockers.includes('CLOCK_UNAVAILABLE') || a.blockers.includes('CLOCK_INVALID'), `clock ${String(bad)} => ${a.blockers}`);
+    assert.equal(a.approvalStatus, 'NOT_VERIFIED'); consistent(a); noAuthority(a);
+  }
+  const src = readFileSync(path.join(REPO, 'rumor2/social-reddit.js'), 'utf8'); assert.ok(!src.includes('Date.now'), 'no wall-clock substitution inside the pure helper');
+});
+
+test('READINESS-A4/A5 (RED A). a review dated after the evaluation clock is not ready with an explicit review-time blocker and is never rewritten; an invalid review date is rejected consistently', () => {
+  const future = evaluateRedditAccess({ record: READY({ reviewedOn: '2056-01-01' }), env: CREDS, nowMs: T });
+  assert.equal(future.activationPrerequisitesMet, false, 'RED A: a review that has not happened cannot establish reviewed status'); assert.ok(future.blockers.includes('REVIEW_DATE_IN_FUTURE')); assert.equal(future.prerequisites.review, false);
+  assert.equal(future.approvalStatus, 'NOT_VERIFIED'); consistent(future); noAuthority(future);
+  const soon = evaluateRedditAccess({ record: READY({ reviewedOn: new Date(T + 1000).toISOString() }), env: CREDS, nowMs: T }); assert.ok(soon.blockers.includes('REVIEW_DATE_IN_FUTURE'), 'one second ahead is still the future');
+  for (const bad of ['yesterday', '2026-13-45', '', 42, {}]) { const a = evaluateRedditAccess({ record: READY({ reviewedOn: bad }), env: CREDS, nowMs: T }); assert.equal(a.activationPrerequisitesMet, false); assert.ok(a.blockers.some((b) => b.startsWith('APPROVAL_RECORD_INVALID')), `reviewedOn ${String(bad)}`); consistent(a); }
+  const absent = evaluateRedditAccess({ record: READY({ reviewedOn: null }), env: CREDS, nowMs: T }); assert.equal(absent.activationPrerequisitesMet, true, 'an absent review date is not a future one');
+});
+
+test('READINESS-A6..A10. expiry, status, scope, agreement, retention, retrieval, credential cases stay not ready; in the whole matrix a blocker implies not-ready and every case keeps live/durable false', () => {
+  const matrix = [
+    ['expired', READY({ validUntil: '2026-09-05T00:00:00Z' }), CREDS, 'APPROVAL_EXPIRED'],
+    ['revoked', READY({ status: 'REVOKED' }), CREDS, 'APPROVAL_REVOKED'], ['denied', READY({ status: 'DENIED' }), CREDS, 'APPROVAL_DENIED'], ['pending', READY({ status: 'PENDING' }), CREDS, 'APPROVAL_PENDING'],
+    ['wrong app', READY({ application: 'OTHER' }), CREDS, 'APPROVAL_OUT_OF_SCOPE'], ['wrong use case', READY({ useCaseVersion: 'v0' }), CREDS, 'APPROVAL_OUT_OF_SCOPE'],
+    ['unclassified', READY({ classification: 'UNRESOLVED' }), CREDS, 'APPROVAL_WITHOUT_CLASSIFICATION'],
+    ['agreement unresolved', READY({ additionalAgreement: 'UNRESOLVED' }), CREDS, 'ADDITIONAL_AGREEMENT_UNRESOLVED'], ['agreement unsatisfied', READY({ classification: 'REQUIRES_ADDITIONAL_TERMS', additionalAgreement: 'REQUIRED' }), CREDS, 'ADDITIONAL_AGREEMENT_REQUIRED_UNSATISFIED'],
+    ['retention unresolved', READY({ retentionCompatibility: 'UNRESOLVED' }), CREDS, 'RETENTION_COMPATIBILITY_UNRESOLVED'], ['retention incompatible', READY({ retentionCompatibility: 'INCOMPATIBLE' }), CREDS, 'RETENTION_INCOMPATIBLE'],
+    ['retrieval missing', READY({ permittedUses: ['PERSONAL_RESEARCH'] }), CREDS, 'RETRIEVAL_NOT_PERMITTED'], ['credential missing', READY(), {}, 'CREDENTIAL_MISSING'],
+    ['future review', READY({ reviewedOn: '2056-01-01' }), CREDS, 'REVIEW_DATE_IN_FUTURE'], ['no record', null, CREDS, 'APPROVAL_RECORD_MISSING'],
+  ];
+  for (const [label, record, env, blocker] of matrix) {
+    const a = evaluateRedditAccess({ record, env, nowMs: T });
+    assert.equal(a.activationPrerequisitesMet, false, label); assert.ok(a.blockers.some((b) => b.startsWith(blocker)), `${label}: expected ${blocker} in ${a.blockers}`); consistent(a); noAuthority(a);
+  }
+  // fully permissive attestations (every classification path, satisfied agreement, reviewed retention) are ready-on-paper only
+  for (const rec of [READY(), READY({ classification: 'REQUIRES_ADDITIONAL_TERMS', additionalAgreement: 'REQUIRED', additionalAgreementSatisfied: true }), READY({ classification: 'COMMERCIAL', additionalAgreement: 'REQUIRED', additionalAgreementSatisfied: true, permittedUses: [...REDDIT_PERMITTED_USES] })]) {
+    const a = evaluateRedditAccess({ record: rec, env: { ...CREDS, REDDIT_LIVE: 'true', RUMOR2_SOCIAL_REDDIT_ENABLED: 'true' }, nowMs: T });
+    assert.equal(a.activationPrerequisitesMet, true); consistent(a); noAuthority(a); assert.equal(a.evidence, 'OPERATOR_ATTESTATION_NOT_PLATFORM_PROOF');
+  }
+  // an informational note is an advisory, never a blocker that readiness contradicts
+  const described = evaluateRedditAccess({ record: READY(), env: CREDS, nowMs: T, description: 'private single-user prototype' });
+  assert.equal(described.activationPrerequisitesMet, true); assert.deepEqual([...described.blockers], []); assert.ok(described.advisories.includes('SELF_DESCRIPTION_IS_NOT_PERMISSION')); noAuthority(described);
+});
+
+test('RATE-HEADERS (RED B). only documented decimal header strings (or finite non-negative numeric fixtures) are accepted; booleans, arrays, objects, functions, null, empty, whitespace, NaN, Infinity, negatives, and out-of-bound values are rejected in every header, and malformed input never yields allowance', () => {
+  const H = (r, u, s) => ({ 'x-ratelimit-remaining': r, 'x-ratelimit-used': u, 'x-ratelimit-reset': s });
+  // RED B
+  assert.equal(parseRedditRateHeaders(H(true, false, [])), null, 'RED B: booleans/arrays coerced to 1/0/0 at baseline');
+  assert.equal(parseRedditRateHeaders(H([], [], [])), null);
+  assert.equal(redditRateAllowance({ approvedQpm: 100, configuredQpm: 100, headers: H(true, false, []) }).allowance, 0);
+  // documented decimal forms + valid zero remaining
+  assert.deepEqual(parseRedditRateHeaders(H('96.0', '4', '412')), { remaining: 96, used: 4, resetSeconds: 412 });
+  assert.deepEqual(parseRedditRateHeaders(H('0', '100', '1')), { remaining: 0, used: 100, resetSeconds: 1 }); assert.equal(redditRateAllowance({ approvedQpm: 100, configuredQpm: 100, headers: H('0', '100', '1') }).allowance, 0);
+  assert.deepEqual(parseRedditRateHeaders(H(' 12.5 ', '1', '2')), { remaining: 12, used: 1, resetSeconds: 2 }, 'surrounding whitespace tolerated; remaining rounds DOWN');
+  assert.deepEqual(parseRedditRateHeaders(H(96, 4, 412)), { remaining: 96, used: 4, resetSeconds: 412 }, 'finite numeric fixture representation');
+  assert.deepEqual(parseRedditRateHeaders({ 'X-RateLimit-Remaining': '5', 'X-RATELIMIT-USED': '1', 'x-RateLimit-Reset': '9' }), { remaining: 5, used: 1, resetSeconds: 9 }, 'case-insensitive lookup on plain objects');
+  assert.deepEqual(parseRedditRateHeaders(new Headers({ 'x-ratelimit-remaining': '7', 'x-ratelimit-used': '3', 'x-ratelimit-reset': '30' })), { remaining: 7, used: 3, resetSeconds: 30 }, 'native Headers fixture');
+  // each malformed type in each of the three headers
+  const bads = [true, false, [], ['96'], {}, { v: 1 }, () => 96, null, undefined, '', '   ', NaN, Infinity, -Infinity, -1, '-1', '1e3', '0x10', 'Infinity', 'NaN', '96,0', '96.', '.5', '+5', 1e7, '10000000', 12345678, Symbol('x'), 96n];
+  for (const bad of bads) for (const slot of [0, 1, 2]) {
+    const good = ['96', '4', '412']; good[slot] = bad;
+    const h = H(...good);
+    assert.equal(parseRedditRateHeaders(h), null, `slot ${slot} value ${typeof bad === 'symbol' ? 'symbol' : String(bad)} (${typeof bad}) must be rejected`);
+    assert.equal(redditRateAllowance({ approvedQpm: 100, configuredQpm: 100, headers: h }).allowance, 0);
+  }
+  // missing headers and missing caps
+  assert.equal(parseRedditRateHeaders(H('96', '4')), null); assert.equal(parseRedditRateHeaders({}), null); assert.equal(parseRedditRateHeaders(null), null); assert.equal(parseRedditRateHeaders('96'), null);
+  assert.equal(redditRateAllowance({ headers: H('96', '4', '412') }).allowance, 0, 'no caps => zero; the published 100 QPM is never a default');
+  assert.equal(redditRateAllowance({ approvedQpm: 100, headers: H('96', '4', '412') }).allowance, 0); assert.equal(redditRateAllowance({ approvedQpm: 100, configuredQpm: 0, headers: H('96', '4', '412') }).allowance, 0);
+  assert.equal(redditRateAllowance({ approvedQpm: 100, configuredQpm: 30, headers: H('96.9', '4', '412') }).allowance, 30);
 });

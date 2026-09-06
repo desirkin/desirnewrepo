@@ -129,14 +129,28 @@ export function redditCredentialsPresent(env = process.env) {
   return REDDIT_OFFICIAL.credentialEnvs.every((k) => typeof env?.[k] === 'string' && env[k].length > 0);
 }
 
+// The evaluation clock is an explicit input: a safe-integer epoch-ms timestamp
+// inside a supported range. Anything else (missing, wrong type, NaN, Infinity,
+// negative, out of range) is rejected; this pure helper never substitutes a
+// wall clock of its own.
+const CLOCK_MIN_MS = Date.parse('2000-01-01T00:00:00Z');
+const CLOCK_MAX_MS = Date.parse('2200-01-01T00:00:00Z');
+export const isSupportedClock = (ms) => Number.isSafeInteger(ms) && ms >= CLOCK_MIN_MS && ms <= CLOCK_MAX_MS;
+
 // The closed access evaluation. Inputs are the operator record (or null), the
 // credential presence, and the clock. Output never contains a secret and never
 // grants a live path: this foundation has none.
+//
+// READINESS LAW: `activationPrerequisitesMet` is a summary of THIS foundation's
+// recorded prerequisites (never permission to run Reddit) and is derived from
+// one coherent rule — every prerequisite true AND zero blockers. A blocking
+// reason can never coexist with readiness; intentionally informational notes
+// go to `advisories`, never `blockers`.
 export function evaluateRedditAccess({ record = null, env = process.env, nowMs = null, description = null } = {}) {
   const blockers = [];
-  // the caller supplies the clock; without one an expiry cannot be judged => fail closed
-  const clockKnown = Number.isFinite(nowMs);
-  if (!clockKnown) blockers.push('CLOCK_UNAVAILABLE');
+  const advisories = [];
+  const clockKnown = isSupportedClock(nowMs);
+  if (!clockKnown) blockers.push(nowMs === null || nowMs === undefined ? 'CLOCK_UNAVAILABLE' : 'CLOCK_INVALID');
   const credentialPresent = redditCredentialsPresent(env);
   let approvalStatus = 'NOT_VERIFIED';
   let useCaseClassification = 'UNRESOLVED';
@@ -144,22 +158,29 @@ export function evaluateRedditAccess({ record = null, env = process.env, nowMs =
   let retentionCompatibility = 'UNRESOLVED';
   let permittedUses = [];
   let recordError = null;
-  // a self-description (private, single-user, theoretical, research, ...) is never permission
-  if (description !== null) blockers.push('SELF_DESCRIPTION_IS_NOT_PERMISSION');
+  let reviewOk = false;
+  // a self-description (private, single-user, theoretical, research, ...) is never permission — advisory, not a blocker
+  if (description !== null) advisories.push('SELF_DESCRIPTION_IS_NOT_PERMISSION');
   if (record === null) blockers.push('APPROVAL_RECORD_MISSING');
   else {
     recordError = validateRedditApprovalRecord(record);
     if (recordError) blockers.push(`APPROVAL_RECORD_INVALID: ${recordError}`);
+    else if (!clockKnown) { /* nothing time-dependent (expiry, review date) can be judged: the attestation stays NOT_VERIFIED */ }
     else {
+      // a supplied review date must already have happened relative to the evaluation clock; it is never rewritten
+      const reviewedMs = record.reviewedOn ? Date.parse(record.reviewedOn) : null;
+      reviewOk = reviewedMs === null || reviewedMs <= nowMs;
+      if (!reviewOk) blockers.push('REVIEW_DATE_IN_FUTURE');
       const inScope = record.application === REDDIT_APPLICATION_ID && record.useCaseVersion === REDDIT_USE_CASE_VERSION;
       if (!inScope) { approvalStatus = 'OUT_OF_SCOPE'; blockers.push('APPROVAL_OUT_OF_SCOPE: the record covers another application or use-case version'); }
       else if (record.status === 'REVOKED') { approvalStatus = 'REVOKED'; blockers.push('APPROVAL_REVOKED'); }
       else if (record.status === 'DENIED') { approvalStatus = 'DENIED'; useCaseClassification = 'DENIED'; blockers.push('APPROVAL_DENIED'); }
       else if (record.status === 'PENDING') { approvalStatus = 'NOT_VERIFIED'; blockers.push('APPROVAL_PENDING'); }
       else if (record.status === 'APPROVED') {
-        const exp = record.validUntil ? Date.parse(record.validUntil) : null;
-        if (exp !== null && !(clockKnown && nowMs < exp)) { approvalStatus = 'EXPIRED'; blockers.push('APPROVAL_EXPIRED'); }
+        const exp = record.validUntil ? Date.parse(record.validUntil) : null; // null = no supplied expiry (never invented)
+        if (exp !== null && !(nowMs < exp)) { approvalStatus = 'EXPIRED'; blockers.push('APPROVAL_EXPIRED'); }
         else if (record.classification === 'UNRESOLVED') { approvalStatus = 'NOT_VERIFIED'; blockers.push('APPROVAL_WITHOUT_CLASSIFICATION: Reddit\'s classification of the use is not recorded'); }
+        else if (!reviewOk) { approvalStatus = 'NOT_VERIFIED'; }
         else {
           approvalStatus = 'OPERATOR_ATTESTED'; // an attestation that Reddit approved — never machine proof
           useCaseClassification = record.classification === 'NON_COMMERCIAL_PERSONAL' ? 'APPROVED_NON_COMMERCIAL_PERSONAL' : record.classification === 'COMMERCIAL' ? 'APPROVED_COMMERCIAL' : 'APPROVED_WITH_ADDITIONAL_TERMS';
@@ -178,13 +199,16 @@ export function evaluateRedditAccess({ record = null, env = process.env, nowMs =
   }
   if (!credentialPresent) blockers.push('CREDENTIAL_MISSING');
   const prerequisites = Object.freeze({
+    clock: clockKnown,
+    review: clockKnown && (record === null ? false : reviewOk),
     approval: approvalStatus === 'OPERATOR_ATTESTED',
     agreement: additionalAgreement === 'NOT_REQUIRED' || additionalAgreement === 'REQUIRED_SATISFIED',
     retention: retentionCompatibility === 'COMPATIBLE_REVIEWED',
     retrieval: permittedUses.includes('RETRIEVAL'),
     credential: credentialPresent,
   });
-  const activationPrerequisitesMet = Object.values(prerequisites).every(Boolean);
+  // ONE derivation: all prerequisites AND no blocker — a blocker can never coexist with readiness
+  const activationPrerequisitesMet = blockers.length === 0 && Object.values(prerequisites).every(Boolean);
   return Object.freeze({
     provider: REDDIT_OFFICIAL.id,
     platformPath: 'DOCUMENTED_OFFICIAL_PATH',
@@ -197,7 +221,7 @@ export function evaluateRedditAccess({ record = null, env = process.env, nowMs =
     liveStatus: 'DISABLED', liveAllowed: false, liveReason: 'FOUNDATION_ONLY_NO_LIVE_PATH',
     durableContentAllowed: false, durableAuthorIdentityAllowed: false, durableReason: prerequisites.retention ? 'RETENTION_COMPATIBLE_DESIGN_NOT_IMPLEMENTED' : 'RETENTION_COMPATIBILITY_UNRESOLVED',
     evidence: 'OPERATOR_ATTESTATION_NOT_PLATFORM_PROOF',
-    blockers: Object.freeze(blockers),
+    blockers: Object.freeze(blockers), advisories: Object.freeze(advisories),
   });
 }
 
@@ -291,12 +315,36 @@ export function redditListingRequest({ subreddit, listing = 'new', limit = 25, a
   const query = { limit, raw_json: 1, ...(after ? { after } : {}) };
   return Object.freeze({ method: 'GET', host: REDDIT_OFFICIAL.apiHost, path: `/r/${subreddit}/${listing}`, query: Object.freeze(query), headers: Object.freeze({ 'User-Agent': userAgent, Authorization: Object.freeze({ scheme: 'Bearer', tokenEnv: 'REDDIT_ACCESS_TOKEN', value: null }) }), sent: false });
 }
-// Rate headers -> bounded numbers, or null for anything malformed (no allowance from garbage).
+// Rate headers -> bounded numbers, or null for anything malformed (no allowance
+// from garbage). ACCEPTED raw representations, explicitly: (a) an HTTP header
+// string in the documented decimal form — digits with an optional fractional
+// part ('96.0', '4', '412'), surrounding whitespace tolerated; (b) a finite
+// non-negative plain number (deliberate fixture representation). Everything
+// else — booleans, arrays, objects, functions, bigint, symbols, null/missing,
+// empty or whitespace-only strings, exponent/hex/signed/partial numeric syntax,
+// NaN, Infinity, negatives, and values at or beyond the bound — is rejected.
+// Lookup is case-insensitive on plain objects and uses `get` on Headers-like inputs.
+const RATE_HEADER_BOUND = 1e7;
+const RATE_DECIMAL_RE = /^\d{1,7}(\.\d{1,6})?$/;
+const rateHeaderValue = (v) => {
+  let n;
+  if (typeof v === 'string') { const t = v.trim(); if (!RATE_DECIMAL_RE.test(t)) return null; n = Number(t); }
+  else if (typeof v === 'number') n = v;
+  else return null;
+  return Number.isFinite(n) && n >= 0 && n < RATE_HEADER_BOUND ? n : null;
+};
+const lookupHeader = (headers, name) => {
+  if (typeof headers.get === 'function') { const v = headers.get(name); return v === null || v === undefined ? undefined : v; }
+  const want = name.toLowerCase();
+  for (const k of Object.keys(headers)) if (typeof k === 'string' && k.toLowerCase() === want) return headers[k];
+  return undefined;
+};
 export function parseRedditRateHeaders(headers) {
-  if (headers === null || typeof headers !== 'object') return null;
-  const get = (k) => { const v = headers[k] ?? headers[k.toLowerCase()] ?? (typeof headers.get === 'function' ? headers.get(k) : undefined); return v === undefined || v === null ? null : Number(v); };
-  const remaining = get('x-ratelimit-remaining'); const used = get('x-ratelimit-used'); const reset = get('x-ratelimit-reset');
-  if (![remaining, used, reset].every((n) => Number.isFinite(n) && n >= 0 && n < 1e7)) return null;
+  if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) return null;
+  const remaining = rateHeaderValue(lookupHeader(headers, 'x-ratelimit-remaining'));
+  const used = rateHeaderValue(lookupHeader(headers, 'x-ratelimit-used'));
+  const reset = rateHeaderValue(lookupHeader(headers, 'x-ratelimit-reset'));
+  if (remaining === null || used === null || reset === null) return null;
   return Object.freeze({ remaining: Math.floor(remaining), used: Math.floor(used), resetSeconds: Math.floor(reset) });
 }
 // The FUTURE runtime's allowance law, pinned now: min(approved scope cap, configured cap, observed remaining).
