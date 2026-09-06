@@ -38,6 +38,8 @@ export const MAX_SHINGLES = 64; // bounded similarity feature set per post
 export const SHINGLE_K = 3; // token shingle width
 export const NEAR_DUP_THRESHOLD = 0.82; // Jaccard >= this => candidate echo (deterministic; not identity)
 export const MAX_WINDOW_OBSERVATIONS = 4_096; // bound on a coordination-feature window
+export const MAX_INGRESS_TAGS = 16; // SOCIAL-2B: bounded provider-side admission tags (X matching_rules)
+export const MAX_INGRESS_TAG_CHARS = 64;
 
 // ---- provider kinds (ALL source-only; none claim-capable) ------------------
 // A social providerKind must NEVER appear in RUMOR-2's CLAIM_CAPABLE_PROVIDER_
@@ -200,7 +202,26 @@ export function socialDiagnosticFacts(f) {
     sourceClockStatus: f.sourceClockStatus ?? 'UNKNOWN',
     sourceClockSkewMs: f.sourceClockSkewMs ?? null,
     providerEventTs: f.providerEventTs ?? null,
+    // FIRST-KNOWN ACQUISITION CLOCK LAW (SOCIAL-2B Job A): retrievedTs/knownAtTs
+    // are Serpent's first-known acquisition truth — NOT provider content
+    // identity (a later redelivery of the same immutable version derives the
+    // SAME socialVersionId and is absorbed keep-first), but once stored they are
+    // bound here so a durable event's acquisition clock can never be silently
+    // rewritten under the same first-known integrity hash. The FIRST durable
+    // acquisition clock stands.
+    retrievedTs: f.retrievedTs ?? null,
+    knownAtTs: f.knownAtTs ?? null,
+    // SOCIAL-2B: WHY the provider admitted this post (X server-side rule tags) —
+    // bounded, sorted, unique, first-known, diagnostic only; never identity,
+    // never authority. A later redelivery matching more rules never rewrites it.
+    ingressTags: canonicalIngressTags(f.ingressTags),
   };
+}
+export function canonicalIngressTags(tags) {
+  if (!Array.isArray(tags)) return [];
+  const out = new Set();
+  for (const t of tags) if (typeof t === 'string' && t.length > 0 && t.length <= MAX_INGRESS_TAG_CHARS) out.add(t);
+  return [...out].sort().slice(0, MAX_INGRESS_TAGS);
 }
 // ---- SOURCE-CLOCK QUARANTINE SEAL — the three clocks ------------------------
 // A. sourceDeclaredTs — the exact parsed provider-record creation time (Bluesky
@@ -396,6 +417,10 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   const knownAtTs = retrievedTs; // NEVER backdated to any source/provider clock
   if (retrievedTs > knownAtTs) return { reject: true, reason: 'retrieved after known' };
   const { sourceCreatedTs, sourceClockStatus, sourceClockSkewMs } = classifySourceClock({ sourceDeclaredTs, retrievedTs });
+  // provider admission tags (X matching_rules) — bounded closed strings only
+  const rawTags = raw.ingressTags ?? [];
+  if (!Array.isArray(rawTags) || rawTags.length > MAX_INGRESS_TAGS || rawTags.some((t) => typeof t !== 'string' || t.length === 0 || t.length > MAX_INGRESS_TAG_CHARS)) return { reject: true, reason: 'ingressTags invalid' };
+  const ingressTags = canonicalIngressTags(rawTags);
   // engagement is PROPAGATION metadata only (never confirmation) — bounded ints or null
   const engagement = normalizeEngagement(raw.engagement);
   if (engagement === undefined) return { reject: true, reason: 'engagement invalid' };
@@ -417,7 +442,7 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   const facts = {
     provider, providerKind, nativePostId, nativeAuthorId, lifecycle, relation, parentNativePostId,
     threadId, nativeVersionId, providerEventSeq, textHash: hash, sourceDeclaredTs,
-    handle, authorMeta, engagement, sourceClockStatus, sourceClockSkewMs, providerEventTs, socialSourceId,
+    handle, authorMeta, engagement, sourceClockStatus, sourceClockSkewMs, providerEventTs, retrievedTs, knownAtTs, ingressTags, socialSourceId,
   };
   const metaHash = socialMetaHash(facts);
   const socialVersionId = socialVersionIdentity(facts);
@@ -431,7 +456,7 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
       nativeVersionId, providerEventSeq, socialVersionId,
       sourceDeclaredTs, sourceCreatedTs, sourceClockStatus, sourceClockSkewMs, providerEventTs,
       retrievedTs, knownAtTs,
-      engagement, authorMeta, metaHash,
+      engagement, authorMeta, ingressTags: Object.freeze(ingressTags), metaHash,
     }),
   };
 }

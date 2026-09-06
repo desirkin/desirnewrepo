@@ -27,6 +27,15 @@ export const SOCIAL_ACCESS_STATES = Object.freeze([
 // without a credential we must obtain. Only AVAILABLE_AUTHORIZED qualifies for
 // unattended activation; everything else is dark until access is arranged.
 export const isLiveActivatable = (state) => state === 'AVAILABLE_AUTHORIZED';
+// SOCIAL-2B: three DISTINCT questions (§7). A. platform access capability — the
+// access state says whether a legitimate machine path exists at all (with or
+// without a credential we must hold). B. implementation/durable capability —
+// `implemented`/`durable` say whether THIS codebase can write durable truth for
+// it. C. runtime authorization RIGHT NOW — decided only by the provider runtime
+// (explicit enable gate + credential present + hard budget + usage preflight +
+// reconciled rules + collector writer fence). A static registry flag NEVER
+// implies a credential exists.
+export const isPlatformCapable = (state) => state === 'AVAILABLE_AUTHORIZED' || state === 'AVAILABLE_REQUIRES_CREDENTIAL';
 
 // The closed social provider set for SOCIAL-1. `implemented` means an adapter
 // exists in this codebase (normalization + transport or normalization-only).
@@ -75,13 +84,14 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     subprotocol: null,
     requiresCredential: true,
     credentialEnv: 'X_BEARER_TOKEN',
-    implemented: false, // contract + cost gate prepared; operational collector is SOCIAL-2
-    durable: false,
+    implemented: true, // SOCIAL-2B: filtered-stream mapper, rule compiler, HTTP transport, cost governor
+    durable: true, // writes durable social truth ONLY when the runtime gates pass (never by this flag alone)
+    runtimeGated: true, // C: authorization is decided at runtime — enable gate + bearer + hard budget + usage preflight + rules + writer fence
     highPriority: true,
-    // pay-per-use cost controls the census records for the future cost gate
-    cost: Object.freeze({ model: 'PAY_PER_USE', postReadUsd: 0.005, monthlyPostReadCap: 3_000_000, usageEndpoint: '/2/usage/tweets', dedupeWindowHours: 24 }),
+    // pay-per-use cost census (observed 2026-09-06, docs.x.com pricing) — the cost governor pins these
+    cost: Object.freeze({ model: 'PAY_PER_USE', postReadUsd: 0.005, userReadUsd: 0.01, monthlyPostReadCap: 3_000_000, usageEndpoint: '/2/usage/tweets', creditsEndpoint: '/2/usage/credits', dedupeWindowHours: 24, dedupeGuarantee: 'SOFT', observedOn: '2026-09-06' }),
     docUrl: 'https://docs.x.com/x-api/getting-started/pricing',
-    reason: 'Pay-per-use filtered stream (~4-5s P99). Requires OAuth2 App-Only bearer + a hard read budget under the 3M/month self-serve cap. Operational collector deferred to SOCIAL-2.',
+    reason: 'Pay-per-use filtered stream (~4-5s P99), 1 connection / 1,000 rules / 1,024 chars per rule. Requires OAuth2 App-Only bearer + an explicit hard read/dollar budget under the 3M/month self-serve cap; DARK by default, no paid connection without every runtime gate.',
   }),
   Object.freeze({
     id: 'REDDIT_OFFICIAL',
@@ -163,5 +173,6 @@ export const ACTIVE_SOCIAL_PROVIDER_IDS = Object.freeze(SOCIAL_PROVIDERS.filter(
 for (const p of SOCIAL_PROVIDERS) {
   if (!SOCIAL_ACCESS_STATES.includes(p.accessState)) throw new Error(`social-registry: ${p.id} has an unknown accessState`);
   if (!SOCIAL_PROVIDER_KINDS.includes(p.providerKind)) throw new Error(`social-registry: ${p.id} has a non-social providerKind`);
-  if (p.durable && !isLiveActivatable(p.accessState)) throw new Error(`social-registry: ${p.id} is durable but not live-activatable`);
+  if (p.durable && !isPlatformCapable(p.accessState)) throw new Error(`social-registry: ${p.id} is durable but the platform is not capable`);
+  if (p.durable && !isLiveActivatable(p.accessState) && p.runtimeGated !== true) throw new Error(`social-registry: ${p.id} needs a credential — it must be runtime-gated`);
 }

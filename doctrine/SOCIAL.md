@@ -54,7 +54,7 @@ The machine-readable census lives in `rumor2/social-registry.js` and is pinned b
 |---|---|---|---|
 | **BLUESKY_OFFICIAL** | microblog | `AVAILABLE_AUTHORIZED` | Free, public, unauthenticated Jetstream v2 real-time firehose with collection/DID filtering + replay. The first live ear. |
 | **FARCASTER_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Neynar hosted API (x-api-key, free tier) gives real-time webhooks + cast search. Hub/Snapchain path needs a full syncing node (not lightweight). Dark until `NEYNAR_API_KEY`. |
-| **X_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Pay-per-use filtered stream (~4–5s P99), OAuth2 App-Only bearer. Needs a hard read budget under the 3M-post-read/month self-serve cap ($0.005/read; usage via `/2/usage/tweets`; 24h dedup). Operational collector = SOCIAL-2. |
+| **X_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Pay-per-use filtered stream (~4–5s P99), OAuth2 App-Only bearer. Hard read/USD budget under the 3M-post-read/month self-serve cap ($0.005/read; usage via `/2/usage/tweets`; UTC-day dedupe is SOFT). Operational, runtime-gated ear since SOCIAL-2B (§5C). |
 | **REDDIT_OFFICIAL** | forum | `AVAILABLE_RESTRICTED_RESEARCH` | Official Data API (OAuth2, 100 QPM/client) is usable, but **commercial** use requires a written contract; scraping is prohibited. Contract-gated for this system. |
 | **STOCKTWITS_OFFICIAL** | finance | `NOT_ACCEPTING_NEW_ACCESS` | Self-serve dev program paused ("won't be accepting new registrations"); public API docs offline (404). Firestream enterprise firehose is partner-gated with no self-serve terms. **High priority, blocked by access — not by importance.** |
 | **META_PUBLIC** (FB Page) | microblog | `AVAILABLE_REQUIRES_APP_REVIEW` | Page Public Content Access reads public Page posts but requires Meta App Review + Business Verification. |
@@ -346,6 +346,98 @@ provider-native ordering = `providerEventSeq`; provider timing = `providerEventT
 only. No clock anomaly rejects an asset, a pump, an author, or a trade — that is
 future research, not a rule. Operational counters (`sourceClockTrusted` /
 `sourceClockFutureQuarantined` / `sourceClockUnknown`) are observability only.
+
+---
+
+## 5C. SOCIAL-2B — X/Twitter operational ear + hard cost governor + first-known acquisition clocks
+
+**Job A — first-known acquisition clock law.** `retrievedTs`/`knownAtTs` are Serpent's
+first-known acquisition truth: NOT provider content identity (a later redelivery of the
+same immutable version derives the SAME `socialVersionId` and is absorbed keep-first),
+but bound by the diagnostic `metaHash` once durable — a stored event's acquisition clock
+can never be silently rewritten (PIT-1..5, `test/social-acquisition-clock.test.js`). No
+source/provider clock can grant earlier knowledge.
+
+**Current official X contract (pinned 2026-09-06, docs.x.com).** Filtered Stream
+`GET /2/tweets/search/stream`; rules `GET/POST /2/tweets/search/stream/rules`
+(`dry_run=true`), `GET …/rules/counts`; usage `GET /2/usage/tweets`, `GET /2/usage/credits`;
+OAuth2 App-Only Bearer; Pay-per-use: 1 connection/project, 1,000 rules/project, 1,024
+chars/rule; ~4–5 s P99; blank CRLF keepalive ~20 s (no data/keepalive for 20 s ⇒ reconnect);
+`backfill_minutes` 0..5; Post read $0.005, User read $0.010, 3,000,000 Post reads per
+monthly cycle; UTC-day billing dedupe is **SOFT** — never a safety barrier.
+
+**Three boundaries (§6).** X server-side rules (first cost/noise boundary) → bounded X HTTP
+transport → normalized observation → Serpent universe filter (second) → durable source-only
+RUMOR evidence → RUMOR analysis (third). Serpent never subscribes to the whole firehose.
+
+**Registry semantics (§7).** `X_OFFICIAL` stays `AVAILABLE_REQUIRES_CREDENTIAL` (platform
+capability), `implemented`/`durable` (implementation capability), `runtimeGated` (runtime
+authorization = enable gate + bearer + hard budget + usage preflight + reconciled rules +
+collector writer fence). A static flag never implies a credential. X is not in the frozen
+five claim-capable ears; it is classifier-null.
+
+**Gates — default cost zero (§8).** `RUMOR2_SOCIAL_X_ENABLED` (false), `X_BEARER_TOKEN`,
+`RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS`, `RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS` (≤ 3M),
+`RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD`; optional `…_MAX_SESSION_POST_READS`,
+`…_LIVE_SMOKE_MAX_POST_READS`, `…_PRIORITY_ACCOUNTS`, `…_PROPAGATION_FOCUS`. Missing bearer ⇒
+CREDENTIAL_MISSING; missing/zero/negative/absurd budget ⇒ BUDGET_NOT_CONFIGURED / BUDGET_INVALID.
+No default paid budget exists; `RUMOR2_SOCIAL_X_ENABLED=true` alone spends nothing.
+
+**Cost governor (§9–§15).** Every delivered Post resource is metered at the wire BEFORE
+universe/duplicate/durable filtering (keepalives cost nothing; backfill/duplicates are
+counted every time). The durable `RUMOR2_SOCIAL_X_METER` (UTC day + month cumulative reads,
+estimated USD at the pinned price, latest closed server-usage snapshot) is appended in the
+same batch as evidence, so a restart never resets spend. Before every paid connection the
+strictest allowance is computed from the daily/monthly/USD caps, the fresh `/2/usage/tweets`
+snapshot (higher of server/local; stale > 6 h ⇒ refuse), `/2/usage/credits` when the
+credential supports it (else honestly `UNAVAILABLE_FOR_CREDENTIAL`), the session/smoke caps,
+minus the pinned headroom `X_IN_FLIGHT_POST_HEADROOM = 25` (shown in status). Any
+inconsistent/unavailable state ⇒ no connection. The Developer Console spending limit is the
+recommended independent backstop (`platformSpendingLimitVerified: UNKNOWN`).
+
+**Rules (§16–§19).** Deterministic bounded manifest from the configured universe: lane A
+origin (`($BTC OR #BTC …) -is:retweet`), lane B event (asset × bounded catalyst vocabulary,
+`-is:retweet`), lane C approved accounts (`from:`; no default list), lane D propagation
+focus (echoes allowed; EMPTY by default). Serpent-owned tags `serpent:v1:<lane>:<hash16>`;
+reconcile only while disconnected: GET → dry-run desired additions → add → delete ONLY stale
+Serpent rules → verify exact set; unowned rules survive byte-for-byte; insufficient capacity
+⇒ fail closed. No blank, whole-firehose, or naked catch-all rule (`crypto`, `bitcoin`,
+`pump`, … alone) can pass `validateXRuleManifest` — refused before any API call. Pump
+language is never a blanket exclusion; X rules are a cost/relevance net, not a pump filter.
+
+**Transport (§20/§36–§38).** Dedicated bounded HTTP streaming client (`rumor2/x-stream.js`),
+exact host `api.x.com`, bearer only in the Authorization header (never logged), bounded
+line parser, keepalive/stall reconnect with backoff, one connection only, 401/403 ⇒ stop,
+420/429 ⇒ bounded backoff then stop. Post fields requested: `id,text,author_id,created_at,
+edit_history_tweet_ids,referenced_tweets,conversation_id,lang,public_metrics,entities,
+possibly_sensitive,withheld` — NO expansions, NO user.fields (no $0.010 User reads).
+
+**Mapping (§22–§27).** Stable `nativePostId` = first id of `edit_history_tweet_ids` (fallback
+`data.id`); `nativeVersionId` = current id; CREATE vs EDIT accordingly. `nativeAuthorId` =
+`author_id`; handle/authorMeta null. `retweeted→REPOST`, `quoted→QUOTE`, `replied_to→REPLY`,
+none→ORIGINAL, multiple/unknown→UNKNOWN (no fabricated priority; thread kept via
+`conversation_id`). `created_at` → `sourceDeclaredTs` under the quarantine law;
+`providerEventTs`/`providerEventSeq` null (never invented). `public_metrics` → first-known
+engagement (views = `impression_count`). `matching_rules` → bounded sorted `ingressTags`
+(Serpent-owned verbatim, others `external:unowned`), first-known, diagnostic only.
+
+**Continuity (§28–§35).** No cursor is invented for X. `RUMOR2_SOCIAL_X_RULESET` records the
+active rule set + coverage epoch (activated now, never backdated); `RUMOR2_SOCIAL_X_PROGRESS`
+is the time watermark (all lines received through it are terminal; never past an unsettled
+or dropped Post); `RUMOR2_SOCIAL_X_GAP` records explicit absence (budget/operator stop,
+unexplained gap, writer loss, auth/connection failure). A settle appends
+`[ruleset?][evidence…][meter][progress][gap?]` as ONE epoch-fenced atomic batch; adoption
+only after commit. Reconnect elapsed ≤ 4 min from DURABLE progress ⇒ `backfill_minutes=5`
+(overlap deduped, still metered); longer unexplained ⇒ WITHHELD_GAP, gap event, then a NEW
+coverage epoch — never silent live-tail continuity. Queue full ⇒ pause; progress never
+passes the owed Post. Writer loss ⇒ X (and Bluesky) stop immediately; nothing advances.
+
+**Collector (§39).** The collector drives Bluesky and X as a bounded set of social runtimes
+under the same writer fence, epoch, and journal; restore hydrates both from the journal.
+`status.socialX` exposes gate, credential presence (boolean), state, `authority: NONE`, rule
+set/epoch, stream, progress, gaps, meter, budget (remaining reads/USD, headroom), server usage,
+credits, reads by lane. Zero authority is unchanged: no claim, proposition, Attention, HYPED,
+eligibility, score, size, order, execution, or model call.
 
 ---
 

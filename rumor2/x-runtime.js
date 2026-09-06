@@ -1,0 +1,502 @@
+// SOCIAL-2B — the X operational runtime: the HARD fail-closed cost governor,
+// usage/credit preflight, Serpent-owned rule reconciliation, and the durable
+// evidence + meter + progress settlement law. It lives INSIDE the single-writer
+// RUMOR collector's authority domain exactly like the Bluesky runtime: the
+// collector hydrates it from the authoritative journal, starts it only under a
+// held writer fence, drives one settle per tick, and stops it on any loss of
+// authority. ONE writer, ONE epoch, ONE PostgreSQL event root — no X store,
+// journal, lock, or trading channel.
+//
+// DEFAULT COST IS ZERO: X is OFF unless RUMOR2_SOCIAL_X_ENABLED=true AND a
+// bearer AND an explicit hard daily/monthly read budget AND an estimated-dollar
+// cap are configured; zero/invalid/absurd budgets fail closed. No default paid
+// budget exists anywhere in this file.
+//
+// BILL AT THE WIRE: every delivered Post resource increments the local
+// conservative meter BEFORE universe/duplicate/durable filtering; keepalives
+// cost nothing; backfill/duplicate deliveries are counted every time because
+// X's UTC-day billing dedupe is a SOFT guarantee that safety never relies on.
+//
+// HEADROOM: the stream stops BEFORE the remaining allowance reaches zero,
+// reserving X_IN_FLIGHT_POST_HEADROOM Posts for what the server may already have
+// buffered. The reserve is pinned in code and shown in status — never hidden.
+import { buildSocialFilter, canonicalIngressTags } from './social.js';
+import { socialIntake } from './social-stream.js';
+import {
+  socialObservationToEvent, validateSocialEvent, replaySocialHistory, emptyXState,
+  xRuleSetEvent, xMeterEvent, xProgressEvent, xGapEvent, SOCIAL_EVENT_TYPE,
+} from './social-settle.js';
+import { startXStream } from './x-stream.js';
+import {
+  X_OFFICIAL, xPostToRaw, xStreamUrl, xRulesUrl, xRulesCountsUrl, xUsageUrl, xCreditsUrl,
+  compileXRuleManifest, validateXRuleManifest, isSerpentTag, xLaneOfTag, parseXUsage, parseXCredits,
+} from './providers/x-official.js';
+
+export const X_IN_FLIGHT_POST_HEADROOM = 25; // Posts reserved for server-side buffered delivery
+export const X_SAFE_GAP_MS = 4 * 60_000; // unexplained gap <= 4 min => backfill_minutes=5
+export const X_BACKFILL_MINUTES = 5;
+export const X_USAGE_MAX_AGE_MS = 6 * 3_600_000; // a server usage snapshot older than this is stale => no paid stream
+export const X_RUNTIME_STATES = Object.freeze(['DARK', 'HYDRATED', 'PREFLIGHT', 'ACTIVE', 'STANDBY', 'BUDGET_STOPPED', 'WITHHELD_GAP', 'WITHHELD']);
+
+const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+const utcMonth = (ms) => new Date(ms).toISOString().slice(0, 7);
+const posInt = (v) => Number.isSafeInteger(v) && v > 0;
+const parseEnvInt = (v) => (v === undefined || v === null || v === '' ? null : (/^\d{1,12}$/.test(String(v)) ? Number(v) : NaN));
+const parseEnvNum = (v) => (v === undefined || v === null || v === '' ? null : (/^\d{1,9}(\.\d{1,6})?$/.test(String(v)) ? Number(v) : NaN));
+const csv = (v) => (typeof v === 'string' ? v.split(',').map((s) => s.trim()).filter(Boolean) : []);
+
+// Read the X gates from an env-like object. NEVER reads a default budget.
+export function xConfigFromEnv(env = process.env) {
+  return {
+    enabled: env.RUMOR2_SOCIAL_X_ENABLED === 'true',
+    bearer: typeof env[X_OFFICIAL.credentialEnv] === 'string' && env[X_OFFICIAL.credentialEnv].length > 0 ? env[X_OFFICIAL.credentialEnv] : null,
+    maxDailyPostReads: parseEnvInt(env.RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS),
+    maxMonthlyPostReads: parseEnvInt(env.RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS),
+    maxEstimatedDailyUsd: parseEnvNum(env.RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD),
+    maxSessionPostReads: parseEnvInt(env.RUMOR2_SOCIAL_X_MAX_SESSION_POST_READS),
+    liveSmokeMaxPostReads: parseEnvInt(env.RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS),
+    priorityAccounts: csv(env.RUMOR2_SOCIAL_X_PRIORITY_ACCOUNTS),
+    propagationFocus: csv(env.RUMOR2_SOCIAL_X_PROPAGATION_FOCUS),
+  };
+}
+
+// The closed gate decision: every element must hold; the reason names the
+// first missing one. A bearer VALUE is never returned or logged.
+export function xGate(config, { pricing = X_OFFICIAL.pricing } = {}) {
+  if (!config?.enabled) return { ok: false, reason: 'DISABLED', detail: 'RUMOR2_SOCIAL_X_ENABLED is not true' };
+  if (!config.bearer) return { ok: false, reason: 'CREDENTIAL_MISSING', detail: `${X_OFFICIAL.credentialEnv} not configured` };
+  const { maxDailyPostReads: d, maxMonthlyPostReads: m, maxEstimatedDailyUsd: usd } = config;
+  if (d === null || d === undefined || m === null || m === undefined || usd === null || usd === undefined) return { ok: false, reason: 'BUDGET_NOT_CONFIGURED', detail: 'daily + monthly Post-read caps and an estimated daily USD cap are all required' };
+  if (!posInt(d) || !posInt(m) || !Number.isFinite(usd) || usd <= 0) return { ok: false, reason: 'BUDGET_INVALID', detail: 'budgets must be positive (zero/negative/non-numeric fail closed)' };
+  if (m > pricing.monthlyPostReadCap) return { ok: false, reason: 'BUDGET_INVALID', detail: `monthly cap ${m} exceeds the X self-serve cap ${pricing.monthlyPostReadCap}` };
+  if (d > m) return { ok: false, reason: 'BUDGET_INVALID', detail: 'daily cap exceeds monthly cap' };
+  if (config.maxSessionPostReads !== null && config.maxSessionPostReads !== undefined && !posInt(config.maxSessionPostReads)) return { ok: false, reason: 'BUDGET_INVALID', detail: 'session cap invalid' };
+  if (config.liveSmokeMaxPostReads !== null && config.liveSmokeMaxPostReads !== undefined && !posInt(config.liveSmokeMaxPostReads)) return { ok: false, reason: 'BUDGET_INVALID', detail: 'smoke cap invalid' };
+  return { ok: true, reason: null, detail: null };
+}
+
+export function createXRuntime({
+  provider = X_OFFICIAL,
+  config = xConfigFromEnv(),
+  filter = null, // Serpent's deterministic universe filter (the SECOND boundary)
+  universe = [], // configured coin tickers (rule manifest anchors)
+  aliases = [], // approved aliases (event lane)
+  now = () => Date.now(),
+  log = () => {},
+  fetchImpl = null, // injected for tests; null => the global fetch (api.x.com only)
+  maxDrain = 200,
+  headroom = X_IN_FLIGHT_POST_HEADROOM,
+  safeGapMs = X_SAFE_GAP_MS,
+  usageMaxAgeMs = X_USAGE_MAX_AGE_MS,
+  intakeOptions = {},
+  streamOptions = {},
+} = {}) {
+  const pricing = provider.pricing;
+  const universeFilter = filter ?? buildSocialFilter({});
+  const durableIds = new Set();
+  let x = emptyXState(); // durable X state from the journal
+  let state = 'DARK';
+  let hydrated = false;
+  let intake = null;
+  let stream = null;
+  let pendingBatch = null;
+  let lastError = null;
+  // local conservative meter (durable snapshot + in-flight)
+  const meter = { period: null, delivered: 0, monthPeriod: null, monthDelivered: 0, durablePeriod: null, durableDelivered: 0, durableMonthPeriod: null, durableMonthDelivered: 0, session: 0, byLane: {} };
+  let serverUsage = null; // latest CLOSED parsed snapshot
+  let credits = { capability: 'NOT_PROBED', value: null, status: null };
+  const rules = { owned: [], unownedCount: 0, desiredHash: null, desiredTags: [], reconciledAt: null, dryRunOk: null, capacity: null };
+  let pendingActivation = null; // { ruleSetHash, ruleTags, coverageEpoch, activatedKnownAtTs, afterGap? }
+  let pendingGap = null; // { gapStartTs, reason, coverageEpoch, ruleSetHash }
+  let lastReceiptTs = null;
+  let lastStopReason = null;
+  let preflightOk = false;
+  let backfillNext = 0; // the backfill window the NEXT (re)connect presents — set by the gap law
+  let owedSince = null; // receipt time of the earliest queue-full DROPPED Post: progress may never pass it until a backfill covers it
+  const stats = { settles: 0, appended: 0, meterEvents: 0, progressEvents: 0, gapEvents: 0, rulesetEvents: 0, durableDuplicates: 0, invalid: 0, appendFailures: 0, deliveredPosts: 0, keepalives: 0 };
+
+  const api = async (url, { method = 'GET', body = null } = {}) => {
+    const f = fetchImpl ?? globalThis.fetch;
+    const headers = { Authorization: `Bearer ${config.bearer}` };
+    if (body !== null) headers['Content-Type'] = 'application/json';
+    const res = await f(url, { method, headers, ...(body !== null ? { body: JSON.stringify(body) } : {}) });
+    let json = null;
+    try { json = typeof res.json === 'function' ? await res.json() : null; } catch { json = null; }
+    return { status: res.status, json };
+  };
+
+  // ---- meter -----------------------------------------------------------------
+  const rollPeriods = (ts) => {
+    const day = utcDay(ts); const month = utcMonth(ts);
+    if (meter.period !== day) { meter.period = day; meter.delivered = 0; }
+    if (meter.monthPeriod !== month) { meter.monthPeriod = month; meter.monthDelivered = 0; }
+  };
+  const meterPost = (ts, tags) => {
+    rollPeriods(ts);
+    meter.delivered += 1; meter.monthDelivered += 1; meter.session += 1; stats.deliveredPosts += 1;
+    for (const t of tags) { const lane = xLaneOfTag(t) ?? 'unowned'; meter.byLane[lane] = (meter.byLane[lane] ?? 0) + 1; }
+  };
+  const estimatedUsd = (n) => Math.round(n * pricing.postReadUsd * 1e6) / 1e6;
+
+  // ---- budget decision: the STRICTEST remaining allowance --------------------
+  function allowance(ts = now()) {
+    rollPeriods(ts);
+    const g = xGate(config, { pricing });
+    if (!g.ok) return { ok: false, reason: g.reason, detail: g.detail, remaining: 0 };
+    if (!serverUsage) return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'no verified server usage snapshot', remaining: 0 };
+    if (ts - serverUsage.observedTs > usageMaxAgeMs) return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'server usage snapshot is stale', remaining: 0 };
+    if (credits.value && credits.value.totalBalance <= 0) return { ok: false, reason: 'NO_CREDITS', detail: 'credit balance is zero or negative', remaining: 0 };
+    // COST-4: the server's observed usage is at least as large as our local month
+    const observedMonth = Math.max(meter.monthDelivered, serverUsage.projectUsage);
+    const candidates = [
+      ['BUDGET_DAILY', config.maxDailyPostReads - meter.delivered],
+      ['BUDGET_MONTHLY', config.maxMonthlyPostReads - observedMonth],
+      ['BUDGET_USD', Math.floor(config.maxEstimatedDailyUsd / pricing.postReadUsd) - meter.delivered],
+      ['BUDGET_MONTHLY', serverUsage.projectCap - observedMonth], // COST-7: the platform cap itself
+    ];
+    if (posInt(config.maxSessionPostReads)) candidates.push(['BUDGET_SESSION', config.maxSessionPostReads - meter.session]);
+    if (posInt(config.liveSmokeMaxPostReads)) candidates.push(['BUDGET_SESSION', config.liveSmokeMaxPostReads - meter.session]);
+    let limiting = null; let remaining = Infinity;
+    for (const [reason, left] of candidates) if (left < remaining) { remaining = left; limiting = reason; }
+    const usable = remaining - headroom; // COST-6: the reserve is subtracted, never hidden
+    if (usable <= 0) return { ok: false, reason: limiting, detail: `remaining ${remaining} <= headroom ${headroom}`, remaining, limiting };
+    return { ok: true, reason: null, remaining, usable, limiting };
+  }
+
+  // ---- preflight: usage, credits, rule reconciliation -------------------------
+  async function preflight() {
+    preflightOk = false;
+    state = 'PREFLIGHT';
+    const g = xGate(config, { pricing });
+    if (!g.ok) { state = 'DARK'; return { ok: false, reason: g.reason, detail: g.detail }; }
+    // 1. server usage — mandatory, closed parse, fresh
+    try {
+      const u = await api(xUsageUrl());
+      const parsed = u.status === 200 ? parseXUsage(u.json, { observedTs: now() }) : null;
+      if (!parsed) { lastError = `usage endpoint http ${u.status} / unparseable`; state = 'WITHHELD'; return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: lastError }; }
+      serverUsage = parsed;
+    } catch { lastError = 'usage endpoint unavailable'; state = 'WITHHELD'; return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: lastError }; }
+    // 2. credits — surfaced when the credential type supports it; never fabricated
+    try {
+      const c = await api(xCreditsUrl());
+      const parsed = c.status === 200 ? parseXCredits(c.json) : null;
+      credits = parsed ? { capability: 'AVAILABLE', value: parsed, status: c.status } : { capability: c.status === 200 ? 'MALFORMED' : 'UNAVAILABLE_FOR_CREDENTIAL', value: null, status: c.status };
+    } catch { credits = { capability: 'UNAVAILABLE', value: null, status: null }; }
+    if (credits.value && credits.value.totalBalance <= 0) { state = 'WITHHELD'; return { ok: false, reason: 'NO_CREDITS', detail: 'credit balance is zero or negative' }; }
+    // 3. rules — reconcile ONLY Serpent-owned rules while the stream is disconnected
+    const r = await reconcileRules();
+    if (!r.ok) { state = 'WITHHELD'; return r; }
+    preflightOk = true;
+    state = hydrated ? 'HYDRATED' : 'PREFLIGHT';
+    return { ok: true, usage: serverUsage, credits: { capability: credits.capability, value: credits.value }, rules: { hash: rules.desiredHash, owned: rules.owned.length, unowned: rules.unownedCount } };
+  }
+
+  async function reconcileRules() {
+    if (stream && stream.isConnected()) return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: 'rules are only reconciled while the paid stream is disconnected' };
+    const manifest = compileXRuleManifest({ universe, aliases, priorityAccounts: config.priorityAccounts ?? [], propagationFocus: config.propagationFocus ?? [] });
+    const verr = validateXRuleManifest(manifest.rules);
+    if (verr) { lastError = verr; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: verr }; }
+    const cur = await api(xRulesUrl());
+    if (cur.status !== 200) { lastError = `rules GET http ${cur.status}`; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
+    const current = Array.isArray(cur.json?.data) ? cur.json.data.filter((r) => r && typeof r.id === 'string' && typeof r.value === 'string') : [];
+    const owned = current.filter((r) => isSerpentTag(r.tag));
+    const unowned = current.filter((r) => !isSerpentTag(r.tag));
+    // capacity: prefer the counts endpoint's cap when present, else the pinned platform limit
+    let cap = provider.limits.rulesPerProject;
+    try { const c = await api(xRulesCountsUrl()); const n = c.status === 200 ? Number(c.json?.data?.cap_per_project) : NaN; if (Number.isSafeInteger(n) && n > 0) cap = n; } catch { /* optional */ }
+    rules.capacity = cap; rules.unownedCount = unowned.length;
+    if (unowned.length + manifest.rules.length > cap) { lastError = `rule capacity ${cap} cannot hold ${unowned.length} unowned + ${manifest.rules.length} Serpent rules; unowned rules are never deleted`; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
+    const key = (r) => `${r.tag} ${r.value}`;
+    const have = new Map(owned.map((r) => [key(r), r]));
+    const want = new Map(manifest.rules.map((r) => [key(r), r]));
+    const toAdd = manifest.rules.filter((r) => !have.has(key(r)));
+    const toDelete = owned.filter((r) => !want.has(key(r)));
+    if (toAdd.length > 0) {
+      // 4. dry-run BEFORE any mutation
+      const dry = await api(xRulesUrl({ dryRun: true }), { method: 'POST', body: { add: toAdd.map((r) => ({ value: r.value, tag: r.tag })) } });
+      const invalid = Number(dry.json?.meta?.summary?.invalid ?? 0);
+      const errors = Array.isArray(dry.json?.errors) ? dry.json.errors.length : 0;
+      rules.dryRunOk = (dry.status === 200 || dry.status === 201) ? invalid === 0 && errors === 0 : false;
+      if (!rules.dryRunOk) { lastError = `dry-run rejected desired rules (http ${dry.status}, invalid ${invalid}, errors ${errors})`; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
+      // 5. add
+      const add = await api(xRulesUrl(), { method: 'POST', body: { add: toAdd.map((r) => ({ value: r.value, tag: r.tag })) } });
+      if (add.status !== 200 && add.status !== 201) { lastError = `rules add http ${add.status}`; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
+    }
+    if (toDelete.length > 0) {
+      // 7. delete ONLY stale Serpent-owned ids
+      const del = await api(xRulesUrl(), { method: 'POST', body: { delete: { ids: toDelete.map((r) => r.id) } } });
+      if (del.status !== 200) { lastError = `rules delete http ${del.status}`; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
+    }
+    // 8. verify the final Serpent set exactly (and that unowned rules survived)
+    const after = await api(xRulesUrl());
+    if (after.status !== 200) { lastError = `rules verify http ${after.status}`; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
+    const finalRules = Array.isArray(after.json?.data) ? after.json.data : [];
+    const finalOwned = finalRules.filter((r) => isSerpentTag(r?.tag));
+    const finalUnowned = finalRules.filter((r) => !isSerpentTag(r?.tag));
+    const finalKeys = new Set(finalOwned.map(key));
+    if (finalKeys.size !== want.size || [...want.keys()].some((k) => !finalKeys.has(k))) { lastError = 'final Serpent rule set does not match the desired manifest'; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
+    if (finalUnowned.length !== unowned.length) { lastError = 'unowned rule count changed during reconciliation'; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: lastError }; }
+    rules.owned = finalOwned.map((r) => ({ id: r.id, value: r.value, tag: r.tag }));
+    rules.desiredHash = manifest.hash; rules.desiredTags = manifest.rules.map((r) => r.tag).sort(); rules.reconciledAt = now();
+    // a NEW rule set starts a NEW coverage epoch, activated NOW (never backdated)
+    if (x.ruleSetHash !== manifest.hash && !(pendingActivation && pendingActivation.ruleSetHash === manifest.hash)) {
+      pendingActivation = { ruleSetHash: manifest.hash, ruleTags: rules.desiredTags, coverageEpoch: (pendingActivation?.coverageEpoch ?? x.coverageEpoch) + 1, activatedKnownAtTs: now() };
+    }
+    return { ok: true };
+  }
+
+  // ---- hydrate: durable X state from the SAME journal --------------------------
+  function hydrate(events) {
+    const r = replaySocialHistory(events);
+    if (!r.ok) { state = 'WITHHELD'; lastError = r.error; hydrated = false; return { ok: false, error: r.error }; }
+    durableIds.clear(); for (const id of r.durableIds) durableIds.add(id);
+    x = r.x;
+    if (x.meter) {
+      meter.durablePeriod = x.meter.period; meter.durableDelivered = x.meter.deliveredPostReads;
+      meter.durableMonthPeriod = x.meter.monthPeriod; meter.durableMonthDelivered = x.meter.monthDeliveredPostReads;
+      // COST-3: restart restores the conservative local count for the current periods
+      meter.period = x.meter.period; meter.delivered = x.meter.deliveredPostReads;
+      meter.monthPeriod = x.meter.monthPeriod; meter.monthDelivered = x.meter.monthDeliveredPostReads;
+      if (x.meter.serverUsage && (!serverUsage || x.meter.serverUsage.observedTs > serverUsage.observedTs)) serverUsage = x.meter.serverUsage;
+    }
+    rollPeriods(now());
+    hydrated = true; lastError = null;
+    if (state !== 'ACTIVE') state = 'HYDRATED';
+    return { ok: true, durableIds: durableIds.size, x: { ruleSetHash: x.ruleSetHash, coverageEpoch: x.coverageEpoch, progressThroughTs: x.progressThroughTs, meter: x.meter ? { period: x.meter.period, deliveredPostReads: x.meter.deliveredPostReads, monthDeliveredPostReads: x.meter.monthDeliveredPostReads } : null, lastGap: x.lastGap } };
+  }
+
+  function recordGap(reason, gapStartTs = null) {
+    // the EFFECTIVE coverage epoch: a pending (not yet durable) activation counts,
+    // because the batch that settles it settles this gap right after it
+    const epoch = pendingActivation && !pendingActivation.afterGap ? pendingActivation.coverageEpoch : x.coverageEpoch;
+    const hash = pendingActivation && !pendingActivation.afterGap ? pendingActivation.ruleSetHash : x.ruleSetHash;
+    if (pendingGap || epoch < 1 || hash === null) return; // no coverage epoch => nothing to mark absent
+    pendingGap = { gapStartTs: gapStartTs ?? x.progressThroughTs ?? x.activatedKnownAtTs ?? now(), reason, coverageEpoch: epoch, ruleSetHash: hash };
+  }
+
+  // ---- start: gate -> preflight -> allowance -> gap law -> stream ---------------
+  // GAP LAW: elapsed is measured from DURABLE continuity (or the owed dropped
+  // Post), never receive-side memory. Returns the backfill window, or null when
+  // the gap is unexplained and must be recorded first.
+  function gapLaw() {
+    if (pendingActivation) return 0;
+    const lastCoverage = owedSince !== null ? Math.min(owedSince, x.progressThroughTs ?? owedSince) : (x.progressThroughTs ?? x.activatedKnownAtTs);
+    if (lastCoverage === null || x.coverageEpoch < 1) return 0;
+    const elapsed = now() - lastCoverage;
+    if (elapsed > safeGapMs) return null;
+    // backfill only reaches back to DURABLE coverage (or an owed dropped Post);
+    // an epoch that has no watermark yet starts as an explicit live tail
+    return (x.progressThroughTs !== null || owedSince !== null) ? X_BACKFILL_MINUTES : 0;
+  }
+
+  async function start() {
+    if (!hydrated) return { ok: false, reason: 'NOT_HYDRATED' };
+    if (stream && !stream.status().paused) return { ok: true, already: true };
+    if (pendingGap || (pendingActivation && pendingActivation.afterGap)) return { ok: false, reason: 'WITHHELD_GAP', detail: 'the coverage gap must settle durably before a new coverage epoch opens' };
+    const g = xGate(config, { pricing });
+    if (!g.ok) { state = 'DARK'; lastStopReason = g.reason; return { ok: false, reason: g.reason, detail: g.detail }; }
+    if (stream && stream.status().paused) {
+      // resume after backpressure: the earlier queued work has settled; replay
+      // the owed Post(s) through backfill or record the gap
+      const bf = gapLaw();
+      if (bf === null) { recordGap('UNEXPLAINED_GAP', owedSince ?? x.progressThroughTs); pendingActivation = { ruleSetHash: x.ruleSetHash, ruleTags: x.ruleTags, coverageEpoch: x.coverageEpoch + 1, activatedKnownAtTs: now(), afterGap: true }; state = 'WITHHELD_GAP'; stream.stop('unexplained gap'); stream = null; return { ok: false, reason: 'WITHHELD_GAP' }; }
+      backfillNext = bf; stream.resume(); state = 'ACTIVE';
+      return { ok: true, resumed: true, backfillMinutes: bf };
+    }
+    if (!preflightOk) { const p = await preflight(); if (!p.ok) { lastStopReason = p.reason; return p; } }
+    const a = allowance();
+    if (!a.ok) { state = 'BUDGET_STOPPED'; lastStopReason = a.reason; recordGap(a.reason); return { ok: false, reason: a.reason, detail: a.detail }; }
+    let backfill = 0;
+    if (!pendingActivation) {
+      const lastCoverage = x.progressThroughTs ?? x.activatedKnownAtTs;
+      if (lastCoverage !== null && x.coverageEpoch >= 1) {
+        const elapsed = now() - lastCoverage;
+        // backfill reaches back to DURABLE coverage only: a freshly activated
+        // epoch (no watermark yet) opens as an explicit live tail (backfill 0)
+        if (elapsed <= safeGapMs) backfill = x.progressThroughTs !== null ? X_BACKFILL_MINUTES : 0;
+        else {
+          // UNEXPLAINED GAP: never silently resume as continuous. Record the gap
+          // durably, then open a NEW coverage epoch (activated now).
+          recordGap('UNEXPLAINED_GAP', lastCoverage);
+          pendingActivation = { ruleSetHash: x.ruleSetHash, ruleTags: x.ruleTags, coverageEpoch: x.coverageEpoch + 1, activatedKnownAtTs: now(), afterGap: true };
+          state = 'WITHHELD_GAP';
+          return { ok: false, reason: 'WITHHELD_GAP', detail: `unexplained gap of ${elapsed} ms exceeds the ${safeGapMs} ms recoverable window` };
+        }
+      }
+    }
+    backfillNext = backfill;
+    intake = intake ?? socialIntake({ provider, mapCommit: xPostToRaw, filter: universeFilter, now, cursorOf: null, isDurable: (id) => durableIds.has(id), ...intakeOptions });
+    const s = startXStream({
+      provider, bearer: config.bearer, fetchImpl: fetchImpl ?? globalThis.fetch, now, log,
+      buildUrl: ({ backfillMinutes }) => xStreamUrl({ backfillMinutes }),
+      backfillMinutesFor: () => backfillNext,
+      shouldConnect: () => { const al = allowance(); return al.ok ? { ok: true } : { ok: false, reason: al.reason }; },
+      onOpen: ({ backfillMinutes }) => {
+        state = 'ACTIVE';
+        // a reconnect whose backfill window reaches back to the owed dropped Post covers it
+        if (owedSince !== null && now() - backfillMinutes * 60_000 <= owedSince) owedSince = null;
+      },
+      onKeepalive: ({ receivedTs }) => { lastReceiptTs = receivedTs; stats.keepalives += 1; },
+      onLine: (obj, { receivedTs }) => {
+        lastReceiptTs = receivedTs;
+        // BILL AT THE WIRE: a delivered Post is metered BEFORE any Serpent filter
+        const isPost = obj && typeof obj === 'object' && obj.data && typeof obj.data === 'object' && typeof obj.data.id === 'string';
+        if (isPost) meterPost(receivedTs, canonicalIngressTags((obj.matching_rules ?? []).map((m) => m?.tag)));
+        const r = intake.offer(obj);
+        if (r.outcome === 'dropped') {
+          if (owedSince === null || receivedTs < owedSince) owedSince = receivedTs; // progress may never pass the owed Post
+          s.pause('backpressure'); state = 'STANDBY'; lastStopReason = 'BACKPRESSURE';
+          log('x-runtime: queue full; paused; will resume through the governor with backfill');
+          return;
+        }
+        const al = allowance(receivedTs);
+        if (!al.ok) { recordGap(al.reason, receivedTs); s.stop(al.reason); stream = null; state = 'BUDGET_STOPPED'; lastStopReason = al.reason; log(`x-runtime: ${al.reason}; stream stopped with headroom ${headroom} (${al.detail})`); }
+      },
+      onClose: ({ reason }) => { if (reason === 'AUTH_REJECTED' || reason === 'CONNECTION_LIMIT') { recordGap(reason); if (stream === s) stream = null; state = 'WITHHELD'; lastStopReason = reason; } },
+      ...streamOptions,
+    });
+    stream = s;
+    s.start();
+    state = 'ACTIVE';
+    return { ok: true, backfillMinutes: backfill, coverageEpoch: pendingActivation?.coverageEpoch ?? x.coverageEpoch };
+  }
+
+  // Writer loss / shutdown: stop the transport IMMEDIATELY; nothing durable is
+  // adopted; no meter/progress/evidence mutation. Frames are redelivered via backfill.
+  function stop(reason = 'stopped') {
+    if (stream) { stream.stop(reason); stream = null; }
+    if (intake) { intake.clear(); intake = null; }
+    pendingBatch = null;
+    owedSince = null; // durable progress already stops before the owed Post; a fresh start replays from it
+    if (state === 'ACTIVE') state = 'STANDBY';
+    lastStopReason = reason;
+    preflightOk = false; // a fresh start re-verifies usage + rules
+    log(`x-runtime: ${provider.id} stopped (${reason})`);
+  }
+
+  // ---- settle: [ruleset?] [evidence...] [meter?] [progress?] [gap?] [ruleset-after-gap?] atomically
+  async function buildBatch(lookup) {
+    if (pendingBatch) return pendingBatch;
+    const knownAtTs = Math.floor(now());
+    const events = [];
+    const envelopes = intake ? intake.drain(maxDrain) : [];
+    let epoch = x.coverageEpoch; let hash = x.ruleSetHash;
+    if (pendingActivation && !pendingActivation.afterGap) { events.push(xRuleSetEvent({ provider: provider.id, ruleSetHash: pendingActivation.ruleSetHash, ruleTags: pendingActivation.ruleTags, coverageEpoch: pendingActivation.coverageEpoch, activatedKnownAtTs: pendingActivation.activatedKnownAtTs, knownAtTs })); epoch = pendingActivation.coverageEpoch; hash = pendingActivation.ruleSetHash; }
+    const candidates = []; const inBatch = new Set();
+    for (const env of envelopes) {
+      const { event } = socialObservationToEvent(env.observation);
+      const verr = validateSocialEvent(event);
+      if (verr) { stats.invalid += 1; continue; }
+      if (durableIds.has(event.sourceEventId) || inBatch.has(event.sourceEventId)) { stats.durableDuplicates += 1; continue; }
+      inBatch.add(event.sourceEventId); candidates.push(event);
+    }
+    if (candidates.length > 0 && typeof lookup === 'function') {
+      const r = await lookup(SOCIAL_EVENT_TYPE, candidates.map((e) => e.sourceEventId));
+      if (!r?.ok) return { error: `durable lookup unavailable: ${r?.reason ?? 'unknown'}` };
+      for (const e of candidates) { if (r.existing.has(e.sourceEventId)) { stats.durableDuplicates += 1; durableIds.add(e.sourceEventId); continue; } events.push(e); }
+    } else events.push(...candidates);
+    // meter: only when the conservative count (or the server snapshot) moved
+    rollPeriods(knownAtTs);
+    let meterEv = null;
+    const meterMoved = meter.period !== meter.durablePeriod || meter.delivered !== meter.durableDelivered || meter.monthDelivered !== meter.durableMonthDelivered
+      || (serverUsage && x.meter?.serverUsage?.observedTs !== serverUsage.observedTs);
+    if (meterMoved && (meter.delivered > 0 || meter.monthDelivered > 0)) {
+      meterEv = xMeterEvent({ provider: provider.id, period: meter.period, deliveredPostReads: meter.delivered, monthPeriod: meter.monthPeriod, monthDeliveredPostReads: meter.monthDelivered, unitPriceUsd: pricing.postReadUsd, serverUsage, knownAtTs });
+      events.push(meterEv);
+    }
+    // progress: every line received through the watermark reached a terminal state
+    let progressEv = null;
+    if (epoch >= 1 && hash && intake) {
+      const queued = intake._peekKnownAts();
+      let through = queued.length === 0 ? lastReceiptTs : Math.min(...queued) - 1;
+      if (through !== null && owedSince !== null) through = Math.min(through, owedSince - 1); // never past an owed dropped Post
+      if (through !== null && through > knownAtTs) through = knownAtTs;
+      // strictly after the last durable watermark of this epoch; the FIRST
+      // watermark of a new epoch may equal its activation clock
+      const prior = x.coverageEpoch === epoch ? x.progressThroughTs : null;
+      const activation = x.coverageEpoch === epoch ? x.activatedKnownAtTs : (pendingActivation?.activatedKnownAtTs ?? null);
+      const admissible = through !== null && (prior === null ? (activation === null || through >= activation) : through > prior);
+      if (admissible && !(stream && stream.status().tainted)) { progressEv = xProgressEvent({ provider: provider.id, ruleSetHash: hash, coverageEpoch: epoch, throughKnownAtTs: through, knownAtTs }); events.push(progressEv); }
+    }
+    let gapEv = null;
+    if (pendingGap) { gapEv = xGapEvent({ provider: provider.id, gapStartTs: pendingGap.gapStartTs, reason: pendingGap.reason, coverageEpoch: pendingGap.coverageEpoch, ruleSetHash: pendingGap.ruleSetHash, knownAtTs }); events.push(gapEv); }
+    if (pendingActivation?.afterGap) events.push(xRuleSetEvent({ provider: provider.id, ruleSetHash: pendingActivation.ruleSetHash, ruleTags: pendingActivation.ruleTags, coverageEpoch: pendingActivation.coverageEpoch, activatedKnownAtTs: pendingActivation.activatedKnownAtTs, knownAtTs }));
+    pendingBatch = { envelopes, events, meter: meterEv ? { period: meter.period, delivered: meter.delivered, monthPeriod: meter.monthPeriod, monthDelivered: meter.monthDelivered } : null, progress: progressEv, gap: gapEv, activation: pendingActivation ? { ...pendingActivation } : null, knownAtTs };
+    return pendingBatch;
+  }
+
+  async function settle({ fenceHeld = () => true, append, lookup = null } = {}) {
+    if (!hydrated) return { ok: false, reason: 'NOT_HYDRATED' };
+    if (!fenceHeld()) { stop('writer authority lost before settle'); return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
+    const batch = await buildBatch(lookup);
+    if (batch.error) { stats.appendFailures += 1; lastError = batch.error; return { ok: false, reason: 'UNAVAILABLE', detail: batch.error }; }
+    stats.settles += 1;
+    if (batch.events.length === 0) { intake?.settled(batch.envelopes); pendingBatch = null; return { ok: true, settled: batch.envelopes.length, appended: 0 }; }
+    if (!fenceHeld()) { stop('writer authority lost before append'); return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
+    const r = await append(batch.events);
+    if (!r?.ok) { stats.appendFailures += 1; lastError = r?.reason ?? 'append failed'; return { ok: false, reason: r?.reason ?? 'UNAVAILABLE' }; }
+    // AFTER the durable commit: adopt exactly once, evidence + meter + progress together
+    let appended = 0;
+    for (const e of batch.events) if (e.type === SOCIAL_EVENT_TYPE) { durableIds.add(e.sourceEventId); appended += 1; }
+    if (batch.activation) {
+      x.ruleSetHash = batch.activation.ruleSetHash; x.coverageEpoch = batch.activation.coverageEpoch; x.activatedKnownAtTs = batch.activation.activatedKnownAtTs; x.ruleTags = batch.activation.ruleTags; x.progressThroughTs = null;
+      pendingActivation = null; stats.rulesetEvents += 1;
+    }
+    if (batch.meter) {
+      meter.durablePeriod = batch.meter.period; meter.durableDelivered = batch.meter.delivered; meter.durableMonthPeriod = batch.meter.monthPeriod; meter.durableMonthDelivered = batch.meter.monthDelivered;
+      x.meter = { period: batch.meter.period, deliveredPostReads: batch.meter.delivered, monthPeriod: batch.meter.monthPeriod, monthDeliveredPostReads: batch.meter.monthDelivered, unitPriceUsd: pricing.postReadUsd, estimatedUsd: estimatedUsd(batch.meter.monthDelivered), serverUsage, knownAtTs: batch.knownAtTs };
+      stats.meterEvents += 1;
+    }
+    if (batch.progress) { x.progressThroughTs = batch.progress.throughKnownAtTs; stats.progressEvents += 1; }
+    if (batch.gap) { x.lastGap = { gapStartTs: batch.gap.gapStartTs, reason: batch.gap.reason, knownAtTs: batch.knownAtTs, coverageEpoch: batch.gap.coverageEpoch }; pendingGap = null; owedSince = null; stats.gapEvents += 1; }
+    stats.appended += appended;
+    intake?.settled(batch.envelopes);
+    const events = batch.events;
+    pendingBatch = null; lastError = null;
+    if (state === 'WITHHELD_GAP' && !pendingGap && !pendingActivation) state = 'HYDRATED'; // the gap is durable; a new epoch may open on the next start
+    return { ok: true, settled: batch.envelopes.length, appended, lastSeq: r.lastSeq, events, coverageEpoch: x.coverageEpoch, progressThroughTs: x.progressThroughTs, meter: x.meter ? { period: x.meter.period, deliveredPostReads: x.meter.deliveredPostReads } : null };
+  }
+
+  // test/diagnostic hook: deliver one stream line as if the transport received it
+  function _feedLine(obj, receivedTs = now()) {
+    if (!intake) return null;
+    lastReceiptTs = receivedTs;
+    if (obj && typeof obj === 'object' && obj.data && typeof obj.data.id === 'string') meterPost(receivedTs, canonicalIngressTags((obj.matching_rules ?? []).map((m) => m?.tag)));
+    return intake.offer(obj);
+  }
+
+  return {
+    provider, hydrate, start, stop, settle, preflight, allowance,
+    isActive: () => state === 'ACTIVE' && stream !== null,
+    isDurable: (id) => durableIds.has(id),
+    gate: () => xGate(config, { pricing }),
+    _intake: () => intake, _stream: () => stream, _feedLine,
+    status() {
+      const g = xGate(config, { pricing });
+      const al = hydrated && serverUsage ? allowance() : null;
+      return {
+        provider: provider.id, accessState: 'AVAILABLE_REQUIRES_CREDENTIAL', enabled: !!config.enabled, credentialPresent: !!config.bearer,
+        gate: g.ok ? 'OPEN' : g.reason, gateDetail: g.detail, state, hydrated, authority: 'NONE',
+        ruleSetHash: x.ruleSetHash, coverageEpoch: x.coverageEpoch, ownedRuleCount: rules.owned.length, unownedRuleCount: rules.unownedCount, ruleCapacity: rules.capacity, dryRunOk: rules.dryRunOk,
+        pendingActivation: pendingActivation ? { ruleSetHash: pendingActivation.ruleSetHash, coverageEpoch: pendingActivation.coverageEpoch } : null,
+        stream: stream ? stream.status() : null, lastReceiptTs,
+        progressThroughTs: x.progressThroughTs, lastGap: x.lastGap, pendingGap: pendingGap ? { reason: pendingGap.reason, gapStartTs: pendingGap.gapStartTs } : null, lastStopReason,
+        meter: { period: meter.period, deliveredPostReads: meter.delivered, monthPeriod: meter.monthPeriod, monthDeliveredPostReads: meter.monthDelivered, sessionPostReads: meter.session, durableDeliveredPostReads: meter.durableDelivered, durableMonthDeliveredPostReads: meter.durableMonthDelivered, byLane: { ...meter.byLane } },
+        budget: {
+          maxDailyPostReads: config.maxDailyPostReads ?? null, maxMonthlyPostReads: config.maxMonthlyPostReads ?? null, maxEstimatedDailyUsd: config.maxEstimatedDailyUsd ?? null, maxSessionPostReads: config.maxSessionPostReads ?? null, liveSmokeMaxPostReads: config.liveSmokeMaxPostReads ?? null,
+          headroomPosts: headroom,
+          dailyRemainingLocal: posInt(config.maxDailyPostReads) ? Math.max(0, config.maxDailyPostReads - meter.delivered) : null,
+          monthlyRemainingLocal: posInt(config.maxMonthlyPostReads) ? Math.max(0, config.maxMonthlyPostReads - meter.monthDelivered) : null,
+          estimatedUsdUsedMonth: estimatedUsd(meter.monthDelivered), estimatedUsdUsedDay: estimatedUsd(meter.delivered),
+          estimatedUsdRemainingDay: Number.isFinite(config.maxEstimatedDailyUsd) ? Math.max(0, Math.round((config.maxEstimatedDailyUsd - estimatedUsd(meter.delivered)) * 1e6) / 1e6) : null,
+          unitPriceUsd: pricing.postReadUsd, pricingObservedOn: pricing.observedOn,
+          allowance: al ? { ok: al.ok, reason: al.reason, remaining: al.remaining === Infinity ? null : al.remaining, limiting: al.limiting ?? null } : null,
+          platformSpendingLimitVerified: 'UNKNOWN', // not machine-verifiable; the Developer Console spending limit is the recommended independent backstop
+        },
+        serverUsage, credits: { capability: credits.capability, value: credits.value, status: credits.status },
+        pendingBatch: pendingBatch ? { envelopes: pendingBatch.envelopes.length, events: pendingBatch.events.length } : null,
+        intake: intake ? intake.stats() : null, stats: { ...stats }, lastError,
+      };
+    },
+  };
+}

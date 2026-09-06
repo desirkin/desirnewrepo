@@ -136,6 +136,9 @@ export function socialIntake({
     },
     // frames still owed a terminal disposition (enqueued or dropped)
     pendingCount() { return pending.size; },
+    // SOCIAL-2B: knowledge clocks of the still-queued observations — the X
+    // time-window progress law needs the oldest unsettled acquisition time
+    _peekKnownAts() { return queue.map((e) => e.observation.knownAtTs); },
     hasDropped() { for (const v of pending.values()) if (v === 'dropped') return true; return false; },
     cursor() { return { ...cursor }; },
     // forget everything non-durable (writer loss / shutdown): frames are

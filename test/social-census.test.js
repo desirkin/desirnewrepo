@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SOCIAL_PROVIDERS, SOCIAL_PROVIDER_IDS, SOCIAL_ACCESS_STATES, ACTIVE_SOCIAL_PROVIDER_IDS,
-  socialProviderById, isLiveActivatable,
+  socialProviderById, isLiveActivatable, isPlatformCapable,
 } from '../rumor2/social-registry.js';
 import { SOCIAL_PROVIDER_KINDS } from '../rumor2/social.js';
 
@@ -35,12 +35,18 @@ test('CENSUS-3. the recorded access decisions match the verified census', () => 
   assert.equal(socialProviderById('TIKTOK_PUBLIC').accessState, 'NOT_AUTHORIZED');
 });
 
-test('CENSUS-4. only Bluesky is durably active in SOCIAL-1 (no credential); the rest are dark by access', () => {
-  assert.deepEqual(ACTIVE_SOCIAL_PROVIDER_IDS, ['BLUESKY_OFFICIAL']);
-  assert.equal(isLiveActivatable('AVAILABLE_AUTHORIZED'), true);
-  assert.equal(isLiveActivatable('AVAILABLE_REQUIRES_CREDENTIAL'), false);
-  // a durable provider must be live-activatable (structural invariant)
-  for (const p of SOCIAL_PROVIDERS) if (p.durable) assert.ok(isLiveActivatable(p.accessState), `${p.id} durable => live-activatable`);
+test('CENSUS-4 (SOCIAL-2B §7). Bluesky is credential-free live; X is durable but RUNTIME-GATED (credential + budget + preflight + fence); the rest dark by access', () => {
+  assert.deepEqual(ACTIVE_SOCIAL_PROVIDER_IDS, ['BLUESKY_OFFICIAL', 'X_OFFICIAL']);
+  assert.equal(isLiveActivatable('AVAILABLE_AUTHORIZED'), true, 'unattended activation needs no credential');
+  assert.equal(isLiveActivatable('AVAILABLE_REQUIRES_CREDENTIAL'), false, 'a static flag never implies a credential exists');
+  assert.equal(isPlatformCapable('AVAILABLE_REQUIRES_CREDENTIAL'), true); assert.equal(isPlatformCapable('NOT_AUTHORIZED'), false);
+  const x = socialProviderById('X_OFFICIAL');
+  assert.equal(x.accessState, 'AVAILABLE_REQUIRES_CREDENTIAL', 'X is NOT relabeled AVAILABLE_AUTHORIZED');
+  assert.equal(x.implemented, true); assert.equal(x.durable, true); assert.equal(x.runtimeGated, true);
+  assert.equal(x.cost.dedupeGuarantee, 'SOFT'); assert.equal(x.cost.observedOn, '2026-09-06');
+  // structural invariants: durable => platform capable; credential-gated durable => runtime-gated
+  for (const p of SOCIAL_PROVIDERS) if (p.durable) assert.ok(isPlatformCapable(p.accessState), `${p.id} durable => platform capable`);
+  for (const p of SOCIAL_PROVIDERS) if (p.durable && !isLiveActivatable(p.accessState)) assert.equal(p.runtimeGated, true, `${p.id} needs runtime authorization`);
 });
 
 test('CENSUS-5. StockTwits stays HIGH PRIORITY though access-blocked; TikTok is a FINAL exclusion, not a TODO', () => {

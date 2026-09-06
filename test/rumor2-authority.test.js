@@ -39,7 +39,7 @@ const code = (f) =>
 const rumor2Files = tracked.filter((f) => f.startsWith('rumor2/'));
 assert.ok(rumor2Files.length >= 8, 'the rumor2 layer is actually scanned');
 // TIER SPLIT: the intentional SOCIAL-1 surface vs the frozen non-social core.
-const SOCIAL_FILE_RE = /(^|\/)social[a-z0-9-]*\.js$|\/providers\/(bluesky|farcaster)-official\.js$/;
+const SOCIAL_FILE_RE = /(^|\/)social[a-z0-9-]*\.js$|(^|\/)x-[a-z0-9-]*\.js$|\/providers\/(bluesky|farcaster|x)-official\.js$/; // SOCIAL-2B: the X ear is audited in the social tier
 const socialFiles = rumor2Files.filter((f) => SOCIAL_FILE_RE.test(f));
 const frozenCoreFiles = rumor2Files.filter((f) => !SOCIAL_FILE_RE.test(f));
 assert.ok(socialFiles.length >= 6, 'the social surface is actually scanned');
@@ -161,15 +161,25 @@ test('R2A-SOCIAL-3. no social file imports a trading/execution/Socrates/attentio
   }
 });
 
-test('R2A-SOCIAL-4. social files perform no HTTP fetch(); the durable social event is distinct from the frozen event world', () => {
-  for (const f of socialFiles)
+test('R2A-SOCIAL-4. only the X transport may fetch(), and only api.x.com; the durable social event is distinct from the frozen event world', () => {
+  for (const f of socialFiles) {
+    if (/(^|\/)x-stream\.js$|(^|\/)x-runtime\.js$/.test(f)) {
+      // SOCIAL-2B: the X ear is an HTTP filtered stream by contract — its fetch
+      // is injected (fetchImpl), host-allowlisted to api.x.com, bearer only in a
+      // header, and never a WebSocket. No other X host literal may appear.
+      const src = code(f);
+      assert.ok(!/https?:\/\/(?!api\.x\.com)[a-z0-9.-]+\.[a-z]{2,}/i.test(src), `${f}: no non-allowlisted host literal`);
+      assert.ok(!/console\.log\([^)]*bearer/i.test(src), `${f}: never logs the bearer`);
+      continue;
+    }
     assert.ok(!read(f).includes('fetch('), `${f}: no HTTP fetch (Bluesky uses a bounded WebSocket transport, Farcaster is dark)`);
+  }
   assert.equal(SOCIAL_EVENT_TYPE, 'RUMOR2_SOCIAL_OBSERVED');
   for (const frozen of ['RUMOR2_SOURCE_OBSERVED', 'RUMOR2_CLAIM_OBSERVED', 'RUMOR2_PACKET'])
     assert.notEqual(SOCIAL_EVENT_TYPE, frozen);
 });
 
-test('R2A-SOCIAL-5. the frozen claim-capable set is untouched; only Bluesky is durably live, the rest access-gated', () => {
+test('R2A-SOCIAL-5. the frozen claim-capable set is untouched; Bluesky is credential-free live, X is runtime-gated, the rest access-gated', () => {
   // the frozen official five remain the ONLY claim-capable registry — social
   // additions never entered the frozen provider set (registry.js)
   assert.deepEqual([...PROVIDER_IDS].sort(), ['CFTC_OFFICIAL', 'EDGAR_OFFICIAL', 'KRAKEN_OFFICIAL', 'OFAC_OFFICIAL', 'SEC_OFFICIAL']);

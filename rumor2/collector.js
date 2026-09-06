@@ -61,6 +61,9 @@ import { buildClaimPacket } from './packet.js';
 import { isSocialEventType } from './social-settle.js';
 import { createSocialRuntime } from './social-runtime.js';
 import { buildSocialFilter } from './social.js';
+// SOCIAL-2B: the X filtered-stream ear — same writer, same epoch, same journal;
+// default cost ZERO (explicit gate + bearer + hard budget + usage preflight)
+import { createXRuntime, xConfigFromEnv } from './x-runtime.js';
 
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -110,6 +113,12 @@ export function startRumor2({
   socialSocketFactory = null, // LIVE: null => the global-WebSocket factory; tests inject fakes
   socialRuntime = null, // an injected runtime (tests); else built here when enabled
   socialOptions = {},
+  // SOCIAL-2B: the X ear — OFF by default; enabling X enables ONLY X
+  socialXEnabled = process.env.RUMOR2_SOCIAL_X_ENABLED === 'true',
+  socialXConfig = null, // { enabled, bearer, budgets... } (tests); else read from env
+  socialXFetchImpl = null, // injected HTTP for tests; null => global fetch, pinned to the approved X API host
+  socialXRuntime = null,
+  socialXOptions = {},
 } = {}) {
   if (!enabled) {
     // dark and silent: zero network, zero timers, zero authority
@@ -262,6 +271,17 @@ export function startRumor2({
         now, log, mode: socialMode, fixtures: socialFixtures, socketFactory: socialSocketFactory, ...socialOptions,
       }))
     : null;
+  const socialX = socialXEnabled
+    ? (socialXRuntime ?? createXRuntime({
+        config: socialXConfig ?? xConfigFromEnv(),
+        filter: buildSocialFilter({ terms: [...registry.tickers, ...registry.aliases.keys()] }),
+        universe: [...registry.tickers], aliases: [...registry.aliases.keys()],
+        now, log, fetchImpl: socialXFetchImpl, ...socialXOptions,
+      }))
+    : null;
+  // every operational social ear the collector drives under ONE writer authority
+  const socialRuntimes = [social, socialX].filter(Boolean);
+  const stopSocial = (reason) => { for (const rt of socialRuntimes) rt.stop(reason); };
   // the frozen core replays ONLY its own event kinds; Social events are
   // replayed/validated by the separate Social path (§22)
   const coreEvents = (events) => events.filter((e) => !(e && typeof e === 'object' && isSocialEventType(e.type)));
@@ -308,7 +328,7 @@ export function startRumor2({
       lifecycle = 'STANDBY_WRITER';
       withholdReason = 'writer authority lost mid-tick — standing by to reacquire';
     }
-    social?.stop('writer authority lost'); // §21: no zombie Social stream under a lost fence
+    stopSocial('writer authority lost'); // §21: no zombie Social stream under a lost fence
     return false;
   }
 
@@ -465,15 +485,17 @@ export function startRumor2({
   let socialHydratedForInit = false;
   async function ensureInit() {
     const ok = await ensureInitCore();
-    if (!ok || !social) return ok;
+    if (!ok || socialRuntimes.length === 0) return ok;
     if (socialHydratedForInit) return true;
     const jr = await activeJournal.read();
     if (journalReadFailure(jr)) return false;
-    const hr = social.hydrate(jr.events);
-    if (!hr.ok) {
-      lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
-      withholdReason = boundedError(hr.error);
-      return false;
+    for (const rt of socialRuntimes) {
+      const hr = rt.hydrate(jr.events);
+      if (!hr.ok) {
+        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+        withholdReason = boundedError(hr.error);
+        return false;
+      }
     }
     socialHydratedForInit = true;
     return true;
@@ -583,7 +605,7 @@ export function startRumor2({
       writerEpoch = null;
       lifecycle = 'STANDBY_WRITER';
       withholdReason = r.reason === 'MISSING_WRITER_EPOCH' ? 'no valid writer epoch — standing by to reacquire' : 'writer epoch is stale — a newer writer holds authority';
-      social?.stop('writer epoch stale');
+      stopSocial('writer epoch stale');
     } else {
       durability = 'UNAVAILABLE';
       lifecycle = 'FAILED_DURABILITY'; // stop polling until durable truth is representable again
@@ -832,7 +854,7 @@ export function startRumor2({
         writerEpoch = null;
         lifecycle = 'STANDBY_WRITER';
         withholdReason = res.reason === 'STALE_WRITER' ? 'writer epoch is stale — a newer writer holds authority' : 'writer authority lost — standing by to reacquire';
-        social?.stop('writer authority lost');
+        stopSocial('writer authority lost');
         return false;
       }
       r.appendFailures += 1;
@@ -1080,40 +1102,46 @@ export function startRumor2({
   // watermark — Social truth is settled truth in the same root.
   const SOCIAL_LIVE_LIFECYCLES = ['FRESH_START', 'RESTORED', 'REBUILT_FROM_EVENT_HISTORY'];
   async function socialTick() {
-    if (!social) return;
-    if (!SOCIAL_LIVE_LIFECYCLES.includes(lifecycle) || !fenceHeld()) { social.stop('collector not authoritative'); return; }
-    if (!social.isActive()) {
-      const st = social.start();
-      if (!st.ok) { log(`RUMOR2 social: not started (${st.reason})`); return; }
-    }
-    const res = await social.settle({
-      fenceHeld,
-      append: (events) => activeJournal.append(events),
-      lookup: typeof activeJournal.hasEventIds === 'function' ? (type, ids) => activeJournal.hasEventIds(type, ids) : null,
-    });
-    if (!res.ok) {
-      const reason = String(res.reason ?? '');
-      if (reason.startsWith('CORRUPTION')) {
-        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
-        withholdReason = boundedError(`EVENT_HISTORY_INVALID: ${reason}`);
-        social.stop('journal corruption');
-        return;
+    if (socialRuntimes.length === 0) return;
+    if (!SOCIAL_LIVE_LIFECYCLES.includes(lifecycle) || !fenceHeld()) { stopSocial('collector not authoritative'); return; }
+    for (const rt of socialRuntimes) {
+      if (!fenceHeld()) { stopSocial('collector not authoritative'); return; }
+      if (!rt.isActive()) {
+        // Bluesky starts synchronously; X performs its gate + usage/credit/rule
+        // preflight and only then a paid connection — a refused start is a
+        // truthful status, never a retry storm (the next tick re-asks)
+        const st = await rt.start();
+        if (!st.ok) { log(`RUMOR2 social ${rt.provider.id}: not started (${st.reason ?? 'unknown'})`); }
       }
-      if (reason === 'WRITER_FENCE_LOST' || reason === 'STALE_WRITER') {
-        writerFenced = false;
-        writerEpoch = null;
-        lifecycle = 'STANDBY_WRITER';
-        withholdReason = reason === 'STALE_WRITER' ? 'writer epoch is stale — a newer writer holds authority' : 'writer authority lost — standing by to reacquire';
-        social.stop('writer authority lost');
-        return;
+      const res = await rt.settle({
+        fenceHeld,
+        append: (events) => activeJournal.append(events),
+        lookup: typeof activeJournal.hasEventIds === 'function' ? (type, ids) => activeJournal.hasEventIds(type, ids) : null,
+      });
+      if (!res.ok) {
+        const reason = String(res.reason ?? '');
+        if (reason.startsWith('CORRUPTION')) {
+          lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+          withholdReason = boundedError(`EVENT_HISTORY_INVALID: ${reason}`);
+          stopSocial('journal corruption');
+          return;
+        }
+        if (reason === 'WRITER_FENCE_LOST' || reason === 'STALE_WRITER') {
+          writerFenced = false;
+          writerEpoch = null;
+          lifecycle = 'STANDBY_WRITER';
+          withholdReason = reason === 'STALE_WRITER' ? 'writer epoch is stale — a newer writer holds authority' : 'writer authority lost — standing by to reacquire';
+          stopSocial('writer authority lost');
+          return;
+        }
+        if (reason !== 'NOT_HYDRATED') log(`RUMOR2 social ${rt.provider.id} settle failed (zero truth advances, will retry): ${boundedError(reason)}`);
+        continue;
       }
-      log(`RUMOR2 social settle failed (zero truth advances, will retry): ${boundedError(reason)}`);
-      return;
-    }
-    if (res.appended !== undefined && res.lastSeq !== undefined) {
-      if (!fenceHeld()) return; // committed but unfenced: the next writer's restore reads it
-      cp.lastSettledEventSeq = res.lastSeq;
-      for (const ev of res.events ?? []) mirrorSafe(ev);
+      if (res.appended !== undefined && res.lastSeq !== undefined) {
+        if (!fenceHeld()) return; // committed but unfenced: the next writer's restore reads it
+        cp.lastSettledEventSeq = res.lastSeq;
+        for (const ev of res.events ?? []) mirrorSafe(ev);
+      }
     }
   }
 
@@ -1184,6 +1212,8 @@ export function startRumor2({
       writerEpoch, // DB-assigned monotonic writer epoch (diagnostic; null when unfenced)
       // SOCIAL-2A: the operational Social ear (source-only, zero authority)
       social: social ? social.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_BLUESKY_ENABLED)' },
+      // SOCIAL-2B: the X ear (source-only, zero authority, default cost zero)
+      socialX: socialX ? socialX.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_X_ENABLED)', authority: 'NONE' },
     };
     try {
       atomicWriteJson(path.join(dir(), 'status.json'), status);
@@ -1206,7 +1236,7 @@ export function startRumor2({
       await safeAppend({ type: 'RUMOR2_STARTED', ts: iso(now()), lifecycle, durability, checkpointRevision: cp.revision }, null);
     }
     if (!ok) {
-      social?.stop('collector not initialized'); // §21: no Social stream without authority
+      stopSocial('collector not initialized'); // §21: no Social stream without authority
       writeStatus();
       return;
     }
@@ -1241,7 +1271,7 @@ export function startRumor2({
         await providerFailure(p, runtime[p.id], cp.providers[p.id], `internal: ${err.message}`);
       }
     }
-    // SOCIAL-2A: the Social ear settles after the official ears, under the same fence
+    // SOCIAL-2A/2B: the Social ears settle after the official ears, under the same fence
     if (!closed && !halted) {
       try { await socialTick(); } catch (err) { log(`RUMOR2 social tick failed (contained): ${boundedError(err.message)}`); }
     }
@@ -1264,7 +1294,7 @@ export function startRumor2({
     process.removeListener('SIGINT', onSignal);
     process.removeListener('SIGTERM', onSignal);
     await inFlight; // settle the in-flight tick (its own bounds keep this finite)
-    social?.stop('collector shutdown'); // close the ear BEFORE handing back writer authority
+    stopSocial('collector shutdown'); // close every ear BEFORE handing back writer authority
     writeStatus();
     // normal shutdown hands writer authority back promptly (a crash would
     // release it server-side anyway)
@@ -1287,6 +1317,6 @@ export function startRumor2({
     stop,
     tickOnce: () => (inFlight = inFlight.then(() => tickOnce())),
     status: writeStatus,
-    internals: { runtime, coverageEntries, social, get checkpoint() { return cp; }, get lifecycle() { return lifecycle; }, get durability() { return durability; } },
+    internals: { runtime, coverageEntries, social, socialX, get checkpoint() { return cp; }, get lifecycle() { return lifecycle; }, get durability() { return durability; } },
   };
 }

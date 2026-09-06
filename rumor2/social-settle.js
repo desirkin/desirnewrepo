@@ -23,7 +23,7 @@ import {
   socialSourceIdentity, socialAuthorIdentity, socialVersionIdentity, socialMetaHash,
   normalizeSocialText, SOCIAL_RELATION_KINDS, ECHO_RELATIONS, SOCIAL_LIFECYCLE_STATES,
   R2SS_RE, R2SA_RE, R2SV_RE, MAX_SOCIAL_TEXT_CHARS, MAX_NATIVE_ID_CHARS, MAX_SOCIAL_HANDLE_CHARS,
-  SOURCE_CLOCK_STATES, classifySourceClock,
+  SOURCE_CLOCK_STATES, classifySourceClock, canonicalIngressTags, MAX_INGRESS_TAGS, MAX_INGRESS_TAG_CHARS,
 } from './social.js';
 import { socialProviderById } from './social-registry.js';
 
@@ -41,6 +41,7 @@ export const SOCIAL_EVENT_KEYS = Object.freeze([
   // SOURCE-CLOCK QUARANTINE SEAL (§14): declared vs trusted source clock, the
   // closed clock verdict + bounded skew diagnostic, and the provider event clock
   'sourceDeclaredTs', 'sourceCreatedTs', 'sourceClockStatus', 'sourceClockSkewMs', 'providerEventTs',
+  'ingressTags', // SOCIAL-2B: bounded first-known provider admission tags (diagnostic only)
   'retrievedTs', 'knownAtTs',
 ]);
 
@@ -58,7 +59,37 @@ export const PROVIDER_EVENT_SEQ_PROVIDERS = Object.freeze(['BLUESKY_OFFICIAL']);
 export const SOCIAL_CURSOR_EVENT_TYPE = 'RUMOR2_SOCIAL_CURSOR';
 export const SOCIAL_CURSOR_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'durableCursor', 'knownAtTs']);
 export const R2SC_RE = /^r2sc-[0-9a-f]{40}$/;
-export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE]);
+// SOCIAL-2B: the CLOSED source-only X operational events — all ride the SAME
+// journal under the SAME writer epoch, none carries authority:
+//   RUMOR2_SOCIAL_X_RULESET  — which Serpent-owned rule set (hash) was active from
+//                              activatedKnownAtTs, under which coverage epoch
+//   RUMOR2_SOCIAL_X_METER    — the conservative local cost meter: cumulative
+//                              delivered Post reads per UTC day + month, at the
+//                              pinned unit price, plus the latest server usage
+//   RUMOR2_SOCIAL_X_PROGRESS — the durable continuity watermark: every stream
+//                              line received through throughKnownAtTs reached a
+//                              terminal state under this coverage epoch
+//   RUMOR2_SOCIAL_X_GAP      — an explicit coverage gap (budget stop, operator
+//                              stop, unexplained gap, writer loss …): coverage
+//                              was ABSENT from gapStartTs; never false continuity
+export const X_RULESET_EVENT_TYPE = 'RUMOR2_SOCIAL_X_RULESET';
+export const X_METER_EVENT_TYPE = 'RUMOR2_SOCIAL_X_METER';
+export const X_PROGRESS_EVENT_TYPE = 'RUMOR2_SOCIAL_X_PROGRESS';
+export const X_GAP_EVENT_TYPE = 'RUMOR2_SOCIAL_X_GAP';
+export const X_RULESET_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'ruleSetHash', 'ruleTags', 'ruleCount', 'coverageEpoch', 'activatedKnownAtTs', 'knownAtTs']);
+export const X_METER_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'period', 'deliveredPostReads', 'monthPeriod', 'monthDeliveredPostReads', 'unitPriceUsd', 'estimatedUsd', 'serverUsage', 'knownAtTs']);
+export const X_PROGRESS_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'ruleSetHash', 'coverageEpoch', 'throughKnownAtTs', 'knownAtTs']);
+export const X_GAP_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'ruleSetHash', 'coverageEpoch', 'gapStartTs', 'reason', 'knownAtTs']);
+export const X_GAP_REASONS = Object.freeze(['BUDGET_DAILY', 'BUDGET_MONTHLY', 'BUDGET_USD', 'BUDGET_SESSION', 'NO_CREDITS', 'OPERATOR_DISABLED', 'USAGE_PREFLIGHT_FAILED', 'RULE_RECONCILE_FAILED', 'UNEXPLAINED_GAP', 'WRITER_LOST', 'CONNECTION_LIMIT', 'AUTH_REJECTED', 'TRANSPORT_FAILED']);
+export const X_STATE_PROVIDERS = Object.freeze(['X_OFFICIAL']);
+export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE]);
+export const xRuleSetIdentity = ({ provider, ruleSetHash, coverageEpoch }) => `r2xr-${contentHash(canonicalJson({ provider, ruleSetHash, coverageEpoch }))}`;
+// a meter snapshot is identified by its counts AND its knowledge clock: two
+// snapshots with equal counts but a newer server-usage observation are distinct
+// observations, while a byte-identical crash retry keeps the same clock
+export const xMeterIdentity = ({ provider, period, deliveredPostReads, monthPeriod, monthDeliveredPostReads, knownAtTs }) => `r2xm-${contentHash(canonicalJson({ provider, period, deliveredPostReads, monthPeriod, monthDeliveredPostReads, knownAtTs }))}`;
+export const xProgressIdentity = ({ provider, coverageEpoch, throughKnownAtTs }) => `r2xp-${contentHash(canonicalJson({ provider, coverageEpoch, throughKnownAtTs }))}`;
+export const xGapIdentity = ({ provider, coverageEpoch, gapStartTs, reason }) => `r2xg-${contentHash(canonicalJson({ provider, coverageEpoch, gapStartTs, reason }))}`;
 export const isSocialEventType = (t) => SOCIAL_EVENT_TYPES.includes(t);
 export const socialCursorIdentity = ({ provider, durableCursor }) => `r2sc-${contentHash(canonicalJson({ provider, durableCursor }))}`;
 
@@ -105,6 +136,7 @@ export function socialObservationToEvent(observation) {
     sourceClockStatus: observation.sourceClockStatus ?? 'UNKNOWN',
     sourceClockSkewMs: observation.sourceClockSkewMs ?? null,
     providerEventTs: observation.providerEventTs ?? null,
+    ingressTags: canonicalIngressTags(observation.ingressTags),
     retrievedTs: observation.retrievedTs,
     knownAtTs: observation.knownAtTs,
   };
@@ -213,6 +245,10 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
     if (c.sourceClockSkewMs !== event.sourceClockSkewMs) return 'social event: sourceClockSkewMs is not the re-derived skew';
   }
   if (event.providerEventTs !== null && !isTs(event.providerEventTs)) return 'social event: providerEventTs invalid';
+  // SOCIAL-2B ingress tags: a bounded, sorted, unique closed list — canonical form only
+  if (!Array.isArray(event.ingressTags) || event.ingressTags.length > MAX_INGRESS_TAGS) return 'social event: ingressTags invalid';
+  for (const t of event.ingressTags) if (typeof t !== 'string' || t.length === 0 || t.length > MAX_INGRESS_TAG_CHARS) return 'social event: ingressTags invalid';
+  if (canonicalJson(canonicalIngressTags(event.ingressTags)) !== canonicalJson(event.ingressTags)) return 'social event: ingressTags not in canonical sorted-unique form';
   if (event.ts !== iso(event.knownAtTs)) return 'social event: ts disagrees with knownAtTs';
   if (!okEngagement(event.engagement)) return 'social event: engagement invalid';
   if (!okAuthorMeta(event.authorMeta, event.retrievedTs)) return 'social event: authorMeta invalid';
@@ -233,6 +269,8 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
     providerEventSeq: event.providerEventSeq, textHash: event.textHash, sourceDeclaredTs: event.sourceDeclaredTs,
     handle: event.handle, authorMeta: event.authorMeta, engagement: event.engagement,
     sourceClockStatus: event.sourceClockStatus, sourceClockSkewMs: event.sourceClockSkewMs, providerEventTs: event.providerEventTs,
+    retrievedTs: event.retrievedTs, knownAtTs: event.knownAtTs, // first-known acquisition clocks are diagnostic-bound (Job A)
+    ingressTags: event.ingressTags,
     socialSourceId: event.socialSourceId,
   };
   if (event.metaHash !== socialMetaHash(facts)) return 'social event: metaHash is not the re-derived diagnostic hash';
@@ -269,6 +307,7 @@ export function reconstructSocialWitness(event) {
     sourceClockStatus: event.sourceClockStatus ?? 'UNKNOWN',
     sourceClockSkewMs: event.sourceClockSkewMs ?? null,
     providerEventTs: event.providerEventTs ?? null,
+    ingressTags: event.ingressTags ?? [],
     retrievedTs: event.retrievedTs,
     knownAtTs: event.knownAtTs,
     engagement: event.engagement,
@@ -307,6 +346,91 @@ export function validateSocialCursorEvent(event) {
   return null;
 }
 
+// ---- SOCIAL-2B X operational events ----------------------------------------
+const okHash = (h) => typeof h === 'string' && /^[0-9a-f]{40}$/.test(h);
+const okEpoch = (e) => Number.isSafeInteger(e) && e >= 1;
+const okPeriod = (p) => typeof p === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(p);
+const okMonth = (p) => typeof p === 'string' && /^\d{4}-\d{2}$/.test(p);
+const xProvider = (ev) => (X_STATE_PROVIDERS.includes(ev.provider) && socialProviderById(ev.provider) ? null : 'provider is not an X-state provider');
+
+export function xRuleSetEvent({ provider, ruleSetHash, ruleTags, coverageEpoch, activatedKnownAtTs, knownAtTs }) {
+  const tags = [...new Set(ruleTags)].sort();
+  return { type: X_RULESET_EVENT_TYPE, ts: iso(knownAtTs), sourceEventId: xRuleSetIdentity({ provider, ruleSetHash, coverageEpoch }), provider, ruleSetHash, ruleTags: tags, ruleCount: tags.length, coverageEpoch, activatedKnownAtTs, knownAtTs };
+}
+export function validateXRuleSetEvent(ev) {
+  if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'x ruleset: not an object';
+  const k = exactKeys(ev, X_RULESET_EVENT_KEYS); if (k) return `x ruleset: ${k}`;
+  if (ev.type !== X_RULESET_EVENT_TYPE) return 'x ruleset: wrong type';
+  const pe = xProvider(ev); if (pe) return `x ruleset: ${pe}`;
+  if (!okHash(ev.ruleSetHash)) return 'x ruleset: ruleSetHash malformed';
+  if (!Array.isArray(ev.ruleTags) || ev.ruleTags.length > 1000 || ev.ruleTags.some((t) => typeof t !== 'string' || t.length === 0 || t.length > MAX_INGRESS_TAG_CHARS)) return 'x ruleset: ruleTags invalid';
+  if (canonicalJson([...new Set(ev.ruleTags)].sort()) !== canonicalJson(ev.ruleTags)) return 'x ruleset: ruleTags not canonical';
+  if (ev.ruleCount !== ev.ruleTags.length) return 'x ruleset: ruleCount disagrees';
+  if (!okEpoch(ev.coverageEpoch)) return 'x ruleset: coverageEpoch invalid';
+  if (!isTs(ev.activatedKnownAtTs) || !isTs(ev.knownAtTs) || ev.activatedKnownAtTs > ev.knownAtTs) return 'x ruleset: clock invalid';
+  if (ev.ts !== iso(ev.knownAtTs)) return 'x ruleset: ts disagrees with knownAtTs';
+  if (ev.sourceEventId !== xRuleSetIdentity(ev)) return 'x ruleset: sourceEventId is not the derived identity';
+  return null;
+}
+export function xMeterEvent({ provider, period, deliveredPostReads, monthPeriod, monthDeliveredPostReads, unitPriceUsd, serverUsage = null, knownAtTs }) {
+  const estimatedUsd = Math.round(monthDeliveredPostReads * unitPriceUsd * 1e6) / 1e6;
+  return { type: X_METER_EVENT_TYPE, ts: iso(knownAtTs), sourceEventId: xMeterIdentity({ provider, period, deliveredPostReads, monthPeriod, monthDeliveredPostReads, knownAtTs }), provider, period, deliveredPostReads, monthPeriod, monthDeliveredPostReads, unitPriceUsd, estimatedUsd, serverUsage, knownAtTs };
+}
+const okServerUsage = (u) => {
+  if (u === null) return true;
+  if (u === undefined || typeof u !== 'object' || Array.isArray(u)) return false;
+  const k = exactKeys(u, ['projectUsage', 'projectCap', 'capResetDay', 'dailyProjectUsage', 'observedTs']); if (k) return false;
+  for (const f of ['projectUsage', 'projectCap']) if (!Number.isSafeInteger(u[f]) || u[f] < 0) return false;
+  if (u.capResetDay !== null && (!Number.isSafeInteger(u.capResetDay) || u.capResetDay < 1 || u.capResetDay > 31)) return false;
+  if (u.dailyProjectUsage !== null && (!Number.isSafeInteger(u.dailyProjectUsage) || u.dailyProjectUsage < 0)) return false;
+  return isTs(u.observedTs);
+};
+export function validateXMeterEvent(ev) {
+  if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'x meter: not an object';
+  const k = exactKeys(ev, X_METER_EVENT_KEYS); if (k) return `x meter: ${k}`;
+  if (ev.type !== X_METER_EVENT_TYPE) return 'x meter: wrong type';
+  const pe = xProvider(ev); if (pe) return `x meter: ${pe}`;
+  if (!okPeriod(ev.period) || !okMonth(ev.monthPeriod) || !ev.period.startsWith(ev.monthPeriod)) return 'x meter: period invalid';
+  for (const f of ['deliveredPostReads', 'monthDeliveredPostReads']) if (!Number.isSafeInteger(ev[f]) || ev[f] < 0) return `x meter: ${f} invalid`;
+  if (ev.deliveredPostReads > ev.monthDeliveredPostReads) return 'x meter: day exceeds month';
+  if (!Number.isFinite(ev.unitPriceUsd) || ev.unitPriceUsd < 0) return 'x meter: unitPriceUsd invalid';
+  if (ev.estimatedUsd !== Math.round(ev.monthDeliveredPostReads * ev.unitPriceUsd * 1e6) / 1e6) return 'x meter: estimatedUsd is not the re-derived estimate';
+  if (!okServerUsage(ev.serverUsage)) return 'x meter: serverUsage invalid';
+  if (!isTs(ev.knownAtTs) || ev.ts !== iso(ev.knownAtTs)) return 'x meter: clock invalid';
+  if (ev.sourceEventId !== xMeterIdentity(ev)) return 'x meter: sourceEventId is not the derived identity';
+  return null;
+}
+export function xProgressEvent({ provider, ruleSetHash, coverageEpoch, throughKnownAtTs, knownAtTs }) {
+  return { type: X_PROGRESS_EVENT_TYPE, ts: iso(knownAtTs), sourceEventId: xProgressIdentity({ provider, coverageEpoch, throughKnownAtTs }), provider, ruleSetHash, coverageEpoch, throughKnownAtTs, knownAtTs };
+}
+export function validateXProgressEvent(ev) {
+  if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'x progress: not an object';
+  const k = exactKeys(ev, X_PROGRESS_EVENT_KEYS); if (k) return `x progress: ${k}`;
+  if (ev.type !== X_PROGRESS_EVENT_TYPE) return 'x progress: wrong type';
+  const pe = xProvider(ev); if (pe) return `x progress: ${pe}`;
+  if (!okHash(ev.ruleSetHash) || !okEpoch(ev.coverageEpoch)) return 'x progress: ruleSetHash/coverageEpoch invalid';
+  if (!isTs(ev.throughKnownAtTs) || !isTs(ev.knownAtTs) || ev.throughKnownAtTs > ev.knownAtTs) return 'x progress: watermark cannot exceed its own knowledge clock';
+  if (ev.ts !== iso(ev.knownAtTs)) return 'x progress: ts disagrees with knownAtTs';
+  if (ev.sourceEventId !== xProgressIdentity(ev)) return 'x progress: sourceEventId is not the derived identity';
+  return null;
+}
+export function xGapEvent({ provider, ruleSetHash, coverageEpoch, gapStartTs, reason, knownAtTs }) {
+  return { type: X_GAP_EVENT_TYPE, ts: iso(knownAtTs), sourceEventId: xGapIdentity({ provider, coverageEpoch, gapStartTs, reason }), provider, ruleSetHash, coverageEpoch, gapStartTs, reason, knownAtTs };
+}
+export function validateXGapEvent(ev) {
+  if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'x gap: not an object';
+  const k = exactKeys(ev, X_GAP_EVENT_KEYS); if (k) return `x gap: ${k}`;
+  if (ev.type !== X_GAP_EVENT_TYPE) return 'x gap: wrong type';
+  const pe = xProvider(ev); if (pe) return `x gap: ${pe}`;
+  if (!okHash(ev.ruleSetHash) || !okEpoch(ev.coverageEpoch)) return 'x gap: ruleSetHash/coverageEpoch invalid';
+  if (!X_GAP_REASONS.includes(ev.reason)) return 'x gap: unknown reason';
+  if (!isTs(ev.gapStartTs) || !isTs(ev.knownAtTs) || ev.gapStartTs > ev.knownAtTs) return 'x gap: clock invalid';
+  if (ev.ts !== iso(ev.knownAtTs)) return 'x gap: ts disagrees with knownAtTs';
+  if (ev.sourceEventId !== xGapIdentity(ev)) return 'x gap: sourceEventId is not the derived identity';
+  return null;
+}
+export const emptyXState = () => ({ ruleSetHash: null, coverageEpoch: 0, activatedKnownAtTs: null, ruleTags: [], progressThroughTs: null, meter: null, lastGap: null, events: 0 });
+
 // Replay the Social layer of one journal history (§22-§24). SOURCE-ONLY: this
 // pass rebuilds ONLY (a) the durable version index — every settled
 // RUMOR2_SOCIAL_OBSERVED sourceEventId, the authority for keep-first dedupe
@@ -326,6 +450,16 @@ export function replaySocialHistory(events) {
   const cursors = {}; // provider -> durableCursor
   let observed = 0;
   let cursorEvents = 0;
+  const x = emptyXState(); // SOCIAL-2B X operational state (source-only)
+  const xDigests = new Map();
+  const xDup = (e, err) => {
+    if (err) return fail(`SOCIAL_HISTORY_INVALID: ${err}`);
+    const d = contentHash(canonicalJson(e));
+    const prior = xDigests.get(`${e.type}|${e.sourceEventId}`);
+    if (prior !== undefined) return prior === d ? 'dup' : fail('SOCIAL_HISTORY_INVALID: duplicate X event identity with an altered payload — corruption, not replay');
+    xDigests.set(`${e.type}|${e.sourceEventId}`, d);
+    return null;
+  };
   for (const e of events) {
     if (e === null || typeof e !== 'object' || Array.isArray(e) || typeof e.type !== 'string') return fail('SOCIAL_HISTORY_INVALID: malformed event record');
     if (e.type === SOCIAL_EVENT_TYPE) {
@@ -351,7 +485,36 @@ export function replaySocialHistory(events) {
       cursorEvents += 1;
       continue;
     }
+    if (e.type === X_RULESET_EVENT_TYPE) {
+      const r = xDup(e, validateXRuleSetEvent(e)); if (r === 'dup') continue; if (r) return r;
+      if (e.coverageEpoch < x.coverageEpoch) return fail(`SOCIAL_HISTORY_INVALID: X coverage epoch regression (${x.coverageEpoch} -> ${e.coverageEpoch})`);
+      x.ruleSetHash = e.ruleSetHash; x.coverageEpoch = e.coverageEpoch; x.activatedKnownAtTs = e.activatedKnownAtTs; x.ruleTags = e.ruleTags; x.progressThroughTs = null; x.events += 1;
+      continue;
+    }
+    if (e.type === X_METER_EVENT_TYPE) {
+      const r = xDup(e, validateXMeterEvent(e)); if (r === 'dup') continue; if (r) return r;
+      const m = x.meter;
+      if (m && e.period === m.period && e.deliveredPostReads < m.deliveredPostReads) return fail('SOCIAL_HISTORY_INVALID: X meter regression within a period');
+      if (m && e.monthPeriod === m.monthPeriod && e.monthDeliveredPostReads < m.monthDeliveredPostReads) return fail('SOCIAL_HISTORY_INVALID: X monthly meter regression');
+      if (m && e.period < m.period) return fail('SOCIAL_HISTORY_INVALID: X meter period regression');
+      x.meter = { period: e.period, deliveredPostReads: e.deliveredPostReads, monthPeriod: e.monthPeriod, monthDeliveredPostReads: e.monthDeliveredPostReads, unitPriceUsd: e.unitPriceUsd, estimatedUsd: e.estimatedUsd, serverUsage: e.serverUsage, knownAtTs: e.knownAtTs };
+      x.events += 1;
+      continue;
+    }
+    if (e.type === X_PROGRESS_EVENT_TYPE) {
+      const r = xDup(e, validateXProgressEvent(e)); if (r === 'dup') continue; if (r) return r;
+      if (e.coverageEpoch !== x.coverageEpoch || e.ruleSetHash !== x.ruleSetHash) return fail('SOCIAL_HISTORY_INVALID: X progress outside the active coverage epoch');
+      if (x.progressThroughTs !== null && e.throughKnownAtTs < x.progressThroughTs) return fail(`SOCIAL_HISTORY_INVALID: X progress regression (${x.progressThroughTs} -> ${e.throughKnownAtTs})`);
+      x.progressThroughTs = e.throughKnownAtTs; x.events += 1;
+      continue;
+    }
+    if (e.type === X_GAP_EVENT_TYPE) {
+      const r = xDup(e, validateXGapEvent(e)); if (r === 'dup') continue; if (r) return r;
+      if (e.coverageEpoch !== x.coverageEpoch) return fail('SOCIAL_HISTORY_INVALID: X gap outside the active coverage epoch');
+      x.lastGap = { gapStartTs: e.gapStartTs, reason: e.reason, knownAtTs: e.knownAtTs, coverageEpoch: e.coverageEpoch }; x.events += 1;
+      continue;
+    }
     // any other type belongs to the frozen core's own replay/validator
   }
-  return { ok: true, durableIds, cursors, observed, cursorEvents };
+  return { ok: true, durableIds, cursors, observed, cursorEvents, x };
 }

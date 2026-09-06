@@ -54,7 +54,7 @@ test('SOC-ID-2. username rename keeps a stable author identity; identity ignores
 
 test('SOC-ID-3. altered content changes the content/version identity, not the diagnostic hash (§26)', () => {
   const one = normalizeSocialObservation(post({ text: 'original text' }), { nowMs: Date.parse('2026-09-05T12:00:05Z') });
-  const two = normalizeSocialObservation(post({ text: 'ALTERED text' }), { nowMs: Date.parse('2026-09-05T12:00:06Z') });
+  const two = normalizeSocialObservation(post({ text: 'ALTERED text' }), { nowMs: Date.parse('2026-09-05T12:00:05Z') }); // same acquisition clock (first-known clocks are diagnostic-bound)
   assert.equal(one.observation.socialSourceId, two.observation.socialSourceId, 'identity is native-id only');
   assert.notEqual(one.observation.textHash, two.observation.textHash, 'altered content is visible in the textHash');
   // content lives in the CONTENT/VERSION identity now, not the diagnostic hash:
