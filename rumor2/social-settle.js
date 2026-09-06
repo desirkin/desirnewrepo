@@ -28,12 +28,15 @@ import { socialProviderById } from './social-registry.js';
 
 export const SOCIAL_EVENT_TYPE = 'RUMOR2_SOCIAL_OBSERVED';
 
-// the CLOSED durable schema — no undeclared field ever enters the journal
+// the CLOSED durable schema — no undeclared field ever enters the journal.
+// handle + authorMeta + engagement are Serpent's FIRST-KNOWN mutable DIAGNOSTIC
+// snapshot (bound by metaHash, §5/§18/§26); every other field is immutable
+// content/provenance (bound by sourceEventId, §4/§26).
 export const SOCIAL_EVENT_KEYS = Object.freeze([
   'type', 'ts', 'sourceEventId', 'provider', 'providerKind',
   'socialSourceId', 'nativePostId', 'nativeAuthorId', 'socialAuthorId',
   'lifecycle', 'relation', 'parentNativePostId', 'threadId', 'nativeVersionId', 'handle',
-  'text', 'textHash', 'metaHash', 'engagement',
+  'text', 'textHash', 'metaHash', 'engagement', 'authorMeta',
   'sourceCreatedTs', 'retrievedTs', 'knownAtTs',
 ]);
 
@@ -69,6 +72,11 @@ export function socialObservationToEvent(observation) {
     // separate concern (a future versioned SOCIAL_METRICS event), never a
     // mutation of this immutable observation.
     engagement: observation.engagement ?? null,
+    // §16-§21: FIRST-KNOWN closed author metadata — information-only research
+    // context (new-account/follower/coordination analysis), never identity,
+    // never claim/trade authority. Retained through the journal + witness so
+    // SOCIAL-5/6 need not reconstruct facts SOCIAL-1 already knew.
+    authorMeta: observation.authorMeta ?? null,
     sourceCreatedTs: observation.sourceCreatedTs,
     retrievedTs: observation.retrievedTs,
     knownAtTs: observation.knownAtTs,
@@ -88,6 +96,24 @@ const okEngagement = (e) => {
   for (const [k, v] of Object.entries(e)) {
     if (!['likes', 'reposts', 'replies', 'quotes', 'views', 'upvotes'].includes(k)) return false;
     if (v !== null && (!Number.isSafeInteger(v) || v < 0)) return false;
+  }
+  return true;
+};
+
+// CLOSED author-metadata shape (§16): null, or an object whose keys are a subset
+// of the five bounded diagnostic fields, each null or the right bounded type. No
+// unbounded provider blob, no fake zero/false. accountCreatedTs (when known)
+// cannot postdate retrieval. The stored snapshot's integrity is additionally
+// bound by metaHash, so a silent post-storage rewrite is rejected (§18/§25).
+const okAuthorMeta = (m, retrievedTs) => {
+  if (m === null) return true;
+  if (typeof m !== 'object' || Array.isArray(m)) return false;
+  for (const [k, v] of Object.entries(m)) {
+    if (!['accountCreatedTs', 'followerCount', 'followingCount', 'verified', 'powerBadge'].includes(k)) return false;
+    if (v === null) continue;
+    if (k === 'verified' || k === 'powerBadge') { if (typeof v !== 'boolean') return false; continue; }
+    if (!Number.isSafeInteger(v) || v < 0) return false;
+    if (k === 'accountCreatedTs' && v > retrievedTs) return false;
   }
   return true;
 };
@@ -135,25 +161,37 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
   }
   if (event.threadId !== null && !isStr(event.threadId, MAX_NATIVE_ID_CHARS)) return 'social event: threadId invalid';
   if (event.handle !== null && !isStr(event.handle, MAX_SOCIAL_HANDLE_CHARS)) return 'social event: handle invalid';
-  if (!isTs(event.sourceCreatedTs) || !isTs(event.retrievedTs) || !isTs(event.knownAtTs)) return 'social event: clock invalid';
-  if (event.sourceCreatedTs > event.retrievedTs) return 'social event: created after retrieved';
+  // point-in-time (§8/§10): sourceCreatedTs is EITHER a safe-integer ms OR null
+  // (UNKNOWN — a provider that supplied no source-created time, never fabricated
+  // from local wall clock). retrieved/known are always present. When source time
+  // is known enforce created <= retrieved <= known; when unknown enforce only
+  // retrieved <= known.
+  if (!isTs(event.retrievedTs) || !isTs(event.knownAtTs)) return 'social event: clock invalid';
+  if (event.sourceCreatedTs !== null && !isTs(event.sourceCreatedTs)) return 'social event: sourceCreatedTs invalid';
+  if (event.sourceCreatedTs !== null && event.sourceCreatedTs > event.retrievedTs) return 'social event: created after retrieved';
   if (event.retrievedTs > event.knownAtTs) return 'social event: retrieved after known';
   if (event.ts !== iso(event.knownAtTs)) return 'social event: ts disagrees with knownAtTs';
   if (!okEngagement(event.engagement)) return 'social event: engagement invalid';
+  if (!okAuthorMeta(event.authorMeta, event.retrievedTs)) return 'social event: authorMeta invalid';
   if (!/^[0-9a-f]{40}$/.test(event.metaHash)) return 'social event: metaHash malformed';
-  // BIND every immutable durable fact: metaHash and sourceEventId are BOTH
-  // re-derived from the ONE canonical fact set (§4/§5/§6). relation, parent,
-  // thread, handle, source time, native version, text, lifecycle, and the
-  // first-known engagement snapshot cannot change without either producing a
-  // legitimately re-derived NEW version identity or being rejected here.
+  // TWO hashes, re-derived from the ONE canonical fact set (§4/§5/§6/§26):
+  //   sourceEventId  = CONTENT/VERSION identity — immutable content/provenance
+  //     facts ONLY (relation, parent, thread, native version, text, lifecycle,
+  //     source time). A change there produces a legitimately re-derived NEW
+  //     version id or is rejected here.
+  //   metaHash       = DIAGNOSTIC/META hash — the first-known mutable snapshot
+  //     (handle, authorMeta, engagement). A silent post-storage rewrite of any
+  //     stored diagnostic is rejected here, but a later live redelivery with
+  //     changed diagnostics is neither a new version nor corruption.
   const facts = {
     provider: event.provider, providerKind: event.providerKind, nativePostId: event.nativePostId,
     nativeAuthorId: event.nativeAuthorId, lifecycle: event.lifecycle, relation: event.relation,
     parentNativePostId: event.parentNativePostId, threadId: event.threadId, nativeVersionId: event.nativeVersionId,
-    handle: event.handle, textHash: event.textHash, sourceCreatedTs: event.sourceCreatedTs,
-    engagement: event.engagement, socialSourceId: event.socialSourceId,
+    textHash: event.textHash, sourceCreatedTs: event.sourceCreatedTs,
+    handle: event.handle, authorMeta: event.authorMeta, engagement: event.engagement,
+    socialSourceId: event.socialSourceId,
   };
-  if (event.metaHash !== socialMetaHash(facts)) return 'social event: metaHash is not the re-derived canonical hash';
+  if (event.metaHash !== socialMetaHash(facts)) return 'social event: metaHash is not the re-derived diagnostic hash';
   if (!R2SV_RE.test(event.sourceEventId) || event.sourceEventId !== socialVersionIdentity(facts))
     return 'social event: sourceEventId is not the derived version identity';
   return null;
@@ -182,5 +220,8 @@ export function reconstructSocialWitness(event) {
     retrievedTs: event.retrievedTs,
     knownAtTs: event.knownAtTs,
     engagement: event.engagement,
+    // first-known author metadata survives the journal exactly (§20/§21) —
+    // information-only research context, never identity or trade authority
+    authorMeta: event.authorMeta ?? null,
   };
 }

@@ -52,12 +52,17 @@ test('SOC-ID-2. username rename keeps a stable author identity; identity ignores
   assert.notEqual(before.observation.socialSourceId, after.observation.socialSourceId, 'different posts are different sources');
 });
 
-test('SOC-ID-3. same native id + altered payload yields the SAME sourceEventId (journal will catch corruption)', () => {
+test('SOC-ID-3. altered content changes the content/version identity, not the diagnostic hash (§26)', () => {
   const one = normalizeSocialObservation(post({ text: 'original text' }), { nowMs: Date.parse('2026-09-05T12:00:05Z') });
   const two = normalizeSocialObservation(post({ text: 'ALTERED text' }), { nowMs: Date.parse('2026-09-05T12:00:06Z') });
   assert.equal(one.observation.socialSourceId, two.observation.socialSourceId, 'identity is native-id only');
   assert.notEqual(one.observation.textHash, two.observation.textHash, 'altered content is visible in the textHash');
-  assert.notEqual(one.observation.metaHash, two.observation.metaHash, 'altered content changes the metaHash — a corruption signal');
+  // content lives in the CONTENT/VERSION identity now, not the diagnostic hash:
+  // altered text is a new content version (and, at a KEPT native version id, a
+  // corruption signal the journal catches); the diagnostic hash — handle +
+  // authorMeta + engagement, all unchanged here — is unaffected (§4/§26).
+  assert.notEqual(one.observation.socialVersionId, two.observation.socialVersionId, 'altered content is a new content/version identity');
+  assert.equal(one.observation.metaHash, two.observation.metaHash, 'the diagnostic hash is unaffected by a content-only change');
 });
 
 test('SOC-ID-4. two independent authors posting identical text are distinct sources', () => {

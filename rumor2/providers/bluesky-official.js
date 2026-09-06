@@ -45,13 +45,11 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
   const operation = payload.operation ?? payload.commit?.operation;
   const record = payload.record ?? payload.commit?.record ?? null;
   const cid = payload.cid ?? payload.commit?.cid ?? null; // content id = the immutable record VERSION (changes on edit)
-  const eventTime = payload.time ?? null; // ISO string of the commit event
   if (!isStr(did) || !isStr(collection) || !isStr(rkey) || !isStr(operation)) return { skip: true, reason: 'incomplete commit' };
   if (collection !== BLUESKY_OFFICIAL.postCollection && collection !== BLUESKY_OFFICIAL.repostCollection) return { skip: true, reason: `collection ${collection} not wanted` };
 
   const nativePostId = atUri(did, collection, rkey);
   const nativeAuthorId = did;
-  const eventMs = eventTime ? Date.parse(eventTime) : NaN;
 
   // DELETE / tombstone — no record, no content. Preserve as a deletion
   // observation; original knowledge is never rewritten (§17).
@@ -61,13 +59,17 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
     // relation is UNKNOWN and parent is null, never a REPOST with a null
     // parent (which the CREATE invariant would reject, dropping the tombstone).
     // The stable socialSourceId ties this DELETE back to the earlier CREATE.
+    // sourceCreatedTs is null: the commit time is when the DELETE was emitted,
+    // NOT when the original post was created — Serpent never fabricates the
+    // original creation clock from a lifecycle event (§9). retrieved/known
+    // still record when Serpent learned the deletion.
     return {
       raw: {
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
         text: '', relation: 'UNKNOWN',
         parentNativePostId: null, editState: 'TOMBSTONED',
         canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null,
-        sourceCreatedTs: Number.isFinite(eventMs) ? eventMs : Date.now(),
+        sourceCreatedTs: null,
         engagement: null, authorMeta: null,
       },
     };
@@ -79,14 +81,17 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
   if (collection === BLUESKY_OFFICIAL.repostCollection) {
     const subjUri = record.subject?.uri;
     if (!isStr(subjUri)) return { skip: true, reason: 'repost without a subject uri' };
-    const created = isStr(record.createdAt) ? Date.parse(record.createdAt) : eventMs;
+    // the repost's own createdAt is its source-created clock, from the immutable
+    // record (deterministic across replay). Absent => null/UNKNOWN, never the
+    // firehose delivery time and never Date.now() (§8/§11).
+    const created = isStr(record.createdAt) ? Date.parse(record.createdAt) : NaN;
     return {
       raw: {
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
         text: '', relation: 'REPOST', parentNativePostId: subjUri,
         editState: operation === 'update' ? 'EDITED' : 'ORIGINAL',
         canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null,
-        sourceCreatedTs: Number.isFinite(created) ? created : Date.now(),
+        sourceCreatedTs: Number.isFinite(created) ? created : null,
         engagement: null, authorMeta: null,
       },
     };
@@ -95,7 +100,10 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
   // POST (create or update). record fields: text, createdAt, reply(root/parent
   // StrongRef), embed (quote = app.bsky.embed.record[WithMedia]).
   const text = typeof record.text === 'string' ? record.text : '';
-  const created = isStr(record.createdAt) ? Date.parse(record.createdAt) : eventMs;
+  // record.createdAt is the post's immutable source-created clock (deterministic
+  // across replay). Absent => null/UNKNOWN, never the firehose delivery time and
+  // never Date.now() (§8/§11).
+  const created = isStr(record.createdAt) ? Date.parse(record.createdAt) : NaN;
   const replyParent = record.reply?.parent?.uri ?? null;
   const replyRoot = record.reply?.root?.uri ?? null;
   const embedType = record.embed?.$type ?? '';
@@ -113,7 +121,7 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
       threadId: isStr(replyRoot) ? replyRoot : nativePostId,
       nativeVersionId: isStr(cid) ? cid : null, // the record CID = this post's immutable version
       handle: null, // Jetstream commits carry the DID, not the handle; resolved elsewhere if needed
-      sourceCreatedTs: Number.isFinite(created) ? created : Date.now(),
+      sourceCreatedTs: Number.isFinite(created) ? created : null,
       engagement: null, // Jetstream post commits carry no engagement counts
       authorMeta: null,
     },

@@ -121,16 +121,18 @@ export const R2SA_RE = /^r2sa-[0-9a-f]{40}$/;
 export const SOCIAL_LIFECYCLE_STATES = Object.freeze(['CREATE', 'EDIT', 'DELETE', 'TOMBSTONE']);
 const LIFECYCLE_BY_EDIT = Object.freeze({ ORIGINAL: 'CREATE', EDITED: 'EDIT', DELETED: 'DELETE', TOMBSTONED: 'TOMBSTONE' });
 export const lifecycleForEditState = (e) => LIFECYCLE_BY_EDIT[e] ?? 'CREATE';
-// The ONE canonical set of IMMUTABLE durable social provenance facts (§4).
-// Every field here is historical truth for a version and is bound into both the
-// version identity and the metaHash — the single source of truth, so no
-// duplicate hash recipe drifts across mapper/settle/validator. Engagement and
-// the retrieved/known clocks are DELIBERATELY excluded from the version facts:
-// engagement is a mutable provider counter (bound separately via metaHash so a
-// stored snapshot can't be altered, but not part of the version id so a
-// legitimate metrics re-delivery dedupes rather than forking a new version —
-// §8); retrieved/known are Serpent's acquisition clocks, validated by the
-// point-in-time law, never part of immutable post truth.
+// CONTENT / VERSION FACTS (§4/§26). The ONE canonical set of IMMUTABLE provider
+// content/provenance/lifecycle facts. These — and ONLY these — bind the content
+// version identity (via socialVersionHash -> socialVersionIdentity -> the
+// durable sourceEventId). MUTABLE first-known diagnostics (handle, authorMeta,
+// engagement) are DELIBERATELY excluded: a handle rename, a follower-count
+// change, or engagement growth on an unchanged provider-native post must NOT
+// manufacture a new content version (§3/§17/§22/§23/§24). sourceCreatedTs is a
+// provider-supplied source clock OR null/UNKNOWN — never Serpent's processing
+// time (§8) — canonicalized to a stable null so an unknown source time stays
+// deterministic across redelivery/replay (§11). retrieved/known are Serpent's
+// acquisition clocks, validated by the point-in-time law, never part of
+// immutable post truth.
 export function socialProvenanceFacts(f) {
   return {
     provider: f.provider, providerKind: f.providerKind,
@@ -139,30 +141,64 @@ export function socialProvenanceFacts(f) {
     parentNativePostId: f.parentNativePostId ?? null,
     threadId: f.threadId ?? null,
     nativeVersionId: f.nativeVersionId ?? null,
-    handle: f.handle ?? null,
     textHash: f.textHash,
-    sourceCreatedTs: f.sourceCreatedTs,
+    sourceCreatedTs: f.sourceCreatedTs ?? null,
   };
 }
 // canonical bounded engagement snapshot (first-known) — a stable 6-key shape so
-// metaHash re-derivation is order/shape independent
+// the diagnostic metaHash re-derivation is order/shape independent
 export function canonicalEngagement(e) {
   if (e === null || e === undefined) return null;
   return { likes: e.likes ?? null, reposts: e.reposts ?? null, replies: e.replies ?? null, quotes: e.quotes ?? null, views: e.views ?? null, upvotes: e.upvotes ?? null };
 }
+// canonical bounded first-known author metadata — a stable CLOSED 5-key shape
+// (§16) so the diagnostic metaHash re-derivation is order/shape independent.
+// Unavailable fields are null/UNKNOWN, never fabricated. authorMeta is NEVER
+// author identity (§17) and never content-version identity — it is a first-known
+// diagnostic snapshot, bound by the diagnostic hash so it cannot be silently
+// rewritten once stored (§18), yet free to differ on a later live redelivery
+// without forking a version (§6).
+export function canonicalAuthorMeta(m) {
+  if (m === null || m === undefined) return null;
+  return {
+    accountCreatedTs: m.accountCreatedTs ?? null,
+    followerCount: m.followerCount ?? null,
+    followingCount: m.followingCount ?? null,
+    verified: m.verified ?? null,
+    powerBadge: m.powerBadge ?? null,
+  };
+}
+// DIAGNOSTIC / META FACTS (§5/§26). Serpent's FIRST-KNOWN mutable diagnostic
+// snapshot for a historical event: handle, author metadata, and the first-known
+// engagement snapshot. These do NOT define the content version, but once stored
+// they are bound by the diagnostic hash and re-verified in validation, so no
+// stored diagnostic can be silently altered later (§18/§25).
+export function socialDiagnosticFacts(f) {
+  return {
+    handle: f.handle ?? null,
+    authorMeta: canonicalAuthorMeta(f.authorMeta),
+    engagement: canonicalEngagement(f.engagement),
+  };
+}
+// CONTENT / VERSION HASH — binds the immutable content/provenance facts only.
 export const socialVersionHash = (f) => contentHash(canonicalJson(socialProvenanceFacts(f)));
-// metaHash binds ALL immutable durable facts INCLUDING the first-known
-// engagement snapshot — re-derived and verified in validation so no stored
-// provenance/diagnostic fact can be silently altered later (§5).
-export const socialMetaHash = (f) => contentHash(canonicalJson({ ...socialProvenanceFacts(f), engagement: canonicalEngagement(f.engagement) }));
+// DIAGNOSTIC / META HASH — binds the first-known mutable diagnostic snapshot
+// (handle + authorMeta + engagement). Re-derived and verified in validation so a
+// stored diagnostic cannot be silently altered; NOT part of content identity, so
+// a legitimate later redelivery with changed diagnostics is neither a new
+// version nor corruption (§5/§6/§26).
+export const socialMetaHash = (f) => contentHash(canonicalJson(socialDiagnosticFacts(f)));
 
 // Version/lifecycle identity. It BINDS the stable post identity plus EVERY
-// immutable provenance fact (via socialVersionHash): a change to lifecycle,
-// relation, parent, thread, native version id, handle, text, or source time
-// yields a DIFFERENT version — so "same sourceEventId + changed immutable
-// provenance fact" is impossible; keeping the old id makes validation reject
-// (§6). Deterministic and replay-stable — never wall-clock. A legitimate edit
-// (new content/CID) is a new version; a delete is a new lifecycle version.
+// immutable CONTENT/provenance fact (via socialVersionHash): a change to
+// lifecycle, relation, parent, thread, native version id, text, or a KNOWN
+// source time yields a DIFFERENT version. MUTABLE diagnostics (handle,
+// authorMeta, engagement) are NOT bound here, so they can never manufacture a
+// fake version (§4/§17). "same sourceEventId + changed immutable content fact"
+// is impossible; keeping the old id makes validation reject (§6). Deterministic
+// and replay-stable — never wall-clock, and stable when the source time is
+// UNKNOWN (§11). A legitimate edit (new content/CID) is a new version; a delete
+// is a new lifecycle version.
 export function socialVersionIdentity(f) {
   return `r2sv-${contentHash(canonicalJson({ socialSourceId: f.socialSourceId, versionHash: socialVersionHash(f) }))}`;
 }
@@ -238,7 +274,7 @@ export function nearDuplicate(textA, textB, threshold = NEAR_DUP_THRESHOLD) {
 // APIs; their normalized result is this. Bounded, closed, no raw API blob.
 // Returns { ok, observation } or { reject, reason }. Callers still gate on the
 // frozen event-root validator before anything becomes durable truth.
-const REQUIRED_RAW = ['provider', 'providerKind', 'nativePostId', 'nativeAuthorId', 'text', 'sourceCreatedTs'];
+const REQUIRED_RAW = ['provider', 'providerKind', 'nativePostId', 'nativeAuthorId', 'text'];
 export function normalizeSocialObservation(raw, { nowMs } = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return { reject: true, reason: 'observation not an object' };
   for (const k of REQUIRED_RAW) if (!(k in raw)) return { reject: true, reason: `missing field ${k}` };
@@ -282,17 +318,28 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   // null when the provider has no version concept (e.g. Farcaster casts).
   const nativeVersionId = raw.nativeVersionId ?? null;
   if (nativeVersionId !== null && !isNonEmptyStr(nativeVersionId, MAX_NATIVE_ID_CHARS)) return { reject: true, reason: 'nativeVersionId invalid' };
-  // point-in-time: creation must be a finite ms; future creation (beyond now)
-  // fails closed — a source clock cannot postdate our retrieval. (§7/§42)
-  const created = raw.sourceCreatedTs;
-  if (!Number.isFinite(created)) return { reject: true, reason: 'sourceCreatedTs not finite' };
-  const clocks = socialClocks({ sourceCreatedTs: created, nowMs });
-  if (clocks.sourceCreatedTs > clocks.retrievedTs) return { reject: true, reason: 'sourceCreatedTs after retrieval — future clock' };
+  // point-in-time (§8/§10/§11): sourceCreatedTs is EITHER a provider-supplied
+  // finite ms OR UNKNOWN (null). Serpent NEVER fabricates a source-created clock
+  // from its own processing time — a missing/absent value is null, never
+  // Date.now()/retrieved/known. retrievedTs/knownAtTs are Serpent's acquisition
+  // clocks (nowMs); knownAt is never backdated to creation.
+  const rawCreated = raw.sourceCreatedTs;
+  let sourceCreatedTs;
+  if (rawCreated === null || rawCreated === undefined) sourceCreatedTs = null;
+  else if (Number.isFinite(rawCreated)) sourceCreatedTs = Math.floor(rawCreated);
+  else return { reject: true, reason: 'sourceCreatedTs must be a finite ms or null (UNKNOWN)' };
+  const retrievedTs = Number.isFinite(nowMs) ? Math.floor(nowMs) : Date.now();
+  const knownAtTs = retrievedTs;
+  // If the source time is KNOWN, enforce the full ordering (a future source clock
+  // fails closed — it cannot postdate retrieval, §42). If UNKNOWN, enforce only
+  // the acquisition ordering; sourceCreatedTs stays null (§10).
+  if (sourceCreatedTs !== null && sourceCreatedTs > retrievedTs) return { reject: true, reason: 'sourceCreatedTs after retrieval — future clock' };
+  if (retrievedTs > knownAtTs) return { reject: true, reason: 'retrieved after known' };
   // engagement is PROPAGATION metadata only (never confirmation) — bounded ints or null
   const engagement = normalizeEngagement(raw.engagement);
   if (engagement === undefined) return { reject: true, reason: 'engagement invalid' };
   // author metadata where legitimately available — else null; never fabricated
-  const authorMeta = normalizeAuthorMeta(raw.authorMeta, clocks.retrievedTs);
+  const authorMeta = normalizeAuthorMeta(raw.authorMeta, retrievedTs);
   if (authorMeta === undefined) return { reject: true, reason: 'authorMeta invalid' };
   const { normalized, hash } = textFingerprint(raw.text);
   const socialSourceId = socialSourceIdentity({ provider, nativePostId });
@@ -301,12 +348,15 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   // a bounded deterministic hash of the immutable native metadata — lets a
   // re-delivery with altered facts be detected as corruption downstream
   const lifecycle = lifecycleForEditState(editState);
-  // ONE canonical fact set feeds BOTH the metaHash and the version identity —
-  // no duplicate hash recipe (§4). Every immutable durable fact is bound.
+  // ONE canonical fact set feeds BOTH hashes (§4/§26): socialVersionHash reads
+  // only the immutable CONTENT facts (no handle/authorMeta/engagement), while
+  // socialMetaHash reads only the first-known DIAGNOSTIC snapshot (handle +
+  // authorMeta + engagement). Neither recipe is duplicated across
+  // mapper/settle/validator.
   const facts = {
     provider, providerKind, nativePostId, nativeAuthorId, lifecycle, relation, parentNativePostId,
-    threadId, nativeVersionId, handle, textHash: hash, sourceCreatedTs: clocks.sourceCreatedTs,
-    engagement, socialSourceId,
+    threadId, nativeVersionId, textHash: hash, sourceCreatedTs,
+    handle, authorMeta, engagement, socialSourceId,
   };
   const metaHash = socialMetaHash(facts);
   const socialVersionId = socialVersionIdentity(facts);
@@ -318,7 +368,7 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
       text: raw.text, normalizedText: normalized, textHash: hash,
       canonicalUrl, threadId, parentNativePostId, relation, editState, lifecycle,
       nativeVersionId, socialVersionId,
-      sourceCreatedTs: clocks.sourceCreatedTs, retrievedTs: clocks.retrievedTs, knownAtTs: clocks.knownAtTs,
+      sourceCreatedTs, retrievedTs, knownAtTs,
       engagement, authorMeta, metaHash,
     }),
   };
@@ -337,16 +387,29 @@ function normalizeEngagement(e) {
   return Object.freeze(out);
 }
 
+// CLOSED bounded first-known author metadata (§16). Only provider-normalizable,
+// safely bounded facts; unavailable fields are null/UNKNOWN, NEVER a fake zero
+// or a default false. No provider-specific unbounded blob ever enters here.
+// This is INFORMATION ONLY — it is not author identity (§17) and carries no
+// claim/trade authority (§30). Returns null (no metadata), a frozen 5-key shape,
+// or undefined (invalid → the caller rejects the observation).
 function normalizeAuthorMeta(m, retrievedTs) {
   if (m === null || m === undefined) return null;
   if (typeof m !== 'object' || Array.isArray(m)) return undefined;
   const followerCount = m.followerCount ?? null;
   if (followerCount !== null && (!Number.isSafeInteger(followerCount) || followerCount < 0)) return undefined;
+  const followingCount = m.followingCount ?? null;
+  if (followingCount !== null && (!Number.isSafeInteger(followingCount) || followingCount < 0)) return undefined;
   const accountCreatedTs = m.accountCreatedTs ?? null;
   if (accountCreatedTs !== null && (!Number.isFinite(accountCreatedTs) || accountCreatedTs > retrievedTs)) return undefined;
   const verified = m.verified ?? null;
   if (verified !== null && typeof verified !== 'boolean') return undefined;
-  return Object.freeze({ followerCount, accountCreatedTs, verified });
+  const powerBadge = m.powerBadge ?? null;
+  if (powerBadge !== null && typeof powerBadge !== 'boolean') return undefined;
+  return Object.freeze({
+    accountCreatedTs: accountCreatedTs === null ? null : Math.floor(accountCreatedTs),
+    followerCount, followingCount, verified, powerBadge,
+  });
 }
 
 // account age in ms at retrieval, or null when creation is unknown (UNKNOWN,

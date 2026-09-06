@@ -82,8 +82,10 @@ API blobs, no unbounded fields. Key pieces:
   `socialAuthorIdentity({provider,nativeAuthorId})` (`r2sa-…`). Content is **not**
   part of post identity, so an altered re-delivery of the same native id is caught
   as corruption at the ear, never accepted as a new post.
-- **Point-in-time** — `socialClocks` / normalization enforce created ≤ retrieved =
-  knownAt and reject future source clocks.
+- **Point-in-time** — normalization enforces `sourceCreatedTs ≤ retrieved = knownAt`
+  when the source clock is **known**, or only `retrieved = knownAt` when it is
+  UNKNOWN (`null`); a known future source clock is rejected. `sourceCreatedTs` is
+  provider-supplied or `null`/UNKNOWN — never fabricated from the local wall clock.
 - **Relationships** — `SOCIAL_RELATION_KINDS` (ORIGINAL/REPLY/REPOST/QUOTE/
   CROSSPOST/POSSIBLE_COPY/UNKNOWN); `ECHO_RELATIONS` (REPOST/QUOTE/CROSSPOST) can
   never be independent provenance.
@@ -144,29 +146,65 @@ so all frozen non-social semantics and tests are unchanged.
 Durable facts preserved: `socialSourceId` (stable post identity), `provider`,
 `providerKind`, `nativePostId`, `nativeAuthorId`, `socialAuthorId`, `lifecycle`
 (CREATE/EDIT/DELETE/TOMBSTONE), `relation`, `parentNativePostId`, `threadId`,
-`nativeVersionId` (CID where the provider supplies one), `handle`, `text`,
-`textHash`, `metaHash`, first-known `engagement`, and the three point-in-time
-clocks. Every identity is **re-derived** on validation — a forged id cannot
-authenticate altered facts.
+`nativeVersionId` (CID where the provider supplies one), `text`, `textHash`,
+`sourceCreatedTs` (or `null`/UNKNOWN), the retrieved/known point-in-time clocks,
+and — as Serpent's **first-known DIAGNOSTIC snapshot** — `handle`, closed
+`authorMeta`, `engagement`, bound by `metaHash`. Every identity is **re-derived**
+on validation — a forged id cannot authenticate altered facts.
 
-**Post identity vs version (§10), and the integrity seal:** `socialSourceId` is
-the stable post identity (`provider`+`nativePostId`); the event's `sourceEventId`
-is a distinct **version identity** that BINDS every immutable provenance fact —
-lifecycle, relation, parent, thread, native version id (CID) where supplied,
-handle, text hash, and source-creation time — via one canonical
-`socialProvenanceFacts` recipe shared by mapper, settle, and validator. `metaHash`
-re-derives that same set plus the first-known engagement snapshot. Validation
-re-derives BOTH, so no stored provenance/diagnostic fact can be altered under the
-same event identity: changing any of them either yields a legitimately re-derived
-new version or is rejected. A legitimate edit (new CID/content) is a new version;
-a delete is a new lifecycle version; original truth is never rewritten. Engagement
-is the **first-known snapshot only** (diagnostic propagation metadata, never
-confirmation, never trade authority; a metrics re-delivery dedupes to the first,
-never forks a version); later mutation is deferred to a future versioned metrics
-event. Trust boundary (§28): Serpent does not retain enough AT-record bytes to
-recompute a Bluesky CID, so the CID is native version *evidence* while Serpent's
-own event identity provides the immutable journal binding — no field is trusted
-merely because a valid CID accompanies it. Deletions never fabricate a missing
+**Content identity vs first-known metadata — two hashes (§26).** The seal draws
+one hard line between what a post *is* and what Serpent *first observed about it*:
+
+- **CONTENT / VERSION HASH.** `socialSourceId` is the stable post identity
+  (`provider`+`nativePostId`); the event's `sourceEventId` is a distinct **version
+  identity** binding ONLY the immutable provider content/provenance/lifecycle
+  facts — lifecycle, relation, parent, thread, native version id (CID) where
+  supplied, `textHash`, and the source-creation time (canonicalized `null` when
+  UNKNOWN) — via one canonical `socialProvenanceFacts` recipe shared by mapper,
+  settle, and validator. It never binds handle, follower count, verification, or
+  engagement, so a handle rename / follower change / engagement growth on an
+  unchanged post can **never** manufacture a fake new content version.
+- **DIAGNOSTIC / META HASH.** `metaHash` binds Serpent's first-known MUTABLE
+  diagnostic snapshot for that historical event: `handle`, `authorMeta`, and the
+  first-known `engagement` (via `socialDiagnosticFacts`). It gives the diagnostics
+  integrity — once stored they cannot be silently rewritten — without making them
+  part of content identity.
+
+Validation re-derives **BOTH**, so no stored fact can be altered under the same
+event identity: a content change yields a legitimately re-derived new version (or,
+at a KEPT native version id, is rejected as corruption); a stored-diagnostic
+rewrite is rejected by `metaHash`. **First-known duplicate law (§6):** a later
+redelivery of the *same* immutable version whose handle / followers / engagement
+have changed is neither a new version nor corruption — the pipeline dedupes it by
+version identity **keep-first** (at the intake ear, exactly as engagement always
+was), so only the FIRST diagnostic snapshot is ever settled; the durable journal
+never receives a conflicting payload under one `sourceEventId`. Future author/
+metric time-series is a SOCIAL-2+ concern (explicitly versioned metric events),
+not built here.
+
+**Author metadata (§14–§21).** `authorMeta` is a CLOSED bounded 5-key shape —
+`accountCreatedTs`, `followerCount`, `followingCount`, `verified`, `powerBadge` —
+with `null`/UNKNOWN wherever a provider does not supply a value (no fake zero, no
+default false, no unbounded blob). It is **information only** (new-account /
+follower-distribution / coordination research for SOCIAL-5/6); it is **never**
+author identity (`socialAuthorId` stays `provider`+`nativeAuthorId`) and carries
+**zero** claim/trade authority. It survives the journal and `reconstructSocialWitness`
+exactly, so later stages need not reconstruct facts SOCIAL-1 already knew.
+
+**Point-in-time clock law (§7–§13).** `sourceCreatedTs` is the provider-supplied
+source-creation time **OR** `null`/UNKNOWN — Serpent **never** fabricates it from
+its own processing clock (`Date.now()`), from `retrievedTs`, or from a lifecycle
+event's commit time. A DELETE/TOMBSTONE's commit time is *not* the original post's
+creation, so a delete carries `sourceCreatedTs = null`. When the source time is
+known, validation enforces `sourceCreatedTs ≤ retrievedTs ≤ knownAtTs` (a future
+source clock fails closed); when unknown, only `retrievedTs ≤ knownAtTs`, with
+`sourceCreatedTs` canonicalized to a stable `null` so the version identity stays
+deterministic across redelivery/replay. `knownAt` is never backdated to creation.
+
+Trust boundary (§28): Serpent does not retain enough AT-record bytes to recompute
+a Bluesky CID, so the CID is native version *evidence* while Serpent's own event
+identity provides the immutable journal binding — no field is trusted merely
+because a valid CID accompanies it. Deletions never fabricate a missing
 parent/target (relation `UNKNOWN`, parent `null`); the stable `socialSourceId`
 ties a DELETE back to its earlier CREATE. `validateSocialEvent` is closed by
 default against the authoritative social registry — an optional caller allowlist

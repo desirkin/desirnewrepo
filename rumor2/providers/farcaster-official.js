@@ -44,6 +44,8 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
     const authorFid = fidStr(d.author?.fid);
     if (!isStr(hash) || !authorFid) return { skip: true, reason: 'cast without hash/fid' };
     const parentHash = isStr(d.parent_hash) ? d.parent_hash : null;
+    // the cast's provider-supplied creation time; absent/invalid => null/UNKNOWN,
+    // never Date.now() (§8/§11)
     const created = isStr(d.timestamp) ? Date.parse(d.timestamp) : NaN;
     const reactions = d.reactions ?? {};
     return {
@@ -55,15 +57,23 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
         threadId: isStr(d.root_parent_url) ? d.root_parent_url : (isStr(d.thread_hash) ? d.thread_hash : hash),
         handle: isStr(d.author?.username) ? d.author.username : null,
         displayName: isStr(d.author?.display_name) ? d.author.display_name : null,
-        sourceCreatedTs: Number.isFinite(created) ? created : Date.now(),
+        sourceCreatedTs: Number.isFinite(created) ? created : null,
         engagement: {
           likes: Number.isSafeInteger(reactions.likes_count) ? reactions.likes_count : null,
           reposts: Number.isSafeInteger(reactions.recasts_count) ? reactions.recasts_count : null,
           replies: Number.isSafeInteger(d.replies?.count) ? d.replies.count : null,
         },
+        // CLOSED first-known author metadata (§16): only provider-normalizable,
+        // bounded facts; unavailable => null/UNKNOWN, never a fake zero/false.
+        // powerBadge is a distinct signal — never conflated with `verified`
+        // (Neynar cast payloads carry no plain verified flag; account creation
+        // time is absent here too, so both are honestly null).
         authorMeta: {
+          accountCreatedTs: null,
           followerCount: Number.isSafeInteger(d.author?.follower_count) ? d.author.follower_count : null,
-          verified: typeof d.author?.power_badge === 'boolean' ? d.author.power_badge : null,
+          followingCount: Number.isSafeInteger(d.author?.following_count) ? d.author.following_count : null,
+          verified: typeof d.author?.verified === 'boolean' ? d.author.verified : null,
+          powerBadge: typeof d.author?.power_badge === 'boolean' ? d.author.power_badge : null,
         },
       },
     };
@@ -78,7 +88,9 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId: hash, nativeAuthorId: authorFid,
         text: '', relation: 'ORIGINAL', parentNativePostId: null, editState: 'TOMBSTONED',
         canonicalUrl: null, threadId: null, handle: null,
-        sourceCreatedTs: isStr(d.timestamp) ? Date.parse(d.timestamp) : Date.now(),
+        // a delete's timestamp is when the deletion was emitted, NOT the cast's
+        // original creation — never fabricate the original clock from it (§9)
+        sourceCreatedTs: null,
         engagement: null, authorMeta: null,
       },
     };
@@ -90,12 +102,15 @@ export function neynarEventToRaw(event, { provider = 'FARCASTER_OFFICIAL' } = {}
     if (!isStr(targetHash) || !reactorFid) return { skip: true, reason: 'recast without target/reactor' };
     // a recast has no cast hash of its own — derive a deterministic native id
     // for the echo edge (reactor + target), so re-delivery dedupes correctly
+    const recastCreated = isStr(d.timestamp) ? Date.parse(d.timestamp) : NaN;
     return {
       raw: {
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId: `recast:${reactorFid}:${targetHash}`, nativeAuthorId: reactorFid,
         text: '', relation: 'REPOST', parentNativePostId: targetHash, editState: 'ORIGINAL',
         canonicalUrl: null, threadId: null, handle: null,
-        sourceCreatedTs: isStr(d.timestamp) ? Date.parse(d.timestamp) : Date.now(),
+        // the recast's own creation time; absent/invalid => null/UNKNOWN, never
+        // Date.now() (§8/§11)
+        sourceCreatedTs: Number.isFinite(recastCreated) ? recastCreated : null,
         engagement: null, authorMeta: null,
       },
     };

@@ -30,7 +30,11 @@ test('FC-MAP-1. a cast maps to an ORIGINAL observation keyed on cast hash + FID 
   assert.equal(r.raw.nativeAuthorId, 'fid:42');
   assert.equal(r.raw.handle, 'alice');
   assert.equal(r.raw.engagement.likes, 5);
-  assert.equal(r.raw.authorMeta.verified, true);
+  // power_badge maps to powerBadge (a distinct signal), NOT verified; the Neynar
+  // cast payload carries no plain verified flag, so verified is honestly null
+  assert.equal(r.raw.authorMeta.powerBadge, true);
+  assert.equal(r.raw.authorMeta.verified, null);
+  assert.equal(r.raw.authorMeta.followerCount, 1200);
 });
 
 test('FC-MAP-2 (§9). a username (fname) rename does not change the author identity; the FID does', () => {
