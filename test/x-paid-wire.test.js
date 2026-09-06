@@ -23,7 +23,10 @@ const T = Date.parse('2026-09-06T12:00:00Z');
 const iso = (m) => new Date(m).toISOString();
 const BEARER = 'test-bearer-value-never-logged';
 const HEADROOM = X_IN_FLIGHT_POST_HEADROOM;
-const CFG = (over = {}) => ({ enabled: true, bearer: BEARER, maxDailyPostReads: 1000, maxMonthlyPostReads: 20000, maxEstimatedDailyUsd: 5, maxSessionPostReads: null, liveSmokeTargetPostReads: null, liveSmokeMaxPostReads: null, priorityAccounts: [], propagationFocus: [], ...over });
+const RUN_ID = 'smoke-2026-09-06-001';
+// a smoke TARGET/MAX pair needs an explicit operator run ID (durable seal); tests that pin the
+// TARGET/MAX arithmetic alone get one automatically unless they set liveSmokeRunId themselves
+const CFG = (over = {}) => ({ enabled: true, bearer: BEARER, maxDailyPostReads: 1000, maxMonthlyPostReads: 20000, maxEstimatedDailyUsd: 5, maxSessionPostReads: null, liveSmokeTargetPostReads: null, liveSmokeMaxPostReads: null, liveSmokeRunId: over.liveSmokeTargetPostReads != null && !('liveSmokeRunId' in over) ? RUN_ID : null, priorityAccounts: [], propagationFocus: [], ...over });
 const FILTER = buildSocialFilter({ terms: ['BTC', 'ETH', 'SOL'] });
 const ORIGIN_TAG = xRuleTag('origin', '($BTC OR #BTC OR $ETH OR #ETH OR $SOL OR #SOL) -is:retweet');
 const postLine = (id, text = '$BTC listing') => JSON.stringify({ data: { id: String(id), text, author_id: '42', created_at: iso(T - 5_000), edit_history_tweet_ids: [String(id)], conversation_id: String(id), public_metrics: { like_count: 1 } }, matching_rules: [{ id: 'r1', tag: ORIGIN_TAG }] }) + '\r\n';
@@ -76,13 +79,21 @@ const boot = ({ api, config = CFG(), nowMs = T, over = {} } = {}) => {
   const rt = createXRuntime({ config, filter: FILTER, universe: ['BTC', 'ETH', 'SOL'], aliases: ['bitcoin'], now: () => (clock.ms += 1), fetchImpl: api.fetchImpl, log: () => {}, streamOptions: { setTimeoutImpl: () => 1, clearTimeoutImpl: () => {} }, ...over });
   return { rt, clock };
 };
+const settle = (rt, j) => rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup: null });
+// boots, hydrates, and starts; a configured smoke goes through the TWO-PHASE durable
+// activation (start => SMOKE_ACTIVATION_PENDING, settle commits ACTIVE, start connects)
 const live = async ({ config = CFG(), apiOpts = {}, over = {} } = {}) => {
   const api = fakeXApi(apiOpts); const b = boot({ api, config, over });
+  const arr = []; const j = memJournal(arr);
   assert.equal(b.rt.hydrate([]).ok, true);
-  const startResult = await b.rt.start();
-  return { ...b, api, startResult, stream: () => api.state.streams[api.state.streams.length - 1] };
+  let startResult = await b.rt.start();
+  if (startResult.reason === 'SMOKE_ACTIVATION_PENDING') {
+    assert.equal(api.state.streams.length, 0, 'no paid stream before the ACTIVE authorization is durable');
+    assert.equal((await settle(b.rt, j)).ok, true);
+    startResult = await b.rt.start();
+  }
+  return { ...b, api, arr, j, startResult, stream: () => api.state.streams[api.state.streams.length - 1] };
 };
-const settle = (rt, j) => rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup: null });
 
 // =====================================================================================
 // RED #1 / §2–§5 — smoke budget semantics
@@ -100,15 +111,16 @@ test('SMOKE-RED-1 (§2). the documented "<=20 Posts" smoke was impossible: 20 re
 });
 
 test('SMOKE-LAW-1 (§3). TARGET and MAX are distinct; both or neither; TARGET + HEADROOM <= MAX; an entered value is never reinterpreted', () => {
-  assert.deepEqual(xSmokeLaw({}), { ok: true, configured: false, target: null, max: null, headroom: 25, minMaxForTarget: null });
+  assert.deepEqual(xSmokeLaw({}), { ok: true, configured: false, target: null, max: null, headroom: 25, minMaxForTarget: null, runId: null });
   assert.equal(xSmokeLaw({ liveSmokeTargetPostReads: 10 }).reason, 'SMOKE_BUDGET_INCOMPLETE', 'target without max');
   assert.equal(xSmokeLaw({ liveSmokeMaxPostReads: 35 }).reason, 'SMOKE_BUDGET_INCOMPLETE', 'max without target');
   assert.equal(xSmokeLaw({ liveSmokeTargetPostReads: 0, liveSmokeMaxPostReads: 35 }).reason, 'BUDGET_INVALID');
   assert.equal(xSmokeLaw({ liveSmokeTargetPostReads: 10, liveSmokeMaxPostReads: -1 }).reason, 'BUDGET_INVALID');
   assert.equal(xSmokeLaw({ liveSmokeTargetPostReads: 10, liveSmokeMaxPostReads: 34 }).reason, 'SMOKE_BUDGET_TOO_SMALL', '10 + 25 = 35 > 34');
-  const ok10 = xSmokeLaw({ liveSmokeTargetPostReads: 10, liveSmokeMaxPostReads: 35 });
-  assert.equal(ok10.ok, true); assert.equal(ok10.target, 10); assert.equal(ok10.max, 35, 'MAX stays exactly what the operator entered');
-  const ok20 = xSmokeLaw({ liveSmokeTargetPostReads: 20, liveSmokeMaxPostReads: 45 });
+  assert.equal(xSmokeLaw({ liveSmokeTargetPostReads: 10, liveSmokeMaxPostReads: 35 }).reason, 'SMOKE_RUN_ID_REQUIRED', 'a valid envelope without an operator run ID is not an authorization');
+  const ok10 = xSmokeLaw({ liveSmokeTargetPostReads: 10, liveSmokeMaxPostReads: 35, liveSmokeRunId: RUN_ID });
+  assert.equal(ok10.ok, true); assert.equal(ok10.target, 10); assert.equal(ok10.max, 35, 'MAX stays exactly what the operator entered'); assert.equal(ok10.runId, RUN_ID);
+  const ok20 = xSmokeLaw({ liveSmokeTargetPostReads: 20, liveSmokeMaxPostReads: 45, liveSmokeRunId: RUN_ID });
   assert.equal(ok20.ok, true); assert.equal(ok20.minMaxForTarget, 45);
   // env parsing + gate composition
   const full = { RUMOR2_SOCIAL_X_ENABLED: 'true', X_BEARER_TOKEN: 'b', RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS: '100', RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS: '1000', RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD: '0.5' };
@@ -116,7 +128,8 @@ test('SMOKE-LAW-1 (§3). TARGET and MAX are distinct; both or neither; TARGET + 
   assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS: '10' })).reason, 'SMOKE_BUDGET_INCOMPLETE');
   assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS: '20' })).reason, 'SMOKE_BUDGET_INCOMPLETE');
   assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS: '20', RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS: '20' })).reason, 'SMOKE_BUDGET_TOO_SMALL');
-  assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS: '10', RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS: '35' })).ok, true);
+  assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS: '10', RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS: '35' })).reason, 'SMOKE_RUN_ID_REQUIRED');
+  assert.equal(xGate(xConfigFromEnv({ ...full, RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS: '10', RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS: '35', RUMOR2_SOCIAL_X_LIVE_SMOKE_RUN_ID: RUN_ID })).ok, true);
   // §4: the example envelopes are internally consistent at the pinned census price (nominal, not a hard ceiling)
   assert.equal(X_OFFICIAL.pricing.postReadUsd, 0.005);
   assert.equal(Math.round(35 * X_OFFICIAL.pricing.postReadUsd * 1e6) / 1e6, 0.175); assert.equal(Math.round(45 * X_OFFICIAL.pricing.postReadUsd * 1e6) / 1e6, 0.225);
@@ -197,8 +210,7 @@ test('X-CHUNK-3 (§37 + chunk law). pause() from inside a chunk is chunk-atomic 
 // §11–§13 — runtime: evidence + meter + gap in the final chunk; the smoke target; overrun
 // =====================================================================================
 test('SMOKE-TARGET (PASS 2 / §13). target 10 / max 35 / headroom 25 connects; at the 10th delivered Post the stop is pending, finalized at chunk end, every Post metered, no reconnect', async () => {
-  const arr = []; const j = memJournal(arr);
-  const { rt, api, stream } = await live({ config: CFG({ liveSmokeTargetPostReads: 10, liveSmokeMaxPostReads: 35 }) });
+  const { rt, api, stream, arr, j } = await live({ config: CFG({ liveSmokeTargetPostReads: 10, liveSmokeMaxPostReads: 35 }) });
   assert.equal(api.state.streams.length, 1, 'a valid smoke envelope may connect'); await tick();
   const st0 = rt.status();
   assert.equal(st0.state, 'ACTIVE'); assert.equal(st0.smoke.configured, true); assert.equal(st0.smoke.targetPostReads, 10); assert.equal(st0.smoke.maxPostReads, 35); assert.equal(st0.smoke.nominalUsdAtMax, 0.175);
@@ -208,21 +220,20 @@ test('SMOKE-TARGET (PASS 2 / §13). target 10 / max 35 / headroom 25 connects; a
   stream().push(postLine(10)); await tick();
   const st = rt.status();
   assert.equal(st.state, 'SMOKE_COMPLETE'); assert.equal(st.lastStopReason, 'SMOKE_TARGET_REACHED'); assert.equal(st.pendingGap.reason, 'SMOKE_TARGET_REACHED');
-  assert.equal(st.meter.deliveredPostReads, 10); assert.equal(st.smoke.latched, true); assert.equal(st.smoke.status, 'SMOKE_COMPLETE'); assert.equal(st.smoke.deliveredAtStop, 10); assert.equal(st.smoke.overrunPosts, 0);
+  assert.equal(st.meter.deliveredPostReads, 10); assert.equal(st.smoke.latched, true); assert.equal(st.smoke.status, 'COMPLETE'); assert.equal(st.smoke.terminalPending.deliveredPostReadsForRun, 10); assert.equal(st.smoke.overrunPosts, 0);
   assert.equal(stream().aborted, true, 'the paid transport is closed'); assert.equal(stream().reads, 10, 'ten chunks, ten reads — none after the stop');
   assert.equal((await rt.start()).reason, 'WITHHELD_GAP', 'the explicit gap settles first');
   const r = await settle(rt, j); assert.equal(r.ok, true);
   const gap = ofType(arr, X_GAP_EVENT_TYPE)[0]; assert.equal(gap.reason, 'SMOKE_TARGET_REACHED'); assert.equal(validateXGapEvent(gap), null);
   assert.equal(ofType(arr, X_METER_EVENT_TYPE)[0].deliveredPostReads, 10); assert.equal(ofType(arr, SOCIAL_EVENT_TYPE).length, 10);
   const again = await rt.start();
-  assert.equal(again.ok, false); assert.equal(again.reason, 'SMOKE_TARGET_REACHED', 'no automatic paid reconnect after a completed smoke');
+  assert.equal(again.ok, false); assert.equal(again.reason, 'SMOKE_RUN_ALREADY_COMPLETE', 'no automatic paid reconnect after a completed smoke — the completion is DURABLE');
   assert.equal(api.state.streams.length, 1); assert.equal(stream().reads, 10);
   assert.ok(X_SMOKE_STOP_REASONS.every((x) => X_GAP_REASONS.includes(x))); assert.ok(X_RUNTIME_STATES.includes('SMOKE_COMPLETE'));
 });
 
 test('X-FINAL-CHUNK (PASS 3 / §7/§8/§11). the target is hit at Post 1 of a 3-Post chunk: all three are metered, all three settle as evidence, the gap starts at the chunk end (never before evidence Serpent received)', async () => {
-  const arr = []; const j = memJournal(arr);
-  const { rt, api, stream, clock } = await live({ config: CFG({ liveSmokeTargetPostReads: 1, liveSmokeMaxPostReads: 26 }) });
+  const { rt, api, stream, clock, arr, j } = await live({ config: CFG({ liveSmokeTargetPostReads: 1, liveSmokeMaxPostReads: 26 }) });
   await tick();
   const before = clock.ms;
   stream().push(postLine(1, '$BTC a') + postLine(2, '$ETH b') + postLine(3, '$SOL c')); await tick();
@@ -243,34 +254,33 @@ test('X-FINAL-CHUNK (PASS 3 / §7/§8/§11). the target is hit at Post 1 of a 3-
 });
 
 test('SMOKE-OVERRUN (PASS 4 / §12). the final received chunk crosses the outer MAX: every Post is metered, the exact overrun is recorded, SMOKE_HEADROOM_OVERRUN latches, no reconnect', async () => {
-  const arr = []; const j = memJournal(arr);
-  const { rt, api, stream } = await live({ config: CFG({ liveSmokeTargetPostReads: 1, liveSmokeMaxPostReads: 26 }) });
+  const { rt, api, stream, arr, j } = await live({ config: CFG({ liveSmokeTargetPostReads: 1, liveSmokeMaxPostReads: 26 }) });
   await tick();
   let chunk = ''; for (let i = 1; i <= 30; i++) chunk += postLine(i, i % 2 ? '$BTC x' : 'unrelated');
   stream().push(chunk); await tick();
   const st = rt.status();
   assert.equal(st.meter.deliveredPostReads, 30, 'never clamped to the max'); assert.equal(st.meter.sessionPostReads, 30); assert.equal(st.intake.filtered, 15, 'filtered Posts still counted (PASS 5)');
-  assert.equal(st.state, 'SMOKE_HEADROOM_OVERRUN'); assert.equal(st.lastStopReason, 'SMOKE_HEADROOM_OVERRUN'); assert.equal(st.smoke.status, 'SMOKE_HEADROOM_OVERRUN');
+  assert.equal(st.state, 'SMOKE_HEADROOM_OVERRUN'); assert.equal(st.lastStopReason, 'SMOKE_HEADROOM_OVERRUN'); assert.equal(st.smoke.status, 'HEADROOM_OVERRUN');
   assert.equal(st.smoke.overrunPosts, 4, '30 delivered - 26 max = exact overrun'); assert.equal(st.smoke.latched, true); assert.equal(st.pendingGap.reason, 'SMOKE_HEADROOM_OVERRUN');
   assert.equal(stream().reads, 1, 'stopped before any new reader.read()'); assert.equal(stream().aborted, true);
   const r = await settle(rt, j); assert.equal(r.ok, true);
   assert.equal(ofType(arr, X_GAP_EVENT_TYPE)[0].reason, 'SMOKE_HEADROOM_OVERRUN'); assert.equal(ofType(arr, X_METER_EVENT_TYPE)[0].deliveredPostReads, 30);
   const again = await rt.start();
-  assert.equal(again.reason, 'SMOKE_HEADROOM_OVERRUN'); assert.ok(/fresh operator-authorized start/.test(again.detail));
+  assert.equal(again.reason, 'SMOKE_RUN_ALREADY_TERMINAL'); assert.ok(/HEADROOM_OVERRUN/.test(again.detail)); assert.ok(/new operator run ID/.test(again.detail));
   assert.equal(api.state.streams.length, 1, 'no automatic paid reconnect');
-  assert.equal(rt.allowance().reason, 'SMOKE_HEADROOM_OVERRUN');
+  assert.equal(rt.allowance().reason, 'SMOKE_RUN_ALREADY_TERMINAL');
   // §12: the local MAX is not a provider billing wall — status says so honestly
   assert.equal(st.budget.platformSpendingLimitVerified, 'UNKNOWN');
 });
 
 test('BUDGET-CHUNK (§8/§21). a plain daily-cap stop obeys the same chunk law: the final chunk is fully metered, the gap starts at its end, and daily/monthly/USD caps still bind under a smoke', async () => {
-  const arr = []; const j = memJournal(arr);
-  const { rt, stream } = await live({ config: CFG({ maxDailyPostReads: 27, liveSmokeTargetPostReads: 50, liveSmokeMaxPostReads: 100 }) });
+  const { rt, stream, arr, j } = await live({ config: CFG({ maxDailyPostReads: 27, liveSmokeTargetPostReads: 50, liveSmokeMaxPostReads: 100 }) });
   await tick();
   assert.equal(rt.status().budget.allowance.limiting, 'BUDGET_DAILY', 'the strictest boundary wins over the smoke envelope');
   stream().push(postLine(1) + postLine(2) + postLine(3) + postLine(4)); await tick();
   const st = rt.status();
-  assert.equal(st.meter.deliveredPostReads, 4); assert.equal(st.state, 'BUDGET_STOPPED'); assert.equal(st.lastStopReason, 'BUDGET_DAILY'); assert.equal(st.smoke.latched, false, 'a cap stop is not a smoke completion');
+  assert.equal(st.meter.deliveredPostReads, 4); assert.equal(st.lastStopReason, 'BUDGET_DAILY');
+  assert.equal(st.state, 'SMOKE_ABORTED'); assert.equal(st.smoke.status, 'ABORTED'); assert.equal(st.smoke.terminalReason, 'BUDGET_DAILY', 'a cap stop during a run is a recorded non-target interruption: the run ABORTS, never COMPLETES');
   assert.equal(stream().reads, 1);
   await settle(rt, j);
   const gap = ofType(arr, X_GAP_EVENT_TYPE)[0]; const ev = ofType(arr, SOCIAL_EVENT_TYPE);
@@ -278,14 +288,14 @@ test('BUDGET-CHUNK (§8/§21). a plain daily-cap stop obeys the same chunk law: 
 });
 
 test('X-WRITER-LOSS-CHUNK (PASS 9). writer loss stops the transport at once; a pending in-chunk stop never survives into a later runtime state', async () => {
-  const { rt, stream } = await live({ config: CFG({ liveSmokeTargetPostReads: 10, liveSmokeMaxPostReads: 35 }) });
+  const { rt, stream, arr, j } = await live({ config: CFG({ liveSmokeTargetPostReads: 10, liveSmokeMaxPostReads: 35 }) });
   await tick();
   stream().push(postLine(1)); await tick();
-  const arr = []; const j = memJournal(arr);
+  const n0 = arr.length;
   const r = await rt.settle({ fenceHeld: () => false, append: (e) => j.append(e), lookup: null });
   assert.equal(r.reason, 'WRITER_FENCE_LOST'); assert.equal(rt.status().stream, null); assert.equal(stream().aborted, true);
   assert.equal(rt.status().smoke.stopPending, null); assert.equal(rt.status().meter.durableDeliveredPostReads, 0, 'no meter advance after writer loss');
-  assert.equal(rt.status().progressThroughTs, null); assert.equal(arr.length, 0, 'nothing durable after writer loss');
+  assert.equal(rt.status().progressThroughTs, null); assert.equal(arr.length, n0, 'nothing durable after writer loss');
 });
 
 // =====================================================================================

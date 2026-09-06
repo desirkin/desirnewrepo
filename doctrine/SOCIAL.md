@@ -379,7 +379,8 @@ five claim-capable ears; it is classifier-null.
 **Gates — default cost zero (§8).** `RUMOR2_SOCIAL_X_ENABLED` (false), `X_BEARER_TOKEN`,
 `RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS`, `RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS` (≤ 3M),
 `RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD`; optional `…_MAX_SESSION_POST_READS`,
-`…_LIVE_SMOKE_TARGET_POST_READS` + `…_LIVE_SMOKE_MAX_POST_READS` (a pair — see §5D),
+`…_LIVE_SMOKE_TARGET_POST_READS` + `…_LIVE_SMOKE_MAX_POST_READS` + `…_LIVE_SMOKE_RUN_ID` (a
+triple — see §5D/§5E),
 `…_PRIORITY_ACCOUNTS`, `…_PROPAGATION_FOCUS`. Missing bearer ⇒
 CREDENTIAL_MISSING; missing/zero/negative/absurd budget ⇒ BUDGET_NOT_CONFIGURED / BUDGET_INVALID.
 No default paid budget exists; `RUMOR2_SOCIAL_X_ENABLED=true` alone spends nothing.
@@ -532,6 +533,108 @@ Tests: `test/x-paid-wire.test.js` (SMOKE-RED-1, SMOKE-LAW-1, SMOKE-IMPOSSIBLE, S
 X-CHUNK-RED-2, X-CHUNK-2/3, SMOKE-TARGET, X-FINAL-CHUNK, SMOKE-OVERRUN, BUDGET-CHUNK,
 X-WRITER-LOSS-CHUNK, RULE-RED-3, RULE-SNAPSHOT, RULE-SEAL-1..6). Live paid smoke: NOT RUN
 here — no bearer and no smoke pair were present, which is the expected safe result.
+
+---
+
+## 5E. DURABLE PAID-SMOKE AUTHORIZATION SEAL — run ID, durable baseline, completion latch
+
+Audit of `e9c56de` reproduced one paid-smoke crash-boundary defect: a completed smoke
+(`SMOKE_COMPLETE`, latched, 1 delivered) restarted as a fresh zero-count smoke — runtime B
+restored the durable daily/monthly meter (1/1) but `meter.session = 0`, `latched = false`,
+and `start()` opened a NEW paid stream. Likewise a mid-run crash (TARGET 10, 8 durable)
+resumed with a full envelope instead of the remaining 2. A process restart is not a new
+operator authorization to spend.
+
+**Permanent law.** A paid smoke is a specific OPERATOR-AUTHORIZED RUN, never TARGET/MAX
+numbers sitting in the environment. Each run has an explicit
+`RUMOR2_SOCIAL_X_LIVE_SMOKE_RUN_ID`: required whenever TARGET/MAX are configured, ignored
+otherwise, bounded to `^[A-Za-z0-9._:-]{8,64}$` (a UUID is fine, e.g. `smoke-2026-09-06-001`),
+authorization identity — not a credential, never a secret. Serpent NEVER generates one (no
+`randomUUID`, `Date.now`, PID, boot id, nonce): an auto-generated ID would turn every restart
+into a "new authorization", which is exactly the defect. TARGET/MAX without a run ID ⇒
+`SMOKE_RUN_ID_REQUIRED`; malformed ⇒ `SMOKE_RUN_ID_INVALID`; both are gate refusals before any
+request. Without smoke variables, normal X gates behave exactly as before.
+
+**Durable smoke-run event.** `RUMOR2_SOCIAL_X_SMOKE` (closed keys, identity
+`r2xk-` over `{provider, smokeRunId, status}`) in the ONE PostgreSQL RUMOR event root — no
+smoke store. Statuses: `ACTIVE`, then exactly one terminal `COMPLETE` / `HEADROOM_OVERRUN` /
+`ABORTED`. It carries the run ID (raw, bounded), target/max/headroom, the pinned unit price,
+the rule-set hash + coverage epoch it was authorized against, the durable baseline
+(`baselinePeriod` UTC day, daily + monthly meter at activation, fresh server project usage
+from the mandatory `/2/usage/tweets` preflight), `activatedKnownAtTs`, and on terminal:
+`deliveredPostReadsForRun`, `overrunPosts`, `terminalReason`, `completedKnownAtTs`. No
+bearer, no environment blobs.
+
+**ACTIVE is durable BEFORE the paid stream opens (two-phase).** Order: run ID + envelope
+validated → usage/credit/rule preflight green → writer fence held → the ACTIVE event with
+its baseline is built → `start()` returns `SMOKE_ACTIVATION_PENDING` (state
+`SMOKE_ACTIVATING`) → `settle()` appends it under the current writer epoch (after any
+rule-set activation event in the same batch) → adoption → ONLY a later `start()` that sees
+the DURABLE run opens the paid stream. The collector's tick already runs start-then-settle,
+so activation costs one tick and no collector change. A crash before the commit leaves no
+run (zero spend; the same run ID may retry); a crash after the commit resumes the SAME run
+from 0 with one activation identity.
+
+**Per-run count is durable arithmetic.** `conservativeDeliveredForRun = max(local durable
+meter delta since the baseline within the baseline UTC day, server project-usage delta since
+the baseline)`. `meter.session` remains a process diagnostic only. Other project consumers
+can only make the count LARGER (safe); usage is never subtracted to make a smoke bigger. On
+resume, a server delta above the local delta is ADOPTED into the conservative meter (lost
+in-memory reads from a crash mid final chunk are never free — §19/§20); a server usage RESET
+across the run (usage below the baseline) is `SMOKE_USAGE_RESET` ⇒ ABORTED. TARGET fires on
+this count (`SMOKE_TARGET_REACHED`); MAX joins the strictest-boundary law as
+`BUDGET_SMOKE_MAX`; daily/monthly/USD caps, project cap, credits, and the writer fence still
+bind. After a restart with 8 durable Posts and TARGET 10, exactly 2 remain.
+
+**Terminal state is durable and latches.** At the controlled target stop: `COMPLETE`
+(`SMOKE_TARGET_REACHED`, exact count). At a reserve overrun in the final received chunk:
+`HEADROOM_OVERRUN` (`SMOKE_HEADROOM_OVERRUN`, exact overrun, exact count, never clamped).
+The terminal event settles in the SAME fenced batch as the final evidence, meter, progress,
+and gap. On restart the same run ID ⇒ `SMOKE_RUN_ALREADY_COMPLETE` / `SMOKE_RUN_ALREADY_TERMINAL`,
+zero stream requests. A restart, a day rollover, unchanged TARGET/MAX, an existing bearer, or
+remaining daily budget are NOT consent: a new paid smoke requires a NEW explicit run ID.
+
+**Binding laws (fail closed, never reinterpret a historical run).** Same run ID with a
+different TARGET/MAX/headroom ⇒ `SMOKE_RUN_CONFIG_MISMATCH` (refused; the original envelope
+still resumes). Verified rule-set hash differs from the run's activation hash ⇒
+`SMOKE_RUN_RULESET_MISMATCH`, run ABORTED, new run ID required after reconciliation. Pinned
+unit price differs from the activation price ⇒ `SMOKE_RUN_PRICING_CHANGED`, ABORTED. A paid
+smoke may not span a UTC-day boundary: `SMOKE_PERIOD_ROLLOVER` ⇒ ABORTED with the run's
+frozen count (never reset), whether detected at restart or at the chunk end of an ACTIVE
+stream (the after-midnight Post is still metered). A new run ID while a crashed run is still
+ACTIVE supersedes it explicitly (`ABORTED` / `SMOKE_RUN_SUPERSEDED`) in the same batch,
+before the new activation — never two ACTIVE runs.
+
+**Non-target interruption policy (§22, chosen and documented).** Every interruption Serpent
+CAN record durably ABORTS the run with its reason — budget caps, credential rejection,
+connection limit, unexplained gap (> 4 min) on resume, period rollover, rule-set / pricing /
+usage-reset mismatches. Interruptions it CANNOT record (a crash, writer loss — nothing may
+be appended without the fence) leave the run durably ACTIVE, and it resumes under the SAME
+run ID only through the full current preflight (usage, credits, rule reconciliation with the
+canonical unowned snapshot, writer fence), the gap law, and the server-usage delta law.
+Durable run state authorizes the RUN; it never bypasses current safety. There is no
+surprise automatic paid resume: a completed, overrun, or aborted run never reconnects.
+
+**Replay validation.** `replaySocialHistory` fails closed on: duplicate activation with an
+altered payload, activation twice, a second ACTIVE while one is ACTIVE, activation outside
+the active coverage epoch, a baseline ahead of the durable meter (or claiming reads in a
+period without one), terminal before ACTIVE, terminal after terminal, terminal fields
+disagreeing with the activation (target/max/headroom/price/rule set/epoch/baseline), a
+terminal count below the durable meter delta, unknown status / terminal reason / provider,
+malformed run ID, pricing/ruleset fields malformed, COMPLETE below target, HEADROOM_OVERRUN
+counts that disagree, ABORTED with a completion reason. Shape alone is never trusted.
+
+**Status (`status.socialX.smoke`).** configured, run ID + hash prefix, durableStatus,
+activationPending / terminalPending, target/max/headroom, baseline (period, daily, monthly,
+server usage), conservativeDeliveredForRun with its local and server deltas, targetRemaining,
+maxRemaining, overrunPosts, activatedKnownAtTs, completedKnownAtTs, terminalReason,
+ruleSetHash, unitPriceUsd, resumedAfterRestart, activeRunId / latestRunId. No bearer.
+
+Tests: `test/x-smoke-durable.test.js` (SMOKE-RUNID-1, SMOKE-ACTIVATE, SMOKE-DUR-1..10,
+SMOKE-PRICING, SMOKE-INTERRUPT, SMOKE-SUPERSEDE, SMOKE-NORMAL, SMOKE-REPLAY,
+SMOKE-ZERO-SPEND + AUTHORITY) and `test/x-collector.test.js` XCOL-5 (PostgreSQL, through the
+collector tick). Live paid smoke: NOT RUN — no bearer and no run ID were present, which is
+the expected safe result.
 
 ---
 

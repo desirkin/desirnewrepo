@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startRumor2 } from '../rumor2/collector.js';
-import { SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_RULESET_EVENT_TYPE } from '../rumor2/social-settle.js';
+import { SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_SMOKE_EVENT_TYPE } from '../rumor2/social-settle.js';
 import { xRuleTag } from '../rumor2/providers/x-official.js';
 
 const dirs = [];
@@ -190,6 +190,32 @@ if (!TEST_URL) {
       const st2 = b.c.status();
       assert.equal(st2.writerAuthority, 'ACTIVE'); assert.equal(st2.social.state, 'ACTIVE'); assert.equal(st2.socialX.state, 'ACTIVE');
       assert.equal(api.state.streams.length, 2, 'X reconnected after reacquisition (usage + rules re-verified)');
+      await b.c.stop();
+    });
+  });
+
+  test('XCOL-5 (durable smoke seal §8/§11). through the collector tick: the smoke ACTIVE authorization is durable in PostgreSQL BEFORE the paid stream opens; a restart cannot re-authorize a completed run', async () => {
+    await withDb(async ({ mkStores }) => {
+      const s1 = mkStores(); const api = fakeXApi();
+      const smoke = XCFG({ liveSmokeTargetPostReads: 1, liveSmokeMaxPostReads: 26, liveSmokeRunId: 'smoke-2026-09-06-xcol' });
+      const social = { socialXEnabled: true, socialXConfig: smoke, socialXFetchImpl: api.fetchImpl, socialXOptions: { streamOptions: { setTimeoutImpl: () => 1, clearTimeoutImpl: () => {} } } };
+      const a = boot({ ...s1, social });
+      await a.tick();
+      assert.equal(api.state.streams.length, 0, 'tick 1: NO paid stream — the ACTIVE event is being made durable first');
+      const h1 = await hist(s1.journal); const act = ofType(h1, X_SMOKE_EVENT_TYPE);
+      assert.equal(act.length, 1); assert.equal(act[0].status, 'ACTIVE'); assert.equal(act[0].smokeRunId, 'smoke-2026-09-06-xcol'); assert.equal(act[0].baselineServerProjectUsage, 10, 'baseline from the fresh usage preflight');
+      assert.equal(a.c.status().socialX.smoke.durableStatus, 'ACTIVE');
+      await a.tick();
+      assert.equal(api.state.streams.length, 1, 'tick 2: the durable authorization opens the ONE paid stream');
+      api.state.streams[0].push(xLine(900, '$BTC smoke')); await tick(); await a.tick();
+      const h2 = await hist(s1.journal);
+      assert.equal(ofType(h2, X_SMOKE_EVENT_TYPE).at(-1).status, 'COMPLETE'); assert.equal(ofType(h2, X_SMOKE_EVENT_TYPE).at(-1).deliveredPostReadsForRun, 1);
+      assert.equal(a.c.status().socialX.state, 'SMOKE_COMPLETE');
+      await a.c.stop();
+      const b = boot({ ...mkStores(), clockMs: a.clock.ms + 30_000, social });
+      await b.tick(); await b.tick();
+      assert.equal(b.c.status().socialX.smoke.durableStatus, 'COMPLETE'); assert.equal(b.c.status().socialX.lastStopReason, 'SMOKE_RUN_ALREADY_COMPLETE');
+      assert.equal(api.state.streams.length, 1, 'restart: ZERO new paid streams for the completed run');
       await b.c.stop();
     });
   });

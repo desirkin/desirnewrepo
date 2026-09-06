@@ -80,9 +80,21 @@ export const X_RULESET_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId'
 export const X_METER_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'period', 'deliveredPostReads', 'monthPeriod', 'monthDeliveredPostReads', 'unitPriceUsd', 'estimatedUsd', 'serverUsage', 'knownAtTs']);
 export const X_PROGRESS_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'ruleSetHash', 'coverageEpoch', 'throughKnownAtTs', 'knownAtTs']);
 export const X_GAP_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'ruleSetHash', 'coverageEpoch', 'gapStartTs', 'reason', 'knownAtTs']);
-export const X_GAP_REASONS = Object.freeze(['BUDGET_DAILY', 'BUDGET_MONTHLY', 'BUDGET_USD', 'BUDGET_SESSION', 'BUDGET_SMOKE_MAX', 'SMOKE_TARGET_REACHED', 'SMOKE_HEADROOM_OVERRUN', 'NO_CREDITS', 'OPERATOR_DISABLED', 'USAGE_PREFLIGHT_FAILED', 'RULE_RECONCILE_FAILED', 'UNEXPLAINED_GAP', 'WRITER_LOST', 'CONNECTION_LIMIT', 'AUTH_REJECTED', 'TRANSPORT_FAILED']);
+export const X_GAP_REASONS = Object.freeze(['BUDGET_DAILY', 'BUDGET_MONTHLY', 'BUDGET_USD', 'BUDGET_SESSION', 'BUDGET_SMOKE_MAX', 'SMOKE_TARGET_REACHED', 'SMOKE_HEADROOM_OVERRUN', 'SMOKE_PERIOD_ROLLOVER', 'NO_CREDITS', 'OPERATOR_DISABLED', 'USAGE_PREFLIGHT_FAILED', 'RULE_RECONCILE_FAILED', 'UNEXPLAINED_GAP', 'WRITER_LOST', 'CONNECTION_LIMIT', 'AUTH_REJECTED', 'TRANSPORT_FAILED']);
+// SOCIAL-2B DURABLE PAID-SMOKE AUTHORIZATION: one closed operational event
+// family records each operator-authorized paid smoke RUN — ACTIVE (with its
+// durable baseline) BEFORE the paid stream opens, then exactly one terminal
+// status. The journal stays the ONE event root; no smoke store exists.
+export const X_SMOKE_EVENT_TYPE = 'RUMOR2_SOCIAL_X_SMOKE';
+export const X_SMOKE_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'smokeRunId', 'status', 'targetPostReads', 'maxPostReads', 'headroomPosts', 'unitPriceUsd', 'ruleSetHash', 'coverageEpoch', 'baselinePeriod', 'baselineDailyDeliveredPostReads', 'baselineMonthlyDeliveredPostReads', 'baselineServerProjectUsage', 'activatedKnownAtTs', 'deliveredPostReadsForRun', 'overrunPosts', 'terminalReason', 'completedKnownAtTs', 'knownAtTs']);
+export const X_SMOKE_STATUSES = Object.freeze(['ACTIVE', 'COMPLETE', 'HEADROOM_OVERRUN', 'ABORTED']);
+export const X_SMOKE_TERMINAL_STATUSES = Object.freeze(['COMPLETE', 'HEADROOM_OVERRUN', 'ABORTED']);
+// non-gap terminal reasons a run may end with (besides every X_GAP_REASONS entry)
+export const X_SMOKE_EXTRA_REASONS = Object.freeze(['SMOKE_RUN_RULESET_MISMATCH', 'SMOKE_RUN_PRICING_CHANGED', 'SMOKE_USAGE_RESET', 'SMOKE_RUN_SUPERSEDED']);
+export const X_SMOKE_RUN_ID_RE = /^[A-Za-z0-9._:-]{8,64}$/;
 export const X_STATE_PROVIDERS = Object.freeze(['X_OFFICIAL']);
-export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE]);
+export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE]);
+export const xSmokeIdentity = ({ provider, smokeRunId, status }) => `r2xk-${contentHash(canonicalJson({ provider, smokeRunId, status }))}`;
 export const xRuleSetIdentity = ({ provider, ruleSetHash, coverageEpoch }) => `r2xr-${contentHash(canonicalJson({ provider, ruleSetHash, coverageEpoch }))}`;
 // a meter snapshot is identified by its counts AND its knowledge clock: two
 // snapshots with equal counts but a newer server-usage observation are distinct
@@ -429,7 +441,47 @@ export function validateXGapEvent(ev) {
   if (ev.sourceEventId !== xGapIdentity(ev)) return 'x gap: sourceEventId is not the derived identity';
   return null;
 }
-export const emptyXState = () => ({ ruleSetHash: null, coverageEpoch: 0, activatedKnownAtTs: null, ruleTags: [], progressThroughTs: null, meter: null, lastGap: null, events: 0 });
+export function xSmokeEvent({ provider, smokeRunId, status, targetPostReads, maxPostReads, headroomPosts, unitPriceUsd, ruleSetHash, coverageEpoch, baselinePeriod, baselineDailyDeliveredPostReads, baselineMonthlyDeliveredPostReads, baselineServerProjectUsage, activatedKnownAtTs, deliveredPostReadsForRun = null, overrunPosts = null, terminalReason = null, completedKnownAtTs = null, knownAtTs }) {
+  return {
+    type: X_SMOKE_EVENT_TYPE, ts: iso(knownAtTs), sourceEventId: xSmokeIdentity({ provider, smokeRunId, status }), provider, smokeRunId, status,
+    targetPostReads, maxPostReads, headroomPosts, unitPriceUsd, ruleSetHash, coverageEpoch,
+    baselinePeriod, baselineDailyDeliveredPostReads, baselineMonthlyDeliveredPostReads, baselineServerProjectUsage, activatedKnownAtTs,
+    deliveredPostReadsForRun, overrunPosts, terminalReason, completedKnownAtTs, knownAtTs,
+  };
+}
+export function validateXSmokeEvent(ev) {
+  if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'x smoke: not an object';
+  const k = exactKeys(ev, X_SMOKE_EVENT_KEYS); if (k) return `x smoke: ${k}`;
+  if (ev.type !== X_SMOKE_EVENT_TYPE) return 'x smoke: wrong type';
+  const pe = xProvider(ev); if (pe) return `x smoke: ${pe}`;
+  if (typeof ev.smokeRunId !== 'string' || !X_SMOKE_RUN_ID_RE.test(ev.smokeRunId)) return 'x smoke: smokeRunId malformed';
+  if (!X_SMOKE_STATUSES.includes(ev.status)) return 'x smoke: unknown status';
+  const nn = (v) => Number.isSafeInteger(v) && v >= 0;
+  for (const f of ['targetPostReads', 'maxPostReads', 'headroomPosts']) if (!Number.isSafeInteger(ev[f]) || ev[f] <= 0) return `x smoke: ${f} invalid`;
+  if (ev.targetPostReads + ev.headroomPosts > ev.maxPostReads) return 'x smoke: target + headroom exceeds max';
+  if (!Number.isFinite(ev.unitPriceUsd) || ev.unitPriceUsd < 0) return 'x smoke: unitPriceUsd invalid';
+  if (!okHash(ev.ruleSetHash) || !okEpoch(ev.coverageEpoch)) return 'x smoke: ruleSetHash/coverageEpoch invalid';
+  if (!okPeriod(ev.baselinePeriod)) return 'x smoke: baselinePeriod invalid';
+  for (const f of ['baselineDailyDeliveredPostReads', 'baselineMonthlyDeliveredPostReads', 'baselineServerProjectUsage']) if (!nn(ev[f])) return `x smoke: ${f} invalid`;
+  if (ev.baselineDailyDeliveredPostReads > ev.baselineMonthlyDeliveredPostReads) return 'x smoke: baseline day exceeds month';
+  if (!isTs(ev.activatedKnownAtTs) || !isTs(ev.knownAtTs) || ev.activatedKnownAtTs > ev.knownAtTs) return 'x smoke: clock invalid';
+  if (ev.ts !== iso(ev.knownAtTs)) return 'x smoke: ts disagrees with knownAtTs';
+  if (ev.status === 'ACTIVE') {
+    if (ev.deliveredPostReadsForRun !== null || ev.overrunPosts !== null || ev.terminalReason !== null || ev.completedKnownAtTs !== null) return 'x smoke: ACTIVE carries terminal fields';
+  } else {
+    if (!nn(ev.deliveredPostReadsForRun) || !nn(ev.overrunPosts)) return 'x smoke: terminal counts invalid';
+    if (!X_GAP_REASONS.includes(ev.terminalReason) && !X_SMOKE_EXTRA_REASONS.includes(ev.terminalReason)) return 'x smoke: unknown terminal reason';
+    if (!isTs(ev.completedKnownAtTs) || ev.completedKnownAtTs < ev.activatedKnownAtTs || ev.completedKnownAtTs > ev.knownAtTs) return 'x smoke: completion clock invalid';
+    if (ev.status === 'COMPLETE' && ev.terminalReason !== 'SMOKE_TARGET_REACHED') return 'x smoke: COMPLETE requires SMOKE_TARGET_REACHED';
+    if (ev.status === 'HEADROOM_OVERRUN' && (ev.terminalReason !== 'SMOKE_HEADROOM_OVERRUN' || ev.overrunPosts < 1 || ev.deliveredPostReadsForRun !== ev.maxPostReads + ev.overrunPosts)) return 'x smoke: HEADROOM_OVERRUN counts disagree';
+    if (ev.status === 'COMPLETE' && ev.deliveredPostReadsForRun < ev.targetPostReads) return 'x smoke: COMPLETE below target';
+    if (ev.status !== 'HEADROOM_OVERRUN' && ev.overrunPosts !== 0) return 'x smoke: overrun without HEADROOM_OVERRUN';
+    if (ev.status === 'ABORTED' && (ev.terminalReason === 'SMOKE_TARGET_REACHED' || ev.terminalReason === 'SMOKE_HEADROOM_OVERRUN')) return 'x smoke: ABORTED with a completion reason';
+  }
+  if (ev.sourceEventId !== xSmokeIdentity(ev)) return 'x smoke: sourceEventId is not the derived identity';
+  return null;
+}
+export const emptyXState = () => ({ ruleSetHash: null, coverageEpoch: 0, activatedKnownAtTs: null, ruleTags: [], progressThroughTs: null, meter: null, lastGap: null, events: 0, smoke: { runs: {}, activeRunId: null, latestRunId: null } });
 
 // Replay the Social layer of one journal history (§22-§24). SOURCE-ONLY: this
 // pass rebuilds ONLY (a) the durable version index — every settled
@@ -512,6 +564,31 @@ export function replaySocialHistory(events) {
       const r = xDup(e, validateXGapEvent(e)); if (r === 'dup') continue; if (r) return r;
       if (e.coverageEpoch !== x.coverageEpoch) return fail('SOCIAL_HISTORY_INVALID: X gap outside the active coverage epoch');
       x.lastGap = { gapStartTs: e.gapStartTs, reason: e.reason, knownAtTs: e.knownAtTs, coverageEpoch: e.coverageEpoch }; x.events += 1;
+      continue;
+    }
+    if (e.type === X_SMOKE_EVENT_TYPE) {
+      const r = xDup(e, validateXSmokeEvent(e)); if (r === 'dup') continue; if (r) return r;
+      const runs = x.smoke.runs; const prior = runs[e.smokeRunId];
+      if (e.status === 'ACTIVE') {
+        if (prior) return fail(`SOCIAL_HISTORY_INVALID: X smoke run ${e.smokeRunId} activated twice`);
+        if (x.smoke.activeRunId !== null) return fail(`SOCIAL_HISTORY_INVALID: X smoke run ${e.smokeRunId} activated while ${x.smoke.activeRunId} is still ACTIVE`);
+        if (e.ruleSetHash !== x.ruleSetHash || e.coverageEpoch !== x.coverageEpoch) return fail('SOCIAL_HISTORY_INVALID: X smoke run activated outside the active coverage epoch');
+        // the baseline is the meter at activation: never ahead of durable truth
+        if (x.meter && x.meter.period === e.baselinePeriod) { if (e.baselineDailyDeliveredPostReads > x.meter.deliveredPostReads) return fail('SOCIAL_HISTORY_INVALID: X smoke baseline ahead of the durable meter'); }
+        else if (e.baselineDailyDeliveredPostReads !== 0) return fail('SOCIAL_HISTORY_INVALID: X smoke baseline claims reads in a period without a durable meter');
+        if (x.meter && x.meter.monthPeriod === e.baselinePeriod.slice(0, 7) && e.baselineMonthlyDeliveredPostReads > x.meter.monthDeliveredPostReads) return fail('SOCIAL_HISTORY_INVALID: X smoke monthly baseline ahead of the durable meter');
+        runs[e.smokeRunId] = { smokeRunId: e.smokeRunId, status: 'ACTIVE', targetPostReads: e.targetPostReads, maxPostReads: e.maxPostReads, headroomPosts: e.headroomPosts, unitPriceUsd: e.unitPriceUsd, ruleSetHash: e.ruleSetHash, coverageEpoch: e.coverageEpoch, baselinePeriod: e.baselinePeriod, baselineDailyDeliveredPostReads: e.baselineDailyDeliveredPostReads, baselineMonthlyDeliveredPostReads: e.baselineMonthlyDeliveredPostReads, baselineServerProjectUsage: e.baselineServerProjectUsage, activatedKnownAtTs: e.activatedKnownAtTs, deliveredPostReadsForRun: 0, overrunPosts: 0, terminalReason: null, completedKnownAtTs: null };
+        x.smoke.activeRunId = e.smokeRunId; x.smoke.latestRunId = e.smokeRunId; x.events += 1;
+        continue;
+      }
+      if (!prior) return fail(`SOCIAL_HISTORY_INVALID: X smoke run ${e.smokeRunId} terminal state before activation`);
+      if (prior.status !== 'ACTIVE') return fail(`SOCIAL_HISTORY_INVALID: X smoke run ${e.smokeRunId} terminal state after terminal state`);
+      for (const f of ['targetPostReads', 'maxPostReads', 'headroomPosts', 'unitPriceUsd', 'ruleSetHash', 'coverageEpoch', 'baselinePeriod', 'baselineDailyDeliveredPostReads', 'baselineMonthlyDeliveredPostReads', 'baselineServerProjectUsage', 'activatedKnownAtTs']) if (e[f] !== prior[f]) return fail(`SOCIAL_HISTORY_INVALID: X smoke run ${e.smokeRunId} terminal ${f} disagrees with its activation`);
+      // the terminal count can never be below what the durable meter already attributed to the run
+      if (x.meter && x.meter.period === e.baselinePeriod && e.deliveredPostReadsForRun < x.meter.deliveredPostReads - e.baselineDailyDeliveredPostReads) return fail('SOCIAL_HISTORY_INVALID: X smoke terminal delivered count below the durable meter delta');
+      runs[e.smokeRunId] = { ...prior, status: e.status, deliveredPostReadsForRun: e.deliveredPostReadsForRun, overrunPosts: e.overrunPosts, terminalReason: e.terminalReason, completedKnownAtTs: e.completedKnownAtTs };
+      if (x.smoke.activeRunId === e.smokeRunId) x.smoke.activeRunId = null;
+      x.smoke.latestRunId = e.smokeRunId; x.events += 1;
       continue;
     }
     // any other type belongs to the frozen core's own replay/validator
