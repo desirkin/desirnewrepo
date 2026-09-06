@@ -268,8 +268,15 @@ if (!TEST_URL) {
       const B = fcRuntime({ fixtures: [castV('newname', 900, 88)] }); B.rt.hydrate([]); B.rt.start();
       assert.equal(B.rt._intake().stats().enqueued, 1, 'the local index did not know V');
       const r = await settleWith(B.rt, j);
-      assert.equal(r.ok, true); assert.equal(r.appended, 0, 'the authoritative lookup caught it — nothing altered was appended');
-      assert.equal(B.rt.isDurable(socialObservationToEvent(normalizeSocialObservation(neynarEventToRaw(castV('x', 1, 1)).raw, { nowMs: C + 1 }).observation).event.sourceEventId), true, 'the lookup result was learned into the index');
+      // SOCIAL-4D CLOSEOUT: identity existence alone cannot establish equivalence — the lookup blocks the
+      // altered re-append AND reports the index divergence honestly; the candidate stays owed, not discarded
+      assert.equal(r.ok, false); assert.equal(r.reason, 'INDEX_DIVERGENCE'); assert.equal(socialOf(await events(j)).length, 1, 'nothing altered was appended');
+      assert.equal(B.rt.status().stats.indexDivergences, 1); assert.equal(B.rt.isDurable(socialObservationToEvent(normalizeSocialObservation(neynarEventToRaw(castV('x', 1, 1)).raw, { nowMs: C + 1 }).observation).event.sourceEventId), false, 'existence is never learned as facts');
+      // re-hydrated from the authoritative journal, the SAME owed candidate settles as the known first truth
+      assert.equal(B.rt.hydrate(await events(j)).ok, true);
+      const r2 = await settleWith(B.rt, j);
+      assert.equal(r2.ok, true); assert.equal(r2.appended, 0); assert.equal(B.rt.status().stats.durableDuplicates, 1, 'keep-first over EXACT facts');
+      assert.equal(B.rt.isDurable(socialObservationToEvent(normalizeSocialObservation(neynarEventToRaw(castV('x', 1, 1)).raw, { nowMs: C + 1 }).observation).event.sourceEventId), true);
       assert.equal(socialOf(await events(j)).length, 1);
       B.rt.stop(); await j.releaseWriter();
     });

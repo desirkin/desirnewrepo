@@ -58,7 +58,7 @@ import { createHash } from 'node:crypto';
 import { buildSocialFilter, canonicalIngressTags } from './social.js';
 import { socialIntake } from './social-stream.js';
 import {
-  validateSocialEvent, replaySocialHistory, emptyXState, SOCIAL_OBSERVATION_TYPES,
+  validateSocialEvent, replaySocialHistory, emptyXState,
   xRuleSetEvent, xMeterEvent, xProgressEvent, xGapEvent, xSmokeEvent, SOCIAL_EVENT_TYPE, X_SMOKE_RUN_ID_RE,
 } from './social-settle.js';
 import { createSocialReconciler } from './social-reconcile.js';
@@ -162,7 +162,7 @@ export function createXRuntime({
   const pricing = provider.pricing;
   const universeFilter = filter ?? buildSocialFilter({});
   const reconciler = createSocialReconciler({ provider }); // SOCIAL-4D COMPLETION: version-aware index + ONE native-event matcher
-  const durableIds = { has: (id) => reconciler.isDurable(id), add: (id) => reconciler._markDurableId(id), get size() { return reconciler.size(); } };
+  const durableIds = { has: (id) => reconciler.isDurable(id), get size() { return reconciler.size(); } };
   let x = emptyXState(); // durable X state from the journal
   let state = 'DARK';
   let hydrated = false;
@@ -641,7 +641,11 @@ export function createXRuntime({
         if (!r?.ok) { retainedEnvelopes = envelopes; return { error: `durable lookup unavailable: ${r?.reason ?? 'unknown'}` }; }
         for (const id of r.existing) existing.add(`${type}|${id}`);
       }
-      for (const e of candidates) { if (existing.has(`${e.type}|${e.sourceEventId}`)) { stats.durableDuplicates += 1; if (SOCIAL_OBSERVATION_TYPES.includes(e.type)) durableIds.add(e.sourceEventId); continue; } events.push(e); }
+      // SOCIAL-4D CLOSEOUT: a journal-held id unknown to the hydrated index is a DIVERGENCE, never a
+      // terminal duplicate (existence cannot establish equivalence): the batch stays owed, nothing appends
+      const divergent = candidates.filter((e) => existing.has(`${e.type}|${e.sourceEventId}`)).map((e) => e.sourceEventId);
+      if (divergent.length > 0) { retainedEnvelopes = envelopes; stats.indexDivergences = (stats.indexDivergences ?? 0) + 1; return { error: `DURABLE_INDEX_DIVERGENCE: ${divergent.length} durable Social record(s) unknown to the hydrated index — re-hydrate before settling`, reason: 'INDEX_DIVERGENCE' }; }
+      events.push(...candidates);
     } else events.push(...candidates);
     // meter: only when the conservative count (or the server snapshot) moved
     rollPeriods(knownAtTs);
@@ -671,7 +675,7 @@ export function createXRuntime({
     // terminal smoke truth settles WITH the final evidence, meter, progress, and gap
     if (pendingSmokeTerminal && smokeTerminal === null) { events.push(smokeTerminalEvent(pendingSmokeTerminal)); smokeTerminal = pendingSmokeTerminal; }
     if (pendingActivation?.afterGap) events.push(xRuleSetEvent({ provider: provider.id, ruleSetHash: pendingActivation.ruleSetHash, ruleTags: pendingActivation.ruleTags, coverageEpoch: pendingActivation.coverageEpoch, activatedKnownAtTs: pendingActivation.activatedKnownAtTs, knownAtTs }));
-    pendingBatch = { envelopes, events, meter: meterEv ? { period: meter.period, delivered: meter.delivered, monthPeriod: meter.monthPeriod, monthDelivered: meter.monthDelivered } : null, progress: progressEv, gap: gapEv, activation: pendingActivation ? { ...pendingActivation } : null, smokeActivation, smokeTerminal: smokeTerminal ? { ...smokeTerminal } : null, knownAtTs };
+    pendingBatch = { envelopes, events, meter: meterEv ? { period: meter.period, delivered: meter.delivered, monthPeriod: meter.monthPeriod, monthDelivered: meter.monthDelivered } : null, progress: progressEv, gap: gapEv, activation: pendingActivation ? { ...pendingActivation } : null, smokeActivation, smokeTerminal: smokeTerminal ? { ...smokeTerminal } : null, knownAtTs, scope };
     return pendingBatch;
   }
 
@@ -679,15 +683,15 @@ export function createXRuntime({
     if (!hydrated) return { ok: false, reason: 'NOT_HYDRATED' };
     if (!fenceHeld()) { stop('writer authority lost before settle'); return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
     const batch = await buildBatch(lookup);
-    if (batch.error) { stats.appendFailures += 1; lastError = batch.error; return { ok: false, reason: 'UNAVAILABLE', detail: batch.error }; }
+    if (batch.error) { stats.appendFailures += 1; lastError = batch.error; return { ok: false, reason: batch.reason ?? 'UNAVAILABLE', detail: batch.error }; }
     stats.settles += 1;
-    if (batch.events.length === 0) { intake?.settled(batch.envelopes); pendingBatch = null; return { ok: true, settled: batch.envelopes.length, appended: 0 }; }
+    if (batch.events.length === 0) { reconciler.adopt([], batch.scope); intake?.settled(batch.envelopes); pendingBatch = null; return { ok: true, settled: batch.envelopes.length, appended: 0 }; }
     if (!fenceHeld()) { stop('writer authority lost before append'); return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
     const r = await append(batch.events);
     if (!r?.ok) { stats.appendFailures += 1; lastError = r?.reason ?? 'append failed'; return { ok: false, reason: r?.reason ?? 'UNAVAILABLE' }; }
     // AFTER the durable commit: adopt exactly once, evidence + meter + progress together
     let appended = 0;
-    { const adopted = reconciler.adopt(batch.events); appended = adopted.sources; stats.annotations = (stats.annotations ?? 0) + adopted.annotated; stats.pendingRecords = (stats.pendingRecords ?? 0) + adopted.pendings; }
+    { const adopted = reconciler.adopt(batch.events, batch.scope); appended = adopted.sources; stats.annotations = (stats.annotations ?? 0) + adopted.annotated; stats.pendingRecords = (stats.pendingRecords ?? 0) + adopted.pendings; }
     if (batch.activation) {
       x.ruleSetHash = batch.activation.ruleSetHash; x.coverageEpoch = batch.activation.coverageEpoch; x.activatedKnownAtTs = batch.activation.activatedKnownAtTs; x.ruleTags = batch.activation.ruleTags; x.progressThroughTs = null;
       pendingActivation = null; stats.rulesetEvents += 1;

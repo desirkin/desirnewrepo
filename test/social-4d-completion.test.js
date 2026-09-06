@@ -231,12 +231,13 @@ test('G. Bluesky: same URI/CID/text with seq 10 vs 20 stay distinct; CREATE -> D
   // an offset-less redelivery of seq 10 annotates seq 10 ONLY (never seq 20)
   const r2 = await pipeline({ path: 'bsky_post', history, deliveries: [bsky('2026-09-06T12:00:00', { seq: 10 })] });
   assert.equal(src(r2.appended).length, 0); assert.equal(ann(r2.appended).length, 1); assert.equal(ann(r2.appended)[0].targetEventId, c10.event.sourceEventId); assert.equal(ann(r2.appended)[0].nativeKey.providerEventSeq, 10);
-  // a Bluesky candidate with NO sequence facing candidates: OCCURRENCE_IDENTITY_INSUFFICIENT, no four-field shortcut
+  // a Bluesky candidate with NO sequence facing a known occurrence of the same post version: missing the
+  // discriminator is not proof of a distinct occurrence — OCCURRENCE_IDENTITY_INSUFFICIENT, linked to
+  // the known occurrence, never NEW and never absorbed (SOCIAL-4D CLOSEOUT semantic correction)
   const noSeq = { ...raw('bsky_post', '2026-09-06T12:00:00', { seq: 10 }), providerEventSeq: null };
-  const rec = createSocialReconciler({ provider: BLUESKY_OFFICIAL }); rec.hydrate(replaySocialHistory([{ ...c10.event, providerEventSeq: null, sourceEventId: c10.event.sourceEventId }].map(() => c10.event)));
-  const legacyNoSeq = replaySocialHistory([c10.event]); rec.hydrate(legacyNoSeq);
+  const rec = createSocialReconciler({ provider: BLUESKY_OFFICIAL }); rec.hydrate(replaySocialHistory([c10.event]));
   const o = normalizeSocialObservation(noSeq, { nowMs: LATER }).observation; const scope = rec.batch({ knownAtTs: LATER });
-  const out = rec.reconcile(o, scope); assert.equal(out.kind, 'NEW', 'a different native key (null seq) is a different event, never absorbed into seq 10');
+  const out = rec.reconcile(o, scope); assert.equal(out.kind, 'PENDING', 'a seq-less delivery of a known post version is retained as uncertain, not minted as a second source'); assert.equal(out.reason, 'OCCURRENCE_IDENTITY_INSUFFICIENT'); assert.deepEqual(out.candidateIds, [c10.event.sourceEventId]);
   const rec2 = createSocialReconciler({ provider: BLUESKY_OFFICIAL }); const nullSeqEvent = socialObservationToEvent(normalizeSocialObservation({ ...raw('bsky_post', T_Z), providerEventSeq: null }, { nowMs: NOW }).observation).event;
   rec2.hydrate(replaySocialHistory([nullSeqEvent])); const out2 = rec2.reconcile(o, rec2.batch({ knownAtTs: LATER })); assert.equal(out2.kind, 'PENDING'); assert.equal(out2.reason, 'OCCURRENCE_IDENTITY_INSUFFICIENT');
 });
@@ -248,7 +249,9 @@ test('H. X: the original and the edited current Post id are distinct versions of
   assert.equal(src(r.appended).length, 1, 'only the genuine second edit (102) is a new version'); assert.equal(src(r.appended)[0].nativeVersionId, '102'); assert.equal(src(r.appended)[0].lifecycle, 'EDIT');
   assert.equal(ann(r.appended).length, 2); assert.deepEqual(ann(r.appended).map((a) => a.nativeKey.nativeVersionId).sort(), ['100', '101']); assert.equal(pend(r.appended).length, 0);
   const xr = readFileSync(path.join(REPO, 'rumor2/x-runtime.js'), 'utf8'); assert.ok(xr.indexOf('meterPost(receivedTs') < xr.indexOf('intake.offer(obj'), 'BILL AT THE WIRE precedes any Serpent dedupe/compatibility decision');
-  assert.ok(!xr.includes('providerEventSeq: ') || true); assert.equal(src(r.appended)[0].providerEventSeq, null, 'no numeric cursor is invented for X');
+  assert.ok(xr.includes('cursorOf: null'), 'the X intake is built WITHOUT a provider cursor — no sequence is invented for X');
+  assert.ok(readFileSync(path.join(REPO, 'rumor2/providers/x-official.js'), 'utf8').includes('providerEventSeq: null'), 'the X adapter emits no provider sequence');
+  assert.equal(src(r.appended)[0].providerEventSeq, null, 'no numeric cursor is invented for X'); assert.equal(r.arr.some((e) => e.type === SOCIAL_CURSOR_EVENT_TYPE), false, 'no cursor event exists for X');
 });
 
 test('I. Farcaster: the same cast hash + FID is a supported match; a different hash is a new cast; a recast edge without occurrence identity stays unresolved; no transport is introduced', async () => {
@@ -269,7 +272,7 @@ test('J. a true immutable conflict (same native identity, changed text/relation/
   // two WITNESSED records of the same native version with non-equivalent retained declarations: DECLARATION_CONFLICT
   const v2 = socialObservationToEvent(obs('bsky_post', '2026-09-06T12:00:00.100Z')).event;
   const r2 = await pipeline({ path: 'bsky_post', history: [v2], deliveries: [bsky('2026-09-06T12:00:00.200Z'), bsky('2026-09-06T12:00:00.100000Z'), bsky('2026-09-06T08:00:00.100-04:00')] });
-  assert.equal(src(r2.appended).length, 0); assert.equal(pend(r2.appended).length, 1); assert.equal(pend(r2.appended)[0].reason, 'DECLARATION_CONFLICT'); assert.equal(r2.stats.durableDuplicates + r2.rt._intake().stats().deduped, 2, 'zero padding and an equivalent offset are the SAME instant under the documented rule');
+  assert.equal(src(r2.appended).length, 0); assert.equal(pend(r2.appended).length, 1); assert.equal(pend(r2.appended)[0].reason, 'DECLARATION_CONFLICT'); assert.equal(r2.stats.durableDuplicates + r2.rt._intake().stats().deduped + r2.rt._intake().stats().durableDeduped, 2, 'zero padding and an equivalent offset are the SAME instant under the documented rule (whichever lawful duplicate route concludes it)');
   assert.equal(r2.arr[0].sourceClockWitness.declared, '2026-09-06T12:00:00.100Z', 'the first recorded string stays intact');
 });
 
@@ -310,7 +313,8 @@ test('M. as-of view: before T1 the correction is invisible; at/after T1 it appli
   const r = await pipeline({ path: 'bsky_post', history: [c.event], deliveries: [c.msg], nowMs: T1 }); const a = ann(r.appended)[0]; assert.equal(a.knownAtTs, T1);
   const snapEvent = canonicalJson(c.event); const snapAnn = canonicalJson(a);
   const before = socialTemporalView({ event: c.event, annotations: [a], asOfTs: T1 - 1 }); assert.equal(before.ok, true);
-  assert.equal(before.effective.sourceDeclaredTs, c.event.sourceDeclaredTs, 'no hindsight leakage'); assert.equal(before.effective.provenance, 'LEGACY_NUMERIC_UNVERIFIED'); assert.equal(before.effective.precisionVerified, false); assert.deepEqual(before.appliedAnnotations, []); assert.deepEqual(before.withheldAnnotations, [a.sourceEventId]);
+  assert.equal(before.effective.sourceDeclaredTs, c.event.sourceDeclaredTs, 'no hindsight leakage'); assert.equal(before.effective.provenance, 'LEGACY_NUMERIC_UNVERIFIED'); assert.equal(before.effective.precisionVerified, false); assert.deepEqual(before.appliedAnnotations, []); assert.equal('withheldAnnotations' in before, false, 'no hindsight channel: withheld future records are not exposed'); assert.equal(before.conflict, null);
+  assert.equal(socialTemporalView({ event: c.event, annotations: [a], asOfTs: T0 - 1 }).status, 'NOT_YET_KNOWN', 'before its first-known time the event is not admissible at all');
   const at = socialTemporalView({ event: c.event, annotations: [a], asOfTs: T1 }); assert.deepEqual(at.appliedAnnotations, [a.sourceEventId]); assert.equal(at.effective.sourceDeclaredTs, null); assert.equal(at.effective.sourceClockStatus, 'UNKNOWN'); assert.equal(at.effective.provenance, 'LATER_EVIDENCE_SAME_EVENT'); assert.equal(at.effective.interpretationKnownAtTs, T1);
   assert.equal(at.original.firstKnownAtTs, T0); assert.equal(at.effective.firstKnownAtTs, T0); assert.equal(at.original.sourceDeclaredTs, c.event.sourceDeclaredTs, 'ORIGINAL_RECORDED is untouched');
   const after = socialTemporalView({ event: c.event, annotations: [a], asOfTs: T1 + 86_400_000 }); assert.deepEqual(after.appliedAnnotations, [a.sourceEventId]);

@@ -220,6 +220,43 @@ export const socialNativeKeyDigest = (e) => contentHash(canonicalJson(socialNati
 // EXACT retained text and every immutable non-clock content fact — never the folded
 // similarity textHash alone, never handle/engagement/followers
 export const socialImmutableDigest = (e) => contentHash(canonicalJson({ providerKind: e.providerKind, nativePostId: e.nativePostId, nativeAuthorId: e.nativeAuthorId, lifecycle: e.lifecycle, relation: e.relation, parentNativePostId: e.parentNativePostId ?? null, threadId: e.threadId ?? null, nativeVersionId: e.nativeVersionId ?? null, providerEventSeq: e.providerEventSeq ?? null, text: e.text }));
+// SOCIAL-4D CLOSEOUT — the COARSE occurrence key: the native key WITHOUT its provider
+// sequence discriminator. Used ONLY to detect uncertainty when a required discriminator is
+// absent on either side (missing a discriminator is not proof of a distinct occurrence);
+// never to merge two commits that both carry distinct sequences.
+export const socialCoarseKey = (e) => ({ provider: e.provider, nativePostId: e.nativePostId, nativeAuthorId: e.nativeAuthorId, lifecycle: e.lifecycle, nativeVersionId: e.nativeVersionId ?? null });
+export const socialCoarseKeyDigest = (e) => contentHash(canonicalJson(socialCoarseKey(e)));
+// SOCIAL-4D CLOSEOUT — THE ONE semantic equivalence assessment shared by every route that may
+// conclude "already known / terminal duplicate": the process-local intake cache, the durable
+// fast check, the exact-identity branch of the reconciler, same-batch dedupe, and restart /
+// eviction paths. A sourceEventId alone (or id + witnessHash) never suffices:
+//   1. EXACT immutable non-clock facts must agree (exact text, ids, lifecycle, relation, parent,
+//      thread, native version, sequence) — the folded similarity fingerprint that feeds the
+//      version id cannot authenticate exact text;              else CONFLICT / IMMUTABLE_FACT_CONFLICT
+//   2. an unwitnessed (legacy-shaped) candidate follows the legacy version law;   EQUIVALENT
+//   3. a legacy durable record retained no declaration: the fast paths cannot decide;
+//                                                        UNDETERMINED / LEGACY_DECLARATION_NOT_RETAINED
+//   4. retained source declarations must be equal or equivalent under the policy
+//      (same projection AND remainder);                        else CONFLICT / DECLARATION_CONFLICT
+//   5. a differing provider EVENT clock (delivery diagnostics) follows the first-known policy —
+//      never a new content identity, never a conflict record.  EQUIVALENT
+// Mutable handle / engagement / profile data and acquisition clocks are not consulted (keep-first).
+export const SOCIAL_EQUIVALENCE_VERDICTS = Object.freeze(['EQUIVALENT', 'CONFLICT', 'UNDETERMINED']);
+export function assessSocialEquivalence(existing, candidate) {
+  if (existing === null || typeof existing !== 'object' || candidate === null || typeof candidate !== 'object') return { verdict: 'UNDETERMINED', reason: 'NO_RETAINED_FACTS' };
+  if (typeof existing.immutableDigest !== 'string') return { verdict: 'UNDETERMINED', reason: 'IMMUTABLE_FACTS_UNKNOWN' };
+  if (existing.immutableDigest !== socialImmutableDigest(candidate)) return { verdict: 'CONFLICT', reason: 'IMMUTABLE_FACT_CONFLICT' };
+  if (candidate.schemaVersion !== SOCIAL_EVENT_SCHEMA_VERSION) return { verdict: 'EQUIVALENT', reason: 'LEGACY_VERSION_LAW' };
+  if (existing.format !== 2) return { verdict: 'UNDETERMINED', reason: 'LEGACY_DECLARATION_NOT_RETAINED' };
+  if (existing.witnessHash === candidate.witnessHash) return { verdict: 'EQUIVALENT', reason: 'SAME_WITNESSES' };
+  if (!sameDeclaration(existing.sourceClockWitness, candidate.sourceClockWitness)) return { verdict: 'CONFLICT', reason: 'DECLARATION_CONFLICT' };
+  return { verdict: 'EQUIVALENT', reason: 'PROVIDER_EVENT_FIRST_KNOWN' };
+}
+// two retained declarations name the same instant (equivalent under the policy) or are the
+// same declaration bytes under the same policy (a non-instant declaration redelivered exactly)
+export const sameDeclaration = (a, b) => witnessesEquivalent(a, b) || (!!a && !!b && a.declared === b.declared && a.declaredStatus === b.declaredStatus && a.policy === b.policy && a.policyVersion === b.policyVersion);
+// the compact first-seen record a bounded process-local cache keeps per version id
+export const socialSeenRecord = (o) => Object.freeze({ format: o.schemaVersion === SOCIAL_EVENT_SCHEMA_VERSION ? 2 : 1, immutableDigest: socialImmutableDigest(o), witnessHash: o.witnessHash ?? null, sourceClockWitness: o.sourceClockWitness ?? null, providerEventWitness: o.providerEventWitness ?? null });
 // the bounded temporal interpretation of ONE clock role, derived deterministically from a
 // witness and the TARGET's recorded acquisition clock (never a wall clock)
 export function deriveClockInterpretation({ witness, clockRole, retrievedTs }) {
@@ -229,7 +266,7 @@ export function deriveClockInterpretation({ witness, clockRole, retrievedTs }) {
   return { established: witness.outcome === 'INSTANT', projectionMs: witness.projectionMs, sourceCreatedTs: c.sourceCreatedTs, sourceClockStatus: c.sourceClockStatus, reason: witness.outcome === 'INSTANT' ? 'WITNESSED_DECLARATION' : witness.outcome };
 }
 // the ONE derived-index entry recipe shared by replay and live adoption (never a second truth)
-export const socialIndexEntry = (e) => Object.freeze({ id: e.sourceEventId, type: e.type, format: e.type === SOCIAL_EVENT_V2_TYPE ? 2 : 1, provider: e.provider, nativeKeyDigest: socialNativeKeyDigest(e), immutableDigest: socialImmutableDigest(e), retrievedTs: e.retrievedTs, knownAtTs: e.knownAtTs, sourceDeclaredTs: e.sourceDeclaredTs, sourceCreatedTs: e.sourceCreatedTs, sourceClockStatus: e.sourceClockStatus, providerEventTs: e.providerEventTs, witnessHash: e.type === SOCIAL_EVENT_V2_TYPE ? e.witnessHash : null, sourceClockWitness: e.type === SOCIAL_EVENT_V2_TYPE ? e.sourceClockWitness : null, providerEventWitness: e.type === SOCIAL_EVENT_V2_TYPE ? (e.providerEventWitness ?? null) : null, relation: e.relation });
+export const socialIndexEntry = (e) => Object.freeze({ id: e.sourceEventId, type: e.type, format: e.type === SOCIAL_EVENT_V2_TYPE ? 2 : 1, provider: e.provider, nativeKeyDigest: socialNativeKeyDigest(e), coarseKeyDigest: socialCoarseKeyDigest(e), immutableDigest: socialImmutableDigest(e), providerEventSeq: e.providerEventSeq ?? null, retrievedTs: e.retrievedTs, knownAtTs: e.knownAtTs, sourceDeclaredTs: e.sourceDeclaredTs, sourceCreatedTs: e.sourceCreatedTs, sourceClockStatus: e.sourceClockStatus, providerEventTs: e.providerEventTs, witnessHash: e.type === SOCIAL_EVENT_V2_TYPE ? e.witnessHash : null, sourceClockWitness: e.type === SOCIAL_EVENT_V2_TYPE ? e.sourceClockWitness : null, providerEventWitness: e.type === SOCIAL_EVENT_V2_TYPE ? (e.providerEventWitness ?? null) : null, relation: e.relation });
 export const socialInterpretationIdentity = ({ targetType, targetEventId, clockRole, witness, interpretation }) => `r2si-${contentHash(canonicalJson({ targetType, targetEventId, clockRole, policy: witness.policy, policyVersion: witness.policyVersion, interpretationDigest: contentHash(canonicalJson({ witness, interpretation })) }))}`;
 // Build the annotation for an already-durable TARGET event. `evidence` is the witnessed
 // candidate observation that carries the new declaration (basis NEW_DELIVERY_SAME_EVENT),
@@ -763,6 +800,7 @@ export function replaySocialHistory(events) {
   const annotationIds = new Set();
   const pendingIds = new Set();
   const pendingDigests = new Map();
+  const pendingByTarget = new Map(); // candidate target id -> [pending record] (the as-of view's conflict context)
   let annotated = 0; let pending = 0;
   const indexObservation = (e) => {
     const entry = socialIndexEntry(e);
@@ -820,6 +858,7 @@ export function replaySocialHistory(events) {
       if (prior !== undefined) { if (prior !== digest) return fail('SOCIAL_HISTORY_INVALID: duplicate reconciliation-pending identity with an altered payload — corruption, not replay'); continue; }
       pendingDigests.set(e.sourceEventId, digest);
       pendingIds.add(e.sourceEventId); // NOT a durable source id — never a social source
+      for (const cid of e.candidateIds) { if (!pendingByTarget.has(cid)) pendingByTarget.set(cid, []); pendingByTarget.get(cid).push(e); }
       pending += 1;
       continue;
     }
@@ -888,5 +927,15 @@ export function replaySocialHistory(events) {
     }
     // any other type belongs to the frozen core's own replay/validator
   }
-  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, annotated, pending };
+  // SOCIAL-4D CLOSEOUT diagnostic: targets whose retained SOURCE declarations disagree (two
+  // non-equivalent annotations of one role). Each record is individually valid and stays; the
+  // conflict is surfaced here and by the as-of view — never resolved by arrival order.
+  const annotationConflicts = [];
+  for (const [targetEventId, list] of annotations) {
+    for (const clockRole of SOCIAL_CLOCK_ROLES) {
+      const ofRole = list.filter((a) => a.clockRole === clockRole);
+      if (ofRole.length > 1 && ofRole.some((a) => !sameDeclaration(a.witness, ofRole[0].witness))) annotationConflicts.push({ targetEventId, clockRole, annotationIds: ofRole.map((a) => a.sourceEventId).sort() });
+    }
+  }
+  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingByTarget, annotationConflicts, annotated, pending };
 }

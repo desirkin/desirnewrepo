@@ -1091,6 +1091,81 @@ Production state remains unobserved: nothing was scanned, migrated, repaired, or
 
 ---
 
+## 5J. SOCIAL-4D CLOSEOUT — cursor obligations, identity-conflict routing, annotation consistency, as-of isolation
+
+A repair of §5I, reproduced RED against the untouched 37b2dab runtime with synthetic inputs and
+the in-memory journal (no provider data, no network) before any fix. Nothing here changes provider
+access, retention firewalls, pump doctrine, journal/checkpoint schema, legacy identity recipes, the
+frozen legacy validator, X bill-at-the-wire, or trading authority. Six laws:
+
+**Duplicate receipt is not settlement of the first receipt (`rumor2/social-stream.js`).** The
+intake's cursor obligation is `providerCursor → { owed, dropped }`: every queued envelope owns ONE
+`owed` unit that only `settled()` (or a writer-loss `clear()`) releases; a queue-full drop sets
+`dropped` until its replay is seen. A later delivery at the same cursor that reaches a terminal
+disposition (filtered / skipped / rejected / deduped) refers to the existing obligation and never
+deletes it — it only resolves an outstanding drop replay. `projectedCursor` releases exactly one
+unit per envelope in the batch. A local seen-cache entry is therefore never a durable terminal
+disposition, and a partial drain can no longer persist a cursor past an unsettled earlier frame. X
+carries no numeric cursor and no obligation is invented for it; its queued-work watermark is
+unchanged.
+
+**One semantic equivalence law on every duplicate route
+(`assessSocialEquivalence`, `rumor2/social-settle.js`).** The process-local cache keeps the
+FIRST-SEEN equivalence record (exact immutable digest + retained witnesses), the durable fast
+check, the exact-identity branch of the reconciler, same-batch dedupe, and restart/eviction paths
+all conclude KNOWN / duplicate ONLY when (1) the EXACT immutable non-clock facts agree (a
+case-folded similarity fingerprint cannot authenticate exact text), and (2) retained source
+declarations are equal or equivalent (same projection and remainder). A differing provider EVENT
+clock is delivery diagnostics and follows the first-known policy (no conflict record, no new
+identity). Mutable handle/engagement/profile data and acquisition clocks stay keep-first. A fast
+path that cannot establish equivalence DEFERS (the candidate is enqueued with a `deferred`
+reason, never absorbed, never discarded). A journal lookup that reports an id unknown to the
+hydrated index is an INDEX_DIVERGENCE: existence alone proves nothing, so nothing appends, no
+cursor advances, the batch stays owed, and the runtime reports it until re-hydrated. Reconciled
+marks for legacy targets are applied at ADOPTION, never at reconcile time, so a failed lookup or
+append installs no cache entry.
+
+**Missing a discriminator is not proof of a distinct occurrence (`rumor2/social-reconcile.js`).**
+When the exact native key finds no candidate, the COARSE key (native key without the provider
+sequence) is consulted only to detect uncertainty: a seq-less Bluesky delivery facing any known
+occurrence of the same post version, or a sequenced delivery facing a known occurrence that itself
+lacks its sequence, is retained `OCCURRENCE_IDENTITY_INSUFFICIENT` and linked to every potential
+occurrence — never NEW, never absorbed, never given an invented sequence. Two distinct sequences
+remain two occurrences; a first-ever record with no known occurrence follows the source contract.
+Farcaster recast edges receive the same treatment; no Farcaster transport exists.
+
+**Later arrival is not proof (`annotateOrKnown`).** For a legacy target, a candidate declaration is
+compared with every declaration already retained for that target and clock role — durable
+annotations AND annotations earlier in the same batch. Equivalent (same instant, or the same bytes
+under the same policy version) ⇒ KNOWN, nothing appended; a non-equivalent complete declaration ⇒
+an explicit `DECLARATION_CONFLICT` pending record naming the target, never a second annotation.
+Existing historical annotations are never rewritten or deleted; `replaySocialHistory` accepts a
+pre-closeout history that carries two disagreeing annotations, reports it in
+`annotationConflicts`, and exposes `pendingByTarget` as the view's conflict context. A policy-version
+reinterpretation of retained bytes is a different interpretation (never silently equal); an
+unsupported witness version is refused at normalization and at annotation validation.
+
+**Base-event admissibility precedes annotation selection (`rumor2/social-view.js`).** Before the
+event's own first-known time `socialTemporalView` returns `status: NOT_YET_KNOWN` with no
+ORIGINAL/EFFECTIVE data; source, declaration and provider clocks grant no earlier admissibility and
+`firstKnownAtTs` is never backdated. The view exposes nothing about withheld future records (no ids,
+no counts). When the eligible retained SOURCE declarations disagree (non-equivalent annotations, or
+an eligible `DECLARATION_CONFLICT` record against this event), the effective source clock is
+`UNRESOLVED_CONFLICT` with provenance `CONFLICTING_DECLARATIONS`, no winning declaration, and
+`conflict.knownAtTs` = when the disagreement became known; before that time the earlier retained
+declaration applies unchanged. Provider-event annotations apply first-known.
+
+**Views are detached, deep-frozen snapshots.** Inputs (including JSON-deserialized journal rows)
+are cloned before use and never frozen or mutated; every nested witness/interpretation reachable
+from `original` or `effective` is frozen; original and effective cannot contaminate each other.
+
+Expectation changes in existing tests, each required by these laws: the missing-sequence
+candidate in the completion suite's group G is PENDING (was NEW); group H's tautological
+assertion was replaced by concrete checks (no provider cursor for X, no sequence in the X adapter,
+no cursor event); group J and N count every lawful duplicate route; group M no longer asserts a
+withheld-annotation id list; RT-PG-3 expects the honest INDEX_DIVERGENCE refusal followed by a
+KNOWN settle after re-hydration instead of a silent "learned" duplicate.
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -1134,6 +1209,9 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   activation still needs this account's Neynar plan/credits, readable terms, retention/deletion
   answers, an acquisition path (search polling proposed), overlap/gap law, and first-known
   diagnostics — none assumed.
+- **SOCIAL-4D CLOSEOUT — DONE (§5J):** cursor obligations owned by envelopes, one equivalence law
+  on every duplicate route, missing-discriminator uncertainty, no last-wins corrections, as-of
+  base-event admissibility, detached views. A repair, not a rollout; further defects may exist.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.
