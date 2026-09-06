@@ -49,14 +49,16 @@ export function socialIntake({ provider, mapCommit, filter, now = () => Date.now
     // bounded universe filter — no silent all-network intake (§24)
     const fm = socialFilterMatches(filter, { text: o.text, nativeAuthorId: o.nativeAuthorId });
     if (!fm.match) { stats.filtered += 1; return { outcome: 'filtered' }; }
-    // dedupe by immutable native identity; an altered re-delivery of the same
-    // native id is CORRUPTION (same id, different metaHash), never a new post (§41)
-    if (seen.has(o.socialSourceId)) {
-      if (seen.get(o.socialSourceId) !== o.metaHash) { stats.corrupt += 1; return { outcome: 'corrupt', reason: 'same native id, altered payload' }; }
+    // dedupe by VERSION identity: the same version re-delivered collapses to
+    // one truth; a legitimate EDIT is a new version (new id) and is admitted; an
+    // altered re-delivery of the SAME version (same id, different metaHash) is
+    // CORRUPTION, never silently accepted (§10/§19/§22/§41).
+    if (seen.has(o.socialVersionId)) {
+      if (seen.get(o.socialVersionId) !== o.metaHash) { stats.corrupt += 1; return { outcome: 'corrupt', reason: 'same version, altered payload' }; }
       stats.deduped += 1; return { outcome: 'deduped' };
     }
     if (queue.length >= maxQueue) { stats.dropped += 1; return { outcome: 'dropped', reason: 'queue full (backpressure)' }; }
-    remember(o.socialSourceId, o.metaHash);
+    remember(o.socialVersionId, o.metaHash);
     queue.push(o);
     stats.enqueued += 1;
     return { outcome: 'enqueued', observation: o, matchedBy: fm.reasons };

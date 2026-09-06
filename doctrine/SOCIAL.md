@@ -127,24 +127,52 @@ API blobs, no unbounded fields. Key pieces:
 
 ---
 
-## 5. Durability (frozen event root, writer epoch)
+## 5. Durability (frozen event root, writer epoch) — SOCIAL-1 closeout
 
-`rumor2/social-settle.js` maps a normalized social observation into the frozen
-`RUMOR2_SOURCE_OBSERVED` event (evidence-only, like EDGAR/OFAC), settling through
-the **same** PostgreSQL journal under the **same** advisory-lock writer + database
-writer epoch. `test/social-durable.test.js` proves against real PostgreSQL that a
-social event appends only under a held writer epoch, is refused without one, and
-collapses an exact re-append (crash-safe restart) — with **no new migration**
-(schema 7 stands), **no parallel table**, and **no social-specific checkpoint**.
+`rumor2/social-settle.js` maps a normalized social observation into a **closed,
+versioned `RUMOR2_SOCIAL_OBSERVED` event** that settles through the **same**
+PostgreSQL RUMOR journal, under the **same** advisory-lock writer + database
+writer epoch (no parallel engine, no parallel table, no social checkpoint). A
+dedicated social event — rather than the generic `RUMOR2_SOURCE_OBSERVED` —
+preserves the provenance SOCIAL-5 will need (author identity, repost/reply/quote
+relationship, thread identity, native version/CID, lifecycle) that the generic
+11-key source event would silently drop. It lives entirely in the social layer
+with its own closed validator (`validateSocialEvent`) and replay witness
+(`reconstructSocialWitness`); the frozen `truth.js` validators are **untouched**,
+so all frozen non-social semantics and tests are unchanged.
 
-**Checkpoint/version decision:** SOCIAL-1 makes **no** checkpoint-version change.
-Social evidence rides the existing event schema; the durable proof is at the
-journal + writer-epoch layer. Registering the active social provider into the
-checkpoint provider set (an explicit v4→v5 migration) and auto-draining the ear
-inside the single-writer collector are the **remaining SOCIAL-1→SOCIAL-2 boundary**
-(see below) — deliberately deferred so the frozen claim-graph collector, checkpoint,
-and event validators are **not** modified in this ticket (zero-regression: SOCIAL-1
-adds only new files).
+Durable facts preserved: `socialSourceId` (stable post identity), `provider`,
+`providerKind`, `nativePostId`, `nativeAuthorId`, `socialAuthorId`, `lifecycle`
+(CREATE/EDIT/DELETE/TOMBSTONE), `relation`, `parentNativePostId`, `threadId`,
+`nativeVersionId` (CID where the provider supplies one), `handle`, `text`,
+`textHash`, `metaHash`, first-known `engagement`, and the three point-in-time
+clocks. Every identity is **re-derived** on validation — a forged id cannot
+authenticate altered facts.
+
+**Post identity vs version (§10):** `socialSourceId` is the stable post identity
+(`provider`+`nativePostId`); the event's `sourceEventId` is a distinct **version
+identity** derived from the native version id (CID) when present, else the content
+hash. A legitimate edit (new CID) is a new version; an altered re-delivery of the
+**same** version collapses to the same id and is caught as corruption by the ear
+and the journal. Edits/deletions are appended as new lifecycle versions —
+original truth is never rewritten. Engagement is the **first-known snapshot only**
+(diagnostic propagation metadata, never confirmation, never trade authority);
+later mutation is deferred to a future versioned metrics event.
+
+`test/social-durable.test.js` (real PostgreSQL) proves: round-trip with all facts
+intact + identities re-derived; the writer-epoch fence applies (no epoch → refused);
+duplicate delivery collapses to one truth; repost/edit/delete survive restart; a
+Farcaster cast round-trips (hash/FID/recast); forgery/undeclared fields reject;
+and point-in-time is preserved. **No new migration** (schema 7 stands); **no**
+checkpoint-version change.
+
+**Checkpoint/version decision:** SOCIAL-1 makes **no** checkpoint-version change
+and does **not** register social providers into the checkpoint provider set. The
+durable social event and its validator are the READY contract; **auto-draining**
+the Bluesky ear inside the single-writer collector (operational activation) is the
+**SOCIAL-2 boundary** — deferred so the frozen collector/checkpoint/claim-graph are
+not modified here. When auto-drain activates, the collector's replay must learn to
+carry `RUMOR2_SOCIAL_OBSERVED` events (source-only, no graph/claim effect).
 
 ---
 

@@ -44,6 +44,7 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
   const rkey = payload.rkey ?? payload.commit?.rkey;
   const operation = payload.operation ?? payload.commit?.operation;
   const record = payload.record ?? payload.commit?.record ?? null;
+  const cid = payload.cid ?? payload.commit?.cid ?? null; // content id = the immutable record VERSION (changes on edit)
   const eventTime = payload.time ?? null; // ISO string of the commit event
   if (!isStr(did) || !isStr(collection) || !isStr(rkey) || !isStr(operation)) return { skip: true, reason: 'incomplete commit' };
   if (collection !== BLUESKY_OFFICIAL.postCollection && collection !== BLUESKY_OFFICIAL.repostCollection) return { skip: true, reason: `collection ${collection} not wanted` };
@@ -60,7 +61,7 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
         text: '', relation: collection === BLUESKY_OFFICIAL.repostCollection ? 'REPOST' : 'ORIGINAL',
         parentNativePostId: null, editState: 'TOMBSTONED',
-        canonicalUrl: null, threadId: null, handle: null,
+        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null,
         sourceCreatedTs: Number.isFinite(eventMs) ? eventMs : Date.now(),
         engagement: null, authorMeta: null,
       },
@@ -79,7 +80,7 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
         text: '', relation: 'REPOST', parentNativePostId: subjUri,
         editState: operation === 'update' ? 'EDITED' : 'ORIGINAL',
-        canonicalUrl: null, threadId: null, handle: null,
+        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null,
         sourceCreatedTs: Number.isFinite(created) ? created : Date.now(),
         engagement: null, authorMeta: null,
       },
@@ -105,6 +106,7 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
       editState: operation === 'update' ? 'EDITED' : 'ORIGINAL',
       canonicalUrl: `https://bsky.app/profile/${did}/post/${rkey}`,
       threadId: isStr(replyRoot) ? replyRoot : nativePostId,
+      nativeVersionId: isStr(cid) ? cid : null, // the record CID = this post's immutable version
       handle: null, // Jetstream commits carry the DID, not the handle; resolved elsewhere if needed
       sourceCreatedTs: Number.isFinite(created) ? created : Date.now(),
       engagement: null, // Jetstream post commits carry no engagement counts

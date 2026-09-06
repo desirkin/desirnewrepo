@@ -115,6 +115,24 @@ export function socialAuthorIdentity({ provider, nativeAuthorId }) {
 export const R2SS_RE = /^r2ss-[0-9a-f]{40}$/;
 export const R2SA_RE = /^r2sa-[0-9a-f]{40}$/;
 
+// ---- lifecycle & version identity (post identity vs post version) — §10 ----
+// A native post keeps a STABLE post identity (socialSourceId) across its life,
+// while each CREATE / EDIT / DELETE / TOMBSTONE is a distinct VERSION event.
+export const SOCIAL_LIFECYCLE_STATES = Object.freeze(['CREATE', 'EDIT', 'DELETE', 'TOMBSTONE']);
+const LIFECYCLE_BY_EDIT = Object.freeze({ ORIGINAL: 'CREATE', EDITED: 'EDIT', DELETED: 'DELETE', TOMBSTONED: 'TOMBSTONE' });
+export const lifecycleForEditState = (e) => LIFECYCLE_BY_EDIT[e] ?? 'CREATE';
+// Version/lifecycle identity. Basis is the provider-native IMMUTABLE version id
+// (e.g. a Bluesky record CID) when present, else the content hash. So a
+// legitimate EDIT (new cid / new content) is a NEW version, while an altered
+// re-delivery of the SAME version (same cid, different payload) collapses to
+// the same version id and is caught as corruption by the journal / ear. This
+// is deterministic and replay-stable — it never uses wall-clock. (§10/§19/§22)
+export function socialVersionIdentity({ socialSourceId, lifecycle, nativeVersionId, textHash }) {
+  const basis = typeof nativeVersionId === 'string' && nativeVersionId.length > 0 ? `cid:${nativeVersionId}` : `txt:${textHash ?? ''}`;
+  return `r2sv-${contentHash(canonicalJson({ socialSourceId, lifecycle, basis }))}`;
+}
+export const R2SV_RE = /^r2sv-[0-9a-f]{40}$/;
+
 // ---- point-in-time clocks — §7 ---------------------------------------------
 // knownAtTs is ALWAYS the moment Serpent actually held the record (retrieval),
 // NEVER the post's creation time. In replay the caller supplies the replay
@@ -213,6 +231,12 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   if (canonicalUrl !== null && !isNonEmptyStr(canonicalUrl, MAX_SOCIAL_URL_CHARS)) return { reject: true, reason: 'canonicalUrl invalid' };
   const threadId = raw.threadId ?? null;
   if (threadId !== null && !isNonEmptyStr(threadId, MAX_NATIVE_ID_CHARS)) return { reject: true, reason: 'threadId invalid' };
+  // a provider-native IMMUTABLE version identifier (e.g. a Bluesky record CID)
+  // where the platform supplies one — it distinguishes an EDIT (a new version
+  // of the same post) from an altered re-delivery of the SAME version (§10).
+  // null when the provider has no version concept (e.g. Farcaster casts).
+  const nativeVersionId = raw.nativeVersionId ?? null;
+  if (nativeVersionId !== null && !isNonEmptyStr(nativeVersionId, MAX_NATIVE_ID_CHARS)) return { reject: true, reason: 'nativeVersionId invalid' };
   // point-in-time: creation must be a finite ms; future creation (beyond now)
   // fails closed — a source clock cannot postdate our retrieval. (§7/§42)
   const created = raw.sourceCreatedTs;
@@ -233,15 +257,18 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   // re-delivery with altered facts be detected as corruption downstream
   const metaHash = contentHash(canonicalJson({
     provider, providerKind, nativePostId, nativeAuthorId, relation, parentNativePostId,
-    sourceCreatedTs: clocks.sourceCreatedTs, textHash: hash,
+    sourceCreatedTs: clocks.sourceCreatedTs, textHash: hash, editState, nativeVersionId,
   }));
+  const lifecycle = lifecycleForEditState(editState);
+  const socialVersionId = socialVersionIdentity({ socialSourceId, lifecycle, nativeVersionId, textHash: hash });
   return {
     ok: true,
     observation: Object.freeze({
       provider, providerKind, nativePostId, nativeAuthorId,
       socialSourceId, socialAuthorId, handle, displayName,
       text: raw.text, normalizedText: normalized, textHash: hash,
-      canonicalUrl, threadId, parentNativePostId, relation, editState,
+      canonicalUrl, threadId, parentNativePostId, relation, editState, lifecycle,
+      nativeVersionId, socialVersionId,
       sourceCreatedTs: clocks.sourceCreatedTs, retrievedTs: clocks.retrievedTs, knownAtTs: clocks.knownAtTs,
       engagement, authorMeta, metaHash,
     }),

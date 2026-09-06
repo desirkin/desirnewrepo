@@ -1,60 +1,165 @@
-// SOCIAL-1 — the durable BRIDGE from a normalized social observation to the
-// FROZEN RUMOR-2 event root. Social evidence does NOT get a parallel engine, a
-// parallel table, or a social-specific checkpoint (§0/§34/§35): it settles as a
-// standard RUMOR2_SOURCE_OBSERVED event through the SAME PostgreSQL journal,
-// under the SAME advisory-lock writer + database writer epoch. A social ear is
-// an EVIDENCE source only — like EDGAR/OFAC it produces a bare source
-// observation and never a typed claim (its providerKind is not claim-capable),
-// so it can never reach Attention/HYPED/eligibility/score/sizing/execution.
+// SOCIAL-1 closeout — the durable social event bridge. A normalized social
+// observation settles as a CLOSED, VALIDATED RUMOR2_SOCIAL_OBSERVED event that
+// rides the SAME frozen PostgreSQL RUMOR journal, under the SAME advisory-lock
+// writer + database writer epoch (§6/§34/§35). No parallel engine, no parallel
+// table, no social-specific checkpoint.
 //
-// This module is PURE: it maps an observation to the exact frozen event shape
-// and its immutable identity facts, using the frozen sourceObservationIdentity
-// so the settled event re-derives its own r2s id forever. The observation's
-// strong native-id identity + altered-payload corruption law are enforced
-// upstream at the ear (socialIntake); this layer preserves the evidence.
-import { sourceObservationIdentity, MAX_SUMMARY_CHARS, MAX_TITLE_CHARS } from './truth.js';
+// Why a dedicated social event and not the generic RUMOR2_SOURCE_OBSERVED:
+// the generic source event is a CLOSED 11-key schema that would silently drop
+// author identity, repost/reply/quote relationships, thread identity, native
+// version/CID, and lifecycle (edit/delete) — exactly the provenance SOCIAL-5
+// will need. Rather than loosen the frozen non-social event (which would touch
+// frozen semantics), social evidence gets its OWN closed, versioned event and
+// its OWN closed validator, living entirely in the social layer. The frozen
+// truth.js validators are untouched. This event is EVIDENCE ONLY: it carries a
+// non-claim-capable providerKind and can never mint a claim, packet, or trade.
+//
+// Post identity vs version (§10): socialSourceId is the STABLE post identity;
+// sourceEventId is the VERSION identity (a distinct CREATE/EDIT/DELETE/TOMBSTONE
+// event). A legitimate edit is a new version; an altered re-delivery of the same
+// version is corruption (caught by the journal's identity/payload law).
+import { contentHash, canonicalJson } from './truth.js';
+import {
+  socialSourceIdentity, socialAuthorIdentity, socialVersionIdentity, lifecycleForEditState,
+  normalizeSocialText, SOCIAL_RELATION_KINDS, ECHO_RELATIONS, SOCIAL_LIFECYCLE_STATES,
+  R2SS_RE, R2SA_RE, R2SV_RE, MAX_SOCIAL_TEXT_CHARS, MAX_NATIVE_ID_CHARS, MAX_SOCIAL_HANDLE_CHARS,
+} from './social.js';
+import { socialProviderById } from './social-registry.js';
 
-const clip = (s, n) => (typeof s === 'string' ? s.slice(0, n) : '');
+export const SOCIAL_EVENT_TYPE = 'RUMOR2_SOCIAL_OBSERVED';
 
-// Map a normalized social observation (from rumor2/social.js) to the immutable
-// identity facts the frozen event root authenticates. nativePostId rides as the
-// guid (the immutable provider-native id); the canonical URL as the link; the
-// post creation time as publishedTs; the post text as the bounded summary. A
-// non-empty title is required by the frozen schema, so an empty-text repost/
-// tombstone gets a synthetic bracket label.
-export function socialIdentityFacts(observation) {
-  const text = clip(observation.text, MAX_SUMMARY_CHARS);
-  const title = text.trim().length > 0
-    ? clip(text, MAX_TITLE_CHARS)
-    : `[${observation.editState === 'TOMBSTONED' ? 'TOMBSTONED' : observation.relation}]`;
-  return {
-    provider: observation.provider,
-    guid: clip(observation.nativePostId, 500) || null,
-    link: observation.canonicalUrl ?? null,
-    publishedTs: Number.isFinite(observation.sourceCreatedTs) ? observation.sourceCreatedTs : null,
-    title,
-    summary: text,
-  };
-}
+// the CLOSED durable schema — no undeclared field ever enters the journal
+export const SOCIAL_EVENT_KEYS = Object.freeze([
+  'type', 'ts', 'sourceEventId', 'provider', 'providerKind',
+  'socialSourceId', 'nativePostId', 'nativeAuthorId', 'socialAuthorId',
+  'lifecycle', 'relation', 'parentNativePostId', 'threadId', 'nativeVersionId', 'handle',
+  'text', 'textHash', 'metaHash', 'engagement',
+  'sourceCreatedTs', 'retrievedTs', 'knownAtTs',
+]);
 
-// The full frozen RUMOR2_SOURCE_OBSERVED event (the closed 11-key schema) plus
-// the identity facts, ready to append through rumor2JournalStore under the
-// writer epoch. sourceEventId is the re-derivable frozen source identity.
-export function socialObservationToSourceEvent(observation) {
-  const facts = socialIdentityFacts(observation);
-  const sourceEventId = sourceObservationIdentity(facts);
+const isStr = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+const isTs = (v) => Number.isSafeInteger(v);
+const iso = (ms) => new Date(ms).toISOString();
+
+// Build the durable event from a normalized observation. sourceEventId is the
+// version identity, so the journal collapses exact re-appends and rejects an
+// altered re-delivery of the same version, while an edit is a new version.
+export function socialObservationToEvent(observation) {
   const event = {
-    type: 'RUMOR2_SOURCE_OBSERVED',
-    ts: new Date(observation.knownAtTs).toISOString(),
-    sourceEventId,
+    type: SOCIAL_EVENT_TYPE,
+    ts: iso(observation.knownAtTs),
+    sourceEventId: observation.socialVersionId,
     provider: observation.provider,
-    title: facts.title,
-    summary: facts.summary,
-    link: facts.link,
-    guid: facts.guid,
-    publishedTs: facts.publishedTs,
+    providerKind: observation.providerKind,
+    socialSourceId: observation.socialSourceId,
+    nativePostId: observation.nativePostId,
+    nativeAuthorId: observation.nativeAuthorId,
+    socialAuthorId: observation.socialAuthorId,
+    lifecycle: observation.lifecycle,
+    relation: observation.relation,
+    parentNativePostId: observation.parentNativePostId ?? null,
+    threadId: observation.threadId ?? null,
+    nativeVersionId: observation.nativeVersionId ?? null,
+    handle: observation.handle ?? null,
+    text: observation.text,
+    textHash: observation.textHash,
+    metaHash: observation.metaHash,
+    // §13: FIRST-KNOWN engagement snapshot only — diagnostic propagation
+    // metadata, never confirmation, never trade authority. Later mutation is a
+    // separate concern (a future versioned SOCIAL_METRICS event), never a
+    // mutation of this immutable observation.
+    engagement: observation.engagement ?? null,
+    sourceCreatedTs: observation.sourceCreatedTs,
     retrievedTs: observation.retrievedTs,
     knownAtTs: observation.knownAtTs,
   };
-  return { event, identityFacts: facts, sourceEventId };
+  return { event, socialSourceId: observation.socialSourceId, socialAuthorId: observation.socialAuthorId, versionId: observation.socialVersionId };
+}
+
+const exactKeys = (obj, allowed) => {
+  for (const k of Object.keys(obj)) if (!allowed.includes(k)) return `undeclared field '${k}'`;
+  for (const k of allowed) if (!(k in obj)) return `missing field '${k}'`;
+  return null;
+};
+
+const okEngagement = (e) => {
+  if (e === null) return true;
+  if (typeof e !== 'object' || Array.isArray(e)) return false;
+  for (const [k, v] of Object.entries(e)) {
+    if (!['likes', 'reposts', 'replies', 'quotes', 'views', 'upvotes'].includes(k)) return false;
+    if (v !== null && (!Number.isSafeInteger(v) || v < 0)) return false;
+  }
+  return true;
+};
+
+// CLOSED validation of a durable social event. Every derivable identity is
+// RE-DERIVED (never trusted from its shape): a syntactically valid but forged
+// r2ss-/r2sa-/r2sv- id dies here. `socialProviderIds` (from the social
+// registry) pins the provider set; providerKind must match the registry so a
+// social event can never claim a claim-capable kind. (§9/§15/§22)
+export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
+  if (event === null || typeof event !== 'object' || Array.isArray(event)) return 'social event: not an object';
+  const kErr = exactKeys(event, SOCIAL_EVENT_KEYS);
+  if (kErr) return `social event: ${kErr}`;
+  if (event.type !== SOCIAL_EVENT_TYPE) return 'social event: wrong type';
+  if (!isStr(event.provider, 100)) return 'social event: provider invalid';
+  if (socialProviderIds && !socialProviderIds.includes(event.provider)) return `social event: ${event.provider} not a registered social provider`;
+  const meta = socialProviderById(event.provider);
+  if (meta && event.providerKind !== meta.providerKind) return 'social event: providerKind disagrees with the social registry';
+  if (!isStr(event.nativePostId, MAX_NATIVE_ID_CHARS)) return 'social event: nativePostId invalid';
+  if (!isStr(event.nativeAuthorId, MAX_NATIVE_ID_CHARS)) return 'social event: nativeAuthorId invalid';
+  // identities RE-DERIVED from immutable facts — forged ids die here
+  if (!R2SS_RE.test(event.socialSourceId) || event.socialSourceId !== socialSourceIdentity({ provider: event.provider, nativePostId: event.nativePostId }))
+    return 'social event: socialSourceId is not the derived post identity';
+  if (!R2SA_RE.test(event.socialAuthorId) || event.socialAuthorId !== socialAuthorIdentity({ provider: event.provider, nativeAuthorId: event.nativeAuthorId }))
+    return 'social event: socialAuthorId is not the derived author identity';
+  if (!SOCIAL_LIFECYCLE_STATES.includes(event.lifecycle)) return 'social event: unknown lifecycle';
+  if (event.lifecycle !== lifecycleForEditState(({ CREATE: 'ORIGINAL', EDIT: 'EDITED', DELETE: 'DELETED', TOMBSTONE: 'TOMBSTONED' })[event.lifecycle]))
+    return 'social event: lifecycle not a canonical value';
+  if (event.nativeVersionId !== null && !isStr(event.nativeVersionId, MAX_NATIVE_ID_CHARS)) return 'social event: nativeVersionId invalid';
+  if (typeof event.text !== 'string' || event.text.length > MAX_SOCIAL_TEXT_CHARS) return 'social event: text invalid';
+  if (event.textHash !== contentHash(normalizeSocialText(event.text))) return 'social event: textHash is not the derived content hash';
+  // version identity RE-DERIVED — an altered version basis cannot ride a real id
+  if (!R2SV_RE.test(event.sourceEventId) || event.sourceEventId !== socialVersionIdentity({ socialSourceId: event.socialSourceId, lifecycle: event.lifecycle, nativeVersionId: event.nativeVersionId, textHash: event.textHash }))
+    return 'social event: sourceEventId is not the derived version identity';
+  if (!/^[0-9a-f]{40}$/.test(event.metaHash)) return 'social event: metaHash invalid';
+  if (!SOCIAL_RELATION_KINDS.includes(event.relation)) return 'social event: unknown relation';
+  if (event.parentNativePostId !== null && !isStr(event.parentNativePostId, MAX_NATIVE_ID_CHARS)) return 'social event: parentNativePostId invalid';
+  if (ECHO_RELATIONS.includes(event.relation) || event.relation === 'REPLY') {
+    if (event.parentNativePostId === null) return `social event: ${event.relation} without a parent`;
+  }
+  if (event.threadId !== null && !isStr(event.threadId, MAX_NATIVE_ID_CHARS)) return 'social event: threadId invalid';
+  if (event.handle !== null && !isStr(event.handle, MAX_SOCIAL_HANDLE_CHARS)) return 'social event: handle invalid';
+  if (!isTs(event.sourceCreatedTs) || !isTs(event.retrievedTs) || !isTs(event.knownAtTs)) return 'social event: clock invalid';
+  if (event.sourceCreatedTs > event.retrievedTs) return 'social event: created after retrieved';
+  if (event.retrievedTs > event.knownAtTs) return 'social event: retrieved after known';
+  if (event.ts !== iso(event.knownAtTs)) return 'social event: ts disagrees with knownAtTs';
+  if (!okEngagement(event.engagement)) return 'social event: engagement invalid';
+  return null;
+}
+
+// Reconstruct the canonical social provenance witness from a durable event —
+// what replay hands SOCIAL-5. No important identity/relationship/version/
+// lifecycle fact is lost across the journal boundary. (§16)
+export function reconstructSocialWitness(event) {
+  return {
+    socialSourceId: event.socialSourceId,
+    socialAuthorId: event.socialAuthorId,
+    provider: event.provider,
+    providerKind: event.providerKind,
+    nativePostId: event.nativePostId,
+    nativeAuthorId: event.nativeAuthorId,
+    lifecycle: event.lifecycle,
+    relation: event.relation,
+    parentNativePostId: event.parentNativePostId,
+    threadId: event.threadId,
+    nativeVersionId: event.nativeVersionId,
+    versionId: event.sourceEventId,
+    handle: event.handle,
+    text: event.text,
+    sourceCreatedTs: event.sourceCreatedTs,
+    retrievedTs: event.retrievedTs,
+    knownAtTs: event.knownAtTs,
+    engagement: event.engagement,
+  };
 }

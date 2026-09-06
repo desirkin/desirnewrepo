@@ -1,7 +1,15 @@
-// RUMOR-2A drills — DARK MEANS DARK. The rumor layer holds zero attention,
-// HYPED, stalking, eligibility, brain, Socrates, STRIKE, or execution
-// authority; no order path can read it; no X, Reddit, media, model, or
-// GHOST adapter exists; and the working RUMINT ear is untouched.
+// RUMOR-2 authority drills — TWO TIERS (SOCIAL-1 closeout).
+//   3A FROZEN NON-SOCIAL CORE: DARK MEANS DARK. The frozen rumor core holds
+//      zero attention/HYPED/stalking/eligibility/Socrates/STRIKE/execution
+//      authority and contains NO social/X/Reddit/media/model/GHOST adapter.
+//   3B SOCIAL RUMOR FILES: social evidence code MAY exist inside the rumor
+//      layer (Bluesky/Farcaster ears, the access census, the durable social
+//      event) — but it has ZERO direct authority: not claim-capable, imports
+//      no execution/trading/Socrates module, changes no Attention/HYPED/
+//      eligibility, creates no order.
+//   The invariant evolved from "SOCIAL MUST NOT EXIST" to "SOCIAL MAY EXIST,
+//   BUT SOCIAL MUST HAVE ZERO DIRECT AUTHORITY." Existence is allowed;
+//   authority is not. This is a SEMANTIC test, not a word-ban contest.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
@@ -10,6 +18,10 @@ import path from 'node:path';
 
 import { PROVIDERS, PROVIDER_IDS } from '../rumor2/registry.js';
 import { startRumor2 } from '../rumor2/collector.js';
+import { classifyOfficialItem } from '../rumor2/truth.js';
+import { SOCIAL_PROVIDER_KINDS, normalizeSocialObservation } from '../rumor2/social.js';
+import { SOCIAL_PROVIDERS, SOCIAL_PROVIDER_IDS, socialProviderById } from '../rumor2/social-registry.js';
+import { socialObservationToEvent, validateSocialEvent, SOCIAL_EVENT_TYPE } from '../rumor2/social-settle.js';
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
@@ -26,6 +38,12 @@ const code = (f) =>
     .join('\n');
 const rumor2Files = tracked.filter((f) => f.startsWith('rumor2/'));
 assert.ok(rumor2Files.length >= 8, 'the rumor2 layer is actually scanned');
+// TIER SPLIT: the intentional SOCIAL-1 surface vs the frozen non-social core.
+const SOCIAL_FILE_RE = /(^|\/)social[a-z0-9-]*\.js$|\/providers\/(bluesky|farcaster)-official\.js$/;
+const socialFiles = rumor2Files.filter((f) => SOCIAL_FILE_RE.test(f));
+const frozenCoreFiles = rumor2Files.filter((f) => !SOCIAL_FILE_RE.test(f));
+assert.ok(socialFiles.length >= 6, 'the social surface is actually scanned');
+assert.ok(frozenCoreFiles.length >= 8, 'the frozen non-social core is actually scanned');
 
 test('R2A-71+72. RUMOR-2 does not modify Attention or HYPED', () => {
   // no rumor2 file imports or touches the attention/UI/hyped surfaces
@@ -39,8 +57,8 @@ test('R2A-71+72. RUMOR-2 does not modify Attention or HYPED', () => {
   }
 });
 
-test('R2A-73+74. RUMOR-2 does not arm stalking or alter eligibility', () => {
-  for (const f of rumor2Files) {
+test('R2A-73+74 (frozen core). the frozen non-social core does not arm stalking or alter eligibility', () => {
+  for (const f of frozenCoreFiles) {
     const src = code(f);
     assert.ok(!/stalk|armStalk|eligib/i.test(src), `${f} carries no stalking/eligibility semantics`);
   }
@@ -67,8 +85,8 @@ test('R2A-76+77. STRIKE-capable and order-path modules never read RUMOR-2', () =
   assert.deepEqual(importers.sort(), ['fly.js'], 'exactly one wiring point — the composition root');
 });
 
-test('R2A-78. no network/model call exists outside the explicit official feed clients', () => {
-  for (const f of rumor2Files) {
+test('R2A-78 (frozen core). no network/model call exists in the frozen core outside the official feed clients', () => {
+  for (const f of frozenCoreFiles) {
     const src = read(f);
     if (f !== 'rumor2/http.js' && f !== 'rumor2/collector.js')
       assert.ok(!src.includes('fetch('), `${f} performs no network call`);
@@ -91,7 +109,9 @@ test('R2A-79+80+81. no X, Reddit, or news-media adapter exists', () => {
     assert.equal(p.authorityClass, 'OFFICIAL');
     assert.ok(p.feedUrl.startsWith('https://'), 'HTTPS only');
   }
-  for (const f of rumor2Files) {
+  // the FROZEN non-social core still contains NO social/media source token —
+  // social names are permitted only in the intentional social files (tier 3B).
+  for (const f of frozenCoreFiles) {
     const src = code(f).toLowerCase();
     for (const banned of ['twitter', 'x.com', 'reddit', 'reuters', 'bloomberg', 'cnbc', 'coindesk', 'decrypt.co', 'telegram', 'discord', 'tiktok', 'facebook'])
       assert.ok(!src.includes(banned), `${f}: contains banned 2A source ${banned}`);
@@ -107,6 +127,54 @@ test('R2A-82+83. SOCRATES-0 and GHOST-1 remain absent', () => {
     const src = code(f).toLowerCase();
     for (const g of ['certificate transparency', 'subdomain', 'dns probe']) assert.ok(!src.includes(g), `${f}: GHOST scope ${g}`);
   }
+});
+
+// ===== TIER 3B — SOCIAL RUMOR: EXISTENCE ALLOWED, ZERO DIRECT AUTHORITY =====
+test('R2A-SOCIAL-1. every social providerKind is classifier-null — not claim-capable (Bluesky & Farcaster included)', () => {
+  for (const kind of SOCIAL_PROVIDER_KINDS)
+    assert.equal(classifyOfficialItem({ providerKind: kind, title: 'FOO lists on Kraken', summary: 'trading starts now' }), null, `${kind} mints no typed claim`);
+  for (const p of SOCIAL_PROVIDERS) assert.ok(SOCIAL_PROVIDER_KINDS.includes(p.providerKind), `${p.id} has a social kind`);
+  for (const id of ['BLUESKY_OFFICIAL', 'FARCASTER_OFFICIAL'])
+    assert.equal(classifyOfficialItem({ providerKind: socialProviderById(id).providerKind, title: 'x', summary: 'y' }), null, `${id} is not claim-capable`);
+});
+
+test('R2A-SOCIAL-2. a social observation settles as EVIDENCE only — no proposition, claim, or packet', () => {
+  const obs = normalizeSocialObservation({ provider: 'BLUESKY_OFFICIAL', providerKind: 'SOCIAL_MICROBLOG', nativePostId: 'at://did:plc:a/app.bsky.feed.post/r', nativeAuthorId: 'did:plc:a', text: 'FOO lists on Kraken, trading starts now', sourceCreatedTs: 1_700_000_000_000 }, { nowMs: 1_700_000_001_000 }).observation;
+  const { event } = socialObservationToEvent(obs);
+  assert.equal(event.type, SOCIAL_EVENT_TYPE);
+  assert.equal(validateSocialEvent(event, { socialProviderIds: SOCIAL_PROVIDER_IDS }), null);
+  for (const k of ['propositionId', 'claimKey', 'claimType', 'packet', 'packetId', 'symbol', 'status'])
+    assert.ok(!(k in event), `a social event carries no ${k} — evidence only`);
+  assert.equal(classifyOfficialItem({ providerKind: event.providerKind, title: event.text, summary: event.text }), null, 'the frozen classifier refuses to type social evidence');
+});
+
+test('R2A-SOCIAL-3. no social file imports a trading/execution/Socrates/attention module or calls a model', () => {
+  const forbidden = /ledger|state|cost|tape|strike|exec|order|portfolio|socrates|attention|hyped|brain/i;
+  for (const f of socialFiles) {
+    for (const m of read(f).matchAll(/from\s+'([^']+)'/g))
+      assert.ok(!forbidden.test(m[1]), `${f}: forbidden import ${m[1]}`);
+    const src = code(f).toLowerCase();
+    for (const marker of ['openai', 'anthropic', 'gemini', 'claude-', 'gpt-', 'model_key'])
+      assert.ok(!src.includes(marker), `${f}: model-caller marker ${marker}`);
+    for (const authority of ['createorder', 'submitorder', 'placeorder', 'armstalk', 'sethyped'])
+      assert.ok(!src.includes(authority), `${f}: social evidence must not reach trade authority (${authority})`);
+  }
+});
+
+test('R2A-SOCIAL-4. social files perform no HTTP fetch(); the durable social event is distinct from the frozen event world', () => {
+  for (const f of socialFiles)
+    assert.ok(!read(f).includes('fetch('), `${f}: no HTTP fetch (Bluesky uses a bounded WebSocket transport, Farcaster is dark)`);
+  assert.equal(SOCIAL_EVENT_TYPE, 'RUMOR2_SOCIAL_OBSERVED');
+  for (const frozen of ['RUMOR2_SOURCE_OBSERVED', 'RUMOR2_CLAIM_OBSERVED', 'RUMOR2_PACKET'])
+    assert.notEqual(SOCIAL_EVENT_TYPE, frozen);
+});
+
+test('R2A-SOCIAL-5. the frozen claim-capable set is untouched; only Bluesky is durably live, the rest access-gated', () => {
+  // the frozen official five remain the ONLY claim-capable registry — social
+  // additions never entered the frozen provider set (registry.js)
+  assert.deepEqual([...PROVIDER_IDS].sort(), ['CFTC_OFFICIAL', 'EDGAR_OFFICIAL', 'KRAKEN_OFFICIAL', 'OFAC_OFFICIAL', 'SEC_OFFICIAL']);
+  assert.equal(socialProviderById('BLUESKY_OFFICIAL').accessState, 'AVAILABLE_AUTHORIZED');
+  assert.equal(socialProviderById('FARCASTER_OFFICIAL').requiresCredential, true, 'Farcaster stays dark without a credential');
 });
 
 test('R2A-rumint. existing RUMINT behavior is untouched', () => {

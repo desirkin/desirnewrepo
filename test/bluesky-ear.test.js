@@ -87,14 +87,24 @@ test('BSKY-INTAKE-2 (§41/§51 PASS-1). duplicate delivery collapses to ONE trut
   assert.equal(intake.stats().deduped, 2);
 });
 
-test('BSKY-INTAKE-3 (§41 corruption). same native id with an altered payload is CORRUPTION, not a new post', () => {
+test('BSKY-INTAKE-3 (§22 corruption). SAME version (same cid) with an altered payload is CORRUPTION, not a new post', () => {
   const intake = mkIntake();
+  // original CREATE (commit() gives every post cid 'bafyCID')
   assert.equal(intake.offer(commit({ rkey: 'x', record: postRecord({ text: '$FOO original', createdAt: iso(CREATED) }) })).outcome, 'enqueued');
-  // same did+rkey (same at:// id) but altered content
-  const forged = { $type: 'message', payload: { $type: 'x#commit', did: 'did:plc:alice', seq: 999, time: iso(CREATED), operation: 'create', collection: 'app.bsky.feed.post', rkey: 'x', cid: 'other', record: postRecord({ text: '$FOO ALTERED', createdAt: iso(CREATED) }) } };
+  // same did+rkey (same at:// id) AND same cid (same immutable version) but altered content — impossible in honest data => corruption
+  const forged = { $type: 'message', payload: { $type: 'x#commit', did: 'did:plc:alice', seq: 999, time: iso(CREATED), operation: 'create', collection: 'app.bsky.feed.post', rkey: 'x', cid: 'bafyCID', record: postRecord({ text: '$FOO ALTERED', createdAt: iso(CREATED) }) } };
   assert.equal(intake.offer(forged).outcome, 'corrupt');
   assert.equal(intake.stats().corrupt, 1);
   assert.equal(intake.size(), 1, 'the forged re-delivery never entered the queue');
+});
+
+test('BSKY-INTAKE-7 (§19 edit). an update with a NEW cid is a new version, admitted (not false corruption)', () => {
+  const intake = mkIntake();
+  assert.equal(intake.offer({ $type: 'message', payload: { $type: 'x#commit', did: 'did:plc:alice', seq: 1, time: iso(CREATED), operation: 'create', collection: 'app.bsky.feed.post', rkey: 'e', cid: 'cidA', record: postRecord({ text: '$FOO v1' }) } }).outcome, 'enqueued');
+  const edit = { $type: 'message', payload: { $type: 'x#commit', did: 'did:plc:alice', seq: 2, time: iso(CREATED + 60000), operation: 'update', collection: 'app.bsky.feed.post', rkey: 'e', cid: 'cidB', record: postRecord({ text: '$FOO v2 edited', createdAt: iso(CREATED) }) } };
+  assert.equal(intake.offer(edit).outcome, 'enqueued', 'a legitimate edit is a new version, not corruption');
+  assert.equal(intake.size(), 2);
+  assert.equal(intake.stats().corrupt, 0);
 });
 
 test('BSKY-INTAKE-4 (§42). a future source clock fails closed', () => {
