@@ -646,6 +646,23 @@ export class Repository {
     }
   }
 
+  // SOCIAL-2A narrow READ-ONLY identity lookup: which of the given event ids
+  // already exist durably for one event type on a stream. Used by the Social
+  // settlement layer to enforce durable keep-first BEFORE an append, so a
+  // legitimate diagnostic-only redelivery of an already-known content version
+  // is never handed to the journal as an altered re-append. Bounded input,
+  // pure SELECT: it alters neither the journal mutation path nor its duplicate
+  // law. Returns a Set of the ids that exist.
+  async hasRumor2EventIds(stream, eventType, ids) {
+    const list = [...new Set((Array.isArray(ids) ? ids : []).filter((x) => typeof x === 'string' && x.length > 0 && x.length <= 300))].slice(0, MAX_QUERY_LIMIT);
+    if (list.length === 0 || typeof eventType !== 'string') return new Set();
+    const { rows } = await this.db.query(
+      `SELECT event_id FROM serpent_rumor2_events WHERE stream = $1 AND event_type = $2 AND event_id = ANY($3::text[])`,
+      [stream, eventType, list]
+    );
+    return new Set(rows.map((r) => r.event_id));
+  }
+
   // Complete ordered history — chunked keyset pagination, contiguity of the
   // sequence proven as it streams: a gap, duplicate, or non-positive start
   // means rows were destroyed or rewritten under the INSERT-only law, which

@@ -141,6 +141,14 @@ export function socialProvenanceFacts(f) {
     parentNativePostId: f.parentNativePostId ?? null,
     threadId: f.threadId ?? null,
     nativeVersionId: f.nativeVersionId ?? null,
+    // SOCIAL-2A: the provider-native lifecycle/commit event identity (Bluesky
+    // Jetstream `seq`) — closed, bounded, provider-supplied, replay-stable,
+    // never wall-clock. It distinguishes genuinely distinct commits on ONE
+    // stable post identity (CREATE / DELETE / RECREATE / DELETE) so two distinct
+    // deletes can never collapse into one tombstone, while an at-least-once
+    // redelivery of the SAME commit (same seq) stays one truth. null for
+    // providers with no such concept. NOT part of socialSourceId. (§9-§13)
+    providerEventSeq: f.providerEventSeq ?? null,
     textHash: f.textHash,
     sourceCreatedTs: f.sourceCreatedTs ?? null,
   };
@@ -318,6 +326,10 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   // null when the provider has no version concept (e.g. Farcaster casts).
   const nativeVersionId = raw.nativeVersionId ?? null;
   if (nativeVersionId !== null && !isNonEmptyStr(nativeVersionId, MAX_NATIVE_ID_CHARS)) return { reject: true, reason: 'nativeVersionId invalid' };
+  // provider-native commit/event sequence (Jetstream seq) — a non-negative safe
+  // integer supplied by the provider, or null/UNKNOWN. Never invented. (§9/§13)
+  const providerEventSeq = raw.providerEventSeq ?? null;
+  if (providerEventSeq !== null && (!Number.isSafeInteger(providerEventSeq) || providerEventSeq < 0)) return { reject: true, reason: 'providerEventSeq invalid' };
   // point-in-time (§8/§10/§11): sourceCreatedTs is EITHER a provider-supplied
   // finite ms OR UNKNOWN (null). Serpent NEVER fabricates a source-created clock
   // from its own processing time — a missing/absent value is null, never
@@ -355,7 +367,7 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
   // mapper/settle/validator.
   const facts = {
     provider, providerKind, nativePostId, nativeAuthorId, lifecycle, relation, parentNativePostId,
-    threadId, nativeVersionId, textHash: hash, sourceCreatedTs,
+    threadId, nativeVersionId, providerEventSeq, textHash: hash, sourceCreatedTs,
     handle, authorMeta, engagement, socialSourceId,
   };
   const metaHash = socialMetaHash(facts);
@@ -367,7 +379,7 @@ export function normalizeSocialObservation(raw, { nowMs } = {}) {
       socialSourceId, socialAuthorId, handle, displayName,
       text: raw.text, normalizedText: normalized, textHash: hash,
       canonicalUrl, threadId, parentNativePostId, relation, editState, lifecycle,
-      nativeVersionId, socialVersionId,
+      nativeVersionId, providerEventSeq, socialVersionId,
       sourceCreatedTs, retrievedTs, knownAtTs,
       engagement, authorMeta, metaHash,
     }),

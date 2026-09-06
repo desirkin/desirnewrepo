@@ -101,7 +101,7 @@ test('SEAL-FIRST-KNOWN (ยง6). a diagnostic-only redelivery dedupes keep-first โ€
   assert.equal(rA.outcome, 'enqueued');
   assert.equal(rB.outcome, 'deduped', 'a diagnostic-only redelivery is one truth, not corruption');
   assert.equal(intake.stats().corrupt, 0, 'never classified as corruption');
-  const [o] = intake.drain();
+  const [{ observation: o }] = intake.drain();
   assert.equal(o.handle, 'oldname', 'the FIRST-KNOWN diagnostic snapshot is retained');
   assert.equal(o.authorMeta.followerCount, 100);
   assert.equal(o.engagement.likes, 10);
@@ -236,7 +236,7 @@ if (!TEST_URL) {
       const intake = socialIntake({ provider: FARCASTER_OFFICIAL, mapCommit: neynarEventToRaw, filter: buildSocialFilter({ terms: ['FOO'] }), now: () => NOW });
       intake.offer({ type: 'cast.created', data: { object: 'cast', hash: '0xkeep', author: { fid: 7, username: 'oldname', follower_count: 100, following_count: 50, power_badge: true }, text: '$FOO news', timestamp: iso(C), reactions: { likes_count: 10 } } });
       intake.offer({ type: 'cast.created', data: { object: 'cast', hash: '0xkeep', author: { fid: 7, username: 'newname', follower_count: 900, following_count: 80, power_badge: true }, text: '$FOO news', timestamp: iso(C), reactions: { likes_count: 88 } } });
-      const events = intake.drain().map((o) => socialObservationToEvent(o).event);
+      const events = intake.drain().map((env) => socialObservationToEvent(env.observation).event);
       assert.equal(events.length, 1, 'keep-first at the ear: one truth drained');
       const r = await settle(j, events);
       assert.equal(r.ok, true);

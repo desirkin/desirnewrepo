@@ -5,7 +5,7 @@
 // socket + fake timers drive everything deterministically.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { jetstreamCommitToRaw, BLUESKY_OFFICIAL } from '../rumor2/providers/bluesky-official.js';
+import { jetstreamCommitToRaw, jetstreamCursorOf, BLUESKY_OFFICIAL } from '../rumor2/providers/bluesky-official.js';
 import { socialIntake, startSocialStream } from '../rumor2/social-stream.js';
 import { buildSocialFilter, normalizeSocialObservation } from '../rumor2/social.js';
 import { socialObservationToEvent, validateSocialEvent } from '../rumor2/social-settle.js';
@@ -66,7 +66,7 @@ test('BSKY-MAP-4. edit (update) is marked EDITED; malformed / non-commit / wrong
 
 // ---- intake pipeline (identity/filter/dedupe/corruption) -------------------
 const mkIntake = (over = {}) => socialIntake({
-  provider: BLUESKY_OFFICIAL, mapCommit: jetstreamCommitToRaw,
+  provider: BLUESKY_OFFICIAL, mapCommit: jetstreamCommitToRaw, cursorOf: jetstreamCursorOf,
   filter: buildSocialFilter({ terms: ['FOO', '$BAR', 'solana'], watchAuthorIds: ['did:plc:watched'] }),
   now: () => NOW, ...over,
 });
@@ -128,7 +128,8 @@ test('BSKY-INTAKE-5. drain hands observations to the durable writer and empties 
   const batch = intake.drain(10);
   assert.equal(batch.length, 2);
   assert.equal(intake.size(), 0);
-  for (const o of batch) assert.match(o.socialSourceId, /^r2ss-[0-9a-f]{40}$/);
+  for (const env of batch) assert.match(env.observation.socialSourceId, /^r2ss-[0-9a-f]{40}$/); // SOCIAL-2A: envelopes carry the provider cursor
+  for (const env of batch) assert.ok(Number.isSafeInteger(env.providerCursor), 'each envelope carries its Jetstream seq');
 });
 
 test('BSKY-INTAKE-6. queue is bounded — backpressure drops rather than growing without limit (§23)', () => {
@@ -209,10 +210,11 @@ test('BSKY-STREAM-3 (§51 PASS-8). a stall reconnects with backoff; a clean stop
 
 test('BSKY-STREAM-4 (§40 replay). REPLAY mode deterministically feeds fixtures with no socket', () => {
   const intake = mkIntake();
+  const alpha = commit({ rkey: 'r1', record: postRecord({ text: '$FOO alpha' }) });
   const fixtures = [
-    commit({ rkey: 'r1', record: postRecord({ text: '$FOO alpha' }) }),
+    alpha,
     commit({ rkey: 'r2', record: postRecord({ text: 'irrelevant' }) }),
-    commit({ rkey: 'r1', record: postRecord({ text: '$FOO alpha' }) }), // duplicate
+    alpha, // the SAME commit redelivered (same seq) — a true at-least-once duplicate (SOCIAL-2A: a different seq is a distinct commit)
     commit({ op: 'delete', rkey: 'r1', record: undefined }), // later tombstone (filtered: empty text, not watched)
   ];
   const s = startSocialStream({ provider: BLUESKY_OFFICIAL, intake, mode: 'REPLAY', fixtures }).start();

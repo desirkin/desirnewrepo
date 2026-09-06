@@ -35,10 +35,28 @@ export const SOCIAL_EVENT_TYPE = 'RUMOR2_SOCIAL_OBSERVED';
 export const SOCIAL_EVENT_KEYS = Object.freeze([
   'type', 'ts', 'sourceEventId', 'provider', 'providerKind',
   'socialSourceId', 'nativePostId', 'nativeAuthorId', 'socialAuthorId',
-  'lifecycle', 'relation', 'parentNativePostId', 'threadId', 'nativeVersionId', 'handle',
+  'lifecycle', 'relation', 'parentNativePostId', 'threadId', 'nativeVersionId', 'providerEventSeq', 'handle',
   'text', 'textHash', 'metaHash', 'engagement', 'authorMeta',
   'sourceCreatedTs', 'retrievedTs', 'knownAtTs',
 ]);
+
+// SOCIAL-2A: providers whose adapter supplies a native commit/event sequence.
+// Any other social provider MUST carry providerEventSeq = null — a seq is never
+// invented, and a caller-created integer cannot authenticate a foreign event.
+export const PROVIDER_EVENT_SEQ_PROVIDERS = Object.freeze(['BLUESKY_OFFICIAL']);
+
+// SOCIAL-2A: the CLOSED source-only operational progress event that rides the
+// SAME journal — the durable Social resume cursor. It is appended LAST in the
+// same atomic batch as the evidence it follows, so the cursor can never outrun
+// settled evidence (§14-§16). Deterministic identity per (provider, cursor):
+// a legitimate re-append after a crash is byte-identical (the batch is
+// retained whole and retried), never a new payload under the same identity.
+export const SOCIAL_CURSOR_EVENT_TYPE = 'RUMOR2_SOCIAL_CURSOR';
+export const SOCIAL_CURSOR_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'durableCursor', 'knownAtTs']);
+export const R2SC_RE = /^r2sc-[0-9a-f]{40}$/;
+export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_CURSOR_EVENT_TYPE]);
+export const isSocialEventType = (t) => SOCIAL_EVENT_TYPES.includes(t);
+export const socialCursorIdentity = ({ provider, durableCursor }) => `r2sc-${contentHash(canonicalJson({ provider, durableCursor }))}`;
 
 const isStr = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
 const isTs = (v) => Number.isSafeInteger(v);
@@ -63,6 +81,7 @@ export function socialObservationToEvent(observation) {
     parentNativePostId: observation.parentNativePostId ?? null,
     threadId: observation.threadId ?? null,
     nativeVersionId: observation.nativeVersionId ?? null,
+    providerEventSeq: observation.providerEventSeq ?? null,
     handle: observation.handle ?? null,
     text: observation.text,
     textHash: observation.textHash,
@@ -147,6 +166,12 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
     return 'social event: socialAuthorId is not the derived author identity';
   if (!SOCIAL_LIFECYCLE_STATES.includes(event.lifecycle)) return 'social event: unknown lifecycle';
   if (event.nativeVersionId !== null && !isStr(event.nativeVersionId, MAX_NATIVE_ID_CHARS)) return 'social event: nativeVersionId invalid';
+  // SOCIAL-2A provider event sequence (§13): null, or a non-negative safe
+  // integer ONLY for a provider whose adapter supplies one; never invented.
+  if (event.providerEventSeq !== null) {
+    if (!Number.isSafeInteger(event.providerEventSeq) || event.providerEventSeq < 0) return 'social event: providerEventSeq invalid';
+    if (!PROVIDER_EVENT_SEQ_PROVIDERS.includes(event.provider)) return 'social event: providerEventSeq not applicable to this provider';
+  }
   if (typeof event.text !== 'string' || event.text.length > MAX_SOCIAL_TEXT_CHARS) return 'social event: text invalid';
   if (event.textHash !== contentHash(normalizeSocialText(event.text))) return 'social event: textHash is not the derived content hash';
   if (!SOCIAL_RELATION_KINDS.includes(event.relation)) return 'social event: unknown relation';
@@ -187,7 +212,7 @@ export function validateSocialEvent(event, { socialProviderIds = null } = {}) {
     provider: event.provider, providerKind: event.providerKind, nativePostId: event.nativePostId,
     nativeAuthorId: event.nativeAuthorId, lifecycle: event.lifecycle, relation: event.relation,
     parentNativePostId: event.parentNativePostId, threadId: event.threadId, nativeVersionId: event.nativeVersionId,
-    textHash: event.textHash, sourceCreatedTs: event.sourceCreatedTs,
+    providerEventSeq: event.providerEventSeq, textHash: event.textHash, sourceCreatedTs: event.sourceCreatedTs,
     handle: event.handle, authorMeta: event.authorMeta, engagement: event.engagement,
     socialSourceId: event.socialSourceId,
   };
@@ -213,6 +238,7 @@ export function reconstructSocialWitness(event) {
     parentNativePostId: event.parentNativePostId,
     threadId: event.threadId,
     nativeVersionId: event.nativeVersionId,
+    providerEventSeq: event.providerEventSeq ?? null,
     versionId: event.sourceEventId,
     handle: event.handle,
     text: event.text,
@@ -224,4 +250,82 @@ export function reconstructSocialWitness(event) {
     // information-only research context, never identity or trade authority
     authorMeta: event.authorMeta ?? null,
   };
+}
+
+// ---- SOCIAL-2A durable cursor event + social history replay ---------------
+// Build the cursor event for a settled batch. ts is the batch's knowledge
+// clock, fixed when the batch is formed and retained verbatim on retry.
+export function socialCursorEvent({ provider, durableCursor, knownAtTs }) {
+  return {
+    type: SOCIAL_CURSOR_EVENT_TYPE,
+    ts: iso(knownAtTs),
+    sourceEventId: socialCursorIdentity({ provider, durableCursor }),
+    provider,
+    durableCursor,
+    knownAtTs,
+  };
+}
+
+export function validateSocialCursorEvent(event) {
+  if (event === null || typeof event !== 'object' || Array.isArray(event)) return 'social cursor: not an object';
+  const kErr = exactKeys(event, SOCIAL_CURSOR_EVENT_KEYS);
+  if (kErr) return `social cursor: ${kErr}`;
+  if (event.type !== SOCIAL_CURSOR_EVENT_TYPE) return 'social cursor: wrong type';
+  if (!isStr(event.provider, 100) || !socialProviderById(event.provider)) return 'social cursor: provider not in the authoritative social registry';
+  if (!PROVIDER_EVENT_SEQ_PROVIDERS.includes(event.provider)) return 'social cursor: provider has no cursor domain';
+  if (!Number.isSafeInteger(event.durableCursor) || event.durableCursor < 0) return 'social cursor: durableCursor invalid';
+  if (!isTs(event.knownAtTs)) return 'social cursor: clock invalid';
+  if (event.ts !== iso(event.knownAtTs)) return 'social cursor: ts disagrees with knownAtTs';
+  if (!R2SC_RE.test(event.sourceEventId) || event.sourceEventId !== socialCursorIdentity({ provider: event.provider, durableCursor: event.durableCursor }))
+    return 'social cursor: sourceEventId is not the derived cursor identity';
+  return null;
+}
+
+// Replay the Social layer of one journal history (§22-§24). SOURCE-ONLY: this
+// pass rebuilds ONLY (a) the durable version index — every settled
+// RUMOR2_SOCIAL_OBSERVED sourceEventId, the authority for keep-first dedupe
+// across restarts and local eviction — and (b) the durable resume cursor per
+// provider. It feeds no graph, claim, packet, Attention, or trade state.
+// Fail-closed: every social event is re-validated (unknown provider, kind
+// mismatch, forged identity, tampered diagnostics), the duplicate law holds
+// inside social history (same identity + altered payload = corruption), and a
+// cursor regression (500, 600, 550) is refused; an inclusive repeat of the
+// SAME cursor is lawful at-least-once replay. Non-social events are ignored
+// here — the frozen replay owns them.
+export function replaySocialHistory(events) {
+  const fail = (msg) => ({ ok: false, error: String(msg).slice(0, 300) });
+  if (!Array.isArray(events)) return fail('SOCIAL_HISTORY_INVALID: history is not a list');
+  const durableIds = new Set();
+  const digests = new Map(); // sourceEventId -> canonical digest (duplicate law)
+  const cursors = {}; // provider -> durableCursor
+  let observed = 0;
+  let cursorEvents = 0;
+  for (const e of events) {
+    if (e === null || typeof e !== 'object' || Array.isArray(e) || typeof e.type !== 'string') return fail('SOCIAL_HISTORY_INVALID: malformed event record');
+    if (e.type === SOCIAL_EVENT_TYPE) {
+      const err = validateSocialEvent(e);
+      if (err) return fail(`SOCIAL_HISTORY_INVALID: ${err}`);
+      const digest = contentHash(canonicalJson(e));
+      const prior = digests.get(e.sourceEventId);
+      if (prior !== undefined) {
+        if (prior !== digest) return fail('SOCIAL_HISTORY_INVALID: duplicate social event identity with an altered payload — corruption, not replay');
+        continue; // exact crash re-append — the same knowledge event
+      }
+      digests.set(e.sourceEventId, digest);
+      durableIds.add(e.sourceEventId);
+      observed += 1;
+      continue;
+    }
+    if (e.type === SOCIAL_CURSOR_EVENT_TYPE) {
+      const err = validateSocialCursorEvent(e);
+      if (err) return fail(`SOCIAL_HISTORY_INVALID: ${err}`);
+      const prev = cursors[e.provider];
+      if (prev !== undefined && e.durableCursor < prev) return fail(`SOCIAL_HISTORY_INVALID: cursor regression for ${e.provider} (${prev} -> ${e.durableCursor})`);
+      cursors[e.provider] = e.durableCursor;
+      cursorEvents += 1;
+      continue;
+    }
+    // any other type belongs to the frozen core's own replay/validator
+  }
+  return { ok: true, durableIds, cursors, observed, cursorEvents };
 }

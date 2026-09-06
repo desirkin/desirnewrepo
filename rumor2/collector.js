@@ -55,6 +55,12 @@ import {
   RECONCILE_TAIL_BYTES,
 } from './truth.js';
 import { buildClaimPacket } from './packet.js';
+// SOCIAL-2A: the Bluesky Social ear runs INSIDE this collector's single-writer
+// authority domain — same journal, same epoch, same fence. Social events are
+// SOURCE-ONLY: they never enter the frozen replay, graph, claims, or packets.
+import { isSocialEventType } from './social-settle.js';
+import { createSocialRuntime } from './social-runtime.js';
+import { buildSocialFilter } from './social.js';
 
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -96,6 +102,14 @@ export function startRumor2({
   // storage, NOT deployment-grade durability — so it never activates by
   // silent fallback. Explicit opt-in only.
   allowLocalJournal = process.env.RUMOR2_ALLOW_LOCAL_JOURNAL === 'true',
+  // SOCIAL-2A: the Bluesky operational ear — explicit gate, OFF by default. A
+  // public firehose is not "always on". Enabling Bluesky enables ONLY Bluesky.
+  socialBlueskyEnabled = process.env.RUMOR2_SOCIAL_BLUESKY_ENABLED === 'true',
+  socialMode = process.env.RUMOR2_SOCIAL_MODE === 'REPLAY' ? 'REPLAY' : 'LIVE',
+  socialFixtures = null,
+  socialSocketFactory = null, // LIVE: null => the global-WebSocket factory; tests inject fakes
+  socialRuntime = null, // an injected runtime (tests); else built here when enabled
+  socialOptions = {},
 } = {}) {
   if (!enabled) {
     // dark and silent: zero network, zero timers, zero authority
@@ -240,6 +254,17 @@ export function startRumor2({
   };
 
   const registry = buildCoinRegistry(config.universe);
+  // SOCIAL-2A: the Social universe filter is DERIVED from the configured coin
+  // universe (tickers + approved aliases) — bounded, observable, never all-network
+  const social = socialBlueskyEnabled
+    ? (socialRuntime ?? createSocialRuntime({
+        filter: buildSocialFilter({ terms: [...registry.tickers, ...registry.aliases.keys()] }),
+        now, log, mode: socialMode, fixtures: socialFixtures, socketFactory: socialSocketFactory, ...socialOptions,
+      }))
+    : null;
+  // the frozen core replays ONLY its own event kinds; Social events are
+  // replayed/validated by the separate Social path (§22)
+  const coreEvents = (events) => events.filter((e) => !(e && typeof e === 'object' && isSocialEventType(e.type)));
   // RUMOR-2B1: EDGAR whitelist configuration is parsed strictly ONCE — one
   // bad token unconfigures the ear with a truthful reason, never a silently
   // narrowed universe
@@ -283,6 +308,7 @@ export function startRumor2({
       lifecycle = 'STANDBY_WRITER';
       withholdReason = 'writer authority lost mid-tick — standing by to reacquire';
     }
+    social?.stop('writer authority lost'); // §21: no zombie Social stream under a lost fence
     return false;
   }
 
@@ -344,7 +370,7 @@ export function startRumor2({
       lifecycle = 'FRESH_START'; // honest: no checkpoint AND no history exist
       return true;
     }
-    const replayed = replayRumor2SettledTruth(jr.events, { providerIds: [...PROVIDER_IDS], excludeSourceId: null });
+    const replayed = replayRumor2SettledTruth(coreEvents(jr.events), { providerIds: [...PROVIDER_IDS], excludeSourceId: null });
     if (!replayed.ok) {
       lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
       withholdReason = boundedError(replayed.error);
@@ -390,6 +416,7 @@ export function startRumor2({
       const ev = jr.events[i];
       if (!ev || typeof ev !== 'object' || typeof ev.type !== 'string') break; // replay below fails closed on shape
       if (ev.type === 'RUMOR2_STARTED' || ev.type === 'RUMOR2_PROVIDER_FAILURE') continue;
+      if (isSocialEventType(ev.type)) continue; // source-only Social evidence/progress beyond the watermark is lawful (its own replay validates it)
       if (ev.type === 'RUMOR2_WITHHELD' && typeof ev.sourceEventId !== 'string') continue;
       const root = typeof ev.sourceEventId === 'string' ? ev.sourceEventId.split('|')[0] : null;
       if (root === null || root !== owedRoot) {
@@ -404,7 +431,7 @@ export function startRumor2({
     // caches; graph/counter disagreement is WITHHELD (a mismatch could be a
     // forged checkpoint OR lost history — neither may be guessed over),
     // while purely-derivable seen state is DERIVED ON RESTORE.
-    const replayed = replayRumor2SettledTruth(jr.events, { providerIds: [...PROVIDER_IDS], excludeSourceId: owedRoot });
+    const replayed = replayRumor2SettledTruth(coreEvents(jr.events), { providerIds: [...PROVIDER_IDS], excludeSourceId: owedRoot });
     if (!replayed.ok) {
       lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
       withholdReason = boundedError(replayed.error);
@@ -433,8 +460,27 @@ export function startRumor2({
     return true;
   }
 
+  // SOCIAL-2A: after the core restores, rebuild durable Social truth (version
+  // index + resume cursor) from the SAME journal history, fail-closed (§22/§23)
+  let socialHydratedForInit = false;
   async function ensureInit() {
+    const ok = await ensureInitCore();
+    if (!ok || !social) return ok;
+    if (socialHydratedForInit) return true;
+    const jr = await activeJournal.read();
+    if (journalReadFailure(jr)) return false;
+    const hr = social.hydrate(jr.events);
+    if (!hr.ok) {
+      lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+      withholdReason = boundedError(hr.error);
+      return false;
+    }
+    socialHydratedForInit = true;
+    return true;
+  }
+  async function ensureInitCore() {
     if (lifecycle === 'FRESH_START' || lifecycle === 'RESTORED' || lifecycle === 'REBUILT_FROM_EVENT_HISTORY') return true;
+    socialHydratedForInit = false; // any (re)initialization re-hydrates Social from the journal
     chooseJournal();
     if (!activeJournal) {
       // no journal authority exists AND local mode was not explicitly
@@ -537,6 +583,7 @@ export function startRumor2({
       writerEpoch = null;
       lifecycle = 'STANDBY_WRITER';
       withholdReason = r.reason === 'MISSING_WRITER_EPOCH' ? 'no valid writer epoch — standing by to reacquire' : 'writer epoch is stale — a newer writer holds authority';
+      social?.stop('writer epoch stale');
     } else {
       durability = 'UNAVAILABLE';
       lifecycle = 'FAILED_DURABILITY'; // stop polling until durable truth is representable again
@@ -785,6 +832,7 @@ export function startRumor2({
         writerEpoch = null;
         lifecycle = 'STANDBY_WRITER';
         withholdReason = res.reason === 'STALE_WRITER' ? 'writer epoch is stale — a newer writer holds authority' : 'writer authority lost — standing by to reacquire';
+        social?.stop('writer authority lost');
         return false;
       }
       r.appendFailures += 1;
@@ -1024,6 +1072,51 @@ export function startRumor2({
     return true;
   }
 
+  // ---- SOCIAL-2A: one Social settle per tick, under the SAME authority ------
+  // The stream becomes ACTIVE only while this collector positively holds (or
+  // needs no) writer authority and the core is in a live lifecycle; any other
+  // state stops it immediately (§21). Settlement appends evidence + the durable
+  // cursor as ONE epoch-fenced journal batch, then advances the event-root
+  // watermark — Social truth is settled truth in the same root.
+  const SOCIAL_LIVE_LIFECYCLES = ['FRESH_START', 'RESTORED', 'REBUILT_FROM_EVENT_HISTORY'];
+  async function socialTick() {
+    if (!social) return;
+    if (!SOCIAL_LIVE_LIFECYCLES.includes(lifecycle) || !fenceHeld()) { social.stop('collector not authoritative'); return; }
+    if (!social.isActive()) {
+      const st = social.start();
+      if (!st.ok) { log(`RUMOR2 social: not started (${st.reason})`); return; }
+    }
+    const res = await social.settle({
+      fenceHeld,
+      append: (events) => activeJournal.append(events),
+      lookup: typeof activeJournal.hasEventIds === 'function' ? (type, ids) => activeJournal.hasEventIds(type, ids) : null,
+    });
+    if (!res.ok) {
+      const reason = String(res.reason ?? '');
+      if (reason.startsWith('CORRUPTION')) {
+        lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
+        withholdReason = boundedError(`EVENT_HISTORY_INVALID: ${reason}`);
+        social.stop('journal corruption');
+        return;
+      }
+      if (reason === 'WRITER_FENCE_LOST' || reason === 'STALE_WRITER') {
+        writerFenced = false;
+        writerEpoch = null;
+        lifecycle = 'STANDBY_WRITER';
+        withholdReason = reason === 'STALE_WRITER' ? 'writer epoch is stale — a newer writer holds authority' : 'writer authority lost — standing by to reacquire';
+        social.stop('writer authority lost');
+        return;
+      }
+      log(`RUMOR2 social settle failed (zero truth advances, will retry): ${boundedError(reason)}`);
+      return;
+    }
+    if (res.appended !== undefined && res.lastSeq !== undefined) {
+      if (!fenceHeld()) return; // committed but unfenced: the next writer's restore reads it
+      cp.lastSettledEventSeq = res.lastSeq;
+      for (const ev of res.events ?? []) mirrorSafe(ev);
+    }
+  }
+
   function writeStatus() {
     const t = now();
     const providers = {};
@@ -1089,6 +1182,8 @@ export function startRumor2({
       // live check downgrades the cached authority so ACTIVE is never stale.
       writerAuthority: writerAuthorityStatus(),
       writerEpoch, // DB-assigned monotonic writer epoch (diagnostic; null when unfenced)
+      // SOCIAL-2A: the operational Social ear (source-only, zero authority)
+      social: social ? social.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_BLUESKY_ENABLED)' },
     };
     try {
       atomicWriteJson(path.join(dir(), 'status.json'), status);
@@ -1111,6 +1206,7 @@ export function startRumor2({
       await safeAppend({ type: 'RUMOR2_STARTED', ts: iso(now()), lifecycle, durability, checkpointRevision: cp.revision }, null);
     }
     if (!ok) {
+      social?.stop('collector not initialized'); // §21: no Social stream without authority
       writeStatus();
       return;
     }
@@ -1145,6 +1241,10 @@ export function startRumor2({
         await providerFailure(p, runtime[p.id], cp.providers[p.id], `internal: ${err.message}`);
       }
     }
+    // SOCIAL-2A: the Social ear settles after the official ears, under the same fence
+    if (!closed && !halted) {
+      try { await socialTick(); } catch (err) { log(`RUMOR2 social tick failed (contained): ${boundedError(err.message)}`); }
+    }
     await saveCheckpoint();
     writeStatus();
   }
@@ -1164,6 +1264,7 @@ export function startRumor2({
     process.removeListener('SIGINT', onSignal);
     process.removeListener('SIGTERM', onSignal);
     await inFlight; // settle the in-flight tick (its own bounds keep this finite)
+    social?.stop('collector shutdown'); // close the ear BEFORE handing back writer authority
     writeStatus();
     // normal shutdown hands writer authority back promptly (a crash would
     // release it server-side anyway)
@@ -1186,6 +1287,6 @@ export function startRumor2({
     stop,
     tickOnce: () => (inFlight = inFlight.then(() => tickOnce())),
     status: writeStatus,
-    internals: { runtime, coverageEntries, get checkpoint() { return cp; }, get lifecycle() { return lifecycle; }, get durability() { return durability; } },
+    internals: { runtime, coverageEntries, social, get checkpoint() { return cp; }, get lifecycle() { return lifecycle; }, get durability() { return durability; } },
   };
 }

@@ -79,6 +79,20 @@ export function rumor2JournalStore({ persistence = getPersistence } = {}) {
         return { unavailable: err.message };
       }
     },
+    // SOCIAL-2A narrow READ-ONLY lookup (no fence required — a read never
+    // mutates): which of `ids` already exist durably for `eventType`. Returns
+    // { ok: true, existing: Set } or { ok: false, reason } — a lookup failure is
+    // NEVER an empty answer, so the caller cannot mistake "unknown" for "new".
+    async hasEventIds(eventType, ids) {
+      const c = classify();
+      if (c.kind === 'NOT_CONFIGURED') return { ok: false, reason: 'NOT_CONFIGURED', notConfigured: true };
+      if (c.kind === 'UNAVAILABLE') return { ok: false, reason: 'UNAVAILABLE' };
+      try {
+        return { ok: true, existing: await c.p.repo.hasRumor2EventIds(STREAM, eventType, ids) };
+      } catch (err) {
+        return { ok: false, reason: 'UNAVAILABLE' };
+      }
+    },
     async append(records) {
       const c = classify();
       if (c.kind === 'NOT_CONFIGURED') return { ok: false, reason: 'NOT_CONFIGURED', notConfigured: true };

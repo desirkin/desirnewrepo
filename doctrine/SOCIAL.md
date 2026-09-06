@@ -220,10 +220,73 @@ checkpoint-version change.
 **Checkpoint/version decision:** SOCIAL-1 makes **no** checkpoint-version change
 and does **not** register social providers into the checkpoint provider set. The
 durable social event and its validator are the READY contract; **auto-draining**
-the Bluesky ear inside the single-writer collector (operational activation) is the
-**SOCIAL-2 boundary** — deferred so the frozen collector/checkpoint/claim-graph are
-not modified here. When auto-drain activates, the collector's replay must learn to
-carry `RUMOR2_SOCIAL_OBSERVED` events (source-only, no graph/claim effect).
+the Bluesky ear inside the single-writer collector (operational activation) was the
+**SOCIAL-2 boundary** — landed in SOCIAL-2A (§5A): the collector carries
+`RUMOR2_SOCIAL_OBSERVED` / `RUMOR2_SOCIAL_CURSOR` through a separate Social replay path
+(source-only, no graph/claim effect), still with no checkpoint-version change.
+
+---
+
+## 5A. SOCIAL-2A — Bluesky operational activation under the durable Social resume law
+
+The Bluesky ear runs **inside** the single-writer RUMOR collector (`rumor2/collector.js`
+→ `rumor2/social-runtime.js`), behind the explicit gate `RUMOR2_SOCIAL_BLUESKY_ENABLED=true`
+(default **false**; enabling Bluesky enables only Bluesky; `RUMOR2_SOCIAL_MODE=REPLAY`
+keeps fixture replay). ONE writer, ONE epoch, ONE PostgreSQL event root — no social
+database, journal, writer, epoch, or checkpoint authority exists (§36).
+
+**Core law (§3):** `RECEIVED ≠ NORMALIZED ≠ QUEUED ≠ DURABLE`, and
+`CURSOR RECEIVED ≠ CURSOR SAFE TO RESUME FROM`. Only a journal batch settled under the
+**current** writer epoch advances Serpent's durable Social position.
+
+- **Durable keep-first (§4–§8).** The frozen journal's duplicate law is untouched
+  (byte-identical ⇒ collapse; same identity + altered payload ⇒ corruption). The Social
+  layer guarantees a diagnostic-only redelivery of an already-settled content version
+  never reaches the journal: `replaySocialHistory` rebuilds a **durable version index**
+  (every settled `RUMOR2_SOCIAL_OBSERVED` `sourceEventId`) on every hydrate and the
+  runtime maintains it after every append; the intake consults it before the local LRU;
+  and before any append the runtime asks the narrow **read-only** journal lookup
+  (`hasEventIds` → `Repository.hasRumor2EventIds`, a pure SELECT) for any id outside the
+  index. Proven across a real process restart and across LRU eviction: first durable
+  truth stands.
+- **Provider lifecycle identity (§9–§13).** Jetstream `seq` is preserved as
+  `providerEventSeq` — closed, bounded, provider-supplied, replay-stable, never
+  wall-clock — and is a CONTENT/VERSION fact, so CREATE/DELETE/RECREATE/DELETE on one
+  `at://` key are four versions and two *distinct* deletes never collapse into one
+  tombstone, while the same commit redelivered 100× is one truth. `socialSourceId` never
+  carries it; `sourceCreatedTs` never comes from it. Non-Bluesky providers must carry
+  `null`; a caller-supplied seq cannot authenticate a foreign event.
+- **Two cursors (§14/§18).** `receivedCursor` is diagnostic. The intake keeps a
+  **contiguous** cursor: the highest seq such that every delivered frame at/below it has
+  an intentional terminal disposition (filtered/skipped/rejected/deduped/durably settled).
+  An enqueued frame pins it until settled; a queue-full DROP pins it until Jetstream
+  replays the frame. It is monotonic (§24).
+- **Durable cursor = a journal event (§15/§16).** Each settle builds
+  `[evidence…, RUMOR2_SOCIAL_CURSOR]` — the cursor event **last**, from the same batch,
+  with a deterministic `r2sc-` identity per `(provider, cursor)` — and appends it as one
+  epoch-fenced atomic batch; only after the commit does the runtime adopt the index and
+  `durableCursor`. A failed append retains the batch whole (retry is byte-identical);
+  there is no API to persist a cursor without its evidence, so the cursor cannot outrun
+  the journal. No checkpoint version change was needed (the checkpoint's
+  `lastSettledEventSeq` watermark simply advances over Social batches).
+- **Backpressure (§19).** Queue full ⇒ the stream **pauses** (socket closed), earlier
+  queued work settles, and the reconnect resumes from the **durable** cursor so Jetstream
+  replays the dropped frames. Latency may be sacrificed; truth may not.
+- **Single-writer ownership (§21).** The ear becomes ACTIVE only after the collector
+  positively holds writer authority; every standby transition (lost fence, stale epoch,
+  failed durability, shutdown) stops the stream immediately and discards nothing durable;
+  reacquisition re-hydrates from the journal and reconnects from the durable cursor.
+- **Social replay (§22/§23).** The frozen `replayRumor2SettledTruth` sees only core
+  event kinds (the collector filters Social kinds before it and skips them in the
+  watermark tail reconciliation); `replaySocialHistory` validates every Social event
+  (`validateSocialEvent` / `validateSocialCursorEvent`), enforces the duplicate law inside
+  Social history, and refuses cursor regression — a corrupt Social history withholds the
+  collector fail-closed. Social events feed no graph/claim/packet/Attention/HYPED state.
+
+Crash matrix (`test/social-runtime.test.js`, real PostgreSQL): crash before normalize,
+before append, evidence-without-cursor (torn), atomic-then-crash, cursor-before-evidence
+(impossible by construction), writer loss before/after append, and diagnostic-changed
+redelivery after restart — all replay safely with evidence exactly once.
 
 ---
 

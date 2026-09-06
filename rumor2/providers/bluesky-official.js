@@ -45,6 +45,11 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
   const operation = payload.operation ?? payload.commit?.operation;
   const record = payload.record ?? payload.commit?.record ?? null;
   const cid = payload.cid ?? payload.commit?.cid ?? null; // content id = the immutable record VERSION (changes on edit)
+  // SOCIAL-2A: Jetstream `seq` is the provider-native commit/event identity
+  // (the event's time_us — stable per commit across cursor replay). It is the
+  // lifecycle identity that keeps CREATE/DELETE/RECREATE/DELETE distinct and
+  // the resume cursor unit. Provider-supplied only — never invented. (§9)
+  const providerEventSeq = jetstreamCursorOf(message);
   if (!isStr(did) || !isStr(collection) || !isStr(rkey) || !isStr(operation)) return { skip: true, reason: 'incomplete commit' };
   if (collection !== BLUESKY_OFFICIAL.postCollection && collection !== BLUESKY_OFFICIAL.repostCollection) return { skip: true, reason: `collection ${collection} not wanted` };
 
@@ -68,7 +73,7 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
         text: '', relation: 'UNKNOWN',
         parentNativePostId: null, editState: 'TOMBSTONED',
-        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null,
+        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null, providerEventSeq,
         sourceCreatedTs: null,
         engagement: null, authorMeta: null,
       },
@@ -90,7 +95,7 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
         provider, providerKind: 'SOCIAL_MICROBLOG', nativePostId, nativeAuthorId,
         text: '', relation: 'REPOST', parentNativePostId: subjUri,
         editState: operation === 'update' ? 'EDITED' : 'ORIGINAL',
-        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null,
+        canonicalUrl: null, threadId: null, handle: null, nativeVersionId: isStr(cid) ? cid : null, providerEventSeq,
         sourceCreatedTs: Number.isFinite(created) ? created : null,
         engagement: null, authorMeta: null,
       },
@@ -120,10 +125,29 @@ export function jetstreamCommitToRaw(message, { provider = 'BLUESKY_OFFICIAL' } 
       canonicalUrl: `https://bsky.app/profile/${did}/post/${rkey}`,
       threadId: isStr(replyRoot) ? replyRoot : nativePostId,
       nativeVersionId: isStr(cid) ? cid : null, // the record CID = this post's immutable version
+      providerEventSeq,
       handle: null, // Jetstream commits carry the DID, not the handle; resolved elsewhere if needed
       sourceCreatedTs: Number.isFinite(created) ? created : null,
       engagement: null, // Jetstream post commits carry no engagement counts
       authorMeta: null,
     },
   };
+}
+
+// The provider cursor of ONE Jetstream message: payload.seq (a non-negative
+// safe integer) or null when absent/invalid. Pure; never throws. (§14/§20)
+export function jetstreamCursorOf(message) {
+  const payload = message && typeof message === 'object' ? (message.payload ?? message) : null;
+  const seq = payload && typeof payload === 'object' ? payload.seq : undefined;
+  return Number.isSafeInteger(seq) && seq >= 0 ? seq : null;
+}
+
+// The exact approved Jetstream subscribe URL for a host, wanted collections,
+// and an optional inclusive resume cursor (at-least-once replay). Only the
+// registered hosts are ever used; a non-integer cursor is omitted (live tail).
+export function jetstreamUrl({ host = BLUESKY_OFFICIAL.hosts[0], cursor = null } = {}) {
+  if (!BLUESKY_OFFICIAL.hosts.includes(host)) throw new Error('jetstreamUrl: host not in the approved Bluesky host allowlist');
+  const params = BLUESKY_OFFICIAL.wantedCollections.map((c) => `wantedCollections=${encodeURIComponent(c)}`);
+  if (Number.isSafeInteger(cursor) && cursor >= 0) params.push(`cursor=${cursor}`);
+  return `wss://${host}${BLUESKY_OFFICIAL.streamPath}?${params.join('&')}`;
 }
