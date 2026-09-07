@@ -1303,6 +1303,48 @@ changed; legacy version-1 records keep their bytes and their LEGACY_UNSEALED lab
 later annotation equal to the disputed declaration is shown among the retained declarations at and
 after its own time; the dispute stays unresolved — there is still no resolution authority here.
 
+## 5N. SOCIAL-4D CONSOLIDATED CAUSAL-ORDER CLOSEOUT — final causal availability and first-known selection
+
+Two defects of §5M reproduced RED on the untouched d24295e runtime with the review's probe: an
+annotation settled AFTER a pending record but carrying an EARLIER recorded clock was admitted as
+that record's invalidator (the canonical full-history view then refused an accepted history), and
+first-known selection among annotations tied at one millisecond fell back to lexicographic record
+ids. Both are closed by one contract.
+
+**Causal availability (`socialCausalPrecedes`, `socialPrefixPrecedes`).** An annotation is available
+to a pending record as its basis or invalidator only when BOTH hold: (1) knowledge-time
+admissibility — its knownAtTs is no later than the record's (equality inclusive); and (2)
+membership of the record's PRECEDING SETTLED CONTEXT — it settled before the record in the journal.
+With the canonical settled order both are checked for earlier, equal, and later clocks alike; a
+later append can never retroactively supply or invalidate the reason for an earlier conflict merely
+because it carries an earlier or equal clock. A verified prefix reader (replay, the reconciler's
+batch self-check) establishes (2) from the actual prefix; an arbitrary full-list caller may not
+claim it by assumption, so without settled positions for BOTH records availability is unknown and
+the annotation is admitted neither as basis nor as invalidator. Keep-first is unchanged: a
+declaration already retained for a target is never re-recorded whatever its recorded clock.
+
+**First-known selection (`rumor2/social-view.js`).** The applied SOURCE_DECLARATION record (among
+equivalent declarations) and the applied PROVIDER_EVENT record are chosen by knowledge time and
+then by settled journal position. Ids and hashes never select; a tie that the supplied context
+cannot break is a context-required refusal. The moment a disagreement became known is an
+order-independent quantity: the first instant two non-equivalent declarations were both known.
+Sorted id lists in results are display only.
+
+**Standalone context.** `settledOrder` is the Map exported by `replaySocialHistory`; nothing is
+sorted into an invented order, the caller's map and records are never mutated, and a malformed
+order is refused rather than falling back to clock, id, or array order. Supported canonical usage is
+`socialCanonicalTemporalView({ replay, sourceEventId, asOfTs })`. Simple views (no pending records,
+a v2 target's own witness as basis, untied first-known) need no order. The full/prefix answers are
+identical wherever the omitted records are inadmissible to the query; later evidence may add
+conflict metadata but never a winning source time.
+
+**Compatibility and limits.** No persisted field, identity, schema, or fixture changed; version-1
+records keep their bytes and LEGACY_UNSEALED label. The neighbour matrix (settled before/after ×
+clock before/equal/after × equivalent/conflicting/precision × sealed/legacy × forward/reversed
+input) and a seeded generated set are covered in `test/social-4d-causal-order.test.js`; they are
+bounded checks, not an exhaustive proof. INDEX_DIVERGENCE stays a manual re-hydration limit; the
+snapshot seal remains self-consistency, not authentication; no conflict-resolution authority exists.
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -1359,6 +1401,9 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
 - **SOCIAL-4D EQUAL-CLOCK CAUSAL CONTEXT — DONE (§5M):** equal-millisecond precedence follows the
   settled journal order; replay exports it and the canonical view consumes it. Further defects may
   exist.
+- **SOCIAL-4D CONSOLIDATED CAUSAL-ORDER — DONE (§5N):** availability = knowledge admissibility AND
+  settled-prefix membership; first-known selection by settled position, never by id; neighbour
+  matrix and seeded checks. Further defects may exist; the Social/RUMOR layer is not complete.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

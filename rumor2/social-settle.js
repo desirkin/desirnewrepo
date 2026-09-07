@@ -385,21 +385,28 @@ const socialPendingShapeError = (ev) => {
 // the accepted causal prefix is never retroactively invalidated). `settledOrder` is the canonical
 // journal order (sourceEventId -> position) that replaySocialHistory exports; the view passes it
 // through so the canonical full-history path and replay judge the SAME context.
+// CONSOLIDATED CAUSAL-ORDER LAW: availability requires BOTH (1) knowledge-time admissibility —
+// the annotation's knownAtTs is no later than the record's (equality inclusive) — AND (2) membership
+// of the record's PRECEDING SETTLED CONTEXT — it settled before the record in the journal. With the
+// canonical settled order both are checked for earlier, equal, and later clocks alike: a later
+// append can never retroactively invalidate (or supply) the reason for an earlier conflict merely
+// because it carries an earlier or equal recorded clock. A verified prefix reader establishes (2)
+// from the actual prefix (socialPrefixPrecedes); an arbitrary full-list caller may not claim it by
+// assumption, so without a settled position for BOTH records the answer is null (unknown).
+export const socialSettledPosition = (settledOrder, id) => { const p = settledOrder instanceof Map ? settledOrder.get(id) : Array.isArray(settledOrder) ? settledOrder.indexOf(id) : undefined; return Number.isSafeInteger(p) && p >= 0 ? p : null; };
 export function socialCausalPrecedes(settledOrder = null) {
-  const pos = (id) => (settledOrder instanceof Map ? settledOrder.get(id) : Array.isArray(settledOrder) ? settledOrder.indexOf(id) : undefined);
   return (a, ev) => {
     if (!Number.isSafeInteger(a?.knownAtTs) || !Number.isSafeInteger(ev?.knownAtTs)) return false;
-    if (a.knownAtTs < ev.knownAtTs) return true;
-    if (a.knownAtTs > ev.knownAtTs) return false;
-    const pa = pos(a.sourceEventId); const pe = pos(ev.sourceEventId);
-    if (Number.isSafeInteger(pa) && pa >= 0 && Number.isSafeInteger(pe) && pe >= 0) return pa < pe;
-    return null;
+    if (a.knownAtTs > ev.knownAtTs) return false; // knowledge-time admissibility fails whatever the order
+    const pa = socialSettledPosition(settledOrder, a?.sourceEventId); const pe = socialSettledPosition(settledOrder, ev?.sourceEventId);
+    if (pa !== null && pe !== null) return pa < pe; // admissible AND settled before
+    return null; // prefix membership cannot be established from this context
   };
 }
 // the precedence a CAUSAL PREFIX reader may assert: every annotation it holds settled before the
 // record it is checking, so knowledge time alone (equality inclusive) decides
 export const socialPrefixPrecedes = (a, ev) => Number.isSafeInteger(a?.knownAtTs) && Number.isSafeInteger(ev?.knownAtTs) && a.knownAtTs <= ev.knownAtTs;
-export const SOCIAL_CONTEXT_ORDER_REQUIRED = 'a declaration known at the same millisecond has no settled order in this context — the canonical journal order (settledOrder from replaySocialHistory) is required to establish the basis';
+export const SOCIAL_CONTEXT_ORDER_REQUIRED = 'the settled order of a retained declaration is unknown in this context — the canonical journal order (settledOrder from replaySocialHistory) is required to establish the basis';
 
 export function socialPendingLinkError(ev, target, annotations = [], { precedes = socialCausalPrecedes(null) } = {}) {
   if (!target || typeof target !== 'object') return 'target not durable (unknown, unsettled, or later than this record)';

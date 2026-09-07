@@ -290,7 +290,7 @@ test('D4. equivalent offsets / padding and the repeated same annotation remain i
 test('D5. the view at T1 and T2 respects when the conflict became known and never picks a winner', async () => {
   const r1 = await annotatedLegacy(); const r2 = await pipeline({ arr: r1.arr, deliveries: [bsky('2026-09-06T12:00:00.200Z')], nowMs: T2 });
   const rp = replaySocialHistory(r2.arr); const id = LEGACY.event.sourceEventId; const annotations = rp.annotations.get(id); const pending = rp.pendingByTarget.get(id);
-  const at = (asOfTs) => socialTemporalView({ event: LEGACY.event, annotations, pending, asOfTs });
+  const at = (asOfTs) => socialTemporalView({ event: LEGACY.event, annotations, pending, asOfTs, settledOrder: rp.settledOrder });
   const v1 = at(T1); assert.equal(v1.conflict, null); assert.equal(v1.effective.sourceDeclaredTs, T_MS + 100); assert.equal(v1.effective.provenance, 'LATER_EVIDENCE_SAME_EVENT');
   const v2m = at(T2 - 1); assert.equal(v2m.conflict, null); assert.equal(v2m.effective.sourceDeclaredTs, T_MS + 100, 'conflict knowledge never leaks backward');
   const v2 = at(T2); assert.equal(v2.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(v2.effective.sourceDeclaredTs, null); assert.equal(v2.effective.sourceClockWitness, null); assert.equal(v2.effective.provenance, 'CONFLICTING_DECLARATIONS'); assert.equal(v2.effective.precisionVerified, false);
@@ -299,9 +299,9 @@ test('D5. the view at T1 and T2 respects when the conflict became known and neve
   // a legacy history carrying two non-equivalent annotations (written before this closeout) is accepted, flagged, and never resolved by arrival order
   const later = socialClockInterpretationEvent({ target: LEGACY.event, clockRole: 'SOURCE_DECLARATION', basis: 'NEW_DELIVERY_SAME_EVENT', witness: obs('bsky', bsky('2026-09-06T12:00:00.200Z'), T2).sourceClockWitness, evidenceRetrievedTs: T2, knownAtTs: T2 });
   const old = replaySocialHistory([...r1.arr, later]); assert.equal(old.ok, true); assert.deepEqual(old.annotationConflicts, [{ targetEventId: id, clockRole: 'SOURCE_DECLARATION', annotationIds: [annotations[0].sourceEventId, later.sourceEventId].sort() }]);
-  const vo = socialTemporalView({ event: LEGACY.event, annotations: old.annotations.get(id), asOfTs: T2 + 1 }); assert.equal(vo.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(vo.conflict.knownAtTs, T2);
-  assert.equal(socialTemporalView({ event: LEGACY.event, annotations: old.annotations.get(id), asOfTs: T2 - 1 }).effective.sourceDeclaredTs, T_MS + 100);
-  const foreign = { ...pending[0], candidateIds: ['r2sv-' + 'a'.repeat(40)] }; assert.equal(socialTemporalView({ event: LEGACY.event, annotations, pending: [foreign], asOfTs: T2 }).ok, false, 'a pending record that does not name this event is refused');
+  const vo = socialTemporalView({ event: LEGACY.event, annotations: old.annotations.get(id), asOfTs: T2 + 1, settledOrder: old.settledOrder }); assert.equal(vo.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(vo.conflict.knownAtTs, T2);
+  assert.equal(socialTemporalView({ event: LEGACY.event, annotations: old.annotations.get(id), asOfTs: T2 - 1, settledOrder: old.settledOrder }).effective.sourceDeclaredTs, T_MS + 100);
+  const foreign = { ...pending[0], candidateIds: ['r2sv-' + 'a'.repeat(40)] }; assert.equal(socialTemporalView({ event: LEGACY.event, annotations, pending: [foreign], asOfTs: T2, settledOrder: rp.settledOrder }).ok, false, 'a pending record that does not name this event is refused');
 });
 
 test('D6. a permitted policy-version reinterpretation of retained bytes is not altered source bytes; unsupported versions fail honestly', () => {
@@ -327,7 +327,7 @@ test('E1-E4. NOT_YET_KNOWN before first-known for legacy and v2 records; T1/T2 c
     assert.equal(socialTemporalView({ event: e, asOfTs: e.sourceDeclaredTs }).status, 'NOT_YET_KNOWN', 'the source clock grants no earlier admissibility');
   }
   const r1 = await annotatedLegacy(); const r2 = await pipeline({ arr: r1.arr, deliveries: [bsky('2026-09-06T12:00:00.200Z')], nowMs: T2 }); const rp = replaySocialHistory(r2.arr); const id = LEGACY.event.sourceEventId;
-  const at = (asOfTs) => socialTemporalView({ event: LEGACY.event, annotations: rp.annotations.get(id), pending: rp.pendingByTarget.get(id), asOfTs });
+  const at = (asOfTs) => socialTemporalView({ event: LEGACY.event, annotations: rp.annotations.get(id), pending: rp.pendingByTarget.get(id), asOfTs, settledOrder: rp.settledOrder });
   assert.deepEqual(at(T1 - 1).appliedAnnotations, []); assert.equal(at(T1 - 1).effective.sourceDeclaredTs, LEGACY.event.sourceDeclaredTs); assert.equal(at(T1).appliedAnnotations.length, 1);
   assert.equal(at(T2 - 1).conflict, null); assert.equal(at(T2).conflict.knownAtTs, T2);
   const snap = canonicalJson(LEGACY.event);
@@ -421,7 +421,7 @@ if (!TEST_URL) {
       const rt2 = bootRt({ fixtures: [bsky('2026-09-06T12:00:00.200Z'), bsky('2026-09-06T12:00:00.100000Z')], nowMs: T2 }); assert.equal(rt2.hydrate(await events(j2)).ok, true); rt2.start(); assert.equal((await settleWith(rt2, j2)).ok, true); rt2.stop(); await j2.releaseWriter();
       const hist = await events(mkJournal()); assert.equal(ann(hist).length, 1); assert.equal(pend(hist).length, 1); assert.equal(src(hist).length, 1);
       const rp = replaySocialHistory(hist); assert.equal(rp.ok, true); const id = LEGACY.event.sourceEventId;
-      const at = (asOfTs) => socialTemporalView({ event: rp.targets.get(id), annotations: rp.annotations.get(id), pending: rp.pendingByTarget.get(id), asOfTs });
+      const at = (asOfTs) => socialTemporalView({ event: rp.targets.get(id), annotations: rp.annotations.get(id), pending: rp.pendingByTarget.get(id), asOfTs, settledOrder: rp.settledOrder });
       assert.equal(at(T0 - 1).status, 'NOT_YET_KNOWN'); assert.equal(at(T1 - 1).effective.sourceDeclaredTs, LEGACY.event.sourceDeclaredTs); assert.equal(at(T1).effective.sourceDeclaredTs, T_MS + 100); assert.equal(at(T2 - 1).conflict, null); assert.equal(at(T2).effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE);
       // a third process hydrated from that history repeats nothing on redelivery of either declaration
       const j3 = mkJournal(); await acquire(j3); const rt3 = bootRt({ fixtures: [bsky('2026-09-06T12:00:00.100Z'), bsky('2026-09-06T12:00:00.200Z')], nowMs: T2 + 1 }); assert.equal(rt3.hydrate(await events(j3)).ok, true); rt3.start();

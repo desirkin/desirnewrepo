@@ -222,8 +222,8 @@ test('L. predecessor-generated version-1 annotation/pending records replay byte-
   }
   // the legacy conflict applies under its own contract — labelled UNSEALED, no seal manufactured
   const conflict = REC.scenarios.conflict; const cp = replaySocialHistory(conflict.history); const target = src(conflict.history)[0]; const id = target.sourceEventId;
-  const v = socialTemporalView({ event: target, annotations: cp.annotations.get(id), pending: cp.pendingByTarget.get(id), asOfTs: REC.T2 }); assert.equal(v.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(v.effective.clockIntegrity, 'LEGACY_UNSEALED');
-  const before = socialTemporalView({ event: target, annotations: cp.annotations.get(id), pending: cp.pendingByTarget.get(id), asOfTs: REC.T1 }); assert.equal(before.effective.sourceDeclaredTs, T_MS + 100); assert.equal(before.effective.clockIntegrity, 'LEGACY_UNSEALED');
+  const v = socialTemporalView({ event: target, annotations: cp.annotations.get(id), pending: cp.pendingByTarget.get(id), asOfTs: REC.T2, settledOrder: cp.settledOrder }); assert.equal(v.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(v.effective.clockIntegrity, 'LEGACY_UNSEALED');
+  const before = socialTemporalView({ event: target, annotations: cp.annotations.get(id), pending: cp.pendingByTarget.get(id), asOfTs: REC.T1, settledOrder: cp.settledOrder }); assert.equal(before.effective.sourceDeclaredTs, T_MS + 100); assert.equal(before.effective.clockIntegrity, 'LEGACY_UNSEALED');
   // a legacy record whose links cannot be verified against actual history: retained, reported, never applied
   const legacyPending = pend(conflict.history)[0]; assert.equal(legacyPending.schemaVersion, 1);
   const other = asEvent(obs('bsky', bsky(T_Z, { seq: 77, rkey: 'k77', cid: 'bafy77' }), T0)); const retargeted = { ...structuredClone(legacyPending), candidateIds: [other.sourceEventId] };

@@ -62,8 +62,10 @@ test('EQ-1. Appendix A same-millisecond accepted history: replay succeeds; the c
   for (const asOfTs of CUTS) { const v = canonical(history, asOfTs); assert.equal(v.ok, true, `${asOfTs - T0}: ${v.error}`); }
   assert.equal(canonical(history, T0 - 1).status, 'NOT_YET_KNOWN'); assert.equal(canonical(history, T1).effective.sourceClockStatus, 'TRUSTED'); assert.equal(canonical(history, T1).effective.sourceDeclaredTs, T_MS + 100);
   for (const asOfTs of [T2, T2 + 1, T3]) { const v = canonical(history, asOfTs); assert.equal(v.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(v.effective.sourceDeclaredTs, null, 'no winner'); assert.deepEqual(v.appliedAnnotations, []); assert.equal(v.conflict.knownAtTs, T2); assert.deepEqual(v.conflict.retainedAnnotationIds, [a1.sourceEventId, a2.sourceEventId].sort(), 'the later equal-clock annotation is retained and shown, not erased'); }
-  // the plain-array path of the probe (no settled order): the strictly-earlier basis suffices and the equal-clock annotation is not an invalidator
-  for (const anns of [[a1, a2], [a2, a1]]) for (const asOfTs of CUTS) { const v = socialTemporalView({ event: E, annotations: anns, pending: [p], asOfTs }); assert.equal(v.ok, true, `${asOfTs - T0}: ${v.error}`); assert.equal(canonicalJson(pick(v)), canonicalJson(pick(canonical(history, asOfTs)))); }
+  // the plain-array path (no settled order) cannot claim prefix membership for ANY basis of a legacy target's conflict: an honest context-required refusal, never a guess (consolidated causal-order law)
+  for (const anns of [[a1, a2], [a2, a1]]) for (const asOfTs of CUTS) { const v = socialTemporalView({ event: E, annotations: anns, pending: [p], asOfTs }); assert.equal(v.ok, false); assert.match(v.error, /settled order/); }
+  // with the canonical order the input-array permutation is irrelevant
+  for (const anns of [[a1, a2], [a2, a1]]) for (const asOfTs of CUTS) { const v = socialTemporalView({ event: E, annotations: anns, pending: [p], asOfTs, settledOrder: rp.settledOrder }); assert.equal(v.ok, true, `${asOfTs - T0}: ${v.error}`); assert.equal(canonicalJson(pick(v)), canonicalJson(pick(canonical(history, asOfTs)))); }
 });
 
 test('EQ-2. before T0 NOT_YET_KNOWN with no future facts, ids, or counts; at T1 and T2-1 the canonical full-history result equals the prefix result exactly', () => {
@@ -114,7 +116,7 @@ test('EQ-6. reversing, shuffling, and sorting caller-provided annotation arrays 
   // an order that names ids in lexicographic sequence is NOT the settled order: precedence follows the map given, never the id text
   const lexi = new Map([...rp.settledOrder.keys()].sort().map((id, i) => [id, i])); const settled = socialCausalPrecedes(rp.settledOrder); const bogus = socialCausalPrecedes(lexi);
   assert.equal(settled(a2, p), false, 'a2 settled after p'); assert.equal(bogus(a2, p), a2.sourceEventId < p.sourceEventId, 'a lexicographic map would answer by id text — that is why only replay\'s settledOrder is canonical');
-  assert.equal(socialCausalPrecedes(null)(a2, p), null); assert.equal(socialCausalPrecedes(null)(a1, p), true); assert.equal(socialCausalPrecedes([E.sourceEventId, a1.sourceEventId, p.sourceEventId, a2.sourceEventId])(a2, p), false, 'an ordered id list is accepted as settled order');
+  assert.equal(socialCausalPrecedes(null)(a2, p), null); assert.equal(socialCausalPrecedes(null)(a1, p), null, 'an earlier clock alone never proves prefix membership'); assert.equal(socialCausalPrecedes(null)(annotate('2026-09-06T12:00:00.100Z', T3), p), false, 'a later clock is inadmissible whatever the order'); assert.equal(socialCausalPrecedes([E.sourceEventId, a1.sourceEventId, p.sourceEventId, a2.sourceEventId])(a2, p), false, 'an ordered id list is accepted as settled order');
 });
 
 test('EQ-7. several equal-millisecond later annotations — equivalent offset/padding and incompatible precision — never latest-wins, never invented early knowledge, never an error on an earlier valid view', () => {
@@ -129,7 +131,8 @@ test('EQ-7. several equal-millisecond later annotations — equivalent offset/pa
 });
 
 test('EQ-8. refusal regression: retargeted, missing, cross-provider, causally later, erased, altered-clock/snapshot, equivalent-only, and future-only-basis records stay refused', () => {
-  const { a1, p, history } = tie(0); const B = toEvent(message(42), T0); const rp = replaySocialHistory([...history, B]); const ctx = { targetOf: (id) => rp.targets.get(id) ?? null, annotationsOf: (id) => rp.annotations.get(id) ?? [], precedes: socialCausalPrecedes(rp.settledOrder) };
+  const { a1, p, history } = tie(0); const B = toEvent(message(42), T0); const rp = replaySocialHistory([...history, B]); const causal = socialCausalPrecedes(rp.settledOrder);
+  const ctx = { targetOf: (id) => rp.targets.get(id) ?? null, annotationsOf: (id) => rp.annotations.get(id) ?? [], precedes: (a, ev) => (rp.settledOrder.has(ev.sourceEventId) ? causal(a, ev) : socialPrefixPrecedes(a, ev)) }; // an unsettled candidate comes after everything settled
   const remint = (q, changes) => { const ev = { ...structuredClone(q), ...changes }; ev.sourceEventId = socialReconciliationIdentity({ provider: ev.provider, nativeKeyDigest: contentHash(canonicalJson(ev.nativeKey)), immutableDigest: ev.immutableDigest, witnessHash: ev.witnessHash, reason: ev.reason, candidateIds: ev.candidateIds, candidateTotal: ev.candidateTotal }); ev.snapshotHash = socialRecordSnapshotHash(ev); return ev; };
   assert.match(validateSocialReconciliationPending({ ...p, candidateIds: [B.sourceEventId] }), /derived identity/); assert.match(validateSocialPendingContext(remint(p, { candidateIds: [B.sourceEventId] }), ctx), /not the same native occurrence/);
   assert.match(validateSocialPendingContext(remint(p, { candidateIds: ['r2sv-' + 'a'.repeat(40)] }), ctx), /target not durable/); assert.match(socialPendingLinkError(p, { ...E, provider: 'FARCASTER_OFFICIAL' }, [a1], { precedes: socialPrefixPrecedes }), /cross-provider/);

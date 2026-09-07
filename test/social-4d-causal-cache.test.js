@@ -130,22 +130,26 @@ function acceptedHistory() {
   const a2 = annotate('2026-09-06T12:00:00.200Z', T3); assert.equal(validateSocialClockInterpretation(a2, { target: LEGACY.event }), null);
   return { a1, p: c.event, a2 };
 }
-const view = (annotations, pending, asOfTs) => socialTemporalView({ event: LEGACY.event, annotations, pending, asOfTs });
+// CANONICAL usage: the view is judged with the settled order of the history the records came from (an
+// input-array subset or permutation never changes the journal order)
+const HIST = (recs) => [LEGACY.event, ...recs];
+const view = (annotations, pending, asOfTs, history = null) => { const rp = replaySocialHistory(history ?? HIST([...annotations, ...pending])); assert.ok(rp.ok, rp.error); return socialTemporalView({ event: LEGACY.event, annotations, pending, asOfTs, settledOrder: rp.settledOrder }); };
 
 test('TIME-1. the T0/T1/T2/T3 accepted history: the full-history view at T2 equals the prefix view at T2, in any input order', () => {
   const { a1, p, a2 } = acceptedHistory();
   const whole = replaySocialHistory([LEGACY.event, a1, p, a2]); assert.equal(whole.ok, true, whole.error); assert.equal(whole.pendingUnlinked.length, 0); assert.equal(whole.annotationConflicts.length, 1);
-  const prefix = view([a1], [p], T2); assert.equal(prefix.ok, true); assert.equal(prefix.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE);
-  for (const anns of [[a1, a2], [a2, a1]]) { const full = view(anns, [p], T2); assert.equal(full.ok, true, full.error); assert.equal(canonicalJson(full), canonicalJson(prefix), 'a valid future annotation changes nothing at T2'); }
-  assert.equal(canonicalJson(socialTemporalView({ event: LEGACY.event, annotations: whole.annotations.get(LEGACY.event.sourceEventId), pending: whole.pendingByTarget.get(LEGACY.event.sourceEventId), asOfTs: T2 })), canonicalJson(prefix), 'replay context agrees');
-  assert.equal(canonicalJson(view([a1, a2], [p], T2 + 999)), canonicalJson(view([a1], [p], T2 + 999)), 'and at any time before T3');
+  const H = [LEGACY.event, a1, p, a2];
+  const prefix = view([a1], [p], T2, [LEGACY.event, a1, p]); assert.equal(prefix.ok, true); assert.equal(prefix.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE);
+  for (const anns of [[a1, a2], [a2, a1]]) { const full = view(anns, [p], T2, H); assert.equal(full.ok, true, full.error); assert.equal(canonicalJson(full), canonicalJson(prefix), 'a valid future annotation changes nothing at T2'); }
+  assert.equal(canonicalJson(socialTemporalView({ event: LEGACY.event, annotations: whole.annotations.get(LEGACY.event.sourceEventId), pending: whole.pendingByTarget.get(LEGACY.event.sourceEventId), asOfTs: T2, settledOrder: whole.settledOrder })), canonicalJson(prefix), 'replay context agrees');
+  assert.equal(canonicalJson(view([a1, a2], [p], T2 + 999, H)), canonicalJson(view([a1], [p], T2 + 999, [LEGACY.event, a1, p])), 'and at any time before T3');
 });
 
 test('TIME-2. before T1 the view is ORIGINAL_RECORDED with nothing applied; before T0 it is NOT_YET_KNOWN; no future ids or counts leak', () => {
   const { a1, p, a2 } = acceptedHistory();
-  const v = view([a1, a2], [p], T1 - 1); assert.equal(v.status, 'EFFECTIVE'); assert.deepEqual(v.appliedAnnotations, []); assert.equal(v.conflict, null); assert.equal(v.effective.sourceDeclaredTs, LEGACY.event.sourceDeclaredTs); assert.equal(v.effective.clockIntegrity, 'ORIGINAL_ONLY');
+  const v = view([a1, a2], [p], T1 - 1, [LEGACY.event, a1, p, a2]); assert.equal(v.status, 'EFFECTIVE'); assert.deepEqual(v.appliedAnnotations, []); assert.equal(v.conflict, null); assert.equal(v.effective.sourceDeclaredTs, LEGACY.event.sourceDeclaredTs); assert.equal(v.effective.clockIntegrity, 'ORIGINAL_ONLY');
   assert.equal(JSON.stringify(v).includes(a2.sourceEventId), false); assert.equal(JSON.stringify(v).includes(p.sourceEventId), false); assert.equal('withheldAnnotations' in v, false);
-  const n = view([a1, a2], [p], T0 - 1); assert.equal(n.status, 'NOT_YET_KNOWN'); assert.equal(n.original, null); assert.equal(n.effective, null); assert.equal(JSON.stringify(n).includes('r2si-'), false); assert.equal(JSON.stringify(n).includes('r2sp-'), false);
+  const n = view([a1, a2], [p], T0 - 1, [LEGACY.event, a1, p, a2]); assert.equal(n.status, 'NOT_YET_KNOWN'); assert.equal(n.original, null); assert.equal(n.effective, null); assert.equal(JSON.stringify(n).includes('r2si-'), false); assert.equal(JSON.stringify(n).includes('r2sp-'), false);
 });
 
 test('TIME-3. context that exists only after the pending record\'s knownAt cannot justify it: a sealed false link fails closed at replay, in the context law, and in the view; timestamps are not rewritten to fit', () => {
@@ -154,7 +158,7 @@ test('TIME-3. context that exists only after the pending record\'s knownAt canno
   assert.equal(validateSocialReconciliationPending(pEarlier), null, 'internally consistent record');
   assert.match(socialPendingLinkError(pEarlier, LEGACY.event, [a1]), /retained no original declaration/); assert.match(validateSocialPendingContext(pEarlier, ctxOf([LEGACY.event, a1])), /retained no original declaration/);
   assert.match(replaySocialHistory([LEGACY.event, a1, pEarlier]).error, /retained no original declaration/, 'append order is not knowledge order');
-  assert.match(view([a1], [pEarlier], T1).error, /retained no original declaration/);
+  assert.match(socialTemporalView({ event: LEGACY.event, annotations: [a1], pending: [pEarlier], asOfTs: T1, settledOrder: [LEGACY.event.sourceEventId, a1.sourceEventId, pEarlier.sourceEventId] }).error, /retained no original declaration/, 'even settled after a1, the record was known before it: no basis');
   const r = rec([LEGACY.event, a1]); assert.equal(r.reconcile(obs(sameNative('2026-09-06T12:00:00.300Z'), T2), r.batch({ knownAtTs: T2 })).kind, 'PENDING', 'the same disagreement known AFTER the annotation is a genuine conflict');
   assert.equal(socialPendingLinkError({ ...pEarlier, knownAtTs: T1 }, LEGACY.event, [a1], { precedes: socialPrefixPrecedes }), null, 'equality of knownAt is admissible in a causal prefix (the snapshot seal, not this law, refuses the rewritten clock)');
   assert.equal(socialPendingLinkError({ ...pEarlier, knownAtTs: T1 }, LEGACY.event, [a1]), SOCIAL_CONTEXT_ORDER_REQUIRED, 'without a settled order an equal-clock basis is honestly context-deficient, never guessed'); assert.match(validateSocialReconciliationPending({ ...pEarlier, knownAtTs: T1, ts: new Date(T1).toISOString() }), /snapshotHash/);
@@ -162,9 +166,10 @@ test('TIME-3. context that exists only after the pending record\'s knownAt canno
 
 test('TIME-4. a later annotation equal to the pending declaration neither invalidates the earlier justified conflict nor resolves it: at T3 the disagreement stays unresolved, not latest-wins', () => {
   const { a1, p, a2 } = acceptedHistory();
-  assert.equal(socialPendingLinkError(p, LEGACY.event, [a1, a2]), null, 'a2 (known at T3) is not a basis for or against the conflict known at T2');
+  const ord = replaySocialHistory([LEGACY.event, a1, p, a2]).settledOrder;
+  assert.equal(socialPendingLinkError(p, LEGACY.event, [a1, a2], { precedes: socialCausalPrecedes(ord) }), null, 'a2 (known at T3) is not a basis for or against the conflict known at T2');
   assert.equal(validateSocialPendingContext(p, ctxOf([LEGACY.event, a1, p, a2])), null);
-  const at3 = view([a1, a2], [p], T3); assert.equal(at3.ok, true); assert.equal(at3.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(at3.effective.sourceDeclaredTs, null); assert.equal(at3.conflict.knownAtTs, T2); assert.deepEqual(at3.conflict.retainedAnnotationIds, [a1.sourceEventId, a2.sourceEventId].sort()); assert.deepEqual(at3.appliedAnnotations, []);
+  const at3 = view([a1, a2], [p], T3, [LEGACY.event, a1, p, a2]); assert.equal(at3.ok, true); assert.equal(at3.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(at3.effective.sourceDeclaredTs, null); assert.equal(at3.conflict.knownAtTs, T2); assert.deepEqual(at3.conflict.retainedAnnotationIds, [a1.sourceEventId, a2.sourceEventId].sort()); assert.deepEqual(at3.appliedAnnotations, []);
   const r = rec([LEGACY.event, a1, p, a2]); const again = r.reconcile(obs(sameNative('2026-09-06T12:00:00.200Z'), T3 + 1), r.batch({ knownAtTs: T3 + 1 })); assert.equal(again.kind, 'KNOWN', 'the .200Z declaration is retained (annotation) — nothing new, no fork');
 });
 
@@ -187,11 +192,11 @@ test('TIME-5. equality boundary, offset-equivalent declarations, precision confl
 test('TIME-6. legacy version-1 records keep their bytes and their honest labels under the causal law; nothing is fabricated', async () => {
   for (const [name, sc] of Object.entries(REC.scenarios)) { const rp = replaySocialHistory(sc.history); assert.equal(rp.ok, true, `${name}: ${rp.error}`); assert.equal(rp.pendingUnlinked.length, 0, `${name}: genuine legacy links hold under the causal filter (their annotations precede them in knowledge)`); }
   const sc = REC.scenarios.conflict; const cp = replaySocialHistory(sc.history); const id = src(sc.history)[0].sourceEventId; const legacyPending = pend(sc.history)[0];
-  const v = socialTemporalView({ event: src(sc.history)[0], annotations: cp.annotations.get(id), pending: cp.pendingByTarget.get(id), asOfTs: REC.T2 }); assert.equal(v.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(v.effective.clockIntegrity, 'LEGACY_UNSEALED');
+  const v = socialTemporalView({ event: src(sc.history)[0], annotations: cp.annotations.get(id), pending: cp.pendingByTarget.get(id), asOfTs: REC.T2, settledOrder: cp.settledOrder }); assert.equal(v.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(v.effective.clockIntegrity, 'LEGACY_UNSEALED');
   // a legacy pending record whose only possible basis was known after it: retained as unlinked, never applied, no seal invented
   const moved = structuredClone(legacyPending); moved.knownAtTs = REC.T0 + 10; moved.ts = new Date(REC.T0 + 10).toISOString(); moved.candidate.retrievedTs = REC.T0 + 10; assert.equal(validateSocialReconciliationPending(moved), null, 'stated limit: a version-1 record binds no snapshot');
   const rl = replaySocialHistory([...src(sc.history), ...ann(sc.history), moved]); assert.equal(rl.ok, true); assert.equal(rl.pendingUnlinked.length, 1); assert.match(rl.pendingUnlinked[0].reason, /retained no original declaration/); assert.equal(rl.pendingByTarget.has(id), false);
-  assert.equal(socialTemporalView({ event: src(sc.history)[0], annotations: rl.annotations.get(id), asOfTs: REC.T2 }).conflict, null); assert.match(socialTemporalView({ event: src(sc.history)[0], annotations: rl.annotations.get(id), pending: [moved], asOfTs: REC.T2 }).error, /retained no original declaration/);
+  assert.equal(socialTemporalView({ event: src(sc.history)[0], annotations: rl.annotations.get(id), asOfTs: REC.T2, settledOrder: rl.settledOrder }).conflict, null); assert.match(socialTemporalView({ event: src(sc.history)[0], annotations: rl.annotations.get(id), pending: [moved], asOfTs: REC.T2, settledOrder: rl.settledOrder }).error, /retained no original declaration/);
   for (let i = 0; i < sc.history.length; i++) assert.equal(canonicalJson(sc.history[i]), canonicalJson(JSON.parse(readFileSync(path.join(REPO, 'test/fixtures/social-4d-legacy-32434e8-records.json'), 'utf8')).scenarios.conflict.history[i]));
 });
 
@@ -238,7 +243,7 @@ if (!TEST_URL) {
   test('TIME-7 (PG). accepted annotation/pending context round-trips through real PostgreSQL and a fresh runtime; before/at/after results are deterministic and a later valid annotation leaves the T2 answer unchanged', async () => {
     await withDb(async ({ mkJournal }) => {
       const { a1, p, a2 } = acceptedHistory(); const jA = mkJournal(); await acquire(jA); assert.equal((await jA.append([LEGACY.event, a1, p])).ok, true); await jA.releaseWriter();
-      const before = replaySocialHistory(await events(mkJournal())); const id = LEGACY.event.sourceEventId; const at = (rp, asOfTs) => canonicalJson(socialTemporalView({ event: rp.targets.get(id), annotations: rp.annotations.get(id), pending: rp.pendingByTarget.get(id), asOfTs }));
+      const before = replaySocialHistory(await events(mkJournal())); const id = LEGACY.event.sourceEventId; const at = (rp, asOfTs) => canonicalJson(socialTemporalView({ event: rp.targets.get(id), annotations: rp.annotations.get(id), pending: rp.pendingByTarget.get(id), asOfTs, settledOrder: rp.settledOrder }));
       const snapshot = { t0m: at(before, T0 - 1), t1m: at(before, T1 - 1), t2: at(before, T2), t3: at(before, T3) };
       const jB = mkJournal(); await acquire(jB); assert.equal((await jB.append([a2])).ok, true); await jB.releaseWriter();
       const after = replaySocialHistory(await events(mkJournal())); assert.equal(after.ok, true); assert.equal(after.annotated, 2); assert.equal(after.pendingUnlinked.length, 0);
