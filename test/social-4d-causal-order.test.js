@@ -16,7 +16,7 @@ import { jetstreamCommitToRaw, jetstreamCursorOf, BLUESKY_OFFICIAL } from '../ru
 import { normalizeSocialObservation, buildSocialFilter } from '../rumor2/social.js';
 import {
   socialObservationToEvent, validateSocialEvent, replaySocialHistory, socialReconciliationPendingEvent, validateSocialReconciliationPending, socialClockInterpretationEvent, validateSocialClockInterpretation,
-  socialPendingLinkError, validateSocialPendingContext, socialCausalPrecedes, socialPrefixPrecedes, socialSettledPosition, sameDeclaration, SOCIAL_CONTEXT_ORDER_REQUIRED,
+  socialPendingLinkError, validateSocialPendingContext, socialCausalPrecedes, socialPrefixPrecedes, socialSettledPosition, socialSettledOrderError, sameDeclaration, SOCIAL_CONTEXT_ORDER_REQUIRED, SOCIAL_SETTLED_ORDER_INVALID,
   SOCIAL_OBSERVATION_TYPES, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CLOCK_INTERPRETATION_KEYS,
 } from '../rumor2/social-settle.js';
 import { createSocialReconciler } from '../rumor2/social-reconcile.js';
@@ -102,7 +102,7 @@ test('A2b. every first/last selection site: equivalent SOURCE_DECLARATION annota
   const bare = socialTemporalView({ event: E, annotations: [s1, s2], asOfTs: T1 }); assert.equal(bare.ok, false); assert.equal(bare.error, SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED);
   const partial = socialTemporalView({ event: E, annotations: [s1, s2], asOfTs: T1, settledOrder: new Map([[ID, 0], [s1.sourceEventId, 1]]) }); assert.equal(partial.ok, false, 'an incomplete order cannot break the tie'); assert.equal(partial.error, SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED);
   const single = socialTemporalView({ event: E, annotations: [s1], asOfTs: T1 }); assert.equal(single.ok, true, 'a simple answerable view needs no order');
-  const earlier = annotate(D200, T1 - 1); const rp2 = replaySocialHistory([E, s1, earlier]); const v2 = socialTemporalView({ event: E, annotations: [s1, earlier], asOfTs: T1, settledOrder: rp2.settledOrder }); assert.equal(v2.effective.appliedSourceInterpretationId, earlier.sourceEventId, 'unequal clocks: first-known wins regardless of settlement position');
+  const earlier = annotate(D200_OFF, T1 - 1); const rp2 = replaySocialHistory([E, s1, earlier]); assert.equal(rp2.ok, true, rp2.error); const v2 = socialTemporalView({ event: E, annotations: [s1, earlier], asOfTs: T1, settledOrder: rp2.settledOrder }); assert.equal(v2.ok, true, v2.error); assert.equal(v2.effective.appliedSourceInterpretationId, earlier.sourceEventId, 'unequal clocks: first-known wins regardless of settlement position, even when it settled second');
   const { larger, smaller } = tiedProviderPair(); const pb = socialTemporalView({ event: E, annotations: [larger, smaller], asOfTs: T1 }); assert.equal(pb.error, SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED);
   // conflict knowledge time is an order-independent quantity: the first moment two non-equivalent declarations were both known
   const c1 = annotate(D100, T1); const c2 = annotate(D300, T2); const c3 = annotate(D2005, T1 - 1); const rp3 = replaySocialHistory([E, c2, c1, c3]); assert.equal(rp3.ok, true, rp3.error); const v3 = socialCanonicalTemporalView({ replay: rp3, sourceEventId: ID, asOfTs: T3 }); assert.equal(v3.ok, true, v3.error); assert.equal(v3.conflict.knownAtTs, T1, 'D2005@T1-1 and D100@T1 were both known at T1');
@@ -223,6 +223,134 @@ test('B4. one source across parser correction with a tied-clock conflict batch; 
   assert.equal(replaySocialHistory(arr).durableIds.size, 2); rt.stop();
 });
 
+
+// =========================================================================================
+// D. STANDALONE ORDER-CONTEXT VALIDATION — complete tied-group and malformed-order laws
+// RED on the untouched 6feb28f runtime (review probe): an incomplete THREE-member tied group
+// selected a record in one input permutation and refused in another (only the first two sorted
+// entries were checked), and a malformed order with duplicate positions let the caller's array
+// order pick the applied record. Complete replay-derived context was already correct and is
+// unchanged. Both roles share one selection boundary, so both are tested at every point.
+// =========================================================================================
+// five EQUIVALENT representations of one instant (12:00:00.200Z) — distinct records, no conflict
+const EQUIV = ['2026-09-06T12:00:00.200Z', '2026-09-06T12:00:00.200000Z', '2026-09-06T08:00:00.200-04:00', '2026-09-06T13:00:00.200+01:00', '2026-09-06T12:00:00.2000Z'];
+const EQUIV_EXTRA = '2026-09-06T11:00:00.200-01:00'; // a sixth equivalent representation: knownAtTs is NOT part of a record's identity, so a 'later' record needs its own declaration bytes
+const PEV_TIMES = ['2026-09-06T13:59:59.101Z', '2026-09-06T13:59:59.102Z', '2026-09-06T13:59:59.103Z', '2026-09-06T13:59:59.104Z', '2026-09-06T13:59:59.105Z'];
+const tiedGroup = (role, n, knownAt = T1) => (role === 'SOURCE_DECLARATION' ? EQUIV.slice(0, n).map((d) => annotate(d, knownAt)) : PEV_TIMES.slice(0, n).map((et) => annotate(D100, knownAt, 'PROVIDER_EVENT', et)));
+const appliedId = (v, role) => (role === 'SOURCE_DECLARATION' ? v.effective?.appliedSourceInterpretationId : v.effective?.appliedProviderEventInterpretationId) ?? null;
+const allPerms = (xs) => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => allPerms([...xs.slice(0, i), ...xs.slice(i + 1)]).map((r) => [x, ...r])));
+// bounded deterministic permutations for larger groups, INCLUDING both id-sorted orders so a
+// lexicographic id can never masquerade as the decider
+const permsOf = (xs) => (xs.length <= 3 ? allPerms(xs) : [xs, [...xs].reverse(), [...xs.slice(1), xs[0]], [xs.at(-1), ...xs.slice(0, -1)], [...xs].sort((a, b) => (a.sourceEventId < b.sourceEventId ? -1 : 1)), [...xs].sort((a, b) => (a.sourceEventId < b.sourceEventId ? 1 : -1))]);
+const viewWith = (anns, settledOrder, asOfTs = T1, ev = E) => socialTemporalView({ event: ev, annotations: anns, asOfTs, settledOrder });
+const ROLES = ['SOURCE_DECLARATION', 'PROVIDER_EVENT'];
+
+test('D1. tied groups of 2-5 distinct records, both roles: with the complete replay order every input permutation selects the first-APPENDED record, and both actual append orders are followed', () => {
+  let checked = 0;
+  for (const role of ROLES) for (const n of [2, 3, 4, 5]) {
+    const group = tiedGroup(role, n); assert.equal(new Set(group.map((g) => g.sourceEventId)).size, n, 'distinct records');
+    for (const appended of [group, [...group].reverse()]) {
+      const rp = replaySocialHistory([E, ...appended]); assert.equal(rp.ok, true, rp.error);
+      for (const perm of permsOf(group)) { const v = viewWith(perm, rp.settledOrder); assert.equal(v.ok, true, `${role} n=${n}: ${v.error}`); assert.equal(appliedId(v, role), appended[0].sourceEventId, `${role} n=${n}: the first-appended record is applied`); checked += 1; }
+      // the id-sorted extremes are not the answer unless they genuinely settled first
+      const lex = [...group].map((g) => g.sourceEventId).sort();
+      if (appended[0].sourceEventId !== lex[0]) assert.notEqual(appliedId(viewWith(group, rp.settledOrder), role), lex[0]);
+    }
+  }
+  assert.ok(checked >= 40, `permutations checked: ${checked}`);
+});
+
+test('D2. a missing required position at EVERY input location of the tied group refuses in EVERY permutation; a later-known or unrelated record missing its rank never becomes a requirement', () => {
+  for (const role of ROLES) for (const n of [2, 3, 4, 5]) {
+    const group = tiedGroup(role, n); const rp = replaySocialHistory([E, ...group]);
+    for (const missing of group) {
+      const partial = new Map(rp.settledOrder); partial.delete(missing.sourceEventId);
+      for (const perm of permsOf(group)) { const v = viewWith(perm, partial); assert.equal(v.ok, false, `${role} n=${n} missing ${missing.sourceEventId}: permutation answered`); assert.equal(v.error, SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED); }
+      // the unpositioned member is never silently discarded: the same group WITH a complete order answers
+      assert.equal(viewWith(group, rp.settledOrder).ok, true);
+    }
+    // a LATER-known extra record with no position at all leaves the unique/complete earliest group answerable
+    const later = role === 'SOURCE_DECLARATION' ? annotate(EQUIV_EXTRA, T2) : annotate(D100, T2, 'PROVIDER_EVENT', '2026-09-06T13:59:59.109Z');
+    const rp2 = replaySocialHistory([E, ...group, later]); const orderWithoutLater = new Map(rp2.settledOrder); orderWithoutLater.delete(later.sourceEventId);
+    const v = viewWith([...group, later], orderWithoutLater, T2 + 1); assert.equal(v.ok, true, `${role} n=${n}: ${v.error}`); assert.equal(appliedId(v, role), group[0].sourceEventId);
+  }
+});
+
+test('D3. malformed order is refused as invalid context, never resolved by input order: duplicate positions, bad position values, and a duplicate id in the list form', () => {
+  const group = tiedGroup('PROVIDER_EVENT', 3); const rp = replaySocialHistory([E, ...group]); const [a, b, c] = group;
+  const dup = new Map([[ID, 0], [a.sourceEventId, 1], [b.sourceEventId, 1], [c.sourceEventId, 2]]);
+  for (const perm of allPerms(group)) { const v = viewWith(perm, dup); assert.equal(v.ok, false); assert.match(v.error, /same settled position/); assert.ok(v.error.startsWith(SOCIAL_SETTLED_ORDER_INVALID)); }
+  for (const bad of [-1, 1.5, '1', null, undefined, NaN, Infinity, 2 ** 53, true, {}]) { const m = new Map(rp.settledOrder); m.set(b.sourceEventId, bad); const v = viewWith(group, m); assert.equal(v.ok, false, `position ${String(bad)} was accepted`); assert.ok(v.error.startsWith(SOCIAL_SETTLED_ORDER_INVALID), v.error); }
+  for (const badId of [1, null, '']) { const m = new Map(rp.settledOrder); m.set(badId, 9); assert.ok(viewWith(group, m).error.startsWith(SOCIAL_SETTLED_ORDER_INVALID)); }
+  // the id-list representation: a repeated id is a competing settlement entry, not a hole
+  const list = [ID, a.sourceEventId, b.sourceEventId, c.sourceEventId];
+  for (const perm of allPerms(group)) { const v = viewWith(perm, [...list, a.sourceEventId]); assert.equal(v.ok, false); assert.match(v.error, /appears twice as a competing settlement entry/); }
+  // a valid list and the equivalent valid Map agree, in every permutation
+  for (const perm of allPerms(group)) assert.equal(canonicalJson(pick(viewWith(perm, list))), canonicalJson(pick(viewWith(perm, new Map(list.map((id, i) => [id, i]))))), 'list and Map agree');
+  assert.equal(appliedId(viewWith(group, list), 'PROVIDER_EVENT'), a.sourceEventId);
+  // holes are legitimate: a subset Map that positions the whole tied group answers
+  const subset = new Map([[a.sourceEventId, 7], [b.sourceEventId, 11], [c.sourceEventId, 40]]); assert.equal(appliedId(viewWith(group, subset), 'PROVIDER_EVENT'), a.sourceEventId);
+  assert.equal(socialSettledOrderError(rp.settledOrder), null); assert.equal(socialSettledOrderError(null), null); assert.equal(socialSettledOrderError(subset), null);
+  assert.match(socialSettledOrderError('journal'), /must be the Map/);
+});
+
+test('D4. answerable controls stay answerable without any order: no annotations, a single record, a unique earliest record, and a genuine declaration conflict', () => {
+  assert.equal(socialTemporalView({ event: E, asOfTs: T1 }).ok, true);
+  const one = annotate(EQUIV[0], T1); assert.equal(viewWith([one], null).effective.appliedSourceInterpretationId, one.sourceEventId);
+  const early = annotate(EQUIV[0], T1); const late = annotate(EQUIV[1], T2); const lateP = annotate(D100, T2, 'PROVIDER_EVENT', PEV_TIMES[0]);
+  const uniq = viewWith([late, early, lateP], null, T2 + 1); assert.equal(uniq.ok, true, uniq.error); assert.equal(uniq.effective.appliedSourceInterpretationId, early.sourceEventId, 'a unique earliest record needs no order');
+  assert.equal(uniq.effective.appliedProviderEventInterpretationId, lateP.sourceEventId, 'a unique provider record needs no order either');
+  // a genuine disagreement is never resolved by rank, id or input order — with or without context
+  const d1 = annotate(D100, T1); const d2 = annotate(D300, T1); const rpC = replaySocialHistory([E, d1, d2]);
+  for (const order of [null, rpC.settledOrder, [...rpC.settledOrder.keys()], new Map([...rpC.settledOrder].reverse())]) for (const perm of allPerms([d1, d2])) {
+    const v = viewWith(perm, order); assert.equal(v.ok, true, v.error); assert.equal(v.effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE); assert.equal(v.effective.sourceDeclaredTs, null); assert.equal(v.effective.appliedSourceInterpretationId, null); assert.equal(v.conflict.knownAtTs, T1);
+  }
+});
+
+test('D5. exact duplicate input is one record; a repeated id with an altered payload is refused; duplicates never create extra rank contenders', () => {
+  const [a, b] = tiedGroup('PROVIDER_EVENT', 2); const rp = replaySocialHistory([E, a, b]);
+  const solo = viewWith([a], null); assert.equal(solo.ok, true);
+  for (const dupInput of [[a, a], [a, JSON.parse(JSON.stringify(a))], [a, a, a]]) { const v = viewWith(dupInput, null); assert.equal(v.ok, true, v.error); assert.equal(canonicalJson(pick(v)), canonicalJson(pick(solo)), 'byte-identical repeats collapse to one record'); }
+  const altered = { ...structuredClone(a), knownAtTs: T1 + 1, ts: new Date(T1 + 1).toISOString() };
+  assert.notEqual(validateSocialClockInterpretation(altered, { target: E }), null, 'a sealed record cannot be altered at all');
+  const v1 = asV1(a); const alteredV1 = { ...structuredClone(v1), evidenceRetrievedTs: T1 - 1 }; assert.equal(validateSocialClockInterpretation(alteredV1, { target: E }), null, 'a legacy record has no snapshot seal — the view must catch the contradiction itself');
+  const dv = viewWith([v1, alteredV1], null); assert.equal(dv.ok, false); assert.match(dv.error, /supplied twice with an altered payload/);
+  // a duplicate copy does not turn a singleton into a tie, and does not turn a 2-tie into a 3-tie
+  assert.equal(viewWith([a, a, b], rp.settledOrder).effective.appliedProviderEventInterpretationId, a.sourceEventId);
+  assert.equal(viewWith([a, a, b], null).error, SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED, 'the genuine 2-member tie still needs order');
+});
+
+test('D6. legacy and version-2 targets, legacy and sealed records, and caller-input isolation across the whole boundary', () => {
+  const v2e = socialObservationToEvent(obs(EQUIV[0], T0)).event; assert.equal(validateSocialEvent(v2e), null);
+  const v2ann = (decl, at, role = 'SOURCE_DECLARATION', et) => { const o = obs(decl, at, et); const x = socialClockInterpretationEvent({ target: v2e, clockRole: role, basis: 'NEW_DELIVERY_SAME_EVENT', witness: role === 'PROVIDER_EVENT' ? o.providerEventWitness : o.sourceClockWitness, evidenceRetrievedTs: at, knownAtTs: at }); assert.equal(validateSocialClockInterpretation(x, { target: v2e }), null); return x; };
+  for (const [role, group] of [['SOURCE_DECLARATION', [v2ann(EQUIV[1], T1), v2ann(EQUIV[2], T1)]], ['PROVIDER_EVENT', [v2ann(D100, T1, 'PROVIDER_EVENT', PEV_TIMES[0]), v2ann(D100, T1, 'PROVIDER_EVENT', PEV_TIMES[1])]]]) {
+    const rp = replaySocialHistory([v2e, ...group]); assert.equal(rp.ok, true, rp.error);
+    for (const perm of allPerms(group)) { const v = socialTemporalView({ event: v2e, annotations: perm, asOfTs: T1, settledOrder: rp.settledOrder }); assert.equal(v.ok, true, v.error); assert.equal(appliedId(v, role), group[0].sourceEventId, `v2 target ${role}`); }
+    const partial = new Map(rp.settledOrder); partial.delete(group[1].sourceEventId);
+    for (const perm of allPerms(group)) assert.equal(socialTemporalView({ event: v2e, annotations: perm, asOfTs: T1, settledOrder: partial }).error, SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED);
+  }
+  // a legacy (version-1) tied group on the legacy target keeps its LEGACY_UNSEALED label
+  const legacyGroup = tiedGroup('SOURCE_DECLARATION', 3).map(asV1); const rpL = replaySocialHistory([E, ...legacyGroup]); assert.equal(rpL.ok, true, rpL.error);
+  for (const perm of allPerms(legacyGroup)) { const v = viewWith(perm, rpL.settledOrder); assert.equal(appliedId(v, 'SOURCE_DECLARATION'), legacyGroup[0].sourceEventId); assert.equal(v.effective.clockIntegrity, 'LEGACY_UNSEALED'); }
+  // isolation: caller Map, arrays and deserialized witnesses are untouched; results stay frozen
+  const group = tiedGroup('PROVIDER_EVENT', 3); const rp = replaySocialHistory([E, ...group]);
+  const orderIn = new Map(rp.settledOrder); const annsIn = JSON.parse(JSON.stringify([...group].reverse())); const snapOrder = canonicalJson([...orderIn]); const snapAnns = canonicalJson(annsIn); const snapEvent = canonicalJson(E);
+  const v = socialTemporalView({ event: E, annotations: annsIn, asOfTs: T1, settledOrder: orderIn }); assert.equal(v.ok, true, v.error); assert.equal(v.effective.appliedProviderEventInterpretationId, group[0].sourceEventId);
+  assert.equal(canonicalJson([...orderIn]), snapOrder); assert.equal(canonicalJson(annsIn), snapAnns); assert.equal(canonicalJson(E), snapEvent); assert.equal(Object.isFrozen(annsIn[0]), false); assert.equal(Object.isFrozen(annsIn[0].witness), false);
+  assert.throws(() => { v.effective.providerEventWitness.declared = 'X'; }); assert.throws(() => { v.appliedAnnotations.push('x'); });
+  annsIn[0].witness.declared = 'MUTATED'; assert.equal(v.effective.providerEventWitness.declared, group[0].witness.declared, 'the view is a detached snapshot');
+});
+
+test('D7. the exact Appendix A reproduction: complete order selects the first-appended record; the incomplete three-member group and the duplicate-position order refuse in BOTH input orders', () => {
+  const a = annotate(D100, T1, 'PROVIDER_EVENT', PEV_TIMES[0]); const b = annotate(D100, T1, 'PROVIDER_EVENT', PEV_TIMES[1]); const c = annotate(D100, T1, 'PROVIDER_EVENT', PEV_TIMES[2]);
+  const rp = replaySocialHistory([E, c, a, b]); assert.equal(rp.ok, true, rp.error);
+  for (const perm of allPerms([a, b, c])) assert.equal(viewWith(perm, rp.settledOrder).effective.appliedProviderEventInterpretationId, c.sourceEventId, 'c was appended first');
+  const partial = new Map(rp.settledOrder); partial.delete(c.sourceEventId);
+  for (const anns of [[a, b, c], [c, b, a]]) { const v = viewWith(anns, partial); assert.equal(v.ok, false); assert.equal(v.error, SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED); }
+  const dup = new Map([[ID, 0], [a.sourceEventId, 1], [b.sourceEventId, 1], [c.sourceEventId, 2]]);
+  for (const anns of [[a, b, c], [b, a, c]]) { const v = viewWith(anns, dup); assert.equal(v.ok, false); assert.ok(v.error.startsWith(SOCIAL_SETTLED_ORDER_INVALID)); }
+});
+
 // =========================================================================================
 // C. REAL POSTGRESQL PROOFS
 // =========================================================================================
@@ -287,6 +415,24 @@ if (!TEST_URL) {
       const ok = await rt.settle({ fenceHeld: () => true, append: failing, lookup: (t, ids) => j.hasEventIds(t, ids) }); assert.equal(ok.ok, true); assert.equal(captured[0], captured[1], 'byte-identical retry'); const all = await events(j); assert.equal(ann(all).length, 1); assert.equal(pend(all).length, 1);
       const rp = replaySocialHistory(all); assert.equal(socialCanonicalTemporalView({ replay: rp, sourceEventId: ID, asOfTs: K }).effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE, 'tied batch clock, settled order decides');
       const killed = await killAdvisoryBackends(admin); assert.ok(killed >= 1); rt._feed(JSON.stringify(msg(D300))); const r3 = await rt.settle({ fenceHeld: () => false, append: (e) => j.append(e), lookup: (t, ids) => j.hasEventIds(t, ids) }); assert.equal(r3.reason, 'WRITER_FENCE_LOST'); assert.equal((await events(mkJournal())).length, all.length); assert.equal(rt.isActive(), false);
+    });
+  });
+
+  test('C5 (PG). a persisted tied group read back through JSON keeps complete-context behaviour: canonical order selects the first-appended record in every permutation; an incomplete group and a duplicate-position order refuse', async () => {
+    await withDb(async ({ mkJournal }) => {
+      const group = tiedGroup('PROVIDER_EVENT', 3); const srcGroup = tiedGroup('SOURCE_DECLARATION', 3, T2);
+      const j = mkJournal(); await acquire(j); assert.equal((await j.append([E, group[2], group[0], group[1]])).ok, true); assert.equal((await j.append(srcGroup)).ok, true); await j.releaseWriter();
+      const hist = await events(mkJournal()); const rp = replaySocialHistory(hist); assert.equal(rp.ok, true, rp.error);
+      assert.deepEqual(hist.map((e) => e.sourceEventId), [ID, group[2].sourceEventId, group[0].sourceEventId, group[1].sourceEventId, ...srcGroup.map((g) => g.sourceEventId)], 'journal order survives the round trip');
+      const annsFromDb = rp.annotations.get(ID); assert.equal(annsFromDb.length, 6);
+      for (const perm of allPerms([annsFromDb[0], annsFromDb[1], annsFromDb[2]]).slice(0, 6)) { const v = socialTemporalView({ event: rp.targets.get(ID), annotations: [...perm, ...annsFromDb.slice(3)], asOfTs: T3, settledOrder: rp.settledOrder }); assert.equal(v.ok, true, v.error); assert.equal(v.effective.appliedProviderEventInterpretationId, group[2].sourceEventId, 'first appended provider record'); assert.equal(v.effective.appliedSourceInterpretationId, srcGroup[0].sourceEventId, 'first appended source record'); }
+      assert.equal(canonicalJson(pick(socialCanonicalTemporalView({ replay: rp, sourceEventId: ID, asOfTs: T3 }))), canonicalJson(pick(socialTemporalView({ event: rp.targets.get(ID), annotations: [...annsFromDb].reverse(), pending: [], asOfTs: T3, settledOrder: rp.settledOrder }))), 'canonical helper and reversed input agree');
+      const partial = new Map(rp.settledOrder); partial.delete(group[2].sourceEventId);
+      for (const anns of [annsFromDb, [...annsFromDb].reverse()]) assert.equal(socialTemporalView({ event: rp.targets.get(ID), annotations: anns, asOfTs: T3, settledOrder: partial }).error, SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED);
+      const dup = new Map(rp.settledOrder); dup.set(group[1].sourceEventId, socialSettledPosition(rp.settledOrder, group[0].sourceEventId));
+      for (const anns of [annsFromDb, [...annsFromDb].reverse()]) assert.ok(socialTemporalView({ event: rp.targets.get(ID), annotations: anns, asOfTs: T3, settledOrder: dup }).error.startsWith(SOCIAL_SETTLED_ORDER_INVALID));
+      for (let i = 0; i < hist.length; i++) assert.equal(canonicalJson((await events(mkJournal()))[i]), canonicalJson(hist[i]), 'rows unchanged by any view');
+      assert.equal(rp.durableIds.size, 1, 'source count unchanged');
     });
   });
 }

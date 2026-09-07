@@ -1345,6 +1345,41 @@ input) and a seeded generated set are covered in `test/social-4d-causal-order.te
 bounded checks, not an exhaustive proof. INDEX_DIVERGENCE stays a manual re-hydration limit; the
 snapshot seal remains self-consistency, not authentication; no conflict-resolution authority exists.
 
+## 5O. SOCIAL-4D STANDALONE ORDER-CONTEXT VALIDATION
+
+A bounded repair of the §5N standalone boundary; the complete replay-derived context was already
+correct and is unchanged. Two reproductions on the untouched 6feb28f runtime: an incomplete
+three-member tied group selected a record in one input permutation and refused in another (only the
+first two sorted entries were checked), and a malformed order giving two distinct records the same
+position let the caller's array order pick the applied record.
+
+**Complete tied-group law (`rumor2/social-view.js`).** For each clock role the applied record is the
+earliest-known one. When the DISTINCT records sharing that earliest knownAt millisecond number more
+than one, the actual settled order decides and EVERY member of that tied group must carry a valid
+position; otherwise the selection is refused in every input permutation and no member is silently
+discarded. A unique earliest record stays answerable with no order at all, whatever later-known or
+unrelated records lack positions; views with no annotations, a single record, or a genuine
+declaration conflict likewise need no order. Ids, hashes, caller list order and guessed positions
+never decide.
+
+**Malformed-order law (`socialSettledOrderError`, `rumor2/social-settle.js`).** A supplied order is
+a context, never an authority: every position must be a safe non-negative integer, no two distinct
+ids may claim the same settled position, and the id-list form may not repeat an id as a competing
+settlement entry. Holes remain legitimate — the canonical order also carries unrelated sources, and
+a subset Map is valid. A malformed order is refused with a specific invalid-order result and never
+falls back to timestamp, id, or array order. Internal consistency is all this establishes: a
+coherent but fabricated map is not thereby authenticated, and canonical usage remains
+`socialCanonicalTemporalView` over a validated replay.
+
+**Duplicate input.** Byte-identical repeats of one record collapse to that one record and create no
+extra rank contender; a repeated id whose payload differs is refused as contradictory input. A
+record's identity does not bind its knownAtTs, so the same semantic annotation re-created with a
+different clock is that same record with an altered payload, never a second contender.
+
+Unchanged: the causal-prefix law, first-known policy for unequal clocks, base-event and annotation
+as-of cutoffs, UNRESOLVED_CONFLICT semantics, LEGACY_UNSEALED labels, retention blocks, source
+counts, identities, journal semantics, and every runtime path.
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -1404,6 +1439,9 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
 - **SOCIAL-4D CONSOLIDATED CAUSAL-ORDER — DONE (§5N):** availability = knowledge admissibility AND
   settled-prefix membership; first-known selection by settled position, never by id; neighbour
   matrix and seeded checks. Further defects may exist; the Social/RUMOR layer is not complete.
+- **SOCIAL-4D STANDALONE ORDER-CONTEXT — DONE (§5O):** the whole earliest tied group must be
+  positioned or the selection is refused; malformed orders are refused, never resolved by input
+  order. Further defects may exist; the Social/RUMOR layer is not complete.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

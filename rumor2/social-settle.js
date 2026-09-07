@@ -394,6 +394,30 @@ const socialPendingShapeError = (ev) => {
 // from the actual prefix (socialPrefixPrecedes); an arbitrary full-list caller may not claim it by
 // assumption, so without a settled position for BOTH records the answer is null (unknown).
 export const socialSettledPosition = (settledOrder, id) => { const p = settledOrder instanceof Map ? settledOrder.get(id) : Array.isArray(settledOrder) ? settledOrder.indexOf(id) : undefined; return Number.isSafeInteger(p) && p >= 0 ? p : null; };
+// SOCIAL-4D STANDALONE ORDER-CONTEXT VALIDATION: a supplied settled order is a CONTEXT, never an
+// authority — this pure check only establishes its INTERNAL CONSISTENCY: every position is a safe
+// non-negative integer, no two DISTINCT record ids claim the same settled position, and the id-list
+// representation carries no id twice as a competing settlement entry. Holes are legitimate: the
+// canonical order also holds unrelated sources and operationally irrelevant records, and a subset
+// Map is valid input. A coherent but fabricated map is NOT thereby authenticated; canonical usage
+// remains the order derived from validated journal replay.
+export const SOCIAL_SETTLED_ORDER_INVALID = 'settledOrder is malformed — it cannot fall back to timestamp, id, or array order';
+export function socialSettledOrderError(settledOrder) {
+  if (settledOrder === null || settledOrder === undefined) return null;
+  const entries = settledOrder instanceof Map ? [...settledOrder.entries()] : Array.isArray(settledOrder) ? settledOrder.map((id, i) => [id, i]) : null;
+  if (entries === null) return 'settledOrder must be the Map (or id list) exported by replaySocialHistory';
+  const seenIds = new Set(); const byPosition = new Map();
+  for (const [id, pos] of entries) {
+    if (typeof id !== 'string' || id.length === 0) return `${SOCIAL_SETTLED_ORDER_INVALID}: a record id is not a non-empty string`;
+    if (!Number.isSafeInteger(pos) || pos < 0) return `${SOCIAL_SETTLED_ORDER_INVALID}: the position of ${id} is not a safe non-negative integer`;
+    if (seenIds.has(id)) return `${SOCIAL_SETTLED_ORDER_INVALID}: ${id} appears twice as a competing settlement entry`;
+    seenIds.add(id);
+    const other = byPosition.get(pos);
+    if (other !== undefined) return `${SOCIAL_SETTLED_ORDER_INVALID}: ${other} and ${id} claim the same settled position ${pos}`;
+    byPosition.set(pos, id);
+  }
+  return null;
+}
 export function socialCausalPrecedes(settledOrder = null) {
   return (a, ev) => {
     if (!Number.isSafeInteger(a?.knownAtTs) || !Number.isSafeInteger(ev?.knownAtTs)) return false;

@@ -19,8 +19,9 @@
 // A legacy numeric-only clock is labelled UNVERIFIED (its declaration was not retained) —
 // never "precision-verified". This is the record/view contract later consumers may use; it
 // is not a dashboard, a model, or a decision rule.
-import { validateSocialEvent, validateSocialClockInterpretation, validateSocialReconciliationPending, socialPendingLinkError, socialCausalPrecedes, socialSettledPosition, sameDeclaration, SOCIAL_EVENT_V2_TYPE } from './social-settle.js';
+import { validateSocialEvent, validateSocialClockInterpretation, validateSocialReconciliationPending, socialPendingLinkError, socialCausalPrecedes, socialSettledPosition, socialSettledOrderError, sameDeclaration, SOCIAL_EVENT_V2_TYPE } from './social-settle.js';
 import { compareWitnessToReference, TEMPORAL_ORDER } from './social-time.js';
+import { canonicalJson } from './truth.js';
 
 export const SOCIAL_VIEW_MODES = Object.freeze(['ORIGINAL_RECORDED', 'EFFECTIVE_AS_OF']);
 export const SOCIAL_VIEW_STATUSES = Object.freeze(['NOT_YET_KNOWN', 'EFFECTIVE']);
@@ -30,11 +31,33 @@ export const SOCIAL_VIEW_CLOCK_INTEGRITY = Object.freeze(['ORIGINAL_ONLY', 'SEAL
 
 const deepFreeze = (v) => { if (v !== null && typeof v === 'object' && !Object.isFrozen(v)) { Object.freeze(v); for (const k of Object.keys(v)) deepFreeze(v[k]); } return v; };
 const detach = (v) => structuredClone(v); // a caller-owned object is never aliased, frozen, or mutated
-// FIRST-KNOWN SELECTION: knowledge time first, then the SETTLED journal position for the same
-// millisecond. Ids and hashes never break a tie; a tie that cannot be broken from the supplied
-// context is reported (context required), never guessed.
-const byKnownThenSettled = (settledOrder) => (x, y) => { const d = x.knownAtTs - y.knownAtTs; if (d !== 0) return d; const px = socialSettledPosition(settledOrder, x.sourceEventId); const py = socialSettledPosition(settledOrder, y.sourceEventId); return px !== null && py !== null ? px - py : 0; };
-const unbrokenTie = (sorted, settledOrder) => sorted.length > 1 && sorted[0].knownAtTs === sorted[1].knownAtTs && (socialSettledPosition(settledOrder, sorted[0].sourceEventId) === null || socialSettledPosition(settledOrder, sorted[1].sourceEventId) === null);
+// FIRST-KNOWN SELECTION (SOCIAL-4D STANDALONE ORDER-CONTEXT VALIDATION): the applied record of a
+// role is the earliest-known one. When the DISTINCT records sharing that earliest knownAt
+// millisecond number more than one, the actual settled order decides — and EVERY member of that
+// tied group must carry a valid position, or the selection is refused in every input permutation
+// and no member is silently discarded. A unique earliest record is answerable with no order at
+// all, whatever later-known or unrelated records lack positions. Record ids, hashes, caller list
+// order and guessed positions never decide.
+const firstKnownOf = (records, settledOrder) => {
+  if (records.length === 0) return { record: null };
+  const earliest = Math.min(...records.map((r) => r.knownAtTs));
+  const tied = records.filter((r) => r.knownAtTs === earliest);
+  if (tied.length === 1) return { record: tied[0] };
+  const positioned = tied.map((r) => ({ r, pos: socialSettledPosition(settledOrder, r.sourceEventId) }));
+  if (positioned.some((x) => x.pos === null)) return { error: SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED }; // the WHOLE tied group must be positioned (a duplicate position is already refused as malformed order)
+  return { record: positioned.sort((x, y) => x.pos - y.pos)[0].r };
+};
+// exact duplicate copies of ONE record are one record; a repeated id whose payload differs is
+// contradictory input and is refused — an altered duplicate is never harmless
+const dedupeById = (records, kind) => {
+  const byId = new Map();
+  for (const r of records) {
+    const prior = byId.get(r.sourceEventId);
+    if (prior === undefined) { byId.set(r.sourceEventId, r); continue; }
+    if (canonicalJson(prior) !== canonicalJson(r)) return { error: `${kind}: ${r.sourceEventId} supplied twice with an altered payload` };
+  }
+  return { records: [...byId.values()] };
+};
 export const SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED = 'first-known selection among records known at the same millisecond requires the canonical settled order (settledOrder from replaySocialHistory)';
 
 const clockOf = (event) => ({
@@ -56,9 +79,7 @@ const clockOf = (event) => ({
 // consulted.
 export function socialTemporalView({ event, annotations = [], pending = [], asOfTs, settledOrder = null } = {}) {
   if (!Number.isSafeInteger(asOfTs)) return { ok: false, error: 'asOfTs must be a safe-integer millisecond acquisition clock' };
-  if (settledOrder !== null && settledOrder !== undefined && !(settledOrder instanceof Map) && !Array.isArray(settledOrder)) return { ok: false, error: 'settledOrder must be the Map (or id list) exported by replaySocialHistory' };
-  if (settledOrder instanceof Map) for (const [k, v] of settledOrder) if (typeof k !== 'string' || !Number.isSafeInteger(v) || v < 0) return { ok: false, error: 'settledOrder is malformed — it cannot fall back to timestamp, id, or array order' };
-  if (Array.isArray(settledOrder) && settledOrder.some((k) => typeof k !== 'string')) return { ok: false, error: 'settledOrder is malformed — it cannot fall back to timestamp, id, or array order' };
+  const oerr = socialSettledOrderError(settledOrder); if (oerr) return { ok: false, error: oerr };
   const verr = validateSocialEvent(event);
   if (verr) return { ok: false, error: verr };
   const ev = detach(event);
@@ -68,6 +89,8 @@ export function socialTemporalView({ event, annotations = [], pending = [], asOf
     if (aerr) return { ok: false, error: aerr };
     anns.push(detach(a));
   }
+  const annDedupe = dedupeById(anns, 'clock interpretation'); if (annDedupe.error) return { ok: false, error: annDedupe.error };
+  anns.length = 0; anns.push(...annDedupe.records);
   const pends = [];
   for (const p of Array.isArray(pending) ? pending : [null]) {
     const perr = validateSocialReconciliationPending(p);
@@ -80,12 +103,15 @@ export function socialTemporalView({ event, annotations = [], pending = [], asOf
     if (lerr) return { ok: false, error: `reconciliation pending: context invalid for ${p.reason} against this event: ${lerr}` };
     pends.push(detach(p));
   }
+  const pendDedupe = dedupeById(pends, 'reconciliation pending'); if (pendDedupe.error) return { ok: false, error: pendDedupe.error };
+  pends.length = 0; pends.push(...pendDedupe.records);
   // base-event admissibility precedes everything else
   if (asOfTs < ev.knownAtTs) return deepFreeze({ ok: true, status: 'NOT_YET_KNOWN', admissible: false, asOfTs, firstKnownAtTs: ev.knownAtTs, original: null, effective: null, appliedAnnotations: [], conflict: null });
   const original = { mode: 'ORIGINAL_RECORDED', firstKnownAtTs: ev.knownAtTs, retrievedTs: ev.retrievedTs, ...clockOf(ev) };
-  const order = byKnownThenSettled(settledOrder);
-  const eligibleAnns = anns.filter((a) => a.knownAtTs <= asOfTs).sort(order);
-  const eligibleConflicts = pends.filter((p) => p.knownAtTs <= asOfTs && p.reason === 'DECLARATION_CONFLICT').sort(order);
+  // selection is decided by firstKnownOf, never by this listing order (kept only for determinism)
+  const byKnown = (x, y) => x.knownAtTs - y.knownAtTs;
+  const eligibleAnns = anns.filter((a) => a.knownAtTs <= asOfTs).sort(byKnown);
+  const eligibleConflicts = pends.filter((p) => p.knownAtTs <= asOfTs && p.reason === 'DECLARATION_CONFLICT').sort(byKnown);
   const eff = { ...detach(original), mode: 'EFFECTIVE_AS_OF', asOfTs, appliedSourceInterpretationId: null, appliedProviderEventInterpretationId: null, interpretationKnownAtTs: null, basis: null };
   // SOURCE DECLARATION role: every eligible retained declaration (the event's own witness for a
   // v2 record, plus eligible annotations) and every eligible conflicting candidate declaration
@@ -102,15 +128,16 @@ export function socialTemporalView({ event, annotations = [], pending = [], asOf
     conflict = { clockRole: 'SOURCE_DECLARATION', knownAtTs, retainedAnnotationIds: srcAnns.map((a) => a.sourceEventId).sort(), pendingIds: eligibleConflicts.map((p) => p.sourceEventId).sort() }; // sorted for DISPLAY only
     Object.assign(eff, { sourceDeclaredTs: null, sourceCreatedTs: null, sourceClockStatus: SOCIAL_VIEW_CONFLICT_STATE, sourceClockSkewMs: null, sourceClockWitness: null, provenance: 'CONFLICTING_DECLARATIONS', precisionVerified: false, interpretationKnownAtTs: knownAtTs, basis: null });
   } else if (srcAnns.length > 0) {
-    if (unbrokenTie(srcAnns, settledOrder)) return { ok: false, error: SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED }; // equivalent values, but the applied RECORD is a historical pointer: never chosen by id
-    const src = srcAnns[0]; // all eligible declarations are equivalent: the first-known (first-settled) one is applied
+    const srcPick = firstKnownOf(srcAnns, settledOrder); // equivalent values, but the applied RECORD is a historical pointer: never chosen by id
+    if (srcPick.error) return { ok: false, error: srcPick.error };
+    const src = srcPick.record; // all eligible declarations are equivalent: the first-known (first-settled) one is applied
     Object.assign(eff, { sourceDeclaredTs: src.interpretation.projectionMs, sourceCreatedTs: src.interpretation.sourceCreatedTs, sourceClockStatus: src.interpretation.sourceClockStatus ?? 'UNKNOWN', sourceClockSkewMs: null, sourceClockWitness: src.witness, provenance: src.basis === 'RETAINED_ORIGINAL_DECLARATION' ? 'WITNESSED_DECLARATION' : 'LATER_EVIDENCE_SAME_EVENT', precisionVerified: src.witness.declaredComplete, appliedSourceInterpretationId: src.sourceEventId, interpretationKnownAtTs: src.knownAtTs, basis: src.basis });
   }
   // PROVIDER EVENT role: delivery diagnostics follow the first-known policy — the first eligible
   // retained provider-event witness applies; there is no conflict state for this role
-  const pevAll = eligibleAnns.filter((a) => a.clockRole === 'PROVIDER_EVENT');
-  if (unbrokenTie(pevAll, settledOrder)) return { ok: false, error: SOCIAL_VIEW_FIRST_KNOWN_ORDER_REQUIRED };
-  const pev = pevAll[0] ?? null;
+  const pevPick = firstKnownOf(eligibleAnns.filter((a) => a.clockRole === 'PROVIDER_EVENT'), settledOrder);
+  if (pevPick.error) return { ok: false, error: pevPick.error };
+  const pev = pevPick.record;
   if (pev) { eff.providerEventTs = pev.interpretation.projectionMs; eff.providerEventWitness = pev.witness; eff.appliedProviderEventInterpretationId = pev.sourceEventId; eff.interpretationKnownAtTs = Math.max(eff.interpretationKnownAtTs ?? 0, pev.knownAtTs); }
   eff.conflict = conflict;
   // which later records shaped this effective answer, and whether each carries the version-2
