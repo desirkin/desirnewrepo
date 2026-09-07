@@ -8,7 +8,7 @@
 // descriptive cohort — no Social feature value is ever inferred for them. Row ids depend only on the recipe and the
 // original semantic identity, so appending later journal events never changes an earlier row's bytes or id.
 import { canonicalJson } from '../rumor2/truth.js';
-import { FEATURE_RECIPE_VERSION, FEATURE_ROW_KEYS, FEATURE_CATALOGUE, ARRAY_CATALOGUE, FEATURE_LEAF_VALUE_OK, COHORTS, ROW_STATUSES, AUTHORITY, PURPOSE, LIMITS, fail, isPlainObject, isTs, isCount, sha256Hex, exactKeys, deepFreeze, isFiniteNum } from './contracts.js';
+import { FEATURE_RECIPE_VERSION, FEATURE_ROW_KEYS, FEATURE_CATALOGUE, FEATURE_LEAF_VALUE_OK, COHORTS, ROW_STATUSES, AUTHORITY, PURPOSE, LIMITS, fail, isPlainObject, isTs, isCount, isCoin, isId, isCode, elementValue, catalogueArraysError, forbiddenLeafError, sha256Hex, exactKeys, deepFreeze, isFiniteNum } from './contracts.js';
 import { validateSnapshotRecord } from './snapshot.js';
 
 export const SOURCE_PROFILE_CONTEXT = 'NOT_RECORDED_IN_DOSSIER'; // never reconstructed from a current profile
@@ -79,24 +79,32 @@ export function selectResearchRows(records, { asOfTs, limits = LIMITS } = {}) {
 export function validateFeatureRow(r) {
   const k = exactKeys(r, FEATURE_ROW_KEYS); if (k) return `feature row: ${k}`;
   if (r.featureRecipeVersion !== FEATURE_RECIPE_VERSION) return 'feature row: unsupported feature recipe';
-  if (!COHORTS.includes(r.cohort) || !ROW_STATUSES.includes(r.rowStatus) || typeof r.snapshotRecordId !== 'string' || !isTs(r.originalSeq) || typeof r.sourceEventId !== 'string' || typeof r.canonicalCoin !== 'string' || !isTs(r.featureAsOfTs) || !isTs(r.decisionKnownAtTs)) return 'feature row: identity / clocks malformed';
+  if (!COHORTS.includes(r.cohort) || !ROW_STATUSES.includes(r.rowStatus) || !isId(r.snapshotRecordId) || !isTs(r.originalSeq) || !isId(r.sourceEventId) || !isCoin(r.canonicalCoin) || !isTs(r.featureAsOfTs) || !isTs(r.decisionKnownAtTs)) return 'feature row: identity / clocks malformed';
   if (r.decisionKnownAtTs < r.featureAsOfTs) return 'feature row: a decision cannot be known before its features were derived';
   if (r.authority !== AUTHORITY || r.purpose !== PURPOSE || r.sourceProfileContext !== SOURCE_PROFILE_CONTEXT || r.claimAssociationContext !== CLAIM_ASSOCIATION_CONTEXT) return 'feature row: authority / context law';
   if (!isPlainObject(r.features) || !isPlainObject(r.absentFeatures) || !isPlainObject(r.arrays)) return 'feature row: containers malformed';
+  const fl = forbiddenLeafError(r, 'feature row'); if (fl) return fl; // the same free-text law the projector obeys
   if (r.cohort === 'PRIMARY') {
-    if (r.episodeId === null || r.dossierId === null || r.sweepId !== null || r.shadowContext !== null) return 'feature row: primary identity malformed';
+    if (!isId(r.episodeId) || !isId(r.dossierId) || r.sweepId !== null || r.shadowContext !== null) return 'feature row: primary identity malformed';
     if (r.rowId !== featureRowIdentity({ cohort: 'PRIMARY', sourceEventId: r.sourceEventId, dossierId: r.dossierId, episodeId: r.episodeId, canonicalCoin: r.canonicalCoin })) return 'feature row: rowId is not the semantic identity';
     for (const spec of FEATURE_CATALOGUE) { const has = spec.name in r.features; const absent = spec.name in r.absentFeatures; if (has === absent) return `feature row: ${spec.name} must be present xor absent`; if (has && !FEATURE_LEAF_VALUE_OK(spec, r.features[spec.name])) return `feature row: ${spec.name} unsupported`; }
     for (const n of Object.keys(r.features)) if (!FEATURE_CATALOGUE.some((s) => s.name === n)) return `feature row: undeclared feature ${n}`;
-    for (const [name, spec] of Object.entries(ARRAY_CATALOGUE)) if (!Array.isArray(r.arrays[name]) || r.arrays[name].length > spec.max) return `feature row: array ${name} malformed`;
-    if (!Array.isArray(r.entrances) || r.entrances.length === 0) return 'feature row: entrances malformed';
+    const ae = catalogueArraysError(r.arrays, { where: 'feature row' }); if (ae) return ae; // EXACT member keys / values, not merely a bounded length
+    if (!Array.isArray(r.entrances) || r.entrances.length === 0 || r.entrances.some((x) => !['MARKET_LED', 'PARTICIPATION_LED', 'INFORMATION_LED'].includes(x))) return 'feature row: entrances malformed';
+    // the row's own copies must agree with the catalogued clocks / identities they duplicate
+    if (r.features['decision.featureAsOfTs'] !== r.featureAsOfTs || r.features['decision.decisionKnownAtTs'] !== r.decisionKnownAtTs) return 'feature row: the recorded decision clocks disagree with the row clocks';
+    if (r.features['episode.episodeId'] !== r.episodeId || r.features['episode.basis'] !== r.episodeBasis || r.features['dossier.researchState'] !== r.researchState) return 'feature row: the recorded episode / state disagree with the row';
+    if (r.features['decision.latestInputKnownAtTs'] > r.decisionKnownAtTs || r.features['episode.onsetKnownAtTs'] > r.decisionKnownAtTs) return 'feature row: an input cannot be known after the decision it fed';
     return null;
   }
-  if (r.episodeId !== null || r.dossierId !== null || typeof r.sweepId !== 'string' || !isPlainObject(r.shadowContext)) return 'feature row: shadow identity malformed';
+  if (r.episodeId !== null || r.dossierId !== null || !isId(r.sweepId) || !isPlainObject(r.shadowContext) || r.researchState !== null || r.episodeBasis !== null) return 'feature row: shadow identity malformed';
   if (r.rowId !== featureRowIdentity({ cohort: 'SHADOW', sourceEventId: r.sourceEventId, sweepId: r.sweepId, canonicalCoin: r.canonicalCoin })) return 'feature row: rowId is not the semantic identity';
   for (const n of Object.keys(r.features)) if (!SHADOW_FEATURE_NAMES.includes(n)) return `feature row: shadow row carries a non-shadow feature ${n}`;
   for (const spec of FEATURE_CATALOGUE) if (r.absentFeatures[spec.name] !== SHADOW_ABSENCE) return `feature row: shadow row must declare ${spec.name} absent`;
-  for (const n of ['shadow.zVol', 'shadow.zRet', 'shadow.extension', 'shadow.usdVol24h']) if (r.features[n] !== null && !isFiniteNum(r.features[n])) return `feature row: ${n} malformed`;
+  for (const n of SHADOW_FEATURE_NAMES) if (!(n in r.features)) return `feature row: shadow row is missing ${n}`;
+  for (const n of Object.keys(r.features)) if (!SHADOW_FEATURE_NAMES.includes(n)) return `feature row: shadow row carries a non-shadow feature ${n}`;
+  for (const n of ['shadow.zVol', 'shadow.zRet', 'shadow.extension', 'shadow.usdVol24h']) if (!elementValue('number?', r.features[n])) return `feature row: ${n} malformed`;
+  if (!isCode(r.features['shadow.selectionReason']) || !elementValue('code?', r.features['shadow.preCooldownVerdict']) || !isId(r.features['shadow.rank']) || typeof r.features['shadow.inDeepTape'] !== 'boolean' || typeof r.features['shadow.cooldownSuppressed'] !== 'boolean') return 'feature row: shadow provenance malformed';
   if (Object.keys(r.arrays).length !== 0 || r.entrances.length !== 0) return 'feature row: a shadow row has no Social arrays / entrances';
   return null;
 }

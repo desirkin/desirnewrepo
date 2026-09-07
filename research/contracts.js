@@ -99,6 +99,38 @@ export const FORBIDDEN_LEAF_NAMES = Object.freeze(['note', 'notes', 'detail', 'd
 export const FORBIDDEN_LEAF_RE = /^(note|notes|detail|description|reason|text|handle|displayName|questionToResolve|liquidityNote|authorMeta|packet|summary|title|link|error)$/;
 export const MAX_ID_CHARS = 200;
 export const MAX_CODE_CHARS = 48;
+// THE canonical asset identity law — the same expression the dossier / shadow validators enforce
+// (rumor2/social-research-dossier.js, rumor2/social-research-shadow.js). An asset field is checked with THIS, never
+// with the uppercase reason-code pattern: a lawful dotted symbol (A.B) is an asset, not a malformed code.
+export const COIN_RE = /^[A-Z0-9][A-Z0-9.]{0,14}$/;
+export const CODE_RE = /^[A-Z0-9_]{1,48}$/;
+export const isCoin = (v) => typeof v === 'string' && COIN_RE.test(v);
+export const isCode = (v) => typeof v === 'string' && CODE_RE.test(v);
+export const isId = (v) => typeof v === 'string' && v.length > 0 && v.length <= MAX_ID_CHARS && !/\s/.test(v);
+// ONE element-value law for every catalogued bounded-array member ('<kind>?' admits null)
+export function elementValue(kind, v) {
+  const optional = kind.endsWith('?'); const k = optional ? kind.slice(0, -1) : kind;
+  if (v === null) return optional;
+  switch (k) {
+    case 'code': return isCode(v);
+    case 'coin': return isCoin(v);
+    case 'id': return isId(v);
+    case 'ts': return isTs(v);
+    case 'count': return isCount(v);
+    case 'number': return isFiniteNum(v);
+    case 'bool': return typeof v === 'boolean';
+    case 'codes': return Array.isArray(v) && v.length <= 16 && v.every(isCode);
+    default: return false;
+  }
+}
+// a leaf that names free text / raw provider content can never appear in ANY artifact record (shared by the
+// projector, the snapshot reader and the feature-row reader — generated and loaded records obey one law)
+export function forbiddenLeafError(v, path = 'record') {
+  if (v === null || typeof v !== 'object') return typeof v === 'string' && v.length > MAX_ID_CHARS ? `${path} carries an over-long string` : null;
+  if (Array.isArray(v)) { for (let i = 0; i < v.length; i += 1) { const e = forbiddenLeafError(v[i], `${path}[${i}]`); if (e) return e; } return null; }
+  for (const k of Object.keys(v)) { if (FORBIDDEN_LEAF_RE.test(k)) return `${path}.${k} is a free-text / raw-content leaf and can never be exported`; const e = forbiddenLeafError(v[k], `${path}.${k}`); if (e) return e; }
+  return null;
+}
 
 // ---- THE FEATURE CATALOGUE ----------------------------------------------------------------------------------------
 // Every projected leaf lists its ORIGINAL recorded path inside the durable dossier EVENT, its value kind, its unit,
@@ -111,7 +143,17 @@ export const MAX_CODE_CHARS = 48;
 const PARTICIPATION_SUPPORT_MS = 9 * 900_000; // (8 prior + 1 current) x 15 min — the participation-window bound (rumor2/social-research-strainer.js)
 const WIDEEYE_BASELINE_MS = 7 * 86_400_000; // survey/eyecore.js pruneBaselineBuckets: seven-day trailing retention feeds zVol / zRet
 const OWNER_FLOW_5M_MS = 300_000;
-const F = (name, path, kind, unit, nullMeaning, support, extra = {}) => Object.freeze({ name, path: Object.freeze(path), kind, unit, nullMeaning, support: Object.freeze(support), optional: false, ...extra });
+// NULLABILITY IS EXPLICIT (never inferred from prose: the phrase "never null" contains the substring "null").
+// An entry either passes { nullable } outright or uses one of exactly two recognized declarations; anything else
+// throws at module load rather than silently defaulting.
+const nullabilityOf = (name, nullMeaning, extra) => {
+  if (typeof extra.nullable === 'boolean') return extra.nullable;
+  if (/^never null(\b|$)/.test(nullMeaning)) return false;
+  if (/^absent = /.test(nullMeaning)) return false;
+  if (/^null = /.test(nullMeaning)) return true;
+  throw new Error(`feature catalogue: ${name} nullMeaning ${JSON.stringify(nullMeaning)} does not declare nullability — pass an explicit { nullable } flag`);
+};
+const F = (name, path, kind, unit, nullMeaning, support, extra = {}) => Object.freeze({ name, path: Object.freeze(path), kind, unit, nullMeaning, support: Object.freeze(support), optional: false, ...extra, nullable: nullabilityOf(name, nullMeaning, extra) });
 const OPT = (name, path, kind, unit, nullMeaning, support, extra = {}) => F(name, path, kind, unit, nullMeaning, support, { optional: true, ...extra });
 const NONE = { kind: 'NONE' }; const FIX = (ms) => ({ kind: 'FIXED_MS', ms }); const CLK = (leaf) => ({ kind: 'ROW_CLOCK', leaf }); const UNK = { kind: 'UNKNOWN' };
 const WINDOWS = Object.freeze(['w15s', 'w60s', 'w180s', 'w900s']);
@@ -212,6 +254,13 @@ export const FEATURE_CATALOGUE = deepFreeze([
 ]);
 export const FEATURE_NAMES = Object.freeze(FEATURE_CATALOGUE.map((f) => f.name));
 if (new Set(FEATURE_NAMES).size !== FEATURE_NAMES.length) throw new Error('feature catalogue: duplicate feature name');
+// load-time self-check: every leaf carries a boolean nullability that AGREES with its documented prose
+for (const s of FEATURE_CATALOGUE) {
+  if (typeof s.nullable !== 'boolean') throw new Error(`feature catalogue: ${s.name} has no explicit nullability`);
+  if (/^never null(\b|$)/.test(s.nullMeaning) && s.nullable) throw new Error(`feature catalogue: ${s.name} documents "never null" but is declared nullable`);
+  if (/^null = /.test(s.nullMeaning) && !s.nullable) throw new Error(`feature catalogue: ${s.name} documents a null meaning but is declared non-nullable`);
+  if (typeof s.optional !== 'boolean' || !['count', 'number', 'ts', 'bool', 'enum', 'code', 'id'].includes(s.kind)) throw new Error(`feature catalogue: ${s.name} kind / optionality malformed`);
+}
 // bounded arrays copied beside the leaves (each element is itself a closed shape)
 export const ARRAY_CATALOGUE = deepFreeze({
   entrances: { path: ['entrances'], max: 3, element: 'enum', values: ['MARKET_LED', 'PARTICIPATION_LED', 'INFORMATION_LED'] },
@@ -245,7 +294,7 @@ export const OUTCOME_HORIZON_KEYS = Object.freeze(['state', 'reason', 'horizonEn
 export const DATASET_MANIFEST_KEYS = Object.freeze(['version', 'pipelineVersion', 'featureRecipeVersion', 'labelRecipeVersion', 'asOfTs', 'asOf', 'inputs', 'census', 'counts', 'coverage', 'codeIdentity', 'limits', 'outputs', 'authority', 'purpose', 'note']);
 export const EVALUATION_MANIFEST_KEYS = Object.freeze(['version', 'pipelineVersion', 'splitRecipeVersion', 'datasetManifestDigest', 'asOfTs', 'splitAtTs', 'splitAt', 'inputs', 'codeIdentity', 'limits', 'outputs', 'authority', 'purpose', 'note']);
 export const FEATURE_LEAF_VALUE_OK = (spec, v) => {
-  if (v === null) return spec.nullable === true || /null/.test(spec.nullMeaning);
+  if (v === null) return spec.nullable === true; // the explicit flag ALONE decides; prose is documentation, never a rule
   switch (spec.kind) {
     case 'count': return isCount(v);
     case 'number': return isFiniteNum(v);
@@ -257,5 +306,26 @@ export const FEATURE_LEAF_VALUE_OK = (spec, v) => {
     default: return false;
   }
 };
+export function catalogueArrayError(name, arr) {
+  const spec = ARRAY_CATALOGUE[name]; if (!spec) return `undeclared array ${name}`;
+  if (!Array.isArray(arr)) return `array ${name} is not a list`;
+  if (arr.length > spec.max) return `array ${name} exceeds its bound ${spec.max}`;
+  for (let i = 0; i < arr.length; i += 1) {
+    const el = arr[i];
+    if (spec.element === 'enum') { if (!spec.values.includes(el)) return `${name}[${i}] is not a closed value`; continue; }
+    if (spec.element === 'code') { if (!isCode(el)) return `${name}[${i}] is not a closed code`; continue; }
+    if (!isPlainObject(el)) return `${name}[${i}] is not an object`;
+    const k = exactKeys(el, Object.keys(spec.keys)); if (k) return `${name}[${i}] ${k}`; // a member may carry NOTHING beyond its declared keys
+    for (const [key, kind] of Object.entries(spec.keys)) if (!elementValue(kind, el[key])) return `${name}[${i}].${key} unsupported`;
+  }
+  return null;
+}
+// every catalogued array present exactly once, each fully revalidated
+export function catalogueArraysError(arrays, { where = 'record' } = {}) {
+  if (!isPlainObject(arrays)) return `${where}: arrays container malformed`;
+  for (const name of Object.keys(arrays)) if (!(name in ARRAY_CATALOGUE)) return `${where}: undeclared array ${name}`;
+  for (const name of Object.keys(ARRAY_CATALOGUE)) { const e = catalogueArrayError(name, arrays[name]); if (e) return `${where}: ${e}`; }
+  return null;
+}
 export const featureSpec = (name) => FEATURE_CATALOGUE.find((f) => f.name === name) ?? null;
 export const readPath = (o, path) => { let cur = o; for (const k of path) { if (!isPlainObject(cur) || !(k in cur)) return { present: false, value: undefined }; cur = cur[k]; } return { present: true, value: cur }; };

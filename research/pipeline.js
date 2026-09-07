@@ -14,23 +14,48 @@ import { PIPELINE_VERSION, SNAPSHOT_VERSION, FEATURE_RECIPE_VERSION, LABEL_RECIP
 import { createSnapshotProjector, validateSnapshotRecord } from './snapshot.js';
 import { readJournalPrefixReadOnly } from '../persistence/social-research-export.js';
 import { prepareOutputTarget, reserveOutputDir, jsonlWriter, writeJsonFile, writeTextFile, publishManifest, readJsonFile, readJsonlStrict, verifyOutputs, fileSha256 } from './artifacts.js';
+import { evaluateDataset, datasetJoinError } from './evaluation.js';
 import { readChildhoodArchive } from './archive.js';
 import { selectResearchRows, validateFeatureRow } from './features.js';
 import { labelRow, validateOutcomeRow } from './outcomes.js';
-import { evaluateDataset } from './evaluation.js';
 import { RESEARCH_DOSSIER_SCHEMA_VERSION, RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION } from '../rumor2/social-research-dossier.js';
 import { RESEARCH_SHADOW_POPULATION_VERSIONS, RESEARCH_SHADOW_RECIPE_VERSION } from '../rumor2/social-research-shadow.js';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // the code closure whose bytes decide artifact provenance (sorted, repo-relative)
 // (direct sources only; transitive dependencies such as the evidence contract behind the dossier validator are covered by the git commit)
-export const PIPELINE_FILES = Object.freeze(['bin/social-research.js', 'childhood/labeler.js', 'childhood/splits.js', 'childhood/store.js', 'childhood/validate.js', 'persistence/db.js', 'persistence/social-research-export.js', 'research/archive.js', 'research/artifacts.js', 'research/contracts.js', 'research/evaluation.js', 'research/features.js', 'research/outcomes.js', 'research/pipeline.js', 'research/snapshot.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-shadow.js', 'rumor2/social-settle.js', 'rumor2/truth.js']);
+// CODE IDENTITY IS THE EFFECTIVE SOURCE CLOSURE, NOT A HAND-KEPT LIST (F6). Starting from the entry points, every
+// local module actually reachable from them is discovered and hashed — including modules reached transitively, such
+// as the evidence contract the dossier validator executes. A hand-maintained list silently omitted those, so a change
+// confined to a real validation dependency changed neither the source digest nor the path-scoped dirty check, and an
+// artifact could still claim PRODUCED_BY_COMMITTED_SOURCE. This inventory is PROVENANCE ONLY: it records which bytes
+// produced an artifact and grants no module any operational import or authority (the import fences decide that).
+export const PIPELINE_ROOTS = Object.freeze(['bin/social-research.js', 'research/pipeline.js', 'persistence/social-research-export.js']);
+const LOCAL_SPECIFIER_RE = /['"](\.{1,2}\/[^'"\n]+\.js)['"]/g;
+export function pipelineSourceClosure(roots = PIPELINE_ROOTS) {
+  const seen = new Set(); const stack = [...roots];
+  while (stack.length) {
+    const rel = stack.pop(); if (seen.has(rel)) continue;
+    const abs = path.join(ROOT, rel);
+    if (!existsSync(abs)) fail('INTERNAL_FAILURE', `pipeline source ${rel} is missing`);
+    seen.add(rel);
+    for (const m of readFileSync(abs, 'utf8').matchAll(LOCAL_SPECIFIER_RE)) {
+      const target = path.resolve(path.dirname(abs), m[1]);
+      if (!target.startsWith(`${ROOT}${path.sep}`) || !existsSync(target)) continue; // never reaches outside the repo
+      stack.push(path.relative(ROOT, target));
+    }
+  }
+  return [...seen].sort();
+}
+// a dirty CLOSURE outranks a clean HEAD: bytes that produced the artifact decide the law, not the commit label
+export const identityLaw = ({ gitCommit, gitSourceDirty }) => (gitSourceDirty === true ? 'PRODUCED_BY_UNCOMMITTED_SOURCE' : gitCommit ? 'PRODUCED_BY_COMMITTED_SOURCE' : 'NO_GIT_CHECKOUT');
 export function codeIdentity() {
-  const parts = []; for (const f of PIPELINE_FILES) { const p = path.join(ROOT, f); if (!existsSync(p)) fail('INTERNAL_FAILURE', `pipeline source ${f} is missing`); parts.push(`${f}\n${sha256Hex(readFileSync(p))}\n`); }
+  const files = pipelineSourceClosure();
+  const parts = files.map((f) => `${f}\n${sha256Hex(readFileSync(path.join(ROOT, f)))}\n`);
   let gitCommit = null; let gitSourceDirty = null;
   try { gitCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim(); if (!/^[0-9a-f]{40}$/.test(gitCommit)) gitCommit = null; } catch { gitCommit = null; }
-  if (gitCommit) { try { gitSourceDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=all', '--', ...PIPELINE_FILES], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim().length > 0; } catch { gitSourceDirty = null; } }
-  return deepFreeze({ pipelineVersion: PIPELINE_VERSION, sourceTreeSha256: sha256Hex(parts.join('')), sourceFiles: PIPELINE_FILES.length, gitCommit, gitSourceDirty, law: gitSourceDirty ? 'PRODUCED_BY_UNCOMMITTED_SOURCE' : gitCommit ? 'PRODUCED_BY_COMMITTED_SOURCE' : 'NO_GIT_CHECKOUT' });
+  if (gitCommit) { try { gitSourceDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=all', '--', ...files], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim().length > 0; } catch { gitSourceDirty = null; } }
+  return deepFreeze({ pipelineVersion: PIPELINE_VERSION, sourceTreeSha256: sha256Hex(parts.join('')), sourceFiles: files.length, sourceClosure: files, roots: [...PIPELINE_ROOTS], gitCommit, gitSourceDirty, law: identityLaw({ gitCommit, gitSourceDirty }), note: 'provenance inventory of the bytes that produced this artifact — never an operational import or authority allowance' });
 }
 const NOTE = 'disposable, reproducible research artifact — not an input to any operational decision; authority NONE, purpose RESEARCH_ONLY';
 
@@ -51,7 +76,7 @@ export async function runSnapshot({ db = null, events = null, out, stream = JOUR
       counts: { ...result.counts, retainedSets: result.retainedSets, selectedRecords: result.records.length }, clockRange: result.clockRange,
       projectionRecipe: { snapshotVersion: SNAPSHOT_VERSION, featureLeaves: FEATURE_NAMES.length, arrays: Object.keys(ARRAY_CATALOGUE), dossierVersions: { projected: [RESEARCH_DOSSIER_SCHEMA_VERSION], countedOnly: [RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION] }, shadowVersions: { population: [...RESEARCH_SHADOW_POPULATION_VERSIONS], recipe: RESEARCH_SHADOW_RECIPE_VERSION }, law: 'allowlisted structured projections only — no raw provider text, post bodies, handles, packets or free-text diagnostics; sparse original sequences are preserved and never presented as a complete replayable journal' },
       codeIdentity: codeIdentity(), limits: { ...limits }, outputs: { 'snapshots.jsonl': o }, readOnlyProof, authority: AUTHORITY, purpose: PURPOSE, note: NOTE };
-    const m = publishManifest(res, 'snapshot.manifest.json', manifest);
+    const m = publishManifest(res, 'snapshot.manifest.json', manifest, { outputs: manifest.outputs, limits });
     return { dir: real, manifest, manifestSha256: m.sha256 };
   } catch (err) { res.remove(); throw err; }
 }
@@ -62,7 +87,7 @@ export function readSnapshotDir(dir, { limits = LIMITS } = {}) {
   if (m.version !== SNAPSHOT_VERSION) fail('UNSUPPORTED_INPUT_VERSION', `snapshot version ${String(m.version).slice(0, 60)} is not supported`);
   if (!isPlainObject(m.prefix) || !Number.isSafeInteger(m.prefix.upperSeq) || !isPlainObject(m.prefix.digest) || !/^[0-9a-f]{64}$/.test(m.prefix.digest.sha256 ?? '')) fail('CORRUPT_INPUT', 'snapshot manifest: prefix malformed');
   if (m.authority !== AUTHORITY || m.purpose !== PURPOSE) fail('CORRUPT_INPUT', 'snapshot manifest: authority law');
-  verifyOutputs(dir, m.outputs);
+  verifyOutputs(dir, m.outputs, { limits, expected: ['snapshots.jsonl'] });
   const records = []; let lastSeq = 0;
   for (const rec of readJsonlStrict(path.join(dir, 'snapshots.jsonl'), { limits })) { const e = validateSnapshotRecord(rec); if (e) fail('CORRUPT_INPUT', e); if (rec.originalSeq <= lastSeq || rec.originalSeq > m.prefix.upperSeq) fail('CORRUPT_INPUT', 'snapshot records are not in original journal order within the prefix'); lastSeq = rec.originalSeq; if (rec.origin !== m.origin) fail('CORRUPT_INPUT', 'snapshot record origin disagrees with the manifest'); records.push(rec); if (records.length > limits.maxProjectedSnapshots) fail('RESOURCE_LIMIT_EXCEEDED', 'snapshot exceeds the projected record limit'); }
   if (records.length !== m.outputs['snapshots.jsonl']?.lines || records.length !== m.counts?.selectedRecords) fail('CORRUPT_INPUT', 'snapshot record count disagrees with the manifest');
@@ -87,7 +112,7 @@ export async function runBuild({ snapshotDir, childhoodDir = null, asOfTs, out, 
     const manifest = { version: DATASET_MANIFEST_VERSION, pipelineVersion: PIPELINE_VERSION, featureRecipeVersion: FEATURE_RECIPE_VERSION, labelRecipeVersion: LABEL_RECIPE_VERSION, asOfTs, asOf: isoOf(asOfTs),
       inputs: { snapshot: { manifestSha256: snap.manifestSha256, snapshotsSha256: snap.manifest.outputs['snapshots.jsonl'].sha256, origin: snap.manifest.origin, upperSeq: snap.manifest.prefix.upperSeq, prefixDigest: snap.manifest.prefix.digest }, childhood: archive ? { manifestSha256: archive.census.identity.manifestSha256, archiveCreatedTs: archive.census.identity.archiveCreatedTs, consumedFiles: archive.consumedFiles } : null },
       census: coverage.census, counts: coverage.counts, coverage: coverage.state, codeIdentity: codeIdentity(), limits: { ...limits }, outputs: { 'features.jsonl': fo, 'outcomes.jsonl': oo, 'coverage.json': co }, authority: AUTHORITY, purpose: PURPOSE, note: NOTE };
-    const m = publishManifest(res, 'dataset.manifest.json', manifest);
+    const m = publishManifest(res, 'dataset.manifest.json', manifest, { outputs: manifest.outputs, limits });
     return { dir: real, manifest, manifestSha256: m.sha256, coverage };
   } catch (err) { res.remove(); throw err; }
 }
@@ -124,11 +149,18 @@ export function readDatasetDir(dir, { limits = LIMITS } = {}) {
   const k = exactKeys(m, DATASET_MANIFEST_KEYS); if (k) fail('CORRUPT_INPUT', `dataset manifest: ${k}`);
   if (m.version !== DATASET_MANIFEST_VERSION || m.featureRecipeVersion !== FEATURE_RECIPE_VERSION || m.labelRecipeVersion !== LABEL_RECIPE_VERSION) fail('UNSUPPORTED_INPUT_VERSION', 'dataset versions are not supported');
   if (!isTs(m.asOfTs) || m.asOf !== isoOf(m.asOfTs) || m.authority !== AUTHORITY || m.purpose !== PURPOSE) fail('CORRUPT_INPUT', 'dataset manifest: clocks / authority malformed');
-  verifyOutputs(dir, m.outputs);
+  verifyOutputs(dir, m.outputs, { limits, expected: ['features.jsonl', 'outcomes.jsonl', 'coverage.json'] });
   const featureRows = []; for (const r of readJsonlStrict(path.join(dir, 'features.jsonl'), { limits })) { const e = validateFeatureRow(r); if (e) fail('CORRUPT_INPUT', e); featureRows.push(r); if (featureRows.length > limits.maxSelectedRows) fail('RESOURCE_LIMIT_EXCEEDED', 'dataset exceeds the selected row limit'); }
   const outcomeRows = []; for (const r of readJsonlStrict(path.join(dir, 'outcomes.jsonl'), { limits })) { const e = validateOutcomeRow(r); if (e) fail('CORRUPT_INPUT', e); outcomeRows.push(r); }
   if (featureRows.length !== m.outputs['features.jsonl']?.lines || outcomeRows.length !== m.outputs['outcomes.jsonl']?.lines) fail('CORRUPT_INPUT', 'dataset row counts disagree with the manifest');
   const coverage = readJsonFile(path.join(dir, 'coverage.json'), { limits }).value;
+  // A saved dataset is only meaningful under the as-of it was frozen for: reopening proves every row still obeys that
+  // clock, and that the manifest's own summary agrees with the rows on disk. Nothing is re-dated to make it fit.
+  const joined = datasetJoinError({ featureRows, outcomeRows, asOfTs: m.asOfTs }); if (joined.error) fail('CORRUPT_INPUT', joined.error);
+  if (!isPlainObject(coverage) || coverage.asOfTs !== m.asOfTs) fail('CORRUPT_INPUT', 'dataset coverage report disagrees with the manifest as-of');
+  if (coverage.authority !== AUTHORITY || coverage.purpose !== PURPOSE) fail('CORRUPT_INPUT', 'dataset coverage report authority law');
+  if (coverage.counts?.rows !== featureRows.length || coverage.counts?.labelled !== outcomeRows.length) fail('CORRUPT_INPUT', `dataset coverage counts (${coverage.counts?.rows} rows / ${coverage.counts?.labelled} labelled) disagree with the ${featureRows.length} feature and ${outcomeRows.length} outcome rows on disk`);
+  if (canonicalJson(m.counts) !== canonicalJson(coverage.counts) || canonicalJson(m.coverage) !== canonicalJson(coverage.state)) fail('CORRUPT_INPUT', 'dataset manifest summary disagrees with its coverage report');
   return { manifest: m, manifestSha256: mf.sha256, featureRows, outcomeRows, coverage };
 }
 
@@ -145,7 +177,7 @@ export async function runEvaluate({ datasetDir, splitAtTs, out, limits = LIMITS 
     const eo = writeJsonFile(res, 'evaluation.json', evaluation);
     const ro = writeTextFile(res, 'report.txt', report);
     const manifest = { version: EVALUATION_VERSION, pipelineVersion: PIPELINE_VERSION, splitRecipeVersion: SPLIT_RECIPE_VERSION, datasetManifestDigest: ds.manifestSha256, asOfTs, splitAtTs, splitAt: isoOf(splitAtTs), inputs: { dataset: { manifestSha256: ds.manifestSha256, featuresSha256: ds.manifest.outputs['features.jsonl'].sha256, outcomesSha256: ds.manifest.outputs['outcomes.jsonl'].sha256, asOf: ds.manifest.asOf } }, codeIdentity: codeIdentity(), limits: { ...limits }, outputs: { 'evaluation.json': eo, 'report.txt': ro }, authority: AUTHORITY, purpose: PURPOSE, note: NOTE };
-    const m = publishManifest(res, 'evaluation.manifest.json', manifest);
+    const m = publishManifest(res, 'evaluation.manifest.json', manifest, { outputs: manifest.outputs, limits });
     return { dir: real, manifest, manifestSha256: m.sha256, evaluation, report };
   } catch (err) { res.remove(); throw err; }
 }
@@ -153,7 +185,7 @@ export function readEvaluationDir(dir, { limits = LIMITS } = {}) {
   const mf = readJsonFile(path.join(dir, 'evaluation.manifest.json'), { limits }); const m = mf.value;
   const k = exactKeys(m, EVALUATION_MANIFEST_KEYS); if (k) fail('CORRUPT_INPUT', `evaluation manifest: ${k}`);
   if (m.version !== EVALUATION_VERSION) fail('UNSUPPORTED_INPUT_VERSION', 'evaluation version is not supported');
-  verifyOutputs(dir, m.outputs);
+  verifyOutputs(dir, m.outputs, { limits, expected: ['evaluation.json', 'report.txt'] });
   return { manifest: m, evaluation: readJsonFile(path.join(dir, 'evaluation.json'), { limits }).value, report: readFileSync(path.join(dir, 'report.txt'), 'utf8') };
 }
 export const datasetDigestOf = (dir) => fileSha256(path.join(dir, 'dataset.manifest.json'));

@@ -48,3 +48,28 @@ export function writeChildhoodArchive(dir, { series = [], archiveCreatedTs, retr
   writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 1));
   return { dir, manifest, files };
 }
+
+// ---- a VALID legacy (serpent-research-dossier-1) dossier event, derived from a lawful v2 one -----------------------
+// The legacy schema is frozen: this projects a real v2 dossier onto the legacy key set, recomputes the semantic
+// identity, and returns an event its OWN frozen validator accepts — so a positive legacy -> v2 lineage round trip can
+// be exercised, not merely the rejection of a record that carries a legacy version label.
+import { RESEARCH_DOSSIER_EVENT_TYPE as RD_TYPE, RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION, researchDossierEventIdentity } from '../../rumor2/social-research-dossier.js';
+import { canonicalJson, contentHash } from '../../rumor2/truth.js';
+const LEGACY_DOSSIER_KEYS = ['schemaVersion', 'canonicalCoin', 'providerSymbols', 'asOfTs', 'derivedKnownAtTs', 'inputDigest', 'entrances', 'opportunityClock', 'information', 'participation', 'marketLight', 'marketDeep', 'executability', 'crossSense', 'missing', 'nextObservationProposals', 'security', 'authority', 'purpose', 'researchState', 'episode'];
+export function legacyDossierEventFrom(ev) {
+  const d = ev.dossier;
+  const sans = Object.fromEntries(LEGACY_DOSSIER_KEYS.filter((k) => k in d).map((k) => [k, d[k]]));
+  sans.schemaVersion = RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION;
+  sans.researchState = d.researchState === 'KEEP_OBSERVING' ? 'OBSERVING' : d.researchState; // the legacy vocabulary
+  sans.episode = { index: 1, previousDossierId: null }; // the first dossier of the coin under the legacy law
+  const dossierId = `r2rd-${contentHash(canonicalJson(sans))}`;
+  const dossier = { ...sans, dossierId };
+  return {
+    type: RD_TYPE, ts: new Date(d.derivedKnownAtTs).toISOString(), sourceEventId: researchDossierEventIdentity({ canonicalCoin: d.canonicalCoin, dossierId }),
+    canonicalCoin: d.canonicalCoin, dossierId, packetId: null, inputDigest: d.inputDigest,
+    entrances: [...d.entrances.kinds], researchState: sans.researchState, derivedKnownAtTs: d.derivedKnownAtTs,
+    latestInputKnownAtTs: d.opportunityClock.latestInputKnownAtTs, firstTriggerKnownAtTs: d.opportunityClock.firstTriggerKnownAtTs,
+    episodeIndex: 1, previousDossierId: null, proposalKinds: [...new Set(d.nextObservationProposals.map((p) => p.proposalKind))].sort(),
+    dossier, packet: null, knownAtTs: d.derivedKnownAtTs,
+  };
+}

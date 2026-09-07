@@ -2181,6 +2181,66 @@ candle anchor is label-side only and never an entry fill or performance claim.
 
 ---
 
+### 5W. SOCIAL-5B TRUTH-BOUNDARY CLOSEOUT — six offline validation defects repaired
+
+An independent review of the SOCIAL-5B delivery (`32637195`) accepted the foundation and the repaired outcome DTO and
+identified six code-level boundary defects in the OFFLINE pipeline. All six were reproduced against the delivered
+behaviour and repaired together as one closeout; no provider was activated, no data acquired, no configuration,
+dependency, durable schema, journal, ledger, cost, controls, risk, execution or trading-permission path changed, and
+no calibration was performed. The repairs tighten shared authoritative checks rather than adding surface.
+
+**F1 — the evaluation did not enforce its own as-of wall.** Generation masked correctly for the as-of supplied to the
+labeler, but reopening a saved dataset never proved the rows still belonged to that clock: a lawful row from a LATER
+dataset evaluated cleanly at an EARLIER as-of, exposing a KNOWN 240-minute outcome whose knowledge floor was hours
+away, and even counted a feature whose decision was three seconds in that clock's future. One shared
+`datasetJoinError` now governs both `evaluateDataset` and `readDatasetDir`: a decision, an input clock, a reference
+price or a KNOWN/CENSORED horizon beyond the as-of, and a value masked although already knowable, are all
+`CORRUPT_INPUT`. `validateOutcomeRow` additionally enforces the as-of-independent floors (a knowledge floor never
+precedes its horizon end; a KNOWN excursion requires a KNOWN reference; the reference names the bar closing at the
+anchor). Manifest, coverage report and rows must reconcile. Nothing is re-dated and no archive clock is adjusted.
+
+**F2 — closed-record validation was not closed throughout.** (a) Nullability was inferred from English prose, and the
+phrase "never null" contains the substring "null", so a non-nullable leaf accepted null and the evaluator read that
+null as "not truncated". Every catalogue leaf now carries an explicit boolean checked against its prose at module
+load, and `FEATURE_LEAF_VALUE_OK` consults the flag alone. (b) Nested member shapes were only length-checked on read,
+so a `text: …` member survived `validateFeatureRow`. One shared `catalogueArraysError` now revalidates exact member
+keys and closed member values for generated AND loaded records, and the free-text scan runs on read as well.
+(c) Feature/label reconciliation compared COUNTS, so a duplicated feature beside an orphan label balanced. Identity is
+now exact set equality over unique ids.
+
+**F3 — a lawful symbol produced an unreadable projection.** The dossier law admits a dot (`A.B`); the snapshot reader
+applied the uppercase reason-code pattern. Asset fields now use the ONE canonical asset-identity law everywhere
+(projector, snapshot reader, feature and outcome rows, shadow rows), with an end-to-end dotted round trip.
+
+**F4 — an output could be sealed beyond its reader's limit.** The writer enforced the per-line bound but not the
+cumulative file bound its reader applies. Writers now enforce both, close their descriptor on every failure path, and
+the manifest is published only after every data output is re-read and proved against its checksum, size and record
+count; the declared member LIST is part of the contract. The archive census hashes and parses the SAME buffer.
+
+**F5 — contradictory archive provenance was accepted.** A manifest claiming creation BEFORE a series it consumed is
+now corrupt input; a genuinely ABSENT creation clock remains an explicit `PROVENANCE_CLOCK_MISSING` limitation with
+unavailable labels. Missing and contradictory provenance are never confused.
+
+**F6 — code identity omitted effective transitive source.** A hand-kept file list controlled both the source digest
+and the path-scoped dirty check, and omitted the evidence contract the dossier validator executes, so an artifact
+could claim `PRODUCED_BY_COMMITTED_SOURCE` over uncommitted dependency bytes. Identity is now the DISCOVERED closure
+reachable from the entry points (34 files here, evidence contract included); a dirty closure never yields a clean-HEAD
+law. The inventory is provenance only — it grants no module an operational import or authority, which the import
+fences continue to decide independently.
+
+**Review qualification also addressed.** `test/social-5b-closeout.test.js` adds the POSITIVE legacy round trip the
+review asked for: a genuinely valid `serpent-research-dossier-1` event (built by projecting a lawful v2 dossier onto
+the frozen legacy key set and recomputing its semantic identity) is replayed, opens a lawful `NEW_AFTER_LEGACY` v2
+episode, and is inventoried without ever being converted into a v2 projection. Semantic mutations in the closeout
+tests reseal their checksums so the semantic validators are what actually run.
+
+**Unchanged.** Real history is still NOT evaluated; stage calibration remains NOT PERFORMED with the live stage
+`UNKNOWN / calibrated:false`; the independent stage labels, the claim-association seam and the `serpent-evidence-1`
+packet limitations remain honestly deferred and are not these defects. Authority stays `NONE` /
+`RESEARCH_ONLY` on every surface.
+
+---
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns

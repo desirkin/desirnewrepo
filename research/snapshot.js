@@ -11,24 +11,13 @@ import { canonicalJson } from '../rumor2/truth.js';
 import { RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_DOSSIER_SCHEMA_VERSION, RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION, replayResearchDossierEvent, isLegacyResearchDossierEvent } from '../rumor2/social-research-dossier.js';
 import { RESEARCH_SHADOW_EVENT_TYPE, RESEARCH_SHADOW_POPULATION_VERSIONS, RESEARCH_SHADOW_RECIPE_VERSION, replayResearchShadowEvent, emptyShadowState } from '../rumor2/social-research-shadow.js';
 import { SOCIAL_OBSERVATION_TYPES } from '../rumor2/social-settle.js';
-import { LIMITS, SNAPSHOT_VERSION, PREFIX_DIGEST_VERSION, SNAPSHOT_ORIGINS, FEATURE_CATALOGUE, ARRAY_CATALOGUE, FEATURE_LEAF_VALUE_OK, SNAPSHOT_DOSSIER_RECORD_KEYS, SNAPSHOT_SHADOW_RECORD_KEYS, SHADOW_ROW_KEYS, SHADOW_SELECTION_REASONS, FORBIDDEN_LEAF_RE, MAX_ID_CHARS, fail, isPlainObject, isTs, isCount, isFiniteNum, readPath, sha256Hex, deepFreeze, exactKeys } from './contracts.js';
+import { LIMITS, SNAPSHOT_VERSION, PREFIX_DIGEST_VERSION, SNAPSHOT_ORIGINS, FEATURE_CATALOGUE, ARRAY_CATALOGUE, FEATURE_LEAF_VALUE_OK, SNAPSHOT_DOSSIER_RECORD_KEYS, SNAPSHOT_SHADOW_RECORD_KEYS, SHADOW_ROW_KEYS, SHADOW_SELECTION_REASONS, fail, isPlainObject, isTs, isCount, isCoin, isCode, isId, elementValue, catalogueArraysError, forbiddenLeafError, readPath, sha256Hex, deepFreeze, exactKeys } from './contracts.js';
 
-const isCode = (v) => typeof v === 'string' && /^[A-Z0-9_]{1,48}$/.test(v);
-const isId = (v) => typeof v === 'string' && v.length > 0 && v.length <= MAX_ID_CHARS && !/\s/.test(v);
-const elementValue = (kind, v) => {
-  const opt = kind.endsWith('?'); const k = opt ? kind.slice(0, -1) : kind;
-  if (v === null) return opt;
-  switch (k) { case 'code': return isCode(v); case 'id': return isId(v); case 'ts': return isTs(v); case 'count': return isCount(v); case 'number': return isFiniteNum(v); case 'bool': return typeof v === 'boolean'; case 'codes': return Array.isArray(v) && v.length <= 16 && v.every(isCode); default: return false; }
-};
 // the record identity is SEMANTIC: recipe + the original durable identities, never the journal position, origin or a clock
 export const snapshotRecordIdentity = (fields) => `r5s-${sha256Hex(canonicalJson({ projectionVersion: SNAPSHOT_VERSION, ...fields }))}`;
 
-// walk a produced projection and refuse any leaf that names free text or carries an over-long string
-function assertNoForbiddenLeaf(v, path = 'record') {
-  if (v === null || typeof v !== 'object') { if (typeof v === 'string' && v.length > MAX_ID_CHARS) fail('VALIDATION_FAILURE', `projection ${path} carries an over-long string`); return; }
-  if (Array.isArray(v)) { v.forEach((x, i) => assertNoForbiddenLeaf(x, `${path}[${i}]`)); return; }
-  for (const k of Object.keys(v)) { if (FORBIDDEN_LEAF_RE.test(k)) fail('VALIDATION_FAILURE', `projection ${path}.${k} is a free-text / raw-content leaf and can never be exported`); assertNoForbiddenLeaf(v[k], `${path}.${k}`); }
-}
+// a produced projection obeys the SAME shared free-text law the readers enforce
+const assertNoForbiddenLeaf = (v, path = 'record') => { const e = forbiddenLeafError(v, path); if (e) fail('VALIDATION_FAILURE', `projection ${e}`); };
 
 export function projectDossierEvent(ev, { originalSeq, origin }) {
   const leaves = {}; const absentLeaves = {};
@@ -54,8 +43,10 @@ export function projectDossierEvent(ev, { originalSeq, origin }) {
   }
   const ps = ev.dossier.providerSymbols; const providerSymbols = ps === null ? null : Object.fromEntries(Object.entries(ps).filter(([p, s]) => isCode(p) && typeof s === 'string' && s.length <= 40).sort());
   const sans = { recordKind: 'RESEARCH_DOSSIER_V2', projectionVersion: SNAPSHOT_VERSION, origin, originalSeq, sourceEventId: ev.sourceEventId, dossierId: ev.dossierId, canonicalCoin: ev.canonicalCoin, providerSymbols, episodeId: ev.episodeId, episodeIndex: ev.episodeIndex, episodeBasis: ev.dossier.episode.basis, featureAsOfTs: ev.dossier.asOfTs, decisionKnownAtTs: ev.knownAtTs, leaves, absentLeaves, arrays };
+  if (!isCoin(sans.canonicalCoin)) fail('VALIDATION_FAILURE', `dossier ${ev.dossierId}: canonicalCoin is not a lawful asset identity`);
   const rec = { ...sans, recordId: snapshotRecordIdentity({ recordKind: 'RESEARCH_DOSSIER_V2', sourceEventId: ev.sourceEventId, dossierId: ev.dossierId, canonicalCoin: ev.canonicalCoin }) };
   assertNoForbiddenLeaf(rec);
+  const ae = catalogueArraysError(rec.arrays, { where: `dossier ${ev.dossierId}` }); if (ae) fail('VALIDATION_FAILURE', ae); // the generator obeys the reader's law
   return deepFreeze(rec);
 }
 
@@ -76,7 +67,9 @@ export function validateSnapshotRecord(rec) {
   if (rec.recordKind === 'RESEARCH_DOSSIER_V2') {
     const k = exactKeys(rec, SNAPSHOT_DOSSIER_RECORD_KEYS); if (k) return `snapshot record: ${k}`;
     if (rec.projectionVersion !== SNAPSHOT_VERSION) return 'snapshot record: unsupported projection version';
-    if (!SNAPSHOT_ORIGINS.includes(rec.origin) || !isTs(rec.originalSeq) || !isId(rec.sourceEventId) || !isId(rec.dossierId) || !isCode(rec.canonicalCoin) || !isId(rec.episodeId) || !isCount(rec.episodeIndex) || !isTs(rec.featureAsOfTs) || !isTs(rec.decisionKnownAtTs)) return 'snapshot record: identity / clocks malformed';
+    if (!SNAPSHOT_ORIGINS.includes(rec.origin) || !isTs(rec.originalSeq) || !isId(rec.sourceEventId) || !isId(rec.dossierId) || !isCoin(rec.canonicalCoin) || !isId(rec.episodeId) || !isCount(rec.episodeIndex) || !isTs(rec.featureAsOfTs) || !isTs(rec.decisionKnownAtTs)) return 'snapshot record: identity / clocks malformed';
+    if (rec.featureAsOfTs > rec.decisionKnownAtTs) return 'snapshot record: a decision cannot be known before its features were derived';
+    if (rec.providerSymbols !== null && (!isPlainObject(rec.providerSymbols) || Object.entries(rec.providerSymbols).some(([k2, v2]) => !isCode(k2) || typeof v2 !== 'string' || v2.length === 0 || v2.length > 40))) return 'snapshot record: providerSymbols malformed';
     if (!isPlainObject(rec.leaves) || !isPlainObject(rec.absentLeaves) || !isPlainObject(rec.arrays)) return 'snapshot record: projection containers malformed';
     for (const spec of FEATURE_CATALOGUE) {
       const has = spec.name in rec.leaves; const absent = spec.name in rec.absentLeaves;
@@ -85,21 +78,18 @@ export function validateSnapshotRecord(rec) {
       if (has && !FEATURE_LEAF_VALUE_OK(spec, rec.leaves[spec.name])) return `snapshot record: leaf ${spec.name} unsupported`;
     }
     for (const n of Object.keys(rec.leaves)) if (!FEATURE_CATALOGUE.some((s) => s.name === n)) return `snapshot record: undeclared leaf ${n}`;
-    for (const [name, spec] of Object.entries(ARRAY_CATALOGUE)) { const a = rec.arrays[name]; if (!Array.isArray(a) || a.length > spec.max) return `snapshot record: array ${name} malformed`; }
-    for (const n of Object.keys(rec.arrays)) if (!(n in ARRAY_CATALOGUE)) return `snapshot record: undeclared array ${n}`;
+    const ae = catalogueArraysError(rec.arrays, { where: 'snapshot record' }); if (ae) return ae;
     if (rec.recordId !== snapshotRecordIdentity({ recordKind: 'RESEARCH_DOSSIER_V2', sourceEventId: rec.sourceEventId, dossierId: rec.dossierId, canonicalCoin: rec.canonicalCoin })) return 'snapshot record: recordId is not the semantic identity';
-    try { assertNoForbiddenLeaf(rec); } catch (e) { return e.researchMessage ?? String(e.message); }
-    return null;
+    return forbiddenLeafError(rec, 'snapshot record');
   }
   if (rec.recordKind === 'RESEARCH_SHADOW_SAMPLE') {
     const k = exactKeys(rec, SNAPSHOT_SHADOW_RECORD_KEYS); if (k) return `snapshot record: ${k}`;
     if (rec.projectionVersion !== SNAPSHOT_VERSION) return 'snapshot record: unsupported projection version';
     if (!SNAPSHOT_ORIGINS.includes(rec.origin) || !isTs(rec.originalSeq) || !isId(rec.sourceEventId) || !isId(rec.sweepId) || !isTs(rec.sweepTsMs) || !isTs(rec.knownAtTs) || rec.knownAtTs < rec.sweepTsMs) return 'snapshot record: shadow identity / clocks malformed';
     if (!RESEARCH_SHADOW_POPULATION_VERSIONS.includes(rec.populationVersion) || rec.recipeVersion !== RESEARCH_SHADOW_RECIPE_VERSION) return 'snapshot record: unsupported shadow version';
-    if (!Array.isArray(rec.selected) || rec.selected.length > rec.sampleCap || rec.selected.some((r) => exactKeys(r, SHADOW_ROW_KEYS) || !isCode(r.coin) || !SHADOW_SELECTION_REASONS.includes(r.selectionReason))) return 'snapshot record: selected rows malformed';
+    if (!Array.isArray(rec.selected) || rec.selected.length > rec.sampleCap || rec.selected.some((r) => exactKeys(r, SHADOW_ROW_KEYS) || !isCoin(r.coin) || !SHADOW_SELECTION_REASONS.includes(r.selectionReason) || typeof r.cooldownSuppressed !== 'boolean' || typeof r.inDeepTape !== 'boolean' || !isId(r.rank) || ['zVol', 'zRet', 'extension', 'usdVol24h'].some((k2) => !elementValue('number?', r[k2])) || !elementValue('code?', r.preCooldownVerdict))) return 'snapshot record: selected rows malformed';
     if (rec.recordId !== snapshotRecordIdentity({ recordKind: 'RESEARCH_SHADOW_SAMPLE', sourceEventId: rec.sourceEventId, sweepId: rec.sweepId })) return 'snapshot record: recordId is not the semantic identity';
-    try { assertNoForbiddenLeaf(rec); } catch (e) { return e.researchMessage ?? String(e.message); }
-    return null;
+    return forbiddenLeafError(rec, 'snapshot record');
   }
   return 'snapshot record: unknown recordKind';
 }

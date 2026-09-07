@@ -32,32 +32,50 @@ export function reserveOutputDir(real) {
   return { dir: real, written, remove };
 }
 
-// streaming JSONL writer with a per-line byte bound and a running sha256 + line count
+// Streaming JSONL writer. It enforces BOTH bounds its own reader enforces — the per-line bound and the cumulative
+// file bound — so a producer can never seal an output the consumer would refuse (F4). Every failure path closes the
+// descriptor before it throws; nothing is left open when a bound trips mid-file.
 export function jsonlWriter(reservation, name, { limits = LIMITS } = {}) {
   const file = path.join(reservation.dir, name); const tmp = `${file}.part`;
   let fd; try { fd = openSync(tmp, 'wx'); } catch (err) { fail(err?.code === 'EACCES' || err?.code === 'EPERM' ? 'PERMISSION_FAILURE' : 'IO_FAILURE', `cannot create ${name}`); }
   reservation.written.push(tmp);
-  const hash = createHash('sha256'); let lines = 0; let bytes = 0;
+  const hash = createHash('sha256'); let lines = 0; let bytes = 0; let open = true;
+  const shut = () => { if (open) { open = false; try { closeSync(fd); } catch { /* already gone */ } } };
   return {
-    write(obj) { const line = `${JSON.stringify(obj)}\n`; const b = Buffer.byteLength(line, 'utf8'); if (b > limits.maxJsonlLineBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}: a record exceeds ${limits.maxJsonlLineBytes} bytes`); writeSync(fd, line); hash.update(line); lines += 1; bytes += b; },
-    close() { fsyncSync(fd); closeSync(fd); renameSync(tmp, file); reservation.written[reservation.written.indexOf(tmp)] = file; return { name, lines, bytes, sha256: hash.digest('hex') }; },
+    write(obj) {
+      try {
+        if (!open) fail('INTERNAL_FAILURE', `${name}: write after close`);
+        const line = `${JSON.stringify(obj)}\n`; const b = Buffer.byteLength(line, 'utf8');
+        if (b > limits.maxJsonlLineBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}: a record exceeds ${limits.maxJsonlLineBytes} bytes`);
+        if (bytes + b > limits.maxInputFileBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}: the file would exceed the ${limits.maxInputFileBytes} byte bound its reader enforces`);
+        writeSync(fd, line); hash.update(line); lines += 1; bytes += b;
+      } catch (err) { shut(); throw err; }
+    },
+    close() { try { fsyncSync(fd); } catch { shut(); fail('IO_FAILURE', `cannot flush ${name}`); } shut(); renameSync(tmp, file); reservation.written[reservation.written.indexOf(tmp)] = file; return { name, lines, bytes, sha256: hash.digest('hex') }; },
+    abort: shut,
   };
 }
-export function writeJsonFile(reservation, name, obj) {
-  const file = path.join(reservation.dir, name); const tmp = `${file}.part`;
-  const text = `${JSON.stringify(obj, null, 1)}\n`;
-  let fd; try { fd = openSync(tmp, 'wx'); } catch (err) { fail(err?.code === 'EACCES' || err?.code === 'EPERM' ? 'PERMISSION_FAILURE' : 'IO_FAILURE', `cannot create ${name}`); }
-  reservation.written.push(tmp); writeSync(fd, text); fsyncSync(fd); closeSync(fd); renameSync(tmp, file); reservation.written[reservation.written.indexOf(tmp)] = file;
-  return { name, bytes: Buffer.byteLength(text, 'utf8'), sha256: sha256Hex(text) };
-}
-export function writeTextFile(reservation, name, text) {
+// one bounded text/JSON writer under the same producer-consumer bound and the same guaranteed close
+function writeBounded(reservation, name, text, { limits = LIMITS } = {}) {
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes > limits.maxInputFileBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}: ${bytes} bytes exceeds the ${limits.maxInputFileBytes} byte bound its reader enforces`);
   const file = path.join(reservation.dir, name); const tmp = `${file}.part`;
   let fd; try { fd = openSync(tmp, 'wx'); } catch (err) { fail(err?.code === 'EACCES' || err?.code === 'EPERM' ? 'PERMISSION_FAILURE' : 'IO_FAILURE', `cannot create ${name}`); }
-  reservation.written.push(tmp); writeSync(fd, text); fsyncSync(fd); closeSync(fd); renameSync(tmp, file); reservation.written[reservation.written.indexOf(tmp)] = file;
-  return { name, bytes: Buffer.byteLength(text, 'utf8'), sha256: sha256Hex(text) };
+  reservation.written.push(tmp);
+  try { writeSync(fd, text); fsyncSync(fd); } catch { try { closeSync(fd); } catch { /* already gone */ } fail('IO_FAILURE', `cannot write ${name}`); }
+  try { closeSync(fd); } catch { /* already closed */ }
+  renameSync(tmp, file); reservation.written[reservation.written.indexOf(tmp)] = file;
+  return { name, bytes, sha256: sha256Hex(text) };
 }
-// the manifest is the LAST file: an interrupted run leaves no manifest and therefore no readable artifact
-export const publishManifest = (reservation, name, manifest) => writeJsonFile(reservation, name, manifest);
+export const writeJsonFile = (reservation, name, obj, opts = {}) => writeBounded(reservation, name, `${JSON.stringify(obj, null, 1)}\n`, opts);
+export const writeTextFile = (reservation, name, text, opts = {}) => writeBounded(reservation, name, text, opts);
+// The manifest is the LAST file, and it is written only after every DATA output has been re-read from disk and
+// proved to match its declared checksum, size, record count and the reader's own limits (F4): a completed manifest
+// therefore never seals bytes a reader would refuse. An interrupted run leaves no manifest, hence no readable artifact.
+export function publishManifest(reservation, name, manifest, { outputs = null, limits = LIMITS } = {}) {
+  if (outputs) verifyOutputs(reservation.dir, outputs, { limits, expected: Object.keys(outputs) });
+  return writeJsonFile(reservation, name, manifest, { limits });
+}
 
 // ---- reading back (revalidate everything) ------------------------------------------------------------------------
 export function readBoundedFile(file, { limits = LIMITS } = {}) {
@@ -71,28 +89,38 @@ export function readJsonFile(file, { limits = LIMITS } = {}) {
   let v; try { v = JSON.parse(buf.toString('utf8')); } catch { fail('CORRUPT_INPUT', `${path.basename(file)} does not parse`); }
   return { value: v, sha256: sha256Hex(buf), bytes: buf.length };
 }
-// strict bounded JSONL: every line must parse (a blank trailing line is the terminator only); a bad line is corruption
-export function* readJsonlStrict(file, { limits = LIMITS } = {}) {
-  const buf = readBoundedFile(file, { limits }); const text = buf.toString('utf8');
+// strict bounded JSONL over ALREADY-CONSUMED bytes: a caller that hashed a buffer parses that SAME buffer, so a
+// digest and the records it vouches for can never describe two different reads of the file
+export function* readJsonlStrictFromBuffer(buf, name, { limits = LIMITS } = {}) {
+  const text = buf.toString('utf8');
   let start = 0; let lineNo = 0;
   while (start < text.length) {
     let end = text.indexOf('\n', start); if (end === -1) end = text.length;
     const line = text.slice(start, end); start = end + 1; lineNo += 1;
-    if (line.length === 0) { if (start >= text.length) break; fail('CORRUPT_INPUT', `${path.basename(file)}:${lineNo} blank line inside the file`); }
-    if (Buffer.byteLength(line, 'utf8') > limits.maxJsonlLineBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${path.basename(file)}:${lineNo} exceeds ${limits.maxJsonlLineBytes} bytes`);
-    let v; try { v = JSON.parse(line); } catch { fail('CORRUPT_INPUT', `${path.basename(file)}:${lineNo} does not parse`); }
-    if (!isPlainObject(v)) fail('CORRUPT_INPUT', `${path.basename(file)}:${lineNo} is not an object`);
+    if (line.length === 0) { if (start >= text.length) break; fail('CORRUPT_INPUT', `${name}:${lineNo} blank line inside the file`); }
+    if (Buffer.byteLength(line, 'utf8') > limits.maxJsonlLineBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}:${lineNo} exceeds ${limits.maxJsonlLineBytes} bytes`);
+    let v; try { v = JSON.parse(line); } catch { fail('CORRUPT_INPUT', `${name}:${lineNo} does not parse`); }
+    if (!isPlainObject(v)) fail('CORRUPT_INPUT', `${name}:${lineNo} is not an object`);
     yield v;
   }
 }
+// strict bounded JSONL: every line must parse (a blank trailing line is the terminator only); a bad line is corruption
+export function* readJsonlStrict(file, { limits = LIMITS } = {}) {
+  yield* readJsonlStrictFromBuffer(readBoundedFile(file, { limits }), path.basename(file), { limits });
+}
 export const fileSha256 = (file, opts) => sha256Hex(readBoundedFile(file, opts));
-// verify the members a manifest declares (name -> { sha256, bytes, lines? }) against the exact bytes on disk
-export function verifyOutputs(dir, outputs) {
+// Verify the members a manifest declares (name -> { sha256, bytes, lines? }) against the exact bytes on disk, under
+// the reader's own limits. `expected` makes the member LIST part of the contract: an omitted checksum entry is a
+// corrupt manifest, not an artifact that passes because every entry that IS listed happens to match.
+export function verifyOutputs(dir, outputs, { limits = LIMITS, expected = null } = {}) {
   if (!isPlainObject(outputs)) fail('CORRUPT_INPUT', 'manifest outputs malformed');
+  const declared = Object.keys(outputs).sort();
+  if (expected) { const want = [...new Set(expected)].sort(); if (declared.length !== want.length || declared.some((n, i) => n !== want[i])) fail('CORRUPT_INPUT', `manifest declares outputs [${declared.join(', ')}] but this artifact requires [${want.join(', ')}]`); }
   for (const [name, decl] of Object.entries(outputs)) {
     if (!/^[a-z0-9.-]+$/.test(name)) fail('CORRUPT_INPUT', `manifest names an unsafe output ${name}`);
-    const buf = readBoundedFile(path.join(dir, name));
+    const buf = readBoundedFile(path.join(dir, name), { limits });
     if (!isPlainObject(decl) || decl.sha256 !== sha256Hex(buf) || decl.bytes !== buf.length) fail('CORRUPT_INPUT', `${name}: checksum / size disagree with the manifest`);
+    if (typeof decl.lines === 'number') { let n = 0; for (const rec of readJsonlStrictFromBuffer(buf, name, { limits })) { void rec; n += 1; } if (n !== decl.lines) fail('CORRUPT_INPUT', `${name}: ${n} records on disk but ${decl.lines} declared`); }
   }
 }
 export { ResearchError };

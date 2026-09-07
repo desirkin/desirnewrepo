@@ -11,7 +11,7 @@
 // CENSORED, never zero return; an absent archive / track / reference bar is OUTCOME_UNAVAILABLE; a value whose knowledge
 // floor is after the dataset as-of is NOT_YET_KNOWN with every value null (never a zero, never a loss). Nothing here
 // resolves high/low ordering, fees, slippage, liquidity, fills or edge, and no tag / threshold / stage label exists.
-import { LIMITS, LABEL_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, OUTCOME_ROW_KEYS, OUTCOME_HORIZON_KEYS, LABEL_STATES, LABEL_REASONS, COHORTS, AUTHORITY, PURPOSE, fail, isPlainObject, isTs, isFiniteNum, round4, exactKeys, deepFreeze } from './contracts.js';
+import { LIMITS, LABEL_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, OUTCOME_ROW_KEYS, OUTCOME_HORIZON_KEYS, LABEL_STATES, LABEL_REASONS, COHORTS, AUTHORITY, PURPOSE, fail, isPlainObject, isTs, isCoin, isFiniteNum, round4, exactKeys, deepFreeze } from './contracts.js';
 
 export const anchorOf = (decisionKnownAtTs) => { const anchorTsMs = Math.ceil(decisionKnownAtTs / 60_000) * 60_000; return { anchorTsMs, anchorLagMs: anchorTsMs - decisionKnownAtTs }; };
 // pure excursion arithmetic over COMPLETE, validated bars ([openSec,o,h,l,c,v]) relative to a reference price
@@ -64,20 +64,29 @@ export function labelRow({ rowId, cohort, canonicalCoin, decisionKnownAtTs }, { 
 export function validateOutcomeRow(r) {
   const k = exactKeys(r, OUTCOME_ROW_KEYS); if (k) return `outcome row: ${k}`;
   if (r.labelRecipeVersion !== LABEL_RECIPE_VERSION) return 'outcome row: unsupported label recipe';
-  if (typeof r.rowId !== 'string' || !COHORTS.includes(r.cohort) || typeof r.canonicalCoin !== 'string' || !isTs(r.decisionKnownAtTs) || !isTs(r.anchorTsMs) || r.sourceTrack !== '1m') return 'outcome row: identity malformed';
+  if (typeof r.rowId !== 'string' || r.rowId.length === 0 || !COHORTS.includes(r.cohort) || !isCoin(r.canonicalCoin) || !isTs(r.decisionKnownAtTs) || !isTs(r.anchorTsMs) || r.sourceTrack !== '1m') return 'outcome row: identity malformed';
   const a = anchorOf(r.decisionKnownAtTs); if (r.anchorTsMs !== a.anchorTsMs || r.anchorLagMs !== a.anchorLagMs) return 'outcome row: anchor is not the recipe anchor';
   if (r.authority !== AUTHORITY || r.purpose !== PURPOSE) return 'outcome row: authority must be NONE / RESEARCH_ONLY';
   if (!isPlainObject(r.availability) || !['AVAILABLE', 'PARTIAL', 'UNAVAILABLE'].includes(r.availability.state) || !LABEL_REASONS.includes(r.availability.reason)) return 'outcome row: availability malformed';
-  if (!isPlainObject(r.reference) || !['KNOWN', 'NOT_YET_KNOWN', 'OUTCOME_UNAVAILABLE'].includes(r.reference.state)) return 'outcome row: reference malformed';
-  if (r.reference.state !== 'KNOWN' && r.reference.price !== null) return 'outcome row: a reference price is exposed before its knowledge floor';
+  if (!isPlainObject(r.reference) || exactKeys(r.reference, ['state', 'barOpenSec', 'price', 'knownAtTs']) || !['KNOWN', 'NOT_YET_KNOWN', 'OUTCOME_UNAVAILABLE'].includes(r.reference.state)) return 'outcome row: reference malformed';
+  if (r.reference.state !== 'KNOWN' && (r.reference.price !== null || r.reference.barOpenSec !== null)) return 'outcome row: a reference price is exposed before its knowledge floor';
+  // the reference bar is the one CLOSING at the anchor, and Cobra learns it no earlier than the anchor itself
+  if (r.reference.state === 'KNOWN' && (!isFiniteNum(r.reference.price) || r.reference.price <= 0 || r.reference.barOpenSec !== r.anchorTsMs / 1000 - 60 || !isTs(r.reference.knownAtTs) || r.reference.knownAtTs < r.anchorTsMs)) return 'outcome row: a KNOWN reference must name the bar closing at the anchor and its own knowledge floor';
+  if (r.reference.state === 'NOT_YET_KNOWN' && (!isTs(r.reference.knownAtTs) || r.reference.knownAtTs < r.anchorTsMs)) return 'outcome row: a masked reference still carries its knowledge floor';
+  if (r.reference.state === 'OUTCOME_UNAVAILABLE' && r.reference.knownAtTs !== null) return 'outcome row: an unavailable reference carries no knowledge floor';
   if (!isPlainObject(r.horizons)) return 'outcome row: horizons malformed';
   const keys = Object.keys(r.horizons); if (keys.length !== LABEL_HORIZONS_MIN.length) return 'outcome row: horizon set is not the recipe set';
   for (const h of LABEL_HORIZONS_MIN) {
     const x = r.horizons[`${h}m`]; if (!isPlainObject(x)) return `outcome row: horizon ${h}m missing`;
     const hk = exactKeys(x, OUTCOME_HORIZON_KEYS); if (hk) return `outcome row: horizon ${h}m ${hk}`;
     if (!LABEL_STATES.includes(x.state) || !LABEL_REASONS.includes(x.reason) || x.horizonEndTs !== r.anchorTsMs + h * 60_000) return `outcome row: horizon ${h}m state / clock malformed`;
-    if (x.state === 'KNOWN') { if (!isFiniteNum(x.mfePct) || !isFiniteNum(x.maePct) || x.mfePct < 0 || x.maePct > 0 || !isTs(x.outcomeKnownAtTs)) return `outcome row: horizon ${h}m KNOWN values malformed`; }
-    else if (x.mfePct !== null || x.maePct !== null || x.logReturnPct !== null) return `outcome row: horizon ${h}m exposes values in state ${x.state}`;
+    // the knowledge floor can never precede the horizon it describes, and an unavailable horizon has no floor at all
+    if (x.state === 'OUTCOME_UNAVAILABLE') { if (x.outcomeKnownAtTs !== null) return `outcome row: horizon ${h}m is unavailable yet carries a knowledge floor`; }
+    else if (!isTs(x.outcomeKnownAtTs) || x.outcomeKnownAtTs < x.horizonEndTs) return `outcome row: horizon ${h}m knowledge floor precedes the horizon end`;
+    if (x.state === 'KNOWN') {
+      if (!isFiniteNum(x.mfePct) || !isFiniteNum(x.maePct) || x.mfePct < 0 || x.maePct > 0) return `outcome row: horizon ${h}m KNOWN values malformed`;
+      if (r.reference.state !== 'KNOWN') return `outcome row: horizon ${h}m is KNOWN while its reference price is not`; // an excursion cannot be known before its own reference
+    } else if (x.mfePct !== null || x.maePct !== null || x.logReturnPct !== null) return `outcome row: horizon ${h}m exposes values in state ${x.state}`;
     const logH = LOG_RETURN_HORIZONS_MIN.includes(h);
     if (logH ? x.logReturnUnit !== 'LOG_RETURN_PERCENT' : (x.logReturnUnit !== null || x.logReturnPct !== null)) return `outcome row: horizon ${h}m log-return labelling malformed`;
     if (x.state === 'KNOWN' && logH && !isFiniteNum(x.logReturnPct)) return `outcome row: horizon ${h}m log return missing`;

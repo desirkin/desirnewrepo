@@ -11,7 +11,7 @@
 // learnability (label knowable at B for discovery; at the dataset as-of for validation) is tracked SEPARATELY from
 // retrospective availability: an archive acquired after B supports descriptive tables, never a claim that a model
 // could have learned those labels at B. Shadow rows form separate descriptive tables. No causal or significance claim.
-import { EVALUATION_VERSION, SPLIT_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, MAX_HORIZON_MS, FEATURE_CATALOGUE, NOTICE_SUPPORT_MS, GROUPING_DEPENDENCY_KINDS, SPLITS, CALIBRATION_BLOCKERS, LIMITS, AUTHORITY, PURPOSE, fail, isTs, isFiniteNum, summarize, deepFreeze, PARTICIPATION_SUPPORT_WINDOW_MS, WIDEEYE_BASELINE_SUPPORT_MS } from './contracts.js';
+import { EVALUATION_VERSION, SPLIT_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, MAX_HORIZON_MS, FEATURE_CATALOGUE, NOTICE_SUPPORT_MS, GROUPING_DEPENDENCY_KINDS, SPLITS, CALIBRATION_BLOCKERS, LIMITS, AUTHORITY, PURPOSE, fail, isTs, isFiniteNum, summarize, deepFreeze, isoOf, PARTICIPATION_SUPPORT_WINDOW_MS, WIDEEYE_BASELINE_SUPPORT_MS } from './contracts.js';
 import { anchorOf } from './outcomes.js';
 import { validateFeatureRow } from './features.js';
 import { validateOutcomeRow } from './outcomes.js';
@@ -49,14 +49,50 @@ const dependenciesTruncated = (row) => row.features['dependencies.truncated'] ==
 const bump = (o, k) => { o[k] = (o[k] ?? 0) + 1; };
 const stateCounts = () => ({ KNOWN: 0, CENSORED: 0, NOT_YET_KNOWN: 0, OUTCOME_UNAVAILABLE: 0 });
 
+// THE DATASET AS-OF WALL AND THE ONE-TO-ONE ROW LAW.
+// Generation masks correctly for the as-of it was given; REOPENING must prove the saved rows still belong to that
+// as-of. A dataset is only meaningful under the clock it was frozen for, so a row whose decision, inputs, reference
+// price or KNOWN horizon reaches past the supplied as-of — or which masks a value that clock could already see — is
+// a CORRUPT INPUT. Rows are never silently re-dated and an archive clock is never adjusted to make a bad row valid.
+// Identity is exact SET equality (unique feature ids, unique outcome ids, a bijection), never equal counts: two
+// copies of one feature beside an orphan label must not balance the books.
+export function datasetJoinError({ featureRows, outcomeRows, asOfTs }) {
+  if (!Array.isArray(featureRows) || !Array.isArray(outcomeRows)) return { error: 'dataset: feature and outcome rows must be lists' };
+  if (!isTs(asOfTs)) return { error: 'dataset: an as-of clock is required to reopen a dataset' };
+  const byId = new Map();
+  for (const o of outcomeRows) {
+    const e = validateOutcomeRow(o); if (e) return { error: e };
+    if (byId.has(o.rowId)) return { error: `dataset: duplicate outcome row ${o.rowId}` };
+    byId.set(o.rowId, o);
+  }
+  const seen = new Set(); const rows = [];
+  for (const r of featureRows) {
+    const e = validateFeatureRow(r); if (e) return { error: e };
+    if (seen.has(r.rowId)) return { error: `dataset: duplicate feature row ${r.rowId}` };
+    seen.add(r.rowId);
+    const o = byId.get(r.rowId); if (!o) return { error: `dataset: feature row ${r.rowId} has no outcome row` };
+    if (o.canonicalCoin !== r.canonicalCoin || o.decisionKnownAtTs !== r.decisionKnownAtTs || o.cohort !== r.cohort) return { error: `dataset: outcome row ${r.rowId} disagrees with its feature row` };
+    if (r.featureAsOfTs > asOfTs || r.decisionKnownAtTs > asOfTs) return { error: `dataset: feature row ${r.rowId} decides at ${isoOf(r.decisionKnownAtTs)}, after the dataset as-of ${isoOf(asOfTs)}` };
+    if (r.cohort === 'PRIMARY' && r.features['decision.latestInputKnownAtTs'] > asOfTs) return { error: `dataset: feature row ${r.rowId} carries an input known after the dataset as-of ${isoOf(asOfTs)}` };
+    const ref = o.reference;
+    if (ref.state === 'KNOWN' && ref.knownAtTs > asOfTs) return { error: `dataset: outcome row ${r.rowId} exposes a reference price knowable only at ${isoOf(ref.knownAtTs)}, after the as-of ${isoOf(asOfTs)}` };
+    if (ref.state === 'NOT_YET_KNOWN' && ref.knownAtTs <= asOfTs) return { error: `dataset: outcome row ${r.rowId} masks a reference price already knowable at the dataset as-of` };
+    for (const h of LABEL_HORIZONS_MIN) {
+      const x = o.horizons[`${h}m`];
+      if ((x.state === 'KNOWN' || x.state === 'CENSORED') && x.outcomeKnownAtTs > asOfTs) return { error: `dataset: outcome row ${r.rowId} horizon ${h}m is ${x.state} although it becomes knowable only at ${isoOf(x.outcomeKnownAtTs)}` };
+      if (x.state === 'NOT_YET_KNOWN' && x.outcomeKnownAtTs <= asOfTs) return { error: `dataset: outcome row ${r.rowId} horizon ${h}m is masked although it was knowable at the dataset as-of` };
+    }
+    rows.push({ f: r, o });
+  }
+  if (byId.size !== rows.length) return { error: 'dataset: outcome rows exist without a feature row' };
+  return { rows };
+}
+
 export function evaluateDataset({ featureRows, outcomeRows, asOfTs, splitAtTs, coverageState = null, limits = LIMITS } = {}) {
   if (!isTs(asOfTs) || !isTs(splitAtTs)) fail('INVALID_REQUEST', 'as-of and split-at clocks are required');
   if (splitAtTs >= asOfTs) fail('INVALID_REQUEST', 'split-at must be earlier than the dataset as-of');
-  const byId = new Map();
-  for (const o of outcomeRows) { const e = validateOutcomeRow(o); if (e) fail('CORRUPT_INPUT', e); if (byId.has(o.rowId)) fail('CORRUPT_INPUT', `duplicate outcome row ${o.rowId}`); byId.set(o.rowId, o); }
-  const rows = [];
-  for (const r of featureRows) { const e = validateFeatureRow(r); if (e) fail('CORRUPT_INPUT', e); const o = byId.get(r.rowId); if (!o) fail('CORRUPT_INPUT', `feature row ${r.rowId} has no outcome row`); if (o.canonicalCoin !== r.canonicalCoin || o.decisionKnownAtTs !== r.decisionKnownAtTs || o.cohort !== r.cohort) fail('CORRUPT_INPUT', `outcome row ${r.rowId} disagrees with its feature row`); rows.push({ f: r, o }); }
-  if (byId.size !== rows.length) fail('CORRUPT_INPUT', 'outcome rows exist without feature rows');
+  const joined = datasetJoinError({ featureRows, outcomeRows, asOfTs }); if (joined.error) fail('CORRUPT_INPUT', joined.error);
+  const rows = joined.rows;
   const primary = rows.filter((x) => x.f.cohort === 'PRIMARY'); const shadow = rows.filter((x) => x.f.cohort === 'SHADOW');
   // ---- grouping (primary only) ----
   const uf = new UnionFind(); const keyOwner = new Map(); let edges = 0; const keysUsed = {};

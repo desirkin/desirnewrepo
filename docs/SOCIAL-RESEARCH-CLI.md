@@ -67,9 +67,25 @@ readers require the final manifest and every checksum, so an interrupted run lea
 | manifests | `social-research-dataset-manifest-1`, `social-research-evaluation-1` | full input hashes, code identity (source-tree sha256 + git commit + dirty flag), fixed as-of / split, census / exclusion counts, output checksums; never a path, a credential, `Date.now()` or a random id |
 
 The feature catalogue (`research/contracts.js` `FEATURE_CATALOGUE`, 319 leaves + 12 bounded arrays) lists every
-projected field's original recorded path, unit, null meaning and support-window rule. Only catalogued finite
-numbers, booleans, closed enums, ids, timestamps and bounded arrays are copied; free text (notes, details,
-descriptions, reasons, post bodies, handles, packets) can never be exported — a projection refuses such leaves.
+projected field's original recorded path, unit, null meaning, **explicit nullability flag** and support-window rule.
+Nullability is a machine-readable boolean checked against its own prose at module load — never inferred from English
+(the phrase "never null" contains the substring "null"). Only catalogued finite numbers, booleans, closed enums, ids,
+timestamps and bounded arrays are copied; free text (notes, details, descriptions, reasons, post bodies, handles,
+packets) can never be exported — a projection refuses such leaves.
+
+**One validator, both directions.** Generated records and loaded records obey the same laws: every bounded array
+member is revalidated with exact member keys and closed member values (not merely a bounded length), the free-text
+scan runs on read as well as on write, and asset fields use the ONE canonical asset-identity law
+(`/^[A-Z0-9][A-Z0-9.]{0,14}$/`, so a lawful dotted symbol such as `A.B` round-trips) rather than the uppercase
+reason-code pattern.
+
+**The dataset as-of wall.** A dataset is only meaningful under the as-of it was frozen for. Reopening it — through
+`readDatasetDir` or `evaluate` — proves every row still obeys that clock: a decision, an input clock, a reference
+price or a KNOWN/CENSORED horizon beyond the as-of, or a value masked although that clock could already see it, is
+`CORRUPT_INPUT` (exit 3). Rows are never silently re-dated and no archive clock is adjusted to make a row fit. Row
+identity is exact SET equality between features and labels (unique ids, a bijection) — equal counts never suffice,
+so a duplicated feature beside an orphan label cannot balance the books. The manifest's own summary, the coverage
+report and the rows on disk must reconcile.
 Source-profile context is `NOT_RECORDED_IN_DOSSIER` for this recipe; claim association is
 `NOT_AVAILABLE_NO_AUTHORIZED_SEAM`. Neither is reconstructed from present-day state.
 
@@ -112,6 +128,18 @@ discovery; at the as-of for validation) is reported separately from retrospectiv
 backdated. Percentiles use linear interpolation at index `(n-1)p`; n=0 → null; n=1 → the value. Shadow rows form
 separate descriptive tables (not matched controls, not a market denominator). No random split, fitted cutoff,
 classifier, causal / significance claim, profitability headline, composite ranking or row weighting exists.
+
+### Producer / consumer bounds and provenance
+Writers enforce the SAME byte bounds their readers enforce (per line and per file), so no run can seal an output a
+reader would refuse; a bound tripped mid-file closes its descriptor and leaves no artifact. The manifest is written
+only after every data output has been re-read from disk and proved against its declared checksum, size and record
+count, and the declared member LIST is itself part of the contract (an omitted checksum entry is a corrupt manifest).
+An archive whose manifest claims it was created BEFORE a series it consumed is corrupt input; a genuinely absent
+creation clock stays an explicit `PROVENANCE_CLOCK_MISSING` limitation with unavailable labels. `codeIdentity`
+hashes the DISCOVERED source closure reachable from the entry points — including transitive dependencies such as the
+evidence contract the dossier validator executes — so a change confined to one of them changes the digest and the
+dirty verdict; a dirty closure is never attributed to a clean HEAD. That inventory is provenance only and grants no
+module any operational import or authority (the import fences decide that).
 
 ### Resource limits (`research/contracts.js` `LIMITS`, recorded in every manifest)
 250,000 source events · 256 MiB cumulative journal payload · 100,000 projected snapshots · 50,000 selected rows ·

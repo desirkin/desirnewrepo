@@ -10,7 +10,7 @@ import path from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { EXPECTED_SCHEMA_VERSION, CHILDHOOD_VERSION } from '../childhood/validate.js';
 import { LIMITS, fail, isPlainObject, isTs, isFiniteNum, parseUtcInstant, readPath, deepFreeze } from './contracts.js';
-import { readJsonFile, readJsonlStrict, readBoundedFile } from './artifacts.js';
+import { readJsonFile, readJsonlStrictFromBuffer, readBoundedFile } from './artifacts.js';
 import { sha256Hex } from './contracts.js';
 
 export const SUPPORTED_ARCHIVE_SCHEMA_VERSIONS = Object.freeze([EXPECTED_SCHEMA_VERSION]);
@@ -67,9 +67,13 @@ export function readChildhoodArchive(dir, { limits = LIMITS } = {}) {
     if (full.slice(0, 16) !== decl) fail('CORRUPT_INPUT', `${name}: bytes do not match the manifest checksum`);
     consumedFiles[name] = { sha256: full, bytes: buf.length, declaredSha256_16: decl };
     let symbols = 0; let candles = 0; let fromSec = null; let toSec = null; const seen = new Set(); const series = intervalMin === 1 ? new Map() : null;
-    for (const row of readJsonlStrict(file, { limits })) {
+    for (const row of readJsonlStrictFromBuffer(buf, name, { limits })) { // the SAME bytes that were hashed above
       const s = validateCandleSeriesRow(row, { intervalMin, limits, file: name });
       if (seen.has(s.symbol)) fail('CORRUPT_INPUT', `${name}: ${s.symbol} appears twice (one series per symbol per track)`); seen.add(s.symbol);
+      // CONTRADICTORY provenance is corrupt input, not missing data: an immutable archive cannot have been created
+      // before the source series it consumed was retrieved. (A genuinely ABSENT creation clock is a different fact —
+      // it stays an explicit PROVENANCE_CLOCK_MISSING limitation and makes labels unavailable, never rejected here.)
+      if (archiveCreatedTsMs !== null && s.retrievedTsMs > archiveCreatedTsMs) fail('CORRUPT_INPUT', `${name}: ${s.symbol} was retrieved at ${new Date(s.retrievedTsMs).toISOString()} but the manifest claims the archive was created earlier, at ${new Date(archiveCreatedTsMs).toISOString()}`);
       symbols += 1; candles += s.count;
       if (s.firstOpenSec !== null) { fromSec = fromSec === null ? s.firstOpenSec : Math.min(fromSec, s.firstOpenSec); toSec = toSec === null ? s.coverageEndSec : Math.max(toSec, s.coverageEndSec); }
       if (series) series.set(s.symbol, s); // only the raw 1m track is retained in memory (bounded per series); coarser tracks are counted, never retained
@@ -77,7 +81,7 @@ export function readChildhoodArchive(dir, { limits = LIMITS } = {}) {
     tracks[`${intervalMin}m`] = { declared: true, present: true, symbols, candles, fromSec, toSec, role: readPath(m, ['historicalSourceCoverage', `${intervalMin}m`, 'role']).value ?? null };
     if (series) oneMinute = series;
   }
-  const countLines = (name) => { const f = path.join(dir, name); if (!existsSync(f)) return null; let n = 0; const buf = readBoundedFile(f, { limits }); consumedFiles[name] = { sha256: sha256Hex(buf), bytes: buf.length, declaredSha256_16: null }; for (const _ of readJsonlStrict(f, { limits })) n += 1; return n; };
+  const countLines = (name) => { const f = path.join(dir, name); if (!existsSync(f)) return null; let n = 0; const buf = readBoundedFile(f, { limits }); consumedFiles[name] = { sha256: sha256Hex(buf), bytes: buf.length, declaredSha256_16: null }; for (const rec of readJsonlStrictFromBuffer(buf, name, { limits })) { void rec; n += 1; } return n; };
   const observations = countLines('observations.jsonl'); const outcomes = countLines('outcomes.jsonl');
   const limitations = [];
   if (m.universeCoverageStatus === 'SURVIVORSHIP_LIMITED_CURRENT_PAIR_SET') limitations.push('SURVIVORSHIP_LIMITED_CURRENT_PAIR_SET');

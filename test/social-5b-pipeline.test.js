@@ -18,7 +18,7 @@ import { selectResearchRows, featureRowIdentity, validateFeatureRow, SHADOW_ABSE
 import { labelRow, excursions, anchorOf, validateOutcomeRow } from '../research/outcomes.js';
 import { readChildhoodArchive, validateCandleSeriesRow } from '../research/archive.js';
 import { evaluateDataset, groupingKeysOf, featureSupportOf } from '../research/evaluation.js';
-import { runSnapshot, runBuild, runEvaluate, readSnapshotDir, readDatasetDir, readEvaluationDir, codeIdentity, ROOT } from '../research/pipeline.js';
+import { runSnapshot, runBuild, runEvaluate, readSnapshotDir, readDatasetDir, readEvaluationDir, codeIdentity, pipelineSourceClosure, PIPELINE_ROOTS, ROOT } from '../research/pipeline.js';
 import { prepareOutputTarget, reserveOutputDir } from '../research/artifacts.js';
 import { journalFixture, writeChildhoodArchive, linearBars, T0, SEC, SENTINEL_TEXT } from './helpers/social-5b.js';
 
@@ -223,7 +223,7 @@ async function syntheticRows() {
   return { mk, base };
 }
 test('T11. grouping and embargo: shared concrete refs group transitively, generic dependency labels never do, a group straddling the split is EMBARGOED whole, truncated / undocumented support is DESCRIPTIVE_ONLY, and archive acquisition after the split makes labels unavailable for true historical learning despite retrospective value', async () => {
-  const { mk } = await syntheticRows(); const B = T0 + 12 * 3_600_000; const asOf = T0 + 3 * 86_400_000;
+  const { mk } = await syntheticRows(); const B = T0 + 12 * 3_600_000; const asOf = T0 + 12 * 86_400_000; // the as-of must cover the latest row: a dataset is only meaningful under a clock every row obeys
   const rows = [
     mk(1, { decisionMs: T0 + 1000, nodes: [{ id: 'social:r2sv-A', kind: 'SOCIAL_SOURCE' }] }),
     mk(2, { decisionMs: T0 + 3_600_000, nodes: [{ id: 'social:r2sv-A', kind: 'SOCIAL_SOURCE' }, { id: 'family:r2ss-F', kind: 'TEXT_FAMILY' }], coin: 'FRESH42' }),
@@ -243,7 +243,8 @@ test('T11. grouping and embargo: shared concrete refs group transitively, generi
   assert.deepEqual(g('ZQQ7').coins, ['AAA1', 'FRESH42', 'ZQQ7']); assert.equal(g('BBB2').rows, 1); assert.equal(g('CCC3').rows, 1);
   assert.equal(g('ZQQ7').split, 'DISCOVERY'); assert.equal(g('DDD4').split, 'EMBARGOED'); assert.equal(g('EEE5').split, 'VALIDATION'); assert.equal(g('FFF6').split, 'DESCRIPTIVE_ONLY'); assert.equal(g('GGG7').split, 'DESCRIPTIVE_ONLY');
   assert.equal(featureSupportOf(rows[6]).featureSupportStartTs, rows[6].featureAsOfTs - 7 * 86_400_000, 'the wide-eye seven-day baseline bounds the support start when a notice value is present'); assert.ok(featureSupportOf(rows[5]).featureSupportStartTs > rows[5].featureAsOfTs - 7 * 86_400_000, 'without a notice the support is the participation window / onset');
-  assert.equal(featureSupportOf(rows[8]).supportKnown, false); assert.ok(featureSupportOf(rows[8]).unknownSupportFeatures.includes('marketDeep.ownerSnapshot.flow.cvdBaseUnits'));
+  assert.equal(featureSupportOf(rows[8]).supportKnown, false);
+  assert.ok(rows.every((r) => r.decisionKnownAtTs <= asOf), 'the fixture obeys its own as-of wall'); assert.ok(featureSupportOf(rows[8]).unknownSupportFeatures.includes('marketDeep.ownerSnapshot.flow.cvdBaseUnits'));
   assert.deepEqual(groupingKeysOf(rows[3]).filter((k) => !k.startsWith('EPISODE:') && !k.startsWith('SOCIAL_SOURCE:')), [], 'a DOSSIER_FIELD node yields no grouping key');
   for (const k of GROUPING_DEPENDENCY_KINDS) assert.ok(!['DOSSIER_FIELD', 'COVERAGE_BOUNDARY', 'SOCIAL_FEATURE_WINDOW'].includes(k));
   // the same rows with a REAL archive created after the split: discovery labels known retrospectively, never trainable at B
@@ -286,7 +287,11 @@ test('T13. reproducibility: repeated same-input runs into different directories 
   const d3 = await runBuild({ snapshotDir: s1.dir, childhoodDir: path.join(W, 'arch2'), asOfTs: ASOF, out: path.join(W, 'd3') });
   same(d1.dir, d3.dir, 'features.jsonl'); assert.notEqual(readFileSync(path.join(d1.dir, 'outcomes.jsonl'), 'utf8'), readFileSync(path.join(d3.dir, 'outcomes.jsonl'), 'utf8')); assert.notEqual(d1.manifest.outputs['outcomes.jsonl'].sha256, d3.manifest.outputs['outcomes.jsonl'].sha256); assert.notEqual(d1.manifest.inputs.childhood.consumedFiles['candles-1m.jsonl'].sha256, d3.manifest.inputs.childhood.consumedFiles['candles-1m.jsonl'].sha256);
   const asOf2 = await runBuild({ snapshotDir: s1.dir, childhoodDir: path.join(W, 'arch'), asOfTs: ASOF + 1, out: path.join(W, 'd4') }); assert.notEqual(asOf2.manifestSha256, d1.manifestSha256); same(d1.dir, asOf2.dir, 'features.jsonl');
-  const id = codeIdentity(); assert.match(id.sourceTreeSha256, /^[0-9a-f]{64}$/); assert.equal(id.sourceFiles, 19); assert.equal(d1.manifest.codeIdentity.sourceTreeSha256, id.sourceTreeSha256); assert.ok(['PRODUCED_BY_UNCOMMITTED_SOURCE', 'PRODUCED_BY_COMMITTED_SOURCE', 'NO_GIT_CHECKOUT'].includes(id.law));
+  const id = codeIdentity(); assert.match(id.sourceTreeSha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(id.sourceClosure, pipelineSourceClosure(), 'code identity hashes the DISCOVERED source closure, not a hand-kept list');
+  assert.equal(id.sourceFiles, id.sourceClosure.length); assert.ok(id.sourceFiles > PIPELINE_ROOTS.length, 'the closure reaches past its own entry points');
+  for (const r of PIPELINE_ROOTS) assert.ok(id.sourceClosure.includes(r), r);
+  assert.equal(d1.manifest.codeIdentity.sourceTreeSha256, id.sourceTreeSha256); assert.ok(['PRODUCED_BY_UNCOMMITTED_SOURCE', 'PRODUCED_BY_COMMITTED_SOURCE', 'NO_GIT_CHECKOUT'].includes(id.law));
 });
 
 test('T14. closed-schema tampering, checksum mismatch, unknown key, non-finite value, malformed JSONL, missing manifest member, bounded overflow, existing / aliased / overlapping / in-tree output, concurrent collision and an interrupted publish: every case fails closed with no false success seal', async () => {
