@@ -36,6 +36,7 @@ export const MAX_SOCIAL_DISPLAY_CHARS = 200;
 export const MAX_NATIVE_ID_CHARS = 500; // at:// URIs, cast hashes, t3_ fullnames
 export const MAX_SOCIAL_URL_CHARS = 2_000;
 export const MAX_SHINGLES = 64; // bounded similarity feature set per post
+export const MAX_NEAR_DUP_CANDIDATES = 256; // SOCIAL-7 §50: bounded near-duplicate family comparisons per post (creation order; cap disclosed)
 export const SHINGLE_K = 3; // token shingle width
 export const NEAR_DUP_THRESHOLD = 0.82; // Jaccard >= this => candidate echo (deterministic; not identity)
 export const MAX_WINDOW_OBSERVATIONS = 4_096; // bound on a coordination-feature window
@@ -583,45 +584,63 @@ export function propagationVsIndependence(observations, { nearDupThreshold = NEA
   const rawPropagationCount = obs.length;
   // sort by knowledge time so "earlier" text families anchor later copies
   const ordered = [...obs].sort((a, b) => (a.knownAtTs ?? 0) - (b.knownAtTs ?? 0));
-  const families = []; // { anchorSourceId, kind, authorIds:Set, memberSourceIds:[], normalizedText }
+  const families = []; // { anchorSourceId, kind, authorIds:Set, memberSourceIds:[], normalizedText, shingles }
   const byNativeId = new Map();
   for (const o of ordered) if (o?.nativePostId) byNativeId.set(o.nativePostId, o);
+  // SOCIAL-7 §50: the SAME deterministic near-duplicate law (first matching family in creation order, Jaccard >= threshold
+  // over the bounded shingle sets) without an unbounded pairwise scan — shingles are computed ONCE per text, an exact
+  // normalized-text map answers identical copies in O(1), and an inverted shingle index yields the ONLY families that can
+  // reach the threshold (Jaccard >= t implies >= t*|A| shared shingles); comparisons per post are capped and the cap is reported
+  const familyOfSource = new Map(); // socialSourceId -> family (explicit native echoes attach to the parent's family)
+  const familyByExactText = new Map(); // normalized text -> first family with that exact text
+  const shingleIndex = new Map(); // shingle -> [family index, ...] in creation order
+  let nearDupCandidatesCapped = 0;
   for (const o of ordered) {
     // explicit native echo → attach to the parent's family if we have it
     if (ECHO_RELATIONS.includes(o.relation) && o.parentNativePostId && byNativeId.has(o.parentNativePostId)) {
       const parent = byNativeId.get(o.parentNativePostId);
-      const fam = families.find((f) => f.memberSourceIds.includes(parent.socialSourceId));
-      if (fam) { fam.memberSourceIds.push(o.socialSourceId); fam.echoCount += 1; continue; }
+      const fam = familyOfSource.get(parent.socialSourceId);
+      if (fam) { fam.memberSourceIds.push(o.socialSourceId); fam.echoCount += 1; familyOfSource.set(o.socialSourceId, fam); continue; }
     }
     // deterministic near-duplicate of an existing family anchor → POSSIBLE_COPY
-    let matched = null;
-    if (o.normalizedText && o.normalizedText.length > 0) {
-      for (const f of families) {
-        if (!f.normalizedText) continue;
-        const nd = nearDuplicate(o.normalizedText, f.normalizedText, nearDupThreshold);
-        if (nd.candidate) { matched = f; break; }
+    let matched = null; let shingles = null; const na = normalizeSocialText(o.normalizedText ?? '');
+    if (na.length > 0) {
+      matched = familyByExactText.get(na) ?? null;
+      if (!matched) {
+        shingles = textShingles(na);
+        const shared = new Map(); // family index -> shared shingle count
+        for (const sh of shingles) for (const fi of shingleIndex.get(sh) ?? []) shared.set(fi, (shared.get(fi) ?? 0) + 1);
+        const need = nearDupThreshold * shingles.size;
+        const candidates = [...shared].filter(([, n]) => n >= need).map(([fi]) => fi).sort((a, b) => a - b);
+        if (candidates.length > MAX_NEAR_DUP_CANDIDATES) { nearDupCandidatesCapped += 1; candidates.length = MAX_NEAR_DUP_CANDIDATES; }
+        for (const fi of candidates) { const f = families[fi]; if (f.shingles && shingleSimilarity(shingles, f.shingles) >= nearDupThreshold) { matched = f; break; } }
       }
     }
     if (matched) {
       matched.memberSourceIds.push(o.socialSourceId);
       matched.copyCount += 1;
       matched.authorIds.add(o.socialAuthorId);
+      familyOfSource.set(o.socialSourceId, matched);
       continue;
     }
     // otherwise a new potential origin family
-    families.push({
+    const fam = {
       anchorSourceId: o.socialSourceId,
       normalizedText: o.normalizedText ?? '',
       authorIds: new Set([o.socialAuthorId]),
       memberSourceIds: [o.socialSourceId],
       echoCount: 0,
       copyCount: 0,
-    });
+      shingles: na.length > 0 ? (shingles ?? textShingles(na)) : null,
+    };
+    families.push(fam); familyOfSource.set(o.socialSourceId, fam);
+    if (na.length > 0) { if (!familyByExactText.has(na)) familyByExactText.set(na, fam); const fi = families.length - 1; for (const sh of fam.shingles) { let list = shingleIndex.get(sh); if (!list) { list = []; shingleIndex.set(sh, list); } list.push(fi); } }
   }
   const independentProvenanceCount = families.length;
   return {
     rawPropagationCount,
     independentProvenanceCount,
+    nearDupCandidatesCapped, // SOCIAL-7 §50: posts whose near-duplicate candidate families exceeded the comparison cap (deterministic, disclosed)
     families: families.map((f) => ({
       anchorSourceId: f.anchorSourceId,
       memberSourceIds: [...f.memberSourceIds], // SOCIAL-5 §36.3: membership exposed so a dependency manifest never re-derives families

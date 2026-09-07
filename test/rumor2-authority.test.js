@@ -216,7 +216,7 @@ test('R2A-82+83. SOCRATES-0 and GHOST-1 remain absent', () => {
 });
 
 test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT allowlist: pure, social-tier, no network/timer/model/authority; they import only inside the rumor layer + the evidence contract; no runtime output carries execution vocabulary; only the collector wires the runtime; the strainer never touches tape/ledger/cost/controls/order paths; the §36.7 bridge injects ONLY the tape store read accessors and the §36.6 seam ONLY the wide eye population snapshot', () => {
-  const MODULES = ['rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-strainer.js', 'rumor2/social-research-packet.js', 'rumor2/social-research-runtime.js', 'rumor2/social-research-shadow.js', 'rumor2/social-research-outcome.js', 'rumor2/social-research-profile.js', 'rumor2/social-research-composite.js'];
+  const MODULES = ['rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-strainer.js', 'rumor2/social-research-packet.js', 'rumor2/social-research-runtime.js', 'rumor2/social-research-shadow.js', 'rumor2/social-research-outcome.js', 'rumor2/social-research-profile.js', 'rumor2/social-research-composite.js', 'rumor2/social-research-ancestry.js', 'rumor2/social-readiness.js'];
   for (const f of MODULES) {
     assert.ok(tracked.includes(f), `${f} is tracked (Git-index-aware)`);
     assert.ok(SOCIAL_FILE_RE.test(f), `${f} audited in the social tier, never as frozen core`);
@@ -260,6 +260,15 @@ test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT all
   assert.ok(!/from\s+'\.\.\/rumor2/.test(read('tape/run.js')) && !/from\s+'\.\.\/rumor2/.test(read('survey/wideeye.js')), 'tape / survey never import the rumor tier');
   const runtime = code('rumor2/social-research-runtime.js');
   for (const forbidden of ['tape/', 'survey/', 'readCurrentBook', 'writeCurrent', 'subscribe']) assert.ok(!runtime.includes(forbidden), `runtime: ${forbidden} (consumes only injected accessors)`);
+  // SOCIAL-7: the readiness matrix is a pure projection wired ONLY by the collector status (no file outside rumor2/test names it);
+  // the ancestry / ablation seam re-derives in memory and never imports or touches a provider runtime, gate, budget or scope;
+  // the research runtime refuses retention-prohibited records at its own seam (defense in depth under the existing law)
+  const readinessMentions = tracked.filter((f) => !f.startsWith('test/') && /social-readiness|readinessMatrix/.test(read(f)));
+  assert.deepEqual(readinessMentions.sort(), ['rumor2/collector.js', 'rumor2/social-readiness.js'], 'readiness is wired only in the collector status');
+  assert.ok(/socialReadiness: readinessMatrix\(\{ runtimes: \{ BLUESKY_OFFICIAL: /.test(read('rumor2/collector.js')), 'the collector projects readiness from its own live runtime statuses');
+  for (const forbidden of ['x-runtime', 'social-runtime', 'x-stream', 'providers/', 'process.env', 'loadConfig', 'config.universe']) assert.ok(!read('rumor2/social-research-ancestry.js').includes(forbidden) && !read('rumor2/social-readiness.js').includes(forbidden), `${forbidden}: readiness / ancestry never reach a provider runtime, credential or config`);
+  assert.ok(/retentionCapability\(e\.provider\)\.state === 'RETENTION_PROHIBITED'/.test(runtime), 'the runtime seam refuses retention-prohibited records');
+  assert.ok(/simulateProviderRemoval/.test(code('rumor2/social-research-ancestry.js')) && !/simulateProviderRemoval|providerAncestry/.test(code('rumor2/collector.js')), 'the ablation seam is a pure test/research function, never a live collector path');
 });
 
 // ===== TIER 3B — SOCIAL RUMOR: EXISTENCE ALLOWED, ZERO DIRECT AUTHORITY =====

@@ -1950,6 +1950,78 @@ probability, trade score, author blacklist, provider spend decision or trade aut
 9. **No authority.** A profile changes no X rule, tape subscription, ledger, cost, permission, focus posture,
    order or execution; no model is called; `authority: NONE` / `purpose: RESEARCH_ONLY`.
 
+
+### 5T. SOCIAL-7 — combined cross-platform hardening, provider readiness truth matrix, CODE-LAYER FREEZE SEAL
+
+SOCIAL-7 (master-convoy Convoy III) attacked the Social/RUMOR intelligence layer as one connected system —
+cross-provider and coverage torture (`test/social-7-cross.test.js`), seeded burst / resource torture
+(`test/social-7-burst.test.js`), crash / journal / fence / replay torture in memory and against real PostgreSQL
+(`test/social-7-replay.test.js`, `test/social-7-durable.test.js`) — made provider readiness machine-readable
+(`rumor2/social-readiness.js`, `social-readiness-matrix-1`, exposed as `socialReadiness` in the collector status),
+and made source ancestry mechanically answerable (`rumor2/social-research-ancestry.js`,
+`social-research-ancestry-1`, a PURE provider-removal re-derivation seam). Defects it found were repaired with
+regressions: the near-duplicate family scan was an unbounded pairwise scan (an inverted shingle index + exact-text
+map + disclosed comparison cap now implement the SAME law, proved equivalent corpus by corpus); the per-section
+dossier bounds did not compose under the whole-dossier canonical bound (the dependency manifest is now the
+elastic section, tightened deterministically with the applied bound disclosed); the research runtime could read
+an evicted subject when more candidates woke in one tick than the subject cap; mixed provider coverage now says
+by name which provider answered and which did not (partial coverage is never universal silence); the runtime seam
+itself refuses retention-prohibited records. No provider was activated, no money was spent, no paid X smoke was
+performed, no config value moved, no trading/risk/execution/permission file changed.
+
+**A. CODE-LAYER FROZEN / TESTED** — no known unresolved code-contract blocker after the §54 gates:
+- the deterministic research strainer (three entrances, no all-green requirement, no Social universal veto);
+- the coverage-aware Social feature foundation (quiet vs blindness vs incomparability, provider-scoped);
+- episode / second-impulse research semantics (immutable onset, CONTINUED / NEW_AFTER_DORMANT, restart truth);
+- bounded dependency ancestry (manifest, descendants, provider refs, entrance / coverage-epoch dependence,
+  pure provider-removal re-derivation leaving no cached conclusion behind);
+- source-behavior research under the retention law (provider-scoped identity, objective counts, authorized
+  association contract, point-in-time outcome adapter, composite view; no score);
+- the readiness truth matrix (closed states, closed blocker codes, authority NONE, never one `implemented` flag);
+- durable / replay / fence integrity of the research family and the derived views (prefix replay = as-of view,
+  full replay = live view, journal order over lexical id, fail-closed corruption, journal-ahead adoption law);
+- authority NONE everywhere (`test/rumor2-authority.test.js`).
+
+**B. EXTERNAL / OPERATIONAL LIMITS STILL OPEN** (listed as blockers in the readiness matrix, never assumed away):
+- Reddit (approval + classification + retention decision) and StockTwits raw Social (entitlement + terms +
+  retention decision) remain RETENTION_BLOCKED; the legacy aggregate RUMINT ear remains ACCESS_UNRESOLVED
+  (entitlement unresolved; deployment unobserved from the collector);
+- X: the authorized paid live smoke and active watch have NOT been performed — READY_REQUIRES_EXPLICIT_PAID_SMOKE
+  at best, DISABLED / NOT_CONFIGURED without the explicit gate, bearer, budget and watch scope;
+- Bluesky: OPERATIONAL_LIVE_PROVEN only while the runtime is ACTIVE in the observing process; the production
+  gate remains unobserved from this checkout;
+- Meta / Instagram, TikTok (operator decision pending) and Farcaster remain FIXTURE_ONLY (transport not
+  implemented; external documents unverified — EXTERNAL_VERIFICATION_DEFERRED);
+- no access / terms / entitlement status was re-verified empirically by this convoy; the registry census dates
+  stand as recorded.
+
+**C. CALIBRATION / PROFITABILITY LIMITS STILL OPEN**
+- the Social stage classifier stays `UNKNOWN` / uncalibrated (`calibrationStatus: INSUFFICIENT_HISTORY`); no
+  genuine calibration history has earned anything else;
+- no author trust / reliability probability, no daily-return or winner probability, no proof that Social
+  improves trading returns; the ancestry seam is infrastructure for a FUTURE honest ablation, not a result;
+- no Socrates runtime; the full market / chart engine and the Decider are not built by this master convoy.
+
+**C2. INTER-LAYER CONTRACT LIMITS STILL OPEN**
+- `serpent-evidence-1` has a closed trigger vocabulary. A dossier entrance that cannot be represented truthfully
+  under v1 (Social-only participation, MISSED-only market context, official-only claim packets, undeclared
+  combinations) stays `PACKET_UNREPRESENTABLE_V1_TRIGGER`. This does NOT block the Social dossier or this freeze;
+  it IS an explicit prerequisite / design question for future Socrates coverage — such cases are not
+  Socrates-ready merely because a dossier exists; no `serpent-evidence-2` was created.
+- derived source-behavior context has no semantically valid packet slot (recorded in the composite view).
+
+**D. FREEZE MEANING.** No known unresolved code-contract blocker exists inside the scoped Social layer after the
+required gates. This is not proof that no future defect exists; a later real defect reopens the affected layer
+under the project's defect law. "Frozen" never means "every provider is live": every provider is either
+represented with a truthful readiness / blocker state or explicitly excluded with a current reason.
+
+**Scope note (trading universe).** The five legacy `config.universe` assets, the ledger, cost, controls, risk and
+execution paths were preserved by SOCIAL-5/6/7 ONLY as the current frozen safety boundary. They are not Cobra's
+permanent or preferred trading universe and carry no research preference: research scope is the broad
+point-in-time venue catalog (SOCIAL-4F), and every SOCIAL-5/6/7 law is exercised on synthetic universes that
+contain none of the five legacy assets. Trade eligibility is a separately authorized future ticket
+(dynamic identity / availability / liquidity / risk / cost requirements), not something this layer encodes.
+
 ---
 
 ## 6. Authority audit
@@ -2038,7 +2110,11 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   firewall, objective counts, the authorized-association contract (no association exists yet), the Childhood
   outcome / lead-lag adapter, the composite view — no score, no authority. Not done: any claim-association
   mechanism, Social-era outcome overlap in the archive.
-- **SOCIAL-7:** full combined social hardening + freeze.
+- **SOCIAL-7 — COMBINED HARDENING + CODE-LAYER FREEZE SEAL DONE (§5T):** cross-provider / coverage, burst /
+  resource and crash / fence / replay torture green; readiness truth matrix (`socialReadiness`) and source-ablation
+  ancestry seam in place; four defects repaired with regressions (near-duplicate scan, dossier size bound, chosen-subject
+  eviction, partial-coverage disclosure). The code layer is frozen under §5T-D; the external, calibration and
+  inter-layer limits in §5T-B/C/C2 remain OPEN and visible — no provider became live, no paid smoke ran.
 
 Do not call the social layer complete until every intended provider is either
 operational-and-tested or explicitly excluded with a current reason, and the

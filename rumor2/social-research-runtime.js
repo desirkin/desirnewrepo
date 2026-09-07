@@ -26,7 +26,7 @@ import { buildResearchPacket } from './social-research-packet.js';
 import { researchDossierEvent, validateResearchDossierEvent, replayResearchDossierEvent, RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_AUTHORITY, RESEARCH_PURPOSE } from './social-research-dossier.js';
 import { buildShadowSample, validateResearchShadowEvent, replayResearchShadowEvent, emptyShadowState, RESEARCH_SHADOW_EVENT_TYPE, RESEARCH_SHADOW_SAMPLE_CAP, RESEARCH_SHADOW_RECIPE_VERSION } from './social-research-shadow.js';
 import { validateDeepMarketWindow } from './social-research-market.js';
-import { createSourceProfileIndex } from './social-research-profile.js';
+import { createSourceProfileIndex, retentionCapability } from './social-research-profile.js';
 import { compositeResearchView } from './social-research-composite.js';
 import { OUTCOME_MAX_ALIGNMENT_MS } from './social-research-outcome.js';
 
@@ -69,7 +69,7 @@ export function createResearchStrainer({
   let pendingOp = null; // { coin, events, adopt, attempts, knownAtTs }
   let journalAhead = null;
   let lastSampledSweepId = null;
-  const stats = { hydrations: 0, ingested: 0, attributed: 0, unattributed: 0, ticks: 0, dossiersBuilt: 0, appended: 0, appendFailures: 0, suppressedUnchanged: 0, suppressedNotMaterial: 0, suppressedInterval: 0, packetsValid: 0, packetsUnrepresentable: 0, packetsWithheld: 0, evictions: 0, dormant: 0, episodesOpened: 0, opRetries: 0, unadopted: 0, shadowSamples: 0, shadowSkipped: 0 };
+  const stats = { hydrations: 0, ingested: 0, attributed: 0, unattributed: 0, ticks: 0, dossiersBuilt: 0, appended: 0, appendFailures: 0, suppressedUnchanged: 0, suppressedNotMaterial: 0, suppressedInterval: 0, packetsValid: 0, packetsUnrepresentable: 0, packetsWithheld: 0, evictions: 0, dormant: 0, episodesOpened: 0, opRetries: 0, unadopted: 0, shadowSamples: 0, shadowSkipped: 0, refusedRetention: 0 };
   const deferrals = Object.fromEntries(RESEARCH_DEFERRAL_REASONS.map((r) => [r, 0]));
   let lastError = null;
 
@@ -92,6 +92,9 @@ export function createResearchStrainer({
     resolver.observe(e); timeline.observe(e);
     if (SOCIAL_OBSERVATION_TYPES.includes(e.type)) {
       if (seenObservations.has(e.sourceEventId)) return;
+      // SOCIAL-7 §51-L defense in depth: a retention-prohibited provider's record can never feed a derived research
+      // fact here even if it reached this seam (the durable validator and replay already refuse it upstream)
+      if (retentionCapability(e.provider).state === 'RETENTION_PROHIBITED') { stats.refusedRetention += 1; return; }
       seenObservations.add(e.sourceEventId); if (seenObservations.size > 65_536) seenObservations.delete(seenObservations.values().next().value);
       profilesIdx.observe(e); // SOCIAL-6: every durable observation counts toward its provider-native source (retention-lawful providers only)
       let a = attributeSocialObservation(e, { resolver, fallbackScope: typeof fallbackScope === 'function' ? fallbackScope() : null });
@@ -225,7 +228,9 @@ export function createResearchStrainer({
       if (previous && previous.inputDigest === d.inputDigest) { stats.suppressedUnchanged += 1; deferrals.NOT_MATERIAL += 1; continue; } // effective content unchanged => no write
       if (previous && previous.materialDigest !== null && previous.materialDigest === d.materialDigest) { stats.suppressedNotMaterial += 1; deferrals.NOT_MATERIAL += 1; continue; } // §36.1: no CLOSED component changed => no write
       if (previous && t - previous.derivedKnownAtTs < emissionMinIntervalMs) { stats.suppressedInterval += 1; deferrals.EMISSION_INTERVAL += 1; continue; } // I/O bound only
-      if (!chosen || (s.latestInputKnownAtTs < subjects.get(chosen.coin).latestInputKnownAtTs)) chosen = { coin, dossier: d, inWindow: r.inWindowObservations, opensEpisode: d.episode.basis !== 'CONTINUED' };
+      // SOCIAL-7 §50: the chosen candidate keeps its own input clock and retained observations — a later candidate in the
+      // same tick may evict the chosen subject under the cap, and the choice must never read an evicted subject
+      if (!chosen || (s.latestInputKnownAtTs < chosen.latestInputKnownAtTs)) chosen = { coin, dossier: d, inWindow: r.inWindowObservations, opensEpisode: d.episode.basis !== 'CONTINUED', latestInputKnownAtTs: s.latestInputKnownAtTs, observations: s.observations };
     }
     // §36.6 shadow sample: at most one, for a newly completed sweep not yet durable
     let shadowEv = null;
@@ -243,7 +248,7 @@ export function createResearchStrainer({
     if (chosen) {
       const officialObservations = claims.filter((c) => c.canonicalCoin === chosen.coin).flatMap((c) => (c.observations ?? []).filter((o) => o.knownAtTs <= t));
       const coverage = providerStates.map((p) => ({ provider: p.provider, state: p.state, checkedTs: p.state === 'NOT_QUERIED' ? null : (p.checkedTs ?? t), detail: p.detail ?? null }));
-      const pk = buildResearchPacket({ dossier: chosen.dossier, officialObservations, socialObservations: subjects.get(chosen.coin).observations, coverage });
+      const pk = buildResearchPacket({ dossier: chosen.dossier, officialObservations, socialObservations: chosen.observations, coverage });
       if (pk.packetStatus === 'VALID') stats.packetsValid += 1; else if (pk.packetStatus === 'PACKET_UNREPRESENTABLE_V1_TRIGGER') stats.packetsUnrepresentable += 1; else { stats.packetsWithheld += 1; lastError = `research packet withheld: ${(pk.reasons ?? [])[0] ?? pk.reasonCodes[0]}`; }
       const ev = researchDossierEvent({ dossier: chosen.dossier, packetResult: pk, latestInputKnownAtTs: chosen.dossier.opportunityClock.latestInputKnownAtTs, firstTriggerKnownAtTs: chosen.dossier.opportunityClock.firstTriggerKnownAtTs });
       const verr = validateResearchDossierEvent(ev); if (verr) { lastError = verr; return { ok: false, reason: 'RESEARCH_EVENT_INVALID', detail: verr }; }

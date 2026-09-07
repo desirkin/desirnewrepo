@@ -1,0 +1,120 @@
+// SOCIAL-7 §48 — the PROVIDER READINESS TRUTH MATRIX (pure). ONE machine-readable, bounded projection of
+// operational readiness per provider / source family, derived from the EXISTING registry, the retention
+// capability law, the live runtime statuses the collector already exposes, and (optionally) the existing
+// access evaluators' results — never a second manually maintained registry, never a new legal conclusion,
+// never new web/terms research. Readiness is operational truth: it is NOT evidence corroboration and NOT a
+// trade permission. Nothing here flattens to one `implemented: true`; the tree wins over prose.
+import { SOCIAL_PROVIDERS, socialProviderById } from './social-registry.js';
+import { retentionCapability, SOURCE_PROFILE_LEGACY_AGGREGATE_PROVIDER } from './social-research-profile.js';
+
+export const READINESS_MATRIX_VERSION = 'social-readiness-matrix-1';
+export const READINESS_STATES = Object.freeze(['OPERATIONAL_LIVE_PROVEN', 'IMPLEMENTED_NOT_LIVE_SMOKED', 'READY_REQUIRES_EXPLICIT_PAID_SMOKE', 'AVAILABLE_REQUIRES_APPROVAL', 'FIXTURE_ONLY', 'ACCESS_UNRESOLVED', 'RETENTION_BLOCKED', 'NOT_CONFIGURED', 'DISABLED', 'UNAVAILABLE']);
+export const READINESS_BLOCKERS = Object.freeze(['RETENTION_NOT_APPROVED', 'APPROVAL_NOT_OBTAINED', 'ENTITLEMENT_UNRESOLVED', 'TERMS_UNRESOLVED', 'CREDENTIAL_MISSING', 'BUDGET_NOT_CONFIGURED', 'PAID_SMOKE_NOT_PERFORMED', 'WATCH_SCOPE_NOT_CONFIGURED', 'TRANSPORT_NOT_IMPLEMENTED', 'NO_SANCTIONED_ROUTE', 'PLATFORM_DECISION_PENDING', 'RUNTIME_DISABLED', 'RUNTIME_WITHHELD', 'PRODUCTION_GATE_UNOBSERVED', 'EXTERNAL_VERIFICATION_DEFERRED', 'EVALUATION_CLOCK_UNAVAILABLE', 'DEPLOYMENT_UNOBSERVED', 'OTHER_EVALUATOR_BLOCKER']);
+export const READINESS_LIVE_SMOKE_STATES = Object.freeze(['PERFORMED_PRIOR_SESSION', 'NOT_PERFORMED', 'NOT_APPLICABLE']);
+export const READINESS_REPLAY_CAPABILITIES = Object.freeze(['JOURNAL_REPLAY', 'FIXTURE_REPLAY_ONLY', 'AGGREGATE_CHECKPOINT_ONLY', 'NONE']);
+export const READINESS_ROW_KEYS = Object.freeze(['provider', 'family', 'foundationPresent', 'transportImplemented', 'accessState', 'entitlementOrApprovalState', 'retentionState', 'historicalReplayCapability', 'liveSmokeState', 'productionGateState', 'currentlyEnabledState', 'durableRawContentAllowed', 'durableAuthorIdentityAllowed', 'operationalEvidenceAvailable', 'statusKnownAtTs', 'latestVerifiedKnownAtTs', 'readiness', 'blockers', 'blockerDetail', 'basis', 'authority']);
+// repository-known smoke facts (doctrine/SOCIAL.md §5B: one real Bluesky live smoke informed the clock law; §5D/§5E/§7:
+// the authorized paid X smoke has NOT been performed) — status, never a new claim
+export const PROVIDER_SMOKE_FACTS = Object.freeze({ BLUESKY_OFFICIAL: Object.freeze({ liveSmokeState: 'PERFORMED_PRIOR_SESSION', ref: 'doctrine/SOCIAL.md §5B' }), X_OFFICIAL: Object.freeze({ liveSmokeState: 'NOT_PERFORMED', ref: 'doctrine/SOCIAL.md §5D-§5E, §7' }) });
+const isTs = (v) => Number.isSafeInteger(v) && v > 0;
+const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
+const uniq = (xs) => [...new Set(xs)];
+
+// map an access evaluator's blocker string (its own vocabulary) onto the closed readiness blocker codes
+export function closedBlocker(raw) {
+  const s = String(raw);
+  if (/^CLOCK_/.test(s)) return 'EVALUATION_CLOCK_UNAVAILABLE';
+  if (/RETENTION/.test(s)) return 'RETENTION_NOT_APPROVED';
+  if (/^APPROVAL_|PREREQUISITE_NOT_ATTESTED|ACQUISITION_PATH_NOT_APPROVED|RETRIEVAL_NOT_PERMITTED|AGREEMENT/.test(s)) return 'APPROVAL_NOT_OBTAINED';
+  if (/^ENTITLEMENT_|PLAN_|CREDITS_|ACCESS_RECORD|ACCOUNT_RECORD|VALID_UNTIL/.test(s)) return 'ENTITLEMENT_UNRESOLVED';
+  if (/TERMS/.test(s)) return 'TERMS_UNRESOLVED';
+  if (/KEY_MISSING|CREDENTIAL/.test(s)) return 'CREDENTIAL_MISSING';
+  if (/NO_SANCTIONED_ROUTE|ROUTE_UNKNOWN/.test(s)) return 'NO_SANCTIONED_ROUTE';
+  return 'OTHER_EVALUATOR_BLOCKER';
+}
+
+// ONE provider row. `runtime` is the collector's live status object for that provider (null when the
+// collector exposes none in this process); `evaluation` an existing access evaluator result (optional).
+export function providerReadinessRow(providerId, { runtime = null, evaluation = null, knownAtTs = null } = {}) {
+  const p = socialProviderById(providerId);
+  if (!p) return null;
+  const retention = retentionCapability(providerId);
+  const blockers = []; const detail = [];
+  const push = (code, why) => { if (READINESS_BLOCKERS.includes(code)) { blockers.push(code); if (why) detail.push(`${code}: ${String(why).slice(0, 140)}`); } };
+  const transportImplemented = p.durable === true; // only a durable ear has a transport wired into the shared contract (registry law)
+  const foundationPresent = p.implemented === true || !!p.foundation;
+  const rt = runtime && typeof runtime === 'object' ? runtime : null;
+  const enabled = rt ? rt.enabled !== false && rt.state !== undefined : null;
+  let entitlement = 'NOT_REQUIRED'; let gate = rt ? (rt.gate ?? (rt.state === 'ACTIVE' ? 'OPEN' : rt.state ?? 'UNOBSERVED')) : 'UNOBSERVED_IN_THIS_PROCESS';
+  let currentlyEnabledState = rt ? (rt.enabled === false ? 'DISABLED' : rt.state ?? 'UNKNOWN') : 'UNOBSERVED_IN_THIS_PROCESS';
+  let readiness; let operational = false; let replay = 'FIXTURE_REPLAY_ONLY'; let smoke = PROVIDER_SMOKE_FACTS[providerId]?.liveSmokeState ?? 'NOT_APPLICABLE';
+  if (evaluation && Array.isArray(evaluation.blockers)) for (const b of evaluation.blockers.slice(0, 16)) push(closedBlocker(b), b);
+  if (p.retentionProhibited === true) {
+    const approvalPath = /APPROVAL/.test(p.accessState); // the registry census names the path (approval + classification vs entitlement + terms review)
+    entitlement = approvalPath ? 'REQUIRES_APPROVAL_AND_CLASSIFICATION' : 'REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW';
+    push('RETENTION_NOT_APPROVED', 'durable content / author-identifying retention not approved'); push(approvalPath ? 'APPROVAL_NOT_OBTAINED' : 'ENTITLEMENT_UNRESOLVED', p.accessState); push('TRANSPORT_NOT_IMPLEMENTED', 'fixture-only preview adapter; no live transport');
+    readiness = 'RETENTION_BLOCKED';
+  } else if (!transportImplemented) {
+    entitlement = p.accessState === 'AVAILABLE_REQUIRES_APP_REVIEW' ? 'REQUIRES_APP_REVIEW' : p.accessState === 'AVAILABLE_REQUIRES_CREDENTIAL' ? 'REQUIRES_CREDENTIAL_PLAN_AND_TERMS' : 'UNRESOLVED';
+    push('TRANSPORT_NOT_IMPLEMENTED', p.foundation?.stage ?? 'no transport'); if (p.decisionStatus === 'OPERATOR_REVIEW_PENDING') push('PLATFORM_DECISION_PENDING', p.decisionStatus);
+    if (p.accessState === 'AVAILABLE_REQUIRES_APP_REVIEW') push('APPROVAL_NOT_OBTAINED', 'platform app review not obtained'); if (Array.isArray(p.foundation?.docsUnverified) && p.foundation.docsUnverified.length) push('EXTERNAL_VERIFICATION_DEFERRED', p.foundation.docsUnverified.join(','));
+    if (providerId === 'FARCASTER_OFFICIAL') { push('CREDENTIAL_MISSING', 'key presence is configuration, not entitlement'); push('ENTITLEMENT_UNRESOLVED', 'plan / credits / terms unknown'); }
+    readiness = 'FIXTURE_ONLY';
+  } else if (providerId === 'X_OFFICIAL') {
+    entitlement = 'PAY_PER_USE_CREDENTIAL_AND_BUDGET_REQUIRED'; replay = 'JOURNAL_REPLAY';
+    if (!rt) { push('PRODUCTION_GATE_UNOBSERVED', 'no X runtime status in this process'); push('PAID_SMOKE_NOT_PERFORMED', PROVIDER_SMOKE_FACTS.X_OFFICIAL.ref); readiness = 'IMPLEMENTED_NOT_LIVE_SMOKED'; }
+    else if (rt.enabled === false) { push('RUNTIME_DISABLED', rt.gateDetail ?? 'RUMOR2_SOCIAL_X_ENABLED'); push('PAID_SMOKE_NOT_PERFORMED', PROVIDER_SMOKE_FACTS.X_OFFICIAL.ref); readiness = 'DISABLED'; }
+    else {
+      if (!rt.credentialPresent) push('CREDENTIAL_MISSING', 'X_BEARER_TOKEN');
+      if (rt.gate && rt.gate !== 'OPEN' && /BUDGET/.test(rt.gate)) push('BUDGET_NOT_CONFIGURED', rt.gate);
+      if (rt.watch && rt.watch.ok === false) push('WATCH_SCOPE_NOT_CONFIGURED', rt.watch.reason ?? rt.watch.mode);
+      const smokeDone = rt.smoke && (rt.smoke.durableStatus === 'COMPLETE' || rt.smoke.status === 'COMPLETE');
+      if (!smokeDone) { push('PAID_SMOKE_NOT_PERFORMED', PROVIDER_SMOKE_FACTS.X_OFFICIAL.ref); smoke = 'NOT_PERFORMED'; } else smoke = 'PERFORMED_PRIOR_SESSION';
+      if (rt.state === 'ACTIVE' && smokeDone) { readiness = 'OPERATIONAL_LIVE_PROVEN'; operational = true; }
+      else if (['WITHHELD', 'WITHHELD_GAP', 'STANDBY', 'BUDGET_STOPPED'].includes(rt.state)) { push('RUNTIME_WITHHELD', rt.state); readiness = 'UNAVAILABLE'; }
+      else if (blockers.some((b) => b === 'CREDENTIAL_MISSING' || b === 'BUDGET_NOT_CONFIGURED' || b === 'WATCH_SCOPE_NOT_CONFIGURED')) readiness = 'NOT_CONFIGURED';
+      else readiness = 'READY_REQUIRES_EXPLICIT_PAID_SMOKE';
+    }
+  } else { // BLUESKY_OFFICIAL — the authorized, live-smoked, durable ear
+    replay = 'JOURNAL_REPLAY';
+    if (!rt) { push('PRODUCTION_GATE_UNOBSERVED', 'no Bluesky runtime status in this process'); readiness = 'IMPLEMENTED_NOT_LIVE_SMOKED'; }
+    else if (rt.enabled === false) { push('RUNTIME_DISABLED', rt.gateDetail ?? 'RUMOR2_SOCIAL_BLUESKY_ENABLED'); readiness = 'DISABLED'; }
+    else if (rt.state === 'ACTIVE') { readiness = 'OPERATIONAL_LIVE_PROVEN'; operational = (rt.durableIndexSize ?? 0) > 0; } // ACTIVE = the runtime holds a connected stream in THIS process under its gates
+    else if (rt.state === 'HYDRATED' || rt.state === 'DARK') { push('PRODUCTION_GATE_UNOBSERVED', `runtime ${rt.state} (not yet connected in this process)`); readiness = 'IMPLEMENTED_NOT_LIVE_SMOKED'; operational = (rt.durableIndexSize ?? 0) > 0; }
+    else { push('RUNTIME_WITHHELD', rt.state); readiness = 'UNAVAILABLE'; operational = (rt.durableIndexSize ?? 0) > 0; }
+  }
+  return deepFreeze({
+    provider: providerId, family: p.providerKind, foundationPresent, transportImplemented, accessState: p.accessState, entitlementOrApprovalState: entitlement, retentionState: retention.state, historicalReplayCapability: replay,
+    liveSmokeState: smoke, productionGateState: gate, currentlyEnabledState, durableRawContentAllowed: p.retentionProhibited === true ? false : p.durable === true, durableAuthorIdentityAllowed: p.retentionProhibited === true ? false : p.durable === true, operationalEvidenceAvailable: operational,
+    statusKnownAtTs: isTs(knownAtTs) ? knownAtTs : null, latestVerifiedKnownAtTs: evaluation && isTs(evaluation.evaluatedAtTs) ? evaluation.evaluatedAtTs : null,
+    readiness, blockers: uniq(blockers).sort(), blockerDetail: uniq(detail).slice(0, 16), basis: `registry accessState ${p.accessState}; retention ${retention.state}; runtime ${rt ? (rt.state ?? 'unknown') : 'unobserved'}${evaluation ? '; access evaluator' : ''}`, authority: 'NONE',
+  });
+}
+
+// the legacy aggregate RUMINT path is a separate source family (aggregate-only; never per-author)
+export function legacyAggregateReadinessRow({ knownAtTs = null, configured = null } = {}) {
+  const retention = retentionCapability(SOURCE_PROFILE_LEGACY_AGGREGATE_PROVIDER);
+  return deepFreeze({ provider: SOURCE_PROFILE_LEGACY_AGGREGATE_PROVIDER, family: 'AGGREGATE_RUMINT', foundationPresent: true, transportImplemented: true, accessState: 'AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW', entitlementOrApprovalState: 'ROUTE_ENTITLEMENT_UNRESOLVED', retentionState: retention.state, historicalReplayCapability: 'AGGREGATE_CHECKPOINT_ONLY', liveSmokeState: 'NOT_APPLICABLE', productionGateState: configured === null ? 'UNOBSERVED_IN_THIS_PROCESS' : configured ? 'CONFIG_ENABLED' : 'CONFIG_DISABLED', currentlyEnabledState: configured === null ? 'UNOBSERVED_IN_THIS_PROCESS' : configured ? 'ENABLED' : 'DISABLED', durableRawContentAllowed: false, durableAuthorIdentityAllowed: false, operationalEvidenceAvailable: false, statusKnownAtTs: isTs(knownAtTs) ? knownAtTs : null, latestVerifiedKnownAtTs: null, readiness: 'ACCESS_UNRESOLVED', blockers: ['DEPLOYMENT_UNOBSERVED', 'ENTITLEMENT_UNRESOLVED'], blockerDetail: ['ENTITLEMENT_UNRESOLVED: route entitlement unresolved (doctrine §5G)', 'DEPLOYMENT_UNOBSERVED: deployment unobserved here'], basis: 'legacy aggregate RUMINT poller (rumint/) — aggregate history only; never converted into per-author profiles', authority: 'NONE' });
+}
+
+// closed-row law: every row carries exactly the readiness keys, a closed readiness state, closed blocker codes and authority NONE
+export function validateReadinessRow(r) {
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return 'readiness row: not an object';
+  const keys = Object.keys(r).sort(); const want = [...READINESS_ROW_KEYS].sort();
+  if (keys.length !== want.length || keys.some((k, i) => k !== want[i])) return 'readiness row: keys are not the closed readiness keys';
+  if (!READINESS_STATES.includes(r.readiness)) return `readiness row: ${r.provider} readiness ${r.readiness} is not a closed state`;
+  if (!Array.isArray(r.blockers) || r.blockers.some((b) => !READINESS_BLOCKERS.includes(b))) return `readiness row: ${r.provider} carries a blocker outside the closed codes`;
+  if (r.readiness !== 'OPERATIONAL_LIVE_PROVEN' && r.blockers.length === 0) return `readiness row: ${r.provider} is not operational yet names no blocker`;
+  if (r.readiness === 'OPERATIONAL_LIVE_PROVEN' && r.blockers.length > 0) return `readiness row: ${r.provider} is called operational while blocked`;
+  if (!READINESS_LIVE_SMOKE_STATES.includes(r.liveSmokeState) || !READINESS_REPLAY_CAPABILITIES.includes(r.historicalReplayCapability)) return `readiness row: ${r.provider} smoke / replay state is not closed`;
+  if (r.authority !== 'NONE') return `readiness row: ${r.provider} authority must be NONE`;
+  if ('implemented' in r) return 'readiness row: a single implemented flag is refused (readiness never flattens)';
+  return null;
+}
+
+export function readinessMatrix({ runtimes = {}, evaluations = {}, knownAtTs = null, legacyAggregateConfigured = null } = {}) {
+  const providers = SOCIAL_PROVIDERS.map((p) => providerReadinessRow(p.id, { runtime: runtimes[p.id] ?? null, evaluation: evaluations[p.id] ?? null, knownAtTs }));
+  const rows = [...providers, legacyAggregateReadinessRow({ knownAtTs, configured: legacyAggregateConfigured })];
+  const counts = {}; for (const r of rows) counts[r.readiness] = (counts[r.readiness] ?? 0) + 1;
+  return deepFreeze({ version: READINESS_MATRIX_VERSION, knownAtTs: isTs(knownAtTs) ? knownAtTs : null, providers: rows, counts, operationalProviders: rows.filter((r) => r.readiness === 'OPERATIONAL_LIVE_PROVEN').map((r) => r.provider), authority: 'NONE', purpose: 'OPERATIONAL_STATUS_ONLY', note: 'readiness is operational truth — never evidence corroboration, never a trade permission; external access / terms / entitlement verification stays deferred and is listed as a blocker, never assumed' });
+}

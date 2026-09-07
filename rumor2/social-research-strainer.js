@@ -31,7 +31,7 @@ import {
 } from './social-settle.js';
 import {
   RESEARCH_DOSSIER_SCHEMA_VERSION, RESEARCH_AUTHORITY, RESEARCH_PURPOSE, RESEARCH_MAX_TRIGGERS, RESEARCH_MAX_PROPOSALS, RESEARCH_MAX_CLAIMS, RESEARCH_MAX_NOTICES,
-  RESEARCH_MAX_DEPENDENCY_NODES, RESEARCH_MAX_DEPENDENCY_EDGES, RESEARCH_CIRCULATION_CLASS,
+  RESEARCH_MAX_DEPENDENCY_NODES, RESEARCH_MAX_DEPENDENCY_EDGES, RESEARCH_MAX_DOSSIER_CANONICAL_CHARS, RESEARCH_CIRCULATION_CLASS,
   researchDossierIdentity, researchEpisodeIdentity, validateResearchDossier,
 } from './social-research-dossier.js';
 import { deepMarketFeatures, validateOwnerMarketSnapshot, ownerMarketFeatures } from './social-research-market.js';
@@ -229,9 +229,14 @@ export function socialWindowFeatures({ observations, asOfTs, windowMs, timeline 
 export function socialCoverageState({ observations, providerStates = [] }) {
   const observedNow = observations.length > 0;
   const states = providerStates.map((p) => p.state);
-  if (observedNow) return { state: 'OBSERVED', detail: `${observations.length} admitted observation(s) under valid coverage` };
+  // SOCIAL-7 §49.3/§49.13: coverage is PROVIDER-SCOPED — a valid provider beside an unavailable / disabled one is
+  // partial coverage, disclosed by name; quiet on one provider is never universal silence
+  const valid = providerStates.filter((p) => p.state === 'OBSERVED').map((p) => p.provider);
+  const blind = providerStates.filter((p) => ['UNAVAILABLE', 'FAILED', 'STALE', 'NOT_QUERIED', 'NOT_SUPPORTED'].includes(p.state)).map((p) => `${p.provider}:${p.state}`);
+  const partial = valid.length > 0 && blind.length > 0 ? ` — provider-scoped coverage: valid on ${valid.join(',')}; ${blind.join(',')} answered nothing (partial coverage, not universal silence)` : '';
+  if (observedNow) return { state: 'OBSERVED', detail: `${observations.length} admitted observation(s) under valid coverage${partial}` };
   if (states.length === 0) return { state: 'NOT_QUERIED', detail: 'no Social provider reported coverage' };
-  if (states.includes('OBSERVED')) return { state: 'OBSERVED_NO_MATCH', detail: 'coverage was valid and no admitted observation named this asset — observed silence, not blindness' };
+  if (states.includes('OBSERVED')) return { state: 'OBSERVED_NO_MATCH', detail: `coverage was valid and no admitted observation named this asset — observed silence, not blindness${partial}` };
   if (states.includes('FAILED')) return { state: 'FAILED', detail: 'a Social provider failed — not negative evidence' };
   if (states.includes('STALE')) return { state: 'STALE', detail: 'Social coverage is stale — not current quiet' };
   if (states.includes('UNAVAILABLE')) return { state: 'UNAVAILABLE', detail: 'Social cannot currently answer — not quiet' };
@@ -384,10 +389,13 @@ export function deepObservationMembership({ deepObservation, canonicalCoin, asOf
 }
 
 // ---- §36.3 the bounded evidence-dependency manifest ----
-export function buildDependencyManifest({ asOfTs, inWindowObs, windows, participation, marketLight, information, marketDeep, entrances }) {
+export function buildDependencyManifest({ asOfTs, inWindowObs, windows, participation, marketLight, information, marketDeep, entrances, maxNodes = RESEARCH_MAX_DEPENDENCY_NODES, maxEdges = RESEARCH_MAX_DEPENDENCY_EDGES }) {
   const nodes = new Map(); const edges = []; const edgeKeys = new Set(); const omitted = { socialSources: 0, edges: 0 }; let truncated = false;
-  const node = (id, kind, knownAtTs) => { if (nodes.has(id)) return true; if (nodes.size >= RESEARCH_MAX_DEPENDENCY_NODES) { truncated = true; return false; } nodes.set(id, { id, kind, knownAtTs }); return true; };
-  const edge = (from, to, relation) => { const key = `${from}>${to}>${relation}`; if (edgeKeys.has(key)) return; if (!nodes.has(from) || !nodes.has(to)) return; if (edges.length >= RESEARCH_MAX_DEPENDENCY_EDGES) { truncated = true; omitted.edges += 1; return; } edgeKeys.add(key); edges.push({ from, to, relation }); };
+  // SOCIAL-7 §50: the manifest is the ELASTIC section of a bounded dossier — a caller may tighten its bounds (never widen them) so the
+  // whole dossier stays under its canonical size bound; a tightened bound is disclosed inside `omitted`
+  if (maxNodes < RESEARCH_MAX_DEPENDENCY_NODES || maxEdges < RESEARCH_MAX_DEPENDENCY_EDGES) omitted.bound = { nodes: maxNodes, edges: maxEdges, reason: 'DOSSIER_SIZE_BOUND' };
+  const node = (id, kind, knownAtTs) => { if (nodes.has(id)) return true; if (nodes.size >= maxNodes) { truncated = true; return false; } nodes.set(id, { id, kind, knownAtTs }); return true; };
+  const edge = (from, to, relation) => { const key = `${from}>${to}>${relation}`; if (edgeKeys.has(key)) return; if (!nodes.has(from) || !nodes.has(to)) return; if (edges.length >= maxEdges) { truncated = true; omitted.edges += 1; return; } edgeKeys.add(key); edges.push({ from, to, relation }); };
   const F = (name) => `dossier:${name}`;
   for (const name of ['entrances', 'participation', 'marketLight', 'information', 'marketDeep', 'executability', 'crossSense', 'proposals']) node(F(name), 'DOSSIER_FIELD', asOfTs);
   // Social: sources -> text families -> windows -> participation; native parents for explicit echoes; coverage boundaries -> windows
@@ -503,7 +511,7 @@ export function buildResearchDossier({
   const researchState = researchStateOf(preliminary);
   episode.state = episodeStateOf({ researchState, participation });
   const proposals = nextObservationProposals({ canonicalCoin, asOfTs, entrances: kinds, participation, marketLight, marketDeep, information, executability, crossSense, episode });
-  const dependencies = buildDependencyManifest({ asOfTs, inWindowObs, windows: participation.windows, participation, marketLight, information, marketDeep, entrances });
+  let dependencies = buildDependencyManifest({ asOfTs, inWindowObs, windows: participation.windows, participation, marketLight, information, marketDeep, entrances });
   const inputDigest = contentHash(canonicalJson({ canonicalCoin, triggers: triggers.map((t) => t.ref), observations: inWindowObs.map((o) => o.sourceEventId), coverage: participation.coverage.state, providerStates: providerStates.map((p) => `${p.provider}:${p.state}`), notices: marketLight.notices.map((n) => n.ref), claims: information.claims.map((c) => `${c.claimRef}:${c.status}:${c.sourceCount}`), deepWindow: dw ? dw.windowId : null, ownerSnapshot: owner.snapshotId ?? owner.state, ownerQuality: owner.state === 'PRESENT_WITH_AGE' ? owner.quality : owner.state, membership: membership.state }));
   // MATERIALITY (§36.1): closed components only — a changing raw count inside an OPEN window is not material
   const materialDigest = contentHash(canonicalJson({
@@ -517,10 +525,19 @@ export function buildResearchDossier({
     missing: missing.slice(0, 24), nextObservationProposals: proposals, dependencies, security: { untrustedTextPresent: inWindowObs.length > 0 }, authority: RESEARCH_AUTHORITY, purpose: RESEARCH_PURPOSE, researchState,
     episode: { episodeId: episode.episodeId, index: episode.index, state: episode.state, basis: episode.basis, onset: episode.onset, previousDossierId: episode.previousDossierId, previousEpisodeId: episode.previousEpisodeId, newSinceLast: episode.newSinceLast },
   };
+  // SOCIAL-7 §50: the per-section bounds must compose under the whole-dossier canonical bound — when they do not
+  // (a window at the observation bound with many distinct families), the dependency manifest is tightened
+  // deterministically (halving, floor 16 / 32) with the applied bound disclosed; the dossier is never unbuildable
+  let sizeBoundApplied = null;
+  for (let nodesCap = RESEARCH_MAX_DEPENDENCY_NODES, edgesCap = RESEARCH_MAX_DEPENDENCY_EDGES; canonicalJson(sansId).length > RESEARCH_MAX_DOSSIER_CANONICAL_CHARS && nodesCap > 16;) {
+    nodesCap = Math.max(16, Math.floor(nodesCap / 2)); edgesCap = Math.max(32, Math.floor(edgesCap / 2)); sizeBoundApplied = { nodes: nodesCap, edges: edgesCap };
+    dependencies = buildDependencyManifest({ asOfTs, inWindowObs, windows: participation.windows, participation, marketLight, information, marketDeep, entrances, maxNodes: nodesCap, maxEdges: edgesCap });
+    sansId.dependencies = dependencies;
+  }
   const dossier = { ...sansId, dossierId: researchDossierIdentity(sansId) };
   const err = validateResearchDossier(dossier);
   if (err) return { error: err };
-  return { dossier: deepFreeze(dossier), inWindowObservations: inWindowObs };
+  return { dossier: deepFreeze(dossier), inWindowObservations: inWindowObs, sizeBoundApplied };
 }
 
 export const RESEARCH_TYPES_OBSERVED = SOCIAL_OBSERVATION_TYPES;
