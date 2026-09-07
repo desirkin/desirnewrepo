@@ -216,7 +216,7 @@ test('R2A-82+83. SOCRATES-0 and GHOST-1 remain absent', () => {
 });
 
 test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT allowlist: pure, social-tier, no network/timer/model/authority; they import only inside the rumor layer + the evidence contract; no runtime output carries execution vocabulary; only the collector wires the runtime; the strainer never touches tape/ledger/cost/controls/order paths; the §36.7 bridge injects ONLY the tape store read accessors and the §36.6 seam ONLY the wide eye population snapshot', () => {
-  const MODULES = ['rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-strainer.js', 'rumor2/social-research-packet.js', 'rumor2/social-research-runtime.js', 'rumor2/social-research-shadow.js'];
+  const MODULES = ['rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-strainer.js', 'rumor2/social-research-packet.js', 'rumor2/social-research-runtime.js', 'rumor2/social-research-shadow.js', 'rumor2/social-research-outcome.js', 'rumor2/social-research-profile.js', 'rumor2/social-research-composite.js'];
   for (const f of MODULES) {
     assert.ok(tracked.includes(f), `${f} is tracked (Git-index-aware)`);
     assert.ok(SOCIAL_FILE_RE.test(f), `${f} audited in the social tier, never as frozen core`);
@@ -236,11 +236,22 @@ test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT all
   assert.deepEqual(mentions.sort(), [...RESEARCH_ALLOWLIST].sort(), `the research strainer may only be wired in ${RESEARCH_ALLOWLIST.join(', ')}`);
   const outside = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && /social-research|researchStrainer|RUMOR2_RESEARCH_DOSSIER/.test(read(f)));
   assert.deepEqual(outside, ['fly.js'], 'exactly the composition root enables the strainer (no tape / ledger / cost / controls / ui reader)');
+  // SOCIAL-6: the source-behavior layer is derived (no new durable family), scores are forbidden by name, the ONLY historical-outcome seam is the
+  // read-only Childhood bridge injected by fly.js (Social never imports memory/ or childhood/), and no claim-association is minted anywhere
+  for (const f of ['rumor2/social-research-profile.js', 'rumor2/social-research-outcome.js', 'rumor2/social-research-composite.js']) {
+    const c = code(f);
+    assert.ok(!/(trust|reliability|credibility|bot|winner|alpha|buy|win)(Score|Probability|Percent|Rate)\b/i.test(c), `${f}: no score alias`);
+    assert.ok(!/from\s+'\.\.\/(memory|childhood)\//.test(read(f)), `${f}: never imports the archive directly`);
+  }
+  assert.ok(/historicalOutcomes: \(\{ symbol, fromTsMs, toTsMs \}\) =>/.test(read('fly.js')) && /from '\.\/memory\/childhood\.js'/.test(read('fly.js')), 'fly.js injects the Childhood read bridge as an accessor only');
+  assert.ok(!/RUMOR2_SOURCE_PROFILE|SOURCE_PROFILE_EVENT/.test(read('rumor2/social-settle.js')), 'no materialized profile family exists');
   for (const f of tracked.filter((x) => x.startsWith('ledger/') || x.startsWith('cost/') || x.startsWith('tape/') || x.startsWith('state/') || x.startsWith('controls/'))) assert.ok(!/dossier|strainer|rumor2/i.test(read(f)), `${f} does not read research output`);
   // §36.7: the tape re-exposes ITS OWN computed feature snapshot (transport only) — the tape never imports the rumor tier,
   // never reads research output, and the accessor recomputes nothing; only fly.js injects the read accessors
   const fly = read('fly.js');
-  assert.ok(fly.includes("researchStrainer: { enabled: true, marketSnapshot: (coin) => ({ snapshot: readCurrentFeatureSnapshot(coin), owner: readTapeStatus() }), currentSession: () => sessionDate() }"), 'fly.js injects exactly the tape store READ accessors (snapshot + status) and the session clock');
+  assert.ok(fly.includes("researchStrainer: { enabled: true, marketSnapshot: (coin) => ({ snapshot: readCurrentFeatureSnapshot(coin), owner: readTapeStatus() }), currentSession: () => sessionDate(),"), 'fly.js injects exactly the tape store READ accessors (snapshot + status) and the session clock');
+  const strainerBlock = fly.slice(fly.indexOf('researchStrainer: {'), fly.indexOf('});', fly.indexOf('researchStrainer: {')));
+  assert.deepEqual([...strainerBlock.matchAll(/\b(enabled|marketSnapshot|currentSession|historicalOutcomes|deepMarketSource|claimAssociations|options):/g)].map((m) => m[1]), ['enabled', 'marketSnapshot', 'currentSession', 'historicalOutcomes'], 'the composition root wires exactly these seams (no deep-market adapter, no association authority, no option override)');
   assert.ok(!/deepMarketSource/.test(fly), 'no live deep-market adapter is wired by SOCIAL-5');
   assert.ok(/population: \(\) => wideEye\.sweepPopulationSnapshot\(\)/.test(fly), 'the §36.6 seam is the wide eye population accessor only');
   const store = code('tape/store.js');

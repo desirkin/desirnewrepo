@@ -26,6 +26,9 @@ import { buildResearchPacket } from './social-research-packet.js';
 import { researchDossierEvent, validateResearchDossierEvent, replayResearchDossierEvent, RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_AUTHORITY, RESEARCH_PURPOSE } from './social-research-dossier.js';
 import { buildShadowSample, validateResearchShadowEvent, replayResearchShadowEvent, emptyShadowState, RESEARCH_SHADOW_EVENT_TYPE, RESEARCH_SHADOW_SAMPLE_CAP, RESEARCH_SHADOW_RECIPE_VERSION } from './social-research-shadow.js';
 import { validateDeepMarketWindow } from './social-research-market.js';
+import { createSourceProfileIndex } from './social-research-profile.js';
+import { compositeResearchView } from './social-research-composite.js';
+import { OUTCOME_MAX_ALIGNMENT_MS } from './social-research-outcome.js';
 
 export const RESEARCH_EMISSION_MIN_INTERVAL_MS = 15_000; // I/O resource bound only
 export const RESEARCH_IDLE_TTL_MS = 3_600_000; // housekeeping limit only — not an opportunity life, not a cutoff
@@ -48,12 +51,17 @@ export function createResearchStrainer({
   catalogBases = null, // () => Set<string> of catalog bases (asset association law for information-led candidates) | null when no catalog is accepted
   currentSession = null, // () => the current session date 'YYYY-MM-DD' (owner-snapshot session identity); null => derived from the tick clock (UTC day)
   fallbackScope = null, // () => the collector's current candidate admission scope (attribution basis when no durable scope exists yet)
+  historicalOutcomes = null, // SOCIAL-6 §42 read-only accessor: ({ symbol, fromTsMs, toTsMs }) => closed Childhood outcome records | null (composition-root injected; never fetched here)
+  claimAssociations = null, // SOCIAL-6 §41 read-only accessor: (socialAuthorId) => already-authorized association records | null (none exists in this repository: factual association stays UNAVAILABLE)
 } = {}) {
   const resolver = createScopeResolver();
   const timeline = createCoverageTimeline();
   const subjects = new Map(); // coin -> { observations: [], latestInputKnownAtTs, lastEmit }
   const research = { byCoin: new Map(), count: 0 }; // durable dossier history (replay)
   const shadow = emptyShadowState(); // durable shadow-sample history (replay)
+  const profilesIdx = createSourceProfileIndex(); // SOCIAL-6: provider-scoped source-behavior index, DERIVED from the same journal (no materialized snapshot)
+  const windowObservationsOf = (coin, knownAtTs) => (subjects.get(coin)?.observations ?? []).filter((o) => o.knownAtTs <= knownAtTs && o.knownAtTs > knownAtTs - RESEARCH_ENTRANCE_WINDOW_MS);
+  const adoptDossierIntoProfiles = (e) => profilesIdx.onDossier(e, windowObservationsOf(e.canonicalCoin, e.derivedKnownAtTs));
   const seenObservations = new Set(); // bounded dedupe of ingested observation ids
   const attributionByNative = new Map(); // nativePostId -> bases (bounded): a textless repost / reply / tombstone of an attributed post inherits its subject
   let journalOrder = 0;
@@ -85,6 +93,7 @@ export function createResearchStrainer({
     if (SOCIAL_OBSERVATION_TYPES.includes(e.type)) {
       if (seenObservations.has(e.sourceEventId)) return;
       seenObservations.add(e.sourceEventId); if (seenObservations.size > 65_536) seenObservations.delete(seenObservations.values().next().value);
+      profilesIdx.observe(e); // SOCIAL-6: every durable observation counts toward its provider-native source (retention-lawful providers only)
       let a = attributeSocialObservation(e, { resolver, fallbackScope: typeof fallbackScope === 'function' ? fallbackScope() : null });
       if (a.bases.length === 0) {
         // lifecycle continuity: an echo / reply / edit / tombstone of an ALREADY-ATTRIBUTED native post (or of
@@ -106,7 +115,7 @@ export function createResearchStrainer({
     }
     if (e.type === RESEARCH_DOSSIER_EVENT_TYPE) {
       const r = replayResearchDossierEvent(research, e);
-      if (r.ok) rememberEmit(e.canonicalCoin, emitRecord(e));
+      if (r.ok) { rememberEmit(e.canonicalCoin, emitRecord(e)); adoptDossierIntoProfiles(e); }
       return r;
     }
     if (e.type === RESEARCH_SHADOW_EVENT_TYPE) { const r = replayResearchShadowEvent(shadow, e); if (r.ok) lastSampledSweepId = e.sweepId; return r; }
@@ -116,7 +125,7 @@ export function createResearchStrainer({
   // rebuild from the authoritative journal (validated social history is the caller's law; this runtime
   // consumes committed events in journal order and validates its own families strictly)
   function hydrate(events) {
-    subjects.clear(); seenObservations.clear(); attributionByNative.clear(); research.byCoin.clear(); research.count = 0; shadow.bySweep.clear(); shadow.order.length = 0; shadow.count = 0; journalOrder = 0; pendingOp = null; journalAhead = null; lastSampledSweepId = null;
+    subjects.clear(); seenObservations.clear(); attributionByNative.clear(); research.byCoin.clear(); research.count = 0; shadow.bySweep.clear(); shadow.order.length = 0; shadow.count = 0; journalOrder = 0; pendingOp = null; journalAhead = null; lastSampledSweepId = null; profilesIdx.clear();
     for (const e of events) {
       if (!e || typeof e !== 'object') continue;
       if (e.type === RESEARCH_DOSSIER_EVENT_TYPE) { const err = validateResearchDossierEvent(e); if (err) { hydrated = false; lastError = err; return { ok: false, error: `RESEARCH_HISTORY_INVALID: ${err}` }; } }
@@ -147,7 +156,7 @@ export function createResearchStrainer({
     pendingOp = null;
     // ADOPT after the durable commit under a held fence: each event enters the research history exactly as replay would read it
     for (const e of op.events) {
-      if (e.type === RESEARCH_DOSSIER_EVENT_TYPE) { const rr = replayResearchDossierEvent(research, e); if (rr.ok) rememberEmit(e.canonicalCoin, emitRecord(e)); }
+      if (e.type === RESEARCH_DOSSIER_EVENT_TYPE) { const rr = replayResearchDossierEvent(research, e); if (rr.ok) { rememberEmit(e.canonicalCoin, emitRecord(e)); adoptDossierIntoProfiles(e); } }
       else if (e.type === RESEARCH_SHADOW_EVENT_TYPE) { const rr = replayResearchShadowEvent(shadow, e); if (rr.ok) { lastSampledSweepId = e.sweepId; stats.shadowSamples += 1; } }
     }
     stats.appended += op.events.length; lastError = null;
@@ -270,6 +279,8 @@ export function createResearchStrainer({
       marketBridge: typeof marketSnapshot === 'function' ? 'OWNER_SNAPSHOT_ACCESSOR' : 'NOT_CONNECTED',
       shadowControl: { status: typeof populationSource !== 'function' ? 'NOT_CONNECTED' : shadow.count === 0 && lastSampledSweepId === null ? 'AWAITING_COMPLETED_SWEEP' : 'SAMPLING', recipeVersion: RESEARCH_SHADOW_RECIPE_VERSION, sampleCap: RESEARCH_SHADOW_SAMPLE_CAP, durableSamples: shadow.count, lastSweepId: lastSampledSweepId, latest: shadow.order.length ? { ...shadow.bySweep.get(shadow.order[shadow.order.length - 1]) } : null },
       deferrals: { ...deferrals, note: 'bounded aggregate counts of research candidates deferred / dormant by reason — no trade decision exists here' },
+      // SOCIAL-6: source-behavior research (derived, bounded, no score); the outcome seam and the association seam are named honestly
+      sourceBehavior: { ...profilesIdx.status(), retention: profilesIdx.retentionSummary(), outcomeSeam: typeof historicalOutcomes === 'function' ? 'CHILDHOOD_ARCHIVE_ACCESSOR' : 'NOT_CONNECTED', claimAssociationSeam: typeof claimAssociations === 'function' ? 'INJECTED_AUTHORIZED_ASSOCIATIONS' : 'NONE_AUTHORIZED', materialized: false, note: 'profiles are derived from the journal on hydrate/ingest — no snapshot event family, no second authority' },
       stats: { ...stats }, lastError,
     };
   }
@@ -277,6 +288,21 @@ export function createResearchStrainer({
   return {
     hydrate, ingest, tick, status, stop,
     history: (coin) => (research.byCoin.get(coin) ?? []).map((x) => ({ ...x })),
+    // SOCIAL-6: the as-of source profile (outcome records resolved through the injected accessor per research episode; associations through the injected accessor)
+    sourceProfile: (socialAuthorId, { asOfTs = Math.floor(now()), availability = 'ACTUAL_OPERATIONAL_AVAILABILITY' } = {}) => {
+      const outcomeRecords = {};
+      if (typeof historicalOutcomes === 'function') for (const ep of profilesIdx.episodes(socialAuthorId)) { try { const found = historicalOutcomes({ symbol: ep.canonicalCoin, fromTsMs: ep.firstKnownAtTs, toTsMs: ep.firstKnownAtTs + OUTCOME_MAX_ALIGNMENT_MS }); if (Array.isArray(found) && found.length) outcomeRecords[ep.episodeId] = found[0]; } catch { /* an unreadable archive is OUTCOME_UNAVAILABLE, never invented */ } }
+      let associations = []; if (typeof claimAssociations === 'function') { try { associations = claimAssociations(socialAuthorId) ?? []; } catch { associations = []; } }
+      return profilesIdx.profile(socialAuthorId, { asOfTs, associations, outcomeRecords, availability });
+    },
+    sourceProfiles: (asOfTs = Math.floor(now())) => profilesIdx.list(asOfTs),
+    // SOCIAL-6 §43: the read-only composite view of a coin's latest dossier known as of `asOfTs` plus later source context
+    composite: (coin, { asOfTs = Math.floor(now()) } = {}) => {
+      const hist = (research.byCoin.get(coin) ?? []).filter((r) => r.derivedKnownAtTs <= asOfTs); const rec = hist.length ? hist[hist.length - 1] : null;
+      if (!rec) return { error: 'composite: no dossier of this coin is known as of the clock' };
+      return compositeResearchView({ dossierRecord: { ...rec, canonicalCoin: coin }, inWindowObservations: windowObservationsOf(coin, rec.derivedKnownAtTs), profileIndex: { profile: (id, opts) => profilesIdx.profile(id, { ...opts, associations: typeof claimAssociations === 'function' ? (claimAssociations(id) ?? []) : [] }) }, asOfTs });
+    },
+    _profiles: profilesIdx,
     shadowHistory: () => shadow.order.map((id) => ({ ...shadow.bySweep.get(id) })),
     _subject: (coin) => subjects.get(coin) ?? null,
     _journalOrder: () => journalOrder,

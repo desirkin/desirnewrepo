@@ -335,6 +335,8 @@ export function startRumor2({
       // asset association law: an information-led candidate must resolve to the current accepted catalog
       catalogBases: () => { const c = researchScope.candidate({ knownAtTs: Math.floor(now()) }).catalog; return c ? new Set(c.markets.map((m) => m.base)) : null; },
       currentSession: typeof researchStrainer.currentSession === 'function' ? researchStrainer.currentSession : null,
+      // SOCIAL-6: read-only historical-outcome accessor (Childhood archive bridge, composition-root injected) — never fetched by Social
+      historicalOutcomes: typeof researchStrainer.historicalOutcomes === 'function' ? researchStrainer.historicalOutcomes : null,
       fallbackScope: () => researchScope.candidate({ knownAtTs: Math.floor(now()) }).scope ?? null, ...(researchStrainer.options ?? {}),
     })
     : null;

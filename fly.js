@@ -8,6 +8,8 @@ import { runTape } from './tape/run.js';
 import { readCurrentUniverse } from './tape/universe.js';
 import { readCurrentFeatureSnapshot, readTapeStatus } from './tape/store.js';
 import { sessionDate } from './lib/time.js';
+import { getChildhoodManifest, queryObservations, getOutcomeForObservation } from './memory/childhood.js';
+import { childhoodOutcomeRecord } from './rumor2/social-research-outcome.js';
 import { startRumint } from './rumint/poller.js';
 import { startGateway } from './gateway/collector.js';
 import { startWideEye } from './survey/wideeye.js';
@@ -104,7 +106,10 @@ startRumor2({
   // §36.7 passive bridge: ONLY the tape store's read accessors are injected (the tape's own current
   // feature snapshot + its status record). Safe if RUMOR starts before the tape: the accessor says
   // NOT_PRESENT until the tape writes; no lifecycle reorder, no subscription, no book mutation.
-  researchStrainer: { enabled: true, marketSnapshot: (coin) => ({ snapshot: readCurrentFeatureSnapshot(coin), owner: readTapeStatus() }), currentSession: () => sessionDate() },
+  // SOCIAL-6 §42: the ONLY lawful historical-outcome seam is the immutable Childhood archive (read-only bridge, candle
+  // tracks, full-horizon discipline); injected as a read accessor — Social never fetches market history or REST snapshots.
+  researchStrainer: { enabled: true, marketSnapshot: (coin) => ({ snapshot: readCurrentFeatureSnapshot(coin), owner: readTapeStatus() }), currentSession: () => sessionDate(),
+    historicalOutcomes: ({ symbol, fromTsMs, toTsMs }) => { const m = getChildhoodManifest(); if (!m) return null; return queryObservations({ symbol, fromTs: Math.floor(fromTsMs / 1000), toTs: Math.floor(toTsMs / 1000), limit: 4 }).map((o) => { const out = getOutcomeForObservation(o.id); return out ? childhoodOutcomeRecord(o, out, m) : null; }).filter(Boolean); } },
 });
 try {
   await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown

@@ -1897,6 +1897,61 @@ live market seam), the Socrates runtime, any Decider, stage calibration, source-
 
 ---
 
+### 5S. SOCIAL-6 — objective source-behavior / outcome research (research only)
+
+SOCIAL-6 (master-convoy Convoy II) adds a point-in-time, provider-scoped, retention-lawful SOURCE-BEHAVIOR
+RESEARCH layer (`rumor2/social-research-profile.js`, `social-research-outcome.js`, `social-research-composite.js`).
+It describes what Cobra has OBSERVED about a provider-native source and, only through an already-authorized
+association, how associated propositions later resolved. It produces no trust score, bot score, win
+probability, trade score, author blacklist, provider spend decision or trade authority. Its laws:
+
+1. **Provider-scoped identity only (§39.1).** A profile key is provider + the provider-native stable author
+   id (`socialAuthorId`). The same handle on Bluesky and X is two unresolved sources; a display name never
+   merges; a rename continues a profile only when the native id proves continuity; a missing native identity
+   mints nothing.
+2. **Retention firewall (§39.2).** DURABLE_PROFILE_ALLOWED / AGGREGATE_ONLY_ALLOWED / TRANSIENT_ONLY /
+   RETENTION_PROHIBITED / ACCESS_UNRESOLVED / PROVIDER_NOT_OPERATIONAL derive from the registry's existing
+   readiness truth (`retentionProhibited`, `implemented`, `durable`, `accessState`, `runtimeGated`) — never a
+   new legal conclusion. Reddit / StockTwits raw Social are RETENTION_PROHIBITED; Farcaster / Meta / TikTok
+   are PROVIDER_NOT_OPERATIONAL; the legacy aggregate RUMINT path is AGGREGATE_ONLY_ALLOWED and is never
+   converted into per-author profiles; an unknown provider is ACCESS_UNRESOLVED and fails closed.
+3. **Data minimization (§39.3).** Profiles keep counts, clocks, relation / lifecycle / clock facts and bounded
+   semantic refs — never post text (the immutable source record holds it).
+4. **Derived, not materialized (§44).** Profiles are rebuilt from the same journal prefix on hydrate/ingest;
+   no snapshot event family, no second authority; a restart reproduces the byte-identical as-of view; a later
+   source, association or outcome never rewrites an earlier as-of view (`SIMULATED_AS_OF` is the only other
+   availability label and is never conflated with ACTUAL_OPERATIONAL_AVAILABILITY).
+5. **Objective counts only (§40).** Coverage (first/latest known, observation and source counts, distinct
+   research episodes, limitations), origin/propagation (explicit native echo count, families anchored first in
+   observed order, family membership — `factualIndependenceStatus: UNESTABLISHED`), lifecycle (edit / delete /
+   tombstone counts, deletion lag over linked create→delete pairs only, unobserved deletion coverage UNKNOWN —
+   no "quick delete" cutoff exists in this repository, so none is invented), source-clock quality counts.
+   Every ratio carries its sample size and is null when the sample is not observed.
+6. **Factual association law (§41).** Only an already-authorized claim link (`AUTHORIZED_CLAIM_LINK`) with its
+   own known-at may count; no such mechanism exists in this repository today, so
+   `factualOutcome.state = UNAVAILABLE_NO_VALID_ASSOCIATION` for every source. A ticker match, similar words, a
+   price move, repetition or a later memory is never an association; a later correction changes the later view
+   only.
+7. **Market outcome / lead-lag adapter (§42).** The only lawful historical outcome store is the immutable
+   Childhood archive (candle tracks, horizons 1/3/5/15/30/60/240 min, full-horizon discipline); fly.js injects
+   its read bridge as an accessor; Social fetches nothing. Fidelity is `CANDLE_ONLY:<track>`; a horizon is
+   knowable only at max(observation + H, archive creation) — at T0 no T0+30 m outcome exists; censored horizons
+   stay censored; candle history never becomes an executable fill; no record or a misaligned record is
+   OUTCOME_UNAVAILABLE. Lead/lag uses Serpent known-at clocks; inside the declared uncertainty (X delivery
+   ~5 s documented, the wide-eye sweep quantisation 60 s, settlement latency) the ordering is
+   ORDERING_UNRESOLVED. In the current archive no Social-era overlap exists, so live profiles report
+   OUTCOME_UNAVAILABLE truthfully.
+8. **Composite view (§43).** The immutable Convoy-I dossier (bytes, id, schema untouched) is shown beside
+   bounded source context that became available later, each with its own known-at; selection is the settled
+   journal order of text-family anchors (cap 8, truncation disclosed); a source without history is valid current
+   evidence with `history: UNKNOWN`; history converts no unverified claim into a fact and creates no permission.
+   The `serpent-evidence-1` packet has no semantically valid slot for derived source-behavior facts — the
+   limitation is recorded for future Socrates packet design; no `serpent-evidence-2` exists.
+9. **No authority.** A profile changes no X rule, tape subscription, ledger, cost, permission, focus posture,
+   order or execution; no model is called; `authority: NONE` / `purpose: RESEARCH_ONLY`.
+
+---
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -1979,7 +2034,10 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   Decider.
 - **SOCIAL-5B+:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
-- **SOCIAL-6:** author reliability / deletion / historical-outcome research.
+- **SOCIAL-6 — SOURCE-BEHAVIOR RESEARCH DONE (§5S):** provider-scoped derived profiles under the retention
+  firewall, objective counts, the authorized-association contract (no association exists yet), the Childhood
+  outcome / lead-lag adapter, the composite view — no score, no authority. Not done: any claim-association
+  mechanism, Social-era outcome overlap in the archive.
 - **SOCIAL-7:** full combined social hardening + freeze.
 
 Do not call the social layer complete until every intended provider is either
