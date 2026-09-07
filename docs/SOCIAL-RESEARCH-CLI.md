@@ -77,7 +77,21 @@ packets) can never be exported — a projection refuses such leaves.
 member is revalidated with exact member keys and closed member values (not merely a bounded length), the free-text
 scan runs on read as well as on write, and asset fields use the ONE canonical asset-identity law
 (`/^[A-Z0-9][A-Z0-9.]{0,14}$/`, so a lawful dotted symbol such as `A.B` round-trips) rather than the uppercase
-reason-code pattern.
+reason-code pattern. Closed member values are the AUTHORITATIVE upstream vocabularies, imported rather than
+restated (entrance kinds, research states, claim types, cross-sense descriptors, proposal kinds, packet reason
+codes, dependency node kinds and edge relations): a projected member must be a value the upstream law actually
+defines, not merely an uppercase-shaped token. That import is vocabulary reuse only and grants no operational
+import or authority.
+
+**Optionality is not nullability.** A leaf the catalogue declares REQUIRED can never be omitted from a row nor
+moved into `absentFeatures`, whatever marker that map carries; only a leaf declared optional may be absent, and
+only under one of the two lawful markers (`NOT_RECORDED`, `SHADOW_ROW_NO_SOCIAL_DEPENDENCY`). `absentFeatures`
+carries no undeclared name, and the row's `entrances` must be its own projected entrances without repeats.
+
+**Nested input clocks obey the row's clock law.** An input cannot be known after the derivation it fed and cannot
+be observed after it became known — applied not only to the row-level clocks but to the dossier's own catalogued
+member clocks: trigger, claim, coverage-check, wide-eye notice and dependency-node clocks. This is the dossier's
+declared relationship applied to the projection, never one universal cutoff over every timestamp-shaped field.
 
 **The dataset as-of wall.** A dataset is only meaningful under the as-of it was frozen for. Reopening it — through
 `readDatasetDir` or `evaluate` — proves every row still obeys that clock: a decision, an input clock, a reference
@@ -131,15 +145,32 @@ classifier, causal / significance claim, profitability headline, composite ranki
 
 ### Producer / consumer bounds and provenance
 Writers enforce the SAME byte bounds their readers enforce (per line and per file), so no run can seal an output a
-reader would refuse; a bound tripped mid-file closes its descriptor and leaves no artifact. The manifest is written
-only after every data output has been re-read from disk and proved against its declared checksum, size and record
-count, and the declared member LIST is itself part of the contract (an omitted checksum entry is a corrupt manifest).
-An archive whose manifest claims it was created BEFORE a series it consumed is corrupt input; a genuinely absent
-creation clock stays an explicit `PROVENANCE_CLOCK_MISSING` limitation with unavailable labels. `codeIdentity`
-hashes the DISCOVERED source closure reachable from the entry points — including transitive dependencies such as the
-evidence contract the dossier validator executes — so a change confined to one of them changes the digest and the
-dirty verdict; a dirty closure is never attributed to a clean HEAD. That inventory is provenance only and grants no
-module any operational import or authority (the import fences decide that).
+reader would refuse; a bound tripped mid-file closes its descriptor and leaves no artifact. JSONL is read back
+incrementally — bounded chunks with an incomplete-line buffer and a streaming UTF-8 decoder, so peak memory is one
+chunk plus the longest record and a multi-byte character split by a chunk edge still parses; the descriptor is
+closed on every exit, including an early `break` by the caller.
+
+**A manifest is sealed only under the reader's own bundle law** (`research/bundle.js`). A checksum proves bytes were
+not altered afterwards; it never proved they were lawful. The SAME whole-bundle validator therefore runs twice: once
+on the unsealed candidate, before the manifest is written and while the run can still be abandoned, and once on
+reopening. So a row the pipeline's own validator rejects can no longer be sealed inside a perfectly checksummed
+artifact. The bundle law covers the member LIST (an omitted checksum entry is a corrupt manifest, not a smaller
+artifact), every declared checksum / size / record count, every row under its own validator, the snapshot's declared
+clock range against the records actually sealed, the dataset's declared census and counts against the aggregates
+RECOMPUTED from those rows, and `report.txt` against the deterministic rendering of the `evaluation.json` sealed
+beside it.
+
+An archive whose manifest claims it was created BEFORE a series it consumed is corrupt input. **A supplied
+`archiveCreatedTs` that is not a lawful UTC instant is also corrupt input** — a garbled clock is never silently
+rewritten as "no clock recorded"; only a genuinely absent one (null, or the key omitted) is the explicit
+`PROVENANCE_CLOCK_MISSING` limitation with unavailable labels. `codeIdentity` hashes the DISCOVERED source closure
+reachable from the entry points — including transitive dependencies such as the evidence contract the dossier
+validator executes — so a change confined to one of them changes the digest and the dirty verdict; a dirty closure
+is never attributed to a clean HEAD. Its law is one of four states: `PRODUCED_BY_UNCOMMITTED_SOURCE`,
+`PRODUCED_BY_COMMITTED_SOURCE`, `NO_GIT_CHECKOUT`, and **`SOURCE_CLEANLINESS_UNKNOWN`** — when a commit is named but
+the cleanliness check did not answer (git absent, refused or timed out), the artifact says so rather than claiming
+committed source. That inventory is provenance only and grants no module any operational import or authority (the
+import fences decide that).
 
 ### Resource limits (`research/contracts.js` `LIMITS`, recorded in every manifest)
 250,000 source events · 256 MiB cumulative journal payload · 100,000 projected snapshots · 50,000 selected rows ·

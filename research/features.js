@@ -8,7 +8,7 @@
 // descriptive cohort — no Social feature value is ever inferred for them. Row ids depend only on the recipe and the
 // original semantic identity, so appending later journal events never changes an earlier row's bytes or id.
 import { canonicalJson } from '../rumor2/truth.js';
-import { FEATURE_RECIPE_VERSION, FEATURE_ROW_KEYS, FEATURE_CATALOGUE, FEATURE_LEAF_VALUE_OK, COHORTS, ROW_STATUSES, AUTHORITY, PURPOSE, LIMITS, fail, isPlainObject, isTs, isCount, isCoin, isId, isCode, elementValue, catalogueArraysError, forbiddenLeafError, sha256Hex, exactKeys, deepFreeze, isFiniteNum } from './contracts.js';
+import { FEATURE_RECIPE_VERSION, FEATURE_ROW_KEYS, FEATURE_CATALOGUE, FEATURE_LEAF_VALUE_OK, ABSENCE_VALUES, ENTRANCE_LABELS, COHORTS, ROW_STATUSES, AUTHORITY, PURPOSE, LIMITS, fail, isPlainObject, isTs, isCount, isCoin, isId, isCode, elementValue, catalogueArraysError, arrayClockError, forbiddenLeafError, sha256Hex, exactKeys, deepFreeze, isFiniteNum } from './contracts.js';
 import { validateSnapshotRecord } from './snapshot.js';
 
 export const SOURCE_PROFILE_CONTEXT = 'NOT_RECORDED_IN_DOSSIER'; // never reconstructed from a current profile
@@ -87,14 +87,28 @@ export function validateFeatureRow(r) {
   if (r.cohort === 'PRIMARY') {
     if (!isId(r.episodeId) || !isId(r.dossierId) || r.sweepId !== null || r.shadowContext !== null) return 'feature row: primary identity malformed';
     if (r.rowId !== featureRowIdentity({ cohort: 'PRIMARY', sourceEventId: r.sourceEventId, dossierId: r.dossierId, episodeId: r.episodeId, canonicalCoin: r.canonicalCoin })) return 'feature row: rowId is not the semantic identity';
-    for (const spec of FEATURE_CATALOGUE) { const has = spec.name in r.features; const absent = spec.name in r.absentFeatures; if (has === absent) return `feature row: ${spec.name} must be present xor absent`; if (has && !FEATURE_LEAF_VALUE_OK(spec, r.features[spec.name])) return `feature row: ${spec.name} unsupported`; }
+    // OPTIONALITY IS NOT NULLABILITY: a catalogued REQUIRED leaf may never be omitted nor moved into the absence map.
+    // Only a leaf the catalogue declares optional can be absent, and only under a lawful absence marker.
+    for (const spec of FEATURE_CATALOGUE) {
+      const has = spec.name in r.features; const absent = spec.name in r.absentFeatures;
+      if (has === absent) return `feature row: ${spec.name} must be present xor absent`;
+      if (has && !FEATURE_LEAF_VALUE_OK(spec, r.features[spec.name])) return `feature row: ${spec.name} unsupported`;
+      if (absent && !spec.optional) return `feature row: ${spec.name} is a required leaf and can never be declared absent`;
+      if (absent && !ABSENCE_VALUES.includes(r.absentFeatures[spec.name])) return `feature row: ${spec.name} carries an unlawful absence marker`;
+    }
     for (const n of Object.keys(r.features)) if (!FEATURE_CATALOGUE.some((s) => s.name === n)) return `feature row: undeclared feature ${n}`;
+    for (const n of Object.keys(r.absentFeatures)) if (!FEATURE_CATALOGUE.some((s) => s.name === n)) return `feature row: undeclared absent feature ${n}`;
     const ae = catalogueArraysError(r.arrays, { where: 'feature row' }); if (ae) return ae; // EXACT member keys / values, not merely a bounded length
-    if (!Array.isArray(r.entrances) || r.entrances.length === 0 || r.entrances.some((x) => !['MARKET_LED', 'PARTICIPATION_LED', 'INFORMATION_LED'].includes(x))) return 'feature row: entrances malformed';
+    if (!Array.isArray(r.entrances) || r.entrances.length === 0 || r.entrances.some((x) => !ENTRANCE_LABELS.includes(x))) return 'feature row: entrances malformed';
+    if ([...new Set(r.entrances)].length !== r.entrances.length) return 'feature row: entrances repeat';
+    if (r.arrays.entrances.length !== r.entrances.length || r.entrances.some((x) => !r.arrays.entrances.includes(x))) return 'feature row: the projected entrances disagree with the row entrances';
     // the row's own copies must agree with the catalogued clocks / identities they duplicate
     if (r.features['decision.featureAsOfTs'] !== r.featureAsOfTs || r.features['decision.decisionKnownAtTs'] !== r.decisionKnownAtTs) return 'feature row: the recorded decision clocks disagree with the row clocks';
     if (r.features['episode.episodeId'] !== r.episodeId || r.features['episode.basis'] !== r.episodeBasis || r.features['dossier.researchState'] !== r.researchState) return 'feature row: the recorded episode / state disagree with the row';
     if (r.features['decision.latestInputKnownAtTs'] > r.decisionKnownAtTs || r.features['episode.onsetKnownAtTs'] > r.decisionKnownAtTs) return 'feature row: an input cannot be known after the decision it fed';
+    // the SAME law applied to the NESTED inputs: a trigger, claim, coverage check, notice or dependency node cannot be
+    // known after the decision it fed, and cannot be observed after it became known
+    const ce = arrayClockError(r.arrays, r.decisionKnownAtTs, { where: 'feature row' }); if (ce) return ce;
     return null;
   }
   if (r.episodeId !== null || r.dossierId !== null || !isId(r.sweepId) || !isPlainObject(r.shadowContext) || r.researchState !== null || r.episodeBasis !== null) return 'feature row: shadow identity malformed';

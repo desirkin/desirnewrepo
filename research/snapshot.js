@@ -33,6 +33,7 @@ export function projectDossierEvent(ev, { originalSeq, origin }) {
     if (!r.present || !Array.isArray(r.value)) fail('VALIDATION_FAILURE', `dossier ${ev.dossierId}: array ${name} is not recorded`);
     if (r.value.length > spec.max) fail('VALIDATION_FAILURE', `dossier ${ev.dossierId}: array ${name} exceeds its bound ${spec.max}`);
     arrays[name] = r.value.map((el, i) => {
+      if (Array.isArray(spec.element)) { if (!spec.element.includes(el)) fail('VALIDATION_FAILURE', `dossier ${ev.dossierId}: ${name}[${i}] is not a value of its authoritative vocabulary`); return el; }
       if (spec.element === 'enum') { if (!spec.values.includes(el)) fail('VALIDATION_FAILURE', `dossier ${ev.dossierId}: ${name}[${i}] is not a closed value`); return el; }
       if (spec.element === 'code') { if (!isCode(el)) fail('VALIDATION_FAILURE', `dossier ${ev.dossierId}: ${name}[${i}] is not a closed code`); return el; }
       if (!isPlainObject(el)) fail('VALIDATION_FAILURE', `dossier ${ev.dossierId}: ${name}[${i}] malformed`);

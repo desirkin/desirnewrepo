@@ -217,7 +217,12 @@ async function syntheticRows() {
     const features = { ...base.features, 'episode.episodeId': episodeId, 'episode.onsetKnownAtTs': decisionMs - 4000, 'episode.onsetObservedTs': decisionMs - 4000, 'decision.featureAsOfTs': decisionMs, 'decision.decisionKnownAtTs': decisionMs, 'decision.latestInputKnownAtTs': decisionMs - 2000, 'decision.firstTriggerKnownAtTs': decisionMs - 4000, 'dependencies.truncated': truncated, 'participation.oldestKnownAtTs': decisionMs - 4000, 'participation.latestKnownAtTs': decisionMs - 4000 };
     const absent = { ...base.absentFeatures };
     if (unknownSupport) { features['marketDeep.ownerSnapshot.flow.cvdBaseUnits'] = 12.5; delete absent['marketDeep.ownerSnapshot.flow.cvdBaseUnits']; }
-    const arrays = { ...base.arrays, dependencyNodes: nodes.map((x) => ({ id: x.id, kind: x.kind, knownAtTs: x.knownAtTs ?? decisionMs - 3000 })), dependencyEdges: [], triggers: [{ kind: 'PARTICIPATION_LED', ref: `r2sv-${n.toString(16).padStart(40, 'c')}`, knownAtTs: decisionMs - 4000, observedTs: decisionMs - 4000 }], notices: notice ? [{ ref: `wideeye:${coin}:${decisionMs - 2000}`, verdict: 'RIPPLE', zVol: 4.5, zRet: 2.1, extension: 3.2, usdVol24h: 2_500_000, inDeepTape: false, observedTs: decisionMs - 2000, knownAtTs: decisionMs - 2000 }] : [] };
+    // every NESTED input clock moves with the synthetic decision clock: a row whose coverage check or claim is dated
+    // from the ORIGINAL fixture decision would be an input known after the decision it fed, which the row law refuses
+    const arrays = { ...base.arrays,
+      coverageProviders: (base.arrays.coverageProviders ?? []).map((p) => ({ ...p, checkedTs: p.checkedTs === null ? null : decisionMs - 3000 })),
+      claims: (base.arrays.claims ?? []).map((c) => ({ ...c, firstKnownTs: decisionMs - 4000, latestKnownTs: decisionMs - 3000 })),
+      dependencyNodes: nodes.map((x) => ({ id: x.id, kind: x.kind, knownAtTs: x.knownAtTs ?? decisionMs - 3000 })), dependencyEdges: [], triggers: [{ kind: 'PARTICIPATION_LED', ref: `r2sv-${n.toString(16).padStart(40, 'c')}`, knownAtTs: decisionMs - 4000, observedTs: decisionMs - 4000 }], notices: notice ? [{ ref: `wideeye:${coin}:${decisionMs - 2000}`, verdict: 'RIPPLE', zVol: 4.5, zRet: 2.1, extension: 3.2, usdVol24h: 2_500_000, inDeepTape: false, observedTs: decisionMs - 2000, knownAtTs: decisionMs - 2000 }] : [] };
     return { ...base, rowId: featureRowIdentity({ cohort: 'PRIMARY', sourceEventId, dossierId, episodeId, canonicalCoin: coin }), sourceEventId, dossierId, episodeId, canonicalCoin: coin, originalSeq: 100 + n, featureAsOfTs: decisionMs, decisionKnownAtTs: decisionMs, features, absentFeatures: absent, arrays };
   };
   return { mk, base };

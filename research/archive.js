@@ -53,7 +53,12 @@ export function readChildhoodArchive(dir, { limits = LIMITS } = {}) {
   const mf = readJsonFile(path.join(dir, 'manifest.json'), { limits }); const m = mf.value; consumedFiles['manifest.json'] = { sha256: mf.sha256, bytes: mf.bytes, declaredSha256_16: null };
   if (!isPlainObject(m)) fail('CORRUPT_INPUT', 'manifest.json is not an object');
   if (!SUPPORTED_ARCHIVE_SCHEMA_VERSIONS.includes(m.schemaVersion) || !SUPPORTED_CHILDHOOD_VERSIONS.includes(m.childhoodVersion)) fail('UNSUPPORTED_INPUT_VERSION', `archive schemaVersion ${String(m.schemaVersion).slice(0, 60)} / childhoodVersion ${String(m.childhoodVersion).slice(0, 40)} is not supported`);
-  const archiveCreatedTsMs = parseUtcInstant(m.archiveCreatedTs);
+  // ABSENT provenance and MALFORMED provenance are different facts. A manifest that never claims a creation clock is
+  // read with PROVENANCE_CLOCK_MISSING (an honest limitation); a manifest that SUPPLIES a value which is not a lawful
+  // UTC instant is a corrupt archive and is refused — a garbled clock is never silently rewritten as "no clock".
+  const archiveCreatedSupplied = 'archiveCreatedTs' in m && m.archiveCreatedTs !== null && m.archiveCreatedTs !== undefined;
+  const archiveCreatedTsMs = archiveCreatedSupplied ? parseUtcInstant(m.archiveCreatedTs) : null;
+  if (archiveCreatedSupplied && archiveCreatedTsMs === null) fail('CORRUPT_INPUT', `manifest.json supplies an archiveCreatedTs that is not a lawful UTC instant: ${String(m.archiveCreatedTs).slice(0, 60)}`);
   const declared = isPlainObject(m.sourceChecksumsSha256_16) ? m.sourceChecksumsSha256_16 : null;
   if (declared === null) fail('CORRUPT_INPUT', 'manifest.json declares no sourceChecksumsSha256_16');
   const tracks = {}; let oneMinute = null;

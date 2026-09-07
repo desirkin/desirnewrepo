@@ -7,7 +7,11 @@
 // type here has an exact key set and a version; readers revalidate on read; identities are semantic (sha256 of a
 // canonical form), never wall time, never a path, never random.
 import { createHash } from 'node:crypto';
-import { canonicalJson } from '../rumor2/truth.js';
+import { canonicalJson, RUMOR2_CLAIM_TYPES } from '../rumor2/truth.js';
+// The AUTHORITATIVE closed vocabularies, imported rather than restated: a projected member must be a value the
+// upstream law actually defines, not merely an uppercase-shaped token. (Provenance/vocabulary reuse only — this
+// grants no operational import or authority; the import fences decide that.)
+import { RESEARCH_ENTRANCE_KINDS, RESEARCH_STATES, RESEARCH_PROPOSAL_KINDS, RESEARCH_CROSS_SENSE, RESEARCH_PACKET_REASON_CODES, RESEARCH_DEPENDENCY_NODE_KINDS, RESEARCH_DEPENDENCY_RELATIONS } from '../rumor2/social-research-dossier.js';
 
 export const PIPELINE_VERSION = 'social-research-pipeline-1';
 export const SNAPSHOT_VERSION = 'social-research-snapshot-1';
@@ -97,6 +101,20 @@ export const NON_GROUPING_DEPENDENCY_KINDS = Object.freeze(['DOSSIER_FIELD', 'CO
 // leaf names that can never appear in a projection (free text / diagnostics / raw content)
 export const FORBIDDEN_LEAF_NAMES = Object.freeze(['note', 'notes', 'detail', 'description', 'reason', 'text', 'handle', 'displayName', 'questionToResolve', 'liquidityNote', 'authorMeta', 'packet', 'summary', 'title', 'link', 'error']);
 export const FORBIDDEN_LEAF_RE = /^(note|notes|detail|description|reason|text|handle|displayName|questionToResolve|liquidityNote|authorMeta|packet|summary|title|link|error)$/;
+// The ONLY lawful absence markers, and the nested INPUT-CLOCK law. Absence is not nullability: a leaf the catalogue
+// declares required may never be omitted or moved into the absence map, whatever value that map carries.
+export const ABSENCE_VALUES = Object.freeze(['NOT_RECORDED', 'SHADOW_ROW_NO_SOCIAL_DEPENDENCY']);
+// Which catalogued array members are KNOWLEDGE clocks (an input cannot be known after the derivation it fed) and
+// which are OBSERVATION clocks (a thing is observed at or before it becomes known). These are the dossier's own
+// relationships, applied to the projection — never one universal cutoff over every timestamp-shaped field.
+export const ARRAY_CLOCK_LAW = Object.freeze({
+  triggers: { known: ['knownAtTs'], observedBeforeKnown: [['observedTs', 'knownAtTs']] },
+  claims: { known: ['firstKnownTs', 'latestKnownTs'], observedBeforeKnown: [['firstKnownTs', 'latestKnownTs']] },
+  coverageProviders: { known: ['checkedTs'], observedBeforeKnown: [] },
+  notices: { known: ['knownAtTs'], observedBeforeKnown: [['observedTs', 'knownAtTs']] },
+  dependencyNodes: { known: ['knownAtTs'], observedBeforeKnown: [] },
+});
+export const ENTRANCE_LABELS = RESEARCH_ENTRANCE_KINDS; // the row-level entrance labels ARE the dossier's trigger kinds
 export const MAX_ID_CHARS = 200;
 export const MAX_CODE_CHARS = 48;
 // THE canonical asset identity law — the same expression the dossier / shadow validators enforce
@@ -109,6 +127,7 @@ export const isCode = (v) => typeof v === 'string' && CODE_RE.test(v);
 export const isId = (v) => typeof v === 'string' && v.length > 0 && v.length <= MAX_ID_CHARS && !/\s/.test(v);
 // ONE element-value law for every catalogued bounded-array member ('<kind>?' admits null)
 export function elementValue(kind, v) {
+  if (Array.isArray(kind)) return kind.includes(v); // an authoritative closed vocabulary
   const optional = kind.endsWith('?'); const k = optional ? kind.slice(0, -1) : kind;
   if (v === null) return optional;
   switch (k) {
@@ -188,7 +207,7 @@ export const FEATURE_CATALOGUE = deepFreeze([
   F('decision.decisionKnownAtTs', ['knownAtTs'], 'ts', 'epoch_ms', 'never null (the durable event clock; outcome anchor)', NONE),
   F('decision.latestInputKnownAtTs', ['latestInputKnownAtTs'], 'ts', 'epoch_ms', 'never null', NONE),
   F('decision.firstTriggerKnownAtTs', ['firstTriggerKnownAtTs'], 'ts', 'epoch_ms', 'never null', NONE),
-  F('dossier.researchState', ['researchState'], 'enum', 'closed', 'never null', NONE, { values: ['INVESTIGATE', 'KEEP_OBSERVING', 'DATA_INSUFFICIENT', 'DATA_UNAVAILABLE'] }),
+  F('dossier.researchState', ['researchState'], 'enum', 'closed', 'never null', NONE, { values: RESEARCH_STATES }),
   F('dossier.packetStatus', ['packetStatus'], 'enum', 'closed', 'never null', NONE, { values: ['VALID', 'PACKET_UNREPRESENTABLE_V1_TRIGGER', 'PACKET_WITHHELD_CONTRACT_FAILURE'] }),
   F('dossier.packetId', ['packetId'], 'id', 'opaque_ref', 'null = no VALID packet', NONE, { nullable: true }),
   F('dossier.inputDigest', ['inputDigest'], 'id', 'sha1_hex', 'never null', NONE), F('dossier.materialDigest', ['materialDigest'], 'id', 'sha1_hex', 'never null', NONE),
@@ -263,18 +282,18 @@ for (const s of FEATURE_CATALOGUE) {
 }
 // bounded arrays copied beside the leaves (each element is itself a closed shape)
 export const ARRAY_CATALOGUE = deepFreeze({
-  entrances: { path: ['entrances'], max: 3, element: 'enum', values: ['MARKET_LED', 'PARTICIPATION_LED', 'INFORMATION_LED'] },
-  triggers: { path: ['dossier', 'entrances', 'triggers'], max: 16, element: 'object', keys: { kind: 'code', ref: 'id', knownAtTs: 'ts', observedTs: 'ts?' } },
-  claims: { path: ['dossier', 'information', 'claims'], max: 12, element: 'object', keys: { claimRef: 'id', claimType: 'code', status: 'code', firstKnownTs: 'ts', latestKnownTs: 'ts', sourceCount: 'count', providers: 'codes' } },
+  entrances: { path: ['entrances'], max: 3, element: 'enum', values: RESEARCH_ENTRANCE_KINDS },
+  triggers: { path: ['dossier', 'entrances', 'triggers'], max: 16, element: 'object', keys: { kind: RESEARCH_ENTRANCE_KINDS, ref: 'id', knownAtTs: 'ts', observedTs: 'ts?' } },
+  claims: { path: ['dossier', 'information', 'claims'], max: 12, element: 'object', keys: { claimRef: 'id', claimType: RUMOR2_CLAIM_TYPES, status: 'code', firstKnownTs: 'ts', latestKnownTs: 'ts', sourceCount: 'count', providers: 'codes' } },
   coverageProviders: { path: ['dossier', 'participation', 'coverage', 'providers'], max: 16, element: 'object', keys: { provider: 'code', state: 'code', checkedTs: 'ts?' } },
   coverageReasons: { path: ['dossier', 'participation', 'coverage', 'comparability', 'reasons'], max: 16, element: 'code' },
   notices: { path: ['dossier', 'marketLight', 'notices'], max: 8, element: 'object', keys: { ref: 'id', verdict: 'code', zVol: 'number?', zRet: 'number?', extension: 'number?', usdVol24h: 'number?', inDeepTape: 'bool', observedTs: 'ts', knownAtTs: 'ts' } },
-  crossSense: { path: ['dossier', 'crossSense', 'descriptors'], max: 16, element: 'code' },
+  crossSense: { path: ['dossier', 'crossSense', 'descriptors'], max: 16, element: RESEARCH_CROSS_SENSE },
   missingKinds: { path: ['dossier', 'missing'], max: 24, element: 'object', keys: { kind: 'code' } },
-  proposalKinds: { path: ['proposalKinds'], max: 8, element: 'code' },
-  packetReasonCodes: { path: ['packetReasonCodes'], max: 8, element: 'code' },
-  dependencyNodes: { path: ['dossier', 'dependencies', 'nodes'], max: 192, element: 'object', keys: { id: 'id', kind: 'code', knownAtTs: 'ts?' } },
-  dependencyEdges: { path: ['dossier', 'dependencies', 'edges'], max: 384, element: 'object', keys: { from: 'id', to: 'id', relation: 'code' } },
+  proposalKinds: { path: ['proposalKinds'], max: 8, element: RESEARCH_PROPOSAL_KINDS },
+  packetReasonCodes: { path: ['packetReasonCodes'], max: 8, element: RESEARCH_PACKET_REASON_CODES },
+  dependencyNodes: { path: ['dossier', 'dependencies', 'nodes'], max: 192, element: 'object', keys: { id: 'id', kind: RESEARCH_DEPENDENCY_NODE_KINDS, knownAtTs: 'ts?' } },
+  dependencyEdges: { path: ['dossier', 'dependencies', 'edges'], max: 384, element: 'object', keys: { from: 'id', to: 'id', relation: RESEARCH_DEPENDENCY_RELATIONS } },
 });
 // documented support windows of the market-light notice fields (wide eye): zVol / zRet are z-scored against the
 // seven-day trailing baseline; extension is the 15-minute return; usdVol24h is the venue's rolling 24h figure
@@ -312,6 +331,7 @@ export function catalogueArrayError(name, arr) {
   if (arr.length > spec.max) return `array ${name} exceeds its bound ${spec.max}`;
   for (let i = 0; i < arr.length; i += 1) {
     const el = arr[i];
+    if (Array.isArray(spec.element)) { if (!spec.element.includes(el)) return `${name}[${i}] is not a value of its authoritative vocabulary`; continue; }
     if (spec.element === 'enum') { if (!spec.values.includes(el)) return `${name}[${i}] is not a closed value`; continue; }
     if (spec.element === 'code') { if (!isCode(el)) return `${name}[${i}] is not a closed code`; continue; }
     if (!isPlainObject(el)) return `${name}[${i}] is not an object`;
@@ -325,6 +345,24 @@ export function catalogueArraysError(arrays, { where = 'record' } = {}) {
   if (!isPlainObject(arrays)) return `${where}: arrays container malformed`;
   for (const name of Object.keys(arrays)) if (!(name in ARRAY_CATALOGUE)) return `${where}: undeclared array ${name}`;
   for (const name of Object.keys(ARRAY_CATALOGUE)) { const e = catalogueArrayError(name, arrays[name]); if (e) return `${where}: ${e}`; }
+  return null;
+}
+// THE nested INPUT-CLOCK law, shared by generation, reopening and evaluation (never re-copied per caller): every
+// catalogued array member clock declared a KNOWLEDGE clock must fall at or before the derivation it fed, and every
+// observation clock at or before the knowledge clock it belongs to. This is the dossier's own relationship applied
+// to the projection — a member whose clock runs past the decision is a future input, not a late record.
+export function arrayClockError(arrays, derivedKnownAtTs, { where = 'record' } = {}) {
+  if (!isPlainObject(arrays)) return `${where}: arrays container malformed`;
+  if (!isTs(derivedKnownAtTs)) return `${where}: a derivation clock is required to check its inputs`;
+  for (const [name, law] of Object.entries(ARRAY_CLOCK_LAW)) {
+    const arr = arrays[name]; if (arr === undefined) continue;
+    if (!Array.isArray(arr)) return `${where}: array ${name} is not a list`;
+    for (let i = 0; i < arr.length; i += 1) {
+      const el = arr[i]; if (!isPlainObject(el)) continue; // shape is catalogueArraysError's law, not this one
+      for (const key of law.known) { const v = el[key]; if (v === null || v === undefined) continue; if (!isTs(v)) return `${where}: ${name}[${i}].${key} is not a clock`; if (v > derivedKnownAtTs) return `${where}: ${name}[${i}].${key} is known after the derivation it fed`; }
+      for (const [early, late] of law.observedBeforeKnown) { const a = el[early]; const b = el[late]; if (a === null || a === undefined || b === null || b === undefined) continue; if (!isTs(a) || !isTs(b)) return `${where}: ${name}[${i}] carries a malformed clock pair`; if (a > b) return `${where}: ${name}[${i}].${early} follows ${name}[${i}].${late}`; }
+    }
+  }
   return null;
 }
 export const featureSpec = (name) => FEATURE_CATALOGUE.find((f) => f.name === name) ?? null;

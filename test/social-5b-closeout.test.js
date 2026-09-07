@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { canonicalJson } from '../rumor2/truth.js';
 import { RESEARCH_DOSSIER_EVENT_TYPE, validateResearchDossierEvent, isLegacyResearchDossierEvent } from '../rumor2/social-research-dossier.js';
 import { createResearchStrainer } from '../rumor2/social-research-runtime.js';
-import { LIMITS, sha256Hex, FEATURE_CATALOGUE, FEATURE_LEAF_VALUE_OK, featureSpec, isCoin, isCode, catalogueArrayError, forbiddenLeafError, ARRAY_CATALOGUE, ResearchError, LABEL_HORIZONS_MIN } from '../research/contracts.js';
+import { LIMITS, sha256Hex, FEATURE_CATALOGUE, FEATURE_LEAF_VALUE_OK, featureSpec, isCoin, isCode, catalogueArrayError, forbiddenLeafError, ARRAY_CATALOGUE, ResearchError, LABEL_HORIZONS_MIN, fail } from '../research/contracts.js';
 import { projectEventList, validateSnapshotRecord } from '../research/snapshot.js';
 import { selectResearchRows, validateFeatureRow } from '../research/features.js';
 import { labelRow, validateOutcomeRow } from '../research/outcomes.js';
@@ -166,10 +166,17 @@ test('C4 (F4). producer and consumer share one byte bound: a writer refuses to s
   assert.equal(n, 1); assert.equal(o2.lines, 1);
   assert.equal(await codeOf(async () => writeJsonFile(res2, 'big.json', { pad: 'x'.repeat(1000) }, { limits: lim })), 'RESOURCE_LIMIT_EXCEEDED');
   // publishing validates every declared output against the bytes on disk, its record count and the reader's limits
-  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': { ...o2, sha256: 'f'.repeat(64) } } }, { outputs: { 'rows.jsonl': { ...o2, sha256: 'f'.repeat(64) } }, limits: lim })), 'CORRUPT_INPUT');
+  const LAW = () => {}; // a trivial stand-in for THIS test's ad-hoc artifact; the real publishers pass the real bundle law
+  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': { ...o2, sha256: 'f'.repeat(64) } } }, { outputs: { 'rows.jsonl': { ...o2, sha256: 'f'.repeat(64) } }, limits: lim, bundle: LAW })), 'CORRUPT_INPUT');
   assert.ok(!existsSync(path.join(res2.dir, 'm.json')), 'no manifest is sealed over an unverified output');
-  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', {}, { outputs: { 'rows.jsonl': { ...o2, lines: 99 } }, limits: lim })), 'CORRUPT_INPUT', 'a declared record count must match the file');
-  publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': o2 } }, { outputs: { 'rows.jsonl': o2 }, limits: lim });
+  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', {}, { outputs: { 'rows.jsonl': { ...o2, lines: 99 } }, limits: lim, bundle: LAW })), 'CORRUPT_INPUT', 'a declared record count must match the file');
+  // and a manifest may not be sealed under NO law at all: checksums prove bytes did not change, never that they were lawful
+  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': o2 } }, { outputs: { 'rows.jsonl': o2 }, limits: lim })), 'INTERNAL_FAILURE', 'the delivered defect: a checksummed artifact could be sealed without the reader\'s own law');
+  assert.ok(!existsSync(path.join(res2.dir, 'm.json')));
+  // a law that refuses the candidate stops the seal, and nothing is written
+  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': o2 } }, { outputs: { 'rows.jsonl': o2 }, limits: lim, bundle: () => fail('CORRUPT_INPUT', 'the reader would refuse this row') })), 'CORRUPT_INPUT');
+  assert.ok(!existsSync(path.join(res2.dir, 'm.json')));
+  publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': o2 } }, { outputs: { 'rows.jsonl': o2 }, limits: lim, bundle: LAW });
   assert.ok(existsSync(path.join(res2.dir, 'm.json')));
   // the declared member LIST is part of the contract: an omitted entry is corrupt, not "everything listed matched"
   assert.equal(await codeOf(async () => verifyOutputs(res2.dir, { 'rows.jsonl': o2 }, { limits: lim, expected: ['rows.jsonl', 'other.jsonl'] })), 'CORRUPT_INPUT');
@@ -189,8 +196,13 @@ test('C5 (F5). archive provenance: a manifest claiming the archive was created B
   // equality is lawful (retrieved exactly when the archive was created)
   ARCHIVE(path.join(W, 'equal'), { createdMs: (SEC(T0) + 5 * 3600) * 1000, retrievedSec: SEC(T0) + 5 * 3600 });
   assert.equal(readChildhoodArchive(path.join(W, 'equal')).census.tracks['1m'].symbols, 1);
-  // MISSING (not contradictory) provenance: unavailable coverage, never a rejection and never a guessed clock
-  writeChildhoodArchive(path.join(W, 'noclock'), { series: [{ symbol: 'ZQQ7', candles: linearBars({ fromSec: SEC(T0) - 600, toSec: SEC(T0) + 3600 }) }], archiveCreatedTs: 'not-a-clock', retrievedSec: SEC(T0) + 3600 });
+  // ABSENT provenance and MALFORMED provenance are DIFFERENT facts and are never collapsed into one.
+  // A SUPPLIED value that is not a lawful UTC instant is a corrupt archive, not "no clock recorded":
+  writeChildhoodArchive(path.join(W, 'garbled'), { series: [{ symbol: 'ZQQ7', candles: linearBars({ fromSec: SEC(T0) - 600, toSec: SEC(T0) + 3600 }) }], archiveCreatedTs: 'not-a-clock', retrievedSec: SEC(T0) + 3600 });
+  assert.equal(await codeOf(async () => readChildhoodArchive(path.join(W, 'garbled'))), 'CORRUPT_INPUT', 'the delivered defect: a garbled creation clock was silently rewritten as an absent one');
+  assert.match(await msgOf(async () => readChildhoodArchive(path.join(W, 'garbled'))), /supplies an archiveCreatedTs that is not a lawful UTC instant/);
+  // a genuinely ABSENT clock (null, or the key omitted) stays an explicit unavailable-coverage limitation
+  writeChildhoodArchive(path.join(W, 'noclock'), { series: [{ symbol: 'ZQQ7', candles: linearBars({ fromSec: SEC(T0) - 600, toSec: SEC(T0) + 3600 }) }], archiveCreatedTs: null, retrievedSec: SEC(T0) + 3600 });
   const nc = readChildhoodArchive(path.join(W, 'noclock'));
   assert.equal(nc.archiveCreatedTsMs, null); assert.ok(nc.limitations.includes('PROVENANCE_CLOCK_MISSING'));
   assert.equal(labelRow({ rowId: 'r', cohort: 'PRIMARY', canonicalCoin: 'ZQQ7', decisionKnownAtTs: T0 + 5000 }, { archive: nc, asOfTs: ASOF }).availability.reason, 'PROVENANCE_CLOCK_MISSING');

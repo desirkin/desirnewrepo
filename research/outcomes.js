@@ -67,7 +67,8 @@ export function validateOutcomeRow(r) {
   if (typeof r.rowId !== 'string' || r.rowId.length === 0 || !COHORTS.includes(r.cohort) || !isCoin(r.canonicalCoin) || !isTs(r.decisionKnownAtTs) || !isTs(r.anchorTsMs) || r.sourceTrack !== '1m') return 'outcome row: identity malformed';
   const a = anchorOf(r.decisionKnownAtTs); if (r.anchorTsMs !== a.anchorTsMs || r.anchorLagMs !== a.anchorLagMs) return 'outcome row: anchor is not the recipe anchor';
   if (r.authority !== AUTHORITY || r.purpose !== PURPOSE) return 'outcome row: authority must be NONE / RESEARCH_ONLY';
-  if (!isPlainObject(r.availability) || !['AVAILABLE', 'PARTIAL', 'UNAVAILABLE'].includes(r.availability.state) || !LABEL_REASONS.includes(r.availability.reason)) return 'outcome row: availability malformed';
+  // a CLOSED object, not merely one carrying two recognized fields: an availability verdict is never a place to smuggle a payload
+  if (!isPlainObject(r.availability) || exactKeys(r.availability, ['state', 'reason']) || !['AVAILABLE', 'PARTIAL', 'UNAVAILABLE'].includes(r.availability.state) || !LABEL_REASONS.includes(r.availability.reason)) return 'outcome row: availability malformed';
   if (!isPlainObject(r.reference) || exactKeys(r.reference, ['state', 'barOpenSec', 'price', 'knownAtTs']) || !['KNOWN', 'NOT_YET_KNOWN', 'OUTCOME_UNAVAILABLE'].includes(r.reference.state)) return 'outcome row: reference malformed';
   if (r.reference.state !== 'KNOWN' && (r.reference.price !== null || r.reference.barOpenSec !== null)) return 'outcome row: a reference price is exposed before its knowledge floor';
   // the reference bar is the one CLOSING at the anchor, and Cobra learns it no earlier than the anchor itself
@@ -83,6 +84,9 @@ export function validateOutcomeRow(r) {
     // the knowledge floor can never precede the horizon it describes, and an unavailable horizon has no floor at all
     if (x.state === 'OUTCOME_UNAVAILABLE') { if (x.outcomeKnownAtTs !== null) return `outcome row: horizon ${h}m is unavailable yet carries a knowledge floor`; }
     else if (!isTs(x.outcomeKnownAtTs) || x.outcomeKnownAtTs < x.horizonEndTs) return `outcome row: horizon ${h}m knowledge floor precedes the horizon end`;
+    // AND its own reference's floor: an excursion measured against a reference price Cobra could not read until the
+    // archive existed is not learnable before that archive, whatever the horizon's own end says
+    else if (isTs(r.reference.knownAtTs) && x.outcomeKnownAtTs < r.reference.knownAtTs) return `outcome row: horizon ${h}m knowledge floor precedes its own reference floor`;
     if (x.state === 'KNOWN') {
       if (!isFiniteNum(x.mfePct) || !isFiniteNum(x.maePct) || x.mfePct < 0 || x.maePct > 0) return `outcome row: horizon ${h}m KNOWN values malformed`;
       if (r.reference.state !== 'KNOWN') return `outcome row: horizon ${h}m is KNOWN while its reference price is not`; // an excursion cannot be known before its own reference

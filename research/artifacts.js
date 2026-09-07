@@ -7,7 +7,7 @@
 // paths, credentials or random ids inside an artifact.
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { mkdirSync, openSync, writeSync, closeSync, fsyncSync, renameSync, readFileSync, statSync, realpathSync, existsSync, unlinkSync, rmdirSync, readdirSync } from 'node:fs';
+import { mkdirSync, openSync, readSync, writeSync, closeSync, fsyncSync, renameSync, readFileSync, statSync, realpathSync, existsSync, unlinkSync, rmdirSync, readdirSync } from 'node:fs';
 import { LIMITS, ResearchError, fail, sha256Hex, isPlainObject } from './contracts.js';
 
 const realOrParent = (p) => { const abs = path.resolve(p); try { return realpathSync(abs); } catch { return path.join(realOrParent(path.dirname(abs)), path.basename(abs)); } };
@@ -70,10 +70,15 @@ function writeBounded(reservation, name, text, { limits = LIMITS } = {}) {
 export const writeJsonFile = (reservation, name, obj, opts = {}) => writeBounded(reservation, name, `${JSON.stringify(obj, null, 1)}\n`, opts);
 export const writeTextFile = (reservation, name, text, opts = {}) => writeBounded(reservation, name, text, opts);
 // The manifest is the LAST file, and it is written only after every DATA output has been re-read from disk and
-// proved to match its declared checksum, size, record count and the reader's own limits (F4): a completed manifest
-// therefore never seals bytes a reader would refuse. An interrupted run leaves no manifest, hence no readable artifact.
-export function publishManifest(reservation, name, manifest, { outputs = null, limits = LIMITS } = {}) {
+// proved to match its declared checksum, size, record count and the reader's own limits (F4) AND to satisfy the
+// reader's OWN bundle law (F2/F4) — the very validator that will run when somebody reopens the artifact. A checksum
+// only proves bytes did not change afterwards; it never proved they were lawful, so a row the pipeline's own
+// validator rejects could previously be sealed and refused only on some later read. `bundle` is therefore REQUIRED:
+// a caller may not seal an artifact under no law at all. An interrupted run leaves no manifest, hence no artifact.
+export function publishManifest(reservation, name, manifest, { outputs = null, limits = LIMITS, bundle = null } = {}) {
   if (outputs) verifyOutputs(reservation.dir, outputs, { limits, expected: Object.keys(outputs) });
+  if (typeof bundle !== 'function') fail('INTERNAL_FAILURE', `${name}: a manifest may only be sealed under the reader's own bundle law`);
+  bundle(reservation.dir); // throws a ResearchError on anything the reader would refuse — nothing is sealed
   return writeJsonFile(reservation, name, manifest, { limits });
 }
 
@@ -104,9 +109,50 @@ export function* readJsonlStrictFromBuffer(buf, name, { limits = LIMITS } = {}) 
     yield v;
   }
 }
-// strict bounded JSONL: every line must parse (a blank trailing line is the terminator only); a bad line is corruption
+// STRICT BOUNDED JSONL, READ INCREMENTALLY. The file is consumed in bounded chunks with an incomplete-line buffer,
+// so peak memory is one chunk plus the longest single record — never the whole file — while the SAME per-line bound,
+// the same cumulative file bound and the same blank-line law apply. Multi-byte UTF-8 is decoded across chunk
+// boundaries by a streaming decoder, so a character split by a chunk edge is never mangled into a parse failure.
+// The descriptor is closed on EVERY exit: normal end, a bound or parse failure, and an early `break` by the caller
+// (which runs the generator's `finally`).
+export const JSONL_CHUNK_BYTES = 1 << 20;
 export function* readJsonlStrict(file, { limits = LIMITS } = {}) {
-  yield* readJsonlStrictFromBuffer(readBoundedFile(file, { limits }), path.basename(file), { limits });
+  let st; try { st = statSync(file); } catch { fail('CORRUPT_INPUT', `${path.basename(file)} is missing`); }
+  if (!st.isFile()) fail('CORRUPT_INPUT', `${path.basename(file)} is not a file`);
+  if (st.size > limits.maxInputFileBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${path.basename(file)} exceeds ${limits.maxInputFileBytes} bytes`);
+  const name = path.basename(file);
+  let fd; try { fd = openSync(file, 'r'); } catch (err) { fail(err?.code === 'EACCES' || err?.code === 'EPERM' ? 'PERMISSION_FAILURE' : 'IO_FAILURE', `cannot read ${name}`); }
+  const decoder = new TextDecoder('utf-8');
+  const chunk = Buffer.allocUnsafe(JSONL_CHUNK_BYTES);
+  let carry = ''; let lineNo = 0; let consumed = 0; let sawTerminator = false;
+  const parseLine = (line) => {
+    lineNo += 1;
+    if (line.length === 0) { if (sawTerminator) fail('CORRUPT_INPUT', `${name}:${lineNo} blank line inside the file`); sawTerminator = true; return null; }
+    if (sawTerminator) fail('CORRUPT_INPUT', `${name}:${lineNo} blank line inside the file`);
+    if (Buffer.byteLength(line, 'utf8') > limits.maxJsonlLineBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}:${lineNo} exceeds ${limits.maxJsonlLineBytes} bytes`);
+    let v; try { v = JSON.parse(line); } catch { fail('CORRUPT_INPUT', `${name}:${lineNo} does not parse`); }
+    if (!isPlainObject(v)) fail('CORRUPT_INPUT', `${name}:${lineNo} is not an object`);
+    return v;
+  };
+  try {
+    for (;;) {
+      let n; try { n = readSync(fd, chunk, 0, chunk.length, null); } catch { fail('IO_FAILURE', `cannot read ${name}`); }
+      if (n === 0) break;
+      consumed += n;
+      if (consumed > limits.maxInputFileBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name} exceeds ${limits.maxInputFileBytes} bytes`);
+      carry += decoder.decode(chunk.subarray(0, n), { stream: true });
+      let nl;
+      while ((nl = carry.indexOf('\n')) !== -1) {
+        const line = carry.slice(0, nl); carry = carry.slice(nl + 1);
+        // a carried partial line may never grow past the per-line bound before its terminator arrives
+        if (Buffer.byteLength(line, 'utf8') > limits.maxJsonlLineBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}:${lineNo + 1} exceeds ${limits.maxJsonlLineBytes} bytes`);
+        const v = parseLine(line); if (v !== null) yield v;
+      }
+      if (Buffer.byteLength(carry, 'utf8') > limits.maxJsonlLineBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}:${lineNo + 1} exceeds ${limits.maxJsonlLineBytes} bytes`);
+    }
+    carry += decoder.decode(); // flush any pending multi-byte sequence
+    if (carry.length > 0) { const v = parseLine(carry); if (v !== null) yield v; }
+  } finally { try { closeSync(fd); } catch { /* already gone */ } }
 }
 export const fileSha256 = (file, opts) => sha256Hex(readBoundedFile(file, opts));
 // Verify the members a manifest declares (name -> { sha256, bytes, lines? }) against the exact bytes on disk, under

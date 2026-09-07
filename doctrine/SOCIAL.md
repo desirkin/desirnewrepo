@@ -2239,6 +2239,74 @@ tests reseal their checksums so the semantic validators are what actually run.
 packet limitations remain honestly deferred and are not these defects. Authority stays `NONE` /
 `RESEARCH_ONLY` on every surface.
 
+### 5X. SOCIAL-5B REMAINING TRUTH-BOUNDARY REPAIR — eight residual defects closed
+
+A second independent review of the SOCIAL-5B delivery (`865a07a`) accepted the F1–F6 closeout and found eight
+REMAINING boundary defects still reproducible on unchanged production code. All eight were reproduced first, then
+repaired together as one closeout. No provider was activated, no data acquired, no configuration, dependency,
+durable schema, journal, ledger, cost, controls, risk, execution or trading-permission path changed, no stage
+calibration was performed, and no expected count was moved to match an over-permissive validator: where the honest
+answer is zero it stays zero and the doctored input is REFUSED instead. The repairs share one validator between
+generation, reopening and evaluation rather than patching each caller with its own copy of the same law.
+
+**R1 — a horizon could claim to be learnable before its own reference was.** Every horizon floor was checked against
+its own end but not against the reference floor it depends on, so cloning a lawful outcome and setting every
+`outcomeKnownAtTs` to its `horizonEndTs` — reference clock and every value untouched — turned an honest count of
+zero as-of-trainable discovery labels into one. `validateOutcomeRow` now requires each applicable floor to respect
+its reference floor as well as its own end; the doctored row is `CORRUPT_INPUT` and the count stays zero.
+
+**R2 — nested input clocks escaped the row's own clock law.** The row-level "an input cannot be known after the
+decision it fed" was enforced only on the row's scalar clocks, so a wide-eye notice dated after the dataset as-of
+validated and evaluated. A declared `ARRAY_CLOCK_LAW` — the dossier's own knowledge and observation relationships,
+never one universal cutoff over every timestamp-shaped field — now covers trigger, claim, coverage-check, notice and
+dependency-node clocks, in both directions (known-after-derivation, observed-after-known).
+
+**R3 — optionality was treated as nullability.** A catalogue leaf declared REQUIRED could be deleted from `features`
+and declared `NOT_RECORDED` in `absentFeatures`, and the row validated. A required leaf can now never be absent
+whatever marker the map carries; absence markers are the lawful two only; the absence map carries no undeclared
+name; and the row's `entrances` must equal its own projected entrances without repeats.
+
+**R4 — a fabricated member value passed as a closed code.** Member enums were shape-checked (`'code'`), so
+`dependencyNodes[0].kind = 'MADE_UP_KIND'` validated. The catalogue now binds the AUTHORITATIVE upstream
+vocabularies by import — entrance kinds, research states, claim types, cross-sense descriptors, proposal kinds,
+packet reason codes, dependency node kinds and edge relations — so a projected member must be a value the upstream
+law actually defines. That import is vocabulary reuse only and grants no operational import or authority.
+
+**R5 — an outcome verdict was an open object.** `availability` accepted any extra field beside a recognized state
+and reason, so raw content rode through validation and evaluation. It is now an exactly-keyed closed object, like
+the reference and every horizon beside it.
+
+**R6 — the publisher could seal what its own reader refuses.** Publication verified checksums, sizes and record
+counts — which prove bytes were not altered afterwards, never that they were lawful — so a correctly checksummed
+JSONL feature row carrying a dependency-node `text` field sealed cleanly and was refused only on some later read. A
+shared `research/bundle.js` now states the whole-bundle law once and runs it TWICE: on the unsealed candidate before
+the manifest is written, and on reopening. Sealing without that law is refused outright. The law covers the member
+LIST, every row under its own validator, the snapshot's declared clock range against the records sealed, the
+dataset's declared census and counts against the aggregates RECOMPUTED from those rows, and `report.txt` against the
+deterministic rendering of the `evaluation.json` beside it.
+
+**R7 — a garbled provenance clock was rewritten as an absent one.** A supplied `archiveCreatedTs` of `'not-a-clock'`
+became the honest-looking `PROVENANCE_CLOCK_MISSING` limitation. Absent and malformed provenance are now different
+facts: a supplied non-instant is `CORRUPT_INPUT`; only a null or omitted clock is the limitation. This defect alone
+does not demonstrate numerical leakage — labels are `OUTCOME_UNAVAILABLE` either way — what it hid was a corrupt
+archive presented as an honest coverage gap.
+
+**R8 — unknown source cleanliness was reported as clean.** `identityLaw({ gitCommit: <valid SHA>, gitSourceDirty:
+null })` returned `PRODUCED_BY_COMMITTED_SOURCE`, so a cleanliness check that never answered (git absent, refused,
+timed out) was read as a clean one. `SOURCE_CLEANLINESS_UNKNOWN` is now its own state, and the real `codeIdentity`
+status-failure branch is exercised under a controlled `git` fixture on `PATH` — the repository itself untouched.
+
+**Also in this closeout.** JSONL artifacts are read back genuinely incrementally (bounded chunks, an incomplete-line
+buffer and a streaming UTF-8 decoder across chunk boundaries, the descriptor closed on every exit including an early
+caller `break`). Two existing fixtures that encoded a repaired defect were corrected rather than the law relaxed: a
+synthetic row set whose nested coverage clocks were left at the original fixture decision, and the archive test that
+used `'not-a-clock'` to mean "no clock".
+
+**Unchanged.** Real history is still NOT evaluated; stage calibration remains NOT PERFORMED with the live stage
+`UNKNOWN / calibrated:false`; the independent stage labels, the claim-association seam and the `serpent-evidence-1`
+packet limitations remain honestly deferred and are not these defects. The five legacy execution assets are not a
+research universe. Authority stays `NONE` / `RESEARCH_ONLY` on every surface.
+
 ---
 
 ## 6. Authority audit
