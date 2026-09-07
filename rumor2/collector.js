@@ -66,6 +66,7 @@ import { buildSocialFilter } from './social.js';
 import { createXRuntime, xConfigFromEnv } from './x-runtime.js';
 import { parseSocialResearchConfig, createResearchScopeSource } from './social-catalog.js';
 import { resolveXWatchScope, buildWatchPlan } from './social-watch-plan.js';
+import { createResearchStrainer } from './social-research-runtime.js';
 
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -126,6 +127,10 @@ export function startRumor2({
   // Social receives no mutable survey map, no posture callback, and no authority to start the
   // wide eye. Absent => CATALOG_UNAVAILABLE — never an invented universe, never the five seeds.
   researchCatalogSource = null,
+  // SOCIAL-5A: the research strainer — OFF unless explicitly enabled by composition (fly.js) or a
+  // test; research dossiers + observation proposals only (authority NONE); an optional PURE injected
+  // deep-market adapter (tests / a later market-evidence ticket); never a network or tape mutation
+  researchStrainer = null, // { enabled: boolean, deepMarketSource?: fn, options?: {...} }
 } = {}) {
   if (!enabled) {
     // dark and silent: zero network, zero timers, zero authority
@@ -319,7 +324,25 @@ export function startRumor2({
   };
   // every operational social ear the collector drives under ONE writer authority
   const socialRuntimes = [social, socialX].filter(Boolean);
-  const stopSocial = (reason) => { for (const rt of socialRuntimes) rt.stop(reason); };
+  // SOCIAL-5A: the research strainer runtime (research dossiers + proposals; authority NONE)
+  const research = researchStrainer && researchStrainer.enabled
+    ? createResearchStrainer({ now, log, deepMarketSource: typeof researchStrainer.deepMarketSource === 'function' ? researchStrainer.deepMarketSource : null, fallbackScope: () => researchScope.candidate({ knownAtTs: Math.floor(now()) }).scope ?? null, ...(researchStrainer.options ?? {}) })
+    : null;
+  const stopSocial = (reason) => { for (const rt of socialRuntimes) rt.stop(reason); if (research) research.stop(reason); };
+  // the operational Social coverage of the two live ears at this instant (OPERATIONAL DIAGNOSTIC —
+  // never evidence): what each ear was doing, so silence is never confused with blindness
+  const researchProviderStates = (t) => {
+    const map = (st, enabledFlag, provider) => {
+      if (!enabledFlag) return { provider, state: 'NOT_QUERIED', checkedTs: null, detail: 'provider disabled' };
+      const s = st.state;
+      if (s === 'ACTIVE') return { provider, state: 'OBSERVED', checkedTs: t, detail: null };
+      if (s === 'WITHHELD' || s === 'WITHHELD_GAP') return { provider, state: 'FAILED', checkedTs: t, detail: `runtime ${s}` };
+      return { provider, state: 'UNAVAILABLE', checkedTs: t, detail: `runtime ${s}` };
+    };
+    return [map(social ? social.status() : null, !!social, 'BLUESKY_OFFICIAL'), map(socialX ? socialX.status() : null, !!socialX, 'X_OFFICIAL')];
+  };
+  const researchProviderSymbolsFor = (coin) => { const c = researchScope.candidate({ knownAtTs: Math.floor(now()) }).catalog; const m = c ? c.markets.find((x) => x.base === coin) : null; return m ? { kraken: m.wsname } : null; };
+  const researchDeepObservation = () => { try { return typeof researchCatalogSource?.deepObservation === 'function' ? researchCatalogSource.deepObservation() : null; } catch { return null; } };
   // the frozen core replays ONLY its own event kinds; Social events are
   // replayed/validated by the separate Social path (§22)
   const coreEvents = (events) => events.filter((e) => !(e && typeof e === 'object' && isSocialEventType(e.type)));
@@ -535,6 +558,7 @@ export function startRumor2({
         const sr = replaySocialHistory(jr.events);
         if (!sr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(sr.error); return false; }
       }
+      if (research) { const rr = research.hydrate(jr.events); if (!rr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(rr.error); return false; } }
       socialHydratedForInit = true;
       return true;
     }
@@ -546,6 +570,8 @@ export function startRumor2({
         return false;
       }
     }
+    // SOCIAL-5A: the research strainer rebuilds its bounded subjects and dossier history from the SAME journal
+    if (research) { const rr = research.hydrate(jr.events); if (!rr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(rr.error); return false; } }
     socialHydratedForInit = true;
     return true;
   }
@@ -1174,6 +1200,7 @@ export function startRumor2({
       if (!res.ok && res.committed && res.committed.lastSeq !== undefined && res.committed.lastSeq !== null && !res.committed.unadopted && fenceHeld()) {
         cp.lastSettledEventSeq = res.committed.lastSeq;
         for (const ev of res.committed.events ?? []) mirrorSafe(ev);
+        if (research) research.ingest(res.committed.events ?? []);
       }
       if (!res.ok) {
         const reason = String(res.reason ?? '');
@@ -1198,7 +1225,35 @@ export function startRumor2({
         if (!fenceHeld()) return; // committed but unfenced: the next writer's restore reads it
         cp.lastSettledEventSeq = res.lastSeq;
         for (const ev of res.events ?? []) mirrorSafe(ev);
+        if (research) research.ingest(res.events ?? []); // SOCIAL-5A: committed Social truth feeds the strainer in journal order
       }
+    }
+  }
+
+  // SOCIAL-5A: ONE research tick under the same fence — consumes the detached wide-eye notices, the
+  // official claim graph (read-only), the strainer's own retained Social subjects, and the injected
+  // deep-observation / deep-market seams; appends at most ONE research dossier per tick. Authority NONE.
+  async function researchTick() {
+    if (!research) return;
+    if (!SOCIAL_LIVE_LIFECYCLES.includes(lifecycle) || !fenceHeld()) return;
+    const t = Math.floor(now());
+    let notices = []; try { notices = researchScope.notices(); } catch { notices = []; }
+    const claims = cp ? Object.entries(cp.graph.claims).map(([id, n]) => ({ ...n, propositionId: n.propositionId ?? id })) : [];
+    const res = await research.tick({
+      knownAtTs: t, notices, claims, providerStates: researchProviderStates(t), deepObservation: researchDeepObservation(), providerSymbolsFor: researchProviderSymbolsFor,
+      fenceHeld, append: (events) => activeJournal.append(events),
+    });
+    if (!res.ok) {
+      const reason = String(res.reason ?? '');
+      if (reason.startsWith('CORRUPTION')) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(`EVENT_HISTORY_INVALID: ${reason}`); stopSocial('journal corruption'); return; }
+      if (reason === 'WRITER_FENCE_LOST' || reason === 'STALE_WRITER') { writerFenced = false; writerEpoch = null; lifecycle = 'STANDBY_WRITER'; withholdReason = reason === 'STALE_WRITER' ? 'writer epoch is stale — a newer writer holds authority' : 'writer authority lost — standing by to reacquire'; stopSocial('writer authority lost'); return; }
+      if (reason !== 'NOT_HYDRATED') log(`RUMOR2 research tick failed (zero truth advances, will retry): ${boundedError(reason)}`);
+      return;
+    }
+    if (res.appended !== undefined && res.lastSeq !== undefined) {
+      if (!fenceHeld()) return;
+      cp.lastSettledEventSeq = res.lastSeq;
+      for (const ev of res.events ?? []) mirrorSafe(ev);
     }
   }
 
@@ -1273,6 +1328,8 @@ export function startRumor2({
       socialX: socialX ? socialX.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_X_ENABLED)', authority: 'NONE' },
       // SOCIAL-4F: discovery / local admission / paid watch / deep observation / legacy permission — separately
       socialResearch: socialResearchStatus(t),
+      // SOCIAL-5A: the research strainer (dossiers + next-observation proposals; authority NONE, RESEARCH_ONLY)
+      research: research ? research.status(t) : { enabled: false, authority: 'NONE', purpose: 'RESEARCH_ONLY', subjects: 0 },
     };
     try {
       atomicWriteJson(path.join(dir(), 'status.json'), status);
@@ -1333,6 +1390,8 @@ export function startRumor2({
     // SOCIAL-2A/2B: the Social ears settle after the official ears, under the same fence
     if (!closed && !halted) {
       try { await socialTick(); } catch (err) { log(`RUMOR2 social tick failed (contained): ${boundedError(err.message)}`); }
+      // SOCIAL-5A: research assembles AFTER every ear settled this tick, under the same fence
+      try { await researchTick(); } catch (err) { log(`RUMOR2 research tick failed (contained): ${boundedError(err.message)}`); }
     }
     await saveCheckpoint();
     writeStatus();
@@ -1376,6 +1435,6 @@ export function startRumor2({
     stop,
     tickOnce: () => (inFlight = inFlight.then(() => tickOnce())),
     status: writeStatus,
-    internals: { runtime, coverageEntries, social, socialX, get checkpoint() { return cp; }, get lifecycle() { return lifecycle; }, get durability() { return durability; } },
+    internals: { runtime, coverageEntries, social, socialX, research, get checkpoint() { return cp; }, get lifecycle() { return lifecycle; }, get durability() { return durability; } },
   };
 }

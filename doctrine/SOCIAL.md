@@ -1778,6 +1778,75 @@ blessed or re-mapped. The X runtime's local second boundary keeps the legacy cas
 token filter (X's own rule engine decides paid matching); the research admission policy above
 governs the catalog-backed Bluesky lane.
 
+### 5R. SOCIAL-5A — adaptive research strainer + bidirectional investigation router (research only)
+
+SOCIAL-5A adds the first deterministic, point-in-time RESEARCH STRAINER. It produces RESEARCH DOSSIERS
+(`serpent-research-dossier-1`, durable as `RUMOR2_RESEARCH_DOSSIER` in the same fenced Social/RUMOR journal)
+and bounded NEXT-OBSERVATION PROPOSALS, projected as `serpent-evidence-1` research packets for a future
+Socrates. Its laws:
+
+1. **Research only.** Every dossier, proposal, packet projection and status object carries `authority:
+   NONE` / `purpose: RESEARCH_ONLY`. The validator refuses uppercase execution vocabulary anywhere in a
+   dossier. No trade, eligibility, sizing, order, direction, entry/exit, paid-provider or subscription
+   authority is added; ledger / cost / controls / tape / order paths do not read research output.
+2. **Three independent entrances.** MARKET_LED (the wide eye's detached notices), PARTICIPATION_LED
+   (durable admitted Social evidence attributed under the scope in force, by journal order) and
+   INFORMATION_LED (the frozen core's official claim graph, read-only). Several entrances form a
+   COMBINATION; every contributing trigger stays visible.
+3. **Social is evidence, not a gate.** A market-led candidate survives with zero useful Social evidence;
+   a Social-led candidate may PROPOSE deep market observation; an information-led candidate may propose
+   both. No family vetoes another.
+4. **Observed silence differs from blindness.** OBSERVED_NO_MATCH, NOT_QUERIED, UNAVAILABLE, FAILED,
+   STALE, COVERAGE_INCOMPARABLE and BASELINE_INSUFFICIENT are distinct states; missing market depth is
+   not zero depth; unknown is never zero.
+5. **Pumps and coordination are context.** Coordination features, echo concentration and burst
+   descriptors are recorded; nothing is rejected for looking pump-like. The MISSION pump doctrine stands.
+6. **`MISSED` and extension are context.** Both RIPPLE and MISSED notices are investigable; the notice
+   fields (verdict, zVol, zRet, extension, usdVol24h, inDeepTape) are preserved verbatim and no percent
+   veto exists.
+7. **Opportunity half-life is uncalibrated.** The OPPORTUNITY CLOCK records factual latency only
+   (first trigger observed/known, latest input, derivation, age, acquisition and derivation latency);
+   `halfLifeEstimateMs` is null and `halfLifeCalibration` is UNCALIBRATED by validation.
+8. **Deep market evidence is not live-wired.** A PURE injected deep-market window contract
+   (`social-research-market.js`) defines what a later market-evidence owner must supply; without it the
+   dossier says MARKET_DEEP_OBSERVATION NOT_CONNECTED and EXECUTABILITY UNASSESSED. Nothing is synthesized
+   from the wide eye's 24h Ticker proxy. The deep-observation membership seam (fly.js) is a read-only
+   immutable snapshot with date/selectedAt/source/coins; a prior-session file is labelled STALE.
+9. **Proposals activate nothing.** MARKET_DEEP_OBSERVATION_PROPOSED / SOCIAL_RESEARCH_PROPOSED /
+   OFFICIAL_VERIFICATION_PROPOSED / RECHECK_PROPOSED / NO_ADDITIONAL_OBSERVATION_PROPOSED carry a closed
+   reason code, a deterministic question, `authority: NONE`, `activation: NOT_AUTHORIZED`. They change no
+   X rule, budget, tape subscription, socket, timer or config.
+10. **Stage stays uncalibrated.** `estimateSocialStage` still returns UNKNOWN / calibrated:false; the
+    dossier records descriptive stage evidence (participation change, potential-origin breadth, echo
+    concentration, novelty) with `calibrationStatus: INSUFFICIENT_HISTORY`. No IGNITION / ACCELERATION /
+    CROWDED / DISTRIBUTION / DECAY is emitted from hand-picked cutoffs.
+11. **No trading authority is added.** The five legacy permission assets, cost, ledger, controls and the
+    official claim registry are unchanged.
+
+Measurement law: fixed windows (15 s / 60 s / 180 s / 900 s — measurement windows, never edge-life claims)
+over journal-order knowledge time; a window is compared with its prior window only when coverage is
+compatible (no Social scope revision, X rule-set epoch, X gap, catalog change or provider failure inside
+the span, and at least 3 prior observations); otherwise no acceleration is derived. Propagation keeps raw
+propagation, potential-origin families (UNRESOLVED possible independence), explicit echo relations,
+possible copies, engagement metadata and provider coverage apart — one post never becomes five
+confirmations. Source time separates OLD content / NEW circulation from NEW / NEW and UNKNOWN; circulation
+is never backdated. Research states (OBSERVING / INVESTIGATE / WAIT_RECHECK / DATA_INSUFFICIENT /
+DATA_UNAVAILABLE) and the Pareto RESOURCE_ORDERING are resource labels, never confidence or probability.
+
+Durability law: a dossier is prepared once, retained, appended under the live fence with a fence re-check
+before adoption (lost acknowledgement => byte-identical retry collapses; fence lost after the append =>
+journal-ahead, nothing adopted, the lawful writer restores); a dossier is written only when its
+point-in-time input digest changed and at most once per `emissionMinIntervalMs` (15 s, an I/O bound);
+episodes are contiguous per coin (a later dossier references the immediately preceding one; a DORMANT
+subject that wakes opens the next episode); `researchIdleTtlMs` (1 h) and `maxSubjects` (200) are
+housekeeping bounds, never opportunity life or rejection. Replay validates the event schema, the dossier
+and its packet, refuses altered payloads and out-of-order episodes, and requires a participation trigger to
+name an already-durable observation. Prefix and full replay yield the same as-of view.
+
+Deferred, deliberately: the live deep-market bridge (MARKET_DEEP_OBSERVATION stays NOT_CONNECTED in
+production), the Socrates runtime, any Decider, stage calibration, author-reliability learning (SOCIAL-6),
+and any cross-platform identity resolution.
+
 ---
 
 ## 6. Authority audit
@@ -1855,7 +1924,11 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   (§5Q-R):** X admission from one adopted watch snapshot, owed-native lifecycle continuity, prepared
   scope operations with fence re-check and complete commit receipts, catalog structural / clock /
   token truth.
-- **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
+- **SOCIAL-5A — RESEARCH STRAINER DONE (§5R):** three-entrance research dossiers, coverage-aware
+  fixed-window Social features, injected deep-market contract, research packets, durable dossier
+  family, bounded next-observation proposals — authority NONE. Not done: live deep-market wiring,
+  stage calibration, Socrates runtime, Decider.
+- **SOCIAL-5B+:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.
 - **SOCIAL-7:** full combined social hardening + freeze.

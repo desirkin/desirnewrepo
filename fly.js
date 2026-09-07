@@ -89,8 +89,14 @@ startRumor2({
   researchCatalogSource: wideEye ? {
     snapshot: () => wideEye.catalogSnapshot(),
     notices: () => wideEye.researchNotices(),
-    deepObservation: () => { const u = readCurrentUniverse(); return u ? { count: Array.isArray(u.pairs) ? u.pairs.length : null, date: u.date ?? null, source: u.source ?? null } : null; },
+    // SOCIAL-5A: DEEP_OBSERVATION_SET membership metadata — an immutable detached snapshot of the
+    // current deep-tape selection (date / selectedAt / source / exact coin membership); the strainer
+    // labels a prior-session file STALE, never current. Read-only: no subscription changes here.
+    deepObservation: () => { const u = readCurrentUniverse(); return u ? Object.freeze({ count: Array.isArray(u.pairs) ? u.pairs.length : null, date: u.date ?? null, selectedAt: u.selectedAt ?? null, source: u.source ?? null, coins: Array.isArray(u.pairs) ? Object.freeze(u.pairs.map((p) => p.coin).filter((c) => typeof c === 'string')) : null }) : null; },
   } : null,
+  // SOCIAL-5A: the research strainer — dossiers + observation proposals only (authority NONE); no
+  // deep-market adapter is connected here (absent evidence stays absent); no network, no tape change
+  researchStrainer: { enabled: true },
 });
 try {
   await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown

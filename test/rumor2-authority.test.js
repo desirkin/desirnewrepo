@@ -188,7 +188,7 @@ test('R2A-SOCIAL-8 (SOCIAL-4F). the discovery-catalog / admission-scope / watch-
     assert.ok(!/config\.universe/.test(code(f)), `${f} never reads the legacy permission set`);
   }
   // the ONLY files in the rumor tier that may name the catalog / scope contracts
-  const CATALOG_ALLOWLIST = ['rumor2/social-catalog.js', 'rumor2/social-scope.js', 'rumor2/social-watch-plan.js', 'rumor2/social-settle.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/collector.js'];
+  const CATALOG_ALLOWLIST = ['rumor2/social-catalog.js', 'rumor2/social-scope.js', 'rumor2/social-watch-plan.js', 'rumor2/social-settle.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/collector.js', 'rumor2/social-research-strainer.js']; // SOCIAL-5A: the strainer consumes the admission policy read-only (attribution under the scope in force)
   const mentions = rumor2Files.filter((f) => /social-catalog|social-scope|social-watch-plan|compileAdmissionScope|admitSocialText|researchCatalogSource|scopeSource|watchScope/.test(code(f)));
   assert.deepEqual(mentions.sort(), [...CATALOG_ALLOWLIST].sort(), `the research scope may only be wired in ${CATALOG_ALLOWLIST.join(', ')}`);
   // survey/catalog.js: imported by the wide eye and tests only; the rumor tier NEVER imports survey/, tape/, cost/, ledger/, state/, controls/
@@ -213,6 +213,32 @@ test('R2A-82+83. SOCRATES-0 and GHOST-1 remain absent', () => {
     const src = code(f).toLowerCase();
     for (const g of ['certificate transparency', 'subdomain', 'dns probe']) assert.ok(!src.includes(g), `${f}: GHOST scope ${g}`);
   }
+});
+
+test('R2A-SOCIAL-9 (SOCIAL-5A). the research strainer modules are an EXPLICIT allowlist: pure, social-tier, no network/timer/model/authority; they import only inside the rumor layer + the evidence contract; no runtime output carries execution vocabulary; only the collector wires the runtime; the strainer never touches tape/ledger/cost/controls/order paths', () => {
+  const MODULES = ['rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-strainer.js', 'rumor2/social-research-packet.js', 'rumor2/social-research-runtime.js'];
+  for (const f of MODULES) {
+    assert.ok(tracked.includes(f), `${f} is tracked (Git-index-aware)`);
+    assert.ok(SOCIAL_FILE_RE.test(f), `${f} audited in the social tier, never as frozen core`);
+    const src = read(f);
+    for (const forbidden of ['fetch(', 'WebSocket', 'EventSource', 'setTimeout', 'setInterval', 'node:http', 'node:https', 'node:net', 'node:fs', 'child_process', 'Date.parse', 'randomUUID', 'Math.random', 'process.env', 'require(', 'import(']) assert.ok(!src.includes(forbidden), `${f}: ${forbidden}`);
+    for (const m of src.matchAll(/from\s+'([^']+)'/g)) assert.ok(/^(\.\/[a-z0-9./-]+|\.\.\/evidence\/contract\.js)$/.test(m[1]), `${f}: import ${m[1]} outside the rumor layer / evidence contract`);
+    const c = code(f);
+    const audited = c.replace(/RUMINT_NOMINATION/g, '').split('\n').filter((l) => !l.includes('RESEARCH_FORBIDDEN_WORDS_RE =')).join('\n'); // the refusal list itself names the vocabulary it refuses
+    assert.ok(!/ledger|cost\/|tape\/|strike|socrates\/|attention|hyped|stalk|nominat|eligib|createOrder|submitOrder|placeOrder|armStalk|setHyped/i.test(audited), `${f} touches no authority (RUMINT_NOMINATION is an existing evidence-contract trigger kind)`);
+    assert.ok(!/config\.universe/.test(c), `${f} never reads the legacy permission set`);
+    assert.ok(!/['"](BUY|SELL|STRIKE|TRADE|ENTER|EXIT)['"]/.test(c), `${f} emits no execution vocabulary constant`);
+  }
+  assert.ok(/Date\.now/.test(code('rumor2/social-research-runtime.js')) === true && !/Date\.now/.test(code('rumor2/social-research-strainer.js')), 'only the runtime carries an injectable default clock; the pure modules read no clock');
+  // the ONLY files that may wire the research runtime / dossier family
+  const RESEARCH_ALLOWLIST = [...MODULES, 'rumor2/social-settle.js', 'rumor2/collector.js'];
+  const mentions = rumor2Files.filter((f) => MODULES.includes(f) || /social-research-|createResearchStrainer|RESEARCH_DOSSIER_EVENT_TYPE|replayResearchDossierEvent/.test(code(f)));
+  assert.deepEqual(mentions.sort(), [...RESEARCH_ALLOWLIST].sort(), `the research strainer may only be wired in ${RESEARCH_ALLOWLIST.join(', ')}`);
+  const outside = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && /social-research|researchStrainer|RUMOR2_RESEARCH_DOSSIER/.test(read(f)));
+  assert.deepEqual(outside, ['fly.js'], 'exactly the composition root enables the strainer (no tape / ledger / cost / controls / ui reader)');
+  for (const f of tracked.filter((x) => x.startsWith('ledger/') || x.startsWith('cost/') || x.startsWith('tape/') || x.startsWith('state/') || x.startsWith('controls/'))) assert.ok(!/research|dossier/i.test(read(f)), `${f} does not read research output`);
+  assert.equal(read('fly.js').includes('researchStrainer: { enabled: true }'), true);
+  assert.ok(!/deepMarketSource/.test(read('fly.js')), 'no live deep-market adapter is wired by SOCIAL-5A');
 });
 
 // ===== TIER 3B — SOCIAL RUMOR: EXISTENCE ALLOWED, ZERO DIRECT AUTHORITY =====
