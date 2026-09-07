@@ -1242,6 +1242,35 @@ ruleset epoch, and smoke-run state restore from the journal; the stale process's
 locally but never persisted are NOT recovered locally — server project usage re-read at preflight is
 the spend authority (existing COST law). This is an operational limitation, not a cosmetic one.
 
+## 5L. SOCIAL-4D UNRESOLVED-CACHE + CAUSAL-CONTEXT CLOSEOUT
+
+Two control-flow repairs of §5K, reproduced RED on the untouched d6692ec runtime with the review's
+probe before any fix. No schema, identity recipe, persistence, provider, or authority change.
+
+**KNOWN SOURCE and KNOWN UNRESOLVED are different dispositions
+(`rumor2/social-runtime.js`, `rumor2/x-runtime.js`).** The reconciler marks a candidate whose
+unchanged association is already retained as `KNOWN … unresolved:true`. Both runtimes carry that
+explicit disposition on the envelope and, after SUCCESSFUL terminal handling — a non-empty durable
+append or a zero-event batch alike — forget the version in the local cache, exactly as they do for
+a newly appended PENDING record. A failed lookup or a refused append installs no terminal cache
+disposition. An unresolved observation therefore always reaches the authoritative reconciler on
+redelivery: an unchanged association stays keep-first there (no duplicate records), and a grown
+candidate set becomes a new later association record. Exactly equivalent real sources keep the
+efficient durable-duplicate path; source counts never grow from pending records.
+
+**Causal-context law (`socialPendingLinkError`).** A pending record's asserted reason is judged
+with target facts available no later than that record's own knownAtTs: only retained
+SOURCE_DECLARATION annotations of the exact target with `knownAtTs <= pending.knownAtTs` (equality
+admissible under the millisecond clock contract) or the target's own v2 witness can supply its
+basis; a legacy numeric clock and provider-event annotations never do. A later matching annotation
+neither justifies an earlier conflict nor retroactively invalidates one, so for a valid history H,
+appending otherwise-valid records known strictly after t never changes the success or effective
+result of a view of H at t. Integrity validation of those later records is unchanged and separate
+from as-of selection. A valid conflict stays a historical conflict at its own time; there is no
+resolution semantics and no latest-wins. The law is applied unchanged at reconciliation, replay,
+and the standalone view. Legacy version-1 records keep their bytes and honest labels; a legacy
+pending record whose only possible basis was known after it is retained unlinked, never applied.
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -1292,6 +1321,9 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   set-bound pending identity, one target-context law across settlement/replay/view, legacy
   version-1 records under their own contract, INDEX_DIVERGENCE recovery documented as manual.
   Further defects may exist.
+- **SOCIAL-4D UNRESOLVED-CACHE + CAUSAL-CONTEXT — DONE (§5L):** KNOWN-unresolved is released
+  from the local cache on every successful settlement; pending records are judged only by context
+  known no later than themselves. Further defects may exist.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

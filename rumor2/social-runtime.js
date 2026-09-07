@@ -134,6 +134,12 @@ export function createSocialRuntime({
     log(`social-runtime: ${provider.id} stopped (${reason})`);
   }
 
+  // UNRESOLVED-CACHE LAW: a version that settled as an unresolved observation (a new PENDING record
+  // OR an unchanged, already-known one) is forgotten by the local cache after SUCCESSFUL terminal
+  // handling — never after a failed lookup/append — so later relevant history reaches the
+  // authoritative reconciler; an unchanged association stays keep-first there.
+  const releaseUnresolved = (envelopes) => { for (const env of envelopes) if (env.unresolved === true) intake.forget(env.observation.socialVersionId); };
+
   // Build (or reuse) the pending batch: validated evidence events, keep-first
   // deduped against the durable index (+ authoritative lookup), with the cursor
   // event LAST. Pure with respect to durable state.
@@ -152,10 +158,10 @@ export function createSocialRuntime({
     for (const env of envelopes) {
       const rc = reconciler.reconcile(env.observation, scope);
       if (rc.kind === 'INVALID') { stats.invalid += 1; env.terminalReason = `invalid: ${rc.error}`; continue; } // refused, never appended (terminal)
-      if (rc.kind === 'KNOWN') { stats.durableDuplicates += 1; if (rc.sameEvent) stats.knownSameEvent += 1; env.terminalReason = 'duplicate'; continue; } // keep-first
+      if (rc.kind === 'KNOWN') { stats.durableDuplicates += 1; if (rc.sameEvent) stats.knownSameEvent += 1; env.terminalReason = rc.unresolved ? 'known-unresolved' : 'duplicate'; env.unresolved = rc.unresolved === true; continue; } // keep-first (source) / unchanged unresolved association
       if (rc.kind === 'NEW') { candidates.push(rc.event); continue; }
       if (rc.kind === 'ANNOTATE') { candidates.push(...rc.events); env.terminalReason = 'annotated'; continue; }
-      candidates.push(rc.event); env.terminalReason = `pending: ${rc.reason}`; // PENDING
+      candidates.push(rc.event); env.terminalReason = `pending: ${rc.reason}`; env.unresolved = true; // PENDING
     }
     // authoritative fallback, PER TYPE, for ids the in-memory index may not carry: a lookup
     // failure is never "not found" and never a reason to advance
@@ -197,6 +203,7 @@ export function createSocialRuntime({
       // nothing durable to add and no cursor advance: the envelopes (all
       // duplicates/invalid) are terminal now
       reconciler.adopt([], batch.scope);
+      releaseUnresolved(batch.envelopes);
       intake.settled(batch.envelopes);
       pendingBatch = null;
       return { ok: true, settled: batch.envelopes.length, appended: 0 };
@@ -216,7 +223,7 @@ export function createSocialRuntime({
     appended = adopted.sources; stats.annotations += adopted.annotated; stats.pendingRecords += adopted.pendings;
     if (batch.projected !== null) { durableCursor = batch.projected; stats.cursorAdvances += 1; if (appended === 0) lastCursorOnlyTs = batch.knownAtTs; }
     stats.appended += appended;
-    for (const env of batch.envelopes) if (typeof env.terminalReason === 'string' && env.terminalReason.startsWith('pending')) intake.forget(env.observation.socialVersionId); // an unresolved version may be re-associated later
+    releaseUnresolved(batch.envelopes);
     intake.settled(batch.envelopes);
     const events = batch.events;
     pendingBatch = null;

@@ -226,11 +226,13 @@ export function createSocialReconciler({ provider } = {}) {
     if (ctx) { stats.invalid += 1; return { kind: 'INVALID', error: ctx }; }
     // the identity binds the canonical target set: an unchanged set is the SAME record (keep-first);
     // a grown/changed set is a NEW later association record with its own knownAt
-    if (pendingIds.has(ev.sourceEventId) || scope.pendingIds.has(ev.sourceEventId)) { stats.known += 1; return { kind: 'KNOWN', id: ev.sourceEventId, durable: pendingIds.has(ev.sourceEventId), pending: true }; }
+    // KNOWN UNRESOLVED is not KNOWN SOURCE: the candidate stays an unresolved observation whose
+    // association may still change with later history — callers must not cache it as a satisfied source
+    if (pendingIds.has(ev.sourceEventId) || scope.pendingIds.has(ev.sourceEventId)) { stats.known += 1; return { kind: 'KNOWN', id: ev.sourceEventId, durable: pendingIds.has(ev.sourceEventId), pending: true, unresolved: true }; }
     // a LEGACY (version-1, unsealed) record of the same semantic conflict over the SAME target set is
     // already retained: keep-first, no duplicate representation, and no seal is manufactured for it
     const legacyId = socialReconciliationIdentity({ provider: ev.provider, nativeKeyDigest: contentHash(canonicalJson(ev.nativeKey)), immutableDigest: ev.immutableDigest, witnessHash: ev.witnessHash, reason });
-    if (pendingIds.has(legacyId) && canonicalJson(pendingSets.get(legacyId) ?? null) === canonicalJson(ev.candidateIds)) { stats.known += 1; return { kind: 'KNOWN', id: legacyId, durable: true, pending: true, legacyRecord: true }; }
+    if (pendingIds.has(legacyId) && canonicalJson(pendingSets.get(legacyId) ?? null) === canonicalJson(ev.candidateIds)) { stats.known += 1; return { kind: 'KNOWN', id: legacyId, durable: true, pending: true, unresolved: true, legacyRecord: true }; }
     scope.pendingIds.add(ev.sourceEventId);
     stats.pending += 1;
     return { kind: 'PENDING', reason, event: ev, candidateIds };

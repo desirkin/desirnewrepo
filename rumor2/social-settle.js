@@ -390,7 +390,12 @@ export function socialPendingLinkError(ev, target, annotations = []) {
   if (ev.reason === 'IMMUTABLE_FACT_CONFLICT') return socialImmutableDigest(target) === ev.immutableDigest ? 'immutable facts agree — no immutable conflict' : null;
   if (ev.reason === 'DECLARATION_CONFLICT') {
     if (socialImmutableDigest(target) !== ev.immutableDigest) return 'immutable facts differ — not a declaration conflict';
-    const retained = [...(target.type === SOCIAL_EVENT_V2_TYPE ? [target.sourceClockWitness] : []), ...(Array.isArray(annotations) ? annotations : []).filter((a) => a && a.clockRole === 'SOURCE_DECLARATION' && a.targetEventId === target.sourceEventId).map((a) => a.witness)];
+    // CAUSAL-CONTEXT LAW (SOCIAL-4D UNRESOLVED-CACHE + CAUSAL-CONTEXT CLOSEOUT): the record's reason is
+    // judged with the target facts available NO LATER than the record's own knownAtTs. Annotations
+    // known later can neither justify an earlier conflict nor retroactively invalidate one; the
+    // millisecond clock contract admits equality. Integrity validation of those later records is a
+    // separate concern (they are validated on their own, never ignored).
+    const retained = [...(target.type === SOCIAL_EVENT_V2_TYPE ? [target.sourceClockWitness] : []), ...(Array.isArray(annotations) ? annotations : []).filter((a) => a && a.clockRole === 'SOURCE_DECLARATION' && a.targetEventId === target.sourceEventId && Number.isSafeInteger(a.knownAtTs) && a.knownAtTs <= ev.knownAtTs).map((a) => a.witness)];
     if (retained.length === 0) return 'target retained no original declaration to conflict with (a legacy numeric clock is not one)';
     if (retained.some((w) => sameDeclaration(w, ev.sourceClockWitness))) return 'the candidate declaration is equivalent to a retained declaration — no conflict';
     return null;

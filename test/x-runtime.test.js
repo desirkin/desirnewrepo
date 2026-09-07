@@ -13,7 +13,7 @@ import { buildSocialFilter } from '../rumor2/social.js';
 import { createXRuntime, xGate, xConfigFromEnv, X_IN_FLIGHT_POST_HEADROOM, X_SAFE_GAP_MS } from '../rumor2/x-runtime.js';
 import { startXStream } from '../rumor2/x-stream.js';
 import { X_OFFICIAL, xRuleTag, compileXRuleManifest, isSerpentTag } from '../rumor2/providers/x-official.js';
-import { SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_GAP_EVENT_TYPE, replaySocialHistory, validateXMeterEvent, validateXProgressEvent, validateXRuleSetEvent, validateXGapEvent, xMeterEvent, xProgressEvent, xRuleSetEvent, xGapEvent } from '../rumor2/social-settle.js';
+import { SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_GAP_EVENT_TYPE, replaySocialHistory, validateXMeterEvent, validateXProgressEvent, validateXRuleSetEvent, validateXGapEvent, xMeterEvent, xProgressEvent, xRuleSetEvent, xGapEvent } from '../rumor2/social-settle.js';
 import { memJournal } from './helpers/rumor2-journal.js';
 
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-xrt-'));
@@ -490,4 +490,25 @@ test('X-DIVERGENCE. a journal Post unknown to a stale index is INDEX_DIVERGENCE:
   assert.equal(ofType(arr, SOCIAL_EVENT_V2_TYPE).length, 2); assert.equal(ofType(arr, X_METER_EVENT_TYPE).at(-1).deliveredPostReads, 3); assert.equal(replaySocialHistory(arr).ok, true);
   assert.equal((await C.rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup })).ok, true); assert.equal(ofType(arr, SOCIAL_EVENT_V2_TYPE).length, 2, 'idempotent afterwards');
   C.rt.stop();
+});
+
+// ---- SOCIAL-4D UNRESOLVED-CACHE: X counterpart ---------------------------------------------
+test('X-CACHE-6. KNOWN(pending) is not a final-source cache shortcut on X: an unresolved Post reaches settlement again after later history; X still invents no cursor and meters every received Post', async () => {
+  const arr = []; const j = memJournal(arr);
+  const lookup = async (type, ids) => ({ ok: true, existing: new Set(arr.filter((e) => e.type === type && ids.includes(e.sourceEventId)).map((e) => e.sourceEventId)) });
+  const { rt, stream } = await liveRuntime(); await tick();
+  const line = (created_at) => JSON.stringify({ data: { id: '500', text: '$BTC ambiguous', author_id: '42', created_at, edit_history_tweet_ids: ['500'], conversation_id: '500', public_metrics: { like_count: 1 } }, matching_rules: [{ id: 'r1', tag: xRuleTag('origin', '($BTC OR #BTC OR $ETH OR #ETH OR $SOL OR #SOL) -is:retweet') }] }) + '\r\n';
+  stream().push(line(iso(T - 5_000))); stream().push(KEEPALIVE); await tick();
+  const r1 = await rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup }); assert.equal(r1.ok, true); assert.equal(r1.appended, 1);
+  stream().push(line(iso(T - 4_000))); stream().push(KEEPALIVE); await tick(); // same Post id + text, a different declared time: a declaration conflict
+  const r2 = await rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup }); assert.equal(r2.ok, true); assert.equal(ofType(arr, SOCIAL_RECONCILIATION_PENDING_TYPE).length, 1); assert.equal(ofType(arr, SOCIAL_RECONCILIATION_PENDING_TYPE)[0].reason, 'DECLARATION_CONFLICT');
+  stream().push(line(iso(T - 4_000))); stream().push(KEEPALIVE); await tick();
+  assert.equal(rt.status().intake.enqueued, 3, 'the unresolved version was forgotten after its PENDING settlement, not deduped locally');
+  const r3 = await rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup }); assert.equal(r3.ok, true); assert.equal(r3.settled, 1); assert.equal(ofType(arr, SOCIAL_RECONCILIATION_PENDING_TYPE).length, 1, 'KNOWN unresolved: keep-first, nothing appended');
+  stream().push(line(iso(T - 4_000))); stream().push(KEEPALIVE); await tick();
+  assert.equal(rt.status().intake.enqueued, 4, 'after the KNOWN-unresolved settlement it is forgotten AGAIN — never a satisfied-source shortcut'); assert.equal(rt.status().intake.deduped, 0);
+  const r4 = await rt.settle({ fenceHeld: () => true, append: (e) => j.append(e), lookup }); assert.equal(r4.ok, true); assert.equal(r4.settled, 1); assert.equal(ofType(arr, SOCIAL_RECONCILIATION_PENDING_TYPE).length, 1);
+  stream().push(line(iso(T - 5_000))); stream().push(KEEPALIVE); await tick(); assert.equal(rt.status().intake.durableDeduped, 1, 'the exact durable source stays on the efficient duplicate path');
+  assert.equal(rt.status().meter.deliveredPostReads, 5, 'every received Post was metered at the wire'); assert.equal(rt.status().intake.receivedCursor, null); assert.equal(rt.status().intake.pending, 0, 'no cursor obligation is invented for X'); assert.equal(ofType(arr, SOCIAL_CURSOR_EVENT_TYPE).length, 0);
+  assert.equal(ofType(arr, SOCIAL_EVENT_V2_TYPE).length, 1); assert.equal(replaySocialHistory(arr).durableIds.size, 1); rt.stop();
 });

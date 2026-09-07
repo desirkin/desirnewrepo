@@ -602,6 +602,10 @@ export function createXRuntime({
     log(`x-runtime: ${provider.id} stopped (${reason})`);
   }
 
+  // UNRESOLVED-CACHE LAW (see social-runtime.js): an unresolved version — a new PENDING record or an
+  // unchanged known one — is forgotten by the local cache only after successful terminal handling
+  const releaseUnresolved = (envelopes) => { for (const env of envelopes) if (env.unresolved === true) intake?.forget(env.observation.socialVersionId); };
+
   // ---- settle: [ruleset?] [evidence...] [meter?] [progress?] [gap?] [ruleset-after-gap?] atomically
   async function buildBatch(lookup) {
     if (pendingBatch) return pendingBatch;
@@ -627,10 +631,10 @@ export function createXRuntime({
     for (const env of envelopes) {
       const rc = reconciler.reconcile(env.observation, scope);
       if (rc.kind === 'INVALID') { stats.invalid += 1; continue; }
-      if (rc.kind === 'KNOWN') { stats.durableDuplicates += 1; continue; }
+      if (rc.kind === 'KNOWN') { stats.durableDuplicates += 1; env.unresolved = rc.unresolved === true; continue; } // keep-first (source) / unchanged unresolved association
       if (rc.kind === 'NEW') { candidates.push(rc.event); continue; }
       if (rc.kind === 'ANNOTATE') { candidates.push(...rc.events); continue; }
-      candidates.push(rc.event); env.terminalReason = `pending: ${rc.reason}`; // PENDING
+      candidates.push(rc.event); env.terminalReason = `pending: ${rc.reason}`; env.unresolved = true; // PENDING
     }
     if (candidates.length > 0 && typeof lookup === 'function') {
       const byType = new Map();
@@ -685,7 +689,7 @@ export function createXRuntime({
     const batch = await buildBatch(lookup);
     if (batch.error) { stats.appendFailures += 1; lastError = batch.error; return { ok: false, reason: batch.reason ?? 'UNAVAILABLE', detail: batch.error }; }
     stats.settles += 1;
-    if (batch.events.length === 0) { reconciler.adopt([], batch.scope); intake?.settled(batch.envelopes); pendingBatch = null; return { ok: true, settled: batch.envelopes.length, appended: 0 }; }
+    if (batch.events.length === 0) { reconciler.adopt([], batch.scope); releaseUnresolved(batch.envelopes); intake?.settled(batch.envelopes); pendingBatch = null; return { ok: true, settled: batch.envelopes.length, appended: 0 }; }
     if (!fenceHeld()) { stop('writer authority lost before append'); return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
     const r = await append(batch.events);
     if (!r?.ok) { stats.appendFailures += 1; lastError = r?.reason ?? 'append failed'; return { ok: false, reason: r?.reason ?? 'UNAVAILABLE' }; }
@@ -702,7 +706,7 @@ export function createXRuntime({
       stats.meterEvents += 1;
     }
     if (batch.progress) { x.progressThroughTs = batch.progress.throughKnownAtTs; stats.progressEvents += 1; }
-    for (const env of batch.envelopes) if (typeof env.terminalReason === 'string' && env.terminalReason.startsWith('pending')) intake?.forget(env.observation.socialVersionId); // an unresolved version may be re-associated later
+    releaseUnresolved(batch.envelopes);
     if (batch.gap) { x.lastGap = { gapStartTs: batch.gap.gapStartTs, reason: batch.gap.reason, knownAtTs: batch.knownAtTs, coverageEpoch: batch.gap.coverageEpoch }; pendingGap = null; owedSince = null; stats.gapEvents += 1; }
     if (batch.smokeTerminal) {
       const t = batch.smokeTerminal; const r = x.smoke.runs[t.smokeRunId];
