@@ -624,6 +624,7 @@ export function propagationVsIndependence(observations, { nearDupThreshold = NEA
     independentProvenanceCount,
     families: families.map((f) => ({
       anchorSourceId: f.anchorSourceId,
+      memberSourceIds: [...f.memberSourceIds], // SOCIAL-5 §36.3: membership exposed so a dependency manifest never re-derives families
       memberCount: f.memberSourceIds.length,
       distinctAuthors: f.authorIds.size,
       echoCount: f.echoCount,

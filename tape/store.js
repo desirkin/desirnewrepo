@@ -52,3 +52,33 @@ export function readTapeStatus() {
   if (!existsSync(file)) return null;
   return JSON.parse(readFileSync(file, 'utf8'));
 }
+
+// ---- CURRENT FEATURE SNAPSHOT (passive read-only bridge; SOCIAL-5 §36.7) ----
+// The SAME already-computed per-coin feature snapshot the tape appends to
+// snapshots.jsonl, re-exposed as an atomically replaced current file so a
+// read-only consumer (the RUMOR research layer, injected through fly.js) can see what
+// the tape already measured — WITHOUT a second socket, a second collector, a
+// subscription change, or any recomputation of book / trade-flow features here.
+// The envelope carries identity/quality only: exact coin + venue symbol, ONE
+// captured owner clock (ts and tsMs derive from the same instant), the ET
+// session date the tape was running under, and the tape state at write time.
+// Missing file != zero market activity: the reader must say NOT_PRESENT.
+export const FEATURE_SNAPSHOT_VERSION = 'tape-feature-snapshot-1';
+const featureSnapshotFile = (coin) => path.join(dataDir(), 'tape', 'features', `${coin}.json`);
+
+export function writeCurrentFeatureSnapshot(coin, snapshot, { tsMs, session, symbol = null }) {
+  if (!Number.isSafeInteger(tsMs) || tsMs <= 0) throw new Error('feature snapshot: tsMs must be the captured owner clock');
+  atomicWriteJson(featureSnapshotFile(coin), { version: FEATURE_SNAPSHOT_VERSION, coin, symbol, ts: new Date(tsMs).toISOString(), tsMs, session, ...snapshot });
+}
+
+// Pure read: a detached deep-frozen copy of the current file, or null when the tape
+// never wrote one (NOT_PRESENT is the reader's word — never "no activity").
+export function readCurrentFeatureSnapshot(coin) {
+  if (typeof coin !== 'string' || !/^[A-Z0-9][A-Z0-9.]{0,14}$/.test(coin)) return null;
+  const file = featureSnapshotFile(coin);
+  if (!existsSync(file)) return null;
+  let parsed;
+  try { parsed = JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } // never a torn read: atomic rename means a file is whole or absent
+  const freeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) freeze(o[k]); return o; };
+  return freeze(parsed);
+}

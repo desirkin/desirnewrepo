@@ -215,8 +215,8 @@ test('R2A-82+83. SOCRATES-0 and GHOST-1 remain absent', () => {
   }
 });
 
-test('R2A-SOCIAL-9 (SOCIAL-5A). the research strainer modules are an EXPLICIT allowlist: pure, social-tier, no network/timer/model/authority; they import only inside the rumor layer + the evidence contract; no runtime output carries execution vocabulary; only the collector wires the runtime; the strainer never touches tape/ledger/cost/controls/order paths', () => {
-  const MODULES = ['rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-strainer.js', 'rumor2/social-research-packet.js', 'rumor2/social-research-runtime.js'];
+test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT allowlist: pure, social-tier, no network/timer/model/authority; they import only inside the rumor layer + the evidence contract; no runtime output carries execution vocabulary; only the collector wires the runtime; the strainer never touches tape/ledger/cost/controls/order paths; the §36.7 bridge injects ONLY the tape store read accessors and the §36.6 seam ONLY the wide eye population snapshot', () => {
+  const MODULES = ['rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-strainer.js', 'rumor2/social-research-packet.js', 'rumor2/social-research-runtime.js', 'rumor2/social-research-shadow.js'];
   for (const f of MODULES) {
     assert.ok(tracked.includes(f), `${f} is tracked (Git-index-aware)`);
     assert.ok(SOCIAL_FILE_RE.test(f), `${f} audited in the social tier, never as frozen core`);
@@ -232,13 +232,23 @@ test('R2A-SOCIAL-9 (SOCIAL-5A). the research strainer modules are an EXPLICIT al
   assert.ok(/Date\.now/.test(code('rumor2/social-research-runtime.js')) === true && !/Date\.now/.test(code('rumor2/social-research-strainer.js')), 'only the runtime carries an injectable default clock; the pure modules read no clock');
   // the ONLY files that may wire the research runtime / dossier family
   const RESEARCH_ALLOWLIST = [...MODULES, 'rumor2/social-settle.js', 'rumor2/collector.js'];
-  const mentions = rumor2Files.filter((f) => MODULES.includes(f) || /social-research-|createResearchStrainer|RESEARCH_DOSSIER_EVENT_TYPE|replayResearchDossierEvent/.test(code(f)));
+  const mentions = rumor2Files.filter((f) => MODULES.includes(f) || /social-research-|createResearchStrainer|RESEARCH_DOSSIER_EVENT_TYPE|replayResearchDossierEvent|RESEARCH_SHADOW_EVENT_TYPE|replayResearchShadowEvent/.test(code(f)));
   assert.deepEqual(mentions.sort(), [...RESEARCH_ALLOWLIST].sort(), `the research strainer may only be wired in ${RESEARCH_ALLOWLIST.join(', ')}`);
   const outside = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && /social-research|researchStrainer|RUMOR2_RESEARCH_DOSSIER/.test(read(f)));
   assert.deepEqual(outside, ['fly.js'], 'exactly the composition root enables the strainer (no tape / ledger / cost / controls / ui reader)');
-  for (const f of tracked.filter((x) => x.startsWith('ledger/') || x.startsWith('cost/') || x.startsWith('tape/') || x.startsWith('state/') || x.startsWith('controls/'))) assert.ok(!/research|dossier/i.test(read(f)), `${f} does not read research output`);
-  assert.equal(read('fly.js').includes('researchStrainer: { enabled: true }'), true);
-  assert.ok(!/deepMarketSource/.test(read('fly.js')), 'no live deep-market adapter is wired by SOCIAL-5A');
+  for (const f of tracked.filter((x) => x.startsWith('ledger/') || x.startsWith('cost/') || x.startsWith('tape/') || x.startsWith('state/') || x.startsWith('controls/'))) assert.ok(!/dossier|strainer|rumor2/i.test(read(f)), `${f} does not read research output`);
+  // §36.7: the tape re-exposes ITS OWN computed feature snapshot (transport only) — the tape never imports the rumor tier,
+  // never reads research output, and the accessor recomputes nothing; only fly.js injects the read accessors
+  const fly = read('fly.js');
+  assert.ok(fly.includes("researchStrainer: { enabled: true, marketSnapshot: (coin) => ({ snapshot: readCurrentFeatureSnapshot(coin), owner: readTapeStatus() }), currentSession: () => sessionDate() }"), 'fly.js injects exactly the tape store READ accessors (snapshot + status) and the session clock');
+  assert.ok(!/deepMarketSource/.test(fly), 'no live deep-market adapter is wired by SOCIAL-5');
+  assert.ok(/population: \(\) => wideEye\.sweepPopulationSnapshot\(\)/.test(fly), 'the §36.6 seam is the wide eye population accessor only');
+  const store = code('tape/store.js');
+  assert.ok(/export function writeCurrentFeatureSnapshot/.test(store) && /export function readCurrentFeatureSnapshot/.test(store), 'the feature snapshot lives in the tape store domain');
+  for (const forbidden of ['bookFeatures', 'TradeFlow', 'rumor2', 'fetch(', 'WebSocket']) assert.ok(!store.includes(forbidden), `tape/store.js: ${forbidden} (transport only — no recomputation, no rumor import)`);
+  assert.ok(!/from\s+'\.\.\/rumor2/.test(read('tape/run.js')) && !/from\s+'\.\.\/rumor2/.test(read('survey/wideeye.js')), 'tape / survey never import the rumor tier');
+  const runtime = code('rumor2/social-research-runtime.js');
+  for (const forbidden of ['tape/', 'survey/', 'readCurrentBook', 'writeCurrent', 'subscribe']) assert.ok(!runtime.includes(forbidden), `runtime: ${forbidden} (consumes only injected accessors)`);
 });
 
 // ===== TIER 3B — SOCIAL RUMOR: EXISTENCE ALLOWED, ZERO DIRECT AUTHORITY =====

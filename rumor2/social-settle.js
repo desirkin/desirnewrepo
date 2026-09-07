@@ -31,6 +31,7 @@ import { socialProviderById } from './social-registry.js';
 import { validateTemporalWitness, witnessesEquivalent, TEMPORAL_POLICY_VERSION } from './social-time.js';
 import { validateCatalogContent, SOCIAL_CATALOG_MARKET_KEYS } from './social-catalog.js';
 import { RESEARCH_DOSSIER_EVENT_TYPE, replayResearchDossierEvent } from './social-research-dossier.js';
+import { RESEARCH_SHADOW_EVENT_TYPE, replayResearchShadowEvent, emptyShadowState } from './social-research-shadow.js';
 import { socialAdmissionFilterId, SOCIAL_ADMISSION_POLICY_VERSION, SOCIAL_ADMISSION_MODES, SOCIAL_BASE_RE, SOCIAL_SCOPE_MAX_STATIC_TERMS, SOCIAL_SCOPE_MAX_ALIASES, SOCIAL_SCOPE_MAX_WATCH_AUTHORS } from './social-scope.js';
 
 export const SOCIAL_EVENT_TYPE = 'RUMOR2_SOCIAL_OBSERVED';
@@ -164,8 +165,10 @@ export const socialCatalogVerifiedIdentity = ({ venue, contentId, observedTs }) 
 export const socialScopeIdentity = ({ provider, scopeRevision }) => `r2sq-${contentHash(canonicalJson({ provider, scopeRevision }))}`;
 // SOCIAL-5A: RUMOR2_RESEARCH_DOSSIER is a Social-side DERIVED research record (authority NONE); it is
 // filtered from the frozen-core replay exactly like every other Social truth and replayed strictly here
-export { RESEARCH_DOSSIER_EVENT_TYPE };
-export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE, SOCIAL_CATALOG_EVENT_TYPE, SOCIAL_CATALOG_VERIFIED_EVENT_TYPE, SOCIAL_SCOPE_EVENT_TYPE, RESEARCH_DOSSIER_EVENT_TYPE]);
+// SOCIAL-5 §36.6: RUMOR2_RESEARCH_SHADOW_SAMPLE is the bounded research-control (false-negative denominator)
+// record — one per sampled completed wide-eye sweep; same fence/replay law, no outcome, authority NONE
+export { RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_SHADOW_EVENT_TYPE };
+export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE, SOCIAL_CATALOG_EVENT_TYPE, SOCIAL_CATALOG_VERIFIED_EVENT_TYPE, SOCIAL_SCOPE_EVENT_TYPE, RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_SHADOW_EVENT_TYPE]);
 // the SOURCE observation types (legacy + witnessed) — the only types that count as social sources
 export const SOCIAL_OBSERVATION_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE]);
 export const xSmokeIdentity = ({ provider, smokeRunId, status }) => `r2xk-${contentHash(canonicalJson({ provider, smokeRunId, status }))}`;
@@ -1090,6 +1093,7 @@ export function replaySocialHistory(events) {
   // them apart). null = LEGACY_SCOPE_UNKNOWN (settled before any durable scope of that provider).
   const observedScope = new Map(); // sourceEventId -> scopeRevision | null
   const research = { byCoin: new Map(), count: 0 }; // SOCIAL-5A: per-coin research dossier history (journal order, strict)
+  const shadow = emptyShadowState(); // SOCIAL-5 §36.6: research-control sample history (journal order, strict, bounded ring)
   const xDup = (e, err) => {
     if (err) return fail(`SOCIAL_HISTORY_INVALID: ${err}`);
     const d = contentHash(canonicalJson(e));
@@ -1268,6 +1272,14 @@ export function replaySocialHistory(events) {
       xDigests.set(`${e.type}|${e.sourceEventId}`, d);
       continue;
     }
+    if (e.type === RESEARCH_SHADOW_EVENT_TYPE) {
+      const d = contentHash(canonicalJson(e)); const prior = xDigests.get(`${e.type}|${e.sourceEventId}`);
+      if (prior !== undefined) { if (prior !== d) return fail('SOCIAL_HISTORY_INVALID: duplicate research shadow-sample identity with an altered payload — corruption, not replay'); continue; }
+      const r = replayResearchShadowEvent(shadow, e);
+      if (!r.ok) return fail(`SOCIAL_HISTORY_INVALID: ${r.error}`);
+      xDigests.set(`${e.type}|${e.sourceEventId}`, d);
+      continue;
+    }
     // any other type belongs to the frozen core's own replay/validator
   }
   // SOCIAL-4D CLOSEOUT diagnostic: targets whose retained SOURCE declarations disagree (two
@@ -1280,5 +1292,5 @@ export function replaySocialHistory(events) {
       if (ofRole.length > 1 && ofRole.some((a) => !sameDeclaration(a.witness, ofRole[0].witness))) annotationConflicts.push({ targetEventId, clockRole, annotationIds: ofRole.map((a) => a.sourceEventId).sort() });
     }
   }
-  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingRecords, pendingByTarget, pendingUnlinked, settledOrder, recordVersions, annotationConflicts, annotated, pending, catalogs, catalogVerified, scopes, scopeHistory, catalogEvents, catalogVerifiedEvents, scopeEvents, observedScope, research };
+  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingRecords, pendingByTarget, pendingUnlinked, settledOrder, recordVersions, annotationConflicts, annotated, pending, catalogs, catalogVerified, scopes, scopeHistory, catalogEvents, catalogVerifiedEvents, scopeEvents, observedScope, research, shadow };
 }

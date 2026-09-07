@@ -16,6 +16,7 @@
 // refresh keeps the previously accepted truth and states why. Sweep cadence and
 // backoff are unchanged.
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { loadConfig, dataDir } from '../lib/config.js';
 import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
@@ -28,6 +29,10 @@ const ASSET_PAIRS_URL = 'https://api.kraken.com/0/public/AssetPairs';
 export const CATALOG_REFRESH_MIN_SEC = 300; // new observation-resource controls (SOCIAL-4F) — not trading thresholds
 export const CATALOG_MAX_AGE_MAX_SEC = 900;
 export const CATALOG_NOTICE_RING = 500;
+// SOCIAL-5 §36.6: the per-sweep RESEARCH POPULATION snapshot — the already-computed facts of ONE
+// completed sweep (no request, no recomputation, no cadence/verdict/nomination change); only the
+// latest completed sweep is retained (no new unbounded history)
+export const SWEEP_POPULATION_VERSION = 'wideeye-sweep-population-1';
 
 const surveyDir = () => path.join(dataDir(), 'survey');
 const baselinesFile = () => path.join(surveyDir(), 'baselines.json');
@@ -103,10 +108,12 @@ export function startWideEye({
   const catalog = { accepted: null, lastAttemptTs: null, lastSuccessTs: null, lastError: null, lastRefusal: null, refreshes: 0, refusals: 0, failures: 0, lastChange: null };
   let refreshToken = 0;
   const notices = []; // bounded ring of already-computed RIPPLE/MISSED records (research context only)
+  let population = null; // SOCIAL-5 §36.6: the latest COMPLETED sweep's observed research population (detached, frozen)
 
   function logEvent(type, detail = {}) {
     appendJsonl(eventsFile(), { ts: nowIso(), type, ...detail });
   }
+  const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
 
   async function fetchJson(url) {
     const f = fetchImpl ?? fetch;
@@ -182,18 +189,23 @@ export function startWideEye({
     }
     const deep = new Set((readCurrentUniverse()?.pairs ?? []).map((p) => p.coin));
     let ripples = 0;
+    // SOCIAL-5 §36.6: the observed research population of THIS sweep — every row the sweep already
+    // evaluated (with the values it already computed) plus counts of rows it could not evaluate.
+    // Recording only; the sweep's own control flow, formulas and decisions are untouched.
+    const rows = []; const excluded = { NO_TICKER_ROW: 0, PRICE_INVALID: 0, INSUFFICIENT_SERIES: 0 };
+    const num2 = (v) => (Number.isFinite(v) ? Number(v.toFixed(2)) : null);
 
     for (const [key, coin] of keyToCoin) {
       const t = tickers[key];
-      if (!t) continue;
+      if (!t) { excluded.NO_TICKER_ROW += 1; continue; }
       const price = Number(t.c?.[0]);
       const cumVol = Number(t.v?.[1]);
-      if (!Number.isFinite(price) || price <= 0) continue;
+      if (!Number.isFinite(price) || price <= 0) { excluded.PRICE_INVALID += 1; continue; }
       const s = series.get(coin) ?? [];
       s.push({ t: nowMs, price, cumVol });
       while (s.length > 16) s.shift();
       series.set(coin, s);
-      if (s.length < 2) continue;
+      if (s.length < 2) { excluded.INSUFFICIENT_SERIES += 1; continue; }
 
       const at = (minAgo) => s.findLast((p) => p.t <= nowMs - minAgo * 60_000 + 5000);
       const p1 = at(1);
@@ -212,8 +224,13 @@ export function startWideEye({
       const b = (baselines[coin] ??= { ret1: {}, ret5: {}, volRate: {} });
       // shared core, live ordering: sample joins baseline, then z, then verdict
       const { zVol, zRet5, verdict } = evaluateTick({ ret1, ret5, ret15Pct, volRate }, b, cfg, hourKey);
+      const cooled = !!verdict && nowMs - (lastRipple.get(coin) ?? 0) < cfg.rippleCooldownMin * 60_000;
+      // population row: the values this sweep ALREADY computed for the coin; the 24h USD proxy exists only for
+      // emitted notices (below) and stays null otherwise — never recomputed for the record
+      const row = { coin, evaluated: true, zVol: num2(zVol), zRet: num2(zRet5), extension: num2(ret15Pct), preCooldownVerdict: verdict ?? null, cooldownSuppressed: cooled, noticeEmitted: !!verdict && !cooled, usdVol24h: null, inDeepTape: deep.has(coin) };
+      rows.push(row);
       if (!verdict) continue;
-      if (nowMs - (lastRipple.get(coin) ?? 0) < cfg.rippleCooldownMin * 60_000) continue;
+      if (cooled) continue;
       lastRipple.set(coin, nowMs);
 
       const usd24h = Number(t.v?.[1]) * Number(t.p?.[1]);
@@ -235,6 +252,7 @@ export function startWideEye({
       // planner (context only — both dispositions; never a veto, never a trading score)
       notices.push(Object.freeze({ ...record, tsMs: nowMs, usdVol24h: Number.isFinite(usd24h) ? Math.round(usd24h) : null }));
       if (notices.length > CATALOG_NOTICE_RING) notices.shift();
+      row.usdVol24h = Number.isFinite(usd24h) ? Math.round(usd24h) : null; // the same already-computed proxy the notice carries
       log(`[${nowIso()}] WIDE EYE ${verdict} ${coin} zVol=${record.zVol} zRet=${record.zRet} ext=${record.extension}%`);
       if (verdict === 'RIPPLE') {
         ripples++;
@@ -261,6 +279,11 @@ export function startWideEye({
       }
       atomicWriteJson(baselinesFile(), baselines); // compact; ~minutes cadence by design
     }
+    // SOCIAL-5 §36.6: publish the completed sweep's population (frozen, detached; identity from the sweep
+    // clock + catalog + scanned count — a semantic id, never random)
+    const catalogContentId = catalog.accepted?.contentId ?? null;
+    const sweepId = `ws-${createHash('sha1').update(`${nowMs}|${catalogContentId ?? 'NO_CATALOG'}|${keyToCoin.size}|${today}`).digest('hex')}`;
+    population = deepFreeze({ version: SWEEP_POPULATION_VERSION, sweepId, tsMs: nowMs, ts: new Date(nowMs).toISOString(), sessionDate: today, catalogContentId, catalogStatus: catalogContentId ? 'ACCEPTED' : 'UNAVAILABLE', scanned: keyToCoin.size, tickerRows: Object.keys(tickers ?? {}).length, evaluated: rows.length, excluded: { ...excluded }, rows, coverageNote: 'one public Ticker sweep; rows not evaluated are counted by reason, never scored' });
     atomicWriteJson(statusFile(), {
       ts: nowIso(),
       tsMs: nowMs,
@@ -321,13 +344,15 @@ export function startWideEye({
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
   }
-  const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
   return {
     stop,
     // SOCIAL-4F: the DETACHED read-only catalog snapshot — accepted truth (frozen) + how it got there
     catalogSnapshot: () => deepFreeze({ ...catalogStatus(now()), catalog: catalog.accepted, source: 'kraken REST AssetPairs (wide-eye acquisition)' }),
     // bounded, already-observed research notices (RIPPLE and MISSED alike) — context, never authority
     researchNotices: () => deepFreeze(notices.slice()),
+    // SOCIAL-5 §36.6: the latest COMPLETED sweep's observed research population (already-computed facts
+    // only; null until the first sweep completes) — the false-negative denominator seam, never authority
+    sweepPopulationSnapshot: () => population,
     // test/diagnostic: drive one refresh attempt directly (still bounded by the same law)
     _refreshCatalog: () => loadWideUniverse({ initial: !keyToCoin.size }),
     _sweepOnce: async () => { if (!keyToCoin.size) await loadWideUniverse({ initial: true }); else if (catalogDue(now())) await loadWideUniverse(); sweep(await fetchJson(TICKER_URL)); },

@@ -12,11 +12,11 @@ import { socialObservationToEvent, socialCatalogEvent, socialScopeEvent, xRuleSe
 import { compileAdmissionScope } from '../rumor2/social-scope.js';
 import { normalizeKrakenAssetPairs } from '../survey/catalog.js';
 import {
-  buildResearchDossier, socialWindowFeatures, socialParticipation, socialCoverageState, crossSenseDescriptors, opportunityClock, nextObservationProposals, researchStateOf, deepObservationMembership, paretoResourceOrdering,
+  buildResearchDossier, socialWindowFeatures, socialParticipation, socialCoverageState, crossSenseDescriptors, opportunityClock, nextObservationProposals, researchStateOf, deepObservationMembership,
   createScopeResolver, createCoverageTimeline, attributeSocialObservation, researchObservationOf, RESEARCH_WINDOWS_MS, RESEARCH_ENTRANCE_WINDOW_MS, RESEARCH_MIN_BASELINE_OBSERVATIONS,
 } from '../rumor2/social-research-strainer.js';
 import { validateDeepMarketWindow, deepMarketFeatures, walkBook, RESEARCH_MARKET_BOOK_MAX_AGE_MS } from '../rumor2/social-research-market.js';
-import { buildResearchPacket, projectResearchSources } from '../rumor2/social-research-packet.js';
+import { buildResearchPacket, projectResearchSources, RESEARCH_PACKET_PROJECTION_POLICY } from '../rumor2/social-research-packet.js';
 import { validateResearchDossier, validateResearchDossierEvent, researchDossierEvent, replayResearchDossierEvent, researchDossierAt, RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_DOSSIER_SCHEMA_VERSION, RESEARCH_FORBIDDEN_WORDS_RE, RESEARCH_PROPOSAL_KINDS, RESEARCH_STATES } from '../rumor2/social-research-dossier.js';
 import { createResearchStrainer } from '../rumor2/social-research-runtime.js';
 import { validateEvidencePacket, EVIDENCE_SCHEMA_VERSION, MAX_SOURCES, TRIGGER_KINDS } from '../evidence/contract.js';
@@ -73,7 +73,7 @@ test('A4. participation-led: Social activity with NO wide-eye notice is a valid 
 test('A5/A6. information-led: an official claim with no Social and no wide eye is a valid dossier with lawful proposals; market + Social + official => COMBINATION preserves every trigger', () => {
   const d = build({ claims: [claim('LINK', T0 - 30_000)] });
   assert.deepEqual(d.entrances.kinds, ['INFORMATION_LED']); assert.equal(d.information.state, 'PRESENT'); assert.equal(d.information.claims[0].status, 'UNVERIFIED');
-  assert.ok(props(d).includes('OFFICIAL_VERIFICATION_PROPOSED/OFFICIAL_CLAIM_UNVERIFIED')); assert.ok(props(d).includes('MARKET_DEEP_OBSERVATION_PROPOSED/EXECUTABILITY_UNASSESSED'));
+  assert.ok(props(d).includes('OFFICIAL_VERIFICATION_PROPOSED/CROSS_SENSE_DIVERGENCE'), props(d)); assert.ok(props(d).includes('MARKET_DEEP_OBSERVATION_PROPOSED/EXECUTABILITY_UNASSESSED'));
   assert.ok(d.crossSense.descriptors.includes('OFFICIAL_EVENT_MARKET_QUIET') && d.crossSense.descriptors.includes('OFFICIAL_EVENT_SOCIAL_QUIET'));
   const evs = [obsEvent({ id: 'c1', text: '$LINK listed', nowMs: T0 + 1000 })];
   const all = build({ notices: [notice('LINK', T0)], claims: [claim('LINK', T0 - 30_000)], observations: evs.map((e, i) => recOf(e, i + 1)) });
@@ -100,15 +100,15 @@ test('C1-C6. one post delivered 1,000 times is one source/author; 1 original + 9
   // C2: 999 explicit reposts
   const reposts = []; for (let i = 0; i < 999; i++) reposts.push(obsEvent({ id: `rp${i}`, author: `did:plc:r${i}`, text: '', relation: 'REPOST', parent: orig.nativePostId, nowMs: T0 + 2000 + i }));
   const f = socialWindowFeatures({ observations: [orig, ...reposts].map((e, i) => recOf(e, i + 1)), asOfTs: T0 + 10_000, windowMs: 60_000 });
-  assert.equal(f.propagation.rawPropagationCount, 1000); assert.equal(f.propagation.potentialOriginFamilies, 1); assert.equal(f.propagation.explicit.repost, 999); assert.equal(f.activity.uniqueAuthors, 1000); assert.equal(f.propagation.echoRatio, 0.999);
+  assert.equal(f.propagation.rawPropagationCount, 1000); assert.equal(f.propagation.potentialOriginFamilyCount, 1); assert.equal(f.propagation.factualIndependenceStatus, 'UNESTABLISHED'); assert.equal(f.propagation.explicit.repost, 999); assert.equal(f.activity.uniqueAuthors, 1000); assert.equal(f.propagation.echoRatio, 0.999);
   // C3: same text, different authors
   const same = [obsEvent({ id: 's1', author: 'did:plc:x', text: 'LINK listing confirmed by the exchange', nowMs: T0 + 1000 }), obsEvent({ id: 's2', author: 'did:plc:y', text: 'LINK listing confirmed by the exchange', nowMs: T0 + 1500 })];
   const g = socialWindowFeatures({ observations: same.map((e, i) => recOf(e, i + 1)), asOfTs: T0 + 10_000, windowMs: 60_000 });
-  assert.equal(g.propagation.potentialOriginFamilies, 1); assert.equal(g.propagation.families[0].kind, 'UNRESOLVED'); assert.equal(g.propagation.families[0].distinctAuthors, 2); assert.match(g.propagation.note, /never confirmed independent corroboration/);
+  assert.equal(g.propagation.potentialOriginFamilyCount, 1); assert.equal(g.propagation.families[0].kind, 'UNRESOLVED'); assert.equal(g.propagation.families[0].distinctAuthors, 2); assert.match(g.propagation.note, /never verified independent control/);
   // C4: a quote with material added text keeps the echo relation AND adds novelty
   const q = obsEvent({ id: 'q', author: 'did:plc:q', text: 'Not so fast: the $LINK listing is for the EU venue only, deposits paused', relation: 'QUOTE', parent: orig.nativePostId, nowMs: T0 + 3000 });
   const h = socialWindowFeatures({ observations: [orig, q].map((e, i) => recOf(e, i + 1)), asOfTs: T0 + 10_000, windowMs: 60_000 });
-  assert.equal(h.propagation.explicit.quote, 1); assert.equal(h.propagation.potentialOriginFamilies, 1, 'an explicit quote of a known parent attaches to its family'); assert.equal(h.propagation.families[0].echoCount, 1);
+  assert.equal(h.propagation.explicit.quote, 1); assert.equal(h.propagation.potentialOriginFamilyCount, 1, 'an explicit quote of a known parent attaches to its family'); assert.equal(h.propagation.families[0].echoCount, 1);
   // C5: near-copies with a changed negation / number / ticker are not silently the same certainty
   const a = '$LINK listing confirmed for Monday, deposits open at 9am UTC'; const neg = a.replace('confirmed', 'NOT confirmed'); const num = a.replace('9am', '3pm'); const tick = a.replace('$LINK', '$FRESH42');
   const prov = propagationVsIndependence([obsEvent({ id: 'n0', text: a, nowMs: T0 + 1000 }), obsEvent({ id: 'n1', author: 'did:plc:n1', text: neg, nowMs: T0 + 1100 }), obsEvent({ id: 'n2', author: 'did:plc:n2', text: num, nowMs: T0 + 1200 }), obsEvent({ id: 'n3', author: 'did:plc:n3', text: tick, nowMs: T0 + 1300 })].map((e) => ({ ...e, normalizedText: recOf(e, 1).normalizedText })));
@@ -141,7 +141,7 @@ test('D1-D5. an X rule-set change, a Social scope revision, an X gap, or a catal
   const tl = createCoverageTimeline(); tl.observe(boundaries.D4);
   const backlog = []; for (let i = 0; i < 10; i++) backlog.push(obsEvent({ id: `b${i}`, author: `did:plc:b${i}`, text: `$LINK backlog ${i}`, createdTs: T0 - 3_000_000, nowMs: T0 - 5000 }));
   const w3 = socialWindowFeatures({ observations: backlog.map((e, i) => recOf(e, i + 1)), asOfTs: T0, windowMs: 60_000, timeline: tl });
-  assert.equal(w3.comparability.compatible, false); assert.equal(w3.sourceTime.SOURCE_TIME_KNOWN_OLD_CIRCULATION_NEW, 10, 'old content, new circulation — never a fresh onset');
+  assert.equal(w3.comparability.compatible, false); assert.equal(w3.sourceTime.SOURCE_PREEXISTS_CURRENT_EPISODE, 10, 'old content, new circulation — never a fresh onset'); assert.equal(w3.sourceTime.circulation, 'CIRCULATION_CURRENT_EPISODE');
   const sparse = socialWindowFeatures({ observations: obs.slice(4), asOfTs: T0, windowMs: 60_000 });
   assert.equal(sparse.comparability.baselineInsufficient, true); assert.ok(sparse.comparability.reasons.includes('BASELINE_INSUFFICIENT')); assert.equal(sparse.delta.countDelta, null); assert.equal(RESEARCH_MIN_BASELINE_OBSERVATIONS, 3);
 });
@@ -153,7 +153,7 @@ test('E1-E6. old source time + fresh retrieval is OLD/NEW-circulation; unknown s
   const fut = obsEvent({ id: 'fut', author: 'did:plc:f', text: '$LINK from the future', createdTs: T0 + 3_600_000, nowMs: T0 + 1000 });
   assert.equal(old.sourceClockStatus, 'TRUSTED'); assert.equal(unk.sourceClockStatus, 'UNKNOWN'); assert.equal(fut.sourceClockStatus, 'FUTURE_QUARANTINED'); assert.equal(fut.sourceCreatedTs, null, 'never clamped'); assert.equal(fut.knownAtTs, T0 + 1000);
   const d = build({ observations: [old, unk, fut].map((e, i) => recOf(e, i + 1)) });
-  const st = d.participation.windows.w900s.sourceTime; assert.equal(st.SOURCE_TIME_KNOWN_OLD_CIRCULATION_NEW, 1); assert.equal(st.SOURCE_TIME_UNKNOWN_CIRCULATION_NEW, 2); assert.equal(st.SOURCE_TIME_KNOWN_NEW_CIRCULATION_NEW, 0);
+  const st = d.participation.windows.w900s.sourceTime; assert.equal(st.SOURCE_PREEXISTS_CURRENT_EPISODE, 1); assert.equal(st.SOURCE_TIME_UNKNOWN, 2); assert.equal(st.SOURCE_FIRST_OBSERVED_IN_CURRENT_EPISODE, 0); assert.equal(st.episodeOnsetTs, d.episode.onset.knownAtTs);
   assert.ok(props(d).includes('SOCIAL_RESEARCH_PROPOSED/SOURCE_FRESHNESS_UNRESOLVED'));
   // E4: derivation cannot precede an input
   const early = buildResearchDossier({ canonicalCoin: 'LINK', asOfTs: T0 + 500, providerStates: observed(), observations: [recOf(old, 1)] });
@@ -179,7 +179,7 @@ test('F1-F3. a new coin with one observation is DATA_INSUFFICIENT with an insuff
   assert.equal(m.researchState, 'INVESTIGATE');
   const two = obsEvent({ id: 'cold2', author: 'did:plc:c2', text: '$FRESH42 deposits open', nowMs: T0 + 2000 });
   const s = buildResearchDossier({ canonicalCoin: 'FRESH42', asOfTs: T0 + 5000, providerStates: observed(), observations: [recOf(one, 1), recOf(two, 2)] }).dossier;
-  assert.equal(s.researchState, 'OBSERVING'); assert.equal(s.participation.descriptive.participationChange, 'INCOMPARABLE', 'no acceleration claim without a comparable baseline');
+  assert.equal(s.researchState, 'KEEP_OBSERVING'); assert.equal(s.episode.state, 'LIGHT_OBSERVING'); assert.equal(s.participation.descriptive.participationChange, 'INCOMPARABLE', 'no acceleration claim without a comparable baseline');
 });
 
 // ================================ G — CROSS-SENSE ================================
@@ -203,7 +203,7 @@ test('H1-H4. the first trigger known clock is retained exactly; derivation later
   assert.equal(c.firstTriggerKnownAtTs, T0 - 4000); assert.equal(c.firstTriggerObservedTs, T0 - 4000); assert.equal(c.latestInputKnownAtTs, T0 + 3000); assert.equal(c.dossierDerivedKnownAtTs, T0 + 10_000);
   assert.equal(c.ageFromFirstKnownMs, 14_000); assert.equal(c.derivationLatencyMs, 7000); assert.equal(c.totalKnownLatencyMs, 14_000); assert.equal(c.acquisitionLatencyMs, 0);
   assert.equal(c.halfLifeEstimateMs, null); assert.equal(c.halfLifeCalibration, 'UNCALIBRATED');
-  const ev = researchDossierEvent({ dossier: d, packet: null, latestInputKnownAtTs: c.latestInputKnownAtTs, firstTriggerKnownAtTs: c.firstTriggerKnownAtTs });
+  const ev = researchDossierEvent({ dossier: d, packetResult: packetOf(d), latestInputKnownAtTs: c.latestInputKnownAtTs, firstTriggerKnownAtTs: c.firstTriggerKnownAtTs });
   assert.equal(ev.knownAtTs, T0 + 10_000, 'the event becomes known at derivation, never at the trigger');
   const forged = { ...d, opportunityClock: { ...c, halfLifeEstimateMs: 60_000, halfLifeCalibration: 'CALIBRATED' } };
   assert.match(validateResearchDossier(forged), /half-life is not calibrated/);
@@ -249,29 +249,40 @@ test('J1-J4. coordinated Social patterns are context; +4% / +8% / +40% extension
 
 // ================================ K — PACKET CONTRACT ================================
 const packetOf = (d, extra = {}) => buildResearchPacket({ dossier: d, coverage: observed(T0 + 10_000).map((p) => ({ provider: p.provider, state: p.state, checkedTs: p.checkedTs, detail: p.detail })), ...extra });
-test('K1-K3/K7. market-only, Social-only, and combination research packets validate under serpent-evidence-1 with existing trigger kinds; MISSING/UNAVAILABLE evidence has value null', () => {
-  const m = packetOf(build({ notices: [notice('LINK', T0)] })); assert.equal(m.outcome, 'VALID', m.reasons); assert.equal(m.packet.schemaVersion, EVIDENCE_SCHEMA_VERSION); assert.equal(m.packet.trigger.kind, 'WIDE_EYE_RIPPLE'); assert.equal(validateEvidencePacket(m.packet).valid, true);
+test('K1-K3/K4/K7/K11. the v1 representability table: an actual RIPPLE => WIDE_EYE_RIPPLE; Social-only, MISSED-only and official-only dossiers stay VALID research truth but the packet is PACKET_UNREPRESENTABLE_V1_TRIGGER with packet null and a closed reason (never RUMINT_NOMINATION / MANUAL_RESEARCH / a relabelled RIPPLE); COMBINATION only when a declared trigger anchors it; MISSING/UNAVAILABLE evidence has value null', () => {
+  const m = packetOf(build({ notices: [notice('LINK', T0)] })); assert.equal(m.packetStatus, 'VALID', m.reasons); assert.deepEqual(m.reasonCodes, []); assert.equal(m.packet.schemaVersion, EVIDENCE_SCHEMA_VERSION); assert.equal(m.packet.trigger.kind, 'WIDE_EYE_RIPPLE'); assert.equal(validateEvidencePacket(m.packet).valid, true);
   assert.ok(m.packet.evidence.some((e) => e.kind === 'MARKET_DEEP_OBSERVATION' && e.state === 'MISSING' && e.value === null)); assert.ok(m.packet.evidence.some((e) => e.kind === 'WIDE_EYE_NOTICE' && e.sense === 'WIDE_EYE'));
-  const evs = [obsEvent({ id: 'k1', text: '$LINK listing', nowMs: T0 + 1000 }), obsEvent({ id: 'k2', author: 'did:plc:k', text: '$LINK deposits', nowMs: T0 + 2000 })];
-  const sd = build({ observations: evs.map((e, i) => recOf(e, i + 1)) });
-  const s = packetOf(sd, { socialObservations: evs.map((e, i) => recOf(e, i + 1)) }); assert.equal(s.outcome, 'VALID', s.reasons); assert.equal(s.packet.trigger.kind, 'RUMINT_NOMINATION'); assert.equal(s.packet.sources.length, 2); assert.equal(s.packet.sources[0].sourceType, 'SOCIAL_ACCOUNT'); assert.equal(s.packet.security.untrustedTextPresent, true);
-  assert.ok(s.packet.evidence.some((e) => e.kind === 'SOCIAL_PARTICIPATION_FEATURES' && e.sense === 'RUMINT' && e.state === 'KNOWN')); assert.ok(s.packet.evidence.some((e) => e.kind === 'SOCIAL_PROPAGATION_FEATURES'));
-  const cd = build({ observations: evs.map((e, i) => recOf(e, i + 1)), notices: [notice('LINK', T0)], claims: [claim('LINK', T0 - 30_000)] });
-  const c = packetOf(cd, { socialObservations: evs.map((e, i) => recOf(e, i + 1)), officialObservations: claim('LINK', T0 - 30_000).observations }); assert.equal(c.outcome, 'VALID', c.reasons); assert.equal(c.packet.trigger.kind, 'COMBINATION'); assert.equal(c.packet.claims.length, 1); assert.equal(c.packet.claimLinks.length, 2);
-  assert.ok(TRIGGER_KINDS.includes(c.packet.trigger.kind)); assert.ok(c.packet.sources.some((x) => x.sourceType === 'EXCHANGE_OFFICIAL' && x.authorityClass === 'OFFICIAL'));
+  const evs = [obsEvent({ id: 'k1', text: '$LINK listing', nowMs: T0 + 1000 }), obsEvent({ id: 'k2', author: 'did:plc:k', text: '$LINK deposits', nowMs: T0 + 2000 })]; const obs = evs.map((e, i) => recOf(e, i + 1));
+  // K2: raw Social participation is NOT a RUMINT nomination
+  const sd = build({ observations: obs }); assert.equal(validateResearchDossier(sd), null, 'the dossier itself is valid research truth');
+  const sp = packetOf(sd, { socialObservations: obs }); assert.equal(sp.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER'); assert.equal(sp.packet, null); assert.deepEqual(sp.reasonCodes, ['PARTICIPATION_LED_ONLY']); assert.match(sp.detail, /not a RUMINT_NOMINATION/);
+  // K3: a MISSED notice is never relabelled WIDE_EYE_RIPPLE
+  const md = build({ notices: [notice('LINK', T0, { verdict: 'MISSED', extension: 12 })] }); const mp = packetOf(md); assert.equal(mp.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER'); assert.deepEqual(mp.reasonCodes, ['MARKET_LED_MISSED_ONLY']); assert.equal(mp.packet, null); assert.equal(md.researchState, 'INVESTIGATE', 'unrepresentable is a packet fact, not a research verdict');
+  // official-only: RUMINT_CLAIM belongs to the frozen claim packet family
+  const od = build({ claims: [claim('LINK', T0 - 30_000)] }); const op = packetOf(od, { officialObservations: claim('LINK', T0 - 30_000).observations }); assert.equal(op.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER'); assert.deepEqual(op.reasonCodes, ['INFORMATION_LED_ONLY_CLAIM_PACKET']);
+  // K4: COMBINATION only with a declared anchor
+  const cd = build({ observations: obs, notices: [notice('LINK', T0)], claims: [claim('LINK', T0 - 30_000)] });
+  const c = packetOf(cd, { socialObservations: obs, officialObservations: claim('LINK', T0 - 30_000).observations }); assert.equal(c.packetStatus, 'VALID', c.reasons); assert.equal(c.packet.trigger.kind, 'COMBINATION'); assert.equal(c.trigger.anchor, 'WIDE_EYE_RIPPLE'); assert.equal(c.packet.claims.length, 1); assert.equal(c.packet.claimLinks.length, 2);
+  assert.ok(TRIGGER_KINDS.includes(c.packet.trigger.kind)); assert.ok(c.packet.sources.some((x) => x.sourceType === 'EXCHANGE_OFFICIAL' && x.authorityClass === 'OFFICIAL')); assert.equal(c.packet.sources.filter((x) => x.sourceType === 'SOCIAL_ACCOUNT').length, 2); assert.equal(c.packet.security.untrustedTextPresent, true);
+  assert.ok(c.packet.evidence.some((e) => e.kind === 'SOCIAL_PARTICIPATION_FEATURES' && e.sense === 'RUMINT' && e.state === 'KNOWN')); assert.ok(c.packet.evidence.some((e) => e.kind === 'SOCIAL_PROPAGATION_FEATURES' && e.value.factualIndependenceStatus === 'UNESTABLISHED'));
+  const cc = packetOf(build({ observations: obs, claims: [claim('LINK', T0 - 30_000)] }), { socialObservations: obs, officialObservations: claim('LINK', T0 - 30_000).observations }); assert.equal(cc.packetStatus, 'VALID'); assert.equal(cc.trigger.anchor, 'OFFICIAL_CLAIM'); assert.equal(cc.packet.trigger.kind, 'COMBINATION');
+  const cm = packetOf(build({ observations: obs, notices: [notice('LINK', T0, { verdict: 'MISSED' })] }), { socialObservations: obs }); assert.equal(cm.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER'); assert.deepEqual(cm.reasonCodes, ['COMBINATION_WITHOUT_DECLARED_TRIGGER'], 'Social + MISSED is a genuine multi-entrance research case but no declared v1 trigger anchors it');
   const unav = packetOf(build({ notices: [notice('LINK', T0)], providerStates: [{ provider: 'BLUESKY_OFFICIAL', state: 'UNAVAILABLE', checkedTs: T0 }] }), { coverage: [{ provider: 'BLUESKY_OFFICIAL', state: 'UNAVAILABLE', checkedTs: T0, detail: null }] });
-  assert.equal(unav.outcome, 'VALID', unav.reasons); assert.ok(unav.packet.evidence.some((e) => e.kind === 'SOCIAL_PARTICIPATION_FEATURES' && e.state === 'UNAVAILABLE' && e.value === null));
+  assert.equal(unav.packetStatus, 'VALID', unav.reasons); assert.ok(unav.packet.evidence.some((e) => e.kind === 'SOCIAL_PARTICIPATION_FEATURES' && e.state === 'UNAVAILABLE' && e.value === null));
+  // K11: no coercion path exists — the table is closed and every packet trigger is a declared kind with exact semantics
+  for (const pr of [m, c, cc, unav]) assert.ok(['WIDE_EYE_RIPPLE', 'COMBINATION'].includes(pr.packet.trigger.kind));
+  assert.equal(buildResearchPacket({ dossier: null }).packetStatus, 'PACKET_WITHHELD_CONTRACT_FAILURE');
 });
 
 test('K4/K5/K6/K8/K9. raw excerpts stay untrusted and bounded; an over-bound Social population is deterministically projected with explicit truncation disclosure; undeclared fields fail (no schema v2); future-known evidence is rejected, never clamped; key order never changes the packetId', () => {
   const many = []; for (let i = 0; i < 60; i++) many.push(obsEvent({ id: `m${i}`, author: `did:plc:m${i % 40}`, text: i % 5 === 0 ? `$LINK original angle ${i} ${'x'.repeat(900)}` : `$LINK original angle ${i - (i % 5)} ${'x'.repeat(900)}`, nowMs: T0 + 1000 + i }));
   const obs = many.map((e, i) => recOf(e, i + 1));
-  const d = build({ observations: obs });
-  const p = packetOf(d, { socialObservations: obs }); assert.equal(p.outcome, 'VALID', p.reasons);
-  assert.equal(p.packet.sources.length, MAX_SOURCES); assert.equal(p.projection.truncated, true); assert.equal(p.projection.total, 60); assert.ok(p.packet.missingEvidence.some((m) => m.kind === 'SOURCE_PROJECTION_TRUNCATED' && m.description.includes('60 sources')));
+  const d = build({ observations: obs, notices: [notice('LINK', T0)] });
+  const p = packetOf(d, { socialObservations: obs }); assert.equal(p.packetStatus, 'VALID', p.reasons);
+  assert.equal(p.packet.sources.length, MAX_SOURCES); assert.equal(p.projection.truncated, true); assert.equal(p.projection.total, 60); assert.ok(p.packet.missingEvidence.some((m) => m.kind === 'SOURCE_PROJECTION_TRUNCATED' && m.description.includes('60 settled sources')));
   for (const s of p.packet.sources) if (s.excerpt) { assert.equal(s.excerpt.untrusted, true); assert.ok(s.excerpt.text.length <= 1000); }
   assert.ok(p.packet.sources.reduce((n, s) => n + (s.excerpt ? s.excerpt.text.length : 0), 0) <= 8000, 'packet raw budget');
-  const proj = projectResearchSources({ socialObservations: obs }); assert.equal(proj.policy, 'OFFICIAL_FIRST_THEN_EARLIEST_FAMILY_REPRESENTATIVES_THEN_JOURNAL_ORDER'); assert.equal(proj.socialSelected.length, MAX_SOURCES);
+  const proj = projectResearchSources({ socialObservations: obs }); assert.equal(proj.policy, RESEARCH_PACKET_PROJECTION_POLICY); assert.equal(proj.socialSelected.length, MAX_SOURCES); assert.equal(proj.passes.p2, 12, 'PASS 2: the earliest representative of each of the 12 text families'); assert.ok(proj.passes.p4 > 0, 'PASS 4: latest novel representatives');
   assert.equal(canonicalJson(projectResearchSources({ socialObservations: [...obs].reverse() }).socialSelected.map((o) => o.sourceEventId)), canonicalJson(proj.socialSelected.map((o) => o.sourceEventId)), 'deterministic regardless of input order');
   // K6: undeclared fields fail; the builder invents no v2
   assert.equal(validateEvidencePacket({ ...p.packet, researchScore: 0.9 }).valid, false); assert.equal(validateEvidencePacket({ ...p.packet, schemaVersion: 'serpent-evidence-2' }).valid, false);
@@ -279,26 +290,28 @@ test('K4/K5/K6/K8/K9. raw excerpts stay untrusted and bounded; an over-bound Soc
   const fut = { ...p.packet, evidence: p.packet.evidence.map((e, i) => (i === 0 ? { ...e, knownAtTs: p.packet.asOfTs + 1 } : e)) }; assert.equal(validateEvidencePacket(fut).valid, false);
   // K9: key order
   const r = rng(SEED); const shuffled = shuffleKeys(d, r);
-  const p2 = buildResearchPacket({ dossier: shuffled, socialObservations: obs, coverage: observed(T0 + 10_000).map((x) => ({ provider: x.provider, state: x.state, checkedTs: x.checkedTs, detail: x.detail })) });
+  const p2 = buildResearchPacket({ dossier: shuffled, socialObservations: obs, coverage: observed(T0 + 10_000).map((x) => ({ provider: x.provider, state: x.state, checkedTs: x.checkedTs, detail: x.detail })) }); assert.equal(p2.packetStatus, 'VALID');
   assert.equal(p2.packet.packetId, p.packet.packetId);
 });
 
 // ================================ DOSSIER EVENT + REPLAY (in-memory) ================================
 test('DOSSIER-EVENT. the durable event validates strictly: envelope agrees with the dossier and packet; identity is semantic; an altered payload is refused; replay enforces episode contiguity and the as-of view; the event type is a Social-tier type filtered from the frozen core', () => {
   const evs = [obsEvent({ id: 'r1', text: '$LINK listing', nowMs: T0 + 1000 })]; const obs = evs.map((e, i) => recOf(e, i + 1));
-  const d = build({ observations: obs }); const p = packetOf(d, { socialObservations: obs }).packet;
-  const ev = researchDossierEvent({ dossier: d, packet: p, latestInputKnownAtTs: d.opportunityClock.latestInputKnownAtTs, firstTriggerKnownAtTs: d.opportunityClock.firstTriggerKnownAtTs });
+  const d = build({ observations: obs }); const pr = packetOf(d, { socialObservations: obs }); assert.equal(pr.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER');
+  const ev = researchDossierEvent({ dossier: d, packetResult: pr, latestInputKnownAtTs: d.opportunityClock.latestInputKnownAtTs, firstTriggerKnownAtTs: d.opportunityClock.firstTriggerKnownAtTs });
   assert.equal(validateResearchDossierEvent(ev), null); assert.equal(ev.type, RESEARCH_DOSSIER_EVENT_TYPE); assert.ok(SOCIAL_EVENT_TYPES.includes(ev.type)); assert.ok(isSocialEventType(ev.type)); assert.equal(ev.knownAtTs, d.derivedKnownAtTs);
-  assert.match(validateResearchDossierEvent({ ...ev, researchState: 'OBSERVING' }), /envelope/); assert.match(validateResearchDossierEvent({ ...ev, packetId: 'sep-' + 'a'.repeat(40) }), /packetId disagrees/); assert.match(validateResearchDossierEvent({ ...ev, dossier: { ...d, dossierId: 'r2rd-' + 'a'.repeat(40) } }), /semantic hash/);
+  assert.equal(ev.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER'); assert.equal(ev.packet, null); assert.equal(ev.packetId, null); assert.deepEqual(ev.packetReasonCodes, ['PARTICIPATION_LED_ONLY']); assert.equal(ev.episodeId, d.episode.episodeId); assert.equal(ev.episodeState, 'DATA_INSUFFICIENT' === d.researchState ? 'LIGHT_OBSERVING' : d.episode.state);
+  assert.match(validateResearchDossierEvent({ ...ev, researchState: 'KEEP_OBSERVING' }), /envelope/); assert.match(validateResearchDossierEvent({ ...ev, packetId: 'sep-' + 'a'.repeat(40) }), /packetId/); assert.match(validateResearchDossierEvent({ ...ev, dossier: { ...d, dossierId: 'r2rd-' + 'a'.repeat(40) } }), /semantic hash/);
+  assert.match(validateResearchDossierEvent({ ...ev, packetStatus: 'VALID' }), /VALID packet carries no reason codes/); assert.match(validateResearchDossierEvent({ ...ev, packetReasonCodes: [] }), /names its bounded reason/); assert.match(validateResearchDossierEvent({ ...ev, packetReasonCodes: ['NOT_A_CODE'] }), /closed set/);
   const state = { byCoin: new Map(), count: 0 }; assert.equal(replayResearchDossierEvent(state, ev).ok, true);
   assert.equal(replayResearchDossierEvent(state, { ...ev }).ok, false, 'a second first-episode dossier without a predecessor is refused');
-  const d2 = buildResearchDossier({ canonicalCoin: 'LINK', asOfTs: T0 + 30_000, providerStates: observed(T0 + 30_000), observations: [...obs, recOf(obsEvent({ id: 'r2', author: 'did:plc:r', text: '$LINK deposits', nowMs: T0 + 20_000 }), 2)], previous: { dossierId: d.dossierId, derivedKnownAtTs: d.derivedKnownAtTs, episodeIndex: 1, entrances: d.entrances.kinds, inputDigest: d.inputDigest } }).dossier;
-  assert.equal(d2.episode.index, 1); assert.equal(d2.episode.previousDossierId, d.dossierId); assert.notEqual(d2.inputDigest, d.inputDigest);
-  const ev2 = researchDossierEvent({ dossier: d2, packet: null, latestInputKnownAtTs: d2.opportunityClock.latestInputKnownAtTs, firstTriggerKnownAtTs: d2.opportunityClock.firstTriggerKnownAtTs });
+  const d2 = buildResearchDossier({ canonicalCoin: 'LINK', asOfTs: T0 + 30_000, providerStates: observed(T0 + 30_000), observations: [...obs, recOf(obsEvent({ id: 'r2', author: 'did:plc:r', text: '$LINK deposits', nowMs: T0 + 20_000 }), 2)], previous: state.byCoin.get('LINK')[0] }).dossier;
+  assert.equal(d2.episode.index, 1); assert.equal(d2.episode.basis, 'CONTINUED'); assert.equal(d2.episode.episodeId, d.episode.episodeId); assert.deepEqual(d2.episode.onset, d.episode.onset, 'the onset is immutable within an episode'); assert.equal(d2.episode.previousDossierId, d.dossierId); assert.notEqual(d2.inputDigest, d.inputDigest);
+  const ev2 = researchDossierEvent({ dossier: d2, packetResult: packetOf(d2, { socialObservations: obs }), latestInputKnownAtTs: d2.opportunityClock.latestInputKnownAtTs, firstTriggerKnownAtTs: d2.opportunityClock.firstTriggerKnownAtTs });
   assert.equal(replayResearchDossierEvent(state, ev2).ok, true); assert.equal(researchDossierAt(state.byCoin.get('LINK'), T0 + 15_000).dossierId, d.dossierId); assert.equal(researchDossierAt(state.byCoin.get('LINK'), T0 + 30_000).dossierId, d2.dossierId); assert.equal(researchDossierAt(state.byCoin.get('LINK'), T0 + 9000), null);
   const rp = replaySocialHistory([...evs, ev, ev2]); assert.equal(rp.ok, true); assert.equal(rp.research.count, 2);
   assert.equal(replaySocialHistory([ev, ...evs]).ok, false, 'a participation trigger must name an already-durable observation');
-  assert.equal(replaySocialHistory([...evs, ev, { ...ev, researchState: 'OBSERVING' }]).ok, false, 'altered payload under the same identity is corruption');
+  assert.equal(replaySocialHistory([...evs, ev, { ...ev, inputDigest: 'f'.repeat(40) }]).ok, false, 'altered payload under the same identity is corruption');
   assert.equal(replaySocialHistory([...evs, ev, ev]).ok, true, 'an exact re-append collapses');
 });
 
@@ -320,9 +333,10 @@ test('RUNTIME-1/N1/N2. attribution under the DURABLE scope in journal order (no 
   assert.deepEqual([...['FRESH42', 'LINK', 'ZQQ7']].map((c) => b.rt._subject(c)?.observations.length ?? 0), [1, 1, 1]); assert.equal(b.rt._subject('FRESH42').observations[0].attributionBasis, 'DURABLE_SCOPE_BLUESKY_OFFICIAL_REV_1');
   const r1 = await b.tick(); assert.equal(r1.ok, true); assert.equal(r1.researchDossiers.length, 1);
   const first = b.arr.find((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE); assert.equal(first.canonicalCoin, 'FRESH42', 'the oldest un-dossiered input is served first (resource ordering, not merit)'); assert.deepEqual(first.entrances, ['PARTICIPATION_LED']); assert.equal(validateResearchDossierEvent(first), null);
-  assert.equal(first.packet.subject.canonicalCoin, 'FRESH42'); assert.equal(validateEvidencePacket(first.packet).valid, true);
+  assert.equal(first.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER', 'raw participation has no exact v1 trigger'); assert.equal(first.packet, null); assert.deepEqual(first.packetReasonCodes, ['PARTICIPATION_LED_ONLY']); assert.equal(first.dossier.episode.basis, 'FIRST_DOSSIER');
   b.clock.ms += 1000; await b.tick({ notices: [notice('LINK', T0 + 3000)] }); b.clock.ms += 1000; await b.tick({ notices: [notice('LINK', T0 + 3000)] });
   const link = b.arr.filter((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE && e.canonicalCoin === 'LINK'); assert.equal(link.length, 1); assert.deepEqual(link[0].entrances, ['MARKET_LED', 'PARTICIPATION_LED']);
+  assert.equal(link[0].packetStatus, 'VALID'); assert.equal(link[0].packet.trigger.kind, 'COMBINATION'); assert.equal(link[0].packet.subject.canonicalCoin, 'LINK'); assert.equal(validateEvidencePacket(link[0].packet).valid, true);
   assert.equal(replaySocialHistory(b.arr).ok, true); assert.equal(replaySocialHistory(b.arr).research.count, 3);
   assert.equal(b.rt.status().authority, 'NONE'); assert.equal(b.rt.status().purpose, 'RESEARCH_ONLY'); assert.equal(b.rt.status().subjects, 3);
 });
@@ -344,7 +358,11 @@ test('RUNTIME-2/§18. emission bounds: unchanged effective content writes nothin
   const storm = []; for (let i = 0; i < 3000; i++) storm.push(obsEvent({ id: `st${i}`, author: `did:plc:s${i}`, text: '', relation: 'REPOST', parent: e1.nativePostId, nowMs: b.clock.ms + i }));
   b.arr.push(...storm); b.rt.ingest(storm); b.clock.ms += 20_000; await b.tick(); b.clock.ms += 1000; await b.tick();
   assert.equal(b.arr.filter((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE).length, 3); assert.ok(b.rt._subject('LINK').observations.length <= 4096);
-  const last = b.arr.filter((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE).at(-1); assert.equal(last.dossier.participation.windows.w900s.propagation.potentialOriginFamilies <= 3, true); assert.equal(last.packet.sources.length, MAX_SOURCES);
+  const last = b.arr.filter((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE).at(-1); assert.equal(last.dossier.participation.windows.w900s.propagation.potentialOriginFamilyCount <= 3, true); assert.equal(last.packet, null, 'participation-only: no exact v1 trigger');
+  assert.equal(last.dossier.dependencies.truncated, true, 'a 3,000-source manifest is bounded and discloses the omission'); assert.ok(last.dossier.dependencies.omitted.socialSources > 0); assert.ok(last.dossier.dependencies.nodes.length <= 192);
+  // §36.1: one more echo inside the OPEN window changes the input digest but no closed component => no write
+  const echo = obsEvent({ id: 'st-late', author: 'did:plc:late', text: '', relation: 'REPOST', parent: e1.nativePostId, nowMs: b.clock.ms }); b.arr.push(echo); b.rt.ingest([echo]); b.clock.ms += 1000; await b.tick();
+  assert.equal(b.arr.filter((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE).length, 3); assert.ok(b.rt.status().stats.suppressedNotMaterial >= 1, 'an echo inside an open window is not material by itself');
 });
 
 test('RUNTIME-3/O4/H5. second impulse: after an idle (DORMANT) period a new evidence wave opens episode 2 referencing the earlier dossier — never suppressed because the asset moved before; DORMANT erases no durable truth', async () => {
@@ -355,6 +373,7 @@ test('RUNTIME-3/O4/H5. second impulse: after an idle (DORMANT) period a new evid
   b.clock.ms += 2 * 3_600_000; await b.tick(); assert.equal(b.rt.status().subjects, 0, 'idle subject dropped from memory (housekeeping)'); assert.equal(b.rt.status().stats.dormant, 1); assert.equal(b.rt.history('LINK').length, 1, 'durable history intact');
   const w2 = obsEvent({ id: 'w2', author: 'did:plc:w', text: '$LINK second wave', nowMs: b.clock.ms }); b.arr.push(w2); b.rt.ingest([w2]); b.clock.ms += 1000; await b.tick();
   const list = b.arr.filter((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE); assert.equal(list.length, 2); assert.equal(list[1].episodeIndex, 2); assert.equal(list[1].previousDossierId, list[0].dossierId);
+  assert.equal(list[1].dossier.episode.basis, 'NEW_AFTER_DORMANT'); assert.notEqual(list[1].episodeId, list[0].episodeId); assert.equal(list[1].dossier.episode.previousEpisodeId, list[0].episodeId); assert.equal(list[1].dossier.episode.onset.ref, w2.sourceEventId, 'the new episode has its own immutable onset');
   assert.ok(list[1].proposalKinds.includes('RECHECK_PROPOSED')); assert.ok(list[1].dossier.nextObservationProposals.some((p) => p.reasonCode === 'SECOND_IMPULSE_CONTEXT'));
   // restart from the journal: the same history, the same view, no backdating
   const c = bootRuntime({ nowMs: b.clock.ms + 1000, arr: b.arr }); assert.equal(c.rt.hydrate(b.arr).ok, true); assert.equal(c.rt.history('LINK').length, 2); assert.equal(c.rt.history('LINK')[1].derivedKnownAtTs, list[1].derivedKnownAtTs);
@@ -372,7 +391,7 @@ test('RUNTIME-4/L2/L5/L6. lost acknowledgement retries the identical bytes and c
   b.clock.ms += 10; const r2 = await b.tick(); assert.equal(r2.ok, true); assert.equal(arr.filter((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE).length, 1, 'duplicate collapsed, not corruption'); assert.equal(b.rt.status().stats.opRetries, 1); assert.equal(b.rt.history('LINK').length, 1);
   mode = 'REFUSE'; const l2 = obsEvent({ id: 'l2', author: 'did:plc:2', text: '$LINK more', nowMs: b.clock.ms }); arr.push(l2); b.rt.ingest([l2]); b.clock.ms += 20_000; const r3 = await b.tick(); assert.equal(r3.ok, false); assert.equal(b.rt.status().pendingOperation.coin, 'LINK'); assert.equal(b.rt.history('LINK').length, 1, 'no watermark advance');
   mode = 'OK'; b.clock.ms += 10; const r4 = await b.tick(); assert.equal(r4.ok, true); assert.equal(b.rt.history('LINK').length, 2);
-  const ev = arr.filter((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE)[1]; const alt = await inner.append([{ ...ev, researchState: 'OBSERVING' }]); assert.match(alt.reason, /CORRUPTION/);
+  const ev = arr.filter((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE)[1]; const alt = await inner.append([{ ...ev, inputDigest: 'f'.repeat(40) }]); assert.match(alt.reason, /CORRUPTION/);
   // fence lost before the append: nothing prepared, nothing written
   const l3 = obsEvent({ id: 'l3', author: 'did:plc:3', text: '$LINK again', nowMs: b.clock.ms }); arr.push(l3); b.rt.ingest([l3]); b.clock.ms += 20_000; const r5 = await b.tick({}, () => false); assert.equal(r5.reason, 'WRITER_FENCE_LOST'); assert.equal(b.rt.status().pendingOperation, null); assert.equal(arr.filter((e) => e.type === RESEARCH_DOSSIER_EVENT_TYPE).length, 2);
 });
@@ -390,13 +409,12 @@ test('M1-M5/N3. the research path performs zero provider calls, starts no timer,
 });
 
 // ================================ O — FALSE-NEGATIVE SHADOW CASES + PARETO ================================
-test('O1-O5 + §14. market-only, Social-only, official-only and coordinated-early cases all survive; the resource ordering is a Pareto frontier labelled RESOURCE_ORDERING, never a score', () => {
+test('O1-O5 + §14. market-only, Social-only, official-only and coordinated-early cases all survive; no grand score, no probability, no Pareto ordering is exported — separate feature families only', () => {
   const m = build({ notices: [notice('LINK', T0, { zVol: 8 })] });
   const s = buildResearchDossier({ canonicalCoin: 'FRESH42', asOfTs: T0 + 10_000, providerStates: observed(), observations: [recOf(obsEvent({ id: 'o1', text: '$FRESH42 early', nowMs: T0 + 1000 }), 1), recOf(obsEvent({ id: 'o2', author: 'did:plc:o', text: '$FRESH42 early too', nowMs: T0 + 2000 }), 2)] }).dossier;
   const o = buildResearchDossier({ canonicalCoin: 'ZQQ7', asOfTs: T0 + 10_000, providerStates: observed(), claims: [claim('ZQQ7', T0 - 10_000)] }).dossier;
-  for (const d of [m, s, o]) assert.ok(['INVESTIGATE', 'OBSERVING'].includes(d.researchState), d.canonicalCoin);
-  const po = paretoResourceOrdering([m, s, o]); assert.match(po.label, /RESOURCE_ORDERING/); assert.equal(po.frontier.length, 3, 'each is unusually strong on a different dimension: none dominates'); assert.equal(po.dominated, 0);
-  assert.ok(!('score' in po) && !('probability' in po));
+  for (const d of [m, s, o]) { assert.ok(['INVESTIGATE', 'KEEP_OBSERVING'].includes(d.researchState), d.canonicalCoin); assert.ok(!/score|probability|confidence|pareto/i.test(canonicalJson(Object.keys(d)))); }
+  assert.deepEqual(RESEARCH_STATES, ['INVESTIGATE', 'KEEP_OBSERVING', 'DATA_INSUFFICIENT', 'DATA_UNAVAILABLE']);
 });
 
 // ================================ §26 — SEEDED ADVERSARIAL / PROPERTY ================================
@@ -416,13 +434,15 @@ test('PROPERTY (seed 5150). key reorder => same identities; duplicate deliveries
     const later = build({ observations: [...obs, recOf(obsEvent({ id: `late${round}`, text: '$LINK late', nowMs: T0 + 50_000 }), obs.length + 1)], notices: d1.marketLight.state === 'PRESENT' ? [notice('LINK', T0)] : [] });
     assert.equal(later.dossierId, d1.dossierId, `round ${round}: a later append changes nothing as-of`);
     assert.equal(validateResearchDossier(d1), null); assert.ok(d1.participation.windows.w900s.propagation.families.length <= 32);
-    const pk = buildResearchPacket({ dossier: d1, socialObservations: obs, coverage: [] }); assert.equal(pk.outcome, 'VALID', pk.reasons);
-    if (evs.some((e) => e.text === hostile)) { assert.ok(pk.packet.sources.some((s) => s.excerpt && s.excerpt.text.includes('place an order') && s.excerpt.untrusted === true), 'hostile text rides as untrusted data'); assert.equal(pk.packet.security.untrustedTextPresent, true); }
+    const pk = buildResearchPacket({ dossier: d1, socialObservations: obs, coverage: [] });
+    if (d1.marketLight.state === 'PRESENT') { assert.equal(pk.packetStatus, 'VALID', pk.reasons); if (evs.some((e) => e.text === hostile)) { assert.ok(pk.packet.sources.some((s) => s.excerpt && s.excerpt.text.includes('place an order') && s.excerpt.untrusted === true), 'hostile text rides as untrusted data'); assert.equal(pk.packet.security.untrustedTextPresent, true); } }
+    else { assert.equal(pk.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER'); assert.equal(pk.packet, null); assert.deepEqual(pk.reasonCodes, ['PARTICIPATION_LED_ONLY']); }
+    assert.ok(d1.security.untrustedTextPresent === true && validateResearchDossier(d1) === null, 'hostile text never escapes as instruction or vocabulary');
   }
   assert.doesNotThrow(() => buildResearchDossier({ canonicalCoin: 'LINK', asOfTs: T0, providerStates: [], observations: [], notices: [{ symbol: 'LINK', tsMs: T0 - 1 }], claims: [{ canonicalCoin: 'LINK', firstKnownTs: T0 - 5, status: 'UNVERIFIED', propositionId: 'p', claimType: 'X', observations: [{ knownAtTs: T0 - 5 }] }] }));
   assert.equal(buildResearchDossier({ canonicalCoin: 'link', asOfTs: T0 }).error, 'dossier: canonicalCoin malformed'); assert.equal(buildResearchDossier({ canonicalCoin: 'LINK', asOfTs: -1 }).error, 'dossier: asOfTs must be a positive epoch-ms integer');
   assert.match(validateResearchDossierEvent({ type: RESEARCH_DOSSIER_EVENT_TYPE }), /missing key/); assert.equal(replaySocialHistory([{ type: RESEARCH_DOSSIER_EVENT_TYPE, ts: 'x', sourceEventId: 'r2rde-' + 'a'.repeat(40) }]).ok, false);
-  assert.equal(RESEARCH_DOSSIER_SCHEMA_VERSION, 'serpent-research-dossier-1'); assert.deepEqual(RESEARCH_WINDOWS_MS, [15_000, 60_000, 180_000, 900_000]); assert.equal(RESEARCH_ENTRANCE_WINDOW_MS, 900_000);
+  assert.equal(RESEARCH_DOSSIER_SCHEMA_VERSION, 'serpent-research-dossier-2'); assert.deepEqual(RESEARCH_WINDOWS_MS, [15_000, 60_000, 180_000, 900_000]); assert.equal(RESEARCH_ENTRANCE_WINDOW_MS, 900_000);
   assert.deepEqual(deepObservationMembership({ deepObservation: { coins: ['BTC', 'LINK'], date: '2026-09-07', selectedAt: 'x', source: 's', count: 2 }, canonicalCoin: 'LINK', asOfTs: T0 }).state, 'PRESENT');
   assert.deepEqual(deepObservationMembership({ deepObservation: { coins: ['BTC'], date: '2026-09-06', selectedAt: 'x', source: 's', count: 1 }, canonicalCoin: 'LINK', asOfTs: T0 }).state, 'STALE', 'a prior-session file never masquerades as current');
   assert.deepEqual(deepObservationMembership({ deepObservation: null, canonicalCoin: 'LINK', asOfTs: T0 }).state, 'UNAVAILABLE');

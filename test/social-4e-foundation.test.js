@@ -164,7 +164,22 @@ test('4E-5. protected provider / contract / truth surfaces are byte-identical to
     'rumor2/social-stocktwits.js': 'f97c662435a21263b5cd8cf51549099adaa65c6749f342e7bf4c6ec1b1c506ee',
     'rumor2/truth.js': 'f8aa2578000d7590e7710a47cbdd1a2b79f763a8baf0a832f89c42eeb6093c2e',
   };
-  for (const [f, h] of Object.entries(pinned)) assert.equal(sha(f), h, `${f} byte-identical`);
+  // SOCIAL-5 (master convoy §36.3): rumor2/social.js lawfully gained ONE line — propagationVsIndependence exposes
+  // family membership (memberSourceIds) so the research dependency manifest never re-derives families. Every other
+  // line of social.js stays byte-identical to the 9b1b405 pin (asserted as an exact line delta against the pinned hash's
+  // committed content); all other surfaces stay fully byte-identical.
+  const SOCIAL_JS_AUTHORIZED_ADDED = ['      memberSourceIds: [...f.memberSourceIds], // SOCIAL-5 §36.3: membership exposed so a dependency manifest never re-derives families'];
+  for (const [f, h] of Object.entries(pinned)) {
+    if (f !== 'rumor2/social.js') { assert.equal(sha(f), h, `${f} byte-identical`); continue; }
+    const committed = execSync('git show 9b1b405:rumor2/social.js', { cwd: REPO, encoding: 'buffer' });
+    assert.equal(createHash('sha256').update(committed).digest('hex'), h, 'the 9b1b405 pin itself is intact');
+    const before = committed.toString('utf8').split('\n'); const after = readFileSync(path.join(REPO, f), 'utf8').split('\n');
+    const count = (lines) => { const m = new Map(); for (const l of lines) m.set(l, (m.get(l) ?? 0) + 1); return m; };
+    const b = count(before); const a = count(after); const added = []; const removed = [];
+    for (const [l, n] of a) for (let i = (b.get(l) ?? 0); i < n; i++) added.push(l);
+    for (const [l, n] of b) for (let i = (a.get(l) ?? 0); i < n; i++) removed.push(l);
+    assert.deepEqual(added, SOCIAL_JS_AUTHORIZED_ADDED, 'rumor2/social.js: only the SOCIAL-5 authorized line was added'); assert.deepEqual(removed, [], 'rumor2/social.js: nothing was removed or altered');
+  }
   assert.equal(SOCIAL_PUMP_DOCTRINE, 'DETECT EARLY. TAKE THE TRADABLE SLICE. DO NOT BECOME EXIT LIQUIDITY. Social RUMOR records pump/coordination stage and provenance as INFORMATION; it never converts COORDINATED into REJECT and makes no trade decision.');
 });
 

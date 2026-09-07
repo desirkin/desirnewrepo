@@ -6,6 +6,8 @@ import path from 'node:path';
 import { dataDir } from './lib/config.js';
 import { runTape } from './tape/run.js';
 import { readCurrentUniverse } from './tape/universe.js';
+import { readCurrentFeatureSnapshot, readTapeStatus } from './tape/store.js';
+import { sessionDate } from './lib/time.js';
 import { startRumint } from './rumint/poller.js';
 import { startGateway } from './gateway/collector.js';
 import { startWideEye } from './survey/wideeye.js';
@@ -93,10 +95,16 @@ startRumor2({
     // current deep-tape selection (date / selectedAt / source / exact coin membership); the strainer
     // labels a prior-session file STALE, never current. Read-only: no subscription changes here.
     deepObservation: () => { const u = readCurrentUniverse(); return u ? Object.freeze({ count: Array.isArray(u.pairs) ? u.pairs.length : null, date: u.date ?? null, selectedAt: u.selectedAt ?? null, source: u.source ?? null, coins: Array.isArray(u.pairs) ? Object.freeze(u.pairs.map((p) => p.coin).filter((c) => typeof c === 'string')) : null }) : null; },
+    // SOCIAL-5 §36.6: the wide eye's latest COMPLETED sweep population (already-computed facts, detached,
+    // frozen) — the false-negative / shadow denominator; read-only, no request, no cadence change
+    population: () => wideEye.sweepPopulationSnapshot(),
   } : null,
-  // SOCIAL-5A: the research strainer — dossiers + observation proposals only (authority NONE); no
-  // deep-market adapter is connected here (absent evidence stays absent); no network, no tape change
-  researchStrainer: { enabled: true },
+  // SOCIAL-5: the research strainer — dossiers + observation proposals only (authority NONE); no
+  // deep-market adapter is connected here (absent evidence stays absent); no network, no tape change.
+  // §36.7 passive bridge: ONLY the tape store's read accessors are injected (the tape's own current
+  // feature snapshot + its status record). Safe if RUMOR starts before the tape: the accessor says
+  // NOT_PRESENT until the tape writes; no lifecycle reorder, no subscription, no book mutation.
+  researchStrainer: { enabled: true, marketSnapshot: (coin) => ({ snapshot: readCurrentFeatureSnapshot(coin), owner: readTapeStatus() }), currentSession: () => sessionDate() },
 });
 try {
   await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown

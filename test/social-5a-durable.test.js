@@ -92,14 +92,16 @@ if (!TEST_URL) {
       assert.equal(rd(ev).length, 1, 'the strainer appended ONE dossier in the same tick the observation became durable');
       const d = rd(ev)[0]; assert.equal(validateResearchDossierEvent(d), null); assert.equal(d.canonicalCoin, 'FRESH42'); assert.deepEqual(d.entrances, ['PARTICIPATION_LED']); assert.equal(d.researchState, 'DATA_INSUFFICIENT'); assert.equal(d.knownAtTs, b.clock.ms);
       assert.equal(d.dossier.entrances.triggers[0].ref, src(ev)[0].sourceEventId); assert.ok(d.dossier.opportunityClock.dossierDerivedKnownAtTs >= src(ev)[0].knownAtTs);
-      assert.equal(d.packet !== null, true); assert.equal(validateEvidencePacket(d.packet).valid, true); assert.equal(d.packet.subject.canonicalCoin, 'FRESH42'); assert.deepEqual(d.packet.subject.providerSymbols, { kraken: 'FRESH42/USD' });
+      assert.equal(d.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER', 'raw Social participation has no exact serpent-evidence-1 trigger'); assert.equal(d.packet, null); assert.equal(d.packetId, null); assert.deepEqual(d.packetReasonCodes, ['PARTICIPATION_LED_ONLY']); assert.deepEqual(d.dossier.providerSymbols, { kraken: 'FRESH42/USD' });
+      assert.equal(d.dossier.episode.basis, 'FIRST_DOSSIER'); assert.equal(d.episodeState, 'LIGHT_OBSERVING'); assert.equal(d.dossier.marketDeep.ownerSnapshot.state, 'NOT_PRESENT', 'no tape feature snapshot in this test venue: NOT_PRESENT, never zero');
       assert.equal(d.dossier.marketDeep.deepObservationMembership.state, 'ABSENT', 'FRESH42 is not in the deep-observation set'); assert.equal(d.dossier.marketDeep.state, 'NOT_CONNECTED'); assert.equal(d.dossier.executability.state, 'UNASSESSED');
       assert.ok(d.proposalKinds.includes('MARKET_DEEP_OBSERVATION_PROPOSED'));
       assert.deepEqual(d.dossier.participation.coverage.providers.map((p) => `${p.provider}:${p.state}`), ['BLUESKY_OFFICIAL:OBSERVED', 'X_OFFICIAL:NOT_QUERIED']);
       assert.ok(!canonicalJson(ev).includes('"BTC"') && !canonicalJson(ev).includes('"ETH"'), 'no legacy major appears in the research journal');
       assert.equal(rd(mirror).length, 1, 'the best-effort mirror saw the dossier');
       // status auditability
-      const rs = b.c.status().research; assert.equal(rs.subjects, 1); assert.equal(rs.subjectList[0].canonicalCoin, 'FRESH42'); assert.equal(rs.subjectList[0].latest.dossierId, d.dossierId); assert.equal(rs.subjectList[0].latest.packetId, d.packetId); assert.equal(rs.durableDossiers, 1); assert.equal(rs.deepMarket, 'NOT_CONNECTED'); assert.equal(rs.pendingOperation, null);
+      const rs = b.c.status().research; assert.equal(rs.subjects, 1); assert.equal(rs.subjectList[0].canonicalCoin, 'FRESH42'); assert.equal(rs.subjectList[0].latest.dossierId, d.dossierId); assert.equal(rs.subjectList[0].latest.packetId, null); assert.equal(rs.subjectList[0].latest.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER'); assert.equal(rs.durableDossiers, 1); assert.equal(rs.deepMarket, 'NOT_CONNECTED'); assert.equal(rs.pendingOperation, null);
+      assert.equal(rs.subjectList[0].episode.state, 'LIGHT_OBSERVING'); assert.equal(rs.shadowControl.status, 'NOT_CONNECTED', 'no population seam in this venue'); assert.equal(rs.marketBridge, 'NOT_CONNECTED');
       // full-history vs prefix replay
       const full = replaySocialHistory(ev); assert.equal(full.ok, true); assert.equal(full.research.count, 1);
       const prefix = replaySocialHistory(ev.slice(0, ev.indexOf(d) + 1)); assert.equal(canonicalJson(prefix.research.byCoin.get('FRESH42')), canonicalJson(full.research.byCoin.get('FRESH42')));
@@ -125,10 +127,11 @@ if (!TEST_URL) {
       await b.tick(); await b.tick();
       const ev = await hist(stores.journal); const ds = rd(ev); assert.equal(ds.length, 1, ds.map((x) => x.canonicalCoin));
       const d = ds[0]; assert.equal(d.canonicalCoin, 'LINK'); assert.deepEqual(d.entrances, ['MARKET_LED']); assert.equal(d.researchState, 'INVESTIGATE'); assert.equal(d.dossier.marketLight.notices[0].verdict, 'MISSED', 'MISSED is context, not rejection');
+      assert.equal(d.packetStatus, 'PACKET_UNREPRESENTABLE_V1_TRIGGER', 'a MISSED notice is never relabelled WIDE_EYE_RIPPLE'); assert.equal(d.packet, null); assert.deepEqual(d.packetReasonCodes, ['MARKET_LED_MISSED_ONLY']); assert.equal(d.episodeState, 'ACTIVE_RESEARCH');
       assert.equal(api.state.calls, 0, 'ZERO X calls: xWatch NOT_CONFIGURED'); assert.equal(b.c.status().socialX.state, 'DARK'); assert.equal(b.c.status().socialResearch.paidWatch.configured.mode, 'NOT_CONFIGURED');
       assert.equal(d.dossier.marketDeep.state, 'SYNCHRONIZED'); assert.equal(d.dossier.executability.state, 'ASSESSED'); assert.equal(d.dossier.marketDeep.features.flow.netTakerNotionalUsd, 3000); assert.ok(d.dossier.marketDeep.features.book.spreadBps > 0); assert.equal(d.dossier.marketDeep.features.slippage[0].marketSell.coverage, 'FULL');
       assert.equal(d.dossier.marketDeep.deepObservationMembership.state, 'STALE', 'a prior-session deep file never masquerades as current'); assert.equal(d.dossier.marketDeep.deepObservationMembership.member, null);
-      assert.ok(d.packet.evidence.some((e) => e.sense === 'MARKET' && e.kind === 'DEEP_MARKET_WINDOW' && e.state === 'KNOWN')); assert.ok(d.packet.sources.some((s) => s.sourceType === 'MARKET_DATA'));
+      assert.ok(d.dossier.dependencies.nodes.some((n) => n.kind === 'MARKET_SNAPSHOT' && n.id === `market:${d.dossier.marketDeep.features.windowId}`), 'the injected window is a dependency node of marketDeep');
       assert.ok(windows >= 1); assert.equal(b.c.status().research.deepMarket, 'INJECTED_ADAPTER');
       // proposals change nothing: the deep-observation snapshot is the same frozen object, config values are untouched, X made no call
       assert.equal(b.deep.value, deep); assert.equal(Object.isFrozen(deep), true); assert.deepEqual(loadConfig().universe, ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']); assert.equal(loadConfig().socialResearch.xWatch.mode, 'NOT_CONFIGURED');

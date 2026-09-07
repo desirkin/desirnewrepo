@@ -1778,74 +1778,122 @@ blessed or re-mapped. The X runtime's local second boundary keeps the legacy cas
 token filter (X's own rule engine decides paid matching); the research admission policy above
 governs the catalog-backed Bluesky lane.
 
-### 5R. SOCIAL-5A — adaptive research strainer + bidirectional investigation router (research only)
+### 5R. SOCIAL-5 — adaptive research strainer + bidirectional investigation router (research only)
 
-SOCIAL-5A adds the first deterministic, point-in-time RESEARCH STRAINER. It produces RESEARCH DOSSIERS
-(`serpent-research-dossier-1`, durable as `RUMOR2_RESEARCH_DOSSIER` in the same fenced Social/RUMOR journal)
-and bounded NEXT-OBSERVATION PROPOSALS, projected as `serpent-evidence-1` research packets for a future
-Socrates. Its laws:
+SOCIAL-5 (foundation SOCIAL-5A, completed by the master-convoy Convoy I) is the deterministic, point-in-time
+RESEARCH STRAINER. It produces RESEARCH DOSSIERS (`serpent-research-dossier-2`, durable as
+`RUMOR2_RESEARCH_DOSSIER` in the same fenced Social/RUMOR journal), bounded NEXT-OBSERVATION PROPOSALS,
+`serpent-evidence-1` research-packet PROJECTIONS with an explicit representability status, and a bounded
+RESEARCH CONTROL sample (`RUMOR2_RESEARCH_SHADOW_SAMPLE`) for later false-negative research. Its laws:
 
-1. **Research only.** Every dossier, proposal, packet projection and status object carries `authority:
-   NONE` / `purpose: RESEARCH_ONLY`. The validator refuses uppercase execution vocabulary anywhere in a
-   dossier. No trade, eligibility, sizing, order, direction, entry/exit, paid-provider or subscription
-   authority is added; ledger / cost / controls / tape / order paths do not read research output.
+1. **Research only.** Every dossier, proposal, packet projection, shadow sample and status object carries
+   `authority: NONE` / `purpose: RESEARCH_ONLY`. The validator refuses uppercase execution vocabulary
+   anywhere in a dossier. No trade, eligibility, sizing, order, direction, entry/exit, paid-provider or
+   subscription authority is added; ledger / cost / controls / order paths do not read research output;
+   the tape and the wide eye never import the rumor tier.
 2. **Three independent entrances.** MARKET_LED (the wide eye's detached notices), PARTICIPATION_LED
    (durable admitted Social evidence attributed under the scope in force, by journal order) and
-   INFORMATION_LED (the frozen core's official claim graph, read-only). Several entrances form a
-   COMBINATION; every contributing trigger stays visible.
-3. **Social is evidence, not a gate.** A market-led candidate survives with zero useful Social evidence;
-   a Social-led candidate may PROPOSE deep market observation; an information-led candidate may propose
-   both. No family vetoes another.
-4. **Observed silence differs from blindness.** OBSERVED_NO_MATCH, NOT_QUERIED, UNAVAILABLE, FAILED,
-   STALE, COVERAGE_INCOMPARABLE and BASELINE_INSUFFICIENT are distinct states; missing market depth is
-   not zero depth; unknown is never zero.
-5. **Pumps and coordination are context.** Coordination features, echo concentration and burst
-   descriptors are recorded; nothing is rejected for looking pump-like. The MISSION pump doctrine stands.
-6. **`MISSED` and extension are context.** Both RIPPLE and MISSED notices are investigable; the notice
-   fields (verdict, zVol, zRet, extension, usdVol24h, inDeepTape) are preserved verbatim and no percent
-   veto exists.
-7. **Opportunity half-life is uncalibrated.** The OPPORTUNITY CLOCK records factual latency only
-   (first trigger observed/known, latest input, derivation, age, acquisition and derivation latency);
-   `halfLifeEstimateMs` is null and `halfLifeCalibration` is UNCALIBRATED by validation.
-8. **Deep market evidence is not live-wired.** A PURE injected deep-market window contract
-   (`social-research-market.js`) defines what a later market-evidence owner must supply; without it the
-   dossier says MARKET_DEEP_OBSERVATION NOT_CONNECTED and EXECUTABILITY UNASSESSED. Nothing is synthesized
-   from the wide eye's 24h Ticker proxy. The deep-observation membership seam (fly.js) is a read-only
-   immutable snapshot with date/selectedAt/source/coins; a prior-session file is labelled STALE.
-9. **Proposals activate nothing.** MARKET_DEEP_OBSERVATION_PROPOSED / SOCIAL_RESEARCH_PROPOSED /
-   OFFICIAL_VERIFICATION_PROPOSED / RECHECK_PROPOSED / NO_ADDITIONAL_OBSERVATION_PROPOSED carry a closed
-   reason code, a deterministic question, `authority: NONE`, `activation: NOT_AUTHORIZED`. They change no
-   X rule, budget, tape subscription, socket, timer or config.
-10. **Stage stays uncalibrated.** `estimateSocialStage` still returns UNKNOWN / calibrated:false; the
-    dossier records descriptive stage evidence (participation change, potential-origin breadth, echo
-    concentration, novelty) with `calibrationStatus: INSUFFICIENT_HISTORY`. No IGNITION / ACCELERATION /
-    CROWDED / DISTRIBUTION / DECAY is emitted from hand-picked cutoffs.
+   INFORMATION_LED (the frozen core's official claim graph, read-only; an information-led candidate must
+   resolve to the current accepted catalog, otherwise it is counted ASSET_ASSOCIATION_UNRESOLVED). Several
+   entrances form a COMBINATION; every contributing trigger stays visible.
+3. **Social is evidence, not a gate.** A market-led candidate survives with zero useful Social evidence; a
+   Social-led candidate may PROPOSE deep market observation; an information-led candidate may propose both.
+4. **Observed silence differs from blindness.** OBSERVED_NO_MATCH, NOT_QUERIED, UNAVAILABLE, FAILED, STALE,
+   COVERAGE_INCOMPARABLE and BASELINE_INSUFFICIENT are distinct states; missing market depth is not zero
+   depth; a missing tape snapshot is NOT_PRESENT, never zero activity; unknown is never zero.
+5. **Pumps and coordination are context.** Coordination features, echo concentration and burst descriptors
+   are recorded; nothing is rejected for looking pump-like. `REJECTED` does not exist.
+6. **`MISSED` and extension are context.** Both RIPPLE and MISSED notices are investigable; notice fields
+   are preserved verbatim; no percent veto exists. A MISSED notice is never relabelled `WIDE_EYE_RIPPLE`.
+7. **Opportunity half-life is uncalibrated.** The OPPORTUNITY CLOCK records factual latency only and starts
+   at the IMMUTABLE episode onset; `halfLifeEstimateMs` is null / UNCALIBRATED by validation.
+8. **Deep market evidence: one market truth, two read-only seams.** (a) The PURE injected deep-market
+   window contract (`social-research-market.js`) for a later owner; (b) the PASSIVE §36.7 bridge: the tape
+   re-exposes the SAME computed per-coin feature snapshot it already appends (`tape/store.js`
+   `writeCurrentFeatureSnapshot` / `readCurrentFeatureSnapshot`, one captured owner clock, atomic replace,
+   no recomputation, no rumor import); fly.js injects only the READ accessors (snapshot + tape status +
+   session clock); the research adapter validates coin / clock / session / tape state and reports
+   NOT_PRESENT, PRESENT_WITH_AGE (exact owner age, no invented freshness threshold, owner health beside it),
+   STALE_SESSION, NOT_YET_KNOWN or INVALID; it derives only descriptive facts (displayed depth bands,
+   aggregate unattributed imbalance, taker-side ratios of executed base quantity — never notionals, never
+   a slippage walk) and executability stays UNASSESSED. No lifecycle reorder, no subscription, no second
+   Kraken connection. Nothing is synthesized from the 24h Ticker proxy.
+9. **Proposals activate nothing.** The proposal kinds are CLOSED to five and the reason codes to EXACTLY
+   eight (MARKET_ANOMALY_SOCIAL_UNKNOWN, SOCIAL_CHANGE_MARKET_UNASSESSED, SOURCE_FRESHNESS_UNRESOLVED,
+   EXECUTABILITY_UNASSESSED, COVERAGE_GAP, CROSS_SENSE_DIVERGENCE, BASELINE_INSUFFICIENT,
+   SECOND_IMPULSE_CONTEXT); NO_ADDITIONAL_OBSERVATION_PROPOSED carries reasonCode null. Every proposal
+   carries a deterministic question, `authority: NONE`, `activation: NOT_AUTHORIZED`; it changes no X rule,
+   budget, tape subscription, socket, timer or config.
+10. **Stage stays uncalibrated.** `estimateSocialStage` still returns UNKNOWN / calibrated:false with
+    `calibrationStatus: INSUFFICIENT_HISTORY`.
 11. **No trading authority is added.** The five legacy permission assets, cost, ledger, controls and the
     official claim registry are unchanged.
+12. **V1 representability (§16).** The evidence contract is closed and untouched. `packetStatus` is one of
+    VALID | PACKET_UNREPRESENTABLE_V1_TRIGGER | PACKET_WITHHELD_CONTRACT_FAILURE. A RIPPLE is
+    `WIDE_EYE_RIPPLE`; a genuine multi-entrance dossier anchored by a RIPPLE or an official claim is
+    `COMBINATION`; MISSED-only, participation-only, information-only (the frozen claim packet owns
+    `RUMINT_CLAIM`) and un-anchored combinations are UNREPRESENTABLE with packet null and a closed reason
+    code — never `RUMINT_NOMINATION` / `MANUAL_RESEARCH` by convenience. Sources are projected in the exact
+    five-pass order (official journal order; earliest family representative; unrepresented family fill;
+    latest novel newest-first; journal-order fill) with truncation disclosed. The golden corpus
+    (doctrine/RESEARCH-GOLDEN.md, test/social-5-golden.test.js) records the expected status of 16 cases.
+13. **Episodes (§36.5).** `episodeId = hash(asset + onset trigger + onset clock)`; the onset is immutable;
+    later material dossiers CONTINUE the episode (same id, contiguous index); DORMANT is reached ONLY
+    through `researchIdleTtlMs` (1 h; a research-resource law over the subject's durable inputs, never a
+    price/pump judgment) and the next admissible trigger opens a NEW episode identity naming the previous
+    one; the lifecycle vocabulary is LIGHT_OBSERVING / ACTIVE_RESEARCH / WAIT_RECHECK / DORMANT and the
+    research status vocabulary INVESTIGATE / KEEP_OBSERVING / DATA_INSUFFICIENT / DATA_UNAVAILABLE; restart
+    reproduces the same episode state from durable truth.
+14. **Materiality (§36.1).** A raw delivery inside an OPEN window updates in-memory state only. A durable
+    dossier is written when a CLOSED component changed (`materialDigest`: entrance set / trigger refs, text
+    families, the last completed aligned window feature tuple per duration, coverage state and reasons,
+    baseline state, claim state, market snapshot quality (injected window identity), deep-observation
+    membership, episode index/state, missing kinds, proposals, research state, executability) and at most
+    once per `emissionMinIntervalMs` (15 s, an I/O bound). One post never becomes an acceleration claim; a
+    hundred duplicate deliveries write nothing; a failed append advances no watermark.
+15. **Prior-only baselines (§36.4).** `social-prior-window-baseline-1`: for each duration W the current
+    window is compared only with prior non-overlapping same-W windows under compatible coverage (the walk
+    stops at the first scope / X rule-set / X gap / catalog boundary; a FAILED / UNAVAILABLE / STALE provider
+    is incomparable); fewer than 3 compatible windows or fewer than 3 prior observations is
+    BASELINE_INSUFFICIENT; median / MAD / rank / ratio are recorded; zero MAD is FLAT_PRIOR (never
+    infinity); the current window never enters its own baseline; the wide eye's market baselines are
+    untouched.
+16. **Potential origin is not independence (§36.2).** `potentialOriginFamilyCount`,
+    `propagationFamilyCount`, `possibleCopyFamilyCount`, `factualIndependenceStatus: UNESTABLISHED`
+    (NOT_APPLICABLE when empty); authors are counted only with stable provider-native identity and
+    `authorIdentityUnavailableCount` is kept apart; recirculation is classified relative to the CURRENT
+    episode onset (SOURCE_PREEXISTS_CURRENT_EPISODE / SOURCE_FIRST_OBSERVED_IN_CURRENT_EPISODE /
+    SOURCE_TIME_UNKNOWN, circulation CIRCULATION_CURRENT_EPISODE) — no arbitrary cutoff.
+17. **Dependency manifest (§36.3).** Every dossier carries `research-dependency-1`: semantic node ids
+    (sources, text families, native origin refs, feature windows, coverage boundaries, official sources,
+    claims, notices, market snapshots, dossier fields), closed relations, acyclic, a derived node never
+    known before its parents, bounded (192 nodes / 384 edges) with omission disclosed; packet evidence
+    names its derivation refs. Dependency count is not independence count.
+18. **Shadow denominator (§36.6).** The wide eye exposes `sweepPopulationSnapshot()` — the completed
+    sweep's already-computed rows (zVol / zRet / extension / pre-cooldown verdict / cooldown suppression /
+    notice emitted / 24h proxy where it exists / inDeepTape) plus counts of rows excluded by reason
+    (NO_TICKER_ROW / PRICE_INVALID / INSUFFICIENT_SERIES), sweep and catalog identity; no request, no
+    cadence / verdict / nomination change, only the latest sweep retained. The strainer samples the
+    UNNOTICED rows by a deterministic hash recipe (`shadow-hash-sample-1`, cap 8 — a RESEARCH RESOURCE
+    constant) into ONE `RUMOR2_RESEARCH_SHADOW_SAMPLE` per sampled sweep under the same fence /
+    prepared-operation / replay law; identity derives from sweep + population digest + recipe; no outcome
+    is ever stored in it. Bounded deferral counts (asset association, identity, baseline, coverage,
+    resource cap, dormant, materiality, emission interval) are reported in status.
 
-Measurement law: fixed windows (15 s / 60 s / 180 s / 900 s — measurement windows, never edge-life claims)
-over journal-order knowledge time; a window is compared with its prior window only when coverage is
-compatible (no Social scope revision, X rule-set epoch, X gap, catalog change or provider failure inside
-the span, and at least 3 prior observations); otherwise no acceleration is derived. Propagation keeps raw
-propagation, potential-origin families (UNRESOLVED possible independence), explicit echo relations,
-possible copies, engagement metadata and provider coverage apart — one post never becomes five
-confirmations. Source time separates OLD content / NEW circulation from NEW / NEW and UNKNOWN; circulation
-is never backdated. Research states (OBSERVING / INVESTIGATE / WAIT_RECHECK / DATA_INSUFFICIENT /
-DATA_UNAVAILABLE) and the Pareto RESOURCE_ORDERING are resource labels, never confidence or probability.
+Durability law: a dossier (and a shadow sample) is prepared once, retained, appended under the live fence
+with a fence re-check before adoption (lost acknowledgement => byte-identical retry collapses; fence lost
+after the append => journal-ahead, nothing adopted, the lawful writer restores); a dry-run replay precedes
+every append; replay validates the event schema, the dossier, the packet only when packetStatus is VALID
+(both non-VALID statuses replay with packetId null and their closed reason codes), refuses altered payloads,
+enforces episode continuity (CONTINUED / NEW_AFTER_DORMANT / NEW_AFTER_LEGACY) and requires a participation
+trigger to name an already-durable observation. Prefix and full replay yield the same as-of view.
+`serpent-research-dossier-1` records already durable replay under their frozen validator byte-identically;
+the next dossier of such a coin opens the next episode (NEW_AFTER_LEGACY); nothing is backfilled or
+re-emitted.
 
-Durability law: a dossier is prepared once, retained, appended under the live fence with a fence re-check
-before adoption (lost acknowledgement => byte-identical retry collapses; fence lost after the append =>
-journal-ahead, nothing adopted, the lawful writer restores); a dossier is written only when its
-point-in-time input digest changed and at most once per `emissionMinIntervalMs` (15 s, an I/O bound);
-episodes are contiguous per coin (a later dossier references the immediately preceding one; a DORMANT
-subject that wakes opens the next episode); `researchIdleTtlMs` (1 h) and `maxSubjects` (200) are
-housekeeping bounds, never opportunity life or rejection. Replay validates the event schema, the dossier
-and its packet, refuses altered payloads and out-of-order episodes, and requires a participation trigger to
-name an already-durable observation. Prefix and full replay yield the same as-of view.
-
-Deferred, deliberately: the live deep-market bridge (MARKET_DEEP_OBSERVATION stays NOT_CONNECTED in
-production), the Socrates runtime, any Decider, stage calibration, author-reliability learning (SOCIAL-6),
-and any cross-platform identity resolution.
+Deferred, deliberately: the injected deep-market window has no live owner (the passive tape bridge is the
+live market seam), the Socrates runtime, any Decider, stage calibration, source-behaviour / outcome research
+(SOCIAL-6), and any cross-platform identity resolution.
 
 ---
 
@@ -1924,10 +1972,11 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   (§5Q-R):** X admission from one adopted watch snapshot, owed-native lifecycle continuity, prepared
   scope operations with fence re-check and complete commit receipts, catalog structural / clock /
   token truth.
-- **SOCIAL-5A — RESEARCH STRAINER DONE (§5R):** three-entrance research dossiers, coverage-aware
-  fixed-window Social features, injected deep-market contract, research packets, durable dossier
-  family, bounded next-observation proposals — authority NONE. Not done: live deep-market wiring,
-  stage calibration, Socrates runtime, Decider.
+- **SOCIAL-5 — RESEARCH STRAINER DONE (§5R):** three-entrance research dossiers with episodes, prior-only
+  baselines, dependency manifests and materiality; v1 packet representability status; the passive tape
+  feature-snapshot bridge; the wide-eye shadow denominator; bounded next-observation proposals — authority
+  NONE. Not done: a live owner for the injected deep-market window, stage calibration, Socrates runtime,
+  Decider.
 - **SOCIAL-5B+:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

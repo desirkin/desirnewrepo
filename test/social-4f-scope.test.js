@@ -216,9 +216,24 @@ test('SCOPE-7 (E/L/P). the watch plan is PROPOSED, deterministic, capped at 25 (
 
 test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authority: the 4F modules import only inside their tier and touch no trading, control, or model surface', () => {
   const pinned = ['survey/eyecore.js', 'tape/universe.js', 'tape/run.js', 'cost/model.js', 'ledger/ledger.js', 'rumor2/truth.js', 'rumor2/social.js', 'rumor2/social-time.js', 'rumor2/social-reconcile.js', 'rumor2/social-view.js', 'rumor2/x-stream.js', 'rumor2/providers/bluesky-official.js', 'rumor2/providers/farcaster-official.js', 'rumor2/providers/x-official.js', 'rumor2/social-reddit.js', 'rumor2/social-stocktwits.js', 'rumor2/social-meta.js', 'rumor2/social-tiktok.js', 'rumor2/social-farcaster-access.js', 'rumor2/social-foundation.js', 'rumor2/social-registry.js', 'doctrine/MISSION.md', 'doctrine/SOCRATES.md', 'package.json', 'package-lock.json'];
+  // SOCIAL-5 (master convoy §36.7 / §36.3) lawfully touched exactly two pinned files; every OTHER line stays byte-identical:
+  //   tape/run.js   — the passive read-only feature-snapshot bridge in the existing snapshot timer (one captured clock)
+  //   rumor2/social.js — propagationVsIndependence exposes family membership (memberSourceIds) so no primitive is duplicated
+  const AUTHORIZED_DELTA = {
+    'tape/run.js': { added: ['  writeCurrentFeatureSnapshot,', '      // ONE captured owner clock per snapshot: the appended record, and the passive current', '      // feature file (SOCIAL-5 §36.7 read-only bridge) carry the SAME computed object and instant', '      const tsMs = Date.now();', "      const snapshot = { ts: new Date(tsMs).toISOString(), coin: p.coin, tapeState, ...bf, ...flows.get(p.symbol).features(tsMs) };", '      writeSnapshot(snapshot);', "      writeCurrentFeatureSnapshot(p.coin, snapshot, { tsMs, session: sessionDate(new Date(tsMs)), symbol: p.symbol });"], removed: ["      writeSnapshot({ ts: nowIso(), coin: p.coin, tapeState, ...bf, ...flows.get(p.symbol).features() });"] },
+    'rumor2/social.js': { added: ['      memberSourceIds: [...f.memberSourceIds], // SOCIAL-5 §36.3: membership exposed so a dependency manifest never re-derives families'], removed: [] },
+  };
   for (const f of pinned) {
     const committed = execSync(`git show 9c173729be979202b7feba822aba59ca383314dc:${f}`, { cwd: REPO, encoding: 'buffer' });
-    assert.equal(createHash('sha256').update(committed).digest('hex'), sha(f), `${f} byte-identical to 9c17372`);
+    if (!AUTHORIZED_DELTA[f]) { assert.equal(createHash('sha256').update(committed).digest('hex'), sha(f), `${f} byte-identical to 9c17372`); continue; }
+    const before = committed.toString('utf8').split('\n'); const after = readFileSync(path.join(REPO, f), 'utf8').split('\n');
+    const count = (lines) => { const m = new Map(); for (const l of lines) m.set(l, (m.get(l) ?? 0) + 1); return m; };
+    const b = count(before); const a = count(after);
+    const added = []; const removed = [];
+    for (const [l, n] of a) for (let i = (b.get(l) ?? 0); i < n; i++) added.push(l);
+    for (const [l, n] of b) for (let i = (a.get(l) ?? 0); i < n; i++) removed.push(l);
+    assert.deepEqual(added.sort(), [...AUTHORIZED_DELTA[f].added].sort(), `${f}: only the SOCIAL-5 authorized lines were added`);
+    assert.deepEqual(removed.sort(), [...AUTHORIZED_DELTA[f].removed].sort(), `${f}: only the SOCIAL-5 authorized lines were replaced`);
   }
   const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
   const read = (f) => readFileSync(path.join(REPO, f), 'utf8');

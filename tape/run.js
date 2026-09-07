@@ -16,6 +16,7 @@ import {
   writeSnapshot,
   writeEvent,
   writeCurrentBook,
+  writeCurrentFeatureSnapshot,
   writeTapeStatus,
 } from './store.js';
 import {
@@ -375,8 +376,13 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       if (!book?.synced) continue;
       const bf = bookFeatures(book);
       if (!bf) continue;
-      writeSnapshot({ ts: nowIso(), coin: p.coin, tapeState, ...bf, ...flows.get(p.symbol).features() });
+      // ONE captured owner clock per snapshot: the appended record, and the passive current
+      // feature file (SOCIAL-5 §36.7 read-only bridge) carry the SAME computed object and instant
+      const tsMs = Date.now();
+      const snapshot = { ts: new Date(tsMs).toISOString(), coin: p.coin, tapeState, ...bf, ...flows.get(p.symbol).features(tsMs) };
+      writeSnapshot(snapshot);
       writeCurrentBook(p.coin, book);
+      writeCurrentFeatureSnapshot(p.coin, snapshot, { tsMs, session: sessionDate(new Date(tsMs)), symbol: p.symbol });
     }
   }, snapIntervalSec * 1000);
 

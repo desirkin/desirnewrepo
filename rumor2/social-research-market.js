@@ -154,3 +154,68 @@ export function deepMarketFeatures(window) {
       : { state: 'UNASSESSED', reason: 'no synchronized book supplied — entry/exit capacity unknown', value: null };
   return deepFreeze({ state: w.state, windowId: w.windowId, venue: w.venue, symbol: w.symbol, windowStartTs: w.windowStartTs, windowEndTs: w.windowEndTs, observedTs: w.observedTs, knownAtTs: w.knownAtTs, priceStart: w.priceStart, priceEnd: w.priceEnd, priceChangePct, flow, priceProgressPerNetTaker: progress, book: bookF, slippage, executability });
 }
+
+// =============================== OWNER SNAPSHOT (passive read-only bridge, §36.7) ===============================
+// The deep tape ALREADY computes per-coin book/trade-flow features and (since SOCIAL-5) re-exposes
+// the SAME computed snapshot as an atomically replaced current file (tape/store.js
+// writeCurrentFeatureSnapshot / readCurrentFeatureSnapshot). The composition root injects only the
+// READ accessor. This section validates one such owner snapshot and derives DESCRIPTIVE facts from
+// what the owner exposed — it never recomputes book or flow features, never invents a freshness
+// threshold (exact owner age/clock is exposed instead), and never converts displayed depth bands into
+// exit capacity: executability stays UNASSESSED because the owner exposes bands, not a walkable book.
+export const RESEARCH_OWNER_SNAPSHOT_VERSIONS = Object.freeze(['tape-feature-snapshot-1']);
+export const RESEARCH_OWNER_SNAPSHOT_STATES = Object.freeze(['NOT_PRESENT', 'PRESENT_WITH_AGE', 'STALE_SESSION', 'NOT_YET_KNOWN', 'INVALID']);
+export const RESEARCH_OWNER_TAPE_STATES = Object.freeze(['LIVE', 'DEGRADED', 'OFFLINE']);
+const OWNER_BANDS = Object.freeze(['top', '5bps', '10bps', '25bps']);
+const unitOrNull = (v) => v === null || (Number.isFinite(v) && v >= -1 && v <= 1);
+
+// Validate ONE owner snapshot for `canonicalCoin` as of `asOfTs` under `currentSession` (the ET
+// session date the research tick runs in; null => session identity cannot be checked and is disclosed).
+export function validateOwnerMarketSnapshot(raw, { canonicalCoin, asOfTs, currentSession = null } = {}) {
+  if (raw === null || raw === undefined) return { state: 'NOT_PRESENT', snapshot: null, error: null };
+  if (!isPlainObject(raw)) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: not an object' };
+  if (!RESEARCH_OWNER_SNAPSHOT_VERSIONS.includes(raw.version)) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: unsupported version' };
+  if (raw.coin !== canonicalCoin) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: coin disagrees with the research subject' };
+  if (!isTs(raw.tsMs) || raw.ts !== new Date(raw.tsMs).toISOString()) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: captured clock malformed (ts must derive from tsMs)' };
+  if (typeof raw.session !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw.session)) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: session identity malformed' };
+  if (!RESEARCH_OWNER_TAPE_STATES.includes(raw.tapeState)) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: tape state malformed' };
+  if (raw.symbol !== null && (typeof raw.symbol !== 'string' || raw.symbol.length === 0 || raw.symbol.length > 40)) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: symbol malformed' };
+  if (!isPrice(raw.bestBid) || !isPrice(raw.bestAsk) || raw.bestBid >= raw.bestAsk) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: no valid uncrossed touch' };
+  if (!Number.isFinite(raw.bestBidQty) || !Number.isFinite(raw.bestAskQty) || raw.bestBidQty < 0 || raw.bestAskQty < 0 || !isPrice(raw.mid) || !Number.isFinite(raw.spreadBps) || raw.spreadBps < 0) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: touch quantities / mid / spread malformed' };
+  if (!isPlainObject(raw.depthUsd) || !isPlainObject(raw.obi)) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: depth/imbalance bands missing' };
+  const depth = {}; const obi = {};
+  for (const band of OWNER_BANDS) {
+    const d = raw.depthUsd[band];
+    if (!isPlainObject(d) || !isUsd(d.bid) || !isUsd(d.ask)) return { state: 'INVALID', snapshot: null, error: `owner snapshot: depth band ${band} malformed` };
+    if (!(band in raw.obi) || !unitOrNull(raw.obi[band])) return { state: 'INVALID', snapshot: null, error: `owner snapshot: imbalance band ${band} malformed` };
+    depth[band] = { bidUsd: round(d.bid, 2), askUsd: round(d.ask, 2) }; obi[band] = raw.obi[band] === null ? null : round(raw.obi[band], 4);
+  }
+  for (const k of ['tradeImbalance15s', 'tradeImbalance1m', 'tradeImbalance5m']) if (!(k in raw) || !unitOrNull(raw[k])) return { state: 'INVALID', snapshot: null, error: `owner snapshot: ${k} malformed` };
+  if (!Number.isFinite(raw.cvd)) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: cvd malformed' };
+  if (!isTs(asOfTs)) return { state: 'INVALID', snapshot: null, error: 'owner snapshot: asOfTs required' };
+  if (raw.tsMs > asOfTs) return { state: 'NOT_YET_KNOWN', snapshot: null, error: 'owner snapshot: captured after the research derivation clock — it cannot enter this dossier' };
+  const closed = {
+    version: raw.version, coin: raw.coin, symbol: raw.symbol ?? null, tsMs: raw.tsMs, session: raw.session, tapeState: raw.tapeState,
+    bestBid: raw.bestBid, bestAsk: raw.bestAsk, bestBidQty: raw.bestBidQty, bestAskQty: raw.bestAskQty, mid: raw.mid, spreadBps: round(raw.spreadBps, 4), depthUsd: depth, obi,
+    tradeImbalance15s: raw.tradeImbalance15s === null ? null : round(raw.tradeImbalance15s, 4), tradeImbalance1m: raw.tradeImbalance1m === null ? null : round(raw.tradeImbalance1m, 4), tradeImbalance5m: raw.tradeImbalance5m === null ? null : round(raw.tradeImbalance5m, 4), cvd: round(raw.cvd, 8),
+  };
+  const snapshot = deepFreeze({ ...closed, snapshotId: `r2os-${contentHash(canonicalJson(closed))}` });
+  const stale = typeof currentSession === 'string' && currentSession !== raw.session;
+  return { state: stale ? 'STALE_SESSION' : 'PRESENT_WITH_AGE', snapshot, error: null };
+}
+
+// DESCRIPTIVE facts from one validated owner snapshot. `ownerHealth` is the tape's own current status
+// record (state/tsMs) when the accessor supplies it — exposed verbatim, never converted into quality.
+export function ownerMarketFeatures({ state, snapshot }, { asOfTs, ownerHealth = null, sessionChecked = true } = {}) {
+  if (state === 'NOT_PRESENT' || !snapshot) return { state: state === 'NOT_PRESENT' ? 'NOT_PRESENT' : state, snapshotId: null, note: 'missing owner snapshot != zero market activity: the tape has not written a current feature snapshot for this coin (not subscribed, not yet synchronized, or not running)' };
+  const s = snapshot;
+  const health = isPlainObject(ownerHealth) && RESEARCH_OWNER_TAPE_STATES.includes(ownerHealth.state) ? { state: ownerHealth.state, tsMs: isTs(ownerHealth.tsMs) ? ownerHealth.tsMs : null, ageMs: isTs(ownerHealth.tsMs) && isTs(asOfTs) ? Math.max(0, asOfTs - ownerHealth.tsMs) : null } : null;
+  const quality = state === 'STALE_SESSION' ? 'STALE_SESSION' : s.tapeState !== 'LIVE' ? `OWNER_${s.tapeState}_AT_CAPTURE` : health && health.state !== 'LIVE' ? `OWNER_${health.state}_NOW` : 'OWNER_LIVE_AT_CAPTURE';
+  return deepFreeze({
+    state, quality, snapshotId: s.snapshotId, ownerVersion: s.version, venue: 'kraken', symbol: s.symbol, ownerTsMs: s.tsMs, ownerTs: new Date(s.tsMs).toISOString(), ageMs: Math.max(0, asOfTs - s.tsMs), session: s.session, sessionChecked, tapeStateAtCapture: s.tapeState, ownerHealth: health,
+    book: { state: 'DISPLAYED_BANDS', bestBid: s.bestBid, bestAsk: s.bestAsk, mid: s.mid, spreadBps: s.spreadBps, displayedDepthUsd: s.depthUsd, imbalance: s.obi, attribution: RESEARCH_L2_ATTRIBUTION, note: 'displayed liquidity within the owner\'s measurement bands only — never guaranteed future liquidity; aggregate L2, unattributed' },
+    flow: { state: 'TAKER_SIDE_RATIOS', tradeImbalance15s: s.tradeImbalance15s, tradeImbalance1m: s.tradeImbalance1m, tradeImbalance5m: s.tradeImbalance5m, cvdBaseUnits: s.cvd, takerSideKnown: true, notionalsUsd: null, note: 'executed taker-side imbalance ratios of base quantity from the authoritative trade feed (explicit side) — distinct from any ticker / candle proxy; USD notionals and trade counts are not exposed by the owner snapshot and are not inferred' },
+    executability: { state: 'UNASSESSED', reason: 'the owner snapshot exposes displayed depth BANDS, not a walkable per-level book: no reference-notional fill can be measured; displayed bands are not exit capacity', value: null },
+    note: 'age is the exact owner clock difference; no universal freshness threshold is applied here — the owner\'s own tape state/health is exposed beside it',
+  });
+}

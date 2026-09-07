@@ -130,7 +130,7 @@ export function startRumor2({
   // SOCIAL-5A: the research strainer — OFF unless explicitly enabled by composition (fly.js) or a
   // test; research dossiers + observation proposals only (authority NONE); an optional PURE injected
   // deep-market adapter (tests / a later market-evidence ticket); never a network or tape mutation
-  researchStrainer = null, // { enabled: boolean, deepMarketSource?: fn, options?: {...} }
+  researchStrainer = null, // { enabled: boolean, deepMarketSource?: fn, marketSnapshot?: fn (§36.7 read-only owner accessor), options?: {...} }
 } = {}) {
   if (!enabled) {
     // dark and silent: zero network, zero timers, zero authority
@@ -326,7 +326,17 @@ export function startRumor2({
   const socialRuntimes = [social, socialX].filter(Boolean);
   // SOCIAL-5A: the research strainer runtime (research dossiers + proposals; authority NONE)
   const research = researchStrainer && researchStrainer.enabled
-    ? createResearchStrainer({ now, log, deepMarketSource: typeof researchStrainer.deepMarketSource === 'function' ? researchStrainer.deepMarketSource : null, fallbackScope: () => researchScope.candidate({ knownAtTs: Math.floor(now()) }).scope ?? null, ...(researchStrainer.options ?? {}) })
+    ? createResearchStrainer({
+      now, log, deepMarketSource: typeof researchStrainer.deepMarketSource === 'function' ? researchStrainer.deepMarketSource : null,
+      // SOCIAL-5 §36.7: the tape's read-only current feature snapshot accessor (composition-root injected; transport only)
+      marketSnapshot: typeof researchStrainer.marketSnapshot === 'function' ? researchStrainer.marketSnapshot : null,
+      // SOCIAL-5 §36.6: the wide eye's completed-sweep population (detached, already-computed) — the shadow denominator seam
+      populationSource: typeof researchCatalogSource?.population === 'function' ? () => researchCatalogSource.population() : null,
+      // asset association law: an information-led candidate must resolve to the current accepted catalog
+      catalogBases: () => { const c = researchScope.candidate({ knownAtTs: Math.floor(now()) }).catalog; return c ? new Set(c.markets.map((m) => m.base)) : null; },
+      currentSession: typeof researchStrainer.currentSession === 'function' ? researchStrainer.currentSession : null,
+      fallbackScope: () => researchScope.candidate({ knownAtTs: Math.floor(now()) }).scope ?? null, ...(researchStrainer.options ?? {}),
+    })
     : null;
   const stopSocial = (reason) => { for (const rt of socialRuntimes) rt.stop(reason); if (research) research.stop(reason); };
   // the operational Social coverage of the two live ears at this instant (OPERATIONAL DIAGNOSTIC —
