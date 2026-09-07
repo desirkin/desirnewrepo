@@ -24,10 +24,14 @@ import { SOCIAL_OBSERVATION_TYPES } from './social-settle.js';
 import { RESEARCH_DOSSIER_EVENT_TYPE } from './social-research-dossier.js';
 import { leadLagOrdering, marketOutcomeView, validateHistoricalOutcomeRecord } from './social-research-outcome.js';
 
-export const SOURCE_PROFILE_VERSION = 'social-source-profile-1';
+export const SOURCE_PROFILE_VERSION = 'social-source-profile-2'; // -2: explicit prior-profile-eviction incompleteness (resourceHistoryState + locally scoped clocks/counts)
 export const SOURCE_RETENTION_STATES = Object.freeze(['DURABLE_PROFILE_ALLOWED', 'AGGREGATE_ONLY_ALLOWED', 'TRANSIENT_ONLY', 'RETENTION_PROHIBITED', 'ACCESS_UNRESOLVED', 'PROVIDER_NOT_OPERATIONAL']);
 export const SOURCE_FACTUAL_ASSOCIATION_STATES = Object.freeze(['UNAVAILABLE_NO_VALID_ASSOCIATION', 'ASSOCIATED']);
 export const SOURCE_AVAILABILITY = Object.freeze(['ACTUAL_OPERATIONAL_AVAILABILITY', 'SIMULATED_AS_OF']);
+// §45-A — RESOURCE HISTORY: whether WHOLE profile records for this source were evicted earlier in the SUPPLIED observed
+// journal prefix. It is never a claim of complete platform/lifetime history, complete provider coverage, complete retained
+// summaries, or complete episode/association history — and never a probability, ranking or trust meaning.
+export const SOURCE_RESOURCE_HISTORY_STATES = Object.freeze(['NO_PRIOR_PROFILE_EVICTION', 'PARTIAL_PRIOR_PROFILE_EVICTION', 'UNKNOWN_PRIOR_PROFILE_EVICTION']);
 export const SOURCE_PROFILE_MAX_PROFILES = 2000; // RESEARCH RESOURCE: bounded in-memory profiles (eviction = oldest latest-known; never a verdict)
 export const SOURCE_PROFILE_MAX_RETAINED = 256; // RESEARCH RESOURCE: retained per-profile observation summaries for as-of views (totals stay exact)
 export const SOURCE_PROFILE_MAX_EPISODES = 64;
@@ -77,15 +81,23 @@ export function validateSourceAssociation(a) {
 export function createSourceProfileIndex({ maxProfiles = SOURCE_PROFILE_MAX_PROFILES, maxRetained = SOURCE_PROFILE_MAX_RETAINED } = {}) {
   const profiles = new Map(); // socialAuthorId -> record
   const bySourceCreate = new Map(); // socialSourceId -> { authorId, knownAtTs } (bounded) for create->delete linkage
-  let observations = 0; let refusedRetention = 0; let evictions = 0;
-  const evict = () => { let victim = null; for (const [k, v] of profiles) if (!victim || v.latestKnownAtTs < profiles.get(victim).latestKnownAtTs) victim = k; if (victim) { profiles.delete(victim); evictions += 1; } };
+  // BOUNDED EVICTION MARKERS (§45-A): identity ONLY (socialAuthorId), at most `maxProfiles` entries — never text, a native
+  // post record, a count, or copied history. There is no unbounded ever-seen author set: when the auxiliary bound overflows
+  // the oldest marker is discarded in insertion order and `markerHistoryLost` latches (sticky, never reset by an admission).
+  const evictedMarkers = new Set();
+  let observations = 0; let refusedRetention = 0; let evictions = 0; let markerHistoryLost = false; let markersDiscarded = 0;
+  const mark = (authorId) => { evictedMarkers.delete(authorId); evictedMarkers.add(authorId); while (evictedMarkers.size > maxProfiles) { evictedMarkers.delete(evictedMarkers.values().next().value); markerHistoryLost = true; markersDiscarded += 1; } };
+  const evict = () => { let victim = null; for (const [k, v] of profiles) if (!victim || v.latestKnownAtTs < profiles.get(victim).latestKnownAtTs) victim = k; if (victim) { profiles.delete(victim); evictions += 1; mark(victim); } }; // step 7: a re-evicted PARTIAL/UNKNOWN incarnation itself held observed history that is now gone — it still marks a definite loss
   const recordOf = (e) => {
     let r = profiles.get(e.socialAuthorId);
-    if (!r) {
-      if (profiles.size >= maxProfiles) evict();
-      r = { provider: e.provider, providerKind: e.providerKind, socialAuthorId: e.socialAuthorId, nativeAuthorId: e.nativeAuthorId, retention: retentionCapability(e.provider), firstKnownAtTs: e.knownAtTs, latestKnownAtTs: e.knownAtTs, total: 0, retained: [], dropped: 0, droppedUpToTs: 0, sources: new Set(), episodes: new Map(), refs: [], truncated: false };
-      profiles.set(e.socialAuthorId, r);
-    }
+    if (r) return r; // step 1: an existing record keeps the resource-history state decided when it was created — an unrelated eviction never rewrites it
+    // step 2: capture marker knowledge BEFORE this arrival evicts anyone, so an admission never retroactively makes a proven-new source unknown
+    const marked = evictedMarkers.has(e.socialAuthorId); const lostBefore = markerHistoryLost;
+    const resourceHistoryState = marked ? 'PARTIAL_PRIOR_PROFILE_EVICTION' : lostBefore ? 'UNKNOWN_PRIOR_PROFILE_EVICTION' : 'NO_PRIOR_PROFILE_EVICTION'; // steps 3-5
+    if (marked) evictedMarkers.delete(e.socialAuthorId); // step 3: the active record now carries the fact; the sticky overflow flag is never reset here
+    if (profiles.size >= maxProfiles) evict(); // step 6
+    r = { provider: e.provider, providerKind: e.providerKind, socialAuthorId: e.socialAuthorId, nativeAuthorId: e.nativeAuthorId, retention: retentionCapability(e.provider), firstKnownAtTs: e.knownAtTs, latestKnownAtTs: e.knownAtTs, total: 0, retained: [], dropped: 0, droppedUpToTs: 0, sources: new Set(), episodes: new Map(), refs: [], truncated: false, resourceHistoryState };
+    profiles.set(e.socialAuthorId, r);
     return r;
   };
   function observe(e) {
@@ -123,7 +135,7 @@ export function createSourceProfileIndex({ maxProfiles = SOURCE_PROFILE_MAX_PROF
       r.episodes.set(ev.episodeId, { episodeId: ev.episodeId, canonicalCoin: ev.canonicalCoin, dossierId: ev.dossierId, episodeKnownAtTs: ev.derivedKnownAtTs, firstKnownAtTs: first.knownAtTs, firstRetrievedTs: first.retrievedTs ?? null, marketNoticeTs, ordering: leadLagOrdering({ provider: r.provider, sourceKnownAtTs: first.knownAtTs, sourceRetrievedTs: first.retrievedTs ?? null, marketNoticeTs }), originAnchored: anchored, familyMembers: members });
     }
   }
-  function clear() { profiles.clear(); bySourceCreate.clear(); observations = 0; refusedRetention = 0; evictions = 0; }
+  function clear() { profiles.clear(); bySourceCreate.clear(); evictedMarkers.clear(); observations = 0; refusedRetention = 0; evictions = 0; markerHistoryLost = false; markersDiscarded = 0; }
 
   // THE AS-OF PROFILE VIEW: only facts known at or before `asOfTs` enter; associations and outcome records are
   // caller-supplied (already-authorized), each with its own known-at — a later association or outcome never rewrites an earlier view.
@@ -155,10 +167,17 @@ export function createSourceProfileIndex({ maxProfiles = SOURCE_PROFILE_MAX_PROF
       if (view.state === 'KNOWN') available += 1; else if (view.state === 'CENSORED' || view.state === 'NOT_YET_KNOWN') censored += 1; else unavailable += 1;
       if (outcomes.length < SOURCE_PROFILE_MAX_EPISODES) outcomes.push({ episodeId: e.episodeId, canonicalCoin: e.canonicalCoin, sourceKnownAtTs: e.firstKnownAtTs, marketNoticeTs: e.marketNoticeTs, ordering: e.ordering.ordering, leadMs: e.ordering.leadMs, uncertaintyMs: e.ordering.uncertaintyMs, outcome: { state: view.state, fidelity: view.fidelity, horizons: view.horizons ?? null, ret1hPct: view.ret1hPct ?? null, counts: view.counts ?? null } });
     }
+    // §45-A: whole-profile eviction is a SEPARATE dimension from per-profile summary truncation. Under proven (PARTIAL) or
+    // possible (UNKNOWN) prior loss the PREFIX-WIDE first clock and total are unreconstructable from identity-only markers and
+    // become null — never a zero and never the later incarnation's clock; the locally scoped facts stay exact and are labelled.
+    const resourceHistoryState = r.resourceHistoryState ?? 'NO_PRIOR_PROFILE_EVICTION';
+    const priorProfileLoss = resourceHistoryState !== 'NO_PRIOR_PROFILE_EVICTION';
+    const localFirstKnownAtTs = r.firstKnownAtTs <= asOfTs ? r.firstKnownAtTs : null;
+    const localCountIncludingDropped = r.dropped === 0 ? obs.length : asOfTs >= r.droppedUpToTs ? obs.length + r.dropped : null;
     const sansId = {
       version: SOURCE_PROFILE_VERSION, identity: { provider: r.provider, providerKind: r.providerKind, nativeAuthorId: r.nativeAuthorId, socialAuthorId: r.socialAuthorId, basis: 'PROVIDER_NATIVE_STABLE_ID', crossProviderIdentity: 'UNRESOLVED_NEVER_MERGED' },
       retentionState: r.retention.state, retentionReason: r.retention.reason, knownAtTs: asOfTs, availability,
-      coverage: { firstObservedKnownAtTs: r.firstKnownAtTs <= asOfTs ? r.firstKnownAtTs : null, latestObservedKnownAtTs: obs.length ? obs[obs.length - 1].knownAtTs : null, observationCount: obs.length, observationCountIncludingDropped: r.dropped === 0 ? obs.length : asOfTs >= r.droppedUpToTs ? obs.length + r.dropped : null, retainedSummaryTruncated: r.truncated, distinctSourceCount: new Set(obs.map((o) => o.socialSourceId)).size, distinctResearchEpisodeCount: episodes.length, coverageLimitations: ['OBSERVED_HISTORY_ONLY', 'COVERAGE_BOUND_BY_ADMISSION_SCOPE_AND_PROVIDER_AVAILABILITY', ...(r.truncated ? ['RETAINED_SUMMARIES_TRUNCATED'] : [])] },
+      coverage: { firstObservedKnownAtTs: priorProfileLoss ? null : localFirstKnownAtTs, latestObservedKnownAtTs: obs.length ? obs[obs.length - 1].knownAtTs : null, observationCount: obs.length, observationCountIncludingDropped: priorProfileLoss ? null : localCountIncludingDropped, currentProfileFirstObservedKnownAtTs: localFirstKnownAtTs, currentProfileObservationCountIncludingDropped: localCountIncludingDropped, resourceHistoryState, retainedSummaryTruncated: r.truncated, distinctSourceCount: new Set(obs.map((o) => o.socialSourceId)).size, distinctResearchEpisodeCount: episodes.length, coverageLimitations: ['OBSERVED_HISTORY_ONLY', 'COVERAGE_BOUND_BY_ADMISSION_SCOPE_AND_PROVIDER_AVAILABILITY', ...(r.truncated ? ['RETAINED_SUMMARIES_TRUNCATED'] : []), ...(priorProfileLoss ? [resourceHistoryState] : [])] },
       origin: { relations, explicitNativeEchoCount: count((o) => ECHO_RELATIONS.includes(o.relation)), potentialOriginAnchoredCount: episodes.reduce((s, e) => s + e.originAnchored, 0), possibleCopyOrEchoFamilyMemberCount: episodes.reduce((s, e) => s + e.familyMembers, 0), factualIndependenceStatus: 'UNESTABLISHED', note: 'anchoring a text family first in Cobra\'s observed order is a fact about observation order, never proof of authorship or independence' },
       lifecycle: { editCount: lifecycle.EDIT, deleteCount: lifecycle.DELETE, tombstoneCount: lifecycle.TOMBSTONE, createCount: lifecycle.CREATE, deletionLag: lags.length ? { linkedPairs: lags.length, minMs: Math.min(...lags), medianMs: median(lags), maxMs: Math.max(...lags) } : null, unobservedDeletionCoverage: 'UNKNOWN', note: 'deletion is a lifecycle fact, never guilt, lying or manipulation; unobserved deletions are UNKNOWN, never a zero rate' },
       clock,
@@ -174,7 +193,7 @@ export function createSourceProfileIndex({ maxProfiles = SOURCE_PROFILE_MAX_PROF
     observe, onDossier, profile, clear,
     has: (id) => profiles.has(id), list, episodes: (id) => [...(profiles.get(id)?.episodes.values() ?? [])].map((e) => ({ ...e })),
     retentionSummary: () => { const out = {}; for (const r of profiles.values()) out[r.retention.state] = (out[r.retention.state] ?? 0) + 1; return out; },
-    status: () => ({ profiles: profiles.size, observations, refusedRetention, evictions, bounds: { maxProfiles, maxRetained, maxEpisodes: SOURCE_PROFILE_MAX_EPISODES, maxRefs: SOURCE_PROFILE_MAX_REFS, label: 'RESEARCH RESOURCE bounds — never a verdict on a source' }, authority: 'NONE', purpose: 'RESEARCH_ONLY' }),
+    status: () => { const resourceHistory = Object.fromEntries(SOURCE_RESOURCE_HISTORY_STATES.map((k) => [k, 0])); for (const r of profiles.values()) resourceHistory[r.resourceHistoryState ?? 'NO_PRIOR_PROFILE_EVICTION'] += 1; return { profiles: profiles.size, observations, refusedRetention, evictions, evictionMarkers: evictedMarkers.size, evictionMarkerCapacity: maxProfiles, evictionMarkerHistoryLost: markerHistoryLost, evictionMarkersDiscarded: markersDiscarded, resourceHistory, bounds: { maxProfiles, maxRetained, maxEvictionMarkers: maxProfiles, maxEpisodes: SOURCE_PROFILE_MAX_EPISODES, maxRefs: SOURCE_PROFILE_MAX_REFS, label: 'RESEARCH RESOURCE bounds — never a verdict on a source' }, authority: 'NONE', purpose: 'RESEARCH_ONLY' }; },
   };
 }
 

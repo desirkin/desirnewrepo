@@ -83,7 +83,7 @@ if (!TEST_URL) {
       for (const r of m.providers) assert.equal(validateReadinessRow(r), null, r.provider);
       const row = (id) => m.providers.find((r) => r.provider === id);
       assert.equal(row('BLUESKY_OFFICIAL').currentlyEnabledState, st.social.state, 'the row mirrors the live runtime state');
-      assert.equal(row('BLUESKY_OFFICIAL').readiness, st.social.state === 'ACTIVE' ? 'OPERATIONAL_LIVE_PROVEN' : 'IMPLEMENTED_NOT_LIVE_SMOKED');
+      assert.equal(row('BLUESKY_OFFICIAL').readiness, st.social.state === 'ACTIVE' ? 'OPERATIONAL_LIVE_PROVEN' : 'LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE'); assert.equal(row('BLUESKY_OFFICIAL').liveSmokeState, 'PERFORMED_PRIOR_SESSION', 'a not-yet-connected runtime never erases the one real prior Bluesky smoke');
       assert.equal(row('X_OFFICIAL').readiness, 'DISABLED'); assert.deepEqual(row('X_OFFICIAL').blockers, ['PAID_SMOKE_NOT_PERFORMED', 'RUNTIME_DISABLED']); assert.equal(row('X_OFFICIAL').liveSmokeState, 'NOT_PERFORMED');
       assert.equal(row('RUMINT_LEGACY_AGGREGATE').currentlyEnabledState, 'UNOBSERVED_IN_THIS_PROCESS'); assert.equal(row('RUMINT_LEGACY_AGGREGATE').readiness, 'ACCESS_UNRESOLVED');
       for (const id of ['REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL']) assert.equal(row(id).readiness, 'RETENTION_BLOCKED'); for (const id of ['META_PUBLIC', 'TIKTOK_PUBLIC', 'FARCASTER_OFFICIAL']) assert.equal(row(id).readiness, 'FIXTURE_ONLY');

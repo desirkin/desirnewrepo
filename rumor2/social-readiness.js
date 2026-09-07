@@ -7,9 +7,9 @@
 import { SOCIAL_PROVIDERS, socialProviderById } from './social-registry.js';
 import { retentionCapability, SOURCE_PROFILE_LEGACY_AGGREGATE_PROVIDER } from './social-research-profile.js';
 
-export const READINESS_MATRIX_VERSION = 'social-readiness-matrix-1';
-export const READINESS_STATES = Object.freeze(['OPERATIONAL_LIVE_PROVEN', 'IMPLEMENTED_NOT_LIVE_SMOKED', 'READY_REQUIRES_EXPLICIT_PAID_SMOKE', 'AVAILABLE_REQUIRES_APPROVAL', 'FIXTURE_ONLY', 'ACCESS_UNRESOLVED', 'RETENTION_BLOCKED', 'NOT_CONFIGURED', 'DISABLED', 'UNAVAILABLE']);
-export const READINESS_BLOCKERS = Object.freeze(['RETENTION_NOT_APPROVED', 'APPROVAL_NOT_OBTAINED', 'ENTITLEMENT_UNRESOLVED', 'TERMS_UNRESOLVED', 'CREDENTIAL_MISSING', 'BUDGET_NOT_CONFIGURED', 'PAID_SMOKE_NOT_PERFORMED', 'WATCH_SCOPE_NOT_CONFIGURED', 'TRANSPORT_NOT_IMPLEMENTED', 'NO_SANCTIONED_ROUTE', 'PLATFORM_DECISION_PENDING', 'RUNTIME_DISABLED', 'RUNTIME_WITHHELD', 'PRODUCTION_GATE_UNOBSERVED', 'EXTERNAL_VERIFICATION_DEFERRED', 'EVALUATION_CLOCK_UNAVAILABLE', 'DEPLOYMENT_UNOBSERVED', 'OTHER_EVALUATOR_BLOCKER']);
+export const READINESS_MATRIX_VERSION = 'social-readiness-matrix-2'; // -2: historical smoke and current activation are separate dimensions (LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE + RUNTIME_NOT_ACTIVE)
+export const READINESS_STATES = Object.freeze(['OPERATIONAL_LIVE_PROVEN', 'LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE', 'IMPLEMENTED_NOT_LIVE_SMOKED', 'READY_REQUIRES_EXPLICIT_PAID_SMOKE', 'AVAILABLE_REQUIRES_APPROVAL', 'FIXTURE_ONLY', 'ACCESS_UNRESOLVED', 'RETENTION_BLOCKED', 'NOT_CONFIGURED', 'DISABLED', 'UNAVAILABLE']);
+export const READINESS_BLOCKERS = Object.freeze(['RETENTION_NOT_APPROVED', 'APPROVAL_NOT_OBTAINED', 'ENTITLEMENT_UNRESOLVED', 'TERMS_UNRESOLVED', 'CREDENTIAL_MISSING', 'BUDGET_NOT_CONFIGURED', 'PAID_SMOKE_NOT_PERFORMED', 'WATCH_SCOPE_NOT_CONFIGURED', 'TRANSPORT_NOT_IMPLEMENTED', 'NO_SANCTIONED_ROUTE', 'PLATFORM_DECISION_PENDING', 'RUNTIME_DISABLED', 'RUNTIME_WITHHELD', 'RUNTIME_NOT_ACTIVE', 'PRODUCTION_GATE_UNOBSERVED', 'EXTERNAL_VERIFICATION_DEFERRED', 'EVALUATION_CLOCK_UNAVAILABLE', 'DEPLOYMENT_UNOBSERVED', 'OTHER_EVALUATOR_BLOCKER']);
 export const READINESS_LIVE_SMOKE_STATES = Object.freeze(['PERFORMED_PRIOR_SESSION', 'NOT_PERFORMED', 'NOT_APPLICABLE']);
 export const READINESS_REPLAY_CAPABILITIES = Object.freeze(['JOURNAL_REPLAY', 'FIXTURE_REPLAY_ONLY', 'AGGREGATE_CHECKPOINT_ONLY', 'NONE']);
 export const READINESS_ROW_KEYS = Object.freeze(['provider', 'family', 'foundationPresent', 'transportImplemented', 'accessState', 'entitlementOrApprovalState', 'retentionState', 'historicalReplayCapability', 'liveSmokeState', 'productionGateState', 'currentlyEnabledState', 'durableRawContentAllowed', 'durableAuthorIdentityAllowed', 'operationalEvidenceAvailable', 'statusKnownAtTs', 'latestVerifiedKnownAtTs', 'readiness', 'blockers', 'blockerDetail', 'basis', 'authority']);
@@ -19,6 +19,8 @@ export const PROVIDER_SMOKE_FACTS = Object.freeze({ BLUESKY_OFFICIAL: Object.fre
 const isTs = (v) => Number.isSafeInteger(v) && v > 0;
 const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
 const uniq = (xs) => [...new Set(xs)];
+const WITHHELD_RUNTIME_STATES = Object.freeze(['WITHHELD', 'WITHHELD_GAP', 'STANDBY', 'BUDGET_STOPPED']);
+const CONFIG_BLOCKERS = Object.freeze(['CREDENTIAL_MISSING', 'BUDGET_NOT_CONFIGURED', 'WATCH_SCOPE_NOT_CONFIGURED']);
 
 // map an access evaluator's blocker string (its own vocabulary) onto the closed readiness blocker codes
 export function closedBlocker(raw) {
@@ -47,7 +49,17 @@ export function providerReadinessRow(providerId, { runtime = null, evaluation = 
   const enabled = rt ? rt.enabled !== false && rt.state !== undefined : null;
   let entitlement = 'NOT_REQUIRED'; let gate = rt ? (rt.gate ?? (rt.state === 'ACTIVE' ? 'OPEN' : rt.state ?? 'UNOBSERVED')) : 'UNOBSERVED_IN_THIS_PROCESS';
   let currentlyEnabledState = rt ? (rt.enabled === false ? 'DISABLED' : rt.state ?? 'UNKNOWN') : 'UNOBSERVED_IN_THIS_PROCESS';
-  let readiness; let operational = false; let replay = 'FIXTURE_REPLAY_ONLY'; let smoke = PROVIDER_SMOKE_FACTS[providerId]?.liveSmokeState ?? 'NOT_APPLICABLE';
+  let readiness; let operational = false; let replay = 'FIXTURE_REPLAY_ONLY';
+  // HISTORICAL SMOKE — derived ONCE, BEFORE any disabled / withheld / current-gate branching, because a performed smoke is a
+  // fact about the past and current enablement is a separate dimension. Bluesky keeps its repository-known fact (§5B). X starts
+  // from its repository-known NOT_PERFORMED fact (§5D-§5E, §7) and is upgraded ONLY by the represented run's DURABLE completion:
+  // smoke.status alone is `pendingSmokeTerminal` (a terminal awaiting append), and configured/ok flags, target counts, an ACTIVE
+  // stream or a pending terminal never substitute for it. This API recovers no history a supplied runtime does not carry.
+  const rtSmoke = rt && rt.smoke && typeof rt.smoke === 'object' ? rt.smoke : null;
+  const durableSmokeComplete = rtSmoke !== null && rtSmoke.durableStatus === 'COMPLETE';
+  let smoke = PROVIDER_SMOKE_FACTS[providerId]?.liveSmokeState ?? 'NOT_APPLICABLE';
+  if (providerId === 'X_OFFICIAL' && durableSmokeComplete) smoke = 'PERFORMED_PRIOR_SESSION';
+  const explicitGate = rt !== null && rt.gate !== undefined && rt.gate !== null; // a fixture/runtime that states its gate is believed; an absent gate stays unobserved
   if (evaluation && Array.isArray(evaluation.blockers)) for (const b of evaluation.blockers.slice(0, 16)) push(closedBlocker(b), b);
   if (p.retentionProhibited === true) {
     const approvalPath = /APPROVAL/.test(p.accessState); // the registry census names the path (approval + classification vs entitlement + terms review)
@@ -62,26 +74,43 @@ export function providerReadinessRow(providerId, { runtime = null, evaluation = 
     readiness = 'FIXTURE_ONLY';
   } else if (providerId === 'X_OFFICIAL') {
     entitlement = 'PAY_PER_USE_CREDENTIAL_AND_BUDGET_REQUIRED'; replay = 'JOURNAL_REPLAY';
-    if (!rt) { push('PRODUCTION_GATE_UNOBSERVED', 'no X runtime status in this process'); push('PAID_SMOKE_NOT_PERFORMED', PROVIDER_SMOKE_FACTS.X_OFFICIAL.ref); readiness = 'IMPLEMENTED_NOT_LIVE_SMOKED'; }
-    else if (rt.enabled === false) { push('RUNTIME_DISABLED', rt.gateDetail ?? 'RUMOR2_SOCIAL_X_ENABLED'); push('PAID_SMOKE_NOT_PERFORMED', PROVIDER_SMOKE_FACTS.X_OFFICIAL.ref); readiness = 'DISABLED'; }
+    // the paid smoke is owed exactly while the represented run has NOT durably completed — including while disabled or withheld
+    if (!durableSmokeComplete) push('PAID_SMOKE_NOT_PERFORMED', PROVIDER_SMOKE_FACTS.X_OFFICIAL.ref);
+    if (!rt) { push('PRODUCTION_GATE_UNOBSERVED', 'no X runtime status in this process'); readiness = 'IMPLEMENTED_NOT_LIVE_SMOKED'; }
+    else if (rt.enabled === false) { push('RUNTIME_DISABLED', rt.gateDetail ?? 'RUMOR2_SOCIAL_X_ENABLED'); readiness = 'DISABLED'; }
     else {
       if (!rt.credentialPresent) push('CREDENTIAL_MISSING', 'X_BEARER_TOKEN');
       if (rt.gate && rt.gate !== 'OPEN' && /BUDGET/.test(rt.gate)) push('BUDGET_NOT_CONFIGURED', rt.gate);
       if (rt.watch && rt.watch.ok === false) push('WATCH_SCOPE_NOT_CONFIGURED', rt.watch.reason ?? rt.watch.mode);
-      const smokeDone = rt.smoke && (rt.smoke.durableStatus === 'COMPLETE' || rt.smoke.status === 'COMPLETE');
-      if (!smokeDone) { push('PAID_SMOKE_NOT_PERFORMED', PROVIDER_SMOKE_FACTS.X_OFFICIAL.ref); smoke = 'NOT_PERFORMED'; } else smoke = 'PERFORMED_PRIOR_SESSION';
-      if (rt.state === 'ACTIVE' && smokeDone) { readiness = 'OPERATIONAL_LIVE_PROVEN'; operational = true; }
-      else if (['WITHHELD', 'WITHHELD_GAP', 'STANDBY', 'BUDGET_STOPPED'].includes(rt.state)) { push('RUNTIME_WITHHELD', rt.state); readiness = 'UNAVAILABLE'; }
-      else if (blockers.some((b) => b === 'CREDENTIAL_MISSING' || b === 'BUDGET_NOT_CONFIGURED' || b === 'WATCH_SCOPE_NOT_CONFIGURED')) readiness = 'NOT_CONFIGURED';
-      else readiness = 'READY_REQUIRES_EXPLICIT_PAID_SMOKE';
+      // PRECEDENCE: known withheld state, then configuration / gate / evaluator blockers, then active-vs-not and performed-vs-not.
+      // A final label never overrides an already established blocker, and an unclassified runtime never defaults to operational.
+      const configBlocked = blockers.some((b) => CONFIG_BLOCKERS.includes(b));
+      if (WITHHELD_RUNTIME_STATES.includes(rt.state)) { push('RUNTIME_WITHHELD', rt.state); readiness = 'UNAVAILABLE'; }
+      else if (configBlocked) readiness = 'NOT_CONFIGURED';
+      else if (explicitGate && rt.gate !== 'OPEN') { push('RUNTIME_WITHHELD', `production gate ${String(rt.gate).slice(0, 60)}`); readiness = 'UNAVAILABLE'; }
+      else if (rt.state !== 'ACTIVE' && durableSmokeComplete) { push('RUNTIME_NOT_ACTIVE', rt.state ?? 'unknown'); readiness = 'LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE'; }
+      else if (!durableSmokeComplete) readiness = 'READY_REQUIRES_EXPLICIT_PAID_SMOKE'; // ACTIVE or not, an unproven paid smoke is still owed
+      else if (gate !== 'OPEN') { push('RUNTIME_WITHHELD', `production gate ${String(gate).slice(0, 60)}`); readiness = 'UNAVAILABLE'; }
+      else if (blockers.length > 0) readiness = 'UNAVAILABLE'; // an access-evaluator blocker keeps its own code and still prevents an operational label
+      else { readiness = 'OPERATIONAL_LIVE_PROVEN'; operational = true; }
     }
-  } else { // BLUESKY_OFFICIAL — the authorized, live-smoked, durable ear
+  } else { // BLUESKY_OFFICIAL — the authorized, live-smoked, durable ear. Its ONE real prior smoke (§5B) is never erased by a
+    // disabled, withheld or merely-hydrated runtime: those describe CURRENT activation, a separate dimension from smoke history.
     replay = 'JOURNAL_REPLAY';
-    if (!rt) { push('PRODUCTION_GATE_UNOBSERVED', 'no Bluesky runtime status in this process'); readiness = 'IMPLEMENTED_NOT_LIVE_SMOKED'; }
+    const evidence = () => (rt?.durableIndexSize ?? 0) > 0;
+    if (!rt) { push('PRODUCTION_GATE_UNOBSERVED', 'no Bluesky runtime status in this process'); readiness = 'LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE'; }
     else if (rt.enabled === false) { push('RUNTIME_DISABLED', rt.gateDetail ?? 'RUMOR2_SOCIAL_BLUESKY_ENABLED'); readiness = 'DISABLED'; }
-    else if (rt.state === 'ACTIVE') { readiness = 'OPERATIONAL_LIVE_PROVEN'; operational = (rt.durableIndexSize ?? 0) > 0; } // ACTIVE = the runtime holds a connected stream in THIS process under its gates
-    else if (rt.state === 'HYDRATED' || rt.state === 'DARK') { push('PRODUCTION_GATE_UNOBSERVED', `runtime ${rt.state} (not yet connected in this process)`); readiness = 'IMPLEMENTED_NOT_LIVE_SMOKED'; operational = (rt.durableIndexSize ?? 0) > 0; }
-    else { push('RUNTIME_WITHHELD', rt.state); readiness = 'UNAVAILABLE'; operational = (rt.durableIndexSize ?? 0) > 0; }
+    else if (rt.state === 'ACTIVE') { // ACTIVE = the runtime holds a connected stream in THIS process under its gates
+      operational = evidence();
+      if (gate !== 'OPEN') { push('RUNTIME_WITHHELD', `production gate ${String(gate).slice(0, 60)}`); readiness = 'UNAVAILABLE'; }
+      else if (blockers.length > 0) readiness = 'UNAVAILABLE';
+      else readiness = 'OPERATIONAL_LIVE_PROVEN';
+    } else if (rt.state === 'HYDRATED' || rt.state === 'DARK') {
+      operational = evidence();
+      if (!explicitGate) { push('PRODUCTION_GATE_UNOBSERVED', `runtime ${rt.state} (not yet connected in this process)`); readiness = 'LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE'; } // no gate was supplied: neither OPEN nor closed is invented
+      else if (rt.gate === 'OPEN') { push('RUNTIME_NOT_ACTIVE', rt.state); readiness = 'LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE'; } // an explicitly OPEN gate is a true fact about the gate, not about activation
+      else { push('RUNTIME_WITHHELD', `production gate ${String(rt.gate).slice(0, 60)}`); readiness = 'UNAVAILABLE'; }
+    } else { push('RUNTIME_WITHHELD', rt.state ?? 'unknown'); readiness = 'UNAVAILABLE'; operational = evidence(); }
   }
   return deepFreeze({
     provider: providerId, family: p.providerKind, foundationPresent, transportImplemented, accessState: p.accessState, entitlementOrApprovalState: entitlement, retentionState: retention.state, historicalReplayCapability: replay,
@@ -107,6 +136,27 @@ export function validateReadinessRow(r) {
   if (r.readiness !== 'OPERATIONAL_LIVE_PROVEN' && r.blockers.length === 0) return `readiness row: ${r.provider} is not operational yet names no blocker`;
   if (r.readiness === 'OPERATIONAL_LIVE_PROVEN' && r.blockers.length > 0) return `readiness row: ${r.provider} is called operational while blocked`;
   if (!READINESS_LIVE_SMOKE_STATES.includes(r.liveSmokeState) || !READINESS_REPLAY_CAPABILITIES.includes(r.historicalReplayCapability)) return `readiness row: ${r.provider} smoke / replay state is not closed`;
+  // SMOKE-HISTORY vs CURRENT-ACTIVATION implications (explicit, never a substring trick). DISABLED / UNAVAILABLE /
+  // NOT_CONFIGURED may each coexist with a performed smoke, and an OPEN configuration gate may coexist with enabled=false:
+  // current enablement is a separate dimension and is not denied here. operationalEvidenceAvailable is likewise NOT asserted
+  // to imply ACTIVE — retained durable evidence survives a hydrated or withheld runtime, and an ACTIVE runtime may hold none.
+  if (r.readiness === 'IMPLEMENTED_NOT_LIVE_SMOKED' && r.liveSmokeState !== 'NOT_PERFORMED') return `readiness row: ${r.provider} is called not-live-smoked while its smoke state is ${r.liveSmokeState}`;
+  if (r.readiness === 'READY_REQUIRES_EXPLICIT_PAID_SMOKE') {
+    if (r.provider !== 'X_OFFICIAL') return `readiness row: ${r.provider} is not the pay-per-use ear and cannot require an explicit paid smoke`;
+    if (r.liveSmokeState !== 'NOT_PERFORMED') return `readiness row: ${r.provider} requires a paid smoke while recording one as performed`;
+    if (!r.blockers.includes('PAID_SMOKE_NOT_PERFORMED')) return `readiness row: ${r.provider} requires a paid smoke yet names no PAID_SMOKE_NOT_PERFORMED blocker`;
+  }
+  if (r.readiness === 'LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE') {
+    if (r.liveSmokeState !== 'PERFORMED_PRIOR_SESSION') return `readiness row: ${r.provider} claims a live-smoked history while its smoke state is ${r.liveSmokeState}`;
+    if (r.currentlyEnabledState === 'ACTIVE') return `readiness row: ${r.provider} is currently ACTIVE and is not merely live-smoked-without-current-proof`;
+  }
+  if (r.readiness === 'OPERATIONAL_LIVE_PROVEN') {
+    if (r.transportImplemented !== true) return `readiness row: ${r.provider} is called operational without an implemented transport`;
+    if (r.liveSmokeState !== 'PERFORMED_PRIOR_SESSION') return `readiness row: ${r.provider} is called operational while its smoke state is ${r.liveSmokeState}`;
+    if (r.currentlyEnabledState !== 'ACTIVE') return `readiness row: ${r.provider} is called operational while its runtime is ${r.currentlyEnabledState}`;
+    if (r.productionGateState !== 'OPEN') return `readiness row: ${r.provider} is called operational while its production gate is ${r.productionGateState}`;
+  }
+  if (r.blockers.includes('PAID_SMOKE_NOT_PERFORMED') && r.liveSmokeState === 'PERFORMED_PRIOR_SESSION') return `readiness row: ${r.provider} names a missing paid smoke while recording one as performed`;
   if (r.authority !== 'NONE') return `readiness row: ${r.provider} authority must be NONE`;
   if ('implemented' in r) return 'readiness row: a single implemented flag is refused (readiness never flattens)';
   return null;

@@ -1957,7 +1957,7 @@ SOCIAL-7 (master-convoy Convoy III) attacked the Social/RUMOR intelligence layer
 cross-provider and coverage torture (`test/social-7-cross.test.js`), seeded burst / resource torture
 (`test/social-7-burst.test.js`), crash / journal / fence / replay torture in memory and against real PostgreSQL
 (`test/social-7-replay.test.js`, `test/social-7-durable.test.js`) — made provider readiness machine-readable
-(`rumor2/social-readiness.js`, `social-readiness-matrix-1`, exposed as `socialReadiness` in the collector status),
+(`rumor2/social-readiness.js`, `social-readiness-matrix-1` — superseded by `social-readiness-matrix-2` in §5U — exposed as `socialReadiness` in the collector status),
 and made source ancestry mechanically answerable (`rumor2/social-research-ancestry.js`,
 `social-research-ancestry-1`, a PURE provider-removal re-derivation seam). Defects it found were repaired with
 regressions: the near-duplicate family scan was an unbounded pairwise scan (an inverted shingle index + exact-text
@@ -2021,6 +2021,96 @@ permanent or preferred trading universe and carry no research preference: resear
 point-in-time venue catalog (SOCIAL-4F), and every SOCIAL-5/6/7 law is exercised on synthetic universes that
 contain none of the five legacy assets. Trade eligibility is a separately authorized future ticket
 (dynamic identity / availability / liquidity / risk / cost requirements), not something this layer encodes.
+
+---
+
+### 5U. SOCIAL-6/7 TRUTH CLOSEOUT REPAIR — source-profile eviction completeness + readiness-state consistency
+
+Two truth boundaries reported by §5S/§5T were reproduced and repaired. This section records ONLY that repair; the
+§5S/§5T records above, and the historical smoke records in §5B/§5D/§5E, stand unchanged as historical statements.
+No durable event, schema, checkpoint, journal identity or database version changed; no config, dependency,
+provider, budget, activation or trading path was touched; no live provider request was made and nothing was spent.
+
+**A. Source-profile eviction completeness (`rumor2/social-research-profile.js`, `social-source-profile-2`).**
+The profile index evicts WHOLE profile records under its RESEARCH RESOURCE cap. A source whose record had been
+evicted and which was then observed again silently reported the LATER incarnation's first clock and count as if
+they were its whole observed history. The repair is EXPLICIT INCOMPLETENESS, never historical reconstruction:
+there is no journal scan on a profile read, no archive accessor, no replay cache.
+
+- **Bounded identity markers.** One in-memory set keyed ONLY by `socialAuthorId` (the existing provider-scoped
+  identity), holding at most `maxProfiles` entries — 2,000 at the defaults, beside at most 2,000 active profiles.
+  A marker carries no text, no native post record, no count and no copied history. There is no unbounded
+  ever-seen author set: on overflow the oldest marker is discarded in insertion order and a sticky
+  `evictionMarkerHistoryLost` flag latches (never reset by a later admission).
+- **`coverage.resourceHistoryState`**, decided once when an active record is created and never rewritten by an
+  unrelated eviction: `NO_PRIOR_PROFILE_EVICTION` (proven — within this prefix an earlier loss would still have a
+  marker), `PARTIAL_PRIOR_PROFILE_EVICTION` (a marker proves whole records were lost), or
+  `UNKNOWN_PRIOR_PROFILE_EVICTION` (marker history was already lost, so neither loss nor novelty is provable —
+  the source is never called definitely new and no earlier observation is invented). Re-eviction of a PARTIAL or
+  UNKNOWN incarnation still creates a DEFINITE marker: that incarnation itself held observed history now gone.
+  More observations, and markers ageing out, never convert UNKNOWN into complete. The state carries no
+  probability, ranking or trust meaning.
+- **Local versus prefix-wide clocks and counts.** Under PARTIAL or UNKNOWN, `firstObservedKnownAtTs` and
+  `observationCountIncludingDropped` are `null` — identity-only markers cannot reconstruct a prefix-wide first or
+  total, and a missing total is never reported as a zero. The exact local facts stay available under explicitly
+  scoped names: `currentProfileFirstObservedKnownAtTs` and
+  `currentProfileObservationCountIncludingDropped`. `observationCount`, `latestObservedKnownAtTs` and
+  `retainedSummaryTruncated` keep their existing meanings: per-profile summary truncation and whole-profile
+  eviction are INDEPENDENT dimensions and may be disclosed together, in deterministic order.
+- **Status and composite.** `status()` exposes marker occupancy, marker capacity, the loss flag, the discard
+  count and per-state counts that sum to the active profiles; the research runtime's existing `sourceBehavior`
+  spread surfaces them. The composite (`social-research-composite-2`) forwards the state, the nulled prefix-wide
+  fields and the scoped ones. `history: AVAILABLE` still means A PROFILE IS AVAILABLE — never that its history is
+  complete — and an absent profile stays `history: UNKNOWN`, never a zero-history verdict.
+- **Exact prefix replay versus an unavailable old cache incarnation.** Replaying the SAME ordered prefix with the
+  same bounds, clock and lawful inputs reproduces byte-identical profile and composite semantics, derived ids
+  included; full replay equals incremental ingest. Querying today's bounded cache at an old timestamp is NOT
+  arbitrary prefix replay: if that incarnation was evicted, `null` / `UNKNOWN` remains the honest unavailable
+  answer. No historical-query engine was built to disguise the difference, and no later marker knowledge is
+  backfilled into an earlier prefix snapshot. `clear()` resets active records, markers, the sticky flag and the
+  counters together; ordering (including at an equal millisecond) stays journal order, never a lexical id.
+
+**B. Readiness-state consistency (`rumor2/social-readiness.js`, `social-readiness-matrix-2`).**
+Historical smoke and current activation are INDEPENDENT dimensions. Rows previously contradicted themselves — a
+Bluesky row recorded its one real prior smoke (§5B) while calling itself `IMPLEMENTED_NOT_LIVE_SMOKED`; a durably
+completed X run was erased merely by disabling the provider; a PENDING terminal was read as a performed smoke;
+and a budget- or gate-blocked runtime could still be labelled operational.
+
+- Historical smoke is derived ONCE, before any disabled / withheld / current-gate branching. Bluesky keeps its
+  repository-known performed fact. X starts from its repository-known NOT_PERFORMED fact (§5D/§5E, §7) and is
+  upgraded only by `smoke.durableStatus === 'COMPLETE'` — the adopted DURABLE run. `smoke.status` may instead come
+  from `pendingSmokeTerminal` (a terminal awaiting append) and is NOT interchangeable with it; configured/ok
+  flags, target counts, an ACTIVE stream and a pending terminal never substitute for durable completion. No
+  process cache, registry, database lookup or request was added to fill a missing input: a row built without a
+  runtime cannot recover dynamic history it was never given.
+- New closed state `LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE` (a known performed smoke, no current proof of active
+  operation — promising nothing about whether a gate is open) and new blocker `RUNTIME_NOT_ACTIVE`. Precedence for
+  a durable row is explicit: absent runtime → disabled → known withheld/standby/budget-stopped → configuration /
+  gate / evaluator blockers → only then active-versus-not and performed-versus-not. `PAID_SMOKE_NOT_PERFORMED` is
+  present exactly while the represented run has not durably completed, including while disabled or withheld.
+  `OPERATIONAL_LIVE_PROVEN` requires transport, a performed smoke, an ACTIVE runtime, an OPEN projected production
+  gate and ZERO blockers; an access-evaluator blocker keeps its own code and prevents an operational label rather
+  than being deleted to satisfy the validator.
+- `validateReadinessRow` now enforces those as explicit implications rather than substring tricks. DISABLED,
+  UNAVAILABLE and NOT_CONFIGURED may each coexist with a performed smoke, and an OPEN configuration gate may
+  coexist with `enabled: false` — current enablement is a separate dimension. `operationalEvidenceAvailable`
+  remains retained-durable-evidence truth and is NOT asserted to imply ACTIVE: an ACTIVE runtime may hold no
+  durable observation, and a hydrated or withheld runtime may still hold retained evidence. Neither promotes a row
+  to currently live.
+
+**Unchanged limits.** Correcting this vocabulary made no provider operational. Reddit and StockTwits stay
+retention-blocked; Meta, TikTok and Farcaster stay fixture-only with external verification deferred; the legacy
+aggregate RUMINT family stays access-unresolved. The authorized paid X smoke is still NOT performed. Stage
+remains UNKNOWN and uncalibrated; claim-association and outcome coverage remain missing; `serpent-evidence-1`
+still has no semantically valid slot for derived source-behavior context or for the entrances that v1 cannot
+represent — both remain disclosed prerequisites for a future Socrates / evidence-contract ticket, and no
+`serpent-evidence-2` was created. Every surface in this section is `authority: NONE`, `purpose: RESEARCH_ONLY` /
+`OPERATIONAL_STATUS_ONLY`. The five legacy `config.universe` assets remain the current frozen safety boundary
+only, not a permanent or preferred trading or research universe (see the §5T scope note).
+
+**Regressions.** `test/social-7-closeout.test.js` (A1–A10, B1–B9) plus the updated
+`test/social-7-readiness.test.js` and `test/social-7-durable.test.js` expectations. This repair closes the two
+reported boundaries; it is not proof that no future defect exists.
 
 ---
 
