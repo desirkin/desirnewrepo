@@ -60,6 +60,11 @@ The machine-readable census lives in `rumor2/social-registry.js` and is pinned b
 | **META_PUBLIC** (Facebook + Instagram routes) | microblog | `AVAILABLE_REQUIRES_APP_REVIEW` | Route-specific (SOCIAL-4D, docs 2026-09-06): Page Public Content Access (public posts/comments of unmanaged Pages; App Review + Business Verification); Page Public Metadata Access (metadata only); managed Pages (own Pages only); Instagram Login (own professional account); Instagram with Facebook Login (capped hashtag search 30/7 days + business discovery; professional account + Page + App Review; no realtime delivery documented); Content Library (research archive; academic/not-for-profit affiliation reviewed by a partner — **not established for this project**); Ad Library (ads only); Groups API removed 2024-04-22. No firehose; latency unmeasured; eligibility for this project **NOT ESTABLISHED**; no application made or denied; retention/inference need route-specific review. SOCIAL-4E: ten route descriptors in FACEBOOK / INSTAGRAM namespaces, route-bound readiness, fixture-only previews (`rumor2/social-meta.js`, §5P) — not operational access. |
 | **TIKTOK_PUBLIC** | microblog | `NOT_AUTHORIZED` (no authorized route established on the supplied facts) | Product-by-product (SOCIAL-4D, docs 2026-09-06): Research Tools require an eligible academic/not-for-profit affiliation, non-commercial public-interest research, ethics review, and project approval — **not established for this project**; on THAT route new videos take up to 48 h to enter search and some metrics up to 10 days (route-specific, not every product). Display API reads only the authorizing user's own videos. Commercial Content API is an ads/commercial dataset (EU data in this phase, open application) — a dataset name, not a classification of Serpent's use. **Current decision:** `INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED`, `OPERATOR_REVIEW_PENDING` — no application, no denial, no permanent exclusion approved. SOCIAL-4E: three product descriptors, product-bound readiness, fixture-only Research/Display video preview (`rumor2/social-tiktok.js`, §5P) — decision unchanged; not operational access. |
 
+**Scope note (SOCIAL-4F, §5Q):** the census above is the PROVIDER census. The ASSET scope of Social
+research is the DISCOVERY_CATALOG (the wide eye's accepted Kraken USD spot metadata), not
+`config.universe`; the five legacy config assets remain the LEGACY_PERMISSION_SET for cost/ledger/
+official-claim purposes only.
+
 Sub-decisions recorded but not built as separate providers (SOCIAL-4D wording; no route enabled):
 - **Instagram** is reviewed separately from Facebook: Instagram Login reads only the authorizing
   professional account; Instagram with Facebook Login adds hashtag search (30 unique hashtags per
@@ -1536,6 +1541,174 @@ the stage explicitly so the flag's two readings are visible.
 
 ---
 
+## 5Q. SOCIAL-4F — universe-scope correction: broad discovery, bounded Social investigation
+
+**The defect (reproduced at 9c17372, no provider calls).** `rumor2/collector.js` built ONE registry
+from `config.universe` (BTC, ETH, SOL, XRP, DOGE) and used its tickers/aliases for BOTH the Bluesky
+local filter and the X rule-manifest anchors: `$BTC` matched, `$LINK` and a synthetic `$FRESH42`
+did not, and the compiled default X manifest carried two rules and no LINK. The five configured
+majors had become the accidental outer boundary of all Social discovery. Meanwhile
+`survey/wideeye.js` already surveyed the full online Kraken USD universe (no volume floor) and kept
+its `keyToCoin` map private.
+
+**Five scopes, stated separately (the vocabulary this section uses throughout):**
+
+| Term | Meaning | Owner | Changed here |
+|---|---|---|---|
+| DISCOVERY_CATALOG | markets current venue evidence lets us observe/research — not eligibility, not authorization, not profitability | `survey/catalog.js` (normalization) via the wide eye's existing AssetPairs acquisition; RUMOR re-validates | NEW |
+| SOCIAL_ADMISSION_SCOPE | what an already-authorized local Social ear admits, under a recorded catalog/filter policy | `rumor2/social-scope.js`, activated durably by `rumor2/social-runtime.js` | NEW (replaces the five-coin filter) |
+| PAID_WATCH_PLAN | a bounded subset PROPOSED for expensive research; never a subscription, spend permission, or attention state | `rumor2/social-watch-plan.js` | NEW (observation-only) |
+| DEEP_OBSERVATION_SET | the capped tape/book subscriptions (volume floor, cap 30, major preference) | `tape/universe.js` | UNCHANGED (byte-identical) |
+| LEGACY_PERMISSION_SET | `config.universe` consumers in cost/ledger/official-claim registry/UI/RUMINT/childhood | `cost/model.js`, `ledger/ledger.js`, `rumor2/truth.js` … | UNCHANGED (retained, labelled; widening needs its own ticket) |
+
+**Occurrence census of `config.universe` (Stage A).** Broad-discovery restriction (REPLACED):
+`rumor2/collector.js` Bluesky filter + X manifest anchors. Deep-observation allocation (PRESERVED):
+`tape/universe.js` selection/fallback, `tape/run.js`, `gateway/collector.js`, `childhood/build.js`.
+Execution/cost/ledger permission (PRESERVED, named): `cost/model.js` `evaluateCost` and
+`ledger/ledger.js` `recordPrediction` refuse a coin outside `config.universe`. Official claim
+resolver (PRESERVED, named): `buildCoinRegistry(config.universe)` in `rumor2/truth.js` still bounds
+official-source claim resolution; the collector still builds it for that purpose only. Provider
+symbol translation (PRESERVED): `XBT→BTC`, `XDG→DOGE` are the only alias rewrites, now in ONE
+shared primitive. Historical/enrichment limitation (PRESERVED honestly): childhood, RUMINT
+cadence (`rumint/poller.js` majors set), UI orbit fallback. Benchmarks/fixtures (PRESERVED): test
+CONFIG constants still name the five seeds — as an explicitly labelled EXPLICIT_STATIC research
+scope, never as an implicit ceiling. Status wording (CLARIFIED): `status.socialResearch` reports the
+five scopes separately and states that none of the other four is the discovery count.
+
+**Catalog (Stage B).** `survey/catalog.js` normalizes ONE complete AssetPairs result into a closed,
+deep-frozen, deterministically sorted catalog: venue, native pair key, native base/quote, wsname,
+canonical research base, quote, observed status, normalization policy version, counts
+(observed / supported / excluded / unresolved), typed exclusions (`STATUS_NOT_ONLINE`,
+`QUOTE_NOT_USD`, `WSNAME_NOT_USD_SPOT`, `BASE_EXCLUDED_STABLE_OR_FIAT`) and unresolved rows
+(`ROW_MALFORMED`, `BASE_UNRESOLVABLE`, `DUPLICATE_COHERENT_ALIAS`). An online USD spot pair that
+passes the existing stable/fiat exclusions is in discovery regardless of volume, market cap, sample
+count, deep-tape membership, extension/MISSED label, or alias availability; the catalog carries no
+volume at all (unknown stays unknown). Coherent alias keys dedupe deterministically; contradictory
+native-id / symbol associations REFUSE the candidate (`CONTRADICTORY_NATIVE_MAPPING`,
+`CONTRADICTORY_BASE_ASSOCIATION`); empty / non-object / zero-supported / over-bound responses
+refuse (`RESPONSE_EMPTY`, `RESPONSE_MALFORMED`, `ZERO_SUPPORTED`, `CATALOG_OVERFLOW` — reported,
+never truncated and called complete). Adoption law: a candidate with fewer than half the previously
+accepted supported markets is `SUSPECTED_INCOMPLETE`; an acquisition clock behind the accepted one is
+`OBSERVED_CLOCK_REGRESSION`; both retain previous truth. Content id = sha1 of the canonical market
+rows; `rumor2/social-catalog.js` re-derives it with the rumor helpers (pinned equal).
+
+**Wide-eye seam.** `startWideEye` now returns `{ stop, catalogSnapshot, researchNotices }`. The sweep
+map is built through the SAME per-row primitive (`krakenUsdSpotBase`) as the catalog, so alias
+compatibility is one code path; the sweep cadence and backoff are unchanged. Metadata refresh runs on
+the existing sweep tick — never a second poller, never one request per coin — no more often than
+`socialResearch.catalog.refreshSec` (≥ 300 s, attempt-based), with maximum age 900 s and a hard bound
+of 5,000 normalized markets; one refresh in flight; `stop()` disowns late results; a failed or refused
+refresh keeps previously accepted truth and records `CATALOG_REFRESH_ERROR` / `CATALOG_REFUSED`
+(the first-load failure keeps its historical sweep backoff). An ACCEPTED refresh lets a new listing
+enter both the catalog and the sweep without a restart, with the ACTUAL acquisition clock (never
+backdated, never a provider creation date). The snapshot is deep-frozen; a stale one is labelled
+(`fresh: false`), never relabelled fresh, never dropped. `fly.js` retains the handle and injects
+`{ snapshot, notices, deepObservation }` into `startRumor2`; the wide eye disabled ⇒ `null` ⇒ Social
+reports `CATALOG_UNAVAILABLE` and never starts it.
+
+**Versioned scope truth (Stage C).** Three CLOSED operational records ride the existing PostgreSQL
+RUMOR event root under the existing writer lock/epoch (no new journal, table, epoch, checkpoint
+provider, or history rewrite): `RUMOR2_SOCIAL_CATALOG` (content, written only when the content
+changes; identity `r2cg-` = venue + content id), `RUMOR2_SOCIAL_CATALOG_VERIFIED` (a small freshness
+record when an unchanged refresh advances the acquisition clock; identity `r2cv-` = venue + content
+id + observedTs; at most one per refresh), and `RUMOR2_SOCIAL_SCOPE` (one activation occurrence per
+provider; identity `r2sq-` = provider + monotonic revision, so a retry is byte-stable and A→B→A is
+three occurrences; carries mode, catalog content id + observed clock, policy version, filterId,
+term count, static terms (static mode only — catalog-backed terms are content-addressed), alias facts,
+watch authors, predecessor revision + filterId, activation clock, reason). Replay validates each
+(`filterId` re-derives from the exact scope; revisions are contiguous; a catalog-backed scope must
+reference settled catalog content and match its term count; clocks never regress) and exposes
+`catalogs`, `scopes`, `scopeHistory`, `catalogVerified`; these records never touch `observed`,
+cursors, the version index, independence groups, packets, or velocity. `socialScopeAt(history,
+knownAtTs)` is the as-of law: the latest activation at or before the record's knowledge clock;
+before the first activation the scope is `LEGACY_SCOPE_UNKNOWN` — old histories are never backfilled
+with today's catalog.
+
+**Admission scope + collector integration (Stage D).** The policy (`rumor2/social-scope.js`, v1):
+explicit cashtag `$BASE`, hashtag `#BASE` (non-ambiguous only), venue pair `BASE/USD` or `BASE-USD`,
+a validated unique alias (the same approved facts as the official resolver, read only), or an
+UPPERCASE non-ambiguous bare ticker of ≥ 3 chars WITH a bounded crypto-context term; ambiguous
+tickers (a closed list — ONE, GAS, AI, LINK, NEAR …) need a cashtag/pair; lowercase and
+context-free bare tickers are `UNRESOLVED` (`AMBIGUOUS_TICKER_REQUIRES_CASHTAG`,
+`BARE_TICKER_NO_CONTEXT`); an unknown cashtag is `UNKNOWN_CASHTAG` — research information kept in a
+bounded diagnostic ring, never a market, never a request. URLs and @handles are removed first;
+tokens are ASCII-only (no Unicode folding: a lookalike never becomes a cashtag); text and token
+counts are bounded; no term ever becomes a regex. Admission is a venue-market research candidate,
+never confirmation, never the source's intended chain asset. In `EXPLICIT_STATIC` mode the operator's
+few explicit terms keep the legacy standalone-token behaviour. The Bluesky runtime consults the
+research scope source every settle: no stream opens before an admission scope is DURABLE
+(`SCOPE_NOT_ACTIVE`); a scope change is a QUIESCENT transition (hold new intake, durably drain every
+owed envelope — prepared/failed batches included — under the OLD scope, append [catalog content if
+new, activation] as one fenced batch, then replace the immutable admission context and reconnect
+from the durable cursor); on restart the last durable scope is restored from journal truth (its
+content must re-derive the same filterId, else WITHHELD) and stale/unavailable catalogs never grant
+NEW scope while the restored scope continues, labelled. Lifecycle continuity: an edit/delete/reply/
+repost of an already-durable native post is admitted from retained native identity (rebuilt from the
+journal on every hydrate, so it survives restart and cache eviction) even without ticker text and
+after the asset left the scope; unknown unlinked lifecycle events stay unmatched. Unknown source
+time keeps the evidence and establishes nothing (the quarantine/precision witness laws are unchanged).
+
+**Handoff and paid watch (Stage E).** `buildWatchPlan` is observation-only and PROPOSED: inputs are
+the accepted catalog and already-known research notices (RIPPLE and MISSED alike — a MISSED label is
+context, not a veto) plus optional explicit operator candidates; priority is explicit and bounded
+(operator candidate, RIPPLE notice, MISSED notice; then most recent, then |zVol|, then base) with a
+default cap of 25 (a stricter operator cap is honored; a looser one never exceeds 25); deferred
+assets remain in discovery; no volume-only path, no majors-first, no return target. CRITICAL X
+SEPARATION: `rumor2/x-runtime.js` compiles rule anchors ONLY from an explicit bounded watch scope —
+`config.socialResearch.xWatch` (mode `EXPLICIT_STATIC`, tickers verified against the accepted catalog,
+cap ≤ 25) or a test-injected static list labelled `INJECTED_STATIC`; empty/missing/unverified ⇒
+`WATCH_SCOPE_NOT_CONFIGURED` / `WATCH_SCOPE_CATALOG_UNAVAILABLE` / `WATCH_SCOPE_EMPTY_AFTER_VERIFICATION`
+/ `WATCH_SCOPE_EXCEEDS_CAP` and ZERO X requests — no five-coin fallback, no full-catalog fallback,
+no plan applied. A change of explicit scope reconciles disconnected through the existing dry-run,
+owned-rule reconciliation, unowned-rule verification, coverage epoch, budget, writer, and durable
+smoke RUN_ID laws (a run bound to another rule-set hash fails closed). The committed config selects
+NO paid target (`xWatch.mode: NOT_CONFIGURED`). Every delivered Post is still metered before the
+local filter; no cap, connection count, or reserve changed.
+
+**Configuration and status (§7 of the ticket).** ONE new section, `socialResearch`, in
+`cobra.config.json` (an intentional hash change; every pre-existing key is deep-equal to 9c17372):
+`catalog { source: WIDEEYE_ASSET_PAIRS, refreshSec: 300, maxAgeSec: 900, maxMarkets: 5000 }`,
+`localAdmission { mode: CATALOG_BACKED, policyVersion: 1, staticTerms: [] }`, `xWatch { mode:
+NOT_CONFIGURED, tickers: [], maxAssets: 25 }`, `watchPlan { maxXAssets: 25 }`. Closed types and
+modes; an invalid section fails closed to NOT_CONFIGURED with a `CONFIG_INVALID` reason; a missing
+section is NOT_CONFIGURED (never a silent fallback); `EXPLICIT_STATIC` requires explicit terms and is
+labelled. `status.socialResearch` reports discovery (source, content id, observed clock, freshness,
+counts, snapshot errors), local admission (mode, active revision/filterId/term count, coverage
+state + reason, restored flag, continuity, unresolved notes), paid watch (PROPOSED plan vs configured
+vs verified vs active rule set), deep observation (count, labelled "not the discovery count"), legacy
+permission (count, labelled), and the historical-coverage statement (scope known only from durable
+scope records; earlier history LEGACY_SCOPE_UNKNOWN; not-watched is never zero mentions).
+
+**Test evidence.** `test/social-4f-catalog.test.js` (normalization integrity, determinism,
+adoption law, the wide-eye seam with exact 300 s / 900 s boundaries, one in flight, stop disowns
+late results, deep/legacy sets unchanged), `test/social-4f-scope.test.js` (policy matrix incl.
+ambiguity, digit-prefixed tickers, URL/handle/substring/Unicode/injection collisions, permutation-
+invariant filterId, closed records + replay incl. A→B→A, config closure, config deep-equality vs
+9c17372, watch plan determinism/cap, explicit X scope + real compiler, protected-surface pins and
+import allowlists), `test/social-4f-runtime.test.js` (no stream before scope, non-major admission,
+name-hack proof incl. a catalog without the seeds, the quiescent transition with owed/failed/duplicate/
+unknown-time/pending work and the 41/42/dup-42/filtered-43 regression, lifecycle continuity across
+restart and eviction, stale/unavailable/future catalogs, A→B→A, restore mismatch, failed activation
+and lost fence), `test/social-4f-collector.test.js` (PostgreSQL: the real composition seam with an
+injected broad snapshot, durable non-major evidence under a real writer epoch, restart/replay with
+correct knownAt and scope, crash/writer-loss/failed-lookup postures, X bounded selection with the
+real compiler and fake API, zero-spend cases, config.universe independence, unowned rules preserved,
+plan change + coverage epoch + smoke RUN_ID mismatch, status truth and no trade leak), and
+`R2A-SOCIAL-8` in the authority suite (explicit allowlists; the rumor tier never imports survey/tape/
+cost/ledger; no Social runtime reads `config.universe`).
+
+**Not done, deliberately.** No live exchange or Social request; no paid X call; no smoke; no
+production or configuration change beyond the new config section; `config.universe` and its
+cost/ledger/official-claim effects untouched; the official claim resolver stays bounded to its
+registry (SOCIAL-5 may associate retained evidence with broader research subjects under its own
+reviewed contract); childhood/RUMINT history not rewritten; the pump doctrine unchanged; Reddit /
+StockTwits / Meta / TikTok / Farcaster access and retention firewalls unchanged; no autonomous
+unknown-asset investigation (unresolved cashtags are a bounded diagnostic ring — a research-request
+authority interface is explicitly deferred); Bluesky live activation itself still requires the
+existing gate and a running wide eye for catalog coverage.
+
+---
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -1603,6 +1776,11 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   Farcaster access/readiness boundary (adapter byte-identical), one shared pure primitive. Not
   operational access, not account entitlement, not production enablement, not a measured edge; the
   remaining-work list in §5P stands.
+- **SOCIAL-4F — UNIVERSE-SCOPE CORRECTION DONE (§5Q):** Social research is no longer implicitly
+  confined to the five legacy config assets; discovery (catalog), local admission (durable versioned
+  scope), paid watch (explicit bounded selection; plans PROPOSED only), deep observation, and legacy
+  permission are separate and observable. Not a live rollout: no provider activation, paid access,
+  historical knowledge, or trading authority was invented.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

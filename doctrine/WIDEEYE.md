@@ -40,3 +40,18 @@ ripple, not the wake. One ripple per symbol per cooldown window.
   field may ever be read by strike evaluation. The chain is fixed:
   the wide eye notices → the deep tape verifies with real L2 books →
   and only the (still unbuilt) confirmation engine could ever bite.
+
+## SOCIAL-4F — the discovery-catalog seam
+
+The wide eye's existing AssetPairs acquisition is the ONE upstream source of the
+Social DISCOVERY_CATALOG (`survey/catalog.js`; doctrine/SOCIAL.md §5Q). `startWideEye`
+exposes a detached, deep-frozen, read-only `catalogSnapshot()` and a bounded
+`researchNotices()` (RIPPLE and MISSED records alike — context, never a veto);
+`fly.js` injects them into the RUMOR collector. Metadata is refreshed on the
+existing sweep tick no more often than `socialResearch.catalog.refreshSec`
+(≥ 300 s), max age 900 s, hard bound 5,000 markets; one refresh in flight; stop
+disowns late results; a failed/refused refresh keeps previously accepted truth
+and never backs the sweep off. Sweep cadence, backoff, baselines, the RIPPLE/
+MISSED classifier and its thresholds, nominations, and the deep cap are
+unchanged. Social catalog membership never depends on a nomination, and
+nothing here can start the wide eye from the Social side.

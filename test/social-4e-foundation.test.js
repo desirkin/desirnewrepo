@@ -149,23 +149,20 @@ test('4E-4. previews are incompatible with every source-event envelope, and the 
   assert.deepEqual(ACTIVE_SOCIAL_PROVIDER_IDS, ['BLUESKY_OFFICIAL', 'X_OFFICIAL'], 'the durable set is unchanged');
 });
 
-test('4E-5. protected surfaces are byte-identical to 9b1b405 and the pump doctrine is preserved', () => {
+test('4E-5. protected provider / contract / truth surfaces are byte-identical to 9b1b405 and the pump doctrine is preserved', () => {
+  // SOCIAL-4F note: social-settle.js, social-runtime.js, collector.js, x-runtime.js, fly.js and cobra.config.json
+  // were legitimately changed by the universe-scope correction (their 4E-era pins are superseded there and
+  // re-pinned by test/social-4f-scope.test.js against 9c17372 where byte identity is still required).
   const pinned = {
     'rumor2/providers/farcaster-official.js': '47d8e8c3ce6ab5bf4993b7a3f7fb6ea312bb6b916e39139b47641aed6879feea',
     'rumor2/providers/bluesky-official.js': '8c8403e553961fe4024c57101b386ef16c0084621f5f5126974420c0c2182fdd',
     'rumor2/providers/x-official.js': '33e846128c6eca467a1b46ce414e7c14ef70cc7f326d68ebca0490445bbaff2a',
     'rumor2/x-stream.js': '5a21881ea009f2be65a47de3c39842951fde4c517163f39534dde713499cfb43',
-    'rumor2/x-runtime.js': 'd3109d1a669a53078c7f77d3302fb400ee80a6d67acdcc0081797997be4dc2a8',
     'rumor2/social.js': '5d9df174b4043f78cddfef3e85ba67a970bfa78c7ed4183b58ca93a595ad9721',
     'rumor2/social-time.js': '952a79e8ea1426c6c2ac1e05727faca181999ad66418827ff4e3eb748bb4e42a',
     'rumor2/social-reddit.js': 'a451febebb1c9f19ad59431ccee640ced220633b3775f340ee574d3c688372f6',
     'rumor2/social-stocktwits.js': 'f97c662435a21263b5cd8cf51549099adaa65c6749f342e7bf4c6ec1b1c506ee',
-    'rumor2/social-settle.js': '948eb3ef4a3ee02d2b50882e4fa0d6714880ddd44f6f1376142e5a03f25d89f3',
-    'rumor2/social-runtime.js': '7697377f1a1f4eb5a6a968a125c63bfff9c5137c053281e24618874849fe97be',
-    'rumor2/collector.js': '0f76abf27bb780eb097b8ef1c5c94f5ce7959a7bf8554f9bec760cc13f1149ef',
     'rumor2/truth.js': 'f8aa2578000d7590e7710a47cbdd1a2b79f763a8baf0a832f89c42eeb6093c2e',
-    'fly.js': 'abe51719716423941b4bb081a9c51ca9b0d07a9df5398fca5d894efba011c70d',
-    'cobra.config.json': '3c034b292962f973ee78fd3cb5d9e8066df49134dbcfbb21068be56f8b2c134d',
   };
   for (const [f, h] of Object.entries(pinned)) assert.equal(sha(f), h, `${f} byte-identical`);
   assert.equal(SOCIAL_PUMP_DOCTRINE, 'DETECT EARLY. TAKE THE TRADABLE SLICE. DO NOT BECOME EXIT LIQUIDITY. Social RUMOR records pump/coordination stage and provenance as INFORMATION; it never converts COORDINATED into REJECT and makes no trade decision.');

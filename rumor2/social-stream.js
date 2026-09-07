@@ -43,6 +43,10 @@ export function socialIntake({
   provider, mapCommit, filter, now = () => Date.now(),
   maxQueue = DEFAULTS.maxQueue, seenCap = DEFAULTS.seenCap,
   cursorOf = null, isDurable = null,
+  // SOCIAL-4F: an injected ADMISSION function (observation) -> { match, reasons } replaces the
+  // legacy term filter for a scoped runtime (the closed research policy + lifecycle continuity);
+  // absent, the legacy filter applies unchanged. Either way an empty scope admits NOTHING.
+  admit = null,
 } = {}) {
   const queue = []; // envelopes { providerCursor, observation }
   // SOCIAL-4D CLOSEOUT: the local cache keeps the FIRST-SEEN equivalence record per version id
@@ -113,9 +117,10 @@ export function socialIntake({
     else if (o.sourceClockStatus === 'FUTURE_QUARANTINED') stats.sourceClockFutureQuarantined += 1;
     else if (o.sourceClockStatus === 'ORDER_UNRESOLVED') stats.sourceClockOrderUnresolved += 1;
     else stats.sourceClockUnknown += 1;
-    // bounded universe filter — no silent all-network intake (§24)
-    const fm = socialFilterMatches(filter, { text: o.text, nativeAuthorId: o.nativeAuthorId });
-    if (!fm.match) { stats.filtered += 1; return done('filtered'); }
+    // bounded admission scope — no silent all-network intake (§24)
+    let fm;
+    try { fm = typeof admit === 'function' ? admit(o) : socialFilterMatches(filter, { text: o.text, nativeAuthorId: o.nativeAuthorId }); } catch { fm = { match: false, reasons: [] }; }
+    if (!fm || fm.match !== true) { stats.filtered += 1; return done('filtered'); }
     // KEEP-FIRST by VERSION identity (content facts only — a diagnostic-only
     // redelivery has the SAME id). The DURABLE index is authoritative: a version
     // already settled in the journal is a duplicate here whatever its current
@@ -149,7 +154,7 @@ export function socialIntake({
     stats.enqueued += 1;
     if (deferred) stats.deferred += 1;
     advance();
-    return { outcome: 'enqueued', observation: o, matchedBy: fm.reasons, providerCursor: cur, ...(deferred ? { deferred } : {}) };
+    return { outcome: 'enqueued', observation: o, matchedBy: Array.isArray(fm.reasons) ? fm.reasons.slice(0, 16) : [], providerCursor: cur, ...(deferred ? { deferred } : {}) };
   }
 
   return {

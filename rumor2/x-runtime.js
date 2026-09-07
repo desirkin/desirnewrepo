@@ -63,6 +63,7 @@ import {
 } from './social-settle.js';
 import { createSocialReconciler } from './social-reconcile.js';
 import { startXStream } from './x-stream.js';
+import { resolveXWatchScope } from './social-watch-plan.js';
 import {
   X_OFFICIAL, xPostToRaw, xStreamUrl, xRulesUrl, xRulesCountsUrl, xUsageUrl, xCreditsUrl,
   compileXRuleManifest, validateXRuleManifest, isSerpentTag, xLaneOfTag, parseXUsage, parseXCredits,
@@ -146,9 +147,15 @@ export function xGate(config, { pricing = X_OFFICIAL.pricing, headroom = X_IN_FL
 export function createXRuntime({
   provider = X_OFFICIAL,
   config = xConfigFromEnv(),
-  filter = null, // Serpent's deterministic universe filter (the SECOND boundary)
-  universe = [], // configured coin tickers (rule manifest anchors)
-  aliases = [], // approved aliases (event lane)
+  filter = null, // Serpent's deterministic local filter (the SECOND boundary); null => derived from the explicit watch scope
+  // SOCIAL-4F CRITICAL X SEPARATION: paid rule anchors come ONLY from an EXPLICIT bounded watch
+  // scope — `watchScope` (a resolver () => resolveXWatchScope(...) result, wired by the collector
+  // from config.socialResearch.xWatch verified against the accepted catalog) or the test-injected
+  // static `universe`/`aliases` lists. Never config.universe, never the broad catalog, never a
+  // generated plan. Empty / missing => WATCH_SCOPE_NOT_CONFIGURED and ZERO X requests.
+  watchScope = null,
+  universe = [], // test-injected static tickers (INJECTED_STATIC scope) — never read from config here
+  aliases = [], // test-injected static aliases
   now = () => Date.now(),
   log = () => {},
   fetchImpl = null, // injected for tests; null => the global fetch (api.x.com only)
@@ -160,7 +167,15 @@ export function createXRuntime({
   streamOptions = {},
 } = {}) {
   const pricing = provider.pricing;
-  const universeFilter = filter ?? buildSocialFilter({});
+  // the ONE watch-scope resolution used by preflight (rule anchors) and the local filter
+  const resolveWatch = () => {
+    // an explicitly injected static list (tests/smoke) is the labelled INJECTED_STATIC scope and takes precedence over a resolver
+    if ((Array.isArray(universe) && universe.length > 0) || (Array.isArray(aliases) && aliases.length > 0)) return resolveXWatchScope({ injected: { tickers: universe, aliases } });
+    if (typeof watchScope === 'function') { try { const w = watchScope(); return w && typeof w === 'object' ? w : { ok: false, reason: 'WATCH_SCOPE_MALFORMED', detail: 'watch scope resolver returned no object', tickers: [], aliases: [], scopeId: null, mode: 'NOT_CONFIGURED' }; } catch (err) { return { ok: false, reason: 'WATCH_SCOPE_MALFORMED', detail: String(err?.message ?? err).slice(0, 120), tickers: [], aliases: [], scopeId: null, mode: 'NOT_CONFIGURED' }; } }
+    return resolveXWatchScope({});
+  };
+  let watch = resolveWatch(); // refreshed at every start(); status reports the latest resolution
+  const universeFilter = filter ?? (watch.ok ? buildSocialFilter({ terms: [...watch.tickers, ...watch.aliases] }) : buildSocialFilter({}));
   const reconciler = createSocialReconciler({ provider }); // SOCIAL-4D COMPLETION: version-aware index + ONE native-event matcher
   const durableIds = { has: (id) => reconciler.isDurable(id), get size() { return reconciler.size(); } };
   let x = emptyXState(); // durable X state from the journal
@@ -337,7 +352,8 @@ export function createXRuntime({
 
   async function reconcileRules() {
     if (stream && stream.isConnected()) return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: 'rules are only reconciled while the paid stream is disconnected' };
-    const manifest = compileXRuleManifest({ universe, aliases, priorityAccounts: config.priorityAccounts ?? [], propagationFocus: config.propagationFocus ?? [] });
+    if (!watch.ok) { lastError = watch.detail ?? watch.reason; return { ok: false, reason: watch.reason, detail: watch.detail }; }
+    const manifest = compileXRuleManifest({ universe: watch.tickers, aliases: watch.aliases, priorityAccounts: config.priorityAccounts ?? [], propagationFocus: config.propagationFocus ?? [] });
     const verr = validateXRuleManifest(manifest.rules);
     if (verr) { lastError = verr; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: verr }; }
     const cur = await api(xRulesUrl());
@@ -475,6 +491,10 @@ export function createXRuntime({
     if (pendingGap || (pendingActivation && pendingActivation.afterGap)) return { ok: false, reason: 'WITHHELD_GAP', detail: 'the coverage gap must settle durably before a new coverage epoch opens' };
     const g = xGate(config, { pricing, headroom });
     if (!g.ok) { state = 'DARK'; lastStopReason = g.reason; return { ok: false, reason: g.reason, detail: g.detail }; }
+    // SOCIAL-4F: an EXPLICIT bounded watch scope is required BEFORE any network — a missing,
+    // unverified, or over-cap selection means zero X requests (no five-coin fallback, no catalog)
+    watch = resolveWatch();
+    if (!watch.ok) { state = 'DARK'; lastStopReason = watch.reason; return { ok: false, reason: watch.reason, detail: watch.detail }; }
     // DURABLE smoke admission BEFORE any network: a completed/terminal run never
     // reconnects; a mismatched, repriced, or day-rolled run fails closed
     const adm0 = smokeAdmission();
@@ -754,6 +774,8 @@ export function createXRuntime({
       return {
         provider: provider.id, accessState: 'AVAILABLE_REQUIRES_CREDENTIAL', enabled: !!config.enabled, credentialPresent: !!config.bearer,
         gate: g.ok ? 'OPEN' : g.reason, gateDetail: g.detail, state, hydrated, authority: 'NONE',
+        // SOCIAL-4F: the EXPLICIT watch scope this runtime compiles rules from (never config.universe, never the catalog)
+        watch: { ok: watch.ok, mode: watch.mode ?? null, reason: watch.reason ?? null, detail: watch.detail ?? null, scopeId: watch.scopeId ?? null, tickerCount: watch.tickers?.length ?? 0, tickers: (watch.tickers ?? []).slice(0, 25), rejected: watch.rejected ?? [], catalogContentId: watch.catalogContentId ?? null },
         ruleSetHash: x.ruleSetHash, coverageEpoch: x.coverageEpoch, ownedRuleCount: rules.owned.length, unownedRuleCount: rules.unownedCount, ruleCapacity: rules.capacity, dryRunOk: rules.dryRunOk,
         rules: { unownedSnapshotHash: rules.unownedSnapshotHash, unownedChanged: rules.unownedChanged, lastFailure: rules.lastFailure },
         smoke: (() => {

@@ -19,7 +19,8 @@ const dirs = [];
 function seedDir() { const d = mkdtempSync(path.join(tmpdir(), 'cobra-soccol-')); dirs.push(d); process.env.COBRA_DATA_DIR = d; return d; }
 test.after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 
-const CONFIG = { universe: ['BTC', 'ETH', 'SOL'] };
+// SOCIAL-4F: these fixtures declare the labelled EXPLICIT_STATIC research scope (the legacy filter is no longer derived from config.universe)
+const CONFIG = { universe: ['BTC', 'ETH', 'SOL'], socialResearch: { localAdmission: { mode: 'EXPLICIT_STATIC', policyVersion: 1, staticTerms: ['BTC', 'ETH', 'SOL'] } } };
 const T1 = Date.parse('2026-09-05T12:00:00Z');
 const C = T1 - 3_600_000;
 const iso = (m) => new Date(m).toISOString();

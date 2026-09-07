@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { dataDir } from './lib/config.js';
 import { runTape } from './tape/run.js';
+import { readCurrentUniverse } from './tape/universe.js';
 import { startRumint } from './rumint/poller.js';
 import { startGateway } from './gateway/collector.js';
 import { startWideEye } from './survey/wideeye.js';
@@ -66,7 +67,9 @@ try {
 // path) so a republish cannot erase the ear's statistical memory.
 startRumint({ checkpointStore: rumintCheckpointStore(), memoryBootstrapSource: rumintBootstrapSource() });
 startGateway(); // no-ops (zero network) unless gateway is enabled — collector only
-startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
+// SOCIAL-4F: the wide eye's handle is RETAINED so its detached read-only catalog snapshot can
+// be injected into the RUMOR collector below (Social never starts the wide eye itself).
+const wideEye = startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
 // GOV-1 dark governance sense — no-ops (zero network) unless governance is
 // enabled. GOV-1B: the durable checkpoint store is injected here from the
 // persistence layer (composition-root wiring; STORAGE ONLY, no return path).
@@ -77,7 +80,18 @@ startGovernance({ checkpointStore: govCheckpointStore() });
 // checkpoint store AND the authoritative event journal are injected here
 // (composition-root wiring; STORAGE ONLY — the local events.jsonl survives
 // only as the best-effort mirror the Memory tail consumes).
-startRumor2({ checkpointStore: rumor2CheckpointStore(), journal: rumor2JournalStore() });
+startRumor2({
+  checkpointStore: rumor2CheckpointStore(), journal: rumor2JournalStore(),
+  // SOCIAL-4F: DISCOVERY_CATALOG injection — read-only accessors only (no mutable survey map, no
+  // posture callback, no authority to start market-data collection); absent when the wide eye is
+  // off => Social reports CATALOG_UNAVAILABLE rather than inventing a universe or falling back
+  // to the five legacy config assets. The deep-observation count rides the same seam, labelled.
+  researchCatalogSource: wideEye ? {
+    snapshot: () => wideEye.catalogSnapshot(),
+    notices: () => wideEye.researchNotices(),
+    deepObservation: () => { const u = readCurrentUniverse(); return u ? { count: Array.isArray(u.pairs) ? u.pairs.length : null, date: u.date ?? null, source: u.source ?? null } : null; },
+  } : null,
+});
 try {
   await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
   process.exit(0);

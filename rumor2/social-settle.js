@@ -29,6 +29,8 @@ import {
 } from './social.js';
 import { socialProviderById } from './social-registry.js';
 import { validateTemporalWitness, witnessesEquivalent, TEMPORAL_POLICY_VERSION } from './social-time.js';
+import { validateCatalogContent, SOCIAL_CATALOG_MARKET_KEYS } from './social-catalog.js';
+import { socialAdmissionFilterId, SOCIAL_ADMISSION_POLICY_VERSION, SOCIAL_ADMISSION_MODES, SOCIAL_BASE_RE, SOCIAL_SCOPE_MAX_STATIC_TERMS, SOCIAL_SCOPE_MAX_ALIASES, SOCIAL_SCOPE_MAX_WATCH_AUTHORS } from './social-scope.js';
 
 export const SOCIAL_EVENT_TYPE = 'RUMOR2_SOCIAL_OBSERVED';
 // SOCIAL-4D COMPLETION — the explicitly discriminated WITNESSED observation format.
@@ -136,7 +138,30 @@ export const X_SMOKE_TERMINAL_STATUSES = Object.freeze(['COMPLETE', 'HEADROOM_OV
 export const X_SMOKE_EXTRA_REASONS = Object.freeze(['SMOKE_RUN_RULESET_MISMATCH', 'SMOKE_RUN_PRICING_CHANGED', 'SMOKE_USAGE_RESET', 'SMOKE_RUN_SUPERSEDED']);
 export const X_SMOKE_RUN_ID_RE = /^[A-Za-z0-9._:-]{8,64}$/;
 export const X_STATE_PROVIDERS = Object.freeze(['X_OFFICIAL']);
-export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE]);
+// SOCIAL-4F: the CLOSED operational records of the DISCOVERY CATALOG and the
+// SOCIAL_ADMISSION_SCOPE — operational evidence only (never a source, never a claim,
+// never a logical social count, independence group, packet, or velocity input):
+//   RUMOR2_SOCIAL_CATALOG          — ONE accepted catalog CONTENT (written only when the
+//                                    content changes; identity = venue + content id)
+//   RUMOR2_SOCIAL_CATALOG_VERIFIED — a small freshness record: an unchanged successful refresh
+//                                    re-verified that content at a later acquisition clock
+//   RUMOR2_SOCIAL_SCOPE            — ONE activation occurrence of an admission scope for ONE
+//                                    provider (identity = provider + monotonic revision, so a
+//                                    retry is byte-stable and A->B->A stays three occurrences)
+export const SOCIAL_CATALOG_EVENT_TYPE = 'RUMOR2_SOCIAL_CATALOG';
+export const SOCIAL_CATALOG_VERIFIED_EVENT_TYPE = 'RUMOR2_SOCIAL_CATALOG_VERIFIED';
+export const SOCIAL_SCOPE_EVENT_TYPE = 'RUMOR2_SOCIAL_SCOPE';
+export const SOCIAL_CATALOG_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'venue', 'quote', 'policyVersion', 'contentId', 'source', 'observedTs', 'counts', 'markets', 'acceptedKnownAtTs']);
+export const SOCIAL_CATALOG_VERIFIED_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'venue', 'contentId', 'observedTs', 'knownAtTs']);
+export const SOCIAL_SCOPE_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'provider', 'scopeRevision', 'mode', 'termsFrom', 'catalogContentId', 'catalogObservedTs', 'policyVersion', 'filterId', 'termCount', 'terms', 'aliases', 'watchAuthorIds', 'previousScopeRevision', 'previousFilterId', 'activatedKnownAtTs', 'reason']);
+export const SOCIAL_SCOPE_REASONS = Object.freeze(['INITIAL_ACTIVATION', 'CATALOG_CHANGED', 'MODE_CHANGED', 'STALE_RESTORED_SCOPE_REPLACED', 'POLICY_CHANGED']);
+export const R2CG_RE = /^r2cg-[0-9a-f]{40}$/;
+export const R2CV_RE = /^r2cv-[0-9a-f]{40}$/;
+export const R2SQ_RE = /^r2sq-[0-9a-f]{40}$/;
+export const socialCatalogIdentity = ({ venue, contentId }) => `r2cg-${contentHash(canonicalJson({ venue, contentId }))}`;
+export const socialCatalogVerifiedIdentity = ({ venue, contentId, observedTs }) => `r2cv-${contentHash(canonicalJson({ venue, contentId, observedTs }))}`;
+export const socialScopeIdentity = ({ provider, scopeRevision }) => `r2sq-${contentHash(canonicalJson({ provider, scopeRevision }))}`;
+export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE, SOCIAL_CATALOG_EVENT_TYPE, SOCIAL_CATALOG_VERIFIED_EVENT_TYPE, SOCIAL_SCOPE_EVENT_TYPE]);
 // the SOURCE observation types (legacy + witnessed) — the only types that count as social sources
 export const SOCIAL_OBSERVATION_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE]);
 export const xSmokeIdentity = ({ provider, smokeRunId, status }) => `r2xk-${contentHash(canonicalJson({ provider, smokeRunId, status }))}`;
@@ -934,6 +959,74 @@ export function validateXSmokeEvent(ev) {
   if (ev.sourceEventId !== xSmokeIdentity(ev)) return 'x smoke: sourceEventId is not the derived identity';
   return null;
 }
+// ---- SOCIAL-4F catalog / scope operational events -----------------------------------
+export function socialCatalogEvent({ catalog, acceptedKnownAtTs }) {
+  const markets = catalog.markets.map((m) => { const o = {}; for (const k of SOCIAL_CATALOG_MARKET_KEYS) o[k] = m[k]; return o; });
+  return { type: SOCIAL_CATALOG_EVENT_TYPE, ts: iso(acceptedKnownAtTs), sourceEventId: socialCatalogIdentity({ venue: catalog.venue, contentId: catalog.contentId }), venue: catalog.venue, quote: catalog.quote, policyVersion: catalog.policyVersion, contentId: catalog.contentId, source: catalog.source, observedTs: catalog.observedTs, counts: { ...catalog.counts }, markets, acceptedKnownAtTs };
+}
+export function validateSocialCatalogEvent(ev) {
+  if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'social catalog: not an object';
+  const k = exactKeys(ev, SOCIAL_CATALOG_EVENT_KEYS); if (k) return `social catalog: ${k}`;
+  if (ev.type !== SOCIAL_CATALOG_EVENT_TYPE) return 'social catalog: wrong type';
+  if (!isTs(ev.acceptedKnownAtTs)) return 'social catalog: acceptance clock invalid';
+  if (ev.ts !== iso(ev.acceptedKnownAtTs)) return 'social catalog: ts disagrees with acceptedKnownAtTs';
+  const v = validateCatalogContent({ venue: ev.venue, quote: ev.quote, policyVersion: ev.policyVersion, observedTs: ev.observedTs, contentId: ev.contentId, counts: ev.counts, markets: ev.markets, source: ev.source });
+  if (v.error) return `social catalog: ${v.error}`;
+  if (typeof ev.source !== 'string' || ev.source.length === 0 || ev.source.length > 80) return 'social catalog: source malformed';
+  if (ev.observedTs > ev.acceptedKnownAtTs + 60_000) return 'social catalog: observed after acceptance (a future acquisition clock is never accepted)';
+  if (!R2CG_RE.test(ev.sourceEventId) || ev.sourceEventId !== socialCatalogIdentity({ venue: ev.venue, contentId: ev.contentId })) return 'social catalog: sourceEventId is not the derived catalog identity';
+  return null;
+}
+export function socialCatalogVerifiedEvent({ venue, contentId, observedTs, knownAtTs }) {
+  return { type: SOCIAL_CATALOG_VERIFIED_EVENT_TYPE, ts: iso(knownAtTs), sourceEventId: socialCatalogVerifiedIdentity({ venue, contentId, observedTs }), venue, contentId, observedTs, knownAtTs };
+}
+export function validateSocialCatalogVerifiedEvent(ev) {
+  if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'social catalog verified: not an object';
+  const k = exactKeys(ev, SOCIAL_CATALOG_VERIFIED_EVENT_KEYS); if (k) return `social catalog verified: ${k}`;
+  if (ev.type !== SOCIAL_CATALOG_VERIFIED_EVENT_TYPE) return 'social catalog verified: wrong type';
+  if (ev.venue !== 'kraken') return 'social catalog verified: venue outside the supported set';
+  if (!okHash(ev.contentId)) return 'social catalog verified: contentId malformed';
+  if (!isTs(ev.observedTs) || !isTs(ev.knownAtTs)) return 'social catalog verified: clock invalid';
+  if (ev.observedTs > ev.knownAtTs + 60_000) return 'social catalog verified: observed after verification';
+  if (ev.ts !== iso(ev.knownAtTs)) return 'social catalog verified: ts disagrees with knownAtTs';
+  if (!R2CV_RE.test(ev.sourceEventId) || ev.sourceEventId !== socialCatalogVerifiedIdentity({ venue: ev.venue, contentId: ev.contentId, observedTs: ev.observedTs })) return 'social catalog verified: sourceEventId is not the derived identity';
+  return null;
+}
+// ONE activation occurrence. `scope` is a compiled admission scope; the previous scope (or
+// null) binds the transition; the activation clock is the settle's knowledge clock.
+export function socialScopeEvent({ provider, scopeRevision, scope, catalogObservedTs = null, previous = null, activatedKnownAtTs, reason }) {
+  return {
+    type: SOCIAL_SCOPE_EVENT_TYPE, ts: iso(activatedKnownAtTs), sourceEventId: socialScopeIdentity({ provider, scopeRevision }), provider, scopeRevision,
+    mode: scope.mode, termsFrom: scope.termsFrom, catalogContentId: scope.catalogContentId, catalogObservedTs, policyVersion: scope.policyVersion, filterId: scope.filterId, termCount: scope.termCount,
+    terms: scope.termsFrom === 'STATIC' ? [...scope.terms] : null, aliases: scope.aliases.map((a) => ({ alias: a.alias, base: a.base })), watchAuthorIds: [...scope.watchAuthorIds],
+    previousScopeRevision: previous ? previous.scopeRevision : null, previousFilterId: previous ? previous.filterId : null, activatedKnownAtTs, reason,
+  };
+}
+export function validateSocialScopeEvent(ev) {
+  if (ev === null || typeof ev !== 'object' || Array.isArray(ev)) return 'social scope: not an object';
+  const k = exactKeys(ev, SOCIAL_SCOPE_EVENT_KEYS); if (k) return `social scope: ${k}`;
+  if (ev.type !== SOCIAL_SCOPE_EVENT_TYPE) return 'social scope: wrong type';
+  if (!isStr(ev.provider, 100) || !socialProviderById(ev.provider)) return 'social scope: provider not in the authoritative social registry';
+  if (!okEpoch(ev.scopeRevision)) return 'social scope: scopeRevision invalid';
+  if (!SOCIAL_ADMISSION_MODES.includes(ev.mode)) return 'social scope: unknown mode';
+  if (ev.termsFrom !== (ev.mode === 'CATALOG_BACKED' ? 'CATALOG' : 'STATIC')) return 'social scope: termsFrom disagrees with mode';
+  if (ev.policyVersion !== SOCIAL_ADMISSION_POLICY_VERSION) return 'social scope: unsupported policy version';
+  if (ev.mode === 'CATALOG_BACKED') { if (!okHash(ev.catalogContentId)) return 'social scope: catalog-backed scope needs a catalog content id'; if (!isTs(ev.catalogObservedTs)) return 'social scope: catalogObservedTs invalid'; if (ev.terms !== null) return 'social scope: catalog-backed terms are content-addressed, never listed'; }
+  else { if (ev.catalogContentId !== null || ev.catalogObservedTs !== null) return 'social scope: explicit-static scope carries no catalog'; if (!Array.isArray(ev.terms) || ev.terms.length === 0 || ev.terms.length > SOCIAL_SCOPE_MAX_STATIC_TERMS) return 'social scope: static terms malformed'; for (let i = 0; i < ev.terms.length; i++) { if (typeof ev.terms[i] !== 'string' || !SOCIAL_BASE_RE.test(ev.terms[i])) return 'social scope: static term malformed'; if (i > 0 && !(ev.terms[i - 1] < ev.terms[i])) return 'social scope: static terms not sorted unique'; } if (ev.termCount !== ev.terms.length) return 'social scope: termCount disagrees with terms'; }
+  if (!Number.isSafeInteger(ev.termCount) || ev.termCount < 1) return 'social scope: termCount invalid';
+  if (!Array.isArray(ev.aliases) || ev.aliases.length > SOCIAL_SCOPE_MAX_ALIASES) return 'social scope: aliases malformed';
+  for (let i = 0; i < ev.aliases.length; i++) { const a = ev.aliases[i]; if (!a || typeof a !== 'object' || Object.keys(a).length !== 2 || typeof a.alias !== 'string' || !/^[a-z][a-z0-9]{2,20}$/.test(a.alias) || typeof a.base !== 'string' || !SOCIAL_BASE_RE.test(a.base)) return 'social scope: alias fact malformed'; if (i > 0 && !(ev.aliases[i - 1].alias < a.alias)) return 'social scope: aliases not sorted unique'; }
+  if (!Array.isArray(ev.watchAuthorIds) || ev.watchAuthorIds.length > SOCIAL_SCOPE_MAX_WATCH_AUTHORS || ev.watchAuthorIds.some((w, i) => typeof w !== 'string' || w.length === 0 || w.length > MAX_NATIVE_ID_CHARS || (i > 0 && !(ev.watchAuthorIds[i - 1] < w)))) return 'social scope: watch authors malformed';
+  if (!okHash(ev.filterId) || ev.filterId !== socialAdmissionFilterId({ policyVersion: ev.policyVersion, mode: ev.mode, termsFrom: ev.termsFrom, catalogContentId: ev.catalogContentId, terms: ev.terms ?? [], aliases: ev.aliases, watchAuthorIds: ev.watchAuthorIds })) return 'social scope: filterId does not re-derive from the exact scope';
+  if (ev.scopeRevision === 1) { if (ev.previousScopeRevision !== null || ev.previousFilterId !== null) return 'social scope: the first activation has no predecessor'; }
+  else { if (ev.previousScopeRevision !== ev.scopeRevision - 1 || !okHash(ev.previousFilterId)) return 'social scope: predecessor binding malformed'; }
+  if (!isTs(ev.activatedKnownAtTs)) return 'social scope: activation clock invalid';
+  if (ev.ts !== iso(ev.activatedKnownAtTs)) return 'social scope: ts disagrees with activatedKnownAtTs';
+  if (!SOCIAL_SCOPE_REASONS.includes(ev.reason)) return 'social scope: unknown reason';
+  if (!R2SQ_RE.test(ev.sourceEventId) || ev.sourceEventId !== socialScopeIdentity({ provider: ev.provider, scopeRevision: ev.scopeRevision })) return 'social scope: sourceEventId is not the derived scope identity';
+  return null;
+}
+
 export const emptyXState = () => ({ ruleSetHash: null, coverageEpoch: 0, activatedKnownAtTs: null, ruleTags: [], progressThroughTs: null, meter: null, lastGap: null, events: 0, smoke: { runs: {}, activeRunId: null, latestRunId: null } });
 
 // Replay the Social layer of one journal history (§22-§24). SOURCE-ONLY: this
@@ -980,6 +1073,12 @@ export function replaySocialHistory(events) {
   };
   const x = emptyXState(); // SOCIAL-2B X operational state (source-only)
   const xDigests = new Map();
+  // SOCIAL-4F: catalog content by id, the latest verification per venue, and per-provider scope activations
+  const catalogs = new Map(); // contentId -> RUMOR2_SOCIAL_CATALOG record
+  const catalogVerified = {}; // venue -> { contentId, observedTs, knownAtTs }
+  const scopes = {}; // provider -> latest scope activation record
+  const scopeHistory = {}; // provider -> [activation records in revision order]
+  let catalogEvents = 0; let scopeEvents = 0; let catalogVerifiedEvents = 0;
   const xDup = (e, err) => {
     if (err) return fail(`SOCIAL_HISTORY_INVALID: ${err}`);
     const d = contentHash(canonicalJson(e));
@@ -1114,6 +1213,38 @@ export function replaySocialHistory(events) {
       x.smoke.latestRunId = e.smokeRunId; x.events += 1;
       continue;
     }
+    if (e.type === SOCIAL_CATALOG_EVENT_TYPE) {
+      const r = xDup(e, validateSocialCatalogEvent(e)); if (r === 'dup') continue; if (r) return r;
+      catalogs.set(e.contentId, e); catalogEvents += 1;
+      continue;
+    }
+    if (e.type === SOCIAL_CATALOG_VERIFIED_EVENT_TYPE) {
+      const r = xDup(e, validateSocialCatalogVerifiedEvent(e)); if (r === 'dup') continue; if (r) return r;
+      const c = catalogs.get(e.contentId);
+      if (!c) return fail('SOCIAL_HISTORY_INVALID: catalog verification references unknown catalog content');
+      if (e.observedTs < c.observedTs) return fail('SOCIAL_HISTORY_INVALID: catalog verification observed before the content it verifies');
+      const prev = catalogVerified[e.venue];
+      if (prev && e.observedTs < prev.observedTs) return fail('SOCIAL_HISTORY_INVALID: catalog verification clock regression');
+      catalogVerified[e.venue] = { contentId: e.contentId, observedTs: e.observedTs, knownAtTs: e.knownAtTs }; catalogVerifiedEvents += 1;
+      continue;
+    }
+    if (e.type === SOCIAL_SCOPE_EVENT_TYPE) {
+      const r = xDup(e, validateSocialScopeEvent(e)); if (r === 'dup') continue; if (r) return r;
+      const prev = scopes[e.provider] ?? null;
+      const expected = prev ? prev.scopeRevision + 1 : 1;
+      if (e.scopeRevision !== expected) return fail(`SOCIAL_HISTORY_INVALID: scope revision ${e.scopeRevision} for ${e.provider} is not the next revision ${expected}`);
+      if ((prev ? prev.filterId : null) !== e.previousFilterId) return fail('SOCIAL_HISTORY_INVALID: scope predecessor filter disagrees with history');
+      if (prev && e.activatedKnownAtTs < prev.activatedKnownAtTs) return fail('SOCIAL_HISTORY_INVALID: scope activation clock regression');
+      if (e.mode === 'CATALOG_BACKED') {
+        const c = catalogs.get(e.catalogContentId);
+        if (!c) return fail('SOCIAL_HISTORY_INVALID: scope activation references catalog content that never settled');
+        if (e.catalogObservedTs < c.observedTs) return fail('SOCIAL_HISTORY_INVALID: scope activation observed its catalog before the content was observed');
+        if (e.termCount !== new Set(c.markets.map((m) => m.base)).size) return fail('SOCIAL_HISTORY_INVALID: scope termCount disagrees with its catalog content');
+      }
+      const rec = { provider: e.provider, scopeRevision: e.scopeRevision, mode: e.mode, termsFrom: e.termsFrom, catalogContentId: e.catalogContentId, catalogObservedTs: e.catalogObservedTs, policyVersion: e.policyVersion, filterId: e.filterId, termCount: e.termCount, terms: e.terms, aliases: e.aliases, watchAuthorIds: e.watchAuthorIds, previousScopeRevision: e.previousScopeRevision, previousFilterId: e.previousFilterId, activatedKnownAtTs: e.activatedKnownAtTs, reason: e.reason };
+      scopes[e.provider] = rec; if (!scopeHistory[e.provider]) scopeHistory[e.provider] = []; scopeHistory[e.provider].push(rec); scopeEvents += 1;
+      continue;
+    }
     // any other type belongs to the frozen core's own replay/validator
   }
   // SOCIAL-4D CLOSEOUT diagnostic: targets whose retained SOURCE declarations disagree (two
@@ -1126,5 +1257,5 @@ export function replaySocialHistory(events) {
       if (ofRole.length > 1 && ofRole.some((a) => !sameDeclaration(a.witness, ofRole[0].witness))) annotationConflicts.push({ targetEventId, clockRole, annotationIds: ofRole.map((a) => a.sourceEventId).sort() });
     }
   }
-  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingRecords, pendingByTarget, pendingUnlinked, settledOrder, recordVersions, annotationConflicts, annotated, pending };
+  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingRecords, pendingByTarget, pendingUnlinked, settledOrder, recordVersions, annotationConflicts, annotated, pending, catalogs, catalogVerified, scopes, scopeHistory, catalogEvents, catalogVerifiedEvents, scopeEvents };
 }

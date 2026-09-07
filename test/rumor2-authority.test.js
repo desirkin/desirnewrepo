@@ -176,6 +176,34 @@ test('R2A-SOCIAL-7 (SOCIAL-4E). the Meta / TikTok / Farcaster-access foundations
   assert.equal(socialProviderById('META_PUBLIC').durable, false); assert.equal(socialProviderById('TIKTOK_PUBLIC').durable, false); assert.equal(socialProviderById('FARCASTER_OFFICIAL').durable, false);
 });
 
+test('R2A-SOCIAL-8 (SOCIAL-4F). the discovery-catalog / admission-scope / watch-plan modules are EXPLICIT allowlists: the survey tier is consumed only through the composition seam, the rumor tier never imports survey/tape/cost/ledger, no Social runtime reads config.universe, and no research module calls out or carries authority', () => {
+  const MODULES = ['rumor2/social-scope.js', 'rumor2/social-catalog.js', 'rumor2/social-watch-plan.js'];
+  for (const f of MODULES) {
+    assert.ok(tracked.includes(f), `${f} is tracked (Git-index-aware)`);
+    assert.ok(SOCIAL_FILE_RE.test(f), `${f} audited in the social tier, never as frozen core`);
+    const src = read(f);
+    for (const forbidden of ['fetch(', 'WebSocket', 'EventSource', 'setTimeout', 'setInterval', 'node:http', 'node:https', 'node:net', 'node:fs', 'child_process', 'Date.now', 'Date.parse', 'randomUUID', 'Math.random', 'process.env']) assert.ok(!src.includes(forbidden), `${f}: ${forbidden}`);
+    assert.ok(!/from '\.\.\//.test(src), `${f} imports nothing outside rumor2`);
+    assert.ok(!/ledger|cost\/|tape\/|strike|exec|socrates|attention|hyped|stalk|nominat/i.test(src.replace(/\/\/.*$/gm, '')), `${f} touches no authority`);
+    assert.ok(!/config\.universe/.test(code(f)), `${f} never reads the legacy permission set`);
+  }
+  // the ONLY files in the rumor tier that may name the catalog / scope contracts
+  const CATALOG_ALLOWLIST = ['rumor2/social-catalog.js', 'rumor2/social-scope.js', 'rumor2/social-watch-plan.js', 'rumor2/social-settle.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/collector.js'];
+  const mentions = rumor2Files.filter((f) => /social-catalog|social-scope|social-watch-plan|compileAdmissionScope|admitSocialText|researchCatalogSource|scopeSource|watchScope/.test(code(f)));
+  assert.deepEqual(mentions.sort(), [...CATALOG_ALLOWLIST].sort(), `the research scope may only be wired in ${CATALOG_ALLOWLIST.join(', ')}`);
+  // survey/catalog.js: imported by the wide eye and tests only; the rumor tier NEVER imports survey/, tape/, cost/, ledger/, state/, controls/
+  const consumers = tracked.filter((f) => !f.startsWith('test/') && /from\s+'(\.\/|[^']*survey\/)catalog\.js'/.test(read(f)));
+  assert.deepEqual(consumers, ['survey/wideeye.js']);
+  for (const f of rumor2Files) assert.ok(!/from\s+'[^']*(survey|tape|cost|ledger|state|controls|governance|rumint)\//.test(read(f)), `${f} imports no survey/trading/control tier`);
+  // the Social runtimes no longer derive their outer boundary from config.universe; the official claim registry is still built from it (a separate, retained scope)
+  assert.ok(!/config\.universe/.test(code('rumor2/social-runtime.js')) && !/config\.universe/.test(code('rumor2/x-runtime.js')), 'Social runtimes never read config.universe');
+  assert.match(code('rumor2/collector.js'), /buildCoinRegistry\(config\.universe\)/, 'the official claim registry keeps its bounded universe');
+  assert.ok(!/buildSocialFilter\(\{ terms: \[\.\.\.registry/.test(code('rumor2/collector.js')), 'the Social filter is no longer derived from the official registry');
+  // the composition root wires the read-only seam only
+  assert.match(read('fly.js'), /researchCatalogSource: wideEye \?/); assert.ok(!/startWideEye\(\)\s*;?\s*$/m.test(read('rumor2/collector.js')), 'the collector never starts the wide eye');
+  for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js']) assert.ok(!/startWideEye|wideeye\.js|survey\//.test(code(f)), `${f} has no survey wiring`);
+});
+
 test('R2A-82+83. SOCRATES-0 and GHOST-1 remain absent', () => {
   // no socrates caller anywhere in the runtime (the contract scans in the
   // socrates suites stay authoritative; this re-pins the rumor layer)

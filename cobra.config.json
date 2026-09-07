@@ -80,5 +80,11 @@
       "maker": 0.004,
       "taker": 0.006
     }
+  },
+  "socialResearch": {
+    "catalog": { "source": "WIDEEYE_ASSET_PAIRS", "refreshSec": 300, "maxAgeSec": 900, "maxMarkets": 5000 },
+    "localAdmission": { "mode": "CATALOG_BACKED", "policyVersion": 1, "staticTerms": [] },
+    "xWatch": { "mode": "NOT_CONFIGURED", "tickers": [], "maxAssets": 25 },
+    "watchPlan": { "maxXAssets": 25 }
   }
 }

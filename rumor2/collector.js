@@ -64,6 +64,8 @@ import { buildSocialFilter } from './social.js';
 // SOCIAL-2B: the X filtered-stream ear — same writer, same epoch, same journal;
 // default cost ZERO (explicit gate + bearer + hard budget + usage preflight)
 import { createXRuntime, xConfigFromEnv } from './x-runtime.js';
+import { parseSocialResearchConfig, createResearchScopeSource } from './social-catalog.js';
+import { resolveXWatchScope, buildWatchPlan } from './social-watch-plan.js';
 
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -119,6 +121,11 @@ export function startRumor2({
   socialXFetchImpl = null, // injected HTTP for tests; null => global fetch, pinned to the approved X API host
   socialXRuntime = null,
   socialXOptions = {},
+  // SOCIAL-4F: the DETACHED read-only survey snapshot accessor, injected from application
+  // composition (fly.js retains the wide-eye handle): { snapshot(), notices(), deepObservation() }.
+  // Social receives no mutable survey map, no posture callback, and no authority to start the
+  // wide eye. Absent => CATALOG_UNAVAILABLE — never an invented universe, never the five seeds.
+  researchCatalogSource = null,
 } = {}) {
   if (!enabled) {
     // dark and silent: zero network, zero timers, zero authority
@@ -262,23 +269,52 @@ export function startRumor2({
     }
   };
 
-  const registry = buildCoinRegistry(config.universe);
-  // SOCIAL-2A: the Social universe filter is DERIVED from the configured coin
-  // universe (tickers + approved aliases) — bounded, observable, never all-network
+  // The OFFICIAL claim registry (rumor2/truth.js) stays what it was: the bounded resolver's
+  // universe for official-source claims. It is NO LONGER the outer boundary of Social research.
+  const registry = buildCoinRegistry(config.universe); // LEGACY_PERMISSION_SET-derived official registry — not the discovery catalog
+  // SOCIAL-4F: the Social research scope is SEPARATE from the official registry. Local admission
+  // is catalog-backed (the injected wide-eye snapshot) or an explicitly configured, labelled
+  // static mode; paid X targets come only from the explicit operator watch selection verified
+  // against the accepted catalog. Neither is derived from config.universe.
+  const researchCfg = parseSocialResearchConfig(config);
+  const researchScope = createResearchScopeSource({ research: researchCfg.research, configReason: researchCfg.ok ? null : researchCfg.reason, source: researchCatalogSource, now });
   const social = socialBlueskyEnabled
     ? (socialRuntime ?? createSocialRuntime({
-        filter: buildSocialFilter({ terms: [...registry.tickers, ...registry.aliases.keys()] }),
+        scopeSource: researchScope,
         now, log, mode: socialMode, fixtures: socialFixtures, socketFactory: socialSocketFactory, ...socialOptions,
       }))
     : null;
+  const xWatchScope = () => { const c = researchScope.candidate({ knownAtTs: Math.floor(now()) }); return resolveXWatchScope({ research: researchCfg.research, catalog: c.catalog ?? null }); };
   const socialX = socialXEnabled
     ? (socialXRuntime ?? createXRuntime({
         config: socialXConfig ?? xConfigFromEnv(),
-        filter: buildSocialFilter({ terms: [...registry.tickers, ...registry.aliases.keys()] }),
-        universe: [...registry.tickers], aliases: [...registry.aliases.keys()],
+        watchScope: xWatchScope,
         now, log, fetchImpl: socialXFetchImpl, ...socialXOptions,
       }))
     : null;
+  // SOCIAL-4F status: the four scopes stated separately — never one number, never a full-universe claim
+  const socialResearchStatus = (t) => {
+    const rs = researchScope.status(t);
+    const notices = researchScope.notices();
+    const plan = rs.catalog && researchScope.candidate({ knownAtTs: t }).catalog ? buildWatchPlan({ catalog: researchScope.candidate({ knownAtTs: t }).catalog, notices, maxAssets: researchCfg.research.watchPlan.maxXAssets, nowMs: t }) : null;
+    const xw = xWatchScope();
+    let deep = null;
+    try { deep = typeof researchCatalogSource?.deepObservation === 'function' ? researchCatalogSource.deepObservation() : null; } catch { deep = null; }
+    return {
+      configPresent: researchCfg.present, configReason: researchCfg.ok ? null : researchCfg.reason,
+      discovery: { mode: rs.mode, state: rs.state, reason: rs.reason, catalog: rs.catalog, snapshot: rs.snapshot, source: researchCatalogSource ? 'INJECTED_WIDEEYE_SNAPSHOT' : 'NONE' },
+      localAdmission: social ? social.status().scope : { mode: 'DISABLED', active: null, coverage: { state: 'PROVIDER_DISABLED', reason: 'RUMOR2_SOCIAL_BLUESKY_ENABLED is off' } },
+      paidWatch: {
+        proposed: plan?.plan ? { status: plan.plan.status, planId: plan.plan.planId, catalogContentId: plan.plan.catalogContentId, selected: plan.plan.selected.map((s) => s.base), deferredCount: plan.plan.deferred.length, noResearchSignalYet: plan.plan.resourceCoverage.noResearchSignalYet, cap: plan.plan.resourceCoverage.cap, createdTs: plan.plan.createdTs } : { status: 'UNAVAILABLE', reason: plan?.error ?? rs.reason ?? 'no accepted catalog' },
+        configured: { mode: researchCfg.research.xWatch.mode, tickers: researchCfg.research.xWatch.tickers, maxAssets: researchCfg.research.xWatch.maxAssets },
+        verified: { ok: xw.ok, reason: xw.reason ?? null, tickers: xw.tickers, rejected: xw.rejected ?? [], scopeId: xw.scopeId ?? null },
+        active: socialX ? { state: socialX.status().state, ruleSetHash: socialX.status().ruleSetHash, watch: socialX.status().watch } : { state: 'DISABLED', ruleSetHash: null, watch: null },
+      },
+      deepObservation: deep ? { count: deep.count ?? null, date: deep.date ?? null, source: deep.source ?? null, label: 'DEEP_OBSERVATION_SET (capped tape/book subscriptions) — not the discovery count' } : { count: null, label: 'DEEP_OBSERVATION_SET — not reported at this boundary' },
+      legacyPermission: { count: Array.isArray(config.universe) ? config.universe.length : null, label: 'LEGACY_PERMISSION_SET (config.universe: cost/ledger/official claim registry) — not the discovery count' },
+      historicalCoverage: 'SCOPE_KNOWN_ONLY_FROM_DURABLE_SCOPE_RECORDS; earlier history is LEGACY_SCOPE_UNKNOWN — not-watched is never zero mentions',
+    };
+  };
   // every operational social ear the collector drives under ONE writer authority
   const socialRuntimes = [social, socialX].filter(Boolean);
   const stopSocial = (reason) => { for (const rt of socialRuntimes) rt.stop(reason); };
@@ -1225,6 +1261,8 @@ export function startRumor2({
       social: social ? social.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_BLUESKY_ENABLED)' },
       // SOCIAL-2B: the X ear (source-only, zero authority, default cost zero)
       socialX: socialX ? socialX.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_X_ENABLED)', authority: 'NONE' },
+      // SOCIAL-4F: discovery / local admission / paid watch / deep observation / legacy permission — separately
+      socialResearch: socialResearchStatus(t),
     };
     try {
       atomicWriteJson(path.join(dir(), 'status.json'), status);
