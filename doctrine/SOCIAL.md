@@ -2114,6 +2114,73 @@ reported boundaries; it is not proof that no future defect exists.
 
 ---
 
+### 5V. SOCIAL-5B — HISTORY / OUTCOME / EVALUATION FOUNDATION (offline, research only)
+
+SOCIAL-5B delivers ONE usable offline research pipeline over what ALREADY exists — the durable v2 dossiers, episodes,
+entrances, propagation families, coordination features, prior-window baselines, shadow samples and source profiles of
+§5R–§5U are reused, never rebuilt — so that the questions "what Social research history exists, which recorded
+episodes have usable time-aligned market history, what did their candle excursions look like, which rows compare
+chronologically without known leakage, and which exact gaps still block stage calibration" are answered from
+artifacts rather than from prose. It completes the history / outcome / evaluation FOUNDATION only: **stage
+calibration is NOT performed**, the live stage stays `UNKNOWN / calibrated:false`, and no classifier fitting,
+threshold promotion, source ranking, trade simulation, Socrates runtime, Market Lab, Judge, Watch or execution work
+exists in it.
+
+**Bundled prerequisite repaired (§4 of the ticket, `social-market-outcome-adapter-2`).** `childhoodOutcomeRecord`
+returned the validator's INTERNAL record (carrying a derived `recordId`) while every consumer re-validates the
+injected record against the strict RAW key set, so a populated Childhood archive was rejected as
+`undeclared key 'recordId'` and looked like unavailable source outcome history. The mapper now returns a validated,
+immutable RAW closed DTO whose keys are exactly `OUTCOME_RECORD_KEYS`; identity is derived at the consumer boundary.
+The strict raw validator is unchanged (no whitelisted key, no trusted supplied id), inputs are never mutated, the
+identity recipe and every known-at / fidelity / alignment law are preserved (`test/social-5b-outcome-seam.test.js`,
+plus the collector-seam regression in `test/social-5b-durable.test.js`).
+
+**The pipeline (`bin/social-research.js`, `research/`, `persistence/social-research-export.js`; operator guide
+`docs/SOCIAL-RESEARCH-CLI.md`).** `snapshot` reads one REPEATABLE READ, READ ONLY journal prefix through the existing
+Db boundary (server-proven, recorded in the manifest; no fence, lock, append, checkpoint, migration or schema
+creation), verifies the contiguous sequence `1..upperSeq`, digests EVERY original event, replays dossier lineage and
+shadow identity under the EXISTING version-aware validators, counts legacy dossiers without modernizing them, and
+projects ONLY allowlisted structured leaves (a 319-leaf catalogue with recorded path, unit, null meaning and
+support-window rule, plus 12 bounded arrays) — never raw provider text, post bodies, handles, packets or free-text
+diagnostics. `build` freezes the feature rows FIRST (the first durable v2 dossier of each episode across all
+entrances and states, `decisionKnownAtTs <= as-of`, later projections counted `AFTER_AS_OF` and excluded before
+selection; shadow rows as recorded, a separate cohort), inspects the explicit Childhood archive strictly (manifest
+version, `sourceChecksumsSha256_16` against exact bytes, full SHA256 retained, corrupt input distinguished from
+NO_DATA), and only then labels rows under the separate candle recipe (`social-research-candle-labels-1`: next-minute
+anchor, reference close of the bar closing at the anchor, dense 1m coverage per horizon, MFE / MAE and 60m / 240m
+LOG_RETURN_PERCENT, `outcomeKnownAtTs = max(horizon end, archive creation, series retrieval)`, as-of masking of every
+value including the reference price). `evaluate` groups rows transitively by episode identity and concrete
+provenance refs, embargoes whole groups across the explicit split, marks truncated / undocumented-support groups
+DESCRIPTIVE_ONLY, and reports counts, quartiles and as-of learnability per cohort / split / horizon — retrospective
+description only, no fitted model.
+
+**Laws carried by every artifact.** Closed, versioned schemas revalidated on read; semantic ids (recipe + original
+identity) so that appending later journal events never changes an earlier feature row's bytes or id; full input
+hashes, code identity (source-tree digest, git commit and a dirty flag), fixed as-of / split, census and exclusion
+counts that reconcile to the input census, output checksums, named resource limits (no quiet truncation), a new
+output directory outside the git tree and every input, exclusive reservation, manifest published last. Exit 0 means
+"completed honestly" — missing or insufficient history is a coverage report, never an invented result.
+
+**The read-only exception to the composition-root law.** `test/rumor2-authority.test.js` (R2A-76+77, R2A-SOCIAL-9)
+now admits, BY FILENAME and by permitted pure export, `research/contracts.js`, `research/features.js`,
+`research/snapshot.js` and `research/pipeline.js` as importers of `rumor2/truth.js`, the dossier / shadow validators
+and replay helpers and `SOCIAL_OBSERVATION_TYPES`; `test/social-5b-fences.test.js` proves in both directions that
+the offline readers import no collector, provider runtime, strainer, execution path, startup, live Childhood bridge
+or archive builder, and that no operational module imports the dataset / evaluator. fly.js remains the ONLY live
+collector composition root. This is a precise offline exception, not a weakening of the authority fence.
+
+**Explicitly not claimed / still open.** Real history was NOT evaluated in the implementation session (no real
+snapshot or archive is committed; fixtures are visibly `origin: FIXTURE`). Stage calibration remains blocked by:
+no independently defined stage labels; no authorized claim-association seam; source-profile history not recorded in
+the dossier; unknown effective sample support (a dependency group is not independence); and, on any concrete
+dataset, insufficient temporal coverage or no as-of-trainable labels where an archive was acquired after the split.
+The `serpent-evidence-1` packet still has no slot for derived source-behavior context or v1-unrepresentable entrances
+(no `serpent-evidence-2`). The five legacy `config.universe` assets remain only the current frozen permission
+boundary — never a dataset filter or research preference (tests use synthetic non-legacy symbols). The delayed
+candle anchor is label-side only and never an entry fill or performance claim.
+
+---
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns

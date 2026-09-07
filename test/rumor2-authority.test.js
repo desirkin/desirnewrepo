@@ -42,6 +42,16 @@ assert.ok(rumor2Files.length >= 8, 'the rumor2 layer is actually scanned');
 const SOCIAL_FILE_RE = /(^|\/)social[a-z0-9-]*\.js$|(^|\/)x-[a-z0-9-]*\.js$|\/providers\/(bluesky|farcaster|x)-official\.js$/; // SOCIAL-2B: the X ear is audited in the social tier
 const socialFiles = rumor2Files.filter((f) => SOCIAL_FILE_RE.test(f));
 const frozenCoreFiles = rumor2Files.filter((f) => !SOCIAL_FILE_RE.test(f));
+// SOCIAL-5B — the OFFLINE research pipeline (bin/social-research.js + research/ + the narrow read-only journal reader):
+// the exact read-only exception to the single-composition-root law, enumerated by filename and permitted pure exports
+const OFFLINE_RESEARCH_FILES = ['bin/social-research.js', 'persistence/social-research-export.js', 'research/archive.js', 'research/artifacts.js', 'research/contracts.js', 'research/evaluation.js', 'research/features.js', 'research/outcomes.js', 'research/pipeline.js', 'research/snapshot.js'];
+const OFFLINE_RESEARCH_RUMOR2_IMPORTS = {
+  'research/contracts.js': { 'truth.js': ['canonicalJson'] },
+  'research/features.js': { 'truth.js': ['canonicalJson'] },
+  'research/snapshot.js': { 'truth.js': ['canonicalJson'], 'social-research-dossier.js': ['RESEARCH_DOSSIER_EVENT_TYPE', 'RESEARCH_DOSSIER_SCHEMA_VERSION', 'RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION', 'replayResearchDossierEvent', 'isLegacyResearchDossierEvent'], 'social-research-shadow.js': ['RESEARCH_SHADOW_EVENT_TYPE', 'RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION', 'replayResearchShadowEvent', 'emptyShadowState'], 'social-settle.js': ['SOCIAL_OBSERVATION_TYPES'] },
+  'research/pipeline.js': { 'truth.js': ['canonicalJson'], 'social-research-dossier.js': ['RESEARCH_DOSSIER_SCHEMA_VERSION', 'RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION'], 'social-research-shadow.js': ['RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION'] },
+};
+const OFFLINE_RESEARCH_RUMOR2_IMPORTERS = Object.keys(OFFLINE_RESEARCH_RUMOR2_IMPORTS);
 assert.ok(socialFiles.length >= 6, 'the social surface is actually scanned');
 assert.ok(frozenCoreFiles.length >= 8, 'the frozen non-social core is actually scanned');
 
@@ -88,7 +98,16 @@ test('R2A-76+77. STRIKE-capable and order-path modules never read RUMOR-2', () =
   for (const f of orderPath) assert.ok(!read(f).toLowerCase().includes('rumor2'), `${f} cannot read RUMOR-2 fields`);
   // only the composition root wires the collector; only persistence stores it
   const importers = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && /from\s+'[^']*rumor2/.test(read(f)));
-  assert.deepEqual(importers.sort(), ['fly.js'], 'exactly one wiring point — the composition root');
+  // SOCIAL-5B: the OFFLINE research readers are the only other importers — enumerated by file, each limited to the pure
+  // validators / replay helpers / constants it names, never a collector, provider runtime, strainer or startup path.
+  // fly.js stays the ONLY live collector composition root; this is a read-only exception, not a weakened fence.
+  assert.deepEqual(importers.sort(), ['fly.js', ...OFFLINE_RESEARCH_RUMOR2_IMPORTERS].sort(), 'exactly one LIVE wiring point (the composition root) plus the enumerated offline research readers');
+  for (const [f, allowed] of Object.entries(OFFLINE_RESEARCH_RUMOR2_IMPORTS)) {
+    const specs = [...read(f).matchAll(/import\s+\{([^}]*)\}\s+from\s+'\.\.\/rumor2\/([a-z0-9-]+\.js)'/g)].map((m) => [m[2], m[1].split(',').map((x) => x.trim().split(/\s+as\s+/)[0]).filter(Boolean)]);
+    assert.ok(specs.length > 0, `${f}: imports rumor2 through named specifiers only`);
+    for (const [mod, names] of specs) { assert.ok(allowed[mod], `${f}: rumor2/${mod} is not an allowed offline import`); for (const n of names) assert.ok(allowed[mod].includes(n), `${f}: ${n} from rumor2/${mod} is not a permitted pure export`); }
+    assert.ok(!/from\s+'[^']*rumor2\/(collector|x-runtime|social-research-runtime|social-research-strainer|providers\/)/.test(read(f)), `${f}: never imports a runtime / collector / provider`);
+  }
 });
 
 test('R2A-78 (frozen core). no network/model call exists in the frozen core outside the official feed clients', () => {
@@ -235,7 +254,10 @@ test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT all
   const mentions = rumor2Files.filter((f) => MODULES.includes(f) || /social-research-|createResearchStrainer|RESEARCH_DOSSIER_EVENT_TYPE|replayResearchDossierEvent|RESEARCH_SHADOW_EVENT_TYPE|replayResearchShadowEvent/.test(code(f)));
   assert.deepEqual(mentions.sort(), [...RESEARCH_ALLOWLIST].sort(), `the research strainer may only be wired in ${RESEARCH_ALLOWLIST.join(', ')}`);
   const outside = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && /social-research|researchStrainer|RUMOR2_RESEARCH_DOSSIER/.test(read(f)));
-  assert.deepEqual(outside, ['fly.js'], 'exactly the composition root enables the strainer (no tape / ledger / cost / controls / ui reader)');
+  // SOCIAL-5B: the offline research family readers are enumerated by file; none enables, wires or starts the strainer
+  assert.ok(outside.includes('fly.js'), 'the composition root enables the strainer');
+  for (const f of outside) assert.ok(f === 'fly.js' || OFFLINE_RESEARCH_FILES.includes(f), `${f}: only the composition root and the enumerated offline research readers may name the research family (no tape / ledger / cost / controls / ui reader)`);
+  for (const f of OFFLINE_RESEARCH_FILES) assert.ok(!/researchStrainer|createResearchStrainer|startRumor2|startPersistence|tickOnce/.test(code(f)), `${f}: an offline reader never enables or drives the strainer`);
   // SOCIAL-6: the source-behavior layer is derived (no new durable family), scores are forbidden by name, the ONLY historical-outcome seam is the
   // read-only Childhood bridge injected by fly.js (Social never imports memory/ or childhood/), and no claim-association is minted anywhere
   for (const f of ['rumor2/social-research-profile.js', 'rumor2/social-research-outcome.js', 'rumor2/social-research-composite.js']) {

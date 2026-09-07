@@ -11,7 +11,7 @@ import { compileAdmissionScope } from '../rumor2/social-scope.js';
 import { normalizeKrakenAssetPairs } from '../survey/catalog.js';
 import { SOCIAL_PROVIDERS } from '../rumor2/social-registry.js';
 import { createSourceProfileIndex, retentionCapability, validateSourceAssociation, forbiddenProfileField, SOURCE_RETENTION_STATES, SOURCE_PROFILE_FORBIDDEN_FIELD_RE, SOURCE_PROFILE_LEGACY_AGGREGATE_PROVIDER } from '../rumor2/social-research-profile.js';
-import { validateHistoricalOutcomeRecord, marketOutcomeView, leadLagOrdering, childhoodOutcomeRecord, OUTCOME_HORIZONS_MIN, OUTCOME_FIDELITIES, PROVIDER_DELIVERY_UNCERTAINTY_MS, WIDE_EYE_SWEEP_UNCERTAINTY_MS } from '../rumor2/social-research-outcome.js';
+import { validateHistoricalOutcomeRecord, marketOutcomeView, leadLagOrdering, childhoodOutcomeRecord, OUTCOME_RECORD_KEYS, OUTCOME_HORIZONS_MIN, OUTCOME_FIDELITIES, PROVIDER_DELIVERY_UNCERTAINTY_MS, WIDE_EYE_SWEEP_UNCERTAINTY_MS } from '../rumor2/social-research-outcome.js';
 import { compositeResearchView, COMPOSITE_MAX_PROFILES } from '../rumor2/social-research-composite.js';
 import { HORIZONS_MIN } from '../childhood/labeler.js';
 import { createResearchStrainer } from '../rumor2/social-research-runtime.js';
@@ -131,7 +131,7 @@ test('S6-M1..M6 MARKET OUTCOME / LEAD. lead uses Serpent known-at (not the sourc
   const hist = scopeHistory(['LINK']); const b = bootRuntime({ nowMs: T0 + 5000, arr: [...hist] }); b.rt.hydrate(hist); assert.equal(b.rt.status().sourceBehavior.outcomeSeam, 'NOT_CONNECTED');
   // the childhood mapper: a real-shaped observation/outcome/manifest triple maps into the closed record; a foreign shape maps to null
   const mapped = childhoodOutcomeRecord({ id: 'obs-1', symbol: 'LINK', ts: Math.floor((T0 + 60_000) / 1000), track: '1m' }, { id: 'obs-1', mfe: outcomeRecord().mfe, mae: outcomeRecord().mae, ret1hPct: 2.1, ret4hPct: null, outcomeTags: ['RUN'] }, { archiveCreatedTs: new Date(T0 + 86_400_000).toISOString() });
-  assert.equal(mapped.recordId, rec.record.recordId); assert.equal(childhoodOutcomeRecord({ id: 'x' }, { id: 'y' }, {}), null);
+  assert.deepEqual(Object.keys(mapped).sort(), [...OUTCOME_RECORD_KEYS].sort(), 'SOCIAL-5B §4: the mapper returns the RAW closed DTO; identity is derived at the consumer boundary'); assert.equal(validateHistoricalOutcomeRecord(mapped).record.recordId, rec.record.recordId); assert.equal(childhoodOutcomeRecord({ id: 'x' }, { id: 'y' }, {}), null);
   // S6-M6: through the runtime, a famous / winning source and an obscure one are profiled by the same recipe — no selection field exists
   const fam = obsEvent({ id: 'm1', author: 'did:plc:famous', text: '$LINK winners only', nowMs: T0 + 1000 }); const obscure = obsEvent({ id: 'm2', author: 'did:plc:nobody', text: '$LINK first post ever', nowMs: T0 + 1100 }); b.arr.push(fam, obscure); b.rt.ingest([fam, obscure]);
   const pf = b.rt.sourceProfile(fam.socialAuthorId, { asOfTs: T0 + 2000 }); const po = b.rt.sourceProfile(obscure.socialAuthorId, { asOfTs: T0 + 2000 });

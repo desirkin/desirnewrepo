@@ -16,7 +16,7 @@
 // quantisation, the settlement latency of the observation itself) the answer is ORDERING_UNRESOLVED.
 import { canonicalJson, contentHash } from './truth.js';
 
-export const OUTCOME_ADAPTER_VERSION = 'social-market-outcome-adapter-1';
+export const OUTCOME_ADAPTER_VERSION = 'social-market-outcome-adapter-2'; // -2: the Childhood mapper returns the RAW closed DTO (exactly OUTCOME_RECORD_KEYS); identity is derived at the consumer boundary
 export const OUTCOME_FIDELITIES = Object.freeze(['CANDLE_ONLY', 'TRADE_LEVEL', 'BOOK_EVENT', 'CENSORED', 'UNAVAILABLE']);
 // the repository's EXISTING declared historical horizons (childhood/labeler.js HORIZONS_MIN) — mirrored, not extended
 export const OUTCOME_HORIZONS_MIN = Object.freeze([1, 3, 5, 15, 30, 60, 240]);
@@ -93,11 +93,16 @@ export function leadLagOrdering({ provider, sourceKnownAtTs, sourceRetrievedTs =
 
 // Map ONE Childhood observation + its outcome (memory/childhood.js read bridge; injected by the composition root)
 // into the closed record — pure, no file access here; the archive creation clock is the record's known-at floor.
+// MAPPER CONTRACT (SOCIAL-5B §4): the result is a validated, deep-frozen RAW record whose keys are EXACTLY
+// OUTCOME_RECORD_KEYS — never the validator's internal normalized record. Every consumer re-validates the injected
+// record against the strict raw key set and derives `recordId` itself (validateHistoricalOutcomeRecord), so a
+// derived identity leaking out of the mapper would make a lawful populated archive look like unavailable history.
+// The inputs are never mutated; an invalid observation / outcome / manifest maps to null, never to a guess.
 export function childhoodOutcomeRecord(observation, outcome, manifest) {
   if (!isPlainObject(observation) || !isPlainObject(outcome) || !isPlainObject(manifest)) return null;
   const archiveKnownAtTs = typeof manifest.archiveCreatedTs === 'string' ? new Date(manifest.archiveCreatedTs).getTime() : null;
   if (!isTs(archiveKnownAtTs) || outcome.id !== observation.id || typeof observation.track !== 'string' || !/^\d+m$/.test(observation.track) || !Number.isSafeInteger(observation.ts)) return null;
   const mfe = {}; const mae = {}; for (const h of OUTCOME_HORIZONS_MIN) { mfe[`${h}m`] = outcome.mfe?.[`${h}m`] ?? null; mae[`${h}m`] = outcome.mae?.[`${h}m`] ?? null; }
   const rec = { source: 'CHILDHOOD_ARCHIVE', observationId: String(observation.id), symbol: observation.symbol, observationTs: observation.ts * 1000, track: observation.track, intervalSec: Number(observation.track.slice(0, -1)) * 60, fidelity: 'CANDLE_ONLY', mfe, mae, ret1hPct: outcome.ret1hPct ?? null, ret4hPct: outcome.ret4hPct ?? null, outcomeTags: Array.isArray(outcome.outcomeTags) ? outcome.outcomeTags.slice(0, 8) : [], archiveKnownAtTs };
-  const v = validateHistoricalOutcomeRecord(rec); return v.ok ? v.record : null;
+  const v = validateHistoricalOutcomeRecord(rec); return v.ok ? deepFreeze(rec) : null;
 }
