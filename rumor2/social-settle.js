@@ -373,7 +373,35 @@ const socialPendingShapeError = (ev) => {
 };
 // the relation between ONE pending record and ONE asserted target; `annotations` are the target's
 // own retained interpretation annotations (needed only for DECLARATION_CONFLICT)
-export function socialPendingLinkError(ev, target, annotations = []) {
+// ---- SOCIAL-4D EQUAL-CLOCK CAUSAL CONTEXT: the precedence contract -----------------------------
+// Whether an annotation was AVAILABLE to a pending record is decided by knowledge time first and,
+// for the same recorded millisecond, by the settled journal order — never by array presentation
+// order, ids/hashes, source or provider clocks, or an invented extra millisecond:
+//   true   — the annotation's knownAtTs is strictly earlier, or equal AND it settled before the record
+//   false  — strictly later, or equal AND it settled after the record
+//   null   — equal millisecond with no settled order available (a standalone array view)
+// A null precedence is admitted NEITHER as the basis of a conflict (a later annotation cannot
+// retrospectively supply the only missing basis) NOR as its invalidator (a conflict established by
+// the accepted causal prefix is never retroactively invalidated). `settledOrder` is the canonical
+// journal order (sourceEventId -> position) that replaySocialHistory exports; the view passes it
+// through so the canonical full-history path and replay judge the SAME context.
+export function socialCausalPrecedes(settledOrder = null) {
+  const pos = (id) => (settledOrder instanceof Map ? settledOrder.get(id) : Array.isArray(settledOrder) ? settledOrder.indexOf(id) : undefined);
+  return (a, ev) => {
+    if (!Number.isSafeInteger(a?.knownAtTs) || !Number.isSafeInteger(ev?.knownAtTs)) return false;
+    if (a.knownAtTs < ev.knownAtTs) return true;
+    if (a.knownAtTs > ev.knownAtTs) return false;
+    const pa = pos(a.sourceEventId); const pe = pos(ev.sourceEventId);
+    if (Number.isSafeInteger(pa) && pa >= 0 && Number.isSafeInteger(pe) && pe >= 0) return pa < pe;
+    return null;
+  };
+}
+// the precedence a CAUSAL PREFIX reader may assert: every annotation it holds settled before the
+// record it is checking, so knowledge time alone (equality inclusive) decides
+export const socialPrefixPrecedes = (a, ev) => Number.isSafeInteger(a?.knownAtTs) && Number.isSafeInteger(ev?.knownAtTs) && a.knownAtTs <= ev.knownAtTs;
+export const SOCIAL_CONTEXT_ORDER_REQUIRED = 'a declaration known at the same millisecond has no settled order in this context — the canonical journal order (settledOrder from replaySocialHistory) is required to establish the basis';
+
+export function socialPendingLinkError(ev, target, annotations = [], { precedes = socialCausalPrecedes(null) } = {}) {
   if (!target || typeof target !== 'object') return 'target not durable (unknown, unsettled, or later than this record)';
   if (!SOCIAL_OBSERVATION_TYPES.includes(target.type)) return 'target is not a social observation';
   if (target.provider !== ev.provider) return 'cross-provider target';
@@ -395,8 +423,11 @@ export function socialPendingLinkError(ev, target, annotations = []) {
     // known later can neither justify an earlier conflict nor retroactively invalidate one; the
     // millisecond clock contract admits equality. Integrity validation of those later records is a
     // separate concern (they are validated on their own, never ignored).
-    const retained = [...(target.type === SOCIAL_EVENT_V2_TYPE ? [target.sourceClockWitness] : []), ...(Array.isArray(annotations) ? annotations : []).filter((a) => a && a.clockRole === 'SOURCE_DECLARATION' && a.targetEventId === target.sourceEventId && Number.isSafeInteger(a.knownAtTs) && a.knownAtTs <= ev.knownAtTs).map((a) => a.witness)];
-    if (retained.length === 0) return 'target retained no original declaration to conflict with (a legacy numeric clock is not one)';
+    const ofRole = (Array.isArray(annotations) ? annotations : []).filter((a) => a && a.clockRole === 'SOURCE_DECLARATION' && a.targetEventId === target.sourceEventId);
+    const available = ofRole.filter((a) => precedes(a, ev) === true).map((a) => a.witness);
+    const orderUnknown = ofRole.filter((a) => precedes(a, ev) === null);
+    const retained = [...(target.type === SOCIAL_EVENT_V2_TYPE ? [target.sourceClockWitness] : []), ...available];
+    if (retained.length === 0) return orderUnknown.length > 0 ? SOCIAL_CONTEXT_ORDER_REQUIRED : 'target retained no original declaration to conflict with (a legacy numeric clock is not one)';
     if (retained.some((w) => sameDeclaration(w, ev.sourceClockWitness))) return 'the candidate declaration is equivalent to a retained declaration — no conflict';
     return null;
   }
@@ -404,12 +435,12 @@ export function socialPendingLinkError(ev, target, annotations = []) {
 }
 // the whole asserted target SET against actual history: targetOf(id) -> durable observation event
 // or null; annotationsOf(id) -> that target's retained annotations. null when every link holds.
-export function validateSocialPendingContext(ev, { targetOf, annotationsOf = () => [] } = {}) {
+export function validateSocialPendingContext(ev, { targetOf, annotationsOf = () => [], precedes = socialCausalPrecedes(null) } = {}) {
   if (typeof targetOf !== 'function') return 'reconciliation pending: no target context supplied';
   const shape = socialPendingShapeError(ev); if (shape) return `reconciliation pending: ${shape}`;
   for (const id of ev.candidateIds) {
     const target = targetOf(id) ?? null;
-    const err = socialPendingLinkError(ev, target, annotationsOf(id));
+    const err = socialPendingLinkError(ev, target, annotationsOf(id), { precedes });
     if (err) return `reconciliation pending: ${ev.reason} link to ${id}: ${err}`;
   }
   return null;
@@ -905,6 +936,7 @@ export function replaySocialHistory(events) {
   const pendingDigests = new Map();
   const pendingByTarget = new Map(); // candidate target id -> [pending record] whose links HOLD (the as-of view's conflict context)
   const pendingRecords = new Map(); // sourceEventId -> pending record (every retained one, linked or not)
+  const settledOrder = new Map(); // sourceEventId -> canonical journal position (sources, annotations, pending): the equal-clock tie-breaker
   const pendingUnlinked = []; // legacy (unsealed) pending records whose asserted links do not hold against actual history: retained, never applied
   const recordVersions = { annotations: { 1: 0, 2: 0 }, pending: { 1: 0, 2: 0 } };
   let annotated = 0; let pending = 0;
@@ -939,6 +971,7 @@ export function replaySocialHistory(events) {
       digests.set(e.sourceEventId, digest);
       durableIds.add(e.sourceEventId);
       indexObservation(e);
+      settledOrder.set(e.sourceEventId, settledOrder.size);
       observed += 1;
       continue;
     }
@@ -954,6 +987,7 @@ export function replaySocialHistory(events) {
       if (!annotations.has(e.targetEventId)) annotations.set(e.targetEventId, []);
       annotations.get(e.targetEventId).push(e);
       recordVersions.annotations[e.schemaVersion] += 1;
+      settledOrder.set(e.sourceEventId, settledOrder.size);
       annotated += 1;
       continue;
     }
@@ -971,7 +1005,11 @@ export function replaySocialHistory(events) {
       // already-durable targets (they precede this record). A sealed record whose links do not hold
       // is corruption/forgery: the history fails closed. A legacy (unsealed) record whose links do not
       // hold is retained as an unlinked unresolved observation — never applied to any target.
-      const ctx = validateSocialPendingContext(e, { targetOf: (id) => targets.get(id) ?? null, annotationsOf: (id) => annotations.get(id) ?? [] });
+      settledOrder.set(e.sourceEventId, settledOrder.size);
+      // the CAUSAL PREFIX: every annotation replayed so far settled before this record, so knowledge
+      // time alone (equality inclusive) decides its availability; annotations appended later — even at
+      // the same millisecond — are not part of this record's context and never invalidate it
+      const ctx = validateSocialPendingContext(e, { targetOf: (id) => targets.get(id) ?? null, annotationsOf: (id) => annotations.get(id) ?? [], precedes: socialPrefixPrecedes });
       if (ctx) {
         if (e.schemaVersion === 2) return fail(`SOCIAL_HISTORY_INVALID: ${ctx}`);
         pendingUnlinked.push({ sourceEventId: e.sourceEventId, reason: ctx.slice(0, 300) });
@@ -1057,5 +1095,5 @@ export function replaySocialHistory(events) {
       if (ofRole.length > 1 && ofRole.some((a) => !sameDeclaration(a.witness, ofRole[0].witness))) annotationConflicts.push({ targetEventId, clockRole, annotationIds: ofRole.map((a) => a.sourceEventId).sort() });
     }
   }
-  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingRecords, pendingByTarget, pendingUnlinked, recordVersions, annotationConflicts, annotated, pending };
+  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingRecords, pendingByTarget, pendingUnlinked, settledOrder, recordVersions, annotationConflicts, annotated, pending };
 }

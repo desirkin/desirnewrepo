@@ -14,7 +14,7 @@ import { jetstreamCommitToRaw, jetstreamCursorOf, BLUESKY_OFFICIAL } from '../ru
 import { normalizeSocialObservation, buildSocialFilter } from '../rumor2/social.js';
 import {
   socialObservationToEvent, validateSocialEvent, replaySocialHistory, socialReconciliationPendingEvent, validateSocialReconciliationPending, socialClockInterpretationEvent, validateSocialClockInterpretation,
-  socialPendingLinkError, validateSocialPendingContext, reconstructSocialWitness, SOCIAL_OBSERVATION_TYPES, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE,
+  socialPendingLinkError, validateSocialPendingContext, socialCausalPrecedes, socialPrefixPrecedes, SOCIAL_CONTEXT_ORDER_REQUIRED, reconstructSocialWitness, SOCIAL_OBSERVATION_TYPES, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE,
 } from '../rumor2/social-settle.js';
 import { createSocialReconciler } from '../rumor2/social-reconcile.js';
 import { socialTemporalView, SOCIAL_VIEW_CONFLICT_STATE } from '../rumor2/social-view.js';
@@ -38,7 +38,9 @@ const ann = (h) => h.filter((e) => e.type === SOCIAL_CLOCK_INTERPRETATION_TYPE);
 const pend = (h) => h.filter((e) => e.type === SOCIAL_RECONCILIATION_PENDING_TYPE);
 const annotate = (declared, at) => socialClockInterpretationEvent({ target: LEGACY.event, clockRole: 'SOURCE_DECLARATION', basis: 'NEW_DELIVERY_SAME_EVENT', witness: obs(sameNative(declared), at).sourceClockWitness, evidenceRetrievedTs: at, knownAtTs: at });
 const rec = (history) => { const r = createSocialReconciler({ provider: BLUESKY_OFFICIAL }); const h = replaySocialHistory(history); assert.ok(h.ok, h.error); r.hydrate(h); return r; };
-const ctxOf = (history) => { const h = replaySocialHistory(history); assert.ok(h.ok, h.error); return { targetOf: (id) => h.targets.get(id) ?? null, annotationsOf: (id) => h.annotations.get(id) ?? [] }; };
+// canonical context: the replay's settled journal order is the only lawful equal-millisecond tie-breaker
+// (a candidate that is NOT yet settled comes after everything settled, so the prefix rule applies to it)
+const ctxOf = (history) => { const h = replaySocialHistory(history); assert.ok(h.ok, h.error); const causal = socialCausalPrecedes(h.settledOrder); return { targetOf: (id) => h.targets.get(id) ?? null, annotationsOf: (id) => h.annotations.get(id) ?? [], precedes: (a, ev) => (h.settledOrder.has(ev.sourceEventId) ? causal(a, ev) : socialPrefixPrecedes(a, ev)) }; };
 
 // the REAL runtime over a shared in-memory journal; one process, frames fed live, one settle per step
 function boot({ history, nowMs = Date.parse('2026-09-06T14:00:00Z'), seenCap, cursorOnlyIntervalMs = 0 } = {}) {
@@ -154,7 +156,8 @@ test('TIME-3. context that exists only after the pending record\'s knownAt canno
   assert.match(replaySocialHistory([LEGACY.event, a1, pEarlier]).error, /retained no original declaration/, 'append order is not knowledge order');
   assert.match(view([a1], [pEarlier], T1).error, /retained no original declaration/);
   const r = rec([LEGACY.event, a1]); assert.equal(r.reconcile(obs(sameNative('2026-09-06T12:00:00.300Z'), T2), r.batch({ knownAtTs: T2 })).kind, 'PENDING', 'the same disagreement known AFTER the annotation is a genuine conflict');
-  assert.equal(socialPendingLinkError({ ...pEarlier, knownAtTs: T1 }, LEGACY.event, [a1]), null, 'equality of knownAt is admissible (the snapshot seal, not this law, refuses the rewritten clock)'); assert.match(validateSocialReconciliationPending({ ...pEarlier, knownAtTs: T1, ts: new Date(T1).toISOString() }), /snapshotHash/);
+  assert.equal(socialPendingLinkError({ ...pEarlier, knownAtTs: T1 }, LEGACY.event, [a1], { precedes: socialPrefixPrecedes }), null, 'equality of knownAt is admissible in a causal prefix (the snapshot seal, not this law, refuses the rewritten clock)');
+  assert.equal(socialPendingLinkError({ ...pEarlier, knownAtTs: T1 }, LEGACY.event, [a1]), SOCIAL_CONTEXT_ORDER_REQUIRED, 'without a settled order an equal-clock basis is honestly context-deficient, never guessed'); assert.match(validateSocialReconciliationPending({ ...pEarlier, knownAtTs: T1, ts: new Date(T1).toISOString() }), /snapshotHash/);
 });
 
 test('TIME-4. a later annotation equal to the pending declaration neither invalidates the earlier justified conflict nor resolves it: at T3 the disagreement stays unresolved, not latest-wins', () => {

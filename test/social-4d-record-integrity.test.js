@@ -314,7 +314,7 @@ if (!TEST_URL) {
       const f2 = await settleWith(rt, j, () => true, failing); assert.equal(f2.ok, true); assert.equal(captured[0], captured[1], 'byte-identical retry'); const all = await events(j); assert.equal(ann(all).length, 1); assert.equal(pend(all).length, 1); assert.equal(pend(all)[0].schemaVersion, 2); assert.equal(pend(all)[0].knownAtTs, T1);
       const killed = await killAdvisoryBackends(admin); assert.ok(killed >= 1); rt._feed(JSON.stringify(bsky('2026-09-06T12:00:00.300Z')));
       const r3 = await settleWith(rt, j, () => false); assert.equal(r3.reason, 'WRITER_FENCE_LOST'); assert.equal((await events(mkJournal())).length, all.length, 'no mutation after fence loss'); assert.equal(rt.isActive(), false);
-      const rp = replaySocialHistory(await events(mkJournal())); assert.equal(rp.ok, true); const id = LEGACY.event.sourceEventId; const at = (asOfTs) => socialTemporalView({ event: rp.targets.get(id), annotations: rp.annotations.get(id), pending: rp.pendingByTarget.get(id), asOfTs });
+      const rp = replaySocialHistory(await events(mkJournal())); assert.equal(rp.ok, true); const id = LEGACY.event.sourceEventId; const at = (asOfTs) => socialTemporalView({ event: rp.targets.get(id), annotations: rp.annotations.get(id), pending: rp.pendingByTarget.get(id), asOfTs, settledOrder: rp.settledOrder }); // canonical usage: the annotation and the conflict share one batch clock
       assert.equal(at(T1 - 1).effective.clockIntegrity, 'ORIGINAL_ONLY'); assert.equal(at(T1).effective.sourceClockStatus, SOCIAL_VIEW_CONFLICT_STATE, 'annotation and conflict were known in the same batch'); assert.equal(at(T1).effective.clockIntegrity, 'SEALED');
     });
   });

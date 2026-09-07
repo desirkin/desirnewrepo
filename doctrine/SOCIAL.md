@@ -1271,6 +1271,38 @@ resolution semantics and no latest-wins. The law is applied unchanged at reconci
 and the standalone view. Legacy version-1 records keep their bytes and honest labels; a legacy
 pending record whose only possible basis was known after it is retained unlinked, never applied.
 
+## 5M. SOCIAL-4D EQUAL-CLOCK CAUSAL CONTEXT CLOSEOUT
+
+One boundary of §5L, reproduced RED on the untouched 065d7f8 runtime with the review's probe: an
+annotation appended AFTER a pending record but sharing its millisecond knownAt was admitted as that
+record's invalidator, so the full-history view refused an accepted history at every query time
+(including before the source was known) while the prefix view answered. Millisecond equality is not
+proof of causal position.
+
+**The precedence contract (`socialCausalPrecedes`, `socialPrefixPrecedes`).** Whether an annotation
+was AVAILABLE to a pending record is decided by knowledge time first and, for the same recorded
+millisecond, by the SETTLED JOURNAL ORDER — never by array presentation order, id or hash text,
+source or provider clocks, or an invented extra millisecond. A strictly earlier annotation precedes;
+a strictly later one does not; an equal-clock annotation precedes only when it settled first. An
+annotation whose precedence cannot be established (equal clock, no settled order) is admitted
+NEITHER as a conflict's basis (a later annotation cannot retrospectively supply the only missing
+basis) NOR as its invalidator (a conflict established by the accepted causal prefix is never
+retroactively invalidated). The equality-inclusive policy of §5L stands: an equal-clock basis that
+settled before the record remains usable.
+
+**Call sites, one contract.** `replaySocialHistory` exports `settledOrder` (sourceEventId → journal
+position over sources, annotations, and pending records) and, being a causal-prefix reader, judges
+each pending record with `socialPrefixPrecedes` (knowledge time, equality inclusive) over the
+annotations already replayed. The reconciler judges its own emitted record over durable plus
+earlier-in-batch annotations the same way. The standalone view accepts `settledOrder`; SUPPORTED
+CANONICAL USAGE passes replay's order, and then the view and replay judge the same context for the
+same accepted history. Without it the view is exact for unequal clocks; for an equal-clock tie it
+returns the specific context-required refusal only when that tie would be the record's ONLY basis,
+and otherwise leaves an established conflict undisturbed. No persisted field, identity, or schema
+changed; legacy version-1 records keep their bytes and their LEGACY_UNSEALED label. A retained
+later annotation equal to the disputed declaration is shown among the retained declarations at and
+after its own time; the dispute stays unresolved — there is still no resolution authority here.
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -1324,6 +1356,9 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
 - **SOCIAL-4D UNRESOLVED-CACHE + CAUSAL-CONTEXT — DONE (§5L):** KNOWN-unresolved is released
   from the local cache on every successful settlement; pending records are judged only by context
   known no later than themselves. Further defects may exist.
+- **SOCIAL-4D EQUAL-CLOCK CAUSAL CONTEXT — DONE (§5M):** equal-millisecond precedence follows the
+  settled journal order; replay exports it and the canonical view consumes it. Further defects may
+  exist.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

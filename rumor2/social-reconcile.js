@@ -27,7 +27,7 @@
 import {
   socialObservationToEvent, validateSocialEvent, validateSocialClockInterpretation, validateSocialReconciliationPending,
   socialClockInterpretationEvent, socialReconciliationPendingEvent, socialNativeKeyDigest, socialCoarseKeyDigest, socialImmutableDigest, socialIndexEntry,
-  assessSocialEquivalence, sameDeclaration, deriveClockInterpretation, validateSocialPendingContext, socialReconciliationIdentity, SOCIAL_OBSERVATION_TYPES, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE,
+  assessSocialEquivalence, sameDeclaration, deriveClockInterpretation, validateSocialPendingContext, socialPrefixPrecedes, socialReconciliationIdentity, SOCIAL_OBSERVATION_TYPES, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE,
 } from './social-settle.js';
 import { contentHash, canonicalJson } from './truth.js';
 
@@ -222,7 +222,7 @@ export function createSocialReconciler({ provider } = {}) {
     if (err) { stats.invalid += 1; return { kind: 'INVALID', error: err }; }
     // SOCIAL-4D RECORD INTEGRITY: the record self-checks its asserted target set under the ONE
     // target-context law, against the durable index and this batch's own new sources
-    const ctx = validateSocialPendingContext(ev, { targetOf: (id) => targets.get(id) ?? scope.targets.get(id) ?? null, annotationsOf: (id) => [...(annotations.get(id) ?? []), ...(scope.annotationsByTarget.get(id) ?? [])] });
+    const ctx = validateSocialPendingContext(ev, { targetOf: (id) => targets.get(id) ?? scope.targets.get(id) ?? null, annotationsOf: (id) => [...(annotations.get(id) ?? []), ...(scope.annotationsByTarget.get(id) ?? [])], precedes: socialPrefixPrecedes }); // durable + earlier-in-batch annotations: a causal prefix
     if (ctx) { stats.invalid += 1; return { kind: 'INVALID', error: ctx }; }
     // the identity binds the canonical target set: an unchanged set is the SAME record (keep-first);
     // a grown/changed set is a NEW later association record with its own knownAt

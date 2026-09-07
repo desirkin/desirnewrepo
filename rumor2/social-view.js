@@ -19,7 +19,7 @@
 // A legacy numeric-only clock is labelled UNVERIFIED (its declaration was not retained) —
 // never "precision-verified". This is the record/view contract later consumers may use; it
 // is not a dashboard, a model, or a decision rule.
-import { validateSocialEvent, validateSocialClockInterpretation, validateSocialReconciliationPending, socialPendingLinkError, sameDeclaration, SOCIAL_EVENT_V2_TYPE } from './social-settle.js';
+import { validateSocialEvent, validateSocialClockInterpretation, validateSocialReconciliationPending, socialPendingLinkError, socialCausalPrecedes, sameDeclaration, SOCIAL_EVENT_V2_TYPE } from './social-settle.js';
 import { compareWitnessToReference, TEMPORAL_ORDER } from './social-time.js';
 
 export const SOCIAL_VIEW_MODES = Object.freeze(['ORIGINAL_RECORDED', 'EFFECTIVE_AS_OF']);
@@ -42,8 +42,14 @@ const clockOf = (event) => ({
 });
 
 // pending: reconciliation-pending records that name this event among their candidates (the
-// narrow conflict context; validated here, never trusted by shape)
-export function socialTemporalView({ event, annotations = [], pending = [], asOfTs } = {}) {
+// narrow conflict context; validated here, never trusted by shape).
+// settledOrder: the canonical journal order exported by replaySocialHistory (sourceEventId ->
+// position). SUPPORTED CANONICAL USAGE passes it: it is the only lawful tie-breaker for records
+// that share a millisecond knownAt. Without it, an equal-clock annotation has UNKNOWN precedence
+// and is admitted neither as a conflict's basis (an honest context-required refusal when it would
+// be the only basis) nor as its invalidator (no retroactive invalidation); array order is never
+// consulted.
+export function socialTemporalView({ event, annotations = [], pending = [], asOfTs, settledOrder = null } = {}) {
   if (!Number.isSafeInteger(asOfTs)) return { ok: false, error: 'asOfTs must be a safe-integer millisecond acquisition clock' };
   const verr = validateSocialEvent(event);
   if (verr) return { ok: false, error: verr };
@@ -62,7 +68,7 @@ export function socialTemporalView({ event, annotations = [], pending = [], asOf
     // SOCIAL-4D RECORD INTEGRITY: the ONE target-context law — a record affects this event only when
     // its asserted relation to THIS event actually holds against the event and its retained
     // annotations; a caller-supplied object saying DECLARATION_CONFLICT proves nothing by itself
-    const lerr = socialPendingLinkError(p, event, anns);
+    const lerr = socialPendingLinkError(p, event, anns, { precedes: socialCausalPrecedes(settledOrder) });
     if (lerr) return { ok: false, error: `reconciliation pending: context invalid for ${p.reason} against this event: ${lerr}` };
     pends.push(detach(p));
   }
