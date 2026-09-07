@@ -74,7 +74,7 @@ test('C1 (F1). reopening enforces the dataset as-of wall: a lawful row from a LA
   assert.equal(await codeOf(async () => readDatasetDir(redated)), 'CORRUPT_INPUT', 'a dataset re-dated to an earlier as-of is corrupt input, not a cheaper evaluation');
   // mismatched dataset metadata is refused too (counts / coverage / manifest summary must reconcile)
   const miscounted = resealDataset(ds.dir, path.join(W, 'miscounted'), (d) => { const c = JSON.parse(readFileSync(path.join(d, 'coverage.json'), 'utf8')); c.counts = { ...c.counts, rows: c.counts.rows + 5 }; writeFileSync(path.join(d, 'coverage.json'), JSON.stringify(c, null, 1) + '\n'); });
-  assert.match(await msgOf(async () => readDatasetDir(miscounted)), /coverage counts .* disagree with the .* rows on disk|manifest summary disagrees/);
+  assert.match(await msgOf(async () => readDatasetDir(miscounted)), /coverage counts .* disagree with the .* rows on disk|manifest summary disagrees|counts: the row total is not the primary plus shadow rows/);
 });
 
 test('C2 (F2a). nullability is an explicit machine-readable flag: "never null" is documentation, never permission — every catalogue leaf declares a boolean that AGREES with its prose, and a non-nullable leaf is refused at generation and on read', () => {
@@ -96,7 +96,8 @@ test('C2b (F2b). nested record shapes are fully revalidated on read: an undeclar
   const withNodes = (nodes) => ({ ...F, arrays: { ...F.arrays, dependencyNodes: nodes } });
   const n0 = F.arrays.dependencyNodes[0];
   assert.match(validateFeatureRow(withNodes([{ ...n0, text: 'AUDIT_RAW_CONTENT_SENTINEL' }])), /free-text \/ raw-content leaf/, 'the delivered defect: a raw-text member was accepted');
-  assert.match(validateFeatureRow(withNodes([{ ...n0, extra: 1 }])), /undeclared key 'extra'/);
+  // the diagnostic names a SAFE STRUCTURAL POSITION, never the attacker-chosen key text itself
+  assert.match(validateFeatureRow(withNodes([{ ...n0, extra: 1 }])), /undeclared key at position \d+ of \d+/);
   assert.match(validateFeatureRow(withNodes([{ id: n0.id, kind: n0.kind }])), /missing key 'knownAtTs'/);
   assert.match(validateFeatureRow(withNodes([{ ...n0, kind: 'not a code' }])), /dependencyNodes\[0\]\.kind unsupported/);
   assert.match(validateFeatureRow(withNodes([{ ...n0, knownAtTs: 'yesterday' }])), /dependencyNodes\[0\]\.knownAtTs unsupported/);
@@ -106,7 +107,7 @@ test('C2b (F2b). nested record shapes are fully revalidated on read: an undeclar
   assert.match(validateFeatureRow({ ...F, arrays: { ...F.arrays, madeUp: [] } }), /undeclared array madeUp/);
   // the same law on snapshot records, and through the real readers with valid checksums
   const rec = readSnapshotDir(snap.dir).records.find((r) => r.recordKind === 'RESEARCH_DOSSIER_V2');
-  assert.match(validateSnapshotRecord({ ...rec, arrays: { ...rec.arrays, dependencyNodes: [{ ...rec.arrays.dependencyNodes[0], text: 'X' }] } }), /undeclared key 'text'|free-text \/ raw-content leaf/, 'the exact-member-key law rejects it first; the free-text law is the second net');
+  assert.match(validateSnapshotRecord({ ...rec, arrays: { ...rec.arrays, dependencyNodes: [{ ...rec.arrays.dependencyNodes[0], text: 'X' }] } }), /undeclared key at position \d+|free-text \/ raw-content leaf/, 'the exact-member-key law rejects it first; the free-text law is the second net');
   assert.match(validateSnapshotRecord({ ...rec, arrays: { ...rec.arrays, claims: [{ claimRef: 'c' }] } }), /claims\[0\] missing key/);
   const tampered = resealDataset(ds.dir, path.join(W, 'nested'), (d) => { const lines = readFileSync(path.join(d, 'features.jsonl'), 'utf8').split('\n').filter(Boolean); const r = JSON.parse(lines[0]); r.arrays.dependencyNodes[0].text = 'AUDIT_RAW_CONTENT_SENTINEL'; lines[0] = JSON.stringify(r); writeFileSync(path.join(d, 'features.jsonl'), lines.join('\n') + '\n'); });
   assert.equal(await codeOf(async () => readDatasetDir(tampered)), 'CORRUPT_INPUT', 'a resealed nested mutation still fails the semantic validator');
@@ -165,19 +166,24 @@ test('C4 (F4). producer and consumer share one byte bound: a writer refuses to s
   let n = 0; for (const rec of readJsonlStrict(path.join(res2.dir, 'rows.jsonl'), { limits: lim })) { void rec; n += 1; }
   assert.equal(n, 1); assert.equal(o2.lines, 1);
   assert.equal(await codeOf(async () => writeJsonFile(res2, 'big.json', { pad: 'x'.repeat(1000) }, { limits: lim })), 'RESOURCE_LIMIT_EXCEEDED');
-  // publishing validates every declared output against the bytes on disk, its record count and the reader's limits
-  const LAW = () => {}; // a trivial stand-in for THIS test's ad-hoc artifact; the real publishers pass the real bundle law
-  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': { ...o2, sha256: 'f'.repeat(64) } } }, { outputs: { 'rows.jsonl': { ...o2, sha256: 'f'.repeat(64) } }, limits: lim, bundle: LAW })), 'CORRUPT_INPUT');
+  // publishing proves the EXACT candidate that will be serialized, under a law that verifies every declared output
+  // against the bytes on disk, its record count and the reader's limits
+  const LAW = (d, m) => verifyOutputs(d, m.outputs, { limits: lim, expected: ['rows.jsonl'] });
+  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': { ...o2, sha256: 'f'.repeat(64) } } }, { limits: lim, bundle: LAW })), 'CORRUPT_INPUT');
   assert.ok(!existsSync(path.join(res2.dir, 'm.json')), 'no manifest is sealed over an unverified output');
-  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', {}, { outputs: { 'rows.jsonl': { ...o2, lines: 99 } }, limits: lim, bundle: LAW })), 'CORRUPT_INPUT', 'a declared record count must match the file');
+  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': { ...o2, lines: 99 } } }, { limits: lim, bundle: LAW })), 'CORRUPT_INPUT', 'a declared record count must match the file');
   // and a manifest may not be sealed under NO law at all: checksums prove bytes did not change, never that they were lawful
-  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': o2 } }, { outputs: { 'rows.jsonl': o2 }, limits: lim })), 'INTERNAL_FAILURE', 'the delivered defect: a checksummed artifact could be sealed without the reader\'s own law');
+  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': o2 } }, { limits: lim })), 'INTERNAL_FAILURE', 'the delivered defect: a checksummed artifact could be sealed without the reader\'s own law');
   assert.ok(!existsSync(path.join(res2.dir, 'm.json')));
   // a law that refuses the candidate stops the seal, and nothing is written
-  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': o2 } }, { outputs: { 'rows.jsonl': o2 }, limits: lim, bundle: () => fail('CORRUPT_INPUT', 'the reader would refuse this row') })), 'CORRUPT_INPUT');
+  assert.equal(await codeOf(async () => publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': o2 } }, { limits: lim, bundle: () => fail('CORRUPT_INPUT', 'the reader would refuse this row') })), 'CORRUPT_INPUT');
   assert.ok(!existsSync(path.join(res2.dir, 'm.json')));
-  publishManifest(res2, 'm.json', { outputs: { 'rows.jsonl': o2 } }, { outputs: { 'rows.jsonl': o2 }, limits: lim, bundle: LAW });
-  assert.ok(existsSync(path.join(res2.dir, 'm.json')));
+  // THE PROVED CANDIDATE IS THE SERIALIZED CANDIDATE: a proof cannot be run against a different object, and mutating
+  // the caller's manifest after publication cannot change the bytes that were validated and written
+  const candidate = { outputs: { 'rows.jsonl': o2 } };
+  publishManifest(res2, 'm.json', candidate, { limits: lim, bundle: (d, m) => { assert.deepEqual(m, candidate, 'the law receives the exact candidate'); assert.ok(Object.isFrozen(m), 'and it is immutable between proof and serialization'); LAW(d, m); } });
+  candidate.outputs['rows.jsonl'] = { ...o2, sha256: 'f'.repeat(64) };
+  assert.equal(JSON.parse(readFileSync(path.join(res2.dir, 'm.json'), 'utf8')).outputs['rows.jsonl'].sha256, o2.sha256, 'the sealed bytes are the proved ones');
   // the declared member LIST is part of the contract: an omitted entry is corrupt, not "everything listed matched"
   assert.equal(await codeOf(async () => verifyOutputs(res2.dir, { 'rows.jsonl': o2 }, { limits: lim, expected: ['rows.jsonl', 'other.jsonl'] })), 'CORRUPT_INPUT');
   // an interrupted build leaves no manifest and removes its own files

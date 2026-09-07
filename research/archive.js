@@ -9,9 +9,8 @@
 import path from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { EXPECTED_SCHEMA_VERSION, CHILDHOOD_VERSION } from '../childhood/validate.js';
-import { LIMITS, fail, isPlainObject, isTs, isFiniteNum, parseUtcInstant, readPath, deepFreeze } from './contracts.js';
-import { readJsonFile, readJsonlStrictFromBuffer, readBoundedFile } from './artifacts.js';
-import { sha256Hex } from './contracts.js';
+import { LIMITS, fail, isPlainObject, isTs, isFiniteNum, parseUtcInstant, readPath, deepFreeze, safeType } from './contracts.js';
+import { readJsonFile, consumeJsonl } from './artifacts.js';
 
 export const SUPPORTED_ARCHIVE_SCHEMA_VERSIONS = Object.freeze([EXPECTED_SCHEMA_VERSION]);
 export const SUPPORTED_CHILDHOOD_VERSIONS = Object.freeze([CHILDHOOD_VERSION]);
@@ -52,41 +51,45 @@ export function readChildhoodArchive(dir, { limits = LIMITS } = {}) {
   const consumedFiles = {};
   const mf = readJsonFile(path.join(dir, 'manifest.json'), { limits }); const m = mf.value; consumedFiles['manifest.json'] = { sha256: mf.sha256, bytes: mf.bytes, declaredSha256_16: null };
   if (!isPlainObject(m)) fail('CORRUPT_INPUT', 'manifest.json is not an object');
-  if (!SUPPORTED_ARCHIVE_SCHEMA_VERSIONS.includes(m.schemaVersion) || !SUPPORTED_CHILDHOOD_VERSIONS.includes(m.childhoodVersion)) fail('UNSUPPORTED_INPUT_VERSION', `archive schemaVersion ${String(m.schemaVersion).slice(0, 60)} / childhoodVersion ${String(m.childhoodVersion).slice(0, 40)} is not supported`);
+  if (!SUPPORTED_ARCHIVE_SCHEMA_VERSIONS.includes(m.schemaVersion) || !SUPPORTED_CHILDHOOD_VERSIONS.includes(m.childhoodVersion)) fail('UNSUPPORTED_INPUT_VERSION', 'the archive manifest does not declare a supported schemaVersion / childhoodVersion');
   // ABSENT provenance and MALFORMED provenance are different facts. A manifest that never claims a creation clock is
   // read with PROVENANCE_CLOCK_MISSING (an honest limitation); a manifest that SUPPLIES a value which is not a lawful
   // UTC instant is a corrupt archive and is refused — a garbled clock is never silently rewritten as "no clock".
   const archiveCreatedSupplied = 'archiveCreatedTs' in m && m.archiveCreatedTs !== null && m.archiveCreatedTs !== undefined;
   const archiveCreatedTsMs = archiveCreatedSupplied ? parseUtcInstant(m.archiveCreatedTs) : null;
-  if (archiveCreatedSupplied && archiveCreatedTsMs === null) fail('CORRUPT_INPUT', `manifest.json supplies an archiveCreatedTs that is not a lawful UTC instant: ${String(m.archiveCreatedTs).slice(0, 60)}`);
+  if (archiveCreatedSupplied && archiveCreatedTsMs === null) fail('CORRUPT_INPUT', `manifest.json supplies an archiveCreatedTs that is not a lawful UTC instant (a ${safeType(m.archiveCreatedTs)} was supplied)`);
   const declared = isPlainObject(m.sourceChecksumsSha256_16) ? m.sourceChecksumsSha256_16 : null;
   if (declared === null) fail('CORRUPT_INPUT', 'manifest.json declares no sourceChecksumsSha256_16');
-  const tracks = {}; let oneMinute = null;
+  const tracks = {}; let oneMinute = null; let i = -1;
   for (const [name, decl] of Object.entries(declared)) {
-    const mt = /^candles-(\d+)m\.jsonl$/.exec(name); if (!mt) fail('CORRUPT_INPUT', `manifest declares an unexpected source file ${name.slice(0, 60)}`);
+    i += 1;
+    const mt = /^candles-(\d+)m\.jsonl$/.exec(name); if (!mt) fail('CORRUPT_INPUT', `manifest source-checksum entry ${i + 1} is not a recognized candles-<interval>m.jsonl track`);
     const intervalMin = Number(mt[1]); const file = path.join(dir, name); const present = existsSync(file);
     if (decl === null) { if (present) fail('CORRUPT_INPUT', `${name} exists but the manifest declares no checksum for it`); tracks[`${intervalMin}m`] = { declared: false, present: false, symbols: 0, candles: 0, fromSec: null, toSec: null, role: readPath(m, ['historicalSourceCoverage', `${intervalMin}m`, 'role']).value ?? null }; continue; }
     if (typeof decl !== 'string' || !/^[0-9a-f]{16}$/.test(decl)) fail('CORRUPT_INPUT', `${name}: declared checksum malformed`);
     if (!present) fail('CORRUPT_INPUT', `${name} is declared by the manifest but missing`);
-    const buf = readBoundedFile(file, { limits }); const full = sha256Hex(buf);
-    if (full.slice(0, 16) !== decl) fail('CORRUPT_INPUT', `${name}: bytes do not match the manifest checksum`);
-    consumedFiles[name] = { sha256: full, bytes: buf.length, declaredSha256_16: decl };
+    // ONE bounded incremental pass: the digest is taken over exactly the bytes these series are parsed from. Only
+    // the raw 1m track is retained; coarser tracks are validated one series at a time, counted, then discarded.
     let symbols = 0; let candles = 0; let fromSec = null; let toSec = null; const seen = new Set(); const series = intervalMin === 1 ? new Map() : null;
-    for (const row of readJsonlStrictFromBuffer(buf, name, { limits })) { // the SAME bytes that were hashed above
+    const io = consumeJsonl(file, { limits, onRecord: (row) => {
       const s = validateCandleSeriesRow(row, { intervalMin, limits, file: name });
-      if (seen.has(s.symbol)) fail('CORRUPT_INPUT', `${name}: ${s.symbol} appears twice (one series per symbol per track)`); seen.add(s.symbol);
+      if (seen.has(s.symbol)) fail('CORRUPT_INPUT', `${name}: a series symbol appears twice (one series per symbol per track)`); seen.add(s.symbol);
       // CONTRADICTORY provenance is corrupt input, not missing data: an immutable archive cannot have been created
       // before the source series it consumed was retrieved. (A genuinely ABSENT creation clock is a different fact —
       // it stays an explicit PROVENANCE_CLOCK_MISSING limitation and makes labels unavailable, never rejected here.)
-      if (archiveCreatedTsMs !== null && s.retrievedTsMs > archiveCreatedTsMs) fail('CORRUPT_INPUT', `${name}: ${s.symbol} was retrieved at ${new Date(s.retrievedTsMs).toISOString()} but the manifest claims the archive was created earlier, at ${new Date(archiveCreatedTsMs).toISOString()}`);
+      if (archiveCreatedTsMs !== null && s.retrievedTsMs > archiveCreatedTsMs) fail('CORRUPT_INPUT', `${name}: a series was retrieved at ${new Date(s.retrievedTsMs).toISOString()} but the manifest claims the archive was created earlier, at ${new Date(archiveCreatedTsMs).toISOString()}`);
       symbols += 1; candles += s.count;
       if (s.firstOpenSec !== null) { fromSec = fromSec === null ? s.firstOpenSec : Math.min(fromSec, s.firstOpenSec); toSec = toSec === null ? s.coverageEndSec : Math.max(toSec, s.coverageEndSec); }
-      if (series) series.set(s.symbol, s); // only the raw 1m track is retained in memory (bounded per series); coarser tracks are counted, never retained
-    }
+      if (series) series.set(s.symbol, s);
+    } });
+    // the declared 16-character convention is preserved, and the FULL digest of those same consumed bytes is recorded
+    if (io.sha256.slice(0, 16) !== decl) fail('CORRUPT_INPUT', `${name}: bytes do not match the manifest checksum`);
+    consumedFiles[name] = { sha256: io.sha256, bytes: io.bytes, declaredSha256_16: decl };
     tracks[`${intervalMin}m`] = { declared: true, present: true, symbols, candles, fromSec, toSec, role: readPath(m, ['historicalSourceCoverage', `${intervalMin}m`, 'role']).value ?? null };
     if (series) oneMinute = series;
   }
-  const countLines = (name) => { const f = path.join(dir, name); if (!existsSync(f)) return null; let n = 0; const buf = readBoundedFile(f, { limits }); consumedFiles[name] = { sha256: sha256Hex(buf), bytes: buf.length, declaredSha256_16: null }; for (const rec of readJsonlStrictFromBuffer(buf, name, { limits })) { void rec; n += 1; } return n; };
+  // the auxiliary census members are COUNTED incrementally and never retained: structured records, no contents
+  const countLines = (name) => { const f = path.join(dir, name); if (!existsSync(f)) return null; const io = consumeJsonl(f, { limits }); consumedFiles[name] = { sha256: io.sha256, bytes: io.bytes, declaredSha256_16: null }; return io.lines; };
   const observations = countLines('observations.jsonl'); const outcomes = countLines('outcomes.jsonl');
   const limitations = [];
   if (m.universeCoverageStatus === 'SURVIVORSHIP_LIMITED_CURRENT_PAIR_SET') limitations.push('SURVIVORSHIP_LIMITED_CURRENT_PAIR_SET');

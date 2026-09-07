@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { canonicalJson } from '../rumor2/truth.js';
 import { RESEARCH_DOSSIER_EVENT_TYPE } from '../rumor2/social-research-dossier.js';
-import { LIMITS, sha256Hex, percentile, summarize, parseUtcInstant, LABEL_HORIZONS_MIN, FEATURE_CATALOGUE, FEATURE_NAMES, GROUPING_DEPENDENCY_KINDS, ResearchError } from '../research/contracts.js';
+import { LIMITS, sha256Hex, percentile, summarize, parseUtcInstant, LABEL_HORIZONS_MIN, FEATURE_CATALOGUE, FEATURE_NAMES, GROUPING_DEPENDENCY_KINDS, ResearchError, DERIVATION_INPUT_LEAF_CLOCKS } from '../research/contracts.js';
 import { createSnapshotProjector, projectEventList, validateSnapshotRecord, snapshotRecordIdentity } from '../research/snapshot.js';
 import { selectResearchRows, featureRowIdentity, validateFeatureRow, SHADOW_ABSENCE } from '../research/features.js';
 import { labelRow, excursions, anchorOf, validateOutcomeRow } from '../research/outcomes.js';
@@ -214,7 +214,10 @@ async function syntheticRows() {
   const fx = await journalFixture({ coins: ['ZQQ7'] }); const base = selectResearchRows(projectEventList(fx.events).records, { asOfTs: ASOF }).rows.find((r) => r.cohort === 'PRIMARY');
   const mk = (n, { decisionMs, nodes = [], truncated = false, unknownSupport = false, coin = 'ZQQ7', notice = false }) => {
     const sourceEventId = `r2rde-${n.toString(16).padStart(40, '0')}`; const dossierId = `r2rd-${n.toString(16).padStart(40, 'a')}`; const episodeId = `r2ep-${n.toString(16).padStart(40, 'b')}`;
+    // EVERY derivation-input clock moves with the synthetic derivation clock: a leaf left at the original fixture's
+    // decision would be an input known after the derivation it fed, which the row law refuses
     const features = { ...base.features, 'episode.episodeId': episodeId, 'episode.onsetKnownAtTs': decisionMs - 4000, 'episode.onsetObservedTs': decisionMs - 4000, 'decision.featureAsOfTs': decisionMs, 'decision.decisionKnownAtTs': decisionMs, 'decision.latestInputKnownAtTs': decisionMs - 2000, 'decision.firstTriggerKnownAtTs': decisionMs - 4000, 'dependencies.truncated': truncated, 'participation.oldestKnownAtTs': decisionMs - 4000, 'participation.latestKnownAtTs': decisionMs - 4000 };
+    for (const n of DERIVATION_INPUT_LEAF_CLOCKS) if (features[n] !== null && features[n] !== undefined && features[n] > decisionMs) features[n] = decisionMs - 4000;
     const absent = { ...base.absentFeatures };
     if (unknownSupport) { features['marketDeep.ownerSnapshot.flow.cvdBaseUnits'] = 12.5; delete absent['marketDeep.ownerSnapshot.flow.cvdBaseUnits']; }
     // every NESTED input clock moves with the synthetic decision clock: a row whose coverage check or claim is dated

@@ -158,7 +158,7 @@ test('E (R5/F2). an outcome verdict is a CLOSED object: an extra field beside a 
   const ref = structuredClone(L); ref.reference.note = 'x';
   assert.match(validateOutcomeRow(ref), /reference malformed/);
   const hz = structuredClone(L); hz.horizons['60m'].detail = 'x';
-  assert.match(validateOutcomeRow(hz), /horizon 60m undeclared key 'detail'/);
+  assert.match(validateOutcomeRow(hz), /horizon 60m undeclared key at position \d+ of \d+/); // a SAFE structural position, never the key text
 });
 
 // ---- F (R6, F2/F4) -------------------------------------------------------------------------------------------

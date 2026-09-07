@@ -11,7 +11,7 @@
 // CENSORED, never zero return; an absent archive / track / reference bar is OUTCOME_UNAVAILABLE; a value whose knowledge
 // floor is after the dataset as-of is NOT_YET_KNOWN with every value null (never a zero, never a loss). Nothing here
 // resolves high/low ordering, fees, slippage, liquidity, fills or edge, and no tag / threshold / stage label exists.
-import { LIMITS, LABEL_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, OUTCOME_ROW_KEYS, OUTCOME_HORIZON_KEYS, LABEL_STATES, LABEL_REASONS, COHORTS, AUTHORITY, PURPOSE, fail, isPlainObject, isTs, isCoin, isFiniteNum, round4, exactKeys, deepFreeze } from './contracts.js';
+import { isoOf, LIMITS, LABEL_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, OUTCOME_ROW_KEYS, OUTCOME_HORIZON_KEYS, LABEL_STATES, LABEL_REASONS, COHORTS, AUTHORITY, PURPOSE, fail, isPlainObject, isTs, isCoin, isFiniteNum, round4, exactKeys, deepFreeze } from './contracts.js';
 
 export const anchorOf = (decisionKnownAtTs) => { const anchorTsMs = Math.ceil(decisionKnownAtTs / 60_000) * 60_000; return { anchorTsMs, anchorLagMs: anchorTsMs - decisionKnownAtTs }; };
 // pure excursion arithmetic over COMPLETE, validated bars ([openSec,o,h,l,c,v]) relative to a reference price
@@ -22,6 +22,18 @@ export function excursions(bars, referencePrice) {
   return { mfePct: round4(Math.max(0, (hi / referencePrice - 1) * 100)), maePct: round4(Math.min(0, (lo / referencePrice - 1) * 100)), finalClose: bars[bars.length - 1][4], logReturnPct: round4(100 * Math.log(bars[bars.length - 1][4] / referencePrice)) };
 }
 const hz = (state, reason, horizonEndTs, outcomeKnownAtTs, values = {}, logHorizon = false) => ({ state, reason, horizonEndTs, outcomeKnownAtTs, mfePct: values.mfePct ?? null, maePct: values.maePct ?? null, logReturnPct: logHorizon ? (values.logReturnPct ?? null) : null, logReturnUnit: logHorizon ? 'LOG_RETURN_PERCENT' : null });
+
+// The reasons under which the archive / track / series / provenance / reference is missing ENTIRELY. When one holds,
+// labelRow's early path makes the reference AND every horizon unavailable under that same reason — there is no such
+// thing as a row that reports no archive while still carrying a KNOWN excursion.
+export const ROW_UNAVAILABLE_REASONS = Object.freeze(['ARCHIVE_ABSENT', 'PROVENANCE_CLOCK_MISSING', 'NO_1M_TRACK', 'SERIES_ABSENT_FOR_ASSET', 'NO_TEMPORAL_OVERLAP', 'REFERENCE_BAR_MISSING']);
+export const CENSORED_REASONS = Object.freeze(['SOURCE_COVERAGE_ENDS_BEFORE_HORIZON', 'INTERIOR_BAR_MISSING']);
+// THE row-availability recipe, stated once. AVAILABLE does not mean "every label is KNOWN": a row every one of whose
+// horizons is still masked at the as-of is lawfully AVAILABLE / COMPLETE. This is preserved exactly as delivered.
+export function rowAvailabilityOf(horizonStates) {
+  if (horizonStates.some((s) => s === 'KNOWN' || s === 'NOT_YET_KNOWN')) return { state: horizonStates.every((s) => s === 'KNOWN' || s === 'NOT_YET_KNOWN') ? 'AVAILABLE' : 'PARTIAL', reason: 'COMPLETE' };
+  return { state: 'PARTIAL', reason: 'INTERIOR_BAR_MISSING' };
+}
 
 // label ONE row. `archive` is the readChildhoodArchive() result or null; `asOfTs` the FROZEN dataset as-of clock.
 export function labelRow({ rowId, cohort, canonicalCoin, decisionKnownAtTs }, { archive = null, asOfTs, limits = LIMITS } = {}) {
@@ -56,8 +68,7 @@ export function labelRow({ rowId, cohort, canonicalCoin, decisionKnownAtTs }, { 
     horizons[key] = hz('KNOWN', 'COMPLETE', horizonEndTs, outcomeKnownAtTs, x, logH);
   }
   const reference = asOfTs < referenceKnownAtTs ? { state: 'NOT_YET_KNOWN', barOpenSec: null, price: null, knownAtTs: referenceKnownAtTs } : { state: 'KNOWN', barOpenSec: refOpenSec, price: p, knownAtTs: referenceKnownAtTs };
-  const states = Object.values(horizons).map((x) => x.state);
-  const availability = states.some((s) => s === 'KNOWN' || s === 'NOT_YET_KNOWN') ? { state: states.every((s) => s === 'KNOWN' || s === 'NOT_YET_KNOWN') ? 'AVAILABLE' : 'PARTIAL', reason: 'COMPLETE' } : { state: 'PARTIAL', reason: 'INTERIOR_BAR_MISSING' };
+  const availability = rowAvailabilityOf(Object.values(horizons).map((x) => x.state));
   return deepFreeze({ ...base, availability, reference, horizons });
 }
 
@@ -94,6 +105,80 @@ export function validateOutcomeRow(r) {
     const logH = LOG_RETURN_HORIZONS_MIN.includes(h);
     if (logH ? x.logReturnUnit !== 'LOG_RETURN_PERCENT' : (x.logReturnUnit !== null || x.logReturnPct !== null)) return `outcome row: horizon ${h}m log-return labelling malformed`;
     if (x.state === 'KNOWN' && logH && !isFiniteNum(x.logReturnPct)) return `outcome row: horizon ${h}m log return missing`;
+    // reasons are not interchangeable across states: each state uses only the recipe's own vocabulary for it
+    if (x.state === 'KNOWN' && x.reason !== 'COMPLETE') return `outcome row: horizon ${h}m is KNOWN under a reason that is not COMPLETE`;
+    if (x.state === 'NOT_YET_KNOWN' && x.reason !== 'NOT_YET_KNOWN_AT_AS_OF') return `outcome row: horizon ${h}m is masked under a reason that is not NOT_YET_KNOWN_AT_AS_OF`;
+    if (x.state === 'CENSORED' && !CENSORED_REASONS.includes(x.reason)) return `outcome row: horizon ${h}m is CENSORED under a reason outside the recipe's missing-window vocabulary`;
+    if (x.state === 'OUTCOME_UNAVAILABLE' && !ROW_UNAVAILABLE_REASONS.includes(x.reason)) return `outcome row: horizon ${h}m is unavailable under a reason that does not describe missing source`;
+  }
+  // ---- CROSS-STATE CONSISTENCY. A combination of individually lawful states can still be an impossible row.
+  const states = LABEL_HORIZONS_MIN.map((h) => r.horizons[`${h}m`].state);
+  const unavailable = LABEL_HORIZONS_MIN.filter((h) => r.horizons[`${h}m`].state === 'OUTCOME_UNAVAILABLE');
+  if (unavailable.length > 0) {
+    // labelRow's early path is all-or-nothing: a row that cannot reach its archive, track, series, provenance or
+    // reference bar has NO reference and NO horizon, all under the one reason that describes the missing source.
+    if (unavailable.length !== LABEL_HORIZONS_MIN.length) return 'outcome row: some horizons are unavailable while others are not, which no source-absence verdict can produce';
+    const reason = r.horizons[`${LABEL_HORIZONS_MIN[0]}m`].reason;
+    if (LABEL_HORIZONS_MIN.some((h) => r.horizons[`${h}m`].reason !== reason)) return 'outcome row: an unavailable row reports more than one source-absence reason';
+    if (r.reference.state !== 'OUTCOME_UNAVAILABLE') return 'outcome row: every horizon is unavailable yet the reference price is not';
+    if (r.availability.state !== 'UNAVAILABLE' || r.availability.reason !== reason) return 'outcome row: the row verdict disagrees with the source-absence its horizons report';
+    return null;
+  }
+  // an available row therefore never declares the source missing
+  if (r.availability.state === 'UNAVAILABLE' || ROW_UNAVAILABLE_REASONS.includes(r.availability.reason)) return 'outcome row: the row declares its source unavailable while its horizons carry outcomes';
+  if (r.reference.state === 'OUTCOME_UNAVAILABLE') return 'outcome row: the reference price is unavailable while its horizons are not';
+  // a masked reference cannot coexist with a horizon that is already knowable: every horizon floor is at or after
+  // the reference floor, so an as-of that hides the reference hides all of them
+  if (r.reference.state === 'NOT_YET_KNOWN' && states.some((x) => x !== 'NOT_YET_KNOWN')) return 'outcome row: the reference price is masked while a horizon beside it is already resolved';
+  // and the row verdict IS the recipe's function of its horizon states — never an independent claim
+  const expected = rowAvailabilityOf(states);
+  if (r.availability.state !== expected.state || r.availability.reason !== expected.reason) return `outcome row: the row verdict ${r.availability.state}/${r.availability.reason} is not what its horizon states produce (${expected.state}/${expected.reason})`;
+  return null;
+}
+
+// ---- THE CONTEXTUAL ARCHIVE FLOOR --------------------------------------------------------------------------
+// A row-local validator can prove anchor arithmetic, value/state consistency and as-of masking. It CANNOT prove a
+// knowledge floor, because the fact that fixes that floor — when the archive carrying the candles came into
+// existence — is not in the row. Backdating both the reference and the horizon floors together therefore left every
+// row-local law satisfied while turning an honest "nothing was learnable at the split" into a trainable label.
+//
+// The containing dataset does carry that fact, in validated provenance. The reader already proves, for every series
+// it consumes, that retrieval R <= creation C. With the recipe's referenceKnownAt = max(A, C, R) and
+// horizonKnownAt = max(H, C, R), that implication collapses them to max(A, C) and max(H, C) exactly — so a lawful
+// saved dataset's floors are RECOMPUTABLE from metadata it already records. No new schema, no archive re-read, and
+// no per-row retrieval clock is needed. This is a contradiction check against recorded lawful context; it is not,
+// and does not claim to be, independent attestation that those recorded source facts are true.
+export const ARCHIVE_CONTEXT_STATES = Object.freeze(['ARCHIVE_ABSENT', 'ARCHIVE_PRESENT']);
+export function archiveContextError(ctx) {
+  if (!isPlainObject(ctx)) return 'archive context: not an object';
+  const k = exactKeys(ctx, ['state', 'archiveCreatedTsMs']); if (k) return `archive context: ${k}`;
+  if (!ARCHIVE_CONTEXT_STATES.includes(ctx.state)) return 'archive context: unknown state';
+  if (ctx.state === 'ARCHIVE_ABSENT' && ctx.archiveCreatedTsMs !== null) return 'archive context: an absent archive has no creation clock';
+  if (ctx.state === 'ARCHIVE_PRESENT' && ctx.archiveCreatedTsMs !== null && !isTs(ctx.archiveCreatedTsMs)) return 'archive context: creation clock malformed';
+  return null;
+}
+export function outcomeContextError(r, ctx, { where = 'outcome row' } = {}) {
+  const ce = archiveContextError(ctx); if (ce) return `${where}: ${ce}`;
+  const unavailableReason = r.availability.state === 'UNAVAILABLE' ? r.availability.reason : null;
+  if (ctx.state === 'ARCHIVE_ABSENT') {
+    // no archive was supplied to this dataset: every row must say so, and none may carry a floor at all
+    if (unavailableReason !== 'ARCHIVE_ABSENT') return `${where} ${r.rowId}: the dataset was built with no Childhood archive, so this row cannot report ${unavailableReason ?? r.availability.state}`;
+    return null;
+  }
+  if (ctx.archiveCreatedTsMs === null) {
+    // the archive exists but its creation provenance is missing: labels are unavailable for exactly that reason
+    if (unavailableReason !== 'PROVENANCE_CLOCK_MISSING') return `${where} ${r.rowId}: the dataset's archive records no creation clock, so this row cannot report ${unavailableReason ?? r.availability.state}`;
+    return null;
+  }
+  if (unavailableReason === 'ARCHIVE_ABSENT' || unavailableReason === 'PROVENANCE_CLOCK_MISSING') return `${where} ${r.rowId}: the row claims ${unavailableReason} although the dataset records a created archive`;
+  const C = ctx.archiveCreatedTsMs;
+  // EQUALITY to the recipe, not merely "some later timestamp": the floors of a lawful saved dataset are determined
+  if (r.reference.knownAtTs !== null && r.reference.knownAtTs !== Math.max(r.anchorTsMs, C)) return `${where} ${r.rowId}: the reference knowledge floor ${isoOf(r.reference.knownAtTs)} is not max(anchor, archive creation ${isoOf(C)})`;
+  for (const h of LABEL_HORIZONS_MIN) {
+    const x = r.horizons[`${h}m`];
+    if (x.outcomeKnownAtTs === null) continue;
+    const want = Math.max(x.horizonEndTs, C);
+    if (x.outcomeKnownAtTs !== want) return `${where} ${r.rowId}: horizon ${h}m knowledge floor ${isoOf(x.outcomeKnownAtTs)} is not max(horizon end, archive creation ${isoOf(C)}) = ${isoOf(want)}`;
   }
   return null;
 }

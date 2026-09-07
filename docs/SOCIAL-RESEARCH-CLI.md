@@ -88,10 +88,21 @@ moved into `absentFeatures`, whatever marker that map carries; only a leaf decla
 only under one of the two lawful markers (`NOT_RECORDED`, `SHADOW_ROW_NO_SOCIAL_DEPENDENCY`). `absentFeatures`
 carries no undeclared name, and the row's `entrances` must be its own projected entrances without repeats.
 
-**Nested input clocks obey the row's clock law.** An input cannot be known after the derivation it fed and cannot
-be observed after it became known — applied not only to the row-level clocks but to the dossier's own catalogued
-member clocks: trigger, claim, coverage-check, wide-eye notice and dependency-node clocks. This is the dossier's
-declared relationship applied to the projection, never one universal cutoff over every timestamp-shaped field.
+**Nested input clocks obey the row's clock law, against the DERIVATION clock.** An input cannot be known after the
+derivation it fed and cannot be observed after it became known — applied not only to the row-level clocks but to the
+dossier's own catalogued member clocks: trigger, claim, coverage-check, wide-eye notice and dependency-node clocks.
+The bound is `featureAsOfTs`, not `decisionKnownAtTs`: the dossier is derived as of its own clock and only later
+becomes a durable decision, and upstream `validateDependencyManifest` bounds dependency-node clocks by that same
+`asOfTs`. An input arriving between the two could not have fed the earlier derivation. (In the current v2 schema the
+two clocks are equal by validation; their roles stay distinct.) This is the dossier's declared relationship applied
+to the projection, never one universal cutoff over every timestamp-shaped field.
+
+**The retained dependency graph keeps the relationships that make it a graph.** The projection copies nodes and
+edges, so the originating law survives the copy: unique node identities, a required clock on every node, closed
+kinds and relations, edge endpoints that exist, no self-dependency, no repeated `(from, to, relation)` edge, no
+derived node dated before its parent, and no cycle. The same check runs at generation, snapshot reopening, feature
+reopening and evaluation. A truncated manifest keeps its truncation disclosure and its `DESCRIPTIVE_ONLY`
+consequence — truncation never legalizes a malformed retained graph and never fabricates the omitted nodes.
 
 **The dataset as-of wall.** A dataset is only meaningful under the as-of it was frozen for. Reopening it — through
 `readDatasetDir` or `evaluate` — proves every row still obeys that clock: a decision, an input clock, a reference
@@ -120,6 +131,29 @@ mfePct       = max(0, (max(high) / p - 1) * 100)        maePct = min(0, (min(low
 logReturnPct = 100 * ln(finalClose / p)   for 60m / 240m only, labelled LOG_RETURN_PERCENT (not a simple return)
 horizonEndTs = anchor + H*60000;  outcomeKnownAtTs = max(horizonEndTs, archiveCreatedTs, series retrievedTs)
 ```
+**Outcome states are validated as COMBINATIONS, not only as members.** A `KNOWN` horizon carries reason `COMPLETE`,
+finite excursion values and a `KNOWN` reference price; `CENSORED` uses only the missing-window / coverage reasons
+with null values; `NOT_YET_KNOWN` uses `NOT_YET_KNOWN_AT_AS_OF` with null values and a floor after the as-of;
+`OUTCOME_UNAVAILABLE` carries null values and no floor at all. A row that cannot reach its archive, track, series,
+provenance or reference bar is unavailable *entirely* — one reason, no reference, no horizon outcomes — so a verdict
+such as `ARCHIVE_ABSENT` can never sit beside a `KNOWN` excursion. A masked reference cannot coexist with a resolved
+horizon, and the row verdict is exactly the recipe's function of its horizon states. Two lawful combinations are
+preserved deliberately: `AVAILABLE` never meant "already known" (a row every one of whose horizons is still masked
+at the as-of is `AVAILABLE / COMPLETE`), and an all-censored row stays `PARTIAL / INTERIOR_BAR_MISSING`.
+
+**The contextual archive floor.** Row-local law can prove anchor arithmetic, value/state consistency and as-of
+masking, but it cannot prove a *knowledge floor*, because the fact that fixes it — when the archive carrying the
+candles came into existence — is not in the row. So the containing dataset's validated provenance is applied too.
+The archive reader already proves retrieval `R <= creation C` for every series it consumes, which collapses the
+recipe's `max(A, C, R)` and `max(H, C, R)` to `max(A, C)` and `max(H, C)` exactly; a lawful saved dataset's floors
+are therefore recomputable from metadata it already records, with no re-read and no new per-row schema. Equality to
+the recipe is required, not merely "some later timestamp". A dataset built with no archive must report
+`ARCHIVE_ABSENT` on every row; one whose archive records no creation clock must report `PROVENANCE_CLOCK_MISSING`.
+A supplied context that is malformed is corruption — it is never downgraded to "no context" — while *omitting* the
+context is a different thing again: a pure row-only call, which makes no claim about any archive. This rejects
+contradictions with recorded lawful context; it is not, and does not claim to be, independent attestation that
+those recorded source facts are true.
+
 States: `KNOWN`, `CENSORED` (a missing interior / end bar or short source coverage: never a zero return),
 `NOT_YET_KNOWN` (the dataset as-of is before the knowledge floor: every value null, the reference price too),
 `OUTCOME_UNAVAILABLE` (no archive / no 1m track / no series / no reference bar / no temporal overlap / missing
@@ -129,6 +163,26 @@ claim. Nothing resolves high/low ordering, fees, slippage, liquidity, fills or e
 to four decimals; negative zero is normalized; NaN / Infinity are refused.
 
 ### Evaluation
+**The payload is validated before its report is trusted.** A report renderer is not a validator: `report.txt` being
+the exact rendering of `evaluation.json` proves only that the two agree, and it renders a negative population or a
+false `stageCalibration: PERFORMED` just as faithfully as a true one. One complete payload validator therefore runs
+at generation, at publication and on standalone reopening, and only then is the rendering required to match. It
+fixes this implementation's constants (`pipelineExecution: COMPLETE`, `evaluation:
+RETROSPECTIVE_DESCRIPTIVE_ONLY`, `fittedModel: NONE`, `stageCalibration: NOT_PERFORMED`, `currentRuntimeStage:
+UNKNOWN`, authority `NONE` / purpose `RESEARCH_ONLY`), requires the standing calibration blockers and laws, and
+checks every count and summary: populations partition (`total = primary + shadow`; split counts sum to the primary
+cohort; group split counts sum to the group total; shadow period counts sum to the shadow cohort), each horizon's
+four state counts sum to its `n`, each table's `n` is its cohort population, the all-primary table is exactly the
+sum over the splits it partitions, a summary's `n` is its table's `KNOWN` count with ordered finite quantiles
+(`min <= p25 <= median <= p75 <= max`, all null when `n = 0`, MFE never negative, MAE never positive, log-return
+summaries only at 60m/240m), and `discoveryTrainableAtSplit <= discoveryKnownRetrospectively`, with the latter equal
+to the DISCOVERY table's `KNOWN` count. Group-summary detail keeps its 500-entry ceiling: when complete the group
+rows reconcile exactly, when truncated the flag, length and bounds are checked and no omitted entry is invented (and
+a group's capped asset list is never read as the whole universe). At `evaluate` the payload is additionally proved
+equal to what the deterministic evaluator produces for the source rows actually consumed, bound to the input
+digests. A standalone reopening has only the artifact: it enforces the complete local schema and arithmetic without
+the original dataset, and does not pretend to recompute quantiles from source rows it does not have.
+
 Rows are grouped transitively by episode identity and shared concrete provenance refs (`SOCIAL_SOURCE`,
 `TEXT_FAMILY`, `NATIVE_ORIGIN_REF`, `OFFICIAL_SOURCE`, `CLAIM`, `WIDE_EYE_NOTICE`, `MARKET_SNAPSHOT`); generic
 `DOSSIER_FIELD` / `COVERAGE_BOUNDARY` / `SOCIAL_FEATURE_WINDOW` labels never connect rows. A group is not proof of
@@ -144,21 +198,52 @@ separate descriptive tables (not matched controls, not a market denominator). No
 classifier, causal / significance claim, profitability headline, composite ranking or row weighting exists.
 
 ### Producer / consumer bounds and provenance
-Writers enforce the SAME byte bounds their readers enforce (per line and per file), so no run can seal an output a
-reader would refuse; a bound tripped mid-file closes its descriptor and leaves no artifact. JSONL is read back
-incrementally — bounded chunks with an incomplete-line buffer and a streaming UTF-8 decoder, so peak memory is one
-chunk plus the longest record and a multi-byte character split by a chunk edge still parses; the descriptor is
-closed on every exit, including an early `break` by the caller.
+Writers enforce the SAME byte bounds their readers enforce, under the same accounting: a record is charged its
+serialized bytes PLUS the newline the writer emits, and the reader charges a terminated line that same newline (a
+final line with no terminator is charged its actual bytes — no byte is invented). So no run can seal an output a
+reader would refuse; a bound tripped mid-file closes its descriptor and leaves no artifact. `writeSync` may accept
+fewer bytes than requested, so every writer loops to the last byte and treats zero progress as a failure — a short
+write can never become a digest and record count that claim more than was written, and a failed write, flush or
+validation never becomes a successful seal.
 
-**A manifest is sealed only under the reader's own bundle law** (`research/bundle.js`). A checksum proves bytes were
-not altered afterwards; it never proved they were lawful. The SAME whole-bundle validator therefore runs twice: once
-on the unsealed candidate, before the manifest is written and while the run can still be abandoned, and once on
-reopening. So a row the pipeline's own validator rejects can no longer be sealed inside a perfectly checksummed
-artifact. The bundle law covers the member LIST (an omitted checksum entry is a corrupt manifest, not a smaller
-artifact), every declared checksum / size / record count, every row under its own validator, the snapshot's declared
-clock range against the records actually sealed, the dataset's declared census and counts against the aggregates
-RECOMPUTED from those rows, and `report.txt` against the deterministic rendering of the `evaluation.json` sealed
-beside it.
+**Every production JSONL member is consumed exactly once**, in bounded chunks, with the digest taken over precisely
+the bytes its records are parsed from — publication verification, artifact reopening and the Childhood archive
+(candle tracks and the auxiliary census members alike) all share that single read. There is no checksum pass
+followed by a separate reopen whose bytes the digest never saw, and no whole file is buffered to feed a streaming
+iterator. Peak memory is one chunk plus the longest record plus each consumer's own bounded state (only the raw 1m
+track is retained; coarser tracks are validated one series at a time and discarded). A streaming UTF-8 decoder
+handles characters split across chunk edges and rejects malformed or truncated UTF-8 rather than substituting a
+replacement character. The descriptor is closed on every exit — normal end, a bound or parse failure, and an early
+`break` by the caller — and a reader abandoned before EOF publishes no digest, size or record count at all.
+
+**A manifest is sealed only under the reader's own bundle law** (`research/bundle.js`, with the metadata schemas in
+`research/schemas.js`). A checksum proves bytes were not altered afterwards; it never proved they were lawful. The
+SAME whole-bundle validator therefore runs twice: once on the unsealed candidate, before the manifest is written and
+while the run can still be abandoned, and once on reopening. The object the law is handed is the exact immutable
+candidate whose bytes are then serialized, so a proof cannot be run against some other object and nothing can change
+between the proof and the write. The bundle law covers:
+
+- the member LIST, fixed by artifact kind and never derived from the untrusted list being checked (an omitted member
+  or checksum entry is a corrupt manifest, not a smaller artifact), plus each output descriptor's own closed shape
+  (`name, lines, bytes, sha256` for JSONL; `name, bytes, sha256` otherwise) and a traversal-free member name;
+- every row under its own validator, and the snapshot's declared clock range and projected/shadow census against the
+  records actually sealed;
+- **complete nested metadata**: `inputs` is required provenance, so `inputs: null` is corruption — an archive-free
+  dataset still records its snapshot input and states `inputs.childhood: null` explicitly. Snapshot and archive
+  identities, digests, versions, consumed-file inventories, clocks, counts, recipe copies, recorded limits and code
+  identity all have declared closed shapes, and repeated facts must AGREE (a manifest digest recorded twice, a
+  creation clock recorded as both ISO text and milliseconds). Recorded limits describe the producing artifact and
+  never raise the reader's own;
+- the dataset's declared census and counts against the aggregates RECOMPUTED from the sealed rows — two matching but
+  wrong copies satisfy nothing — and, at build time, the source-dependent aggregates against the validated snapshot
+  actually consumed;
+- **the evaluation payload, validated first and completely** (see below), and only then `report.txt` against the
+  deterministic rendering of that payload.
+
+**Diagnostics never echo input.** A rejected record is described by safe structural facts — the declared field name
+we were looking for, the ordinal position of an undeclared one, the JavaScript type of a bad value — never by the
+value or key text the input supplied, and never by a raw driver or OS message. A length cap is not sanitization.
+Repository-defined explanatory constants in generated artifacts are a different thing and are unaffected.
 
 An archive whose manifest claims it was created BEFORE a series it consumed is corrupt input. **A supplied
 `archiveCreatedTs` that is not a lawful UTC instant is also corrupt input** — a garbled clock is never silently
@@ -187,8 +272,23 @@ split. Hand-checked: decision at `12:00:05Z` → anchor `12:01:00Z`, lag 55,000 
 MFE 1.1876 % / MAE −0.2375 %. The report states `stageCalibration: NOT_PERFORMED` and `currentRuntimeStage:
 UNKNOWN` with the calibration blockers.
 
+### Compatibility
+No artifact shape or recipe version changed in this closeout: the completed laws are enforced against the fields the
+current producers already emit, so an artifact produced by this build is read by this build. Corrupt artifacts are
+rejected, never normalized or repaired while reading, and there is no silent legacy conversion. `ARRAY_CATALOGUE`
+now records `dependencyNodes.knownAtTs` as required rather than nullable — a correction to the projection table,
+which never matched the upstream contract that always required the clock; no lawful artifact carried a null there.
+
 ## What this pipeline does not claim
 It does not create propagation, coordination, baselines, entrances, dossiers, episodes, shadow sampling or source
 profiles (they already exist), does not train or calibrate a stage classifier, does not rank sources, simulate
 trades or produce edge claims, and does not repair or extend historical universe coverage
 (`SURVIVORSHIP_LIMITED_CURRENT_PAIR_SET` and the fast-memory parity limitation are preserved from the archive).
+
+Code that passes its own validators is not evaluated history. **No real history has been evaluated here**; the live
+stage remains `UNKNOWN / calibrated:false` with no fitted model and no operational use. Standalone artifact
+validation establishes the declared schema, internal consistency and byte integrity of what is in front of it — it
+is not independent attestation of source datasets that are absent: an offline reader without the originals cannot
+prove that consistently rewritten identities and provenance are true. Track-wide coverage cannot prove any
+individual candle window, and a sparse projection is never a complete replayable journal. The external provider,
+data-acquisition, claim-association-seam and `serpent-evidence-1` packet limitations all remain open.

@@ -8,8 +8,9 @@
 // descriptive cohort — no Social feature value is ever inferred for them. Row ids depend only on the recipe and the
 // original semantic identity, so appending later journal events never changes an earlier row's bytes or id.
 import { canonicalJson } from '../rumor2/truth.js';
-import { FEATURE_RECIPE_VERSION, FEATURE_ROW_KEYS, FEATURE_CATALOGUE, FEATURE_LEAF_VALUE_OK, ABSENCE_VALUES, ENTRANCE_LABELS, COHORTS, ROW_STATUSES, AUTHORITY, PURPOSE, LIMITS, fail, isPlainObject, isTs, isCount, isCoin, isId, isCode, elementValue, catalogueArraysError, arrayClockError, forbiddenLeafError, sha256Hex, exactKeys, deepFreeze, isFiniteNum } from './contracts.js';
+import { FEATURE_RECIPE_VERSION, FEATURE_ROW_KEYS, FEATURE_CATALOGUE, FEATURE_LEAF_VALUE_OK, ABSENCE_VALUES, ENTRANCE_LABELS, DERIVATION_INPUT_LEAF_CLOCKS, COHORTS, ROW_STATUSES, AUTHORITY, PURPOSE, LIMITS, fail, isPlainObject, isTs, isCount, isCoin, isId, isCode, elementValue, catalogueArraysError, arrayClockError, forbiddenLeafError, sha256Hex, exactKeys, deepFreeze, isFiniteNum } from './contracts.js';
 import { validateSnapshotRecord } from './snapshot.js';
+import { dependencyGraphError } from './relations.js';
 
 export const SOURCE_PROFILE_CONTEXT = 'NOT_RECORDED_IN_DOSSIER'; // never reconstructed from a current profile
 export const CLAIM_ASSOCIATION_CONTEXT = 'NOT_AVAILABLE_NO_AUTHORIZED_SEAM';
@@ -105,10 +106,20 @@ export function validateFeatureRow(r) {
     // the row's own copies must agree with the catalogued clocks / identities they duplicate
     if (r.features['decision.featureAsOfTs'] !== r.featureAsOfTs || r.features['decision.decisionKnownAtTs'] !== r.decisionKnownAtTs) return 'feature row: the recorded decision clocks disagree with the row clocks';
     if (r.features['episode.episodeId'] !== r.episodeId || r.features['episode.basis'] !== r.episodeBasis || r.features['dossier.researchState'] !== r.researchState) return 'feature row: the recorded episode / state disagree with the row';
-    if (r.features['decision.latestInputKnownAtTs'] > r.decisionKnownAtTs || r.features['episode.onsetKnownAtTs'] > r.decisionKnownAtTs) return 'feature row: an input cannot be known after the decision it fed';
+    // THE DERIVATION CLOCK, NOT THE DECISION CLOCK. featureAsOfTs is when this row's values were derived;
+    // decisionKnownAtTs is when the durable decision became known. An input arriving BETWEEN them could not have fed
+    // the earlier derivation, so every input clock is bounded by featureAsOfTs and only the derivation itself by the
+    // decision. (In the current v2 schema the two are equal by validation; their roles stay distinct.)
+    for (const name of DERIVATION_INPUT_LEAF_CLOCKS) {
+      const v = r.features[name]; if (v === null || v === undefined) continue;
+      if (v > r.featureAsOfTs) return `feature row: ${name} is known after the derivation it fed`;
+    }
     // the SAME law applied to the NESTED inputs: a trigger, claim, coverage check, notice or dependency node cannot be
-    // known after the decision it fed, and cannot be observed after it became known
-    const ce = arrayClockError(r.arrays, r.decisionKnownAtTs, { where: 'feature row' }); if (ce) return ce;
+    // known after the derivation it fed, and cannot be observed after it became known
+    const ce = arrayClockError(r.arrays, r.featureAsOfTs, { where: 'feature row' }); if (ce) return ce;
+    // THE RETAINED GRAPH keeps the relationships that make it a graph: unique identities, present endpoints, no
+    // self-dependency, no repeated edge, no parent later than what it derives, no cycle
+    const ge = dependencyGraphError(r.arrays.dependencyNodes, r.arrays.dependencyEdges, { derivationTs: r.featureAsOfTs, where: 'feature row' }); if (ge) return ge;
     return null;
   }
   if (r.episodeId !== null || r.dossierId !== null || !isId(r.sweepId) || !isPlainObject(r.shadowContext) || r.researchState !== null || r.episodeBasis !== null) return 'feature row: shadow identity malformed';

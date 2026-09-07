@@ -44,7 +44,7 @@ const socialFiles = rumor2Files.filter((f) => SOCIAL_FILE_RE.test(f));
 const frozenCoreFiles = rumor2Files.filter((f) => !SOCIAL_FILE_RE.test(f));
 // SOCIAL-5B — the OFFLINE research pipeline (bin/social-research.js + research/ + the narrow read-only journal reader):
 // the exact read-only exception to the single-composition-root law, enumerated by filename and permitted pure exports
-const OFFLINE_RESEARCH_FILES = ['bin/social-research.js', 'persistence/social-research-export.js', 'research/archive.js', 'research/artifacts.js', 'research/bundle.js', 'research/contracts.js', 'research/evaluation.js', 'research/features.js', 'research/outcomes.js', 'research/pipeline.js', 'research/snapshot.js'];
+const OFFLINE_RESEARCH_FILES = ['bin/social-research.js', 'persistence/social-research-export.js', 'research/archive.js', 'research/artifacts.js', 'research/bundle.js', 'research/contracts.js', 'research/evaluation.js', 'research/features.js', 'research/identity.js', 'research/outcomes.js', 'research/pipeline.js', 'research/relations.js', 'research/schemas.js', 'research/snapshot.js'];
 const OFFLINE_RESEARCH_RUMOR2_IMPORTS = {
   // the contracts module imports the AUTHORITATIVE closed vocabularies rather than restating them: pure frozen
   // string lists, no runtime, no collector, no provider — provenance/vocabulary reuse, never an authority allowance

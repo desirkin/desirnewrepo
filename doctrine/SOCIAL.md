@@ -2183,8 +2183,9 @@ candle anchor is label-side only and never an entry fill or performance claim.
 
 ### 5W. SOCIAL-5B TRUTH-BOUNDARY CLOSEOUT — six offline validation defects repaired
 
-An independent review of the SOCIAL-5B delivery (`32637195`) accepted the foundation and the repaired outcome DTO and
-identified six code-level boundary defects in the OFFLINE pipeline. All six were reproduced against the delivered
+An independent review of the SOCIAL-5B delivery (`32637195`) WITHHELD acceptance of that delivery while retaining its
+useful repairs, and identified six code-level boundary defects in the OFFLINE pipeline. (An earlier version of this
+section said the review "accepted the foundation"; it did not, and the wording is corrected here.) All six were reproduced against the delivered
 behaviour and repaired together as one closeout; no provider was activated, no data acquired, no configuration,
 dependency, durable schema, journal, ledger, cost, controls, risk, execution or trading-permission path changed, and
 no calibration was performed. The repairs tighten shared authoritative checks rather than adding surface.
@@ -2241,8 +2242,8 @@ packet limitations remain honestly deferred and are not these defects. Authority
 
 ### 5X. SOCIAL-5B REMAINING TRUTH-BOUNDARY REPAIR — eight residual defects closed
 
-A second independent review of the SOCIAL-5B delivery (`865a07a`) accepted the F1–F6 closeout and found eight
-REMAINING boundary defects still reproducible on unchanged production code. All eight were reproduced first, then
+A second independent review of the SOCIAL-5B delivery (`865a07a`) likewise withheld acceptance while retaining the
+F1–F6 repairs, and found eight REMAINING boundary defects still reproducible on unchanged production code. All eight were reproduced first, then
 repaired together as one closeout. No provider was activated, no data acquired, no configuration, dependency,
 durable schema, journal, ledger, cost, controls, risk, execution or trading-permission path changed, no stage
 calibration was performed, and no expected count was moved to match an over-permissive validator: where the honest
@@ -2306,6 +2307,80 @@ used `'not-a-clock'` to mean "no clock".
 `UNKNOWN / calibrated:false`; the independent stage labels, the claim-association seam and the `serpent-evidence-1`
 packet limitations remain honestly deferred and are not these defects. The five legacy execution assets are not a
 research universe. Authority stays `NONE` / `RESEARCH_ONLY` on every surface.
+
+### 5Y. SOCIAL-5B EXISTING-CONTRACT COMPLETION — nine remaining boundaries finished
+
+A third independent review of the SOCIAL-5B delivery (`32e074f`) found that the previous repair fixed the original
+narrow examples but did not finish the relationships between records, provenance, saved summaries and actual I/O.
+All nine remaining findings were reproduced on unchanged production code before editing, and repaired together. No
+provider was activated, no data acquired, no configuration, dependency, durable schema, journal, ledger, cost,
+controls, risk, execution or trading-permission path changed, no artifact shape or recipe version changed, and no
+stage calibration was performed.
+
+**C1 — a saved dataset's labels escaped its own archive provenance.** Backdating the reference AND every horizon
+floor together left every row-local law satisfied, so publication, reopening and `evaluate` all accepted it and an
+honest count of zero as-of-trainable discovery labels became one. A row-local validator cannot prove a knowledge
+floor: the fact that fixes it is not in the row. The containing dataset's validated provenance is now applied
+through the one shared join — the archive reader already proves retrieval `<=` creation, which makes the recipe's
+floors exactly `max(anchor, creation)` and `max(horizon end, creation)`, recomputable from metadata already
+recorded. Equality to the recipe is required, not merely a later timestamp. A malformed context is corruption and is
+never downgraded to "no context"; an omitted context is a distinct, honest row-only call.
+
+**C2 — a report was trusted in place of a validator.** A negative `rows.primary` and a false
+`stageCalibration: PERFORMED` were accepted because `report.txt` was regenerated from the mutated payload and every
+checksum matched. One complete evaluation-payload validator now runs at generation, publication and standalone
+reopening — constants, blockers, laws, populations, partitions, per-horizon state totals, summary shape and quantile
+ordering, learnability bounds and breakdown coverage — and only then is the rendering required to match it.
+
+**C3 — artifact metadata had no closed schema.** A dataset declaring `inputs: null` — no snapshot digest, no archive
+identity, no provenance at all — sealed and reopened cleanly. Every nested manifest, coverage and census structure
+now has a declared closed shape, required nested identities and reconciled repeated copies, and declared summaries
+are recomputed from the sealed rows: two matching but wrong copies satisfy nothing.
+
+**C4 — the derivation clock was substituted by the decision clock.** An input arriving after `featureAsOfTs` but
+before the later durable decision passed. The nested clock law now bounds inputs by the derivation they fed, which
+is also what upstream `validateDependencyManifest` does.
+
+**C5 — the retained dependency graph lost the relationships that make it a graph.** Duplicate node identities,
+missing endpoints, self-edges, repeated edges, a derived node dated before its parent and cycles all survived
+projection. The upstream relational law now survives the copy, applied at generation, snapshot reopening, feature
+reopening and evaluation; truncation stays disclosed and consequential and never legalizes a malformed graph.
+
+**C6 — outcome states were checked as members, not combinations.** `ARCHIVE_ABSENT` could sit beside `KNOWN`
+excursions. Source absence is now all-or-nothing under one reason with no reference, reasons are not interchangeable
+across states, a masked reference cannot coexist with a resolved horizon, and the row verdict is the recipe's own
+function of its horizon states. The lawful `AVAILABLE`-with-masked-horizons and all-censored `PARTIAL` combinations
+are preserved exactly.
+
+**C7 — the streaming parser existed but production did not use it.** Verification and archive paths still buffered
+whole files, and hashing and parsing were separate reads, so a digest did not describe the bytes the records came
+from. Every production JSONL member is now consumed exactly once in bounded chunks with the digest taken over those
+same bytes. Writers loop to the last byte (a short `writeSync` no longer becomes a completed record), zero progress
+is a failure, and a failed write, flush or validation never becomes a seal. Readers close on every exit and an
+abandoned read publishes no integrity at all. Writer and reader now charge a record the same bytes, including the
+newline the writer emits.
+
+**C8 — a rejection echoed the input that caused it.** The malformed-clock error serialized the supplied value, and
+an undeclared-key error serialized the attacker-chosen key. Diagnostics now name safe structural facts only — the
+declared field we expected, the ordinal position of an undeclared one, the JavaScript type of a bad value.
+
+**C9 — the doctrine overstated a review outcome.** Section 5W said the `32637195` review "accepted the foundation".
+It withheld acceptance while retaining the useful repairs; that wording is corrected above, as is the corresponding
+sentence in 5X.
+
+**Also in this closeout.** Code identity moved into its own module so the metadata validator can check a recorded
+identity without importing the orchestration that produces one; the new validator and I/O modules join the
+discovered source closure, which still includes `evidence/contract.js`. Two existing fixtures that encoded a
+repaired defect were corrected rather than the law relaxed. `ARRAY_CATALOGUE` now records `dependencyNodes.knownAtTs`
+as required rather than nullable, matching the upstream contract it always had to obey.
+
+**Unchanged, and not claimed.** Code that passes its own validators is not evaluated history: real history is still
+NOT evaluated, stage calibration remains NOT PERFORMED with the live stage `UNKNOWN / calibrated:false`, and there
+is no fitted model and no operational use. Standalone artifact validation establishes declared schema, internal
+consistency and byte integrity — it is not independent attestation of absent source datasets. The independent stage
+labels, the claim-association seam, the source-profile context and the `serpent-evidence-1` packet limitations
+remain honestly deferred. The five legacy execution assets are not a research universe. Authority stays `NONE` /
+`RESEARCH_ONLY` on every surface. This implementation has been tested, not independently accepted.
 
 ---
 

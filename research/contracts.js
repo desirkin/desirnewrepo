@@ -62,7 +62,19 @@ export const canonicalDigest = (v) => sha256Hex(canonicalJson(v));
 export const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
 // four-decimal canonical rounding: negative zero normalized; NaN / Infinity refused rather than serialized
 export const round4 = (v) => { if (!isFiniteNum(v)) fail('VALIDATION_FAILURE', 'a canonical numeric output must be finite'); const r = Number(v.toFixed(4)); return Object.is(r, -0) ? 0 : r; };
-export const exactKeys = (o, keys) => { if (!isPlainObject(o)) return 'not an object'; for (const k of Object.keys(o)) if (!keys.includes(k)) return `undeclared key '${k}'`; for (const k of keys) if (!(k in o)) return `missing key '${k}'`; return null; };
+// DIAGNOSTICS NEVER ECHO INPUT. A rejected record is described by SAFE STRUCTURAL FACTS — the declared field name
+// we were looking for, the ordinal position of an undeclared one, the JavaScript type of a bad value — never by the
+// value or key text the input supplied. An attacker-chosen string in a manifest field or an unknown key must not
+// reach an error message, a serialized ResearchError, a log line or a CLI diagnostic. A length cap is not
+// sanitization: 60 characters of raw input is still raw input.
+export const safeType = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v === 'object' ? 'object' : typeof v);
+export const exactKeys = (o, keys) => {
+  if (!isPlainObject(o)) return 'not an object';
+  const present = Object.keys(o);
+  for (let i = 0; i < present.length; i += 1) if (!keys.includes(present[i])) return `undeclared key at position ${i + 1} of ${present.length}`;
+  for (const k of keys) if (!(k in o)) return `missing key '${k}'`; // OUR OWN declared name, never the input's
+  return null;
+};
 // a strict, unambiguous UTC instant: YYYY-MM-DDTHH:MM:SS[.mmm]Z that round-trips; anything else (offsets, no Z, dates) is refused
 export function parseUtcInstant(text) {
   if (typeof text !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(text)) return null;
@@ -104,9 +116,14 @@ export const FORBIDDEN_LEAF_RE = /^(note|notes|detail|description|reason|text|ha
 // The ONLY lawful absence markers, and the nested INPUT-CLOCK law. Absence is not nullability: a leaf the catalogue
 // declares required may never be omitted or moved into the absence map, whatever value that map carries.
 export const ABSENCE_VALUES = Object.freeze(['NOT_RECORDED', 'SHADOW_ROW_NO_SOCIAL_DEPENDENCY']);
-// Which catalogued array members are KNOWLEDGE clocks (an input cannot be known after the derivation it fed) and
+// Which catalogued array members are KNOWLEDGE clocks (an input cannot be known after the DERIVATION it fed) and
 // which are OBSERVATION clocks (a thing is observed at or before it becomes known). These are the dossier's own
 // relationships, applied to the projection — never one universal cutoff over every timestamp-shaped field.
+//
+// THE DERIVATION CLOCK IS featureAsOfTs, NOT decisionKnownAtTs. They are different clocks: the dossier is derived
+// as of its own asOfTs and only later becomes a durable decision. Upstream validateDependencyManifest bounds every
+// dependency-node clock by the dossier's asOfTs for exactly this reason. An input that arrives BETWEEN the two
+// cannot retroactively have fed the earlier derivation, so comparing it against the later decision is not the law.
 export const ARRAY_CLOCK_LAW = Object.freeze({
   triggers: { known: ['knownAtTs'], observedBeforeKnown: [['observedTs', 'knownAtTs']] },
   claims: { known: ['firstKnownTs', 'latestKnownTs'], observedBeforeKnown: [['firstKnownTs', 'latestKnownTs']] },
@@ -114,6 +131,8 @@ export const ARRAY_CLOCK_LAW = Object.freeze({
   notices: { known: ['knownAtTs'], observedBeforeKnown: [['observedTs', 'knownAtTs']] },
   dependencyNodes: { known: ['knownAtTs'], observedBeforeKnown: [] },
 });
+// Catalogued LEAF clocks that are inputs to the derivation rather than the derivation or decision itself.
+export const DERIVATION_INPUT_LEAF_CLOCKS = Object.freeze(['episode.onsetKnownAtTs', 'episode.onsetObservedTs', 'decision.firstTriggerKnownAtTs', 'decision.latestInputKnownAtTs', 'clock.firstInvestigationKnownAtTs', 'participation.oldestKnownAtTs', 'participation.latestKnownAtTs']);
 export const ENTRANCE_LABELS = RESEARCH_ENTRANCE_KINDS; // the row-level entrance labels ARE the dossier's trigger kinds
 export const MAX_ID_CHARS = 200;
 export const MAX_CODE_CHARS = 48;
@@ -292,7 +311,7 @@ export const ARRAY_CATALOGUE = deepFreeze({
   missingKinds: { path: ['dossier', 'missing'], max: 24, element: 'object', keys: { kind: 'code' } },
   proposalKinds: { path: ['proposalKinds'], max: 8, element: RESEARCH_PROPOSAL_KINDS },
   packetReasonCodes: { path: ['packetReasonCodes'], max: 8, element: RESEARCH_PACKET_REASON_CODES },
-  dependencyNodes: { path: ['dossier', 'dependencies', 'nodes'], max: 192, element: 'object', keys: { id: 'id', kind: RESEARCH_DEPENDENCY_NODE_KINDS, knownAtTs: 'ts?' } },
+  dependencyNodes: { path: ['dossier', 'dependencies', 'nodes'], max: 192, element: 'object', keys: { id: 'id', kind: RESEARCH_DEPENDENCY_NODE_KINDS, knownAtTs: 'ts' } }, // upstream requires the clock; '?' here was a projection-table slip, not a lawful nullability
   dependencyEdges: { path: ['dossier', 'dependencies', 'edges'], max: 384, element: 'object', keys: { from: 'id', to: 'id', relation: RESEARCH_DEPENDENCY_RELATIONS } },
 });
 // documented support windows of the market-light notice fields (wide eye): zVol / zRet are z-scored against the

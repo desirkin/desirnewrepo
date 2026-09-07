@@ -14,7 +14,7 @@
 import { EVALUATION_VERSION, SPLIT_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, MAX_HORIZON_MS, FEATURE_CATALOGUE, NOTICE_SUPPORT_MS, GROUPING_DEPENDENCY_KINDS, SPLITS, CALIBRATION_BLOCKERS, LIMITS, AUTHORITY, PURPOSE, fail, isTs, isFiniteNum, summarize, deepFreeze, isoOf, PARTICIPATION_SUPPORT_WINDOW_MS, WIDEEYE_BASELINE_SUPPORT_MS } from './contracts.js';
 import { anchorOf } from './outcomes.js';
 import { validateFeatureRow } from './features.js';
-import { validateOutcomeRow } from './outcomes.js';
+import { validateOutcomeRow, outcomeContextError, archiveContextError } from './outcomes.js';
 
 const TRIGGER_KIND_TO_DEPENDENCY = { PARTICIPATION_LED: 'SOCIAL_SOURCE', MARKET_LED: 'WIDE_EYE_NOTICE', INFORMATION_LED: 'CLAIM' };
 const SPEC_BY_NAME = new Map(FEATURE_CATALOGUE.map((f) => [f.name, f]));
@@ -56,9 +56,20 @@ const stateCounts = () => ({ KNOWN: 0, CENSORED: 0, NOT_YET_KNOWN: 0, OUTCOME_UN
 // a CORRUPT INPUT. Rows are never silently re-dated and an archive clock is never adjusted to make a bad row valid.
 // Identity is exact SET equality (unique feature ids, unique outcome ids, a bijection), never equal counts: two
 // copies of one feature beside an orphan label must not balance the books.
-export function datasetJoinError({ featureRows, outcomeRows, asOfTs }) {
+// `archiveContext` is DELIBERATELY three-valued and the three are never conflated:
+//   omitted (undefined) — a pure row-only call with no source context in scope. The row-local law runs; no claim of
+//                         archive verification is made, because the caller supplied no archive fact to check.
+//   a valid context     — the containing dataset's validated provenance. The contextual floor law runs as well.
+//   anything else       — MALFORMED. It is refused, never silently downgraded to "no context". Production dataset
+//                         publication, reopening and evaluate always supply a validated context; no caller may drop
+//                         it to pass validation.
+export function datasetJoinError({ featureRows, outcomeRows, asOfTs, archiveContext = undefined }) {
   if (!Array.isArray(featureRows) || !Array.isArray(outcomeRows)) return { error: 'dataset: feature and outcome rows must be lists' };
   if (!isTs(asOfTs)) return { error: 'dataset: an as-of clock is required to reopen a dataset' };
+  const contextSupplied = archiveContext !== undefined;
+  if (contextSupplied) { const ce = archiveContextError(archiveContext); if (ce) return { error: `dataset: ${ce}` }; }
+  // the row limit is enforced on BOTH lists before any large map is built
+  if (featureRows.length > LIMITS.maxSelectedRows || outcomeRows.length > LIMITS.maxSelectedRows) return { error: 'dataset: row lists exceed the selected row limit' };
   const byId = new Map();
   for (const o of outcomeRows) {
     const e = validateOutcomeRow(o); if (e) return { error: e };
@@ -82,16 +93,18 @@ export function datasetJoinError({ featureRows, outcomeRows, asOfTs }) {
       if ((x.state === 'KNOWN' || x.state === 'CENSORED') && x.outcomeKnownAtTs > asOfTs) return { error: `dataset: outcome row ${r.rowId} horizon ${h}m is ${x.state} although it becomes knowable only at ${isoOf(x.outcomeKnownAtTs)}` };
       if (x.state === 'NOT_YET_KNOWN' && x.outcomeKnownAtTs <= asOfTs) return { error: `dataset: outcome row ${r.rowId} horizon ${h}m is masked although it was knowable at the dataset as-of` };
     }
+    // and, when the dataset's own validated archive provenance is in scope, the CONTEXTUAL floor law
+    if (contextSupplied) { const ae = outcomeContextError(o, archiveContext, { where: 'dataset outcome row' }); if (ae) return { error: ae }; }
     rows.push({ f: r, o });
   }
   if (byId.size !== rows.length) return { error: 'dataset: outcome rows exist without a feature row' };
   return { rows };
 }
 
-export function evaluateDataset({ featureRows, outcomeRows, asOfTs, splitAtTs, coverageState = null, limits = LIMITS } = {}) {
+export function evaluateDataset({ featureRows, outcomeRows, asOfTs, splitAtTs, coverageState = null, archiveContext = undefined, limits = LIMITS } = {}) {
   if (!isTs(asOfTs) || !isTs(splitAtTs)) fail('INVALID_REQUEST', 'as-of and split-at clocks are required');
   if (splitAtTs >= asOfTs) fail('INVALID_REQUEST', 'split-at must be earlier than the dataset as-of');
-  const joined = datasetJoinError({ featureRows, outcomeRows, asOfTs }); if (joined.error) fail('CORRUPT_INPUT', joined.error);
+  const joined = datasetJoinError({ featureRows, outcomeRows, asOfTs, archiveContext }); if (joined.error) fail('CORRUPT_INPUT', joined.error);
   const rows = joined.rows;
   const primary = rows.filter((x) => x.f.cohort === 'PRIMARY'); const shadow = rows.filter((x) => x.f.cohort === 'SHADOW');
   // ---- grouping (primary only) ----
