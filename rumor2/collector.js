@@ -284,7 +284,9 @@ export function startRumor2({
         now, log, mode: socialMode, fixtures: socialFixtures, socketFactory: socialSocketFactory, ...socialOptions,
       }))
     : null;
-  const xWatchScope = () => { const c = researchScope.candidate({ knownAtTs: Math.floor(now()) }); return resolveXWatchScope({ research: researchCfg.research, catalog: c.catalog ?? null }); };
+  // the WHOLE research candidate crosses the resolver boundary: a STALE / future-clock / invalid /
+  // not-accepted catalog (carried only diagnostically) never verifies a NEW paid watch scope
+  const xWatchScope = () => resolveXWatchScope({ research: researchCfg.research, candidate: researchScope.candidate({ knownAtTs: Math.floor(now()) }) });
   const socialX = socialXEnabled
     ? (socialXRuntime ?? createXRuntime({
         config: socialXConfig ?? xConfigFromEnv(),
@@ -1165,6 +1167,14 @@ export function startRumor2({
         append: (events) => activeJournal.append(events),
         lookup: typeof activeJournal.hasEventIds === 'function' ? (type, ids) => activeJournal.hasEventIds(type, ids) : null,
       });
+      // SOCIAL-4F CLOSEOUT — COMPLETE COMMIT RECEIPTS: a settle that failed AFTER real durable commits
+      // (old-scope drain rounds before a refused scope append) still reports them; the watermark and
+      // the best-effort mirror consume them exactly as ordinary settlement would — under a held fence
+      // only (an unfenced commit is the next writer's to read) and never as journal authority
+      if (!res.ok && res.committed && res.committed.lastSeq !== undefined && res.committed.lastSeq !== null && !res.committed.unadopted && fenceHeld()) {
+        cp.lastSettledEventSeq = res.committed.lastSeq;
+        for (const ev of res.committed.events ?? []) mirrorSafe(ev);
+      }
       if (!res.ok) {
         const reason = String(res.reason ?? '');
         if (reason.startsWith('CORRUPTION')) {

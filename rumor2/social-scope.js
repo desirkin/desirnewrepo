@@ -8,8 +8,10 @@
 // filter would replace a five-coin blind spot with a noisy false map.
 //
 // THE POLICY (v1), applied per post to ASCII tokens only (no Unicode folding:
-// a lookalike never casually becomes an asset match; URLs and @handles are
-// removed before tokenizing so a term inside them never matches):
+// a lookalike never casually becomes an asset match; a lookalike, combining mark,
+// Unicode digit, or invisible format character ATTACHED to a token keeps the whole
+// token unestablished — it is never erased into a valid match; URLs and @handles
+// are removed before tokenizing so a term inside them never matches):
 //   CASHTAG          $BASE                       -> research-mention candidate for a catalog market
 //   HASHTAG          #BASE (non-ambiguous only)  -> candidate
 //   VENUE_PAIR       BASE/USD or BASE-USD        -> candidate
@@ -104,7 +106,16 @@ export function compileAdmissionScope({ mode, catalogContentId = null, terms = [
   }) };
 }
 
-const stripNoise = (text) => text.replace(/https?:\/\/[^\s]+/g, ' ').replace(/\bwww\.[^\s]+/g, ' ').replace(/(^|[^A-Za-z0-9])@[A-Za-z0-9_.-]+/g, '$1 ');
+// URLs (any scheme case) and @handles are removed BEFORE tokenizing so a term inside them never matches
+const stripNoise = (text) => text.replace(/https?:\/\/\S+/giu, ' ').replace(/\bwww\.\S+/giu, ' ').replace(/(^|[^A-Za-z0-9])@[A-Za-z0-9_.-]+/g, '$1 ');
+// COMPLETE TOKEN BOUNDARIES (SOCIAL-4F CLOSEOUT): a token is delimited ONLY by whitespace (any
+// script), punctuation, symbols, separators, and controls — never by a letter, mark, digit, or
+// invisible format character of another script. `$LINK` followed by a Cyrillic letter, a combining
+// mark, a Unicode digit, or a zero-width character is ONE token whose exact ASCII spelling is not
+// established, so it is dropped as a whole — never split into a manufactured exact match. The
+// five ASCII token characters ($ # . / -) are kept inside tokens; ordinary punctuation of any
+// script still delimits, so a valid cashtag inside multilingual prose remains a match.
+const TOKEN_DELIM_RE = /(?:(?![$#./-])[\s\p{P}\p{S}\p{Z}\p{Cc}])+/u;
 
 // Deterministic admission of ONE post text under ONE scope. Returns { match, reasons,
 // candidates, unresolved }. `reasons` is the bounded string list the intake records as
@@ -115,8 +126,8 @@ export function admitSocialText(scope, { text, nativeAuthorId = null } = {}) {
   if (scope && typeof text === 'string' && text.length > 0) {
     const bases = new Set(scope.terms);
     const aliasMap = new Map(scope.aliases.map((a) => [a.alias, a.base]));
-    const raw = stripNoise(text.slice(0, MAX_SOCIAL_TEXT_CHARS)).split(/[^A-Za-z0-9$#./-]+/).filter(Boolean).slice(0, MAX_TOKENS);
-    const tokens = raw.map((t) => t.replace(/^[./-]+|[./-]+$/g, '')).filter((t) => t.length > 0 && ASCII_RE.test(t));
+    const raw = stripNoise(text.slice(0, MAX_SOCIAL_TEXT_CHARS)).split(TOKEN_DELIM_RE).filter(Boolean).slice(0, MAX_TOKENS);
+    const tokens = raw.map((t) => (ASCII_RE.test(t) ? t.replace(/^[./-]+|[./-]+$/g, '') : '')).filter((t) => t.length > 0); // a token carrying ANY non-ASCII code point is dropped whole
     const lower = tokens.map((t) => t.toLowerCase());
     let context = lower.some((t) => CONTEXT.has(t));
     const add = (base, evidence, token) => { const prev = candidates.get(base); if (!prev || SOCIAL_MATCH_EVIDENCE.indexOf(evidence) < SOCIAL_MATCH_EVIDENCE.indexOf(prev.evidence)) candidates.set(base, { base, evidence, token }); };

@@ -1707,6 +1707,77 @@ unknown-asset investigation (unresolved cashtags are a bounded diagnostic ring �
 authority interface is explicitly deferred); Bluesky live activation itself still requires the
 existing gate and a running wide eye for catalog coverage.
 
+### 5Q-R. SOCIAL-4F operational scope closeout — eight repaired laws
+
+An independent review of 930ef32 reproduced eight synthetic correctness failures in the 4F
+integration (none a deployment incident). Each is now a permanent regression
+(`test/social-4f-closeout.test.js`, RED on 930ef32) and a stated law:
+
+- **ONE verified X watch snapshot at ACTUAL activation (A).** The X runtime's upstream rule
+  manifest, local admission filter, coverage identity, and status derive from the SAME immutable
+  watch snapshot adopted when the paid stream is actually activated (`status().activeWatch`) —
+  never from a construction-time null/stale resolution. A catalog that arrives after boot therefore
+  admits the selected non-major through the real runtime -> intake -> journal path. An approved
+  watch change reaches an ACTIVE runtime as a DISCONNECTED transition: the transport closes, owed
+  Posts settle under the old snapshot (no reclassification, meter/progress preserved), and the next
+  start adopts the new snapshot for rules + filter together in a new coverage epoch. A test-injected
+  `filter` is a labelled override; positive tests use the default construction.
+- **Owed-native lifecycle continuity (B).** An admitted, validated CREATE that is enqueued but not
+  yet durable is an intake OBLIGATION. Its immediately following delete / reply / repost is admitted
+  from that TEMPORARY interest (owned by the owed envelope, released when it settles or clears;
+  `continuity.owedNativePosts`) for normal validation and settlement. Temporary interest never mints
+  source truth, an author, or a parent; it derives only from validated admitted observations; it
+  does not survive a restart — the redelivered original re-establishes it. Durable interest (journal
+  truth) stays separate (`lifecycle-continuity` vs `lifecycle-continuity-owed`).
+- **Prepared scope operations (C).** A catalog / verification / scope-activation batch is prepared
+  ONCE (immutable content, revision, predecessor binding, recorded clock) and RETAINED until its
+  append succeeds (`scope.pendingOperation`). A retry after a refused or lost acknowledgement is
+  byte-identical, so the journal collapses a committed-but-unacknowledged operation instead of
+  refusing it as corruption. A changed candidate never overwrites an owed operation; it becomes a
+  bounded following revision with its own honest clock. Order: validate candidate -> drain owed
+  old-scope work through the existing prepared-batch law -> retain the exact batch -> fence check ->
+  epoch-guarded append -> fence RE-CHECK -> adopt / replace filter / reopen.
+- **Writer loss during a scope append (D).** A fence lost after a successful append leaves valid
+  journal-ahead truth (`scope.journalAhead`); this runtime adopts nothing, opens no socket, and
+  reports STANDBY. The lawful writer hydrates the committed operation from the journal exactly once.
+- **Complete commit receipts (E).** Every successful old-scope drain commit is reported to the
+  collector (events in journal order, source count, final sequence) — also when the following scope
+  append fails (`committed` on a failed result). The collector advances its watermark and feeds the
+  best-effort mirror from those receipts under a held fence only; mirror failure never rolls back
+  journal truth.
+- **Catalog structural semantics (F).** A supported row requires the EXACT `BASE/USD` wsname
+  grammar (a suffix check is not a locator: `LINK/OTHER/USD` is excluded, never LINK), a retained
+  venue-native base identifier (missing -> UNRESOLVED `NATIVE_ID_MISSING`, never a verified supported
+  row), one native asset per research base (contradiction -> refusal), and a display base that
+  RE-DERIVES from its wsname under the two approved aliases. The survey normalizer and the Social
+  validator pin the same grammar, native-id grammar, and alias map (parity test); a rehashed
+  contradictory row is refused by the content validator, the event validator, and replay.
+- **Local acquisition clock (G).** The catalog's `observedTs` is our acquisition clock, not a social
+  author's client clock: an observation ahead of the evaluation clock is FUTURE with NO tolerance,
+  no clamp, no fabricated past observation — at the source, the builders, the validators, replay,
+  and the X resolver (which now receives the whole candidate: a catalog attached only diagnostically
+  to a STALE / UNAVAILABLE candidate verifies no new paid scope; an already adopted watch continues
+  under its snapshot until a stop). Social source-time quarantine and unknown-time retention are
+  unchanged.
+- **Complete token boundaries (H).** A token is delimited only by whitespace (any script),
+  punctuation, symbols, separators, and controls. A lookalike letter, combining mark, Unicode digit,
+  or invisible format character ATTACHED to a token keeps the whole token unestablished — it is
+  dropped whole, never split into a manufactured exact match. Multilingual prose, Unicode
+  punctuation, emoji, digit-prefixed tickers, and any-case URL schemes behave. (Consequence: an
+  invisible character glued to a cashtag no longer matches; SCOPE-2 was tightened accordingly.)
+- **Receipt / scope association contract.** The scope that governed a durable source is the
+  provider's latest activation preceding the source IN JOURNAL ORDER (`replay.observedScope`). A
+  source drained under the old scope and the new activation may share one knowledge millisecond;
+  journal order — never an invented millisecond or a lexical id — keeps them apart. The clock-only
+  as-of law (`socialScopeAt`) is an upper bound at that shared millisecond, disclosed as such.
+
+**Cutover note.** No journal was edited. A previously accepted catalog record that violates the
+tightened structural invariants (none exists for real venue rows, which always carry a native
+base) makes that Social history invalid on hydrate — fail closed and reported, never silently
+blessed or re-mapped. The X runtime's local second boundary keeps the legacy case-insensitive
+token filter (X's own rule engine decides paid matching); the research admission policy above
+governs the catalog-backed Bluesky lane.
+
 ---
 
 ## 6. Authority audit
@@ -1780,7 +1851,10 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
   confined to the five legacy config assets; discovery (catalog), local admission (durable versioned
   scope), paid watch (explicit bounded selection; plans PROPOSED only), deep observation, and legacy
   permission are separate and observable. Not a live rollout: no provider activation, paid access,
-  historical knowledge, or trading authority was invented.
+  historical knowledge, or trading authority was invented. **Operational scope closeout done
+  (§5Q-R):** X admission from one adopted watch snapshot, owed-native lifecycle continuity, prepared
+  scope operations with fence re-check and complete commit receipts, catalog structural / clock /
+  token truth.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

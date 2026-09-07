@@ -20,7 +20,7 @@ export const WATCH_PLAN_DEFAULT_CAP = SOCIAL_X_WATCH_MAX_ASSETS;
 export const WATCH_PLAN_PRIORITY = Object.freeze(['OPERATOR_CANDIDATE', 'RIPPLE_NOTICE', 'MISSED_NOTICE']); // explicit bounded input priority, in this order
 export const WATCH_PLAN_DEFERRAL_REASONS = Object.freeze(['RESOURCE_CAP', 'NO_RESEARCH_SIGNAL_YET']);
 export const X_WATCH_SCOPE_MODES = Object.freeze(['NOT_CONFIGURED', 'EXPLICIT_STATIC', 'INJECTED_STATIC']);
-export const X_WATCH_SCOPE_REASONS = Object.freeze(['WATCH_SCOPE_NOT_CONFIGURED', 'WATCH_SCOPE_CATALOG_UNAVAILABLE', 'WATCH_SCOPE_EMPTY_AFTER_VERIFICATION', 'WATCH_SCOPE_EXCEEDS_CAP', 'WATCH_SCOPE_MALFORMED']);
+export const X_WATCH_SCOPE_REASONS = Object.freeze(['WATCH_SCOPE_NOT_CONFIGURED', 'WATCH_SCOPE_CATALOG_UNAVAILABLE', 'WATCH_SCOPE_CATALOG_STALE', 'WATCH_SCOPE_EMPTY_AFTER_VERIFICATION', 'WATCH_SCOPE_EXCEEDS_CAP', 'WATCH_SCOPE_MALFORMED']);
 const MAX_NOTICES = 500; const MAX_OPERATOR_CANDIDATES = 100;
 const TICKER_RE = /^[A-Z0-9]{2,15}$/;
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -29,8 +29,19 @@ export const xWatchScopeId = ({ mode, tickers, aliases }) => contentHash(canonic
 
 // Resolve the EXPLICIT X watch scope: operator tickers verified against the accepted catalog
 // (or a test-injected static list). Never derived from config.universe, never from a plan.
-export function resolveXWatchScope({ research = null, catalog = null, injected = null } = {}) {
-  const fail = (reason, detail, extra = {}) => ({ ok: false, mode: injected ? 'INJECTED_STATIC' : (research?.xWatch?.mode ?? 'NOT_CONFIGURED'), reason, detail, tickers: [], aliases: [], scopeId: null, ...extra });
+// SOCIAL-4F CLOSEOUT: catalog FRESHNESS survives this boundary. The collector passes the research
+// scope source's whole `candidate` — a catalog carried only diagnostically on a STALE / UNAVAILABLE
+// (future-clock, invalid, not-accepted) candidate is NOT permission to verify a NEW paid scope.
+export function resolveXWatchScope({ research = null, catalog = null, injected = null, candidate = null } = {}) {
+  const fail = (reason, detail, extra = {}) => ({ ok: false, mode: injected ? 'INJECTED_STATIC' : (research?.xWatch?.mode ?? 'NOT_CONFIGURED'), reason, detail, tickers: [], aliases: [], scopeId: null, catalogStatus: candidate ? candidate.status ?? null : (catalog ? 'CATALOG_BACKED' : null), ...extra });
+  if (candidate !== null && injected === null) {
+    if (!candidate || typeof candidate !== 'object') return fail('WATCH_SCOPE_CATALOG_UNAVAILABLE', 'no research scope candidate');
+    const xw0 = research?.xWatch;
+    if (!xw0 || xw0.mode === 'NOT_CONFIGURED') return fail('WATCH_SCOPE_NOT_CONFIGURED', 'no explicit X watch selection is configured (socialResearch.xWatch) — zero X requests');
+    if (candidate.status === 'STALE') return fail('WATCH_SCOPE_CATALOG_STALE', `${candidate.reason ?? 'the accepted catalog is stale'} — a stale catalog verifies no NEW paid scope`);
+    if (candidate.status !== 'CATALOG_BACKED' || !candidate.catalog) return fail('WATCH_SCOPE_CATALOG_UNAVAILABLE', `${candidate.reason ?? candidate.status ?? 'no fresh accepted catalog'} — explicit tickers are verified only against a FRESH accepted catalog`);
+    catalog = candidate.catalog;
+  }
   if (injected) {
     const tickers = [...new Set((Array.isArray(injected.tickers) ? injected.tickers : []).filter((t) => typeof t === 'string' && TICKER_RE.test(t)))].sort();
     const aliases = [...new Set((Array.isArray(injected.aliases) ? injected.aliases : []).filter((a) => typeof a === 'string'))].sort();
@@ -49,7 +60,7 @@ export function resolveXWatchScope({ research = null, catalog = null, injected =
   if (verified.length === 0) return fail('WATCH_SCOPE_EMPTY_AFTER_VERIFICATION', `none of the ${xw.tickers.length} configured tickers is in the accepted catalog`, { rejected });
   if (verified.length > cap) return fail('WATCH_SCOPE_EXCEEDS_CAP', `${verified.length} verified tickers exceed the cap ${cap}`, { rejected });
   const aliases = aliasFactsFor(verified).map((a) => a.alias);
-  return deepFreeze({ ok: true, mode: 'EXPLICIT_STATIC', reason: null, detail: `operator-configured explicit scope verified against catalog ${catalog.contentId.slice(0, 12)}`, tickers: verified, aliases, verified, rejected, scopeId: xWatchScopeId({ mode: 'EXPLICIT_STATIC', tickers: verified, aliases }), catalogContentId: catalog.contentId });
+  return deepFreeze({ ok: true, mode: 'EXPLICIT_STATIC', reason: null, detail: `operator-configured explicit scope verified against catalog ${catalog.contentId.slice(0, 12)}`, tickers: verified, aliases, verified, rejected, scopeId: xWatchScopeId({ mode: 'EXPLICIT_STATIC', tickers: verified, aliases }), catalogContentId: catalog.contentId, catalogObservedTs: catalog.observedTs, catalogStatus: 'CATALOG_BACKED' });
 }
 
 // Build the observation-only PROPOSED plan. Inputs are the accepted catalog and ALREADY-KNOWN

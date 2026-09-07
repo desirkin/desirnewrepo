@@ -46,6 +46,21 @@
 //     left the scope — never a fabricated parent, never invented content.
 // Without a scopeSource the legacy injected filter applies unchanged (tests).
 //
+// SOCIAL-4F CLOSEOUT — three repaired laws:
+//   * OWED-NATIVE CONTINUITY: an admitted, validated CREATE that is enqueued but not yet durable
+//     is an intake OBLIGATION; its immediately following delete / reply / repost is admitted for
+//     normal validation and settlement from that TEMPORARY interest (owned by the owed envelope,
+//     released when it settles or clears) — never from raw ids, never minting independent truth.
+//   * PREPARED SCOPE OPERATIONS: a catalog / verification / scope activation batch is prepared
+//     ONCE (immutable content, revision, predecessor binding, recorded clocks) and RETAINED until
+//     its append succeeds; a retry after a refused or lost acknowledgement is byte-identical so
+//     the journal collapses it. The live fence is checked immediately before the append AND
+//     re-checked after it: a fence lost after a successful append leaves valid journal-ahead
+//     truth for the lawful writer to restore — this runtime adopts nothing and opens nothing.
+//   * COMPLETE COMMIT RECEIPTS: every successful old-scope drain commit is reported to the
+//     collector (events, source count, final sequence), also when the following scope append
+//     fails (`committed` on a failed result) — never "zero truth advanced" after a real commit.
+//
 // ZERO AUTHORITY (§30): this runtime produces source-only evidence + progress
 // events. No claim, proposition, Attention, HYPED, eligibility, score, size,
 // order, execution, or Socrates path exists here.
@@ -113,7 +128,7 @@ export function createSocialRuntime({
   let pendingBatch = null; // { envelopes, events, projected, knownAtTs } retained whole until settled
   let retainedEnvelopes = []; // SOCIAL-4D COMPLETION: envelopes drained before a FAILED lookup stay owed — never drain-and-loss
   let lastCursorOnlyTs = null;
-  const stats = { hydrations: 0, settles: 0, appended: 0, cursorAdvances: 0, durableDuplicates: 0, invalid: 0, appendFailures: 0, stops: 0, annotations: 0, pendingRecords: 0, knownSameEvent: 0, indexDivergences: 0, scopeActivations: 0, scopeVerifications: 0, scopeTransitionsHeld: 0, continuityAdmissions: 0, unresolvedNotes: 0 };
+  const stats = { hydrations: 0, settles: 0, appended: 0, cursorAdvances: 0, durableDuplicates: 0, invalid: 0, appendFailures: 0, stops: 0, annotations: 0, pendingRecords: 0, knownSameEvent: 0, indexDivergences: 0, scopeActivations: 0, scopeVerifications: 0, scopeTransitionsHeld: 0, continuityAdmissions: 0, owedContinuityAdmissions: 0, unresolvedNotes: 0, scopeOpRetries: 0, scopeAppendsUnadopted: 0 };
   let lastError = null;
   // SOCIAL-4F scope state
   let activeScope = null; // { scopeRevision, filterId, mode, catalogContentId, catalogObservedTs, activatedKnownAtTs, admission, restored }
@@ -123,6 +138,8 @@ export function createSocialRuntime({
   let knownNative = new Set(); // provider-native post ids already durable (lifecycle continuity), rebuilt on every hydrate
   let coverage = { state: scoped ? 'UNAVAILABLE' : 'LEGACY_FILTER', reason: scoped ? 'NOT_EVALUATED_YET' : 'injected legacy filter (no research scope source)', freshness: null };
   let streamHeld = false; // a scope transition is holding new intake until owed work drains
+  let pendingScopeOp = null; // SOCIAL-4F CLOSEOUT: the PREPARED, retained catalog/verification/scope batch awaiting its durable append
+  let journalAhead = null; // { scopeRevision } — a scope append committed after the fence was lost: durable truth this runtime did NOT adopt
   const unresolvedNotes = []; // bounded ring of { token, reason, count } — research information only
 
   const urlFor = ({ cursor }) => (buildUrl ? buildUrl({ cursor }) : jetstreamUrl({ host, cursor }));
@@ -137,10 +154,15 @@ export function createSocialRuntime({
   };
   // The ONE admission decision under the active scope (+ lifecycle continuity from retained
   // native identity). A missing active scope admits NOTHING.
+  // Lifecycle interest: DURABLE native identity (journal truth) or TEMPORARY interest owned by an
+  // admitted, still-owed envelope (intake obligation) — the two are distinguished in the reasons.
+  const owedNative = (id) => typeof id === 'string' && intake !== null && intake.owesNative(id);
   function admitObservation(o) {
     const a = activeScope ? admitSocialText(activeScope.admission, { text: o.text, nativeAuthorId: o.nativeAuthorId }) : null;
     if (a && a.match) { noteUnresolved(a.unresolved); return { match: true, reasons: a.reasons }; }
-    if (knownNative.has(o.nativePostId) || (typeof o.parentNativePostId === 'string' && knownNative.has(o.parentNativePostId))) { stats.continuityAdmissions += 1; return { match: true, reasons: ['lifecycle-continuity'] }; }
+    const parent = typeof o.parentNativePostId === 'string' ? o.parentNativePostId : null;
+    if (knownNative.has(o.nativePostId) || (parent !== null && knownNative.has(parent))) { stats.continuityAdmissions += 1; return { match: true, reasons: ['lifecycle-continuity'] }; }
+    if (owedNative(o.nativePostId) || (parent !== null && owedNative(parent))) { stats.owedContinuityAdmissions += 1; return { match: true, reasons: ['lifecycle-continuity-owed'] }; }
     if (a) noteUnresolved(a.unresolved);
     return { match: false, reasons: [] };
   }
@@ -170,6 +192,7 @@ export function createSocialRuntime({
     if (!r.ok) { state = 'WITHHELD'; lastError = r.error; hydrated = false; return { ok: false, error: r.error }; }
     reconciler.hydrate(r);
     knownNative = new Set([...r.targets.values()].filter((e) => e.provider === provider.id).map((e) => e.nativePostId));
+    pendingScopeOp = null; journalAhead = null; // journal truth decides: a committed operation is restored below, an uncommitted one is re-prepared
     if (scoped) { const err = restoreScope(r); if (err) { state = 'WITHHELD'; lastError = err; hydrated = false; return { ok: false, error: err }; } }
     const c = r.cursors[provider.id];
     // never regress an already-known cursor within one process (§24)
@@ -206,7 +229,7 @@ export function createSocialRuntime({
   function stop(reason = 'stopped') {
     if (stream) { stream.stop(); stream = null; stats.stops += 1; }
     if (intake) { intake.clear(); intake = null; }
-    pendingBatch = null; retainedEnvelopes = []; streamHeld = false;
+    pendingBatch = null; retainedEnvelopes = []; streamHeld = false; pendingScopeOp = null; // the lawful writer re-hydrates from the journal before any new scope operation
     if (state === 'ACTIVE') state = 'STANDBY';
     log(`social-runtime: ${provider.id} stopped (${reason})`);
   }
@@ -307,9 +330,48 @@ export function createSocialRuntime({
 
   const owedWork = () => (intake !== null && (intake.size() > 0 || retainedEnvelopes.length > 0 || pendingBatch !== null));
 
+  // SOCIAL-4F CLOSEOUT — append ONE prepared scope operation (byte-identical on every retry):
+  // fence check immediately before the append, epoch-guarded append, fence RE-CHECK before any
+  // adoption, filter replacement, or (re)connect. Returns a settle result.
+  async function appendScopeOp({ fenceHeld, append }) {
+    const op = pendingScopeOp;
+    if (op.attempts > 0) stats.scopeOpRetries += 1;
+    op.attempts += 1;
+    if (!fenceHeld()) { stop('writer authority lost before scope append'); state = 'STANDBY'; return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
+    const r = await append(op.events);
+    if (!r?.ok) { stats.appendFailures += 1; lastError = r?.reason ?? 'append failed'; return { ok: false, reason: r?.reason ?? 'UNAVAILABLE', scopeOpPending: op.kind }; } // retained whole; the next tick retries the SAME bytes
+    if (!fenceHeld()) {
+      // JOURNAL-AHEAD: the operation is durable but this runtime no longer holds authority — adopt
+      // nothing, open nothing; the lawful writer restores it from the journal on hydrate
+      stats.scopeAppendsUnadopted += 1; journalAhead = { kind: op.kind, scopeRevision: op.adopt.scopeRevision ?? null, lastSeq: r.lastSeq };
+      stop('writer authority lost after scope append (journal-ahead; not adopted)'); state = 'STANDBY';
+      return { ok: false, reason: 'WRITER_FENCE_LOST', committed: { events: op.events, appended: 0, settled: 0, lastSeq: r.lastSeq, unadopted: true } };
+    }
+    pendingScopeOp = null;
+    if (op.kind === 'VERIFY') {
+      lastVerified = { contentId: op.adopt.contentId, observedTs: op.adopt.observedTs, knownAtTs: op.knownAtTs }; stats.scopeVerifications += 1; lastError = null;
+      return { ok: true, settled: 0, appended: 0, lastSeq: r.lastSeq, events: op.events, scopeVerified: true };
+    }
+    // ADOPT after the durable commit AND under a held fence: replace the immutable admission context, then reopen
+    const a = op.adopt;
+    if (a.catalogContentId) knownCatalogIds.add(a.catalogContentId);
+    activeScope = { scopeRevision: a.scopeRevision, filterId: a.scope.filterId, mode: a.scope.mode, catalogContentId: a.scope.catalogContentId, catalogObservedTs: a.catalogObservedTs, activatedKnownAtTs: op.knownAtTs, admission: a.scope, restored: false };
+    stats.scopeActivations += 1; lastError = null;
+    const reopen = streamHeld || (a.previous === null && state !== 'STANDBY'); // a held transition reopens; the FIRST activation opens the ear the collector already asked for
+    if (intake) { intake.clear(); intake = null; }
+    pendingBatch = null; retainedEnvelopes = []; streamHeld = false;
+    if (reopen) start(); // (re)connect from the DURABLE cursor under the new, now-durable admission context
+    return { ok: true, settled: 0, appended: 0, lastSeq: r.lastSeq, events: op.events, scopeActivated: a.scopeRevision };
+  }
+
   // SOCIAL-4F: reconcile the research scope BEFORE evidence settles. Returns a settle result when
   // something was appended (or a transition is owed / failed), else null (proceed normally).
+  // `committed` carries every successful old-scope drain commit of THIS call, whatever follows.
   async function reconcileScope({ fenceHeld, append, lookup }) {
+    const committed = { events: [], appended: 0, settled: 0, lastSeq: null };
+    const withCommitted = (r) => (committed.events.length > 0 ? { ...r, committed: { ...committed, events: [...committed.events] } } : r);
+    // a PREPARED operation is retried first, byte-identically — a changed candidate never overwrites it
+    if (pendingScopeOp) return appendScopeOp({ fenceHeld, append });
     const knownAtTs = Math.floor(now());
     let cand;
     try { cand = scopeSource.candidate({ knownAtTs }); } catch (err) { cand = { status: 'UNAVAILABLE', reason: `SCOPE_SOURCE_THREW: ${String(err?.message ?? err).slice(0, 120)}` }; }
@@ -318,16 +380,13 @@ export function createSocialRuntime({
     if (cand.status === 'STALE') { if (activeScope) coverage.reason = `${cand.reason} — continuing under durable scope revision ${activeScope.scopeRevision}`; return null; } // stale data grants no NEW scope
     const scope = cand.scope;
     if (activeScope && activeScope.filterId === scope.filterId) {
-      // unchanged scope: at most ONE small freshness record per advanced acquisition clock
+      // unchanged scope: at most ONE small freshness record per advanced acquisition clock — PREPARED, then appended
       if (cand.catalog && cand.catalog.contentId === activeScope.catalogContentId) {
         const seenObserved = Math.max(activeScope.catalogObservedTs ?? 0, lastVerified && lastVerified.contentId === cand.catalog.contentId ? lastVerified.observedTs : 0);
         if (cand.catalog.observedTs > seenObserved) {
-          if (!fenceHeld()) { stop('writer authority lost before scope verification'); return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
           const ev = socialCatalogVerifiedEvent({ venue: cand.catalog.venue, contentId: cand.catalog.contentId, observedTs: cand.catalog.observedTs, knownAtTs });
-          const r = await append([ev]);
-          if (!r?.ok) { stats.appendFailures += 1; lastError = r?.reason ?? 'append failed'; return { ok: false, reason: r?.reason ?? 'UNAVAILABLE' }; }
-          lastVerified = { contentId: ev.contentId, observedTs: ev.observedTs, knownAtTs }; stats.scopeVerifications += 1;
-          return { ok: true, settled: 0, appended: 0, lastSeq: r.lastSeq, events: [ev], scopeVerified: true };
+          pendingScopeOp = { kind: 'VERIFY', events: [ev], knownAtTs, attempts: 0, adopt: { contentId: ev.contentId, observedTs: ev.observedTs } };
+          return appendScopeOp({ fenceHeld, append });
         }
       }
       return null;
@@ -337,29 +396,25 @@ export function createSocialRuntime({
     let rounds = 0;
     while (owedWork() && rounds < maxScopeDrainRounds) {
       rounds += 1;
-      if (!fenceHeld()) { stop('writer authority lost during scope transition'); return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
+      if (!fenceHeld()) { stop('writer authority lost during scope transition'); return withCommitted({ ok: false, reason: 'WRITER_FENCE_LOST' }); }
       const r = await settleBatch({ fenceHeld, append, lookup });
-      if (!r.ok) return r; // owed work stays owed under the OLD scope; the hold persists; the next tick retries byte-identically
+      if (!r.ok) return withCommitted(r); // owed work stays owed under the OLD scope; the hold persists; the next tick retries byte-identically
+      committed.settled += r.settled ?? 0;
+      if (r.lastSeq !== undefined) { committed.events.push(...(r.events ?? [])); committed.appended += r.appended ?? 0; committed.lastSeq = r.lastSeq; }
     }
-    if (owedWork()) { lastError = 'SCOPE_TRANSITION_OWED_WORK: bounded drain rounds exhausted'; return { ok: false, reason: 'SCOPE_TRANSITION_OWED_WORK', detail: lastError }; }
+    if (owedWork()) { lastError = 'SCOPE_TRANSITION_OWED_WORK: bounded drain rounds exhausted'; return withCommitted({ ok: false, reason: 'SCOPE_TRANSITION_OWED_WORK', detail: lastError }); }
+    // PREPARE the exact activation batch: immutable content, next revision, predecessor binding, recorded clock
     const events = [];
     if (cand.catalog && !knownCatalogIds.has(cand.catalog.contentId)) events.push(socialCatalogEvent({ catalog: cand.catalog, acceptedKnownAtTs: knownAtTs }));
     const previous = activeScope ? { scopeRevision: activeScope.scopeRevision, filterId: activeScope.filterId } : null;
     const scopeRevision = (activeScope ? activeScope.scopeRevision : durableScopeRevision) + 1;
     const reason = !activeScope ? 'INITIAL_ACTIVATION' : activeScope.mode !== scope.mode ? 'MODE_CHANGED' : activeScope.restored && coverage.freshness !== 'FRESH' ? 'STALE_RESTORED_SCOPE_REPLACED' : activeScope.admission.policyVersion !== scope.policyVersion ? 'POLICY_CHANGED' : 'CATALOG_CHANGED';
     events.push(socialScopeEvent({ provider: provider.id, scopeRevision, scope, catalogObservedTs: cand.catalog ? cand.catalog.observedTs : null, previous, activatedKnownAtTs: knownAtTs, reason }));
-    if (!fenceHeld()) { stop('writer authority lost before scope activation'); return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
-    const r = await append(events);
-    if (!r?.ok) { stats.appendFailures += 1; lastError = r?.reason ?? 'append failed'; return { ok: false, reason: r?.reason ?? 'UNAVAILABLE' }; } // nothing adopted; the hold persists; retry is byte-identical
-    // ADOPT after the durable commit: replace the immutable admission context, then reopen
-    if (cand.catalog) knownCatalogIds.add(cand.catalog.contentId);
-    activeScope = { scopeRevision, filterId: scope.filterId, mode: scope.mode, catalogContentId: scope.catalogContentId, catalogObservedTs: cand.catalog ? cand.catalog.observedTs : null, activatedKnownAtTs: knownAtTs, admission: scope, restored: false };
-    stats.scopeActivations += 1; lastError = null;
-    const reopen = streamHeld || (previous === null && state !== 'STANDBY'); // a held transition reopens; the FIRST activation opens the ear the collector already asked for
-    if (intake) { intake.clear(); intake = null; }
-    pendingBatch = null; retainedEnvelopes = []; streamHeld = false;
-    if (reopen) start(); // (re)connect from the DURABLE cursor under the new, now-durable admission context
-    return { ok: true, settled: 0, appended: 0, lastSeq: r.lastSeq, events, scopeActivated: scopeRevision };
+    pendingScopeOp = { kind: 'ACTIVATE', events, knownAtTs, attempts: 0, adopt: { scopeRevision, scope, catalogContentId: cand.catalog ? cand.catalog.contentId : null, catalogObservedTs: cand.catalog ? cand.catalog.observedTs : null, previous } };
+    const r = await appendScopeOp({ fenceHeld, append });
+    if (!r.ok || committed.events.length === 0) return withCommitted(r);
+    // one receipt: the drained old-scope commits FIRST (journal order), then the activation batch
+    return { ...r, settled: committed.settled, appended: committed.appended, events: [...committed.events, ...r.events], durableCursor, drained: { appended: committed.appended, settled: committed.settled, lastSeq: committed.lastSeq } };
   }
 
   // ONE settle under the live fence. `append(events)` is the collector's
@@ -375,7 +430,7 @@ export function createSocialRuntime({
         if (!sr.ok || !sr.scopeActivated || !stream || !intake || !fenceHeld()) return sr;
         const er = await settleBatch({ fenceHeld, append, lookup });
         if (!er.ok) return { ...sr, evidence: { ok: false, reason: er.reason, detail: er.detail ?? null } };
-        return { ok: true, settled: er.settled, appended: er.appended ?? 0, lastSeq: er.lastSeq ?? sr.lastSeq, events: [...sr.events, ...(er.events ?? [])], durableCursor, scopeActivated: sr.scopeActivated };
+        return { ok: true, settled: (sr.settled ?? 0) + er.settled, appended: (sr.appended ?? 0) + (er.appended ?? 0), lastSeq: er.lastSeq ?? sr.lastSeq, events: [...sr.events, ...(er.events ?? [])], durableCursor, scopeActivated: sr.scopeActivated, ...(sr.drained ? { drained: sr.drained } : {}) };
       }
     }
     if (!stream || !intake) return { ok: true, settled: 0, idle: true };
@@ -413,7 +468,9 @@ export function createSocialRuntime({
           mode: scoped ? 'SCOPED' : 'LEGACY_FILTER',
           active: activeScope ? { scopeRevision: activeScope.scopeRevision, filterId: activeScope.filterId, mode: activeScope.mode, catalogContentId: activeScope.catalogContentId, catalogObservedTs: activeScope.catalogObservedTs, activatedKnownAtTs: activeScope.activatedKnownAtTs, termCount: activeScope.admission.termCount, aliasCount: activeScope.admission.aliases.length, restored: activeScope.restored } : null,
           coverage: { ...coverage }, held: streamHeld, durableScopeRevision, knownCatalogContent: knownCatalogIds.size, lastVerified,
-          continuity: { knownNativePosts: knownNative.size }, unresolved: { distinct: unresolvedNotes.length, recent: unresolvedNotes.slice(-10) },
+          pendingOperation: pendingScopeOp ? { kind: pendingScopeOp.kind, events: pendingScopeOp.events.length, scopeRevision: pendingScopeOp.adopt.scopeRevision ?? null, preparedKnownAtTs: pendingScopeOp.knownAtTs, attempts: pendingScopeOp.attempts } : null,
+          journalAhead, // a committed-but-unadopted operation (fence lost after append): restored by the lawful writer, never by this runtime
+          continuity: { knownNativePosts: knownNative.size, owedNativePosts: intake ? intake.owedNativeCount() : 0 }, unresolved: { distinct: unresolvedNotes.length, recent: unresolvedNotes.slice(-10) },
           legacyFilterTerms: scoped ? null : universe.tokenTerms.length,
         },
       };

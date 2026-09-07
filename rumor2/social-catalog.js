@@ -32,6 +32,15 @@ const posInt = (v) => Number.isSafeInteger(v) && v > 0;
 const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const TICKER_RE = /^[A-Z0-9]{2,15}$/;
+// SOCIAL-4F CLOSEOUT — the SAME normalization invariants the survey normalizer applies (pinned
+// equal by a parity test; the rumor tier imports nothing from the survey tier): the exact
+// supported wsname grammar, the retained native identifier grammar, and the ONLY two display
+// aliases. The canonical base of a row must RE-DERIVE from its wsname under this alias law —
+// a row whose `base` disagrees with its wsname is internally contradictory and refused.
+export const SOCIAL_CATALOG_WSNAME_RE = /^([A-Z0-9][A-Z0-9.]{0,14})\/USD$/;
+export const SOCIAL_CATALOG_NATIVE_ID_RE = /^[A-Z0-9.]{1,20}$/;
+export const SOCIAL_CATALOG_BASE_ALIASES = Object.freeze({ XBT: 'BTC', XDG: 'DOGE' });
+export const SOCIAL_CATALOG_NATIVE_QUOTES = Object.freeze(['ZUSD', 'USD']);
 
 // ---- closed research configuration (fail closed: an invalid section is NOT_CONFIGURED with a reason) ----
 export const SOCIAL_RESEARCH_DEFAULTS = deepFreeze({
@@ -88,7 +97,7 @@ export function validateCatalogContent(c, { maxMarkets = SOCIAL_CATALOG_MAX_MARK
   if (typeof c.contentId !== 'string' || !/^[0-9a-f]{40}$/.test(c.contentId)) return { error: 'catalog: contentId malformed' };
   if (!Array.isArray(c.markets) || c.markets.length === 0) return { error: 'catalog: no markets (an empty catalog is never accepted as a universe)' };
   if (c.markets.length > maxMarkets) return { error: `catalog: ${c.markets.length} markets exceed the bound ${maxMarkets}` };
-  const bases = new Set(); const keys = new Set();
+  const bases = new Set(); const keys = new Set(); const natives = new Set(); const wsnames = new Set();
   let prev = null;
   for (const m of c.markets) {
     if (!isPlainObject(m)) return { error: 'catalog: market row malformed' };
@@ -97,11 +106,17 @@ export function validateCatalogContent(c, { maxMarkets = SOCIAL_CATALOG_MAX_MARK
     if (typeof m.pairKey !== 'string' || !/^[A-Za-z0-9._-]{1,40}$/.test(m.pairKey) || keys.has(m.pairKey)) return { error: 'catalog: pairKey malformed or repeated' };
     if (typeof m.base !== 'string' || !SOCIAL_BASE_RE.test(m.base) || bases.has(m.base)) return { error: `catalog: base '${String(m.base).slice(0, 20)}' malformed or repeated` };
     if (m.quote !== 'USD' || m.status !== 'online') return { error: 'catalog: only online USD markets are supported rows' };
-    if (typeof m.wsname !== 'string' || !m.wsname.endsWith('/USD') || m.wsname.length > 40) return { error: 'catalog: wsname malformed' };
-    if (m.nativeBase !== null && (typeof m.nativeBase !== 'string' || m.nativeBase.length === 0 || m.nativeBase.length > 20)) return { error: 'catalog: nativeBase malformed' };
-    if (m.nativeQuote !== null && typeof m.nativeQuote !== 'string') return { error: 'catalog: nativeQuote malformed' };
+    if (typeof m.wsname !== 'string' || m.wsname.length > 40) return { error: 'catalog: wsname malformed' };
+    const ws = m.wsname.match(SOCIAL_CATALOG_WSNAME_RE);
+    if (!ws) return { error: `catalog: wsname '${m.wsname.slice(0, 40)}' is not the exact BASE/USD spot grammar` };
+    if (wsnames.has(m.wsname)) return { error: 'catalog: wsname repeated' };
+    // the canonical display base MUST re-derive from the wsname under the approved alias law
+    if (m.base !== (SOCIAL_CATALOG_BASE_ALIASES[ws[1]] ?? ws[1])) return { error: `catalog: base '${m.base}' does not re-derive from wsname '${m.wsname}' under the alias law (internally contradictory row)` };
+    if (typeof m.nativeBase !== 'string' || !SOCIAL_CATALOG_NATIVE_ID_RE.test(m.nativeBase)) return { error: 'catalog: a supported row requires a retained venue-native base identifier' };
+    if (natives.has(m.nativeBase)) return { error: `catalog: native base '${m.nativeBase}' claims two research bases` };
+    if (!SOCIAL_CATALOG_NATIVE_QUOTES.includes(m.nativeQuote)) return { error: 'catalog: nativeQuote is not a USD quote identifier' };
     if (prev !== null && !(cmp(prev.base, m.base) < 0 || (prev.base === m.base && cmp(prev.pairKey, m.pairKey) < 0))) return { error: 'catalog: markets are not in canonical order' };
-    keys.add(m.pairKey); bases.add(m.base); prev = m;
+    keys.add(m.pairKey); bases.add(m.base); natives.add(m.nativeBase); wsnames.add(m.wsname); prev = m;
   }
   if (!isPlainObject(c.counts) || c.counts.supported !== c.markets.length || !Number.isSafeInteger(c.counts.observed) || c.counts.observed < c.markets.length) return { error: 'catalog: counts disagree with content' };
   for (const k of ['excluded', 'unresolved']) if (!Number.isSafeInteger(c.counts[k]) || c.counts[k] < 0) return { error: `catalog: counts.${k} malformed` };
@@ -111,9 +126,12 @@ export function validateCatalogContent(c, { maxMarkets = SOCIAL_CATALOG_MAX_MARK
 }
 export const catalogBases = (catalog) => (catalog ? [...new Set(catalog.markets.map((m) => m.base))].sort() : []);
 
+// observedTs is OUR LOCAL ACQUISITION clock (the wide eye's fetch clock), never a social author's
+// client clock: an observation ahead of the evaluation clock is FUTURE — no tolerance, no clamp,
+// no fabricated past observation. It grants no new scope; an earlier accepted scope continues.
 export function catalogFreshness(catalog, nowMs, maxAgeSec) {
   if (!catalog || !Number.isSafeInteger(nowMs)) return 'STALE';
-  if (catalog.observedTs > nowMs + 60_000) return 'FUTURE'; // a minute of tolerance for clock skew between the acquisition and evaluation clocks
+  if (catalog.observedTs > nowMs) return 'FUTURE';
   return nowMs - catalog.observedTs <= maxAgeSec * 1000 ? 'FRESH' : 'STALE';
 }
 

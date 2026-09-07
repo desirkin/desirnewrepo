@@ -973,7 +973,7 @@ export function validateSocialCatalogEvent(ev) {
   const v = validateCatalogContent({ venue: ev.venue, quote: ev.quote, policyVersion: ev.policyVersion, observedTs: ev.observedTs, contentId: ev.contentId, counts: ev.counts, markets: ev.markets, source: ev.source });
   if (v.error) return `social catalog: ${v.error}`;
   if (typeof ev.source !== 'string' || ev.source.length === 0 || ev.source.length > 80) return 'social catalog: source malformed';
-  if (ev.observedTs > ev.acceptedKnownAtTs + 60_000) return 'social catalog: observed after acceptance (a future acquisition clock is never accepted)';
+  if (ev.observedTs > ev.acceptedKnownAtTs) return 'social catalog: observed after acceptance (a future acquisition clock is never accepted)';
   if (!R2CG_RE.test(ev.sourceEventId) || ev.sourceEventId !== socialCatalogIdentity({ venue: ev.venue, contentId: ev.contentId })) return 'social catalog: sourceEventId is not the derived catalog identity';
   return null;
 }
@@ -987,7 +987,7 @@ export function validateSocialCatalogVerifiedEvent(ev) {
   if (ev.venue !== 'kraken') return 'social catalog verified: venue outside the supported set';
   if (!okHash(ev.contentId)) return 'social catalog verified: contentId malformed';
   if (!isTs(ev.observedTs) || !isTs(ev.knownAtTs)) return 'social catalog verified: clock invalid';
-  if (ev.observedTs > ev.knownAtTs + 60_000) return 'social catalog verified: observed after verification';
+  if (ev.observedTs > ev.knownAtTs) return 'social catalog verified: observed after verification';
   if (ev.ts !== iso(ev.knownAtTs)) return 'social catalog verified: ts disagrees with knownAtTs';
   if (!R2CV_RE.test(ev.sourceEventId) || ev.sourceEventId !== socialCatalogVerifiedIdentity({ venue: ev.venue, contentId: ev.contentId, observedTs: ev.observedTs })) return 'social catalog verified: sourceEventId is not the derived identity';
   return null;
@@ -1011,7 +1011,7 @@ export function validateSocialScopeEvent(ev) {
   if (!SOCIAL_ADMISSION_MODES.includes(ev.mode)) return 'social scope: unknown mode';
   if (ev.termsFrom !== (ev.mode === 'CATALOG_BACKED' ? 'CATALOG' : 'STATIC')) return 'social scope: termsFrom disagrees with mode';
   if (ev.policyVersion !== SOCIAL_ADMISSION_POLICY_VERSION) return 'social scope: unsupported policy version';
-  if (ev.mode === 'CATALOG_BACKED') { if (!okHash(ev.catalogContentId)) return 'social scope: catalog-backed scope needs a catalog content id'; if (!isTs(ev.catalogObservedTs)) return 'social scope: catalogObservedTs invalid'; if (ev.terms !== null) return 'social scope: catalog-backed terms are content-addressed, never listed'; }
+  if (ev.mode === 'CATALOG_BACKED') { if (!okHash(ev.catalogContentId)) return 'social scope: catalog-backed scope needs a catalog content id'; if (!isTs(ev.catalogObservedTs)) return 'social scope: catalogObservedTs invalid'; if (ev.terms !== null) return 'social scope: catalog-backed terms are content-addressed, never listed'; if (isTs(ev.activatedKnownAtTs) && ev.catalogObservedTs > ev.activatedKnownAtTs) return 'social scope: activation precedes its catalog observation'; }
   else { if (ev.catalogContentId !== null || ev.catalogObservedTs !== null) return 'social scope: explicit-static scope carries no catalog'; if (!Array.isArray(ev.terms) || ev.terms.length === 0 || ev.terms.length > SOCIAL_SCOPE_MAX_STATIC_TERMS) return 'social scope: static terms malformed'; for (let i = 0; i < ev.terms.length; i++) { if (typeof ev.terms[i] !== 'string' || !SOCIAL_BASE_RE.test(ev.terms[i])) return 'social scope: static term malformed'; if (i > 0 && !(ev.terms[i - 1] < ev.terms[i])) return 'social scope: static terms not sorted unique'; } if (ev.termCount !== ev.terms.length) return 'social scope: termCount disagrees with terms'; }
   if (!Number.isSafeInteger(ev.termCount) || ev.termCount < 1) return 'social scope: termCount invalid';
   if (!Array.isArray(ev.aliases) || ev.aliases.length > SOCIAL_SCOPE_MAX_ALIASES) return 'social scope: aliases malformed';
@@ -1079,6 +1079,12 @@ export function replaySocialHistory(events) {
   const scopes = {}; // provider -> latest scope activation record
   const scopeHistory = {}; // provider -> [activation records in revision order]
   let catalogEvents = 0; let scopeEvents = 0; let catalogVerifiedEvents = 0;
+  // SOCIAL-4F CLOSEOUT — the RECEIPT / SCOPE ASSOCIATION CONTRACT: the scope that governed the
+  // admission of a durable source is the provider's latest activation that precedes the source
+  // record IN JOURNAL ORDER (a source drained under the old scope and the new activation may share
+  // one knowledge millisecond; journal order, never an invented millisecond or a lexical id, keeps
+  // them apart). null = LEGACY_SCOPE_UNKNOWN (settled before any durable scope of that provider).
+  const observedScope = new Map(); // sourceEventId -> scopeRevision | null
   const xDup = (e, err) => {
     if (err) return fail(`SOCIAL_HISTORY_INVALID: ${err}`);
     const d = contentHash(canonicalJson(e));
@@ -1103,6 +1109,7 @@ export function replaySocialHistory(events) {
       indexObservation(e);
       settledOrder.set(e.sourceEventId, settledOrder.size);
       observed += 1;
+      observedScope.set(e.sourceEventId, scopes[e.provider] ? scopes[e.provider].scopeRevision : null);
       continue;
     }
     if (e.type === SOCIAL_CLOCK_INTERPRETATION_TYPE) {
@@ -1239,6 +1246,7 @@ export function replaySocialHistory(events) {
         const c = catalogs.get(e.catalogContentId);
         if (!c) return fail('SOCIAL_HISTORY_INVALID: scope activation references catalog content that never settled');
         if (e.catalogObservedTs < c.observedTs) return fail('SOCIAL_HISTORY_INVALID: scope activation observed its catalog before the content was observed');
+        if (e.catalogObservedTs > e.activatedKnownAtTs) return fail('SOCIAL_HISTORY_INVALID: scope activation precedes its own catalog observation (a future acquisition clock never establishes membership)');
         if (e.termCount !== new Set(c.markets.map((m) => m.base)).size) return fail('SOCIAL_HISTORY_INVALID: scope termCount disagrees with its catalog content');
       }
       const rec = { provider: e.provider, scopeRevision: e.scopeRevision, mode: e.mode, termsFrom: e.termsFrom, catalogContentId: e.catalogContentId, catalogObservedTs: e.catalogObservedTs, policyVersion: e.policyVersion, filterId: e.filterId, termCount: e.termCount, terms: e.terms, aliases: e.aliases, watchAuthorIds: e.watchAuthorIds, previousScopeRevision: e.previousScopeRevision, previousFilterId: e.previousFilterId, activatedKnownAtTs: e.activatedKnownAtTs, reason: e.reason };
@@ -1257,5 +1265,5 @@ export function replaySocialHistory(events) {
       if (ofRole.length > 1 && ofRole.some((a) => !sameDeclaration(a.witness, ofRole[0].witness))) annotationConflicts.push({ targetEventId, clockRole, annotationIds: ofRole.map((a) => a.sourceEventId).sort() });
     }
   }
-  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingRecords, pendingByTarget, pendingUnlinked, settledOrder, recordVersions, annotationConflicts, annotated, pending, catalogs, catalogVerified, scopes, scopeHistory, catalogEvents, catalogVerifiedEvents, scopeEvents };
+  return { ok: true, durableIds, cursors, observed, cursorEvents, x, index, byNativeKey, targets, annotations, annotationIds, pendingIds, pendingRecords, pendingByTarget, pendingUnlinked, settledOrder, recordVersions, annotationConflicts, annotated, pending, catalogs, catalogVerified, scopes, scopeHistory, catalogEvents, catalogVerifiedEvents, scopeEvents, observedScope };
 }

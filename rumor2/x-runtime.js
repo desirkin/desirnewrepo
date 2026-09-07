@@ -175,7 +175,14 @@ export function createXRuntime({
     return resolveXWatchScope({});
   };
   let watch = resolveWatch(); // refreshed at every start(); status reports the latest resolution
-  const universeFilter = filter ?? (watch.ok ? buildSocialFilter({ terms: [...watch.tickers, ...watch.aliases] }) : buildSocialFilter({}));
+  // SOCIAL-4F CLOSEOUT — ONE VERIFIED WATCH SNAPSHOT AT ACTUAL ACTIVATION: the upstream rule
+  // manifest, the local admission filter, the coverage identity, and status all derive from the
+  // SAME immutable watch snapshot adopted when the paid stream is actually activated — never from
+  // a construction-time null/stale resolution. A test-injected `filter` is a labelled override.
+  let activeWatch = null; // the snapshot the current intake filter + rule manifest were built from
+  let localFilter = filter ?? buildSocialFilter({}); // rebuilt from the adopted snapshot at activation (empty admits nothing)
+  const filterFor = (w) => filter ?? (w && w.ok ? buildSocialFilter({ terms: [...w.tickers, ...w.aliases] }) : buildSocialFilter({}));
+  const owedWork = () => (intake !== null && intake.size() > 0) || retainedEnvelopes.length > 0 || pendingBatch !== null;
   const reconciler = createSocialReconciler({ provider }); // SOCIAL-4D COMPLETION: version-aware index + ONE native-event matcher
   const durableIds = { has: (id) => reconciler.isDurable(id), get size() { return reconciler.size(); } };
   let x = emptyXState(); // durable X state from the journal
@@ -353,7 +360,8 @@ export function createXRuntime({
   async function reconcileRules() {
     if (stream && stream.isConnected()) return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: 'rules are only reconciled while the paid stream is disconnected' };
     if (!watch.ok) { lastError = watch.detail ?? watch.reason; return { ok: false, reason: watch.reason, detail: watch.detail }; }
-    const manifest = compileXRuleManifest({ universe: watch.tickers, aliases: watch.aliases, priorityAccounts: config.priorityAccounts ?? [], propagationFocus: config.propagationFocus ?? [] });
+    const w = activeWatch ?? watch; // rules and the local filter agree: the SAME adopted snapshot
+    const manifest = compileXRuleManifest({ universe: w.tickers, aliases: w.aliases, priorityAccounts: config.priorityAccounts ?? [], propagationFocus: config.propagationFocus ?? [] });
     const verr = validateXRuleManifest(manifest.rules);
     if (verr) { lastError = verr; return { ok: false, reason: 'RULE_RECONCILE_FAILED', detail: verr }; }
     const cur = await api(xRulesUrl());
@@ -494,7 +502,20 @@ export function createXRuntime({
     // SOCIAL-4F: an EXPLICIT bounded watch scope is required BEFORE any network — a missing,
     // unverified, or over-cap selection means zero X requests (no five-coin fallback, no catalog)
     watch = resolveWatch();
-    if (!watch.ok) { state = 'DARK'; lastStopReason = watch.reason; return { ok: false, reason: watch.reason, detail: watch.detail }; }
+    if (stream && stream.status().paused && activeWatch && (!watch.ok || watch.scopeId === activeWatch.scopeId)) {
+      // a backpressure resume continues under the ADOPTED snapshot (a stale/unavailable catalog never
+      // tears down an already-authorized watch; a changed selection is handled by the transition below)
+    } else {
+      if (!watch.ok) { state = 'DARK'; lastStopReason = watch.reason; return { ok: false, reason: watch.reason, detail: watch.detail }; }
+      if (activeWatch && activeWatch.scopeId !== watch.scopeId) {
+        // WATCH CHANGE — disconnected transition only: owed work under the OLD snapshot must settle first
+        if (stream) { stream.stop('WATCH_SCOPE_CHANGED'); stream = null; preflightOk = false; if (state === 'ACTIVE') state = 'STANDBY'; }
+        if (owedWork()) { lastStopReason = 'WATCH_SCOPE_TRANSITION_OWED_WORK'; return { ok: false, reason: 'WATCH_SCOPE_TRANSITION_OWED_WORK', detail: `queued evidence admitted under watch ${activeWatch.scopeId.slice(0, 12)} settles before the new selection ${watch.scopeId.slice(0, 12)} is adopted` }; }
+        if (intake) { intake.clear(); intake = null; }
+        activeWatch = null; preflightOk = false; // the new snapshot is adopted below: rules + filter from ONE resolution
+      }
+      if (!activeWatch) { activeWatch = watch; localFilter = filterFor(watch); preflightOk = false; }
+    }
     // DURABLE smoke admission BEFORE any network: a completed/terminal run never
     // reconnects; a mismatched, repriced, or day-rolled run fails closed
     const adm0 = smokeAdmission();
@@ -560,7 +581,7 @@ export function createXRuntime({
       }
     }
     backfillNext = backfill;
-    intake = intake ?? socialIntake({ provider, mapCommit: xPostToRaw, filter: universeFilter, now, cursorOf: null, isDurable: (id, o) => reconciler.isFastDurable(id, o), ...intakeOptions });
+    intake = intake ?? socialIntake({ provider, mapCommit: xPostToRaw, filter: localFilter, now, cursorOf: null, isDurable: (id, o) => reconciler.isFastDurable(id, o), ...intakeOptions });
     const s = startXStream({
       provider, bearer: config.bearer, fetchImpl: fetchImpl ?? globalThis.fetch, now, log,
       buildUrl: ({ backfillMinutes }) => xStreamUrl({ backfillMinutes }),
@@ -613,6 +634,7 @@ export function createXRuntime({
     retainedEnvelopes = [];
     if (stream) { stream.stop(reason); stream = null; }
     if (intake) { intake.clear(); intake = null; }
+    activeWatch = null; // a fresh start adopts ONE freshly verified snapshot for rules + filter together
     pendingBatch = null;
     stopPending = null;
     owedSince = null; // durable progress already stops before the owed Post; a fresh start replays from it
@@ -706,6 +728,14 @@ export function createXRuntime({
   async function settle({ fenceHeld = () => true, append, lookup = null } = {}) {
     if (!hydrated) return { ok: false, reason: 'NOT_HYDRATED' };
     if (!fenceHeld()) { stop('writer authority lost before settle'); return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
+    if (activeWatch && stream) {
+      // SOCIAL-4F CLOSEOUT: an approved watch change reaches an ACTIVE runtime as a DISCONNECTED
+      // transition — close the paid transport now, keep every queued Post owed under the OLD
+      // snapshot (settled below), preserve the meter/progress, and let the next start() adopt the
+      // new snapshot for rules + filter together. A failed/stale resolution changes nothing here.
+      const w = resolveWatch(); watch = w; // status always reports the LATEST resolution; the adopted snapshot stays until a lawful transition
+      if (w.ok && w.scopeId !== activeWatch.scopeId) { stream.stop('WATCH_SCOPE_CHANGED'); stream = null; preflightOk = false; if (state === 'ACTIVE') state = 'STANDBY'; lastStopReason = 'WATCH_SCOPE_CHANGED'; log(`x-runtime: watch scope changed (${activeWatch.scopeId.slice(0, 12)} -> ${w.scopeId.slice(0, 12)}); disconnected; owed evidence settles under the previous selection`); }
+    }
     const batch = await buildBatch(lookup);
     if (batch.error) { stats.appendFailures += 1; lastError = batch.error; return { ok: false, reason: batch.reason ?? 'UNAVAILABLE', detail: batch.error }; }
     stats.settles += 1;
@@ -775,7 +805,9 @@ export function createXRuntime({
         provider: provider.id, accessState: 'AVAILABLE_REQUIRES_CREDENTIAL', enabled: !!config.enabled, credentialPresent: !!config.bearer,
         gate: g.ok ? 'OPEN' : g.reason, gateDetail: g.detail, state, hydrated, authority: 'NONE',
         // SOCIAL-4F: the EXPLICIT watch scope this runtime compiles rules from (never config.universe, never the catalog)
-        watch: { ok: watch.ok, mode: watch.mode ?? null, reason: watch.reason ?? null, detail: watch.detail ?? null, scopeId: watch.scopeId ?? null, tickerCount: watch.tickers?.length ?? 0, tickers: (watch.tickers ?? []).slice(0, 25), rejected: watch.rejected ?? [], catalogContentId: watch.catalogContentId ?? null },
+        watch: { ok: watch.ok, mode: watch.mode ?? null, reason: watch.reason ?? null, detail: watch.detail ?? null, scopeId: watch.scopeId ?? null, tickerCount: watch.tickers?.length ?? 0, tickers: (watch.tickers ?? []).slice(0, 25), rejected: watch.rejected ?? [], catalogContentId: watch.catalogContentId ?? null, catalogStatus: watch.catalogStatus ?? null },
+        // the snapshot the rule manifest AND the local filter were built from (null = nothing adopted; nothing admitted)
+        activeWatch: activeWatch ? { scopeId: activeWatch.scopeId, mode: activeWatch.mode, tickers: activeWatch.tickers.slice(0, 25), catalogContentId: activeWatch.catalogContentId ?? null, filterTerms: localFilter.tokenTerms.length, agreesWithLatestResolution: watch.ok ? watch.scopeId === activeWatch.scopeId : null } : null,
         ruleSetHash: x.ruleSetHash, coverageEpoch: x.coverageEpoch, ownedRuleCount: rules.owned.length, unownedRuleCount: rules.unownedCount, ruleCapacity: rules.capacity, dryRunOk: rules.dryRunOk,
         rules: { unownedSnapshotHash: rules.unownedSnapshotHash, unownedChanged: rules.unownedChanged, lastFailure: rules.lastFailure },
         smoke: (() => {

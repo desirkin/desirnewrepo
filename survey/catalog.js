@@ -40,12 +40,19 @@ export const KRAKEN_BASE_ALIASES = Object.freeze({ XBT: 'BTC', XDG: 'DOGE' }); /
 export const CATALOG_MARKET_KEYS = Object.freeze(['pairKey', 'nativeBase', 'nativeQuote', 'wsname', 'base', 'quote', 'status']);
 export const CATALOG_MARKET_STATUSES = Object.freeze(['online']); // supported statuses — every other documented status is an explicit exclusion
 export const CATALOG_EXCLUSION_REASONS = Object.freeze(['STATUS_NOT_ONLINE', 'QUOTE_NOT_USD', 'WSNAME_NOT_USD_SPOT', 'BASE_EXCLUDED_STABLE_OR_FIAT']);
-export const CATALOG_UNRESOLVED_REASONS = Object.freeze(['ROW_MALFORMED', 'BASE_UNRESOLVABLE', 'DUPLICATE_COHERENT_ALIAS']);
+export const CATALOG_UNRESOLVED_REASONS = Object.freeze(['ROW_MALFORMED', 'BASE_UNRESOLVABLE', 'NATIVE_ID_MISSING', 'DUPLICATE_COHERENT_ALIAS']);
 export const CATALOG_REFUSAL_REASONS = Object.freeze(['RESPONSE_MALFORMED', 'RESPONSE_EMPTY', 'OBSERVED_CLOCK_INVALID', 'ZERO_SUPPORTED', 'CATALOG_OVERFLOW', 'CONTRADICTORY_NATIVE_MAPPING', 'CONTRADICTORY_BASE_ASSOCIATION', 'SUSPECTED_INCOMPLETE', 'OBSERVED_CLOCK_REGRESSION']);
 export const CATALOG_MAX_MARKETS_DEFAULT = 5000;
 export const CATALOG_MAX_DROP_FRACTION_DEFAULT = 0.5;
 const BASE_RE = /^[A-Z0-9][A-Z0-9.]{0,14}$/; // a canonical research base: uppercase venue symbol (digit-prefixed tickers such as 1INCH included)
 const PAIR_KEY_RE = /^[A-Za-z0-9._-]{1,40}$/;
+// SOCIAL-4F CLOSEOUT — the EXACT supported wsname grammar: ONE base segment, ONE `/USD` quote
+// segment, nothing else. A suffix check alone (`endsWith('/USD')`) is not a base/quote locator:
+// `LINK/OTHER/USD` names no supported spot market and must never become LINK.
+export const KRAKEN_WSNAME_USD_RE = /^([A-Z0-9][A-Z0-9.]{0,14})\/USD$/;
+// a retained venue-native asset identifier (Kraken `base`, e.g. XXBT, XETH, 1INCH): required
+// for a SUPPORTED row — a row without one is UNRESOLVED, never a verified supported market
+export const KRAKEN_NATIVE_ID_RE = /^[A-Z0-9.]{1,20}$/;
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -57,8 +64,11 @@ export function krakenUsdSpotBase(pair, excluded = new Set()) {
   if (!isPlainObject(pair)) return { unresolved: 'ROW_MALFORMED' };
   if (pair.status !== 'online') return { excluded: 'STATUS_NOT_ONLINE' };
   if (pair.quote !== 'ZUSD' && pair.quote !== 'USD') return { excluded: 'QUOTE_NOT_USD' };
-  if (typeof pair.wsname !== 'string' || !pair.wsname.endsWith('/USD') || pair.wsname.length > 40) return { excluded: 'WSNAME_NOT_USD_SPOT' };
-  const raw = pair.wsname.split('/')[0];
+  if (typeof pair.wsname !== 'string' || pair.wsname.length > 40) return { excluded: 'WSNAME_NOT_USD_SPOT' };
+  if (!pair.wsname.endsWith('/USD')) return { excluded: 'WSNAME_NOT_USD_SPOT' };
+  const m = pair.wsname.match(KRAKEN_WSNAME_USD_RE);
+  if (!m) return pair.wsname.split('/').length !== 2 ? { excluded: 'WSNAME_NOT_USD_SPOT' } : { unresolved: 'BASE_UNRESOLVABLE' }; // three segments: not a spot locator; two segments with a non-canonical base: unresolvable
+  const raw = m[1];
   const base = KRAKEN_BASE_ALIASES[raw] ?? raw;
   if (!BASE_RE.test(base)) return { unresolved: 'BASE_UNRESOLVABLE' };
   if (excluded.has(base.toUpperCase())) return { excluded: 'BASE_EXCLUDED_STABLE_OR_FIAT' };
@@ -78,6 +88,7 @@ export function normalizeKrakenAssetPairs(result, { excludeBases = [], observedT
   const excluded = new Set((Array.isArray(excludeBases) ? excludeBases : []).filter((b) => typeof b === 'string').map((b) => b.toUpperCase()));
   const supported = []; const excludedRows = []; const unresolved = []; const responseOrder = [];
   const byWsname = new Map(); // wsname -> nativeBase (contradiction check)
+  const byNative = new Map(); // nativeBase -> research base (contradiction check)
   const byBase = new Map(); // canonical base -> { nativeBase, pairKey, wsname }
   const duplicates = [];
   for (const pairKey of keys) {
@@ -86,11 +97,19 @@ export function normalizeKrakenAssetPairs(result, { excludeBases = [], observedT
     const r = krakenUsdSpotBase(pair, excluded);
     if (r.unresolved) { unresolved.push({ pairKey, reason: r.unresolved }); continue; }
     if (r.excluded) { excludedRows.push({ pairKey, reason: r.excluded, status: typeof pair.status === 'string' ? pair.status.slice(0, 20) : null }); continue; }
-    const nativeBase = typeof pair.base === 'string' && pair.base.length > 0 && pair.base.length <= 20 ? pair.base : null;
-    const nativeQuote = typeof pair.quote === 'string' ? pair.quote : null;
+    // a SUPPORTED row retains its venue-native identifiers; a row whose native base is missing or
+    // malformed is classified UNRESOLVED (never silently a verified supported market)
+    if (typeof pair.base !== 'string' || !KRAKEN_NATIVE_ID_RE.test(pair.base)) { unresolved.push({ pairKey, reason: 'NATIVE_ID_MISSING' }); continue; }
+    const nativeBase = pair.base;
+    const nativeQuote = pair.quote; // already ZUSD | USD
     const prevWs = byWsname.get(pair.wsname);
     if (prevWs !== undefined && prevWs !== nativeBase) return { ok: false, reason: 'CONTRADICTORY_NATIVE_MAPPING', detail: `wsname ${pair.wsname} is associated with native bases ${prevWs} and ${nativeBase}` };
     byWsname.set(pair.wsname, nativeBase);
+    // ONE native asset identifies ONE supported USD spot market: the same native base under two
+    // different research bases is a contradiction, never last-row-wins
+    const prevNative = byNative.get(nativeBase);
+    if (prevNative !== undefined && prevNative !== r.base) return { ok: false, reason: 'CONTRADICTORY_NATIVE_MAPPING', detail: `native base ${nativeBase} is associated with research bases ${prevNative} and ${r.base}` };
+    byNative.set(nativeBase, r.base);
     const prevBase = byBase.get(r.base);
     if (prevBase !== undefined) {
       if (prevBase.nativeBase !== nativeBase || prevBase.wsname !== pair.wsname) return { ok: false, reason: 'CONTRADICTORY_BASE_ASSOCIATION', detail: `research base ${r.base} is claimed by ${prevBase.pairKey} (${prevBase.wsname}/${prevBase.nativeBase}) and ${pairKey} (${pair.wsname}/${nativeBase})` };

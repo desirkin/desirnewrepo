@@ -62,6 +62,15 @@ export function socialIntake({
   // local seen-cache entry is not a durable terminal disposition. It only resolves a drop
   // (its replay reached a terminal disposition).
   const pending = new Map();
+  // SOCIAL-4F CLOSEOUT — TEMPORARY NATIVE INTEREST owned by admitted, still-owed envelopes:
+  // nativePostId -> owed envelope count. An admitted, validated CREATE that is enqueued but not
+  // yet durable is an intake OBLIGATION (not durable truth); its immediately following deletion /
+  // reply / repost must reach normal validation and settlement instead of being filtered away.
+  // Interest is derived ONLY from validated admitted observations, exists ONLY while the envelope
+  // is owed (released by settled() or clear()), never mints source truth, an author, or a parent.
+  const owedNative = new Map();
+  const owedNativeOwe = (o) => { if (typeof o?.nativePostId !== 'string') return; owedNative.set(o.nativePostId, (owedNative.get(o.nativePostId) ?? 0) + 1); };
+  const owedNativeRelease = (o) => { if (typeof o?.nativePostId !== 'string') return; const n = owedNative.get(o.nativePostId); if (n === undefined) return; if (n <= 1) owedNative.delete(o.nativePostId); else owedNative.set(o.nativePostId, n - 1); };
   const cursor = { received: null, contiguous: null };
   const stats = {
     received: 0, enqueued: 0, deduped: 0, durableDeduped: 0, deferred: 0, filtered: 0, skipped: 0, rejected: 0, corrupt: 0, dropped: 0, settled: 0,
@@ -150,6 +159,7 @@ export function socialIntake({
     }
     remember(o);
     owe(cur);
+    owedNativeOwe(o);
     queue.push({ providerCursor: cur, observation: o });
     stats.enqueued += 1;
     if (deferred) stats.deferred += 1;
@@ -178,9 +188,12 @@ export function socialIntake({
     // mark drained envelopes as DURABLY settled (or intentionally refused) —
     // the only way an enqueued frame becomes terminal (one owed unit per envelope)
     settled(envelopes) {
-      for (const e of envelopes ?? []) { release(e.providerCursor); stats.settled += 1; }
+      for (const e of envelopes ?? []) { release(e.providerCursor); owedNativeRelease(e.observation); stats.settled += 1; }
       advance();
     },
+    // temporary native interest: a still-owed admitted envelope names this native post
+    owesNative(nativePostId) { return typeof nativePostId === 'string' && owedNative.has(nativePostId); },
+    owedNativeCount() { return owedNative.size; },
     // cursors still owed a terminal disposition (queued envelopes or outstanding drop replays)
     pendingCount() { return pending.size; },
     // the owed units and drop flag of one cursor (diagnostic)
@@ -197,7 +210,7 @@ export function socialIntake({
     cursor() { return { ...cursor }; },
     // forget everything non-durable (writer loss / shutdown): frames are
     // redelivered from the durable cursor, never lost
-    clear() { queue.length = 0; pending.clear(); },
+    clear() { queue.length = 0; pending.clear(); owedNative.clear(); },
     size() { return queue.length; },
     seenSize() { return seen.size; },
     stats() { return { ...stats, queued: queue.length, pending: pending.size, receivedCursor: cursor.received, contiguousCursor: cursor.contiguous }; },
