@@ -3,8 +3,10 @@
 // what the frozen checkpoint validator keys its required-provider set on, and
 // §38 forbids forcing inactive social providers into that durable set. Social
 // providers therefore live here with truthful, machine-readable access states,
-// and only a durably-ACTIVE social provider is ever migrated into the
-// checkpoint's provider set (see the checkpoint v5 migration).
+// and only a durably-ACTIVE social provider ever joins the checkpoint's provider
+// set. (SOCIAL-4E correction: this checkout retains checkpoint v4 — the Social
+// resume position lives in journal RUMOR2_SOCIAL_CURSOR events; no v5 migration
+// exists or is required.)
 //
 // The census below is verified against CURRENT official documentation (see
 // doctrine/SOCIAL.md for citations, gathered 2026-09-05). The system knows WHY
@@ -78,6 +80,10 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     // SOCIAL-4D census correction: mapper present; live transport / collector wiring ABSENT; a
     // configured key is configuration only, never proof a feed runs or an account is entitled
     account: Object.freeze({ publishedPlan: 'FREE_PLAN_DOCUMENTED', thisProjectPlan: 'UNKNOWN', credits: 'UNKNOWN', entitlement: 'UNVERIFIED', termsRetrieval: 'FAILED_2026-09-06', retention: 'UNRESOLVED' }),
+    // SOCIAL-4E foundation stage (pure, non-live): a readiness boundary that separates key presence,
+    // published limits, account plan/credits, terms, retention, acquisition-path approval, coverage,
+    // lag, and webhook guarantees. NOT operational access; `implemented`/`durable` keep their meanings.
+    foundation: Object.freeze({ ticket: 'SOCIAL-4E', stage: 'ACCESS_BOUNDARY_ONLY', module: 'rumor2/social-farcaster-access.js', fixtureOnly: true, live: false, durable: false, operationalAccess: false, docsAccessedOn: '2026-09-07', docsUnverified: Object.freeze(['N3_PRICING', 'N4_TERMS']) }),
     reason: 'Neynar hosted API (x-api-key) documents event webhooks, cast search, a Kafka stream, and gRPC hub access; Neynar publishes a Free plan with per-endpoint limits (docs, 2026-09-06). This project\'s plan, credits, entitlement, terms (retrieval failed), retention, and actual cost are UNKNOWN/UNVERIFIED. The hub/Snapchain path needs a full node (not lightweight). The normalization mapper exists; NO live transport or collector wiring exists; NEYNAR_API_KEY presence is configuration only. Acquisition path selection (search polling vs webhooks) is a PROPOSAL pending terms, plan, recovery, and scope.',
   }),
   Object.freeze({
@@ -211,6 +217,11 @@ export const SOCIAL_PROVIDERS = Object.freeze([
       GROUPS: 'Groups API deprecated (v19.0, removed 2024-04-22) — no sanctioned route',
     }),
     eligibilityForThisProject: 'NOT_ESTABLISHED', retention: 'UNRESOLVED_ROUTE_SPECIFIC_REVIEW_REQUIRED', latencyMeasured: false,
+    // SOCIAL-4E foundation stage (pure, non-live): ten route descriptors in two namespaces (FACEBOOK /
+    // INSTAGRAM — not checkpoint providers), route-bound readiness evaluators, and fixture-only Page-post /
+    // Page-comment / Instagram-media previews. NOT operational access; `implemented: false` and
+    // `durable: false` keep their meanings (no acquisition adapter into the shared contract, no durable truth).
+    foundation: Object.freeze({ ticket: 'SOCIAL-4E', stage: 'DESCRIPTORS_READINESS_AND_FIXTURE_PREVIEWS', module: 'rumor2/social-meta.js', namespaces: Object.freeze(['FACEBOOK', 'INSTAGRAM']), fixtureOnly: true, live: false, durable: false, operationalAccess: false, docsAccessedOn: '2026-09-07', docsUnverified: Object.freeze(['COMMENT_MESSAGE_CREATED_TIME_FROM']) }),
     reason: 'Route-specific (SOCIAL-4D): Page Public Content Access reads public Page posts/comments only after Meta App Review + Business Verification; Page Public Metadata Access is metadata only; Instagram routes read an authorizing professional account (Instagram Login) or add capped hashtag search and business discovery (Facebook Login) with no realtime delivery documented; the Meta Content Library requires an academic/not-for-profit affiliation reviewed by a partner — not established for this project. No route is a firehose; latency is unmeasured; delete/retention and inference permissions need their own route-specific review. See doctrine/SOCIAL.md §2/§5H.',
   }),
   Object.freeze({
@@ -238,6 +249,10 @@ export const SOCIAL_PROVIDERS = Object.freeze([
       COMMERCIAL_CONTENT: 'Commercial Content API: paid ads, advertiser data, and other commercial content (EU data in this phase, open application) — an ad/commercial dataset, not the organic feed and not a classification of Serpent\'s use',
     }),
     docUrl: 'https://developers.tiktok.com/products/research-api/',
+    // SOCIAL-4E foundation stage (pure, non-live): three product descriptors, product-bound readiness
+    // evaluators, and a fixture-only Research/Display video preview (documented epoch seconds parsed only
+    // as seconds; no identity from labels). The decision above is preserved unchanged. NOT operational access.
+    foundation: Object.freeze({ ticket: 'SOCIAL-4E', stage: 'DESCRIPTORS_READINESS_AND_FIXTURE_PREVIEWS', module: 'rumor2/social-tiktok.js', credentialEnvs: Object.freeze(['TIKTOK_CLIENT_KEY', 'TIKTOK_CLIENT_SECRET']), fixtureOnly: true, live: false, durable: false, operationalAccess: false, docsAccessedOn: '2026-09-07', docsUnverified: Object.freeze(['COMMERCIAL_CONTENT_SCHEMA']) }),
     reason: 'Product-by-product (SOCIAL-4D): Research Tools require an eligible institutional affiliation and project approval this project has not supplied, and that route indexes new videos with up to 48 h delay; the Display API reads only an authorizing user\'s own videos; the Commercial Content API is an ads/commercial dataset. No appropriate authorized minutes-scale organic route is established on the supplied facts. Inactive; operator review of any permanent decision is pending.',
   }),
 ]);
@@ -245,8 +260,8 @@ export const SOCIAL_PROVIDERS = Object.freeze([
 export const SOCIAL_PROVIDER_IDS = Object.freeze(SOCIAL_PROVIDERS.map((p) => p.id));
 export const socialProviderById = (id) => SOCIAL_PROVIDERS.find((p) => p.id === id) ?? null;
 
-// Providers that are durably ACTIVE in this ticket (write social truth into the
-// event root now). Only these join the checkpoint provider set via v5.
+// Providers that are durably ACTIVE (write social truth into the event root now).
+// Only these may join the checkpoint provider set (v4 retained; cursor in journal).
 export const ACTIVE_SOCIAL_PROVIDER_IDS = Object.freeze(SOCIAL_PROVIDERS.filter((p) => p.durable).map((p) => p.id));
 
 // Structural invariants — asserted by tests too, so drift is caught.

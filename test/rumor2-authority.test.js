@@ -154,6 +154,28 @@ test('R2A-SOCIAL-6 (SOCIAL-4B). the StockTwits raw-Social surface is an explicit
   for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/social-stream.js']) assert.ok(!/social-stocktwits|STOCKTWITS/.test(read(f)), `${f} has no StockTwits wiring`);
 });
 
+test('R2A-SOCIAL-7 (SOCIAL-4E). the Meta / TikTok / Farcaster-access foundations are EXPLICIT filename allowlists — each module added deliberately, fixture-only, never fetching, never importing authority; no collector or runtime wires them', () => {
+  // EXPLICIT allowlists: the only rumor2 files whose CODE may name each platform (never a wildcard over social* files)
+  const META_ALLOWLIST = ['rumor2/social-meta.js', 'rumor2/social-registry.js'];
+  const TIKTOK_ALLOWLIST = ['rumor2/social-tiktok.js', 'rumor2/social-registry.js'];
+  const NEYNAR_ALLOWLIST = ['rumor2/providers/farcaster-official.js', 'rumor2/social-farcaster-access.js', 'rumor2/social-registry.js'];
+  assert.deepEqual(rumor2Files.filter((f) => /facebook|instagram/i.test(code(f))).sort(), [...META_ALLOWLIST].sort(), `Facebook/Instagram may only be named in ${META_ALLOWLIST.join(', ')}`);
+  assert.deepEqual(rumor2Files.filter((f) => /tiktok/i.test(code(f))).sort(), [...TIKTOK_ALLOWLIST].sort(), `TikTok may only be named in ${TIKTOK_ALLOWLIST.join(', ')}`);
+  assert.deepEqual(rumor2Files.filter((f) => /neynar/i.test(code(f))).sort(), [...NEYNAR_ALLOWLIST].sort(), `Neynar may only be named in ${NEYNAR_ALLOWLIST.join(', ')}`);
+  const MODULES = ['rumor2/social-foundation.js', 'rumor2/social-meta.js', 'rumor2/social-tiktok.js', 'rumor2/social-farcaster-access.js'];
+  for (const f of MODULES) {
+    assert.ok(tracked.includes(f), `${f} is tracked (Git-index-aware)`);
+    assert.ok(SOCIAL_FILE_RE.test(f), `${f} audited in the social tier, never as frozen core`);
+    const src = read(f);
+    for (const forbidden of ['fetch(', 'WebSocket', 'EventSource', 'setTimeout', 'setInterval', 'node:http', 'node:https', 'node:net', 'node:fs', 'child_process', 'zlib', 'Authorization', 'access_token=', 'grant_type', 'client_secret=', 'x-api-key:', 'Date.now', 'Date.parse', 'randomUUID']) assert.ok(!src.includes(forbidden), `${f}: ${forbidden}`);
+    assert.ok(!/from '\.\.\//.test(src), `${f} imports nothing outside rumor2`);
+    assert.ok(!/ledger|cost\/|tape|strike|exec|socrates|attention|hyped|stalk|nominat/i.test(src.replace(/\/\/.*$/gm, '')), `${f} touches no authority`);
+    assert.ok(!/reddit|stocktwits/i.test(code(f)), `${f} does not widen the Reddit/StockTwits allowlists`);
+  }
+  for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/social-stream.js', 'rumor2/social-settle.js', 'rumor2/social.js']) assert.ok(!/social-(foundation|meta|tiktok|farcaster-access)|META_ROUTES|TIKTOK_ROUTES|evaluateFarcasterAccess/.test(read(f)), `${f} has no 4E wiring`);
+  assert.equal(socialProviderById('META_PUBLIC').durable, false); assert.equal(socialProviderById('TIKTOK_PUBLIC').durable, false); assert.equal(socialProviderById('FARCASTER_OFFICIAL').durable, false);
+});
+
 test('R2A-82+83. SOCRATES-0 and GHOST-1 remain absent', () => {
   // no socrates caller anywhere in the runtime (the contract scans in the
   // socrates suites stay authoritative; this re-pins the rumor layer)

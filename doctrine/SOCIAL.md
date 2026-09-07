@@ -53,12 +53,12 @@ The machine-readable census lives in `rumor2/social-registry.js` and is pinned b
 | Provider | Kind | Access state | Why (summary) |
 |---|---|---|---|
 | **BLUESKY_OFFICIAL** | microblog | `AVAILABLE_AUTHORIZED` | Free, public, unauthenticated Jetstream v2 real-time firehose with collection/DID filtering + replay. The first live ear. |
-| **FARCASTER_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Neynar hosted API (x-api-key) documents event webhooks, cast search, a Kafka stream, and gRPC hub access; Neynar **publishes** a Free plan with per-endpoint limits (docs, 2026-09-06). THIS project's plan, credits, entitlement, terms (retrieval failed 2026-09-06), retention, and cost are **UNKNOWN/UNVERIFIED**. Mapper present; **no live transport or collector wiring**; a configured `NEYNAR_API_KEY` is configuration only. Hub/Snapchain needs a full node. Acquisition path is a proposal pending terms/plan/recovery/scope (§5H). |
+| **FARCASTER_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Neynar hosted API (x-api-key) documents event webhooks, cast search, a Kafka stream, and gRPC hub access; Neynar **publishes** a Free plan with per-endpoint limits (docs, 2026-09-06). THIS project's plan, credits, entitlement, terms (retrieval failed 2026-09-06), retention, and cost are **UNKNOWN/UNVERIFIED**. Mapper present; **no live transport or collector wiring**; a configured `NEYNAR_API_KEY` is configuration only. Hub/Snapchain needs a full node. Acquisition path is a proposal pending terms/plan/recovery/scope (§5H). SOCIAL-4E: pure access/readiness boundary (`rumor2/social-farcaster-access.js`, §5P) — not operational access. |
 | **X_OFFICIAL** | microblog | `AVAILABLE_REQUIRES_CREDENTIAL` | Pay-per-use filtered stream (~4–5s P99), OAuth2 App-Only bearer. Hard read/USD budget under the 3M-post-read/month self-serve cap ($0.005/read; usage via `/2/usage/tweets`; UTC-day dedupe is SOFT). Operational, runtime-gated ear since SOCIAL-2B (§5C). |
 | **REDDIT_OFFICIAL** | forum | `AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION` | Official OAuth2 Data API is a documented path; API data access requires Reddit's explicit approval with honest disclosure. Serpent's private single-user personal-trading use is **UNRESOLVED** (not assumed commercial, not assumed exempt); any separate-agreement requirement and retention compatibility are unresolved. Scraping is prohibited. Fixture-only foundation (SOCIAL-3, §5F) — not an operational ear. |
 | **STOCKTWITS_OFFICIAL** | finance | `AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW` | ONE platform, several routes (SOCIAL-4B, §5G). Self-service registration is **paused** (route-specific). Firestream message/activity/reference/backup routes are documented for stream-authorized accounts (HTTP Basic); general Terms (revised 2026-07-10) permit only authorized API/developer access and let offering terms prevail. This account's entitlement, Serpent's permitted use, additional terms, and raw-content/author retention are **UNRESOLVED**. A **legacy aggregate RUMINT ear exists separately** (config-enabled; deployment unobserved; entitlement unresolved). New raw Social path: fixture-only, retention-blocked. **High priority, blocked by entitlement/terms review — not by importance.** |
-| **META_PUBLIC** (Facebook + Instagram routes) | microblog | `AVAILABLE_REQUIRES_APP_REVIEW` | Route-specific (SOCIAL-4D, docs 2026-09-06): Page Public Content Access (public posts/comments of unmanaged Pages; App Review + Business Verification); Page Public Metadata Access (metadata only); managed Pages (own Pages only); Instagram Login (own professional account); Instagram with Facebook Login (capped hashtag search 30/7 days + business discovery; professional account + Page + App Review; no realtime delivery documented); Content Library (research archive; academic/not-for-profit affiliation reviewed by a partner — **not established for this project**); Ad Library (ads only); Groups API removed 2024-04-22. No firehose; latency unmeasured; eligibility for this project **NOT ESTABLISHED**; no application made or denied; retention/inference need route-specific review. |
-| **TIKTOK_PUBLIC** | microblog | `NOT_AUTHORIZED` (no authorized route established on the supplied facts) | Product-by-product (SOCIAL-4D, docs 2026-09-06): Research Tools require an eligible academic/not-for-profit affiliation, non-commercial public-interest research, ethics review, and project approval — **not established for this project**; on THAT route new videos take up to 48 h to enter search and some metrics up to 10 days (route-specific, not every product). Display API reads only the authorizing user's own videos. Commercial Content API is an ads/commercial dataset (EU data in this phase, open application) — a dataset name, not a classification of Serpent's use. **Current decision:** `INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED`, `OPERATOR_REVIEW_PENDING` — no application, no denial, no permanent exclusion approved. |
+| **META_PUBLIC** (Facebook + Instagram routes) | microblog | `AVAILABLE_REQUIRES_APP_REVIEW` | Route-specific (SOCIAL-4D, docs 2026-09-06): Page Public Content Access (public posts/comments of unmanaged Pages; App Review + Business Verification); Page Public Metadata Access (metadata only); managed Pages (own Pages only); Instagram Login (own professional account); Instagram with Facebook Login (capped hashtag search 30/7 days + business discovery; professional account + Page + App Review; no realtime delivery documented); Content Library (research archive; academic/not-for-profit affiliation reviewed by a partner — **not established for this project**); Ad Library (ads only); Groups API removed 2024-04-22. No firehose; latency unmeasured; eligibility for this project **NOT ESTABLISHED**; no application made or denied; retention/inference need route-specific review. SOCIAL-4E: ten route descriptors in FACEBOOK / INSTAGRAM namespaces, route-bound readiness, fixture-only previews (`rumor2/social-meta.js`, §5P) — not operational access. |
+| **TIKTOK_PUBLIC** | microblog | `NOT_AUTHORIZED` (no authorized route established on the supplied facts) | Product-by-product (SOCIAL-4D, docs 2026-09-06): Research Tools require an eligible academic/not-for-profit affiliation, non-commercial public-interest research, ethics review, and project approval — **not established for this project**; on THAT route new videos take up to 48 h to enter search and some metrics up to 10 days (route-specific, not every product). Display API reads only the authorizing user's own videos. Commercial Content API is an ads/commercial dataset (EU data in this phase, open application) — a dataset name, not a classification of Serpent's use. **Current decision:** `INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED`, `OPERATOR_REVIEW_PENDING` — no application, no denial, no permanent exclusion approved. SOCIAL-4E: three product descriptors, product-bound readiness, fixture-only Research/Display video preview (`rumor2/social-tiktok.js`, §5P) — decision unchanged; not operational access. |
 
 Sub-decisions recorded but not built as separate providers (SOCIAL-4D wording; no route enabled):
 - **Instagram** is reviewed separately from Facebook: Instagram Login reads only the authorizing
@@ -1380,6 +1380,162 @@ Unchanged: the causal-prefix law, first-known policy for unequal clocks, base-ev
 as-of cutoffs, UNRESOLVED_CONFLICT semantics, LEGACY_UNSEALED labels, retention blocks, source
 counts, identities, journal semantics, and every runtime path.
 
+## 5P. SOCIAL-4E — remaining social-source foundations (Meta / TikTok / Farcaster access), non-live
+
+**Status: FOUNDATION BUNDLE COMPLETE, NOT LIVE.** Foundation complete is NOT operational access,
+account entitlement, production enablement, or a measured trading edge. Nothing here performs a
+provider request, authenticated preflight, OAuth exchange, WebSocket, webhook, subscription, login,
+purchase, or application; nothing reads or prints a credential value; no runtime, collector,
+registry, provider, or persistence module imports a 4E module (pinned by `test/social-4e-foundation.test.js`).
+
+**Documentation check (first-party pages read 2026-09-07; a fetch failure is
+`DOCUMENTATION_UNVERIFIED`, never a guess).** Verified: M1 Page Public Content Access (App Review +
+Business Verification + possible contracts; `/page/feed`, `/page-post`, `/page-post/comments`;
+"Analyze and/or display posts and engagement on Pages"); M2 Page Public Metadata Access (metadata
+only; excludes feed/comments); M3 Instagram overview (two login paths; hashtag search only via
+Facebook Login under Instagram Public Content Access; App Review for Advanced Access; 4800 ×
+impressions / 24 h); M4 Instagram Login (own professional account; no ads/tagging; no hashtag
+search documented); M5 Instagram with Facebook Login (professional accounts only; cursor
+pagination); M6 Page `/feed` (Post `id` = `{page-id}_{post-identifier}`, `message`, `created_time`,
+`permalink_url`, `from{name,id}`; ~600 ranked posts/year; `limit` ≤ 100); Comment reference (`id`,
+`parent`, `comment_count`, `like_count` — `message`, `created_time`, `from` were NOT documented on
+the pages read, so the comment preview does not parse them); IG Media reference (`id`, `media_type`,
+`timestamp` "ISO 8601-formatted creation date in UTC", `permalink`, `username`, `owner`, counts;
+`caption` and `media_product_type` documented for Facebook Login only); M7 Meta Content Library
+(academic / not-for-profit affiliation reviewed by CASD; controlled environments); M8 Platform Terms
+(3.d deletion obligations; 3.a prohibited uses; no explicit automated-financial-use statement); T1
+Research API FAQ (commercial users ineligible; 48 h search indexing; up to 10 days metric refresh;
+daily quota); T2 Display API overview and the Display Video Object (`id` string, `create_time`
+int64 "UTC Unix epoch (in seconds)", counts int32/int64); T3 Research Tools eligibility; Research
+query-videos object (`id` int64, `create_time` seconds, `username`, `region_code`, counts,
+`hashtag_names`); T4 Commercial Content API (ads/advertiser/commercial content; EU data in this
+phase; no content schema verified). N1 Neynar rate limits (Free 600 RPM / 10 RPS per endpoint;
+cast search 120 RPM; global 1000 RPM; per subscription plan, independent of credits); N2
+search-casts (`q`, `limit` ≤ 100, `cursor`, chronological sort; NO freshness or completeness
+statement). **Unverified:** N3 pricing (client-rendered shell on read) and N4 terms (HTTP 404 at
+`/terms` and `/terms-of-service`, one recheck each) — consistent with the registry's
+`termsRetrieval: FAILED_2026-09-06`. A retrieval limit is not an access decision.
+
+**Shared primitive (`rumor2/social-foundation.js`).** One small pure module, importing only the
+sealed temporal boundary, holds what three new modules would otherwise triplicate: the supported
+caller clock, the closed record vocabularies (statuses, approval states, agreement states,
+retention states, permitted uses, documentation statuses, implementation stages), the sealed
+`accessDate` judgement of `reviewedOn` / `validUntil`, the scope/route-bound approval outcome, the
+extra-agreement and retention blockers, ONE readiness derivation (every prerequisite AND zero
+blockers), and the frozen no-live facts every output spreads in: `liveStatus DISABLED`,
+`liveAllowed false`, `liveReason FOUNDATION_ONLY_NO_LIVE_PATH`, `durableContentAllowed false`,
+`durableAuthorIdentityAllowed false`, `measuredLatency UNKNOWN`, `productionObservation UNOBSERVED`.
+The Reddit and StockTwits foundations keep their own byte-identical copies (pinned).
+
+**Meta (`rumor2/social-meta.js`).** ONE registry provider (`META_PUBLIC`), TWO route namespaces
+(`FACEBOOK`, `INSTAGRAM`) that are not checkpoint providers. Ten distinct descriptors —
+`FACEBOOK_PAGE_PUBLIC_CONTENT`, `FACEBOOK_PAGE_PUBLIC_METADATA`, `FACEBOOK_MANAGED_PAGES`,
+`FACEBOOK_CONTENT_LIBRARY`, `FACEBOOK_AD_LIBRARY`, `FACEBOOK_GROUPS` (no sanctioned route),
+`INSTAGRAM_LOGIN`, `INSTAGRAM_FACEBOOK_LOGIN`, `INSTAGRAM_HASHTAG_DISCOVERY` (30 unique hashtags /
+7 days), `INSTAGRAM_CONTENT_LIBRARY` — each answering separately: platform path; payload scope;
+eligibility requirements (closed prerequisite vocabulary); eligibility established for this
+operator (`NOT_ESTABLISHED`); approval/entitlement; credential configuration (env NAMES only;
+the Instagram Login route names its own token); permitted uses; extra-agreement applicability
+and satisfaction; retention for content and for identity (both `UNRESOLVED_ROUTE_SPECIFIC…`);
+implementation stage; measured latency; production observation. Evidence classes keep metadata,
+promotion data, operator-managed Pages, and research archives distinct from `PUBLIC_PAGE_ORGANIC`.
+An operator record is bound to ONE route (`APPROVAL_ROUTE_MISMATCH` elsewhere) and is
+`OPERATOR_ATTESTED` evidence, never platform proof. Previews (`metaPayloadToPreview`) are typed by
+route and content kind: Page post (documented string id + namespace; `from.id` contradicting the
+id prefix is refused; basic-format offsets such as `+0000` are NOT repaired — recorded `MALFORMED`
+with the declaration preserved and no instant), Page comment (id, parent, counts only; text/clock
+`DOCUMENTATION_UNVERIFIED`; relationship needs explicit post context; self-parent refused),
+Instagram media (caption only where documented for the route; `AD` product type relabelled
+`PROMOTION_DATA`; `username` never identity; hidden likes unknown). Missing content is never
+deletion. Every preview says `fixtureOnly true, durable false, authority NONE, readinessToken false`
+and is rejected by normalization, event build, and settlement.
+
+**TikTok (`rumor2/social-tiktok.js`).** The registry decision is preserved verbatim
+(`INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED`, `OPERATOR_REVIEW_PENDING`; no
+application made or denied; no permanent exclusion approved). Three product descriptors equal to
+the registry route keys: `RESEARCH` (institutional affiliation, non-commercial basis, ethics
+review, project approval; route-specific 48 h indexing / 10-day metric refresh), `DISPLAY` (own
+videos only), `COMMERCIAL_CONTENT` (commercial dataset; preview
+`PREVIEW_UNSUPPORTED_DOCUMENTATION_UNVERIFIED`). Products cannot impersonate each other; a client
+key is configuration and never supplies affiliation or approval. The preview parses documented
+epoch SECONDS only as seconds with a range window (`UNSUPPORTED_RANGE` for millisecond magnitudes,
+never divided; strings `TYPE_MISMATCH`; floats `NOT_AN_INTEGER`), preserves int64 ids as digit
+strings (unsafe numbers refused as `ID_PRECISION_LOST`), derives NO author identity from
+`username` / `display_name` / `nickname`, records metrics as a first-known diagnostic snapshot
+with `asOf UNKNOWN`, and keeps four distinct clocks (source-created, indexed, metric-updated,
+retrieved) each honestly unknown when not supplied.
+
+**Farcaster access boundary (`rumor2/social-farcaster-access.js`).** `providers/farcaster-official.js`
+stays byte-identical (sha pinned); the boundary reuses only its key-presence boolean. It separates:
+published plan/reference limits (`NEYNAR_PUBLISHED_REFERENCE`, labelled
+`PUBLISHED_REFERENCE_NOT_ACCOUNT_ENTITLEMENT`) from this account's plan and credits (`UNKNOWN`
+unless attested; account limits `UNVERIFIED`); key presence (`CONFIGURATION_ONLY`) from
+entitlement; the suggested acquisition path (`SEARCH_POLLING`, a proposal) from an approved choice;
+documented cursor pagination from complete coverage (`UNPROVEN`); unmeasured lag from a real-time
+lead (`UNPROVEN`); documented webhook authentication from delivery completeness, ordering, and
+replay (`UNPROVEN`). Blockers are independent (`KEY_MISSING`, `PLAN_UNKNOWN`, `CREDITS_UNKNOWN` /
+`CREDITS_EXHAUSTED`, `TERMS_UNRESOLVED` / `TERMS_PROHIBIT_USE`, `ACQUISITION_PATH_NOT_APPROVED`,
+clock / expiry / agreement / retention). No transport, poller, webhook receiver, collector, or
+journal wiring exists.
+
+**Registry.** `META_PUBLIC`, `TIKTOK_PUBLIC`, and `FARCASTER_OFFICIAL` carry explicit `foundation`
+metadata (ticket, stage, module, fixtureOnly, live false, durable false, operationalAccess false,
+docs accessed 2026-09-07, unverified docs) while `implemented` / `durable` keep their meanings.
+The stale "checkpoint v5 migration" wording is corrected: this checkout retains checkpoint v4 and
+the Social resume position lives in journal `RUMOR2_SOCIAL_CURSOR` events. The registry imports
+none of the 4E modules.
+
+**Stage gates (all pinned).** Stage 1: no evidence leaks across routes/namespaces; metadata / ad /
+managed / archive results never labelled organic; malformed relationship / id / clock cannot
+fabricate provenance; permissive inputs cannot enable a request or a durable event. Stage 2:
+products cannot impersonate; a token cannot supply affiliation or approval; missing clocks /
+metrics stay unknown; no raw content reaches a persistent path; bad types, timezone strings, long
+ids, partial payloads, absent dates handled. Stage 3: key / Free plan / unrelated approval /
+credits cannot authorize; independent blockers; no new runtime imports. Stage 4: zero-capability
+imports proven with injected traps (fetch, WebSocket, EventSource, timers, `Date.now`, `new Date()`,
+`Math.random`, credential-named `process.env` reads) plus static checks; cross-provider mutation
+matrix (the strongest record any foundation accepts readies nothing else, including the Reddit
+and StockTwits evaluators); previews incompatible with every source-event envelope; the
+Reddit/StockTwits retention firewall unchanged; protected surfaces byte-identical; pump doctrine
+preserved; ONE coverage matrix (14 routes: 7 previewable, 3 documentation-unverified, 1 no-route,
+3 descriptor-only/boundary).
+
+**Coverage matrix.**
+
+| Provider | Route | Descriptor | Readiness | Preview | Stage |
+|---|---|---|---|---|---|
+| META_PUBLIC | FACEBOOK_PAGE_PUBLIC_CONTENT | yes | yes | SUPPORTED (post, comment) | DESCRIPTOR_AND_FIXTURE_PREVIEW |
+| META_PUBLIC | FACEBOOK_PAGE_PUBLIC_METADATA | yes | yes | PREVIEW_UNSUPPORTED_METADATA_ONLY | DESCRIPTOR_ONLY |
+| META_PUBLIC | FACEBOOK_MANAGED_PAGES | yes | yes | SUPPORTED (post, comment; OPERATOR_MANAGED) | DESCRIPTOR_AND_FIXTURE_PREVIEW |
+| META_PUBLIC | FACEBOOK_CONTENT_LIBRARY | yes | yes | PREVIEW_UNSUPPORTED_DOCUMENTATION_UNVERIFIED | DESCRIPTOR_ONLY |
+| META_PUBLIC | FACEBOOK_AD_LIBRARY | yes | yes | PREVIEW_UNSUPPORTED_NOT_ORGANIC_CONTENT | DESCRIPTOR_ONLY |
+| META_PUBLIC | FACEBOOK_GROUPS | yes | never ready | PREVIEW_UNSUPPORTED_NO_ROUTE | NO_SANCTIONED_ROUTE |
+| META_PUBLIC | INSTAGRAM_LOGIN | yes | yes | SUPPORTED (media; caption not documented for route) | DESCRIPTOR_AND_FIXTURE_PREVIEW |
+| META_PUBLIC | INSTAGRAM_FACEBOOK_LOGIN | yes | yes | SUPPORTED (media) | DESCRIPTOR_AND_FIXTURE_PREVIEW |
+| META_PUBLIC | INSTAGRAM_HASHTAG_DISCOVERY | yes | yes | SUPPORTED (media; capped) | DESCRIPTOR_AND_FIXTURE_PREVIEW |
+| META_PUBLIC | INSTAGRAM_CONTENT_LIBRARY | yes | yes | PREVIEW_UNSUPPORTED_DOCUMENTATION_UNVERIFIED | DESCRIPTOR_ONLY |
+| TIKTOK_PUBLIC | RESEARCH | yes | yes | SUPPORTED (video) | DESCRIPTOR_AND_FIXTURE_PREVIEW |
+| TIKTOK_PUBLIC | DISPLAY | yes | yes | SUPPORTED (video) | DESCRIPTOR_AND_FIXTURE_PREVIEW |
+| TIKTOK_PUBLIC | COMMERCIAL_CONTENT | yes | yes | PREVIEW_UNSUPPORTED_DOCUMENTATION_UNVERIFIED | DESCRIPTOR_ONLY |
+| FARCASTER_OFFICIAL | NEYNAR_HOSTED_API | yes | yes | mapper exists in the provider adapter (unchanged) | ACCESS_BOUNDARY_ONLY |
+
+**Remaining work (SOCIAL-4E) — none of it assumed:** a Meta-specific clock grammar for the
+basic-format offset (`+0000`) once an observed payload confirms it (today: `MALFORMED`, declaration
+preserved); Comment `message` / `created_time` / `from` and the Commercial Content schema once
+documented on a page that can be read; Neynar pricing and terms (retrieval failed twice) — permitted
+use, retention/deletion, and prohibited uses remain unverified; every readiness prerequisite is an
+operator attestation awaiting the platform's actual decision (App Review, Business Verification,
+partner affiliation, TikTok project approval, Neynar plan/credits/entitlement); route-specific
+retention and deletion designs before any durable content or author identity; measured latency
+and coverage under a real acquisition path; an operator decision on the TikTok current decision
+(`OPERATOR_REVIEW_PENDING`) and on the Farcaster acquisition path; a possible consolidation of the
+Reddit/StockTwits copies onto the shared primitive (deliberately not done here). Observation (out of
+scope): the registry's `implemented` flag means "fixture-only preview adapter" for Reddit/StockTwits
+(`true`) but was left `false` for Meta/TikTok per this ticket; the `foundation` metadata now records
+the stage explicitly so the flag's two readings are visible.
+
+---
+
 ## 6. Authority audit
 
 - Social providerKinds are not claim-capable → `classifyOfficialItem` returns
@@ -1442,6 +1598,11 @@ SOCIAL-1 is the foundation; it is **not** the frozen social layer. Remaining:
 - **SOCIAL-4D STANDALONE ORDER-CONTEXT — DONE (§5O):** the whole earliest tied group must be
   positioned or the selection is refused; malformed orders are refused, never resolved by input
   order. Further defects may exist; the Social/RUMOR layer is not complete.
+- **SOCIAL-4E — FOUNDATION BUNDLE COMPLETE, NOT LIVE (§5P):** Meta route descriptors + readiness +
+  fixture previews, TikTok product descriptors + readiness + video preview (decision unchanged),
+  Farcaster access/readiness boundary (adapter byte-identical), one shared pure primitive. Not
+  operational access, not account entitlement, not production enablement, not a measured edge; the
+  remaining-work list in §5P stands.
 - **SOCIAL-5:** cross-platform provenance / propagation / pump-stage engine
   (calibrate the stage classifier against real history).
 - **SOCIAL-6:** author reliability / deletion / historical-outcome research.

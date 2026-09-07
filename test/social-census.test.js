@@ -4,6 +4,7 @@
 // caught, and asserts the SOCIAL-1 activation decisions.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   SOCIAL_PROVIDERS, SOCIAL_PROVIDER_IDS, SOCIAL_ACCESS_STATES, ACTIVE_SOCIAL_PROVIDER_IDS,
   socialProviderById, isLiveActivatable, isPlatformCapable,
@@ -65,4 +66,19 @@ test('CENSUS-6. no credential/secret value is ever embedded — only env var NAM
     const blob = JSON.stringify(p);
     assert.ok(!/(sk-[A-Za-z0-9]{16,}|AIza[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{12,}|[A-Za-z0-9_-]{32,}\.[A-Za-z0-9_-]{16,})/.test(blob), `${p.id} embeds no secret token value`);
   }
+});
+
+test('CENSUS-7 (SOCIAL-4E). foundation-stage metadata is explicit and non-live; implemented/durable keep their meanings; the TikTok decision and Meta eligibility are unchanged; the stale v5 wording is gone', () => {
+  const expected = { META_PUBLIC: 'rumor2/social-meta.js', TIKTOK_PUBLIC: 'rumor2/social-tiktok.js', FARCASTER_OFFICIAL: 'rumor2/social-farcaster-access.js' };
+  for (const [id, module] of Object.entries(expected)) {
+    const f = socialProviderById(id).foundation;
+    assert.equal(f.ticket, 'SOCIAL-4E'); assert.equal(f.module, module); assert.equal(f.fixtureOnly, true); assert.equal(f.live, false); assert.equal(f.durable, false); assert.equal(f.operationalAccess, false); assert.match(f.docsAccessedOn, /^\d{4}-\d{2}-\d{2}$/);
+  }
+  for (const p of SOCIAL_PROVIDERS) if (!(p.id in expected)) assert.ok(!('foundation' in p), `${p.id} carries no 4E metadata`);
+  assert.equal(socialProviderById('META_PUBLIC').implemented, false); assert.equal(socialProviderById('TIKTOK_PUBLIC').implemented, false); assert.equal(socialProviderById('FARCASTER_OFFICIAL').implemented, true);
+  assert.equal(socialProviderById('TIKTOK_PUBLIC').currentDecision, 'INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED'); assert.equal(socialProviderById('TIKTOK_PUBLIC').decisionStatus, 'OPERATOR_REVIEW_PENDING');
+  assert.equal(socialProviderById('META_PUBLIC').eligibilityForThisProject, 'NOT_ESTABLISHED'); assert.equal(socialProviderById('FARCASTER_OFFICIAL').account.entitlement, 'UNVERIFIED');
+  assert.deepEqual(ACTIVE_SOCIAL_PROVIDER_IDS, ['BLUESKY_OFFICIAL', 'X_OFFICIAL'], 'no 4E provider became durable');
+  const src = readFileSync(new URL('../rumor2/social-registry.js', import.meta.url), 'utf8');
+  assert.ok(!/checkpoint v5 migration|via v5/.test(src)); assert.ok(/checkpoint v4/.test(src) && /RUMOR2_SOCIAL_CURSOR/.test(src));
 });
