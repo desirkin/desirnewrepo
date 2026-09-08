@@ -28,7 +28,7 @@ export const CLOSE_DRAIN_MS = 10_000; // the bounded close drain: a transport ig
 export const CASE_STATES = Object.freeze(['CREATED', 'ACQUIRING_INITIAL', 'PACKET_READY', 'INTERPRETING', 'FOLLOWUP_ACQUISITION', 'NEW_PACKET_READY', 'FINAL_INTERPRETING', 'COMPLETED', 'INITIAL_REPORT_ONLY', 'MODEL_FAILED', 'BUDGET_BLOCKED', 'DEADLINE_EXCEEDED', 'PACKET_INVALID', 'CANCELLED']);
 export const TERMINAL_STATES = Object.freeze(['COMPLETED', 'INITIAL_REPORT_ONLY', 'MODEL_FAILED', 'BUDGET_BLOCKED', 'DEADLINE_EXCEEDED', 'PACKET_INVALID', 'CANCELLED']);
 export const ATTEMPT_PATHS = Object.freeze(['LIVE_MODEL', 'RECORDED_RESPONSE', 'REUSED', 'MODEL_REEVALUATION_NOW']);
-export const ATTEMPT_FAILURE_KINDS = Object.freeze(['MODEL_DISABLED', 'CREDENTIAL_MISSING', 'INPUT_TOO_LARGE', 'BUDGET_BLOCKED', 'RESERVATION_FAILED', 'TOKEN_COUNT_FAILED', 'RECORDED_RESPONSE_MISSING', 'RECORDED_RESPONSE_MISMATCH', 'REPLAY_LIVE_MODEL_OFF', 'DEADLINE', 'CANCELLED', 'RUNTIME_CLOSED', 'OUTPUT_TOO_LARGE', 'JSON_INVALID', 'SCHEMA', 'TRANSPORT', 'REFUSAL', 'TRUNCATED', 'NO_TEXT', 'MODEL_MISMATCH']);
+export const ATTEMPT_FAILURE_KINDS = Object.freeze(['MODEL_DISABLED', 'CREDENTIAL_MISSING', 'INPUT_TOO_LARGE', 'BUDGET_BLOCKED', 'RESERVATION_FAILED', 'TOKEN_COUNT_FAILED', 'ACCOUNTING_FAILED', 'RECORDED_RESPONSE_MISSING', 'RECORDED_RESPONSE_MISMATCH', 'REPLAY_LIVE_MODEL_OFF', 'DEADLINE', 'CANCELLED', 'RUNTIME_CLOSED', 'OUTPUT_TOO_LARGE', 'JSON_INVALID', 'SCHEMA', 'TRANSPORT', 'REFUSAL', 'TRUNCATED', 'NO_TEXT', 'MODEL_MISMATCH']);
 const TRANSITIONS = Object.freeze({ CREATED: ['ACQUIRING_INITIAL', 'CANCELLED'], ACQUIRING_INITIAL: ['PACKET_READY', 'PACKET_INVALID', 'CANCELLED', 'DEADLINE_EXCEEDED'], PACKET_READY: ['INTERPRETING', 'CANCELLED'], INTERPRETING: ['COMPLETED', 'FOLLOWUP_ACQUISITION', 'MODEL_FAILED', 'BUDGET_BLOCKED', 'DEADLINE_EXCEEDED', 'CANCELLED'], FOLLOWUP_ACQUISITION: ['NEW_PACKET_READY', 'COMPLETED', 'INITIAL_REPORT_ONLY', 'CANCELLED'], NEW_PACKET_READY: ['FINAL_INTERPRETING', 'INITIAL_REPORT_ONLY', 'CANCELLED'], FINAL_INTERPRETING: ['COMPLETED', 'INITIAL_REPORT_ONLY', 'CANCELLED'] });
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const sha = (o) => sha256Hex(Buffer.from(canonicalJson(o), 'utf8'));
@@ -134,20 +134,29 @@ export function createCaseRuntime({ policy, env = {}, owner = null, clock = () =
     const journalMutable = () => journalOpen() && j.isOpen(reservationId);
     if (!res.ok) {
       const f = res.failure ?? { kind: 'SCHEMA', reason: 'no failure detail' }; const known4xx = ['HTTP_401', 'HTTP_403', 'HTTP_429', 'HTTP_4XX'].includes(f.kind);
-      let settledUsd = null; let accounting;
-      if (!journalMutable()) accounting = 'PRESERVED_AT_CLOSE';
-      else if (f.kind === 'CANCELLED' && f.dispatched === false) { j.releaseReservation({ reservationId, reason: 'CANCELLED_BEFORE_DISPATCH' }); accounting = 'RELEASED'; } // provably never dispatched (explicit client fact)
-      else if (f.usage && !usageError(f.usage)) { settledUsd = j.settle({ reservationId, usage: f.usage, pricing: modelCfg.pricing }).actualUsd; accounting = 'SETTLED'; } // refusal / truncation / mismatch: usage is known and billed
-      else if (known4xx) { settledUsd = j.settle({ reservationId, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, pricing: modelCfg.pricing }).actualUsd; accounting = 'SETTLED'; } // provider answered with an error: no tokens processed
-      else { j.markUnresolved({ reservationId, reason: f.kind }); accounting = 'UNRESOLVED'; } // timeout / network / 5xx / oversized / invalid body / invalid usage: a charge is not disproven, no automatic refund
+      let settledUsd = null; let accounting; let accountingError = null;
+      // closeout P2: a failed durable accounting transition is owned explicitly — the reservation stays RESERVED on disk (conservative), the
+      // journal latches, and this attempt reports ACCOUNTING_FAILED rather than an ordinary outcome
+      try {
+        if (!journalMutable()) accounting = 'PRESERVED_AT_CLOSE';
+        else if (f.kind === 'CANCELLED' && f.dispatched === false) { j.releaseReservation({ reservationId, reason: 'CANCELLED_BEFORE_DISPATCH' }); accounting = 'RELEASED'; } // provably never dispatched (explicit client fact)
+        else if (f.usage && !usageError(f.usage)) { settledUsd = j.settle({ reservationId, usage: f.usage, pricing: modelCfg.pricing }).actualUsd; accounting = 'SETTLED'; } // refusal / truncation / mismatch: usage is known and billed
+        else if (known4xx) { settledUsd = j.settle({ reservationId, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, pricing: modelCfg.pricing }).actualUsd; accounting = 'SETTLED'; } // provider answered with an error: no tokens processed
+        else { j.markUnresolved({ reservationId, reason: f.kind }); accounting = 'UNRESOLVED'; } // timeout / network / 5xx / oversized / invalid body / invalid usage: a charge is not disproven, no automatic refund
+      } catch (err) { accounting = 'FAILED'; accountingError = { code: err?.code ?? 'IO_FAILURE', message: String(err?.message ?? err).slice(0, 160) }; log(`budget accounting failed after the wire: ${accountingError.message}`); }
+      if (accountingError) { meta.accounting = accounting; meta.accountingError = accountingError; meta.usage = f.usage ?? null; meta.estimatedUsd = estimatedUsd; return failure('ACCOUNTING_FAILED', `durable accounting failed after the wire (${accountingError.code}); the reservation stays charged`, { path: pathLabel, ...meta, provider: { kind: f.kind, status: f.status ?? null, requestId: f.requestId ?? null, actualModel: f.actualModel ?? null, stopReason: f.stopReason ?? null, usage: f.usage ?? null, durationMs: f.durationMs ?? null, ambiguousCharge: true } }); }
       const kind = ['REFUSAL', 'TRUNCATED', 'NO_TEXT', 'MODEL_MISMATCH', 'JSON_INVALID', 'CANCELLED', 'TIMEOUT'].includes(f.kind) ? (f.kind === 'TIMEOUT' ? 'DEADLINE' : f.kind) : 'TRANSPORT';
       meta.actualUsd = settledUsd; meta.usage = f.usage ?? null; meta.estimatedUsd = estimatedUsd; meta.actualModel = f.actualModel ?? null; meta.latencyMs = f.durationMs ?? null; meta.accounting = accounting;
       return failure(closing && kind === 'CANCELLED' ? 'RUNTIME_CLOSED' : kind, `${f.kind}: ${f.reason}`, { path: pathLabel, ...meta, provider: { kind: f.kind, status: f.status ?? null, requestId: f.requestId ?? null, actualModel: f.actualModel ?? null, stopReason: f.stopReason ?? null, usage: f.usage ?? null, durationMs: f.durationMs ?? null, ambiguousCharge: f.ambiguousCharge === true } });
     }
-    const usageBad = usageError(res.usage); let actualUsd = null; let accounting;
-    if (!journalMutable()) accounting = 'PRESERVED_AT_CLOSE';
-    else if (usageBad) { j.markUnresolved({ reservationId, reason: 'USAGE_INVALID' }); accounting = 'UNRESOLVED'; }
-    else { actualUsd = j.settle({ reservationId, usage: res.usage, pricing: modelCfg.pricing }).actualUsd; accounting = 'SETTLED'; }
+    const usageBad = usageError(res.usage); let actualUsd = null; let accounting; let accountingError = null;
+    try {
+      if (!journalMutable()) accounting = 'PRESERVED_AT_CLOSE';
+      else if (usageBad) { j.markUnresolved({ reservationId, reason: 'USAGE_INVALID' }); accounting = 'UNRESOLVED'; }
+      else { actualUsd = j.settle({ reservationId, usage: res.usage, pricing: modelCfg.pricing }).actualUsd; accounting = 'SETTLED'; }
+    } catch (err) { accounting = 'FAILED'; accountingError = { code: err?.code ?? 'IO_FAILURE', message: String(err?.message ?? err).slice(0, 160) }; log(`budget accounting failed after the wire: ${accountingError.message}`); }
+    // P2: a validated model answer whose accounting could not become durable is NOT a completed report; the reservation stays charged
+    if (accountingError) return failure('ACCOUNTING_FAILED', `durable accounting failed after the wire (${accountingError.code}); the reservation stays charged`, { path: pathLabel, ...meta, usage: usageBad ? null : res.usage, estimatedUsd, actualUsd: null, accounting, accountingError, actualModel: res.actualModel, latencyMs: res.durationMs, provider: { requestId: res.requestId, responseId: res.responseId, stopReason: res.stopReason, ambiguousCharge: true } });
     const usageRec = { usage: usageBad ? null : res.usage, usageInvalid: usageBad ?? null, estimatedUsd, actualUsd, accounting, actualModel: res.actualModel, latencyMs: res.durationMs, provider: { requestId: res.requestId, responseId: res.responseId, stopReason: res.stopReason, nonTextBlocks: res.nonTextBlocks, responseBytes: res.responseBytes, responseSha256: res.responseSha256 } };
     if (closing) return failure('RUNTIME_CLOSED', 'the model result arrived during / after close — recorded for accounting, never the active report', { path: pathLabel, ...meta, ...usageRec, late: true });
     if (clock() > deadlineTs) return failure('DEADLINE', 'the model result arrived after the case deadline — a late result cannot become the active final report', { path: pathLabel, ...meta, ...usageRec, late: true });

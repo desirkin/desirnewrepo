@@ -325,6 +325,49 @@ Notes.
    `meteredAuthorization` and the new resource bounds default in `validatePolicy`, so an owner's existing policy file
    loads without edits and no spending permission is created by default.
 
+### Remaining closeout, revision 2 (P1–P5) — traceability
+
+The five remaining owner findings, repaired together on baseline `0c61508` (parent `1f6f211`). The owner's acceptance
+file `test/market-socrates-remaining-owner.test.js` is installed byte-for-byte (SHA-256
+`b6438b26c4f3a83b7ed22afad87faeaba58e36f9f66c4a9db295f1e8dfa7cded`); against the unmodified baseline it ran RED as the
+author documented (12 tests: 3 controls pass, 9 fail, natural exit 1) and it is GREEN on the candidate. The linked
+variants live in `test/market-socrates-rev2-variants.test.js`. Every fixture is offline (scripted fetch, injected
+timers, temp journals); no provider, model or database call, no paid smoke, no purchase.
+
+| ID | Boundary | Law on the candidate | Test | Result |
+|---|---|---|---|---|
+| P1 | `market-lab/readiness.js` (`market-live-readiness-3`, `qualifyFamilyEvidence`, `qualifyModelDemonstration`) | a family is LIVE only from QUALIFIED evidence: the selected required provider (enabled, live-PASSED, usable access), a family-relevant REGISTRY endpoint, requested / obtained assets and REGISTERED metrics, the measured interval, the knowledge clock fresh under the family's own `ALLOWED_MAX_AGE_MS` (no invented universal threshold), a support / census basis; counts, historical smokes (reported separately) and unrelated endpoints never qualify; the model needs a supported demonstration (clock, model, request, real usage); absent or incomplete proof is a non-green family with named `missingProof`, never a throw | OA-P1, OA-C01, MC-RD01/RD02, MC-RD03 (qualified positive + legacy negative), P1-R01/R02/R03 | PASS |
+| P2 | `socrates/budget.js`, `market-lab/quota.js` (validate → append + fsync + close → commit; first failure latched; `failed()`), `market-lab/transport.js` (`ACCOUNTING_FAILED`), `socrates/runtime.js` (`ACCOUNTING_FAILED` attempt), `market-lab/owner.js` (`ACCOUNTING_FAILED` result, `ACCOUNTING_UNAVAILABLE` refusal) | a rejected transition writes nothing; a failed or uncertain durable write commits nothing, latches the journal and refuses every later admission; a failed reservation append never dispatches; a failed settle after the wire is a named failure with no admitted data and a conservatively charged reservation; restart resolves RESERVED as UNRESOLVED; a failed open releases the startup lock | OA-P2, OA-C02, MC-Q05/Q06, P2-B01..B05, P2-Q01..Q03 | PASS |
+| P3 | `market-lab/owner.js` (`closeDrainMs`, default `CLOSE_DRAIN_MS` = 10 000 ms, zero permitted; owned controller, generation fence, `fenced`, in-flight acquisition set, `drainInFlight` on injected timers), `market-lab/transport.js` (`active` set apart from the coalescing map; `inFlight`, `stop`, `fence`, `drained`), `market-lab/service.js` (forwards `closeDrainMs` to both lifecycle owners) | stop admission → track every in-flight acquisition and request (shared, share:false, coalesced consumers, queued) → abort and drain within the bounded deadline → fence: open reservations preserved UNRESOLVED while the journal is still owned, every late continuation detached → seal only the admitted prefix → release the journal last; the lock is held DURING the drain; a late success or rejection mutates nothing | OA-P3, MC-L04, MC-L06, MC-S07, P3-S01..S06 | PASS |
+| P4 | `socrates/broker.js` (`evaluate` with identity dedupe, `metricSupport`, `periodGrid`, `coverageSpan`, `INDICATOR_WARMUP`) | support is demonstrated, never counted: a HISTORY interval needs the observations' own period grid complete (no missing period, interval ≥ one period, aligned, one period length; each native constituent separately) or, for point observations, OBSERVED coverage records spanning the interval; derived candle metrics need the ACTUAL `indicators()` warmup over a contiguous same-interval bar series; a cache hit re-runs the same law and cannot erase a gap; duplicates count once; useful PARTIAL points stay reported | OA-P4a/P4b, MC-B02, MC-B03 (period-grid positive + unsupported interval negative + sub-period negative), P4-D01..D04 | PASS |
+| P5 | `market-lab/context-schema.js` (own-key DSL; `nonneg` / `price` magnitudes; signed metrics keep `num`), `market-lab/context.js` (closed family entries, coverage rows, subjects, omitted, resourceState, limits, captureRef, component scalars, limitations; safe diagnostics) | every container of the saved shape is closed with typed scalars at the pure validator, the candidate, the reader and the verifier; membership is own-property membership (an inherited name is never declared nor present); quantities, notionals, counts and fills are non-negative while returns, imbalances, basis, net flows and changes stay signed; a diagnostic names the schema path or key position, never the untrusted text; the strict parser is untouched | OA-P5a/b/c/d, OA-C03, MC-V01..V06, P5-E01..E03 | PASS |
+
+Changed paths (revision 2) and why. `socrates/budget.js`, `market-lab/quota.js` (P2 validate → persist → commit, latch,
+`failed()`, lock release on failed initialization); `market-lab/transport.js` (P2 `ACCOUNTING_FAILED`; P3 ownership set,
+`fence` / `drained` / `inFlight`); `market-lab/providers/base.js` (`ACCOUNTING_FAILED` failure mapping);
+`socrates/runtime.js` (P2 accounting failure after the wire is an `ACCOUNTING_FAILED` attempt, never a success);
+`market-lab/owner.js` (P3 stop ownership + `closeDrainMs`; P2 accounting failure surfaced per acquisition);
+`market-lab/service.js` (P3 forwarding); `socrates/broker.js` (P4 support law); `market-lab/context-schema.js`,
+`market-lab/context.js` (P5 closure); `market-lab/readiness.js` (P1 qualification); tests:
+`test/market-socrates-remaining-owner.test.js` (owner file, unchanged bytes), `test/market-socrates-rev2-variants.test.js`
+(new), `test/helpers/market-closeout.js` (`SEALED_REF`, a lawful sealed capture reference for in-memory fixtures),
+`test/market-closeout-r04-r06.test.js` (MC-B03 adapted to the period-grid law per the ticket),
+`test/market-closeout-r07-e2e.test.js` (MC-RD03 rewritten around a qualified fixture with the legacy form as the
+negative; MC-V02 / MC-V06 expect the positional diagnostic; the MC-V06 candidate carries the full sealed reference),
+`test/market-closeout-r01-r03.test.js`, `test/market-closeout-witnesses.test.js`, `test/socrates-v2.test.js`
+(placeholder capture references replaced by `SEALED_REF`; no expectation weakened); docs: this file,
+`docs/MARKET-RESEARCH-CLI.md`, the revision-2 appendix in `doctrine/SOCRATES.md` with its exact-line fence in
+`test/social-4f-scope.test.js`. No protected file changed; no profit target, return quota or forced-trade objective
+exists anywhere in configuration, prompts, code, tests or these claims.
+
+Relation chains reviewed together (one consistency pass): (1) reservation → dispatch → settle / release / unresolved →
+restart in both journals, with the latch checked before every later admission and the owner / transport / runtime
+surfacing the failure; (2) stop admission → in-flight tracking → bounded drain → fence → seal → journal release, with
+the service forwarding one deadline to both owners; (3) observation identity → dedupe → per-metric support → broker
+state → cache rebinding; (4) builder candidate → pure validator → reader → verifier over one closed schema; (5)
+provider row → family evidence qualification → family state → overall readiness, with the historical smoke and the
+model demonstration kept as separate facts.
+
 ### Judge handoff
 
 What the candidate claims: the seven repairs above are implemented at the named production boundaries and proven by the

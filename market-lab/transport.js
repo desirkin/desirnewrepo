@@ -19,7 +19,7 @@ import { parseStrictJson, sha256Hex, isTs, isCount, deepFreeze, fail } from './c
 import { PROVIDERS, endpointOf } from './registry.js';
 import { RESOURCE_DEFAULTS } from './policy.js';
 
-export const FAILURE_KINDS = Object.freeze(['HOST_NOT_ALLOWED', 'ENDPOINT_UNKNOWN', 'CREDENTIAL_MISSING', 'CREDENTIAL_HOLD', 'BACKOFF_ACTIVE', 'TIMEOUT', 'NETWORK', 'CANCELLED', 'REDIRECT_REFUSED', 'HTTP_401', 'HTTP_403', 'HTTP_429', 'HTTP_4XX', 'HTTP_5XX', 'CONTENT_TYPE', 'BODY_TOO_LARGE', 'JSON_INVALID', 'SCHEMA', 'REPLAY_MISSING', 'STOPPED', 'QUOTA_REFUSED', 'CONCURRENCY_REFUSED', 'ADMISSION_UNBOUND']);
+export const FAILURE_KINDS = Object.freeze(['ACCOUNTING_FAILED', 'HOST_NOT_ALLOWED', 'ENDPOINT_UNKNOWN', 'CREDENTIAL_MISSING', 'CREDENTIAL_HOLD', 'BACKOFF_ACTIVE', 'TIMEOUT', 'NETWORK', 'CANCELLED', 'REDIRECT_REFUSED', 'HTTP_401', 'HTTP_403', 'HTTP_429', 'HTTP_4XX', 'HTTP_5XX', 'CONTENT_TYPE', 'BODY_TOO_LARGE', 'JSON_INVALID', 'SCHEMA', 'REPLAY_MISSING', 'STOPPED', 'QUOTA_REFUSED', 'CONCURRENCY_REFUSED', 'ADMISSION_UNBOUND']);
 // dispatched-with-unknown-outcome kinds: the provider may have served (and billed) the request; never a proof of no charge
 export const AMBIGUOUS_FAILURE_KINDS = Object.freeze(['TIMEOUT', 'NETWORK', 'BODY_TOO_LARGE']);
 export const RETRY_AFTER_MIN_MS = 1_000;
@@ -88,7 +88,8 @@ export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () =
   const global = createLimiter(limits.httpConcurrencyGlobal);
   const perProvider = new Map();
   const state = new Map(); // providerId -> { backoffUntil, credentialHoldUntil, counters }
-  const inFlight = new Map(); // requestKey -> { promise, consumers, controller }
+  const inFlight = new Map(); // requestKey -> { promise, consumers, controller } (coalescing map only)
+  const active = new Set(); // closeout P3: EVERY in-flight request, shared or not — the ownership set stop() / fence() act on
   let stopped = false; let seq = 0;
   const st = (id) => { if (!state.has(id)) state.set(id, { backoffUntil: 0, credentialHoldUntil: 0, counters: { requests: 0, ok: 0, failed: 0, bytes: 0, credits: 0, shared: 0, refused: 0, lastRequestTs: null, byKind: {} } }); return state.get(id); };
   const lim = (id, max) => { if (!perProvider.has(id)) perProvider.set(id, createLimiter(max)); return perProvider.get(id); };
@@ -151,8 +152,8 @@ export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () =
     const adm = { providerId, endpointId, query: query ?? null, requestKey: plan.requestKey, purpose: purpose ?? undefined };
     if (guard) { const pre = guard.precheck(adm); if (!pre.ok) { s.counters.refused += 1; return failure('QUOTA_REFUSED', `admission refused: ${pre.reasons.join(',')}`, { reasons: pre.reasons, redactedUrl: plan.redactedUrl }); } maxConcurrency = Number.isSafeInteger(pre.maxConcurrency) ? pre.maxConcurrency : maxConcurrency; }
     if (!(Number.isSafeInteger(maxConcurrency) && maxConcurrency > 0)) { s.counters.refused += 1; return failure('CONCURRENCY_REFUSED', 'zero concurrency slots for this provider', { redactedUrl: plan.redactedUrl }); }
-    const entry = { consumers: 1, controller: new AbortController(), promise: null };
-    if (share) inFlight.set(plan.requestKey, entry);
+    const entry = { consumers: 1, controller: new AbortController(), promise: null, reservationId: null, fenced: false, requestKey: plan.requestKey };
+    if (share) inFlight.set(plan.requestKey, entry); active.add(entry);
     entry.promise = (async () => {
       const requestId = `req-${(seq += 1).toString(36)}-${sha256Hex(plan.requestKey).slice(0, 12)}`;
       let gotGlobal = false; let gotProv = false; const pl = lim(providerId, maxConcurrency); let reservationId = null;
@@ -161,12 +162,19 @@ export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () =
         await pl.acquire(entry.controller.signal); gotProv = true;
         // the atomic admission at the dispatch boundary: recheck + durable reservation, THEN the wire (never the reverse)
         let charge = null;
-        if (guard) { const a = guard.admit(adm); if (!a.ok) { s.counters.refused += 1; return failure('QUOTA_REFUSED', `admission refused: ${a.reasons.join(',')}`, { reasons: a.reasons, redactedUrl: plan.redactedUrl, requestId }); } reservationId = a.reservationId; charge = a.charge; }
+        if (entry.fenced) return failure('CANCELLED', 'fenced at stop before dispatch', { requestId });
+        if (guard) { const a = guard.admit(adm); if (!a.ok) { s.counters.refused += 1; return failure('QUOTA_REFUSED', `admission refused: ${a.reasons.join(',')}`, { reasons: a.reasons, redactedUrl: plan.redactedUrl, requestId }); } reservationId = a.reservationId; charge = a.charge; entry.reservationId = reservationId; }
         if (entry.controller.signal.aborted) { if (reservationId) { guard.release(reservationId, 'CANCELLED_BEFORE_DISPATCH'); reservationId = null; } return failure('CANCELLED', 'cancelled before dispatch', { requestId }); }
         s.counters.requests += 1; s.counters.credits += charge ? charge.credits : 0; s.counters.lastRequestTs = clock();
         const r = await perform(plan, { signal: entry.controller.signal, timeoutMs, maxBytes, expectJson, requestId, providerId });
+        // closeout P3: a continuation that returns after the owner fenced this request has no mutation authority — its reservation was
+        // already preserved as UNRESOLVED under the lock; the late bytes are discarded as an honest cancellation, never parsed as data
+        if (entry.fenced) { s.counters.byKind.FENCED = (s.counters.byKind.FENCED ?? 0) + 1; s.counters.failed += 1; return failure('CANCELLED', 'fenced at stop: the response arrived after ownership was released', { requestId, fenced: true }); }
         const kind = r.ok ? 'OK' : r.failure.kind; s.counters.byKind[kind] = (s.counters.byKind[kind] ?? 0) + 1;
-        if (reservationId) { if (r.ok) guard.settle(reservationId, { ok: true, status: r.status }); else if (r.failure.kind === 'CANCELLED' && r.failure.reason === 'cancelled before dispatch') guard.release(reservationId, 'CANCELLED_BEFORE_DISPATCH'); else if (AMBIGUOUS_FAILURE_KINDS.includes(r.failure.kind) || r.failure.kind === 'CANCELLED') guard.unresolved(reservationId, r.failure.kind); else guard.settle(reservationId, { ok: false, status: r.failure.status ?? null }); reservationId = null; }
+        let accounting = null;
+        if (reservationId) { let ok; if (r.ok) ok = guard.settle(reservationId, { ok: true, status: r.status }); else if (r.failure.kind === 'CANCELLED' && r.failure.reason === 'cancelled before dispatch') ok = guard.release(reservationId, 'CANCELLED_BEFORE_DISPATCH'); else if (AMBIGUOUS_FAILURE_KINDS.includes(r.failure.kind) || r.failure.kind === 'CANCELLED') ok = guard.unresolved(reservationId, r.failure.kind); else ok = guard.settle(reservationId, { ok: false, status: r.failure.status ?? null }); accounting = ok ? 'RECORDED' : 'FAILED'; reservationId = null; entry.reservationId = null; }
+        // P2: a response whose accounting transition could not become durable is not an ordinary success — the caller sees the failure
+        if (accounting === 'FAILED') { s.counters.failed += 1; s.counters.byKind.ACCOUNTING_FAILED = (s.counters.byKind.ACCOUNTING_FAILED ?? 0) + 1; return failure('ACCOUNTING_FAILED', 'the durable accounting transition failed after the wire; the reservation stays charged and no data is admitted', { requestId, status: r.status ?? r.failure?.status ?? null, redactedUrl: plan.redactedUrl }); }
         if (r.ok) { s.counters.ok += 1; s.counters.bytes += r.bytes.byteLength; }
         else {
           s.counters.failed += 1;
@@ -176,7 +184,7 @@ export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () =
         if (recorder) { try { recorder({ requestKey: plan.requestKey, providerId, endpointId, method: plan.method, redactedUrl: plan.redactedUrl, headers: redactHeaders(plan.headers), body: plan.body, ok: r.ok, status: r.status ?? r.failure?.status ?? null, failureKind: r.ok ? null : r.failure.kind, bytesSha256: r.sha256 ?? r.failure?.sha256 ?? null, bytes: r.bytes ?? r.failure?.bytes ?? null, contentType: r.contentType ?? r.failure?.contentType ?? null, receivedTs: r.receivedTs ?? r.failure?.receivedTs ?? clock(), requestId }); } catch (err) { log(`recorder failed (contained): ${String(err?.message ?? err).slice(0, 120)}`); } }
         return Object.freeze(r); // shallow: the body Buffer cannot be frozen
       } catch (err) { if (reservationId) { guard.unresolved(reservationId, 'INTERNAL'); reservationId = null; } s.counters.failed += 1; return failure(err?.kind === 'CANCELLED' ? 'CANCELLED' : err?.kind === 'CONCURRENCY_REFUSED' ? 'CONCURRENCY_REFUSED' : 'NETWORK', err?.kind ?? err?.name ?? 'failure'); }
-      finally { if (gotProv) pl.release(); if (gotGlobal) global.release(); if (share) inFlight.delete(plan.requestKey); }
+      finally { if (gotProv) pl.release(); if (gotGlobal) global.release(); if (share) inFlight.delete(plan.requestKey); active.delete(entry); }
     })();
     return waitShared(entry, signal);
   }
@@ -193,8 +201,13 @@ export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () =
     accounting: () => deepFreeze(Object.fromEntries([...state.entries()].map(([id, s]) => [id, { ...s.counters, byKind: { ...s.counters.byKind }, backoffUntilTs: s.backoffUntil || null, credentialHoldUntilTs: s.credentialHoldUntil || null }]))),
     resetCredentialHold: (providerId) => { st(providerId).credentialHoldUntil = 0; },
     limiter: () => ({ global: global.snapshot(), providers: Object.fromEntries([...perProvider.entries()].map(([k, v]) => [k, v.snapshot()])) }),
-    inFlight: () => inFlight.size,
-    stop: () => { stopped = true; for (const e of inFlight.values()) e.controller.abort(); },
+    inFlight: () => active.size,
+    stop: () => { stopped = true; for (const e of active) e.controller.abort(); },
+    // closeout P3: the ownership fence — while the accounting journal is still owned, every open reservation of a request that did not
+    // finish inside the drain deadline is preserved as UNRESOLVED (conservative spend), and its continuation is detached: whatever the
+    // uncooperative transport returns later is discarded. Returns the fenced request identities.
+    fence: (reason = 'DETACHED_AT_STOP') => { const fenced = []; for (const e of active) { e.fenced = true; e.controller.abort(); if (e.reservationId && guard) { guard.unresolved(e.reservationId, reason); e.reservationId = null; } fenced.push(e.requestKey); } return fenced; },
+    drained: () => new Promise((resolve) => { if (!active.size) { resolve(true); return; } const waits = [...active].map((e) => e.promise.then(() => undefined, () => undefined)); Promise.all(waits).then(() => resolve(true)); }),
   };
 }
 

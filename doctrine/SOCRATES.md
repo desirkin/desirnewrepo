@@ -322,3 +322,26 @@ The sentence above still governs. v2 adds the machinery, not authority:
 
 Authority remains NONE. Readiness is BLOCKED until the owner supplies entitled keys, attested plans and a dollar
 ceiling; no independent acceptance seal is issued by the delivering session.
+
+### Closeout appendix, revision 2 — the five remaining laws (P1–P5)
+
+1. **Readiness is qualified, never counted.** A family is LIVE only from evidence that names its selected required
+   provider, a family-relevant registry endpoint, the requested and obtained assets and registered metrics, the measured
+   interval, a knowledge clock fresh under the family's own policy age and a support basis; a historical smoke is a
+   separate fact; the model needs a supported demonstration; missing proof is named, never thrown.
+2. **Accounting commits only what became durable.** A transition is validated, then its bytes are appended, fsynced and
+   closed, then the validated state change is applied; a rejected transition writes nothing, a failed or uncertain write
+   latches the journal and refuses every later admission, a failed reservation never dispatches, a failed settlement is a
+   named failure that admits no data and keeps the reservation charged, and a restart resolves the ambiguous conservatively.
+3. **Stop owns its work.** Admission stops; every in-flight acquisition and request (shared, unshared, coalesced, queued)
+   is tracked apart from the coalescing map, aborted and drained within a bounded deadline; open reservations are preserved
+   as unresolved while the journal is still owned; late continuations are detached; only the admitted prefix is sealed;
+   the journal is released last.
+4. **Support is demonstrated.** A history interval is complete only over the observations' own period grid with no
+   missing period, or over positive coverage records for point observations; a derived candle metric needs its actual
+   warmup over a contiguous series; identities are counted once; a cache hit cannot erase a gap.
+5. **Every container of the saved context is closed.** Membership is own-property membership; scalars are typed;
+   quantities are magnitudes and signed metrics keep their sign; a diagnostic names the path, never the untrusted text.
+
+Authority remains NONE. No readiness claim, acceptance claim, prompt, test or configuration carries a profit target,
+a return quota or a forced-trade objective.

@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { T0, tmp, json, subjects, btcOnly, includedPlan, cryptoquantPolicy, cryptoquantFetch, deribitOwner, deribitTicker, DERIBIT_FOUR, deribitFourSummaries, krakenBookOnly, bookObs, krakenWsScript, krakenTradeMsg, krakenRestFixture, H } from './helpers/market-closeout.js';
+import { T0, tmp, json, subjects, btcOnly, includedPlan, cryptoquantPolicy, cryptoquantFetch, deribitOwner, deribitTicker, DERIBIT_FOUR, deribitFourSummaries, krakenBookOnly, bookObs, krakenWsScript, krakenTradeMsg, krakenRestFixture, H, SEALED_REF } from './helpers/market-closeout.js';
 import { createResearchOwner } from '../market-lab/owner.js';
 import { loadPolicy } from '../market-lab/policy.js';
 import { openQuotaJournal, createDispatchGuard, nativeCharge } from '../market-lab/quota.js';
@@ -25,7 +25,7 @@ const mkt = { subjectKind: 'MARKET', canonicalCoin: 'BTC', providerAssetId: 'XXB
 const trade = (i, ts, price, side = 'BUY', { subject = mkt, knownAtTs = ts + 5 } = {}) => makeObservation({ provider: 'KRAKEN_SPOT', endpointId: 'ws-v2', subject, kind: 'TRADE', sequence: i, epochId: null, sourceRevision: null, sourceKey: String(i), sourceEventTs: ts, publishedTs: null, periodStartTs: null, periodEndTs: null, receivedTs: ts + 5, knownAtTs, quality: quality('KNOWN', { methodologyId: 'kraken-ws-trade-v2', originalUnit: 'USD' }), provenance: emptyProvenance(), payload: { price, qty: 0.5, quoteNotional: price * 0.5, takerSide: side, sideConvention: 'TAKER_NATIVE', nativeTradeId: String(i), orderType: 'market' } });
 const book = (i, ts, { bids = [[99.9, 3], [99.5, 5]], asks = [[100.1, 2], [100.5, 4]] } = {}) => makeObservation({ provider: 'KRAKEN_SPOT', endpointId: 'ws-v2', subject: mkt, kind: 'BOOK_SNAPSHOT', sequence: 1000 + i, epochId: null, sourceRevision: null, sourceKey: null, sourceEventTs: null, publishedTs: null, periodStartTs: null, periodEndTs: null, receivedTs: ts, knownAtTs: ts, quality: quality('KNOWN', { methodologyId: 'kraken-ws-book-v2', originalUnit: 'USD' }), provenance: emptyProvenance(), payload: { bids, asks, levelsPerSideCap: 200, synchronized: true, checksumVerified: true, bookAgeMs: 0, sampleReason: 'INTERVAL', pricePrecision: 1, qtyPrecision: 8 } });
 const cov = ({ state, startTs, endTs = null, subject = mkt, reasonCodes = [], epochId = null }) => makeCoverage({ provider: 'KRAKEN_SPOT', endpointId: 'ws-v2', subjectId: subjectId(subject), family: 'SPOT_FLOW', kind: 'TRADE', state, reasonCodes, startTs, endTs, observationCount: 0, droppedCount: state === 'DROPPED' ? 1 : 0, epochId, sequenceStart: null, sequenceEnd: null });
-const REF = { bundleId: 'audit' };
+const REF = SEALED_REF;
 
 // ---------------------------------------------------------------- R01 -----------------------------------------------------------
 test('MC-Q03 (R01). native charge units differ from HTTP counts and are enforced at the LAST dispatch boundary: a two-symbol Twelve Data quote is ONE call / TWO credits; a Tokenomist failure charges zero credits (charged on success); each page / retry is its own reservation; the per-provider concurrency slot serialises the wire', async () => {

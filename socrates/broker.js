@@ -8,7 +8,8 @@
 // requested metrics and window forwarded. Every result carries exact request binding, exact admitted unique ids and
 // counts, the actual guarded usage, coverage, cache status and ONE closed terminal state. Failures carry a closed reason
 // and ZERO invented values. Results are diagnostics in the case envelope, never corroborating facts.
-import { deepFreeze, FAMILY_REGISTRY, familyMetricIds, canonicalDigest } from '../market-lab/contracts.js';
+import { deepFreeze, FAMILY_REGISTRY, familyMetricIds, canonicalDigest, subjectId } from '../market-lab/contracts.js';
+import { indicators } from '../market-lab/recipes.js';
 import { ALLOWED_MAX_AGE_MS, providerEnabled, paidCallAuthorized } from '../market-lab/policy.js';
 import { providersForFamily } from '../market-lab/registry.js';
 import { METRIC_MAP, metricInputMatch } from '../evidence/research-builder.js';
@@ -29,8 +30,16 @@ export function createBroker({ owner, policy, clock = () => Date.now(), cacheSiz
   const emptyUsage = () => ({ calls: 0, credits: 0, dispatched: 0, refused: 0, unresolved: 0, estimatedUsd: 0 });
   const result = (r, analysisId, state, reason, extra = {}) => deepFreeze({ requestId: requestIdentity(analysisId, r), analysisId, requestKey: r.requestKey, requestKind: r.requestKind, family: r.family, metricIds: r.metricIds, subjectRef: r.subjectRef, state, reason, responseTs: clock(), sourceIds: [], inputIds: [], observationIds: [], idsTruncated: false, coverage: null, cacheStatus: 'MISS', usage: emptyUsage(), observationsAdmitted: 0, metrics: null, ...extra });
   const requestError = (r) => { if (!r || typeof r !== 'object') return 'request malformed'; if (!REQUEST_KINDS.includes(r.requestKind) || !FAMILY_REGISTRY[r.family] || !Array.isArray(r.metricIds) || !r.metricIds.length || r.metricIds.length > 8 || new Set(r.metricIds).size !== r.metricIds.length || typeof r.subjectRef !== 'string' || typeof r.requestKey !== 'string') return 'request shape outside the closed contract'; if (r.metricIds.some((m) => !METRIC_REGISTRY[r.family].includes(m))) return 'UNSUPPORTED_METRIC'; if (!(r.windowStartTs === null || isTs(r.windowStartTs)) || !(r.windowEndTs === null || isTs(r.windowEndTs)) || (r.windowStartTs !== null && r.windowEndTs !== null && r.windowEndTs < r.windowStartTs)) return 'window malformed'; if (r.requestKind === 'HISTORY' && !(isTs(r.windowStartTs) && isTs(r.windowEndTs))) return 'HISTORY needs a window'; if (!(r.requestedMaxAgeMs === null || (Number.isSafeInteger(r.requestedMaxAgeMs) && r.requestedMaxAgeMs > 0))) return 'requestedMaxAgeMs malformed'; return null; };
-  // ---- satisfaction: every requested metric matched by value-bearing native inputs for the subject, window and freshness -----
-  function evaluate(obs, r, coin, { asOfTs, receiptCutoffTs = null }) {
+  // ---- satisfaction (closeout P4): every requested metric matched by value-bearing native inputs for the subject, window and
+  // freshness, over DEMONSTRATED support — never a row count. Identities are deduplicated first (one observation repeated is
+  // one observation). HISTORY support is a complete expected-period grid derived from the observations' own declared periods
+  // (a lawful daily/hourly/bar census basis) with no missing period inside the requested interval and an interval no shorter
+  // than one period; point observations need positive OBSERVED coverage records spanning the interval. Derived candle metrics
+  // use the ACTUAL indicators() warmup over contiguous same-interval closed bars. A cache hit re-runs the same law, so a hit
+  // can never erase a gap. Snapshot metrics rest on the freshness / identity law above.
+  function evaluate(rawObs, r, coin, { asOfTs, receiptCutoffTs = null, coverage = [] }) {
+    const obs = []; const seenIds = new Set(); let duplicateIdentities = 0;
+    for (const o of rawObs) { if (seenIds.has(o.observationId)) { duplicateIdentities += 1; continue; } seenIds.add(o.observationId); obs.push(o); }
     const perMetric = {}; const admitted = new Map(); let allSatisfied = r.metricIds.length > 0; let anySatisfied = false; const reasons = new Set();
     for (const metricId of r.metricIds) {
       const m = METRIC_MAP[r.family]?.[metricId]; if (!m) { perMetric[metricId] = { state: 'UNSUPPORTED', matched: 0 }; allSatisfied = false; reasons.add('METRIC_UNMATCHED'); continue; }
@@ -44,19 +53,69 @@ export function createBroker({ owner, policy, clock = () => Date.now(), cacheSiz
         else if (r.requestedMaxAgeMs !== null && asOfTs - (o.periodEndTs !== null && o.periodEndTs <= asOfTs ? o.knownAtTs : measureTs) > r.requestedMaxAgeMs) { stale += 1; continue; }
         matches.push(o); fresh += 1;
       }
-      // a derived metric needs EVERY declared native input; HISTORY needs more than one point inside the interval
+      // a derived metric needs EVERY declared native input
       // closeout B02: a derived metric's constituents must be recipe-compatible (same provider / entity set / chain / unit / window / period);
       // an inflow in one unit and an outflow in another never satisfy exchange_net_flow
       const needed = m.native ?? null; const nativeSeen = new Set();
       if (needed && needed.length > 1 && m.nativeOf) { const groups = new Map(); for (const o of matches) { const p = o.payload ?? {}; const k = `${o.provider}|${p.entitySet ?? ''}|${p.chain ?? ''}|${p.unit ?? ''}|${p.window ?? ''}|${o.periodStartTs ?? ''}|${o.periodEndTs ?? ''}`; if (!groups.has(k)) groups.set(k, new Set()); groups.get(k).add(m.nativeOf(o)); } const complete = [...groups.values()].find((g) => needed.every((n) => g.has(n))); if (complete) for (const n of complete) nativeSeen.add(n); else for (const g of groups.values()) for (const n of g) nativeSeen.add(n); if (!complete && groups.size > 1) { for (const n of needed) if (![...groups.values()].every((g) => g.has(n))) nativeSeen.delete(n); } }
       else for (const o of matches) nativeSeen.add(m.nativeOf ? m.nativeOf(o) : o.kind);
       const constituentsMissing = needed ? needed.filter((n) => !nativeSeen.has(n)) : [];
-      const historyThin = r.requestKind === 'HISTORY' && matches.length < 2 && (r.windowEndTs - r.windowStartTs) > 0;
-      const satisfied = matches.length > 0 && constituentsMissing.length === 0 && !historyThin;
-      perMetric[metricId] = { state: satisfied ? 'SATISFIED' : matches.length ? 'PARTIAL' : 'UNMATCHED', matched: matches.length, fresh, stale, nullValues, wrongSubject, outOfWindow, constituentsMissing, nativeInputs: needed, historyThin };
-      if (satisfied) { anySatisfied = true; for (const o of matches) admitted.set(o.observationId, o); } else { allSatisfied = false; if (stale && !matches.length) reasons.add('FRESHNESS_UNMET'); else if (nullValues && !matches.length) reasons.add('VALUE_MISSING'); else if (historyThin || constituentsMissing.length) reasons.add('PARTIAL_COVERAGE'); else reasons.add('METRIC_UNMATCHED'); if (matches.length) for (const o of matches) admitted.set(o.observationId, o); }
+      const support = matches.length ? metricSupport(m, metricId, matches, r, coverage) : { state: 'NONE', basis: 'NO_MATCH', reasons: ['NO_MATCH'] };
+      const historyThin = r.requestKind === 'HISTORY' && support.state !== 'COMPLETE';
+      const satisfied = matches.length > 0 && constituentsMissing.length === 0 && support.state === 'COMPLETE';
+      perMetric[metricId] = { state: satisfied ? 'SATISFIED' : matches.length ? 'PARTIAL' : 'UNMATCHED', matched: matches.length, fresh, stale, nullValues, wrongSubject, outOfWindow, constituentsMissing, nativeInputs: needed, historyThin, support, duplicateIdentities };
+      if (satisfied) { anySatisfied = true; for (const o of matches) admitted.set(o.observationId, o); } else { allSatisfied = false; if (stale && !matches.length) reasons.add('FRESHNESS_UNMET'); else if (nullValues && !matches.length) reasons.add('VALUE_MISSING'); else if (historyThin || constituentsMissing.length || (matches.length && support.state !== 'COMPLETE')) reasons.add('PARTIAL_COVERAGE'); else reasons.add('METRIC_UNMATCHED'); if (matches.length) for (const o of matches) admitted.set(o.observationId, o); }
     }
-    return { allSatisfied, anySatisfied, perMetric, admitted: [...admitted.values()], reasons: [...reasons] };
+    return { allSatisfied, anySatisfied, perMetric, admitted: [...admitted.values()], reasons: [...reasons], duplicateIdentities };
+  }
+  // the per-metric support law (closeout P4). Returns { state: COMPLETE | PARTIAL, basis, reasons, ...facts }; never a row count.
+  const MAX_MISSING_LISTED = 16;
+  const INDICATOR_WARMUP = Object.freeze({ sma: (i) => i.sma[60] !== null, ema: (i) => i.ema[60] !== null, realized_volatility: (i) => i.realizedVolatility[60] !== null, atr14: (i) => i.atr14 !== null, rsi14: (i) => i.rsi14.state !== 'WARMUP', macd: (i) => i.macd !== null, bollinger20: (i) => i.bollinger20 !== null, prior_range: (i) => i.prior60 !== null, breakout_distance: (i) => i.prior20 !== null });
+  function periodGrid(list, startTs, endTs) {
+    // expected periods: every period of the observations' own grid that overlaps [startTs, endTs]; present: the distinct periods seen
+    const lengths = new Set(list.map((o) => o.periodEndTs - o.periodStartTs)); if (lengths.size !== 1) return { state: 'PARTIAL', reasons: ['MIXED_PERIODS'], periodMs: null, expectedPeriods: null, presentPeriods: null, missingPeriods: null, missingStarts: [] };
+    const periodMs = [...lengths][0]; if (!(periodMs > 0)) return { state: 'PARTIAL', reasons: ['PERIOD_MALFORMED'], periodMs, expectedPeriods: null, presentPeriods: null, missingPeriods: null, missingStarts: [] };
+    const anchor = Math.min(...list.map((o) => o.periodStartTs)); const off = (t) => (t - anchor) / periodMs;
+    if (list.some((o) => !Number.isInteger(off(o.periodStartTs)))) return { state: 'PARTIAL', reasons: ['PERIOD_GRID_MISALIGNED'], periodMs, expectedPeriods: null, presentPeriods: null, missingPeriods: null, missingStarts: [] };
+    if (endTs - startTs < periodMs) return { state: 'PARTIAL', reasons: ['INTERVAL_BELOW_RESOLUTION'], periodMs, expectedPeriods: null, presentPeriods: new Set(list.map((o) => o.periodStartTs)).size, missingPeriods: null, missingStarts: [] };
+    const kMin = Math.ceil((startTs - periodMs + 1 - anchor) / periodMs); const kMax = Math.floor((endTs - 1 - anchor) / periodMs); const expected = Math.max(0, kMax - kMin + 1);
+    const present = new Set(); for (const o of list) { const k = off(o.periodStartTs); if (k >= kMin && k <= kMax) present.add(k); }
+    const missing = expected - present.size; const missingStarts = []; if (missing > 0) for (let k = kMin; k <= kMax && missingStarts.length < MAX_MISSING_LISTED; k += 1) if (!present.has(k)) missingStarts.push(anchor + k * periodMs);
+    return { state: missing === 0 && expected > 0 ? 'COMPLETE' : 'PARTIAL', reasons: missing === 0 && expected > 0 ? [] : ['MISSING_PERIODS'], periodMs, expectedPeriods: expected, presentPeriods: present.size, missingPeriods: missing, missingStarts };
+  }
+  function coverageSpan(records, kinds, subjectIds, family, startTs, endTs) {
+    // positive OBSERVED coverage records of the metric's input kinds for the subject, merged; complete only when their union spans the interval
+    const spans = records.filter((c) => c.state === 'OBSERVED' && c.family === family && (c.kind === null || kinds.includes(c.kind)) && subjectIds.has(c.subjectId)).map((c) => [c.startTs, c.endTs ?? endTs]).sort((a, b) => a[0] - b[0]);
+    if (!spans.length) return { state: 'PARTIAL', reasons: ['COVERAGE_BASIS_MISSING'], coverageRecords: 0, gaps: [] };
+    let cursor = startTs; const gaps = []; for (const [s, e] of spans) { if (e < cursor) continue; if (s > cursor) gaps.push([cursor, s]); cursor = Math.max(cursor, e); if (cursor >= endTs) break; } if (cursor < endTs) gaps.push([cursor, endTs]);
+    return { state: gaps.length ? 'PARTIAL' : 'COMPLETE', reasons: gaps.length ? ['COVERAGE_GAP'] : [], coverageRecords: spans.length, gaps: gaps.slice(0, MAX_MISSING_LISTED) };
+  }
+  function metricSupport(m, metricId, matches, r, coverage) {
+    const isIndicator = m.component === 'indicators' && m.inputKinds.includes('CANDLE');
+    const periodic = matches.filter((o) => o.periodStartTs !== null && o.periodEndTs !== null);
+    const facts = { basis: null, duplicatesDropped: 0 };
+    if (periodic.length && periodic.length !== matches.length) return { state: 'PARTIAL', basis: 'MIXED', reasons: ['MIXED_OBSERVATION_SHAPES'], ...facts };
+    let out = { state: 'COMPLETE', basis: 'SNAPSHOT', reasons: [] };
+    if (r.requestKind === 'HISTORY') {
+      if (periodic.length) {
+        // a native constituent set (inflow + outflow) must EACH cover the whole grid
+        const groups = new Map(); for (const o of periodic) { const n = m.native && m.nativeOf ? m.nativeOf(o) : o.kind; if (!groups.has(n)) groups.set(n, []); groups.get(n).push(o); }
+        const grids = [...groups.entries()].map(([n, list]) => [n, periodGrid(list, r.windowStartTs, r.windowEndTs)]); const worst = grids.find(([, g]) => g.state !== 'COMPLETE');
+        out = { state: worst ? 'PARTIAL' : 'COMPLETE', basis: 'PERIOD_GRID', reasons: worst ? worst[1].reasons : [], ...(worst ? worst[1] : grids[0][1]), nativeInput: worst ? worst[0] : grids[0][0] };
+      } else {
+        const ids = new Set(matches.map((o) => subjectId(o.subject)));
+        out = { basis: 'COVERAGE_RECORDS', ...coverageSpan(coverage, m.inputKinds, ids, r.family, r.windowStartTs, r.windowEndTs) };
+      }
+    } else if (periodic.length && matches.some((o) => o.kind === 'CANDLE')) {
+      // a bar set answering a snapshot request must be one contiguous same-interval series (a cache hit cannot hide a gap)
+      const sorted = [...periodic].sort((a, b) => a.periodStartTs - b.periodStartTs); const g = periodGrid(sorted, sorted[0].periodStartTs, sorted[sorted.length - 1].periodEndTs);
+      out = { state: g.state, basis: 'PERIOD_GRID', reasons: g.reasons, ...g };
+    }
+    if (isIndicator && out.state === 'COMPLETE') {
+      const ind = indicators(matches); const ready = INDICATOR_WARMUP[metricId] ? INDICATOR_WARMUP[metricId](ind) : ind.closedBars > 0;
+      out = { ...out, basis: 'INDICATOR_WARMUP', state: ready ? 'COMPLETE' : 'PARTIAL', reasons: ready ? [] : ['WARMUP_INCOMPLETE'], closedBars: ind.closedBars, intervalMs: ind.intervalMs };
+    }
+    return out;
   }
   const idsOf = (list) => { const ids = list.map((o) => o.observationId).sort(); return { ids: ids.slice(0, MAX_ID_LIST), truncated: ids.length > MAX_ID_LIST, digest: canonicalDigest(ids), count: ids.length }; };
   const shape = (ev, extra = {}) => { const idl = idsOf(ev.admitted); return { observationIds: idl.ids, inputIds: idl.ids, idsTruncated: idl.truncated, admittedDigest: idl.digest, sourceIds: [...new Set(ev.admitted.map((o) => o.provider))].sort(), observationsAdmitted: idl.count, metrics: ev.perMetric, coverage: ev.admitted.length ? { startTs: Math.min(...ev.admitted.map((o) => o.sourceEventTs ?? o.periodStartTs ?? o.knownAtTs)), endTs: Math.max(...ev.admitted.map((o) => o.sourceEventTs ?? o.periodEndTs ?? o.knownAtTs)), knownAtMax: Math.max(...ev.admitted.map((o) => o.knownAtTs)), count: idl.count } : null, ...extra }; };
@@ -76,13 +135,13 @@ export function createBroker({ owner, policy, clock = () => Date.now(), cacheSiz
     //    a cache entry recorded at a later as-of never contaminates an earlier replay
     const cached = cache.get(key);
     if (cached && cached.mode === mode && cached.policyDigest === pd && cached.asOfTs <= asOfTs && (r.requestedMaxAgeMs === null ? now - cached.acquiredTs <= 60_000 : true)) {
-      const ev = evaluate(cached.observations, r, coin, { asOfTs }); const st = stateOf(ev, false);
+      const ev = evaluate(cached.observations, r, coin, { asOfTs, coverage: cached.coverage ?? [] }); const st = stateOf(ev, false);
       if (st) return remember(result(r, analysisId, st, 'CACHE_HIT', shape(ev, { cacheStatus: 'FRESH_EXACT', cachedFrom: { acquiredTs: cached.acquiredTs, asOfTs: cached.asOfTs, requestId: cached.requestId, usage: cached.usage }, usage: emptyUsage() })));
     }
     // 2. DETAIL: the current lawful LOCAL evidence only (never paid fetching); HISTORY / REFRESH may also be answered locally when it satisfies
-    const local = owner.observations();
-    if (r.requestKind === 'DETAIL') { const ev = evaluate(local, r, coin, { asOfTs }); const st = stateOf(ev, false); const res = st ? result(r, analysisId, st, st === 'SATISFIED' ? 'NONE' : ev.reasons[0] ?? 'PARTIAL_COVERAGE', shape(ev, { cacheStatus: 'LOCAL_STORE' })) : result(r, analysisId, 'NOT_APPLICABLE', ev.reasons[0] ?? 'NO_OBSERVATIONS', shape(ev, { cacheStatus: 'LOCAL_STORE' })); return remember(res); }
-    if (mode === 'REPLAY_AS_OF') { const ev = evaluate(local, r, coin, { asOfTs }); const st = stateOf(ev, r.requestKind !== 'HISTORY'); if (st) return remember(result(r, analysisId, st, st === 'SATISFIED' ? 'NONE' : 'REPLAY_NETWORK_OFF', shape(ev, { cacheStatus: 'LOCAL_STORE' }))); return remember(result(r, analysisId, 'NOT_APPLICABLE', 'REPLAY_NETWORK_OFF')); }
+    const local = owner.observations(); const localCoverage = typeof owner.coverage === 'function' ? owner.coverage() : [];
+    if (r.requestKind === 'DETAIL') { const ev = evaluate(local, r, coin, { asOfTs, coverage: localCoverage }); const st = stateOf(ev, false); const res = st ? result(r, analysisId, st, st === 'SATISFIED' ? 'NONE' : ev.reasons[0] ?? 'PARTIAL_COVERAGE', shape(ev, { cacheStatus: 'LOCAL_STORE' })) : result(r, analysisId, 'NOT_APPLICABLE', ev.reasons[0] ?? 'NO_OBSERVATIONS', shape(ev, { cacheStatus: 'LOCAL_STORE' })); return remember(res); }
+    if (mode === 'REPLAY_AS_OF') { const ev = evaluate(local, r, coin, { asOfTs, coverage: localCoverage }); const st = stateOf(ev, r.requestKind !== 'HISTORY'); if (st) return remember(result(r, analysisId, st, st === 'SATISFIED' ? 'NONE' : 'REPLAY_NETWORK_OFF', shape(ev, { cacheStatus: 'LOCAL_STORE' }))); return remember(result(r, analysisId, 'NOT_APPLICABLE', 'REPLAY_NETWORK_OFF')); }
     // 3. enabled native source, then configured alternative (the owner's acquire crosses the R01 guard per request)
     const providers = providersForFamily(r.family); const enabled = providers.filter((p) => providerEnabled(policy, p));
     if (!enabled.length) return remember(result(r, analysisId, 'POLICY_REJECTED', 'FAMILY_NOT_ENABLED'));
@@ -95,7 +154,7 @@ export function createBroker({ owner, policy, clock = () => Date.now(), cacheSiz
     const results = Array.isArray(acq.results) ? acq.results : []; const u = acq.usage ?? null;
     const usage = { calls: u ? u.dispatched : results.filter((x) => x.state === 'OK').length, credits: u ? u.credits : 0, dispatched: u ? u.dispatched : 0, refused: u ? u.refused : results.filter((x) => x.state === 'QUOTA_REFUSED').length, unresolved: u ? u.unresolved : 0, estimatedUsd: 0, reasons: u?.reasons ?? {} };
     if (clock() > deadlineTs) return remember(result(r, analysisId, 'DEADLINE_EXCEEDED', 'DEADLINE', { usage, acquisition: results }));
-    const fresh = (acq.observations ?? []).filter((o) => o.receivedTs >= startTs); const ev = evaluate(fresh, r, coin, { asOfTs: clock() });
+    const fresh = (acq.observations ?? []).filter((o) => o.receivedTs >= startTs); const freshCoverage = Array.isArray(acq.coverage) ? acq.coverage : []; /* the acquisition's own coverage records are the support basis for point observations */ const ev = evaluate(fresh, r, coin, { asOfTs: clock(), coverage: freshCoverage });
     const blocked = results.filter((x) => x.state === 'ACCESS_BLOCKED'); const failed = results.filter((x) => x.state === 'FAILED' || x.state === 'SOURCE_FAILED'); const refused = results.filter((x) => x.state === 'QUOTA_REFUSED'); const okResults = results.filter((x) => x.state === 'OK' || x.state === 'CACHED');
     const common = shape(ev, { usage, acquisition: results });
     let res;
@@ -106,7 +165,7 @@ export function createBroker({ owner, policy, clock = () => Date.now(), cacheSiz
     else if (!okResults.length && failed.length) res = result(r, analysisId, 'SOURCE_FAILED', 'PROVIDER_FAILED', common);
     else if (!okResults.length && results.length && results.every((x) => x.state === 'PROVIDER_DISABLED' || x.state === 'POLICY_REJECTED')) res = result(r, analysisId, 'POLICY_REJECTED', 'FAMILY_NOT_ENABLED', common);
     else res = result(r, analysisId, 'NOT_APPLICABLE', results.length ? (r.requestKind === 'HISTORY' ? 'HISTORY_UNAVAILABLE' : ev.reasons[0] ?? 'NO_OBSERVATIONS') : 'NO_MAPPING_FOR_SUBJECT', common);
-    if (fresh.length) put(key, { asOfTs: clock(), mode, policyDigest: pd, observations: fresh, acquisition: results, usage, acquiredTs: clock(), requestId });
+    if (fresh.length) put(key, { asOfTs: clock(), mode, policyDigest: pd, observations: fresh, coverage: freshCoverage, acquisition: results, usage, acquiredTs: clock(), requestId });
     return remember(res);
   }
   const roundKeys = new Map();

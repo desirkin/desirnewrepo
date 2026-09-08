@@ -4,6 +4,7 @@
 // independent numeric oracle, never from the generator and validator agreeing.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { SEALED_REF } from './helpers/market-closeout.js';
 import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -69,7 +70,7 @@ test('MC-W01 (R02). one Kraken book and NO trade-feed coverage: the 1 h trade wi
   const { ko, market } = await krakenBookOnly();
   try {
     const tick = await ko.clients.KRAKEN_SPOT.ticker({ markets: [market] }); assert.equal(tick.ok, true);
-    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: tick.observations, coverage: tick.coverage, captureRef: { bundleId: 'audit' } });
+    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: tick.observations, coverage: tick.coverage, captureRef: SEALED_REF });
     assert.equal(contextError(ctx.context, { inputReferences: ctx.inputReferences }), null);
     const oneHour = ctx.context.families.SPOT_PRICE_CHART.components.find((c) => c.metricId === 'window_ohlcv' && c.value.current.windowMs === 3_600_000);
     assert.notEqual(oneHour.value.current.support.state, 'COMPLETE_NO_TRADES', 'no positive interval coverage => no valid zero');
@@ -90,7 +91,7 @@ test('MC-J04 (R03). the production owner enriches admitted Deribit options throu
     const dq = await dout.acquire('OPTIONS_TERM_SKEW', 'BTC');
     assert.ok(paths.some((p) => /\/ticker\?/.test(p)), `the owner must call the registered ticker path (paths ${JSON.stringify(paths)})`);
     const ticks = dq.observations.filter((o) => o.kind === 'OPTION_TICK'); assert.ok(ticks.some((o) => o.payload.delta !== null), 'a parsed Greek reaches the observations');
-    const dc = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: { bundleId: 'audit' } });
+    const dc = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: SEALED_REF });
     const surf = dc.context.families.OPTIONS_TERM_SKEW.components.find((c) => c.metricId === 'atm_iv_term').value;
     assert.equal(surf.term.length, 1); assert.equal(surf.term[0].contracts, 4, 'summary + ticker of one instrument is ONE contract'); assert.ok(Math.abs(surf.term[0].riskReversal25d - (-0.12)) < 1e-9, `RR ${surf.term[0].riskReversal25d}`); assert.ok(Math.abs(surf.term[0].butterfly25d - 0.01) < 1e-9, `BF ${surf.term[0].butterfly25d}`);
   } finally { await dout.stop({ seal: false }); }
@@ -100,9 +101,9 @@ test('MC-W05 (R02). one OPTION_TICK without an instrument census cannot claim ce
   const paths = []; const dout = await deribitOwner(paths);
   try {
     const dq = await dout.acquire('OPTIONS_TERM_SKEW', 'BTC'); const ticks = dq.observations.filter((o) => o.kind === 'OPTION_TICK');
-    const partial = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: ticks.slice(0, 1), coverage: [], captureRef: { bundleId: 'audit' } }).context.families.OPTIONS_TERM_SKEW.components[0].value;
+    const partial = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: ticks.slice(0, 1), coverage: [], captureRef: SEALED_REF }).context.families.OPTIONS_TERM_SKEW.components[0].value;
     assert.equal(partial.censusComplete, false, 'no census evidence => not complete'); assert.notEqual(partial.support.state, 'COMPLETE');
-    const full = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: { bundleId: 'audit' } }).context.families.OPTIONS_TERM_SKEW.components[0].value;
+    const full = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: SEALED_REF }).context.families.OPTIONS_TERM_SKEW.components[0].value;
     assert.equal(full.censusComplete, true, 'the real census (instruments + census coverage) establishes completeness for its named scope');
   } finally { await dout.stop({ seal: false }); }
 });
@@ -111,7 +112,7 @@ test('MC-J01 (R03). the exact exit-liquidity oracle (asks 101x1, bids 99x3, noti
   const { ko, market } = await krakenBookOnly();
   try {
     const exitBook = ko.clients.KRAKEN_SPOT.bookSnapshotObservation({ market, levels: { bids: [[99, 3]], asks: [[101, 1]] }, receivedTs: T0, epochId: null, synced: true, checksumOk: true, sampleReason: 'INTERVAL', pricePrecision: 1, qtyPrecision: 8 }); assert.equal(observationError(exitBook), null);
-    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: [exitBook], coverage: [], captureRef: { bundleId: 'audit' }, referenceNotionals: [101] }).context;
+    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: [exitBook], coverage: [], captureRef: SEALED_REF, referenceNotionals: [101] }).context;
     const rt = ctx.families.DISPLAYED_LIQUIDITY.components.find((c) => c.metricId === 'round_trip_loss').value.current; assert.equal(rt.coverage, 'FULL'); assert.ok(Math.abs(rt.lossBps - 1e4 * 2 / 101) < 1e-4);
     for (const detailRequests of [[], [{ family: 'DISPLAYED_LIQUIDITY', metricId: 'round_trip_loss' }]]) {
       const b = buildResearchEvidenceV2({ marketContext: ctx, asOfTs: T0, trigger: { kind: 'MARKET_RESEARCH' }, detailRequests }); assert.equal(b.ok, true, JSON.stringify(b.detail ?? null));
@@ -131,7 +132,7 @@ test('MC-J02 (R03). venue mid dispersion reaches a packet as MARKET_MULTI_VENUE_
     const cbMarket = { subject: { subjectKind: 'MARKET', canonicalCoin: 'BTC', providerAssetId: 'BTC-USD', venue: 'coinbase', nativeSymbol: 'BTC-USD', base: 'BTC', quote: 'USD', marketType: 'SPOT', quoteAliasGroup: 'COINBASE_USD_USDC' } };
     const cb = { ...kb, provider: 'COINBASE_SPOT', endpointId: 'ws-feed', subject: cbMarket.subject, payload: { ...kb.payload, bids: [[100, 3]], asks: [[102, 1]] } };
     const { makeObservation } = await import('../market-lab/contracts.js'); const { observationId, ...rest } = cb; const cbo = makeObservation(rest);
-    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: [kb, cbo], coverage: [], captureRef: { bundleId: 'audit' }, referenceNotionals: [101] }).context;
+    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: [kb, cbo], coverage: [], captureRef: SEALED_REF, referenceNotionals: [101] }).context;
     const vd = ctx.families.CROSS_VENUE.components.find((c) => c.metricId === 'venue_mid_dispersion'); assert.equal(vd.value.dispersion.n, 2); assert.ok(Math.abs(vd.value.dispersion.dispersionBps - 1e4 * (101 - 100) / 100.5) < 1e-6);
     const b = buildResearchEvidenceV2({ marketContext: ctx, asOfTs: T0, trigger: { kind: 'MARKET_RESEARCH' } }); assert.equal(b.ok, true);
     const item = b.packet.evidence.find((e) => e.kind === 'MARKET_MULTI_VENUE_CONTEXT'); assert.ok(item, 'the dispersion reaches the packet'); assert.equal(item.value.fields.n, 2); assert.ok(Math.abs(item.value.fields.dispersionBps - vd.value.dispersion.dispersionBps) < 1e-9);
@@ -146,7 +147,7 @@ test('MC-J06 (R03). Coin Metrics disabled + CryptoQuant explicitly entitled: NET
     const na = await nr.acquire('NETWORK_ACTIVITY', 'BTC');
     assert.ok(requests.some((p) => p.includes('/network-data/')), `network-data requested (${JSON.stringify(requests)})`); assert.ok(requests.some((p) => p.includes('/market-indicator/')), 'market-indicator requested');
     const aa = na.observations.filter((o) => o.payload.metricId === 'active_addresses'); assert.ok(aa.length >= 1, 'active_addresses observed');
-    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: na.observations, coverage: na.coverage, captureRef: { bundleId: 'audit' } }).context;
+    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: na.observations, coverage: na.coverage, captureRef: SEALED_REF }).context;
     const comp = ctx.families.NETWORK_ACTIVITY.components.find((c) => c.metricId === 'active_addresses' && c.value.nativeMetric === 'active_addresses'); assert.ok(comp, 'active_addresses component'); assert.equal(comp.value.provider, 'CRYPTOQUANT'); assert.equal(typeof comp.value.value, 'number');
   } finally { await nr.stop({ seal: false }); }
 });
@@ -202,7 +203,7 @@ test('MC-V01 (R07). a string spreadBps with correctly recomputed component / con
   const { ko, market } = await krakenBookOnly();
   try {
     const book = ko.clients.KRAKEN_SPOT.bookSnapshotObservation({ market, levels: { bids: [[99, 3]], asks: [[101, 1]] }, receivedTs: T0, epochId: null, synced: true, checksumOk: true, sampleReason: 'INTERVAL', pricePrecision: 1, qtyPrecision: 8 });
-    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: [book], coverage: [], captureRef: { bundleId: 'audit' }, referenceNotionals: [101] }).context;
+    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: [book], coverage: [], captureRef: SEALED_REF, referenceNotionals: [101] }).context;
     assert.equal(contextError(ctx), null, 'the lawful context passes');
     const hostile = structuredClone(ctx); const c = hostile.families.DISPLAYED_LIQUIDITY.components.find((x) => x.metricId === 'spread_bps'); c.value.spreadBps = 'AUDIT_INVALID_NUMERIC_VALUE';
     const cb = Object.fromEntries(COMPONENT_KEYS.filter((k) => k !== 'componentId').map((k) => [k, c[k]])); c.componentId = `mcc-${canonicalDigest(cb).slice(0, 40)}`; hostile.contextId = contextIdentity(hostile);

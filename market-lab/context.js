@@ -3,10 +3,11 @@
 // names and restarts (no wall clock, no randomness). Every component references the exact observation ids it used,
 // carries its own derivation clock and support, and never references the summary back. Resource loss propagates
 // as support / completeness, never as a quiet zero.
-import { deepFreeze, canonicalDigest, exactKeys, isTs, isPlainObject, isFiniteNum, FAMILIES, fail, PAYLOAD_KINDS, PROVIDER_IDS } from './contracts.js';
+import { deepFreeze, canonicalDigest, exactKeys, isTs, isPlainObject, isFiniteNum, FAMILIES, fail, PAYLOAD_KINDS, PROVIDER_IDS, COVERAGE_STATES, QUALITY_REASON_CODES, SUBJECT_KEYS, subjectError } from './contracts.js';
+import { PREFIX_KEYS, PREFIX_VERSION } from './prefix.js';
 import { WINDOWS_MS, MINUTE_MS, HOUR_MS, DAY_MS, adjacentWindows, derivationClockError } from './time.js';
 import { intervalCoverage } from './recipes.js';
-import { componentValueError, contextSupportError } from './context-schema.js';
+import { componentValueError, contextSupportError, METRIC_SCHEMAS } from './context-schema.js';
 import { RECIPE_SET_VERSION, RECIPES, tradeWindow, bookMetrics, walkBook, roundTrip, haircutScenarios, pressureResponse, pressureResponseChange, peerRelativeMove, venueDispersion, orderedFirstChanges, basisBps, oiChange, fundingNative, optionsSurface, admitOptions, supplyRatios, exchangeNetFlow, stablecoinChange, pegDeviationBps, liquidationTotals, etfFlowSummary, macroSurprise, pearson, relativeActivity, indicators, breakoutDistance } from './recipes.js';
 import { RESOURCE_DEFAULTS } from './policy.js';
 
@@ -159,22 +160,76 @@ export function buildContext({ canonicalCoin, asOfTs, observations, coverage = [
 }
 
 // ---- validator (shared by builder output, publisher, reopen, evidence builder) ----------------------------------------
+// closeout P5: the pure validator closes EVERY container of the saved shape (top level, family entries, family coverage rows,
+// subjects, omission / resource / limit metadata, the capture reference, components and their values) with typed scalars; a
+// diagnostic names the schema path or key position, never the untrusted key or value text.
+export const FAMILY_ENTRY_KEYS = Object.freeze(['state', 'components', 'coverage']);
+export const FAMILY_COVERAGE_KEYS = Object.freeze(['coverageId', 'provider', 'endpointId', 'subjectId', 'kind', 'state', 'reasonCodes', 'startTs', 'endTs', 'observationCount', 'droppedCount']);
+export const OMITTED_KEYS = Object.freeze(['lateArrivals', 'componentsOverCap', 'inputIdsTruncated']);
+export const RESOURCE_STATE_KEYS = Object.freeze(['subjects', 'totalBytes', 'evictions']);
+export const EVICTION_KEYS = Object.freeze(['trades', 'bookSamples', 'bars', 'subjects', 'bytesPressure']);
+export const LIMIT_KEYS = Object.freeze(['maxInputIds', 'maxComponentsPerFamily', 'bookEndpointMaxAgeMs']);
+export const SEALED_CAPTURE_REF_KEYS = Object.freeze(['bundleId', 'manifestSha256', 'observationsSha256', 'coverageSha256']);
+export const MAX_LIMITATIONS = 32;
+const isCount = (v) => Number.isSafeInteger(v) && v >= 0; const isTsOrNull = (v) => v === null || isTs(v); const isCountOrNull = (v) => v === null || isCount(v);
+const SUBJECT_ID_RE = /^ms-[0-9a-f]{32}$/; const OBS_ID_RE = /^mo-[0-9a-f]{64}$/; const SHA_RE = /^[0-9a-f]{64}$/; const BUNDLE_RE = /^mb-[0-9a-f]{64}$/;
+const shortStr = (v, max = 300) => typeof v === 'string' && v.length >= 1 && v.length <= max;
+function captureRefError(ref, where) {
+  if (!isPlainObject(ref)) return `${where}: must be an object`;
+  if (Object.hasOwn(ref, 'prefixVersion')) { // a versioned capture prefix: closed by PREFIX_KEYS here, bound to its bytes by prefixError at the bundle reader
+    const k = exactKeys(ref, PREFIX_KEYS, where); if (k) return k;
+    if (ref.prefixVersion !== PREFIX_VERSION || !/^mpx-[0-9a-f]{64}$/.test(String(ref.prefixId)) || !(ref.bundleId === null || BUNDLE_RE.test(String(ref.bundleId))) || !(ref.manifestSha256 === null || SHA_RE.test(String(ref.manifestSha256))) || !Array.isArray(ref.segments) || !isPlainObject(ref.membership) || !isPlainObject(ref.limits) || !(ref.resourceState === null || isPlainObject(ref.resourceState)) || !(ref.recording === null || isPlainObject(ref.recording))) return `${where}: prefix reference malformed`;
+    return null;
+  }
+  const k = exactKeys(ref, SEALED_CAPTURE_REF_KEYS, where); if (k) return k;
+  if (!BUNDLE_RE.test(String(ref.bundleId)) || !SHA_RE.test(String(ref.manifestSha256)) || !SHA_RE.test(String(ref.observationsSha256)) || !SHA_RE.test(String(ref.coverageSha256))) return `${where}: sealed capture reference malformed`;
+  return null;
+}
+function familyCoverageError(c, where) {
+  const k = exactKeys(c, FAMILY_COVERAGE_KEYS, where); if (k) return k;
+  if (!/^mc-[0-9a-f]{40}$/.test(String(c.coverageId)) || !PROVIDER_IDS.includes(c.provider) || !shortStr(c.endpointId, 120) || !SUBJECT_ID_RE.test(String(c.subjectId)) || !(c.kind === null || PAYLOAD_KINDS.includes(c.kind))) return `${where}: identity malformed`;
+  if (!COVERAGE_STATES.includes(c.state) || !Array.isArray(c.reasonCodes) || c.reasonCodes.length > 16 || c.reasonCodes.some((r) => !QUALITY_REASON_CODES.includes(r))) return `${where}: state/reasons malformed`;
+  if (!isTs(c.startTs) || !isTsOrNull(c.endTs) || (c.endTs !== null && c.endTs < c.startTs) || !isCount(c.observationCount) || !isCount(c.droppedCount)) return `${where}: interval/counters malformed`;
+  return null;
+}
+function subjectEntryError(s, where) {
+  if (!isPlainObject(s) || !Object.hasOwn(s, 'subjectKind') || !SUBJECT_KEYS[s.subjectKind]) return `${where}: subject malformed`;
+  const k = exactKeys(s, ['subjectId', ...SUBJECT_KEYS[s.subjectKind]], where); if (k) return k;
+  const body = {}; for (const key of SUBJECT_KEYS[s.subjectKind]) body[key] = s[key];
+  const se = subjectError(body, where); if (se) return se;
+  if (s.subjectId !== `ms-${canonicalDigest(body).slice(0, 32)}`) return `${where}: subjectId does not match the subject`;
+  return null;
+}
 export function contextError(ctx, { inputReferences = null, where = 'context' } = {}) {
   const k = exactKeys(ctx, CONTEXT_KEYS, where); if (k) return k;
   if (LEGACY_CONTEXT_VERSIONS.includes(ctx.contextVersion)) return `${where}: legacy context version ${ctx.contextVersion} lacks coverage / census proof and is not converted — rebuild from its capture`;
   if (ctx.contextVersion !== CONTEXT_VERSION || ctx.recipeSetVersion !== RECIPE_SET_VERSION) return `${where}: unsupported version`;
   if (!/^[A-Z0-9][A-Z0-9.]{0,14}$/.test(String(ctx.canonicalCoin)) || !isTs(ctx.asOfTs) || !isTs(ctx.derivationTs) || ctx.derivationTs > ctx.asOfTs) return `${where}: identity/clock malformed`;
-  if (!isPlainObject(ctx.captureRef) || !isPlainObject(ctx.families) || !isPlainObject(ctx.omitted) || !isPlainObject(ctx.limits) || !Array.isArray(ctx.subjects)) return `${where}: structure malformed`;
-  const seen = new Set();
+  if (!isPlainObject(ctx.captureRef) || !isPlainObject(ctx.families) || !isPlainObject(ctx.omitted) || !isPlainObject(ctx.limits) || !Array.isArray(ctx.subjects) || !(ctx.resourceState === null || isPlainObject(ctx.resourceState))) return `${where}: structure malformed`;
+  const cr = captureRefError(ctx.captureRef, `${where}.captureRef`); if (cr) return cr;
+  const ok = exactKeys(ctx.omitted, OMITTED_KEYS, `${where}.omitted`); if (ok) return ok; if (!OMITTED_KEYS.every((key) => isCount(ctx.omitted[key]))) return `${where}.omitted: counts malformed`;
+  const lk = exactKeys(ctx.limits, LIMIT_KEYS, `${where}.limits`); if (lk) return lk; if (!LIMIT_KEYS.every((key) => isCount(ctx.limits[key]) && ctx.limits[key] > 0)) return `${where}.limits: malformed`;
+  if (ctx.resourceState !== null) { const rk = exactKeys(ctx.resourceState, RESOURCE_STATE_KEYS, `${where}.resourceState`); if (rk) return rk; if (!isCountOrNull(ctx.resourceState.subjects) || !isCountOrNull(ctx.resourceState.totalBytes) || !(ctx.resourceState.evictions === null || isPlainObject(ctx.resourceState.evictions))) return `${where}.resourceState: malformed`; if (ctx.resourceState.evictions !== null) { const ek = exactKeys(ctx.resourceState.evictions, EVICTION_KEYS, `${where}.resourceState.evictions`); if (ek) return ek; if (!EVICTION_KEYS.every((key) => isCount(ctx.resourceState.evictions[key]))) return `${where}.resourceState.evictions: counts malformed`; } }
+  if (ctx.subjects.length > 256) return `${where}.subjects: over the cap`; const subjectIds = new Set();
+  for (let i = 0; i < ctx.subjects.length; i += 1) { const e = subjectEntryError(ctx.subjects[i], `${where}.subjects[${i}]`); if (e) return e; if (subjectIds.has(ctx.subjects[i].subjectId)) return `${where}.subjects[${i}]: duplicate subject`; subjectIds.add(ctx.subjects[i].subjectId); }
+  const seen = new Set(); const famSeen = new Set();
   for (const fam of Object.keys(ctx.families)) {
-    if (!FAMILIES.includes(fam)) return `${where}: unknown family`;
-    const f = ctx.families[fam]; if (!isPlainObject(f) || !FAMILY_STATES.includes(f.state) || !Array.isArray(f.components) || !Array.isArray(f.coverage)) return `${where}.${fam}: malformed`;
+    if (!FAMILIES.includes(fam)) return `${where}.families: undeclared family at position ${famSeen.size + 1}`; famSeen.add(fam);
+    const f = ctx.families[fam]; const fk = exactKeys(f, FAMILY_ENTRY_KEYS, `${where}.${fam}`); if (fk) return fk;
+    if (!FAMILY_STATES.includes(f.state) || !Array.isArray(f.components) || !Array.isArray(f.coverage)) return `${where}.${fam}: malformed`;
     if (f.components.length > MAX_COMPONENTS_PER_FAMILY) return `${where}.${fam}: over the component cap`;
+    if (f.coverage.length > 4_096) return `${where}.${fam}.coverage: over the cap`;
+    for (let i = 0; i < f.coverage.length; i += 1) { const e = familyCoverageError(f.coverage[i], `${where}.${fam}.coverage[${i}]`); if (e) return e; }
     for (let i = 0; i < f.components.length; i += 1) {
       const c = f.components[i]; const w = `${where}.${fam}[${i}]`; const e = exactKeys(c, COMPONENT_KEYS, w); if (e) return e;
       if (c.family !== fam || !RECIPES[c.recipeId] || RECIPES[c.recipeId].version !== c.version || recipeOf(c.metricId)?.recipeId !== c.recipeId) return `${w}: recipe binding malformed`;
-      if (!Array.isArray(c.inputObservationIds) || c.inputObservationIds.length > MAX_INPUT_IDS || new Set(c.inputObservationIds).size !== c.inputObservationIds.length || [...c.inputObservationIds].sort().join() !== c.inputObservationIds.join()) return `${w}: input ids must be a sorted unique set`;
+      if (typeof c.metricId !== 'string' || !Object.hasOwn(METRIC_SCHEMAS, c.metricId)) return `${w}.metricId: no closed schema`;
+      if (!(c.subjectId === null || SUBJECT_ID_RE.test(String(c.subjectId))) || !isTsOrNull(c.windowStartTs) || !isTsOrNull(c.windowEndTs) || !isTs(c.derivationTs) || !isTsOrNull(c.inputKnownAtMax)) return `${w}: subject/clock fields malformed`;
+      if (!Array.isArray(c.inputObservationIds) || c.inputObservationIds.length > MAX_INPUT_IDS || c.inputObservationIds.some((id) => !OBS_ID_RE.test(String(id))) || new Set(c.inputObservationIds).size !== c.inputObservationIds.length || [...c.inputObservationIds].sort().join() !== c.inputObservationIds.join()) return `${w}: input ids must be a sorted unique set`;
+      if (!isCount(c.inputObservationCount)) return `${w}.inputObservationCount: must be a non-negative integer`;
       if (c.inputObservationCount < c.inputObservationIds.length) return `${w}: input count below listed ids`;
+      if (!SHA_RE.test(String(c.inputDigest))) return `${w}.inputDigest: malformed`;
+      if (!Array.isArray(c.limitations) || c.limitations.length > MAX_LIMITATIONS || c.limitations.some((l) => !shortStr(l, 300))) return `${w}.limitations: malformed`;
       const ce = derivationClockError({ windowEndTs: c.windowEndTs, derivationTs: c.derivationTs, asOfTs: ctx.asOfTs, inputKnownAtTs: c.inputKnownAtMax === null ? [] : [c.inputKnownAtMax] }, w); if (ce) return ce;
       if (c.windowStartTs !== null && c.windowEndTs !== null && c.windowStartTs > c.windowEndTs) return `${w}: window reversed`;
       if (inputReferences) { for (const id of c.inputObservationIds) { const ref = inputReferences[id]; if (!ref) return `${w}: input id not in input references`; if (ref.knownAtTs > c.derivationTs) return `${w}: input known after derivation`; } if (c.inputObservationCount === c.inputObservationIds.length && c.inputDigest !== canonicalDigest(c.inputObservationIds)) return `${w}: input digest disagrees`; const listedMax = c.inputObservationIds.length ? Math.max(...c.inputObservationIds.map((id) => inputReferences[id].knownAtTs)) : null; if (listedMax !== null && (c.inputObservationCount === c.inputObservationIds.length ? c.inputKnownAtMax !== listedMax : c.inputKnownAtMax < listedMax)) return `${w}: inputKnownAtMax disagrees with the references`; }

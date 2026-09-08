@@ -7,11 +7,11 @@ import { rmSync, readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { T0, tmp, json, btcOnly, includedPlan, cryptoquantPolicy, cryptoquantFetch, deribitTicker, DERIBIT_FOUR, deribitFourSummaries, deribitOwner, krakenBookOnly, bookObs, krakenWsScript, krakenTradeMsg, krakenRestFixture, H } from './helpers/market-closeout.js';
+import { T0, tmp, json, btcOnly, includedPlan, cryptoquantPolicy, cryptoquantFetch, deribitTicker, DERIBIT_FOUR, deribitFourSummaries, deribitOwner, krakenBookOnly, bookObs, krakenWsScript, krakenTradeMsg, krakenRestFixture, H, SEALED_REF } from './helpers/market-closeout.js';
 import { createResearchOwner } from '../market-lab/owner.js';
 import { createResearchService } from '../market-lab/service.js';
-import { loadPolicy, RESOURCE_DEFAULTS } from '../market-lab/policy.js';
-import { makeObservation, makeCoverage, quality, emptyProvenance, subjectId, canonicalDigest, sha256Hex, FAMILIES, PROVIDER_IDS } from '../market-lab/contracts.js';
+import { loadPolicy, RESOURCE_DEFAULTS, ALLOWED_MAX_AGE_MS } from '../market-lab/policy.js';
+import { makeObservation, makeCoverage, quality, emptyProvenance, subjectId, canonicalDigest, sha256Hex, FAMILIES, PROVIDER_IDS, familyMetricIds } from '../market-lab/contracts.js';
 import { buildContext, contextError, contextIdentity, COMPONENT_KEYS } from '../market-lab/context.js';
 import { METRIC_SCHEMAS, SUPPORT_STATES, componentValueError, contextSupportError } from '../market-lab/context-schema.js';
 import { readCapture, runBuild, readContext, contextBundleError } from '../market-lab/commands.js';
@@ -19,6 +19,7 @@ import { openBundle, manifestIdentity, prepareOutputTarget, reserveOutputDir, js
 import { codeIdentity, sourceClosure, codeIdentityError, MARKET_RESEARCH_ROOTS } from '../market-lab/identity.js';
 import { providerReadiness, liveReadinessManifest } from '../market-lab/readiness.js';
 import { buildCoverageMatrix } from '../market-lab/coverage.js';
+import { ENDPOINTS, endpointsOf, providersForFamily } from '../market-lab/registry.js';
 import { explainDeepMarket, createDeepMarketSource } from '../market-lab/deep-market-adapter.js';
 import { buildResearchEvidenceV2 } from '../evidence/research-builder.js';
 import { validateEvidencePacketV2 } from '../evidence/contract-v2.js';
@@ -37,7 +38,7 @@ const mkt = { subjectKind: 'MARKET', canonicalCoin: 'BTC', providerAssetId: 'XXB
 const trade = (i, ts, price, side = 'BUY') => makeObservation({ provider: 'KRAKEN_SPOT', endpointId: 'ws-v2', subject: mkt, kind: 'TRADE', sequence: i, epochId: null, sourceRevision: null, sourceKey: String(i), sourceEventTs: ts, publishedTs: null, periodStartTs: null, periodEndTs: null, receivedTs: ts + 5, knownAtTs: ts + 5, quality: quality('KNOWN', { methodologyId: 'kraken-ws-trade-v2', originalUnit: 'USD' }), provenance: emptyProvenance(), payload: { price, qty: 0.5, quoteNotional: price * 0.5, takerSide: side, sideConvention: 'TAKER_NATIVE', nativeTradeId: String(i), orderType: 'market' } });
 const book = (i, ts) => makeObservation({ provider: 'KRAKEN_SPOT', endpointId: 'ws-v2', subject: mkt, kind: 'BOOK_SNAPSHOT', sequence: 1000 + i, epochId: null, sourceRevision: null, sourceKey: null, sourceEventTs: null, publishedTs: null, periodStartTs: null, periodEndTs: null, receivedTs: ts, knownAtTs: ts, quality: quality('KNOWN', { methodologyId: 'kraken-ws-book-v2', originalUnit: 'USD' }), provenance: emptyProvenance(), payload: { bids: [[99.9, 3], [99.5, 5]], asks: [[100.1, 2], [100.5, 4]], levelsPerSideCap: 200, synchronized: true, checksumVerified: true, bookAgeMs: 0, sampleReason: 'INTERVAL', pricePrecision: 1, qtyPrecision: 8 } });
 const subscribed = (startTs) => makeCoverage({ provider: 'KRAKEN_SPOT', endpointId: 'ws-v2', subjectId: subjectId(mkt), family: 'SPOT_FLOW', kind: 'TRADE', state: 'SUBSCRIBED', reasonCodes: [], startTs, endTs: null, observationCount: 0, droppedCount: 0, epochId: null, sequenceStart: null, sequenceEnd: null });
-const REF = { bundleId: 'audit' };
+const REF = SEALED_REF;
 const populated = () => { const obs = []; for (let i = 0; i < 40; i += 1) obs.push(trade(i, T0 - 600_000 + i * 15_000, 100 + i * 0.01, i % 3 ? 'BUY' : 'SELL')); for (let i = 0; i < 12; i += 1) obs.push(book(i, T0 - 600_000 + i * 50_000)); obs.push(book(12, T0 - 1000)); return { obs, cov: [subscribed(T0 - 900_000)] }; };
 const rebind = (ctx) => { for (const f of Object.values(ctx.families)) for (const c of f.components) { const cb = Object.fromEntries(COMPONENT_KEYS.filter((k) => k !== 'componentId').map((k) => [k, c[k]])); c.componentId = `mcc-${canonicalDigest(cb).slice(0, 40)}`; } ctx.contextId = contextIdentity(ctx); return ctx; };
 const firstReport = (packet, requests = []) => { const chart = byKind(packet, 'MARKET_CHART_WINDOW'); const ids = [chart.evidenceId]; return { analysisState: 'ANALYZED', thesis: { text: `Close ${chart.value.fields.close} on kraken.`, evidenceRefs: ids, claimRefs: [], sourceRefs: [] }, mechanism: { description: 'Taker flow into displayed liquidity.', evidenceRefs: ids, claimRefs: [], sourceRefs: [] }, marketImplication: { direction: 'NO_CLEAR_DIRECTION', horizon: 'MINUTES_5_30', evidenceRefs: ids }, stage: { general: 'UNCLEAR', pumpStage: 'NOT_APPLICABLE' }, support: [{ kind: 'FACT_REFERENCE', text: `Close ${chart.value.fields.close}`, evidenceRefs: ids, claimRefs: [], sourceRefs: [] }], contradictions: [], missingEvidence: [], falsifiers: [{ condition: 'a', whyItMatters: 'b', evidenceToWatch: 'c' }], watchNext: [], unknowns: [], security: { untrustedTextSeen: packet.security.untrustedTextPresent, promptInjectionSuspected: false }, securityNotes: [], limitations: [], hypotheses: [{ hypothesisKey: 'H1', mechanism: 'flow', evidenceRefs: ids, claimRefs: [], sourceRefs: [], supportingEvidenceRefs: ids, opposingEvidenceRefs: [], unknowns: [], discriminators: [] }], alternativeConsideration: { state: 'CONSIDERED_NO_SUPPORTED_ALTERNATIVE', explanation: 'none' }, dataRequests: requests, revision: { state: 'FIRST_REPORT', previousAnalysisId: null, changedEvidenceRefs: [], explanation: null }, calibration: { assessedAs: 'RESEARCH_HYPOTHESIS', calibrated: false } }; };
@@ -52,7 +53,7 @@ test('MC-V02 (R07). named mutations across value / support families reject with 
   const cases = [
     ['missing required key', (c) => { delete find(c, 'DISPLAYED_LIQUIDITY', 'spread_bps').value.mid; }, /spread_bps|value\.mid.*required/],
     ['invalid null', (c) => { find(c, 'DISPLAYED_LIQUIDITY', 'spread_bps').value.venue = null; }, /venue/],
-    ['unknown key', (c) => { find(c, 'SPOT_PRICE_CHART', 'window_ohlcv').value.extra = 1; }, /extra.*undeclared/],
+    ['unknown key', (c) => { find(c, 'SPOT_PRICE_CHART', 'window_ohlcv').value.extra = 1; }, /window_ohlcv|SPOT_PRICE_CHART\[\d+\]\.value: undeclared key at position/], // closeout P5: the path and key position, never the untrusted key text
     ['unknown enum (support state)', (c) => { find(c, 'SPOT_FLOW', 'signed_notional').support.state = 'TOTALLY_FINE'; }, /support.*state/],
     ['unknown enum (nested)', (c) => { find(c, 'SPOT_PRICE_CHART', 'window_ohlcv').value.current.coverage.state = 'PERFECT'; }, /coverage\.state/],
     ['wrong nested type', (c) => { find(c, 'DISPLAYED_LIQUIDITY', 'spread_bps').value.bands['5bps'].bid.qty = '3'; }, /5bps.*bid.*qty/],
@@ -63,7 +64,7 @@ test('MC-V02 (R07). named mutations across value / support families reject with 
     ['duplicate member', (c) => { const f = c.families.SPOT_FLOW; f.components.push(structuredClone(f.components[0])); }, /duplicate component/],
     ['inconsistent support / count', (c) => { const x = find(c, 'SPOT_PRICE_CHART', 'window_ohlcv'); x.inputObservationCount = 0; }, /input count/],
     ['support state outside the metric list', (c) => { find(c, 'DISPLAYED_LIQUIDITY', 'round_trip_loss').support.state = 'NO_BOOK'; }, /round_trip_loss state|support\.state/],
-    ['raw-content sentinel', (c) => { find(c, 'CROSS_VENUE', 'venue_mid_dispersion').value.raw = '<html>PROVIDER BODY</html>'; }, /raw.*undeclared/],
+    ['raw-content sentinel', (c) => { find(c, 'CROSS_VENUE', 'venue_mid_dispersion').value.raw = '<html>PROVIDER BODY</html>'; }, /venue_mid_dispersion|CROSS_VENUE\[\d+\]\.value: undeclared key at position/], // the sentinel text never reaches the diagnostic
     ['support reasons not strings', (c) => { find(c, 'SPOT_PRICE_CHART', 'window_ohlcv').support.reasons = [42]; }, /reasons/],
   ];
   for (const [name, mutate, re] of cases) { const hostile = rebind((() => { const h = structuredClone(base); mutate(h); return h; })()); const e = contextError(hostile, { inputReferences: built.inputReferences }); assert.ok(e, `${name}: must reject`); assert.match(e, re, `${name}: ${e}`); }
@@ -138,11 +139,11 @@ test('MC-V06 (R07). an invalid candidate never acquires a completion manifest; e
   const fd = openSync(path.join(real, 'tmpfile'), 'w'); closeSync(fd); assert.throws(() => writeAll(fd, Buffer.from('x'), 'tmpfile'), /write failed/); assert.equal(res.sealed, false); assert.equal(existsSync(path.join(real, 'manifest.json')), false); res.cleanup();
   // a context candidate above its byte bound never publishes: no manifest, no leftover directory
   const capture = { bundle: { manifest: { bundleId: 'mb-' + 'a'.repeat(64) }, manifestSha256: 'b'.repeat(64), members: { 'observations.jsonl': { sha256: 'c'.repeat(64) }, 'coverage.jsonl': { sha256: 'd'.repeat(64) } } } };
-  const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: obs, coverage: cov, captureRef: { bundleId: capture.bundle.manifest.bundleId, manifestSha256: capture.bundle.manifestSha256 }, referenceNotionals: [100] });
+  const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: obs, coverage: cov, captureRef: { bundleId: capture.bundle.manifest.bundleId, manifestSha256: capture.bundle.manifestSha256, observationsSha256: capture.bundle.members['observations.jsonl'].sha256, coverageSha256: capture.bundle.members['coverage.jsonl'].sha256 }, referenceNotionals: [100] });
   assert.ok(JSON.stringify(ctx.context).length > 2048); const out = path.join(dir, 'ctx-small');
   assert.throws(() => { const r2 = reserveOutputDir(prepareOutputTarget(out)); try { writeJsonFile(r2, 'context.json', ctx.context, { maxBytes: 2048 }); } catch (err) { r2.cleanup(); throw err; } }, /exceeds/); assert.equal(existsSync(out), false, 'a refused candidate leaves nothing behind');
   const hostile = rebind((() => { const h = structuredClone(ctx.context); h.families.DISPLAYED_LIQUIDITY.components[0].value.spreadBps = 'x'; return h; })()); const identity = codeIdentity();
-  assert.match(contextBundleError({ context: hostile, inputReferences: ctx.inputReferences, coverage: { coverageVersion: 'market-context-coverage-2', asOfTs: T0, canonicalCoin: 'BTC', admissible: 99, late: 0, families: {}, params: { canonicalCoin: 'BTC', referenceNotionals: [100], peers: [] } }, identity }), /spreadBps/, 'the shared candidate validator refuses BEFORE any manifest');
+  assert.match(contextBundleError({ context: hostile, inputReferences: ctx.inputReferences, coverage: { coverageVersion: 'market-context-coverage-2', asOfTs: T0, canonicalCoin: 'BTC', admissible: 99, late: 0, families: {}, params: { canonicalCoin: 'BTC', referenceNotionals: [100], peers: [] } }, identity }), /DISPLAYED_LIQUIDITY\[0\]\.value: undeclared key at position \d+ of \d+/, 'the shared candidate validator refuses BEFORE any manifest (closeout P5: the path and position, never the injected key text)');
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -159,14 +160,25 @@ test('MC-V07 (R07). the code identity covers the new effective modules through t
 });
 
 // ---------------------------------------------------------------- readiness ------------------------------------------------------
-test('MC-RD03 (readiness). an explicitly partial family keeps the overall state non-green; a fully supported synthetic all-required case passes READINESS_GREEN (the gate is not hardwired red)', () => {
+test('MC-RD03 (readiness). an explicitly partial family keeps the overall state non-green; a QUALIFIED synthetic all-required case passes READINESS_GREEN (the gate is not hardwired red); the old count-only form (null provider, endpoint e, no metrics) is non-green with named missing proof', () => {
   const policy = loadPolicy(H.policyWith({ providers: [...PROVIDER_IDS] })); const env = Object.fromEntries(PROVIDER_IDS.map((id) => [`${id}_API_KEY`, 'x']));
-  const rows = providerReadiness({ policy, env, testReport: Object.fromEntries(PROVIDER_IDS.map((id) => [id, 'PASSED'])), liveReport: Object.fromEntries(PROVIDER_IDS.map((id) => [id, { state: 'PASSED', ts: T0, endpointId: 'e', asset: 'BTC', evidence: 'synthetic' }])) });
-  const full = Object.fromEntries(FAMILIES.map((f) => [f, { requested: 1, obtained: 1, assets: ['BTC'], nativeLatencyMs: 10, complete: true, providerId: null, smokeTs: T0, metrics: null }]));
-  const green = liveReadinessManifest({ rows, familyCoverage: full, modelReadiness: { enabled: true, credentialPresent: true, liveVerification: 'PASSED' }, generatedTs: T0 }); assert.equal(green.overall, 'READINESS_GREEN', JSON.stringify(green.blockers)); assert.deepEqual(green.blockers, []); assert.ok(FAMILIES.every((f) => green.families[f].state === 'LIVE'));
-  const partial = liveReadinessManifest({ rows, familyCoverage: { ...full, OPTIONS_TERM_SKEW: { ...full.OPTIONS_TERM_SKEW, complete: false } }, modelReadiness: { enabled: true, credentialPresent: true, liveVerification: 'PASSED' }, generatedTs: T0 });
+  const rows = providerReadiness({ policy, env, testReport: Object.fromEntries(PROVIDER_IDS.map((id) => [id, 'PASSED'])), liveReport: Object.fromEntries(PROVIDER_IDS.map((id) => [id, { state: 'PASSED', ts: T0, endpointId: endpointsOf(id)[0].endpointId, asset: 'BTC', evidence: 'synthetic' }])) });
+  // closeout P1: qualified evidence names the selected required provider, a family-relevant REGISTRY endpoint, requested / obtained
+  // assets and REGISTERED metrics, the interval, the knowledge clock under the family's own policy age and a support basis
+  const qualified = (fam, over = {}) => { const providerId = providersForFamily(fam)[0]; const endpoint = ENDPOINTS.find((e) => e.providerId === providerId && e.families.includes(fam)); const metrics = familyMetricIds(fam); return { providerId, endpointId: endpoint.endpointId, requested: 1, obtained: 1, assets: { requested: ['BTC'], obtained: ['BTC'] }, metrics: { requested: metrics, obtained: metrics }, interval: { startTs: T0 - 3_600_000, endTs: T0 - 500 }, knownAtTs: T0 - 500, requestedMaxAgeMs: ALLOWED_MAX_AGE_MS[fam].at(-1), support: { state: 'COMPLETE', basis: 'SNAPSHOT' }, complete: true, nativeLatencyMs: 10, smokeTs: T0 - 86_400_000, ...over }; };
+  const full = Object.fromEntries(FAMILIES.map((f) => [f, qualified(f)]));
+  const model = { enabled: true, credentialPresent: true, liveVerification: 'PASSED', demonstration: { ts: T0 - 1000, model: 'synthetic-demonstration', requestId: 'req-synthetic', usage: { inputTokens: 1200, outputTokens: 300 } } };
+  const green = liveReadinessManifest({ rows, familyCoverage: full, modelReadiness: model, generatedTs: T0 }); assert.equal(green.overall, 'READINESS_GREEN', JSON.stringify(green.blockers)); assert.deepEqual(green.blockers, []); assert.ok(FAMILIES.every((f) => green.families[f].state === 'LIVE' && green.families[f].qualified === true && green.families[f].missingProof.length === 0)); assert.equal(green.manifestVersion, 'market-live-readiness-3');
+  assert.equal(green.families.NETWORK_ACTIVITY.historicalSmokeTs, T0 - 86_400_000, 'the historical smoke is reported separately'); assert.equal(green.families.NETWORK_ACTIVITY.knownAtTs, T0 - 500);
+  const partial = liveReadinessManifest({ rows, familyCoverage: { ...full, OPTIONS_TERM_SKEW: qualified('OPTIONS_TERM_SKEW', { complete: false, support: { state: 'PARTIAL', basis: 'CENSUS_RECORD' } }) }, modelReadiness: model, generatedTs: T0 });
   assert.equal(partial.families.OPTIONS_TERM_SKEW.state, 'PARTIAL_LIVE'); assert.notEqual(partial.overall, 'READINESS_GREEN'); assert.ok(partial.familiesNotLive.includes('OPTIONS_TERM_SKEW')); assert.ok(partial.blockers.some((b) => /OPTIONS_TERM_SKEW/.test(b)));
-  const absent = liveReadinessManifest({ rows, familyCoverage: { ...full, ETF_FLOWS: null }, modelReadiness: { enabled: true, credentialPresent: true, liveVerification: 'PASSED' }, generatedTs: T0 }); assert.notEqual(absent.overall, 'READINESS_GREEN'); assert.equal(absent.families.ETF_FLOWS.state, 'NOT_VERIFIED');
+  const absent = liveReadinessManifest({ rows, familyCoverage: { ...full, ETF_FLOWS: null }, modelReadiness: model, generatedTs: T0 }); assert.notEqual(absent.overall, 'READINESS_GREEN'); assert.equal(absent.families.ETF_FLOWS.state, 'NOT_VERIFIED'); assert.deepEqual(absent.families.ETF_FLOWS.missingProof, ['NO_FAMILY_EVIDENCE']);
+  // the OLD positive form: a count with no provider, a non-registry endpoint and no metrics — never GREEN, missing proof named, nothing thrown
+  const old = Object.fromEntries(FAMILIES.map((f) => [f, { requested: 1, obtained: 1, assets: ['BTC'], nativeLatencyMs: 10, complete: true, providerId: null, smokeTs: T0, metrics: null }]));
+  const legacy = liveReadinessManifest({ rows, familyCoverage: old, modelReadiness: model, generatedTs: T0 }); assert.notEqual(legacy.overall, 'READINESS_GREEN'); assert.equal(legacy.families.NETWORK_ACTIVITY.state, 'NOT_VERIFIED');
+  for (const r of ['PROVIDER_NOT_SELECTED_FOR_FAMILY', 'ENDPOINT_NOT_IN_REGISTRY', 'METRIC_PROOF_MISSING', 'ASSET_PROOF_MISSING', 'INTERVAL_MISSING', 'KNOWN_AT_MISSING', 'FRESHNESS_POLICY_NOT_NAMED', 'SUPPORT_BASIS_MISSING']) assert.ok(legacy.families.NETWORK_ACTIVITY.missingProof.includes(r), r);
+  // a bare PASSED model flag without a supported demonstration blocks
+  const bare = liveReadinessManifest({ rows, familyCoverage: full, modelReadiness: { enabled: true, credentialPresent: true, liveVerification: 'PASSED' }, generatedTs: T0 }); assert.equal(bare.overall, 'BLOCKED'); assert.ok(bare.blockers.some((b) => /MODEL_DEMONSTRATION_MISSING/.test(b)));
 });
 
 test('MC-RD04 (readiness). declared-policy counts are computed from the 17-family artifact; a disabled or unauthorised alternative provider never overrides the qualified source', () => {

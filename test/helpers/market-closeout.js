@@ -54,3 +54,6 @@ export async function krakenRestFixture() {
   return H.startHttpFixture({ 'GET /0/public/AssetPairs': { json: H.KRAKEN_ASSET_PAIRS }, 'GET /0/public/OHLC': (req) => ({ json: H.krakenOhlc(req.query.pair, { intervalMin: Number(req.query.interval), endTs: now(), count: 30 }) }), 'GET /0/public/Trades': (req) => ({ json: H.krakenTrades(req.query.pair, { endTs: now() }) }), 'GET /0/public/Ticker': (req) => ({ json: H.krakenTicker(req.query.pair.split(',')[0]) }), '*': { status: 404, json: { error: 'no fixture' } } });
 }
 export { H };
+// closeout P5: the pure validator closes the capture reference, so an in-memory context fixture carries a LAWFUL sealed reference
+// (shape only — it names no real bundle; every suite that reopens a bundle uses the reader's own reference)
+export const SEALED_REF = Object.freeze({ bundleId: `mb-${'0'.repeat(64)}`, manifestSha256: '1'.repeat(64), observationsSha256: '2'.repeat(64), coverageSha256: '3'.repeat(64) });

@@ -50,19 +50,22 @@ function rowError(r, i) {
 }
 function createState() {
   const byId = new Map(); const plans = new Map(); let lastTs = 0; let rows = 0;
-  const apply = (r, i, strict) => {
+  // closeout P2: prepare() validates the row and the transition WITHOUT touching state and returns the nonthrowing commit;
+  // the journal persists the bytes between the two, so a rejected transition or a failed write changes no live counter
+  const prepare = (r, i, strict) => {
     const e = rowError(r, i); if (e) fail('INVALID_INPUT', e);
     if (r.ts < lastTs && strict) fail('INVALID_INPUT', `quota journal row ${i}: clock runs backwards`);
-    lastTs = Math.max(lastTs, r.ts); rows += 1;
-    if (r.type === 'PLAN') { plans.set(r.providerId, { ...r }); return; }
-    if (r.type === 'RESERVE') { if (byId.has(r.reservationId)) fail('INVALID_INPUT', `quota journal row ${i}: duplicate reservation id`); byId.set(r.reservationId, { ...r, state: 'RESERVED', settledCredits: null, ok: null, status: null }); return; }
+    const advance = () => { lastTs = Math.max(lastTs, r.ts); rows += 1; };
+    if (r.type === 'PLAN') return () => { advance(); plans.set(r.providerId, { ...r }); };
+    if (r.type === 'RESERVE') { if (byId.has(r.reservationId)) fail('INVALID_INPUT', `quota journal row ${i}: duplicate reservation id`); return () => { advance(); byId.set(r.reservationId, { ...r, state: 'RESERVED', settledCredits: null, ok: null, status: null }); }; }
     const x = byId.get(r.reservationId); if (!x) fail('INVALID_INPUT', `quota journal row ${i}: unknown reservation`);
     if (x.state !== 'RESERVED') fail('INVALID_INPUT', `quota journal row ${i}: impossible transition from ${x.state}`);
-    if (r.type === 'SETTLE') { if (r.credits > x.credits) fail('INVALID_INPUT', `quota journal row ${i}: settled credits exceed the reservation`); Object.assign(x, { state: 'SETTLED', settledCredits: r.credits, ok: r.ok, status: r.status, settledTs: r.ts }); }
-    else if (r.type === 'UNRESOLVED') Object.assign(x, { state: 'UNRESOLVED', reason: r.reason, unresolvedTs: r.ts });
-    else Object.assign(x, { state: 'RELEASED', reason: r.reason, releasedTs: r.ts });
+    if (r.type === 'SETTLE') { if (r.credits > x.credits) fail('INVALID_INPUT', `quota journal row ${i}: settled credits exceed the reservation`); return () => { advance(); Object.assign(x, { state: 'SETTLED', settledCredits: r.credits, ok: r.ok, status: r.status, settledTs: r.ts }); }; }
+    if (r.type === 'UNRESOLVED') return () => { advance(); Object.assign(x, { state: 'UNRESOLVED', reason: r.reason, unresolvedTs: r.ts }); };
+    return () => { advance(); Object.assign(x, { state: 'RELEASED', reason: r.reason, releasedTs: r.ts }); };
   };
-  return { byId, plans, apply, lastTs: () => lastTs, rows: () => rows };
+  const apply = (r, i, strict) => prepare(r, i, strict)();
+  return { byId, plans, apply, prepare, lastTs: () => lastTs, rows: () => rows };
 }
 // spent credits of one reservation against a limit: RESERVED and UNRESOLVED count in full (conservative); SETTLED counts the actual charge; RELEASED is zero
 const spentCredits = (x) => (x.state === 'RELEASED' ? 0 : x.state === 'SETTLED' ? x.settledCredits : x.credits);
@@ -70,9 +73,11 @@ const spentCalls = (x) => (x.state === 'RELEASED' ? 0 : 1);
 const spentUsd = (x) => (x.state === 'RELEASED' ? 0 : x.state === 'SETTLED' ? (x.credits ? x.estimatedUsd * (x.settledCredits / x.credits) : 0) : x.estimatedUsd);
 
 function journalApi(state, { append, clock, durable, close, files }) {
-  let closed = false; const guard = () => { if (closed) fail('PERMISSION_FAILURE', 'quota journal closed — no mutation after release'); };
+  let closed = false; let failure = null; // closeout P2: the first failed / uncertain durable write latches; no allowance until a safe reopen
+  const guard = () => { if (closed) fail('PERMISSION_FAILURE', 'quota journal closed — no mutation after release'); if (failure) fail('IO_FAILURE', `quota journal accounting failure latched (${failure.code}: ${failure.message}) — no new dispatch until a safe reopen`); };
   const now = () => Math.max(clock(), state.lastTs()); // clock rollback never regains a consumed bucket
-  const write = (rec) => { guard(); state.apply(rec, state.rows() + 1, false); try { append(rec); } catch (err) { throw err; } };
+  // validate -> persist -> commit (P2): live state changes only after the bytes are durable
+  const write = (rec) => { guard(); const commit = state.prepare(rec, state.rows() + 1, false); try { append(rec); } catch (err) { if (err?.code !== 'RESOURCE_LIMIT_EXCEEDED' && !failure) failure = { code: err?.code ?? 'IO_FAILURE', message: String(err?.message ?? err).slice(0, 160) }; throw err; } commit(); };
   function totals(providerId, nowTs = now()) {
     const t = { calls: { day: 0, month: 0 }, credits: { day: 0, month: 0 }, usd: { day: 0, month: 0 }, reserved: 0, settled: 0, unresolved: 0, released: 0, smoke: { calls: 0, usd: 0 }, dispatched: 0 };
     for (const x of state.byId.values()) { if (x.providerId !== providerId) continue; if (x.state === 'RESERVED') t.reserved += 1; else if (x.state === 'SETTLED') t.settled += 1; else if (x.state === 'UNRESOLVED') t.unresolved += 1; else t.released += 1; if (x.state !== 'RELEASED') t.dispatched += 1; const c = spentCalls(x); const cr = spentCredits(x); const u = spentUsd(x); if (dayKey(x.ts) === dayKey(nowTs)) { t.calls.day += c; t.credits.day += cr; t.usd.day += u; } if (monthKey(x.ts) === monthKey(nowTs)) { t.calls.month += c; t.credits.month += cr; t.usd.month += u; } if (x.purpose === 'PROBE' || x.purpose === 'SMOKE') { t.smoke.calls += c; t.smoke.usd += u; } }
@@ -103,7 +108,7 @@ function journalApi(state, { append, clock, durable, close, files }) {
   return {
     journalVersion: QUOTA_JOURNAL_VERSION, durable, files, loadPlan, entitlementRemaining, reserve, settle, unresolved, release, totals, now,
     reservations: () => deepFreeze([...state.byId.values()].map((x) => ({ ...x }))), plans: () => deepFreeze(Object.fromEntries([...state.plans.entries()].map(([k, v]) => [k, { ...v }]))),
-    close: () => { if (closed) return; closed = true; close(); }, isClosed: () => closed,
+    close: () => { if (closed) return; closed = true; close(); }, isClosed: () => closed, failed: () => (failure ? { ...failure } : null),
   };
 }
 // the durable single-owner journal at a STABLE accounting location (never a per-run output directory)
@@ -121,7 +126,7 @@ export function openQuotaJournal({ dir, clock = () => Date.now(), pid = process.
   function append(rec) { const line = Buffer.from(`${JSON.stringify(rec)}\n`); if (bytes + line.length > MAX_QUOTA_JOURNAL_BYTES) fail('RESOURCE_LIMIT_EXCEEDED', 'quota journal at its bound — dispatch stopped explicitly'); let fd = null; try { fd = openSync(journalFile, 'a'); writeAll(fd, line, 'quota.jsonl'); fsyncSync(fd); bytes += line.length; } catch (err) { if (err?.code === 'RESOURCE_LIMIT_EXCEEDED') throw err; fail('IO_FAILURE', `quota journal append failed (${err?.code ?? 'error'}) — dispatch blocked`); } finally { if (fd !== null) { try { closeSync(fd); } catch { /* ignore */ } } } }
   const api = journalApi(state, { append, clock, durable: true, close: releaseLock, files: { lockFile, journalFile } });
   // restart law: a reservation left open by a crash may have been dispatched — UNRESOLVED, counted, never refunded
-  for (const x of [...state.byId.values()]) if (x.state === 'RESERVED') api.unresolved(x.reservationId, 'RESERVED_AT_RESTART');
+  try { for (const x of [...state.byId.values()]) if (x.state === 'RESERVED') api.unresolved(x.reservationId, 'RESERVED_AT_RESTART'); } catch (err) { releaseLock(); throw err; } // a failed initialization holds no lock
   return api;
 }
 // process-local accounting for FREE public providers when no stable research root is configured (never for paid dispatch)
@@ -138,6 +143,7 @@ export function createDispatchGuard({ policy, env = {}, journal, clock = () => D
     const reasons = []; const p = policy.providers[providerId]; const e = endpointOf(providerId, endpointId);
     if (researchMode === 'REPLAY_AS_OF') reasons.push('NETWORK_OFF');
     if (lifecycle() !== 'ACTIVE') reasons.push('OWNER_STOPPED');
+    if (typeof journal.failed === 'function' && journal.failed()) reasons.push('ACCOUNTING_UNAVAILABLE'); // P2: a latched journal admits nothing
     if (!p || p.enabled !== true) reasons.push('PROVIDER_DISABLED');
     if (!e || e.method === 'WS') reasons.push('ENDPOINT_UNKNOWN'); else if (p && !endpointPermitted(policy, providerId, endpointId)) reasons.push('ENDPOINT_NOT_PERMITTED');
     if (e && e.authEnv !== null && e.authPlacement !== 'HEADER_OPTIONAL' && presence[providerId]?.access !== 'CONFIGURED') reasons.push('CREDENTIAL_MISSING');
@@ -173,16 +179,19 @@ export function createDispatchGuard({ policy, env = {}, journal, clock = () => D
     counters.admitted += 1; counters.dispatched += 1; counters.credits += v.charge.credits;
     return { ok: true, reservationId, charge: v.charge, estimatedUsd: v.estimatedUsd };
   }
-  const safe = (fn) => { try { fn(); return true; } catch (err) { log(`quota journal mutation failed: ${String(err?.message ?? err).slice(0, 120)}`); return false; } };
+  // P2: a failed accounting transition is NEVER silently swallowed: the first error is kept, counted and reported to the caller (false)
+  const failures = []; const safe = (fn) => { try { fn(); return true; } catch (err) { failures.push({ code: err?.code ?? 'IO_FAILURE', message: String(err?.message ?? err).slice(0, 160), ts: clock() }); if (failures.length > 16) failures.shift(); log(`quota journal mutation failed: ${String(err?.message ?? err).slice(0, 120)}`); return false; } };
+  let failureCount = 0;
   return {
     precheck, admit,
-    settle: (id, r) => safe(() => { journal.settle(id, r); counters.settled += 1; }),
-    unresolved: (id, reason) => safe(() => { journal.unresolved(id, reason); counters.unresolved += 1; }),
-    release: (id, reason) => safe(() => { journal.release(id, reason); counters.released += 1; counters.dispatched -= 1; }),
+    settle: (id, r) => safe(() => { journal.settle(id, r); counters.settled += 1; }) || !(failureCount += 1),
+    unresolved: (id, reason) => safe(() => { journal.unresolved(id, reason); counters.unresolved += 1; }) || !(failureCount += 1),
+    release: (id, reason) => safe(() => { journal.release(id, reason); counters.released += 1; counters.dispatched -= 1; }) || !(failureCount += 1),
+    failureCount: () => failureCount, accountingFailure: () => (journal.failed?.() ?? null) ?? (failures.length ? failures[0] : null),
     mayStream: (providerId, endpointId) => { const p = policy.providers[providerId]; const e = endpointOf(providerId, endpointId); const reasons = []; if (researchMode === 'REPLAY_AS_OF') reasons.push('NETWORK_OFF'); if (lifecycle() !== 'ACTIVE') reasons.push('OWNER_STOPPED'); if (!p || p.enabled !== true) reasons.push('PROVIDER_DISABLED'); if (!e || e.method !== 'WS') reasons.push('ENDPOINT_UNKNOWN'); else if (p && !endpointPermitted(policy, providerId, endpointId)) reasons.push('ENDPOINT_NOT_PERMITTED'); if (p && p.limits.maxConcurrency === 0) reasons.push('CONCURRENCY_ZERO'); return { ok: reasons.length === 0, reasons }; },
     withPurpose: async (purpose, fn) => { if (!DISPATCH_PURPOSES.includes(purpose)) fail('INVALID_REQUEST', 'unknown dispatch purpose'); const prev = purposeDefault; purposeDefault = purpose; try { return await fn(); } finally { purposeDefault = prev; } },
     purpose: () => purposeDefault,
-    snapshot: () => deepFreeze({ journal: { version: QUOTA_JOURNAL_VERSION, durable: journal.durable, files: journal.files ?? null, closed: journal.isClosed() }, counters: { ...counters }, providers: Object.fromEntries(PROVIDER_IDS.filter((id) => policy.providers[id]?.enabled).map((id) => [id, { totals: journal.totals(id), entitlementRemaining: journal.entitlementRemaining(id), refusals: refusals[id] ? { ...refusals[id], reasons: { ...refusals[id].reasons } } : null, billing: policy.providers[id].plan.billing, unit: CREDIT_PROVIDERS[id] ? 'CREDIT' : 'CALL' }])), limitation: 'local accounting for THIS owner only; unrelated external users of the same provider account are not observed' }),
+    snapshot: () => deepFreeze({ journal: { version: QUOTA_JOURNAL_VERSION, durable: journal.durable, files: journal.files ?? null, closed: journal.isClosed(), failure: journal.failed?.() ?? null, transitionFailures: failures.slice() }, counters: { ...counters }, providers: Object.fromEntries(PROVIDER_IDS.filter((id) => policy.providers[id]?.enabled).map((id) => [id, { totals: journal.totals(id), entitlementRemaining: journal.entitlementRemaining(id), refusals: refusals[id] ? { ...refusals[id], reasons: { ...refusals[id].reasons } } : null, billing: policy.providers[id].plan.billing, unit: CREDIT_PROVIDERS[id] ? 'CREDIT' : 'CALL' }])), limitation: 'local accounting for THIS owner only; unrelated external users of the same provider account are not observed' }),
     journal,
   };
 }

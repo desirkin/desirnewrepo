@@ -68,7 +68,14 @@ node bin/market-research.js serve    --policy <policy.json> --subjects <subjects
   caps, a loopback GET-only HTTP view (`/status`, `/readiness`, `/cases`, `/cases/<dir>`, `/cases/<dir>/report`,
   `/cases/<dir>/manifest`; anything else is 404, non-GET is 405), a status file written atomically every 5 s, and
   SIGINT / SIGTERM handling that seals the open segment and releases the port. It never starts the application
-  execution / order loops.
+  execution / order loops. Stop is an ownership barrier for BOTH lifecycles: the runtime's model requests and the
+  owner's provider requests are aborted and drained within the bounded `closeDrainMs` deadline (default 10 000 ms;
+  `createResearchService({ closeDrainMs })` forwards one value to the runtime and to the market owner — a test seam,
+  never a policy key; zero means fence at the deadline now), open reservations are preserved as UNRESOLVED while the
+  journals are still owned, late responses are discarded, only the admitted prefix is sealed, and the journal locks are
+  released last. An accounting write that fails after a response (`ACCOUNTING_FAILED`) is never an ordinary success:
+  the reservation stays charged, no data is admitted, the journal latches (`accounting.journal.failure` in the status)
+  and no further dispatch is admitted until a safe reopen.
 
 ## socrates-research
 
@@ -149,6 +156,15 @@ ANTHROPIC_API_KEY=... node bin/socrates-research.js run --packet <DIR>/pk --poli
 # L04 — the readiness manifest (requested vs obtained coverage per family / source / asset)
 node bin/market-research.js coverage --policy <policy-public.json> --subjects <subjects.json> --out <DIR>/readiness --probe true
 ```
+
+The readiness manifest (`market-live-readiness-3`, `market-lab/readiness.js`) marks a family LIVE only from QUALIFIED
+obtained evidence: the selected required provider (enabled, live-PASSED, usable access), a family-relevant registry
+endpoint, requested / obtained assets and registered metrics, the measured interval, the knowledge clock fresh under the
+family's own policy age (`ALLOWED_MAX_AGE_MS`), and a support / census basis. A count, a historical smoke (reported
+separately as `historicalSmokeTs`) or a provider smoke on another endpoint never qualifies; the family row names its
+`missingProof`. READINESS_GREEN additionally needs every contract test PASSED and a supported model demonstration
+(`modelReadiness.demonstration`: clock, model, request id, real usage) — a bare PASSED flag blocks. Nothing here runs a
+provider or the model; the manifest reports what the owner's demonstrations established.
 
 The deterministic suite (`node --test`) never spends money or reaches a provider: every network path is a loopback
 fixture or a narrow injected transport, and every model path is a scripted / recorded response.
