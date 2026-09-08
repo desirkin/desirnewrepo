@@ -4,7 +4,7 @@
 // silently downgraded.
 import { createHash } from 'node:crypto';
 
-export const SCHEMA_VERSION = 7; // RUMOR-2 writer-epoch fencing / schema 7
+export const SCHEMA_VERSION = 8; // JUDGE-1 / EXECUTION-1 execution journal / schema 8
 
 // Canonical key-sorted JSON — the stable content form durable event
 // identities are computed over (independent of key order and whitespace).
@@ -257,6 +257,61 @@ export const MIGRATIONS = [
         stream text PRIMARY KEY,
         epoch bigint NOT NULL DEFAULT 0,
         updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ],
+  },
+  {
+    version: 8,
+    name: 'EXECUTION-1 execution accounts, append-only event journal, writer epochs, venue-wide live owner slot',
+    // ONE additive migration (ticket §3.1). Accounts carry a revision (optimistic guard), the current writerEpoch (the
+    // stale-writer fence, advanced ONLY on the advisory-lock session), the journal head (seq + chained digest) and the
+    // validated reducer projection. Events are INSERT-only, sequenced per account, identity-unique per account. The
+    // live-owner slot is venue-wide: at most ONE active LIVE economic account/sender per installation, bound to the
+    // owner-confirmed exchange context, key fingerprint and account id. Versions 1-7 are untouched.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_execution_accounts (
+        account_id text PRIMARY KEY,
+        account_kind text NOT NULL,
+        mode text NOT NULL,
+        revision bigint NOT NULL DEFAULT 0,
+        writer_epoch bigint NOT NULL DEFAULT 0,
+        head_seq bigint NOT NULL DEFAULT 0,
+        head_digest text,
+        policy_digest text,
+        release_ref text,
+        arming_ref text,
+        state jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS serpent_execution_events (
+        account_id text NOT NULL REFERENCES serpent_execution_accounts (account_id),
+        seq bigint NOT NULL,
+        event_id text NOT NULL,
+        event_type text NOT NULL,
+        cause_id text,
+        known_at_ts bigint NOT NULL,
+        writer_epoch bigint NOT NULL,
+        event jsonb NOT NULL,
+        appended_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (account_id, seq),
+        UNIQUE (account_id, event_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS execution_events_type_idx ON serpent_execution_events (account_id, event_type, seq)`,
+      `CREATE TABLE IF NOT EXISTS serpent_execution_writer_epoch (
+        account_id text PRIMARY KEY,
+        epoch bigint NOT NULL DEFAULT 0,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS serpent_execution_live_owner (
+        venue text PRIMARY KEY,
+        account_id text NOT NULL,
+        key_fingerprint text NOT NULL,
+        exchange_context text NOT NULL,
+        owner_epoch bigint NOT NULL DEFAULT 0,
+        claimed_at timestamptz NOT NULL DEFAULT now(),
+        released_at timestamptz,
+        release_reason text
       )`,
     ],
   },

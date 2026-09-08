@@ -614,6 +614,8 @@ test('39. no runtime import of Socrates contract from execution/strike modules',
   for (const f of runtime) {
     const src = readFileSync(path.join(REPO, f), 'utf8');
     if (RESEARCH_COMPOSITION.includes(f)) { assert.ok(!/evidence\/contract|socrates\/contract/.test(src), `${f} composes the runtime, never the contracts`); continue; }
+    // JUDGE (ticket §4.1): judge/intake.js consumes SEALED cases through socrates/runtime.js verifyCase (a validator) — read-only, never the contracts, never the client / commands
+    if (f === 'judge/intake.js') { assert.ok(!/evidence\/contract|socrates\/(contract|client|commands|broker|prompt)/.test(src) && /from\s+'\.\.\/socrates\/runtime\.js'/.test(src), `${f} verifies sealed cases through the runtime validator only`); continue; }
     // RUMOR-2A: rumor2/ is the ONE authorized evidence-packet PRODUCER and
     // may import evidence/contract.js; the Socrates analysis contract
     // remains un-importable by any runtime module — producing evidence

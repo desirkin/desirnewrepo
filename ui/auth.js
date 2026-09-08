@@ -161,6 +161,24 @@ export class ControlAuth {
     this.audit({ event: 'CLEAR_AUTHORIZED', sessionTag: a.sessionTag });
     return { ok: true, sessionTag: a.sessionTag };
   }
+
+  // ---- ARM_LIVE (JUDGE §9.1): a distinct authenticated action. A valid session
+  // is necessary but never sufficient: the fresh password goes through the same
+  // limiter, and the caller then verifies the exact server-generated phrase and
+  // the account / allocation / policy / release binding (judge/arming.js).
+  // Refusals never say which part failed.
+  authorizeArm(sessionId, csrfHeader, password) {
+    const a = this.authorize(sessionId, csrfHeader);
+    if (!a.ok) return a;
+    const v = this.#verifyPassword(password);
+    if (!v.ok) {
+      const code = v.reason === 'RATE_LIMITED' ? 429 : 403;
+      this.audit({ event: 'ARM_REFUSED', category: v.reason, sessionTag: a.sessionTag });
+      return { ok: false, code, reason: v.reason === 'RATE_LIMITED' ? 'RATE_LIMITED' : 'ARM_REFUSED', ...(v.retryAfterSec ? { retryAfterSec: v.retryAfterSec } : {}) };
+    }
+    this.audit({ event: 'ARM_AUTHENTICATED', sessionTag: a.sessionTag });
+    return { ok: true, sessionTag: a.sessionTag };
+  }
 }
 
 // ---- request-level helpers (pure; the server wires them) ----

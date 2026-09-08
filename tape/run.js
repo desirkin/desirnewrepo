@@ -28,9 +28,14 @@ import {
 // MARKET-LAB seam: an OPTIONAL observer receives copies of ACCEPTED trades and applied books (values only, plus the
 // receipt clock). It is called after the tape has already written its own truth; an observer exception is counted and
 // logged (bounded), never propagated — the tape's health, books, snapshots and features do not depend on it.
-export async function runTape({ minutes = null, chaosAfterSec = null, log = console.log, observer = null } = {}) {
+// EXECUTION-1 seam (ticket §4.2-4.3): an OPTIONAL execution feed receives the raw accepted socket text (exact lexemes) plus
+// connect / disconnect epochs, may pin held / pending symbols (never shed, never dropped at the session refresh) and may ask
+// for a bounded on-demand subscription of a symbol the tape already carries. It never mutates the tape's own books.
+export async function runTape({ minutes = null, chaosAfterSec = null, log = console.log, executionFeed = null, observer = null } = {}) {
   const config = loadConfig();
-  let observerErrors = 0;
+  let observerErrors = 0; let feedErrors = 0;
+  const feedGuard = (fn) => { if (!executionFeed) return; try { fn(); } catch (err) { feedErrors += 1; if (feedErrors <= 3) log(`execution feed error #${feedErrors} (ignored): ${err?.message ?? err}`); } };
+  const pinnedSymbols = () => { try { return executionFeed ? executionFeed.pinned() : new Set(); } catch { return new Set(); } };
   const observe = (fn) => { if (!observer) return; try { fn(); } catch (err) { observerErrors += 1; if (observerErrors <= 3) log(`tape observer error #${observerErrors} (ignored): ${err?.message ?? err}`); } };
   const xp = config.universeExpansion ?? {};
   const staleMs = config.tape.staleFeedSec * 1000;
@@ -85,8 +90,9 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     const incoming = new Map(selection.pairs.map((p) => [p.symbol, p]));
     const added = [];
     const removed = [];
+    const pinned = pinnedSymbols();
     for (const symbol of pairs.keys()) {
-      if (!incoming.has(symbol)) removed.push(symbol);
+      if (!incoming.has(symbol) && !pinned.has(symbol)) removed.push(symbol); // a held / pending symbol is never dropped by a volume-rank refresh
     }
     for (const [symbol, p] of incoming) {
       if (!pairs.has(symbol)) added.push(p);
@@ -273,6 +279,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     } catch {
       return;
     }
+    feedGuard(() => executionFeed.ingest(raw, lastAnyMsgMs));
     try {
       handleMessage(msg);
     } catch (err) {
@@ -427,8 +434,9 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     const heapMb = process.memoryUsage().heapUsed / 1024 / 1024;
     const limits = xp.resource ?? {};
     if (heapMb > (limits.maxHeapMb ?? 512) || lagMs > (limits.maxLoopLagMs ?? 1000)) {
+      const pinned = pinnedSymbols();
       const sheddable = [...pairs.values()]
-        .filter((p) => !p.major && !unavailable.has(p.symbol))
+        .filter((p) => !p.major && !unavailable.has(p.symbol) && !pinned.has(p.symbol)) // held / pending exposure is never shed; caps stay
         .sort((a, b) => (a.usdVol24h ?? 0) - (b.usdVol24h ?? 0));
       const count = Math.max(1, Math.ceil(sheddable.length * (limits.shedFraction ?? 0.15)));
       const shed = sheddable.slice(0, count);
@@ -454,12 +462,14 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       writeEvent('WS_CONNECTED', { url: config.tape.wsUrl });
       log(`[${nowIso()}] connected ${config.tape.wsUrl}`);
       subscribeAll();
+      feedGuard(() => executionFeed.onConnect(Date.now()));
     };
     ws.onmessage = (e) => onMessage(e.data);
     ws.onerror = () => {};
     ws.onclose = () => {
       if (stopping) return;
       for (const book of books.values()) book.desync();
+      feedGuard(() => executionFeed.onDisconnect(Date.now()));
       writeEvent('WS_DISCONNECTED', {});
       const holdMs = Math.max(0, reconnectBlockedUntil - Date.now());
       const delay = Math.max(reconnectDelayMs, holdMs);
@@ -502,6 +512,16 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   });
 
   await loadUniverse('startup');
+  // bounded admission seam: the feed may ask for a symbol the tape already carries (or re-adopt a HELD symbol from its
+  // recorded instrument identity); it cannot widen the venue, raise depth or lift resource caps
+  feedGuard(() => executionFeed.bindTape({
+    ensureSubscribed(symbol, entry) {
+      if (pairs.has(symbol)) { if (unavailable.has(symbol) && (entry?.priority === 'HELD' || entry?.priority === 'PENDING')) { unavailable.delete(symbol); subFailures.delete(symbol); if (ws?.readyState === WebSocket.OPEN) subscribeSymbols([symbol]); } return { ok: true, carried: true }; }
+      if (entry?.priority === 'HELD' || entry?.priority === 'PENDING') { adoptPair({ coin: coinFromSymbol(symbol), symbol, major: false, depth: entry.depth ?? xp.defaultDepth ?? 25, usdVol24h: null, pinned: true }); if (ws?.readyState === WebSocket.OPEN) subscribeSymbols([symbol]); writeEvent('PAIR_PINNED', { symbol, priority: entry.priority }); return { ok: true, adopted: true }; }
+      return { ok: false, reason: 'NOT_IN_TAPE_UNIVERSE' };
+    },
+    depthOf: (symbol) => pairs.get(symbol)?.depth ?? null,
+  }));
   writeEvent('TAPE_STARTED', { pairs: pairs.size, minutes, chaosAfterSec });
   log(`[${nowIso()}] tape starting: ${pairs.size} pairs (majors at depth ${xp.majorsDepth ?? config.tape.bookDepth}, minors at ${xp.defaultDepth ?? 25})`);
   connect();

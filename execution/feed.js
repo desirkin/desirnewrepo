@@ -1,0 +1,94 @@
+// EXECUTION — the point-in-time execution feed (ticket §4.2-4.3): ONE existing public-feed owner (tape/run.js) fans its
+// raw accepted Kraken v2 messages into this bounded seam. Exact numeric lexemes are preserved through the runtime's JSON
+// reviver source tokens (verified on the deployed Node), books are kept as exact decimals, the CRC over the top ten levels
+// is verified at exact source precision, and every applied message yields a DETACHED immutable snapshot (feed epoch, local
+// receipt sequence, nativeSequence null — the public book channel has no documented native sequence — source / receipt
+// clocks, CRC facts, instrument identity, bounded exact levels, content digest). Trades keep the native per-book trade_id
+// (dedup) and the taker side verbatim. Hot-set admission is bounded and prioritized: held / pending exposure first (pinned:
+// never shed, never evicted), shortlisted candidates next, research last; no slot -> refuse, never evict held exposure.
+// Heartbeats are liveness, not quotes. A reconnect is a new epoch and invalidates continuity until restored.
+import { crc32 } from '../lib/crc32.js';
+import * as M from './money.js';
+import { digestOf, bookSnapshotError } from './contract.js';
+
+export const FEED_DEFAULTS = Object.freeze({ maxLevels: 100, maxCandidates: 6, maxResearch: 2, maxHotSet: 12, tradeDedupRing: 4096, maxBookAgeMs: 1000, impairedAfterMs: 5000, criticalAfterMs: 10_000, maxReceiptLagMs: 500 });
+export const PRIORITIES = Object.freeze(['HELD', 'PENDING', 'CANDIDATE', 'RESEARCH']);
+const PIN_PRIORITIES = new Set(['HELD', 'PENDING']);
+// lexeme-preserving parse: numbers come back as their exact source tokens (strings); everything else unchanged
+export function parseLexemes(raw) { return JSON.parse(raw, function reviver(key, value, context) { return typeof value === 'number' && context && typeof context.source === 'string' ? context.source : value; }); }
+const canon = (lex) => M.fromNumberLexeme(lex);
+// Kraken v2 checksum digit string: value formatted to exactly `decimals` places, '.' removed, leading zeros stripped
+function crcDigits(lexeme, decimals) { const [ip, fp = ''] = lexeme.split('.'); if (fp.length > decimals) return null; const s = (ip + fp.padEnd(decimals, '0')).replace(/^0+/, ''); return s; }
+const coinOf = (symbol) => symbol.split('/')[0];
+
+export function createExecutionFeed({ clock = () => Date.now(), limits = FEED_DEFAULTS, log = () => {}, depthOf = () => 100 } = {}) {
+  const L = { ...FEED_DEFAULTS, ...limits };
+  const books = new Map(); // symbol -> { bids: Map, asks: Map, synced, lastReceiptTs, lastSourceTs, receiptSequence, priceDecimals, qtyDecimals, crcFailures, lastSnapshot }
+  const admitted = new Map(); // symbol -> { priority, reason, admittedTs, coin }
+  const tradeRings = new Map(); // symbol -> { set: Set, order: [] }
+  const tradeCoverage = new Map(); // symbol -> { epoch, startTs, lastTs }
+  const listeners = new Set(); const counters = { messages: 0, books: 0, trades: 0, tradesDeduped: 0, snapshotTrades: 0, crcFailures: 0, precisionUnsupported: 0, listenerErrors: 0, ignored: 0, parseErrors: 0, refusedAdmissions: 0 };
+  let epoch = 0; let connected = false; let lastHeartbeatTs = null; let lastMessageTs = null; let tape = null; let receiptSequence = 0;
+  const emit = (ev) => { for (const fn of listeners) { try { fn(ev); } catch (err) { counters.listenerErrors += 1; if (counters.listenerErrors <= 3) log(`execution feed listener error (ignored): ${err?.message ?? err}`); } } };
+  const bookOf = (symbol) => { if (!books.has(symbol)) books.set(symbol, { bids: new Map(), asks: new Map(), synced: false, lastReceiptTs: null, lastSourceTs: null, receiptSequence: 0, priceDecimals: null, qtyDecimals: null, crcFailures: 0, lastSnapshot: null, epoch }); return books.get(symbol); };
+  const sortedLevels = (map, side) => [...map.entries()].sort((a, b) => (side === 'bids' ? M.cmp(b[0], a[0]) : M.cmp(a[0], b[0])));
+  function truncate(b, symbol) { const depth = depthOf(symbol) ?? 100; for (const side of ['bids', 'asks']) { const m = b[side]; if (m.size > depth) for (const [p] of sortedLevels(m, side).slice(depth)) m.delete(p); } }
+  function checksum(b) { if (b.priceDecimals === null || b.qtyDecimals === null) return { computed: null, reason: 'PRECISION_UNKNOWN' }; let s = ''; for (const side of ['asks', 'bids']) for (const [p, q] of sortedLevels(b[side], side).slice(0, 10)) { const pd = crcDigits(p, b.priceDecimals); const qd = crcDigits(q, b.qtyDecimals); if (pd === null || qd === null) return { computed: null, reason: 'PRECISION_UNSUPPORTED' }; s += pd + qd; } return { computed: crc32(s), reason: null }; }
+  function snapshotOf(symbol, b, { kind, sourceTs, receiptTs, crc, crcVerified, crcComputed }) {
+    const bids = sortedLevels(b.bids, 'bids'); const asks = sortedLevels(b.asks, 'asks'); const cap = L.maxLevels;
+    const s = { snapshotVersion: 'execution-book-snapshot-1', symbol, canonicalCoin: coinOf(symbol), feedEpoch: epoch, receiptSequence: b.receiptSequence, nativeSequence: null, sourceTs, receiptTs, crc, crcVerified, crcComputed, synced: b.synced, instrumentDigest: admitted.get(symbol)?.specDigest ?? null, priceDecimals: b.priceDecimals, qtyDecimals: b.qtyDecimals, bids: bids.slice(0, cap).map(([p, q]) => [canon(p), canon(q)]), asks: asks.slice(0, cap).map(([p, q]) => [canon(p), canon(q)]), levelsCap: cap, truncated: bids.length > cap || asks.length > cap, kind, digest: 'x'.repeat(64) };
+    s.digest = digestOf({ ...s, digest: null }); return Object.freeze(s);
+  }
+  function applyBook(symbol, d, type, receiptTs) {
+    const b = bookOf(symbol); b.receiptSequence = ++receiptSequence; const sourceTs = typeof d.timestamp === 'string' ? Date.parse(d.timestamp) || null : null;
+    let changes = null;
+    if (type === 'snapshot') { b.bids.clear(); b.asks.clear(); b.epoch = epoch; for (const l of d.bids ?? []) b.bids.set(l.price, l.qty); for (const l of d.asks ?? []) b.asks.set(l.price, l.qty); b.synced = true; }
+    else { if (!b.synced) { counters.ignored += 1; return; } changes = []; for (const side of ['bids', 'asks']) for (const l of d[side] ?? []) { const q = canon(l.qty); changes.push([side, canon(l.price), q]); if (M.isZero(q)) b[side].delete(l.price); else b[side].set(l.price, l.qty); } truncate(b, symbol); }
+    const crc = d.checksum === undefined ? null : Number(d.checksum); const { computed, reason } = checksum(b); if (reason === 'PRECISION_UNSUPPORTED') counters.precisionUnsupported += 1;
+    let crcVerified = null; if (crc !== null && computed !== null) { crcVerified = computed === crc; if (!crcVerified) { b.crcFailures += 1; counters.crcFailures += 1; b.synced = false; b.bids.clear(); b.asks.clear(); emit({ kind: 'HEALTH', symbol, state: 'DESYNCHRONIZED', reason: 'CRC_MISMATCH', receiptTs, epoch }); return; } }
+    b.lastReceiptTs = receiptTs; b.lastSourceTs = sourceTs; counters.books += 1;
+    const snap = snapshotOf(symbol, b, { kind: type === 'snapshot' ? 'SNAPSHOT' : 'UPDATE', sourceTs, receiptTs, crc, crcVerified, crcComputed: computed }); b.lastSnapshot = snap; emit({ kind: 'BOOK', symbol, snapshot: snap, changes: changes ? Object.freeze(changes) : null });
+  }
+  function applyTrade(symbol, t, type, receiptTs) {
+    const ring = tradeRings.get(symbol) ?? (tradeRings.set(symbol, { set: new Set(), order: [] }), tradeRings.get(symbol)); const id = t.trade_id === undefined || t.trade_id === null ? null : String(t.trade_id);
+    if (id !== null) { if (ring.set.has(id)) { counters.tradesDeduped += 1; return; } ring.set.add(id); ring.order.push(id); if (ring.order.length > L.tradeDedupRing) ring.set.delete(ring.order.shift()); }
+    const fromSnapshot = type === 'snapshot'; if (fromSnapshot) counters.snapshotTrades += 1; else counters.trades += 1;
+    const price = canon(t.price); const qty = canon(t.qty); const eventTs = Date.parse(t.timestamp); if (!Number.isFinite(eventTs)) { counters.ignored += 1; return; }
+    if (!fromSnapshot) { const cov = tradeCoverage.get(symbol); if (cov && cov.epoch === epoch) cov.lastTs = receiptTs; }
+    const trade = Object.freeze({ tradeVersion: 'execution-trade-1', symbol, canonicalCoin: coinOf(symbol), feedEpoch: epoch, receiptSequence: ++receiptSequence, nativeTradeId: id, side: t.side, price, qty, quoteNotional: M.mul(price, qty), eventTs, receiptTs, fromSubscriptionSnapshot: fromSnapshot, orderType: typeof t.ord_type === 'string' ? t.ord_type : null });
+    emit({ kind: 'TRADE', symbol, trade });
+  }
+  function ingest(raw, receiptTs = clock()) {
+    counters.messages += 1; lastMessageTs = receiptTs; let msg; try { msg = parseLexemes(raw); } catch { counters.parseErrors += 1; return; }
+    if (msg.channel === 'heartbeat') { lastHeartbeatTs = receiptTs; return; }
+    if (msg.method === 'subscribe' && msg.success === true && msg.result?.channel === 'trade' && admitted.has(msg.result.symbol)) { tradeCoverage.set(msg.result.symbol, { epoch, startTs: receiptTs, lastTs: receiptTs }); return; }
+    if (msg.channel === 'instrument') { for (const p of msg.data?.pairs ?? []) { if (!admitted.has(p.symbol)) continue; const b = bookOf(p.symbol); const pp = p.price_precision !== undefined ? Number(p.price_precision) : null; const qp = p.qty_precision !== undefined ? Number(p.qty_precision) : null; if (Number.isInteger(pp) && Number.isInteger(qp)) { b.priceDecimals = pp; b.qtyDecimals = qp; } } return; }
+    if (msg.channel === 'book') { for (const d of msg.data ?? []) if (admitted.has(d.symbol)) applyBook(d.symbol, d, msg.type, receiptTs); return; }
+    if (msg.channel === 'trade') { for (const t of msg.data ?? []) if (admitted.has(t.symbol)) applyTrade(t.symbol, t, msg.type, receiptTs); return; }
+  }
+  function onConnect(ts = clock()) { epoch += 1; connected = true; for (const b of books.values()) { b.synced = false; b.bids.clear(); b.asks.clear(); b.lastSnapshot = null; } tradeCoverage.clear(); emit({ kind: 'EPOCH', epoch, ts, reason: 'CONNECT' }); if (tape) for (const s of admitted.keys()) tape.ensureSubscribed(s, admitted.get(s)); }
+  function onDisconnect(ts = clock()) { connected = false; for (const b of books.values()) { b.synced = false; b.bids.clear(); b.asks.clear(); } emit({ kind: 'EPOCH', epoch, ts, reason: 'DISCONNECT' }); }
+  // ---- bounded prioritized admission -----------------------------------------------------------------------------------
+  function admit(symbol, { coin = coinOf(symbol), priority, reason = null, specDigest = null, depth = null } = {}) {
+    if (!PRIORITIES.includes(priority)) return { ok: false, reason: 'PRIORITY_UNKNOWN' };
+    const cur = admitted.get(symbol); if (cur) { if (PRIORITIES.indexOf(priority) < PRIORITIES.indexOf(cur.priority)) cur.priority = priority; cur.reason = reason ?? cur.reason; if (specDigest) cur.specDigest = specDigest; return { ok: true, symbol, priority: cur.priority, existing: true }; }
+    const counts = { CANDIDATE: 0, RESEARCH: 0 }; for (const a of admitted.values()) if (counts[a.priority] !== undefined) counts[a.priority] += 1;
+    if (!PIN_PRIORITIES.has(priority)) { if (admitted.size >= L.maxHotSet) { counters.refusedAdmissions += 1; return { ok: false, reason: 'HOT_SET_FULL' }; } if (priority === 'CANDIDATE' && counts.CANDIDATE >= L.maxCandidates) { counters.refusedAdmissions += 1; return { ok: false, reason: 'CANDIDATE_SLOTS_FULL' }; } if (priority === 'RESEARCH' && counts.RESEARCH >= L.maxResearch) { counters.refusedAdmissions += 1; return { ok: false, reason: 'RESEARCH_SLOTS_FULL' }; } }
+    const entry = { priority, reason, admittedTs: clock(), coin, specDigest, depth }; admitted.set(symbol, entry); bookOf(symbol);
+    const sub = tape ? tape.ensureSubscribed(symbol, entry) : { ok: null, reason: 'NO_TAPE_BOUND' }; return { ok: true, symbol, priority, subscription: sub };
+  }
+  function release(symbol, { force = false } = {}) { const cur = admitted.get(symbol); if (!cur) return { ok: true, absent: true }; if (PIN_PRIORITIES.has(cur.priority) && !force) return { ok: false, reason: 'PINNED' }; admitted.delete(symbol); books.delete(symbol); tradeRings.delete(symbol); tradeCoverage.delete(symbol); return { ok: true }; }
+  const pinned = () => new Set([...admitted.entries()].filter(([, a]) => PIN_PRIORITIES.has(a.priority)).map(([s]) => s));
+  function health(symbol, now = clock()) { const b = books.get(symbol); const age = b?.lastReceiptTs === null || !b ? null : now - b.lastReceiptTs; const usable = connected && Boolean(b?.synced) && age !== null && age <= L.maxBookAgeMs; return { symbol, connected, epoch, synced: Boolean(b?.synced), bookAgeMs: age, usable, impaired: !connected || age === null || age > L.impairedAfterMs, critical: !connected || age === null || age > L.criticalAfterMs, heartbeatAgeMs: lastHeartbeatTs === null ? null : now - lastHeartbeatTs, crcFailures: b?.crcFailures ?? 0, tradeCoverage: coverage(symbol, now) }; }
+  function coverage(symbol, now = clock()) { const c = tradeCoverage.get(symbol); if (!c || c.epoch !== epoch || !connected) return { continuous: false, epoch, startTs: null, endTs: null }; return { continuous: true, epoch, startTs: c.startTs, endTs: now }; }
+  return {
+    ingest, onConnect, onDisconnect, admit, release, pinned, health, coverage, parseLexemes,
+    subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+    latest: (symbol) => books.get(symbol)?.lastSnapshot ?? null,
+    admittedSymbols: () => [...admitted.entries()].map(([symbol, a]) => ({ symbol, ...a })),
+    bindTape(t) { tape = t; for (const [s, a] of admitted) t.ensureSubscribed(s, a); },
+    status: () => ({ epoch, connected, admitted: admitted.size, pinned: pinned().size, counters: { ...counters }, lastHeartbeatTs, lastMessageTs, receiptSequence, limits: L }),
+    limits: L,
+  };
+}
+export { bookSnapshotError };

@@ -38,7 +38,7 @@ if (!TEST_URL) {
     try {
       assert.equal(await db.connect(), true);
       const m = await runMigrations(db);
-      assert.equal(m.schemaVersion, 7, 'writer-epoch schema landed');
+      assert.equal(m.schemaVersion, 8, 'writer-epoch schema landed (JUDGE execution schema 8 is additive; 1-7 untouched)');
       const repo = new Repository(db);
       const persistence = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       await fn({ db, repo, SCHEMA, mkStores: () => ({ checkpointStore: rumor2CheckpointStore({ persistence }), journal: rumor2JournalStore({ persistence }) }) });

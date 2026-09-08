@@ -25,6 +25,10 @@ import { getPersistence } from '../persistence/runtime.js';
 import { attentionSnapshot, attentionForCoin, earsRoom, wideEyeRoom } from './attention-view.js';
 import { MemoryView } from '../persistence/memory-view.js';
 import { marketResearchRootFromEnv, CASE_DIR_NAME_RE } from '../market-lab/paths.js';
+import { readExecutionProjection, projectionFile as executionProjectionFile } from '../state/execution-projection.js';
+import { createArmChallenge, verifyArmRequest, ARM_PHRASE_TTL_MS } from '../judge/arming.js';
+import { readApproval, approvalsDir, listApprovals } from '../judge/owner.js';
+import { parseUtcInstant } from '../market-lab/time.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -43,6 +47,47 @@ const auth = new ControlAuth({
   },
 });
 console.log(auth.configured() ? 'CONTROL AUTH: CONFIGURED' : 'CONTROL AUTH: UNCONFIGURED — control mutations fail closed');
+
+// JUDGE (ticket §9.1): fly.js registers the ONE running composition here so the
+// authenticated ARM_LIVE door can bind to the actual account / policy / release.
+// The cockpit never receives credentials: the run exposes only its fingerprint,
+// policy digest, projection and the arm() method that appends to the journal.
+let judgeRun = null;
+let armChallenge = null; // one outstanding server-generated phrase, short-lived
+export function setJudgeRun(run) { judgeRun = run; armChallenge = null; }
+function judgeView() {
+  const projection = readJsonBounded(executionProjectionFile()); const summary = readExecutionProjection();
+  return { enabled: projection !== null || judgeRun !== null, running: judgeRun !== null, projectionFresh: summary?.state === 'FRESH', projection, prominent: projection ? (projection.accountKind === 'LIVE' ? `LIVE ${projection.mode}` : `${projection.accountKind} — NOT REAL MONEY`) : 'JUDGE OFF', approvals: listApprovals(), arm: { endpoint: 'POST /api/judge/arm', steps: ['challenge', 'confirm'], requires: ['session', 'csrf', 'same-origin', 'fresh password', 'exact server phrase', 'account/allocation/policy/release binding', 'owner limits', 'expiry'], never: ['GET', 'URL parameter', 'environment flag', 'pasted case instruction', 'default password'] }, authority: 'READ_ONLY_VIEW; arming is a separate authenticated action; no return figure without basis' };
+}
+function judgeArm(body, gate, res) {
+  const step = String(body.step ?? '').toLowerCase();
+  if (!judgeRun) { json(res, 409, { ok: false, reason: 'JUDGE_NOT_RUNNING' }); return; }
+  if (judgeRun.kind !== 'LIVE') { json(res, 409, { ok: false, reason: 'NOT_A_LIVE_ACCOUNT', accountKind: judgeRun.kind }); return; }
+  // the payload can never substitute another account / policy for the authenticated run context
+  if (body.accountId !== judgeRun.accountId) { json(res, 403, { ok: false, reason: 'ACCOUNT_BINDING_MISMATCH' }); return; }
+  if (typeof body.approvalId !== 'string' || !/^apr-[0-9a-f]{24}$/.test(body.approvalId)) { json(res, 400, { ok: false, reason: 'APPROVAL_ID_REQUIRED' }); return; }
+  let approval; try { approval = readApproval(path.join(approvalsDir(), `${body.approvalId}.json`)); } catch { approval = { ok: false, reason: 'APPROVAL_UNKNOWN' }; }
+  if (!approval.ok) { json(res, 403, { ok: false, reason: approval.reason }); return; }
+  if (approval.approval.policyDigest !== judgeRun.policyDigest) { json(res, 403, { ok: false, reason: 'POLICY_DIGEST_CHANGED_SINCE_APPROVAL' }); return; }
+  const allocation = typeof body.allocationCeiling === 'string' && /^\d{1,9}(\.\d{1,8})?$/.test(body.allocationCeiling) ? body.allocationCeiling : null;
+  if (!allocation) { json(res, 400, { ok: false, reason: 'ALLOCATION_CEILING_REQUIRED' }); return; }
+  if (step === 'challenge') {
+    armChallenge = createArmChallenge({ accountId: judgeRun.accountId, allocationCeiling: allocation, policyDigest: judgeRun.policyDigest, releaseDigest: approval.approval.releaseDigest, nowTs: Date.now() });
+    json(res, 200, { ok: true, step: 'CHALLENGE', challengeId: armChallenge.challengeId, phrase: armChallenge.phrase, expiresTs: armChallenge.expiresTs, ttlMs: ARM_PHRASE_TTL_MS, binding: armChallenge.binding });
+    return;
+  }
+  if (step !== 'confirm') { json(res, 400, { ok: false, reason: 'STEP_REQUIRED' }); return; }
+  const v = verifyArmRequest({ challenge: armChallenge, request: { phrase: body.phrase, accountId: body.accountId, allocationCeiling: allocation, policyDigest: judgeRun.policyDigest, releaseDigest: approval.approval.releaseDigest }, nowTs: Date.now() });
+  armChallenge = null; // one confirmation attempt per phrase, success or not
+  if (!v.ok) { json(res, 403, { ok: false, reason: 'ARM_REFUSED' }); return; }
+  const expiresTs = typeof body.expiresAt === 'string' ? parseUtcInstant(body.expiresAt) : null;
+  if (expiresTs === null) { json(res, 400, { ok: false, reason: 'OWNER_EXPIRY_REQUIRED' }); return; }
+  const ownerLimits = body.ownerLimits && typeof body.ownerLimits === 'object' ? body.ownerLimits : judgeRun.policy?.live?.ownerLimits ?? null;
+  judgeRun.arm({ ownerLimits, expiresTs, allocationCeiling: allocation, reinvestment: judgeRun.policy?.live?.reinvestment ?? 'NONE', approval: approval.approval, ownerRef: `owner-ui-${gate.sessionTag}`, releaseDigest: approval.approval.releaseDigest }).then((r) => {
+    try { appendJsonl(authLogFile(), { ts: nowIso(), event: r.ok ? 'ARM_LIVE_COMMITTED' : 'ARM_LIVE_BLOCKED', sessionTag: gate.sessionTag, accountId: judgeRun.accountId, reasons: r.reasons ?? [], authorizationId: r.authorizationId ?? null }); } catch { /* audit best effort */ }
+    json(res, r.ok ? 200 : 409, { ok: r.ok, step: 'CONFIRM', reasons: r.reasons ?? [], state: r.state ?? (r.ok ? 'ARMED' : 'BLOCKED'), authorizationId: r.authorizationId ?? null, expiresTs: r.ok ? expiresTs : null });
+  }).catch((err) => { console.error(`[api/judge/arm] ${err.constructor.name}: ${err.message}`); json(res, 500, { ok: false, reason: 'ARM_FAILED' }); });
+}
 
 const SESSION_COOKIE = 'serpent_session';
 // ONE cookie policy for creation AND deletion (CONTROL-0A): Secure is
@@ -170,6 +215,8 @@ function statusPayload() {
   }
   return {
     posture: engine.state,
+    // JUDGE: the read-only execution projection summary (null when the Judge is off)
+    execution: engine.execution ?? null,
     retreatCauses: engine.retreatCauses.map((c) => ({ key: c.key, detail: c.detail })),
     advisories: engine.reasons.slice(engine.retreatCauses.length),
     locks: engine.locks
@@ -443,6 +490,24 @@ const server = http.createServer((req, res) => {
       });
       return;
     }
+    // JUDGE ARM_LIVE: a distinct authenticated action — session + CSRF + same-origin
+    // through the shared gate, then the FRESH password through the limiter, then
+    // the exact server-generated phrase and the account / allocation / policy /
+    // release binding. POST only; nothing here ever sees a trading key.
+    if (req.method === 'POST' && url.pathname === '/api/judge/arm') {
+      readBody(req, res, (body) => {
+        const gate = gateControl(auth, { cookieHeader: req.headers.cookie, csrfHeader: req.headers['x-serpent-csrf'], originHeader: req.headers.origin, hostHeader: req.headers.host, body: { action: 'judge-arm' } });
+        if (!gate.allow) { json(res, gate.code, { ok: false, reason: gate.reason }); return; }
+        const step = String(body.step ?? '').toLowerCase();
+        if (step === 'confirm') {
+          const fresh = auth.authorizeArm(parseCookies(req.headers.cookie).serpent_session, req.headers['x-serpent-csrf'], body.password);
+          if (!fresh.ok) { json(res, fresh.code, { ok: false, reason: fresh.reason, ...(fresh.retryAfterSec ? { retryAfterSec: fresh.retryAfterSec } : {}) }); return; }
+        }
+        const { password, ...rest } = body; // the secret never travels past this line
+        try { judgeArm(rest, gate, res); } catch (err) { console.error(`[api/judge/arm] ${err.constructor.name}: ${err.message}`); json(res, 500, { ok: false, reason: 'ARM_FAILED' }); }
+      });
+      return;
+    }
     // UI-1A §21: everything below is READ-ONLY and explicitly GET-only —
     // a non-GET request to a read route is refused, never quietly served.
     if (req.method !== 'GET') {
@@ -488,6 +553,11 @@ const server = http.createServer((req, res) => {
       const dir = url.searchParams.get('dir') ?? '';
       const c = marketResearchCase(dir);
       if (!c) json(res, 404, { ok: false, error: 'no such sealed case' }); else json(res, 200, c);
+    } else if (url.pathname === '/api/judge') {
+      // JUDGE read-only explanation view: the projection FILE the composition writes from the actual journal
+      json(res, 200, judgeView());
+    } else if (url.pathname === '/api/judge/arm') {
+      json(res, 405, { ok: false, error: 'METHOD_NOT_ALLOWED', reason: 'ARM_LIVE is POST-only: no GET mutation' }, { allow: 'POST' });
     } else if (url.pathname === '/api/status') {
       json(res, 200, statusPayload());
     } else if (url.pathname === '/api/ledger/summary') {

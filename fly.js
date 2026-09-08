@@ -106,6 +106,32 @@ if (process.env.MARKET_RESEARCH_ENABLED === 'true') {
     marketResearch = null;
   }
 }
+// JUDGE / WATCH / EXECUTION (documented OPT-IN; defaults change nothing): JUDGE_ENABLED=true composes the ONE Judge
+// run (judge/composition.js) under JUDGE_POLICY (a validated policy JSON outside cobra.config.json), JUDGE_MODE
+// (OBSERVE | PAPER | LIVE_UNARMED | LIVE_ARMED; PAPER / LIVE need the PostgreSQL journal authority and an owner-
+// initialized account) and JUDGE_ACCOUNT. It receives the SAME accepted Kraken public messages through the Tape's
+// execution-feed seam (no duplicate public collector), reads sealed research cases read-only from the research root's
+// case directory, owns execution / Watch, publishes the read-only projection the cockpit and the posture machine
+// read, and registers itself with the cockpit so ARM_LIVE can bind to the actual account. Trade credentials come
+// only from the environment names the LIVE policy declares. Nothing here is constructed without the opt-in.
+let judgeRun = null;
+if (process.env.JUDGE_ENABLED === 'true') {
+  try {
+    const { composeJudge, loadSpecs } = await import('./judge/composition.js');
+    const { setJudgeRun } = await import('./ui/server.js');
+    const { marketResearchRootFromEnv } = await import('./market-lab/paths.js');
+    if (!process.env.JUDGE_POLICY || !process.env.JUDGE_MODE) throw new Error('JUDGE_POLICY (policy JSON file) and JUDGE_MODE (OBSERVE | PAPER | LIVE_UNARMED | LIVE_ARMED) are required');
+    const universe = readCurrentUniverse(); const symbols = (universe?.pairs ?? []).map((p) => p.symbol);
+    const specs = await loadSpecs({ transport: (u, i) => fetch(u, i), symbols, nowTs: Date.now() });
+    judgeRun = await composeJudge({ policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true' });
+    const startup = await judgeRun.start();
+    setJudgeRun(judgeRun);
+    console.log(`JUDGE active: ${judgeRun.kind} account ${judgeRun.accountId} mode ${judgeRun.mode} (${judgeRun.kind === 'PAPER' ? 'NOT REAL MONEY' : 'LIVE: entries need an unexpired owner authorization'}); startup ${JSON.stringify({ uncertain: startup.uncertainOrders.length, exposed: startup.exposedPositions.length, authorizationEnded: startup.authorizationEnded })}`);
+  } catch (err) {
+    console.error(`JUDGE failed to start (dark; nothing else affected; no orders): ${err.message}`);
+    judgeRun = null;
+  }
+}
 rumor2Handle = startRumor2({
   checkpointStore: rumor2CheckpointStore(), journal: rumor2JournalStore(),
   // SOCIAL-4F: DISCOVERY_CATALOG injection — read-only accessors only (no mutable survey map, no
@@ -137,7 +163,8 @@ rumor2Handle = startRumor2({
     deepMarketSource: marketResearch ? createDeepMarketSource(marketResearch.owner) : null,
 });
 try {
-  await runTape({ observer: marketResearch ? marketResearch.observer : null }); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
+  await runTape({ executionFeed: judgeRun ? judgeRun.tapeFeed : null, observer: marketResearch ? marketResearch.observer : null }); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
+  if (judgeRun) { try { await judgeRun.stop(); } catch (err) { console.error(`JUDGE stop failed: ${err.message}`); } }
   if (marketResearch) { try { await marketResearch.stop(); } catch (err) { console.error(`MARKET RESEARCH stop failed: ${err.message}`); } }
   process.exit(0);
 } catch (err) {

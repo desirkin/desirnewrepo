@@ -53,14 +53,21 @@ export class PostureMachine {
 
   // Returns the transition event, or null when already in `to` (no-op, not
   // logged — posture holds are not events).
-  transition(to, cause) {
+  // JUDGE (ticket §9.1): STRIKE / DIGESTING have exactly ONE real door — a FRESH
+  // execution projection (state/execution-projection.js) written by the Judge
+  // composition from the actual journal, whose own posture names `to` and whose
+  // exposure is real (open position or pending entry). The label follows the
+  // journal; it never grants permission and never invents a fill. Without that
+  // projection the two postures stay unreachable exactly as before.
+  transition(to, cause, { execution = null } = {}) {
     const from = this.posture;
     if (!POSTURES.includes(to)) throw new IllegalTransition(`unknown posture ${to}`);
     if (from === to) return null;
     if (!LEGAL[from].includes(to)) {
       throw new IllegalTransition(`illegal transition ${from} -> ${to}`);
     }
-    if (!this.demo && !REACHABLE.has(to)) {
+    const projected = execution && execution.state === 'FRESH' && execution.exposure === true && execution.posture === to;
+    if (!this.demo && !REACHABLE.has(to) && !projected) {
       throw new NotYetImplemented(
         `${to} is defined but unreachable — no confirmation/strike engine exists yet (demo mode only)`
       );

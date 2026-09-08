@@ -36,7 +36,7 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
       const target = resolveRel(f, spec);
       const inside = /^(market-lab|socrates|evidence|bin)\//.test(target);
       if (!inside) assert.ok((ALLOWED_CROSSINGS[f] ?? []).includes(target), `${f} -> ${target} is not an allowlisted crossing`);
-      assert.ok(!/^(ledger|cost|state|controls|orders|risk|judge|watch|rumint|research|persistence|gateway|governance|childhood|memory)\//.test(target), `${f} -> ${target} crosses an authority fence`);
+      assert.ok(!/^(ledger|cost|state|controls|orders|risk|judge|watch|execution|rumint|research|persistence|gateway|governance|childhood|memory)\//.test(target), `${f} -> ${target} crosses an authority fence`);
       assert.ok(!/^rumor2\/(collector|journal|checkpoint|social-research-strainer|social-collector)/.test(target), `${f} -> ${target} reaches the RUMOR-2 runtime`);
       assert.ok(!/^tape\/(run|micro|features|heartbeat|integrity)/.test(target), `${f} -> ${target} reaches Tape truth`);
     }
@@ -49,7 +49,7 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
 });
 
 test('B08 (live -> research): the live path never imports research/, socrates/ or evidence v2; market-lab is reached ONLY by fly.js (service, commands, deep-market adapter) and the read-only UI server (paths); Tape, ledger, cost, state, gateway, governance never mention the research modules', () => {
-  const ALLOWED = { 'fly.js': ['market-lab/deep-market-adapter.js', 'market-lab/service.js', 'market-lab/commands.js'], 'ui/server.js': ['market-lab/paths.js'], 'persistence/social-research-export.js': ['research/'] };
+  const ALLOWED = { 'fly.js': ['market-lab/deep-market-adapter.js', 'market-lab/service.js', 'market-lab/commands.js', 'market-lab/paths.js'], 'ui/server.js': ['market-lab/paths.js', 'market-lab/time.js'], 'persistence/social-research-export.js': ['research/'] };
   assert.ok(LIVE_FILES.length >= 30, `live files ${LIVE_FILES.length}`);
   for (const f of LIVE_FILES) {
     for (const spec of imports(f)) {
@@ -68,7 +68,7 @@ test('§12 composition seams are exact: fly.js opt-in guard + deep-market adapte
   assert.ok(fly.includes("if (process.env.MARKET_RESEARCH_ENABLED === 'true') {"), 'the research owner is an explicit env opt-in');
   assert.ok(fly.includes('let marketResearch = null;'), 'default: no research service');
   assert.ok(fly.includes('deepMarketSource: marketResearch ? createDeepMarketSource(marketResearch.owner) : null,'), 'the strainer receives the adapter ONLY when the owner exists');
-  assert.ok(fly.includes('await runTape({ observer: marketResearch ? marketResearch.observer : null })'), 'the Tape observer seam is null by default');
+  assert.ok(fly.includes('await runTape({ executionFeed: judgeRun ? judgeRun.tapeFeed : null, observer: marketResearch ? marketResearch.observer : null })'), 'the Tape observer seam AND the execution feed seam are null by default');
   assert.ok(fly.includes("import { createDeepMarketSource } from './market-lab/deep-market-adapter.js';"));
   assert.ok(!/MARKET_RESEARCH_ENABLED\s*=[^=]|RUMOR2_.*MARKET_RESEARCH|MARKET_RESEARCH.*RUMOR2_/.test(code('fly.js')), 'paid authorization is never inferred from RUMOR-2 flags');
   assert.ok(fly.indexOf('startRumor2(') < fly.indexOf('await runTape(') && fly.indexOf('marketResearch.stop()') > fly.indexOf('await runTape('), 'stop after the tape drained');

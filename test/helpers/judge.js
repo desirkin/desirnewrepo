@@ -1,0 +1,58 @@
+// JUDGE / EXECUTION shared fixture builder (ticket §1): one builder, separate dirs / accounts per case, a fake clock, a
+// scripted venue, an isolated PostgreSQL schema on the established loopback cluster. Every helper is offline.
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { makeEvent, instrumentSpec, feeContract, digestOf } from '../../execution/contract.js';
+import { createMemoryJournal } from '../../execution/journal.js';
+
+export const T0 = Date.parse('2026-09-08T12:00:00Z');
+export const tmp = (prefix = 'judge-') => mkdtempSync(path.join(tmpdir(), prefix));
+export const cleanup = (dir) => rmSync(dir, { recursive: true, force: true });
+// a fake clock: wall + monotonic advance together unless the test moves one (rollback / suspend drills)
+export function fakeClock(start = T0) { let wall = start; let mono = 0; const c = { now: () => wall, monotonic: () => mono, advance: (ms) => { wall += ms; mono += ms; return wall; }, setWall: (v) => { wall = v; }, advanceMonotonic: (ms) => { mono += ms; } }; return c; }
+export const SAMPLE_LIMITS = Object.freeze({ maxSimultaneousAssetPositions: 3, maxModelledRiskPerPositionFraction: 0.01, maxAggregateModelledRiskFraction: 0.02, maxCorrelatedClusterModelledRiskFraction: 0.015, dailyLossRestrictionFraction: 0.05, peakEquityDrawdownRestrictionFraction: 0.1, maxGrossExposureFraction: 1, maxAssetExposureFraction: 1 });
+export const POLICY_DIGEST = 'a'.repeat(64); export const HEX = (c) => String(c).repeat(64).slice(0, 64);
+export const SPEC = instrumentSpec({ venue: 'kraken', pairKey: 'XXBTZUSD', altname: 'XBTUSD', wsname: 'XBT/USD', base: 'XXBT', quote: 'ZUSD', canonicalCoin: 'BTC', status: 'online', priceIncrement: '0.1', qtyIncrement: '0.00000001', orderMin: '0.00005', costMin: '0.5', priceDecimals: 1, qtyDecimals: 8, observedTs: T0, source: 'FIXTURE' });
+export const SOL_SPEC = instrumentSpec({ venue: 'kraken', pairKey: 'SOLUSD', altname: 'SOLUSD', wsname: 'SOL/USD', base: 'SOL', quote: 'ZUSD', canonicalCoin: 'SOL', status: 'online', priceIncrement: '0.01', qtyIncrement: '0.00000001', orderMin: '0.02', costMin: '0.5', priceDecimals: 2, qtyDecimals: 8, observedTs: T0, source: 'FIXTURE' });
+export const TAKER_FEE = feeContract({ venue: 'kraken', pairKey: null, orderType: 'TAKER', rate: '0.008', rateKind: 'PAPER_REFERENCE', currency: 'QUOTE', roundingQuantum: '0.01', roundingMode: 'UP', minimumFee: '0', scope: 'ORDER_TOTAL', scheduleId: 'cobra.config.json fees 2026-09-02 kraken taker', observedTs: T0 });
+// event factory bound to one account + clock (knownAtTs = clock.now() unless given)
+export function eventsFor(accountId, clock) {
+  const ev = (type, payload, extra = {}) => makeEvent({ type, accountId, payload, knownAtTs: extra.knownAtTs ?? clock.now(), causeId: extra.causeId ?? null });
+  const F = {
+    ev,
+    init: (over = {}) => ev('ACCOUNT_INITIALIZED', { accountKind: 'PAPER', initialCapital: '500', quote: 'USD', venue: 'kraken', policyDigest: POLICY_DIGEST, policyVersion: 'judge-policy-paper-reference-1', ownerRef: 'owner-test', sessionDate: '2026-09-08', clockAnchorTs: clock.now(), limits: SAMPLE_LIMITS, compounding: 'NONE', ...over }),
+    hypothesis: (decisionId, over = {}) => ev('HYPOTHESIS_LOCKED', { decisionId, episodeId: `ep-${decisionId}`, setupId: 'RANGE_IGNITION', assetId: 'BTC', pair: 'XBT/USD', hypothesisDigest: HEX('b'), frozenAtTs: clock.now(), triggerTs: clock.now(), expiresTs: clock.now() + 10_000, ...over }),
+    decision: (decisionId, over = {}) => ev('DECISION_RECORDED', { decisionId, episodeId: `ep-${decisionId}`, assetId: 'BTC', pair: 'XBT/USD', setupId: 'RANGE_IGNITION', inputMode: 'MARKET_DIRECT', state: 'ENTRY_PROPOSED', reasonCodes: [], decisionKnownAtTs: clock.now(), decisionDigest: HEX('d'), sizing: { q: '0.001', entryLimitPrice: '100000', entryCashOut: '100.8', riskUsd: '4', bufferedScenarioNetProfit: '2' }, strategyVersion: 'judge-strategy-paper-reference-1', policyDigest: POLICY_DIGEST, ...over }),
+    reserve: (reservationId, decisionId, over = {}) => ev('RESERVATION_OPENED', { reservationId, decisionId, assetId: 'BTC', pair: 'XBT/USD', cashReserved: '100.8', riskReserved: '4', clusterId: 'BTC', expiresTs: clock.now() + 10_000, ...over }),
+    release: (reservationId, over = {}) => ev('RESERVATION_RELEASED', { reservationId, reason: 'CONSUMED', releasedCash: '0', releasedRisk: '0', ts: clock.now(), ...over }),
+    position: (positionId, decisionId, over = {}) => ev('POSITION_OPENED', { positionId, decisionId, assetId: 'BTC', pair: 'XBT/USD', specDigest: SPEC.specDigest, structuralStop: '99000', targetPrice: '102000', targetProceedsRecipe: 'SHIFTED_BOOK_STRESS_50', atr14: '200', maxDurationMs: 4 * 3_600_000, feedPinned: true, requestedQty: '0.001', clusterId: 'BTC', ...over }),
+    pin: (symbol = 'XBT/USD', action = 'PIN') => ev('FEED_PIN', { symbol, action, reason: 'position shell', ts: clock.now() }),
+    intent: (orderId, positionId, reservationId, over = {}) => ev('ORDER_INTENT', { intentId: `int-${orderId}`, orderId, clientOrderId: `cl-${orderId}`, reservationId, positionId, kind: 'ENTRY', side: 'buy', pair: 'XBT/USD', qty: '0.001', limitPrice: '100000', orderType: 'limit', timeInForce: 'IOC', protection: { ordertype: 'stop-loss', trigger: 'last', price: '99000' }, deadlineTs: clock.now() + 3000, feeDigest: TAKER_FEE.feeDigest, specDigest: SPEC.specDigest, snapshotDigest: HEX('e'), createdTs: clock.now(), ...over }),
+    sellIntent: (orderId, positionId, over = {}) => ev('ORDER_INTENT', { intentId: `int-${orderId}`, orderId, clientOrderId: `cl-${orderId}`, reservationId: null, positionId, kind: 'PLANNED_EXIT', side: 'sell', pair: 'XBT/USD', qty: '0.001', limitPrice: '99500', orderType: 'limit', timeInForce: 'IOC', protection: null, deadlineTs: clock.now() + 3000, feeDigest: TAKER_FEE.feeDigest, specDigest: SPEC.specDigest, snapshotDigest: HEX('e'), createdTs: clock.now(), ...over }),
+    stopIntent: (orderId, positionId, over = {}) => ev('ORDER_INTENT', { intentId: `int-${orderId}`, orderId, clientOrderId: `cl-${orderId}`, reservationId: null, positionId, kind: 'PROTECTIVE_STOP', side: 'sell', pair: 'XBT/USD', qty: '0.001', limitPrice: '99000', orderType: 'stop-loss', timeInForce: 'GTC', protection: null, deadlineTs: null, feeDigest: TAKER_FEE.feeDigest, specDigest: SPEC.specDigest, snapshotDigest: null, createdTs: clock.now(), ...over }),
+    attempt: (orderId, attemptId = `att-${orderId}`, adapter = 'PAPER') => ev('DISPATCH_ATTEMPTED', { orderId, attemptId, adapter, ts: clock.now() }),
+    result: (orderId, outcome, over = {}) => ev('DISPATCH_RESULT', { orderId, attemptId: `att-${orderId}`, outcome, nativeOrderId: outcome === 'ACKNOWLEDGED' ? `nat-${orderId}` : null, reason: null, sourceTs: clock.now(), receiptTs: clock.now(), guaranteesNoAcceptance: outcome === 'REJECTED', ...over }),
+    fill: (orderId, execId, over = {}) => ev('EXECUTION_RECORDED', { orderId, execId, nativeOrderId: `nat-${orderId}`, side: 'buy', base: '0.001', quote: '100', price: '100000', fee: { asset: 'USD', amount: '0.8' }, sourceTs: clock.now(), receiptTs: clock.now(), origin: 'PAPER', ordRefId: null, nativeCumQty: null, sequence: null, ...over }),
+    orderState: (orderId, state, over = {}) => ev('ORDER_STATE', { orderId, state, nativeOrderId: null, nativeCumQty: null, reason: null, sourceTs: clock.now(), receiptTs: clock.now(), ...over }),
+    protection: (positionId, state, over = {}) => ev('PROTECTION_STATE', { positionId, orderId: null, state, nativeOrderId: null, trigger: '99000', qty: '0.001', sourceTs: clock.now(), receiptTs: clock.now(), reason: null, ...over }),
+    amend: (positionId, orderId, amendId, outcome, over = {}) => ev('PROTECTION_AMEND', { positionId, orderId, amendId, requestedTrigger: '99500', outcome, confirmedTrigger: outcome === 'ACKNOWLEDGED' ? '99500' : null, receiptTs: clock.now(), reason: null, ...over }),
+    r: (positionId, state, over = {}) => ev('POSITION_R', { positionId, state, initialR: state === 'FINAL' ? '1.8' : null, entryVwap: '100000', entryCashOut: '100.8', confirmedBase: '0.001', reason: null, ts: clock.now(), ...over }),
+    watch: (positionId, over = {}) => ev('WATCH_STATE', { positionId, trailActive: false, highestBid: null, exitState: 'NONE', primaryReason: null, priority: null, supportedReasons: [], ts: clock.now(), ...over }),
+    closed: (positionId, state = 'FLAT', over = {}) => ev('POSITION_CLOSED', { positionId, reason: 'target', residualBase: '0', state, ts: clock.now(), ...over }),
+    valuation: (over = {}) => ev('VALUATION', { ts: clock.now(), cashComponent: '500', liquidationComponent: '0', equity: '500', unknown: false, reason: null, marks: [], sessionDate: '2026-09-08', ...over }),
+    restriction: (code, action = 'LATCH', over = {}) => ev('RESTRICTION', { code, action, scope: null, source: 'test', sessionDate: '2026-09-08', reason: null, ownerRef: null, ts: clock.now(), ...over }),
+    flow: (flowId, direction, amount, over = {}) => ev('EXTERNAL_FLOW_ADMITTED', { flowId, direction, asset: 'USD', amount, valuedUsd: amount, conversionSource: 'USD_IDENTITY', ownerRef: 'owner-test', ts: clock.now(), ...over }),
+    mode: (from, to, over = {}) => ev('MODE_TRANSITION', { from, to, reason: 'test', authorizationId: null, ts: clock.now(), ...over }),
+    authorized: (authorizationId, over = {}) => ev('ACCOUNT_AUTHORIZED', { authorizationId, kind: 'LIVE_ARM', releaseDigest: HEX('f'), policyDigest: POLICY_DIGEST, codeDigest: HEX('c'), allocationCeiling: '500', reinvestment: 'NONE', limits: SAMPLE_LIMITS, keyFingerprint: 'kf-abc', ownerRef: 'owner-test', issuedTs: clock.now(), expiresTs: clock.now() + 3_600_000, restrictionRevision: 1, canary: null, ...over }),
+  };
+  return F;
+}
+// a memory journal with an initialized PAPER account and an acquired writer
+export async function paperAccount({ accountId = 'paper-test', clock = fakeClock(), init = {} } = {}) {
+  const journal = createMemoryJournal(); await journal.create(accountId, { accountKind: init.accountKind ?? 'PAPER' }); const writer = await journal.acquireWriter(accountId); const F = eventsFor(accountId, clock);
+  let revision = 0; const append = async (events) => { const r = await journal.append(accountId, { expectedRevision: revision, writerEpoch: writer.epoch, events: Array.isArray(events) ? events : [events] }); revision = r.revision; return r; };
+  await append(F.init(init));
+  return { journal, writer, F, clock, accountId, append, revision: () => revision, state: async () => (await journal.load(accountId)).state };
+}
+export const digest = digestOf;

@@ -204,10 +204,14 @@ export const PROVIDER_STATUS_STATES = Object.freeze(['OPERATIONAL', 'DEGRADED', 
 export const BOOK_SAMPLE_REASONS = Object.freeze(['INTERVAL', 'MINUTE_ENDPOINT', 'REQUEST', 'REST_SNAPSHOT']);
 export const BOOK_COVERAGE_STATES = Object.freeze(['SYNCHRONIZED', 'DESYNCHRONIZED', 'GAP', 'SUBSCRIBED', 'UNSUBSCRIBED']);
 export const DEFI_METRIC_IDS = Object.freeze(['protocol_tvl', 'chain_tvl', 'protocol_fees', 'protocol_revenue', 'dex_volume', 'pool_supply_apy', 'pool_borrow_apy']);
-export const ONCHAIN_METRIC_IDS = Object.freeze(['exchange_inflow', 'exchange_outflow', 'exchange_netflow', 'exchange_reserve', 'active_addresses', 'transaction_count', 'transfer_volume', 'fees_total', 'mvrv', 'sopr', 'realized_price', 'supply_circulating', 'holder_age_cohort', 'miner_reserve', 'dev_activity', 'stablecoin_supply_ratio']);
+export const ONCHAIN_METRIC_IDS = Object.freeze(['exchange_inflow', 'exchange_outflow', 'exchange_netflow', 'exchange_reserve', 'active_addresses', 'transaction_count', 'transfer_volume', 'fees_total', 'mvrv', 'sopr', 'realized_price', 'supply_circulating', 'holder_age_cohort', 'miner_reserve', 'dev_activity', 'stablecoin_supply_ratio', 'whale_transaction_count_100k_usd_to_inf', 'whale_transaction_count_1m_usd_to_inf', 'whale_transaction_volume_100k_usd_to_inf', 'whale_transaction_volume_1m_usd_to_inf']);
+// JUDGE-1 §5.2: the four documented Santiment large-transfer metrics (NETWORK_ACTIVITY: large transfers WITHOUT entity attribution;
+// the >1m group is NESTED inside >100k — never added as independent counts / volume); restricted-access metrics with a 5m native interval
+export const WHALE_METRIC_IDS = Object.freeze(['whale_transaction_count_100k_usd_to_inf', 'whale_transaction_count_1m_usd_to_inf', 'whale_transaction_volume_100k_usd_to_inf', 'whale_transaction_volume_1m_usd_to_inf']);
+export const WHALE_METRIC_UNITS = Object.freeze({ whale_transaction_count_100k_usd_to_inf: 'COUNT', whale_transaction_count_1m_usd_to_inf: 'COUNT', whale_transaction_volume_100k_usd_to_inf: 'USD', whale_transaction_volume_1m_usd_to_inf: 'USD' });
 export const STABLECOIN_METRIC_IDS = Object.freeze(['circulating_supply', 'peg_price', 'bridged_supply']);
 export const UNITS = Object.freeze(['USD', 'USDT', 'USDC', 'EUR', 'BASE', 'QUOTE', 'CONTRACTS', 'COUNT', 'PERCENT', 'PERCENTAGE_POINTS', 'FRACTION', 'BPS', 'RATIO', 'NATIVE', 'INDEX', 'BILLIONS_USD', 'MILLIONS_USD', 'UNKNOWN']);
-export const WINDOWS = Object.freeze(['day', 'hour', 'block', 'minute']);
+export const WINDOWS = Object.freeze(['day', 'hour', 'block', 'minute', 'five_minutes']); // five_minutes: exact 300000ms native periods (JUDGE-1 §5.2)
 export const KNOWN_CHAINS = Object.freeze(['ethereum', 'bitcoin', 'solana', 'base', 'arbitrum', 'optimism', 'polygon', 'bsc', 'avalanche', 'tron', 'hyperliquid', 'sui', 'aptos', 'near', 'cosmos', 'cardano', 'dogecoin', 'litecoin', 'xrp', 'ton', 'other']);
 
 // ---- family registry: which kinds, which providers, which metrics -----------------------------------------
@@ -223,7 +227,7 @@ export const FAMILY_REGISTRY = deepFreeze({
   SUPPLY_UNLOCKS: { kinds: ['ASSET_REFERENCE', 'UNLOCK_EVENT'], providers: ['COINGECKO', 'COINGLASS', 'TOKENOMIST'], metrics: { supply_ratios: 'FRACTION', unlock_schedule: 'BASE', next_unlock: 'BASE' } },
   DEX_DEFI: { kinds: ['DEX_POOL', 'DEFI_METRIC'], providers: ['GECKOTERMINAL', 'DEFILLAMA'], metrics: { pool_liquidity: 'USD', pool_activity: 'USD', protocol_tvl: 'USD', protocol_fees_revenue: 'USD', lending_rates: 'PERCENT' } },
   ONCHAIN_ENTITY_FLOW: { kinds: ['ONCHAIN_METRIC'], providers: ['CRYPTOQUANT', 'SANTIMENT'], metrics: { exchange_net_flow: 'NATIVE', exchange_reserve: 'NATIVE', holder_cohorts: 'NATIVE' } },
-  NETWORK_ACTIVITY: { kinds: ['ONCHAIN_METRIC'], providers: ['COINMETRICS', 'CRYPTOQUANT', 'SANTIMENT'], metrics: { active_addresses: 'COUNT', transaction_count: 'COUNT', transfer_volume: 'NATIVE', network_fees: 'NATIVE', realized_value_metrics: 'RATIO' } },
+  NETWORK_ACTIVITY: { kinds: ['ONCHAIN_METRIC'], providers: ['COINMETRICS', 'CRYPTOQUANT', 'SANTIMENT'], metrics: { active_addresses: 'COUNT', transaction_count: 'COUNT', transfer_volume: 'NATIVE', network_fees: 'NATIVE', realized_value_metrics: 'RATIO', whale_transaction_count_100k_usd_to_inf: 'COUNT', whale_transaction_count_1m_usd_to_inf: 'COUNT', whale_transaction_volume_100k_usd_to_inf: 'USD', whale_transaction_volume_1m_usd_to_inf: 'USD' } },
   STABLECOIN_LIQUIDITY: { kinds: ['STABLECOIN_METRIC'], providers: ['DEFILLAMA', 'CRYPTOQUANT'], metrics: { stablecoin_supply_change: 'USD', peg_deviation: 'BPS' } },
   ETF_FLOWS: { kinds: ['ETF_FLOW'], providers: ['COINGLASS'], metrics: { etf_daily_flow: 'USD', etf_flow_trailing: 'USD' } },
   MACRO_RELEASES: { kinds: ['MACRO_OBSERVATION', 'ECONOMIC_EVENT'], providers: ['FRED', 'COINGLASS'], metrics: { macro_level: 'NATIVE', macro_change: 'NATIVE', macro_surprise: 'PERCENTAGE_POINTS', release_schedule: 'COUNT' } },

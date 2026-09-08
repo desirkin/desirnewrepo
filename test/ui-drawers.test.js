@@ -93,7 +93,7 @@ test('K11. UNIVERSE, EARS, WIDE EYE, coin, auth, CLEAR and VETO all use the shar
   }
   // and no drawer opens outside the shell any more
   const opens = SCRIPT.match(/classList\.add\('open'\)/g) ?? [];
-  assert.equal(opens.length, 3); // exactly one inside showCard + one inside showLedger + one inside showResearch (MARKET-LAB read-only view)
+  assert.equal(opens.length, 4); // exactly one inside showCard + one inside showLedger + one inside showResearch (MARKET-LAB read-only view) + one inside showJudge (JUDGE read-only explanation drawer)
 });
 
 test('K13. closing an auth/CLEAR/VETO panel performs NO mutation and authorizes nothing', () => {

@@ -408,6 +408,17 @@
     transition: bottom .35s cubic-bezier(.3,.9,.3,1); backdrop-filter: blur(10px);
   }
   #research.open { bottom: 0; }
+  #judge { position: fixed; left: 50%; bottom: -110%; transform: translateX(-50%); width: min(94vw, 430px); z-index: 70; max-height: 80vh; max-height: 84dvh; display: flex; flex-direction: column; padding: 0; background: rgba(7, 12, 24, .94); border: 1px solid #29394f; border-radius: 16px 16px 0 0; transition: bottom .35s cubic-bezier(.3,.9,.3,1); backdrop-filter: blur(10px); }
+  #judge.open { bottom: 0; }
+  #judge .dhead h2 { color: #9fb7d9; font-size: 13px; letter-spacing: .34em; }
+  #judge .rmeta { font-size: 9.5px; letter-spacing: .06em; color: var(--dim); margin: 6px 0; line-height: 1.5; }
+  #judge .jmode { font-size: 15px; letter-spacing: .3em; padding: 8px 10px; border-radius: 10px; margin: 6px 0; text-align: center; }
+  #judge .jmode.paper { color: #0b1220; background: #c9b27f; }
+  #judge .jmode.live { color: #fff; background: #7a1f1f; border: 1px solid #ff6b6b; }
+  #judge .jmode.off { color: var(--dim); border: 1px solid #22334c; }
+  #judge .jrow { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid #1b2739; font-size: 10.5px; }
+  #judge .jrow .k { color: var(--dim); letter-spacing: .12em; font-size: 9px; }
+  #btnJudge { color: #9fb7d9; border: 1px solid #2f4360; } /* read-only explanation of the Judge / Watch journal; never an order button */
   #research .dhead h2 { color: #c9b27f; font-size: 13px; letter-spacing: .34em; }
   #research .rrow { display: flex; justify-content: space-between; gap: 8px; padding: 7px 0; border-bottom: 1px solid #1b2739; font-size: 11px; cursor: pointer; }
   #research .rrow .k { color: var(--dim); letter-spacing: .12em; font-size: 9px; }
@@ -561,6 +572,7 @@
   <button id="btnVeto" hidden><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M6 6 L18 18" stroke="currentColor" stroke-width="2"></path></svg><span>VETO</span></button>
   <button id="btnClear" hidden><span>CLEAR</span></button>
   <button id="btnLedger"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4.5" y="3.5" width="15" height="17" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect><path d="M8.5 8 H15.5 M8.5 12 H15.5 M8.5 16 H13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg><span>LEDGER</span></button>
+  <button id="btnJudge" aria-label="judge / watch — read-only explanation of the execution journal"><span>JUDGE</span></button>
   <button id="btnResearch" aria-label="market research — read-only reports"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M15.5 15.5 L20 20" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg><span>RESEARCH</span></button>
 </div>
 
@@ -592,6 +604,23 @@
     </button>
   </div>
   <div id="researchBody" class="dbody"></div>
+</div>
+<!-- JUDGE (ticket §9.1): the read-only explanation drawer. Everything shown is the
+     projection FILE the Judge composition writes from the actual execution journal:
+     mode (PAPER is loud and cannot be mistaken for LIVE), candidates and their
+     readiness rows, the last decisions with their refusal clauses / measurements,
+     held quantity and protection, drawdown, authorization / seals, feed coverage and
+     blocked capabilities. No number here is a promised return; no control lives here. -->
+<div id="judge" role="dialog" aria-modal="true" aria-label="Judge">
+  <div class="dhead">
+    <div class="dtitle"><span class="kicker">JUDGE · WATCH · EXECUTION JOURNAL · READ ONLY</span><h2>JUDGE</h2></div>
+    <button type="button" id="judgeClose" class="dclose" aria-label="Close">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path d="M6 6 L18 18 M18 6 L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path>
+      </svg>
+    </button>
+  </div>
+  <div id="judgeBody" class="dbody"></div>
 </div>
 <div id="demobadge" title="Tap to exit demo">DEMO</div>
 
@@ -1363,6 +1392,38 @@ async function refreshResearch() { const d = await fetchResearch('/api/market-re
 async function openResearchCase(dir) { const c = await fetchResearch(`/api/market-research/case?dir=${encodeURIComponent(dir)}`); if (c) { try { renderResearchCase(c); } catch (err) { console.error('RESEARCH case render error:', err); researchError('RESEARCH RENDER ERROR — see console'); } } }
 $('#btnResearch').addEventListener('click', () => { showResearch(); refreshResearch(); });
 
+/* ---------- JUDGE drawer: the execution journal explained, read-only ---------- */
+function showJudge() { armDrawerHistory(); $('#judge').classList.add('open'); $('#backdrop').hidden = false; }
+function judgeError(msg) { $('#judgeBody').innerHTML = `<div class="line"><span>${esc(msg)}</span></div>`; }
+const jrow = (k, v) => `<div class="jrow"><span class="k">${esc(k)}</span><span>${v}</span></div>`;
+function renderJudge(d) {
+  const b = $('#judgeBody'); const p = d.projection;
+  if (!d.enabled || !p) { b.innerHTML = '<div class="jmode off">JUDGE OFF</div><div class="empty"><div class="sub">JUDGE_ENABLED is not set — no account, no orders, no projection. The ship flies non-trading by default.</div></div>'; return; }
+  const live = p.accountKind === 'LIVE'; const modeCls = live ? 'live' : 'paper';
+  const modeText = live ? `LIVE · ${esc(p.mode)} · REAL MONEY` : `${esc(p.accountKind)} · ${esc(p.mode)} · NOT REAL MONEY`;
+  const a = p.authorization; const seals = p.seals?.seals ?? {}; const perf = p.performance ?? {}; const val = p.valuation ?? {};
+  const cov = p.feed ? `epoch ${esc(p.feed.epoch)} · ${p.feed.connected ? 'CONNECTED' : 'DISCONNECTED'} · admitted ${esc(p.feed.admitted)} · pinned ${esc(p.feed.pinned)}` : '—';
+  const blocked = [...(p.restrictions ?? []), ...(p.clock && p.clock.trusted === false ? ['CLOCK_UNTRUSTED'] : []), ...(p.writerLost ? ['WRITER_LOST'] : []), ...(live && !(a && a.active) ? ['ENTRIES: ARM_REQUIRED'] : [])];
+  const positions = (p.positions ?? []).map((x) => jrow(`${x.pair} ${x.state}`, `held ${esc(x.base)} · protection ${esc(x.protection)} @ ${esc(x.trigger)} · stop ${esc(x.structuralStop)} · R ${esc(x.initialR)} · exit ${esc(x.exit?.phase ?? 'NONE')}${x.exit?.reason ? ' ' + esc(x.exit.reason) : ''}`)).join('');
+  const pending = (p.pendingOrders ?? []).map((o) => jrow(`${o.kind} ${o.orderId.slice(0, 12)}`, esc(o.state))).join('');
+  const cands = (p.candidates ?? []).map((c) => { const r = c.readiness ?? {}; const rows = Object.entries(r).map(([setup, rec]) => `${esc(setup)}: ${esc(rec?.state)}${(rec?.missing ?? []).length ? ' (' + rec.missing.map((m) => esc(m.id)).join(', ') + ')' : ''}`).join('<br>'); return jrow(`${c.symbol} ${c.priority}`, rows || '—'); }).join('');
+  const decisions = (p.decisions ?? []).slice().reverse().map((x) => jrow(`${esc(x.setupId)} ${esc(x.status)}`, `${esc(x.asset?.pair)} · ${esc((x.reasonCodes ?? []).join(', ') || 'no refusal clause')}${x.sizing ? ' · q ' + esc(x.sizing.q) + ' @ ' + esc(x.sizing.entryLimitPrice) + ' · risk ' + esc(x.sizing.riskUsd) + ' · net scenario ' + esc(x.sizing.bufferedScenarioNetProfit) : ''} · cost ${esc(x.costModelVersion)} · expectancy UNKNOWN (${esc(x.calibrationState ?? 'UNVALIDATED_HYPOTHESIS')})`)).join('');
+  b.innerHTML = `<div class="jmode ${modeCls}">${modeText}</div>
+    <div class="rmeta">ACCOUNT ${esc(p.accountId)} · policy ${esc(p.policyName)} ${esc((p.policyDigest ?? '').slice(0, 8))} · code ${esc((p.codeDigest ?? 'unknown').slice(0, 8))} · revision ${esc(p.revision)} · projection ${d.projectionFresh ? 'FRESH' : 'STALE'} ${ageStr(p.ts)}<br>
+    CASH ${esc(p.cash)} · equity ${esc(val.equity)}${val.unknown ? ' (UNKNOWN: ' + esc(val.reason) + ')' : ''} · day P&amp;L ${esc(perf.session?.dayPnl)} · drawdown ${esc(perf.drawdown)} · high water ${esc(perf.highWater)}<br>
+    FEED ${cov} · clock ${esc(p.clock?.state ?? p.clock?.kind ?? '—')} · cases verified ${esc(p.cases?.verified)}/${esc(p.cases?.known)}</div>
+    ${jrow('AUTHORIZATION', a ? `${esc(a.kind)} ${a.active ? 'ACTIVE' : a.ended ? 'ENDED' : 'EXPIRED'} · ceiling ${esc(a.allocationCeiling)} · expires ${esc(new Date(a.expiresTs).toISOString())}` : (live ? 'NONE — OWNER_LIMITS_REQUIRED / ARM_REQUIRED' : 'not applicable (paper)'))}
+    ${jrow('BLOCKED', blocked.length ? esc(blocked.join(' · ')) : 'no restriction latched')}
+    ${jrow('SEALS', Object.entries(seals).map(([k, v]) => `${esc(k)}=${esc(v)}`).join(' · '))}
+    ${jrow('RECONCILIATION', p.dispatcher?.lastReconciliation ? esc(JSON.stringify(p.dispatcher.lastReconciliation).slice(0, 160)) : 'none pending / none recorded')}
+    <div class="rmeta">HELD / PENDING</div>${positions || pending ? positions + pending : '<div class="jrow"><span>flat — nothing held, nothing pending</span></div>'}
+    <div class="rmeta">CANDIDATES · READINESS (per setup; a missing interval names itself)</div>${cands || '<div class="jrow"><span>no candidates admitted</span></div>'}
+    <div class="rmeta">LAST DECISIONS · REFUSAL CLAUSES · COST</div>${decisions || '<div class="jrow"><span>no decisions yet — NO_TRADE is a successful decision</span></div>'}
+    <div class="rmeta">ARMING is a separate authenticated action (${esc(d.arm?.endpoint)}): ${esc((d.arm?.requires ?? []).join(', '))}. Never by ${esc((d.arm?.never ?? []).join(', '))}. Approvals on file: ${esc((d.approvals ?? []).length)}.</div>`;
+}
+async function refreshJudge() { let res; try { res = await fetch('/api/judge', { cache: 'no-store' }); } catch (err) { console.error('JUDGE fetch failed:', err); judgeError('SHELL LINK LOST — server unreachable'); return; } if (!res.ok) { judgeError(`JUDGE ERROR — HTTP ${res.status}`); return; } try { renderJudge(await res.json()); } catch (err) { console.error('JUDGE render error:', err); judgeError('JUDGE RENDER ERROR — see console'); } }
+$('#btnJudge').addEventListener('click', () => { showJudge(); refreshJudge(); });
+
 function renderStatus(s) {
   lastStatus = s;
   if (Array.isArray(s.universe) && s.universe.length) universe = s.universe; // fallback majors
@@ -1770,7 +1831,7 @@ $('#capEye').addEventListener('click', () => { if (!demo) openEyeCard(); });
    on the header. Closing an auth/CLEAR/VETO card merely cancels the UI —
    it never posts anything and can never authorize anything. */
 let drawerPushed = false;
-const anySheetOpen = () => $('#card').classList.contains('open') || $('#ledger').classList.contains('open') || $('#research').classList.contains('open');
+const anySheetOpen = () => $('#card').classList.contains('open') || $('#ledger').classList.contains('open') || $('#research').classList.contains('open') || $('#judge').classList.contains('open');
 function armDrawerHistory() {
   if (!drawerPushed && !anySheetOpen()) {
     try { history.pushState({ serpentDrawer: true }, ''); drawerPushed = true; } catch { /* history optional */ }
@@ -1793,6 +1854,7 @@ function closeSheets({ viaHistory = false } = {}) {
   $('#card').classList.remove('open');
   $('#ledger').classList.remove('open');
   $('#research').classList.remove('open');
+  $('#judge').classList.remove('open');
   $('#backdrop').hidden = true;
   if (drawerPushed && !viaHistory) {
     drawerPushed = false;
@@ -1805,6 +1867,7 @@ addEventListener('popstate', () => { if (anySheetOpen()) closeSheets({ viaHistor
 $('#cardClose').addEventListener('click', () => closeSheets());
 $('#ledgerClose').addEventListener('click', () => closeSheets());
 $('#researchClose').addEventListener('click', () => closeSheets());
+$('#judgeClose').addEventListener('click', () => closeSheets());
 $('#backdrop').addEventListener('click', () => closeSheets()); // tap outside always exits
 // taps INSIDE a drawer never dismiss it (the backdrop is a sibling behind)
 addEventListener('keydown', (e) => { if (e.key === 'Escape' && anySheetOpen()) closeSheets(); });
