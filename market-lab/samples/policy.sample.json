@@ -1,0 +1,480 @@
+{
+ "policyVersion": "market-research-policy-1",
+ "mode": "LIVE_OBSERVATION",
+ "providers": {
+  "KRAKEN_SPOT": {
+   "enabled": false,
+   "credentialEnv": null,
+   "plan": {
+    "name": null,
+    "billing": "FREE",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "COINBASE_SPOT": {
+   "enabled": false,
+   "credentialEnv": null,
+   "plan": {
+    "name": null,
+    "billing": "FREE",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "KRAKEN_DERIVATIVES": {
+   "enabled": false,
+   "credentialEnv": null,
+   "plan": {
+    "name": null,
+    "billing": "FREE",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "DERIBIT": {
+   "enabled": false,
+   "credentialEnv": null,
+   "plan": {
+    "name": null,
+    "billing": "FREE",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "BYBIT": {
+   "enabled": false,
+   "credentialEnv": null,
+   "plan": {
+    "name": null,
+    "billing": "FREE",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "COINGECKO": {
+   "enabled": false,
+   "credentialEnv": "COINGECKO_DEMO_API_KEY",
+   "plan": {
+    "name": null,
+    "billing": "UNKNOWN",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "GECKOTERMINAL": {
+   "enabled": false,
+   "credentialEnv": null,
+   "plan": {
+    "name": null,
+    "billing": "FREE",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "DEFILLAMA": {
+   "enabled": false,
+   "credentialEnv": null,
+   "plan": {
+    "name": null,
+    "billing": "FREE",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "COINGLASS": {
+   "enabled": false,
+   "credentialEnv": "COINGLASS_API_KEY",
+   "plan": {
+    "name": null,
+    "billing": "UNKNOWN",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "CRYPTOQUANT": {
+   "enabled": false,
+   "credentialEnv": "CRYPTOQUANT_API_KEY",
+   "plan": {
+    "name": null,
+    "billing": "UNKNOWN",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "SANTIMENT": {
+   "enabled": false,
+   "credentialEnv": "SANTIMENT_API_KEY",
+   "plan": {
+    "name": null,
+    "billing": "UNKNOWN",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "COINMETRICS": {
+   "enabled": false,
+   "credentialEnv": null,
+   "plan": {
+    "name": null,
+    "billing": "FREE",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "FRED": {
+   "enabled": false,
+   "credentialEnv": "FRED_API_KEY",
+   "plan": {
+    "name": null,
+    "billing": "FREE",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "TWELVEDATA": {
+   "enabled": false,
+   "credentialEnv": "TWELVEDATA_API_KEY",
+   "plan": {
+    "name": null,
+    "billing": "UNKNOWN",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "SETTLED_RECORDS": {
+   "enabled": false,
+   "credentialEnv": null,
+   "plan": {
+    "name": null,
+    "billing": "FREE",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  },
+  "TOKENOMIST": {
+   "enabled": false,
+   "credentialEnv": "TOKENOMIST_API_KEY",
+   "plan": {
+    "name": null,
+    "billing": "UNKNOWN",
+    "includedCallsPerMonth": null,
+    "remainingCalls": null,
+    "incrementalUsdPerCall": null,
+    "attestation": null,
+    "verifiedDate": null,
+    "quoteUsdPerMonth": null
+   },
+   "limits": {
+    "maxCallsPerDay": 1000,
+    "maxCallsPerMonth": 20000,
+    "maxConcurrency": 1
+   },
+   "permittedEndpoints": null,
+   "smoke": {
+    "authorized": false,
+    "maxCalls": 0,
+    "maxEstimatedUsd": null
+   }
+  }
+ },
+ "model": {
+  "enabled": false,
+  "provider": "ANTHROPIC",
+  "model": "claude-sonnet-5",
+  "credentialEnv": "ANTHROPIC_API_KEY",
+  "apiHost": "api.anthropic.com",
+  "maxOutputTokens": 4096,
+  "maxEstimatedUsdPerCase": 0,
+  "maxEstimatedUsdPerDay": 0,
+  "maxEstimatedUsdPerMonth": 0,
+  "totalSmokeMaxEstimatedUsd": 0,
+  "attemptTimeoutMs": 90000,
+  "caseTimeoutMs": 180000,
+  "pricing": {
+   "inputUsdPerMTok": 2,
+   "outputUsdPerMTok": 10,
+   "cacheReadUsdPerMTok": 0.2,
+   "cacheWriteUsdPerMTok": 2.5,
+   "pricingSource": "https://www.anthropic.com/claude/sonnet",
+   "verifiedDate": "2026-09-08"
+  },
+  "effort": null,
+  "pinnedPromptVersion": null
+ },
+ "resources": {
+  "catalogMaxMarkets": 5000,
+  "hotSubjects": 64,
+  "tradesPerHotSymbol": 50000,
+  "hotStateBytes": 67108864,
+  "bookLevelsPerSide": 200,
+  "bookSampleMinIntervalMs": 500,
+  "bookSamplesTwoMinutes": 241,
+  "bookMinuteEndpoints": 180,
+  "barsPerInterval": 720,
+  "derivativesPerCase": 64,
+  "optionsAdmittedPerCase": 512,
+  "venueSnapshots": 16,
+  "onchainMetrics": 64,
+  "eventsPerCase": 128,
+  "intakeQueueItems": 1024,
+  "intakeQueueBytes": 8388608,
+  "transportResponseBytes": 8388608,
+  "observationLineBytes": 131072,
+  "coverageLineBytes": 131072,
+  "packetLineBytes": 262144,
+  "manifestBytes": 1048576,
+  "segmentBytes": 33554432,
+  "runBytes": 1073741824,
+  "contextBytes": 2097152,
+  "researchRootQuotaBytes": 4294967296,
+  "httpConcurrencyGlobal": 4,
+  "httpConcurrencyPerProvider": 1,
+  "httpTimeoutMs": 15000,
+  "wsIdleTimeoutMs": 30000,
+  "maxPagesPerRequest": 20,
+  "maxRecordsPerRequest": 5000
+ },
+ "cases": {
+  "maxConcurrentModelRequests": 1,
+  "maxPendingCases": 16,
+  "maxDataRequestsPerCase": 6,
+  "maxFollowupRounds": 1,
+  "maxModelAttempts": 2,
+  "attemptTimeoutMs": 90000,
+  "caseTimeoutMs": 180000,
+  "maxModelInputBytes": 262144,
+  "maxModelOutputBytes": 65536,
+  "maxOutputTokens": 8192,
+  "requestCacheSize": 256
+ },
+ "retention": {
+  "persistProviderText": false,
+  "onQuotaExhausted": "STOP_CAPTURE"
+ }
+}

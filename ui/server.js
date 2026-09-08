@@ -16,7 +16,7 @@ import { openPositions, allPredictions, allFills } from '../ledger/ledger.js';
 import { ledgerSummary } from '../ledger/summary.js';
 import { isVetoed, readControls } from '../state/controls.js';
 import { applyRestriction, requestClear } from '../persistence/control-plane.js';
-import { existsSync, readFileSync as readFs } from 'node:fs';
+import { existsSync, readFileSync as readFs, readdirSync } from 'node:fs';
 import { dataDir } from '../lib/config.js';
 import { appendJsonl } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
@@ -24,6 +24,7 @@ import { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_
 import { getPersistence } from '../persistence/runtime.js';
 import { attentionSnapshot, attentionForCoin, earsRoom, wideEyeRoom } from './attention-view.js';
 import { MemoryView } from '../persistence/memory-view.js';
+import { marketResearchRootFromEnv, CASE_DIR_NAME_RE } from '../market-lab/paths.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -278,6 +279,30 @@ async function coinDetail(coin) {
   return { ...market, attention, memory };
 }
 
+// ---- MARKET-LAB read-only readers (status.json + sealed case bundles; bounded reads; nothing here can act) ----
+const MR_MAX_BYTES = 2 * 1024 * 1024;
+function readJsonBounded(file) { try { const buf = readFs(file); if (buf.length > MR_MAX_BYTES) return null; return JSON.parse(buf.toString('utf8')); } catch { return null; } }
+function marketResearchRoot() { return marketResearchRootFromEnv(process.env, dataDir()); }
+function marketResearchSummary() {
+  const root = marketResearchRoot(); const status = readJsonBounded(path.join(root, 'status.json'));
+  const casesDir = path.join(root, 'cases'); let dirs = [];
+  try { dirs = readdirSync(casesDir).filter((d) => CASE_DIR_NAME_RE.test(d) && existsSync(path.join(casesDir, d, 'manifest.json'))).sort().slice(-64); } catch { dirs = []; }
+  const cases = dirs.map((d) => { const m = readJsonBounded(path.join(casesDir, d, 'manifest.json')); const s = m?.summary ?? null; return { dir: d, caseId: s?.caseId ?? null, status: s?.status ?? null, canonicalCoin: s?.canonicalCoin ?? null, mode: s?.mode ?? null, createdTs: s?.createdTs ?? null, finishedTs: m?.createdTs ?? null, selectedAnalysisId: s?.selectedAnalysisId ?? null, paths: s?.paths ?? [], usage: s?.usage ?? null }; }).reverse();
+  return { enabled: status !== null, root, status, cases, authority: 'NONE', purpose: 'RESEARCH_ONLY' };
+}
+function marketResearchCase(dir) {
+  if (!CASE_DIR_NAME_RE.test(dir)) return null;
+  const base = path.join(marketResearchRoot(), 'cases', dir); if (!existsSync(path.join(base, 'manifest.json'))) return null;
+  const manifest = readJsonBounded(path.join(base, 'manifest.json')); const caseRecord = readJsonBounded(path.join(base, 'case.json'));
+  let report = null; try { const buf = readFs(path.join(base, 'report.md')); report = buf.length > MR_MAX_BYTES ? null : buf.toString('utf8'); } catch { report = null; }
+  const lines = (name) => { try { const buf = readFs(path.join(base, name)); if (buf.length > MR_MAX_BYTES) return []; return buf.toString('utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { return []; } };
+  const analyses = lines('analyses.jsonl'); const packets = lines('packets.jsonl'); const results = lines('results.jsonl'); const usage = lines('usage.jsonl');
+  const selected = caseRecord?.analysis?.analysisId ? analyses.find((a) => a.analysisId === caseRecord.analysis.analysisId) ?? null : null;
+  const packet = selected ? packets.find((p) => p.packetId === selected.packetId) ?? null : packets[0] ?? null;
+  const cited = selected && packet ? [...new Set([selected.thesis, selected.mechanism, ...(selected.support ?? []), ...(selected.hypotheses ?? [])].filter(Boolean).flatMap((x) => x.evidenceRefs ?? []))].map((id) => { const e = packet.evidence.find((v) => v.evidenceId === id); return e ? { evidenceId: id, kind: e.kind, state: e.state, knownAtTs: e.knownAtTs, observedTs: e.observedTs, fields: e.value?.fields ?? null } : { evidenceId: id, kind: null }; }) : [];
+  return { dir, manifest: manifest ? { bundleId: manifest.bundleId, createdTs: manifest.createdTs, summary: manifest.summary } : null, caseRecord, report, selectedAnalysis: selected ? { analysisId: selected.analysisId, packetId: selected.packetId, analysisState: selected.analysisState, revision: selected.revision, dataRequests: selected.dataRequests } : null, packet: packet ? { packetId: packet.packetId, asOfTs: packet.asOfTs, evidence: packet.evidence.length, providerCoverage: packet.providerCoverage, coverageLimitations: packet.researchContext?.coverageLimitations ?? [], mode: packet.researchContext?.mode ?? null, entrances: packet.researchContext?.entrances ?? [], trigger: packet.trigger } : null, citedFacts: cited, requestOutcomes: results.map((r) => ({ requestKey: r.requestKey, family: r.family, metricIds: r.metricIds, state: r.state, reason: r.reason, observationsAdmitted: r.observationsAdmitted, cacheStatus: r.cacheStatus })), attempts: usage.map((u) => ({ attemptNo: u.attemptNo, path: u.path, ok: u.ok, model: u.model, actualModel: u.actualModel, latencyMs: u.latencyMs, usage: u.usage, estimatedUsd: u.estimatedUsd, actualUsd: u.actualUsd, failure: u.failure })), authority: 'NONE', purpose: 'RESEARCH_ONLY' };
+}
+
 function json(res, code, obj, extraHeaders = {}) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', ...extraHeaders });
@@ -455,6 +480,14 @@ const server = http.createServer((req, res) => {
         console.error(`[api/rumor2] ${err.constructor.name}: ${err.message}`);
         json(res, 200, { enabled: false, state: 'DARK', degraded: true });
       }
+    } else if (url.pathname === '/api/market-research') {
+      // MARKET-LAB read-only view: the research service's status FILE and sealed case directories under the research
+      // root (file-based; the cockpit never talks to the owner, never enqueues, never toggles anything paid).
+      json(res, 200, marketResearchSummary());
+    } else if (url.pathname === '/api/market-research/case') {
+      const dir = url.searchParams.get('dir') ?? '';
+      const c = marketResearchCase(dir);
+      if (!c) json(res, 404, { ok: false, error: 'no such sealed case' }); else json(res, 200, c);
     } else if (url.pathname === '/api/status') {
       json(res, 200, statusPayload());
     } else if (url.pathname === '/api/ledger/summary') {

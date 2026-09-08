@@ -266,3 +266,29 @@ incompatible schema versions fail closed.
 
 THE MODEL MAY INTERPRET EVIDENCE.
 THE MODEL MAY NOT CREATE TRUTH.
+
+## v2 — the research interpreter over real market evidence (MARKET LAB)
+
+The sentence above still governs. v2 adds the machinery, not authority:
+
+- **Evidence v2** (`serpent-evidence-2`, `evidence/contract-v2.js`, `evidence/research-builder.js`) is a compact
+  dossier of family summaries derived from a sealed market context plus the read-only Social projection. v1 packets,
+  ids, validators and dispatch are untouched; v2 rejects unknown versions and keys and never converts old artifacts.
+- **Analysis v2** (`socrates-analysis-2`, `socrates/contract-v2.js`) is assembled by the host from the model's raw
+  text: ids, packet binding, schema version and calibration labels are host-derived; a model-supplied id is refused.
+  Every citation must resolve inside the packet; a thesis without support is invalid; execution vocabulary fails.
+- **The case runtime** (`socrates/runtime.js`) is a state machine: packet validity gate, budget reservation persisted
+  before dispatch, the production client, at most two accepted attempts and one follow-up round through the bounded
+  broker, a new packet at Q1 >= result receipt, the original packet preserved, sealed CASE bundles that verify offline.
+  Terminal states are honest: COMPLETED, INITIAL_REPORT_ONLY, MODEL_FAILED, BUDGET_BLOCKED, DEADLINE_EXCEEDED,
+  PACKET_INVALID, CANCELLED. A recorded response is labelled RECORDED_RESPONSE; a reused answer discloses its age.
+- **Spend** is a law, not a hope: zero caps mean zero calls, the reservation precedes the request, an ambiguous
+  timeout stays counted as spent, a restart cannot reset spent quota, and no cheaper model is substituted silently.
+- **Hostile text** (headlines, excerpts, provider errors, broker diagnostics) reaches the model only as data inside the
+  dossier; the only HTTP host is the model host; provider URLs are chosen by code, never by the model or by a source.
+- **The corpus** (`socrates/corpus.js`, twelve cases, development and held-out split) and the rubric
+  (`socrates/evaluate.js`) measure citation validity, unsupported claims, temporal errors, conflated measurements,
+  request selection and honest refusal. Scores are an implementation assessment, never stage calibration, a backtest
+  or profit proof. A model may reasonably choose a different supported interpretation.
+- Authority remains NONE. Research output is read by a person through sealed files and the read-only cockpit drawer.
+  No trade button, no order suggestion, no paid toggle, no import of orders, ledger, cost, risk, Judge or Watch.

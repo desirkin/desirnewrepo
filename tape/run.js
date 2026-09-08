@@ -25,8 +25,13 @@ import {
   MICRO_LIMITS,
 } from './microstructure.js';
 
-export async function runTape({ minutes = null, chaosAfterSec = null, log = console.log } = {}) {
+// MARKET-LAB seam: an OPTIONAL observer receives copies of ACCEPTED trades and applied books (values only, plus the
+// receipt clock). It is called after the tape has already written its own truth; an observer exception is counted and
+// logged (bounded), never propagated — the tape's health, books, snapshots and features do not depend on it.
+export async function runTape({ minutes = null, chaosAfterSec = null, log = console.log, observer = null } = {}) {
   const config = loadConfig();
+  let observerErrors = 0;
+  const observe = (fn) => { if (!observer) return; try { fn(); } catch (err) { observerErrors += 1; if (observerErrors <= 3) log(`tape observer error #${observerErrors} (ignored): ${err?.message ?? err}`); } };
   const xp = config.universeExpansion ?? {};
   const staleMs = config.tape.staleFeedSec * 1000;
   const snapIntervalSec = config.tape.snapshotIntervalSec;
@@ -216,6 +221,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
           flow.add({ ts: Date.parse(t.timestamp), side: t.side, qty: t.qty, price: t.price });
           // MICRO-1: direct Kraken taker side, verbatim — never re-inferred
           microGuard(() => micro.onTrade(t.symbol, { ts: Date.parse(t.timestamp), side: t.side, qty: t.qty, price: t.price }));
+          observe(() => observer.onTrade({ coin: coinFromSymbol(t.symbol), symbol: t.symbol, side: t.side, qty: t.qty, price: t.price, eventTs: Date.parse(t.timestamp), receivedTs: Date.now(), tradeId: t.trade_id ?? null, ordType: t.ord_type ?? null, snapshot: msg.type === 'snapshot' }));
           if (msg.type !== 'snapshot') {
             writeTrade({
               ts: t.timestamp,
@@ -235,6 +241,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
           const book = books.get(d.symbol);
           if (!book) continue;
           touch(d.symbol);
+          let checksumVerified = null;
           if (msg.type === 'snapshot') {
             book.applySnapshot(d);
           } else {
@@ -244,9 +251,12 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
               resyncBook(d.symbol, `checksum mismatch (computed=${check.computed} expected=${check.expected})`);
               continue;
             }
+            checksumVerified = check.ok;
           }
           // MICRO-1: sample the applied book (rate-limited inside; local clock)
           microGuard(() => micro.onBook(d.symbol, book));
+          observe(() => observer.onBook({ coin: coinFromSymbol(d.symbol), symbol: d.symbol, receivedTs: Date.now(), synced: book.synced, checksumVerified, pricePrecision: book.pricePrecision, qtyPrecision: book.qtyPrecision,
+            levels: () => ({ bids: [...book.bids.entries()].sort((a, b) => b[0] - a[0]).slice(0, 100).map(([price, qty]) => [price, qty]), asks: [...book.asks.entries()].sort((a, b) => a[0] - b[0]).slice(0, 100).map(([price, qty]) => [price, qty]) }) }));
         }
         break;
       }

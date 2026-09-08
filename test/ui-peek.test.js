@@ -191,8 +191,8 @@ test('12. no additional fetch/API request exists for the disclosure', () => {
     assert.ok(!fnSrc(name).includes('fetch('), `${name} performs no network request`);
   }
   // the page's API surface is unchanged — no new endpoint was introduced
-  const endpoints = new Set(SCRIPT.match(/\/api\/[a-z/]+/g));
-  const known = new Set(['/api/status', '/api/attention', '/api/ears', '/api/wideeye', '/api/coin/', '/api/ledger/summary', '/api/control/', '/api/auth/']);
+  const endpoints = new Set(SCRIPT.match(/\/api\/[a-z/-]+/g)); // MARKET-LAB: hyphenated route names are whole endpoints
+  const known = new Set(['/api/status', '/api/attention', '/api/ears', '/api/wideeye', '/api/coin/', '/api/ledger/summary', '/api/control/', '/api/auth/', '/api/market-research']); // MARKET-LAB: read-only research files
   for (const e of endpoints) {
     assert.ok([...known].some((k) => e.startsWith(k.replace(/\/$/, ''))), `unexpected new endpoint ${e}`);
   }

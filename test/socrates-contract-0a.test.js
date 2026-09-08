@@ -630,8 +630,12 @@ test('0A-52. no runtime module imports the Socrates/evidence contracts', () => {
   const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
   const runtime = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('evidence/') && !f.startsWith('socrates/'));
   assert.ok(runtime.length > 50, 'the runtime scan actually covers the codebase');
+  // MARKET-LAB: the research service composition (market-lab/service.js) and the Socrates research CLI are the ONLY
+  // runtime files that may reach the Socrates v2 runtime — research only, authority NONE; no execution / strike module.
+  const RESEARCH_COMPOSITION = ['bin/socrates-research.js', 'market-lab/service.js'];
   for (const f of runtime) {
     const src = readFileSync(path.join(REPO, f), 'utf8');
+    if (RESEARCH_COMPOSITION.includes(f)) { assert.ok(!/evidence\/contract|socrates\/contract/.test(src), `${f} composes the runtime, never the contracts`); continue; }
     // RUMOR-2A: rumor2/ is the ONE authorized evidence-packet PRODUCER and
     // may import evidence/contract.js; the Socrates analysis contract
     // remains un-importable by any runtime module — producing evidence

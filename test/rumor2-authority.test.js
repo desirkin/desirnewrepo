@@ -44,7 +44,9 @@ const socialFiles = rumor2Files.filter((f) => SOCIAL_FILE_RE.test(f));
 const frozenCoreFiles = rumor2Files.filter((f) => !SOCIAL_FILE_RE.test(f));
 // SOCIAL-5B — the OFFLINE research pipeline (bin/social-research.js + research/ + the narrow read-only journal reader):
 // the exact read-only exception to the single-composition-root law, enumerated by filename and permitted pure exports
-const OFFLINE_RESEARCH_FILES = ['bin/social-research.js', 'persistence/social-research-export.js', 'research/archive.js', 'research/artifacts.js', 'research/bundle.js', 'research/contracts.js', 'research/evaluation.js', 'research/features.js', 'research/identity.js', 'research/outcomes.js', 'research/pipeline.js', 'research/relations.js', 'research/schemas.js', 'research/snapshot.js'];
+// MARKET-LAB: two more pure readers of the research family's frozen vocabularies / contract validator (no runtime, no strainer):
+//   evidence/social-projection.js (the detached Social projection DTO) and market-lab/deep-market-adapter.js (validateDeepMarketWindow)
+const OFFLINE_RESEARCH_FILES = ['evidence/social-projection.js', 'market-lab/deep-market-adapter.js', 'bin/social-research.js', 'persistence/social-research-export.js', 'research/archive.js', 'research/artifacts.js', 'research/bundle.js', 'research/contracts.js', 'research/evaluation.js', 'research/features.js', 'research/identity.js', 'research/outcomes.js', 'research/pipeline.js', 'research/relations.js', 'research/schemas.js', 'research/snapshot.js'];
 const OFFLINE_RESEARCH_RUMOR2_IMPORTS = {
   // the contracts module imports the AUTHORITATIVE closed vocabularies rather than restating them: pure frozen
   // string lists, no runtime, no collector, no provider — provenance/vocabulary reuse, never an authority allowance
@@ -57,6 +59,10 @@ const OFFLINE_RESEARCH_RUMOR2_IMPORTS = {
   'research/snapshot.js': { 'truth.js': ['canonicalJson'], 'social-research-dossier.js': ['RESEARCH_DOSSIER_EVENT_TYPE', 'RESEARCH_DOSSIER_SCHEMA_VERSION', 'RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION', 'replayResearchDossierEvent', 'isLegacyResearchDossierEvent'], 'social-research-shadow.js': ['RESEARCH_SHADOW_EVENT_TYPE', 'RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION', 'replayResearchShadowEvent', 'emptyShadowState'], 'social-settle.js': ['SOCIAL_OBSERVATION_TYPES'] },
   'research/pipeline.js': { 'truth.js': ['canonicalJson'], 'social-research-dossier.js': ['RESEARCH_DOSSIER_SCHEMA_VERSION', 'RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION'], 'social-research-shadow.js': ['RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION'] },
 };
+// MARKET-LAB: the Social projection reuses the dossier / composite / profile vocabularies (pure frozen lists); the deep-market
+// adapter consumes the v1 market contract validator + version (pure function + constant). Neither names a runtime or collector.
+OFFLINE_RESEARCH_RUMOR2_IMPORTS['evidence/social-projection.js'] = { 'social-research-dossier.js': ['RESEARCH_ENTRANCE_KINDS', 'RESEARCH_STATES', 'RESEARCH_EPISODE_STATES', 'RESEARCH_PACKET_STATUSES'], 'social-research-composite.js': ['COMPOSITE_VIEW_VERSION', 'COMPOSITE_HISTORY_STATES'], 'social-research-profile.js': ['SOURCE_RETENTION_STATES', 'SOURCE_RESOURCE_HISTORY_STATES'] };
+OFFLINE_RESEARCH_RUMOR2_IMPORTS['market-lab/deep-market-adapter.js'] = { 'social-research-market.js': ['validateDeepMarketWindow', 'RESEARCH_MARKET_CONTRACT_VERSION'] };
 const OFFLINE_RESEARCH_RUMOR2_IMPORTERS = Object.keys(OFFLINE_RESEARCH_RUMOR2_IMPORTS);
 assert.ok(socialFiles.length >= 6, 'the social surface is actually scanned');
 assert.ok(frozenCoreFiles.length >= 8, 'the frozen non-social core is actually scanned');
@@ -218,7 +224,7 @@ test('R2A-SOCIAL-8 (SOCIAL-4F). the discovery-catalog / admission-scope / watch-
   assert.deepEqual(mentions.sort(), [...CATALOG_ALLOWLIST].sort(), `the research scope may only be wired in ${CATALOG_ALLOWLIST.join(', ')}`);
   // survey/catalog.js: imported by the wide eye and tests only; the rumor tier NEVER imports survey/, tape/, cost/, ledger/, state/, controls/
   const consumers = tracked.filter((f) => !f.startsWith('test/') && /from\s+'(\.\/|[^']*survey\/)catalog\.js'/.test(read(f)));
-  assert.deepEqual(consumers, ['survey/wideeye.js']);
+  assert.deepEqual(consumers, ['market-lab/providers/kraken-spot.js', 'survey/wideeye.js']); // MARKET-LAB: the Kraken client reuses the survey's pure pair normalizer (D01 instrument mapping)
   for (const f of rumor2Files) assert.ok(!/from\s+'[^']*(survey|tape|cost|ledger|state|controls|governance|rumint)\//.test(read(f)), `${f} imports no survey/trading/control tier`);
   // the Social runtimes no longer derive their outer boundary from config.universe; the official claim registry is still built from it (a separate, retained scope)
   assert.ok(!/config\.universe/.test(code('rumor2/social-runtime.js')) && !/config\.universe/.test(code('rumor2/x-runtime.js')), 'Social runtimes never read config.universe');
@@ -279,8 +285,10 @@ test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT all
   const fly = read('fly.js');
   assert.ok(fly.includes("researchStrainer: { enabled: true, marketSnapshot: (coin) => ({ snapshot: readCurrentFeatureSnapshot(coin), owner: readTapeStatus() }), currentSession: () => sessionDate(),"), 'fly.js injects exactly the tape store READ accessors (snapshot + status) and the session clock');
   const strainerBlock = fly.slice(fly.indexOf('researchStrainer: {'), fly.indexOf('});', fly.indexOf('researchStrainer: {')));
-  assert.deepEqual([...strainerBlock.matchAll(/\b(enabled|marketSnapshot|currentSession|historicalOutcomes|deepMarketSource|claimAssociations|options):/g)].map((m) => m[1]), ['enabled', 'marketSnapshot', 'currentSession', 'historicalOutcomes'], 'the composition root wires exactly these seams (no deep-market adapter, no association authority, no option override)');
-  assert.ok(!/deepMarketSource/.test(fly), 'no live deep-market adapter is wired by SOCIAL-5');
+  assert.deepEqual([...strainerBlock.matchAll(/\b(enabled|marketSnapshot|currentSession|historicalOutcomes|deepMarketSource|claimAssociations|options):/g)].map((m) => m[1]), ['enabled', 'marketSnapshot', 'currentSession', 'historicalOutcomes', 'deepMarketSource'], 'the composition root wires exactly these seams (the deep-market adapter only behind the MARKET_RESEARCH_ENABLED opt-in; no associations, no options)');
+  // MARKET-LAB: the deep-market adapter is wired ONLY over the opt-in research owner (null otherwise => absent evidence stays absent)
+  assert.match(fly, /deepMarketSource: marketResearch \? createDeepMarketSource\(marketResearch\.owner\) : null,/, 'the deep-market adapter rides the documented opt-in only');
+  assert.ok(/MARKET_RESEARCH_ENABLED === 'true'/.test(fly) && /let marketResearch = null/.test(fly), 'the research owner exists only behind the explicit opt-in');
   assert.ok(/population: \(\) => wideEye\.sweepPopulationSnapshot\(\)/.test(fly), 'the §36.6 seam is the wide eye population accessor only');
   const store = code('tape/store.js');
   assert.ok(/export function writeCurrentFeatureSnapshot/.test(store) && /export function readCurrentFeatureSnapshot/.test(store), 'the feature snapshot lives in the tape store domain');

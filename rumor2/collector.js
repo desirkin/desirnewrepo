@@ -135,7 +135,7 @@ export function startRumor2({
 } = {}) {
   if (!enabled) {
     // dark and silent: zero network, zero timers, zero authority
-    return { enabled: false, stop: () => {}, tickOnce: async () => {}, status: () => ({ enabled: false, state: 'DARK', lifecycle: 'DISABLED' }) };
+    return { enabled: false, stop: () => {}, tickOnce: async () => {}, status: () => ({ enabled: false, state: 'DARK', lifecycle: 'DISABLED' }), researchProjection: () => null };
   }
 
   const dir = () => path.join(dataDir(), 'rumor2');
@@ -1450,6 +1450,16 @@ export function startRumor2({
     stop,
     tickOnce: () => (inFlight = inFlight.then(() => tickOnce())),
     status: writeStatus,
+    // MARKET-LAB seam: a DETACHED read-only projection of the research strainer's as-of composite view and latest settled
+    // dossier record for one coin — already-computed frozen values, no collector internals, no subscription, no authority.
+    // Absent strainer => null (the consumer reports NOT_CONNECTED rather than inventing Social coverage).
+    researchProjection: (coin, { asOfTs = Math.floor(now()) } = {}) => {
+      if (!research) return null;
+      let composite = null; let dossierRecord = null;
+      try { composite = research.composite(coin, { asOfTs }); } catch (err) { composite = { error: boundedError(err.message) }; }
+      try { const hist = research.history(coin).filter((r) => Number.isSafeInteger(r.derivedKnownAtTs) && r.derivedKnownAtTs <= asOfTs); dossierRecord = hist.length ? Object.freeze({ ...hist[hist.length - 1], canonicalCoin: coin }) : null; } catch { dossierRecord = null; }
+      return Object.freeze({ canonicalCoin: coin, asOfTs, connected: true, composite: composite && !composite.error ? Object.freeze(composite) : null, dossierRecord });
+    },
     internals: { runtime, coverageEntries, social, socialX, research, get checkpoint() { return cp; }, get lifecycle() { return lifecycle; }, get durability() { return durability; } },
   };
 }

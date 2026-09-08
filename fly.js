@@ -21,6 +21,7 @@ import { rumor2CheckpointStore } from './persistence/rumor2-checkpoint.js';
 import { rumor2JournalStore } from './persistence/rumor2-journal.js';
 import { startMemoryMirror } from './memory/mirror.js';
 import { startPersistence } from './persistence/runtime.js';
+import { createDeepMarketSource } from './market-lab/deep-market-adapter.js';
 
 console.log('COBRA FLYING — tape + cockpit. Default answer is NO TRADE.');
 
@@ -84,7 +85,28 @@ startGovernance({ checkpointStore: govCheckpointStore() });
 // checkpoint store AND the authoritative event journal are injected here
 // (composition-root wiring; STORAGE ONLY — the local events.jsonl survives
 // only as the best-effort mirror the Memory tail consumes).
-startRumor2({
+// MARKET-LAB (documented OPT-IN; defaults change nothing): MARKET_RESEARCH_ENABLED=true creates the research owner +
+// case runtime under MARKET_RESEARCH_POLICY / MARKET_RESEARCH_SUBJECTS (JSON files outside cobra.config.json) with the
+// research root at MARKET_RESEARCH_ROOT (default <data dir>/market-research). It receives accepted Tape observations
+// through the tape's observer seam, reads the RUMOR collector's detached Social projection accessor (late-bound below),
+// queues research cases, and exposes read-only status / report FILES the cockpit serves. Paid provider / model calls
+// need the policy's own explicit authorization: nothing is inferred from RUMOR2 flags or trading controls. Authority NONE.
+let marketResearch = null; let rumor2Handle = null;
+if (process.env.MARKET_RESEARCH_ENABLED === 'true') {
+  try {
+    const { createResearchService, marketResearchRootFromEnv } = await import('./market-lab/service.js');
+    const { readPolicyFile, readSubjectsFile } = await import('./market-lab/commands.js');
+    if (!process.env.MARKET_RESEARCH_POLICY || !process.env.MARKET_RESEARCH_SUBJECTS) throw new Error('MARKET_RESEARCH_POLICY and MARKET_RESEARCH_SUBJECTS must name the policy / subjects JSON files');
+    marketResearch = createResearchService({ policy: readPolicyFile(process.env.MARKET_RESEARCH_POLICY), subjects: readSubjectsFile(process.env.MARKET_RESEARCH_SUBJECTS), env: process.env, researchRoot: marketResearchRootFromEnv(process.env, dataDir()), mode: 'INTEGRATED', log: console.log,
+      socialSource: (coin, opts) => (rumor2Handle && typeof rumor2Handle.researchProjection === 'function' ? rumor2Handle.researchProjection(coin, opts) : null) });
+    await marketResearch.start();
+    console.log(`MARKET RESEARCH active (research only, authority NONE): root ${marketResearch.paths.root}`);
+  } catch (err) {
+    console.error(`MARKET RESEARCH failed to start (dark; nothing else affected): ${err.message}`);
+    marketResearch = null;
+  }
+}
+rumor2Handle = startRumor2({
   checkpointStore: rumor2CheckpointStore(), journal: rumor2JournalStore(),
   // SOCIAL-4F: DISCOVERY_CATALOG injection — read-only accessors only (no mutable survey map, no
   // posture callback, no authority to start market-data collection); absent when the wide eye is
@@ -110,9 +132,13 @@ startRumor2({
   // tracks, full-horizon discipline); injected as a read accessor — Social never fetches market history or REST snapshots.
   researchStrainer: { enabled: true, marketSnapshot: (coin) => ({ snapshot: readCurrentFeatureSnapshot(coin), owner: readTapeStatus() }), currentSession: () => sessionDate(),
     historicalOutcomes: ({ symbol, fromTsMs, toTsMs }) => { const m = getChildhoodManifest(); if (!m) return null; return queryObservations({ symbol, fromTs: Math.floor(fromTsMs / 1000), toTs: Math.floor(toTsMs / 1000), limit: 4 }).map((o) => { const out = getOutcomeForObservation(o.id); return out ? childhoodOutcomeRecord(o, out, m) : null; }).filter(Boolean); } },
+    // MARKET-LAB: the deep-market adapter over the research owner's ACTUAL retained windows (validateDeepMarketWindow law);
+    // absent when the opt-in is off => the strainer keeps reporting absent deep-market evidence exactly as before.
+    deepMarketSource: marketResearch ? createDeepMarketSource(marketResearch.owner) : null,
 });
 try {
-  await runTape({}); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
+  await runTape({ observer: marketResearch ? marketResearch.observer : null }); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
+  if (marketResearch) { try { await marketResearch.stop(); } catch (err) { console.error(`MARKET RESEARCH stop failed: ${err.message}`); } }
   process.exit(0);
 } catch (err) {
   // Tape died hard (e.g. unwritable disk mid-run). Keep the cockpit serving
