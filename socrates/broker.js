@@ -10,7 +10,7 @@
 // and ZERO invented values. Results are diagnostics in the case envelope, never corroborating facts.
 import { deepFreeze, FAMILY_REGISTRY, familyMetricIds, canonicalDigest, subjectId } from '../market-lab/contracts.js';
 import { indicators } from '../market-lab/recipes.js';
-import { selectNativeSeries, selectionFacts, seriesKeyOf } from '../market-lab/native-series.js';
+import { selectNativeSeries, selectionFacts, seriesKeyOf, periodGrid } from '../market-lab/native-series.js';
 import { ALLOWED_MAX_AGE_MS, providerEnabled, paidCallAuthorized } from '../market-lab/policy.js';
 import { providersForFamily } from '../market-lab/registry.js';
 import { METRIC_MAP, metricInputMatch } from '../evidence/research-builder.js';
@@ -75,18 +75,6 @@ export function createBroker({ owner, policy, clock = () => Date.now(), cacheSiz
   // the per-metric support law (closeout P4). Returns { state: COMPLETE | PARTIAL, basis, reasons, ...facts }; never a row count.
   const MAX_MISSING_LISTED = 16;
   const INDICATOR_WARMUP = Object.freeze({ sma: (i) => i.sma[60] !== null, ema: (i) => i.ema[60] !== null, realized_volatility: (i) => i.realizedVolatility[60] !== null, atr14: (i) => i.atr14 !== null, rsi14: (i) => i.rsi14.state !== 'WARMUP', macd: (i) => i.macd !== null, bollinger20: (i) => i.bollinger20 !== null, prior_range: (i) => i.prior60 !== null, breakout_distance: (i) => i.prior20 !== null });
-  function periodGrid(list, startTs, endTs) {
-    // expected periods: every period of the observations' own grid that overlaps [startTs, endTs]; present: the distinct periods seen
-    const lengths = new Set(list.map((o) => o.periodEndTs - o.periodStartTs)); if (lengths.size !== 1) return { state: 'PARTIAL', reasons: ['MIXED_PERIODS'], periodMs: null, expectedPeriods: null, presentPeriods: null, missingPeriods: null, missingStarts: [] };
-    const periodMs = [...lengths][0]; if (!(periodMs > 0)) return { state: 'PARTIAL', reasons: ['PERIOD_MALFORMED'], periodMs, expectedPeriods: null, presentPeriods: null, missingPeriods: null, missingStarts: [] };
-    const anchor = Math.min(...list.map((o) => o.periodStartTs)); const off = (t) => (t - anchor) / periodMs;
-    if (list.some((o) => !Number.isInteger(off(o.periodStartTs)))) return { state: 'PARTIAL', reasons: ['PERIOD_GRID_MISALIGNED'], periodMs, expectedPeriods: null, presentPeriods: null, missingPeriods: null, missingStarts: [] };
-    if (endTs - startTs < periodMs) return { state: 'PARTIAL', reasons: ['INTERVAL_BELOW_RESOLUTION'], periodMs, expectedPeriods: null, presentPeriods: new Set(list.map((o) => o.periodStartTs)).size, missingPeriods: null, missingStarts: [] };
-    const kMin = Math.ceil((startTs - periodMs + 1 - anchor) / periodMs); const kMax = Math.floor((endTs - 1 - anchor) / periodMs); const expected = Math.max(0, kMax - kMin + 1);
-    const present = new Set(); for (const o of list) { const k = off(o.periodStartTs); if (k >= kMin && k <= kMax) present.add(k); }
-    const missing = expected - present.size; const missingStarts = []; if (missing > 0) for (let k = kMin; k <= kMax && missingStarts.length < MAX_MISSING_LISTED; k += 1) if (!present.has(k)) missingStarts.push(anchor + k * periodMs);
-    return { state: missing === 0 && expected > 0 ? 'COMPLETE' : 'PARTIAL', reasons: missing === 0 && expected > 0 ? [] : ['MISSING_PERIODS'], periodMs, expectedPeriods: expected, presentPeriods: present.size, missingPeriods: missing, missingStarts };
-  }
   function coverageSpan(records, kinds, subjectIds, family, startTs, endTs) {
     // positive OBSERVED coverage records of the metric's input kinds for the subject, merged; complete only when their union spans the interval
     const spans = records.filter((c) => c.state === 'OBSERVED' && c.family === family && (c.kind === null || kinds.includes(c.kind)) && subjectIds.has(c.subjectId)).map((c) => [c.startTs, c.endTs ?? endTs]).sort((a, b) => a[0] - b[0]);

@@ -37,7 +37,7 @@ export function seriesKeyOf(o) {
   }
 }
 const later = (a, b) => (a.knownAtTs !== b.knownAtTs ? (a.knownAtTs ?? 0) > (b.knownAtTs ?? 0) : a.sequence !== b.sequence ? (a.sequence ?? 0) > (b.sequence ?? 0) : s(a.observationId) > s(b.observationId));
-// select one admissible version per (series, period). Returns the selected observations (input order preserved), the
+// select one admissible version per (series, period). Returns periodic winners in canonical series/period order, the
 // per-series facts and bounded diagnostic counters. Non-periodic observations pass through untouched (they are events,
 // not samples of a period) and are counted in `passthrough`.
 export function selectNativeSeries(observations, { asOfTs = null } = {}) {
@@ -47,19 +47,58 @@ export function selectNativeSeries(observations, { asOfTs = null } = {}) {
     if (asOfTs !== null && o.knownAtTs > asOfTs) { lateExcluded += 1; continue; }
     const key = seriesKeyOf(o); if (!groups.has(key)) groups.set(key, new Map()); const periods = groups.get(key); const pk = `${o.periodStartTs}|${o.periodEndTs}`;
     const cur = periods.get(pk);
-    if (!cur) { periods.set(pk, { winner: o, digests: new Set([canonicalDigest(o.payload ?? null)]), envelopes: 1, repeats: 0, revisions: 0, conflict: false }); continue; }
-    cur.envelopes += 1; const d = canonicalDigest(o.payload ?? null);
-    if (cur.digests.has(d)) cur.repeats += 1; else { cur.digests.add(d); if (o.knownAtTs === cur.winner.knownAtTs) cur.conflict = true; else cur.revisions += 1; }
+    const d = canonicalDigest(o.payload ?? null);
+    if (!cur) { periods.set(pk, { winner: o, clocks: new Map([[o.knownAtTs, new Set([d])]]), envelopes: 1 }); continue; }
+    cur.envelopes += 1;
+    if (!cur.clocks.has(o.knownAtTs)) cur.clocks.set(o.knownAtTs, new Set());
+    cur.clocks.get(o.knownAtTs).add(d);
     if (later(o, cur.winner)) cur.winner = o;
   }
-  const chosen = new Set(); const series = {}; let repeats = 0; let revisions = 0; let conflicts = 0; let selectedPeriods = 0;
-  for (const [key, periods] of groups) {
+  const chosen = []; const series = {}; let repeats = 0; let revisions = 0; let conflicts = 0; let selectedPeriods = 0;
+  for (const [key, periods] of [...groups.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     let envelopes = 0; let r = 0; let v = 0; let c = 0;
-    for (const p of periods.values()) { chosen.add(p.winner); envelopes += p.envelopes; r += p.repeats; v += p.revisions; if (p.conflict) c += 1; }
+    for (const p of periods.values()) {
+      // Facts concern the admitted set, not traversal order. A repeat adds no new
+      // payload; a revision is a new payload first known after the first clock;
+      // a conflict is any clock carrying multiple payloads for this period.
+      const seen = new Set(); let first = true; let conflict = false;
+      for (const [, digests] of [...p.clocks.entries()].sort(([a], [b]) => a - b)) {
+        if (digests.size > 1) conflict = true;
+        for (const digest of digests) { if (!first && !seen.has(digest)) v += 1; seen.add(digest); }
+        first = false;
+      }
+      chosen.push(p.winner); envelopes += p.envelopes; r += p.envelopes - seen.size; if (conflict) c += 1;
+    }
     series[key] = { periods: periods.size, envelopes, repeats: r, revisions: v, conflicts: c }; repeats += r; revisions += v; conflicts += c; selectedPeriods += periods.size;
   }
-  const selected = observations.filter((o) => !isPeriodic(o) || chosen.has(o));
+  // Emit entries, never re-expand winners by filtering the original array: the
+  // same JS object can occur repeatedly before serialization/restart.
+  chosen.sort((a, b) => a.periodStartTs - b.periodStartTs || a.periodEndTs - b.periodEndTs || (seriesKeyOf(a) < seriesKeyOf(b) ? -1 : seriesKeyOf(a) > seriesKeyOf(b) ? 1 : 0) || (s(a.observationId) < s(b.observationId) ? -1 : 1));
+  const selected = [...passthrough, ...chosen];
   return deepFreeze({ law: NATIVE_SERIES_LAW, selected, series, seriesCount: groups.size, selectedPeriods, envelopes: observations.length - passthrough.length, repeats, revisions, conflicts, lateExcluded, passthrough: passthrough.length });
 }
 // the compact, closed disclosure of one selection for a component / broker result (never a score, never a ranking)
 export const selectionFacts = (sel) => ({ law: NATIVE_SERIES_LAW, envelopes: sel.envelopes, selectedPeriods: sel.selectedPeriods, series: sel.seriesCount, repeats: sel.repeats, revisions: sel.revisions, conflicts: sel.conflicts });
+
+// Callers must retain these partitions through arithmetic; the selector's flat
+// list is an inventory of winners, not permission to combine native series.
+export function partitionNativeSeries(observations, keyOf = seriesKeyOf) {
+  const groups = new Map();
+  for (const o of observations) { const key = keyOf(o); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(o); }
+  return [...groups.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, rows]) => rows);
+}
+
+// Shared bounded grid law for broker and numerical context.
+export function periodGrid(list, startTs, endTs) {
+    if (!list.length) return { state: 'PARTIAL', reasons: ['NO_PERIODS'], expectedPeriods: 0, presentPeriods: 0, missingPeriods: null, missingStarts: [] };
+    // expected periods: every period of the observations' own grid that overlaps [startTs, endTs]; present: the distinct periods seen
+    const lengths = new Set(list.map((o) => o.periodEndTs - o.periodStartTs)); if (lengths.size !== 1) return { state: 'PARTIAL', reasons: ['MIXED_PERIODS'], periodMs: null, expectedPeriods: null, presentPeriods: null, missingPeriods: null, missingStarts: [] };
+    const periodMs = [...lengths][0]; if (!(periodMs > 0)) return { state: 'PARTIAL', reasons: ['PERIOD_MALFORMED'], periodMs, expectedPeriods: null, presentPeriods: null, missingPeriods: null, missingStarts: [] };
+    const anchor = Math.min(...list.map((o) => o.periodStartTs)); const off = (t) => (t - anchor) / periodMs;
+    if (list.some((o) => !Number.isInteger(off(o.periodStartTs)))) return { state: 'PARTIAL', reasons: ['PERIOD_GRID_MISALIGNED'], periodMs, expectedPeriods: null, presentPeriods: null, missingPeriods: null, missingStarts: [] };
+    if (endTs - startTs < periodMs) return { state: 'PARTIAL', reasons: ['INTERVAL_BELOW_RESOLUTION'], periodMs, expectedPeriods: null, presentPeriods: new Set(list.map((o) => o.periodStartTs)).size, missingPeriods: null, missingStarts: [] };
+    const kMin = Math.ceil((startTs - periodMs + 1 - anchor) / periodMs); const kMax = Math.floor((endTs - 1 - anchor) / periodMs); const expected = Math.max(0, kMax - kMin + 1);
+    const present = new Set(); for (const o of list) { const k = off(o.periodStartTs); if (k >= kMin && k <= kMax) present.add(k); }
+    const missing = expected - present.size; const missingStarts = []; if (missing > 0) for (let k = kMin; k <= kMax && missingStarts.length < 64; k += 1) if (!present.has(k)) missingStarts.push(anchor + k * periodMs);
+    return { state: missing === 0 && expected > 0 ? 'COMPLETE' : 'PARTIAL', reasons: missing === 0 && expected > 0 ? [] : ['MISSING_PERIODS'], periodMs, expectedPeriods: expected, presentPeriods: present.size, missingPeriods: missing, missingStarts };
+  }

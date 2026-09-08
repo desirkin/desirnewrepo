@@ -2,8 +2,8 @@
 // no learned cutoff, no tuning against outcomes, no composite edge score, no invented probability. Each recipe has an
 // immutable id/version, exact input kinds, formula, window, units, required/optional leaves and machine-readable
 // nullability. Absent support yields null with a closed reason — never zero, never an extrapolation.
-import { deepFreeze, isFiniteNum, isTs, round } from './contracts.js';
-import { selectNativeSeries } from './native-series.js';
+import { deepFreeze, isFiniteNum, isTs, round, fail } from './contracts.js';
+import { selectNativeSeries, periodGrid } from './native-series.js';
 import { inWindow } from './time.js';
 
 export const RECIPE_SET_VERSION = 'market-lab-recipes-1';
@@ -245,7 +245,9 @@ export function liquidationTotals(events, { startTs, endTs, coverageKnown = true
   return deepFreeze({ recipeId: 'liquidation_notional_by_side', version: 1, startTs, endTs, events: n, unit: units.size ? [...units][0] : null, longNotional: n ? round(L) : null, shortNotional: n ? round(S) : null, unknownSideNotional: n ? round(U) : null, zeroMeaningful: coverageKnown, support: support(n ? 'COMPLETE' : coverageKnown ? 'COMPLETE_NO_EVENTS' : 'UNKNOWN_COVERAGE'), law: 'CAUSE_OF_A_LIQUIDATION_IS_NOT_OBSERVED' });
 }
 export function etfFlowSummary(flows) {
-  const agg = selectNativeSeries(flows.filter((f) => f.kind === 'ETF_FLOW' && f.payload.fund === null && isFiniteNum(f.payload.flowUsd))).selected.slice().sort((a, b) => a.periodStartTs - b.periodStartTs);
+  const selection = selectNativeSeries(flows.filter((f) => f.kind === 'ETF_FLOW' && f.payload.fund === null && isFiniteNum(f.payload.flowUsd)));
+  if (selection.seriesCount > 1) fail('INVALID_REQUEST', 'ETF flow summary requires one compatible aggregate series');
+  const agg = selection.selected.slice().sort((a, b) => a.periodStartTs - b.periodStartTs);
   if (!agg.length) return deepFreeze({ recipeId: 'etf_daily_flow', version: 1, latest: null, support: support('NO_FLOWS') });
   const last = agg[agg.length - 1]; const trailing = (n) => round(sum(agg.slice(-n).map((f) => f.payload.flowUsd)));
   return deepFreeze({ recipeId: 'etf_daily_flow', version: 1, asset: last.payload.asset, latest: { periodStartTs: last.periodStartTs, periodEndTs: last.periodEndTs, flowUsd: last.payload.flowUsd, estimate: last.payload.estimate, receivedTs: last.receivedTs }, trailing5: trailing(5), trailing20: trailing(20), days: agg.length, support: support('COMPLETE'), law: 'DAILY_FLOW_IS_SLOW_CONTEXT' });
@@ -277,8 +279,14 @@ export function relativeActivity(current, trailing, key) {
 // correction B: the indicator series is ONE selected version per native period (never envelope repeats); callers select under
 // the as-of law and pass exactly those inputs, and the recipe applies the same selector so closedBars can never count envelopes
 export function indicators(bars) {
-  const closed = selectNativeSeries(bars.filter((b) => b.payload.closed && isFiniteNum(b.payload.close))).selected.slice().sort((a, b) => a.periodStartTs - b.periodStartTs);
-  const c = closed.map((b) => b.payload.close); const h = closed.map((b) => b.payload.high); const l = closed.map((b) => b.payload.low); const n = c.length;
+  const selection = selectNativeSeries(bars.filter((b) => b.payload.closed && isFiniteNum(b.payload.close)));
+  if (selection.seriesCount > 1) fail('INVALID_REQUEST', 'indicators require one compatible native series');
+  const closed = selection.selected.slice().sort((a, b) => a.periodStartTs - b.periodStartTs);
+  const grid = closed.length ? periodGrid(closed, closed[0].periodStartTs, closed.at(-1).periodEndTs) : null;
+  const gap = grid !== null && grid.state !== 'COMPLETE';
+  // Retain observed clocks/counts, but never compress missing hours into a
+  // purported contiguous indicator window. The component carries PARTIAL.
+  const c = gap ? [] : closed.map((b) => b.payload.close); const h = closed.map((b) => b.payload.high); const l = closed.map((b) => b.payload.low); const n = c.length;
   const sma = (k) => (n >= k ? round(sum(c.slice(-k)) / k) : null);
   const ema = (k) => { if (n < k) return null; let e = sum(c.slice(0, k)) / k; const a = 2 / (k + 1); for (let i = k; i < n; i += 1) e = c[i] * a + e * (1 - a); return round(e); };
   const rets = []; for (let i = 1; i < n; i += 1) rets.push(Math.log(c[i] / c[i - 1]));
@@ -288,7 +296,7 @@ export function indicators(bars) {
   const macd = () => { if (n < 35) return null; const series = (k) => { const out = []; let e = sum(c.slice(0, k)) / k; out[k - 1] = e; const a = 2 / (k + 1); for (let i = k; i < n; i += 1) { e = c[i] * a + e * (1 - a); out[i] = e; } return out; }; const e12 = series(12); const e26 = series(26); const line = []; for (let i = 25; i < n; i += 1) line.push(e12[i] - e26[i]); if (line.length < 9) return null; let s = sum(line.slice(0, 9)) / 9; for (let i = 9; i < line.length; i += 1) s = line[i] * 0.2 + s * 0.8; const m = line[line.length - 1]; return { macd: round(m), signal: round(s), histogram: round(m - s) }; };
   const bb = () => { if (n < 20) return null; const w = c.slice(-20); const m = sum(w) / 20; const sd = populationStdev(w); return { middle: round(m), upper: round(m + 2 * sd), lower: round(m - 2 * sd), stdev: round(sd) }; };
   const prior = (k) => (n > k ? { high: Math.max(...h.slice(-k - 1, -1)), low: Math.min(...l.slice(-k - 1, -1)) } : null);
-  return deepFreeze({ recipeId: 'indicators', version: 1, closedBars: n, lastClosedEndTs: n ? closed[n - 1].periodEndTs : null, intervalMs: n ? closed[n - 1].payload.intervalMs : null, sma: { 5: sma(5), 20: sma(20), 60: sma(60) }, ema: { 5: ema(5), 20: ema(20), 60: ema(60) }, realizedVolatility: { 5: rv(5), 20: rv(20), 60: rv(60) }, atr14: atr(), rsi14: rsi(), macd: macd(), bollinger20: bb(), prior20: prior(20), prior60: prior(60), lastClose: n ? c[n - 1] : null, support: support(n ? 'COMPLETE' : 'NO_CLOSED_BARS', n < 60 ? ['WARMUP_INCOMPLETE_FOR_60'] : []), law: 'WARMUP_IS_NULL_NEVER_ZERO' });
+  return deepFreeze({ recipeId: 'indicators', version: 1, closedBars: closed.length, lastClosedEndTs: closed.length ? closed.at(-1).periodEndTs : null, intervalMs: closed.length ? closed.at(-1).payload.intervalMs : null, sma: { 5: sma(5), 20: sma(20), 60: sma(60) }, ema: { 5: ema(5), 20: ema(20), 60: ema(60) }, realizedVolatility: { 5: rv(5), 20: rv(20), 60: rv(60) }, atr14: atr(), rsi14: rsi(), macd: macd(), bollinger20: bb(), prior20: prior(20), prior60: prior(60), lastClose: closed.length ? closed.at(-1).payload.close : null, support: support(gap ? 'PARTIAL' : n ? 'COMPLETE' : 'NO_CLOSED_BARS', gap ? grid.reasons : n < 60 ? ['WARMUP_INCOMPLETE_FOR_60'] : []), law: 'WARMUP_IS_NULL_NEVER_ZERO' });
 }
 export function breakoutDistance(lastClose, ind, vwap = null) {
   const bps = (a, b) => (isFiniteNum(a) && isFiniteNum(b) && b > 0 ? round(1e4 * (a / b - 1)) : null);

@@ -63,7 +63,7 @@ const triple = obj({ 5: numN, 20: numN, 60: numN }); const nonnegTriple = obj({ 
 const indicatorsValue = obj({
   intervalMs: nullable(count), recipeId: literal('indicators'), version, closedBars: count, lastClosedEndTs: tsN, sma: triple, ema: triple, realizedVolatility: nonnegTriple, atr14: nonnegN,
   rsi14: obj({ value: nullable((v, w) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100 ? null : `${w}: must be an RSI in [0, 100]`)), state: en(['WARMUP', 'FLAT', 'NO_LOSSES', 'NO_GAINS', 'OK']) }), macd: nullable(obj({ macd: num, signal: num, histogram: num })), bollinger20: nullable(obj({ middle: num, upper: num, lower: num, stdev: nonneg })),
-  prior20: nullable(obj({ high: price, low: price })), prior60: nullable(obj({ high: price, low: price })), lastClose: priceN, support: supportOf(['COMPLETE', 'NO_CLOSED_BARS']), law: literal('WARMUP_IS_NULL_NEVER_ZERO'),
+  prior20: nullable(obj({ high: price, low: price })), prior60: nullable(obj({ high: price, low: price })), lastClose: priceN, support: supportOf(['COMPLETE', 'NO_CLOSED_BARS', 'PARTIAL']), law: literal('WARMUP_IS_NULL_NEVER_ZERO'),
   breakout: obj({ recipeId: literal('breakout_distance'), version, toPrior20High: numN, toPrior20Low: numN, toPrior60High: numN, toPrior60Low: numN, toVwap: numN, support: supportOf(['COMPLETE', 'INSUFFICIENT_BARS']) }),
   provisionalBar: nullable(obj({ periodStartTs: ts, close: price, state: literal('PROVISIONAL') })), completeness: obj({ bars: count, evictedBarsUntilTs: tsN, capReached: bool }, { selection: obj({ law: literal('ONE_SELECTED_VERSION_PER_NATIVE_PERIOD'), envelopes: count, selectedPeriods: count, series: count, repeats: count, revisions: count, conflicts: count }) }), venue: str(80),
 });
@@ -114,7 +114,7 @@ const NETWORK_METRICS = ['active_addresses', 'transaction_count', 'transfer_volu
 export const METRIC_SCHEMAS = deepFreeze(Object.fromEntries([
   ['window_ohlcv', { support: TRADE_WINDOW_SUPPORT, value: obj({ current: tradeWindowSchema, previous: tradeWindowSchema, venue: str(80), quote: str(20), changes: obj({ logReturn: numN, quoteNotional: numN, count: numN }) }) }],
   ['relative_activity', { support: ['COMPLETE', 'INSUFFICIENT_TRAILING'], value: obj({ notional: relativeActivitySchema, range: relativeActivitySchema, venue: str(80) }) }],
-  ['indicators', { support: ['COMPLETE', 'NO_CLOSED_BARS'], value: indicatorsValue }],
+  ['indicators', { support: ['COMPLETE', 'NO_CLOSED_BARS', 'PARTIAL'], value: indicatorsValue }],
   ['signed_notional', { support: FLOW_STATES, value: obj({ current: flowSchema, previous: flowSchema, stats: statsSchema, venue: str(80), quote: str(20) }) }],
   ['pressure_response_efficiency', { support: ['COMPLETE', 'PARTIAL'], value: pressureValue }],
   ['spread_bps', { support: ['FRESH', 'STALE', 'NO_BOOK'], value: spreadValue }],

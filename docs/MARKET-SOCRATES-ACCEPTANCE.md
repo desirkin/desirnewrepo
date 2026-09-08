@@ -384,10 +384,11 @@ journal, D-V01..V03). Every fixture is offline; the descriptor faults run in a c
 | D | `market-lab/context.js` (`COMPONENT_FAMILY`, `GENERIC_RECIPE_METRIC_FAMILY`, `componentBindingError`) applied by `contextError`, hence by the candidate publisher (`contextBundleError`), the reader, the verifier and evidence construction | supplied family, containing family, metric, recipe and recipe version are bound together by ONE closed table: a single-family recipe binds its own family; the intentionally generic `latest_observation` recipe (nominal family NETWORK_ACTIVITY) is bound explicitly for entity-flow / holder (ONCHAIN_ENTITY_FLOW) and DEX / DeFi (DEX_DEFI) metrics; matching summary copies, valid hashes or an available value never authorize a metric in a foreign family | IR-N08/N09, IR-C03, D-V01..V03, MC-V01..V06 | PASS |
 
 Compatibility decision (B). No recipe, context or evidence version changes: `RECIPE_SET_VERSION`, `RECIPES.indicators.version`
-and `CONTEXT_VERSION` are unchanged. A lawful artifact built from distinct bars derives byte-identically (the selector is the
-identity on such input); an older artifact whose bars were inflated by envelope repeats is exposed by the existing
-recomputation (`verify --resolve-inputs`) as a context-identity disagreement, which is the truthful outcome, not a
-reinterpretation of its bytes. The indicator component's `completeness` block gains a closed OPTIONAL `selection` disclosure
+and `CONTEXT_VERSION` are unchanged. For a complete compatible distinct-bar series, numerical indicator values are preserved.
+Artifact bytes and identities are NOT promised unchanged: new builds add selection metadata.
+Older artifacts may still pass structural validation, while input-resolved recomputation
+can report an identity difference caused by metadata or by changed numerical semantics.
+An identity difference alone is not proof of numerical corruption; stored bytes are not rewritten. The indicator component's `completeness` block gains a closed OPTIONAL `selection` disclosure
 (law, envelopes, selected periods, series, repeats, revisions, conflicts) that new builds always carry and earlier lawful
 artifacts may lack; it is disclosure, never a score or ranking.
 
@@ -424,3 +425,21 @@ owner supplies entitled keys, attested plan records and a dollar ceiling; nothin
 (INDEPENDENT ACCEPTANCE: PENDING). The Judge should re-run `node --test --test-concurrency=1` with the PostgreSQL test
 URL, `node --check` over every tracked script, diff the protected files against the baseline, and read the closeout
 suites against the ticket's acceptance ids before any seal.
+
+
+Native-history local repair after f6532bf (pending implementation-environment gates).
+One native winner is emitted once even when the same object is repeated. Diagnostic
+facts are computed by knowledge-clock sets, and periodic outputs are canonically
+ordered. Broker and indicators share the bounded period-grid law. A missing
+interval makes the indicator component PARTIAL with null contiguous-window
+calculations; observed counts, last close and input identities remain factual.
+Recipes reject mixed native series; context partitions indicator, ETF and
+cross-asset inputs before arithmetic. Multiple candidate target series withhold
+correlation instead of pooling quotes/providers. The indicator PARTIAL state is
+an additive accepted state in the current offline schema. Original source and
+v1 contracts are unchanged. New artifact identity reflects these code changes.
+
+NS-C01/C02 and NS-N01..N04 cover the independent witnesses. The linked native
+repair suite covers permutations, as-of selection, gap context round trips and
+separate series. Full PostgreSQL gates and remote delivery must be verified by
+the implementation owner; this appendix does not claim they ran locally.
