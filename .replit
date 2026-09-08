@@ -15,3 +15,9 @@ externalPort = 80
 [deployment]
 run = ["node", "fly.js"]
 deploymentTarget = "vm"
+
+[userenv]
+
+[userenv.shared]
+COINGECKO_DEMO_API_KEY = "CGNXtAKuBsvCwCuZXqheXKQe4X"
+FRED_API_KEY = "87480278685f3ba1a92ca31e2f975511"
