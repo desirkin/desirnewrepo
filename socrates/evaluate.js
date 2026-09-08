@@ -78,7 +78,7 @@ export async function runEvaluate({ policy, env = {}, out, liveModel = false, bu
     for (const c of corpus) {
       const recorded = liveModel ? null : ({ packet, revision, priorAnalysisId }) => (revision === 'FIRST_REPORT' ? { text: canonicalJson(c.scripted), packetId: packet.packetId, source: `corpus:${c.id}` } : c.scriptedRevised ? { text: canonicalJson(c.scriptedRevised(priorAnalysisId)), packetId: packet.packetId, source: `corpus:${c.id}:revised` } : null);
       const rt = createCaseRuntime({ policy, env, clock, log, fetchImpl, budgetDir, recordedResponse: recorded, identity, mode: policy.mode });
-      let r; try { r = await rt.runCase({ packet: c.packet }).done; } finally { rt.close(); }
+      let r; try { r = await rt.runCase({ packet: c.packet }).done; } finally { await rt.close(); }
       for (const a of r.attempts) { usage.attempts += 1; if (a.path === 'LIVE_MODEL') usage.live += 1; if (a.path === 'RECORDED_RESPONSE') usage.recorded += 1; usage.inputTokens += a.usage?.inputTokens ?? 0; usage.outputTokens += a.usage?.outputTokens ?? 0; usage.estimatedUsd += a.estimatedUsd ?? 0; usage.actualUsd += a.actualUsd ?? 0; }
       const row = { caseId: c.id, split: c.split, title: c.title, packetId: c.packet.packetId, status: r.status, path: r.attempts[0]?.path ?? null, diagnostic: r.manifest.diagnostic, analysisId: r.analysis?.analysisId ?? null, score: null, revised: null };
       if (r.analysis) row.score = scoreAnalysis({ analysis: r.analysis, packet: r.packet, rubric: c.rubric });

@@ -10,12 +10,18 @@
 //    acquisition; one consumer's cancellation never cancels another consumer's shared work.
 //  * A recorder hook captures every exchange (redacted request + response bytes) so a replay transport can serve the
 //    same bytes network-free; replay never fetches.
+//  * Closeout R01: an ADMISSION guard (market-lab/quota.js) is bound once; every dispatch is prechecked before queueing
+//    and reserved atomically at the dispatch boundary; a refused or unreserved request never touches the wire; the
+//    outcome settles / stays unresolved / is released (proven non-dispatch only). A transport constructed for
+//    production (requireAdmission) refuses every request until a guard is bound; a plain transport is a TEST SEAM.
 import { createHash } from 'node:crypto';
 import { parseStrictJson, sha256Hex, isTs, isCount, deepFreeze, fail } from './contracts.js';
 import { PROVIDERS, endpointOf } from './registry.js';
 import { RESOURCE_DEFAULTS } from './policy.js';
 
-export const FAILURE_KINDS = Object.freeze(['HOST_NOT_ALLOWED', 'ENDPOINT_UNKNOWN', 'CREDENTIAL_MISSING', 'CREDENTIAL_HOLD', 'BACKOFF_ACTIVE', 'TIMEOUT', 'NETWORK', 'CANCELLED', 'REDIRECT_REFUSED', 'HTTP_401', 'HTTP_403', 'HTTP_429', 'HTTP_4XX', 'HTTP_5XX', 'CONTENT_TYPE', 'BODY_TOO_LARGE', 'JSON_INVALID', 'SCHEMA', 'REPLAY_MISSING', 'STOPPED']);
+export const FAILURE_KINDS = Object.freeze(['HOST_NOT_ALLOWED', 'ENDPOINT_UNKNOWN', 'CREDENTIAL_MISSING', 'CREDENTIAL_HOLD', 'BACKOFF_ACTIVE', 'TIMEOUT', 'NETWORK', 'CANCELLED', 'REDIRECT_REFUSED', 'HTTP_401', 'HTTP_403', 'HTTP_429', 'HTTP_4XX', 'HTTP_5XX', 'CONTENT_TYPE', 'BODY_TOO_LARGE', 'JSON_INVALID', 'SCHEMA', 'REPLAY_MISSING', 'STOPPED', 'QUOTA_REFUSED', 'CONCURRENCY_REFUSED', 'ADMISSION_UNBOUND']);
+// dispatched-with-unknown-outcome kinds: the provider may have served (and billed) the request; never a proof of no charge
+export const AMBIGUOUS_FAILURE_KINDS = Object.freeze(['TIMEOUT', 'NETWORK', 'BODY_TOO_LARGE']);
 export const RETRY_AFTER_MIN_MS = 1_000;
 export const RETRY_AFTER_MAX_MS = 3_600_000;
 export const DEFAULT_BACKOFF_MS = 60_000;
@@ -65,6 +71,7 @@ const redactHeaders = (h) => Object.fromEntries(Object.entries(h).map(([k, v]) =
 // ---- limiter ---------------------------------------------------------------------------------------------------
 function createLimiter(max) {
   let active = 0; const waiters = [];
+  if (!(Number.isSafeInteger(max) && max > 0)) return { acquire: () => Promise.reject(Object.assign(new Error('zero concurrency slots'), { kind: 'CONCURRENCY_REFUSED' })), release: () => {}, snapshot: () => ({ active: 0, queued: 0, max: 0 }) };
   const next = () => { while (active < max && waiters.length) { const w = waiters.shift(); if (w.signal?.aborted) { w.reject(Object.assign(new Error('cancelled'), { kind: 'CANCELLED' })); continue; } active += 1; w.resolve(); } };
   return {
     acquire: (signal) => new Promise((resolve, reject) => { if (signal?.aborted) return reject(Object.assign(new Error('cancelled'), { kind: 'CANCELLED' })); waiters.push({ resolve, reject, signal }); signal?.addEventListener?.('abort', () => { const i = waiters.findIndex((w) => w.resolve === resolve); if (i >= 0) { waiters.splice(i, 1); reject(Object.assign(new Error('cancelled'), { kind: 'CANCELLED' })); } }, { once: true }); next(); }),
@@ -74,14 +81,16 @@ function createLimiter(max) {
 }
 
 // ---- HTTP transport ---------------------------------------------------------------------------------------------
-export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () => Date.now(), limits = RESOURCE_DEFAULTS, recorder = null, log = () => {}, credentialHoldMs = CREDENTIAL_HOLD_MS } = {}) {
+export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () => Date.now(), limits = RESOURCE_DEFAULTS, recorder = null, log = () => {}, credentialHoldMs = CREDENTIAL_HOLD_MS, admission = null, requireAdmission = false } = {}) {
   if (typeof fetchImpl !== 'function') fail('INVALID_REQUEST', 'a fetch implementation is required');
+  let guard = admission; // bound at most once; a production transport refuses until bound
+  const bindAdmission = (g) => { if (guard) fail('INVALID_REQUEST', 'an admission guard is already bound'); if (!g || typeof g.admit !== 'function' || typeof g.precheck !== 'function') fail('INVALID_REQUEST', 'admission guard malformed'); guard = g; };
   const global = createLimiter(limits.httpConcurrencyGlobal);
   const perProvider = new Map();
   const state = new Map(); // providerId -> { backoffUntil, credentialHoldUntil, counters }
   const inFlight = new Map(); // requestKey -> { promise, consumers, controller }
   let stopped = false; let seq = 0;
-  const st = (id) => { if (!state.has(id)) state.set(id, { backoffUntil: 0, credentialHoldUntil: 0, counters: { requests: 0, ok: 0, failed: 0, bytes: 0, credits: 0, shared: 0, lastRequestTs: null, byKind: {} } }); return state.get(id); };
+  const st = (id) => { if (!state.has(id)) state.set(id, { backoffUntil: 0, credentialHoldUntil: 0, counters: { requests: 0, ok: 0, failed: 0, bytes: 0, credits: 0, shared: 0, refused: 0, lastRequestTs: null, byKind: {} } }); return state.get(id); };
   const lim = (id, max) => { if (!perProvider.has(id)) perProvider.set(id, createLimiter(max)); return perProvider.get(id); };
   const failure = (kind, reason, extra = {}) => ({ ok: false, failure: { kind, reason: String(reason ?? kind).slice(0, 160), ...extra } });
 
@@ -128,26 +137,36 @@ export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () =
     } finally { clearTimeout(timer); if (signal) signal.removeEventListener('abort', onAbort); }
   }
 
-  async function request({ providerId, endpointId, pathParams, query, credential = null, method = null, body = null, headers = {}, signal = null, timeoutMs = limits.httpTimeoutMs, maxBytes = limits.transportResponseBytes, expectJson = true, credits = 1, share = true, maxConcurrency = limits.httpConcurrencyPerProvider }) {
+  async function request({ providerId, endpointId, pathParams, query, credential = null, method = null, body = null, headers = {}, signal = null, timeoutMs = limits.httpTimeoutMs, maxBytes = limits.transportResponseBytes, expectJson = true, share = true, maxConcurrency = limits.httpConcurrencyPerProvider, purpose = null }) {
     if (stopped) return failure('STOPPED', 'transport stopped');
+    if (requireAdmission && !guard) return failure('ADMISSION_UNBOUND', 'production transport has no admission guard bound — no dispatch');
     const plan = planRequest({ providerId, endpointId, pathParams, query, credential, method, body, headers });
     if (!plan.ok) return plan;
     const s = st(providerId); const now = clock();
     if (s.credentialHoldUntil > now) return failure('CREDENTIAL_HOLD', 'a rejected credential is not retried', { holdUntilTs: s.credentialHoldUntil, redactedUrl: plan.redactedUrl });
     if (s.backoffUntil > now) return failure('BACKOFF_ACTIVE', 'provider backoff in force', { backoffUntilTs: s.backoffUntil, redactedUrl: plan.redactedUrl });
-    // in-flight coalescing: same redacted request key => one acquisition; cancellation is per consumer
+    // in-flight coalescing: same redacted request key => one acquisition AND one reservation; cancellation is per consumer
     if (share && inFlight.has(plan.requestKey)) { const f = inFlight.get(plan.requestKey); f.consumers += 1; s.counters.shared += 1; return waitShared(f, signal); }
+    // cheap refusal BEFORE queueing: disabled / zero / unknown conditions never wait in a limiter (no reservation yet)
+    const adm = { providerId, endpointId, query: query ?? null, requestKey: plan.requestKey, purpose: purpose ?? undefined };
+    if (guard) { const pre = guard.precheck(adm); if (!pre.ok) { s.counters.refused += 1; return failure('QUOTA_REFUSED', `admission refused: ${pre.reasons.join(',')}`, { reasons: pre.reasons, redactedUrl: plan.redactedUrl }); } maxConcurrency = Number.isSafeInteger(pre.maxConcurrency) ? pre.maxConcurrency : maxConcurrency; }
+    if (!(Number.isSafeInteger(maxConcurrency) && maxConcurrency > 0)) { s.counters.refused += 1; return failure('CONCURRENCY_REFUSED', 'zero concurrency slots for this provider', { redactedUrl: plan.redactedUrl }); }
     const entry = { consumers: 1, controller: new AbortController(), promise: null };
     if (share) inFlight.set(plan.requestKey, entry);
     entry.promise = (async () => {
       const requestId = `req-${(seq += 1).toString(36)}-${sha256Hex(plan.requestKey).slice(0, 12)}`;
-      let gotGlobal = false; let gotProv = false; const pl = lim(providerId, maxConcurrency);
+      let gotGlobal = false; let gotProv = false; const pl = lim(providerId, maxConcurrency); let reservationId = null;
       try {
         await global.acquire(entry.controller.signal); gotGlobal = true;
         await pl.acquire(entry.controller.signal); gotProv = true;
-        s.counters.requests += 1; s.counters.credits += credits; s.counters.lastRequestTs = clock();
+        // the atomic admission at the dispatch boundary: recheck + durable reservation, THEN the wire (never the reverse)
+        let charge = null;
+        if (guard) { const a = guard.admit(adm); if (!a.ok) { s.counters.refused += 1; return failure('QUOTA_REFUSED', `admission refused: ${a.reasons.join(',')}`, { reasons: a.reasons, redactedUrl: plan.redactedUrl, requestId }); } reservationId = a.reservationId; charge = a.charge; }
+        if (entry.controller.signal.aborted) { if (reservationId) { guard.release(reservationId, 'CANCELLED_BEFORE_DISPATCH'); reservationId = null; } return failure('CANCELLED', 'cancelled before dispatch', { requestId }); }
+        s.counters.requests += 1; s.counters.credits += charge ? charge.credits : 0; s.counters.lastRequestTs = clock();
         const r = await perform(plan, { signal: entry.controller.signal, timeoutMs, maxBytes, expectJson, requestId, providerId });
         const kind = r.ok ? 'OK' : r.failure.kind; s.counters.byKind[kind] = (s.counters.byKind[kind] ?? 0) + 1;
+        if (reservationId) { if (r.ok) guard.settle(reservationId, { ok: true, status: r.status }); else if (r.failure.kind === 'CANCELLED' && r.failure.reason === 'cancelled before dispatch') guard.release(reservationId, 'CANCELLED_BEFORE_DISPATCH'); else if (AMBIGUOUS_FAILURE_KINDS.includes(r.failure.kind) || r.failure.kind === 'CANCELLED') guard.unresolved(reservationId, r.failure.kind); else guard.settle(reservationId, { ok: false, status: r.failure.status ?? null }); reservationId = null; }
         if (r.ok) { s.counters.ok += 1; s.counters.bytes += r.bytes.byteLength; }
         else {
           s.counters.failed += 1;
@@ -156,7 +175,7 @@ export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () =
         }
         if (recorder) { try { recorder({ requestKey: plan.requestKey, providerId, endpointId, method: plan.method, redactedUrl: plan.redactedUrl, headers: redactHeaders(plan.headers), body: plan.body, ok: r.ok, status: r.status ?? r.failure?.status ?? null, failureKind: r.ok ? null : r.failure.kind, bytesSha256: r.sha256 ?? r.failure?.sha256 ?? null, bytes: r.bytes ?? r.failure?.bytes ?? null, contentType: r.contentType ?? r.failure?.contentType ?? null, receivedTs: r.receivedTs ?? r.failure?.receivedTs ?? clock(), requestId }); } catch (err) { log(`recorder failed (contained): ${String(err?.message ?? err).slice(0, 120)}`); } }
         return Object.freeze(r); // shallow: the body Buffer cannot be frozen
-      } catch (err) { s.counters.failed += 1; return failure(err?.kind === 'CANCELLED' ? 'CANCELLED' : 'NETWORK', err?.kind ?? err?.name ?? 'failure'); }
+      } catch (err) { if (reservationId) { guard.unresolved(reservationId, 'INTERNAL'); reservationId = null; } s.counters.failed += 1; return failure(err?.kind === 'CANCELLED' ? 'CANCELLED' : err?.kind === 'CONCURRENCY_REFUSED' ? 'CONCURRENCY_REFUSED' : 'NETWORK', err?.kind ?? err?.name ?? 'failure'); }
       finally { if (gotProv) pl.release(); if (gotGlobal) global.release(); if (share) inFlight.delete(plan.requestKey); }
     })();
     return waitShared(entry, signal);
@@ -170,7 +189,7 @@ export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () =
   function leave(entry) { entry.consumers -= 1; if (entry.consumers <= 0) entry.controller.abort(); }
 
   return {
-    request,
+    request, bindAdmission, guarded: () => guard !== null,
     accounting: () => deepFreeze(Object.fromEntries([...state.entries()].map(([id, s]) => [id, { ...s.counters, byKind: { ...s.counters.byKind }, backoffUntilTs: s.backoffUntil || null, credentialHoldUntilTs: s.credentialHoldUntil || null }]))),
     resetCredentialHold: (providerId) => { st(providerId).credentialHoldUntil = 0; },
     limiter: () => ({ global: global.snapshot(), providers: Object.fromEntries([...perProvider.entries()].map(([k, v]) => [k, v.snapshot()])) }),

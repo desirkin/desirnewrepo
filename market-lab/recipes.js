@@ -51,22 +51,54 @@ export const mad = (values) => { const m = median(values); if (m === null) retur
 export const populationStdev = (values) => { if (!values.length) return null; const m = sum(values) / values.length; return Math.sqrt(sum(values.map((v) => (v - m) ** 2)) / values.length); };
 const support = (state, reasons = [], extra = {}) => ({ state, reasons, ...extra });
 
-// ---- 7.1 trade windows ----------------------------------------------------------------------------------------------
-export function tradeWindow(trades, { startTs, endTs, evictedUntilTs = null, coverageGap = false }) {
+// ---- 7.1 trade windows (closeout R02: POSITIVE interval coverage is an input, never inferred) -------------------------------
+export const INTERVAL_COVERAGE_STATES = Object.freeze(['COMPLETE', 'PARTIAL', 'UNKNOWN']);
+export const TRADE_WINDOW_SUPPORT = Object.freeze(['COMPLETE', 'COMPLETE_NO_TRADES', 'PARTIAL', 'UNKNOWN_COVERAGE']);
+// Interval coverage for ONE subject / channel from its coverage records: positive facts (SUBSCRIBED intervals from the
+// provider's channel acknowledgement until the next GAP / end; OBSERVED spans of a bounded history acquisition) minus
+// negative facts (GAP / DROPPED / EVICTED / FAILED inside the interval). COMPLETE only when the positive union covers the
+// whole (startTs, endTs] and no negative fact intersects it; PARTIAL when some positive coverage or a negative fact
+// intersects; UNKNOWN when no positive fact reaches the interval. Every basis record id is returned (bounded).
+export function intervalCoverage(records, { startTs, endTs, asOfTs = endTs }) {
+  const recs = [...records].filter((c) => c && isTs(c.startTs)).sort((a, b) => a.startTs - b.startTs);
+  const clip = (a, b) => [Math.max(a, startTs), Math.min(b, endTs)];
+  const negatives = []; const positives = []; const basis = new Set(); const reasons = new Set();
+  const ends = recs.filter((c) => c.state === 'GAP' || c.state === 'FAILED' || c.state === 'DROPPED' || c.state === 'EVICTED').map((c) => c.startTs);
+  for (const c of recs) {
+    if (c.state === 'SUBSCRIBED') { const nextEnd = ends.find((t) => t > c.startTs) ?? null; const end = Math.min(c.endTs ?? asOfTs, nextEnd ?? asOfTs, asOfTs); if (end > c.startTs) positives.push([c.startTs, end, c.coverageId]); }
+    else if (c.state === 'OBSERVED' && isTs(c.endTs) && c.endTs > c.startTs) positives.push([c.startTs, c.endTs, c.coverageId]);
+    else if (c.state === 'GAP' || c.state === 'FAILED' || c.state === 'DROPPED' || c.state === 'EVICTED') { const nextStart = recs.find((x) => x.state === 'SUBSCRIBED' && x.startTs > c.startTs)?.startTs ?? null; const end = c.endTs ?? nextStart ?? asOfTs; negatives.push([c.startTs, Math.max(end, c.startTs), c.coverageId, c.state, c.reasonCodes ?? []]); }
+  }
+  let coveredMs = 0; const merged = positives.map(([a, b, id]) => [...clip(a, b), id]).filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
+  let cursor = startTs; for (const [a, b, id] of merged) { basis.add(id); const from = Math.max(a, cursor); if (b > from) { coveredMs += b - from; cursor = b; } }
+  // a window is (startTs, endTs]: a negative fact touches it only when it overlaps that half-open span — an instant boundary belongs to
+  // the earlier interval (a subscription ending exactly at endTs covered the window; a gap opening exactly at endTs did not touch it)
+  const hits = negatives.filter(([a, b]) => a < endTs && b > startTs);
+  for (const [, , id, state, rc] of hits) { basis.add(id); reasons.add(state === 'EVICTED' ? 'RESOURCE_EVICTED' : state === 'DROPPED' ? 'QUEUE_DROPPED' : 'COVERAGE_GAP_INSIDE_WINDOW'); for (const r of rc) reasons.add(String(r).slice(0, 64)); }
+  const span = endTs - startTs; const state = coveredMs >= span && !hits.length ? 'COMPLETE' : coveredMs > 0 || hits.length ? 'PARTIAL' : 'UNKNOWN';
+  return deepFreeze({ state, coveredMs: Math.min(coveredMs, span), spanMs: span, gaps: hits.length, reasons: [...reasons].slice(0, 8), basis: [...basis].slice(0, 16) });
+}
+export function tradeWindow(trades, { startTs, endTs, evictedUntilTs = null, coverage = null, coverageGap = false }) {
   const inside = trades.filter((t) => inWindow(t.sourceEventTs, startTs, endTs)).sort((a, b) => a.sourceEventTs - b.sourceEventTs || a.sequence - b.sequence);
-  const unknownCoverage = coverageGap || (evictedUntilTs !== null && evictedUntilTs > startTs);
+  const cov = coverage && INTERVAL_COVERAGE_STATES.includes(coverage.state) ? coverage : { state: 'UNKNOWN', reasons: [], basis: [] };
+  const evicted = evictedUntilTs !== null && evictedUntilTs > startTs;
+  const state = coverageGap || evicted ? (cov.state === 'UNKNOWN' ? 'UNKNOWN_COVERAGE' : 'PARTIAL') : cov.state === 'COMPLETE' ? (inside.length ? 'COMPLETE' : 'COMPLETE_NO_TRADES') : cov.state === 'PARTIAL' ? 'PARTIAL' : 'UNKNOWN_COVERAGE';
+  const complete = state === 'COMPLETE' || state === 'COMPLETE_NO_TRADES';
+  const reasons = [...new Set([...(cov.reasons ?? []), ...(evicted ? ['RESOURCE_EVICTED'] : []), ...(coverageGap ? ['COVERAGE_GAP_INSIDE_WINDOW'] : []), ...(state === 'UNKNOWN_COVERAGE' ? ['NO_POSITIVE_INTERVAL_COVERAGE'] : [])])].slice(0, 8);
   const totalNotional = sum(inside.map((t) => t.payload.quoteNotional)); const qty = sum(inside.map((t) => t.payload.qty));
   const known = { BUY: 0, SELL: 0, UNKNOWN: 0 }; const counts = { BUY: 0, SELL: 0, UNKNOWN: 0 };
   for (const t of inside) { known[t.payload.takerSide] += t.payload.quoteNotional; counts[t.payload.takerSide] += 1; }
   const prices = inside.map((t) => t.payload.price); const sizes = inside.map((t) => t.payload.qty).sort((a, b) => a - b);
   const gaps = []; for (let i = 1; i < inside.length; i += 1) gaps.push(inside[i].sourceEventTs - inside[i - 1].sourceEventTs);
   const kn = known.BUY + known.SELL;
-  const base = { recipeId: 'window_ohlcv', version: 1, startTs, endTs, windowMs: endTs - startTs, count: unknownCoverage ? null : inside.length, observedCount: inside.length, volumeBase: unknownCoverage ? null : round(qty), quoteNotional: unknownCoverage ? null : round(totalNotional), vwap: qty > 0 ? round(totalNotional / qty) : null, open: prices.length ? prices[0] : null, high: prices.length ? Math.max(...prices) : null, low: prices.length ? Math.min(...prices) : null, close: prices.length ? prices[prices.length - 1] : null };
+  // interval TOTALS (count / volume / notional) exist only over a complete interval; observed values are always labelled observed
+  const base = { recipeId: 'window_ohlcv', version: 1, startTs, endTs, windowMs: endTs - startTs, count: complete ? inside.length : null, observedCount: inside.length, volumeBase: complete ? round(qty) : null, quoteNotional: complete ? round(totalNotional) : null, observedNotional: round(totalNotional), vwap: qty > 0 ? round(totalNotional / qty) : null, open: prices.length ? prices[0] : null, high: prices.length ? Math.max(...prices) : null, low: prices.length ? Math.min(...prices) : null, close: prices.length ? prices[prices.length - 1] : null, coverage: { state: cov.state, basis: (cov.basis ?? []).slice(0, 8) } };
   base.range = base.high !== null ? round(base.high - base.low) : null;
   base.closeLocation = base.high !== null && base.high > base.low ? round((base.close - base.low) / (base.high - base.low)) : null;
   base.logReturn = base.open !== null ? round(Math.log(base.close / base.open)) : null;
-  base.support = support(unknownCoverage ? 'PARTIAL' : inside.length ? 'COMPLETE' : 'COMPLETE_NO_TRADES', unknownCoverage ? ['COVERAGE_GAP_INSIDE_WINDOW'] : []);
-  const flow = { recipeId: 'signed_notional', version: 1, buyNotional: round(known.BUY), sellNotional: round(known.SELL), unknownNotional: round(known.UNKNOWN), buyCount: counts.BUY, sellCount: counts.SELL, unknownCount: counts.UNKNOWN, signedNotional: kn > 0 ? round(known.BUY - known.SELL) : null, knownSideImbalance: kn > 0 ? round((known.BUY - known.SELL) / kn) : null, knownSideFraction: totalNotional > 0 ? round(kn / totalNotional) : null, support: support(unknownCoverage ? 'PARTIAL' : kn === 0 ? 'NO_KNOWN_SIDE' : counts.UNKNOWN ? 'KNOWN_SUBSET' : 'COMPLETE', [...(unknownCoverage ? ['COVERAGE_GAP_INSIDE_WINDOW'] : []), ...(counts.UNKNOWN ? ['UNKNOWN_SIDES_EXCLUDED'] : [])]) };
+  base.support = support(state, reasons);
+  const flowState = !complete ? (state === 'PARTIAL' ? 'PARTIAL' : 'UNKNOWN_COVERAGE') : kn === 0 ? 'NO_KNOWN_SIDE' : counts.UNKNOWN ? 'KNOWN_SUBSET' : 'COMPLETE';
+  const flow = { recipeId: 'signed_notional', version: 1, buyNotional: round(known.BUY), sellNotional: round(known.SELL), unknownNotional: round(known.UNKNOWN), buyCount: counts.BUY, sellCount: counts.SELL, unknownCount: counts.UNKNOWN, signedNotional: kn > 0 ? round(known.BUY - known.SELL) : null, knownSideImbalance: kn > 0 ? round((known.BUY - known.SELL) / kn) : null, knownSideFraction: totalNotional > 0 ? round(kn / totalNotional) : null, observedOnly: !complete, support: support(flowState, [...new Set([...reasons, ...(counts.UNKNOWN ? ['UNKNOWN_SIDES_EXCLUDED'] : [])])].slice(0, 8)) };
   const stats = { recipeId: 'trade_size_stats', version: 1, sizeMedian: sizes.length ? nearestRank(sizes, 50) : null, sizeP90: sizes.length ? nearestRank(sizes, 90) : null, interarrivalMeanMs: gaps.length ? round(sum(gaps) / gaps.length, 3) : null, interarrivalMedianMs: gaps.length ? median(gaps) : null, clockPrecisionMs: inside.length ? (inside.every((t) => t.sourceEventTs % 1000 === 0) ? 1000 : 1) : null, support: support(gaps.length ? 'COMPLETE' : 'INSUFFICIENT') };
   return deepFreeze({ ...base, flow, stats });
 }
@@ -149,8 +181,14 @@ export function fundingNative(tick) {
   if (!['FRACTION_PER_INTERVAL', 'ABSOLUTE_QUOTE_PER_CONTRACT_PER_INTERVAL'].includes(p.fundingUnit) || !isTs(p.fundingIntervalMs)) return deepFreeze({ recipeId: 'funding_native', version: 1, value: null, support: support('UNIT_REJECTED') });
   return deepFreeze({ recipeId: 'funding_native', version: 1, value: p.fundingRateNative, unit: p.fundingUnit, intervalMs: p.fundingIntervalMs, relative: p.fundingRelative, payerConvention: p.fundingRateNative > 0 ? 'LONGS_PAY_SHORTS' : p.fundingRateNative < 0 ? 'SHORTS_PAY_LONGS' : 'ZERO', settlementCurrency: p.settlementCurrency, linearity: p.linearity, annualized: null, support: support('COMPLETE'), law: 'NO_SILENT_ANNUALIZATION' });
 }
-export function optionsSurface(ticks, { admittedCap = 512, censusComplete = true } = {}) {
-  const usable = ticks.filter((t) => t.kind === 'OPTION_TICK'); const byExpiry = new Map();
+export const OPTIONS_CENSUS_BASES = Object.freeze(['CENSUS_RECORD', 'NONE']);
+// closeout R02: census completeness is an INPUT established by a recorded instrument census (never a default); ticks are
+// deduplicated by full instrument / specification / source identity keeping the latest known record (a summary tick and its
+// enriched ticker are ONE contract); a ratio over an admitted subset is labelled as that subset; missing OI is never summed as zero
+export function optionsSurface(ticks, { admittedCap = 512, censusComplete = false, census = null } = {}) {
+  const latest = new Map();
+  for (const t of ticks.filter((x) => x.kind === 'OPTION_TICK')) { const k = `${t.provider}:${t.subject.venue}:${t.subject.instrumentId}:${t.subject.specificationId}`; const cur = latest.get(k); if (!cur || t.knownAtTs > cur.knownAtTs || (t.knownAtTs === cur.knownAtTs && t.sequence > cur.sequence)) latest.set(k, t); }
+  const usable = [...latest.values()]; const byExpiry = new Map();
   for (const t of usable) { const k = t.payload.expiryTs; if (!byExpiry.has(k)) byExpiry.set(k, []); byExpiry.get(k).push(t); }
   const source = new Set(usable.map((t) => `${t.provider}:${t.subject.venue}:${t.payload.settlementCurrency}:${t.payload.underlyingIndex}`));
   if (!usable.length) return deepFreeze({ recipeId: 'atm_iv_term', version: 1, term: [], support: support('NO_OPTIONS') });
@@ -163,12 +201,18 @@ export function optionsSurface(ticks, { admittedCap = 512, censusComplete = true
     const call25 = calls.map((t) => ({ t, d: Math.abs(t.payload.delta - 0.25) })).sort((a, b) => a.d - b.d || (a.t.subject.instrumentId < b.t.subject.instrumentId ? -1 : 1))[0] ?? null;
     const put25 = puts.map((t) => ({ t, d: Math.abs(t.payload.delta + 0.25) })).sort((a, b) => a.d - b.d || (a.t.subject.instrumentId < b.t.subject.instrumentId ? -1 : 1))[0] ?? null;
     const atmIv = atm ? atm.t.payload.markIv : null; const cIv = call25 ? call25.t.payload.markIv : null; const pIv = put25 ? put25.t.payload.markIv : null;
-    const putOi = sum(list.filter((t) => t.payload.optionType === 'PUT').map((t) => t.payload.openInterest ?? 0)); const callOi = sum(list.filter((t) => t.payload.optionType === 'CALL').map((t) => t.payload.openInterest ?? 0));
-    const putVol = sum(list.filter((t) => t.payload.optionType === 'PUT').map((t) => t.payload.volume24h ?? 0)); const callVol = sum(list.filter((t) => t.payload.optionType === 'CALL').map((t) => t.payload.volume24h ?? 0));
+    const putsAll = list.filter((t) => t.payload.optionType === 'PUT'); const callsAll = list.filter((t) => t.payload.optionType === 'CALL');
+    const oiKnown = list.every((t) => isFiniteNum(t.payload.openInterest)); const volKnown = list.every((t) => isFiniteNum(t.payload.volume24h));
+    const putOi = sum(putsAll.map((t) => t.payload.openInterest ?? 0)); const callOi = sum(callsAll.map((t) => t.payload.openInterest ?? 0));
+    const putVol = sum(putsAll.map((t) => t.payload.volume24h ?? 0)); const callVol = sum(callsAll.map((t) => t.payload.volume24h ?? 0));
     const ivSpread = atm && isFiniteNum(atm.t.payload.bidIv) && isFiniteNum(atm.t.payload.askIv) ? round(atm.t.payload.askIv - atm.t.payload.bidIv) : null;
-    term.push({ expiryTs, contracts: list.length, atm: atm ? { instrumentId: atm.t.subject.instrumentId, strike: atm.t.payload.strike, logDistance: round(atm.d), markIv: atmIv } : null, call25: call25 ? { instrumentId: call25.t.subject.instrumentId, delta: call25.t.payload.delta, deltaDistance: round(call25.d), markIv: cIv } : null, put25: put25 ? { instrumentId: put25.t.subject.instrumentId, delta: put25.t.payload.delta, deltaDistance: round(put25.d), markIv: pIv } : null, riskReversal25d: isFiniteNum(cIv) && isFiniteNum(pIv) ? round(cIv - pIv) : null, butterfly25d: isFiniteNum(cIv) && isFiniteNum(pIv) && isFiniteNum(atmIv) ? round((cIv + pIv) / 2 - atmIv) : null, atmIvBidAskSpread: ivSpread, putCallOiRatio: censusComplete && callOi > 0 ? round(putOi / callOi) : null, putCallVolumeRatio: censusComplete && callVol > 0 ? round(putVol / callVol) : null, support: support(censusComplete ? 'COMPLETE_ADMITTED_SCOPE' : 'PARTIAL_CENSUS') });
+    const wholeChain = censusComplete && (census?.omitted ?? 0) === 0 && (census?.unticked ?? 0) === 0; const ratioScope = wholeChain ? 'WHOLE_CHAIN' : 'ADMITTED_SUBSET';
+    const greeksMissing = withIv.filter((t) => !isFiniteNum(t.payload.delta)).length;
+    const reasons = [...(censusComplete ? [] : ['CENSUS_INCOMPLETE']), ...(wholeChain ? [] : ['ADMITTED_SUBSET']), ...((census?.unticked ?? 0) > 0 ? ['TICKS_MISSING'] : []), ...(oiKnown ? [] : ['OI_MISSING']), ...(greeksMissing ? ['GREEKS_MISSING'] : []), ...(list.length > withIv.length ? ['IV_MISSING'] : [])];
+    term.push({ expiryTs, contracts: list.length, atm: atm ? { instrumentId: atm.t.subject.instrumentId, strike: atm.t.payload.strike, logDistance: round(atm.d), markIv: atmIv } : null, call25: call25 ? { instrumentId: call25.t.subject.instrumentId, delta: call25.t.payload.delta, deltaDistance: round(call25.d), markIv: cIv } : null, put25: put25 ? { instrumentId: put25.t.subject.instrumentId, delta: put25.t.payload.delta, deltaDistance: round(put25.d), markIv: pIv } : null, riskReversal25d: isFiniteNum(cIv) && isFiniteNum(pIv) ? round(cIv - pIv) : null, butterfly25d: isFiniteNum(cIv) && isFiniteNum(pIv) && isFiniteNum(atmIv) ? round((cIv + pIv) / 2 - atmIv) : null, atmIvBidAskSpread: ivSpread, putCallOiRatio: oiKnown && callOi > 0 ? round(putOi / callOi) : null, putCallVolumeRatio: volKnown && callVol > 0 ? round(putVol / callVol) : null, ratioScope, greeksMissing, support: support(reasons.length ? (censusComplete ? 'PARTIAL_ADMITTED_SCOPE' : 'PARTIAL_CENSUS') : 'COMPLETE_ADMITTED_SCOPE', reasons) });
   }
-  return deepFreeze({ recipeId: 'atm_iv_term', version: 1, scope: [...source][0], admitted: usable.length, admittedCap, censusComplete, term, law: 'NO_DEALER_GAMMA_INFERENCE_FROM_PUBLIC_OI', support: support(usable.length > admittedCap ? 'OVER_CAP' : 'COMPLETE') });
+  const censusFacts = { complete: censusComplete === true, basis: census?.basis ?? 'NONE', total: census?.total ?? null, admitted: usable.length, omitted: census?.omitted ?? null, rejected: census?.rejected ?? null, unticked: census?.unticked ?? null, censusId: census?.censusId ?? null, censusKnownAtTs: census?.knownAtTs ?? null };
+  return deepFreeze({ recipeId: 'atm_iv_term', version: 1, scope: [...source][0], admitted: usable.length, admittedCap, censusComplete: censusComplete === true, census: censusFacts, term, law: 'NO_DEALER_GAMMA_INFERENCE_FROM_PUBLIC_OI', support: support(usable.length > admittedCap ? 'OVER_CAP' : !censusComplete ? 'PARTIAL_CENSUS' : (census?.omitted ?? 0) > 0 || (census?.unticked ?? 0) > 0 ? 'ADMITTED_SUBSET' : 'COMPLETE', [...(censusComplete ? [] : ['CENSUS_INCOMPLETE']), ...((census?.omitted ?? 0) > 0 ? ['ADMISSION_CAP'] : []), ...((census?.unticked ?? 0) > 0 ? ['TICKS_MISSING'] : [])]) });
 }
 // deterministic admission of a large chain: nearest expiries first, then strikes nearest the index, capped
 export function admitOptions(ticks, { cap = 512, nowTs }) {

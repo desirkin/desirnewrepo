@@ -6,7 +6,7 @@
 // application's trading cost / ledger truth.
 import { openSync, closeSync, writeSync, fsyncSync, mkdirSync, readFileSync, existsSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
-import { parseStrictJson, fail, deepFreeze, isFiniteNum } from '../market-lab/contracts.js';
+import { parseStrictJson, fail, deepFreeze, isFiniteNum, isCount, isTs, isPlainObject } from '../market-lab/contracts.js';
 import { writeAll } from '../market-lab/store.js';
 
 export const BUDGET_JOURNAL_VERSION = 'socrates-budget-journal-1';
@@ -15,9 +15,24 @@ export const MAX_JOURNAL_BYTES = 16 * 1024 * 1024;
 const dayKey = (ts) => new Date(ts).toISOString().slice(0, 10);
 const monthKey = (ts) => new Date(ts).toISOString().slice(0, 7);
 
-// uncached reservation: input tokens (actual count when available, else conservative estimate) + configured max output
-export const estimateCostUsd = ({ inputTokens, maxOutputTokens, pricing }) => Number(((inputTokens * pricing.inputUsdPerMTok + maxOutputTokens * pricing.outputUsdPerMTok) / 1e6).toFixed(6));
-export const actualCostUsd = ({ usage, pricing }) => { const u = usage ?? {}; const inp = Math.max(0, (u.inputTokens ?? 0)); const cw = u.cacheCreationInputTokens ?? 0; const cr = u.cacheReadInputTokens ?? 0; const out = u.outputTokens ?? 0; return Number(((inp * pricing.inputUsdPerMTok + cw * pricing.cacheWriteUsdPerMTok + cr * pricing.cacheReadUsdPerMTok + out * pricing.outputUsdPerMTok) / 1e6).toFixed(6)); };
+// closeout R01 (Q07): the reservation covers the WORST billed input class ENABLED IN THE EXACT REQUEST plus the configured
+// maximum billed output. A request carrying cache_control enables prompt-cache creation, so its input tokens may be billed
+// at the cache-write rate (2.5 > 2.0 in the shipped fixture rates); a cache hit is never assumed. Classes are never summed.
+export const INPUT_CLASSES = Object.freeze(['INPUT', 'CACHE_WRITE', 'CACHE_READ']);
+const rateOf = (pricing, cls) => (cls === 'CACHE_WRITE' ? pricing.cacheWriteUsdPerMTok : cls === 'CACHE_READ' ? pricing.cacheReadUsdPerMTok : pricing.inputUsdPerMTok);
+// the input classes a request body enables: INPUT always; CACHE_WRITE (and CACHE_READ) when any block carries cache_control
+export function enabledInputClasses(body) { const hasCache = (v) => { if (Array.isArray(v)) return v.some(hasCache); if (v && typeof v === 'object') return 'cache_control' in v || Object.values(v).some(hasCache); return false; }; return hasCache(body) ? ['INPUT', 'CACHE_WRITE', 'CACHE_READ'] : ['INPUT']; }
+export function estimateCostUsd({ inputTokens, maxOutputTokens, pricing, inputClasses = ['INPUT'] }) {
+  if (!isCount(inputTokens) || !isCount(maxOutputTokens)) fail('INVALID_REQUEST', 'token counts must be non-negative safe integers');
+  const classes = [...new Set(inputClasses)]; if (!classes.length || classes.some((c) => !INPUT_CLASSES.includes(c))) fail('INVALID_REQUEST', 'unknown input class');
+  const rates = classes.map((c) => rateOf(pricing, c)); if (rates.some((r) => !isFiniteNum(r) || r < 0) || !isFiniteNum(pricing.outputUsdPerMTok) || pricing.outputUsdPerMTok < 0) fail('INVALID_REQUEST', 'price metadata missing for an enabled billed class — dispatch blocked');
+  const worst = Math.max(...rates); // never rounded downward at a limit: round half away only after the sum
+  return Number(((inputTokens * worst + maxOutputTokens * pricing.outputUsdPerMTok) / 1e6).toFixed(6));
+}
+export const USAGE_KEYS = Object.freeze(['inputTokens', 'outputTokens', 'cacheCreationInputTokens', 'cacheReadInputTokens']);
+// actual usage must be non-negative safe integers for EVERY billed category; anything else is not settleable (stays unresolved)
+export const usageError = (u) => { if (!u || typeof u !== 'object' || Array.isArray(u)) return 'usage must be an object'; for (const k of USAGE_KEYS) if (!isCount(u[k])) return `usage.${k} is not a non-negative safe integer`; return null; };
+export const actualCostUsd = ({ usage, pricing }) => { const e = usageError(usage); if (e) fail('INVALID_REQUEST', e); const u = usage; return Number(((u.inputTokens * pricing.inputUsdPerMTok + u.cacheCreationInputTokens * pricing.cacheWriteUsdPerMTok + u.cacheReadInputTokens * pricing.cacheReadUsdPerMTok + u.outputTokens * pricing.outputUsdPerMTok) / 1e6).toFixed(6)); };
 
 export function openBudgetJournal({ dir, clock = () => Date.now(), pid = process.pid }) {
   mkdirSync(dir, { recursive: true });
@@ -25,31 +40,43 @@ export function openBudgetJournal({ dir, clock = () => Date.now(), pid = process
   let lockFd = null;
   try { lockFd = openSync(lockFile, 'wx'); writeAll(lockFd, Buffer.from(`${JSON.stringify({ pid, openedTs: clock(), version: BUDGET_JOURNAL_VERSION })}\n`), 'budget.lock'); fsyncSync(lockFd); }
   catch (err) { if (err?.code === 'EEXIST') fail('PERMISSION_FAILURE', 'the budget journal is locked by another owner (single-owner law)'); fail('IO_FAILURE', `cannot lock the budget journal (${err?.code ?? 'error'})`); }
-  const records = []; const byId = new Map();
-  const apply = (r) => { records.push(r); if (r.type === 'RESERVE') byId.set(r.reservationId, { ...r, state: 'RESERVED', actualUsd: null, usage: null }); else if (r.type === 'SETTLE' && byId.has(r.reservationId)) Object.assign(byId.get(r.reservationId), { state: 'SETTLED', actualUsd: r.actualUsd, usage: r.usage, settledTs: r.ts }); else if (r.type === 'RELEASE' && byId.has(r.reservationId)) Object.assign(byId.get(r.reservationId), { state: 'RELEASED', releasedTs: r.ts, reason: r.reason }); else if (r.type === 'UNRESOLVED' && byId.has(r.reservationId)) Object.assign(byId.get(r.reservationId), { state: 'UNRESOLVED', unresolvedTs: r.ts, reason: r.reason }); };
-  if (existsSync(journalFile)) { const buf = readFileSync(journalFile); if (buf.length > MAX_JOURNAL_BYTES) { release(); fail('RESOURCE_LIMIT_EXCEEDED', 'budget journal too large'); } const lines = buf.toString('utf8').split('\n'); for (let i = 0; i < lines.length; i += 1) { const l = lines[i]; if (!l) { if (i !== lines.length - 1) { release(); fail('INVALID_INPUT', `budget journal: empty line ${i + 1}`); } continue; } const p = parseStrictJson(l, { maxBytes: 65_536 }); if (!p.ok) { release(); fail('INVALID_INPUT', `budget journal: line ${i + 1} ${p.error}`); } apply(p.value); } }
+  const records = []; const byId = new Map(); let lastTs = 0; let closed = false; let bytes = 0;
+  // every row is validated (types, ids, quantities) and every transition is lawful; a malformed or impossible row rejects the journal
+  const rowError = (r, i) => { const w = `budget journal row ${i}`; if (!isPlainObject(r) || !['RESERVE', 'SETTLE', 'UNRESOLVED', 'RELEASE'].includes(r.type) || !isTs(r.ts) || typeof r.reservationId !== 'string' || !/^[A-Za-z0-9._:-]{1,80}$/.test(r.reservationId)) return `${w}: type/ts/id malformed`; if (r.type === 'RESERVE') { if (typeof r.caseId !== 'string' || typeof r.attemptId !== 'string' || !(isFiniteNum(r.estimatedUsd) && r.estimatedUsd >= 0) || !isCount(r.inputTokens) || !isCount(r.maxOutputTokens) || !isPlainObject(r.pricing) || typeof r.smoke !== 'boolean') return `${w}: reservation malformed`; } else if (r.type === 'SETTLE') { if (!(isFiniteNum(r.actualUsd) && r.actualUsd >= 0) || usageError(r.usage)) return `${w}: settlement malformed`; } else if (typeof r.reason !== 'string' || !r.reason.length || r.reason.length > 64) return `${w}: reason malformed`; return null; };
+  const apply = (r, i, strict) => { const e = rowError(r, i); if (e) fail('INVALID_INPUT', e); if (strict && r.ts < lastTs) fail('INVALID_INPUT', `budget journal row ${i}: clock runs backwards`); lastTs = Math.max(lastTs, r.ts); records.push(r); if (r.type === 'RESERVE') { if (byId.has(r.reservationId)) fail('INVALID_INPUT', `budget journal row ${i}: duplicate reservation id`); byId.set(r.reservationId, { ...r, state: 'RESERVED', actualUsd: null, usage: null }); return; } const x = byId.get(r.reservationId); if (!x) fail('INVALID_INPUT', `budget journal row ${i}: unknown reservation`); if (x.state !== 'RESERVED') fail('INVALID_INPUT', `budget journal row ${i}: impossible transition from ${x.state}`); if (r.type === 'SETTLE') Object.assign(x, { state: 'SETTLED', actualUsd: r.actualUsd, usage: r.usage, settledTs: r.ts }); else if (r.type === 'RELEASE') Object.assign(x, { state: 'RELEASED', releasedTs: r.ts, reason: r.reason }); else Object.assign(x, { state: 'UNRESOLVED', unresolvedTs: r.ts, reason: r.reason }); };
+  try { if (existsSync(journalFile)) { const buf = readFileSync(journalFile); bytes = buf.length; if (buf.length > MAX_JOURNAL_BYTES) fail('RESOURCE_LIMIT_EXCEEDED', 'budget journal too large — stopped explicitly, never cleared to regain budget'); const lines = buf.toString('utf8').split('\n'); for (let i = 0; i < lines.length; i += 1) { const l = lines[i]; if (!l) { if (i !== lines.length - 1) fail('INVALID_INPUT', `budget journal: empty line ${i + 1}`); continue; } const p = parseStrictJson(l, { maxBytes: 65_536 }); if (!p.ok) fail('INVALID_INPUT', `budget journal: line ${i + 1} ${p.error}`); apply(p.value, i + 1, true); } } }
+  catch (err) { release(); throw err; }
+  const now = () => Math.max(clock(), lastTs); // clock rollback never regains a consumed bucket
+  const guard = () => { if (closed) fail('PERMISSION_FAILURE', 'budget journal closed — no mutation after the lock is released'); };
+  function append(rec) { guard(); const line = Buffer.from(`${JSON.stringify(rec)}\n`); if (bytes + line.length > MAX_JOURNAL_BYTES) fail('RESOURCE_LIMIT_EXCEEDED', 'budget journal at its bound — dispatch stopped explicitly'); let fd = null; try { fd = openSync(journalFile, 'a'); writeAll(fd, line, 'journal.jsonl'); fsyncSync(fd); bytes += line.length; } catch (err) { if (err?.code === 'RESOURCE_LIMIT_EXCEEDED') throw err; fail('IO_FAILURE', `budget journal append failed (${err?.code ?? 'error'}) — dispatch blocked`); } finally { if (fd !== null) { try { closeSync(fd); } catch { /* ignore */ } } } }
+  const write = (rec) => { apply(rec, records.length + 1, false); append(rec); };
   // restart law: a RESERVED entry with no settle/release is UNRESOLVED (a crash after dispatch may still have been charged)
-  for (const r of byId.values()) if (r.state === 'RESERVED') { const u = { type: 'UNRESOLVED', reservationId: r.reservationId, ts: clock(), reason: 'RESERVED_AT_RESTART' }; append(u); apply(u); }
-  function append(rec) { let fd = null; try { fd = openSync(journalFile, 'a'); writeAll(fd, Buffer.from(`${JSON.stringify(rec)}\n`), 'journal.jsonl'); fsyncSync(fd); } catch (err) { fail('IO_FAILURE', `budget journal append failed (${err?.code ?? 'error'}) — dispatch blocked`); } finally { if (fd !== null) { try { closeSync(fd); } catch { /* ignore */ } } } }
-  function release() { if (lockFd !== null) { try { closeSync(lockFd); } catch { /* ignore */ } lockFd = null; try { unlinkSync(lockFile); } catch { /* ignore */ } } }
+  for (const r of [...byId.values()]) if (r.state === 'RESERVED') write({ type: 'UNRESOLVED', reservationId: r.reservationId, ts: now(), reason: 'RESERVED_AT_RESTART' });
+  function release() { if (lockFd !== null) { try { closeSync(lockFd); } catch { /* ignore */ } lockFd = null; try { unlinkSync(lockFile); } catch { /* ignore */ } } closed = true; }
   const spent = (r) => (r.state === 'SETTLED' ? r.actualUsd : r.state === 'RELEASED' ? 0 : r.estimatedUsd); // RESERVED + UNRESOLVED count as spent
-  function totals(nowTs) { let day = 0; let month = 0; let smoke = 0; let unresolved = 0; for (const r of byId.values()) { const v = spent(r); if (dayKey(r.ts) === dayKey(nowTs)) day += v; if (monthKey(r.ts) === monthKey(nowTs)) month += v; if (r.smoke) smoke += v; if (r.state === 'UNRESOLVED') unresolved += r.estimatedUsd; } return { dayUsd: Number(day.toFixed(6)), monthUsd: Number(month.toFixed(6)), smokeUsd: Number(smoke.toFixed(6)), unresolvedUsd: Number(unresolved.toFixed(6)) }; }
-  function caseTotal(caseId) { let t = 0; for (const r of byId.values()) if (r.caseId === caseId) t += spent(r); return Number(t.toFixed(6)); }
+  function totals(nowTs = now()) { if (!isTs(nowTs)) fail('INVALID_REQUEST', 'totals need a clock'); let day = 0; let month = 0; let smoke = 0; let unresolved = 0; for (const r of byId.values()) { const v = spent(r); if (dayKey(r.ts) === dayKey(nowTs)) day += v; if (monthKey(r.ts) === monthKey(nowTs)) month += v; if (r.smoke) smoke += v; if (r.state === 'UNRESOLVED') unresolved += r.estimatedUsd; } return { dayUsd: Number(day.toFixed(6)), monthUsd: Number(month.toFixed(6)), smokeUsd: Number(smoke.toFixed(6)), unresolvedUsd: Number(unresolved.toFixed(6)), reserved: [...byId.values()].filter((r) => r.state === 'RESERVED').length }; }
+  function caseTotal(caseId) { if (typeof caseId !== 'string') fail('INVALID_REQUEST', 'caseId required'); let t = 0; for (const r of byId.values()) if (r.caseId === caseId) t += spent(r); return Number(t.toFixed(6)); }
   // reserve BEFORE dispatch: every cap must hold with this reservation included, or BUDGET_BLOCKED
   function reserve({ reservationId, caseId, attemptId, estimatedUsd, inputTokens, maxOutputTokens, pricing, caps, smoke = false }) {
-    if (!isFiniteNum(estimatedUsd) || estimatedUsd < 0) fail('INVALID_REQUEST', 'estimated cost malformed');
-    const now = clock(); const t = totals(now); const reasons = [];
+    guard(); if (!isFiniteNum(estimatedUsd) || estimatedUsd < 0) fail('INVALID_REQUEST', 'estimated cost malformed');
+    if (typeof reservationId !== 'string' || !/^[A-Za-z0-9._:-]{1,80}$/.test(reservationId) || byId.has(reservationId)) fail('INVALID_REQUEST', 'reservation id malformed or already used');
+    if (typeof caseId !== 'string' || typeof attemptId !== 'string' || !isCount(inputTokens) || !isCount(maxOutputTokens) || !isPlainObject(caps) || !isPlainObject(pricing)) fail('INVALID_REQUEST', 'reservation arguments malformed');
+    const nowTs = now(); const t = totals(nowTs); const reasons = [];
     if (!(caps.maxEstimatedUsdPerCase > 0)) reasons.push('CASE_CAP_ZERO'); else if (caseTotal(caseId) + estimatedUsd > caps.maxEstimatedUsdPerCase) reasons.push('CASE_CAP');
     if (!(caps.maxEstimatedUsdPerDay > 0) || t.dayUsd + estimatedUsd > caps.maxEstimatedUsdPerDay) reasons.push('DAY_CAP');
     if (!(caps.maxEstimatedUsdPerMonth > 0) || t.monthUsd + estimatedUsd > caps.maxEstimatedUsdPerMonth) reasons.push('MONTH_CAP');
     if (smoke && (!(caps.totalSmokeMaxEstimatedUsd > 0) || t.smokeUsd + estimatedUsd > caps.totalSmokeMaxEstimatedUsd)) reasons.push('SMOKE_CAP');
     if (reasons.length) return { ok: false, state: 'BUDGET_BLOCKED', reasons, totals: t };
-    const rec = { type: 'RESERVE', reservationId, caseId, attemptId, estimatedUsd, inputTokens, maxOutputTokens, pricing: { inputUsdPerMTok: pricing.inputUsdPerMTok, outputUsdPerMTok: pricing.outputUsdPerMTok, cacheReadUsdPerMTok: pricing.cacheReadUsdPerMTok, cacheWriteUsdPerMTok: pricing.cacheWriteUsdPerMTok }, smoke, ts: now };
-    append(rec); apply(rec); return { ok: true, state: 'RESERVED', reservationId, totals: totals(now) };
+    write({ type: 'RESERVE', reservationId, caseId, attemptId, estimatedUsd, inputTokens, maxOutputTokens, pricing: { inputUsdPerMTok: pricing.inputUsdPerMTok, outputUsdPerMTok: pricing.outputUsdPerMTok, cacheReadUsdPerMTok: pricing.cacheReadUsdPerMTok, cacheWriteUsdPerMTok: pricing.cacheWriteUsdPerMTok }, smoke, ts: nowTs });
+    return { ok: true, state: 'RESERVED', reservationId, totals: totals(nowTs) };
   }
-  function settle({ reservationId, usage, pricing }) { const r = byId.get(reservationId); if (!r || r.state !== 'RESERVED') fail('INVALID_REQUEST', 'reservation not open'); const rec = { type: 'SETTLE', reservationId, actualUsd: actualCostUsd({ usage, pricing }), usage, ts: clock() }; append(rec); apply(rec); return byId.get(reservationId); }
-  function markUnresolved({ reservationId, reason }) { const r = byId.get(reservationId); if (!r || r.state !== 'RESERVED') fail('INVALID_REQUEST', 'reservation not open'); const rec = { type: 'UNRESOLVED', reservationId, reason, ts: clock() }; append(rec); apply(rec); return byId.get(reservationId); }
+  const open = (reservationId) => { const r = byId.get(reservationId); if (!r || r.state !== 'RESERVED') fail('INVALID_REQUEST', 'reservation not open'); return r; };
+  // settlement needs VALID usage (non-negative safe integers in every billed category); invalid usage is not zero — it stays unresolved
+  function settle({ reservationId, usage, pricing }) { guard(); open(reservationId); const e = usageError(usage); if (e) fail('INVALID_REQUEST', `cannot settle: ${e}`); write({ type: 'SETTLE', reservationId, actualUsd: actualCostUsd({ usage, pricing }), usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens }, ts: now() }); return byId.get(reservationId); }
+  function markUnresolved({ reservationId, reason }) { guard(); open(reservationId); write({ type: 'UNRESOLVED', reservationId, reason: String(reason).slice(0, 64), ts: now() }); return byId.get(reservationId); }
   // a release is lawful ONLY when the provider provably never received the request (refused before dispatch)
-  function releaseReservation({ reservationId, reason }) { const r = byId.get(reservationId); if (!r || r.state !== 'RESERVED') fail('INVALID_REQUEST', 'reservation not open'); const rec = { type: 'RELEASE', reservationId, reason, ts: clock() }; append(rec); apply(rec); return byId.get(reservationId); }
-  return { reserve, settle, markUnresolved, releaseReservation, totals: () => totals(clock()), caseTotal, reservations: () => deepFreeze([...byId.values()].map((r) => ({ ...r }))), close: release, files: { lockFile, journalFile } };
+  function releaseReservation({ reservationId, reason }) { guard(); open(reservationId); write({ type: 'RELEASE', reservationId, reason: String(reason).slice(0, 64), ts: now() }); return byId.get(reservationId); }
+  // closing under the lock: every still-open reservation may have been dispatched — mark it UNRESOLVED BEFORE the lock goes
+  function close({ openReason = 'OPEN_AT_CLOSE' } = {}) { if (closed) return; for (const r of [...byId.values()]) if (r.state === 'RESERVED') { try { write({ type: 'UNRESOLVED', reservationId: r.reservationId, reason: openReason, ts: now() }); } catch { /* the lock still goes; the row stays RESERVED on disk and becomes UNRESOLVED at the next open */ } } release(); }
+  return { reserve, settle, markUnresolved, releaseReservation, totals: () => totals(now()), caseTotal, reservations: () => deepFreeze([...byId.values()].map((r) => ({ ...r }))), close, isClosed: () => closed, isOpen: (id) => byId.get(id)?.state === 'RESERVED', files: { lockFile, journalFile } };
 }

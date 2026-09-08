@@ -145,3 +145,197 @@ sources from this environment.
   missing (free) key; Bybit is BLOCKED by a geo restriction of this environment. Overall live readiness is therefore
   BLOCKED, and no LIVE_COMPLETE or READINESS_GREEN claim is made. Nothing in this document is an independent acceptance
   seal.
+
+
+## MARKET / SOCRATES closeout (R01–R07) — traceability
+
+The coordinated repair of the seven review findings. Every row names the production boundary that now carries the law,
+the deterministic test that proves it (`MC-` ids are local to this closeout; suites `test/market-closeout-witnesses.test.js`,
+`test/market-closeout-r01-r03.test.js`, `test/market-closeout-r04-r06.test.js`, `test/market-closeout-r07-e2e.test.js`,
+fixtures in `test/helpers/market-closeout.js`) and the measured result. Every fixture is offline: fake HTTP / WebSocket
+over loopback, a scripted Messages transport, fake clocks, temp directories — zero provider calls, zero model calls, zero
+spend. The fourteen witness tests were run against the baseline commit before the repair (14 of 14 RED) and are GREEN on
+the candidate; the acceptance tests were written against the repaired boundaries.
+
+### R01 — one accounting authority before every dispatch
+
+Production boundary: `market-lab/quota.js` (durable journal `<research-root>/accounting/quota.jsonl` + `quota.lock`,
+`createDispatchGuard`: precheck before queueing, atomic reservation at the dispatch boundary, native charge units,
+purposes ACQUIRE / CATALOG / BROKER / PROBE / SMOKE), `market-lab/transport.js` (the guard is bound once; refused or
+unreserved requests never touch the wire; shared in-flight requests reserve once; ambiguous failures stay UNRESOLVED),
+`market-lab/owner.js` (usage = dispatched / credits / refused / unresolved / reasons per acquisition, precheck refusals
+included), `socrates/budget.js` + `socrates/runtime.js` (the model reservation covers the worst enabled billed input
+class; an exact provider token count is required; malformed usage is UNRESOLVED).
+
+| ID | Boundary | Test | Result |
+|---|---|---|---|
+| Q01 | guard: DAY_CAP_ZERO / MONTH_CAP_ZERO / SMOKE caps refuse before queueing | MC-Q01/MC-Q02 | PASS: zero wire requests |
+| Q02 | guard: ENTITLEMENT_EXHAUSTED at the atomic reservation; concurrent race admits one | MC-Q01/MC-Q02, MC-Q04 (shared) | PASS: at most one dispatch |
+| Q03 | native charge units (credit per symbol, credit on success), page / retry reservations, per-provider slot | MC-Q03 | PASS |
+| Q04 | probe / catalog / acquire / broker / shared through one guard; truthful usage under refusal | MC-Q04 | PASS: BROKER / CATALOG / PROBE purposes in the journal |
+| Q05 | restart, changed output directory, day / month rollover, repeated attestation, clock rollback | MC-Q05 | PASS: nothing re-granted |
+| Q06 | reservation write failure, corrupt journal, second owner; proven non-dispatch vs ambiguous | MC-Q06 | PASS |
+| Q07 | cache-price witness: 10 000 in + 256 out with cache creation reserves USD 0.02756; ceiling 0.024 refuses before dispatch | MC-Q07 | PASS |
+| Q08 | token-count failure cannot authorise inference (no bytes/3 fallback); malformed usage UNRESOLVED; late count after close | MC-Q08, MC-L03 | PASS |
+
+### R02 — positive window coverage and a real options census
+
+Production boundary: `market-lab/recipes.js` (`intervalCoverage`, `tradeWindow` consumes a positive coverage fact;
+`optionsSurface` takes census completeness as an input, dedupes summary + ticker, labels ratio scope, counts unticked
+census members), providers `kraken-spot.js` / `coinbase.js` (SUBSCRIBED on the trade-channel ACK, GAP with
+SUBSCRIPTION_ENDED on close), `deribit.js` (census coverage record), `market-lab/context.js`,
+`market-lab/deep-market-adapter.js` (trade aggregates withheld unless the interval is COMPLETE).
+
+| ID | Boundary | Test | Result |
+|---|---|---|---|
+| W01 | one book, no trade coverage ⇒ UNKNOWN_COVERAGE, never COMPLETE_NO_TRADES | MC-W01 | PASS |
+| W02 | proven quiet interval is a valid zero; traded interval keeps the OHLCV / flow oracle | MC-W02 | PASS (notional 60.2, vwap 100.333, signed +19.8) |
+| W03 | startup, gaps (overlapping / not), foreign subject, dropped, late, evicted affect exactly their scope | MC-W03 | PASS |
+| W04 | support survives capture / reopen / restart / as-of replay / packet / deep-market adapter | MC-W04 | PASS |
+| W05 | one tick without census is incomplete; a complete census succeeds | MC-W05, MC-W06 | PASS |
+| W06 | summary + ticker is one contract; put / call counts reconcile; unticked census member ⇒ ADMITTED_SUBSET / TICKS_MISSING | MC-W06 | PASS |
+
+### R03 — acquisition → context → packet connections
+
+Production boundary: `evidence/research-builder.js` (`METRIC_MAP`: every registered metric of the 17 families has one
+bounded mapping or a declared `unsupported` reason; default summaries include exit liquidity and multi-venue; absent
+inputs are MISSING items with `value: null`; omissions reconciled), `market-lab/owner.js` (bounded Deribit ticker
+enrichment `optionsTickerEnrichmentPerSweep`; NETWORK_ACTIVITY routed to CryptoQuant network-data / market-indicator
+or Santiment; `acquire` accepts `metricIds` and a window).
+
+| ID | Boundary | Test | Result |
+|---|---|---|---|
+| J01 | 198.01980198 bps exit loss as numeric evidence (summary and DETAIL) inside the serialized request | MC-J01 | PASS |
+| J02 | venue dispersion reaches the packet without a peer cohort | MC-J02 | PASS |
+| J03 | mapping table for every registered metric; reconciled omission reasons / counts | MC-J03 | PASS |
+| J04 | bounded ticker enrichment; Greeks reach the surface; RR −0.12 / BF 0.01 oracle | MC-J04 | PASS |
+| J05 | missing / denied Greeks and an off-census tick stay PARTIAL | MC-J05 | PASS |
+| J06 | Coin Metrics disabled + CryptoQuant entitled ⇒ mapped network requests, parsed value in context | MC-J06, MC-B06 (packet + model request + follow-up) | PASS |
+| J07 | Santiment-only fixture; exhausted primary + fallback stays within R01; no duplicate paid request | MC-J07 | PASS |
+| J08 | H01 / H02 / H03, market-led and Social-led entries populated, labelled, bounded | MC-J08 | PASS |
+
+### R04 — broker satisfaction matches the actual question
+
+Production boundary: `socrates/broker.js` (per-metric evaluation against `METRIC_MAP`, GLOBAL scope, freshness on
+source / knowledge clocks, HISTORY thin rule, recipe-compatible constituents for derived metrics, evidence cache
+rebinding with freshness recheck, semantic round de-duplication, usage from the guard, bounded id lists with a digest
+over every admitted id).
+
+| ID | Boundary | Test | Result |
+|---|---|---|---|
+| B01 | active_addresses with only exchange_reserve ⇒ not SATISFIED | MC-B01 | PASS |
+| B02 | exact positive, multi-metric partial, missing constituent, null value, incompatible unit, stale | MC-B02 | PASS |
+| B03 | age boundary exact; HISTORY thin / satisfied; source period in coverage; late knowledge at Q0 / Q1 | MC-B03 | PASS |
+| B04 | cache hit is a fresh binding, zero usage, freshness rechecked; later as-of never contaminates an earlier replay | MC-B04 | PASS |
+| B05 | same semantic question under a new key ⇒ no duplicate paid work; different request dispatches | MC-B05 | PASS |
+| B06 | the actual owner receives metric / window; parsed data enters P1 and the second model request; wrong sibling never satisfies | MC-B06, MC-E02 | PASS |
+| B07 | usage and bounded id lists reconcile to guarded wire requests and unique inputs | MC-B07 | PASS |
+
+### R05 — bounded recording and resolvable case inputs
+
+Production boundary: `market-lab/retention.js` (bounded retained store, ordinal + membership chain, EVICTED /
+COVERAGE_OVERFLOW facts), `market-lab/owner.js` (segment rotation before the bound, per-segment seal with ordinal range,
+run / root quota, explicit recording failure with the first error preserved, `snapshotPrefix`), `market-lab/prefix.js`
+(`market-capture-prefix-1`, id bound to content, `resolvePrefix` replays sealed segments through the same retention law;
+`sealedCapturePrefix` for the single-capture CLI path), `market-lab/service.js` (case inputs carry the derivation
+params), `socrates/runtime.js` (`verifyCase --resolve-inputs`).
+
+| ID | Boundary | Test | Result |
+|---|---|---|---|
+| S01 | tiny segments rotate before overflow; records once; read back through capture / build; prefix resolves COMPLETE | MC-S01 | PASS |
+| S02 | over-cap row rejected and counted; run bound stops with the first error, no manifest, no later admission; seal / validation failure never publishes | MC-S02 | PASS |
+| S03 | the 4000-byte / two-trade witness rotates lawfully or stops explicitly; retention bounded | MC-S03 | PASS |
+| S04 | fake-clock long operation bounds retention, coverage, broker cache, case descriptors | MC-S04 | PASS |
+| S05 | actual service case cites a resolvable prefix; offline reopen recomputes the context identity | MC-S05, MC-E06 | PASS |
+| S06 | partial file, altered hash, missing segment, tampered prefix in a resealed case fail semantic verification | MC-S06 | PASS |
+| S07 | concurrent intake / rotation / snapshots and repeated stop: deterministic membership, no unowned deletion, no leaked timers | MC-S07 | PASS |
+
+### R06 — close is an ownership barrier
+
+Production boundary: `socrates/runtime.js` (`close()` is an idempotent asynchronous barrier: admission stopped, owned
+requests aborted through one controller, bounded drain `closeDrainMs`, open reservations preserved UNRESOLVED, lock
+released once; every continuation is fenced), `socrates/budget.js` (`close({ openReason })`), `market-lab/service.js`
+(stop awaits the runtime barrier before the owner seal; a recording failure closes the runtime), `socrates/evaluate.js`
+and `socrates/commands.js` await the barrier.
+
+| ID | Boundary | Test | Result |
+|---|---|---|---|
+| L01 | held Messages response, close aborts, lock held until the drain, no late COMPLETED | MC-L01 | PASS |
+| L02 | late valid response / rejection after drain mutate nothing; no unhandled rejection | MC-L02 | PASS |
+| L03 | close during count (no reservation), during Messages (UNRESOLVED), during broker acquisition (initial SETTLED, no second attempt); caller abort before dispatch (no reservation) | MC-L03 | PASS — see note 1 |
+| L04 | abort-ignoring transport drains within the test deadline; unresolved spend retained; lock released once | MC-L04 | PASS |
+| L05 | repeated / concurrent close, runCase after close, a completed case unchanged | MC-L05 | PASS |
+| L06 | service.stop awaits both lifecycles; recording failure stops admission and closes the runtime; the error survives stop | MC-L06, MC-E05 | PASS |
+
+### R07 — one source of schema truth
+
+Production boundary: `market-lab/context-schema.js` (closed per-metric value and support schemas: required keys, no
+undeclared keys, enums, finite numbers, nullability, nested recipe sub-schemas), `market-lab/context.js`
+(`market-context-2`; every component validated by the shared schema inside `contextError`; legacy `market-context-1`
+rejected explicitly), `market-lab/commands.js` (`contextBundleError` shared by the unsealed candidate and the reader;
+`readContext` with the capture recomputes the derivation), `market-lab/store.js` (exact-byte bounds, no seal on any
+failure), `market-lab/identity.js` (closure through the four roots covers the new modules).
+
+| ID | Boundary | Test | Result |
+|---|---|---|---|
+| V01 | string spreadBps with recomputed identities rejects at contextError / candidate / reader | MC-V01, MC-V06 | PASS |
+| V02 | missing key, invalid null, unknown key / enum, wrong nested type, bad reference / clock, duplicate, inconsistent support / count, raw-content sentinel | MC-V02 | PASS |
+| V03 | lawful populated and partial contexts pass all four boundaries | MC-V03 | PASS |
+| V04 | resealed mutations: omitted member, false counts, wrong prefix, packet-map mismatch, inconsistent status / report | MC-V04 | PASS |
+| V05 | valid numeric mutation resealed rejects with the capture; without it the reader labels its proof honestly | MC-V05 | PASS |
+| V06 | invalid candidate never publishes; exact-byte / multibyte / occupied path / closed descriptor / double close | MC-V06 | PASS — see note 2 |
+| V07 | code identity covers the new modules; clean / dirty / unknown / no-git truthful | MC-V07 | PASS |
+
+### Readiness and joined cases
+
+Production boundary: `market-lab/readiness.js` (`market-live-readiness-2`: a family is LIVE only from obtained family
+evidence; a null / non-PASSED model verification is BLOCKED), `market-lab/coverage.js` (17-family matrix).
+
+| ID | Boundary | Test | Result |
+|---|---|---|---|
+| RD01 | unrelated-endpoint smoke never makes a family LIVE | MC-RD01/MC-RD02 | PASS |
+| RD02 | null / blocked model verification prevents READINESS_GREEN | MC-RD01/MC-RD02 | PASS |
+| RD03 | explicit partial family keeps overall non-green; a fully supported synthetic case is GREEN | MC-RD03 | PASS |
+| RD04 | counts from the 17-family artifact; a disabled / unauthorised alternative never overrides the qualified source | MC-RD04 | PASS — public policy: 12 COVERED_BY_DECLARED_POLICY, 1 ENABLED_BUT_BLOCKED (SUPPLY_UNLOCKS: CoinGecko needs its demo key), 4 UNCOVERED (ONCHAIN_ENTITY_FLOW, ETF_FLOWS, MACRO_RELEASES, CROSS_ASSET: paid or keyed sources only) |
+| E01 | production owner + fake HTTP/WS → guarded acquisition → sealed prefix → context → packet → actual client → validated report → sealed case → reopen; numbers / support / citations in the serialized request | MC-E01 | PASS |
+| E02 | real follow-up through the guarded owner; new prefix and P1; second request carries the new evidence; P0 byte-identical; wrong-metric data never satisfies | MC-E02, MC-B06 | PASS |
+| E03 | depleted provider and model allowances refuse before the wire; no synthetic evidence; no misleading completion | MC-E03 | PASS |
+| E04 | book-only startup, capped census, absent Greeks, paid access refusal, quiet interval reach context / packet / case correctly | MC-E04 | PASS |
+| E05 | recording failure with an active model request: admission stopped, ownership drained, error and prefix preserved, in-flight charge UNRESOLVED | MC-E05 | PASS |
+| E06 | restart / reopen from files only; recorded replay makes zero network calls; the account journal never resets | MC-E06 | PASS |
+| E07 | Social-led and market-led packets, the deep-market adapter's valid input and withheld aggregate, protected v1 contracts and config byte-identical | MC-E07 | PASS |
+
+Notes.
+1. The runtime's reserve → dispatch sequence has no `await` between the reservation and the wire, so a close or a caller
+   abort can only land before the reservation (proven non-dispatch, nothing to release) or during the wire (ambiguous,
+   UNRESOLVED). The release-before-dispatch path exists for a signal already aborted at that instant and is exercised
+   at the provider transport (`CANCELLED_BEFORE_DISPATCH` in MC-Q06's refusal path); it is not observable as a separate
+   runtime stage without an artificial await, and none was added.
+2. An fsync failure is not injectable from a test without mocking `node:fs`; write / open / close / validation failures
+   are injected through real conditions (an occupied member path, a closed descriptor, a double close, a refusing
+   candidate validator). The fsync failure branch keeps the same no-seal law by construction.
+3. The INTEGRATED seam (the application Tape) carries accepted trades but no subscription-continuity fact for the
+   interval, so its trade windows are UNKNOWN_COVERAGE and the deep-market adapter withholds the trade aggregate
+   (`trades: null`, `TRADE_COVERAGE_UNKNOWN`) while the accepted book still supports the window. The former A12/B06
+   expectation of a supplied aggregate was the review's false-completeness finding and was changed to this law.
+4. The broker's constituent compatibility groups by provider, entity set, chain, unit, window and period; a
+   methodology-family mismatch between an inflow and an outflow is refused by the context recipe
+   (`exchangeNetFlow` RECIPE_MISMATCH), not additionally by the broker.
+5. The sample policy ships unchanged (every provider disabled, model disabled, zero caps); the optional plan key
+   `meteredAuthorization` and the new resource bounds default in `validatePolicy`, so an owner's existing policy file
+   loads without edits and no spending permission is created by default.
+
+### Judge handoff
+
+What the candidate claims: the seven repairs above are implemented at the named production boundaries and proven by the
+named deterministic tests; the full serial suite passes with zero fail / skip / todo / cancelled (see the final report
+of the delivering session); `cobra.config.json`, `config.universe`, dependencies and lockfiles, the v1 contracts
+(`evidence/contract.js`, `socrates/contract.js`), the trading ledger / cost / state / controls / risk, the Tape truth and
+collection semantics and the Social foundation are byte-identical to the baseline commit.
+
+What the candidate does NOT claim: no live provider or model demonstration was run in this repair (LIVE VERIFICATION per
+step: NOT RUN); no paid smoke, activation, subscription or data acquisition happened; readiness stays BLOCKED until the
+owner supplies entitled keys, attested plan records and a dollar ceiling; nothing here is an independent acceptance seal
+(INDEPENDENT ACCEPTANCE: PENDING). The Judge should re-run `node --test --test-concurrency=1` with the PostgreSQL test
+URL, `node --check` over every tracked script, diff the protected files against the baseline, and read the closeout
+suites against the ticket's acceptance ids before any seal.

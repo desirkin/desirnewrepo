@@ -24,7 +24,12 @@ export const RESOURCE_DEFAULTS = deepFreeze({
   observationLineBytes: 128 * 1024, coverageLineBytes: 128 * 1024, packetLineBytes: 256 * 1024, manifestBytes: 1024 * 1024,
   segmentBytes: 32 * 1024 * 1024, runBytes: 1024 * 1024 * 1024, contextBytes: 2 * 1024 * 1024, researchRootQuotaBytes: 4 * 1024 * 1024 * 1024,
   httpConcurrencyGlobal: 4, httpConcurrencyPerProvider: 1, httpTimeoutMs: 15_000, wsIdleTimeoutMs: 30_000, maxPagesPerRequest: 20, maxRecordsPerRequest: 5_000,
+  // closeout R05 / R03 bounds (conservative, explicit; every retained collection is bounded, never an unbounded side array)
+  retainedObservations: 250_000, retainedCoverage: 20_000, sealedSegmentIndex: 4_096, retainedCaseDescriptors: 1_024, sharedCacheEntries: 4_096, optionsTickerEnrichmentPerSweep: 24,
 });
+// resource keys an OLDER policy file may omit: they default to the shipped bound (never above it) so existing policies stay loadable
+export const RESOURCE_OPTIONAL_KEYS = Object.freeze(['retainedObservations', 'retainedCoverage', 'sealedSegmentIndex', 'retainedCaseDescriptors', 'sharedCacheEntries', 'optionsTickerEnrichmentPerSweep']);
+export const CASE_OPTIONAL_KEYS = Object.freeze([]);
 export const CASE_DEFAULTS = deepFreeze({ maxConcurrentModelRequests: 1, maxPendingCases: 16, maxDataRequestsPerCase: 6, maxFollowupRounds: 1, maxModelAttempts: 2, attemptTimeoutMs: 90_000, caseTimeoutMs: 180_000, maxModelInputBytes: 262_144, maxModelOutputBytes: 65_536, maxOutputTokens: 8_192, requestCacheSize: 256 });
 // allowed requestedMaxAgeMs values per family (a freshness REQUEST vocabulary; never a cadence change)
 export const ALLOWED_MAX_AGE_MS = deepFreeze({
@@ -36,6 +41,9 @@ export const ALLOWED_MAX_AGE_MS = deepFreeze({
 
 const PROVIDER_POLICY_KEYS = ['enabled', 'credentialEnv', 'plan', 'limits', 'permittedEndpoints', 'smoke'];
 const PLAN_KEYS = ['name', 'billing', 'includedCallsPerMonth', 'remainingCalls', 'incrementalUsdPerCall', 'attestation', 'verifiedDate', 'quoteUsdPerMonth'];
+// closeout R01: routine METERED acquisition needs an EXPLICIT owner authorization record (absent = denied; a smoke flag never waives it)
+export const METERED_AUTHORIZATION_KEYS = Object.freeze(['authorized', 'maxCallsPerMonth', 'maxEstimatedUsdPerMonth', 'attestation']);
+const keysWithOptional = (o, required, optional, where) => { if (!isPlainObject(o)) return `${where}: expected object`; const own = Object.keys(o); for (let i = 0; i < own.length; i += 1) if (!required.includes(own[i]) && !optional.includes(own[i])) return `${where}: undeclared key at position ${i + 1} of ${own.length}`; for (const k of required) if (!(k in o)) return `${where}: missing key ${k}`; return null; };
 const LIMIT_KEYS = ['maxCallsPerDay', 'maxCallsPerMonth', 'maxConcurrency'];
 const SMOKE_KEYS = ['authorized', 'maxCalls', 'maxEstimatedUsd'];
 const MODEL_KEYS = ['enabled', 'provider', 'model', 'credentialEnv', 'apiHost', 'maxOutputTokens', 'maxEstimatedUsdPerCase', 'maxEstimatedUsdPerDay', 'maxEstimatedUsdPerMonth', 'totalSmokeMaxEstimatedUsd', 'attemptTimeoutMs', 'caseTimeoutMs', 'pricing', 'effort', 'pinnedPromptVersion'];
@@ -58,7 +66,8 @@ export function policyError(raw, where = 'policy') {
     const e = exactKeys(p, PROVIDER_POLICY_KEYS, w); if (e) return e;
     if (typeof p.enabled !== 'boolean') return `${w}: enabled must be boolean`;
     if (!(p.credentialEnv === null || (typeof p.credentialEnv === 'string' && ENV_NAME_RE.test(p.credentialEnv)))) return `${w}: credentialEnv must be an environment variable NAME or null`;
-    const pe = exactKeys(p.plan, PLAN_KEYS, `${w}.plan`); if (pe) return pe;
+    const pe = keysWithOptional(p.plan, PLAN_KEYS, ['meteredAuthorization'], `${w}.plan`); if (pe) return pe;
+    if ('meteredAuthorization' in p.plan) { const ma = p.plan.meteredAuthorization; const mk = exactKeys(ma, METERED_AUTHORIZATION_KEYS, `${w}.plan.meteredAuthorization`); if (mk) return mk; if (typeof ma.authorized !== 'boolean' || !isCount(ma.maxCallsPerMonth) || !(isFiniteNum(ma.maxEstimatedUsdPerMonth) && ma.maxEstimatedUsdPerMonth >= 0) || !isBoundedString(ma.attestation, 300)) return `${w}.plan.meteredAuthorization: malformed`; if (ma.authorized && p.plan.billing !== 'METERED') return `${w}.plan.meteredAuthorization: only a METERED plan carries a metered authorization`; if (ma.authorized && !(isFiniteNum(p.plan.incrementalUsdPerCall) && p.plan.incrementalUsdPerCall >= 0)) return `${w}.plan.meteredAuthorization: an authorized metered plan needs a known incrementalUsdPerCall`; }
     if (!isStringOrNull(p.plan.name, 64) || !BILLING.includes(p.plan.billing) || !(p.plan.includedCallsPerMonth === null || isCount(p.plan.includedCallsPerMonth)) || !(p.plan.remainingCalls === null || isCount(p.plan.remainingCalls)) || !nonNegOrNull(p.plan.incrementalUsdPerCall) || !isStringOrNull(p.plan.attestation, 300) || !(p.plan.verifiedDate === null || isDateOnly(p.plan.verifiedDate)) || !nonNegOrNull(p.plan.quoteUsdPerMonth)) return `${w}.plan: malformed`;
     const le = exactKeys(p.limits, LIMIT_KEYS, `${w}.limits`); if (le) return le;
     if (!isCount(p.limits.maxCallsPerDay) || !isCount(p.limits.maxCallsPerMonth) || !isCount(p.limits.maxConcurrency) || p.limits.maxConcurrency > 4) return `${w}.limits: malformed`;
@@ -82,16 +91,17 @@ export function policyError(raw, where = 'policy') {
   for (const c of ['inputUsdPerMTok', 'outputUsdPerMTok', 'cacheReadUsdPerMTok', 'cacheWriteUsdPerMTok']) if (!(isFiniteNum(m.pricing[c]) && m.pricing[c] >= 0)) return `${where}.model.pricing: ${c} malformed`;
   if (!isBoundedString(m.pricing.pricingSource, 200) || !isDateOnly(m.pricing.verifiedDate)) return `${where}.model.pricing: source/date malformed`;
   if (!(m.effort === null || MODEL_EFFORTS.includes(m.effort)) || !isIdOrNull(m.pinnedPromptVersion)) return `${where}.model: effort/prompt pin malformed`;
-  const re = exactKeys(raw.resources, Object.keys(RESOURCE_DEFAULTS), `${where}.resources`); if (re) return re;
-  for (const [key, def] of Object.entries(RESOURCE_DEFAULTS)) { const v = raw.resources[key]; if (!isCount(v) || v === 0) return `${where}.resources: ${key} must be a positive integer`; if (v > def) return `${where}.resources: ${key} exceeds the shipped ceiling ${def}`; }
-  const ce = exactKeys(raw.cases, Object.keys(CASE_DEFAULTS), `${where}.cases`); if (ce) return ce;
-  for (const [key, def] of Object.entries(CASE_DEFAULTS)) { const v = raw.cases[key]; if (!isCount(v) || v === 0) return `${where}.cases: ${key} must be a positive integer`; if (v > def) return `${where}.cases: ${key} exceeds the ceiling ${def}`; }
+  const re = keysWithOptional(raw.resources, Object.keys(RESOURCE_DEFAULTS).filter((k) => !RESOURCE_OPTIONAL_KEYS.includes(k)), RESOURCE_OPTIONAL_KEYS, `${where}.resources`); if (re) return re;
+  for (const [key, def] of Object.entries(RESOURCE_DEFAULTS)) { if (!(key in raw.resources)) continue; const v = raw.resources[key]; if (!isCount(v) || v === 0) return `${where}.resources: ${key} must be a positive integer`; if (v > def) return `${where}.resources: ${key} exceeds the shipped ceiling ${def}`; }
+  const ce = keysWithOptional(raw.cases, Object.keys(CASE_DEFAULTS).filter((k) => !CASE_OPTIONAL_KEYS.includes(k)), CASE_OPTIONAL_KEYS, `${where}.cases`); if (ce) return ce;
+  for (const [key, def] of Object.entries(CASE_DEFAULTS)) { if (!(key in raw.cases)) continue; const v = raw.cases[key]; if (!isCount(v) || v === 0) return `${where}.cases: ${key} must be a positive integer`; if (v > def) return `${where}.cases: ${key} exceeds the ceiling ${def}`; }
   const rt = exactKeys(raw.retention, RETENTION_KEYS, `${where}.retention`); if (rt) return rt;
   if (raw.retention.persistProviderText !== false) return `${where}.retention: provider free text is never persisted beyond bounded references (must be false)`;
   if (!QUOTA_EXHAUSTED_POLICIES.includes(raw.retention.onQuotaExhausted)) return `${where}.retention: onQuotaExhausted outside vocabulary`;
   return null;
 }
-export function validatePolicy(raw) { const e = policyError(raw); return e ? { ok: false, error: e, policy: null } : { ok: true, error: null, policy: deepFreeze(structuredClone(raw)) }; }
+// a loaded policy carries every bound explicitly: omitted optional resource / case keys take the shipped default (the ceiling), never more
+export function validatePolicy(raw) { const e = policyError(raw); if (e) return { ok: false, error: e, policy: null }; const p = structuredClone(raw); for (const k of RESOURCE_OPTIONAL_KEYS) if (!(k in p.resources)) p.resources[k] = RESOURCE_DEFAULTS[k]; for (const k of CASE_OPTIONAL_KEYS) if (!(k in p.cases)) p.cases[k] = CASE_DEFAULTS[k]; return { ok: true, error: null, policy: deepFreeze(p) }; }
 export const policyDigest = (policy) => canonicalDigest(policy);
 export const loadPolicy = (raw) => { const r = validatePolicy(raw); if (!r.ok) fail('INVALID_INPUT', r.error); return r.policy; };
 

@@ -15,6 +15,7 @@ export const FAILURE_MAP = deepFreeze({
   NETWORK: ['FAILED', 'PROVIDER_ERROR', null], TIMEOUT: ['FAILED', 'PROVIDER_ERROR', null], CANCELLED: ['FAILED', 'PROVIDER_ERROR', null], REDIRECT_REFUSED: ['FAILED', 'PROVIDER_ERROR', null],
   CONTENT_TYPE: ['FAILED', 'PROVIDER_ERROR', null], BODY_TOO_LARGE: ['FAILED', 'PROVIDER_ERROR', null], JSON_INVALID: ['FAILED', 'PROVIDER_ERROR', null], SCHEMA: ['FAILED', 'PROVIDER_ERROR', null],
   HOST_NOT_ALLOWED: ['FAILED', 'PROVIDER_ERROR', null], ENDPOINT_UNKNOWN: ['FAILED', 'PROVIDER_ERROR', null], REPLAY_MISSING: ['NOT_QUERIED', 'NONE', null], STOPPED: ['NOT_QUERIED', 'NONE', null], GEO: ['ACCESS_BLOCKED', 'GEO_RESTRICTED', 'ENTITLEMENT_DENIED'],
+  QUOTA_REFUSED: ['NOT_QUERIED', 'QUOTA_REFUSED', null], CONCURRENCY_REFUSED: ['NOT_QUERIED', 'QUOTA_REFUSED', null], ADMISSION_UNBOUND: ['NOT_QUERIED', 'QUOTA_REFUSED', null],
 });
 
 // ---- strict native field readers: read the documented field, discard everything else ---------------------------
@@ -33,20 +34,21 @@ export const idSafe = (v, max = 120) => { const s = str(v, max); return s !== nu
 export const isGeoBlock = (failure) => failure?.kind === 'HTTP_403' && failure.bytes && /country|region|geograph|cloudfront/i.test(failure.bytes.toString('utf8', 0, Math.min(400, failure.bytes.length)));
 
 // ---- client base ----------------------------------------------------------------------------------------------
-export function createClientBase({ providerId, transport, clock = () => Date.now(), credential = null, log = () => {}, credits = 1 }) {
+export function createClientBase({ providerId, transport, clock = () => Date.now(), credential = null, log = () => {} }) {
   if (!transport || typeof transport.request !== 'function') fail('INVALID_REQUEST', 'a transport is required');
   let seq = 0; let runtime = 'STOPPED'; let lastFailure = null; let lastOkTs = null; let consecutiveFailures = 0;
   const counters = { requests: 0, ok: 0, failed: 0, observations: 0, rejectedRecords: 0 };
   const setRuntime = (s) => { runtime = s; };
   // one bounded request through the registry endpoint; returns transport result + a closed failure summary
-  async function call({ endpointId, pathParams, query, signal, maxBytes, method, body, share = true, credits: c = credits }) {
+  // the native charge is derived by the accounting authority from the ACTUAL request, never supplied by a caller
+  async function call({ endpointId, pathParams, query, signal, maxBytes, method, body, share = true, purpose = null }) {
     counters.requests += 1;
-    const r = await transport.request({ providerId, endpointId, pathParams, query, credential, signal, maxBytes, method, body, share, credits: c });
+    const r = await transport.request({ providerId, endpointId, pathParams, query, credential, signal, maxBytes, method, body, share, purpose });
     if (r.ok) { counters.ok += 1; lastOkTs = r.receivedTs; consecutiveFailures = 0; if (runtime === 'STARTING' || runtime === 'DEGRADED' || runtime === 'BACKOFF') setRuntime('ACTIVE'); return r; }
     counters.failed += 1; consecutiveFailures += 1;
     const kind = isGeoBlock(r.failure) ? 'GEO' : r.failure.kind;
     const [coverageState, reasonCode, access] = FAILURE_MAP[kind] ?? ['FAILED', 'PROVIDER_ERROR', null];
-    lastFailure = deepFreeze({ kind, reason: r.failure.reason, status: r.failure.status ?? null, ts: r.failure.receivedTs ?? clock(), coverageState, reasonCode, access, retryAfterMs: r.failure.retryAfterMs ?? null, redactedUrl: r.failure.redactedUrl ?? null });
+    lastFailure = deepFreeze({ kind, reason: r.failure.reason, status: r.failure.status ?? null, ts: r.failure.receivedTs ?? clock(), coverageState, reasonCode, access, retryAfterMs: r.failure.retryAfterMs ?? null, redactedUrl: r.failure.redactedUrl ?? null, refusalReasons: Array.isArray(r.failure.reasons) ? r.failure.reasons.slice(0, 8) : null });
     if (coverageState === 'ACCESS_BLOCKED') setRuntime('BLOCKED'); else if (kind === 'HTTP_429' || kind === 'BACKOFF_ACTIVE') setRuntime('BACKOFF'); else if (runtime !== 'STOPPED') setRuntime('DEGRADED');
     return { ok: false, failure: lastFailure, endpointId };
   }

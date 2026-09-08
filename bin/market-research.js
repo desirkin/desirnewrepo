@@ -12,20 +12,21 @@ import { readPolicyFile, readSubjectsFile, runInspect, runCoverage, runCapture, 
 
 export const COMMANDS = Object.freeze({
   inspect: { flags: { policy: { required: true } } },
-  coverage: { flags: { policy: { required: true }, out: { required: true }, subjects: { required: false }, probe: { required: false, bool: true } } },
-  capture: { flags: { policy: { required: true }, subjects: { required: true }, 'duration-seconds': { required: true, int: true }, out: { required: true } } },
+  coverage: { flags: { policy: { required: true }, out: { required: true }, subjects: { required: false }, probe: { required: false, bool: true }, 'research-root': { required: false } } },
+  capture: { flags: { policy: { required: true }, subjects: { required: true }, 'duration-seconds': { required: true, int: true }, out: { required: true }, 'research-root': { required: true } } },
   build: { flags: { capture: { required: true }, 'as-of': { required: true, utc: true }, subject: { required: true }, out: { required: true } } },
   serve: { flags: { policy: { required: true }, subjects: { required: true }, 'research-root': { required: true }, port: { required: false, int: true }, 'case-every-seconds': { required: false, int: true } } },
 });
 export const USAGE = `usage: market-research <command> [flags]
   inspect   --policy <policy.json>
-  coverage  --policy <policy.json> --out <NEW_DIR> [--subjects <subjects.json>] [--probe true]
-  capture   --policy <policy.json> --subjects <subjects.json> --duration-seconds <1..86400> --out <NEW_DIR>
+  coverage  --policy <policy.json> --out <NEW_DIR> [--subjects <subjects.json>] [--probe true --research-root <DIR>]
+  capture   --policy <policy.json> --subjects <subjects.json> --duration-seconds <1..86400> --out <NEW_DIR> --research-root <DIR>
   build     --capture <SEALED_CAPTURE_DIR> --as-of <YYYY-MM-DDTHH:MM:SSZ> --subject <CANONICAL_COIN> --out <NEW_DIR>
   serve     --policy <policy.json> --subjects <subjects.json> --research-root <DIR> [--port <loopback port>] [--case-every-seconds <N>]
 research only (authority NONE / RESEARCH_ONLY). inspect and build are offline; coverage is offline unless --probe true
-(policy-authorized metadata requests only); capture and serve reach the providers the policy enables. Credentials are read
-by environment variable NAME from the policy; values are never printed. See docs/MARKET-RESEARCH-CLI.md.
+(policy-authorized metadata requests only); capture and serve reach the providers the policy enables. Every dispatch is
+accounted in <research-root>/accounting (the stable quota journal); a per-run --out directory is never an accounting root.
+Credentials are read by environment variable NAME from the policy; values are never printed. See docs/MARKET-RESEARCH-CLI.md.
 exit codes: 0 completed honestly | 2 invalid request | 3 corrupt input | 4 resource limit | 5 execution failure
 `;
 export function parseArgs(argv) {
@@ -56,8 +57,8 @@ export async function runCli(argv, { env = process.env, stdout = (s) => process.
   try {
     let result;
     if (command === 'inspect') result = runInspect({ policy: readPolicyFile(flags.policy), env });
-    else if (command === 'coverage') { const { sampleSubjects } = await import('../market-lab/policy.js'); result = await runCoverage({ policy: readPolicyFile(flags.policy), subjects: flags.subjects ? readSubjectsFile(flags.subjects) : sampleSubjects(), env, out: flags.out, probe: flags.probe === true, fetchImpl, clock }); }
-    else if (command === 'capture') result = await runCapture({ policy: readPolicyFile(flags.policy), subjects: readSubjectsFile(flags.subjects), env, out: flags.out, durationSeconds: flags['duration-seconds'], fetchImpl, WebSocketImpl, clock, log: (m) => stderr(`${JSON.stringify({ log: String(m).slice(0, 300) })}\n`) });
+    else if (command === 'coverage') { const { sampleSubjects } = await import('../market-lab/policy.js'); result = await runCoverage({ policy: readPolicyFile(flags.policy), subjects: flags.subjects ? readSubjectsFile(flags.subjects) : sampleSubjects(), env, out: flags.out, probe: flags.probe === true, fetchImpl, clock, researchRoot: flags['research-root'] ?? null }); }
+    else if (command === 'capture') result = await runCapture({ policy: readPolicyFile(flags.policy), subjects: readSubjectsFile(flags.subjects), env, out: flags.out, durationSeconds: flags['duration-seconds'], researchRoot: flags['research-root'], fetchImpl, WebSocketImpl, clock, log: (m) => stderr(`${JSON.stringify({ log: String(m).slice(0, 300) })}\n`) });
     else if (command === 'build') result = runBuild({ captureDir: flags.capture, asOfTs: flags['as-of'], canonicalCoin: flags.subject, out: flags.out, clock });
     else {
       const { createResearchService } = await import('../market-lab/service.js');

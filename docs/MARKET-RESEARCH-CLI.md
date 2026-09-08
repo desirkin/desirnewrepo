@@ -26,8 +26,8 @@ silent fallback to another model.
 
 ```
 node bin/market-research.js inspect  --policy <policy.json>
-node bin/market-research.js coverage --policy <policy.json> --out <NEW_DIR> [--subjects <subjects.json>] [--probe true]
-node bin/market-research.js capture  --policy <policy.json> --subjects <subjects.json> --duration-seconds <1..86400> --out <NEW_DIR>
+node bin/market-research.js coverage --policy <policy.json> --out <NEW_DIR> [--subjects <subjects.json>] [--probe true --research-root <DIR>]
+node bin/market-research.js capture  --policy <policy.json> --subjects <subjects.json> --duration-seconds <1..86400> --out <NEW_DIR> --research-root <DIR>
 node bin/market-research.js build    --capture <SEALED_CAPTURE_DIR> --as-of <YYYY-MM-DDTHH:MM:SSZ> --subject <CANONICAL_COIN> --out <NEW_DIR>
 node bin/market-research.js serve    --policy <policy.json> --subjects <subjects.json> --research-root <DIR> [--port <loopback port>] [--case-every-seconds <N>]
 ```
@@ -36,15 +36,33 @@ node bin/market-research.js serve    --policy <policy.json> --subjects <subjects
   `access: CREDENTIAL_MISSING | CONFIGURED`. No network, no secret.
 - `coverage` — offline by default: the declared-source / cost / required-family matrix (`coverage-matrix.json`) with
   the cheapest SUPPLIED plan combination. `--probe true` performs only policy-authorized metadata / entitlement requests
-  and records the actual probe evidence per route.
+  and records the actual probe evidence per route; a probe is a PROBE-purpose dispatch through the same accounting
+  guard as every other request, so it needs `--research-root <DIR>` (a paid provider's probe additionally needs the
+  policy's `smoke` authorization) and the result reports `accounting` (dispatched / refused / credits).
 - `capture` — real bounded observations from every provider the policy enables: Kraken v2 streams (instrument, book,
   trade), Coinbase feed, REST catalogs / candles / tickers / funding / option summaries / stablecoin / network metrics.
   Native catalogs resolve the supplied identities; an ambiguous or absent symbol is refused before acquisition. The
   output is a sealed CAPTURE bundle (`manifest.json`, `observations.jsonl`, `coverage.jsonl`, `catalog.json`,
   `policy.json` non-secret, `code-identity.json`). A fixture is never injected by default.
+  `--research-root <DIR>` is required: every dispatch is reserved and settled in the STABLE accounting journal
+  `<research-root>/accounting/quota.jsonl` (single owner: `quota.lock`), never in the per-run `--out` directory, so
+  spent / unresolved quantities survive a restart and a changed output directory. A capture longer than one segment
+  bound (`resources.segmentBytes`) rotates into sibling segments `<out>-s0002`, `<out>-s0003`, … before the bound is
+  crossed; each segment is its own sealed bundle whose manifest carries `summary.segment` (ordinal range, policy digest,
+  recipe set), and the result lists `segments` and `accounting`. A row larger than its line bound is rejected and counted;
+  the run bound (`resources.runBytes`) or an exhausted research-root quota stops recording with the first error preserved
+  and no manifest for the failed segment.
 - `build` — offline. Context / features / provenance for one subject at one as-of instant from a sealed capture; the
   same capture prefix and as-of give byte-identical `context.json` across directory names and restarts. A subject with
   no observation or coverage record in the capture is refused (an empty context would be invented, not observed).
+  The context version is `market-context-2` (every component value and support obeys its metric's closed schema in
+  `market-lab/context-schema.js`; trade windows carry positive interval coverage; the options surface carries its
+  census facts). A `market-context-1` bundle is rejected with an explicit message and is never converted — rebuild it
+  from its capture. `coverage.json` (`market-context-coverage-2`) records the derivation `params`, and the UNSEALED
+  candidate is validated by the same bundle law the reader applies before any manifest is written. A capture sealed
+  under the segment law is cited as a versioned immutable prefix descriptor (`market-capture-prefix-1`: segment
+  directory / bundle id / member hashes / ordinal range, membership chain, retention bounds) that resolves offline; an
+  older capture keeps a plain sealed reference and never acquires invented prefix proof.
 - `serve` — the real research service: rolling acquisition into capture segments, a bounded case queue
   (`--case-every-seconds` enqueues every declared subject on that cadence), the Socrates runtime under the policy's
   caps, a loopback GET-only HTTP view (`/status`, `/readiness`, `/cases`, `/cases/<dir>`, `/cases/<dir>/report`,
@@ -57,7 +75,7 @@ node bin/market-research.js serve    --policy <policy.json> --subjects <subjects
 ```
 node bin/socrates-research.js packet   --context <SEALED_CONTEXT_DIR> [--social <validated-social-projection.json>] [--as-of <UTC>] --out <NEW_DIR>
 node bin/socrates-research.js run      --packet <SEALED_PACKET_DIR> --policy <policy.json> --out <NEW_DIR> [--context <SEALED_CONTEXT_DIR>] [--capture <SEALED_CAPTURE_DIR>] [--budget-dir <DIR>] [--recorded-response <file.json>] [--reevaluation true]
-node bin/socrates-research.js verify   --case <SEALED_CASE_DIR>
+node bin/socrates-research.js verify   --case <SEALED_CASE_DIR> [--resolve-inputs true]
 node bin/socrates-research.js evaluate --cases builtin|<cases.json> --policy <policy.json> --out <NEW_DIR> [--live-model true --budget-dir <DIR>]
 ```
 
@@ -69,9 +87,16 @@ node bin/socrates-research.js evaluate --cases builtin|<cases.json> --policy <po
   bundle with `report.md`. With the model disabled or the credential absent the case seals as `BUDGET_BLOCKED` with a
   diagnostic and zero calls. `--recorded-response` is the explicit replay / test path: the attempt path is
   `RECORDED_RESPONSE`, the report says so, and no model call happens. `--reevaluation true` labels a live call over a
-  replayed packet as `MODEL_REEVALUATION_NOW`.
+  replayed packet as `MODEL_REEVALUATION_NOW`. A `--context` built from a prefix-sealed capture makes the case record
+  its immutable input (`case.json` `inputs`: packet id, context id, the capture prefix descriptor, as-of and the
+  derivation params); a `market-context-1` bundle is refused. The runtime's `close()` is awaited before the command
+  returns (open reservations are settled or preserved as unresolved before the budget lock is released).
 - `verify` — offline validation of a sealed case: members, hashes, packet / analysis / attempt relationships, clocks,
-  citations, the report re-rendering. It does not claim source authenticity or the model's financial correctness.
+  citations, the report re-rendering, and the recorded inputs (every packet with a market context must cite a versioned
+  immutable prefix; P1 must cite a new prefix when its context changed). With `--resolve-inputs true` the cited sealed
+  segments are reopened through the capture reader, replayed through the same retention law and the context identity is
+  recomputed from them (`inputResolution`: COMPLETE, RETAINED_WINDOW_ONLY, PARTIAL_SEGMENT_LIST, or a failure that names
+  the segment). It does not claim source authenticity or the model's financial correctness.
 - `evaluate` — the fixed twelve-case reasoning corpus (`socrates/corpus.js`, eight DEVELOPMENT + four HELD_OUT) scored
   by the fixed rubric (`socrates/evaluate.js`). Scripted responses by default (zero usage); `--live-model true` needs a
   budget directory and reports measured usage. It is an implementation assessment, not stage calibration, not a

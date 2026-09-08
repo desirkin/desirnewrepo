@@ -1,7 +1,7 @@
 // D04 — DERIBIT public: complete instrument census (one response, no pagination — the census is complete only when
 // the whole response parsed), book summaries per currency (mark IV in documented PERCENT -> fraction), and per-instrument
 // tickers (Greeks, bid/ask IV). Options exist where Deribit lists them (BTC/ETH and a few others), never synthesized.
-import { createClientBase, num, int, str, bool, tsFromMs, arr, obj, derivativeSubject } from './base.js';
+import { createClientBase, num, int, str, bool, tsFromMs, arr, obj, derivativeSubject, assetSubject } from './base.js';
 import { quality, deepFreeze } from '../contracts.js';
 
 export const DERIBIT_VENUE = 'deribit';
@@ -30,7 +30,10 @@ export function createDeribitClient({ transport, clock, log } = {}) {
       if (ob) observations.push(ob); }
     const complete = rejected === 0;
     census.set(`${currency}:${kind}`, deepFreeze({ instruments: map, receivedTs: r.receivedTs, complete, total: list.length, rejected, requestId: r.requestId, sha256: r.sha256 }));
-    return { ok: true, observations, coverage: [], meta: { requestId: r.requestId, receivedTs: r.receivedTs, total: list.length, rejected, complete } };
+    // closeout R02: the census is a RECORDED fact with its scope (currency + kind), source response identity, receipt clock, member
+    // counts and completeness — the only lawful basis for censusComplete; one option tick never implies it
+    const censusCoverage = base.coverage({ endpointId: 'get-instruments', subject: assetSubject({ canonicalCoin: currency, providerAssetId: currency }), family: kind === 'option' ? 'OPTIONS_TERM_SKEW' : 'DERIVATIVES_FUNDING_OI', kind: 'INSTRUMENT', state: observations.length ? 'OBSERVED' : 'GAP', reasonCodes: complete ? [] : ['CENSUS_INCOMPLETE'], startTs: r.receivedTs, endTs: r.receivedTs, observationCount: observations.length, droppedCount: rejected, epochId: `census:${kind}:${r.sha256.slice(0, 32)}`, sequenceStart: list.length, sequenceEnd: map.size });
+    return { ok: true, observations, coverage: [censusCoverage], meta: { requestId: r.requestId, receivedTs: r.receivedTs, total: list.length, rejected, complete, censusId: censusCoverage.coverageId } };
   }
   const censusOf = (currency, kind = 'option') => census.get(`${currency}:${kind}`) ?? null;
   async function bookSummaries({ currency, kind = 'option', signal }) {

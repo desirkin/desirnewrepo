@@ -292,3 +292,33 @@ The sentence above still governs. v2 adds the machinery, not authority:
   or profit proof. A model may reasonably choose a different supported interpretation.
 - Authority remains NONE. Research output is read by a person through sealed files and the read-only cockpit drawer.
   No trade button, no order suggestion, no paid toggle, no import of orders, ledger, cost, risk, Judge or Watch.
+
+
+## Closeout appendix — the seven laws of the market / Socrates repair (R01–R07)
+
+1. **One accounting authority stands before every dispatch.** A provider request is reserved in the stable research
+   journal (`<research-root>/accounting`) at the dispatch boundary, in native charge units, under day / month / smoke /
+   entitlement / metered caps, or it never reaches the wire. Probe, catalog, acquisition, broker and shared requests use
+   the same guard; refusal is truthful usage; an ambiguous failure stays counted; a restart, a rollover, a repeated
+   attestation or a clock rollback never re-grant. The model reservation covers the worst billed input class actually
+   enabled and needs an exact provider token count.
+2. **Completeness is a positive fact.** A trade window is COMPLETE only over a recorded subscription-continuity fact;
+   a quiet proven interval is a valid zero; anything else is PARTIAL or UNKNOWN_COVERAGE with observed rows labelled
+   observed. An options surface is complete only against a recorded instrument census; a summary and its ticker are one
+   contract; a ratio over a subset says so.
+3. **Every registered metric has one explicit mapping** from acquisition to context component to packet item, bounded
+   and reconciled; absent inputs are MISSING items with no value, never known items with null fields.
+4. **The broker satisfies the question that was asked**: per metric, per subject scope, on source and knowledge clocks,
+   with every constituent of a derived metric present and compatible; a cache hit is a fresh binding; the same question
+   under a new key is never bought twice.
+5. **Recording is bounded and every case cites an immutable prefix**: segments rotate before their bound, retention is
+   bounded with counted eviction facts, a recording failure stops admission with its first error preserved, and a case's
+   inputs resolve offline through sealed segments whose identity is bound to their bytes.
+6. **Close is an ownership barrier**: admission stops, owned requests are aborted, the drain is bounded, open
+   reservations are preserved as unresolved spend, the lock is released once, and no late result becomes a report.
+7. **There is one schema truth**: every component value and support obeys its metric's closed schema at the builder,
+   the candidate, the reader and the verifier; a legacy context is rejected, never converted; a resealed mutation is
+   exposed by recomputation from the source when the source is supplied, and labelled as unverified when it is not.
+
+Authority remains NONE. Readiness is BLOCKED until the owner supplies entitled keys, attested plans and a dollar
+ceiling; no independent acceptance seal is issued by the delivering session.

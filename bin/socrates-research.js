@@ -14,14 +14,14 @@ import { runPacket, runCaseCommand, runVerify, runEvaluateCommand } from '../soc
 export const COMMANDS = Object.freeze({
   packet: { flags: { context: { required: true }, social: { required: false }, 'as-of': { required: false, utc: true }, out: { required: true } } },
   run: { flags: { packet: { required: true }, policy: { required: true }, out: { required: true }, context: { required: false }, capture: { required: false }, 'budget-dir': { required: false }, 'recorded-response': { required: false }, reevaluation: { required: false, bool: true } } },
-  verify: { flags: { case: { required: true } } },
+  verify: { flags: { case: { required: true }, 'resolve-inputs': { required: false, bool: true } } },
   evaluate: { flags: { cases: { required: true }, policy: { required: true }, out: { required: true }, 'live-model': { required: false, bool: true }, 'budget-dir': { required: false } } },
 });
 export const USAGE = `usage: socrates-research <command> [flags]
   packet    --context <SEALED_CONTEXT_DIR> [--social <validated-social-projection.json>] [--as-of <YYYY-MM-DDTHH:MM:SSZ>] --out <NEW_DIR>
   run       --packet <SEALED_PACKET_DIR> --policy <policy.json> --out <NEW_DIR> [--context <SEALED_CONTEXT_DIR>] [--capture <SEALED_CAPTURE_DIR>]
             [--budget-dir <DIR>] [--recorded-response <file.json>] [--reevaluation true]
-  verify    --case <SEALED_CASE_DIR>
+  verify    --case <SEALED_CASE_DIR> [--resolve-inputs true]
   evaluate  --cases builtin|<cases.json> --policy <policy.json> --out <NEW_DIR> [--live-model true --budget-dir <DIR>]
 research only (authority NONE / RESEARCH_ONLY). packet and verify are offline. run makes a live model call ONLY when the
 policy enables the model, the credential environment variable NAME resolves and every dollar cap is positive; it never
@@ -57,7 +57,7 @@ export async function runCli(argv, { env = process.env, stdout = (s) => process.
     let result;
     if (command === 'packet') result = runPacket({ contextDir: flags.context, socialFile: flags.social ?? null, asOfTs: flags['as-of'] ?? null, out: flags.out });
     else if (command === 'run') result = await runCaseCommand({ packetDir: flags.packet, policy: readPolicyFile(flags.policy), env, out: flags.out, contextDir: flags.context ?? null, captureDir: flags.capture ?? null, budgetDir: flags['budget-dir'] ?? null, recordedResponseFile: flags['recorded-response'] ?? null, reevaluation: flags.reevaluation === true, fetchImpl, clock, log });
-    else if (command === 'verify') result = runVerify(flags.case);
+    else if (command === 'verify') result = runVerify(flags.case, { resolveInputs: flags['resolve-inputs'] === true });
     else result = await runEvaluateCommand({ casesSpec: flags.cases, policy: readPolicyFile(flags.policy), env, out: flags.out, liveModel: flags['live-model'] === true, budgetDir: flags['budget-dir'] ?? null, fetchImpl, clock, log });
     stdout(`${JSON.stringify(result)}\n`);
     return result.ok === false ? EXIT_CODES.INVALID_INPUT : EXIT_CODES.OK;

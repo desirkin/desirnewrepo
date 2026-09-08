@@ -187,7 +187,7 @@ export const PROVIDER_IDS = Object.freeze(['KRAKEN_SPOT', 'COINBASE_SPOT', 'KRAK
 export const SUBJECT_KINDS = Object.freeze(['ASSET', 'MARKET', 'TOKEN', 'DERIVATIVE', 'SERIES', 'POOL', 'PROTOCOL', 'PROVIDER']);
 export const MARKET_TYPES = Object.freeze(['SPOT', 'PERPETUAL', 'FUTURE', 'OPTION']);
 export const QUALITY_STATES = Object.freeze(['KNOWN', 'PARTIAL', 'MISSING', 'UNAVAILABLE', 'STALE', 'PROVISIONAL', 'CLOCK_CONFLICT', 'FAILED', 'NOT_SUPPORTED']);
-export const QUALITY_REASON_CODES = Object.freeze(['NONE', 'SOURCE_EVENT_AHEAD_OF_RECEIPT', 'FIELD_MISSING_AT_SOURCE', 'UNIT_UNVERIFIED', 'PAGINATION_INCOMPLETE', 'CENSUS_INCOMPLETE', 'DELAYED_DATA', 'SESSION_CLOSED', 'PROVIDER_ERROR', 'CREDENTIAL_MISSING', 'ENTITLEMENT_DENIED', 'RATE_LIMITED', 'GEO_RESTRICTED', 'STALE_BY_POLICY', 'UNCOMMITTED_BAR', 'NO_TRADES_IN_PERIOD', 'DATE_ONLY_PRECISION', 'ESTIMATE', 'REVISED', 'RESOURCE_EVICTED', 'QUEUE_DROPPED', 'DESYNCHRONIZED', 'EPOCH_GAP', 'CHECKSUM_UNVERIFIED', 'NOT_IN_CATALOG', 'AMBIGUOUS_MAPPING']);
+export const QUALITY_REASON_CODES = Object.freeze(['NONE', 'SOURCE_EVENT_AHEAD_OF_RECEIPT', 'FIELD_MISSING_AT_SOURCE', 'UNIT_UNVERIFIED', 'PAGINATION_INCOMPLETE', 'CENSUS_INCOMPLETE', 'DELAYED_DATA', 'SESSION_CLOSED', 'PROVIDER_ERROR', 'CREDENTIAL_MISSING', 'ENTITLEMENT_DENIED', 'RATE_LIMITED', 'GEO_RESTRICTED', 'STALE_BY_POLICY', 'UNCOMMITTED_BAR', 'NO_TRADES_IN_PERIOD', 'DATE_ONLY_PRECISION', 'ESTIMATE', 'REVISED', 'RESOURCE_EVICTED', 'QUEUE_DROPPED', 'DESYNCHRONIZED', 'EPOCH_GAP', 'CHECKSUM_UNVERIFIED', 'NOT_IN_CATALOG', 'AMBIGUOUS_MAPPING', 'QUOTA_REFUSED', 'RECORDING_FAILED', 'SUBSCRIPTION_ENDED', 'COVERAGE_OVERFLOW']);
 export const SIDES = Object.freeze(['BUY', 'SELL', 'UNKNOWN']);
 export const POSITION_SIDES = Object.freeze(['LONG', 'SHORT', 'UNKNOWN']);
 export const SIDE_CONVENTIONS = Object.freeze(['TAKER_NATIVE', 'MAKER_NATIVE_INVERTED', 'UNKNOWN']);
@@ -583,7 +583,10 @@ export const quality = (state, { reasonCodes = [], coverageStartTs = null, cover
 // ---- coverage interval record (coverage.jsonl) -------------------------------------------------------------
 export const COVERAGE_RECORD_KEYS = Object.freeze(['recordVersion', 'coverageId', 'provider', 'endpointId', 'subjectId', 'family', 'kind', 'state', 'reasonCodes', 'startTs', 'endTs', 'observationCount', 'droppedCount', 'epochId', 'sequenceStart', 'sequenceEnd']);
 export const COVERAGE_RECORD_VERSION = 'market-coverage-1';
-export const COVERAGE_STATES = Object.freeze(['OBSERVED', 'GAP', 'NOT_QUERIED', 'FAILED', 'ACCESS_BLOCKED', 'NOT_SUPPORTED', 'EVICTED', 'DROPPED']);
+// SUBSCRIBED (closeout R02): a POSITIVE feed-continuity fact — the provider acknowledged the channel subscription for this
+// subject at startTs; the interval stays open (endTs null) until a GAP / SUBSCRIPTION_ENDED record closes it. It is the only
+// lawful basis for a complete zero-trade interval; a book, a heartbeat or one trade never establishes it.
+export const COVERAGE_STATES = Object.freeze(['OBSERVED', 'GAP', 'NOT_QUERIED', 'FAILED', 'ACCESS_BLOCKED', 'NOT_SUPPORTED', 'EVICTED', 'DROPPED', 'SUBSCRIBED']);
 export const coverageIdentity = (c) => { const b = {}; for (const k of COVERAGE_RECORD_KEYS) if (k !== 'coverageId') b[k] = c[k]; return `mc-${canonicalDigest(b).slice(0, 40)}`; };
 export function coverageRecordError(c, where = 'coverage') {
   const k = exactKeys(c, COVERAGE_RECORD_KEYS, where); if (k) return k;

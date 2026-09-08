@@ -59,15 +59,13 @@ export function jsonlWriter(reservation, name, { lineBytes, fileBytes = RESOURCE
   let fd; try { fd = openSync(file, 'wx'); } catch (err) { fail('IO_FAILURE', `cannot open ${name} (${err?.code ?? 'error'})`); }
   const hash = createHash('sha256'); let bytes = 0; let lines = 0; let closed = false;
   const release = () => { if (fd !== null) { try { closeSync(fd); } catch { /* best effort */ } fd = null; } };
+  const appendBuffer = (buf) => { if (closed) fail('INTERNAL_FAILURE', 'writer closed'); if (buf.length > lineBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}: line of ${buf.length} bytes exceeds ${lineBytes}`); if (bytes + buf.length > fileBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}: file would exceed ${fileBytes} bytes`); writeAll(fd, buf, name); hash.update(buf); bytes += buf.length; lines += 1; return { bytes, lines }; };
   return {
-    append(obj) {
-      if (closed) fail('INTERNAL_FAILURE', 'writer closed');
-      const line = `${JSON.stringify(obj)}\n`; const buf = Buffer.from(line, 'utf8');
-      if (buf.length > lineBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}: line of ${buf.length} bytes exceeds ${lineBytes}`);
-      if (bytes + buf.length > fileBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}: file would exceed ${fileBytes} bytes`);
-      writeAll(fd, buf, name); hash.update(buf); bytes += buf.length; lines += 1;
-      return { bytes, lines };
-    },
+    append(obj) { return appendBuffer(Buffer.from(`${JSON.stringify(obj)}\n`, 'utf8')); },
+    // rotation seam (closeout R05): the caller measures a record before admitting it, so a segment fills only to its bound
+    encode: (obj) => Buffer.from(`${JSON.stringify(obj)}\n`, 'utf8'),
+    fits: (buf) => ({ line: buf.length <= lineBytes, file: bytes + buf.length <= fileBytes, lineBytes, fileBytes, bytes }),
+    appendBuffer,
     close() {
       if (closed) fail('INTERNAL_FAILURE', 'writer closed twice');
       closed = true;
