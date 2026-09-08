@@ -10,6 +10,7 @@
 // and ZERO invented values. Results are diagnostics in the case envelope, never corroborating facts.
 import { deepFreeze, FAMILY_REGISTRY, familyMetricIds, canonicalDigest, subjectId } from '../market-lab/contracts.js';
 import { indicators } from '../market-lab/recipes.js';
+import { selectNativeSeries, selectionFacts, seriesKeyOf } from '../market-lab/native-series.js';
 import { ALLOWED_MAX_AGE_MS, providerEnabled, paidCallAuthorized } from '../market-lab/policy.js';
 import { providersForFamily } from '../market-lab/registry.js';
 import { METRIC_MAP, metricInputMatch } from '../evidence/research-builder.js';
@@ -53,18 +54,21 @@ export function createBroker({ owner, policy, clock = () => Date.now(), cacheSiz
         else if (r.requestedMaxAgeMs !== null && asOfTs - (o.periodEndTs !== null && o.periodEndTs <= asOfTs ? o.knownAtTs : measureTs) > r.requestedMaxAgeMs) { stale += 1; continue; }
         matches.push(o); fresh += 1;
       }
+      // correction B: after the as-of / freshness admission, ONE version per native period of each compatible series is selected;
+      // envelope repeats, revisions and conflicts are disclosed and never counted as periods, bars or admitted inputs
+      const selection = selectNativeSeries(matches, { asOfTs }); const selected = selection.selected;
       // a derived metric needs EVERY declared native input
       // closeout B02: a derived metric's constituents must be recipe-compatible (same provider / entity set / chain / unit / window / period);
       // an inflow in one unit and an outflow in another never satisfy exchange_net_flow
       const needed = m.native ?? null; const nativeSeen = new Set();
-      if (needed && needed.length > 1 && m.nativeOf) { const groups = new Map(); for (const o of matches) { const p = o.payload ?? {}; const k = `${o.provider}|${p.entitySet ?? ''}|${p.chain ?? ''}|${p.unit ?? ''}|${p.window ?? ''}|${o.periodStartTs ?? ''}|${o.periodEndTs ?? ''}`; if (!groups.has(k)) groups.set(k, new Set()); groups.get(k).add(m.nativeOf(o)); } const complete = [...groups.values()].find((g) => needed.every((n) => g.has(n))); if (complete) for (const n of complete) nativeSeen.add(n); else for (const g of groups.values()) for (const n of g) nativeSeen.add(n); if (!complete && groups.size > 1) { for (const n of needed) if (![...groups.values()].every((g) => g.has(n))) nativeSeen.delete(n); } }
-      else for (const o of matches) nativeSeen.add(m.nativeOf ? m.nativeOf(o) : o.kind);
+      if (needed && needed.length > 1 && m.nativeOf) { const groups = new Map(); for (const o of selected) { const p = o.payload ?? {}; const k = `${o.provider}|${p.entitySet ?? ''}|${p.chain ?? ''}|${p.unit ?? ''}|${p.window ?? ''}|${o.periodStartTs ?? ''}|${o.periodEndTs ?? ''}`; if (!groups.has(k)) groups.set(k, new Set()); groups.get(k).add(m.nativeOf(o)); } const complete = [...groups.values()].find((g) => needed.every((n) => g.has(n))); if (complete) for (const n of complete) nativeSeen.add(n); else for (const g of groups.values()) for (const n of g) nativeSeen.add(n); if (!complete && groups.size > 1) { for (const n of needed) if (![...groups.values()].every((g) => g.has(n))) nativeSeen.delete(n); } }
+      else for (const o of selected) nativeSeen.add(m.nativeOf ? m.nativeOf(o) : o.kind);
       const constituentsMissing = needed ? needed.filter((n) => !nativeSeen.has(n)) : [];
-      const support = matches.length ? metricSupport(m, metricId, matches, r, coverage) : { state: 'NONE', basis: 'NO_MATCH', reasons: ['NO_MATCH'] };
+      const support = selected.length ? metricSupport(m, metricId, selected, r, coverage) : { state: 'NONE', basis: 'NO_MATCH', reasons: ['NO_MATCH'] };
       const historyThin = r.requestKind === 'HISTORY' && support.state !== 'COMPLETE';
-      const satisfied = matches.length > 0 && constituentsMissing.length === 0 && support.state === 'COMPLETE';
-      perMetric[metricId] = { state: satisfied ? 'SATISFIED' : matches.length ? 'PARTIAL' : 'UNMATCHED', matched: matches.length, fresh, stale, nullValues, wrongSubject, outOfWindow, constituentsMissing, nativeInputs: needed, historyThin, support, duplicateIdentities };
-      if (satisfied) { anySatisfied = true; for (const o of matches) admitted.set(o.observationId, o); } else { allSatisfied = false; if (stale && !matches.length) reasons.add('FRESHNESS_UNMET'); else if (nullValues && !matches.length) reasons.add('VALUE_MISSING'); else if (historyThin || constituentsMissing.length || (matches.length && support.state !== 'COMPLETE')) reasons.add('PARTIAL_COVERAGE'); else reasons.add('METRIC_UNMATCHED'); if (matches.length) for (const o of matches) admitted.set(o.observationId, o); }
+      const satisfied = selected.length > 0 && constituentsMissing.length === 0 && support.state === 'COMPLETE';
+      perMetric[metricId] = { state: satisfied ? 'SATISFIED' : selected.length ? 'PARTIAL' : 'UNMATCHED', matched: selected.length, envelopes: matches.length, fresh, stale, nullValues, wrongSubject, outOfWindow, constituentsMissing, nativeInputs: needed, historyThin, support, duplicateIdentities, selection: selectionFacts(selection) };
+      if (satisfied) { anySatisfied = true; for (const o of selected) admitted.set(o.observationId, o); } else { allSatisfied = false; if (stale && !selected.length) reasons.add('FRESHNESS_UNMET'); else if (nullValues && !selected.length) reasons.add('VALUE_MISSING'); else if (historyThin || constituentsMissing.length || (selected.length && support.state !== 'COMPLETE')) reasons.add('PARTIAL_COVERAGE'); else reasons.add('METRIC_UNMATCHED'); if (selected.length) for (const o of selected) admitted.set(o.observationId, o); }
     }
     return { allSatisfied, anySatisfied, perMetric, admitted: [...admitted.values()], reasons: [...reasons], duplicateIdentities };
   }
@@ -90,32 +94,44 @@ export function createBroker({ owner, policy, clock = () => Date.now(), cacheSiz
     let cursor = startTs; const gaps = []; for (const [s, e] of spans) { if (e < cursor) continue; if (s > cursor) gaps.push([cursor, s]); cursor = Math.max(cursor, e); if (cursor >= endTs) break; } if (cursor < endTs) gaps.push([cursor, endTs]);
     return { state: gaps.length ? 'PARTIAL' : 'COMPLETE', reasons: gaps.length ? ['COVERAGE_GAP'] : [], coverageRecords: spans.length, gaps: gaps.slice(0, MAX_MISSING_LISTED) };
   }
-  function metricSupport(m, metricId, matches, r, coverage) {
+  // support of ONE compatible native series (already selected: one version per period); different series never fill each
+  // other's gaps or jointly satisfy a warmup they individually lack
+  function seriesSupport(m, metricId, list, r) {
     const isIndicator = m.component === 'indicators' && m.inputKinds.includes('CANDLE');
-    const periodic = matches.filter((o) => o.periodStartTs !== null && o.periodEndTs !== null);
-    const facts = { basis: null, duplicatesDropped: 0 };
-    if (periodic.length && periodic.length !== matches.length) return { state: 'PARTIAL', basis: 'MIXED', reasons: ['MIXED_OBSERVATION_SHAPES'], ...facts };
     let out = { state: 'COMPLETE', basis: 'SNAPSHOT', reasons: [] };
     if (r.requestKind === 'HISTORY') {
-      if (periodic.length) {
-        // a native constituent set (inflow + outflow) must EACH cover the whole grid
-        const groups = new Map(); for (const o of periodic) { const n = m.native && m.nativeOf ? m.nativeOf(o) : o.kind; if (!groups.has(n)) groups.set(n, []); groups.get(n).push(o); }
-        const grids = [...groups.entries()].map(([n, list]) => [n, periodGrid(list, r.windowStartTs, r.windowEndTs)]); const worst = grids.find(([, g]) => g.state !== 'COMPLETE');
-        out = { state: worst ? 'PARTIAL' : 'COMPLETE', basis: 'PERIOD_GRID', reasons: worst ? worst[1].reasons : [], ...(worst ? worst[1] : grids[0][1]), nativeInput: worst ? worst[0] : grids[0][0] };
-      } else {
-        const ids = new Set(matches.map((o) => subjectId(o.subject)));
-        out = { basis: 'COVERAGE_RECORDS', ...coverageSpan(coverage, m.inputKinds, ids, r.family, r.windowStartTs, r.windowEndTs) };
-      }
-    } else if (periodic.length && matches.some((o) => o.kind === 'CANDLE')) {
+      // a native constituent set (inflow + outflow) must EACH cover the whole grid
+      const groups = new Map(); for (const o of list) { const n = m.native && m.nativeOf ? m.nativeOf(o) : o.kind; if (!groups.has(n)) groups.set(n, []); groups.get(n).push(o); }
+      const grids = [...groups.entries()].map(([n, g]) => [n, periodGrid(g, r.windowStartTs, r.windowEndTs)]); const worst = grids.find(([, g]) => g.state !== 'COMPLETE');
+      out = { state: worst ? 'PARTIAL' : 'COMPLETE', basis: 'PERIOD_GRID', reasons: worst ? worst[1].reasons : [], ...(worst ? worst[1] : grids[0][1]), nativeInput: worst ? worst[0] : grids[0][0] };
+    } else if (list.some((o) => o.kind === 'CANDLE')) {
       // a bar set answering a snapshot request must be one contiguous same-interval series (a cache hit cannot hide a gap)
-      const sorted = [...periodic].sort((a, b) => a.periodStartTs - b.periodStartTs); const g = periodGrid(sorted, sorted[0].periodStartTs, sorted[sorted.length - 1].periodEndTs);
+      const sorted = [...list].sort((a, b) => a.periodStartTs - b.periodStartTs); const g = periodGrid(sorted, sorted[0].periodStartTs, sorted[sorted.length - 1].periodEndTs);
       out = { state: g.state, basis: 'PERIOD_GRID', reasons: g.reasons, ...g };
     }
     if (isIndicator && out.state === 'COMPLETE') {
-      const ind = indicators(matches); const ready = INDICATOR_WARMUP[metricId] ? INDICATOR_WARMUP[metricId](ind) : ind.closedBars > 0;
+      const ind = indicators(list); const ready = INDICATOR_WARMUP[metricId] ? INDICATOR_WARMUP[metricId](ind) : ind.closedBars > 0;
       out = { ...out, basis: 'INDICATOR_WARMUP', state: ready ? 'COMPLETE' : 'PARTIAL', reasons: ready ? [] : ['WARMUP_INCOMPLETE'], closedBars: ind.closedBars, intervalMs: ind.intervalMs };
     }
     return out;
+  }
+  function metricSupport(m, metricId, selected, r, coverage) {
+    const periodic = selected.filter((o) => o.periodStartTs !== null && o.periodEndTs !== null);
+    if (periodic.length && periodic.length !== selected.length) return { state: 'PARTIAL', basis: 'MIXED', reasons: ['MIXED_OBSERVATION_SHAPES'] };
+    if (!periodic.length) {
+      if (r.requestKind !== 'HISTORY') return { state: 'COMPLETE', basis: 'SNAPSHOT', reasons: [] };
+      const ids = new Set(selected.map((o) => subjectId(o.subject)));
+      return { basis: 'COVERAGE_RECORDS', ...coverageSpan(coverage, m.inputKinds, ids, r.family, r.windowStartTs, r.windowEndTs) };
+    }
+    // correction B: support is judged PER compatible series (provider / subject / kind / interval / unit / methodology); a derived
+    // metric's constituents share one provider series family, so constituent grouping happens inside the chosen series set
+    // a derived metric's constituents (inflow + outflow) live in sibling series of one provider / entity set / chain / unit / window:
+    // the metric id and its per-metric methodology are masked so the constituents are judged together, never across providers
+    const constituentKey = (o) => seriesKeyOf({ ...o, payload: { ...(o.payload ?? {}), metricId: '*', methodologyId: '*' } });
+    const bySeries = new Map(); for (const o of periodic) { const k = m.native && m.nativeOf ? constituentKey(o) : seriesKeyOf(o); if (!bySeries.has(k)) bySeries.set(k, []); bySeries.get(k).push(o); }
+    const judged = [...bySeries.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([key, list]) => ({ key, periods: list.length, support: seriesSupport(m, metricId, list, r) }));
+    const complete = judged.filter((j) => j.support.state === 'COMPLETE'); const pick = complete[0] ?? judged.slice().sort((a, b) => b.periods - a.periods || (a.key < b.key ? -1 : 1))[0];
+    return { ...pick.support, seriesCount: judged.length, seriesJudged: judged.map((j) => ({ periods: j.periods, state: j.support.state })), reasons: pick.support.state === 'COMPLETE' ? [] : judged.length > 1 && !complete.length ? [...new Set([...pick.support.reasons, 'NO_SINGLE_SERIES_COMPLETE'])] : pick.support.reasons };
   }
   const idsOf = (list) => { const ids = list.map((o) => o.observationId).sort(); return { ids: ids.slice(0, MAX_ID_LIST), truncated: ids.length > MAX_ID_LIST, digest: canonicalDigest(ids), count: ids.length }; };
   const shape = (ev, extra = {}) => { const idl = idsOf(ev.admitted); return { observationIds: idl.ids, inputIds: idl.ids, idsTruncated: idl.truncated, admittedDigest: idl.digest, sourceIds: [...new Set(ev.admitted.map((o) => o.provider))].sort(), observationsAdmitted: idl.count, metrics: ev.perMetric, coverage: ev.admitted.length ? { startTs: Math.min(...ev.admitted.map((o) => o.sourceEventTs ?? o.periodStartTs ?? o.knownAtTs)), endTs: Math.max(...ev.admitted.map((o) => o.sourceEventTs ?? o.periodEndTs ?? o.knownAtTs)), knownAtMax: Math.max(...ev.admitted.map((o) => o.knownAtTs)), count: idl.count } : null, ...extra }; };

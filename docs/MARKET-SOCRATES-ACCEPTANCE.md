@@ -368,6 +368,48 @@ state → cache rebinding; (4) builder candidate → pure validator → reader �
 provider row → family evidence qualification → family state → overall readiness, with the historical smoke and the
 model demonstration kept as separate facts.
 
+### Four remaining boundaries (IR-A..D) — traceability
+
+Baseline `6596db5` (parent `0c61508`). The owner's acceptance file `test/market-socrates-6596-owner.test.mjs` is installed
+byte-for-byte (SHA-256 `81722e36f8d370773c3c46764c62c3eab4c4ff6207fd6c4babc4d26a701187a1`); on the unchanged baseline it ran
+RED as documented (12 tests: IR-C01..C03 pass, IR-N01..N09 fail, child exit 0, natural exit 1) and it is GREEN on the
+candidate. The linked variants live in `test/market-socrates-rev3-variants.test.js` (A-V01..V03, B-V01..V05, C-V01..V03 per
+journal, D-V01..V03). Every fixture is offline; the descriptor faults run in a child process and patch nothing shared.
+
+| ID | Boundary | Law on the candidate | Test | Result |
+|---|---|---|---|---|
+| A | `market-lab/readiness.js` (`qualifyFamilyEvidence`, `qualifyModelDemonstration`, `liveReadinessManifest`) | COMPLETE concerns the declared requested scope: the obtained asset set, metric set and count must each equal the requested ones (as sets; order irrelevant); a shortfall is a named partial (`scopeShortfall`: ASSET / METRIC / COUNT) — qualified as PARTIAL_LIVE when the evidence says partial, refused (`COMPLETION_CLAIM_CONTRADICTED`) when the evidence claims complete; counts are reconciled in their own meaning, never inferred from array lengths; the model demonstration must have occurred by the manifest's `generatedTs` (`MODEL_DEMONSTRATION_NOT_YET_OCCURRED`), with no invented expiry; nothing throws on well-typed missing proof | IR-N01/N02/N03, IR-C01, A-V01..V03, MC-RD03, P1-R01..R03 | PASS |
+| B | `market-lab/native-series.js` (new, pure), `market-lab/recipes.js` (`indicators`, `etfFlowSummary`), `market-lab/context.js` (closed-bar / cross-asset / ETF selection, indicator component inputs, `completeness.selection`), `market-lab/context-schema.js` (closed optional `selection` disclosure), `socrates/broker.js` (selection after admission, per-series support) | one selected version per native period of one compatible series (provider, subject / venue / instrument / chain / entity, kind, interval, unit, metric, methodology, currency, fund, series id), chosen AFTER the as-of admission law: the version known last wins, ties by ingestion sequence then observation id; identical repeats count once, later-known changes are revisions, same-clock changes are disclosed conflicts (never pooled or averaged); grids, warmup, numerical indicators and component input ids / digests / counts / known-at describe the selected inputs; different series never fill each other's gaps or jointly satisfy a warmup; derived constituents are judged within one provider series family; the evidence cache and replay re-run the same law | IR-N04/N05, IR-C02, B-V01..V05, MC-B01..B07, P4-D01..D04, G11 | PASS |
+| C | `socrates/budget.js`, `market-lab/quota.js` (`append`, lock initialization) | a successful append is open + write-all + fsync + the ONE primary close; the first write / fsync / close failure is surfaced as `IO_FAILURE` (with the primary error's own code and text), the journal latches, no later allowance or dispatch is admitted, live state stays conservative (the reservation stays charged); the descriptor is closed exactly once and never retried; a cleanup error never replaces a primary error; a failed lock initialization releases the descriptor and removes only the lock this process created (another owner's lock is never deleted); a verified reopen validates the actual journal — a row that reached disk before the failed close is kept, never truncated — and starts without the latch | IR-N06/N07, C-V01..V03 (both journals), P2-B01..B05, P2-Q01..Q03, MC-Q06 | PASS |
+| D | `market-lab/context.js` (`COMPONENT_FAMILY`, `GENERIC_RECIPE_METRIC_FAMILY`, `componentBindingError`) applied by `contextError`, hence by the candidate publisher (`contextBundleError`), the reader, the verifier and evidence construction | supplied family, containing family, metric, recipe and recipe version are bound together by ONE closed table: a single-family recipe binds its own family; the intentionally generic `latest_observation` recipe (nominal family NETWORK_ACTIVITY) is bound explicitly for entity-flow / holder (ONCHAIN_ENTITY_FLOW) and DEX / DeFi (DEX_DEFI) metrics; matching summary copies, valid hashes or an available value never authorize a metric in a foreign family | IR-N08/N09, IR-C03, D-V01..V03, MC-V01..V06 | PASS |
+
+Compatibility decision (B). No recipe, context or evidence version changes: `RECIPE_SET_VERSION`, `RECIPES.indicators.version`
+and `CONTEXT_VERSION` are unchanged. A lawful artifact built from distinct bars derives byte-identically (the selector is the
+identity on such input); an older artifact whose bars were inflated by envelope repeats is exposed by the existing
+recomputation (`verify --resolve-inputs`) as a context-identity disagreement, which is the truthful outcome, not a
+reinterpretation of its bytes. The indicator component's `completeness` block gains a closed OPTIONAL `selection` disclosure
+(law, envelopes, selected periods, series, repeats, revisions, conflicts) that new builds always carry and earlier lawful
+artifacts may lack; it is disclosure, never a score or ranking.
+
+Changed paths and why. `market-lab/native-series.js` (new: the shared pure selector); `market-lab/recipes.js` (indicators
+and the ETF summary compute over the selected series; the indicators formula text names the law); `market-lab/context.js`
+(B: candle / cross-asset / ETF selection under the as-of, component inputs are the selected bars; D: the closed binding table
+and check); `market-lab/context-schema.js` (the optional `selection` disclosure); `socrates/broker.js` (B: selection after
+admission, per-series support, constituent grouping, `envelopes` / `selection` facts); `market-lab/readiness.js` (A);
+`socrates/budget.js`, `market-lab/quota.js` (C); tests: the owner file (unchanged bytes), `test/market-socrates-rev3-variants.test.js`
+(new), `test/market-socrates-rev2-variants.test.js` (P1-R01 expects the new `shortfall` member and the contradiction reasons —
+the semantic oracle is unchanged); docs: this file, `docs/MARKET-RESEARCH-CLI.md`, the revision-3 appendix in
+`doctrine/SOCRATES.md` with its exact-line fence in `test/social-4f-scope.test.js`. No protected file changed; no operational
+authority was added for the new helper; no profit target, return quota or forced-trade objective exists anywhere.
+
+Boundary consistency review (one pass, named coverage): native observations → as-of selection → compatible periods →
+indicators → context references / support → broker acquisition / cache / replay → packet (B-V01..V05, IR-N04/N05,
+MC-B04/B06, MC-E01); requested proof → obtained proof → family / model qualification → overall (A-V01..V03, IR-N01..N03);
+validate transition → write-all → fsync → primary close → commit / latch → next allowance → bounded shutdown → reopen
+(C-V01..V03, IR-N06/N07, P3-S06, MC-L04); component family / metric / recipe → candidate → saved context → evidence
+(D-V01..V03, IR-N08/N09, MC-V03). The review found one in-scope gap and fixed it: a derived metric's constituents (inflow /
+outflow) carry per-metric methodology ids, so they are judged inside one provider series family rather than as unrelated series.
+
 ### Judge handoff
 
 What the candidate claims: the seven repairs above are implemented at the named production boundaries and proven by the

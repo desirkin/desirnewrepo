@@ -375,12 +375,12 @@ const qualified = (fam, over = {}) => { const providerId = providersForFamily(fa
 
 test('P1-R01. qualification names every missing proof and never throws: unrelated endpoint, stale knowledge, historical smoke only, unregistered metric, unbound count, provider not PASSED / disabled, age outside the family policy, garbage input', () => {
   const rows = rowsAllPassed(); const q = (fam, ev, generatedTs = T0) => qualifyFamilyEvidence(fam, ev, rows, { generatedTs });
-  assert.deepEqual(q('NETWORK_ACTIVITY', qualified('NETWORK_ACTIVITY')), { qualified: true, complete: true, missing: [] });
+  assert.deepEqual(q('NETWORK_ACTIVITY', qualified('NETWORK_ACTIVITY')), { qualified: true, complete: true, missing: [], shortfall: [] });
   assert.deepEqual(q('DISPLAYED_LIQUIDITY', qualified('DISPLAYED_LIQUIDITY', { endpointId: 'rest-trades' })).missing, ['ENDPOINT_NOT_FAMILY_RELEVANT'], 'a Kraken trades smoke is not displayed-liquidity proof');
   assert.deepEqual(q('NETWORK_ACTIVITY', qualified('NETWORK_ACTIVITY'), T0 + DAY + 1).missing, ['FRESHNESS_UNMET'], 'fresh under the family policy age only');
   assert.deepEqual(q('NETWORK_ACTIVITY', qualified('NETWORK_ACTIVITY', { requestedMaxAgeMs: 12_345 })).missing, ['FRESHNESS_POLICY_NOT_NAMED']);
   assert.deepEqual(q('NETWORK_ACTIVITY', qualified('NETWORK_ACTIVITY', { knownAtTs: undefined, smokeTs: T0 - 1000 })).missing, ['KNOWN_AT_MISSING'], 'a historical smoke never stands in for the knowledge clock');
-  assert.deepEqual(q('NETWORK_ACTIVITY', qualified('NETWORK_ACTIVITY', { metrics: { requested: ['active_addresses', 'exchange_reserve'], obtained: ['active_addresses'] } })).missing, ['METRIC_PROOF_MISSING'], 'exchange_reserve is not a NETWORK_ACTIVITY metric');
+  assert.deepEqual(q('NETWORK_ACTIVITY', qualified('NETWORK_ACTIVITY', { metrics: { requested: ['active_addresses', 'exchange_reserve'], obtained: ['active_addresses'] } })).missing, ['METRIC_PROOF_MISSING', 'COMPLETION_CLAIM_CONTRADICTED', 'METRIC_SCOPE_SHORTFALL'], 'exchange_reserve is not a NETWORK_ACTIVITY metric, and a complete claim over a shortfall is contradicted (correction A)');
   assert.deepEqual(q('NETWORK_ACTIVITY', qualified('NETWORK_ACTIVITY', { obtained: 3 })).missing, ['OBTAINED_COUNT_UNBOUND']);
   assert.deepEqual(q('NETWORK_ACTIVITY', qualified('NETWORK_ACTIVITY', { assets: { requested: ['BTC'], obtained: ['BTC', 'SOL'] } })).missing, ['ASSET_PROOF_MISSING']);
   assert.deepEqual(q('NETWORK_ACTIVITY', qualified('NETWORK_ACTIVITY', { support: { state: 'COMPLETE', basis: 'ROWS' } })).missing, ['SUPPORT_BASIS_MISSING']);

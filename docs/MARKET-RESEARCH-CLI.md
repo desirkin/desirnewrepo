@@ -98,6 +98,13 @@ node bin/socrates-research.js evaluate --cases builtin|<cases.json> --policy <po
   its immutable input (`case.json` `inputs`: packet id, context id, the capture prefix descriptor, as-of and the
   derivation params); a `market-context-1` bundle is refused. The runtime's `close()` is awaited before the command
   returns (open reservations are settled or preserved as unresolved before the budget lock is released).
+- Native series law (`build`, `verify --resolve-inputs`, the broker): a provider's periodic measurement (a candle, a daily
+  on-chain point, an ETF flow, a cross-asset bar) is ONE sample per period of ONE compatible series. Repeated polling yields
+  many lawful observations of the same period; the builder, the indicator recipe and the broker select one version per
+  (series, period) under the as-of law before counting, gridding or computing (`market-lab/native-series.js`), and the
+  indicator component's `completeness.selection` discloses envelopes, selected periods, series, repeats, revisions and
+  conflicts. Sixty-two receipts of one hourly candle are one closed bar (SMA60 null), never sixty bars. Different providers,
+  venues, quotes, intervals or units are different series and never fill one another's gaps.
 - `verify` — offline validation of a sealed case: members, hashes, packet / analysis / attempt relationships, clocks,
   citations, the report re-rendering, and the recorded inputs (every packet with a market context must cite a versioned
   immutable prefix; P1 must cite a new prefix when its context changed). With `--resolve-inputs true` the cited sealed
@@ -162,9 +169,12 @@ obtained evidence: the selected required provider (enabled, live-PASSED, usable 
 endpoint, requested / obtained assets and registered metrics, the measured interval, the knowledge clock fresh under the
 family's own policy age (`ALLOWED_MAX_AGE_MS`), and a support / census basis. A count, a historical smoke (reported
 separately as `historicalSmokeTs`) or a provider smoke on another endpoint never qualifies; the family row names its
-`missingProof`. READINESS_GREEN additionally needs every contract test PASSED and a supported model demonstration
-(`modelReadiness.demonstration`: clock, model, request id, real usage) — a bare PASSED flag blocks. Nothing here runs a
-provider or the model; the manifest reports what the owner's demonstrations established.
+`missingProof`. COMPLETE concerns the declared requested scope: the obtained asset set, metric set and count must each
+equal the requested ones (a shortfall is a named partial, `scopeShortfall`; a complete claim over a shortfall is refused as
+`COMPLETION_CLAIM_CONTRADICTED`). READINESS_GREEN additionally needs every contract test PASSED and a supported model
+demonstration (`modelReadiness.demonstration`: clock at or before the manifest's `generatedTs`, model, request id, real
+usage) — a bare PASSED flag or a demonstration dated after the manifest blocks. Nothing here runs a provider or the model;
+the manifest reports what the owner's demonstrations established.
 
 The deterministic suite (`node --test`) never spends money or reaches a provider: every network path is a loopback
 fixture or a narrow injected transport, and every model path is a scripted / recorded response.

@@ -117,13 +117,20 @@ export function openQuotaJournal({ dir, clock = () => Date.now(), pid = process.
   const lockFile = path.join(dir, 'quota.lock'); const journalFile = path.join(dir, 'quota.jsonl');
   let lockFd = null;
   try { lockFd = openSync(lockFile, 'wx'); writeAll(lockFd, Buffer.from(`${JSON.stringify({ pid, openedTs: clock(), version: QUOTA_JOURNAL_VERSION })}\n`), 'quota.lock'); fsyncSync(lockFd); }
-  catch (err) { if (err?.code === 'EEXIST') fail('PERMISSION_FAILURE', 'the provider quota journal is locked by another owner (single-owner law; a stale lock is never deleted by age)'); fail('IO_FAILURE', `cannot lock the quota journal (${err?.code ?? 'error'})`); }
+  catch (err) { if (lockFd !== null) { const owned = lockFd; lockFd = null; try { closeSync(owned); } catch { /* released once */ } try { unlinkSync(lockFile); } catch { /* our own partial lock */ } } if (err?.code === 'EEXIST') fail('PERMISSION_FAILURE', 'the provider quota journal is locked by another owner (single-owner law; a stale lock is never deleted by age)'); fail('IO_FAILURE', `cannot lock the quota journal (${err?.code ?? 'error'})`); } // correction C: a failed initialization holds neither descriptor nor lock; another process's lock is never deleted
   const releaseLock = () => { if (lockFd !== null) { try { closeSync(lockFd); } catch { /* ignore */ } lockFd = null; try { unlinkSync(lockFile); } catch { /* ignore */ } } };
   const state = createState(); let bytes = 0;
   try {
     if (existsSync(journalFile)) { const buf = readFileSync(journalFile); bytes = buf.length; if (buf.length > MAX_QUOTA_JOURNAL_BYTES) fail('RESOURCE_LIMIT_EXCEEDED', 'quota journal too large — stop explicitly, never cleared to regain budget'); const lines = buf.toString('utf8').split('\n'); for (let i = 0; i < lines.length; i += 1) { const l = lines[i]; if (!l) { if (i !== lines.length - 1) fail('INVALID_INPUT', `quota journal: empty line ${i + 1}`); continue; } if (Buffer.byteLength(l) > MAX_QUOTA_ROW_BYTES) fail('INVALID_INPUT', `quota journal: row ${i + 1} too long`); const p = parseStrictJson(l, { maxBytes: MAX_QUOTA_ROW_BYTES }); if (!p.ok) fail('INVALID_INPUT', `quota journal: line ${i + 1} ${p.error}`); state.apply(p.value, i + 1, true); } }
   } catch (err) { releaseLock(); throw err; }
-  function append(rec) { const line = Buffer.from(`${JSON.stringify(rec)}\n`); if (bytes + line.length > MAX_QUOTA_JOURNAL_BYTES) fail('RESOURCE_LIMIT_EXCEEDED', 'quota journal at its bound — dispatch stopped explicitly'); let fd = null; try { fd = openSync(journalFile, 'a'); writeAll(fd, line, 'quota.jsonl'); fsyncSync(fd); bytes += line.length; } catch (err) { if (err?.code === 'RESOURCE_LIMIT_EXCEEDED') throw err; fail('IO_FAILURE', `quota journal append failed (${err?.code ?? 'error'}) — dispatch blocked`); } finally { if (fd !== null) { try { closeSync(fd); } catch { /* ignore */ } } } }
+  function append(rec) { const line = Buffer.from(`${JSON.stringify(rec)}\n`); if (bytes + line.length > MAX_QUOTA_JOURNAL_BYTES) fail('RESOURCE_LIMIT_EXCEEDED', 'quota journal at its bound — dispatch stopped explicitly'); let fd = null; let primary = null;
+    // correction C: a successful append is open + write-all + fsync + the ONE primary close; the first failure is kept and surfaced as
+    // IO_FAILURE. The descriptor is closed exactly once (the caller never retries a close that may already have released it);
+    // a close error after a successful fsync is still an accounting failure — the row may be on disk while live state is not committed.
+    try { fd = openSync(journalFile, 'a'); writeAll(fd, line, 'quota.jsonl'); fsyncSync(fd); } catch (err) { primary = err; }
+    if (fd !== null) { const owned = fd; fd = null; try { closeSync(owned); } catch (err) { if (!primary) primary = err; } }
+    if (primary) { if (primary?.code === 'RESOURCE_LIMIT_EXCEEDED') throw primary; fail('IO_FAILURE', `quota journal append failed (${primary?.code ?? 'error'}: ${String(primary?.message ?? primary).slice(0, 120)}) — dispatch blocked`); }
+    bytes += line.length; }
   const api = journalApi(state, { append, clock, durable: true, close: releaseLock, files: { lockFile, journalFile } });
   // restart law: a reservation left open by a crash may have been dispatched — UNRESOLVED, counted, never refunded
   try { for (const x of [...state.byId.values()]) if (x.state === 'RESERVED') api.unresolved(x.reservationId, 'RESERVED_AT_RESTART'); } catch (err) { releaseLock(); throw err; } // a failed initialization holds no lock

@@ -345,3 +345,19 @@ ceiling; no independent acceptance seal is issued by the delivering session.
 
 Authority remains NONE. No readiness claim, acceptance claim, prompt, test or configuration carries a profit target,
 a return quota or a forced-trade objective.
+
+### Closeout appendix, revision 3 — the four remaining boundaries (A–D)
+
+1. **Readiness reconciles requested and obtained scope.** Complete means the declared requested assets, metrics and
+   count were obtained; a shortfall is a named partial, and a complete claim over a shortfall is a contradiction that never
+   qualifies. A model demonstration counts only once it has occurred by the manifest's own clock.
+2. **One native period is one sample.** Envelope identity is not sample identity: one version per native period of one
+   compatible series is selected under the as-of law before anything is counted, gridded or computed; repeats, revisions and
+   conflicts are disclosed; different providers, venues, quotes, intervals or units never merge.
+3. **A journal append ends with its primary close.** The first write, fsync or close failure surfaces and latches; the
+   descriptor is closed once and never retried; a failed initialization leaves neither descriptor nor lock; a reopen validates
+   the actual journal and never truncates a valid row to regain allowance.
+4. **A component's family is bound to its metric.** Family, metric, recipe and version agree with one closed binding at the
+   builder, the candidate, the reader, the verifier and the packet; hashes, counts and available values authorize nothing.
+
+Authority remains NONE. No profit target, return quota or forced-trade objective belongs in any readiness or acceptance claim.

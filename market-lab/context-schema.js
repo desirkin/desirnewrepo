@@ -65,7 +65,7 @@ const indicatorsValue = obj({
   rsi14: obj({ value: nullable((v, w) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100 ? null : `${w}: must be an RSI in [0, 100]`)), state: en(['WARMUP', 'FLAT', 'NO_LOSSES', 'NO_GAINS', 'OK']) }), macd: nullable(obj({ macd: num, signal: num, histogram: num })), bollinger20: nullable(obj({ middle: num, upper: num, lower: num, stdev: nonneg })),
   prior20: nullable(obj({ high: price, low: price })), prior60: nullable(obj({ high: price, low: price })), lastClose: priceN, support: supportOf(['COMPLETE', 'NO_CLOSED_BARS']), law: literal('WARMUP_IS_NULL_NEVER_ZERO'),
   breakout: obj({ recipeId: literal('breakout_distance'), version, toPrior20High: numN, toPrior20Low: numN, toPrior60High: numN, toPrior60Low: numN, toVwap: numN, support: supportOf(['COMPLETE', 'INSUFFICIENT_BARS']) }),
-  provisionalBar: nullable(obj({ periodStartTs: ts, close: price, state: literal('PROVISIONAL') })), completeness: obj({ bars: count, evictedBarsUntilTs: tsN, capReached: bool }), venue: str(80),
+  provisionalBar: nullable(obj({ periodStartTs: ts, close: price, state: literal('PROVISIONAL') })), completeness: obj({ bars: count, evictedBarsUntilTs: tsN, capReached: bool }, { selection: obj({ law: literal('ONE_SELECTED_VERSION_PER_NATIVE_PERIOD'), envelopes: count, selectedPeriods: count, series: count, repeats: count, revisions: count, conflicts: count }) }), venue: str(80),
 });
 const bandSide = obj({ qty: nonneg, notional: nonneg, lowerBoundOnly: bool });
 const band = obj({ bid: bandSide, ask: bandSide, imbalance: numN });

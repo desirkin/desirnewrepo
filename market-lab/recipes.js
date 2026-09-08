@@ -3,6 +3,7 @@
 // immutable id/version, exact input kinds, formula, window, units, required/optional leaves and machine-readable
 // nullability. Absent support yields null with a closed reason — never zero, never an extrapolation.
 import { deepFreeze, isFiniteNum, isTs, round } from './contracts.js';
+import { selectNativeSeries } from './native-series.js';
 import { inWindow } from './time.js';
 
 export const RECIPE_SET_VERSION = 'market-lab-recipes-1';
@@ -27,7 +28,7 @@ export const RECIPES = deepFreeze(Object.fromEntries([
   R('put_call_oi_ratio', { family: 'OPTIONS_TERM_SKEW', inputs: ['OPTION_TICK'], formula: 'sum(put OI)/sum(call OI) and volumes under a complete admitted same-scope census with positive denominators', window: 'point', units: 'RATIO', required: ['payload.openInterest'], optional: ['payload.volume24h'], nullable: { value: true }, limitations: ['partial-chain totals are never market totals; no dealer gamma inference'] }),
   R('supply_ratios', { family: 'SUPPLY_UNLOCKS', inputs: ['ASSET_REFERENCE'], formula: 'circulating/total, circulating/max, FDV/marketCap, volume24h/marketCap; unknown max => only its ratio null', window: 'point', units: 'FRACTION', required: ['payload.circulatingSupply'], optional: ['payload.maxSupply'], nullable: { all: true }, limitations: ['provider-reported cap is not overwritten with another venue price'] }),
   R('exchange_net_flow', { family: 'ONCHAIN_ENTITY_FLOW', inputs: ['ONCHAIN_METRIC'], formula: 'net=inflow-outflow ONLY for matching provider, entity set, chain, asset, unit, window and methodology', window: 'matched', units: 'NATIVE', required: ['inflow', 'outflow'], optional: [], nullable: { net: true }, limitations: ['transfers into exchange labels do not prove sales; wrapper transfers are not pooled'] }),
-  R('indicators', { family: 'SPOT_PRICE_CHART', inputs: ['CANDLE'], formula: 'closed bars only: SMA/EMA 5/20/60 (EMA seeded by SMA of its length), realized volatility of log returns 5/20/60, ATR14 and RSI14 with Wilder smoothing seeded by arithmetic averages (RSI: no gains and no losses => FLAT null; no losses => 100; no gains => 0), MACD 12/26/9, Bollinger 20 with population stdev, prior 20/60-bar high/low; warmup is null never zero', window: 'bars', units: 'QUOTE', required: ['closed bars'], optional: [], nullable: { warmup: true }, limitations: ['candle typical-price VWAP is never trade VWAP'] }),
+  R('indicators', { family: 'SPOT_PRICE_CHART', inputs: ['CANDLE'], formula: 'closed bars only, one selected version per native period (envelope repeats are not bars): SMA/EMA 5/20/60 (EMA seeded by SMA of its length), realized volatility of log returns 5/20/60, ATR14 and RSI14 with Wilder smoothing seeded by arithmetic averages (RSI: no gains and no losses => FLAT null; no losses => 100; no gains => 0), MACD 12/26/9, Bollinger 20 with population stdev, prior 20/60-bar high/low; warmup is null never zero', window: 'bars', units: 'QUOTE', required: ['closed bars'], optional: [], nullable: { warmup: true }, limitations: ['candle typical-price VWAP is never trade VWAP'] }),
   R('macro_surprise', { family: 'MACRO_RELEASES', inputs: ['ECONOMIC_EVENT'], formula: 'actual minus pre-release forecast in compatible units (percentage points for percent units) ONLY when the forecast was known BEFORE release; revised previous is never the first-release prior', window: 'event', units: 'PERCENTAGE_POINTS', required: ['payload.actualValue', 'payload.forecastValue', 'payload.forecastKnownAtTs', 'payload.scheduledTs'], optional: [], nullable: { surprise: true }, limitations: ['forecast learned after release cannot establish a point-in-time surprise'] }),
   R('pearson_correlation', { family: 'CROSS_ASSET', inputs: ['CROSS_ASSET_BAR', 'CANDLE'], formula: 'Pearson r over >=30 paired closed returns of the same complete interval and synchronous labelled sessions; both variances must be positive', window: 'paired returns', units: 'RATIO', required: ['paired returns'], optional: [], nullable: { r: true }, limitations: ['descriptive, never causal; no forward-fill of a closed market as a fresh zero return'] }),
   R('relative_activity', { family: 'SPOT_PRICE_CHART', inputs: ['TRADE', 'CANDLE'], formula: 'current window volume / range divided by the median of the coin\'s own trailing complete windows of equal elapsed time', window: 'current vs trailing', units: 'RATIO', required: ['current', 'trailing>=3'], optional: [], nullable: { ratio: true }, limitations: ['equal elapsed time, not a full prior day; 24/7 UTC clock'] }),
@@ -244,7 +245,7 @@ export function liquidationTotals(events, { startTs, endTs, coverageKnown = true
   return deepFreeze({ recipeId: 'liquidation_notional_by_side', version: 1, startTs, endTs, events: n, unit: units.size ? [...units][0] : null, longNotional: n ? round(L) : null, shortNotional: n ? round(S) : null, unknownSideNotional: n ? round(U) : null, zeroMeaningful: coverageKnown, support: support(n ? 'COMPLETE' : coverageKnown ? 'COMPLETE_NO_EVENTS' : 'UNKNOWN_COVERAGE'), law: 'CAUSE_OF_A_LIQUIDATION_IS_NOT_OBSERVED' });
 }
 export function etfFlowSummary(flows) {
-  const agg = flows.filter((f) => f.kind === 'ETF_FLOW' && f.payload.fund === null && isFiniteNum(f.payload.flowUsd)).sort((a, b) => a.periodStartTs - b.periodStartTs);
+  const agg = selectNativeSeries(flows.filter((f) => f.kind === 'ETF_FLOW' && f.payload.fund === null && isFiniteNum(f.payload.flowUsd))).selected.slice().sort((a, b) => a.periodStartTs - b.periodStartTs);
   if (!agg.length) return deepFreeze({ recipeId: 'etf_daily_flow', version: 1, latest: null, support: support('NO_FLOWS') });
   const last = agg[agg.length - 1]; const trailing = (n) => round(sum(agg.slice(-n).map((f) => f.payload.flowUsd)));
   return deepFreeze({ recipeId: 'etf_daily_flow', version: 1, asset: last.payload.asset, latest: { periodStartTs: last.periodStartTs, periodEndTs: last.periodEndTs, flowUsd: last.payload.flowUsd, estimate: last.payload.estimate, receivedTs: last.receivedTs }, trailing5: trailing(5), trailing20: trailing(20), days: agg.length, support: support('COMPLETE'), law: 'DAILY_FLOW_IS_SLOW_CONTEXT' });
@@ -273,8 +274,10 @@ export function relativeActivity(current, trailing, key) {
 }
 
 // ---- indicators over closed bars -------------------------------------------------------------------------------------
+// correction B: the indicator series is ONE selected version per native period (never envelope repeats); callers select under
+// the as-of law and pass exactly those inputs, and the recipe applies the same selector so closedBars can never count envelopes
 export function indicators(bars) {
-  const closed = bars.filter((b) => b.payload.closed && isFiniteNum(b.payload.close)).sort((a, b) => a.periodStartTs - b.periodStartTs);
+  const closed = selectNativeSeries(bars.filter((b) => b.payload.closed && isFiniteNum(b.payload.close))).selected.slice().sort((a, b) => a.periodStartTs - b.periodStartTs);
   const c = closed.map((b) => b.payload.close); const h = closed.map((b) => b.payload.high); const l = closed.map((b) => b.payload.low); const n = c.length;
   const sma = (k) => (n >= k ? round(sum(c.slice(-k)) / k) : null);
   const ema = (k) => { if (n < k) return null; let e = sum(c.slice(0, k)) / k; const a = 2 / (k + 1); for (let i = k; i < n; i += 1) e = c[i] * a + e * (1 - a); return round(e); };
