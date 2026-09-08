@@ -50,8 +50,10 @@ const OFFLINE_RESEARCH_RUMOR2_IMPORTS = {
   // string lists, no runtime, no collector, no provider — provenance/vocabulary reuse, never an authority allowance
   'research/contracts.js': { 'truth.js': ['canonicalJson', 'RUMOR2_CLAIM_TYPES'], 'social-research-dossier.js': ['RESEARCH_ENTRANCE_KINDS', 'RESEARCH_STATES', 'RESEARCH_PROPOSAL_KINDS', 'RESEARCH_CROSS_SENSE', 'RESEARCH_PACKET_REASON_CODES', 'RESEARCH_DEPENDENCY_NODE_KINDS', 'RESEARCH_DEPENDENCY_RELATIONS'] },
   'research/bundle.js': { 'truth.js': ['canonicalJson'] },
+  // the breakdown key domains are the dossier contract's OWN frozen vocabularies: pure string lists, no runtime
+  'research/schemas.js': { 'social-research-dossier.js': ['RESEARCH_STATES', 'RESEARCH_SOCIAL_COVERAGE_STATES'] },
   // the SHADOW record law is the source's own: pure frozen vocabularies / version lists, no runtime, no collector
-  'research/features.js': { 'truth.js': ['canonicalJson'], 'social-research-shadow.js': ['RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION', 'RESEARCH_SHADOW_EXCLUSION_REASONS'] },
+  'research/features.js': { 'truth.js': ['canonicalJson'], 'social-research-shadow.js': ['RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION', 'RESEARCH_SHADOW_EXCLUSION_REASONS', 'shadowRowRank'] },
   'research/snapshot.js': { 'truth.js': ['canonicalJson'], 'social-research-dossier.js': ['RESEARCH_DOSSIER_EVENT_TYPE', 'RESEARCH_DOSSIER_SCHEMA_VERSION', 'RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION', 'replayResearchDossierEvent', 'isLegacyResearchDossierEvent'], 'social-research-shadow.js': ['RESEARCH_SHADOW_EVENT_TYPE', 'RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION', 'replayResearchShadowEvent', 'emptyShadowState'], 'social-settle.js': ['SOCIAL_OBSERVATION_TYPES'] },
   'research/pipeline.js': { 'truth.js': ['canonicalJson'], 'social-research-dossier.js': ['RESEARCH_DOSSIER_SCHEMA_VERSION', 'RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION'], 'social-research-shadow.js': ['RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION'] },
 };

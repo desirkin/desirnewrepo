@@ -11,7 +11,7 @@ import { canonicalJson } from '../rumor2/truth.js';
 import { FEATURE_RECIPE_VERSION, FEATURE_ROW_KEYS, FEATURE_CATALOGUE, FEATURE_LEAF_VALUE_OK, ABSENCE_VALUES, ENTRANCE_LABELS, DERIVATION_INPUT_LEAF_CLOCKS, derivedLatencyError, SHADOW_SELECTION_REASONS, SHADOW_PRECOOLDOWN_VERDICTS, COHORTS, ROW_STATUSES, AUTHORITY, PURPOSE, LIMITS, fail, isPlainObject, isTs, isCount, isCoin, isId, isCode, elementValue, catalogueArraysError, arrayClockError, forbiddenLeafError, sha256Hex, exactKeys, deepFreeze, isFiniteNum } from './contracts.js';
 import { validateSnapshotRecord } from './snapshot.js';
 import { dependencyGraphError } from './relations.js';
-import { RESEARCH_SHADOW_POPULATION_VERSIONS, RESEARCH_SHADOW_RECIPE_VERSION, RESEARCH_SHADOW_EXCLUSION_REASONS } from '../rumor2/social-research-shadow.js';
+import { RESEARCH_SHADOW_POPULATION_VERSIONS, RESEARCH_SHADOW_RECIPE_VERSION, RESEARCH_SHADOW_EXCLUSION_REASONS, shadowRowRank } from '../rumor2/social-research-shadow.js';
 
 export const SOURCE_PROFILE_CONTEXT = 'NOT_RECORDED_IN_DOSSIER'; // never reconstructed from a current profile
 export const CLAIM_ASSOCIATION_CONTEXT = 'NOT_AVAILABLE_NO_AUTHORIZED_SEAM';
@@ -178,6 +178,11 @@ export function validateFeatureRow(r) {
   const suppressed = r.features['shadow.selectionReason'] === 'SHADOW_CONTROL_COOLDOWN_SUPPRESSED';
   if (suppressed !== (verdict !== null)) return 'feature row: the shadow selection reason disagrees with the pre-cooldown verdict beside it';
   if (suppressed !== r.features['shadow.cooldownSuppressed']) return 'feature row: the shadow selection reason disagrees with its own cooldown flag';
+  // THE SAMPLING RANK IS A FUNCTION OF THE IDENTITY IT RANKS, not a free 40-hex field. The source recipe derives it
+  // from (recipeVersion, sweepId, coin), which is exactly what makes the sample reproducible from the same
+  // population — so a different valid-looking hash, or the right hash left behind after the coin or sweep changed,
+  // is the wrong sampling provenance. Recomputed here, never rewritten: an inconsistent row is refused.
+  if (r.features['shadow.rank'] !== shadowRowRank({ recipeVersion: r.shadowContext.recipeVersion, sweepId: r.sweepId, coin: r.canonicalCoin })) return 'feature row: the shadow sampling rank is not the recipe rank of the identity it ranks';
   if (Object.keys(r.arrays).length !== 0 || r.entrances.length !== 0) return 'feature row: a shadow row has no Social arrays / entrances';
   return null;
 }

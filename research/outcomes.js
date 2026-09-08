@@ -157,7 +157,15 @@ export function archiveContextError(ctx) {
   if (ctx.state === 'ARCHIVE_PRESENT' && ctx.archiveCreatedTsMs !== null && !isTs(ctx.archiveCreatedTsMs)) return 'archive context: creation clock malformed';
   // the series inventory is explicit: a list (possibly empty) of canonical assets, or an explicit null meaning the
   // caller has no inventory in scope. `undefined` is not a third option — the key is required either way.
-  if (ctx.oneMinuteSymbols !== null && (!Array.isArray(ctx.oneMinuteSymbols) || ctx.oneMinuteSymbols.some((x) => typeof x !== 'string' || x.length === 0))) return 'archive context: the series inventory is malformed';
+  // A SUPPLIED inventory is input like any other: every member is a canonical asset identity (dotted symbols
+  // included) and no member repeats. Nothing is normalized into null and nothing is quietly deduplicated. This
+  // API's list has no ordering law, so none is imposed — the SAVED archive census keeps its own sorted-set rule.
+  if (ctx.oneMinuteSymbols !== null) {
+    if (!Array.isArray(ctx.oneMinuteSymbols)) return 'archive context: the series inventory is malformed';
+    if (ctx.oneMinuteSymbols.length > LIMITS.maxSelectedRows) return 'archive context: the series inventory exceeds its bound';
+    for (let i = 0; i < ctx.oneMinuteSymbols.length; i += 1) if (!isCoin(ctx.oneMinuteSymbols[i])) return `archive context: series inventory entry ${i + 1} is not a canonical asset identity`;
+    if (new Set(ctx.oneMinuteSymbols).size !== ctx.oneMinuteSymbols.length) return 'archive context: the series inventory repeats an asset';
+  }
   if (ctx.state === 'ARCHIVE_ABSENT' && Array.isArray(ctx.oneMinuteSymbols) && ctx.oneMinuteSymbols.length > 0) return 'archive context: an absent archive carries no series inventory';
   return null;
 }

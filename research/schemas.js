@@ -12,8 +12,9 @@
 //
 // Where a fact genuinely cannot be recovered from a portable artifact, this module does NOT pretend otherwise. It
 // checks provenance and internal consistency, and leaves the honest limitation in place.
-import { COVERAGE_REASONS, AUTHORITY, PURPOSE, LIMITS, PIPELINE_VERSION, SNAPSHOT_VERSION, PREFIX_DIGEST_VERSION, FEATURE_RECIPE_VERSION, LABEL_RECIPE_VERSION, DATASET_MANIFEST_VERSION, EVALUATION_VERSION, SPLIT_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, MAX_HORIZON_MS, SPLITS, CALIBRATION_BLOCKERS, GROUPING_DEPENDENCY_KINDS, NON_GROUPING_DEPENDENCY_KINDS, LABEL_STATES, COHORTS, ARRAY_CATALOGUE, FEATURE_NAMES, NOTICE_SUPPORT_MS, PARTICIPATION_SUPPORT_WINDOW_MS, WIDEEYE_BASELINE_SUPPORT_MS, isPlainObject, isTs, isCount, isCoin, isFiniteNum, exactKeys, isoOf, parseUtcInstant, safeType } from './contracts.js';
+import { COVERAGE_REASONS, ENTRANCE_LABELS, isCode, AUTHORITY, PURPOSE, LIMITS, PIPELINE_VERSION, SNAPSHOT_VERSION, PREFIX_DIGEST_VERSION, FEATURE_RECIPE_VERSION, LABEL_RECIPE_VERSION, DATASET_MANIFEST_VERSION, EVALUATION_VERSION, SPLIT_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, MAX_HORIZON_MS, SPLITS, CALIBRATION_BLOCKERS, GROUPING_DEPENDENCY_KINDS, NON_GROUPING_DEPENDENCY_KINDS, LABEL_STATES, COHORTS, ARRAY_CATALOGUE, FEATURE_NAMES, NOTICE_SUPPORT_MS, PARTICIPATION_SUPPORT_WINDOW_MS, WIDEEYE_BASELINE_SUPPORT_MS, isPlainObject, isTs, isCount, isCoin, isFiniteNum, exactKeys, isoOf, parseUtcInstant, safeType } from './contracts.js';
 import { IDENTITY_LAWS, identityLaw } from './identity.js';
+import { RESEARCH_STATES, RESEARCH_SOCIAL_COVERAGE_STATES } from '../rumor2/social-research-dossier.js';
 import { splitOfGroup } from './evaluation.js';
 
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -116,10 +117,23 @@ function snapshotInputError(v, where) {
 // ONE consumed-file schema, used by BOTH recorded copies (the dataset's declared archive input and the archive
 // census beside it) so the two can never drift into different laws. It preserves the archive's own
 // 16-character declared-checksum convention and requires it to agree with the full digest recorded next to it.
-export function consumedFilesError(v, where) {
+// `manifestSha256` is the digest of the archive manifest this inventory is supposed to describe. When it is
+// supplied, the inventory must contain that manifest's OWN entry and its digest must be that value — the reader
+// consumes manifest.json before any track, so an inventory without it is describing an archive it never opened.
+// Two matching inventories that BOTH omit the manifest are still invalid: agreement is not evidence.
+export function consumedFilesError(v, where, { manifestSha256 = null } = {}) {
   if (!isPlainObject(v)) return err(where, 'is not an object');
   const names = Object.keys(v);
   if (names.length === 0 || names.length > 64) return err(where, 'consumed-file inventory is empty or unbounded');
+  if (manifestSha256 !== null) {
+    const own = v['manifest.json'];
+    if (own === undefined) return err(where, 'a present archive does not inventory the manifest it was read from');
+    if (own !== null && isPlainObject(own)) {
+      if (own.sha256 !== manifestSha256) return err(where, 'the inventoried manifest digest is not the archive manifest this artifact declares');
+      // the reader records no declared 16-character checksum for the manifest itself — it is not one of its own tracks
+      if (own.declaredSha256_16 !== null) return err(where, 'the inventoried manifest carries a declared track checksum it can never have');
+    }
+  }
   for (let i = 0; i < names.length; i += 1) {
     const f = v[names[i]];
     if (!/^[a-z0-9][a-z0-9.-]*$/.test(names[i]) || names[i].includes('..')) return err(where, `entry ${i + 1} is not a plain file name`);
@@ -133,7 +147,7 @@ function childhoodInputError(v, where) {
   const k = exactKeys(v, ['manifestSha256', 'archiveCreatedTs', 'consumedFiles']); if (k) return err(where, k);
   if (!SHA256.test(v.manifestSha256 ?? '')) return err(where, 'archive manifest digest malformed');
   if (v.archiveCreatedTs !== null && parseUtcInstant(v.archiveCreatedTs) === null) return err(where, `archive creation clock is not a lawful UTC instant (a ${safeType(v.archiveCreatedTs)} was recorded)`);
-  return consumedFilesError(v.consumedFiles, `${where}.consumedFiles`);
+  return consumedFilesError(v.consumedFiles, `${where}.consumedFiles`, { manifestSha256: v.manifestSha256 });
 }
 const RECONCILIATION_KEYS = ['dossierRecords', 'primaryRows', 'continued', 'afterAsOf', 'sum', 'legacyDossiersInPrefix'];
 const COUNTS_KEYS = ['dossierRecords', 'dossierAfterAsOf', 'dossierContinued', 'primaryRows', 'shadowSamples', 'shadowSamplesAfterAsOf', 'shadowRows', 'episodes', 'coinsPrimary', 'coinsShadow', 'overlapCoins', 'rows', 'labelled', 'reconciliation'];
@@ -230,7 +244,7 @@ export function datasetCensusError(v, where, { archiveExpected }) {
       if (t.present !== consumed) return err(`${where}.archive.tracks.${key}`, 'the track presence disagrees with the consumed-file inventory');
       if (key === '1m') oneMinute = t;
     }
-    let e2 = consumedFilesError(a.consumedFiles, `${where}.archive.consumedFiles`); if (e2) return e2;
+    let e2 = consumedFilesError(a.consumedFiles, `${where}.archive.consumedFiles`, { manifestSha256: id.manifestSha256 }); if (e2) return e2;
     // THE 1m SYMBOL INVENTORY is what every label depends on: unique, canonical, sorted, and consistent with the
     // track census that produced it. An empty inventory means no series were loaded — never "some, unrecorded".
     if (!Array.isArray(a.oneMinuteSymbols) || a.oneMinuteSymbols.some((x) => !isCoin(x))) return err(`${where}.archive`, 'the 1m symbol inventory carries a value that is not a canonical asset identity');
@@ -347,6 +361,37 @@ function tableError(t, where, { population = null } = {}) {
   }
   return null;
 }
+// THE COMPOSITE BREAKDOWN GRAMMARS, exactly as the producer builds them.
+// `byEntrance` is the row's recorded entrance labels joined with '+'. Its SOURCE ORDER is preserved — the producer
+// joins the order the row records, so no new sort is imposed — but every component must be a declared entrance and
+// no component may repeat or be empty.
+export function entranceCompositeOk(key) {
+  if (typeof key !== 'string' || key.length === 0 || key.length > 96) return false;
+  const parts = key.split('+');
+  if (parts.length === 0 || parts.length > ENTRANCE_LABELS.length) return false;
+  if (parts.some((p) => !ENTRANCE_LABELS.includes(p))) return false;
+  return new Set(parts).size === parts.length;
+}
+// `byProviderContext` is each coverage-provider member rendered `provider:state`, sorted lexically and joined with
+// ',', or exactly 'NONE' for an empty provider list. The tokens obey the catalogue's own member law (isCode), the
+// member count obeys its bound, and the two forms never mix. Member REPETITION is not forbidden here: the input
+// contract does not require unique providers, and this repair closes the composite structure only — it does not
+// turn a bounded code domain into an independent provider attestation.
+export function providerContextOk(key) {
+  if (typeof key !== 'string' || key.length === 0 || key.length > 400) return false;
+  if (key === 'NONE') return true;
+  const members = key.split(',');
+  if (members.length === 0 || members.length > ARRAY_CATALOGUE.coverageProviders.max) return false;
+  for (const m of members) {
+    const parts = m.split(':');
+    if (parts.length !== 2) return false;
+    if (!isCode(parts[0]) || !isCode(parts[1])) return false; // the catalogue's own provider / state token law
+  }
+  // the producer sorts the rendered members lexically before joining
+  for (let i = 1; i < members.length; i += 1) if (members[i - 1] > members[i]) return false;
+  return true;
+}
+
 const sumStates = (t, s) => LABEL_HORIZONS_MIN.reduce((a, h) => a + t[`${h}m`].counts[s], 0);
 export function evaluationPayloadError(e0) {
   const W = 'evaluation';
@@ -463,10 +508,15 @@ export function evaluationPayloadError(e0) {
     if (v.discoveryTrainableAtSplit > v.discoveryKnownRetrospectively) return err(w, 'more labels are trainable at the split than are known retrospectively');
     // retrospective discovery availability IS that split's KNOWN population; trainability is a subset of it
     if (v.discoveryKnownRetrospectively !== t.primaryBySplit.DISCOVERY[`${h}m`].counts.KNOWN) return err(w, 'retrospective discovery availability disagrees with the DISCOVERY table');
-    if (v.validationKnownAtAsOf > t.primaryBySplit.VALIDATION[`${h}m`].counts.KNOWN) return err(w, 'more validation labels are known at the as-of than the VALIDATION table reports KNOWN');
+    // EQUALITY, not a one-sided bound. Under the enforced as-of wall every KNOWN validation outcome is by
+    // definition available at the evaluation as-of, so this count IS its table's KNOWN count — an undercount is
+    // just as false as an overcount, and the previous `>` check let one through.
+    if (v.validationKnownAtAsOf !== t.primaryBySplit.VALIDATION[`${h}m`].counts.KNOWN) return err(w, 'the validation labels known at the as-of disagree with the VALIDATION table');
   }
   // ---- breakdowns
-  for (const [name, keyOk, max] of [['byEntrance', (x) => /^[A-Z_]+(\+[A-Z_]+)*$/.test(x) && x.length <= 96, 16], ['byResearchState', (x) => /^[A-Z0-9_]{1,48}$/.test(x), 16], ['byProviderContext', (x) => x.length > 0 && x.length <= 400, 64], ['byCoverageState', (x) => /^[A-Z0-9_]{1,48}$/.test(x), 32]]) {
+  // A BREAKDOWN KEY IS A PROJECTION OF A CLOSED SOURCE VALUE, so it is checked against the domain the producer
+  // actually grouped by — never against a character shape. Uppercase is not a vocabulary.
+  for (const [name, keyOk, max] of [['byEntrance', entranceCompositeOk, 16], ['byResearchState', (x) => RESEARCH_STATES.includes(x), 16], ['byProviderContext', providerContextOk, 64], ['byCoverageState', (x) => RESEARCH_SOCIAL_COVERAGE_STATES.includes(x), 32]]) {
     e = countMapError(e0[name], `${W} ${name}`, { maxKeys: max, keyOk }); if (e) return e;
     const total = Object.values(e0[name]).reduce((a, b) => a + b, 0);
     if (total !== e0.rows.primary) return err(`${W} ${name}`, `the breakdown covers ${total} rows but the primary cohort holds ${e0.rows.primary}`);

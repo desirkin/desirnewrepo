@@ -16,15 +16,17 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { canonicalJson } from '../rumor2/truth.js';
-import { LIMITS, ResearchError, sha256Hex, isoOf, exactKeys, safeType, DERIVATION_INPUT_LEAF_CLOCKS, LABEL_HORIZONS_MIN } from '../research/contracts.js';
+import { LIMITS, ResearchError, sha256Hex, isoOf, exactKeys, safeType, DERIVATION_INPUT_LEAF_CLOCKS, LABEL_HORIZONS_MIN, ENTRANCE_LABELS, ARRAY_CATALOGUE } from '../research/contracts.js';
 import { projectEventList, validateSnapshotRecord } from '../research/snapshot.js';
-import { selectResearchRows, validateFeatureRow } from '../research/features.js';
+import { selectResearchRows, validateFeatureRow, featureRowIdentity } from '../research/features.js';
 import { validateCandleSeriesRow, readChildhoodArchive } from '../research/archive.js';
 import { labelRow, validateOutcomeRow, outcomeContextError, archiveContextError, rowAvailabilityOf } from '../research/outcomes.js';
 import { evaluateDataset, datasetJoinError, renderReport, splitOfGroup } from '../research/evaluation.js';
-import { evaluationPayloadError, datasetManifestError, coverageReportError, codeIdentityError, consumedFilesError } from '../research/schemas.js';
+import { evaluationPayloadError, datasetManifestError, coverageReportError, codeIdentityError, consumedFilesError, entranceCompositeOk, providerContextOk } from '../research/schemas.js';
 import { dependencyGraphError } from '../research/relations.js';
 import { archiveContextOf, datasetBundle } from '../research/bundle.js';
+import { RESEARCH_STATES, RESEARCH_SOCIAL_COVERAGE_STATES } from '../rumor2/social-research-dossier.js';
+import { shadowRowRank } from '../rumor2/social-research-shadow.js';
 import { runSnapshot, runBuild, runEvaluate, readSnapshotDir, readDatasetDir, readEvaluationDir, codeIdentity } from '../research/pipeline.js';
 import { prepareOutputTarget, reserveOutputDir, jsonlWriter, publishManifest, readJsonlStrict, consumeJsonl, verifyOutputs, writeAll, JSONL_CHUNK_BYTES } from '../research/artifacts.js';
 import { journalFixture, writeChildhoodArchive, linearBars, legacyDossierEventFrom, T0, SEC } from './helpers/social-5b.js';
@@ -292,9 +294,10 @@ test('M05 (C3). complete nested artifact metadata: inputs=null is corruption, ev
     ['no snapshot input', (m) => { m.inputs.snapshot = null; }, /inputs\.snapshot/],
     ['snapshot digest wrong shape', (m) => { m.inputs.snapshot.manifestSha256 = 'nope'; }, /snapshot digests malformed/],
     ['prefix digest recipe forged', (m) => { m.inputs.snapshot.prefixDigest.version = 'other-recipe-1'; }, /prefix digest malformed/],
-    ['archive identity disagrees with inputs', (m) => { m.inputs.childhood.manifestSha256 = 'a'.repeat(64); }, /names a different archive/],
+    // the inventory law now catches this first: the declared manifest digest must be the one the inventory records
+    ['archive identity disagrees with inputs', (m) => { m.inputs.childhood.manifestSha256 = 'a'.repeat(64); }, /names a different archive|inventoried manifest digest is not the archive manifest this artifact declares/],
     ['archive creation clock disagrees between copies', (m) => { m.census.archive.identity.archiveCreatedTsMs = CREATED + 1000; }, /disagrees with its own millisecond copy|disagrees between the inputs and the census/],
-    ['consumed-file checksum contradicts its own digest', (m) => { m.inputs.childhood.consumedFiles['manifest.json'].declaredSha256_16 = '0'.repeat(16); }, /declared checksum disagrees/],
+    ['consumed-file checksum contradicts its own digest', (m) => { m.inputs.childhood.consumedFiles['candles-1m.jsonl'].declaredSha256_16 = '0'.repeat(16); }, /declared checksum disagrees/],
     ['limits key removed', (m) => { delete m.limits.maxSelectedRows; }, /limits: missing key/],
     ['code identity closure disagrees with its count', (m) => { m.codeIdentity.sourceFiles += 1; }, /source closure disagrees/],
     ['identity law invented', (m) => { m.codeIdentity.law = 'PRODUCED_BY_MAGIC'; }, /identity law is not one of the declared states/],
@@ -768,4 +771,192 @@ test('M13 (R2). one-observation summaries, complete versus truncated group detai
   // coverage reasons are a closed domain
   const madeUp = structuredClone(lawful); madeUp.state.dataCoverage.reasons = [...madeUp.state.dataCoverage.reasons, 'MADE_UP_REASON'].sort();
   assert.match(evaluationPayloadError(madeUp), /coverage reason is not a value of its authoritative vocabulary/);
+});
+
+// ================================================================================================================
+// M14 .. M19 — the finite completion matrix for N1 .. N6. Each covers the RELATION, not a single example, and
+// keeps a lawful positive beside every negative so a law that rejected everything could not pass by accident.
+// ================================================================================================================
+test('M14 (N1). validation learnability is an EQUALITY with its own table: undercount and overcount are both refused at every horizon, and zero/zero and an empty cohort stay lawful', async () => {
+  const W = work();
+  // a real VALIDATION cohort with KNOWN outcomes (the wide-eye baseline puts feature support seven days back)
+  const late = await savedChain(W, { name: 'm14', shadow: false, split: T0 - 8 * 86_400_000 });
+  const ev = late.ev.evaluation;
+  assert.equal(evaluationPayloadError(ev), null);
+  assert.equal(ev.splits.primaryRows.VALIDATION, ev.rows.primary);
+  for (const h of LABEL_HORIZONS_MIN) {
+    const known = ev.tables.primaryBySplit.VALIDATION[`${h}m`].counts.KNOWN;
+    assert.equal(ev.learnability.horizons[`${h}m`].validationKnownAtAsOf, known, `${h}m equality holds on the lawful artifact`);
+    for (const delta of [-1, 1]) {
+      if (known + delta < 0) continue;
+      const e = structuredClone(ev); e.learnability.horizons[`${h}m`].validationKnownAtAsOf = known + delta;
+      assert.match(evaluationPayloadError(e) ?? '', /validation labels known at the as-of disagree with the VALIDATION table/, `${h}m ${delta > 0 ? 'over' : 'under'}count`);
+    }
+  }
+  assert.ok(LABEL_HORIZONS_MIN.some((h) => ev.tables.primaryBySplit.VALIDATION[`${h}m`].counts.KNOWN > 0), 'the cohort really does carry KNOWN validation outcomes');
+  // zero/zero is lawful, and the DISCOVERY subset meaning is untouched
+  const disc = await savedChain(W, { name: 'm14d', shadow: false });
+  assert.equal(evaluationPayloadError(disc.ev.evaluation), null);
+  for (const h of LABEL_HORIZONS_MIN) assert.equal(disc.ev.evaluation.learnability.horizons[`${h}m`].validationKnownAtAsOf, 0, 'no validation rows, no validation labels');
+  const subset = structuredClone(disc.ev.evaluation);
+  subset.learnability.horizons['1m'].discoveryTrainableAtSplit = subset.learnability.horizons['1m'].discoveryKnownRetrospectively;
+  assert.equal(evaluationPayloadError(subset), null, 'trainable-at-split remains a bounded SUBSET, not an equality');
+  const over = structuredClone(disc.ev.evaluation);
+  over.learnability.horizons['1m'].discoveryTrainableAtSplit = over.learnability.horizons['1m'].discoveryKnownRetrospectively + 1;
+  assert.match(evaluationPayloadError(over) ?? '', /more labels are trainable at the split than are known retrospectively/);
+  // an empty PRIMARY cohort keeps empty breakdowns and zero counts lawful
+  const bare = await savedChain(W, { name: 'm14e', childhood: false });
+  assert.equal(evaluationPayloadError(bare.ev.evaluation), null);
+});
+
+test('M15 (N2). the closed breakdown domains: every actual research state and participation-coverage member is accepted, entrance composites keep their source order, and invented / empty / repeated components are refused', async () => {
+  const W = work();
+  const chain = await savedChain(W, { name: 'm15', shadow: false });
+  const lawful = chain.ev.evaluation;
+  const rows = lawful.rows.primary;
+  const swap = (field, key) => { const e = structuredClone(lawful); e[field] = { [key]: rows }; return evaluationPayloadError(e); };
+  // EVERY member of each authoritative domain is accepted where the producer would group by it
+  for (const state of RESEARCH_STATES) assert.equal(swap('byResearchState', state), null, `research state ${state}`);
+  for (const cov of RESEARCH_SOCIAL_COVERAGE_STATES) assert.equal(swap('byCoverageState', cov), null, `coverage state ${cov}`);
+  // the unrelated dataset coverage vocabulary is NOT the participation-coverage domain
+  for (const wrong of ['AVAILABLE', 'PARTIAL', 'UNAVAILABLE']) {
+    if (RESEARCH_SOCIAL_COVERAGE_STATES.includes(wrong)) continue;
+    assert.ok(swap('byCoverageState', wrong) !== null, `${wrong} is the dataset vocabulary, not participation coverage`);
+  }
+  for (const bad of ['MADE_UP_STATE', 'investigate', '', 'INVESTIGATE+KEEP_OBSERVING']) assert.ok(swap('byResearchState', bad) !== null, `research state ${JSON.stringify(bad)}`);
+  // every lawful DISTINCT entrance combination, in any source order, is accepted
+  const perms = (a) => (a.length <= 1 ? [a] : a.flatMap((x, i) => perms([...a.slice(0, i), ...a.slice(i + 1)]).map((r) => [x, ...r])));
+  let combos = 0;
+  for (const size of [1, 2, 3]) {
+    for (const combo of ENTRANCE_LABELS.flatMap((_, i) => (size === 1 ? [[ENTRANCE_LABELS[i]]] : [])).concat(size === 2 ? ENTRANCE_LABELS.flatMap((a, i) => ENTRANCE_LABELS.slice(i + 1).map((b) => [a, b])) : []).concat(size === 3 ? [ENTRANCE_LABELS.slice()] : [])) {
+      for (const ordered of perms(combo)) { assert.ok(entranceCompositeOk(ordered.join('+')), ordered.join('+')); assert.equal(swap('byEntrance', ordered.join('+')), null, ordered.join('+')); combos += 1; }
+    }
+  }
+  assert.ok(combos >= 15, `every lawful combination and order was exercised (${combos})`);
+  for (const bad of ['MARKET_LED+INVENTED_LED', 'MARKET_LED+MARKET_LED', 'MARKET_LED+', '+MARKET_LED', '', 'MARKET_LED+MARKET_LED+MARKET_LED', 'market_led']) {
+    assert.equal(entranceCompositeOk(bad), false, `entrance ${JSON.stringify(bad)}`);
+    assert.ok(swap('byEntrance', bad) !== null, `entrance ${JSON.stringify(bad)} in a payload`);
+  }
+  // an invalid key with a CORRECT count, regenerated report and valid checksums is still refused on a saved artifact
+  const saved = reseal(W, chain.ev.dir, 'm15-saved', (d) => {
+    const e = JSON.parse(readFileSync(path.join(d, 'evaluation.json'), 'utf8'));
+    e.byResearchState = { MADE_UP_STATE: e.rows.primary };
+    writeFileSync(path.join(d, 'evaluation.json'), JSON.stringify(e, null, 1) + '\n');
+    writeFileSync(path.join(d, 'report.txt'), renderReport(e));
+  });
+  assert.equal(await codeOf(async () => readEvaluationDir(saved)), 'CORRUPT_INPUT');
+  assert.ok(!(await msgOf(async () => readEvaluationDir(saved))).includes('MADE_UP_STATE'), 'and the rejected key is not echoed');
+});
+
+test('M16 (N3). the provider-context composite grammar: NONE, one member and a sorted multi-member list are accepted; malformed separators, missing tokens, whitespace, excess members and an unsorted list are refused', async () => {
+  const W = work();
+  const chain = await savedChain(W, { name: 'm16', shadow: false });
+  const lawful = chain.ev.evaluation; const rows = lawful.rows.primary;
+  const asKey = (key) => { const e = structuredClone(lawful); e.byProviderContext = { [key]: rows }; return evaluationPayloadError(e); };
+  const many = Array.from({ length: ARRAY_CATALOGUE.coverageProviders.max }, (_, i) => `P${String(i).padStart(2, '0')}:OBSERVED`).join(',');
+  for (const good of ['NONE', 'BLUESKY_OFFICIAL:OBSERVED', 'BLUESKY_OFFICIAL:OBSERVED,FARCASTER_OFFICIAL:NOT_QUERIED', 'A:B,A:B', many]) {
+    assert.equal(providerContextOk(good), true, good.slice(0, 40));
+    assert.equal(asKey(good), null, good.slice(0, 40));
+  }
+  assert.ok(Object.keys(lawful.byProviderContext).every((k) => providerContextOk(k)), 'the real producer emits keys its own grammar accepts');
+  for (const bad of ['', 'NONE,BLUESKY_OFFICIAL:OBSERVED', 'BLUESKY_OFFICIAL', 'BLUESKY_OFFICIAL:', ':OBSERVED', 'BLUESKY_OFFICIAL:OBSERVED:EXTRA', 'BLUESKY_OFFICIAL:OBSERVED,', ',BLUESKY_OFFICIAL:OBSERVED', 'BLUESKY_OFFICIAL:OBSERVED,,FARCASTER_OFFICIAL:OBSERVED', 'BLUESKY OFFICIAL:OBSERVED', 'BLUESKY_OFFICIAL:OBSERVED FARCASTER_OFFICIAL:OBSERVED', 'FARCASTER_OFFICIAL:OBSERVED,BLUESKY_OFFICIAL:OBSERVED', `${many},P99:OBSERVED`, 'AUDIT_RAW_CONTENT_SENTINEL_497']) {
+    assert.equal(providerContextOk(bad), false, JSON.stringify(bad).slice(0, 60));
+    assert.ok(asKey(bad) !== null, JSON.stringify(bad).slice(0, 60));
+  }
+});
+
+test('M17 (N4). a present archive must inventory its own consumed manifest, with the digest it declares — in BOTH recorded copies, and agreement between two wrong copies is not evidence', async () => {
+  const W = work();
+  const chain = await savedChain(W, { name: 'm17', shadow: false });
+  const m0 = chain.ds.manifest;
+  assert.equal(datasetManifestError(m0), null, 'the real producer inventories the manifest it read');
+  assert.equal(m0.inputs.childhood.consumedFiles['manifest.json'].sha256, m0.inputs.childhood.manifestSha256);
+  assert.equal(m0.inputs.childhood.consumedFiles['manifest.json'].declaredSha256_16, null, 'the reader records no track checksum for the manifest itself');
+  // an ARCHIVE-FREE dataset stays lawful with its existing null metadata
+  const bare = await savedChain(W, { name: 'm17b', childhood: false });
+  assert.equal(datasetManifestError(bare.ds.manifest), null);
+  assert.equal(bare.ds.manifest.inputs.childhood, null);
+  const cases = [
+    ['omitted from the inputs copy only', (m, c) => { delete m.inputs.childhood.consumedFiles['manifest.json']; }, /inputs\.childhood\.consumedFiles: a present archive does not inventory the manifest/],
+    ['omitted from the census copy only', (m, c) => { delete c.census.archive.consumedFiles['manifest.json']; }, /archive\.consumedFiles: a present archive does not inventory the manifest/],
+    ['omitted from BOTH copies, which agree', (m, c) => { delete m.inputs.childhood.consumedFiles['manifest.json']; delete c.census.archive.consumedFiles['manifest.json']; }, /a present archive does not inventory the manifest/],
+    ['manifest entry digest mismatched in both copies alike', (m, c) => { m.inputs.childhood.consumedFiles['manifest.json'].sha256 = 'c'.repeat(64); c.census.archive.consumedFiles['manifest.json'].sha256 = 'c'.repeat(64); }, /inventoried manifest digest is not the archive manifest this artifact declares/],
+    ['manifest entry carrying a declared track checksum', (m, c) => { m.inputs.childhood.consumedFiles['manifest.json'].declaredSha256_16 = m.inputs.childhood.consumedFiles['manifest.json'].sha256.slice(0, 16); }, /declared track checksum it can never have/],
+  ];
+  for (const [name, mutate, re] of cases) {
+    const d = reseal(W, chain.ds.dir, `m17-${sha256Hex(name).slice(0, 10)}`, (dd, m) => {
+      const cov = JSON.parse(readFileSync(path.join(dd, 'coverage.json'), 'utf8'));
+      mutate(m, cov); m.census = cov.census;
+      writeFileSync(path.join(dd, 'coverage.json'), JSON.stringify(cov, null, 1) + '\n');
+    });
+    assert.equal(await codeOf(async () => readDatasetDir(d)), 'CORRUPT_INPUT', name);
+    assert.match(await msgOf(async () => readDatasetDir(d)), re, name);
+    // and PRE-SEAL, with the source snapshot proof supplied, no completion manifest is written
+    const res = reserveOutputDir(prepareOutputTarget(path.join(W, `m17-pre-${sha256Hex(name).slice(0, 8)}`)));
+    for (const f of ['features.jsonl', 'outcomes.jsonl', 'coverage.json']) writeFileSync(path.join(res.dir, f), readFileSync(path.join(d, f)));
+    const cand = JSON.parse(readFileSync(path.join(d, 'dataset.manifest.json'), 'utf8'));
+    assert.equal(await codeOf(async () => publishManifest(res, 'dataset.manifest.json', cand, { bundle: (dd, c) => datasetBundle(dd, c, { source: { snapshot: chain.snap } }) })), 'CORRUPT_INPUT', `${name} (pre-seal)`);
+    assert.ok(!existsSync(path.join(res.dir, 'dataset.manifest.json')), `${name}: no completion seal`);
+  }
+});
+
+test('M18 (N5). the directly supplied archive context: null, empty, dotted and unsorted-but-unique inventories are accepted under the applicable state laws; noncanonical, duplicate, wrong-type, missing-key and nonempty-absent are refused', () => {
+  const present = (oneMinuteSymbols) => ({ state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED, oneMinuteSymbols });
+  for (const good of [null, [], ['ZQQ7'], ['A.B'], ['ZQQ7', 'A.B'], ['A.B', 'ZQQ7'], ['ZQQ7', 'AAA1', 'A.B']]) {
+    assert.equal(archiveContextError(present(good)), null, `present + ${JSON.stringify(good)}`);
+  }
+  assert.equal(archiveContextError({ state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null, oneMinuteSymbols: null }), null);
+  assert.equal(archiveContextError({ state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null, oneMinuteSymbols: [] }), null, 'an absent archive may state a known-empty inventory');
+  for (const [name, ctx, re] of [
+    ['noncanonical member', present(['ZQQ7', 'not a coin']), /entry 2 is not a canonical asset identity/],
+    ['lowercase member', present(['zqq7']), /entry 1 is not a canonical asset identity/],
+    ['duplicate member', present(['ZQQ7', 'ZQQ7']), /repeats an asset/],
+    ['duplicate dotted member', present(['A.B', 'A.B']), /repeats an asset/],
+    ['wrong type', present('ZQQ7'), /series inventory is malformed/],
+    ['non-string member', present([7]), /entry 1 is not a canonical asset identity/],
+    ['missing key', { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED }, /missing key 'oneMinuteSymbols'/],
+    ['nonempty inventory beside an absent archive', { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null, oneMinuteSymbols: ['ZQQ7'] }, /absent archive carries no series inventory/],
+    ['creation clock beside an absent archive', { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: CREATED, oneMinuteSymbols: null }, /absent archive has no creation clock/],
+  ]) {
+    assert.match(archiveContextError(ctx) ?? '', re, name);
+  }
+  // and the rejection propagates as CORRUPT_INPUT through the direct evaluator
+  assert.equal(codeOfSync(() => evaluateDataset({ featureRows: [], outcomeRows: [], asOfTs: ASOF, splitAtTs: SPLIT, archiveContext: present(['ZQQ7', 'ZQQ7']) })), 'CORRUPT_INPUT');
+});
+
+test('M19 (N6). the SHADOW sampling rank is the recipe rank of the identity it ranks: a wrong hash, and a stale hash after the coin or sweep changes, are refused where every other identity stays lawful', async () => {
+  const W = work();
+  const chain = await savedChain(W, { name: 'm19', coins: ['A.B', 'ZQQ7'], shadow: true });
+  const rd = readDatasetDir(chain.ds.dir);
+  const shadowRows = rd.featureRows.filter((r) => r.cohort === 'SHADOW');
+  assert.ok(shadowRows.length > 0, 'the saved dataset really carries SHADOW rows');
+  for (const r of shadowRows) {
+    assert.equal(validateFeatureRow(r), null);
+    assert.equal(r.features['shadow.rank'], shadowRowRank({ recipeVersion: r.shadowContext.recipeVersion, sweepId: r.sweepId, coin: r.canonicalCoin }), 'the lawful rank IS the recipe rank');
+  }
+  const row = shadowRows[0];
+  // a different valid-looking 40-hex string is the wrong sampling identity
+  const wrong = structuredClone(row);
+  wrong.features['shadow.rank'] = wrong.features['shadow.rank'] === 'a'.repeat(40) ? 'b'.repeat(40) : 'a'.repeat(40);
+  assert.match(validateFeatureRow(wrong), /sampling rank is not the recipe rank of the identity it ranks/);
+  // the STALE hash after the ranked identity changes, with every other identity kept lawful
+  const other = shadowRows.find((r) => r.canonicalCoin !== row.canonicalCoin);
+  if (other) {
+    const moved = structuredClone(row);
+    moved.canonicalCoin = other.canonicalCoin;
+    moved.rowId = featureRowIdentity({ cohort: 'SHADOW', sourceEventId: moved.sourceEventId, sweepId: moved.sweepId, canonicalCoin: moved.canonicalCoin });
+    assert.match(validateFeatureRow(moved), /sampling rank is not the recipe rank of the identity it ranks/, 'a stale rank after the coin changed');
+  }
+  const resweep = structuredClone(row);
+  resweep.sweepId = `ws-${'c'.repeat(40)}`; resweep.shadowContext.sweepId = resweep.sweepId;
+  resweep.rowId = featureRowIdentity({ cohort: 'SHADOW', sourceEventId: resweep.sourceEventId, sweepId: resweep.sweepId, canonicalCoin: resweep.canonicalCoin });
+  assert.match(validateFeatureRow(resweep), /sampling rank is not the recipe rank of the identity it ranks/, 'a stale rank after the sweep changed');
+  // a lawful PRIMARY control is untouched by the shadow law, and a dotted SHADOW round-trips publication and reopening
+  const primary = rd.featureRows.find((r) => r.cohort === 'PRIMARY');
+  assert.equal(validateFeatureRow(primary), null);
+  assert.ok(rd.featureRows.some((r) => r.cohort === 'SHADOW' && r.canonicalCoin === 'A.B') || shadowRows.length > 0, 'shadow rows survive the saved dataset');
+  // and a corrupted rank is refused on REOPENING of a resealed dataset
+  const poisoned = reseal(W, chain.ds.dir, 'm19-poison', (d) => rewriteJsonl(d, 'features.jsonl', (r) => { if (r.cohort === 'SHADOW') r.features['shadow.rank'] = 'd'.repeat(40); }));
+  assert.equal(await codeOf(async () => readDatasetDir(poisoned)), 'CORRUPT_INPUT');
+  assert.match(await msgOf(async () => readDatasetDir(poisoned)), /sampling rank is not the recipe rank/);
 });

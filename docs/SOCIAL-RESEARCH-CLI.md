@@ -94,7 +94,10 @@ population accounting (`unnoticed + noticed = evaluated`, and evaluated plus eac
 for every scanned row), version/recipe/digest/cap bounds, the coverage verdict against its own exclusion counts, the
 `min(cap, unnoticed)` selection rule, and agreement of the repeated sweep identity and clock with the enclosing row.
 `shadow.selectionReason` and `shadow.preCooldownVerdict` are the source's closed vocabularies — not an uppercase
-shape — and the reason is bound to the verdict it did or did not suppress. Nothing PRIMARY is required of a shadow.
+shape — and the reason is bound to the verdict it did or did not suppress. `shadow.rank` is the source recipe's own
+`shadowRowRank(recipeVersion, sweepId, coin)` — the function that makes the sample reproducible from the same
+population — so a different valid-looking 40-hex string, or the right hash left behind after the coin or sweep
+changed, is refused rather than recomputed. Nothing PRIMARY is required of a shadow.
 
 **Optionality is not nullability.** A leaf the catalogue declares REQUIRED can never be omitted from a row nor
 moved into `absentFeatures`, whatever marker that map carries; only a leaf declared optional may be absent, and
@@ -168,7 +171,10 @@ one is `SERIES_ABSENT_FOR_ASSET`, following `labelRow`'s own missing-source prio
 censored observed series — the unavailable branch is retained, not softened — and no archive is reopened during
 `evaluate`.
 A supplied context that is malformed is corruption — it is never downgraded to "no context" — while *omitting* the
-context is a different thing again: a pure row-only call, which makes no claim about any archive. This rejects
+context is a different thing again: a pure row-only call, which makes no claim about any archive. A supplied
+inventory is input like any other: every member must be a canonical asset identity (dotted symbols included) and no
+member may repeat. Nothing is normalized into null and nothing is quietly deduplicated. That direct API has no
+ordering law and none is imposed; the saved archive census keeps its own sorted-set rule. This rejects
 contradictions with recorded lawful context; it is not, and does not claim to be, independent attestation that
 those recorded source facts are true.
 
@@ -189,13 +195,20 @@ fixes this implementation's constants (`pipelineExecution: COMPLETE`, `evaluatio
 RETROSPECTIVE_DESCRIPTIVE_ONLY`, `fittedModel: NONE`, `stageCalibration: NOT_PERFORMED`, `currentRuntimeStage:
 UNKNOWN`, authority `NONE` / purpose `RESEARCH_ONLY`), requires the standing calibration blockers and laws, and
 checks every count and summary: a one-observation summary's order statistics all coincide (a spread over a single
-KNOWN outcome is not something the recipe could produce), populations partition (`total = primary + shadow`; split counts sum to the primary
+KNOWN outcome is not something the recipe could produce), each breakdown key belongs to the domain the producer
+actually grouped by — `RESEARCH_STATES` for research state, `RESEARCH_SOCIAL_COVERAGE_STATES` for participation
+coverage (not the unrelated dataset `AVAILABLE / PARTIAL / UNAVAILABLE` vocabulary), distinct `ENTRANCE_LABELS`
+joined with `+` in the row's own recorded order, and provider context as the producer's composite grammar
+(`NONE`, or lexically sorted `provider:state` members joined with `,`, each token under the catalogue's member law
+and within its 16-member bound) — populations partition (`total = primary + shadow`; split counts sum to the primary
 cohort; group split counts sum to the group total; shadow period counts sum to the shadow cohort), each horizon's
 four state counts sum to its `n`, each table's `n` is its cohort population, the all-primary table is exactly the
 sum over the splits it partitions, a summary's `n` is its table's `KNOWN` count with ordered finite quantiles
 (`min <= p25 <= median <= p75 <= max`, all null when `n = 0`, MFE never negative, MAE never positive, log-return
 summaries only at 60m/240m), and `discoveryTrainableAtSplit <= discoveryKnownRetrospectively`, with the latter equal
-to the DISCOVERY table's `KNOWN` count. Every recorded group's split is re-derived by the one shared split predicate the producer uses, in its exact
+to the DISCOVERY table's `KNOWN` count. `validationKnownAtAsOf` is an EQUALITY with the VALIDATION table's `KNOWN`
+count, not a one-sided bound: under the enforced as-of wall every KNOWN validation outcome is available at the
+evaluation as-of, so an undercount is exactly as false as an overcount. Every recorded group's split is re-derived by the one shared split predicate the producer uses, in its exact
 priority order, and the visible summaries reconcile with the declared per-split group and row counts. Coverage
 reasons and the other closed codes are checked against their authoritative vocabularies, not a character shape.
 Group-summary detail keeps its 500-entry ceiling: when complete the group rows and per-split counts reconcile
@@ -268,7 +281,11 @@ between the proof and the write. The bundle law covers:
   wrong copies satisfy nothing — and, at build time, the source-dependent aggregates against the validated snapshot
   actually consumed. The archive census is itself closed: `source` and each `tracks` entry have exact shapes, track
   keys agree with the consumed-file names, one shared schema governs both recorded copies of `consumedFiles`, and
-  the 1m symbol inventory is unique, canonical, sorted and consistent with the track census that produced it. Asset
+  the 1m symbol inventory is unique, canonical, sorted and consistent with the track census that produced it. A
+  present archive must also inventory the very manifest it was read from: `manifest.json` is consumed before any
+  track, so both recorded copies of `consumedFiles` must carry that entry, its digest must be the `manifestSha256`
+  the artifact declares, and it keeps the reader's own `declaredSha256_16: null` convention (a manifest is not one
+  of its own tracks). Two inventories that agree with each other while both omitting it are still invalid. Asset
   overlap, the archive series count and `temporalOverlap` are recomputed from the rows and that validated inventory;
   the cohort overlap list is checked as the sorted intersection under its own 200-entry projection cap while
   `counts.overlapCoins` is the full intersection — a capped list is never read as a complete population;

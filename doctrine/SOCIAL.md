@@ -2434,6 +2434,50 @@ source datasets. The independent stage labels, the claim-association seam, the s
 `serpent-evidence-1` packet limitations remain deferred. Authority stays `NONE` / `RESEARCH_ONLY`. This
 implementation has been tested here; it has NOT been independently accepted.
 
+### 5AA. SOCIAL-5B FINAL VALIDATION CLOSEOUT — six remaining relations
+
+The owner supplied a seventh acceptance file whose bytes had been executed against `497687f`: one lawful CONTROL
+passing and six N1-N6 cases failing on unchanged production code. It was created here byte-for-byte (SHA256
+verified) and run before any edit, reproducing that result exactly — 7 tests, 1 pass, 6 fail, zero
+skip/todo/cancelled, natural exit 1. All 7 are now green, the original 30-case owner suite and its three helpers
+are byte-identical and still pass 30/30, and no owner assertion was edited, weakened or skipped.
+
+**N1** — `validationKnownAtAsOf` is now an EQUALITY with the VALIDATION table's KNOWN count. The previous `>` check
+caught only overcounts; under the enforced as-of wall an undercount is equally false. The DISCOVERY equality and the
+trainable-at-split subset meaning are unchanged.
+
+**N2** — breakdown keys are checked against the domains the producer grouped by: `RESEARCH_STATES`,
+`RESEARCH_SOCIAL_COVERAGE_STATES` (participation coverage, NOT the dataset availability vocabulary), and entrance
+composites of distinct `ENTRANCE_LABELS` in the row's own recorded order. Uppercase shape is not a vocabulary.
+
+**N3** — provider context is validated as the producer's composite grammar: `NONE`, or lexically sorted
+`provider:state` members joined with `,`, each token under `ARRAY_CATALOGUE.coverageProviders`' own member law and
+within its 16-member bound. Member repetition is NOT forbidden — the input contract does not require unique
+providers — so this closes the composite structure without inventing a provider registry.
+
+**N4** — a present archive must inventory the manifest it was read from, in both recorded copies, with that entry's
+digest equal to the declared `manifestSha256` and the reader's `declaredSha256_16: null` convention preserved. Two
+inventories that agree while both omitting it remain invalid. An absent archive keeps its lawful null metadata; no
+archive is fetched or reopened.
+
+**N5** — a directly supplied `oneMinuteSymbols` must be canonical and duplicate-free, propagating CORRUPT_INPUT
+through `evaluateDataset`. Explicit null still means "inventory outside the caller's scope" and an empty list still
+means a known-empty inventory; no ordering law is newly imposed on that API.
+
+**N6** — `shadow.rank` must equal `shadowRowRank({ recipeVersion, sweepId, coin })`, the source validator's own law,
+in the single feature validator that guards generation and dataset reopening alike. Nothing is recomputed in place
+and the sampling recipe is unchanged.
+
+**Test-consequent updates.** `research/schemas.js` imports two PURE frozen dossier vocabularies and
+`research/features.js` imports the pure `shadowRowRank`; both were added to the authority allowlist. Two assertions
+in the implementation suite were re-pointed where a stricter new rule now rejects first — the general
+declared-checksum rule is still proven on a track entry, and the archive-identity case accepts either message.
+
+**Unchanged, and not claimed.** Real history is still NOT evaluated; stage calibration remains NOT PERFORMED with
+the live stage `UNKNOWN / calibrated:false`. Independent stage labels, the claim-association seam, source-profile
+context and the `serpent-evidence-1` packet limitations remain deferred. Authority stays `NONE` / `RESEARCH_ONLY`.
+This implementation has been tested here; it has NOT been independently accepted.
+
 ---
 
 ## 6. Authority audit
