@@ -12,8 +12,9 @@
 //
 // Where a fact genuinely cannot be recovered from a portable artifact, this module does NOT pretend otherwise. It
 // checks provenance and internal consistency, and leaves the honest limitation in place.
-import { AUTHORITY, PURPOSE, LIMITS, PIPELINE_VERSION, SNAPSHOT_VERSION, PREFIX_DIGEST_VERSION, FEATURE_RECIPE_VERSION, LABEL_RECIPE_VERSION, DATASET_MANIFEST_VERSION, EVALUATION_VERSION, SPLIT_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, MAX_HORIZON_MS, SPLITS, CALIBRATION_BLOCKERS, GROUPING_DEPENDENCY_KINDS, NON_GROUPING_DEPENDENCY_KINDS, LABEL_STATES, COHORTS, ARRAY_CATALOGUE, FEATURE_NAMES, NOTICE_SUPPORT_MS, PARTICIPATION_SUPPORT_WINDOW_MS, WIDEEYE_BASELINE_SUPPORT_MS, isPlainObject, isTs, isCount, isCoin, isFiniteNum, exactKeys, isoOf, parseUtcInstant, safeType } from './contracts.js';
-import { IDENTITY_LAWS } from './identity.js';
+import { COVERAGE_REASONS, AUTHORITY, PURPOSE, LIMITS, PIPELINE_VERSION, SNAPSHOT_VERSION, PREFIX_DIGEST_VERSION, FEATURE_RECIPE_VERSION, LABEL_RECIPE_VERSION, DATASET_MANIFEST_VERSION, EVALUATION_VERSION, SPLIT_RECIPE_VERSION, LABEL_HORIZONS_MIN, LOG_RETURN_HORIZONS_MIN, MAX_HORIZON_MS, SPLITS, CALIBRATION_BLOCKERS, GROUPING_DEPENDENCY_KINDS, NON_GROUPING_DEPENDENCY_KINDS, LABEL_STATES, COHORTS, ARRAY_CATALOGUE, FEATURE_NAMES, NOTICE_SUPPORT_MS, PARTICIPATION_SUPPORT_WINDOW_MS, WIDEEYE_BASELINE_SUPPORT_MS, isPlainObject, isTs, isCount, isCoin, isFiniteNum, exactKeys, isoOf, parseUtcInstant, safeType } from './contracts.js';
+import { IDENTITY_LAWS, identityLaw } from './identity.js';
+import { splitOfGroup } from './evaluation.js';
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const err = (where, what) => `${where}: ${what}`;
@@ -42,9 +43,15 @@ export function codeIdentityError(v, where) {
   if (!Array.isArray(v.sourceClosure) || v.sourceClosure.length === 0 || v.sourceFiles !== v.sourceClosure.length) return err(`${where} codeIdentity`, 'source closure disagrees with its own file count');
   if (v.sourceClosure.some((f) => typeof f !== 'string' || f.length === 0 || f.length > 200)) return err(`${where} codeIdentity`, 'a source closure entry is malformed');
   if (!Array.isArray(v.roots) || v.roots.length === 0 || v.roots.some((f) => !v.sourceClosure.includes(f))) return err(`${where} codeIdentity`, 'a declared root is not inside the closure it produced');
+  if (new Set(v.sourceClosure).size !== v.sourceClosure.length) return err(`${where} codeIdentity`, 'the source closure repeats a path');
+  if (v.sourceClosure.some((f) => f.startsWith('/') || f.includes('..'))) return err(`${where} codeIdentity`, 'a source closure entry is not a plain repository-relative path');
   if (v.gitCommit !== null && !/^[0-9a-f]{40}$/.test(v.gitCommit)) return err(`${where} codeIdentity`, 'git commit malformed');
   if (v.gitSourceDirty !== null && typeof v.gitSourceDirty !== 'boolean') return err(`${where} codeIdentity`, 'source cleanliness malformed');
   if (!IDENTITY_LAWS.includes(v.law)) return err(`${where} codeIdentity`, 'identity law is not one of the declared states');
+  // AND IT IS THE RIGHT ONE. Membership in the vocabulary proves nothing: a recorded dirty closure beside a clean
+  // commit label must not be able to claim PRODUCED_BY_COMMITTED_SOURCE. The law is a function of the identity,
+  // so it is recomputed from the very fields recorded next to it.
+  if (v.law !== identityLaw(v)) return err(`${where} codeIdentity`, 'the recorded identity law is not the law its own commit and cleanliness produce');
   if (!isNonEmptyString(v.note)) return err(`${where} codeIdentity`, 'note malformed');
   return null;
 }
@@ -106,21 +113,27 @@ function snapshotInputError(v, where) {
   if (v.prefixDigest.version !== PREFIX_DIGEST_VERSION || !SHA256.test(v.prefixDigest.sha256 ?? '') || !isCount(v.prefixDigest.payloadBytes)) return err(`${where}.prefixDigest`, 'prefix digest malformed');
   return null;
 }
+// ONE consumed-file schema, used by BOTH recorded copies (the dataset's declared archive input and the archive
+// census beside it) so the two can never drift into different laws. It preserves the archive's own
+// 16-character declared-checksum convention and requires it to agree with the full digest recorded next to it.
+export function consumedFilesError(v, where) {
+  if (!isPlainObject(v)) return err(where, 'is not an object');
+  const names = Object.keys(v);
+  if (names.length === 0 || names.length > 64) return err(where, 'consumed-file inventory is empty or unbounded');
+  for (let i = 0; i < names.length; i += 1) {
+    const f = v[names[i]];
+    if (!/^[a-z0-9][a-z0-9.-]*$/.test(names[i]) || names[i].includes('..')) return err(where, `entry ${i + 1} is not a plain file name`);
+    const fk = exactKeys(f, ['sha256', 'bytes', 'declaredSha256_16']); if (fk) return err(where, `entry ${i + 1} ${fk}`);
+    if (!SHA256.test(f.sha256 ?? '') || !isCount(f.bytes)) return err(where, `entry ${i + 1} digest / size malformed`);
+    if (f.declaredSha256_16 !== null && (typeof f.declaredSha256_16 !== 'string' || !/^[0-9a-f]{16}$/.test(f.declaredSha256_16) || f.sha256.slice(0, 16) !== f.declaredSha256_16)) return err(where, `entry ${i + 1} declared checksum disagrees with the recorded digest`);
+  }
+  return null;
+}
 function childhoodInputError(v, where) {
   const k = exactKeys(v, ['manifestSha256', 'archiveCreatedTs', 'consumedFiles']); if (k) return err(where, k);
   if (!SHA256.test(v.manifestSha256 ?? '')) return err(where, 'archive manifest digest malformed');
   if (v.archiveCreatedTs !== null && parseUtcInstant(v.archiveCreatedTs) === null) return err(where, `archive creation clock is not a lawful UTC instant (a ${safeType(v.archiveCreatedTs)} was recorded)`);
-  if (!isPlainObject(v.consumedFiles)) return err(`${where}.consumedFiles`, 'is not an object');
-  const names = Object.keys(v.consumedFiles);
-  if (names.length === 0 || names.length > 64) return err(`${where}.consumedFiles`, 'consumed-file inventory is empty or unbounded');
-  for (let i = 0; i < names.length; i += 1) {
-    const f = v.consumedFiles[names[i]];
-    if (!/^[a-z0-9][a-z0-9.-]*$/.test(names[i])) return err(`${where}.consumedFiles`, `entry ${i + 1} is not a plain file name`);
-    const fk = exactKeys(f, ['sha256', 'bytes', 'declaredSha256_16']); if (fk) return err(`${where}.consumedFiles`, `entry ${i + 1} ${fk}`);
-    if (!SHA256.test(f.sha256 ?? '') || !isCount(f.bytes)) return err(`${where}.consumedFiles`, `entry ${i + 1} digest / size malformed`);
-    if (f.declaredSha256_16 !== null && (typeof f.declaredSha256_16 !== 'string' || !/^[0-9a-f]{16}$/.test(f.declaredSha256_16) || f.sha256.slice(0, 16) !== f.declaredSha256_16)) return err(`${where}.consumedFiles`, `entry ${i + 1} declared checksum disagrees with the recorded digest`);
-  }
-  return null;
+  return consumedFilesError(v.consumedFiles, `${where}.consumedFiles`);
 }
 const RECONCILIATION_KEYS = ['dossierRecords', 'primaryRows', 'continued', 'afterAsOf', 'sum', 'legacyDossiersInPrefix'];
 const COUNTS_KEYS = ['dossierRecords', 'dossierAfterAsOf', 'dossierContinued', 'primaryRows', 'shadowSamples', 'shadowSamplesAfterAsOf', 'shadowRows', 'episodes', 'coinsPrimary', 'coinsShadow', 'overlapCoins', 'rows', 'labelled', 'reconciliation'];
@@ -144,7 +157,7 @@ export function coverageStateError(v, where) {
   const k = exactKeys(v, ['state', 'reasons']); if (k) return err(where, k);
   if (!['AVAILABLE', 'PARTIAL', 'UNAVAILABLE'].includes(v.state)) return err(where, 'coverage state is not a declared verdict');
   if (!Array.isArray(v.reasons) || v.reasons.length > 32) return err(where, 'coverage reasons malformed');
-  if (v.reasons.some((r) => !/^[A-Z0-9_]{1,64}$/.test(r))) return err(where, 'a coverage reason is not a closed code');
+  if (v.reasons.some((r) => !COVERAGE_REASONS.includes(r))) return err(where, 'a coverage reason is not a value of its authoritative vocabulary');
   if (v.reasons.some((r, i) => i > 0 && v.reasons[i - 1] >= r)) return err(where, 'coverage reasons are not a sorted unique set');
   return null;
 }
@@ -177,16 +190,57 @@ export function datasetCensusError(v, where, { archiveExpected }) {
   if (v.snapshot.decisionDates !== null) { const dk = exactKeys(v.snapshot.decisionDates, ['from', 'to']); if (dk) return err(`${where}.snapshot.decisionDates`, dk); if (!/^\d{4}-\d{2}-\d{2}$/.test(v.snapshot.decisionDates.from) || !/^\d{4}-\d{2}-\d{2}$/.test(v.snapshot.decisionDates.to)) return err(`${where}.snapshot.decisionDates`, 'dates malformed'); }
   if (archiveExpected ? v.archive === null : v.archive !== null) return err(`${where}.archive`, 'the archive census disagrees with the declared inputs');
   if (v.archive !== null) {
-    const ak = exactKeys(v.archive, ['identity', 'source', 'tracks', 'oneMinuteSymbols', 'observations', 'outcomes', 'consumedFiles', 'limitations']); if (ak) return err(`${where}.archive`, ak);
-    const ik = exactKeys(v.archive.identity, ['schemaVersion', 'childhoodVersion', 'archiveCreatedTs', 'archiveCreatedTsMs', 'codeCommit', 'manifestSha256']); if (ik) return err(`${where}.archive.identity`, ik);
-    const id = v.archive.identity;
+    const a = v.archive;
+    const ak = exactKeys(a, ['identity', 'source', 'tracks', 'oneMinuteSymbols', 'observations', 'outcomes', 'consumedFiles', 'limitations']); if (ak) return err(`${where}.archive`, ak);
+    const ik = exactKeys(a.identity, ['schemaVersion', 'childhoodVersion', 'archiveCreatedTs', 'archiveCreatedTsMs', 'codeCommit', 'manifestSha256']); if (ik) return err(`${where}.archive.identity`, ik);
+    const id = a.identity;
+    if (!isNonEmptyString(id.schemaVersion, 80) || !isNonEmptyString(id.childhoodVersion, 80)) return err(`${where}.archive.identity`, 'archive versions malformed');
+    if (id.codeCommit !== null && !isNonEmptyString(id.codeCommit, 64)) return err(`${where}.archive.identity`, 'archive code commit malformed');
     if (!SHA256.test(id.manifestSha256 ?? '')) return err(`${where}.archive.identity`, 'manifest digest malformed');
     // the SAME creation clock is recorded twice, as text and as milliseconds: both must be lawful AND agree
     if (id.archiveCreatedTsMs === null ? id.archiveCreatedTs !== null : (!isTs(id.archiveCreatedTsMs) || id.archiveCreatedTs !== isoOf(id.archiveCreatedTsMs))) return err(`${where}.archive.identity`, 'the archive creation clock disagrees with its own millisecond copy');
-    if (!Array.isArray(v.archive.oneMinuteSymbols) || v.archive.oneMinuteSymbols.some((s) => !isCoin(s))) return err(`${where}.archive`, 'the 1m symbol inventory is malformed');
-    if (v.archive.observations !== null && !isCount(v.archive.observations)) return err(`${where}.archive`, 'observation count malformed');
-    if (v.archive.outcomes !== null && !isCount(v.archive.outcomes)) return err(`${where}.archive`, 'outcome count malformed');
-    if (!Array.isArray(v.archive.limitations) || v.archive.limitations.some((l) => !/^[A-Z0-9_]{1,64}$/.test(l))) return err(`${where}.archive`, 'limitations malformed');
+    // THE PROVENANCE DESCRIPTION IS A CLOSED RECORD TOO. Its declared fields are legitimate bounded provenance text
+    // from the Childhood contract and stay allowed; an UNDECLARED key beside them is not the same thing and is
+    // refused. (This closes the shape, not "every string".)
+    const sk = exactKeys(a.source, ['historicalSourceType', 'sourceLatestTs', 'universeCoverageStatus', 'fastMemoryParityStatus', 'universeToday', 'deepUniverseCount']); if (sk) return err(`${where}.archive.source`, sk);
+    for (const [f, max] of [['historicalSourceType', 120], ['sourceLatestTs', 64], ['universeCoverageStatus', 80], ['fastMemoryParityStatus', 80]]) {
+      if (a.source[f] !== null && !isNonEmptyString(a.source[f], max)) return err(`${where}.archive.source`, `${f} is neither an explicit null nor bounded provenance text`);
+    }
+    for (const f of ['universeToday', 'deepUniverseCount']) if (a.source[f] !== null && !isCount(a.source[f])) return err(`${where}.archive.source`, `${f} is neither an explicit null nor a nonnegative safe integer`);
+    // every track entry has the shape its reader produces; the track key and its file name must agree
+    if (!isPlainObject(a.tracks)) return err(`${where}.archive.tracks`, `is a ${safeType(a.tracks)}, not the per-track census object`);
+    const trackKeys = Object.keys(a.tracks);
+    if (trackKeys.length === 0 || trackKeys.length > 16) return err(`${where}.archive.tracks`, 'the track census is empty or unbounded');
+    let oneMinute = null;
+    for (let i = 0; i < trackKeys.length; i += 1) {
+      const key = trackKeys[i]; const t = a.tracks[key];
+      const mt = /^(\d{1,4})m$/.exec(key); if (!mt) return err(`${where}.archive.tracks`, `entry ${i + 1} is not a <interval>m track key`);
+      const tk = exactKeys(t, ['declared', 'present', 'symbols', 'candles', 'fromSec', 'toSec', 'role']); if (tk) return err(`${where}.archive.tracks.${key}`, tk);
+      if (typeof t.declared !== 'boolean' || typeof t.present !== 'boolean') return err(`${where}.archive.tracks.${key}`, 'declaration / presence malformed');
+      if (t.present && !t.declared) return err(`${where}.archive.tracks.${key}`, 'a present track that the manifest never declared');
+      if (!isCount(t.symbols) || !isCount(t.candles)) return err(`${where}.archive.tracks.${key}`, 'symbol / candle counts malformed');
+      if (!t.present && (t.symbols !== 0 || t.candles !== 0 || t.fromSec !== null || t.toSec !== null)) return err(`${where}.archive.tracks.${key}`, 'an absent track cannot carry counts or coverage bounds');
+      for (const f of ['fromSec', 'toSec']) if (t[f] !== null && (!Number.isSafeInteger(t[f]) || t[f] <= 0)) return err(`${where}.archive.tracks.${key}`, `${f} is neither an explicit null nor epoch seconds`);
+      if ((t.fromSec === null) !== (t.toSec === null)) return err(`${where}.archive.tracks.${key}`, 'one coverage bound is absent while the other is not');
+      if (t.fromSec !== null && t.fromSec > t.toSec) return err(`${where}.archive.tracks.${key}`, 'coverage bounds are inverted');
+      if (t.role !== null && !isNonEmptyString(t.role, 64)) return err(`${where}.archive.tracks.${key}`, 'role is neither an explicit null nor a bounded role name');
+      // a declared, present track is a consumed file of the same name; a track that is not present is not
+      const file = `candles-${Number(mt[1])}m.jsonl`;
+      const consumed = Object.prototype.hasOwnProperty.call(a.consumedFiles ?? {}, file);
+      if (t.present !== consumed) return err(`${where}.archive.tracks.${key}`, 'the track presence disagrees with the consumed-file inventory');
+      if (key === '1m') oneMinute = t;
+    }
+    let e2 = consumedFilesError(a.consumedFiles, `${where}.archive.consumedFiles`); if (e2) return e2;
+    // THE 1m SYMBOL INVENTORY is what every label depends on: unique, canonical, sorted, and consistent with the
+    // track census that produced it. An empty inventory means no series were loaded — never "some, unrecorded".
+    if (!Array.isArray(a.oneMinuteSymbols) || a.oneMinuteSymbols.some((x) => !isCoin(x))) return err(`${where}.archive`, 'the 1m symbol inventory carries a value that is not a canonical asset identity');
+    if (a.oneMinuteSymbols.some((x, i) => i > 0 && a.oneMinuteSymbols[i - 1] >= x)) return err(`${where}.archive`, 'the 1m symbol inventory is not a sorted unique set');
+    if (oneMinute === null) { if (a.oneMinuteSymbols.length !== 0) return err(`${where}.archive`, 'a 1m symbol inventory exists although no 1m track is recorded'); }
+    else if (a.oneMinuteSymbols.length !== oneMinute.symbols) return err(`${where}.archive`, `the 1m symbol inventory lists ${a.oneMinuteSymbols.length} assets but its track census counts ${oneMinute.symbols}`);
+    if (a.observations !== null && !isCount(a.observations)) return err(`${where}.archive`, 'observation count malformed');
+    if (a.outcomes !== null && !isCount(a.outcomes)) return err(`${where}.archive`, 'outcome count malformed');
+    if (!Array.isArray(a.limitations) || a.limitations.some((l) => !/^[A-Z0-9_]{1,64}$/.test(l))) return err(`${where}.archive`, 'limitations malformed');
+    if (a.limitations.includes('NO_1M_TRACK') !== (a.oneMinuteSymbols.length === 0)) return err(`${where}.archive`, 'the NO_1M_TRACK limitation disagrees with the recorded 1m inventory');
   }
   const ok = exactKeys(v.overlap, ['rowCoins', 'rowCoinsWithOneMinuteSeries', 'archiveOneMinuteSymbols', 'primaryShadowOverlapCoins', 'temporalOverlap']); if (ok) return err(`${where}.overlap`, ok);
   for (const n of ['rowCoins', 'rowCoinsWithOneMinuteSeries', 'archiveOneMinuteSymbols']) if (!isCount(v.overlap[n])) return err(`${where}.overlap`, `${n} is not a nonnegative safe integer`);
@@ -268,6 +322,9 @@ function summaryError(v, where, { known, sign = null }) {
   if (v.n === 0) { if (nums.some((f) => v[f] !== null)) return err(where, 'an empty summary exposes values'); return null; }
   for (const f of nums) if (!isFiniteNum(v[f])) return err(where, `${f} is not a finite number`);
   if (!(v.min <= v.p25 && v.p25 <= v.median && v.median <= v.p75 && v.p75 <= v.max)) return err(where, 'the quantiles are not ordered');
+  // ONE observation has ONE value: every order statistic of it is that value. A spread over a single KNOWN outcome
+  // is not a summary of anything the recipe could have produced.
+  if (v.n === 1 && nums.some((f) => v[f] !== v.median)) return err(where, 'a one-observation summary reports a spread its single value cannot produce');
   if (sign === 'NON_NEGATIVE' && v.min < 0) return err(where, 'a maximum favourable excursion cannot be negative');
   if (sign === 'NON_POSITIVE' && v.max > 0) return err(where, 'a maximum adverse excursion cannot be positive');
   return null;
@@ -327,7 +384,7 @@ export function evaluationPayloadError(e0) {
   if (typeof g.groupSummariesTruncated !== 'boolean' || !Array.isArray(g.groupSummaries) || g.groupSummaries.length > 500) return err(`${W} grouping`, 'group summaries malformed or beyond their declared ceiling');
   if (g.groupSummariesTruncated !== (g.groups > 500)) return err(`${W} grouping`, 'the truncation flag disagrees with the group count');
   if (g.groupSummaries.length !== Math.min(g.groups, 500)) return err(`${W} grouping`, 'the number of group summaries disagrees with the group count and its ceiling');
-  let summedRows = 0;
+  let summedRows = 0; const bySplit = {}; const rowsBySplit = {};
   for (let i = 0; i < g.groupSummaries.length; i += 1) {
     const w = `${W} grouping.groupSummaries[${i + 1}]`; const gs = g.groupSummaries[i];
     const gk = exactKeys(gs, ['rows', 'split', 'minDecisionKnownAtTs', 'maxDecisionKnownAtTs', 'featureSupportStartTs', 'outcomeSupportEndTs', 'dependenciesTruncated', 'unknownSupport', 'coins']); if (gk) return err(w, gk);
@@ -340,6 +397,10 @@ export function evaluationPayloadError(e0) {
     if (gs.outcomeSupportEndTs > gs.maxDecisionKnownAtTs + 60_000 + MAX_HORIZON_MS) return err(w, 'outcome support extends beyond the recipe horizon');
     if (typeof gs.dependenciesTruncated !== 'boolean' || typeof gs.unknownSupport !== 'boolean') return err(w, 'truncation / support disclosure malformed');
     if ((gs.dependenciesTruncated || gs.unknownSupport) && gs.split !== 'DESCRIPTIVE_ONLY') return err(w, 'a truncated or unsupported group is not DESCRIPTIVE_ONLY');
+    // the recorded split IS the split law applied to this group's own recorded chronology
+    const want = splitOfGroup(gs, e0.splitAtTs);
+    if (gs.split !== want) return err(w, `is recorded as ${gs.split} although its own chronology places it in ${want}`);
+    bySplit[gs.split] = (bySplit[gs.split] ?? 0) + 1; rowsBySplit[gs.split] = (rowsBySplit[gs.split] ?? 0) + gs.rows;
     if (!Array.isArray(gs.coins) || gs.coins.length === 0 || gs.coins.length > 16 || gs.coins.some((c) => !isCoin(c))) return err(w, 'the capped asset list is malformed'); // capped: never the whole universe
     summedRows += gs.rows;
   }
@@ -365,6 +426,16 @@ export function evaluationPayloadError(e0) {
   }
   if (primarySum !== e0.rows.primary) return err(`${W} splits`, 'the primary split counts do not add up to the primary population');
   if (groupSum !== g.groups) return err(`${W} splits`, 'the group split counts do not add up to the group total');
+  // THE VISIBLE GROUP SUMMARIES AND THE DECLARED SPLIT COUNTS DESCRIBE THE SAME GROUPS. When the summaries are
+  // complete, both counts must agree exactly. When they are truncated, only the checkable bound applies — the
+  // visible prefix is never treated as if it contained every group.
+  for (const x of SPLITS) {
+    const seen = bySplit[x] ?? 0; const seenRows = rowsBySplit[x] ?? 0;
+    if (!g.groupSummariesTruncated) {
+      if (seen !== sp.groupsBySplit[x]) return err(`${W} grouping`, `${seen} recorded group summaries fall in ${x} but the split census declares ${sp.groupsBySplit[x]}`);
+      if (seenRows !== sp.primaryRows[x]) return err(`${W} grouping`, `the recorded ${x} groups hold ${seenRows} rows but the split census declares ${sp.primaryRows[x]}`);
+    } else if (seen > sp.groupsBySplit[x] || seenRows > sp.primaryRows[x]) return err(`${W} grouping`, `the visible ${x} group summaries already exceed the split census`);
+  }
   let shadowSum = 0; for (const p of ['BEFORE_SPLIT', 'AT_OR_AFTER_SPLIT']) { if (!isCount(sp.shadowRowsByPeriod[p])) return err(`${W} splits.shadowRowsByPeriod`, `${p} is not a nonnegative safe integer`); shadowSum += sp.shadowRowsByPeriod[p]; }
   if (shadowSum !== e0.rows.shadow) return err(`${W} splits`, 'the shadow period counts do not add up to the shadow population');
   // ---- tables

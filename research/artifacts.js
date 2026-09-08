@@ -54,7 +54,15 @@ export function jsonlWriter(reservation, name, { limits = LIMITS } = {}) {
   let fd; try { fd = openSync(tmp, 'wx'); } catch (err) { fail(err?.code === 'EACCES' || err?.code === 'EPERM' ? 'PERMISSION_FAILURE' : 'IO_FAILURE', `cannot create ${name}`); }
   reservation.written.push(tmp);
   const hash = createHash('sha256'); let lines = 0; let bytes = 0; let open = true;
-  const shut = () => { if (open) { open = false; try { closeSync(fd); } catch { /* already gone */ } } };
+  // A PRIMARY CLOSE AND A BEST-EFFORT RELEASE ARE DIFFERENT OPERATIONS.
+  // `release` is cleanup on a path that is ALREADY failing: it frees the descriptor and never masks the error that
+  // brought us there. `closePrimary` is part of the success path, where a reported close failure means the file's
+  // bytes are not known to be on disk — so it propagates and the rename never happens. A cleanup helper must never
+  // swallow a primary close failure and then let success continue.
+  // Both mark the descriptor closed BEFORE calling close(3), because an OS may release a descriptor and still
+  // report a failure; retrying that fd could close an unrelated file that has since reused the number.
+  const release = () => { if (!open) return; open = false; try { closeSync(fd); } catch { /* already failing; cleanup never masks the primary error */ } };
+  const closePrimary = () => { if (!open) return; open = false; closeSync(fd); };
   return {
     write(obj) {
       try {
@@ -63,10 +71,15 @@ export function jsonlWriter(reservation, name, { limits = LIMITS } = {}) {
         if (b > limits.maxJsonlLineBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}: a record exceeds ${limits.maxJsonlLineBytes} bytes`);
         if (bytes + b > limits.maxInputFileBytes) fail('RESOURCE_LIMIT_EXCEEDED', `${name}: the file would exceed the ${limits.maxInputFileBytes} byte bound its reader enforces`);
         writeAll(fd, Buffer.from(line, 'utf8'), name); hash.update(line); lines += 1; bytes += b;
-      } catch (err) { shut(); throw err; }
+      } catch (err) { release(); throw err; }
     },
-    close() { try { fsyncSync(fd); } catch { shut(); fail('IO_FAILURE', `cannot flush ${name}`); } shut(); renameSync(tmp, file); reservation.written[reservation.written.indexOf(tmp)] = file; return { name, lines, bytes, sha256: hash.digest('hex') }; },
-    abort: shut,
+    close() {
+      try { fsyncSync(fd); } catch { release(); fail('IO_FAILURE', `cannot flush ${name}`); }
+      try { closePrimary(); } catch (err) { if (err instanceof ResearchError) throw err; fail('IO_FAILURE', `cannot close ${name}`, { code: err?.code ?? null }); }
+      renameSync(tmp, file); reservation.written[reservation.written.indexOf(tmp)] = file;
+      return { name, lines, bytes, sha256: hash.digest('hex') };
+    },
+    abort: release,
   };
 }
 // one bounded text/JSON writer under the same producer-consumer bound and the same guaranteed close
@@ -76,8 +89,11 @@ function writeBounded(reservation, name, text, { limits = LIMITS } = {}) {
   const file = path.join(reservation.dir, name); const tmp = `${file}.part`;
   let fd; try { fd = openSync(tmp, 'wx'); } catch (err) { fail(err?.code === 'EACCES' || err?.code === 'EPERM' ? 'PERMISSION_FAILURE' : 'IO_FAILURE', `cannot create ${name}`); }
   reservation.written.push(tmp);
-  try { writeAll(fd, Buffer.from(text, 'utf8'), name); fsyncSync(fd); } catch (err) { try { closeSync(fd); } catch { /* already gone */ } if (err instanceof ResearchError) throw err; fail('IO_FAILURE', `cannot write ${name}`); }
-  try { closeSync(fd); } catch { /* already closed */ }
+  let open = true;
+  const release = () => { if (!open) return; open = false; try { closeSync(fd); } catch { /* already failing; cleanup never masks the primary error */ } };
+  try { writeAll(fd, Buffer.from(text, 'utf8'), name); fsyncSync(fd); } catch (err) { release(); if (err instanceof ResearchError) throw err; fail('IO_FAILURE', `cannot write ${name}`); }
+  // the PRIMARY close: a reported failure here means these bytes are not known to be on disk, so nothing is renamed
+  try { open = false; closeSync(fd); } catch (err) { fail('IO_FAILURE', `cannot close ${name}`, { code: err?.code ?? null }); }
   renameSync(tmp, file); reservation.written[reservation.written.indexOf(tmp)] = file;
   return { name, bytes, sha256: sha256Hex(text) };
 }

@@ -113,7 +113,10 @@ test('C2b (F2b). nested record shapes are fully revalidated on read: an undeclar
   assert.equal(await codeOf(async () => readDatasetDir(tampered)), 'CORRUPT_INPUT', 'a resealed nested mutation still fails the semantic validator');
   // the shared array validator is the same one the projector obeys
   assert.equal(catalogueArrayError('dependencyNodes', F.arrays.dependencyNodes), null);
-  assert.equal(forbiddenLeafError({ a: { b: [{ note: 'x' }] } }), 'record.a.b[0].note is a free-text / raw-content leaf and can never be exported');
+  // the forbidden leaf name is one of OUR closed names and stays readable; undeclared segments on the way to it are
+  // untrusted text and are reported by structural position, so a record cannot smuggle content out through the path
+  assert.equal(forbiddenLeafError({ a: { b: [{ note: 'x' }] } }), 'record.field#1.field#1[0].note is a free-text / raw-content leaf and can never be exported');
+  assert.equal(forbiddenLeafError({ arrays: { dependencyNodes: [{ note: 'x' }] } }), 'record.arrays.dependencyNodes[0].note is a free-text / raw-content leaf and can never be exported', 'a DECLARED path stays fully readable');
   assert.ok(Object.keys(ARRAY_CATALOGUE).length >= 12);
 });
 

@@ -20,9 +20,9 @@ import { LIMITS, ResearchError, sha256Hex, isoOf, exactKeys, safeType, DERIVATIO
 import { projectEventList, validateSnapshotRecord } from '../research/snapshot.js';
 import { selectResearchRows, validateFeatureRow } from '../research/features.js';
 import { validateCandleSeriesRow, readChildhoodArchive } from '../research/archive.js';
-import { labelRow, validateOutcomeRow, outcomeContextError, rowAvailabilityOf } from '../research/outcomes.js';
-import { evaluateDataset, datasetJoinError, renderReport } from '../research/evaluation.js';
-import { evaluationPayloadError, datasetManifestError } from '../research/schemas.js';
+import { labelRow, validateOutcomeRow, outcomeContextError, archiveContextError, rowAvailabilityOf } from '../research/outcomes.js';
+import { evaluateDataset, datasetJoinError, renderReport, splitOfGroup } from '../research/evaluation.js';
+import { evaluationPayloadError, datasetManifestError, coverageReportError, codeIdentityError, consumedFilesError } from '../research/schemas.js';
 import { dependencyGraphError } from '../research/relations.js';
 import { archiveContextOf, datasetBundle } from '../research/bundle.js';
 import { runSnapshot, runBuild, runEvaluate, readSnapshotDir, readDatasetDir, readEvaluationDir, codeIdentity } from '../research/pipeline.js';
@@ -53,14 +53,14 @@ async function pureFixture() {
   return { fx, F, L: labelRow(F, { archive, asOfTs: ASOF }), archive };
 }
 // a complete lawful SAVED artifact chain through the real production commands
-async function savedChain(W, { name = 'a', coins = ['ZQQ7'], shadow = true, childhood = true, createdMs = CREATED, extraEvents = [] } = {}) {
+async function savedChain(W, { name = 'a', coins = ['ZQQ7'], shadow = true, childhood = true, createdMs = CREATED, extraEvents = [], split = SPLIT } = {}) {
   const fx = await journalFixture({ coins, shadow });
   const events = [...fx.events, ...extraEvents];
   const snap = await runSnapshot({ events, out: path.join(W, `${name}-snap`) });
   let arch = null;
   if (childhood) { arch = path.join(W, `${name}-arch`); writeChildhoodArchive(arch, { series: coins.map((c) => ({ symbol: c, candles: BARS() })), archiveCreatedTs: isoOf(createdMs), retrievedSec: SPLIT / 1000 }); }
   const ds = await runBuild({ snapshotDir: snap.dir, childhoodDir: arch, asOfTs: ASOF, out: path.join(W, `${name}-ds`) });
-  const ev = await runEvaluate({ datasetDir: ds.dir, splitAtTs: SPLIT, out: path.join(W, `${name}-ev`) });
+  const ev = await runEvaluate({ datasetDir: ds.dir, splitAtTs: split, out: path.join(W, `${name}-ev`) });
   return { fx, snap, ds, ev, archiveDir: arch };
 }
 // copy a completed artifact, mutate it, and RESEAL its integrity fields in TEST CODE ONLY
@@ -90,11 +90,11 @@ test('M01. the lawful chain: snapshot -> build -> evaluate and back, with dotted
   assert.ok(rd.featureRows.some((r) => r.cohort === 'SHADOW'), 'and the shadow cohort survives beside it');
   assert.equal(re.report, ev.report); assert.equal(canonicalJson(re.evaluation), canonicalJson(ev.evaluation));
   assert.equal(evaluationPayloadError(ev.evaluation), null, 'the real evaluator produces a payload its own validator accepts');
-  assert.deepEqual(rd.archiveContext, { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED });
+  assert.deepEqual(rd.archiveContext, { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED, oneMinuteSymbols: ['A.B', 'ZQQ7'] });
   // a dataset built with NO archive is a different, lawful fact
   const bare = await savedChain(W, { name: 'bare', childhood: false });
   const rb = readDatasetDir(bare.ds.dir);
-  assert.deepEqual(rb.archiveContext, { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null });
+  assert.deepEqual(rb.archiveContext, { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null, oneMinuteSymbols: null });
   assert.equal(rb.manifest.inputs.childhood, null, 'the lawful null is recorded explicitly, beside a present snapshot input');
   assert.ok(rb.manifest.inputs.snapshot.manifestSha256, 'the snapshot provenance is still there');
   assert.ok(rb.coverage.state.reasons.includes('CHILDHOOD_ARCHIVE_NOT_SUPPLIED'));
@@ -128,7 +128,7 @@ test('M02 (C1/C6). the CONTEXTUAL archive floor: backdating the reference AND ev
   forged.reference.knownAtTs = forged.anchorTsMs;
   for (const h of Object.values(forged.horizons)) h.outcomeKnownAtTs = h.horizonEndTs;
   assert.equal(validateOutcomeRow(forged), null, 'the forgery is row-locally lawful — which is exactly why row-local law could not catch it');
-  const ctx = { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED };
+  const ctx = { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED, oneMinuteSymbols: ['ZQQ7'] };
   assert.match(outcomeContextError(forged, ctx), /reference knowledge floor .* is not max\(anchor, archive creation/);
   assert.match(datasetJoinError({ featureRows: [F], outcomeRows: [forged], asOfTs: ASOF, archiveContext: ctx }).error ?? '', /is not max\(anchor, archive creation/);
   assert.equal(await codeOf(async () => evaluateDataset({ featureRows: [F], outcomeRows: [forged], asOfTs: ASOF, splitAtTs: SPLIT, archiveContext: ctx })), 'CORRUPT_INPUT');
@@ -161,12 +161,12 @@ test('M02 (C1/C6). the CONTEXTUAL archive floor: backdating the reference AND ev
   const single = structuredClone(L); for (const h of Object.values(single.horizons)) h.outcomeKnownAtTs = h.horizonEndTs;
   assert.match(validateOutcomeRow(single), /knowledge floor precedes its own reference floor/);
   // a context that disagrees with the row's own reported source is refused in either direction
-  assert.match(outcomeContextError(L, { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null }), /built with no Childhood archive/);
+  assert.match(outcomeContextError(L, { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null, oneMinuteSymbols: null }), /built with no Childhood archive/);
   const absent = labelRow(F, { archive: null, asOfTs: ASOF });
   assert.match(outcomeContextError(absent, ctx), /claims ARCHIVE_ABSENT although the dataset records a created archive/);
-  assert.equal(outcomeContextError(absent, { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null }), null);
+  assert.equal(outcomeContextError(absent, { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null, oneMinuteSymbols: null }), null);
   // MALFORMED context is never silently downgraded to "no context"
-  for (const bad of [null, {}, { state: 'NOPE', archiveCreatedTsMs: null }, { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: CREATED }, { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: 'x' }]) {
+  for (const bad of [null, {}, { state: 'NOPE', archiveCreatedTsMs: null, oneMinuteSymbols: null }, { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: CREATED, oneMinuteSymbols: null }, { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: 'x', oneMinuteSymbols: null }, { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED }, { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null, oneMinuteSymbols: ['ZQQ7'] }]) {
     assert.match(datasetJoinError({ featureRows: [F], outcomeRows: [L], asOfTs: ASOF, archiveContext: bad }).error ?? '', /archive context/, `${JSON.stringify(bad)} is corruption, not an absent context`);
   }
   // an OMITTED context is a different thing again: the row-local law runs and claims nothing about the archive
@@ -602,7 +602,7 @@ test('M09. reproducibility: identical inputs, as-of, split and limits produce by
   assert.equal(sha256Hex(readFileSync(path.join(other.dir, 'features.jsonl'))), sha256Hex(readFileSync(path.join(a.d.dir, 'features.jsonl'))), 'the feature side never sees the archive');
   assert.notEqual(sha256Hex(readFileSync(path.join(other.dir, 'outcomes.jsonl'))), sha256Hex(readFileSync(path.join(a.d.dir, 'outcomes.jsonl'))), 'but the labels move with their archive');
   const later = readDatasetDir(other.dir);
-  assert.deepEqual(later.archiveContext, { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED + 7 * 86_400_000 });
+  assert.deepEqual(later.archiveContext, { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED + 7 * 86_400_000, oneMinuteSymbols: ['ZQQ7'] });
   assert.ok(later.outcomeRows.every((o) => o.reference.knownAtTs === null || o.reference.knownAtTs === Math.max(o.anchorTsMs, CREATED + 7 * 86_400_000)), 'and the floors follow the recipe against the new archive');
   // a LATER as-of admits later decisions but never rewrites an earlier row's own feature values
   const wide = await runBuild({ snapshotDir: a.s.dir, childhoodDir: arch, asOfTs: ASOF + 30 * 86_400_000, out: path.join(W, 'r4-ds') });
@@ -612,4 +612,160 @@ test('M09. reproducibility: identical inputs, as-of, split and limits produce by
     assert.ok(same, 'an already-selected row is still selected under a later as-of');
     assert.equal(canonicalJson(same.features), canonicalJson(r.features), 'and its frozen feature values are byte-identical');
   }
+});
+
+// ================================================================================================================
+// M10 .. M13 — the finite neighbouring cases required alongside the owner acceptance suite. Each keeps a lawful
+// POSITIVE beside its negative, so a law that would reject everything cannot pass by accident.
+// ================================================================================================================
+test('M10 (R1a/R1b/R1c). every newly closed archive sub-shape rejects an unknown key and a wrong type, while valid missing / null provenance and a lawfully absent track still pass', async () => {
+  const W = work();
+  const chain = await savedChain(W, { name: 'm10', shadow: false });
+  assert.equal(datasetManifestError(chain.ds.manifest), null, 'the real producer emits an archive census its own schema accepts');
+  const cov0 = JSON.parse(readFileSync(path.join(chain.ds.dir, 'coverage.json'), 'utf8'));
+  assert.equal(coverageReportError(cov0, chain.ds.manifest), null);
+  // the delivered archive legitimately carries bounded provenance TEXT and lawfully absent coarse tracks
+  assert.equal(typeof cov0.census.archive.source.historicalSourceType, 'string', 'declared provenance text stays allowed');
+  assert.ok(Object.entries(cov0.census.archive.tracks).some(([, t]) => t.declared === false && t.present === false), 'a lawfully absent track stays allowed');
+  const nulled = structuredClone(cov0);
+  for (const f of ['historicalSourceType', 'sourceLatestTs', 'universeCoverageStatus', 'fastMemoryParityStatus', 'universeToday', 'deepUniverseCount']) nulled.census.archive.source[f] = null;
+  assert.equal(coverageReportError(nulled, chain.ds.manifest), null, 'and every source field may be an explicit null');
+  const table = [
+    ['source: undeclared key', (c) => { c.census.archive.source.text = 'AUDIT_RAW_CONTENT_SENTINEL'; }, /archive\.source: undeclared key/],
+    ['source: wrong type', (c) => { c.census.archive.source.universeToday = 'many'; }, /universeToday is neither an explicit null nor a nonnegative safe integer/],
+    ['tracks: wrong type', (c) => { c.census.archive.tracks = 'NOT_AN_OBJECT'; }, /is a string, not the per-track census object/],
+    ['tracks: undeclared key in an entry', (c) => { c.census.archive.tracks['1m'].note = 'x'; }, /archive\.tracks\.1m: undeclared key/],
+    ['tracks: bad key shape', (c) => { c.census.archive.tracks.hourly = { ...c.census.archive.tracks['1m'] }; }, /is not a <interval>m track key/],
+    ['tracks: present but never declared', (c) => { c.census.archive.tracks['1m'].declared = false; }, /present track that the manifest never declared/],
+    ['tracks: an absent track carrying counts', (c) => { const t = Object.entries(c.census.archive.tracks).find(([, x]) => !x.present); t[1].symbols = 3; }, /absent track cannot carry counts/],
+    ['tracks: inverted coverage bounds', (c) => { const t = c.census.archive.tracks['1m']; const f = t.fromSec; t.fromSec = t.toSec; t.toSec = f; }, /coverage bounds are inverted/],
+    ['tracks: presence disagrees with the consumed files', (c) => { delete c.census.archive.consumedFiles['candles-1m.jsonl']; }, /presence disagrees with the consumed-file inventory/],
+    ['consumedFiles: undeclared key', (c) => { c.census.archive.consumedFiles['manifest.json'].note = 'x'; }, /consumedFiles: entry \d+ undeclared key/],
+    ['consumedFiles: declared checksum contradicts its digest', (c) => { c.census.archive.consumedFiles['candles-1m.jsonl'].declaredSha256_16 = '0'.repeat(16); }, /declared checksum disagrees/],
+    ['inventory: not canonical', (c) => { c.census.archive.oneMinuteSymbols = ['not a coin']; }, /not a canonical asset identity/],
+    ['inventory: unsorted / repeated', (c) => { c.census.archive.oneMinuteSymbols = ['ZQQ7', 'ZQQ7']; }, /not a sorted unique set/],
+    ['inventory: disagrees with its own track census', (c) => { c.census.archive.oneMinuteSymbols = []; c.census.archive.limitations = [...new Set([...c.census.archive.limitations, 'NO_1M_TRACK'])].sort(); }, /lists 0 assets but its track census counts/],
+    ['identity: creation clock copies disagree', (c) => { c.census.archive.identity.archiveCreatedTsMs += 1000; }, /disagrees with its own millisecond copy/],
+  ];
+  for (const [name, mutate, re] of table) {
+    const c = structuredClone(cov0); mutate(c);
+    const got = coverageReportError(c, chain.ds.manifest);
+    assert.ok(got !== null, `${name} must be refused`); assert.match(got, re, name);
+  }
+  // and the SAME consumed-file schema governs both recorded copies
+  assert.equal(consumedFilesError(cov0.census.archive.consumedFiles, 'x'), null);
+  assert.match(consumedFilesError({ '../escape.json': { sha256: 'a'.repeat(64), bytes: 1, declaredSha256_16: null } }, 'x'), /not a plain file name/);
+  assert.match(consumedFilesError({}, 'x'), /empty or unbounded/);
+});
+
+test('M11 (R1c). a declared source absence and a KNOWN outcome cannot coexist, under labelRow\'s own missing-source priority, and the honest unavailable branches are retained', async () => {
+  const { F, L } = await pureFixture();
+  const present = { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED, oneMinuteSymbols: ['ZQQ7'] };
+  assert.equal(outcomeContextError(L, present), null, 'the lawful positive: the asset IS inventoried');
+  // an empty inventory is NO_1M_TRACK for every row — not "some series, unrecorded"
+  assert.match(outcomeContextError(L, { ...present, oneMinuteSymbols: [] }), /records no 1m track at all/);
+  // an asset outside a non-empty inventory is SERIES_ABSENT_FOR_ASSET
+  assert.match(outcomeContextError(L, { ...present, oneMinuteSymbols: ['AAA1'] }), /records no series for this asset/);
+  // and the honest unavailable rows are ACCEPTED under exactly their own reason
+  const noTrack = labelRow(F, { archive: { archiveCreatedTsMs: CREATED, oneMinute: new Map() }, asOfTs: ASOF });
+  assert.equal(noTrack.availability.reason, 'NO_1M_TRACK');
+  assert.equal(outcomeContextError(noTrack, { ...present, oneMinuteSymbols: [] }), null);
+  assert.match(outcomeContextError(noTrack, present), /inventories a series for this asset/, 'and a claim of no track is refused when one is recorded');
+  const raw = { symbol: 'AAA1', intervalMin: 1, retrievedTs: isoOf(SPLIT), retrievedSec: SPLIT / 1000, candles: BARS() };
+  const otherOnly = { archiveCreatedTsMs: CREATED, oneMinute: new Map([['AAA1', validateCandleSeriesRow(raw, { intervalMin: 1 })]]) };
+  const noSeries = labelRow(F, { archive: otherOnly, asOfTs: ASOF });
+  assert.equal(noSeries.availability.reason, 'SERIES_ABSENT_FOR_ASSET');
+  assert.equal(outcomeContextError(noSeries, { ...present, oneMinuteSymbols: ['AAA1'] }), null);
+  // the context itself is validated: an inventory beside an absent archive is corruption
+  assert.match(archiveContextError({ state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null, oneMinuteSymbols: ['ZQQ7'] }) ?? '', /absent archive carries no series inventory/);
+  assert.equal(archiveContextError({ state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: CREATED, oneMinuteSymbols: null }), null, 'an explicit null inventory is a lawful "not in scope"');
+});
+
+test('M12 (R1d/R3). the recorded identity law is the law its own fields produce, and recorded latencies are arithmetic over the clocks beside them', async () => {
+  const id = codeIdentity();
+  assert.equal(codeIdentityError(id, 'x'), null, 'the live identity satisfies its own schema');
+  for (const [name, mutate, re] of [
+    ['a dirty closure claiming a clean commit', (v) => { v.gitCommit = 'a'.repeat(40); v.gitSourceDirty = true; v.law = 'PRODUCED_BY_COMMITTED_SOURCE'; }, /not the law its own commit and cleanliness produce/],
+    ['an unknown cleanliness claiming clean', (v) => { v.gitCommit = 'a'.repeat(40); v.gitSourceDirty = null; v.law = 'PRODUCED_BY_COMMITTED_SOURCE'; }, /not the law its own commit and cleanliness produce/],
+    ['no checkout claiming committed source', (v) => { v.gitCommit = null; v.gitSourceDirty = null; v.law = 'PRODUCED_BY_COMMITTED_SOURCE'; }, /not the law its own commit and cleanliness produce/],
+    ['a repeated closure path', (v) => { v.sourceClosure = [...v.sourceClosure, v.sourceClosure[0]]; v.sourceFiles = v.sourceClosure.length; }, /repeats a path/],
+    ['an absolute closure path', (v) => { v.sourceClosure = [...v.sourceClosure, '/etc/passwd'].sort(); v.sourceFiles = v.sourceClosure.length; }, /not a plain repository-relative path/],
+  ]) {
+    const v = structuredClone(id); mutate(v);
+    const got = codeIdentityError(v, 'x'); assert.ok(got !== null, `${name} must be refused`); assert.match(got, re, name);
+  }
+  // each lawful state is accepted where it IS the law
+  for (const [commit, dirty, law] of [['a'.repeat(40), false, 'PRODUCED_BY_COMMITTED_SOURCE'], ['a'.repeat(40), true, 'PRODUCED_BY_UNCOMMITTED_SOURCE'], ['a'.repeat(40), null, 'SOURCE_CLEANLINESS_UNKNOWN'], [null, null, 'NO_GIT_CHECKOUT']]) {
+    const v = structuredClone(id); v.gitCommit = commit; v.gitSourceDirty = dirty; v.law = law;
+    assert.equal(codeIdentityError(v, 'x'), null, `${law} is accepted when it is the law its own fields produce`);
+  }
+  // R3: both source-defined latencies, on the row AND at the projection boundary
+  const { F } = await pureFixture();
+  assert.equal(F.features['clock.derivationLatencyMs'], F.featureAsOfTs - F.features['decision.latestInputKnownAtTs']);
+  assert.equal(F.features['clock.ageFromFirstKnownMs'], F.featureAsOfTs - F.features['decision.firstTriggerKnownAtTs']);
+  for (const leaf of ['clock.derivationLatencyMs', 'clock.ageFromFirstKnownMs']) {
+    const bad = structuredClone(F); bad.features[leaf] += 1;
+    assert.match(validateFeatureRow(bad), new RegExp(`${leaf.replace('.', '\\.')} disagrees with the clocks it is derived from`), leaf);
+  }
+  const rec = projectEventList((await journalFixture({ coins: ['ZQQ7'], shadow: false })).events).records.find((r) => r.recordKind === 'RESEARCH_DOSSIER_V2');
+  const badRec = structuredClone(rec); badRec.leaves['clock.derivationLatencyMs'] -= 1;
+  assert.match(validateSnapshotRecord(badRec), /derivationLatencyMs disagrees with the clocks it is derived from/, 'the same law runs where the projection is made');
+});
+
+test('M13 (R2). one-observation summaries, complete versus truncated group detail, the split predicate and a VALIDATION cohort with KNOWN outcomes', async () => {
+  const W = work();
+  const chain = await savedChain(W, { name: 'm13', shadow: false });
+  const lawful = chain.ev.evaluation;
+  assert.equal(evaluationPayloadError(lawful), null);
+  // an honest n=1 summary coincides on every order statistic; an honest n=0 summary is all null
+  const one = lawful.tables.primaryAll['1m'];
+  assert.equal(one.mfePct.n, 1);
+  for (const f of ['p25', 'median', 'p75', 'min', 'max']) assert.equal(one.mfePct[f], one.mfePct.median, `an honest one-observation ${f} coincides`);
+  const spread = structuredClone(lawful); spread.tables.primaryAll['1m'].mfePct = { n: 1, min: 0, p25: 1, median: 2, p75: 3, max: 4 };
+  assert.match(evaluationPayloadError(spread), /one-observation summary reports a spread/);
+  // the split predicate is shared: every recorded group agrees with its own chronology
+  for (const g of lawful.grouping.groupSummaries) assert.equal(g.split, splitOfGroup(g, lawful.splitAtTs));
+  const moved = structuredClone(lawful); moved.grouping.groupSummaries[0].split = 'VALIDATION';
+  assert.match(evaluationPayloadError(moved), /is recorded as VALIDATION although its own chronology places it in DISCOVERY/);
+  const miscounted = structuredClone(lawful);
+  miscounted.splits.groupsBySplit.DISCOVERY = 0; miscounted.splits.groupsBySplit.EMBARGOED = 1;
+  miscounted.splits.primaryRows.DISCOVERY = 0; miscounted.splits.primaryRows.EMBARGOED = 1;
+  miscounted.tables.primaryBySplit.EMBARGOED = structuredClone(miscounted.tables.primaryBySplit.DISCOVERY);
+  miscounted.tables.primaryBySplit.DISCOVERY = structuredClone(chain.ev.evaluation.tables.primaryBySplit.VALIDATION);
+  miscounted.learnability.horizons = Object.fromEntries(LABEL_HORIZONS_MIN.map((h) => [`${h}m`, { discoveryKnownRetrospectively: 0, discoveryTrainableAtSplit: 0, validationKnownAtAsOf: 0 }]));
+  assert.match(evaluationPayloadError(miscounted), /recorded group summaries fall in|is recorded as/, 'the visible summaries and the declared split counts describe the same groups');
+  // TRUNCATED detail keeps only its checkable bounds — the visible prefix is never treated as the whole population
+  const truncated = structuredClone(lawful);
+  truncated.grouping.groups = 640; truncated.grouping.groupSummariesTruncated = true;
+  truncated.rows.primary = 640; truncated.rows.total = 640 + truncated.rows.shadow;
+  truncated.splits.primaryRows.DISCOVERY = 640; truncated.splits.groupsBySplit.DISCOVERY = 640;
+  truncated.grouping.groupSummaries = Array.from({ length: 500 }, () => structuredClone(lawful.grouping.groupSummaries[0]));
+  for (const t of [truncated.tables.primaryAll, truncated.tables.primaryBySplit.DISCOVERY]) for (const h of LABEL_HORIZONS_MIN) { const x = t[`${h}m`]; x.n = 640; x.counts.KNOWN = 640; x.mfePct.n = 640; x.maePct.n = 640; if (x.logReturnPct) x.logReturnPct.n = 640; }
+  for (const h of LABEL_HORIZONS_MIN) { truncated.learnability.horizons[`${h}m`].discoveryKnownRetrospectively = 640; truncated.learnability.horizons[`${h}m`].discoveryTrainableAtSplit = 0; }
+  for (const k of Object.keys(truncated.byEntrance)) truncated.byEntrance[k] = 640;
+  for (const k of Object.keys(truncated.byResearchState)) truncated.byResearchState[k] = 640;
+  for (const k of Object.keys(truncated.byProviderContext)) truncated.byProviderContext[k] = 640;
+  for (const k of Object.keys(truncated.byCoverageState)) truncated.byCoverageState[k] = 640;
+  assert.equal(evaluationPayloadError(truncated), null, 'a truncated projection is lawful without pretending its prefix is the whole population');
+  const overCap = structuredClone(truncated); overCap.grouping.groupSummaries = [...overCap.grouping.groupSummaries, structuredClone(lawful.grouping.groupSummaries[0])];
+  assert.ok(evaluationPayloadError(overCap) !== null, 'and the 500-entry ceiling still holds');
+  const wrongFlag = structuredClone(lawful); wrongFlag.grouping.groupSummariesTruncated = true;
+  assert.match(evaluationPayloadError(wrongFlag), /truncation flag disagrees with the group count/);
+  // a VALIDATION cohort with KNOWN outcomes: the exact known-count equalities hold on real rows
+  // the wide-eye baseline makes feature support start seven days before the derivation, so a VALIDATION split
+  // must sit at or before that: this is the recipe's own support window, not a threshold tuned for the test
+  const late = await savedChain(W, { name: 'm13v', shadow: false, split: T0 - 8 * 86_400_000 });
+  const ev = late.ev.evaluation;
+  assert.equal(evaluationPayloadError(ev), null);
+  assert.equal(ev.splits.primaryRows.VALIDATION, ev.rows.primary, 'a split before every decision puts the cohort in VALIDATION');
+  for (const h of LABEL_HORIZONS_MIN) {
+    assert.equal(ev.learnability.horizons[`${h}m`].validationKnownAtAsOf, ev.tables.primaryBySplit.VALIDATION[`${h}m`].counts.KNOWN, `${h}m validation known count`);
+    assert.equal(ev.learnability.horizons[`${h}m`].discoveryKnownRetrospectively, ev.tables.primaryBySplit.DISCOVERY[`${h}m`].counts.KNOWN, `${h}m discovery known count`);
+  }
+  assert.ok(LABEL_HORIZONS_MIN.some((h) => ev.tables.primaryBySplit.VALIDATION[`${h}m`].counts.KNOWN > 0), 'the VALIDATION cohort really does carry KNOWN outcomes');
+  const forged = structuredClone(ev); forged.learnability.horizons['1m'].validationKnownAtAsOf += 1;
+  assert.ok(evaluationPayloadError(forged) !== null, 'and an inflated validation count is refused');
+  // coverage reasons are a closed domain
+  const madeUp = structuredClone(lawful); madeUp.state.dataCoverage.reasons = [...madeUp.state.dataCoverage.reasons, 'MADE_UP_REASON'].sort();
+  assert.match(evaluationPayloadError(madeUp), /coverage reason is not a value of its authoritative vocabulary/);
 });

@@ -12,7 +12,7 @@ import { RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_DOSSIER_SCHEMA_VERSION, RESEARCH_
 import { dependencyGraphError } from './relations.js';
 import { RESEARCH_SHADOW_EVENT_TYPE, RESEARCH_SHADOW_POPULATION_VERSIONS, RESEARCH_SHADOW_RECIPE_VERSION, replayResearchShadowEvent, emptyShadowState } from '../rumor2/social-research-shadow.js';
 import { SOCIAL_OBSERVATION_TYPES } from '../rumor2/social-settle.js';
-import { LIMITS, SNAPSHOT_VERSION, PREFIX_DIGEST_VERSION, SNAPSHOT_ORIGINS, FEATURE_CATALOGUE, ARRAY_CATALOGUE, FEATURE_LEAF_VALUE_OK, ABSENCE_VALUES, DERIVATION_INPUT_LEAF_CLOCKS, arrayClockError, SNAPSHOT_DOSSIER_RECORD_KEYS, SNAPSHOT_SHADOW_RECORD_KEYS, SHADOW_ROW_KEYS, SHADOW_SELECTION_REASONS, fail, isPlainObject, isTs, isCount, isCoin, isCode, isId, elementValue, catalogueArraysError, forbiddenLeafError, readPath, sha256Hex, deepFreeze, exactKeys } from './contracts.js';
+import { LIMITS, SNAPSHOT_VERSION, PREFIX_DIGEST_VERSION, SNAPSHOT_ORIGINS, FEATURE_CATALOGUE, ARRAY_CATALOGUE, FEATURE_LEAF_VALUE_OK, ABSENCE_VALUES, DERIVATION_INPUT_LEAF_CLOCKS, derivedLatencyError, arrayClockError, SNAPSHOT_DOSSIER_RECORD_KEYS, SNAPSHOT_SHADOW_RECORD_KEYS, SHADOW_ROW_KEYS, SHADOW_SELECTION_REASONS, fail, isPlainObject, isTs, isCount, isCoin, isCode, isId, elementValue, catalogueArraysError, forbiddenLeafError, readPath, safeType, sha256Hex, deepFreeze, exactKeys } from './contracts.js';
 
 // the record identity is SEMANTIC: recipe + the original durable identities, never the journal position, origin or a clock
 export const snapshotRecordIdentity = (fields) => `r5s-${sha256Hex(canonicalJson({ projectionVersion: SNAPSHOT_VERSION, ...fields }))}`;
@@ -79,11 +79,12 @@ export function validateSnapshotRecord(rec) {
       if (absent && !spec.optional) return `snapshot record: required leaf ${spec.name} is absent`;
       if (has && !FEATURE_LEAF_VALUE_OK(spec, rec.leaves[spec.name])) return `snapshot record: leaf ${spec.name} unsupported`;
     }
-    for (const n of Object.keys(rec.leaves)) if (!FEATURE_CATALOGUE.some((s) => s.name === n)) return `snapshot record: undeclared leaf ${n}`;
-    for (const n of Object.keys(rec.absentLeaves)) { if (!FEATURE_CATALOGUE.some((s) => s.name === n)) return `snapshot record: undeclared absent leaf ${n}`; if (!ABSENCE_VALUES.includes(rec.absentLeaves[n])) return `snapshot record: leaf ${n} carries an unlawful absence marker`; }
+    { const k = Object.keys(rec.leaves); for (let i = 0; i < k.length; i += 1) if (!FEATURE_CATALOGUE.some((s) => s.name === k[i])) return `snapshot record: undeclared leaf at position ${i + 1} of ${k.length}`; }
+    { const k = Object.keys(rec.absentLeaves); for (let i = 0; i < k.length; i += 1) { if (!FEATURE_CATALOGUE.some((s) => s.name === k[i])) return `snapshot record: undeclared absent leaf at position ${i + 1} of ${k.length}`; if (!ABSENCE_VALUES.includes(rec.absentLeaves[k[i]])) return `snapshot record: absent leaf at position ${i + 1} carries an unlawful absence marker`; } }
     const ae = catalogueArraysError(rec.arrays, { where: 'snapshot record' }); if (ae) return ae;
     // THE SAME derivation-clock and retained-graph laws the feature row obeys, applied where the projection is made
     for (const name of DERIVATION_INPUT_LEAF_CLOCKS) { const v = rec.leaves[name]; if (v === null || v === undefined) continue; if (v > rec.featureAsOfTs) return `snapshot record: ${name} is known after the derivation it fed`; }
+    const le = derivedLatencyError(rec.leaves, rec.featureAsOfTs, { where: 'snapshot record' }); if (le) return le;
     const ce = arrayClockError(rec.arrays, rec.featureAsOfTs, { where: 'snapshot record' }); if (ce) return ce;
     const ge = dependencyGraphError(rec.arrays.dependencyNodes, rec.arrays.dependencyEdges, { derivationTs: rec.featureAsOfTs, where: 'snapshot record' }); if (ge) return ge;
     if (rec.recordId !== snapshotRecordIdentity({ recordKind: 'RESEARCH_DOSSIER_V2', sourceEventId: rec.sourceEventId, dossierId: rec.dossierId, canonicalCoin: rec.canonicalCoin })) return 'snapshot record: recordId is not the semantic identity';
@@ -128,7 +129,7 @@ export function createSnapshotProjector({ origin, limits = LIMITS } = {}) {
     if (event.type === RESEARCH_DOSSIER_EVENT_TYPE) {
       const v = isPlainObject(event.dossier) ? event.dossier.schemaVersion : undefined;
       counts.byDossierVersion[String(v)] = (counts.byDossierVersion[String(v)] ?? 0) + 1;
-      if (v !== RESEARCH_DOSSIER_SCHEMA_VERSION && v !== RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION) fail('UNSUPPORTED_INPUT_VERSION', `dossier schemaVersion ${String(v).slice(0, 60)} at seq ${seq} is not a supported version`);
+      if (v !== RESEARCH_DOSSIER_SCHEMA_VERSION && v !== RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION) fail('UNSUPPORTED_INPUT_VERSION', `the dossier at seq ${seq} declares no supported schemaVersion (a ${safeType(v)} was supplied)`);
       const r = replayResearchDossierEvent(dossierState, event, { durableIds });
       if (!r.ok) fail('CORRUPT_LINEAGE', `seq ${seq}: ${r.error}`);
       if (isLegacyResearchDossierEvent(event)) { counts.dossierLegacy += 1; return; } // inventoried, never modernized

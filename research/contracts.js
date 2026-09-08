@@ -113,6 +113,9 @@ export const NON_GROUPING_DEPENDENCY_KINDS = Object.freeze(['DOSSIER_FIELD', 'CO
 // leaf names that can never appear in a projection (free text / diagnostics / raw content)
 export const FORBIDDEN_LEAF_NAMES = Object.freeze(['note', 'notes', 'detail', 'description', 'reason', 'text', 'handle', 'displayName', 'questionToResolve', 'liquidityNote', 'authorMeta', 'packet', 'summary', 'title', 'link', 'error']);
 export const FORBIDDEN_LEAF_RE = /^(note|notes|detail|description|reason|text|handle|displayName|questionToResolve|liquidityNote|authorMeta|packet|summary|title|link|error)$/;
+// The names this codebase itself declares — catalogue leaf segments, projected array names and their member keys —
+// which are therefore safe to name in a diagnostic. Filled once, below the catalogues that define them.
+const DECLARED_PATH_NAMES = new Set();
 // The ONLY lawful absence markers, and the nested INPUT-CLOCK law. Absence is not nullability: a leaf the catalogue
 // declares required may never be omitted or moved into the absence map, whatever value that map carries.
 export const ABSENCE_VALUES = Object.freeze(['NOT_RECORDED', 'SHADOW_ROW_NO_SOCIAL_DEPENDENCY']);
@@ -133,6 +136,25 @@ export const ARRAY_CLOCK_LAW = Object.freeze({
 });
 // Catalogued LEAF clocks that are inputs to the derivation rather than the derivation or decision itself.
 export const DERIVATION_INPUT_LEAF_CLOCKS = Object.freeze(['episode.onsetKnownAtTs', 'episode.onsetObservedTs', 'decision.firstTriggerKnownAtTs', 'decision.latestInputKnownAtTs', 'clock.firstInvestigationKnownAtTs', 'participation.oldestKnownAtTs', 'participation.latestKnownAtTs']);
+// RECORDED LATENCIES ARE ARITHMETIC, NOT FREE COUNTS. The originating dossier contract derives each of these from
+// clocks the projection also carries, so a loaded record whose recorded latency disagrees with its own unchanged
+// input clocks is inconsistent and is REJECTED — never silently clamped, re-dated or repaired. Only relationships
+// the source recipe actually defines are checked here; no formula is invented for a clock whose derivation is not
+// stated (acquisitionLatencyMs and totalKnownLatencyMs are left to their own source recipe).
+export const DERIVED_LATENCY_LAW = Object.freeze([
+  { name: 'clock.derivationLatencyMs', minuend: null, subtrahend: 'decision.latestInputKnownAtTs' }, // featureAsOfTs - latest input
+  { name: 'clock.ageFromFirstKnownMs', minuend: null, subtrahend: 'decision.firstTriggerKnownAtTs' }, // featureAsOfTs - first trigger
+]);
+// featureAsOfTs is the minuend for every entry above; `leaves` is the projected leaf map of ONE primary record.
+export function derivedLatencyError(leaves, featureAsOfTs, { where = 'record' } = {}) {
+  for (const law of DERIVED_LATENCY_LAW) {
+    const recorded = leaves[law.name]; const from = leaves[law.subtrahend];
+    if (recorded === null || recorded === undefined || from === null || from === undefined) continue;
+    if (!Number.isSafeInteger(recorded) || !isTs(from)) return `${where}: ${law.name} or the clock it is derived from is malformed`;
+    if (recorded !== featureAsOfTs - from) return `${where}: ${law.name} disagrees with the clocks it is derived from`;
+  }
+  return null;
+}
 export const ENTRANCE_LABELS = RESEARCH_ENTRANCE_KINDS; // the row-level entrance labels ARE the dossier's trigger kinds
 export const MAX_ID_CHARS = 200;
 export const MAX_CODE_CHARS = 48;
@@ -166,7 +188,15 @@ export function elementValue(kind, v) {
 export function forbiddenLeafError(v, path = 'record') {
   if (v === null || typeof v !== 'object') return typeof v === 'string' && v.length > MAX_ID_CHARS ? `${path} carries an over-long string` : null;
   if (Array.isArray(v)) { for (let i = 0; i < v.length; i += 1) { const e = forbiddenLeafError(v[i], `${path}[${i}]`); if (e) return e; } return null; }
-  for (const k of Object.keys(v)) { if (FORBIDDEN_LEAF_RE.test(k)) return `${path}.${k} is a free-text / raw-content leaf and can never be exported`; const e = forbiddenLeafError(v[k], `${path}.${k}`); if (e) return e; }
+  // The location is built from DECLARED names only. A forbidden leaf name is itself one of our own closed names and
+  // stays useful; any other key on the way to it is untrusted text and is replaced by its structural position, so a
+  // record cannot smuggle its own content out through the path of the error that rejected it.
+  const keys = Object.keys(v);
+  for (let i = 0; i < keys.length; i += 1) {
+    const k = keys[i];
+    if (FORBIDDEN_LEAF_RE.test(k)) return `${path}.${k} is a free-text / raw-content leaf and can never be exported`;
+    const e = forbiddenLeafError(v[k], `${path}.${DECLARED_PATH_NAMES.has(k) ? k : `field#${i + 1}`}`); if (e) return e;
+  }
   return null;
 }
 
@@ -325,6 +355,8 @@ export const SNAPSHOT_DOSSIER_RECORD_KEYS = Object.freeze(['recordKind', 'projec
 export const SNAPSHOT_SHADOW_RECORD_KEYS = Object.freeze(['recordKind', 'projectionVersion', 'origin', 'originalSeq', 'sourceEventId', 'sweepId', 'sweepTsMs', 'knownAtTs', 'sessionDate', 'catalogContentId', 'catalogStatus', 'populationVersion', 'recipeVersion', 'populationDigest', 'sampleCap', 'population', 'coverageComplete', 'coveragePartialReasons', 'selected', 'recordId']);
 export const SHADOW_ROW_KEYS = Object.freeze(['coin', 'rank', 'selectionReason', 'zVol', 'zRet', 'extension', 'usdVol24h', 'preCooldownVerdict', 'cooldownSuppressed', 'inDeepTape']); // selectionReason = the recorded closed row reason (never free text)
 export const SHADOW_SELECTION_REASONS = Object.freeze(['SHADOW_CONTROL_NOT_NOTICED', 'SHADOW_CONTROL_COOLDOWN_SUPPRESSED']);
+// the wide eye's own closed verdict vocabulary (survey/eyecore.js): RIPPLE or MISSED, or null when none was reached
+export const SHADOW_PRECOOLDOWN_VERDICTS = Object.freeze(['RIPPLE', 'MISSED']);
 export const SNAPSHOT_MANIFEST_KEYS = Object.freeze(['version', 'pipelineVersion', 'origin', 'stream', 'prefix', 'counts', 'clockRange', 'projectionRecipe', 'codeIdentity', 'limits', 'outputs', 'readOnlyProof', 'authority', 'purpose', 'note']);
 export const FEATURE_ROW_KEYS = Object.freeze(['rowId', 'featureRecipeVersion', 'cohort', 'rowStatus', 'snapshotRecordId', 'originalSeq', 'sourceEventId', 'canonicalCoin', 'episodeId', 'dossierId', 'sweepId', 'featureAsOfTs', 'decisionKnownAtTs', 'entrances', 'researchState', 'episodeBasis', 'features', 'absentFeatures', 'arrays', 'sourceProfileContext', 'claimAssociationContext', 'shadowContext', 'authority', 'purpose']);
 export const OUTCOME_ROW_KEYS = Object.freeze(['rowId', 'labelRecipeVersion', 'cohort', 'canonicalCoin', 'decisionKnownAtTs', 'anchorTsMs', 'anchorLagMs', 'sourceTrack', 'availability', 'reference', 'horizons', 'authority', 'purpose']);
@@ -384,5 +416,11 @@ export function arrayClockError(arrays, derivedKnownAtTs, { where = 'record' } =
   }
   return null;
 }
+// assemble the safe-to-name set from the declared catalogues (leaf path segments, array names and member keys)
+for (const spec of FEATURE_CATALOGUE) for (const seg of spec.path) DECLARED_PATH_NAMES.add(seg);
+for (const [name, spec] of Object.entries(ARRAY_CATALOGUE)) { DECLARED_PATH_NAMES.add(name); for (const seg of spec.path) DECLARED_PATH_NAMES.add(seg); for (const k of Object.keys(spec.keys ?? {})) DECLARED_PATH_NAMES.add(k); }
+for (const k of ['features', 'absentFeatures', 'arrays', 'leaves', 'absentLeaves', 'shadowContext', 'horizons', 'reference', 'availability', 'selected', 'population', 'excluded', 'census', 'identity', 'source', 'tracks', 'consumedFiles', 'outputs', 'inputs', 'snapshot', 'childhood', 'counts', 'coverage', 'limits', 'codeIdentity', 'prefix', 'digest']) DECLARED_PATH_NAMES.add(k);
+Object.freeze(DECLARED_PATH_NAMES);
+
 export const featureSpec = (name) => FEATURE_CATALOGUE.find((f) => f.name === name) ?? null;
 export const readPath = (o, path) => { let cur = o; for (const k of path) { if (!isPlainObject(cur) || !(k in cur)) return { present: false, value: undefined }; cur = cur[k]; } return { present: true, value: cur }; };

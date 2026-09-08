@@ -151,10 +151,14 @@ export function validateOutcomeRow(r) {
 export const ARCHIVE_CONTEXT_STATES = Object.freeze(['ARCHIVE_ABSENT', 'ARCHIVE_PRESENT']);
 export function archiveContextError(ctx) {
   if (!isPlainObject(ctx)) return 'archive context: not an object';
-  const k = exactKeys(ctx, ['state', 'archiveCreatedTsMs']); if (k) return `archive context: ${k}`;
+  const k = exactKeys(ctx, ['state', 'archiveCreatedTsMs', 'oneMinuteSymbols']); if (k) return `archive context: ${k}`;
   if (!ARCHIVE_CONTEXT_STATES.includes(ctx.state)) return 'archive context: unknown state';
   if (ctx.state === 'ARCHIVE_ABSENT' && ctx.archiveCreatedTsMs !== null) return 'archive context: an absent archive has no creation clock';
   if (ctx.state === 'ARCHIVE_PRESENT' && ctx.archiveCreatedTsMs !== null && !isTs(ctx.archiveCreatedTsMs)) return 'archive context: creation clock malformed';
+  // the series inventory is explicit: a list (possibly empty) of canonical assets, or an explicit null meaning the
+  // caller has no inventory in scope. `undefined` is not a third option — the key is required either way.
+  if (ctx.oneMinuteSymbols !== null && (!Array.isArray(ctx.oneMinuteSymbols) || ctx.oneMinuteSymbols.some((x) => typeof x !== 'string' || x.length === 0))) return 'archive context: the series inventory is malformed';
+  if (ctx.state === 'ARCHIVE_ABSENT' && Array.isArray(ctx.oneMinuteSymbols) && ctx.oneMinuteSymbols.length > 0) return 'archive context: an absent archive carries no series inventory';
   return null;
 }
 export function outcomeContextError(r, ctx, { where = 'outcome row' } = {}) {
@@ -171,6 +175,19 @@ export function outcomeContextError(r, ctx, { where = 'outcome row' } = {}) {
     return null;
   }
   if (unavailableReason === 'ARCHIVE_ABSENT' || unavailableReason === 'PROVENANCE_CLOCK_MISSING') return `${where} ${r.rowId}: the row claims ${unavailableReason} although the dataset records a created archive`;
+  // A DECLARED SOURCE ABSENCE AND A KNOWN OUTCOME CANNOT COEXIST. The dataset's own validated series inventory says
+  // which assets the archive could label at all. labelRow's missing-source priority is followed exactly: an empty
+  // inventory is NO_1M_TRACK for every row; an asset outside a non-empty inventory is SERIES_ABSENT_FOR_ASSET.
+  // Missing source is not a censored observed series — the unavailable branch is retained, not softened.
+  if (ctx.oneMinuteSymbols !== null) {
+    const inventoried = ctx.oneMinuteSymbols.includes(r.canonicalCoin);
+    const required = ctx.oneMinuteSymbols.length === 0 ? 'NO_1M_TRACK' : inventoried ? null : 'SERIES_ABSENT_FOR_ASSET';
+    if (required !== null) {
+      if (unavailableReason !== required) return `${where} ${r.rowId}: the dataset's archive records no ${ctx.oneMinuteSymbols.length === 0 ? '1m track at all' : 'series for this asset'}, so this row cannot report ${unavailableReason ?? r.availability.state}`;
+      return null; // an unavailable row under the right reason carries no floors to check
+    }
+    if (unavailableReason === 'NO_1M_TRACK' || unavailableReason === 'SERIES_ABSENT_FOR_ASSET') return `${where} ${r.rowId}: the row claims ${unavailableReason} although the dataset's archive inventories a series for this asset`;
+  }
   const C = ctx.archiveCreatedTsMs;
   // EQUALITY to the recipe, not merely "some later timestamp": the floors of a lawful saved dataset are determined
   if (r.reference.knownAtTs !== null && r.reference.knownAtTs !== Math.max(r.anchorTsMs, C)) return `${where} ${r.rowId}: the reference knowledge floor ${isoOf(r.reference.knownAtTs)} is not max(anchor, archive creation ${isoOf(C)})`;

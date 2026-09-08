@@ -77,8 +77,9 @@ export function snapshotBundle(dir, m, { limits = LIMITS, consumed = null } = {}
 // ---- dataset -------------------------------------------------------------------------------------------------
 // the dataset's OWN validated archive provenance, derived from metadata it already records (never a re-read)
 export function archiveContextOf(m) {
-  if (m.inputs.childhood === null) return { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null };
-  return { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: parseUtcInstant(m.inputs.childhood.archiveCreatedTs) };
+  if (m.inputs.childhood === null) return { state: 'ARCHIVE_ABSENT', archiveCreatedTsMs: null, oneMinuteSymbols: null };
+  // the inventory comes from the census the manifest already records and datasetManifestError has already validated
+  return { state: 'ARCHIVE_PRESENT', archiveCreatedTsMs: parseUtcInstant(m.inputs.childhood.archiveCreatedTs), oneMinuteSymbols: [...m.census.archive.oneMinuteSymbols] };
 }
 export function datasetBundle(dir, m, { limits = LIMITS, consumed = null, source = null } = {}) {
   const k = exactKeys(m, DATASET_MANIFEST_KEYS); if (k) fail('CORRUPT_INPUT', `dataset manifest: ${k}`);
@@ -108,6 +109,23 @@ export function datasetBundle(dir, m, { limits = LIMITS, consumed = null, source
   if (coverage.counts.coinsPrimary !== c.coinsPrimary || coverage.counts.coinsShadow !== c.coinsShadow || coverage.counts.overlapCoins !== c.overlapCoins) fail('CORRUPT_INPUT', 'the declared asset counts disagree with the sealed rows');
   if (coverage.counts.episodes !== c.episodes) fail('CORRUPT_INPUT', 'the declared episode count disagrees with the sealed rows');
   if (cen.overlap.rowCoins !== c.rowCoins) fail('CORRUPT_INPUT', `the dataset census claims ${cen.overlap.rowCoins} row assets but the sealed rows carry ${c.rowCoins}`);
+  // RECOMPUTED FROM THE ROWS AND THE VALIDATED INVENTORY, never taken on the census's word
+  const inventory = archiveContext.oneMinuteSymbols ?? [];
+  if (cen.overlap.archiveOneMinuteSymbols !== inventory.length) fail('CORRUPT_INPUT', 'the declared archive series count disagrees with the inventory beside it');
+  const rowCoins = new Set(featureRows.map((r) => r.canonicalCoin));
+  const withSeries = [...rowCoins].filter((x) => inventory.includes(x)).length;
+  if (cen.overlap.rowCoinsWithOneMinuteSeries !== withSeries) fail('CORRUPT_INPUT', `the census claims ${cen.overlap.rowCoinsWithOneMinuteSeries} row assets have a 1m series but the rows and the validated inventory give ${withSeries}`);
+  // the cohort overlap is a CAPPED PROJECTION of the sorted intersection; its count is the FULL intersection
+  const primaryCoins = new Set(featureRows.filter((r) => r.cohort === 'PRIMARY').map((r) => r.canonicalCoin));
+  const shadowCoins = new Set(featureRows.filter((r) => r.cohort === 'SHADOW').map((r) => r.canonicalCoin));
+  const intersection = [...primaryCoins].filter((x) => shadowCoins.has(x)).sort();
+  if (canonicalJson(cen.overlap.primaryShadowOverlapCoins) !== canonicalJson(intersection.slice(0, 200))) fail('CORRUPT_INPUT', 'the declared cohort overlap list is not the sorted intersection of the sealed rows under its own projection cap');
+  if (coverage.counts.overlapCoins !== intersection.length) fail('CORRUPT_INPUT', 'the declared cohort overlap count is not the full intersection of the sealed rows');
+  // temporalOverlap is recomputed from ITS OWN declared inputs when they are available; null stays unknown
+  const t1 = cen.archive === null ? null : cen.archive.tracks['1m'] ?? null;
+  const cr = cen.snapshot.clockRange;
+  const wantTemporal = t1 && t1.fromSec !== null && cr.minDecisionKnownAtTs !== null ? !(cr.maxDecisionKnownAtTs / 1000 < t1.fromSec - 60 || cr.minDecisionKnownAtTs / 1000 > t1.toSec) : null;
+  if (cen.overlap.temporalOverlap !== wantTemporal) fail('CORRUPT_INPUT', 'the declared temporal overlap is not what its own recorded coverage bounds and decision range produce');
   for (const [field, want] of [['decisionAnchor', c.decisionAnchor], ['rowAvailability', c.rowAvailability], ['unavailableReasons', c.unavailableReasons], ['horizons', c.horizons]]) {
     if (canonicalJson(cen[field]) !== canonicalJson(want)) fail('CORRUPT_INPUT', `the dataset census ${field} disagrees with the outcome rows it summarizes`);
   }

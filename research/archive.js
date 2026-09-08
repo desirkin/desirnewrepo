@@ -20,26 +20,26 @@ const MAX_SANE_OPEN_SEC = 1e11; // an open timestamp at or above this is millise
 // validate ONE candle series row of the 1m track; returns the bounded in-memory series
 export function validateCandleSeriesRow(row, { intervalMin, limits = LIMITS, file = 'candles' } = {}) {
   if (!isPlainObject(row)) fail('CORRUPT_INPUT', `${file}: series row is not an object`);
-  if (typeof row.symbol !== 'string' || !COIN_RE.test(row.symbol)) fail('CORRUPT_INPUT', `${file}: series symbol malformed`);
-  if (row.intervalMin !== intervalMin) fail('CORRUPT_INPUT', `${file}: ${row.symbol} intervalMin ${String(row.intervalMin)} disagrees with the track`);
-  if (!Number.isSafeInteger(row.retrievedSec) || row.retrievedSec <= 0 || row.retrievedSec >= MAX_SANE_OPEN_SEC) fail('CORRUPT_INPUT', `${file}: ${row.symbol} retrievedSec missing or not epoch seconds`);
+  if (typeof row.symbol !== 'string' || !COIN_RE.test(row.symbol)) fail('CORRUPT_INPUT', `${file}: a series symbol is not a canonical asset identity`);
+  if (row.intervalMin !== intervalMin) fail('CORRUPT_INPUT', `${file}: a series declares an intervalMin that disagrees with the track it is in`);
+  if (!Number.isSafeInteger(row.retrievedSec) || row.retrievedSec <= 0 || row.retrievedSec >= MAX_SANE_OPEN_SEC) fail('CORRUPT_INPUT', `${file}: a series retrievedSec is missing or not epoch seconds`);
   const retrievedTsMs = parseUtcInstant(row.retrievedTs);
-  if (retrievedTsMs === null || retrievedTsMs !== row.retrievedSec * 1000) fail('CORRUPT_INPUT', `${file}: ${row.symbol} retrievedTs disagrees with retrievedSec`);
-  if (!Array.isArray(row.candles)) fail('CORRUPT_INPUT', `${file}: ${row.symbol} candles malformed`);
-  if (row.candles.length > limits.maxCandlesPerSeries) fail('RESOURCE_LIMIT_EXCEEDED', `${file}: ${row.symbol} exceeds ${limits.maxCandlesPerSeries} candles`);
+  if (retrievedTsMs === null || retrievedTsMs !== row.retrievedSec * 1000) fail('CORRUPT_INPUT', `${file}: a series retrievedTs disagrees with its own retrievedSec`);
+  if (!Array.isArray(row.candles)) fail('CORRUPT_INPUT', `${file}: a series candle list is malformed`);
+  if (row.candles.length > limits.maxCandlesPerSeries) fail('RESOURCE_LIMIT_EXCEEDED', `${file}: a series exceeds ${limits.maxCandlesPerSeries} candles`);
   const step = intervalMin * 60; let prev = null;
   for (let i = 0; i < row.candles.length; i += 1) {
     const c = row.candles[i];
-    if (!Array.isArray(c) || c.length !== 6 || c.some((x) => !isFiniteNum(x))) fail('CORRUPT_INPUT', `${file}: ${row.symbol} candle ${i} is not six finite numbers`);
+    if (!Array.isArray(c) || c.length !== 6 || c.some((x) => !isFiniteNum(x))) fail('CORRUPT_INPUT', `${file}: a series candle ${i} is not six finite numbers`);
     const [open, o, h, l, cl, v] = c;
-    if (!Number.isSafeInteger(open) || open <= 0) fail('CORRUPT_INPUT', `${file}: ${row.symbol} candle ${i} open timestamp malformed`);
-    if (open >= MAX_SANE_OPEN_SEC) fail('CORRUPT_INPUT', `${file}: ${row.symbol} candle ${i} open timestamp looks like milliseconds (seconds required)`);
-    if (open % step !== 0) fail('CORRUPT_INPUT', `${file}: ${row.symbol} candle ${i} is not aligned to the ${intervalMin}m grid`);
-    if (prev !== null && open <= prev) fail('CORRUPT_INPUT', `${file}: ${row.symbol} candle ${i} is ${open === prev ? 'a duplicate' : 'out of order'}`);
-    if (o <= 0 || h <= 0 || l <= 0 || cl <= 0) fail('CORRUPT_INPUT', `${file}: ${row.symbol} candle ${i} carries a non-positive price`);
-    if (h < Math.max(o, cl) || l > Math.min(o, cl) || l > h) fail('CORRUPT_INPUT', `${file}: ${row.symbol} candle ${i} has impossible OHLC`);
-    if (v < 0) fail('CORRUPT_INPUT', `${file}: ${row.symbol} candle ${i} has negative volume`);
-    if (open + step > row.retrievedSec) fail('CORRUPT_INPUT', `${file}: ${row.symbol} contains a candle not closed by retrieval time`);
+    if (!Number.isSafeInteger(open) || open <= 0) fail('CORRUPT_INPUT', `${file}: a series candle ${i} open timestamp malformed`);
+    if (open >= MAX_SANE_OPEN_SEC) fail('CORRUPT_INPUT', `${file}: a series candle ${i} open timestamp looks like milliseconds (seconds required)`);
+    if (open % step !== 0) fail('CORRUPT_INPUT', `${file}: a series candle ${i} is not aligned to the ${intervalMin}m grid`);
+    if (prev !== null && open <= prev) fail('CORRUPT_INPUT', `${file}: a series candle ${i} is ${open === prev ? 'a duplicate' : 'out of order'}`);
+    if (o <= 0 || h <= 0 || l <= 0 || cl <= 0) fail('CORRUPT_INPUT', `${file}: a series candle ${i} carries a non-positive price`);
+    if (h < Math.max(o, cl) || l > Math.min(o, cl) || l > h) fail('CORRUPT_INPUT', `${file}: a series candle ${i} has impossible OHLC`);
+    if (v < 0) fail('CORRUPT_INPUT', `${file}: a series candle ${i} has negative volume`);
+    if (open + step > row.retrievedSec) fail('CORRUPT_INPUT', `${file}: a series contains a candle not closed by retrieval time`);
     prev = open;
   }
   const index = new Map(); row.candles.forEach((c, i) => index.set(c[0], i));

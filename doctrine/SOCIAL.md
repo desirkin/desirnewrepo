@@ -2382,6 +2382,58 @@ labels, the claim-association seam, the source-profile context and the `serpent-
 remain honestly deferred. The five legacy execution assets are not a research universe. Authority stays `NONE` /
 `RESEARCH_ONLY` on every surface. This implementation has been tested, not independently accepted.
 
+### 5Z. SOCIAL-5B REMAINING CLOSEOUT — the owner's executed acceptance suite
+
+The owner supplied four complete test files whose exact bytes had been executed against the reviewed tree
+(`ad74e15`): 30 cases, 8 P-prefixed controls passing and 22 R-prefixed cases failing on unchanged production code.
+Those files were created here byte-for-byte (SHA256 verified against the supplied list) and run BEFORE any edit,
+reproducing the stated result exactly — 30 tests, 8 pass, 22 fail, zero skip/todo/cancelled, natural exit 1. The
+repair makes all 30 green without inverting a single assertion.
+
+**R1 — nested schemas and relationships.** The archive census was closed only at its parent: `source` accepted an
+undeclared text key and `tracks` accepted a string. Both now have exact shapes (the Childhood contract's legitimate
+bounded provenance fields stay allowed; an undeclared key beside them does not), track keys must agree with the
+consumed-file names, and ONE shared schema governs both recorded copies of `consumedFiles`. The 1m symbol inventory
+is reconciled with the track census, and asset overlap, the archive series count and `temporalOverlap` are
+recomputed from the rows and that validated inventory — with the cohort overlap list checked under its own 200-entry
+cap and `counts.overlapCoins` against the full intersection. A declared source absence and a KNOWN outcome can no
+longer coexist, checked at the shared contextual boundary under `labelRow`'s own missing-source priority and without
+reopening an archive during `evaluate`. `codeIdentityError` now validates the identity LAW as a relation — `law`
+must be what its own commit and cleanliness produce — plus unique repository-relative closure paths. The SHADOW
+record is closed against the source sweep's own laws: context keys, population accounting, versions, digest, cap,
+coverage verdict, the `min(cap, unnoticed)` rule, repeated sweep identity and clock, the closed selection-reason and
+pre-cooldown-verdict vocabularies and their binding, and an absence map with no extra names.
+
+**R2 — standalone evaluation validity.** A one-observation summary must coincide on every order statistic; every
+recorded group's split is re-derived by the one shared split predicate the producer uses, and the visible summaries
+reconcile with the declared per-split group and row counts (bounds only, honestly, when truncated); coverage reasons
+use `COVERAGE_REASONS` rather than a character shape.
+
+**R3 — recorded clock arithmetic.** `clock.derivationLatencyMs` and `clock.ageFromFirstKnownMs` are the source's own
+subtractions from `featureAsOfTs`. A record whose recorded latency disagrees with its unchanged input clocks is
+refused at the projection boundary and on the feature row alike — never clamped or repaired.
+
+**R4 — file finalization.** A primary close is now separate from best-effort cleanup. A reported close failure on
+the success path is `IO_FAILURE` and prevents the rename, so no completion manifest exists; on an already-failing
+path cleanup releases the handle without masking the original error. Both mark the descriptor closed before calling
+close, so a close that fails after the OS released the fd is never retried and nothing double-closes.
+
+**R5 — sanitized diagnostics on the manual paths.** The saved-bundle error echoed an unknown feature name. Unknown
+feature, absent-feature, shadow-feature and leaf names, unsupported version values, series symbols, and the path of
+a rejected free-text leaf now report structural position; a path segment is named only when this codebase declares
+it, so a declared path stays readable while untrusted text cannot ride out inside the error that rejected it.
+
+**Test-consequent updates.** `research/features.js` now imports three PURE frozen shadow vocabularies, added to the
+authority allowlist. Assertions that quoted a now-sanitized name or a two-key archive context were updated to the
+repaired forms; no negative assertion was weakened and no test was deleted.
+
+**Unchanged, and not claimed.** Real history is still NOT evaluated; stage calibration remains NOT PERFORMED with
+the live stage `UNKNOWN / calibrated:false`; no fitted model, no operational use. Standalone artifact validation
+establishes declared schema, internal consistency and byte integrity — it is not independent attestation of absent
+source datasets. The independent stage labels, the claim-association seam, the source-profile context and the
+`serpent-evidence-1` packet limitations remain deferred. Authority stays `NONE` / `RESEARCH_ONLY`. This
+implementation has been tested here; it has NOT been independently accepted.
+
 ---
 
 ## 6. Authority audit

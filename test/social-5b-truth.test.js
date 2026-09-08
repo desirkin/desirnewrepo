@@ -111,7 +111,7 @@ test('C (R3/F2). OPTIONALITY IS NOT NULLABILITY: a catalogued REQUIRED leaf can 
   const badMarker = structuredClone(F); badMarker.absentFeatures[optional.name] = 'BECAUSE_I_SAID_SO';
   assert.match(validateFeatureRow(badMarker), new RegExp(`${optional.name.replace(/\./g, '\\.')} carries an unlawful absence marker`));
   const undeclared = structuredClone(F); undeclared.absentFeatures['dossier.notARealLeaf'] = 'NOT_RECORDED';
-  assert.match(validateFeatureRow(undeclared), /undeclared absent feature dossier\.notARealLeaf/);
+  assert.match(validateFeatureRow(undeclared), /undeclared absent feature at position \d+ of \d+/); // a SAFE structural position, never the supplied name
   assert.deepEqual([...ABSENCE_VALUES], ['NOT_RECORDED', 'SHADOW_ROW_NO_SOCIAL_DEPENDENCY']);
   // and the projected entrances must be the row's own entrances — no repeats, no divergent copy
   const dup = structuredClone(F); dup.entrances = [...dup.entrances, dup.entrances[0]];

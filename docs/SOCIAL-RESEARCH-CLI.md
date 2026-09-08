@@ -83,6 +83,19 @@ codes, dependency node kinds and edge relations): a projected member must be a v
 defines, not merely an uppercase-shaped token. That import is vocabulary reuse only and grants no operational
 import or authority.
 
+**Recorded latencies are arithmetic, not free counts.** The originating dossier contract derives
+`clock.derivationLatencyMs` as `featureAsOfTs - decision.latestInputKnownAtTs` and `clock.ageFromFirstKnownMs` as
+`featureAsOfTs - decision.firstTriggerKnownAtTs`. A loaded record whose recorded latency disagrees with its own
+unchanged input clocks is inconsistent and is refused — never clamped, re-dated or repaired — at the projection
+boundary and on the feature row alike. No formula is invented for a clock whose derivation the source does not state.
+
+**The SHADOW record is closed too.** `shadowContext` is validated against the source sweep's own laws: exact keys,
+population accounting (`unnoticed + noticed = evaluated`, and evaluated plus each declared exclusion reason accounts
+for every scanned row), version/recipe/digest/cap bounds, the coverage verdict against its own exclusion counts, the
+`min(cap, unnoticed)` selection rule, and agreement of the repeated sweep identity and clock with the enclosing row.
+`shadow.selectionReason` and `shadow.preCooldownVerdict` are the source's closed vocabularies — not an uppercase
+shape — and the reason is bound to the verdict it did or did not suppress. Nothing PRIMARY is required of a shadow.
+
 **Optionality is not nullability.** A leaf the catalogue declares REQUIRED can never be omitted from a row nor
 moved into `absentFeatures`, whatever marker that map carries; only a leaf declared optional may be absent, and
 only under one of the two lawful markers (`NOT_RECORDED`, `SHADOW_ROW_NO_SOCIAL_DEPENDENCY`). `absentFeatures`
@@ -149,6 +162,11 @@ recipe's `max(A, C, R)` and `max(H, C, R)` to `max(A, C)` and `max(H, C)` exactl
 are therefore recomputable from metadata it already records, with no re-read and no new per-row schema. Equality to
 the recipe is required, not merely "some later timestamp". A dataset built with no archive must report
 `ARCHIVE_ABSENT` on every row; one whose archive records no creation clock must report `PROVENANCE_CLOCK_MISSING`.
+The same context carries the archive's validated 1m symbol inventory, so a declared source absence and a KNOWN
+outcome can no longer coexist: an empty inventory is `NO_1M_TRACK` for every row and an asset outside a non-empty
+one is `SERIES_ABSENT_FOR_ASSET`, following `labelRow`'s own missing-source priority. Missing source is not a
+censored observed series — the unavailable branch is retained, not softened — and no archive is reopened during
+`evaluate`.
 A supplied context that is malformed is corruption — it is never downgraded to "no context" — while *omitting* the
 context is a different thing again: a pure row-only call, which makes no claim about any archive. This rejects
 contradictions with recorded lawful context; it is not, and does not claim to be, independent attestation that
@@ -170,15 +188,19 @@ at generation, at publication and on standalone reopening, and only then is the 
 fixes this implementation's constants (`pipelineExecution: COMPLETE`, `evaluation:
 RETROSPECTIVE_DESCRIPTIVE_ONLY`, `fittedModel: NONE`, `stageCalibration: NOT_PERFORMED`, `currentRuntimeStage:
 UNKNOWN`, authority `NONE` / purpose `RESEARCH_ONLY`), requires the standing calibration blockers and laws, and
-checks every count and summary: populations partition (`total = primary + shadow`; split counts sum to the primary
+checks every count and summary: a one-observation summary's order statistics all coincide (a spread over a single
+KNOWN outcome is not something the recipe could produce), populations partition (`total = primary + shadow`; split counts sum to the primary
 cohort; group split counts sum to the group total; shadow period counts sum to the shadow cohort), each horizon's
 four state counts sum to its `n`, each table's `n` is its cohort population, the all-primary table is exactly the
 sum over the splits it partitions, a summary's `n` is its table's `KNOWN` count with ordered finite quantiles
 (`min <= p25 <= median <= p75 <= max`, all null when `n = 0`, MFE never negative, MAE never positive, log-return
 summaries only at 60m/240m), and `discoveryTrainableAtSplit <= discoveryKnownRetrospectively`, with the latter equal
-to the DISCOVERY table's `KNOWN` count. Group-summary detail keeps its 500-entry ceiling: when complete the group
-rows reconcile exactly, when truncated the flag, length and bounds are checked and no omitted entry is invented (and
-a group's capped asset list is never read as the whole universe). At `evaluate` the payload is additionally proved
+to the DISCOVERY table's `KNOWN` count. Every recorded group's split is re-derived by the one shared split predicate the producer uses, in its exact
+priority order, and the visible summaries reconcile with the declared per-split group and row counts. Coverage
+reasons and the other closed codes are checked against their authoritative vocabularies, not a character shape.
+Group-summary detail keeps its 500-entry ceiling: when complete the group rows and per-split counts reconcile
+exactly, when truncated the flag, length and bounds are checked and no omitted entry is invented (and a group's
+capped asset list is never read as the whole universe). At `evaluate` the payload is additionally proved
 equal to what the deterministic evaluator produces for the source rows actually consumed, bound to the input
 digests. A standalone reopening has only the artifact: it enforces the complete local schema and arithmetic without
 the original dataset, and does not pretend to recompute quantiles from source rows it does not have.
@@ -205,6 +227,14 @@ reader would refuse; a bound tripped mid-file closes its descriptor and leaves n
 fewer bytes than requested, so every writer loops to the last byte and treats zero progress as a failure — a short
 write can never become a digest and record count that claim more than was written, and a failed write, flush or
 validation never becomes a successful seal.
+
+**A primary close and a best-effort release are different operations.** On the success path a reported close
+failure means the bytes are not known to be on disk: it is `IO_FAILURE` and the temporary file is never renamed, so
+no completion manifest exists. On a path that is already failing, cleanup releases the descriptor and never masks
+the error that brought it there — a cleanup helper can no longer swallow a primary close failure and let success
+continue. Both mark the descriptor closed *before* calling close, because an operating system may release a
+descriptor and still report a failure; that fd is never retried, so nothing double-closes or closes a reused
+number.
 
 **Every production JSONL member is consumed exactly once**, in bounded chunks, with the digest taken over precisely
 the bytes its records are parsed from — publication verification, artifact reopening and the Childhood archive
@@ -236,14 +266,25 @@ between the proof and the write. The bundle law covers:
   never raise the reader's own;
 - the dataset's declared census and counts against the aggregates RECOMPUTED from the sealed rows — two matching but
   wrong copies satisfy nothing — and, at build time, the source-dependent aggregates against the validated snapshot
-  actually consumed;
+  actually consumed. The archive census is itself closed: `source` and each `tracks` entry have exact shapes, track
+  keys agree with the consumed-file names, one shared schema governs both recorded copies of `consumedFiles`, and
+  the 1m symbol inventory is unique, canonical, sorted and consistent with the track census that produced it. Asset
+  overlap, the archive series count and `temporalOverlap` are recomputed from the rows and that validated inventory;
+  the cohort overlap list is checked as the sorted intersection under its own 200-entry projection cap while
+  `counts.overlapCoins` is the full intersection — a capped list is never read as a complete population;
+- the recorded code identity as a RELATION, not a membership: `law` must be the law its own commit and cleanliness
+  produce, and closure paths must be unique and repository-relative — a dirty closure can no longer be recorded
+  beside a clean-commit label;
 - **the evaluation payload, validated first and completely** (see below), and only then `report.txt` against the
   deterministic rendering of that payload.
 
 **Diagnostics never echo input.** A rejected record is described by safe structural facts — the declared field name
 we were looking for, the ordinal position of an undeclared one, the JavaScript type of a bad value — never by the
 value or key text the input supplied, and never by a raw driver or OS message. A length cap is not sanitization.
-Repository-defined explanatory constants in generated artifacts are a different thing and are unaffected.
+This holds on the manual paths too: an unknown feature, absent-feature or shadow-feature name, an unsupported
+version, a series symbol, and the *path* of a rejected free-text leaf all report position rather than content — a
+segment is named only when it is one this codebase itself declares. Repository-defined explanatory constants in
+generated artifacts are a different thing and are unaffected.
 
 An archive whose manifest claims it was created BEFORE a series it consumed is corrupt input. **A supplied
 `archiveCreatedTs` that is not a lawful UTC instant is also corrupt input** — a garbled clock is never silently

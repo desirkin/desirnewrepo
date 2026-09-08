@@ -101,6 +101,16 @@ export function datasetJoinError({ featureRows, outcomeRows, asOfTs, archiveCont
   return { rows };
 }
 
+// THE CHRONOLOGICAL SPLIT LAW, stated once, in priority order, and used by BOTH the producer that assigns a group
+// its split and the validator that checks a recorded one. A saved group summary carries every input this predicate
+// needs, so a recorded split that its own recorded chronology does not produce is a corrupt record.
+export function splitOfGroup(g, splitAtTs) {
+  if (g.dependenciesTruncated || g.unknownSupport) return 'DESCRIPTIVE_ONLY';
+  if (g.maxDecisionKnownAtTs < splitAtTs && g.outcomeSupportEndTs <= splitAtTs) return 'DISCOVERY';
+  if (g.minDecisionKnownAtTs >= splitAtTs && g.featureSupportStartTs >= splitAtTs) return 'VALIDATION';
+  return 'EMBARGOED';
+}
+
 export function evaluateDataset({ featureRows, outcomeRows, asOfTs, splitAtTs, coverageState = null, archiveContext = undefined, limits = LIMITS } = {}) {
   if (!isTs(asOfTs) || !isTs(splitAtTs)) fail('INVALID_REQUEST', 'as-of and split-at clocks are required');
   if (splitAtTs >= asOfTs) fail('INVALID_REQUEST', 'split-at must be earlier than the dataset as-of');
@@ -122,11 +132,7 @@ export function evaluateDataset({ featureRows, outcomeRows, asOfTs, splitAtTs, c
     const minDecision = Math.min(...members.map((x) => x.f.decisionKnownAtTs)); const maxDecision = Math.max(...members.map((x) => x.f.decisionKnownAtTs));
     const minSupport = Math.min(...supports.map((s) => s.featureSupportStartTs)); const maxOutcomeEnd = Math.max(...members.map((x) => outcomeSupportEndOf(x.f)));
     const truncated = members.some((x) => dependenciesTruncated(x.f)); const unknownSupport = supports.some((s) => !s.supportKnown);
-    let split;
-    if (truncated || unknownSupport) split = 'DESCRIPTIVE_ONLY';
-    else if (maxDecision < splitAtTs && maxOutcomeEnd <= splitAtTs) split = 'DISCOVERY';
-    else if (minDecision >= splitAtTs && minSupport >= splitAtTs) split = 'VALIDATION';
-    else split = 'EMBARGOED';
+    const split = splitOfGroup({ dependenciesTruncated: truncated, unknownSupport, minDecisionKnownAtTs: minDecision, maxDecisionKnownAtTs: maxDecision, featureSupportStartTs: minSupport, outcomeSupportEndTs: maxOutcomeEnd }, splitAtTs);
     for (const x of members) splitOfRow.set(x.f.rowId, split);
     groupSummaries.push({ rows: members.length, split, minDecisionKnownAtTs: minDecision, maxDecisionKnownAtTs: maxDecision, featureSupportStartTs: minSupport, outcomeSupportEndTs: maxOutcomeEnd, dependenciesTruncated: truncated, unknownSupport, coins: [...new Set(members.map((x) => x.f.canonicalCoin))].sort().slice(0, 16) });
   }
