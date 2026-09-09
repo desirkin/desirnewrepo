@@ -10,7 +10,7 @@
 // LLM-generated string becomes code, a field path, a size, a mode, a probability or an order.
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, readdirSync } from 'node:fs';
 import { verifyCase } from '../socrates/runtime.js';
 import { openBundle, readMemberJson, readMemberJsonl } from '../market-lab/store.js';
 import { RESOURCE_DEFAULTS } from '../market-lab/policy.js';
@@ -24,14 +24,19 @@ export const FORBIDDEN_CONTROL_KEYS = Object.freeze(['mode', 'size', 'sizeUsd', 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 const isPlain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 // ---- immutable verification cache: bytes + verifier version -> result; consumption rechecks subject / clocks / coverage ------------
+// the whole verification of one sealed case directory (pure over the bytes): shared by the in-process path and the worker thread
+export function verifyCaseBundle(dir, { limits = RESOURCE_DEFAULTS } = {}) { const v = verifyCase(dir, { limits, resolveInputs: true }); let manifest = null; let analyses = []; let packets = []; try { const b = openBundle(dir, 'CASE', { limits }); manifest = readMemberJson(b, 'case.json', limits); analyses = [...readMemberJsonl(b, 'analyses.jsonl', limits)].map((x) => x.record); packets = [...readMemberJsonl(b, 'packets.jsonl', limits)].map((x) => x.record); } catch (err) { return { ok: false, reasons: [...v.reasons, `members: ${err.message}`], verification: v, manifest: null, analyses: [], packets: [] }; } return { ok: v.ok, reasons: v.reasons, verification: v, manifest, analyses, packets }; }
+// cache identity = verifier version + EVERY byte the verdict depends on: all regular files of the bundle directory (sorted), not a
+// hand-picked subset (closeout R10): a change to any referenced member invalidates the cached verdict
+export function caseBytesKey(dir, verifierVersion = INTAKE_VERSION) { const h = createHash('sha256'); const names = readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name).sort(); for (const n of names) { h.update(n); h.update(readFileSync(path.join(dir, n))); } h.update(`|${names.length}`); return `${verifierVersion}|${h.digest('hex')}`; }
 export function createCaseVerifier({ limits = RESOURCE_DEFAULTS, verifierVersion = INTAKE_VERSION, cacheSize = 64, worker = null, clock = () => Date.now() } = {}) {
   const cache = new Map(); let hits = 0; let misses = 0;
-  const bytesKey = (dir) => { const names = ['manifest.json', 'case.json', 'packets.jsonl', 'analyses.jsonl']; const h = createHash('sha256'); for (const n of names) { try { h.update(n); h.update(readFileSync(path.join(dir, n))); } catch { h.update(`${n}:absent`); } } return `${verifierVersion}|${h.digest('hex')}`; };
+  const bytesKey = (dir) => caseBytesKey(dir, verifierVersion);
   async function verify(dir) {
     let key; try { key = bytesKey(dir); } catch (err) { return { ok: false, reasons: [`bytes: ${err.message}`], cached: false }; }
     if (cache.has(key)) { hits += 1; const v = cache.get(key); cache.delete(key); cache.set(key, v); return { ...v, cached: true }; }
-    misses += 1; const run = () => { const v = verifyCase(dir, { limits, resolveInputs: true }); let manifest = null; let analyses = []; let packets = []; try { const b = openBundle(dir, 'CASE', { limits }); manifest = readMemberJson(b, 'case.json', limits); analyses = [...readMemberJsonl(b, 'analyses.jsonl', limits)].map((x) => x.record); packets = [...readMemberJsonl(b, 'packets.jsonl', limits)].map((x) => x.record); } catch (err) { return { ok: false, reasons: [...v.reasons, `members: ${err.message}`], verification: v, manifest: null, analyses: [], packets: [] }; } return { ok: v.ok, reasons: v.reasons, verification: v, manifest, analyses, packets, bytesKey: key, verifiedTs: clock() }; };
-    const result = worker ? await worker(run, { key }) : run(); const stored = { ...result, cached: false }; cache.set(key, stored); if (cache.size > cacheSize) cache.delete(cache.keys().next().value); return stored;
+    misses += 1; const run = () => verifyCaseBundle(dir, { limits });
+    const raw = worker ? await worker(run, { key, dir, limits }) : run(); const result = { ...raw, bytesKey: key, verifiedTs: clock() }; const stored = { ...result, cached: false }; cache.set(key, stored); if (cache.size > cacheSize) cache.delete(cache.keys().next().value); return stored;
   }
   return { verify, status: () => ({ size: cache.size, hits, misses, verifierVersion }) };
 }
@@ -54,26 +59,40 @@ export function consumeCase(verified, { canonicalCoin, decisionTs, requiredWindo
   const direction = analysis?.marketImplication?.direction ?? null;
   return { ok: reasons.length === 0, reasons, analysis, packet, manifest: m, direction, provenance, resolution, caseId: m?.caseId ?? null, analysisId: selectedId, packetId: packet?.packetId ?? null, completionTs: finished, receiptTs: verified.verifiedTs ?? null, useful: { ageMs: Number.isSafeInteger(finished) ? decisionTs - finished : null, maxAgeMs } };
 }
-// ---- the closed catalyst mapping over authoritative claim / source / link relations ----------------------------------------------
+// ---- the closed catalyst mapping over the VERIFIED serpent-evidence-2 relations (closeout R10) ------------------------------
+// claims[]: { claimId, claimType, normalizedSubject, claimText, firstObservedTs, status }; sources[]: { sourceId, provider, sourceType,
+// authorityClass, publishedTs, retrievedTs, ... }; claimLinks[]: { claimRef, sourceRef, kind, independenceGroup, observedTs }.
+// A catalyst is a PRIMARY_CONFIRMED claim whose normalizedSubject is bound to the coin, whose claimType is in the closed taxonomy,
+// linked by a PRIMARY_CONFIRMATION relation to a source of an official sourceType with authorityClass OFFICIAL, observed at a
+// known instant at or before the decision; the analysis mechanism must cite the claim and the implication must be UPWARD.
+export const OFFICIAL_SOURCE_TYPES = Object.freeze(['PRIMARY_OFFICIAL', 'EXCHANGE_OFFICIAL', 'PROJECT_OFFICIAL', 'REGULATOR']);
+export const CATALYST_CLAIM_TYPES = Object.freeze({ LISTING_OR_INTEGRATION: ['EXCHANGE_LISTING', 'EXCHANGE_ASSET_SUPPORT', 'LISTING', 'INTEGRATION'], EXECUTED_GOVERNANCE_OR_PROTOCOL_CHANGE: ['GOVERNANCE_EXECUTED', 'PROTOCOL_UPGRADE_EXECUTED', 'UPGRADE_ACTIVATED'], OFFICIAL_DISCLOSURE_DIRECTLY_RELEVANT: ['OTHER_OFFICIAL_CRYPTO_CLAIM', 'OFFICIAL_DISCLOSURE', 'PARTNERSHIP_OFFICIAL', 'TREASURY_ACTION_OFFICIAL'] });
+const subjectBound = (claim, canonicalCoin) => typeof claim.normalizedSubject === 'string' && (claim.normalizedSubject === canonicalCoin || claim.normalizedSubject.startsWith(`${canonicalCoin}:`));
+const officialSourceIds = (packet) => new Set((Array.isArray(packet.sources) ? packet.sources : []).filter((s) => s && OFFICIAL_SOURCE_TYPES.includes(s.sourceType) && s.authorityClass === 'OFFICIAL').map((s) => s.sourceId));
 export function primaryConfirmedCatalyst({ packet, analysis, canonicalCoin, decisionTs, knownWithinMs = 600_000 }) {
   if (!packet || !analysis) return { ok: false, reason: 'NO_PACKET_OR_ANALYSIS', event: null };
-  const claims = Array.isArray(packet.claims) ? packet.claims : []; const sources = Array.isArray(packet.sources) ? packet.sources : []; const links = Array.isArray(packet.claimLinks ?? packet.links) ? (packet.claimLinks ?? packet.links) : [];
-  const official = new Set(sources.filter((s) => s.sourceType === 'OFFICIAL' || s.authority === 'OFFICIAL' || s.kind === 'PRIMARY_OFFICIAL').map((s) => s.sourceId));
-  const candidates = [];
+  if (packet.subject?.canonicalCoin !== canonicalCoin) return { ok: false, reason: 'PACKET_SUBJECT_MISMATCH', event: null };
+  const claims = Array.isArray(packet.claims) ? packet.claims : []; const links = Array.isArray(packet.claimLinks) ? packet.claimLinks : []; const official = officialSourceIds(packet); const candidates = []; const refusals = [];
   for (const c of claims) {
-    if (c.status !== 'PRIMARY_CONFIRMED') continue; if (c.asset !== canonicalCoin && c.canonicalCoin !== canonicalCoin && !(Array.isArray(c.assets) && c.assets.length === 1 && c.assets[0] === canonicalCoin)) continue;
-    const link = links.find((l) => l.kind === 'PRIMARY_CONFIRMATION' && (l.claimId === c.claimId || l.toClaimId === c.claimId) && official.has(l.sourceId ?? l.fromSourceId)); if (!link) continue;
-    const taxonomy = CATALYST_TAXONOMY.find((t) => CATALYST_CLAIM_KINDS[t].includes(c.claimKind ?? c.kind)); if (!taxonomy) continue;
-    const knownAt = c.knownAtTs ?? c.confirmedAtTs ?? null; if (!Number.isSafeInteger(knownAt)) continue; if (knownAt > decisionTs || decisionTs - knownAt > knownWithinMs) continue;
-    const occurredTs = c.occurredTs ?? c.eventTs ?? null; const occurred = Number.isSafeInteger(occurredTs) ? occurredTs <= decisionTs : false;
-    candidates.push({ eventId: c.claimId, taxonomy, knownAtTs: knownAt, occurredTs, occurred, sourceId: link.sourceId ?? link.fromSourceId, claimKind: c.claimKind ?? c.kind });
+    if (!c || c.status !== 'PRIMARY_CONFIRMED') continue; if (!subjectBound(c, canonicalCoin)) { refusals.push('SUBJECT_UNBOUND'); continue; }
+    const taxonomy = CATALYST_TAXONOMY.find((t) => CATALYST_CLAIM_TYPES[t].includes(c.claimType)); if (!taxonomy) { refusals.push('CLAIM_TYPE_OUTSIDE_TAXONOMY'); continue; }
+    const link = links.find((l) => l && l.kind === 'PRIMARY_CONFIRMATION' && l.claimRef === c.claimId && official.has(l.sourceRef)); if (!link) { refusals.push('NO_OFFICIAL_PRIMARY_CONFIRMATION'); continue; }
+    const knownAt = Number.isSafeInteger(link.observedTs) ? link.observedTs : Number.isSafeInteger(c.firstObservedTs) ? c.firstObservedTs : null; if (knownAt === null) { refusals.push('CONFIRMATION_CLOCK_ABSENT'); continue; }
+    if (knownAt > decisionTs) { refusals.push('CONFIRMATION_FROM_THE_FUTURE'); continue; } if (decisionTs - knownAt > knownWithinMs) { refusals.push('CONFIRMATION_STALE'); continue; }
+    candidates.push({ eventId: c.claimId, taxonomy, knownAtTs: knownAt, occurredTs: knownAt, occurred: true, sourceId: link.sourceRef, claimType: c.claimType, claimKind: c.claimType });
   }
-  if (!candidates.length) return { ok: false, reason: 'NO_PRIMARY_CONFIRMED_MAPPED_EVENT', event: null };
+  if (!candidates.length) return { ok: false, reason: 'NO_PRIMARY_CONFIRMED_MAPPED_EVENT', refusals: [...new Set(refusals)], event: null };
   const mech = analysis.mechanism ?? null; const cited = candidates.find((e) => Array.isArray(mech?.claimRefs) && mech.claimRefs.includes(e.eventId));
   if (!cited) return { ok: false, reason: 'MECHANISM_DOES_NOT_CITE_EVENT', event: null };
   if (analysis.marketImplication?.direction !== 'UPWARD_PRESSURE') return { ok: false, reason: `DIRECTION_${analysis.marketImplication?.direction ?? 'ABSENT'}_NOT_UPWARD`, event: null };
-  if (!cited.occurred) return { ok: false, reason: 'EVENT_SCHEDULED_NOT_OCCURRED', event: cited };
   return { ok: true, reason: null, event: { ...cited, primaryConfirmed: true, mechanismDirection: 'UPWARD_PRESSURE', mechanismCitesEvent: true } };
+}
+// a verified PRIMARY correction (closeout R10): a RETRACTED / CONTRADICTED claim bound to the coin, linked by a RETRACTION /
+// CONTRADICTION relation to an OFFICIAL source -> a Watch falsifier (THESIS_FALSIFIED), never prose
+export function primaryCorrections({ packet, canonicalCoin, decisionTs }) {
+  if (!packet || packet.subject?.canonicalCoin !== canonicalCoin) return []; const claims = Array.isArray(packet.claims) ? packet.claims : []; const links = Array.isArray(packet.claimLinks) ? packet.claimLinks : []; const official = officialSourceIds(packet); const out = [];
+  for (const c of claims) { if (!c || !['RETRACTED', 'CONTRADICTED'].includes(c.status) || !subjectBound(c, canonicalCoin)) continue; const link = links.find((l) => l && ['RETRACTION', 'CONTRADICTION'].includes(l.kind) && l.claimRef === c.claimId && official.has(l.sourceRef)); if (!link) continue; const knownAt = Number.isSafeInteger(link.observedTs) ? link.observedTs : c.firstObservedTs; if (!Number.isSafeInteger(knownAt) || knownAt > decisionTs) continue; out.push({ assetId: canonicalCoin, factType: 'PRIMARY_CORRECTION', verified: true, claimId: c.claimId, status: c.status, sourceId: link.sourceRef, knownAtTs: knownAt }); }
+  return out;
 }
 // ---- the injection fence: nothing in the analysis may set a control field; opposing arguments stay explanatory ----------------------
 export function controlFieldsFromAnalysis(analysis) { const found = []; const walk = (v, p) => { if (!isPlain(v)) { if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${p}[${i}]`)); return; } for (const k of Object.keys(v)) { if (FORBIDDEN_CONTROL_KEYS.includes(k)) found.push(`${p}.${k}`); walk(v[k], `${p}.${k}`); } }; walk(analysis ?? {}, 'analysis'); return found; }

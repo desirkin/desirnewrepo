@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { isCanonicalDecimal, isPositive, isNegative, isZero } from './money.js';
 
 export const EXECUTION_CONTRACT_VERSION = 'serpent-execution-1';
-export const ACCOUNT_STATE_VERSION = 'execution-account-state-1';
+export const ACCOUNT_STATE_VERSION = 'execution-account-state-2'; // 2: durable adjustment identities, net-basis realized P&L, unbounded execution identities (closeout R03 / R06)
 export const MODES = Object.freeze(['OBSERVE', 'REPLAY', 'PAPER', 'LIVE_UNARMED', 'LIVE_ARMED', 'REDUCE_ONLY', 'HALTED_UNRESOLVED']);
 export const ACCOUNT_KINDS = Object.freeze(['REPLAY', 'PAPER', 'LIVE', 'SHADOW']); // journal namespaces; PAPER never becomes LIVE
 export const ORDER_STATES = Object.freeze(['UNSENT', 'DISPATCH_UNCERTAIN', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'FILLED', 'CANCEL_PENDING', 'CANCELLED', 'REJECTED', 'EXPIRED', 'RECONCILIATION_REQUIRED']);
@@ -59,15 +59,20 @@ export const T = Object.freeze({
   finiteOrNull: (v) => v === null || (typeof v === 'number' && Number.isFinite(v)),
   fraction: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1,
   idList: (v) => Array.isArray(v) && v.length <= MAX_LIST && v.every((x) => typeof x === 'string' && ID_RE.test(x)) && new Set(v).size === v.length,
+  // an OPTIONAL key: absent is lawful (events written before the key existed stay valid); present must satisfy the check
+  opt: (fn) => Object.assign((v, where) => fn(v, where), { optional: true }),
 });
 // closed object check: exact own keys (no more, no fewer), each checked; nested plain objects only; hazards refused
 export function shapeError(v, schema, where = 'object') {
   if (!isPlainObject(v)) return `${where}: expected a plain object`;
   const keys = Object.keys(v); for (const k of keys) { if (HAZARD.has(k)) return `${where}: hazardous key`; if (!Object.hasOwn(schema, k)) return `${where}: unknown key ${k.slice(0, 40)}`; }
-  for (const k of Object.keys(schema)) { if (!Object.hasOwn(v, k)) return `${where}: missing key ${k}`; const chk = schema[k]; const r = typeof chk === 'function' ? chk(v[k], `${where}.${k}`) : shapeError(v[k], chk, `${where}.${k}`); if (r === false) return `${where}.${k}: invalid`; if (typeof r === 'string') return r; }
+  for (const k of Object.keys(schema)) { const chk = schema[k]; if (!Object.hasOwn(v, k)) { if (chk && chk.optional === true) continue; return `${where}: missing key ${k}`; } const r = typeof chk === 'function' ? chk(v[k], `${where}.${k}`) : shapeError(v[k], chk, `${where}.${k}`); if (r === false) return `${where}.${k}: invalid`; if (typeof r === 'string') return r; }
   return null;
 }
 export const nullable = (schema) => (v, where) => (v === null ? null : shapeError(v, schema, where));
+// recorded challenger verdicts per decision (closeout R13): challenger id -> restriction word; absent / null = none recorded
+export const VERDICT_WORDS = Object.freeze(['ALLOW', 'RESTRICT', 'NO_RULE', 'UNKNOWN', 'DISABLED']);
+const verdictMap = (v, where) => (v === null || (isPlainObject(v) && Object.keys(v).length <= 16 && Object.entries(v).every(([k, x]) => ID_RE.test(k) && VERDICT_WORDS.includes(x))) ? null : `${where}: verdict map`);
 export const listOf = (fn, max = MAX_LIST) => (v, where) => { if (!Array.isArray(v) || v.length > max) return `${where}: list malformed`; for (let i = 0; i < v.length; i += 1) { const r = typeof fn === 'function' ? fn(v[i], `${where}[${i}]`) : shapeError(v[i], fn, `${where}[${i}]`); if (r === false) return `${where}[${i}]: invalid`; if (typeof r === 'string') return r; } return null; };
 export function assertShape(v, schema, where) { const e = shapeError(v, schema, where); if (e) throw new ContractError(e); return v; }
 // ---- canonical JSON / identities ------------------------------------------------------------------------------------------
@@ -102,10 +107,10 @@ const PROTECTION_TEMPLATE = Object.freeze({ ordertype: T.en(['stop-loss']), trig
 export const LIMITS = Object.freeze({ maxSimultaneousAssetPositions: T.count, maxModelledRiskPerPositionFraction: T.fraction, maxAggregateModelledRiskFraction: T.fraction, maxCorrelatedClusterModelledRiskFraction: T.fraction, dailyLossRestrictionFraction: T.fraction, peakEquityDrawdownRestrictionFraction: T.fraction, maxGrossExposureFraction: T.fraction, maxAssetExposureFraction: T.fraction });
 export const EVENT_SCHEMAS = Object.freeze({
   ACCOUNT_INITIALIZED: { accountKind: T.en(ACCOUNT_KINDS), initialCapital: T.posDec, quote: T.en(['USD']), venue: T.en(['kraken']), policyDigest: T.hex64, policyVersion: T.id, ownerRef: T.id, sessionDate: T.text, clockAnchorTs: T.ts, limits: LIMITS, compounding: T.en(['NONE', 'REALIZED_WITHIN_CEILING']) },
-  ACCOUNT_AUTHORIZED: { authorizationId: T.id, kind: T.en(['LIVE_ARM', 'CANARY', 'PAPER_RUN']), releaseDigest: T.hex64OrNull, policyDigest: T.hex64, codeDigest: T.hex64OrNull, allocationCeiling: T.posDec, reinvestment: T.en(['NONE', 'REALIZED_WITHIN_CEILING']), limits: nullable(LIMITS), keyFingerprint: T.idOrNull, ownerRef: T.id, issuedTs: T.ts, expiresTs: T.ts, restrictionRevision: T.count, canary: nullable({ pair: T.id, maxBuyConsiderationWithFees: T.posDec, maxDurationMs: T.count, lossAcknowledged: T.bool }) },
+  ACCOUNT_AUTHORIZED: { authorizationId: T.id, kind: T.en(['LIVE_ARM', 'CANARY', 'PAPER_RUN']), releaseDigest: T.hex64OrNull, policyDigest: T.hex64, codeDigest: T.hex64OrNull, allocationCeiling: T.posDec, reinvestment: T.en(['NONE', 'REALIZED_WITHIN_CEILING']), limits: nullable(LIMITS), keyFingerprint: T.idOrNull, ownerRef: T.id, issuedTs: T.ts, expiresTs: T.ts, restrictionRevision: T.count, canary: nullable({ pair: T.id, maxBuyConsiderationWithFees: T.posDec, maxDurationMs: T.count, lossAcknowledged: T.bool }), canaryEvidence: T.opt(nullable({ authorizationId: T.id, releaseDigest: T.hex64, completedTs: T.ts })) },
   AUTHORIZATION_ENDED: { authorizationId: T.id, reason: T.en(['EXPIRED', 'REVOKED', 'BINDING_CHANGED', 'COMPLETED']), ts: T.ts },
   HYPOTHESIS_LOCKED: { decisionId: T.id, episodeId: T.id, setupId: T.id, assetId: T.id, pair: T.id, hypothesisDigest: T.hex64, frozenAtTs: T.ts, triggerTs: T.ts, expiresTs: T.ts },
-  DECISION_RECORDED: { decisionId: T.id, episodeId: T.id, assetId: T.id, pair: T.id, setupId: T.idOrNull, inputMode: T.en(['MARKET_DIRECT', 'CASE_ENRICHED', 'CATALYST_CASE']), state: T.en(['NO_TRADE', 'NEEDS_DATA', 'WATCH_CANDIDATE', 'ENTRY_PROPOSED', 'ENTRY_RESERVED', 'ENTRY_REFUSED', 'EXPIRED']), reasonCodes: T.idList, decisionKnownAtTs: T.ts, decisionDigest: T.hex64, sizing: nullable({ q: T.posDec, entryLimitPrice: T.posDec, entryCashOut: T.posDec, riskUsd: T.posDec, bufferedScenarioNetProfit: T.dec }), strategyVersion: T.id, policyDigest: T.hex64 },
+  DECISION_RECORDED: { decisionId: T.id, episodeId: T.id, assetId: T.id, pair: T.id, setupId: T.idOrNull, inputMode: T.en(['MARKET_DIRECT', 'CASE_ENRICHED', 'CATALYST_CASE']), state: T.en(['NO_TRADE', 'NEEDS_DATA', 'WATCH_CANDIDATE', 'ENTRY_PROPOSED', 'ENTRY_RESERVED', 'ENTRY_REFUSED', 'EXPIRED']), reasonCodes: T.idList, decisionKnownAtTs: T.ts, decisionDigest: T.hex64, sizing: nullable({ q: T.posDec, entryLimitPrice: T.posDec, entryCashOut: T.posDec, riskUsd: T.posDec, bufferedScenarioNetProfit: T.dec }), strategyVersion: T.id, policyDigest: T.hex64, verdicts: T.opt(verdictMap) },
   RESERVATION_OPENED: { reservationId: T.id, decisionId: T.id, assetId: T.id, pair: T.id, cashReserved: T.posDec, riskReserved: T.posDec, clusterId: T.id, expiresTs: T.ts },
   RESERVATION_RELEASED: { reservationId: T.id, reason: T.en(['CONSUMED', 'EXPIRED', 'REFUSED_AT_REVALIDATION', 'REJECTED_BY_VENUE', 'CANCELLED_UNSENT', 'ORDER_TERMINAL', 'ORDER_UNFILLED']), releasedCash: T.nonNegDec, releasedRisk: T.nonNegDec, ts: T.ts },
   ORDER_INTENT: { intentId: T.id, orderId: T.id, clientOrderId: T.id, reservationId: T.idOrNull, positionId: T.id, kind: T.en(ORDER_KINDS), side: T.en(['buy', 'sell']), pair: T.id, qty: T.posDec, limitPrice: T.decOrNull, orderType: T.en(['limit', 'market', 'stop-loss']), timeInForce: T.en(['IOC', 'GTC']), protection: nullable(PROTECTION_TEMPLATE), deadlineTs: T.tsOrNull, feeDigest: T.hex64, specDigest: T.hex64, snapshotDigest: T.hex64OrNull, createdTs: T.ts },
@@ -118,7 +123,7 @@ export const EVENT_SCHEMAS = Object.freeze({
   PROTECTION_STATE: { positionId: T.id, orderId: T.idOrNull, state: T.en(PROTECTION_STATES), nativeOrderId: T.idOrNull, trigger: T.decOrNull, qty: T.decOrNull, sourceTs: T.tsOrNull, receiptTs: T.ts, reason: T.textOrNull },
   PROTECTION_AMEND: { positionId: T.id, orderId: T.id, amendId: T.id, requestedTrigger: T.posDec, outcome: T.en(AMEND_OUTCOMES), confirmedTrigger: T.decOrNull, receiptTs: T.ts, reason: T.textOrNull },
   POSITION_OPENED: { positionId: T.id, decisionId: T.id, assetId: T.id, pair: T.id, specDigest: T.hex64, structuralStop: T.posDec, targetPrice: T.decOrNull, targetProceedsRecipe: T.id, atr14: T.posDec, maxDurationMs: T.count, feedPinned: T.bool, requestedQty: T.posDec, clusterId: T.id },
-  POSITION_R: { positionId: T.id, state: T.en(R_STATES), initialR: T.decOrNull, entryVwap: T.decOrNull, entryCashOut: T.decOrNull, confirmedBase: T.nonNegDec, reason: T.textOrNull, ts: T.ts },
+  POSITION_R: { positionId: T.id, state: T.en(R_STATES), initialR: T.decOrNull, entryVwap: T.decOrNull, entryCashOut: T.decOrNull, confirmedBase: T.nonNegDec, reason: T.textOrNull, ts: T.ts, targetPerUnit: T.opt(T.decOrNull) },
   WATCH_STATE: { positionId: T.id, trailActive: T.bool, highestBid: T.decOrNull, exitState: T.en(['NONE', 'REQUESTED', 'IN_PROGRESS', 'DONE', 'UNRESOLVED']), primaryReason: T.enOrNull(EXIT_REASONS), priority: T.enOrNull(EXIT_PRIORITIES), supportedReasons: T.idList, ts: T.ts },
   POSITION_CLOSED: { positionId: T.id, reason: T.text, residualBase: T.nonNegDec, state: T.en(['FLAT', 'DUST_UNRESOLVED', 'UNRESOLVED']), ts: T.ts },
   RECONCILIATION: { reconciliationId: T.id, scope: T.en(['STARTUP', 'PERIODIC', 'AFTER_GAP', 'SHUTDOWN', 'REQUESTED', 'CANARY']), outcome: T.en(RECONCILIATION_OUTCOMES), balances: nullable({ quoteAvailable: T.decOrNull, quoteTotal: T.decOrNull, baseByAsset: listOf({ asset: T.id, total: T.dec, available: T.decOrNull }) }), openOrdersSeen: T.count, executionsSeen: T.count, unmatched: T.count, pagesRead: T.count, pageIncomplete: T.bool, cursorTs: T.tsOrNull, reason: T.textOrNull, ts: T.ts },

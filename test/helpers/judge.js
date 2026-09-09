@@ -56,3 +56,20 @@ export async function paperAccount({ accountId = 'paper-test', clock = fakeClock
   return { journal, writer, F, clock, accountId, append, revision: () => revision, state: async () => (await journal.load(accountId)).state };
 }
 export const digest = digestOf;
+// closeout R14 fixture completion: a COMPLETED, reconciled canary on a LIVE account (one bounded CANARY_ENTRY filled and
+// closed, then AUTHORIZATION_ENDED COMPLETED) — the durable evidence the ordinary LIVE_ARM authorization requires
+// (P&L-neutral: equal prices, zero fees, so accounting assertions of the surrounding test are untouched)
+export const canaryAuthorization = (F, { authorizationId = 'canary-0', releaseDigest = HEX('f'), pair = 'XBT/USD', codeDigest = HEX('c'), keyFingerprint = 'kf-abc', policyDigest = POLICY_DIGEST } = {}) => F.authorized(authorizationId, { kind: 'CANARY', releaseDigest, codeDigest, keyFingerprint, policyDigest, allocationCeiling: '25', canary: { pair, maxBuyConsiderationWithFees: '25', maxDurationMs: 600_000, lossAcknowledged: true } });
+export function canaryCompleted(F, clock, opts = {}) { const { authorizationId = 'canary-0' } = opts; return [canaryAuthorization(F, opts), F.mode('LIVE_UNARMED', 'LIVE_ARMED', { authorizationId }), ...canaryEntryCycle(F, clock, opts), F.ev('AUTHORIZATION_ENDED', { authorizationId, reason: 'COMPLETED', ts: clock.now() }), F.mode('REDUCE_ONLY', 'LIVE_UNARMED', { reason: 'canary completed' })]; }
+// one bounded canary entry, filled and closed flat (the entry / exit of the canary itself)
+export function canaryEntryCycle(F, clock, { authorizationId = 'canary-0', pair = 'XBT/USD' } = {}) {
+  const c = `${authorizationId}-`;
+  return [
+    F.hypothesis(`${c}d`, { pair }), F.decision(`${c}d`, { pair, sizing: { q: '0.0001', entryLimitPrice: '100000', entryCashOut: '10.08', riskUsd: '1', bufferedScenarioNetProfit: '0.1' } }),
+    F.reserve(`${c}r`, `${c}d`, { pair, cashReserved: '10.08', riskReserved: '1' }), F.position(`${c}p`, `${c}d`, { pair, requestedQty: '0.0001' }), F.ev('FEED_PIN', { symbol: pair, action: 'PIN', reason: `canary shell ${c}p`, ts: clock.now() }),
+    F.intent(`${c}o`, `${c}p`, `${c}r`, { kind: 'CANARY_ENTRY', pair, qty: '0.0001' }), F.attempt(`${c}o`), F.result(`${c}o`, 'ACKNOWLEDGED'), F.fill(`${c}o`, `${c}x1`, { base: '0.0001', quote: '10', fee: { asset: 'USD', amount: '0' } }),
+    F.orderState(`${c}o`, 'FILLED', { nativeOrderId: `nat-${c}o`, nativeCumQty: '0.0001' }), F.release(`${c}r`, { reason: 'ORDER_TERMINAL', releasedCash: '0', releasedRisk: '0' }),
+    F.sellIntent(`${c}s`, `${c}p`, { pair, qty: '0.0001', limitPrice: '100000' }), F.attempt(`${c}s`), F.result(`${c}s`, 'ACKNOWLEDGED'), F.fill(`${c}s`, `${c}x2`, { side: 'sell', base: '0.0001', quote: '10', price: '100000', fee: { asset: 'USD', amount: '0' } }), F.orderState(`${c}s`, 'FILLED', { nativeOrderId: `nat-${c}s`, nativeCumQty: '0.0001' }),
+    F.closed(`${c}p`, 'FLAT', { residualBase: '0' }),
+  ];
+}

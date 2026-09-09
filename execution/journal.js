@@ -24,11 +24,13 @@ export function createMemoryJournal({ log = () => {} } = {}) {
     async exists(accountId) { return accounts.has(accountId); },
     async create(accountId, { accountKind }) { if (accounts.has(accountId)) throw new JournalError('ACCOUNT_EXISTS', 'refusing to reset an existing account'); accounts.set(accountId, { accountId, accountKind, revision: 0, writerEpoch: 0, headSeq: 0, headDigest: null, state: emptyAccountState(accountId), events: [] }); return { accountId, revision: 0 }; },
     async load(accountId) { const r = row(accountId); if (!r) return null; return { accountId, revision: r.revision, writerEpoch: r.writerEpoch, headSeq: r.headSeq, headDigest: r.headDigest, state: structuredClone(r.state) }; },
-    async acquireWriter(accountId) { const r = row(accountId); if (!r) throw new JournalError('ACCOUNT_UNKNOWN', accountId); if (r.lockHeld) return null; r.lockHeld = true; epochCounter += 1; r.writerEpoch = epochCounter; const epoch = epochCounter; let lost = false; return { epoch, held: () => !lost && r.writerEpoch === epoch, release: async () => { lost = true; r.lockHeld = false; }, _lose: () => { lost = true; r.lockHeld = false; } }; },
-    async append(accountId, { expectedRevision, writerEpoch, events }) {
+    // the lease: an epoch is current only while ITS holder still holds the lock (release / loss ends the lease at once, before any successor)
+    async acquireWriter(accountId) { const r = row(accountId); if (!r) throw new JournalError('ACCOUNT_UNKNOWN', accountId); if (r.lockHeld) return null; r.lockHeld = true; epochCounter += 1; r.writerEpoch = epochCounter; const epoch = epochCounter; let lost = false; const lose = () => { lost = true; if (r.lockHeld && r.writerEpoch === epoch) { r.lockHeld = false; r.leaseLost = true; } }; return { epoch, held: () => !lost && r.writerEpoch === epoch && r.lockHeld === true, release: async () => lose(), _lose: () => lose() }; },
+    async append(accountId, { expectedRevision, writerEpoch, events, writer = null }) {
       validateBatch(events); const r = row(accountId); if (!r) throw new JournalError('ACCOUNT_UNKNOWN', accountId);
+      if (writer && typeof writer.held === 'function' && !writer.held()) throw new JournalError('LOCK_LOST', 'writer lease released or lost: no commit without the lock');
       if (r.revision !== expectedRevision) throw new JournalError('REVISION_CONFLICT', `expected ${expectedRevision}, current ${r.revision}`);
-      if (!isValidEpoch(writerEpoch) || writerEpoch !== r.writerEpoch) throw new JournalError('EPOCH_FENCED', `writer epoch ${writerEpoch} is not current (${r.writerEpoch})`);
+      if (!isValidEpoch(writerEpoch) || writerEpoch !== r.writerEpoch || !r.lockHeld) throw new JournalError('EPOCH_FENCED', `writer epoch ${writerEpoch} is not current (${r.writerEpoch}${r.lockHeld ? '' : ', lease released'})`);
       for (const ev of events) if (r.events.some((x) => x.event.eventId === ev.eventId)) throw new JournalError('EVENT_DUPLICATE', ev.eventId);
       const { state } = reduceBatch(r.state, events); let seq = r.headSeq; let digest = r.headDigest;
       for (const ev of events) { seq += 1; digest = headDigest(digest, seq, ev.eventId); r.events.push({ seq, event: ev, writerEpoch }); }
@@ -36,6 +38,8 @@ export function createMemoryJournal({ log = () => {} } = {}) {
       return { revision: r.revision, headSeq: seq, headDigest: digest, state: structuredClone(state) };
     },
     async page(accountId, { afterSeq = 0, limit = MAX_PAGE } = {}) { const r = row(accountId); if (!r) throw new JournalError('ACCOUNT_UNKNOWN', accountId); const lim = Math.min(MAX_PAGE, Math.max(1, limit)); return r.events.filter((x) => x.seq > afterSeq).slice(0, lim).map((x) => ({ seq: x.seq, event: x.event, writerEpoch: x.writerEpoch })); },
+    async findEvent(accountId, eventId) { const r = row(accountId); if (!r) return null; const x = r.events.find((e) => e.event.eventId === eventId); return x ? { seq: x.seq, event: x.event } : null; },
+    async reproject(accountId, { writer }) { const r = row(accountId); if (!r) throw new JournalError('ACCOUNT_UNKNOWN', accountId); if (!writer || !writer.held() || writer.epoch !== r.writerEpoch) throw new JournalError('EPOCH_FENCED', 'reprojection needs the current writer'); r.state = replayEvents(accountId, r.events.map((x) => x.event)); return { revision: r.revision, stateDigest: stateDigest(r.state) }; },
     async replayVerify(accountId, opts) { return replayVerify(this, accountId, opts); },
     async claimLiveOwner() { throw new JournalError('NOT_DURABLE', 'a memory journal can never own LIVE'); },
     async listAccounts() { return [...accounts.keys()].sort(); },
@@ -76,15 +80,17 @@ export function createPgJournal({ db, log = () => {}, lockTimeoutMs = 5000, stat
         return { ...lock, epoch };
       } catch (err) { await lock.release().catch(() => {}); throw err; }
     },
-    async append(accountId, { expectedRevision, writerEpoch, events }) {
+    async append(accountId, { expectedRevision, writerEpoch, events, writer = null }) {
       validateBatch(events); if (!isValidEpoch(writerEpoch)) throw new JournalError('EPOCH_FENCED', 'no writer epoch');
-      return db.tx(async (q) => {
+      // the lock session itself: a terminated / released advisory-lock session cannot commit even before a successor advances the epoch
+      const heldNow = () => { if (writer && typeof writer.held === 'function' && !writer.held()) throw new JournalError('LOCK_LOST', 'writer lock session released or lost: no commit without the lock'); }; heldNow();
+      return db.tx(async (q) => { heldNow();
         await q(`SET LOCAL lock_timeout = '${Math.max(100, lockTimeoutMs)}ms'`); await q(`SET LOCAL statement_timeout = '${Math.max(100, statementTimeoutMs)}ms'`);
         const { rows } = await q('SELECT revision, writer_epoch, head_seq, head_digest, state FROM serpent_execution_accounts WHERE account_id = $1 FOR UPDATE', [accountId]); if (!rows.length) throw new JournalError('ACCOUNT_UNKNOWN', accountId);
         const r = rows[0]; const revision = Number(r.revision); const epoch = Number(r.writer_epoch);
         if (revision !== expectedRevision) throw new JournalError('REVISION_CONFLICT', `expected ${expectedRevision}, current ${revision}`);
         if (epoch !== writerEpoch) throw new JournalError('EPOCH_FENCED', `writer epoch ${writerEpoch} is not current (${epoch})`);
-        const { state } = reduceBatch(stateOf(r), events); let seq = Number(r.head_seq); let digest = r.head_digest;
+        const { state } = reduceBatch(stateOf(r), events); let seq = Number(r.head_seq); let digest = r.head_digest; heldNow();
         for (const ev of events) { seq += 1; digest = headDigest(digest, seq, ev.eventId); try { await q('INSERT INTO serpent_execution_events (account_id, seq, event_id, event_type, cause_id, known_at_ts, writer_epoch, event) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [accountId, seq, ev.eventId, ev.type, ev.causeId, ev.knownAtTs, writerEpoch, JSON.stringify(ev)]); } catch (err) { if (err.code === '23505') throw new JournalError('EVENT_DUPLICATE', ev.eventId); throw err; } }
         await q('UPDATE serpent_execution_accounts SET revision = revision + 1, head_seq = $2, head_digest = $3, state = $4, mode = $5, account_kind = COALESCE($6, account_kind), policy_digest = $7, arming_ref = $8, updated_at = now() WHERE account_id = $1', [accountId, seq, digest, JSON.stringify(state), state.mode, state.accountKind, state.policyDigest, state.authorization?.authorizationId ?? null]);
         return { revision: revision + 1, headSeq: seq, headDigest: digest, state };
@@ -92,6 +98,8 @@ export function createPgJournal({ db, log = () => {}, lockTimeoutMs = 5000, stat
     },
     async page(accountId, { afterSeq = 0, limit = MAX_PAGE } = {}) { const lim = Math.min(MAX_PAGE, Math.max(1, limit)); const { rows } = await db.query(`SELECT seq, writer_epoch, event FROM serpent_execution_events WHERE account_id = $1 AND seq > $2 ORDER BY seq LIMIT ${lim}`, [accountId, afterSeq]); return rows.map((r) => ({ seq: Number(r.seq), writerEpoch: Number(r.writer_epoch), event: typeof r.event === 'string' ? JSON.parse(r.event) : r.event })); },
     async findEvent(accountId, eventId) { const { rows } = await db.query('SELECT seq, event FROM serpent_execution_events WHERE account_id = $1 AND event_id = $2', [accountId, eventId]); return rows.length ? { seq: Number(rows[0].seq), event: typeof rows[0].event === 'string' ? JSON.parse(rows[0].event) : rows[0].event } : null; },
+    // rewrite the derived projection from the durable events (reducer version change): current writer only, chain + head verified first
+    async reproject(accountId, { writer }) { if (!writer || !writer.held()) throw new JournalError('LOCK_LOST', 'reprojection needs the held writer'); let state = emptyAccountState(accountId); let after = 0; let seq = 0; let digest = null; for (;;) { const page = await this.page(accountId, { afterSeq: after, limit: MAX_PAGE }); if (!page.length) break; for (const row of page) { if (row.seq !== seq + 1) throw new JournalError('CHAIN_GAP', `sequence gap at ${row.seq}`); seq = row.seq; digest = headDigest(digest, seq, row.event.eventId); state = applyEvent(state, row.event); } after = page[page.length - 1].seq; if (page.length < MAX_PAGE) break; } return db.tx(async (q) => { const { rows } = await q('SELECT revision, writer_epoch, head_seq, head_digest FROM serpent_execution_accounts WHERE account_id = $1 FOR UPDATE', [accountId]); if (!rows.length) throw new JournalError('ACCOUNT_UNKNOWN', accountId); const r = rows[0]; if (Number(r.writer_epoch) !== writer.epoch) throw new JournalError('EPOCH_FENCED', 'reprojection by a stale writer'); if (Number(r.head_seq) !== seq || r.head_digest !== digest) throw new JournalError('CHAIN_MISMATCH', 'events disagree with the recorded head: reconciliation, not an invented state'); await q('UPDATE serpent_execution_accounts SET state = $2, mode = $3, updated_at = now() WHERE account_id = $1', [accountId, JSON.stringify(state), state.mode]); return { revision: Number(r.revision), stateDigest: stateDigest(state) }; }); },
     async replayVerify(accountId, opts) { return replayVerify(this, accountId, opts); },
     // venue-wide LIVE owner slot: one active LIVE economic account / sender per installation, bound to exchange context + key
     async claimLiveOwner({ venue, accountId, keyFingerprint, exchangeContext, writerEpoch }) {

@@ -21,7 +21,20 @@ export function createPaperAdapter({ accountId, clock, feed = null, fee, specOf,
   const listeners = new Set(); const pending = new Map(); const stops = new Map(); const orders = new Map(); const depletion = new Map(); const firstSnapshotSeen = new Set();
   let admission = true; let seq = 0; let execSeq = 0; const counters = { submitted: 0, filled: 0, partial: 0, unfilledCoverageUnknown: 0, stopsTriggered: 0, extraObservationWaits: [], uncertainLevels: 0 };
   const emit = (type, payload, receiptTs) => { const ev = adapterEvent('PAPER', type, payload, receiptTs); for (const fn of listeners) { try { fn(ev); } catch (err) { log(`paper listener error: ${err?.message ?? err}`); } } return ev; };
-  if (restore?.levels) for (const [k, v] of restore.levels) depletion.set(k, { ...v });
+  // restore (closeout R07): the durable journal state names every native child (paper stops), the exec-id / native-id progression
+  // and every open paper order; the depletion checkpoint restores consumed levels. Nothing here invents a fill: an entry that was
+  // pending at the crash can no longer be sampled and is reported EXPIRED (UNFILLED_COVERAGE_UNKNOWN) by reconcile().
+  const lostPending = new Map(); let restored = { stops: 0, orders: 0, execSeq: 0, seq: 0, levels: 0 };
+  const levelsIn = restore?.checkpoint?.levels ?? restore?.levels ?? null; if (levelsIn) for (const [k, v] of levelsIn) { depletion.set(k, { ...v }); restored.levels += 1; }
+  function restoreFrom(state) {
+    if (!state) return restored; const num = (id, prefix) => { const m = typeof id === 'string' && id.startsWith(`${prefix}-${accountId}-`) ? Number(id.slice(prefix.length + accountId.length + 2)) : NaN; return Number.isSafeInteger(m) ? m : 0; };
+    for (const k of Object.keys(state.execIds ?? {})) execSeq = Math.max(execSeq, num(k.split('|')[1], 'pex')); restored.execSeq = execSeq;
+    for (const o of Object.values(state.orders ?? {})) { for (const p of ['pord', 'pexit', 'pstop']) seq = Math.max(seq, num(o.nativeOrderId, p)); }
+    for (const pos of Object.values(state.positions ?? {})) { if (pos.state === 'FLAT') continue; for (const c of Object.values(pos.protection?.children ?? {})) { const id = c.nativeOrderId; if (!id || !id.startsWith(`pstop-`) || stops.has(id)) continue; seq = Math.max(seq, num(id, 'pstop')); if (['ACTIVE', 'AMEND_PENDING', 'PENDING'].includes(c.state)) { stops.set(id, { stopOrderId: id, positionId: pos.positionId, pair: pos.pair, trigger: c.trigger, qty: M.sub(c.qty ?? '0', c.filledBase ?? '0'), state: 'ACTIVE', spec: specOf(pos.pair), parentOrderId: pos.entryOrderId, ordRefId: pos.entryOrderId ? state.orders[pos.entryOrderId]?.nativeOrderId ?? null : null, journalOrderId: c.orderId ?? null, restored: true }); restored.stops += 1; } } }
+    for (const o of Object.values(state.orders ?? {})) { if (['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'].includes(o.state)) continue; if (o.kind === 'PROTECTIVE_STOP') continue; if (o.state === 'DISPATCH_UNCERTAIN' || o.state === 'ACKNOWLEDGED' || o.state === 'PARTIALLY_FILLED' || o.state === 'CANCEL_PENDING') { lostPending.set(o.orderId, { orderId: o.orderId, nativeOrderId: o.nativeOrderId, state: o.state }); orders.set(o.orderId, { intent: o, spec: specOf(o.pair), resolved: true, lost: true, nativeOrderId: o.nativeOrderId }); restored.orders += 1; } }
+    restored.seq = seq; return restored;
+  }
+  if (restore?.state) restoreFrom(restore.state);
   const dep = (k) => depletion.get(k) ?? (depletion.set(k, { generation: 1, consumed: '0', uncertain: false, tombstone: false, lastObserved: null }), depletion.get(k));
   const available = (pair, side, price, qty) => { const d = depletion.get(key(pair, side, price)); if (!d) return qty; if (d.uncertain) return '0'; return M.max('0', M.sub(qty, d.consumed)); };
   function observeBook(ev) {
@@ -70,7 +83,11 @@ export function createPaperAdapter({ accountId, clock, feed = null, fee, specOf,
     kind: 'PAPER', accountId, limitation: PAPER_LIMITATION,
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     async preflight() { return { ok: true, adapter: 'PAPER', liveCapable: false, privateAccess: 'NONE', limitation: PAPER_LIMITATION }; },
-    async reconcile({ scope = 'PERIODIC' } = {}) { const now = clock(); return emit('RECONCILIATION', { reconciliationId: `prec-${accountId}-${++seq}`, scope, outcome: 'COMPLETE', balances: null, openOrdersSeen: [...stops.values()].filter((s) => s.state === 'ACTIVE').length, executionsSeen: execSeq, unmatched: 0, pagesRead: 0, pageIncomplete: false, cursorTs: now, reason: 'paper venue: internal simulation state is the only truth', ts: now }, now).payload; },
+    // COMPLETE only when every open journal order is known to this simulation (restored or placed here); an entry that was pending
+    // at a crash cannot be re-sampled: it is reported EXPIRED with UNFILLED_COVERAGE_UNKNOWN (unscorable), never a zero-loss fill
+    async reconcile({ scope = 'PERIODIC', state = null } = {}) { const now = clock(); if (state) restoreFrom(state); let unknown = 0; const open = Object.values(state?.orders ?? {}).filter((o) => !['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'].includes(o.state));
+      for (const o of open) { if (o.kind === 'PROTECTIVE_STOP') { const known = [...stops.values()].some((s) => s.journalOrderId === o.orderId || s.stopOrderId === o.nativeOrderId); if (!known) unknown += 1; continue; } const lp = lostPending.get(o.orderId); if (lp) { lostPending.delete(o.orderId); emit('ORDER_STATE', { orderId: o.orderId, state: 'EXPIRED', nativeOrderId: o.nativeOrderId ?? null, nativeCumQty: o.filledBase ?? '0', reason: 'UNFILLED_COVERAGE_UNKNOWN: pending at restart, the post-arrival book can no longer be sampled (unscorable)', sourceTs: null, receiptTs: now }, now); continue; } if (!orders.has(o.orderId) && !pending.has(o.orderId)) unknown += 1; }
+      return emit('RECONCILIATION', { reconciliationId: `prec-${accountId}-${++seq}`, scope, outcome: unknown ? 'INCOMPLETE' : 'COMPLETE', balances: null, openOrdersSeen: [...stops.values()].filter((s) => s.state === 'ACTIVE').length, executionsSeen: execSeq, unmatched: unknown, pagesRead: 0, pageIncomplete: unknown > 0, cursorTs: now, reason: unknown ? `${unknown} open journal order(s) unknown to the paper venue after restart` : 'paper venue: internal simulation state is the only truth', ts: now }, now).payload; },
     // returns the dispatch result at simulated arrival; fills / states follow through subscribe
     async submitEntryWithProtection({ intent, spec: givenSpec }) {
       if (!admission) return { outcome: 'REJECTED', nativeOrderId: null, reason: 'ADMISSION_STOPPED', guaranteesNoAcceptance: true };
@@ -85,10 +102,11 @@ export function createPaperAdapter({ accountId, clock, feed = null, fee, specOf,
     // a protective market sell of a confirmed residual: same post-arrival sampling law, no price guarantee
     async closeResidual({ intent, spec: givenSpec }) { if (!admission && intent.kind === 'PLANNED_EXIT') return { outcome: 'REJECTED', nativeOrderId: null, reason: 'ADMISSION_STOPPED', guaranteesNoAcceptance: true }; const spec = givenSpec ?? specOf(intent.pair); const now = clock(); const nativeOrderId = `pexit-${accountId}-${++seq}`; const order = { kind: 'EXIT', intent, spec, arrivalTs: now + PAPER_DEFAULTS.exitLatencyMs, submittedTs: now, nativeOrderId, resolved: false }; pending.set(intent.orderId, order); orders.set(intent.orderId, order); return { outcome: 'ACKNOWLEDGED', nativeOrderId, reason: null, guaranteesNoAcceptance: false, arrivalTs: order.arrivalTs }; },
     // bind a durable journal order id to a paper stop so its trigger fill references the journal's PROTECTIVE_STOP order
-    bindStopOrder(positionId, journalOrderId) { const st = [...stops.values()].find((s) => s.positionId === positionId && s.state === 'ACTIVE'); if (st) st.journalOrderId = journalOrderId; return Boolean(st); },
+    bindStopOrder(positionId, journalOrderId, nativeOrderId = null) { const st = (nativeOrderId && stops.get(nativeOrderId)) || [...stops.values()].find((s) => s.positionId === positionId && s.state === 'ACTIVE' && !s.journalOrderId); if (st) st.journalOrderId = journalOrderId; return Boolean(st); },
     stopAdmission() { admission = false; return { admission }; },
     async drain({ maxWaitMs = 10_000 } = {}) { admission = false; return { pending: pending.size, uncertain: [...orders.values()].filter((o) => o.uncertain).length, stopsActive: [...stops.values()].filter((s) => s.state === 'ACTIVE').length }; },
     onTick, onBook, onTrade,
+    restore: restoreFrom, restored: () => ({ ...restored }),
     checkpoint: () => ({ version: 'paper-depletion-checkpoint-1', accountId, ts: clock(), levels: [...depletion.entries()].filter(([, d]) => !M.isZero(d.consumed) || d.uncertain || d.tombstone).map(([k, d]) => [k, { generation: d.generation, consumed: d.consumed, uncertain: d.uncertain, tombstone: d.tombstone, lastObserved: d.lastObserved }]) }),
     availableAt: (pair, side, price, shownQty) => available(pair, side, price, shownQty),
     depletionOf: (pair, side, price) => depletion.get(key(pair, side, price)) ?? null,

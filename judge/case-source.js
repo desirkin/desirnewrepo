@@ -7,8 +7,8 @@ import path from 'node:path';
 import { createCaseVerifier, consumeCase } from './intake.js';
 
 const CASE_DIR_RE = /^[A-Za-z0-9._-]{1,120}$/;
-export function createCaseSource({ casesDir, clock, mode = 'PAPER', maxDirs = 256, log = () => {} }) {
-  const verifier = createCaseVerifier({ clock }); const consumed = new Map(); // dir -> { mtimeMs, verified }
+export function createCaseSource({ casesDir, clock, mode = 'PAPER', maxDirs = 256, worker = null, log = () => {} }) {
+  const verifier = createCaseVerifier({ clock, worker }); const consumed = new Map(); // dir -> { mtimeMs, verified }
   function candidates() { try { return readdirSync(casesDir).filter((d) => CASE_DIR_RE.test(d) && existsSync(path.join(casesDir, d, 'manifest.json'))).sort().slice(-maxDirs); } catch { return []; } }
   async function refresh() { for (const d of candidates()) { const dir = path.join(casesDir, d); let m; try { m = statSync(path.join(dir, 'manifest.json')).mtimeMs; } catch { continue; } const prev = consumed.get(d); if (prev && prev.mtimeMs === m) continue; try { consumed.set(d, { mtimeMs: m, verified: await verifier.verify(dir) }); } catch (err) { log(`case ${d}: verify failed: ${err.message}`); consumed.set(d, { mtimeMs: m, verified: { ok: false, reasons: ['VERIFY_THREW'] } }); } } }
   // the freshest admissible case for one subject at one decision clock (null when none qualifies; reasons are kept for status)

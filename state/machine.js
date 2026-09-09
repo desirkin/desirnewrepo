@@ -51,8 +51,13 @@ function assess() {
   // position stays visible whatever the posture label says (a RETREAT with
   // exposure is a retreat under Watch, never a flat fiction); a stale or
   // absent projection projects nothing.
-  const execution = readExecutionProjection();
-  if (execution?.state === 'FRESH' && execution.exposure) {
+  // closeout R16: the projection must be bound (account / run mode / revision) and its revision may never go backwards for
+  // the same account within this process; a rejected projection projects nothing and is named
+  const execution = readExecutionProjection({ expected: lastProjection ? { accountId: lastProjection.accountId, minRevision: lastProjection.revision } : null });
+  if (execution?.state === 'FRESH' || execution?.state === 'STALE') lastProjection = { accountId: execution.accountId, revision: execution.revision };
+  if (execution?.state === 'REJECTED') {
+    advisories.push(`execution projection REJECTED (${execution.reason}): it projects nothing; the journal is the truth`);
+  } else if (execution?.state === 'FRESH' && execution.exposure) {
     advisories.push(`execution exposure: ${execution.openPositions} open position(s), ${execution.pendingEntries} pending entr${execution.pendingEntries === 1 ? 'y' : 'ies'} under Watch (${execution.accountKind} ${execution.accountId})`);
   } else if (execution?.state === 'STALE' && execution.exposure) {
     // recorded exposure whose publisher went quiet: no new strikes until the
@@ -79,6 +84,7 @@ function walk(machine, target, cause, execution) {
 // Sync the persisted machine with reality; logs any transition it causes.
 // Precedence: RETREAT causes > live stalk set (RUMINT nominations, arming
 // only) > COILED, the resting truth. Nothing here can reach STRIKE.
+let lastProjection = null; // the last bound projection this process accepted (account + revision): revisions never go backwards
 export function syncPosture() {
   const { retreatCauses, advisories, controls, locks, tape, execution } = assess();
   const stalking = pruneStalking();

@@ -26,6 +26,9 @@ doubles with synthetic credentials; live preflight, the canary and arming were N
 | `execution/paper-adapter.js` | PAPER: first post-arrival book, per-level displayed-depth depletion, IOC remainder, emulated child stop, scripted faults |
 | `execution/kraken-adapter.js` | KRAKEN SPOT: endpoint allowlist (no withdrawal / transfer / margin / staking), published signature vector, durable serialized nonce, IOC limit + conditional close, amend, cancel, residual close, paginated reconciliation, WebSocket v2 executions channel |
 | `execution/dispatcher.js` | durable outbox → wire → result, prioritized safety / entry queues, adapter event mapping, restart reconciliation, latency samples |
+| `execution/authority.js` | the ONE entry-authority law (`entryPermission`, `entryAuthority` before the commit and again immediately before the send) and the owned-reduction law (`reductionAuthority`) shared by Judge, dispatcher and Watch |
+| `judge/snapshot-store.js` | bounded persisted decision / exit book snapshots (digest-named, atomic) written BEFORE the durable intent / the sale |
+| `judge/case-verify-worker.js` | sealed-case verification in a worker thread (bounded, off the safety loop) |
 | `judge/*` | features / setups / cost / risk (§4–§6), intake (sealed cases, catalyst taxonomy, control-field refusal), scheduler (25ms buckets), readiness, policy, judge, challengers / evaluation, arming, owner intent, composition, commands, history, case source, recorder, replay clock |
 | `watch/watch.js` | exposure-first Watch: R finalization, deterioration, trail, targets, no-progress / duration, health halts, serialized exit coordinator, dust |
 | `bin/judge.js` | the ONE CLI (closed subcommands, strict flags, secrets never as flags) |
@@ -98,8 +101,12 @@ Do not run `bin/judge.js run-*` beside a JUDGE-enabled fly.js on the same accoun
 
 1. A LIVE policy + a dedicated trade key (spot trading only, NO withdrawal permission) in the named environment variables.
 2. `prepare-release` → a CANDIDATE manifest needs forward-paper evidence (source `FORWARD_PAPER`, a non-empty closed
-   sample, untouched holdout, fees accounted, no open positions), passing critical suites, an independent review PASSED,
-   proposed limits; otherwise BLOCKED with named blockers.
+   sample, a KNOWN net P&L, an evaluation digest, untouched holdout, fees accounted, no open positions), non-empty
+   source prefixes, passing critical suites, an independent review PASSED, proposed limits; otherwise BLOCKED with named
+   blockers. The blockers FOLLOW from the content (`releaseBlockers`): a manifest whose state / blockers do not follow
+   is `MANIFEST_INVALID` for generation, reopen, approval and arm alike (rehashing is integrity, never qualification).
+   The `evaluate` artifact (`--out`) carries `release`, `evaluationDigest` and `sourcePrefixes` for `--evaluation`; its
+   `holdoutUntouched` is `false` because the evaluation examined every split — it never qualifies alone.
 3. `approve-release` (owner intent; bounded written assessment that states uncertainty) → durable approval; it grants
    eligibility for the remaining checks only.
 4. `preflight-live --allow-private true` (owner intent): read-only private checks — server time, key permissions
@@ -108,14 +115,25 @@ Do not run `bin/judge.js run-*` beside a JUDGE-enabled fly.js on the same accoun
 5. `arm-live --challenge true` then `arm-live --confirm true --expires-at .. --owner-limits FILE --preflight FILE`:
    the authorization binds account / mode, venue, release / policy / code digests, allocation ceiling ≤ verified funds,
    reinvestment policy, every cap, key fingerprint, issuance / expiry (≤ `live.armExpiryMs`) and the restriction
-   revision. `OWNER_LIMITS_REQUIRED` until the owner chooses limits.
+   revision. `OWNER_LIMITS_REQUIRED` until the owner chooses limits. The ORDINARY arm additionally needs qualified canary
+   evidence: a canary authorization on THIS account under the SAME release that ran ARMED, whose entry reached a terminal
+   state with certainty, whose position is flat and whose shutdown reconciliation was COMPLETE (`CANARY_EVIDENCE_REQUIRED`
+   otherwise, enforced by `buildLiveAuthorization` AND the reducer). The code identity must be known: a dirty worktree or
+   an unknown tree yields no digest and `CODE_IDENTITY_UNKNOWN` (a running authorization ends on restart under an unknown
+   identity). The arm challenge is consumed durably BEFORE it is verified (one attempt per phrase, right or wrong:
+   `CHALLENGE_CONSUMED`); the owner-intent audit line is written BEFORE any authority (`AUDIT_UNWRITABLE` refuses); the
+   failed-attempt limiter is a durable file (`owner_limiter.json`) — a fresh process is not a fresh allowance.
 6. `run-live --allow-private true` (owner intent): claims the venue owner slot, reconciles, preflights again in-process,
    resumes the SAME unexpired authorization (mode → LIVE_ARMED), connects the private executions channel, runs the tape.
    A changed code / policy / key binding on restart ENDS the old authorization; exposure stays managed under its recorded
    safety policy. Expiry stops additions; owned exits / protection continue.
 7. `canary-live` needs its OWN short-lived CANARY authorization (`arm-live --canary-pair .. --canary-max-consideration ..
-   --canary-max-duration-ms .. --canary-loss-acknowledged true`): one bounded entry on one pair; ordinary and canary
-   authorizations are mutually exclusive on an account. It costs fees and can lose money.
+   --canary-max-duration-ms .. --canary-loss-acknowledged true`): the CANARY authorization enters `LIVE_ARMED` (reducer
+   `MODE_TRANSITION`), only `CANARY_ENTRY` intents on the authorized pair pass (`CANARY_PAIR` in the shared permission law,
+   `CANARY_BOUNDS` in the reducer), the position duration is bounded by the canary, ordinary and canary authorizations are
+   mutually exclusive on an account. A canary that ran ARMED and reconciled COMPLETE at stop ends `COMPLETED` (lifecycle
+   `CANARY_COMPLETED`; `CANARY_INCOMPLETE:<reason>` otherwise) — the durable `canaryEvidence` step 5 requires. It costs
+   fees and can lose money. It comes BEFORE the ordinary arm, never instead of it.
 
 The cockpit door (`POST /api/judge/arm`, steps `challenge` / `confirm`) needs the session cookie, the CSRF header,
 same origin, the FRESH password (limiter-governed), the exact phrase and the account / allocation / policy / release
@@ -142,6 +160,22 @@ process. No cockpit button issues an arm.
   receipt-floored and bounded (720 rows).
 - Live owner slot, nonce store and writer epochs are per installation; two installations sharing one key are outside
   this build's guarantees.
+- Native permission vocabulary (closeout R05): the `GetApiKeyInfo` documentation page returned 404 during this repair, so
+  only the identifiers the ticket names — `query-funds`, `query-open-trades`, `modify-trades` — are KNOWN; nothing else
+  is invented. The remaining capabilities are PROVEN by documented endpoint probes in preflight (`CancelOrder` with the
+  synthetic txid `OPROBE-00000-000000` → `EOrder:Unknown order` proves cancel permission, `Permission denied` denies it;
+  `ClosedOrders`; `GetWebSocketsToken`); an unproven capability is `CAPABILITY_<X>_NOT_PROVEN`. Available funds come from
+  `BalanceEx` (`balance` − `hold_trade`), never from the gross balance.
+- Book checksum (closeout R09): the feed's CRC32 is verified against the published documentation example (BTC/USD, ten
+  asks / ten bids, checksum `3310070434`) — a real example, not a self-referential vector.
+- Challenger verdicts (closeout R13): the production Judge records no per-decision challenger verdicts yet
+  (`DECISION_RECORDED.verdicts` stays absent), so the D1 / D2 / D3 / ablation arms report `UNSCORABLE` with
+  `NO_RECORDED_VERDICTS`; the setup arms, `REF_COMBINED`, `CASH` and the seeded control are SCORED from independent
+  simulated accounts over the durable stream. The D4 exit-policy views need their own accounts (`UNSCORABLE` with reason).
+- Code identity (closeout R14): `codeTreeDigest` is `null` on a dirty worktree (modified OR untracked files); a release
+  prepared or an arm attempted from an uncommitted tree is refused (`CODE_TREE_DIGEST_MISSING`, `CODE_IDENTITY_UNKNOWN`).
+- The canary path is exercised end to end against a SCRIPTED venue only (arming `R14-04`, section-d `D6`); no canary has
+  run against the real venue in this build.
 
 ## Consistency review record (ticket §12, one deliberate pass)
 
@@ -161,12 +195,12 @@ journal commit); the context builder bound the open 5m interval as a complete co
 the reducer had no canary consideration / pair / count bound (added); the composition did not connect the private
 executions channel on LIVE start (added).
 
-Named, uncovered cases (not silently green): (1) a late adapter callback arriving AFTER `stop()` released the writer is
-refused by the epoch fence (D03/D07) but no test drives a socket callback through the closed dispatcher; (2) the
-executions-channel reconnect / resubscribe after a sequence gap emits `RECONCILIATION_REQUIRED` (E04) but the
-re-subscription itself is not exercised end-to-end; (3) file-system fsync / short-write faults on the projection and
-recorder files are handled as logged failures, not injected in tests; (4) the canary run is implemented and unit-bound
-but was never executed against a venue.
+Previously named uncovered cases, now closed by the R01–R16 closeout (`docs/JUDGE-CLOSEOUT-ACCEPTANCE.md`): (1) a late
+adapter callback after `stop()` is fenced through the closed dispatcher (projection `R16-05`, counted, no commit, no
+throw); (2) the executions-channel reconnect re-subscribes with a fresh token and reconciles the gap (runtime
+`R15-03/R15-04`); (3) an unwritable projection / checkpoint / snapshot directory is a counted, reported failure that
+never stops the run (projection `R16-05`), a recorder failure closes admission (evidence `R11-03`); (4) the canary run is
+exercised end to end against a scripted venue (arming `R14-04`, section-d `D6`) — still never against the real venue.
 
 ## Traceability (acceptance id → tests → boundary)
 
@@ -271,3 +305,32 @@ without `PERSIST_TEST_DATABASE_URL` / `DATABASE_URL`; the final gate ran them wi
 | CATALYST_TRANSMISSION | all of the above + a COMPLETED / ANALYZED case with a recomputed context and a PRIMARY_CONFIRMED mapped event | whale metrics |
 
 Absent optional data never forbids a market setup; a missing executable book or credible cost always does.
+
+## Closeout R01–R16 traceability (this repair)
+
+The independent-review closeout (`docs/JUDGE-CLOSEOUT-ACCEPTANCE.md`) carries one row per assertion with baseline /
+candidate results and evidence-log locations. Test files: `test/judge-repair-authority.test.js` (R01),
+`test/judge-repair-accounting.test.js` (R06), `test/judge-repair-exit.test.js` (R02/R04), `test/judge-repair-kraken.test.js`
+(R03/R05), `test/judge-repair-restart.test.js` (R07), `test/judge-repair-runtime.test.js` (R08/R09/R15),
+`test/judge-repair-evidence.test.js` (R10/R11), `test/judge-repair-evaluation.test.js` (R12/R13),
+`test/judge-repair-arming.test.js` (R14), `test/judge-repair-projection.test.js` (R16), `test/judge-repair-pg.test.js`
+(R01-07 / R15-01 / R16-04 over competing PostgreSQL sessions), `test/judge-repair-section-d.test.js` (D1–D6 over
+PostgreSQL through the actual CLI / composition with scripted transports).
+
+| Law | Production boundary |
+|---|---|
+| ONE entry-authority law before commit and again immediately before the send (R01) | `execution/authority.js` (`entryPermission`, `entryAuthority`, `reductionAuthority`) used by `judge/judge.js`, `execution/dispatcher.js`, `watch/watch.js` |
+| cancel → confirm → reconcile → sell; protection as a SET of children (R02/R04) | `watch/watch.js` (phase `RECONCILING`), `execution/reducer.js` (`protection.children`, `deriveProtection`) |
+| hydrate ownership, query open + closed orders, validated pages, durable dedup (R03) | `execution/kraken-adapter.js` (`hydrate`, `reconcile`, `paged`) |
+| documented permission identifiers, probes, fixed WS host, available funds (R05) | `execution/kraken-adapter.js` (`KRAKEN_NATIVE_PERMISSIONS`, `PROBE_TXID`, `connectExecutions`, `BalanceEx`) |
+| exact net basis, adjustment dedup, durable valuation, synchronized correlation (R06) | `execution/reducer.js` (`recomputeRealized`, adjustments), `judge/composition.js` (`publishValuation`), `judge/risk.js` |
+| durable Watch / PAPER restart (R07) | `watch/watch.js` (`restoredExit`, `targetPerUnit`), `execution/paper-adapter.js` (`restore`), `judge/composition.js` (checkpoint) |
+| clock qualification, scheduler independence, deterministic ranking, bounded queues, serialized ticks (R08) | `judge/composition.js` (`qualifyClock`, `SCHEDULER_TICK_MS`, `tick`), `judge/judge.js` (`admissionGate`), `execution/dispatcher.js` (`pumpSafety` / `pumpEntry`, `OVERLOAD`) |
+| immutable exact-depth feed, real checksum example, specs via transport, coverage invalidation (R09) | `execution/feed.js`, `judge/composition.js` (`ensureSpecs`) |
+| lawful v2 evidence normalization, production catalyst / correction delivery, whole-bundle cache key, absorption windows (R10) | `judge/intake.js` (`primaryConfirmedCatalyst`, `primaryCorrections`, `caseBytesKey`), `judge/composition.js` (`deliverEvidence`), `judge/setups.js` |
+| sealed recordings, persisted snapshots, verify never complete for partial data (R11) | `judge/recorder.js` (manifest, `verifyRecording`), `judge/snapshot-store.js` |
+| D1 displayed-depth stress, D3 target identity, D2 covered intervals (R12) | `judge/challengers.js` (`scaleDisplayedDepth`, `peerMembership.self`, `windowsCovered`) |
+| independent simulated arms, durable splits, bounded pages, complete outcome reporting (R13) | `judge/challengers.js` (`evaluateArms`, `declareSplits`), `judge/commands.js` (`evaluate`) |
+| shared manifest semantics, no null qualification, canary permission runs canary, canary evidence, code identity, durable audit / challenge / limiter (R14) | `judge/arming.js` (`releaseBlockers`, `manifestSemanticsError`, `buildLiveAuthorization`), `execution/reducer.js` (`canaryEvidence`, `COMPLETED`), `judge/owner.js`, `judge/composition.js` (`stop`) |
+| one lifecycle law, atomic slot, release after handoff, reconnect + reconcile (R15) | `judge/composition.js` (`start` / `stop`), `execution/journal.js` (live owner), `execution/kraken-adapter.js` (`connectExecutions`) |
+| bounded checkpoints, owned base in the projection, bound projection, restore failure, fenced late callbacks, file failures (R16) | `judge/composition.js` (`projection`, `publishProjection`), `state/execution-projection.js`, `ui/server.js` (`judgeView`), `state/machine.js` |

@@ -2,7 +2,7 @@
 // halves). Memory journal only here (no database); the same reducer runs under PostgreSQL in judge-journal-pg.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { paperAccount, fakeClock, eventsFor, SAMPLE_LIMITS } from './helpers/judge.js';
+import { paperAccount, fakeClock, eventsFor, SAMPLE_LIMITS, canaryCompleted } from './helpers/judge.js';
 import { availableCash, ownedBase, slotsUsed, ReducerRefusal } from '../execution/reducer.js';
 import { JournalError, createMemoryJournal } from '../execution/journal.js';
 
@@ -115,6 +115,8 @@ test('RED-07. restrictions and modes: KILL moves to REDUCE_ONLY and blocks reser
   const live = await paperAccount({ accountId: 'live-test', init: { accountKind: 'LIVE' } }); const L = live.F; s = await live.state(); assert.equal(s.mode, 'LIVE_UNARMED');
   await refused(() => live.append(L.authorized('auth0', { limits: null })), 'OWNER_LIMITS_REQUIRED'); await refused(() => live.append(L.authorized('auth0', { keyFingerprint: null })), 'KEY_BINDING_REQUIRED');
   await refused(() => live.append(L.mode('LIVE_UNARMED', 'LIVE_ARMED')), 'ARM_REQUIRED');
+  // closeout R14 (old law: any LIVE_ARM with limits + key committed; new law: a COMPLETED reconciled canary under the same release first)
+  await refused(() => live.append(L.authorized('auth1')), 'CANARY_EVIDENCE_REQUIRED'); await live.append(canaryCompleted(L, live.clock)); await refused(() => live.append(L.authorized('auth1', { releaseDigest: 'e'.repeat(64) })), 'CANARY_EVIDENCE_REQUIRED');
   await live.append(L.authorized('auth1')); await refused(() => live.append(L.authorized('can1', { kind: 'CANARY', canary: { pair: 'XBT/USD', maxBuyConsiderationWithFees: '10', maxDurationMs: 600000, lossAcknowledged: true } })), 'AUTHORIZATION_EXCLUSIVE');
   await live.append(L.mode('LIVE_UNARMED', 'LIVE_ARMED', { authorizationId: 'auth1' })); s = await live.state(); assert.equal(s.mode, 'LIVE_ARMED');
   live.clock.advance(3_600_001); await live.append([L.hypothesis('d1'), L.decision('d1')]); await refused(() => live.append(L.reserve('r1', 'd1')), 'ARM_EXPIRED');
