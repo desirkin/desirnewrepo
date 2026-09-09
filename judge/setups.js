@@ -55,14 +55,20 @@ export function fastClauses(setupId, frozen, fast) {
 }
 // the target scenario capped by a nearer confirmed resistance above the proposed entry (never an invented level)
 export function scenarioTarget(frozen, bars, entry, referenceTs) { const raw = frozen.scenarioRaw; if (raw === null) return { target: null, cappedBy: null }; const res = nearestResistanceAbove(bars, Number(entry), { referenceTs }); if (res && M.lt(d(res.price), raw)) return { target: d(res.price), cappedBy: { price: d(res.price), periodStartTs: res.periodStartTs } }; return { target: raw, cappedBy: null }; }
-export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisionTs, event = null }) {
+// ablate (focused completion §5, MOMENTUM_ABLATION): an explicit research-only removal of NAMED entry clauses of ONE setup; the removed
+// clauses are still measured and reported (`ablated`), they simply do not decide. Nothing else changes; PAPER / LIVE never pass it.
+export const ABLATABLE_CLAUSES = Object.freeze({ RANGE_IGNITION: ['FI15', 'FI60_POSITIVE'] });
+export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisionTs, event = null, ablate = null }) {
   if (!SETUPS.includes(setupId)) throw new Error(`unknown setup ${setupId}`);
-  const structural = structuralClauses(setupId, frozen, ind, fast, { decisionTs, event }); const quick = fastClauses(setupId, frozen, fast); const clauses = [...structural, ...quick];
+  if (ablate && ablate.setupId === setupId) { const allowed = ABLATABLE_CLAUSES[setupId] ?? []; const bad = (ablate.clauses ?? []).filter((id) => !allowed.includes(id)); if (bad.length) throw new Error(`clauses ${bad.join(',')} are not ablatable for ${setupId}`); }
+  const structural = structuralClauses(setupId, frozen, ind, fast, { decisionTs, event }); const quick = fastClauses(setupId, frozen, fast); const all = [...structural, ...quick];
+  let ablated = []; if (ablate && ablate.setupId === setupId) ablated = all.filter((x) => ablate.clauses.includes(x.id)).map((x) => ({ ...x, ablated: true }));
+  const clauses = ablated.length ? all.filter((x) => !ablate.clauses.includes(x.id)) : all;
   const needsData = clauses.filter((x) => x.value === null && !x.ok).map((x) => x.id); const refused = clauses.filter((x) => !x.ok).map((x) => x.id);
   const t = scenarioTarget(frozen, bars, entry, frozen.referenceTs); const stopOk = M.isPositive(frozen.structuralStop) && M.lt(frozen.structuralStop, entry);
   if (!stopOk) refused.push('STOP_GEOMETRY');
   const state = refused.length === 0 ? 'ELIGIBLE' : needsData.length && needsData.length === refused.length ? 'NEEDS_DATA' : 'REFUSED';
-  return Object.freeze({ setupId, strategyVersion: STRATEGY_VERSION, state, clauses, refused, needsData, invalidation: { structuralStop: frozen.structuralStop, kind: 'ABSOLUTE_PRICE_BELOW' }, scenario: { target: t.target, cappedBy: t.cappedBy, kind: 'SCENARIO_NOT_FORECAST' }, maxEntryLevel: frozen.maxEntryLevel, maxDurationMs: REFERENCE.maxDurationMs, hypothesisDigest: hypothesisDigest(frozen), calibrationState: 'UNVALIDATED_HYPOTHESIS' });
+  return Object.freeze({ setupId, strategyVersion: STRATEGY_VERSION, state, clauses: ablated.length ? [...clauses, ...ablated] : clauses, ablated: ablated.map((x) => x.id), refused, needsData, invalidation: { structuralStop: frozen.structuralStop, kind: 'ABSOLUTE_PRICE_BELOW' }, scenario: { target: t.target, cappedBy: t.cappedBy, kind: 'SCENARIO_NOT_FORECAST' }, maxEntryLevel: frozen.maxEntryLevel, maxDurationMs: REFERENCE.maxDurationMs, hypothesisDigest: hypothesisDigest(frozen), calibrationState: 'UNVALIDATED_HYPOTHESIS' });
 }
 // ---- the persistence / expiry / cooldown law over accepted books --------------------------------------------------------------
 export function createConfirmation({ level, triggerTs, expiryMs = REFERENCE.proposalExpiryMs, minBooks = REFERENCE.persistenceBooks, spanMs = REFERENCE.persistenceSpanMs }) {

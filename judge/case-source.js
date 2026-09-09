@@ -17,5 +17,5 @@ export function createCaseSource({ casesDir, clock, mode = 'PAPER', maxDirs = 25
     for (const [d, e] of consumed) { if (!e.verified?.ok) continue; const c = consumeCase(e.verified, { canonicalCoin, decisionTs, requireContext }); if (!c.ok) { refused.push({ dir: d, reasons: c.reasons.slice(0, 4) }); continue; } if (mode !== 'REPLAY' && c.provenance !== 'LIVE_MODEL') { refused.push({ dir: d, reasons: ['SYNTHETIC_PROVENANCE_REFUSED'] }); continue; } if (!best || c.completionTs > best.completionTs) best = { ...c, dir: d }; }
     return best ? { case: best, refused } : { case: null, refused: refused.slice(-8) };
   }
-  return { refresh, consumed: (coin, { decisionTs, requireContext = true } = {}) => consumedFor(coin, decisionTs, { requireContext }).case, status: () => ({ casesDir, known: consumed.size, verified: [...consumed.values()].filter((e) => e.verified?.ok).length }), detail: consumedFor };
+  return { refresh, consumed: (coin, { decisionTs, requireContext = true } = {}) => consumedFor(coin, decisionTs, { requireContext }).case, verified: (dir) => consumed.get(dir)?.verified ?? null, status: () => ({ casesDir, known: consumed.size, verified: [...consumed.values()].filter((e) => e.verified?.ok).length }), detail: consumedFor };
 }

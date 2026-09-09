@@ -52,7 +52,7 @@ if (!TEST_URL) {
     try {
       assert.equal(await db.connect(), true);
       const m = await runMigrations(db);
-      assert.equal(m.schemaVersion, 8, 'social evidence rides the existing frozen event-root schema — no new migration (JUDGE execution schema 8 is additive; 1-7 untouched)');
+      assert.equal(m.schemaVersion, 9, 'old law 8, new law 9 (focused-completion experiment records, additive): social evidence rides the existing frozen event-root schema — no new migration (JUDGE execution schema 8 is additive; 1-7 untouched)');
       await fn({ db, SCHEMA, journal: mkJournal(db) });
     } finally {
       await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});

@@ -65,6 +65,8 @@ export function createFlowTracker({ retentionMs = 22 * BAR_MS, maxTrades = 50_00
     add(t) { if (t.fromSubscriptionSnapshot) return false; if (epoch !== null && t.feedEpoch !== epoch) { epochChanges += 1; } epoch = t.feedEpoch; const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (ids.has(k)) { dropped += 1; return false; } ids.add(k); trades.push(t); lastTs = Math.max(lastTs, t.eventTs); if (trades.length > maxTrades) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); overflow += 1; } return true; },
     advance(now) { const cut = now - retentionMs; while (trades.length && trades[0].eventTs < cut) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); } },
     fi(startTs, endTs) { return flowImbalance(trades, startTs, endTs); }, notional(startTs, endTs) { return windowNotional(trades, startTs, endTs); }, vwap(startTs, endTs) { return vwap(trades, startTs, endTs); }, rv60(decisionTs, coverage) { return relativeVolume60(trades, decisionTs, coverage); },
+    // the trades inside [startTs, endTs) in receipt order: the challengers' window input (focused completion §5), never a copy of the whole tape
+    window(startTs, endTs) { return trades.filter((t) => t.eventTs >= startTs && t.eventTs < endTs); },
     snapshot: () => trades.slice(), status: () => ({ trades: trades.length, duplicatesDropped: dropped, overflow, epoch, epochChanges, lastTs }),
   };
 }

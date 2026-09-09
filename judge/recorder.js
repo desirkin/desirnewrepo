@@ -12,29 +12,40 @@ import { atomicWriteJson } from '../lib/jsonl.js';
 
 export const RECORDING_VERSION = 'judge-feed-recording-1';
 export const MANIFEST_VERSION = 'judge-feed-recording-manifest-1';
-export const RECORDER_DEFAULTS = Object.freeze({ maxBytesPerFile: 256 * 1024 * 1024, maxFiles: 8 });
+export const RECORDER_DEFAULTS = Object.freeze({ maxBytesPerFile: 256 * 1024 * 1024, maxFiles: 8, maxTypedRecords: Object.freeze({ NOMINATION: 4096, INSTRUMENT: 2048, FEE: 64, HISTORY: 4096, CASE: 1024, CONTROL: 4096, WHALE: 4096, PEER: 1024 }) });
+// focused completion §3: typed experiment-input rows live beside the raw feed rows in the SAME sealed segments, ordered by one
+// capture sequence (seq) that every row carries; the manifest names the bundle version, the per-kind counts (capabilities), the
+// experiment binding and the replay tie-order law. Readers written for raw-only recordings keep working: replay skips typed rows.
+export const BUNDLE_VERSION = 'judge-experiment-bundle-1';
+export const TIE_ORDER_VERSION = 'judge-replay-tie-order-1';
+export const RECORD_KINDS = Object.freeze(['FEED', 'CONNECT', 'DISCONNECT', 'NOMINATION', 'INSTRUMENT', 'FEE', 'HISTORY', 'CASE', 'CONTROL', 'WHALE', 'PEER']);
+export const TYPED_KINDS = Object.freeze(RECORD_KINDS.filter((k) => !['FEED', 'CONNECT', 'DISCONNECT'].includes(k)));
 export const RECORDING_STATES = Object.freeze(['RECORDING', 'COMPLETE', 'INTERRUPTED']);
 export class RecordingIntegrityError extends Error { constructor(code, message) { super(`${code}: ${message}`); this.code = code; } }
 const manifestFile = (dir) => path.join(dir, 'manifest.json');
 const segmentFile = (dir, i) => path.join(dir, `feed-${String(i).padStart(3, '0')}.jsonl`);
 
-export function createFeedRecorder({ dir, clock, limits = RECORDER_DEFAULTS, log = () => {}, fs = { appendFileSync, writeManifest: atomicWriteJson } }) {
-  mkdirSync(dir, { recursive: true }); let fileIndex = 0; let bytes = 0; let total = 0; let messages = 0; let state = 'RECORDING'; let reason = null; let firstTs = null; let lastTs = null;
+export function createFeedRecorder({ dir, clock, limits = RECORDER_DEFAULTS, log = () => {}, fs = { appendFileSync, writeManifest: atomicWriteJson }, binding = null, validateTyped = null }) {
+  mkdirSync(dir, { recursive: true }); let fileIndex = 0; let bytes = 0; let total = 0; let messages = 0; let state = 'RECORDING'; let reason = null; let firstTs = null; let lastTs = null; let seq = 0; let records = 0; const capabilities = {}; for (const k of RECORD_KINDS) capabilities[k] = 0; const typedLimits = limits.maxTypedRecords ?? RECORDER_DEFAULTS.maxTypedRecords;
   const segments = []; let cur = null; const startedTs = clock();
   const open = (i) => { const header = `${JSON.stringify({ header: RECORDING_VERSION, startedTs, segment: i })}\n`; fs.appendFileSync(segmentFile(dir, i), header); cur = { index: i, file: path.basename(segmentFile(dir, i)), bytes: Buffer.byteLength(header), messages: 0, hash: createHash('sha256').update(header), firstTs: null, lastTs: null }; bytes = cur.bytes; total += cur.bytes; };
   const seal = (seg) => ({ index: seg.index, file: seg.file, bytes: seg.bytes, messages: seg.messages, sha256: seg.hash.digest('hex'), firstTs: seg.firstTs, lastTs: seg.lastTs });
-  const manifest = () => ({ manifestVersion: MANIFEST_VERSION, recordingVersion: RECORDING_VERSION, state, reason, startedTs, stoppedTs: state === 'RECORDING' ? null : clock(), segments: [...segments, ...(cur ? [{ index: cur.index, file: cur.file, bytes: cur.bytes, messages: cur.messages, sha256: cur.hash.copy().digest('hex'), firstTs: cur.firstTs, lastTs: cur.lastTs }] : [])], messages, bytes: total, firstTs, lastTs });
+  const manifest = () => ({ manifestVersion: MANIFEST_VERSION, recordingVersion: RECORDING_VERSION, bundleVersion: BUNDLE_VERSION, tieOrderVersion: TIE_ORDER_VERSION, binding, capabilities: { ...capabilities }, lastSeq: seq, records, state, reason, startedTs, stoppedTs: state === 'RECORDING' ? null : clock(), segments: [...segments, ...(cur ? [{ index: cur.index, file: cur.file, bytes: cur.bytes, messages: cur.messages, sha256: cur.hash.copy().digest('hex'), firstTs: cur.firstTs, lastTs: cur.lastTs }] : [])], messages, bytes: total, firstTs, lastTs });
   const writeManifest = () => { try { fs.writeManifest(manifestFile(dir), manifest()); return true; } catch (err) { log(`feed recorder manifest write failed: ${err.message}`); return false; } };
   const interrupt = (why) => { if (state !== 'RECORDING') return; state = 'INTERRUPTED'; reason = why; if (cur) { segments.push(seal(cur)); cur = null; } writeManifest(); log(`feed recorder INTERRUPTED: ${why}`); };
   try { open(0); writeManifest(); } catch (err) { interrupt(`open: ${err.message}`); }
-  function record(raw, receiptTs, { connect = false, disconnect = false } = {}) {
+  function record(raw, receiptTs, { connect = false, disconnect = false, kind = null, payload = null } = {}) {
+    const k = kind ?? (connect ? 'CONNECT' : disconnect ? 'DISCONNECT' : 'FEED'); if (!RECORD_KINDS.includes(k)) throw new RecordingIntegrityError('RECORD_KIND', `unknown record kind ${String(kind).slice(0, 24)}`);
     if (state !== 'RECORDING' || !cur) return false;
-    const line = `${JSON.stringify({ receiptTs, raw: connect || disconnect ? null : String(raw), connect: connect || undefined, disconnect: disconnect || undefined })}\n`; const n = Buffer.byteLength(line);
+    // a typed row is validated by the caller-supplied closed validator BEFORE it is written (generation-time law), and bounded per kind: an
+    // exceeded bound INTERRUPTS the recording with the bound named — never a silently dropped input
+    if (TYPED_KINDS.includes(k)) { const e = validateTyped ? validateTyped(k, payload) : null; if (e) { interrupt(`typed record refused: ${e}`); return false; } if (capabilities[k] + 1 > (typedLimits[k] ?? Infinity)) { interrupt(`typed record bound ${k} ${typedLimits[k]} reached at ${receiptTs}`); return false; } }
+    const line = `${JSON.stringify(TYPED_KINDS.includes(k) ? { seq: seq + 1, receiptTs, raw: null, kind: k, payload } : { seq: seq + 1, receiptTs, raw: k === 'FEED' ? String(raw) : null, connect: connect || undefined, disconnect: disconnect || undefined })}\n`; const n = Buffer.byteLength(line);
     if (bytes + n > limits.maxBytesPerFile) { segments.push(seal(cur)); cur = null; fileIndex += 1; if (fileIndex >= limits.maxFiles) { interrupt(`file limit ${limits.maxFiles} reached at ${receiptTs}`); return false; } try { open(fileIndex); } catch (err) { interrupt(`open: ${err.message}`); return false; } writeManifest(); }
     try { fs.appendFileSync(segmentFile(dir, cur.index), line); } catch (err) { interrupt(`write failed: ${err.message}`); return false; }
-    cur.hash.update(line); cur.bytes += n; bytes += n; total += n; cur.messages += 1; messages += 1; if (cur.firstTs === null) cur.firstTs = receiptTs; cur.lastTs = receiptTs; if (firstTs === null) firstTs = receiptTs; lastTs = receiptTs; return true;
+    cur.hash.update(line); cur.bytes += n; bytes += n; total += n; cur.messages += 1; records += 1; if (!TYPED_KINDS.includes(k)) messages += 1; seq += 1; capabilities[k] += 1; if (cur.firstTs === null) cur.firstTs = receiptTs; cur.lastTs = receiptTs; if (firstTs === null) firstTs = receiptTs; lastTs = receiptTs; return true;
   }
-  return { record, status: () => ({ recordingVersion: RECORDING_VERSION, state, reason, dir, files: segments.length + (cur ? 1 : 0), bytes: total, messages, firstTs, lastTs }), manifest,
+  return { record, status: () => ({ recordingVersion: RECORDING_VERSION, bundleVersion: BUNDLE_VERSION, state, reason, dir, files: segments.length + (cur ? 1 : 0), bytes: total, messages, records, lastSeq: seq, capabilities: { ...capabilities }, firstTs, lastTs }), manifest,
     // a clean stop seals the recording COMPLETE; the manifest is the closed inventory of every segment
     stop: () => { if (state !== 'RECORDING') return state; if (cur) { segments.push(seal(cur)); cur = null; } state = 'COMPLETE'; if (!writeManifest()) { state = 'INTERRUPTED'; reason = 'manifest write failed at stop'; } return state; } };
 }
@@ -49,8 +60,8 @@ export function readManifest(dir) {
   for (let i = m.segments.length; existsSync(segmentFile(dir, i)); i += 1) throw new RecordingIntegrityError('SEGMENT_UNLISTED', `segment ${i} exists beyond the sealed inventory`);
   return m;
 }
-export function verifyRecording(dir) { try { const m = readManifest(dir); let messages = 0; for (const row of readRecording(dir)) if (typeof row.receiptTs === 'number') messages += 1; const complete = m.state === 'COMPLETE' && messages === m.messages; return { ok: complete, complete, state: m.state, reason: complete ? null : m.state !== 'COMPLETE' ? `recording ${m.state}: ${m.reason ?? 'no clean stop'}` : `message count ${messages} != sealed ${m.messages}`, segments: m.segments.length, messages, firstTs: m.firstTs, lastTs: m.lastTs }; } catch (err) { let state = null; try { const raw = JSON.parse(readFileSync(manifestFile(dir), 'utf8')); state = RECORDING_STATES.includes(raw?.state) ? raw.state : null; } catch { state = null; } return { ok: false, complete: false, state, reason: err.message, segments: 0, messages: 0 }; } }
-// read a sealed recording in order; each entry is { receiptTs, raw } or a connect / disconnect marker; integrity verified first
+export function verifyRecording(dir) { try { const m = readManifest(dir); let messages = 0; let records = 0; for (const row of readRecording(dir)) if (typeof row.receiptTs === 'number') { records += 1; if (!(row.kind && TYPED_KINDS.includes(row.kind))) messages += 1; } const complete = m.state === 'COMPLETE' && messages === m.messages && (!Number.isSafeInteger(m.records) || records === m.records); return { ok: complete, complete, state: m.state, reason: complete ? null : m.state !== 'COMPLETE' ? `recording ${m.state}: ${m.reason ?? 'no clean stop'}` : messages !== m.messages ? `message count ${messages} != sealed ${m.messages}` : `record count ${records} != sealed ${m.records}`, segments: m.segments.length, messages, records, bundleVersion: m.bundleVersion ?? null, capabilities: m.capabilities ?? null, firstTs: m.firstTs, lastTs: m.lastTs }; } catch (err) { let state = null; try { const raw = JSON.parse(readFileSync(manifestFile(dir), 'utf8')); state = RECORDING_STATES.includes(raw?.state) ? raw.state : null; } catch { state = null; } return { ok: false, complete: false, state, reason: err.message, segments: 0, messages: 0 }; } }
+// read a sealed recording in order; each entry is { seq?, receiptTs, raw } or a connect / disconnect marker or a typed { kind, payload } row; integrity verified first
 export function* readRecording(dir) {
   const m = readManifest(dir);
   for (const s of m.segments) { const file = path.join(dir, s.file); let n = 0; for (const line of readFileSync(file, 'utf8').split('\n')) { if (!line) continue; const row = JSON.parse(line); if (row.header) { if (row.header !== RECORDING_VERSION) throw new RecordingIntegrityError('VERSION', `recording version ${row.header} is not ${RECORDING_VERSION}`); continue; } n += 1; yield row; } if (n !== s.messages) throw new RecordingIntegrityError('SEGMENT_MESSAGES', `segment ${s.index}: ${n} messages read, ${s.messages} sealed`); }
@@ -60,7 +71,7 @@ export function* readRecording(dir) {
 export async function replayRecording({ dir, feed, clock, onTick = null, tickMs = 250, maxMessages = Infinity }) {
   let n = 0; let nextTick = null; let firstTs = null; let lastTs = null;
   for (const row of readRecording(dir)) {
-    if (n >= maxMessages) break; if (typeof row.receiptTs !== 'number') continue;
+    if (n >= maxMessages) break; if (typeof row.receiptTs !== 'number') continue; if (row.kind && TYPED_KINDS.includes(row.kind)) continue; // typed experiment inputs are consumed by the experiment replay, never fed to the feed
     if (nextTick === null) { nextTick = Math.floor(row.receiptTs / tickMs) * tickMs + tickMs; firstTs = row.receiptTs; }
     while (onTick && row.receiptTs >= nextTick) { clock.setWall(nextTick); await onTick(nextTick); nextTick += tickMs; }
     clock.setWall(row.receiptTs); lastTs = row.receiptTs;

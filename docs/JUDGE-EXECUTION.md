@@ -56,6 +56,13 @@ node bin/judge.js inspect          --policy P [--account A]
 node bin/judge.js run-observe      --policy P [--pairs XBT/USD,SOL/USD] [--record DIR] [--minutes N]
 node bin/judge.js init-paper       --policy P [--account A] --owner-stdin true
 node bin/judge.js replay           --policy P --recording DIR [--pairs ..] [--specs FILE] [--out FILE]
+node bin/judge.js replay-experiment --policy P --bundle DIR --experiment ID [--arms A,B] [--seed S] [--stop-at-seq N] [--expect-policy-binding true] [--out FILE]
+node bin/judge.js declare-experiment --policy P --experiment ID --start 2026-10-01T00:00:00Z --duration-ms N --owner-stdin true [--development-fraction F] [--validation-fraction F] [--embargo-ms N] [--lookback-ms N] [--decision-ms N] [--max-outcome-ms N] [--publication-floor-ms N] [--arms ..] [--seed S] [--source-prefix P] [--exploratory true]
+node bin/judge.js evaluate-experiment --policy P --experiment ID --report FILE --split DEVELOPMENT|VALIDATION [--out FILE]
+node bin/judge.js lock-candidate   --policy P --experiment ID --arm ARM --owner-stdin true
+node bin/judge.js open-holdout     --policy P --experiment ID --run-id ID --report FILE --owner-stdin true [--out FILE]
+node bin/judge.js verify           [--bundle DIR] [--experiment ID] [--manifest FILE --experiment ID] (in addition to the existing --policy/--account/--case/--recording/--approval)
+node bin/judge.js prepare-release  --policy P --experiment ID ... (the holdout chain is read from the experiment store; without --experiment the candidate is BLOCKED: HOLDOUT_CHAIN_MISSING)
 node bin/judge.js run-paper        --policy P --account A --owner-stdin true [--pairs ..] [--cases DIR] [--record DIR]
 node bin/judge.js preflight-live   --policy P --account A --owner-stdin true --allow-private true
 node bin/judge.js arm-live         --policy P --account A --approval FILE --allocation-ceiling USD --owner-stdin true --challenge true
@@ -334,3 +341,100 @@ PostgreSQL through the actual CLI / composition with scripted transports).
 | shared manifest semantics, no null qualification, canary permission runs canary, canary evidence, code identity, durable audit / challenge / limiter (R14) | `judge/arming.js` (`releaseBlockers`, `manifestSemanticsError`, `buildLiveAuthorization`), `execution/reducer.js` (`canaryEvidence`, `COMPLETED`), `judge/owner.js`, `judge/composition.js` (`stop`) |
 | one lifecycle law, atomic slot, release after handoff, reconnect + reconcile (R15) | `judge/composition.js` (`start` / `stop`), `execution/journal.js` (live owner), `execution/kraken-adapter.js` (`connectExecutions`) |
 | bounded checkpoints, owned base in the projection, bound projection, restore failure, fenced late callbacks, file failures (R16) | `judge/composition.js` (`projection`, `publishProjection`), `state/execution-projection.js`, `ui/server.js` (`judgeView`), `state/machine.js` |
+
+## Focused completion (revision 2, 2026-09-09) — offline research over recorded inputs
+
+Everything in this section is offline code over recorded inputs. It authorizes no activation, no provider / model / exchange
+call, no paper deployment and no order. `READY_FOR_INDEPENDENT_REVIEW` for this delivery means the offline assertions below
+hold under the enforced guard; it does not mean paper operation or trading is verified.
+
+### The offline guard and the gate (N01 / N02)
+
+`test/helpers/offline-guard.mjs` is preloaded into every test process and every spawned Node child
+(`NODE_OPTIONS="--import=$PWD/test/helpers/offline-guard.mjs"`; children with replaced env objects are re-armed by the wrapped
+`child_process` API). It denies every non-loopback route BEFORE the transport opens — `fetch`, `WebSocket`, `net` / `tls`
+sockets, DNS lookups / resolves and datagrams — and appends one evidence record per attempt (kind, host, port, pid, run
+identity, test file, three stack frames; never a URL query, body, header or key) to a JSONL file OUTSIDE the tree
+(`COBRA_OFFLINE_GUARD_LOG`, default under the OS temp dir). Loopback HTTP / PostgreSQL behave normally. The guard's own
+self-tests run in separate processes with an explicit `selftest:<name>:<uuid>` run identity and assert the exact expected
+denial records; nothing else is exempt, by file name or otherwise. The gate:
+
+```
+NODE_OPTIONS="--import=$PWD/test/helpers/offline-guard.mjs" COBRA_OFFLINE_GUARD_LOG=/tmp/guard.jsonl COBRA_OFFLINE_GUARD_RUN=suite \
+PERSIST_TEST_DATABASE_URL=postgresql://... node --test --test-concurrency=1
+node tools/offline-gate.mjs /tmp/guard.jsonl      # exit 1 when ANY non-selftest attempt was denied, even one the application caught
+```
+
+The reviewer's 14 (guarded baseline with PostgreSQL: 19) external WebSocket attempts came from LIVE compositions in
+`judge-arming`, `judge-repair-arming`, `judge-repair-kraken`, `judge-repair-runtime`, `judge-e2e-pg` and `judge-repair-pg`
+that omitted a WebSocket double, so `composeJudge` fell back to the process `WebSocket` and the real adapter opened
+`wss://ws-auth.kraken.com/v2`. Every such composition now receives `test/helpers/scripted-ws.js` — a scripted
+executions-channel venue (open, subscribe with the token, acknowledgement, sequenced executions and gaps, ping / pong, a
+venue-side drop with reconnect and a fresh token, the owner's close). The production adapter is unchanged.
+
+### The experiment input bundle (I01–I03)
+
+A recording made with `--record DIR` is now an input bundle: beside the exact feed rows the recorder writes typed rows —
+NOMINATION (as discovered, with its known-at), INSTRUMENT, FEE, HISTORY (the exact OHLC rows retrieved, their receipt clock and
+the provider's last committed bar), CASE (a consumed verified case: packet, selected analysis, the verifier's output with its
+digest, provenance re-derived from the verifier), CONTROL (every change) and, when supplied by research configuration, WHALE
+/ PEER. Every row carries one capture sequence; the manifest carries `bundleVersion`, per-kind `capabilities`, the
+experiment `binding` and the replay `tieOrderVersion`. Typed rows are validated by closed schemas BEFORE they are written
+(an invalid row INTERRUPTS the recording with the reason — never a silent strip), at reopen and at the evaluation APIs;
+identities (instrument / fee digests, packet and analysis ids, verification digest) are re-derived, never trusted as copied.
+Legacy raw-only recordings stay readable and replayable through the legacy `replay`; `replayCapabilities` names what they
+lack (raw-feed COMPLETE is not "inputs exist"). Bounds are explicit: per-kind record bounds interrupt the recording naming
+the bound, the bundle stores refuse beyond `maxNominationsPerReplay`, a CASE record is bounded in bytes. The case BYTES are
+not in the bundle: the verifier cannot be re-run offline; the intake consumer (`consumeCase`) is re-run at every replay
+decision clock on the carried verifier output (`caseVerification: CONSUMER_RERUN_VERIFIER_OUTPUT_CARRIED`).
+
+### The experiment replay engine (S01–S08)
+
+`judge/experiment-replay.js` replays one sealed bundle into independent REPLAY arms. Each funded arm is its own hypothetical
+account (USD 500 from the policy, its own memory journal / reducer / paper adapter with its own depletion / reservations /
+positions / Watch / Judge) composed through the production `composeJudge` with a research-only `armRule` (enabled setups,
+the RANGE_IGNITION FI15 / FI60_POSITIVE ablation, the seeded nomination thinning, the challenger whose verdict gates
+admission) or an `exitPolicy` (`{ plannedTarget: false }` disables ONLY the planned full exit at the frozen target). Arms:
+`REF_<setup>`, `REF_COMBINED`, `CASH`, `D1_PRESSURE_TO_PROGRESS`, `D2_FLOW_EVENT_RESPONSE` (needs WHALE), `D3_RESIDUAL_IGNITION`
+(needs PEER), `MOMENTUM_ABLATION`, `SEEDED_NOMINATION_CONTROL`, `D4_TRAIL_CONTINUATION_FUNDED`, `D4_TRAIL_CONTINUATION_MATCHED`
+(one isolated episode account per REF_COMBINED entry that reached its final R, the identical cloned entry, the alternative exit,
+never summed into a funded return). The admission law under a challenger arm: D1 admits only KNOWN ALLOW; D2 admits KNOWN ALLOW
+or KNOWN NO_RULE (a known absence of an anomaly) — missing evidence is UNKNOWN and refuses; D3 admits KNOWN ALLOW; every verdict
+is a closed record (`verdictRecords`) that names the decision it gated, and the decision record carries the verdict words.
+Tie order (`judge-replay-tie-order-1`, persisted in every report): timers due strictly before the next receipt fire first (the
+25 ms admission bucket, then at 250 ms boundaries the heartbeat), same-time records apply in capture order, then same-time
+timers, then scheduler drain and dispatcher queues, arms in declared order. Arm accounts are bound to experiment, code, policy,
+rule version, tie order, source prefix and seed; a dirty tree has no code identity (`codeIdentity: UNKNOWN_DIRTY_TREE`). Fills
+come only from subsequent eligible observations (the paper venue law). At the end an open position is CENSORED with a
+factual conservative mark or an unknown mark (equity null), never FLAT. Restart law: a run stopped at a sequence and a fresh
+replay of the same sealed prefix restore the same state (journal head, revision, depletion digest) in a fresh REPLAY
+namespace; there is no partial-state resume.
+
+Honest limitations: the challenger windows read the arm's own retained snapshots (180 s) — an anomaly response window older
+than that is UNKNOWN (BOOK_ENDPOINTS_MISSING); D3 peer returns come from the arm's own accepted books for admitted peers or
+from PEER records whose endpoints match the exact window, otherwise the peer stays missing (UNKNOWN, never ALLOW); the
+forward composition now closes live one-minute bars on every tick (previously only on the 10 s maintenance pass, which left a
+candidate without indicators for the confirming books).
+
+### The prospective experiment and the holdout chain (H01–H05, D01, D02)
+
+`judge/experiment.js` over `judge/experiment-store.js` (PostgreSQL migration 9 `serpent_experiment_records`, append-only,
+digest-chained, serialized per experiment with a revision check; a memory twin for offline tests). `declare-experiment`
+persists ONCE the exact UTC development / validation / holdout boundaries from a chosen future start + duration and the
+declared fractions (holdout = remainder), the embargo, the horizons (lookback, decision, max outcome, publication floor),
+the seed and the policy / code / strategy / arm-version / source bindings; a past start is refused unless `--exploratory
+true`, which can never open a holdout. Groups (episode level from a replay report; catalyst / source levels through the same
+API) are assigned by their first-known UTC instant; a group whose horizon spans a cutoff, starts inside the embargo after a
+cutoff or ends inside the embargo before one is PURGED whole; an incomplete outcome or unreached publication floor is PENDING;
+a late arrival keeps its UTC assignment and is flagged; groups outside the window are named. `evaluate-experiment` persists
+development / validation looks over a `replay-experiment` report and refuses HOLDOUT; `lock-candidate` requires both looks
+and locks once; `open-holdout` requires the lock and the completed window + outcome horizon, persists the opening record
+BEFORE computing anything, serializes concurrent openings to one, resumes under the same run id after a crash, refuses
+another run id, evaluates only the locked arm and persists the bound evaluation once. `verify --experiment` re-verifies the
+record chain; `prepare-release --experiment` embeds the store's holdout chain (lock → first opening → bound evaluation) and
+the release validator blocks `HOLDOUT_CHAIN_MISSING` / `HOLDOUT_CHAIN_INVALID` — legacy artifacts without a chain are
+unqualified; `verify --manifest --experiment` refuses a manifest whose embedded chain differs from the store.
+
+The legacy `evaluate` command and `evaluateArms` remain as HISTORICAL_ATTRIBUTION of one recorded ledger (`kind`,
+`limitation` fields): a filtered ledger is not a strategy comparison; the replay engine is. The legacy index-based
+`predeclareSplits` keeps its old behaviour for the legacy command and is reproduced as the defect it was (D02).

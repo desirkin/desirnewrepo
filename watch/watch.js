@@ -20,7 +20,10 @@ const PRIORITY = { OWNER_KILL: 'P1_KILL_OR_INVALID_PROTECTION', CRITICAL_OPERATI
 const ORDER = ['OWNER_KILL', 'CRITICAL_OPERATIONAL', 'PROTECTION_INVALID', 'FEED_UNUSABLE', 'NATIVE_STOP', 'STRUCTURAL_STOP', 'THESIS_FALSIFIED', 'DETERIORATION', 'TRAIL_CROSSED', 'PLANNED_TARGET', 'NO_PROGRESS', 'MAX_DURATION', 'RISK_POLICY'];
 const PROTECTIVE = new Set(['OWNER_KILL', 'CRITICAL_OPERATIONAL', 'PROTECTION_INVALID', 'FEED_UNUSABLE', 'NATIVE_STOP', 'STRUCTURAL_STOP', 'THESIS_FALSIFIED', 'DETERIORATION', 'TRAIL_CROSSED', 'MAX_DURATION', 'RISK_POLICY']);
 
-export function createWatch({ accountId, dispatcher, adapter, feed = null, clock, specOf, feeOf, controls = () => ({ kill: false, cage: false }), falsifiers = () => [], policy = WATCH_REFERENCE, onClosed = () => {}, snapshotStore = null, log = () => {} }) {
+// exitPolicy (focused completion §5, D4 alternative exit): `{ plannedTarget: false }` disables ONLY the planned full exit at the frozen target;
+// the trail and every higher-priority exit (kill, protection, stops, falsification, deterioration, feed) stay exactly as they are
+export function createWatch({ accountId, dispatcher, adapter, feed = null, clock, specOf, feeOf, controls = () => ({ kill: false, cage: false }), falsifiers = () => [], policy = WATCH_REFERENCE, onClosed = () => {}, snapshotStore = null, log = () => {}, exitPolicy = null }) {
+  const plannedTargetEnabled = !(exitPolicy && exitPolicy.plannedTarget === false);
   const P = policy; const T = new Map(); const now = () => clock.now(); const mono = () => clock.monotonic(); const counters = { books: 0, trades: 0, exitsStarted: 0, amends: 0, amendsCoalesced: 0, targetsHit: 0, deteriorations: 0, noProgress: 0, durations: 0, halted: 0, killRequested: 0, protectionMismatch: 0, reductionRefusals: 0, overlappedTicks: 0, snapshotPersistFailures: 0, eventLoopDelaySamples: [] }; let killComplete = false; let haltedLatched = false; let lastTickMono = null;
   const state = () => dispatcher.state(); const ev = dispatcher.ev;
   // durable restore (closeout R07): the per-unit target basis (POSITION_R), an in-progress exit (WATCH_STATE), the trail / highest bid
@@ -49,7 +52,7 @@ export function createWatch({ accountId, dispatcher, adapter, feed = null, clock
     const det = deterioration(pos, t, nowTs); if (det.active) reasons.push('DETERIORATION');
     if (feedHealth.critical && t.firstFillMono !== null) reasons.push('FEED_UNUSABLE');
     const R = pos.initialR.state === 'FINAL' ? pos.initialR.value : null; const nl = t.lastNetPnl;
-    if (R && nl) { if (pos.trailActive && t.lastBook && pos.protection.trigger && bookFacts(t.lastBook) && M.lte(bookFacts(t.lastBook).bestBid, pos.protection.trigger)) reasons.push('TRAIL_CROSSED'); if (t.targetPerUnit && M.gte(nl.cashIn, M.mul(t.targetPerUnit, residualOf(pos)))) reasons.push('PLANNED_TARGET'); const elapsed = t.firstFillMono === null ? 0 : mono() - t.firstFillMono; if (elapsed >= P.noProgress.afterMs) { const fi60 = t.flow.fi(nowTs - 60_000, nowTs); if (fi60.state === 'KNOWN' && t.maxNetPnl !== null && M.lt(t.maxNetPnl, M.mul(R, P.noProgress.minRFraction)) && M.lte(nl.netPnl, '0') && fi60.fi <= 0) reasons.push('NO_PROGRESS'); } }
+    if (R && nl) { if (pos.trailActive && t.lastBook && pos.protection.trigger && bookFacts(t.lastBook) && M.lte(bookFacts(t.lastBook).bestBid, pos.protection.trigger)) reasons.push('TRAIL_CROSSED'); if (plannedTargetEnabled && t.targetPerUnit && M.gte(nl.cashIn, M.mul(t.targetPerUnit, residualOf(pos)))) reasons.push('PLANNED_TARGET'); const elapsed = t.firstFillMono === null ? 0 : mono() - t.firstFillMono; if (elapsed >= P.noProgress.afterMs) { const fi60 = t.flow.fi(nowTs - 60_000, nowTs); if (fi60.state === 'KNOWN' && t.maxNetPnl !== null && M.lt(t.maxNetPnl, M.mul(R, P.noProgress.minRFraction)) && M.lte(nl.netPnl, '0') && fi60.fi <= 0) reasons.push('NO_PROGRESS'); } }
     if (pos.durationDeadlineTs && nowTs >= pos.durationDeadlineTs) reasons.push('MAX_DURATION');
     const primary = ORDER.find((r) => reasons.includes(r)) ?? null; return { reasons, primary, priority: primary ? PRIORITY[primary] : null, det, feedHealth };
   }

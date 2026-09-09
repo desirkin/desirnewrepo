@@ -47,7 +47,7 @@ if (!TEST_URL) {
     try {
       assert.equal(await db.connect(), true);
       const m = await runMigrations(db);
-      assert.equal(m.schemaVersion, 8, 'RUMOR-2 event-root schema (and later) landed in Development PostgreSQL (JUDGE execution schema 8 is additive; 1-7 untouched)');
+      assert.equal(m.schemaVersion, 9, 'old law 8, new law 9 (focused-completion experiment records, additive): RUMOR-2 event-root schema (and later) landed in Development PostgreSQL (JUDGE execution schema 8 is additive; 1-7 untouched)');
       const repo = new Repository(db);
       const alive = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       const store = rumor2CheckpointStore({ persistence: alive });

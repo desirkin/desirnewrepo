@@ -520,7 +520,7 @@ if (!TEST_URL) {
     try {
       assert.equal(await db.connect(), true);
       const m = await runMigrations(db);
-      assert.equal(m.schemaVersion, 8, 'the event-root + writer-epoch schema landed (JUDGE execution schema 8 is additive; 1-7 untouched)');
+      assert.equal(m.schemaVersion, 9, 'old law 8, new law 9 (focused-completion experiment records, additive): the event-root + writer-epoch schema landed (JUDGE execution schema 8 is additive; 1-7 untouched)');
       const repo = new Repository(db);
       const persistence = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) });
       await fn({ db, repo, checkpointStore: rumor2CheckpointStore({ persistence }), journal: rumor2JournalStore({ persistence }) });

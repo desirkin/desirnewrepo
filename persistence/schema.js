@@ -4,7 +4,7 @@
 // silently downgraded.
 import { createHash } from 'node:crypto';
 
-export const SCHEMA_VERSION = 8; // JUDGE-1 / EXECUTION-1 execution journal / schema 8
+export const SCHEMA_VERSION = 9; // JUDGE-1 / EXECUTION-1 execution journal (8) + JUDGE focused-completion experiment records (9)
 
 // Canonical key-sorted JSON — the stable content form durable event
 // identities are computed over (independent of key order and whitespace).
@@ -313,6 +313,29 @@ export const MIGRATIONS = [
         released_at timestamptz,
         release_reason text
       )`,
+    ],
+  },
+  {
+    version: 9,
+    name: 'JUDGE focused completion: append-only experiment records (declaration, split evaluations, selection lock, holdout opening / evaluation)',
+    // ONE additive migration (focused completion §6 / §7). An experiment is a durable, digest-chained, append-only record stream: the
+    // prospective declaration (exact UTC cutoffs, embargo, seed, bindings), every split evaluation, the candidate selection lock, the
+    // one-shot holdout opening (persisted BEFORE any holdout result exists) and the bound holdout evaluation. Writes serialize per
+    // experiment (transaction-scoped advisory lock) and carry a revision check; there is no editable flag and no mutable file.
+    // Versions 1-8 are untouched.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_experiment_records (
+        experiment_id text NOT NULL,
+        seq bigint NOT NULL,
+        kind text NOT NULL,
+        record jsonb NOT NULL,
+        digest text NOT NULL,
+        prev_digest text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (experiment_id, seq),
+        UNIQUE (experiment_id, digest)
+      )`,
+      `CREATE INDEX IF NOT EXISTS experiment_records_kind_idx ON serpent_experiment_records (experiment_id, kind, seq)`,
     ],
   },
 ];

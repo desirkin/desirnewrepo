@@ -73,3 +73,18 @@ export function canaryEntryCycle(F, clock, { authorizationId = 'canary-0', pair 
     F.closed(`${c}p`, 'FLAT', { residualBase: '0' }),
   ];
 }
+
+// focused completion §6: a REAL holdout chain for release fixtures — the production lifecycle (declare -> development / validation
+// evaluations -> selection lock -> one-shot opening -> bound holdout evaluation) run over the memory experiment store with explicit
+// clocks and a minimal scored report; nothing here is hand-written: the chain is projected from the records it created
+export async function holdoutChainFixture({ experimentId = 'exp-fixture-chain', policyDigest = 'a'.repeat(64), codeDigest = 'c'.repeat(64), seed = 'paper-reference-seed-2026-09-08', arm = 'REF_COMBINED', nowTs = T0, store = null } = {}) {
+  const X = await import('../../judge/experiment.js'); const { createMemoryExperimentStore } = await import('../../judge/experiment-store.js'); const st = store ?? createMemoryExperimentStore();
+  const day = 86_400_000; const horizons = { lookbackMs: 3_600_000, decisionMs: 0, maxOutcomeMs: 4 * 3_600_000, publicationFloorMs: 0 }; const startTs = nowTs + 60_000; const durationMs = 6 * day;
+  const declaration = X.declareExperiment({ experimentId, policyDigest, codeDigest, strategyVersion: 'judge-strategy-paper-reference-1', arms: [arm, 'CASH'], seed, sourceBinding: { sourcePrefix: 'journal:fixture', accountId: 'fixture' }, startTs, durationMs, fractions: { developmentFraction: 0.5, validationFraction: 0.25 }, embargoMs: 0, horizons, nowTs }); await X.persistDeclaration(st, declaration);
+  const w = declaration.windows; const ep = (id, ts, pnl) => ({ episodeId: id, decisionId: `dec-${id}`, ts, pnl }); const episodes = [ep('ep-dev-1', w.startTs + day, '3.5'), ep('ep-val-1', w.developmentEndTs + day / 2, '1.25'), ep('ep-hold-1', w.validationEndTs + day / 2, '2')];
+  const report = { engine: 'judge-experiment-replay-1', tieOrderVersion: 'judge-replay-tie-order-1', policyDigest, codeDigest, seed, bundle: { dir: 'fixture', lastSeq: 3 }, arms: { [arm]: { kind: 'FUNDED', outcome: 'SCORED', accountId: `replay-fixture-${arm}`, headDigest: 'b'.repeat(64), decisions: episodes.map((e) => ({ decisionId: e.decisionId, episodeId: e.episodeId, setupId: 'RANGE_IGNITION', status: 'ENTRY_RESERVED', reasonCodes: [], decisionKnownAtTs: e.ts, triggerTs: e.ts - 2000 })), positions: episodes.map((e) => ({ positionId: `pos-${e.episodeId}`, decisionId: e.decisionId, assetId: 'BTC', pair: 'XBT/USD', state: 'FLAT', realizedPnl: e.pnl, firstFillTs: e.ts + 500, lastEconomicTs: e.ts + 600_000, exitReason: 'PLANNED_TARGET' })) }, CASH: { kind: 'FUNDED', outcome: 'SCORED', accountId: 'replay-fixture-CASH', headDigest: 'd'.repeat(64), decisions: [], positions: [] } } };
+  const groups = X.groupsFromReport(report, declaration); const after = w.endTs + horizons.maxOutcomeMs + 1000; const assignment = X.assignGroups(declaration, groups, { nowTs: after });
+  await X.persistEvaluation(st, experimentId, X.evaluateSplit({ declaration, assignment, report, split: 'DEVELOPMENT', nowTs: after })); await X.persistEvaluation(st, experimentId, X.evaluateSplit({ declaration, assignment, report, split: 'VALIDATION', nowTs: after + 1 }));
+  await X.lockCandidate(st, { experimentId, arm, nowTs: after + 2 }); await X.openHoldout(st, { experimentId, runId: 'run-fixture-1', nowTs: after + 3 }); await X.evaluateHoldout(st, { experimentId, runId: 'run-fixture-1', report, groups, nowTs: after + 4 });
+  const chain = await X.holdoutChain(st, experimentId); return Object.assign(chain, { __store: st });
+}
