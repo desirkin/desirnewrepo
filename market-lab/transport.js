@@ -63,10 +63,15 @@ export function planRequest({ providerId, endpointId, pathParams = {}, query = {
     if (providerId === 'TWELVEDATA') { delete h.authorization; h.authorization = `apikey ${credential}`; }
   }
   const m = method ?? e.method;
-  if (m === 'POST') h['content-type'] = 'application/json';
-  return { ok: true, endpoint: e, method: m, url, redactedUrl, headers: h, body: body === null ? null : JSON.stringify(body), requestKey: `${m} ${redactedUrl}${body === null ? '' : ` ${sha256Hex(JSON.stringify(body)).slice(0, 16)}`}` };
+  // a caller-encoded string body (form encoding for a signed Kraken private read) travels verbatim under the caller's content type;
+  // an object body is JSON. A signed body is never coalesced with another request (its digest carries the nonce).
+  const rawBody = typeof body === 'string';
+  if (m === 'POST' && !rawBody) h['content-type'] = 'application/json';
+  if (rawBody && !h['content-type']) h['content-type'] = 'application/x-www-form-urlencoded';
+  const wire = body === null ? null : rawBody ? body : JSON.stringify(body);
+  return { ok: true, endpoint: e, method: m, url, redactedUrl, headers: h, body: wire, sensitive: e.sensitive === true, requestKey: `${m} ${redactedUrl}${wire === null ? '' : ` ${sha256Hex(wire).slice(0, 16)}`}` };
 }
-const redactHeaders = (h) => Object.fromEntries(Object.entries(h).map(([k, v]) => [k, /authorization|api-key|apikey/i.test(k) ? REDACTED : v]));
+const redactHeaders = (h) => Object.fromEntries(Object.entries(h).map(([k, v]) => [k, /authorization|api-key|apikey|api-sign|token/i.test(k) ? REDACTED : v]));
 
 // ---- limiter ---------------------------------------------------------------------------------------------------
 function createLimiter(max) {
@@ -181,7 +186,7 @@ export function createHttpTransport({ fetchImpl = globalThis.fetch, clock = () =
           if (r.failure.kind === 'HTTP_429' || (r.failure.kind === 'HTTP_5XX' && r.failure.retryAfterMs)) s.backoffUntil = clock() + (r.failure.retryAfterMs ?? DEFAULT_BACKOFF_MS);
           if (r.failure.kind === 'HTTP_401' || (r.failure.kind === 'HTTP_403' && credential)) s.credentialHoldUntil = clock() + credentialHoldMs;
         }
-        if (recorder) { try { recorder({ requestKey: plan.requestKey, providerId, endpointId, method: plan.method, redactedUrl: plan.redactedUrl, headers: redactHeaders(plan.headers), body: plan.body, ok: r.ok, status: r.status ?? r.failure?.status ?? null, failureKind: r.ok ? null : r.failure.kind, bytesSha256: r.sha256 ?? r.failure?.sha256 ?? null, bytes: r.bytes ?? r.failure?.bytes ?? null, contentType: r.contentType ?? r.failure?.contentType ?? null, receivedTs: r.receivedTs ?? r.failure?.receivedTs ?? clock(), requestId }); } catch (err) { log(`recorder failed (contained): ${String(err?.message ?? err).slice(0, 120)}`); } }
+        if (recorder) { try { recorder({ requestKey: plan.requestKey, providerId, endpointId, method: plan.method, redactedUrl: plan.redactedUrl, headers: redactHeaders(plan.headers), body: plan.sensitive ? (plan.body === null ? null : REDACTED) : plan.body, ok: r.ok, status: r.status ?? r.failure?.status ?? null, failureKind: r.ok ? null : r.failure.kind, bytesSha256: r.sha256 ?? r.failure?.sha256 ?? null, bytes: r.bytes ?? r.failure?.bytes ?? null, contentType: r.contentType ?? r.failure?.contentType ?? null, receivedTs: r.receivedTs ?? r.failure?.receivedTs ?? clock(), requestId }); } catch (err) { log(`recorder failed (contained): ${String(err?.message ?? err).slice(0, 120)}`); } }
         return Object.freeze(r); // shallow: the body Buffer cannot be frozen
       } catch (err) { if (reservationId) { guard.unresolved(reservationId, 'INTERNAL'); reservationId = null; } s.counters.failed += 1; return failure(err?.kind === 'CANCELLED' ? 'CANCELLED' : err?.kind === 'CONCURRENCY_REFUSED' ? 'CONCURRENCY_REFUSED' : 'NETWORK', err?.kind ?? err?.name ?? 'failure'); }
       finally { if (gotProv) pl.release(); if (gotGlobal) global.release(); if (share) inFlight.delete(plan.requestKey); active.delete(entry); }

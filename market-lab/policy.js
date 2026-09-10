@@ -2,7 +2,7 @@
 // hands in `env` when presence of a credential must be checked, and only PRESENCE is ever reported — no value leaves.
 // The policy is separate from cobra.config.json and from the trading cost / ledger modules. Zero or absent paid
 // authorization means NO paid call. Shipped defaults are disabled; an operator enables explicitly.
-import { isPlainObject, isCount, isFiniteNum, isBoundedString, isStringOrNull, exactKeys, enumError, deepFreeze, canonicalDigest, PROVIDER_IDS, FAMILIES, isCoin, isId, isIdOrNull, isDateOnly, jsonShapeError, fail } from './contracts.js';
+import { isPlainObject, isCount, isFiniteNum, isBoundedString, isStringOrNull, exactKeys, enumError, deepFreeze, canonicalDigest, PROVIDER_IDS, FAMILIES, isCoin, isId, isIdOrNull, isDateOnly, jsonShapeError, fail, ANALYTICS_TYPES, ANALYTICS_INTERVALS_S, L3_DEPTHS } from './contracts.js';
 import { ENDPOINTS } from './registry.js';
 
 export const POLICY_VERSION = 'market-research-policy-1';
@@ -40,6 +40,42 @@ export const ALLOWED_MAX_AGE_MS = deepFreeze({
 });
 
 const PROVIDER_POLICY_KEYS = ['enabled', 'credentialEnv', 'plan', 'limits', 'permittedEndpoints', 'smoke'];
+// ---- MARKET-EDGE-KRAKEN-1 (dark senses; shipped DISABLED; engineering bounds only, never trading rules) ----------------------
+// charts: Kraken Futures Charts / Market Analytics (KRAKEN_DERIVATIVES). l3: Kraken Spot Level 3 (KRAKEN_SPOT) with a DEDICATED
+// data-only key named by environment variable NAMES that must differ from every other credential name in the policy.
+export const CHARTS_POLICY_KEYS = Object.freeze(['enabled', 'analyticsTypes', 'intervalsS', 'maxLookbackMs', 'maxPagesPerRequest', 'pollingCadenceMs', 'maxCallsPerDay']);
+export const CHARTS_DEFAULTS = deepFreeze({ enabled: false, analyticsTypes: ['open-interest', 'aggressor-differential', 'liquidation-volume', 'cvd', 'future-basis', 'funding'], intervalsS: [60, 300, 900, 3600], maxLookbackMs: 30 * 86_400_000, maxPagesPerRequest: 10, pollingCadenceMs: 300_000, maxCallsPerDay: 2_000 });
+export const CHARTS_CEILINGS = deepFreeze({ maxLookbackMs: 400 * 86_400_000, maxPagesPerRequest: 50, maxCallsPerDay: 20_000, minPollingCadenceMs: 60_000 });
+export const L3_POLICY_KEYS = Object.freeze(['enabled', 'keyEnv', 'secretEnv', 'depth', 'maxSymbols', 'maxSubscriptionsPerSecond', 'maxQueueMessages', 'maxInMemoryOrders', 'maxRunBytes', 'maxSegmentBytes', 'maxReconnectAttempts', 'reconnectBackoffMaxMs']);
+export const L3_DEFAULTS = deepFreeze({ enabled: false, keyEnv: 'KRAKEN_L3_DATA_API_KEY', secretEnv: 'KRAKEN_L3_DATA_API_SECRET', depth: 10, maxSymbols: 8, maxSubscriptionsPerSecond: 2, maxQueueMessages: 10_000, maxInMemoryOrders: 50_000, maxRunBytes: 1024 * 1024 * 1024, maxSegmentBytes: 32 * 1024 * 1024, maxReconnectAttempts: 20, reconnectBackoffMaxMs: 60_000 });
+export const L3_CEILINGS = deepFreeze({ maxSymbols: 200, maxSubscriptionsPerSecond: 50, maxQueueMessages: 100_000, maxInMemoryOrders: 500_000, maxReconnectAttempts: 1_000, reconnectBackoffMaxMs: 3_600_000 });
+const DARK_PROVIDER_KEYS = deepFreeze({ KRAKEN_DERIVATIVES: ['charts'], KRAKEN_SPOT: ['l3'] });
+function chartsPolicyError(c, w) {
+  const e = exactKeys(c, CHARTS_POLICY_KEYS, w); if (e) return e;
+  if (typeof c.enabled !== 'boolean') return `${w}: enabled must be boolean`;
+  if (!Array.isArray(c.analyticsTypes) || !c.analyticsTypes.length || c.analyticsTypes.some((t) => !ANALYTICS_TYPES.includes(t)) || new Set(c.analyticsTypes).size !== c.analyticsTypes.length) return `${w}: analyticsTypes must be distinct supported types`;
+  if (!Array.isArray(c.intervalsS) || !c.intervalsS.length || c.intervalsS.some((i) => !ANALYTICS_INTERVALS_S.includes(i)) || new Set(c.intervalsS).size !== c.intervalsS.length) return `${w}: intervalsS must be distinct documented intervals`;
+  if (!isCount(c.maxLookbackMs) || c.maxLookbackMs === 0 || c.maxLookbackMs > CHARTS_CEILINGS.maxLookbackMs) return `${w}: maxLookbackMs outside (0, ${CHARTS_CEILINGS.maxLookbackMs}]`;
+  if (!isCount(c.maxPagesPerRequest) || c.maxPagesPerRequest === 0 || c.maxPagesPerRequest > CHARTS_CEILINGS.maxPagesPerRequest) return `${w}: maxPagesPerRequest outside (0, ${CHARTS_CEILINGS.maxPagesPerRequest}]`;
+  if (!isCount(c.pollingCadenceMs) || c.pollingCadenceMs < CHARTS_CEILINGS.minPollingCadenceMs) return `${w}: pollingCadenceMs below the floor ${CHARTS_CEILINGS.minPollingCadenceMs}`;
+  if (!isCount(c.maxCallsPerDay) || c.maxCallsPerDay > CHARTS_CEILINGS.maxCallsPerDay) return `${w}: maxCallsPerDay outside [0, ${CHARTS_CEILINGS.maxCallsPerDay}]`;
+  return null;
+}
+function l3PolicyError(l, w, otherCredentialNames) {
+  const e = exactKeys(l, L3_POLICY_KEYS, w); if (e) return e;
+  if (typeof l.enabled !== 'boolean') return `${w}: enabled must be boolean`;
+  for (const k of ['keyEnv', 'secretEnv']) if (!(typeof l[k] === 'string' && ENV_NAME_RE.test(l[k]))) return `${w}: ${k} must be an environment variable NAME`;
+  if (l.keyEnv === l.secretEnv) return `${w}: keyEnv and secretEnv must differ`;
+  if (otherCredentialNames.includes(l.keyEnv) || otherCredentialNames.includes(l.secretEnv)) return `${w}: the L3 data key must be DEDICATED (its environment names are shared with another credential)`;
+  if (!L3_DEPTHS.includes(l.depth)) return `${w}: depth must be 10, 100 or 1000`;
+  for (const k of ['maxSymbols', 'maxSubscriptionsPerSecond', 'maxQueueMessages', 'maxInMemoryOrders', 'maxReconnectAttempts', 'reconnectBackoffMaxMs']) if (!isCount(l[k]) || l[k] === 0 || l[k] > L3_CEILINGS[k]) return `${w}: ${k} outside (0, ${L3_CEILINGS[k]}]`;
+  if (!isCount(l.maxRunBytes) || l.maxRunBytes === 0 || l.maxRunBytes > RESOURCE_DEFAULTS.runBytes || !isCount(l.maxSegmentBytes) || l.maxSegmentBytes === 0 || l.maxSegmentBytes > RESOURCE_DEFAULTS.segmentBytes || l.maxSegmentBytes > l.maxRunBytes) return `${w}: byte bounds outside the shipped ceilings`;
+  return null;
+}
+export const chartsPolicy = (policy) => policy?.providers?.KRAKEN_DERIVATIVES?.charts ?? CHARTS_DEFAULTS;
+export const l3Policy = (policy) => policy?.providers?.KRAKEN_SPOT?.l3 ?? L3_DEFAULTS;
+export const chartsEnabled = (policy) => providerEnabled(policy, 'KRAKEN_DERIVATIVES') && chartsPolicy(policy).enabled === true;
+export const l3Enabled = (policy) => providerEnabled(policy, 'KRAKEN_SPOT') && l3Policy(policy).enabled === true;
 const PLAN_KEYS = ['name', 'billing', 'includedCallsPerMonth', 'remainingCalls', 'incrementalUsdPerCall', 'attestation', 'verifiedDate', 'quoteUsdPerMonth'];
 // closeout R01: routine METERED acquisition needs an EXPLICIT owner authorization record (absent = denied; a smoke flag never waives it)
 export const METERED_AUTHORIZATION_KEYS = Object.freeze(['authorized', 'maxCallsPerMonth', 'maxEstimatedUsdPerMonth', 'attestation']);
@@ -63,8 +99,10 @@ export function policyError(raw, where = 'policy') {
   for (let i = 0; i < pkeys.length; i += 1) {
     const id = pkeys[i]; if (!PROVIDER_IDS.includes(id)) return `${where}.providers: undeclared provider at position ${i + 1}`;
     const p = raw.providers[id]; const w = `${where}.providers.${id}`;
-    const e = exactKeys(p, PROVIDER_POLICY_KEYS, w); if (e) return e;
+    const e = keysWithOptional(p, PROVIDER_POLICY_KEYS, DARK_PROVIDER_KEYS[id] ?? [], w); if (e) return e;
     if (typeof p.enabled !== 'boolean') return `${w}: enabled must be boolean`;
+    if ('charts' in p) { const ce = chartsPolicyError(p.charts, `${w}.charts`); if (ce) return ce; }
+    if ('l3' in p) { const others = [...pkeys.map((k) => raw.providers[k]?.credentialEnv).filter((n) => typeof n === 'string'), raw.model?.credentialEnv].filter((n) => typeof n === 'string'); const le = l3PolicyError(p.l3, `${w}.l3`, others); if (le) return le; }
     if (!(p.credentialEnv === null || (typeof p.credentialEnv === 'string' && ENV_NAME_RE.test(p.credentialEnv)))) return `${w}: credentialEnv must be an environment variable NAME or null`;
     const pe = keysWithOptional(p.plan, PLAN_KEYS, ['meteredAuthorization'], `${w}.plan`); if (pe) return pe;
     if ('meteredAuthorization' in p.plan) { const ma = p.plan.meteredAuthorization; const mk = exactKeys(ma, METERED_AUTHORIZATION_KEYS, `${w}.plan.meteredAuthorization`); if (mk) return mk; if (typeof ma.authorized !== 'boolean' || !isCount(ma.maxCallsPerMonth) || !(isFiniteNum(ma.maxEstimatedUsdPerMonth) && ma.maxEstimatedUsdPerMonth >= 0) || !isBoundedString(ma.attestation, 300)) return `${w}.plan.meteredAuthorization: malformed`; if (ma.authorized && p.plan.billing !== 'METERED') return `${w}.plan.meteredAuthorization: only a METERED plan carries a metered authorization`; if (ma.authorized && !(isFiniteNum(p.plan.incrementalUsdPerCall) && p.plan.incrementalUsdPerCall >= 0)) return `${w}.plan.meteredAuthorization: an authorized metered plan needs a known incrementalUsdPerCall`; }
@@ -101,7 +139,7 @@ export function policyError(raw, where = 'policy') {
   return null;
 }
 // a loaded policy carries every bound explicitly: omitted optional resource / case keys take the shipped default (the ceiling), never more
-export function validatePolicy(raw) { const e = policyError(raw); if (e) return { ok: false, error: e, policy: null }; const p = structuredClone(raw); for (const k of RESOURCE_OPTIONAL_KEYS) if (!(k in p.resources)) p.resources[k] = RESOURCE_DEFAULTS[k]; for (const k of CASE_OPTIONAL_KEYS) if (!(k in p.cases)) p.cases[k] = CASE_DEFAULTS[k]; return { ok: true, error: null, policy: deepFreeze(p) }; }
+export function validatePolicy(raw) { const e = policyError(raw); if (e) return { ok: false, error: e, policy: null }; const p = structuredClone(raw); for (const k of RESOURCE_OPTIONAL_KEYS) if (!(k in p.resources)) p.resources[k] = RESOURCE_DEFAULTS[k]; for (const k of CASE_OPTIONAL_KEYS) if (!(k in p.cases)) p.cases[k] = CASE_DEFAULTS[k]; if (p.providers.KRAKEN_DERIVATIVES && !('charts' in p.providers.KRAKEN_DERIVATIVES)) p.providers.KRAKEN_DERIVATIVES.charts = structuredClone(CHARTS_DEFAULTS); if (p.providers.KRAKEN_SPOT && !('l3' in p.providers.KRAKEN_SPOT)) p.providers.KRAKEN_SPOT.l3 = structuredClone(L3_DEFAULTS); return { ok: true, error: null, policy: deepFreeze(p) }; }
 export const policyDigest = (policy) => canonicalDigest(policy);
 export const loadPolicy = (raw) => { const r = validatePolicy(raw); if (!r.ok) fail('INVALID_INPUT', r.error); return r.policy; };
 
@@ -131,10 +169,10 @@ export const paidCallAuthorized = (policy, id) => { const p = policy.providers[i
 export function samplePolicy() {
   const providers = {};
   for (const id of PROVIDER_IDS) {
-    const ep = ENDPOINTS.filter((e) => e.providerId === id);
+    const ep = ENDPOINTS.filter((e) => e.providerId === id && e.dark !== true); // dark senses never change a provider's public billing class
     const authEnv = ep.find((e) => e.authEnv)?.authEnv ?? null;
     const billing = ep.every((e) => e.planRequirement === 'PUBLIC') ? 'FREE' : 'UNKNOWN';
-    providers[id] = { enabled: false, credentialEnv: authEnv, plan: { name: null, billing, includedCallsPerMonth: null, remainingCalls: null, incrementalUsdPerCall: null, attestation: null, verifiedDate: null, quoteUsdPerMonth: null }, limits: { maxCallsPerDay: 1000, maxCallsPerMonth: 20000, maxConcurrency: 1 }, permittedEndpoints: null, smoke: { authorized: false, maxCalls: 0, maxEstimatedUsd: null } };
+    providers[id] = { enabled: false, credentialEnv: authEnv, plan: { name: null, billing, includedCallsPerMonth: null, remainingCalls: null, incrementalUsdPerCall: null, attestation: null, verifiedDate: null, quoteUsdPerMonth: null }, limits: { maxCallsPerDay: 1000, maxCallsPerMonth: 20000, maxConcurrency: 1 }, permittedEndpoints: null, smoke: { authorized: false, maxCalls: 0, maxEstimatedUsd: null }, ...(id === 'KRAKEN_DERIVATIVES' ? { charts: { ...CHARTS_DEFAULTS, analyticsTypes: [...CHARTS_DEFAULTS.analyticsTypes], intervalsS: [...CHARTS_DEFAULTS.intervalsS] } } : {}), ...(id === 'KRAKEN_SPOT' ? { l3: { ...L3_DEFAULTS } } : {}) };
   }
   return deepFreeze({
     policyVersion: POLICY_VERSION, mode: 'LIVE_OBSERVATION', providers,

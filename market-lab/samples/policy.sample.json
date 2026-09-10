@@ -25,6 +25,20 @@
     "authorized": false,
     "maxCalls": 0,
     "maxEstimatedUsd": null
+   },
+   "l3": {
+    "enabled": false,
+    "keyEnv": "KRAKEN_L3_DATA_API_KEY",
+    "secretEnv": "KRAKEN_L3_DATA_API_SECRET",
+    "depth": 10,
+    "maxSymbols": 8,
+    "maxSubscriptionsPerSecond": 2,
+    "maxQueueMessages": 10000,
+    "maxInMemoryOrders": 50000,
+    "maxRunBytes": 1073741824,
+    "maxSegmentBytes": 33554432,
+    "maxReconnectAttempts": 20,
+    "reconnectBackoffMaxMs": 60000
    }
   },
   "COINBASE_SPOT": {
@@ -75,6 +89,27 @@
     "authorized": false,
     "maxCalls": 0,
     "maxEstimatedUsd": null
+   },
+   "charts": {
+    "enabled": false,
+    "analyticsTypes": [
+     "open-interest",
+     "aggressor-differential",
+     "liquidation-volume",
+     "cvd",
+     "future-basis",
+     "funding"
+    ],
+    "intervalsS": [
+     60,
+     300,
+     900,
+     3600
+    ],
+    "maxLookbackMs": 2592000000,
+    "maxPagesPerRequest": 10,
+    "pollingCadenceMs": 300000,
+    "maxCallsPerDay": 2000
    }
   },
   "DERIBIT": {

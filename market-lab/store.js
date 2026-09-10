@@ -11,8 +11,8 @@ import { RESOURCE_DEFAULTS } from './policy.js';
 
 export const EMPTY_SHA256 = sha256Hex(Buffer.alloc(0));
 export const MEMBER_NAME_RE = /^[a-z][a-z0-9-]{0,60}\.(json|jsonl|md)$/;
-export const BUNDLE_KINDS = Object.freeze(['CAPTURE', 'CONTEXT', 'PACKET', 'CASE', 'EVALUATION']);
-export const BUNDLE_VERSIONS = Object.freeze({ CAPTURE: 'market-capture-bundle-1', CONTEXT: 'market-context-bundle-1', PACKET: 'research-packet-bundle-1', CASE: 'socrates-case-bundle-1', EVALUATION: 'socrates-evaluation-bundle-1' });
+export const BUNDLE_KINDS = Object.freeze(['CAPTURE', 'CONTEXT', 'PACKET', 'CASE', 'EVALUATION', 'EDGE_CAPTURE']);
+export const BUNDLE_VERSIONS = Object.freeze({ CAPTURE: 'market-capture-bundle-1', CONTEXT: 'market-context-bundle-1', PACKET: 'research-packet-bundle-1', CASE: 'socrates-case-bundle-1', EVALUATION: 'socrates-evaluation-bundle-1', EDGE_CAPTURE: 'market-edge-capture-bundle-1' });
 // member -> { kind: json | jsonl | text, limit: name of the byte bound in the resource policy (line bound for jsonl) }
 export const BUNDLE_LAYOUTS = deepFreeze({
   CAPTURE: { 'observations.jsonl': { kind: 'jsonl', line: 'observationLineBytes' }, 'coverage.jsonl': { kind: 'jsonl', line: 'coverageLineBytes' }, 'catalog.json': { kind: 'json', bytes: 'contextBytes' }, 'policy.json': { kind: 'json', bytes: 'manifestBytes' }, 'code-identity.json': { kind: 'json', bytes: 'manifestBytes' } },
@@ -20,6 +20,9 @@ export const BUNDLE_LAYOUTS = deepFreeze({
   PACKET: { 'packet.json': { kind: 'json', bytes: 'packetLineBytes' }, 'context-map.json': { kind: 'json', bytes: 'contextBytes' }, 'code-identity.json': { kind: 'json', bytes: 'manifestBytes' } },
   CASE: { 'case.json': { kind: 'json', bytes: 'manifestBytes' }, 'packets.jsonl': { kind: 'jsonl', line: 'packetLineBytes' }, 'analyses.jsonl': { kind: 'jsonl', line: 'packetLineBytes' }, 'requests.jsonl': { kind: 'jsonl', line: 'coverageLineBytes' }, 'results.jsonl': { kind: 'jsonl', line: 'packetLineBytes' }, 'usage.jsonl': { kind: 'jsonl', line: 'coverageLineBytes' }, 'report.md': { kind: 'text', bytes: 'contextBytes' }, 'code-identity.json': { kind: 'json', bytes: 'manifestBytes' } },
   EVALUATION: { 'evaluation.json': { kind: 'json', bytes: 'contextBytes' }, 'cases.jsonl': { kind: 'jsonl', line: 'packetLineBytes' }, 'evaluation.md': { kind: 'md', bytes: 'contextBytes' }, 'code-identity.json': { kind: 'json', bytes: 'manifestBytes' } },
+  // MARKET-EDGE-KRAKEN-1: the DARK capture bundle is a separate layout on purpose — the context builder, the Judge intake and the
+  // Socrates runtime open CAPTURE / CASE bundles only, so dark observations never share a member with decision evidence
+  EDGE_CAPTURE: { 'analytics.jsonl': { kind: 'jsonl', line: 'observationLineBytes' }, 'l3-snapshots.jsonl': { kind: 'jsonl', line: 'observationLineBytes' }, 'l3-events.jsonl': { kind: 'jsonl', line: 'observationLineBytes' }, 'coverage.jsonl': { kind: 'jsonl', line: 'coverageLineBytes' }, 'policy.json': { kind: 'json', bytes: 'manifestBytes' }, 'code-identity.json': { kind: 'json', bytes: 'manifestBytes' } },
 });
 export const MANIFEST_NAME = 'manifest.json';
 export const MANIFEST_KEYS = Object.freeze(['bundleVersion', 'bundleKind', 'bundleId', 'createdTs', 'members', 'summary', 'limits', 'identity']);

@@ -2,7 +2,7 @@
 // are one transport, one observation envelope, one failure vocabulary and one runtime state machine — not fifteen
 // frameworks. Clients accept an injected transport/clock for deterministic tests AND default to the real registry
 // transport when explicitly started. Importing a provider module performs no I/O.
-import { makeObservation, makeCoverage, quality, emptyProvenance, subjectId, isFiniteNum, isTs, deepFreeze, fail, FAMILIES } from '../contracts.js';
+import { makeObservation, makeCoverage, quality, emptyProvenance, subjectId, isFiniteNum, isTs, deepFreeze, fail, ALL_FAMILIES } from '../contracts.js';
 import { endpointOf } from '../registry.js';
 import { clockConflict } from '../time.js';
 
@@ -79,5 +79,5 @@ export const tokenSubject = ({ canonicalCoin, providerAssetId = null, chain, con
 export const poolSubject = ({ canonicalCoin, providerAssetId = null, chain, poolAddress, quoteToken }) => ({ subjectKind: 'POOL', canonicalCoin, providerAssetId, chain, poolAddress, quoteToken });
 export const protocolSubject = ({ protocolId, chain = null, canonicalCoin = null, providerAssetId = null }) => ({ subjectKind: 'PROTOCOL', canonicalCoin, providerAssetId, protocolId, chain });
 export const providerSubject = (providerId) => ({ subjectKind: 'PROVIDER', canonicalCoin: null, providerAssetId: null, providerId });
-export const assertFamily = (f) => { if (!FAMILIES.includes(f)) fail('INTERNAL_FAILURE', 'unknown family'); return f; };
+export const assertFamily = (f) => { if (!ALL_FAMILIES.includes(f)) fail('INTERNAL_FAILURE', 'unknown family'); return f; };
 export { isFiniteNum, isTs };

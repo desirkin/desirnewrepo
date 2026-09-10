@@ -11,7 +11,7 @@
 // summaries returns PACKET_LIMIT_EXCEEDED with no packet — no family is silently dropped.
 import { EVIDENCE_SCHEMA_VERSION_2, MARKET_EVIDENCE_KINDS, KIND_FAMILY, COVERAGE_LIMITATION_REASONS, TRIGGER_KINDS_V2, RESEARCH_MODES, RESEARCH_ENTRANCES, MAX_COMPONENT_IDS, MAX_EVIDENCE, MAX_SOURCES, MAX_PACKET_CANONICAL_CHARS, MAX_PACKET_UTF8_BYTES, canonicalJson, sourceIdentity, evidenceIdentity, packetIdentityV2, validateEvidencePacketV2, typedValueError } from './contract-v2.js';
 import { contextError } from '../market-lab/context.js';
-import { FAMILIES, FAMILY_REGISTRY, VALUE_BEARING } from '../market-lab/contracts.js';
+import { FAMILIES, FAMILY_REGISTRY, VALUE_BEARING, DARK_FAMILIES, DARK_PAYLOAD_KINDS } from '../market-lab/contracts.js';
 import { RECIPE_SET_VERSION } from '../market-lab/recipes.js';
 import { projectSocial, socialProjectionError } from './social-projection.js';
 
@@ -97,7 +97,11 @@ export function metricInputMatch(m, o) {
 }
 // every registered metric has a mapping (audited by MC-J03); every mapping names a closed kind
 for (const f of FAMILIES) for (const id of Object.keys(FAMILY_REGISTRY[f].metrics)) { if (!METRIC_MAP[f]?.[id]) throw new Error(`METRIC_MAP: ${f}.${id} unmapped`); if (!MARKET_EVIDENCE_KINDS.includes(METRIC_MAP[f][id].kind)) throw new Error(`METRIC_MAP: ${f}.${id} names an unknown kind`); }
-export const metricMapping = (family, metricId) => METRIC_MAP[family]?.[metricId] ?? null;
+// MARKET-EDGE-KRAKEN-1 dark-family exclusion fence: decision evidence never maps a dark family or consumes a dark payload kind
+for (const f of DARK_FAMILIES) if (METRIC_MAP[f] !== undefined || FAMILIES.includes(f)) throw new Error(`METRIC_MAP: dark family ${f} must not enter decision evidence`);
+for (const f of FAMILIES) for (const m of Object.values(METRIC_MAP[f])) for (const k of [...(m.inputKinds ?? []), ...(m.native ?? [])]) if (DARK_PAYLOAD_KINDS.includes(k)) throw new Error(`METRIC_MAP: ${f} consumes the dark kind ${k}`);
+export const DARK_FAMILIES_EXCLUDED = Object.freeze([...DARK_FAMILIES]);
+export const metricMapping = (family, metricId) => (DARK_FAMILIES.includes(family) ? null : METRIC_MAP[family]?.[metricId] ?? null);
 // the components that carry a metric (by the mapping's component id) and the typed value for one component
 export const componentsFor = (ctx, family, metricId) => { const m = metricMapping(family, metricId); if (!m || !m.component) return []; return (ctx.families[family]?.components ?? []).filter((c) => c.metricId === m.component); };
 export function buildValue(ctx, family, metricId, comp, comps) { const m = metricMapping(family, metricId); if (!m || !m.build || !comp) return null; return BUILD[m.build](ctx, comp, comps); }

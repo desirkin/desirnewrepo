@@ -182,7 +182,17 @@ export const wellFormedString = (s) => typeof s === 'string' && (typeof s.isWell
 
 // ---- closed vocabularies ---------------------------------------------------------------------------------
 export const FAMILIES = Object.freeze(['SPOT_PRICE_CHART', 'SPOT_FLOW', 'DISPLAYED_LIQUIDITY', 'CROSS_VENUE', 'DERIVATIVES_FUNDING_OI', 'LIQUIDATIONS', 'OPTIONS_TERM_SKEW', 'SUPPLY_UNLOCKS', 'DEX_DEFI', 'ONCHAIN_ENTITY_FLOW', 'NETWORK_ACTIVITY', 'STABLECOIN_LIQUIDITY', 'ETF_FLOWS', 'MACRO_RELEASES', 'CROSS_ASSET', 'OFFICIAL_SOCIAL_EVENTS', 'INFRASTRUCTURE_STATUS']);
-export const PAYLOAD_KINDS = Object.freeze(['TRADE', 'BOOK_SNAPSHOT', 'BOOK_COVERAGE', 'CANDLE', 'INSTRUMENT', 'DERIVATIVE_TICK', 'LIQUIDATION', 'OPTION_TICK', 'ASSET_REFERENCE', 'UNLOCK_EVENT', 'DEX_POOL', 'DEFI_METRIC', 'ONCHAIN_METRIC', 'STABLECOIN_METRIC', 'ETF_FLOW', 'MACRO_OBSERVATION', 'ECONOMIC_EVENT', 'CROSS_ASSET_BAR', 'EVENT_REFERENCE', 'PROVIDER_STATUS']);
+export const PAYLOAD_KINDS = Object.freeze(['TRADE', 'BOOK_SNAPSHOT', 'BOOK_COVERAGE', 'CANDLE', 'INSTRUMENT', 'DERIVATIVE_TICK', 'LIQUIDATION', 'OPTION_TICK', 'ASSET_REFERENCE', 'UNLOCK_EVENT', 'DEX_POOL', 'DEFI_METRIC', 'ONCHAIN_METRIC', 'STABLECOIN_METRIC', 'ETF_FLOW', 'MACRO_OBSERVATION', 'ECONOMIC_EVENT', 'CROSS_ASSET_BAR', 'EVENT_REFERENCE', 'PROVIDER_STATUS', 'DERIVATIVE_ANALYTIC_BUCKET', 'L3_BOOK_SNAPSHOT', 'L3_ORDER_EVENT', 'L3_BOOK_COVERAGE']);
+// MARKET-EDGE-KRAKEN-1 — DARK research families. They are deliberately NOT members of FAMILIES: every generic consumer of the
+// decision vocabulary (FAMILY_REGISTRY -> the Socrates broker metric registry, the evidence METRIC_MAP, readiness, the
+// coverage matrix, the context builder, the Socrates v2 contract) iterates FAMILIES and therefore never sees them. They live
+// only in the closed observation / coverage / store / retention contracts, the dark recipes and the dark evaluation harness.
+export const DARK_FAMILIES = Object.freeze(['DERIVATIVES_PRESSURE', 'L3_MICROSTRUCTURE']);
+export const DARK_PAYLOAD_KINDS = Object.freeze(['DERIVATIVE_ANALYTIC_BUCKET', 'L3_BOOK_SNAPSHOT', 'L3_ORDER_EVENT', 'L3_BOOK_COVERAGE']);
+export const ALL_FAMILIES = Object.freeze([...FAMILIES, ...DARK_FAMILIES]);
+export const DARK_FAMILY_LAW = 'MARKET-EDGE-KRAKEN-1: dark families carry no trading, Judge or Socrates authority; they never enter Judge intake / features, Socrates broker requests, decision evidence, readiness, thresholds, execution, the Watch or the paper / live adapters';
+export const isDarkFamily = (f) => DARK_FAMILIES.includes(f);
+export const isDarkKind = (k) => DARK_PAYLOAD_KINDS.includes(k);
 export const PROVIDER_IDS = Object.freeze(['KRAKEN_SPOT', 'COINBASE_SPOT', 'KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGECKO', 'GECKOTERMINAL', 'DEFILLAMA', 'COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'COINMETRICS', 'FRED', 'TWELVEDATA', 'SETTLED_RECORDS', 'TOKENOMIST']);
 export const SUBJECT_KINDS = Object.freeze(['ASSET', 'MARKET', 'TOKEN', 'DERIVATIVE', 'SERIES', 'POOL', 'PROTOCOL', 'PROVIDER']);
 export const MARKET_TYPES = Object.freeze(['SPOT', 'PERPETUAL', 'FUTURE', 'OPTION']);
@@ -211,6 +221,30 @@ export const WHALE_METRIC_IDS = Object.freeze(['whale_transaction_count_100k_usd
 export const WHALE_METRIC_UNITS = Object.freeze({ whale_transaction_count_100k_usd_to_inf: 'COUNT', whale_transaction_count_1m_usd_to_inf: 'COUNT', whale_transaction_volume_100k_usd_to_inf: 'USD', whale_transaction_volume_1m_usd_to_inf: 'USD' });
 export const STABLECOIN_METRIC_IDS = Object.freeze(['circulating_supply', 'peg_price', 'bridged_supply']);
 export const UNITS = Object.freeze(['USD', 'USDT', 'USDC', 'EUR', 'BASE', 'QUOTE', 'CONTRACTS', 'COUNT', 'PERCENT', 'PERCENTAGE_POINTS', 'FRACTION', 'BPS', 'RATIO', 'NATIVE', 'INDEX', 'BILLIONS_USD', 'MILLIONS_USD', 'UNKNOWN']);
+// ---- MARKET-EDGE-KRAKEN-1 dark vocabularies (documented 2026-09-10; see doctrine/MARKET_EDGE_KRAKEN.md) ----------------
+// Charts / Market Analytics types with an UNAMBIGUOUS documented value schema (scalar series, cvd, future-basis, funding);
+// the nested types (long-short-info, top-traders, orderbook, spreads, liquidity, slippage) are NOT_SUPPORTED_WITH_CURRENT_SCHEMA
+export const ANALYTICS_TYPES = Object.freeze(['open-interest', 'aggressor-differential', 'trade-volume', 'trade-count', 'liquidation-volume', 'rolling-volatility', 'long-short-ratio', 'cvd', 'future-basis', 'funding']);
+export const ANALYTICS_TYPES_UNSUPPORTED = Object.freeze(['long-short-info', 'top-traders', 'orderbook', 'spreads', 'liquidity', 'slippage']);
+export const ANALYTICS_VALUE_KEYS = deepFreeze({ 'open-interest': ['value'], 'aggressor-differential': ['value'], 'trade-volume': ['value'], 'trade-count': ['value'], 'liquidation-volume': ['value'], 'rolling-volatility': ['value'], 'long-short-ratio': ['value'], cvd: ['buyVolume', 'sellVolume', 'cvd'], 'future-basis': ['basis'], funding: ['rateOpen', 'rateHigh', 'rateLow', 'rateClose', 'relativeRateOpen', 'relativeRateHigh', 'relativeRateLow', 'relativeRateClose'] });
+export const ANALYTICS_INTERVALS_S = Object.freeze([60, 300, 900, 1800, 3600, 14400, 43200, 86400, 604800]);
+// manipulation-risk metadata (documentation only, never a weight): LOWER = settlement-anchored (basis, funding); MEDIUM = venue
+// aggregates (OI, CVD, aggressor differential, liquidations, volumes, counts, volatility); HIGHER = positioning ratios
+export const MANIPULATION_RISK = Object.freeze(['LOWER', 'MEDIUM', 'HIGHER']);
+export const ANALYTICS_MANIPULATION_RISK = deepFreeze({ 'future-basis': 'LOWER', funding: 'LOWER', 'open-interest': 'MEDIUM', cvd: 'MEDIUM', 'aggressor-differential': 'MEDIUM', 'liquidation-volume': 'MEDIUM', 'trade-volume': 'MEDIUM', 'trade-count': 'MEDIUM', 'rolling-volatility': 'MEDIUM', 'long-short-ratio': 'HIGHER' });
+export const BUCKET_FINALITY = Object.freeze(['FINAL', 'PROVISIONAL']);
+export const VINTAGES = Object.freeze(['LIVE_FORWARD_CAPTURE', 'HISTORICAL_FETCH']);
+export const UNIT_NORMALIZATIONS = Object.freeze(['NONE', 'IDENTITY']); // NONE: native only (unit unverified); IDENTITY: normalized == native under a documented unit
+export const L3_EVENTS = Object.freeze(['ADD', 'MODIFY', 'DELETE', 'SCOPE_EVICTED']); // SCOPE_EVICTED: left the subscribed depth — NEVER a cancel
+export const L3_SIDES = Object.freeze(['BID', 'ASK']);
+export const L3_COVERAGE_STATES = Object.freeze(['SYNCHRONIZED', 'DESYNCHRONIZED', 'GAP', 'SUBSCRIBED', 'UNSUBSCRIBED', 'DEGRADED', 'OVERFLOW', 'ACCESS_BLOCKED']);
+export const L3_SAMPLE_REASONS = Object.freeze(['SNAPSHOT', 'INTERVAL', 'REQUEST']);
+export const L3_DEPTHS = Object.freeze([10, 100, 1000]);
+export const MAX_L3_ORDERS_PER_SIDE = 2_000;
+export const MAX_L3_EVENTS_PER_BATCH = 2_000;
+export const L3_ORDER_KEY_RE = /^[0-9a-f]{24}$/; // sha256(symbol|order_id) prefix: a stable persisted identity that never echoes the venue id
+export const L3_ORDER_KEYS = Object.freeze(['orderKey', 'price', 'qty', 'providerTs', 'firstSeenTs', 'modifiedTs']);
+export const L3_EVENT_KEYS = Object.freeze(['event', 'orderKey', 'side', 'price', 'qty', 'previousQty', 'providerTs', 'firstSeenTs', 'ageMs']);
 export const WINDOWS = Object.freeze(['day', 'hour', 'block', 'minute', 'five_minutes']); // five_minutes: exact 300000ms native periods (JUDGE-1 §5.2)
 export const KNOWN_CHAINS = Object.freeze(['ethereum', 'bitcoin', 'solana', 'base', 'arbitrum', 'optimism', 'polygon', 'bsc', 'avalanche', 'tron', 'hyperliquid', 'sui', 'aptos', 'near', 'cosmos', 'cardano', 'dogecoin', 'litecoin', 'xrp', 'ton', 'other']);
 
@@ -235,6 +269,14 @@ export const FAMILY_REGISTRY = deepFreeze({
   OFFICIAL_SOCIAL_EVENTS: { kinds: ['EVENT_REFERENCE'], providers: ['SETTLED_RECORDS', 'COINGLASS'], metrics: { event_references: 'COUNT' } },
   INFRASTRUCTURE_STATUS: { kinds: ['PROVIDER_STATUS'], providers: ['SETTLED_RECORDS'], metrics: { provider_status: 'COUNT' } },
 });
+// the DARK registry is a separate object on purpose: nothing that derives its vocabulary from FAMILY_REGISTRY can reach it
+export const DARK_FAMILY_REGISTRY = deepFreeze({
+  DERIVATIVES_PRESSURE: { kinds: ['DERIVATIVE_ANALYTIC_BUCKET'], providers: ['KRAKEN_DERIVATIVES'], metrics: { oi_bucket_level: 'NATIVE', oi_bucket_change: 'NATIVE', oi_bucket_acceleration: 'NATIVE', aggressor_bucket_level: 'NATIVE', aggressor_bucket_change: 'NATIVE', aggressor_bucket_slope: 'NATIVE', cvd_bucket_change: 'NATIVE', cvd_bucket_slope: 'NATIVE', liquidation_bucket_burst: 'RATIO', basis_bucket_level: 'NATIVE', basis_bucket_change: 'NATIVE', funding_bucket_level: 'NATIVE', funding_bucket_change: 'NATIVE', pressure_combinations: 'NATIVE' } },
+  L3_MICROSTRUCTURE: { kinds: ['L3_BOOK_SNAPSHOT', 'L3_ORDER_EVENT', 'L3_BOOK_COVERAGE'], providers: ['KRAKEN_SPOT'], metrics: { visible_order_age_imbalance: 'RATIO', queue_turnover_imbalance: 'RATIO', depth_persistence: 'FRACTION', new_order_impulse: 'BASE', visible_liquidity_disappearance: 'BASE', replenishment_after_pressure: 'BASE', queue_concentration: 'FRACTION', order_age_quantiles: 'NATIVE', top_level_churn: 'COUNT', microstructure_pressure_change: 'RATIO' } },
+});
+for (const f of DARK_FAMILIES) if (FAMILIES.includes(f) || FAMILY_REGISTRY[f]) throw new Error(`dark family ${f} leaked into the decision vocabulary`);
+{ const decision = new Set(Object.values(FAMILY_REGISTRY).flatMap((r) => Object.keys(r.metrics))); for (const f of DARK_FAMILIES) for (const id of Object.keys(DARK_FAMILY_REGISTRY[f].metrics)) if (decision.has(id)) throw new Error(`dark metric ${id} collides with a decision metric id`); }
+export const darkFamilyMetricIds = (family) => Object.keys(DARK_FAMILY_REGISTRY[family]?.metrics ?? {});
 export const familyMetricIds = (family) => Object.keys(FAMILY_REGISTRY[family]?.metrics ?? {});
 export const metricUnit = (family, metricId) => FAMILY_REGISTRY[family]?.metrics?.[metricId] ?? null;
 
@@ -256,6 +298,7 @@ export const KIND_SUBJECTS = deepFreeze({
   UNLOCK_EVENT: ['ASSET', 'TOKEN'], DEX_POOL: ['POOL'], DEFI_METRIC: ['PROTOCOL', 'ASSET'], ONCHAIN_METRIC: ['ASSET', 'TOKEN'],
   STABLECOIN_METRIC: ['ASSET', 'TOKEN'], ETF_FLOW: ['ASSET'], MACRO_OBSERVATION: ['SERIES'], ECONOMIC_EVENT: ['SERIES'],
   CROSS_ASSET_BAR: ['SERIES'], EVENT_REFERENCE: ['ASSET', 'PROVIDER'], PROVIDER_STATUS: ['PROVIDER'],
+  DERIVATIVE_ANALYTIC_BUCKET: ['DERIVATIVE'], L3_BOOK_SNAPSHOT: ['MARKET'], L3_ORDER_EVENT: ['MARKET'], L3_BOOK_COVERAGE: ['MARKET'],
 });
 export function subjectError(s, where = 'subject') {
   if (!isPlainObject(s)) return `${where}: expected object`;
@@ -339,7 +382,38 @@ export const PAYLOAD_KEYS = deepFreeze({
   CROSS_ASSET_BAR: ['instrument', 'exchange', 'intervalMs', 'open', 'high', 'low', 'close', 'volume', 'sessionState', 'delayed', 'proxyFor', 'currency'],
   EVENT_REFERENCE: ['eventKind', 'sourceProvider', 'nativeRef', 'sourceEventTs', 'headline', 'untrusted', 'status'],
   PROVIDER_STATUS: ['providerId', 'status', 'component', 'incidentRef'],
+  // MARKET-EDGE-KRAKEN-1 (dark): one Charts analytics bucket; one L3 book snapshot; one batch of L3 order events (one WS
+  // message); one L3 coverage transition. Clocks: bucketTs = the provider bucket timestamp (period start), periodEndTs =
+  // bucketTs + intervalMs; finality FINAL only when the bucket closed at or before receipt; knownAtTs >= receivedTs always.
+  DERIVATIVE_ANALYTIC_BUCKET: ['analyticsType', 'intervalMs', 'bucketTs', 'values', 'nativeUnit', 'normalizedUnit', 'normalization', 'finality', 'manipulationRisk', 'vintage', 'pageIndex', 'more'],
+  L3_BOOK_SNAPSHOT: ['depth', 'bids', 'asks', 'checksumVerified', 'synchronized', 'sampleReason', 'truncated', 'pricePrecision', 'qtyPrecision'],
+  L3_ORDER_EVENT: ['depth', 'events', 'checksumVerified'],
+  L3_BOOK_COVERAGE: ['state', 'reason', 'sinceTs', 'untilTs', 'droppedUpdates', 'depth', 'ordersTracked'],
 });
+const l3OrdersError = (orders, side, cap) => {
+  if (!Array.isArray(orders) || orders.length > cap) return `${side}: orders malformed or over ${cap}`;
+  let prev = null;
+  for (let i = 0; i < orders.length; i += 1) {
+    const o = orders[i]; const e = exactKeys(o, L3_ORDER_KEYS, `${side}[${i}]`); if (e) return e;
+    if (!L3_ORDER_KEY_RE.test(String(o.orderKey)) || !isPositive(o.price) || !isNonNegative(o.qty)) return `${side}: order ${i} malformed`;
+    if (!isTsOrNull(o.providerTs) || !isTs(o.firstSeenTs) || !isTsOrNull(o.modifiedTs) || (o.modifiedTs !== null && o.modifiedTs < o.firstSeenTs)) return `${side}: order ${i} clocks malformed`;
+    if (prev !== null && (side === 'bids' ? o.price > prev : o.price < prev)) return `${side}: order ${i} not ordered from the touch`; // equal prices = queue order within a level
+    prev = o.price;
+  }
+  return null;
+};
+const l3EventsError = (events, where) => {
+  if (!Array.isArray(events) || events.length > MAX_L3_EVENTS_PER_BATCH) return `${where}: events malformed or over ${MAX_L3_EVENTS_PER_BATCH}`;
+  for (let i = 0; i < events.length; i += 1) {
+    const ev = events[i]; const e = exactKeys(ev, L3_EVENT_KEYS, `${where}[${i}]`); if (e) return e;
+    if (!L3_EVENTS.includes(ev.event) || !L3_SIDES.includes(ev.side) || !L3_ORDER_KEY_RE.test(String(ev.orderKey))) return `${where}[${i}]: vocabulary`;
+    if (!isPositive(ev.price) || !isNonNegative(ev.qty) || !(ev.previousQty === null || isNonNegative(ev.previousQty))) return `${where}[${i}]: quantities malformed`;
+    if (!isTsOrNull(ev.providerTs) || !isTs(ev.firstSeenTs) || !(ev.ageMs === null || isCount(ev.ageMs))) return `${where}[${i}]: clocks malformed`;
+    if (ev.event === 'ADD' && ev.previousQty !== null) return `${where}[${i}]: an ADD has no previous quantity`;
+    if (ev.event === 'MODIFY' && ev.previousQty === null) return `${where}[${i}]: a MODIFY carries its previous quantity`;
+  }
+  return null;
+};
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export const isDateOnly = (v) => typeof v === 'string' && DATE_RE.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
@@ -494,6 +568,37 @@ export function payloadError(kind, p, where = 'payload') {
     case 'PROVIDER_STATUS':
       if (!isId(p.providerId) || !PROVIDER_STATUS_STATES.includes(p.status) || !isStringOrNull(p.component, 80) || !isIdOrNull(p.incidentRef)) return `${where}: provider status malformed`;
       return null;
+    case 'DERIVATIVE_ANALYTIC_BUCKET':
+      if (!ANALYTICS_TYPES.includes(p.analyticsType) || !ANALYTICS_INTERVALS_S.includes(p.intervalMs / 1000) || !isTs(p.bucketTs)) return `${where}: analytics identity malformed`;
+      if (p.bucketTs % p.intervalMs !== 0) return `${where}: bucketTs is not aligned to its interval`;
+      if (!(p.values === null || isPlainObject(p.values))) return `${where}: values must be an object or null`;
+      if (p.values !== null) { const ke = exactKeys(p.values, ANALYTICS_VALUE_KEYS[p.analyticsType], `${where}.values`); if (ke) return ke; e = numOrNullKeys(p.values, ANALYTICS_VALUE_KEYS[p.analyticsType], `${where}.values`); if (e) return e; if (ANALYTICS_VALUE_KEYS[p.analyticsType].every((k) => p.values[k] === null)) return `${where}: an all-null bucket carries null values, not an empty object`; }
+      if (!isStringOrNull(p.nativeUnit, 80) || !UNITS.includes(p.normalizedUnit) || !UNIT_NORMALIZATIONS.includes(p.normalization)) return `${where}: unit vocabulary`;
+      if (p.normalization === 'NONE' && p.normalizedUnit !== 'NATIVE') return `${where}: an unnormalized bucket is NATIVE (a unit is never inferred from magnitude)`;
+      if (p.normalization === 'IDENTITY' && (p.nativeUnit === null || p.normalizedUnit === 'NATIVE' || p.normalizedUnit === 'UNKNOWN')) return `${where}: an IDENTITY normalization names both units`;
+      if (!BUCKET_FINALITY.includes(p.finality) || !MANIPULATION_RISK.includes(p.manipulationRisk) || !VINTAGES.includes(p.vintage)) return `${where}: finality/risk/vintage vocabulary`;
+      if (p.manipulationRisk !== ANALYTICS_MANIPULATION_RISK[p.analyticsType]) return `${where}: manipulation risk disagrees with the documented class`;
+      if (!isCount(p.pageIndex) || typeof p.more !== 'boolean') return `${where}: pagination fields malformed`;
+      return null;
+    case 'L3_BOOK_SNAPSHOT':
+      if (!L3_DEPTHS.includes(p.depth)) return `${where}: depth outside the documented set`;
+      e = l3OrdersError(p.bids, 'bids', MAX_L3_ORDERS_PER_SIDE) ?? l3OrdersError(p.asks, 'asks', MAX_L3_ORDERS_PER_SIDE); if (e) return `${where}: ${e}`;
+      if (p.bids.length > 0 && p.asks.length > 0 && p.bids[0].price >= p.asks[0].price) return `${where}: crossed book`;
+      if (new Set([...p.bids, ...p.asks].map((o) => o.orderKey)).size !== p.bids.length + p.asks.length) return `${where}: duplicate order identity`;
+      if (!(p.checksumVerified === null || typeof p.checksumVerified === 'boolean') || typeof p.synchronized !== 'boolean' || typeof p.truncated !== 'boolean') return `${where}: flags malformed`;
+      if (!L3_SAMPLE_REASONS.includes(p.sampleReason)) return `${where}: sampleReason vocabulary`;
+      if (!(p.pricePrecision === null || isCount(p.pricePrecision)) || !(p.qtyPrecision === null || isCount(p.qtyPrecision))) return `${where}: precision malformed`;
+      return null;
+    case 'L3_ORDER_EVENT':
+      if (!L3_DEPTHS.includes(p.depth)) return `${where}: depth outside the documented set`;
+      e = l3EventsError(p.events, `${where}.events`); if (e) return e;
+      if (!(p.checksumVerified === null || typeof p.checksumVerified === 'boolean')) return `${where}: checksumVerified malformed`;
+      return null;
+    case 'L3_BOOK_COVERAGE':
+      if (!L3_COVERAGE_STATES.includes(p.state) || !QUALITY_REASON_CODES.includes(p.reason)) return `${where}: vocabulary`;
+      if (!isTs(p.sinceTs) || !isTsOrNull(p.untilTs) || (p.untilTs !== null && p.untilTs < p.sinceTs)) return `${where}: interval malformed`;
+      if (!isCount(p.droppedUpdates) || !L3_DEPTHS.includes(p.depth) || !isCount(p.ordersTracked)) return `${where}: counters malformed`;
+      return null;
     default: return `${where}: unknown kind`;
   }
 }
@@ -504,6 +609,7 @@ const PRIMARY_VALUE_KEYS = deepFreeze({
   LIQUIDATION: ['notional', 'longNotional', 'shortNotional', 'qtyBase'], OPTION_TICK: ['markIv', 'markPrice', 'openInterest'], ASSET_REFERENCE: ['priceUsd', 'marketCapUsd', 'circulatingSupply'], UNLOCK_EVENT: ['scheduledTs', 'amountToken'],
   DEX_POOL: ['priceUsd', 'liquidityUsd'], DEFI_METRIC: ['value'], ONCHAIN_METRIC: ['value'], STABLECOIN_METRIC: ['value'], ETF_FLOW: ['flowUsd'], MACRO_OBSERVATION: ['value'], ECONOMIC_EVENT: ['scheduledTs', 'actualValue', 'forecastValue'],
   CROSS_ASSET_BAR: ['close'], EVENT_REFERENCE: ['nativeRef'], PROVIDER_STATUS: ['status'],
+  DERIVATIVE_ANALYTIC_BUCKET: ['values'], L3_BOOK_SNAPSHOT: ['bids', 'asks'], L3_ORDER_EVENT: ['events'], L3_BOOK_COVERAGE: ['state'],
 });
 const NULL_VALUE_STATES = new Set(['MISSING', 'UNAVAILABLE', 'FAILED', 'NOT_SUPPORTED']);
 export const VALUE_BEARING = (kind, p) => PRIMARY_VALUE_KEYS[kind].some((k) => p[k] !== null && !(Array.isArray(p[k]) && p[k].length === 0));
@@ -523,8 +629,10 @@ export function qualityError(q, kind, p, where = 'quality') {
   if (NULL_VALUE_STATES.has(q.state) && bearing) return `${where}: ${q.state} carries null values, never a number`;
   if (q.state === 'PARTIAL' && q.reasonCodes.length === 0) return `${where}: PARTIAL must say what is missing`;
   if (q.state === 'PARTIAL' && q.completeness === 1) return `${where}: PARTIAL cannot claim complete coverage`;
-  if (q.state === 'PROVISIONAL' && !(kind === 'CANDLE' && p.provisional === true)) return `${where}: PROVISIONAL is the uncommitted-candle state only`;
+  const provisionalBucket = kind === 'DERIVATIVE_ANALYTIC_BUCKET' && p.finality === 'PROVISIONAL';
+  if (q.state === 'PROVISIONAL' && !(kind === 'CANDLE' && p.provisional === true) && !provisionalBucket) return `${where}: PROVISIONAL is the uncommitted-candle / in-progress-bucket state only`;
   if (kind === 'CANDLE' && p.provisional === true && q.state !== 'PROVISIONAL') return `${where}: an uncommitted candle is PROVISIONAL`;
+  if (provisionalBucket && (q.state !== 'PROVISIONAL' || !q.reasonCodes.includes('UNCOMMITTED_BAR'))) return `${where}: an in-progress analytics bucket is PROVISIONAL with reason UNCOMMITTED_BAR`;
   if (q.state === 'CLOCK_CONFLICT' && !q.reasonCodes.includes('SOURCE_EVENT_AHEAD_OF_RECEIPT')) return `${where}: CLOCK_CONFLICT needs its reason`;
   if (q.state === 'STALE' && !q.reasonCodes.includes('STALE_BY_POLICY') && !q.reasonCodes.includes('DELAYED_DATA')) return `${where}: STALE needs a staleness reason`;
   return null;
@@ -569,6 +677,13 @@ export function observationError(o, where = 'observation') {
     if (o.kind === 'CANDLE' && o.periodStartTs !== null && o.periodEndTs !== null && o.periodEndTs - o.periodStartTs !== o.payload.intervalMs) return `${where}: candle period disagrees with its interval`;
     if (o.kind === 'CANDLE' && o.payload.closed && o.periodEndTs !== null && o.periodEndTs > o.receivedTs) return `${where}: a closed candle cannot end after receipt`;
     if (o.kind === 'CANDLE' && o.payload.provisional && o.periodEndTs !== null && o.periodEndTs <= o.receivedTs) return `${where}: a provisional candle has not closed yet`;
+    if (o.kind === 'DERIVATIVE_ANALYTIC_BUCKET') {
+      if (o.periodStartTs !== o.payload.bucketTs || o.periodEndTs !== o.payload.bucketTs + o.payload.intervalMs) return `${where}: analytics bucket period must be [bucketTs, bucketTs + interval]`;
+      if (o.payload.finality === 'FINAL' && o.periodEndTs > o.receivedTs) return `${where}: a FINAL bucket cannot end after receipt`;
+      if (o.payload.finality === 'PROVISIONAL' && o.periodEndTs <= o.receivedTs) return `${where}: a bucket that closed before receipt is not PROVISIONAL`;
+      if (o.provenance.vintage !== o.payload.vintage) return `${where}: provenance vintage disagrees with the payload vintage`;
+    }
+    if (o.kind === 'L3_BOOK_SNAPSHOT' || o.kind === 'L3_ORDER_EVENT') { if (o.epochId === null) return `${where}: an L3 record names its connection epoch`; const orders = o.kind === 'L3_BOOK_SNAPSHOT' ? [...o.payload.bids, ...o.payload.asks] : o.payload.events; for (const x of orders) if (x.firstSeenTs > o.receivedTs || (x.providerTs !== null && x.providerTs > o.receivedTs + CLOCK_CONFLICT_TOLERANCE_MS)) return `${where}: an order clock cannot follow receipt`; }
     if (typeof o.observationId !== 'string' || !OBSERVATION_ID_RE.test(o.observationId)) return `${where}: observationId malformed`;
     if (observationIdentity(o) !== o.observationId) return `${where}: observationId does not match content`;
     return null;
@@ -595,7 +710,8 @@ export const coverageIdentity = (c) => { const b = {}; for (const k of COVERAGE_
 export function coverageRecordError(c, where = 'coverage') {
   const k = exactKeys(c, COVERAGE_RECORD_KEYS, where); if (k) return k;
   if (c.recordVersion !== COVERAGE_RECORD_VERSION) return `${where}: unsupported recordVersion`;
-  if (!PROVIDER_IDS.includes(c.provider) || !isId(c.endpointId) || !/^ms-[0-9a-f]{32}$/.test(String(c.subjectId)) || !FAMILIES.includes(c.family) || !(c.kind === null || PAYLOAD_KINDS.includes(c.kind))) return `${where}: identity malformed`;
+  if (!PROVIDER_IDS.includes(c.provider) || !isId(c.endpointId) || !/^ms-[0-9a-f]{32}$/.test(String(c.subjectId)) || !ALL_FAMILIES.includes(c.family) || !(c.kind === null || PAYLOAD_KINDS.includes(c.kind))) return `${where}: identity malformed`;
+  if (c.kind !== null && DARK_PAYLOAD_KINDS.includes(c.kind) !== DARK_FAMILIES.includes(c.family)) return `${where}: a dark kind belongs to a dark family and to nothing else`;
   if (!COVERAGE_STATES.includes(c.state) || !Array.isArray(c.reasonCodes) || c.reasonCodes.some((r) => !QUALITY_REASON_CODES.includes(r))) return `${where}: state/reasons malformed`;
   if (!isTs(c.startTs) || !isTsOrNull(c.endTs) || (c.endTs !== null && c.endTs < c.startTs)) return `${where}: interval malformed`;
   if (!isCount(c.observationCount) || !isCount(c.droppedCount) || !isIdOrNull(c.epochId) || !(c.sequenceStart === null || isCount(c.sequenceStart)) || !(c.sequenceEnd === null || isCount(c.sequenceEnd))) return `${where}: counters malformed`;

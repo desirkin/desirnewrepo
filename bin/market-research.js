@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { EXIT_CODES, MarketLabError } from '../market-lab/contracts.js';
 import { parseUtcInstant } from '../market-lab/time.js';
 import { readPolicyFile, readSubjectsFile, runInspect, runCoverage, runCapture, runBuild } from '../market-lab/commands.js';
+import { runEdgeCapture, runEdgeEvaluate } from '../market-lab/edge-capture.js';
 
 export const COMMANDS = Object.freeze({
   inspect: { flags: { policy: { required: true } } },
@@ -16,6 +17,9 @@ export const COMMANDS = Object.freeze({
   capture: { flags: { policy: { required: true }, subjects: { required: true }, 'duration-seconds': { required: true, int: true }, out: { required: true }, 'research-root': { required: true } } },
   build: { flags: { capture: { required: true }, 'as-of': { required: true, utc: true }, subject: { required: true }, out: { required: true } } },
   serve: { flags: { policy: { required: true }, subjects: { required: true }, 'research-root': { required: true }, port: { required: false, int: true }, 'case-every-seconds': { required: false, int: true } } },
+  // MARKET-EDGE-KRAKEN-1 (dark; status IMPLEMENTED_DARK_NOT_EVALUATED): the two dark senses, captured and evaluated apart from every decision path
+  'edge-capture': { flags: { policy: { required: true }, subjects: { required: true }, 'duration-seconds': { required: true, int: true }, out: { required: true }, 'research-root': { required: true } } },
+  'edge-evaluate': { flags: { 'edge-capture': { required: true }, capture: { required: true }, subject: { required: true }, 'spot-symbol': { required: true }, 'futures-symbol': { required: true }, 'evaluation-id': { required: true }, 'declared-at': { required: true, utc: true }, start: { required: true, utc: true }, 'duration-seconds': { required: true, int: true }, 'embargo-seconds': { required: true, int: true }, 'as-of': { required: true, utc: true }, seed: { required: true }, 'include-holdout': { required: false, bool: true } } },
 });
 export const USAGE = `usage: market-research <command> [flags]
   inspect   --policy <policy.json>
@@ -23,6 +27,9 @@ export const USAGE = `usage: market-research <command> [flags]
   capture   --policy <policy.json> --subjects <subjects.json> --duration-seconds <1..86400> --out <NEW_DIR> --research-root <DIR>
   build     --capture <SEALED_CAPTURE_DIR> --as-of <YYYY-MM-DDTHH:MM:SSZ> --subject <CANONICAL_COIN> --out <NEW_DIR>
   serve     --policy <policy.json> --subjects <subjects.json> --research-root <DIR> [--port <loopback port>] [--case-every-seconds <N>]
+  edge-capture  --policy <policy.json> --subjects <subjects.json> --duration-seconds <1..86400> --out <NEW_DIR> --research-root <DIR>
+  edge-evaluate --edge-capture <SEALED_EDGE_DIR> --capture <SEALED_CAPTURE_DIR> --subject <COIN> --spot-symbol <BTC/USD> --futures-symbol <PF_XBTUSD>
+                --evaluation-id <ID> --declared-at <UTC> --start <UTC> --duration-seconds <N> --embargo-seconds <N> --as-of <UTC> --seed <ID> [--include-holdout true]
 research only (authority NONE / RESEARCH_ONLY). inspect and build are offline; coverage is offline unless --probe true
 (policy-authorized metadata requests only); capture and serve reach the providers the policy enables. Every dispatch is
 accounted in <research-root>/accounting (the stable quota journal); a per-run --out directory is never an accounting root.
@@ -60,6 +67,8 @@ export async function runCli(argv, { env = process.env, stdout = (s) => process.
     else if (command === 'coverage') { const { sampleSubjects } = await import('../market-lab/policy.js'); result = await runCoverage({ policy: readPolicyFile(flags.policy), subjects: flags.subjects ? readSubjectsFile(flags.subjects) : sampleSubjects(), env, out: flags.out, probe: flags.probe === true, fetchImpl, clock, researchRoot: flags['research-root'] ?? null }); }
     else if (command === 'capture') result = await runCapture({ policy: readPolicyFile(flags.policy), subjects: readSubjectsFile(flags.subjects), env, out: flags.out, durationSeconds: flags['duration-seconds'], researchRoot: flags['research-root'], fetchImpl, WebSocketImpl, clock, log: (m) => stderr(`${JSON.stringify({ log: String(m).slice(0, 300) })}\n`) });
     else if (command === 'build') result = runBuild({ captureDir: flags.capture, asOfTs: flags['as-of'], canonicalCoin: flags.subject, out: flags.out, clock });
+    else if (command === 'edge-capture') result = await runEdgeCapture({ policy: readPolicyFile(flags.policy), subjects: readSubjectsFile(flags.subjects), env, out: flags.out, durationSeconds: flags['duration-seconds'], researchRoot: flags['research-root'], fetchImpl, WebSocketImpl, clock, log: (m) => stderr(`${JSON.stringify({ log: String(m).slice(0, 300) })}\n`) });
+    else if (command === 'edge-evaluate') result = runEdgeEvaluate({ edgeCaptureDir: flags['edge-capture'], captureDir: flags.capture, evaluationId: flags['evaluation-id'], declaredTs: flags['declared-at'], startTs: flags.start, durationMs: flags['duration-seconds'] * 1000, embargoMs: flags['embargo-seconds'] * 1000, seed: flags.seed, subject: { canonicalCoin: flags.subject, spotSymbol: flags['spot-symbol'], futuresSymbol: flags['futures-symbol'] }, asOfTs: flags['as-of'], includeHoldout: flags['include-holdout'] === true });
     else {
       const { createResearchService } = await import('../market-lab/service.js');
       const policy = readPolicyFile(flags.policy); const subjects = readSubjectsFile(flags.subjects);
