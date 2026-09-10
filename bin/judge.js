@@ -18,11 +18,12 @@ export const FLAGS = Object.freeze({
   'run-observe': RUN,
   'init-paper': { ...COMMON, ...OWNER },
   replay: { ...COMMON, recording: { required: true }, pairs: {}, specs: {}, out: {} },
-  'replay-experiment': { ...COMMON, bundle: { required: true }, experiment: { required: true }, arms: {}, seed: {}, out: {}, 'stop-at-seq': { int: true }, 'expect-policy-binding': { bool: true } },
-  'declare-experiment': { ...COMMON, ...OWNER, experiment: { required: true }, start: { required: true, utc: true }, 'duration-ms': { required: true, int: true }, 'development-fraction': {}, 'validation-fraction': {}, 'embargo-ms': { int: true }, 'lookback-ms': { int: true }, 'decision-ms': { int: true }, 'max-outcome-ms': { int: true }, 'publication-floor-ms': { int: true }, arms: {}, seed: {}, 'source-prefix': {}, exploratory: { bool: true } },
-  'evaluate-experiment': { ...COMMON, experiment: { required: true }, report: { required: true }, split: { required: true }, out: {} },
+  'replay-experiment': { ...COMMON, bundle: { required: true }, experiment: { required: true }, arms: {}, seed: {}, out: {}, 'stop-at-seq': { int: true }, 'expect-policy-binding': { bool: true }, 'scope-stage': {}, 'scope-boundary': { utc: true }, 'holdout-opening': {} },
+  'declare-experiment': { ...COMMON, ...OWNER, experiment: { required: true }, start: { required: true, utc: true }, 'duration-ms': { required: true, int: true }, 'development-fraction': {}, 'validation-fraction': {}, 'embargo-ms': { int: true }, 'lookback-ms': { int: true }, 'decision-ms': { int: true }, 'max-outcome-ms': { int: true }, 'publication-floor-ms': { int: true }, 'selection-grace-ms': { int: true }, arms: {}, seed: {}, 'source-prefix': {}, exploratory: { bool: true } },
+  'evaluate-experiment': { ...COMMON, ...OWNER, experiment: { required: true }, report: { required: true }, split: { required: true }, out: {} },
   'lock-candidate': { ...COMMON, ...OWNER, experiment: { required: true }, arm: { required: true } },
-  'open-holdout': { ...COMMON, ...OWNER, experiment: { required: true }, 'run-id': { required: true }, report: { required: true }, out: {} },
+  'open-holdout': { ...COMMON, ...OWNER, experiment: { required: true }, 'run-id': { required: true }, out: {} },
+  'evaluate-holdout': { ...COMMON, ...OWNER, experiment: { required: true }, 'run-id': { required: true }, report: { required: true }, out: {} },
   'run-paper': { ...RUN, ...OWNER },
   'preflight-live': { ...COMMON, ...OWNER, 'allow-private': { bool: true } },
   'arm-live': { ...COMMON, ...OWNER, challenge: { bool: true }, confirm: { bool: true }, approval: { required: true }, preflight: {}, 'owner-limits': {}, 'allocation-ceiling': { required: true }, 'expires-at': { utc: true }, reinvestment: {}, 'canary-pair': {}, 'canary-max-consideration': {}, 'canary-max-duration-ms': { int: true }, 'canary-loss-acknowledged': { bool: true } },
@@ -41,11 +42,12 @@ export const USAGE = `usage: judge <command> [--flag value ...]
   run-observe      --policy P [--pairs XBT/USD,SOL/USD] [--record DIR] [--minutes N]   hypothetical account, no orders
   init-paper       --policy P [--account A] --owner-stdin true            owner intent; refuses to reset
   replay           --policy P --recording DIR [--pairs ..] [--specs FILE] [--out FILE]  deterministic replay
-  replay-experiment --policy P --bundle DIR --experiment ID [--arms A,B] [--seed S] [--stop-at-seq N] [--out FILE]  offline experiment arms over a sealed bundle
-  declare-experiment --policy P --experiment ID --start UTC --duration-ms N --owner-stdin true [--development-fraction F] [--validation-fraction F] [--embargo-ms N] [--lookback-ms N] [--max-outcome-ms N] [--publication-floor-ms N] [--arms ..] [--seed S] [--exploratory true]  persist the prospective windows ONCE
-  evaluate-experiment --policy P --experiment ID --report FILE --split DEVELOPMENT|VALIDATION [--out FILE]  a split evaluation of a replay report (never the holdout)
-  lock-candidate   --policy P --experiment ID --arm ARM --owner-stdin true   lock the candidate before the one-shot holdout
-  open-holdout     --policy P --experiment ID --run-id ID --report FILE --owner-stdin true [--out FILE]  open (persisted first) and evaluate the holdout once
+  replay-experiment --policy P --bundle DIR --experiment ID [--arms A,B] [--seed S] [--stop-at-seq N] [--scope-stage DEVELOPMENT|VALIDATION --scope-boundary UTC] [--holdout-opening HEX] [--out FILE]  offline experiment arms over a sealed bundle (a stage artifact, a bound holdout look, or research)
+  declare-experiment --policy P --experiment ID --start UTC --duration-ms N --owner-stdin true [--development-fraction F] [--validation-fraction F] [--embargo-ms N] [--lookback-ms N] [--max-outcome-ms N] [--publication-floor-ms N] [--selection-grace-ms N] [--arms ..] [--seed S] [--exploratory true]  persist the prospective windows + selection deadline ONCE
+  evaluate-experiment --policy P --experiment ID --report FILE --split DEVELOPMENT|VALIDATION --owner-stdin true [--out FILE]  a stage look over a stage-scoped replay report (never the holdout)
+  lock-candidate   --policy P --experiment ID --arm ARM --owner-stdin true   lock the candidate at or before the declared selection deadline
+  open-holdout     --policy P --experiment ID --run-id ID --owner-stdin true [--out FILE]  persist the one-shot opening (evaluates nothing; takes no report)
+  evaluate-holdout --policy P --experiment ID --run-id ID --report FILE --owner-stdin true [--out FILE]  the one bound holdout look (report replayed with --holdout-opening <opening digest>)
   run-paper        --policy P --account A --owner-stdin true [--pairs ..] [--cases DIR] [--record DIR]
   preflight-live   --policy P --account A --owner-stdin true --allow-private true      read-only private checks (NOT RUN in this build)
   arm-live         --policy P --account A --approval FILE --allocation-ceiling USD --owner-stdin true --challenge true

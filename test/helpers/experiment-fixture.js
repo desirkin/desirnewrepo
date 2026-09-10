@@ -52,10 +52,10 @@ export function rewriteBundle(srcDir, dstDir, extra = [], { binding = null, vali
   flush(Infinity); const state = rec.stop(); return { dir: dstDir, state, inserted: n, status: rec.status() };
 }
 // record the fixture bundle through the real composition; returns the forward run's observable facts for comparison
-export async function recordExperimentFixture(dir, { scenario = 'TARGET_THEN_CRASH', experimentId = 'exp-fixture', accountId = 'fixture-observe', policyFile = null, extraSpecs = [], extraNominations = [], controlsSource = null, log = () => {} } = {}) {
+export async function recordExperimentFixture(dir, { scenario = 'TARGET_THEN_CRASH', experimentId = null, accountId = 'fixture-observe', codeDigest = 'c'.repeat(64), policyFile = null, extraSpecs = [], extraNominations = [], controlsSource = null, log = () => {} } = {}) {
   const clock = fakeClock(); const transport = ohlcTransport(clock); const noms = [{ symbol: 'XBT/USD', assetId: 'BTC', nominationKnownAtTs: clock.now() - 1000 }, ...extraNominations]; const pf = policyFile ?? writeFixturePolicy(path.dirname(dir)); const P = loadJudgePolicy(pf); const journal = createMemoryJournal();
   await initAccount({ journal, policy: P.policy, policyDigest: P.digest, mode: 'OBSERVE', ownerRef: 'fixture', nowTs: clock.now(), accountId });
-  const run = await composeJudge({ policyFile: pf, mode: 'OBSERVE', accountId, journal, clock: pclockOf(clock), transport, specs: [SPEC, ...extraSpecs], controlsSource: controlsSource ?? (() => ({ kill: false, cage: false, vetoes: [] })), nominations: () => noms, recordDir: dir, writeProjection: false, codeDigest: 'c'.repeat(64), log, experimentId });
+  const run = await composeJudge({ policyFile: pf, mode: 'OBSERVE', accountId, journal, clock: pclockOf(clock), transport, specs: [SPEC, ...extraSpecs], controlsSource: controlsSource ?? (() => ({ kill: false, cage: false, vetoes: [] })), nominations: () => noms, recordDir: dir, writeProjection: false, codeDigest, log, experimentId });
   // the first tick retrieves the bar history BEFORE the warm range starts (the provider's bars end before the recording; live minutes follow)
   run.admitNominations(); await run.tick(); await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r)); const d = createDriver(run, clock); await d.warm(); await d.ignite(); await d.hold();
   if (scenario === 'TARGET_THEN_CRASH') { await d.rally(); await d.advance(3000); await d.crash(); await d.advance(3000); }

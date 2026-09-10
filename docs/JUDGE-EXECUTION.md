@@ -56,11 +56,12 @@ node bin/judge.js inspect          --policy P [--account A]
 node bin/judge.js run-observe      --policy P [--pairs XBT/USD,SOL/USD] [--record DIR] [--minutes N]
 node bin/judge.js init-paper       --policy P [--account A] --owner-stdin true
 node bin/judge.js replay           --policy P --recording DIR [--pairs ..] [--specs FILE] [--out FILE]
-node bin/judge.js replay-experiment --policy P --bundle DIR --experiment ID [--arms A,B] [--seed S] [--stop-at-seq N] [--expect-policy-binding true] [--out FILE]
-node bin/judge.js declare-experiment --policy P --experiment ID --start 2026-10-01T00:00:00Z --duration-ms N --owner-stdin true [--development-fraction F] [--validation-fraction F] [--embargo-ms N] [--lookback-ms N] [--decision-ms N] [--max-outcome-ms N] [--publication-floor-ms N] [--arms ..] [--seed S] [--source-prefix P] [--exploratory true]
-node bin/judge.js evaluate-experiment --policy P --experiment ID --report FILE --split DEVELOPMENT|VALIDATION [--out FILE]
-node bin/judge.js lock-candidate   --policy P --experiment ID --arm ARM --owner-stdin true
-node bin/judge.js open-holdout     --policy P --experiment ID --run-id ID --report FILE --owner-stdin true [--out FILE]
+node bin/judge.js replay-experiment --policy P --bundle DIR --experiment ID [--arms A,B] [--seed S] [--stop-at-seq N] [--expect-policy-binding true] [--scope-stage DEVELOPMENT|VALIDATION --scope-boundary UTC] [--holdout-opening HEX] [--out FILE]
+node bin/judge.js declare-experiment --policy P --experiment ID --start 2026-10-01T00:00:00Z --duration-ms N --owner-stdin true [--development-fraction F] [--validation-fraction F] [--embargo-ms N] [--lookback-ms N] [--decision-ms N] [--max-outcome-ms N] [--publication-floor-ms N] [--selection-grace-ms N] [--arms ..] [--seed S] [--source-prefix P] [--exploratory true]
+node bin/judge.js evaluate-experiment --policy P --experiment ID --report FILE --split DEVELOPMENT|VALIDATION --owner-stdin true [--out FILE]   (the report must be the stage artifact: replayed with --scope-stage/--scope-boundary at the declared boundary)
+node bin/judge.js lock-candidate   --policy P --experiment ID --arm ARM --owner-stdin true   (at or before the declared selection deadline)
+node bin/judge.js open-holdout     --policy P --experiment ID --run-id ID --owner-stdin true [--out FILE]   (persists the opening; takes NO report; evaluates nothing)
+node bin/judge.js evaluate-holdout --policy P --experiment ID --run-id ID --report FILE --owner-stdin true [--out FILE]   (the ONE look: a report replayed AFTER the opening with --holdout-opening <opening digest>)
 node bin/judge.js verify           [--bundle DIR] [--experiment ID] [--manifest FILE --experiment ID] (in addition to the existing --policy/--account/--case/--recording/--approval)
 node bin/judge.js prepare-release  --policy P --experiment ID ... (the holdout chain is read from the experiment store; without --experiment the candidate is BLOCKED: HOLDOUT_CHAIN_MISSING)
 node bin/judge.js run-paper        --policy P --account A --owner-stdin true [--pairs ..] [--cases DIR] [--record DIR]
@@ -416,7 +417,56 @@ from PEER records whose endpoints match the exact window, otherwise the peer sta
 forward composition now closes live one-minute bars on every tick (previously only on the 10 s maintenance pass, which left a
 candidate without indicators for the confirming books).
 
-### The prospective experiment and the holdout chain (H01–H05, D01, D02)
+### The prospective experiment and the holdout chain (H01–H05, D01, D02) — corrected by the holdout truth closeout (H06–H13)
+
+The corrected lifecycle (each step is one durable, semantically closed record in the migration-9 store; steps 5 and 6 are
+NEVER merged):
+
+1. DECLARED — `declare-experiment` (owner) persists ONCE the exact UTC windows, the bindings, the horizons, the embargo and the
+   SELECTION DEADLINE (`validationEndTs + selectionGraceMs`; the grace defaults to `maxOutcomeMs + publicationFloorMs`). A
+   declaration without a KNOWN code identity is research-visible but `qualifiable: false`.
+2. DEVELOPMENT EVALUATED — `replay-experiment --scope-stage DEVELOPMENT --scope-boundary <developmentEnd>` produces a stage
+   artifact (`COMPLETE_THROUGH_SCOPE`: the stream is consumed STRICTLY before the boundary, `evidenceScope` names the last applied
+   record and how many lay beyond); `evaluate-experiment --split DEVELOPMENT` (owner) admits ONLY that artifact.
+3. VALIDATION EVALUATED — the same with the validation boundary. A full report, a `STOPPED_AT_SEQ` prefix, an `INCOMPLETE` or
+   dirty-tree report is never a stage look (`REPORT_INADMISSIBLE`).
+4. SELECTION LOCKED — `lock-candidate` (owner) names the two stage evaluations (seq, digest, evaluation digest, report digest)
+   and is refused after the selection deadline (`SELECTION_DEADLINE_PASSED`).
+5. HOLDOUT OPENED — `open-holdout` (owner) persists the opening (lock digest, run id, holdout window, evidence-complete clock)
+   after the window + outcome horizon; it takes NO report and evaluates NOTHING; the chain says `HOLDOUT_NOT_EVALUATED`.
+6. HOLDOUT EVALUATED — `replay-experiment --holdout-opening <opening digest>` (the opening digest is part of the report
+   identity) then `evaluate-holdout --run-id <same run id>` (owner): the ONE look, only the locked arm, groups derived from the
+   bound report, persisted once and forever as `QUALIFIED` or `CONSUMED_BUT_UNQUALIFIED` with named blockers
+   (`HOLDOUT_UNSCORABLE`, `HOLDOUT_PENDING`, `HOLDOUT_EMPTY`, `HOLDOUT_CENSORED`, `HOLDOUT_NO_CLOSED_OUTCOME`,
+   `DECLARATION_UNQUALIFIABLE`). A second look, a second opening or another run id is refused.
+7. RELEASE PREPARATION — read-only: `prepare-release --experiment` embeds the store's chain (`judge-holdout-chain-2`: lock →
+   opening → bound evaluation, `consumed`, `qualified`, the blockers and the candidate BINDING — experiment, arm, policy, code,
+   strategy, seed, source prefix, account, declaration / report / bundle digests); the release validator blocks
+   `HOLDOUT_CHAIN_MISSING` / `HOLDOUT_CHAIN_INVALID` / `HOLDOUT_UNQUALIFIED:<blockers>` / `HOLDOUT_CHAIN_CODE_MISMATCH` /
+   `HOLDOUT_CHAIN_POLICY_MISMATCH` / `HOLDOUT_CHAIN_STRATEGY_MISMATCH` / `HOLDOUT_CHAIN_SOURCE_MISMATCH`.
+
+ONE closed, re-derived admissibility validator (`admissibleReport`) sits behind every look: report digest re-derived (the seal
+covers everything but the local path), completeness, evidence scope (stage + boundary + no decision / close clock at or beyond
+it), holdout-opening binding, experiment / policy / KNOWN code / strategy / seed / source prefix, engine / bundle / tie-order
+versions, the sealed bundle binding (a bound field must agree with the declaration; an unbound field is unbound), every declared
+FUNDED arm with its binding and account id re-derived, and the arm ledger (the closed net IS the sum of the listed closes). The
+CLI doors additionally re-derive the bundle fingerprint from the directory the report names (`BUNDLE_ABSENT` /
+`BUNDLE_DIGEST_MISMATCH`); the fingerprint (`bundleFingerprint`) covers the sealed manifest's versions, binding, COMPLETE state,
+per-kind capabilities, capture count, first / last clocks and the ordered segment inventory (file, bytes, messages, sha256, first /
+last clocks) — the directory name is never the binding. Catalyst / source dependencies (the consumed case id, the primary-confirmed claim id, that claim's
+OFFICIAL source id, carried by the judge beside its decisions and read from the bundle's own CASE record) form closures that are
+assigned WHOLE: two episodes sharing one canonical catalyst or source across a cutoff are purged together (`DEPENDENCY_*`
+reasons); a missing identity joins nothing. Arrival clocks are the preserved decision / case receipt clocks, never the wall clock
+of the evaluator; a late arrival is named in `late[]`. Every experiment record is validated by `judge/experiment-records.js` on
+append (before the insert) and on read: an unknown / missing / null key, a wrong experiment id or version, a digest that does not
+re-derive, an impossible clock order, a reference to the wrong seq / digest, an undeclared arm, a stage look after the opening, a
+second lock / opening / evaluation, or a qualification that does not follow from the content is `RECORD_INVALID` even when the
+hash chain re-derives. Every experiment-store mutator (`declare-experiment`, `evaluate-experiment`, `lock-candidate`,
+`open-holdout`, `evaluate-holdout`) proves owner intent BEFORE its append; `replay-experiment` mutates nothing.
+
+The original description of this section (H01–H05 as first delivered) follows; where it says the opening "evaluates only the
+locked arm and persists the bound evaluation once", the corrected law above splits that into steps 5 and 6.
+
 
 `judge/experiment.js` over `judge/experiment-store.js` (PostgreSQL migration 9 `serpent_experiment_records`, append-only,
 digest-chained, serialized per experiment with a revision check; a memory twin for offline tests). `declare-experiment`

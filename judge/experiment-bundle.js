@@ -5,9 +5,7 @@
 // (typed rows beside the raw feed rows) and sealed by the same manifest; legacy raw-only recordings stay readable and
 // are reported with NAMED missing capabilities, never with synthesized inputs. Every record is validated by a closed
 // schema at generation (the recorder refuses an invalid row), at reopening and at the public evaluation APIs.
-import { shapeError, T, digestOf, instrumentSpec, feeContract, isPlainObject } from '../execution/contract.js';
-import { validateEvidencePacketV2 } from '../evidence/contract-v2.js';
-import { validateAnalysis2 } from '../socrates/contract-v2.js';
+import { shapeError, T, digestOf, canonicalJson, instrumentSpec, feeContract, isPlainObject } from '../execution/contract.js';
 import { consumeCase } from './intake.js';
 import { readManifest, readRecording, BUNDLE_VERSION, TIE_ORDER_VERSION, RECORD_KINDS, TYPED_KINDS } from './recorder.js';
 export { BUNDLE_VERSION, TIE_ORDER_VERSION, RECORD_KINDS, TYPED_KINDS };
@@ -31,7 +29,10 @@ const SCHEMAS = Object.freeze({
   WHALE: { assetId: T.id, knownAtTs: T.ts, intervals: listOf((x) => isPlainObject(x) && Number.isSafeInteger(x.periodStartTs) && Number.isSafeInteger(x.knownAtTs) && (x.value === null || typeof x.value === 'number' || typeof x.value === 'string') && typeof x.complete === 'boolean', 64), source: T.id },
   PEER: { selectionTs: T.ts, census: T.idList, rankings: obj('rankings'), returns: obj('returns'), source: T.id },
 });
-// validate one typed payload; identities are RE-DERIVED (never trusted as copied): instrument / fee digests, packet identity, verification digest
+// validate one typed payload; identities are RE-DERIVED (never trusted as copied): instrument / fee digests, packet identity, verification digest.
+// A CASE record never re-interprets evidence here (doctrine: no runtime module imports the evidence / Socrates contracts; the intake consumes
+// SEALED cases through the verifier's output only): the packet and analysis it carries must BE the verifier's — canonically identical to the
+// packet / analysis of that identity inside the carried verification output — and the intake consumer is re-run at every replay decision.
 export function recordError(kind, payload, where = 'record') {
   if (!TYPED_KINDS.includes(kind)) return `${where}: unknown kind ${String(kind).slice(0, 24)}`;
   const e = shapeError(payload, SCHEMAS[kind], `${where}.${kind}`); if (e) return e;
@@ -39,10 +40,12 @@ export function recordError(kind, payload, where = 'record') {
   if (kind === 'FEE') { try { const f = feeContract({ ...payload.fee, feeDigest: undefined }); if (f.feeDigest !== payload.fee.feeDigest) return `${where}.FEE: feeDigest is not the digest of the contract`; } catch (err) { return `${where}.FEE: ${String(err.message).slice(0, 80)}`; } }
   if (kind === 'CASE') {
     if (JSON.stringify(payload).length > BUNDLE_LIMITS.maxCaseBytes) return `${where}.CASE: exceeds ${BUNDLE_LIMITS.maxCaseBytes} bytes`;
-    const v = validateEvidencePacketV2(payload.packet); if (!v.valid) return `${where}.CASE: packet ${v.reasons[0] ?? 'invalid'}`; if (payload.packet.packetId !== payload.packetId) return `${where}.CASE: packetId disagrees with the packet`;
-    const a = validateAnalysis2(payload.analysis, payload.packet); if (!a.valid) return `${where}.CASE: analysis ${a.reasons[0] ?? 'invalid'}`; if (payload.analysis.analysisId !== payload.analysisId) return `${where}.CASE: analysisId disagrees with the analysis`;
+    if (payload.packet.packetId !== payload.packetId) return `${where}.CASE: packetId disagrees with the packet`; if (payload.analysis.analysisId !== payload.analysisId) return `${where}.CASE: analysisId disagrees with the analysis`; if (payload.analysis.packetId !== payload.packetId) return `${where}.CASE: the analysis does not cite the carried packet`;
     if (payload.completionTs > payload.receiptTs) return `${where}.CASE: completion after receipt (future knowledge)`; if (digestOf(payload.verification) !== payload.verificationDigest) return `${where}.CASE: verification digest`;
     if (payload.verification.ok !== true || !isPlainObject(payload.verification.manifest) || !Array.isArray(payload.verification.analyses) || !Array.isArray(payload.verification.packets) || !isPlainObject(payload.verification.verification)) return `${where}.CASE: verification is not the verifier's output`;
+    const vp = payload.verification.packets.find((p) => isPlainObject(p) && p.packetId === payload.packetId) ?? null; if (!vp || canonicalJson(vp) !== canonicalJson(payload.packet)) return `${where}.CASE: the carried packet is not the verifier's packet ${String(payload.packetId).slice(0, 48)}`;
+    const va = payload.verification.analyses.find((a) => isPlainObject(a) && a.analysisId === payload.analysisId) ?? null; if (!va || canonicalJson(va) !== canonicalJson(payload.analysis)) return `${where}.CASE: the carried analysis is not the verifier's analysis ${String(payload.analysisId).slice(0, 48)}`;
+    if (payload.verification.manifest.analysis?.analysisId !== payload.analysisId) return `${where}.CASE: the verifier selected another analysis`;
     if (payload.verification.manifest.caseId !== payload.caseId) return `${where}.CASE: caseId disagrees with the verified manifest`;
     // the provenance is the verifier's (the model path of the selected analysis attempt), never a copied label
     const attempt = (payload.verification.manifest.sequence ?? []).find((s) => s && s.ok && s.analysisId === payload.analysisId) ?? null; if (!attempt || attempt.path !== payload.provenance) return `${where}.CASE: provenance disagrees with the verified attempt path`;
@@ -86,6 +89,13 @@ export function verifyBundle(dir, { expectedBinding = null } = {}) {
   } catch (err) { return { ok: false, reasons: [err.code ?? 'INTEGRITY', String(err.message).slice(0, 200)], records: 0, counts: null, capabilities: null }; }
 }
 export const bundleBinding = ({ experimentId = null, policyDigest, codeDigest = null, strategyVersion, sourcePrefix, seed = null }) => ({ experimentId, policyDigest, codeDigest, strategyVersion, sourcePrefix, seed });
+// the bundle identity a report carries (holdout truth closeout HR03): the sealed manifest's versions, binding, capabilities, capture count
+// and every segment's byte digest — re-derived from the directory by the evaluation doors, so a report cannot name bytes it did not replay
+export function bundleFingerprint(dir) { const m = readManifest(dir); return digestOf({ bundleVersion: m.bundleVersion ?? null, tieOrderVersion: m.tieOrderVersion ?? null, binding: m.binding ?? null, state: m.state, capabilities: m.capabilities ?? null, lastSeq: m.lastSeq ?? null, records: m.records ?? null, messages: m.messages ?? null, firstTs: m.firstTs ?? null, lastTs: m.lastTs ?? null, segments: m.segments.map((s) => ({ index: s.index, file: s.file, bytes: s.bytes, messages: s.messages, sha256: s.sha256, firstTs: s.firstTs ?? null, lastTs: s.lastTs ?? null })) }); }
+// the canonical source of one primary-confirmed claim inside a verified packet: the OFFICIAL primary-confirmation link's source id (the same
+// selection the intake consumer makes), else null — a provenance label is never a source
+const OFFICIAL_SOURCE_TYPES = Object.freeze(['PRIMARY_OFFICIAL', 'EXCHANGE_OFFICIAL', 'PROJECT_OFFICIAL', 'REGULATOR']);
+export function primarySourceOf(packet, claimId) { if (!isPlainObject(packet) || !claimId) return null; const official = new Set((Array.isArray(packet.sources) ? packet.sources : []).filter((s) => s && OFFICIAL_SOURCE_TYPES.includes(s.sourceType) && s.authorityClass === 'OFFICIAL').map((s) => s.sourceId)); const link = (Array.isArray(packet.claimLinks) ? packet.claimLinks : []).find((l) => l && l.kind === 'PRIMARY_CONFIRMATION' && l.claimRef === claimId && official.has(l.sourceRef)) ?? null; return link ? link.sourceRef : null; }
 // ---- bundle-backed sources for a replay composition: fed by the replay engine IN STREAM ORDER, so nothing is known before its
 // receipt; each is the same interface the live composition uses (nominations(), caseSource, controlsSource, specs, history rows)
 export function createBundleStores({ mode = 'REPLAY', maxNominations = BUNDLE_LIMITS.maxNominationsPerReplay } = {}) {
@@ -110,5 +120,5 @@ export function createBundleStores({ mode = 'REPLAY', maxNominations = BUNDLE_LI
     nominations: () => [...nominations.values()].filter((n) => n.nominationKnownAtTs <= now).map((n) => ({ symbol: n.symbol, assetId: n.assetId, source: n.source, nominationKnownAtTs: n.nominationKnownAtTs })),
     specs: () => [...specs.values()], fee: () => fee, controls: () => ({ kill: control.kill, cage: control.cage, vetoes: control.vetoes.slice() }), controlRevision: () => control.revision,
     caseSource: { refresh: async () => {}, consumed: (coin, { decisionTs, requireContext = true } = {}) => consumedFor(coin, decisionTs, { requireContext }).case, detail: consumedFor, status: () => ({ casesDir: null, known: cases.size, verified: cases.size, source: 'BUNDLE' }) },
-    historyRows: () => history.splice(0, history.length), whale: (assetId) => whale.get(assetId) ?? null, peers: () => peers[peers.length - 1] ?? null, counts: () => ({ nominations: nominations.size, cases: cases.size, specs: specs.size, fee: fee ? 1 : 0, controlRevision: control.revision, whale: whale.size, peers: peers.length, refusedBound }) };
+    historyRows: () => history.splice(0, history.length), casePacket: (caseId, analysisId) => cases.get(`${caseId}|${analysisId}`)?.packet ?? null, whale: (assetId) => whale.get(assetId) ?? null, peers: () => peers[peers.length - 1] ?? null, counts: () => ({ nominations: nominations.size, cases: cases.size, specs: specs.size, fee: fee ? 1 : 0, controlRevision: control.revision, whale: whale.size, peers: peers.length, refusedBound }) };
 }
