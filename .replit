@@ -18,6 +18,6 @@ deploymentTarget = "vm"
 
 [userenv]
 
-[userenv.shared]
-COINGECKO_DEMO_API_KEY = "CGNXtAKuBsvCwCuZXqheXKQe4X"
-FRED_API_KEY = "87480278685f3ba1a92ca31e2f975511"
+# [userenv.shared] removed: provider keys must live in Replit Secrets (host private config), never in this tracked file.
+# Optional sources only (CoinGecko demo, FRED). Set them as Secrets if wanted; absent, those senses report their
+# own blocked/config-required state and core paper readiness is unaffected.

@@ -4,6 +4,9 @@
 import { sha256Hex, createRng } from '../../research/referee/contracts.js';
 import { createRegistry, registerExperiment, registrySnapshot } from '../../research/referee/registry.js';
 import { buildBundle } from '../../research/referee/seal.js';
+import { refereeEvaluate, resultSharpesOf } from '../../research/referee/evaluate.js';
+import { recordResult } from '../../research/referee/registry.js';
+import { openProspective } from '../../research/referee/prospective.js';
 
 export const T0 = Date.UTC(2026, 0, 5, 0, 0, 0); // a Monday
 export const MIN = 60_000;
@@ -68,3 +71,18 @@ export const noiseData = (k = 40, seed = 'noise') => synth({ seed, features: (rn
 export const leakData = (seed = 'leak') => synth({ seed, steps: 400, features: (rng, y) => ({ SIG: mix(rng, y, 0.4), LEAK: y + 0.001 * rng.normal() }) });
 // FIXTURE 4 — an effect at exactly one parameter cell: P5 carries rho = 0.3, P4 / P6 are independent noise
 export const knifeEdgeData = (seed = 'knife') => synth({ seed, steps: 400, features: (rng, y) => ({ SIG_P4: rng.normal(), SIG_P5: mix(rng, y, 0.4), SIG_P6: rng.normal() }) });
+
+// A prospective shadow opened lawfully: evaluate a real-effect bundle, record its result, open the shadow. Returns the
+// registry at the moment of opening plus the sealed design, so a test can reason about clocks relative to `openedAtTs`.
+export function prospectiveSetup({ terminalObservations = 5, bundle = null, registry = null, report = null, data = null } = {}) {
+  let b = bundle; let reg = registry; let rep = report;
+  if (!b) { const built = bundleFor({ data: data ?? realEffectData('prospective-setup'), manifestOver: { prospective: { terminalObservations, horizonMs: HOUR, universeRule: 'DECLARED_STATIC_LIST', sequentialMethod: null } } }); b = built.bundle; reg = built.registry; }
+  if (!rep) rep = refereeEvaluate(b);
+  if (rep.verdict.verdict !== 'HISTORICALLY_INTERESTING') throw new Error(`fixture verdict ${rep.verdict.verdict}`);
+  const experimentId = rep.identity.experimentId; const t1 = b.evaluation.requestedAtTs + MIN;
+  const recorded = recordResult(reg, { experimentId, reportDigest: rep.reportDigest, verdict: rep.verdict.verdict, primaryMetric: { name: rep.primaryResult.metric, value: rep.primaryResult.value }, sharpes: resultSharpesOf(rep), datasetDigest: b.dataset.manifestDigest, recordedAtTs: t1 });
+  if (recorded.error) throw new Error(`fixture result: ${recorded.error.reason}`);
+  const opened = openProspective(recorded.registry, { experimentId, historicalReport: rep, ts: t1 + MIN });
+  if (opened.error) throw new Error(`fixture open: ${opened.error.reason} ${opened.error.detail ?? ''}`);
+  return { registry: opened.registry, experimentId, report: rep, bundle: b, design: opened.design, designDigest: opened.designDigest, openedAtTs: t1 + MIN };
+}

@@ -2,6 +2,8 @@
 
 Code: `research/referee/` (contracts, registry, pitAudit, splits, metrics, statistics, negativeControls, stability,
 evaluate, seal, prospective, store). Tests: `test/referee-*.test.js`, fixtures in `test/helpers/referee.js`.
+Registry format: **serpent-referee-registry-2**. v2 introduced the two-stage prospective lifecycle below; a v1 file is
+refused with UNSUPPORTED_REGISTRY_VERSION rather than reinterpreted, and no old record is ever rewritten.
 
 > A beautiful backtest is evidence against itself until it survives hostile evaluation.
 
@@ -88,21 +90,72 @@ experiment's own sealed criteria, and the predeclared perturbations do not colla
 NOT robust, NOT production approval, a prospective test is still required. Nothing in the paper runtime, the Judge,
 Socrates or The Watch reads it.
 
+## 8b. A hash chain is not a licence: semantic replay
+
+The chain proves nobody edited the stored bytes. It says nothing about whether a record was ever lawful. So every
+entry path — `appendRecord`, `registryFromSnapshot`, `readRegistryFile` — folds the records through one state
+machine (`recordSemanticError`) and refuses a history whose semantics are wrong however well it is rehashed: an
+experiment registered twice or scored twice, a prospective observation without its opening, a decision recorded after
+it was supposedly made, an outcome known before its horizon ended or after the clock that recorded it, a capture whose
+position disagrees with the sealed condition, a second formal look. An invalid but correctly rehashed history is
+refused BEFORE it can be scored.
+
 ## 9. Why prospective validation is required
 
 Every historical test, however hostile, was run on data the researcher could see. A prospective shadow
-(`prospective.js`) seals the feature definition, the condition (with any fitted threshold frozen to a number), the
-primary metric, the horizon, the universe rule, the terminal sample count and the null test BEFORE one future
-observation exists, then records future observations and outcomes DARK in the registry. Only a HISTORICALLY_INTERESTING
-result can open one; any change to the sealed design is refused as PROSPECTIVE_DESIGN_CHANGED (a new experiment).
+(`prospective.js`) seals the feature and condition OF THE CANDIDATE THE REPORT ACTUALLY SCORED (with any fitted
+threshold frozen to a number — never manifest.signal mixed with another candidate's threshold), the primary metric, the
+horizon, the universe rule, the terminal sample count, the alpha and the NULL SEED, all BEFORE one future observation
+exists. Only a HISTORICALLY_INTERESTING result can open one; any change to the sealed design is refused as
+PROSPECTIVE_DESIGN_CHANGED (a new experiment).
+
+**The lifecycle is two append-only stages, because a prediction is only a prediction if the score existed before the
+outcome did.** A CAPTURE commits the observation id, symbol, decision clock, score, position and design binding while
+the outcome is still unknown; a separate later OUTCOME record supplies exactly one outcome for that id and carries
+nothing that could revise the capture. The clock rules, enforced at every entry path:
+
+| rule | refusal |
+| --- | --- |
+| the design is sealed before the decision | EVALUATION_BEFORE_REGISTRATION |
+| the decision is not later than its recording | DECISION_AFTER_RECORDING |
+| the label end matches the sealed horizon | LABEL_HORIZON_MISMATCH |
+| the capture is recorded before its label window closes | CAPTURE_NOT_PRIOR_TO_OUTCOME |
+| an outcome is not known before its label end | OUTCOME_KNOWN_BEFORE_HORIZON_END |
+| an outcome is not recorded before it is known | OUTCOME_RECORDED_BEFORE_KNOWN |
+| the registry clock never runs backwards | REGISTRY_CLOCK_BACKWARDS |
+
+Capture-before-label-end is the ONLY prior-capture evidence this registry can verify (`IN_REGISTRY_PRIOR_CAPTURE`). A
+delayed import carrying only declared timestamps proves nothing about an external source's honesty, so it is refused
+rather than credited: such data is unsuitable for prospective confirmation until independently verifiable prior capture
+exists. The counted sample is the first N CAPTURED observations — never the first N favourable or completed ones — so a
+missing outcome keeps the evaluation pending and out-of-order outcome arrival cannot reorder or replace the sample.
 
 ## 10. Interim prospective results are descriptive
 
-Formal significance is evaluated ONCE, at the pre-registered terminal count, with the sealed block null and alpha.
+Formal significance is evaluated ONCE, at the pre-registered terminal count, with the sealed block null, alpha and
+seed. The seed is bound at opening, before any outcome exists, so there is no second final look with a luckier draw;
+the one-look rule itself survives a restart because it lives in the registry, not in memory.
 Everything shown before that carries the banner **INTERIM — NOT A FORMAL CONFIRMATION** and is a count / effect
 estimate, never a p-value re-run after every new observation (that is optional stopping). The data model reserves
 `sequentialMethod` so an anytime-valid test (Koning & van Meer, JRSS-B 2026) can be plugged in without changing
 experiment identity; v1 reports `anytimeValid.status = NOT_IMPLEMENTED` rather than improvising one.
+
+## 10b. The durable store: the stored file is the source of truth
+
+A writer that trusted the `previous` registry handed to it could append the same records twice and leave a broken
+chain. So `appendRegistryFile` now validates both registries, takes an EXCLUSIVE lock file, re-reads and re-validates
+the ACTUAL stored history under that same lock, and requires its length and head digest to equal the caller's expected
+state. A stale expectation is refused (STALE_EXPECTED_STATE) without touching one byte — even when the requested tail
+is empty, and a missing file can never stand in for nonempty expected history. The whole tail is checked against the
+reader's own byte, line and record bounds before anything is written; short writes are looped rather than assumed; an
+I/O failure mid-tail is reported as PARTIAL_WRITE_UNCERTAIN and its bytes are LEFT IN PLACE, so the next reader refuses
+the file instead of mistaking a partial tail for a complete append. A retry after a successful write reports a stale
+state rather than appending twice; the writer reloads and forms a new request.
+
+**Lock recovery (manual, never automatic).** A leftover `<registry>.lock` is never stolen on age alone — age cannot
+distinguish a crashed writer from a slow one. Establish that the owner has stopped (the lock file names the pid that
+took it; confirm no such process is running and that no other host writes this path), then remove the lock file by
+hand and re-read the registry before writing again.
 
 ## 11. How to reproduce a report
 
@@ -137,7 +190,9 @@ feature whose ranks reproduce the outcome (|ρ| ≥ 0.995 over ≥ 30 rows — a
 threshold), full-sample normalization, a universe defined by current listings or survivors, an entity label from a
 current snapshot, overlapping labels without purge or embargo, a family holdout already opened over this dataset.
 INSUFFICIENT_DATA and UNSCORABLE (no valid out-of-sample path, an impractical CPCV, a resource limit, a constant score,
-a single-class outcome) stop before any effect is claimed. The Referee never repairs a bad input.
+a single-class outcome) stop before any effect is claimed. The Referee never repairs a bad input. On the registry side:
+UNSUPPORTED_REGISTRY_VERSION, REGISTRY_CHAIN_BROKEN (bytes edited), the semantic refusals of section 8b, and on the
+store side STALE_EXPECTED_STATE, LOCK_CONTENTION, RESOURCE_LIMIT_EXCEEDED, CORRUPT_INPUT and PARTIAL_WRITE_UNCERTAIN.
 
 ## What this ticket did NOT do
 

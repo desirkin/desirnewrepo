@@ -18,7 +18,7 @@ export const REFEREE_VERSION = 'serpent-research-referee-1';
 export const BUNDLE_VERSION = 'serpent-referee-bundle-1';
 export const MANIFEST_VERSION = 'serpent-referee-experiment-1';
 export const DATASET_MANIFEST_VERSION = 'serpent-referee-dataset-1';
-export const REGISTRY_VERSION = 'serpent-referee-registry-1';
+export const REGISTRY_VERSION = 'serpent-referee-registry-2'; // v2: the two-stage prospective lifecycle (capture, then a separate outcome). v1 prospective data is REFUSED, never reinterpreted.
 export const REPORT_VERSION = 'serpent-referee-report-1';
 export const PROSPECTIVE_VERSION = 'serpent-referee-prospective-1';
 
@@ -35,7 +35,8 @@ export const EVALUATION_TYPES = Object.freeze(['FORWARD_RETURN', 'EVENT_CLASSIFI
 export const HYPOTHESIS_ORIGINS = Object.freeze(['BEFORE_INSPECTING_OUTCOMES', 'AFTER_INSPECTING_OUTCOMES']);
 export const DIRECTIONS = Object.freeze(['POSITIVE', 'NEGATIVE', 'UNDECLARED']);
 export const EXPERIMENT_STATUSES = Object.freeze(['REGISTERED', 'EVALUATED', 'ABANDONED', 'PROSPECTIVE_PENDING', 'PROSPECTIVE_EVALUATED']);
-export const REGISTRY_RECORD_KINDS = Object.freeze(['EXPERIMENT_REGISTERED', 'RESULT_RECORDED', 'EXPERIMENT_ABANDONED', 'HOLDOUT_OPENED', 'PROSPECTIVE_OPENED', 'PROSPECTIVE_OBSERVATION', 'PROSPECTIVE_EVALUATED']);
+export const REGISTRY_RECORD_KINDS = Object.freeze(['EXPERIMENT_REGISTERED', 'RESULT_RECORDED', 'EXPERIMENT_ABANDONED', 'HOLDOUT_OPENED', 'PROSPECTIVE_OPENED', 'PROSPECTIVE_OBSERVATION', 'PROSPECTIVE_OUTCOME', 'PROSPECTIVE_EVALUATED']);
+export const CAPTURE_EVIDENCE_KINDS = Object.freeze(['IN_REGISTRY_PRIOR_CAPTURE']); // the ONLY evidence v1 can verify: the score was committed to this registry before its own label window closed. A delayed import carrying only declared timestamps is not verifiable prior capture and has no kind here.
 export const SPLIT_METHODS = Object.freeze(['PURGED_KFOLD', 'CPCV']);
 export const CONDITION_OPS = Object.freeze(['GT', 'GTE', 'LT', 'LTE', 'ALWAYS']);
 export const FEATURE_SCOPES = Object.freeze(['SYMBOL', 'MARKET_WIDE']);
@@ -90,7 +91,7 @@ export const REASON_CODES = Object.freeze([
   // SUSPECT_FRAGILITY
   'DIRECTION_INCONSISTENT', 'KNIFE_EDGE_PARAMETER', 'CONCENTRATED_IN_ONE_BLOCK', 'CONCENTRATED_IN_ONE_SYMBOL', 'REGIME_DEPENDENT', 'WORST_PERTURBATION_FLIPS_SIGN', 'HORIZON_PROFILE_INCOHERENT',
   // HISTORICALLY_INTERESTING / PROSPECTIVE
-  'SURVIVED_HISTORICAL_TESTS', 'PROSPECTIVE_DESIGN_SEALED', 'TERMINAL_SAMPLE_NOT_REACHED', 'TERMINAL_SAMPLE_REACHED', 'TERMINAL_NULL_REJECTED', 'TERMINAL_NULL_NOT_REJECTED', 'TERMINAL_WRONG_DIRECTION', 'PROSPECTIVE_DESIGN_CHANGED',
+  'SURVIVED_HISTORICAL_TESTS', 'PROSPECTIVE_DESIGN_SEALED', 'DECISION_AFTER_RECORDING', 'CAPTURE_NOT_PRIOR_TO_OUTCOME', 'OUTCOME_RECORDED_BEFORE_KNOWN', 'PROSPECTIVE_OBSERVATION_UNKNOWN', 'PROSPECTIVE_OUTCOME_ALREADY_RECORDED', 'PROSPECTIVE_NOT_OPENED', 'PROSPECTIVE_ALREADY_OPENED', 'PROSPECTIVE_ALREADY_EVALUATED', 'EVALUATION_BEFORE_RECORDS', 'REGISTRY_CLOCK_BACKWARDS', 'POSITION_INCONSISTENT_WITH_DESIGN', 'UNSUPPORTED_REGISTRY_VERSION', 'TERMINAL_SAMPLE_NOT_REACHED', 'TERMINAL_SAMPLE_REACHED', 'TERMINAL_NULL_REJECTED', 'TERMINAL_NULL_NOT_REJECTED', 'TERMINAL_WRONG_DIRECTION', 'PROSPECTIVE_DESIGN_CHANGED',
   // informational (never a verdict driver on its own)
   'PSR_NOT_APPLICABLE', 'DSR_NOT_APPLICABLE', 'PBO_NOT_APPLICABLE', 'SINGLE_CANDIDATE', 'TRIAL_VARIANCE_UNAVAILABLE', 'SYMBOL_PLACEBO_NOT_APPLICABLE', 'HORIZON_PROFILE_NOT_AVAILABLE', 'PARTITION_TOO_SMALL', 'NEIGHBORS_NOT_DECLARED',
 ]);
@@ -142,6 +143,12 @@ export const CHECKSUM_KEYS = Object.freeze(['experiment', 'dataset', 'observatio
 export const EVALUATION_REQUEST_KEYS = Object.freeze(['requestedAtTs']);
 export const REGISTRY_SNAPSHOT_KEYS = Object.freeze(['registryVersion', 'headSeq', 'headDigest', 'records']);
 export const REGISTRY_RECORD_KEYS = Object.freeze(['seq', 'kind', 'ts', 'experimentId', 'experimentFamilyId', 'payload', 'prevDigest', 'digest']);
+// THE TWO-STAGE PROSPECTIVE LIFECYCLE. A capture commits the score and its design binding while the outcome is still
+// unknown; a separate later record supplies that one outcome. An outcome record carries nothing that could revise the
+// capture — not the score, not the symbol, not the decision clock, not the position.
+export const PROSPECTIVE_CAPTURE_INPUT_KEYS = Object.freeze(['observationId', 'symbol', 'ts', 'score', 'labelEndTs']);
+export const PROSPECTIVE_CAPTURE_KEYS = Object.freeze(['observationId', 'symbol', 'ts', 'score', 'position', 'labelEndTs', 'captureEvidence', 'designDigest']);
+export const PROSPECTIVE_OUTCOME_KEYS = Object.freeze(['observationId', 'outcome', 'outcomeKnownAtTs', 'designDigest']);
 
 // ---- helpers -------------------------------------------------------------------------------------------------------
 export const isHex64 = (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);

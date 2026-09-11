@@ -10,7 +10,7 @@ import { refereeEvaluate, resultSharpesOf } from '../research/referee/evaluate.j
 import { verifyReport, renderReport, reportDigestOf, buildBundle } from '../research/referee/seal.js';
 import { writeReportFile } from '../research/referee/store.js';
 import { recordResult, registrySnapshot, experimentOf } from '../research/referee/registry.js';
-import { openProspective, recordProspectiveObservation, prospectiveProgress, evaluateProspectiveTerminal, INTERIM_BANNER, ANYTIME_VALID } from '../research/referee/prospective.js';
+import { openProspective, captureProspectiveObservation, recordProspectiveOutcome, prospectiveProgress, evaluateProspectiveTerminal, INTERIM_BANNER, ANYTIME_VALID } from '../research/referee/prospective.js';
 import { describe } from '../research/referee/statistics.js';
 import { FORBIDDEN_TOKENS, LIMITS, tokensOf } from '../research/referee/contracts.js';
 import { realEffectData, noiseData, leakData, knifeEdgeData, bundleFor, feature, condition, synth, mix, T0, HOUR, MIN, PROVENANCE, CODE_IDENTITY } from './helpers/referee.js';
@@ -95,32 +95,48 @@ test('I1. reproducibility: the same sealed bundle yields a byte-identical canoni
   const dir = mkdtempSync(path.join(tmpdir(), 'referee-rep-')); try { const f = path.join(dir, 'report.json'); const w = writeReportFile(f, a); assert.equal(w.reportDigest, a.reportDigest); assert.equal(JSON.parse(readFileSync(f, 'utf8')).reportDigest, a.reportDigest); assert.throws(() => writeReportFile(f, a), /OUTPUT_EXISTS/); } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('PROSPECTIVE — the shadow: a HISTORICALLY_INTERESTING result may open a sealed design; observations are recorded DARK after opening only; interim progress is descriptive with the banner; the formal look happens once at the terminal count; anytime-valid inference is NOT_IMPLEMENTED', () => {
-  const data = realEffectData('prospective'); const { bundle, registry } = bundleFor({ data, manifestOver: { prospective: { terminalObservations: 60, horizonMs: HOUR, universeRule: 'DECLARED_STATIC_LIST', sequentialMethod: null } } });
+test('PROSPECTIVE — the shadow: only a HISTORICALLY_INTERESTING result may open a sealed design; captures and outcomes are two DARK stages with coherent clocks; interim progress is descriptive; the formal look happens once at the terminal count; anytime-valid inference is NOT_IMPLEMENTED', () => {
+  const data = realEffectData('prospective'); const { bundle, registry } = bundleFor({ data, manifestOver: { prospective: { terminalObservations: 20, horizonMs: HOUR, universeRule: 'DECLARED_STATIC_LIST', sequentialMethod: null } } });
   const report = refereeEvaluate(bundle); assert.equal(report.verdict.verdict, 'HISTORICALLY_INTERESTING'); assert.equal(report.prospective.status, 'DESIGN_DECLARED');
   const id = report.identity.experimentId; const t1 = bundle.evaluation.requestedAtTs + MIN;
-  let early = openProspective(registry, { experimentId: id, historicalReport: report, ts: t1 }); assert.equal(early.error.reason, 'STATUS_TRANSITION_REFUSED', 'the result must be recorded first');
+  assert.equal(openProspective(registry, { experimentId: id, historicalReport: report, ts: t1 }).error.reason, 'STATUS_TRANSITION_REFUSED', 'the result must be recorded first');
   let reg = recordResult(registry, { experimentId: id, reportDigest: report.reportDigest, verdict: report.verdict.verdict, primaryMetric: { name: report.primaryResult.metric, value: report.primaryResult.value }, sharpes: resultSharpesOf(report), datasetDigest: bundle.dataset.manifestDigest, recordedAtTs: t1 }).registry;
-  const forged = { ...report, verdict: { ...report.verdict, verdict: 'REJECTED' } }; assert.equal(openProspective(reg, { experimentId: id, historicalReport: forged, ts: t1 + 1 }).error.reason, 'CHECKSUM_MISMATCH');
-  const opened = openProspective(reg, { experimentId: id, historicalReport: report, ts: t1 + 1 }); assert.equal(opened.error, null); reg = opened.registry; assert.equal(opened.design.terminalObservations, 60); assert.equal(opened.design.condition.threshold, 0); assert.deepEqual(opened.design.anytimeValid, ANYTIME_VALID); assert.equal(experimentOf(reg, id).status, 'PROSPECTIVE_PENDING');
-  const before = recordProspectiveObservation(reg, { experimentId: id, observation: { observationId: 'p-early', symbol: 'BTC', ts: t1, score: 1, labelEndTs: t1 + HOUR, outcome: null, outcomeKnownAtTs: null }, ts: t1 + 2 }); assert.equal(before.error.reason, 'EVALUATION_BEFORE_REGISTRATION');
-  const rng = { i: 0 }; const gen = synth({ seed: 'prospective-future', steps: 70, symbols: ['BTC'], features: (r, y) => ({ SIG: mix(r, y, 0.4) }) });
-  let ts = t1 + 3; const fut = gen.observations.map((o, i) => ({ observationId: `p-${i}`, symbol: 'BTC', ts: t1 + 10 + i * 5 * MIN, score: o.features.SIG, labelEndTs: t1 + 10 + i * 5 * MIN + HOUR, outcome: gen.outcomes[i].value, outcomeKnownAtTs: t1 + 10 + i * 5 * MIN + HOUR }));
-  for (let i = 0; i < 30; i += 1) { const r = recordProspectiveObservation(reg, { experimentId: id, observation: fut[i], ts: ts += 1 }); assert.equal(r.error, null, JSON.stringify(r.error)); reg = r.registry; }
-  assert.equal(recordProspectiveObservation(reg, { experimentId: id, observation: fut[0], ts: ts += 1 }).error.reason, 'DUPLICATE_OBSERVATION_ID');
-  assert.equal(recordProspectiveObservation(reg, { experimentId: id, observation: { ...fut[31], labelEndTs: fut[31].ts + 2 * HOUR }, ts: ts += 1 }).error.reason, 'LABEL_HORIZON_MISMATCH');
-  assert.equal(recordProspectiveObservation(reg, { experimentId: id, observation: { ...fut[31], outcomeKnownAtTs: fut[31].ts }, ts: ts += 1 }).error.reason, 'OUTCOME_KNOWN_BEFORE_HORIZON_END');
-  assert.equal(recordProspectiveObservation(reg, { experimentId: id, observation: { ...fut[31], symbol: 'DOGE' }, ts: ts += 1 }).error.reason, 'SYMBOL_OUTSIDE_SCOPE');
-  const prog = prospectiveProgress(reg, id); assert.equal(prog.formal.status, 'TERMINAL_SAMPLE_NOT_REACHED'); assert.equal(prog.interim.banner, INTERIM_BANNER); assert.equal(prog.counted, 30); assert.equal(prog.canAffectTrading, false);
-  const tooSoon = evaluateProspectiveTerminal(reg, { experimentId: id, ts: ts += 1, seed: 'p' }); assert.equal(tooSoon.error.reason, 'TERMINAL_SAMPLE_NOT_REACHED'); assert.equal(tooSoon.report, null);
-  for (let i = 30; i < 65; i += 1) { const r = recordProspectiveObservation(reg, { experimentId: id, observation: fut[i], ts: ts += 1 }); assert.equal(r.error, null); reg = r.registry; }
-  assert.equal(prospectiveProgress(reg, id).formal.status, 'TERMINAL_SAMPLE_REACHED'); assert.equal(prospectiveProgress(reg, id).recorded, 65);
-  const done = evaluateProspectiveTerminal(reg, { experimentId: id, ts: ts += 1, seed: 'p' }); assert.equal(done.error, null); reg = done.registry;
-  assert.ok(['PROSPECTIVE_SUPPORTED', 'PROSPECTIVE_NOT_SUPPORTED'].includes(done.report.verdict.verdict)); assert.equal(done.report.terminal.counted, 60, 'exactly the sealed terminal count, in registry order'); assert.equal(done.report.canAffectExecution, false); assert.deepEqual(done.report.anytimeValid, ANYTIME_VALID); assert.ok(done.report.verdict.reasons.includes('TERMINAL_SAMPLE_REACHED'));
+  const forged = { ...report, verdict: { ...report.verdict, verdict: 'REJECTED' } };
+  assert.equal(openProspective(reg, { experimentId: id, historicalReport: forged, ts: t1 + 1 }).error.reason, 'CHECKSUM_MISMATCH');
+  const opened = openProspective(reg, { experimentId: id, historicalReport: report, ts: t1 + MIN }); assert.equal(opened.error, null); reg = opened.registry;
+  const T = t1 + MIN; // the sealing clock
+  assert.equal(opened.design.terminalObservations, 20); assert.equal(opened.design.condition.threshold, 0); assert.equal(opened.design.feature, 'SIG');
+  assert.deepEqual(opened.design.anytimeValid, ANYTIME_VALID); assert.ok(opened.design.nullSeed, 'the null seed is bound at opening');
+  assert.equal(experimentOf(reg, id).status, 'PROSPECTIVE_PENDING');
+  // a decision that predates the sealing is refused, whatever its recording clock says
+  assert.equal(captureProspectiveObservation(reg, { experimentId: id, observation: { observationId: 'p-early', symbol: 'BTC', ts: T - MIN, score: 1, labelEndTs: T - MIN + HOUR }, ts: T + MIN }).error.reason, 'EVALUATION_BEFORE_REGISTRATION');
+  // 21 future decisions on a coherent clock: each is captured a minute after it is decided, well inside its own hour
+  const future = synth({ seed: 'prospective-future', steps: 21, symbols: ['BTC'], features: (rng, y) => ({ SIG: mix(rng, y, 0.4) }) });
+  const obs = future.observations.map((o, i) => { const ts = T + MIN + i * 5 * MIN; return { observationId: `p-${i}`, symbol: 'BTC', ts, score: o.features.SIG, labelEndTs: ts + HOUR, outcome: future.outcomes[i].value }; });
+  for (const o of obs) { const r = captureProspectiveObservation(reg, { experimentId: id, observation: { observationId: o.observationId, symbol: o.symbol, ts: o.ts, score: o.score, labelEndTs: o.labelEndTs }, ts: o.ts + MIN }); assert.equal(r.error, null, JSON.stringify(r.error)); reg = r.registry; }
+  const last = obs[obs.length - 1];
+  assert.equal(captureProspectiveObservation(reg, { experimentId: id, observation: { observationId: 'p-0', symbol: 'BTC', ts: last.ts, score: 1, labelEndTs: last.ts + HOUR }, ts: last.ts + MIN }).error.reason, 'DUPLICATE_OBSERVATION_ID');
+  assert.equal(captureProspectiveObservation(reg, { experimentId: id, observation: { observationId: 'p-bad', symbol: 'BTC', ts: last.ts, score: 1, labelEndTs: last.ts + 2 * HOUR }, ts: last.ts + MIN }).error.reason, 'LABEL_HORIZON_MISMATCH');
+  assert.equal(captureProspectiveObservation(reg, { experimentId: id, observation: { observationId: 'p-bad', symbol: 'DOGE', ts: last.ts, score: 1, labelEndTs: last.ts + HOUR }, ts: last.ts + MIN }).error.reason, 'SYMBOL_OUTSIDE_SCOPE');
+  // outcomes mature only after their own hour
+  const firstBatchTs = obs[9].labelEndTs + MIN;
+  assert.equal(recordProspectiveOutcome(reg, { experimentId: id, observationId: 'p-0', outcome: obs[0].outcome, outcomeKnownAtTs: obs[0].labelEndTs - 1, ts: firstBatchTs }).error.reason, 'OUTCOME_KNOWN_BEFORE_HORIZON_END');
+  for (const o of obs.slice(0, 10)) { const r = recordProspectiveOutcome(reg, { experimentId: id, observationId: o.observationId, outcome: o.outcome, outcomeKnownAtTs: o.labelEndTs, ts: firstBatchTs }); assert.equal(r.error, null, JSON.stringify(r.error)); reg = r.registry; }
+  const prog = prospectiveProgress(reg, id);
+  assert.equal(prog.formal.status, 'TERMINAL_SAMPLE_NOT_REACHED'); assert.equal(prog.interim.banner, INTERIM_BANNER); assert.equal(prog.counted, 20, 'the first twenty CAPTURED are the sample'); assert.equal(prog.withOutcome, 10, 'half of them are still pending'); assert.equal(prog.pendingObservationIds.length, 10); assert.equal(prog.canAffectTrading, false);
+  assert.equal(evaluateProspectiveTerminal(reg, { experimentId: id, ts: firstBatchTs + MIN }).error.reason, 'TERMINAL_SAMPLE_NOT_REACHED');
+  // the remaining outcomes mature later, on the same forward-running clock
+  const endTs = obs[obs.length - 1].labelEndTs + MIN;
+  for (const o of obs.slice(10)) { const r = recordProspectiveOutcome(reg, { experimentId: id, observationId: o.observationId, outcome: o.outcome, outcomeKnownAtTs: o.labelEndTs, ts: endTs }); assert.equal(r.error, null, JSON.stringify(r.error)); reg = r.registry; }
+  assert.equal(prospectiveProgress(reg, id).formal.status, 'TERMINAL_SAMPLE_REACHED'); assert.equal(prospectiveProgress(reg, id).captured, 21);
+  const done = evaluateProspectiveTerminal(reg, { experimentId: id, ts: endTs + MIN }); assert.equal(done.error, null); reg = done.registry;
+  assert.ok(['PROSPECTIVE_SUPPORTED', 'PROSPECTIVE_NOT_SUPPORTED'].includes(done.report.verdict.verdict));
+  assert.equal(done.report.terminal.counted, 20, 'exactly the sealed terminal count, in capture order');
+  assert.equal(done.report.canAffectExecution, false); assert.deepEqual(done.report.anytimeValid, ANYTIME_VALID); assert.ok(done.report.verdict.reasons.includes('TERMINAL_SAMPLE_REACHED'));
   assert.equal(experimentOf(reg, id).status, 'PROSPECTIVE_EVALUATED'); assert.equal(prospectiveProgress(reg, id).interim, null);
-  assert.equal(evaluateProspectiveTerminal(reg, { experimentId: id, ts: ts += 1, seed: 'p' }).error.reason, 'STATUS_TRANSITION_REFUSED', 'one formal look');
-  assert.equal(recordProspectiveObservation(reg, { experimentId: id, observation: fut[66], ts: ts += 1 }).error.reason, 'STATUS_TRANSITION_REFUSED');
-  noForbidden(done.report); assert.ok(rng.i === 0);
+  assert.equal(evaluateProspectiveTerminal(reg, { experimentId: id, ts: endTs + 2 * MIN }).error.reason, 'STATUS_TRANSITION_REFUSED', 'one formal look');
+  assert.equal(captureProspectiveObservation(reg, { experimentId: id, observation: { observationId: 'p-late', symbol: 'BTC', ts: endTs + 2 * MIN, score: 1, labelEndTs: endTs + 2 * MIN + HOUR }, ts: endTs + 3 * MIN }).error.reason, 'STATUS_TRANSITION_REFUSED');
+  noForbidden(done.report);
 });
 
 test('RESOURCE BOUNDS + ABSENCES: iteration counts over the named limits are refused at the manifest; an impractical CPCV is UNSCORABLE; too few rows is INSUFFICIENT_DATA; masked and censored rows are counted as distinct absences and never scored as zero', () => {

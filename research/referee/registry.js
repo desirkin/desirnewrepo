@@ -9,7 +9,8 @@
 // a fork into its parent's family; otherwise the (evaluationType, sources, familyTag) key decides, and any experiment
 // that shares a feature definition with an existing family is pulled into that family whatever its tag says. Once a
 // family carries a recorded result, further members must name their parent — a rewrite cannot appear as a first try.
-import { fail, isPlainObject, isTs, isCount, isFiniteNum, canonicalDigest, deepFreeze, exactKeys, isCoin, isId, isCode, isHex64, isProb, isScalarMap, shortId, finding, carriesForbiddenToken, LIMITS, REGISTRY_VERSION, MANIFEST_VERSION, EXPERIMENT_MANIFEST_KEYS, MANIFEST_DATASET_KEYS, UNIVERSE_KEYS, FEATURE_KEYS, SIGNAL_KEYS, CONDITION_KEYS, CANDIDATE_KEYS, LABEL_KEYS, OUTCOME_DEF_KEYS, SPLIT_KEYS, HOLDOUT_KEYS, BASELINE_KEYS, CONTROLS_KEYS, STABILITY_KEYS, NEIGHBOR_KEYS, CRITERIA_KEYS, ECONOMICS_KEYS, PROSPECTIVE_DESIGN_KEYS, REGISTRY_RECORD_KEYS, REGISTRY_SNAPSHOT_KEYS, REGISTRY_RECORD_KINDS, EVALUATION_TYPES, HYPOTHESIS_ORIGINS, DIRECTIONS, SPLIT_METHODS, CONDITION_OPS, FEATURE_SCOPES, FEATURE_KINDS, NORMALIZATIONS, VINTAGES, UNIVERSE_DEFINITIONS, LABEL_UNITS, LABEL_KNOWN_AT_RULES, BASELINE_KINDS, BLOCK_LENGTH_RULES, STABILITY_AXES, METRICS, METRIC_NAMES, CODE_IDENTITY_KEYS, VERDICTS } from './contracts.js';
+import { positionOf } from './metrics.js';
+import { fail, isPlainObject, isTs, isCount, isFiniteNum, canonicalDigest, deepFreeze, exactKeys, isCoin, isId, isCode, isHex64, isProb, isScalarMap, shortId, finding, carriesForbiddenToken, LIMITS, CAPTURE_EVIDENCE_KINDS, PROSPECTIVE_CAPTURE_KEYS, PROSPECTIVE_OUTCOME_KEYS, REGISTRY_VERSION, MANIFEST_VERSION, EXPERIMENT_MANIFEST_KEYS, MANIFEST_DATASET_KEYS, UNIVERSE_KEYS, FEATURE_KEYS, SIGNAL_KEYS, CONDITION_KEYS, CANDIDATE_KEYS, LABEL_KEYS, OUTCOME_DEF_KEYS, SPLIT_KEYS, HOLDOUT_KEYS, BASELINE_KEYS, CONTROLS_KEYS, STABILITY_KEYS, NEIGHBOR_KEYS, CRITERIA_KEYS, ECONOMICS_KEYS, PROSPECTIVE_DESIGN_KEYS, REGISTRY_RECORD_KEYS, REGISTRY_SNAPSHOT_KEYS, REGISTRY_RECORD_KINDS, EVALUATION_TYPES, HYPOTHESIS_ORIGINS, DIRECTIONS, SPLIT_METHODS, CONDITION_OPS, FEATURE_SCOPES, FEATURE_KINDS, NORMALIZATIONS, VINTAGES, UNIVERSE_DEFINITIONS, LABEL_UNITS, LABEL_KNOWN_AT_RULES, BASELINE_KINDS, BLOCK_LENGTH_RULES, STABILITY_AXES, METRICS, METRIC_NAMES, CODE_IDENTITY_KEYS, VERDICTS } from './contracts.js';
 
 // ---- the experiment manifest validator ---------------------------------------------------------------------------
 const oneOf = (v, list) => list.includes(v);
@@ -126,7 +127,8 @@ function append(reg, kind, ts, experimentId, experimentFamilyId, payload) {
 }
 // chain verification: exact keys, contiguous seq, monotone ts, closed kinds, every prevDigest / digest recomputed
 export function registryError(reg) {
-  if (!isPlainObject(reg) || reg.registryVersion !== REGISTRY_VERSION || !Array.isArray(reg.records)) return finding('SCHEMA', 'registry');
+  if (!isPlainObject(reg) || !Array.isArray(reg.records)) return finding('SCHEMA', 'registry');
+  if (reg.registryVersion !== REGISTRY_VERSION) return finding('UNSUPPORTED_REGISTRY_VERSION', 'this reader supports one registry version and never reinterprets another');
   if (reg.records.length > LIMITS.maxRegistryRecords) return finding('REGISTRY_LIMIT_EXCEEDED');
   let prev = canonicalDigest({ registryVersion: REGISTRY_VERSION, genesis: true }); let lastTs = 0;
   for (let i = 0; i < reg.records.length; i += 1) {
@@ -135,7 +137,7 @@ export function registryError(reg) {
     if (r.prevDigest !== prev || r.digest !== recordDigest(r)) return finding('REGISTRY_CHAIN_BROKEN', 'digest', i + 1);
     prev = r.digest; lastTs = r.ts;
   }
-  return null;
+  return replayError(reg.records); // the bytes are intact; now prove the history is lawful
 }
 export const registrySnapshot = (reg) => deepFreeze({ registryVersion: REGISTRY_VERSION, headSeq: reg.records.length, headDigest: headDigestOf(reg), records: reg.records });
 export function registryFromSnapshot(snap) {
@@ -146,18 +148,110 @@ export function registryFromSnapshot(snap) {
   return { registry: deepFreeze(reg), error: null };
 }
 
+// ---- semantic replay: a hash chain proves nobody edited the bytes, NOT that a record was lawful ---------------------
+// Every entry path (append, snapshot, file reload) folds the records in order through this state machine and refuses a
+// history whose SEMANTICS are wrong, however well it is rehashed: an experiment scored twice, a prospective
+// observation without its opening, a decision recorded after it was supposedly made, an outcome known before its
+// horizon ended or after the clock that recorded it, a second formal look.
+export const replayState = () => ({ experiments: new Map(), lastTs: 0 });
+const expState = (st, id) => st.experiments.get(id) ?? null;
+export function recordSemanticError(st, r, ordinal = null) {
+  const bad = (reason, detail = null) => finding(reason, detail, ordinal);
+  const ex = expState(st, r.experimentId); const p = r.payload;
+  if (r.ts < st.lastTs) return bad('REGISTRY_CLOCK_BACKWARDS');
+  if (r.kind === 'EXPERIMENT_REGISTERED') {
+    if (ex) return bad('ALREADY_REGISTERED');
+    if (!isPlainObject(p.manifest) || !isHex64(p.manifestDigest) || !isHex64(p.featureDigest) || !isCount(p.candidateCount)) return bad('SCHEMA', 'registration payload');
+    if (canonicalDigest(p.manifest) !== p.manifestDigest || experimentIdOf(p.manifest) !== r.experimentId) return bad('CHECKSUM_MISMATCH', 'registration identity');
+    return null;
+  }
+  if (!ex) return bad('EXPERIMENT_NOT_REGISTERED');
+  switch (r.kind) {
+    case 'RESULT_RECORDED': return ex.status === 'REGISTERED' ? null : bad(ex.status === 'EVALUATED' ? 'RESULT_ALREADY_RECORDED' : 'STATUS_TRANSITION_REFUSED', ex.status);
+    case 'EXPERIMENT_ABANDONED': return ex.status === 'REGISTERED' ? null : bad('STATUS_TRANSITION_REFUSED', ex.status);
+    case 'HOLDOUT_OPENED': return isTs(p.startTs) && isTs(p.endTs) && p.startTs < p.endTs ? null : bad('SCHEMA', 'holdout window');
+    case 'PROSPECTIVE_OPENED': {
+      if (ex.prospective) return bad('PROSPECTIVE_ALREADY_OPENED');
+      if (ex.status !== 'EVALUATED') return bad('STATUS_TRANSITION_REFUSED', ex.status);
+      if (!isPlainObject(p.design) || !isHex64(p.designDigest) || canonicalDigest(p.design) !== p.designDigest) return bad('CHECKSUM_MISMATCH', 'sealed design');
+      return null;
+    }
+    case 'PROSPECTIVE_OBSERVATION': {
+      const d = ex.prospective; if (!d) return bad('PROSPECTIVE_NOT_OPENED');
+      if (ex.evaluated) return bad('PROSPECTIVE_ALREADY_EVALUATED');
+      const e = exactKeys(p, PROSPECTIVE_CAPTURE_KEYS); if (e) return bad('SCHEMA', e);
+      if (!isId(p.observationId) || !isCoin(p.symbol) || !isTs(p.ts) || !isTs(p.labelEndTs) || !(p.score === null || isFiniteNum(p.score)) || !Number.isInteger(p.position)) return bad('SCHEMA', 'capture');
+      if (p.designDigest !== d.designDigest) return bad('PROSPECTIVE_DESIGN_CHANGED');
+      if (!CAPTURE_EVIDENCE_KINDS.includes(p.captureEvidence)) return bad('UNKNOWN_VOCABULARY', 'captureEvidence');
+      if (d.captures.has(p.observationId)) return bad('DUPLICATE_OBSERVATION_ID');
+      if (!d.design.symbolScope.includes(p.symbol)) return bad('SYMBOL_OUTSIDE_SCOPE');
+      if (p.ts < d.openedAtTs) return bad('EVALUATION_BEFORE_REGISTRATION', 'decided before the design was sealed');
+      if (p.ts > r.ts) return bad('DECISION_AFTER_RECORDING');
+      if (p.labelEndTs - p.ts !== d.design.horizonMs) return bad('LABEL_HORIZON_MISMATCH');
+      if (r.ts >= p.labelEndTs) return bad('CAPTURE_NOT_PRIOR_TO_OUTCOME');
+      if (p.position !== positionOf(p.score, { op: d.design.condition.op, threshold: d.design.condition.threshold })) return bad('POSITION_INCONSISTENT_WITH_DESIGN');
+      return null;
+    }
+    case 'PROSPECTIVE_OUTCOME': {
+      const d = ex.prospective; if (!d) return bad('PROSPECTIVE_NOT_OPENED');
+      if (ex.evaluated) return bad('PROSPECTIVE_ALREADY_EVALUATED');
+      const e = exactKeys(p, PROSPECTIVE_OUTCOME_KEYS); if (e) return bad('SCHEMA', e);
+      if (!isId(p.observationId) || !isFiniteNum(p.outcome) || !isTs(p.outcomeKnownAtTs)) return bad('SCHEMA', 'outcome');
+      if (p.designDigest !== d.designDigest) return bad('PROSPECTIVE_DESIGN_CHANGED');
+      const cap = d.captures.get(p.observationId); if (!cap) return bad('PROSPECTIVE_OBSERVATION_UNKNOWN');
+      if (d.outcomes.has(p.observationId)) return bad('PROSPECTIVE_OUTCOME_ALREADY_RECORDED');
+      if (p.outcomeKnownAtTs < cap.labelEndTs) return bad('OUTCOME_KNOWN_BEFORE_HORIZON_END');
+      if (p.outcomeKnownAtTs > r.ts) return bad('OUTCOME_RECORDED_BEFORE_KNOWN');
+      return null;
+    }
+    case 'PROSPECTIVE_EVALUATED': {
+      const d = ex.prospective; if (!d) return bad('PROSPECTIVE_NOT_OPENED');
+      if (ex.evaluated) return bad('PROSPECTIVE_ALREADY_EVALUATED');
+      const counted = [...d.captures.values()].slice(0, d.design.terminalObservations);
+      if (counted.length < d.design.terminalObservations || counted.some((c) => !d.outcomes.has(c.observationId))) return bad('TERMINAL_SAMPLE_NOT_REACHED');
+      return null;
+    }
+    default: return bad('UNKNOWN_VOCABULARY', 'record kind');
+  }
+}
+export function advanceState(st, r) {
+  const p = r.payload;
+  if (r.kind === 'EXPERIMENT_REGISTERED') { st.experiments.set(r.experimentId, { status: 'REGISTERED', prospective: null, evaluated: false }); }
+  else {
+    const ex = st.experiments.get(r.experimentId);
+    if (ex) {
+      if (r.kind === 'RESULT_RECORDED') ex.status = 'EVALUATED';
+      else if (r.kind === 'EXPERIMENT_ABANDONED') ex.status = 'ABANDONED';
+      else if (r.kind === 'PROSPECTIVE_OPENED') { ex.status = 'PROSPECTIVE_PENDING'; ex.prospective = { design: p.design, designDigest: p.designDigest, openedAtTs: r.ts, captures: new Map(), outcomes: new Map() }; }
+      else if (r.kind === 'PROSPECTIVE_OBSERVATION') ex.prospective.captures.set(p.observationId, p);
+      else if (r.kind === 'PROSPECTIVE_OUTCOME') ex.prospective.outcomes.set(p.observationId, p);
+      else if (r.kind === 'PROSPECTIVE_EVALUATED') { ex.status = 'PROSPECTIVE_EVALUATED'; ex.evaluated = true; }
+    }
+  }
+  st.lastTs = r.ts;
+}
+// the fold over a whole registry, used by every reader
+export function replayError(records) {
+  const st = replayState();
+  for (let i = 0; i < records.length; i += 1) { const e = recordSemanticError(st, records[i], i + 1); if (e) return e; advanceState(st, records[i]); }
+  return null;
+}
+// the state a single candidate record will be validated against (one pass over the stored records)
+export function stateOf(reg) { const st = replayState(); for (const r of reg.records) advanceState(st, r); return st; }
+
 // ---- queries --------------------------------------------------------------------------------------------------------
 export function experimentOf(reg, experimentId) {
   const rs = reg.records.filter((r) => r.experimentId === experimentId); const reg0 = rs.find((r) => r.kind === 'EXPERIMENT_REGISTERED'); if (!reg0) return null;
-  let status = 'REGISTERED'; let result = null; let prospective = null; const observations = [];
+  let status = 'REGISTERED'; let result = null; let prospective = null; const observations = []; const outcomes = [];
   for (const r of rs) {
     if (r.kind === 'RESULT_RECORDED') { status = 'EVALUATED'; result = r; }
     else if (r.kind === 'EXPERIMENT_ABANDONED') status = 'ABANDONED';
     else if (r.kind === 'PROSPECTIVE_OPENED') { status = 'PROSPECTIVE_PENDING'; prospective = r; }
     else if (r.kind === 'PROSPECTIVE_OBSERVATION') observations.push(r);
+    else if (r.kind === 'PROSPECTIVE_OUTCOME') outcomes.push(r);
     else if (r.kind === 'PROSPECTIVE_EVALUATED') status = 'PROSPECTIVE_EVALUATED';
   }
-  return { experimentId, experimentFamilyId: reg0.experimentFamilyId, registeredAtTs: reg0.ts, manifest: reg0.payload.manifest, manifestDigest: reg0.payload.manifestDigest, featureDigest: reg0.payload.featureDigest, candidateCount: reg0.payload.candidateCount, status, result, prospective, prospectiveObservations: observations };
+  return { experimentId, experimentFamilyId: reg0.experimentFamilyId, registeredAtTs: reg0.ts, manifest: reg0.payload.manifest, manifestDigest: reg0.payload.manifestDigest, featureDigest: reg0.payload.featureDigest, candidateCount: reg0.payload.candidateCount, status, result, prospective, prospectiveObservations: observations, prospectiveOutcomes: outcomes };
 }
 export const familyMembers = (reg, familyId) => reg.records.filter((r) => r.kind === 'EXPERIMENT_REGISTERED' && r.experimentFamilyId === familyId).map((r) => experimentOf(reg, r.experimentId));
 export const holdoutWindows = (reg, familyId) => reg.records.filter((r) => r.kind === 'HOLDOUT_OPENED' && r.experimentFamilyId === familyId).map((r) => ({ startTs: r.payload.startTs, endTs: r.payload.endTs, openedBy: r.payload.openedBy, openedAtTs: r.ts }));
@@ -217,6 +311,9 @@ export function openHoldout(reg, { experimentId, startTs, endTs, ts }) {
 // generic appenders used by the prospective shadow (validated there)
 export function appendRecord(reg, { kind, ts, experimentId, payload }) {
   const ex = experimentOf(reg, experimentId); if (!ex) return { registry: reg, error: finding('EXPERIMENT_NOT_REGISTERED') };
-  if (!['PROSPECTIVE_OPENED', 'PROSPECTIVE_OBSERVATION', 'PROSPECTIVE_EVALUATED'].includes(kind) || !isPlainObject(payload)) return { registry: reg, error: finding('SCHEMA', 'record') };
+  if (!['PROSPECTIVE_OPENED', 'PROSPECTIVE_OBSERVATION', 'PROSPECTIVE_OUTCOME', 'PROSPECTIVE_EVALUATED'].includes(kind) || !isPlainObject(payload) || !isTs(ts)) return { registry: reg, error: finding('SCHEMA', 'record') };
+  // THE SAME LAW AS RELOAD: the candidate record is replayed against the stored state before it can be appended
+  const candidate = { seq: reg.records.length + 1, kind, ts, experimentId, experimentFamilyId: ex.experimentFamilyId, payload };
+  const err = recordSemanticError(stateOf(reg), candidate, candidate.seq); if (err) return { registry: reg, error: err };
   return { registry: append(reg, kind, ts, experimentId, ex.experimentFamilyId, payload), error: null };
 }
