@@ -1,9 +1,12 @@
 # RESEARCH REFEREE — the hostile laboratory quality-control law
 
-Code: `research/referee/` (contracts, registry, pitAudit, splits, metrics, statistics, negativeControls, stability,
-evaluate, seal, prospective, store). Tests: `test/referee-*.test.js`, fixtures in `test/helpers/referee.js`.
-Registry format: **serpent-referee-registry-2**. v2 introduced the two-stage prospective lifecycle below; a v1 file is
-refused with UNSUPPORTED_REGISTRY_VERSION rather than reinterpreted, and no old record is ever rewritten.
+Code: `research/referee/` (contracts, design, registry, pitAudit, splits, metrics, statistics, negativeControls,
+stability, evaluate, seal, prospective, store). Tests: `test/referee-*.test.js` and `test/referee-closeout-*.test.mjs`,
+fixtures in `test/helpers/referee.js`.
+Registry format: **serpent-referee-registry-3**. v2 introduced the two-stage prospective lifecycle below; v3 makes the
+prospective records PROOF-CARRYING (section 8b). A v1 or v2 file is refused with UNSUPPORTED_REGISTRY_VERSION rather
+than reinterpreted or relabelled: no automatic migration invents the proof an older record never carried, no old record
+is rewritten, and no prior trial is deleted. Old bytes are preserved exactly as found.
 
 > A beautiful backtest is evidence against itself until it survives hostile evaluation.
 
@@ -90,15 +93,36 @@ experiment's own sealed criteria, and the predeclared perturbations do not colla
 NOT robust, NOT production approval, a prospective test is still required. Nothing in the paper runtime, the Judge,
 Socrates or The Watch reads it.
 
-## 8b. A hash chain is not a licence: semantic replay
+## 8b. A hash chain is not a licence: proof-carrying records and one validated replay
 
-The chain proves nobody edited the stored bytes. It says nothing about whether a record was ever lawful. So every
-entry path — `appendRecord`, `registryFromSnapshot`, `readRegistryFile` — folds the records through one state
-machine (`recordSemanticError`) and refuses a history whose semantics are wrong however well it is rehashed: an
-experiment registered twice or scored twice, a prospective observation without its opening, a decision recorded after
-it was supposedly made, an outcome known before its horizon ended or after the clock that recorded it, a capture whose
-position disagrees with the sealed condition, a second formal look. An invalid but correctly rehashed history is
-refused BEFORE it can be scored.
+The chain proves nobody edited the stored bytes. It says nothing about whether a record was ever lawful, and a digest
+that covers only a record's own contents is self-consistent by construction. A registration could declare five terminal
+observations while the opening beside it claimed one, and both would hash perfectly.
+
+So there is ONE validated replay (`registry.js`) and it is the only way to obtain trusted state. Every entry path —
+`appendRecord`, every exported mutator, `openProspective`, the capture / outcome / progress / terminal consumers,
+`registryFromSnapshot` and `readRegistryFile` — validates the registry it was handed, folds it record by record, and
+advances state only after a record is accepted. There is no weaker reload path, no bypass flag and no cache keyed on
+object identity or on a caller-supplied digest. `prospectiveProgress` refuses invalid input instead of showing a
+metric derived from it.
+
+Each record kind is checked against its closed payload shape AND its meaning: a registration's manifest is fully
+validated and its digests, feature digest, candidate count, code identity and deterministically resolved family must
+match; every later record must carry the registered family id; a result is one-per-experiment with a checked verdict
+vocabulary; holdout windows keep their non-overlap law; captures and outcomes keep every clock and duplicate rule.
+
+**The prospective records carry their own proof (v3).** A `PROSPECTIVE_OPENED` record embeds the historical report it
+was derived from, and `PROSPECTIVE_EVALUATED` embeds the terminal report it produced. Replay validates the embedded
+report (digest recomputed, identity bound to the registration and the recorded result, HISTORICALLY_INTERESTING on both
+sides, research stamp intact, clock not from the future, fit naming the declared primary candidate) and then REBUILDS
+the sealed design from that evidence with the one shared builder in `design.js`, requiring exact canonical equality
+before any record that depends on it is accepted. A terminal record must further match the first-N-captured sample, the
+positioned count, the sealed alpha and seed, and its verdict and reasons must FOLLOW from its own recorded metric,
+direction and null test — a perfectly shaped payload claiming a result its numbers do not support is refused.
+
+What this proves and what it does not: the stored evidence is internally consistent, bound to the registered experiment
+and sufficient to rebuild the design. That is not authentication. A caller who fabricates an entire self-consistent
+history has not thereby told the truth about the world.
 
 ## 9. Why prospective validation is required
 
@@ -152,10 +176,40 @@ I/O failure mid-tail is reported as PARTIAL_WRITE_UNCERTAIN and its bytes are LE
 the file instead of mistaking a partial tail for a complete append. A retry after a successful write reports a stale
 state rather than appending twice; the writer reloads and forms a new request.
 
+**An unfinished append is unavailable until explicit recovery.** Parsing cannot detect one: a failure between two
+complete records, or at the data fsync, leaves perfectly parseable bytes. Two independent mechanisms fence the file.
+
+1. **Framing.** A nonempty registry must end with a newline. A complete last JSON object without its terminator is an
+   unfinished record: refused for read, for a no-op append and for a real append, and never completed, trimmed or
+   truncated to make it readable.
+2. **A durable pending marker.** Before any registry data byte is written, a closed marker naming the expected old
+   state (records, head digest, byte count, byte digest) and the intended final state is written, fsynced, and its
+   directory entry fsynced. Every reader and writer checks it; an unresolved marker is REGISTRY_RECOVERY_REQUIRED,
+   never an empty registry and never a silent repair. A live writer's lock fences ordinary readers too.
+
+The commit sequence is: validate both registries and the exact prefix, take the lock, refuse any unresolved marker,
+read and validate the ACTUAL stored history under that lock and require it to equal the expected state, finish every
+byte / line / record bound check, establish the marker durably, write every record completely (short writes looped),
+fsync the data, prove the resulting bytes are exactly the intended complete valid chain, and only then clear the
+marker. An empty tail performs every check and opens no transaction.
+
+A failure before durable commit leaves the bytes and the marker in place and reports PARTIAL_WRITE_UNCERTAIN; a
+failure while clearing the marker AFTER the data is proven durable reports APPEND_COMMITTED_CLEANUP_INCOMPLETE and
+says plainly that nothing was rolled back. Readers stay fenced until recovery finalizes it.
+
+**Recovery (explicit, never a side effect).** `recoverRegistryFile` takes the real exclusive lock and validates the
+marker's shape, version and path binding against the actual bytes. If they are exactly the recorded OLD state, no tail
+was published and the marker is cleared. If they are exactly the intended FINAL state and pass full framing, size,
+chain and semantic validation, the transaction is finalized: the records are NOT reappended, no report is regenerated
+with a new seed, and an already recorded formal look is kept exactly as written. Anything partial, divergent or of an
+unknown version stays refused with its evidence preserved. A normal retry afterwards reloads the recovered head; a
+stale request is still refused.
+
 **Lock recovery (manual, never automatic).** A leftover `<registry>.lock` is never stolen on age alone — age cannot
-distinguish a crashed writer from a slow one. Establish that the owner has stopped (the lock file names the pid that
-took it; confirm no such process is running and that no other host writes this path), then remove the lock file by
-hand and re-read the registry before writing again.
+distinguish a crashed writer from a slow one, and a process killed mid-append leaves both its lock and its pending
+marker behind. Establish that the owner has stopped (the lock file names the pid that took it; confirm no such process
+is running and that no other host writes this path), remove the lock file by hand, then run explicit recovery before
+writing again.
 
 ## 11. How to reproduce a report
 
@@ -192,7 +246,9 @@ current snapshot, overlapping labels without purge or embargo, a family holdout 
 INSUFFICIENT_DATA and UNSCORABLE (no valid out-of-sample path, an impractical CPCV, a resource limit, a constant score,
 a single-class outcome) stop before any effect is claimed. The Referee never repairs a bad input. On the registry side:
 UNSUPPORTED_REGISTRY_VERSION, REGISTRY_CHAIN_BROKEN (bytes edited), the semantic refusals of section 8b, and on the
-store side STALE_EXPECTED_STATE, LOCK_CONTENTION, RESOURCE_LIMIT_EXCEEDED, CORRUPT_INPUT and PARTIAL_WRITE_UNCERTAIN.
+store side STALE_EXPECTED_STATE, LOCK_CONTENTION, REGISTRY_WRITER_ACTIVE, REGISTRY_INCOMPLETE_RECORD,
+REGISTRY_RECOVERY_REQUIRED, RESOURCE_LIMIT_EXCEEDED, CORRUPT_INPUT, PARTIAL_WRITE_UNCERTAIN and
+APPEND_COMMITTED_CLEANUP_INCOMPLETE.
 
 ## What this ticket did NOT do
 

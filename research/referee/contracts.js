@@ -12,13 +12,13 @@
 // other than the seeded generator below, no I/O, no environment, no network anywhere in this package.
 import { fail, ResearchError, isPlainObject, isTs, isCount, isFiniteNum, sha256Hex, canonicalDigest, deepFreeze, exactKeys, safeType, isCoin, isId, isCode, AUTHORITY, PURPOSE, round4 } from '../contracts.js';
 
-export { fail, ResearchError, isPlainObject, isTs, isCount, isFiniteNum, sha256Hex, canonicalDigest, deepFreeze, exactKeys, safeType, isCoin, isId, isCode, round4 };
+export { fail, ResearchError, isPlainObject, isTs, isCount, isFiniteNum, sha256Hex, canonicalDigest, deepFreeze, exactKeys, safeType, isCoin, isId, isCode, round4, AUTHORITY, PURPOSE };
 
 export const REFEREE_VERSION = 'serpent-research-referee-1';
 export const BUNDLE_VERSION = 'serpent-referee-bundle-1';
 export const MANIFEST_VERSION = 'serpent-referee-experiment-1';
 export const DATASET_MANIFEST_VERSION = 'serpent-referee-dataset-1';
-export const REGISTRY_VERSION = 'serpent-referee-registry-2'; // v2: the two-stage prospective lifecycle (capture, then a separate outcome). v1 prospective data is REFUSED, never reinterpreted.
+export const REGISTRY_VERSION = 'serpent-referee-registry-3'; // v3: PROOF-CARRYING prospective records — an opening carries the historical report it was derived from and a terminal record carries its report, so replay can REBUILD the sealed design instead of trusting a self-consistent digest. v1 / v2 data is REFUSED, never reinterpreted or relabelled.
 export const REPORT_VERSION = 'serpent-referee-report-1';
 export const PROSPECTIVE_VERSION = 'serpent-referee-prospective-1';
 
@@ -91,7 +91,7 @@ export const REASON_CODES = Object.freeze([
   // SUSPECT_FRAGILITY
   'DIRECTION_INCONSISTENT', 'KNIFE_EDGE_PARAMETER', 'CONCENTRATED_IN_ONE_BLOCK', 'CONCENTRATED_IN_ONE_SYMBOL', 'REGIME_DEPENDENT', 'WORST_PERTURBATION_FLIPS_SIGN', 'HORIZON_PROFILE_INCOHERENT',
   // HISTORICALLY_INTERESTING / PROSPECTIVE
-  'SURVIVED_HISTORICAL_TESTS', 'PROSPECTIVE_DESIGN_SEALED', 'DECISION_AFTER_RECORDING', 'CAPTURE_NOT_PRIOR_TO_OUTCOME', 'OUTCOME_RECORDED_BEFORE_KNOWN', 'PROSPECTIVE_OBSERVATION_UNKNOWN', 'PROSPECTIVE_OUTCOME_ALREADY_RECORDED', 'PROSPECTIVE_NOT_OPENED', 'PROSPECTIVE_ALREADY_OPENED', 'PROSPECTIVE_ALREADY_EVALUATED', 'EVALUATION_BEFORE_RECORDS', 'REGISTRY_CLOCK_BACKWARDS', 'POSITION_INCONSISTENT_WITH_DESIGN', 'UNSUPPORTED_REGISTRY_VERSION', 'TERMINAL_SAMPLE_NOT_REACHED', 'TERMINAL_SAMPLE_REACHED', 'TERMINAL_NULL_REJECTED', 'TERMINAL_NULL_NOT_REJECTED', 'TERMINAL_WRONG_DIRECTION', 'PROSPECTIVE_DESIGN_CHANGED',
+  'SURVIVED_HISTORICAL_TESTS', 'PROSPECTIVE_DESIGN_SEALED', 'DECISION_AFTER_RECORDING', 'CAPTURE_NOT_PRIOR_TO_OUTCOME', 'OUTCOME_RECORDED_BEFORE_KNOWN', 'PROSPECTIVE_OBSERVATION_UNKNOWN', 'PROSPECTIVE_OUTCOME_ALREADY_RECORDED', 'PROSPECTIVE_NOT_OPENED', 'PROSPECTIVE_ALREADY_OPENED', 'PROSPECTIVE_ALREADY_EVALUATED', 'EVALUATION_BEFORE_RECORDS', 'REGISTRY_CLOCK_BACKWARDS', 'POSITION_INCONSISTENT_WITH_DESIGN', 'UNSUPPORTED_REGISTRY_VERSION', 'UNSUPPORTED_REPORT_VERSION', 'HISTORICAL_REPORT_MISSING', 'TERMINAL_REPORT_MISSING', 'EXPERIMENT_FAMILY_MISMATCH', 'CODE_IDENTITY_INVALID', 'FAMILY_RULE_INVALID', 'TERMINAL_SAMPLE_NOT_REACHED', 'TERMINAL_SAMPLE_REACHED', 'TERMINAL_NULL_REJECTED', 'TERMINAL_NULL_NOT_REJECTED', 'TERMINAL_WRONG_DIRECTION', 'PROSPECTIVE_DESIGN_CHANGED',
   // informational (never a verdict driver on its own)
   'PSR_NOT_APPLICABLE', 'DSR_NOT_APPLICABLE', 'PBO_NOT_APPLICABLE', 'SINGLE_CANDIDATE', 'TRIAL_VARIANCE_UNAVAILABLE', 'SYMBOL_PLACEBO_NOT_APPLICABLE', 'HORIZON_PROFILE_NOT_AVAILABLE', 'PARTITION_TOO_SMALL', 'NEIGHBORS_NOT_DECLARED',
 ]);
@@ -100,7 +100,7 @@ export const isReason = (v) => typeof v === 'string' && REASON_CODES.includes(v)
 // NAMED RESOURCE LIMITS (not config). Exceeding ANY of them is UNSCORABLE / RESOURCE_LIMIT_EXCEEDED — never a silent
 // truncation that would change the inference.
 export const LIMITS = Object.freeze({
-  maxObservations: 200_000, maxOutcomes: 200_000, maxSymbols: 2_000, maxFeatures: 64, maxCandidates: 500, maxFolds: 50, maxCpcvCombinations: 5_000, maxCscvCombinations: 5_000, maxResampleIterations: 5_000, maxShiftCount: 500, maxNullFeatureTrials: 200, maxStabilityPerturbations: 200, maxNeighbors: 64, maxRegistryRecords: 100_000, maxFamilyMembers: 10_000, maxReportBytes: 8 * 1024 * 1024, maxViolationsListed: 50, maxReasonChars: 400, maxParamsKeys: 32, maxProspectiveObservations: 100_000,
+  maxObservations: 200_000, maxOutcomes: 200_000, maxSymbols: 2_000, maxFeatures: 64, maxCandidates: 500, maxFolds: 50, maxCpcvCombinations: 5_000, maxCscvCombinations: 5_000, maxResampleIterations: 5_000, maxShiftCount: 500, maxNullFeatureTrials: 200, maxStabilityPerturbations: 200, maxNeighbors: 64, maxRegistryRecords: 100_000, maxFamilyMembers: 10_000, maxReportBytes: 8 * 1024 * 1024, maxRecordBytes: 8 * 1024 * 1024, maxViolationsListed: 50, maxReasonChars: 400, maxParamsKeys: 32, maxProspectiveObservations: 100_000,
 });
 // STRUCTURAL minima — mathematical floors below which the statistics are undefined or degenerate (a sample standard
 // deviation needs two points, kurtosis four, a block null at least two blocks), NOT financial thresholds. The
@@ -149,6 +149,21 @@ export const REGISTRY_RECORD_KEYS = Object.freeze(['seq', 'kind', 'ts', 'experim
 export const PROSPECTIVE_CAPTURE_INPUT_KEYS = Object.freeze(['observationId', 'symbol', 'ts', 'score', 'labelEndTs']);
 export const PROSPECTIVE_CAPTURE_KEYS = Object.freeze(['observationId', 'symbol', 'ts', 'score', 'position', 'labelEndTs', 'captureEvidence', 'designDigest']);
 export const PROSPECTIVE_OUTCOME_KEYS = Object.freeze(['observationId', 'outcome', 'outcomeKnownAtTs', 'designDigest']);
+// v3 PROOF-CARRYING records: the opening carries the historical report, the terminal record carries its own report.
+export const PROSPECTIVE_OPENED_KEYS = Object.freeze(['design', 'designDigest', 'historicalReport', 'historicalReportDigest', 'authority', 'purpose', 'researchOnly', 'canAffectTrading', 'canAffectEligibility', 'canAffectSizing', 'canAffectExecution']);
+export const PROSPECTIVE_EVALUATED_KEYS = Object.freeze(['verdict', 'reasons', 'report', 'reportDigest', 'designDigest']);
+export const PROSPECTIVE_DESIGN_SEAL_KEYS = Object.freeze(['prospectiveVersion', 'refereeVersion', 'feature', 'candidateId', 'featureDefinitionDigest', 'condition', 'primaryMetric', 'parameters', 'direction', 'evaluationType', 'horizonMs', 'terminalObservations', 'universeRule', 'symbolScope', 'nullAlpha', 'blockLengthRows', 'permutationIterations', 'nullSeed', 'sequentialMethod', 'anytimeValid', 'captureEvidenceRequired', 'historicalReportDigest']);
+export const REGISTERED_PAYLOAD_KEYS = Object.freeze(['manifest', 'manifestDigest', 'featureDigest', 'candidateCount', 'codeIdentity', 'familyRule']);
+export const RESULT_PAYLOAD_KEYS = Object.freeze(['reportDigest', 'verdict', 'primaryMetric', 'sharpes', 'datasetDigest']);
+export const ABANDON_PAYLOAD_KEYS = Object.freeze(['reasonCode']);
+export const HOLDOUT_PAYLOAD_KEYS = Object.freeze(['startTs', 'endTs', 'openedBy']);
+export const FAMILY_RULES = Object.freeze(['INHERITED_FROM_PARENT', 'SHARED_FEATURE_IDENTITY', 'DERIVED_KEY']);
+export const TERMINAL_VERDICTS = Object.freeze(['PROSPECTIVE_SUPPORTED', 'PROSPECTIVE_NOT_SUPPORTED']);
+export const TERMINAL_REASONS = Object.freeze(['TERMINAL_SAMPLE_REACHED', 'TERMINAL_NULL_REJECTED', 'TERMINAL_NULL_NOT_REJECTED', 'TERMINAL_WRONG_DIRECTION', 'METRIC_UNDEFINED']);
+// the durable append protocol: a pending marker fences an unfinished data append until explicit recovery
+export const PENDING_PROTOCOL = 'serpent-referee-registry-append-1';
+export const PENDING_MARKER_KEYS = Object.freeze(['protocol', 'registryVersion', 'storePath', 'expected', 'intended']);
+export const PENDING_SIDE_KEYS = Object.freeze(['records', 'headDigest', 'bytes', 'byteDigest']);
 
 // ---- helpers -------------------------------------------------------------------------------------------------------
 export const isHex64 = (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);

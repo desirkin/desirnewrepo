@@ -186,7 +186,7 @@ test('W2. two independent processes contending from the same stored head: exactl
   const dir = work(); try {
     const file = path.join(dir, 'registry.jsonl'); const barrier = path.join(dir, 'go');
     const kids = ['one', 'two'].map((tag) => { const k = spawn(process.execPath, [CHILD, file, barrier, tag], { stdio: ['ignore', 'pipe', 'pipe'] }); k.out = ''; k.stdout.on('data', (d) => { k.out += d; }); k.stderr.on('data', (d) => { k.out += d; }); return k; });
-    while (!(existsSync(`${file}.ready-one`) && existsSync(`${file}.ready-two`))) nap(5); // deterministic barrier: both are inside the append call path before either proceeds
+    const deadline = Date.now() + 30_000; while (!(existsSync(`${file}.ready-one`) && existsSync(`${file}.ready-two`))) { if (Date.now() > deadline) { kids.forEach((k) => k.kill('SIGKILL')); assert.fail('the contending writers did not both reach the barrier'); } nap(5); } // deterministic barrier: both are inside the append call path before either proceeds
     writeFileSync(barrier, 'go');
     const codes = await Promise.all(kids.map((k) => new Promise((res) => k.on('exit', (c) => res(c)))));
     const outs = kids.map((k) => k.out.trim());

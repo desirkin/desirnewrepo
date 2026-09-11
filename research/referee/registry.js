@@ -10,7 +10,8 @@
 // that shares a feature definition with an existing family is pulled into that family whatever its tag says. Once a
 // family carries a recorded result, further members must name their parent — a rewrite cannot appear as a first try.
 import { positionOf } from './metrics.js';
-import { fail, isPlainObject, isTs, isCount, isFiniteNum, canonicalDigest, deepFreeze, exactKeys, isCoin, isId, isCode, isHex64, isProb, isScalarMap, shortId, finding, carriesForbiddenToken, LIMITS, CAPTURE_EVIDENCE_KINDS, PROSPECTIVE_CAPTURE_KEYS, PROSPECTIVE_OUTCOME_KEYS, REGISTRY_VERSION, MANIFEST_VERSION, EXPERIMENT_MANIFEST_KEYS, MANIFEST_DATASET_KEYS, UNIVERSE_KEYS, FEATURE_KEYS, SIGNAL_KEYS, CONDITION_KEYS, CANDIDATE_KEYS, LABEL_KEYS, OUTCOME_DEF_KEYS, SPLIT_KEYS, HOLDOUT_KEYS, BASELINE_KEYS, CONTROLS_KEYS, STABILITY_KEYS, NEIGHBOR_KEYS, CRITERIA_KEYS, ECONOMICS_KEYS, PROSPECTIVE_DESIGN_KEYS, REGISTRY_RECORD_KEYS, REGISTRY_SNAPSHOT_KEYS, REGISTRY_RECORD_KINDS, EVALUATION_TYPES, HYPOTHESIS_ORIGINS, DIRECTIONS, SPLIT_METHODS, CONDITION_OPS, FEATURE_SCOPES, FEATURE_KINDS, NORMALIZATIONS, VINTAGES, UNIVERSE_DEFINITIONS, LABEL_UNITS, LABEL_KNOWN_AT_RULES, BASELINE_KINDS, BLOCK_LENGTH_RULES, STABILITY_AXES, METRICS, METRIC_NAMES, CODE_IDENTITY_KEYS, VERDICTS } from './contracts.js';
+import { historicalReportError, designError, terminalReportError } from './design.js';
+import { fail, isPlainObject, isTs, isCount, isFiniteNum, canonicalDigest, deepFreeze, exactKeys, isCoin, isId, isCode, isHex64, isProb, isScalarMap, shortId, finding, carriesForbiddenToken, LIMITS, CAPTURE_EVIDENCE_KINDS, PROSPECTIVE_CAPTURE_KEYS, PROSPECTIVE_OUTCOME_KEYS, PROSPECTIVE_OPENED_KEYS, PROSPECTIVE_EVALUATED_KEYS, REGISTERED_PAYLOAD_KEYS, RESULT_PAYLOAD_KEYS, ABANDON_PAYLOAD_KEYS, HOLDOUT_PAYLOAD_KEYS, FAMILY_RULES, AUTHORITY, PURPOSE, REGISTRY_VERSION, MANIFEST_VERSION, EXPERIMENT_MANIFEST_KEYS, MANIFEST_DATASET_KEYS, UNIVERSE_KEYS, FEATURE_KEYS, SIGNAL_KEYS, CONDITION_KEYS, CANDIDATE_KEYS, LABEL_KEYS, OUTCOME_DEF_KEYS, SPLIT_KEYS, HOLDOUT_KEYS, BASELINE_KEYS, CONTROLS_KEYS, STABILITY_KEYS, NEIGHBOR_KEYS, CRITERIA_KEYS, ECONOMICS_KEYS, PROSPECTIVE_DESIGN_KEYS, REGISTRY_RECORD_KEYS, REGISTRY_SNAPSHOT_KEYS, REGISTRY_RECORD_KINDS, EVALUATION_TYPES, HYPOTHESIS_ORIGINS, DIRECTIONS, SPLIT_METHODS, CONDITION_OPS, FEATURE_SCOPES, FEATURE_KINDS, NORMALIZATIONS, VINTAGES, UNIVERSE_DEFINITIONS, LABEL_UNITS, LABEL_KNOWN_AT_RULES, BASELINE_KINDS, BLOCK_LENGTH_RULES, STABILITY_AXES, METRICS, METRIC_NAMES, CODE_IDENTITY_KEYS, VERDICTS } from './contracts.js';
 
 // ---- the experiment manifest validator ---------------------------------------------------------------------------
 const oneOf = (v, list) => list.includes(v);
@@ -125,20 +126,6 @@ function append(reg, kind, ts, experimentId, experimentFamilyId, payload) {
   r.digest = recordDigest(r);
   return deepFreeze({ registryVersion: REGISTRY_VERSION, records: [...reg.records, deepFreeze(r)] });
 }
-// chain verification: exact keys, contiguous seq, monotone ts, closed kinds, every prevDigest / digest recomputed
-export function registryError(reg) {
-  if (!isPlainObject(reg) || !Array.isArray(reg.records)) return finding('SCHEMA', 'registry');
-  if (reg.registryVersion !== REGISTRY_VERSION) return finding('UNSUPPORTED_REGISTRY_VERSION', 'this reader supports one registry version and never reinterprets another');
-  if (reg.records.length > LIMITS.maxRegistryRecords) return finding('REGISTRY_LIMIT_EXCEEDED');
-  let prev = canonicalDigest({ registryVersion: REGISTRY_VERSION, genesis: true }); let lastTs = 0;
-  for (let i = 0; i < reg.records.length; i += 1) {
-    const r = reg.records[i]; const e = exactKeys(r, REGISTRY_RECORD_KEYS); if (e) return finding('SCHEMA', `registry record ${i + 1}: ${e}`, i + 1);
-    if (r.seq !== i + 1 || !isTs(r.ts) || r.ts < lastTs || !REGISTRY_RECORD_KINDS.includes(r.kind) || !isId(r.experimentId) || !isId(r.experimentFamilyId) || !isPlainObject(r.payload)) return finding('REGISTRY_CHAIN_BROKEN', 'record shape', i + 1);
-    if (r.prevDigest !== prev || r.digest !== recordDigest(r)) return finding('REGISTRY_CHAIN_BROKEN', 'digest', i + 1);
-    prev = r.digest; lastTs = r.ts;
-  }
-  return replayError(reg.records); // the bytes are intact; now prove the history is lawful
-}
 export const registrySnapshot = (reg) => deepFreeze({ registryVersion: REGISTRY_VERSION, headSeq: reg.records.length, headDigest: headDigestOf(reg), records: reg.records });
 export function registryFromSnapshot(snap) {
   const e = exactKeys(snap, REGISTRY_SNAPSHOT_KEYS); if (e) return { registry: null, error: finding('SCHEMA', `registry snapshot: ${e}`) };
@@ -148,32 +135,98 @@ export function registryFromSnapshot(snap) {
   return { registry: deepFreeze(reg), error: null };
 }
 
-// ---- semantic replay: a hash chain proves nobody edited the bytes, NOT that a record was lawful ---------------------
-// Every entry path (append, snapshot, file reload) folds the records in order through this state machine and refuses a
-// history whose SEMANTICS are wrong, however well it is rehashed: an experiment scored twice, a prospective
-// observation without its opening, a decision recorded after it was supposedly made, an outcome known before its
-// horizon ended or after the clock that recorded it, a second formal look.
-export const replayState = () => ({ experiments: new Map(), lastTs: 0 });
-const expState = (st, id) => st.experiments.get(id) ?? null;
+// ---- ONE VALIDATED REPLAY: a hash chain proves nobody edited the bytes, NOT that a record was lawful ----------------
+// Every entry path — appendRecord, the exported mutators, registryFromSnapshot, readRegistryFile and every prospective
+// consumer — folds the records in order through THIS state machine. There is no weaker reload path and no trust cache:
+// a caller cannot hand in an unvalidated object and have it become trusted state. Validation happens first; state
+// advances only after a record has been accepted.
+//
+// What replay proves: each record's payload matches its closed shape, its identity and family bind to the registered
+// experiment, its transition is lawful, its clocks are ordered, and — for a prospective opening or terminal record —
+// the sealed design and the reported result REBUILD from the evidence the record itself carries. What it does not
+// prove: that a wholly fabricated but internally consistent history describes anything real.
+const HISTORICAL_RESULT_VERDICTS = Object.freeze(VERDICTS.filter((v) => !v.startsWith('PROSPECTIVE_')));
+const replayState = () => ({ experiments: new Map(), families: new Map(), lastTs: 0 });
+const familyOf = (st, id) => { if (!st.families.has(id)) st.families.set(id, { featureDigests: new Set(), members: [], holdouts: [], settled: 0 }); return st.families.get(id); };
+// the SAME deterministic family law the registry has always used, resolved from validated state instead of raw records
+function resolveFamilyFromState(st, manifest) {
+  const derived = derivedFamilyKeyOf(manifest);
+  if (manifest.parentExperimentId !== null) { const parent = st.experiments.get(manifest.parentExperimentId); if (!parent) return { error: finding('PARENT_UNKNOWN') }; return { familyId: parent.familyId, rule: 'INHERITED_FROM_PARENT', error: null }; }
+  const digests = new Set(manifest.features.map((f) => f.definitionDigest)); const sharing = new Set();
+  for (const [fid, fam] of st.families) if (fid !== derived) for (const d of digests) if (fam.featureDigests.has(d)) { sharing.add(fid); break; }
+  if (sharing.size > 1) return { error: finding('AMBIGUOUS_FAMILY', 'shared feature identity with more than one family: name the parent') };
+  if (sharing.size === 1) return { familyId: [...sharing][0], rule: 'SHARED_FEATURE_IDENTITY', error: null };
+  return { familyId: derived, rule: 'DERIVED_KEY', error: null };
+}
+const codeIdentityError = (ci) => {
+  if (exactKeys(ci, CODE_IDENTITY_KEYS)) return 'shape';
+  if (ci.gitCommit !== null && !/^[0-9a-f]{40}$/.test(ci.gitCommit)) return 'gitCommit';
+  if (!isHex64(ci.sourceTreeSha256) || !isCode(ci.law)) return 'digest / law';
+  return null;
+};
+// the first N CAPTURED observations joined with their outcomes — the sample every terminal claim must match
+function countedOf(pro) {
+  const ids = [...pro.captures.keys()].slice(0, pro.design.terminalObservations);
+  const rows = ids.map((id) => ({ capture: pro.captures.get(id), outcome: pro.outcomes.get(id) ?? null }));
+  return { ids, rows, complete: ids.length === pro.design.terminalObservations && rows.every((r) => r.outcome !== null) };
+}
 export function recordSemanticError(st, r, ordinal = null) {
   const bad = (reason, detail = null) => finding(reason, detail, ordinal);
-  const ex = expState(st, r.experimentId); const p = r.payload;
+  const p = r.payload; const ex = st.experiments.get(r.experimentId);
   if (r.ts < st.lastTs) return bad('REGISTRY_CLOCK_BACKWARDS');
+  // a proof-carrying record must fit the bound the reader and the writer share, BEFORE it can be accepted anywhere
+  if ((r.kind === 'PROSPECTIVE_OPENED' || r.kind === 'PROSPECTIVE_EVALUATED') && Buffer.byteLength(JSON.stringify(p ?? null), 'utf8') > LIMITS.maxRecordBytes) return bad('RESOURCE_LIMIT_EXCEEDED', 'record payload');
   if (r.kind === 'EXPERIMENT_REGISTERED') {
     if (ex) return bad('ALREADY_REGISTERED');
-    if (!isPlainObject(p.manifest) || !isHex64(p.manifestDigest) || !isHex64(p.featureDigest) || !isCount(p.candidateCount)) return bad('SCHEMA', 'registration payload');
+    const e = exactKeys(p, REGISTERED_PAYLOAD_KEYS); if (e) return bad('SCHEMA', `registration payload: ${e}`);
+    const me = experimentManifestError(p.manifest); if (me) return finding(me.reason, `manifest: ${me.detail ?? ''}`.trim(), ordinal);
     if (canonicalDigest(p.manifest) !== p.manifestDigest || experimentIdOf(p.manifest) !== r.experimentId) return bad('CHECKSUM_MISMATCH', 'registration identity');
+    if (featureDigestOf(p.manifest) !== p.featureDigest || p.candidateCount !== p.manifest.candidates.length) return bad('CHECKSUM_MISMATCH', 'registration feature / candidate identity');
+    const ce = codeIdentityError(p.codeIdentity); if (ce) return bad('CODE_IDENTITY_INVALID', ce);
+    if (!FAMILY_RULES.includes(p.familyRule)) return bad('FAMILY_RULE_INVALID');
+    const fam = resolveFamilyFromState(st, p.manifest); if (fam.error) return finding(fam.error.reason, fam.error.detail, ordinal);
+    if (fam.familyId !== r.experimentFamilyId || fam.rule !== p.familyRule) return bad('EXPERIMENT_FAMILY_MISMATCH', 'the record does not carry the family the deterministic rules resolve');
+    const f = familyOf(st, fam.familyId);
+    if (p.manifest.parentExperimentId === null && f.settled > 0) return bad('FORK_REQUIRES_PARENT', 'the family already carries a result: a new member must name its parent');
+    if (f.members.length >= LIMITS.maxFamilyMembers) return bad('REGISTRY_LIMIT_EXCEEDED', 'family');
     return null;
   }
   if (!ex) return bad('EXPERIMENT_NOT_REGISTERED');
+  if (r.experimentFamilyId !== ex.familyId) return bad('EXPERIMENT_FAMILY_MISMATCH');
   switch (r.kind) {
-    case 'RESULT_RECORDED': return ex.status === 'REGISTERED' ? null : bad(ex.status === 'EVALUATED' ? 'RESULT_ALREADY_RECORDED' : 'STATUS_TRANSITION_REFUSED', ex.status);
-    case 'EXPERIMENT_ABANDONED': return ex.status === 'REGISTERED' ? null : bad('STATUS_TRANSITION_REFUSED', ex.status);
-    case 'HOLDOUT_OPENED': return isTs(p.startTs) && isTs(p.endTs) && p.startTs < p.endTs ? null : bad('SCHEMA', 'holdout window');
+    case 'RESULT_RECORDED': {
+      if (ex.status !== 'REGISTERED') return bad(ex.status === 'EVALUATED' ? 'RESULT_ALREADY_RECORDED' : 'STATUS_TRANSITION_REFUSED', ex.status);
+      const e = exactKeys(p, RESULT_PAYLOAD_KEYS); if (e) return bad('SCHEMA', `result payload: ${e}`);
+      if (!isHex64(p.reportDigest) || !isHex64(p.datasetDigest)) return bad('SCHEMA', 'result digests');
+      if (!HISTORICAL_RESULT_VERDICTS.includes(p.verdict) || carriesForbiddenToken(p.verdict)) return bad('UNKNOWN_VOCABULARY', 'result verdict');
+      if (!isPlainObject(p.primaryMetric) || exactKeys(p.primaryMetric, ['name', 'value']) || !isCode(p.primaryMetric.name) || !(p.primaryMetric.value === null || isFiniteNum(p.primaryMetric.value))) return bad('SCHEMA', 'result primary metric');
+      if (!Array.isArray(p.sharpes) || p.sharpes.length > LIMITS.maxCandidates || !p.sharpes.every(isFiniteNum)) return bad('SCHEMA', 'result sharpes');
+      return null;
+    }
+    case 'EXPERIMENT_ABANDONED': {
+      if (ex.status !== 'REGISTERED') return bad('STATUS_TRANSITION_REFUSED', ex.status);
+      const e = exactKeys(p, ABANDON_PAYLOAD_KEYS); if (e) return bad('SCHEMA', `abandon payload: ${e}`);
+      return isCode(p.reasonCode) ? null : bad('SCHEMA', 'reasonCode');
+    }
+    case 'HOLDOUT_OPENED': {
+      const e = exactKeys(p, HOLDOUT_PAYLOAD_KEYS); if (e) return bad('SCHEMA', `holdout payload: ${e}`);
+      if (!isTs(p.startTs) || !isTs(p.endTs) || !(p.startTs < p.endTs)) return bad('SCHEMA', 'holdout window');
+      if (p.openedBy !== r.experimentId) return bad('SCHEMA', 'holdout openedBy');
+      if (familyOf(st, ex.familyId).holdouts.some((w) => w.startTs < p.endTs && p.startTs < w.endTs)) return bad('HOLDOUT_ALREADY_OPENED');
+      return null;
+    }
     case 'PROSPECTIVE_OPENED': {
       if (ex.prospective) return bad('PROSPECTIVE_ALREADY_OPENED');
       if (ex.status !== 'EVALUATED') return bad('STATUS_TRANSITION_REFUSED', ex.status);
-      if (!isPlainObject(p.design) || !isHex64(p.designDigest) || canonicalDigest(p.design) !== p.designDigest) return bad('CHECKSUM_MISMATCH', 'sealed design');
+      if (!ex.manifest.prospective) return bad('SCHEMA', 'the manifest declares no prospective design');
+      const e = exactKeys(p, PROSPECTIVE_OPENED_KEYS); if (e) return bad('SCHEMA', `opening payload: ${e}`);
+      if (p.authority !== AUTHORITY || p.purpose !== PURPOSE || p.researchOnly !== true || p.canAffectTrading !== false || p.canAffectEligibility !== false || p.canAffectSizing !== false || p.canAffectExecution !== false) return bad('SCHEMA', 'opening research stamp');
+      if (!isPlainObject(p.historicalReport)) return bad('HISTORICAL_REPORT_MISSING');
+      if (!isHex64(p.historicalReportDigest) || p.historicalReportDigest !== p.historicalReport.reportDigest) return bad('CHECKSUM_MISMATCH', 'the opening names a report it does not carry');
+      const he = historicalReportError(p.historicalReport, { experimentId: r.experimentId, experimentFamilyId: ex.familyId, manifest: ex.manifest, manifestDigest: ex.manifestDigest, featureDigest: ex.featureDigest, resultPayload: ex.result, registeredAtTs: ex.registeredAtTs, openedAtTs: r.ts });
+      if (he) return finding(he.reason, he.detail, ordinal);
+      const de = designError(p.design, p.designDigest, ex.manifest, p.historicalReport);
+      if (de) return finding(de.reason, de.detail, ordinal);
       return null;
     }
     case 'PROSPECTIVE_OBSERVATION': {
@@ -182,8 +235,9 @@ export function recordSemanticError(st, r, ordinal = null) {
       const e = exactKeys(p, PROSPECTIVE_CAPTURE_KEYS); if (e) return bad('SCHEMA', e);
       if (!isId(p.observationId) || !isCoin(p.symbol) || !isTs(p.ts) || !isTs(p.labelEndTs) || !(p.score === null || isFiniteNum(p.score)) || !Number.isInteger(p.position)) return bad('SCHEMA', 'capture');
       if (p.designDigest !== d.designDigest) return bad('PROSPECTIVE_DESIGN_CHANGED');
-      if (!CAPTURE_EVIDENCE_KINDS.includes(p.captureEvidence)) return bad('UNKNOWN_VOCABULARY', 'captureEvidence');
+      if (!CAPTURE_EVIDENCE_KINDS.includes(p.captureEvidence) || p.captureEvidence !== d.design.captureEvidenceRequired) return bad('UNKNOWN_VOCABULARY', 'captureEvidence');
       if (d.captures.has(p.observationId)) return bad('DUPLICATE_OBSERVATION_ID');
+      if (d.captures.size >= LIMITS.maxProspectiveObservations) return bad('REGISTRY_LIMIT_EXCEEDED');
       if (!d.design.symbolScope.includes(p.symbol)) return bad('SYMBOL_OUTSIDE_SCOPE');
       if (p.ts < d.openedAtTs) return bad('EVALUATION_BEFORE_REGISTRATION', 'decided before the design was sealed');
       if (p.ts > r.ts) return bad('DECISION_AFTER_RECORDING');
@@ -207,37 +261,59 @@ export function recordSemanticError(st, r, ordinal = null) {
     case 'PROSPECTIVE_EVALUATED': {
       const d = ex.prospective; if (!d) return bad('PROSPECTIVE_NOT_OPENED');
       if (ex.evaluated) return bad('PROSPECTIVE_ALREADY_EVALUATED');
-      const counted = [...d.captures.values()].slice(0, d.design.terminalObservations);
-      if (counted.length < d.design.terminalObservations || counted.some((c) => !d.outcomes.has(c.observationId))) return bad('TERMINAL_SAMPLE_NOT_REACHED');
+      const e = exactKeys(p, PROSPECTIVE_EVALUATED_KEYS); if (e) return bad('SCHEMA', `terminal payload: ${e}`);
+      if (!isHex64(p.reportDigest) || !isHex64(p.designDigest)) return bad('SCHEMA', 'terminal digests');
+      if (!isPlainObject(p.report)) return bad('TERMINAL_REPORT_MISSING');
+      const counted = countedOf(d);
+      if (!counted.complete) return bad('TERMINAL_SAMPLE_NOT_REACHED');
+      const positioned = counted.rows.filter((x) => x.capture.position === 1).length;
+      const latestKnown = Math.max(...counted.rows.map((x) => x.outcome.outcomeKnownAtTs), ...counted.rows.map((x) => d.recordedAt.get(x.capture.observationId)));
+      const te = terminalReportError(p.report, { experimentId: r.experimentId, experimentFamilyId: ex.familyId, design: d.design, designDigest: d.designDigest, payload: p, recordTs: r.ts, countedIds: counted.ids, positioned, latestKnownTs: latestKnown });
+      if (te) return finding(te.reason, te.detail, ordinal);
       return null;
     }
     default: return bad('UNKNOWN_VOCABULARY', 'record kind');
   }
 }
-export function advanceState(st, r) {
+function advanceState(st, r) {
   const p = r.payload;
-  if (r.kind === 'EXPERIMENT_REGISTERED') { st.experiments.set(r.experimentId, { status: 'REGISTERED', prospective: null, evaluated: false }); }
-  else {
-    const ex = st.experiments.get(r.experimentId);
-    if (ex) {
-      if (r.kind === 'RESULT_RECORDED') ex.status = 'EVALUATED';
-      else if (r.kind === 'EXPERIMENT_ABANDONED') ex.status = 'ABANDONED';
-      else if (r.kind === 'PROSPECTIVE_OPENED') { ex.status = 'PROSPECTIVE_PENDING'; ex.prospective = { design: p.design, designDigest: p.designDigest, openedAtTs: r.ts, captures: new Map(), outcomes: new Map() }; }
-      else if (r.kind === 'PROSPECTIVE_OBSERVATION') ex.prospective.captures.set(p.observationId, p);
-      else if (r.kind === 'PROSPECTIVE_OUTCOME') ex.prospective.outcomes.set(p.observationId, p);
-      else if (r.kind === 'PROSPECTIVE_EVALUATED') { ex.status = 'PROSPECTIVE_EVALUATED'; ex.evaluated = true; }
-    }
+  if (r.kind === 'EXPERIMENT_REGISTERED') {
+    st.experiments.set(r.experimentId, { familyId: r.experimentFamilyId, registeredAtTs: r.ts, manifest: p.manifest, manifestDigest: p.manifestDigest, featureDigest: p.featureDigest, status: 'REGISTERED', result: null, prospective: null, evaluated: false });
+    const f = familyOf(st, r.experimentFamilyId); f.members.push(r.experimentId); for (const d of p.manifest.features.map((x) => x.definitionDigest)) f.featureDigests.add(d);
+  } else {
+    const ex = st.experiments.get(r.experimentId); const f = familyOf(st, ex.familyId);
+    if (r.kind === 'RESULT_RECORDED') { ex.status = 'EVALUATED'; ex.result = p; f.settled += 1; }
+    else if (r.kind === 'EXPERIMENT_ABANDONED') { ex.status = 'ABANDONED'; f.settled += 1; }
+    else if (r.kind === 'HOLDOUT_OPENED') f.holdouts.push({ startTs: p.startTs, endTs: p.endTs });
+    else if (r.kind === 'PROSPECTIVE_OPENED') { ex.status = 'PROSPECTIVE_PENDING'; ex.prospective = { design: p.design, designDigest: p.designDigest, openedAtTs: r.ts, captures: new Map(), outcomes: new Map(), recordedAt: new Map() }; }
+    else if (r.kind === 'PROSPECTIVE_OBSERVATION') { ex.prospective.captures.set(p.observationId, p); ex.prospective.recordedAt.set(p.observationId, r.ts); }
+    else if (r.kind === 'PROSPECTIVE_OUTCOME') ex.prospective.outcomes.set(p.observationId, p);
+    else if (r.kind === 'PROSPECTIVE_EVALUATED') { ex.status = 'PROSPECTIVE_EVALUATED'; ex.evaluated = true; }
   }
   st.lastTs = r.ts;
 }
-// the fold over a whole registry, used by every reader
-export function replayError(records) {
-  const st = replayState();
-  for (let i = 0; i < records.length; i += 1) { const e = recordSemanticError(st, records[i], i + 1); if (e) return e; advanceState(st, records[i]); }
+// the ONE fold: outer shape and hash chain, then semantics, record by record
+export function registryError(reg) {
+  if (!isPlainObject(reg) || !Array.isArray(reg.records)) return finding('SCHEMA', 'registry');
+  if (reg.registryVersion !== REGISTRY_VERSION) return finding('UNSUPPORTED_REGISTRY_VERSION', 'this reader supports one registry version and never reinterprets or relabels another');
+  if (reg.records.length > LIMITS.maxRegistryRecords) return finding('REGISTRY_LIMIT_EXCEEDED');
+  let prev = canonicalDigest({ registryVersion: REGISTRY_VERSION, genesis: true }); const st = replayState();
+  for (let i = 0; i < reg.records.length; i += 1) {
+    const r = reg.records[i]; const e = exactKeys(r, REGISTRY_RECORD_KEYS); if (e) return finding('SCHEMA', `registry record ${i + 1}: ${e}`, i + 1);
+    if (r.seq !== i + 1 || !isTs(r.ts) || !REGISTRY_RECORD_KINDS.includes(r.kind) || !isId(r.experimentId) || !isId(r.experimentFamilyId) || !isPlainObject(r.payload)) return finding('REGISTRY_CHAIN_BROKEN', 'record shape', i + 1);
+    if (r.prevDigest !== prev || r.digest !== recordDigest(r)) return finding('REGISTRY_CHAIN_BROKEN', 'digest', i + 1);
+    const se = recordSemanticError(st, r, i + 1); if (se) return se;
+    advanceState(st, r); prev = r.digest;
+  }
   return null;
 }
-// the state a single candidate record will be validated against (one pass over the stored records)
-export function stateOf(reg) { const st = replayState(); for (const r of reg.records) advanceState(st, r); return st; }
+// THE ONLY way to obtain trusted state: validate, then fold. There is no cache keyed on object identity, no
+// caller-supplied digest and no "already validated" flag.
+export function validatedState(reg) {
+  const err = registryError(reg); if (err) return { state: null, error: err };
+  const st = replayState(); for (const r of reg.records) advanceState(st, r);
+  return { state: st, error: null };
+}
 
 // ---- queries --------------------------------------------------------------------------------------------------------
 export function experimentOf(reg, experimentId) {
@@ -266,54 +342,52 @@ export function trialHistory(reg, experimentId) {
   return { experimentFamilyId: ex.experimentFamilyId, rawTrialCount, memberCount: members.length, members: members.map((m) => ({ experimentId: m.experimentId, status: m.status, candidateCount: m.candidateCount, registeredAtTs: m.registeredAtTs, hypothesisOrigin: m.manifest.hypothesisOrigin, parentExperimentId: m.manifest.parentExperimentId })), recordedSharpes: sharpes, holdoutWindows: holdoutWindows(reg, ex.experimentFamilyId) };
 }
 
-// ---- mutations (each returns a NEW registry) -------------------------------------------------------------------------
+// ---- mutations: every one validates its incoming registry, then proves its own record under the SAME replay law ------
+// A mutator never trusts the registry it is handed. It validates, folds, builds the candidate record and runs the
+// identical record validator a reload would run. A refused call returns the caller's registry unchanged.
+function propose(reg, { kind, ts, experimentId, experimentFamilyId, payload }) {
+  const v = validatedState(reg); if (v.error) return { registry: reg, error: v.error };
+  if (!isTs(ts)) return { registry: reg, error: finding('SCHEMA', 'record clock') };
+  if (reg.records.length >= LIMITS.maxRegistryRecords) return { registry: reg, error: finding('REGISTRY_LIMIT_EXCEEDED') };
+  const candidate = { seq: reg.records.length + 1, kind, ts, experimentId, experimentFamilyId, payload };
+  const err = recordSemanticError(v.state, candidate, candidate.seq); if (err) return { registry: reg, error: err };
+  return { registry: append(reg, kind, ts, experimentId, experimentFamilyId, payload), error: null };
+}
 export function resolveFamily(reg, manifest) {
-  const derived = derivedFamilyKeyOf(manifest);
-  if (manifest.parentExperimentId !== null) { const parent = experimentOf(reg, manifest.parentExperimentId); if (!parent) return { error: finding('PARENT_UNKNOWN') }; return { familyId: parent.experimentFamilyId, rule: 'INHERITED_FROM_PARENT', error: null }; }
-  const digests = new Set(manifest.features.map((f) => f.definitionDigest)); const sharing = new Set();
-  for (const r of reg.records) if (r.kind === 'EXPERIMENT_REGISTERED' && r.experimentFamilyId !== derived && r.payload.manifest.features.some((f) => digests.has(f.definitionDigest))) sharing.add(r.experimentFamilyId);
-  if (sharing.size > 1) return { error: finding('AMBIGUOUS_FAMILY', 'shared feature identity with more than one family: name the parent') };
-  if (sharing.size === 1) return { familyId: [...sharing][0], rule: 'SHARED_FEATURE_IDENTITY', error: null };
-  return { familyId: derived, rule: 'DERIVED_KEY', error: null };
+  const v = validatedState(reg); if (v.error) return { error: v.error };
+  return resolveFamilyFromState(v.state, manifest);
 }
 export function registerExperiment(reg, manifest, { registeredAtTs, codeIdentity }) {
-  const err = experimentManifestError(manifest); if (err) return { registry: reg, error: err, experimentId: null, experimentFamilyId: null };
-  const ci = exactKeys(codeIdentity, CODE_IDENTITY_KEYS); if (ci || (codeIdentity.gitCommit !== null && !/^[0-9a-f]{40}$/.test(codeIdentity.gitCommit)) || !isHex64(codeIdentity.sourceTreeSha256) || !isCode(codeIdentity.law)) return { registry: reg, error: finding('SCHEMA', 'codeIdentity'), experimentId: null, experimentFamilyId: null };
+  const me = experimentManifestError(manifest); if (me) return { registry: reg, error: me, experimentId: null, experimentFamilyId: null };
+  const v = validatedState(reg); if (v.error) return { registry: reg, error: v.error, experimentId: null, experimentFamilyId: null };
   const experimentId = experimentIdOf(manifest);
-  if (experimentOf(reg, experimentId)) return { registry: reg, error: finding('ALREADY_REGISTERED'), experimentId, experimentFamilyId: null };
-  const fam = resolveFamily(reg, manifest); if (fam.error) return { registry: reg, error: fam.error, experimentId, experimentFamilyId: null };
-  if (manifest.parentExperimentId === null && familyMembers(reg, fam.familyId).some((m) => m.status !== 'REGISTERED')) return { registry: reg, error: finding('FORK_REQUIRES_PARENT', 'the family already carries a result: a new member must name its parent'), experimentId, experimentFamilyId: fam.familyId };
-  if (familyMembers(reg, fam.familyId).length >= LIMITS.maxFamilyMembers) return { registry: reg, error: finding('REGISTRY_LIMIT_EXCEEDED', 'family'), experimentId, experimentFamilyId: fam.familyId };
-  const payload = { manifest, manifestDigest: canonicalDigest(manifest), featureDigest: featureDigestOf(manifest), candidateCount: manifest.candidates.length, codeIdentity: { gitCommit: codeIdentity.gitCommit, sourceTreeSha256: codeIdentity.sourceTreeSha256, law: codeIdentity.law }, familyRule: fam.rule };
-  return { registry: append(reg, 'EXPERIMENT_REGISTERED', registeredAtTs, experimentId, fam.familyId, payload), error: null, experimentId, experimentFamilyId: fam.familyId };
+  const fam = resolveFamilyFromState(v.state, manifest); if (fam.error) return { registry: reg, error: fam.error, experimentId, experimentFamilyId: null };
+  const payload = { manifest, manifestDigest: canonicalDigest(manifest), featureDigest: featureDigestOf(manifest), candidateCount: manifest.candidates.length, codeIdentity: isPlainObject(codeIdentity) ? { gitCommit: codeIdentity.gitCommit ?? null, sourceTreeSha256: codeIdentity.sourceTreeSha256, law: codeIdentity.law } : codeIdentity, familyRule: fam.rule };
+  const r = propose(reg, { kind: 'EXPERIMENT_REGISTERED', ts: registeredAtTs, experimentId, experimentFamilyId: fam.familyId, payload });
+  return { registry: r.registry, error: r.error, experimentId, experimentFamilyId: r.error ? null : fam.familyId };
 }
 // ONE result per experiment, ever
 export function recordResult(reg, { experimentId, reportDigest, verdict, primaryMetric, sharpes, datasetDigest, recordedAtTs }) {
-  const ex = experimentOf(reg, experimentId); if (!ex) return { registry: reg, error: finding('EXPERIMENT_NOT_REGISTERED') };
-  if (ex.status !== 'REGISTERED') return { registry: reg, error: finding(ex.status === 'EVALUATED' ? 'RESULT_ALREADY_RECORDED' : 'STATUS_TRANSITION_REFUSED', ex.status) };
-  if (!isHex64(reportDigest) || !VERDICTS.includes(verdict) || !isPlainObject(primaryMetric) || !isCode(primaryMetric.name) || !(primaryMetric.value === null || isFiniteNum(primaryMetric.value)) || !Array.isArray(sharpes) || sharpes.length > LIMITS.maxCandidates || !sharpes.every(isFiniteNum) || !isHex64(datasetDigest)) return { registry: reg, error: finding('SCHEMA', 'result') };
-  if (carriesForbiddenToken(verdict)) return { registry: reg, error: finding('UNKNOWN_VOCABULARY', 'verdict') };
-  return { registry: append(reg, 'RESULT_RECORDED', recordedAtTs, experimentId, ex.experimentFamilyId, { reportDigest, verdict, primaryMetric: { name: primaryMetric.name, value: primaryMetric.value }, sharpes: sharpes.slice(), datasetDigest }), error: null };
+  const v = validatedState(reg); if (v.error) return { registry: reg, error: v.error };
+  const ex = v.state.experiments.get(experimentId); if (!ex) return { registry: reg, error: finding('EXPERIMENT_NOT_REGISTERED') };
+  const payload = { reportDigest, verdict, primaryMetric: isPlainObject(primaryMetric) ? { name: primaryMetric.name, value: primaryMetric.value } : primaryMetric, sharpes: Array.isArray(sharpes) ? sharpes.slice() : sharpes, datasetDigest };
+  return propose(reg, { kind: 'RESULT_RECORDED', ts: recordedAtTs, experimentId, experimentFamilyId: ex.familyId, payload });
 }
 export function abandonExperiment(reg, { experimentId, reasonCode, ts }) {
-  const ex = experimentOf(reg, experimentId); if (!ex) return { registry: reg, error: finding('EXPERIMENT_NOT_REGISTERED') };
-  if (ex.status !== 'REGISTERED') return { registry: reg, error: finding('STATUS_TRANSITION_REFUSED', ex.status) };
-  if (!isCode(reasonCode)) return { registry: reg, error: finding('SCHEMA', 'reasonCode') };
-  return { registry: append(reg, 'EXPERIMENT_ABANDONED', ts, experimentId, ex.experimentFamilyId, { reasonCode }), error: null };
+  const v = validatedState(reg); if (v.error) return { registry: reg, error: v.error };
+  const ex = v.state.experiments.get(experimentId); if (!ex) return { registry: reg, error: finding('EXPERIMENT_NOT_REGISTERED') };
+  return propose(reg, { kind: 'EXPERIMENT_ABANDONED', ts, experimentId, experimentFamilyId: ex.familyId, payload: { reasonCode } });
 }
 // opening a family's untouched holdout is recorded PERMANENTLY; a second opening of an overlapping window is refused
 export function openHoldout(reg, { experimentId, startTs, endTs, ts }) {
-  const ex = experimentOf(reg, experimentId); if (!ex) return { registry: reg, error: finding('EXPERIMENT_NOT_REGISTERED') };
-  if (!isTs(startTs) || !isTs(endTs) || !(startTs < endTs)) return { registry: reg, error: finding('SCHEMA', 'holdout window') };
-  if (holdoutWindows(reg, ex.experimentFamilyId).some((w) => w.startTs < endTs && startTs < w.endTs)) return { registry: reg, error: finding('HOLDOUT_ALREADY_OPENED') };
-  return { registry: append(reg, 'HOLDOUT_OPENED', ts, experimentId, ex.experimentFamilyId, { startTs, endTs, openedBy: experimentId }), error: null };
+  const v = validatedState(reg); if (v.error) return { registry: reg, error: v.error };
+  const ex = v.state.experiments.get(experimentId); if (!ex) return { registry: reg, error: finding('EXPERIMENT_NOT_REGISTERED') };
+  return propose(reg, { kind: 'HOLDOUT_OPENED', ts, experimentId, experimentFamilyId: ex.familyId, payload: { startTs, endTs, openedBy: experimentId } });
 }
-// generic appenders used by the prospective shadow (validated there)
+// the generic prospective appender used by prospective.js; it enforces exactly what a reload enforces
 export function appendRecord(reg, { kind, ts, experimentId, payload }) {
-  const ex = experimentOf(reg, experimentId); if (!ex) return { registry: reg, error: finding('EXPERIMENT_NOT_REGISTERED') };
-  if (!['PROSPECTIVE_OPENED', 'PROSPECTIVE_OBSERVATION', 'PROSPECTIVE_OUTCOME', 'PROSPECTIVE_EVALUATED'].includes(kind) || !isPlainObject(payload) || !isTs(ts)) return { registry: reg, error: finding('SCHEMA', 'record') };
-  // THE SAME LAW AS RELOAD: the candidate record is replayed against the stored state before it can be appended
-  const candidate = { seq: reg.records.length + 1, kind, ts, experimentId, experimentFamilyId: ex.experimentFamilyId, payload };
-  const err = recordSemanticError(stateOf(reg), candidate, candidate.seq); if (err) return { registry: reg, error: err };
-  return { registry: append(reg, kind, ts, experimentId, ex.experimentFamilyId, payload), error: null };
+  if (!['PROSPECTIVE_OPENED', 'PROSPECTIVE_OBSERVATION', 'PROSPECTIVE_OUTCOME', 'PROSPECTIVE_EVALUATED'].includes(kind) || !isPlainObject(payload)) return { registry: reg, error: finding('SCHEMA', 'record') };
+  const v = validatedState(reg); if (v.error) return { registry: reg, error: v.error };
+  const ex = v.state.experiments.get(experimentId); if (!ex) return { registry: reg, error: finding('EXPERIMENT_NOT_REGISTERED') };
+  return propose(reg, { kind, ts, experimentId, experimentFamilyId: ex.familyId, payload });
 }
