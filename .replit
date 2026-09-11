@@ -18,6 +18,11 @@ deploymentTarget = "vm"
 
 [userenv]
 
+[userenv.shared]
+COBRA_DATA_DIR = "./data"
+COBRA_PROFILE = "config/paper-runtime.json"
+PORT = "3000"
+
 # [userenv.shared] removed: provider keys must live in Replit Secrets (host private config), never in this tracked file.
 # Optional sources only (CoinGecko demo, FRED). Set them as Secrets if wanted; absent, those senses report their
 # own blocked/config-required state and core paper readiness is unaffected.
