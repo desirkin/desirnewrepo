@@ -6,7 +6,9 @@
 // timestamp is the period start and periodEndTs = bucketTs + interval; a bucket whose end lies after receipt is
 // PROVISIONAL (in progress), never FINAL; knownAtTs = receivedTs for EVERY vintage — a HISTORICAL_FETCH is known when it
 // was fetched, never at the bucket's own time; pagination follows result.more with an advancing cursor and fails closed
-// on a non-advancing page; a page cap yields PAGINATION_INCOMPLETE; units are NATIVE with UNIT_UNVERIFIED because the
+// on a non-advancing page; a page cap yields PAGINATION_INCOMPLETE; W13: every partial acquisition (page cap, non-advancing
+// cursor, a later page failing after good rows, misaligned buckets skipped) is EXPLICIT coverage truth — retained rows stay
+// available, the coverage record names the reason and meta.acquisition says PARTIAL, never COMPLETE; units are NATIVE with UNIT_UNVERIFIED because the
 // Charts documentation states none (never inferred from magnitude, never converted without a contract specification).
 // Authority: NONE. Nothing here is a signal; manipulation risk is documentation.
 import { createClientBase, num, int, bool, arr, obj } from './base.js';
@@ -100,11 +102,12 @@ export function createKrakenChartsClient({ transport, clock, log, resolveInstrum
       if (pages >= maxPages) break;
       cursorTs = next;
     }
-    const reasonCodes = []; if (failure) reasonCodes.push(failure.reasonCode ?? 'PROVIDER_ERROR'); if (nonAdvancing || (more && pages >= maxPages)) reasonCodes.push('PAGINATION_INCOMPLETE');
+    const reasonCodes = []; if (failure) reasonCodes.push(failure.reasonCode ?? 'PROVIDER_ERROR'); if (failure && observations.length) reasonCodes.push('ACQUISITION_INCOMPLETE'); if (nonAdvancing || (more && pages >= maxPages)) reasonCodes.push('PAGINATION_INCOMPLETE'); if (misaligned > 0) reasonCodes.push('MISALIGNED_BUCKET');
     const first = observations[0]; const lastOb = observations[observations.length - 1];
     const state = observations.length ? 'OBSERVED' : failure ? failure.coverageState : 'GAP';
+    const acquisition = !failure && !nonAdvancing && !(more && pages >= maxPages) && misaligned === 0 ? 'COMPLETE' : 'PARTIAL';
     const coverage = base.coverage({ endpointId: CHARTS_ENDPOINT_ID, subject: res.subject, family: 'DERIVATIVES_PRESSURE', kind: 'DERIVATIVE_ANALYTIC_BUCKET', state, reasonCodes: [...new Set(reasonCodes.filter((c) => c !== 'NONE'))], startTs: first ? first.periodStartTs : startTs, endTs: lastOb ? lastOb.periodEndTs : (lastReceipt ?? base.clock()), observationCount: observations.length });
-    return { ok: !failure || observations.length > 0, failure, observations, coverage: [coverage], meta: { pages, more, truncated: more && pages >= maxPages, nonAdvancing, misaligned, requestIds, vintage, firstReceiptTs: firstReceipt, lastReceiptTs: lastReceipt, dailyCalls: daily.calls } };
+    return { ok: !failure || observations.length > 0, failure, observations, coverage: [coverage], meta: { pages, more, truncated: more && pages >= maxPages, nonAdvancing, misaligned, acquisition, requestIds, vintage, firstReceiptTs: firstReceipt, lastReceiptTs: lastReceipt, dailyCalls: daily.calls } };
   }
   // the forward poll: the last FORWARD_CAPTURE_BUCKETS buckets up to now, vintage LIVE_FORWARD_CAPTURE
   const pollForward = ({ symbol, analyticsType, intervalS, signal = null }) => fetchAnalytics({ symbol, analyticsType, intervalS, sinceTs: Math.floor(base.clock() / (intervalS * 1000)) * intervalS * 1000 - (FORWARD_CAPTURE_BUCKETS - 1) * intervalS * 1000, vintage: 'LIVE_FORWARD_CAPTURE', maxPages: 1, signal });

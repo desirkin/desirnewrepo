@@ -2,4 +2,7 @@
 // MARKET_RESEARCH_ROOT by environment variable NAME, else <data dir>/market-research. Never a repository path.
 import path from 'node:path';
 export const marketResearchRootFromEnv = (env, dataDirPath) => (typeof env.MARKET_RESEARCH_ROOT === 'string' && env.MARKET_RESEARCH_ROOT.length ? env.MARKET_RESEARCH_ROOT : path.join(dataDirPath, 'market-research'));
+// the dark research capture runs beside the research owner in ONE process; each root owns its provider quota journal
+// (single-owner law), so the dark families capture under a SIBLING root that Socrates / the owner never read
+export const darkResearchRootOf = (researchRoot) => `${researchRoot}-dark`;
 export const CASE_DIR_NAME_RE = /^case-[0-9a-f]{40}-\d{13}$/;

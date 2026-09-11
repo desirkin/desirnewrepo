@@ -419,6 +419,18 @@
   #judge .jrow { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid #1b2739; font-size: 10.5px; }
   #judge .jrow .k { color: var(--dim); letter-spacing: .12em; font-size: 9px; }
   #btnJudge { color: #9fb7d9; border: 1px solid #2f4360; } /* read-only explanation of the Judge / Watch journal; never an order button */
+  /* SERPENT PAPER senses drawer: the same sheet as JUDGE; state colour is EARNED by a fresh status record, never by a module existing */
+  #senses { position: fixed; left: 50%; bottom: -110%; transform: translateX(-50%); width: min(94vw, 430px); z-index: 70; max-height: 80vh; max-height: 84dvh; display: flex; flex-direction: column; padding: 0; background: rgba(7, 12, 24, .94); border: 1px solid #29394f; border-radius: 16px 16px 0 0; transition: bottom .35s cubic-bezier(.3,.9,.3,1); backdrop-filter: blur(10px); }
+  #senses.open { bottom: 0; }
+  #senses .dhead h2 { color: #8fd3b0; font-size: 13px; letter-spacing: .34em; }
+  #senses .rmeta { font-size: 9.5px; letter-spacing: .06em; color: var(--dim); margin: 6px 0; line-height: 1.5; }
+  #senses .srow { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid #1b2739; font-size: 10.5px; }
+  #senses .srow .k { color: var(--ink); letter-spacing: .06em; font-size: 10px; }
+  #senses .srow .d { color: var(--dim); font-size: 9px; display: block; letter-spacing: .04em; }
+  #senses .st { font-size: 9px; letter-spacing: .12em; white-space: nowrap; text-align: right; }
+  #senses .st.on { color: #4fd598; } #senses .st.deg { color: #e0b45a; } #senses .st.blk { color: #ff7a6b; } #senses .st.off { color: var(--dim); }
+  #senses .auth { font-size: 10px; letter-spacing: .18em; padding: 8px 10px; border-radius: 10px; margin: 6px 0; text-align: center; color: #0b1220; background: #8fd3b0; }
+  #btnSenses { color: #8fd3b0; border: 1px solid #2f5a48; } /* read-only: what is actually ON; never a control */
   #research .dhead h2 { color: #c9b27f; font-size: 13px; letter-spacing: .34em; }
   #research .rrow { display: flex; justify-content: space-between; gap: 8px; padding: 7px 0; border-bottom: 1px solid #1b2739; font-size: 11px; cursor: pointer; }
   #research .rrow .k { color: var(--dim); letter-spacing: .12em; font-size: 9px; }
@@ -573,6 +585,7 @@
   <button id="btnClear" hidden><span>CLEAR</span></button>
   <button id="btnLedger"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4.5" y="3.5" width="15" height="17" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect><path d="M8.5 8 H15.5 M8.5 12 H15.5 M8.5 16 H13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg><span>LEDGER</span></button>
   <button id="btnJudge" aria-label="judge / watch — read-only explanation of the execution journal"><span>JUDGE</span></button>
+  <button id="btnSenses" aria-label="senses — read-only sensor and readiness panel"><span>SENSES</span></button>
   <button id="btnResearch" aria-label="market research — read-only reports"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M15.5 15.5 L20 20" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg><span>RESEARCH</span></button>
 </div>
 
@@ -621,6 +634,17 @@
     </button>
   </div>
   <div id="judgeBody" class="dbody"></div>
+</div>
+<div id="senses" role="dialog" aria-modal="true" aria-label="Senses">
+  <div class="dhead">
+    <div class="dtitle"><span class="kicker">SENSES · READINESS · READ ONLY</span><h2>SENSES</h2></div>
+    <button type="button" id="sensesClose" class="dclose" aria-label="Close">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path d="M6 6 L18 18 M18 6 L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path>
+      </svg>
+    </button>
+  </div>
+  <div id="sensesBody" class="dbody"></div>
 </div>
 <div id="demobadge" title="Tap to exit demo">DEMO</div>
 
@@ -1423,6 +1447,19 @@ function renderJudge(d) {
 }
 async function refreshJudge() { let res; try { res = await fetch('/api/judge', { cache: 'no-store' }); } catch (err) { console.error('JUDGE fetch failed:', err); judgeError('SHELL LINK LOST — server unreachable'); return; } if (!res.ok) { judgeError(`JUDGE ERROR — HTTP ${res.status}`); return; } try { renderJudge(await res.json()); } catch (err) { console.error('JUDGE render error:', err); judgeError('JUDGE RENDER ERROR — see console'); } }
 $('#btnJudge').addEventListener('click', () => { showJudge(); refreshJudge(); });
+// SERPENT PAPER — SENSES: what is actually ON. Grouped rows from /api/sensors (state, last success, age, coverage, blocker, authority).
+function showSenses() { armDrawerHistory(); $('#senses').classList.add('open'); $('#backdrop').hidden = false; }
+const sState = (s) => (s === 'ACTIVE' || s === 'DARK_CAPTURE_OPERATIONAL' ? 'on' : s === 'ACTIVE_DEGRADED' || s === 'DARK_CAPTURE_DEGRADED' || s === 'NOT_OBSERVED' || s === 'KEY_PRESENT_UNPROVEN' ? 'deg' : s === 'DISABLED_BY_PAPER_POLICY' || s === 'DARK_CAPTURE_DISABLED_BY_POLICY' ? 'off' : 'blk');
+const sAge = (ms) => (ms === null || ms === undefined ? '—' : ms < 60000 ? Math.round(ms / 1000) + 's' : ms < 3600000 ? Math.round(ms / 60000) + 'm' : Math.round(ms / 3600000) + 'h');
+function renderSenses(d) {
+  const b = $('#sensesBody');
+  if (!d.enabled) { b.innerHTML = '<div class="empty"><div class="sub">' + esc(d.error ?? 'no sensor snapshot') + '</div></div>'; return; }
+  const a = d.authority ?? {};
+  const groups = Object.entries(d.groups ?? {}).map(([g, ids]) => '<div class="rmeta">' + esc(g.replace('_', ' ')) + '</div>' + ids.map((id) => { const r = d.rows.find((x) => x.id === id); if (!r) return ''; return '<div class="srow"><span class="k">' + esc(r.name) + '<span class="d">' + esc(r.coverage ?? '—') + (r.blocker ? ' · ' + esc(r.blocker) : '') + ' · auth ' + esc(r.authority) + '</span></span><span class="st ' + sState(r.state) + '">' + esc(r.state) + '<br>' + (r.lastSuccessTs ? 'last ' + sAge(r.ageMs) + ' ago' : 'no observation') + '</span></div>'; }).join('')).join('');
+  b.innerHTML = '<div class="auth">REAL MONEY ' + esc(a.realMoney) + ' · LIVE ORDERS ' + esc(a.liveOrders) + ' · JUDGE ' + esc(a.judgeMode ?? 'OFF') + '</div>' + '<div class="rmeta">profile ' + esc(d.profile) + (d.profileApplied ? '' : ' (profile NOT applied to this process: env enables only)') + ' · ' + esc(new Date(d.generatedTs).toISOString()) + ' · kill ' + esc(d.controls?.kill) + ' · cage ' + esc(d.controls?.cage) + ' · lock ' + esc(d.locks?.level) + ' · db ' + esc(d.persistence?.status ?? (d.persistence?.databaseConfigured ? 'configured' : 'not configured')) + '</div>' + groups + '<div class="rmeta">' + esc(d.law) + '</div>';
+}
+async function refreshSenses() { let res; try { res = await fetch('/api/sensors', { cache: 'no-store' }); } catch (err) { console.error('SENSES fetch failed:', err); $('#sensesBody').innerHTML = '<div class="line"><span>SHELL LINK LOST — server unreachable</span></div>'; return; } if (!res.ok) { $('#sensesBody').innerHTML = '<div class="line"><span>senses unavailable (' + esc(res.status) + ')</span></div>'; return; } try { renderSenses(await res.json()); } catch (err) { console.error('SENSES render failed:', err); $('#sensesBody').innerHTML = '<div class="line"><span>senses render failed</span></div>'; } }
+$('#btnSenses').addEventListener('click', () => { showSenses(); refreshSenses(); });
 
 function renderStatus(s) {
   lastStatus = s;
@@ -1831,7 +1868,7 @@ $('#capEye').addEventListener('click', () => { if (!demo) openEyeCard(); });
    on the header. Closing an auth/CLEAR/VETO card merely cancels the UI —
    it never posts anything and can never authorize anything. */
 let drawerPushed = false;
-const anySheetOpen = () => $('#card').classList.contains('open') || $('#ledger').classList.contains('open') || $('#research').classList.contains('open') || $('#judge').classList.contains('open');
+const anySheetOpen = () => $('#card').classList.contains('open') || $('#ledger').classList.contains('open') || $('#research').classList.contains('open') || $('#judge').classList.contains('open') || $('#senses').classList.contains('open');
 function armDrawerHistory() {
   if (!drawerPushed && !anySheetOpen()) {
     try { history.pushState({ serpentDrawer: true }, ''); drawerPushed = true; } catch { /* history optional */ }
@@ -1855,6 +1892,7 @@ function closeSheets({ viaHistory = false } = {}) {
   $('#ledger').classList.remove('open');
   $('#research').classList.remove('open');
   $('#judge').classList.remove('open');
+  $('#senses').classList.remove('open');
   $('#backdrop').hidden = true;
   if (drawerPushed && !viaHistory) {
     drawerPushed = false;
@@ -1868,6 +1906,7 @@ $('#cardClose').addEventListener('click', () => closeSheets());
 $('#ledgerClose').addEventListener('click', () => closeSheets());
 $('#researchClose').addEventListener('click', () => closeSheets());
 $('#judgeClose').addEventListener('click', () => closeSheets());
+$('#sensesClose').addEventListener('click', () => closeSheets());
 $('#backdrop').addEventListener('click', () => closeSheets()); // tap outside always exits
 // taps INSIDE a drawer never dismiss it (the backdrop is a sibling behind)
 addEventListener('keydown', (e) => { if (e.key === 'Escape' && anySheetOpen()) closeSheets(); });

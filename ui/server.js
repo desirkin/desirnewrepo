@@ -29,6 +29,8 @@ import { readExecutionProjection, projectionFile as executionProjectionFile } fr
 import { createArmChallenge, verifyArmRequest, ARM_PHRASE_TTL_MS } from '../judge/arming.js';
 import { readApproval, approvalsDir, listApprovals } from '../judge/owner.js';
 import { parseUtcInstant } from '../market-lab/time.js';
+import { sensorSnapshot } from '../paper/readiness.js';
+import { loadProfile as loadPaperProfile, profileEnvironment as paperProfileEnvironment } from '../paper/profile.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -55,6 +57,15 @@ console.log(auth.configured() ? 'CONTROL AUTH: CONFIGURED' : 'CONTROL AUTH: UNCO
 let judgeRun = null;
 let armChallenge = null; // one outstanding server-generated phrase, short-lived
 export function setJudgeRun(run) { judgeRun = run; armChallenge = null; }
+// SERPENT PAPER: the read-only sensor / readiness snapshot (paper/readiness.js): what is actually ON, from the durable status
+// files + the running composition's handles; grouped MARKET / OFFICIAL / SOCIAL / INFRASTRUCTURE / DARK_RESEARCH / SOCRATES /
+// JUDGE / WATCH; no credential, header or token material ever enters it. Without a profile the snapshot still answers honestly.
+function sensorsView() {
+  let profile = null; try { profile = loadPaperProfile(); } catch (err) { return { enabled: false, error: `profile: ${String(err.message).slice(0, 160)}`, rows: [], groups: {}, authority: 'NONE' }; }
+  const env = { ...process.env, ...(process.env.COBRA_PROFILE ? paperProfileEnvironment(profile) : {}) };
+  const snap = sensorSnapshot({ profile, env, live: { judgeRun, persistence: getPersistence() } });
+  return { enabled: true, profileApplied: Boolean(process.env.COBRA_PROFILE), ...snap };
+}
 function judgeView() {
   // closeout R16: the view is bound to the running composition's account / mode; a projection file for another account or mode is REJECTED and never shown
   const raw = readJsonBounded(executionProjectionFile()); const summary = readExecutionProjection({ expected: judgeRun ? { accountId: judgeRun.accountId, runMode: judgeRun.mode } : null }); const rejectedReason = summary?.state === 'REJECTED' ? summary.reason : null; const projection = rejectedReason ? null : raw;
@@ -559,6 +570,9 @@ const server = http.createServer((req, res) => {
       json(res, 200, judgeView());
     } else if (url.pathname === '/api/judge/arm') {
       json(res, 405, { ok: false, error: 'METHOD_NOT_ALLOWED', reason: 'ARM_LIVE is POST-only: no GET mutation' }, { allow: 'POST' });
+    } else if (url.pathname === '/api/sensors') {
+      // SERPENT PAPER: read-only sensor / readiness panel data (never a control; never a secret)
+      try { json(res, 200, sensorsView()); } catch (err) { console.error(`[api/sensors] ${err.constructor.name}: ${err.message}`); json(res, 200, { enabled: false, error: err.message, rows: [], groups: {}, authority: 'NONE', degraded: true }); }
     } else if (url.pathname === '/api/status') {
       json(res, 200, statusPayload());
     } else if (url.pathname === '/api/ledger/summary') {

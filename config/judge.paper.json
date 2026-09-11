@@ -1,0 +1,28 @@
+{
+  "policyVersion": "judge-policy-1",
+  "policyName": "paper-reference-usd500",
+  "strategyVersion": "judge-strategy-paper-reference-1",
+  "costModelVersion": "judge-cost-paper-reference-1",
+  "watchVersion": "watch-paper-reference-1",
+  "mode": "PAPER",
+  "venue": "kraken",
+  "quote": "USD",
+  "account": { "accountId": "paper-reference-usd500", "initialCapital": "500", "compounding": "NONE" },
+  "limits": {
+    "maxSimultaneousAssetPositions": 3,
+    "maxModelledRiskPerPositionFraction": 0.01,
+    "maxAggregateModelledRiskFraction": 0.02,
+    "maxCorrelatedClusterModelledRiskFraction": 0.015,
+    "dailyLossRestrictionFraction": 0.05,
+    "peakEquityDrawdownRestrictionFraction": 0.1,
+    "maxGrossExposureFraction": 1,
+    "maxAssetExposureFraction": 1
+  },
+  "execution": { "adapter": "PAPER", "paperLatencyMs": 250, "paperMaxObservationWaitMs": 1000, "entryDeadlineMs": 3000, "maxBookAgeMs": 1000, "maxReceiptToDecisionLagMs": 500, "admissionBucketMs": 25, "queueExpiryMs": 100, "proposalExpiryMs": 10000, "cooldownMs": 60000, "maxDurationMs": 14400000 },
+  "fees": { "taker": { "rate": "0.008", "rateKind": "PAPER_REFERENCE", "currency": "QUOTE", "roundingQuantum": "0.01", "roundingMode": "UP", "minimumFee": "0", "scope": "ORDER_TOTAL", "maxExecutionsBound": null, "boundSource": null, "scheduleId": "cobra.config.json fees version 2026-09-02 kraken taker (paper reference; not a live account fee)" } },
+  "universe": { "excludeBases": ["USDT", "USDC", "DAI", "TUSD", "PYUSD", "USDS", "RLUSD", "FDUSD", "USDG", "EURT", "USDR", "EUR", "GBP", "AUD", "CHF", "CAD", "JPY", "EURR"], "maxCandidates": 6, "maxResearch": 2, "maxHotSet": 12, "preparationSlots": 6 },
+  "setups": { "enabled": ["RANGE_IGNITION", "ABSORPTION_RECLAIM", "TREND_PULLBACK_CONTINUATION", "CATALYST_TRANSMISSION"], "inputModes": ["MARKET_DIRECT", "CASE_ENRICHED", "CATALYST_CASE"] },
+  "evaluation": { "seed": "paper-reference-seed-2026-09-08", "arms": ["REF_RANGE_IGNITION", "REF_ABSORPTION_RECLAIM", "REF_TREND_PULLBACK_CONTINUATION", "REF_CATALYST_TRANSMISSION", "REF_COMBINED", "D1_PRESSURE_TO_PROGRESS", "D2_FLOW_EVENT_RESPONSE", "D3_RESIDUAL_IGNITION", "D4_TRAIL_CONTINUATION_MATCHED", "D4_TRAIL_CONTINUATION_FUNDED", "CASH", "MOMENTUM_ABLATION", "SEEDED_NOMINATION_CONTROL"], "splits": { "developmentFraction": 0.5, "validationFraction": 0.25, "holdoutFraction": 0.25, "embargoMs": 14400000 } },
+  "live": null,
+  "authorityNote": "PAPER_REFERENCE hypotheses for a USD 500 paper experiment. Risk limits are provisional experiment hypotheses, not performance promises and not LIVE loss allowances. NO_TRADE is a successful decision."
+}

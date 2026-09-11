@@ -31,7 +31,7 @@ const read = (f) => readFileSync(path.join(REPO, f), 'utf8');
 const code = (f) => read(f).split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 const imports = (f) => [...code(f).matchAll(/(?:^|\n)\s*(?:import\s[^;]*?from\s*|import\s*\(\s*|export\s[^;]*?from\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]);
 const resolveRel = (f, spec) => (spec.startsWith('.') ? path.normalize(path.join(path.dirname(f), spec)).replace(/\\/g, '/') : spec);
-export const NEW_MODULES = Object.freeze(['market-lab/providers/kraken-charts.js', 'market-lab/providers/kraken-l3-auth.js', 'market-lab/providers/kraken-l3.js', 'market-lab/l3-book.js', 'market-lab/edge-recipes.js', 'market-lab/edge-evaluation.js', 'market-lab/edge-capture.js']);
+export const NEW_MODULES = Object.freeze(['market-lab/providers/kraken-charts.js', 'market-lab/providers/kraken-l3-auth.js', 'market-lab/providers/kraken-l3.js', 'market-lab/l3-book.js', 'market-lab/edge-recipes.js', 'market-lab/edge-evaluation.js', 'market-lab/edge-eval-records.js', 'market-lab/edge-eval-store.js', 'market-lab/edge-capture.js']);
 const ORDER_VERBS = /\b(add_order|amend_order|edit_order|cancel_order|cancel_all|batch_add|batch_cancel|AddOrder|CancelOrder|AmendOrder|EditOrder|Withdraw|WithdrawFunds|placeOrder|submitOrder|createOrder|cancelOrder|closePosition)\b/;
 
 test('F-01. the dark families are OUTSIDE the decision vocabulary: not in FAMILIES, FAMILY_REGISTRY, METRIC_MAP, the broker metric registry, the Socrates v2 contract, the context component binding, ALLOWED_MAX_AGE_MS, the coverage route plan or any decision recipe; their kinds are closed dark kinds bound to dark families only; the law is declared', () => {
@@ -93,8 +93,8 @@ test('F-03. static authority proof: no new module names an order / amend / cance
   // sensitive endpoints: the plan marks them, the recorder never sees the body, API-Sign / API-Key / token headers are redacted
   const plan = planRequest({ providerId: 'KRAKEN_SPOT', endpointId: 'rest-private-key-info', method: 'POST', body: 'nonce=1', headers: { 'API-Key': 'k', 'API-Sign': 's' } }); assert.equal(plan.sensitive, true); assert.equal(plan.body, 'nonce=1'); assert.equal(plan.headers['content-type'], 'application/x-www-form-urlencoded'); assert.ok(!plan.requestKey.includes('nonce'));
   assert.equal(planRequest({ providerId: 'KRAKEN_SPOT', endpointId: 'rest-ohlc', query: {} }).sensitive, false);
-  for (const f of NEW_MODULES) assert.ok(/2026-09-10/.test(read(f)) || /edge-(recipes|evaluation)|l3-book/.test(f), `${f} records the docs check date`);
-  assert.ok(read('doctrine/MARKET_EDGE_KRAKEN.md').includes('2026-09-10')); assert.ok(read('doctrine/MARKET_EDGE_KRAKEN.md').includes('IMPLEMENTED_DARK_NOT_EVALUATED'));
+  for (const f of NEW_MODULES) assert.ok(/2026-09-10/.test(read(f)) || /edge-(recipes|evaluation|eval-records|eval-store)|l3-book/.test(f), `${f} records the docs check date`);
+  assert.ok(read('doctrine/MARKET_EDGE_KRAKEN.md').includes('2026-09-10')); assert.ok(read('doctrine/MARKET_EDGE_KRAKEN.md').includes('IMPLEMENTED_DARK_NOT_EVALUATED')); for (const w of ['W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7', 'W8', 'W9', 'W10', 'W11', 'W12', 'W13']) assert.ok(new RegExp(`\\b${w}\\b`).test(read('doctrine/MARKET_EDGE_KRAKEN.md')), `doctrine names ${w}`);
   // no credential VALUE anywhere in the new files, fixtures or docs
   for (const f of [...NEW_MODULES, 'test/fixtures/kraken-l3-checksum-snapshot.json', 'doctrine/MARKET_EDGE_KRAKEN.md', 'market-lab/samples/policy.sample.json']) assert.ok(!/sk-ant|sk_live|Bearer [A-Za-z0-9]|eyJ[A-Za-z0-9_-]{10,}|api[_-]?key['"]?\s*:\s*['"][A-Za-z0-9+/]{16,}/i.test(read(f)), `${f} carries a value-like secret`);
 });

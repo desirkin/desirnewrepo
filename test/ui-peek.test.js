@@ -192,7 +192,7 @@ test('12. no additional fetch/API request exists for the disclosure', () => {
   }
   // the page's API surface is unchanged — no new endpoint was introduced
   const endpoints = new Set(SCRIPT.match(/\/api\/[a-z/-]+/g)); // MARKET-LAB: hyphenated route names are whole endpoints
-  const known = new Set(['/api/status', '/api/attention', '/api/ears', '/api/wideeye', '/api/coin/', '/api/ledger/summary', '/api/control/', '/api/auth/', '/api/market-research', '/api/judge']); // MARKET-LAB: read-only research files; JUDGE: the read-only journal projection view
+  const known = new Set(['/api/status', '/api/attention', '/api/ears', '/api/wideeye', '/api/coin/', '/api/ledger/summary', '/api/control/', '/api/auth/', '/api/market-research', '/api/judge', '/api/sensors']); // MARKET-LAB: read-only research files; JUDGE: the read-only journal projection view; SENSORS: the read-only paper sensor / readiness snapshot
   for (const e of endpoints) {
     assert.ok([...known].some((k) => e.startsWith(k.replace(/\/$/, ''))), `unexpected new endpoint ${e}`);
   }

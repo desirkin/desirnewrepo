@@ -91,8 +91,8 @@ test('T01 (collector seam, real DB). the repaired outcome seam resolves through 
     const early = research.sourceProfile(me, { asOfTs: obsTs * 1000 + 300_000 }); assert.equal(early.marketLead.episodes[0].outcome.state, 'NOT_YET_KNOWN', 'hidden before the archive existed');
     assert.equal(b.c.status().research.sourceBehavior.outcomeSeam, 'CHILDHOOD_ARCHIVE_ACCESSOR');
     // restart from the same durable journal (same data dir) => byte-identical profile
-    b.c.stop(); const b2 = bootC({ ...mkStores(), snapshot: accepted(cat), dataDir: b.dir }); await b2.tick();
-    const again = b2.c.internals.research.sourceProfile(me, { asOfTs: created + 1 }); assert.equal(canonicalJson(again), canonicalJson(late), 'restart agrees byte for byte'); b2.c.stop();
+    await b.c.stop(); const b2 = bootC({ ...mkStores(), snapshot: accepted(cat), dataDir: b.dir }); await b2.tick(); // the fence hand-off is part of stop(): never boot the successor before it completes
+    const again = b2.c.internals.research.sourceProfile(me, { asOfTs: created + 1 }); assert.equal(canonicalJson(again), canonicalJson(late), 'restart agrees byte for byte'); await b2.c.stop();
   });
 });
 

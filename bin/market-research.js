@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { EXIT_CODES, MarketLabError } from '../market-lab/contracts.js';
 import { parseUtcInstant } from '../market-lab/time.js';
 import { readPolicyFile, readSubjectsFile, runInspect, runCoverage, runCapture, runBuild } from '../market-lab/commands.js';
-import { runEdgeCapture, runEdgeEvaluate } from '../market-lab/edge-capture.js';
+import { runEdgeCapture, declareEdge, evaluateEdge, lockEdgeSelection, openEdgeHoldout, consumeEdgeHoldout, verifyEdgeChain, retrospectiveEdgeEvaluation } from '../market-lab/edge-capture.js';
 
 export const COMMANDS = Object.freeze({
   inspect: { flags: { policy: { required: true } } },
@@ -19,7 +19,16 @@ export const COMMANDS = Object.freeze({
   serve: { flags: { policy: { required: true }, subjects: { required: true }, 'research-root': { required: true }, port: { required: false, int: true }, 'case-every-seconds': { required: false, int: true } } },
   // MARKET-EDGE-KRAKEN-1 (dark; status IMPLEMENTED_DARK_NOT_EVALUATED): the two dark senses, captured and evaluated apart from every decision path
   'edge-capture': { flags: { policy: { required: true }, subjects: { required: true }, 'duration-seconds': { required: true, int: true }, out: { required: true }, 'research-root': { required: true } } },
-  'edge-evaluate': { flags: { 'edge-capture': { required: true }, capture: { required: true }, subject: { required: true }, 'spot-symbol': { required: true }, 'futures-symbol': { required: true }, 'evaluation-id': { required: true }, 'declared-at': { required: true, utc: true }, start: { required: true, utc: true }, 'duration-seconds': { required: true, int: true }, 'embargo-seconds': { required: true, int: true }, 'as-of': { required: true, utc: true }, seed: { required: true }, 'include-holdout': { required: false, bool: true } } },
+  // the sealed evaluation chain (closeout W1-W13): declare (runtime clock; never --declared-at) -> evaluate looks -> lock -> open the
+  // one-shot holdout -> evaluate it once. Every step is appended to <research-root>/edge-eval/<evaluation-id>.jsonl.
+  'edge-declare': { flags: { 'edge-capture': { required: true }, capture: { required: true }, 'research-root': { required: true }, subject: { required: true }, 'spot-symbol': { required: true }, 'futures-symbol': { required: true }, 'evaluation-id': { required: true }, start: { required: true, utc: true }, 'duration-seconds': { required: true, int: true }, 'embargo-seconds': { required: true, int: true }, seed: { required: true } } },
+  'edge-evaluate': { flags: { 'edge-capture': { required: true }, capture: { required: true }, 'research-root': { required: true }, 'evaluation-id': { required: true }, stage: { required: true }, 'as-of': { required: true, utc: true } } },
+  'edge-lock': { flags: { 'research-root': { required: true }, 'evaluation-id': { required: true }, arm: { required: true } } },
+  'edge-holdout-open': { flags: { 'research-root': { required: true }, 'evaluation-id': { required: true } } },
+  'edge-holdout-evaluate': { flags: { 'edge-capture': { required: true }, capture: { required: true }, 'research-root': { required: true }, 'evaluation-id': { required: true }, 'as-of': { required: false, utc: true } } },
+  'edge-verify': { flags: { 'edge-capture': { required: true }, capture: { required: true }, 'research-root': { required: true }, 'evaluation-id': { required: true } } },
+  // the offline RETROSPECTIVE convenience: says RETROSPECTIVE, release evidence NEVER, touches no chain, opens no holdout
+  'edge-retrospective': { flags: { 'edge-capture': { required: true }, capture: { required: true }, 'as-of': { required: true, utc: true }, subject: { required: true }, 'spot-symbol': { required: true }, 'futures-symbol': { required: true }, 'evaluation-id': { required: true }, start: { required: true, utc: true }, 'duration-seconds': { required: true, int: true }, 'embargo-seconds': { required: true, int: true }, seed: { required: true } } },
 });
 export const USAGE = `usage: market-research <command> [flags]
   inspect   --policy <policy.json>
@@ -28,8 +37,15 @@ export const USAGE = `usage: market-research <command> [flags]
   build     --capture <SEALED_CAPTURE_DIR> --as-of <YYYY-MM-DDTHH:MM:SSZ> --subject <CANONICAL_COIN> --out <NEW_DIR>
   serve     --policy <policy.json> --subjects <subjects.json> --research-root <DIR> [--port <loopback port>] [--case-every-seconds <N>]
   edge-capture  --policy <policy.json> --subjects <subjects.json> --duration-seconds <1..86400> --out <NEW_DIR> --research-root <DIR>
-  edge-evaluate --edge-capture <SEALED_EDGE_DIR> --capture <SEALED_CAPTURE_DIR> --subject <COIN> --spot-symbol <BTC/USD> --futures-symbol <PF_XBTUSD>
-                --evaluation-id <ID> --declared-at <UTC> --start <UTC> --duration-seconds <N> --embargo-seconds <N> --as-of <UTC> --seed <ID> [--include-holdout true]
+  edge-declare  --edge-capture <SEALED_EDGE_DIR> --capture <SEALED_CAPTURE_DIR> --research-root <DIR> --subject <COIN> --spot-symbol <BTC/USD>
+                --futures-symbol <PF_XBTUSD> --evaluation-id <ID> --start <UTC> --duration-seconds <N> --embargo-seconds <N> --seed <ID>
+  edge-evaluate --edge-capture <DIR> --capture <DIR> --research-root <DIR> --evaluation-id <ID> --stage <DEVELOPMENT|VALIDATION> --as-of <UTC>
+  edge-lock     --research-root <DIR> --evaluation-id <ID> --arm <ONE of the four declared feature-set arms (EDGE_ARMS; doctrine/MARKET_EDGE_KRAKEN.md)>
+  edge-holdout-open     --research-root <DIR> --evaluation-id <ID>
+  edge-holdout-evaluate --edge-capture <DIR> --capture <DIR> --research-root <DIR> --evaluation-id <ID> [--as-of <UTC>]
+  edge-verify           --edge-capture <DIR> --capture <DIR> --research-root <DIR> --evaluation-id <ID>
+  edge-retrospective    --edge-capture <DIR> --capture <DIR> --as-of <UTC> --subject <COIN> --spot-symbol <BTC/USD> --futures-symbol <PF_XBTUSD>
+                --evaluation-id <ID> --start <UTC> --duration-seconds <N> --embargo-seconds <N> --seed <ID>
 research only (authority NONE / RESEARCH_ONLY). inspect and build are offline; coverage is offline unless --probe true
 (policy-authorized metadata requests only); capture and serve reach the providers the policy enables. Every dispatch is
 accounted in <research-root>/accounting (the stable quota journal); a per-run --out directory is never an accounting root.
@@ -68,7 +84,15 @@ export async function runCli(argv, { env = process.env, stdout = (s) => process.
     else if (command === 'capture') result = await runCapture({ policy: readPolicyFile(flags.policy), subjects: readSubjectsFile(flags.subjects), env, out: flags.out, durationSeconds: flags['duration-seconds'], researchRoot: flags['research-root'], fetchImpl, WebSocketImpl, clock, log: (m) => stderr(`${JSON.stringify({ log: String(m).slice(0, 300) })}\n`) });
     else if (command === 'build') result = runBuild({ captureDir: flags.capture, asOfTs: flags['as-of'], canonicalCoin: flags.subject, out: flags.out, clock });
     else if (command === 'edge-capture') result = await runEdgeCapture({ policy: readPolicyFile(flags.policy), subjects: readSubjectsFile(flags.subjects), env, out: flags.out, durationSeconds: flags['duration-seconds'], researchRoot: flags['research-root'], fetchImpl, WebSocketImpl, clock, log: (m) => stderr(`${JSON.stringify({ log: String(m).slice(0, 300) })}\n`) });
-    else if (command === 'edge-evaluate') result = runEdgeEvaluate({ edgeCaptureDir: flags['edge-capture'], captureDir: flags.capture, evaluationId: flags['evaluation-id'], declaredTs: flags['declared-at'], startTs: flags.start, durationMs: flags['duration-seconds'] * 1000, embargoMs: flags['embargo-seconds'] * 1000, seed: flags.seed, subject: { canonicalCoin: flags.subject, spotSymbol: flags['spot-symbol'], futuresSymbol: flags['futures-symbol'] }, asOfTs: flags['as-of'], includeHoldout: flags['include-holdout'] === true });
+    else if (command === 'edge-declare' || command === 'edge-retrospective') {
+      const window = { edgeCaptureDir: flags['edge-capture'], captureDir: flags.capture, evaluationId: flags['evaluation-id'], startTs: flags.start, durationMs: flags['duration-seconds'] * 1000, embargoMs: flags['embargo-seconds'] * 1000, seed: flags.seed, subject: { canonicalCoin: flags.subject, spotSymbol: flags['spot-symbol'], futuresSymbol: flags['futures-symbol'] }, clock };
+      result = command === 'edge-declare' ? await declareEdge({ ...window, researchRoot: flags['research-root'], log: (m) => stderr(`${JSON.stringify({ log: String(m).slice(0, 300) })}\n`) }) : retrospectiveEdgeEvaluation({ ...window, asOfTs: flags['as-of'] });
+    }
+    else if (command === 'edge-evaluate') result = await evaluateEdge({ edgeCaptureDir: flags['edge-capture'], captureDir: flags.capture, researchRoot: flags['research-root'], evaluationId: flags['evaluation-id'], stage: flags.stage, asOfTs: flags['as-of'], clock });
+    else if (command === 'edge-lock') result = await lockEdgeSelection({ researchRoot: flags['research-root'], evaluationId: flags['evaluation-id'], arm: flags.arm, clock });
+    else if (command === 'edge-holdout-open') result = await openEdgeHoldout({ researchRoot: flags['research-root'], evaluationId: flags['evaluation-id'], clock });
+    else if (command === 'edge-verify') result = await verifyEdgeChain({ edgeCaptureDir: flags['edge-capture'], captureDir: flags.capture, researchRoot: flags['research-root'], evaluationId: flags['evaluation-id'], clock });
+    else if (command === 'edge-holdout-evaluate') result = await consumeEdgeHoldout({ edgeCaptureDir: flags['edge-capture'], captureDir: flags.capture, researchRoot: flags['research-root'], evaluationId: flags['evaluation-id'], asOfTs: flags['as-of'] ?? null, clock });
     else {
       const { createResearchService } = await import('../market-lab/service.js');
       const policy = readPolicyFile(flags.policy); const subjects = readSubjectsFile(flags.subjects);
@@ -81,7 +105,8 @@ export async function runCli(argv, { env = process.env, stdout = (s) => process.
     stdout(`${JSON.stringify(result)}\n`);
     return result.ok === false ? EXIT_CODES.EXECUTION_FAILURE : EXIT_CODES.OK;
   } catch (err) {
-    const e = err instanceof MarketLabError ? err.toJSON() : { code: 'INTERNAL_FAILURE', message: `unexpected ${err?.constructor?.name ?? 'failure'}: ${String(err?.message ?? '').slice(0, 160)}`, detail: null, exitCode: EXIT_CODES.EXECUTION_FAILURE };
+    const storeCode = err?.constructor?.name === 'EdgeEvalStoreError' ? (['REVISION_CONFLICT', 'LOCKED', 'INVALID_INPUT'].includes(err.code) ? EXIT_CODES.INVALID_REQUEST : ['CHAIN_INVALID', 'RECORD_INVALID'].includes(err.code) ? EXIT_CODES.INVALID_INPUT : EXIT_CODES.EXECUTION_FAILURE) : null;
+    const e = err instanceof MarketLabError ? err.toJSON() : storeCode !== null ? { code: err.code, message: String(err.message).slice(0, 200), detail: null, exitCode: storeCode } : { code: 'INTERNAL_FAILURE', message: `unexpected ${err?.constructor?.name ?? 'failure'}: ${String(err?.message ?? '').slice(0, 160)}`, detail: null, exitCode: EXIT_CODES.EXECUTION_FAILURE };
     stderr(`${JSON.stringify({ ok: false, command, error: e })}\n`);
     return e.exitCode;
   }

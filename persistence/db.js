@@ -9,6 +9,10 @@ const CONNECT_TIMEOUT_MS = 5000;
 const QUERY_TIMEOUT_MS = 10_000;
 const IDLE_TIMEOUT_MS = 30_000;
 const STARTUP_RETRIES = 3; // bounded — no infinite reconnect storm
+// every session of a Db names its owner in pg_stat_activity.application_name: production sessions are 'serpent'; a
+// schema-scoped Db (the TEST seam) is 'serpent-test:<schema>' so a test that simulates session loss can terminate ONLY
+// its own advisory-lock sessions — never another test file's collector running in parallel on the same database
+export const applicationNameOf = (schema) => (schema ? `serpent-test:${schema}` : 'serpent');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -81,6 +85,7 @@ export class Db {
       query_timeout: QUERY_TIMEOUT_MS,
       statement_timeout: QUERY_TIMEOUT_MS,
       allowExitOnIdle: true, // persistence never keeps a dying process alive
+      application_name: applicationNameOf(this.schema),
     };
     this.#pool = this.#poolFactory ? this.#poolFactory(opts) : new pg.Pool(opts);
     this.#pool.on('error', () => {

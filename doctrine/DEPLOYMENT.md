@@ -45,6 +45,14 @@ environment variable relocates the whole tree without code changes.
   3. Never run a deployment flavor whose disk resets. A fresh-wiped `data/`
      would erase KILL/CAGE latches — human controls must not be amnesiac.
 
+## The paper profile
+
+The ONE deployment target is the paper profile: `npm run paper:preflight` then `npm run paper` (see
+`docs/PAPER-RUNBOOK.md`). The launcher applies `config/paper-runtime.json` to the environment and forces
+`JUDGE_MODE=PAPER`, `JUDGE_ALLOW_PRIVATE=false`, `JUDGE_ALLOW_ORDERS=false` whatever the environment says; real money,
+live orders, withdrawals and funding are disabled. The paper shutdown seam runs after the Tape's clean stop and before
+`process.exit(0)` so a dark research segment in flight is sealed.
+
 ## Graceful shutdown contract
 
 `SIGTERM`/`SIGINT` → the tape closes its websocket, writes a final

@@ -1,0 +1,261 @@
+{
+ "evidenceVersion": "serpent-paper-smoke-evidence-1",
+ "generatedTs": 1789093963501,
+ "generatedIso": "2026-09-11T02:32:43.501Z",
+ "preflightVersion": "serpent-paper-preflight-1",
+ "readOnly": true,
+ "paidCalls": 0,
+ "network": "outbound HTTPS through the build environment proxy",
+ "marketResearch": {
+  "KRAKEN_SPOT": {
+   "state": "NOT_OBSERVED",
+   "policyEnabled": true,
+   "billing": "FREE",
+   "credentialEnv": null,
+   "credentialPresent": null,
+   "smokeProbe": {
+    "state": "PROBED_OK",
+    "reason": null,
+    "receivedTs": 1789093963933,
+    "endpointId": null
+   }
+  },
+  "COINBASE_SPOT": {
+   "state": "NOT_OBSERVED",
+   "policyEnabled": true,
+   "billing": "FREE",
+   "credentialEnv": null,
+   "credentialPresent": null,
+   "smokeProbe": {
+    "state": "PROBED_OK",
+    "reason": null,
+    "receivedTs": 1789093964245,
+    "endpointId": null
+   }
+  },
+  "KRAKEN_DERIVATIVES": {
+   "state": "NOT_OBSERVED",
+   "policyEnabled": true,
+   "billing": "FREE",
+   "credentialEnv": null,
+   "credentialPresent": null,
+   "smokeProbe": {
+    "state": "PROBED_OK",
+    "reason": null,
+    "receivedTs": 1789093965377,
+    "endpointId": null
+   }
+  },
+  "DERIBIT": {
+   "state": "NOT_OBSERVED",
+   "policyEnabled": true,
+   "billing": "FREE",
+   "credentialEnv": null,
+   "credentialPresent": null,
+   "smokeProbe": {
+    "state": "PROBED_OK",
+    "reason": null,
+    "receivedTs": 1789093966137,
+    "endpointId": null
+   }
+  },
+  "BYBIT": {
+   "state": "DISABLED_BY_PAPER_POLICY",
+   "policyEnabled": false,
+   "billing": "FREE",
+   "credentialEnv": null,
+   "credentialPresent": null,
+   "smokeProbe": {
+    "state": "NOT_PROBED",
+    "reason": "PROVIDER_DISABLED",
+    "receivedTs": null,
+    "endpointId": null
+   }
+  },
+  "GECKOTERMINAL": {
+   "state": "NOT_OBSERVED",
+   "policyEnabled": true,
+   "billing": "FREE",
+   "credentialEnv": null,
+   "credentialPresent": null,
+   "smokeProbe": {
+    "state": "PROBED_OK",
+    "reason": null,
+    "receivedTs": 1789093967101,
+    "endpointId": null
+   }
+  },
+  "DEFILLAMA": {
+   "state": "NOT_OBSERVED",
+   "policyEnabled": true,
+   "billing": "FREE",
+   "credentialEnv": null,
+   "credentialPresent": null,
+   "smokeProbe": {
+    "state": "PROBED_OK",
+    "reason": null,
+    "receivedTs": 1789093967402,
+    "endpointId": null
+   }
+  },
+  "COINMETRICS": {
+   "state": "NOT_OBSERVED",
+   "policyEnabled": true,
+   "billing": "FREE",
+   "credentialEnv": null,
+   "credentialPresent": null,
+   "smokeProbe": {
+    "state": "PROBED_OK",
+    "reason": null,
+    "receivedTs": 1789093967914,
+    "endpointId": null
+   }
+  },
+  "SETTLED_RECORDS": {
+   "state": "NOT_OBSERVED",
+   "policyEnabled": true,
+   "billing": "FREE",
+   "credentialEnv": null,
+   "credentialPresent": null,
+   "smokeProbe": {
+    "state": "NOT_PROBED",
+    "reason": "NO_NETWORK_SOURCE",
+    "receivedTs": null,
+    "endpointId": null
+   }
+  },
+  "FRED": {
+   "state": "BLOCKED_CREDENTIAL",
+   "policyEnabled": true,
+   "billing": "FREE",
+   "credentialEnv": "FRED_API_KEY",
+   "credentialPresent": false,
+   "smokeProbe": {
+    "state": "PROBED_FAILED",
+    "reason": null,
+    "receivedTs": 1789093967914,
+    "endpointId": null
+   }
+  },
+  "COINGECKO": {
+   "state": "DISABLED_BY_PAPER_POLICY",
+   "policyEnabled": false,
+   "billing": "UNKNOWN",
+   "credentialEnv": "COINGECKO_DEMO_API_KEY",
+   "credentialPresent": false,
+   "smokeProbe": {
+    "state": "NOT_PROBED",
+    "reason": "PROVIDER_DISABLED",
+    "receivedTs": null,
+    "endpointId": null
+   }
+  },
+  "COINGLASS": {
+   "state": "DISABLED_BY_PAPER_POLICY",
+   "policyEnabled": false,
+   "billing": "UNKNOWN",
+   "credentialEnv": "COINGLASS_API_KEY",
+   "credentialPresent": false,
+   "smokeProbe": {
+    "state": "NOT_PROBED",
+    "reason": "PROVIDER_DISABLED",
+    "receivedTs": null,
+    "endpointId": null
+   }
+  },
+  "CRYPTOQUANT": {
+   "state": "DISABLED_BY_PAPER_POLICY",
+   "policyEnabled": false,
+   "billing": "UNKNOWN",
+   "credentialEnv": "CRYPTOQUANT_API_KEY",
+   "credentialPresent": false,
+   "smokeProbe": {
+    "state": "NOT_PROBED",
+    "reason": "PROVIDER_DISABLED",
+    "receivedTs": null,
+    "endpointId": null
+   }
+  },
+  "SANTIMENT": {
+   "state": "DISABLED_BY_PAPER_POLICY",
+   "policyEnabled": false,
+   "billing": "UNKNOWN",
+   "credentialEnv": "SANTIMENT_API_KEY",
+   "credentialPresent": false,
+   "smokeProbe": {
+    "state": "NOT_PROBED",
+    "reason": "PROVIDER_DISABLED",
+    "receivedTs": null,
+    "endpointId": null
+   }
+  },
+  "TWELVEDATA": {
+   "state": "DISABLED_BY_PAPER_POLICY",
+   "policyEnabled": false,
+   "billing": "UNKNOWN",
+   "credentialEnv": "TWELVEDATA_API_KEY",
+   "credentialPresent": false,
+   "smokeProbe": {
+    "state": "NOT_PROBED",
+    "reason": "PROVIDER_DISABLED",
+    "receivedTs": null,
+    "endpointId": null
+   }
+  },
+  "TOKENOMIST": {
+   "state": "DISABLED_BY_PAPER_POLICY",
+   "policyEnabled": false,
+   "billing": "UNKNOWN",
+   "credentialEnv": "TOKENOMIST_API_KEY",
+   "credentialPresent": false,
+   "smokeProbe": {
+    "state": "NOT_PROBED",
+    "reason": "PROVIDER_DISABLED",
+    "receivedTs": null,
+    "endpointId": null
+   }
+  }
+ },
+ "darkResearch": {
+  "krakenCharts": {
+   "catalogOk": true,
+   "symbol": "PF_XBTUSD",
+   "ok": true,
+   "observations": 2,
+   "acquisition": "COMPLETE",
+   "failure": null,
+   "coverage": "OBSERVED"
+  },
+  "krakenL3": {
+   "verdict": "CREDENTIAL_MISSING",
+   "blocker": "CREDENTIAL_MISSING",
+   "l3Usable": false
+  }
+ },
+ "bluesky": {
+  "transport": "WEBSOCKET_JETSTREAM_V2",
+  "host": "jetstream.us-east.bsky.network",
+  "openMs": 284,
+  "messages": 50,
+  "elapsedMs": 1493,
+  "note": "unauthenticated public read; no retention; closed after 50 messages"
+ },
+ "publicReachability": {
+  "api.kraken.com": 200,
+  "futures.kraken.com": 200,
+  "api.exchange.coinbase.com": 200,
+  "www.deribit.com": 200,
+  "api.bybit.com": 403,
+  "api.geckoterminal.com": 200,
+  "api.llama.fi": 200,
+  "community-api.coinmetrics.io": 200,
+  "status.kraken.com": 200,
+  "status.coinbase.com": 200,
+  "www.okx.com": 200,
+  "www.sec.gov": 200,
+  "sanctionslistservice.ofac.treas.gov": 302,
+  "api.coingecko.com": 200,
+  "api.stlouisfed.org (no key)": 400
+ },
+ "law": "a smoke is a dated fact, never a runtime claim; secret values never appear here"
+}

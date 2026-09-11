@@ -78,6 +78,22 @@ function refuseStrikeIfCaged(predictionId) {
 async function main() {
   const config = loadConfig();
   switch (command) {
+    // SERPENT PAPER: the ONE preflight / launch / inventory entry (paper/*). preflight is READ-ONLY and makes zero paid calls
+    // (--smoke adds only the policy-authorized read-only probes); run applies the paper profile and hands the process to fly.js.
+    case 'paper': {
+      const sub = rest[0];
+      if (sub === 'preflight') {
+        const { runPreflight, renderPreflight } = await import('../paper/preflight.js');
+        const report = await runPreflight({ smoke: rest.includes('--smoke') });
+        if (rest.includes('--json')) console.log(JSON.stringify(report, null, 1)); else console.log(renderPreflight(report));
+        process.exitCode = report.ready ? 0 : 1;
+        return;
+      }
+      if (sub === 'inventory') { const { sensorInventory } = await import('../paper/inventory.js'); console.log(JSON.stringify(sensorInventory(), null, 1)); return; }
+      if (sub === 'snapshot') { const { sensorSnapshot } = await import('../paper/readiness.js'); const { loadProfile, profileEnvironment } = await import('../paper/profile.js'); const p = loadProfile(); console.log(JSON.stringify(sensorSnapshot({ profile: p, env: { ...process.env, ...profileEnvironment(p) } }), null, 1)); return; }
+      if (sub === 'run') { const { launchPaper } = await import('../paper/launch.js'); await launchPaper({}); return; }
+      return usage();
+    }
     case 'tape': {
       const sub = rest[0];
       if (sub !== 'run') return usage();
@@ -273,6 +289,9 @@ function usage() {
   cobra status                                     engine posture + locks + tape
   cobra kill | cobra cage | cobra veto <id>        human controls
   cobra state simulate <pct> [--clear]             inject simulated daily P&L
+  cobra paper preflight [--smoke] [--json]         READ-ONLY: can the whole system run PAPER now? (sections A..L)
+  cobra paper run                                  launch the complete PAPER system (profile config/paper-runtime.json)
+  cobra paper inventory | snapshot                 machine-readable sensor inventory / sensor readiness snapshot
   cobra state clear                                clear KILL/CAGE latches`);
   process.exitCode = 1;
 }

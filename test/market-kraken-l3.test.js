@@ -9,7 +9,7 @@ import { createScriptedWebSocket } from './helpers/scripted-ws.js';
 import { createHttpTransport } from '../market-lab/transport.js';
 import { createL3Book, parseL3Order, orderKeyOf, checksumField, l3ChecksumDigest, l3Checksum, CHECKSUM_LEVELS } from '../market-lab/l3-book.js';
 import { createL3AuthHelper, assessKeyPermissions, signNarrow, KRAKEN_KEY_PERMISSIONS, SIGNABLE_ENDPOINTS, keyFingerprintOf } from '../market-lab/providers/kraken-l3-auth.js';
-import { createKrakenL3Stream } from '../market-lab/providers/kraken-l3.js';
+import { createKrakenL3Stream, L3_SUBSCRIPTION_WEIGHTS, L3_RATE_BUDGETS } from '../market-lab/providers/kraken-l3.js';
 import { observationError, coverageRecordError, L3_EVENTS } from '../market-lab/contracts.js';
 import { L3_DEFAULTS, loadPolicy, l3Enabled } from '../market-lab/policy.js';
 import { PROVIDERS, endpointOf } from '../market-lab/registry.js';
@@ -75,12 +75,13 @@ test('L3-02. state model: a snapshot REPLACES state; add appends to its level qu
   const c = createL3Book({ symbol: 'BTC/USD', depth: 10 }); c.applySnapshot({ bids: FX.bids, asks: FX.asks }, { receivedTs: T0 }); c.applySnapshot({ bids: FX.bids, asks: FX.asks }, { receivedTs: T0 + 60_000 }); assert.ok(c.view().bids.every((o) => o.firstSeenTs === T0 + 60_000)); c.reset('EPOCH'); assert.equal(c.synchronized, false); assert.equal(c.size, 0);
 });
 
-test('L3-03. the narrow auth helper: the documented permission vocabulary; any authority-capable permission (modify-trades, close-trades, add-funds, withdraw-funds, earn-funds, add-withdraw-address, update-withdraw-address) or any undocumented value FAILS CLOSED; the signer signs ONLY GetApiKeyInfo and GetWebSocketsToken with the form body `nonce=`; a token is issued only after a SAFE_DATA_KEY proof; the key, secret, token, signed payload and nonce never reach status, recorder, logs or the observations', async () => {
+test('L3-03. the narrow auth helper: the documented permission vocabulary; any authority-capable permission (modify-trades, close-trades, add-funds, withdraw-funds, earn-funds, add-withdraw-address, update-withdraw-address) or any undocumented value FAILS CLOSED; the signer signs ONLY GetApiKeyInfo and GetWebSocketsToken with the form body `nonce=`; a token is issued only after a SAFE_L3_DATA_KEY proof (W8: a key without create-ws-token is NON_AUTHORITY_KEY with blocker TOKEN_PERMISSION_MISSING and never usable for L3); the key, secret, token, signed payload and nonce never reach status, recorder, logs or the observations', async () => {
   assert.deepEqual(KRAKEN_KEY_PERMISSIONS.AUTHORITY_CAPABLE, ['modify-trades', 'close-trades', 'add-funds', 'withdraw-funds', 'earn-funds', 'add-withdraw-address', 'update-withdraw-address']);
-  assert.equal(assessKeyPermissions(SAFE).verdict, 'SAFE_DATA_KEY');
+  assert.equal(assessKeyPermissions(SAFE).verdict, 'SAFE_L3_DATA_KEY'); assert.equal(assessKeyPermissions(SAFE).blocker, null); assert.equal(assessKeyPermissions(SAFE).l3Usable, true);
+  const noToken = assessKeyPermissions(['query-funds', 'query-ledger']); assert.equal(noToken.verdict, 'NON_AUTHORITY_KEY'); assert.equal(noToken.blocker, 'TOKEN_PERMISSION_MISSING'); assert.equal(noToken.l3Usable, false); assert.equal(noToken.tokenPermission, false);
   for (const p of KRAKEN_KEY_PERMISSIONS.AUTHORITY_CAPABLE) assert.equal(assessKeyPermissions([...SAFE, p]).verdict, 'AUTHORITY_CAPABLE', p);
   const unk = assessKeyPermissions([...SAFE, 'super-powers']); assert.equal(unk.verdict, 'UNKNOWN_PERMISSION'); assert.ok(!JSON.stringify(unk).includes('super-powers'), 'an undocumented value is counted, never echoed');
-  assert.equal(assessKeyPermissions('query-funds').verdict, 'MALFORMED'); assert.equal(assessKeyPermissions([1]).verdict, 'MALFORMED'); assert.equal(assessKeyPermissions([]).verdict, 'SAFE_DATA_KEY');
+  assert.equal(assessKeyPermissions('query-funds').verdict, 'MALFORMED'); assert.equal(assessKeyPermissions([1]).verdict, 'MALFORMED'); assert.equal(assessKeyPermissions([]).verdict, 'NON_AUTHORITY_KEY', 'no permission at all: safe from authority, unusable for L3'); assert.equal(assessKeyPermissions([...SAFE.filter((p) => p !== 'create-ws-token'), 'modify-trades']).verdict, 'AUTHORITY_CAPABLE', 'authority outranks the missing token permission');
   assert.deepEqual(Object.keys(SIGNABLE_ENDPOINTS), ['rest-private-key-info', 'rest-private-ws-token']);
   const s = signNarrow({ endpointId: 'rest-private-ws-token', nonce: '1616492376594', secret: Buffer.from('k').toString('base64') }); assert.equal(s.body, 'nonce=1616492376594'); assert.equal(s.path, '/0/private/GetWebSocketsToken'); assert.match(s.signature, /^[A-Za-z0-9+/=]+$/);
   for (const id of ['rest-ohlc', 'rest-asset-pairs', 'AddOrder', '/0/private/AddOrder', 'rest-private-add-order', 'ws-l3']) assert.throws(() => signNarrow({ endpointId: id, nonce: '1', secret: 'aGk=' }), /signs only/);
@@ -89,7 +90,7 @@ test('L3-03. the narrow auth helper: the documented permission vocabulary; any a
   try { const p = await bad.auth.proveDataKey(); assert.equal(p.ok, false); assert.equal(p.verdict, 'AUTHORITY_CAPABLE'); assert.deepEqual(p.forbidden, ['modify-trades']); assert.equal(p.keyFingerprint, keyFingerprintOf('the-key-value')); const tk = await bad.auth.fetchToken(); assert.equal(tk.ok, false); assert.equal(tk.reason, 'KEY_NOT_PROVEN'); assert.equal(bad.recorded.length, 1, 'no token request after a refused proof'); assert.equal(bad.leak(), false); assert.ok(bad.logs.some((m) => /refused \(AUTHORITY_CAPABLE/.test(m))); } finally { await bad.close(); }
   const good = await rig();
   try {
-    const p = await good.auth.proveDataKey(); assert.equal(p.ok, true); assert.equal(p.verdict, 'SAFE_DATA_KEY'); assert.equal(p.tokenPermission, true); assert.deepEqual(p.dataOnly, SAFE);
+    const p = await good.auth.proveDataKey(); assert.equal(p.ok, true); assert.equal(p.verdict, 'SAFE_L3_DATA_KEY'); assert.equal(p.blocker, null); assert.equal(p.l3Usable, true); assert.equal(p.tokenPermission, true); assert.deepEqual(p.dataOnly, SAFE);
     const tk = await good.auth.fetchToken(); assert.equal(tk.ok, true); assert.equal(tk.token, 'SYNTHETIC-TOKEN-VALUE'); assert.equal(tk.expiresTs, tk.issuedTs + 900_000);
     const st = good.auth.status(); assert.equal(st.proven, true); assert.equal(st.tokensIssued, 1); assert.equal(st.keyEnv, 'L3K'); assert.ok(!JSON.stringify(st).includes('SYNTHETIC') && !JSON.stringify(st).includes('the-key'));
     assert.equal(good.recorded.length, 2); for (const r of good.recorded) { assert.equal(r.body, '<redacted>'); assert.equal(r.headers['API-Key'], '<redacted>'); assert.equal(r.headers['API-Sign'], '<redacted>'); assert.equal(r.method, 'POST'); assert.match(r.redactedUrl, /^https:\/\/api\.kraken\.com\/0\/private\/(GetApiKeyInfo|GetWebSocketsToken)$/); }
@@ -98,6 +99,9 @@ test('L3-03. the narrow auth helper: the documented permission vocabulary; any a
     const reqs = good.fixture.requests; assert.equal(reqs.length, 2); assert.match(reqs[0].body, /^nonce=\d+$/); assert.equal(reqs[0].headers['content-type'], 'application/x-www-form-urlencoded'); assert.equal(reqs[0].headers['api-key'], 'the-key-value'); assert.ok(reqs[0].headers['api-sign'].length > 40); assert.ok(BigInt(reqs[1].body.slice(6)) > BigInt(reqs[0].body.slice(6)));
   } finally { await good.close(); }
   const missing = await rig({ env: {} }); try { const p = await missing.auth.proveDataKey(); assert.equal(p.verdict, 'CREDENTIAL_MISSING'); assert.equal(missing.recorded.length, 0); } finally { await missing.close(); }
+  // W8: a non-authority key WITHOUT the token permission is proven as NON_AUTHORITY_KEY: no token is fetched, the blocker is named in the proof, the status and the log
+  const noTok = await rig({ permissions: ['query-funds', 'query-ledger'] });
+  try { const p = await noTok.auth.proveDataKey(); assert.equal(p.ok, false); assert.equal(p.verdict, 'NON_AUTHORITY_KEY'); assert.equal(p.blocker, 'TOKEN_PERMISSION_MISSING'); assert.deepEqual(p.forbidden, []); const tk = await noTok.auth.fetchToken(); assert.equal(tk.ok, false); assert.equal(tk.reason, 'KEY_NOT_PROVEN'); assert.equal(tk.blocker, 'TOKEN_PERMISSION_MISSING'); assert.equal(noTok.recorded.length, 1, 'no token request'); assert.equal(noTok.auth.status().blocker, 'TOKEN_PERMISSION_MISSING'); assert.equal(noTok.auth.status().l3Usable, false); assert.ok(noTok.logs.some((m) => /NON_AUTHORITY_KEY: TOKEN_PERMISSION_MISSING/.test(m))); assert.equal(noTok.leak(), false); } finally { await noTok.close(); }
   const denied = await rig({ tokenOk: false }); try { await denied.auth.proveDataKey(); const tk = await denied.auth.fetchToken(); assert.equal(tk.ok, false); assert.equal(tk.reason, 'PROVIDER_REJECTED'); } finally { await denied.close(); }
   assert.throws(() => createL3AuthHelper({ transport: { request: async () => ({}) }, keyEnv: 'SAME', secretEnv: 'SAME' }), /dedicated/);
 });
@@ -107,7 +111,7 @@ test('L3-04. the stream: registry host ws-l3.kraken.com under KRAKEN_SPOT (the p
   const r = await rig();
   try {
     const stream = r.make([MARKET('BTC/USD')]);
-    const started = await stream.start(); assert.equal(started.ok, true); assert.equal(started.verdict, 'SAFE_DATA_KEY');
+    const started = await stream.start(); assert.equal(started.ok, true); assert.equal(started.verdict, 'SAFE_L3_DATA_KEY'); assert.equal(started.blocker, null);
     const sock = await opened(r.sw); const subs = sock.sent.map((s) => JSON.parse(s)); assert.equal(subs.length, 1); assert.deepEqual(subs[0].params, { channel: 'level3', symbol: ['BTC/USD'], depth: 10, snapshot: true, token: 'SYNTHETIC-TOKEN-VALUE' }); assert.match(sock.url, /^wss:\/\/ws-l3\.kraken\.com\/v2$/);
     ack(sock, ['BTC/USD']); assert.equal(r.out.cov.at(-1).state, 'SUBSCRIBED'); assert.equal(r.out.cov.at(-1).family, 'L3_MICROSTRUCTURE');
     r.advance(1000); sock.deliver({ channel: 'level3', type: 'snapshot', data: [FX] });
@@ -140,6 +144,8 @@ test('L3-05. fences and bounds: an authority-capable or missing key never opens 
   try { const s = bad.make([MARKET()]); const st = await s.start(); assert.equal(st.ok, false); assert.equal(st.verdict, 'AUTHORITY_CAPABLE'); assert.equal(bad.sw.sockets.length, 0, 'no socket'); assert.equal(bad.out.cov.at(-1).state, 'ACCESS_BLOCKED'); assert.deepEqual(bad.out.cov.at(-1).reasonCodes, ['ENTITLEMENT_DENIED']); assert.equal(s.status().runtime, 'BLOCKED'); assert.equal(s.status().blocked, true); assert.equal(bad.leak(), false); await s.stop(); } finally { await bad.close(); }
   const missing = await rig({ env: {} });
   try { const s = missing.make([MARKET()]); const st = await s.start(); assert.equal(st.verdict, 'CREDENTIAL_MISSING'); assert.equal(missing.sw.sockets.length, 0); assert.deepEqual(missing.out.cov.at(-1).reasonCodes, ['CREDENTIAL_MISSING']); await s.stop(); } finally { await missing.close(); }
+  const noTok = await rig({ permissions: ['query-funds'] });
+  try { const s = noTok.make([MARKET()]); const st = await s.start(); assert.equal(st.ok, false); assert.equal(st.verdict, 'NON_AUTHORITY_KEY'); assert.equal(st.blocker, 'TOKEN_PERMISSION_MISSING'); assert.equal(noTok.sw.sockets.length, 0, 'a non-authority key without the token permission never opens a socket'); assert.deepEqual(noTok.out.cov.at(-1).reasonCodes, ['ENTITLEMENT_DENIED']); assert.equal(s.status().proof.blocker, 'TOKEN_PERMISSION_MISSING'); await s.stop(); } finally { await noTok.close(); }
   const tokenDenied = await rig({ tokenOk: false });
   try { const s = tokenDenied.make([MARKET()]); const st = await s.start(); assert.equal(st.ok, true); await H.waitFor(() => tokenDenied.out.cov.some((c) => c.state === 'ACCESS_BLOCKED'), { timeoutMs: 2000 }); assert.equal(tokenDenied.sw.latest().sent.length, 0, 'no subscribe without a token'); await H.waitFor(() => s.status().state === 'STOPPED', { timeoutMs: 3000 }); assert.equal(s.status().runtime, 'BLOCKED'); } finally { await tokenDenied.close(); }
   const many = await rig();
@@ -151,13 +157,15 @@ test('L3-05. fences and bounds: an authority-capable or missing key never opens 
     assert.equal(s.status().perBookOrderCap, 12);
     ack(sock, ['A/USD']); many.advance(1000); sock.deliver({ channel: 'level3', type: 'snapshot', data: [{ ...FX, symbol: 'A/USD' }] }); assert.equal(many.out.snaps.at(-1).payload.state, 'OVERFLOW'); assert.ok(s.status().dropped.includes('A/USD')); assert.equal(s.status().overflows, 0, 'a snapshot overflow is refused before it grows'); assert.deepEqual(many.out.cov.at(-1).reasonCodes, ['COVERAGE_OVERFLOW']);
     // the message-rate bound: the 4th message inside one wall second is dropped and counted
-    ack(sock, ['B/USD']); const small = { symbol: 'B/USD', checksum: null, bids: FX.bids.slice(0, 3), asks: FX.asks.slice(0, 3) }; many.advance(1000); sock.deliver({ channel: 'level3', type: 'snapshot', data: [small] }); assert.equal(s.books.get('B/USD').synchronized, true);
-    for (let i = 0; i < 4; i += 1) sock.deliver({ channel: 'level3', type: 'update', data: [{ symbol: 'B/USD', checksum: null, bids: [], asks: [] }] });
+    ack(sock, ['B/USD']); const pb = createL3Book({ symbol: 'B/USD', depth: 10 }); pb.applySnapshot({ bids: FX.bids.slice(0, 3), asks: FX.asks.slice(0, 3) }, { receivedTs: T0 }); const small = { symbol: 'B/USD', checksum: pb.checksum(), bids: FX.bids.slice(0, 3), asks: FX.asks.slice(0, 3) }; many.advance(1000); sock.deliver({ channel: 'level3', type: 'snapshot', data: [small] }); assert.equal(s.books.get('B/USD').synchronized, true);
+    for (let i = 0; i < 4; i += 1) sock.deliver({ channel: 'level3', type: 'update', data: [{ symbol: 'B/USD', checksum: pb.checksum(), bids: [], asks: [] }] });
     assert.ok(s.status().queueDropped >= 1); assert.ok(many.out.cov.some((c) => c.state === 'DROPPED' && c.reasonCodes.includes('QUEUE_DROPPED'))); assert.equal(s.books.get('B/USD').synchronized, false);
     } finally { if (s) await s.stop(); }
   } finally { await many.close(); }
   const p = loadPolicy(H.policyWith({ providers: ['KRAKEN_SPOT'] })); assert.equal(l3Enabled(p), false); assert.deepEqual(p.providers.KRAKEN_SPOT.l3, L3_DEFAULTS); assert.notEqual(L3_DEFAULTS.keyEnv, L3_DEFAULTS.secretEnv); assert.match(L3_DEFAULTS.keyEnv, /L3/);
+  assert.equal(L3_DEFAULTS.rateTier, 'STANDARD', 'the shipped tier is the standard published limit'); assert.deepEqual(L3_SUBSCRIPTION_WEIGHTS, { 10: 5, 100: 25, 1000: 100 }); assert.deepEqual(L3_RATE_BUDGETS, { STANDARD: 200, PRO: 500 });
+  const legacy = H.policyWith({ providers: ['KRAKEN_SPOT'] }); delete legacy.providers.KRAKEN_SPOT.l3.rateTier; assert.equal(loadPolicy(legacy).providers.KRAKEN_SPOT.l3.rateTier, 'STANDARD', 'an older l3 block fails safe to STANDARD');
   const shared = H.policyWith({ providers: ['KRAKEN_SPOT'] }); shared.providers.COINGLASS.credentialEnv = 'KRAKEN_L3_DATA_API_KEY'; assert.throws(() => loadPolicy(shared), /DEDICATED/);
   const bad2 = (mut) => { const q = H.policyWith({ providers: ['KRAKEN_SPOT'] }); mut(q.providers.KRAKEN_SPOT.l3); assert.throws(() => loadPolicy(q), /l3/); };
-  bad2((l) => { l.depth = 50; }); bad2((l) => { l.maxSymbols = 201; }); bad2((l) => { l.keyEnv = 'lower'; }); bad2((l) => { l.secretEnv = l.keyEnv; }); bad2((l) => { l.maxSegmentBytes = l.maxRunBytes + 1; }); bad2((l) => { l.extra = true; });
+  bad2((l) => { l.depth = 50; }); bad2((l) => { l.rateTier = 'ULTRA'; }); bad2((l) => { l.rateTier = 'pro'; }); bad2((l) => { l.maxSymbols = 201; }); bad2((l) => { l.keyEnv = 'lower'; }); bad2((l) => { l.secretEnv = l.keyEnv; }); bad2((l) => { l.maxSegmentBytes = l.maxRunBytes + 1; }); bad2((l) => { l.extra = true; });
 });

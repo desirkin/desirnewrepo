@@ -7,6 +7,7 @@
 // 32434e8 record corpus; never regenerated.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ownAdvisoryHolders } from './helpers/pg-fence.js';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -217,7 +218,7 @@ if (!TEST_URL) {
     try { assert.equal(await db.connect(), true); assert.equal(await admin.connect(), true); await runMigrations(db); const repo = new Repository(db); const persistence = () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) }); await fn({ admin, mkJournal: () => rumor2JournalStore({ persistence }) }); }
     finally { await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}); await db.end(); await admin.end(); }
   };
-  const killAdvisoryBackends = async (admin) => { const { rows } = await admin.query(`SELECT l.pid FROM pg_locks l WHERE l.locktype='advisory' AND l.granted AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND l.pid <> pg_backend_pid()`); for (const r of rows) await admin.query(`SELECT pg_terminate_backend($1)`, [r.pid]).catch(() => {}); return rows.length; };
+  const killAdvisoryBackends = async (admin) => { const { rows } = await ownAdvisoryHolders(admin); for (const r of rows) await admin.query(`SELECT pg_terminate_backend($1)`, [r.pid]).catch(() => {}); return rows.length; };
   const events = async (j) => (await j.read()).events;
   const acquire = async (j) => { const w = await j.acquireWriter(); assert.equal(w.ok, true); return w; };
   const liveRt = (clock) => { const rt = createSocialRuntime({ provider: BLUESKY_OFFICIAL, mapCommit: jetstreamCommitToRaw, cursorOf: jetstreamCursorOf, filter: FILTER, now: () => clock.ms, mode: 'REPLAY', fixtures: [], log: () => {}, cursorOnlyIntervalMs: 0 }); return rt; };

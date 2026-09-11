@@ -10,6 +10,7 @@
 // the tightened laws.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ownAdvisoryHolders } from './helpers/pg-fence.js';
 import { mkdtempSync, rmSync, rmSync as rm, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -501,12 +502,7 @@ if (!TEST_URL) {
       { const w = await A.journal.acquireWriter(); assert.equal(w.ok, true); assert.ok(Number.isInteger(w.epoch), 'acquisition returns a writer epoch'); }
       assert.deepEqual(await B.journal.acquireWriter(), { ok: false, reason: 'HELD' });
       // kill A's fence SESSION from outside — the crash-failover law
-      const { rows } = await db.query(
-        `SELECT l.pid FROM pg_locks l
-          WHERE l.locktype = 'advisory' AND l.granted
-            AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
-            AND l.pid <> pg_backend_pid()`
-      );
+      const { rows } = await ownAdvisoryHolders(db);
       assert.ok(rows.length >= 1, 'the advisory fence is visible in pg_locks');
       for (const r of rows) await db.query(`SELECT pg_terminate_backend($1)`, [r.pid]).catch(() => {});
       // the server released the lock with the session: B can now acquire

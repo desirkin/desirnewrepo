@@ -6,6 +6,7 @@
 // these drills pin the repair.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ownAdvisoryHolders } from './helpers/pg-fence.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -347,10 +348,7 @@ if (!TEST_URL) {
     }
   };
   const killAdvisoryBackends = async (admin) => {
-    const { rows } = await admin.query(
-      `SELECT l.pid FROM pg_locks l WHERE l.locktype='advisory' AND l.granted
-         AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND l.pid <> pg_backend_pid()`
-    );
+    const { rows } = await ownAdvisoryHolders(admin);
     for (const r of rows) await admin.query(`SELECT pg_terminate_backend($1)`, [r.pid]).catch(() => {});
     return rows.length;
   };

@@ -119,6 +119,14 @@ NOT the Level 2 algorithm (which aggregates a level); it verifies queue priority
   `SCOPE_EVICTED` event — it left OUR window; it was NOT cancelled;
 - `DELETE` means "left the visible book": fill, cancel and expiry are indistinguishable. Nothing here says "proven
   cancel";
+- W10: every snapshot / update record preserves the exchange (matching-engine) message `timestamp` as `sourceEventTs`
+  BESIDE `receivedTs` / `knownAtTs` (our clocks; never replaced); an INTERVAL sample names the exchange clock of the
+  message that shaped the state; a source clock ahead of receipt beyond the shared tolerance is `CLOCK_CONFLICT`
+  (degraded window support), never normalized;
+- W11: the documented checksum must be PRESENT and VERIFIED for a record to be `KNOWN`; a snapshot or update WITHOUT
+  a checksum is `CHECKSUM_MISSING` -> desynchronized + resubscribe (a `DEGRADED` / `CHECKSUM_UNVERIFIED` coverage
+  fact); an unverified checksum makes the record `PARTIAL` with `CHECKSUM_UNVERIFIED`, which is never "synchronized
+  enough" for a primary feature;
 - an unknown order in `modify` / `delete`, a duplicate `add`, a checksum mismatch, a crossed book or the per-book
   order cap (`OVERFLOW`) desynchronizes the book; the stream records a `GAP` / `DESYNCHRONIZED` / `DEGRADED` /
   `OVERFLOW` coverage fact and resubscribes for a fresh snapshot (an overflowed symbol is dropped, explicitly);
@@ -132,17 +140,41 @@ Sequence: prove the DEDICATED data key (documented permission vocabulary: `query
 `withdraw-funds`, `earn-funds`, `query-open-trades`, `query-closed-trades`, `modify-trades`, `close-trades`,
 `query-ledger`, `export-data`, `create-ws-token`, `add-withdraw-address`, `update-withdraw-address`); FAIL CLOSED on
 any authority-capable permission (`modify-trades`, `close-trades`, `add-funds`, `withdraw-funds`, `earn-funds`,
-`add-withdraw-address`, `update-withdraw-address`) and on any undocumented value; only a `SAFE_DATA_KEY` fetches a
-token; only then does a socket open; the subscription is `level3` only. The key, secret, token, signed payload and
+`add-withdraw-address`, `update-withdraw-address`) and on any undocumented value. Two SEPARATE verdicts (closeout W8):
+`NON_AUTHORITY_KEY` — safe from trading authority but WITHOUT the documented token capability `create-ws-token`, so
+L3 stays blocked with the blocker `TOKEN_PERMISSION_MISSING` — and `SAFE_L3_DATA_KEY` (no authority, no undocumented
+value, token capability present, identity / permission probe succeeded). Only a `SAFE_L3_DATA_KEY` fetches a token;
+only then does a socket open; the subscription is `level3` only. The key, secret, token, signed payload and
 nonce are never logged, never persisted, never in `status()`; the transport marks the two endpoints `sensitive` so the
 recorder receives a redacted body and redacted `API-Key` / `API-Sign` headers. The only retained key fact is a
 fingerprint (sha256 prefix).
 
 **Resource bounds** (`providers.KRAKEN_SPOT.l3`, shipped `enabled: false`; dedicated env NAMES
 `KRAKEN_L3_DATA_API_KEY` / `KRAKEN_L3_DATA_API_SECRET`, which must differ from every other credential name in the
-policy): `depth` (default 10), `maxSymbols`, `maxSubscriptionsPerSecond`, `maxQueueMessages` (messages per wall
-second; beyond it the stream DROPS with `QUEUE_DROPPED` coverage and resyncs), `maxInMemoryOrders` (split per book;
-beyond it `OVERFLOW`), `maxRunBytes`, `maxSegmentBytes`, `maxReconnectAttempts`, `reconnectBackoffMaxMs`.
+policy): `depth` (default 10), `rateTier` (`STANDARD` shipped; `PRO` only when the account tier is separately proven),
+`maxSymbols`, `maxSubscriptionsPerSecond` (an operator symbols-per-second bound on top of the weighted counter),
+`maxQueueMessages` (messages per wall second; beyond it the stream DROPS with `QUEUE_DROPPED` coverage and resyncs),
+`maxInMemoryOrders` (split per book; beyond it `OVERFLOW`), `maxRunBytes`, `maxSegmentBytes`,
+`maxReconnectAttempts`, `reconnectBackoffMaxMs`.
+
+**W9 — ONE weighted subscription limiter** (`createSubscriptionPacer`, documented 2026-09-10): the Kraken L3
+subscription counter grows by +5 / +25 / +100 points per symbol for depth 10 / 100 / 1000 against a budget of 200
+points per second on the standard tier (500 on the pro tier ONLY with `rateTier: PRO`; an unknown tier fails safe to
+STANDARD). The initial subscribe, every resubscribe after a desync AND every unsubscribe pass through the same pacer
+(unsubscribes are charged conservatively at the same weight); the remainder waits a real second and is never dropped.
+
+**W12 — no silent capture loss** (`edge-capture.js`): an admitted record the recorder cannot persist (line bound) is
+counted and leaves a DURABLE `DROPPED` / `RECORD_REJECTED` coverage marker in `coverage.jsonl`; the sealed manifest
+says `capture: PARTIAL` with `rejected` / `dropMarkers` counts, never COMPLETE; a run / segment byte bound stops the
+recording explicitly (no bundle is sealed, the error is returned); `readEdgeCapture` refuses a manifest claiming
+COMPLETE beside markers. The evaluation counts the markers as dark gap records.
+
+**W13 — Charts partial acquisition** (`kraken-charts.js`): a page cap (`PAGINATION_INCOMPLETE`), a non-advancing
+cursor, a later page failing after good rows (`ACQUISITION_INCOMPLETE`) or skipped misaligned buckets
+(`MISALIGNED_BUCKET`) keep the retained rows AND name the incompleteness in the coverage record with
+`meta.acquisition: PARTIAL`; a derivatives feature whose lookback touches such a record is `PARTIAL` /
+`COVERAGE_INCOMPLETE`, never COMPLETE. A historical re-fetch remains a new vintage known at fetch time; units stay
+NATIVE / `UNIT_UNVERIFIED`.
 
 ## 5. Dark features (`market-lab/edge-recipes.js`)
 
@@ -160,20 +192,60 @@ unless asked for; a missing bucket is a gap (never a zero); one native field of 
 §7.2 `L3_MICROSTRUCTURE`: `visible_order_age_imbalance`, `queue_turnover_imbalance`, `depth_persistence`,
 `new_order_impulse`, `visible_liquidity_disappearance` (DELETE vs SCOPE_EVICTED vs GAP — three different things),
 `replenishment_after_pressure`, `queue_concentration`, `order_age_quantiles`, `top_level_churn`,
-`microstructure_pressure_change`. A coverage break or an epoch change inside the window lowers support to PARTIAL.
+`microstructure_pressure_change`. A coverage break, an epoch change, an unverified checksum on the latest snapshot or
+any event batch (`CHECKSUM_UNVERIFIED`), a latest snapshot received before the window start (`SNAPSHOT_STALE`) or a
+source clock in conflict (`CLOCK_CONFLICT`) inside the window lowers support to PARTIAL (`L3_WINDOW_REASONS`).
 
-## 6. The prospective evaluation harness (`market-lab/edge-evaluation.js`)
+## 6. The sealed evaluation chain (`edge-evaluation.js`, `edge-eval-records.js`, `edge-eval-store.js`, `edge-capture.js`)
 
 Arms are FEATURE SETS: `EXISTING_MARKET_BASELINE`, `BASELINE_PLUS_DERIVATIVES_PRESSURE`,
-`BASELINE_PLUS_L3_MICROSTRUCTURE`, `BASELINE_PLUS_BOTH`. Horizons: 1, 5, 15, 30, 60 minutes. A declaration
-(`declareEdgeEvaluation`) fixes the window, the fractions, the embargo (>= the longest horizon), the cadence, the
-subject and the seed and is `prospective` only when declared at or before its start. Splits are chronological blocks;
-a decision point whose outcome window crosses its block boundary is PURGED (dependency-safe); the holdout stays SEALED
-unless opened explicitly. The law mirrors `judge/experiment.js` without importing it (market-lab never imports
-`judge/`). Features at `t` see only `knownAtTs <= t`; labels are forward log returns from closed 1-minute spot candles
-known at the evaluation's own as-of; a label beyond the as-of is censored (`null`). Scores are Spearman rank
-correlations per feature / horizon / split with a minimum n; arms aggregate their own features. The report carries
-`edgeClaim: NOT_MADE`, `promotionCriteria: NONE`, `authority: NONE`; there is no threshold and no promotion path.
+`BASELINE_PLUS_L3_MICROSTRUCTURE`, `BASELINE_PLUS_BOTH`. Horizons: 1, 5, 15, 30, 60 minutes. Scores are Spearman rank
+correlations per feature / horizon / split with a minimum n; arms aggregate their own features. The law mirrors
+`judge/experiment.js` without importing it (market-lab never imports `judge/`). Research only: nothing here is Judge
+release evidence; there is no threshold and no promotion path; every report carries `edgeClaim: NOT_MADE`,
+`promotionCriteria: NONE`, `releaseEvidence: NONE` (`NEVER` for a retrospective), every authority `NONE`.
+
+The closeout (W1-W7) replaced the ad-hoc harness with a SEALED TRUTH CHAIN, one append-only, digest-chained record
+file per evaluation under `<research-root>/edge-eval/<evaluation-id>.jsonl` (exclusive lock per append; the SAME
+closed semantic validators on write and on read; a valid hash chain is necessary, never sufficient):
+
+`DECLARED -> DEVELOPMENT_ALLOWED (EVALUATED looks) -> SELECTION_LOCKED -> HOLDOUT_OPENED -> HOLDOUT_CONSUMED`
+`(QUALIFIED | CONSUMED_BUT_UNQUALIFIED)`, with `DATASET_SEALED` manifests per look and one for the opened run.
+
+- **W1 exact labels**: the label endpoint is the closed 1-minute candle ending EXACTLY at `t + H` (and the anchor
+  exactly at `t`); a missing exact endpoint is CENSORED (`null`), never the nearest candle; the label is known only at
+  the later candle's own `knownAtTs`, so it is censored at any as-of before that.
+- **W2 real prospective precommitment**: `edge-declare` creates the declaration with the RUNTIME clock (no
+  `--declared-at`; a typed `createdTs` is not a parameter); `prospective` is true only when the declaration existed at
+  or before its start; the chain refuses a declaration whose clock is not the runtime clock of its record (backdated or
+  future-dated); the durable record binds `declarationId` (content digest), `createdTs` / `knownAtTs`, window, selection
+  deadline (= holdout start), split law, recipe set version + digest, horizons, arms / feature sets, scoring law, code
+  digest, policy digest, source roots (bundle id + manifest sha of the dark and the public bundle), seed, holdout
+  definition. The evaluator cannot mint a declaration; `edge-retrospective` says `mode: RETROSPECTIVE`,
+  `releaseEvidence: NEVER`, touches no chain, opens no holdout, and refuses a window that has not started.
+- **W3 one-shot holdout**: a look after the lock, a lock without a look or after the deadline, an opening before the
+  lock, a second opening, a second lock, a second consumption and anything after consumption are refused; opening
+  consumes the one shot even when the result is disappointing; a crash resumes ONLY the same opened run (same
+  `runId`, lock, declaration, code / policy / source bindings, as-of: the rebuilt rows must be the sealed rows).
+- **W4 no caller-fabricated dataset**: `evaluateEdge` / `consumeEdgeHoldout` take no rows; rows are built internally
+  from the declared sealed bundles (source-root binding refuses foreign bundles); the sealed dataset manifest binds the
+  declaration digest, code / policy / recipe digests, source bundle digests, time range, split membership, row identity
+  digest, counts, availability per split x feature x horizon (the ONLY n a report may claim), support counts, censored
+  counts and the coverage summary; `scoreRowsPrimitive` is a visibly internal primitive returning bare tables that the
+  report validator refuses; `edge-verify` rebuilds every sealed dataset from the bundles and exposes fabricated rows
+  (`ROWS_NOT_DERIVED_FROM_SOURCES`).
+- **W5 closed semantic report validation**: `reportError` is recursive over exact keys / vocabularies and reconciles
+  evaluation / declaration ids, recipe version / digest, law text, decision counts, split counts, the arm set against
+  the locked selection, every n against the sealed availability, per-feature state contradictions, the aggregates
+  against the features, the holdout state against the stage, the dataset digest, the clocks against the manifest and
+  the release-evidence class; a validly rehashed lie is refused exactly like a wrong hash.
+- **W6 stale current-state inputs**: the displayed-book spread reuses the shared 15 s book law
+  (`BOOK_ENDPOINT_MAX_AGE_MS`); the latest closed candle must end within one interval of `t`; the latest L3 snapshot
+  must be received inside its window; a derivatives bucket older than two intervals is STALE. Stale is `null`, never
+  "current".
+- **W7 COMPLETE-only primary scoring**: a feature value enters the primary statistic only with support COMPLETE (and,
+  for L3, a verified checksum and no clock conflict); PARTIAL / MISSING / STALE / UNVERIFIED rows are `null` with the
+  reason retained in the manifest's support counts; nothing is zero-filled. Secondary diagnostics never mingle with it.
 
 ## 7. What this ticket does NOT do
 
@@ -186,19 +258,29 @@ provider outside Kraken; no new npm dependency (the CRC32 comes from `node:zlib`
 ## 8. Live smoke
 
 Automated tests are mock-only. A Level 3 network smoke may run ONLY with an explicitly dedicated non-trading key
-that `proveDataKey()` reports as `SAFE_DATA_KEY`; otherwise the closeout reports `NOT_RUN_NO_SAFE_DATA_KEY`. The
-Charts public smoke is optional. There is no order smoke of any kind.
+that `proveDataKey()` reports as `SAFE_L3_DATA_KEY`; otherwise the closeout reports `NOT_RUN_NO_SAFE_L3_DATA_KEY`
+(a `NON_AUTHORITY_KEY` names `TOKEN_PERMISSION_MISSING`). The Charts public smoke is optional. There is no order
+smoke of any kind.
 
 ```
 # both dark senses, bounded, sealed EDGE_CAPTURE bundle (policy: charts.enabled / l3.enabled true, provider enabled)
 KRAKEN_L3_DATA_API_KEY=... KRAKEN_L3_DATA_API_SECRET=... \
 node bin/market-research.js edge-capture --policy <policy.json> --subjects <subjects.json> --duration-seconds 120 --out <DIR>/edge --research-root <ROOT>
-# offline evaluation against a sealed public capture (baseline + labels); measures, never promotes
-node bin/market-research.js edge-evaluate --edge-capture <DIR>/edge --capture <DIR>/cap --subject BTC --spot-symbol BTC/USD --futures-symbol PF_XBTUSD \
-  --evaluation-id e1 --declared-at <UTC> --start <UTC> --duration-seconds 7200 --embargo-seconds 3600 --as-of <UTC> --seed s1
+# the sealed chain (research only; measures, never promotes): declare BEFORE the window starts (runtime clock), look, lock, open, consume
+node bin/market-research.js edge-declare --edge-capture <DIR>/edge --capture <DIR>/cap --research-root <ROOT> --subject BTC --spot-symbol BTC/USD \
+  --futures-symbol PF_XBTUSD --evaluation-id e1 --start <UTC> --duration-seconds 7200 --embargo-seconds 3600 --seed s1
+node bin/market-research.js edge-evaluate --edge-capture <DIR>/edge --capture <DIR>/cap --research-root <ROOT> --evaluation-id e1 --stage DEVELOPMENT --as-of <UTC>
+node bin/market-research.js edge-lock --research-root <ROOT> --evaluation-id e1 --arm BASELINE_PLUS_BOTH
+node bin/market-research.js edge-holdout-open --research-root <ROOT> --evaluation-id e1
+node bin/market-research.js edge-holdout-evaluate --edge-capture <DIR>/edge --capture <DIR>/cap --research-root <ROOT> --evaluation-id e1 --as-of <UTC>
+node bin/market-research.js edge-verify --edge-capture <DIR>/edge --capture <DIR>/cap --research-root <ROOT> --evaluation-id e1
+# the retrospective convenience: RETROSPECTIVE, release evidence NEVER, no chain, no holdout
+node bin/market-research.js edge-retrospective --edge-capture <DIR>/edge --capture <DIR>/cap --as-of <UTC> --subject BTC --spot-symbol BTC/USD \
+  --futures-symbol PF_XBTUSD --evaluation-id r1 --start <UTC> --duration-seconds 7200 --embargo-seconds 3600 --seed s1
 ```
 
 ## 9. Tests
 
 `test/market-kraken-charts.test.js`, `test/market-kraken-l3.test.js`, `test/market-kraken-edge-truth.test.js`,
-`test/market-kraken-edge-fences.test.js`, `test/market-kraken-edge-evaluation.test.js`.
+`test/market-kraken-edge-fences.test.js`, `test/market-kraken-edge-evaluation.test.js` (the chain E-01..E-05) and
+`test/market-kraken-edge-closeout.test.js` (the thirteen witnesses W1..W13 as negative regressions).

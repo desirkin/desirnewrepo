@@ -24,6 +24,9 @@ import { startPersistence } from './persistence/runtime.js';
 import { createDeepMarketSource } from './market-lab/deep-market-adapter.js';
 
 console.log('COBRA FLYING — tape + cockpit. Default answer is NO TRADE.');
+// SERPENT PAPER profile (COBRA_PROFILE, applied by `cobra paper run`): the composition
+// below is unchanged; the profile only sets the documented enables and forces JUDGE_MODE=PAPER / no private / no orders.
+if (process.env.COBRA_PROFILE) console.log(`PROFILE ${process.env.COBRA_PROFILE} — JUDGE_MODE ${process.env.JUDGE_MODE ?? 'unset'} · allowPrivate ${process.env.JUDGE_ALLOW_PRIVATE ?? 'unset'} · allowOrders ${process.env.JUDGE_ALLOW_ORDERS ?? 'unset'}`);
 
 // Deployment-disk probe: if the data dir can't be written, say exactly that
 // and name the remedy — a silent write failure must never masquerade as a
@@ -166,6 +169,8 @@ try {
   await runTape({ executionFeed: judgeRun ? judgeRun.tapeFeed : null, observer: marketResearch ? marketResearch.observer : null }); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
   if (judgeRun) { try { await judgeRun.stop(); } catch (err) { console.error(`JUDGE stop failed: ${err.message}`); } }
   if (marketResearch) { try { await marketResearch.stop(); } catch (err) { console.error(`MARKET RESEARCH stop failed: ${err.message}`); } }
+  // paper launch seam: components the paper launcher started stop cleanly BEFORE the process exits
+  if (typeof globalThis.serpentPaperShutdown === 'function') { try { await globalThis.serpentPaperShutdown(); } catch (err) { console.error(`PAPER shutdown seam failed: ${err.message}`); } }
   process.exit(0);
 } catch (err) {
   // Tape died hard (e.g. unwritable disk mid-run). Keep the cockpit serving

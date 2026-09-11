@@ -46,8 +46,11 @@ const PROVIDER_POLICY_KEYS = ['enabled', 'credentialEnv', 'plan', 'limits', 'per
 export const CHARTS_POLICY_KEYS = Object.freeze(['enabled', 'analyticsTypes', 'intervalsS', 'maxLookbackMs', 'maxPagesPerRequest', 'pollingCadenceMs', 'maxCallsPerDay']);
 export const CHARTS_DEFAULTS = deepFreeze({ enabled: false, analyticsTypes: ['open-interest', 'aggressor-differential', 'liquidation-volume', 'cvd', 'future-basis', 'funding'], intervalsS: [60, 300, 900, 3600], maxLookbackMs: 30 * 86_400_000, maxPagesPerRequest: 10, pollingCadenceMs: 300_000, maxCallsPerDay: 2_000 });
 export const CHARTS_CEILINGS = deepFreeze({ maxLookbackMs: 400 * 86_400_000, maxPagesPerRequest: 50, maxCallsPerDay: 20_000, minPollingCadenceMs: 60_000 });
-export const L3_POLICY_KEYS = Object.freeze(['enabled', 'keyEnv', 'secretEnv', 'depth', 'maxSymbols', 'maxSubscriptionsPerSecond', 'maxQueueMessages', 'maxInMemoryOrders', 'maxRunBytes', 'maxSegmentBytes', 'maxReconnectAttempts', 'reconnectBackoffMaxMs']);
-export const L3_DEFAULTS = deepFreeze({ enabled: false, keyEnv: 'KRAKEN_L3_DATA_API_KEY', secretEnv: 'KRAKEN_L3_DATA_API_SECRET', depth: 10, maxSymbols: 8, maxSubscriptionsPerSecond: 2, maxQueueMessages: 10_000, maxInMemoryOrders: 50_000, maxRunBytes: 1024 * 1024 * 1024, maxSegmentBytes: 32 * 1024 * 1024, maxReconnectAttempts: 20, reconnectBackoffMaxMs: 60_000 });
+// rateTier: the documented Kraken L3 subscription counter budget (STANDARD 200 points/s; PRO 500 only when the account tier is
+// separately proven and configured). The weighted counter itself lives in providers/kraken-l3.js (W9); it fails safe to STANDARD.
+export const L3_RATE_TIERS = Object.freeze(['STANDARD', 'PRO']);
+export const L3_POLICY_KEYS = Object.freeze(['enabled', 'keyEnv', 'secretEnv', 'depth', 'rateTier', 'maxSymbols', 'maxSubscriptionsPerSecond', 'maxQueueMessages', 'maxInMemoryOrders', 'maxRunBytes', 'maxSegmentBytes', 'maxReconnectAttempts', 'reconnectBackoffMaxMs']);
+export const L3_DEFAULTS = deepFreeze({ enabled: false, keyEnv: 'KRAKEN_L3_DATA_API_KEY', secretEnv: 'KRAKEN_L3_DATA_API_SECRET', depth: 10, rateTier: 'STANDARD', maxSymbols: 8, maxSubscriptionsPerSecond: 2, maxQueueMessages: 10_000, maxInMemoryOrders: 50_000, maxRunBytes: 1024 * 1024 * 1024, maxSegmentBytes: 32 * 1024 * 1024, maxReconnectAttempts: 20, reconnectBackoffMaxMs: 60_000 });
 export const L3_CEILINGS = deepFreeze({ maxSymbols: 200, maxSubscriptionsPerSecond: 50, maxQueueMessages: 100_000, maxInMemoryOrders: 500_000, maxReconnectAttempts: 1_000, reconnectBackoffMaxMs: 3_600_000 });
 const DARK_PROVIDER_KEYS = deepFreeze({ KRAKEN_DERIVATIVES: ['charts'], KRAKEN_SPOT: ['l3'] });
 function chartsPolicyError(c, w) {
@@ -68,6 +71,7 @@ function l3PolicyError(l, w, otherCredentialNames) {
   if (l.keyEnv === l.secretEnv) return `${w}: keyEnv and secretEnv must differ`;
   if (otherCredentialNames.includes(l.keyEnv) || otherCredentialNames.includes(l.secretEnv)) return `${w}: the L3 data key must be DEDICATED (its environment names are shared with another credential)`;
   if (!L3_DEPTHS.includes(l.depth)) return `${w}: depth must be 10, 100 or 1000`;
+  if (!L3_RATE_TIERS.includes(l.rateTier)) return `${w}: rateTier must be STANDARD or PRO (PRO only when the account tier is proven)`;
   for (const k of ['maxSymbols', 'maxSubscriptionsPerSecond', 'maxQueueMessages', 'maxInMemoryOrders', 'maxReconnectAttempts', 'reconnectBackoffMaxMs']) if (!isCount(l[k]) || l[k] === 0 || l[k] > L3_CEILINGS[k]) return `${w}: ${k} outside (0, ${L3_CEILINGS[k]}]`;
   if (!isCount(l.maxRunBytes) || l.maxRunBytes === 0 || l.maxRunBytes > RESOURCE_DEFAULTS.runBytes || !isCount(l.maxSegmentBytes) || l.maxSegmentBytes === 0 || l.maxSegmentBytes > RESOURCE_DEFAULTS.segmentBytes || l.maxSegmentBytes > l.maxRunBytes) return `${w}: byte bounds outside the shipped ceilings`;
   return null;
@@ -139,7 +143,7 @@ export function policyError(raw, where = 'policy') {
   return null;
 }
 // a loaded policy carries every bound explicitly: omitted optional resource / case keys take the shipped default (the ceiling), never more
-export function validatePolicy(raw) { const e = policyError(raw); if (e) return { ok: false, error: e, policy: null }; const p = structuredClone(raw); for (const k of RESOURCE_OPTIONAL_KEYS) if (!(k in p.resources)) p.resources[k] = RESOURCE_DEFAULTS[k]; for (const k of CASE_OPTIONAL_KEYS) if (!(k in p.cases)) p.cases[k] = CASE_DEFAULTS[k]; if (p.providers.KRAKEN_DERIVATIVES && !('charts' in p.providers.KRAKEN_DERIVATIVES)) p.providers.KRAKEN_DERIVATIVES.charts = structuredClone(CHARTS_DEFAULTS); if (p.providers.KRAKEN_SPOT && !('l3' in p.providers.KRAKEN_SPOT)) p.providers.KRAKEN_SPOT.l3 = structuredClone(L3_DEFAULTS); return { ok: true, error: null, policy: deepFreeze(p) }; }
+export function validatePolicy(raw0) { const raw = structuredClone(raw0); if (raw?.providers?.KRAKEN_SPOT?.l3 && typeof raw.providers.KRAKEN_SPOT.l3 === 'object' && raw.providers.KRAKEN_SPOT.l3 !== null && !('rateTier' in raw.providers.KRAKEN_SPOT.l3)) raw.providers.KRAKEN_SPOT.l3.rateTier = 'STANDARD'; /* an older l3 block fails safe to the standard tier */ const e = policyError(raw); if (e) return { ok: false, error: e, policy: null }; const p = structuredClone(raw); for (const k of RESOURCE_OPTIONAL_KEYS) if (!(k in p.resources)) p.resources[k] = RESOURCE_DEFAULTS[k]; for (const k of CASE_OPTIONAL_KEYS) if (!(k in p.cases)) p.cases[k] = CASE_DEFAULTS[k]; if (p.providers.KRAKEN_DERIVATIVES && !('charts' in p.providers.KRAKEN_DERIVATIVES)) p.providers.KRAKEN_DERIVATIVES.charts = structuredClone(CHARTS_DEFAULTS); if (p.providers.KRAKEN_SPOT && !('l3' in p.providers.KRAKEN_SPOT)) p.providers.KRAKEN_SPOT.l3 = structuredClone(L3_DEFAULTS); return { ok: true, error: null, policy: deepFreeze(p) }; }
 export const policyDigest = (policy) => canonicalDigest(policy);
 export const loadPolicy = (raw) => { const r = validatePolicy(raw); if (!r.ok) fail('INVALID_INPUT', r.error); return r.policy; };
 

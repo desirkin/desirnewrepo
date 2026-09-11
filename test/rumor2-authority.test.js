@@ -46,7 +46,7 @@ const frozenCoreFiles = rumor2Files.filter((f) => !SOCIAL_FILE_RE.test(f));
 // the exact read-only exception to the single-composition-root law, enumerated by filename and permitted pure exports
 // MARKET-LAB: two more pure readers of the research family's frozen vocabularies / contract validator (no runtime, no strainer):
 //   evidence/social-projection.js (the detached Social projection DTO) and market-lab/deep-market-adapter.js (validateDeepMarketWindow)
-const OFFLINE_RESEARCH_FILES = ['evidence/social-projection.js', 'market-lab/deep-market-adapter.js', 'bin/social-research.js', 'persistence/social-research-export.js', 'research/archive.js', 'research/artifacts.js', 'research/bundle.js', 'research/contracts.js', 'research/evaluation.js', 'research/features.js', 'research/identity.js', 'research/outcomes.js', 'research/pipeline.js', 'research/relations.js', 'research/schemas.js', 'research/snapshot.js'];
+const OFFLINE_RESEARCH_FILES = ['paper/inventory.js', 'evidence/social-projection.js', 'market-lab/deep-market-adapter.js', 'bin/social-research.js', 'persistence/social-research-export.js', 'research/archive.js', 'research/artifacts.js', 'research/bundle.js', 'research/contracts.js', 'research/evaluation.js', 'research/features.js', 'research/identity.js', 'research/outcomes.js', 'research/pipeline.js', 'research/relations.js', 'research/schemas.js', 'research/snapshot.js'];
 const OFFLINE_RESEARCH_RUMOR2_IMPORTS = {
   // the contracts module imports the AUTHORITATIVE closed vocabularies rather than restating them: pure frozen
   // string lists, no runtime, no collector, no provider — provenance/vocabulary reuse, never an authority allowance
@@ -63,6 +63,9 @@ const OFFLINE_RESEARCH_RUMOR2_IMPORTS = {
 // adapter consumes the v1 market contract validator + version (pure function + constant). Neither names a runtime or collector.
 OFFLINE_RESEARCH_RUMOR2_IMPORTS['evidence/social-projection.js'] = { 'social-research-dossier.js': ['RESEARCH_ENTRANCE_KINDS', 'RESEARCH_STATES', 'RESEARCH_EPISODE_STATES', 'RESEARCH_PACKET_STATUSES'], 'social-research-composite.js': ['COMPOSITE_VIEW_VERSION', 'COMPOSITE_HISTORY_STATES'], 'social-research-profile.js': ['SOURCE_RETENTION_STATES', 'SOURCE_RESOURCE_HISTORY_STATES'] };
 OFFLINE_RESEARCH_RUMOR2_IMPORTS['market-lab/deep-market-adapter.js'] = { 'social-research-market.js': ['validateDeepMarketWindow', 'RESEARCH_MARKET_CONTRACT_VERSION'] };
+// SERPENT PAPER: the sensor inventory reads the frozen provider registries (pure lists) — a read-only status surface with no
+// trading, control or model authority (test/paper-runtime P-07); the preflight reads only the collector's PUBLISHED status
+OFFLINE_RESEARCH_RUMOR2_IMPORTS['paper/inventory.js'] = { 'registry.js': ['PROVIDERS'], 'social-registry.js': ['SOCIAL_PROVIDERS'] };
 const OFFLINE_RESEARCH_RUMOR2_IMPORTERS = Object.keys(OFFLINE_RESEARCH_RUMOR2_IMPORTS);
 assert.ok(socialFiles.length >= 6, 'the social surface is actually scanned');
 assert.ok(frozenCoreFiles.length >= 8, 'the frozen non-social core is actually scanned');

@@ -31,7 +31,13 @@ node bin/market-research.js capture  --policy <policy.json> --subjects <subjects
 node bin/market-research.js build    --capture <SEALED_CAPTURE_DIR> --as-of <YYYY-MM-DDTHH:MM:SSZ> --subject <CANONICAL_COIN> --out <NEW_DIR>
 node bin/market-research.js serve    --policy <policy.json> --subjects <subjects.json> --research-root <DIR> [--port <loopback port>] [--case-every-seconds <N>]
 node bin/market-research.js edge-capture  --policy <policy.json> --subjects <subjects.json> --duration-seconds <1..86400> --out <NEW_DIR> --research-root <DIR>
-node bin/market-research.js edge-evaluate --edge-capture <SEALED_EDGE_DIR> --capture <SEALED_CAPTURE_DIR> --subject <COIN> --spot-symbol <BTC/USD> --futures-symbol <PF_XBTUSD> --evaluation-id <ID> --declared-at <UTC> --start <UTC> --duration-seconds <N> --embargo-seconds <N> --as-of <UTC> --seed <ID> [--include-holdout true]
+node bin/market-research.js edge-declare  --edge-capture <SEALED_EDGE_DIR> --capture <SEALED_CAPTURE_DIR> --research-root <DIR> --subject <COIN> --spot-symbol <BTC/USD> --futures-symbol <PF_XBTUSD> --evaluation-id <ID> --start <UTC> --duration-seconds <N> --embargo-seconds <N> --seed <ID>
+node bin/market-research.js edge-evaluate --edge-capture <SEALED_EDGE_DIR> --capture <SEALED_CAPTURE_DIR> --research-root <DIR> --evaluation-id <ID> --stage <DEVELOPMENT|VALIDATION> --as-of <UTC>
+node bin/market-research.js edge-lock     --research-root <DIR> --evaluation-id <ID> --arm <ARM>
+node bin/market-research.js edge-holdout-open     --research-root <DIR> --evaluation-id <ID>
+node bin/market-research.js edge-holdout-evaluate --edge-capture <SEALED_EDGE_DIR> --capture <SEALED_CAPTURE_DIR> --research-root <DIR> --evaluation-id <ID> [--as-of <UTC>]
+node bin/market-research.js edge-verify           --edge-capture <SEALED_EDGE_DIR> --capture <SEALED_CAPTURE_DIR> --research-root <DIR> --evaluation-id <ID>
+node bin/market-research.js edge-retrospective    --edge-capture <SEALED_EDGE_DIR> --capture <SEALED_CAPTURE_DIR> --as-of <UTC> --subject <COIN> --spot-symbol <BTC/USD> --futures-symbol <PF_XBTUSD> --evaluation-id <ID> --start <UTC> --duration-seconds <N> --embargo-seconds <N> --seed <ID>
 ```
 
 - `inspect` — offline. Prints per-provider implementation / access / plan / readiness state and the model block with
@@ -82,16 +88,27 @@ node bin/market-research.js edge-evaluate --edge-capture <SEALED_EDGE_DIR> --cap
 - `edge-capture` — MARKET-EDGE-KRAKEN-1 (dark; status `IMPLEMENTED_DARK_NOT_EVALUATED`): a bounded forward capture of the
   two DARK senses the policy enables — Kraken Futures Charts / Market Analytics (`providers.KRAKEN_DERIVATIVES.charts`)
   and Kraken Spot Level 3 (`providers.KRAKEN_SPOT.l3`, a DEDICATED data-only key named by environment variable NAMES;
-  the key is refused unless `GetApiKeyInfo` proves it carries no authority-capable permission). Every dispatch is
+  the key is refused unless `GetApiKeyInfo` proves it carries no authority-capable permission AND the documented token
+  capability `create-ws-token` — verdict `SAFE_L3_DATA_KEY`; a `NON_AUTHORITY_KEY` stays blocked with
+  `TOKEN_PERMISSION_MISSING`). A record the recorder cannot persist leaves a durable `DROPPED` / `RECORD_REJECTED`
+  coverage marker and the manifest says `capture: PARTIAL` (never a silent loss). Every dispatch is
   accounted in `<research-root>/accounting` like `capture`. The output is ONE sealed `EDGE_CAPTURE` bundle
   (`analytics.jsonl`, `l3-snapshots.jsonl`, `l3-events.jsonl`, `coverage.jsonl`, `policy.json`, `code-identity.json`):
   a separate layout that `build`, the Judge intake and Socrates never open. No order verb exists in this path.
   See `doctrine/MARKET_EDGE_KRAKEN.md`.
-- `edge-evaluate` — offline. Joins one sealed `EDGE_CAPTURE` bundle with one sealed public `CAPTURE` bundle (spot
-  candles / trades / books for the baseline arm and the forward labels) under a declared prospective evaluation
-  (chronological embargoed splits, sealed holdout unless `--include-holdout true`) and prints rank-correlation
-  measurements per arm / horizon / split. It measures and never promotes: the report carries `edgeClaim: NOT_MADE`,
-  `promotionCriteria: NONE`, every authority `NONE`.
+- `edge-declare` / `edge-evaluate` / `edge-lock` / `edge-holdout-open` / `edge-holdout-evaluate` / `edge-verify` —
+  offline, the SEALED evaluation chain over one sealed `EDGE_CAPTURE` bundle and one sealed public `CAPTURE` bundle,
+  appended to `<research-root>/edge-eval/<evaluation-id>.jsonl` (append-only, digest-chained, closed semantics on
+  write and read). `edge-declare` creates the declaration with the RUNTIME clock (there is no `--declared-at`;
+  prospective only when declared before the start). `edge-evaluate --stage DEVELOPMENT|VALIDATION` builds the rows
+  internally from the declared bundles, seals the dataset manifest and the report (n from the manifest only).
+  `edge-lock --arm` fixes ONE arm before the declared selection deadline; `edge-holdout-open` opens the ONE-SHOT
+  holdout; `edge-holdout-evaluate` seals and scores it once for the locked arm and consumes it (QUALIFIED or
+  CONSUMED_BUT_UNQUALIFIED); `edge-verify` rebuilds every sealed dataset from the bundles (a fabricated dataset is
+  exposed). Every report carries `edgeClaim: NOT_MADE`, `promotionCriteria: NONE`, every authority `NONE`; nothing
+  here is Judge release evidence.
+- `edge-retrospective` — offline convenience over a window that has already started: `mode: RETROSPECTIVE`,
+  `releaseEvidence: NEVER`, no chain record, no holdout.
 
 ## socrates-research
 
