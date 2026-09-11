@@ -1,0 +1,1 @@
+- [Temporary PostgreSQL on Replit](replit-temporary-postgres.md) — keep disposable test PostgreSQL attached to a background shell; never reuse the paper database.
