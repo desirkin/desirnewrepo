@@ -17,6 +17,21 @@ every mature lawful sense runs under `config/paper-runtime.json`; the dark resea
 Stop with `SIGINT` / `SIGTERM`: the Tape closes, the Judge and the research service stop, the paper shutdown seam seals a
 dark segment in flight, then the process exits 0.
 
+Replit's Run button and deployment command use `npm run paper`. Configure the required environment and initialize the
+paper account before starting. A failed or malformed account / writer-lock check is a core blocker: an unknown result
+cannot establish readiness. Preflight checks database state without modifying it; a running writer must be stopped
+cleanly before using the preflight as a launch gate for its replacement.
+
+The market-driven setups (`MARKET_DIRECT`) can qualify without a Socrates model response. Catalyst transmission requires
+an admissible case. A conversational operator interface is separate from those decision paths. The shipped model remains
+disabled, and that limitation must remain visible.
+
+After startup, inspect the JUDGE and SENSES drawers. A candidate needs 61 accepted closed one-minute bars and 21 minutes of
+continuous trade coverage, plus the setup's other inputs. Warmup is per candidate and is affected by gaps and replacement;
+21 minutes is not a promise that a trade will occur. Verify fresh market data, a PAPER Judge and adapter, durable journal
+updates, candidate readiness or explicit refusal reasons, and Watch status. Do not weaken the strategy to force a fill.
+Record the deployment commit, policy digest and UTC paper-run start. Preserve the account and journal across restarts.
+
 ## 2. Environment
 
 Copy `.env.paper.example` (NAMES and placeholders only) into your process manager's private environment. Required for
@@ -82,7 +97,27 @@ THRESHOLD CHANGES: NONE
 byte-verified sealed cases and nothing else from it); its model is `DISABLED_BY_PAPER_POLICY` until an operator sets
 explicit USD caps in the paper research policy.
 
-## 8. Operator actions that remain outside the code
+## 8. Ask Serpent (the operator conversation)
+
+The cockpit's ASK button opens the read-only conversation over the recorded evidence. It answers the six operator
+questions (what are you doing, why did you buy / skip a coin, what The Watch is watching, how the paper account is doing
+after costs, which senses work or are blocked) from the same views the drawers show: the Judge projection bound to the
+running account and mode, the sensor snapshot, the research summary, and ONE bounded page of the execution journal when a
+decision is older than the projection's latest-12 window. Every answer carries its evidence timestamp and identifier and
+one of RECORDED / UNVERIFIED (stale projection) / UNAVAILABLE (rejected projection, Judge off). It never invents a reason
+the Judge did not record, keeps recorded rationale apart from interpretation, and uses the Judge paper account's canonical
+realized / unrealized fields, never the legacy ledger. Questions are untrusted text: they select an intent and a coin and
+nothing else. The panel has no authority: it cannot place, cancel, arm, clear, initialize or reset anything.
+
+Free-form AI chat (`POST /api/ask` with mode `chat`) is optional and paid: it needs an authenticated operator session
+(session + CSRF, like a control) AND `ANTHROPIC_API_KEY` AND explicit `SERPENT_CHAT_MAX_USD_PER_REQUEST` and
+`SERPENT_CHAT_MAX_USD_PER_DAY`. Until then the panel says plainly that AI chat is not configured and keeps answering from
+the recorded evidence. No call happens on open or refresh; every send is one explicit request, refused before dispatch
+when the estimate breaks a cap; the daily ledger (`<data dir>/companion/companion-spend.json`) survives restarts. The
+model receives the evidence answer as data and has no tools. Voice input is not implemented; the typed panel is the
+interface.
+
+## 9. Operator actions that remain outside the code
 
 - Provision PostgreSQL and set `DATABASE_URL`; run `init-paper` once with owner intent.
 - Set `SERPENT_HTTP_CONTACT` (SEC / EDGAR user-agent law) and, when wanted, an explicit `RUMOR2_EDGAR_CIKS` whitelist.

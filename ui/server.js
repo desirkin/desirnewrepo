@@ -31,6 +31,8 @@ import { readApproval, approvalsDir, listApprovals } from '../judge/owner.js';
 import { parseUtcInstant } from '../market-lab/time.js';
 import { sensorSnapshot } from '../paper/readiness.js';
 import { loadProfile as loadPaperProfile, profileEnvironment as paperProfileEnvironment } from '../paper/profile.js';
+import { answerQuestion, boundHistory, SUGGESTED_QUESTIONS, COMPANION_VERSION, COMPANION_LABEL, MAX_QUESTION_CHARS } from '../paper/companion.js';
+import { createChatDispatcher } from '../paper/companion-chat.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -70,6 +72,26 @@ function judgeView() {
   // closeout R16: the view is bound to the running composition's account / mode; a projection file for another account or mode is REJECTED and never shown
   const raw = readJsonBounded(executionProjectionFile()); const summary = readExecutionProjection({ expected: judgeRun ? { accountId: judgeRun.accountId, runMode: judgeRun.mode } : null }); const rejectedReason = summary?.state === 'REJECTED' ? summary.reason : null; const projection = rejectedReason ? null : raw;
   return { enabled: projection !== null || judgeRun !== null, running: judgeRun !== null, projectionFresh: summary?.state === 'FRESH', projection, rejected: rejectedReason, prominent: rejectedReason ? `JUDGE PROJECTION REJECTED (${rejectedReason})` : projection ? (projection.accountKind === 'LIVE' ? `LIVE ${projection.mode}` : `${projection.accountKind} — NOT REAL MONEY`) : 'JUDGE OFF', approvals: listApprovals(), arm: { endpoint: 'POST /api/judge/arm', steps: ['challenge', 'confirm'], requires: ['session', 'csrf', 'same-origin', 'fresh password', 'exact server phrase', 'account/allocation/policy/release binding', 'owner limits', 'expiry'], never: ['GET', 'URL parameter', 'environment flag', 'pasted case instruction', 'default password'] }, authority: 'READ_ONLY_VIEW; arming is a separate authenticated action; no return figure without basis' };
+}
+// ---- ASK SERPENT (paper/companion.js): the operator's read-only conversation over the recorded evidence ----------------
+let chatDispatcher = null; const chat = () => (chatDispatcher ??= createChatDispatcher({ env: process.env, dataDir: dataDir() }));
+const ASK_MAX_BODY = 16 * 1024; const askBucket = { tokens: 30, ts: Date.now() }; // 30 questions / minute per process
+function askAllowed() { const now = Date.now(); askBucket.tokens = Math.min(30, askBucket.tokens + ((now - askBucket.ts) / 60_000) * 30); askBucket.ts = now; if (askBucket.tokens < 1) return false; askBucket.tokens -= 1; return true; }
+// the ONE bounded journal read available to the companion: the newest page of the RUNNING account (never another account, never a path from a question)
+async function askJournalPage({ limit }) { if (!judgeRun || !judgeRun.journal || typeof judgeRun.journal.page !== 'function') return null; const h = await judgeRun.journal.load(judgeRun.accountId); const head = Number(h?.headSeq ?? 0); return judgeRun.journal.page(judgeRun.accountId, { afterSeq: Math.max(0, head - limit), limit }); }
+function askStatusView() { let c = null; try { c = chat().status(); } catch (err) { c = { state: 'NOT_CONFIGURED', reason: 'CHAT_UNAVAILABLE', notice: String(err.message).slice(0, 120) }; } return { label: COMPANION_LABEL, version: COMPANION_VERSION, suggestions: [...SUGGESTED_QUESTIONS], chat: c, authority: 'READ_ONLY' }; }
+async function askHandler(req, res, body) {
+  if (!askAllowed()) { json(res, 429, { ok: false, reason: 'RATE_LIMITED' }); return; }
+  const question = typeof body?.question === 'string' ? body.question.trim() : ''; if (!question.length || question.length > MAX_QUESTION_CHARS) { json(res, 400, { ok: false, reason: 'QUESTION_REQUIRED', max: MAX_QUESTION_CHARS }); return; }
+  const history = boundHistory(body?.history); const mode = body?.mode === 'chat' ? 'chat' : 'evidence';
+  let judge = null; let sensors = null; let research = null; try { judge = judgeView(); } catch (err) { judge = { enabled: false, error: String(err.message).slice(0, 120) }; } try { sensors = sensorsView(); } catch { sensors = null; } try { research = marketResearchSummary(); } catch { research = null; }
+  const answer = await answerQuestion({ question, judge, sensors, research, journalPage: askJournalPage });
+  if (mode !== 'chat') { json(res, 200, { ...answer, chat: null }); return; }
+  // a billed conversation request is an authenticated operator action: session + CSRF + same-origin, exactly like a control
+  const gate = gateControl(auth, { cookieHeader: req.headers.cookie, csrfHeader: req.headers['x-serpent-csrf'], originHeader: req.headers.origin, hostHeader: req.headers.host, body });
+  if (!gate.allow) { json(res, gate.code, { ...answer, chat: { ok: false, dispatched: false, reason: gate.reason, notice: 'free-form AI chat needs an authenticated operator session; the recorded-evidence answer is above' } }); return; }
+  let r; try { r = await chat().ask({ question, history, evidence: { answer: answer.answer, availability: answer.availability, evidence: answer.evidence, intent: answer.intent } }); } catch (err) { r = { ok: false, dispatched: false, reason: 'CHAT_FAILED', notice: String(err.message).slice(0, 160) }; }
+  json(res, 200, { ...answer, chat: r });
 }
 function judgeArm(body, gate, res) {
   const step = String(body.step ?? '').toLowerCase();
@@ -368,11 +390,11 @@ function json(res, code, obj, extraHeaders = {}) {
   res.end(body);
 }
 
-function readBody(req, res, cb) {
+function readBody(req, res, cb, maxBytes = 4096) {
   let raw = '';
   req.on('data', (chunk) => {
     raw += chunk;
-    if (raw.length > 4096) req.destroy(); // auth/control bodies are tiny
+    if (raw.length > maxBytes) req.destroy(); // auth/control bodies are tiny; the companion question is bounded too
   });
   req.on('end', () => {
     try {
@@ -423,6 +445,10 @@ const server = http.createServer((req, res) => {
         return;
       }
       json(res, 200, { ok: true }, { 'set-cookie': setSessionCookie(req, '', 0) });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/ask') {
+      readBody(req, res, (body) => { askHandler(req, res, body).catch((err) => { console.error(`[api/ask] ${err.constructor.name}: ${err.message}`); json(res, 500, { ok: false, reason: 'ASK_FAILED' }); }); }, ASK_MAX_BODY);
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/control') {
@@ -570,6 +596,10 @@ const server = http.createServer((req, res) => {
       json(res, 200, judgeView());
     } else if (url.pathname === '/api/judge/arm') {
       json(res, 405, { ok: false, error: 'METHOD_NOT_ALLOWED', reason: 'ARM_LIVE is POST-only: no GET mutation' }, { allow: 'POST' });
+    } else if (url.pathname === '/api/ask/status') {
+      json(res, 200, askStatusView());
+    } else if (url.pathname === '/api/ask') {
+      json(res, 405, { ok: false, error: 'METHOD_NOT_ALLOWED', reason: 'a question is POSTed; nothing is read from the URL' }, { allow: 'POST' });
     } else if (url.pathname === '/api/sensors') {
       // SERPENT PAPER: read-only sensor / readiness panel data (never a control; never a secret)
       try { json(res, 200, sensorsView()); } catch (err) { console.error(`[api/sensors] ${err.constructor.name}: ${err.message}`); json(res, 200, { enabled: false, error: err.message, rows: [], groups: {}, authority: 'NONE', degraded: true }); }

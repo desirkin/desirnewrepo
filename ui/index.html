@@ -431,6 +431,22 @@
   #senses .st.on { color: #4fd598; } #senses .st.deg { color: #e0b45a; } #senses .st.blk { color: #ff7a6b; } #senses .st.off { color: var(--dim); }
   #senses .auth { font-size: 10px; letter-spacing: .18em; padding: 8px 10px; border-radius: 10px; margin: 6px 0; text-align: center; color: #0b1220; background: #8fd3b0; }
   #btnSenses { color: #8fd3b0; border: 1px solid #2f5a48; } /* read-only: what is actually ON; never a control */
+  #btnAsk { color: #d9c48f; border: 1px solid #5a4d2f; } /* read-only conversation over the recorded evidence; never a control */
+  #ask { position: fixed; left: 50%; bottom: -110%; transform: translateX(-50%); width: min(94vw, 430px); z-index: 70; max-height: 80vh; max-height: 84dvh; display: flex; flex-direction: column; background: var(--panel, #0b1220); border: 1px solid #2a3550; border-bottom: none; border-radius: 16px 16px 0 0; transition: bottom .28s ease; }
+  #ask.open { bottom: 0; }
+  #ask .dhead h2 { color: #d9c48f; font-size: 13px; letter-spacing: .34em; }
+  #ask .rmeta { font-size: 9.5px; letter-spacing: .06em; color: var(--dim); margin: 6px 0; line-height: 1.5; }
+  #ask .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+  #ask .chip { position: static; font: inherit; font-size: 9.5px; letter-spacing: .04em; color: #d9c48f; background: transparent; border: 1px solid #5a4d2f; border-radius: 999px; padding: 6px 10px; cursor: pointer; min-height: 32px; }
+  #ask .turn { padding: 8px 0; border-bottom: 1px solid #1b2739; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  #ask .turn.q { color: var(--ink); } #ask .turn.a { color: #cfd8e6; } #ask .turn.err { color: #ff7a6b; }
+  #ask .ev { display: block; font-size: 9px; letter-spacing: .06em; color: var(--dim); margin-top: 4px; }
+  #ask .avail { font-size: 9px; letter-spacing: .12em; } #ask .avail.RECORDED { color: #4fd598; } #ask .avail.UNVERIFIED { color: #e0b45a; } #ask .avail.UNAVAILABLE { color: #ff7a6b; }
+  #ask form { display: flex; gap: 6px; padding: 8px 0 4px; }
+  #ask input { flex: 1 1 auto; min-width: 0; font: inherit; font-size: 12px; color: var(--ink); background: #0f172a; border: 1px solid #2a3550; border-radius: 10px; padding: 10px 12px; min-height: 44px; }
+  #ask button.send { position: static; font: inherit; font-size: 10px; letter-spacing: .18em; color: #0b1220; background: #d9c48f; border: none; border-radius: 10px; padding: 0 14px; min-height: 44px; cursor: pointer; }
+  #ask button.send:disabled { opacity: .5; cursor: default; }
+  #ask .notice { font-size: 9.5px; letter-spacing: .04em; color: #e0b45a; margin: 4px 0; }
   #research .dhead h2 { color: #c9b27f; font-size: 13px; letter-spacing: .34em; }
   #research .rrow { display: flex; justify-content: space-between; gap: 8px; padding: 7px 0; border-bottom: 1px solid #1b2739; font-size: 11px; cursor: pointer; }
   #research .rrow .k { color: var(--dim); letter-spacing: .12em; font-size: 9px; }
@@ -586,6 +602,7 @@
   <button id="btnLedger"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4.5" y="3.5" width="15" height="17" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect><path d="M8.5 8 H15.5 M8.5 12 H15.5 M8.5 16 H13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg><span>LEDGER</span></button>
   <button id="btnJudge" aria-label="judge / watch — read-only explanation of the execution journal"><span>JUDGE</span></button>
   <button id="btnSenses" aria-label="senses — read-only sensor and readiness panel"><span>SENSES</span></button>
+  <button id="btnAsk" aria-label="Ask Serpent — read-only conversation over the recorded evidence"><span>ASK</span></button>
   <button id="btnResearch" aria-label="market research — read-only reports"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M15.5 15.5 L20 20" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg><span>RESEARCH</span></button>
 </div>
 
@@ -645,6 +662,26 @@
     </button>
   </div>
   <div id="sensesBody" class="dbody"></div>
+</div>
+<div id="ask" role="dialog" aria-modal="true" aria-label="Ask Serpent">
+  <div class="dhead">
+    <div class="dtitle"><span class="kicker">ASK SERPENT · RECORDED EVIDENCE · READ ONLY</span><h2>ASK SERPENT</h2></div>
+    <button type="button" id="askClose" class="dclose" aria-label="Close">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path d="M6 6 L18 18 M18 6 L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path>
+      </svg>
+    </button>
+  </div>
+  <div id="askBody" class="dbody">
+    <div id="askNotice" class="notice">loading…</div>
+    <div id="askChips" class="chips"></div>
+    <div id="askLog"></div>
+    <div class="rmeta">Answers quote what the Judge, the Watch and the senses recorded, with the evidence time. Nothing here places, cancels, arms, clears or resets anything.</div>
+  </div>
+  <form id="askForm" autocomplete="off">
+    <input id="askInput" type="text" maxlength="2000" placeholder="Ask about a coin, the account, the senses…" aria-label="Question">
+    <button type="submit" id="askSend" class="send">SEND</button>
+  </form>
 </div>
 <div id="demobadge" title="Tap to exit demo">DEMO</div>
 
@@ -1461,6 +1498,42 @@ function renderSenses(d) {
 async function refreshSenses() { let res; try { res = await fetch('/api/sensors', { cache: 'no-store' }); } catch (err) { console.error('SENSES fetch failed:', err); $('#sensesBody').innerHTML = '<div class="line"><span>SHELL LINK LOST — server unreachable</span></div>'; return; } if (!res.ok) { $('#sensesBody').innerHTML = '<div class="line"><span>senses unavailable (' + esc(res.status) + ')</span></div>'; return; } try { renderSenses(await res.json()); } catch (err) { console.error('SENSES render failed:', err); $('#sensesBody').innerHTML = '<div class="line"><span>senses render failed</span></div>'; } }
 $('#btnSenses').addEventListener('click', () => { showSenses(); refreshSenses(); });
 
+// ---- ASK SERPENT: a read-only conversation over the recorded evidence (paper/companion.js). The server keeps no
+// transcript; the last turns are sent back only as bounded context. A send is ALWAYS explicit (never on open / refresh);
+// free-form AI chat runs only when the owner configured a credential AND explicit USD caps (mode 'chat', authenticated).
+const askHistory = []; let askBusy = false; let askChat = null;
+function showAsk() { armDrawerHistory(); $('#ask').classList.add('open'); $('#backdrop').hidden = false; }
+function askRender() {
+  $('#askLog').innerHTML = askHistory.map((t) => t.role === 'user' ? '<div class="turn q">' + esc(t.text) + '</div>' : '<div class="turn ' + (t.error ? 'err' : 'a') + '">' + esc(t.text) + (t.availability ? '<span class="ev"><span class="avail ' + esc(t.availability) + '">' + esc(t.availability) + '</span>' + (t.evidence && t.evidence.length ? ' · evidence ' + t.evidence.map((e) => esc(e.kind) + (e.ts ? ' @ ' + esc(new Date(e.ts).toISOString()) : '') + (e.id ? ' [' + esc(String(e.id)) + ']' : '')).join(' · ') : '') + (t.chat ? ' · AI: ' + esc(t.chat) : '') + '</span>' : '') + '</div>').join('') || '<div class="rmeta">Ask a question, or tap a suggestion.</div>';
+  $('#askLog').scrollTop = $('#askLog').scrollHeight;
+}
+async function refreshAskStatus() {
+  try { const res = await fetch('/api/ask/status', { cache: 'no-store' }); const d = await res.json(); askChat = d.chat ?? null;
+    const ready = d.chat && d.chat.state === 'READY' ? 'AI chat READY (' + d.chat.model + '; caps per request ' + d.chat.caps.perRequestUsd + ' USD, per day ' + d.chat.caps.perDayUsd + ' USD; today ' + (d.chat.spend ? d.chat.spend.spentUsd : 0) + ' USD). Each send is one paid request.' : null;
+    $('#askNotice').textContent = !d.chat ? 'status unavailable' : ready ? ready : 'Free-form AI chat is NOT configured (' + d.chat.reason + '). Answers below come from the recorded evidence only.';
+    $('#askChips').innerHTML = (d.suggestions ?? []).map((q) => '<button type="button" class="chip">' + esc(q) + '</button>').join('');
+    for (const b of $('#askChips').querySelectorAll('.chip')) b.addEventListener('click', () => { $('#askInput').value = b.textContent; askSend(); });
+  } catch (err) { console.error('ASK status failed:', err); $('#askNotice').textContent = 'SHELL LINK LOST — server unreachable'; }
+}
+async function askSend() {
+  const q = $('#askInput').value.trim(); if (!q || askBusy) return;
+  askBusy = true; $('#askSend').disabled = true; $('#askSend').textContent = '…';
+  askHistory.push({ role: 'user', text: q }); askRender(); $('#askInput').value = '';
+  const history = askHistory.slice(-8).map((t) => ({ role: t.role, text: t.text }));
+  const mode = askChat && askChat.state === 'READY' ? 'chat' : 'evidence';
+  try {
+    const headers = { 'content-type': 'application/json' }; if (mode === 'chat' && typeof csrfToken === 'string' && csrfToken) headers['x-serpent-csrf'] = csrfToken;
+    const res = await fetch('/api/ask', { method: 'POST', headers, cache: 'no-store', body: JSON.stringify({ question: q, history, mode }) });
+    const d = await res.json();
+    if (!d.ok && !d.answer) { askHistory.push({ role: 'assistant', text: 'ERROR ' + (d.reason ?? res.status), error: true }); }
+    else { askHistory.push({ role: 'assistant', text: d.chat && d.chat.ok ? d.chat.text : d.answer, availability: d.availability, evidence: d.evidence, chat: d.chat ? (d.chat.ok ? 'answered by ' + d.chat.model + ' from the evidence, charged ' + d.chat.chargedUsd + ' USD' : (d.chat.reason ?? 'not used') + (d.chat.notice ? ' — ' + d.chat.notice : '')) : null }); if (d.chat && d.chat.ok) askHistory.push({ role: 'assistant', text: 'Recorded evidence answer:\n' + d.answer, availability: d.availability, evidence: d.evidence }); }
+  } catch (err) { askHistory.push({ role: 'assistant', text: 'SHELL LINK LOST — ' + String(err && err.message ? err.message : err), error: true }); }
+  while (askHistory.length > 24) askHistory.shift();
+  askBusy = false; $('#askSend').disabled = false; $('#askSend').textContent = 'SEND'; askRender();
+}
+$('#askForm').addEventListener('submit', (e) => { e.preventDefault(); askSend(); });
+$('#btnAsk').addEventListener('click', () => { showAsk(); refreshAskStatus(); askRender(); });
+
 function renderStatus(s) {
   lastStatus = s;
   if (Array.isArray(s.universe) && s.universe.length) universe = s.universe; // fallback majors
@@ -1868,7 +1941,7 @@ $('#capEye').addEventListener('click', () => { if (!demo) openEyeCard(); });
    on the header. Closing an auth/CLEAR/VETO card merely cancels the UI —
    it never posts anything and can never authorize anything. */
 let drawerPushed = false;
-const anySheetOpen = () => $('#card').classList.contains('open') || $('#ledger').classList.contains('open') || $('#research').classList.contains('open') || $('#judge').classList.contains('open') || $('#senses').classList.contains('open');
+const anySheetOpen = () => $('#card').classList.contains('open') || $('#ledger').classList.contains('open') || $('#research').classList.contains('open') || $('#judge').classList.contains('open') || $('#senses').classList.contains('open') || $('#ask').classList.contains('open');
 function armDrawerHistory() {
   if (!drawerPushed && !anySheetOpen()) {
     try { history.pushState({ serpentDrawer: true }, ''); drawerPushed = true; } catch { /* history optional */ }
@@ -1893,6 +1966,7 @@ function closeSheets({ viaHistory = false } = {}) {
   $('#research').classList.remove('open');
   $('#judge').classList.remove('open');
   $('#senses').classList.remove('open');
+  $('#ask').classList.remove('open');
   $('#backdrop').hidden = true;
   if (drawerPushed && !viaHistory) {
     drawerPushed = false;
@@ -1907,6 +1981,7 @@ $('#ledgerClose').addEventListener('click', () => closeSheets());
 $('#researchClose').addEventListener('click', () => closeSheets());
 $('#judgeClose').addEventListener('click', () => closeSheets());
 $('#sensesClose').addEventListener('click', () => closeSheets());
+$('#askClose').addEventListener('click', () => closeSheets());
 $('#backdrop').addEventListener('click', () => closeSheets()); // tap outside always exits
 // taps INSIDE a drawer never dismiss it (the backdrop is a sibling behind)
 addEventListener('keydown', (e) => { if (e.key === 'Escape' && anySheetOpen()) closeSheets(); });

@@ -28,6 +28,11 @@ export const SECTIONS = Object.freeze(['A_CODE', 'B_STORAGE', 'C_CORE_MARKET', '
 const git = (root, args) => { try { return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim(); } catch { return null; } };
 const present = (env, names) => (Array.isArray(names) ? names : [names]).filter(Boolean).every((n) => typeof env[n] === 'string' && env[n].length > 0);
 const bounded = (v) => String(v ?? '').slice(0, 200);
+const storageCheckFailure = (name, err) => {
+  const code = typeof err?.code === 'string' && /^(?:[0-9A-Z]{5}|INVALID_RESULT)$/.test(err.code) ? err.code : 'CHECK_FAILED';
+  return `${name} could not be verified (${code}); PAPER readiness is blocked`;
+};
+const invalidStorageResult = () => Object.assign(new Error('invalid storage check result'), { code: 'INVALID_RESULT' });
 const NO_SECRET = /sk-ant|Bearer [A-Za-z0-9]|eyJ[A-Za-z0-9_-]{10,}|postgres(ql)?:\/\/[^\s"]+:[^\s"]+@|API-Key|API-Sign|x-api-key|nonce=\d/i;
 
 export async function runPreflight({ profileFile = process.env.COBRA_PROFILE ?? 'config/paper-runtime.json', env = process.env, smoke = false, now = () => Date.now(), log = () => {}, dbFactory = null, fetchImpl = globalThis.fetch } = {}) {
@@ -62,8 +67,29 @@ export async function runPreflight({ profileFile = process.env.COBRA_PROFILE ?? 
         let v = null; try { v = await conn.query('SELECT max(version) AS v FROM serpent_schema_migrations'); } catch (err) { if (err?.code !== '42P01') throw err; v = { rows: [{ v: null }] }; /* no migrations table yet: the persistence bootstrap creates it at launch */ }
         db.schemaVersion = v.rows[0]?.v === null || v.rows[0]?.v === undefined ? 0 : Number(v.rows[0].v); db.schemaCurrent = db.schemaVersion === SCHEMA_VERSION;
         if (db.schemaVersion > SCHEMA_VERSION) block('CORE_RUNTIME_BLOCKER', 'SCHEMA', `database schema ${db.schemaVersion} is newer than this build (${SCHEMA_VERSION})`); else if (db.schemaVersion < SCHEMA_VERSION) warnings.push({ id: 'SCHEMA_BEHIND', detail: `schema ${db.schemaVersion} < build ${SCHEMA_VERSION}: the persistence bootstrap applies migrations at launch` });
-        if (acct) { try { const a = await conn.query('SELECT 1 FROM serpent_execution_accounts WHERE account_id = $1', [acct]); db.accountInitialized = a.rows.length > 0; } catch (err) { db.accountInitialized = err?.code === '42P01' ? false : null; } if (db.accountInitialized === false) block('CORE_RUNTIME_BLOCKER', 'JUDGE_ACCOUNT', `paper account ${acct} is not initialized`, `node bin/judge.js init-paper --policy ${profile.files.judgePolicy} --owner-stdin true (owner intent; once)`); }
-        if (acct) { try { const name = `serpent_execution_writer:${conn.schema ?? 'public'}:${acct}`; const l = await conn.query('SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = $1 AND classid = ((hashtext($2)::bigint >> 32) & 4294967295) AND objid = (hashtext($2)::bigint & 4294967295)) AS held', ['advisory', name]); db.writerLockHeld = l.rows[0]?.held === true; if (db.writerLockHeld) block('CORE_RUNTIME_BLOCKER', 'WRITER_HELD', `another writer holds the ${acct} journal lock (a Serpent already running this account?)`, 'stop the other process before launching a second paper runtime'); } catch { db.writerLockHeld = null; } }
+        if (acct) {
+          try {
+            const a = await conn.query('SELECT 1 FROM serpent_execution_accounts WHERE account_id = $1', [acct]);
+            if (!Array.isArray(a?.rows) || a.rows.length > 1 || !a.rows.every((r) => r !== null && typeof r === 'object' && !Array.isArray(r) && Object.values(r).length === 1 && Object.values(r)[0] === 1)) throw invalidStorageResult();
+            db.accountInitialized = a.rows.length === 1;
+          } catch (err) {
+            db.accountInitialized = err?.code === '42P01' ? false : null;
+            if (db.accountInitialized === null) block('CORE_RUNTIME_BLOCKER', 'JUDGE_ACCOUNT_CHECK', storageCheckFailure('Paper account', err), 'restore database access and rerun preflight');
+          }
+          if (db.accountInitialized === false) block('CORE_RUNTIME_BLOCKER', 'JUDGE_ACCOUNT', `paper account ${acct} is not initialized`, `node bin/judge.js init-paper --policy ${profile.files.judgePolicy} --owner-stdin true (owner intent; once)`);
+        }
+        if (acct) {
+          try {
+            const name = `serpent_execution_writer:${conn.schema ?? 'public'}:${acct}`;
+            const l = await conn.query('SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = $1 AND classid = ((hashtext($2)::bigint >> 32) & 4294967295) AND objid = (hashtext($2)::bigint & 4294967295)) AS held', ['advisory', name]);
+            if (!Array.isArray(l?.rows) || l.rows.length !== 1 || typeof l.rows[0]?.held !== 'boolean') throw invalidStorageResult();
+            db.writerLockHeld = l.rows[0].held;
+            if (db.writerLockHeld) block('CORE_RUNTIME_BLOCKER', 'WRITER_HELD', `another writer holds the ${acct} journal lock (a Serpent already running this account?)`, 'stop the other process before launching a second paper runtime');
+          } catch (err) {
+            db.writerLockHeld = null;
+            block('CORE_RUNTIME_BLOCKER', 'WRITER_LOCK_CHECK', storageCheckFailure('Writer lock', err), 'restore database access and rerun preflight');
+          }
+        }
       }
     } catch (err) { db.error = bounded(err.message); block('CORE_RUNTIME_BLOCKER', 'DATABASE', `database check failed: ${bounded(err.message)}`); }
     finally { if (conn && typeof conn.end === 'function') { try { await conn.end(); } catch { /* released */ } } }

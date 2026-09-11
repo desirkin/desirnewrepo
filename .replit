@@ -1,5 +1,5 @@
-run = "npm run fly"
-entrypoint = "fly.js"
+run = "npm run paper"
+entrypoint = "bin/cobra.js"
 modules = ["nodejs-22", "postgresql-16"]
 
 [nix]
@@ -13,7 +13,7 @@ localPort = 3000
 externalPort = 80
 
 [deployment]
-run = ["node", "fly.js"]
+run = ["npm", "run", "paper"]
 deploymentTarget = "vm"
 
 [userenv]
