@@ -95,7 +95,9 @@ test('VIDEO-5. composition + authority fences: fly.js starts the video collector
   const imports = (f) => [...readFileSync(path.join(REPO, f), 'utf8').matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
   for (const f of tracked.filter((x) => x.startsWith('video/'))) for (const spec of imports(f)) assert.ok(!/judge\/|execution\/|watch\/|tape\/|ledger\/|cost\/|state\/|market-lab\/|socrates\/|research\/|rumor2\//.test(spec), `${f} -> ${spec}`);
   for (const f of tracked.filter((x) => /^(judge|execution|watch|tape|ledger|cost|state|rumor2|market-lab|socrates)\//.test(x))) assert.ok(!imports(f).some((s) => s.includes('video/')), `${f} imports video/`);
-  assert.ok(!readFileSync(path.join(REPO, 'rumor2/social-registry.js'), 'utf8').includes('YOUTUBE'), 'the sealed social registry gained no provider');
+  const sealedSocialRegistry = readFileSync(path.join(REPO, 'rumor2/social-registry.js'), 'utf8');
+  assert.match(sealedSocialRegistry, /id:\s*'YOUTUBE_OFFICIAL'/, 'the pre-existing legacy YouTube boundary remains represented');
+  assert.ok(!/id:\s*'YOUTUBE_DATA_API'/.test(sealedSocialRegistry), 'the video collector source was not added to the sealed social registry');
   const example = readFileSync(path.join(REPO, '.env.paper.example'), 'utf8'); for (const n of ['YOUTUBE_API_KEY', 'SOCIAL_VIDEO_YOUTUBE_QUERIES', 'SOCIAL_VIDEO_YOUTUBE_MAX_DAILY_SEARCHES']) assert.ok(example.includes(n), n); assert.match(example, /YOUTUBE_API_KEY=<[^>]+>/);
 });
 

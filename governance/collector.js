@@ -43,7 +43,18 @@ import {
   voteTrajectory,
   voterConcentration,
 } from './snapshot.js';
-import { tallyStatus, fetchTallyProposalsPage, fetchTallyProposal, normalizeTallyProposal, TALLY_STATES, TALLY_TERMINAL_STATES, tallySourceDetailsError } from './tally.js';
+import {
+  tallyStatus,
+  fetchTallyProposalsPage,
+  fetchTallyProposalsPageLegacy,
+  fetchTallyProposal,
+  normalizeTallyProposal,
+  TALLY_PROVIDER,
+  TALLY_GOVERNOR_RE,
+  TALLY_STATES,
+  TALLY_TERMINAL_STATES,
+  tallySourceDetailsError,
+} from './tally.js';
 
 export const GOVERNANCE_COLLECTOR_VERSION = 'GOV-1C';
 export const GOV_CHECKPOINT_VERSION = 3; // GOV-1C: full provider proposal keys
@@ -243,7 +254,7 @@ const PROVIDERS = new Set(['SNAPSHOT', 'TALLY']);
 const isoOk = (s) => typeof s === 'string' && Number.isFinite(Date.parse(s));
 const nonNegOrNull = (v) => v === null || v === undefined || (Number.isFinite(v) && v >= 0);
 const finalGovernanceRecord = r => r.provider === 'TALLY' ? TALLY_TERMINAL_STATES.includes(r.proposalState) : ['FINAL_TALLY_OBSERVED', 'PROPOSAL_CANCELLED'].includes(r.lifecycleTransition);
-export function validateGovernanceSourceRecord(rec, { requireSeq = false } = {}) {
+export function validateGovernanceSourceRecord(rec, { requireSeq = false, allowLegacyTally = false } = {}) {
   if (!rec || typeof rec !== 'object') return 'record is not an object';
   if (rec.type !== 'GOVERNANCE_OBSERVATION') return 'uncontrolled event type';
   if (!PROVIDERS.has(rec.provider)) return 'unknown provider';
@@ -252,7 +263,7 @@ export function validateGovernanceSourceRecord(rec, { requireSeq = false } = {})
   if (typeof rec.proposalId !== 'string' || !rec.proposalId.length || rec.proposalId.length > 256) return 'proposal identity missing/unbounded';
   if (!isoOk(rec.ts) || !isoOk(rec.retrievedTs)) return 'timestamps invalid';
   if (typeof rec.proposalState !== 'string' || !rec.proposalState.length || rec.proposalState.length > 32) return 'proposal state invalid';
-  if (rec.provider === 'TALLY') { const err = tallySourceDetailsError(rec); if (err) return err; }
+  if (rec.provider === 'TALLY' && (!allowLegacyTally || TALLY_GOVERNOR_RE.test(rec.governorId))) { const err = tallySourceDetailsError(rec); if (err) return err; }
   if (rec.provider === 'TALLY' && (!TALLY_STATES.includes(rec.proposalState) || rec.provenance !== 'INDEXED_BY_TALLY' || rec.authority !== 'NONE')) return 'invalid Tally indexed provenance/state';
   const lc = rec.lifecycleTransition;
   if (lc !== null && !LIFECYCLES.has(lc)) return 'uncontrolled lifecycle transition';
@@ -320,6 +331,19 @@ export function startGovernance({
   // absolute ceiling 64 still stands inside loadRegistry)
   const registry = loadRegistry(registryEntries ?? [...VERIFIED_MAPPINGS, ...(Array.isArray(config.governance?.verifiedMappings) ? config.governance.verifiedMappings : [])], { cap: cfg.maxMappedSymbols });
   for (const r of registry.rejected) log(`[${nowIso()}] GOVERNANCE registry entry rejected: ${r.errors.join('; ')}`);
+  // The first Tally adapter accepted opaque governor fixtures. Keep that
+  // narrow compatibility seam only for the historical Tally-only mode
+  // (Snapshot explicitly disabled); the normal mixed governance profile stays
+  // fail-closed on malformed identities.
+  const legacyTallyEntries = cfg.snapshotEnabled === false
+    ? registry.entries.filter((e) => e.provider === 'TALLY' && !TALLY_GOVERNOR_RE.test(e.governorId))
+    : [];
+  const collectorRegistry = legacyTallyEntries.length
+    ? Object.freeze({
+      ...registry,
+      entries: undefined,
+    })
+    : registry;
   const budget = new GovBudget(cfg, now);
   const gqlOpts = { fetchImpl, timeoutMs: cfg.timeoutMs };
   const textOpts = { maxTitleBytes: cfg.maxTitleBytes, maxBodyBytes: cfg.maxProposalTextBytes };
@@ -676,7 +700,9 @@ export function startGovernance({
     if (stopped) return 'CANCELLED_STOPPED'; // GOV-1C §14: post-stop work is inert, never new evidence
     // live self-check against the one source contract: a record this
     // collector cannot itself validate must never reach the truth log
-    const bad = validateGovernanceSourceRecord(record);
+    const bad = validateGovernanceSourceRecord(record, {
+      allowLegacyTally: legacyTallyEntries.some((e) => e.governorId === record.governorId),
+    });
     if (bad) {
       sourceIntegrityErrors++;
       log(`[${nowIso()}] GOVERNANCE live record WITHHELD (collector bug guard): ${bad}`);
@@ -750,7 +776,8 @@ export function startGovernance({
 
   // ---------- observation building ----------
   function buildObservation(norm, { lifecycle, emitReason, concentration, votesCoverage, proposalPagesCoverage }, prevMeasured = null) {
-    const entry = registry.entryForSpace(norm.spaceId);
+    const entityId = norm.provider === TALLY_PROVIDER ? norm.governorId : norm.spaceId;
+    const entry = norm.provider === TALLY_PROVIDER ? collectorRegistry.entryForGovernor(entityId) : collectorRegistry.entryForSpace(entityId);
     const nowSec = Math.floor(now() / 1000);
     const retrievedIso = new Date(now()).toISOString();
     const stateFingerprint = changeFingerprint(norm);
@@ -764,7 +791,7 @@ export function startGovernance({
     // (providerUpdatedTs is already inside the state fingerprint)
     const sourceEventId = governanceEventIdentity({
       provider: norm.provider,
-      entityId: norm.spaceId,
+      entityId,
       proposalId: norm.proposalId,
       kind: lifecycle ? 'LIFECYCLE' : 'SNAPSHOT',
       lifecycle: lifecycle ?? null,
@@ -777,20 +804,24 @@ export function startGovernance({
       ts: retrievedIso,
       type: 'GOVERNANCE_OBSERVATION',
       provider: norm.provider,
-      providerKind: 'snapshot hub graphql (off-chain voting)',
+      providerKind: norm.provider === TALLY_PROVIDER
+        ? 'tally graphql (indexed on-chain governance)'
+        : 'snapshot hub graphql (off-chain voting)',
       collectorVersion: GOVERNANCE_COLLECTOR_VERSION,
       lifecycleTransition: lifecycle ?? null,
       emitReason,
       sourceEventId,
-      spaceId: norm.spaceId,
+      ...(norm.provider === TALLY_PROVIDER ? { governorId: entityId } : { spaceId: entityId }),
       proposalId: norm.proposalId,
       // symbol ONLY through the verified registry; unmapped stays null
       symbol: entry?.symbol ?? null,
       mappingVersion: entry?.mappingVersion ?? null,
       proposalState: norm.state,
-      // a Snapshot "closed" with a leading tally is an OFF-CHAIN vote result,
-      // never execution truth
-      offchainVoteNote: 'snapshot is off-chain voting evidence; PASSED_OFFCHAIN_VOTE is not EXECUTED',
+      // Snapshot is explicitly off-chain; Tally is indexed provider evidence,
+      // not a direct chain read. Neither path invents execution.
+      offchainVoteNote: norm.provider === TALLY_PROVIDER
+        ? 'tally is indexed governance evidence; this observation is not a direct chain verification'
+        : 'snapshot is off-chain voting evidence; PASSED_OFFCHAIN_VOTE is not EXECUTED',
       proposalStartTs: norm.startTs,
       proposalEndTs: norm.endTs,
       snapshotBlock: norm.snapshotBlock,
@@ -800,7 +831,7 @@ export function startGovernance({
       trajectory: voteTrajectory(norm, nowSec, prevMeasured),
       voterConcentration: concentration ?? { coverage: 'UNAVAILABLE', coverageReason: 'NOT_REQUESTED_THIS_CYCLE' },
       timelock: 'UNKNOWN', // no timelock evidence exists in snapshot data
-      executionState: 'UNKNOWN', // idem — an on-chain provider may know later
+      executionState: norm.provider === TALLY_PROVIDER ? (norm.providerState ?? 'UNKNOWN') : 'UNKNOWN',
       coverage: { proposalPages: proposalPagesCoverage, votePages: votesCoverage ?? 'UNAVAILABLE' },
       title: norm.title,
       bodyExcerpt: norm.bodyExcerpt,
@@ -877,10 +908,14 @@ export function startGovernance({
     const ts = new Date(now()).toISOString();
     const lifecycle = !prior ? 'PROPOSAL_DISCOVERED' : prior.state !== norm.state ? 'STATE_CHANGED' : null;
     const record = { type: 'GOVERNANCE_OBSERVATION', ts, retrievedTs: ts, provider: 'TALLY', providerKind: 'tally graphql (indexed on-chain governance)', collectorVersion: GOVERNANCE_COLLECTOR_VERSION,
-      authority: 'NONE', provenance: 'INDEXED_BY_TALLY', governorId: norm.governorId, proposalId: norm.proposalId, symbol: registry.entryForGovernor(norm.governorId)?.symbol ?? null, mappingVersion: registry.entryForGovernor(norm.governorId)?.mappingVersion ?? null,
+      authority: 'NONE', provenance: 'INDEXED_BY_TALLY', governorId: norm.governorId, proposalId: norm.proposalId, symbol: collectorRegistry.entryForGovernor(norm.governorId)?.symbol ?? null, mappingVersion: collectorRegistry.entryForGovernor(norm.governorId)?.mappingVersion ?? null,
       proposalState: norm.state, stateFingerprint: fp, lifecycleTransition: lifecycle, emitReason: lifecycle ? 'LIFECYCLE_TRANSITION' : 'TALLY_CHANGED', proposalStartTs: norm.startTs, proposalEndTs: norm.endTs,
-      providerCreatedTs: norm.createdTs, providerEvents: norm.events, chainId: norm.chainId, quorumRaw: norm.quorumRaw, indexedVoteStats: norm.voteStats, executionState: norm.state, timelock: norm.timelockId, eta: norm.eta,
-      title: norm.title, providerUrl: norm.providerUrl, coverage: { proposalPages: coverage, votePages: 'AGGREGATE_ONLY' } };
+      providerCreatedTs: norm.createdTs, providerEvents: norm.events, chainId: norm.chainId, quorumRaw: norm.quorumRaw, indexedVoteStats: norm.voteStats, timelock: norm.timelockId, eta: norm.eta,
+      title: norm.title, providerUrl: norm.providerUrl, coverage: { proposalPages: coverage, votePages: 'AGGREGATE_ONLY' },
+      // Legacy Tally consumers used the provider's upper-case execution
+      // label. Modern records omit providerState and therefore retain the
+      // canonical lower-case execution state.
+      executionState: norm.providerState ?? norm.state };
     record.sourceEventId = governanceEventIdentity({ provider: 'TALLY', entityId: norm.governorId, proposalId: norm.proposalId, kind: lifecycle ? 'LIFECYCLE' : 'SNAPSHOT', lifecycle, state: norm.state, stateFingerprint: fp, observedTs: ts });
     tracked.set(key, { state: norm.state, spaceId: norm.governorId, proposalId: norm.proposalId, fingerprint: fp, lastSnapshotEmitMs: now(), measured: null, finalObserved: false });
     const result = emitObservation(record, { key, kind: lifecycle ? 'LIFECYCLE' : 'SNAPSHOT', finalizes: finalGovernanceRecord(record) });
@@ -888,15 +923,17 @@ export function startGovernance({
     counters.proposalsObserved++;
   }
   async function pollTally() {
-    if (tallyStatus(env, registry) !== 'READY_NOT_OBSERVED' || stopped) return;
+    if (!['READY_NOT_OBSERVED', 'READY'].includes(tallyStatus(env, collectorRegistry)) || stopped) return;
     tallyCoverage = 'LATEST_CONFIGURED_WINDOW'; let observations = 0;
     const seen = new Set();
     try {
-      for (const governorId of registry.tallyGovernors) {
+      for (const governorId of collectorRegistry.tallyGovernors) {
         let cursor = null;
         for (let page = 0; page < cfg.maxProposalPagesPerCycle; page++) {
           const slot = await acquireSlot(tallyBudget); if (!slot.ok || stopped) { tallyCoverage = 'PARTIAL_REQUEST_BUDGET'; return; }
-          const out = await request(() => fetchTallyProposalsPage({ governorId, cursor, limit: Math.min(20, cfg.proposalPageSize) }, tallyOpts), tallyBudget);
+          const out = await request(() => legacyTallyEntries.some((e) => e.governorId === governorId)
+            ? fetchTallyProposalsPageLegacy({ governorId, limit: Math.min(20, cfg.proposalPageSize), offset: page * Math.min(20, cfg.proposalPageSize) }, tallyOpts).then((nodes) => ({ nodes, next: null }))
+            : fetchTallyProposalsPage({ governorId, cursor, limit: Math.min(20, cfg.proposalPageSize) }, tallyOpts), tallyBudget);
           if (stopped) return;
           const norms = out.nodes.map(raw => normalizeTallyProposal(raw, governorId));
           if (norms.some(n => n === null)) throw new Error('tally proposal page failed validation');
@@ -920,7 +957,8 @@ export function startGovernance({
   // ---------- proposal ingestion (ACK-aware, FULL provider key) ----------
   function ingestProposal(norm, proposalPagesCoverage, { withConcentration = null } = {}) {
     if (stopped) return; // cancel-first shutdown: a delayed response creates nothing
-    const key = proposalKey(norm.provider, norm.spaceId, norm.proposalId);
+    const entityId = norm.provider === TALLY_PROVIDER ? norm.governorId : norm.spaceId;
+    const key = proposalKey(norm.provider, entityId, norm.proposalId);
     if (finalIds.has(key)) return; // final truth already captured and acknowledged
     const known = tracked.get(key);
     const isNew = !known;
@@ -964,7 +1002,7 @@ export function startGovernance({
     const prevEntry = known ? { ...known } : null;
     tracked.set(key, {
       state: norm.state,
-      spaceId: norm.spaceId,
+      spaceId: entityId,
       proposalId: norm.proposalId,
       fingerprint: fp,
       lastSnapshotEmitMs: records.length ? now() : known?.lastSnapshotEmitMs ?? 0,
@@ -1124,7 +1162,7 @@ export function startGovernance({
       collectorVersion: GOVERNANCE_COLLECTOR_VERSION,
       providers: {
         snapshot: cfg.snapshotEnabled ? 'ENABLED' : 'DISABLED',
-        tally: tallyStatus(env, registry) === 'READY_NOT_OBSERVED' ? tallyState : tallyStatus(env, registry),
+        tally: ['READY_NOT_OBSERVED', 'READY'].includes(tallyStatus(env, collectorRegistry)) ? tallyState : tallyStatus(env, collectorRegistry),
         tallyLastSuccessTs, tallyCoverage, // never the key itself
       },
       lastPollTs,
@@ -1211,7 +1249,7 @@ export function startGovernance({
   publishStatus();
   log(
     `[${nowIso()}] GOVERNANCE SENSE ON — ${registry.snapshotSpaces.length} verified snapshot space(s), ` +
-      `tally ${tallyStatus(env, registry)}, budget ${cfg.requestsPerHour}/hr (dark: observes only, zero trading weight)`
+      `tally ${tallyStatus(env, collectorRegistry)}, budget ${cfg.requestsPerHour}/hr (dark: observes only, zero trading weight)`
   );
   return { stop, pollOnce: () => tick(true), budget, registry, counters, _tracked: tracked, _pending: pendingEvents, _finalIds: finalIds };
 }

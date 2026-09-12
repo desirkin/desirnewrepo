@@ -54,6 +54,7 @@
   "social": {
    "BLUESKY_OFFICIAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "authority": "NONE", "enableEnv": "RUMOR2_SOCIAL_BLUESKY_ENABLED" },
    "X_OFFICIAL": { "desiredState": "REQUEST", "blockerPolicy": "PAID_GATE", "authority": "NONE", "paid": true, "enableEnv": "RUMOR2_SOCIAL_X_ENABLED", "credentialEnv": "X_BEARER_TOKEN", "budgetEnv": ["RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS", "RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS", "RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD"], "note": "activates only through the existing X governor: credential -> explicit budgets -> explicit paid smoke; this profile invents no budget" },
+    "YOUTUBE_OFFICIAL": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "DISABLED_BY_PAPER_POLICY", "enableEnv": "RUMOR2_SOCIAL_YOUTUBE_ENABLED", "credentialEnv": "YOUTUBE_API_KEY", "budgetEnv": ["RUMOR2_SOCIAL_YOUTUBE_MAX_DAILY_QUOTA_UNITS", "RUMOR2_SOCIAL_YOUTUBE_MAX_MONTHLY_QUOTA_UNITS"], "note": "read-only search.list fixture/request boundary; explicit quota-unit caps and existing bounded Social scope required; no collector or receipt" },
    "FARCASTER_OFFICIAL": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "NEYNAR_API_KEY"},
    "REDDIT_OFFICIAL": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "REDDIT_CLIENT_ID"},
    "STOCKTWITS_OFFICIAL": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "STOCKTWITS_STREAM_USER"},
@@ -74,7 +75,7 @@
     "COINMETRICS": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
     "SETTLED_RECORDS": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
     "FRED": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "credentialEnv": "FRED_API_KEY" },
-    "COINGECKO": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "COINGECKO_DEMO_API_KEY", "reason": "BLOCKED_BUDGET" },
+    "COINGECKO": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "credentialEnv": "COINGECKO_DEMO_API_KEY", "reason": "DEMO_INCLUDED_QUOTA_TWO_CALL_VERIFICATION" },
     "COINGLASS": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "COINGLASS_API_KEY", "reason": "BLOCKED_BUDGET" },
     "CRYPTOQUANT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "CRYPTOQUANT_API_KEY", "reason": "BLOCKED_BUDGET" },
     "SANTIMENT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "SANTIMENT_API_KEY", "reason": "BLOCKED_BUDGET" },

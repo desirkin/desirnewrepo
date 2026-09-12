@@ -40,3 +40,33 @@ test('social snapshot requires recent observations and collector publication, no
     assert.equal(snapshotRow(blocked, 'X_OFFICIAL').state, 'BLOCKED_CREDENTIAL');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test('merged social summary honors policy and never borrows another Meta route receipt', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'social-merge-status-'));
+  const profile = loadProfile();
+  const env = { ...profileEnvironment(profile), NEYNAR_API_KEY: 'fixture-key', META_APP_TOKEN: 'fixture-token' };
+  mkdirSync(path.join(dir, 'rumor2'));
+  const read = (state, facebookTs, instagramState = 'CONNECTED_NO_MATCH', useProfile = profile) => {
+    writeFileSync(path.join(dir, 'rumor2/status.json'), JSON.stringify({ tsMs: now,
+      socialFarcaster: { state: 'ACTIVE', lastSuccessTs: now, gateReason: null },
+      socialCurrent: { state, sources: {
+        META_FACEBOOK: { state: 'OBSERVED', lastSuccessTs: facebookTs },
+        META_INSTAGRAM: { state: instagramState, lastSuccessTs: now },
+      } },
+    }));
+    return sensorSnapshot({ profile: useProfile, env, dataDir: dir, now });
+  };
+  try {
+    const active = read('CURRENT_VIEW', now);
+    assert.equal(snapshotRow(active, 'META_PUBLIC').state, 'ACTIVE');
+    assert.notEqual(snapshotRow(read('DARK', now), 'META_PUBLIC').state, 'ACTIVE');
+    const old = now - FRESH_MS.rumor2 - 1;
+    const stale = snapshotRow(read('CURRENT_VIEW', old), 'META_PUBLIC');
+    assert.notEqual(stale.state, 'ACTIVE', 'no-match Instagram receipt cannot refresh stale Facebook content');
+    assert.equal(stale.lastSuccessTs, old);
+    const off = structuredClone(profile);
+    off.groups.social.FARCASTER_OFFICIAL.desiredState = 'OFF';
+    assert.equal(snapshotRow(read('CURRENT_VIEW', now, 'CONNECTED_NO_MATCH', off), 'FARCASTER_OFFICIAL').state, 'DISABLED_BY_PAPER_POLICY');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
