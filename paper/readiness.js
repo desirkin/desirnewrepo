@@ -10,6 +10,7 @@ import { readExecutionProjection } from '../state/execution-projection.js';
 import { readControls } from '../state/controls.js';
 import { dailyLockStatus } from '../state/locks.js';
 import { marketResearchRootFromEnv, darkResearchRootOf } from '../market-lab/paths.js';
+import { paidCallAuthorized } from '../market-lab/policy.js';
 import { loadProfile, profileFileOf, RUNTIME_STATES, mergeOverlay } from './profile.js';
 
 export const SNAPSHOT_VERSION = 'serpent-sensor-snapshot-1';
@@ -74,11 +75,11 @@ export function sensorSnapshot({ profile = loadProfile(), env = process.env, con
   const root = marketResearchRootFromEnv(env, dataDir); const mr = readJsonBounded(path.join(root, 'status.json')); const mrTs = tsOf(mr?.nowTs); const policy = readJsonBounded(profileFileOf(profile, 'marketResearchPolicy'));
   const clients = mr?.owner?.clients ?? {}; const mrOn = env.MARKET_RESEARCH_ENABLED === 'true';
   for (const [id, pr] of Object.entries(g.marketResearch.providers)) {
-    const pol = policy?.providers?.[id] ?? null; const c = clients[id] ?? null; const cred = pol?.credentialEnv ?? null; const keyPresent = cred ? present(env, cred) : true; const paidPlan = pol && pol.plan?.billing !== 'FREE';
+    const pol = policy?.providers?.[id] ?? null; const c = clients[id] ?? null; const cred = pol?.credentialEnv ?? null; const keyPresent = cred ? present(env, cred) : true; const quotaBlocked = pol && pol.plan?.billing !== 'FREE' && !paidCallAuthorized(policy, id);
     let state; let blocker = null;
     if (!mrOn || !pol?.enabled || pr.desiredState === 'OFF') { state = 'DISABLED_BY_PAPER_POLICY'; blocker = pr.reason ?? (pol?.enabled === false ? 'disabled in the paper policy' : 'research service off'); }
-    else if (paidPlan) { state = 'BLOCKED_BUDGET'; blocker = 'plan / cost attestation required before any paid call'; }
     else if (cred && !keyPresent) { state = 'BLOCKED_CREDENTIAL'; blocker = `${cred} missing`; }
+    else if (quotaBlocked) { state = 'BLOCKED_BUDGET'; blocker = 'plan / cost attestation required before any paid call'; }
     else if (mr === null) { state = 'NOT_OBSERVED'; blocker = 'no research status yet'; }
     else if (c === null) { state = 'NOT_OBSERVED'; blocker = 'client not reported'; }
     else state = c.runtime === 'ACTIVE' ? (c.failed > 0 && c.ok === 0 ? 'ACTIVE_DEGRADED' : 'ACTIVE') : c.runtime === 'BLOCKED' ? (c.lastFailure?.access === 'ENTITLEMENT_DENIED' ? 'BLOCKED_GEOGRAPHY' : 'BLOCKED_PROVIDER') : c.runtime === 'DEGRADED' || c.runtime === 'BACKOFF' ? 'ACTIVE_DEGRADED' : 'NOT_OBSERVED';

@@ -70,7 +70,7 @@
     "COINMETRICS": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
     "SETTLED_RECORDS": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
     "FRED": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "credentialEnv": "FRED_API_KEY" },
-    "COINGECKO": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "COINGECKO_DEMO_API_KEY", "reason": "BLOCKED_BUDGET" },
+    "COINGECKO": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "credentialEnv": "COINGECKO_DEMO_API_KEY", "reason": "DEMO_INCLUDED_QUOTA_TWO_CALL_VERIFICATION" },
     "COINGLASS": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "COINGLASS_API_KEY", "reason": "BLOCKED_BUDGET" },
     "CRYPTOQUANT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "CRYPTOQUANT_API_KEY", "reason": "BLOCKED_BUDGET" },
     "SANTIMENT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "SANTIMENT_API_KEY", "reason": "BLOCKED_BUDGET" },

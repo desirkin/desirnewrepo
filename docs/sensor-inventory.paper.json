@@ -744,7 +744,7 @@
    "credentialEnv": [
     "COINGECKO_DEMO_API_KEY"
    ],
-   "paid": true,
+   "paid": false,
    "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
    "retentionTermsGate": "hosts api.coingecko.com, pro-api.coingecko.com",
    "liveTransport": true,
@@ -753,10 +753,10 @@
    "replay": "REPLAY_AS_OF over sealed bundles",
    "decisionAuthority": "EVIDENCE_ONLY (decision families)",
    "paperAuthority": "EVIDENCE_ONLY",
-   "paperDesiredState": "OFF",
-   "blockerPolicy": "PAID_GATE",
-   "readinessBlocker": "CREDENTIAL_MISSING + BLOCKED_BUDGET",
-   "smokeEvidence": "unauthenticated public ping reached HTTP 200 on 2026-09-12; the CONFIGURED provider path stays NOT_PROBED (PROVIDER_DISABLED); demo plan / cost UNKNOWN (policy plan attestation absent)"
+    "paperDesiredState": "ON",
+    "blockerPolicy": "DEGRADE",
+    "readinessBlocker": "CREDENTIAL_MISSING",
+    "smokeEvidence": "Demo key receipt 2026-09-12: two authorized zero-cost calls (catalog + coins-markets), both settled, one observation sealed in bundle mb-d0cb3c5d606789fc4c12ea3463e4c837bd9a50da06fbaeebc7a0b036833a04a8; local two-call entitlement exhausted; production not verified"
   },
   {
    "id": "GECKOTERMINAL",
@@ -925,7 +925,7 @@
    "paperDesiredState": "REQUEST",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": "CREDENTIAL_MISSING",
-   "smokeEvidence": "PROBED_FAILED 2026-09-12 CREDENTIAL_MISSING / coverage ACCESS_BLOCKED without FRED_API_KEY (documented free key required; docs/evidence/operational-repair-2026-09-12.md)"
+   "smokeEvidence": "2026-09-12 bounded capture: 16 successful requests, 240 observations sealed in bundle mb-d0cb3c5d606789fc4c12ea3463e4c837bd9a50da06fbaeebc7a0b036833a04a8; production not verified"
   },
   {
    "id": "TWELVEDATA",

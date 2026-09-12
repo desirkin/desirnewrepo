@@ -164,28 +164,31 @@
    }
   },
   "COINGECKO": {
-   "enabled": false,
+   "enabled": true,
    "credentialEnv": "COINGECKO_DEMO_API_KEY",
    "plan": {
-    "name": null,
-    "billing": "UNKNOWN",
-    "includedCallsPerMonth": null,
-    "remainingCalls": null,
-    "incrementalUsdPerCall": null,
-    "attestation": null,
-    "verifiedDate": null,
-    "quoteUsdPerMonth": null
+    "name": "Demo",
+    "billing": "INCLUDED_QUOTA",
+    "includedCallsPerMonth": 10000,
+    "remainingCalls": 2,
+    "incrementalUsdPerCall": 0,
+    "attestation": "Owner confirmed the existing saved key uses the CoinGecko Demo entitlement on 2026-09-12; Demo dashboard usage is not exposed by the Demo API, so PAPER admits two zero-cost calls only: catalog resolution plus one bounded market observation.",
+    "verifiedDate": "2026-09-12",
+    "quoteUsdPerMonth": 0
    },
    "limits": {
-    "maxCallsPerDay": 1000,
-    "maxCallsPerMonth": 20000,
+    "maxCallsPerDay": 2,
+    "maxCallsPerMonth": 2,
     "maxConcurrency": 1
    },
-   "permittedEndpoints": null,
+   "permittedEndpoints": [
+    "coins-list",
+    "coins-markets"
+   ],
    "smoke": {
-    "authorized": false,
-    "maxCalls": 0,
-    "maxEstimatedUsd": null
+    "authorized": true,
+    "maxCalls": 2,
+    "maxEstimatedUsd": 0
    }
   },
   "GECKOTERMINAL": {
