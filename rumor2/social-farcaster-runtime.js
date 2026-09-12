@@ -82,5 +82,5 @@ export function createFarcasterRuntime({ env = process.env, config = farcasterCo
     } finally { abort = null; inFlight = false; }
   }
   return { provider: FARCASTER_OFFICIAL, hydrate, start, stop, settle, isActive: base.isActive,
-    status: () => ({ ...base.status(), enabled: config.enabled, gateReason: gate() ?? gateReason, transport: 'NEYNAR_SEARCH_REST', coverage, lastSuccessTs, lastError, quota: { day: meterDay, requests: used, maxDailyRequests: config.maxDailyRequests }, counters: { ...counters } }) };
+    status: () => ({ ...base.status(), enabled: config.enabled, transportImplemented: true, gateReason: gate() ?? gateReason, transport: 'NEYNAR_SEARCH_REST', coverage, lastSuccessTs, lastError, quota: { day: meterDay, requests: used, maxDailyRequests: config.maxDailyRequests }, counters: { ...counters } }) };
 }

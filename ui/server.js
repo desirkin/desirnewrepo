@@ -660,9 +660,9 @@ const server = http.createServer((req, res) => {
   }
 });
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = process.env.PORT === '0' ? 0 : Number(process.env.PORT) || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`COBRA SHELL — http://localhost:${PORT}  (cockpit; controls can only remove permission to trade)`);
+  console.log(`COBRA SHELL — http://localhost:${server.address().port}  (cockpit; controls can only remove permission to trade)`);
 });
 
 // Graceful shutdown: stop accepting connections; the tape (when co-running

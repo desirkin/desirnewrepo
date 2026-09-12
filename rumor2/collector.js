@@ -60,7 +60,7 @@ import { buildClaimPacket } from './packet.js';
 // SOURCE-ONLY: they never enter the frozen replay, graph, claims, or packets.
 import { isSocialEventType, replaySocialHistory } from './social-settle.js';
 import { createSocialRuntime } from './social-runtime.js';
-import { createSocialCurrentRuntime } from './social-current-runtime.js';
+import { createSocialCurrentRuntime, currentReadinessRuntimes } from './social-current-runtime.js';
 import { createFarcasterRuntime } from './social-farcaster-runtime.js';
 import { buildSocialFilter } from './social.js';
 // SOCIAL-2B: the X filtered-stream ear — same writer, same epoch, same journal;
@@ -69,7 +69,7 @@ import { createXRuntime, xConfigFromEnv } from './x-runtime.js';
 import { parseSocialResearchConfig, createResearchScopeSource } from './social-catalog.js';
 import { resolveXWatchScope, buildWatchPlan } from './social-watch-plan.js';
 import { createResearchStrainer } from './social-research-runtime.js';
-import { currentReadinessRuntimes, readinessMatrix } from './social-readiness.js';
+import { readinessMatrix } from './social-readiness.js';
 
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -1350,7 +1350,7 @@ export function startRumor2({
       socialFarcaster: socialFarcaster ? socialFarcaster.status() : { enabled: false, state: 'DARK', authority: 'NONE' },
       socialX: socialX ? socialX.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_X_ENABLED)', authority: 'NONE' },
       // SOCIAL-7 §48: ONE machine-readable provider readiness truth matrix (registry + retention law + the live runtime statuses above; authority NONE) — the legacy aggregate RUMINT poller is not owned here, so its deployment stays UNOBSERVED_IN_THIS_PROCESS
-      socialReadiness: readinessMatrix({ runtimes: { BLUESKY_OFFICIAL: social ? social.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_BLUESKY_ENABLED)' }, X_OFFICIAL: socialX ? socialX.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_X_ENABLED)' }, FARCASTER_OFFICIAL: socialFarcaster ? socialFarcaster.status() : { enabled: false, state: 'DARK' }, ...currentReadinessRuntimes(socialCurrent ? socialCurrent.status() : null) }, knownAtTs: t }),
+      socialReadiness: readinessMatrix({ runtimes: { BLUESKY_OFFICIAL: social ? social.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_BLUESKY_ENABLED)' }, X_OFFICIAL: socialX ? socialX.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_X_ENABLED)' }, FARCASTER_OFFICIAL: socialFarcaster ? socialFarcaster.status() : { enabled: false, state: 'DARK', transportImplemented: true }, ...currentReadinessRuntimes(socialCurrent ? socialCurrent.status() : null) }, knownAtTs: t }),
       // SOCIAL-4F: discovery / local admission / paid watch / deep observation / legacy permission — separately
       socialResearch: socialResearchStatus(t),
       // SOCIAL-5A: the research strainer (dossiers + next-observation proposals; authority NONE, RESEARCH_ONLY)

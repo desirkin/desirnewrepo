@@ -50,3 +50,22 @@ export function createSocialCurrentRuntime({ env=process.env, now=Date.now, fetc
     snapshot:()=>store.snapshot(),
     status:()=>({enabled:true,state:active?'CURRENT_VIEW':'DARK',authority:'NONE',retention:'RAM_ONLY_MAX_5_MINUTES',sources:Object.fromEntries(clients.map(c=>{const s=states.get(c.id),blocked=gate(c);const fresh=Number.isSafeInteger(s.lastSuccessTs)&&s.lastSuccessTs<=now()&&now()-s.lastSuccessTs<=300000;return [c.id,{...s,enabled:c.enabled,gateReason:blocked,state:blocked??(!active?'DARK':['OBSERVED','CONNECTED_NO_MATCH'].includes(s.state)&&!fresh?'STALE':s.state)}];})),quota:{day:meterDay,requests:{...counts}}})};
 }
+
+// Meta's registry family contains two independent routes. Neither route may
+// stand in for the other; retain both states in the family status description.
+export function currentReadinessRuntimes(current) {
+  const off = { enabled: false, state: 'DARK', transportImplemented: true };
+  const source = id => {
+    if (current?.enabled === false || !current) return off;
+    const value = current.sources?.[id] ?? off;
+    return { ...value, transportImplemented: true, ...(current.state === 'DARK' ? { state: 'DARK' } : {}) };
+  };
+  const facebook = source('META_FACEBOOK'), instagram = source('META_INSTAGRAM');
+  return {
+    REDDIT_OFFICIAL: source('REDDIT_OFFICIAL'),
+    STOCKTWITS_OFFICIAL: source('STOCKTWITS_OFFICIAL'),
+    META_PUBLIC: { transportImplemented: true, enabled: facebook.enabled !== false || instagram.enabled !== false,
+      state: `FACEBOOK:${facebook.state};INSTAGRAM:${instagram.state}`,
+      gateReason: [facebook.gateReason, instagram.gateReason].filter(Boolean).join(';') || null },
+  };
+}

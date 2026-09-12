@@ -36,15 +36,15 @@ test('R7-1. closed vocabularies; every registry provider plus the legacy aggrega
   assert.equal(providerReadinessRow('NOT_A_PROVIDER'), null, 'no row is invented for an unregistered provider');
 });
 
-test('R7-2. the tree wins over prose: with NO runtime status in this process Bluesky is LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE (its one real prior smoke is kept; the production gate is unobserved) and X is IMPLEMENTED_NOT_LIVE_SMOKED (paid smoke NOT performed), Reddit / StockTwits are RETENTION_BLOCKED, TikTok is FIXTURE_ONLY; Meta / Farcaster have bounded transports with unobserved gates, the legacy aggregate is ACCESS_UNRESOLVED; nothing is green', () => {
+test('R7-2. the tree wins over prose: with NO runtime status in this process Bluesky is LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE (its one real prior smoke is kept; the production gate is unobserved) and X is IMPLEMENTED_NOT_LIVE_SMOKED (paid smoke NOT performed), Reddit / StockTwits are RETENTION_BLOCKED, Meta / TikTok / Farcaster are FIXTURE_ONLY with external verification deferred, the legacy aggregate is ACCESS_UNRESOLVED; nothing is green', () => {
   const m = readinessMatrix({ knownAtTs: T0 });
   const row = (id) => m.providers.find((r) => r.provider === id);
   assert.equal(row('BLUESKY_OFFICIAL').readiness, 'LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE', 'a performed prior smoke and an unobserved current gate are two dimensions — the row may not deny its own smoke'); assert.deepEqual(row('BLUESKY_OFFICIAL').blockers, ['PRODUCTION_GATE_UNOBSERVED']); assert.equal(row('BLUESKY_OFFICIAL').liveSmokeState, 'PERFORMED_PRIOR_SESSION', 'the one real Bluesky smoke (doctrine §5B) is repository-known status'); assert.equal(row('BLUESKY_OFFICIAL').historicalReplayCapability, 'JOURNAL_REPLAY'); assert.equal(row('BLUESKY_OFFICIAL').durableRawContentAllowed, true);
   assert.equal(row('X_OFFICIAL').readiness, 'IMPLEMENTED_NOT_LIVE_SMOKED'); assert.deepEqual(row('X_OFFICIAL').blockers, ['PAID_SMOKE_NOT_PERFORMED', 'PRODUCTION_GATE_UNOBSERVED']); assert.equal(row('X_OFFICIAL').liveSmokeState, 'NOT_PERFORMED'); assert.equal(row('X_OFFICIAL').entitlementOrApprovalState, 'PAY_PER_USE_CREDENTIAL_AND_BUDGET_REQUIRED');
-  for (const id of ['REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL']) { const r = row(id); assert.equal(r.readiness, 'RETENTION_BLOCKED', id); assert.ok(r.blockers.includes('RETENTION_NOT_APPROVED')); assert.equal(r.durableRawContentAllowed, false); assert.equal(r.durableAuthorIdentityAllowed, false); assert.equal(r.transportImplemented, true); assert.equal(r.historicalReplayCapability, 'FIXTURE_REPLAY_ONLY'); }
+  for (const id of ['REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL']) { const r = row(id); assert.equal(r.readiness, 'RETENTION_BLOCKED', id); assert.ok(r.blockers.includes('RETENTION_NOT_APPROVED')); assert.equal(r.durableRawContentAllowed, false); assert.equal(r.durableAuthorIdentityAllowed, false); assert.equal(r.transportImplemented, false); assert.equal(r.historicalReplayCapability, 'FIXTURE_REPLAY_ONLY'); }
   assert.ok(row('REDDIT_OFFICIAL').blockers.includes('APPROVAL_NOT_OBTAINED')); assert.ok(row('STOCKTWITS_OFFICIAL').blockers.includes('ENTITLEMENT_UNRESOLVED'));
-  for (const id of ['TIKTOK_PUBLIC']) { const r = row(id); assert.equal(r.readiness, 'FIXTURE_ONLY', id); assert.ok(r.blockers.includes('TRANSPORT_NOT_IMPLEMENTED')); assert.ok(r.blockers.includes('EXTERNAL_VERIFICATION_DEFERRED'), `${id}: unverified docs stay deferred, never assumed`); assert.equal(r.operationalEvidenceAvailable, false); assert.equal(r.foundationPresent, true); }
-  assert.ok(row('TIKTOK_PUBLIC').blockers.includes('PLATFORM_DECISION_PENDING')); for (const id of ['META_PUBLIC','FARCASTER_OFFICIAL']) { assert.equal(row(id).readiness, 'ACCESS_UNRESOLVED'); assert.equal(row(id).transportImplemented, true); assert.ok(row(id).blockers.includes('PRODUCTION_GATE_UNOBSERVED')); }
+  for (const id of ['META_PUBLIC', 'TIKTOK_PUBLIC', 'FARCASTER_OFFICIAL']) { const r = row(id); assert.equal(r.readiness, 'FIXTURE_ONLY', id); assert.ok(r.blockers.includes('TRANSPORT_NOT_IMPLEMENTED')); assert.ok(r.blockers.includes('EXTERNAL_VERIFICATION_DEFERRED'), `${id}: unverified docs stay deferred, never assumed`); assert.equal(r.operationalEvidenceAvailable, false); assert.equal(r.foundationPresent, true); }
+  assert.ok(row('TIKTOK_PUBLIC').blockers.includes('PLATFORM_DECISION_PENDING')); assert.ok(row('META_PUBLIC').blockers.includes('APPROVAL_NOT_OBTAINED')); assert.ok(row('FARCASTER_OFFICIAL').blockers.includes('ENTITLEMENT_UNRESOLVED'));
   const la = row(SOURCE_PROFILE_LEGACY_AGGREGATE_PROVIDER); assert.equal(la.readiness, 'ACCESS_UNRESOLVED'); assert.deepEqual(la.blockers, ['DEPLOYMENT_UNOBSERVED', 'ENTITLEMENT_UNRESOLVED']); assert.equal(la.retentionState, 'AGGREGATE_ONLY_ALLOWED'); assert.equal(la.durableAuthorIdentityAllowed, false); assert.equal(la.historicalReplayCapability, 'AGGREGATE_CHECKPOINT_ONLY'); assert.equal(la.currentlyEnabledState, 'UNOBSERVED_IN_THIS_PROCESS');
   assert.deepEqual(m.operationalProviders, []); assert.equal(m.counts.OPERATIONAL_LIVE_PROVEN, undefined);
   assert.equal(legacyAggregateReadinessRow({ knownAtTs: T0, configured: true }).currentlyEnabledState, 'ENABLED'); assert.equal(legacyAggregateReadinessRow({ knownAtTs: T0, configured: true }).readiness, 'ACCESS_UNRESOLVED', 'config-enabled is not entitlement');
@@ -77,7 +77,7 @@ test('R7-4. the existing access evaluators feed the matrix through the closed bl
   const m = readinessMatrix({ knownAtTs: T0, evaluations });
   for (const r of m.providers) assert.equal(validateReadinessRow(r), null, r.provider);
   const row = (id) => m.providers.find((r) => r.provider === id);
-  assert.equal(row('REDDIT_OFFICIAL').readiness, 'RETENTION_BLOCKED'); assert.equal(row('STOCKTWITS_OFFICIAL').readiness, 'RETENTION_BLOCKED'); assert.equal(row('FARCASTER_OFFICIAL').readiness, 'ACCESS_UNRESOLVED'); assert.equal(row('META_PUBLIC').readiness, 'ACCESS_UNRESOLVED'); assert.equal(row('TIKTOK_PUBLIC').readiness, 'FIXTURE_ONLY');
+  assert.equal(row('REDDIT_OFFICIAL').readiness, 'RETENTION_BLOCKED'); assert.equal(row('STOCKTWITS_OFFICIAL').readiness, 'RETENTION_BLOCKED'); assert.equal(row('FARCASTER_OFFICIAL').readiness, 'FIXTURE_ONLY'); assert.equal(row('META_PUBLIC').readiness, 'FIXTURE_ONLY'); assert.equal(row('TIKTOK_PUBLIC').readiness, 'FIXTURE_ONLY');
   assert.ok(row('REDDIT_OFFICIAL').blockers.includes('CREDENTIAL_MISSING')); assert.ok(row('REDDIT_OFFICIAL').blockerDetail.some((d) => /APPROVAL_RECORD_MISSING/.test(d)), 'the evaluator\'s own reason is kept as bounded detail');
   for (const r of m.providers) if (evaluations[r.provider]) assert.equal(r.latestVerifiedKnownAtTs, Number.isSafeInteger(evaluations[r.provider].evaluatedAtTs) ? evaluations[r.provider].evaluatedAtTs : null);
   // an evaluator claiming green cannot override registry / retention truth
@@ -91,20 +91,20 @@ test('R7-5. readiness is operational truth only: no row and no matrix field carr
   const json = canonicalJson(m);
   assert.ok(!/bullish|bearish|score|probab|"(BUY|SELL|STRIKE|TRADE|ENTER|EXIT)"/i.test(json), 'no direction / score / execution vocabulary');
   assert.ok(!/corroborat/i.test(canonicalJson(m.providers)), 'no row carries corroboration vocabulary'); assert.match(m.note, /never evidence corroboration, never a trade permission/);
-  for (const p of SOCIAL_PROVIDERS) { const r = m.providers.find((x) => x.provider === p.id); assert.equal(r.accessState, p.accessState, `${p.id}: accessState is the registry census`); assert.equal(r.family, p.providerKind); assert.equal(r.transportImplemented, p.durable === true || typeof p.runtimeTransport === 'string'); }
+  for (const p of SOCIAL_PROVIDERS) { const r = m.providers.find((x) => x.provider === p.id); assert.equal(r.accessState, p.accessState, `${p.id}: accessState is the registry census`); assert.equal(r.family, p.providerKind); assert.equal(r.transportImplemented, p.durable === true); }
   assert.ok(m.providers.some((r) => r.readiness === 'RETENTION_BLOCKED'), 'excluded providers are represented with a current reason');
   assert.equal(m.purpose, 'OPERATIONAL_STATUS_ONLY');
 });
 
 test('bounded runtime transports are present without granting durable retention or claiming current operation', async()=>{
-  const {currentReadinessRuntimes}=await import('../rumor2/social-readiness.js');
+  const {currentReadinessRuntimes}=await import('../rumor2/social-current-runtime.js');
   const runtimes=currentReadinessRuntimes({enabled:true,state:'CURRENT_VIEW',sources:{
     REDDIT_OFFICIAL:{enabled:true,state:'OBSERVED',gateReason:null},
     STOCKTWITS_OFFICIAL:{enabled:true,state:'ENTITLEMENT_REQUIRED',gateReason:'ENTITLEMENT_REQUIRED'},
     META_FACEBOOK:{enabled:true,state:'OBSERVED',gateReason:null},
     META_INSTAGRAM:{enabled:false,state:'DISABLED',gateReason:'DISABLED'},
   }});
-  runtimes.FARCASTER_OFFICIAL={enabled:true,state:'DARK',gateReason:'KEY_MISSING'};
+  runtimes.FARCASTER_OFFICIAL={transportImplemented:true,enabled:true,state:'DARK',gateReason:'KEY_MISSING'};
   const m=readinessMatrix({runtimes,knownAtTs:T0});
   for(const id of ['REDDIT_OFFICIAL','STOCKTWITS_OFFICIAL','META_PUBLIC','FARCASTER_OFFICIAL']){
     const r=m.providers.find(x=>x.provider===id);assert.equal(r.transportImplemented,true);assert.ok(!r.blockers.includes('TRANSPORT_NOT_IMPLEMENTED'));assert.equal(r.durableRawContentAllowed,false);assert.equal(r.operationalEvidenceAvailable,false);assert.equal(validateReadinessRow(r),null);

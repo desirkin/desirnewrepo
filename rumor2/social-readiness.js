@@ -43,7 +43,7 @@ export function providerReadinessRow(providerId, { runtime = null, evaluation = 
   const retention = retentionCapability(providerId);
   const blockers = []; const detail = [];
   const push = (code, why) => { if (READINESS_BLOCKERS.includes(code)) { blockers.push(code); if (why) detail.push(`${code}: ${String(why).slice(0, 140)}`); } };
-  const transportImplemented = p.durable === true || typeof p.runtimeTransport === 'string'; // transport existence is separate from durable retention permission
+  const transportImplemented = p.durable === true || runtime?.transportImplemented === true; // transport existence is separate from durable retention permission
   const foundationPresent = p.implemented === true || !!p.foundation;
   const rt = runtime && typeof runtime === 'object' ? runtime : null;
   const enabled = rt ? rt.enabled !== false && rt.state !== undefined : null;
@@ -73,10 +73,10 @@ export function providerReadinessRow(providerId, { runtime = null, evaluation = 
     if (p.accessState === 'AVAILABLE_REQUIRES_APP_REVIEW') push('APPROVAL_NOT_OBTAINED', 'platform app review not obtained'); if (Array.isArray(p.foundation?.docsUnverified) && p.foundation.docsUnverified.length) push('EXTERNAL_VERIFICATION_DEFERRED', p.foundation.docsUnverified.join(','));
     if (providerId === 'FARCASTER_OFFICIAL') { push('CREDENTIAL_MISSING', 'key presence is configuration, not entitlement'); push('ENTITLEMENT_UNRESOLVED', 'plan / credits / terms unknown'); }
     readiness = 'FIXTURE_ONLY';
-  } else if (p.runtimeTransport) {
+  } else if (rt?.transportImplemented === true && p.durable !== true) {
     // These bounded routes were added after the original fixture census. Their
     // existence does not change the registry's durable-retention capability.
-    entitlement = providerId === 'META_PUBLIC' ? 'REQUIRES_APP_REVIEW' : 'REQUIRES_CREDENTIAL_PLAN_AND_TERMS';
+    entitlement = p.accessState === 'AVAILABLE_REQUIRES_APP_REVIEW' ? 'REQUIRES_APP_REVIEW' : 'REQUIRES_CREDENTIAL_PLAN_AND_TERMS';
     replay = 'NONE';
     if (!rt) { push('PRODUCTION_GATE_UNOBSERVED', 'bounded transport exists; no runtime status supplied'); readiness = 'ACCESS_UNRESOLVED'; }
     else if (rt.enabled === false) { push('RUNTIME_DISABLED', rt.gateDetail ?? 'runtime disabled'); readiness = 'DISABLED'; }
@@ -181,23 +181,4 @@ export function readinessMatrix({ runtimes = {}, evaluations = {}, knownAtTs = n
   const rows = [...providers, legacyAggregateReadinessRow({ knownAtTs, configured: legacyAggregateConfigured })];
   const counts = {}; for (const r of rows) counts[r.readiness] = (counts[r.readiness] ?? 0) + 1;
   return deepFreeze({ version: READINESS_MATRIX_VERSION, knownAtTs: isTs(knownAtTs) ? knownAtTs : null, providers: rows, counts, operationalProviders: rows.filter((r) => r.readiness === 'OPERATIONAL_LIVE_PROVEN').map((r) => r.provider), authority: 'NONE', purpose: 'OPERATIONAL_STATUS_ONLY', note: 'readiness is operational truth — never evidence corroboration, never a trade permission; external access / terms / entitlement verification stays deferred and is listed as a blocker, never assumed' });
-}
-
-// Meta's registry family contains two independent routes. Neither route may
-// stand in for the other; retain both states in the family status description.
-export function currentReadinessRuntimes(current) {
-  const off = { enabled: false, state: 'DARK' };
-  const source = id => {
-    if (current?.enabled === false || !current) return off;
-    const value = current.sources?.[id] ?? off;
-    return current.state === 'DARK' ? { ...value, state: 'DARK' } : value;
-  };
-  const facebook = source('META_FACEBOOK'), instagram = source('META_INSTAGRAM');
-  return {
-    REDDIT_OFFICIAL: source('REDDIT_OFFICIAL'),
-    STOCKTWITS_OFFICIAL: source('STOCKTWITS_OFFICIAL'),
-    META_PUBLIC: { enabled: facebook.enabled !== false || instagram.enabled !== false,
-      state: `FACEBOOK:${facebook.state};INSTAGRAM:${instagram.state}`,
-      gateReason: [facebook.gateReason, instagram.gateReason].filter(Boolean).join(';') || null },
-  };
 }

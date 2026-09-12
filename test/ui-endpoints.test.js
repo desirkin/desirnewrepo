@@ -7,11 +7,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { once } from 'node:events';
 
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-uiend-'));
 process.env.COBRA_DATA_DIR = TEST_DATA;
-const PORT = 39950 + Math.floor(Math.random() * 40);
-process.env.PORT = String(PORT);
+process.env.PORT = '0'; // ask the OS for an available port; never race a guessed port
 delete process.env.DATABASE_URL; // local-only display mode; persistence has its own suites
 delete process.env.REPLIT_DEPLOYMENT;
 delete process.env.SERPENT_DURABLE_REQUIRED;
@@ -38,10 +38,11 @@ writeFileSync(path.join(TEST_DATA, 'rumint', 'status.json'), JSON.stringify({ en
 writeFileSync(path.join(TEST_DATA, 'rumint', 'hyped.json'), JSON.stringify(HYPED_SNAP));
 
 const { server } = await import('../ui/server.js');
-const BASE = `http://127.0.0.1:${PORT}`;
+if (!server.listening) await once(server, 'listening');
+const BASE = `http://127.0.0.1:${server.address().port}`;
 
-test.after(() => {
-  server.close();
+test.after(async () => {
+  await new Promise(resolve => server.close(resolve));
   rmSync(TEST_DATA, { recursive: true, force: true });
 });
 
