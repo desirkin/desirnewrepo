@@ -266,8 +266,8 @@ export function fromGovernanceEvent(rec, observedTs = nowIso()) {
       quorum: quorumKnown ? 'KNOWN' : 'UNKNOWN',
       trajectory: traj ? 'KNOWN' : 'UNKNOWN',
       voterConcentration: conc?.coverage === 'COMPLETE' ? 'KNOWN' : conc?.coverage === 'PARTIAL' ? 'DEGRADED' : 'UNAVAILABLE',
-      timelock: 'UNKNOWN', // no timelock evidence in GOV-1 snapshot data
-      executionState: 'UNKNOWN',
+      timelock: rec.provider === 'TALLY' && typeof rec.timelock === 'string' ? 'KNOWN' : 'UNKNOWN',
+      executionState: rec.provider === 'TALLY' && rec.provenance === 'INDEXED_BY_TALLY' ? 'KNOWN' : 'UNKNOWN',
     },
     provenance: {
       source: providerNote,

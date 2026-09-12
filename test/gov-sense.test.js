@@ -758,7 +758,7 @@ test('H10. FINALIZED STATE IS BOUNDED: hundreds of finished proposals release th
   cleanupDir(d, gov);
 });
 
-test('H11. TALLY SCAFFOLD TRUTH: key + verified governor => collector-not-implemented, zero tally requests', async () => {
+test('H11. TALLY scope truth: a malformed governor identity fails closed before any Tally request', async () => {
   const d = freshDir();
   const SECRET = 'tally-secret-zzz';
   const governorEntry = { symbol: 'UNI', provider: 'TALLY', governorId: 'eip155:1:0xGovernor', scope: 'TOKEN_GOVERNANCE', verified: true, mappingVersion: 1 };
@@ -777,7 +777,7 @@ test('H11. TALLY SCAFFOLD TRUTH: key + verified governor => collector-not-implem
     registryEntries: [...VERIFIED_MAPPINGS, governorEntry],
   });
   await gov.pollOnce();
-  assert.equal(statusOf(d).providers.tally, 'UNAVAILABLE_COLLECTOR_NOT_IMPLEMENTED', 'status never suggests collection will occur');
+  assert.equal(statusOf(d).providers.tally, 'CONFIG_INVALID_GOVERNOR_ID', 'malformed governor identity cannot activate the collector');
   assert.ok(urls.every((u) => !String(u).includes('tally')), 'zero Tally network requests');
   assert.ok(!readFileSync(path.join(d, 'governance', 'status.json'), 'utf8').includes(SECRET), 'key never persisted');
   assert.ok(!eventLines(d).some((e) => e.provider === 'TALLY'), 'no fake Tally observation');

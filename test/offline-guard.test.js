@@ -91,7 +91,7 @@ test('N02. the baseline network-leak witness and its closure: a LIVE Kraken adap
   assert.deepEqual(summary(closure), [], 'N02: a scripted lifecycle reaches no network');
   // the closure at suite level: the once-leaking non-PG suites run guarded in a separate process with a selftest run identity and produce ZERO records (the PG suites are covered by the full guarded gate)
   for (const file of ['test/judge-repair-runtime.test.js', 'test/judge-repair-kraken.test.js']) {
-    const log = path.join(TMP, `${path.basename(file)}.jsonl`); let out; try { out = await execFileP(process.execPath, ['--test', file], { env: { PATH: process.env.PATH, HOME: process.env.HOME, NODE_OPTIONS: `--import=${GUARD}`, COBRA_OFFLINE_GUARD_LOG: log, COBRA_OFFLINE_GUARD_RUN: `selftest:suite:${randomUUID().slice(0, 8)}` }, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 }); } catch (err) { out = { stdout: err.stdout ?? '', stderr: err.stderr ?? '', failed: true }; }
+    const log = path.join(TMP, `${path.basename(file)}.jsonl`); let out; try { out = await execFileP(process.execPath, ['--test', '--test-reporter=tap', file], { env: { PATH: process.env.PATH, HOME: process.env.HOME, NODE_OPTIONS: `--import=${GUARD}`, COBRA_OFFLINE_GUARD_LOG: log, COBRA_OFFLINE_GUARD_RUN: `selftest:suite:${randomUUID().slice(0, 8)}` }, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 }); } catch (err) { out = { stdout: err.stdout ?? '', stderr: err.stderr ?? '', failed: true }; }
     assert.equal(out.failed, undefined, `${file} failed under the guard: ${out.stderr.slice(-2000)}`); assert.match(out.stdout, /\n# fail 0\n/, file); assert.equal(existsSync(log) ? readFileSync(log, 'utf8').trim() : '', '', `${file}: zero denied attempts under the guard`);
   }
 });

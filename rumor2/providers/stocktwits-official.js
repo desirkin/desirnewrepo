@@ -185,7 +185,7 @@ export function createStocktwitsFirestreamClient({
     if (typeof transport !== 'function' && typeof transport?.connect !== 'function') { state.lastStatus = 'FAILED'; state.lastError = 'FIRESTREAM_TRANSPORT_REQUIRED'; return { ok: false, status: state.lastStatus, error: state.lastError, access, state: { ...state } }; }
     stopped = false; state.lastStatus = 'RUNNING';
     while (!stopped) {
-      try { await connect(); state.reconnects = 0; if (stopped) break; }
+      try { await connect(); state.reconnects = 0; if (stopped) break; break; }
       catch (error) {
         state.failures += 1; state.lastError = String(error?.message ?? error).slice(0, 200); state.lastStatus = 'FAILED';
         if (state.reconnects >= maxReconnects) return { ok: false, status: 'FAILED', error: state.lastError, access, state: { ...state } };

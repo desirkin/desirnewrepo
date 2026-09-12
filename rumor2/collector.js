@@ -60,6 +60,8 @@ import { buildClaimPacket } from './packet.js';
 // SOURCE-ONLY: they never enter the frozen replay, graph, claims, or packets.
 import { isSocialEventType, replaySocialHistory } from './social-settle.js';
 import { createSocialRuntime } from './social-runtime.js';
+import { createSocialCurrentRuntime } from './social-current-runtime.js';
+import { createFarcasterRuntime } from './social-farcaster-runtime.js';
 import { buildSocialFilter } from './social.js';
 // SOCIAL-2B: the X filtered-stream ear — same writer, same epoch, same journal;
 // default cost ZERO (explicit gate + bearer + hard budget + usage preflight)
@@ -123,6 +125,10 @@ export function startRumor2({
   socialXFetchImpl = null, // injected HTTP for tests; null => global fetch, pinned to the approved X API host
   socialXRuntime = null,
   socialXOptions = {},
+  socialFarcasterEnabled = process.env.RUMOR2_SOCIAL_FARCASTER_ENABLED === 'true',
+  socialFarcasterOptions = {},
+  socialCurrentEnabled = process.env.RUMOR2_SOCIAL_CURRENT_ENABLED === 'true',
+  socialCurrentOptions = {},
   // SOCIAL-4F: the DETACHED read-only survey snapshot accessor, injected from application
   // composition (fly.js retains the wide-eye handle): { snapshot(), notices(), deepObservation() }.
   // Social receives no mutable survey map, no posture callback, and no authority to start the
@@ -300,6 +306,8 @@ export function startRumor2({
         now, log, fetchImpl: socialXFetchImpl, ...socialXOptions,
       }))
     : null;
+  const socialCurrent = socialCurrentEnabled ? createSocialCurrentRuntime({ now, ...socialCurrentOptions }) : null;
+  const socialFarcaster = socialFarcasterEnabled ? createFarcasterRuntime({ scopeSource: researchScope, now, log, ...socialFarcasterOptions }) : null;
   // SOCIAL-4F status: the four scopes stated separately — never one number, never a full-universe claim
   const socialResearchStatus = (t) => {
     const rs = researchScope.status(t);
@@ -324,7 +332,7 @@ export function startRumor2({
     };
   };
   // every operational social ear the collector drives under ONE writer authority
-  const socialRuntimes = [social, socialX].filter(Boolean);
+  const socialRuntimes = [social, socialX, socialFarcaster, socialCurrent].filter(Boolean);
   // SOCIAL-5A: the research strainer runtime (research dossiers + proposals; authority NONE)
   const research = researchStrainer && researchStrainer.enabled
     ? createResearchStrainer({
@@ -1338,6 +1346,8 @@ export function startRumor2({
       // SOCIAL-2A: the operational Social ear (source-only, zero authority)
       social: social ? social.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_BLUESKY_ENABLED)' },
       // SOCIAL-2B: the X ear (source-only, zero authority, default cost zero)
+      socialCurrent: socialCurrent ? socialCurrent.status() : { enabled: false, state: 'DARK', authority: 'NONE' },
+      socialFarcaster: socialFarcaster ? socialFarcaster.status() : { enabled: false, state: 'DARK', authority: 'NONE' },
       socialX: socialX ? socialX.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_X_ENABLED)', authority: 'NONE' },
       // SOCIAL-7 §48: ONE machine-readable provider readiness truth matrix (registry + retention law + the live runtime statuses above; authority NONE) — the legacy aggregate RUMINT poller is not owned here, so its deployment stays UNOBSERVED_IN_THIS_PROCESS
       socialReadiness: readinessMatrix({ runtimes: { BLUESKY_OFFICIAL: social ? social.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_BLUESKY_ENABLED)' }, X_OFFICIAL: socialX ? socialX.status() : { enabled: false, state: 'DARK', gateDetail: 'disabled (RUMOR2_SOCIAL_X_ENABLED)' } }, knownAtTs: t }),
@@ -1450,6 +1460,7 @@ export function startRumor2({
     stop,
     tickOnce: () => (inFlight = inFlight.then(() => tickOnce())),
     status: writeStatus,
+    currentSocial: () => socialCurrent?.snapshot() ?? { authority: 'NONE', retention: 'RAM_ONLY_MAX_5_MINUTES', observations: [] },
     // MARKET-LAB seam: a DETACHED read-only projection of the research strainer's as-of composite view and latest settled
     // dossier record for one coin — already-computed frozen values, no collector internals, no subscription, no authority.
     // Absent strainer => null (the consumer reports NOT_CONNECTED rather than inventing Social coverage).

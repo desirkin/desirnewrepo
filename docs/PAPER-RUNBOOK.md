@@ -46,9 +46,11 @@ dedicated DATA-ONLY key (`create-ws-token` only) and is proven before use (`SAFE
 ## 3. Composition order (fly.js, unchanged)
 
 persistence bootstrap (restrictive first) → cockpit status server → memory mirror → RUMINT legacy ear → gateway (exchange
-infrastructure) → wide eye / universe → governance (dark; off) → market research owner + Socrates case runtime → Judge
-PAPER (+ Watch, paper execution) → RUMOR2 official + social ears + strainer → Tape feed loop (blocks until a signal) →
-stops → paper shutdown seam → exit.
+infrastructure) → press (publisher headlines, dark) → infra (NOAA / RIPE RIS / Cloudflare Radar, dark) → video (YouTube
+public metadata, dark) → wide eye / universe → governance (dark; off) → market research owner + Socrates case runtime →
+Judge PAPER (+ Watch, paper execution) → RUMOR2 official + social ears + strainer → Tape feed loop (blocks until a signal)
+→ stops → paper shutdown seam → exit. The three observation tiers are collectors only (authority NONE): zero network
+unless the profile derives their enables, JSONL observations + a status file, and nothing downstream reads them.
 
 ## 4. Preflight sections and blocker groups
 
@@ -65,12 +67,24 @@ Runtime state vocabulary (closed; zero `UNKNOWN` rows): `ACTIVE`, `ACTIVE_DEGRAD
 `CONFIG_REQUIRED:<name>`, `KEY_PRESENT_UNPROVEN`, `BLOCKED_NO_SAFE_L3_DATA_KEY`, and the dark states
 `DARK_CAPTURE_OPERATIONAL` / `DARK_CAPTURE_BLOCKED_EXTERNAL` / `DARK_CAPTURE_DEGRADED` / `DARK_CAPTURE_DISABLED_BY_POLICY`.
 
+## 4A. Observation tiers: press / infra / video (dark; authority NONE)
+
+| Tier | Enable (derived by the profile) | Gate (env NAMES) | Files | Reader |
+| --- | --- | --- | --- | --- |
+| `press/` publisher headlines (P03-P09) | `PRESS_ENABLED=true`, `PRESS_SOURCES=<ON rows>` | none (public RSS; profile OFF rows never polled; Reuters / Bloomberg `LICENSED_INTERFACE_REQUIRED`, zero requests) | `<data>/press/status.json`, `observations.jsonl`, `checkpoint-<ID>.json` | `cobra press status \| tail` |
+| `infra/` NOAA SWPC (EXPERIMENTAL), RIPE RIS, Cloudflare Radar (I01-I03) | `INFRA_OBS_ENABLED=true`, `INFRA_SOURCES=NOAA_SWPC,RIPE_RIS,CLOUDFLARE_RADAR` | RIPE: `INFRA_RIPE_RESOURCES` (your own prefixes / ASNs; `CONFIG_REQUIRED` until set); Cloudflare: `CLOUDFLARE_API_TOKEN` (`CREDENTIAL_REQUIRED` until present; header only) | `<data>/infra/status.json`, `observations.jsonl`, `checkpoint-<ID>.json` | `cobra infra status \| tail` |
+| `video/` YouTube public metadata (S10) | `SOCIAL_VIDEO_ENABLED=true` | `YOUTUBE_API_KEY` + `SOCIAL_VIDEO_YOUTUBE_QUERIES` (your own queries) + `SOCIAL_VIDEO_YOUTUBE_MAX_DAILY_SEARCHES` (explicit; no default budget) — zero requests until all three hold | `<data>/video/status.json`, `observations.jsonl`, `checkpoint-YOUTUBE_DATA_API.json` | `cobra video status \| tail` |
+
+Every tier is operable by supplying the documented configuration alone. A credential present in the environment never
+enables a tier by itself; a measurement exists only from a parsed payload; every observation carries `authority: NONE`;
+none of them is a RUMOR-2 event (the RUMOR-2 registries stay sealed — `doctrine/RUMOR2.md` scope note).
+
 ## 5. The sensor snapshot (`paper/readiness.js`)
 
 `sensorSnapshot()` returns `{ snapshotVersion, generatedTs, profile, runtimeMode, authority, groups, rows, counts,
 controls, locks, persistence, law }`. Every row carries exactly `id, name, group, state, desiredState, lastSuccessTs,
 ageMs, coverage, blocker, detail, authority`. Groups: `MARKET`, `OFFICIAL`, `SOCIAL`, `INFRASTRUCTURE`, `DARK_RESEARCH`,
-`SOCRATES`, `JUDGE`, `WATCH`. A sense is `ACTIVE` only from a FRESH status record; a stale record is `ACTIVE_DEGRADED`;
+`SOCRATES`, `JUDGE`, `WATCH`, `PUBLISHER_NEWS`. A sense is `ACTIVE` only from a FRESH status record; a stale record is `ACTIVE_DEGRADED`;
 nothing recorded is `NOT_OBSERVED`. No secret value can enter the snapshot (the builder throws on a value-like string).
 The cockpit reads it at `/api/sensors` (read-only) and shows it in the SENSES drawer.
 

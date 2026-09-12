@@ -449,6 +449,31 @@ GHOST. Zero Attention weight, zero HYPED authority, zero stalking, zero
 eligibility, zero Brain, zero STRIKE, zero execution. Those boundaries
 are enforced by tests, not comments.
 
+### Scope note (2026-09-12): publishers exist OUTSIDE this core
+
+- Old rule (unchanged for THIS layer): no publisher is a RUMOR-2 provider.
+  `rumor2/registry.js` still names no Reuters / Bloomberg / CNBC / FT /
+  CoinDesk / The Block / Cointelegraph / Decrypt / Google News token
+  (`test/rumor2-authority.test.js` bans the tokens in the frozen core), no
+  publisher item ever becomes a RUMOR-2 event, claim, corroboration or
+  provenance, and the official-ear transport (`rumor2/http.js`) is not shared.
+- New scope (a separate tier, not an extension of this one): the owner's
+  sensor scope P01-P09 is implemented by `press/` — a dark
+  PUBLISHER-OBSERVATION collector composed by `fly.js` beside the gateway.
+  It reuses exactly ONE pure export of this layer, `parseFeed` from
+  `rumor2/feed.js` (the hostile-XML-safe parser; enumerated in the authority
+  fence as an offline-research-style allowance), records HEADLINE / LINK /
+  PUBLISHER-TIMESTAMP observations only in `<data>/press/observations.jsonl`
+  (bodies are never fetched), keeps publisher and aggregator identities apart
+  (a Google News item carries its own `<source>` publisher with the aggregator
+  as transport), and answers LICENSED_INTERFACE_REQUIRED with zero requests for
+  Reuters / Bloomberg until the owner supplies a licensed interface.
+- Unchanged authority: press observations carry `authority: NONE`; nothing in
+  `rumor2/`, `judge/`, `execution/`, `watch/`, `tape/` or `market-lab/` reads
+  them (`test/press.test.js` PRESS-5). The same pattern holds for the
+  `infra/` (NOAA / RIPE RIS / Cloudflare Radar) and `video/` (YouTube public
+  metadata) tiers: separate, dark, non-authoritative, never a RUMOR-2 event.
+
 ## RUMOR-2 IS FROZEN
 
 Final freeze seal — the last closeout pass. RUMOR-2's source, claim,

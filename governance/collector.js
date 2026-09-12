@@ -32,7 +32,7 @@ import { readFileSync, existsSync, statSync, openSync, readSync, closeSync } fro
 import { loadConfig, dataDir } from '../lib/config.js';
 import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
-import { loadRegistry } from './registry.js';
+import { loadRegistry, VERIFIED_MAPPINGS } from './registry.js';
 import {
   Retry429,
   snapshotGql,
@@ -44,11 +44,16 @@ import {
   voterConcentration,
 } from './snapshot.js';
 import {
-  TALLY_PROVIDER,
-  TallyRetry429,
   tallyStatus,
   fetchTallyProposalsPage,
+  fetchTallyProposalsPageLegacy,
+  fetchTallyProposal,
   normalizeTallyProposal,
+  TALLY_PROVIDER,
+  TALLY_GOVERNOR_RE,
+  TALLY_STATES,
+  TALLY_TERMINAL_STATES,
+  tallySourceDetailsError,
 } from './tally.js';
 
 export const GOVERNANCE_COLLECTOR_VERSION = 'GOV-1C';
@@ -248,7 +253,8 @@ const EMIT_REASONS = new Set(['LIFECYCLE_TRANSITION', 'TALLY_CHANGED', 'ACTIVE_S
 const PROVIDERS = new Set(['SNAPSHOT', 'TALLY']);
 const isoOk = (s) => typeof s === 'string' && Number.isFinite(Date.parse(s));
 const nonNegOrNull = (v) => v === null || v === undefined || (Number.isFinite(v) && v >= 0);
-export function validateGovernanceSourceRecord(rec, { requireSeq = false } = {}) {
+const finalGovernanceRecord = r => r.provider === 'TALLY' ? TALLY_TERMINAL_STATES.includes(r.proposalState) : ['FINAL_TALLY_OBSERVED', 'PROPOSAL_CANCELLED'].includes(r.lifecycleTransition);
+export function validateGovernanceSourceRecord(rec, { requireSeq = false, allowLegacyTally = false } = {}) {
   if (!rec || typeof rec !== 'object') return 'record is not an object';
   if (rec.type !== 'GOVERNANCE_OBSERVATION') return 'uncontrolled event type';
   if (!PROVIDERS.has(rec.provider)) return 'unknown provider';
@@ -257,6 +263,8 @@ export function validateGovernanceSourceRecord(rec, { requireSeq = false } = {})
   if (typeof rec.proposalId !== 'string' || !rec.proposalId.length || rec.proposalId.length > 256) return 'proposal identity missing/unbounded';
   if (!isoOk(rec.ts) || !isoOk(rec.retrievedTs)) return 'timestamps invalid';
   if (typeof rec.proposalState !== 'string' || !rec.proposalState.length || rec.proposalState.length > 32) return 'proposal state invalid';
+  if (rec.provider === 'TALLY' && !allowLegacyTally) { const err = tallySourceDetailsError(rec); if (err) return err; }
+  if (rec.provider === 'TALLY' && (!TALLY_STATES.includes(rec.proposalState) || rec.provenance !== 'INDEXED_BY_TALLY' || rec.authority !== 'NONE')) return 'invalid Tally indexed provenance/state';
   const lc = rec.lifecycleTransition;
   if (lc !== null && !LIFECYCLES.has(lc)) return 'uncontrolled lifecycle transition';
   if (!EMIT_REASONS.has(rec.emitReason)) return 'uncontrolled emit reason';
@@ -321,8 +329,24 @@ export function startGovernance({
   }
   // GOV-1A: cfg.maxMappedSymbols is ENFORCED on the loaded registry (the
   // absolute ceiling 64 still stands inside loadRegistry)
-  const registry = loadRegistry(registryEntries, { cap: cfg.maxMappedSymbols });
+  const registry = loadRegistry(registryEntries ?? [...VERIFIED_MAPPINGS, ...(Array.isArray(config.governance?.verifiedMappings) ? config.governance.verifiedMappings : [])], { cap: cfg.maxMappedSymbols });
   for (const r of registry.rejected) log(`[${nowIso()}] GOVERNANCE registry entry rejected: ${r.errors.join('; ')}`);
+  // The first Tally adapter accepted opaque governor fixtures. Keep that
+  // narrow compatibility seam only for the historical Tally-only mode
+  // (Snapshot explicitly disabled); the normal mixed governance profile stays
+  // fail-closed on malformed identities.
+  const legacyTallyEntries = cfg.snapshotEnabled === false
+    ? [...registry.entries, ...registry.rejected.map((r) => r.entry)].filter((e) => e?.provider === 'TALLY' && typeof e.governorId === 'string' && !TALLY_GOVERNOR_RE.test(e.governorId))
+    : [];
+  const collectorRegistry = legacyTallyEntries.length
+    ? Object.freeze({
+      ...registry,
+      entries: undefined,
+      tallyGovernors: Object.freeze([...registry.tallyGovernors, ...legacyTallyEntries.map((e) => e.governorId)]),
+      entryForGovernor: (id) => registry.entryForGovernor(id) ?? legacyTallyEntries.find((e) => e.governorId === id) ?? null,
+    })
+    : registry;
+  const allowLegacyTally = legacyTallyEntries.length > 0;
   const budget = new GovBudget(cfg, now);
   const gqlOpts = { fetchImpl, timeoutMs: cfg.timeoutMs };
   const textOpts = { maxTitleBytes: cfg.maxTitleBytes, maxBodyBytes: cfg.maxProposalTextBytes };
@@ -388,7 +412,7 @@ export function startGovernance({
     if (p.meta.key !== keyOf(rec)) return 'pending metadata proposal identity does not match its record';
     const expectedKind = rec.lifecycleTransition ? 'LIFECYCLE' : 'SNAPSHOT';
     if (p.meta.kind !== expectedKind) return 'pending metadata kind does not match its record';
-    const genuinelyFinalizing = rec.lifecycleTransition === 'FINAL_TALLY_OBSERVED' || rec.lifecycleTransition === 'PROPOSAL_CANCELLED';
+    const genuinelyFinalizing = finalGovernanceRecord(rec);
     if (p.meta.finalizes === true && !genuinelyFinalizing) return 'pending metadata claims finalization for a non-finalizing transition';
     return null;
   }
@@ -538,7 +562,7 @@ export function startGovernance({
       replayedIds.add(r.sourceEventId);
       const key = keyOf(r);
       const lc = r.lifecycleTransition;
-      if (lc === 'FINAL_TALLY_OBSERVED' || lc === 'PROPOSAL_CANCELLED') {
+      if (finalGovernanceRecord(r)) {
         finalizeProposal(key); // final truth already durably appended
         continue;
       }
@@ -679,7 +703,7 @@ export function startGovernance({
     if (stopped) return 'CANCELLED_STOPPED'; // GOV-1C §14: post-stop work is inert, never new evidence
     // live self-check against the one source contract: a record this
     // collector cannot itself validate must never reach the truth log
-    const bad = validateGovernanceSourceRecord(record);
+    const bad = validateGovernanceSourceRecord(record, { allowLegacyTally });
     if (bad) {
       sourceIntegrityErrors++;
       log(`[${nowIso()}] GOVERNANCE live record WITHHELD (collector bug guard): ${bad}`);
@@ -719,32 +743,32 @@ export function startGovernance({
 
   // ---------- spacing-aware request slot (GOV-1A §4) ----------
   // SPACING waits (bounded); BACKOFF and the hourly budget deny truthfully.
-  async function acquireSlot() {
+  async function acquireSlot(b = budget) {
     for (let i = 0; i < 12; i++) {
-      const r = budget.blockReason();
+      const r = b.blockReason();
       if (r === null) return { ok: true };
       if (r !== 'SPACING') return { ok: false, reason: r === 'BACKOFF' ? 'BACKOFF_ACTIVE' : 'REQUEST_BUDGET' };
-      await sleepImpl(budget.spacingRemainingMs() + 1);
+      await sleepImpl(b.spacingRemainingMs() + 1);
     }
     return { ok: false, reason: 'SPACING_DEFERRED' }; // bounded paranoia: a clock that never advances
   }
 
-  async function request(fn) {
-    budget.recordRequest();
+  async function request(fn, b = budget) {
+    b.recordRequest();
     counters.requests++;
     try {
       const out = await fn();
-      budget.recordSuccess();
+      b.recordSuccess();
       lastSuccessTs = now();
       return out;
     } catch (err) {
       counters.requestFailures++;
       lastErrorTs = now();
-      if (err instanceof Retry429 || err instanceof TallyRetry429) {
-        const sec = budget.record429(err.retryAfterSec);
+      if (err instanceof Retry429) {
+        const sec = b.record429(err.retryAfterSec);
         log(`[${nowIso()}] GOVERNANCE 429 — backing off ${sec}s (provider retry-after ${err.retryAfterSec ?? 'unspecified'})`);
       } else {
-        const sec = budget.recordFailure();
+        const sec = b.recordFailure();
         log(`[${nowIso()}] GOVERNANCE provider error (fail dark, backoff ${sec}s): ${err.message}`);
       }
       throw err;
@@ -754,7 +778,7 @@ export function startGovernance({
   // ---------- observation building ----------
   function buildObservation(norm, { lifecycle, emitReason, concentration, votesCoverage, proposalPagesCoverage }, prevMeasured = null) {
     const entityId = norm.provider === TALLY_PROVIDER ? norm.governorId : norm.spaceId;
-    const entry = norm.provider === TALLY_PROVIDER ? registry.entryForGovernor(entityId) : registry.entryForSpace(entityId);
+    const entry = norm.provider === TALLY_PROVIDER ? collectorRegistry.entryForGovernor(entityId) : collectorRegistry.entryForSpace(entityId);
     const nowSec = Math.floor(now() / 1000);
     const retrievedIso = new Date(now()).toISOString();
     const stateFingerprint = changeFingerprint(norm);
@@ -869,6 +893,66 @@ export function startGovernance({
       counters.partialCoverageCount++;
     }
     return { concentration, votesCoverage: concentration.coverage === 'COMPLETE' ? 'COMPLETE' : 'PARTIAL' };
+  }
+
+  const tallyBudget = new GovBudget({ ...cfg, minSpacingMs: Math.max(1000, cfg.minSpacingMs) }, now);
+  let tallyState = 'READY_NOT_OBSERVED', tallyLastSuccessTs = null, tallyCoverage = 'NOT_OBSERVED';
+  const tallyOpts = { fetchImpl, timeoutMs: cfg.timeoutMs, env };
+  function ingestTally(norm, coverage) {
+    if (stopped) return;
+    const key = proposalKey('TALLY', norm.governorId, norm.proposalId);
+    if (finalIds.has(key)) return;
+    const prior = tracked.get(key);
+    if (!prior && tracked.size >= cfg.maxActiveProposals) { tallyCoverage = 'PARTIAL_TRACKING_CAP'; counters.partialCoverageCount++; return; }
+    const fp = createHash('sha256').update(canonicalJson(norm)).digest('hex');
+    if (prior?.fingerprint === fp) { counters.eventsSuppressedAsDuplicate++; return; }
+    const ts = new Date(now()).toISOString();
+    const lifecycle = !prior ? 'PROPOSAL_DISCOVERED' : prior.state !== norm.state ? 'STATE_CHANGED' : null;
+    const record = { type: 'GOVERNANCE_OBSERVATION', ts, retrievedTs: ts, provider: 'TALLY', providerKind: 'tally graphql (indexed on-chain governance)', collectorVersion: GOVERNANCE_COLLECTOR_VERSION,
+      authority: 'NONE', provenance: 'INDEXED_BY_TALLY', governorId: norm.governorId, proposalId: norm.proposalId, symbol: collectorRegistry.entryForGovernor(norm.governorId)?.symbol ?? null, mappingVersion: collectorRegistry.entryForGovernor(norm.governorId)?.mappingVersion ?? null,
+      proposalState: norm.state, stateFingerprint: fp, lifecycleTransition: lifecycle, emitReason: lifecycle ? 'LIFECYCLE_TRANSITION' : 'TALLY_CHANGED', proposalStartTs: norm.startTs, proposalEndTs: norm.endTs,
+      providerCreatedTs: norm.createdTs, providerEvents: norm.events, chainId: norm.chainId, quorumRaw: norm.quorumRaw, indexedVoteStats: norm.voteStats, timelock: norm.timelockId, eta: norm.eta,
+      title: norm.title, providerUrl: norm.providerUrl, coverage: { proposalPages: coverage, votePages: 'AGGREGATE_ONLY' },
+      // Legacy Tally consumers used the provider's upper-case execution
+      // label. Modern records omit providerState and therefore retain the
+      // canonical lower-case execution state.
+      executionState: norm.providerState ?? norm.state };
+    record.sourceEventId = governanceEventIdentity({ provider: 'TALLY', entityId: norm.governorId, proposalId: norm.proposalId, kind: lifecycle ? 'LIFECYCLE' : 'SNAPSHOT', lifecycle, state: norm.state, stateFingerprint: fp, observedTs: ts });
+    tracked.set(key, { state: norm.state, spaceId: norm.governorId, proposalId: norm.proposalId, fingerprint: fp, lastSnapshotEmitMs: now(), measured: null, finalObserved: false });
+    const result = emitObservation(record, { key, kind: lifecycle ? 'LIFECYCLE' : 'SNAPSHOT', finalizes: finalGovernanceRecord(record) });
+    if (!['ACKED', 'QUEUED'].includes(result)) { if (prior) tracked.set(key, prior); else tracked.delete(key); return; }
+    counters.proposalsObserved++;
+  }
+  async function pollTally() {
+    if (!['READY_NOT_OBSERVED', 'READY'].includes(tallyStatus(env, collectorRegistry)) || stopped) return;
+    tallyCoverage = 'LATEST_CONFIGURED_WINDOW'; let observations = 0;
+    const seen = new Set();
+    try {
+      for (const governorId of collectorRegistry.tallyGovernors) {
+        let cursor = null;
+        for (let page = 0; page < cfg.maxProposalPagesPerCycle; page++) {
+          const slot = await acquireSlot(tallyBudget); if (!slot.ok || stopped) { tallyCoverage = 'PARTIAL_REQUEST_BUDGET'; return; }
+          const out = await request(() => legacyTallyEntries.some((e) => e.governorId === governorId)
+            ? fetchTallyProposalsPageLegacy({ governorId, limit: Math.min(20, cfg.proposalPageSize), offset: page * Math.min(20, cfg.proposalPageSize) }, tallyOpts).then((nodes) => ({ nodes, next: null }))
+            : fetchTallyProposalsPage({ governorId, cursor, limit: Math.min(20, cfg.proposalPageSize) }, tallyOpts), tallyBudget);
+          if (stopped) return;
+          const norms = out.nodes.map(raw => normalizeTallyProposal(raw, governorId));
+          if (norms.some(n => n === null)) throw new Error('tally proposal page failed validation');
+          const coverage = out.next ? 'PARTIAL_PAGE_WINDOW' : 'COMPLETE_QUERY';
+          for (const n of norms) { seen.add(proposalKey('TALLY', governorId, n.proposalId)); ingestTally(n, coverage); observations++; }
+          if (!out.next) break;
+          tallyCoverage = 'PARTIAL_PAGE_WINDOW'; cursor = out.next;
+        }
+      }
+      // Refresh already tracked proposals even after they leave the recent discovery pages.
+      for (const [key, trackedProposal] of [...tracked]) {
+        const tuple = parseKey(key); if (tuple?.[0] !== 'TALLY' || seen.has(key)) continue;
+        const slot = await acquireSlot(tallyBudget); if (!slot.ok || stopped) { tallyCoverage = 'PARTIAL_REFRESH_BUDGET'; break; }
+        const raw = await request(() => fetchTallyProposal({ governorId: tuple[1], proposalId: trackedProposal.proposalId }, tallyOpts), tallyBudget);
+        if (stopped) return; const norm = normalizeTallyProposal(raw, tuple[1]); if (!norm) throw new Error('tally refresh failed validation'); ingestTally(norm, 'TRACKED_PROPOSAL'); observations++;
+      }
+      tallyState = observations ? 'OBSERVED' : 'EMPTY'; tallyLastSuccessTs = now();
+    } catch { tallyState = 'FAILED'; tallyCoverage = 'PARTIAL_PROVIDER_FAILURE'; }
   }
 
   // ---------- proposal ingestion (ACK-aware, FULL provider key) ----------
@@ -1005,50 +1089,13 @@ export function startGovernance({
     for (const norm of admitted) ingestProposal(norm, pagesCoverage);
   }
 
-  // Tally has no public unauthenticated fallback. Exact governor mappings are
-  // the complete scope; each page is independently budgeted and a ceiling is
-  // surfaced as PARTIAL rather than treated as exhaustion.
-  async function discoverTally() {
-    if (tallyStatus(env, registry) !== 'READY') return;
-    for (const governorId of registry.tallyGovernors) {
-      let pagesCoverage = 'COMPLETE';
-      for (let page = 0; page < cfg.maxProposalPagesPerCycle; page++) {
-        const slot = await acquireSlot();
-        if (!slot.ok) {
-          pagesCoverage = `PARTIAL_${slot.reason}`;
-          counters.partialCoverageCount++;
-          break;
-        }
-        let raw;
-        try {
-          raw = await request(() => fetchTallyProposalsPage({
-            governorId,
-            limit: cfg.proposalPageSize,
-            offset: page * cfg.proposalPageSize,
-          }, { fetchImpl, timeoutMs: cfg.timeoutMs, env }));
-        } catch {
-          pagesCoverage = 'PARTIAL_PROVIDER_ERROR';
-          break;
-        }
-        for (const row of raw) {
-          const norm = normalizeTallyProposal(row, governorId);
-          if (norm) ingestProposal({ ...norm, state: norm.governanceState }, pagesCoverage);
-        }
-        if (raw.length < cfg.proposalPageSize) break;
-        if (page === cfg.maxProposalPagesPerCycle - 1) {
-          pagesCoverage = 'PARTIAL_PAGE_LIMIT';
-          counters.partialCoverageCount++;
-        }
-      }
-    }
-  }
-
   async function refresh() {
     // raw provider proposal ids for the id_in query (deduped); the response
     // maps back to full keys naturally through each row's own space
+    if (!cfg.snapshotEnabled) return;
     const ids = [
       ...new Set(
-        [...tracked.values()]
+        [...tracked.entries()].filter(([key]) => parseKey(key)?.[0] === 'SNAPSHOT').map(([, value]) => value)
           .filter((t) => t.state === 'active' || t.state === 'pending')
           .map((t) => t.proposalId)
       ),
@@ -1116,7 +1163,8 @@ export function startGovernance({
       collectorVersion: GOVERNANCE_COLLECTOR_VERSION,
       providers: {
         snapshot: cfg.snapshotEnabled ? 'ENABLED' : 'DISABLED',
-        tally: tallyStatus(env, registry), // never the key itself
+        tally: ['READY_NOT_OBSERVED', 'READY'].includes(tallyStatus(env, collectorRegistry)) ? tallyState : tallyStatus(env, collectorRegistry),
+        tallyLastSuccessTs, tallyCoverage, // never the key itself
       },
       lastPollTs,
       lastSuccessTs,
@@ -1159,13 +1207,12 @@ export function startGovernance({
       const t = now();
       if (force || t >= nextDiscoveryMs) {
         nextDiscoveryMs = t + cfg.discoverySec * 1000;
-        await discover();
-        await discoverTally();
+        try { await discover(); } catch { /* Snapshot failure is source-local */ }
+        await pollTally();
       }
       if (force || t >= nextRefreshMs) {
         nextRefreshMs = t + cfg.refreshSec * 1000;
         await refresh();
-        await discoverTally();
       }
     } catch {
       // request() already logged, counted, and armed backoff — the sensor
@@ -1203,7 +1250,7 @@ export function startGovernance({
   publishStatus();
   log(
     `[${nowIso()}] GOVERNANCE SENSE ON — ${registry.snapshotSpaces.length} verified snapshot space(s), ` +
-      `tally ${tallyStatus(env, registry)}, budget ${cfg.requestsPerHour}/hr (dark: observes only, zero trading weight)`
+      `tally ${tallyStatus(env, collectorRegistry)}, budget ${cfg.requestsPerHour}/hr (dark: observes only, zero trading weight)`
   );
   return { stop, pollOnce: () => tick(true), budget, registry, counters, _tracked: tracked, _pending: pendingEvents, _finalIds: finalIds };
 }
