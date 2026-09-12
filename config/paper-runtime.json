@@ -78,7 +78,7 @@
     "COINGLASS": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "COINGLASS_API_KEY", "reason": "BLOCKED_BUDGET" },
     "CRYPTOQUANT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "CRYPTOQUANT_API_KEY", "reason": "BLOCKED_BUDGET" },
     "SANTIMENT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "SANTIMENT_API_KEY", "reason": "BLOCKED_BUDGET" },
-    "TWELVEDATA": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "TWELVEDATA_API_KEY", "reason": "BLOCKED_BUDGET" },
+    "TWELVEDATA": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "credentialEnv": "TWELVEDATA_API_KEY", "note": "Owner Basic 8 key verified with EUR/USD candles; free REST only, capped in research policy. Key must be installed in host Secrets; production collection remains unverified." },
     "TOKENOMIST": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "TOKENOMIST_API_KEY", "reason": "BLOCKED_BUDGET" }
    }
   },
