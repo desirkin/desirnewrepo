@@ -20,11 +20,9 @@ const T0 = 1_900_000_000_000; // deterministic base clock (ms)
 const T0s = Math.floor(T0 / 1000);
 
 // ---- staged provider plumbing -------------------------------------------
-const res = (json, { status = 200, retryAfter } = {}) => ({
-  ok: status >= 200 && status < 300,
+const res = (json, { status = 200, retryAfter } = {}) => Response.json(json, {
   status,
-  headers: { get: (h) => (h.toLowerCase() === 'retry-after' && retryAfter !== undefined ? String(retryAfter) : null) },
-  json: async () => json,
+  headers: retryAfter === undefined ? {} : { 'retry-after': String(retryAfter) },
 });
 // route by query shape; every call recorded
 function gqlFetch(routes) {

@@ -8,7 +8,7 @@
 // proven, nothing to observe), PARSE_FAILED, RATE_LIMITED (Retry-After honoured), FAILED (exponential backoff, capped),
 // RETENTION_CAP. Authority NONE: no nomination, no attention, no Judge, no Watch, no execution — a reader may look.
 import path from 'node:path';
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, openSync, closeSync, writeFileSync, unlinkSync } from 'node:fs';
 import { appendJsonl, atomicWriteJson as writeAtomicJson, readJsonlTail, readJsonBounded } from '../lib/jsonl.js';
 import { dataDir as defaultDataDir } from '../lib/config.js';
 import { fetchTextBounded } from '../lib/bounded-fetch.js';
@@ -35,6 +35,14 @@ export function startPress({ env = process.env, dataDir = defaultDataDir(), fetc
   const selected = new Set(pressSelectedIds(env)); const userAgent = `SerpentCobra/press (publisher headline observation; contact: ${typeof env.SERPENT_HTTP_CONTACT === 'string' && env.SERPENT_HTTP_CONTACT.length ? env.SERPENT_HTTP_CONTACT : 'not configured'})`;
   mkdirSync(pressDir(dataDir), { recursive: true });
   const S = new Map(); let stopping = false; const timerSet = new Set();
+  // The independent news launcher and fly.js share this fence: never let two
+  // processes hydrate stale checkpoints or append duplicate observations. The
+  // fence is acquired before reading any checkpoint or observation history.
+  const writerFile = path.join(pressDir(dataDir), 'writer.lock');
+  let writerFd; try { writerFd = openSync(writerFile, 'wx', 0o600); } catch (err) { if (err.code === 'EEXIST') throw new Error('press writer already locked; stop the existing news collector before starting another'); throw err; }
+  const stop = () => { if (stopping) return; stopping = true; for (const t of timerSet) { timers.clearTimeout(t); timers.clearInterval(t); } timerSet.clear(); active.delete(dataDir); process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); try { closeSync(writerFd); } finally { unlinkSync(writerFile); } };
+  try {
+    writeFileSync(writerFd, JSON.stringify({ pid: process.pid, openedTs: clock() }));
   for (const s of sources) {
     const cp = readCheckpoint(dataDir, s.id);
     S.set(s.id, { source: s, selected: selected.has(s.id), state: !selected.has(s.id) ? 'DISABLED' : s.route === 'LICENSED_INTERFACE_REQUIRED' ? 'LICENSED_INTERFACE_REQUIRED' : 'IDLE', etag: cp?.etag ?? null, lastModified: cp?.lastModified ?? null, seen: cp?.seen ?? [], seenSet: new Set(cp?.seen ?? []), lastSuccessTs: cp?.lastSuccessTs ?? null, lastReceiptTs: null, lastOutcome: null, lastError: null, backoffUntil: null, delayMs: 0, running: false, coverage: 'HEADLINE_LINK_ONLY', counters: { polls: 0, observed: 0, admitted: 0, duplicates: 0, skipped: 0, failed: 0, rateLimited: 0, notModified: 0, emptyFeeds: 0, parseFailed: 0 } });
@@ -66,14 +74,14 @@ export function startPress({ env = process.env, dataDir = defaultDataDir(), fetc
     } catch (err) { st.state = 'FAILED'; st.counters.failed += 1; st.lastError = boundedErr(err?.message ?? err); st.delayMs = Math.min(st.delayMs ? st.delayMs * 2 : PRESS_LIMITS_RUNTIME.backoffBaseMs, PRESS_LIMITS_RUNTIME.backoffMaxMs); st.backoffUntil = clock() + st.delayMs; return { outcome: 'FAILED', admitted: 0 }; }
     finally { st.running = false; if (!stopping) { try { writeStatus(); } catch (err) { log(`[press] status write failed: ${boundedErr(err.message)}`); } } }
   }
-  let i = 0; for (const [id, st] of S) { if (!st.selected || st.source.route !== 'RSS') continue; const first = timers.setTimeout(() => { timerSet.delete(first); poll(id).catch(() => {}); }, firstDelayMs + i * PRESS_LIMITS_RUNTIME.staggerMs); timerSet.add(first); const iv = timers.setInterval(() => { poll(id).catch(() => {}); }, st.source.cadenceSec * 1000); timerSet.add(iv); i += 1; }
-  writeStatus();
-  const stop = () => { if (stopping) return; stopping = true; for (const t of timerSet) { timers.clearTimeout(t); timers.clearInterval(t); } timerSet.clear(); active.delete(dataDir); };
+    let i = 0; for (const [id, st] of S) { if (!st.selected || st.source.route !== 'RSS') continue; const first = timers.setTimeout(() => { timerSet.delete(first); poll(id).catch(() => {}); }, firstDelayMs + i * PRESS_LIMITS_RUNTIME.staggerMs); timerSet.add(first); const iv = timers.setInterval(() => { poll(id).catch(() => {}); }, st.source.cadenceSec * 1000); timerSet.add(iv); i += 1; }
+    writeStatus();
   if (signals) { process.once('SIGINT', stop); process.once('SIGTERM', stop); }
   const handle = { stop, pollOnce: poll, status: () => JSON.parse(readFileSync(pressStatusFile(dataDir), 'utf8')), sourceIds: [...S.keys()] };
   active.set(dataDir, handle);
   log(`[press] watching ${[...S.values()].filter((s) => s.selected && s.source.route === 'RSS').length} publisher feed(s) — headline / link observations only, authority NONE`);
   return handle;
+  } catch (err) { stop(); throw err; }
 }
 function readCheckpoint(dir, id) { try { const f = checkpointFile(dir, id); if (!existsSync(f)) return null; const c = readJsonBounded(f); if (c?.v !== PRESS_CHECKPOINT_VERSION || c.sourceId !== id || !Array.isArray(c.seen)) return null; return { etag: typeof c.etag === 'string' ? c.etag : null, lastModified: typeof c.lastModified === 'string' ? c.lastModified : null, seen: c.seen.filter((x) => typeof x === 'string').slice(-PRESS_LIMITS_RUNTIME.seenCap), lastSuccessTs: Number.isSafeInteger(c.lastSuccessTs) ? c.lastSuccessTs : null }; } catch { return null; } }
 function writeCheckpoint(dir, st) { atomicWriteJson(checkpointFile(dir, st.source.id), { v: PRESS_CHECKPOINT_VERSION, sourceId: st.source.id, etag: st.etag, lastModified: st.lastModified, seen: st.seen.slice(-PRESS_LIMITS_RUNTIME.seenCap), lastSuccessTs: st.lastSuccessTs }); }

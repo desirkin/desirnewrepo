@@ -1,0 +1,1880 @@
+{
+  "version": 1,
+  "date": "2026-09-12",
+  "scope": "77 capability/proposal entries, not 77 independent feeds",
+  "currentReplitCollectionVerified": false,
+  "combinedExternalIntelligenceMonthlyCeilingUsd": 100,
+  "aggregateBudgetGovernorVerified": false,
+  "paperStartAuthorizedDuringSetup": false,
+  "credentialValuesIncluded": false,
+  "rows": [
+    {
+      "id": "KRAKEN_OFFICIAL",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "rumor2/feed.js",
+      "compositionPath": "fly.js -> RUMOR2 collector (RUMOR2_ENABLED)",
+      "enable": "RUMOR2_ENABLED",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "cadence 60s, hourly budget 90",
+      "retentionTermsGate": "official host blog.kraken.com; bounded references only",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "Public adapter present",
+      "nextAction": "No key. Preserve official-feed configuration; verify saved observations on the host.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "SEC_OFFICIAL",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "rumor2/feed.js",
+      "compositionPath": "fly.js -> RUMOR2 collector (RUMOR2_ENABLED)",
+      "enable": "RUMOR2_ENABLED",
+      "credentialEnv": [
+        "SERPENT_HTTP_CONTACT (contact NAME, not a secret)"
+      ],
+      "configurationEnv": [
+        "SERPENT_HTTP_CONTACT"
+      ],
+      "budgetGovernor": "cadence 120s, hourly budget 45",
+      "retentionTermsGate": "official host www.sec.gov; bounded references only",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "Public adapter present; contact required",
+      "nextAction": "Set the real public SERPENT_HTTP_CONTACT identity before a bounded check.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "CFTC_OFFICIAL",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "rumor2/feed.js",
+      "compositionPath": "fly.js -> RUMOR2 collector (RUMOR2_ENABLED)",
+      "enable": "RUMOR2_ENABLED",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "cadence 120s, hourly budget 45",
+      "retentionTermsGate": "official host www.cftc.gov; bounded references only",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "Public adapter present",
+      "nextAction": "No key. Verify saved official-feed observations on the host.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "EDGAR_OFFICIAL",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "rumor2/edgar.js",
+      "compositionPath": "fly.js -> RUMOR2 collector (RUMOR2_ENABLED)",
+      "enable": "RUMOR2_EDGAR_ENABLED",
+      "credentialEnv": [
+        "SERPENT_HTTP_CONTACT (contact NAME, not a secret)"
+      ],
+      "configurationEnv": [
+        "SERPENT_HTTP_CONTACT",
+        "RUMOR2_EDGAR_CIKS",
+        "RUMOR2_EDGAR_FORMS"
+      ],
+      "budgetGovernor": "cadence 300s, hourly budget 12",
+      "retentionTermsGate": "official host data.sec.gov; bounded references only",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "Adapter present; watch list required",
+      "nextAction": "Use existing contact, CIK whitelist and form filters; no invented company scope.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "OFAC_OFFICIAL",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "rumor2/ofac.js",
+      "compositionPath": "fly.js -> RUMOR2 collector (RUMOR2_ENABLED)",
+      "enable": "RUMOR2_OFAC_ENABLED",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "cadence 3600s, hourly budget 4",
+      "retentionTermsGate": "official host sanctionslistservice.ofac.treas.gov; bounded references only",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "Public adapter present",
+      "nextAction": "No key. Verify the bounded official sanctions-data update on the host.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "REUTERS_NEWS",
+      "classification": "NOT_PRESENT",
+      "module": null,
+      "compositionPath": "not composed",
+      "enable": "none",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "none",
+      "retentionTermsGate": "licensed distribution agreement required",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "Licensed client absent",
+      "nextAction": "Obtain an actual licensed interface/payload contract before implementation; no existing secret name.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "BLOOMBERG_NEWS",
+      "classification": "NOT_PRESENT",
+      "module": null,
+      "compositionPath": "not composed",
+      "enable": "none",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "none",
+      "retentionTermsGate": "licensed distribution agreement required",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "Licensed client absent",
+      "nextAction": "Obtain an actual licensed interface/payload contract before implementation; no existing secret name.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "CNBC_NEWS",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "press/collector.js (+ press/registry.js, press/parse.js, press/reader.js)",
+      "compositionPath": "tools/news-setup.mjs -> startPress (news only, no paper startup); fly.js -> startPress (dark; PRESS_ENABLED + PRESS_SOURCES from the profile); observations <data>/press/observations.jsonl; status <data>/press/status.json; reader press/reader.js; CLI cobra press status | tail",
+      "enable": "profile publisherNews.CNBC_NEWS ON -> PRESS_ENABLED=true + PRESS_SOURCES contains CNBC_NEWS",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "polite polling: cadence 600s, If-None-Match / If-Modified-Since, Retry-After honoured, exponential backoff to 1h",
+      "retentionTermsGate": "headline / link / publisher timestamp only (terms UNVERIFIED); bodies never fetched; observations file capped at 50 MiB",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "RSS adapter present; OFF",
+      "nextAction": "Latest bounded check returned 403. Preserve access/terms gate; no bypass or API key needed for this adapter.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "FT_NEWS",
+      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+      "module": "press/collector.js (+ press/registry.js, press/parse.js, press/reader.js)",
+      "compositionPath": "tools/news-setup.mjs -> startPress (news only, no paper startup); fly.js -> startPress (dark; PRESS_ENABLED + PRESS_SOURCES from the profile); observations <data>/press/observations.jsonl; status <data>/press/status.json; reader press/reader.js; CLI cobra press status | tail",
+      "enable": "profile publisherNews.FT_NEWS ON -> PRESS_ENABLED=true + PRESS_SOURCES contains FT_NEWS",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "polite polling: cadence 600s, If-None-Match / If-Modified-Since, Retry-After honoured, exponential backoff to 1h",
+      "retentionTermsGate": "headline / link / publisher timestamp only (terms UNVERIFIED); bodies never fetched; observations file capped at 50 MiB",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "RSS adapter present; OFF",
+      "nextAction": "Latest check timed out; earlier access denial recorded. Resolve actual route/terms before enabling.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "COINDESK_NEWS",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "press/collector.js (+ press/registry.js, press/parse.js, press/reader.js)",
+      "compositionPath": "tools/news-setup.mjs -> startPress (news only, no paper startup); fly.js -> startPress (dark; PRESS_ENABLED + PRESS_SOURCES from the profile); observations <data>/press/observations.jsonl; status <data>/press/status.json; reader press/reader.js; CLI cobra press status | tail",
+      "enable": "profile publisherNews.COINDESK_NEWS ON -> PRESS_ENABLED=true + PRESS_SOURCES contains COINDESK_NEWS",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "polite polling: cadence 600s, If-None-Match / If-Modified-Since, Retry-After honoured, exponential backoff to 1h",
+      "retentionTermsGate": "headline / link / publisher timestamp only (terms UNVERIFIED); bodies never fetched; observations file capped at 50 MiB",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "RSS adapter selected; latest check timed out",
+      "nextAction": "No key. Run the news-only check on Replit; a timeout does not prove a permanent outage.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "THEBLOCK_NEWS",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "press/collector.js (+ press/registry.js, press/parse.js, press/reader.js)",
+      "compositionPath": "tools/news-setup.mjs -> startPress (news only, no paper startup); fly.js -> startPress (dark; PRESS_ENABLED + PRESS_SOURCES from the profile); observations <data>/press/observations.jsonl; status <data>/press/status.json; reader press/reader.js; CLI cobra press status | tail",
+      "enable": "profile publisherNews.THEBLOCK_NEWS ON -> PRESS_ENABLED=true + PRESS_SOURCES contains THEBLOCK_NEWS",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "polite polling: cadence 600s, If-None-Match / If-Modified-Since, Retry-After honoured, exponential backoff to 1h",
+      "retentionTermsGate": "headline / link / publisher timestamp only (terms UNVERIFIED); bodies never fetched; observations file capped at 50 MiB",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "20 headlines saved in development run",
+      "nextAction": "No key. Verify with the news-only runner on Replit; headline/link use only.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "COINTELEGRAPH_NEWS",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "press/collector.js (+ press/registry.js, press/parse.js, press/reader.js)",
+      "compositionPath": "tools/news-setup.mjs -> startPress (news only, no paper startup); fly.js -> startPress (dark; PRESS_ENABLED + PRESS_SOURCES from the profile); observations <data>/press/observations.jsonl; status <data>/press/status.json; reader press/reader.js; CLI cobra press status | tail",
+      "enable": "profile publisherNews.COINTELEGRAPH_NEWS ON -> PRESS_ENABLED=true + PRESS_SOURCES contains COINTELEGRAPH_NEWS",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "polite polling: cadence 600s, If-None-Match / If-Modified-Since, Retry-After honoured, exponential backoff to 1h",
+      "retentionTermsGate": "headline / link / publisher timestamp only (terms UNVERIFIED); bodies never fetched; observations file capped at 50 MiB",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "30 headlines saved in development run",
+      "nextAction": "No key. Verify with the news-only runner on Replit; headline/link use only.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "DECRYPT_NEWS",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "press/collector.js (+ press/registry.js, press/parse.js, press/reader.js)",
+      "compositionPath": "tools/news-setup.mjs -> startPress (news only, no paper startup); fly.js -> startPress (dark; PRESS_ENABLED + PRESS_SOURCES from the profile); observations <data>/press/observations.jsonl; status <data>/press/status.json; reader press/reader.js; CLI cobra press status | tail",
+      "enable": "profile publisherNews.DECRYPT_NEWS ON -> PRESS_ENABLED=true + PRESS_SOURCES contains DECRYPT_NEWS",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "polite polling: cadence 600s, If-None-Match / If-Modified-Since, Retry-After honoured, exponential backoff to 1h",
+      "retentionTermsGate": "headline / link / publisher timestamp only (terms UNVERIFIED); bodies never fetched; observations file capped at 50 MiB",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "35 headlines saved in development run",
+      "nextAction": "No key. Verify with the news-only runner on Replit; headline/link use only.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "GOOGLE_NEWS_AGGREGATOR",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "press/collector.js (+ press/registry.js, press/parse.js, press/reader.js)",
+      "compositionPath": "tools/news-setup.mjs -> startPress (news only, no paper startup); fly.js -> startPress (dark; PRESS_ENABLED + PRESS_SOURCES from the profile); observations <data>/press/observations.jsonl; status <data>/press/status.json; reader press/reader.js; CLI cobra press status | tail",
+      "enable": "profile publisherNews.GOOGLE_NEWS_AGGREGATOR ON -> PRESS_ENABLED=true + PRESS_SOURCES contains GOOGLE_NEWS_AGGREGATOR",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "polite polling: cadence 600s, If-None-Match / If-Modified-Since, Retry-After honoured, exponential backoff to 1h",
+      "retentionTermsGate": "headline / link / publisher timestamp only (terms UNVERIFIED); bodies never fetched; observations file capped at 50 MiB",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "news",
+      "currentState": "RSS adapter present; OFF; 100 items parsed",
+      "nextAction": "No key. Preserve existing route/terms review before enabling; individual publishers are separate sources.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "CNN_NEWS",
+      "classification": "NOT_PRESENT",
+      "module": null,
+      "compositionPath": "not composed",
+      "enable": "none",
+      "credentialEnv": [],
+      "configurationEnv": null,
+      "budgetGovernor": "none",
+      "retentionTermsGate": "licensed distribution agreement required",
+      "paperDesiredState": "OFF",
+      "sourceFiles": null,
+      "group": "news",
+      "currentState": "Explicitly blocked; client absent",
+      "nextAction": "Legacy feeds returned 502. Need a working documented public route or licensed interface; no key to request yet.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "UPBIT_ANNOUNCEMENTS",
+      "classification": "PROPOSED_NOT_IMPLEMENTED",
+      "module": null,
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [],
+      "configurationEnv": null,
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": null,
+      "sourceFiles": null,
+      "group": "news",
+      "currentState": "Proposed; not implemented",
+      "nextAction": "No announcement client or registry row. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can deduplicate, summarize and compare permitted headlines/excerpts with source links. It cannot supply a missing CNN/Reuters/Bloomberg license or turn one web lookup into a continuous feed."
+    },
+    {
+      "id": "RESEARCH_STRAINER",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "rumor2/social-research-strainer.js",
+      "compositionPath": "fly.js -> RUMOR2 collector (the composition root wires the social strainer)",
+      "enable": "composition (fly.js) \u2014 always in the paper profile",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "none",
+      "retentionTermsGate": "derived dossiers only",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Internal filtering code present",
+      "nextAction": "Consumes admitted social observations; it supplies neither credentials nor source access.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "RUMINT_STOCKTWITS_AGGREGATE",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "rumint/poller.js",
+      "compositionPath": "fly.js -> startRumint",
+      "enable": "cobra.config.json rumint.enabled / RUMINT_ENABLED",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "hourlyBudget + spacing + backoff",
+      "retentionTermsGate": "aggregate counts only (no raw social content)",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Legacy aggregate client present",
+      "nextAction": "Prior one-page success is historical. Verify current availability and permitted use; distinct from Firestream and the ChatGPT plugin.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "BLUESKY_OFFICIAL",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "rumor2/social-runtime.js + social-stream.js",
+      "compositionPath": "fly.js -> RUMOR2 collector (social gate)",
+      "enable": "RUMOR2_SOCIAL_BLUESKY_ENABLED",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "none",
+      "retentionTermsGate": "AVAILABLE_AUTHORIZED",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Public Jetstream adapter present",
+      "nextAction": "No key. Prior live messages were parsed; current host durable delivery remains unverified.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "FARCASTER_OFFICIAL",
+      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+      "module": "rumor2/social-farcaster-runtime.js",
+      "compositionPath": "fly.js -> RUMOR2 collector -> social journal -> research projection",
+      "enable": "RUMOR2_SOCIAL_FARCASTER_ENABLED plus scoped access and request allowance",
+      "credentialEnv": [
+        "NEYNAR_API_KEY"
+      ],
+      "configurationEnv": [
+        "RUMOR2_SOCIAL_FARCASTER_QUERIES",
+        "RUMOR2_SOCIAL_FARCASTER_MAX_DAILY_REQUESTS",
+        "RUMOR2_SOCIAL_FARCASTER_INTERVAL_SEC"
+      ],
+      "budgetGovernor": "request reservation acknowledged in the existing journal before dispatch",
+      "retentionTermsGate": "approved DERIVED_FEATURES and compatible existing Social journal retention",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Neynar key checked: one cast returned",
+      "nextAction": "Claude installs NEYNAR_API_KEY; verify the existing free search plan, narrow query scope and request cap on host.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access.",
+      "sessionCredentialCheck": {
+        "status": "LIVE_IN_PARENT_SESSION",
+        "httpStatus": 200,
+        "scope": "one Neynar cast-search result; not continuous collection"
+      }
+    },
+    {
+      "id": "X_OFFICIAL",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "rumor2/x-runtime.js + x-stream.js",
+      "compositionPath": "fly.js -> RUMOR2 collector (social gate)",
+      "enable": "RUMOR2_SOCIAL_X_ENABLED",
+      "credentialEnv": [
+        "X_BEARER_TOKEN"
+      ],
+      "configurationEnv": [
+        "RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS",
+        "RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS",
+        "RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD",
+        "RUMOR2_SOCIAL_X_MAX_SESSION_POST_READS",
+        "RUMOR2_SOCIAL_X_LIVE_SMOKE_TARGET_POST_READS",
+        "RUMOR2_SOCIAL_X_LIVE_SMOKE_MAX_POST_READS",
+        "RUMOR2_SOCIAL_X_LIVE_SMOKE_RUN_ID",
+        "RUMOR2_SOCIAL_X_PRIORITY_ACCOUNTS",
+        "RUMOR2_SOCIAL_X_PROPAGATION_FOCUS"
+      ],
+      "budgetGovernor": "x-runtime governor: daily / monthly / USD caps + explicit paid smoke",
+      "retentionTermsGate": "AVAILABLE_REQUIRES_CREDENTIAL",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Bearer checked: usage endpoint only",
+      "nextAction": "Claude installs X_BEARER_TOKEN. Keep collection unstarted until focused watch scope and explicit share of the combined budget are configured.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access.",
+      "sessionCredentialCheck": {
+        "status": "LIVE_IN_PARENT_SESSION",
+        "httpStatus": 200,
+        "scope": "GET /2/usage/tweets; credential/usage only, no post collection"
+      }
+    },
+    {
+      "id": "YOUTUBE_OFFICIAL",
+      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+      "module": "rumor2/providers/youtube-official.js (fixture/request boundary; no collector)",
+      "compositionPath": "not composed (foundation / access boundary only)",
+      "enable": "RUMOR2_SOCIAL_YOUTUBE_ENABLED",
+      "credentialEnv": [
+        "YOUTUBE_API_KEY"
+      ],
+      "configurationEnv": [
+        "RUMOR2_SOCIAL_YOUTUBE_MAX_DAILY_QUOTA_UNITS",
+        "RUMOR2_SOCIAL_YOUTUBE_MAX_MONTHLY_QUOTA_UNITS"
+      ],
+      "budgetGovernor": "search.list hard cost 100 quota units/request + explicit daily/monthly quota-unit caps",
+      "retentionTermsGate": "AVAILABLE_REQUIRES_CREDENTIAL",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Boundary/fixture path only; OFF",
+      "nextAction": "Use the implemented YOUTUBE_DATA_API row below for metadata collection; this is not a second feed.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "REDDIT_OFFICIAL",
+      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+      "module": "rumor2/social-current-runtime.js + rumor2/social-current-clients.js",
+      "compositionPath": "fly.js -> RUMOR2 collector -> erasable current view -> owner Senses panel",
+      "enable": "RUMOR2_SOCIAL_CURRENT_ENABLED plus provider-specific enable, access and request allowance",
+      "credentialEnv": [
+        "REDDIT_CLIENT_ID"
+      ],
+      "configurationEnv": [
+        "RUMOR2_SOCIAL_REDDIT_SUBREDDITS",
+        "RUMOR2_SOCIAL_REDDIT_USER_AGENT",
+        "RUMOR2_SOCIAL_REDDIT_MAX_DAILY_REQUESTS"
+      ],
+      "budgetGovernor": "request reservation acknowledged in the existing journal before dispatch",
+      "retentionTermsGate": "approved RETRIEVAL; current content and identities RAM only, max five minutes",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Collector present; API approval unresolved",
+      "nextAction": "Needs approved OAuth app credentials, subreddits, user-agent and request cap. Repeating the failed form or using an LLM cannot grant access.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "STOCKTWITS_OFFICIAL",
+      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+      "module": "rumor2/social-current-runtime.js + rumor2/social-current-clients.js",
+      "compositionPath": "fly.js -> RUMOR2 collector -> erasable current view -> owner Senses panel",
+      "enable": "RUMOR2_SOCIAL_CURRENT_ENABLED plus provider-specific enable, access and request allowance",
+      "credentialEnv": [
+        "STOCKTWITS_STREAM_USER"
+      ],
+      "configurationEnv": [
+        "RUMOR2_SOCIAL_STOCKTWITS_SYMBOLS",
+        "RUMOR2_SOCIAL_STOCKTWITS_MAX_DAILY_REQUESTS",
+        "RUMOR2_SOCIAL_STOCKTWITS_ACCESS_COST"
+      ],
+      "budgetGovernor": "request reservation acknowledged in the existing journal before dispatch",
+      "retentionTermsGate": "approved RETRIEVAL; current content and identities RAM only, max five minutes",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Licensed Firestream collector present",
+      "nextAction": "Needs licensed stream username/password and symbols/cap. Website login and ChatGPT connection do not provide these.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "META_PUBLIC",
+      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+      "module": "rumor2/social-current-runtime.js + rumor2/social-current-clients.js",
+      "compositionPath": "fly.js -> RUMOR2 collector -> erasable current view -> owner Senses panel",
+      "enable": "RUMOR2_SOCIAL_CURRENT_ENABLED plus provider-specific enable, access and request allowance",
+      "credentialEnv": [
+        "META_APP_TOKEN"
+      ],
+      "configurationEnv": [
+        "META_GRAPH_API_VERSION",
+        "META_INSTAGRAM_USER_ID",
+        "RUMOR2_SOCIAL_FACEBOOK_PAGE_IDS",
+        "RUMOR2_SOCIAL_INSTAGRAM_HASHTAG_IDS",
+        "RUMOR2_SOCIAL_INSTAGRAM_HASHTAG_SCOPE_REVIEW",
+        "RUMOR2_SOCIAL_META_MAX_DAILY_REQUESTS"
+      ],
+      "budgetGovernor": "request reservation acknowledged in the existing journal before dispatch",
+      "retentionTermsGate": "approved RETRIEVAL; current content and identities RAM only, max five minutes",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Collector present; approved access unresolved",
+      "nextAction": "Needs META_APP_TOKEN, reviewed Graph API scope and page/hashtag selection plus cap. This is not unrestricted Facebook access.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "TIKTOK_PUBLIC",
+      "classification": "FOUNDATION_ONLY",
+      "module": "rumor2/social-tiktok.js",
+      "compositionPath": "not composed (foundation / access boundary only)",
+      "enable": "not enableable",
+      "credentialEnv": [
+        "TIKTOK_CLIENT_KEY",
+        "TIKTOK_CLIENT_SECRET"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "none",
+      "retentionTermsGate": "NOT_AUTHORIZED",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Foundation only; eligible route unresolved",
+      "nextAction": "Do not request template keys as a completion step. Research eligibility is not established; own-account Display access is insufficient.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "YOUTUBE_DATA_API",
+      "classification": "IMPLEMENTED_NOT_LIVE_SMOKED",
+      "module": "video/collector.js (+ video/registry.js, video/parse.js, video/reader.js)",
+      "compositionPath": "fly.js -> startVideo (dark; SOCIAL_VIDEO_ENABLED from the profile; the closed gate decides with zero requests); observations <data>/video/observations.jsonl; status <data>/video/status.json; reader video/reader.js; CLI cobra video status | tail \u2014 NOT a RUMOR-2 social provider (rumor2/social-registry.js is sealed; its validators refuse unregistered providers)",
+      "enable": "profile social.YOUTUBE_DATA_API REQUEST -> SOCIAL_VIDEO_ENABLED=true; then YOUTUBE_API_KEY + SOCIAL_VIDEO_YOUTUBE_QUERIES + SOCIAL_VIDEO_YOUTUBE_MAX_DAILY_SEARCHES",
+      "credentialEnv": [
+        "YOUTUBE_API_KEY"
+      ],
+      "configurationEnv": [
+        "SOCIAL_VIDEO_YOUTUBE_QUERIES",
+        "SOCIAL_VIDEO_YOUTUBE_MAX_DAILY_SEARCHES"
+      ],
+      "budgetGovernor": "explicit daily search.list budget (no default is ever read) counted per Pacific accounting day in the durable checkpoint; one search per poll in query rotation; interval = max(900 s, day / budget); quotaExceeded parks until the next day; documented default quota 100 search.list calls / day",
+      "retentionTermsGate": "YouTube API Services Terms (owner accepts at key issue); METADATA_ONLY \u2014 title / description snippet / channel / publish clock / public counters; never captions, transcripts, comments, media or viewer identity; observations file capped at 50 MiB",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Metadata collector present; key missing",
+      "nextAction": "Needs YOUTUBE_API_KEY plus narrow query list and daily search cap. Google account/MFA step remains external; no transcript/video scraping.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "META_REALTIME_TRANSPORT",
+      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+      "module": "rumor2/social-current-clients.js",
+      "compositionPath": "fly.js -> RUMOR2 collector -> provider runtime",
+      "enable": "requested paper social profile; source-specific credential, scope, access review and request allowance",
+      "credentialEnv": [
+        "META_APP_TOKEN"
+      ],
+      "configurationEnv": [
+        "META_GRAPH_API_VERSION",
+        "META_INSTAGRAM_USER_ID",
+        "RUMOR2_SOCIAL_FACEBOOK_PAGE_IDS",
+        "RUMOR2_SOCIAL_INSTAGRAM_HASHTAG_IDS",
+        "RUMOR2_SOCIAL_INSTAGRAM_HASHTAG_SCOPE_REVIEW",
+        "RUMOR2_SOCIAL_META_MAX_DAILY_REQUESTS"
+      ],
+      "budgetGovernor": "journaled request reservations; Meta routes share a lane",
+      "retentionTermsGate": "operator/provider access review required",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Implementation layer of META_PUBLIC",
+      "nextAction": "Same Meta credential and scope requirements; do not count as another feed.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "FARCASTER_LIVE_TRANSPORT",
+      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+      "module": "rumor2/social-farcaster-runtime.js",
+      "compositionPath": "fly.js -> RUMOR2 collector -> provider runtime",
+      "enable": "requested paper social profile; source-specific credential, scope, access review and request allowance",
+      "credentialEnv": [
+        "NEYNAR_API_KEY"
+      ],
+      "configurationEnv": [
+        "RUMOR2_SOCIAL_FARCASTER_QUERIES",
+        "RUMOR2_SOCIAL_FARCASTER_MAX_DAILY_REQUESTS",
+        "RUMOR2_SOCIAL_FARCASTER_INTERVAL_SEC"
+      ],
+      "budgetGovernor": "journaled request reservations; Meta routes share a lane",
+      "retentionTermsGate": "operator/provider access review required",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Implementation layer of FARCASTER_OFFICIAL",
+      "nextAction": "Same Neynar credential and query/cap requirements; do not count as another feed.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "TIKTOK_REALTIME_TRANSPORT",
+      "classification": "NOT_PRESENT",
+      "module": null,
+      "compositionPath": "not composed",
+      "enable": "none",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "none",
+      "retentionTermsGate": "no eligible public market-intelligence route established",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "social",
+      "currentState": "Live route absent",
+      "nextAction": "Same unresolved eligibility as TIKTOK_PUBLIC; no automatic workaround claimed.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can review selected, permitted posts for topics, corroboration and source context after deterministic filtering. It cannot approve an API application, bypass MFA, or turn a ChatGPT plugin into Serpent runtime access."
+    },
+    {
+      "id": "TAPE",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "tape/run.js",
+      "compositionPath": "fly.js -> runTape (last; execution feed + research observer seams)",
+      "enable": "always (cobra.config.json tape.*)",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "none (public WS)",
+      "retentionTermsGate": "public market data",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Kraken public market-data core present",
+      "nextAction": "No data key. Prior live book/trade evidence exists; leave paper composition stopped during API setup.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "WIDEEYE",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "survey/wideeye.js",
+      "compositionPath": "fly.js -> startWideEye",
+      "enable": "cobra.config.json wideeye.enabled / WIDEEYE_ENABLED",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "sweep cadence + catalog resource settings",
+      "retentionTermsGate": "public market data",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Market survey code present",
+      "nextAction": "Uses public market data and configured resource limits; no separate account.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "UNIVERSE_EXPANSION",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "tape/universe.js",
+      "compositionPath": "tape/run.js (subscription selection)",
+      "enable": "cobra.config.json universeExpansion.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "resource caps (heap / loop lag / shed fraction)",
+      "retentionTermsGate": "public market data",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Observation selection code present",
+      "nextAction": "Uses actual market catalog and resource caps; no separate API key.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "COST_EXECUTABILITY",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "cost/model.js + judge/cost.js",
+      "compositionPath": "bin/cobra.js cost; judge intake (book age law)",
+      "enable": "always (cobra.config.json cost.*)",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "none",
+      "retentionTermsGate": "derived from public book",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Internal numerical calculation present",
+      "nextAction": "Needs fresh actual book data; an LLM cannot replace missing numerical observations.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "KRAKEN_SPOT",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "market-lab/providers/kraken-spot.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.KRAKEN_SPOT.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.kraken.com, ws.kraken.com, ws-l3.kraken.com",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Public adapter present; latest check timed out",
+      "nextAction": "No key. Existing receipt is historical; current host connectivity still needs verification.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "COINBASE_SPOT",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "market-lab/providers/coinbase.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.COINBASE_SPOT.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.exchange.coinbase.com, ws-feed.exchange.coinbase.com",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Public adapter present; latest check timed out",
+      "nextAction": "No key. Existing receipt is historical; current host connectivity still needs verification.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "KRAKEN_DERIVATIVES",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "market-lab/providers/kraken-derivatives.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.KRAKEN_DERIVATIVES.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts futures.kraken.com",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Public adapter present",
+      "nextAction": "No key for configured public data; current host verification outstanding.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "DERIBIT",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "market-lab/providers/deribit.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.DERIBIT.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts www.deribit.com",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Public adapter present; latest check timed out",
+      "nextAction": "No key for configured public data; current host verification outstanding.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "BYBIT",
+      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+      "module": "market-lab/providers/bybit.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.BYBIT.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.bybit.com, stream.bybit.com",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Public adapter present; OFF for access/geography",
+      "nextAction": "REST and liquidation/ticker WebSocket code exist. Do not bypass observed access restrictions.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "GECKOTERMINAL",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "market-lab/providers/coingecko.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.GECKOTERMINAL.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.geckoterminal.com",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Public adapter present",
+      "nextAction": "No key. Verify configured pool coverage and host response within current allowance.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "TWELVEDATA",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "market-lab/providers/twelvedata.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.TWELVEDATA.enabled",
+      "credentialEnv": [
+        "TWELVEDATA_API_KEY"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.twelvedata.com",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Key checked: two EUR/USD bars",
+      "nextAction": "Claude installs TWELVEDATA_API_KEY. Basic free allowance is configured; verify other instruments before claiming entitlement.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement.",
+      "sessionCredentialCheck": {
+        "status": "LIVE_IN_PARENT_SESSION",
+        "httpStatus": 200,
+        "scope": "EUR/USD 1-minute candles, 2 bars; api_usage plan_limit 8"
+      }
+    },
+    {
+      "id": "KRAKEN_CHARTS_DARK",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "market-lab/providers/kraken-charts.js",
+      "compositionPath": "bin/market-research.js edge-capture (bounded run) \u2014 never the decision owner",
+      "enable": "policy providers.KRAKEN_DERIVATIVES.charts.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "charts maxCallsPerDay + polling cadence + accounting journal",
+      "retentionTermsGate": "public futures.kraken.com charts API",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Public derivatives chart adapter present",
+      "nextAction": "No key. Separate research path; prior open-interest response does not establish current host coverage.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "KRAKEN_L3_DARK",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "market-lab/providers/kraken-l3.js + kraken-l3-auth.js + l3-book.js",
+      "compositionPath": "bin/market-research.js edge-capture \u2014 connection opens ONLY on a proven SAFE_L3_DATA_KEY",
+      "enable": "policy providers.KRAKEN_SPOT.l3.enabled",
+      "credentialEnv": [
+        "KRAKEN_L3_DATA_API_KEY",
+        "KRAKEN_L3_DATA_API_SECRET"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "weighted subscription pacer (W9) + queue / order / byte bounds",
+      "retentionTermsGate": "dedicated DATA-ONLY key; never an execution credential",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Data-key-gated L3 adapter present",
+      "nextAction": "Requires a dedicated data-only pair and SAFE_L3_DATA_KEY proof; never reuse order/withdrawal credentials.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "KRAKEN_OHLC_HISTORY",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "judge/history.js",
+      "compositionPath": "judge/composition.js -> createBarHistory (REST OHLC cold start, live continuation from the execution feed trades)",
+      "enable": "with the Judge (shared transport)",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "one bounded REST refresh per symbol when needsRefresh (720-row cap, never re-entrant)",
+      "retentionTermsGate": "public market data",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "charts",
+      "currentState": "Public OHLC/history adapter present",
+      "nextAction": "No key. Preserve recorded history and verify actual candle clocks/gaps.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "BINANCE_CROSS_VENUE",
+      "classification": "PROPOSED_NOT_IMPLEMENTED",
+      "module": null,
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [],
+      "configurationEnv": null,
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": null,
+      "sourceFiles": null,
+      "group": "charts",
+      "currentState": "Proposed; not implemented",
+      "nextAction": "No Binance market provider; a name in vocabulary/tests and a doctrine not-watched status note are not a collector. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
+    },
+    {
+      "id": "COINGECKO",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "market-lab/providers/coingecko.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.COINGECKO.enabled",
+      "credentialEnv": [
+        "COINGECKO_DEMO_API_KEY"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.coingecko.com, pro-api.coingecko.com",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "macro",
+      "currentState": "Demo adapter present; reported existing key",
+      "nextAction": "Preserve existing key and exhausted two-call demonstration meter. Do not reset it for another check.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
+    },
+    {
+      "id": "DEFILLAMA",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "market-lab/providers/defillama.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.DEFILLAMA.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.llama.fi, stablecoins.llama.fi, yields.llama.fi",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "macro",
+      "currentState": "Fresh HTTP 200; one valid TVL scalar",
+      "nextAction": "No key. One response validated; continuous host collection remains unverified.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
+    },
+    {
+      "id": "COINGLASS",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "market-lab/providers/coinglass.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.COINGLASS.enabled",
+      "credentialEnv": [
+        "COINGLASS_API_KEY"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts open-api-v4.coinglass.com",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "macro",
+      "currentState": "Credentialed adapter present; plan/budget blocked",
+      "nextAction": "Needs entitled COINGLASS_API_KEY and allocated budget; no paid subscription created.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
+    },
+    {
+      "id": "CRYPTOQUANT",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "market-lab/providers/cryptoquant.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.CRYPTOQUANT.enabled",
+      "credentialEnv": [
+        "CRYPTOQUANT_API_KEY"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.cryptoquant.com",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "macro",
+      "currentState": "Credentialed adapter present; plan/budget blocked",
+      "nextAction": "Needs entitled CRYPTOQUANT_API_KEY and allocated budget; no paid subscription created.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
+    },
+    {
+      "id": "SANTIMENT",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "market-lab/providers/santiment.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.SANTIMENT.enabled",
+      "credentialEnv": [
+        "SANTIMENT_API_KEY"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.santiment.net",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "macro",
+      "currentState": "Credentialed adapter present; plan/budget blocked",
+      "nextAction": "Needs entitled SANTIMENT_API_KEY and allocated budget; no paid subscription created.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
+    },
+    {
+      "id": "COINMETRICS",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "market-lab/providers/coinmetrics.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.COINMETRICS.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts community-api.coinmetrics.io",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "macro",
+      "currentState": "Community adapter present; latest check timed out",
+      "nextAction": "No key for the implemented community route. Verify current host availability.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
+    },
+    {
+      "id": "FRED",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "market-lab/providers/fred.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.FRED.enabled",
+      "credentialEnv": [
+        "FRED_API_KEY"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.stlouisfed.org",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "macro",
+      "currentState": "Adapter present; reported existing key",
+      "nextAction": "Preserve FRED_API_KEY and existing series scope. Earlier 240 observations are historical evidence, not a new host check.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
+    },
+    {
+      "id": "TOKENOMIST",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "market-lab/providers/tokenomist.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.TOKENOMIST.enabled",
+      "credentialEnv": [
+        "TOKENOMIST_API_KEY"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts api.tokenomist.ai",
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "macro",
+      "currentState": "Credentialed adapter present; plan/budget blocked",
+      "nextAction": "Needs entitled TOKENOMIST_API_KEY and allocated budget; no paid subscription created.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
+    },
+    {
+      "id": "POLYMARKET_PUBLIC_DATA",
+      "classification": "PROPOSED_NOT_IMPLEMENTED",
+      "module": null,
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [],
+      "configurationEnv": null,
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": null,
+      "sourceFiles": null,
+      "group": "macro",
+      "currentState": "Proposed; not implemented",
+      "nextAction": "No public market-data client or registry row; no trading integration requested. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
+    },
+    {
+      "id": "KALSHI_PUBLIC_DATA",
+      "classification": "PROPOSED_NOT_IMPLEMENTED",
+      "module": null,
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [],
+      "configurationEnv": null,
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": null,
+      "sourceFiles": null,
+      "group": "macro",
+      "currentState": "Proposed; not implemented",
+      "nextAction": "No public market-data client or registry row; no trading integration requested. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
+    },
+    {
+      "id": "GOVERNANCE_TALLY",
+      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+      "module": "governance/tally.js + governance/collector.js",
+      "compositionPath": "fly.js -> startGovernance -> pollTally -> governance/events.jsonl -> memory/adapters.js",
+      "enable": "cobra.config.json governance.enabled + governance.verifiedMappings",
+      "credentialEnv": [
+        "TALLY_API_KEY"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "separate Tally GovBudget; >=1 second request spacing",
+      "retentionTermsGate": "verified governor mappings required",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "governance",
+      "currentState": "Collector present; credentials/mappings unverified",
+      "nextAction": "Needs TALLY_API_KEY and verified governor mappings. No live request made in this check.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize bounded proposal text with links. An off-chain vote does not prove execution, treasury movement or an inevitable outcome."
+    },
+    {
+      "id": "GOVERNANCE_SNAPSHOT",
+      "classification": "IMPLEMENTED_PROFILE_OFF",
+      "module": "governance/snapshot.js + governance/collector.js",
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [],
+      "configurationEnv": null,
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": "OFF",
+      "sourceFiles": [
+        "governance/snapshot.js",
+        "governance/collector.js",
+        "governance/registry.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "governance",
+      "currentState": "Transport repaired; HTTP 200, valid empty result",
+      "nextAction": "No key. Preserve OFF profile until selected governance scope is reviewed. Empty Aave result is not a proposal observation.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize bounded proposal text with links. An off-chain vote does not prove execution, treasury movement or an inevitable outcome."
+    },
+    {
+      "id": "GATEWAY_KRAKEN_STATUS",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "gateway/collector.js",
+      "compositionPath": "fly.js -> startGateway (collector only; wired to nothing)",
+      "enable": "cobra.config.json gateway.enabled + gateway.sources.kraken / GATEWAY_ENABLED",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "pollSec floor 60 s + backoff",
+      "retentionTermsGate": "public status page (status.kraken.com)",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "infrastructure",
+      "currentState": "Public status adapter present; latest timeout",
+      "nextAction": "No key. Current host incident collection requires verification; keep existing spacing/backoff.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
+    },
+    {
+      "id": "GATEWAY_KRAKEN_SYSTEM",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "gateway/collector.js",
+      "compositionPath": "fly.js -> startGateway (collector only; wired to nothing)",
+      "enable": "cobra.config.json gateway.enabled + gateway.sources.krakenSystem / GATEWAY_ENABLED",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "pollSec floor 60 s + backoff",
+      "retentionTermsGate": "public status page (api.kraken.com SystemStatus)",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "infrastructure",
+      "currentState": "Public system-status adapter present; latest timeout",
+      "nextAction": "No key. Current host status collection requires verification; keep existing spacing/backoff.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
+    },
+    {
+      "id": "GATEWAY_COINBASE_STATUS",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "gateway/collector.js",
+      "compositionPath": "fly.js -> startGateway (collector only; wired to nothing)",
+      "enable": "cobra.config.json gateway.enabled + gateway.sources.coinbase / GATEWAY_ENABLED",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "pollSec floor 60 s + backoff",
+      "retentionTermsGate": "public status page (status.coinbase.com)",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "infrastructure",
+      "currentState": "Public status adapter present; latest timeout",
+      "nextAction": "No key. Current host incident collection requires verification; keep existing spacing/backoff.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
+    },
+    {
+      "id": "GATEWAY_OKX_STATUS",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "gateway/collector.js",
+      "compositionPath": "fly.js -> startGateway (collector only; wired to nothing)",
+      "enable": "cobra.config.json gateway.enabled + gateway.sources.okx / GATEWAY_ENABLED",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "pollSec floor 60 s + backoff",
+      "retentionTermsGate": "public status page (www.okx.com system status)",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "infrastructure",
+      "currentState": "Public status adapter present; latest timeout",
+      "nextAction": "No key. Current host incident collection requires verification; keep existing spacing/backoff.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
+    },
+    {
+      "id": "NOAA_SWPC_SPACE_WEATHER",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "infra/collector.js (+ infra/registry.js, infra/parse.js, infra/reader.js)",
+      "compositionPath": "fly.js -> startInfra (dark; INFRA_OBS_ENABLED + INFRA_SOURCES from the profile); observations <data>/infra/observations.jsonl; status <data>/infra/status.json; reader infra/reader.js; CLI cobra infra status | tail; EXPERIMENTAL family",
+      "enable": "profile infrastructure.NOAA_SWPC ON -> INFRA_OBS_ENABLED=true + INFRA_SOURCES contains NOAA_SWPC",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "cadence 600s; bounded 2 MiB JSON; exponential backoff to 1h; Retry-After honoured",
+      "retentionTermsGate": "public documented data API (route + docs dated in infra/registry.js); observations file capped at 50 MiB",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "infrastructure",
+      "currentState": "Fresh HTTP 200; 82 valid alerts",
+      "nextAction": "No key. One response validated; continuous host collection remains unverified.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
+    },
+    {
+      "id": "RIPE_RIS_BGP",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "infra/collector.js (+ infra/registry.js, infra/parse.js, infra/reader.js)",
+      "compositionPath": "fly.js -> startInfra (dark; INFRA_OBS_ENABLED + INFRA_SOURCES from the profile); observations <data>/infra/observations.jsonl; status <data>/infra/status.json; reader infra/reader.js; CLI cobra infra status | tail",
+      "enable": "profile infrastructure.RIPE_RIS REQUEST -> INFRA_OBS_ENABLED=true + INFRA_SOURCES contains RIPE_RIS + INFRA_RIPE_RESOURCES",
+      "credentialEnv": [],
+      "configurationEnv": [
+        "INFRA_RIPE_RESOURCES"
+      ],
+      "budgetGovernor": "cadence 900s; bounded 2 MiB JSON; exponential backoff to 1h; Retry-After honoured",
+      "retentionTermsGate": "public documented data API (route + docs dated in infra/registry.js); observations file capped at 50 MiB",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "infrastructure",
+      "currentState": "Public adapter present; resource scope missing",
+      "nextAction": "Set real monitored prefixes/ASNs in INFRA_RIPE_RESOURCES; do not invent a list.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
+    },
+    {
+      "id": "CLOUDFLARE_RADAR",
+      "classification": "IMPLEMENTED_NOT_LIVE_SMOKED",
+      "module": "infra/collector.js (+ infra/registry.js, infra/parse.js, infra/reader.js)",
+      "compositionPath": "fly.js -> startInfra (dark; INFRA_OBS_ENABLED + INFRA_SOURCES from the profile); observations <data>/infra/observations.jsonl; status <data>/infra/status.json; reader infra/reader.js; CLI cobra infra status | tail",
+      "enable": "profile infrastructure.CLOUDFLARE_RADAR REQUEST -> INFRA_OBS_ENABLED=true + INFRA_SOURCES contains CLOUDFLARE_RADAR + CLOUDFLARE_API_TOKEN",
+      "credentialEnv": [
+        "CLOUDFLARE_API_TOKEN"
+      ],
+      "configurationEnv": [
+        "INFRA_CLOUDFLARE_ASN",
+        "INFRA_CLOUDFLARE_PREFIX",
+        "INFRA_CLOUDFLARE_DATE_RANGE",
+        "INFRA_CLOUDFLARE_GLOBAL"
+      ],
+      "budgetGovernor": "cadence 3600s; bounded 2 MiB JSON; exponential backoff to 1h; Retry-After honoured; token-refused answers park the source for 1h (CREDENTIAL_REQUIRED)",
+      "retentionTermsGate": "public documented data API (route + docs dated in infra/registry.js); observations file capped at 50 MiB",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "infrastructure",
+      "currentState": "Adapter present; token/scope unverified",
+      "nextAction": "Needs CLOUDFLARE_API_TOKEN and actual ASN/prefix/date-range or reviewed global scope.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
+    },
+    {
+      "id": "HELIUS_SOLANA",
+      "classification": "PROPOSED_NOT_IMPLEMENTED",
+      "module": null,
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [],
+      "configurationEnv": null,
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": null,
+      "sourceFiles": null,
+      "group": "infrastructure",
+      "currentState": "Proposed; not implemented",
+      "nextAction": "No Helius client, RPC/WebSocket configuration or runtime secret name. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
+    },
+    {
+      "id": "DOUBLEZERO_EDGE",
+      "classification": "PROPOSED_NOT_IMPLEMENTED",
+      "module": null,
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [],
+      "configurationEnv": null,
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": null,
+      "sourceFiles": null,
+      "group": "infrastructure",
+      "currentState": "Proposed; not implemented",
+      "nextAction": "No client/config/runtime secret name; intended data contract requires clarification from the recovered proposal and first-party documentation. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
+    },
+    {
+      "id": "JITO_SHREDSTREAM",
+      "classification": "RETIRED_PER_RECOVERED_CONTEXT",
+      "module": null,
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [],
+      "configurationEnv": null,
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": null,
+      "sourceFiles": null,
+      "group": "infrastructure",
+      "currentState": "Retired",
+      "nextAction": "Recovered prior decision marks this target dead; no implementation. JITOSOL in risk asset groups is unrelated. Keep retired; do not reactivate by default",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
+    },
+    {
+      "id": "SOCRATES",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "socrates/runtime.js (+ broker, client, report)",
+      "compositionPath": "market-lab/service.js case runtime (inside the research service)",
+      "enable": "policy model.enabled + explicit USD caps",
+      "credentialEnv": [
+        "ANTHROPIC_API_KEY"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "socrates budget (per case / day / month USD caps, model reservation)",
+      "retentionTermsGate": "model output is interpretation, never source truth",
+      "paperDesiredState": "REQUEST",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "model",
+      "currentState": "Anthropic client present; policy disabled",
+      "nextAction": "ANTHROPIC_API_KEY plus explicit model caps required. Keep selective; data and models share the combined ceiling.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Selective model calls need an explicit allocation within the combined budget. No generic always-running news/social LLM agent has been verified by this audit."
+    },
+    {
+      "id": "ASK_SERPENT_CHAT",
+      "classification": "IMPLEMENTED_CREDENTIAL_AND_BUDGET_GATED",
+      "module": "paper/companion-chat.js",
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [
+        "ANTHROPIC_API_KEY"
+      ],
+      "configurationEnv": [
+        "SERPENT_CHAT_MAX_USD_PER_REQUEST",
+        "SERPENT_CHAT_MAX_USD_PER_DAY",
+        "SERPENT_CHAT_MODEL"
+      ],
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": null,
+      "sourceFiles": [
+        "paper/companion-chat.js",
+        "config/companion-chat.json",
+        ".env.paper.example"
+      ],
+      "group": "model",
+      "currentState": "Anthropic chat client present; budget gated",
+      "nextAction": "Same Anthropic key; explicit chat request/day caps. This does not create a news collection agent.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Selective model calls need an explicit allocation within the combined budget. No generic always-running news/social LLM agent has been verified by this audit."
+    },
+    {
+      "id": "ASK_SERPENT_RECORDED_ANSWERS",
+      "classification": "IMPLEMENTED_LOCAL_ONLY",
+      "module": "paper/companion.js",
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": null,
+      "sourceFiles": [
+        "paper/companion.js"
+      ],
+      "group": "model",
+      "currentState": "Local recorded-state answers present",
+      "nextAction": "No model key. Needs actual saved runtime state; cannot report unseen live feeds.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Selective model calls need an explicit allocation within the combined budget. No generic always-running news/social LLM agent has been verified by this audit."
+    },
+    {
+      "id": "GEMINI_TRIAGE",
+      "classification": "PROPOSED_NOT_IMPLEMENTED",
+      "module": null,
+      "compositionPath": null,
+      "enable": null,
+      "credentialEnv": [],
+      "configurationEnv": null,
+      "budgetGovernor": null,
+      "retentionTermsGate": null,
+      "paperDesiredState": null,
+      "sourceFiles": null,
+      "group": "model",
+      "currentState": "Proposed; not implemented",
+      "nextAction": "Current implemented model clients use Anthropic only; forbidden-marker tests mentioning gemini are not an integration. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "Selective model calls need an explicit allocation within the combined budget. No generic always-running news/social LLM agent has been verified by this audit."
+    },
+    {
+      "id": "MEMORY_MIRROR",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "memory/mirror.js",
+      "compositionPath": "fly.js -> startMemoryMirror (dark; no return path)",
+      "enable": "always",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "none",
+      "retentionTermsGate": "internal",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "system",
+      "currentState": "Internal storage code present",
+      "nextAction": "Preserve authoritative database and records; no separate source account.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "These preserve, calculate or consume observations. They do not require another news/social subscription. Keep existing paper and account holds intact."
+    },
+    {
+      "id": "SETTLED_RECORDS",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "market-lab/providers/settled.js",
+      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+      "enable": "policy providers.SETTLED_RECORDS.enabled",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+      "retentionTermsGate": "hosts ",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "system",
+      "currentState": "Local recorded-observation adapter present",
+      "nextAction": "No network/key. Preserve existing settled records and clocks.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "These preserve, calculate or consume observations. They do not require another news/social subscription. Keep existing paper and account holds intact."
+    },
+    {
+      "id": "JUDGE",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "judge/composition.js (+ intake, readiness, features, setups, judge, risk, cost, scheduler, recorder, history, owner, arming, experiment*, snapshot-store)",
+      "compositionPath": "fly.js -> composeJudge (JUDGE_ENABLED; mode from the profile = PAPER)",
+      "enable": "JUDGE_ENABLED + JUDGE_POLICY + JUDGE_MODE (forced PAPER)",
+      "credentialEnv": [
+        "DATABASE_URL (journal authority; not a provider key)"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "risk limits / daily loss / drawdown restrictions (policy)",
+      "retentionTermsGate": "internal",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "system",
+      "currentState": "Decision core present",
+      "nextAction": "Preserve DATABASE_URL and journal; no new external text authority or paper start during setup.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "These preserve, calculate or consume observations. They do not require another news/social subscription. Keep existing paper and account holds intact."
+    },
+    {
+      "id": "WATCH",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "watch/watch.js",
+      "compositionPath": "judge/composition.js (owns every non-FLAT position)",
+      "enable": "with the Judge",
+      "credentialEnv": [
+        "DATABASE_URL (through the Judge)"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "none",
+      "retentionTermsGate": "internal",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "system",
+      "currentState": "Position monitoring core present",
+      "nextAction": "Preserve DATABASE_URL and existing account state; keep setup separate from paper startup.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "These preserve, calculate or consume observations. They do not require another news/social subscription. Keep existing paper and account holds intact."
+    },
+    {
+      "id": "PAPER_EXECUTION",
+      "classification": "OPERATIONAL_CREDENTIAL_GATED",
+      "module": "execution/paper-adapter.js + execution/journal.js + reconciliation",
+      "compositionPath": "judge/composition.js (adapter PAPER; the LIVE adapter is never constructed without a LIVE policy + mode)",
+      "enable": "judge policy execution.adapter PAPER",
+      "credentialEnv": [
+        "DATABASE_URL"
+      ],
+      "configurationEnv": [],
+      "budgetGovernor": "none",
+      "retentionTermsGate": "internal",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "system",
+      "currentState": "Execution core present; owner hold",
+      "nextAction": "Keep paper stopped and CAGE on until requested feeds are connected and verified.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "These preserve, calculate or consume observations. They do not require another news/social subscription. Keep existing paper and account holds intact."
+    },
+    {
+      "id": "HISTORICAL_CAPTURE_REPLAY",
+      "classification": "OPERATIONAL_PUBLIC",
+      "module": "judge/recorder.js + judge/experiment-replay.js + judge/experiment-store.js + childhood/fetch.js",
+      "compositionPath": "judge/composition.js (JUDGE_RECORD_DIR -> sealed input bundles); bin/judge.js replay / replay-experiment (offline); childhood archive",
+      "enable": "JUDGE_RECORD_DIR for capture; replay is an offline command",
+      "credentialEnv": [],
+      "configurationEnv": [],
+      "budgetGovernor": "segment rotation + bounded retention (MC-5); a recording failure stops admission",
+      "retentionTermsGate": "internal",
+      "paperDesiredState": "ON",
+      "sourceFiles": [
+        "docs/sensor-inventory.paper.json",
+        "paper/inventory.js",
+        "config/paper-runtime.json"
+      ],
+      "group": "system",
+      "currentState": "Offline capture/replay code present",
+      "nextAction": "No separate API key. Uses saved observations; replay is not live connectivity.",
+      "currentReplitCollectionVerified": false,
+      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
+      "llmAssistance": "These preserve, calculate or consume observations. They do not require another news/social subscription. Keep existing paper and account holds intact."
+    }
+  ]
+}

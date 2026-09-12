@@ -57,7 +57,7 @@ The checked-in Replit Run and deployment commands start the paper composition. L
 
 ## API completion boundary
 
-The repair implements and tests 53 of the 56 listed bounded capability paths. This includes existing paths; it does not mean 53 new feeds or 53 live connections. It does not create provider accounts or API credentials.
+Use the [complete source checklist](API-SOURCE-CHECKLIST.md) and [Claude setup handoff](CLAUDE-API-SETUP-HANDOFF.md) for the current source-by-source state. Capability counts include internal and duplicate transport layers and must not be reported as live feed counts. GitHub code does not create provider accounts or install Replit Secrets. The news-only entry point is `node tools/news-setup.mjs --once`; it leaves paper stopped.
 
 - Reuters and Bloomberg require the actual licensed API interface contracts; those transports remain unimplemented.
 - TikTok's eligible supported public-intelligence route remains unresolved and unimplemented.
@@ -66,4 +66,4 @@ The repair implements and tests 53 of the 56 listed bounded capability paths. Th
 - X and paid market/model providers require explicit spending limits and the existing provider-policy gates. No paid plan, budget, approval record or entitlement has been invented.
 - See [sensor-runtime-configuration.md](sensor-runtime-configuration.md) and [.env.paper.example](../.env.paper.example) for exact configuration names and supported routes.
 
-Current host evidence: the owner's Replit Shell works and the rescue branch push succeeded. Replit is still at the interrupted local merge until the recovery command succeeds. Source synchronization, publishing, production sensor health and paper-account continuity must not be inferred from a GitHub merge. No new publish or production account modification was performed by this handoff.
+Current host evidence: the owner's Replit Shell works and the rescue branch push succeeded. The last supplied screenshot shows the interrupted local merge; successful recovery has not yet been verified. Source synchronization, publishing, production sensor health and paper-account continuity must not be inferred from a GitHub merge. No new publish or production account modification was performed by this handoff.

@@ -22,8 +22,8 @@ const rss = (items) => `<?xml version="1.0"?><rss version="2.0"><channel><title>
 const timers = { setTimeout: () => ({}), clearTimeout() {}, setInterval: () => ({}), clearInterval() {} };
 const ON = 'COINDESK_NEWS,THEBLOCK_NEWS,COINTELEGRAPH_NEWS,DECRYPT_NEWS';
 
-test('PRESS-1. registry law: nine stable ids, closed kind / route vocabularies, https feed on the pinned host, cadence floor, dated docs, licensed rows carry no URL and a prerequisite; every mutation is refused', () => {
-  assert.equal(pressRegistryError(), null); assert.deepEqual([...PRESS_SOURCE_IDS], ['REUTERS_NEWS', 'BLOOMBERG_NEWS', 'CNBC_NEWS', 'FT_NEWS', 'COINDESK_NEWS', 'THEBLOCK_NEWS', 'COINTELEGRAPH_NEWS', 'DECRYPT_NEWS', 'GOOGLE_NEWS_AGGREGATOR']);
+test('PRESS-1. registry law: ten stable ids, closed kind / route vocabularies, https feed on the pinned host, cadence floor, dated docs, licensed rows carry no URL and a prerequisite; every mutation is refused', () => {
+  assert.equal(pressRegistryError(), null); assert.deepEqual([...PRESS_SOURCE_IDS], ['REUTERS_NEWS', 'BLOOMBERG_NEWS', 'CNBC_NEWS', 'FT_NEWS', 'COINDESK_NEWS', 'THEBLOCK_NEWS', 'COINTELEGRAPH_NEWS', 'DECRYPT_NEWS', 'GOOGLE_NEWS_AGGREGATOR', 'CNN_NEWS']);
   for (const s of PRESS_SOURCES) { assert.ok(PRESS_KINDS.includes(s.kind)); assert.ok(PRESS_ROUTES.includes(s.route)); assert.ok(s.docs.every((d) => d.accessedOn === '2026-09-12' && /^https:\/\//.test(d.url))); if (s.route === 'RSS') { assert.ok(s.feedUrl.startsWith('https://')); assert.equal(new URL(s.feedUrl).hostname, s.host); assert.ok(s.cadenceSec >= 300); } else { assert.equal(s.feedUrl, null); assert.match(s.prerequisite, /licensed/i); } }
   assert.equal(pressSource('GOOGLE_NEWS_AGGREGATOR').kind, 'AGGREGATOR'); assert.equal(pressSource('NOPE'), null);
   const mut = (fn) => { const list = PRESS_SOURCES.map((s) => ({ ...s, docs: [...s.docs] })); fn(list); return pressRegistryError(list); };
@@ -71,7 +71,7 @@ test('PRESS-4. reader + snapshot: corrupt / forged lines are counted and never r
   const good = itemToObservation({ title: 'x', link: 'https://www.coindesk.com/x', guid: 'x', publishedTs: null }, { source: pressSource('COINDESK_NEWS'), receiptTs: now, feedKind: 'RSS' }).observation;
   writeFileSync(path.join(dir, 'press', 'observations.jsonl'), `${JSON.stringify(good)}\nnot json\n${JSON.stringify({ ...good, observationId: 'f'.repeat(64) })}\n`);
   const r = readPressObservations(dir, {}); assert.equal(r.observations.length, 1); assert.equal(r.corrupt, 2);
-  const s0 = sensorSnapshot({ profile: p, env: { ...env }, dataDir: dir, now }); assert.ok(SNAPSHOT_GROUPS.includes('PUBLISHER_NEWS')); assert.equal(s0.groups.PUBLISHER_NEWS.length, 9);
+  const s0 = sensorSnapshot({ profile: p, env: { ...env }, dataDir: dir, now }); assert.ok(SNAPSHOT_GROUPS.includes('PUBLISHER_NEWS')); assert.equal(s0.groups.PUBLISHER_NEWS.length, 10);
   assert.equal(snapshotRow(s0, 'PRESS_COINDESK_NEWS').state, 'NOT_OBSERVED'); assert.equal(snapshotRow(s0, 'PRESS_REUTERS_NEWS').state, 'BLOCKED_EXTERNAL_APPROVAL'); assert.equal(snapshotRow(s0, 'PRESS_FT_NEWS').state, 'DISABLED_BY_PAPER_POLICY'); assert.equal(snapshotRow(s0, 'PRESS_FT_NEWS').blocker, 'BLOCKED_TERMS'); assert.ok(s0.rows.filter((x) => x.group === 'PUBLISHER_NEWS').every((x) => x.authority === 'NONE'));
   const status = (state, lastSuccessTs, lastError = null) => ({ v: 'press-status-1', tsMs: now, enabled: true, authority: 'NONE', sources: { COINDESK_NEWS: { kind: 'PUBLISHER', route: 'RSS', desired: 'ON', state, cadenceSec: 600, terms: 'UNVERIFIED', coverage: 'HEADLINE_LINK_ONLY', lastReceiptTs: now, lastSuccessTs, lastOutcome: null, lastError, backoffUntil: null, prerequisite: null, counters: { polls: 1, admitted: 1 } } } });
   writeFileSync(pressStatusFile(dir), JSON.stringify(status('OBSERVED', now - 1000))); assert.equal(snapshotRow(sensorSnapshot({ profile: p, env: { ...env }, dataDir: dir, now }), 'PRESS_COINDESK_NEWS').state, 'ACTIVE');

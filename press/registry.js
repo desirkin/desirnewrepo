@@ -31,6 +31,9 @@ export const PRESS_SOURCES = Object.freeze([
   src({ id: 'DECRYPT_NEWS', name: 'Decrypt', host: 'decrypt.co', feedUrl: 'https://decrypt.co/feed', docs: [doc('https://decrypt.co/feed', 'HTTP 200 application/xml, 55 items')] }),
   src({ id: 'GOOGLE_NEWS_AGGREGATOR', name: 'Google News (aggregator)', kind: 'AGGREGATOR', host: 'news.google.com', feedUrl: 'https://news.google.com/rss/search?q=bitcoin%20OR%20crypto%20OR%20ethereum&hl=en-US&gl=US&ceid=US:en', terms: 'UNVERIFIED',
     docs: [doc('https://news.google.com/rss/search?q=bitcoin&hl=en-US&gl=US&ceid=US:en', 'HTTP 200 application/xml; each item carries its own <source> publisher — transport identity is GOOGLE_NEWS, publisher identity per item, never a direct publisher licence'), doc('https://support.google.com/news/publisher-center/answer/9545420', 'Publisher Center documentation describes publisher onboarding, not a consumer feed contract', 'NO_CONSUMER_CONTRACT')] }),
+  src({ id: 'CNN_NEWS', name: 'CNN', host: 'www.cnn.com', route: 'LICENSED_INTERFACE_REQUIRED', feedUrl: null, cadenceSec: null,
+    docs: [doc('https://www.cnnnewsource.com/', 'CNN Newsource documents syndicated text, photos and video; no public API payload or self-service key is supplied', 'LICENSED_PRODUCT'), doc('https://edition.cnn.com/services/rss/', 'HTTP 301 to the homepage; legacy rss.cnn.com top-stories and money feeds returned HTTP 502 during bounded reads', 'NO_WORKING_PUBLIC_ROUTE')],
+    prerequisite: 'a licensed CNN Newsource interface with an approved payload contract, or a working officially documented public feed; no key or endpoint is invented' }),
 ]);
 export const PRESS_SOURCE_IDS = Object.freeze(PRESS_SOURCES.map((s) => s.id));
 export const pressSource = (id) => PRESS_SOURCES.find((s) => s.id === id) ?? null;

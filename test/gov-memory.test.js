@@ -190,7 +190,7 @@ test('M6. ZERO TRADING WEIGHT: governance observation changes no trading state; 
       const body = q.includes('{ votes(')
         ? { data: { votes: [{ voter: '0xa', created: T0s, choice: 1, vp: 10 }] } }
         : { data: { proposals: [{ id: 'zp1', space: { id: 'uniswapgovernance.eth' }, title: 't', body: 'b', state: 'active', created: T0s - 100, start: T0s - 50, end: T0s + 5000, quorum: 10, choices: ['For', 'Against'], scores: [5, 1], scores_total: 6, votes: 2, snapshot: '1', updated: T0s }] } };
-      return { ok: true, status: 200, headers: { get: () => null }, json: async () => body };
+      return Response.json(body);
     };
     let clock = T0;
     const gov = startGovernance({
