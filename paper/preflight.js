@@ -35,6 +35,25 @@ const storageCheckFailure = (name, err) => {
 const invalidStorageResult = () => Object.assign(new Error('invalid storage check result'), { code: 'INVALID_RESULT' });
 const NO_SECRET = /sk-ant|Bearer [A-Za-z0-9]|eyJ[A-Za-z0-9_-]{10,}|postgres(ql)?:\/\/[^\s"]+:[^\s"]+@|API-Key|API-Sign|x-api-key|nonce=\d/i;
 
+// A FAILED probe must say WHY, in the operator's report, not only in the matrix file: an authentication refusal, a parse
+// failure, a timeout or an unavailable feed that arrives here as a bare PROBED_FAILED with a null reason is a failure
+// masquerading as "nothing happened". The probe layer records the failure kind / reason code / coverage state / HTTP
+// status; those facts are carried through verbatim and a reason is derived from them when the layer left it unset. The
+// positive side is kept too — a PROBED_OK carrying count 0 is a SUCCESSFUL EMPTY response, never a failed collection.
+export function probeFacts(probe) {
+  if (!probe || typeof probe !== 'object') return null;
+  const f = probe.failure && typeof probe.failure === 'object' ? probe.failure : null;
+  const derived = f ? [f.kind ?? null, f.reasonCode ?? null, f.status === null || f.status === undefined ? null : `HTTP ${f.status}`, f.reason ?? null].filter(Boolean).join(':') : null;
+  return {
+    state: probe.state ?? null,
+    reason: probe.reason ?? (derived || null),
+    receivedTs: probe.receivedTs ?? probe.ts ?? null,
+    endpointId: probe.endpointId ?? null,
+    count: probe.count === undefined ? null : probe.count,
+    requestId: probe.requestId ?? null,
+    failure: f ? { kind: f.kind ?? null, reasonCode: f.reasonCode ?? null, coverageState: f.coverageState ?? null, status: f.status ?? null, reason: f.reason ?? null } : null,
+  };
+}
 export async function runPreflight({ profileFile = process.env.COBRA_PROFILE ?? 'config/paper-runtime.json', env = process.env, smoke = false, now = () => Date.now(), log = () => {}, dbFactory = null, fetchImpl = globalThis.fetch } = {}) {
   const startedTs = now(); const blockers = Object.fromEntries(BLOCKER_GROUPS.map((g) => [g, []])); const warnings = [];
   const block = (group, id, reason, remedy = null) => blockers[group].push({ id, reason: bounded(reason), remedy: remedy ? bounded(remedy) : null });
@@ -115,7 +134,7 @@ export async function runPreflight({ profileFile = process.env.COBRA_PROFILE ?? 
   for (const r of socialRows) if (['FOUNDATION_ONLY', 'BLOCKED_RETENTION', 'BLOCKED_TERMS', 'BLOCKED_EXTERNAL_APPROVAL'].includes(r.state)) block('EXTERNAL_OPTIONAL_SENSE_BLOCKER', r.id, `${r.state}: ${r.blocker}`);
   // ---- F. MARKET RESEARCH -----------------------------------------------------------------------------------------------------
   let probe = null; const presence = mrPolicy ? credentialPresence(mrPolicy, env) : null;
-  if (smoke && mrPolicy && subjects) { const tmp = mkdtempSync(path.join(tmpdir(), 'serpent-preflight-')); try { const r = await runCoverage({ policy: mrPolicy, subjects, env, out: path.join(tmp, 'coverage'), probe: true, fetchImpl, clock: now, researchRoot: marketResearchRootFromEnv(eff, dataDir) }); const results = {}; try { const walk = (v) => { if (Array.isArray(v)) { for (const x of v) walk(x); return; } if (v && typeof v === 'object') { if (typeof v.providerId === 'string' && v.probe && typeof v.probe === 'object' && !(v.providerId in results)) results[v.providerId] = { state: v.probe.state ?? null, reason: v.probe.reason ?? null, receivedTs: v.probe.receivedTs ?? v.probe.ts ?? null, endpointId: v.probe.endpointId ?? null }; for (const x of Object.values(v)) walk(x); } }; walk(JSON.parse(readFileSync(path.join(tmp, 'coverage', r.file ?? 'coverage-matrix.json'), 'utf8'))); } catch { /* matrix unreadable: probe facts stay null */ }
+  if (smoke && mrPolicy && subjects) { const tmp = mkdtempSync(path.join(tmpdir(), 'serpent-preflight-')); try { const r = await runCoverage({ policy: mrPolicy, subjects, env, out: path.join(tmp, 'coverage'), probe: true, fetchImpl, clock: now, researchRoot: marketResearchRootFromEnv(eff, dataDir) }); const results = {}; try { const walk = (v) => { if (Array.isArray(v)) { for (const x of v) walk(x); return; } if (v && typeof v === 'object') { if (typeof v.providerId === 'string' && v.probe && typeof v.probe === 'object' && !(v.providerId in results)) results[v.providerId] = probeFacts(v.probe); for (const x of Object.values(v)) walk(x); } }; walk(JSON.parse(readFileSync(path.join(tmp, 'coverage', r.file ?? 'coverage-matrix.json'), 'utf8'))); } catch { /* matrix unreadable: probe facts stay null */ }
       probe = { results, accounting: r.accounting ?? null, families: r.families ?? null }; } catch (err) { probe = { error: bounded(err.message) }; } finally { try { rmSync(tmp, { recursive: true, force: true }); } catch { /* scratch */ } } }
   const probeOf = (id) => probe?.results?.[id] ?? null;
   const mrRows = Object.keys(profile.groups.marketResearch.providers).map((id) => { const r = row(id); const pol = mrPolicy?.providers?.[id] ?? null; return { ...r, policyEnabled: pol?.enabled ?? null, billing: pol?.plan?.billing ?? null, credentialEnv: pol?.credentialEnv ?? null, credentialPresent: pol?.credentialEnv ? present(env, pol.credentialEnv) : null, access: presence?.[id]?.access ?? null, smokeProbe: probeOf(id) }; });
@@ -173,7 +192,8 @@ export function renderPreflight(r) {
   const C = s.C_CORE_MARKET; line(`C. CORE      tape ${C.tape.state} (${C.tape.blocker ?? 'fresh'}) · wide eye ${C.wideEye.state} · universe ${C.universe.state} (${C.universe.coverage}) · feature freshness ${C.featureFreshness.ageMs === null ? 'n/a (not running)' : `${C.featureFreshness.ageMs} ms`}`);
   line(`D. OFFICIAL  rumor2 ${s.D_RUMOR_OFFICIAL.rumor2Enabled ? 'requested' : 'off'} · ${s.D_RUMOR_OFFICIAL.providers.map((p) => `${p.id} ${p.state}`).join(' · ')} · legacy ${s.D_RUMOR_OFFICIAL.legacyRumint.state}`);
   line(`E. SOCIAL    ${s.E_SOCIAL.providers.map((p) => `${p.id} ${p.state}${p.governor ? ` [${p.governor}]` : ''}`).join(' · ')}`);
-  line(`F. RESEARCH  service ${s.F_MARKET_RESEARCH.serviceRequested ? 'requested' : 'off'} · ${s.F_MARKET_RESEARCH.providers.map((p) => `${p.id} ${p.state}${p.smokeProbe ? ` [smoke ${p.smokeProbe.state ?? p.smokeProbe.ok ?? '?'}]` : ''}`).join(' · ')}`);
+  const smokeText = (sp) => { if (!sp) return ''; const st = sp.state ?? sp.ok ?? '?'; const why = sp.reason ? ` ${sp.reason}` : ''; const n = sp.count === null || sp.count === undefined ? '' : ` ${sp.count} record${sp.count === 1 ? '' : 's'}${sp.count === 0 ? ' (successful empty response)' : ''}`; return ` [smoke ${st}${why}${n}]`; };
+  line(`F. RESEARCH  service ${s.F_MARKET_RESEARCH.serviceRequested ? 'requested' : 'off'} · ${s.F_MARKET_RESEARCH.providers.map((p) => `${p.id} ${p.state}${smokeText(p.smokeProbe)}`).join(' · ')}`);
   const G = s.G_DARK_EDGE_CAPTURE; line(`G. DARK      charts ${G.krakenCharts.state}${G.krakenCharts.smokeProbe ? ` [smoke ${G.krakenCharts.smokeProbe.ok ? 'ok ' + G.krakenCharts.smokeProbe.observations + ' obs ' + G.krakenCharts.smokeProbe.acquisition : 'FAILED ' + G.krakenCharts.smokeProbe.failure}]` : ''} · L3 ${G.krakenL3.verdictState}${G.krakenL3.smokeProbe ? ` [probe ${G.krakenL3.smokeProbe.verdict}${G.krakenL3.smokeProbe.blocker ? ' ' + G.krakenL3.smokeProbe.blocker : ''}]` : ''} · authority NONE`);
   line(`H. SOCRATES  runtime ${s.H_SOCRATES.caseRuntime.state} · model ${s.H_SOCRATES.model.state} (${s.H_SOCRATES.model.blocker ?? 'authorized'})`);
   const I = s.I_JUDGE; line(`I. JUDGE     ${I.state} · policy mode ${I.checks.policyMode} adapter ${I.checks.adapter} · env ${I.checks.envMode} private ${I.checks.envAllowPrivate} orders ${I.checks.envAllowOrders} · account ${I.checks.accountId} ${I.checks.accountInitialized === null ? '' : I.checks.accountInitialized ? 'initialized' : 'NOT INITIALIZED'} · LIVE armed possible: no`);

@@ -30,7 +30,23 @@ import {
 // logged (bounded), never propagated — the tape's health, books, snapshots and features do not depend on it.
 // EXECUTION-1 seam (ticket §4.2-4.3): an OPTIONAL execution feed receives the raw accepted socket text (exact lexemes) plus
 // connect / disconnect epochs, may pin held / pending symbols (never shed, never dropped at the session refresh) and may ask
-// for a bounded on-demand subscription of a symbol the tape already carries. It never mutates the tape's own books.
+// for a bounded on-demand subscription of a symbol the tape already carries. It never mutates the tape's own books — with one
+// declared exception: requestBookSnapshot, where the feed asks for the venue's book snapshot for a symbol it admitted AFTER
+// the tape's subscription (the venue sends one snapshot per subscription, so a later admission has none). That is the
+// documented resynchronisation path: the tape's own book desynchronises for the round trip and is re-established by the same
+// venue snapshot. It never widens the venue, never raises depth and is rate-limited per symbol.
+export const BOOK_SNAPSHOT_MIN_INTERVAL_MS = 15_000;
+// pure: what a book-snapshot request may do right now, and the exact subscription messages it would send
+export function bookSnapshotRequest({ symbol, pair, unavailable = false, socketOpen, lastRequestMs = null, nowMs, minIntervalMs = BOOK_SNAPSHOT_MIN_INTERVAL_MS }) {
+  if (!pair) return { ok: false, reason: 'NOT_IN_TAPE_UNIVERSE' };
+  if (unavailable) return { ok: false, reason: 'PAIR_UNAVAILABLE' };
+  if (!socketOpen) return { ok: false, reason: 'SOCKET_NOT_OPEN' };
+  if (lastRequestMs !== null && nowMs - lastRequestMs < minIntervalMs) return { ok: false, reason: 'RATE_LIMITED', retryAfterMs: minIntervalMs - (nowMs - lastRequestMs) };
+  return { ok: true, requested: true, depth: pair.depth, messages: [
+    { method: 'unsubscribe', params: { channel: 'book', symbol: [symbol], depth: pair.depth } },
+    { method: 'subscribe', params: { channel: 'book', symbol: [symbol], depth: pair.depth, snapshot: true } },
+  ] };
+}
 export async function runTape({ minutes = null, chaosAfterSec = null, log = console.log, executionFeed = null, observer = null } = {}) {
   const config = loadConfig();
   let observerErrors = 0; let feedErrors = 0;
@@ -51,6 +67,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   const lastMsgMs = {}; // symbol -> ms
   const unavailable = new Set(); // subscribe-failed or shed symbols
   const subFailures = new Map(); // symbol -> attempt count
+  const bookSnapshotAsked = new Map(); // symbol -> clock of the last execution-feed book-snapshot request
   let lastAnyMsgMs = null;
 
   // MICRO-1: the dark microstructure sense. OBSERVES ONLY — nothing here
@@ -83,6 +100,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     delete lastMsgMs[symbol];
     unavailable.delete(symbol);
     subFailures.delete(symbol);
+    bookSnapshotAsked.delete(symbol);
   }
 
   async function loadUniverse(reason) {
@@ -519,6 +537,17 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       if (pairs.has(symbol)) { if (unavailable.has(symbol) && (entry?.priority === 'HELD' || entry?.priority === 'PENDING')) { unavailable.delete(symbol); subFailures.delete(symbol); if (ws?.readyState === WebSocket.OPEN) subscribeSymbols([symbol]); } return { ok: true, carried: true }; }
       if (entry?.priority === 'HELD' || entry?.priority === 'PENDING') { adoptPair({ coin: coinFromSymbol(symbol), symbol, major: false, depth: entry.depth ?? xp.defaultDepth ?? 25, usdVol24h: null, pinned: true }); if (ws?.readyState === WebSocket.OPEN) subscribeSymbols([symbol]); writeEvent('PAIR_PINNED', { symbol, priority: entry.priority }); return { ok: true, adopted: true }; }
       return { ok: false, reason: 'NOT_IN_TAPE_UNIVERSE' };
+    },
+    // the venue answers a subscription with exactly one book snapshot: a symbol admitted after ours needs a real one
+    requestBookSnapshot(symbol, reason = null) {
+      const now = Date.now();
+      const r = bookSnapshotRequest({ symbol, pair: pairs.get(symbol) ?? null, unavailable: unavailable.has(symbol), socketOpen: ws?.readyState === WebSocket.OPEN, lastRequestMs: bookSnapshotAsked.get(symbol) ?? null, nowMs: now });
+      if (!r.ok) return r;
+      bookSnapshotAsked.set(symbol, now);
+      books.get(symbol)?.desync(); // the round trip loses updates: the tape's own book is not trusted until the snapshot lands
+      writeEvent('BOOK_SNAPSHOT_REQUESTED', { symbol, depth: r.depth, reason: String(reason ?? '').slice(0, 120) });
+      for (const m of r.messages) send(m);
+      return { ok: true, requested: true, depth: r.depth };
     },
     depthOf: (symbol) => pairs.get(symbol)?.depth ?? null,
   }));

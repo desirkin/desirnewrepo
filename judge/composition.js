@@ -110,7 +110,19 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   // bounded preparation (ticket §4.5 / J11): at most policy.universe.preparationSlots warm candidates, newest nomination first, held assets
   // outside the contest; a candidate that loses its slot is released (never a held / pending one: judge.release refuses those)
   let prepared = new Map(); let lastPreparation = null; const capturedNominations = new Set();
-  function admitNominations() { const t = nowTs(); const held = new Set(Object.values(dispatcher.state()?.positions ?? {}).filter((p) => p.state !== 'FLAT').map((p) => p.assetId)); const list = nominate().filter((x) => x?.symbol && !excluded(policy, x.symbol) && specOf(x.symbol)).map((x) => ({ symbol: x.symbol, assetId: x.assetId ?? x.symbol.split('/')[0], source: x.source ?? 'UNIVERSE', nominationKnownAtTs: x.nominationKnownAtTs ?? prepared.get(x.assetId ?? x.symbol.split('/')[0])?.nominationKnownAtTs ?? t }));
+  // A source that carries no nomination clock (the tape universe is a STANDING list, not an event stream) is stamped ONCE —
+  // at the first pass that observed it — and merely RE-AFFIRMED afterwards. Re-stamping it with the current clock on every
+  // pass made every standing nomination look newer than the candidates it was already preparing: with more nominations than
+  // slots the six preparation slots flipped between disjoint groups at every cadence and no candidate ever warmed. The
+  // affirmation clock keeps legitimate expiry intact (a nomination that stops being listed still ages out of the TTL).
+  const nominationClocks = new Map(); const NOMINATION_CLOCKS_MAX = 4096;
+  function nominationClocksOf(key, explicitTs, t) {
+    const rec = nominationClocks.get(key); const knownAtTs = Number.isSafeInteger(explicitTs) ? explicitTs : rec?.knownAtTs ?? t;
+    if (rec) { rec.knownAtTs = knownAtTs; rec.lastSeenTs = t; }
+    else { if (nominationClocks.size >= NOMINATION_CLOCKS_MAX) for (const [k] of [...nominationClocks.entries()].sort((a, b) => a[1].lastSeenTs - b[1].lastSeenTs).slice(0, Math.ceil(NOMINATION_CLOCKS_MAX / 8))) nominationClocks.delete(k); nominationClocks.set(key, { knownAtTs, lastSeenTs: t }); }
+    return { nominationKnownAtTs: knownAtTs, nominationLastSeenTs: t };
+  }
+  function admitNominations() { const t = nowTs(); const held = new Set(Object.values(dispatcher.state()?.positions ?? {}).filter((p) => p.state !== 'FLAT').map((p) => p.assetId)); const list = nominate().filter((x) => x?.symbol && !excluded(policy, x.symbol) && specOf(x.symbol)).map((x) => { const assetId = x.assetId ?? x.symbol.split('/')[0]; const source = x.source ?? 'UNIVERSE'; return { symbol: x.symbol, assetId, source, ...nominationClocksOf(`${assetId}|${x.symbol}|${source}`, x.nominationKnownAtTs, t) }; });
     for (const n of list) { const key = `${n.assetId}|${n.symbol}|${n.nominationKnownAtTs}`; if (!capturedNominations.has(key)) { capturedNominations.add(key); if (capturedNominations.size > 8192) capturedNominations.clear(); captureInput('NOMINATION', { symbol: n.symbol, assetId: n.assetId, source: n.source, nominationKnownAtTs: n.nominationKnownAtTs }); } }
     const sel = selectPreparation({ nominations: list, held, remainingSlots: Math.min(policy.universe.preparationSlots, policy.universe.maxCandidates), previous: prepared, nowTs: t }); lastPreparation = { slots: sel.slots, selected: sel.selected.map((n) => n.assetId), preempted: sel.preempted, lost: sel.lost, held: sel.held, ts: t };
     for (const l of sel.lost) { const c = judge.candidates().find((x) => x.assetId === l.assetId); if (c) judge.release(c.symbol); }

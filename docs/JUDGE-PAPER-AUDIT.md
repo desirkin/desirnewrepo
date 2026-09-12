@@ -60,11 +60,29 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       ca3b1c8f0b2ed3418ca4a105c5f7a829bc459afaad66ebee8cbd2a53d54780fd
-execution/*.js   1885a471b7d2cc2f0d8b03c4b923f0a838eb6f67f868e60b98d45a3d5b6545f7
+judge/*.js       187fbace4d564df0ea8426177b99706cd706e65a678ce5768b187022b52f0fcc
+execution/*.js   d9ce90d9b08977048fb333bb8a22b7e949613832193a58763238d79a9d671965
 watch/watch.js   dc49a39444e2971dafb766f2a831fda6894968238606c7c6bfa8b5b782cf53a6
-all (39 files)   cbdf087847694d878b850661577c48e40f4d7caf243b2588ab80502e3dee2b3c
+all (39 files)   075ecd3aecefde6d836acc065b1a0e9a8b95eed5c6d7b6a9b804ea383f0e7ff5
 ```
+
+### 4.1 Audited change — 2026-09-12 operational repair (previous digests: judge `ca3b1c8f0b2e…`, execution `1885a471b7d2…`, all `cbdf08784769…`)
+
+Two reproduced runtime defects were repaired inside the frozen trees. `watch/watch.js` is byte-identical. Evidence and
+before/after counters: `docs/evidence/operational-repair-2026-09-12.md`; regressions: `test/judge-operational-repair.test.js`.
+
+- `execution/feed.js` — the venue sends ONE book snapshot per subscription, so a symbol admitted AFTER the tape's book
+  subscription had no synchronized book and every later `update` hit the not-synchronized guard: books stayed at ZERO for
+  the whole run while trades flowed. The feed now asks the bound tape for a REAL venue snapshot (bounded, rate-limited,
+  `requestBookSnapshot`), keeps the public instrument PRECISION for every announced pair (so `crcVerified` can become true
+  for a later admission), and starts a carried symbol's trade coverage at the ADMISSION clock. No depth is manufactured,
+  no stale depth is reused as current, and the synchronization / CRC / freshness laws are unchanged. Authority unchanged.
+- `judge/readiness.js` + `judge/composition.js` — a standing nomination list that carries no nomination clock was
+  re-stamped with the current clock on every pass, so the six preparation slots flipped between disjoint groups every
+  cadence and warmup never accumulated. The nomination's KNOWN-AT clock (rank) is now separated from its LAST-AFFIRMED
+  clock (expiry). Warmup lengths, eligibility clauses, capacity limits, held-position protection and legitimate expiry
+  are unchanged; `judge/readiness.js` also names WHY a book is unusable (`bookFreshDetail`) instead of `age nullms`.
+- No change to thresholds, sizing, risk, gates, authority, order permissions or the paper runtime.
 
 ## 5. Socrates under the paper profile
 

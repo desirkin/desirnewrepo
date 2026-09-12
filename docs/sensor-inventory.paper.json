@@ -1,6 +1,6 @@
 {
  "inventoryVersion": "serpent-sensor-inventory-1",
- "generatedTs": 1789097061831,
+ "generatedTs": 1789172524698,
  "profile": "paper",
  "policyFile": "config/market-research.paper.json",
  "classifications": [
@@ -43,7 +43,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "BLOCK_PAPER",
    "readinessBlocker": null,
-   "smokeEvidence": "Kraken WS v2 public feed: continuous live operation on the deployment; doctrine/WIDEEYE.md, doctrine/DEPLOYMENT.md"
+   "smokeEvidence": "Kraken WS v2 public feed: continuous live operation on the deployment; doctrine/WIDEEYE.md, doctrine/DEPLOYMENT.md. 2026-09-12 local OBSERVE run (no credentials, no orders): 34231 CRC-verified book snapshots and 537 trades delivered to the Judge consumer in 5 minutes, 0 CRC failures (docs/evidence/operational-repair-2026-09-12.md)"
   },
   {
    "id": "WIDEEYE",
@@ -89,7 +89,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "Kraken WS v2 public feed: continuous live operation on the deployment; doctrine/WIDEEYE.md, doctrine/DEPLOYMENT.md"
+   "smokeEvidence": "Kraken WS v2 public feed: continuous live operation on the deployment; doctrine/WIDEEYE.md, doctrine/DEPLOYMENT.md. 2026-09-12 local OBSERVE run (no credentials, no orders): 34231 CRC-verified book snapshots and 537 trades delivered to the Judge consumer in 5 minutes, 0 CRC failures (docs/evidence/operational-repair-2026-09-12.md)"
   },
   {
    "id": "COST_EXECUTABILITY",
@@ -440,7 +440,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "Jetstream public read 2026-09-11: open 284 ms, 50 messages in 1.5 s (docs/evidence); doctrine/SOCIAL.md §5B"
+   "smokeEvidence": "Jetstream public read 2026-09-12: open 461 ms, 200 messages in 3.3 s, 200/200 mapped to valid shared-contract observations (112 posts / 88 reposts), 0 skips, provider sequence 25754477318; durable delivery to the RUMOR2 event root NOT proven locally (no DATABASE_URL); docs/evidence/operational-repair-2026-09-12.md, doctrine/SOCIAL.md §5B"
   },
   {
    "id": "FARCASTER_OFFICIAL",
@@ -614,7 +614,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "PROBED_OK 2026-09-11 read-only preflight smoke (docs/evidence/paper-preflight-smoke-2026-09-11.json); L01"
+   "smokeEvidence": "PROBED_OK 2026-09-12 read-only preflight smoke, 622 markets (docs/evidence/operational-repair-2026-09-12.md); L01"
   },
   {
    "id": "COINBASE_SPOT",
@@ -637,7 +637,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "PROBED_OK 2026-09-11 (docs/evidence); L01"
+   "smokeEvidence": "PROBED_OK 2026-09-12 (record count not reported by the endpoint); L01"
   },
   {
    "id": "KRAKEN_DERIVATIVES",
@@ -660,7 +660,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "PROBED_OK 2026-09-11 (docs/evidence); L01"
+   "smokeEvidence": "PROBED_OK 2026-09-12, 295 records; L01"
   },
   {
    "id": "DERIBIT",
@@ -683,7 +683,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "PROBED_OK 2026-09-11 (docs/evidence); L01"
+   "smokeEvidence": "PROBED_OK 2026-09-12, 950 records; L01"
   },
   {
    "id": "BYBIT",
@@ -706,7 +706,7 @@
    "paperDesiredState": "OFF",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": "BLOCKED_GEOGRAPHY",
-   "smokeEvidence": "HTTP 403 from this build environment (geo / access), 2026-09-11 read-only probe; docs/MARKET-SOCRATES-ACCEPTANCE.md"
+   "smokeEvidence": "HTTP 403 from this build environment (geo / access), 2026-09-11 read-only probe; 2026-09-12 NOT_PROBED (PROVIDER_DISABLED by the paper policy); docs/MARKET-SOCRATES-ACCEPTANCE.md"
   },
   {
    "id": "COINGECKO",
@@ -731,7 +731,7 @@
    "paperDesiredState": "OFF",
    "blockerPolicy": "PAID_GATE",
    "readinessBlocker": "CREDENTIAL_MISSING + BLOCKED_BUDGET",
-   "smokeEvidence": "public ping reached 2026-09-11; demo plan / cost UNKNOWN (policy plan attestation absent)"
+   "smokeEvidence": "unauthenticated public ping reached HTTP 200 on 2026-09-12; the CONFIGURED provider path stays NOT_PROBED (PROVIDER_DISABLED); demo plan / cost UNKNOWN (policy plan attestation absent)"
   },
   {
    "id": "GECKOTERMINAL",
@@ -754,7 +754,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "PROBED_OK 2026-09-11 (docs/evidence); L01"
+   "smokeEvidence": "PROBED_OK 2026-09-12, 1 record; L01"
   },
   {
    "id": "DEFILLAMA",
@@ -777,7 +777,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "PROBED_OK 2026-09-11 (docs/evidence); L01"
+   "smokeEvidence": "PROBED_OK 2026-09-12, 1 record; L01"
   },
   {
    "id": "COINGLASS",
@@ -875,7 +875,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "PROBED_OK 2026-09-11 (docs/evidence); L01 (community API)"
+   "smokeEvidence": "PROBED_OK 2026-09-12 (community API); L01"
   },
   {
    "id": "FRED",
@@ -900,7 +900,7 @@
    "paperDesiredState": "REQUEST",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": "CREDENTIAL_MISSING",
-   "smokeEvidence": "PROBED_FAILED 2026-09-11 without FRED_API_KEY (documented free key required; docs/evidence)"
+   "smokeEvidence": "PROBED_FAILED 2026-09-12 CREDENTIAL_MISSING / coverage ACCESS_BLOCKED without FRED_API_KEY (documented free key required; docs/evidence/operational-repair-2026-09-12.md)"
   },
   {
    "id": "TWELVEDATA",
@@ -996,7 +996,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DARK_RESEARCH",
    "readinessBlocker": null,
-   "smokeEvidence": "public poll 2026-09-11: PF_XBTUSD open-interest 60 s, 2 observations, acquisition COMPLETE, coverage OBSERVED (docs/evidence)"
+   "smokeEvidence": "public poll 2026-09-12: PF_XBTUSD open-interest 60 s, 2 observations, acquisition COMPLETE, coverage OBSERVED (docs/evidence/operational-repair-2026-09-12.md)"
   },
   {
    "id": "KRAKEN_L3_DARK",
@@ -1022,7 +1022,7 @@
    "paperDesiredState": "REQUEST",
    "blockerPolicy": "DARK_RESEARCH",
    "readinessBlocker": "BLOCKED_NO_SAFE_L3_DATA_KEY (CREDENTIAL_MISSING)",
-   "smokeEvidence": "NOT_RUN_NO_SAFE_L3_DATA_KEY (2026-09-11 probe: CREDENTIAL_MISSING)"
+   "smokeEvidence": "NOT_RUN_NO_SAFE_L3_DATA_KEY (2026-09-12 probe: CREDENTIAL_MISSING). Separate from the Judge book route: no module under judge/, execution/, watch/ or tape/ names L3 at all"
   },
   {
    "id": "SOCRATES",
