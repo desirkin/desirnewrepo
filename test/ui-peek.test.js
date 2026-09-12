@@ -190,9 +190,9 @@ test('12. no additional fetch/API request exists for the disclosure', () => {
   for (const name of ['openHuntCard', 'stPeekRow', 'stPeekLine', 'stTogglePeek']) {
     assert.ok(!fnSrc(name).includes('fetch('), `${name} performs no network request`);
   }
-  // the page's API surface is unchanged — no new endpoint was introduced
+  // The peek adds no request. Senses has one separately authorized, owner-authenticated current-view reader.
   const endpoints = new Set(SCRIPT.match(/\/api\/[a-z/-]+/g)); // MARKET-LAB: hyphenated route names are whole endpoints
-  const known = new Set(['/api/status', '/api/attention', '/api/ears', '/api/wideeye', '/api/coin/', '/api/ledger/summary', '/api/control/', '/api/auth/', '/api/market-research', '/api/judge', '/api/sensors', '/api/ask']); // MARKET-LAB: read-only research files; JUDGE: the read-only journal projection view; SENSORS: the read-only paper sensor / readiness snapshot
+  const known = new Set(['/api/status', '/api/attention', '/api/ears', '/api/wideeye', '/api/coin/', '/api/ledger/summary', '/api/control/', '/api/auth/', '/api/market-research', '/api/judge', '/api/sensors', '/api/ask', '/api/social/current']); // MARKET-LAB: read-only research files; JUDGE: the read-only journal projection view; SENSORS: the read-only paper sensor / readiness snapshot
   for (const e of endpoints) {
     assert.ok([...known].some((k) => e.startsWith(k.replace(/\/$/, ''))), `unexpected new endpoint ${e}`);
   }
