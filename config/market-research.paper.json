@@ -364,24 +364,28 @@
    }
   },
   "TWELVEDATA": {
-   "enabled": false,
+   "enabled": true,
    "credentialEnv": "TWELVEDATA_API_KEY",
    "plan": {
-    "name": null,
-    "billing": "UNKNOWN",
+    "name": "Basic 8",
+    "billing": "FREE",
     "includedCallsPerMonth": null,
     "remainingCalls": null,
-    "incrementalUsdPerCall": null,
-    "attestation": null,
-    "verifiedDate": null,
-    "quoteUsdPerMonth": null
+    "incrementalUsdPerCall": 0,
+    "attestation": "Owner Basic 8 account; supplied key returned EUR/USD candles and api_usage plan_limit=8 on 2026-09-12. Basic free limits: support.twelvedata.com/en/articles/5335783-trial. No paid upgrade authorized.",
+    "verifiedDate": "2026-09-12",
+    "quoteUsdPerMonth": 0
    },
    "limits": {
-    "maxCallsPerDay": 1000,
-    "maxCallsPerMonth": 20000,
+    "maxCallsPerDay": 600,
+    "maxCallsPerMonth": 18000,
     "maxConcurrency": 1
    },
-   "permittedEndpoints": null,
+   "permittedEndpoints": [
+    "symbol-search",
+    "quote",
+    "time-series"
+   ],
    "smoke": {
     "authorized": false,
     "maxCalls": 0,
