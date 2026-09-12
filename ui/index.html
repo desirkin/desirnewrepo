@@ -263,7 +263,7 @@
 
   /* human controls: confirm-tap buttons. They only remove permission to trade. */
   #controls { position: fixed; bottom: calc(max(12px, env(safe-area-inset-bottom)) + 40px);
-              left: 50%; transform: translateX(-50%); display: flex; gap: 10px; z-index: 35; }
+              left: 50%; transform: translateX(-50%); display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; width: min(96vw, 760px); z-index: 35; }
   body.demo #controls { display: none; }
   #controls button {
     font-size: 11px; font-weight: 700; letter-spacing: .2em; padding: 9px 15px;
@@ -1493,9 +1493,21 @@ function renderSenses(d) {
   if (!d.enabled) { b.innerHTML = '<div class="empty"><div class="sub">' + esc(d.error ?? 'no sensor snapshot') + '</div></div>'; return; }
   const a = d.authority ?? {};
   const groups = Object.entries(d.groups ?? {}).map(([g, ids]) => '<div class="rmeta">' + esc(g.replace('_', ' ')) + '</div>' + ids.map((id) => { const r = d.rows.find((x) => x.id === id); if (!r) return ''; return '<div class="srow"><span class="k">' + esc(r.name) + '<span class="d">' + esc(r.coverage ?? '—') + (r.blocker ? ' · ' + esc(r.blocker) : '') + ' · auth ' + esc(r.authority) + '</span></span><span class="st ' + sState(r.state) + '">' + esc(r.state) + '<br>' + (r.lastSuccessTs ? 'last ' + sAge(r.ageMs) + ' ago' : 'no observation') + '</span></div>'; }).join('')).join('');
-  b.innerHTML = '<div class="auth">REAL MONEY ' + esc(a.realMoney) + ' · LIVE ORDERS ' + esc(a.liveOrders) + ' · JUDGE ' + esc(a.judgeMode ?? 'OFF') + '</div>' + '<div class="rmeta">profile ' + esc(d.profile) + (d.profileApplied ? '' : ' (profile NOT applied to this process: env enables only)') + ' · ' + esc(new Date(d.generatedTs).toISOString()) + ' · kill ' + esc(d.controls?.kill) + ' · cage ' + esc(d.controls?.cage) + ' · lock ' + esc(d.locks?.level) + ' · db ' + esc(d.persistence?.status ?? (d.persistence?.databaseConfigured ? 'configured' : 'not configured')) + '</div>' + groups + '<div class="rmeta">' + esc(d.law) + '</div>';
+  b.innerHTML = '<div class="auth">REAL MONEY ' + esc(a.realMoney) + ' · LIVE ORDERS ' + esc(a.liveOrders) + ' · JUDGE ' + esc(a.judgeMode ?? 'OFF') + '</div>' + '<div class="rmeta">profile ' + esc(d.profile) + (d.profileApplied ? '' : ' (profile NOT applied to this process: env enables only)') + ' · ' + esc(new Date(d.generatedTs).toISOString()) + ' · kill ' + esc(d.controls?.kill) + ' · cage ' + esc(d.controls?.cage) + ' · lock ' + esc(d.locks?.level) + ' · db ' + esc(d.persistence?.status ?? (d.persistence?.databaseConfigured ? 'configured' : 'not configured')) + '</div>' + '<div id="currentSocialView" class="rmeta">Current social observations loading…</div>' + groups + '<div class="rmeta">' + esc(d.law) + '</div>';
 }
-async function refreshSenses() { let res; try { res = await fetch('/api/sensors', { cache: 'no-store' }); } catch (err) { console.error('SENSES fetch failed:', err); $('#sensesBody').innerHTML = '<div class="line"><span>SHELL LINK LOST — server unreachable</span></div>'; return; } if (!res.ok) { $('#sensesBody').innerHTML = '<div class="line"><span>senses unavailable (' + esc(res.status) + ')</span></div>'; return; } try { renderSenses(await res.json()); } catch (err) { console.error('SENSES render failed:', err); $('#sensesBody').innerHTML = '<div class="line"><span>senses render failed</span></div>'; } }
+async function refreshSenses() { let res; try { res = await fetch('/api/sensors', { cache: 'no-store' }); } catch (err) { console.error('SENSES fetch failed:', err); $('#sensesBody').innerHTML = '<div class="line"><span>SHELL LINK LOST — server unreachable</span></div>'; return; } if (!res.ok) { $('#sensesBody').innerHTML = '<div class="line"><span>senses unavailable (' + esc(res.status) + ')</span></div>'; return; } try { renderSenses(await res.json()); await refreshCurrentSocial(); } catch (err) { console.error('SENSES render failed:', err); $('#sensesBody').innerHTML = '<div class="line"><span>senses render failed</span></div>'; } }
+async function refreshCurrentSocial() {
+  const host = $('#currentSocialView'); if (!host) return;
+  try {
+    const response = await fetch('/api/social/current', { cache: 'no-store' });
+    if (response.status === 401) { host.textContent = 'Unlock the owner session to view current social observations.'; return; }
+    if (!response.ok) throw new Error('Current view unavailable');
+    const d = await response.json();
+    const entries = [...(d.observations ?? []).map(o => ({ provider:o.provider, title:o.title, text:o.text, time:o.knownAtTs, expires:o.expiresAtTs })), ...(d.videos ?? []).map(o => ({provider:'YOUTUBE_DATA_API',title:o.title,text:o.description,time:o.receiptTs,expires:o.receiptTs+300000}))].filter(o => o.expires > Date.now());
+    host.innerHTML = '<div class="rmeta">CURRENT SOCIAL · ' + entries.length + ' observations · expires after five minutes</div>' + (entries.length ? entries.slice(-30).reverse().map(o => '<div class="srow"><span class="k">' + esc(o.provider) + '<span class="d">' + esc(o.title ?? '') + ' ' + esc(o.text ?? '') + '</span></span><span>' + sAge(Date.now()-o.time) + '</span></div>').join('') : '<div>No current observations. Source gates and last successful reads are listed below.</div>');
+  } catch { host.textContent = 'Current social view is unavailable.'; }
+}
+setInterval(() => { if ($('#senses').classList.contains('open')) refreshCurrentSocial(); }, 15000);
 $('#btnSenses').addEventListener('click', () => { showSenses(); refreshSenses(); });
 
 // ---- ASK SERPENT: a read-only conversation over the recorded evidence (paper/companion.js). The server keeps no

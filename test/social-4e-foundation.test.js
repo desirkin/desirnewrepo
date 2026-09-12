@@ -92,7 +92,7 @@ test('4E-2. static: the new modules import only inside rumor2 (shared contract, 
     for (const marker of ['openai', 'anthropic', 'gemini', 'claude-', 'gpt-', 'model_key', 'api_key']) assert.ok(!src.toLowerCase().includes(marker), `${f}: model/credential marker ${marker}`);
   }
   const consumers = tracked.filter((f) => !f.startsWith('test/') && !NEW_MODULES.includes(f) && /from\s+'[^']*social-(foundation|meta|tiktok|farcaster-access)\.js'/.test(read(f)));
-  assert.deepEqual(consumers, [], 'no runtime, collector, registry, provider, or persistence module imports a 4E module');
+  assert.deepEqual(consumers.sort(), ['rumor2/social-current-clients.js', 'rumor2/social-farcaster-runtime.js'], 'only the owner-authorized sensor transports consume the pure access gates');
   for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/social-stream.js', 'rumor2/social-registry.js', 'fly.js']) assert.ok(!/from\s+'[^']*social-(foundation|meta|tiktok|farcaster-access)\.js'|evaluate(Meta|Tiktok|Farcaster)|PayloadToPreview|VideoToPreview/.test(read(f)), `${f} has no 4E wiring`);
 });
 

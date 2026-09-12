@@ -18,6 +18,8 @@
 // sourceEventId is the VERSION identity (a distinct CREATE/EDIT/DELETE/TOMBSTONE
 // event). A legitimate edit is a new version; an altered re-delivery of the same
 // version is corruption (caught by the journal's identity/payload law).
+import { CURRENT_REQUEST_TYPE, currentRequestError } from './social-current-meter.js';
+import { FARCASTER_REQUEST_TYPE, farcasterRequestError } from './social-farcaster-meter.js';
 import { contentHash, canonicalJson } from './truth.js';
 import {
   socialSourceIdentity, socialAuthorIdentity, socialVersionIdentity, socialMetaHash,
@@ -168,7 +170,7 @@ export const socialScopeIdentity = ({ provider, scopeRevision }) => `r2sq-${cont
 // SOCIAL-5 §36.6: RUMOR2_RESEARCH_SHADOW_SAMPLE is the bounded research-control (false-negative denominator)
 // record — one per sampled completed wide-eye sweep; same fence/replay law, no outcome, authority NONE
 export { RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_SHADOW_EVENT_TYPE };
-export const SOCIAL_EVENT_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE, SOCIAL_CATALOG_EVENT_TYPE, SOCIAL_CATALOG_VERIFIED_EVENT_TYPE, SOCIAL_SCOPE_EVENT_TYPE, RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_SHADOW_EVENT_TYPE]);
+export const SOCIAL_EVENT_TYPES = Object.freeze([CURRENT_REQUEST_TYPE, FARCASTER_REQUEST_TYPE, SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE, SOCIAL_CLOCK_INTERPRETATION_TYPE, SOCIAL_RECONCILIATION_PENDING_TYPE, SOCIAL_CURSOR_EVENT_TYPE, X_RULESET_EVENT_TYPE, X_METER_EVENT_TYPE, X_PROGRESS_EVENT_TYPE, X_GAP_EVENT_TYPE, X_SMOKE_EVENT_TYPE, SOCIAL_CATALOG_EVENT_TYPE, SOCIAL_CATALOG_VERIFIED_EVENT_TYPE, SOCIAL_SCOPE_EVENT_TYPE, RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_SHADOW_EVENT_TYPE]);
 // the SOURCE observation types (legacy + witnessed) — the only types that count as social sources
 export const SOCIAL_OBSERVATION_TYPES = Object.freeze([SOCIAL_EVENT_TYPE, SOCIAL_EVENT_V2_TYPE]);
 export const xSmokeIdentity = ({ provider, smokeRunId, status }) => `r2xk-${contentHash(canonicalJson({ provider, smokeRunId, status }))}`;
@@ -1103,6 +1105,8 @@ export function replaySocialHistory(events) {
     return null;
   };
   for (const e of events) {
+    if (e?.type === CURRENT_REQUEST_TYPE) { const error = currentRequestError(e); if (error) return fail(error); continue; }
+    if (e?.type === FARCASTER_REQUEST_TYPE) { const error = farcasterRequestError(e); if (error) return fail(error); continue; }
     if (e === null || typeof e !== 'object' || Array.isArray(e) || typeof e.type !== 'string') return fail('SOCIAL_HISTORY_INVALID: malformed event record');
     if (e.type === SOCIAL_EVENT_TYPE || e.type === SOCIAL_EVENT_V2_TYPE) {
       const err = validateSocialEvent(e);

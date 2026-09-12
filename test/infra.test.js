@@ -76,7 +76,7 @@ test('INFRA-4. reader + profile + snapshot: corrupt lines are counted not return
   writeFileSync(infraStatusFile(dir), JSON.stringify(status('OBSERVED', now - 1000))); assert.equal(snapshotRow(sensorSnapshot({ profile: p, env: { ...env }, dataDir: dir, now }), 'INFRA_NOAA_SWPC').state, 'ACTIVE');
   assert.equal(snapshotRow(sensorSnapshot({ profile: p, env: { ...env }, dataDir: dir, now: now + 4 * 3_600_000 }), 'INFRA_NOAA_SWPC').state, 'ACTIVE_DEGRADED');
   writeFileSync(infraStatusFile(dir), JSON.stringify(status('FAILED', null))); assert.equal(snapshotRow(sensorSnapshot({ profile: p, env: { ...env }, dataDir: dir, now }), 'INFRA_NOAA_SWPC').state, 'BLOCKED_PROVIDER');
-  const withTok = sensorSnapshot({ profile: p, env: { ...env, CLOUDFLARE_API_TOKEN: 'tok-abc', INFRA_RIPE_RESOURCES: 'AS13335' }, dataDir: dir, now }); assert.equal(snapshotRow(withTok, 'INFRA_CLOUDFLARE_RADAR').state, 'NOT_OBSERVED', 'a present credential is never green by itself'); assert.equal(snapshotRow(withTok, 'INFRA_RIPE_RIS').state, 'NOT_OBSERVED'); assert.ok(!JSON.stringify(withTok).includes('tok-abc'));
+  const withTok = sensorSnapshot({ profile: p, env: { ...env, CLOUDFLARE_API_TOKEN: 'tok-abc', INFRA_RIPE_RESOURCES: 'AS13335', INFRA_CLOUDFLARE_ASN: '13335' }, dataDir: dir, now }); assert.equal(snapshotRow(withTok, 'INFRA_CLOUDFLARE_RADAR').state, 'NOT_OBSERVED', 'a present credential is never green by itself'); assert.equal(snapshotRow(withTok, 'INFRA_RIPE_RIS').state, 'NOT_OBSERVED'); assert.ok(!JSON.stringify(withTok).includes('tok-abc'));
 });
 
 test('INFRA-5. composition + authority fences: fly.js starts the infra collector after the gateway and before the tape; infra/ imports no trading, control, research or RUMOR-2 module; no authority module imports infra/; nothing under infra/ names an order verb', () => {
@@ -85,4 +85,13 @@ test('INFRA-5. composition + authority fences: fly.js starts the infra collector
   const imports = (f) => [...readFileSync(path.join(REPO, f), 'utf8').matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
   for (const f of tracked.filter((x) => x.startsWith('infra/'))) { for (const spec of imports(f)) assert.ok(!/judge\/|execution\/|watch\/|tape\/|ledger\/|cost\/|state\/|market-lab\/|socrates\/|research\/|rumor2\//.test(spec), `${f} -> ${spec}`); assert.ok(!/addOrder|placeOrder|cancelOrder|editOrder/.test(readFileSync(path.join(REPO, f), 'utf8')), `${f} names an order verb`); }
   for (const f of tracked.filter((x) => /^(judge|execution|watch|tape|ledger|cost|state|rumor2|market-lab|socrates)\//.test(x))) assert.ok(!imports(f).some((s) => s.includes('infra/')), `${f} imports infra/`);
+});
+
+test('Invalid routing scopes never expand Cloudflare collection to global',async()=>{
+  let calls=0;const {validRoutingResource}=await import('../infra/parse.js');
+  for(const value of ['999.1.1.0/24','1.1.1.0/33','2001:db8::/129','AS4294967296','abcd/64'])assert.equal(validRoutingResource(value),false);
+  for(const extra of [{},{INFRA_CLOUDFLARE_PREFIX:'999.1.1.0/24'},{INFRA_CLOUDFLARE_ASN:'bad'},{INFRA_CLOUDFLARE_ASN:'13335',INFRA_CLOUDFLARE_DATE_RANGE:'bad'}]){
+    const h=startInfra({env:{INFRA_OBS_ENABLED:'true',INFRA_SOURCES:'CLOUDFLARE_RADAR',CLOUDFLARE_API_TOKEN:'fixture',...extra},dataDir:tmp('infra-scope-'),fetchImpl:async()=>{calls++;},clock:()=>T0,timers,signals:false,log:()=>{}});
+    assert.equal(h.status().sources.CLOUDFLARE_RADAR.state,'CONFIG_REQUIRED');assert.equal(await h.pollOnce('CLOUDFLARE_RADAR'),null);h.stop();
+  }assert.equal(calls,0);
 });

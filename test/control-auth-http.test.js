@@ -22,7 +22,7 @@ delete process.env.DATABASE_URL;
 delete process.env.REPLIT_DEPLOYMENT;
 delete process.env.SERPENT_DURABLE_REQUIRED;
 
-const { server } = await import('../ui/server.js'); // listens on PORT
+const { server, setCurrentSocialSource } = await import('../ui/server.js'); // listens on PORT
 const BASE = `http://127.0.0.1:${PORT}`;
 
 test.after(() => {
@@ -85,6 +85,14 @@ test('LOGIN: wrong password generic 401; correct password sets an HttpOnly SameS
   const st = await (await fetch(BASE + '/api/auth/status', { headers: { cookie } })).json();
   assert.equal(st.authenticated, true);
   assert.equal(st.controlAuth, 'CONTROL_AUTHENTICATED');
+});
+
+test('CURRENT SOCIAL: raw current content requires the owner session, is never cached, and is not read for anonymous callers',async()=>{
+  let reads=0;setCurrentSocialSource(()=>{reads++;return {authority:'NONE',observations:[{text:'CURRENT SOCIAL FIXTURE'}]};});
+  try{
+    const denied=await fetch(BASE+'/api/social/current');assert.equal(denied.status,401);assert.equal(denied.headers.get('cache-control'),'no-store');assert.equal(reads,0);assert.deepEqual((await denied.json()).observations,[]);
+    const allowed=await fetch(BASE+'/api/social/current',{headers:{cookie}});assert.equal(allowed.status,200);assert.equal(allowed.headers.get('cache-control'),'no-store');assert.equal((await allowed.json()).observations[0].text,'CURRENT SOCIAL FIXTURE');assert.equal(reads,1);
+  }finally{setCurrentSocialSource(null);}
 });
 
 test('EVERY MUTATION GATED: no auth 401; cookie without CSRF 403; CSRF without cookie 401; wrong CSRF 403', async () => {

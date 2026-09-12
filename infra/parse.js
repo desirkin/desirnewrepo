@@ -5,6 +5,7 @@
 // knownAtTs = receiptTs. A missing source clock stays null, never invented from receipt. Values are validated, never
 // coerced to zero: a non-finite or out-of-range value rejects that row with a reason.
 import { createHash } from 'node:crypto';
+import { isIP } from 'node:net';
 
 export const INFRA_OBSERVATION_VERSION = 'infra-observation-1';
 export const INFRA_OBSERVATION_KINDS = Object.freeze(['NOAA_KP', 'NOAA_SCALES', 'RIS_ROUTING_STATUS', 'CF_RADAR_BGP_TIMESERIES']);
@@ -20,7 +21,7 @@ export function noaaKpObservations(json, { receiptTs, sourceId = 'NOAA_SWPC', ma
     if (ts === null) { rejected.push({ row: String(row?.time_tag ?? '?').slice(0, 30), reason: 'time_tag not a UTC instant' }); continue; }
     if (!Number.isFinite(kp) || kp < 0 || kp > 9) { rejected.push({ row: row.time_tag, reason: 'Kp not finite in 0..9' }); continue; }
     if (!Number.isSafeInteger(a) || a < 0 || !Number.isSafeInteger(n) || n < 0) { rejected.push({ row: row.time_tag, reason: 'a_running / station_count not non-negative integers' }); continue; }
-    if (ts > receiptTs + 3 * 3_600_000) { rejected.push({ row: row.time_tag, reason: 'interval start in the future' }); continue; }
+    if (ts > receiptTs) { rejected.push({ row: row.time_tag, reason: 'interval start in the future' }); continue; }
     observations.push(obs({ sourceId, kind: 'NOAA_KP', dedupeKey: row.time_tag, experimental: true, measurement: 'planetary K-index (3-hour interval)', units: 'Kp 0-9', scope: 'planetary', sourceEventTs: ts, sourceClockPrecision: 'INTERVAL_START_3H', receiptTs, knownAtTs: receiptTs, values: { kp, aRunning: a, stationCount: n } }));
   }
   return { ok: true, empty: observations.length === 0 && rejected.length === 0, observations, rejected };
@@ -28,13 +29,20 @@ export function noaaKpObservations(json, { receiptTs, sourceId = 'NOAA_SWPC', ma
 export function noaaScalesObservation(json, { receiptTs, sourceId = 'NOAA_SWPC' } = {}) {
   if (!json || typeof json !== 'object' || Array.isArray(json)) return { ok: false, reason: 'scales payload is not a keyed object' };
   const cur = json['0']; const excluded = Object.keys(json).filter((k) => k !== '0'); if (!cur || typeof cur !== 'object') return { ok: false, reason: 'no current entry "0"', excludedForecasts: excluded.length };
-  const ts = utcNoZone(`${cur.DateStamp}T${cur.TimeStamp}`); if (ts === null) return { ok: false, reason: 'DateStamp / TimeStamp not a UTC instant', excludedForecasts: excluded.length };
+  const ts = utcNoZone(`${cur.DateStamp}T${cur.TimeStamp}`); if (ts === null || ts > receiptTs) return { ok: false, reason: 'DateStamp / TimeStamp invalid or future', excludedForecasts: excluded.length };
   const level = (axis) => { const v = cur?.[axis]?.Scale; const n = typeof v === 'string' && /^[0-5]$/.test(v) ? Number(v) : typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 5 ? v : null; return n; };
   const R = level('R'), S = level('S'), G = level('G'); if (R === null || S === null || G === null) return { ok: false, reason: 'R / S / G scale not an integer 0..5', excludedForecasts: excluded.length };
   const text = (axis) => (typeof cur?.[axis]?.Text === 'string' ? cur[axis].Text.slice(0, 40) : null);
   return { ok: true, excludedForecasts: excluded.length, observation: obs({ sourceId, kind: 'NOAA_SCALES', dedupeKey: `${cur.DateStamp}T${cur.TimeStamp}`, experimental: true, measurement: 'NOAA R / S / G scales (current)', units: 'level 0-5 per axis', scope: 'current', sourceEventTs: ts, sourceClockPrecision: 'SECOND', receiptTs, knownAtTs: receiptTs, values: { R, S, G, rText: text('R'), sText: text('S'), gText: text('G') } }) };
 }
 export const RIPE_RESOURCE_RE = /^(AS\d{1,10}|(\d{1,3}\.){3}\d{1,3}\/\d{1,2}|[0-9a-f:]+\/\d{1,3})$/i;
+export function validRoutingResource(value) {
+  if (typeof value !== 'string' || !RIPE_RESOURCE_RE.test(value)) return false;
+  if (/^AS/i.test(value)) { const n=Number(value.slice(2)); return Number.isSafeInteger(n)&&n>0&&n<=4294967295; }
+  const [address,bits]=value.split('/'), version=isIP(address), n=Number(bits);
+  return Boolean(version)&&Number.isInteger(n)&&n>=0&&n<=(version===4?32:128);
+}
+
 export function ripeRoutingStatusObservation(json, { resource, receiptTs, sourceId = 'RIPE_RIS' } = {}) {
   if (!json || typeof json !== 'object') return { ok: false, reason: 'not an object' }; if (json.status !== 'ok') return { ok: false, reason: `RIPEstat status ${String(json.status).slice(0, 20)}` };
   if (json.data_call_status && !String(json.data_call_status).startsWith('supported')) return { ok: false, reason: `data call ${String(json.data_call_status).slice(0, 40)}` };
@@ -66,7 +74,7 @@ export function infraObservationError(o) {
   const v = o.values; const nonNegInt = (x) => Number.isSafeInteger(x) && x >= 0; const level = (x) => Number.isSafeInteger(x) && x >= 0 && x <= 5;
   if (o.kind === 'NOAA_KP' && !(typeof v.kp === 'number' && Number.isFinite(v.kp) && v.kp >= 0 && v.kp <= 9 && nonNegInt(v.aRunning) && nonNegInt(v.stationCount))) return 'NOAA_KP values';
   if (o.kind === 'NOAA_SCALES' && !(level(v.R) && level(v.S) && level(v.G))) return 'NOAA_SCALES values';
-  if (o.kind === 'RIS_ROUTING_STATUS' && !(typeof v.resource === 'string' && RIPE_RESOURCE_RE.test(v.resource) && v.visibility && typeof v.visibility === 'object')) return 'RIS_ROUTING_STATUS values';
+  if (o.kind === 'RIS_ROUTING_STATUS' && !(typeof v.resource === 'string' && validRoutingResource(v.resource) && v.visibility && typeof v.visibility === 'object')) return 'RIS_ROUTING_STATUS values';
   if (o.kind === 'CF_RADAR_BGP_TIMESERIES' && !(Array.isArray(v.points) && v.points.every((pt) => Number.isSafeInteger(pt?.ts) && Number.isFinite(pt?.value)))) return 'CF_RADAR_BGP_TIMESERIES values';
   return null;
 }

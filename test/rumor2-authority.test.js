@@ -103,7 +103,7 @@ test('R2A-75. RUMOR-2 imports no STRIKE/execution/trading module', () => {
   for (const cap of ['fetch(', 'WebSocket', 'EventSource', 'setTimeout', 'setInterval', 'node:', 'process.', 'Date.now', 'Date.parse', 'require(', 'import(']) assert.ok(!code('rumor2/social-time.js').includes(cap), `social-time.js carries no capability marker ${cap}`);
   for (const f of rumor2Files) {
     for (const m of read(f).matchAll(/from\s+'([^']+)'/g)) {
-      assert.ok(allowed.test(m[1]), `${f}: import ${m[1]} outside the rumor layer's narrow allowance`);
+      assert.ok(allowed.test(m[1]) || (['rumor2/social-farcaster-runtime.js', 'rumor2/social-current-clients.js'].includes(f) && m[1] === '../lib/bounded-fetch.js'), `${f}: import ${m[1]} outside the rumor layer's narrow allowance`);
       assert.ok(!/ledger|state|cost|tape|strike|exec|socrates/i.test(m[1]), `${f}: forbidden import ${m[1]}`);
     }
   }
@@ -164,7 +164,7 @@ test('R2A-79+80+81. no X, Reddit, or news-media adapter exists', () => {
 
 test('R2A-SOCIAL-5 (SOCIAL-3). the Reddit surface is an explicit filename allowlist; it is fixture-only, never fetches, never imports authority, and the frozen core stays free of it', () => {
   // EXPLICIT allowlist: the only rumor2 files whose CODE may name Reddit
-  const REDDIT_ALLOWLIST = ['rumor2/social-reddit.js', 'rumor2/social-registry.js', 'rumor2/social.js'];
+  const REDDIT_ALLOWLIST = ['rumor2/social-current-clients.js', 'rumor2/social-current-meter.js', 'rumor2/social-current-runtime.js', 'rumor2/social-current-store.js', 'rumor2/social-reddit.js', 'rumor2/social-registry.js', 'rumor2/social.js'];
   const mentions = rumor2Files.filter((f) => /reddit/i.test(code(f)));
   assert.deepEqual(mentions.sort(), [...REDDIT_ALLOWLIST].sort(), `Reddit may only be named in ${REDDIT_ALLOWLIST.join(', ')}`);
   assert.ok(tracked.includes('rumor2/social-reddit.js'), 'the Reddit foundation is tracked (Git-index-aware)');
@@ -180,7 +180,7 @@ test('R2A-SOCIAL-5 (SOCIAL-3). the Reddit surface is an explicit filename allowl
 test('R2A-SOCIAL-6 (SOCIAL-4B). the StockTwits raw-Social surface is an explicit filename allowlist; fixture-only, never fetches, never imports legacy or authority; no collector wires it', () => {
   // EXPLICIT allowlist of rumor2 files whose CODE may name StockTwits (the legacy
   // rumint/* subsystem is a separate tier audited by R2A-rumint, untouched here)
-  const ST_ALLOWLIST = ['rumor2/social-stocktwits.js', 'rumor2/social-registry.js', 'rumor2/social.js'];
+  const ST_ALLOWLIST = ['rumor2/social-current-clients.js', 'rumor2/social-current-meter.js', 'rumor2/social-current-runtime.js', 'rumor2/social-current-store.js', 'rumor2/social-stocktwits.js', 'rumor2/social-registry.js', 'rumor2/social.js'];
   const mentions = rumor2Files.filter((f) => /stocktwits/i.test(code(f)));
   assert.deepEqual(mentions.sort(), [...ST_ALLOWLIST].sort(), `StockTwits may only be named in ${ST_ALLOWLIST.join(', ')}`);
   assert.ok(tracked.includes('rumor2/social-stocktwits.js'), 'the foundation is tracked (Git-index-aware)');
@@ -194,9 +194,9 @@ test('R2A-SOCIAL-6 (SOCIAL-4B). the StockTwits raw-Social surface is an explicit
 
 test('R2A-SOCIAL-7 (SOCIAL-4E). the Meta / TikTok / Farcaster-access foundations are EXPLICIT filename allowlists — each module added deliberately, fixture-only, never fetching, never importing authority; no collector or runtime wires them', () => {
   // EXPLICIT allowlists: the only rumor2 files whose CODE may name each platform (never a wildcard over social* files)
-  const META_ALLOWLIST = ['rumor2/social-meta.js', 'rumor2/social-registry.js'];
+  const META_ALLOWLIST = ['rumor2/social-current-clients.js', 'rumor2/social-current-runtime.js', 'rumor2/social-current-store.js', 'rumor2/social-meta.js', 'rumor2/social-registry.js'];
   const TIKTOK_ALLOWLIST = ['rumor2/social-tiktok.js', 'rumor2/social-registry.js'];
-  const NEYNAR_ALLOWLIST = ['rumor2/providers/farcaster-official.js', 'rumor2/social-farcaster-access.js', 'rumor2/social-registry.js'];
+  const NEYNAR_ALLOWLIST = ['rumor2/social-farcaster-runtime.js', 'rumor2/providers/farcaster-official.js', 'rumor2/social-farcaster-access.js', 'rumor2/social-registry.js'];
   assert.deepEqual(rumor2Files.filter((f) => /facebook|instagram/i.test(code(f))).sort(), [...META_ALLOWLIST].sort(), `Facebook/Instagram may only be named in ${META_ALLOWLIST.join(', ')}`);
   assert.deepEqual(rumor2Files.filter((f) => /tiktok/i.test(code(f))).sort(), [...TIKTOK_ALLOWLIST].sort(), `TikTok may only be named in ${TIKTOK_ALLOWLIST.join(', ')}`);
   assert.deepEqual(rumor2Files.filter((f) => /neynar/i.test(code(f))).sort(), [...NEYNAR_ALLOWLIST].sort(), `Neynar may only be named in ${NEYNAR_ALLOWLIST.join(', ')}`);
@@ -226,7 +226,7 @@ test('R2A-SOCIAL-8 (SOCIAL-4F). the discovery-catalog / admission-scope / watch-
     assert.ok(!/config\.universe/.test(code(f)), `${f} never reads the legacy permission set`);
   }
   // the ONLY files in the rumor tier that may name the catalog / scope contracts
-  const CATALOG_ALLOWLIST = ['rumor2/social-catalog.js', 'rumor2/social-scope.js', 'rumor2/social-watch-plan.js', 'rumor2/social-settle.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/collector.js', 'rumor2/social-research-strainer.js']; // SOCIAL-5A: the strainer consumes the admission policy read-only (attribution under the scope in force)
+  const CATALOG_ALLOWLIST = ['rumor2/social-farcaster-runtime.js', 'rumor2/social-catalog.js', 'rumor2/social-scope.js', 'rumor2/social-watch-plan.js', 'rumor2/social-settle.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/collector.js', 'rumor2/social-research-strainer.js']; // SOCIAL-5A: the strainer consumes the admission policy read-only (attribution under the scope in force)
   const mentions = rumor2Files.filter((f) => /social-catalog|social-scope|social-watch-plan|compileAdmissionScope|admitSocialText|researchCatalogSource|scopeSource|watchScope/.test(code(f)));
   assert.deepEqual(mentions.sort(), [...CATALOG_ALLOWLIST].sort(), `the research scope may only be wired in ${CATALOG_ALLOWLIST.join(', ')}`);
   // survey/catalog.js: imported by the wide eye and tests only; the rumor tier NEVER imports survey/, tape/, cost/, ledger/, state/, controls/

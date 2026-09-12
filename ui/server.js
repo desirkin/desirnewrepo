@@ -58,6 +58,8 @@ console.log(auth.configured() ? 'CONTROL AUTH: CONFIGURED' : 'CONTROL AUTH: UNCO
 // policy digest, projection and the arm() method that appends to the journal.
 let judgeRun = null;
 let armChallenge = null; // one outstanding server-generated phrase, short-lived
+let currentSocialSource = null;
+export function setCurrentSocialSource(source) { currentSocialSource = typeof source === 'function' ? source : null; }
 export function setJudgeRun(run) { judgeRun = run; armChallenge = null; }
 // SERPENT PAPER: the read-only sensor / readiness snapshot (paper/readiness.js): what is actually ON, from the durable status
 // files + the running composition's handles; grouped MARKET / OFFICIAL / SOCIAL / INFRASTRUCTURE / DARK_RESEARCH / SOCRATES /
@@ -571,6 +573,10 @@ const server = http.createServer((req, res) => {
         console.error(`[api/wideeye] ${err.constructor.name}: ${err.message}`);
         json(res, 200, { status: { enabled: false, fresh: false }, ripples: [], degraded: true });
       }
+    } else if (url.pathname === '/api/social/current') {
+      res.setHeader('Cache-Control', 'no-store');
+      if (!auth.status(parseCookies(req.headers.cookie)[SESSION_COOKIE]).authenticated) { json(res, 401, { error: 'OWNER_SESSION_REQUIRED', observations: [] }); return; }
+      json(res, 200, currentSocialSource?.() ?? { authority: 'NONE', retention: 'RAM_ONLY_MAX_5_MINUTES', observations: [] });
     } else if (url.pathname === '/api/rumor2') {
       // RUMOR-2A: read-only passthrough of the dark rumor layer's atomic
       // status file — bounded operational truth only (provider health,

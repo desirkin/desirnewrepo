@@ -21,6 +21,7 @@
   "runbook": "docs/PAPER-RUNBOOK.md"
  },
  "configOverlay": {
+  "governance": { "enabled": true, "snapshotEnabled": false },
   "wideeye": { "enabled": true },
   "rumint": { "enabled": true },
   "universeExpansion": { "enabled": true },
@@ -53,10 +54,10 @@
   "social": {
    "BLUESKY_OFFICIAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "authority": "NONE", "enableEnv": "RUMOR2_SOCIAL_BLUESKY_ENABLED" },
    "X_OFFICIAL": { "desiredState": "REQUEST", "blockerPolicy": "PAID_GATE", "authority": "NONE", "paid": true, "enableEnv": "RUMOR2_SOCIAL_X_ENABLED", "credentialEnv": "X_BEARER_TOKEN", "budgetEnv": ["RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS", "RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS", "RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD"], "note": "activates only through the existing X governor: credential -> explicit budgets -> explicit paid smoke; this profile invents no budget" },
-   "FARCASTER_OFFICIAL": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "FOUNDATION_ONLY" },
-   "REDDIT_OFFICIAL": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "BLOCKED_RETENTION" },
-   "STOCKTWITS_OFFICIAL": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "BLOCKED_TERMS" },
-   "META_PUBLIC": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "BLOCKED_EXTERNAL_APPROVAL" },
+   "FARCASTER_OFFICIAL": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "NEYNAR_API_KEY"},
+   "REDDIT_OFFICIAL": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "REDDIT_CLIENT_ID"},
+   "STOCKTWITS_OFFICIAL": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "STOCKTWITS_STREAM_USER"},
+   "META_PUBLIC": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "META_APP_TOKEN"},
    "TIKTOK_PUBLIC": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "BLOCKED_TERMS" },
    "YOUTUBE_DATA_API": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "module": "video/collector.js", "enableEnv": "SOCIAL_VIDEO_ENABLED", "credentialEnv": "YOUTUBE_API_KEY", "configEnv": ["SOCIAL_VIDEO_YOUTUBE_QUERIES", "SOCIAL_VIDEO_YOUTUBE_MAX_DAILY_SEARCHES"], "coverage": "METADATA_ONLY", "note": "separate social-video observation tier (video/) outside the frozen RUMOR-2 social registry; metadata only (never captions / transcripts); activates only when the key, the owner's own query list and an explicit daily search budget are all present" }
   },

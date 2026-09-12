@@ -63,7 +63,7 @@ test('VIDEO-3. composed collector under an injected transport: dark without the 
   assert.ok(calls.every((c) => !c.url.includes(KEY)), 'the key never enters a URL'); assert.ok(calls.every((c) => c.key === KEY), 'every request carries the header'); assert.ok(calls[0].url.includes('order=date') && calls[0].url.includes('type=video') && calls[0].url.includes('maxResults=25'));
   const obs = readVideoObservations(dir, {}); assert.equal(obs.observations.length, 3); assert.equal(obs.corrupt, 0); assert.ok(obs.observations.every((o) => videoObservationError(o) === null && o.statistics.viewCount === 1200));
   assert.deepEqual(await h.pollOnce(), { outcome: 'EMPTY', admitted: 0 }, 'same page again: duplicates are not re-admitted'); assert.ok(calls.filter((c) => c.url.includes('/search?')).pop().url.includes('publishedAfter='), 'the cursor narrows the next search');
-  mode = 'throw'; assert.deepEqual(await h.pollOnce(), { outcome: 'FAILED', admitted: 0 }); st = readVideoStatus(dir); assert.equal(st.state, 'FAILED'); assert.ok(st.lastError.includes('<redacted>') && !st.lastError.includes(KEY), 'the key is redacted from a transport error');
+  mode = 'throw'; assert.deepEqual(await h.pollOnce(), { outcome: 'FAILED', admitted: 0 }); st = readVideoStatus(dir); assert.equal(st.state, 'FAILED'); assert.equal(st.lastError, 'transport failed', 'arbitrary transport error text is never persisted'); assert.ok(!st.lastError.includes(KEY));
   assert.equal(await h.pollOnce(), null, 'in backoff'); t += 61_000; mode = 'ok'; assert.deepEqual(await h.pollOnce(), { outcome: 'BUDGET_STOPPED', admitted: 0 }, '4 searches spent (the failed one counted): the budget is law'); st = readVideoStatus(dir); assert.equal(st.state, 'BUDGET_STOPPED'); assert.equal(st.quota.searchCalls, 4); assert.equal(calls.filter((c) => c.url.includes('/search?')).length, 4);
   h.stop();
   const h2 = startVideo({ env: BASE, dataDir: dir, fetchImpl, clock: () => (t += 1000), log: () => {}, timers, signals: false }); assert.equal(readVideoStatus(dir).quota.searchCalls, 4, 'restart: the day\'s spend is restored from the checkpoint'); const searchesBefore = calls.filter((c) => c.url.includes('/search?')).length; assert.deepEqual(await h2.pollOnce(), { outcome: 'BUDGET_STOPPED', admitted: 0 }, 'still parked until the next accounting day'); assert.equal(calls.filter((c) => c.url.includes('/search?')).length, searchesBefore, 'zero requests while parked');
@@ -97,4 +97,26 @@ test('VIDEO-5. composition + authority fences: fly.js starts the video collector
   for (const f of tracked.filter((x) => /^(judge|execution|watch|tape|ledger|cost|state|rumor2|market-lab|socrates)\//.test(x))) assert.ok(!imports(f).some((s) => s.includes('video/')), `${f} imports video/`);
   assert.ok(!readFileSync(path.join(REPO, 'rumor2/social-registry.js'), 'utf8').includes('YOUTUBE'), 'the sealed social registry gained no provider');
   const example = readFileSync(path.join(REPO, '.env.paper.example'), 'utf8'); for (const n of ['YOUTUBE_API_KEY', 'SOCIAL_VIDEO_YOUTUBE_QUERIES', 'SOCIAL_VIDEO_YOUTUBE_MAX_DAILY_SEARCHES']) assert.ok(example.includes(n), n); assert.match(example, /YOUTUBE_API_KEY=<[^>]+>/);
+});
+
+test('VIDEO-6. opaque pages survive restart and a recovered append is never duplicated when its checkpoint lagged',async()=>{
+  const dir=tmp('video-pages-'), env={...BASE,SOCIAL_VIDEO_YOUTUBE_QUERIES:'bitcoin'};let calls=[];
+  const fetchImpl=async url=>{const u=new URL(url);if(u.pathname.endsWith('/videos'))return Response.json(stats(u.searchParams.get('id').split(',')));calls.push(u);return Response.json(u.searchParams.get('pageToken')?page(['vid00002']):{...page(['vid00001']),nextPageToken:'opaque-next'});};
+  const options={env,dataDir:dir,fetchImpl,clock:()=>T0,timers,signals:false,log:()=>{}};
+  let h=startVideo(options);await h.pollOnce();h.stop();const cpFile=path.join(dir,'video','checkpoint-YOUTUBE_DATA_API.json');const cp=JSON.parse(readFileSync(cpFile));
+  assert.equal(cp.perQuery.bitcoin.pageToken,'opaque-next');assert.equal(cp.perQuery.bitcoin.lastPublishedTs,null);
+  h=startVideo(options);await h.pollOnce();h.stop();assert.equal(calls[1].searchParams.get('pageToken'),'opaque-next');assert.equal(calls[1].searchParams.has('publishedAfter'),false);assert.equal(readVideoObservations(dir).observations.length,2);
+  // Simulate observation append/fsync succeeding but the checkpoint rename never happening.
+  writeFileSync(cpFile,JSON.stringify(cp));h=startVideo(options);await h.pollOnce();h.stop();assert.equal(readVideoObservations(dir).observations.length,2);assert.equal(JSON.parse(readFileSync(cpFile)).perQuery.bitcoin.pageToken,null);
+  writeFileSync(cpFile,'{"v":"video-checkpoint-1","searchCalls":');assert.throws(()=>startVideo(options),/JSON|checkpoint|position/i);
+});
+
+test('VIDEO-7. a malformed page cannot advance a cursor, and stop during statistics fetch cannot commit late metadata',async()=>{
+  const dir=tmp('video-stop-');let release;let phase='bad';
+  const options={env:{...BASE,SOCIAL_VIDEO_YOUTUBE_QUERIES:'bitcoin'},dataDir:dir,clock:()=>T0,timers,signals:false,log:()=>{},fetchImpl:async url=>{
+    if(url.includes('/videos?'))return new Promise(resolve=>{release=()=>resolve(Response.json(stats(['vid00001'])));});
+    return Response.json(phase==='bad'?{...page(['vid00001']),nextPageToken:42}:page(['vid00001']));
+  }};
+  let h=startVideo(options);assert.equal((await h.pollOnce()).outcome,'PARSE_FAILED');h.stop();assert.equal(readVideoObservations(dir).observations.length,0);
+  phase='ok';h=startVideo(options);const pending=h.pollOnce();while(!release)await new Promise(resolve=>setImmediate(resolve));h.stop();release();assert.equal(await pending,null);assert.equal(readVideoObservations(dir).observations.length,0);
 });
