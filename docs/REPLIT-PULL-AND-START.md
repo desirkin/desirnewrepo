@@ -4,11 +4,23 @@
 
 Keep paper trading OFF and CAGE ON while accounts, keys and feed verification are being completed. A `READY_FOR_PAPER` preflight result describes the core runtime only; it does **not** mean all APIs are connected. Do not start paper or republish a deployment that starts paper based on that verdict. Each requested feed still needs its actual access requirements and fresh observations verified on the host.
 
-Updated 2026-09-12. PR #1 is merged. Application code at merge commit `64c4d9954ef77157cca5b4714748c68233842165` is identical to repair head `26ffc60be44a91ba076d56935aa55d230ab23daa`. Both GitHub project branches were synchronized. GitHub Actions passed on that repair head; the recorded full gate has 2,181 passed tests, zero failures and zero skips. This guide is documentation only.
+Updated 2026-09-12. The latest reconciliation is [PR #3](https://github.com/desirkin/desirnewrepo/pull/3). It combines the verified GitHub repair with the six saved Replit commits pushed to `replit-rescue-0912`. See [the verification record](evidence/replit-merge-recovery-2026-09-12.md) for the tested commit, gate result and merged history. This guide is documentation only.
 
 ## 1. Bring GitHub changes into the existing Replit project
 
 Use Replit's normal Shell in the existing `desirnewrepo` project. Preserve the existing database, Secrets, account and data directory. Stop the workspace process before installing or restarting it.
+
+### Recover the owner's interrupted merge
+
+The owner's screenshots show an unfinished merge and a successful backup push of committed HEAD `89e1f9800fb24307d6784ae2844574593dffee9f` to `replit-rescue-0912`. The reconciled GitHub history includes that commit as an ancestor. After PR #3 is merged, and provided no further local edits have been made, run this whole line on `claude/cobra-phase-c1-setup-n9yy6r`:
+
+```sh
+git merge --abort && git pull --ff-only && git status -sb
+```
+
+This aborts only the interrupted local merge, restores the saved local commits, and then fast-forwards to their reconciled descendant. The backup branch remains on GitHub. No push is needed after the pull succeeds. If a command reports an error, stop and inspect it rather than retrying Sync or choosing one side of every conflict. Do not use a hard reset or force-push.
+
+### Subsequent updates
 
 First inspect local changes:
 
@@ -21,12 +33,10 @@ If there are uncommitted changes, preserve and review them before pulling. Do no
 With a clean working tree:
 
 ```sh
-git -c pull.rebase=false pull --no-rebase --no-edit origin claude/cobra-phase-c1-setup-n9yy6r
+git pull --ff-only
 ```
 
-This merges the GitHub update into the current local branch and preserves local commits. A previous report indicated that the Replit branch had local commits, so a fast-forward-only pull is not assumed. If Git reports a conflict, stop there and resolve the named files before installation. Do not use force-push or select all incoming files blindly.
-
-The next step is a pull into Replit, not a push of the old Replit tree over GitHub.
+If Git reports diverged history, stop and preserve/reconcile the new local commits before continuing. Do not start another automatic merge or rebase through the Sync button.
 
 ## 2. Install and check
 
@@ -56,4 +66,4 @@ The repair implements and tests 53 of the 56 listed bounded capability paths. Th
 - X and paid market/model providers require explicit spending limits and the existing provider-policy gates. No paid plan, budget, approval record or entitlement has been invented.
 - See [sensor-runtime-configuration.md](sensor-runtime-configuration.md) and [.env.paper.example](../.env.paper.example) for exact configuration names and supported routes.
 
-Current verified outcome: code merged in GitHub. Replit source synchronization, publishing, production sensor health and paper-account continuity remain unverified because the editor is stuck in a security-verification loop. No new publish or production account modification was performed by this handoff.
+Current host evidence: the owner's Replit Shell works and the rescue branch push succeeded. Replit is still at the interrupted local merge until the recovery command succeeds. Source synchronization, publishing, production sensor health and paper-account continuity must not be inferred from a GitHub merge. No new publish or production account modification was performed by this handoff.
