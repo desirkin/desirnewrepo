@@ -256,6 +256,19 @@ async function main() {
       return usage();
     }
 
+    case 'press':
+    case 'infra':
+    case 'video': {
+      // read-only readers over the dark observation tiers (press/ publisher headlines, infra/ NOAA / RIPE RIS / Cloudflare Radar):
+      // status = the collector's status file; tail = the last N observations (--source ID, --kind KIND, --limit N). No network.
+      const { dataDir } = await import('../lib/config.js');
+      const mod = command === 'press' ? await import('../press/reader.js') : command === 'infra' ? await import('../infra/reader.js') : await import('../video/reader.js');
+      const dir = dataDir(config); const sub = rest[0]; const limit = Math.min(500, Math.max(1, Number(flag('limit') ?? 20) || 20));
+      if (sub === 'status') { const st = command === 'press' ? mod.readPressStatus(dir) : command === 'infra' ? mod.readInfraStatus(dir) : mod.readVideoStatus(dir); if (!st) { console.log(`${command}: no status file at ${dir}/${command}/status.json (collector dark or never started)`); process.exitCode = 1; return; } console.log(JSON.stringify(st, null, 1)); return; }
+      if (sub === 'tail') { const opts = { sourceId: typeof flag('source') === 'string' ? flag('source') : null, limit }; if (command === 'infra' && typeof flag('kind') === 'string') opts.kind = flag('kind'); if (command === 'video' && typeof flag('query') === 'string') opts.query = flag('query'); const r = command === 'press' ? mod.readPressObservations(dir, opts) : command === 'infra' ? mod.readInfraObservations(dir, opts) : mod.readVideoObservations(dir, opts); for (const o of r.observations) console.log(JSON.stringify(o)); console.log(`# ${r.observations.length} observation(s); corrupt ${r.corrupt}; truncatedRead ${r.truncatedRead}`); return; }
+      return usage();
+    }
+
     case 'status': {
       const engine = getEngineState(config);
       console.log(`COBRA ${engine.state}${engine.state === 'COILED' ? ' — NO TRADE' : ''}`);
@@ -292,6 +305,9 @@ function usage() {
   cobra paper preflight [--smoke] [--json]         READ-ONLY: can the whole system run PAPER now? (sections A..L)
   cobra paper run                                  launch the complete PAPER system (profile config/paper-runtime.json)
   cobra paper inventory | snapshot                 machine-readable sensor inventory / sensor readiness snapshot
+  cobra press status | tail [--source ID] [--limit N]   publisher headline observations (dark tier; read-only)
+  cobra infra status | tail [--source ID] [--kind K] [--limit N]   NOAA / RIPE RIS / Cloudflare Radar observations (dark tier)
+  cobra video status | tail [--query Q] [--limit N]     YouTube public video metadata observations (dark social-video tier)
   cobra state clear                                clear KILL/CAGE latches`);
   process.exitCode = 1;
 }

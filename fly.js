@@ -12,6 +12,9 @@ import { getChildhoodManifest, queryObservations, getOutcomeForObservation } fro
 import { childhoodOutcomeRecord } from './rumor2/social-research-outcome.js';
 import { startRumint } from './rumint/poller.js';
 import { startGateway } from './gateway/collector.js';
+import { startPress } from './press/collector.js';
+import { startInfra } from './infra/collector.js';
+import { startVideo } from './video/collector.js';
 import { startWideEye } from './survey/wideeye.js';
 import { startGovernance } from './governance/collector.js';
 import { startRumor2 } from './rumor2/collector.js';
@@ -75,6 +78,13 @@ try {
 // path) so a republish cannot erase the ear's statistical memory.
 startRumint({ checkpointStore: rumintCheckpointStore(), memoryBootstrapSource: rumintBootstrapSource() });
 startGateway(); // no-ops (zero network) unless gateway is enabled — collector only
+// PRESS (publisher headline observation, press/) and INFRA (NOAA / RIPE RIS / Cloudflare Radar, infra/): dark collectors
+// composed exactly like the gateway — zero network, zero timers unless PRESS_ENABLED / INFRA_OBS_ENABLED say true (the paper
+// profile derives both); JSONL observations + a status file only; nothing downstream reads them for a decision. Authority NONE.
+startPress(); startInfra();
+// VIDEO (YouTube public metadata, video/): the same dark pattern — zero requests unless SOCIAL_VIDEO_ENABLED says true AND the
+// closed gate holds (key + the operator's own queries + an explicit daily search budget); never a RUMOR-2 social event.
+startVideo();
 // SOCIAL-4F: the wide eye's handle is RETAINED so its detached read-only catalog snapshot can
 // be injected into the RUMOR collector below (Social never starts the wide eye itself).
 const wideEye = startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
