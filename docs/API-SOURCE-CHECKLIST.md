@@ -123,7 +123,7 @@ An LLM can summarize recorded incidents and routing changes. Correlation and mis
 | `GATEWAY_KRAKEN_SYSTEM` | Public system-status adapter present; latest timeout | No key. Current host status collection requires verification; keep existing spacing/backoff. |
 | `GATEWAY_COINBASE_STATUS` | Public status adapter present; latest timeout | No key. Current host incident collection requires verification; keep existing spacing/backoff. |
 | `GATEWAY_OKX_STATUS` | Public status adapter present; latest timeout | No key. Current host incident collection requires verification; keep existing spacing/backoff. |
-| `NOAA_SWPC_SPACE_WEATHER` | Fresh HTTP 200; 82 valid alerts | No key. One response validated; continuous host collection remains unverified. |
+| `NOAA_SWPC_SPACE_WEATHER` | Kp/scales adapter present; separate alerts endpoint checked | No key. A separate NOAA alerts.json request returned 82 valid alerts; that does not verify the composed Kp/scales routes or continuous host collection. |
 | `RIPE_RIS_BGP` | Public adapter present; resource scope missing | Set real monitored prefixes/ASNs in INFRA_RIPE_RESOURCES; do not invent a list. |
 | `CLOUDFLARE_RADAR` | Adapter present; token/scope unverified | Needs CLOUDFLARE_API_TOKEN and actual ASN/prefix/date-range or reviewed global scope. |
 | `HELIUS_SOLANA` | Proposed; not implemented | No Helius client, RPC/WebSocket configuration or runtime secret name. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget |

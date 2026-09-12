@@ -37,9 +37,7 @@
       "module": "rumor2/feed.js",
       "compositionPath": "fly.js -> RUMOR2 collector (RUMOR2_ENABLED)",
       "enable": "RUMOR2_ENABLED",
-      "credentialEnv": [
-        "SERPENT_HTTP_CONTACT (contact NAME, not a secret)"
-      ],
+      "credentialEnv": [],
       "configurationEnv": [
         "SERPENT_HTTP_CONTACT"
       ],
@@ -87,9 +85,7 @@
       "module": "rumor2/edgar.js",
       "compositionPath": "fly.js -> RUMOR2 collector (RUMOR2_ENABLED)",
       "enable": "RUMOR2_EDGAR_ENABLED",
-      "credentialEnv": [
-        "SERPENT_HTTP_CONTACT (contact NAME, not a secret)"
-      ],
+      "credentialEnv": [],
       "configurationEnv": [
         "SERPENT_HTTP_CONTACT",
         "RUMOR2_EDGAR_CIKS",
@@ -556,7 +552,8 @@
       "compositionPath": "fly.js -> RUMOR2 collector -> erasable current view -> owner Senses panel",
       "enable": "RUMOR2_SOCIAL_CURRENT_ENABLED plus provider-specific enable, access and request allowance",
       "credentialEnv": [
-        "REDDIT_CLIENT_ID"
+        "REDDIT_CLIENT_ID",
+        "REDDIT_CLIENT_SECRET"
       ],
       "configurationEnv": [
         "RUMOR2_SOCIAL_REDDIT_SUBREDDITS",
@@ -585,7 +582,8 @@
       "compositionPath": "fly.js -> RUMOR2 collector -> erasable current view -> owner Senses panel",
       "enable": "RUMOR2_SOCIAL_CURRENT_ENABLED plus provider-specific enable, access and request allowance",
       "credentialEnv": [
-        "STOCKTWITS_STREAM_USER"
+        "STOCKTWITS_STREAM_USER",
+        "STOCKTWITS_STREAM_PASS"
       ],
       "configurationEnv": [
         "RUMOR2_SOCIAL_STOCKTWITS_SYMBOLS",
@@ -1404,6 +1402,11 @@
         "governance/registry.js",
         "config/paper-runtime.json"
       ],
+      "configurationFields": [
+        "configOverlay.governance.enabled",
+        "configOverlay.governance.snapshotEnabled",
+        "configOverlay.governance.verifiedMappings"
+      ],
       "group": "governance",
       "currentState": "Transport repaired; HTTP 200, valid empty result",
       "nextAction": "No key. Preserve OFF profile until selected governance scope is reviewed. Empty Aave result is not a proposal observation.",
@@ -1520,8 +1523,8 @@
         "config/paper-runtime.json"
       ],
       "group": "infrastructure",
-      "currentState": "Fresh HTTP 200; 82 valid alerts",
-      "nextAction": "No key. One response validated; continuous host collection remains unverified.",
+      "currentState": "Kp/scales adapter present; separate alerts endpoint checked",
+      "nextAction": "No key. A separate NOAA alerts.json request returned 82 valid alerts; that does not verify the composed Kp/scales routes or continuous host collection.",
       "currentReplitCollectionVerified": false,
       "credentialPresence": "NOT_CHECKED_ON_REPLIT",
       "llmAssistance": "An LLM can summarize recorded incidents and routing changes. Correlation and missing observations do not become trading instructions."
@@ -1785,7 +1788,7 @@
       "compositionPath": "fly.js -> composeJudge (JUDGE_ENABLED; mode from the profile = PAPER)",
       "enable": "JUDGE_ENABLED + JUDGE_POLICY + JUDGE_MODE (forced PAPER)",
       "credentialEnv": [
-        "DATABASE_URL (journal authority; not a provider key)"
+        "DATABASE_URL"
       ],
       "configurationEnv": [],
       "budgetGovernor": "risk limits / daily loss / drawdown restrictions (policy)",
@@ -1810,7 +1813,7 @@
       "compositionPath": "judge/composition.js (owns every non-FLAT position)",
       "enable": "with the Judge",
       "credentialEnv": [
-        "DATABASE_URL (through the Judge)"
+        "DATABASE_URL"
       ],
       "configurationEnv": [],
       "budgetGovernor": "none",
