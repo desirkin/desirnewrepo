@@ -9,13 +9,15 @@
 // RETENTION_CAP. Authority NONE: no nomination, no attention, no Judge, no Watch, no execution — a reader may look.
 import path from 'node:path';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
-import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
+import { appendJsonl, atomicWriteJson as writeAtomicJson, readJsonlTail, readJsonBounded } from '../lib/jsonl.js';
 import { dataDir as defaultDataDir } from '../lib/config.js';
 import { fetchTextBounded } from '../lib/bounded-fetch.js';
 import { parseFeed } from '../rumor2/feed.js'; // the hostile-XML-safe parser is a PURE export; the official-ear transport is not shared
 import { PRESS_SOURCES, pressRegistryError } from './registry.js';
 import { itemToObservation, extractItemSources, pressObservationError, PRESS_LIMITS } from './parse.js';
 import { PRESS_STATUS_VERSION, pressDir, pressStatusFile, pressObservationsFile } from './reader.js';
+
+const atomicWriteJson = (file, value) => writeAtomicJson(file, value, { sync: true });
 
 export const PRESS_CHECKPOINT_VERSION = 'press-checkpoint-1';
 export const PRESS_LIMITS_RUNTIME = Object.freeze({ seenCap: 500, timeoutMs: 10_000, backoffBaseMs: 60_000, backoffMaxMs: 3_600_000, rateLimitFloorMs: 60_000, maxObservationsBytes: 50 * 1024 * 1024, firstDelayMs: 3000, staggerMs: 1000 });
@@ -37,6 +39,9 @@ export function startPress({ env = process.env, dataDir = defaultDataDir(), fetc
     const cp = readCheckpoint(dataDir, s.id);
     S.set(s.id, { source: s, selected: selected.has(s.id), state: !selected.has(s.id) ? 'DISABLED' : s.route === 'LICENSED_INTERFACE_REQUIRED' ? 'LICENSED_INTERFACE_REQUIRED' : 'IDLE', etag: cp?.etag ?? null, lastModified: cp?.lastModified ?? null, seen: cp?.seen ?? [], seenSet: new Set(cp?.seen ?? []), lastSuccessTs: cp?.lastSuccessTs ?? null, lastReceiptTs: null, lastOutcome: null, lastError: null, backoffUntil: null, delayMs: 0, running: false, coverage: 'HEADLINE_LINK_ONLY', counters: { polls: 0, observed: 0, admitted: 0, duplicates: 0, skipped: 0, failed: 0, rateLimited: 0, notModified: 0, emptyFeeds: 0, parseFailed: 0 } });
   }
+  const durable = readJsonlTail(pressObservationsFile(dataDir), { maxBytes: PRESS_LIMITS_RUNTIME.maxObservationsBytes });
+  if (durable.truncated || durable.torn) throw new Error('press observation history incomplete; collection withheld');
+  for (const line of durable.lines) { if (!line.trim()) continue; const o = JSON.parse(line); if (pressObservationError(o)) throw new Error('press observation history invalid; collection withheld'); S.get(o.sourceId)?.seenSet.add(o.observationId); }
   function writeStatus() { const now = clock(); const sourcesOut = {}; for (const [id, st] of S) sourcesOut[id] = { kind: st.source.kind, route: st.source.route, desired: st.selected ? 'ON' : 'OFF', state: st.state, cadenceSec: st.source.cadenceSec, terms: st.source.terms, coverage: st.coverage, lastReceiptTs: st.lastReceiptTs, lastSuccessTs: st.lastSuccessTs, lastOutcome: st.lastOutcome, lastError: st.lastError, backoffUntil: st.backoffUntil, prerequisite: st.source.prerequisite ?? null, counters: { ...st.counters } }; atomicWriteJson(pressStatusFile(dataDir), { v: PRESS_STATUS_VERSION, tsMs: now, enabled: true, authority: 'NONE', sources: sourcesOut }); }
   async function poll(id) {
     const st = S.get(id); if (!st || stopping || !st.selected || st.source.route !== 'RSS' || st.running) return null; const now = clock(); if (st.backoffUntil !== null && now < st.backoffUntil) return null;
@@ -50,13 +55,13 @@ export function startPress({ env = process.env, dataDir = defaultDataDir(), fetc
       st.backoffUntil = null; st.delayMs = 0; const parsed = parseFeed(r.text);
       if (!parsed.ok) { const empty = /no parseable items/.test(parsed.reason ?? ''); st.state = empty ? 'EMPTY_FEED' : 'PARSE_FAILED'; st.counters[empty ? 'emptyFeeds' : 'parseFailed'] += 1; st.lastError = boundedErr(parsed.reason); if (empty) { st.lastSuccessTs = receiptTs; st.etag = r.etag ?? st.etag; st.lastModified = r.lastModified ?? st.lastModified; writeCheckpoint(dataDir, st); } return { outcome: st.state, admitted: 0 }; }
       const file = pressObservationsFile(dataDir); if (existsSync(file) && statSync(file).size > PRESS_LIMITS_RUNTIME.maxObservationsBytes) { st.state = 'RETENTION_CAP'; st.lastError = 'observations file at the retention cap; nothing appended'; return { outcome: 'RETENTION_CAP', admitted: 0 }; }
-      const itemSources = s.kind === 'AGGREGATOR' ? extractItemSources(r.text) : null; let admitted = 0;
+      const itemSources = s.kind === 'AGGREGATOR' ? extractItemSources(r.text) : null; let admitted = 0; let skipped = 0;
       for (const item of parsed.items.slice(0, PRESS_LIMITS.maxItemsPerPoll)) {
-        st.counters.observed += 1; const m = itemToObservation(item, { source: s, receiptTs, feedKind: parsed.kind, itemSources }); if (m.skip) { st.counters.skipped += 1; continue; }
-        const o = m.observation; if (st.seenSet.has(o.observationId)) { st.counters.duplicates += 1; continue; } const e = pressObservationError(o); if (e) { st.counters.skipped += 1; continue; }
-        appendJsonl(file, o); admitted += 1; st.counters.admitted += 1; st.seen.push(o.observationId); st.seenSet.add(o.observationId); while (st.seen.length > PRESS_LIMITS_RUNTIME.seenCap) st.seenSet.delete(st.seen.shift());
+        st.counters.observed += 1; const m = itemToObservation(item, { source: s, receiptTs, feedKind: parsed.kind, itemSources }); if (m.skip) { st.counters.skipped += 1; skipped += 1; continue; }
+        const o = m.observation; if (st.seenSet.has(o.observationId)) { st.counters.duplicates += 1; continue; } const e = pressObservationError(o); if (e) { st.counters.skipped += 1; skipped += 1; continue; }
+        if ((existsSync(file) ? statSync(file).size : 0) + Buffer.byteLength(JSON.stringify(o)) + 1 > PRESS_LIMITS_RUNTIME.maxObservationsBytes) throw new Error('observation storage cap'); appendJsonl(file, o, { sync: true }); admitted += 1; st.counters.admitted += 1; st.seen.push(o.observationId); st.seenSet.add(o.observationId); while (st.seen.length > PRESS_LIMITS_RUNTIME.seenCap) st.seen.shift();
       }
-      st.state = 'OBSERVED'; st.lastError = null; st.lastSuccessTs = receiptTs; st.etag = r.etag ?? null; st.lastModified = r.lastModified ?? null; st.coverage = parsed.truncated ? `HEADLINE_LINK_ONLY; PARTIAL: feed truncated at ${PRESS_LIMITS.maxItemsPerPoll} items` : 'HEADLINE_LINK_ONLY';
+      st.state = 'OBSERVED'; st.lastError = null; st.lastSuccessTs = receiptTs; st.etag = parsed.truncated || skipped ? null : r.etag ?? null; st.lastModified = parsed.truncated || skipped ? null : r.lastModified ?? null; st.coverage = parsed.truncated ? `HEADLINE_LINK_ONLY; PARTIAL: feed truncated at ${PRESS_LIMITS.maxItemsPerPoll} items` : skipped ? `HEADLINE_LINK_ONLY; PARTIAL: ${skipped} invalid items` : 'HEADLINE_LINK_ONLY';
       writeCheckpoint(dataDir, st); return { outcome: 'OBSERVED', admitted };
     } catch (err) { st.state = 'FAILED'; st.counters.failed += 1; st.lastError = boundedErr(err?.message ?? err); st.delayMs = Math.min(st.delayMs ? st.delayMs * 2 : PRESS_LIMITS_RUNTIME.backoffBaseMs, PRESS_LIMITS_RUNTIME.backoffMaxMs); st.backoffUntil = clock() + st.delayMs; return { outcome: 'FAILED', admitted: 0 }; }
     finally { st.running = false; if (!stopping) { try { writeStatus(); } catch (err) { log(`[press] status write failed: ${boundedErr(err.message)}`); } } }
@@ -70,5 +75,5 @@ export function startPress({ env = process.env, dataDir = defaultDataDir(), fetc
   log(`[press] watching ${[...S.values()].filter((s) => s.selected && s.source.route === 'RSS').length} publisher feed(s) — headline / link observations only, authority NONE`);
   return handle;
 }
-function readCheckpoint(dir, id) { try { const f = checkpointFile(dir, id); if (!existsSync(f)) return null; const c = JSON.parse(readFileSync(f, 'utf8')); if (c?.v !== PRESS_CHECKPOINT_VERSION || c.sourceId !== id || !Array.isArray(c.seen)) return null; return { etag: typeof c.etag === 'string' ? c.etag : null, lastModified: typeof c.lastModified === 'string' ? c.lastModified : null, seen: c.seen.filter((x) => typeof x === 'string').slice(-PRESS_LIMITS_RUNTIME.seenCap), lastSuccessTs: Number.isSafeInteger(c.lastSuccessTs) ? c.lastSuccessTs : null }; } catch { return null; } }
+function readCheckpoint(dir, id) { try { const f = checkpointFile(dir, id); if (!existsSync(f)) return null; const c = readJsonBounded(f); if (c?.v !== PRESS_CHECKPOINT_VERSION || c.sourceId !== id || !Array.isArray(c.seen)) return null; return { etag: typeof c.etag === 'string' ? c.etag : null, lastModified: typeof c.lastModified === 'string' ? c.lastModified : null, seen: c.seen.filter((x) => typeof x === 'string').slice(-PRESS_LIMITS_RUNTIME.seenCap), lastSuccessTs: Number.isSafeInteger(c.lastSuccessTs) ? c.lastSuccessTs : null }; } catch { return null; } }
 function writeCheckpoint(dir, st) { atomicWriteJson(checkpointFile(dir, st.source.id), { v: PRESS_CHECKPOINT_VERSION, sourceId: st.source.id, etag: st.etag, lastModified: st.lastModified, seen: st.seen.slice(-PRESS_LIMITS_RUNTIME.seenCap), lastSuccessTs: st.lastSuccessTs }); }

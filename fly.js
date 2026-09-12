@@ -15,6 +15,7 @@ import { startGateway } from './gateway/collector.js';
 import { startPress } from './press/collector.js';
 import { startInfra } from './infra/collector.js';
 import { startVideo } from './video/collector.js';
+import { readVideoObservations } from './video/reader.js';
 import { startWideEye } from './survey/wideeye.js';
 import { startGovernance } from './governance/collector.js';
 import { startRumor2 } from './rumor2/collector.js';
@@ -81,10 +82,11 @@ startGateway(); // no-ops (zero network) unless gateway is enabled — collector
 // PRESS (publisher headline observation, press/) and INFRA (NOAA / RIPE RIS / Cloudflare Radar, infra/): dark collectors
 // composed exactly like the gateway — zero network, zero timers unless PRESS_ENABLED / INFRA_OBS_ENABLED say true (the paper
 // profile derives both); JSONL observations + a status file only; nothing downstream reads them for a decision. Authority NONE.
-startPress(); startInfra();
+try { startPress(); } catch { console.error('[press] startup withheld: observation storage requires review'); }
+try { startInfra(); } catch { console.error('[infra] startup withheld: observation storage requires review'); }
 // VIDEO (YouTube public metadata, video/): the same dark pattern — zero requests unless SOCIAL_VIDEO_ENABLED says true AND the
 // closed gate holds (key + the operator's own queries + an explicit daily search budget); never a RUMOR-2 social event.
-startVideo();
+try { startVideo(); } catch { console.error('[video] startup withheld: observation storage requires review'); }
 // SOCIAL-4F: the wide eye's handle is RETAINED so its detached read-only catalog snapshot can
 // be injected into the RUMOR collector below (Social never starts the wide eye itself).
 const wideEye = startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
@@ -175,6 +177,13 @@ rumor2Handle = startRumor2({
     // absent when the opt-in is off => the strainer keeps reporting absent deep-market evidence exactly as before.
     deepMarketSource: marketResearch ? createDeepMarketSource(marketResearch.owner) : null,
 });
+const { setCurrentSocialSource } = await import('./ui/server.js');
+setCurrentSocialSource(() => {
+  const current = rumor2Handle?.currentSocial() ?? { authority: 'NONE', retention: 'RAM_ONLY_MAX_5_MINUTES', observations: [] };
+  const videos = readVideoObservations(dataDir(), { sinceReceiptTs: Date.now() - 300000, limit: 50 });
+  return { ...current, videos: videos.observations, videoCoverage: 'CURRENT_METADATA_ONLY' };
+});
+
 try {
   await runTape({ executionFeed: judgeRun ? judgeRun.tapeFeed : null, observer: marketResearch ? marketResearch.observer : null }); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
   if (judgeRun) { try { await judgeRun.stop(); } catch (err) { console.error(`JUDGE stop failed: ${err.message}`); } }

@@ -19,7 +19,7 @@ export const PROFILE_GROUPS = Object.freeze(['coreObservation', 'infrastructure'
 export const RUNTIME_STATES = Object.freeze(['ACTIVE', 'ACTIVE_DEGRADED', 'BLOCKED_CREDENTIAL', 'BLOCKED_BUDGET', 'BLOCKED_EXTERNAL_APPROVAL', 'BLOCKED_TERMS', 'BLOCKED_RETENTION', 'BLOCKED_GEOGRAPHY', 'BLOCKED_PROVIDER', 'FOUNDATION_ONLY', 'DISABLED_BY_PAPER_POLICY']);
 // names the launcher FORCES (never read from the operator environment) — the paper profile's non-negotiable authority law
 export const FORCED_ENV = Object.freeze({ JUDGE_MODE: 'PAPER', JUDGE_ALLOW_PRIVATE: 'false', JUDGE_ALLOW_ORDERS: 'false', RUMOR2_SOCIAL_MODE: 'LIVE' });
-export const SECRET_ENV_NAMES = Object.freeze(['SERPENT_CONTROL_PASSWORD', 'DATABASE_URL', 'X_BEARER_TOKEN', 'FRED_API_KEY', 'COINGECKO_DEMO_API_KEY', 'COINGLASS_API_KEY', 'CRYPTOQUANT_API_KEY', 'SANTIMENT_API_KEY', 'TWELVEDATA_API_KEY', 'TOKENOMIST_API_KEY', 'ANTHROPIC_API_KEY', 'KRAKEN_L3_DATA_API_KEY', 'KRAKEN_L3_DATA_API_SECRET', 'JUDGE_OWNER_PASSWORD', 'CLOUDFLARE_API_TOKEN', 'YOUTUBE_API_KEY']);
+export const SECRET_ENV_NAMES = Object.freeze(['SERPENT_CONTROL_PASSWORD', 'DATABASE_URL', 'X_BEARER_TOKEN', 'FRED_API_KEY', 'COINGECKO_DEMO_API_KEY', 'COINGLASS_API_KEY', 'CRYPTOQUANT_API_KEY', 'SANTIMENT_API_KEY', 'TWELVEDATA_API_KEY', 'TOKENOMIST_API_KEY', 'ANTHROPIC_API_KEY', 'KRAKEN_L3_DATA_API_KEY', 'KRAKEN_L3_DATA_API_SECRET', 'JUDGE_OWNER_PASSWORD', 'CLOUDFLARE_API_TOKEN', 'YOUTUBE_API_KEY', 'NEYNAR_API_KEY', 'TALLY_API_KEY', 'REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'STOCKTWITS_STREAM_USER', 'STOCKTWITS_STREAM_PASS', 'META_APP_TOKEN']);
 const VALUE_LIKE = /sk-ant|sk_live|Bearer [A-Za-z0-9]|eyJ[A-Za-z0-9_-]{10,}|postgres(ql)?:\/\/[^<\s]+:[^<\s]+@/i;
 
 export class ProfileError extends Error { constructor(message) { super(message); this.code = 'PROFILE_INVALID'; } }
@@ -73,6 +73,12 @@ export function profileEnvironment(profile, { dataDir = null } = {}) {
     // X: the profile REQUESTS it; the existing governor decides (credential -> budgets -> paid smoke). The enable flag alone
     // never spends: without a bearer / budget the runtime stays CREDENTIAL_MISSING / BUDGET_NOT_CONFIGURED.
     RUMOR2_SOCIAL_X_ENABLED: g.social.X_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.X_OFFICIAL) ? 'true' : 'false',
+    RUMOR2_SOCIAL_FARCASTER_ENABLED: g.social.FARCASTER_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.FARCASTER_OFFICIAL) ? 'true' : 'false',
+    RUMOR2_SOCIAL_CURRENT_ENABLED: ['REDDIT_OFFICIAL','STOCKTWITS_OFFICIAL','META_PUBLIC'].some(id => g.social[id]?.desiredState === 'REQUEST' || on(g.social[id])) ? 'true' : 'false',
+    RUMOR2_SOCIAL_REDDIT_ENABLED: g.social.REDDIT_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.REDDIT_OFFICIAL) ? 'true' : 'false',
+    RUMOR2_SOCIAL_STOCKTWITS_ENABLED: g.social.STOCKTWITS_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.STOCKTWITS_OFFICIAL) ? 'true' : 'false',
+    RUMOR2_SOCIAL_FACEBOOK_ENABLED: g.social.META_PUBLIC?.desiredState === 'REQUEST' || on(g.social.META_PUBLIC) ? 'true' : 'false',
+    RUMOR2_SOCIAL_INSTAGRAM_ENABLED: g.social.META_PUBLIC?.desiredState === 'REQUEST' || on(g.social.META_PUBLIC) ? 'true' : 'false',
     WIDEEYE_ENABLED: on(g.coreObservation.wideEye) ? 'true' : 'false', GATEWAY_ENABLED: on(g.infrastructure.gateway) ? 'true' : 'false', RUMINT_ENABLED: on(g.rumorOfficial.rumintLegacy) ? 'true' : 'false',
     // PUBLISHER observation tier (press/): the profile selects publisher feeds by id; ON rows are watched, OFF / licensed rows
     // never called. Headline / link only, authority NONE, outside the frozen RUMOR-2 evidence core.

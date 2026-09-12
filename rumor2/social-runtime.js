@@ -105,6 +105,7 @@ export function createSocialRuntime({
   mode = 'LIVE', // 'LIVE' | 'REPLAY'
   fixtures = null,
   socketFactory = null, // LIVE only; null => nodeWebSocketFactory
+  sourceFactory = null, // S09: bounded REST intake lifecycle; settlement remains owned here
   maxDrain = 200, // envelopes settled per tick (bounded batch)
   maxScopeDrainRounds = 50, // bounded quiescent drain before a scope transition (rounds of maxDrain)
   // a batch WITH evidence always carries its cursor; a cursor-ONLY batch (a
@@ -212,13 +213,14 @@ export function createSocialRuntime({
     if (streamHeld) return { ok: false, reason: 'SCOPE_TRANSITION_HELD', detail: 'owed work under the previous scope must settle before the stream reopens' };
     if (scoped && !activeScope) return { ok: false, reason: 'SCOPE_NOT_ACTIVE', detail: coverage.reason ?? 'no durable admission scope yet' };
     intake = socialIntake({ provider, mapCommit, filter: universe, now, cursorOf, isDurable: (id, o) => reconciler.isFastDurable(id, o), admit: scoped ? admitObservation : null, ...intakeOptions });
-    stream = startSocialStream({
+    stream = sourceFactory ? sourceFactory({ intake }) : startSocialStream({
       provider, intake, mode, fixtures, now, log,
       buildUrl: urlFor,
       socketFactory: mode === 'LIVE' ? (socketFactory ?? nodeWebSocketFactory) : null,
       resumeCursor: () => durableCursor,
       ...streamOptions,
-    }).start();
+    });
+    stream = stream.start();
     state = 'ACTIVE';
     return { ok: true };
   }

@@ -89,3 +89,14 @@ test('PRESS-5. composition + authority fences: fly.js starts the press collector
   const core = readFileSync(path.join(REPO, 'rumor2/registry.js'), 'utf8').toLowerCase(); for (const b of ['reuters', 'bloomberg', 'cnbc', 'coindesk', 'decrypt.co']) assert.ok(!core.includes(b), `frozen core names ${b}`);
   assert.ok(!/sk-ant|sk_live|Bearer [A-Za-z0-9]|eyJ[A-Za-z0-9_-]{10,}/i.test(readFileSync(path.join(REPO, 'press/registry.js'), 'utf8')));
 });
+
+test('Every supported publisher composes to its reader with the correct direct or aggregate identity; replay after a lost checkpoint deduplicates',async()=>{
+  const dir=tmp('press-all-'),sources=PRESS_SOURCES.filter(s=>s.route==='RSS');
+  const options={env:{PRESS_ENABLED:'true',PRESS_SOURCES:sources.map(s=>s.id).join(',')},dataDir:dir,clock:()=>T0,timers,signals:false,log:()=>{},fetchImpl:async url=>{
+    const source=sources.find(s=>s.feedUrl===url);assert.ok(source);return new Response(rss([{t:`Fixture ${source.name}`,l:`https://${source.host}/fixture`,g:'same-guid',...(source.kind==='AGGREGATOR'?{s:'Fixture publisher'}:{})}]),{headers:{'content-type':'application/rss+xml'}});
+  }};
+  let h=startPress(options);for(const s of sources)assert.equal((await h.pollOnce(s.id)).admitted,1);h.stop();
+  const rows=readPressObservations(dir).observations;assert.equal(rows.length,7);assert.equal(new Set(rows.map(o=>o.observationId)).size,7);assert.equal(rows.find(o=>o.sourceId==='GOOGLE_NEWS_AGGREGATOR').publisher,'Fixture publisher');
+  const {unlinkSync}=await import('node:fs');for(const s of sources)unlinkSync(path.join(dir,'press',`checkpoint-${s.id}.json`));
+  h=startPress(options);for(const s of sources)assert.equal((await h.pollOnce(s.id)).admitted,0);h.stop();assert.equal(readPressObservations(dir).observations.length,7);
+});
