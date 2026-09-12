@@ -1,1 +1,2 @@
 - [Temporary PostgreSQL on Replit](replit-temporary-postgres.md) — keep disposable test PostgreSQL attached to a background shell; never reuse the paper database.
+- [Paper account production migration](paper-account-production-migration.md) — use a table-specific merge; Publishing overwrite would destroy substantial production memory history.

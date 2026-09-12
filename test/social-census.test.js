@@ -22,7 +22,7 @@ test('CENSUS-1. every intended provider has a truthful, closed access state — 
 
 test('CENSUS-2. the SOCIAL-1 provider set is exactly the intended universe', () => {
   assert.deepEqual([...SOCIAL_PROVIDER_IDS].sort(), [
-    'BLUESKY_OFFICIAL', 'FARCASTER_OFFICIAL', 'META_PUBLIC', 'REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL', 'TIKTOK_PUBLIC', 'X_OFFICIAL',
+    'BLUESKY_OFFICIAL', 'FARCASTER_OFFICIAL', 'META_PUBLIC', 'REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL', 'TIKTOK_PUBLIC', 'X_OFFICIAL', 'YOUTUBE_OFFICIAL',
   ]);
 });
 
@@ -30,6 +30,7 @@ test('CENSUS-3. the recorded access decisions match the verified census', () => 
   assert.equal(socialProviderById('BLUESKY_OFFICIAL').accessState, 'AVAILABLE_AUTHORIZED');
   assert.equal(socialProviderById('FARCASTER_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
   assert.equal(socialProviderById('X_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
+  assert.equal(socialProviderById('YOUTUBE_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
   assert.equal(socialProviderById('REDDIT_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION', 'SOCIAL-3: classification-neutral — approval and use-case review pending, nothing assumed');
   assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW', 'SOCIAL-4B: route-specific — registration paused, Firestream documented, entitlement/terms unresolved');
   assert.equal(socialProviderById('META_PUBLIC').accessState, 'AVAILABLE_REQUIRES_APP_REVIEW');

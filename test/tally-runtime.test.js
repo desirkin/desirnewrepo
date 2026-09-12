@@ -32,6 +32,8 @@ test('Tally preserves large JSON numeric tokens, null clocks, refusal status and
   const data = await tallyGql('{fixture}', {}, { env: { TALLY_API_KEY: 'fixture' }, fetchImpl: async () => new Response('{"data":{"id":2207450143689540900,"votes":100000000000000000001}}', { headers: { 'content-type': 'application/json' } }) }); assert.equal(data.id, '2207450143689540900'); assert.equal(data.votes, '100000000000000000001');
   const n = normalizeTallyProposal({ ...raw(), start: null, end: { timestamp: true }, quorum: null }, G); assert.equal(n.startTs, null); assert.equal(n.endTs, null); assert.equal(n.quorumRaw, null);
   assert.equal(normalizeTallyProposal({ ...raw(), id: 2207450143689540900 }, G), null, 'already rounded identifiers are refused');
+  assert.equal(normalizeTallyProposal({ ...raw(), status: 'ACTIVE' }, G), null, 'legacy wire compatibility cannot weaken a modern governor response');
+  assert.equal(normalizeTallyProposal({ ...raw(), status: 'ACTIVE' }, 'legacy-governor'), null, 'legacy observations cannot change their provider governor identity');
   await assert.rejects(() => fetchTallyProposalsPage({ governorId: G }, { env: { TALLY_API_KEY: 'fixture' }, fetchImpl: async () => Response.json({ data: { proposals: { nodes: [], pageInfo: { count: 99 } } } }) }), /page shape/);
   await assert.rejects(() => tallyGql('{fixture}', {}, { env: { TALLY_API_KEY: 'fixture' }, fetchImpl: async () => Response.json({ data: {} }, { status: 403 }) }), /403/);
 });

@@ -105,6 +105,35 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     docUrl: 'https://docs.x.com/x-api/getting-started/pricing',
     reason: 'Pay-per-use filtered stream (~4-5s P99), 1 connection / 1,000 rules / 1,024 chars per rule. Requires OAuth2 App-Only bearer + an explicit hard read/dollar budget under the 3M/month self-serve cap; DARK by default, no paid connection without every runtime gate.',
   }),
+  // Legacy YouTube source boundary. This is a pure request/fixture
+  // descriptor retained for backward compatibility; the live metadata
+  // collector is the separate video/ tier and never enters this registry.
+  Object.freeze({
+    id: 'YOUTUBE_OFFICIAL',
+    providerKind: 'SOCIAL_MICROBLOG',
+    accessState: 'AVAILABLE_REQUIRES_CREDENTIAL',
+    transport: 'REST_SEARCH_LIST',
+    hosts: Object.freeze(['www.googleapis.com']),
+    streamPath: null,
+    subprotocol: null,
+    requiresCredential: true,
+    credentialEnv: 'YOUTUBE_API_KEY',
+    implemented: true,
+    durable: false,
+    runtimeGated: true,
+    highPriority: false,
+    cost: Object.freeze({
+      model: 'QUOTA_UNITS',
+      searchListUnits: 100,
+      dailyBudgetEnv: 'RUMOR2_SOCIAL_YOUTUBE_MAX_DAILY_QUOTA_UNITS',
+      monthlyBudgetEnv: 'RUMOR2_SOCIAL_YOUTUBE_MAX_MONTHLY_QUOTA_UNITS',
+      maxWatchlistAssets: 25,
+      maxResults: 50,
+      observedOn: '2026-09-12',
+    }),
+    docUrl: 'https://developers.google.com/youtube/v3/docs/search/list',
+    reason: 'Official YouTube Data API v3 search.list read-only request/fixture boundary. No RUMOR-2 collector, durable social journal, posting, OAuth account mutation, or authority path exists; the composed metadata collector remains separate under video/.',
+  }),
   Object.freeze({
     id: 'REDDIT_OFFICIAL',
     providerKind: 'SOCIAL_FORUM',

@@ -1,6 +1,6 @@
 {
  "inventoryVersion": "serpent-sensor-inventory-1",
- "generatedTs": 1789228300190,
+ "generatedTs": 1789231392821,
  "profile": "paper",
  "policyFile": "config/market-research.paper.json",
  "classifications": [
@@ -16,7 +16,7 @@
   "OPERATIONAL_PUBLIC": 36,
   "OPERATIONAL_CREDENTIAL_GATED": 13,
   "IMPLEMENTED_NOT_LIVE_SMOKED": 2,
-  "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 9,
+  "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 10,
   "FOUNDATION_ONLY": 1,
   "DEPRECATED": 0,
   "NOT_PRESENT": 3
@@ -493,6 +493,31 @@
    "smokeEvidence": "never spent (paid; explicit smoke envelope required)"
   },
   {
+   "id": "YOUTUBE_OFFICIAL",
+   "group": "SOCIAL",
+   "family": "SOCIAL",
+   "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+   "module": "rumor2/providers/youtube-official.js (fixture/request boundary; no collector)",
+   "compositionPath": "not composed (foundation / access boundary only)",
+   "enable": "RUMOR2_SOCIAL_YOUTUBE_ENABLED",
+   "credentialEnv": [
+    "YOUTUBE_API_KEY"
+   ],
+   "paid": false,
+   "budgetGovernor": "search.list hard cost 100 quota units/request + explicit daily/monthly quota-unit caps",
+   "retentionTermsGate": "AVAILABLE_REQUIRES_CREDENTIAL",
+   "liveTransport": false,
+   "durableTruth": "none",
+   "pointInTimeContract": "fixture only",
+   "replay": "FIXTURE_REPLAY_ONLY",
+   "decisionAuthority": "NONE",
+   "paperAuthority": "NONE",
+   "paperDesiredState": "OFF",
+   "blockerPolicy": "DEGRADE",
+   "readinessBlocker": "DISABLED_BY_PAPER_POLICY",
+   "smokeEvidence": "none (no receipt; fixture-only)"
+  },
+  {
    "id": "REDDIT_OFFICIAL",
    "group": "SOCIAL",
    "family": "SOCIAL",
@@ -719,7 +744,7 @@
    "credentialEnv": [
     "COINGECKO_DEMO_API_KEY"
    ],
-   "paid": true,
+   "paid": false,
    "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
    "retentionTermsGate": "hosts api.coingecko.com, pro-api.coingecko.com",
    "liveTransport": true,
@@ -728,10 +753,10 @@
    "replay": "REPLAY_AS_OF over sealed bundles",
    "decisionAuthority": "EVIDENCE_ONLY (decision families)",
    "paperAuthority": "EVIDENCE_ONLY",
-   "paperDesiredState": "OFF",
-   "blockerPolicy": "PAID_GATE",
-   "readinessBlocker": "CREDENTIAL_MISSING + BLOCKED_BUDGET",
-   "smokeEvidence": "unauthenticated public ping reached HTTP 200 on 2026-09-12; the CONFIGURED provider path stays NOT_PROBED (PROVIDER_DISABLED); demo plan / cost UNKNOWN (policy plan attestation absent)"
+   "paperDesiredState": "ON",
+   "blockerPolicy": "DEGRADE",
+   "readinessBlocker": "CREDENTIAL_MISSING",
+   "smokeEvidence": "Demo key receipt 2026-09-12: two authorized zero-cost calls (catalog + coins-markets), both settled, one observation sealed in bundle mb-d0cb3c5d606789fc4c12ea3463e4c837bd9a50da06fbaeebc7a0b036833a04a8; local two-call entitlement exhausted; production not verified"
   },
   {
    "id": "GECKOTERMINAL",
@@ -900,7 +925,7 @@
    "paperDesiredState": "REQUEST",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": "CREDENTIAL_MISSING",
-   "smokeEvidence": "PROBED_FAILED 2026-09-12 CREDENTIAL_MISSING / coverage ACCESS_BLOCKED without FRED_API_KEY (documented free key required; docs/evidence/operational-repair-2026-09-12.md)"
+   "smokeEvidence": "2026-09-12 bounded capture: 16 successful requests, 240 observations sealed in bundle mb-d0cb3c5d606789fc4c12ea3463e4c837bd9a50da06fbaeebc7a0b036833a04a8; production not verified"
   },
   {
    "id": "TWELVEDATA",

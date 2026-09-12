@@ -10,6 +10,7 @@ import { readExecutionProjection } from '../state/execution-projection.js';
 import { readControls } from '../state/controls.js';
 import { dailyLockStatus } from '../state/locks.js';
 import { marketResearchRootFromEnv, darkResearchRootOf } from '../market-lab/paths.js';
+import { paidCallAuthorized } from '../market-lab/policy.js';
 import { loadProfile, profileFileOf, RUNTIME_STATES, mergeOverlay } from './profile.js';
 import { PRESS_SOURCES } from '../press/registry.js';
 import { INFRA_SOURCES } from '../infra/registry.js';
@@ -86,6 +87,12 @@ export function sensorSnapshot({ profile = loadProfile(), env = process.env, con
   const xTs = tsOf(x?.stream?.lastPostTs ?? x?.lastEventTs ?? null);
   const xState = desired('social', 'X_OFFICIAL') === 'OFF' ? 'DISABLED_BY_PAPER_POLICY' : xGov === 'CREDENTIAL_MISSING' ? 'BLOCKED_CREDENTIAL' : xGov === 'BUDGET_NOT_CONFIGURED' ? 'BLOCKED_BUDGET' : xGov === 'ACTIVE' ? socialObservationState(x, xTs, r2Ts, now) : 'BLOCKED_EXTERNAL_APPROVAL';
   rows.push(R({ id: 'X_OFFICIAL', name: 'X official filtered stream (PAID)', group: 'SOCIAL', state: xState, desiredState: desired('social', 'X_OFFICIAL'), lastSuccessTs: xTs, ageMs: age(xTs, now), coverage: x ? `${x.state ?? '—'}` : 'NOT_OPERATIONAL', blocker: xState === 'ACTIVE' ? null : xGov === 'ACTIVE' ? 'fresh post observation and collector status required; stream may be stale or disconnected' : xGov, detail: 'credential + explicit budgets + explicit paid smoke required; fresh post delivery and collector status prove activity', authority: 'NONE' }));
+  const youtube = r2?.socialYouTube ?? null;
+  const youtubeBudget = present(env, ['RUMOR2_SOCIAL_YOUTUBE_MAX_DAILY_QUOTA_UNITS', 'RUMOR2_SOCIAL_YOUTUBE_MAX_MONTHLY_QUOTA_UNITS']);
+  const youtubeEnabled = env.RUMOR2_SOCIAL_YOUTUBE_ENABLED === 'true' && desired('social', 'YOUTUBE_OFFICIAL') !== 'OFF';
+  const youtubeGate = !youtubeEnabled ? 'DISABLED_BY_PAPER_POLICY' : !present(env, 'YOUTUBE_API_KEY') ? 'CREDENTIAL_MISSING' : !youtubeBudget ? 'BUDGET_NOT_CONFIGURED' : youtube?.watchlist?.ok === false || !youtube?.watchlist ? 'WATCH_SCOPE_NOT_CONFIGURED' : 'CODE_COMPLETE_NO_COLLECTOR';
+  const youtubeTs = tsOf(youtube?.lastEventTs ?? youtube?.lastReceiptTs ?? null);
+  rows.push(R({ id: 'YOUTUBE_OFFICIAL', name: 'YouTube official search.list (read-only)', group: 'SOCIAL', state: youtubeGate === 'DISABLED_BY_PAPER_POLICY' ? 'DISABLED_BY_PAPER_POLICY' : youtubeGate === 'CREDENTIAL_MISSING' ? 'BLOCKED_CREDENTIAL' : youtubeGate === 'BUDGET_NOT_CONFIGURED' ? 'BLOCKED_BUDGET' : youtubeGate === 'WATCH_SCOPE_NOT_CONFIGURED' ? 'BLOCKED_EXTERNAL_APPROVAL' : 'NOT_OBSERVED', desiredState: desired('social', 'YOUTUBE_OFFICIAL'), lastSuccessTs: null, ageMs: null, coverage: youtube ? `${youtube.state ?? '—'}; no receipt asserted` : 'CODE_COMPLETE_NO_RECEIPT', blocker: youtubeGate === 'CODE_COMPLETE_NO_COLLECTOR' ? 'no collector/runtime composed; no receipt claimed' : youtubeGate, detail: 'search.list only; 100 quota units/request; explicit daily/monthly quota-unit caps and existing bounded social scope required before dispatch', authority: 'NONE' }));
   // SOCIAL VIDEO (video/: YouTube public metadata) — a separate observation tier; ACTIVE only from a fresh collector status record
   const vs = readJsonBounded(path.join(dataDir, 'video', 'status.json')); const vOn = env.SOCIAL_VIDEO_ENABLED === 'true'; const vOkTs = tsOf(vs?.lastSuccessTs); const vDesired = desired('social', 'YOUTUBE_DATA_API');
   const vGate = !present(env, 'YOUTUBE_API_KEY') ? 'BLOCKED_CREDENTIAL' : !present(env, 'SOCIAL_VIDEO_YOUTUBE_QUERIES') ? 'CONFIG_REQUIRED:SOCIAL_VIDEO_YOUTUBE_QUERIES' : !present(env, 'SOCIAL_VIDEO_YOUTUBE_MAX_DAILY_SEARCHES') ? 'BLOCKED_BUDGET' : null;
@@ -99,8 +106,22 @@ export function sensorSnapshot({ profile = loadProfile(), env = process.env, con
     const state=disabled('social',profileId)?'DISABLED_BY_PAPER_POLICY':!present(env,key)?'BLOCKED_CREDENTIAL':r2?.socialCurrent?.state==='DARK'?'BLOCKED_PROVIDER':/BUDGET/.test(st?.state??'')?'BLOCKED_BUDGET':/CREDENTIAL/.test(st?.state??'')?'BLOCKED_CREDENTIAL':st?.state==='OBSERVED'?freshOr(ts,now,300000,'ACTIVE'):st?.state==='CONNECTED_NO_MATCH'?'NOT_OBSERVED':'BLOCKED_EXTERNAL_APPROVAL';
     rows.push(R({id,name,group:'SOCIAL',desiredState:desired('social',profileId),state,lastSuccessTs:ts,ageMs:age(ts,now),coverage:st?.coverage??'NOT_OBSERVED',blocker:['ACTIVE','NOT_OBSERVED'].includes(state)?null:st?.state??'CONFIG_OR_ACCESS_REVIEW_REQUIRED',detail:'Erasable current observations in owner cockpit; content and identities expire after five minutes; no permanent social archive or model input',authority:'NONE'}));
   }
+  // META_PUBLIC is the sealed provider identity used by the preflight and
+  // access registry; the route rows above remain useful detail, but the
+  // aggregate must always be a real sensor row (never an undefined render).
+  const metaFacebook = r2?.socialCurrent?.sources?.META_FACEBOOK ?? null;
+  const metaInstagram = r2?.socialCurrent?.sources?.META_INSTAGRAM ?? null;
+  const metaObserved = [metaFacebook, metaInstagram].filter((st) => st?.state === 'OBSERVED');
+  const metaTs = Math.max(0, ...metaObserved.map((st) => tsOf(st.lastSuccessTs) ?? 0)) || null;
+  const metaDesired = desired('social', 'META_PUBLIC');
+  const metaState = metaDesired === 'OFF' ? 'DISABLED_BY_PAPER_POLICY'
+    : !present(env, 'META_APP_TOKEN') ? 'BLOCKED_CREDENTIAL'
+      : r2?.socialCurrent?.state === 'DARK' ? 'BLOCKED_PROVIDER'
+        : metaObserved.length ? socialObservationState(null, metaTs, r2Ts, now)
+          : metaFacebook || metaInstagram ? 'NOT_OBSERVED' : 'BLOCKED_EXTERNAL_APPROVAL';
+  rows.push(R({ id: 'META_PUBLIC', name: 'Meta public Pages / Instagram', group: 'SOCIAL', desiredState: metaDesired, state: metaState, lastSuccessTs: metaTs, ageMs: age(metaTs, now), coverage: [metaFacebook, metaInstagram].filter(Boolean).map((st) => st.state ?? 'NOT_OBSERVED').join('/') || 'NOT_OBSERVED', blocker: metaState === 'ACTIVE' || metaState === 'NOT_OBSERVED' ? null : metaDesired === 'OFF' ? (g.social.META_PUBLIC?.reason ?? 'OFF') : metaState === 'BLOCKED_CREDENTIAL' ? 'META_APP_TOKEN missing' : 'route access / retention approval required', detail: 'Separate route-bound, read-only Meta observations; no scraper or durable social archive', authority: 'NONE' }));
   rows.push(R({id:'TIKTOK_PUBLIC',name:'TikTok',group:'SOCIAL',desiredState:desired('social','TIKTOK_PUBLIC'),state:'BLOCKED_TERMS',lastSuccessTs:null,ageMs:null,coverage:'NO_ELIGIBLE_PUBLIC_INTELLIGENCE_ROUTE',blocker:'Research API institutional eligibility is not established; own-account Display API does not satisfy the requested feed',detail:'No scrape or substituted route',authority:'NONE'}));
-  // ---- PUBLISHER NEWS (press/: headline / link observation outside the frozen RUMOR-2 evidence core) -------------------------------
+   // ---- PUBLISHER NEWS (press/: headline / link observation outside the frozen RUMOR-2 evidence core) -------------------------------
   const press = readJsonBounded(path.join(dataDir, 'press', 'status.json')); const pressOn = env.PRESS_ENABLED === 'true'; const pressSel = new Set(String(env.PRESS_SOURCES ?? '').split(',').map((x) => x.trim()).filter(Boolean));
   for (const src of PRESS_SOURCES) {
     const pr = g.publisherNews?.[src.id] ?? null; const desiredHere = pr?.desiredState ?? 'OFF'; const st = press?.sources?.[src.id] ?? null; const okTs = tsOf(st?.lastSuccessTs); const licensed = src.route === 'LICENSED_INTERFACE_REQUIRED';
@@ -111,11 +132,11 @@ export function sensorSnapshot({ profile = loadProfile(), env = process.env, con
   const root = marketResearchRootFromEnv(env, dataDir); const mr = readJsonBounded(path.join(root, 'status.json')); const mrTs = tsOf(mr?.nowTs); const policy = readJsonBounded(profileFileOf(profile, 'marketResearchPolicy'));
   const clients = mr?.owner?.clients ?? {}; const mrOn = env.MARKET_RESEARCH_ENABLED === 'true';
   for (const [id, pr] of Object.entries(g.marketResearch.providers)) {
-    const pol = policy?.providers?.[id] ?? null; const c = clients[id] ?? null; const cred = pol?.credentialEnv ?? null; const keyPresent = cred ? present(env, cred) : true; const paidPlan = pol && pol.plan?.billing !== 'FREE';
+    const pol = policy?.providers?.[id] ?? null; const c = clients[id] ?? null; const cred = pol?.credentialEnv ?? null; const keyPresent = cred ? present(env, cred) : true; const quotaBlocked = pol && pol.plan?.billing !== 'FREE' && !paidCallAuthorized(policy, id);
     let state; let blocker = null;
     if (!mrOn || !pol?.enabled || pr.desiredState === 'OFF') { state = 'DISABLED_BY_PAPER_POLICY'; blocker = pr.reason ?? (pol?.enabled === false ? 'disabled in the paper policy' : 'research service off'); }
-    else if (paidPlan) { state = 'BLOCKED_BUDGET'; blocker = 'plan / cost attestation required before any paid call'; }
     else if (cred && !keyPresent) { state = 'BLOCKED_CREDENTIAL'; blocker = `${cred} missing`; }
+    else if (quotaBlocked) { state = 'BLOCKED_BUDGET'; blocker = 'plan / cost attestation required before any paid call'; }
     else if (mr === null) { state = 'NOT_OBSERVED'; blocker = 'no research status yet'; }
     else if (c === null) { state = 'NOT_OBSERVED'; blocker = 'client not reported'; }
     else state = c.runtime === 'ACTIVE' ? (c.failed > 0 && c.ok === 0 ? 'ACTIVE_DEGRADED' : 'ACTIVE') : c.runtime === 'BLOCKED' ? (c.lastFailure?.access === 'ENTITLEMENT_DENIED' ? 'BLOCKED_GEOGRAPHY' : 'BLOCKED_PROVIDER') : c.runtime === 'DEGRADED' || c.runtime === 'BACKOFF' ? 'ACTIVE_DEGRADED' : 'NOT_OBSERVED';
