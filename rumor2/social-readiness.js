@@ -43,7 +43,7 @@ export function providerReadinessRow(providerId, { runtime = null, evaluation = 
   const retention = retentionCapability(providerId);
   const blockers = []; const detail = [];
   const push = (code, why) => { if (READINESS_BLOCKERS.includes(code)) { blockers.push(code); if (why) detail.push(`${code}: ${String(why).slice(0, 140)}`); } };
-  const transportImplemented = p.durable === true; // only a durable ear has a transport wired into the shared contract (registry law)
+  const transportImplemented = p.durable === true || runtime?.transportImplemented === true; // transport existence is separate from durable retention permission
   const foundationPresent = p.implemented === true || !!p.foundation;
   const rt = runtime && typeof runtime === 'object' ? runtime : null;
   const enabled = rt ? rt.enabled !== false && rt.state !== undefined : null;
@@ -61,10 +61,11 @@ export function providerReadinessRow(providerId, { runtime = null, evaluation = 
   if (providerId === 'X_OFFICIAL' && durableSmokeComplete) smoke = 'PERFORMED_PRIOR_SESSION';
   const explicitGate = rt !== null && rt.gate !== undefined && rt.gate !== null; // a fixture/runtime that states its gate is believed; an absent gate stays unobserved
   if (evaluation && Array.isArray(evaluation.blockers)) for (const b of evaluation.blockers.slice(0, 16)) push(closedBlocker(b), b);
+  if (rt?.gateReason) push(closedBlocker(rt.gateReason), rt.gateReason);
   if (p.retentionProhibited === true) {
     const approvalPath = /APPROVAL/.test(p.accessState); // the registry census names the path (approval + classification vs entitlement + terms review)
     entitlement = approvalPath ? 'REQUIRES_APPROVAL_AND_CLASSIFICATION' : 'REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW';
-    push('RETENTION_NOT_APPROVED', 'durable content / author-identifying retention not approved'); push(approvalPath ? 'APPROVAL_NOT_OBTAINED' : 'ENTITLEMENT_UNRESOLVED', p.accessState); push('TRANSPORT_NOT_IMPLEMENTED', 'fixture-only preview adapter; no live transport');
+    push('RETENTION_NOT_APPROVED', 'durable content / author-identifying retention not approved'); push(approvalPath ? 'APPROVAL_NOT_OBTAINED' : 'ENTITLEMENT_UNRESOLVED', p.accessState); if (!transportImplemented) push('TRANSPORT_NOT_IMPLEMENTED', 'fixture-only preview adapter; no live transport');
     readiness = 'RETENTION_BLOCKED';
   } else if (!transportImplemented) {
     entitlement = p.accessState === 'AVAILABLE_REQUIRES_APP_REVIEW' ? 'REQUIRES_APP_REVIEW' : p.accessState === 'AVAILABLE_REQUIRES_CREDENTIAL' ? 'REQUIRES_CREDENTIAL_PLAN_AND_TERMS' : 'UNRESOLVED';
@@ -72,6 +73,19 @@ export function providerReadinessRow(providerId, { runtime = null, evaluation = 
     if (p.accessState === 'AVAILABLE_REQUIRES_APP_REVIEW') push('APPROVAL_NOT_OBTAINED', 'platform app review not obtained'); if (Array.isArray(p.foundation?.docsUnverified) && p.foundation.docsUnverified.length) push('EXTERNAL_VERIFICATION_DEFERRED', p.foundation.docsUnverified.join(','));
     if (providerId === 'FARCASTER_OFFICIAL') { push('CREDENTIAL_MISSING', 'key presence is configuration, not entitlement'); push('ENTITLEMENT_UNRESOLVED', 'plan / credits / terms unknown'); }
     readiness = 'FIXTURE_ONLY';
+  } else if (rt?.transportImplemented === true && p.durable !== true) {
+    // These bounded routes were added after the original fixture census. Their
+    // existence does not change the registry's durable-retention capability.
+    entitlement = p.accessState === 'AVAILABLE_REQUIRES_APP_REVIEW' ? 'REQUIRES_APP_REVIEW' : 'REQUIRES_CREDENTIAL_PLAN_AND_TERMS';
+    replay = 'NONE';
+    if (!rt) { push('PRODUCTION_GATE_UNOBSERVED', 'bounded transport exists; no runtime status supplied'); readiness = 'ACCESS_UNRESOLVED'; }
+    else if (rt.enabled === false) { push('RUNTIME_DISABLED', rt.gateDetail ?? 'runtime disabled'); readiness = 'DISABLED'; }
+    else {
+      // The original closed row describes durable research readiness. Keep its
+      // retention boundary explicit even if a bounded current transport succeeds.
+      push('RETENTION_NOT_APPROVED', 'bounded transport is implemented; durable research capability remains unavailable in the registry');
+      readiness = 'RETENTION_BLOCKED';
+    }
   } else if (providerId === 'X_OFFICIAL') {
     entitlement = 'PAY_PER_USE_CREDENTIAL_AND_BUDGET_REQUIRED'; replay = 'JOURNAL_REPLAY';
     // the paid smoke is owed exactly while the represented run has NOT durably completed — including while disabled or withheld

@@ -1,6 +1,6 @@
 {
  "inventoryVersion": "serpent-sensor-inventory-1",
- "generatedTs": 1789214324717,
+ "generatedTs": 1789228300190,
  "profile": "paper",
  "policyFile": "config/market-research.paper.json",
  "classifications": [
@@ -913,7 +913,7 @@
    "credentialEnv": [
     "TWELVEDATA_API_KEY"
    ],
-   "paid": true,
+   "paid": false,
    "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
    "retentionTermsGate": "hosts api.twelvedata.com",
    "liveTransport": true,
@@ -922,10 +922,10 @@
    "replay": "REPLAY_AS_OF over sealed bundles",
    "decisionAuthority": "EVIDENCE_ONLY (decision families)",
    "paperAuthority": "EVIDENCE_ONLY",
-   "paperDesiredState": "OFF",
-   "blockerPolicy": "PAID_GATE",
-   "readinessBlocker": "CREDENTIAL_MISSING + BLOCKED_BUDGET",
-   "smokeEvidence": "L02: BLOCKED"
+   "paperDesiredState": "REQUEST",
+   "blockerPolicy": "DEGRADE",
+   "readinessBlocker": "CREDENTIAL_MISSING",
+   "smokeEvidence": "2026-09-12: owner-supplied key returned HTTP 200 / status ok for EUR/USD 1-minute time_series (2 bars); api_usage reported plan_limit 8. Basic free allowance configured. Replit key installation and host collection remain unverified; other instruments not proven entitled"
   },
   {
    "id": "SETTLED_RECORDS",

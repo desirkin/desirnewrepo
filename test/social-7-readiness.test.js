@@ -95,3 +95,21 @@ test('R7-5. readiness is operational truth only: no row and no matrix field carr
   assert.ok(m.providers.some((r) => r.readiness === 'RETENTION_BLOCKED'), 'excluded providers are represented with a current reason');
   assert.equal(m.purpose, 'OPERATIONAL_STATUS_ONLY');
 });
+
+test('bounded runtime transports are present without granting durable retention or claiming current operation', async()=>{
+  const {currentReadinessRuntimes}=await import('../rumor2/social-current-runtime.js');
+  const runtimes=currentReadinessRuntimes({enabled:true,state:'CURRENT_VIEW',sources:{
+    REDDIT_OFFICIAL:{enabled:true,state:'OBSERVED',gateReason:null},
+    STOCKTWITS_OFFICIAL:{enabled:true,state:'ENTITLEMENT_REQUIRED',gateReason:'ENTITLEMENT_REQUIRED'},
+    META_FACEBOOK:{enabled:true,state:'OBSERVED',gateReason:null},
+    META_INSTAGRAM:{enabled:false,state:'DISABLED',gateReason:'DISABLED'},
+  }});
+  runtimes.FARCASTER_OFFICIAL={transportImplemented:true,enabled:true,state:'DARK',gateReason:'KEY_MISSING'};
+  const m=readinessMatrix({runtimes,knownAtTs:T0});
+  for(const id of ['REDDIT_OFFICIAL','STOCKTWITS_OFFICIAL','META_PUBLIC','FARCASTER_OFFICIAL']){
+    const r=m.providers.find(x=>x.provider===id);assert.equal(r.transportImplemented,true);assert.ok(!r.blockers.includes('TRANSPORT_NOT_IMPLEMENTED'));assert.equal(r.durableRawContentAllowed,false);assert.equal(r.operationalEvidenceAvailable,false);assert.equal(validateReadinessRow(r),null);
+  }
+  assert.match(m.providers.find(x=>x.provider==='META_PUBLIC').currentlyEnabledState,/FACEBOOK:OBSERVED;INSTAGRAM:DISABLED/);
+  assert.ok(m.providers.find(x=>x.provider==='FARCASTER_OFFICIAL').blockers.includes('CREDENTIAL_MISSING'));
+  assert.deepEqual(m.operationalProviders,[]);
+});
