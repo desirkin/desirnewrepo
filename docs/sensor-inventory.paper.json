@@ -16,7 +16,7 @@
   "OPERATIONAL_PUBLIC": 28,
   "OPERATIONAL_CREDENTIAL_GATED": 13,
   "IMPLEMENTED_NOT_LIVE_SMOKED": 0,
-  "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 3,
+  "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 4,
   "FOUNDATION_ONLY": 4,
   "DEPRECATED": 0,
   "NOT_PRESENT": 16
@@ -491,6 +491,31 @@
    "blockerPolicy": "PAID_GATE",
    "readinessBlocker": "CREDENTIAL_MISSING",
    "smokeEvidence": "never spent (paid; explicit smoke envelope required)"
+  },
+  {
+   "id": "YOUTUBE_OFFICIAL",
+   "group": "SOCIAL",
+   "family": "SOCIAL",
+   "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+   "module": "rumor2/providers/youtube-official.js (fixture/request boundary; no collector)",
+   "compositionPath": "not composed (foundation / access boundary only)",
+   "enable": "RUMOR2_SOCIAL_YOUTUBE_ENABLED",
+   "credentialEnv": [
+    "YOUTUBE_API_KEY"
+   ],
+   "paid": false,
+   "budgetGovernor": "search.list hard cost 100 quota units/request + explicit daily/monthly quota-unit caps",
+   "retentionTermsGate": "AVAILABLE_REQUIRES_CREDENTIAL",
+   "liveTransport": false,
+   "durableTruth": "none",
+   "pointInTimeContract": "fixture only",
+   "replay": "FIXTURE_REPLAY_ONLY",
+   "decisionAuthority": "NONE",
+   "paperAuthority": "NONE",
+   "paperDesiredState": "OFF",
+   "blockerPolicy": "DEGRADE",
+   "readinessBlocker": "DISABLED_BY_PAPER_POLICY",
+   "smokeEvidence": "none (no receipt; fixture-only)"
   },
   {
    "id": "REDDIT_OFFICIAL",

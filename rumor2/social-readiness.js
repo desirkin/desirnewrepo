@@ -15,7 +15,7 @@ export const READINESS_REPLAY_CAPABILITIES = Object.freeze(['JOURNAL_REPLAY', 'F
 export const READINESS_ROW_KEYS = Object.freeze(['provider', 'family', 'foundationPresent', 'transportImplemented', 'accessState', 'entitlementOrApprovalState', 'retentionState', 'historicalReplayCapability', 'liveSmokeState', 'productionGateState', 'currentlyEnabledState', 'durableRawContentAllowed', 'durableAuthorIdentityAllowed', 'operationalEvidenceAvailable', 'statusKnownAtTs', 'latestVerifiedKnownAtTs', 'readiness', 'blockers', 'blockerDetail', 'basis', 'authority']);
 // repository-known smoke facts (doctrine/SOCIAL.md §5B: one real Bluesky live smoke informed the clock law; §5D/§5E/§7:
 // the authorized paid X smoke has NOT been performed) — status, never a new claim
-export const PROVIDER_SMOKE_FACTS = Object.freeze({ BLUESKY_OFFICIAL: Object.freeze({ liveSmokeState: 'PERFORMED_PRIOR_SESSION', ref: 'doctrine/SOCIAL.md §5B' }), X_OFFICIAL: Object.freeze({ liveSmokeState: 'NOT_PERFORMED', ref: 'doctrine/SOCIAL.md §5D-§5E, §7' }) });
+export const PROVIDER_SMOKE_FACTS = Object.freeze({ BLUESKY_OFFICIAL: Object.freeze({ liveSmokeState: 'PERFORMED_PRIOR_SESSION', ref: 'doctrine/SOCIAL.md §5B' }), X_OFFICIAL: Object.freeze({ liveSmokeState: 'NOT_PERFORMED', ref: 'doctrine/SOCIAL.md §5D-§5E, §7' }), YOUTUBE_OFFICIAL: Object.freeze({ liveSmokeState: 'NOT_PERFORMED', ref: 'no receipt; fixture-only deterministic checks' }) });
 const isTs = (v) => Number.isSafeInteger(v) && v > 0;
 const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
 const uniq = (xs) => [...new Set(xs)];
@@ -31,6 +31,7 @@ export function closedBlocker(raw) {
   if (/^ENTITLEMENT_|PLAN_|CREDITS_|ACCESS_RECORD|ACCOUNT_RECORD|VALID_UNTIL/.test(s)) return 'ENTITLEMENT_UNRESOLVED';
   if (/TERMS/.test(s)) return 'TERMS_UNRESOLVED';
   if (/KEY_MISSING|CREDENTIAL/.test(s)) return 'CREDENTIAL_MISSING';
+  if (/BUDGET|QUOTA/.test(s)) return 'BUDGET_NOT_CONFIGURED';
   if (/NO_SANCTIONED_ROUTE|ROUTE_UNKNOWN/.test(s)) return 'NO_SANCTIONED_ROUTE';
   return 'OTHER_EVALUATOR_BLOCKER';
 }
@@ -43,7 +44,7 @@ export function providerReadinessRow(providerId, { runtime = null, evaluation = 
   const retention = retentionCapability(providerId);
   const blockers = []; const detail = [];
   const push = (code, why) => { if (READINESS_BLOCKERS.includes(code)) { blockers.push(code); if (why) detail.push(`${code}: ${String(why).slice(0, 140)}`); } };
-  const transportImplemented = p.durable === true; // only a durable ear has a transport wired into the shared contract (registry law)
+  const transportImplemented = p.transportImplemented === true || p.durable === true;
   const foundationPresent = p.implemented === true || !!p.foundation;
   const rt = runtime && typeof runtime === 'object' ? runtime : null;
   const enabled = rt ? rt.enabled !== false && rt.state !== undefined : null;
@@ -66,12 +67,31 @@ export function providerReadinessRow(providerId, { runtime = null, evaluation = 
     entitlement = approvalPath ? 'REQUIRES_APPROVAL_AND_CLASSIFICATION' : 'REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW';
     push('RETENTION_NOT_APPROVED', 'durable content / author-identifying retention not approved'); push(approvalPath ? 'APPROVAL_NOT_OBTAINED' : 'ENTITLEMENT_UNRESOLVED', p.accessState); push('TRANSPORT_NOT_IMPLEMENTED', 'fixture-only preview adapter; no live transport');
     readiness = 'RETENTION_BLOCKED';
-  } else if (!transportImplemented) {
+  } else if (!transportImplemented && providerId !== 'YOUTUBE_OFFICIAL') {
     entitlement = p.accessState === 'AVAILABLE_REQUIRES_APP_REVIEW' ? 'REQUIRES_APP_REVIEW' : p.accessState === 'AVAILABLE_REQUIRES_CREDENTIAL' ? 'REQUIRES_CREDENTIAL_PLAN_AND_TERMS' : 'UNRESOLVED';
     push('TRANSPORT_NOT_IMPLEMENTED', p.foundation?.stage ?? 'no transport'); if (p.decisionStatus === 'OPERATOR_REVIEW_PENDING') push('PLATFORM_DECISION_PENDING', p.decisionStatus);
     if (p.accessState === 'AVAILABLE_REQUIRES_APP_REVIEW') push('APPROVAL_NOT_OBTAINED', 'platform app review not obtained'); if (Array.isArray(p.foundation?.docsUnverified) && p.foundation.docsUnverified.length) push('EXTERNAL_VERIFICATION_DEFERRED', p.foundation.docsUnverified.join(','));
     if (providerId === 'FARCASTER_OFFICIAL') { push('CREDENTIAL_MISSING', 'key presence is configuration, not entitlement'); push('ENTITLEMENT_UNRESOLVED', 'plan / credits / terms unknown'); }
     readiness = 'FIXTURE_ONLY';
+  } else if (providerId === 'YOUTUBE_OFFICIAL') {
+    entitlement = 'READ_ONLY_CREDENTIAL_AND_QUOTA_BUDGET_REQUIRED';
+    // YouTube is deliberately code-complete at the pure request/fixture
+    // boundary, but has no collector/runtime in this ticket.  Keep that fact
+    // distinct from a missing key or missing quota caps supplied by an
+    // evaluator; neither is converted into a receipt or operational claim.
+    if (!rt) {
+      push('PRODUCTION_GATE_UNOBSERVED', 'no YouTube collector/runtime status in this process');
+      readiness = blockers.some((b) => CONFIG_BLOCKERS.includes(b)) ? 'NOT_CONFIGURED' : 'IMPLEMENTED_NOT_LIVE_SMOKED';
+    } else if (rt.enabled === false) {
+      push('RUNTIME_DISABLED', rt.gateDetail ?? 'RUMOR2_SOCIAL_YOUTUBE_ENABLED');
+      readiness = 'DISABLED';
+    } else {
+      if (rt.credentialPresent === false) push('CREDENTIAL_MISSING', 'YOUTUBE_API_KEY');
+      if (rt.budgetConfigured === false || (rt.gate && /BUDGET|QUOTA/.test(String(rt.gate)))) push('BUDGET_NOT_CONFIGURED', rt.gate ?? 'explicit quota-unit caps required');
+      if (rt.watchlist && rt.watchlist.ok === false) push('WATCH_SCOPE_NOT_CONFIGURED', rt.watchlist.reason ?? 'bounded social watchlist required');
+      if (blockers.some((b) => CONFIG_BLOCKERS.includes(b))) readiness = 'NOT_CONFIGURED';
+      else { push('PRODUCTION_GATE_UNOBSERVED', 'YouTube has no composed collector/runtime'); readiness = 'IMPLEMENTED_NOT_LIVE_SMOKED'; }
+    }
   } else if (providerId === 'X_OFFICIAL') {
     entitlement = 'PAY_PER_USE_CREDENTIAL_AND_BUDGET_REQUIRED'; replay = 'JOURNAL_REPLAY';
     // the paid smoke is owed exactly while the represented run has NOT durably completed — including while disabled or withheld

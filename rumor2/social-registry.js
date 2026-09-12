@@ -106,6 +106,32 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     reason: 'Pay-per-use filtered stream (~4-5s P99), 1 connection / 1,000 rules / 1,024 chars per rule. Requires OAuth2 App-Only bearer + an explicit hard read/dollar budget under the 3M/month self-serve cap; DARK by default, no paid connection without every runtime gate.',
   }),
   Object.freeze({
+    id: 'YOUTUBE_OFFICIAL',
+    providerKind: 'SOCIAL_MICROBLOG',
+    accessState: 'AVAILABLE_REQUIRES_CREDENTIAL',
+    transport: 'REST_SEARCH_LIST',
+    hosts: Object.freeze(['www.googleapis.com']),
+    streamPath: null,
+    subprotocol: null,
+    requiresCredential: true,
+    credentialEnv: 'YOUTUBE_API_KEY',
+    implemented: true, // bounded request descriptor + fixture mapper; no default network path
+    durable: false, // no collector/runtime composition in this ticket
+    runtimeGated: true, // enable + key + explicit quota-unit caps + bounded scope
+    highPriority: false,
+    cost: Object.freeze({
+      model: 'QUOTA_UNITS',
+      searchListUnits: 100,
+      dailyBudgetEnv: 'RUMOR2_SOCIAL_YOUTUBE_MAX_DAILY_QUOTA_UNITS',
+      monthlyBudgetEnv: 'RUMOR2_SOCIAL_YOUTUBE_MAX_MONTHLY_QUOTA_UNITS',
+      maxWatchlistAssets: 25,
+      maxResults: 50,
+      observedOn: '2026-09-12',
+    }),
+    docUrl: 'https://developers.google.com/youtube/v3/docs/search/list',
+    reason: 'Official YouTube Data API v3 search.list read-only route only. Search.list costs 100 quota units per request; explicit daily and monthly quota-unit caps, YOUTUBE_API_KEY presence, enablement, and a bounded watchlist derived from the existing social scope are required before any dispatch. No posting, OAuth account mutation, videos/channels/comments route, or deletion claim exists; no receipt is claimed.',
+  }),
+  Object.freeze({
     id: 'REDDIT_OFFICIAL',
     providerKind: 'SOCIAL_FORUM',
     // SOCIAL-3 (corrected): a documented official path exists (OAuth2 Data API);

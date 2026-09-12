@@ -50,6 +50,7 @@
   "social": {
    "BLUESKY_OFFICIAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "authority": "NONE", "enableEnv": "RUMOR2_SOCIAL_BLUESKY_ENABLED" },
    "X_OFFICIAL": { "desiredState": "REQUEST", "blockerPolicy": "PAID_GATE", "authority": "NONE", "paid": true, "enableEnv": "RUMOR2_SOCIAL_X_ENABLED", "credentialEnv": "X_BEARER_TOKEN", "budgetEnv": ["RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS", "RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS", "RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD"], "note": "activates only through the existing X governor: credential -> explicit budgets -> explicit paid smoke; this profile invents no budget" },
+    "YOUTUBE_OFFICIAL": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "DISABLED_BY_PAPER_POLICY", "enableEnv": "RUMOR2_SOCIAL_YOUTUBE_ENABLED", "credentialEnv": "YOUTUBE_API_KEY", "budgetEnv": ["RUMOR2_SOCIAL_YOUTUBE_MAX_DAILY_QUOTA_UNITS", "RUMOR2_SOCIAL_YOUTUBE_MAX_MONTHLY_QUOTA_UNITS"], "note": "read-only search.list fixture/request boundary; explicit quota-unit caps and existing bounded Social scope required; no collector or receipt" },
    "FARCASTER_OFFICIAL": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "FOUNDATION_ONLY" },
    "REDDIT_OFFICIAL": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "BLOCKED_RETENTION" },
    "STOCKTWITS_OFFICIAL": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "BLOCKED_TERMS" },
