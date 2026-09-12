@@ -54,3 +54,15 @@ test('Senses reports actual active Farcaster and never calls a stopped current-v
   const dir=mkdtempSync(path.join(tmpdir(),'social-status-')),profile=loadProfile(),env={...profileEnvironment(profile),NEYNAR_API_KEY:'fixture',REDDIT_CLIENT_ID:'fixture'};
   try{mkdirSync(path.join(dir,'rumor2'));writeFileSync(path.join(dir,'rumor2','status.json'),JSON.stringify({tsMs:T,socialFarcaster:{state:'ACTIVE',gateReason:null,lastSuccessTs:T,coverage:'SEARCH_QUERY_EXHAUSTED'},socialCurrent:{state:'DARK',sources:{REDDIT_OFFICIAL:{state:'OBSERVED',lastSuccessTs:T}}}}));const snap=sensorSnapshot({profile,env,dataDir:dir,now:T});assert.equal(snapshotRow(snap,'FARCASTER_OFFICIAL').state,'ACTIVE');assert.equal(snapshotRow(snap,'REDDIT_OFFICIAL').state,'BLOCKED_PROVIDER');}finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+test('current-view status expires observations, reports gates before requests, and cannot stay observed after stop', async()=>{
+  const env={RUMOR2_SOCIAL_REDDIT_ENABLED:'true',RUMOR2_SOCIAL_REDDIT_SUBREDDITS:'fixturecrypto',RUMOR2_SOCIAL_REDDIT_USER_AGENT:'nodejs:fixture:1.0 (by /u/fixture)',RUMOR2_SOCIAL_REDDIT_MAX_DAILY_REQUESTS:'3',REDDIT_CLIENT_ID:'fixture-id',REDDIT_CLIENT_SECRET:'fixture-secret'};
+  let calls=0;
+  const h=harness(env,{reddit},async(url)=>{calls++;return Response.json(url.includes('access_token')?{access_token:'fixture-token',token_type:'bearer',expires_in:3600}:{kind:'Listing',data:{children:[],after:null}});});
+  const r=h.make();await r.settle(h.hooks);
+  assert.equal(r.status().sources.REDDIT_OFFICIAL.state,'CONNECTED_NO_MATCH');
+  h.advance(300001);assert.equal(r.status().sources.REDDIT_OFFICIAL.state,'STALE');assert.equal(calls,2);
+  r.stop();assert.equal(r.status().sources.REDDIT_OFFICIAL.state,'DARK');
+  delete env.REDDIT_CLIENT_SECRET;
+  const s=r.status().sources.REDDIT_OFFICIAL;assert.ok(s.gateReason);assert.notEqual(s.state,'CONNECTED_NO_MATCH');assert.equal(calls,2);
+});

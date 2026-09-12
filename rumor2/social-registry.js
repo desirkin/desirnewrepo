@@ -44,8 +44,9 @@ export const isPlatformCapable = (state) => state === 'AVAILABLE_AUTHORIZED' || 
 
 // The closed social provider set for SOCIAL-1. `implemented` means an adapter
 // exists in this codebase (normalization + transport or normalization-only).
-// `durable` means it is wired to write durable social truth in THIS ticket
-// (only Bluesky). Everything else is contract/access-prepared and DARK.
+// `durable` is the durable research capability law. `runtimeTransport` names
+// subsequently implemented bounded routes without changing that law or proving
+// account access. Current-view routes retain no raw content in the journal.
 export const SOCIAL_PROVIDERS = Object.freeze([
   Object.freeze({
     id: 'BLUESKY_OFFICIAL',
@@ -65,6 +66,7 @@ export const SOCIAL_PROVIDERS = Object.freeze([
   }),
   Object.freeze({
     id: 'FARCASTER_OFFICIAL',
+    runtimeTransport: 'NEYNAR_SEARCH_REST', // bounded collector route exists; grants no access or durable retention
     providerKind: 'SOCIAL_MICROBLOG',
     accessState: 'AVAILABLE_REQUIRES_CREDENTIAL',
     transport: 'NEYNAR_WEBHOOK_REST',
@@ -73,18 +75,18 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     subprotocol: null,
     requiresCredential: true,
     credentialEnv: 'NEYNAR_API_KEY',
-    implemented: true, // normalization adapter + fixtures; live transport gated on a key
+    implemented: true, // normalization plus bounded search runtime; access evaluator gates all calls
     durable: false,
     highPriority: true,
     docUrl: 'https://docs.neynar.com/',
-    // SOCIAL-4D census correction: mapper present; live transport / collector wiring ABSENT; a
+    // Historical SOCIAL-4D census preceded the bounded search runtime; a
     // configured key is configuration only, never proof a feed runs or an account is entitled
     account: Object.freeze({ publishedPlan: 'FREE_PLAN_DOCUMENTED', thisProjectPlan: 'UNKNOWN', credits: 'UNKNOWN', entitlement: 'UNVERIFIED', termsRetrieval: 'FAILED_2026-09-06', retention: 'UNRESOLVED' }),
     // SOCIAL-4E foundation stage (pure, non-live): a readiness boundary that separates key presence,
     // published limits, account plan/credits, terms, retention, acquisition-path approval, coverage,
     // lag, and webhook guarantees. NOT operational access; `implemented`/`durable` keep their meanings.
     foundation: Object.freeze({ ticket: 'SOCIAL-4E', stage: 'ACCESS_BOUNDARY_ONLY', module: 'rumor2/social-farcaster-access.js', fixtureOnly: true, live: false, durable: false, operationalAccess: false, docsAccessedOn: '2026-09-07', docsUnverified: Object.freeze(['N3_PRICING', 'N4_TERMS']) }),
-    reason: 'Neynar hosted API (x-api-key) documents event webhooks, cast search, a Kafka stream, and gRPC hub access; Neynar publishes a Free plan with per-endpoint limits (docs, 2026-09-06). This project\'s plan, credits, entitlement, terms (retrieval failed), retention, and actual cost are UNKNOWN/UNVERIFIED. The hub/Snapchain path needs a full node (not lightweight). The normalization mapper exists; NO live transport or collector wiring exists; NEYNAR_API_KEY presence is configuration only. Acquisition path selection (search polling vs webhooks) is a PROPOSAL pending terms, plan, recovery, and scope.',
+    reason: 'Neynar hosted API (x-api-key) documents event webhooks, cast search, a Kafka stream, and gRPC hub access; Neynar publishes a Free plan with per-endpoint limits (docs, 2026-09-06). This project\'s plan, credits, entitlement, terms (retrieval failed), retention, and actual cost are UNKNOWN/UNVERIFIED. The hub/Snapchain path needs a full node (not lightweight). Bounded search polling is implemented and collector-wired; NEYNAR_API_KEY presence alone proves neither activation nor entitlement. Webhook/Kafka coverage is not implemented. Runtime gates require the account record, approved search path, scope and request budget; durable research capability remains separately gated by this registry.',
   }),
   Object.freeze({
     id: 'X_OFFICIAL',
@@ -107,6 +109,7 @@ export const SOCIAL_PROVIDERS = Object.freeze([
   }),
   Object.freeze({
     id: 'REDDIT_OFFICIAL',
+    runtimeTransport: 'OAUTH_SCOPED_LISTING_CURRENT_VIEW', // bounded collector route exists; grants no access or durable retention
     providerKind: 'SOCIAL_FORUM',
     // SOCIAL-3 (corrected): a documented official path exists (OAuth2 Data API);
     // whether THIS private single-user personal-trading use is permitted, how
@@ -120,9 +123,9 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     subprotocol: null,
     requiresCredential: true,
     credentialEnv: 'REDDIT_CLIENT_ID', // + REDDIT_CLIENT_SECRET; a credential is NOT an approval
-    implemented: true, // SOCIAL-3: fixture-only preview adapter + pure request/limit helpers (rumor2/social-reddit.js); NO live transport
+    implemented: true, // preview adapter plus gated OAuth/listing current-view client
     durable: false,
-    runtimeGated: false, // no runtime exists that could open a live path by flipping fields
+    runtimeGated: false, // no durable research route; bounded current-view runtime has separate access gates
     retentionProhibited: true, // SOCIAL-3: no durable content / author-identifying journal until retention compatibility is reviewed
     highPriority: false,
     // separate questions, separate closed answers (§5) — none is inferred from another
@@ -148,10 +151,11 @@ export const SOCIAL_PROVIDERS = Object.freeze([
       Object.freeze({ ref: 'R5', title: 'Reddit Data API Wiki', url: 'https://support.reddithelp.com/hc/en-us/articles/16160319875092-Reddit-Data-API-Wiki', accessedOn: '2026-09-06' }),
     ]),
     docUrl: 'https://support.reddithelp.com/hc/en-us/articles/14945211791892-Developer-Platform-Accessing-Reddit-Data',
-    reason: 'Official OAuth2 Data API exists (documented path); API data access requires explicit Reddit approval with honest disclosure of purpose and scope. Serpent is a private single-user personal project with intended personal research, paper trading, and possibly automated trading of the owner\'s own funds — its classification, any separate-agreement requirement, and retention compatibility are UNRESOLVED pending Reddit review. Scraping is prohibited. Fixture-only foundation; not an operational ear.',
+    reason: 'Official OAuth2 Data API exists (documented path); API data access requires explicit Reddit approval with honest disclosure of purpose and scope. Serpent is a private single-user personal project with intended personal research, paper trading, and possibly automated trading of the owner\'s own funds — its classification, any separate-agreement requirement, and retention compatibility are UNRESOLVED pending Reddit review. Scraping is prohibited. Bounded OAuth listing transport is implemented; runtime activation requires approved access, credentials, scope and a budget. Durable raw content remains prohibited.',
   }),
   Object.freeze({
     id: 'STOCKTWITS_OFFICIAL',
+    runtimeTransport: 'FIRESTREAM_MESSAGES_CURRENT_VIEW', // bounded collector route exists; grants no access or durable retention
     providerKind: 'SOCIAL_FINANCE',
     // SOCIAL-4B (corrected): ONE originating platform with several documented
     // routes/products. Self-service registration is paused (route-specific);
@@ -166,9 +170,9 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     subprotocol: null,
     requiresCredential: true,
     credentialEnv: 'STOCKTWITS_STREAM_USER', // + STOCKTWITS_STREAM_PASS (Firestream HTTP Basic); presence is not entitlement
-    implemented: true, // the NEW Social foundation only: fixture-only Firestream preview + access summary (rumor2/social-stocktwits.js); NOT the legacy RUMINT ear, NOT a transport
+    implemented: true, // preview/access foundation plus bounded Firestream current-view transport
     durable: false,
-    runtimeGated: false, // no runtime exists that an environment flag could activate
+    runtimeGated: false, // no durable research route; current-view client independently evaluates access
     retentionProhibited: true, // SOCIAL-4B: the NEW raw Social path retains nothing until entitlement, permitted use, and retention are established
     highPriority: true, // a high-value intended ear — blocked by entitlement/terms review, not by importance
     routes: STOCKTWITS_ROUTES, // SELF_SERVE_REGISTRATION (paused) · LEGACY_SYMBOL_REST · FIRESTREAM_MESSAGES · FIRESTREAM_SYMBOL_ACTIVITY · FIRESTREAM_REFERENCE · FIRESTREAM_BACKUPS — routes, not six sources
@@ -186,10 +190,11 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     useCase: STOCKTWITS_USE_CASE,
     sources: STOCKTWITS_SOURCES,
     docUrl: 'https://firestream-portal.stocktwits.com/documentation/stream',
-    reason: 'One platform, several routes. Self-service registration is paused (S1, route-specific). Firestream message/activity/reference/backup routes are documented (S2-S6) for stream-authorized accounts under HTTP Basic; general Terms (S7, revised 2026-07-10) require authorized API/developer access and let offering-specific terms prevail. This account\'s entitlement, Serpent\'s permitted use, additional terms, and raw-content/author retention are UNRESOLVED. A legacy aggregate RUMINT ear exists separately (config-enabled; deployment unobserved; entitlement unresolved). New raw Social path: fixture-only, retention-blocked, not an operational ear.',
+    reason: 'One platform, several routes. Self-service registration is paused (S1, route-specific). Firestream message/activity/reference/backup routes are documented (S2-S6) for stream-authorized accounts under HTTP Basic; general Terms (S7, revised 2026-07-10) require authorized API/developer access and let offering-specific terms prevail. This account\'s entitlement, Serpent\'s permitted use, additional terms, and raw-content/author retention are UNRESOLVED. A legacy aggregate RUMINT ear exists separately (config-enabled; deployment unobserved; entitlement unresolved). Bounded Firestream message transport is implemented for an approved scoped current view; durable raw content remains prohibited and live activation is unverified.',
   }),
   Object.freeze({
     id: 'META_PUBLIC',
+    runtimeTransport: 'PAGE_FEED_AND_INSTAGRAM_HASHTAG_CURRENT_VIEW', // bounded collector route exists; grants no access or durable retention
     providerKind: 'SOCIAL_MICROBLOG',
     accessState: 'AVAILABLE_REQUIRES_APP_REVIEW',
     transport: 'GRAPH_API',

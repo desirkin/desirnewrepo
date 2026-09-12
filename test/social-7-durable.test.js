@@ -87,7 +87,7 @@ if (!TEST_URL) {
       assert.equal(row('BLUESKY_OFFICIAL').readiness, st.social.state === 'ACTIVE' ? 'OPERATIONAL_LIVE_PROVEN' : 'LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE'); assert.equal(row('BLUESKY_OFFICIAL').liveSmokeState, 'PERFORMED_PRIOR_SESSION', 'a not-yet-connected runtime never erases the one real prior Bluesky smoke');
       assert.equal(row('X_OFFICIAL').readiness, 'DISABLED'); assert.deepEqual(row('X_OFFICIAL').blockers, ['PAID_SMOKE_NOT_PERFORMED', 'RUNTIME_DISABLED']); assert.equal(row('X_OFFICIAL').liveSmokeState, 'NOT_PERFORMED');
       assert.equal(row('RUMINT_LEGACY_AGGREGATE').currentlyEnabledState, 'UNOBSERVED_IN_THIS_PROCESS'); assert.equal(row('RUMINT_LEGACY_AGGREGATE').readiness, 'ACCESS_UNRESOLVED');
-      for (const id of ['REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL']) assert.equal(row(id).readiness, 'RETENTION_BLOCKED'); for (const id of ['META_PUBLIC', 'TIKTOK_PUBLIC', 'FARCASTER_OFFICIAL']) assert.equal(row(id).readiness, 'FIXTURE_ONLY');
+      for (const id of ['REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL']) assert.equal(row(id).readiness, 'RETENTION_BLOCKED'); assert.equal(row('TIKTOK_PUBLIC').readiness, 'FIXTURE_ONLY'); for (const id of ['META_PUBLIC','FARCASTER_OFFICIAL']) { assert.equal(row(id).readiness, 'DISABLED'); assert.equal(row(id).transportImplemented, true); }
       // a real connection in this process (fake socket) + one durable observation
       b.sockets.at(-1).emit('open'); b.sockets.at(-1).emit('message', JSON.stringify(commit(31, '$LINK readiness proof post')));
       await b.tick(); st = b.c.status(); m = st.socialReadiness;

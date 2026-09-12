@@ -48,5 +48,5 @@ export function createSocialCurrentRuntime({ env=process.env, now=Date.now, fetc
   }
   return {provider:{id:'SOCIAL_CURRENT'},hydrate,start,stop,settle,isActive:()=>active,
     snapshot:()=>store.snapshot(),
-    status:()=>({enabled:true,state:active?'CURRENT_VIEW':'DARK',authority:'NONE',retention:'RAM_ONLY_MAX_5_MINUTES',sources:Object.fromEntries([...states].map(([id,s])=>[id,{...s}])),quota:{day:meterDay,requests:{...counts}}})};
+    status:()=>({enabled:true,state:active?'CURRENT_VIEW':'DARK',authority:'NONE',retention:'RAM_ONLY_MAX_5_MINUTES',sources:Object.fromEntries(clients.map(c=>{const s=states.get(c.id),blocked=gate(c);const fresh=Number.isSafeInteger(s.lastSuccessTs)&&s.lastSuccessTs<=now()&&now()-s.lastSuccessTs<=300000;return [c.id,{...s,enabled:c.enabled,gateReason:blocked,state:blocked??(!active?'DARK':['OBSERVED','CONNECTED_NO_MATCH'].includes(s.state)&&!fresh?'STALE':s.state)}];})),quota:{day:meterDay,requests:{...counts}}})};
 }
