@@ -43,7 +43,13 @@ import {
   voteTrajectory,
   voterConcentration,
 } from './snapshot.js';
-import { tallyStatus } from './tally.js';
+import {
+  TALLY_PROVIDER,
+  TallyRetry429,
+  tallyStatus,
+  fetchTallyProposalsPage,
+  normalizeTallyProposal,
+} from './tally.js';
 
 export const GOVERNANCE_COLLECTOR_VERSION = 'GOV-1C';
 export const GOV_CHECKPOINT_VERSION = 3; // GOV-1C: full provider proposal keys
@@ -734,7 +740,7 @@ export function startGovernance({
     } catch (err) {
       counters.requestFailures++;
       lastErrorTs = now();
-      if (err instanceof Retry429) {
+      if (err instanceof Retry429 || err instanceof TallyRetry429) {
         const sec = budget.record429(err.retryAfterSec);
         log(`[${nowIso()}] GOVERNANCE 429 — backing off ${sec}s (provider retry-after ${err.retryAfterSec ?? 'unspecified'})`);
       } else {
@@ -747,7 +753,8 @@ export function startGovernance({
 
   // ---------- observation building ----------
   function buildObservation(norm, { lifecycle, emitReason, concentration, votesCoverage, proposalPagesCoverage }, prevMeasured = null) {
-    const entry = registry.entryForSpace(norm.spaceId);
+    const entityId = norm.provider === TALLY_PROVIDER ? norm.governorId : norm.spaceId;
+    const entry = norm.provider === TALLY_PROVIDER ? registry.entryForGovernor(entityId) : registry.entryForSpace(entityId);
     const nowSec = Math.floor(now() / 1000);
     const retrievedIso = new Date(now()).toISOString();
     const stateFingerprint = changeFingerprint(norm);
@@ -761,7 +768,7 @@ export function startGovernance({
     // (providerUpdatedTs is already inside the state fingerprint)
     const sourceEventId = governanceEventIdentity({
       provider: norm.provider,
-      entityId: norm.spaceId,
+      entityId,
       proposalId: norm.proposalId,
       kind: lifecycle ? 'LIFECYCLE' : 'SNAPSHOT',
       lifecycle: lifecycle ?? null,
@@ -774,20 +781,24 @@ export function startGovernance({
       ts: retrievedIso,
       type: 'GOVERNANCE_OBSERVATION',
       provider: norm.provider,
-      providerKind: 'snapshot hub graphql (off-chain voting)',
+      providerKind: norm.provider === TALLY_PROVIDER
+        ? 'tally graphql (indexed on-chain governance)'
+        : 'snapshot hub graphql (off-chain voting)',
       collectorVersion: GOVERNANCE_COLLECTOR_VERSION,
       lifecycleTransition: lifecycle ?? null,
       emitReason,
       sourceEventId,
-      spaceId: norm.spaceId,
+      ...(norm.provider === TALLY_PROVIDER ? { governorId: entityId } : { spaceId: entityId }),
       proposalId: norm.proposalId,
       // symbol ONLY through the verified registry; unmapped stays null
       symbol: entry?.symbol ?? null,
       mappingVersion: entry?.mappingVersion ?? null,
       proposalState: norm.state,
-      // a Snapshot "closed" with a leading tally is an OFF-CHAIN vote result,
-      // never execution truth
-      offchainVoteNote: 'snapshot is off-chain voting evidence; PASSED_OFFCHAIN_VOTE is not EXECUTED',
+      // Snapshot is explicitly off-chain; Tally is indexed provider evidence,
+      // not a direct chain read. Neither path invents execution.
+      offchainVoteNote: norm.provider === TALLY_PROVIDER
+        ? 'tally is indexed governance evidence; this observation is not a direct chain verification'
+        : 'snapshot is off-chain voting evidence; PASSED_OFFCHAIN_VOTE is not EXECUTED',
       proposalStartTs: norm.startTs,
       proposalEndTs: norm.endTs,
       snapshotBlock: norm.snapshotBlock,
@@ -797,7 +808,7 @@ export function startGovernance({
       trajectory: voteTrajectory(norm, nowSec, prevMeasured),
       voterConcentration: concentration ?? { coverage: 'UNAVAILABLE', coverageReason: 'NOT_REQUESTED_THIS_CYCLE' },
       timelock: 'UNKNOWN', // no timelock evidence exists in snapshot data
-      executionState: 'UNKNOWN', // idem — an on-chain provider may know later
+      executionState: norm.provider === TALLY_PROVIDER ? (norm.providerState ?? 'UNKNOWN') : 'UNKNOWN',
       coverage: { proposalPages: proposalPagesCoverage, votePages: votesCoverage ?? 'UNAVAILABLE' },
       title: norm.title,
       bodyExcerpt: norm.bodyExcerpt,
@@ -863,7 +874,8 @@ export function startGovernance({
   // ---------- proposal ingestion (ACK-aware, FULL provider key) ----------
   function ingestProposal(norm, proposalPagesCoverage, { withConcentration = null } = {}) {
     if (stopped) return; // cancel-first shutdown: a delayed response creates nothing
-    const key = proposalKey(norm.provider, norm.spaceId, norm.proposalId);
+    const entityId = norm.provider === TALLY_PROVIDER ? norm.governorId : norm.spaceId;
+    const key = proposalKey(norm.provider, entityId, norm.proposalId);
     if (finalIds.has(key)) return; // final truth already captured and acknowledged
     const known = tracked.get(key);
     const isNew = !known;
@@ -907,7 +919,7 @@ export function startGovernance({
     const prevEntry = known ? { ...known } : null;
     tracked.set(key, {
       state: norm.state,
-      spaceId: norm.spaceId,
+      spaceId: entityId,
       proposalId: norm.proposalId,
       fingerprint: fp,
       lastSnapshotEmitMs: records.length ? now() : known?.lastSnapshotEmitMs ?? 0,
@@ -991,6 +1003,44 @@ export function startGovernance({
       counters.partialCoverageCount++;
     }
     for (const norm of admitted) ingestProposal(norm, pagesCoverage);
+  }
+
+  // Tally has no public unauthenticated fallback. Exact governor mappings are
+  // the complete scope; each page is independently budgeted and a ceiling is
+  // surfaced as PARTIAL rather than treated as exhaustion.
+  async function discoverTally() {
+    if (tallyStatus(env, registry) !== 'READY') return;
+    for (const governorId of registry.tallyGovernors) {
+      let pagesCoverage = 'COMPLETE';
+      for (let page = 0; page < cfg.maxProposalPagesPerCycle; page++) {
+        const slot = await acquireSlot();
+        if (!slot.ok) {
+          pagesCoverage = `PARTIAL_${slot.reason}`;
+          counters.partialCoverageCount++;
+          break;
+        }
+        let raw;
+        try {
+          raw = await request(() => fetchTallyProposalsPage({
+            governorId,
+            limit: cfg.proposalPageSize,
+            offset: page * cfg.proposalPageSize,
+          }, { fetchImpl, timeoutMs: cfg.timeoutMs, env }));
+        } catch {
+          pagesCoverage = 'PARTIAL_PROVIDER_ERROR';
+          break;
+        }
+        for (const row of raw) {
+          const norm = normalizeTallyProposal(row, governorId);
+          if (norm) ingestProposal({ ...norm, state: norm.governanceState }, pagesCoverage);
+        }
+        if (raw.length < cfg.proposalPageSize) break;
+        if (page === cfg.maxProposalPagesPerCycle - 1) {
+          pagesCoverage = 'PARTIAL_PAGE_LIMIT';
+          counters.partialCoverageCount++;
+        }
+      }
+    }
   }
 
   async function refresh() {
@@ -1110,10 +1160,12 @@ export function startGovernance({
       if (force || t >= nextDiscoveryMs) {
         nextDiscoveryMs = t + cfg.discoverySec * 1000;
         await discover();
+        await discoverTally();
       }
       if (force || t >= nextRefreshMs) {
         nextRefreshMs = t + cfg.refreshSec * 1000;
         await refresh();
+        await discoverTally();
       }
     } catch {
       // request() already logged, counted, and armed backoff — the sensor
