@@ -5,6 +5,7 @@
 // injectable fetch for tests; proposal text is UNTRUSTED DATA that is
 // stored bounded and never executed or interpreted.
 import { createHash } from 'node:crypto';
+import { fetchJsonBounded } from '../lib/bounded-fetch.js';
 
 export const SNAPSHOT_HUB = 'https://hub.snapshot.org/graphql';
 export const SNAPSHOT_PROVIDER = 'SNAPSHOT';
@@ -25,19 +26,27 @@ export class Retry429 extends Error {
 
 // One bounded GraphQL POST. Throws Retry429 on rate limiting (carrying
 // Retry-After when the provider names one) and Error otherwise.
-export async function snapshotGql(query, { fetchImpl = fetch, timeoutMs = 15_000 } = {}) {
-  const res = await fetchImpl(SNAPSHOT_HUB, {
+export async function snapshotGql(query, { fetchImpl = fetch, timeoutMs = 15_000, signal = null } = {}) {
+  const res = await fetchJsonBounded(SNAPSHOT_HUB, {
+    host: 'hub.snapshot.org',
+    fetchImpl,
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({ query }),
-    signal: AbortSignal.timeout(timeoutMs),
+    timeoutMs,
+    maxBytes: 2 * 1024 * 1024,
+    maxRedirects: 0,
+    signal,
   });
-  if (res.status === 429) {
-    const ra = Number(res.headers?.get?.('retry-after'));
+  if (res.outcome === 'RATE_LIMITED') {
+    const ra = res.retryAfterSec;
     throw new Retry429(Number.isFinite(ra) && ra > 0 ? ra : null);
   }
-  if (!res.ok) throw new Error(`snapshot HTTP ${res.status}`);
-  const body = await res.json();
+  if (res.outcome !== 'OK') {
+    if (res.status >= 400) throw new Error(`snapshot HTTP ${res.status}`);
+    throw new Error(`snapshot ${res.reason ?? res.outcome}`);
+  }
+  const body = res.json;
   if (body.errors?.length) throw new Error(`snapshot graphql: ${body.errors.map((e) => e.message).join('; ')}`);
   return body.data;
 }
