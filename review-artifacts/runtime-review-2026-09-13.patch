@@ -1,319 +1,90 @@
-diff --git a/market-lab/owner.js b/market-lab/owner.js
-index 236f22d..c8772ea 100644
---- a/market-lab/owner.js
-+++ b/market-lab/owner.js
-@@ -89,6 +89,9 @@ const WHALE_NATIVE = new Set(['whale_transaction_count_100k_usd_to_inf', 'whale_
- const WHALE_5M_LOOKBACK_MS = 6 * HOUR_MS;
- export const ALL_NETWORK_NATIVE = Object.freeze([...new Set(Object.values(NETWORK_NATIVE_IDS).flat()), 'supply_circulating']);
- const SEEN_CAP = 262_144; // dedup keys retained (bounded ring)
-+// Private scheduler-only option. Public acquire() callers cannot manufacture it,
-+// so their existing one-subject CoinGecko request semantics remain unchanged.
-+const COINGECKO_SWEEP_ASSETS = Symbol('COINGECKO_SWEEP_ASSETS');
- const toJsonError = (err) => (err instanceof MarketLabError ? err.toJSON() : { code: err?.code === 'RESOURCE_LIMIT_EXCEEDED' ? 'RESOURCE_LIMIT_EXCEEDED' : 'IO_FAILURE', message: String(err?.message ?? err).slice(0, 160) });
- 
- export function createResearchOwner({ policy, subjects, env = {}, researchRoot = null, mode = 'STANDALONE', clock = () => Date.now(), log = () => {}, transport = null, fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, wsUrls = {}, settledAccessors = {}, socialProjection = null, timers = { setInterval, clearInterval, setTimeout, clearTimeout }, recorder = null, quotaJournal = null, onRecordingFailure = null, closeDrainMs = CLOSE_DRAIN_MS } = {}) {
-@@ -205,7 +208,9 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
-   const usageSnapshot = () => { const c = guard.snapshot().counters; return { dispatched: c.dispatched, credits: c.credits, refused: c.refused, unresolved: c.unresolved }; };
-   const optionEnrichmentTargets = (ticks, cap) => { const byExpiry = new Map(); for (const t of ticks) { const k = t.payload.expiryTs; if (!byExpiry.has(k)) byExpiry.set(k, []); byExpiry.get(k).push(t); } const out = []; for (const [, list] of [...byExpiry.entries()].sort((a, b) => a[0] - b[0])) { const idx = list.find((t) => t.payload.underlyingPrice)?.payload.underlyingPrice ?? null; if (!idx) continue; const dist = (t) => Math.abs(Math.log(t.payload.strike / idx)); const calls = list.filter((t) => t.payload.optionType === 'CALL'); const puts = list.filter((t) => t.payload.optionType === 'PUT'); const atmC = [...calls].sort((a, b) => dist(a) - dist(b))[0]; const atmP = [...puts].sort((a, b) => dist(a) - dist(b))[0]; const above = calls.filter((t) => t.payload.strike > idx).sort((a, b) => a.payload.strike - b.payload.strike).slice(0, 2); const below = puts.filter((t) => t.payload.strike < idx).sort((a, b) => b.payload.strike - a.payload.strike).slice(0, 2); for (const t of [atmC, atmP, ...above, ...below]) { if (t && !out.includes(t)) out.push(t); if (out.length >= cap) return out; } } return out; };
-   function acquire(family, coin, opts = {}) { const p = acquireInternal(family, coin, opts); inFlightAcquisitions.add(p); p.then(() => inFlightAcquisitions.delete(p), () => inFlightAcquisitions.delete(p)); return p; }
--  async function acquireInternal(family, coin, { signal: callerSignal = null, force = false, metricIds = null, windowStartTs = null, windowEndTs = null } = {}) {
-+  async function acquireInternal(family, coin, options = {}) {
-+    const { signal: callerSignal = null, force = false, metricIds = null, windowStartTs = null, windowEndTs = null } = options;
-+    const scheduledCoinGeckoAssets = Object.hasOwn(options, COINGECKO_SWEEP_ASSETS) ? options[COINGECKO_SWEEP_ASSETS] : null;
-     const signal = callerSignal ? AbortSignal.any([owned.signal, callerSignal]) : owned.signal; const gen = generation;
-     const s = bySubjectCoin(coin); const m = markets.get(coin) ?? {}; const before = usageSnapshot(); const refusals = {}; let preRefused = 0; // closeout Q04: refusals BEFORE queueing are usage too
-     const out = { family, coin, observations: [], coverage: [], results: [], usage: null };
-@@ -248,7 +253,7 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
-         // R03: bounded ticker enrichment of the deterministically admitted subset (Greeks / bid-ask IV), each call under the guard
-         if (sum?.ok) { const ticks = (sum.observations ?? []).filter((o) => o.kind === 'OPTION_TICK'); const adm = admitOptions(ticks, { cap: limits.optionsAdmittedPerCase, nowTs: clock() }); for (const t of optionEnrichmentTargets(adm.admitted, limits.optionsTickerEnrichmentPerSweep)) { if (signal?.aborted || lifecycleForGuard() !== 'ACTIVE') break; const r = await run('DERIBIT', 'ticker', `dtk:${t.subject.instrumentId}`, () => clients.DERIBIT.ticker({ instrumentName: t.subject.instrumentId, signal })); if (r === null && out.results[out.results.length - 1]?.state === 'QUOTA_REFUSED') break; } }
-       } break;
--      case 'SUPPLY_UNLOCKS': if (s?.coingecko && m.coingecko) await run('COINGECKO', 'coins-markets', `cgm:${coin}`, () => clients.COINGECKO.markets({ assets: [m.coingecko], signal })); if (s?.coinglass) await run('COINGLASS', 'coin-vesting', `cgv:${coin}`, () => clients.COINGLASS.vesting({ symbol: s.coinglass, canonicalCoin: coin, signal }), { ttlMs: DAY_MS }); if (s?.tokenomist) await run('TOKENOMIST', 'upcoming-unlock-events', 'tku', () => clients.TOKENOMIST.upcoming({ subjects: subjects.subjects.filter((x) => x.tokenomist).map((x) => ({ slug: x.tokenomist, canonicalCoin: x.canonicalCoin })), signal }), { ttlMs: DAY_MS }); break;
-+      case 'SUPPLY_UNLOCKS': { const assets = scheduledCoinGeckoAssets ?? (s?.coingecko && m.coingecko ? [m.coingecko] : []); if (assets.length) await run('COINGECKO', 'coins-markets', `cgm:${assets.map((a) => a.coingeckoId).join(',')}`, () => clients.COINGECKO.markets({ assets, signal })); if (s?.coinglass) await run('COINGLASS', 'coin-vesting', `cgv:${coin}`, () => clients.COINGLASS.vesting({ symbol: s.coinglass, canonicalCoin: coin, signal }), { ttlMs: DAY_MS }); if (s?.tokenomist) await run('TOKENOMIST', 'upcoming-unlock-events', 'tku', () => clients.TOKENOMIST.upcoming({ subjects: subjects.subjects.filter((x) => x.tokenomist).map((x) => ({ slug: x.tokenomist, canonicalCoin: x.canonicalCoin })), signal }), { ttlMs: DAY_MS }); break; }
-       case 'DEX_DEFI': for (const p of s?.pools ?? []) await run('GECKOTERMINAL', 'pool', `gtp:${p.network}:${p.poolAddress}`, () => clients.GECKOTERMINAL.pool({ network: p.network, address: p.poolAddress, canonicalCoin: coin, signal })); for (const slug of s?.protocols ?? []) { await run('DEFILLAMA', 'tvl', `dlt:${slug}`, () => clients.DEFILLAMA.protocol({ slug, canonicalCoin: coin, signal }), { ttlMs: HOUR_MS }); await run('DEFILLAMA', 'fees-summary', `dlf:${slug}`, () => clients.DEFILLAMA.summary({ slug, kind: 'fees', canonicalCoin: coin, signal }), { ttlMs: HOUR_MS }); } break;
-       case 'ONCHAIN_ENTITY_FLOW': { const ids = (metricIds ?? ['exchange_net_flow', 'exchange_reserve']).flatMap((x) => (x === 'exchange_net_flow' ? ['exchange_inflow', 'exchange_outflow'] : x === 'exchange_reserve' ? ['exchange_reserve'] : x === 'holder_cohorts' ? ['holder_age_cohort'] : [])); if (s?.cryptoquant && enabled('CRYPTOQUANT')) { for (const mid of ids.filter((x) => CRYPTOQUANT_METRICS[x])) await run('CRYPTOQUANT', CRYPTOQUANT_METRICS[mid].endpointId, `cq:${coin}:${mid}:${windowStartTs ?? ''}`, () => clients.CRYPTOQUANT.series({ asset: s.cryptoquant, canonicalCoin: coin, metricId: mid, limit: 30, fromTs: windowStartTs, toTs: windowEndTs, signal }), { ttlMs: HOUR_MS }); } else if (s?.santiment && enabled('SANTIMENT')) { for (const mid of ids.filter((x) => SANTIMENT_METRICS[x])) await run('SANTIMENT', 'graphql-get-metric', `san:${coin}:${mid}:${windowStartTs ?? ''}`, () => clients.SANTIMENT.series({ slug: s.santiment, canonicalCoin: coin, metricId: mid, fromTs: histFrom, toTs: histTo, signal }), { ttlMs: HOUR_MS }); } break; }
-       case 'NETWORK_ACTIVITY': {
-@@ -272,7 +277,12 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
-     const after = usageSnapshot(); out.usage = { dispatched: after.dispatched - before.dispatched, credits: after.credits - before.credits, refused: after.refused - before.refused + preRefused, unresolved: after.unresolved - before.unresolved, reasons: refusals };
-     return deepFreeze(out);
-   }
--  async function sweep() { for (const coin of subjects.subjects.map((s) => s.canonicalCoin)) { if (stopped) return; for (const fam of sweepFamilies) { if (stopped) return; try { await acquire(fam, coin); } catch (err) { counters.acquisitionFailures += 1; log(`acquire ${fam}/${coin} failed: ${String(err?.message ?? err).slice(0, 120)}`); } } } }
-+  async function sweep() {
-+    const coins = subjects.subjects.map((s) => s.canonicalCoin);
-+    const coinGeckoBatch = coins.map((coin) => ({ coin, asset: markets.get(coin)?.coingecko ?? null })).filter((x) => x.asset);
-+    const coinGeckoAnchor = coinGeckoBatch[0]?.coin ?? null;
-+    for (const coin of coins) { if (stopped) return; for (const fam of sweepFamilies) { if (stopped) return; try { const options = fam === 'SUPPLY_UNLOCKS' ? { [COINGECKO_SWEEP_ASSETS]: coin === coinGeckoAnchor ? coinGeckoBatch.map((x) => x.asset) : [] } : {}; await acquire(fam, coin, options); } catch (err) { counters.acquisitionFailures += 1; log(`acquire ${fam}/${coin} failed: ${String(err?.message ?? err).slice(0, 120)}`); } } }
-+  }
-   function kickSweep(reason) {
-     if (stopped) return null;
-     if (sweepPromise) { bootstrap.overlapSkips += 1; return sweepPromise; }
-diff --git a/test/coingecko-batched-sweep.test.js b/test/coingecko-batched-sweep.test.js
-new file mode 100644
---- /dev/null
-+++ b/test/coingecko-batched-sweep.test.js
-@@ -0,0 +1,88 @@
-+import test from 'node:test';
-+import assert from 'node:assert/strict';
-+import path from 'node:path';
-+import os from 'node:os';
-+import { mkdtempSync, rmSync } from 'node:fs';
-+import { createResearchOwner } from '../market-lab/owner.js';
-+import { loadPolicy, loadSubjects } from '../market-lab/policy.js';
-+import { subjectId } from '../market-lab/contracts.js';
-+import * as H from './helpers/market-lab.js';
-+
-+const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
-+const timers = { setInterval: () => ({ unref() {} }), clearInterval() {}, setTimeout, clearTimeout };
-+const tmp = () => mkdtempSync(path.join(os.tmpdir(), 'coingecko-batch-'));
-+
-+function policy() {
-+  const raw = H.policyWith({ providers: ['COINGECKO'] });
-+  raw.providers.COINGECKO.plan = {
-+    name: 'Demo', billing: 'INCLUDED_QUOTA', includedCallsPerMonth: 10_000,
-+    remainingCalls: 2, incrementalUsdPerCall: 0, attestation: 'offline fixture',
-+    verifiedDate: '2026-09-13', quoteUsdPerMonth: 0,
-+  };
-+  raw.providers.COINGECKO.limits = { maxCallsPerDay: 2, maxCallsPerMonth: 2, maxConcurrency: 1 };
-+  raw.providers.COINGECKO.permittedEndpoints = ['coins-list', 'coins-markets'];
-+  raw.providers.COINGECKO.smoke = { authorized: true, maxCalls: 2, maxEstimatedUsd: 0 };
-+  return loadPolicy(raw);
-+}
-+
-+const subjects = () => loadSubjects(H.subjectsWith());
-+const marketRows = () => [
-+  { ...H.coingeckoMarkets()[0], last_updated: new Date(H.T0 - 60_000).toISOString() },
-+  { id: 'ethereum', symbol: 'eth', name: 'Ethereum', current_price: 4_200, market_cap: 5e11, fully_diluted_valuation: 5.1e11, total_volume: 2e10, circulating_supply: 120_000_000, total_supply: 120_000_000, max_supply: null, last_updated: new Date(H.T0 - 60_000).toISOString() },
-+  { id: 'solana', symbol: 'sol', name: 'Solana', current_price: 220, market_cap: 1.2e11, fully_diluted_valuation: 1.3e11, total_volume: 7e9, circulating_supply: 550_000_000, total_supply: 600_000_000, max_supply: null, last_updated: new Date(H.T0 - 60_000).toISOString() },
-+];
-+
-+function fetchFixture(requests, { marketStatus = 200 } = {}) {
-+  return async (input) => {
-+    const url = new URL(input);
-+    requests.push(url);
-+    if (url.pathname === '/api/v3/coins/list') return json(H.COINGECKO_LIST);
-+    if (url.pathname === '/api/v3/coins/markets') return marketStatus === 200 ? json(marketRows()) : json({ error: 'fixture failure' }, marketStatus);
-+    throw new Error(`unexpected wire attempt: ${url.pathname}`);
-+  };
-+}
-+
-+test('scheduled SUPPLY_UNLOCKS sweep batches every resolved CoinGecko asset into its one remaining admitted call', async () => {
-+  const root = tmp(); const requests = [];
-+  const owner = createResearchOwner({ policy: policy(), subjects: subjects(), env: { COINGECKO_DEMO_API_KEY: 'offline-fixture' }, researchRoot: root, mode: 'INTEGRATED', clock: () => H.T0, fetchImpl: fetchFixture(requests), timers });
-+  try {
-+    await owner.start({ families: ['SUPPLY_UNLOCKS'], awaitInitialSweep: true });
-+    const marketRequests = requests.filter((u) => u.pathname === '/api/v3/coins/markets');
-+    assert.equal(requests.filter((u) => u.pathname === '/api/v3/coins/list').length, 1);
-+    assert.equal(marketRequests.length, 1, 'catalog plus one batched market request consumes the exact two-call allowance');
-+    assert.deepEqual(marketRequests[0].searchParams.get('ids').split(','), ['bitcoin', 'ethereum', 'solana']);
-+    assert.equal(marketRequests[0].searchParams.get('per_page'), '3');
-+    const observations = owner.observations().filter((o) => o.provider === 'COINGECKO' && o.endpointId === 'coins-markets');
-+    assert.deepEqual(observations.map((o) => o.subject.canonicalCoin).sort(), ['BTC', 'ETH', 'SOL']);
-+    assert.deepEqual(observations.map((o) => o.sourceKey).sort(), ['bitcoin', 'ethereum', 'solana']);
-+    assert.equal(new Set(observations.map((o) => o.observationId)).size, 3, 'each asset keeps a distinct evidence identity');
-+    assert.equal(owner.journal.totals('COINGECKO').calls.day, 2);
-+  } finally { await owner.stop({ seal: false }); rmSync(root, { recursive: true, force: true }); }
+diff --git a/lib/bounded-fetch.js b/lib/bounded-fetch.js
+index fd45366..af99a5a 100644
+--- a/lib/bounded-fetch.js
++++ b/lib/bounded-fetch.js
+@@ -1,6 +1,15 @@
+ // Bounded transport for optional observation sources. The deadline includes streamed body reads;
+ // byte limits are enforced before buffering, and credentials never cross a redirect origin.
+ const PRIVATE_HOST_RE = /^(localhost|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|\[?::1\]?$|\[?fe80:|\[?fc|\[?fd)/i;
++// Closed Node/Undici transport codes only. Error messages, URLs, hosts, and
++// arbitrary provider-supplied codes are never copied into collector status.
++const NETWORK_CAUSE_CODES = Object.freeze({
++  ENOTFOUND: true, EAI_AGAIN: true,
++  ECONNRESET: true, ECONNREFUSED: true, UND_ERR_SOCKET: true,
++  ETIMEDOUT: true, UND_ERR_CONNECT_TIMEOUT: true, UND_ERR_HEADERS_TIMEOUT: true, UND_ERR_BODY_TIMEOUT: true,
++  CERT_HAS_EXPIRED: true, DEPTH_ZERO_SELF_SIGNED_CERT: true, SELF_SIGNED_CERT_IN_CHAIN: true,
++  UNABLE_TO_VERIFY_LEAF_SIGNATURE: true, ERR_TLS_CERT_ALTNAME_INVALID: true,
 +});
-+
-+test('a failed batched response records provider failure coverage separately for every requested asset', async () => {
-+  const root = tmp(); const requests = [];
-+  const owner = createResearchOwner({ policy: policy(), subjects: subjects(), env: { COINGECKO_DEMO_API_KEY: 'offline-fixture' }, researchRoot: root, mode: 'INTEGRATED', clock: () => H.T0, fetchImpl: fetchFixture(requests, { marketStatus: 503 }), timers });
-+  try {
-+    await owner.start({ families: ['SUPPLY_UNLOCKS'], awaitInitialSweep: true });
-+    assert.equal(requests.filter((u) => u.pathname === '/api/v3/coins/markets').length, 1);
-+    const coverage = owner.coverage().filter((c) => c.provider === 'COINGECKO' && c.endpointId === 'coins-markets');
-+    assert.deepEqual(coverage.map((c) => c.subjectId).sort(), [
-+      ['BTC', 'bitcoin'], ['ETH', 'ethereum'], ['SOL', 'solana'],
-+    ].map(([canonicalCoin, providerAssetId]) => subjectId({ subjectKind: 'ASSET', canonicalCoin, providerAssetId })).sort());
-+    assert.ok(coverage.every((c) => c.observationCount === 0 && c.state === 'FAILED'));
-+  } finally { await owner.stop({ seal: false }); rmSync(root, { recursive: true, force: true }); }
-+});
-+
-+test('explicit owner.acquire retains its existing single-subject CoinGecko request behavior', async () => {
-+  const root = tmp(); const requests = [];
-+  const owner = createResearchOwner({ policy: policy(), subjects: subjects(), env: { COINGECKO_DEMO_API_KEY: 'offline-fixture' }, researchRoot: root, mode: 'INTEGRATED', clock: () => H.T0, fetchImpl: fetchFixture(requests), timers });
-+  try {
-+    await owner.start({ families: [], awaitInitialSweep: true });
-+    const result = await owner.acquire('SUPPLY_UNLOCKS', 'ETH');
-+    const marketRequests = requests.filter((u) => u.pathname === '/api/v3/coins/markets');
-+    assert.equal(marketRequests.length, 1);
-+    assert.equal(marketRequests[0].searchParams.get('ids'), 'ethereum');
-+    assert.deepEqual(result.observations.map((o) => o.subject.canonicalCoin), ['ETH']);
-+  } finally { await owner.stop({ seal: false }); rmSync(root, { recursive: true, force: true }); }
-+});
-diff --git a/tools/data-only-market.mjs b/tools/data-only-market.mjs
-index 00a6d05..a5fa0dc 100644
---- a/tools/data-only-market.mjs
-+++ b/tools/data-only-market.mjs
-@@ -114,6 +114,28 @@ function configuredState(id, policy, env) {
-   return { desired: 'ON', state: 'STARTING', reason: null };
+ export const BOUNDED_FETCH_DEFAULTS = Object.freeze({ timeoutMs: 10000, maxBytes: 2 * 1024 * 1024, maxRedirects: 2 });
+ export function pinnedUrlError(rawUrl, { host, redirectHosts = [] }) {
+   let u; try { u = new URL(rawUrl); } catch { return 'unparseable URL'; }
+@@ -12,6 +21,12 @@ export function pinnedUrlError(rawUrl, { host, redirectHosts = [] }) {
  }
- 
-+const sanitizedRefusals = (value) => {
-+  if (!value || typeof value !== 'object' || !Number.isSafeInteger(value.count) || value.count < 1) return null;
-+  const safeReason = (reason) => typeof reason === 'string' && /^[A-Z0-9_]{1,64}$/.test(reason);
-+  const reasons = Object.fromEntries(Object.entries(value.reasons ?? {}).filter(([reason, count]) => safeReason(reason) && Number.isSafeInteger(count) && count > 0).sort(([a], [b]) => a.localeCompare(b)));
-+  return {
-+    count: value.count,
-+    reasons,
-+    lastReasons: Array.isArray(value.lastReasons) ? value.lastReasons.filter(safeReason).slice(0, 16) : [],
-+    lastTs: Number.isSafeInteger(value.lastTs) && value.lastTs > 0 ? value.lastTs : null,
-+  };
+ const header = (r, name) => r.headers?.get?.(name) ?? null;
+ const cancel = (body) => { try { Promise.resolve(body?.cancel?.()).catch(() => {}); } catch { /* already locked */ } };
++const networkCauseCode = (error) => {
++  try {
++    for (const code of [error?.cause?.code, error?.code]) if (typeof code === 'string' && Object.hasOwn(NETWORK_CAUSE_CODES, code)) return code;
++  } catch { /* hostile getters and unknown error shapes stay generic */ }
++  return null;
 +};
-+
-+function accountingBlockReasons(provider, accounting) {
-+  if (!provider || !accounting) return [];
-+  const out = [];
-+  const totals = accounting.totals;
-+  if (totals?.calls?.day >= provider.limits.maxCallsPerDay) out.push(provider.limits.maxCallsPerDay === 0 ? 'DAY_CAP_ZERO' : 'DAY_CAP');
-+  if (totals?.calls?.month >= provider.limits.maxCallsPerMonth) out.push(provider.limits.maxCallsPerMonth === 0 ? 'MONTH_CAP_ZERO' : 'MONTH_CAP');
-+  if (provider.plan.billing === 'INCLUDED_QUOTA' && accounting.entitlementRemaining === 0) out.push('ENTITLEMENT_EXHAUSTED');
-+  return [...new Set(out)];
-+}
-+
- export async function startDataOnlyMarket({
-   env = process.env,
-   dataDir = null,
-@@ -159,16 +181,35 @@ export async function startDataOnlyMarket({
-       const configured = configuredState(id, policy, env);
-       const client = current.clients[id]; const accounting = current.accounting.providers?.[id] ?? null;
-       const ok = client?.counters?.ok ?? 0; const failed = client?.counters?.failed ?? 0;
-+      const refusal = sanitizedRefusals(accounting?.refusals);
-+      const catalog = current.resolution?.catalogs?.[id] ?? started?.resolution?.catalogs?.[id] ?? null;
-+      // Refusal totals are historical diagnostics. A later successful receipt
-+      // clears the refusal as a CURRENT blocker, but never erases its audit row.
-+      const refusalIsCurrent = refusal !== null && !(Number.isSafeInteger(client?.lastOkTs) && client.lastOkTs > refusal.lastTs);
-+      const blockReasons = [...new Set([...(refusalIsCurrent ? refusal.lastReasons : []), ...accountingBlockReasons(policy.providers[id], accounting)])];
-+      // Catalog state describes startup resolution and may be stale after a
-+      // quota window changes. Current accounting/refusal evidence owns state.
-+      const policyBlocked = configured.state === 'STARTING' && blockReasons.length > 0;
-       sources[id] = {
-         ...configured,
--        state: configured.state === 'STARTING' ? (ok > 0 ? 'OBSERVED' : failed > 0 ? 'DEGRADED' : current.bootstrap.running ? 'STARTING' : 'NOT_OBSERVED') : configured.state,
-+        state: configured.state === 'STARTING' ? (policyBlocked ? 'POLICY_BLOCKED' : ok > 0 ? 'OBSERVED' : failed > 0 ? 'DEGRADED' : current.bootstrap.running ? 'STARTING' : 'NOT_OBSERVED') : configured.state,
-         credentialEnv: policy.providers[id]?.credentialEnv ?? null,
-         credentialPresent: policy.providers[id]?.credentialEnv ? credentialPresent(policy.providers[id], env) : null,
-         requests: client?.counters?.requests ?? 0,
-         succeeded: ok,
-         failed,
-         callsToday: accounting?.totals?.calls?.day ?? 0,
-+        callsMonth: accounting?.totals?.calls?.month ?? 0,
-         dailyCap: policy.providers[id]?.limits.maxCallsPerDay ?? 0,
-+        monthlyCap: policy.providers[id]?.limits.maxCallsPerMonth ?? 0,
-+        entitlementRemaining: accounting?.entitlementRemaining ?? null,
-+        policyRefusals: refusal,
-+        policyBlockReasons: blockReasons,
-+        catalogResolution: catalog ? {
-+          state: typeof catalog.state === 'string' ? catalog.state : 'UNKNOWN',
-+          count: Number.isSafeInteger(catalog.count) && catalog.count >= 0 ? catalog.count : null,
-+          knownAtTs: Number.isSafeInteger(catalog.knownAtTs) && catalog.knownAtTs > 0 ? catalog.knownAtTs : null,
-+        } : null,
-       };
-     }
-     return {
-diff --git a/test/data-only-market.test.mjs b/test/data-only-market.test.mjs
-index ce02ebd..8264c49 100644
---- a/test/data-only-market.test.mjs
-+++ b/test/data-only-market.test.mjs
-@@ -93,6 +93,103 @@ test('fake provider transport starts scoped spot capture, publishes honest cap p
-   }
+ export function retryAfterSeconds(value, now = Date.now()) {
+   if (typeof value !== 'string' || !value.trim()) return null;
+   if (/^\d+$/.test(value.trim())) return Number(value);
+@@ -77,9 +92,11 @@ async function requestBounded(url, options, json) {
+     return { outcome: 'FAILED', reason: `more than ${maxRedirects} redirects` };
+   } catch (err) {
+     // Neither URLs, response text, nor transport error messages may echo credentials into status.
+-    return { outcome: 'FAILED', reason: ctl.signal.aborted
+-      ? (signal?.aborted ? 'request stopped' : `timeout after ${timeoutMs}ms`)
+-      : `${failureStage} failed` };
++    let reason;
++    if (ctl.signal.aborted) reason = signal?.aborted ? 'request stopped' : `timeout after ${timeoutMs}ms`;
++    else if (failureStage === 'network request') { const code = networkCauseCode(err); reason = code ? `network request failed (${code})` : 'network request failed'; }
++    else reason = `${failureStage} failed`;
++    return { outcome: 'FAILED', reason };
+   } finally {
+     clearTimeout(timer); signal?.removeEventListener('abort', abort);
+     if (reader) { cancel(reader); try { reader.releaseLock(); } catch { /* pending read */ } }
+diff --git a/test/bounded-fetch-diagnostics.test.js b/test/bounded-fetch-diagnostics.test.js
+index 9632dd4..5beec82 100644
+--- a/test/bounded-fetch-diagnostics.test.js
++++ b/test/bounded-fetch-diagnostics.test.js
+@@ -7,6 +7,7 @@ const base = { host: 'sensor.example', timeoutMs: 100, maxBytes: 1024 };
+ 
+ test('bounded JSON transport distinguishes a request failure without exposing its message', async () => {
+   const secretBearingError = new TypeError('fetch https://sensor.example/?token=do-not-echo failed');
++  secretBearingError.cause = { code: 'UNKNOWN_do-not-echo', message: 'credential=do-not-echo' };
+   const result = await fetchJsonBounded(url, {
+     ...base,
+     fetchImpl: async () => { throw secretBearingError; }
+@@ -15,6 +16,29 @@ test('bounded JSON transport distinguishes a request failure without exposing it
+   assert.doesNotMatch(JSON.stringify(result), /do-not-echo/);
  });
  
-+test('status exposes a durable CoinGecko policy block that occurs before the client can issue a request', async () => {
-+  const root = tmp(); let handle = null; let wires = 0;
-+  const policyRaw = JSON.parse(readFileSync(path.join(REPO, 'config', 'market-research.paper.json'), 'utf8'));
-+  for (const [id, provider] of Object.entries(policyRaw.providers)) provider.enabled = id === 'COINGECKO';
-+  const zero = () => ({ calls: { day: 0, month: 0 }, credits: { day: 0, month: 0 }, usd: { day: 0, month: 0 }, reserved: 0, settled: 0, unresolved: 0, released: 0, smoke: { calls: 0, usd: 0 }, dispatched: 0 });
-+  const quotaJournal = {
-+    durable: true,
-+    failed: () => null,
-+    isClosed: () => false,
-+    totals: (id) => id === 'COINGECKO' ? { ...zero(), calls: { day: 0, month: 2 }, credits: { day: 0, month: 2 }, settled: 2, dispatched: 2 } : zero(),
-+    entitlementRemaining: (id) => id === 'COINGECKO' ? 0 : null,
-+    loadPlan: async () => { throw new Error('precheck must block before plan loading'); },
-+    reserve: async () => { throw new Error('precheck must block before reservation'); },
-+    settle: async () => { throw new Error('no reservation exists'); },
-+    unresolved: async () => { throw new Error('no reservation exists'); },
-+    release: async () => { throw new Error('no reservation exists'); },
-+    drained: async () => {},
-+  };
-+  try {
-+    handle = await startDataOnlyMarket({
-+      env: { COINGECKO_DEMO_API_KEY: 'fixture' }, policyRaw, dataDir: root,
-+      families: ['SUPPLY_UNLOCKS'], ownerMode: 'INTEGRATED', quotaJournal,
-+      fetchImpl: async () => { wires += 1; throw new Error('no provider request expected'); },
-+      clock: () => H.T0, log: () => {},
-+    });
-+    const source = handle.status().sources.COINGECKO;
-+    assert.equal(source.desired, 'ON');
-+    assert.equal(source.state, 'POLICY_BLOCKED');
-+    assert.equal(source.requests, 0);
-+    assert.equal(source.callsToday, 0);
-+    assert.equal(source.callsMonth, 2);
-+    assert.equal(source.monthlyCap, 2);
-+    assert.equal(source.entitlementRemaining, 0);
-+    assert.deepEqual(source.policyBlockReasons, ['MONTH_CAP', 'ENTITLEMENT_EXHAUSTED']);
-+    assert.equal(source.policyRefusals, null, 'the catalog precheck itself does not increment dispatch-refusal counters');
-+    assert.deepEqual(source.catalogResolution, { state: 'PROVIDER_DISABLED', count: null, knownAtTs: null });
-+    assert.equal(wires, 0);
-+  } finally {
-+    if (handle) await handle.stop({ seal: false });
-+    rmSync(root, { recursive: true, force: true });
++test('bounded JSON transport appends only allowlisted DNS, reset, TLS, and pre-response timeout cause codes', async () => {
++  const cases = [
++    ['ENOTFOUND', 'DNS'],
++    ['ECONNRESET', 'reset'],
++    ['CERT_HAS_EXPIRED', 'TLS'],
++    ['UND_ERR_CONNECT_TIMEOUT', 'timeout'],
++  ];
++  for (const [code, label] of cases) {
++    const error = new TypeError(`secret ${label} detail`); error.cause = { code, message: `token-${label}` };
++    const result = await fetchJsonBounded(url, { ...base, fetchImpl: async () => { throw error; } });
++    assert.deepEqual(result, { outcome: 'FAILED', reason: `network request failed (${code})` });
++    assert.doesNotMatch(JSON.stringify(result), new RegExp(`secret|token-${label}`));
 +  }
 +});
 +
-+test('a historical policy refusal remains diagnosed but does not mask a later successful observation', async () => {
-+  const root = tmp(); let handle = null; const intervals = []; const reservations = new Map();
-+  const clock = H.clockAt(H.T0); let planLoads = 0; let calls = 0; let nextReservation = 0;
-+  const policyRaw = JSON.parse(readFileSync(path.join(REPO, 'config', 'market-research.paper.json'), 'utf8'));
-+  for (const [id, provider] of Object.entries(policyRaw.providers)) provider.enabled = id === 'COINGECKO';
-+  Object.assign(policyRaw.providers.COINGECKO.plan, { includedCallsPerMonth: 10, remainingCalls: 10, attestation: 'offline recovery fixture' });
-+  Object.assign(policyRaw.providers.COINGECKO.limits, { maxCallsPerDay: 10, maxCallsPerMonth: 10 });
-+  const totals = () => ({ calls: { day: calls, month: calls }, credits: { day: calls, month: calls }, usd: { day: 0, month: 0 }, reserved: 0, settled: calls, unresolved: 0, released: 0, smoke: { calls: 0, usd: 0 }, dispatched: calls });
-+  const quotaJournal = {
-+    durable: true,
-+    failed: () => null,
-+    isClosed: () => false,
-+    totals: () => totals(),
-+    entitlementRemaining: (id) => id === 'COINGECKO' ? 10 - calls : null,
-+    loadPlan: async () => { planLoads += 1; return planLoads === 2 ? { ok: false, reason: 'PLAN_CONFLICT' } : { ok: true, fresh: planLoads === 1 }; },
-+    reserve: async (record) => { calls += 1; const id = `r-${++nextReservation}`; reservations.set(id, record); return id; },
-+    settle: async (id) => { assert.ok(reservations.has(id)); },
-+    unresolved: async (id) => { assert.ok(reservations.has(id)); },
-+    release: async (id) => { assert.ok(reservations.has(id)); },
-+    drained: async () => {},
-+  };
-+  const timers = {
-+    setInterval: (fn, ms) => { const timer = { fn, ms, unref() {} }; intervals.push(timer); return timer; },
-+    clearInterval() {}, setTimeout, clearTimeout,
-+  };
-+  const fetchImpl = async (input) => {
-+    const url = new URL(input);
-+    if (url.pathname === '/api/v3/coins/list') return json(H.COINGECKO_LIST);
-+    if (url.pathname === '/api/v3/coins/markets') return json(H.coingeckoMarkets().map((row) => ({ ...row, last_updated: new Date(clock() - 60_000).toISOString() })));
-+    throw new Error(`unexpected provider request ${url.pathname}`);
-+  };
-+  try {
-+    handle = await startDataOnlyMarket({ env: { COINGECKO_DEMO_API_KEY: 'fixture' }, policyRaw, dataDir: root, families: ['SUPPLY_UNLOCKS'], ownerMode: 'INTEGRATED', quotaJournal, fetchImpl, clock, timers, log: () => {} });
-+    await H.waitFor(() => handle.status().bootstrap.initialState === 'COMPLETE');
-+    const refused = handle.status().sources.COINGECKO;
-+    assert.equal(refused.state, 'POLICY_BLOCKED');
-+    assert.deepEqual(refused.policyBlockReasons, ['PLAN_CONFLICT']);
-+    assert.equal(refused.policyRefusals.count, 1);
-+
-+    clock.advance(1000);
-+    intervals.find((timer) => timer.ms === 300_000).fn();
-+    await H.waitFor(() => handle.status().bootstrap.runsCompleted === 2);
-+    const recovered = handle.status().sources.COINGECKO;
-+    assert.equal(recovered.state, 'OBSERVED', 'a later successful provider receipt owns the live source state');
-+    assert.equal(recovered.succeeded, 2, 'catalog and recovered market request both succeeded');
-+    assert.deepEqual(recovered.policyBlockReasons, []);
-+    assert.equal(recovered.policyRefusals.count, 1, 'the historical refusal remains visible for audit');
-+    assert.deepEqual(recovered.policyRefusals.lastReasons, ['PLAN_CONFLICT']);
-+  } finally {
-+    if (handle) await handle.stop({ seal: false });
-+    rmSync(root, { recursive: true, force: true });
-+  }
++test('the collector-owned deadline keeps its existing timeout reason instead of adopting a nested cause code', async () => {
++  const result = await fetchJsonBounded(url, {
++    ...base, timeoutMs: 10,
++    fetchImpl: async () => new Promise(() => {}),
++  });
++  assert.deepEqual(result, { outcome: 'FAILED', reason: 'timeout after 10ms' });
 +});
 +
- test('data-only market import graph has no trading, model, Judge, Watch, Paper, or Tape composition', () => {
-   const graph = [...importsOf(entry)];
-   const forbidden = ['paper', 'judge', 'execution', 'watch', 'socrates', 'ledger', 'state'];
+ test('bounded JSON transport distinguishes invalid UTF-8 from a network failure', async () => {
+   const bytes = new Uint8Array([0xc3, 0x28]);
+   const result = await fetchJsonBounded(url, {
