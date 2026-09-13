@@ -1,725 +1,140 @@
-diff --git a/lib/decision-memory-port.js b/lib/decision-memory-port.js
-index f7f3913..bf03771 100644
---- a/lib/decision-memory-port.js
-+++ b/lib/decision-memory-port.js
-@@ -7,8 +7,8 @@
- import { createHash, randomBytes } from 'node:crypto';
- import { Worker } from 'node:worker_threads';
- 
--export const DECISION_MEMORY_PORT_VERSION = 'decision-memory-port-1';
--export const DECISION_MEMORY_WORKER_PROTOCOL = 'learning-decision-memory-worker-1';
-+export const DECISION_MEMORY_PORT_VERSION = 'decision-memory-port-2';
-+export const DECISION_MEMORY_WORKER_PROTOCOL = 'learning-decision-memory-worker-2';
- export const DECISION_MEMORY_REFRESH_MS = 60_000;
- export const DECISION_MEMORY_MAX_AGE_MS = 15 * 60_000;
- export const DECISION_MEMORY_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-@@ -21,14 +21,18 @@ export const DECISION_MEMORY_WORKER_RESOURCE_LIMITS = Object.freeze({
-   stackSizeMb: 4,
- });
- const ALLOWED_MODES = Object.freeze(['OBSERVE', 'PAPER']);
--const SNAPSHOT_KEYS = Object.freeze(['view', 'version', 'law', 'preparedTs', 'activations', 'withheld', 'kill']);
-+const SNAPSHOT_KEYS = Object.freeze(['view', 'version', 'law', 'preparedTs', 'activations', 'withheld', 'kill', 'sourceProvenance']);
-+const SOURCE_PROVENANCE_KEYS = Object.freeze([
-+  'snapshotStoreVersion', 'sourceSnapshotVersion', 'sourceProvenanceVersion', 'trustBasis',
-+  'canonicalStoreId', 'sourceDigest', 'totalBytes', 'totalRows',
-+]);
- const ENVELOPE_KEYS = Object.freeze(['protocol', 'requestId', 'ok', 'preparedTs', 'snapshotDigest', 'snapshot']);
- const FAILURE_KEYS = Object.freeze(['protocol', 'requestId', 'ok', 'code']);
- const FAILURE_CODES = new Set([
-   'REQUEST_INVALID', 'STORE_NOT_COMMISSIONED', 'STORE_NOT_DIRECTORY', 'MEMORY_READ_FAILED',
-   'RESPONSE_TOO_LARGE', 'WORKER_TIMEOUT', 'WORKER_ERROR', 'WORKER_EXITED',
-   'RESPONSE_INVALID', 'CLOCK_INVALID', 'CLOCK_ROLLBACK', 'SNAPSHOT_FUTURE', 'SNAPSHOT_STALE',
--  'STOPPED', 'DISABLED', 'REFRESH_RATE_LIMITED', 'WORKER_RESOURCE_LIMIT_INVALID',
-+  'STOPPED', 'DISABLED', 'REFRESH_RATE_LIMITED', 'WORKER_RESOURCE_LIMIT_INVALID', 'MEMORY_SOURCE_REFUSED',
- ]);
- 
- const exactKeys = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value)
-@@ -48,6 +52,16 @@ function snapshotError(snapshot, expectedTs) {
-   if (snapshot.view !== 'DECISION' || snapshot.version !== 'learning-memory-view-1'
-       || snapshot.law !== 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY') return 'RESPONSE_INVALID';
-   if (!safeTs(snapshot.preparedTs) || snapshot.preparedTs !== expectedTs) return 'RESPONSE_INVALID';
-+  const source = snapshot.sourceProvenance;
-+  if (!exactKeys(source, SOURCE_PROVENANCE_KEYS)
-+      || source.snapshotStoreVersion !== 'learning-decision-snapshot-store-1'
-+      || source.sourceSnapshotVersion !== 'learning-decision-raw-snapshot-1'
-+      || source.sourceProvenanceVersion !== 'learning-decision-read-provenance-1'
-+      || source.trustBasis !== 'FIXED_BOUNDED_READER_COMPLETE_RAW_BYTES'
-+      || !/^sha256:[a-f0-9]{64}$/.test(source.canonicalStoreId ?? '')
-+      || !/^[a-f0-9]{64}$/.test(source.sourceDigest ?? '')
-+      || !Number.isSafeInteger(source.totalBytes) || source.totalBytes < 0 || source.totalBytes > 8 * 1024 * 1024
-+      || !Number.isSafeInteger(source.totalRows) || source.totalRows < 0 || source.totalRows > 10_000) return 'RESPONSE_INVALID';
-   // Until a future activation schema seals the feature body and rank-effect
-   // transform before capture, the authoritative worker must pass no activation.
-   if (!Array.isArray(snapshot.activations) || snapshot.activations.length !== 0) return 'RESPONSE_INVALID';
-diff --git a/learning/decision-memory-worker.js b/learning/decision-memory-worker.js
-index 0347d8d..948c38c 100644
---- a/learning/decision-memory-worker.js
-+++ b/learning/decision-memory-worker.js
-@@ -3,12 +3,12 @@
- // structured-cloneable snapshot. A missing learning directory is NOT
- // commissioned here: the decision consumer is read-only and fails closed.
- import { createHash } from 'node:crypto';
--import { existsSync, statSync } from 'node:fs';
- import { isMainThread, parentPort, workerData, resourceLimits } from 'node:worker_threads';
--import { createLearningStore, learningDir } from './store.js';
-+import { readDecisionSourceSnapshot } from './decision-read-snapshot.js';
-+import { createDecisionSnapshotStore } from './decision-snapshot-store.js';
- import { readDecisionMemory } from './memory-view.js';
- 
--export const DECISION_MEMORY_WORKER_PROTOCOL = 'learning-decision-memory-worker-1';
-+export const DECISION_MEMORY_WORKER_PROTOCOL = 'learning-decision-memory-worker-2';
- export const DECISION_MEMORY_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
- export const UNSEALED_ACTIVATION_REASON = 'ACTIVATION_V1_EFFECT_AND_FEATURE_RECIPE_BODY_UNSEALED';
- 
-@@ -20,7 +20,7 @@ const safeTs = (value) => Number.isSafeInteger(value) && value >= 0;
- // but not the feature recipe body/digest or the rank-effect transform/units.
- // Those durable rows remain readable history; they are never retrofitted after
- // their outcomes and cannot enter a decision snapshot through this boundary.
--export function withholdUnsealedDecisionEffects(memory) {
-+export function withholdUnsealedDecisionEffects(memory, sourceProvenance) {
-   const activations = Array.isArray(memory?.activations) ? memory.activations : [];
-   const prior = Array.isArray(memory?.withheld) ? memory.withheld : [];
-   const withheld = [...prior];
-@@ -37,6 +37,7 @@ export function withholdUnsealedDecisionEffects(memory) {
-     version: memory?.version,
-     law: memory?.law,
-     preparedTs: memory?.preparedTs,
-+    sourceProvenance,
-     activations: [],
-     withheld,
-     kill: memory?.kill,
-@@ -53,11 +54,15 @@ function runRequest(request) {
-       || typeof request?.dataDir !== 'string' || request.dataDir.length === 0 || request.dataDir.length > 4096
-       || !safeTs(request?.nowTs)) return failure(requestId, 'REQUEST_INVALID');
-   try {
--    const dir = learningDir(request.dataDir);
--    if (!existsSync(dir)) return failure(requestId, 'STORE_NOT_COMMISSIONED');
--    if (!statSync(dir).isDirectory()) return failure(requestId, 'STORE_NOT_DIRECTORY');
--    const store = createLearningStore({ dataDir: request.dataDir });
--    const snapshot = withholdUnsealedDecisionEffects(readDecisionMemory({ store, nowTs: request.nowTs }));
-+    const source = readDecisionSourceSnapshot({ dataDir: request.dataDir });
-+    if (!source.ok) return failure(requestId, source.code === 'STORE_NOT_COMMISSIONED' ? source.code : 'MEMORY_SOURCE_REFUSED');
-+    let store;
-+    try { store = createDecisionSnapshotStore(source, { nowTs: request.nowTs }); }
-+    catch { return failure(requestId, 'MEMORY_SOURCE_REFUSED'); }
-+    const snapshot = withholdUnsealedDecisionEffects(
-+      readDecisionMemory({ store, nowTs: request.nowTs }),
-+      store.sourceProvenance,
-+    );
-     const serialized = JSON.stringify(snapshot);
-     if (Buffer.byteLength(serialized, 'utf8') > DECISION_MEMORY_MAX_RESPONSE_BYTES) {
-       return failure(requestId, 'RESPONSE_TOO_LARGE');
-diff --git a/test/learning-memory-port-review.test.js b/test/learning-memory-port-review.test.js
-index 7cc9227..05e934c 100644
---- a/test/learning-memory-port-review.test.js
-+++ b/test/learning-memory-port-review.test.js
-@@ -2,7 +2,7 @@ import test from 'node:test';
- import assert from 'node:assert/strict';
- import { createHash } from 'node:crypto';
- import { execFileSync } from 'node:child_process';
--import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
- import { tmpdir } from 'node:os';
- import path from 'node:path';
- import {
-@@ -17,14 +17,27 @@ import {
-   UNSEALED_ACTIVATION_REASON,
-   withholdUnsealedDecisionEffects,
- } from '../learning/decision-memory-worker.js';
-+import { DECISION_READ_MAX_TOTAL_BYTES, readDecisionSourceSnapshot } from '../learning/decision-read-snapshot.js';
- 
- const T = Date.UTC(2026, 8, 13, 12);
- const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-+const sourceProvenance = (overrides = {}) => ({
-+  snapshotStoreVersion: 'learning-decision-snapshot-store-1',
-+  sourceSnapshotVersion: 'learning-decision-raw-snapshot-1',
-+  sourceProvenanceVersion: 'learning-decision-read-provenance-1',
-+  trustBasis: 'FIXED_BOUNDED_READER_COMPLETE_RAW_BYTES',
-+  canonicalStoreId: `sha256:${'a'.repeat(64)}`,
-+  sourceDigest: 'b'.repeat(64),
-+  totalBytes: 0,
-+  totalRows: 0,
-+  ...overrides,
-+});
- const memory = (preparedTs, overrides = {}) => ({
-   view: 'DECISION',
-   version: 'learning-memory-view-1',
-   law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY',
-   preparedTs,
-+  sourceProvenance: sourceProvenance(),
-   activations: [],
-   withheld: [],
-   kill: { state: 'ARMED', reason: null, ts: null },
-@@ -49,6 +62,12 @@ const immediate = (makeResponse) => (request) => ({
-   closed: Promise.resolve(),
-   cancel: () => {},
- });
-+const commissionEmptyLearning = (root) => {
-+  const learning = path.join(root, 'learning');
-+  mkdirSync(learning);
-+  for (const file of ['activations.jsonl', 'patterns.jsonl', 'prospective.jsonl']) writeFileSync(path.join(learning, file), '');
-+  return learning;
-+};
- 
- test('default-off port has no worker or snapshot and is not composed into Judge or fly', async () => {
-   const port = createDecisionMemoryPort();
-@@ -87,8 +106,9 @@ test('authoritative worker refuses an absent learning store without commissionin
- 
- test('real worker reads an existing store; later snapshot calls are frozen RAM-only reads', async () => {
-   const root = mkdtempSync(path.join(tmpdir(), 'cobra-memory-existing-'));
--  const learning = path.join(root, 'learning');
--  mkdirSync(learning);
-+  const learning = commissionEmptyLearning(root);
-+  const before = readDecisionSourceSnapshot({ dataDir: root });
-+  assert.equal(before.ok, true);
-   const port = createDecisionMemoryPort({ enabled: true, mode: 'OBSERVE', dataDir: root, clock: () => T });
-   try {
-     assert.deepEqual(await port.refresh(), { ok: true, preparedTs: T, withheldCount: 0 });
-@@ -97,6 +117,14 @@ test('real worker reads an existing store; later snapshot calls are frozen RAM-o
-     assert.equal(first.activations.length, 0);
-     assert.equal(Object.isFrozen(first), true);
-     assert.equal(Object.isFrozen(first.kill), true);
-+    assert.equal(Object.isFrozen(first.sourceProvenance), true);
-+    assert.equal(first.sourceProvenance.sourceDigest, before.provenance.sourceDigest);
-+    assert.equal(first.sourceProvenance.canonicalStoreId, before.provenance.canonicalStoreId);
-+    assert.equal(first.sourceProvenance.totalBytes, before.provenance.totalBytes);
-+    assert.equal(first.sourceProvenance.totalRows, before.provenance.totalRows);
-+    const after = readDecisionSourceSnapshot({ dataDir: root });
-+    assert.equal(after.ok, true);
-+    assert.equal(after.provenance.sourceDigest, before.provenance.sourceDigest, 'worker is a byte-stable read with no filesystem write');
-     rmSync(learning, { recursive: true, force: true });
-     assert.strictEqual(port.snapshot(), first, 'snapshot() performs no filesystem read or refresh');
-     assert.equal(existsSync(learning), false);
-@@ -109,9 +137,47 @@ test('real worker reads an existing store; later snapshot calls are frozen RAM-o
- test('activation-v1 history is explicitly withheld, never retrofitted into the RAM view', () => {
-   const filtered = withholdUnsealedDecisionEffects(memory(T, {
-     activations: [{ activationVersion: 'learning-activation-1', activationId: 'lact-existing' }],
--  }));
-+  }), sourceProvenance());
-   assert.deepEqual(filtered.activations, []);
-   assert.deepEqual(filtered.withheld, [{ activationId: 'lact-existing', reason: UNSEALED_ACTIVATION_REASON }]);
-+  assert.deepEqual(filtered.sourceProvenance, sourceProvenance());
-+});
-+
-+test('required-history absence and oversized preflight refuse whole without repair or partial fallback', async () => {
-+  const missingRoot = mkdtempSync(path.join(tmpdir(), 'cobra-memory-required-'));
-+  const missingDir = path.join(missingRoot, 'learning');
-+  mkdirSync(missingDir);
-+  writeFileSync(path.join(missingDir, 'activations.jsonl'), '');
-+  writeFileSync(path.join(missingDir, 'patterns.jsonl'), '');
-+  const beforeNames = readdirSync(missingDir);
-+  const missingPort = createDecisionMemoryPort({ enabled: true, mode: 'OBSERVE', dataDir: missingRoot, clock: () => T });
-+  try {
-+    assert.deepEqual(await missingPort.refresh(), { ok: false, reason: 'MEMORY_SOURCE_REFUSED' });
-+    assert.deepEqual(readdirSync(missingDir), beforeNames);
-+    assert.equal(existsSync(path.join(missingDir, 'prospective.jsonl')), false, 'worker never commissions the required journal');
-+    assert.equal(missingPort.snapshot(), null);
-+  } finally {
-+    await missingPort.stop();
-+    rmSync(missingRoot, { recursive: true, force: true });
-+  }
-+
-+  const largeRoot = mkdtempSync(path.join(tmpdir(), 'cobra-memory-large-'));
-+  const largeDir = commissionEmptyLearning(largeRoot);
-+  const largeFile = path.join(largeDir, 'prospective.jsonl');
-+  writeFileSync(largeFile, Buffer.alloc(DECISION_READ_MAX_TOTAL_BYTES + 1, 0x20));
-+  const sizeBefore = statSync(largeFile).size;
-+  const direct = readDecisionSourceSnapshot({ dataDir: largeRoot });
-+  assert.equal(direct.ok, false);
-+  assert.equal(direct.code, 'SOURCE_TOO_LARGE');
-+  const largePort = createDecisionMemoryPort({ enabled: true, mode: 'OBSERVE', dataDir: largeRoot, clock: () => T });
-+  try {
-+    assert.deepEqual(await largePort.refresh(), { ok: false, reason: 'MEMORY_SOURCE_REFUSED' });
-+    assert.equal(statSync(largeFile).size, sizeBefore);
-+    assert.equal(largePort.snapshot(), null);
-+  } finally {
-+    await largePort.stop();
-+    rmSync(largeRoot, { recursive: true, force: true });
-+  }
- });
- 
- test('refresh calls coalesce, publish only a validated frozen snapshot, and report counts only', async () => {
-diff --git a/learning/decision-snapshot-store.js b/learning/decision-snapshot-store.js
+diff --git a/test/learning-worker-activation-withheld-review.test.js b/test/learning-worker-activation-withheld-review.test.js
 new file mode 100644
 --- /dev/null
-+++ b/learning/decision-snapshot-store.js
-@@ -0,0 +1,210 @@
-+// Pure semantic facade over one complete output from decision-read-snapshot.js.
-+//
-+// This module performs no filesystem work and grants no decision authority.  In
-+// production it is intended to receive the fixed bounded reader's deeply frozen
-+// result in the same worker turn.  The parsed values cannot independently prove
-+// their raw-byte hashes: that trust boundary remains the fixed reader.  We make
-+// that dependency explicit in sourceProvenance and reject any envelope whose
-+// byte/row/entity accounting does not exactly reconcile.
-+import {
-+  canonicalDigest,
-+  isPlainObject,
-+  isTs,
-+  patternRecordError,
-+} from './contracts.js';
-+import { replayActivationHistory } from './activation-chain.js';
-+
-+export const DECISION_SNAPSHOT_STORE_VERSION = 'learning-decision-snapshot-store-1';
-+export const DECISION_SNAPSHOT_SOURCE_TRUST = 'FIXED_BOUNDED_READER_COMPLETE_RAW_BYTES';
-+
-+// Mirrored as a closed input contract rather than imported from the reader, so
-+// this semantic adapter has no filesystem dependency (including transitively).
-+const DECISION_READ_SNAPSHOT_VERSION = 'learning-decision-raw-snapshot-1';
-+const DECISION_READ_PROVENANCE_VERSION = 'learning-decision-read-provenance-1';
-+const DECISION_READ_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
-+const DECISION_READ_MAX_LINE_BYTES = 64 * 1024;
-+const DECISION_READ_MAX_TOTAL_ROWS = 10_000;
-+const DECISION_READ_MAX_ACTIVATION_ENTITIES = 1_000;
-+const DECISION_READ_MAX_PATTERN_ENTITIES = 10_000;
-+const DECISION_READ_MAX_PROSPECTIVE_ENTITIES = 1_000;
-+
-+const HEX64 = /^[a-f0-9]{64}$/;
-+const DECIMAL_INTEGER = /^(?:0|[1-9][0-9]*)$/;
-+const TOP_KEYS = Object.freeze(['ok', 'version', 'authority', 'activations', 'patterns', 'prospective', 'kill', 'provenance']);
-+const PROVENANCE_KEYS = Object.freeze(['version', 'authority', 'complete', 'canonicalStoreId', 'sourceDigest', 'totalBytes', 'totalRows', 'files', 'limits']);
-+const FILE_KEYS = Object.freeze(['present', 'bytes', 'rows', 'entities', 'sha256', 'identity']);
-+const IDENTITY_KEYS = Object.freeze(['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs']);
-+const LIMIT_KEYS = Object.freeze([
-+  'maxTotalBytes', 'maxLineBytes', 'maxTotalRows', 'maxActivationEntities',
-+  'maxPatternEntities', 'maxProspectiveEntities',
-+]);
-+const JOURNALS = Object.freeze([
-+  Object.freeze({ key: 'activations', required: true, maxEntities: DECISION_READ_MAX_ACTIVATION_ENTITIES }),
-+  Object.freeze({ key: 'patterns', required: true, maxEntities: DECISION_READ_MAX_PATTERN_ENTITIES }),
-+  Object.freeze({ key: 'prospective', required: true, maxEntities: DECISION_READ_MAX_PROSPECTIVE_ENTITIES }),
-+  Object.freeze({ key: 'kill', required: false, maxEntities: 1 }),
-+]);
-+const KILL_KEYS = Object.freeze(['state', 'reason', 'ts']);
-+
-+const exactKeys = (value, keys) => isPlainObject(value)
-+  && Object.keys(value).length === keys.length
-+  && keys.every((key) => Object.hasOwn(value, key));
-+const count = (value, maximum) => Number.isSafeInteger(value) && value >= 0 && value <= maximum;
-+const deepFrozen = (value, seen = new Set()) => {
-+  if (value === null || typeof value !== 'object' || seen.has(value)) return true;
-+  if (!Object.isFrozen(value)) return false;
-+  seen.add(value);
-+  return Object.keys(value).every((key) => deepFrozen(value[key], seen));
-+};
-+const refuse = (code) => { throw new Error(`decision snapshot store: ${code}`); };
-+
-+function entityKey(journal, row, rowNumber) {
-+  let value = null;
-+  if (journal === 'activations') value = row?.activationId;
-+  else if (journal === 'patterns') value = row?.patternId;
-+  else if (journal === 'prospective') value = row?.candidateId ?? row?.design?.candidateId;
-+  return typeof value === 'string' && value.length > 0 ? value : `UNIDENTIFIED_ROW_${rowNumber}`;
-+}
-+
-+function expectedEntities(journal, rows) {
-+  return new Set(rows.map((row, index) => entityKey(journal, row, index + 1))).size;
-+}
-+
-+function fileError(file, { key, required, maxEntities }, rows) {
-+  if (!exactKeys(file, FILE_KEYS) || typeof file.present !== 'boolean') return 'SOURCE_PROVENANCE_INVALID';
-+  if (!count(file.bytes, DECISION_READ_MAX_TOTAL_BYTES)
-+      || !count(file.rows, DECISION_READ_MAX_TOTAL_ROWS)
-+      || !count(file.entities, maxEntities)) return 'SOURCE_PROVENANCE_INVALID';
-+  if (!file.present) {
-+    if (required || file.bytes !== 0 || file.rows !== 0 || file.entities !== 0
-+        || file.sha256 !== null || file.identity !== null) return 'SOURCE_PROVENANCE_INVALID';
-+    return null;
-+  }
-+  if (!HEX64.test(file.sha256 ?? '') || !exactKeys(file.identity, IDENTITY_KEYS)
-+      || !IDENTITY_KEYS.every((key) => DECIMAL_INTEGER.test(file.identity[key] ?? ''))
-+      || file.identity.size !== String(file.bytes)) return 'SOURCE_PROVENANCE_INVALID';
-+  if (file.rows !== rows.length || file.entities !== expectedEntities(key, rows)) return 'SOURCE_PROVENANCE_INVALID';
-+  return null;
-+}
-+
-+function snapshotError(snapshot) {
-+  if (!exactKeys(snapshot, TOP_KEYS) || snapshot.ok !== true
-+      || snapshot.version !== DECISION_READ_SNAPSHOT_VERSION || snapshot.authority !== 'NONE'
-+      || !deepFrozen(snapshot)) return 'SOURCE_SNAPSHOT_INVALID';
-+  if (!Array.isArray(snapshot.activations) || !Array.isArray(snapshot.patterns)
-+      || !Array.isArray(snapshot.prospective) || !isPlainObject(snapshot.kill)) return 'SOURCE_SNAPSHOT_INVALID';
-+  const provenance = snapshot.provenance;
-+  if (!exactKeys(provenance, PROVENANCE_KEYS)
-+      || provenance.version !== DECISION_READ_PROVENANCE_VERSION
-+      || provenance.authority !== 'NONE' || provenance.complete !== true
-+      || !/^sha256:[a-f0-9]{64}$/.test(provenance.canonicalStoreId ?? '')
-+      || !HEX64.test(provenance.sourceDigest ?? '')
-+      || !count(provenance.totalBytes, DECISION_READ_MAX_TOTAL_BYTES)
-+      || !count(provenance.totalRows, DECISION_READ_MAX_TOTAL_ROWS)
-+      || !exactKeys(provenance.files, JOURNALS.map(({ key }) => key))
-+      || !exactKeys(provenance.limits, LIMIT_KEYS)) return 'SOURCE_PROVENANCE_INVALID';
-+  const expectedLimits = {
-+    maxTotalBytes: DECISION_READ_MAX_TOTAL_BYTES,
-+    maxLineBytes: DECISION_READ_MAX_LINE_BYTES,
-+    maxTotalRows: DECISION_READ_MAX_TOTAL_ROWS,
-+    maxActivationEntities: DECISION_READ_MAX_ACTIVATION_ENTITIES,
-+    maxPatternEntities: DECISION_READ_MAX_PATTERN_ENTITIES,
-+    maxProspectiveEntities: DECISION_READ_MAX_PROSPECTIVE_ENTITIES,
-+  };
-+  if (LIMIT_KEYS.some((key) => provenance.limits[key] !== expectedLimits[key])) return 'SOURCE_PROVENANCE_INVALID';
-+
-+  let bytes = 0; let rows = 0;
-+  for (const descriptor of JOURNALS) {
-+    const values = descriptor.key === 'kill' ? [snapshot.kill] : snapshot[descriptor.key];
-+    const err = fileError(provenance.files[descriptor.key], descriptor, values); if (err) return err;
-+    bytes += provenance.files[descriptor.key].bytes;
-+    rows += provenance.files[descriptor.key].rows;
-+  }
-+  if (bytes !== provenance.totalBytes || rows !== provenance.totalRows) return 'SOURCE_PROVENANCE_INVALID';
-+  const killFile = provenance.files.kill;
-+  if (!killFile.present && canonicalDigest(snapshot.kill) !== canonicalDigest({ state: 'ARMED', reason: null, ts: null })) return 'SOURCE_PROVENANCE_INVALID';
-+  return null;
-+}
-+
-+const patternIdentityDigest = (row) => canonicalDigest({
-+  patternRecordVersion: row.patternRecordVersion,
-+  patternId: row.patternId,
-+  predicate: row.predicate,
-+  predicateDigest: row.predicateDigest,
-+  scope: row.scope,
-+  scopeDigest: row.scopeDigest,
-+  origin: row.origin,
-+  createdTs: row.createdTs,
-+  authority: row.authority,
-+  purpose: row.purpose,
-+});
-+
-+function strictPatternHeads(records) {
-+  const heads = new Map();
-+  const identities = new Map();
-+  const invalid = new Set();
-+  let globalInvalid = false;
-+  for (const row of records) {
-+    const patternId = isPlainObject(row) && typeof row.patternId === 'string' && row.patternId.length > 0
-+      ? row.patternId : null;
-+    if (patternId !== null && invalid.has(patternId)) continue;
-+    const localError = patternRecordError(row);
-+    if (localError) {
-+      if (patternId === null) globalInvalid = true;
-+      else { invalid.add(patternId); heads.delete(patternId); identities.delete(patternId); }
-+      continue;
-+    }
-+    const previous = heads.get(patternId) ?? null;
-+    const identity = patternIdentityDigest(row);
-+    const broken = previous === null
-+      ? row.seq !== 0 || row.previousState !== null
-+      : row.seq !== previous.seq + 1 || row.previousState !== previous.state
-+        || row.ts < previous.ts || identity !== identities.get(patternId);
-+    if (broken) {
-+      invalid.add(patternId); heads.delete(patternId); identities.delete(patternId);
-+      continue;
-+    }
-+    heads.set(patternId, row); identities.set(patternId, identity);
-+  }
-+  if (globalInvalid) heads.clear();
-+  return heads;
-+}
-+
-+function canonicalKill(snapshot, nowTs) {
-+  const present = snapshot.provenance.files.kill.present;
-+  if (!present) return snapshot.kill;
-+  const kill = snapshot.kill;
-+  const valid = exactKeys(kill, KILL_KEYS)
-+    && ['ARMED', 'KILLED'].includes(kill.state)
-+    && (kill.reason === null || (typeof kill.reason === 'string' && kill.reason.length > 0 && kill.reason.length <= 1_000))
-+    && isTs(kill.ts) && kill.ts <= nowTs;
-+  if (valid) return kill;
-+  return Object.freeze({
-+    state: 'KILLED',
-+    reason: isPlainObject(kill) && isTs(kill.ts) && kill.ts > nowTs ? 'KILL_FILE_FUTURE' : 'KILL_FILE_INVALID',
-+    ts: null,
-+  });
-+}
-+
-+export function createDecisionSnapshotStore(snapshot, { nowTs } = {}) {
-+  if (!isTs(nowTs)) refuse('CLOCK_INVALID');
-+  const error = snapshotError(snapshot); if (error) refuse(error);
-+  const kill = canonicalKill(snapshot, nowTs);
-+  const sourceProvenance = Object.freeze({
-+    snapshotStoreVersion: DECISION_SNAPSHOT_STORE_VERSION,
-+    sourceSnapshotVersion: snapshot.version,
-+    sourceProvenanceVersion: snapshot.provenance.version,
-+    trustBasis: DECISION_SNAPSHOT_SOURCE_TRUST,
-+    canonicalStoreId: snapshot.provenance.canonicalStoreId,
-+    sourceDigest: snapshot.provenance.sourceDigest,
-+    totalBytes: snapshot.provenance.totalBytes,
-+    totalRows: snapshot.provenance.totalRows,
-+  });
-+  return Object.freeze({
-+    sourceProvenance,
-+    activationHistory: () => replayActivationHistory(snapshot.activations),
-+    patternHeads: () => strictPatternHeads(snapshot.patterns),
-+    readProspective: () => snapshot.prospective,
-+    readKill: () => kill,
-+  });
-+}
-diff --git a/test/learning-decision-snapshot-store-review.test.js b/test/learning-decision-snapshot-store-review.test.js
-new file mode 100644
---- /dev/null
-+++ b/test/learning-decision-snapshot-store-review.test.js
-@@ -0,0 +1,264 @@
++++ b/test/learning-worker-activation-withheld-review.test.js
+@@ -0,0 +1,135 @@
 +import test from 'node:test';
 +import assert from 'node:assert/strict';
-+import { createHash } from 'node:crypto';
-+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
++import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 +import { tmpdir } from 'node:os';
 +import path from 'node:path';
-+import {
-+  DECISION_READ_MAX_ACTIVATION_ENTITIES,
-+  DECISION_READ_MAX_LINE_BYTES,
-+  DECISION_READ_MAX_PATTERN_ENTITIES,
-+  DECISION_READ_MAX_PROSPECTIVE_ENTITIES,
-+  DECISION_READ_MAX_TOTAL_BYTES,
-+  DECISION_READ_MAX_TOTAL_ROWS,
-+  DECISION_READ_PROVENANCE_VERSION,
-+  DECISION_READ_SNAPSHOT_VERSION,
-+  readDecisionSourceSnapshot,
-+} from '../learning/decision-read-snapshot.js';
-+import {
-+  DECISION_SNAPSHOT_SOURCE_TRUST,
-+  createDecisionSnapshotStore,
-+} from '../learning/decision-snapshot-store.js';
-+import { buildPatternRecord } from '../learning/patterns.js';
-+import { buildActivation, transitionActivation } from '../learning/adapter.js';
++import { fileURLToPath } from 'node:url';
++import { createDecisionMemoryPort } from '../lib/decision-memory-port.js';
++import { UNSEALED_ACTIVATION_REASON } from '../learning/decision-memory-worker.js';
++import { transitionActivation } from '../learning/adapter.js';
++import { buildEvidence, buildPatternRecord, estimateFromEvidence } from '../learning/patterns.js';
++import { freezeCandidate, settleCandidate } from '../learning/promotion.js';
 +import { readDecisionMemory } from '../learning/memory-view.js';
++import { createLearningStore } from '../learning/store.js';
++import { JUDGE_FACT_RECIPE_VERSION } from '../judge/learning-intake.js';
 +
-+const T = 1_800_000_000_000;
++const T0 = Date.UTC(2026, 5, 1);
++const HOUR = 3_600_000;
 +const DAY = 86_400_000;
-+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
-+const deepFreeze = (value) => {
-+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
-+  Object.freeze(value);
-+  for (const key of Object.keys(value)) deepFreeze(value[key]);
-+  return value;
-+};
-+const entityKey = (journal, row, rowNumber) => {
-+  let value = null;
-+  if (journal === 'activations') value = row?.activationId;
-+  else if (journal === 'patterns') value = row?.patternId;
-+  else if (journal === 'prospective') value = row?.candidateId ?? row?.design?.candidateId;
-+  return typeof value === 'string' && value.length > 0 ? value : `UNIDENTIFIED_ROW_${rowNumber}`;
-+};
-+const fileProvenance = (journal, value, present, ino) => {
-+  if (!present) return { present: false, bytes: 0, rows: 0, entities: 0, sha256: null, identity: null };
-+  const values = journal === 'kill' ? [value] : value;
-+  const bytes = Buffer.from(journal === 'kill'
-+    ? JSON.stringify(value)
-+    : values.map((row) => `${JSON.stringify(row)}\n`).join(''));
-+  return {
-+    present: true,
-+    bytes: bytes.length,
-+    rows: values.length,
-+    entities: new Set(values.map((row, index) => entityKey(journal, row, index + 1))).size,
-+    sha256: sha256(bytes),
-+    identity: { dev: '1', ino: String(ino), size: String(bytes.length), mtimeNs: '10', ctimeNs: '10' },
-+  };
-+};
++const POLICY_DIGEST = 'a'.repeat(64);
++const PREDICATE = Object.freeze({ clauses: [Object.freeze({ feature: 'relVolume60m', op: 'GTE', threshold: 3 })] });
++const SCOPE = Object.freeze({ setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED' });
++const COST_MODEL = Object.freeze({ feePctPerSide: 0.8, slippageBps: 10 });
++const CONSUMER_BINDING = Object.freeze({ featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyDigest: POLICY_DIGEST });
 +
-+function sourceSnapshot({ activations = [], patterns = [], prospective = [], kill = { state: 'ARMED', reason: null, ts: null }, killPresent = false } = {}) {
-+  const files = {
-+    activations: fileProvenance('activations', activations, true, 1),
-+    patterns: fileProvenance('patterns', patterns, true, 2),
-+    prospective: fileProvenance('prospective', prospective, true, 3),
-+    kill: fileProvenance('kill', kill, killPresent, 4),
-+  };
-+  const totalBytes = Object.values(files).reduce((sum, file) => sum + file.bytes, 0);
-+  const totalRows = Object.values(files).reduce((sum, file) => sum + file.rows, 0);
-+  return deepFreeze({
-+    ok: true,
-+    version: DECISION_READ_SNAPSHOT_VERSION,
-+    authority: 'NONE',
-+    activations,
-+    patterns,
-+    prospective,
-+    kill,
-+    provenance: {
-+      version: DECISION_READ_PROVENANCE_VERSION,
-+      authority: 'NONE',
-+      complete: true,
-+      canonicalStoreId: `sha256:${'a'.repeat(64)}`,
-+      sourceDigest: 'b'.repeat(64),
-+      totalBytes,
-+      totalRows,
-+      files,
-+      limits: {
-+        maxTotalBytes: DECISION_READ_MAX_TOTAL_BYTES,
-+        maxLineBytes: DECISION_READ_MAX_LINE_BYTES,
-+        maxTotalRows: DECISION_READ_MAX_TOTAL_ROWS,
-+        maxActivationEntities: DECISION_READ_MAX_ACTIVATION_ENTITIES,
-+        maxPatternEntities: DECISION_READ_MAX_PATTERN_ENTITIES,
-+        maxProspectiveEntities: DECISION_READ_MAX_PROSPECTIVE_ENTITIES,
-+      },
-+    },
-+  });
++function appendAccumulatingPattern(store) {
++  const items = Array.from({ length: 8 }, (_, index) => ({
++    opportunityId: `lop-history-${index}`,
++    canonicalCoin: `A${index % 5}A`,
++    decisionTs: T0 - 20 * DAY + index * DAY,
++    evidenceBasis: 'HISTORICAL_RECONSTRUCTION',
++    outcomeClass: index % 4 === 3 ? 'ADVERSE' : 'FAVORABLE',
++  }));
++  const evidence = buildEvidence(items);
++  const estimate = estimateFromEvidence(items, evidence, { pooledMean: 0.5, priorStrength: 8, updatedTs: T0 - DAY });
++  const persistedEvidence = { ...evidence, _grouping: null };
++  store.appendPattern(buildPatternRecord({
++    predicate: PREDICATE, scope: SCOPE, origin: 'TEST', createdTs: T0 - 20 * DAY,
++    ts: T0 - 20 * DAY, seq: 0, state: 'NOTICED', previousState: null,
++    transitionReason: 'FIRST_OBSERVATION', evidence: persistedEvidence, estimate, contradictions: [],
++  }));
++  store.appendPattern(buildPatternRecord({
++    predicate: PREDICATE, scope: SCOPE, origin: 'TEST', createdTs: T0 - 20 * DAY,
++    ts: T0 - 10 * DAY, seq: 1, state: 'ACCUMULATING', previousState: 'NOTICED',
++    transitionReason: 'NEW_MATURED_EVIDENCE', evidence: persistedEvidence, estimate, contradictions: [],
++  }));
++  return store.patternHeads().values().next().value;
 +}
 +
-+const predicate = deepFreeze({ clauses: [{ feature: 'rv60', op: 'GTE', threshold: 1 }] });
-+const scope = Object.freeze({ setupType: 'MOMENTUM', regime: 'ANY' });
-+const evidence = (rawCount = 1) => ({
-+  rawCount,
-+  groupCount: rawCount,
-+  distinctAssets: 1,
-+  distinctUtcDates: 1,
-+  favorable: rawCount,
-+  adverse: 0,
-+  neutral: 0,
-+  censored: 0,
-+  byBasis: { HISTORICAL_RECONSTRUCTION: 0, CONTEMPORANEOUS_HISTORICAL: 0, PROSPECTIVE: rawCount, SYNTHETIC: 0 },
-+  evidenceRefs: Array.from({ length: rawCount }, (_, index) => `lop-${index + 1}`),
-+  evidenceRefsTruncated: false,
-+});
-+const patternRow = ({ seq, state, previousState, ts = T + seq, rawCount = 1, candidateId = null, activationId = null, createdTs = T, origin = 'TEST' }) => buildPatternRecord({
-+  predicate,
-+  scope,
-+  origin,
-+  createdTs,
-+  ts,
-+  seq,
-+  state,
-+  previousState,
-+  transitionReason: `STEP_${seq}`,
-+  evidence: evidence(rawCount),
-+  estimate: null,
-+  contradictions: seq ? [{ opportunityId: 'lop-loss', utcDate: '2027-01-15' }] : [],
-+  candidateId,
-+  activationId,
-+});
-+const activePatternChain = () => {
-+  const candidateId = 'lcand-test'; const activationId = 'lact-test';
-+  return [
-+    patternRow({ seq: 0, state: 'NOTICED', previousState: null }),
-+    patternRow({ seq: 1, state: 'ACCUMULATING', previousState: 'NOTICED', rawCount: 2 }),
-+    patternRow({ seq: 2, state: 'CANDIDATE_FROZEN', previousState: 'ACCUMULATING', rawCount: 2, candidateId }),
-+    patternRow({ seq: 3, state: 'PROSPECTIVE_PENDING', previousState: 'CANDIDATE_FROZEN', rawCount: 2, candidateId }),
-+    patternRow({ seq: 4, state: 'VALIDATED_PAPER', previousState: 'PROSPECTIVE_PENDING', rawCount: 2, candidateId, activationId }),
-+    patternRow({ seq: 5, state: 'ACTIVE_PAPER', previousState: 'VALIDATED_PAPER', rawCount: 2, candidateId, activationId }),
-+  ];
-+};
++function appendForwardEvidence(store, design) {
++  for (let group = 0; group < 34; group += 1) {
++    const decisionTs = design.sealedTs + HOUR + (group % 8) * DAY + Math.floor(group / 8) * 5 * HOUR;
++    const labelEndTs = decisionTs + HOUR;
++    const opportunityId = `lop-forward-${group}`;
++    store.appendProspective({
++      kind: 'CAPTURE', candidateId: design.candidateId, opportunityId,
++      canonicalCoin: `A${group % 6}A`, decisionTs,
++      candidateDecision: 'SELECTED_FOR_SHADOW', baselineDecision: 'SKIPPED',
++      recordedTs: decisionTs + 1_000, labelEndTs,
++    });
++    store.appendProspective({
++      kind: 'OUTCOME', candidateId: design.candidateId, opportunityId,
++      outcomeClass: 'FAVORABLE', metricValue: 1.5,
++      outcomeKnownAtTs: labelEndTs, recordedTs: labelEndTs + 1_000,
++    });
++  }
++}
 +
-+const activationOrigin = () => buildActivation({
-+  candidateId: 'lcand-test',
-+  patternId: 'lpat-test',
-+  trainingCutoffTs: T,
-+  candidateDigest: 'candidate-digest',
-+  evidenceDigest: 'evidence-digest',
-+  reportDigest: 'report-digest',
-+  maxAbsAdjust: 0.1,
-+  scope: { setupType: 'MOMENTUM', regime: 'ANY', assets: 'ANY', venues: 'ANY' },
-+  validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 1 },
-+  maxSizeUsd: null,
-+  featureRecipeVersion: 'recipe-v1',
-+  policyVersion: 'policy-v1',
-+  applicability: predicate,
-+  effectiveTs: T,
-+  expiresTs: T + DAY,
-+  ts: T,
-+});
++function commissionLawfulActiveV1(dataDir) {
++  const store = createLearningStore({ dataDir });
++  const accumulating = appendAccumulatingPattern(store);
++  const design = freezeCandidate({
++    store, pattern: accumulating, costModel: COST_MODEL,
++    consumerBinding: CONSUMER_BINDING, nowTs: T0,
++  });
++  appendForwardEvidence(store, design);
++  const settledTs = T0 + 40 * DAY;
++  const settled = settleCandidate({ store, candidateId: design.candidateId, nowTs: settledTs });
++  assert.equal(settled.terminal.verdict, 'FORWARD_SUPPORTED');
++  assert.equal(settled.activation.activationVersion, 'learning-activation-1');
++  const active = transitionActivation(settled.activation, {
++    state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: settledTs + 1,
++  });
++  store.appendActivation(active);
++  const validated = store.patternHeads().get(design.patternId);
++  store.appendPattern(buildPatternRecord({
++    predicate: validated.predicate, scope: validated.scope, origin: validated.origin,
++    createdTs: validated.createdTs, ts: settledTs + 1, seq: validated.seq + 1,
++    state: 'ACTIVE_PAPER', previousState: validated.state, transitionReason: 'PAPER_RUNTIME_ADOPTED',
++    evidence: validated.evidence, estimate: validated.estimate, contradictions: validated.contradictions,
++    candidateId: validated.candidateId, activationId: active.activationId,
++  }));
++  return { store, active, nowTs: settledTs + 2 };
++}
 +
-+test('facade is pure, binds the fixed-reader provenance and returns only frozen source rows', () => {
-+  const source = readFileSync(new URL('../learning/decision-snapshot-store.js', import.meta.url), 'utf8');
-+  assert.doesNotMatch(source, /from\s+['"]node:fs/);
-+  assert.doesNotMatch(source, /from\s+['"].*\/store\.js/);
-+  const raw = sourceSnapshot();
-+  const facade = createDecisionSnapshotStore(raw, { nowTs: T });
-+  assert.equal(facade.sourceProvenance.trustBasis, DECISION_SNAPSHOT_SOURCE_TRUST);
-+  assert.equal(facade.sourceProvenance.sourceDigest, raw.provenance.sourceDigest);
-+  assert.equal(facade.sourceProvenance.totalBytes, raw.provenance.totalBytes);
-+  assert.equal(facade.sourceProvenance.totalRows, raw.provenance.totalRows);
-+  assert.equal(Object.isFrozen(facade), true);
-+  assert.equal(Object.isFrozen(facade.readProspective()), true);
-+  assert.deepEqual(facade.readKill(), { state: 'ARMED', reason: null, ts: null });
-+});
-+
-+test('the actual fixed bounded reader output satisfies the mirrored facade contract', () => {
-+  const root = mkdtempSync(path.join(tmpdir(), 'cobra-decision-facade-'));
++test('the real fixed worker withholds a lawful active activation-v1 instead of retrofitting it', async () => {
++  const dataDir = mkdtempSync(path.join(tmpdir(), 'cobra-worker-lawful-v1-'));
 +  try {
-+    const dir = path.join(root, 'learning');
-+    mkdirSync(dir);
-+    for (const file of ['activations.jsonl', 'patterns.jsonl', 'prospective.jsonl']) writeFileSync(path.join(dir, file), '');
-+    const raw = readDecisionSourceSnapshot({ dataDir: root });
-+    assert.equal(raw.ok, true);
-+    const facade = createDecisionSnapshotStore(raw, { nowTs: T });
-+    assert.equal(facade.activationHistory().heads.size, 0);
-+    assert.equal(facade.patternHeads().size, 0);
-+    assert.deepEqual(facade.readProspective(), []);
-+    assert.deepEqual(facade.readKill(), { state: 'ARMED', reason: null, ts: null });
-+  } finally { rmSync(root, { recursive: true, force: true }); }
++    const { store, active, nowTs } = commissionLawfulActiveV1(dataDir);
++    const preWorker = readDecisionMemory({ store, nowTs });
++    assert.equal(preWorker.activations.length, 1, 'fixture must be lawful before testing the worker fence');
++    assert.equal(preWorker.activations[0].activationId, active.activationId);
++    assert.deepEqual(preWorker.withheld, []);
++
++    const port = createDecisionMemoryPort({ enabled: true, mode: 'PAPER', dataDir, clock: () => nowTs });
++    try {
++      assert.deepEqual(await port.refresh(), { ok: true, preparedTs: nowTs, withheldCount: 1 });
++      const snapshot = port.snapshot();
++      assert.deepEqual(snapshot.activations, []);
++      assert.deepEqual(snapshot.withheld, [{ activationId: active.activationId, reason: UNSEALED_ACTIVATION_REASON }]);
++      assert.equal(snapshot.sourceProvenance.trustBasis, 'FIXED_BOUNDED_READER_COMPLETE_RAW_BYTES');
++    } finally {
++      await port.stop();
++    }
++  } finally {
++    rmSync(dataDir, { recursive: true, force: true });
++  }
 +});
 +
-+test('unfrozen, partial or arithmetically inconsistent source envelopes are refused whole', () => {
-+  const raw = sourceSnapshot();
-+  assert.throws(() => createDecisionSnapshotStore(JSON.parse(JSON.stringify(raw)), { nowTs: T }), /SOURCE_SNAPSHOT_INVALID/);
-+
-+  const wrongTotal = JSON.parse(JSON.stringify(raw));
-+  wrongTotal.provenance.totalBytes += 1;
-+  deepFreeze(wrongTotal);
-+  assert.throws(() => createDecisionSnapshotStore(wrongTotal, { nowTs: T }), /SOURCE_PROVENANCE_INVALID/);
-+
-+  const wrongRows = JSON.parse(JSON.stringify(raw));
-+  wrongRows.provenance.files.patterns.rows = 1;
-+  wrongRows.provenance.totalRows = 1;
-+  deepFreeze(wrongRows);
-+  assert.throws(() => createDecisionSnapshotStore(wrongRows, { nowTs: T }), /SOURCE_PROVENANCE_INVALID/);
-+
-+  const extra = JSON.parse(JSON.stringify(raw));
-+  extra.provenance.untrusted = true;
-+  deepFreeze(extra);
-+  assert.throws(() => createDecisionSnapshotStore(extra, { nowTs: T }), /SOURCE_PROVENANCE_INVALID/);
-+});
-+
-+test('legal pattern refinement is retained, but a later identifiable bad row invalidates the whole pattern chain', () => {
-+  const legal = activePatternChain();
-+  let facade = createDecisionSnapshotStore(sourceSnapshot({ patterns: legal }), { nowTs: T + 10 });
-+  assert.equal(facade.patternHeads().get(legal[0].patternId).state, 'ACTIVE_PAPER');
-+  assert.equal(facade.patternHeads().get(legal[0].patternId).evidence.rawCount, 2, 'evidence refinement remains legal');
-+
-+  const malformedLast = { ...legal.at(-1), seq: 6, previousState: 'ACTIVE_PAPER', ts: 'not-a-clock' };
-+  facade = createDecisionSnapshotStore(sourceSnapshot({ patterns: [...legal, malformedLast] }), { nowTs: T + 10 });
-+  assert.equal(facade.patternHeads().has(legal[0].patternId), false, 'bad tail never exposes the older ACTIVE head');
-+
-+  const regressed = patternRow({ seq: 1, state: 'ACCUMULATING', previousState: 'NOTICED', ts: T - 1, rawCount: 2 });
-+  facade = createDecisionSnapshotStore(sourceSnapshot({ patterns: [legal[0], regressed] }), { nowTs: T + 10 });
-+  assert.equal(facade.patternHeads().has(legal[0].patternId), false, 'cross-row clock regression invalidates the chain');
-+
-+  const changedOrigin = patternRow({ seq: 1, state: 'ACCUMULATING', previousState: 'NOTICED', rawCount: 2, origin: 'ALTERED' });
-+  facade = createDecisionSnapshotStore(sourceSnapshot({ patterns: [legal[0], changedOrigin] }), { nowTs: T + 10 });
-+  assert.equal(facade.patternHeads().has(legal[0].patternId), false, 'creation identity is immutable while evidence may refine');
-+});
-+
-+test('an unidentifiable pattern row clears every otherwise valid pattern head', () => {
-+  const legal = activePatternChain();
-+  const facade = createDecisionSnapshotStore(sourceSnapshot({ patterns: [...legal, { broken: true }] }), { nowTs: T + 10 });
-+  assert.equal(facade.patternHeads().size, 0);
-+});
-+
-+test('activation replay never skips an altered immutable binding', () => {
-+  const origin = activationOrigin();
-+  const active = transitionActivation(origin, { state: 'ACTIVE_PAPER', transitionReason: 'ADOPTED', ts: T + 1 });
-+  const altered = { ...active, allowedEffect: { ...active.allowedEffect, adjust: 0.05 } };
-+  const history = createDecisionSnapshotStore(sourceSnapshot({ activations: [origin, altered] }), { nowTs: T + 10 }).activationHistory();
-+  assert.equal(history.heads.size, 0);
-+  assert.match(history.invalid.get(origin.activationId), /immutable binding changed/);
-+});
-+
-+test('invalid prospective history withholds every activation instead of returning a partial decision view', () => {
-+  const activation = activationOrigin();
-+  const facade = createDecisionSnapshotStore(sourceSnapshot({ activations: [activation], prospective: [{ kind: 'BROKEN' }] }), { nowTs: T + 10 });
-+  const memory = readDecisionMemory({ store: facade, nowTs: T + 10 });
-+  assert.equal(memory.activations.length, 0);
-+  assert.deepEqual(memory.withheld, [{ activationId: activation.activationId, reason: 'PROSPECTIVE_EVIDENCE_INVALID' }]);
-+});
-+
-+test('present malformed or future kill state becomes KILLED; absence alone receives the ARMED default', () => {
-+  let facade = createDecisionSnapshotStore(sourceSnapshot({ killPresent: true, kill: { state: 'ARMED' } }), { nowTs: T });
-+  assert.deepEqual(facade.readKill(), { state: 'KILLED', reason: 'KILL_FILE_INVALID', ts: null });
-+
-+  facade = createDecisionSnapshotStore(sourceSnapshot({ killPresent: true, kill: { state: 'ARMED', reason: null, ts: T + 1 } }), { nowTs: T });
-+  assert.deepEqual(facade.readKill(), { state: 'KILLED', reason: 'KILL_FILE_FUTURE', ts: null });
-+
-+  facade = createDecisionSnapshotStore(sourceSnapshot({ killPresent: true, kill: { state: 'KILLED', reason: 'operator', ts: T } }), { nowTs: T });
-+  assert.deepEqual(facade.readKill(), { state: 'KILLED', reason: 'operator', ts: T });
-+
-+  facade = createDecisionSnapshotStore(sourceSnapshot(), { nowTs: T });
-+  assert.deepEqual(facade.readKill(), { state: 'ARMED', reason: null, ts: null });
++test('production source cannot import or call the injectable test-only port constructor', () => {
++  const runtimeRoot = fileURLToPath(new URL('..', import.meta.url));
++  const excludedDirectories = new Set(['.git', 'coverage', 'data', 'node_modules', 'test']);
++  const portSource = path.join(runtimeRoot, 'lib', 'decision-memory-port.js');
++  const violations = [];
++  const visit = (directory) => {
++    for (const entry of readdirSync(directory, { withFileTypes: true })) {
++      if (entry.isDirectory() && !excludedDirectories.has(entry.name)) visit(path.join(directory, entry.name));
++      if (!entry.isFile() || !/\.(?:cjs|mjs|js)$/.test(entry.name)) continue;
++      const file = path.join(directory, entry.name);
++      if (file === portSource) continue;
++      if (/\bcreateDecisionMemoryPortForTest\b/.test(readFileSync(file, 'utf8'))) violations.push(path.relative(runtimeRoot, file));
++    }
++  };
++  visit(runtimeRoot);
++  assert.deepEqual(violations, [], `test-only constructor referenced by production source: ${violations.join(', ')}`);
 +});
