@@ -1,90 +1,1704 @@
-diff --git a/lib/bounded-fetch.js b/lib/bounded-fetch.js
-index fd45366..af99a5a 100644
---- a/lib/bounded-fetch.js
-+++ b/lib/bounded-fetch.js
-@@ -1,6 +1,15 @@
- // Bounded transport for optional observation sources. The deadline includes streamed body reads;
- // byte limits are enforced before buffering, and credentials never cross a redirect origin.
- const PRIVATE_HOST_RE = /^(localhost|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|\[?::1\]?$|\[?fe80:|\[?fc|\[?fd)/i;
-+// Closed Node/Undici transport codes only. Error messages, URLs, hosts, and
-+// arbitrary provider-supplied codes are never copied into collector status.
-+const NETWORK_CAUSE_CODES = Object.freeze({
-+  ENOTFOUND: true, EAI_AGAIN: true,
-+  ECONNRESET: true, ECONNREFUSED: true, UND_ERR_SOCKET: true,
-+  ETIMEDOUT: true, UND_ERR_CONNECT_TIMEOUT: true, UND_ERR_HEADERS_TIMEOUT: true, UND_ERR_BODY_TIMEOUT: true,
-+  CERT_HAS_EXPIRED: true, DEPTH_ZERO_SELF_SIGNED_CERT: true, SELF_SIGNED_CERT_IN_CHAIN: true,
-+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: true, ERR_TLS_CERT_ALTNAME_INVALID: true,
+diff --git a/market-lab/broad-kraken.js b/market-lab/broad-kraken.js
+new file mode 100644
+--- /dev/null
++++ b/market-lab/broad-kraken.js
+@@ -0,0 +1,695 @@
++// Data-only broad Kraken eye. This is a shallow, public market-data collector:
++// it has no account, order, execution, model, Watch, Tape, or Judge dependency.
++//
++// The accepted REST AssetPairs catalog remains the population authority. A
++// fresh public WebSocket v2 instrument snapshot must independently map every
++// accepted member before ticker/OHLC subscription; an unsupported or ambiguous
++// member stays in the denominator and is reported, never silently discarded.
++// Raw ticker and OHLC events are kept in a bounded rolling local JSONL capture.
++// That capture is useful operational evidence, but is explicitly not external
++// or republish durability and grants no learning/promotion authority.
++import path from 'node:path';
++import {
++  closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,
++  readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync,
++} from 'node:fs';
++import { createHash, randomBytes } from 'node:crypto';
++import { createWsClient } from './transport.js';
++import { catalogContentId, KRAKEN_BASE_ALIASES } from '../survey/catalog.js';
++
++export const BROAD_KRAKEN_VERSION = 'broad-kraken-v1';
++export const BROAD_KRAKEN_RECORD_VERSION = 'broad-kraken-record-v1';
++export const BROAD_KRAKEN_STATES = Object.freeze([
++  'WAITING_CATALOG', 'CONNECTING', 'AWAITING_INSTRUMENT', 'SUBSCRIBING',
++  'ACTIVE', 'DEGRADED', 'STOPPING', 'STOPPED', 'RECORDING_FAILED',
++]);
++export const BROAD_KRAKEN_CHANNEL_STATES = Object.freeze([
++  'AWAITING_INSTRUMENT', 'PENDING', 'SUBSCRIBED', 'FAILED', 'GAP',
++  'UNSUPPORTED', 'STOPPED',
++]);
++export const BROAD_KRAKEN_DEFAULTS = Object.freeze({
++  maxMarkets: 5_000,
++  subscribeChunkSize: 25,
++  subscribePaceMs: 250,
++  catalogPollMs: 5_000,
++  maxCatalogAgeMs: 900_000,
++  clockSkewMs: 2_000,
++  tickerFreshMs: 120_000,
++  candleFreshMs: 180_000,
++  segmentBytes: 16 * 1024 * 1024,
++  maxSegments: 64,
++  lineBytes: 64 * 1024,
++  maxQueue: 50_000,
++  writeBatchSize: 256,
++  fsyncEveryRecords: 256,
++  // Native socket ingestion is continuous. Replaceable current-market disk
++  // state is coalesced to this bounded cadence to avoid full-catalog fsync
++  // amplification on the shared host; the status discloses the resulting lag.
++  latestSnapshotMs: 5_000,
++  maxLatestBytes: 16 * 1024 * 1024,
 +});
- export const BOUNDED_FETCH_DEFAULTS = Object.freeze({ timeoutMs: 10000, maxBytes: 2 * 1024 * 1024, maxRedirects: 2 });
- export function pinnedUrlError(rawUrl, { host, redirectHosts = [] }) {
-   let u; try { u = new URL(rawUrl); } catch { return 'unparseable URL'; }
-@@ -12,6 +21,12 @@ export function pinnedUrlError(rawUrl, { host, redirectHosts = [] }) {
- }
- const header = (r, name) => r.headers?.get?.(name) ?? null;
- const cancel = (body) => { try { Promise.resolve(body?.cancel?.()).catch(() => {}); } catch { /* already locked */ } };
-+const networkCauseCode = (error) => {
++
++const SEGMENT_RE = /^events-(\d{6})\.jsonl$/;
++const BASE_RE = /^[A-Z0-9][A-Z0-9.]{0,14}$/;
++const PAIR_KEY_RE = /^[A-Za-z0-9._-]{1,40}$/;
++const WS_SYMBOL_RE = /^([A-Z0-9][A-Z0-9._-]{0,39})\/USD$/;
++// Instrument snapshots are venue-wide, not USD-only. This grammar validates
++// the native BASE/QUOTE identity without turning non-USD pairs into candidates.
++const WS_COMPONENT_RE = /^[A-Z0-9][A-Z0-9._-]{0,39}$/;
++const WS_PAIR_SYMBOL_RE = /^[A-Z0-9][A-Z0-9._-]{0,39}\/[A-Z0-9][A-Z0-9._-]{0,39}$/;
++const positiveInt = (n) => Number.isSafeInteger(n) && n > 0;
++const finite = (n) => typeof n === 'number' && Number.isFinite(n);
++const number = (v) => finite(v) ? v : typeof v === 'string' && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(v.trim()) && Number.isFinite(Number(v)) ? Number(v) : null;
++const integer = (v) => { const n = number(v); return Number.isSafeInteger(n) ? n : null; };
++const isoTs = (v) => { if (typeof v !== 'string' || v.length > 40) return null; const n = Date.parse(v); return Number.isSafeInteger(n) && n > 0 ? n : null; };
++const plain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
++const boundedText = (v, max = 160) => typeof v === 'string' ? v.slice(0, max) : String(v ?? '').slice(0, max);
++const clone = (v) => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
++const hash = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
++const normalizeAsset = (v) => typeof v === 'string' ? (KRAKEN_BASE_ALIASES[v] ?? v) : null;
++const marketIdentity = (m) => ({
++  canonicalCoin: m.base,
++  pairKey: m.pairKey,
++  nativeBase: m.nativeBase,
++  catalogWsname: m.wsname,
++  wsSymbol: null,
++});
++
++export function validateBroadKrakenCatalog(catalog, { maxMarkets = BROAD_KRAKEN_DEFAULTS.maxMarkets } = {}) {
++  if (!plain(catalog)) return { ok: false, reason: 'CATALOG_MISSING' };
++  if (catalog.venue !== 'kraken' || catalog.quote !== 'USD') return { ok: false, reason: 'CATALOG_SCOPE_MISMATCH' };
++  if (!positiveInt(catalog.observedTs) || typeof catalog.contentId !== 'string') return { ok: false, reason: 'CATALOG_IDENTITY_MALFORMED' };
++  if (!Array.isArray(catalog.markets) || catalog.markets.length === 0) return { ok: false, reason: 'CATALOG_EMPTY' };
++  if (!positiveInt(maxMarkets) || catalog.markets.length > maxMarkets) return { ok: false, reason: 'CATALOG_OVERFLOW', count: catalog.markets.length };
++  const bases = new Set(); const pairKeys = new Set(); const wsNames = new Set();
++  for (const m of catalog.markets) {
++    if (!plain(m) || !PAIR_KEY_RE.test(String(m.pairKey)) || !BASE_RE.test(String(m.base)) || m.quote !== 'USD' || m.status !== 'online'
++      || typeof m.nativeBase !== 'string' || typeof m.nativeQuote !== 'string' || typeof m.wsname !== 'string') return { ok: false, reason: 'CATALOG_MARKET_MALFORMED' };
++    if (bases.has(m.base) || pairKeys.has(m.pairKey) || wsNames.has(m.wsname)) return { ok: false, reason: 'CATALOG_IDENTITY_DUPLICATE' };
++    bases.add(m.base); pairKeys.add(m.pairKey); wsNames.add(m.wsname);
++  }
++  let computed;
++  try { computed = catalogContentId(catalog); } catch { return { ok: false, reason: 'CATALOG_CONTENT_ID_UNVERIFIABLE' }; }
++  if (computed !== catalog.contentId) return { ok: false, reason: 'CATALOG_CONTENT_ID_MISMATCH' };
++  return { ok: true, count: catalog.markets.length };
++}
++
++function writeAll(fd, buffer) {
++  let offset = 0;
++  while (offset < buffer.length) {
++    const n = writeSync(fd, buffer, offset, buffer.length - offset);
++    if (!Number.isSafeInteger(n) || n <= 0) throw Object.assign(new Error('zero-byte broad market write'), { code: 'BROAD_MARKET_WRITE_FAILED' });
++    offset += n;
++  }
++}
++
++function openBroadStore({ dataDir, clock, segmentBytes, maxSegments, lineBytes, fsyncEveryRecords }) {
++  if (typeof dataDir !== 'string' || !dataDir.length) throw Object.assign(new Error('broad market dataDir required'), { code: 'BROAD_MARKET_DATA_DIR_REQUIRED' });
++  for (const [name, value] of Object.entries({ segmentBytes, maxSegments, lineBytes, fsyncEveryRecords })) if (!positiveInt(value)) throw new Error(`invalid ${name}`);
++  const dir = path.join(path.resolve(dataDir), 'broad-kraken');
++  mkdirSync(dir, { recursive: true });
++  const lockFile = path.join(dir, 'writer.lock');
++  const lockToken = randomBytes(16).toString('hex');
++  let lockFd = null; let fd = null; let closed = false; let current = null; let bytes = 0; let records = 0; let unflushedRecords = 0;
++  let evictedSegments = 0; let evictedBytes = 0; let latestBytes = 0; let latestWrittenTs = null; let latestWrites = 0;
 +  try {
-+    for (const code of [error?.cause?.code, error?.code]) if (typeof code === 'string' && Object.hasOwn(NETWORK_CAUSE_CODES, code)) return code;
-+  } catch { /* hostile getters and unknown error shapes stay generic */ }
++    lockFd = openSync(lockFile, 'wx');
++    writeAll(lockFd, Buffer.from(`${JSON.stringify({ version: BROAD_KRAKEN_VERSION, pid: process.pid, token: lockToken, acquiredTs: clock() })}\n`));
++    fsyncSync(lockFd); closeSync(lockFd); lockFd = null;
++  } catch (error) {
++    if (lockFd !== null) try { closeSync(lockFd); } catch { /* preserve first failure */ }
++    const e = Object.assign(new Error(error?.code === 'EEXIST' ? 'broad Kraken writer locked by another owner; operator verification is required before recovery' : `cannot acquire broad Kraken writer: ${boundedText(error?.message)}`), { code: error?.code === 'EEXIST' ? 'BROAD_MARKET_LOCKED' : 'BROAD_MARKET_IO' });
++    throw e;
++  }
++  const segments = () => readdirSync(dir).map((name) => {
++    const m = name.match(SEGMENT_RE); if (!m) return null;
++    const file = path.join(dir, name); return { name, file, index: Number(m[1]), bytes: statSync(file).size };
++  }).filter(Boolean).sort((a, b) => a.index - b.index);
++  let nextIndex = (segments().at(-1)?.index ?? 0) + 1;
++  const releaseLock = () => {
++    if (!existsSync(lockFile)) return;
++    let payload = null;
++    try { payload = JSON.parse(readFileSync(lockFile, 'utf8')); } catch { /* refuse to unlink an unverified lock */ }
++    if (payload?.token !== lockToken) throw Object.assign(new Error('broad Kraken writer lock ownership changed'), { code: 'BROAD_MARKET_LOCK_CHANGED' });
++    unlinkSync(lockFile);
++  };
++  const pruneForNewSegment = () => {
++    const all = segments();
++    while (all.length >= maxSegments) {
++      const victim = all.shift();
++      if (!victim || !SEGMENT_RE.test(victim.name) || path.dirname(victim.file) !== dir) throw new Error('unsafe broad market retention target');
++      unlinkSync(victim.file);
++      evictedSegments += 1; evictedBytes += victim.bytes;
++    }
++  };
++  const openSegment = () => {
++    pruneForNewSegment();
++    const name = `events-${String(nextIndex).padStart(6, '0')}.jsonl`; nextIndex += 1;
++    current = path.join(dir, name); fd = openSync(current, 'wx'); bytes = 0; records = 0; unflushedRecords = 0;
++  };
++  try { openSegment(); } catch (error) { try { releaseLock(); } catch { /* preserve open failure */ } throw error; }
++  return {
++    append(record) {
++      if (closed || fd === null) throw Object.assign(new Error('broad market writer closed'), { code: 'BROAD_MARKET_WRITER_CLOSED' });
++      const line = Buffer.from(`${JSON.stringify(record)}\n`);
++      if (line.length > lineBytes) throw Object.assign(new Error(`broad market line exceeds ${lineBytes} bytes`), { code: 'BROAD_MARKET_LINE_LIMIT' });
++      if (bytes > 0 && bytes + line.length > segmentBytes) {
++        fsyncSync(fd); closeSync(fd); fd = null; openSegment();
++      }
++      writeAll(fd, line); bytes += line.length; records += 1; unflushedRecords += 1;
++      if (unflushedRecords >= fsyncEveryRecords) { fsyncSync(fd); unflushedRecords = 0; }
++      return { file: current, bytes: line.length };
++    },
++    flush() { if (!closed && fd !== null && unflushedRecords > 0) { fsyncSync(fd); unflushedRecords = 0; } },
++    writeLatest(snapshot, maxBytes) {
++      if (closed) throw Object.assign(new Error('broad market writer closed'), { code: 'BROAD_MARKET_WRITER_CLOSED' });
++      const bytes_ = Buffer.from(`${JSON.stringify(snapshot)}\n`);
++      if (bytes_.length > maxBytes) throw Object.assign(new Error(`broad market latest snapshot exceeds ${maxBytes} bytes`), { code: 'BROAD_MARKET_LATEST_LIMIT' });
++      const target = path.join(dir, 'latest.json'); const tmp = path.join(dir, `latest.${process.pid}.${randomBytes(6).toString('hex')}.tmp`); let latestFd = null;
++      try {
++        latestFd = openSync(tmp, 'wx'); writeAll(latestFd, bytes_); fsyncSync(latestFd); closeSync(latestFd); latestFd = null; renameSync(tmp, target);
++      } catch (error) {
++        if (latestFd !== null) try { closeSync(latestFd); } catch { /* preserve first error */ }
++        try { unlinkSync(tmp); } catch { /* owned temp may already be renamed */ }
++        throw error;
++      }
++      latestBytes = bytes_.length; latestWrittenTs = clock(); latestWrites += 1;
++    },
++    close() {
++      if (closed) return;
++      let first = null;
++      if (fd !== null) { try { fsyncSync(fd); } catch (e) { first = e; } try { closeSync(fd); } catch (e) { if (!first) first = e; } fd = null; }
++      try { releaseLock(); } catch (e) { if (!first) first = e; }
++      closed = true; if (first) throw first;
++    },
++    status() {
++      const all = segments();
++      return { dir, segment: current ? path.basename(current) : null, segments: all.length, bytes: all.reduce((n, s) => n + s.bytes, 0), records, unflushedRecords, latestBytes, latestWrittenTs, latestWrites, latestSnapshotWrites: latestWrites, evictedSegments, evictedBytes, durability: 'LOCAL_FILESYSTEM_PERIODIC_FSYNC', retention: 'ROLLING_BOUNDED_JOURNAL_PLUS_REPLACEABLE_LATEST' };
++    },
++  };
++}
++
++function sealRecord({ sessionId, sequence, clock, body }) {
++  const record = {
++    recordVersion: BROAD_KRAKEN_RECORD_VERSION,
++    recordId: null,
++    sessionId,
++    sequence,
++    recordType: body.recordType,
++    recordedTs: clock(),
++    catalogContentId: body.catalogContentId ?? null,
++    epochId: body.epochId ?? null,
++    market: body.market ?? null,
++    channel: body.channel ?? null,
++    quality: body.quality,
++    sourceEventTs: body.sourceEventTs ?? null,
++    receivedTs: body.receivedTs,
++    periodStartTs: body.periodStartTs ?? null,
++    periodEndTs: body.periodEndTs ?? null,
++    payload: body.payload,
++  };
++  record.recordId = `bkr-${hash(record)}`;
++  return Object.freeze(record);
++}
++
++export function broadKrakenRecordError(record) {
++  if (!plain(record) || record.recordVersion !== BROAD_KRAKEN_RECORD_VERSION || typeof record.recordId !== 'string' || !record.recordId.startsWith('bkr-')) return 'record envelope malformed';
++  if (!positiveInt(record.recordedTs) || !positiveInt(record.receivedTs) || !plain(record.payload)) return 'record clocks/payload malformed';
++  if (record.market !== null && (!plain(record.market) || !BASE_RE.test(String(record.market.canonicalCoin)) || !PAIR_KEY_RE.test(String(record.market.pairKey)))) return 'record market malformed';
++  const copy = { ...record, recordId: null };
++  if (`bkr-${hash(copy)}` !== record.recordId) return 'record identity mismatch';
 +  return null;
++}
++
++export function readBroadKrakenLatest({ dataDir, now = Date.now(), includeJournal = false, maxBytes = BROAD_KRAKEN_DEFAULTS.maxLatestBytes, maxLatestBytes = BROAD_KRAKEN_DEFAULTS.maxLatestBytes, tickerFreshMs = BROAD_KRAKEN_DEFAULTS.tickerFreshMs, candleFreshMs = BROAD_KRAKEN_DEFAULTS.candleFreshMs, clockSkewMs = BROAD_KRAKEN_DEFAULTS.clockSkewMs } = {}) {
++  if (typeof dataDir !== 'string' || typeof includeJournal !== 'boolean' || !positiveInt(now) || !positiveInt(maxBytes) || !positiveInt(maxLatestBytes) || !positiveInt(tickerFreshMs) || !positiveInt(candleFreshMs) || !positiveInt(clockSkewMs)) throw new Error('invalid broad latest reader arguments');
++  const dir = path.join(path.resolve(dataDir), 'broad-kraken');
++  if (!existsSync(dir)) return { version: BROAD_KRAKEN_VERSION, asOfTs: now, source: 'LOCAL_FILESYSTEM_NOT_REPUBLISH_DURABLE', historyIncluded: includeJournal, sessionId: null, epochId: null, catalog: null, records: {}, markets: [], bytesRead: 0, truncated: false, malformed: 0 };
++  const files = includeJournal ? readdirSync(dir).map((name) => {
++    const m = name.match(SEGMENT_RE); if (!m) return null;
++    const file = path.join(dir, name); return { file, index: Number(m[1]), bytes: statSync(file).size };
++  }).filter(Boolean).sort((a, b) => b.index - a.index) : [];
++  let budget = maxBytes; let truncated = false; let malformed = 0; const chosen = [];
++  for (const f of files) { if (f.bytes > budget) { truncated = true; break; } chosen.push(f); budget -= f.bytes; }
++  const latest = {};
++  let snapshotSessionId = null; let snapshotEpochId = null; let snapshotCatalog = null;
++  for (const f of chosen.reverse()) {
++    const text = readFileSync(f.file, 'utf8');
++    const lines = text.split('\n');
++    for (let i = 0; i < lines.length - 1; i += 1) {
++      if (!lines[i]) continue;
++      try {
++        const r = JSON.parse(lines[i]); if (broadKrakenRecordError(r)) { malformed += 1; continue; }
++        const coin = r.market?.canonicalCoin; if (!coin) continue;
++        latest[coin] ??= { instrument: null, subscription: {}, ticker: null, candleProvisional: null, candleClosed: null };
++        if (r.recordType === 'INSTRUMENT_MAP') latest[coin].instrument = r;
++        else if (r.recordType === 'SUBSCRIPTION' || r.recordType === 'GAP') latest[coin].subscription[r.channel] = r;
++        else if (r.recordType === 'TICKER') latest[coin].ticker = r;
++        else if (r.recordType === 'OHLC' && r.quality === 'PROVISIONAL') latest[coin].candleProvisional = r;
++        else if (r.recordType === 'OHLC') latest[coin].candleClosed = r;
++      } catch { malformed += 1; }
++    }
++  }
++  const latestFile = path.join(dir, 'latest.json');
++  if (existsSync(latestFile)) {
++    try {
++      const size = statSync(latestFile).size;
++      if (size > maxLatestBytes || size > budget) truncated = true;
++      else {
++        const snap = JSON.parse(readFileSync(latestFile, 'utf8')); budget -= size;
++        const validSnapshot = snap?.version === BROAD_KRAKEN_VERSION && plain(snap.records)
++          && typeof snap.sessionId === 'string' && snap.sessionId.length > 0 && snap.sessionId.length <= 128
++          && typeof snap.currentEpoch === 'string' && snap.currentEpoch.length > 0 && snap.currentEpoch.length <= 160
++          && positiveInt(snap.updatedTs) && snap.updatedTs <= now + clockSkewMs
++          && plain(snap.catalog) && typeof snap.catalog.contentId === 'string' && positiveInt(snap.catalog.observedTs) && snap.catalog.observedTs <= now + clockSkewMs
++          && Number.isSafeInteger(snap.catalog.markets) && snap.catalog.markets > 0
++          && snap.catalog.contentId === snap.catalogContentId && Object.keys(snap.records).length === snap.catalog.markets;
++        if (!validSnapshot) malformed += 1;
++        else {
++          snapshotSessionId = snap.sessionId; snapshotEpochId = snap.currentEpoch; snapshotCatalog = clone(snap.catalog);
++          for (const [coin, row] of Object.entries(snap.records)) {
++          const marketOk = BASE_RE.test(coin) && plain(row) && plain(row.market)
++            && row.market.canonicalCoin === coin && PAIR_KEY_RE.test(String(row.market.pairKey))
++            && typeof row.market.nativeBase === 'string' && typeof row.market.catalogWsname === 'string'
++            && (row.market.wsSymbol === null || WS_SYMBOL_RE.test(String(row.market.wsSymbol)));
++          if (!marketOk) { malformed += 1; continue; }
++          latest[coin] ??= { instrument: null, subscription: {}, ticker: null, candleProvisional: null, candleClosed: null };
++          latest[coin].market = row.market;
++          const clocksOk = (r, field) => !broadKrakenRecordError(r)
++            && r.recordedTs <= now + clockSkewMs && r.receivedTs <= now + clockSkewMs
++            && (r.sourceEventTs === null || (positiveInt(r.sourceEventTs) && r.sourceEventTs <= r.receivedTs + clockSkewMs && r.sourceEventTs <= now + clockSkewMs))
++            && (field !== 'candleProvisional' && field !== 'candleClosed' || (positiveInt(r.periodStartTs) && positiveInt(r.periodEndTs) && r.periodEndTs - r.periodStartTs === 60_000 && r.periodStartTs <= r.receivedTs + clockSkewMs && (field === 'candleProvisional' || r.periodEndTs <= r.receivedTs + clockSkewMs)));
++          if (plain(row.subscription)) for (const [channel, r] of Object.entries(row.subscription)) {
++            const compatible = ['ticker', 'ohlc'].includes(channel) && clocksOk(r, 'subscription')
++              && ['SUBSCRIPTION', 'GAP'].includes(r.recordType) && r.channel === channel
++              && r.market?.canonicalCoin === coin && r.market?.pairKey === row.market.pairKey
++              && r.sessionId === snap.sessionId && r.catalogContentId === snap.catalog.contentId;
++            if (!compatible) malformed += 1; else latest[coin].subscription[channel] = r;
++          }
++          for (const [field, target] of [['instrument', 'instrument'], ['ticker', 'ticker'], ['candleProvisional', 'candleProvisional'], ['candleClosed', 'candleClosed']]) {
++            const r = row[field]; if (r === null || r === undefined) continue;
++            const expected = field === 'instrument' ? r.recordType === 'INSTRUMENT_MAP'
++              : field === 'ticker' ? r.recordType === 'TICKER'
++                : r.recordType === 'OHLC' && (field === 'candleProvisional' ? r.quality === 'PROVISIONAL' : r.quality !== 'PROVISIONAL');
++            const compatible = clocksOk(r, field) && expected
++              && r.market?.canonicalCoin === coin && r.market?.pairKey === row.market.pairKey
++              && r.sessionId === snap.sessionId && r.catalogContentId === snap.catalog.contentId;
++            if (!compatible) malformed += 1; else latest[coin][target] = r;
++          }
++        }
++        }
++      }
++    } catch { malformed += 1; }
++  }
++  const markets = Object.entries(latest).sort(([a], [b]) => a.localeCompare(b)).map(([canonicalCoin, row]) => {
++    const t = row.ticker; const p = row.candleProvisional; const c = row.candleClosed;
++    const age = (r) => r ? Math.max(0, now - r.receivedTs) : null;
++    const epochCurrent = (r) => !!r && snapshotSessionId !== null && r.sessionId === snapshotSessionId && r.epochId === snapshotEpochId && r.catalogContentId === snapshotCatalog?.contentId;
++    const channelCurrent = (channel) => { const r = row.subscription?.[channel]; return epochCurrent(r) && r.recordType === 'SUBSCRIPTION' && r.payload?.state === 'SUBSCRIBED'; };
++    const tickerAge = t ? Math.max(age(t), t.sourceEventTs === null ? Infinity : Math.max(0, now - t.sourceEventTs)) : null;
++    const candleAge = (r) => r ? Math.max(age(r), Math.max(0, now - r.periodEndTs)) : null;
++    return { canonicalCoin,
++      identity: row.market ?? t?.market ?? p?.market ?? c?.market ?? row.instrument?.market ?? null,
++      ticker: { record: t, ageMs: tickerAge, state: !t ? 'NEVER_OBSERVED' : !epochCurrent(t) ? 'EPOCH_STALE_PERSISTED' : !channelCurrent('ticker') ? 'RETAINED_ONLY_PERSISTED' : t.quality === 'FAILED' ? 'INVALID' : t.payload.lastPrice === null ? 'OBSERVED_MISSING_PRICE' : t.payload.messageType === 'snapshot' ? 'IDLE_SNAPSHOT_BASELINE_PERSISTED' : t.quality !== 'OBSERVED' ? 'OBSERVED_PARTIAL' : tickerAge <= tickerFreshMs ? 'FRESH_PERSISTED' : 'STALE_PERSISTED' },
++      candle: { provisional: p, provisionalAgeMs: candleAge(p), closed: c, closedAgeMs: candleAge(c), state: p ? (!epochCurrent(p) ? 'EPOCH_STALE_PERSISTED' : !channelCurrent('ohlc') ? 'RETAINED_ONLY_PERSISTED' : candleAge(p) <= candleFreshMs && p.periodStartTs <= now && p.periodEndTs >= now ? 'PROVISIONAL_FRESH_PERSISTED' : 'PROVISIONAL_STALE_PERSISTED') : c ? (!epochCurrent(c) ? 'EPOCH_STALE_PERSISTED' : !channelCurrent('ohlc') ? 'RETAINED_ONLY_PERSISTED' : candleAge(c) <= candleFreshMs ? 'CLOSED_FRESH_PERSISTED' : 'CLOSED_STALE_PERSISTED') : 'NEVER_OBSERVED' },
++      instrument: row.instrument, subscription: row.subscription,
++    };
++  });
++  return { version: BROAD_KRAKEN_VERSION, asOfTs: now, source: 'LOCAL_FILESYSTEM_NOT_REPUBLISH_DURABLE', historyIncluded: includeJournal, sessionId: snapshotSessionId, epochId: snapshotEpochId, catalog: snapshotCatalog, records: latest, markets, bytesRead: maxBytes - budget, truncated, malformed };
++}
++
++export function startBroadKraken({
++  catalogSource,
++  dataDir,
++  WebSocketImpl = globalThis.WebSocket,
++  url = null,
++  clock = () => Date.now(),
++  log = () => {},
++  timers = { setTimeout, clearTimeout, setInterval, clearInterval },
++  onRecord = () => {},
++  limits = {},
++} = {}) {
++  if (!catalogSource || typeof catalogSource.snapshot !== 'function') throw new Error('broad Kraken catalogSource.snapshot required');
++  if (typeof WebSocketImpl !== 'function') throw new Error('broad Kraken WebSocket implementation required');
++  const cfg = { ...BROAD_KRAKEN_DEFAULTS, ...limits };
++  for (const key of Object.keys(BROAD_KRAKEN_DEFAULTS)) if (!positiveInt(cfg[key])) throw new Error(`invalid broad Kraken ${key}`);
++  if (cfg.subscribeChunkSize > cfg.maxMarkets || cfg.writeBatchSize > cfg.maxQueue) throw new Error('broad Kraken limits contradict');
++  const store = openBroadStore({ dataDir, clock, ...cfg });
++  const sessionId = `bks-${randomBytes(12).toString('hex')}`;
++  let state = 'WAITING_CATALOG'; let startedTs = clock(); let stoppedTs = null; let stopping = false; let sequence = 0; let ws = null; let currentEpoch = null;
++  let acceptedCatalog = null; let lastInstrumentTs = null; let instrumentState = 'AWAITING'; let instrumentError = null;
++  let catalogLastCheckedTs = null; let catalogLastError = null; let subscribeTimer = null; let catalogTimer = null; let drainTimer = null; let latestTimer = null; let draining = false; let stopPromise = null;
++  const instrumentPairs = new Map(); const markets = new Map(); const byWsSymbol = new Map(); const requestMap = new Map(); const subscriptionQueue = []; const writeQueue = [];
++  const dirtyLatest = new Map(); let latestDirty = false;
++  const counters = { nativeMessages: 0, nativeRows: 0, records: 0, tickerRecords: 0, ohlcRecords: 0, instrumentRecords: 0, latestSnapshotWrites: 0, snapshotRecordsPersisted: 0, coalescedSnapshotRecords: 0, rejectedRows: 0, gaps: 0, subscriptionRequests: 0, recordingFailures: 0, queueHighWater: 0 };
++  let recordingError = null; let requestId = 1;
++
++  const schedule = (fn, ms) => timers.setTimeout(fn, ms);
++  const marketForRecord = (m) => ({ canonicalCoin: m.canonicalCoin, pairKey: m.pairKey, nativeBase: m.nativeBase, catalogWsname: m.catalogWsname, wsSymbol: m.wsSymbol });
++  const applyLatest = (r) => {
++    const m = r.market ? markets.get(r.market.canonicalCoin) : null; if (!m) return;
++    if (r.recordType === 'INSTRUMENT_MAP') m.latestInstrument = r;
++    if (r.recordType === 'SUBSCRIPTION' || r.recordType === 'GAP') m.latestSubscription[r.channel] = r;
++    if (r.recordType === 'TICKER') m.latestTicker = r;
++    if (r.recordType === 'OHLC' && r.quality === 'PROVISIONAL') m.latestProvisional = r;
++    if (r.recordType === 'OHLC' && r.quality !== 'PROVISIONAL') m.latestClosed = r;
++  };
++  const failRecording = (error) => {
++    if (recordingError) return;
++    recordingError = { code: boundedText(error?.code || 'BROAD_MARKET_RECORDING_FAILED', 60), message: boundedText(error?.message ?? error), ts: clock() };
++    counters.recordingFailures += 1; state = 'RECORDING_FAILED'; stopping = true;
++    if (subscribeTimer !== null) timers.clearTimeout(subscribeTimer); subscribeTimer = null;
++    if (catalogTimer !== null) timers.clearInterval(catalogTimer); catalogTimer = null;
++    if (latestTimer !== null) timers.clearTimeout(latestTimer); latestTimer = null;
++    void ws?.stop?.().catch(() => {});
++  };
++  const drainWrites = () => {
++    if (draining || recordingError) return;
++    draining = true; drainTimer = null;
++    try {
++      let n = 0;
++      while (writeQueue.length && n < cfg.writeBatchSize) {
++        const r = writeQueue.shift(); store.append(r); counters.records += 1;
++        if (r.recordType === 'TICKER') counters.tickerRecords += 1;
++        else if (r.recordType === 'OHLC') counters.ohlcRecords += 1;
++        else if (r.recordType === 'INSTRUMENT_MAP') counters.instrumentRecords += 1;
++        applyLatest(r); latestDirty = true; if (latestTimer === null) latestTimer = schedule(persistLatestSnapshot, cfg.latestSnapshotMs); try { onRecord(r); } catch (error) { log(`broad Kraken onRecord contained: ${boundedText(error?.message)}`); }
++        n += 1;
++      }
++    } catch (error) { failRecording(error); }
++    finally { draining = false; }
++    if (writeQueue.length && !recordingError) drainTimer = schedule(drainWrites, 0);
++  };
++  const enqueue = (body, { duringStop = false } = {}) => {
++    if (recordingError || (stopping && !duringStop)) return false;
++    if (writeQueue.length >= cfg.maxQueue) { failRecording(Object.assign(new Error(`broad market write queue exceeded ${cfg.maxQueue}`), { code: 'BROAD_MARKET_BACKPRESSURE' })); return false; }
++    const r = sealRecord({ sessionId, sequence: ++sequence, clock, body });
++    const e = broadKrakenRecordError(r); if (e) { failRecording(Object.assign(new Error(e), { code: 'BROAD_MARKET_RECORD_INVALID' })); return false; }
++    writeQueue.push(r); counters.queueHighWater = Math.max(counters.queueHighWater, writeQueue.length);
++    if (!draining && drainTimer === null) drainTimer = schedule(drainWrites, 0);
++    return true;
++  };
++  const persistLatestSnapshot = () => {
++    latestTimer = null;
++    if (recordingError || !latestDirty) return;
++    const records = {};
++    for (const m of markets.values()) records[m.canonicalCoin] = { market: marketForRecord(m), instrument: m.latestInstrument ?? null, subscription: { ...m.latestSubscription }, ticker: m.currentTicker ?? m.latestTicker ?? null, candleProvisional: m.currentProvisional ?? m.latestProvisional ?? null, candleClosed: m.latestClosed ?? null };
++    try {
++      store.writeLatest({ version: BROAD_KRAKEN_VERSION, sessionId, currentEpoch, updatedTs: clock(), catalogContentId: acceptedCatalog?.contentId ?? null, catalog: acceptedCatalog ? { contentId: acceptedCatalog.contentId, observedTs: acceptedCatalog.observedTs, markets: acceptedCatalog.markets.length } : null, records }, cfg.maxLatestBytes);
++      counters.latestSnapshotWrites += 1;
++      for (const r of dirtyLatest.values()) {
++        applyLatest(r); counters.records += 1; counters.snapshotRecordsPersisted += 1;
++        if (r.recordType === 'TICKER') counters.tickerRecords += 1; else counters.ohlcRecords += 1;
++        try { onRecord(r); } catch (error) { log(`broad Kraken onRecord contained: ${boundedText(error?.message)}`); }
++      }
++      dirtyLatest.clear(); latestDirty = false;
++    } catch (error) { failRecording(error); }
++  };
++  const stageLatest = (m, field, body) => {
++    if (recordingError || stopping) return false;
++    const record = sealRecord({ sessionId, sequence: ++sequence, clock, body });
++    const e = broadKrakenRecordError(record); if (e) { failRecording(Object.assign(new Error(e), { code: 'BROAD_MARKET_RECORD_INVALID' })); return false; }
++    const key = `${m.canonicalCoin}:${field}`; if (dirtyLatest.has(key)) counters.coalescedSnapshotRecords += 1;
++    dirtyLatest.set(key, record); latestDirty = true;
++    if (field === 'ticker') m.currentTicker = record; else m.currentProvisional = record;
++    if (latestTimer === null) latestTimer = schedule(persistLatestSnapshot, cfg.latestSnapshotMs);
++    return true;
++  };
++  const markLatestDirty = () => {
++    if (recordingError) return;
++    latestDirty = true;
++    if (!stopping && latestTimer === null) latestTimer = schedule(persistLatestSnapshot, cfg.latestSnapshotMs);
++  };
++
++  const coverageRecord = (m, channel, quality, receivedTs, payload = {}, duringStop = false) => enqueue({ recordType: quality === 'GAP' ? 'GAP' : 'SUBSCRIPTION', catalogContentId: acceptedCatalog?.contentId, epochId: currentEpoch, market: marketForRecord(m), channel, quality, receivedTs, payload }, { duringStop });
++  const setChannel = (m, channel, value, ts, error = null) => { m.channels[channel] = value; m.lastError = error; coverageRecord(m, channel, value === 'SUBSCRIBED' ? 'SUBSCRIBED' : value === 'GAP' ? 'GAP' : value === 'FAILED' ? 'FAILED' : 'PROVISIONAL', ts, { state: value, error }); };
++
++  const resolveInstrument = (m) => {
++    const candidates = [];
++    for (const p of instrumentPairs.values()) {
++      const sm = typeof p.symbol === 'string' ? p.symbol.match(WS_SYMBOL_RE) : null;
++      if (!sm || p.quote !== 'USD' || p.status !== 'online') continue;
++      if (normalizeAsset(p.base) === m.canonicalCoin && normalizeAsset(sm[1]) === m.canonicalCoin) candidates.push(p);
++    }
++    if (candidates.length === 1) return { state: 'MAPPED', pair: candidates[0] };
++    return { state: candidates.length ? 'AMBIGUOUS' : 'UNSUPPORTED', candidates: candidates.slice(0, 8).map((p) => p.symbol) };
++  };
++  const queueSubscriptions = (entries) => {
++    const symbols = entries.map((m) => m.wsSymbol);
++    for (let i = 0; i < symbols.length; i += cfg.subscribeChunkSize) {
++      const chunk = symbols.slice(i, i + cfg.subscribeChunkSize);
++      subscriptionQueue.push({ channel: 'ticker', symbols: chunk });
++      subscriptionQueue.push({ channel: 'ohlc', symbols: chunk });
++    }
++    if (subscriptionQueue.length && subscribeTimer === null) subscribeTimer = schedule(pumpSubscriptions, 0);
++  };
++  const updateState = () => {
++    if (recordingError || stopping || !acceptedCatalog) return;
++    if (catalogLastError) { state = 'DEGRADED'; return; }
++    const rows = [...markets.values()];
++    if (instrumentState !== 'MAPPED') { state = instrumentState === 'FAILED' ? 'DEGRADED' : 'AWAITING_INSTRUMENT'; return; }
++    const classified = rows.every((m) => ['MAPPED', 'UNSUPPORTED', 'AMBIGUOUS'].includes(m.mappingState));
++    const allMappedAcked = rows.filter((m) => m.mappingState === 'MAPPED').every((m) => m.channels.ticker === 'SUBSCRIBED' && m.channels.ohlc === 'SUBSCRIBED');
++    const anyRefused = rows.some((m) => m.mappingState !== 'MAPPED' || ['FAILED', 'GAP'].includes(m.channels.ticker) || ['FAILED', 'GAP'].includes(m.channels.ohlc));
++    state = classified && allMappedAcked && subscriptionQueue.length === 0 && !anyRefused ? 'ACTIVE' : anyRefused ? 'DEGRADED' : 'SUBSCRIBING';
++  };
++  function pumpSubscriptions() {
++    subscribeTimer = null;
++    if (stopping || recordingError || !ws) return;
++    const item = subscriptionQueue.shift(); if (!item) { updateState(); return; }
++    const id = requestId++;
++    const params = item.channel === 'ticker'
++      ? { channel: 'ticker', symbol: item.symbols, event_trigger: 'trades', snapshot: true }
++      : { channel: 'ohlc', symbol: item.symbols, interval: 1, snapshot: true };
++    requestMap.set(id, { ...item, remaining: new Set(item.symbols) }); counters.subscriptionRequests += 1;
++    const sent = ws.send({ method: 'subscribe', params, req_id: id });
++    if (!sent) { requestMap.delete(id); for (const symbol of item.symbols) { const m = byWsSymbol.get(symbol); if (m) setChannel(m, item.channel, 'GAP', clock(), 'SOCKET_NOT_OPEN'); } }
++    if (subscriptionQueue.length) subscribeTimer = schedule(pumpSubscriptions, cfg.subscribePaceMs);
++    else updateState();
++  }
++
++  const reconcileMappings = (receivedTs) => {
++    byWsSymbol.clear(); const newlyMapped = [];
++    let mapped = 0; let unsupported = 0; let ambiguous = 0;
++    for (const m of markets.values()) {
++      const r = resolveInstrument(m); m.mappingState = r.state;
++      if (r.state === 'MAPPED') {
++        m.wsSymbol = r.pair.symbol; byWsSymbol.set(m.wsSymbol, m); mapped += 1;
++        if (!['SUBSCRIBED', 'PENDING'].includes(m.channels.ticker)) { m.channels.ticker = 'PENDING'; m.channels.ohlc = 'PENDING'; newlyMapped.push(m); }
++      } else {
++        m.wsSymbol = null; m.channels.ticker = 'UNSUPPORTED'; m.channels.ohlc = 'UNSUPPORTED';
++        if (r.state === 'AMBIGUOUS') ambiguous += 1; else unsupported += 1;
++      }
++      enqueue({ recordType: 'INSTRUMENT_MAP', catalogContentId: acceptedCatalog?.contentId, epochId: currentEpoch, market: marketForRecord(m), channel: 'instrument', quality: r.state === 'MAPPED' ? 'OBSERVED' : 'FAILED', receivedTs, payload: { mappingState: r.state, candidates: r.candidates ?? [r.pair.symbol], pair: r.pair ? { symbol: r.pair.symbol, base: r.pair.base, quote: r.pair.quote, status: r.pair.status } : null } });
++    }
++    instrumentState = 'MAPPED'; instrumentError = null;
++    if (unsupported || ambiguous) state = 'DEGRADED'; else state = newlyMapped.length ? 'SUBSCRIBING' : 'SUBSCRIBING';
++    queueSubscriptions(newlyMapped);
++    updateState();
++    return { mapped, unsupported, ambiguous };
++  };
++
++  const adoptCatalog = () => {
++    catalogLastCheckedTs = clock(); let snap;
++    const reject = (error) => { catalogLastError = error; if (acceptedCatalog && !recordingError && !stopping) state = 'DEGRADED'; };
++    try { snap = catalogSource.snapshot(); } catch (error) { reject({ reason: 'CATALOG_SOURCE_FAILED', detail: boundedText(error?.message), ts: catalogLastCheckedTs }); return; }
++    const catalog = plain(snap) && plain(snap.catalog) ? snap.catalog : snap;
++    const checked = validateBroadKrakenCatalog(catalog, cfg);
++    if (!checked.ok) { reject({ ...checked, ts: catalogLastCheckedTs }); return; }
++    if (plain(snap) && snap.fresh === false) { reject({ reason: 'CATALOG_SOURCE_STALE', ts: catalogLastCheckedTs }); return; }
++    if (catalog.observedTs > catalogLastCheckedTs + cfg.clockSkewMs) { reject({ reason: 'CATALOG_CLOCK_AHEAD', ts: catalogLastCheckedTs }); return; }
++    if (catalogLastCheckedTs - catalog.observedTs > cfg.maxCatalogAgeMs) { reject({ reason: 'CATALOG_TOO_OLD', ageMs: catalogLastCheckedTs - catalog.observedTs, ts: catalogLastCheckedTs }); return; }
++    if (acceptedCatalog && catalog.observedTs < acceptedCatalog.observedTs) { reject({ reason: 'CATALOG_CLOCK_REGRESSION', ts: catalogLastCheckedTs }); return; }
++    if (acceptedCatalog?.contentId === catalog.contentId) { acceptedCatalog = clone(catalog); catalogLastError = null; markLatestDirty(); updateState(); return; }
++    acceptedCatalog = clone(catalog); catalogLastError = null;
++    const previous = new Map(markets); markets.clear();
++    for (const row of acceptedCatalog.markets) {
++      const prior = previous.get(row.base);
++      markets.set(row.base, prior && prior.pairKey === row.pairKey ? prior : {
++        ...marketIdentity(row), mappingState: 'AWAITING_INSTRUMENT', channels: { ticker: 'AWAITING_INSTRUMENT', ohlc: 'AWAITING_INSTRUMENT' },
++        currentTicker: null, currentProvisional: null, latestInstrument: null, latestSubscription: {}, latestTicker: null, latestProvisional: null, latestClosed: null, pendingCandle: null, lastError: null,
++      });
++    }
++    if (instrumentPairs.size) reconcileMappings(catalogLastCheckedTs);
++    if (!ws) startSocket();
++  };
++
++  const nativeTicker = (row, receivedTs, epochId) => {
++    const symbol = typeof row.symbol === 'string' ? row.symbol : null; const m = symbol ? byWsSymbol.get(symbol) : null;
++    if (!m) { counters.rejectedRows += 1; return; }
++    const tickerTimestampTs = isoTs(row.timestamp);
++    // A ticker snapshot is a baseline of the rolling window. Kraken only
++    // documents trade-trigger semantics for updates, so snapshot.timestamp is
++    // retained as payload but is not promoted to a last-trade event clock.
++    const sourceEventTs = row.__messageType === 'update' ? tickerTimestampTs : null;
++    const payload = {
++      lastPrice: number(row.last), bid: number(row.bid), ask: number(row.ask), bidQty: number(row.bid_qty), askQty: number(row.ask_qty),
++      change24h: number(row.change), changePct24h: number(row.change_pct), high24h: number(row.high), low24h: number(row.low),
++      volume24hBase: number(row.volume), vwap24h: number(row.vwap), tickerTimestampTs,
++    };
++    const missingFields = Object.entries(payload).filter(([, v]) => v === null).map(([k]) => k);
++    const invalidFields = [];
++    if (payload.lastPrice !== null && payload.lastPrice <= 0) invalidFields.push('lastPrice');
++    if (payload.volume24hBase !== null && payload.volume24hBase < 0) invalidFields.push('volume24hBase');
++    if (payload.vwap24h !== null && payload.vwap24h <= 0) invalidFields.push('vwap24h');
++    if (tickerTimestampTs !== null && tickerTimestampTs > receivedTs + cfg.clockSkewMs) invalidFields.push('tickerTimestampTs');
++    const full = payload.lastPrice !== null && payload.lastPrice > 0 && payload.volume24hBase !== null && payload.volume24hBase >= 0;
++    stageLatest(m, 'ticker', { recordType: 'TICKER', catalogContentId: acceptedCatalog.contentId, epochId, market: marketForRecord(m), channel: 'ticker', quality: invalidFields.length ? 'FAILED' : full ? 'OBSERVED' : payload.lastPrice === null ? 'MISSING' : 'PARTIAL', sourceEventTs, receivedTs, payload: { messageType: row.__messageType, ...payload, missingFields, invalidFields } });
++  };
++  const nativeOhlc = (row, receivedTs, epochId) => {
++    const symbol = typeof row.symbol === 'string' ? row.symbol : null; const m = symbol ? byWsSymbol.get(symbol) : null;
++    const startTs = isoTs(row.interval_begin ?? row.timestamp); const interval = integer(row.interval);
++    if (!m || startTs === null || interval !== 1 || startTs > receivedTs + cfg.clockSkewMs) { counters.rejectedRows += 1; return; }
++    const periodEndTs = startTs + 60_000;
++    const payload = { open: number(row.open), high: number(row.high), low: number(row.low), close: number(row.close), vwap: number(row.vwap), trades: integer(row.trades), volumeBase: number(row.volume) };
++    if (![payload.open, payload.high, payload.low, payload.close].every((n) => n !== null && n > 0) || payload.high < Math.max(payload.open, payload.close) || payload.low > Math.min(payload.open, payload.close) || payload.high < payload.low || (payload.vwap !== null && payload.vwap <= 0) || payload.volumeBase === null || payload.volumeBase < 0 || payload.trades === null || payload.trades < 0) { counters.rejectedRows += 1; return; }
++    const prior = m.pendingCandle;
++    if (prior && startTs < prior.periodStartTs) { counters.rejectedRows += 1; m.lastError = 'OHLC_CLOCK_REGRESSION'; return; }
++    if (prior && startTs > prior.periodStartTs) {
++      enqueue({ recordType: 'OHLC', catalogContentId: acceptedCatalog.contentId, epochId, market: marketForRecord(m), channel: 'ohlc', quality: 'CONSERVATIVE_CLOSED', sourceEventTs: null, receivedTs, periodStartTs: prior.periodStartTs, periodEndTs: prior.periodEndTs, payload: { messageType: 'closed', finality: 'CONSERVATIVE_SAME_SYMBOL_NEXT_INTERVAL', sourceClockBasis: 'DERIVED_PERIOD_END_NOT_PROVIDER_EVENT_TIME', learningEligible: false, ...prior.payload } });
++      if (startTs > prior.periodEndTs) { counters.gaps += 1; coverageRecord(m, 'ohlc', 'GAP', receivedTs, { state: 'GAP', reason: 'NO_NATIVE_INTERVAL', sinceTs: prior.periodEndTs, untilTs: startTs }); }
++    }
++    m.pendingCandle = { periodStartTs: startTs, periodEndTs, payload };
++    stageLatest(m, 'candle', { recordType: 'OHLC', catalogContentId: acceptedCatalog.contentId, epochId, market: marketForRecord(m), channel: 'ohlc', quality: 'PROVISIONAL', receivedTs, periodStartTs: startTs, periodEndTs, payload: { messageType: row.__messageType, finality: 'PROVISIONAL', learningEligible: false, ...payload } });
++  };
++
++  function onMessage(msg, meta) {
++    counters.nativeMessages += 1;
++    if (msg?.method === 'subscribe') {
++      const result = plain(msg.result) ? msg.result : {}; const channel = result.channel; const symbol = result.symbol; const request = requestMap.get(integer(msg.req_id));
++      if (!request || request.channel !== channel) { counters.rejectedRows += 1; return; }
++      if (channel === 'instrument') {
++        if (msg.success === false) { instrumentState = 'FAILED'; instrumentError = boundedText(msg.error ?? 'instrument subscription failed'); state = 'DEGRADED'; }
++        else if (instrumentState !== 'MAPPED') instrumentState = 'SUBSCRIBED';
++        requestMap.delete(integer(msg.req_id)); updateState();
++        return;
++      }
++      if (!['ticker', 'ohlc'].includes(channel) || typeof symbol !== 'string' || !request.remaining.has(symbol)) { counters.rejectedRows += 1; return; }
++      const affected = [symbol]; request.remaining.delete(symbol); if (request.remaining.size === 0) requestMap.delete(integer(msg.req_id));
++      for (const s of affected) { const m = byWsSymbol.get(s); if (m) setChannel(m, channel, msg.success === true ? 'SUBSCRIBED' : 'FAILED', meta.receivedTs, msg.success === false ? boundedText(msg.error ?? 'subscription failed') : null); }
++      updateState();
++      return;
++    }
++    if (msg?.channel === 'instrument' && plain(msg.data)) {
++      const hasPairs = Array.isArray(msg.data.pairs); const pairs = hasPairs ? msg.data.pairs : [];
++      // Kraken may send an asset-only incremental instrument update. It does
++      // not alter pair reconciliation and is not evidence that the feed failed.
++      if (msg.type !== 'snapshot' && !hasPairs && Array.isArray(msg.data.assets)) { lastInstrumentTs = meta.receivedTs; return; }
++      // The instrument snapshot contains every quote currency. Validate the
++      // complete native row set, then resolve only exact USD members below.
++      const valid = (msg.type !== 'snapshot' || pairs.length > 0) && hasPairs
++        && pairs.every((raw) => {
++          if (!plain(raw) || typeof raw.symbol !== 'string' || !WS_PAIR_SYMBOL_RE.test(raw.symbol)
++            || typeof raw.base !== 'string' || !WS_COMPONENT_RE.test(raw.base)
++            || typeof raw.quote !== 'string' || !WS_COMPONENT_RE.test(raw.quote)
++            || typeof raw.status !== 'string' || raw.status.length === 0 || raw.status.length > 40) return false;
++          const [base, quote] = raw.symbol.split('/'); return base === raw.base && quote === raw.quote;
++        }) && new Set(pairs.map((p) => p.symbol)).size === pairs.length;
++      if (!valid) { counters.rejectedRows += Math.max(1, pairs.length); instrumentState = 'FAILED'; instrumentError = 'INSTRUMENT_PAYLOAD_MALFORMED_OR_EMPTY'; state = 'DEGRADED'; return; }
++      if (pairs.length === 0) { lastInstrumentTs = meta.receivedTs; return; }
++      if (msg.type === 'snapshot') instrumentPairs.clear();
++      for (const raw of pairs) instrumentPairs.set(raw.symbol, { symbol: raw.symbol, base: raw.base, quote: raw.quote, status: raw.status });
++      lastInstrumentTs = meta.receivedTs; reconcileMappings(meta.receivedTs); return;
++    }
++    if (msg?.channel === 'ticker' && Array.isArray(msg.data)) {
++      for (const row of msg.data) { counters.nativeRows += 1; if (plain(row)) nativeTicker({ ...row, __messageType: msg.type === 'snapshot' ? 'snapshot' : 'update' }, meta.receivedTs, meta.epochId); else counters.rejectedRows += 1; }
++      return;
++    }
++    if (msg?.channel === 'ohlc' && Array.isArray(msg.data)) {
++      for (const row of msg.data) { counters.nativeRows += 1; if (plain(row)) nativeOhlc({ ...row, __messageType: msg.type === 'snapshot' ? 'snapshot-provisional' : 'update-provisional' }, meta.receivedTs, meta.epochId); else counters.rejectedRows += 1; }
++    }
++  }
++
++  function startSocket() {
++    state = 'CONNECTING';
++    ws = createWsClient({
++      providerId: 'KRAKEN_SPOT', endpointId: 'ws-v2', WebSocketImpl, clock, log, url,
++      onMessage,
++      onOpen: ({ epochId, send }) => {
++        currentEpoch = epochId; state = 'AWAITING_INSTRUMENT'; instrumentState = 'PENDING'; instrumentError = null; instrumentPairs.clear(); byWsSymbol.clear(); subscriptionQueue.length = 0; requestMap.clear();
++        for (const m of markets.values()) { m.mappingState = 'AWAITING_INSTRUMENT'; m.wsSymbol = null; m.channels.ticker = 'AWAITING_INSTRUMENT'; m.channels.ohlc = 'AWAITING_INSTRUMENT'; m.pendingCandle = null; }
++        markLatestDirty();
++        const id = requestId++; requestMap.set(id, { channel: 'instrument', symbols: [], remaining: new Set() }); counters.subscriptionRequests += 1;
++        if (!send({ method: 'subscribe', params: { channel: 'instrument', snapshot: true, include_tokenized_assets: false }, req_id: id })) { instrumentState = 'FAILED'; instrumentError = 'SOCKET_NOT_OPEN'; state = 'DEGRADED'; }
++      },
++      onClose: ({ epochId, reason }) => {
++        const ts = clock();
++        if (subscribeTimer !== null) timers.clearTimeout(subscribeTimer); subscribeTimer = null; subscriptionQueue.length = 0;
++        for (const m of markets.values()) {
++          for (const channel of ['ticker', 'ohlc']) if (m.channels[channel] === 'SUBSCRIBED' || m.channels[channel] === 'PENDING') { m.channels[channel] = stopping ? 'STOPPED' : 'GAP'; coverageRecord(m, channel, 'GAP', ts, { state: m.channels[channel], reason: reason ?? 'SOCKET_CLOSED', epochId }, stopping); }
++          m.pendingCandle = null;
++        }
++        if (!stopping && !recordingError) state = 'DEGRADED';
++      },
++    });
++    ws.start();
++  }
++
++  const freshness = (m, now) => {
++    // Public readiness is based on the last fsynced latest snapshot / appended
++    // close, never merely a value waiting in the coalescing buffer.
++    const t = m.latestTicker; const p = m.latestProvisional; const c = p ?? m.latestClosed;
++    const tickerAge = t ? Math.max(0, now - t.receivedTs) : null; const tickerEventAge = t?.sourceEventTs ? Math.max(0, now - t.sourceEventTs) : null;
++    const candleAge = c ? Math.max(Math.max(0, now - c.receivedTs), Math.max(0, now - c.periodEndTs)) : null;
++    const tickerContinuous = !!t && t.epochId === currentEpoch && m.channels.ticker === 'SUBSCRIBED';
++    const candleContinuous = !!c && c.epochId === currentEpoch && m.channels.ohlc === 'SUBSCRIBED';
++    const tickerState = !t ? 'NEVER_OBSERVED' : !tickerContinuous ? 'EPOCH_STALE' : t.quality === 'FAILED' ? 'INVALID' : t.payload.lastPrice === null ? 'OBSERVED_MISSING_PRICE' : t.payload.messageType === 'snapshot' ? 'IDLE_SNAPSHOT_BASELINE' : t.quality !== 'OBSERVED' ? 'OBSERVED_PARTIAL' : tickerAge > cfg.tickerFreshMs ? 'STALE' : tickerEventAge === null || tickerEventAge > cfg.tickerFreshMs ? 'IDLE_NO_RECENT_TRADE' : 'FRESH';
++    const currentInterval = !!p && p.periodStartTs <= now + cfg.clockSkewMs && p.periodEndTs >= now - cfg.clockSkewMs;
++    const candleState = !c ? 'NEVER_OBSERVED' : !candleContinuous ? 'EPOCH_STALE' : p ? (currentInterval && candleAge <= cfg.candleFreshMs ? 'PROVISIONAL_FRESH' : 'PROVISIONAL_STALE') : (candleAge <= cfg.candleFreshMs ? 'CLOSED_FRESH' : 'CLOSED_STALE');
++    return { tickerState, tickerAge, candleState, candleAge };
++  };
++  const perMarketStatus = (now) => [...markets.values()].map((m) => {
++    const f = freshness(m, now);
++    const ticker = m.currentTicker ?? m.latestTicker; const provisional = m.currentProvisional ?? m.latestProvisional; const closed = m.latestClosed; const candle = provisional ?? closed;
++    const tickerPending = !!m.currentTicker && m.currentTicker.recordId !== m.latestTicker?.recordId;
++    const candlePending = !!m.currentProvisional && m.currentProvisional.recordId !== m.latestProvisional?.recordId;
++    return { canonicalCoin: m.canonicalCoin, pairKey: m.pairKey, nativeBase: m.nativeBase, catalogWsname: m.catalogWsname, wsSymbol: m.wsSymbol, mappingState: m.mappingState, channels: { ...m.channels }, ticker: { state: tickerPending ? 'PENDING_PERSIST' : f.tickerState, persisted: !tickerPending && !!ticker, lastReceivedTs: ticker?.receivedTs ?? null, sourceEventTs: ticker?.sourceEventTs ?? null, ageMs: tickerPending ? Math.max(0, now - ticker.receivedTs) : f.tickerAge, lastPrice: ticker?.payload.lastPrice ?? null, volume24hBase: ticker?.payload.volume24hBase ?? null, vwap24h: ticker?.payload.vwap24h ?? null }, candle: { state: candlePending ? 'PENDING_PERSIST' : f.candleState, persisted: !candlePending && !!candle, lastReceivedTs: candle?.receivedTs ?? null, periodStartTs: candle?.periodStartTs ?? null, periodEndTs: candle?.periodEndTs ?? null, ageMs: candlePending ? Math.max(0, now - candle.receivedTs) : f.candleAge, quality: candle?.quality ?? null, close: candle?.payload.close ?? null, volumeBase: candle?.payload.volumeBase ?? null, learningEligible: false, provisional: provisional ? { receivedTs: provisional.receivedTs, periodStartTs: provisional.periodStartTs, periodEndTs: provisional.periodEndTs, close: provisional.payload.close, volumeBase: provisional.payload.volumeBase, trades: provisional.payload.trades } : null, closed: closed ? { receivedTs: closed.receivedTs, periodStartTs: closed.periodStartTs, periodEndTs: closed.periodEndTs, close: closed.payload.close, volumeBase: closed.payload.volumeBase, trades: closed.payload.trades, finality: closed.payload.finality } : null }, lastError: m.lastError };
++  });
++  const status = () => {
++    const now = clock(); const perMarket = perMarketStatus(now); const channelCount = (ch, value) => perMarket.filter((m) => m.channels[ch] === value).length;
++    const countState = (field, values) => perMarket.filter((m) => values.includes(m[field].state)).length;
++    const storage = store.status();
++    return clone({ version: BROAD_KRAKEN_VERSION, state, startedTs, stoppedTs,
++      catalog: { state: !acceptedCatalog ? 'WAITING' : catalogLastError ? 'STALE_OR_REJECTED' : 'ACCEPTED', contentId: acceptedCatalog?.contentId ?? null, observedTs: acceptedCatalog?.observedTs ?? null, ageMs: acceptedCatalog ? Math.max(0, now - acceptedCatalog.observedTs) : null, maxAgeMs: cfg.maxCatalogAgeMs, markets: acceptedCatalog?.markets.length ?? 0, attempted: markets.size, lastCheckedTs: catalogLastCheckedTs, lastError: catalogLastError },
++      instrument: { state: instrumentState, receivedTs: lastInstrumentTs, pairs: instrumentPairs.size, mapped: perMarket.filter((m) => m.mappingState === 'MAPPED').length, unsupported: perMarket.filter((m) => m.mappingState === 'UNSUPPORTED').length, ambiguous: perMarket.filter((m) => m.mappingState === 'AMBIGUOUS').length, lastError: instrumentError },
++      socket: ws?.status?.() ?? { state: 'STOPPED' },
++      subscription: { queueDepth: subscriptionQueue.length, requestsSent: counters.subscriptionRequests, ackedTicker: channelCount('ticker', 'SUBSCRIBED'), ackedOhlc: channelCount('ohlc', 'SUBSCRIBED'), failedTicker: channelCount('ticker', 'FAILED'), failedOhlc: channelCount('ohlc', 'FAILED') },
++      recording: { state: recordingError ? 'FAILED' : stopping ? 'STOPPING' : 'ACTIVE', ...storage, latestSnapshotCadenceMs: cfg.latestSnapshotMs, queued: writeQueue.length, maxQueue: cfg.maxQueue, error: recordingError },
++      freshness: { tickerFreshMs: cfg.tickerFreshMs, candleFreshMs: cfg.candleFreshMs, freshTicker: countState('ticker', ['FRESH']), staleTicker: countState('ticker', ['STALE', 'EPOCH_STALE']), idleTicker: countState('ticker', ['IDLE_NO_RECENT_TRADE', 'IDLE_SNAPSHOT_BASELINE']), snapshotBaselineTicker: countState('ticker', ['IDLE_SNAPSHOT_BASELINE']), partialTicker: countState('ticker', ['OBSERVED_PARTIAL', 'INVALID']), neverTicker: countState('ticker', ['NEVER_OBSERVED']), missingPriceTicker: countState('ticker', ['OBSERVED_MISSING_PRICE']), freshCandle: countState('candle', ['PROVISIONAL_FRESH', 'CLOSED_FRESH']), staleCandle: countState('candle', ['PROVISIONAL_STALE', 'CLOSED_STALE', 'EPOCH_STALE']), neverCandle: countState('candle', ['NEVER_OBSERVED']), provisionalCandle: countState('candle', ['PROVISIONAL_FRESH', 'PROVISIONAL_STALE']), closedCandle: countState('candle', ['CLOSED_FRESH', 'CLOSED_STALE']) },
++      counters: { ...counters }, perMarket,
++    });
++  };
++  const latest = (canonicalCoin = null) => {
++    const rows = perMarketStatus(clock());
++    if (canonicalCoin !== null) return clone(rows.find((m) => m.canonicalCoin === canonicalCoin) ?? null);
++    return clone({ catalogContentId: acceptedCatalog?.contentId ?? null, markets: rows });
++  };
++  const drain = async () => {
++    if (latestTimer !== null) timers.clearTimeout(latestTimer); latestTimer = null;
++    while ((writeQueue.length || draining) && !recordingError) { drainWrites(); await Promise.resolve(); }
++    if (!recordingError) {
++      store.flush();
++      if (latestTimer !== null) timers.clearTimeout(latestTimer); latestTimer = null;
++      if (latestDirty) persistLatestSnapshot();
++    }
++  };
++  const stop = () => {
++    if (stopPromise) return stopPromise;
++    stopPromise = (async () => {
++      if (latestTimer !== null) timers.clearTimeout(latestTimer); latestTimer = null;
++      stopping = true; if (state !== 'RECORDING_FAILED') state = 'STOPPING';
++      if (catalogTimer !== null) timers.clearInterval(catalogTimer); catalogTimer = null;
++      if (subscribeTimer !== null) timers.clearTimeout(subscribeTimer); subscribeTimer = null;
++      if (drainTimer !== null) timers.clearTimeout(drainTimer); drainTimer = null;
++      try { await ws?.stop?.(); } catch (error) { if (!recordingError) recordingError = { code: 'BROAD_MARKET_SOCKET_STOP_FAILED', message: boundedText(error?.message), ts: clock() }; }
++      await drain();
++      try { store.close(); } catch (error) { if (!recordingError) recordingError = { code: boundedText(error?.code || 'BROAD_MARKET_CLOSE_FAILED', 60), message: boundedText(error?.message), ts: clock() }; }
++      stoppedTs = clock(); state = recordingError ? 'RECORDING_FAILED' : 'STOPPED';
++      return status();
++    })(); return stopPromise;
++  };
++
++  adoptCatalog();
++  catalogTimer = timers.setInterval(adoptCatalog, cfg.catalogPollMs); catalogTimer?.unref?.();
++  return { status, latest, drain, stop, dataDir: store.status().dir };
++}
+diff --git a/test/broad-kraken.test.js b/test/broad-kraken.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/broad-kraken.test.js
+@@ -0,0 +1,241 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { catalogContentId } from '../survey/catalog.js';
++import { BROAD_KRAKEN_DEFAULTS, readBroadKrakenLatest, startBroadKraken, validateBroadKrakenCatalog } from '../market-lab/broad-kraken.js';
++
++const T = Date.UTC(2026, 8, 13, 12, 0, 20);
++const sleep = (ms = 5) => new Promise((resolve) => setTimeout(resolve, ms));
++const temp = () => mkdtempSync(path.join(tmpdir(), 'cobra-broad-'));
++const market = (base, nativeBase = base, wsBase = base) => ({ pairKey: `${nativeBase}ZUSD`, nativeBase, nativeQuote: 'ZUSD', wsname: `${wsBase}/USD`, base, quote: 'USD', status: 'online' });
++const catalog = (rows, observedTs = T) => {
++  const c = { venue: 'kraken', quote: 'USD', policyVersion: 1, observedTs, counts: { observed: rows.length, supported: rows.length, excluded: 0, unresolved: 0 }, markets: rows, excluded: [], unresolved: [], duplicates: [], aliasesApplied: { XBT: 'BTC', XDG: 'DOGE' }, excludeBases: [], responseOrder: rows.map((m) => m.pairKey), source: 'test' };
++  c.contentId = catalogContentId(c); return c;
 +};
- export function retryAfterSeconds(value, now = Date.now()) {
-   if (typeof value !== 'string' || !value.trim()) return null;
-   if (/^\d+$/.test(value.trim())) return Number(value);
-@@ -77,9 +92,11 @@ async function requestBounded(url, options, json) {
-     return { outcome: 'FAILED', reason: `more than ${maxRedirects} redirects` };
-   } catch (err) {
-     // Neither URLs, response text, nor transport error messages may echo credentials into status.
--    return { outcome: 'FAILED', reason: ctl.signal.aborted
--      ? (signal?.aborted ? 'request stopped' : `timeout after ${timeoutMs}ms`)
--      : `${failureStage} failed` };
-+    let reason;
-+    if (ctl.signal.aborted) reason = signal?.aborted ? 'request stopped' : `timeout after ${timeoutMs}ms`;
-+    else if (failureStage === 'network request') { const code = networkCauseCode(err); reason = code ? `network request failed (${code})` : 'network request failed'; }
-+    else reason = `${failureStage} failed`;
-+    return { outcome: 'FAILED', reason };
-   } finally {
-     clearTimeout(timer); signal?.removeEventListener('abort', abort);
-     if (reader) { cancel(reader); try { reader.releaseLock(); } catch { /* pending read */ } }
-diff --git a/test/bounded-fetch-diagnostics.test.js b/test/bounded-fetch-diagnostics.test.js
-index 9632dd4..5beec82 100644
---- a/test/bounded-fetch-diagnostics.test.js
-+++ b/test/bounded-fetch-diagnostics.test.js
-@@ -7,6 +7,7 @@ const base = { host: 'sensor.example', timeoutMs: 100, maxBytes: 1024 };
++
++class FakeSocket {
++  static instances = [];
++  constructor(url) { this.url = url; this.readyState = 0; this.sent = []; FakeSocket.instances.push(this); }
++  open() { this.readyState = 1; this.onopen?.(); }
++  send(text) { this.sent.push(JSON.parse(text)); }
++  emit(message) { this.onmessage?.({ data: JSON.stringify(message) }); }
++  close() { this.readyState = 3; this.onclose?.({}); }
++}
++
++const manualTimers = () => {
++  const queue = []; const intervals = new Set();
++  const later = (fn) => { const token = { fn, cleared: false }; queue.push(token); return token; };
++  return {
++    setTimeout: (fn) => later(fn), clearTimeout: (token) => { if (token) token.cleared = true; },
++    setInterval: (fn) => { const token = { fn, cleared: false, unref() {} }; intervals.add(token); return token; },
++    clearInterval: (token) => { if (token) token.cleared = true; intervals.delete(token); },
++    runAll(limit = 20_000) { let count = 0; while (queue.length) { const token = queue.shift(); if (!token.cleared) token.fn(); if (++count > limit) throw new Error('manual timer runaway'); } },
++  };
++};
++
++const ack = (socket, request, symbol = null, success = true) => socket.emit({ method: 'subscribe', req_id: request.req_id, success, ...(success ? {} : { error: 'unsupported' }), result: { channel: request.params.channel, ...(symbol ? { symbol } : {}) } });
++const instrumentSnapshot = (socket, pairs) => socket.emit({ channel: 'instrument', type: 'snapshot', data: { assets: [], pairs } });
++const ticker = (symbol, overrides = {}) => ({ symbol, ask: 101, ask_qty: null, bid: 99, bid_qty: 2, change: 1, change_pct: 1, high: 105, last: 100, low: 90, volume: 123.5, vwap: 98.2, timestamp: new Date(T).toISOString(), ...overrides });
++const ohlc = (symbol, startTs, overrides = {}) => ({ symbol, open: 100, high: 102, low: 99, close: 101, vwap: 100.5, trades: 4, volume: 8.25, interval_begin: new Date(startTs).toISOString(), interval: 1, ...overrides });
++
++test('catalog validation is atomic and never slices the accepted population', () => {
++  const c = catalog([market('BTC', 'XXBT', 'XBT'), market('DOGE', 'XXDG', 'XDG'), market('ABC')]);
++  assert.deepEqual(validateBroadKrakenCatalog(c), { ok: true, count: 3 });
++  assert.equal(validateBroadKrakenCatalog({ ...c, markets: [...c.markets, c.markets[0]] }).ok, false);
++  assert.equal(validateBroadKrakenCatalog(c, { maxMarkets: 2 }).reason, 'CATALOG_OVERFLOW');
++});
++
++test('full accepted population is classified without a named/top-N cap and every mapped symbol reaches both bounded channel requests', async () => {
++  FakeSocket.instances.length = 0; const dir = temp(); const timers = manualTimers();
++  const supported = Array.from({ length: 612 }, (_, i) => market(`C${String(i).padStart(3, '0')}`));
++  const c = catalog([...supported, market('MISSING')]);
++  const handle = startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: c, fresh: true }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => T, timers, limits: { subscribeChunkSize: 25, catalogPollMs: 60_000 } });
++  try {
++    const socket = FakeSocket.instances.at(-1); socket.open(); const instrumentRequest = socket.sent.find((r) => r.params.channel === 'instrument'); ack(socket, instrumentRequest);
++    instrumentSnapshot(socket, [
++      ...supported.map((m) => ({ symbol: `${m.base}/USD`, base: m.base, quote: 'USD', status: 'online' })),
++      { symbol: 'BTC/EUR', base: 'BTC', quote: 'EUR', status: 'online' },
++    ]);
++    timers.runAll();
++    const requests = socket.sent.filter((r) => ['ticker', 'ohlc'].includes(r.params.channel));
++    assert.ok(requests.every((r) => r.params.symbol.length > 0 && r.params.symbol.length <= 25));
++    for (const channel of ['ticker', 'ohlc']) {
++      const channelRequests = requests.filter((r) => r.params.channel === channel);
++      assert.equal(channelRequests.length, Math.ceil(supported.length / 25));
++      assert.deepEqual(new Set(channelRequests.flatMap((r) => r.params.symbol)), new Set(supported.map((m) => `${m.base}/USD`)));
++      for (const request of channelRequests) for (const symbol of request.params.symbol) ack(socket, request, symbol);
++    }
++    socket.emit({ channel: 'ticker', type: 'snapshot', data: supported.map((m) => ticker(`${m.base}/USD`)) });
++    socket.emit({ channel: 'ohlc', type: 'snapshot', data: supported.map((m) => ohlc(`${m.base}/USD`, T - 20_000)) });
++    timers.runAll(); await handle.drain();
++    let status = handle.status();
++    assert.equal(status.freshness.freshTicker, 0); assert.equal(status.freshness.snapshotBaselineTicker, 612);
++    let persisted = readBroadKrakenLatest({ dataDir: dir, now: T });
++    assert.equal(persisted.markets.filter((m) => m.ticker.state === 'IDLE_SNAPSHOT_BASELINE_PERSISTED').length, 612);
++    socket.emit({ channel: 'ticker', type: 'update', data: supported.map((m) => ticker(`${m.base}/USD`)) });
++    timers.runAll(); await handle.drain(); status = handle.status();
++    assert.equal(status.catalog.markets, 613); assert.equal(status.catalog.attempted, 613); assert.equal(status.perMarket.length, 613);
++    assert.equal(status.instrument.mapped, 612); assert.equal(status.instrument.unsupported, 1);
++    assert.equal(status.subscription.ackedTicker, 612); assert.equal(status.subscription.ackedOhlc, 612);
++    assert.equal(status.freshness.freshTicker, 612); assert.equal(status.freshness.freshCandle, 612);
++    assert.equal(status.perMarket.find((m) => m.canonicalCoin === 'MISSING').channels.ticker, 'UNSUPPORTED');
++    const latestFile = path.join(dir, 'broad-kraken', 'latest.json');
++    assert.ok(statSync(latestFile).size < BROAD_KRAKEN_DEFAULTS.maxLatestBytes);
++    persisted = readBroadKrakenLatest({ dataDir: dir, now: T });
++    assert.equal(persisted.markets.length, 613);
++    assert.equal(persisted.markets.filter((m) => m.ticker.state === 'FRESH_PERSISTED').length, 612);
++    assert.equal(persisted.markets.filter((m) => m.candle.state === 'PROVISIONAL_FRESH_PERSISTED').length, 612);
++  } finally { await handle.stop(); rmSync(dir, { recursive: true, force: true }); }
++});
++
++test('instrument mapping gates all subscriptions; unsupported stays in denominator; raw ticker and current/closed candle values land on disk without fake zeros', async () => {
++  FakeSocket.instances.length = 0; const dir = temp(); let now = T;
++  const c = catalog([market('BTC', 'XXBT', 'XBT'), market('DOGE', 'XXDG', 'XDG'), market('ABC')]);
++  const handle = startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: c, fresh: true }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => now, limits: { subscribeChunkSize: 2, subscribePaceMs: 1, latestSnapshotMs: 1, catalogPollMs: 60_000 } });
++  try {
++    const socket = FakeSocket.instances[0]; assert.ok(socket); socket.open();
++    const instrumentRequest = socket.sent.find((r) => r.params.channel === 'instrument'); assert.ok(instrumentRequest); ack(socket, instrumentRequest);
++    instrumentSnapshot(socket, [
++      { symbol: 'BTC/USD', base: 'BTC', quote: 'USD', status: 'online' },
++      { symbol: 'DOGE/USD', base: 'DOGE', quote: 'USD', status: 'online' },
++      { symbol: 'BTC/EUR', base: 'BTC', quote: 'EUR', status: 'online' },
++    ]);
++    await sleep(20);
++    const subscriptions = socket.sent.filter((r) => r.method === 'subscribe' && ['ticker', 'ohlc'].includes(r.params.channel));
++    assert.equal(subscriptions.length, 2, 'two mapped symbols fit one bounded chunk per channel');
++    assert.deepEqual(new Set(subscriptions.flatMap((r) => r.params.symbol)), new Set(['BTC/USD', 'DOGE/USD']));
++    for (const request of subscriptions) for (const symbol of request.params.symbol) ack(socket, request, symbol);
++    socket.emit({ channel: 'ticker', type: 'snapshot', data: [ticker('BTC/USD')] });
++    socket.emit({ channel: 'ohlc', type: 'snapshot', data: [ohlc('BTC/USD', T - 20_000)] });
++    socket.emit({ channel: 'heartbeat' });
++    await sleep(5); await handle.drain();
++    let latest = handle.latest('BTC');
++    assert.equal(latest.ticker.lastPrice, 100);
++    assert.equal(latest.ticker.volume24hBase, 123.5);
++    assert.equal(latest.ticker.state, 'IDLE_SNAPSHOT_BASELINE', 'a snapshot exposes price/volume but cannot prove a recent trade');
++    assert.equal(latest.candle.provisional.volumeBase, 8.25);
++    assert.equal(latest.candle.closed, null, 'heartbeat/wall clock/other-channel traffic cannot close a candle');
++    socket.emit({ channel: 'ticker', type: 'update', data: [ticker('BTC/USD')] });
++    await sleep(5); await handle.drain();
++    assert.equal(handle.latest('BTC').ticker.state, 'FRESH', 'a trade-triggered update establishes freshness');
++    now = T + 45_000;
++    socket.emit({ channel: 'ohlc', type: 'update', data: [ohlc('BTC/USD', T + 40_000, { close: 103, high: 104, volume: 2 })] });
++    await sleep(5); await handle.drain();
++    latest = handle.latest('BTC');
++    assert.equal(latest.candle.provisional.close, 103);
++    assert.equal(latest.candle.closed.close, 101);
++    assert.equal(latest.candle.closed.finality, 'CONSERVATIVE_SAME_SYMBOL_NEXT_INTERVAL');
++    assert.equal(latest.candle.learningEligible, false);
++    const status = handle.status();
++    assert.equal(status.catalog.markets, 3); assert.equal(status.catalog.attempted, 3); assert.equal(status.perMarket.length, 3);
++    assert.equal(status.instrument.mapped, 2); assert.equal(status.instrument.unsupported, 1);
++    assert.equal(status.perMarket.find((m) => m.canonicalCoin === 'ABC').channels.ticker, 'UNSUPPORTED');
++    assert.equal(status.state, 'DEGRADED', 'unsupported catalog member prevents a false all-market ACTIVE claim');
++    assert.equal(status.freshness.freshCandle, 1, 'the current real provisional candle is a fresh detector input');
++    assert.equal(status.recording.error, null); assert.ok(status.recording.latestSnapshotWrites >= 1);
++    const disk = readBroadKrakenLatest({ dataDir: dir, now });
++    assert.equal(disk.historyIncluded, false, 'the live reader never scans the rolling journal by default');
++    assert.equal(disk.epochId, 'KRAKEN_SPOT:ws-v2:1');
++    assert.equal(disk.catalog.contentId, c.contentId);
++    assert.equal(disk.markets.find((m) => m.canonicalCoin === 'BTC').ticker.record.payload.volume24hBase, 123.5);
++    assert.equal(disk.markets.find((m) => m.canonicalCoin === 'BTC').candle.provisional.payload.volumeBase, 2);
++    assert.equal(disk.source, 'LOCAL_FILESYSTEM_NOT_REPUBLISH_DURABLE');
++    writeFileSync(path.join(dir, 'broad-kraken', 'events-999999.jsonl'), 'not-json\n');
++    const bounded = readBroadKrakenLatest({ dataDir: dir, now });
++    assert.equal(bounded.malformed, 0, 'journal corruption cannot block or contaminate the default bounded latest read');
++    assert.equal(bounded.markets.find((m) => m.canonicalCoin === 'BTC').ticker.state, 'FRESH_PERSISTED');
++    const historical = readBroadKrakenLatest({ dataDir: dir, now, includeJournal: true });
++    assert.ok(historical.malformed >= 1, 'journal parsing is explicit opt-in');
++    const latestFile = path.join(dir, 'broad-kraken', 'latest.json');
++    const snapshot = JSON.parse(readFileSync(latestFile, 'utf8'));
++    writeFileSync(latestFile, `${JSON.stringify({ ...snapshot, currentEpoch: 'KRAKEN_SPOT:ws-v2:999' })}\n`);
++    const staleEpoch = readBroadKrakenLatest({ dataDir: dir, now });
++    assert.equal(staleEpoch.markets.find((m) => m.canonicalCoin === 'BTC').ticker.state, 'EPOCH_STALE_PERSISTED');
++    snapshot.records.BTC.market.canonicalCoin = 'DOGE';
++    writeFileSync(latestFile, `${JSON.stringify(snapshot)}\n`);
++    const identityMismatch = readBroadKrakenLatest({ dataDir: dir, now });
++    assert.ok(identityMismatch.malformed >= 1);
++    assert.equal(identityMismatch.markets.some((m) => m.canonicalCoin === 'BTC'), false, 'a mismatched snapshot key/market identity is rejected');
++  } finally { await handle.stop(); rmSync(dir, { recursive: true, force: true }); }
++});
++
++test('stale catalog never opens a socket; malformed instrument snapshot never maps or subscribes', async () => {
++  FakeSocket.instances.length = 0; const dir = temp();
++  const old = catalog([market('BTC', 'XXBT', 'XBT')], T - BROAD_KRAKEN_DEFAULTS.maxCatalogAgeMs - 1);
++  const waiting = startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: old, fresh: false }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => T, limits: { catalogPollMs: 60_000 } });
++  assert.equal(FakeSocket.instances.length, 0); assert.equal(waiting.status().catalog.state, 'WAITING'); await waiting.stop();
++  const c = catalog([market('BTC', 'XXBT', 'XBT')]);
++  const bad = startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: c, fresh: true }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => T, limits: { catalogPollMs: 60_000 } });
++  try {
++    const socket = FakeSocket.instances.at(-1); socket.open(); const request = socket.sent.find((r) => r.params.channel === 'instrument'); ack(socket, request); instrumentSnapshot(socket, []); await sleep();
++    assert.equal(bad.status().instrument.state, 'FAILED');
++    assert.equal(socket.sent.filter((r) => ['ticker', 'ohlc'].includes(r.params.channel)).length, 0);
++  } finally { await bad.stop(); rmSync(dir, { recursive: true, force: true }); }
++});
++
++test('a legitimate asset-only instrument delta does not fail a mapped collector', async () => {
++  FakeSocket.instances.length = 0; const dir = temp();
++  const c = catalog([market('BTC', 'XXBT', 'XBT')]);
++  const handle = startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: c, fresh: true }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => T, limits: { subscribePaceMs: 1, latestSnapshotMs: 1, catalogPollMs: 60_000 } });
++  try {
++    const socket = FakeSocket.instances.at(-1); socket.open(); const request = socket.sent.find((r) => r.params.channel === 'instrument');
++    instrumentSnapshot(socket, [
++      { symbol: 'BTC/USD', base: 'BTC', quote: 'USD', status: 'online' },
++      { symbol: 'BTC/EUR', base: 'BTC', quote: 'EUR', status: 'online' },
++      { symbol: 'USD/JPY', base: 'USD', quote: 'JPY', status: 'online' },
++    ]);
++    ack(socket, request, null);
++    await sleep(10);
++    socket.emit({ channel: 'instrument', type: 'update', data: { assets: [{ id: 'BTC', status: 'enabled' }] } });
++    await sleep();
++    assert.equal(handle.status().instrument.state, 'MAPPED', 'a late subscribe ack cannot downgrade a processed snapshot');
++    assert.equal(handle.status().instrument.mapped, 1);
++  } finally { await handle.stop(); rmSync(dir, { recursive: true, force: true }); }
++});
++
++test('a reconnect snapshot remains a visible baseline until the new epoch receives a trade-triggered update', async () => {
++  FakeSocket.instances.length = 0; const dir = temp(); let now = T;
++  const c = catalog([market('BTC', 'XXBT', 'XBT')]);
++  const handle = startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: c, fresh: true }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => now, limits: { subscribePaceMs: 1, latestSnapshotMs: 1, catalogPollMs: 60_000 } });
++  try {
++    const first = FakeSocket.instances.at(-1); first.open(); let request = first.sent.find((r) => r.params.channel === 'instrument'); ack(first, request); instrumentSnapshot(first, [{ symbol: 'BTC/USD', base: 'BTC', quote: 'USD', status: 'online' }]); await sleep(15);
++    for (const sub of first.sent.filter((r) => ['ticker', 'ohlc'].includes(r.params.channel))) ack(first, sub, 'BTC/USD');
++    first.emit({ channel: 'ticker', type: 'update', data: [ticker('BTC/USD')] }); await sleep(5); await handle.drain();
++    assert.equal(handle.latest('BTC').ticker.state, 'FRESH');
++    first.close(); now += 1_000; await sleep(1_020);
++    const second = FakeSocket.instances.at(-1); assert.notEqual(second, first); second.open(); request = second.sent.find((r) => r.params.channel === 'instrument'); ack(second, request); instrumentSnapshot(second, [{ symbol: 'BTC/USD', base: 'BTC', quote: 'USD', status: 'online' }]); await sleep(15);
++    for (const sub of second.sent.filter((r) => ['ticker', 'ohlc'].includes(r.params.channel))) ack(second, sub, 'BTC/USD');
++    second.emit({ channel: 'ticker', type: 'snapshot', data: [ticker('BTC/USD', { timestamp: new Date(now).toISOString() })] }); await sleep(5); await handle.drain();
++    const latest = handle.latest('BTC'); assert.equal(latest.ticker.lastPrice, 100); assert.equal(latest.ticker.volume24hBase, 123.5); assert.equal(latest.ticker.state, 'IDLE_SNAPSHOT_BASELINE');
++  } finally { await handle.stop(); rmSync(dir, { recursive: true, force: true }); }
++});
++
++test('invalid price/volume and malformed/future OHLC are never fresh; stop drains and releases the exact writer lock', async () => {
++  FakeSocket.instances.length = 0; const dir = temp(); let now = T;
++  const c = catalog([market('BTC', 'XXBT', 'XBT')]);
++  const open = () => startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: c, fresh: true }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => now, limits: { subscribePaceMs: 1, latestSnapshotMs: 1, catalogPollMs: 60_000 } });
++  const handle = open();
++  const socket = FakeSocket.instances.at(-1); socket.open(); const ir = socket.sent.find((r) => r.params.channel === 'instrument'); ack(socket, ir); instrumentSnapshot(socket, [{ symbol: 'BTC/USD', base: 'BTC', quote: 'USD', status: 'online' }]); await sleep(15);
++  for (const request of socket.sent.filter((r) => ['ticker', 'ohlc'].includes(r.params.channel))) ack(socket, request, 'BTC/USD');
++  socket.emit({ channel: 'ticker', type: 'update', data: [ticker('BTC/USD', { timestamp: new Date(T + 10_000).toISOString() })] });
++  await sleep(5); await handle.drain();
++  const futureClock = readBroadKrakenLatest({ dataDir: dir, now });
++  assert.ok(futureClock.malformed >= 1);
++  assert.equal(futureClock.markets.find((m) => m.canonicalCoin === 'BTC').ticker.record, null, 'future source clocks are rejected by the disk reader');
++  socket.emit({ channel: 'ticker', type: 'update', data: [ticker('BTC/USD', { last: -1, volume: -5 })] });
++  socket.emit({ channel: 'ohlc', type: 'update', data: [ohlc('BTC/USD', T + 10_000, { high: 90 })] });
++  socket.emit({ channel: 'ohlc', type: 'update', data: [ohlc('BTC/USD', T + 10_000, { interval_begin: new Date(T + 10_000).toISOString() })] });
++  await sleep(5); await handle.drain();
++  assert.equal(handle.latest('BTC').ticker.state, 'INVALID');
++  assert.equal(handle.status().counters.rejectedRows, 2, 'bad-envelope and future-clock OHLC rows are rejected, never normalized into detector facts');
++  await handle.stop();
++  const stopped = readBroadKrakenLatest({ dataDir: dir, now });
++  assert.equal(stopped.markets.find((m) => m.canonicalCoin === 'BTC').ticker.state, 'RETAINED_ONLY_PERSISTED');
++  assert.ok(!readdirSync(path.join(dir, 'broad-kraken')).includes('writer.lock'));
++  const reopened = open(); await reopened.stop();
++  const source = readFileSync(new URL('../market-lab/broad-kraken.js', import.meta.url), 'utf8');
++  for (const forbidden of ['addOrder', 'cancelOrder', "from '../judge", "from '../watch", "from '../tape", 'api_key', 'ws-auth']) assert.equal(source.includes(forbidden), false, forbidden);
++  rmSync(dir, { recursive: true, force: true });
++});
+diff --git a/tools/data-only-runtime.mjs b/tools/data-only-runtime.mjs
+index c7dd4bf..01a47f3 100644
+--- a/tools/data-only-runtime.mjs
++++ b/tools/data-only-runtime.mjs
+@@ -13,7 +13,9 @@ Object.assign(process.env, {
+   JUDGE_ALLOW_ORDERS: 'false',
+   MARKET_RESEARCH_ENABLED: 'false',
+   RUMINT_ENABLED: 'false',
+-  RUMOR2_SOCIAL_X_ENABLED: 'true',
++  // Paid X stays disabled during broad-market rollout; existing caps are not
++  // authorization to create stream rules or consume the funded account.
++  RUMOR2_SOCIAL_X_ENABLED: 'false',
+   RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS: '100',
+   RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS: '3000',
+   RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD: '0.50',
+@@ -55,6 +57,7 @@ const { rumor2CheckpointStore } = await import('../persistence/rumor2-checkpoint
+ const { rumor2JournalStore } = await import('../persistence/rumor2-journal.js');
+ const { startRumor2 } = await import('../rumor2/collector.js');
+ const { startDataOnlyMarket } = await import('./data-only-market.mjs');
++const { startBroadKraken } = await import('../market-lab/broad-kraken.js');
+ const { openDataOnlyCheckpoints } = await import('./data-only-checkpoints.mjs');
+ const { onceAsync, dataOnlySpending } = await import('../lib/data-only-lifecycle.js');
  
- test('bounded JSON transport distinguishes a request failure without exposing its message', async () => {
-   const secretBearingError = new TypeError('fetch https://sensor.example/?token=do-not-echo failed');
-+  secretBearingError.cause = { code: 'UNKNOWN_do-not-echo', message: 'credential=do-not-echo' };
-   const result = await fetchJsonBounded(url, {
-     ...base,
-     fetchImpl: async () => { throw secretBearingError; }
-@@ -15,6 +16,29 @@ test('bounded JSON transport distinguishes a request failure without exposing it
-   assert.doesNotMatch(JSON.stringify(result), /do-not-echo/);
+@@ -129,6 +132,7 @@ let wideEye = null;
+ let rumor2 = null;
+ let video = null;
+ let market = null;
++let broadMarket = null;
+ let publicDiscovery = null;
+ let persistence = null;
+ let checkpoints = null;
+@@ -192,6 +196,22 @@ if (!Array.isArray(catalog?.markets) || catalog.markets.length === 0) {
+   blockers.KRAKEN_CATALOG = 'no accepted full Kraken USD catalog; catalog-dependent collectors withheld (no named fallback)';
+ }
+ 
++// The outer funnel is independent of the small, deeper research-subject set.
++// Every accepted catalog market gets the same public price/volume/candle
++// subscription opportunity. Observed coverage is reported by the collector,
++// never inferred from catalog size or from the deep collector's health.
++if (catalog) {
++  try {
++    startupPhase = 'BROAD_MARKET_CAPTURE';
++    if (!checkpoints?.market) throw new Error(blockers.MARKET ?? 'MARKET_QUOTA_NOT_RESTORED');
++    broadMarket = await startBroadKraken({ catalogSource, dataDir: root, log });
++    handles.push(broadMarket);
++  } catch (error) {
++    blockers.BROAD_MARKET = bounded(error.message);
++    log(`BROAD MARKET blocked: ${blockers.BROAD_MARKET}`);
++  }
++}
++
+ try {
+   const env = { ...process.env, INFRA_OBS_ENABLED: 'true', INFRA_SOURCES: 'NOAA_SWPC,CLOUDFLARE_RADAR', INFRA_CLOUDFLARE_GLOBAL: 'true' };
+   const handle = startInfra({ env, dataDir: root, fetchImpl: governor.fetch, log, signals: false });
+@@ -323,6 +343,7 @@ function writeRuntimeStatus() {
+     blockers,
+     collectors: {
+       market: market?.status?.() ?? { state: 'BLOCKED', authority: 'NONE', reason: blockers.MARKET ?? 'market observation unavailable' },
++      broadMarket: broadMarket?.status?.() ?? { state: 'BLOCKED', authority: 'NONE', reason: blockers.BROAD_MARKET ?? blockers.KRAKEN_CATALOG ?? 'broad market capture unavailable' },
+       wideeye: readWideEyeStatus(root),
+       press: publisherNewsPolicy,
+       news: {
+diff --git a/tools/data-only-with-ui.mjs b/tools/data-only-with-ui.mjs
+index 45689c7..fc5f37c 100644
+--- a/tools/data-only-with-ui.mjs
++++ b/tools/data-only-with-ui.mjs
+@@ -13,7 +13,8 @@ const safetyEnv = {
+   JUDGE_ALLOW_ORDERS: 'false',
+   MARKET_RESEARCH_ENABLED: 'false',
+   RUMINT_ENABLED: 'false',
+-  RUMOR2_SOCIAL_X_ENABLED: 'true',
++  // Price/volume coverage is public Kraken data, not a paid X firehose.
++  RUMOR2_SOCIAL_X_ENABLED: 'false',
+   RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS: '100',
+   RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS: '3000',
+   RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD: '0.50',
+diff --git a/test/data-only-runtime.test.mjs b/test/data-only-runtime.test.mjs
+index 01de2e4..d61f08a 100644
+--- a/test/data-only-runtime.test.mjs
++++ b/test/data-only-runtime.test.mjs
+@@ -52,6 +52,18 @@ test('data-only launcher starts and reports zero-order market observations with
+   assert.match(source, /blockers\.MARKET/);
  });
  
-+test('bounded JSON transport appends only allowlisted DNS, reset, TLS, and pre-response timeout cause codes', async () => {
-+  const cases = [
-+    ['ENOTFOUND', 'DNS'],
-+    ['ECONNRESET', 'reset'],
-+    ['CERT_HAS_EXPIRED', 'TLS'],
-+    ['UND_ERR_CONNECT_TIMEOUT', 'timeout'],
-+  ];
-+  for (const [code, label] of cases) {
-+    const error = new TypeError(`secret ${label} detail`); error.cause = { code, message: `token-${label}` };
-+    const result = await fetchJsonBounded(url, { ...base, fetchImpl: async () => { throw error; } });
-+    assert.deepEqual(result, { outcome: 'FAILED', reason: `network request failed (${code})` });
-+    assert.doesNotMatch(JSON.stringify(result), new RegExp(`secret|token-${label}`));
++test('outer market funnel subscribes the complete accepted catalog independently of the deep subject list', () => {
++  const source = readFileSync(entry, 'utf8');
++  assert.match(source, /import\('\.\.\/market-lab\/broad-kraken\.js'\)/);
++  assert.match(source, /broadMarket = await startBroadKraken\(\{ catalogSource, dataDir: root, log \}\)/);
++  assert.match(source, /handles\.push\(broadMarket\)/);
++  assert.match(source, /broadMarket:\s*broadMarket\?\.status\?\.\(\)/);
++  assert.match(source, /blockers\.BROAD_MARKET/);
++  assert.ok(source.indexOf('await wideEye._refreshCatalog()') < source.indexOf('await startBroadKraken('));
++  assert.ok(source.indexOf('await openDataOnlyCheckpoints(') < source.indexOf('await startBroadKraken('));
++  assert.doesNotMatch(source, /\b(?:BTC|ETH|SOL)\b|composeDataOnlySocialConfig/);
++});
++
+ test('data-only deployment composes the existing YouTube collector behind explicit fail-closed gates and durable status', () => {
+   const source = readFileSync(entry, 'utf8');
+   const supervisor = readFileSync(path.join(root, 'tools', 'data-only-with-ui.mjs'), 'utf8');
+@@ -100,6 +112,14 @@ test('Replit run and deployment commands select the data-only supervisor, not th
+   assert.doesNotMatch(supervisor, /}, 10_000\)\.unref\(\)/, 'supervisor grace must exceed bounded collector drains');
+ });
+ 
++test('both data-only launchers explicitly keep paid X collection disabled during broad-market rollout', () => {
++  for (const file of [entry, path.join(root, 'tools', 'data-only-with-ui.mjs')]) {
++    const source = readFileSync(file, 'utf8');
++    assert.match(source, /RUMOR2_SOCIAL_X_ENABLED:\s*'false'/);
++    assert.doesNotMatch(source, /RUMOR2_SOCIAL_X_ENABLED:\s*'true'/);
 +  }
 +});
 +
-+test('the collector-owned deadline keeps its existing timeout reason instead of adopting a nested cause code', async () => {
-+  const result = await fetchJsonBounded(url, {
-+    ...base, timeoutMs: 10,
-+    fetchImpl: async () => new Promise(() => {}),
+ test('startup publishes process identity and restores external quotas before any provider starts', () => {
+   const source = readFileSync(entry, 'utf8');
+   const initialStatus = source.indexOf('writeStartupStatus();');
+diff --git a/lib/data-only-status.js b/lib/data-only-status.js
+index 56814f2..417391b 100644
+--- a/lib/data-only-status.js
++++ b/lib/data-only-status.js
+@@ -7,6 +7,7 @@ export const DATA_ONLY_HEARTBEAT_MAX_AGE_MS = 150_000;
+ export const DATA_ONLY_RUNTIME_STATUS_VERSION = 'serpent-data-only-runtime-2';
+ export const DATA_ONLY_MARKET_STREAM_MAX_AGE_MS = 90_000;
+ export const DATA_ONLY_MARKET_REQUIRED_STREAMS = Object.freeze(['KRAKEN_SPOT', 'COINBASE_SPOT']);
++export const DATA_ONLY_BROAD_MARKET_MAX_ROWS = 5_000;
+ const MAX_STATUS_BYTES = 16 * 1024 * 1024;
+ const MAX_LOCK_BYTES = 64 * 1024;
+ const LIFECYCLES = new Set(['STARTING', 'ACTIVE', 'STOPPING', 'STOPPED']);
+@@ -15,6 +16,9 @@ const object = (value) => value !== null && typeof value === 'object' && !Array.
+ const timestamp = (value) => Number.isSafeInteger(value) && value > 0;
+ const positivePid = (value) => Number.isSafeInteger(value) && value > 0;
+ const finiteNonnegative = (value) => Number.isFinite(value) && value >= 0 ? value : null;
++const finitePositive = (value) => Number.isFinite(value) && value > 0 ? value : null;
++const diagnosticCode = (value) => typeof value === 'string' && /^[A-Z0-9_]{1,64}$/.test(value);
++const count = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+ const text = (value, max = 200) => String(value ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, max);
+ 
+ function pidAlive(pid) {
+@@ -148,6 +152,20 @@ function publicMarket(market, snapshotTs) {
+       credentialPresent: typeof source.credentialPresent === 'boolean' ? source.credentialPresent : null,
+       requests: finiteNonnegative(source.requests), succeeded: finiteNonnegative(source.succeeded), failed: finiteNonnegative(source.failed),
+       callsToday: finiteNonnegative(source.callsToday), dailyCap: finiteNonnegative(source.dailyCap),
++      callsMonth: count(source.callsMonth), monthlyCap: count(source.monthlyCap),
++      entitlementRemaining: count(source.entitlementRemaining),
++      policyBlockReasons: Array.isArray(source.policyBlockReasons) ? source.policyBlockReasons.filter(diagnosticCode).slice(0, 32) : [],
++      policyRefusals: object(source.policyRefusals) ? {
++        count: count(source.policyRefusals.count),
++        lastTs: timestamp(source.policyRefusals.lastTs) ? source.policyRefusals.lastTs : null,
++        reasons: Object.fromEntries(Object.entries(object(source.policyRefusals.reasons) ? source.policyRefusals.reasons : {}).filter(([key, value]) => diagnosticCode(key) && count(value) !== null).slice(0, 32)),
++        lastReasons: Array.isArray(source.policyRefusals.lastReasons) ? source.policyRefusals.lastReasons.filter(diagnosticCode).slice(0, 16) : [],
++      } : null,
++      catalogResolution: object(source.catalogResolution) ? {
++        state: diagnosticCode(source.catalogResolution.state) ? source.catalogResolution.state : 'UNKNOWN',
++        count: count(source.catalogResolution.count),
++        knownAtTs: timestamp(source.catalogResolution.knownAtTs) ? source.catalogResolution.knownAtTs : null,
++      } : null,
+     };
+   }
+   const streams = {};
+@@ -194,13 +212,248 @@ function publicMarket(market, snapshotTs) {
+   };
+ }
+ 
++function publicBroadChannel(value) {
++  if (typeof value === 'boolean') return value;
++  if (typeof value === 'string') return text(value, 32) || null;
++  return null;
++}
++
++function broadObservation(observation, snapshotTs, freshMs, { candle = false } = {}) {
++  const source = object(observation) ? observation : {};
++  const lastReceivedTs = timestamp(source.lastReceivedTs) ? source.lastReceivedTs : null;
++  const sourceEventTs = timestamp(source.sourceEventTs) ? source.sourceEventTs : null;
++  const periodStartTs = timestamp(source.periodStartTs) ? source.periodStartTs : null;
++  const periodEndTs = timestamp(source.periodEndTs ?? source.lastPeriodEndTs) ? (source.periodEndTs ?? source.lastPeriodEndTs) : null;
++  const future = lastReceivedTs !== null && timestamp(snapshotTs) && lastReceivedTs > snapshotTs;
++  const receiptAgeMs = lastReceivedTs !== null && timestamp(snapshotTs) && !future ? snapshotTs - lastReceivedTs : null;
++  const ageMs = receiptAgeMs === null ? null : candle && periodEndTs !== null ? Math.max(receiptAgeMs, snapshotTs - periodEndTs, 0)
++    : !candle && sourceEventTs !== null ? Math.max(receiptAgeMs, snapshotTs - sourceEventTs, 0) : receiptAgeMs;
++  const reportedState = text(source.state, 40) || 'NOT_OBSERVED';
++  const validValues = candle ? finitePositive(source.close) !== null && finiteNonnegative(source.volumeBase) !== null
++    : finitePositive(source.lastPrice) !== null && finiteNonnegative(source.volume24hBase) !== null;
++  const validPeriod = periodStartTs !== null && periodEndTs !== null && periodEndTs - periodStartTs === 60_000 && periodStartTs <= snapshotTs;
++  const idle = ['IDLE_SNAPSHOT_BASELINE', 'IDLE_NO_RECENT_TRADE'].includes(reportedState);
++  let freshnessState;
++  if (lastReceivedTs === null || reportedState === 'NEVER_OBSERVED') freshnessState = 'NEVER';
++  else if (future || !Number.isSafeInteger(freshMs) || freshMs <= 0 || !validValues || (candle && !validPeriod) || (!candle && sourceEventTs !== null && sourceEventTs > snapshotTs)) freshnessState = 'INVALID';
++  else if (source.persisted !== true || reportedState === 'PENDING_PERSIST') freshnessState = 'PENDING';
++  else if (idle) freshnessState = 'IDLE';
++  else if (ageMs > freshMs || ['STALE', 'CLOSED_STALE', 'PROVISIONAL_STALE', 'EPOCH_STALE'].includes(reportedState) || (candle && reportedState === 'PROVISIONAL_FRESH' && periodEndTs < snapshotTs)) freshnessState = 'STALE';
++  else if (candle && reportedState === 'PROVISIONAL_FRESH') freshnessState = 'PROVISIONAL_FRESH';
++  else if (candle && reportedState === 'CLOSED_FRESH' && periodEndTs <= snapshotTs) freshnessState = 'CLOSED_FRESH';
++  else if (!candle && reportedState === 'FRESH' && sourceEventTs !== null) freshnessState = 'FRESH';
++  else freshnessState = 'INVALID';
++  return {
++    state: reportedState, persisted: source.persisted === true,
++    ...(candle ? {
++      periodStartTs, periodEndTs,
++      quality: source.quality ? text(source.quality, 48) : null,
++      close: finitePositive(source.close),
++      volumeBase: finiteNonnegative(source.volumeBase),
++      learningEligible: false,
++    } : {
++      sourceEventTs,
++      lastPrice: finitePositive(source.lastPrice),
++      volume24hBase: finiteNonnegative(source.volume24hBase),
++      vwap24h: finiteNonnegative(source.vwap24h),
++    }),
++    lastReceivedTs,
++    ageMs,
++    freshnessState,
++  };
++}
++
++// Broad market status is deliberately projected independently of the deep
++// BTC/ETH/SOL capture. Every accepted catalog row is either returned or the
++// entire over-bound list is refused; this view never silently samples rows.
++function publicBroadMarket(raw, snapshotTs) {
++  if (!object(raw)) return null;
++  const catalogMarkets = count(raw.catalog?.markets);
++  const attempted = count(raw.catalog?.attempted);
++  const tickerFreshMs = count(raw.freshness?.tickerFreshMs);
++  const candleFreshMs = count(raw.freshness?.candleFreshMs);
++  const inputRows = Array.isArray(raw.perMarket) ? raw.perMarket : null;
++  const overflow = inputRows !== null && inputRows.length > DATA_ONLY_BROAD_MARKET_MAX_ROWS;
++  const rows = overflow || inputRows === null ? [] : inputRows.map((entry, index) => {
++    const source = object(entry) ? entry : {};
++    const canonicalCoin = typeof source.canonicalCoin === 'string' ? text(source.canonicalCoin, 32) : '';
++    const pairKey = typeof source.pairKey === 'string' ? text(source.pairKey, 80) : '';
++    const nativeBase = typeof source.nativeBase === 'string' ? text(source.nativeBase, 80) : '';
++    const catalogWsname = typeof source.catalogWsname === 'string' ? text(source.catalogWsname, 80) : '';
++    const nativeSymbol = typeof source.nativeSymbol === 'string' ? text(source.nativeSymbol, 80) : (catalogWsname || nativeBase);
++    const wsSymbol = typeof source.wsSymbol === 'string' ? text(source.wsSymbol, 80) : '';
++    const mappingState = text(source.mappingState, 32) || 'NOT_OBSERVED';
++    const validMapping = ['MAPPED', 'UNSUPPORTED', 'AMBIGUOUS', 'AWAITING_INSTRUMENT'].includes(mappingState);
++    return {
++      index,
++      valid: canonicalCoin.length > 0 && pairKey.length > 0 && nativeSymbol.length > 0 && validMapping && (mappingState !== 'MAPPED' || wsSymbol.length > 0),
++      canonicalCoin: canonicalCoin || null,
++      pairKey: pairKey || null,
++      nativeSymbol: nativeSymbol || null,
++      nativeBase: nativeBase || null,
++      catalogWsname: catalogWsname || null,
++      wsSymbol: wsSymbol || null,
++      mappingState,
++      ticker: broadObservation(source.ticker, snapshotTs, tickerFreshMs),
++      candle: broadObservation(source.candle, snapshotTs, candleFreshMs, { candle: true }),
++      channels: {
++        ticker: publicBroadChannel(source.channels?.ticker),
++        ohlc: publicBroadChannel(source.channels?.ohlc),
++      },
++      lastError: source.lastError ? 'PRESENT_REDACTED' : null,
++    };
 +  });
-+  assert.deepEqual(result, { outcome: 'FAILED', reason: 'timeout after 10ms' });
++
++  const uniquePairKeys = new Set(rows.map((row) => row.pairKey).filter(Boolean));
++  const duplicateCoins = rows.length - new Set(rows.map((row) => row.canonicalCoin).filter(Boolean)).size;
++  const mappedSymbols = rows.filter((row) => row.mappingState === 'MAPPED').map((row) => row.wsSymbol);
++  const duplicateWsSymbols = mappedSymbols.length - new Set(mappedSymbols).size;
++  const invalidRows = rows.filter((row) => !row.valid).length;
++  const duplicatePairKeys = rows.length - uniquePairKeys.size;
++  const duplicateIdentities = duplicatePairKeys + duplicateCoins + duplicateWsSymbols;
++  const summarize = (kind) => ({
++    fresh: rows.filter((row) => row[kind].freshnessState === 'FRESH' || row[kind].freshnessState === 'CLOSED_FRESH').length,
++    provisionalFresh: rows.filter((row) => row[kind].freshnessState === 'PROVISIONAL_FRESH').length,
++    stale: rows.filter((row) => row[kind].freshnessState === 'STALE').length,
++    never: rows.filter((row) => row[kind].freshnessState === 'NEVER').length,
++    invalid: rows.filter((row) => row[kind].freshnessState === 'INVALID').length,
++    idle: rows.filter((row) => row[kind].freshnessState === 'IDLE').length,
++    pending: rows.filter((row) => row[kind].freshnessState === 'PENDING').length,
++  });
++  const ticker = summarize('ticker');
++  const candle = summarize('candle');
++  const completeTicker = rows.filter((row) => row.ticker.freshnessState === 'FRESH' && row.ticker.lastPrice !== null && row.ticker.volume24hBase !== null).length;
++  const completeCandle = rows.filter((row) => ['CLOSED_FRESH', 'PROVISIONAL_FRESH'].includes(row.candle.freshnessState) && row.candle.close !== null && row.candle.volumeBase !== null).length;
++
++  const subscription = object(raw.subscription) ? raw.subscription : {};
++  const ackedTicker = count(subscription.ackedTicker);
++  const ackedOhlc = count(subscription.ackedOhlc);
++  const failedTicker = count(subscription.failedTicker) ?? 0;
++  const failedOhlc = count(subscription.failedOhlc) ?? 0;
++  const failedLegacy = count(subscription.failed) ?? 0;
++  const failed = failedTicker + failedOhlc + failedLegacy;
++  const instrument = object(raw.instrument) ? raw.instrument : {};
++  const mapped = count(instrument.mapped);
++  const unsupported = count(instrument.unsupported) ?? 0;
++  const ambiguous = count(instrument.ambiguous) ?? 0;
++  const recordingError = object(raw.recording?.error) || typeof raw.recording?.error === 'string';
++  const recordingKnownHealthy = object(raw.recording) && raw.recording.error === null;
++  const records = count(raw.recording?.records);
++  const segments = count(raw.recording?.segments);
++  const recordedBytes = count(raw.recording?.bytes);
++  const recordingState = recordingError ? 'FAILED' : recordingKnownHealthy ? (text(raw.recording?.state, 32) || 'HEALTHY') : 'UNKNOWN';
++  const socket = publicMarketStream(raw.socket, snapshotTs);
++  const catalogFresh = raw.catalog?.state === 'ACCEPTED' && timestamp(raw.catalog?.observedTs) && raw.catalog.observedTs <= snapshotTs && snapshotTs - raw.catalog.observedTs <= (count(raw.catalog.maxAgeMs) ?? 900_000) && raw.catalog.lastError === null;
++  const fullCatalogRows = catalogMarkets !== null && catalogMarkets > 0 && rows.length === catalogMarkets && attempted === catalogMarkets && !overflow && inputRows !== null && invalidRows === 0 && duplicateIdentities === 0;
++  const allMapped = mapped !== null && catalogMarkets !== null && mapped === catalogMarkets && unsupported === 0 && ambiguous === 0 && rows.every((row) => row.mappingState === 'MAPPED');
++  const allSubscribed = allMapped && ackedTicker === mapped && ackedOhlc === mapped && failed === 0 && rows.every((row) => row.channels.ticker === 'SUBSCRIBED' && row.channels.ohlc === 'SUBSCRIBED');
++  const allFresh = allMapped && completeTicker === mapped && completeCandle === mapped && ticker.stale === 0 && candle.stale === 0 && ticker.never === 0 && candle.never === 0 && ticker.invalid === 0 && candle.invalid === 0;
++  const reportedState = text(raw.state, 40) || 'NOT_OBSERVED';
++  const recordingOperational = recordingState === 'ACTIVE' || recordingState === 'HEALTHY';
++  const persisted = recordingKnownHealthy && recordingOperational && records !== null && records > 0 && segments !== null && segments > 0 && recordedBytes !== null && recordedBytes > 0;
++  const complete = reportedState === 'ACTIVE' && catalogFresh && fullCatalogRows && allSubscribed && allFresh && persisted && socket?.healthState === 'HEALTHY';
++  const terminalState = ['BLOCKED', 'FAILED', 'STOPPING', 'STOPPED', 'RECORDING_FAILED'].includes(reportedState);
++  let state;
++  let reason;
++  if (recordingError || reportedState === 'RECORDING_FAILED') { state = 'RECORDING_FAILED'; reason = 'BROAD_MARKET_RECORDING_FAILED'; }
++  else if (overflow) { state = 'INVALID'; reason = 'BROAD_MARKET_ROW_BOUND_EXCEEDED'; }
++  else if (terminalState) { state = reportedState; reason = `BROAD_MARKET_${reportedState}`; }
++  else if (complete) { state = 'ACTIVE'; reason = null; }
++  else if (['WAITING_CATALOG', 'CONNECTING', 'AWAITING_INSTRUMENT', 'SUBSCRIBING', 'STARTING'].includes(reportedState)) { state = 'STARTING'; reason = `BROAD_MARKET_${reportedState}`; }
++  else { state = 'DEGRADED'; reason = !fullCatalogRows ? 'BROAD_MARKET_CATALOG_INCOMPLETE' : !catalogFresh ? 'BROAD_MARKET_CATALOG_NOT_FRESH' : !allMapped ? 'BROAD_MARKET_MAPPING_INCOMPLETE' : !allSubscribed ? 'BROAD_MARKET_SUBSCRIPTIONS_INCOMPLETE' : !allFresh ? 'BROAD_MARKET_OBSERVATIONS_NOT_FRESH' : !persisted ? 'BROAD_MARKET_NOT_PERSISTED' : 'BROAD_MARKET_SOCKET_NOT_OPEN'; }
++
++  return {
++    state,
++    reportedState,
++    running: state === 'ACTIVE' || state === 'STARTING' || state === 'DEGRADED',
++    reason,
++    authority: 'NONE',
++    purpose: 'BROAD_OBSERVATION_ONLY',
++    scope: {
++      venue: 'KRAKEN', quote: 'USD', membership: 'ALL_ACCEPTED_CATALOG',
++      catalogMarkets, projectedMarkets: rows.length, allCatalogMarkets: fullCatalogRows,
++      namedPreference: false, topN: null, omittedByRank: 0, authority: 'NONE',
++    },
++    catalog: object(raw.catalog) ? {
++      state: text(raw.catalog.state, 32) || null,
++      contentId: typeof raw.catalog.contentId === 'string' ? text(raw.catalog.contentId, 80) : null,
++      observedTs: timestamp(raw.catalog.observedTs) ? raw.catalog.observedTs : null,
++      markets: catalogMarkets,
++      attempted,
++      lastCheckedTs: timestamp(raw.catalog.lastCheckedTs) ? raw.catalog.lastCheckedTs : null,
++      lastError: raw.catalog.lastError ? 'PRESENT_REDACTED' : null,
++    } : null,
++    instrument: object(raw.instrument) ? {
++      state: text(instrument.state, 32) || null,
++      receivedTs: timestamp(instrument.receivedTs) ? instrument.receivedTs : null,
++      pairs: count(instrument.pairs), mapped, unsupported, ambiguous,
++      lastError: instrument.lastError ? 'PRESENT_REDACTED' : null,
++    } : null,
++    socket,
++    subscription: {
++      queueDepth: count(subscription.queueDepth ?? subscription.queued),
++      requestsSent: count(subscription.requestsSent ?? subscription.sent),
++      ackedTicker, ackedOhlc, failedTicker, failedOhlc, failed,
++    },
++    recording: object(raw.recording) ? {
++      state: recordingState,
++      directoryConfigured: typeof raw.recording.dir === 'string' && raw.recording.dir.length > 0,
++      segments, bytes: recordedBytes, records,
++      latestBytes: count(raw.recording.latestBytes),
++      latestWrittenTs: timestamp(raw.recording.latestWrittenTs) ? raw.recording.latestWrittenTs : null,
++      latestSnapshotWrites: count(raw.recording.latestSnapshotWrites ?? raw.recording.latestWrites),
++      latestSnapshotCadenceMs: count(raw.recording.latestSnapshotCadenceMs),
++      coalescedSnapshotRecords: count(raw.counters?.coalescedSnapshotRecords),
++      queued: count(raw.recording.queued), maxQueue: count(raw.recording.maxQueue),
++      unflushedRecords: count(raw.recording.unflushedRecords),
++      evictedSegments: count(raw.recording.evictedSegments), evictedBytes: count(raw.recording.evictedBytes),
++      error: recordingError ? 'PRESENT_REDACTED' : raw.recording.error === null ? null : 'UNKNOWN',
++      durability: raw.recording.durability ? text(raw.recording.durability, 80) : null,
++      retention: raw.recording.retention ? text(raw.recording.retention, 80) : null,
++    } : { state: 'UNKNOWN', directoryConfigured: false, segments: null, bytes: null, records: null, queued: null, maxQueue: null, unflushedRecords: null, evictedSegments: null, evictedBytes: null, error: 'UNKNOWN', durability: null, retention: null },
++    freshness: {
++      tickerFreshMs, candleFreshMs,
++      freshTicker: ticker.fresh, completeTicker, staleTicker: ticker.stale, neverTicker: ticker.never, invalidTicker: ticker.invalid,
++      idleTicker: ticker.idle, pendingTicker: ticker.pending, pendingCandle: candle.pending,
++      freshCandle: candle.fresh, provisionalFreshCandle: candle.provisionalFresh, completeCandle,
++      staleCandle: candle.stale, neverCandle: candle.never, invalidCandle: candle.invalid,
++      provisionalCandle: rows.filter((row) => row.candle.state === 'PROVISIONAL_FRESH' || row.candle.state === 'PROVISIONAL_STALE').length,
++      reported: object(raw.freshness) ? {
++        freshTicker: count(raw.freshness.freshTicker), staleTicker: count(raw.freshness.staleTicker), neverTicker: count(raw.freshness.neverTicker),
++        freshCandle: count(raw.freshness.freshCandle), staleCandle: count(raw.freshness.staleCandle), neverCandle: count(raw.freshness.neverCandle), provisionalCandle: count(raw.freshness.provisionalCandle),
++      } : null,
++    },
++    coverage: {
++      denominator: catalogMarkets,
++      mapped, unsupported, ambiguous,
++      ackedTicker, ackedOhlc, failed,
++      persistedRecords: records,
++      fullCatalogRows, catalogFresh, allMapped, allSubscribed, allFresh, persisted,
++    },
++    validation: {
++      state: overflow || inputRows === null || invalidRows > 0 || duplicateIdentities > 0 ? 'REFUSED' : 'ACCEPTED',
++      reason: overflow ? 'PER_MARKET_OVERFLOW' : inputRows === null ? 'PER_MARKET_MISSING' : invalidRows > 0 ? 'PER_MARKET_INVALID' : duplicatePairKeys > 0 ? 'PAIR_KEY_DUPLICATE' : duplicateCoins > 0 ? 'CANONICAL_COIN_DUPLICATE' : duplicateWsSymbols > 0 ? 'WS_SYMBOL_DUPLICATE' : null,
++      reportedRows: inputRows?.length ?? null,
++      maxRows: DATA_ONLY_BROAD_MARKET_MAX_ROWS,
++      invalidRows,
++      duplicatePairKeys,
++      duplicateCoins, duplicateWsSymbols,
++    },
++    perMarket: rows,
++  };
++}
++
+ export function dataOnlyPublicStatus(evaluated) {
+   const source = object(evaluated?.status) ? evaluated.status : {};
+   const persistence = source.collectors?.persistence;
+   const observedMarket = publicMarket(source.collectors?.market, evaluated?.evaluatedAtTs);
++  const observedBroadMarket = publicBroadMarket(source.collectors?.broadMarket, evaluated?.evaluatedAtTs);
+   const market = observedMarket && evaluated?.effectiveRunning !== true
+     ? { ...observedMarket, reportedState: observedMarket.state, state: evaluated?.healthState ?? 'STALE', running: false }
+     : observedMarket;
++  const broadMarket = observedBroadMarket && evaluated?.effectiveRunning !== true
++    ? { ...observedBroadMarket, reportedState: observedBroadMarket.state, state: evaluated?.healthState ?? 'STALE', running: false, reason: `RUNTIME_${evaluated?.statusReason ?? 'NOT_LIVE'}` }
++    : observedBroadMarket;
+   return {
+     mode: 'DATA_ONLY', version: source.version ?? DATA_ONLY_RUNTIME_STATUS_VERSION,
+     healthState: evaluated?.healthState ?? 'UNAVAILABLE', statusReason: evaluated?.statusReason === undefined ? 'STATUS_UNAVAILABLE' : evaluated.statusReason,
+@@ -218,7 +471,7 @@ export function dataOnlyPublicStatus(evaluated) {
+     } : null,
+     spending: object(source.spending) ? source.spending : null,
+     blockers: object(source.blockers) ? Object.fromEntries(Object.entries(source.blockers).slice(0, 64).map(([key, value]) => [text(key, 64), text(value)])) : {},
+-    market,
++    market, broadMarket,
+     persistence: object(persistence) ? {
+       status: persistence.status ? text(persistence.status, 64) : null,
+       databaseConfigured: persistence.databaseConfigured === true,
+@@ -246,17 +499,30 @@ export function dataOnlySensorSnapshot(evaluated, { now = Date.now() } = {}) {
+ 
+   add('RUNTIME', { id: 'DATA_ONLY_RUNTIME', name: 'Data-only collector runtime', state: evaluated?.healthState ?? 'UNAVAILABLE', lastSuccessTs: lastTs(source.tsMs), coverage: `${evaluated?.lifecycle ?? 'UNAVAILABLE'}${evaluated?.startupPhase ? `; phase ${evaluated.startupPhase}` : ''}; heartbeat ${evaluated?.heartbeatAgeMs ?? 'n/a'} ms`, blocker: evaluated?.effectiveRunning ? null : evaluated?.statusReason ?? 'STATUS_UNAVAILABLE' });
+ 
++  const publicStatus = dataOnlyPublicStatus(evaluated);
+   const market = collectors.market;
+   if (object(market)) {
+-    const publishedMarket = dataOnlyPublicStatus(evaluated).market;
++    const publishedMarket = publicStatus.market;
+     const subjects = Array.isArray(market.scope?.subjects) ? market.scope.subjects.slice(0, 64) : [];
+     const count = Number.isSafeInteger(market.scope?.subjectCount) ? market.scope.subjectCount : subjects.length;
+     const receipts = Number.isFinite(market.counters?.observations) ? market.counters.observations : 0;
+     const marketBlocker = publishedMarket?.recording?.state === 'FAILED' ? `recording failed${publishedMarket.recording.where ? ` at ${publishedMarket.recording.where}` : ''}` : publishedMarket?.streamHealth?.state !== 'HEALTHY' ? publishedMarket?.streamHealth?.reason : market.stopped?.reason ?? null;
+-    add('MARKET', { id: 'MARKET_CAPTURE', name: 'Scoped market capture', state: publishedMarket?.state ?? market.state, coverage: `capture scope ${count} subjects (${subjects.join(', ') || 'none'}); ${receipts} observations; full catalog ${source.catalog?.markets ?? 'unavailable'} is discovery only`, blocker: marketBlocker });
++    add('MARKET', { id: 'MARKET_CAPTURE', name: 'Deep market capture (BTC/ETH/SOL)', state: publishedMarket?.state ?? market.state, coverage: `deep capture scope ${count} subjects (${subjects.join(', ') || 'none'}); ${receipts} observations; broad catalog coverage is reported separately`, blocker: marketBlocker, detail: 'High-detail bounded subject capture; it is not the all-market breadth collector.' });
+     for (const [id, provider] of Object.entries(object(market.sources) ? market.sources : {})) add('MARKET', { id: `MARKET_${id}`, name: `Market provider: ${id}`, state: provider.state, coverage: `requests ${provider.requests ?? 0}; succeeded ${provider.succeeded ?? 0}; failed ${provider.failed ?? 0}; today ${provider.callsToday ?? 0}/${provider.dailyCap ?? 0}`, blocker: provider.reason ?? null });
+     for (const [id, stream] of Object.entries(publishedMarket?.streams ?? {})) add('MARKET', { id: `MARKET_WS_${id}`, name: `Market WebSocket: ${id}`, state: stream.healthState === 'HEALTHY' ? 'ACTIVE' : stream.healthState === 'STARTING' ? 'STARTING' : 'DEGRADED', lastSuccessTs: stream.lastMessageTs, coverage: `${stream.state}; ${stream.messages ?? 0} messages; ${stream.reconnects ?? 0} reconnects`, blocker: stream.reason });
+-  } else add('MARKET', { id: 'MARKET_CAPTURE', name: 'Scoped market capture', state: 'NOT_OBSERVED', coverage: 'NO_RUNTIME_STATUS', blocker: source.blockers?.MARKET ?? 'market runtime unavailable' });
++  } else add('MARKET', { id: 'MARKET_CAPTURE', name: 'Deep market capture (BTC/ETH/SOL)', state: 'NOT_OBSERVED', coverage: 'NO_RUNTIME_STATUS', blocker: source.blockers?.MARKET ?? 'market runtime unavailable' });
++
++  const broad = publicStatus.broadMarket;
++  if (broad) {
++    const denominator = broad.coverage.denominator ?? 'unknown';
++    const lastSuccessTs = Math.max(0, ...broad.perMarket.flatMap((row) => [row.ticker.lastReceivedTs ?? 0, row.candle.lastReceivedTs ?? 0])) || null;
++    add('MARKET', {
++      id: 'BROAD_KRAKEN_MARKET', name: 'Broad Kraken market observations', state: broad.state, lastSuccessTs,
++      coverage: `all accepted Kraken USD markets ${broad.scope.projectedMarkets}/${denominator}; ticker/24h-volume acked ${broad.coverage.ackedTicker ?? 0}/${denominator}, complete+fresh ${broad.freshness.completeTicker}/${denominator}; candles acked ${broad.coverage.ackedOhlc ?? 0}/${denominator}, complete+fresh ${broad.freshness.completeCandle}/${denominator} (closed ${broad.freshness.freshCandle}, provisional ${broad.freshness.provisionalFreshCandle}); persisted ${broad.recording.records ?? 0} records in ${broad.recording.segments ?? 0} segments`,
++      blocker: broad.state === 'ACTIVE' ? null : broad.reason,
++      detail: 'Shallow ticker/24h-volume and OHLC observations for every accepted Kraken USD catalog market; no named-asset or top-N filter.',
++    });
++  } else add('MARKET', { id: 'BROAD_KRAKEN_MARKET', name: 'Broad Kraken market observations', state: 'NOT_OBSERVED', coverage: `0/${source.catalog?.markets ?? 'unknown'} accepted Kraken USD markets`, blocker: source.blockers?.BROAD_KRAKEN_MARKET ?? 'broad market runtime unavailable', detail: 'No all-catalog coverage is inferred from catalog membership alone.' });
+ 
+   const eye = collectors.wideeye;
+   add('MARKET', { id: 'WIDEEYE', name: 'Wide eye discovery catalog', state: source.catalog ? 'ACTIVE' : rowState(eye?.state), lastSuccessTs: lastTs(eye?.tsMs ?? eye?.lastSuccessTs), coverage: source.catalog ? `${source.catalog.markets} accepted Kraken USD markets (discovery universe, not capture scope)` : 'NO_ACCEPTED_CATALOG', blocker: source.blockers?.WIDEEYE ?? source.blockers?.KRAKEN_CATALOG ?? null });
+@@ -289,18 +555,19 @@ export function dataOnlySensorSnapshot(evaluated, { now = Date.now() } = {}) {
+     authority: { realMoney: 'DISABLED', liveOrders: 'DISABLED', withdrawFunding: 'DISABLED', judgeMode: 'OFF' },
+     groups, rows, counts: Object.fromEntries([...new Set(rows.map((row) => row.state))].map((state) => [state, rows.filter((row) => row.state === state).length])),
+     controls: { kill: false, cage: false }, locks: null,
+-    persistence: dataOnlyPublicStatus(evaluated).persistence,
+-    dataOnly: dataOnlyPublicStatus(evaluated),
+-    law: 'DATA_ONLY: liveness requires a current heartbeat and matching runtime lock; collector observations retain their own explicit observed, blocked, disabled, or starting state; the market capture scope is never replaced by the wider discovery catalog.',
++    persistence: publicStatus.persistence,
++    dataOnly: publicStatus,
++    law: 'DATA_ONLY: liveness requires a current heartbeat and matching runtime lock; collector observations retain their own explicit observed, blocked, disabled, or starting state; deep capture and all-catalog broad observation are reported separately, and catalog membership alone never implies live coverage.',
+   };
+ }
+ 
+ export function dataOnlyMarketView(evaluated) {
+   const published = dataOnlyPublicStatus(evaluated);
+   const market = published.market;
++  const broadMarket = published.broadMarket;
+   const observations = Number(market?.receipts?.observations ?? 0);
+   return {
+-    enabled: market !== null,
++    enabled: market !== null || broadMarket !== null,
+     dataOnly: true,
+     status: market ? {
+       state: market.state, mode: 'DATA_ONLY', policyMode: 'OBSERVATION_ONLY', nowTs: published.tsMs,
+@@ -309,8 +576,8 @@ export function dataOnlyMarketView(evaluated) {
+       runtime: { cacheSize: 0, budget: { dayUsd: 0, monthUsd: 0, unresolvedUsd: 0 } },
+       cases: { queued: 0, running: 0 }, quota: { usedBytes: null, quotaBytes: null },
+     } : null,
+-    market,
++    market, broadMarket,
+     cases: [], authority: 'NONE', purpose: 'OBSERVATION_ONLY',
+-    scopeLaw: 'market.scope is the actual capture scope; catalog.markets is discovery coverage and never substitutes for it',
++    scopeLaw: 'market.scope is deep capture; broadMarket.scope is separately verified all-catalog breadth; catalog membership alone never substitutes for live, fresh, persisted observations',
+   };
+ }
+diff --git a/test/data-only-status.test.js b/test/data-only-status.test.js
+index 6bc2286..7c2a8f2 100644
+--- a/test/data-only-status.test.js
++++ b/test/data-only-status.test.js
+@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+ import { tmpdir } from 'node:os';
+ import path from 'node:path';
+ import {
++  DATA_ONLY_BROAD_MARKET_MAX_ROWS,
+   DATA_ONLY_HEARTBEAT_MAX_AGE_MS,
+   evaluateDataOnlyRuntimeStatus,
+   readDataOnlyRuntimeStatus,
+@@ -23,6 +24,32 @@ const base = (overrides = {}) => ({
+   authority: 'NONE', safety: { realTrading: 'OFF' }, collectors: {}, ...overrides,
+ });
+ const lock = (overrides = {}) => ({ pid: 4242, openedTs: STARTED, authority: 'NONE', ...overrides });
++const broadMarket = ({ markets = 70, state = 'ACTIVE', receivedTs = NOW - 1_000, overrides = {} } = {}) => {
++  const perMarket = Array.from({ length: markets }, (_, index) => ({
++    canonicalCoin: `COIN${index}`,
++    pairKey: `COIN${index}/USD`,
++    nativeBase: `XCOIN${index}`,
++    catalogWsname: `COIN${index}/USD`,
++    wsSymbol: `COIN${index}/USD`,
++    mappingState: 'MAPPED',
++    ticker: { state: 'FRESH', persisted: true, lastReceivedTs: receivedTs, sourceEventTs: receivedTs - 1, ageMs: 1_000, lastPrice: 10 + index, volume24hBase: 1_000 + index, vwap24h: 10 + index },
++    candle: { state: 'PROVISIONAL_FRESH', persisted: true, periodStartTs: Math.floor(receivedTs / 60_000) * 60_000, periodEndTs: (Math.floor(receivedTs / 60_000) + 1) * 60_000, lastReceivedTs: receivedTs, ageMs: 1_000, quality: 'PROVISIONAL', close: 10 + index, volumeBase: 100 + index, learningEligible: false },
++    channels: { ticker: 'SUBSCRIBED', ohlc: 'SUBSCRIBED' },
++    lastError: null,
++  }));
++  return {
++    version: 'broad-kraken-1', state, startedTs: STARTED,
++    catalog: { state: 'ACCEPTED', contentId: 'b'.repeat(40), observedTs: NOW - 5_000, markets, attempted: markets, lastCheckedTs: NOW - 5_000, lastError: null, maxAgeMs: 900_000 },
++    instrument: { state: 'READY', receivedTs: NOW - 4_000, pairs: markets, mapped: markets, unsupported: 0, ambiguous: 0, lastError: null },
++    socket: { state: state === 'CONNECTING' ? 'CONNECTING' : 'OPEN', epoch: 1, messages: markets * 2, bytes: markets * 100, dropped: 0, invalidJson: 0, reconnects: 0, openedTs: NOW - 4_000, lastMessageTs: receivedTs },
++    subscription: { queueDepth: 0, requestsSent: markets * 2, ackedTicker: markets, ackedOhlc: markets, failedTicker: 0, failedOhlc: 0 },
++    recording: { state: 'ACTIVE', dir: 'C:/private/broad-capture', segment: 'private-name.jsonl', segments: 1, bytes: markets * 200, records: markets * 2, queued: 0, maxQueue: 10_000, unflushedRecords: 0, evictedSegments: 0, evictedBytes: 0, error: null, durability: 'LOCAL_FILESYSTEM_PERIODIC_FSYNC', retention: 'ROLLING_BOUNDED' },
++    freshness: { tickerFreshMs: 90_000, candleFreshMs: 180_000, freshTicker: markets, staleTicker: 0, neverTicker: 0, freshCandle: markets, staleCandle: 0, neverCandle: 0, provisionalCandle: markets },
++    counters: { tickerMessages: markets, candleMessages: markets },
++    perMarket,
++    ...overrides,
++  };
++};
+ 
+ test('data-only liveness requires a current heartbeat and matching runtime identity', () => {
+   const active = evaluateDataOnlyRuntimeStatus(base(), { now: NOW, lock: lock(), isPidAlive: () => true });
+@@ -103,7 +130,7 @@ test('public market and sensor views keep capture scope separate from the wider
+   assert.equal(pub.market.streams.KRAKEN_SPOT.healthState, 'HEALTHY'); assert.equal(pub.market.streamHealth.state, 'HEALTHY'); assert.equal(pub.market.recording.state, 'HEALTHY');
+   assert.equal(JSON.stringify(pub).includes('secret/server/path'), false, 'public status does not expose runtime filesystem paths');
+   const sensors = dataOnlySensorSnapshot(evaluated, { now: NOW }); const market = sensors.rows.find((row) => row.id === 'MARKET_CAPTURE');
+-  assert.match(market.coverage, /^capture scope 3 subjects/); assert.match(market.coverage, /full catalog 612 is discovery only/);
++  assert.equal(market.name, 'Deep market capture (BTC/ETH/SOL)'); assert.match(market.coverage, /^deep capture scope 3 subjects/); assert.match(market.coverage, /broad catalog coverage is reported separately/);
+   assert.equal(sensors.runtimeMode, 'DATA_ONLY'); assert.equal(sensors.authority.realMoney, 'DISABLED');
+   const endpoint = dataOnlyMarketView(evaluated);
+   assert.equal(endpoint.market.scope.subjectCount, 3); assert.equal(endpoint.market.providerSources.KRAKEN_SPOT.requests, 9); assert.equal(endpoint.market.streams.KRAKEN_SPOT.messages, 90); assert.equal(endpoint.status.mode, 'DATA_ONLY');
+@@ -134,6 +161,93 @@ test('public market downgrades failed, initializing, and stale required streams
+   assert.equal(sensors.rows.find((row) => row.id === 'MARKET_CAPTURE').state, 'DEGRADED'); assert.equal(sensors.rows.find((row) => row.id === 'MARKET_WS_KRAKEN_SPOT').state, 'DEGRADED'); assert.equal(sensors.rows.find((row) => row.id === 'MARKET_KRAKEN_SPOT').state, 'OBSERVED');
+ });
+ 
++test('broad Kraken projection returns every bounded catalog market and requires mapped, subscribed, fresh, persisted observations', () => {
++  const broad = broadMarket();
++  const evaluated = evaluateDataOnlyRuntimeStatus(base({
++    catalog: { contentId: 'b'.repeat(40), observedTs: NOW - 5_000, markets: 70, policy: 'FULL_CATALOG' },
++    collectors: { broadMarket: broad },
++  }), { now: NOW, lock: lock() });
++  const pub = dataOnlyPublicStatus(evaluated);
++  assert.equal(pub.broadMarket.state, 'ACTIVE');
++  assert.equal(pub.broadMarket.scope.membership, 'ALL_ACCEPTED_CATALOG');
++  assert.equal(pub.broadMarket.scope.namedPreference, false); assert.equal(pub.broadMarket.scope.topN, null);
++  assert.equal(pub.broadMarket.perMarket.length, 70, 'public breadth is not silently sliced at the former 64-row UI bound');
++  assert.equal(pub.broadMarket.coverage.denominator, 70); assert.equal(pub.broadMarket.coverage.ackedTicker, 70); assert.equal(pub.broadMarket.coverage.ackedOhlc, 70);
++  assert.equal(pub.broadMarket.freshness.freshTicker, 70); assert.equal(pub.broadMarket.freshness.freshCandle, 0); assert.equal(pub.broadMarket.freshness.provisionalFreshCandle, 70); assert.equal(pub.broadMarket.freshness.completeCandle, 70); assert.equal(pub.broadMarket.recording.records, 140);
++  assert.equal(pub.broadMarket.authority, 'NONE'); assert.equal(JSON.stringify(pub.broadMarket).includes('private/broad-capture'), false); assert.equal(JSON.stringify(pub.broadMarket).includes('private-name'), false);
++
++  const row = dataOnlySensorSnapshot(evaluated, { now: NOW }).rows.find((entry) => entry.id === 'BROAD_KRAKEN_MARKET');
++  assert.equal(row.state, 'ACTIVE'); assert.match(row.coverage, /all accepted Kraken USD markets 70\/70/); assert.match(row.coverage, /ticker\/24h-volume acked 70\/70, complete\+fresh 70\/70/); assert.match(row.coverage, /candles acked 70\/70, complete\+fresh 70\/70 \(closed 0, provisional 70\)/); assert.match(row.coverage, /persisted 140 records/); assert.equal(row.authority, 'NONE');
++  const endpoint = dataOnlyMarketView(evaluated);
++  assert.equal(endpoint.enabled, true); assert.equal(endpoint.broadMarket.perMarket.length, 70); assert.equal(endpoint.scopeLaw.includes('catalog membership alone'), true);
 +});
 +
- test('bounded JSON transport distinguishes invalid UTF-8 from a network failure', async () => {
-   const bytes = new Uint8Array([0xc3, 0x28]);
-   const result = await fetchJsonBounded(url, {
++test('broad Kraken projection keeps startup, partial, stale, and writer failure states explicit', () => {
++  const project = (broadMarketStatus) => dataOnlyPublicStatus(evaluateDataOnlyRuntimeStatus(base({ collectors: { broadMarket: broadMarketStatus } }), { now: NOW, lock: lock() })).broadMarket;
++
++  const partialBase = broadMarket();
++  const partial = project({ ...partialBase, subscription: { ...partialBase.subscription, ackedTicker: 69 } });
++  assert.equal(partial.state, 'DEGRADED'); assert.equal(partial.reason, 'BROAD_MARKET_SUBSCRIPTIONS_INCOMPLETE'); assert.equal(partial.coverage.ackedTicker, 69);
++
++  const startingBase = broadMarket({ markets: 0, state: 'CONNECTING' });
++  const starting = project({ ...startingBase, socket: { state: 'CONNECTING', epoch: 1, messages: 0, bytes: 0, dropped: 0, invalidJson: 0, reconnects: 0 } });
++  assert.equal(starting.state, 'STARTING'); assert.equal(starting.reason, 'BROAD_MARKET_CONNECTING'); assert.notEqual(starting.state, 'ACTIVE', 'a catalog or connecting socket alone is never active coverage');
++
++  const staleBase = broadMarket({ receivedTs: NOW - 200_000 });
++  const stale = project(staleBase);
++  assert.equal(stale.state, 'DEGRADED'); assert.equal(stale.reason, 'BROAD_MARKET_OBSERVATIONS_NOT_FRESH'); assert.equal(stale.freshness.freshTicker, 0); assert.equal(stale.freshness.staleTicker, 70); assert.equal(stale.freshness.completeCandle, 0); assert.equal(stale.freshness.staleCandle, 70);
++  assert.equal(stale.freshness.reported.freshTicker, 70, 'raw claims remain distinguishable from freshness recomputed at evaluation time');
++
++  const failedBase = broadMarket();
++  const writerFailure = project({ ...failedBase, recording: { ...failedBase.recording, state: 'RECORDING_FAILED', error: { code: 'WRITE_FAILED', message: 'C:/private/must-not-leak', ts: NOW } } });
++  assert.equal(writerFailure.state, 'RECORDING_FAILED'); assert.equal(writerFailure.running, false); assert.equal(writerFailure.recording.error, 'PRESENT_REDACTED'); assert.equal(JSON.stringify(writerFailure).includes('must-not-leak'), false);
++});
++
++test('broad readiness recomputes clocks, price validity, persistence and unique identities rather than trusting raw ACTIVE', () => {
++  const project = (raw) => dataOnlyPublicStatus(evaluateDataOnlyRuntimeStatus(base({ collectors: { broadMarket: raw } }), { now: NOW, lock: lock() })).broadMarket;
++  const changes = [
++    (b) => { b.perMarket[0].ticker.sourceEventTs = NOW - 200_000; },
++    (b) => { b.perMarket[0].ticker.sourceEventTs = NOW + 1000; },
++    (b) => { b.perMarket[0].ticker.lastPrice = 0; },
++    (b) => { b.perMarket[0].candle.close = 0; },
++    (b) => { b.perMarket[0].candle.periodStartTs = NOW - 600_000; b.perMarket[0].candle.periodEndTs = NOW - 540_000; },
++    (b) => { b.perMarket[0].ticker.persisted = false; },
++    (b) => { b.perMarket[0].channels.ohlc = 'GAP'; },
++    (b) => { b.perMarket[0].canonicalCoin = b.perMarket[1].canonicalCoin; },
++    (b) => { b.perMarket[0].wsSymbol = b.perMarket[1].wsSymbol; },
++    (b) => { b.catalog.observedTs = NOW - 900_001; },
++  ];
++  for (const change of changes) { const b = broadMarket(); change(b); assert.notEqual(project(b).state, 'ACTIVE'); }
++  const baseline = broadMarket(); baseline.perMarket[0].ticker.state = 'IDLE_SNAPSHOT_BASELINE'; baseline.perMarket[0].ticker.sourceEventTs = null;
++  const idle = project(baseline);
++  assert.equal(idle.freshness.idleTicker, 1); assert.equal(idle.perMarket[0].ticker.freshnessState, 'IDLE'); assert.equal(idle.coverage.allFresh, false);
++  const metadata = broadMarket(); Object.assign(metadata.recording, { latestBytes: 10000, latestWrittenTs: NOW - 2000, latestSnapshotWrites: 8, latestSnapshotCadenceMs: 5000 }); metadata.counters.coalescedSnapshotRecords = 200;
++  assert.equal(project(metadata).recording.latestSnapshotCadenceMs, 5000);
++  assert.equal(project(metadata).recording.coalescedSnapshotRecords, 200);
++});
++
++test('public market diagnostics preserve monthly policy evidence without exposing arbitrary error text', () => {
++  const raw = { state: 'ACTIVE', running: true, recording: { error: null }, sources: {
++    COINGECKO: { state: 'POLICY_BLOCKED', callsMonth: 2, monthlyCap: 2, entitlementRemaining: 0,
++      policyBlockReasons: ['MONTH_CAP', 'private/url?secret=value'],
++      policyRefusals: { count: 1, lastTs: NOW - 1000, reasons: { MONTH_CAP: 1, 'private/url?secret=value': 1 }, lastReasons: ['MONTH_CAP', 'private/url?secret=value'] },
++      catalogResolution: { state: 'PROVIDER_DISABLED', count: null, knownAtTs: null } },
++  } };
++  const source = dataOnlyPublicStatus(evaluateDataOnlyRuntimeStatus(base({ collectors: { market: raw } }), { now: NOW, lock: lock() })).market.providerSources.COINGECKO;
++  assert.equal(source.callsMonth, 2); assert.equal(source.monthlyCap, 2); assert.equal(source.entitlementRemaining, 0);
++  assert.deepEqual(source.policyBlockReasons, ['MONTH_CAP']); assert.deepEqual(source.policyRefusals.reasons, { MONTH_CAP: 1 });
++  assert.equal(source.catalogResolution.state, 'PROVIDER_DISABLED'); assert.doesNotMatch(JSON.stringify(source), /private|secret/);
++});
++
++test('broad Kraken projection refuses over-bound rows instead of claiming a truncated catalog', () => {
++  const tooMany = DATA_ONLY_BROAD_MARKET_MAX_ROWS + 1;
++  const broad = broadMarket({ markets: tooMany });
++  const projected = dataOnlyPublicStatus(evaluateDataOnlyRuntimeStatus(base({ collectors: { broadMarket: broad } }), { now: NOW, lock: lock() })).broadMarket;
++  assert.equal(projected.state, 'INVALID'); assert.equal(projected.reason, 'BROAD_MARKET_ROW_BOUND_EXCEEDED');
++  assert.equal(projected.validation.state, 'REFUSED'); assert.equal(projected.validation.reason, 'PER_MARKET_OVERFLOW'); assert.equal(projected.validation.reportedRows, tooMany);
++  assert.deepEqual(projected.perMarket, []); assert.equal(projected.scope.allCatalogMarkets, false);
++});
++
+ test('data-only UI routes branch to truthful runtime projections', async () => {
+   const server = await import('node:fs/promises').then(({ readFile }) => readFile(new URL('../ui/server.js', import.meta.url), 'utf8'));
+   assert.match(server, /if \(DATA_ONLY_MODE\) return dataOnlySensorSnapshot\(readDataOnlyRuntimeStatus/);
+diff --git a/ui/server.js b/ui/server.js
+index 65cde07..824e35e 100644
+--- a/ui/server.js
++++ b/ui/server.js
+@@ -34,6 +34,7 @@ import { loadProfile as loadPaperProfile, profileEnvironment as paperProfileEnvi
+ import { answerQuestion, boundHistory, SUGGESTED_QUESTIONS, COMPANION_VERSION, COMPANION_LABEL, MAX_QUESTION_CHARS } from '../paper/companion.js';
+ import { createChatDispatcher } from '../paper/companion-chat.js';
+ import { readDataOnlyRuntimeStatus, dataOnlyPublicStatus, dataOnlySensorSnapshot, dataOnlyMarketView } from '../lib/data-only-status.js';
++import { readBroadKrakenLatest } from '../market-lab/broad-kraken.js';
+ 
+ const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
+ const config = loadConfig();
+@@ -664,6 +665,19 @@ const server = http.createServer((req, res) => {
+         console.error(`[api/rumor2] ${err.constructor.name}: ${err.message}`);
+         json(res, 200, { enabled: false, state: 'DARK', degraded: true });
+       }
++    } else if (url.pathname === '/api/market-broad') {
++      // Public-market observations only: no provider calls, no subscription
++      // changes, no path supplied by the client, and no trading authority.
++      try {
++        const { records: _duplicateRecordIndex, ...latest } = readBroadKrakenLatest({ dataDir: dataDir(), now: Date.now() });
++        const runtime = readDataOnlyRuntimeStatus({ root: dataDir() });
++        json(res, 200, { ...latest, available: latest.catalog !== null && latest.malformed === 0 && !latest.truncated,
++          runtimeRunning: runtime.effectiveRunning === true,
++          runtimeHealth: runtime.healthState, authority: 'NONE' });
++      } catch {
++        json(res, 200, { available: false, state: 'UNAVAILABLE', markets: [],
++          reason: 'BROAD_MARKET_READER_UNAVAILABLE', authority: 'NONE' });
++      }
+     } else if (url.pathname === '/api/market-research') {
+       // MARKET-LAB read-only view: the research service's status FILE and sealed case directories under the research
+       // root (file-based; the cockpit never talks to the owner, never enqueues, never toggles anything paid).
+diff --git a/test/ui-broad-market.test.js b/test/ui-broad-market.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/ui-broad-market.test.js
+@@ -0,0 +1,89 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { once } from 'node:events';
++import { catalogContentId } from '../survey/catalog.js';
++import { startBroadKraken } from '../market-lab/broad-kraken.js';
++
++const root = mkdtempSync(path.join(tmpdir(), 'cobra-ui-broad-'));
++process.env.COBRA_DATA_DIR = root;
++process.env.PORT = '0';
++process.env.SERPENT_DATA_ONLY = 'true';
++for (const key of ['DATABASE_URL', 'REPLIT_DEPLOYMENT', 'SERPENT_DURABLE_REQUIRED', 'SERPENT_CONTROL_PASSWORD']) delete process.env[key];
++const { server } = await import('../ui/server.js');
++if (!server.listening) await once(server, 'listening');
++const base = `http://127.0.0.1:${server.address().port}`;
++const tree = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
++  const full = path.join(dir, entry.name);
++  return entry.isDirectory() ? tree(full) : [[path.relative(root, full), readFileSync(full).toString('base64')]];
++});
++
++test.after(async () => {
++  await new Promise((resolve) => server.close(resolve));
++  rmSync(root, { recursive: true, force: true });
++});
++
++test('broad-market endpoint is read-only, uncached, and never invents a three-coin fallback', async () => {
++  const before = tree(root);
++  const response = await fetch(`${base}/api/market-broad?path=../../outside`);
++  assert.equal(response.status, 200);
++  assert.equal(response.headers.get('cache-control'), 'no-store');
++  const value = await response.json();
++  assert.equal(value.authority, 'NONE');
++  assert.notEqual(value.available, true);
++  assert.equal(Object.hasOwn(value, 'records'), false, 'the endpoint must not duplicate its full per-market record payload');
++  assert.doesNotMatch(JSON.stringify(value), /\b(?:BTC|ETH|SOL)\b/);
++  assert.deepEqual(tree(root), before, 'GET must not start a collector or create files');
++});
++
++test('broad-market read route rejects every mutation method', async () => {
++  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
++    const response = await fetch(`${base}/api/market-broad`, { method });
++    assert.equal(response.status, 405, method);
++    assert.equal(response.headers.get('allow'), 'GET');
++  }
++});
++
++test('broad-market endpoint serves an actually persisted non-major candle and volume without claiming a live runtime', async () => {
++  const now = Date.now();
++  const catalog = { venue: 'kraken', quote: 'USD', policyVersion: 1, observedTs: now,
++    markets: [{ pairKey: 'DOGEUSD', nativeBase: 'XDG', nativeQuote: 'ZUSD', wsname: 'XDG/USD', base: 'DOGE', quote: 'USD', status: 'online' }] };
++  catalog.contentId = catalogContentId(catalog);
++  let socket;
++  class FakeSocket {
++    constructor() { this.readyState = 0; this.sent = []; socket = this; }
++    send(raw) { this.sent.push(JSON.parse(raw)); }
++    emit(value) { this.onmessage?.({ data: JSON.stringify(value) }); }
++    close() { this.readyState = 3; this.onclose?.({}); }
++  }
++  const handle = startBroadKraken({ catalogSource: { snapshot: () => ({ catalog, fresh: true }) }, dataDir: root,
++    WebSocketImpl: FakeSocket, clock: () => now, limits: { subscribePaceMs: 1, latestSnapshotMs: 1 } });
++  try {
++    socket.readyState = 1; socket.onopen();
++    const instrument = socket.sent[0];
++    socket.emit({ method: 'subscribe', req_id: instrument.req_id, success: true, result: { channel: 'instrument' } });
++    socket.emit({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'DOGE/USD', base: 'DOGE', quote: 'USD', status: 'online' }] } });
++    for (let tries = 0; socket.sent.length < 3 && tries < 100; tries += 1) await new Promise((resolve) => setTimeout(resolve, 1));
++    assert.equal(socket.sent.length, 3);
++    for (const request of socket.sent.slice(1)) socket.emit({ method: 'subscribe', req_id: request.req_id, success: true, result: { channel: request.params.channel, symbol: 'DOGE/USD' } });
++    socket.emit({ channel: 'ticker', type: 'update', data: [{ symbol: 'DOGE/USD', last: 0.2, volume: 12345, vwap: 0.19, timestamp: new Date(now).toISOString() }] });
++    socket.emit({ channel: 'ohlc', type: 'update', data: [{ symbol: 'DOGE/USD', interval: 1, interval_begin: new Date(Math.floor(now / 60000) * 60000).toISOString(), open: 0.19, high: 0.21, low: 0.18, close: 0.2, volume: 123, trades: 3, vwap: 0.195 }] });
++    await handle.drain();
++    const before = tree(root);
++    const response = await fetch(`${base}/api/market-broad`);
++    const value = await response.json();
++    assert.equal(response.status, 200);
++    assert.equal(value.available, true);
++    assert.equal(value.runtimeRunning, false, 'the test never starts the trading or data-only composition');
++    assert.equal(value.authority, 'NONE');
++    assert.equal(value.markets.length, 1);
++    assert.equal(value.markets[0].canonicalCoin, 'DOGE');
++    assert.equal(value.markets[0].ticker.record.payload.volume24hBase, 12345);
++    assert.equal(value.markets[0].candle.provisional.payload.volumeBase, 123);
++    assert.equal(value.markets[0].candle.provisional.payload.close, 0.2);
++    assert.equal(Object.hasOwn(value, 'records'), false);
++    assert.deepEqual(tree(root), before);
++  } finally { await handle.stop(); }
++});
