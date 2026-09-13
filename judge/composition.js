@@ -51,7 +51,9 @@ export function feeFromPolicy(policy, nowTs) { const f = policy.fees.taker; retu
 export const accountKindOf = (mode) => (mode === 'REPLAY' ? 'REPLAY' : mode === 'PAPER' || mode === 'OBSERVE' ? 'PAPER' : 'LIVE');
 export function readCredentials(policy, env, mode) { if (!mode.startsWith('LIVE') || !policy.live) return null; const key = env[policy.live.keyEnv]; const secret = env[policy.live.secretEnv]; if (typeof key !== 'string' || !key.length || typeof secret !== 'string' || !secret.length) return null; return { key, secret }; }
 // public instrument specifications from the REST AssetPairs catalog (no key; the ONLY spec source besides an injected fixture)
-export async function loadSpecs({ transport, symbols, nowTs }) { const out = []; if (!transport) return out; const r = await transport(`${KRAKEN_REST_BASE}/0/public/AssetPairs`, { method: 'GET' }); if (!r.ok) throw new Error(`AssetPairs ${r.status}`); const body = JSON.parse(await r.text()); if (Array.isArray(body.error) && body.error.length) throw new Error(`AssetPairs ${body.error[0]}`); for (const [pairKey, p] of Object.entries(body.result ?? {})) { if (!symbols.includes(p.wsname)) continue; try { out.push(specFromAssetPair(pairKey, p, { observedTs: nowTs, canonicalCoin: String(p.wsname).split('/')[0] })); } catch { /* an unparseable pair is simply not admitted */ } } return out; }
+const KRAKEN_EXECUTION_BASE_ALIASES = Object.freeze({ XBT: 'BTC', XDG: 'DOGE' });
+const normalizedKrakenWsname = (wsname) => { if (typeof wsname !== 'string') return null; const parts = wsname.split('/'); if (parts.length !== 2 || !parts[0] || !parts[1]) return wsname; return `${KRAKEN_EXECUTION_BASE_ALIASES[parts[0]] ?? parts[0]}/${parts[1]}`; };
+export async function loadSpecs({ transport, symbols, nowTs }) { const out = []; if (!transport) return out; const requested = new Set(symbols); const r = await transport(`${KRAKEN_REST_BASE}/0/public/AssetPairs`, { method: 'GET' }); if (!r.ok) throw new Error(`AssetPairs ${r.status}`); const body = JSON.parse(await r.text()); if (Array.isArray(body.error) && body.error.length) throw new Error(`AssetPairs ${body.error[0]}`); for (const [pairKey, p] of Object.entries(body.result ?? {})) { const rawWsname = p?.wsname; const normalizedWsname = normalizedKrakenWsname(rawWsname); const executionWsname = normalizedWsname && requested.has(normalizedWsname) ? normalizedWsname : requested.has(rawWsname) ? rawWsname : null; if (!executionWsname) continue; try { out.push(specFromAssetPair(pairKey, { ...p, wsname: executionWsname }, { observedTs: nowTs, canonicalCoin: executionWsname.split('/')[0] })); } catch { /* an unparseable pair is simply not admitted */ } } return out; }
 const excluded = (policy, symbol) => policy.universe.excludeBases.includes(symbol.split('/')[0]);
 
 export const paperCheckpointFile = (acct) => path.join(judgeDir(), `paper-checkpoint-${acct}.json`);
@@ -61,6 +63,9 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   if (!RUN_MODES.includes(mode)) throw new Error(`mode ${mode} outside ${RUN_MODES.join('/')}`);
   const loaded = loadJudgePolicy(policyFile); const policy = loaded.policy; const policyDigest = loaded.digest; const acct = accountId ?? policy.account.accountId; const kind = accountKindOf(mode);
   if (mode.startsWith('LIVE') && policy.mode !== 'LIVE') throw new Error('a LIVE run needs a LIVE policy (the paper sample cannot be promoted by a flag)'); if (!mode.startsWith('LIVE') && policy.mode === 'LIVE') throw new Error('a LIVE policy cannot run a paper / observe mode account');
+  // The current cost/reservation model is denominated in quote currency. A BASE contract is syntactically readable for
+  // historical records, but cannot enter a new Judge composition until its basis, rounding and both-side accounting are specified.
+  if (policy.fees.taker.currency !== 'QUOTE') throw new JournalError('FEE_CURRENCY_UNSUPPORTED', `Judge supports QUOTE fees only; ${policy.fees.taker.currency} is read-only until denomination arithmetic is specified`);
   const pclock = clock ?? createPermissionClock({ log }); const nowTs = () => pclock.now(); const treeDigest = codeDigest === undefined ? codeTreeDigest() : codeDigest;
   // ---- journal: PostgreSQL is the authority for PAPER / LIVE; REPLAY and OBSERVE use a memory journal (hypothetical accounts) ----
   let ownDb = null; let jr = journal; const needDb = requireDb ?? (mode === 'PAPER' || mode.startsWith('LIVE'));
@@ -69,6 +74,9 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   if (!exists) await jr.create(acct, { accountKind: kind });
   const writer = await jr.acquireWriter(acct); if (!writer) throw new JournalError('WRITER_HELD', `another writer owns ${acct}`);
   const loadedAcct = await jr.load(acct); if (loadedAcct.state.initialized && loadedAcct.state.accountKind !== kind) { await writer.release(); throw new JournalError('ACCOUNT_KIND_MISMATCH', `${acct} is a ${loadedAcct.state.accountKind} account; ${mode} needs ${kind}`); }
+  // ACCOUNT_INITIALIZED.policyVersion historically stores policyName (see initAccount). Both immutable fields must match
+  // before constructing an adapter or returning a runnable composition; a mismatch is never an implicit migration/reset.
+  if (loadedAcct.state.initialized && (loadedAcct.state.policyDigest !== policyDigest || loadedAcct.state.policyVersion !== policy.policyName)) { await writer.release(); throw new JournalError('ACCOUNT_POLICY_MISMATCH', `${acct} was initialized under another policy binding`); }
   // ---- feed / specs / fees / recorder ----
   const fd = feed ?? createExecutionFeed({ clock: nowTs, limits: { maxCandidates: policy.universe.maxCandidates, maxResearch: policy.universe.maxResearch, maxHotSet: policy.universe.maxHotSet }, log });
   // focused completion §3: the recording is an experiment INPUT BUNDLE — typed inputs (nominations, instruments, fees, history retrievals,
