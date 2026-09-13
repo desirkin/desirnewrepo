@@ -1,278 +1,701 @@
-diff --git a/judge/features.js b/judge/features.js
-index 3ffae5d..82a52bd 100644
---- a/judge/features.js
-+++ b/judge/features.js
-@@ -68,7 +68,8 @@ export function windowNotional(trades, startTs, endTs, query = {}) { const selec
- export function relativeVolume60(trades, decisionTs, coverage) {
-   const validDecision = Number.isSafeInteger(decisionTs) && decisionTs >= 0; const E = validDecision ? Math.floor(decisionTs / BAR_MS) * BAR_MS : null; const unknown = (reason) => ({ state: 'UNKNOWN', reason, rv60: null, E, numerator: null, baseline: null, completedMinuteDelayMs: E === null ? null : decisionTs - E });
-   if (!Array.isArray(trades) || !validDecision) return unknown('INPUT_INVALID');
--  const coverageClockValid = coverage && coverage.continuous === true && Number.isSafeInteger(coverage.startTs) && coverage.startTs >= 0 && Number.isSafeInteger(coverage.endTs) && coverage.endTs >= 0 && coverage.startTs <= coverage.endTs && coverage.endTs <= decisionTs && (!Object.hasOwn(coverage, 'gapTs') || coverage.gapTs === null);
-+  const historicalGap = !coverage || !Object.hasOwn(coverage, 'gapTs') || coverage.gapTs === null || (Number.isSafeInteger(coverage.gapTs) && coverage.gapTs >= 0 && Number.isSafeInteger(coverage.startTs) && coverage.gapTs <= coverage.startTs);
-+  const coverageClockValid = coverage && coverage.continuous === true && Number.isSafeInteger(coverage.startTs) && coverage.startTs >= 0 && Number.isSafeInteger(coverage.endTs) && coverage.endTs >= 0 && coverage.startTs <= coverage.endTs && coverage.endTs <= decisionTs && historicalGap;
-   const need = { startTs: E - 21 * BAR_MS, endTs: E };
-   if (!coverageClockValid || coverage.startTs > need.startTs || coverage.endTs < need.endTs) return unknown('COVERAGE_INCOMPLETE');
-   const resolved = queryEpoch(trades, need.startTs, need.endTs, decisionTs, coverage.epoch); if (!resolved.ok) return unknown(resolved.reason === 'TRADE_INVALID' ? 'INPUT_INVALID' : 'EPOCH_AMBIGUOUS');
-diff --git a/test/judge-feature-asof-review.test.js b/test/judge-feature-asof-review.test.js
-index ddd4017..a34291d 100644
---- a/test/judge-feature-asof-review.test.js
-+++ b/test/judge-feature-asof-review.test.js
-@@ -141,6 +141,8 @@ test('RV60 malformed clocks, collections and coverage fail closed without throwi
-     [rows, D, { ...valid, startTs: -1 }, 'COVERAGE_INCOMPLETE'],
-     [rows, D, { ...valid, startTs: D, endTs: D - 1 }, 'COVERAGE_INCOMPLETE'],
-     [rows, D, { ...valid, endTs: D + 1 }, 'COVERAGE_INCOMPLETE'],
-+    [rows, D, { ...valid, gapTs: -1 }, 'COVERAGE_INCOMPLETE'],
-+    [rows, D, { ...valid, gapTs: 'old' }, 'COVERAGE_INCOMPLETE'],
-     [rows, D, { ...valid, gapTs: D - 1 }, 'COVERAGE_INCOMPLETE'],
-   ]) assert.equal(relativeVolume60(trades, decisionTs, coverage).reason, reason);
- 
-@@ -150,6 +152,35 @@ test('RV60 malformed clocks, collections and coverage fail closed without throwi
-   assert.equal(invalidBatch.reason, 'INPUT_INVALID');
- });
- 
-+test('actual feed recovers RV only after 21 complete post-gap minutes and retains the historical gap diagnostic', () => {
-+  const gapTs = T - 21 * BAR_MS;
-+  const feed = createExecutionFeed({ clock: () => T + 5_000, limits: { impairedAfterMs: 90_000, criticalAfterMs: 180_000 } });
-+  const tracker = createFlowTracker();
-+  feed.subscribe((event) => { if (event.kind === 'TRADE') tracker.add(event.trade); });
-+  feed.admit('XBT/USD', { priority: 'CANDIDATE' });
-+  feed.onConnect(gapTs - 200_001);
-+  feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), gapTs - 200_000);
-+  feed.ingest(JSON.stringify({ channel: 'heartbeat' }), gapTs);
-+
-+  const ingestMinute = (minute) => {
-+    const ts = gapTs + minute * BAR_MS + 1_000;
-+    feed.ingest(JSON.stringify({
-+      channel: 'trade', type: 'update',
-+      data: [{ symbol: 'XBT/USD', side: 'buy', price: '1', qty: '100', ord_type: 'market', trade_id: minute + 1, timestamp: new Date(ts).toISOString() }],
-+    }), ts);
-+  };
-+  for (let minute = 0; minute < 20; minute += 1) ingestMinute(minute);
-+  const beforeD = gapTs + 20 * BAR_MS + 5_000;
-+  assert.equal(tracker.rv60(beforeD, feed.coverage('XBT/USD', beforeD)).reason, 'COVERAGE_INCOMPLETE');
-+
-+  ingestMinute(20);
-+  const after = tracker.rv60(T + 5_000, feed.coverage('XBT/USD', T + 5_000));
-+  assert.equal(after.state, 'KNOWN');
-+  assert.equal(after.rv60, 1);
-+  assert.equal(feed.coverage('XBT/USD', T + 5_000).gapTs, gapTs, 'historical gap remains visible at the continuous-coverage start');
-+  assert.equal(feed.status().counters.coverageGaps, 1, 'recovery does not erase the gap counter');
-+});
-+
- test('RV60 does not mix a prior feed epoch into current coverage', () => {
-   const D = T + 5_000;
-   const E = Math.floor(D / BAR_MS) * BAR_MS;
-diff --git a/judge/learning-recipe.js b/judge/learning-recipe.js
-index d29801b..972f398 100644
---- a/judge/learning-recipe.js
-+++ b/judge/learning-recipe.js
-@@ -14,7 +14,7 @@ import { COST_MODEL_VERSION } from './cost.js';
- import { RISK_VERSION } from './risk.js';
- import { STRATEGY_VERSION } from './setups.js';
- 
--export const JUDGE_LEARNING_RECIPE_VERSION = 'judge-prepared-market-features-2';
-+export const JUDGE_LEARNING_RECIPE_VERSION = 'judge-prepared-market-features-3';
- export const JUDGE_LEARNING_PREPARED_FACTS_VERSION = 'judge-prepared-learning-facts-1';
- export const JUDGE_LEARNING_CONSUMER_CONTRACT_VERSION = 'judge-prospective-consumer-1';
- export const JUDGE_LEARNING_CONSUMER_ID = 'COBRA_JUDGE_ADMISSION_BATCH_RANK';
-@@ -99,19 +99,19 @@ const RECIPE_FEATURES = Object.freeze([
-   Object.freeze({
-     name: 'fi15', sourcePath: 'sourceEvidence.tradeEvidence.trades[D-15s,D)', transform: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION_FROM_RAW_TRADES',
-     units: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION', lookbackMs: 15_000,
--    supportLaw: 'CONTINUOUS_TRADE_COVERAGE_AND_CLASSIFIED_QUOTE_NOTIONAL_GTE_0_95', ageBasis: 'decisionTs-fast.fi15.endTs',
-+    supportLaw: 'CONTINUOUS_TRADE_COVERAGE_RESET_AFTER_ANY_RETAINED_GAP_AT_OR_BEFORE_START_AND_CLASSIFIED_QUOTE_NOTIONAL_GTE_0_95', ageBasis: 'decisionTs-fast.fi15.endTs',
-     domain: Object.freeze({ min: -1, max: 1, minInclusive: true, maxInclusive: true }),
-   }),
-   Object.freeze({
-     name: 'fi60', sourcePath: 'sourceEvidence.tradeEvidence.trades[D-60s,D)', transform: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION_FROM_RAW_TRADES',
-     units: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION', lookbackMs: 60_000,
--    supportLaw: 'CONTINUOUS_TRADE_COVERAGE_AND_CLASSIFIED_QUOTE_NOTIONAL_GTE_0_95', ageBasis: 'decisionTs-fast.fi60.endTs',
-+    supportLaw: 'CONTINUOUS_TRADE_COVERAGE_RESET_AFTER_ANY_RETAINED_GAP_AT_OR_BEFORE_START_AND_CLASSIFIED_QUOTE_NOTIONAL_GTE_0_95', ageBasis: 'decisionTs-fast.fi60.endTs',
-     domain: Object.freeze({ min: -1, max: 1, minInclusive: true, maxInclusive: true }),
-   }),
-   Object.freeze({
-     name: 'rv60', sourcePath: 'sourceEvidence.tradeEvidence.trades[E-21m,E)', transform: 'LAST_CLOSED_60S_QUOTE_NOTIONAL_OVER_MEDIAN_PRIOR_20_FROM_RAW_TRADES',
-     units: 'RATIO_LAST_CLOSED_60S_QUOTE_NOTIONAL_TO_MEDIAN_PRIOR_20', lookbackMs: 21 * BAR_MS,
--    supportLaw: 'CONTINUOUS_21_COMPLETE_1M_TRADE_WINDOWS', ageBasis: 'decisionTs-fast.rv60.E',
-+    supportLaw: 'CONTINUOUS_21_COMPLETE_1M_TRADE_WINDOWS_RESET_AFTER_ANY_RETAINED_GAP_AT_OR_BEFORE_START', ageBasis: 'decisionTs-fast.rv60.E',
-     domain: Object.freeze({ min: 0, max: null, minInclusive: true, maxInclusive: null }),
-   }),
-   Object.freeze({
-@@ -160,8 +160,12 @@ const known = (name, value, sourceReferenceTs, decisionTs, factSupport) => {
-   const d = definition(name);
-   return { name, value, units: d.units, lookbackMs: d.lookbackMs, sourceReferenceTs, ageMs: decisionTs - sourceReferenceTs, availability: 'KNOWN', reason: null, support: factSupport };
- };
-+const nonNegativeTs = (v) => Number.isSafeInteger(v) && v >= 0;
-+const retainedGapIsHistorical = (coverage) => coverage.gapTs === null
-+  || (nonNegativeTs(coverage.gapTs) && coverage.gapTs <= coverage.startTs);
- const coverageProves = (coverage, startTs, endTs) => isPlainObject(coverage) && coverage.continuous === true
--  && ts(coverage.startTs) && ts(coverage.endTs) && coverage.startTs <= startTs && coverage.endTs >= endTs;
-+  && ts(coverage.startTs) && ts(coverage.endTs) && coverage.startTs < coverage.endTs
-+  && retainedGapIsHistorical(coverage) && coverage.startTs <= startTs && coverage.endTs >= endTs;
- 
- const selected = (v, keys) => {
-   if (!isPlainObject(v)) return null;
-@@ -171,7 +175,7 @@ const tradeEvidenceDigestOf = (e) => digestOf({ coverage: e.coverage, trades: e.
- function rawTradeWindowError(input, decisionTs) {
-   if (!isPlainObject(input) || exactKeys(input, ['coverage', 'trades'])) return 'input shape malformed';
-   const coverage = input.coverage; const ck = exactKeys(coverage, COVERAGE_EVIDENCE_KEYS); if (ck) return `coverage ${ck}`;
--  if (coverage.continuous !== true || !Number.isSafeInteger(coverage.epoch) || coverage.epoch < 0 || !ts(coverage.startTs) || coverage.endTs !== decisionTs || coverage.gapTs !== null) return 'coverage is not continuous through decisionTs';
-+  if (coverage.continuous !== true || !Number.isSafeInteger(coverage.epoch) || coverage.epoch < 0 || !ts(coverage.startTs) || !ts(coverage.endTs) || coverage.startTs >= coverage.endTs || coverage.endTs !== decisionTs || !retainedGapIsHistorical(coverage)) return 'coverage is not continuous through decisionTs after its retained gap';
-   if (!Array.isArray(input.trades) || input.trades.length > JUDGE_LEARNING_MAX_RAW_TRADES) return 'raw trade window exceeds bound or is not an array';
-   let symbol = null; let coin = null; let priorReceiptTs = null; let priorSequence = null; const identities = new Set();
-   for (let i = 0; i < input.trades.length; i += 1) {
-diff --git a/test/judge-learning-recipe-review.test.js b/test/judge-learning-recipe-review.test.js
-index e8a479c..557a595 100644
---- a/test/judge-learning-recipe-review.test.js
-+++ b/test/judge-learning-recipe-review.test.js
-@@ -16,6 +16,7 @@ import {
- } from '../judge/learning-recipe.js';
- import { digestOf } from '../execution/contract.js';
- import { FEATURE_VERSION, indicatorBlock } from '../judge/features.js';
-+import { createExecutionFeed, FEED_DEFAULTS } from '../execution/feed.js';
- import { COST_MODEL_VERSION } from '../judge/cost.js';
- import { RISK_VERSION } from '../judge/risk.js';
- import { STRATEGY_VERSION } from '../judge/setups.js';
-@@ -86,6 +87,7 @@ const inputs = (over = {}) => {
- };
- 
- test('the canonical V3 recipe binds the actual six derivations, units, lookbacks and upstream versions—not a version alias', () => {
-+  assert.equal(JUDGE_LEARNING_RECIPE_VERSION, 'judge-prepared-market-features-3');
-   assert.equal(judgeLearningFeatureRecipeError(JUDGE_LEARNING_FEATURE_RECIPE), null);
-   assert.equal(JUDGE_LEARNING_FEATURE_RECIPE.featureRecipeVersion, JUDGE_LEARNING_RECIPE_VERSION);
-   assert.deepEqual(JUDGE_LEARNING_FEATURE_RECIPE.upstreamVersions, { marketFeatureVersion: FEATURE_VERSION, strategyVersion: STRATEGY_VERSION, bookSnapshotVersion: 'execution-book-snapshot-1' });
-@@ -94,6 +96,8 @@ test('the canonical V3 recipe binds the actual six derivations, units, lookbacks
-   ]);
-   assert.equal(JUDGE_LEARNING_FEATURE_RECIPE.features.find((f) => f.name === 'bidDepthUsd10bps').units, 'USD_QUOTE_NOTIONAL_BID_SIDE_WITHIN_10BPS_OF_MID');
-   assert.equal(JUDGE_LEARNING_FEATURE_RECIPE.features.find((f) => f.name === 'rv60').units, 'RATIO_LAST_CLOSED_60S_QUOTE_NOTIONAL_TO_MEDIAN_PRIOR_20');
-+  assert.match(JUDGE_LEARNING_FEATURE_RECIPE.features.find((f) => f.name === 'fi15').supportLaw, /RETAINED_GAP_AT_OR_BEFORE_START/);
-+  assert.match(JUDGE_LEARNING_FEATURE_RECIPE.features.find((f) => f.name === 'rv60').supportLaw, /RETAINED_GAP_AT_OR_BEFORE_START/);
-   assert.equal(judgeLearningFeatureRecipeDigestOf(JUDGE_LEARNING_FEATURE_RECIPE), JUDGE_LEARNING_FEATURE_RECIPE_DIGEST);
- 
-   const changed = clone(JUDGE_LEARNING_FEATURE_RECIPE);
-@@ -104,6 +108,49 @@ test('the canonical V3 recipe binds the actual six derivations, units, lookbacks
-   assert.match(judgeLearningFeatureRecipeError(duplicate), /duplicate/);
-   const unknown = clone(JUDGE_LEARNING_FEATURE_RECIPE); unknown.features[1].name = 'futureProfit';
-   assert.match(judgeLearningFeatureRecipeError(unknown), /unknown/);
-+
-+  const priorCapture = clone(buildJudgeLearningPreparedFacts(inputs()));
-+  priorCapture.featureRecipeVersion = 'judge-prepared-market-features-2';
-+  priorCapture.factsDigest = judgeLearningPreparedFactsDigestOf(priorCapture);
-+  assert.match(judgeLearningPreparedFactsError(priorCapture), /recipe identity mismatch/, 'a pre-change capture cannot be relabelled under the historical-gap semantics');
-+});
-+
-+test('a real retained feed gap is historical after a full clean window; an inside-window gap or short reset never earns RV credit', () => {
-+  const gapAt = D - 21 * 60_000;
-+  let now = gapAt - FEED_DEFAULTS.impairedAfterMs - 1;
-+  const feed = createExecutionFeed({ clock: () => now });
-+  feed.admit('XBT/USD', { priority: 'CANDIDATE' });
-+  feed.onConnect(now);
-+  feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), now);
-+  now = gapAt;
-+  feed.ingest(JSON.stringify({ channel: 'heartbeat' }), now);
-+  for (now = gapAt + 4_000; now <= D; now += 4_000) feed.ingest(JSON.stringify({ channel: 'heartbeat' }), now);
-+  now = D;
-+  const recoveredCoverage = feed.coverage('XBT/USD', D);
-+  assert.deepEqual(recoveredCoverage, { continuous: true, epoch: 1, startTs: gapAt, endTs: D, gapTs: gapAt });
-+
-+  const recovered = tradeWindowAt(D);
-+  recovered.coverage = recoveredCoverage;
-+  for (const row of recovered.trades) row.feedEpoch = recoveredCoverage.epoch;
-+  const recoveredFacts = buildJudgeLearningPreparedFacts(inputs({ tradeEvidence: recovered }));
-+  assert.equal(recoveredFacts.features.fi15.availability, 'KNOWN');
-+  assert.equal(recoveredFacts.features.rv60.availability, 'KNOWN', 'the retained diagnostic gap does not poison the clean interval that begins at that gap');
-+
-+  for (const gapTs of [gapAt + 1, D + 1, -1, 1.5]) {
-+    const invalid = clone(recovered);
-+    invalid.coverage.gapTs = gapTs;
-+    const facts = buildJudgeLearningPreparedFacts(inputs({ tradeEvidence: invalid }));
-+    for (const name of ['fi15', 'fi60', 'rv60']) assert.equal(facts.features[name].availability, 'UNAVAILABLE');
-+  }
-+
-+  const shortStart = D - 20 * 60_000;
-+  const short = clone(recovered);
-+  short.coverage.startTs = shortStart;
-+  short.coverage.gapTs = shortStart;
-+  short.trades = short.trades.filter((row) => row.receiptTs >= shortStart);
-+  const shortFacts = buildJudgeLearningPreparedFacts(inputs({ tradeEvidence: short }));
-+  assert.equal(shortFacts.features.fi15.availability, 'KNOWN', 'the recent FI window is independently covered');
-+  assert.equal(shortFacts.features.rv60.availability, 'UNAVAILABLE', 'twenty clean minutes cannot satisfy the strict twenty-one-minute RV law');
- });
- 
- test('pure prepared facts reproduce six current sources with truthful clocks/support and renamed bid-only depth', () => {
-diff --git a/test/learning-memory-burst-review.test.js b/test/learning-memory-burst-review.test.js
+diff --git a/learning/daily-broad-input.js b/learning/daily-broad-input.js
 new file mode 100644
 --- /dev/null
-+++ b/test/learning-memory-burst-review.test.js
-@@ -0,0 +1,72 @@
-+// Bounded synthetic concurrency test. These calls are NOT trading simulations.
++++ b/learning/daily-broad-input.js
+@@ -0,0 +1,455 @@
++// Pure adapter from one bounded broad-Kraken capture into the exact market-day
++// input accepted by daily-move-study.js. It has no filesystem, provider,
++// scheduler, Judge, promotion, or order authority.
++//
++// A current accepted catalog is a population snapshot, not proof of the union
++// of every catalog epoch that existed during a civil day. Catalog churn is
++// therefore refused in this version instead of being silently merged. The
++// caller must also disclose the actual capture window; start/tail loss,
++// reconnects, and explicit gaps can only reduce support.
++import { createHash } from 'node:crypto';
++import {
++  canonicalDigest, deepFreeze, exactKeys, isFiniteNum, isPlainObject, isTs,
++} from './shadow-contracts.js';
++import {
++  acceptedCatalogSnapshotError, marketIdentityDigest, sealAcceptedCatalogSnapshot,
++} from './shadow-catalog-snapshot.js';
++
++export const DAILY_BROAD_INPUT_VERSION = 'daily-broad-input-1';
++export const DAILY_BROAD_CAPTURE_VERSION = 'daily-broad-capture-1';
++export const DAILY_BROAD_HARD_LIMITS = Object.freeze({
++  maxInputBytes: 32 * 1024 * 1024,
++  // broad-kraken's physical JSONL line limit, including the newline.
++  maxRecordBytes: 64 * 1024,
++  maxRecords: 50_000,
++  maxMarkets: 5_000,
++  maxObservationsPerMarket: 100_000,
++  maxFinalizationLagMs: 48 * 60 * 60_000,
++});
++
++const BROAD_RECORD_VERSION = 'broad-kraken-record-v1';
++const MINUTE = 60_000;
++const SHA1_RE = /^[0-9a-f]{40}$/;
++const SHA256_RE = /^[0-9a-f]{64}$/;
++const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,199}$/;
++const COIN_RE = /^[A-Z0-9][A-Z0-9.]{0,14}$/;
++const PAIR_RE = /^[A-Za-z0-9._-]{1,40}$/;
++const NATIVE_RE = /^[A-Z0-9.]{1,20}$/;
++const WS_RE = /^([A-Z0-9][A-Z0-9._-]{0,39})\/USD$/;
++const BASE_ALIASES = Object.freeze({ XBT: 'BTC', XDG: 'DOGE' });
++const SUPPORT_FAMILIES = Object.freeze([
++  'PRICE', 'CANDLES', 'BASE_VOLUME', 'QUOTE_VOLUME', 'TRADES', 'TRADE_FLOW', 'SPREAD', 'DEPTH', 'CATALYST',
++]);
++const CATALOG_MARKET_KEYS = Object.freeze(['pairKey', 'nativeBase', 'nativeQuote', 'wsname', 'base', 'quote', 'status']);
++const RECORD_KEYS = Object.freeze([
++  'recordVersion', 'recordId', 'sessionId', 'sequence', 'recordType', 'recordedTs',
++  'catalogContentId', 'epochId', 'market', 'channel', 'quality', 'sourceEventTs',
++  'receivedTs', 'periodStartTs', 'periodEndTs', 'payload',
++]);
++const RECORD_MARKET_KEYS = Object.freeze(['canonicalCoin', 'pairKey', 'nativeBase', 'catalogWsname', 'wsSymbol']);
++const TICKER_KEYS = Object.freeze([
++  'messageType', 'lastPrice', 'bid', 'ask', 'bidQty', 'askQty', 'change24h', 'changePct24h',
++  'high24h', 'low24h', 'volume24hBase', 'vwap24h', 'tickerTimestampTs', 'missingFields', 'invalidFields',
++]);
++const OHLC_KEYS = Object.freeze([
++  'messageType', 'finality', 'learningEligible', 'open', 'high', 'low', 'close', 'vwap', 'trades', 'volumeBase',
++]);
++const CLOSED_OHLC_KEYS = Object.freeze([...OHLC_KEYS.slice(0, 2), 'sourceClockBasis', ...OHLC_KEYS.slice(2)]);
++const INSTRUMENT_KEYS = Object.freeze(['mappingState', 'candidates', 'pair']);
++const INSTRUMENT_PAIR_KEYS = Object.freeze(['symbol', 'base', 'quote', 'status']);
++
++const bounded = (value, max = 240) => String(value ?? '').slice(0, max);
++const refuse = (reason, detail) => deepFreeze({ ok: false, reason, detail: bounded(detail) });
++const utf8Bytes = (value) => Buffer.byteLength(JSON.stringify(value), 'utf8');
++const normalizeBase = (value) => BASE_ALIASES[value] ?? value;
++const sha256 = (value) => createHash('sha256').update(value).digest('hex');
++const boundedString = (value, max) => typeof value === 'string' && value.length <= max;
++
++function canonicalJson(value) {
++  if (value === null || typeof value !== 'object') return JSON.stringify(value);
++  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
++  return `{${Object.keys(value).sort().map((key) => (value[key] === undefined ? null : `${JSON.stringify(key)}:${canonicalJson(value[key])}`)).filter(Boolean).join(',')}}`;
++}
++
++function catalogContentId(catalog) {
++  const markets = catalog.markets.map((market) => Object.fromEntries(CATALOG_MARKET_KEYS.map((key) => [key, market[key]])));
++  return createHash('sha1').update(canonicalJson({
++    venue: catalog.venue, quote: catalog.quote, policyVersion: catalog.policyVersion, markets,
++  })).digest('hex');
++}
++
++function catalogProjection(catalog) {
++  return {
++    venue: catalog.venue, quote: catalog.quote, policyVersion: catalog.policyVersion,
++    observedTs: catalog.observedTs, contentId: catalog.contentId,
++    markets: catalog.markets.map((market) => Object.fromEntries(CATALOG_MARKET_KEYS.map((key) => [key, market[key]]))),
++  };
++}
++
++function normalizeLimits(supplied) {
++  if (supplied === undefined) return DAILY_BROAD_HARD_LIMITS;
++  if (!isPlainObject(supplied)) return null;
++  const out = { ...DAILY_BROAD_HARD_LIMITS };
++  for (const [key, value] of Object.entries(supplied)) {
++    if (!(key in out) || !Number.isSafeInteger(value) || value < 1 || value > DAILY_BROAD_HARD_LIMITS[key]) return null;
++    out[key] = value;
++  }
++  return Object.freeze(out);
++}
++
++function validateCatalog(catalog, limits) {
++  if (!isPlainObject(catalog) || catalog.venue !== 'kraken' || catalog.quote !== 'USD' || catalog.policyVersion !== 1
++      || !isTs(catalog.observedTs) || !boundedString(catalog.contentId, 40) || !SHA1_RE.test(catalog.contentId) || !Array.isArray(catalog.markets)
++      || catalog.markets.length < 1 || catalog.markets.length > limits.maxMarkets) return 'catalog envelope malformed or outside limits';
++  const bases = new Set(); const pairKeys = new Set(); const names = new Set();
++  let previous = null;
++  for (let i = 0; i < catalog.markets.length; i += 1) {
++    const market = catalog.markets[i];
++    const keys = exactKeys(market, CATALOG_MARKET_KEYS);
++    const match = typeof market?.wsname === 'string' ? market.wsname.match(WS_RE) : null;
++    if (keys || !boundedString(market?.pairKey, 40) || !PAIR_RE.test(market.pairKey)
++        || !boundedString(market?.nativeBase, 20) || !NATIVE_RE.test(market.nativeBase)
++        || !['USD', 'ZUSD'].includes(market?.nativeQuote) || !match || normalizeBase(match[1]) !== market?.base
++        || !boundedString(market?.base, 15) || !COIN_RE.test(market.base)
++        || market?.quote !== 'USD' || market?.status !== 'online') return `catalog market ${i} malformed`;
++    if (bases.has(market.base) || pairKeys.has(market.pairKey) || names.has(market.wsname)) return `catalog market ${i} duplicates an accepted identity`;
++    const order = `${market.base}\n${market.pairKey}`;
++    if (previous !== null && order < previous) return 'catalog market inventory is not canonical-sorted';
++    previous = order; bases.add(market.base); pairKeys.add(market.pairKey); names.add(market.wsname);
++  }
++  if (catalogContentId(catalog) !== catalog.contentId) return 'catalog contentId forged';
++  return null;
++}
++
++function acceptedFromCatalog(catalog) {
++  return sealAcceptedCatalogSnapshot({
++    observedTs: catalog.observedTs,
++    knownAtTs: catalog.observedTs,
++    maxAgeMs: 24 * 60 * 60_000,
++    markets: catalog.markets.map((market) => ({
++      subjectKind: 'MARKET', canonicalCoin: market.base, providerAssetId: market.pairKey,
++      venue: 'kraken', nativeSymbol: market.wsname, base: market.base, quote: 'USD',
++      marketType: 'SPOT', quoteAliasGroup: 'USD',
++    })),
++  });
++}
++
++function recordDigestError(record) {
++  if (!boundedString(record.recordId, 68) || !record.recordId.startsWith('bkr-')
++      || !SHA256_RE.test(record.recordId.slice(4))) return 'recordId malformed';
++  const copy = { ...record, recordId: null };
++  return `bkr-${sha256(JSON.stringify(copy))}` === record.recordId ? null : 'recordId content digest forged';
++}
++
++function nullableFinite(value, { positive = false, nonNegative = false } = {}) {
++  if (value === null) return true;
++  if (!isFiniteNum(value)) return false;
++  if (positive && value <= 0) return false;
++  if (nonNegative && value < 0) return false;
++  return true;
++}
++
++function payloadError(record) {
++  const p = record.payload;
++  if (!isPlainObject(p)) return 'payload malformed';
++  if (record.recordType === 'INSTRUMENT_MAP') {
++    if (record.channel !== 'instrument' || exactKeys(p, INSTRUMENT_KEYS)
++        || !['MAPPED', 'UNSUPPORTED', 'AMBIGUOUS'].includes(p.mappingState)
++        || !Array.isArray(p.candidates) || p.candidates.length > 8 || p.candidates.some((x) => !boundedString(x, 80))
++        || !(p.pair === null || (isPlainObject(p.pair) && !exactKeys(p.pair, INSTRUMENT_PAIR_KEYS)
++          && boundedString(p.pair.symbol, 44) && WS_RE.test(p.pair.symbol)
++          && boundedString(p.pair.base, 40) && boundedString(p.pair.quote, 40)
++          && boundedString(p.pair.status, 40)))
++        || (p.mappingState === 'MAPPED') !== (record.quality === 'OBSERVED')) return 'instrument payload malformed';
++    return null;
++  }
++  if (record.recordType === 'SUBSCRIPTION') {
++    if (!['ticker', 'ohlc'].includes(record.channel) || exactKeys(p, ['state', 'error'])
++        || !['SUBSCRIBED', 'FAILED', 'PENDING'].includes(p.state)
++        || !(p.error === null || boundedString(p.error, 240))
++        || record.quality !== (p.state === 'SUBSCRIBED' ? 'SUBSCRIBED' : p.state === 'FAILED' ? 'FAILED' : 'PROVISIONAL')) return 'subscription payload malformed';
++    return null;
++  }
++  if (record.recordType === 'GAP') {
++    if (!['ticker', 'ohlc'].includes(record.channel) || record.quality !== 'GAP' || !['GAP', 'STOPPED'].includes(p.state)) return 'gap payload malformed';
++    const socket = !exactKeys(p, ['state', 'reason', 'epochId']) && boundedString(p.reason, 240)
++      && boundedString(p.epochId, 200) && ID_RE.test(p.epochId);
++    const send = !exactKeys(p, ['state', 'error']) && boundedString(p.error, 240);
++    const interval = !exactKeys(p, ['state', 'reason', 'sinceTs', 'untilTs']) && p.reason === 'NO_NATIVE_INTERVAL'
++      && isTs(p.sinceTs) && isTs(p.untilTs) && p.sinceTs < p.untilTs;
++    return socket || send || interval ? null : 'gap payload malformed';
++  }
++  if (record.recordType === 'TICKER') {
++    if (record.channel !== 'ticker' || exactKeys(p, TICKER_KEYS)
++        || !['OBSERVED', 'PARTIAL', 'MISSING', 'FAILED'].includes(record.quality)
++        || !['snapshot', 'update'].includes(p.messageType)
++        || !nullableFinite(p.lastPrice, { positive: true }) || !nullableFinite(p.bid, { positive: true })
++        || !nullableFinite(p.ask, { positive: true }) || !nullableFinite(p.bidQty, { nonNegative: true })
++        || !nullableFinite(p.askQty, { nonNegative: true }) || !nullableFinite(p.change24h)
++        || !nullableFinite(p.changePct24h) || !nullableFinite(p.high24h, { positive: true })
++        || !nullableFinite(p.low24h, { positive: true }) || !nullableFinite(p.volume24hBase, { nonNegative: true })
++        || !nullableFinite(p.vwap24h, { positive: true }) || !(p.tickerTimestampTs === null || isTs(p.tickerTimestampTs))
++        || !Array.isArray(p.missingFields) || p.missingFields.length > 32 || !Array.isArray(p.invalidFields) || p.invalidFields.length > 32
++        || p.missingFields.some((x) => !boundedString(x, 80)) || p.invalidFields.some((x) => !boundedString(x, 80))) return 'ticker payload malformed';
++    if (p.messageType === 'update' && (!isTs(record.sourceEventTs) || p.tickerTimestampTs !== record.sourceEventTs)) return 'ticker update lacks its exact source clock';
++    if (p.messageType === 'snapshot' && record.sourceEventTs !== null) return 'ticker snapshot cannot claim a last-trade clock';
++    const expectedQuality = p.invalidFields.length > 0 ? 'FAILED'
++      : p.lastPrice === null ? 'MISSING'
++        : p.volume24hBase !== null ? 'OBSERVED' : 'PARTIAL';
++    if (record.quality !== expectedQuality) return 'ticker quality disagrees with its observed fields';
++    return null;
++  }
++  if (record.recordType === 'OHLC') {
++    const closed = record.quality === 'CONSERVATIVE_CLOSED';
++    if (record.channel !== 'ohlc' || exactKeys(p, closed ? CLOSED_OHLC_KEYS : OHLC_KEYS)
++        || !isTs(record.periodStartTs) || !isTs(record.periodEndTs) || record.periodEndTs - record.periodStartTs !== MINUTE
++        || record.sourceEventTs !== null || ![p.open, p.high, p.low, p.close].every((n) => isFiniteNum(n) && n > 0)
++        || p.high < Math.max(p.open, p.close) || p.low > Math.min(p.open, p.close) || p.high < p.low
++        || !nullableFinite(p.vwap, { positive: true }) || !Number.isSafeInteger(p.trades) || p.trades < 0
++        || !isFiniteNum(p.volumeBase) || p.volumeBase < 0 || p.learningEligible !== false) return 'OHLC payload malformed';
++    if (closed) {
++      if (p.messageType !== 'closed' || p.finality !== 'CONSERVATIVE_SAME_SYMBOL_NEXT_INTERVAL'
++          || p.sourceClockBasis !== 'DERIVED_PERIOD_END_NOT_PROVIDER_EVENT_TIME' || record.receivedTs < record.periodEndTs) return 'closed OHLC finality malformed';
++    } else if (record.quality !== 'PROVISIONAL' || p.finality !== 'PROVISIONAL'
++        || !['snapshot-provisional', 'update-provisional'].includes(p.messageType)) return 'provisional OHLC state malformed';
++    return null;
++  }
++  return 'record type unsupported';
++}
++
++function recordError(record, { finalizedTs, captureStartTs, captureEndTs, catalog, marketByPair, maxRecordBytes }) {
++  const keys = exactKeys(record, RECORD_KEYS); if (keys) return `record envelope ${keys}`;
++  if (record.catalogContentId !== catalog.contentId) return 'catalog contentId changed inside the capture';
++  if (record.recordVersion !== BROAD_RECORD_VERSION || !boundedString(record.sessionId, 200) || !ID_RE.test(record.sessionId)
++      || !Number.isSafeInteger(record.sequence) || record.sequence < 1
++      || !boundedString(record.epochId, 200) || !ID_RE.test(record.epochId)
++      || !isTs(record.receivedTs) || !isTs(record.recordedTs)
++      || record.receivedTs < captureStartTs || record.recordedTs < record.receivedTs
++      || record.recordedTs > captureEndTs || record.recordedTs > finalizedTs
++      || !(record.sourceEventTs === null || (isTs(record.sourceEventTs) && record.sourceEventTs <= record.receivedTs))
++      || !(record.periodStartTs === null || isTs(record.periodStartTs))
++      || !(record.periodEndTs === null || isTs(record.periodEndTs))) return 'record identity or clocks malformed';
++  if (record.recordType !== 'OHLC' && (record.periodStartTs !== null || record.periodEndTs !== null)) return 'non-OHLC record carries candle clocks';
++  if (!['TICKER', 'OHLC'].includes(record.recordType) && record.sourceEventTs !== null) return 'control record carries a source event clock';
++  if (!isPlainObject(record.market) || exactKeys(record.market, RECORD_MARKET_KEYS)) return 'record market malformed';
++  const accepted = marketByPair.get(record.market.pairKey);
++  const ws = record.market.wsSymbol === null ? null
++    : boundedString(record.market.wsSymbol, 44) ? record.market.wsSymbol.match(WS_RE) : null;
++  if (!accepted || !boundedString(record.market.canonicalCoin, 15) || !boundedString(record.market.pairKey, 40)
++      || !boundedString(record.market.nativeBase, 20) || !boundedString(record.market.catalogWsname, 44)
++      || record.market.canonicalCoin !== accepted.accepted.canonicalCoin
++      || record.market.catalogWsname !== accepted.raw.wsname || record.market.nativeBase !== accepted.raw.nativeBase
++      || (ws && normalizeBase(ws[1]) !== accepted.accepted.canonicalCoin)
++      || (record.market.wsSymbol !== null && !ws)) return 'record market is unknown or disagrees with the accepted catalog';
++  const perType = payloadError(record); if (perType) return perType;
++  let wireBytes;
++  try { wireBytes = utf8Bytes(record) + 1; } catch { return 'record is not JSON serializable'; }
++  if (wireBytes > maxRecordBytes) return `record exceeds the ${maxRecordBytes}-byte broad JSONL wire ceiling`;
++  const digest = recordDigestError(record); if (digest) return digest;
++  return null;
++}
++
++const absent = (state, reason) => ({
++  state, observedCount: 0, coverageStartTs: null, coverageEndTs: null,
++  gapCount: 0, sourceDigests: [], reason,
++});
++
++function evidenceSupport({ family, observations, startOf, endOf, reasons, complete = false }) {
++  if (observations.length === 0) return absent('MISSING', reasons.length ? reasons.join('|').slice(0, 240) : `${family}_NOT_RECORDED`);
++  let coverageStartTs = Infinity; let coverageEndTs = -Infinity;
++  for (const row of observations) {
++    coverageStartTs = Math.min(coverageStartTs, startOf(row));
++    coverageEndTs = Math.max(coverageEndTs, endOf(row));
++  }
++  const sourceDigests = [canonicalDigest({
++    adapterVersion: DAILY_BROAD_INPUT_VERSION, family,
++    records: observations.map((row) => row.recordId).sort(),
++  })];
++  if (reasons.length) return {
++    state: 'GAP', observedCount: observations.length,
++    coverageStartTs, coverageEndTs,
++    gapCount: reasons.length, sourceDigests, reason: reasons.join('|').slice(0, 240),
++  };
++  return {
++    state: complete ? 'COMPLETE' : 'PARTIAL', observedCount: observations.length,
++    coverageStartTs, coverageEndTs,
++    gapCount: 0, sourceDigests,
++    reason: complete ? null : `${family}_EVENT_RATE_HAS_NO_FULL_DAY_COMPLETENESS_LAW`,
++  };
++}
++
++function boundaryReasons({ captureStartTs, captureEndTs, dayStartTs, dayEndTs }) {
++  const reasons = [];
++  if (captureStartTs > dayStartTs) reasons.push('CAPTURE_STARTED_AFTER_DAY_START');
++  if (captureEndTs < dayEndTs) reasons.push('CAPTURE_ENDED_BEFORE_DAY_END');
++  return reasons;
++}
++
++function relevantGap(record, dayStartTs, dayEndTs) {
++  if (record.recordType !== 'GAP' && !(record.recordType === 'SUBSCRIPTION' && record.quality === 'FAILED')) return false;
++  if (record.payload?.reason === 'NO_NATIVE_INTERVAL') return record.payload.sinceTs < dayEndTs && record.payload.untilTs > dayStartTs;
++  return record.receivedTs >= dayStartTs && record.receivedTs < dayEndTs;
++}
++
++function makeMarketDay(state, { dayStartTs, dayEndTs, captureStartTs, captureEndTs, maxObservationsPerMarket }) {
++  const boundary = boundaryReasons({ captureStartTs, captureEndTs, dayStartTs, dayEndTs });
++  const common = [...boundary];
++  if (state.sessions.size > 1) common.push('SESSION_RESTART');
++  if (state.epochs.size > 1) common.push('FEED_EPOCH_CHANGE');
++  const channelReasons = (channel) => {
++    const out = [...common];
++    if (state.channelGaps[channel]) out.push(`EXPLICIT_${channel.toUpperCase()}_GAP`);
++    return [...new Set(out)];
++  };
++  const tickerReasons = channelReasons('ticker'); const candleReasons = channelReasons('ohlc');
++  if (state.instrumentUnsupported) { tickerReasons.push('INSTRUMENT_UNSUPPORTED_OR_AMBIGUOUS'); candleReasons.push('INSTRUMENT_UNSUPPORTED_OR_AMBIGUOUS'); }
++
++  const sortedPrices = [...state.prices].sort((a, b) => a.sourceEventTs - b.sourceEventTs || a.recordId.localeCompare(b.recordId));
++  const sortedCandles = [...state.candles].sort((a, b) => a.periodStartTs - b.periodStartTs || a.recordId.localeCompare(b.recordId));
++  if (sortedPrices.length + sortedCandles.length > maxObservationsPerMarket) throw Object.assign(new Error('market observation cap exceeded'), { code: 'MARKET_OBSERVATION_LIMIT' });
++
++  const expectedCandles = (dayEndTs - dayStartTs) / MINUTE;
++  let candleGridComplete = sortedCandles.length === expectedCandles;
++  if (candleGridComplete) for (let i = 0; i < sortedCandles.length; i += 1) {
++    if (sortedCandles[i].periodStartTs !== dayStartTs + i * MINUTE) { candleGridComplete = false; break; }
++  }
++  if (!candleGridComplete && sortedCandles.length > 0) candleReasons.push('CANDLE_INTERVALS_INCOMPLETE');
++
++  const priceSupport = evidenceSupport({ family: 'PRICE', observations: sortedPrices, startOf: (r) => r.sourceEventTs, endOf: (r) => r.sourceEventTs, reasons: tickerReasons });
++  const candleSupport = evidenceSupport({ family: 'CANDLES', observations: sortedCandles, startOf: (r) => r.periodStartTs, endOf: (r) => r.periodEndTs, reasons: candleReasons, complete: candleGridComplete });
++  const baseSupport = evidenceSupport({ family: 'BASE_VOLUME', observations: sortedCandles, startOf: (r) => r.periodStartTs, endOf: (r) => r.periodEndTs, reasons: candleReasons, complete: candleGridComplete });
++
++  const support = Object.fromEntries(SUPPORT_FAMILIES.map((family) => [family, absent('UNSUPPORTED', `BROAD_KRAKEN_${family}_NOT_CAPTURED`)]));
++  support.PRICE = priceSupport; support.CANDLES = candleSupport; support.BASE_VOLUME = baseSupport;
++  const marketDay = {
++    marketIdentityDigest: state.marketDigest,
++    priceEvents: sortedPrices.map((row) => ({
++      observationId: row.recordId, kind: 'TICKER_UPDATE', price: row.payload.lastPrice,
++      sourceEventTs: row.sourceEventTs, receivedTs: row.receivedTs, knownAtTs: row.recordedTs,
++      sourceDigest: row.recordId.slice(4),
++    })),
++    candles: sortedCandles.map((row) => ({
++      observationId: row.recordId, periodStartTs: row.periodStartTs, periodEndTs: row.periodEndTs,
++      open: row.payload.open, high: row.payload.high, low: row.payload.low, close: row.payload.close,
++      volumeBase: row.payload.volumeBase, volumeQuote: null, closed: true,
++      receivedTs: row.receivedTs, knownAtTs: row.recordedTs, sourceDigest: row.recordId.slice(4),
++    })),
++    support,
++  };
++  return { marketDay, sessions: state.sessions.size, epochs: state.epochs.size, reasons: [...new Set([...tickerReasons, ...candleReasons])] };
++}
++
++// Returns either one complete planner-compatible input or an error with no
++// partial catalog/marketDays. `truncated:true` always refuses the whole input.
++export function prepareDailyBroadInput({
++  catalog, records, dayStartTs, dayEndTs, finalizedTs,
++  captureStartTs, captureEndTs, truncated = false, limits: suppliedLimits,
++} = {}) {
++  const limits = normalizeLimits(suppliedLimits); if (!limits) return refuse('INPUT_LIMITS_INVALID', 'limits must be positive and no larger than the hard law');
++  if (!isTs(dayStartTs) || !isTs(dayEndTs) || dayEndTs <= dayStartTs || dayEndTs - dayStartTs < 23 * 60 * 60_000
++      || dayEndTs - dayStartTs > 25 * 60 * 60_000 || (dayEndTs - dayStartTs) % MINUTE !== 0
++      || !isTs(finalizedTs) || finalizedTs < dayEndTs || finalizedTs - dayEndTs > limits.maxFinalizationLagMs
++      || !isTs(captureStartTs) || !isTs(captureEndTs) || captureEndTs < captureStartTs || captureEndTs > finalizedTs) return refuse('CAPTURE_CLOCK_INVALID', 'day/capture/finalization clocks violate the bounded completed-day law');
++  if (truncated !== false) return refuse('CAPTURE_TRUNCATED', 'a truncated source inventory cannot produce any planner input');
++  if (!Array.isArray(records) || records.length > limits.maxRecords) return refuse('RECORD_LIMIT', 'record inventory malformed or exceeds the hard row cap');
++  const catalogError = validateCatalog(catalog, limits); if (catalogError) return refuse('CATALOG_INVALID', catalogError);
++  if (catalog.observedTs >= dayEndTs || dayStartTs - catalog.observedTs > 24 * 60 * 60_000 || catalog.observedTs > finalizedTs) return refuse('CATALOG_NOT_POINT_IN_TIME', 'catalog cannot identify this completed day population');
++
++  let bytes;
++  try {
++    // Measure only the validated catalog identity projection plus validated
++    // record wires. WideEye's additional diagnostic arrays are not market
++    // proof, and this is not represented as a physical-source byte count.
++    bytes = utf8Bytes({ version: DAILY_BROAD_CAPTURE_VERSION, dayStartTs, dayEndTs, finalizedTs, captureStartTs, captureEndTs, truncated, catalog: catalogProjection(catalog), records: [] });
++    if (bytes > limits.maxInputBytes) return refuse('INPUT_BYTE_LIMIT', `UTF-8 JSON input exceeds ${limits.maxInputBytes} bytes`);
++  } catch { return refuse('INPUT_NOT_SERIALIZABLE', 'catalog or records are not JSON serializable'); }
++
++  let acceptedCatalogSnapshot;
++  try { acceptedCatalogSnapshot = acceptedFromCatalog(catalog); }
++  catch (error) { return refuse('CATALOG_INVALID', error.message); }
++  // A completed-day study intentionally consumes a historical point-in-time
++  // catalog. The explicit day-relative checks above, rather than freshness at
++  // finalization, are the applicable temporal law.
++  const snapshotError = acceptedCatalogSnapshotError(acceptedCatalogSnapshot);
++  if (snapshotError) return refuse('CATALOG_INVALID', snapshotError);
++  const marketByPair = new Map(); const states = new Map();
++  for (let i = 0; i < catalog.markets.length; i += 1) {
++    const raw = catalog.markets[i]; const accepted = acceptedCatalogSnapshot.markets.find((market) => market.providerAssetId === raw.pairKey);
++    const marketDigest = marketIdentityDigest(accepted);
++    marketByPair.set(raw.pairKey, { raw, accepted, marketDigest });
++    states.set(marketDigest, {
++      marketDigest, raw, accepted, sessions: new Set(), epochs: new Set(),
++      channelGaps: { ticker: false, ohlc: false }, instrumentUnsupported: false,
++      prices: [], candles: [], candlePeriods: new Set(),
++    });
++  }
++
++  const ids = new Set(); const sequenceIds = new Set();
++  for (let i = 0; i < records.length; i += 1) {
++    const record = records[i];
++    const error = recordError(record, { finalizedTs, captureStartTs, captureEndTs, catalog, marketByPair, maxRecordBytes: limits.maxRecordBytes });
++    if (error) return refuse(error.includes('catalog') ? 'CATALOG_CHURN_OR_UNKNOWN_MARKET' : error.includes('wire ceiling') ? 'RECORD_WIRE_LIMIT' : 'RECORD_INVALID', `record ${i}: ${error}`);
++    let recordBytes;
++    try { recordBytes = utf8Bytes(record); } catch { return refuse('RECORD_INVALID', `record ${i}: not JSON serializable`); }
++    bytes += (i === 0 ? 0 : 1) + recordBytes;
++    if (bytes > limits.maxInputBytes) return refuse('INPUT_BYTE_LIMIT', `validated projection and record wire bytes exceed ${limits.maxInputBytes}`);
++    const seqId = `${record.sessionId}:${record.sequence}`;
++    if (ids.has(record.recordId) || sequenceIds.has(seqId)) return refuse('DUPLICATE_RECORD', `record ${i} duplicates a durable identity or session sequence`);
++    ids.add(record.recordId); sequenceIds.add(seqId);
++    const binding = marketByPair.get(record.market.pairKey); const state = states.get(binding.marketDigest);
++    const recordRelevant = (record.receivedTs >= dayStartTs && record.receivedTs < dayEndTs)
++      || (record.recordType === 'TICKER' && isTs(record.sourceEventTs) && record.sourceEventTs >= dayStartTs && record.sourceEventTs < dayEndTs)
++      || (record.recordType === 'OHLC' && record.periodStartTs < dayEndTs && record.periodEndTs > dayStartTs)
++      || (record.payload?.reason === 'NO_NATIVE_INTERVAL' && record.payload.sinceTs < dayEndTs && record.payload.untilTs > dayStartTs);
++    if (recordRelevant) {
++      state.sessions.add(record.sessionId); state.epochs.add(record.epochId);
++      if (['ticker', 'ohlc'].includes(record.channel) && relevantGap(record, dayStartTs, dayEndTs)) state.channelGaps[record.channel] = true;
++      if (record.recordType === 'INSTRUMENT_MAP' && record.payload.mappingState !== 'MAPPED') state.instrumentUnsupported = true;
++    }
++    if (record.recordType === 'TICKER' && record.payload.messageType === 'update'
++        && record.quality !== 'FAILED' && record.payload.lastPrice !== null
++        && record.sourceEventTs >= dayStartTs && record.sourceEventTs < dayEndTs) {
++      if (state.prices.length + state.candles.length >= limits.maxObservationsPerMarket) return refuse('MARKET_OBSERVATION_LIMIT', `record ${i} crosses the per-market observation cap`);
++      state.prices.push(record);
++    }
++    if (record.recordType === 'OHLC' && record.quality === 'CONSERVATIVE_CLOSED'
++        && record.periodStartTs >= dayStartTs && record.periodEndTs <= dayEndTs) {
++      if (state.candlePeriods.has(record.periodStartTs)) return refuse('DUPLICATE_CANDLE_PERIOD', `record ${i} repeats a closed market minute`);
++      if (state.prices.length + state.candles.length >= limits.maxObservationsPerMarket) return refuse('MARKET_OBSERVATION_LIMIT', `record ${i} crosses the per-market observation cap`);
++      state.candlePeriods.add(record.periodStartTs); state.candles.push(record);
++    }
++  }
++
++  const marketDays = []; let priceEvents = 0; let candles = 0; let gappedMarkets = 0;
++  try {
++    for (const market of acceptedCatalogSnapshot.markets) {
++      const built = makeMarketDay(states.get(marketIdentityDigest(market)), {
++        dayStartTs, dayEndTs, captureStartTs, captureEndTs,
++        maxObservationsPerMarket: limits.maxObservationsPerMarket,
++      });
++      marketDays.push(built.marketDay); priceEvents += built.marketDay.priceEvents.length; candles += built.marketDay.candles.length;
++      if (built.reasons.length) gappedMarkets += 1;
++    }
++  } catch (error) { return refuse(error.code ?? 'MARKET_DAY_INVALID', error.message); }
++
++  return deepFreeze({
++    ok: true,
++    version: DAILY_BROAD_INPUT_VERSION,
++    acceptedCatalogSnapshot,
++    marketDays,
++    diagnostics: {
++      mode: 'BOUNDED_PARTIAL_CAPTURE_ONLY',
++      inputByteBasis: 'VALIDATED_CATALOG_PROJECTION_PLUS_RECORD_WIRE_UTF8_BYTES', inputBytes: bytes, validatedRecords: records.length,
++      acceptedMarkets: acceptedCatalogSnapshot.acceptedMarketCount, marketDays: marketDays.length,
++      priceEvents, closedCandles: candles, gappedMarkets,
++      sourceWindowCoversDay: captureStartTs <= dayStartTs && captureEndTs >= dayEndTs,
++      catalogObservedAfterDayStart: catalog.observedTs > dayStartTs,
++      fullDayCatalogEpochUnionVerified: false,
++      persistedRecordContinuityVerified: false,
++      producerSequenceMayLawfullyGapOrReorder: true,
++      candleCompletenessBasis: 'EXACT_DIRECT_CLOSED_ONE_MINUTE_GRID_ONLY',
++      fullDetailClaimed: false,
++      authority: 'NONE',
++    },
++  });
++}
+diff --git a/test/daily-broad-input.test.js b/test/daily-broad-input.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/daily-broad-input.test.js
+@@ -0,0 +1,236 @@
 +import test from 'node:test';
 +import assert from 'node:assert/strict';
 +import { createHash } from 'node:crypto';
-+import { createDecisionMemoryPortForTest, DECISION_MEMORY_WORKER_PROTOCOL, DECISION_MEMORY_REFRESH_MS } from '../lib/decision-memory-port.js';
++import { prepareDailyBroadInput } from '../learning/daily-broad-input.js';
++import { buildDailyMoveStudy, sealDailyMoveStudyManifest } from '../learning/daily-move-study.js';
 +
-+const T = Date.UTC(2026, 8, 13, 12);
-+const turn = () => new Promise((resolve) => setImmediate(resolve));
-+const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
-+function response(request) {
-+  const snapshot = {
-+    view: 'DECISION', version: 'learning-memory-view-1', law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY',
-+    preparedTs: request.nowTs, activations: [], withheld: [], kill: { state: 'ARMED', reason: null, ts: null },
-+    sourceProvenance: {
-+      snapshotStoreVersion: 'learning-decision-snapshot-store-1', sourceSnapshotVersion: 'learning-decision-raw-snapshot-1',
-+      sourceProvenanceVersion: 'learning-decision-read-provenance-1', trustBasis: 'FIXED_BOUNDED_READER_COMPLETE_RAW_BYTES',
-+      canonicalStoreId: `sha256:${'a'.repeat(64)}`, sourceDigest: 'b'.repeat(64), totalBytes: 0, totalRows: 0,
-+    },
-+  };
-+  return { protocol: DECISION_MEMORY_WORKER_PROTOCOL, requestId: request.requestId, ok: true, preparedTs: request.nowTs,
-+    snapshotDigest: createHash('sha256').update(JSON.stringify(snapshot)).digest('hex'), snapshot };
++const MINUTE = 60_000;
++const HOUR = 60 * MINUTE;
++const START = Date.UTC(2026, 8, 13, 4); // midnight America/New_York (EDT)
++const END = START + 24 * HOUR;
++const FINAL = END + HOUR;
++const MARKET_KEYS = ['pairKey', 'nativeBase', 'nativeQuote', 'wsname', 'base', 'quote', 'status'];
++
++function canonicalJson(value) {
++  if (value === null || typeof value !== 'object') return JSON.stringify(value);
++  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
++  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
 +}
 +
-+test('5,000 refresh requests cannot fan out workers before response OR before physical exit', async () => {
-+  let nowTs = T; let starts = 0; let cancels = 0; let request;
-+  const result = deferred(); const closed = deferred();
-+  const port = createDecisionMemoryPortForTest({ enabled: true, mode: 'OBSERVE', dataDir: 'unused-test-path', clock: () => nowTs }, (r) => {
-+    starts += 1; request = r;
-+    return { promise: result.promise, closed: closed.promise, cancel: () => { cancels += 1; return closed.promise; } };
-+  });
-+  const first = port.refresh();
-+  for (let i = 0; i < 5_000; i += 1) assert.strictEqual(i % 2 ? port.refresh() : port.refreshIfDue(), first);
-+  assert.equal(starts, 1);
-+  result.resolve(response(request));
-+  assert.equal((await first).ok, true);
-+  nowTs += DECISION_MEMORY_REFRESH_MS;
-+  for (let i = 0; i < 5_000; i += 1) assert.strictEqual(port.refresh(), first, 'cadence expiry does not release a still-running worker');
-+  const snapshot = port.snapshot();
-+  for (let i = 0; i < 10_000; i += 1) assert.strictEqual(port.snapshot(), snapshot);
-+  assert.equal(starts, 1, 'RAM reads cannot trigger a source refresh');
-+  const stopping = port.stop();
-+  for (let i = 0; i < 1_000; i += 1) assert.strictEqual(port.stop(), stopping);
-+  let stopped = false; stopping.then(() => { stopped = true; });
-+  await turn(); assert.equal(stopped, false, 'shutdown must still await the physical exit');
-+  assert.equal(cancels, 1);
-+  assert.equal(port.snapshot(), null);
-+  closed.resolve(); await stopping;
-+  assert.equal(stopped, true);
-+  assert.deepEqual(await port.refresh(), { ok: false, reason: 'STOPPED' });
++const rawMarket = (base, pairKey = `${base}USD`) => ({ pairKey, nativeBase: `X${base}`, nativeQuote: 'ZUSD', wsname: `${base}/USD`, base, quote: 'USD', status: 'online' });
++function catalog(markets = [rawMarket('BTC'), rawMarket('ETH')]) {
++  const out = { venue: 'kraken', quote: 'USD', policyVersion: 1, observedTs: START + 1, contentId: '', markets };
++  const selected = markets.map((market) => Object.fromEntries(MARKET_KEYS.map((key) => [key, market[key]])));
++  out.contentId = createHash('sha1').update(canonicalJson({ venue: out.venue, quote: out.quote, policyVersion: out.policyVersion, markets: selected })).digest('hex');
++  return out;
++}
++
++const tickerPayload = (eventTs, price = 100) => ({
++  messageType: 'update', lastPrice: price, bid: price - 1, ask: price + 1, bidQty: 2, askQty: 3,
++  change24h: 1, changePct24h: 1, high24h: price + 5, low24h: price - 5,
++  volume24hBase: 1000, vwap24h: price, tickerTimestampTs: eventTs, missingFields: [], invalidFields: [],
++});
++const candlePayload = (price = 100) => ({
++  messageType: 'closed', finality: 'CONSERVATIVE_SAME_SYMBOL_NEXT_INTERVAL',
++  sourceClockBasis: 'DERIVED_PERIOD_END_NOT_PROVIDER_EVENT_TIME', learningEligible: false,
++  open: price, high: price + 1, low: price - 1, close: price, vwap: price, trades: 1, volumeBase: 2,
 +});
 +
-+test('a burst after a failed refresh respects cadence and a fresh successful cycle can recover', async () => {
-+  let nowTs = T; let starts = 0;
-+  const port = createDecisionMemoryPortForTest({ enabled: true, mode: 'OBSERVE', dataDir: 'unused-test-path', clock: () => nowTs }, (request) => {
-+    starts += 1;
-+    return { promise: Promise.resolve(starts === 1
-+      ? { protocol: DECISION_MEMORY_WORKER_PROTOCOL, requestId: request.requestId, ok: false, code: 'MEMORY_SOURCE_REFUSED' }
-+      : response(request)), closed: Promise.resolve(), cancel: () => {} };
++function sealRecord({
++  seq, market = rawMarket('BTC'), sessionId = 'bks-session-1', epochId = 'epoch-1',
++  recordType = 'TICKER', channel = 'ticker', quality = 'OBSERVED',
++  receivedTs = START + HOUR + 20, recordedTs = receivedTs + 1,
++  sourceEventTs = START + HOUR + 10, periodStartTs = null, periodEndTs = null,
++  payload = tickerPayload(sourceEventTs), catalogContentId = CATALOG.contentId,
++} = {}) {
++  const record = {
++    recordVersion: 'broad-kraken-record-v1', recordId: null, sessionId, sequence: seq,
++    recordType, recordedTs, catalogContentId, epochId,
++    market: { canonicalCoin: market.base, pairKey: market.pairKey, nativeBase: market.nativeBase, catalogWsname: market.wsname, wsSymbol: market.wsname },
++    channel, quality, sourceEventTs, receivedTs, periodStartTs, periodEndTs, payload,
++  };
++  record.recordId = `bkr-${createHash('sha256').update(JSON.stringify(record)).digest('hex')}`;
++  return record;
++}
++
++function resealRecord(record) {
++  const copy = structuredClone(record);
++  copy.recordId = null;
++  copy.recordId = `bkr-${createHash('sha256').update(JSON.stringify(copy)).digest('hex')}`;
++  return copy;
++}
++
++const CATALOG = catalog();
++const baseInput = (records, extra = {}) => ({
++  catalog: CATALOG, records, dayStartTs: START, dayEndTs: END, finalizedTs: FINAL,
++  captureStartTs: START, captureEndTs: FINAL, truncated: false, ...extra,
++});
++
++test('valid bounded capture maps the proven catalog to every planner row and stays explicit about incomplete families', () => {
++  const ticker = sealRecord({ seq: 1 });
++  const periodStartTs = START + 2 * HOUR;
++  const candle = sealRecord({
++    seq: 2, recordType: 'OHLC', channel: 'ohlc', quality: 'CONSERVATIVE_CLOSED',
++    sourceEventTs: null, periodStartTs, periodEndTs: periodStartTs + MINUTE,
++    receivedTs: periodStartTs + MINUTE + 20, payload: candlePayload(),
 +  });
-+  try {
-+    assert.deepEqual(await port.refresh(), { ok: false, reason: 'MEMORY_SOURCE_REFUSED' });
-+    await turn();
-+    const burst = await Promise.all(Array.from({ length: 5_000 }, () => port.refreshIfDue()));
-+    assert.ok(burst.every((r) => !r.ok && r.reason === 'MEMORY_SOURCE_REFUSED'));
-+    assert.equal(starts, 1); assert.equal(port.snapshot(), null);
-+    nowTs += DECISION_MEMORY_REFRESH_MS;
-+    assert.equal((await port.refresh()).ok, true);
-+    assert.equal(starts, 2); assert.ok(Object.isFrozen(port.snapshot()));
-+    nowTs -= 1;
-+    assert.equal(port.snapshot(), null, 'clock rollback invalidates recovered cached data');
-+  } finally { await port.stop(); }
++  const result = prepareDailyBroadInput(baseInput([ticker, candle]));
++  assert.equal(result.ok, true);
++  assert.equal(result.acceptedCatalogSnapshot.acceptedMarketCount, 2);
++  assert.equal(result.marketDays.length, 2);
++  const btc = result.marketDays.find((row) => row.priceEvents.length === 1);
++  assert.equal(btc.candles.length, 1);
++  assert.equal(btc.support.PRICE.state, 'PARTIAL');
++  assert.equal(btc.support.CANDLES.state, 'GAP');
++  assert.equal(btc.support.BASE_VOLUME.observedCount, 1);
++  for (const family of ['QUOTE_VOLUME', 'TRADES', 'TRADE_FLOW', 'SPREAD', 'DEPTH', 'CATALYST']) assert.equal(btc.support[family].state, 'UNSUPPORTED');
++  assert.equal(result.diagnostics.fullDayCatalogEpochUnionVerified, false);
++  assert.equal(result.diagnostics.persistedRecordContinuityVerified, false);
++  assert.equal(result.diagnostics.mode, 'BOUNDED_PARTIAL_CAPTURE_ONLY');
++  assert.equal(result.diagnostics.inputByteBasis, 'VALIDATED_CATALOG_PROJECTION_PLUS_RECORD_WIRE_UTF8_BYTES');
++  assert.equal(result.diagnostics.fullDetailClaimed, false);
++
++  const manifest = sealDailyMoveStudyManifest({
++    createdTs: FINAL, localDay: '2026-09-13', dayStartTs: START, dayEndTs: END,
++    acceptedCatalogSnapshot: result.acceptedCatalogSnapshot,
++  });
++  const study = buildDailyMoveStudy({ manifest, acceptedCatalogSnapshot: result.acceptedCatalogSnapshot, marketDays: result.marketDays });
++  assert.equal(study.cases.length, 2, 'adapter output is accepted without shrinking the denominator');
++  assert.equal(study.counters.completedSimulations, 0);
++});
++
++test('truncation and aggregate UTF-8 byte/row limits refuse the whole input', () => {
++  const record = sealRecord({ seq: 1 });
++  const good = prepareDailyBroadInput(baseInput([record]));
++  assert.equal(good.ok, true);
++  const truncated = prepareDailyBroadInput(baseInput([record], { truncated: true }));
++  assert.deepEqual(Object.keys(truncated).sort(), ['detail', 'ok', 'reason']);
++  assert.equal(truncated.reason, 'CAPTURE_TRUNCATED');
++  assert.equal(prepareDailyBroadInput(baseInput([record], { limits: { maxInputBytes: good.diagnostics.inputBytes - 1 } })).reason, 'INPUT_BYTE_LIMIT');
++  assert.equal(prepareDailyBroadInput(baseInput([record], { limits: { maxRecords: 1 }, records: [record, sealRecord({ seq: 2 })] })).reason, 'RECORD_LIMIT');
++});
++
++test('record wire, bounded payload, and incremental per-market observation limits refuse before partial output', () => {
++  const record = sealRecord({ seq: 1 });
++  assert.equal(prepareDailyBroadInput(baseInput([record], { limits: { maxRecordBytes: 200 } })).reason, 'RECORD_WIRE_LIMIT');
++
++  const oversizedList = sealRecord({
++    seq: 2,
++    payload: { ...tickerPayload(START + HOUR + 10), missingFields: Array(33).fill('bounded-name') },
++  });
++  assert.equal(prepareDailyBroadInput(baseInput([oversizedList])).reason, 'RECORD_INVALID');
++
++  const second = sealRecord({
++    seq: 2,
++    sourceEventTs: START + 2 * HOUR,
++    receivedTs: START + 2 * HOUR + 1,
++    recordedTs: START + 2 * HOUR + 2,
++    payload: tickerPayload(START + 2 * HOUR, 101),
++  });
++  const capped = prepareDailyBroadInput(baseInput([record, second], { limits: { maxObservationsPerMarket: 1 } }));
++  assert.deepEqual(Object.keys(capped).sort(), ['detail', 'ok', 'reason']);
++  assert.equal(capped.reason, 'MARKET_OBSERVATION_LIMIT');
++});
++
++test('catalog digest forgery, churn, unknown markets, and hidden payload fields are never accepted as a partial prefix', () => {
++  const forgedCatalog = structuredClone(CATALOG); forgedCatalog.contentId = 'f'.repeat(40);
++  assert.equal(prepareDailyBroadInput(baseInput([], { catalog: forgedCatalog })).reason, 'CATALOG_INVALID');
++
++  const churn = sealRecord({ seq: 1, catalogContentId: 'e'.repeat(40) });
++  assert.equal(prepareDailyBroadInput(baseInput([churn])).reason, 'CATALOG_CHURN_OR_UNKNOWN_MARKET');
++
++  const stranger = rawMarket('SOL');
++  const unknown = sealRecord({ seq: 2, market: stranger });
++  assert.equal(prepareDailyBroadInput(baseInput([unknown])).reason, 'CATALOG_CHURN_OR_UNKNOWN_MARKET');
++
++  const poisoned = sealRecord({ seq: 3, payload: { ...tickerPayload(START + HOUR + 10), retrospectiveWinner: true } });
++  assert.equal(prepareDailyBroadInput(baseInput([poisoned])).reason, 'RECORD_INVALID');
++});
++
++test('identity fields require JSON strings even when coercion could stringify a one-element array', () => {
++  const arraySession = sealRecord({ seq: 1 });
++  arraySession.sessionId = ['bks-session-1'];
++  assert.equal(prepareDailyBroadInput(baseInput([resealRecord(arraySession)])).reason, 'RECORD_INVALID');
++
++  const arraySymbol = sealRecord({ seq: 2 });
++  arraySymbol.market.wsSymbol = ['BTC/USD'];
++  assert.equal(prepareDailyBroadInput(baseInput([resealRecord(arraySymbol)])).reason, 'CATALOG_CHURN_OR_UNKNOWN_MARKET');
++});
++
++test('midday starts, early tails, explicit gaps, restarts, and epoch changes can only downgrade support', () => {
++  const first = sealRecord({ seq: 1, receivedTs: START + 3 * HOUR, recordedTs: START + 3 * HOUR + 1, sourceEventTs: START + 3 * HOUR - 1, payload: tickerPayload(START + 3 * HOUR - 1) });
++  const second = sealRecord({ seq: 1, sessionId: 'bks-session-2', epochId: 'epoch-2', receivedTs: START + 4 * HOUR, recordedTs: START + 4 * HOUR + 1, sourceEventTs: START + 4 * HOUR - 1, payload: tickerPayload(START + 4 * HOUR - 1, 101) });
++  const gap = sealRecord({
++    seq: 2, sessionId: 'bks-session-2', epochId: 'epoch-2', recordType: 'GAP', channel: 'ticker', quality: 'GAP',
++    receivedTs: START + 5 * HOUR, recordedTs: START + 5 * HOUR + 1, sourceEventTs: null,
++    payload: { state: 'GAP', reason: 'SOCKET_CLOSED', epochId: 'epoch-2' },
++  });
++  const result = prepareDailyBroadInput(baseInput([first, second, gap], { captureStartTs: START + 2 * HOUR, captureEndTs: END - HOUR }));
++  assert.equal(result.ok, true);
++  const btc = result.marketDays.find((row) => row.priceEvents.length === 2);
++  assert.equal(btc.support.PRICE.state, 'GAP');
++  assert.match(btc.support.PRICE.reason, /CAPTURE_STARTED_AFTER_DAY_START/);
++  assert.match(btc.support.PRICE.reason, /CAPTURE_ENDED_BEFORE_DAY_END/);
++  assert.match(btc.support.PRICE.reason, /SESSION_RESTART/);
++  assert.match(btc.support.PRICE.reason, /FEED_EPOCH_CHANGE/);
++  assert.match(btc.support.PRICE.reason, /EXPLICIT_TICKER_GAP/);
++});
++
++test('a candle closed after the day is retained only when it was known by the declared finalization clock', () => {
++  const periodStartTs = END - MINUTE;
++  const late = sealRecord({
++    seq: 1, recordType: 'OHLC', channel: 'ohlc', quality: 'CONSERVATIVE_CLOSED', sourceEventTs: null,
++    periodStartTs, periodEndTs: END, receivedTs: END + 5 * MINUTE, recordedTs: END + 5 * MINUTE + 1,
++    payload: candlePayload(110),
++  });
++  const result = prepareDailyBroadInput(baseInput([late], { captureEndTs: END + 10 * MINUTE, finalizedTs: END + 10 * MINUTE }));
++  assert.equal(result.ok, true);
++  assert.equal(result.marketDays.find((row) => row.candles.length).candles[0].knownAtTs, END + 5 * MINUTE + 1);
++
++  const afterFinal = sealRecord({
++    seq: 2, recordType: 'OHLC', channel: 'ohlc', quality: 'CONSERVATIVE_CLOSED', sourceEventTs: null,
++    periodStartTs, periodEndTs: END, receivedTs: END + 5 * MINUTE, recordedTs: END + 11 * MINUTE,
++    payload: candlePayload(110),
++  });
++  assert.equal(prepareDailyBroadInput(baseInput([afterFinal], { captureEndTs: END + 10 * MINUTE, finalizedTs: END + 10 * MINUTE })).reason, 'RECORD_INVALID');
++});
++
++test('duplicate durable identities, session sequences, and closed candle periods refuse the whole day', () => {
++  const record = sealRecord({ seq: 1 });
++  assert.equal(prepareDailyBroadInput(baseInput([record, record])).reason, 'DUPLICATE_RECORD');
++  const sameSequence = sealRecord({ seq: 1, sourceEventTs: START + 2 * HOUR, receivedTs: START + 2 * HOUR + 1, payload: tickerPayload(START + 2 * HOUR) });
++  assert.equal(prepareDailyBroadInput(baseInput([record, sameSequence])).reason, 'DUPLICATE_RECORD');
++
++  const periodStartTs = START + 4 * HOUR;
++  const a = sealRecord({ seq: 2, recordType: 'OHLC', channel: 'ohlc', quality: 'CONSERVATIVE_CLOSED', sourceEventTs: null, periodStartTs, periodEndTs: periodStartTs + MINUTE, receivedTs: periodStartTs + MINUTE + 1, payload: candlePayload(100) });
++  const b = sealRecord({ seq: 3, recordType: 'OHLC', channel: 'ohlc', quality: 'CONSERVATIVE_CLOSED', sourceEventTs: null, periodStartTs, periodEndTs: periodStartTs + MINUTE, receivedTs: periodStartTs + MINUTE + 2, payload: candlePayload(101) });
++  assert.equal(prepareDailyBroadInput(baseInput([a, b])).reason, 'DUPLICATE_CANDLE_PERIOD');
++});
++
++test('within a bounded single-market fixture, only an exact direct 1-minute grid can earn complete candle/base-volume support', () => {
++  const one = catalog([rawMarket('BTC')]);
++  const records = Array.from({ length: 24 * 60 }, (_, i) => {
++    const periodStartTs = START + i * MINUTE;
++    return sealRecord({
++      seq: i + 1, recordType: 'OHLC', channel: 'ohlc', quality: 'CONSERVATIVE_CLOSED', sourceEventTs: null,
++      periodStartTs, periodEndTs: periodStartTs + MINUTE, receivedTs: periodStartTs + MINUTE + 1,
++      recordedTs: periodStartTs + MINUTE + 2, payload: candlePayload(100 + i / 1000), catalogContentId: one.contentId,
++    });
++  });
++  const complete = prepareDailyBroadInput(baseInput(records, { catalog: one }));
++  assert.equal(complete.ok, true);
++  assert.equal(complete.marketDays[0].support.CANDLES.state, 'COMPLETE');
++  assert.equal(complete.marketDays[0].support.BASE_VOLUME.state, 'COMPLETE');
++  assert.equal(complete.marketDays[0].support.PRICE.state, 'MISSING');
++
++  const missingMinute = prepareDailyBroadInput(baseInput(records.slice(1), { catalog: one }));
++  assert.equal(missingMinute.ok, true);
++  assert.equal(missingMinute.marketDays[0].support.CANDLES.state, 'GAP');
++});
++
++test('future/malformed clocks and unsupported record kinds refuse rather than disappear', () => {
++  const futureClock = sealRecord({ seq: 1, sourceEventTs: START + HOUR + 30, receivedTs: START + HOUR + 20, payload: tickerPayload(START + HOUR + 30) });
++  assert.equal(prepareDailyBroadInput(baseInput([futureClock])).reason, 'RECORD_INVALID');
++  const unknown = sealRecord({ seq: 2, recordType: 'TRADE', channel: 'trade', sourceEventTs: null, payload: {} });
++  assert.equal(prepareDailyBroadInput(baseInput([unknown])).reason, 'RECORD_INVALID');
 +});
