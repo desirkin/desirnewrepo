@@ -21,11 +21,15 @@ export function normalMixtureBoundary({ variance, alpha, rho }) {
   if (!finite(variance) || variance < 0 || !finite(alpha) || alpha <= 0 || alpha >= 1 || !finite(rho) || rho <= 0) throw new TypeError('CS_SETTINGS_INVALID');
   // log1p avoids unstable ratio arithmetic. Eq.17 is already TWO-SIDED:
   // alpha is not halved again and repeated monitoring does not spend alpha.
-  return Math.sqrt((variance + rho) * (Math.log1p(variance / rho) - 2 * Math.log(alpha)));
+  const boundary = Math.sqrt((variance + rho) * (Math.log1p(variance / rho) - 2 * Math.log(alpha)));
+  // Exotic but finite inputs can still overflow intermediate IEEE arithmetic.
+  // Refuse unsupported numeric settings instead of serializing Infinity as null.
+  if (!finite(boundary)) throw new RangeError('CS_NUMERIC_RANGE_UNSUPPORTED');
+  return boundary;
 }
 
 export function forecastConfidenceSequence({ count, sum, alpha, rho }) {
-  if (!Number.isSafeInteger(count) || count < 0 || !finite(sum) || Math.abs(sum) > count + 1e-10) throw new TypeError('CS_STATE_INVALID');
+  if (!Number.isSafeInteger(count) || count < 0 || !finite(sum) || Math.abs(sum) > count + 1e-10 || (count === 0 && sum !== 0)) throw new TypeError('CS_STATE_INVALID');
   const boundary = normalMixtureBoundary({ variance: count, alpha, rho });
   if (count === 0) return deepFreeze({ version: SEQUENTIAL_FORECAST_VERSION, count, mean: null, lower: -1, upper: 1, radius: null, alpha, rho, authority: 'NONE' });
   const mean = sum / count; const radius = boundary / count;
@@ -37,7 +41,9 @@ export function forecastConfidenceSequence({ count, sum, alpha, rho }) {
 // ordinal across restart/renaming, and never issue two claims for one ordinal.
 export function trialAlpha({ familyAlpha, trialOrdinal }) {
   if (!finite(familyAlpha) || familyAlpha <= 0 || familyAlpha >= 1 || !Number.isSafeInteger(trialOrdinal) || trialOrdinal < 1 || trialOrdinal > 1_000_000) throw new TypeError('TRIAL_BUDGET_INVALID');
-  return familyAlpha / (trialOrdinal * (trialOrdinal + 1));
+  const alpha = familyAlpha / (trialOrdinal * (trialOrdinal + 1));
+  if (!finite(alpha) || alpha <= 0) throw new RangeError('TRIAL_ALPHA_UNREPRESENTABLE');
+  return alpha;
 }
 
 // Each unit is sealed before observing its label. This first supported method

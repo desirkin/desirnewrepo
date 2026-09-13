@@ -12,6 +12,9 @@ test('published two-sided normal-mixture formula parity and score bounds', () =>
   for (const bad of [-1, 1.01, NaN, Infinity, '0.5']) assert.throws(() => brierLoss(bad, 1));
   assert.throws(() => brierLoss(0.5, null));
   assert.equal(forecastConfidenceSequence({ count: 0, sum: 0, alpha: .05, rho: 1 }).mean, null);
+  assert.throws(() => forecastConfidenceSequence({ count: 0, sum: 1e-12, alpha: .05, rho: 1 }), /CS_STATE_INVALID/);
+  assert.throws(() => normalMixtureBoundary({ variance: 1, alpha: .05, rho: Number.MIN_VALUE }), /CS_NUMERIC_RANGE/);
+  assert.throws(() => normalMixtureBoundary({ variance: Number.MAX_VALUE, alpha: .05, rho: Number.MAX_VALUE }), /CS_NUMERIC_RANGE/);
 });
 
 function row(i, candidatePrediction = .9, referencePrediction = .5, label = 1) {
@@ -38,6 +41,7 @@ test('per-trial allocations are summable; a new ordinal cannot reset the family 
   for (let i = 1; i <= 10000; i++) total += trialAlpha({ familyAlpha: .05, trialOrdinal: i });
   assert.ok(total < .05 && total > .04999);
   assert.throws(() => trialAlpha({ familyAlpha: .05, trialOrdinal: 0 }));
+  assert.throws(() => trialAlpha({ familyAlpha: Number.MIN_VALUE, trialOrdinal: 2 }), /TRIAL_ALPHA_UNREPRESENTABLE/);
 });
 
 test('declared no-improvement experiment: repeated monitoring, independent runs and uncertainty', (t) => {
