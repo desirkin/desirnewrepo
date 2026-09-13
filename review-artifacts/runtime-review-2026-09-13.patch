@@ -1,179 +1,31 @@
-diff --git a/lib/data-only-status.js b/lib/data-only-status.js
-index 8200b62..c508e86 100644
---- a/lib/data-only-status.js
-+++ b/lib/data-only-status.js
-@@ -5,6 +5,8 @@ import { readJsonBounded } from './jsonl.js';
- 
- export const DATA_ONLY_HEARTBEAT_MAX_AGE_MS = 150_000;
- export const DATA_ONLY_RUNTIME_STATUS_VERSION = 'serpent-data-only-runtime-2';
-+export const DATA_ONLY_MARKET_STREAM_MAX_AGE_MS = 90_000;
-+export const DATA_ONLY_MARKET_REQUIRED_STREAMS = Object.freeze(['KRAKEN_SPOT', 'COINBASE_SPOT']);
- const MAX_STATUS_BYTES = 16 * 1024 * 1024;
- const MAX_LOCK_BYTES = 64 * 1024;
- const LIFECYCLES = new Set(['STARTING', 'ACTIVE', 'STOPPING', 'STOPPED']);
-@@ -37,7 +39,7 @@ export function evaluateDataOnlyRuntimeStatus(raw, {
-     available: false, reportedRunning: false, effectiveRunning: false, running: false,
-     healthState: 'UNAVAILABLE', statusReason: 'STATUS_UNAVAILABLE', heartbeatAgeMs: null,
-     heartbeatMaxAgeMs: maxHeartbeatAgeMs, lifecycle: 'UNAVAILABLE', startupPhase: null,
--    tsMs: null, pid: null, startedTs: null, authority: 'NONE', status: null,
-+    tsMs: null, evaluatedAtTs: now, pid: null, startedTs: null, authority: 'NONE', status: null,
-   });
- 
-   const reportedRunning = raw.running === true;
-@@ -95,6 +97,7 @@ export function evaluateDataOnlyRuntimeStatus(raw, {
-     statusReason,
-     heartbeatAgeMs,
-     heartbeatMaxAgeMs: maxHeartbeatAgeMs,
-+    evaluatedAtTs: now,
-     lifecycle: lifecycle ?? 'INVALID',
-     startupPhase: typeof raw.startupPhase === 'string' ? text(raw.startupPhase, 80) : null,
-     status: raw,
-@@ -118,7 +121,22 @@ export function readDataOnlyRuntimeStatus({
-   });
- }
- 
--function publicMarket(market) {
-+function publicMarketStream(stream, snapshotTs) {
-+  if (!object(stream)) return null;
-+  const state = text(stream.state, 24) || 'UNKNOWN';
-+  const lastMessageTs = timestamp(stream.lastMessageTs) ? stream.lastMessageTs : null;
-+  const openedTs = timestamp(stream.openedTs) ? stream.openedTs : null;
-+  const lastMessageAgeMs = lastMessageTs !== null && timestamp(snapshotTs) && lastMessageTs <= snapshotTs ? snapshotTs - lastMessageTs : null;
-+  const openedAgeMs = openedTs !== null && timestamp(snapshotTs) && openedTs <= snapshotTs ? snapshotTs - openedTs : null;
-+  let healthState = 'DEGRADED'; let reason = `WS_${state}`;
-+  if (state === 'CONNECTING') { healthState = 'STARTING'; reason = 'WS_CONNECTING'; }
-+  else if (state === 'OPEN' && lastMessageAgeMs !== null && lastMessageAgeMs <= DATA_ONLY_MARKET_STREAM_MAX_AGE_MS) { healthState = 'HEALTHY'; reason = null; }
-+  else if (state === 'OPEN' && lastMessageTs === null && openedAgeMs !== null && openedAgeMs <= DATA_ONLY_MARKET_STREAM_MAX_AGE_MS) { healthState = 'STARTING'; reason = 'WS_OPEN_AWAITING_FIRST_MESSAGE'; }
-+  else if (state === 'OPEN') { healthState = 'STALE'; reason = lastMessageTs !== null && lastMessageAgeMs === null ? 'WS_MESSAGE_TIMESTAMP_INVALID' : 'WS_MESSAGE_STALE'; }
-+  return { state, healthState, reason, epoch: finiteNonnegative(stream.epoch), messages: finiteNonnegative(stream.messages), bytes: finiteNonnegative(stream.bytes), dropped: finiteNonnegative(stream.dropped), invalidJson: finiteNonnegative(stream.invalidJson), reconnects: finiteNonnegative(stream.reconnects), lastMessageTs, lastMessageAgeMs, openedTs };
-+}
-+
-+function publicMarket(market, snapshotTs) {
-   if (!object(market)) return null;
-   const sources = {};
-   for (const [id, source] of Object.entries(object(market.sources) ? market.sources : {})) {
-@@ -132,9 +150,25 @@ function publicMarket(market) {
-       callsToday: finiteNonnegative(source.callsToday), dailyCap: finiteNonnegative(source.dailyCap),
+diff --git a/tools/data-only-runtime.mjs b/tools/data-only-runtime.mjs
+index 639aca0..41bad26 100644
+--- a/tools/data-only-runtime.mjs
++++ b/tools/data-only-runtime.mjs
+@@ -226,8 +226,11 @@ if (catalog) {
+       DISCOVERY_GDELT_MAX_DAILY_REQUESTS: '16',
+       DISCOVERY_GDELT_RESULT_LIMIT: '50',
+       DISCOVERY_GDELT_ASSETS_PER_QUERY: '12',
+-      DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS: '24',
+-      DISCOVERY_KALSHI_MAX_DAILY_REQUESTS: '24',
++      // Local free-read ceilings, not provider entitlements. Hourly scheduling
++      // remains unchanged; 48 leaves bounded maintenance-restart headroom.
++      // Existing charged reservations are restored, never reset by this change.
++      DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS: '48',
++      DISCOVERY_KALSHI_MAX_DAILY_REQUESTS: '48',
+       DISCOVERY_POLYMARKET_PAGE_LIMIT: '100',
+       DISCOVERY_KALSHI_PAGE_LIMIT: '1000',
      };
-   }
-+  const streams = {};
-+  for (const [id, stream] of Object.entries(object(market.streams) ? market.streams : {})) { const visible = publicMarketStream(stream, snapshotTs); if (visible) streams[text(id, 64)] = visible; }
-+  const required = Object.fromEntries(DATA_ONLY_MARKET_REQUIRED_STREAMS.map((id) => [id, streams[id]?.healthState ?? 'MISSING']));
-+  const requiredStates = Object.values(required);
-+  const streamHealth = requiredStates.every((state) => state === 'HEALTHY') ? { state: 'HEALTHY', reason: null, required }
-+    : requiredStates.every((state) => state === 'HEALTHY' || state === 'STARTING') ? { state: 'STARTING', reason: 'REQUIRED_WS_INITIALIZING', required }
-+      : { state: 'DEGRADED', reason: 'REQUIRED_WS_NOT_HEALTHY', required };
-+  const recordingError = object(market.recording?.error) || typeof market.recording?.error === 'string';
-+  const recordingHealthy = object(market.recording) && market.recording.error === null;
-+  const recording = { state: recordingError ? 'FAILED' : recordingHealthy ? 'HEALTHY' : 'UNKNOWN', healthy: recordingHealthy, failedTs: timestamp(market.recording?.failedTs) ? market.recording.failedTs : null, where: market.recording?.where ? text(market.recording.where, 80) : null };
-+  const reportedState = text(market.state, 64) || 'NOT_OBSERVED'; const reportedRunning = market.running === true;
-+  let state = reportedState; let running = reportedRunning;
-+  if (recording.state === 'FAILED') { state = 'RECORDING_FAILED'; running = false; }
-+  else if (reportedState === 'ACTIVE' && recording.state !== 'HEALTHY') state = 'DEGRADED';
-+  else if (reportedState === 'ACTIVE' && streamHealth.state === 'STARTING') state = 'STARTING';
-+  else if (reportedState === 'ACTIVE' && streamHealth.state !== 'HEALTHY') state = 'DEGRADED';
-   const subjects = Array.isArray(market.scope?.subjects) ? market.scope.subjects.filter((v) => typeof v === 'string').map((v) => text(v, 24)).slice(0, 64) : [];
-   return {
--    state: text(market.state, 64) || 'NOT_OBSERVED', running: market.running === true,
-+    state, running, reportedState, reportedRunning,
-     purpose: text(market.purpose, 40) || 'OBSERVATION_ONLY',
-     scope: {
-       subjectCount: Number.isSafeInteger(market.scope?.subjectCount) && market.scope.subjectCount >= 0 ? market.scope.subjectCount : subjects.length,
-@@ -148,7 +182,10 @@ function publicMarket(market) {
-       lastError: market.bootstrap.lastError ? text(market.bootstrap.lastError) : null,
-     } : null,
-     receipts: object(market.counters) ? Object.fromEntries(Object.entries(market.counters).filter(([, value]) => Number.isFinite(value) && value >= 0).slice(0, 24)) : {},
--    streams: sources,
-+    providerSources: sources,
-+    streams,
-+    streamHealth,
-+    recording,
-     persistence: object(market.persistence) ? {
-       captures: text(market.persistence.captures, 80) || null,
-       quotaJournal: text(market.persistence.quotaJournal, 80) || null,
-@@ -160,8 +197,8 @@ function publicMarket(market) {
- export function dataOnlyPublicStatus(evaluated) {
-   const source = object(evaluated?.status) ? evaluated.status : {};
-   const persistence = source.collectors?.persistence;
--  const observedMarket = publicMarket(source.collectors?.market);
--  const market = observedMarket && evaluated?.effectiveRunning !== true && ['STARTING', 'ACTIVE', 'OBSERVED', 'EMPTY', 'CURRENT_VIEW'].includes(observedMarket.state)
-+  const observedMarket = publicMarket(source.collectors?.market, evaluated?.evaluatedAtTs);
-+  const market = observedMarket && evaluated?.effectiveRunning !== true
-     ? { ...observedMarket, reportedState: observedMarket.state, state: evaluated?.healthState ?? 'STALE', running: false }
-     : observedMarket;
-   return {
-@@ -211,11 +248,14 @@ export function dataOnlySensorSnapshot(evaluated, { now = Date.now() } = {}) {
- 
-   const market = collectors.market;
-   if (object(market)) {
-+    const publishedMarket = dataOnlyPublicStatus(evaluated).market;
-     const subjects = Array.isArray(market.scope?.subjects) ? market.scope.subjects.slice(0, 64) : [];
-     const count = Number.isSafeInteger(market.scope?.subjectCount) ? market.scope.subjectCount : subjects.length;
-     const receipts = Number.isFinite(market.counters?.observations) ? market.counters.observations : 0;
--    add('MARKET', { id: 'MARKET_CAPTURE', name: 'Scoped market capture', state: market.state, coverage: `capture scope ${count} subjects (${subjects.join(', ') || 'none'}); ${receipts} observations; full catalog ${source.catalog?.markets ?? 'unavailable'} is discovery only`, blocker: market.state === 'ACTIVE' ? null : market.stopped?.reason ?? null });
--    for (const [id, stream] of Object.entries(object(market.sources) ? market.sources : {})) add('MARKET', { id: `MARKET_${id}`, name: `Market stream: ${id}`, state: stream.state, coverage: `requests ${stream.requests ?? 0}; succeeded ${stream.succeeded ?? 0}; failed ${stream.failed ?? 0}; today ${stream.callsToday ?? 0}/${stream.dailyCap ?? 0}`, blocker: stream.reason ?? null });
-+    const marketBlocker = publishedMarket?.recording?.state === 'FAILED' ? `recording failed${publishedMarket.recording.where ? ` at ${publishedMarket.recording.where}` : ''}` : publishedMarket?.streamHealth?.state !== 'HEALTHY' ? publishedMarket?.streamHealth?.reason : market.stopped?.reason ?? null;
-+    add('MARKET', { id: 'MARKET_CAPTURE', name: 'Scoped market capture', state: publishedMarket?.state ?? market.state, coverage: `capture scope ${count} subjects (${subjects.join(', ') || 'none'}); ${receipts} observations; full catalog ${source.catalog?.markets ?? 'unavailable'} is discovery only`, blocker: marketBlocker });
-+    for (const [id, provider] of Object.entries(object(market.sources) ? market.sources : {})) add('MARKET', { id: `MARKET_${id}`, name: `Market provider: ${id}`, state: provider.state, coverage: `requests ${provider.requests ?? 0}; succeeded ${provider.succeeded ?? 0}; failed ${provider.failed ?? 0}; today ${provider.callsToday ?? 0}/${provider.dailyCap ?? 0}`, blocker: provider.reason ?? null });
-+    for (const [id, stream] of Object.entries(publishedMarket?.streams ?? {})) add('MARKET', { id: `MARKET_WS_${id}`, name: `Market WebSocket: ${id}`, state: stream.healthState === 'HEALTHY' ? 'ACTIVE' : stream.healthState === 'STARTING' ? 'STARTING' : 'DEGRADED', lastSuccessTs: stream.lastMessageTs, coverage: `${stream.state}; ${stream.messages ?? 0} messages; ${stream.reconnects ?? 0} reconnects`, blocker: stream.reason });
-   } else add('MARKET', { id: 'MARKET_CAPTURE', name: 'Scoped market capture', state: 'NOT_OBSERVED', coverage: 'NO_RUNTIME_STATUS', blocker: source.blockers?.MARKET ?? 'market runtime unavailable' });
- 
-   const eye = collectors.wideeye;
-diff --git a/test/data-only-status.test.js b/test/data-only-status.test.js
-index 29358ad..223c831 100644
---- a/test/data-only-status.test.js
-+++ b/test/data-only-status.test.js
-@@ -85,6 +85,11 @@ test('public market and sensor views keep capture scope separate from the wider
-         families: ['SPOT_PRICE_CHART', 'SPOT_FLOW'], bootstrap: { running: false, initialState: 'COMPLETE' },
-         counters: { observations: 27 }, persistence: { captures: 'FILE_BACKED_SAME_FILESYSTEM', quotaJournal: 'FILE_BACKED_SAME_FILESYSTEM', replitRepublish: 'NOT_GUARANTEED' },
-         sources: { KRAKEN_SPOT: { desired: 'ON', state: 'OBSERVED', requests: 9, succeeded: 9, failed: 0, callsToday: 9, dailyCap: 1000 } },
-+        streams: {
-+          KRAKEN_SPOT: { state: 'OPEN', epoch: 1, messages: 90, bytes: 9000, dropped: 0, invalidJson: 0, reconnects: 0, openedTs: NOW - 9_000, lastMessageTs: NOW - 1_500 },
-+          COINBASE_SPOT: { state: 'OPEN', epoch: 1, messages: 80, bytes: 8000, dropped: 0, invalidJson: 0, reconnects: 0, openedTs: NOW - 9_000, lastMessageTs: NOW - 1_600 },
-+        },
-+        recording: { error: null, failedTs: null, where: null, segmentDir: 'C:/secret/server/path/segment' },
-       },
-       wideeye: { state: 'ACTIVE', tsMs: NOW - 500 },
-       persistence: { status: 'HEALTHY', databaseConfigured: true, restored: true },
-@@ -93,13 +98,14 @@ test('public market and sensor views keep capture scope separate from the wider
-   const evaluated = evaluateDataOnlyRuntimeStatus(status, { now: NOW, lock: lock() });
-   const pub = dataOnlyPublicStatus(evaluated);
-   assert.equal(pub.market.scope.subjectCount, 3); assert.deepEqual(pub.market.scope.subjects, ['BTC', 'ETH', 'SOL']); assert.equal(pub.catalog.markets, 612);
--  assert.equal(pub.market.streams.KRAKEN_SPOT.succeeded, 9); assert.equal(pub.market.receipts.observations, 27);
-+  assert.equal(pub.market.providerSources.KRAKEN_SPOT.succeeded, 9); assert.equal(pub.market.receipts.observations, 27);
-+  assert.equal(pub.market.streams.KRAKEN_SPOT.healthState, 'HEALTHY'); assert.equal(pub.market.streamHealth.state, 'HEALTHY'); assert.equal(pub.market.recording.state, 'HEALTHY');
-   assert.equal(JSON.stringify(pub).includes('secret/server/path'), false, 'public status does not expose runtime filesystem paths');
-   const sensors = dataOnlySensorSnapshot(evaluated, { now: NOW }); const market = sensors.rows.find((row) => row.id === 'MARKET_CAPTURE');
-   assert.match(market.coverage, /^capture scope 3 subjects/); assert.match(market.coverage, /full catalog 612 is discovery only/);
-   assert.equal(sensors.runtimeMode, 'DATA_ONLY'); assert.equal(sensors.authority.realMoney, 'DISABLED');
-   const endpoint = dataOnlyMarketView(evaluated);
--  assert.equal(endpoint.market.scope.subjectCount, 3); assert.equal(endpoint.market.streams.KRAKEN_SPOT.requests, 9); assert.equal(endpoint.status.mode, 'DATA_ONLY');
-+  assert.equal(endpoint.market.scope.subjectCount, 3); assert.equal(endpoint.market.providerSources.KRAKEN_SPOT.requests, 9); assert.equal(endpoint.market.streams.KRAKEN_SPOT.messages, 90); assert.equal(endpoint.status.mode, 'DATA_ONLY');
-   assert.equal(endpoint.status.owner.counters.tapeTrades, null); assert.equal(endpoint.status.owner.counters.acquisitions, 27);
- 
-   const stale = evaluateDataOnlyRuntimeStatus({ ...status, tsMs: NOW - DATA_ONLY_HEARTBEAT_MAX_AGE_MS - 1 }, { now: NOW, lock: lock() });
-@@ -109,6 +115,24 @@ test('public market and sensor views keep capture scope separate from the wider
-   assert.match(staleSensors.rows.find((row) => row.id === 'MARKET_KRAKEN_SPOT').blocker, /HEARTBEAT_STALE/);
- });
- 
-+test('public market downgrades failed, initializing, and stale required streams while preserving REST truth', () => {
-+  const market = { state: 'ACTIVE', running: true, purpose: 'OBSERVATION_ONLY', scope: { subjectCount: 1, subjects: ['BTC'], allAssetCoverageClaim: false }, families: ['SPOT_FLOW'], counters: { observations: 41 }, sources: { KRAKEN_SPOT: { desired: 'ON', state: 'OBSERVED', requests: 3, succeeded: 3, failed: 0 } }, streams: { KRAKEN_SPOT: { state: 'OPEN', epoch: 1, messages: 20, lastMessageTs: NOW - 1_000, openedTs: NOW - 10_000 }, COINBASE_SPOT: { state: 'OPEN', epoch: 1, messages: 15, lastMessageTs: NOW - 1_000, openedTs: NOW - 10_000 } }, recording: { error: null, failedTs: null, where: null } };
-+  const project = (next) => dataOnlyPublicStatus(evaluateDataOnlyRuntimeStatus(base({ collectors: { market: next } }), { now: NOW, lock: lock() })).market;
-+  const failed = project({ ...market, recording: { error: { kind: 'IO_FAILURE', message: 'private path omitted' }, failedTs: NOW - 5, where: 'APPEND' } });
-+  assert.equal(failed.state, 'RECORDING_FAILED'); assert.equal(failed.running, false); assert.equal(failed.recording.state, 'FAILED'); assert.equal(JSON.stringify(failed).includes('private path omitted'), false);
-+  const malformedRecording = project({ ...market, recording: { error: false, failedTs: null, where: null } });
-+  assert.equal(malformedRecording.state, 'DEGRADED'); assert.equal(malformedRecording.recording.state, 'UNKNOWN');
-+  const connecting = project({ ...market, streams: { ...market.streams, COINBASE_SPOT: { state: 'CONNECTING', epoch: 2, messages: 0, lastMessageTs: null, openedTs: null } } });
-+  assert.equal(connecting.state, 'STARTING'); assert.equal(connecting.streamHealth.state, 'STARTING'); assert.equal(connecting.running, true);
-+  const staleMarket = { ...market, streams: { ...market.streams, KRAKEN_SPOT: { ...market.streams.KRAKEN_SPOT, lastMessageTs: NOW - 91_001 } } };
-+  const stale = project(staleMarket);
-+  assert.equal(stale.state, 'DEGRADED'); assert.equal(stale.streams.KRAKEN_SPOT.healthState, 'STALE'); assert.equal(stale.running, true); assert.equal(stale.receipts.observations, 41); assert.equal(stale.providerSources.KRAKEN_SPOT.succeeded, 3);
-+  const oldHeartbeat = dataOnlyPublicStatus(evaluateDataOnlyRuntimeStatus(base({ tsMs: NOW - 100_000, collectors: { market: { ...market, streams: { ...market.streams, KRAKEN_SPOT: { ...market.streams.KRAKEN_SPOT, lastMessageTs: NOW - 150_000 } } } } }), { now: NOW, lock: lock() })).market;
-+  assert.equal(oldHeartbeat.state, 'DEGRADED'); assert.equal(oldHeartbeat.streams.KRAKEN_SPOT.healthState, 'STALE', 'WS age uses evaluation time, not the older saved heartbeat');
-+  const sensors = dataOnlySensorSnapshot(evaluateDataOnlyRuntimeStatus(base({ collectors: { market: staleMarket } }), { now: NOW, lock: lock() }), { now: NOW });
-+  assert.equal(sensors.rows.find((row) => row.id === 'MARKET_CAPTURE').state, 'DEGRADED'); assert.equal(sensors.rows.find((row) => row.id === 'MARKET_WS_KRAKEN_SPOT').state, 'DEGRADED'); assert.equal(sensors.rows.find((row) => row.id === 'MARKET_KRAKEN_SPOT').state, 'OBSERVED');
-+});
-+
- test('data-only UI routes branch to truthful runtime projections', async () => {
-   const server = await import('node:fs/promises').then(({ readFile }) => readFile(new URL('../ui/server.js', import.meta.url), 'utf8'));
-   assert.match(server, /if \(DATA_ONLY_MODE\) return dataOnlySensorSnapshot\(readDataOnlyRuntimeStatus/);
+diff --git a/test/data-only-runtime.test.mjs b/test/data-only-runtime.test.mjs
+index 360d18a..8222726 100644
+--- a/test/data-only-runtime.test.mjs
++++ b/test/data-only-runtime.test.mjs
+@@ -77,6 +77,8 @@ test('data-only news uses official feeds plus bounded GDELT metadata and withhol
+   assert.match(source, /publisherExcerptsStored:\s*false/);
+   assert.match(source, /DISCOVERY_SOURCES:\s*'GDELT_NEWS_DISCOVERY,POLYMARKET_PUBLIC_DATA,KALSHI_PUBLIC_DATA'/);
+   assert.match(source, /DISCOVERY_GDELT_MAX_DAILY_REQUESTS:\s*'16'/);
++  assert.match(source, /DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS:\s*'48'/);
++  assert.match(source, /DISCOVERY_KALSHI_MAX_DAILY_REQUESTS:\s*'48'/);
+   assert.match(source, /DISCOVERY_GDELT_RESULT_LIMIT:\s*'50'/);
+   assert.match(source, /DISCOVERY_GDELT_ASSETS_PER_QUERY:\s*'12'/);
+   assert.match(source, /contact:\s*process\.env\.SERPENT_HTTP_CONTACT \?\? null/);
