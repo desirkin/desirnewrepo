@@ -7,10 +7,13 @@ import path from 'node:path';
 import * as M from '../execution/money.js';
 import { paperAccount, fakeClock, SPEC, TAKER_FEE, T0, SAMPLE_LIMITS } from './helpers/judge.js';
 import { composeJudge } from '../judge/composition.js';
+import { loadJudgePolicy } from '../judge/policy.js';
 import { computeClusters } from '../judge/risk.js';
 import { crc32 } from '../lib/crc32.js';
 
 const POLICY_FILE = path.resolve('judge/samples/policy.paper-reference.json');
+const COMPOSED_POLICY = loadJudgePolicy(POLICY_FILE);
+const COMPOSED_INIT = Object.freeze({ policyDigest: COMPOSED_POLICY.digest, policyVersion: COMPOSED_POLICY.policy.policyName });
 const refused = async (fn, code) => { try { await fn(); } catch (err) { assert.equal(err.code === 'REDUCER_REFUSED' ? err.detail.code : err.code, code, err.message); return err; } assert.fail(`expected refusal ${code}`); };
 const fmt = (v, d) => v.toFixed(d).replace('.', '').replace(/^0+/, ''); const crcFor = (asks, bids) => crc32([...asks.slice(0, 10), ...bids.slice(0, 10)].map(([p, q]) => fmt(p, 1) + fmt(q, 8)).join(''));
 const pclockOf = (clock) => ({ now: clock.now, monotonic: clock.monotonic, observeWall: () => null, status: () => ({ trusted: true, kind: 'TEST' }), expired: (t) => clock.now() > t });
@@ -40,7 +43,7 @@ test('R06-02. adjustment dedup by native identity: the same fee-adjustment ref w
 });
 
 test('R06-03/R06-04. the production composition publishes a durable VALUATION from the Watch marks: equity = cash + conservative liquidation, the mark is recorded on the position, session P&L / drawdown derive from THIS account; no usable book -> UNKNOWN (entries blocked) until a book returns; a verified deposit never lifts the flow-adjusted drawdown', async () => {
-  const clock = fakeClock(); const r = await paperAccount({ accountId: 'val', clock }); const { F } = r;
+  const clock = fakeClock(); const r = await paperAccount({ accountId: 'val', clock, init: COMPOSED_INIT }); const { F } = r;
   await r.append([F.hypothesis('d1'), F.decision('d1'), F.reserve('r1', 'd1'), F.position('p1', 'd1'), F.pin(), F.intent('o1', 'p1', 'r1'), F.attempt('o1'), F.result('o1', 'ACKNOWLEDGED'), F.fill('o1', 'f1'), F.release('r1', { reason: 'ORDER_TERMINAL', releasedCash: '0', releasedRisk: '0' }), F.stopIntent('st1', 'p1'), F.attempt('st1'), F.result('st1', 'ACKNOWLEDGED'), F.protection('p1', 'ACTIVE', { orderId: 'st1', nativeOrderId: 'nat-st1' }), F.r('p1', 'FINAL')]);
   await r.writer.release(); let s = await r.state(); assert.equal(s.cash, '399.2'); assert.equal(s.valuation.reason, 'INITIAL');
   const run = await composeJudge({ policyFile: POLICY_FILE, mode: 'PAPER', accountId: 'val', journal: r.journal, clock: pclockOf(clock), specs: [SPEC], nominations: () => [], writeProjection: false, codeDigest: 'c'.repeat(64), log: () => {} });
@@ -58,7 +61,7 @@ test('R06-03/R06-04. the production composition publishes a durable VALUATION fr
 });
 
 test('R06-05. gain restrictions are account-specific: the composition derives the lock level from THIS account\'s session P&L against the configured thresholds, never from the legacy ledger\'s daily lock', async () => {
-  const clock = fakeClock(); const r = await paperAccount({ accountId: 'gain', clock }); await r.writer.release();
+  const clock = fakeClock(); const r = await paperAccount({ accountId: 'gain', clock, init: COMPOSED_INIT }); await r.writer.release();
   const run = await composeJudge({ policyFile: POLICY_FILE, mode: 'PAPER', accountId: 'gain', journal: r.journal, clock: pclockOf(clock), specs: [SPEC], nominations: () => [], writeProjection: false, codeDigest: 'c'.repeat(64), log: () => {} });
   assert.equal(run.lockLevel(), 'NONE');
   // a realized gain of USD 40 on 500 (8%) is above the configured hard lock threshold (cobra.config.json locks); the legacy ledger knows nothing of it
