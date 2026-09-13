@@ -1,0 +1,281 @@
+{
+ "note": "trimmed real payloads captured 2026-09-03 from status.kraken.com / status.coinbase.com; okx entry is schema-shaped from OKX API docs (live feed was empty at capture)",
+ "kraken_summary": {
+  "incidents": [
+   {
+    "id": "cs12xgc7ll9y",
+    "name": "Monad (MON) Funding Delays",
+    "status": "investigating",
+    "impact": "minor",
+    "created_at": "2026-09-02T23:48:17.928Z",
+    "monitoring_at": null,
+    "resolved_at": null,
+    "scheduled_for": null,
+    "scheduled_until": null,
+    "incident_updates": [
+     {
+      "status": "investigating",
+      "created_at": "2026-09-02T23:48:18.066Z",
+      "body": "We're investigating an issue with the Monad (MON) funding gateway. Deposits and withdrawals may be delayed at this time. All other funding methods are operating normally. We are working diligently to "
+     }
+    ],
+    "components": [
+     {
+      "name": "Monad (MON)",
+      "status": "degraded_performance"
+     }
+    ]
+   },
+   {
+    "id": "zw1z5jvcmcrs",
+    "name": "Nesa (NES) Funding Delays",
+    "status": "identified",
+    "impact": "minor",
+    "created_at": "2026-08-24T14:56:40.436Z",
+    "monitoring_at": null,
+    "resolved_at": null,
+    "scheduled_for": null,
+    "scheduled_until": null,
+    "incident_updates": [
+     {
+      "status": "identified",
+      "created_at": "2026-08-31T16:19:16.139Z",
+      "body": "We continue to work to remediate the issue with Nesa (NES) token. Please note that at this time withdrawals are paused, while all other funding methods are operating normally. We will continue to prov"
+     },
+     {
+      "status": "identified",
+      "created_at": "2026-08-29T22:36:34.651Z",
+      "body": "The issue has been identified and a fix is being implemented."
+     },
+     {
+      "status": "investigating",
+      "created_at": "2026-08-24T14:56:40.549Z",
+      "body": "We're investigating an issue with the Nesa (NES) token. Deposits may be delayed at this time. All other funding methods are operating normally. We are working diligently to resolve the issue and will "
+     }
+    ],
+    "components": [
+     {
+      "name": "Nesa (NES) - BNB Chain",
+      "status": "degraded_performance"
+     }
+    ]
+   },
+   {
+    "id": "28cg7pcwnqbl",
+    "name": "Cronos (CRO) Funding Disruptions",
+    "status": "investigating",
+    "impact": "minor",
+    "created_at": "2026-08-30T16:01:50.560Z",
+    "monitoring_at": null,
+    "resolved_at": null,
+    "scheduled_for": null,
+    "scheduled_until": null,
+    "incident_updates": [
+     {
+      "status": "investigating",
+      "created_at": "2026-08-30T16:01:50.658Z",
+      "body": "We're investigating an issue with the Cronos (CRO) funding gateway. Deposits and withdrawals are currently not being processed. All other funding methods are operating normally. We are working diligen"
+     }
+    ],
+    "components": [
+     {
+      "name": "Cronos (CRO) - Ethereum",
+      "status": "degraded_performance"
+     }
+    ]
+   }
+  ],
+  "scheduled_maintenances": [
+   {
+    "id": "jsvkjhytrk1h",
+    "name": "Arbitrum Nova Deposits and Withdrawals Discontinued",
+    "status": "scheduled",
+    "impact": "maintenance",
+    "created_at": "2026-08-21T06:55:32.540Z",
+    "monitoring_at": null,
+    "resolved_at": null,
+    "scheduled_for": "2026-08-21T07:00:00.000Z",
+    "scheduled_until": "2026-09-11T00:00:00.000Z",
+    "incident_updates": [
+     {
+      "status": "scheduled",
+      "created_at": "2026-08-21T06:55:32.634Z",
+      "body": "As of August 20, 2026, Kraken no longer supports deposits or withdrawals through the Arbitrum Nova network. This change affects only Arbitrum Nova; Arbitrum One remains unaffected."
+     }
+    ],
+    "components": []
+   },
+   {
+    "id": "1q6g7qg5v3sw",
+    "name": "Derivatives Platform Maintenance",
+    "status": "scheduled",
+    "impact": "maintenance",
+    "created_at": "2026-09-02T10:29:28.194Z",
+    "monitoring_at": null,
+    "resolved_at": null,
+    "scheduled_for": "2026-09-03T07:00:00.000Z",
+    "scheduled_until": "2026-09-03T07:10:00.000Z",
+    "incident_updates": [
+     {
+      "status": "scheduled",
+      "created_at": "2026-09-02T10:29:28.323Z",
+      "body": "The Derivatives platform will be unavailable for approximately 10 minutes on Thursday (September 3rd) at 07:00 UTC as we perform site maintenance. There will be a period of 'post-only' once the platfo"
+     }
+    ],
+    "components": [
+     {
+      "name": "User Interface",
+      "status": "operational"
+     },
+     {
+      "name": "User Interface",
+      "status": "operational"
+     },
+     {
+      "name": "Single Sign-On",
+      "status": "operational"
+     },
+     {
+      "name": "Single Sign-On",
+      "status": "operational"
+     },
+     {
+      "name": "REST API",
+      "status": "operational"
+     }
+    ]
+   }
+  ],
+  "components": [
+   {
+    "name": "Digital Currency Funding",
+    "status": "degraded_performance"
+   },
+   {
+    "name": "Cronos (CRO) - Ethereum",
+    "status": "degraded_performance"
+   },
+   {
+    "name": "MemeCore (M) - BNB Chain",
+    "status": "degraded_performance"
+   },
+   {
+    "name": "Monad (MON)",
+    "status": "degraded_performance"
+   },
+   {
+    "name": "Nesa (NES) - BNB Chain",
+    "status": "degraded_performance"
+   },
+   {
+    "name": "Stablr Euro (EURR) - Ethereum",
+    "status": "degraded_performance"
+   },
+   {
+    "name": "Stablr USD (USDR) - Ethereum",
+    "status": "degraded_performance"
+   },
+   {
+    "name": "Bitcoin (BTC) - Opt-in Rewards",
+    "status": "operational"
+   },
+   {
+    "name": "Bitcoin (BTC) - Custody",
+    "status": "operational"
+   },
+   {
+    "name": "Bitcoin (BTC) - Bitcoin",
+    "status": "operational"
+   },
+   {
+    "name": "Solana (SOL) - Custody",
+    "status": "operational"
+   },
+   {
+    "name": "Solana (SOL) - Staking",
+    "status": "operational"
+   }
+  ]
+ },
+ "coinbase_summary": {
+  "incidents": [
+   {
+    "id": "nltyx398vxl0",
+    "name": "Paused Sends/Receives - Core DAO Network",
+    "status": "investigating",
+    "impact": "none",
+    "created_at": "2026-08-30T21:41:13.162-07:00",
+    "monitoring_at": null,
+    "resolved_at": null,
+    "scheduled_for": null,
+    "scheduled_until": null,
+    "incident_updates": [
+     {
+      "status": "investigating",
+      "created_at": "2026-08-30T21:41:13.233-07:00",
+      "body": "Core DAO sends and receives are temporarily paused. Buys, sells, converts, and fiat transactions are not affected. Our team is aware of this and will provide updates as soon as possible."
+     }
+    ],
+    "components": []
+   }
+  ],
+  "scheduled_maintenances": [],
+  "components": [
+   {
+    "name": "Coinbase - Website",
+    "status": "operational"
+   },
+   {
+    "name": "Bitcoin",
+    "status": "operational"
+   },
+   {
+    "name": "Credit & Debit Cards",
+    "status": "operational"
+   },
+   {
+    "name": "Proof of Address",
+    "status": "operational"
+   },
+   {
+    "name": "Dapp wallet",
+    "status": "operational"
+   },
+   {
+    "name": "Wallets",
+    "status": "operational"
+   }
+  ]
+ },
+ "okx_status": {
+  "code": "0",
+  "data": [
+   {
+    "begin": "1788500000000",
+    "end": "1788503600000",
+    "state": "scheduled",
+    "title": "OKX will suspend SOL deposits and withdrawals for Solana network upgrade",
+    "serviceType": "5"
+   }
+  ]
+ },
+ "kraken_system": {
+  "error": [],
+  "result": {
+   "status": "online",
+   "timestamp": "2026-09-03T03:12:05Z",
+   "upcoming_maintenance": [
+    {
+     "event_id": 25,
+     "expected_start_utc": "2026-09-03T07:00:00Z",
+     "expected_end_utc": "2026-09-03T07:10:00Z",
+     "phase": "reminder_24h",
+     "affected_services": [
+      "futures_rest",
+      "futures_ws"
+     ]
+    }
+   ]
+  }
+ }
+}

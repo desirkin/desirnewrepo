@@ -1,0 +1,352 @@
+// MEMORY-0 adapters. THIN, PURE, ONE-WAY: each takes a record an existing
+// sensor ALREADY writes (its JSONL event stream) and returns a canonical
+// envelope. No sensor is modified, imported, or called; inputs are never
+// mutated; nothing flows back. Names carry no direction the source did not
+// establish — an abnormal co-fire is an abnormal co-fire, never a prophecy.
+import { nowIso } from '../lib/time.js';
+import { envelope, sourceFingerprint } from './schema.js';
+
+const sec = (iso) => Math.floor(Date.parse(iso) / 1000);
+const SYMBOL_RE = /^[A-Z0-9]{1,15}$/;
+// canonicalize or refuse — a coin association is never invented (schema §symbol)
+const strip = (rec, ...keys) => {
+  const o = { ...rec };
+  for (const k of keys) delete o[k];
+  return o;
+};
+const canonSymbol = (s) => {
+  if (typeof s !== 'string') return null;
+  const c = s.toUpperCase().replace(/\.X$/, '');
+  return SYMBOL_RE.test(c) ? c : null;
+};
+
+const liveProv = (source, recordTs, observedTs) => ({
+  source,
+  sourceTs: recordTs,
+  availableTs: recordTs, // our own module wrote it: knowable at write time
+  retrievedTs: observedTs,
+  kind: 'live',
+  form: 'raw',
+});
+
+// ---------------------------------------------------------------------
+// A. WIDE EYE — survey/events.jsonl lines. One coherent observation per
+// event: zVol and zRet are two fields of ONE market observation, spanning
+// the MARKET_PRICE and MARKET_VOLUME families — never two confirmations.
+// ---------------------------------------------------------------------
+export function fromWideeyeEvent(rec, observedTs = nowIso()) {
+  const signal = rec.type === 'RIPPLE' || rec.type === 'MISSED';
+  const symbol = canonSymbol(rec.symbol);
+  return envelope({
+    sourceModule: 'WIDEEYE',
+    eventType: signal ? `WIDEEYE_${rec.type}` : rec.type === 'SWEEP_ERROR' ? 'WIDEEYE_SWEEP_ERROR' : 'WIDEEYE_STATUS',
+    ts: sec(rec.ts),
+    symbol,
+    families: signal ? ['MARKET_PRICE', 'MARKET_VOLUME'] : ['MARKET_PRICE'],
+    observationState: rec.type === 'SWEEP_ERROR' ? 'DEGRADED' : 'KNOWN',
+    payload: signal
+      ? {
+          verdict: rec.verdict,
+          zVol: rec.zVol,
+          zRet: rec.zRet,
+          extensionPct: rec.extension,
+          liquidityNote: rec.liquidityNote ?? null,
+          inDeepTape: rec.inDeepTape ?? null,
+        }
+      : { type: rec.type, detail: strip(rec, 'ts') },
+    dataAvailability: { zVol: rec.zVol !== undefined ? 'KNOWN' : 'UNAVAILABLE', zRet: rec.zRet !== undefined ? 'KNOWN' : 'UNAVAILABLE' },
+    provenance: liveProv('survey/events.jsonl (live wide eye)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'survey/events.jsonl'),
+  });
+}
+
+// ---------------------------------------------------------------------
+// B. RUMINT — rumint/events.jsonl lines. RUMOR/SOCIAL_ATTENTION evidence,
+// truthfully: a failed poll is UNAVAILABLE data, not bearish=false. No
+// rumor-propagation graph is inferred — the module does not know one.
+// ---------------------------------------------------------------------
+export function fromRumintEvent(rec, observedTs = nowIso()) {
+  const failed = rec.type === 'RUMINT_POLL_FAILED' || rec.type === 'RUMINT_UNAVAILABLE' || rec.type === 'RUMINT_CONTINUATION_FAILED';
+  // RUMINT-R1: expanded poll diagnostics ride through UNTOUCHED inside the
+  // payload detail — every null keeps its stated reason (zReason,
+  // accelerationReason, decision), so a 12-hour forensic query can answer
+  // "why no signal?" from durable Memory alone. Availability is read from
+  // the record's own reasons, never inferred from silence.
+  const zKnown = rec.zReason === 'KNOWN' || (rec.zReason === undefined && rec.z !== undefined && rec.z !== null);
+  const accelKnown = rec.accelerationReason === 'KNOWN' || (rec.accelerationReason === undefined && rec.acceleration !== undefined && rec.acceleration !== null);
+  return envelope({
+    sourceModule: 'RUMINT',
+    eventType: 'RUMOR_OBSERVATION',
+    ts: sec(rec.ts),
+    symbol: canonSymbol(rec.symbol),
+    families: ['RUMOR', 'SOCIAL_ATTENTION'],
+    observationState: failed ? 'UNAVAILABLE' : 'KNOWN',
+    payload: { type: rec.type, detail: strip(rec, 'ts') },
+    dataAvailability: {
+      chatterVelocity: failed ? 'UNAVAILABLE' : rec.velocity !== undefined || rec.z !== undefined ? 'KNOWN' : 'UNKNOWN',
+      zVelocity: failed ? 'UNAVAILABLE' : zKnown ? 'KNOWN' : rec.zReason ? 'UNAVAILABLE' : 'UNKNOWN',
+      acceleration: failed ? 'UNAVAILABLE' : accelKnown ? 'KNOWN' : rec.accelerationReason ? 'UNAVAILABLE' : 'UNKNOWN',
+    },
+    provenance: liveProv('rumint/events.jsonl (stocktwits chatter poller)', rec.ts, observedTs),
+    // RUMINT-R1 §43: polls, nominations and HYPED sessions carry semantic
+    // deterministic sourceEventIds — a pending replay of the exact prepared
+    // record keeps its exact identity, so restarts dedupe instead of
+    // minting second memories (fingerprint remains the fallback).
+    correlation: { eventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null, sourceEventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null },
+    sourceEventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null,
+    identity: sourceFingerprint(rec, 'rumint/events.jsonl'),
+  });
+}
+
+// ---------------------------------------------------------------------
+// C. GATEWAY — gateway/transitions.jsonl lines. The incident key is a
+// natural episode id: every transition of one incident shares eventId.
+// ---------------------------------------------------------------------
+export function fromGatewayTransition(rec, observedTs = nowIso()) {
+  return envelope({
+    sourceModule: 'GATEWAY',
+    eventType: 'GATEWAY_STATUS',
+    ts: sec(rec.observedAt),
+    symbol: null, // exchange infrastructure is not asset-specific; no coin is invented
+    families: ['EXCHANGE_INFRASTRUCTURE'],
+    observationState: 'KNOWN',
+    payload: strip(rec, 'observedAt'),
+    dataAvailability: { incidentStage: 'KNOWN' },
+    provenance: {
+      source: 'gateway/transitions.jsonl (statuspage collector)',
+      sourceTs: rec.announcedAt ?? 'UNKNOWN',
+      availableTs: rec.announcedAt ?? rec.observedAt,
+      retrievedTs: observedTs,
+      kind: 'live',
+      form: 'raw',
+    },
+    correlation: { eventId: rec.key ?? null, sourceEventId: rec.key ?? null },
+    sourceEventId: rec.key ? `${rec.key}:${rec.to ?? ''}:${rec.observedAt}` : null,
+    identity: sourceFingerprint(rec, 'gateway/transitions.jsonl'),
+  });
+}
+
+// ---------------------------------------------------------------------
+// D. TAPE — tape session snapshots.jsonl lines (already curated, bounded
+// summaries — never the raw order book firehose).
+// ---------------------------------------------------------------------
+export function fromTapeSnapshot(rec, observedTs = nowIso()) {
+  return envelope({
+    sourceModule: 'TAPE',
+    eventType: 'MARKET_SNAPSHOT',
+    ts: sec(rec.ts),
+    symbol: canonSymbol(rec.coin),
+    families: ['MARKET_PRICE', 'LIQUIDITY', 'ORDER_FLOW'],
+    // FAIL CLOSED (MEMORY-0A §7): LIVE (and legacy CLEAN) -> KNOWN; an
+    // explicit non-healthy state -> DEGRADED; ABSENT health is UNKNOWN —
+    // memory never infers health from the absence of health data.
+    observationState: rec.tapeState === 'LIVE' || rec.tapeState === 'CLEAN' ? 'KNOWN' : rec.tapeState === undefined ? 'UNKNOWN' : 'DEGRADED',
+    payload: strip(rec, 'ts', 'coin'),
+    dataAvailability: { book: rec.tapeState === 'LIVE' || rec.tapeState === 'CLEAN' ? 'KNOWN' : rec.tapeState === undefined ? 'UNKNOWN' : 'DEGRADED' },
+    provenance: liveProv('tape session snapshots.jsonl (kraken WS L2 features)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'tape/snapshots.jsonl'),
+  });
+}
+
+// ---------------------------------------------------------------------
+// E. COST — cost/evaluations.jsonl lines. Execution-quality CONTEXT only;
+// this grants nothing and prices nothing into action.
+// ---------------------------------------------------------------------
+export function fromCostEvaluation(rec, observedTs = nowIso()) {
+  return envelope({
+    sourceModule: 'COST',
+    eventType: 'EXECUTION_CONTEXT',
+    ts: sec(rec.ts),
+    symbol: canonSymbol(rec.coin),
+    families: ['EXECUTION_QUALITY'],
+    observationState: 'KNOWN',
+    payload: strip(rec, 'ts', 'coin'),
+    dataAvailability: { roundTripCost: Array.isArray(rec.rungs) && rec.rungs.length ? 'KNOWN' : 'UNKNOWN' },
+    provenance: liveProv('cost/evaluations.jsonl (execution cost model)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'cost/evaluations.jsonl'),
+  });
+}
+
+// ---------------------------------------------------------------------
+// F. STATE — state/transitions.jsonl (posture) and controls_log.jsonl.
+// Memory OBSERVES state; it can never cause a transition (no path exists).
+// ---------------------------------------------------------------------
+export function fromStateTransition(rec, observedTs = nowIso()) {
+  return envelope({
+    sourceModule: 'STATE',
+    eventType: 'STATE_CHANGE',
+    ts: sec(rec.ts),
+    symbol: null,
+    families: ['STATE_CONTROL'],
+    observationState: 'KNOWN',
+    payload: strip(rec, 'ts'),
+    dataAvailability: { posture: rec.to ? 'KNOWN' : 'UNKNOWN' },
+    provenance: liveProv('state/transitions.jsonl (posture machine)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'state/transitions.jsonl'),
+  });
+}
+
+// ---------------------------------------------------------------------
+// G. MICROSTRUCTURE — micro/observations.jsonl lines (MICRO-1). Order-flow
+// and liquidity evidence measured from aggregate L2 + direct Kraken taker
+// side. MARKET_PRICE joins the families only when the observation carries
+// an actual measured price-response window. Everything liquidity-shaped is
+// a PROXY (AGGREGATE_L2_UNATTRIBUTED) and stays one here. A sense, not a
+// strategy: nothing downstream may read this as permission.
+// ---------------------------------------------------------------------
+export function fromMicrostructureObservation(rec, observedTs = nowIso()) {
+  const hasPriceResponse =
+    rec.priceResponse && typeof rec.priceResponse === 'object'
+      ? Object.values(rec.priceResponse).some((w) => w && typeof w === 'object' && Number.isFinite(w.midReturnPct))
+      : false;
+  const proxyState = rec.absorptionProxy && typeof rec.absorptionProxy === 'object' ? rec.absorptionProxy.state : null;
+  // MICRO-1A: a TRANSITION observation carries deterministic transition
+  // keys tied to the transition itself (symbol|kind|side|anchor clock) —
+  // the same transition handled again collapses; a new one never can.
+  const firstTransition =
+    rec.emitReason?.kind === 'TRANSITION' && Array.isArray(rec.emitReason.transitions)
+      ? rec.emitReason.transitions[0] ?? null
+      : null;
+  return envelope({
+    sourceModule: 'MICROSTRUCTURE',
+    eventType: 'MICROSTRUCTURE_OBSERVATION',
+    ts: sec(rec.ts),
+    symbol: canonSymbol(rec.coin),
+    families: hasPriceResponse ? ['ORDER_FLOW', 'LIQUIDITY', 'MARKET_PRICE'] : ['ORDER_FLOW', 'LIQUIDITY'],
+    observationState: rec.bookState === 'FRESH' ? 'KNOWN' : rec.bookState === 'STALE' ? 'DEGRADED' : 'UNKNOWN',
+    payload: strip(rec, 'ts', 'coin'),
+    dataAvailability: {
+      aggressiveFlow: rec.flow ? 'KNOWN' : 'UNAVAILABLE',
+      priceResponse: hasPriceResponse ? 'KNOWN' : rec.bookState === 'STALE' ? 'STALE' : 'UNKNOWN',
+      depthPressure: rec.bookState === 'FRESH' ? 'KNOWN' : 'STALE',
+      recoveryAsymmetry: rec.recoveryAsymmetry50 && typeof rec.recoveryAsymmetry50 === 'object' ? 'KNOWN' : 'UNKNOWN',
+      absorptionProxy: proxyState === 'PRESENT' || proxyState === 'NOT_PRESENT' ? 'KNOWN' : proxyState === 'DEGRADED' ? 'DEGRADED' : 'UNAVAILABLE',
+    },
+    provenance: liveProv('micro/observations.jsonl (kraken WS v2 microstructure tracker, aggregate L2 unattributed)', rec.ts, observedTs),
+    correlation: { eventId: firstTransition?.transitionKey ?? null, sourceEventId: firstTransition?.transitionKey ?? null },
+    sourceEventId: firstTransition?.transitionKey ?? null,
+    identity: sourceFingerprint(rec, 'micro/observations.jsonl'),
+  });
+}
+
+// ---------------------------------------------------------------------
+// H. GOVERNANCE — governance/events.jsonl lines (GOV-1). A verified
+// decision process is changing: here is exactly what we know, when we knew
+// it, how complete the evidence is, and what remains unknown. Snapshot
+// records are OFF-CHAIN voting evidence; a passed vote is never execution
+// truth. One observation with several correlated governance metrics is
+// still ONE evidence family. Symbol comes only from the verified registry
+// (already resolved by the collector) — null is honest and allowed.
+// Proposal text is untrusted data carried as bounded strings, never
+// interpreted. A sense, not a strategy: zero trading authority.
+// ---------------------------------------------------------------------
+export function fromGovernanceEvent(rec, observedTs = nowIso()) {
+  const isObservation = rec.type === 'GOVERNANCE_OBSERVATION';
+  const quorumKnown = rec.quorum && typeof rec.quorum === 'object';
+  const traj = rec.trajectory && typeof rec.trajectory === 'object' ? rec.trajectory : null;
+  const conc = rec.voterConcentration && typeof rec.voterConcentration === 'object' ? rec.voterConcentration : null;
+  const providerNote =
+    rec.provider === 'TALLY'
+      ? 'governance/events.jsonl (tally api — INDEXED on-chain governance data, not direct chain verification)'
+      : 'governance/events.jsonl (snapshot hub graphql — OFF-CHAIN governance/voting evidence)';
+  return envelope({
+    sourceModule: 'GOVERNANCE',
+    eventType: 'GOVERNANCE_OBSERVATION',
+    ts: sec(rec.ts),
+    symbol: canonSymbol(rec.symbol), // registry-resolved or null; never guessed here
+    families: ['GOVERNANCE'],
+    observationState: isObservation ? 'KNOWN' : 'UNAVAILABLE',
+    // GOV-1B: `seq` is the collector's LOCAL source-log cursor, assigned at
+    // append time — stripping it keeps a legitimately re-appended owed
+    // record byte-equivalent here, so it deduplicates instead of colliding
+    payload: strip(rec, 'ts', 'seq'),
+    dataAvailability: {
+      proposalState: typeof rec.proposalState === 'string' ? 'KNOWN' : 'UNKNOWN',
+      voteTotals: rec.voteTotals && Number.isFinite(rec.voteTotals.scoresTotal) ? 'KNOWN' : 'UNKNOWN',
+      quorum: quorumKnown ? 'KNOWN' : 'UNKNOWN',
+      trajectory: traj ? 'KNOWN' : 'UNKNOWN',
+      voterConcentration: conc?.coverage === 'COMPLETE' ? 'KNOWN' : conc?.coverage === 'PARTIAL' ? 'DEGRADED' : 'UNAVAILABLE',
+      timelock: rec.provider === 'TALLY' && typeof rec.timelock === 'string' ? 'KNOWN' : 'UNKNOWN',
+      executionState: rec.provider === 'TALLY' && rec.provenance === 'INDEXED_BY_TALLY' ? 'KNOWN' : 'UNKNOWN',
+    },
+    provenance: {
+      source: providerNote,
+      sourceTs: rec.retrievedTs ?? rec.ts, // provider truth became knowable at retrieval
+      availableTs: rec.retrievedTs ?? rec.ts,
+      retrievedTs: observedTs,
+      kind: 'live',
+      form: 'raw',
+      collectorVersion: rec.collectorVersion ?? null,
+      mappingVersion: rec.mappingVersion ?? null,
+      coverage: rec.coverage ?? null,
+    },
+    // every observation of ONE proposal clusters under a stable event id;
+    // GOV-1A: the collector's deterministic sourceEventId anchors canonical
+    // identity, so a restart re-retrieving the same provider event never
+    // mints a second memory (fingerprint remains the fallback)
+    correlation: { eventId: rec.proposalId ? `${rec.provider}:${rec.spaceId ?? rec.governorId ?? '?'}:${rec.proposalId}` : null },
+    sourceEventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null,
+    identity: sourceFingerprint(rec, 'governance/events.jsonl'),
+  });
+}
+
+// ---------------------------------------------------------------------
+// I. RUMOR-2 — rumor2/events.jsonl lines (RUMOR-2A). Multi-source rumor
+// intelligence OBSERVATION evidence only: official-source observations,
+// deterministic claim-graph updates, valid serpent-evidence-1 packets,
+// provider failures, and honest withholdings. Every record's
+// sourceEventId is a semantic identity over immutable provider facts, so
+// a crash-window replay of the same official item collapses to ONE memory
+// instead of minting a second truth. NOTHING here maps to STRIKE,
+// eligibility, position, or execution — a claim is not a fact, and an
+// official announcement is not trading permission.
+// ---------------------------------------------------------------------
+export function fromRumor2Event(rec, observedTs = nowIso()) {
+  const failed = rec.type === 'RUMOR2_PROVIDER_FAILURE';
+  const withheld = rec.type === 'RUMOR2_WITHHELD';
+  return envelope({
+    sourceModule: 'RUMOR2',
+    eventType: typeof rec.type === 'string' && /^[A-Z][A-Z0-9_]*$/.test(rec.type) ? rec.type : 'RUMOR2_OBSERVATION',
+    ts: sec(rec.ts),
+    symbol: canonSymbol(rec.symbol), // present only on coin-bound claim/packet records; never invented
+    families: ['RUMOR', 'OFFICIAL_NEWS'],
+    // a provider failure is UNAVAILABLE evidence about that ear, not silence
+    observationState: failed ? 'UNAVAILABLE' : 'KNOWN',
+    payload: { type: rec.type, detail: strip(rec, 'ts') },
+    dataAvailability: {
+      sourceObservation: rec.type === 'RUMOR2_SOURCE_OBSERVED' || rec.type === 'RUMOR2_CLAIM_OBSERVED' ? 'KNOWN' : failed ? 'UNAVAILABLE' : 'UNKNOWN',
+      evidencePacket: rec.type === 'RUMOR2_PACKET' ? 'KNOWN' : withheld ? 'UNAVAILABLE' : 'UNKNOWN',
+    },
+    provenance: {
+      source: 'rumor2/events.jsonl (official-feed multi-source rumor collector)',
+      // point-in-time truth rides through: the publisher's clock stays the
+      // publisher's clock; Serpent's knowledge clock is when it fetched
+      sourceTs: rec.publishedTs ? new Date(rec.publishedTs).toISOString() : rec.ts,
+      availableTs: rec.ts,
+      retrievedTs: observedTs,
+      kind: 'live',
+      form: 'raw',
+    },
+    correlation: {
+      eventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null,
+      sourceEventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null,
+    },
+    sourceEventId: typeof rec.sourceEventId === 'string' ? rec.sourceEventId : null,
+    identity: sourceFingerprint(rec, 'rumor2/events.jsonl'),
+  });
+}
+
+export function fromControlAction(rec, observedTs = nowIso()) {
+  return envelope({
+    sourceModule: 'STATE',
+    eventType: 'CONTROL_ACTION',
+    ts: sec(rec.ts),
+    symbol: null,
+    families: ['STATE_CONTROL'],
+    observationState: 'KNOWN',
+    payload: strip(rec, 'ts'),
+    dataAvailability: { control: 'KNOWN' },
+    provenance: liveProv('state/controls_log.jsonl (human controls)', rec.ts, observedTs),
+    identity: sourceFingerprint(rec, 'state/controls_log.jsonl'),
+  });
+}

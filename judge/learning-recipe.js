@@ -1,0 +1,525 @@
+// JUDGE prospective-learning recipe V3 building block.
+//
+// This module is deliberately not wired into Judge or the promotion path yet. It closes the
+// consumer-side description of the six facts that the current Judge can actually prepare and
+// the one rank-only effect it could eventually consume. A version string alone is never the
+// recipe identity: every derivation, unit, support rule and clock basis is content-digested.
+// The source digests below are content identities, not provider authentication or proof that a
+// prospective store captured them at decision time. That external first-write chronology is a
+// later integration requirement; this isolated building block grants no publishability.
+import { digestOf, bookSnapshotError, shapeError, TRADE_SCHEMA } from '../execution/contract.js';
+import * as M from '../execution/money.js';
+import { FEATURE_VERSION, bookFacts, bidDepthWithinBps, indicatorBlock, validateBarBlock, flowImbalance, relativeVolume60 } from './features.js';
+import { COST_MODEL_VERSION } from './cost.js';
+import { RISK_VERSION } from './risk.js';
+import { STRATEGY_VERSION } from './setups.js';
+
+export const JUDGE_LEARNING_RECIPE_VERSION = 'judge-prepared-market-features-3';
+export const JUDGE_LEARNING_PREPARED_FACTS_VERSION = 'judge-prepared-learning-facts-1';
+export const JUDGE_LEARNING_CONSUMER_CONTRACT_VERSION = 'judge-prospective-consumer-1';
+export const JUDGE_LEARNING_CONSUMER_ID = 'COBRA_JUDGE_ADMISSION_BATCH_RANK';
+export const JUDGE_LEARNING_EFFECT_VERSION = 'judge-rank-effect-1';
+export const JUDGE_LEARNING_EFFECT_UNITS = 'REWARD_RISK_RATIO_POINTS';
+export const JUDGE_LEARNING_MAX_ABS_EFFECT = 0.15;
+export const JUDGE_LEARNING_MAX_LIFETIME_MS = 90 * 86_400_000;
+export const JUDGE_LEARNING_MAX_RAW_TRADES = 10_000;
+
+const HEX64 = /^[0-9a-f]{64}$/;
+const MARKET_SYMBOL = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,119}$/;
+const CANONICAL_COIN = /^[A-Z0-9][A-Z0-9.]{0,14}$/;
+const BAR_MS = 60_000;
+const FEATURE_NAMES = Object.freeze(['atrPct', 'bidDepthUsd10bps', 'fi15', 'fi60', 'rv60', 'spreadBps']);
+const FACT_KEYS = Object.freeze(['name', 'value', 'units', 'lookbackMs', 'sourceReferenceTs', 'ageMs', 'availability', 'reason', 'support']);
+const SUPPORT_KEYS = Object.freeze(['kind', 'continuous', 'startTs', 'endTs', 'classifiedFraction', 'sourceDigest', 'feedEpoch', 'receiptSequence']);
+const RECIPE_KEYS = Object.freeze(['featureRecipeVersion', 'upstreamVersions', 'decisionClock', 'features']);
+const FEATURE_RECIPE_KEYS = Object.freeze(['name', 'sourcePath', 'transform', 'units', 'lookbackMs', 'supportLaw', 'ageBasis', 'domain']);
+const DOMAIN_KEYS = Object.freeze(['min', 'max', 'minInclusive', 'maxInclusive']);
+const UPSTREAM_KEYS = Object.freeze(['marketFeatureVersion', 'strategyVersion', 'bookSnapshotVersion']);
+const DECISION_CLOCK_KEYS = Object.freeze(['field', 'basis']);
+const PREPARED_KEYS = Object.freeze(['preparedFactsVersion', 'featureRecipeVersion', 'featureRecipeDigest', 'decisionTs', 'marketIdentity', 'sourceEvidence', 'features', 'factsDigest']);
+const MARKET_IDENTITY_KEYS = Object.freeze(['symbol', 'canonicalCoin']);
+const SOURCE_EVIDENCE_KEYS = Object.freeze(['bookSnapshot', 'barEvidence', 'frozenIndicator', 'tradeEvidence']);
+const BAR_EVIDENCE_KEYS = Object.freeze(['featureVersion', 'symbol', 'canonicalCoin', 'bars', 'knownAtTs', 'evidenceDigest']);
+const BAR_KEYS = Object.freeze(['periodStartTs', 'periodEndTs', 'open', 'high', 'low', 'close', 'volumeQuote', 'volumeBase', 'closed']);
+const FROZEN_INDICATOR_KEYS = Object.freeze(['strategyVersion', 'triggerTs', 'blockDigest', 'referenceTs', 'atr14']);
+const TRADE_EVIDENCE_KEYS = Object.freeze(['coverage', 'trades', 'symbol', 'canonicalCoin', 'feedEpoch', 'knownAtCeilingTs', 'evidenceDigest']);
+const COVERAGE_EVIDENCE_KEYS = Object.freeze(['continuous', 'epoch', 'startTs', 'endTs', 'gapTs']);
+const CONTRACT_KEYS = Object.freeze(['consumerContractVersion', 'consumerId', 'policyDigest', 'featureRecipe', 'featureRecipeDigest', 'eligibility', 'effect', 'validationSemantics', 'maxSizeUsd', 'activationLifetimeMs', 'degradeRule', 'consumerContractDigest']);
+const ELIGIBILITY_KEYS = Object.freeze(['maxSpreadBps', 'minBidDepthUsd10bps', 'minAtrPct', 'maxAtrPct', 'maxFactAgeMs', 'requiredFeatures']);
+const EFFECT_KEYS = Object.freeze(['effectVersion', 'axis', 'target', 'targetProducerVersion', 'rankingLawVersion', 'transform', 'magnitude', 'units', 'magnitudeRounding']);
+const VALIDATION_KEYS = Object.freeze(['experimentalUnit', 'baselineArm', 'candidateArm', 'decisionOutput', 'noOrderAuthority']);
+const DEGRADE_KEYS = Object.freeze(['minGroups', 'adverseFractionAbove', 'consecutiveWindows']);
+
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+  && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
+const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+const nonNegative = (v) => finite(v) && v >= 0;
+const ts = (v) => Number.isSafeInteger(v) && v > 0;
+const exactKeys = (v, expected) => {
+  if (!isPlainObject(v)) return 'not a plain object';
+  const actual = Object.keys(v);
+  for (const key of actual) if (!expected.includes(key)) return `unknown key ${key}`;
+  for (const key of expected) if (!Object.hasOwn(v, key)) return `missing key ${key}`;
+  return null;
+};
+const deepFreeze = (v) => {
+  if (v === null || typeof v !== 'object' || Object.isFrozen(v)) return v;
+  Object.freeze(v);
+  for (const key of Object.keys(v)) deepFreeze(v[key]);
+  return v;
+};
+const clone = (v) => JSON.parse(JSON.stringify(v));
+const numeric = (v) => {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v !== 'string' || v.trim() === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+const normalizedFour = (v) => {
+  if (!finite(v)) return null;
+  const n = Number(v.toFixed(4));
+  return Object.is(n, -0) ? 0 : n;
+};
+const sameNumber = (a, b) => finite(a) && finite(b) && Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+const closeWithin = (a, b, tolerance) => finite(a) && finite(b) && Math.abs(a - b) <= tolerance;
+
+const RECIPE_FEATURES = Object.freeze([
+  Object.freeze({
+    name: 'atrPct', sourcePath: 'sourceEvidence.barEvidence.bars + sourceEvidence.frozenIndicator + sourceEvidence.bookSnapshot',
+    transform: 'PERCENT_100_X_WILDER_ATR14_OVER_DECISION_MID', units: 'PERCENT_OF_DECISION_MID',
+    lookbackMs: 61 * BAR_MS, supportLaw: '61_CONTIGUOUS_CLOSED_1M_BARS_ENDING_AT_REFERENCE_TS',
+    ageBasis: 'decisionTs-frozen.referenceTs', domain: Object.freeze({ min: 0, max: null, minInclusive: false, maxInclusive: null }),
+  }),
+  Object.freeze({
+    name: 'bidDepthUsd10bps', sourcePath: 'sourceEvidence.bookSnapshot.bids', transform: 'SUM_BID_PRICE_X_QTY_WITHIN_10BPS_OF_MID',
+    units: 'USD_QUOTE_NOTIONAL_BID_SIDE_WITHIN_10BPS_OF_MID', lookbackMs: 0,
+    supportLaw: 'SYNCED_TWO_SIDED_BOOK_POINT_IN_TIME', ageBasis: 'fast.bookAgeMs',
+    domain: Object.freeze({ min: 0, max: null, minInclusive: true, maxInclusive: null }),
+  }),
+  Object.freeze({
+    name: 'fi15', sourcePath: 'sourceEvidence.tradeEvidence.trades[D-15s,D)', transform: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION_FROM_RAW_TRADES',
+    units: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION', lookbackMs: 15_000,
+    supportLaw: 'CONTINUOUS_TRADE_COVERAGE_RESET_AFTER_ANY_RETAINED_GAP_AT_OR_BEFORE_START_AND_CLASSIFIED_QUOTE_NOTIONAL_GTE_0_95', ageBasis: 'decisionTs-fast.fi15.endTs',
+    domain: Object.freeze({ min: -1, max: 1, minInclusive: true, maxInclusive: true }),
+  }),
+  Object.freeze({
+    name: 'fi60', sourcePath: 'sourceEvidence.tradeEvidence.trades[D-60s,D)', transform: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION_FROM_RAW_TRADES',
+    units: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION', lookbackMs: 60_000,
+    supportLaw: 'CONTINUOUS_TRADE_COVERAGE_RESET_AFTER_ANY_RETAINED_GAP_AT_OR_BEFORE_START_AND_CLASSIFIED_QUOTE_NOTIONAL_GTE_0_95', ageBasis: 'decisionTs-fast.fi60.endTs',
+    domain: Object.freeze({ min: -1, max: 1, minInclusive: true, maxInclusive: true }),
+  }),
+  Object.freeze({
+    name: 'rv60', sourcePath: 'sourceEvidence.tradeEvidence.trades[E-21m,E)', transform: 'LAST_CLOSED_60S_QUOTE_NOTIONAL_OVER_MEDIAN_PRIOR_20_FROM_RAW_TRADES',
+    units: 'RATIO_LAST_CLOSED_60S_QUOTE_NOTIONAL_TO_MEDIAN_PRIOR_20', lookbackMs: 21 * BAR_MS,
+    supportLaw: 'CONTINUOUS_21_COMPLETE_1M_TRADE_WINDOWS_RESET_AFTER_ANY_RETAINED_GAP_AT_OR_BEFORE_START', ageBasis: 'decisionTs-fast.rv60.E',
+    domain: Object.freeze({ min: 0, max: null, minInclusive: true, maxInclusive: null }),
+  }),
+  Object.freeze({
+    name: 'spreadBps', sourcePath: 'sourceEvidence.bookSnapshot.bestBid + bestAsk', transform: '10000_X_BEST_ASK_MINUS_BEST_BID_OVER_MID',
+    units: 'BASIS_POINTS_OF_MID', lookbackMs: 0, supportLaw: 'SYNCED_TWO_SIDED_BOOK_POINT_IN_TIME',
+    ageBasis: 'fast.bookAgeMs', domain: Object.freeze({ min: 0, max: null, minInclusive: true, maxInclusive: null }),
+  }),
+]);
+
+export const JUDGE_LEARNING_FEATURE_RECIPE = deepFreeze({
+  featureRecipeVersion: JUDGE_LEARNING_RECIPE_VERSION,
+  upstreamVersions: { marketFeatureVersion: FEATURE_VERSION, strategyVersion: STRATEGY_VERSION, bookSnapshotVersion: 'execution-book-snapshot-1' },
+  decisionClock: { field: 'decisionTs', basis: 'LOCAL_RECEIPT_DECISION_CLOCK_MS' },
+  features: RECIPE_FEATURES,
+});
+export const JUDGE_LEARNING_FEATURE_RECIPE_DIGEST = digestOf(JUDGE_LEARNING_FEATURE_RECIPE);
+export const judgeLearningFeatureRecipeDigestOf = (recipe) => digestOf(recipe);
+
+export function judgeLearningFeatureRecipeError(recipe) {
+  const top = exactKeys(recipe, RECIPE_KEYS); if (top) return `feature recipe: ${top}`;
+  if (recipe.featureRecipeVersion !== JUDGE_LEARNING_RECIPE_VERSION) return 'feature recipe: unsupported version';
+  const upstream = exactKeys(recipe.upstreamVersions, UPSTREAM_KEYS); if (upstream) return `feature recipe upstream: ${upstream}`;
+  if (recipe.upstreamVersions.marketFeatureVersion !== FEATURE_VERSION || recipe.upstreamVersions.strategyVersion !== STRATEGY_VERSION || recipe.upstreamVersions.bookSnapshotVersion !== 'execution-book-snapshot-1') return 'feature recipe: upstream version mismatch';
+  const clock = exactKeys(recipe.decisionClock, DECISION_CLOCK_KEYS); if (clock) return `feature recipe decision clock: ${clock}`;
+  if (recipe.decisionClock.field !== 'decisionTs' || recipe.decisionClock.basis !== 'LOCAL_RECEIPT_DECISION_CLOCK_MS') return 'feature recipe: decision clock mismatch';
+  if (!Array.isArray(recipe.features) || recipe.features.length !== FEATURE_NAMES.length) return 'feature recipe: exact six-feature set required';
+  const names = recipe.features.map((f) => f?.name);
+  if (new Set(names).size !== names.length) return 'feature recipe: duplicate feature name';
+  if (names.some((name) => !FEATURE_NAMES.includes(name))) return 'feature recipe: unknown feature name';
+  if (names.some((name, i) => name !== FEATURE_NAMES[i])) return 'feature recipe: features not in canonical order';
+  for (let i = 0; i < recipe.features.length; i += 1) {
+    const f = recipe.features[i]; const shape = exactKeys(f, FEATURE_RECIPE_KEYS); if (shape) return `feature recipe ${FEATURE_NAMES[i]}: ${shape}`;
+    const domain = exactKeys(f.domain, DOMAIN_KEYS); if (domain) return `feature recipe ${FEATURE_NAMES[i]} domain: ${domain}`;
+  }
+  if (digestOf(recipe) !== JUDGE_LEARNING_FEATURE_RECIPE_DIGEST) return 'feature recipe: content differs from canonical derivations';
+  return null;
+}
+
+const definition = (name) => RECIPE_FEATURES.find((f) => f.name === name);
+const support = (kind, { continuous = null, startTs = null, endTs = null, classifiedFraction = null, sourceDigest = null, feedEpoch = null, receiptSequence = null } = {}) => ({ kind, continuous, startTs, endTs, classifiedFraction, sourceDigest, feedEpoch, receiptSequence });
+const unavailable = (name, reason, factSupport = support('UNPROVEN')) => {
+  const d = definition(name);
+  return { name, value: null, units: d.units, lookbackMs: d.lookbackMs, sourceReferenceTs: null, ageMs: null, availability: 'UNAVAILABLE', reason, support: factSupport };
+};
+const known = (name, value, sourceReferenceTs, decisionTs, factSupport) => {
+  const d = definition(name);
+  return { name, value, units: d.units, lookbackMs: d.lookbackMs, sourceReferenceTs, ageMs: decisionTs - sourceReferenceTs, availability: 'KNOWN', reason: null, support: factSupport };
+};
+const nonNegativeTs = (v) => Number.isSafeInteger(v) && v >= 0;
+const retainedGapIsHistorical = (coverage) => coverage.gapTs === null
+  || (nonNegativeTs(coverage.gapTs) && coverage.gapTs <= coverage.startTs);
+const coverageProves = (coverage, startTs, endTs) => isPlainObject(coverage) && coverage.continuous === true
+  && ts(coverage.startTs) && ts(coverage.endTs) && coverage.startTs < coverage.endTs
+  && retainedGapIsHistorical(coverage) && coverage.startTs <= startTs && coverage.endTs >= endTs;
+
+const selected = (v, keys) => {
+  if (!isPlainObject(v)) return null;
+  return Object.fromEntries(keys.map((key) => [key, Object.hasOwn(v, key) ? v[key] : null]));
+};
+const tradeEvidenceDigestOf = (e) => digestOf({ coverage: e.coverage, trades: e.trades, symbol: e.symbol, canonicalCoin: e.canonicalCoin, feedEpoch: e.feedEpoch, knownAtCeilingTs: e.knownAtCeilingTs });
+function rawTradeWindowError(input, decisionTs) {
+  if (!isPlainObject(input) || exactKeys(input, ['coverage', 'trades'])) return 'input shape malformed';
+  const coverage = input.coverage; const ck = exactKeys(coverage, COVERAGE_EVIDENCE_KEYS); if (ck) return `coverage ${ck}`;
+  if (coverage.continuous !== true || !Number.isSafeInteger(coverage.epoch) || coverage.epoch < 0 || !ts(coverage.startTs) || !ts(coverage.endTs) || coverage.startTs >= coverage.endTs || coverage.endTs !== decisionTs || !retainedGapIsHistorical(coverage)) return 'coverage is not continuous through decisionTs after its retained gap';
+  if (!Array.isArray(input.trades) || input.trades.length > JUDGE_LEARNING_MAX_RAW_TRADES) return 'raw trade window exceeds bound or is not an array';
+  let symbol = null; let coin = null; let priorReceiptTs = null; let priorSequence = null; const identities = new Set();
+  for (let i = 0; i < input.trades.length; i += 1) {
+    const trade = input.trades[i]; const shape = shapeError(trade, TRADE_SCHEMA, `trade[${i}]`); if (shape) return shape;
+    if (trade.feedEpoch !== coverage.epoch) return `trade[${i}] epoch mismatch`;
+    if (trade.receiptTs > decisionTs || trade.eventTs > trade.receiptTs) return `trade[${i}] was not known by decisionTs`;
+    if (trade.receiptTs < coverage.startTs) return `trade[${i}] precedes the continuous coverage epoch`;
+    if (priorReceiptTs !== null && (trade.receiptTs < priorReceiptTs || trade.receiptSequence <= priorSequence)) return `trade[${i}] receipt order is not strictly increasing`;
+    if (M.mul(trade.price, trade.qty) !== trade.quoteNotional) return `trade[${i}] quote notional mismatch`;
+    symbol ??= trade.symbol; coin ??= trade.canonicalCoin;
+    if (trade.symbol !== symbol || trade.canonicalCoin !== coin) return `trade[${i}] mixed market identity`;
+    const identity = trade.nativeTradeId ?? `${trade.eventTs}|${trade.price}|${trade.qty}|${trade.side}`;
+    if (identities.has(identity)) return `trade[${i}] duplicate identity`;
+    identities.add(identity); priorReceiptTs = trade.receiptTs; priorSequence = trade.receiptSequence;
+  }
+  return null;
+}
+function sealTradeEvidence(input, decisionTs) {
+  if (rawTradeWindowError(input, decisionTs)) return null;
+  const coverage = clone(input.coverage); const trades = clone(input.trades);
+  const first = trades[0] ?? null;
+  const body = {
+    coverage,
+    trades,
+    symbol: first?.symbol ?? null,
+    canonicalCoin: first?.canonicalCoin ?? null,
+    feedEpoch: coverage.epoch,
+    knownAtCeilingTs: trades.length ? trades[trades.length - 1].receiptTs : coverage.endTs,
+  };
+  return { ...body, evidenceDigest: digestOf(body) };
+}
+const normalizeFrozenIndicator = (frozen, decisionTs) => {
+  const out = selected(frozen, FROZEN_INDICATOR_KEYS);
+  if (!out || out.strategyVersion !== STRATEGY_VERSION || !ts(out.triggerTs) || out.triggerTs > decisionTs || !ts(out.referenceTs) || out.referenceTs > out.triggerTs || !HEX64.test(String(out.blockDigest ?? '')) || numeric(out.atr14) === null || numeric(out.atr14) <= 0) return null;
+  return out;
+};
+const validBookSnapshot = (snapshot, decisionTs) => isPlainObject(snapshot) && bookSnapshotError(snapshot) === null
+  && snapshot.synced === true && snapshot.crcVerified === true && snapshot.receiptTs <= decisionTs
+  && (snapshot.sourceTs === null || snapshot.sourceTs <= decisionTs);
+const normalizeBookSnapshot = (snapshot, decisionTs) => validBookSnapshot(snapshot, decisionTs) ? clone(snapshot) : null;
+const barEvidenceDigestOf = (e) => digestOf({ featureVersion: e.featureVersion, symbol: e.symbol, canonicalCoin: e.canonicalCoin, bars: e.bars, knownAtTs: e.knownAtTs });
+const sealBarEvidence = (input, frozen, decisionTs) => {
+  if (!isPlainObject(input) || input.featureVersion !== FEATURE_VERSION || !MARKET_SYMBOL.test(String(input.symbol ?? '')) || !CANONICAL_COIN.test(String(input.canonicalCoin ?? '')) || !Array.isArray(input.bars) || !Array.isArray(input.knownAtTs) || input.bars.length !== 61 || input.knownAtTs.length !== 61 || frozen === null) return null;
+  const bars = clone(input.bars); const knownAtTs = [...input.knownAtTs];
+  if (bars.some((bar) => exactKeys(bar, BAR_KEYS) !== null)) return null;
+  const valid = validateBarBlock(bars, { referenceTs: decisionTs }); if (!valid.ok) return null;
+  if (knownAtTs.some((knownAt, i) => !ts(knownAt) || knownAt < bars[i].periodEndTs || knownAt > frozen.triggerTs || (i > 0 && knownAt < knownAtTs[i - 1]))) return null;
+  const derived = indicatorBlock(bars, { referenceTs: decisionTs });
+  if (derived.blockDigest !== frozen.blockDigest || derived.referenceTs !== frozen.referenceTs || !sameNumber(derived.atr14, numeric(frozen.atr14))) return null;
+  const body = { featureVersion: FEATURE_VERSION, symbol: input.symbol, canonicalCoin: input.canonicalCoin, bars, knownAtTs };
+  return { ...body, evidenceDigest: digestOf(body) };
+};
+
+function marketIdentityOf(sourceEvidence) {
+  const candidates = [];
+  if (sourceEvidence.bookSnapshot !== null) candidates.push({ symbol: sourceEvidence.bookSnapshot.symbol, canonicalCoin: sourceEvidence.bookSnapshot.canonicalCoin });
+  if (sourceEvidence.tradeEvidence !== null && sourceEvidence.tradeEvidence.symbol !== null) candidates.push({ symbol: sourceEvidence.tradeEvidence.symbol, canonicalCoin: sourceEvidence.tradeEvidence.canonicalCoin });
+  if (sourceEvidence.barEvidence !== null) candidates.push({ symbol: sourceEvidence.barEvidence.symbol, canonicalCoin: sourceEvidence.barEvidence.canonicalCoin });
+  if (!candidates.length) return { identity: null, error: null };
+  const identity = candidates[0];
+  if (candidates.some((candidate) => candidate.symbol !== identity.symbol || candidate.canonicalCoin !== identity.canonicalCoin)) return { identity: null, error: 'CROSS_SOURCE_MARKET_IDENTITY_MISMATCH' };
+  return { identity, error: null };
+}
+
+function flowFact(name, source, coverage, decisionTs, lookbackMs, rawEvidence) {
+  const factSupport = support('CONTINUOUS_TRADE', {
+    continuous: coverage?.continuous === true,
+    startTs: ts(coverage?.startTs) ? coverage.startTs : null,
+    endTs: ts(coverage?.endTs) ? coverage.endTs : null,
+    classifiedFraction: finite(source?.classifiedFraction) ? source.classifiedFraction : null,
+    sourceDigest: rawEvidence?.evidenceDigest ?? null,
+    feedEpoch: rawEvidence?.feedEpoch ?? null,
+    receiptSequence: rawEvidence?.trades?.length ? rawEvidence.trades[rawEvidence.trades.length - 1].receiptSequence : null,
+  });
+  if (!isPlainObject(source) || source.state !== 'KNOWN' || !finite(source.fi)) return unavailable(name, 'SOURCE_UNAVAILABLE', factSupport);
+  if (!ts(source.startTs) || !ts(source.endTs) || source.startTs !== decisionTs - lookbackMs || source.endTs !== decisionTs) return unavailable(name, 'WINDOW_CLOCK_MISMATCH', factSupport);
+  if (!coverageProves(coverage, source.startTs, source.endTs) || coverage.endTs > decisionTs) return unavailable(name, 'TRADE_COVERAGE_INCOMPLETE', factSupport);
+  if (!Number.isSafeInteger(source.count) || source.count < 1 || !finite(source.classifiedFraction) || source.classifiedFraction < 0.95 || source.classifiedFraction > 1) return unavailable(name, 'CLASSIFICATION_COVERAGE_INCOMPLETE', factSupport);
+  const buy = numeric(source.buy); const sell = numeric(source.sell); const unknown = numeric(source.unknown);
+  if (buy === null || sell === null || unknown === null || buy < 0 || sell < 0 || unknown < 0 || buy + sell <= 0) return unavailable(name, 'SOURCE_COMPONENTS_UNAVAILABLE', factSupport);
+  const recomputedClassified = (buy + sell) / (buy + sell + unknown);
+  const recomputedFi = (buy - sell) / (buy + sell);
+  // features.js emits classifiedFraction at 6 decimals and fi at 8 decimals.
+  if (!closeWithin(source.classifiedFraction, recomputedClassified, 1e-6) || !closeWithin(source.fi, recomputedFi, 1e-8)) return unavailable(name, 'SOURCE_DERIVATION_MISMATCH', factSupport);
+  if (source.fi < -1 || source.fi > 1) return unavailable(name, 'VALUE_OUT_OF_DOMAIN', factSupport);
+  return known(name, source.fi, source.endTs, decisionTs, factSupport);
+}
+
+function rvFact(source, coverage, decisionTs, rawEvidence) {
+  const E = Math.floor(decisionTs / BAR_MS) * BAR_MS;
+  const factSupport = support('CONTINUOUS_TRADE', {
+    continuous: coverage?.continuous === true,
+    startTs: ts(coverage?.startTs) ? coverage.startTs : null,
+    endTs: ts(coverage?.endTs) ? coverage.endTs : null,
+    sourceDigest: rawEvidence?.evidenceDigest ?? null,
+    feedEpoch: rawEvidence?.feedEpoch ?? null,
+    receiptSequence: rawEvidence?.trades?.length ? rawEvidence.trades[rawEvidence.trades.length - 1].receiptSequence : null,
+  });
+  if (!isPlainObject(source) || source.state !== 'KNOWN' || !finite(source.rv60)) return unavailable('rv60', 'SOURCE_UNAVAILABLE', factSupport);
+  if (source.E !== E || source.baselineWindows !== 20 || source.completedMinuteDelayMs !== decisionTs - E) return unavailable('rv60', 'WINDOW_CLOCK_MISMATCH', factSupport);
+  if (!coverageProves(coverage, E - 21 * BAR_MS, E) || coverage.endTs > decisionTs) return unavailable('rv60', 'TRADE_COVERAGE_INCOMPLETE', factSupport);
+  const numerator = numeric(source.numerator); const baseline = numeric(source.baseline);
+  if (numerator === null || numerator < 0 || baseline === null || baseline <= 0) return unavailable('rv60', 'SOURCE_COMPONENTS_UNAVAILABLE', factSupport);
+  // features.js emits rv60 at 8 decimals.
+  if (!closeWithin(source.rv60, numerator / baseline, 1e-8)) return unavailable('rv60', 'SOURCE_DERIVATION_MISMATCH', factSupport);
+  if (source.rv60 < 0) return unavailable('rv60', 'VALUE_OUT_OF_DOMAIN', factSupport);
+  return known('rv60', source.rv60, E, decisionTs, factSupport);
+}
+
+export const judgeLearningPreparedFactsDigestOf = (facts) => {
+  if (!isPlainObject(facts)) return digestOf(facts);
+  const body = { ...facts }; delete body.factsDigest;
+  return digestOf(body);
+};
+
+function deriveFeatures(sourceEvidence, decisionTs) {
+  const trade = sourceEvidence.tradeEvidence;
+  const coverage = trade?.coverage ?? null; const trades = trade?.trades ?? [];
+  const rvSource = trade ? relativeVolume60(trades, decisionTs, coverage) : null;
+  const fi15Source = trade ? flowImbalance(trades, decisionTs - 15_000, decisionTs) : null;
+  const fi60Source = trade ? flowImbalance(trades, decisionTs - 60_000, decisionTs) : null;
+  const rv60 = rvFact(rvSource, coverage, decisionTs, trade);
+  const fi15 = flowFact('fi15', fi15Source, coverage, decisionTs, 15_000, trade);
+  const fi60 = flowFact('fi60', fi60Source, coverage, decisionTs, 60_000, trade);
+  const snapshot = sourceEvidence.bookSnapshot;
+  let spreadBps = unavailable('spreadBps', 'BOOK_EVIDENCE_UNAVAILABLE', support('POINT_IN_TIME_BOOK'));
+  let bidDepth = unavailable('bidDepthUsd10bps', 'BOOK_EVIDENCE_UNAVAILABLE', support('POINT_IN_TIME_BOOK'));
+  let midpoint = null;
+  if (snapshot !== null && validBookSnapshot(snapshot, decisionTs)) {
+    const book = bookFacts(snapshot); const depth = bidDepthWithinBps(snapshot, 10);
+    midpoint = numeric(book?.mid);
+    const bid = numeric(book?.bestBid); const ask = numeric(book?.bestAsk); const depthNumber = numeric(depth);
+    const point = support('POINT_IN_TIME_BOOK', { startTs: snapshot.receiptTs, endTs: snapshot.receiptTs, sourceDigest: snapshot.digest, feedEpoch: snapshot.feedEpoch, receiptSequence: snapshot.receiptSequence });
+    if (midpoint !== null && midpoint > 0 && bid !== null && ask !== null && ask > bid) {
+      spreadBps = known('spreadBps', (ask - bid) / midpoint * 10_000, snapshot.receiptTs, decisionTs, point);
+      bidDepth = depthNumber !== null && depthNumber >= 0 ? known('bidDepthUsd10bps', depthNumber, snapshot.receiptTs, decisionTs, point) : unavailable('bidDepthUsd10bps', 'BID_DEPTH_UNAVAILABLE', point);
+    }
+  }
+  let atrPct = unavailable('atrPct', 'BAR_EVIDENCE_UNAVAILABLE', support('CONTIGUOUS_CLOSED_BARS'));
+  const barEvidence = sourceEvidence.barEvidence; const frozen = sourceEvidence.frozenIndicator;
+  if (barEvidence !== null && frozen !== null && midpoint !== null) {
+    try {
+      const derived = indicatorBlock(barEvidence.bars, { referenceTs: decisionTs }); const atr = numeric(frozen.atr14);
+      const clocksKnown = barEvidence.knownAtTs.every((knownAt, i) => knownAt >= barEvidence.bars[i].periodEndTs && knownAt <= frozen.triggerTs);
+      if (clocksKnown && derived.featureVersion === FEATURE_VERSION && derived.blockDigest === frozen.blockDigest && derived.referenceTs === frozen.referenceTs && sameNumber(derived.atr14, atr)) {
+        atrPct = known('atrPct', atr / midpoint * 100, frozen.referenceTs, decisionTs, support('CONTIGUOUS_CLOSED_BARS', { continuous: true, startTs: barEvidence.bars[0].periodStartTs, endTs: frozen.referenceTs, sourceDigest: barEvidence.evidenceDigest }));
+      }
+    } catch { /* malformed evidence stays unavailable */ }
+  }
+  return { atrPct, bidDepthUsd10bps: bidDepth, fi15, fi60, rv60, spreadBps };
+}
+
+export function buildJudgeLearningPreparedFacts({ frozen, decisionTs, bookSnapshot = null, barEvidence = null, tradeEvidence = null } = {}) {
+  if (!ts(decisionTs)) throw new TypeError('decisionTs must be a positive safe-integer timestamp');
+  const frozenIndicator = normalizeFrozenIndicator(frozen, decisionTs);
+  const sourceEvidence = {
+    bookSnapshot: normalizeBookSnapshot(bookSnapshot, decisionTs),
+    barEvidence: sealBarEvidence(barEvidence, frozenIndicator, decisionTs),
+    frozenIndicator,
+    tradeEvidence: sealTradeEvidence(tradeEvidence, decisionTs),
+  };
+  const market = marketIdentityOf(sourceEvidence);
+  if (market.error) throw new TypeError(market.error);
+  const features = deriveFeatures(sourceEvidence, decisionTs);
+  const body = {
+    preparedFactsVersion: JUDGE_LEARNING_PREPARED_FACTS_VERSION,
+    featureRecipeVersion: JUDGE_LEARNING_RECIPE_VERSION,
+    featureRecipeDigest: JUDGE_LEARNING_FEATURE_RECIPE_DIGEST,
+    decisionTs,
+    marketIdentity: market.identity,
+    sourceEvidence,
+    features,
+  };
+  return deepFreeze({ ...body, factsDigest: digestOf(body) });
+}
+
+function sourceEvidenceError(sourceEvidence, decisionTs, marketIdentity) {
+  const top = exactKeys(sourceEvidence, SOURCE_EVIDENCE_KEYS); if (top) return top;
+  const book = sourceEvidence.bookSnapshot;
+  if (book !== null && !validBookSnapshot(book, decisionTs)) return 'book snapshot invalid, future, unsynced or unverified';
+  const frozen = sourceEvidence.frozenIndicator;
+  if (frozen !== null) {
+    const fk = exactKeys(frozen, FROZEN_INDICATOR_KEYS); if (fk) return `frozen indicator ${fk}`;
+    if (frozen.strategyVersion !== STRATEGY_VERSION || !ts(frozen.triggerTs) || frozen.triggerTs > decisionTs || !ts(frozen.referenceTs) || frozen.referenceTs > frozen.triggerTs || !HEX64.test(String(frozen.blockDigest ?? '')) || numeric(frozen.atr14) === null || numeric(frozen.atr14) <= 0) return 'frozen indicator malformed or future';
+  }
+  const bar = sourceEvidence.barEvidence;
+  if (bar !== null) {
+    const bk = exactKeys(bar, BAR_EVIDENCE_KEYS); if (bk) return `bar evidence ${bk}`;
+    if (frozen === null || bar.featureVersion !== FEATURE_VERSION || !MARKET_SYMBOL.test(String(bar.symbol ?? '')) || !CANONICAL_COIN.test(String(bar.canonicalCoin ?? '')) || !Array.isArray(bar.bars) || !Array.isArray(bar.knownAtTs) || bar.bars.length !== 61 || bar.knownAtTs.length !== 61 || !HEX64.test(bar.evidenceDigest) || barEvidenceDigestOf(bar) !== bar.evidenceDigest) return 'bar evidence shape/digest/market identity mismatch';
+    if (bar.bars.some((row) => exactKeys(row, BAR_KEYS) !== null)) return 'bar evidence row schema not closed';
+    const block = validateBarBlock(bar.bars, { referenceTs: decisionTs }); if (!block.ok) return `bar evidence ${block.reason}`;
+    if (bar.knownAtTs.some((knownAt, i) => !ts(knownAt) || knownAt < bar.bars[i].periodEndTs || knownAt > frozen.triggerTs || (i > 0 && knownAt < bar.knownAtTs[i - 1]))) return 'bar evidence knownAt clock malformed or after trigger';
+    const derived = indicatorBlock(bar.bars, { referenceTs: decisionTs });
+    if (derived.blockDigest !== frozen.blockDigest || derived.referenceTs !== frozen.referenceTs || !sameNumber(derived.atr14, numeric(frozen.atr14))) return 'bar evidence does not reproduce frozen indicator';
+  }
+  const trade = sourceEvidence.tradeEvidence;
+  if (trade !== null) {
+    const tk = exactKeys(trade, TRADE_EVIDENCE_KEYS); if (tk) return `trade evidence ${tk}`;
+    if (rawTradeWindowError({ coverage: trade.coverage, trades: trade.trades }, decisionTs)) return 'trade evidence raw window/chronology invalid';
+    const first = trade.trades[0] ?? null;
+    if (trade.symbol !== (first?.symbol ?? null) || trade.canonicalCoin !== (first?.canonicalCoin ?? null) || trade.feedEpoch !== trade.coverage.epoch || trade.knownAtCeilingTs !== (trade.trades.length ? trade.trades[trade.trades.length - 1].receiptTs : trade.coverage.endTs)) return 'trade evidence identity/knownAt mismatch';
+    if (!HEX64.test(trade.evidenceDigest) || tradeEvidenceDigestOf(trade) !== trade.evidenceDigest) return 'trade evidence digest mismatch';
+  }
+  const market = marketIdentityOf(sourceEvidence); if (market.error) return market.error;
+  if (marketIdentity === null) { if (market.identity !== null) return 'prepared market identity missing'; }
+  else {
+    const mk = exactKeys(marketIdentity, MARKET_IDENTITY_KEYS); if (mk) return `prepared market identity ${mk}`;
+    if (!MARKET_SYMBOL.test(String(marketIdentity.symbol ?? '')) || !CANONICAL_COIN.test(String(marketIdentity.canonicalCoin ?? ''))) return 'prepared market identity malformed';
+    if (market.identity === null || market.identity.symbol !== marketIdentity.symbol || market.identity.canonicalCoin !== marketIdentity.canonicalCoin) return 'prepared market identity does not match evidence';
+  }
+  return null;
+}
+
+function factError(f, expected, decisionTs) {
+  const shape = exactKeys(f, FACT_KEYS); if (shape) return shape;
+  const d = definition(expected); if (f.name !== expected || f.units !== d.units || f.lookbackMs !== d.lookbackMs) return 'identity, units or lookback mismatch';
+  const ss = exactKeys(f.support, SUPPORT_KEYS); if (ss) return `support ${ss}`;
+  if (f.support.sourceDigest !== null && (typeof f.support.sourceDigest !== 'string' || !HEX64.test(f.support.sourceDigest))) return 'support source digest malformed';
+  if (f.support.feedEpoch !== null && (!Number.isSafeInteger(f.support.feedEpoch) || f.support.feedEpoch < 0)) return 'support feed epoch malformed';
+  if (f.support.receiptSequence !== null && (!Number.isSafeInteger(f.support.receiptSequence) || f.support.receiptSequence < 0)) return 'support receipt sequence malformed';
+  if (!['KNOWN', 'UNAVAILABLE'].includes(f.availability)) return 'availability malformed';
+  if (f.availability === 'UNAVAILABLE') {
+    if (f.value !== null || f.sourceReferenceTs !== null || f.ageMs !== null || typeof f.reason !== 'string' || !f.reason) return 'unavailable fact exposes value/clock or lacks reason';
+    return null;
+  }
+  if (!finite(f.value) || !ts(f.sourceReferenceTs) || !Number.isSafeInteger(f.ageMs) || f.ageMs < 0 || f.sourceReferenceTs > decisionTs || f.ageMs !== decisionTs - f.sourceReferenceTs || f.reason !== null) return 'known value/clock malformed';
+  const { min, max, minInclusive, maxInclusive } = d.domain;
+  if (min !== null && (minInclusive ? f.value < min : f.value <= min)) return 'value below domain';
+  if (max !== null && (maxInclusive ? f.value > max : f.value >= max)) return 'value above domain';
+  if (expected === 'fi15' || expected === 'fi60') {
+    if (f.support.kind !== 'CONTINUOUS_TRADE' || f.support.continuous !== true || !ts(f.support.startTs) || !ts(f.support.endTs) || f.support.endTs > decisionTs || f.sourceReferenceTs !== decisionTs || f.ageMs !== 0 || !finite(f.support.classifiedFraction) || f.support.classifiedFraction < 0.95 || f.support.classifiedFraction > 1 || !HEX64.test(String(f.support.sourceDigest ?? '')) || f.support.feedEpoch === null || f.support.receiptSequence === null) return 'flow support unproven';
+  }
+  if (expected === 'rv60' && (f.support.kind !== 'CONTINUOUS_TRADE' || f.support.continuous !== true || !ts(f.support.startTs) || !ts(f.support.endTs) || f.support.startTs > f.sourceReferenceTs - 21 * BAR_MS || f.support.endTs < f.sourceReferenceTs || f.support.endTs > decisionTs || f.sourceReferenceTs !== Math.floor(decisionTs / BAR_MS) * BAR_MS || !HEX64.test(String(f.support.sourceDigest ?? '')) || f.support.feedEpoch === null || f.support.receiptSequence === null)) return 'relative-volume support unproven';
+  if ((expected === 'spreadBps' || expected === 'bidDepthUsd10bps') && (f.support.kind !== 'POINT_IN_TIME_BOOK' || f.support.startTs !== f.sourceReferenceTs || f.support.endTs !== f.sourceReferenceTs || !HEX64.test(String(f.support.sourceDigest ?? '')) || f.support.feedEpoch === null || f.support.receiptSequence === null)) return 'book support malformed';
+  if (expected === 'atrPct' && (f.support.kind !== 'CONTIGUOUS_CLOSED_BARS' || f.support.continuous !== true || f.support.endTs !== f.sourceReferenceTs || f.support.startTs !== f.sourceReferenceTs - 61 * BAR_MS || !HEX64.test(String(f.support.sourceDigest ?? '')))) return 'bar support malformed';
+  return null;
+}
+
+export function judgeLearningPreparedFactsError(facts, { consumerContract = null } = {}) {
+  const top = exactKeys(facts, PREPARED_KEYS); if (top) return `prepared facts: ${top}`;
+  if (facts.preparedFactsVersion !== JUDGE_LEARNING_PREPARED_FACTS_VERSION || facts.featureRecipeVersion !== JUDGE_LEARNING_RECIPE_VERSION || facts.featureRecipeDigest !== JUDGE_LEARNING_FEATURE_RECIPE_DIGEST) return 'prepared facts: recipe identity mismatch';
+  if (!ts(facts.decisionTs)) return 'prepared facts: decision clock malformed';
+  const sourceError = sourceEvidenceError(facts.sourceEvidence, facts.decisionTs, facts.marketIdentity); if (sourceError) return `prepared facts source evidence: ${sourceError}`;
+  const featureKeys = exactKeys(facts.features, FEATURE_NAMES); if (featureKeys) return `prepared facts features: ${featureKeys}`;
+  for (const name of FEATURE_NAMES) { const err = factError(facts.features[name], name, facts.decisionTs); if (err) return `prepared facts ${name}: ${err}`; }
+  if (digestOf(facts.features) !== digestOf(deriveFeatures(facts.sourceEvidence, facts.decisionTs))) return 'prepared facts: values/support do not reproduce source evidence';
+  if (!HEX64.test(facts.factsDigest) || judgeLearningPreparedFactsDigestOf(facts) !== facts.factsDigest) return 'prepared facts: digest mismatch';
+  if (consumerContract !== null) {
+    const ce = judgeLearningConsumerContractError(consumerContract); if (ce) return `prepared facts contract: ${ce}`;
+    if (facts.featureRecipeDigest !== consumerContract.featureRecipeDigest) return 'prepared facts: consumer recipe mismatch';
+    const { eligibility } = consumerContract;
+    for (const name of eligibility.requiredFeatures) {
+      const f = facts.features[name];
+      if (f.availability !== 'KNOWN') return `prepared facts: required feature ${name} unavailable`;
+      if (f.ageMs > eligibility.maxFactAgeMs) return `prepared facts: required feature ${name} stale`;
+    }
+    const checkRange = (name, min, max) => {
+      if (min === null && max === null) return null;
+      const f = facts.features[name]; if (f.availability !== 'KNOWN') return `${name} unavailable`;
+      if (f.ageMs > eligibility.maxFactAgeMs) return `${name} stale`;
+      if (min !== null && f.value < min) return `${name} below minimum`;
+      if (max !== null && f.value > max) return `${name} above maximum`;
+      return null;
+    };
+    const rangeError = checkRange('spreadBps', null, eligibility.maxSpreadBps)
+      ?? checkRange('bidDepthUsd10bps', eligibility.minBidDepthUsd10bps, null)
+      ?? checkRange('atrPct', eligibility.minAtrPct, eligibility.maxAtrPct);
+    if (rangeError) return `prepared facts: ${rangeError}`;
+  }
+  return null;
+}
+
+export const judgeLearningConsumerContractDigestOf = (contract) => {
+  if (!isPlainObject(contract)) return digestOf(contract);
+  const body = { ...contract }; delete body.consumerContractDigest;
+  return digestOf(body);
+};
+
+function eligibilityError(v) {
+  const shape = exactKeys(v, ELIGIBILITY_KEYS); if (shape) return shape;
+  for (const key of ['maxSpreadBps', 'minBidDepthUsd10bps', 'minAtrPct', 'maxAtrPct']) if (v[key] !== null && !nonNegative(v[key])) return `${key} malformed`;
+  if (!Number.isSafeInteger(v.maxFactAgeMs) || v.maxFactAgeMs < 0) return 'maxFactAgeMs malformed';
+  if (v.minAtrPct !== null && v.maxAtrPct !== null && v.minAtrPct > v.maxAtrPct) return 'ATR range inverted';
+  if (!Array.isArray(v.requiredFeatures) || v.requiredFeatures.length > FEATURE_NAMES.length || new Set(v.requiredFeatures).size !== v.requiredFeatures.length) return 'requiredFeatures malformed';
+  if (v.requiredFeatures.some((name) => !FEATURE_NAMES.includes(name))) return 'requiredFeatures contains unknown feature';
+  if (v.requiredFeatures.some((name, i) => i > 0 && name < v.requiredFeatures[i - 1])) return 'requiredFeatures not in canonical order';
+  return null;
+}
+
+export function judgeLearningConsumerContractError(contract) {
+  const top = exactKeys(contract, CONTRACT_KEYS); if (top) return `consumer contract: ${top}`;
+  if (contract.consumerContractVersion !== JUDGE_LEARNING_CONSUMER_CONTRACT_VERSION || contract.consumerId !== JUDGE_LEARNING_CONSUMER_ID) return 'consumer contract: version or consumer mismatch';
+  if (typeof contract.policyDigest !== 'string' || !HEX64.test(contract.policyDigest)) return 'consumer contract: policy digest malformed';
+  const recipeError = judgeLearningFeatureRecipeError(contract.featureRecipe); if (recipeError) return `consumer contract: ${recipeError}`;
+  if (contract.featureRecipeDigest !== JUDGE_LEARNING_FEATURE_RECIPE_DIGEST || contract.featureRecipeDigest !== digestOf(contract.featureRecipe)) return 'consumer contract: feature recipe digest mismatch';
+  const el = eligibilityError(contract.eligibility); if (el) return `consumer contract eligibility: ${el}`;
+  const effect = exactKeys(contract.effect, EFFECT_KEYS); if (effect) return `consumer contract effect: ${effect}`;
+  if (contract.effect.effectVersion !== JUDGE_LEARNING_EFFECT_VERSION || contract.effect.axis !== 'RANKING' || contract.effect.target !== 'REWARD_RISK_RATIO') return 'consumer contract: effect target mismatch';
+  if (contract.effect.targetProducerVersion !== COST_MODEL_VERSION || contract.effect.rankingLawVersion !== RISK_VERSION) return 'consumer contract: effect producer mismatch';
+  if (contract.effect.transform !== 'ADD_FIXED_IF_APPLICABLE_AND_FORWARD_SUPPORTED' || contract.effect.units !== JUDGE_LEARNING_EFFECT_UNITS || contract.effect.magnitudeRounding !== 'ECMASCRIPT_TO_FIXED_4_NORMALIZE_NEGATIVE_ZERO') return 'consumer contract: effect transform or units mismatch';
+  if (!finite(contract.effect.magnitude) || contract.effect.magnitude <= 0 || contract.effect.magnitude > JUDGE_LEARNING_MAX_ABS_EFFECT || normalizedFour(contract.effect.magnitude) !== contract.effect.magnitude) return 'consumer contract: effect magnitude malformed';
+  const validation = exactKeys(contract.validationSemantics, VALIDATION_KEYS); if (validation) return `consumer contract validation: ${validation}`;
+  if (contract.validationSemantics.experimentalUnit !== 'ADMISSION_BATCH' || contract.validationSemantics.baselineArm !== 'SAME_BATCH_UNADJUSTED_REWARD_RISK_RATIO' || contract.validationSemantics.candidateArm !== 'SAME_BATCH_SEALED_EFFECT' || contract.validationSemantics.decisionOutput !== 'RANK_ORDER' || contract.validationSemantics.noOrderAuthority !== true) return 'consumer contract: validation semantics mismatch';
+  if (contract.maxSizeUsd !== null) return 'consumer contract: rank-only evidence cannot claim size support';
+  if (!Number.isSafeInteger(contract.activationLifetimeMs) || contract.activationLifetimeMs < 1 || contract.activationLifetimeMs > JUDGE_LEARNING_MAX_LIFETIME_MS) return 'consumer contract: activation lifetime malformed';
+  const degrade = exactKeys(contract.degradeRule, DEGRADE_KEYS); if (degrade) return `consumer contract degrade rule: ${degrade}`;
+  if (!Number.isSafeInteger(contract.degradeRule.minGroups) || contract.degradeRule.minGroups < 2 || !finite(contract.degradeRule.adverseFractionAbove) || contract.degradeRule.adverseFractionAbove < 0 || contract.degradeRule.adverseFractionAbove > 1 || !Number.isSafeInteger(contract.degradeRule.consecutiveWindows) || contract.degradeRule.consecutiveWindows < 1) return 'consumer contract: degradation rule malformed';
+  if (!HEX64.test(contract.consumerContractDigest) || judgeLearningConsumerContractDigestOf(contract) !== contract.consumerContractDigest) return 'consumer contract: digest mismatch';
+  return null;
+}
+
+export function buildJudgeLearningConsumerContract({ policyDigest, eligibility, effectMagnitude, activationLifetimeMs, degradeRule } = {}) {
+  const requiredFeatures = Array.isArray(eligibility?.requiredFeatures) ? [...eligibility.requiredFeatures].sort() : eligibility?.requiredFeatures;
+  const body = {
+    consumerContractVersion: JUDGE_LEARNING_CONSUMER_CONTRACT_VERSION,
+    consumerId: JUDGE_LEARNING_CONSUMER_ID,
+    policyDigest,
+    featureRecipe: clone(JUDGE_LEARNING_FEATURE_RECIPE),
+    featureRecipeDigest: JUDGE_LEARNING_FEATURE_RECIPE_DIGEST,
+    eligibility: eligibility ? { ...eligibility, requiredFeatures } : eligibility,
+    effect: {
+      effectVersion: JUDGE_LEARNING_EFFECT_VERSION,
+      axis: 'RANKING',
+      target: 'REWARD_RISK_RATIO',
+      targetProducerVersion: COST_MODEL_VERSION,
+      rankingLawVersion: RISK_VERSION,
+      transform: 'ADD_FIXED_IF_APPLICABLE_AND_FORWARD_SUPPORTED',
+      magnitude: effectMagnitude,
+      units: JUDGE_LEARNING_EFFECT_UNITS,
+      magnitudeRounding: 'ECMASCRIPT_TO_FIXED_4_NORMALIZE_NEGATIVE_ZERO',
+    },
+    validationSemantics: {
+      experimentalUnit: 'ADMISSION_BATCH',
+      baselineArm: 'SAME_BATCH_UNADJUSTED_REWARD_RISK_RATIO',
+      candidateArm: 'SAME_BATCH_SEALED_EFFECT',
+      decisionOutput: 'RANK_ORDER',
+      noOrderAuthority: true,
+    },
+    maxSizeUsd: null,
+    activationLifetimeMs,
+    degradeRule: degradeRule ? { ...degradeRule } : degradeRule,
+  };
+  const contract = { ...body, consumerContractDigest: digestOf(body) };
+  const error = judgeLearningConsumerContractError(contract);
+  if (error) throw new TypeError(error);
+  return deepFreeze(contract);
+}

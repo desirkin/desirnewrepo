@@ -1,0 +1,269 @@
+// JUDGE — the sole strategy decision producer (ticket §2.1, §4-6). Deterministic versioned setup rules over facts, with
+// validated Socrates interpretation only where a setup consumes it; NO LLM call, no model per tick / stop / fill. Every
+// accepted trade / book updates the cheap coverage / trigger / persistence state; expensive evaluation is coalesced through
+// the 25ms scheduler; the price-blind law commits HYPOTHESIS_LOCKED at the frozen trigger T BEFORE any execution
+// valuation; the decision envelope, reservation, position shell, feed pin and durable ORDER_INTENT commit in ONE account
+// transaction with a revision recheck; the dispatcher then sends through the outbox. Entry permission is the intersection
+// of authenticated controls, account mode / release, risk and health. NO_TRADE is a successful decision.
+import * as M from '../execution/money.js';
+import { indicatorBlock, createFlowTracker, createFeatureCache, bookFacts, bidDepthWithinBps, medianDecimal, validateBarBlock, FEATURE_VERSION } from './features.js';
+import { SETUPS, SETUP_INPUT_MODES, REFERENCE, freezeReferences, evaluateSetup, createConfirmation, createEpisodeTracker, hypothesisDigest, setupDefinition, STRATEGY_VERSION } from './setups.js';
+import { evaluateEntry, sizeSearch, liquidationValue, COST_MODEL_VERSION } from './cost.js';
+import { admitCandidate, riskBudgetFor, rankCandidates, clusterIdOf } from './risk.js';
+import { makeDecision, decisionIdentity, decisionRecord } from './contract.js';
+import { intakeDecision, consumeCase, primaryConfirmedCatalyst } from './intake.js';
+import { JUDGE_FACT_RECIPE_VERSION, resolveLearningContribution, contributionMeasurement, contributionCandidateLog } from './learning-intake.js';
+import { evaluateSizeLadder, sizingMeasurement, sizingCandidateLog } from './size-ladder.js';
+import { SETUP_SELECTION_VERSION, createUnderlyingClaimLedger, deterministicSetupTieOrder, selectionMeasurement, setupDurationBound, strategyFamilyOf } from './setup-selection.js';
+import { createScheduler } from './scheduler.js';
+import { judgeReadinessMatrix } from './readiness.js';
+import { entryBlockingRestrictions } from '../execution/reducer.js';
+import { entryPermission } from '../execution/authority.js';
+import { d1Feature, d2Feature, d3Feature, transferAnomaly, peerMembership } from './challengers.js';
+import { VERDICT_WORDS } from '../execution/contract.js';
+export const VERDICT_RECORD_VERSION = 'judge-challenger-verdict-1';
+
+export const JUDGE_VERSION = 'judge-1';
+// a CANARY authorization bounds the position duration (closeout R14): the shorter of the policy duration and the owner's canary bound
+export const canaryDurationBound = (s, policyMs) => { const a = s?.authorization; const bound = a && !a.ended && a.kind === 'CANARY' && Number.isSafeInteger(a.canary?.maxDurationMs) ? a.canary.maxDurationMs : null; return bound === null ? policyMs : Math.min(policyMs, bound); };
+export const FUNNEL_STAGES = Object.freeze(['discovered', 'recorded', 'warmed', 'nominated', 'setupQualified', 'costQualifiedAtLegalSize', 'reserved', 'sent', 'filled', 'protected', 'closedReconciled']);
+const inc = (obj, k, n = 1) => { obj[k] = (obj[k] ?? 0) + n; };
+
+export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null, setupSelection = null }) {
+  // LEARN-1 consumer seam (ADDENDUM-2 §08): `learning` is an OPTIONAL injected read accessor over the prepared
+  // immutable decision-memory snapshot ({ snapshot: () => readDecisionMemory(...) }), refreshed outside this loop.
+  // Absent (every current composition; fly.js passes nothing), every path below is byte-identical to the baseline
+  // Judge. Present, its ONLY effect is a bounded rank-order nudge among ALREADY fully qualified candidates plus a
+  // measurement row recording what was consumed or why nothing was — never sizing, risk, permission, case intake,
+  // The Watch, or any committed event payload.
+  // DYNAMIC SIZING seam (final sizing addendum): `dynamicSizing` is the SECOND independent default-off switch
+  // ({ fractions? }). Absent, sizing is the exact existing sizeSearch call. Present, the size ladder evaluates
+  // multiple fractions of the SAME risk-bounded spendable budget through the SAME cost law and records every
+  // candidate size; risk caps, admission, permission and The Watch are untouched at every size.
+  // armRule (focused completion §5): a research-only experiment arm — enabled setups, a named clause ablation, a deterministic nomination
+  // thinning and the challengers whose verdicts gate admission. PAPER / LIVE compositions never pass one; a REPLAY arm is one account.
+  if (armRule && mode !== 'REPLAY') throw new Error('an arm rule is research configuration: only a REPLAY composition may carry one');
+  // Strategy-family selection is a separate, explicit version transition. The
+  // default path remains the exact legacy four-setup Judge. Fail closed on any
+  // malformed/future port instead of treating a truthy object as authority.
+  const selectionKeys = setupSelection === null ? [] : (setupSelection && typeof setupSelection === 'object' && !Array.isArray(setupSelection) ? Object.keys(setupSelection) : []);
+  if (setupSelection !== null && (selectionKeys.length !== 1 || selectionKeys[0] !== 'version' || setupSelection.version !== SETUP_SELECTION_VERSION)) throw new Error(`invalid setupSelection port; expected { version: '${SETUP_SELECTION_VERSION}' }`);
+  const setupSelectionEnabled = setupSelection !== null;
+  const keepSnapshots = Boolean(armRule?.challengers?.length);
+  const S = scheduler ?? createScheduler({ monotonic: () => clock.monotonic() }); const setups = armRule?.setups ?? enabledSetups ?? policy.setups.enabled;
+  // EDGE_STATE setups are research evaluators only until both their post-size
+  // execution gate and their Watch exit contract are composed. Check the
+  // effective list after every override so no caller can accidentally turn a
+  // null operational horizon into the generic policy duration.
+  for (const setupId of setups) if (setupDefinition(setupId)?.operationalMaxDurationMs === null) throw new Error(`NEW_SETUP_NOT_OPERATIONAL: ${setupId} requires a composed post-size execution gate and Watch EDGE_STATE contract`);
+  const cache = createFeatureCache({ max: 128 });
+  const candidates = new Map(); // symbol -> runtime
+  const funnel = Object.fromEntries(FUNNEL_STAGES.map((s) => [s, 0])); const refusals = {}; const counters = { books: 0, trades: 0, crossings: 0, confirmations: 0, expired: 0, decisions: 0, entries: 0, needsData: 0, missedDuringWarmup: 0, modelWait: 0, modelStale: 0, missedDuringAnalysis: 0, revalidationRefusals: 0, queueDelayExpired: 0, snapshotPersistFailures: 0 }; const decisions = []; let lastEntryMono = null; const provenance = new Map(); // episode|decision clock -> the already-known dependency identities (research report only)
+  const now = () => clock.now(); const state = () => dispatcher.state(); const ev = dispatcher.ev;
+  // deterministic ranking BEFORE reservation (closeout R08): every candidate that reaches the admission point inside one scheduler
+  // pass registers here; the batch is ranked (rankCandidates: reward / stressed risk, cost bps, first known, asset) and admitted ONE
+  // at a time in that order, each seeing the reservations the earlier ones committed — receipt order never decides
+  const gate = { pending: [], scheduled: false, batches: 0, lastBatch: null };
+  function admissionGate(entry) { return new Promise((resolve) => { gate.pending.push({ ...entry, resolve }); if (!gate.scheduled) { gate.scheduled = true; setImmediate(() => flushGate().catch((err) => log(`admission gate: ${err.message}`))); } }); }
+  async function flushGate() {
+    const batch = gate.pending; gate.pending = []; gate.scheduled = false; if (!batch.length) return;
+    gate.batches += 1;
+    if (!setupSelectionEnabled) {
+      const ranked = rankCandidates(batch.map((b) => ({ ...b.rank, entry: b })));
+      const unranked = batch.filter((b) => !ranked.some((r) => r.entry === b));
+      const order = [...ranked.map((r) => r.entry), ...unranked];
+      const batchReport = { size: batch.length, order: order.map((b) => b.rank.assetId) };
+      gate.lastBatch = batchReport;
+      for (let i = 0; i < order.length; i += 1) await new Promise((done) => order[i].resolve({ rank: i + 1, of: order.length, done }));
+      return;
+    }
+    // The existing risk rank remains primary. The pre-order contributes only
+    // the deterministic family/setup tie which risk.js otherwise leaves equal
+    // for two setups of the same asset.
+    const tied = deterministicSetupTieOrder(batch);
+    const ranked = rankCandidates(tied.map((b) => ({ ...b.rank, entry: b })));
+    const unranked = tied.filter((b) => !ranked.some((r) => r.entry === b));
+    const order = [...ranked.map((r) => r.entry), ...unranked];
+    const claims = createUnderlyingClaimLedger(); const outcomes = [];
+    const batchReport = { size: batch.length, order: order.map((b) => b.rank.assetId), detail: order.map((b) => ({ assetId: b.rank.assetId, setupId: b.rank.setupId, family: strategyFamilyOf(b.rank.setupId) })) };
+    gate.lastBatch = batchReport;
+    for (let i = 0; i < order.length; i += 1) {
+      const entry = order[i]; const offered = claims.offer({ assetId: entry.rank.assetId, setupId: entry.rank.setupId });
+      if (!offered.selected) {
+        outcomes.push({ assetId: entry.rank.assetId, setupId: entry.rank.setupId, outcome: 'NOT_SELECTED', winnerSetupId: offered.winnerSetupId });
+        entry.resolve({ rank: i + 1, of: order.length, selected: false, winnerSetupId: offered.winnerSetupId, done: () => {} });
+        continue;
+      }
+      const result = await new Promise((done) => entry.resolve({ rank: i + 1, of: order.length, selected: true, winnerSetupId: null, done }));
+      const didClaim = result?.claimed === true;
+      outcomes.push({ assetId: entry.rank.assetId, setupId: entry.rank.setupId, outcome: didClaim ? 'CLAIMED' : 'FALLBACK_ALLOWED', winnerSetupId: null });
+      claims.settle({ assetId: entry.rank.assetId, setupId: entry.rank.setupId, claimed: didClaim });
+    }
+    // Capture the batch object before any await: a later batch may replace
+    // gate.lastBatch while this one is still settling.
+    batchReport.outcomes = outcomes;
+  }
+  function admit(symbol, { assetId = symbol.split('/')[0], priority = 'CANDIDATE', nominationKnownAtTs = now(), source = 'MANUAL' } = {}) {
+    if (candidates.has(symbol)) return candidates.get(symbol); const spec = specOf(symbol); if (!spec) { inc(refusals, 'INSTRUMENT_SPEC_UNKNOWN'); return null; }
+    if (policy.universe.excludeBases.includes(assetId)) { inc(refusals, 'EXCLUDED_BASE'); return null; } if (spec.status !== 'online') { inc(refusals, `INSTRUMENT_${spec.status.toUpperCase()}`); return null; }
+    const fa = feed ? feed.admit(symbol, { coin: assetId, priority, reason: source, specDigest: spec.specDigest }) : { ok: true }; if (!fa.ok) { inc(refusals, `FEED_${fa.reason}`); return null; }
+    const c = { symbol, assetId, spec, priority, source, nominationKnownAtTs, admittedTs: now(), flow: createFlowTracker({ retentionMs: 25 * 60_000 }), books: [], snapshots: [], lastBook: null, indicators: null, indicatorsRef: null, episodes: Object.fromEntries(setups.map((s) => [s, createEpisodeTracker({ assetId, setupId: s, cooldownMs: policy.execution.cooldownMs })])), confirmations: new Map(), frozen: new Map(), readiness: null, decisionsMade: 0 };
+    candidates.set(symbol, c); funnel.discovered += 1; funnel.recorded += 1; if (source !== 'MANUAL') funnel.nominated += 1; return c;
+  }
+  function release(symbol) { const c = candidates.get(symbol); if (!c) return; if (Object.values(state()?.positions ?? {}).some((p) => p.pair === symbol && p.state !== 'FLAT')) return; candidates.delete(symbol); if (feed) feed.release(symbol); }
+  // ---- cheap per-message state --------------------------------------------------------------------------------------------
+  function refreshIndicators(c, nowTs) { const bars = history.bars(c.symbol, nowTs); c.lastBars = bars ?? null; if (!bars) { c.indicators = null; c.indicatorsReason = 'NO_HISTORY'; return null; } const v = validateBarBlock(bars, { referenceTs: nowTs }); if (!v.ok) { c.indicators = null; c.indicatorsReason = v.reason; return null; } c.indicatorsReason = null; const { value, hit } = cache.get({ blockDigest: bars.map((b) => `${b.periodStartTs}:${b.close}:${b.high}:${b.low}`).join('|'), referenceTs: bars[bars.length - 1].periodEndTs, featureVersion: FEATURE_VERSION }, () => indicatorBlock(bars)); c.indicators = value; c.indicatorsRef = { hit, bars }; return value; }
+  function fastFacts(c, snap, decisionTs) { const f = bookFacts(snap); const cov = feed ? feed.coverage(c.symbol, decisionTs) : { continuous: true, startTs: c.admittedTs, endTs: decisionTs }; const health = feed ? feed.health(c.symbol, decisionTs) : { bookAgeMs: decisionTs - snap.receiptTs }; const depthNow = bidDepthWithinBps(snap, 10); const prior = c.books.filter((b) => b.ts >= decisionTs - 75_000 && b.ts < decisionTs - 15_000); const priorDepths = prior.map((b) => b.depth).filter(Boolean); const priorMids = prior.map((b) => b.mid); const lows60 = c.books.filter((b) => b.ts >= decisionTs - 60_000).map((b) => b.bestBid);
+    return { mid: f?.mid ?? null, bestBid: f?.bestBid ?? null, bestAsk: f?.bestAsk ?? null, fi15: c.flow.fi(decisionTs - 15_000, decisionTs), fi60: c.flow.fi(decisionTs - 60_000, decisionTs), rv60: c.flow.rv60(decisionTs, cov), coverage: cov, decisionTs, bookAgeMs: health.bookAgeMs ?? (decisionTs - snap.receiptTs), crcVerified: snap.crcVerified, depth10bps: depthNow, vwap60: c.flow.vwap(decisionTs - 60_000, decisionTs), priorFi: c.flow.fi(decisionTs - 75_000, decisionTs - 15_000), reclaimFi: c.flow.fi(decisionTs - 15_000, decisionTs), priorMidChange: priorMids.length >= 2 ? M.sub(priorMids[priorMids.length - 1], priorMids[0]) : null, priorMedianDepth: priorDepths.length ? medianDecimal(priorDepths) : null, priorDepthSamples: priorDepths.length, priorLow60: lows60.length ? lows60.reduce((a, b) => (M.lt(a, b) ? a : b)) : null, receiptSequence: snap.receiptSequence, feedEpoch: snap.feedEpoch, snapshotDigest: snap.digest };
+  }
+  // the prepared-fact view handed to the learned-contribution selector: the SAME already-computed fast facts,
+  // reshaped into the learning feature contract (value + availability; UNKNOWN stays unavailable, never zero)
+  const lf = (obj, key, unit, lookbackMs) => (obj && obj.state === 'KNOWN' && Number.isFinite(obj[key]) ? { value: obj[key], unit, lookbackMs, ageMs: 0, availability: 'KNOWN' } : { value: null, unit, lookbackMs, ageMs: null, availability: 'UNAVAILABLE' });
+  const numFact = (v, unit, ageMs = 0) => (Number.isFinite(v) && Number.isFinite(ageMs) && ageMs >= 0 ? { value: v, unit, lookbackMs: 0, ageMs, availability: 'KNOWN' } : { value: null, unit, lookbackMs: 0, ageMs: null, availability: 'UNAVAILABLE' });
+  function learnedFactsOf(fast, frozen = null) {
+    const spreadBps = fast.bestBid && fast.bestAsk && fast.mid ? (Number(fast.bestAsk) - Number(fast.bestBid)) / Number(fast.mid) * 10_000 : null;
+    const bookAge = Number.isFinite(fast.bookAgeMs) && fast.bookAgeMs >= 0 ? fast.bookAgeMs : null;
+    const atrPct = frozen && frozen.atr14 !== undefined && fast.mid && Number.isFinite(Number(frozen.atr14)) && Number(fast.mid) > 0 ? Number(frozen.atr14) / Number(fast.mid) * 100 : NaN;
+    return {
+      rv60: lf(fast.rv60, 'rv60', 'ratio', 60_000), fi15: lf(fast.fi15, 'fi', 'fraction', 15_000), fi60: lf(fast.fi60, 'fi', 'fraction', 60_000),
+      spreadBps: numFact(Number.isFinite(spreadBps) ? spreadBps : NaN, 'bps', bookAge),
+      depthUsd10bps: numFact(fast.depth10bps !== null && Number.isFinite(Number(fast.depth10bps)) ? Number(fast.depth10bps) : NaN, 'usd_notional', bookAge),
+      atrPct: numFact(atrPct, 'pct_of_mid', 0),
+    };
+  }
+  function onBook(e) { const c = candidates.get(e.symbol); if (!c) return; const snap = e.snapshot; if (!snap.synced) return; counters.books += 1; c.lastBook = snap; if (keepSnapshots) { c.snapshots.push(snap); while (c.snapshots.length && c.snapshots[0].receiptTs < snap.receiptTs - 180_000) c.snapshots.shift(); } const f = bookFacts(snap); if (!f) return; c.books.push({ ts: snap.receiptTs, seq: snap.receiptSequence, mid: f.mid, bestBid: f.bestBid, depth: bidDepthWithinBps(snap, 10) }); while (c.books.length && c.books[0].ts < snap.receiptTs - 120_000) c.books.shift(); c.flow.advance(snap.receiptTs);
+    const ind = c.indicators ?? refreshIndicators(c, snap.receiptTs); if (!ind) return;
+    for (const setupId of setups) { if (setupId === 'CATALYST_TRANSMISSION' && !c.catalystEvent) continue; const tracker = c.episodes[setupId]; const fast = fastFacts(c, snap, snap.receiptTs); if (setupId === 'ABSORPTION_RECLAIM' && !fast.vwap60) continue; const probe = freezeReferences({ setupId, ind, spec: c.spec, fast, event: c.catalystEvent ?? null, triggerTs: snap.receiptTs }); if (!probe) continue;
+      const cur = tracker.current(); const level = cur ? cur.level : probe.triggerLevel; const r = tracker.observeMid(f.mid, level, snap.receiptTs);
+      if (r.crossing) { counters.crossings += 1; const frozen = { ...probe, triggerTs: snap.receiptTs, episodeId: r.episode.episodeId }; c.frozen.set(r.episode.episodeId, frozen); c.confirmations.set(r.episode.episodeId, createConfirmation({ level: frozen.triggerLevel, triggerTs: snap.receiptTs, expiryMs: policy.execution.proposalExpiryMs })); lockHypothesis(c, setupId, frozen, r.episode).catch((err) => log(`hypothesis lock failed: ${err.message}`)); }
+      const ep = tracker.current(); if (!ep) continue; const conf = c.confirmations.get(ep.episodeId); if (!conf) continue; const st = conf.observe(f.mid, snap.receiptTs, snap.receiptSequence); if (st === 'CONFIRMED' && !ep.submitted) { ep.submitted = true; counters.confirmations += 1; S.submit({ key: `${c.assetId}|${ep.episodeId}`, episodeId: ep.episodeId, snapshotSeq: snap.receiptSequence, receiptMono: clock.monotonic(), job: () => decide(c, setupId, ep.episodeId).catch((err) => { log(`decision failed: ${err.message}`); return null; }) }); } else if (st === 'EXPIRED') { counters.expired += 1; tracker.expire(snap.receiptTs + policy.execution.proposalExpiryMs + 1); recordRefusal(c, setupId, ep.episodeId, 'EXPIRED', ['PROPOSAL_EXPIRED_10S'], snap).catch(() => {}); c.confirmations.delete(ep.episodeId); } }
+  }
+  function onTrade(e) { const c = candidates.get(e.symbol); if (!c) return; counters.trades += 1; c.flow.add(e.trade); }
+  async function lockHypothesis(c, setupId, frozen, episode) { const decisionId = decisionIdentity({ accountId, episodeId: episode.episodeId, setupId, decisionKnownAtTs: frozen.triggerTs, snapshotDigest: null }); frozen.decisionId = decisionId; await dispatcher.commit(ev('HYPOTHESIS_LOCKED', { decisionId, episodeId: episode.episodeId, setupId, assetId: c.assetId, pair: c.symbol, hypothesisDigest: hypothesisDigest(frozen), frozenAtTs: frozen.triggerTs, triggerTs: frozen.triggerTs, expiresTs: frozen.triggerTs + policy.execution.proposalExpiryMs })); frozen.locked = true; }
+  async function recordRefusal(c, setupId, episodeId, status, reasonCodes, snap, extra = {}) { const { verdicts = null, ...rest } = extra; const frozen = c.frozen.get(episodeId); const d = buildDecision({ c, setupId, episodeId, frozen, status, reasonCodes, snap, decisionTs: now(), ...rest }); await dispatcher.commit(ev('DECISION_RECORDED', decisionRecord(d, verdicts))); decisions.push(d); if (decisions.length > 256) decisions.shift(); counters.decisions += 1; for (const r of reasonCodes) inc(refusals, r); return d; }
+  function buildDecision({ c, setupId, episodeId, frozen, status, reasonCodes, snap, decisionTs, inputMode = 'MARKET_DIRECT', caseRefs = null, measurements = [], invalidation = null, scenario = null, valuationRef = null, sizing = null }) {
+    const s = state(); const snapshotDigest = snap?.digest ?? null; const decisionId = frozen?.decisionId ?? decisionIdentity({ accountId, episodeId, setupId, decisionKnownAtTs: decisionTs, snapshotDigest });
+    return makeDecision({ decisionId, accountId, mode: s.mode, strategyVersion: STRATEGY_VERSION, policyDigest, costModelVersion: COST_MODEL_VERSION, asset: { canonicalCoin: c.assetId, venue: 'kraken', pair: c.symbol, specDigest: c.spec.specDigest }, episodeId, setupId, decisionKnownAtTs: decisionTs, triggerTs: frozen?.triggerTs ?? decisionTs, inputMode, caseRefs: caseRefs ?? { packetId: null, analysisId: null, caseId: null, caseCompletionTs: null, caseReceiptTs: null, direction: null, provenance: null, eventId: null, eventTaxonomy: null }, sourcePrefix: { snapshotDigest, feedEpoch: snap?.feedEpoch ?? null, receiptSequence: snap?.receiptSequence ?? null, barBlockDigest: c.indicators?.blockDigest ?? null, tradeCoverageStartTs: feed ? feed.coverage(c.symbol, decisionTs).startTs : null, tradeCoverageEndTs: feed ? feed.coverage(c.symbol, decisionTs).endTs : null }, featureSnapshotRef: c.indicators?.blockDigest ?? null, portfolioRevision: dispatcher.revision() ?? 0, restrictionRevision: Object.keys(s.restrictions).length, status, reasonCodes: [...new Set(reasonCodes)].slice(0, 64).map((r) => String(r).replace(/[^A-Za-z0-9._:@/+-]/g, '_').slice(0, 120)), measurements: measurements.slice(0, 64).map((m) => ({ ...(m.ablated === true ? { ablated: true } : {}), id: m.id, ok: m.ok, value: typeof m.value === 'number' || typeof m.value === 'boolean' || m.value === null ? m.value : String(m.value).slice(0, 64), threshold: typeof m.threshold === 'number' || typeof m.threshold === 'boolean' || m.threshold === null ? m.threshold : String(m.threshold).slice(0, 64), unit: m.unit, note: m.note ?? null })), predicates: [], invalidation, scenario, valuationRef, sizing });
+  }
+  // ---- the expensive decision at D ------------------------------------------------------------------------------------------------
+  async function decide(c, setupId, episodeId) {
+    const D = now(); const snap = c.lastBook; const frozen = c.frozen.get(episodeId); const tracker = c.episodes[setupId]; if (!frozen || !snap) return null; if (!frozen.locked) { counters.needsData += 1; return recordRefusal(c, setupId, episodeId, 'NEEDS_DATA', ['HYPOTHESIS_NOT_DURABLE'], snap); }
+    if (D - frozen.triggerTs > policy.execution.proposalExpiryMs) { counters.expired += 1; tracker.decide('EXPIRED'); return recordRefusal(c, setupId, episodeId, 'EXPIRED', ['PROPOSAL_EXPIRED_10S'], snap); }
+    const lag = D - snap.receiptTs; if (lag > policy.execution.maxReceiptToDecisionLagMs) { counters.queueDelayExpired += 1; tracker.decide('NEEDS_DATA'); return recordRefusal(c, setupId, episodeId, 'NEEDS_DATA', ['RECEIPT_TO_DECISION_LAG_EXCEEDED'], snap); }
+    const ind = c.indicators; const fast = fastFacts(c, snap, D); const entry = fast.bestAsk; if (!ind || !entry) { tracker.decide('NEEDS_DATA'); return recordRefusal(c, setupId, episodeId, 'NEEDS_DATA', ['NO_INDICATORS_OR_BOOK'], snap); }
+    // intake: MARKET_DIRECT for I-III unless a case is supplied; IV needs the verified catalyst case
+    const consumed = caseSource.consumed(c.assetId, { decisionTs: D }); let inputMode = 'MARKET_DIRECT'; let catalyst = null; if (setupId === 'CATALYST_TRANSMISSION') inputMode = 'CATALYST_CASE'; else if (consumed) inputMode = 'CASE_ENRICHED';
+    if (consumed && consumed.ok) catalyst = primaryConfirmedCatalyst({ packet: consumed.packet, analysis: consumed.analysis, canonicalCoin: c.assetId, decisionTs: D });
+    if (consumed && consumed.ok) { if (provenance.size >= 4096) provenance.delete(provenance.keys().next().value); provenance.set(`${episodeId}|${D}`, { caseId: consumed.caseId ?? null, catalystId: catalyst?.ok ? catalyst.event.eventId : null, sourceId: catalyst?.ok ? catalyst.event.sourceId : null }); }
+    const intake = intakeDecision({ inputMode, caseConsumption: consumed, catalyst, setupId }); const caseRefs = { packetId: intake.packetId ?? null, analysisId: intake.analysisId ?? null, caseId: intake.caseId ?? null, caseCompletionTs: intake.caseCompletionTs ?? null, caseReceiptTs: intake.caseReceiptTs ?? null, direction: intake.direction ?? null, provenance: intake.provenance ?? null, eventId: intake.event?.eventId ?? null, eventTaxonomy: intake.event?.taxonomy ?? null };
+    if (!intake.ok) { if (intake.reasons.includes('CASE_INVALID_REJECTED_NOT_STRIPPED')) counters.modelStale += 1; tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, setupId === 'CATALYST_TRANSMISSION' && !consumed ? 'NEEDS_DATA' : 'ENTRY_REFUSED', intake.reasons, snap, { inputMode: intake.ok ? inputMode : 'MARKET_DIRECT' }); }
+    // the absorption feature windows are anchored at the FROZEN trigger T (closeout R10): [T-15s,T) is measured from the tracker at D, never [D-15s,D)
+    const atTrigger = setupId === 'ABSORPTION_RECLAIM' ? { reclaimFi: c.flow.fi(frozen.triggerTs - 15_000, frozen.triggerTs), vwap60: c.flow.vwap(frozen.triggerTs - 60_000, frozen.triggerTs) } : null;
+    const setup = evaluateSetup({ setupId, frozen, ind, fast: atTrigger ? { ...fast, atTrigger } : fast, bars: c.indicatorsRef.bars, entry, decisionTs: D, event: intake.event ?? c.catalystEvent ?? null, ablate: armRule?.ablate ?? null }); const baseMeasurements = setup.clauses;
+    // learned contribution (dormant without the injected port): resolved from the prepared snapshot and THIS
+    // decision's already-prepared facts only; any resolver fault falls back to baseline with the fault logged
+    let learned = null;
+    if (learning) { try { learned = resolveLearningContribution({ snapshot: learning.snapshot(), facts: { setupType: setupId, regime: 'LIVE_UNCLASSIFIED', asset: c.assetId, venue: 'kraken', featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyVersion: policyDigest, features: learnedFactsOf(fast, frozen) }, mode, nowTs: D }); } catch (err) { log(`learned contribution resolver failed (baseline): ${err.message}`); learned = null; } }
+    let measurements = learned ? [...baseMeasurements, contributionMeasurement(learned), ...contributionCandidateLog(learned)] : baseMeasurements;
+    if (setup.state !== 'ELIGIBLE') { if (setup.state === 'NEEDS_DATA') counters.needsData += 1; tracker.decide(setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'NO_TRADE', setup.refused, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+    funnel.setupQualified += 1;
+    let operationalDurationMs = policy.execution.maxDurationMs;
+    if (setupSelectionEnabled) {
+      const duration = setupDurationBound({ policyMaxDurationMs: policy.execution.maxDurationMs, setupMaxDurationMs: setup.maxDurationMs });
+      if (!duration.ok) { tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', [duration.reason], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+      operationalDurationMs = duration.maxDurationMs;
+    }
+    // a seeded nomination control (focused completion §5): ONE deterministic draw per canonical episode, before any reservation, never redrawn
+    if (armRule?.nominationFilter && !armRule.nominationFilter({ episodeId, assetId: c.assetId, setupId })) { tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', ['SEEDED_CONTROL_NOT_SELECTED'], snap, { inputMode, caseRefs, measurements }); }
+    // permission intersection: controls, mode, restrictions, health, clock
+    // ONE shared law with the dispatcher's pre-send check (closeout R01): controls, restrictions, mode, authorization, clock, writer
+    const s = state(); const blocked = entryPermission(s, { controls: controls(), nowTs: D, assetId: c.assetId, pair: c.symbol, runMode: mode, clockTrusted: clock.status ? clock.status().trusted !== false : true, writerHeld: dispatcher.writerHeld ? dispatcher.writerHeld() && !dispatcher.writerLost() : true }).reasons;
+    if (blocked.length) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', blocked, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+    if (setup.scenario.target === null) { tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', ['NO_SCENARIO_TARGET'], snap, { inputMode, caseRefs, measurements }); }
+    // cost + size (largest legal lot inside cash, stressed risk, cluster caps) — computed OUTSIDE the account lock
+    const clusterId = clusterIdOf(clusters(), c.assetId); const budget = riskBudgetFor({ state: s, limits: s.limits, lockLevel: lockLevel(), clusterId }); if (!budget) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['EQUITY_UNKNOWN'], snap, { inputMode, caseRefs, measurements }); }
+    const fee = feeOf(c.symbol);
+    // sizing: the exact existing search when the dynamic-sizing switch is off; the size ladder over the SAME
+    // risk-bounded budget and SAME cost law when it is on, with every candidate size recorded
+    let found;
+    if (dynamicSizing) {
+      // the ladder's prepared inputs come ONLY from what this decision already holds: the UNCHANGED admission law
+      // per size (concentration/cluster/reservations/risk caps), the freshness law from policy, and — only when a
+      // forward-validated candidate applies AND declares one — its maximum evidence-supported size. budget.cash is
+      // caps.cashAvailable, already net of open reservations. Nothing is invented; absent evidence keeps
+      // full-balance ineligible inside the ladder.
+      const prepared = {
+        admissible: (ev2) => admitCandidate({ state: s, candidate: { assetId: c.assetId, clusterId, entryCashOut: ev2.entryCashOut, riskUsd: ev2.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: s.limits, lockLevel: lockLevel(), clusters: clusters() }),
+        candidateMaxSizeUsd: learned?.applied && Number.isFinite(learned.selected?.maxSizeUsd) ? learned.selected.maxSizeUsd : null,
+        maxBookAgeMs: policy.execution.maxBookAgeMs,
+      };
+      const ladder = evaluateSizeLadder({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget, fractions: dynamicSizing.fractions ?? undefined, prepared, nowTs: D });
+      measurements = [...measurements, sizingMeasurement(ladder), ...sizingCandidateLog(ladder)];
+      if (!ladder.selected) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', 'NO_ELIGIBLE_SIZE_ON_LADDER'], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+      found = ladder.selected.found;
+    } else {
+      found = sizeSearch({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget });
+    }
+    if (found.status !== 'OK') { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', found.reason, ...(found.binding ?? [])], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+    const e = found.evaluation; funnel.costQualifiedAtLegalSize += 1;
+    const admission = admitCandidate({ state: s, candidate: { assetId: c.assetId, clusterId, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: s.limits, lockLevel: lockLevel(), clusters: clusters() });
+    const valuationRef = { snapshotDigest: snap.digest, entryLimitPrice: e.entryLimitPrice, entryCashOut: e.entryCashOut, entryBookEstimateCashOut: e.entryBookEstimate.cashOut, scenarioExitCashIn: e.scenarioExitCashIn, scenarioNetProfit: e.scenarioNetProfit, executionUncertaintyBuffer: e.executionUncertaintyBuffer, bufferedScenarioNetProfit: e.bufferedScenarioNetProfit, scenarioStressedLoss: e.scenarioStressedLoss, rewardRiskRatio: e.rewardRiskRatio, feeDigest: fee.feeDigest, expectancyState: 'UNCALIBRATED' };
+    const sizing = { q: found.q, entryLimitPrice: e.entryLimitPrice, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, bufferedScenarioNetProfit: e.bufferedScenarioNetProfit, binding: found.binding, clusterId };
+    // challenger verdicts (focused completion §5) computed from REAL inputs at D through the production feature functions: an arm admits only
+    // on its declared law (D1 KNOWN ALLOW, D2 KNOWN ALLOW / NO_RULE, D3 KNOWN ALLOW); UNKNOWN never admits; every verdict is a closed record
+    let verdicts = null; if (armRule?.challengers?.length) { const ch = challengerVerdicts({ c, D, snap, fast, found, e, fee, setupId, episodeId, frozen }); verdicts = ch.verdicts; if (ch.blocked.length) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ch.blocked, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); } }
+    if (!admission.ok) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', admission.reasons, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); }
+    // ranked admission: wait for this pass's batch to be ordered, then re-admit against the state the earlier winners left behind
+    // the ONE allowlisted learned effect: a bounded nudge to the RANK KEY of an already fully qualified candidate.
+    // It can only reorder this admission batch; it cannot admit, size, or bypass anything, and the committed
+    // valuationRef/sizing keep the untouched baseline ratio.
+    const rankRatio = learned?.applied && e.rewardRiskRatio !== null && Number.isFinite(Number(e.rewardRiskRatio)) ? Number(e.rewardRiskRatio) + learned.adjust : e.rewardRiskRatio;
+    const rank = { rewardRiskRatio: rankRatio, costBps: e.costBps ?? null, firstKnownTs: c.nominationKnownAtTs, assetId: c.assetId };
+    if (setupSelectionEnabled) Object.assign(rank, { setupId, decisionId: frozen.decisionId });
+    const slot = await admissionGate({ rank }); c.lastRank = { rank: slot.rank, of: slot.of, ts: D };
+    if (setupSelectionEnabled) {
+      measurements = [...measurements, selectionMeasurement({ setupId, selected: slot.selected, winnerSetupId: slot.winnerSetupId, rank: slot.rank, of: slot.of })];
+      if (!slot.selected) { tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', ['STRATEGY_NOT_SELECTED_SAME_UNDERLYING'], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); }
+    }
+    let claimedUnderlying = false;
+    try {
+    const again = admitCandidate({ state: state(), candidate: { assetId: c.assetId, clusterId, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: state().limits, lockLevel: lockLevel(), clusters: clusters() });
+    if (!again.ok) { tracker.decide('ENTRY_REFUSED'); return await recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', [...again.reasons, `RANKED_${slot.rank}_OF_${slot.of}`], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); }
+    // ONE transaction: decision + reservation + shell + pin + outbox intent, rechecked against the current revision
+    const decision = buildDecision({ c, setupId, episodeId, frozen, status: 'ENTRY_RESERVED', reasonCodes: [], snap, decisionTs: D, inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing });
+    const n = Object.keys(s.orders).length + 1; const positionId = `pos-${c.assetId}-${D}-${n}`; const reservationId = `res-${decision.decisionId.slice(4, 20)}`; const orderId = `ord-${c.assetId}-${D}-${n}`; const clientOrderId = `s${(D % 1e9).toString(36)}${n.toString(36)}`.slice(0, 18);
+    const events = [ev('DECISION_RECORDED', decisionRecord(decision, verdicts)), ev('RESERVATION_OPENED', { reservationId, decisionId: decision.decisionId, assetId: c.assetId, pair: c.symbol, cashReserved: e.entryCashOut, riskReserved: e.scenarioStressedLoss, clusterId, expiresTs: D + policy.execution.proposalExpiryMs }), ev('POSITION_OPENED', { positionId, decisionId: decision.decisionId, assetId: c.assetId, pair: c.symbol, specDigest: c.spec.specDigest, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, targetProceedsRecipe: 'SHIFTED_BOOK_STRESS_50', atr14: frozen.atr14, maxDurationMs: canaryDurationBound(s, operationalDurationMs), feedPinned: true, requestedQty: found.q, clusterId }), ev('FEED_PIN', { symbol: c.symbol, action: 'PIN', reason: `position shell ${positionId}`, ts: D }), ev('ORDER_INTENT', { intentId: `int-${orderId}`, orderId, clientOrderId, reservationId, positionId, kind: s.authorization && !s.authorization.ended && s.authorization.kind === 'CANARY' ? 'CANARY_ENTRY' : 'ENTRY', side: 'buy', pair: c.symbol, qty: found.q, limitPrice: e.entryLimitPrice, orderType: 'limit', timeInForce: 'IOC', protection: { ordertype: 'stop-loss', trigger: 'last', price: M.roundToStep(frozen.structuralStop, c.spec.priceIncrement, 'FLOOR') }, deadlineTs: D + policy.execution.entryDeadlineMs, feeDigest: fee.feeDigest, specDigest: c.spec.specDigest, snapshotDigest: snap.digest, createdTs: D })];
+    const revisionSeen = dispatcher.revision();
+    // the valued snapshot is persisted BEFORE the durable intent (closeout R11): a dispatched order references evidence on disk
+    if (snapshotStore) { const persisted = await snapshotStore.persist(snap, { purpose: 'DECISION', ref: decision.decisionId }); if (!persisted.ok) { counters.snapshotPersistFailures += 1; tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['DECISION_SNAPSHOT_NOT_PERSISTED'], snap, { inputMode, caseRefs, measurements, valuationRef, sizing }); } }
+    try { await dispatcher.commit(events, { retryOnConflict: true, recheck: (cur) => (dispatcher.revision() === revisionSeen || admitCandidate({ state: cur, candidate: { assetId: c.assetId, clusterId, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: cur.limits, lockLevel: lockLevel(), clusters: clusters() }).ok) && !entryBlockingRestrictions(cur).length }); claimedUnderlying = true; } catch (err) { counters.revalidationRefusals += 1; tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', [err.code === 'REDUCER_REFUSED' ? err.detail.code : err.code ?? 'COMMIT_FAILED'], snap, { inputMode, caseRefs, measurements, valuationRef, sizing }); }
+    if (feed) feed.admit(c.symbol, { coin: c.assetId, priority: 'PENDING', reason: positionId }); funnel.reserved += 1; decisions.push(decision); if (decisions.length > 256) decisions.shift(); counters.decisions += 1; tracker.decide('ENTRY_RESERVED');
+    // last-moment revalidation on the freshest accepted book (one retry law: a changed book that cannot buy q at the limit refuses and releases the unsent reservation)
+    const fresh = c.lastBook; if (fresh && fresh.digest !== snap.digest) { const again = evaluateEntry({ snapshot: fresh, q: found.q, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel }); if (again.status !== 'OK' || M.gt(again.entryLimitPrice, e.entryLimitPrice) || (now() - fresh.receiptTs) > policy.execution.maxBookAgeMs) { counters.revalidationRefusals += 1; await dispatcher.commit([ev('ORDER_STATE', { orderId, state: 'CANCELLED', nativeOrderId: null, nativeCumQty: '0', reason: `revalidation refused before dispatch: ${again.reasons?.join(',') || 'limit would rise / book stale'}`, sourceTs: null, receiptTs: now() }), ev('RESERVATION_RELEASED', { reservationId, reason: 'REFUSED_AT_REVALIDATION', releasedCash: e.entryCashOut, releasedRisk: e.scenarioStressedLoss, ts: now() })]); if (feed) feed.admit(c.symbol, { coin: c.assetId, priority: 'CANDIDATE' }); return decision; } }
+    funnel.sent += 1; counters.entries += 1; lastEntryMono = clock.monotonic(); dispatcher.enqueue('ENTRY', () => dispatcher.dispatchEntry(orderId)).catch((err) => log(`dispatch ${orderId}: ${err.message}`)); return decision;
+    } finally { if (setupSelectionEnabled) slot.done({ claimed: claimedUnderlying }); else slot.done(); }
+  }
+  // ---- challenger verdicts at D (research arms only) --------------------------------------------------------------------------------
+  const boundedFeature = (f) => JSON.parse(JSON.stringify(f, (k, v) => (Array.isArray(v) && v.length > 32 ? v.slice(0, 32) : v)));
+  // 60s mid returns for the target and its frozen peers from THIS arm's accepted books: an endpoint outside the books is missing, never filled
+  function midAt(assetId, ts) { const c = [...candidates.values()].find((x) => x.assetId === assetId); if (!c) return null; let best = null; for (const b of c.books) { if (b.ts <= ts && b.ts >= ts - 5000) best = b; if (b.ts > ts) break; } return best ? best.mid : null; }
+  function returnsFor({ self, peers, startTs, endTs, recorded = null }) { const out = {}; for (const a of [self, ...peers.map((p) => p.asset)]) { const s = midAt(a, startTs); const e = midAt(a, endTs); if (s !== null && e !== null) out[a] = { startTs, endTs, startMid: s, endMid: e, source: 'ARM_BOOKS' }; else if (recorded?.[a] && recorded[a].startTs === startTs && recorded[a].endTs === endTs) out[a] = { ...recorded[a], source: 'PEER_RECORD' }; } return out; }
+  function challengerVerdicts({ c, D, snap, fast, found, e, fee, setupId, episodeId, frozen }) {
+    const verdicts = {}; const blocked = []; const records = []; const trades = c.flow.window(D - 180_000, D); const books = c.snapshots;
+    for (const ch of armRule.challengers) { let f;
+      if (ch === 'D1_PRESSURE_TO_PROGRESS') f = d1Feature({ trades, books, decisionTs: D, proposedNotional: e.entryCashOut, snapshot: snap, q: found.q, spec: c.spec, fee, liquidation: liquidationValue });
+      else if (ch === 'D2_FLOW_EVENT_RESPONSE') { const w = armRule.inputs?.whale ? armRule.inputs.whale(c.assetId, D) : null; const anomaly = w ? transferAnomaly((w.intervals ?? []).filter((x) => x.knownAtTs <= D)) : { state: 'UNKNOWN', reason: 'NO_WHALE_INPUT' }; f = d2Feature({ anomaly, trades, books, decisionTs: D, coverage: fast.coverage }); }
+      else if (ch === 'D3_RESIDUAL_IGNITION') { const p = armRule.inputs?.peers ? armRule.inputs.peers(D) : null; const membership = p ? peerMembership({ census: p.census, rankings: p.rankings, selectionTs: p.selectionTs, self: c.assetId, excludeBases: policy.universe.excludeBases }) : { state: 'UNKNOWN', reason: 'NO_PEER_INPUT' }; const returns = membership.state === 'KNOWN' ? returnsFor({ self: c.assetId, peers: membership.peers, startTs: D - 60_000, endTs: D, recorded: p?.returns ?? null }) : {}; f = d3Feature({ membership, returns, decisionTs: D }); }
+      else f = { challenger: ch, state: 'UNKNOWN', restriction: 'UNKNOWN', reason: 'CHALLENGER_UNKNOWN' };
+      const word = VERDICT_WORDS.includes(f.restriction) ? f.restriction : 'UNKNOWN'; verdicts[ch] = word; const admits = f.state === 'KNOWN' && (word === 'ALLOW' || (ch === 'D2_FLOW_EVENT_RESPONSE' && word === 'NO_RULE'));
+      if (!admits) blocked.push(`${ch}_${word}${f.reason ? `:${String(f.reason).slice(0, 48)}` : ''}`);
+      records.push({ verdictVersion: VERDICT_RECORD_VERSION, accountId, decisionId: frozen.decisionId, episodeId, assetId: c.assetId, pair: c.symbol, setupId, decisionTs: D, challenger: ch, state: f.state, restriction: word, reason: f.reason ?? null, admits, feature: boundedFeature(f) }); }
+    if (verdictSink) for (const r of records) { try { verdictSink(r); } catch (err) { log(`verdict sink: ${err.message}`); } }
+    return { verdicts, blocked, records };
+  }
+  async function onTick(nowTs = now()) { for (const c of candidates.values()) { c.flow.advance(nowTs); for (const [setupId, tr] of Object.entries(c.episodes)) { const gone = tr.expire(nowTs); if (gone) { counters.expired += 1; c.confirmations.delete(gone.episodeId); recordRefusal(c, setupId, gone.episodeId, 'EXPIRED', ['PROPOSAL_EXPIRED_10S'], c.lastBook).catch(() => {}); } } if (!c.indicators || nowTs - (c.indicators.referenceTs ?? 0) >= 60_000) refreshIndicators(c, nowTs); c.readiness = judgeReadinessMatrix(c, { bars: c.lastBars ?? null, flowCoverage: feed ? feed.coverage(c.symbol, nowTs) : { continuous: true, startTs: c.admittedTs }, bookHealth: feed ? feed.health(c.symbol, nowTs) : { usable: Boolean(c.lastBook) }, baselineBooks: c.books.length, caseState: c.catalystEvent ? 'VERIFIED' : null, controls: { vetoed: (controls().vetoes ?? []).includes(c.assetId), caged: controls().cage }, instrumentOk: c.spec.status === 'online', nowTs }); if (Object.values(c.readiness).some((r) => r.state === 'READY_TO_EVALUATE') && !c.warmedCounted) { c.warmedCounted = true; funnel.warmed += 1; } } await S.tick(); }
+  // a closed position returns its symbol to cooldown; the funnel counts protection / close from journal state
+  function onCommit(s, events) { for (const e of events) { if (e.type === 'EXECUTION_RECORDED' && e.payload.side === 'buy') funnel.filled += 1; if (e.type === 'PROTECTION_STATE' && e.payload.state === 'ACTIVE') funnel.protected += 1; if (e.type === 'POSITION_CLOSED') { funnel.closedReconciled += 1; const pos = s.positions[e.payload.positionId]; const c = pos ? candidates.get(pos.pair) : null; if (c) for (const tr of Object.values(c.episodes)) tr.closed(e.payload.ts); } } }
+  dispatcher.onCommit(onCommit); if (feed) feed.subscribe((e) => { if (e.kind === 'BOOK') onBook(e); else if (e.kind === 'TRADE') onTrade(e); });
+  return { admit, release, onBook, onTrade, onTick, decide, drain: () => S.drain(), candidates: () => [...candidates.values()].map((c) => ({ symbol: c.symbol, assetId: c.assetId, priority: c.priority, lastRank: c.lastRank ?? null, catalystEvent: c.catalystEvent ?? null, indicators: c.indicators ? { atr14: c.indicators.atr14, h20: c.indicators.h20, l20: c.indicators.l20, blockDigest: c.indicators.blockDigest.slice(0, 16) } : null, indicatorsReason: c.indicatorsReason ?? null, readiness: c.readiness, books: c.books.length, flow: c.flow.status(), episodes: Object.fromEntries(Object.entries(c.episodes).map(([k, v]) => [k, v.status()])) })), setCatalystEvent: (symbol, event) => { const c = candidates.get(symbol); if (c) c.catalystEvent = event; }, decisions: () => decisions.slice(), dependenciesAt: (episodeId, decisionTs) => { const p = provenance.get(`${episodeId}|${decisionTs}`); return p ? { ...p } : null; }, funnel: () => ({ ...funnel, refusals: { ...refusals } }), status: () => ({ judgeVersion: JUDGE_VERSION, strategyVersion: STRATEGY_VERSION, costModelVersion: COST_MODEL_VERSION, setups, candidates: candidates.size, counters: { ...counters }, funnel: { ...funnel }, refusals: { ...refusals }, scheduler: S.status(), cache: cache.status(), lastEntryMono, admissionGate: { batches: gate.batches, lastBatch: gate.lastBatch } }), scheduler: S, admissionGate: () => ({ batches: gate.batches, lastBatch: gate.lastBatch }) };
+}

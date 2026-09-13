@@ -1,0 +1,18 @@
+{
+  "name": "Serpent",
+  "short_name": "Serpent",
+  "description": "COBRA ENGINE cockpit — paper-fanged research display. It never decides.",
+  "display": "standalone",
+  "start_url": "/",
+  "scope": "/",
+  "background_color": "#030612",
+  "theme_color": "#030612",
+  "icons": [
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

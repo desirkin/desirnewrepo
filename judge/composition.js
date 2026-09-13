@@ -1,0 +1,283 @@
+// JUDGE — the ONE controlled composition (ticket §9.1): one top-level assembly per mode, used by bin/judge.js and by
+// fly.js's explicit opt-in. It injects read-only market / case accessors into Judge and OWNS execution / Watch. The research
+// service remains a producer (never imports the execution writer). Default startup remains non-trading: without
+// JUDGE_ENABLED=true and an explicit policy / account / mode nothing here is constructed. LIVE credentials are read ONLY
+// from the environment names the policy declares, only for LIVE modes, and are never logged, exported or serialized.
+// Entry permission is the intersection of authenticated controls, account mode / release / authorization, risk and
+// health (each enforced by the reducer / Judge / Watch); no posture label grants permission or invents a fill.
+import path from 'node:path';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { verifyCaseInWorker } from './case-verify-worker.js';
+import { atomicWriteJson } from '../lib/jsonl.js';
+import { dataDir } from '../lib/config.js';
+import { sessionDate } from '../lib/time.js';
+import { Db } from '../persistence/db.js';
+import { runMigrations } from '../persistence/migrate.js';
+import { createPgJournal, createMemoryJournal, JournalError } from '../execution/journal.js';
+import { createDispatcher } from '../execution/dispatcher.js';
+import { createExecutionFeed } from '../execution/feed.js';
+import { createPaperAdapter } from '../execution/paper-adapter.js';
+import { createKrakenAdapter, createNonceStore, specFromAssetPair, KRAKEN_REST_BASE } from '../execution/kraken-adapter.js';
+import { createPermissionClock } from '../execution/clock.js';
+import { feeContract, instrumentSpec, makeEvent, keyFingerprint, digestOf, ACCOUNT_STATE_VERSION } from '../execution/contract.js';
+import { createJudge } from './judge.js';
+import { createWatch } from '../watch/watch.js';
+import { readControls } from '../state/controls.js';
+import { lockLevelForPnlPct } from '../state/locks.js';
+import { loadConfig } from '../lib/config.js';
+import * as M from '../execution/money.js';
+import { readCurrentUniverse } from '../tape/universe.js';
+import { loadJudgePolicy } from './policy.js';
+import { evaluateAccount } from './challengers.js';
+import { ownedBase } from '../execution/reducer.js';
+import { sealsReport, buildLiveAuthorization } from './arming.js';
+import { createBarHistory } from './history.js';
+import { createCaseSource } from './case-source.js';
+import { createFeedRecorder } from './recorder.js';
+import { recordError, bundleBinding } from './experiment-bundle.js';
+import { createSnapshotStore } from './snapshot-store.js';
+import { primaryConfirmedCatalyst, primaryCorrections } from './intake.js';
+import { selectPreparation } from './readiness.js';
+import { codeTreeDigest } from './owner.js';
+
+export const COMPOSITION_VERSION = 'judge-composition-1';
+export const RUN_MODES = Object.freeze(['OBSERVE', 'REPLAY', 'PAPER', 'LIVE_UNARMED', 'LIVE_ARMED']);
+export const judgeDir = () => path.join(dataDir(), 'execution');
+export const projectionFile = () => path.join(judgeDir(), 'projection.json');
+export const PROJECTION_VERSION = 'judge-projection-1';
+export const PREFLIGHT_MAX_AGE_MS = 15 * 60_000;
+export function feeFromPolicy(policy, nowTs) { const f = policy.fees.taker; return feeContract({ venue: 'kraken', pairKey: null, orderType: 'TAKER', rate: f.rate, rateKind: f.rateKind, currency: f.currency, roundingQuantum: f.roundingQuantum, roundingMode: f.roundingMode, minimumFee: f.minimumFee, scope: f.scope, maxExecutionsBound: f.maxExecutionsBound ?? null, boundSource: f.boundSource ?? null, scheduleId: f.scheduleId, observedTs: nowTs }); }
+// the account/mode namespace law: one account id belongs to exactly one kind; PAPER never becomes LIVE
+export const accountKindOf = (mode) => (mode === 'REPLAY' ? 'REPLAY' : mode === 'PAPER' || mode === 'OBSERVE' ? 'PAPER' : 'LIVE');
+export function readCredentials(policy, env, mode) { if (!mode.startsWith('LIVE') || !policy.live) return null; const key = env[policy.live.keyEnv]; const secret = env[policy.live.secretEnv]; if (typeof key !== 'string' || !key.length || typeof secret !== 'string' || !secret.length) return null; return { key, secret }; }
+// public instrument specifications from the REST AssetPairs catalog (no key; the ONLY spec source besides an injected fixture)
+export async function loadSpecs({ transport, symbols, nowTs }) { const out = []; if (!transport) return out; const r = await transport(`${KRAKEN_REST_BASE}/0/public/AssetPairs`, { method: 'GET' }); if (!r.ok) throw new Error(`AssetPairs ${r.status}`); const body = JSON.parse(await r.text()); if (Array.isArray(body.error) && body.error.length) throw new Error(`AssetPairs ${body.error[0]}`); for (const [pairKey, p] of Object.entries(body.result ?? {})) { if (!symbols.includes(p.wsname)) continue; try { out.push(specFromAssetPair(pairKey, p, { observedTs: nowTs, canonicalCoin: String(p.wsname).split('/')[0] })); } catch { /* an unparseable pair is simply not admitted */ } } return out; }
+const excluded = (policy, symbol) => policy.universe.excludeBases.includes(symbol.split('/')[0]);
+
+export const paperCheckpointFile = (acct) => path.join(judgeDir(), `paper-checkpoint-${acct}.json`);
+function readPaperCheckpoint(acct) { try { const raw = JSON.parse(readFileSync(paperCheckpointFile(acct), 'utf8')); return raw && raw.version === 'paper-depletion-checkpoint-1' && raw.accountId === acct && Array.isArray(raw.levels) ? raw : null; } catch { return null; } }
+export const PERIODIC_RECONCILE_MS = 5 * 60_000; export const CLOCK_REQUALIFY_MS = 60_000; export const SCHEDULER_TICK_MS = 25;
+export async function composeJudge({ policyFile, mode, accountId = null, env = process.env, log = console.log, db = null, journal = null, clock = null, feed = null, transport = null, WebSocketImpl = null, specs = null, history = null, caseSource = null, casesDir = null, controlsSource = null, nominations = null, recordDir = null, allowPrivate = () => false, allowOrders = () => false, requireDb = null, writeProjection = true, codeDigest = undefined, caseWorker = null, exchangeContext = 'kraken-spot', experimentId = null, armRule = null, exitPolicy = null, verdictSink = null, learningActivationSource = null, dynamicSizing = null }) {
+  if (!RUN_MODES.includes(mode)) throw new Error(`mode ${mode} outside ${RUN_MODES.join('/')}`);
+  const loaded = loadJudgePolicy(policyFile); const policy = loaded.policy; const policyDigest = loaded.digest; const acct = accountId ?? policy.account.accountId; const kind = accountKindOf(mode);
+  if (mode.startsWith('LIVE') && policy.mode !== 'LIVE') throw new Error('a LIVE run needs a LIVE policy (the paper sample cannot be promoted by a flag)'); if (!mode.startsWith('LIVE') && policy.mode === 'LIVE') throw new Error('a LIVE policy cannot run a paper / observe mode account');
+  const pclock = clock ?? createPermissionClock({ log }); const nowTs = () => pclock.now(); const treeDigest = codeDigest === undefined ? codeTreeDigest() : codeDigest;
+  // ---- journal: PostgreSQL is the authority for PAPER / LIVE; REPLAY and OBSERVE use a memory journal (hypothetical accounts) ----
+  let ownDb = null; let jr = journal; const needDb = requireDb ?? (mode === 'PAPER' || mode.startsWith('LIVE'));
+  if (!jr) { if (needDb) { ownDb = db ?? new Db({ log }); if (!ownDb.configured()) throw new JournalError('DB_REQUIRED', `${mode} needs DATABASE_URL: the journal authority is PostgreSQL`); if (!(await ownDb.connect())) throw new JournalError('DB_UNAVAILABLE', 'database unreachable: no account authority, no dispatch'); await runMigrations(ownDb, { log }); jr = createPgJournal({ db: ownDb, log }); } else jr = createMemoryJournal({ log }); }
+  const exists = await jr.exists(acct); if (!exists && mode !== 'OBSERVE' && mode !== 'REPLAY') throw new JournalError('ACCOUNT_UNINITIALIZED', `account ${acct} is not initialized: run init-${kind.toLowerCase()} with owner intent first`);
+  if (!exists) await jr.create(acct, { accountKind: kind });
+  const writer = await jr.acquireWriter(acct); if (!writer) throw new JournalError('WRITER_HELD', `another writer owns ${acct}`);
+  const loadedAcct = await jr.load(acct); if (loadedAcct.state.initialized && loadedAcct.state.accountKind !== kind) { await writer.release(); throw new JournalError('ACCOUNT_KIND_MISMATCH', `${acct} is a ${loadedAcct.state.accountKind} account; ${mode} needs ${kind}`); }
+  // ---- feed / specs / fees / recorder ----
+  const fd = feed ?? createExecutionFeed({ clock: nowTs, limits: { maxCandidates: policy.universe.maxCandidates, maxResearch: policy.universe.maxResearch, maxHotSet: policy.universe.maxHotSet }, log });
+  // focused completion §3: the recording is an experiment INPUT BUNDLE — typed inputs (nominations, instruments, fees, history retrievals,
+  // consumed cases, control changes) are captured beside the raw feed rows under one capture sequence, validated before they are written
+  const recorder = recordDir ? createFeedRecorder({ dir: recordDir, clock: nowTs, log, binding: bundleBinding({ experimentId, policyDigest, codeDigest: treeDigest, strategyVersion: policy.strategyVersion, sourcePrefix: `journal:${acct}`, seed: policy.evaluation?.seed ?? null }), validateTyped: (k, p) => recordError(k, p, 'capture') }) : null; let stopped = false;
+  const captureInput = (kind, payload) => { if (!recorder || stopped) return false; try { return recorder.record(null, nowTs(), { kind, payload }); } catch (err) { log(`capture ${kind}: ${String(err?.message ?? err).slice(0, 160)}`); return false; } };
+  // bounded decision / exit snapshots persisted before dispatch (closeout R11): beside the recording when one exists, else under the execution dir
+  const snapshotStore = writeProjection || recordDir ? createSnapshotStore({ dir: recordDir ? path.join(recordDir, 'snapshots') : path.join(judgeDir(), 'snapshots', acct), log }) : null;
+  // the tape-facing feed: recorded when a recorder exists, and a no-op after stop() (producers stop BEFORE the drain, closeout R08 / R15)
+  const droppedAfterStop = { messages: 0 };
+  const tapeFeed = { ...fd, ingest: (raw, ts) => { if (stopped) { droppedAfterStop.messages += 1; return undefined; } if (recorder) recorder.record(raw, ts); return fd.ingest(raw, ts); }, onConnect: (ts) => { if (stopped) return undefined; if (recorder) recorder.record(null, ts, { connect: true }); return fd.onConnect(ts); }, onDisconnect: (ts) => { if (stopped) return undefined; if (recorder) recorder.record(null, ts, { disconnect: true }); return fd.onDisconnect(ts); } };
+  const fee = feeFromPolicy(policy, nowTs()); const specMap = new Map(); const captureSpec = (s) => { specMap.set(s.wsname, s); captureInput('INSTRUMENT', { spec: { ...s }, observedTs: nowTs() }); }; if (specs) for (const s of specs) captureSpec(s); const specOf = (symbol) => specMap.get(symbol) ?? null; captureInput('FEE', { fee: { ...fee }, observedTs: nowTs() });
+  // ---- adapter ----
+  const credentials = readCredentials(policy, env, mode); const fp = credentials ? keyFingerprint(credentials.key) : null;
+  const adapter = kind === 'LIVE' ? createKrakenAdapter({ accountId: acct, clock: nowTs, credentials, nonceStore: fp ? createNonceStore({ dir: judgeDir(), fingerprint: fp, wall: nowTs }) : null, transport: transport ?? (mode.startsWith('LIVE') ? (u, i) => fetch(u, i) : null), WebSocketImpl: WebSocketImpl ?? globalThis.WebSocket ?? null, allowPrivate, allowOrders: () => mode === 'LIVE_ARMED' && allowOrders(), log, dataDir: judgeDir() }) : createPaperAdapter({ accountId: acct, clock: nowTs, feed: fd, fee, specOf, latencyMs: policy.execution.paperLatencyMs, maxObservationWaitMs: policy.execution.paperMaxObservationWaitMs, restore: { state: loadedAcct.state, checkpoint: mode === 'REPLAY' ? null : readPaperCheckpoint(acct) }, log });
+  const controlsRaw = controlsSource ?? (() => { const c = readControls(); return { kill: Boolean(c.kill?.active), cage: Boolean(c.cage?.active), vetoes: (c.vetoes ?? []).map((v) => v.prediction_id) }; });
+  let controlSeen = null; let controlRevision = 0; const controls = () => { const c = controlsRaw(); if (recorder) { const key = JSON.stringify([c.kill, c.cage, c.vetoes]); if (key !== controlSeen) { controlSeen = key; controlRevision += 1; captureInput('CONTROL', { kill: Boolean(c.kill), cage: Boolean(c.cage), vetoes: [...new Set((c.vetoes ?? []).map(String))], revision: controlRevision }); } } return c; };
+  // the dispatcher's authority context (closeout R01): run mode, binding digests / key, controls, clock trust — checked again at the send
+  const dispatcher = createDispatcher({ accountId: acct, journal: jr, writer, adapter, clock: pclock, feed: fd, specOf, feeOf: () => fee, controls, authority: { runMode: mode, binding: { policyDigest, codeDigest: treeDigest, keyFingerprint: fp, releaseDigest: null }, clockTrusted: () => (kind === 'LIVE' && pclock.status ? pclock.status().trusted !== false : true), maxBookAgeMs: policy.execution.maxBookAgeMs }, log }); await dispatcher.load();
+  // gain restrictions are account-specific (closeout R06): THIS account's session P&L against the configured lock thresholds, never the legacy ledger's daily lock
+  let lockThresholds = null; try { lockThresholds = loadConfig().locks ?? null; } catch { lockThresholds = null; }
+  const lockLevel = () => { try { const s = dispatcher.state(); const sess = s?.performance?.session; if (!sess || !lockThresholds || !M.isPositive(sess.openingEquity ?? '0')) return 'NONE'; const pct = M.toStatistic(M.div(M.mul(sess.dayPnl, '100'), sess.openingEquity, 6, 'HALF_UP')); return lockLevelForPnlPct(pct, lockThresholds); } catch { return 'NONE'; } };
+  const hist = history ?? createBarHistory({ clock: nowTs, fetchImpl: transport, pairKeyOf: (symbol) => specOf(symbol)?.pairKey ?? null, log, onRetrieved: ({ symbol, rows, receiptTs, lastCommitted }) => captureInput('HISTORY', { symbol, receiptTs, lastCommitted, rows: rows.slice(0, 800).map((r) => r.slice(0, 8)), source: 'KRAKEN_OHLC' }) });
+  const cases = caseSource ?? (casesDir ? createCaseSource({ casesDir, clock: nowTs, mode, log, worker: caseWorker ?? ((run, { dir, limits }) => verifyCaseInWorker(dir, { limits })) }) : { consumed: () => null, refresh: async () => {}, status: () => ({ casesDir: null, known: 0, verified: 0 }) });
+  // verified evidence delivery (closeout R10): the freshest admissible case per candidate supplies the catalyst event to the Judge and
+  // verified PRIMARY corrections for held assets supply falsifiers to the Watch — through the intake law, never prose
+  let falsifierList = []; const evidenceReport = { catalysts: 0, corrections: 0, lastTs: null };
+  // every consumed case is captured ONCE with the verifier's output (digest re-derived at reopen) so a replay re-runs the same intake consumer
+  const capturedCases = new Set(); function captureCase(assetId, consumed, t) { if (!recorder) return; const key = `${consumed.caseId}|${consumed.analysisId}`; if (capturedCases.has(key)) return; const verified = cases.verified ? cases.verified(consumed.dir) : null; if (!verified?.ok) { log(`capture CASE ${key}: verifier output unavailable`); return; } const verification = { ok: true, manifest: verified.manifest, analyses: verified.analyses, packets: verified.packets, verification: verified.verification, verifiedTs: verified.verifiedTs ?? null, reasons: verified.reasons ?? [] }; capturedCases.add(key); captureInput('CASE', { assetId, caseId: consumed.caseId, packetId: consumed.packetId, analysisId: consumed.analysisId, completionTs: consumed.completionTs, receiptTs: consumed.receiptTs ?? t, direction: consumed.direction ?? null, provenance: consumed.provenance, outcome: 'CONSUMED', reasons: [], packet: consumed.packet, analysis: consumed.analysis, verification, verificationDigest: digestOf(verification) }); }
+  function deliverEvidence(t) { if (!cases.consumed) return; falsifierList = []; const held = Object.values(dispatcher.state()?.positions ?? {}).filter((p) => p.state !== 'FLAT'); const assets = new Set([...judge.candidates().map((c) => c.assetId), ...held.map((p) => p.assetId)]);
+    for (const assetId of assets) { let consumed = null; try { consumed = cases.consumed(assetId, { decisionTs: t }); } catch (err) { log(`evidence ${assetId}: ${err.message}`); continue; } const symbols = judge.candidates().filter((c) => c.assetId === assetId).map((c) => c.symbol); if (!consumed?.ok) { for (const s of symbols) judge.setCatalystEvent(s, null); continue; } captureCase(assetId, consumed, t); const cat = primaryConfirmedCatalyst({ packet: consumed.packet, analysis: consumed.analysis, canonicalCoin: assetId, decisionTs: t }); for (const s of symbols) judge.setCatalystEvent(s, cat.ok ? cat.event : null); if (cat.ok) evidenceReport.catalysts += 1; if (held.some((p) => p.assetId === assetId)) { const corr = primaryCorrections({ packet: consumed.packet, canonicalCoin: assetId, decisionTs: t }); falsifierList.push(...corr); evidenceReport.corrections += corr.length; } } evidenceReport.lastTs = t; }
+  // research seams (focused completion §5): an arm rule / alternative exit policy / verdict sink exist only for a REPLAY composition
+  if ((armRule || exitPolicy || verdictSink) && mode !== 'REPLAY') throw new Error('armRule / exitPolicy / verdictSink are research configuration: only a REPLAY composition may carry them');
+  const watch = createWatch({ accountId: acct, dispatcher, adapter, feed: fd, clock: pclock, specOf, feeOf: () => fee, controls, falsifiers: () => falsifierList, snapshotStore, log, exitPolicy });
+  // LEARN-1 consumer seam (ADDENDUM-2 §08): an OPTIONAL bounded read-only activation source injected beside the
+  // existing case/market accessors. Absent (fly.js and every current composition pass nothing), the Judge is the
+  // byte-identical baseline. When present, the prepared immutable snapshot is refreshed OUTSIDE the decision loop
+  // (here, lazily at most once per PERIODIC_RECONCILE window) — never a store read, network call or model call in
+  // admission; a source fault yields no snapshot, which the selector answers with BASELINE_ONLY.
+  let learningSnap = null; let learningSnapTs = 0;
+  const learning = learningActivationSource ? { snapshot: () => { const t = nowTs(); if (!learningSnap || t - learningSnapTs > 60_000) { try { learningSnap = learningActivationSource(); learningSnapTs = t; } catch (err) { log(`learning activation source failed (baseline): ${String(err?.message ?? err).slice(0, 160)}`); learningSnap = null; } } return learningSnap; } } : null;
+  const judge = createJudge({ accountId: acct, policy, policyDigest, dispatcher, feed: fd, clock: pclock, specOf, feeOf: () => fee, history: hist, caseSource: cases, controls, lockLevel, log, mode, snapshotStore, armRule, verdictSink, learning, dynamicSizing });
+  if (hist.onTrade) fd.subscribe((e) => { if (e.kind === 'TRADE') hist.onTrade(e.trade); });
+  // ---- nominations: the tape's current universe (bounded by the policy), never a research ranking, never a buy list ----
+  const nominate = nominations ?? (() => { const u = readCurrentUniverse(); return (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); });
+  // bounded preparation (ticket §4.5 / J11): at most policy.universe.preparationSlots warm candidates, newest nomination first, held assets
+  // outside the contest; a candidate that loses its slot is released (never a held / pending one: judge.release refuses those)
+  let prepared = new Map(); let lastPreparation = null; const capturedNominations = new Set();
+  // A source that carries no nomination clock (the tape universe is a STANDING list, not an event stream) is stamped ONCE —
+  // at the first pass that observed it — and merely RE-AFFIRMED afterwards. Re-stamping it with the current clock on every
+  // pass made every standing nomination look newer than the candidates it was already preparing: with more nominations than
+  // slots the six preparation slots flipped between disjoint groups at every cadence and no candidate ever warmed. The
+  // affirmation clock keeps legitimate expiry intact (a nomination that stops being listed still ages out of the TTL).
+  const nominationClocks = new Map(); const NOMINATION_CLOCKS_MAX = 4096;
+  function nominationClocksOf(key, explicitTs, t) {
+    const rec = nominationClocks.get(key); const knownAtTs = Number.isSafeInteger(explicitTs) ? explicitTs : rec?.knownAtTs ?? t;
+    if (rec) { rec.knownAtTs = knownAtTs; rec.lastSeenTs = t; }
+    else { if (nominationClocks.size >= NOMINATION_CLOCKS_MAX) for (const [k] of [...nominationClocks.entries()].sort((a, b) => a[1].lastSeenTs - b[1].lastSeenTs).slice(0, Math.ceil(NOMINATION_CLOCKS_MAX / 8))) nominationClocks.delete(k); nominationClocks.set(key, { knownAtTs, lastSeenTs: t }); }
+    return { nominationKnownAtTs: knownAtTs, nominationLastSeenTs: t };
+  }
+  function admitNominations() { const t = nowTs(); const held = new Set(Object.values(dispatcher.state()?.positions ?? {}).filter((p) => p.state !== 'FLAT').map((p) => p.assetId)); const list = nominate().filter((x) => x?.symbol && !excluded(policy, x.symbol) && specOf(x.symbol)).map((x) => { const assetId = x.assetId ?? x.symbol.split('/')[0]; const source = x.source ?? 'UNIVERSE'; return { symbol: x.symbol, assetId, source, ...nominationClocksOf(`${assetId}|${x.symbol}|${source}`, x.nominationKnownAtTs, t) }; });
+    for (const n of list) { const key = `${n.assetId}|${n.symbol}|${n.nominationKnownAtTs}`; if (!capturedNominations.has(key)) { capturedNominations.add(key); if (capturedNominations.size > 8192) capturedNominations.clear(); captureInput('NOMINATION', { symbol: n.symbol, assetId: n.assetId, source: n.source, nominationKnownAtTs: n.nominationKnownAtTs }); } }
+    const sel = selectPreparation({ nominations: list, held, remainingSlots: Math.min(policy.universe.preparationSlots, policy.universe.maxCandidates), previous: prepared, nowTs: t }); lastPreparation = { slots: sel.slots, selected: sel.selected.map((n) => n.assetId), preempted: sel.preempted, lost: sel.lost, held: sel.held, ts: t };
+    for (const l of sel.lost) { const c = judge.candidates().find((x) => x.assetId === l.assetId); if (c) judge.release(c.symbol); }
+    prepared = new Map(sel.selected.map((n) => [n.assetId, n]));
+    for (const n of sel.selected) { if (judge.candidates().some((c) => c.symbol === n.symbol)) continue; judge.admit(n.symbol, { assetId: n.assetId, priority: 'CANDIDATE', source: n.source, nominationKnownAtTs: n.nominationKnownAtTs }); }
+    return lastPreparation; }
+  // ---- authorization continuity (A03 / A04): a changed code / policy / key binding ends the OLD entry authority; exposure stays managed ----
+  async function checkAuthorizationBinding() { const s = dispatcher.state(); const a = s?.authorization; if (!a || a.ended || a.expiresTs <= nowTs()) return null; const reasons = []; if (a.policyDigest !== policyDigest) reasons.push('POLICY_CHANGED'); if (a.kind !== 'PAPER_RUN' && !treeDigest) reasons.push('CODE_IDENTITY_UNKNOWN'); if (a.codeDigest && treeDigest && a.codeDigest !== treeDigest) reasons.push('CODE_CHANGED'); if (a.keyFingerprint && fp && a.keyFingerprint !== fp) reasons.push('KEY_CHANGED'); if (!reasons.length) return null; await dispatcher.commit(makeEvent({ type: 'AUTHORIZATION_ENDED', accountId: acct, knownAtTs: nowTs(), payload: { authorizationId: a.authorizationId, reason: 'BINDING_CHANGED', ts: nowTs() } })); log(`authorization ${a.authorizationId} ended: BINDING_CHANGED (${reasons.join(',')})`); return reasons; }
+  let lastPreflight = null;
+  async function preflight() { if (kind !== 'LIVE') return { ok: false, reason: 'NOT_A_LIVE_ACCOUNT' }; const r = await adapter.preflight(); lastPreflight = { ...r, ts: nowTs(), accountId: acct, policyDigest }; return lastPreflight; }
+  // ARM: the authenticated owner intent has ALREADY been verified by the door (CLI / cockpit); this binds and commits it
+  // a preflight report is usable only from THIS key, unexpired (PREFLIGHT_MAX_AGE_MS) and passed; a stale or foreign report is not proof
+  const usablePreflight = (p) => (p && p.ok && p.keyFingerprint === fp && Number.isSafeInteger(p.ts) && nowTs() - p.ts <= PREFLIGHT_MAX_AGE_MS ? p : null);
+  async function arm({ ownerLimits, expiresTs, allocationCeiling, reinvestment = 'NONE', approval, ownerRef, releaseDigest, canary = null, preflight: given = null }) {
+    if (kind !== 'LIVE') return { ok: false, reasons: ['NOT_A_LIVE_ACCOUNT'] };
+    const pf = usablePreflight(given ?? lastPreflight); if (policy.live && (expiresTs - nowTs() > policy.live.armExpiryMs)) return { ok: false, reasons: ['OWNER_EXPIRY_EXCEEDS_POLICY'], state: 'BLOCKED' };
+    const ce = dispatcher.state()?.canaryEvidence ?? null; const built = buildLiveAuthorization({ accountId: acct, releaseDigest, policyDigest, codeDigest: treeDigest, allocationCeiling, reinvestment, ownerLimits, keyFingerprint: fp, ownerRef, expiresTs, restrictionRevision: dispatcher.revision(), nowTs: nowTs(), verifiedAvailableUsd: pf ? pf.checks?.balance?.quoteAvailable ?? null : null, preflight: pf, approval, canary, canaryEvidence: ce ? { ...ce, accountId: acct } : null });
+    if (!built.ok) return built;
+    try { await dispatcher.commit(built.event()); } catch (err) { return { ok: false, reasons: [err.detail?.code ?? err.code ?? 'COMMIT_FAILED'], state: 'BLOCKED', detail: String(err.message ?? '').slice(0, 200) }; }
+    publishProjection(); return { ok: true, reasons: [], authorizationId: built.payload.authorizationId, expiresTs };
+  }
+  async function disarm(reason = 'REVOKED') { const a = dispatcher.state()?.authorization; if (!a || a.ended) return { ok: false, reason: 'NO_ACTIVE_AUTHORIZATION' }; await dispatcher.commit(makeEvent({ type: 'AUTHORIZATION_ENDED', accountId: acct, knownAtTs: nowTs(), payload: { authorizationId: a.authorizationId, reason, ts: nowTs() } })); publishProjection(); return { ok: true, authorizationId: a.authorizationId }; }
+  let projectionTimer = null;
+  function projection() {
+    const s = dispatcher.state(); const positions = Object.values(s?.positions ?? {}); const open = positions.filter((p) => p.state !== 'FLAT'); const pending = Object.values(s?.orders ?? {}).filter((o) => !['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'].includes(o.state));
+    const a = s?.authorization ?? null; const authorization = a ? { authorizationId: a.authorizationId, kind: a.kind, expiresTs: a.expiresTs, ended: a.ended, active: !a.ended && a.expiresTs > nowTs(), allocationCeiling: a.allocationCeiling, releaseDigest: a.releaseDigest } : null;
+    const exiting = open.some((p) => ['EXITING', 'CLOSING', 'DUST'].includes(p.state) || watch.positions().some((w) => w.positionId === p.positionId && w.exit.phase !== 'NONE'));
+    return { projectionVersion: PROJECTION_VERSION, compositionVersion: COMPOSITION_VERSION, ts: nowTs(), accountId: acct, mode: s?.mode ?? mode, runMode: mode, accountKind: kind, policyName: policy.policyName, policyDigest, codeDigest: treeDigest, revision: dispatcher.revision(), writerLost: dispatcher.writerLost(), adapter: adapter.kind, credentialsPresent: Boolean(credentials), keyFingerprint: fp, authorization,
+      positions: open.map((p) => ({ positionId: p.positionId, pair: p.pair, state: p.state, base: ownedBase(p), confirmedBase: p.confirmedBase, soldBase: p.soldBase, baseFees: p.baseFees, protection: p.protection.state, trigger: p.protection.trigger, firstFillTs: p.firstFillTs, initialR: p.initialR?.value ?? null, structuralStop: p.structuralStop, exit: watch.positions().find((w) => w.positionId === p.positionId)?.exit ?? null })), runtimeLanes: laneStatus(),
+      pendingOrders: pending.map((o) => ({ orderId: o.orderId, state: o.state, kind: o.kind })), restrictions: Object.keys(s?.restrictions ?? {}), performance: s?.performance ?? null, valuation: s?.valuation ?? null, cash: s?.cash ?? null, limits: s?.limits ?? null, clock: pclock.status ? pclock.status() : null, feed: fd.status(), judge: judge.status(), decisions: judge.decisions().slice(-12), candidates: judge.candidates().map((c) => ({ symbol: c.symbol, priority: c.priority, readiness: c.readiness ?? null })), preparation: lastPreparation, watch: watch.status(), dispatcher: dispatcher.status(), latency: dispatcher.latency(), cases: cases.status(), recorder: recorder ? recorder.status() : null,
+      posture: open.length || pending.some((o) => o.kind === 'ENTRY' || o.kind === 'CANARY_ENTRY') ? (exiting ? 'DIGESTING' : 'STRIKE') : null, exposure: { openPositions: open.length, pendingOrders: pending.length }, projectionWrites: { failed: projectionWriteFailed, lastError: lastProjectionWriteError },
+      seals: sealsReport({ codeTested: 'SEE_TEST_LOG', paperOperational: mode === 'PAPER' ? 'RUNNING_UNSEALED' : 'NOT_RUN', livePreflight: lastPreflight ? (lastPreflight.ok ? 'PASSED_THIS_PROCESS' : `FAILED:${lastPreflight.reason}`) : 'NOT_RUN', liveArmed: authorization?.active ? 'ARMED_UNEXPIRED' : 'NOT_RUN' }) };
+  }
+  // a file failure is a logged, counted, reported failure that never stops the run (closeout R16): the journal stays the truth
+  let projectionWriteFailed = 0; let lastProjectionWriteError = null;
+  function publishProjection() { if (!writeProjection) return; try { mkdirSync(judgeDir(), { recursive: true }); atomicWriteJson(projectionFile(), projection()); } catch (err) { projectionWriteFailed += 1; lastProjectionWriteError = String(err.message ?? err).slice(0, 160); log(`projection write failed: ${err.message}`); } }
+  let heartbeat = null; let schedulerTimer = null; let executions = null; const lifecycle = []; let ticks = 0; let dirty = false; dispatcher.onCommit(() => { dirty = true; });
+  // durable valuation from the Watch's conservative marks (closeout R06): committed when the marks / cash changed or every 60 s;
+  // UNKNOWN (entries blocked) while a held position has no usable book; the reducer derives session / drawdown / gain facts from it
+  let lastValuation = { digest: null, ts: null, unknown: null }; const VALUATION_MAX_AGE_MS = 60_000;
+  async function publishValuation(t) { const s = dispatcher.state(); if (!s?.initialized || dispatcher.writerLost()) return null; const m = watch.marks(t); const digest = `${s.cash}|${m.digest}|${m.unknown}`; if (digest === lastValuation.digest && lastValuation.ts !== null && t - lastValuation.ts < VALUATION_MAX_AGE_MS) return null; const payload = m.unknown ? { ts: t, cashComponent: s.cash, liquidationComponent: null, equity: null, unknown: true, reason: m.reason.slice(0, 300), marks: m.marks.map((x) => ({ positionId: x.positionId, base: x.base, liquidationValue: x.liquidationValue, snapshotDigest: x.snapshotDigest })), sessionDate: sessionDate(new Date(t)) } : { ts: t, cashComponent: s.cash, liquidationComponent: m.liquidation, equity: M.add(s.cash, m.liquidation), unknown: false, reason: 'WATCH_MARKS', marks: m.marks.map((x) => ({ positionId: x.positionId, base: x.base, liquidationValue: x.liquidationValue, snapshotDigest: x.snapshotDigest })), sessionDate: sessionDate(new Date(t)) }; if (m.unknown && s.valuation.unknown && s.valuation.reason === payload.reason) { lastValuation = { digest, ts: t, unknown: true }; return null; } try { await dispatcher.commit(makeEvent({ type: 'VALUATION', accountId: acct, knownAtTs: t, payload }), { retryOnConflict: true, recheck: (cur) => cur.cash === payload.cashComponent }); lastValuation = { digest, ts: t, unknown: m.unknown }; return payload; } catch (err) { if (err.code !== 'RECHECK_FAILED') log(`valuation: ${err.message}`); return null; } }
+  // ---- clock qualification wired to real venue inputs (closeout R08): REST Time at start, WS ping / REST Time on requalification; the
+  // durable CLOCK_ANCHOR follows every trust change; an untrusted clock is a durable restriction (no additions, safety continues) ----
+  let lastQualifyMono = null; const clockReport = { attempts: 0, ok: 0, lastReason: null, lastSource: null };
+  async function qualifyClock() { if (kind !== 'LIVE' || typeof pclock.qualify !== 'function') return null; clockReport.attempts += 1; lastQualifyMono = pclock.monotonic(); let sample = null; try { if (adapter.ping && adapter.executionsState && adapter.executionsState().connected) sample = await adapter.ping(); if (!sample?.ok && typeof adapter.serverTime === 'function') sample = await adapter.serverTime(); } catch (err) { sample = { ok: false, reason: String(err?.message ?? err).slice(0, 120) }; } const r = sample?.ok ? pclock.qualify({ serverUtcTs: sample.serverUtcTs, sentMono: sample.sentMono, receivedMono: sample.receivedMono, precisionMs: sample.precisionMs, source: sample.source, requestIdMatched: sample.requestIdMatched ?? true, responseConsistent: sample.responseConsistent ?? true }) : { ok: false, reason: sample?.reason ?? 'NO_SAMPLE' }; if (r.ok) clockReport.ok += 1; clockReport.lastReason = r.ok ? null : r.reason; clockReport.lastSource = sample?.source ?? null; if (!stopped) await anchorClock(); return r; }
+  async function anchorClock() { if (stopped || typeof pclock.anchorRecord !== 'function') return; const s = dispatcher.state(); if (!s?.initialized || dispatcher.writerLost()) return; const rec = pclock.anchorRecord(); const prev = s.clockAnchor; if (prev && prev.trusted === rec.trusted && prev.source === rec.source) return; try { await dispatcher.commit(makeEvent({ type: 'CLOCK_ANCHOR', accountId: acct, knownAtTs: nowTs(), payload: { anchorUtcTs: rec.anchorUtcTs, monotonicMs: rec.monotonicMs, uncertaintyMs: rec.uncertaintyMs, source: rec.source, watermarkTs: Math.max(rec.watermarkTs, prev?.watermarkTs ?? 0), trusted: rec.trusted } })); } catch (err) { log(`clock anchor: ${err.message}`); } }
+  // ---- instrument specs through the SHARED transport for nominated symbols that carry none (closeout R09) ----
+  let specLoad = null; function ensureSpecs() { if (!transport || specLoad) return specLoad; const missing = [...new Set(nominate().map((x) => x?.symbol).filter((s) => s && !specMap.has(s) && !excluded(policy, s)))]; if (!missing.length) return null; specLoad = loadSpecs({ transport, symbols: missing, nowTs: nowTs() }).then((list) => { for (const s of list) captureSpec(s); return list.length; }).catch((err) => { log(`specs: ${err.message}`); return 0; }).finally(() => { specLoad = null; }); return specLoad; }
+  // ---- periodic fallback reconciliation / after-gap completion (closeout R15) ----
+  let lastPeriodicMono = null; let reconcilePending = false; const reconcileReport = { periodic: 0, afterGap: 0, lastOutcome: null };
+  async function fallbackReconcile(t) { if (kind !== 'LIVE' || reconcilePending || dispatcher.writerLost()) return; const s = dispatcher.state(); const ex = adapter.executionsState ? adapter.executionsState() : null; const gap = Boolean(s?.restrictions?.RECONCILIATION_REQUIRED) && ex && (ex.reconnects > (reconcileReport.reconnectsSeen ?? 0) || ex.connected); const openWork = Object.values(s?.orders ?? {}).some((o) => !['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'].includes(o.state)) || Object.values(s?.positions ?? {}).some((p) => p.state !== 'FLAT'); const silent = ex && (!ex.connected || (ex.lastMessageTs !== null && t - ex.lastMessageTs > CLOCK_REQUALIFY_MS)); const due = lastPeriodicMono === null || pclock.monotonic() - lastPeriodicMono >= PERIODIC_RECONCILE_MS || (silent && openWork && pclock.monotonic() - lastPeriodicMono >= CLOCK_REQUALIFY_MS); if (!gap && !due) return; reconcilePending = true; try { const rec = await dispatcher.reconcileNow({ scope: gap ? 'AFTER_GAP' : 'PERIODIC' }); reconcileReport.lastOutcome = rec?.outcome ?? null; if (gap) { reconcileReport.afterGap += 1; reconcileReport.reconnectsSeen = ex?.reconnects ?? 0; } else reconcileReport.periodic += 1; lastPeriodicMono = pclock.monotonic(); } catch (err) { log(`fallback reconciliation: ${err.message}`); } finally { reconcilePending = false; } }
+  function writePaperCheckpoint() { if (kind !== 'PAPER' || typeof adapter.checkpoint !== 'function' || !writeProjection) return null; try { mkdirSync(judgeDir(), { recursive: true }); const cp = adapter.checkpoint(); atomicWriteJson(paperCheckpointFile(acct), cp); return cp; } catch (err) { log(`paper checkpoint: ${err.message}`); return null; } }
+  // Runtime work is split into single-flight lanes. Watch is always attempted first; a slow valuation, Judge pass,
+  // periodic scan or clock request cannot make the next heartbeat skip Watch. setImmediate is only a priority boundary,
+  // not CPU isolation: synchronous work is still bounded by the candidate/preparation limits and measured below.
+  let safetyTask = null; let coreTask = null; let maintenanceTask = null; let maintenancePending = null; let clockTask = null; let recorderLatched = false; let overlappedTicks = 0;
+  const laneReport = { watchStarted: 0, watchCompleted: 0, watchOverlaps: 0, coreStarted: 0, coreCompleted: 0, coreCoalesced: 0, maintenanceStarted: 0, maintenanceCompleted: 0, maintenanceCoalesced: 0, clockStarted: 0, clockCompleted: 0, clockCoalesced: 0, errors: 0, maxCoreMs: 0, maxMaintenanceMs: 0 };
+  const elapsed = (start) => Math.max(0, pclock.monotonic() - start);
+  const laneStatus = () => ({ ...laneReport, safetyInFlight: Boolean(safetyTask), coreInFlight: Boolean(coreTask), maintenanceInFlight: Boolean(maintenanceTask), maintenancePending: Boolean(maintenancePending), clockInFlight: Boolean(clockTask) });
+  async function scanMaintenance(t, periodic) {
+    if (stopped) return;
+    if (periodic) { try { admitNominations(); } catch (err) { log(`nominations: ${err.message}`); } }
+    if (!periodic || stopped) return;
+    await (ensureSpecs() ?? Promise.resolve(0));
+    if (stopped) return;
+    if (cases.refresh) { try { await cases.refresh(); } catch (err) { log(`cases: ${err.message}`); } if (!stopped) deliverEvidence(nowTs()); } else deliverEvidence(t);
+    if (stopped) return;
+    const refreshes = []; for (const c of judge.candidates()) if (hist.needsRefresh && hist.refresh && hist.needsRefresh(c.symbol, t)) refreshes.push(Promise.resolve(hist.refresh(c.symbol)).catch((err) => log(`history ${c.symbol}: ${err.message}`)));
+    await Promise.all(refreshes);
+  }
+  function scheduleMaintenance(t, periodic) {
+    if (stopped) return null;
+    if (maintenanceTask) { maintenancePending = { t, periodic: Boolean(periodic || maintenancePending?.periodic) }; laneReport.maintenanceCoalesced += 1; return maintenanceTask; }
+    const started = pclock.monotonic(); laneReport.maintenanceStarted += 1;
+    maintenanceTask = new Promise((resolve) => setImmediate(resolve)).then(() => scanMaintenance(t, periodic)).catch((err) => { laneReport.errors += 1; log(`maintenance: ${err.message}`); }).finally(() => { laneReport.maintenanceCompleted += 1; laneReport.maxMaintenanceMs = Math.max(laneReport.maxMaintenanceMs, elapsed(started)); maintenanceTask = null; const pending = maintenancePending; maintenancePending = null; if (pending && !stopped) scheduleMaintenance(pending.t, pending.periodic); });
+    return maintenanceTask;
+  }
+  function scheduleClockQualification() {
+    if (stopped || kind !== 'LIVE' || typeof pclock.qualify !== 'function') return null;
+    let due; try { due = lastQualifyMono === null || pclock.monotonic() - lastQualifyMono >= CLOCK_REQUALIFY_MS || (pclock.status && pclock.status().needsRequalify); } catch (err) { laneReport.errors += 1; log(`clock qualification status: ${err.message}`); return null; }
+    if (!due) return clockTask;
+    if (clockTask) { laneReport.clockCoalesced += 1; return clockTask; }
+    laneReport.clockStarted += 1;
+    clockTask = new Promise((resolve) => setImmediate(resolve)).then(() => (stopped ? null : qualifyClock())).catch((err) => { laneReport.errors += 1; log(`clock qualification: ${err.message}`); }).finally(() => { laneReport.clockCompleted += 1; clockTask = null; });
+    return clockTask;
+  }
+  async function coreTick(t, tickNumber) {
+    const started = pclock.monotonic(); laneReport.coreStarted += 1;
+    try {
+      // Cheap bounded in-memory bar closure belongs after Watch but before
+      // Judge. A held case/network refresh must not freeze the candle clock.
+      // This still shares the event loop; it is not CPU isolation.
+      for (const c of judge.candidates()) if (hist.advance) { try { hist.advance(c.symbol, t, { coverage: fd.coverage(c.symbol, t) }); } catch (err) { log(`history advance ${c.symbol}: ${err.message}`); } }
+      await publishValuation(t); if (stopped) return;
+      await judge.onTick(t); if (stopped) return;
+      if (adapter.onTick) adapter.onTick(t); await fallbackReconcile(t); if (stopped) return;
+      // a recorder that stopped recording closes admission (closeout R11): FEED_IMPAIRED latched (exits continue), never a silently partial recording
+      if (recorder && !recorderLatched && recorder.status().state !== 'RECORDING' && !dispatcher.writerLost()) { recorderLatched = true; const st = recorder.status(); try { await dispatcher.commit(makeEvent({ type: 'RESTRICTION', accountId: acct, knownAtTs: t, payload: { code: 'FEED_IMPAIRED', action: 'LATCH', scope: null, source: 'recorder', sessionDate: null, reason: `feed recording ${st.state}: ${st.reason ?? 'not recording'}`.slice(0, 200), ownerRef: null, ts: t } })); } catch (err) { log(`recorder latch: ${err.message}`); } }
+      if (tickNumber % 240 === 0) writePaperCheckpoint(); if (dirty) { dirty = false; publishProjection(); }
+    } finally { laneReport.coreCompleted += 1; laneReport.maxCoreMs = Math.max(laneReport.maxCoreMs, elapsed(started)); }
+  }
+  async function tick() {
+    const t = nowTs(); try { if (pclock.observeWall) pclock.observeWall(); } catch (err) { laneReport.errors += 1; log(`clock wall observation: ${err.message}`); }
+    ticks += 1; const tickNumber = ticks;
+    if (safetyTask) { overlappedTicks += 1; laneReport.watchOverlaps += 1; await watch.onTick(t); return { state: 'WATCH_IN_FLIGHT' }; }
+    laneReport.watchStarted += 1; safetyTask = Promise.resolve().then(() => watch.onTick(t));
+    try { await safetyTask; laneReport.watchCompleted += 1; } finally { safetyTask = null; }
+    if (stopped) return { state: 'STOPPED' };
+    const maintenanceAlreadyInFlight = Boolean(maintenanceTask); const scheduledMaintenance = scheduleMaintenance(t, tickNumber % 40 === 1); scheduleClockQualification();
+    if (coreTask) { overlappedTicks += 1; laneReport.coreCoalesced += 1; return { state: 'CORE_IN_FLIGHT' }; }
+    coreTask = coreTick(t, tickNumber).catch((err) => { laneReport.errors += 1; throw err; }).finally(() => { coreTask = null; });
+    await coreTask; if (scheduledMaintenance && !maintenanceAlreadyInFlight) await scheduledMaintenance; return { state: 'COMPLETE' };
+  }
+  return {
+    compositionVersion: COMPOSITION_VERSION, accountId: acct, mode, kind, policy, policyDigest, codeDigest: treeDigest, journal: jr, writer, dispatcher, feed: fd, tapeFeed, adapter, judge, watch, history: hist, cases, clock: pclock, fee, specOf, credentialsPresent: Boolean(credentials), keyFingerprint: fp, projection, tick, preflight, arm, disarm, admitNominations, checkAuthorizationBinding, lastPreflight: () => lastPreflight, lockLevel, publishValuation,
+    registerSpec(spec) { captureSpec(spec); return spec; },
+    async start({ heartbeatMs = 250, projectionMs = 2000, schedulerMs = SCHEDULER_TICK_MS } = {}) {
+      lifecycle.push('START');
+      // restoration law (closeout R16): the durable chain must verify against the stored projection; a reducer-version change re-derives
+      // the projection from the events (chain verified first); anything else refuses to start — never a fresh USD 500
+      const verified = await jr.replayVerify(acct); if (!verified.ok) { const stored = (await jr.load(acct))?.state; if (verified.projectionDigest && stored && stored.stateVersion !== ACCOUNT_STATE_VERSION && typeof jr.reproject === 'function') { const rp = await jr.reproject(acct, { writer }); log(`account ${acct}: projection re-derived from ${verified.events} events after a reducer version change (${stored.stateVersion} -> ${ACCOUNT_STATE_VERSION})`); await dispatcher.load(); if (rp.stateDigest !== verified.replayDigest) throw new JournalError('RESTORE_FAILED', 'reprojection disagrees with the replay'); } else throw new JournalError('RESTORE_FAILED', `account ${acct}: ${verified.reason}`); }
+      // held / pending exposure pins its symbols BEFORE the feed connects (closeout R07 / R09): never shed by a catalogue refresh
+      for (const p of Object.values(dispatcher.state()?.positions ?? {})) if (p.state !== 'FLAT') fd.admit(p.pair, { coin: p.assetId, priority: 'HELD', reason: p.positionId, specDigest: specOf(p.pair)?.specDigest ?? null });
+      for (const [symbol, pin] of Object.entries(dispatcher.state()?.pins ?? {})) fd.admit(symbol, { priority: 'HELD', reason: pin.reason ?? 'durable pin' });
+      // LIVE: the venue owner slot is claimed HERE, before any private call (atomic initial creation, same binding re-claims)
+      let liveOwner = null; if (kind === 'LIVE' && jr.kind !== 'MEMORY' && typeof jr.claimLiveOwner === 'function') { liveOwner = await jr.claimLiveOwner({ venue: 'kraken', accountId: acct, keyFingerprint: fp, exchangeContext, writerEpoch: writer.epoch }); if (!liveOwner.ok) throw new JournalError('LIVE_OWNER_HELD', `venue owner slot held by ${liveOwner.holder?.accountId ?? 'another account'}`); lifecycle.push('OWNER_CLAIMED'); }
+      const specsLoaded = transport ? await (ensureSpecs() ?? Promise.resolve(0)) : 0;
+      if (kind === 'LIVE') await qualifyClock();
+      const report = await dispatcher.restart({ scope: 'STARTUP' }); lifecycle.push('RECONCILED'); report.authorizationEnded = await checkAuthorizationBinding(); report.executions = null; report.liveOwner = liveOwner ?? (kind === 'LIVE' ? { ok: false, reason: 'NOT_DURABLE: a memory journal never owns the venue (hypothetical account)' } : null); report.specsLoaded = specsLoaded; report.clock = pclock.status ? pclock.status() : null;
+      if (kind === 'LIVE' && adapter.connectExecutions && allowPrivate()) { try { executions = await adapter.connectExecutions(); report.executions = { ok: executions.ok, reason: executions.reason ?? null }; } catch (err) { report.executions = { ok: false, reason: err.message }; } }
+      heartbeat = setInterval(() => { tick().catch((err) => log(`tick: ${err.message}`)); }, heartbeatMs); heartbeat.unref?.();
+      // the scheduler's own cadence: bucket deadlines never wait for the heartbeat (closeout R08)
+      schedulerTimer = setInterval(() => { judge.scheduler.tick().catch((err) => log(`scheduler: ${err.message}`)); }, Math.max(5, schedulerMs)); schedulerTimer.unref?.();
+      if (writeProjection) { projectionTimer = setInterval(publishProjection, projectionMs); projectionTimer.unref?.(); publishProjection(); } lifecycle.push('RUNNING'); return report; },
+    // stop: producers first (feed no-op, timers cleared, admission closed), then the drain, the SHUTDOWN reconciliation and the owner
+    // slot release ONLY after a verified handoff, the socket close, the checkpoint / projection, and the writer release LAST
+    async stop({ drainMs = 10_000 } = {}) { if (stopped) return null; stopped = true; lifecycle.push('PRODUCERS_STOPPED'); if (heartbeat) clearInterval(heartbeat); if (schedulerTimer) clearInterval(schedulerTimer); if (projectionTimer) clearInterval(projectionTimer); try { adapter.stopAdmission(); } catch { /* none */ }
+      await Promise.allSettled([safetyTask, coreTask, maintenanceTask, clockTask].filter(Boolean)); lifecycle.push('RUNTIME_LANES_SETTLED');
+      let shutdown = null; let ownerRelease = null;
+      if (kind === 'LIVE' && !dispatcher.writerLost()) { try { shutdown = await dispatcher.restart({ scope: 'SHUTDOWN' }); } catch (err) { shutdown = { error: err.message }; } lifecycle.push('SHUTDOWN_RECONCILED'); const reconciled = shutdown?.reconciliation?.outcome === 'COMPLETE' && !(shutdown?.uncertainOrders ?? []).length; if (typeof jr.releaseLiveOwner === 'function') { try { ownerRelease = reconciled ? await jr.releaseLiveOwner({ venue: 'kraken', accountId: acct, writerEpoch: writer.epoch, reason: 'run ended: shutdown reconciliation COMPLETE, no uncertain dispatch', reconciled: true }) : { ok: false, held: true, reason: `slot retained: shutdown reconciliation ${shutdown?.reconciliation?.outcome ?? 'ABSENT'}, ${(shutdown?.uncertainOrders ?? []).length} uncertain` }; } catch (err) { ownerRelease = { ok: false, held: true, reason: err.message }; } lifecycle.push(ownerRelease?.ok ? 'OWNER_RELEASED' : 'OWNER_RETAINED'); }
+        // a canary that ran ARMED and reconciled COMPLETE ends as COMPLETED: the durable evidence the ordinary arm needs (closeout R14); the reducer verifies terminal entries / flat position
+        const auth = dispatcher.state()?.authorization; if (mode === 'LIVE_ARMED' && auth && !auth.ended && auth.kind === 'CANARY' && !reconciled) lifecycle.push('CANARY_INCOMPLETE:UNRECONCILED'); if (reconciled && mode === 'LIVE_ARMED' && auth && !auth.ended && auth.kind === 'CANARY') { try { await dispatcher.commit(makeEvent({ type: 'AUTHORIZATION_ENDED', accountId: acct, knownAtTs: nowTs(), payload: { authorizationId: auth.authorizationId, reason: 'COMPLETED', ts: nowTs() } })); lifecycle.push('CANARY_COMPLETED'); } catch (err) { lifecycle.push(`CANARY_INCOMPLETE:${err.detail?.code ?? err.code ?? 'REFUSED'}`); } } }
+      const closed = await dispatcher.close({ drainMs }); lifecycle.push('DRAINED'); if (executions?.close) { try { executions.close(); } catch { /* gone */ } lifecycle.push('SOCKET_CLOSED'); }
+      if (recorder) recorder.stop(); writePaperCheckpoint(); publishProjection(); await writer.release(); lifecycle.push('WRITER_RELEASED'); if (ownDb) await ownDb.end(); return { ...closed, shutdown, ownerRelease, droppedAfterStop: { ...droppedAfterStop }, lifecycle: lifecycle.slice() }; },
+    lifecycle: () => lifecycle.slice(), snapshotStore, recorder, evidenceReport: () => ({ ...evidenceReport, falsifiers: falsifierList.slice() }), deliverEvidence, clockReport: () => ({ ...clockReport }), reconcileReport: () => ({ ...reconcileReport }), runtimeLanes: laneStatus, overlappedTicks: () => overlappedTicks, executions: () => executions,
+    evaluate: (arm = 'REF_COMBINED') => evaluateAccount(dispatcher.state(), { arm }),
+  };
+}
+// owner-intent account initialization (refuses to reset an existing account; no implicit deposit on restart)
+export async function initAccount({ journal, policy, policyDigest, mode, ownerRef, nowTs, limits = null, accountId = null }) { const acct = accountId ?? policy.account.accountId; const kind = accountKindOf(mode); if (await journal.exists(acct)) { const l = await journal.load(acct); if (l.state.initialized) throw new JournalError('ACCOUNT_EXISTS', `${acct} is already initialized (revision ${l.revision}); refusing to reset`); } else await journal.create(acct, { accountKind: kind }); const writer = await journal.acquireWriter(acct); if (!writer) throw new JournalError('WRITER_HELD', acct); try { const ev = makeEvent({ type: 'ACCOUNT_INITIALIZED', accountId: acct, knownAtTs: nowTs, payload: { accountKind: kind, initialCapital: policy.account.initialCapital, quote: 'USD', venue: 'kraken', policyDigest, policyVersion: policy.policyName, ownerRef, sessionDate: sessionDate(new Date(nowTs)), clockAnchorTs: nowTs, limits: limits ?? policy.limits, compounding: policy.account.compounding } }); const l = await journal.load(acct); return journal.append(acct, { expectedRevision: l.revision, writerEpoch: writer.epoch, events: [ev] }); } finally { await writer.release(); } }
+export { specFromAssetPair, instrumentSpec };

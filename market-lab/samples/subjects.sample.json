@@ -1,0 +1,131 @@
+{
+ "subjectsVersion": "market-research-subjects-1",
+ "subjects": [
+  {
+   "canonicalCoin": "BTC",
+   "krakenSpot": "BTC/USD",
+   "coinbase": "BTC-USD",
+   "krakenDerivatives": "PF_XBTUSD",
+   "deribit": "BTC",
+   "bybit": "BTCUSDT",
+   "coingecko": "bitcoin",
+   "tokens": [],
+   "pools": [],
+   "protocols": [],
+   "cryptoquant": "btc",
+   "santiment": "bitcoin",
+   "coinmetrics": "btc",
+   "tokenomist": null,
+   "coinglass": "BTC"
+  },
+  {
+   "canonicalCoin": "ETH",
+   "krakenSpot": "ETH/USD",
+   "coinbase": "ETH-USD",
+   "krakenDerivatives": "PF_ETHUSD",
+   "deribit": "ETH",
+   "bybit": "ETHUSDT",
+   "coingecko": "ethereum",
+   "tokens": [],
+   "pools": [
+    {
+     "network": "eth",
+     "poolAddress": "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
+    }
+   ],
+   "protocols": [
+    "aave"
+   ],
+   "cryptoquant": "eth",
+   "santiment": "ethereum",
+   "coinmetrics": "eth",
+   "tokenomist": null,
+   "coinglass": "ETH"
+  },
+  {
+   "canonicalCoin": "SOL",
+   "krakenSpot": "SOL/USD",
+   "coinbase": "SOL-USD",
+   "krakenDerivatives": "PF_SOLUSD",
+   "deribit": null,
+   "bybit": "SOLUSDT",
+   "coingecko": "solana",
+   "tokens": [],
+   "pools": [],
+   "protocols": [],
+   "cryptoquant": null,
+   "santiment": "solana",
+   "coinmetrics": "sol",
+   "tokenomist": "solana",
+   "coinglass": "SOL"
+  }
+ ],
+ "macroSeries": [
+  "DFF",
+  "DGS2",
+  "DGS10",
+  "DTWEXBGS",
+  "CPIAUCSL",
+  "UNRATE",
+  "WALCL",
+  "RRPONTSYD"
+ ],
+ "crossAsset": [
+  {
+   "symbol": "SPY",
+   "exchange": null,
+   "proxyFor": "broad US equity benchmark ETF proxy"
+  },
+  {
+   "symbol": "QQQ",
+   "exchange": null,
+   "proxyFor": "technology benchmark ETF proxy"
+  },
+  {
+   "symbol": "TLT",
+   "exchange": null,
+   "proxyFor": "long Treasury bond ETF proxy (not a cash yield)"
+  },
+  {
+   "symbol": "EUR/USD",
+   "exchange": null,
+   "proxyFor": "dollar pair proxy (not DXY)"
+  },
+  {
+   "symbol": "XAU/USD",
+   "exchange": null,
+   "proxyFor": "gold spot proxy"
+  }
+ ],
+ "stablecoins": [
+  {
+   "stablecoinId": "USDT",
+   "pegCurrency": "USD",
+   "defillamaId": "1"
+  },
+  {
+   "stablecoinId": "USDC",
+   "pegCurrency": "USD",
+   "defillamaId": "2"
+  }
+ ],
+ "referenceNotionals": [
+  1000,
+  10000,
+  100000
+ ],
+ "peers": [
+  "BTC",
+  "ETH",
+  "SOL",
+  "XRP",
+  "DOGE",
+  "ADA",
+  "LINK",
+  "AVAX"
+ ],
+ "benchmarks": [
+  "BTC",
+  "ETH"
+ ]
+}

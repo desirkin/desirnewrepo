@@ -1,0 +1,225 @@
+// GOV-1 — Snapshot Hub provider client. OFF-CHAIN governance/voting
+// evidence, and it says so: a Snapshot proposal that passes proves a vote
+// PASSED_OFFCHAIN_VOTE — never that code executed, a treasury moved, a
+// timelock started, or an outcome is inevitable. Bounded GraphQL only;
+// injectable fetch for tests; proposal text is UNTRUSTED DATA that is
+// stored bounded and never executed or interpreted.
+import { createHash } from 'node:crypto';
+import { fetchJsonBounded } from '../lib/bounded-fetch.js';
+
+export const SNAPSHOT_HUB = 'https://hub.snapshot.org/graphql';
+export const SNAPSHOT_PROVIDER = 'SNAPSHOT';
+
+// Canonical FOR/AGAINST choice recognition: EXACT labels only (case
+// blind). Anything else keeps scoresByChoice verbatim and support ratios
+// UNKNOWN — choice-label similarity is a guess and guesses are refused.
+const CANONICAL_FOR = new Set(['for', 'yes', 'yae', 'yay']);
+const CANONICAL_AGAINST = new Set(['against', 'no', 'nay']);
+const CANONICAL_ABSTAIN = new Set(['abstain']);
+
+export class Retry429 extends Error {
+  constructor(retryAfterSec) {
+    super('HTTP 429');
+    this.retryAfterSec = retryAfterSec;
+  }
+}
+
+// One bounded GraphQL POST. Throws Retry429 on rate limiting (carrying
+// Retry-After when the provider names one) and Error otherwise.
+export async function snapshotGql(query, { fetchImpl = fetch, timeoutMs = 15_000, signal = null } = {}) {
+  const res = await fetchJsonBounded(SNAPSHOT_HUB, {
+    host: 'hub.snapshot.org',
+    fetchImpl,
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ query }),
+    timeoutMs,
+    maxBytes: 2 * 1024 * 1024,
+    maxRedirects: 0,
+    signal,
+  });
+  if (res.outcome === 'RATE_LIMITED') {
+    const ra = res.retryAfterSec;
+    throw new Retry429(Number.isFinite(ra) && ra > 0 ? ra : null);
+  }
+  if (res.outcome !== 'OK') {
+    if (res.status >= 400) throw new Error(`snapshot HTTP ${res.status}`);
+    throw new Error(`snapshot ${res.reason ?? res.outcome}`);
+  }
+  const body = res.json;
+  if (body.errors?.length) throw new Error(`snapshot graphql: ${body.errors.map((e) => e.message).join('; ')}`);
+  return body.data;
+}
+
+const esc = (s) => String(s).replace(/[\\"]/g, ''); // ids are plain tokens; quotes/backslashes have no business here
+
+// One page of proposals across ALL registry spaces at once (batched query,
+// one request instead of one per space). `state` narrows server-side.
+export async function fetchProposalsPage({ spaceIds, state, first, skip = 0 }, opts = {}) {
+  const spaces = spaceIds.map((s) => `"${esc(s)}"`).join(', ');
+  const stateClause = state ? `, state: "${esc(state)}"` : '';
+  const q = `{ proposals(first: ${Math.floor(first)}, skip: ${Math.floor(skip)},
+      where: { space_in: [${spaces}]${stateClause} }, orderBy: "created", orderDirection: desc) {
+    id space { id } author title body state created start end quorum choices scores scores_total votes snapshot updated } }`;
+  const data = await snapshotGql(q, opts);
+  return data?.proposals ?? [];
+}
+
+// One bounded page of votes for one proposal.
+export async function fetchVotesPage({ proposalId, first, skip = 0 }, opts = {}) {
+  const q = `{ votes(first: ${Math.floor(first)}, skip: ${Math.floor(skip)},
+      where: { proposal: "${esc(proposalId)}" }, orderBy: "vp", orderDirection: desc) {
+    voter created choice vp } }`;
+  const data = await snapshotGql(q, opts);
+  return data?.votes ?? [];
+}
+
+const boundedText = (s, maxBytes) => {
+  if (typeof s !== 'string') return null;
+  const buf = Buffer.from(s, 'utf8');
+  if (buf.length <= maxBytes) return s;
+  return buf.subarray(0, maxBytes).toString('utf8').replace(/�+$/, '');
+};
+
+// PURE normalization of one raw provider proposal into the bounded shape
+// the collector observes. Malformed input returns null — refused, never
+// repaired. Text stays data: bounded excerpt + content hash, nothing more.
+export function normalizeProposal(raw, { maxTitleBytes = 256, maxBodyBytes = 2048 } = {}) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (typeof raw.id !== 'string' || !raw.id.length) return null;
+  const spaceId = raw.space?.id;
+  if (typeof spaceId !== 'string' || !spaceId.length) return null;
+  if (typeof raw.state !== 'string') return null;
+  const num = (v) => (Number.isFinite(v) ? v : null);
+  // GOV-1B: vote power, scores, totals, counts, and quorum are NON-NEGATIVE
+  // quantities. An impossible finite negative from the provider is INVALID
+  // evidence and becomes null (UNKNOWN downstream) — never preserved as a
+  // valid measurement, never "repaired" into a positive.
+  const nonNeg = (v) => (Number.isFinite(v) && v >= 0 ? v : null);
+  const body = typeof raw.body === 'string' ? raw.body : '';
+  return {
+    provider: SNAPSHOT_PROVIDER,
+    proposalId: raw.id,
+    spaceId,
+    author: typeof raw.author === 'string' ? raw.author.slice(0, 100) : null,
+    state: raw.state, // provider vocabulary: pending | active | closed
+    createdTs: num(raw.created),
+    startTs: num(raw.start),
+    endTs: num(raw.end),
+    snapshotBlock: raw.snapshot ?? null,
+    updatedTs: num(raw.updated),
+    quorumRaw: nonNeg(raw.quorum),
+    choices: Array.isArray(raw.choices) ? raw.choices.slice(0, 32).map((c) => String(c).slice(0, 100)) : null,
+    scores: Array.isArray(raw.scores) ? raw.scores.slice(0, 32).map((s) => nonNeg(s)) : null,
+    scoresTotal: nonNeg(raw.scores_total),
+    voteCount: nonNeg(raw.votes),
+    title: boundedText(raw.title ?? '', maxTitleBytes),
+    bodyExcerpt: boundedText(body, maxBodyBytes),
+    textHash: createHash('sha1').update(`${raw.title ?? ''}\n${body}`).digest('hex'),
+    providerUrl: `https://snapshot.org/#/${spaceId}/proposal/${raw.id}`,
+  };
+}
+
+// QUORUM TRUTH (pure): Snapshot's proposal.quorum and scores_total are both
+// denominated in the space's own voting power, so progress is defensible
+// ONLY when the provider supplies a positive quorum. Anything else is
+// UNKNOWN — never zero, never a sum invented from votes.
+export function quorumTruth(p) {
+  if (!p || !Number.isFinite(p.quorumRaw) || p.quorumRaw <= 0 || !Number.isFinite(p.scoresTotal)) return 'UNKNOWN';
+  return {
+    quorumRequired: p.quorumRaw,
+    quorumObserved: p.scoresTotal,
+    quorumProgressRatio: Number((p.scoresTotal / p.quorumRaw).toFixed(6)),
+    unit: 'space voting power (provider-defined strategies)',
+  };
+}
+
+// VOTE TRAJECTORY (pure, descriptive): measurements only — never momentum,
+// never confidence, never a prediction. GOV-1A: support/opposition ratios
+// exist ONLY when the ENTIRE choice set is canonical — exactly one
+// FOR-class choice, exactly one AGAINST-class choice, at most one
+// ABSTAIN-class choice, NO other/noncanonical choices, no duplicate
+// semantics, and matching choices/scores lengths. Anything else keeps the
+// verbatim per-choice scores and ratios UNKNOWN — a partial recognition
+// of a mixed choice set is a guess, and guesses are refused.
+export function voteTrajectory(p, nowSec, prev = null) {
+  if (!p || !Array.isArray(p.choices) || !Array.isArray(p.scores)) return 'UNKNOWN';
+  const byChoice = {};
+  for (let i = 0; i < p.choices.length; i++) byChoice[p.choices[i]] = p.scores[i] ?? null;
+  const total = Number.isFinite(p.scoresTotal) ? p.scoresTotal : null;
+  const forIdx = [];
+  const againstIdx = [];
+  const abstainIdx = [];
+  let otherCount = 0;
+  for (let i = 0; i < p.choices.length; i++) {
+    const label = String(p.choices[i]).trim().toLowerCase();
+    if (CANONICAL_FOR.has(label)) forIdx.push(i);
+    else if (CANONICAL_AGAINST.has(label)) againstIdx.push(i);
+    else if (CANONICAL_ABSTAIN.has(label)) abstainIdx.push(i);
+    else otherCount++;
+  }
+  const canonicalSet =
+    p.choices.length === p.scores.length &&
+    forIdx.length === 1 &&
+    againstIdx.length === 1 &&
+    abstainIdx.length <= 1 &&
+    otherCount === 0;
+  const forPower = canonicalSet ? p.scores[forIdx[0]] ?? null : null;
+  const againstPower = canonicalSet ? p.scores[againstIdx[0]] ?? null : null;
+  const abstainPower = canonicalSet && abstainIdx.length === 1 ? p.scores[abstainIdx[0]] ?? null : null;
+  // GOV-1B numeric consistency: ratios require finite NON-NEGATIVE powers,
+  // a finite positive total, no individual power above the total beyond a
+  // tiny documented tolerance (1e-6 relative), and results inside [0, 1].
+  // Internally inconsistent provider totals keep their raw values but the
+  // DERIVED ratio is UNKNOWN — provider numbers are never repaired.
+  const tol = total > 0 ? total * 1e-6 : 0;
+  const consistent =
+    canonicalSet &&
+    Number.isFinite(forPower) && forPower >= 0 &&
+    Number.isFinite(againstPower) && againstPower >= 0 &&
+    Number.isFinite(total) && total > 0 &&
+    forPower <= total + tol &&
+    againstPower <= total + tol;
+  let ratios = { supportRatio: 'UNKNOWN', oppositionRatio: 'UNKNOWN' };
+  if (consistent) {
+    const s = Number((forPower / total).toFixed(6));
+    const o = Number((againstPower / total).toFixed(6));
+    if (s >= 0 && s <= 1 && o >= 0 && o <= 1) ratios = { supportRatio: s, oppositionRatio: o };
+  }
+  return {
+    scoresByChoice: byChoice,
+    totalObservedPower: total,
+    forPower,
+    againstPower,
+    abstainPower,
+    ...ratios,
+    observedVoterCount: Number.isFinite(p.voteCount) ? p.voteCount : null,
+    timeRemainingSec: Number.isFinite(p.endTs) && Number.isFinite(nowSec) ? Math.max(0, p.endTs - nowSec) : null,
+    // descriptive deltas against the PRIOR observation of the same proposal
+    votingPowerDelta: prev && Number.isFinite(prev.scoresTotal) && Number.isFinite(total) ? Number((total - prev.scoresTotal).toFixed(6)) : null,
+    voterCountDelta:
+      prev && Number.isFinite(prev.voteCount) && Number.isFinite(p.voteCount) ? p.voteCount - prev.voteCount : null,
+  };
+}
+
+// VOTER/DELEGATE CONCENTRATION (pure, descriptive) over the votes actually
+// FETCHED under the page budget. When pagination is incomplete the metric
+// truthfully describes the observed votes, labeled coverage PARTIAL —
+// never the complete electorate.
+export function voterConcentration(votes, { pagesComplete, totalVoteCount = null } = {}) {
+  const powers = (votes ?? []).map((v) => v.vp).filter((x) => Number.isFinite(x) && x >= 0);
+  if (!powers.length) return { coverage: 'UNAVAILABLE', observedVoterCount: 0 };
+  const sum = powers.reduce((a, b) => a + b, 0);
+  if (sum <= 0) return { coverage: 'UNAVAILABLE', observedVoterCount: powers.length };
+  const sorted = [...powers].sort((a, b) => b - a);
+  const top = (n) => Number((sorted.slice(0, n).reduce((a, b) => a + b, 0) / sum).toFixed(6));
+  const complete = pagesComplete === true && (totalVoteCount === null || powers.length >= totalVoteCount);
+  return {
+    coverage: complete ? 'COMPLETE' : 'PARTIAL',
+    coverageReason: complete ? null : pagesComplete === true ? 'VOTE_POWER_FIELDS_MISSING_OR_COUNT_SHORT' : 'PARTIAL_PAGE_LIMIT',
+    observedVoterCount: powers.length,
+    top1VotingPowerShare: top(1),
+    top5VotingPowerShare: top(5),
+    observedPowerSum: sum,
+  };
+}

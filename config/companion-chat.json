@@ -1,0 +1,10 @@
+{
+  "version": "serpent-companion-chat-models-1",
+  "note": "Known model ids for the optional Ask Serpent chat with documented first-party list prices (USD per million tokens). Chat is OFF until the owner sets ANTHROPIC_API_KEY, SERPENT_CHAT_MAX_USD_PER_REQUEST and SERPENT_CHAT_MAX_USD_PER_DAY; an id outside this table is refused (MODEL_NOT_KNOWN); availability is proven by the provider's response, never by this file.",
+  "defaultModel": "claude-opus-5",
+  "models": {
+    "claude-opus-5": { "inputUsdPerMTok": 5, "outputUsdPerMTok": 25 },
+    "claude-sonnet-5": { "inputUsdPerMTok": 2, "outputUsdPerMTok": 10 },
+    "claude-haiku-4-5": { "inputUsdPerMTok": 1, "outputUsdPerMTok": 5 }
+  }
+}

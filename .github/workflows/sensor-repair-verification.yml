@@ -1,0 +1,51 @@
+name: Sensor repair verification
+on:
+  pull_request:
+    branches: [claude/cobra-phase-c1-setup-n9yy6r]
+    paths-ignore: [docs/**]
+permissions:
+  contents: read
+concurrency:
+  group: sensor-verification-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  offline-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cobra_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cobra_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Tracked JavaScript syntax and patch hygiene
+        run: |
+          git ls-files -z '*.js' '*.mjs' | xargs -0 -n 1 node --check
+          git diff --check
+      - name: Full serial suite with isolated PostgreSQL and outbound guard
+        env:
+          PERSIST_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/cobra_test
+          NODE_OPTIONS: --import=${{ github.workspace }}/test/helpers/offline-guard.mjs
+          COBRA_OFFLINE_GUARD_LOG: ${{ runner.temp }}/sensor-offline-guard.jsonl
+          COBRA_OFFLINE_GUARD_RUN: suite
+        run: npm test -- --test-concurrency=1
+      - name: No unexpected outbound requests
+        if: always()
+        run: node tools/offline-gate.mjs "${{ runner.temp }}/sensor-offline-guard.jsonl"

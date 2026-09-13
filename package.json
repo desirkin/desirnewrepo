@@ -1,0 +1,31 @@
+{
+  "name": "cobra-engine",
+  "version": "0.1.0",
+  "description": "COBRA (Ophiophagus) — automated long/flat crypto research & paper-trading engine. PAPER-FANGED.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "cobra": "./bin/cobra.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "drill": "node index.js && npm test",
+    "test": "node --test",
+    "tape": "node bin/cobra.js tape run",
+    "ui": "node ui/server.js",
+    "fly": "node fly.js",
+    "cobra": "node bin/cobra.js",
+    "paper": "node bin/cobra.js paper run",
+    "paper:preflight": "node bin/cobra.js paper preflight",
+    "paper:inventory": "node bin/cobra.js paper inventory",
+    "data:only": "node tools/data-only-runtime.mjs",
+    "data:only-ui": "node tools/data-only-with-ui.mjs",
+    "data:status": "node tools/data-only-status.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.23.0"
+  }
+}

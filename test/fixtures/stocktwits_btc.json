@@ -1,0 +1,157 @@
+{
+  "symbol": "BTC.X",
+  "capturedAt": "2026-09-03T02:12:02.775Z",
+  "watchlist_count": 678545,
+  "messages": [
+    {
+      "id": 663502465,
+      "created_at": "2026-09-03T02:08:14Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663502408,
+      "created_at": "2026-09-03T02:06:35Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663502400,
+      "created_at": "2026-09-03T02:06:26Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663502362,
+      "created_at": "2026-09-03T02:05:23Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663502322,
+      "created_at": "2026-09-03T02:04:17Z",
+      "sentiment": null
+    },
+    {
+      "id": 663502252,
+      "created_at": "2026-09-03T02:02:05Z",
+      "sentiment": null
+    },
+    {
+      "id": 663502204,
+      "created_at": "2026-09-03T02:01:04Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663502193,
+      "created_at": "2026-09-03T02:00:42Z",
+      "sentiment": null
+    },
+    {
+      "id": 663502178,
+      "created_at": "2026-09-03T02:00:18Z",
+      "sentiment": null
+    },
+    {
+      "id": 663501974,
+      "created_at": "2026-09-03T01:54:54Z",
+      "sentiment": null
+    },
+    {
+      "id": 663501699,
+      "created_at": "2026-09-03T01:47:11Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663501575,
+      "created_at": "2026-09-03T01:43:44Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663501542,
+      "created_at": "2026-09-03T01:42:53Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663501482,
+      "created_at": "2026-09-03T01:41:07Z",
+      "sentiment": null
+    },
+    {
+      "id": 663501474,
+      "created_at": "2026-09-03T01:40:59Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663501354,
+      "created_at": "2026-09-03T01:38:00Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663501306,
+      "created_at": "2026-09-03T01:36:56Z",
+      "sentiment": null
+    },
+    {
+      "id": 663501250,
+      "created_at": "2026-09-03T01:35:32Z",
+      "sentiment": "Bearish"
+    },
+    {
+      "id": 663501210,
+      "created_at": "2026-09-03T01:34:31Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663501202,
+      "created_at": "2026-09-03T01:34:18Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663501192,
+      "created_at": "2026-09-03T01:34:01Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663501147,
+      "created_at": "2026-09-03T01:32:59Z",
+      "sentiment": null
+    },
+    {
+      "id": 663501135,
+      "created_at": "2026-09-03T01:32:43Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663500946,
+      "created_at": "2026-09-03T01:27:19Z",
+      "sentiment": null
+    },
+    {
+      "id": 663500898,
+      "created_at": "2026-09-03T01:25:43Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663500891,
+      "created_at": "2026-09-03T01:25:33Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663500878,
+      "created_at": "2026-09-03T01:25:16Z",
+      "sentiment": "Bearish"
+    },
+    {
+      "id": 663500874,
+      "created_at": "2026-09-03T01:25:13Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663500802,
+      "created_at": "2026-09-03T01:23:17Z",
+      "sentiment": "Bullish"
+    },
+    {
+      "id": 663500777,
+      "created_at": "2026-09-03T01:22:51Z",
+      "sentiment": null
+    }
+  ]
+}

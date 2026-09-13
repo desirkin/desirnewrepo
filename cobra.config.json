@@ -1,0 +1,90 @@
+{
+  "venue": "kraken",
+  "universe": ["BTC", "ETH", "SOL", "XRP", "DOGE"],
+  "quote": "USD",
+  "locks": {
+    "selectivePct": 5,
+    "protectPct": 8,
+    "hardPct": 11
+  },
+  "timezone": "America/New_York",
+  "paper": {
+    "baseBalanceUsd": 500
+  },
+  "childhood": {
+    "tradesRequestBudgetPerMajor": 30
+  },
+  "wideeye": {
+    "enabled": true,
+    "sweepSec": 60,
+    "persistSec": 600,
+    "zVolThreshold": 3,
+    "zRetThreshold": 2,
+    "extensionCapPct": 3,
+    "minSamples": 60,
+    "rippleCooldownMin": 60,
+    "nominationFloorUsd": 2000000,
+    "deepUniverseCap": 30
+  },
+  "gateway": {
+    "enabled": false,
+    "pollSec": 60,
+    "backoffMaxSec": 300,
+    "contagionWindowMin": 30,
+    "sources": { "kraken": true, "krakenSystem": true, "coinbase": true, "okx": true }
+  },
+  "rumint": {
+    "enabled": true,
+    "zThreshold": 3,
+    "stalkTtlMin": 60,
+    "pollHotSec": 300,
+    "pollWarmSec": 1200,
+    "hourlyBudget": 120,
+    "spacingMs": 2100,
+    "backoffMin": 15
+  },
+  "universeExpansion": {
+    "enabled": true,
+    "minUsdVolume24h": 5000000,
+    "majorsDepth": 100,
+    "defaultDepth": 25,
+    "minorsSnapshotIntervalSec": 30,
+    "subscribeBatchSize": 50,
+    "excludeBases": ["USDT", "USDC", "DAI", "TUSD", "PYUSD", "USDS", "RLUSD", "FDUSD", "USDG", "EURT", "USDR", "EUR", "GBP", "AUD", "CHF", "CAD", "JPY", "EURR"],
+    "resource": {
+      "maxHeapMb": 512,
+      "maxLoopLagMs": 1000,
+      "shedFraction": 0.15
+    }
+  },
+  "tape": {
+    "wsUrl": "wss://ws.kraken.com/v2",
+    "bookDepth": 100,
+    "snapshotIntervalSec": 5,
+    "staleFeedSec": 10,
+    "dataDir": "data"
+  },
+  "cost": {
+    "sizeLadderUsd": [100, 500, 1000, 2500, 5000],
+    "maxBookAgeSec": 10
+  },
+  "fees": {
+    "version": "2026-09-02",
+    "kraken": {
+      "tier": "base ($0+ 30-day volume)",
+      "maker": 0.004,
+      "taker": 0.008
+    },
+    "coinbase_advanced": {
+      "tier": "entry (<$10k 30-day volume)",
+      "maker": 0.004,
+      "taker": 0.006
+    }
+  },
+  "socialResearch": {
+    "catalog": { "source": "WIDEEYE_ASSET_PAIRS", "refreshSec": 300, "maxAgeSec": 900, "maxMarkets": 5000 },
+    "localAdmission": { "mode": "CATALOG_BACKED", "policyVersion": 1, "staticTerms": [] },
+    "xWatch": { "mode": "NOT_CONFIGURED", "tickers": [], "maxAssets": 25 },
+    "watchPlan": { "maxXAssets": 25 }
+  }
+}

@@ -1,0 +1,341 @@
+// PERSIST-0 schema — numbered, idempotent-by-version migrations, applied
+// transactionally, tracked in serpent_schema_migrations. No external
+// migration framework. An UNKNOWN FUTURE schema version is refused, never
+// silently downgraded.
+import { createHash } from 'node:crypto';
+
+export const SCHEMA_VERSION = 9; // JUDGE-1 / EXECUTION-1 execution journal (8) + JUDGE focused-completion experiment records (9)
+
+// Canonical key-sorted JSON — the stable content form durable event
+// identities are computed over (independent of key order and whitespace).
+export const canonicalJson = (v) => {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(v)
+    .sort()
+    .map((k) => (v[k] === undefined ? null : `${JSON.stringify(k)}:${canonicalJson(v[k])}`))
+    .filter(Boolean)
+    .join(',')}}`;
+};
+
+// PERSIST-0A §13 — deterministic durable event identity. Line numbers in
+// ephemeral local files restart at 1 on every fresh deployment, so they can
+// NEVER be global identity; content + stream type is. Where an upstream
+// event already carries an id, that id is preserved as the identity.
+export function durableEventId(streamType, event) {
+  const upstream = event?.event_id ?? event?.eventId;
+  if (typeof upstream === 'string' && upstream.length > 0) return upstream;
+  return createHash('sha1').update(`${streamType}|${canonicalJson(event)}`).digest('hex');
+}
+
+export const MIGRATIONS = [
+  {
+    version: 1,
+    name: 'PERSIST-0 durable core',
+    statements: [
+      // ---- durable CURRENT control state: single revision-guarded row so
+      // concurrent mutations can never silently last-write-wins each other
+      `CREATE TABLE IF NOT EXISTS serpent_control_state (
+        id text PRIMARY KEY,
+        revision bigint NOT NULL DEFAULT 0,
+        state jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      // ---- durable control/security audit (no secrets, ever)
+      `CREATE TABLE IF NOT EXISTS serpent_control_audit (
+        seq bigserial PRIMARY KEY,
+        ts timestamptz NOT NULL,
+        source_file text NOT NULL,
+        line_no bigint NOT NULL,
+        event jsonb NOT NULL,
+        UNIQUE (source_file, line_no)
+      )`,
+      // ---- durable current posture + lock/sim state (revision-guarded)
+      `CREATE TABLE IF NOT EXISTS serpent_runtime_state (
+        id text PRIMARY KEY,
+        revision bigint NOT NULL DEFAULT 0,
+        state jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS serpent_posture_transitions (
+        seq bigserial PRIMARY KEY,
+        ts timestamptz NOT NULL,
+        source_file text NOT NULL,
+        line_no bigint NOT NULL,
+        transition jsonb NOT NULL,
+        UNIQUE (source_file, line_no)
+      )`,
+      // ---- durable paper ledger: deterministic upstream ids, idempotent
+      `CREATE TABLE IF NOT EXISTS serpent_ledger_predictions (
+        prediction_id text PRIMARY KEY,
+        ts timestamptz,
+        row jsonb NOT NULL,
+        durable_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS serpent_ledger_fills (
+        prediction_id text PRIMARY KEY,
+        ts timestamptz,
+        row jsonb NOT NULL,
+        durable_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS serpent_ledger_exits (
+        prediction_id text PRIMARY KEY,
+        ts timestamptz,
+        row jsonb NOT NULL,
+        durable_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      // ---- durable canonical MEMORY: the complete envelope survives as its
+      // exact canonical JSON text plus the MEMORY-0C persisted digest;
+      // extracted columns exist only for bounded queries, never as the truth
+      `CREATE TABLE IF NOT EXISTS serpent_memory_events (
+        id text PRIMARY KEY CHECK (id ~ '^mem-[0-9a-f]{40}$'),
+        ts bigint NOT NULL,
+        symbol text,
+        source_module text NOT NULL,
+        event_type text NOT NULL,
+        evidence_family text[] NOT NULL,
+        observation_state text NOT NULL,
+        event_id text,
+        cluster_id text,
+        envelope text NOT NULL,
+        digest char(40) NOT NULL,
+        durable_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_mem_ts ON serpent_memory_events (ts)`,
+      `CREATE INDEX IF NOT EXISTS idx_mem_symbol_ts ON serpent_memory_events (symbol, ts)`,
+      `CREATE INDEX IF NOT EXISTS idx_mem_module_ts ON serpent_memory_events (source_module, ts)`,
+      `CREATE INDEX IF NOT EXISTS idx_mem_event ON serpent_memory_events (event_id) WHERE event_id IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_mem_cluster ON serpent_memory_events (cluster_id) WHERE cluster_id IS NOT NULL`,
+      // ---- small Childhood manifest identity only (bulk stays file-oriented
+      // for PERSIST-1 / App Storage)
+      `CREATE TABLE IF NOT EXISTS serpent_childhood_manifest (
+        id text PRIMARY KEY,
+        manifest_summary jsonb NOT NULL,
+        recorded_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ],
+  },
+  {
+    version: 2,
+    name: 'PERSIST-0A durable event identity',
+    // Line numbers in local files restart at 1 on every fresh deployment —
+    // (source_file, line_no) can never be global durable identity. Replace
+    // it with a deterministic content-derived event_id; keep source_file +
+    // line_no as provenance/debug metadata ONLY.
+    statements: [
+      `ALTER TABLE serpent_control_audit ADD COLUMN IF NOT EXISTS event_id text`,
+      `ALTER TABLE serpent_posture_transitions ADD COLUMN IF NOT EXISTS event_id text`,
+    ],
+    // Backfill + constraint swap needs node:crypto hashes and dynamic
+    // constraint names, so it runs as JS inside the same transaction.
+    post: async (q, { raw, db }) => {
+      for (const table of ['serpent_control_audit', 'serpent_posture_transitions']) {
+        const rel = db.qualifiedName(table);
+        const eventCol = table === 'serpent_control_audit' ? 'event' : 'transition';
+        // compute deterministic identities for existing rows
+        const { rows } = await raw(`SELECT seq, source_file, ${eventCol} AS body FROM ${rel} WHERE event_id IS NULL ORDER BY seq`);
+        const seen = new Set();
+        for (const r of rows) {
+          const id = durableEventId(r.source_file, r.body);
+          if (seen.has(id)) {
+            // literally identical content in the same stream — the
+            // deterministic-duplicate rule collapses it to one truth
+            await raw(`DELETE FROM ${rel} WHERE seq = $1`, [r.seq]);
+            continue;
+          }
+          seen.add(id);
+          await raw(`UPDATE ${rel} SET event_id = $1 WHERE seq = $2`, [id, r.seq]);
+        }
+        // drop the old ephemeral line-identity unique constraints, whatever
+        // their generated names are
+        const cons = await raw(`SELECT conname FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'u'`, [rel]);
+        for (const c of cons.rows) {
+          await raw(`ALTER TABLE ${rel} DROP CONSTRAINT "${c.conname}"`);
+        }
+      }
+      await q(`ALTER TABLE serpent_control_audit ALTER COLUMN event_id SET NOT NULL`);
+      await q(`ALTER TABLE serpent_posture_transitions ALTER COLUMN event_id SET NOT NULL`);
+      await q(`CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_event ON serpent_control_audit (event_id)`);
+      await q(`CREATE UNIQUE INDEX IF NOT EXISTS uq_transition_event ON serpent_posture_transitions (event_id)`);
+    },
+  },
+  {
+    version: 3,
+    name: 'GOV-1B durable governance collector checkpoint',
+    // The narrowest dedicated store for the GOV collector checkpoint: one
+    // revision-counted row, STORAGE ONLY. It carries no control/posture/sim
+    // semantics, participates in no most-restrictive reconciliation, and
+    // grants nothing — deployment disk is ephemeral, so the checkpoint that
+    // prevents governance history rewrites must survive a republish.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_governance_checkpoint (
+        id text PRIMARY KEY,
+        revision bigint NOT NULL DEFAULT 0,
+        state jsonb NOT NULL,
+        saved_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ],
+  },
+  {
+    version: 4,
+    name: 'RUMINT-R1 durable rumor-ear checkpoint',
+    // Same narrow storage-only pattern as the GOV collector checkpoint: one
+    // bounded revision-counted JSONB row carrying the StockTwits ear's
+    // baselines, watermarks, HYPED session state, provider health and owed
+    // evidence — so a republish restarts the process WITHOUT erasing the
+    // ear's statistical memory. No control/posture/trading semantics, no
+    // decision return path; the collector validates strictly before trust.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_rumint_checkpoint (
+        id text PRIMARY KEY,
+        revision bigint NOT NULL DEFAULT 0,
+        state jsonb NOT NULL,
+        saved_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ],
+  },
+  {
+    version: 5,
+    name: 'RUMOR-2A durable multi-source rumor checkpoint',
+    // Same narrow storage-only pattern as the GOV/RUMINT checkpoints: one
+    // bounded revision-counted JSONB row carrying RUMOR-2 provider states,
+    // recent seen identities, counters, and the bounded active claim graph
+    // — so a republish restarts the process WITHOUT replaying history as
+    // new evidence. Historical evidence itself belongs in append-only
+    // Memory, never in this row. No control/posture/trading semantics; no
+    // decision return path; the collector validates strictly before trust.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_rumor2_checkpoint (
+        id text PRIMARY KEY,
+        revision bigint NOT NULL DEFAULT 0,
+        state jsonb NOT NULL,
+        saved_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ],
+  },
+  {
+    version: 6,
+    name: 'RUMOR-2 event-root seal: authoritative append-only event journal',
+    // The RUMOR-2 settled event history IS the root of truth its durable
+    // checkpoint is derived from, so it must be at least as durable as that
+    // checkpoint: append-only rows in the durable core, one monotonic
+    // contiguous per-stream sequence, INSERT-only (no UPDATE/DELETE path
+    // exists in the repository at all). The event payload is stored as the
+    // exact JSON text so byte truth never depends on jsonb normalization,
+    // and a partial unique index pins each truth-bearing identity
+    // (type, sourceEventId) to ONE durable payload — the duplicate law in
+    // the schema itself. Local events.jsonl survives only as a best-effort
+    // mirror/export; it is not, and can never again be, the authority.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_rumor2_events (
+        stream text NOT NULL,
+        event_seq bigint NOT NULL,
+        event_type text NOT NULL,
+        event_id text,
+        event text NOT NULL,
+        appended_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (stream, event_seq)
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_rumor2_event_identity
+        ON serpent_rumor2_events (stream, event_type, event_id) WHERE event_id IS NOT NULL`,
+    ],
+  },
+  {
+    version: 7,
+    name: 'RUMOR-2 writer epoch: database fencing token',
+    // The advisory lock names the ACTIVE writer; a monotonic per-stream
+    // writer epoch is the STALE-WRITER fence. Acquiring writer authority (it
+    // already holds the advisory lock) advances this epoch by one; every
+    // authoritative RUMOR mutation then verifies current_epoch == caller
+    // epoch INSIDE the same database transaction that performs the write, so
+    // a delayed cross-session operation from a writer that has since lost the
+    // lock is rejected by PostgreSQL itself — closing the time-of-check/
+    // time-of-use race the application-level fence checks alone cannot. One
+    // row per stream; the epoch only ever increases.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_rumor2_writer_epoch (
+        stream text PRIMARY KEY,
+        epoch bigint NOT NULL DEFAULT 0,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ],
+  },
+  {
+    version: 8,
+    name: 'EXECUTION-1 execution accounts, append-only event journal, writer epochs, venue-wide live owner slot',
+    // ONE additive migration (ticket §3.1). Accounts carry a revision (optimistic guard), the current writerEpoch (the
+    // stale-writer fence, advanced ONLY on the advisory-lock session), the journal head (seq + chained digest) and the
+    // validated reducer projection. Events are INSERT-only, sequenced per account, identity-unique per account. The
+    // live-owner slot is venue-wide: at most ONE active LIVE economic account/sender per installation, bound to the
+    // owner-confirmed exchange context, key fingerprint and account id. Versions 1-7 are untouched.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_execution_accounts (
+        account_id text PRIMARY KEY,
+        account_kind text NOT NULL,
+        mode text NOT NULL,
+        revision bigint NOT NULL DEFAULT 0,
+        writer_epoch bigint NOT NULL DEFAULT 0,
+        head_seq bigint NOT NULL DEFAULT 0,
+        head_digest text,
+        policy_digest text,
+        release_ref text,
+        arming_ref text,
+        state jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS serpent_execution_events (
+        account_id text NOT NULL REFERENCES serpent_execution_accounts (account_id),
+        seq bigint NOT NULL,
+        event_id text NOT NULL,
+        event_type text NOT NULL,
+        cause_id text,
+        known_at_ts bigint NOT NULL,
+        writer_epoch bigint NOT NULL,
+        event jsonb NOT NULL,
+        appended_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (account_id, seq),
+        UNIQUE (account_id, event_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS execution_events_type_idx ON serpent_execution_events (account_id, event_type, seq)`,
+      `CREATE TABLE IF NOT EXISTS serpent_execution_writer_epoch (
+        account_id text PRIMARY KEY,
+        epoch bigint NOT NULL DEFAULT 0,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS serpent_execution_live_owner (
+        venue text PRIMARY KEY,
+        account_id text NOT NULL,
+        key_fingerprint text NOT NULL,
+        exchange_context text NOT NULL,
+        owner_epoch bigint NOT NULL DEFAULT 0,
+        claimed_at timestamptz NOT NULL DEFAULT now(),
+        released_at timestamptz,
+        release_reason text
+      )`,
+    ],
+  },
+  {
+    version: 9,
+    name: 'JUDGE focused completion: append-only experiment records (declaration, split evaluations, selection lock, holdout opening / evaluation)',
+    // ONE additive migration (focused completion §6 / §7). An experiment is a durable, digest-chained, append-only record stream: the
+    // prospective declaration (exact UTC cutoffs, embargo, seed, bindings), every split evaluation, the candidate selection lock, the
+    // one-shot holdout opening (persisted BEFORE any holdout result exists) and the bound holdout evaluation. Writes serialize per
+    // experiment (transaction-scoped advisory lock) and carry a revision check; there is no editable flag and no mutable file.
+    // Versions 1-8 are untouched.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_experiment_records (
+        experiment_id text NOT NULL,
+        seq bigint NOT NULL,
+        kind text NOT NULL,
+        record jsonb NOT NULL,
+        digest text NOT NULL,
+        prev_digest text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (experiment_id, seq),
+        UNIQUE (experiment_id, digest)
+      )`,
+      `CREATE INDEX IF NOT EXISTS experiment_records_kind_idx ON serpent_experiment_records (experiment_id, kind, seq)`,
+    ],
+  },
+];

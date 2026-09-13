@@ -1,0 +1,120 @@
+{
+ "profileVersion": "serpent-paper-profile-1",
+ "profileName": "paper",
+ "runtimeMode": "PAPER",
+ "authority": {
+  "realMoney": "DISABLED",
+  "liveOrders": "DISABLED",
+  "withdrawFunding": "DISABLED",
+  "judgeMode": "PAPER",
+  "judgeAllowPrivate": false,
+  "judgeAllowOrders": false,
+  "darkSensesDecisionAuthority": "NONE",
+  "law": "a credential present in the environment is never an enable; every paid or private activity needs this profile's separate enable + the subsystem's own budget / access gate; the Judge mode of this profile is PAPER and can never be LIVE"
+ },
+ "files": {
+  "config": "cobra.config.json",
+  "marketResearchPolicy": "config/market-research.paper.json",
+  "marketResearchSubjects": "config/market-subjects.paper.json",
+  "judgePolicy": "config/judge.paper.json",
+  "envExample": ".env.paper.example",
+  "runbook": "docs/PAPER-RUNBOOK.md"
+ },
+ "configOverlay": {
+  "governance": { "enabled": true, "snapshotEnabled": false },
+  "wideeye": { "enabled": true },
+  "rumint": { "enabled": true },
+  "universeExpansion": { "enabled": true },
+  "gateway": { "enabled": true, "sources": { "kraken": true, "krakenSystem": true, "coinbase": true, "okx": true } }
+ },
+ "groups": {
+  "coreObservation": {
+   "tape": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "tape/run.js", "authority": "NONE", "note": "Kraken public WebSocket v2 market data; the only feed the Judge accepts" },
+   "wideEye": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "survey/wideeye.js", "authority": "NONE" },
+   "universeExpansion": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "tape/universe.js", "authority": "NONE" },
+   "costExecutability": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "cost/model.js", "authority": "NONE" },
+   "memoryMirror": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "memory/mirror.js", "authority": "NONE" },
+   "socialStrainer": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "rumor2/social-research-strainer.js", "authority": "NONE" }
+  },
+  "infrastructure": {
+   "gateway": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "gateway/collector.js", "authority": "NONE", "sources": ["kraken", "krakenSystem", "coinbase", "okx"], "note": "public status pages / system-status endpoints, polite polling; never trading permission" },
+   "NOAA_SWPC": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "infra/collector.js", "authority": "NONE", "enableEnv": "INFRA_OBS_ENABLED", "experimental": true, "note": "NOAA SWPC planetary K-index + current R/S/G scales (public JSON, 10 min cadence); EXPERIMENTAL observation family, never a decision input" },
+   "RIPE_RIS": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "module": "infra/collector.js", "authority": "NONE", "enableEnv": "INFRA_OBS_ENABLED", "gate": "INFRA_RIPE_RESOURCES", "note": "RIPEstat routing-status for the operator's OWN monitored prefixes / ASNs (INFRA_RIPE_RESOURCES); CONFIG_REQUIRED until named — the profile never invents a watch list" },
+   "CLOUDFLARE_RADAR": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "module": "infra/collector.js", "authority": "NONE", "enableEnv": "INFRA_OBS_ENABLED", "credentialEnv": "CLOUDFLARE_API_TOKEN", "note": "Cloudflare Radar BGP announcement time series (the provider requires API-token authorization); CREDENTIAL_REQUIRED until the token is present" }
+  },
+  "rumorOfficial": {
+   "rumor2": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "rumor2/collector.js", "authority": "NONE", "enableEnv": "RUMOR2_ENABLED" },
+   "KRAKEN_OFFICIAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "authority": "NONE" },
+   "SEC_OFFICIAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "authority": "NONE", "requiresEnv": ["SERPENT_HTTP_CONTACT"], "configRequired": "SERPENT_HTTP_CONTACT" },
+   "CFTC_OFFICIAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "authority": "NONE" },
+   "EDGAR_OFFICIAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "authority": "NONE", "enableEnv": "RUMOR2_EDGAR_ENABLED", "requiresEnv": ["SERPENT_HTTP_CONTACT", "RUMOR2_EDGAR_CIKS"], "configRequired": "EDGAR_WHITELIST", "note": "a CIK whitelist is operator configuration; the profile never invents one from test fixtures" },
+   "OFAC_OFFICIAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "authority": "NONE", "enableEnv": "RUMOR2_OFAC_ENABLED" },
+   "rumintLegacy": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "rumint/poller.js", "authority": "NONE", "note": "StockTwits aggregate legacy ear; nominate / warn only" }
+  },
+  "social": {
+   "BLUESKY_OFFICIAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "authority": "NONE", "enableEnv": "RUMOR2_SOCIAL_BLUESKY_ENABLED" },
+   "X_OFFICIAL": { "desiredState": "REQUEST", "blockerPolicy": "PAID_GATE", "authority": "NONE", "paid": true, "enableEnv": "RUMOR2_SOCIAL_X_ENABLED", "credentialEnv": "X_BEARER_TOKEN", "budgetEnv": ["RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS", "RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS", "RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD"], "note": "activates only through the existing X governor: credential -> explicit budgets -> explicit paid smoke; this profile invents no budget" },
+    "YOUTUBE_OFFICIAL": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "DISABLED_BY_PAPER_POLICY", "enableEnv": "RUMOR2_SOCIAL_YOUTUBE_ENABLED", "credentialEnv": "YOUTUBE_API_KEY", "budgetEnv": ["RUMOR2_SOCIAL_YOUTUBE_MAX_DAILY_QUOTA_UNITS", "RUMOR2_SOCIAL_YOUTUBE_MAX_MONTHLY_QUOTA_UNITS"], "note": "read-only search.list fixture/request boundary; explicit quota-unit caps and existing bounded Social scope required; no collector or receipt" },
+   "FARCASTER_OFFICIAL": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "NEYNAR_API_KEY"},
+   "REDDIT_OFFICIAL": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "REDDIT_CLIENT_ID"},
+   "STOCKTWITS_OFFICIAL": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "STOCKTWITS_STREAM_USER"},
+   "META_PUBLIC": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "META_APP_TOKEN"},
+   "TIKTOK_PUBLIC": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "authority": "NONE", "reason": "BLOCKED_TERMS" },
+   "YOUTUBE_DATA_API": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "module": "video/collector.js", "enableEnv": "SOCIAL_VIDEO_ENABLED", "credentialEnv": "YOUTUBE_API_KEY", "configEnv": ["SOCIAL_VIDEO_YOUTUBE_QUERIES", "SOCIAL_VIDEO_YOUTUBE_MAX_DAILY_SEARCHES"], "coverage": "METADATA_ONLY", "note": "separate social-video observation tier (video/) outside the frozen RUMOR-2 social registry; metadata only (never captions / transcripts); activates only when the key, the owner's own query list and an explicit daily search budget are all present" }
+  },
+  "marketResearch": {
+   "service": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "market-lab/service.js", "authority": "NONE", "enableEnv": "MARKET_RESEARCH_ENABLED" },
+   "providers": {
+    "KRAKEN_SPOT": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
+    "COINBASE_SPOT": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
+    "KRAKEN_DERIVATIVES": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
+    "DERIBIT": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
+    "BYBIT": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "reason": "BLOCKED_GEOGRAPHY" },
+    "GECKOTERMINAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
+    "DEFILLAMA": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
+    "COINMETRICS": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
+    "SETTLED_RECORDS": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
+    "FRED": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "credentialEnv": "FRED_API_KEY" },
+    "COINGECKO": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "credentialEnv": "COINGECKO_DEMO_API_KEY", "reason": "DEMO_INCLUDED_QUOTA_TWO_CALL_VERIFICATION" },
+    "COINGLASS": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "COINGLASS_API_KEY", "reason": "BLOCKED_BUDGET" },
+    "CRYPTOQUANT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "CRYPTOQUANT_API_KEY", "reason": "BLOCKED_BUDGET" },
+    "SANTIMENT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "SANTIMENT_API_KEY", "reason": "BLOCKED_BUDGET" },
+    "TWELVEDATA": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "credentialEnv": "TWELVEDATA_API_KEY", "note": "Owner Basic 8 key verified with EUR/USD candles; free REST only, capped in research policy. Key must be installed in host Secrets; production collection remains unverified." },
+    "TOKENOMIST": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "TOKENOMIST_API_KEY", "reason": "BLOCKED_BUDGET" }
+   }
+  },
+  "darkEdgeCapture": {
+   "krakenCharts": { "desiredState": "ON", "blockerPolicy": "DARK_RESEARCH", "authority": "NONE", "consumers": "EDGE_CAPTURE only (never Socrates / Judge / Watch / execution)" },
+   "krakenL3": { "desiredState": "REQUEST", "blockerPolicy": "DARK_RESEARCH", "authority": "NONE", "gate": "SAFE_L3_DATA_KEY", "blockedVerdict": "BLOCKED_NO_SAFE_L3_DATA_KEY", "credentialEnv": ["KRAKEN_L3_DATA_API_KEY", "KRAKEN_L3_DATA_API_SECRET"], "consumers": "EDGE_CAPTURE only (never Socrates / Judge / Watch / execution)" }
+  },
+  "socrates": {
+   "caseRuntime": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "socrates/runtime.js", "authority": "NONE", "note": "runs inside the market-research service; a case without an authorized model seals BUDGET_BLOCKED (fail-closed, never a fabricated score)" },
+   "model": { "desiredState": "REQUEST", "blockerPolicy": "PAID_GATE", "authority": "NONE", "credentialEnv": "ANTHROPIC_API_KEY", "budgetSource": "config/market-research.paper.json model.* (explicit USD caps; shipped 0 = blocked)" }
+  },
+  "judge": {
+   "judge": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "judge/composition.js", "mode": "PAPER", "enableEnv": "JUDGE_ENABLED", "policyFile": "config/judge.paper.json", "accountId": "paper-reference-usd500", "authority": "PAPER_SIMULATION_ONLY" }
+  },
+  "watch": {
+   "watch": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "watch/watch.js", "composedBy": "judge/composition.js", "authority": "PAPER_EXIT_INTENT_ONLY" }
+  },
+  "persistence": {
+   "database": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "persistence/runtime.js", "env": "DATABASE_URL", "note": "PostgreSQL is the journal authority for PAPER accounts and the RUMOR2 event root; without it the Judge cannot start and permission-increasing behaviour stays locked" },
+   "localJournalFallback": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "reason": "DISABLED_BY_PAPER_POLICY", "env": "RUMOR2_ALLOW_LOCAL_JOURNAL", "note": "never a silent fallback in the paper profile" }
+  },
+  "cockpit": {
+   "server": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "ui/server.js", "portEnv": "PORT", "controlAuthEnv": "SERPENT_CONTROL_PASSWORD", "authority": "READ_ONLY_PLUS_HUMAN_CONTROLS" }
+  },
+  "publisherNews": {
+   "COINDESK_NEWS": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "press/collector.js", "authority": "NONE", "enableEnv": "PRESS_ENABLED", "coverage": "HEADLINE_LINK_ONLY", "note": "public RSS; headline / link / publisher timestamp only; bodies never fetched" },
+   "THEBLOCK_NEWS": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "press/collector.js", "authority": "NONE", "enableEnv": "PRESS_ENABLED", "coverage": "HEADLINE_LINK_ONLY" },
+   "COINTELEGRAPH_NEWS": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "press/collector.js", "authority": "NONE", "enableEnv": "PRESS_ENABLED", "coverage": "HEADLINE_LINK_ONLY" },
+   "DECRYPT_NEWS": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "press/collector.js", "authority": "NONE", "enableEnv": "PRESS_ENABLED", "coverage": "HEADLINE_LINK_ONLY" },
+   "FT_NEWS": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "module": "press/collector.js", "authority": "NONE", "enableEnv": "PRESS_ENABLED", "coverage": "HEADLINE_LINK_ONLY", "reason": "BLOCKED_TERMS", "note": "public headline RSS composed; ft.com answered HTTP 403 to the runtime client from the development environment on 2026-09-12 (curl: 200) and the owner's terms review of ft.com syndication is unresolved, so the profile leaves it OFF" },
+   "CNBC_NEWS": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "module": "press/collector.js", "authority": "NONE", "enableEnv": "PRESS_ENABLED", "coverage": "HEADLINE_LINK_ONLY", "reason": "BLOCKED_TERMS", "note": "documented Top News RSS composed and read live through press/collector.js on 2026-09-12 (HTTP 200, 30 items); OFF until the owner accepts CNBC's RSS terms" },
+   "GOOGLE_NEWS_AGGREGATOR": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "module": "press/collector.js", "authority": "NONE", "enableEnv": "PRESS_ENABLED", "coverage": "HEADLINE_LINK_ONLY", "reason": "BLOCKED_TERMS", "note": "aggregator RSS implemented (per-item publisher kept); no documented consumer API / terms for the RSS route, so OFF until the owner accepts" },
+   "CNN_NEWS": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "module": "press/collector.js", "authority": "NONE", "reason": "BLOCKED_EXTERNAL_APPROVAL", "note": "CNN Newsource licensed interface not supplied; legacy CNN RSS endpoints returned HTTP 502 on 2026-09-12. No key is needed for the other public RSS adapters; no CNN route is invented." },
+   "REUTERS_NEWS": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "module": "press/collector.js", "authority": "NONE", "reason": "BLOCKED_EXTERNAL_APPROVAL", "note": "LICENSED_INTERFACE_REQUIRED: no public feed; only the owner's licensed distribution agreement (Reuters Connect) can supply the interface — the code never invents one" },
+   "BLOOMBERG_NEWS": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "module": "press/collector.js", "authority": "NONE", "reason": "BLOCKED_EXTERNAL_APPROVAL", "note": "LICENSED_INTERFACE_REQUIRED: Terminal / B-PIPE / Enterprise licensing only; never a scraped route" }
+  }
+ }
+}
