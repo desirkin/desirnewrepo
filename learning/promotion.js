@@ -66,7 +66,10 @@ export function settleCandidate({ store, candidateId, nowTs, commonShockDates = 
     const activation = buildActivation({
       candidateId, patternId: design.patternId, trainingCutoffTs: design.sealedTs,
       candidateDigest: candidateId, evidenceDigest: design.evidenceDigest, reportDigest: `terminal-${terminal.recordedTs}`,
-      maxAbsAdjust, applicability: design.predicate, effectiveTs: nowTs,
+      // the frozen learned parameter: the full permitted positive nudge, itself conservative — sealed at publication,
+      // never retuned in place; the artifact also carries the design's exact declared scope for the selector
+      maxAbsAdjust, adjust: maxAbsAdjust, scope: { setupType: String(design.scope?.setupType ?? 'ANY'), regime: String(design.scope?.regime ?? 'ANY') },
+      applicability: design.predicate, effectiveTs: nowTs,
       expiresTs: nowTs + PROMOTION_POLICY.activationLifetimeDays * 86_400_000,
       degradeRule: PROMOTION_POLICY.degradeRule, ts: nowTs,
     });

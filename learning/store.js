@@ -195,6 +195,32 @@ export function createLearningStore({ dataDir, log = () => {} }) {
   };
   const listCampaigns = () => { const d = path.join(dir, 'campaigns'); if (!existsSync(d)) return []; return readdirSync(d).filter((f) => f.startsWith('lcmp-')).sort(); };
 
+  // ---- diagnostics: <dir>/diagnostics/<id>/{manifest.json, state.json, results.jsonl} (registration BEFORE calls;
+  // the manifest is immutable; results append with idempotent (sampleId, condition, repeat) identity on read)
+  const diagnosticDir = (id) => path.join(dir, 'diagnostics', id);
+  const writeDiagnosticManifest = (m) => {
+    const f = path.join(diagnosticDir(m.diagnosticId), 'manifest.json');
+    if (existsSync(f)) throw new Error('learning store: diagnostic manifest already exists (immutable)');
+    mkdirSync(diagnosticDir(m.diagnosticId), { recursive: true });
+    atomicWriteJson(f, m, { pretty: true, sync: true });
+  };
+  const readDiagnosticManifest = (id) => { const f = path.join(diagnosticDir(id), 'manifest.json'); return existsSync(f) ? readJsonBounded(f, 4 * 1024 * 1024) : null; };
+  const writeDiagnosticState = (id, s) => atomicWriteJson(path.join(diagnosticDir(id), 'state.json'), s, { sync: true });
+  const readDiagnosticState = (id) => { const f = path.join(diagnosticDir(id), 'state.json'); return existsSync(f) ? readJsonBounded(f) : null; };
+  const appendDiagnosticResult = (id, row) => { appendJsonl(path.join(diagnosticDir(id), 'results.jsonl'), row, { sync: true }); counters.appended += 1; };
+  const readDiagnosticResults = (id) => {
+    const f = path.join(diagnosticDir(id), 'results.jsonl'); if (!existsSync(f)) return [];
+    const out = []; const seen = new Set();
+    for (const r of readJsonl(f)) {
+      if (!isPlainObject(r) || typeof r.sampleId !== 'string') { counters.corruptSkipped += 1; continue; }
+      const key = `${r.sampleId}|${r.condition}|${r.repeat}`;
+      if (seen.has(key)) { counters.duplicateSuppressed += 1; continue; } // a replayed retry is the same repeat, never a new sample
+      seen.add(key); out.push(r);
+    }
+    return out;
+  };
+  const listDiagnostics = () => { const d = path.join(dir, 'diagnostics'); if (!existsSync(d)) return []; return readdirSync(d).filter((f) => f.startsWith('ldiag-')).sort(); };
+
   // ---- daily summaries
   const writeSummary = (s) => atomicWriteJson(path.join(dir, 'summaries', `${s.utcDate}.json`), s, { pretty: true, sync: true });
   const readSummary = (utcDate) => { const f = path.join(dir, 'summaries', `${utcDate}.json`); return existsSync(f) ? readJsonBounded(f) : null; };
@@ -231,6 +257,8 @@ export function createLearningStore({ dataDir, log = () => {} }) {
     appendCoverage, readCoverage, coverageDates,
     writeCampaignManifest, readCampaignManifest, appendCampaignResult, readCampaignResults,
     writeCampaignCheckpoint, readCampaignCheckpoint, listCampaigns,
+    writeDiagnosticManifest, readDiagnosticManifest, writeDiagnosticState, readDiagnosticState,
+    appendDiagnosticResult, readDiagnosticResults, listDiagnostics,
     writeSummary, readSummary, writeStatus, readStatus, readKill, writeKill,
   });
 }

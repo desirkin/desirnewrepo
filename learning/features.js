@@ -99,12 +99,14 @@ export function baselineDecision(featureSet) {
   });
 }
 
-// A predicate over the frozen feature snapshot — the ONLY predicate language pattern candidates may use. Clauses
-// reference approved feature names; an unavailable feature makes the predicate UNKNOWN (never true, never false).
+// A predicate over a frozen feature snapshot — the ONLY predicate language pattern candidates may use. Clauses
+// reference features by name in the CONSUMER's prepared fact vocabulary (the learning recipe's names in learning,
+// the Judge's prepared-fact names at its consumer seam); a name absent from the supplied set, or an unavailable
+// feature, makes the predicate UNKNOWN (never true, never false — no extrapolated confidence).
 export function evaluatePredicate(predicate, featureSet) {
   if (!predicate || !Array.isArray(predicate.clauses) || predicate.clauses.length === 0) return 'UNKNOWN';
   for (const c of predicate.clauses) {
-    if (!FEATURE_NAMES.includes(c.feature)) return 'UNKNOWN';
+    if (typeof c.feature !== 'string') return 'UNKNOWN';
     const f = featureSet.features[c.feature];
     if (!f || f.availability !== 'KNOWN') return 'UNKNOWN';
     const ok = c.op === 'GT' ? f.value > c.threshold : c.op === 'GTE' ? f.value >= c.threshold : c.op === 'LT' ? f.value < c.threshold : c.op === 'LTE' ? f.value <= c.threshold : null;

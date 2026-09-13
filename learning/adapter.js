@@ -21,14 +21,14 @@ export const DEFAULT_COOLDOWN_MS = 24 * 3_600_000;
 
 export function buildActivation({
   candidateId, patternId, trainingCutoffTs, candidateDigest, evidenceDigest, reportDigest,
-  maxAbsAdjust, applicability, previousVersion = null, effectiveTs, expiresTs,
-  degradeRule = DEFAULT_DEGRADE_RULE, state = 'PUBLISHED_WAITING_FOR_PAPER', seq = 0, ts, transitionReason = 'PROSPECTIVE_GATE_PASSED', cooldownUntilTs = null,
+  maxAbsAdjust, adjust = maxAbsAdjust, scope = { setupType: 'ANY', regime: 'ANY' }, eligibility = null, axes = ['RANKING'], applicability, previousVersion = null, effectiveTs, expiresTs,
+  degradeRule = DEFAULT_DEGRADE_RULE, state = 'PUBLISHED_WAITING_FOR_PAPER', seq = 0, ts, transitionReason = 'FORWARD_GATE_PASSED', cooldownUntilTs = null,
 }) {
   const identity = { candidateId, patternId, candidateDigest, effectiveTs };
   const record = {
     activationVersion: ACTIVATION_VERSION, activationId: activationIdOf(identity), seq, state, candidateId, patternId,
-    trainingCutoffTs, candidateDigest, evidenceDigest, reportDigest,
-    allowedEffect: { kind: 'SETUP_QUALITY_SCORE_ADJUSTMENT', maxAbsAdjust, units: 'BASELINE_SCORE_UNITS' },
+    trainingCutoffTs, candidateDigest, evidenceDigest, reportDigest, scope, eligibility,
+    allowedEffect: { kind: 'SETUP_QUALITY_SCORE_ADJUSTMENT', axes, adjust, maxAbsAdjust, units: 'BASELINE_SCORE_UNITS' },
     applicability, previousVersion, effectiveTs, expiresTs, cooldownUntilTs, degradeRule, transitionReason, ts,
     authority: AUTHORITY_PAPER_ADJUSTMENT,
   };
@@ -55,7 +55,9 @@ export function applyLearnedAdjustment({ baselineScore, activationHeads, feature
     if (activationError(head)) return fallback('ACTIVATION_RECORD_INVALID'); // one corrupt record suspends learned influence entirely
     if (head.state !== 'ACTIVE_PAPER') continue;
     if (nowTs < head.effectiveTs || nowTs >= head.expiresTs) continue;
-    const adjust = adjustments?.[head.activationId];
+    // the frozen learned parameter lives in the artifact; an explicit adjustments map may only NARROW it (shadow
+    // experiments) — an absent map applies the frozen value, never an external retune
+    const adjust = adjustments && head.activationId in adjustments ? adjustments[head.activationId] : head.allowedEffect.adjust;
     if (!isFiniteNum(adjust)) continue;
     if (Math.abs(adjust) > head.allowedEffect.maxAbsAdjust + 1e-12) return fallback('ADJUSTMENT_EXCEEDS_ALLOWED_EFFECT');
     // applicability: a pattern outside its validated domain answers UNKNOWN/OUT_OF_DOMAIN and contributes nothing —

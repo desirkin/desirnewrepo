@@ -82,14 +82,18 @@ test('activation ceilings: per-activation cap, lifetime cap, allowlisted kind on
   const a = (over = {}) => ({
     activationVersion: ACTIVATION_VERSION, activationId: 'lact-x', seq: 0, state: 'PUBLISHED_WAITING_FOR_PAPER',
     candidateId: 'lcand-x', patternId: 'lpat-x', trainingCutoffTs: T, candidateDigest: 'd', evidenceDigest: 'e', reportDigest: 'r',
-    allowedEffect: { kind: 'SETUP_QUALITY_SCORE_ADJUSTMENT', maxAbsAdjust: 0.1, units: 'BASELINE_SCORE_UNITS' },
+    scope: { setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED' }, eligibility: null,
+    allowedEffect: { kind: 'SETUP_QUALITY_SCORE_ADJUSTMENT', axes: ['RANKING'], adjust: 0.1, maxAbsAdjust: 0.1, units: 'BASELINE_SCORE_UNITS' },
     applicability: { clauses: [] }, previousVersion: null, effectiveTs: T, expiresTs: T + 86_400_000, cooldownUntilTs: null,
     degradeRule: { minGroups: 10, adverseFractionAbove: 0.7, consecutiveWindows: 2 }, transitionReason: 't', ts: T,
     authority: 'PAPER_ASSESSMENT_ADJUSTMENT_ONLY', ...over,
   });
   assert.equal(activationError(a()), null);
-  assert.match(activationError(a({ allowedEffect: { kind: 'SETUP_QUALITY_SCORE_ADJUSTMENT', maxAbsAdjust: 0.2, units: 'BASELINE_SCORE_UNITS' } })), /maxAbsAdjust/);
-  assert.match(activationError(a({ allowedEffect: { kind: 'THRESHOLD_REWRITE', maxAbsAdjust: 0.1, units: 'BASELINE_SCORE_UNITS' } })), /allowlisted/);
+  assert.match(activationError(a({ allowedEffect: { kind: 'SETUP_QUALITY_SCORE_ADJUSTMENT', axes: ['RANKING'], adjust: 0.1, maxAbsAdjust: 0.2, units: 'BASELINE_SCORE_UNITS' } })), /maxAbsAdjust/);
+  assert.match(activationError(a({ allowedEffect: { kind: 'THRESHOLD_REWRITE', axes: ['RANKING'], adjust: 0.1, maxAbsAdjust: 0.1, units: 'BASELINE_SCORE_UNITS' } })), /allowlisted/);
+  assert.match(activationError(a({ allowedEffect: { kind: 'SETUP_QUALITY_SCORE_ADJUSTMENT', axes: ['RANKING'], adjust: 0.12, maxAbsAdjust: 0.1, units: 'BASELINE_SCORE_UNITS' } })), /frozen adjust/);
+  assert.match(activationError(a({ scope: { setupType: '', regime: 'ANY' } })), /scope setupType/);
+  assert.match(activationError(a({ scope: { setupType: 'ANY' } })), /scope/);
   assert.match(activationError(a({ expiresTs: T + 200 * 86_400_000 })), /ceiling/);
   assert.match(activationError(a({ degradeRule: { minGroups: 1, adverseFractionAbove: 0.5, consecutiveWindows: 1 } })), /lone loss/);
   assert.match(activationError(a({ authority: 'NONE' })), /authority/);

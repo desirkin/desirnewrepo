@@ -148,9 +148,19 @@ export const FLOORS_KEYS = Object.freeze(['minIndependentGroups', 'minDistinctUt
 export const DEFAULT_FLOORS = Object.freeze({ minIndependentGroups: 30, minDistinctUtcDates: 7, minDistinctAssets: 5, floorsLaw: 'ENGINEERING_DEFAULT_NOT_PROOF_OF_POWER' });
 export const ACTIVATION_KEYS = Object.freeze([
   'activationVersion', 'activationId', 'seq', 'state', 'candidateId', 'patternId', 'trainingCutoffTs', 'candidateDigest', 'evidenceDigest', 'reportDigest',
-  'allowedEffect', 'applicability', 'previousVersion', 'effectiveTs', 'expiresTs', 'cooldownUntilTs', 'degradeRule', 'transitionReason', 'ts', 'authority',
+  'scope', 'eligibility', 'allowedEffect', 'applicability', 'previousVersion', 'effectiveTs', 'expiresTs', 'cooldownUntilTs', 'degradeRule', 'transitionReason', 'ts', 'authority',
 ]);
-export const ALLOWED_EFFECT_KEYS = Object.freeze(['kind', 'maxAbsAdjust', 'units']);
+// the frozen learned parameter travels IN the artifact (adjust), inside its own declared bound (maxAbsAdjust) and
+// the code-level ceilings: active learned parameters are frozen — no external map can retune an active version.
+// `axes` declares the candidate's PERMITTED influence axes; only RANKING is consumable in this release — a declared
+// SIZING/EXIT_MANAGEMENT axis is a forward declaration nothing consumes yet, never implicit authority.
+export const ALLOWED_EFFECT_KEYS = Object.freeze(['kind', 'axes', 'adjust', 'maxAbsAdjust', 'units']);
+export const INFLUENCE_AXES = Object.freeze(['RANKING', 'SIZING', 'EXIT_MANAGEMENT']);
+// every candidate artifact declares its exact scope; 'ANY' is an explicit declaration, never a default the selector invents
+export const ACTIVATION_SCOPE_KEYS = Object.freeze(['setupType', 'regime']);
+// optional liquidity/coverage eligibility: when declared, the selector refuses the candidate unless the CURRENT
+// prepared facts prove the range (missing facts = OUT_OF_DOMAIN, never an optimistic pass)
+export const ACTIVATION_ELIGIBILITY_KEYS = Object.freeze(['maxSpreadBps', 'minDepthUsd10bps']);
 export const CAMPAIGN_MANIFEST_KEYS = Object.freeze([
   'campaignVersion', 'campaignId', 'createdTs', 'mode', 'fidelity', 'datasetId', 'datasetIdentity', 'universeRule', 'samplingSchedule',
   'captureRecipeVersion', 'featureRecipeVersion', 'baselineRuleVersion', 'candidateVersions', 'discoveryValidationBoundaryTs',
@@ -288,10 +298,18 @@ export function activationError(a) {
   if (a.expiresTs <= a.effectiveTs) return 'activation: expiry precedes effect';
   if (a.expiresTs - a.effectiveTs > ADJUSTMENT_CEILINGS.maxLifetimeDays * 86_400_000) return 'activation: lifetime exceeds the ceiling';
   if (!isTs(a.trainingCutoffTs) || a.trainingCutoffTs > a.effectiveTs) return 'activation: training cutoff after effect';
+  const sk = exactKeys(a.scope, ACTIVATION_SCOPE_KEYS); if (sk) return `activation: scope ${sk}`;
+  for (const f of ACTIVATION_SCOPE_KEYS) if (typeof a.scope[f] !== 'string' || a.scope[f].length === 0 || a.scope[f].length > 48) return `activation: scope ${f} malformed`;
+  if (a.eligibility !== null) {
+    const gk = exactKeys(a.eligibility, ACTIVATION_ELIGIBILITY_KEYS); if (gk) return `activation: eligibility ${gk}`;
+    for (const f of ACTIVATION_ELIGIBILITY_KEYS) if (a.eligibility[f] !== null && (!isFiniteNum(a.eligibility[f]) || a.eligibility[f] < 0)) return `activation: eligibility ${f} malformed`;
+  }
   const ek = exactKeys(a.allowedEffect, ALLOWED_EFFECT_KEYS); if (ek) return `activation: allowedEffect ${ek}`;
+  if (!Array.isArray(a.allowedEffect.axes) || a.allowedEffect.axes.length === 0 || a.allowedEffect.axes.some((x) => !INFLUENCE_AXES.includes(x)) || new Set(a.allowedEffect.axes).size !== a.allowedEffect.axes.length) return 'activation: influence axes malformed';
   if (a.allowedEffect.kind !== 'SETUP_QUALITY_SCORE_ADJUSTMENT') return 'activation: only the allowlisted score adjustment kind exists';
   if (a.allowedEffect.units !== 'BASELINE_SCORE_UNITS') return 'activation: adjustment units must be baseline score units';
   if (!isFiniteNum(a.allowedEffect.maxAbsAdjust) || a.allowedEffect.maxAbsAdjust <= 0 || a.allowedEffect.maxAbsAdjust > ADJUSTMENT_CEILINGS.maxAbsPerActivation) return `activation: maxAbsAdjust outside (0, ${ADJUSTMENT_CEILINGS.maxAbsPerActivation}]`;
+  if (!isFiniteNum(a.allowedEffect.adjust) || Math.abs(a.allowedEffect.adjust) > a.allowedEffect.maxAbsAdjust) return 'activation: the frozen adjust must sit inside its own declared bound';
   if (!isPlainObject(a.degradeRule) || exactKeys(a.degradeRule, ['minGroups', 'adverseFractionAbove', 'consecutiveWindows'])) return 'activation: degradation rule must be predeclared';
   if (!isCount(a.degradeRule.minGroups) || a.degradeRule.minGroups < 2) return 'activation: a lone loss can never trigger degradation (minGroups >= 2)';
   if (a.authority !== AUTHORITY_PAPER_ADJUSTMENT) return 'activation: authority must be PAPER_ASSESSMENT_ADJUSTMENT_ONLY';
