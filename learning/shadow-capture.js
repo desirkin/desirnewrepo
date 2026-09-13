@@ -5,7 +5,7 @@
 // became known after) the decision clock, and downgrades fidelity honestly when depth is absent.
 import {
   SHADOW_CAPTURE_VERSION, LANE, AUTHORITY, PURPOSE,
-  recipeError, captureError, opportunityIdOf, captureIdOf, canonicalDigest, deepFreeze, isPlainObject, isTs, isFiniteNum,
+  recipeError, captureError, opportunityIdOf, decisionMomentIdOf, captureIdOf, canonicalDigest, deepFreeze, isPlainObject, isTs, isFiniteNum,
 } from './shadow-contracts.js';
 
 const MINUTE = 60_000;
@@ -37,6 +37,7 @@ export function buildShadowCapture({ recipe, venue, assetId, decisionTs, inputs 
     if (c.closed !== true) return refuse('CANDLE_NOT_CLOSED', `candle ending ${c.periodEndTs} is not a completed candle`);
     if (c.periodEndTs > decisionTs) return refuse('FUTURE_KNOWN_INPUT', `candle ends ${c.periodEndTs} after the decision clock ${decisionTs}`);
     if (!isTs(c.knownAtTs) || c.knownAtTs > decisionTs) return refuse('FUTURE_KNOWN_INPUT', `candle known at ${c.knownAtTs} after the decision clock`);
+    if (c.periodEndTs - c.periodStartTs !== recipe.candlePeriodMs) return refuse('CANDLE_WINDOW_INCOMPLETE', `candle ${i} is not one declared ${recipe.candlePeriodMs}ms bar`);
     if (i > 0 && c.periodStartTs !== window[i - 1].periodEndTs) return refuse('NON_CONTIGUOUS_WINDOW', `gap before candle starting ${c.periodStartTs}`);
     for (const f of ['open', 'high', 'low', 'close']) if (!isFiniteNum(c[f]) || c[f] <= 0) return refuse('CANDLE_WINDOW_INCOMPLETE', `candle ${i} ${f} malformed`);
     // VOLUME law (P1): a REAL observed component is required — some venues (Coinbase) report base volume with
@@ -70,7 +71,7 @@ export function buildShadowCapture({ recipe, venue, assetId, decisionTs, inputs 
   const frozenInputs = { window, depth, social: inputs?.social ?? null, news: inputs?.news ?? null };
   const inputDigest = canonicalDigest({ lane: LANE, venue, assetId, decisionTs, recipeVersion: recipe.recipeVersion, costPolicyVersion: recipe.costPolicy.costPolicyVersion, frozenInputs });
   const inputKnownAt = { lastCandle: last.knownAtTs, ...(depth ? { depth: depth.knownAtTs } : {}), ...(inputs?.social ? { social: inputs.social.knownAtTs } : {}), ...(inputs?.news ? { news: inputs.news.knownAtTs } : {}) };
-  const inputUnits = { price: 'QUOTE_PER_BASE', volumeComponents, tradeFlow: 'SIGNED_FRACTION', candlePeriodMs: MINUTE };
+  const inputUnits = { price: 'QUOTE_PER_BASE', volumeComponents, tradeFlow: 'SIGNED_FRACTION', candlePeriodMs: recipe.candlePeriodMs };
   const frozenFacts = { lastClose: last.close, lastVolumeBase: last.volumeBase ?? null, lastVolumeQuote: last.volumeQuote ?? null, lastTradeFlow: last.tradeFlow ?? null, windowHigh: Math.max(...window.map((c) => c.high)), windowLow: Math.min(...window.map((c) => c.low)) };
 
   opportunityId = opportunityIdOf({ venue, assetId, decisionTs, recipeVersion: recipe.recipeVersion, windowEndTs: last.periodEndTs });
@@ -78,7 +79,8 @@ export function buildShadowCapture({ recipe, venue, assetId, decisionTs, inputs 
     const record = {
       captureVersion: SHADOW_CAPTURE_VERSION,
       captureId: captureIdOf({ opportunityId, variantId: variant.variantId }),
-      opportunityId, variantId: variant.variantId, groupId: opportunityId, lane: LANE,
+      opportunityId, variantId: variant.variantId,
+      groupId: decisionMomentIdOf({ venue, assetId, decisionTs, recipeVersion: recipe.recipeVersion }), lane: LANE,
       venue, assetId, decisionTs,
       recipeVersion: recipe.recipeVersion, costPolicyVersion: recipe.costPolicy.costPolicyVersion,
       inputDigest,

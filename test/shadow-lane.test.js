@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createShadowStore } from '../learning/shadow-store.js';
 import { buildShadowCapture } from '../learning/shadow-capture.js';
 import { matureShadowCapture } from '../learning/shadow-outcome.js';
@@ -20,7 +21,7 @@ const COST = { costPolicyVersion: 'shadow-cost-1', feePctPerSide: 0.1, assumedHa
 const RECIPE = {
   recipeVersion: 'shadow-recipe-test-1',
   requiredInputs: ['CANDLES_1M', 'VOLUME'], contextualInputs: ['SOCIAL_CONTEXT', 'NEWS_CONTEXT'],
-  candleWindowMin: 5, maxInputAgeMs: 2 * MIN, horizonMin: 3, costPolicy: COST,
+  candleWindowMin: 5, candlePeriodMs: MIN, maxInputAgeMs: 2 * MIN, horizonMin: 3, costPolicy: COST,
   variants: [
     { variantId: 'take-open-s', decision: 'TAKE', sizeTier: 'S', entryRule: 'NEXT_CANDLE_OPEN', limitOffsetBps: null, stopPct: 1, targetPct: 1 },
     { variantId: 'take-limit-m', decision: 'TAKE', sizeTier: 'M', entryRule: 'LIMIT_AT_TRIGGER', limitOffsetBps: 10, stopPct: 1, targetPct: 1 },
@@ -55,7 +56,8 @@ test('capture freezes the then-known world and REFUSES ineligible opportunities 
   assert.equal(c0.inputFidelity, 'CANDLE_ONLY', 'no depth supplied = an honest downgrade, recorded');
   assert.match(c0.inputDigest, /^[0-9a-f]{64}$/);
   assert.equal(c0.inputWindow.endTs, T, 'the frozen window ends AT the decision clock');
-  assert.equal(c0.groupId, c0.opportunityId, 'same-moment variants share ONE dependence group');
+  assert.ok(c0.groupId.startsWith('fsmom-') && c0.groupId !== c0.opportunityId, 'the dependence group is the DECISION MOMENT, distinct from the window-bearing opportunity id');
+  assert.ok(ok.eligible.every((x) => x.groupId === c0.groupId), 'every variant of the moment shares the ONE group');
   assert.ok(Object.isFrozen(c0) && Object.isFrozen(c0.frozenFacts), 'captures are immutable');
   assert.ok(new Set(ok.eligible.map((x) => x.captureId)).size === 4 && new Set(ok.eligible.map((x) => x.opportunityId)).size === 1);
   const cases = [
@@ -63,7 +65,7 @@ test('capture freezes the then-known world and REFUSES ineligible opportunities 
     [{ candles: WINDOW.map((c, i) => (i === 4 ? { ...c, closed: false } : c)) }, 'CANDLE_NOT_CLOSED'],
     [{ candles: WINDOW.map((c, i) => (i === 2 ? { ...c, volumeBase: undefined, volumeQuote: undefined } : c)) }, 'VOLUME_MISSING'],
     [{ candles: WINDOW.slice(0, 3) }, 'CANDLE_WINDOW_INCOMPLETE'],
-    [{ candles: WINDOW.map((c, i) => (i === 3 ? { ...c, periodStartTs: c.periodStartTs - 1 } : c)) }, 'NON_CONTIGUOUS_WINDOW'],
+    [{ candles: WINDOW.map((c, i) => (i === 3 ? { ...c, periodStartTs: c.periodStartTs - 1, periodEndTs: c.periodEndTs - 1 } : c)) }, 'NON_CONTIGUOUS_WINDOW'],
   ];
   for (const [inputs, reason] of cases) {
     const r = buildShadowCapture({ recipe: RECIPE, venue: 'kraken', assetId: 'BTC', decisionTs: T, inputs });
@@ -247,7 +249,7 @@ test('maturation through the lane + the prepared result: PENDING first, matured 
 });
 
 test('SEPARATION fences: shadow modules import only shadow siblings + lib/jsonl.js, carry no network primitive, no order/ledger/Judge/Watch token, and never import the campaign, prospective, promotion or execution paths', () => {
-  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'); // fileURLToPath: portable on Windows
   const files = ['learning/shadow-contracts.js', 'learning/shadow-store.js', 'learning/shadow-capture.js', 'learning/shadow-outcome.js', 'learning/shadow-lane.js', 'learning/shadow-result.js'];
   for (const f of files) {
     const src = readFileSync(path.join(root, f), 'utf8');

@@ -32,7 +32,7 @@ export const INELIGIBLE_REASONS = Object.freeze([
   'REQUIRED_INPUT_MISSING', 'REQUIRED_INPUT_STALE', 'CANDLE_WINDOW_INCOMPLETE', 'CANDLE_NOT_CLOSED',
   'FUTURE_KNOWN_INPUT', 'VOLUME_MISSING', 'TRADE_FLOW_MISSING', 'NON_CONTIGUOUS_WINDOW',
 ]);
-export const STORE_REFUSALS = Object.freeze(['LATE_CAPTURE_AFTER_THE_FACT', 'DUPLICATE_CAPTURE', 'DUPLICATE_OUTCOME', 'UNKNOWN_CAPTURE', 'CHAIN_CORRUPT', 'DURABLE_QUOTA_EXCEEDED', 'LANE_STOPPED']);
+export const STORE_REFUSALS = Object.freeze(['LATE_CAPTURE_AFTER_THE_FACT', 'DUPLICATE_CAPTURE', 'DUPLICATE_OUTCOME', 'UNKNOWN_CAPTURE', 'CHAIN_CORRUPT', 'DURABLE_QUOTA_EXCEEDED', 'LANE_STOPPED', 'WRITER_LOCK_HELD', 'WRITER_LOCK_LOST']);
 export const OUTCOME_LABELS = Object.freeze(['PENDING_BEFORE_HORIZON', 'MATURED_FAVORABLE', 'MATURED_ADVERSE', 'MATURED_NEUTRAL', 'MATURED_AMBIGUOUS', 'UNMATURABLE_PATH_MISSING']);
 export const AMBIGUITY_FLAGS = Object.freeze([
   'STOP_TARGET_SAME_CANDLE_CONSERVATIVE_STOP_FIRST', 'ENTRY_FILL_ASSUMED_AT_CANDLE_FIDELITY',
@@ -42,7 +42,7 @@ export const SIZE_EVIDENCE_STATES = Object.freeze(['NONE_AT_CANDLE_FIDELITY', 'D
 export const AUTHORITY = 'NONE';
 export const PURPOSE = 'RESEARCH_ONLY';
 
-export const RECIPE_KEYS = Object.freeze(['recipeVersion', 'requiredInputs', 'contextualInputs', 'candleWindowMin', 'maxInputAgeMs', 'horizonMin', 'costPolicy', 'variants']);
+export const RECIPE_KEYS = Object.freeze(['recipeVersion', 'requiredInputs', 'contextualInputs', 'candleWindowMin', 'candlePeriodMs', 'maxInputAgeMs', 'horizonMin', 'costPolicy', 'variants']);
 export const COST_POLICY_KEYS = Object.freeze(['costPolicyVersion', 'feePctPerSide', 'assumedHalfSpreadBps', 'assumedLatencyMs']);
 export const VARIANT_KEYS = Object.freeze(['variantId', 'decision', 'sizeTier', 'entryRule', 'limitOffsetBps', 'stopPct', 'targetPct']);
 export const CAPTURE_KEYS = Object.freeze([
@@ -85,11 +85,15 @@ export function deepFreeze(obj) {
   return obj;
 }
 
-// ---- identities (honest counting: 1 opportunity = venue+asset+decisionTs+WINDOW+recipe within THIS lane).
-// The frozen window's end is part of the identity: one REST receipt can stamp SEVERAL completed candles with
-// the same knownAt clock, and two different windows sharing that decision clock are two different
-// opportunities — identity by clock alone would collide them and dedupe the newer window as a "duplicate".
+// ---- identities. TWO distinct identities, deliberately (review item 6):
+//   - opportunityId carries the frozen WINDOW end besides the decision clock: one REST receipt can stamp
+//     several completed candles with one knownAt clock, and two windows sharing that clock are two different
+//     work items — identity by clock alone would dedupe the newer window as a "duplicate".
+//   - groupId (the DEPENDENCE group) is the DECISION MOMENT ONLY (venue+asset+decisionTs+recipe, NO window):
+//     every window and every variant born of one receipt shares ONE moment of information and can never be
+//     counted as independent evidence — the estimator downstream sees one group, however many windows exist.
 export const opportunityIdOf = ({ venue, assetId, decisionTs, recipeVersion, windowEndTs }) => `fsop-${canonicalDigest({ lane: LANE, venue, assetId, decisionTs, recipeVersion, windowEndTs }).slice(0, 24)}`;
+export const decisionMomentIdOf = ({ venue, assetId, decisionTs, recipeVersion }) => `fsmom-${canonicalDigest({ lane: LANE, venue, assetId, decisionTs, recipeVersion }).slice(0, 24)}`;
 export const captureIdOf = ({ opportunityId, variantId }) => `fscap-${canonicalDigest({ opportunityId, variantId }).slice(0, 24)}`;
 
 // ---- validators -----------------------------------------------------------------------------------------------
@@ -103,6 +107,10 @@ export function recipeError(r) {
   if (r.requiredInputs.some((x) => r.contextualInputs.includes(x))) return 'recipe: an input cannot be both required and contextual';
   if (!r.requiredInputs.includes('CANDLES_1M')) return 'recipe: candles are the lane substrate and must be required';
   if (!isCount(r.candleWindowMin) || r.candleWindowMin < 2 || r.candleWindowMin > 24 * 60) return 'recipe: candle window malformed';
+  // the DECLARED observed granularity (review item 4): the owner may seal 60s or 3600s bars; the recipe names
+  // which it consumes, and the ALIGNED-BAR horizon must be a whole number of those bars
+  if (!isCount(r.candlePeriodMs) || r.candlePeriodMs < 60_000 || r.candlePeriodMs > 24 * 3_600_000 || r.candlePeriodMs % 60_000 !== 0) return 'recipe: candlePeriodMs malformed (a declared bar granularity, whole minutes)';
+  if ((r.horizonMin * 60_000) % r.candlePeriodMs !== 0) return 'recipe: the horizon must be a WHOLE number of declared bars (the aligned-bar horizon law)';
   if (!isCount(r.maxInputAgeMs) || r.maxInputAgeMs < 1000) return 'recipe: freshness bound malformed';
   if (!isCount(r.horizonMin) || r.horizonMin < 1 || r.horizonMin > 7 * 24 * 60) return 'recipe: horizon malformed';
   const ck = exactKeys(r.costPolicy, COST_POLICY_KEYS); if (ck) return `recipe: costPolicy ${ck}`;
@@ -134,7 +142,7 @@ export function captureError(c) {
   if (!isTs(c.decisionTs)) return 'capture: decision clock malformed';
   if (!isPlainObject(c.inputWindow) || c.opportunityId !== opportunityIdOf({ ...c, windowEndTs: c.inputWindow.endTs })) return 'capture: opportunityId is not the honest identity (venue+asset+decision clock+window+recipe)';
   if (c.captureId !== captureIdOf(c)) return 'capture: captureId is not the honest identity';
-  if (c.groupId !== c.opportunityId) return 'capture: same-moment variants share ONE dependence group (groupId = opportunityId)';
+  if (c.groupId !== decisionMomentIdOf(c)) return 'capture: the dependence group is the DECISION MOMENT — every window and variant of one receipt shares it';
   if (!/^[0-9a-f]{64}$/.test(c.inputDigest)) return 'capture: inputDigest malformed';
   if (!FIDELITIES.includes(c.inputFidelity)) return 'capture: fidelity malformed';
   const wk = exactKeys(c.inputWindow, ['startTs', 'endTs', 'candleCount']); if (wk) return `capture: inputWindow ${wk}`;

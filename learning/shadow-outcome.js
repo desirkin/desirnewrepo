@@ -40,12 +40,21 @@ export function matureShadowCapture({ capture, costPolicy, horizonMin, path, asO
     return deepFreeze(record);
   };
 
-  const horizonEnd = D + horizonMin * MINUTE;
-  // observed-path law: every candle must have STARTED at/after the decision, be CLOSED, and have become known
-  // AFTER the decision (a path row known at/before D is lookahead or a re-labelled input, refused outright)
+  // THE ALIGNED-BAR HORIZON LAW (review P0, second pass): candle data cannot answer sub-bar questions, so the
+  // horizon is PREDECLARED as a whole number of declared bars after the decision boundary — never a raw
+  // millisecond offset. A decision at :00.200 gets bars [:01 .. :01+H): every bar used ENDS at or before the
+  // declared boundary, so no partial bar can leak seconds of post-horizon high/low/close into the outcome.
+  const period = capture.inputUnits?.candlePeriodMs;
+  if (!isFiniteNum(period) || period <= 0) throw new Error('shadow outcome: the capture must carry its frozen bar granularity');
+  if ((horizonMin * MINUTE) % period !== 0) throw new Error('shadow outcome: the sealed horizon must be a WHOLE number of declared bars');
+  const bound = Math.ceil(D / period) * period;
+  const horizonEnd = bound + horizonMin * MINUTE; // the DECLARED aligned boundary; recorded on every outcome
+  // observed-path law: every candle must be one DECLARED bar, STARTED at/after the decision boundary, CLOSED,
+  // and known AFTER the decision (a path row known at/before D is lookahead or a re-labelled input)
   const candles = Array.isArray(path) ? [...path].sort((a, b) => a.periodStartTs - b.periodStartTs) : [];
   for (const c of candles) {
     if (!isPlainObject(c) || !isTs(c.periodStartTs) || !isTs(c.periodEndTs) || c.closed !== true) throw new Error('shadow outcome: path candle malformed or not closed');
+    if (c.periodEndTs - c.periodStartTs !== period) throw new Error('shadow outcome: a path candle must be one DECLARED bar — mixed granularity is not a path');
     if (c.periodStartTs < D) throw new Error(`shadow outcome: LOOKAHEAD refused — path candle starting ${c.periodStartTs} precedes the decision ${D}`);
     if (!isTs(c.knownAtTs) || c.knownAtTs <= D) throw new Error(`shadow outcome: path candle known at ${c.knownAtTs} was not SUBSEQUENTLY observed`);
     if (c.knownAtTs < c.periodEndTs) throw new Error('shadow outcome: a candle cannot be known before it closes');
@@ -63,18 +72,17 @@ export function matureShadowCapture({ capture, costPolicy, horizonMin, path, asO
   }
 
   if (asOfTs < horizonEnd) return base('PENDING_BEFORE_HORIZON', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
-  // the usable path: candles that START inside the horizon (the candle CONTAINING horizonEnd is part of the
-  // observed span), beginning exactly at the decision boundary and CONTIGUOUS from there — the first hole ends
-  // the usable span; nothing after a hole may inform this outcome
-  const started = candles.filter((c) => c.periodStartTs < horizonEnd);
+  // the usable path: ONLY whole bars ENDING at or before the declared boundary (a bar ending after it is the
+  // future, whatever its start), beginning exactly at the decision boundary and CONTIGUOUS from there — the
+  // first hole ends the usable span; nothing after a hole may inform this outcome
+  const started = candles.filter((c) => c.periodEndTs <= horizonEnd);
   if (started.length === 0) return base('UNMATURABLE_PATH_MISSING', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
-  const bound = Math.ceil(D / MINUTE) * MINUTE;
   if (started[0].periodStartTs !== bound) return base('UNMATURABLE_PATH_MISSING', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
   const inHorizon = [started[0]];
   for (let i = 1; i < started.length; i += 1) { if (started[i].periodStartTs !== started[i - 1].periodEndTs) break; inHorizon.push(started[i]); }
-  // COVERAGE-THROUGH-HORIZON LAW (review P0): the observed span must reach horizonEnd before ANY claim that
-  // depends on "nothing happened for the rest of the horizon" — a shorter span can still mature ONLY through
-  // an exit that genuinely occurred inside it; it can never pretend a horizon outcome
+  // COVERAGE-THROUGH-HORIZON LAW (review P0): the observed span must reach the declared boundary before ANY
+  // claim that depends on "nothing happened for the rest of the horizon" — a shorter span can still mature
+  // ONLY through an exit that genuinely occurred inside it; it can never pretend a horizon outcome
   const coverageEndTs = inHorizon[inHorizon.length - 1].periodEndTs;
   const coversHorizon = coverageEndTs >= horizonEnd;
 

@@ -25,9 +25,7 @@ export const DEFAULT_MAX_CAPTURE_LAG_MS = 10 * 60_000; // a forward capture is r
 
 const utcDateOf = (ts) => new Date(ts).toISOString().slice(0, 10);
 
-export const DEFAULT_STALE_LOCK_MS = 15 * 60_000;
-
-export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptureLagMs = DEFAULT_MAX_CAPTURE_LAG_MS, staleLockMs = DEFAULT_STALE_LOCK_MS, log = () => {} }) {
+export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptureLagMs = DEFAULT_MAX_CAPTURE_LAG_MS, recoverStaleLock = null, log = () => {} }) {
   if (typeof dataDir !== 'string' || !dataDir.length) throw new Error('shadow store: dataDir required');
   const dir = path.join(dataDir, 'learning-shadow');
   mkdirSync(dir, { recursive: true });
@@ -35,28 +33,36 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
   const headFile = path.join(dir, 'head.json');
   const lockFile = path.join(dir, 'writer.lock');
 
-  // ---- SINGLE-WRITER law (review P1): the journal has ONE writer. A second store over the same directory
-  // opens READ-ONLY (appends refused WRITER_LOCK_HELD) while the lock stands; a lock older than staleLockMs is
-  // taken over with a NEW writer token, and the takeover is DISCLOSED as a CONTROL row on the chain — custody
-  // changed, and nothing pretends otherwise. The digest chain itself remains the continuity proof either way.
+  // ---- SINGLE-WRITER law (review P0, second pass): the journal has ONE writer, and liveness is NEVER
+  // inferred from a lock file's age — an age-based takeover mints two healthy writers. The rule is FAIL
+  // CLOSED: while the lock file stands, every other store opens READ-ONLY (appends refused WRITER_LOCK_HELD),
+  // however old the lock is. The ONLY recovery from a crashed writer's leftover lock is EXPLICIT and
+  // operator-verified: the caller passes recoverStaleLock: { confirmedBy, expectedToken } after externally
+  // verifying the old writer process is dead; expectedToken must equal the exact token being replaced
+  // (compare-and-swap — a concurrent recovery loses), and the takeover is DISCLOSED as a WRITER_EPOCH CONTROL
+  // row on the chain. Belt-and-braces, every append re-verifies lock custody, so a writer that loses its lock
+  // to a recovery STOPS (WRITER_LOCK_LOST) instead of racing the new one.
   const writerToken = randomBytes(12).toString('hex');
   let writeAuthority = false; let lockTakeover = null;
+  const readLock = () => { try { return JSON.parse(readFileSync(lockFile, 'utf8')); } catch { return null; } };
   try {
     writeFileSync(lockFile, JSON.stringify({ writerToken, pid: process.pid, acquiredTs: clock() }), { flag: 'wx' });
     writeAuthority = true;
   } catch {
-    let held = null;
-    try { held = JSON.parse(readFileSync(lockFile, 'utf8')); } catch { held = null; }
-    const age = held && Number.isSafeInteger(held.acquiredTs) ? clock() - held.acquiredTs : Infinity;
-    if (age > staleLockMs) {
-      // a stale lock (crashed writer) is taken over EXPLICITLY, never silently
-      writeFileSync(lockFile, JSON.stringify({ writerToken, pid: process.pid, acquiredTs: clock() }));
-      writeAuthority = true;
-      lockTakeover = { previousToken: held?.writerToken ?? null, previousAcquiredTs: held?.acquiredTs ?? null, staleForMs: age === Infinity ? null : age };
+    const held = readLock();
+    if (recoverStaleLock && typeof recoverStaleLock.confirmedBy === 'string' && recoverStaleLock.confirmedBy.length
+        && typeof recoverStaleLock.expectedToken === 'string' && held && held.writerToken === recoverStaleLock.expectedToken) {
+      try {
+        writeFileSync(lockFile, JSON.stringify({ writerToken, pid: process.pid, acquiredTs: clock() }));
+        writeAuthority = true;
+        lockTakeover = { previousToken: held.writerToken, previousAcquiredTs: held.acquiredTs ?? null, confirmedBy: recoverStaleLock.confirmedBy.slice(0, 120) };
+      } catch (err) { log(`shadow store: stale-lock recovery failed (${err.message}) — READ-ONLY`); }
     } else {
-      log(`shadow store: writer lock held by ${held?.writerToken ?? 'unknown'} — opening READ-ONLY`);
+      if (recoverStaleLock) log(`shadow store: stale-lock recovery REFUSED (expectedToken ${recoverStaleLock?.expectedToken ?? 'missing'} vs held ${held?.writerToken ?? 'unreadable'}) — READ-ONLY`);
+      else log(`shadow store: writer lock held by ${held?.writerToken ?? 'unknown'} — opening READ-ONLY (no age-based takeover exists; recovery requires operator verification)`);
     }
   }
+  const ownsLock = () => readLock()?.writerToken === writerToken;
 
   // ---- open: replay + verify the full chain; build the indexes restart-safely -------------------------------
   let seq = 0; let lastDigest = 'GENESIS'; let corrupt = null;
@@ -101,6 +107,7 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
   function append(kind, body) {
     if (corrupt) return { ok: false, refused: 'CHAIN_CORRUPT', detail: corrupt };
     if (!writeAuthority) return { ok: false, refused: 'WRITER_LOCK_HELD', detail: 'another writer holds this journal; this store is read-only' };
+    if (!ownsLock()) { writeAuthority = false; return { ok: false, refused: 'WRITER_LOCK_LOST', detail: 'lock custody changed (an operator-verified recovery replaced this writer); stopping rather than racing the new writer' }; }
     const ingestedTs = clock(); // the STORE owns this clock — no caller field reaches it
     const row = { seq: seq + 1, prevDigest: lastDigest, ingestedTs, kind, body };
     row.digest = rowDigest(row);
@@ -133,8 +140,11 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
     const err = outcomeError(outcome); if (err) return { ok: false, refused: 'OUTCOME_INVALID', detail: err };
     if (!captures.has(outcome.captureId)) return { ok: false, refused: 'UNKNOWN_CAPTURE', detail: outcome.captureId };
     const existing = outcomes.get(outcome.captureId);
-    if (existing && existing.label !== 'PENDING_BEFORE_HORIZON') return { ok: false, refused: 'DUPLICATE_OUTCOME', detail: 'the terminal outcome is already recorded (append-only, one terminal look)' };
-    if (existing && existing.label === outcome.label && existing.asOfTs === outcome.asOfTs) return { ok: false, refused: 'DUPLICATE_OUTCOME', detail: 'identical pending checkpoint already recorded' };
+    // MATURED_* is the ONE terminal look; PENDING and UNMATURABLE_PATH_MISSING are RETRIABLE states — an
+    // adjacent sealed segment arriving later may complete the path (review item 5), so "path missing" is a
+    // fact about what has been observed SO FAR, never a permanent verdict
+    if (existing && existing.label.startsWith('MATURED')) return { ok: false, refused: 'DUPLICATE_OUTCOME', detail: 'the terminal outcome is already recorded (append-only, one terminal look)' };
+    if (existing && existing.label === outcome.label && existing.asOfTs === outcome.asOfTs) return { ok: false, refused: 'DUPLICATE_OUTCOME', detail: 'identical checkpoint already recorded' };
     return append('OUTCOME', outcome);
   };
 
@@ -151,15 +161,15 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
   };
 
   const status = () => {
-    let pending = 0; let matured = 0;
-    for (const o of outcomes.values()) { if (o.label === 'PENDING_BEFORE_HORIZON') pending += 1; else if (o.label.startsWith('MATURED')) matured += 1; }
+    let pending = 0; let matured = 0; let unmaturable = 0;
+    for (const o of outcomes.values()) { if (o.label === 'PENDING_BEFORE_HORIZON') pending += 1; else if (o.label === 'UNMATURABLE_PATH_MISSING') unmaturable += 1; else if (o.label.startsWith('MATURED')) matured += 1; }
     return deepFreeze({
       laneVersion: SHADOW_LANE_VERSION, chainOk: corrupt === null, chainReason: corrupt, seq,
       primaryOpportunities: opportunities.size, // honest count: variants NEVER inflate this
       variantCaptures: captures.size,
-      pendingOutcomes: pending, maturedOutcomes: matured,
+      pendingOutcomes: pending, maturedOutcomes: matured, unmaturableAwaitingPath: unmaturable,
       ineligible: ineligible.length,
-      awaitingOutcome: captures.size - outcomes.size < 0 ? 0 : [...captures.keys()].filter((id) => !outcomes.has(id) || outcomes.get(id).label === 'PENDING_BEFORE_HORIZON').length,
+      awaitingOutcome: [...captures.keys()].filter((id) => !outcomes.has(id) || !outcomes.get(id).label.startsWith('MATURED')).length,
       durableBytesToday: bytesByDate.get(utcDateOf(clock())) ?? 0,
       countLaw: 'ONE_OPPORTUNITY_ONE_PRIMARY; VARIANTS_SHARE_ONE_DEPENDENCE_GROUP; DUPLICATES_REFUSED_NOT_RECOUNTED',
     });

@@ -9,6 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -29,6 +30,7 @@ import {
   makeObservation, makeCoverage, quality, emptyProvenance, subjectId, canonicalJson,
   QUALITY_STATES, OBSERVATION_SCHEMA_VERSION, COVERAGE_RECORD_VERSION, observationError, coverageRecordError,
 } from '../market-lab/contracts.js';
+import { recipeError } from '../learning/shadow-contracts.js';
 import { BUNDLE_VERSIONS } from '../market-lab/store.js';
 
 const MIN = 60_000;
@@ -37,7 +39,7 @@ const COST = { costPolicyVersion: 'shadow-cost-1', feePctPerSide: 0.1, assumedHa
 const RECIPE = {
   recipeVersion: 'shadow-recipe-adapter-2',
   requiredInputs: ['CANDLES_1M', 'VOLUME'], contextualInputs: ['SOCIAL_CONTEXT', 'NEWS_CONTEXT'],
-  candleWindowMin: 5, maxInputAgeMs: 2 * MIN, horizonMin: 3, costPolicy: COST,
+  candleWindowMin: 5, candlePeriodMs: MIN, maxInputAgeMs: 2 * MIN, horizonMin: 3, costPolicy: COST,
   variants: [
     { variantId: 'take-open-s', decision: 'TAKE', sizeTier: 'S', entryRule: 'NEXT_CANDLE_OPEN', limitOffsetBps: null, stopPct: 1, targetPct: 1 },
     { variantId: 'abstain', decision: 'ABSTAIN', sizeTier: 'S', entryRule: 'NEXT_CANDLE_OPEN', limitOffsetBps: null, stopPct: null, targetPct: null },
@@ -299,11 +301,23 @@ test('SINGLE WRITER + REPUBLISH REFUSAL: a second store over a held journal is r
     s1.close();
     const s3 = createShadowStore({ dataDir: dir, clock: () => now });
     assert.equal(s3.writeAuthority(), true, 'a released lock hands over cleanly');
-    // stale-lock takeover is DISCLOSED on the chain, never silent
-    now += 20 * 60_000; // beyond staleLockMs while s3 never closed (a crashed writer)
-    const s4 = createShadowStore({ dataDir: dir, clock: () => now });
+    // NO age-based takeover exists (review P0): however old the lock, another store stays read-only —
+    // liveness is never inferred from age, so two healthy writers can never coexist
+    now += 24 * 3_600_000;
+    const aged = createShadowStore({ dataDir: dir, clock: () => now });
+    assert.equal(aged.writeAuthority(), false, 'a day-old HELD lock still fails closed');
+    assert.equal(aged.appendControl({ control: 'x' }).refused, 'WRITER_LOCK_HELD');
+    // the ONLY recovery is EXPLICIT and operator-verified, naming the EXACT token it replaces (CAS)
+    const heldToken = JSON.parse(readFileSync(path.join(dir, 'learning-shadow', 'writer.lock'), 'utf8')).writerToken;
+    const wrongToken = createShadowStore({ dataDir: dir, clock: () => now, recoverStaleLock: { confirmedBy: 'operator: verified dead', expectedToken: 'not-the-token' } });
+    assert.equal(wrongToken.writeAuthority(), false, 'recovery with a stale expectation LOSES the compare-and-swap');
+    const s4 = createShadowStore({ dataDir: dir, clock: () => now, recoverStaleLock: { confirmedBy: 'operator: verified s3 process dead', expectedToken: heldToken } });
     assert.equal(s4.writeAuthority(), true);
     assert.equal(s4.lastControl('WRITER_EPOCH')?.takeover, true, 'the custody change is a durable CONTROL row');
+    assert.match(s4.lastControl('WRITER_EPOCH').confirmedBy, /verified s3/);
+    // and the DISPLACED writer STOPS instead of racing: its next append sees lost custody
+    const late = s3.appendControl({ control: 'y' });
+    assert.equal(late.refused, 'WRITER_LOCK_LOST', 'the old writer can never race the recovered one');
     s4.close();
     // REPUBLISH refusal: a head asserting seq beyond the journal is a truncated/republished journal
     const headFile = path.join(dir, 'learning-shadow', 'head.json');
@@ -340,7 +354,7 @@ test('the SERVICE hook stays DEFAULT-OFF and fail-dark (unchanged this round): a
 });
 
 test('NO-ORDER import fence: the adapter/runner import only shadow siblings + lib/jsonl + node builtins (and NEVER market-lab — the mirror is proven by the parity test instead); service.js gains no shadow import', () => {
-  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'); // fileURLToPath: portable on Windows (no C:\C:\ pathname bug)
   for (const f of ['learning/shadow-market-adapter.js', 'learning/shadow-runner.js']) {
     const src = readFileSync(path.join(root, f), 'utf8');
     for (const m of src.matchAll(/from\s+'([^']+)'/g)) {
@@ -352,4 +366,129 @@ test('NO-ORDER import fence: the adapter/runner import only shadow siblings + li
   const service = readFileSync(path.join(root, 'learning/service.js'), 'utf8');
   assert.ok(!/from '\.\/shadow-/.test(service), 'the service never constructs the shadow lane itself');
   for (const bad of ["from '../execution", "from '../judge", "from '../watch", "from '../market-lab"]) assert.ok(!service.includes(bad), `service.js carries ${bad}`);
+});
+
+test('ALIGNED-BAR HORIZON regression: an offset decision (:00.200) gets a PREDECLARED whole-bar horizon; a spike in the bar AFTER the aligned boundary can NEVER touch the outcome, and no partial bar exists to leak post-horizon seconds', () => {
+  const window = [8, 7, 6, 5, 4].map((i) => mkCandle({ i }));
+  const n = normalizeMarketRows({ rows: window, coverage: [covCandles({ startTs: T - 9 * MIN, endTs: T - 4 * MIN, n: 5 })] }, KR);
+  const opp = extractShadowOpportunities({ normalized: n, recipe: RECIPE, venue: 'kraken', canonicalCoin: 'BTC' })[0];
+  const take = buildShadowCapture({ recipe: RECIPE, venue: 'kraken', assetId: 'BTC', decisionTs: opp.decisionTs, inputs: opp.inputs }).eligible.find((c) => c.variantId === 'take-open-s');
+  const D = take.decisionTs; const bound = Math.ceil(D / MIN) * MIN;
+  assert.notEqual(D % MIN, 0, 'the decision clock is genuinely offset (:00.200-style)');
+  const pc = (k, over = {}) => ({ periodStartTs: bound + k * MIN, periodEndTs: bound + (k + 1) * MIN, open: 100, high: 100.3, low: 99.8, close: 100.1, volumeBase: 5, closed: true, knownAtTs: bound + (k + 1) * MIN + 100, ...over });
+  const asOf = D + 10 * MIN;
+  const flat = matureShadowCapture({ capture: take, costPolicy: COST, horizonMin: RECIPE.horizonMin, path: [pc(0), pc(1), pc(2)], asOfTs: asOf });
+  assert.equal(flat.horizonEndTs, bound + 3 * MIN, 'the horizon is the DECLARED aligned boundary, not a raw millisecond offset');
+  assert.equal(flat.exit.kind, 'HORIZON');
+  // the SPIKE bar starts exactly at the boundary: whatever it does is the future
+  const spiked = matureShadowCapture({ capture: take, costPolicy: COST, horizonMin: RECIPE.horizonMin, path: [pc(0), pc(1), pc(2), pc(3, { high: 150, close: 149 })], asOfTs: asOf });
+  assert.deepEqual({ label: spiked.label, exit: spiked.exit, netPct: spiked.netPct }, { label: flat.label, exit: flat.exit, netPct: flat.netPct }, 'the post-boundary spike changes NOTHING');
+  // and a bar CONTAINING the boundary (wrong granularity) is refused outright — no partial bar can exist
+  assert.throws(() => matureShadowCapture({ capture: take, costPolicy: COST, horizonMin: RECIPE.horizonMin, path: [{ ...pc(0), periodEndTs: pc(0).periodEndTs + 30_000 }], asOfTs: asOf }), /DECLARED bar/);
+});
+
+test('COMPOSITE CURSOR regression: two markets, each with several SAME-RECEIPT windows, maxBatch 1 — every window of every market is captured exactly once across steps AND a mid-way restart; the scalar-clock drop is gone', () => {
+  const dir = tdir();
+  try {
+    const batchReceipt = T + 300;
+    const rowsFor = (subject) => [5, 4, 3, 2, 1, 0].map((i) => mkCandle({ subject, provider: subject === KRAKEN_BTC ? 'KRAKEN_SPOT' : 'COINBASE_SPOT', i, knownLag: batchReceipt - (T - i * MIN) }));
+    const covFor2 = (subject, provider) => [covCandles({ subject, provider, startTs: T - 9 * MIN, endTs: T, n: 6 })];
+    const sources = [
+      { dir: writeBundle(path.join(dir, 'b-btc'), rowsFor(KRAKEN_BTC), covFor2(KRAKEN_BTC, 'KRAKEN_SPOT')), venue: 'kraken', canonicalCoin: 'BTC' },
+      { dir: writeBundle(path.join(dir, 'b-eth'), rowsFor(COINBASE_ETH), covFor2(COINBASE_ETH, 'COINBASE_SPOT')), venue: 'coinbase', canonicalCoin: 'ETH' },
+    ];
+    // each market yields TWO windows, all four opportunities at ONE decision clock (the shared REST receipt)
+    let now = batchReceipt + 100; let mono = 0;
+    const mkStore = (extra = {}) => createShadowStore({ dataDir: dir, clock: () => now, ...extra });
+    const mkRunner = (store) => createShadowRunner({ store, recipe: RECIPE, bundleSource: () => sources, quotas: { maxBatch: 1, minInterBatchMs: 1 }, clock: () => now, monotonic: () => (mono += 500) });
+    const store1 = mkStore();
+    const s1 = mkRunner(store1).step({ nowTs: now });
+    assert.equal(s1.captured, 2, `one opportunity (two variants) per step under maxBatch 1 (${JSON.stringify(s1)})`);
+    store1.close();
+    // RESTART mid-way: a fresh store+runner must resume at the composite frontier, not skip the same-clock siblings
+    const store2 = mkStore();
+    const r2 = mkRunner(store2);
+    let total = s1.captured; let guard = 0;
+    while (guard < 12) { guard += 1; const st = r2.step({ nowTs: now }); total += st.captured; if (st.captured === 0 && st.shed === 0 && st.deduped === 0) break; }
+    assert.equal(total, 8, 'ALL four same-clock windows (2 markets x 2 windows x 2 variants) captured exactly once — none dropped, none duplicated');
+    assert.equal(store2.captures().size, 8);
+    assert.equal(store2.status().primaryOpportunities, 4);
+    const groups = new Set([...store2.captures().values()].map((c) => c.groupId));
+    assert.equal(groups.size, 2, 'one dependence group PER MARKET-MOMENT: same-receipt sibling windows never inflate independent evidence');
+    const cursor = store2.lastControl(`${CURSOR_CONTROL}:kraken:BTC:${RECIPE.recipeVersion}`);
+    assert.ok(Number.isFinite(cursor.lastWindowEndTs), 'the durable cursor carries the immutable window identity, not a clock alone');
+    store2.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('DECLARED GRANULARITY (review item 4): the real Coinbase owner seals 3600s candles — a recipe declaring candlePeriodMs 3600000 captures them lawfully; the 1m recipe reports them as incompatible scope (census) instead of silently mixing or zeroing', () => {
+  const HOUR = 3_600_000;
+  const hourCandle = (i) => makeObservation({
+    provider: 'COINBASE_SPOT', endpointId: 'rest-candles', subject: COINBASE_ETH, kind: 'CANDLE', sourceKey: `h:${i}`, sourceRevision: null,
+    sourceEventTs: T - i * HOUR, periodStartTs: T - (i + 1) * HOUR, periodEndTs: T - i * HOUR, publishedTs: null,
+    receivedTs: T - i * HOUR + 400, knownAtTs: T - i * HOUR + 400, sequence: 0, epochId: 'ep-1',
+    quality: quality('KNOWN'), provenance: emptyProvenance(),
+    payload: { intervalMs: HOUR, open: 100, high: 100.4, low: 99.6, close: 100.1, volumeBase: 50, volumeQuote: null, tradeCount: 40, vwap: 100, closed: true, provisional: false },
+  });
+  const rows = [4, 3, 2, 1, 0].map(hourCandle);
+  const cov = [makeCoverage({ provider: 'COINBASE_SPOT', endpointId: 'rest-candles', subjectId: subjectId(COINBASE_ETH), family: 'SPOT_PRICE_CHART', kind: 'CANDLE', state: 'OBSERVED', reasonCodes: [], startTs: T - 5 * HOUR, endTs: T, observationCount: 5, droppedCount: 0, epochId: 'ep-1', sequenceStart: null, sequenceEnd: null })];
+  const hourRecipe = { ...RECIPE, recipeVersion: 'shadow-recipe-1h-1', candlePeriodMs: HOUR, candleWindowMin: 5, maxInputAgeMs: 2 * HOUR, horizonMin: 60 };
+  const n1h = normalizeMarketRows({ rows, coverage: cov }, { venue: 'coinbase', canonicalCoin: 'ETH', candlePeriodMs: HOUR });
+  assert.equal(n1h.candles.length, 5, 'the declared 3600s granularity admits the real Coinbase bars');
+  const opps = extractShadowOpportunities({ normalized: n1h, recipe: hourRecipe, venue: 'coinbase', canonicalCoin: 'ETH' });
+  assert.equal(opps.length, 1);
+  const built = buildShadowCapture({ recipe: hourRecipe, venue: 'coinbase', assetId: 'ETH', decisionTs: opps[0].decisionTs, inputs: opps[0].inputs });
+  assert.equal(built.eligible.length, 2, 'hour-bar Coinbase decisions are LAWFUL under a declaring recipe');
+  assert.equal(built.eligible[0].inputUnits.candlePeriodMs, HOUR, 'the granularity is frozen in the capture');
+  // the 1m recipe over the SAME rows: nothing mixed in, and the census REPORTS the incompatible scope
+  const n1m = normalizeMarketRows({ rows, coverage: cov }, { venue: 'coinbase', canonicalCoin: 'ETH', candlePeriodMs: MIN });
+  assert.equal(n1m.candles.length, 0, 'no silent mixing of granularities');
+  assert.equal(n1m.granularityCensus[HOUR], 5, 'the mismatch is REPORTED as incompatible scope, never silent');
+  assert.match(recipeError({ ...hourRecipe, horizonMin: 90 }), /WHOLE number of declared bars/, 'the aligned-bar horizon law binds the recipe too');
+});
+
+test('FAIL-CLOSED candle coverage + book gaps at USE time (review item 4): without proven CANDLE coverage nothing is decision evidence; a coverage.jsonl book GAP between a snapshot and a later decision kills the stale depth', () => {
+  // no candle coverage at all -> ZERO candles (proof is required, absence proves nothing)
+  const bare = normalizeMarketRows({ rows: GOOD_ROWS, coverage: [GOOD_COVERAGE[1]] }, KR);
+  assert.equal(bare.candles.length, 0, 'fail-closed: unproven candle intervals admit nothing');
+  // a synchronized snapshot at T-3m, then a coverage.jsonl BOOK gap [T-2m, T-90s]: a decision AFTER the gap
+  // must not consume the pre-gap snapshot, while a decision whose window completed BEFORE the gap could
+  const bookGap = makeCoverage({ provider: 'KRAKEN_SPOT', endpointId: 'ws-v2', subjectId: subjectId(KRAKEN_BTC), family: 'DISPLAYED_LIQUIDITY', kind: 'BOOK_SNAPSHOT', state: 'GAP', reasonCodes: [], startTs: T - 2 * MIN, endTs: T - 90_000, observationCount: 0, droppedCount: 0, epochId: 'ep-1', sequenceStart: null, sequenceEnd: null });
+  const rows = [...GOOD_ROWS.filter((r) => r.kind !== 'BOOK_SNAPSHOT'), mkBook({ at: T - 3 * MIN })];
+  const n = normalizeMarketRows({ rows, coverage: [...GOOD_COVERAGE, bookGap] }, KR);
+  assert.equal(n.depths.length, 1, 'the snapshot itself was lawful when taken');
+  assert.equal(n.bookBreaks.length, 1, 'the sealed coverage gap is a break fact');
+  const opps = extractShadowOpportunities({ normalized: n, recipe: RECIPE, venue: 'kraken', canonicalCoin: 'BTC' });
+  const lastOpp = opps[opps.length - 1]; // decision ~T+200, AFTER the gap
+  assert.equal(lastOpp.inputs.depth, undefined, 'stale depth does not survive a later book gap — the decision is CANDLE_ONLY');
+});
+
+test('CROSS-SEGMENT outcomes (review item 5): a path split across two adjacent sealed segments is UNMATURABLE only PROVISIONALLY — retriable, never terminal — and matures once the segments are read together; a second bundle never overwrites the first', () => {
+  const dir = tdir();
+  try {
+    // segment 1: the decision window (bars 8..4) + the FIRST path bar (bar 2, at the decision boundary);
+    // segment 2: the remaining path bars (1, 0). Bar 3 is deliberately absent so no second window forms.
+    const seg1Rows = [[8, 7, 6, 5, 4].map((i) => mkCandle({ i })), [mkCandle({ i: 2 })]].flat();
+    const seg2Rows = [1, 0].map((i) => mkCandle({ i }));
+    const cov = [covCandles({ startTs: T - 9 * MIN, endTs: T, n: 9 }), GOOD_COVERAGE[1]];
+    const b1 = writeBundle(path.join(dir, 'seg1'), seg1Rows, cov);
+    const b2 = writeBundle(path.join(dir, 'seg2'), seg2Rows, cov);
+    let now = T - 4 * MIN + 400; let mono = 0;
+    const store = createShadowStore({ dataDir: dir, clock: () => now });
+    let visible = [{ dir: b1, venue: 'kraken', canonicalCoin: 'BTC' }];
+    const runner = createShadowRunner({ store, recipe: RECIPE, bundleSource: () => visible, maxBundlesPerStep: 2, quotas: { minInterBatchMs: 1 }, clock: () => now, monotonic: () => (mono += 500) });
+    const r1 = runner.step({ nowTs: now });
+    assert.equal(r1.captured, 2, 'the decision window in segment 1 captures');
+    // horizon passed, but only ONE path bar is sealed so far: provisionally unmaturable, NEVER terminal
+    now = T + MIN;
+    const r2 = runner.step({ nowTs: now });
+    assert.ok(r2.unmaturable >= 1, `the split path is honestly not maturable yet (${JSON.stringify(r2)})`);
+    // the adjacent segment arrives: read TOGETHER, the merged rows complete ONE path and the outcome matures
+    visible = [{ dir: b1, venue: 'kraken', canonicalCoin: 'BTC' }, { dir: b2, venue: 'kraken', canonicalCoin: 'BTC' }];
+    const r3 = runner.step({ nowTs: now });
+    assert.ok(r3.matured >= 1, `the retried TAKE matures once the segments are co-read (the ABSTAIN twin, path-independent, matured earlier) (${JSON.stringify(r3)})`);
+    const heads = [...store.outcomes().values()];
+    assert.ok(heads.every((o) => o.label.startsWith('MATURED')), 'UNMATURABLE was superseded, not terminal');
+    store.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

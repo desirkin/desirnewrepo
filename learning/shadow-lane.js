@@ -37,23 +37,26 @@ export function createShadowLane({ store, recipe, quotas = {}, clock = () => Dat
     if (!Array.isArray(opportunities)) throw new Error('shadow lane: opportunities must be an array');
     if (!isTs(nowTs)) throw new Error('shadow lane: clock malformed');
     const date = utcDateOf(nowTs); const day = dc(date);
-    const out = { captured: 0, ineligible: 0, deduped: 0, refusedLate: 0, shed: 0, stopped: false, quota: null, consumedThroughTs: null };
+    const out = { captured: 0, ineligible: 0, deduped: 0, refusedLate: 0, shed: 0, stopped: false, quota: null, consumedThroughTs: null, cursorSafeDisposed: [] };
     if (stopped) { out.stopped = true; return deepFreeze(out); }
     if (lastBatchEndedMono !== null && monotonic() - lastBatchEndedMono < Q.minInterBatchMs) { out.quota = 'PACING_MIN_INTERVAL'; out.shed = 0; return deepFreeze(out); }
     const startMono = monotonic();
     const slice = opportunities.slice(0, Q.maxBatch);
     if (opportunities.length > Q.maxBatch) { out.shed += opportunities.length - Q.maxBatch; out.quota = 'BATCH_BOUND'; }
-    // consumedThroughTs: the decision clock of the LAST opportunity fully DISPOSED (captured / ineligible /
-    // deduped / refused-late) with nothing shed at or before it — the durable consumption cursor may advance
-    // to exactly here; shed work stays in front of the cursor and is retried, never silently skipped
+    // cursorSafeDisposed (review P0, third pass): the EXACT prefix of opportunities fully DISPOSED (captured /
+    // ineligible / deduped / refused-late) before anything was shed, each with its immutable identity
+    // (decision clock + window end + market). The durable per-market cursor may advance ONLY through this
+    // prefix — a scalar clock would drop same-timestamp windows and advance markets whose work was never
+    // processed. consumedThroughTs remains as the coarse summary of the same prefix.
     let anyShed = false;
+    const disposedRecord = (opp) => ({ decisionTs: opp.decisionTs, windowEndTs: opp.windowEndTs ?? null, venue: opp.venue, assetId: opp.assetId });
     for (const opp of slice) {
       if (stopped) { out.stopped = true; break; }
       if (monotonic() - startMono > Q.maxBatchWallMs) { out.quota = 'BATCH_WALL_CLOCK'; out.shed += 1; anyShed = true; continue; }
       let oppShed = false;
       let built;
       try { built = buildShadowCapture({ recipe, venue: opp.venue, assetId: opp.assetId, decisionTs: opp.decisionTs, inputs: opp.inputs }); }
-      catch (err) { log(`shadow lane: capture build failed: ${err.message}`); out.ineligible += 1; if (!anyShed) out.consumedThroughTs = opp.decisionTs; continue; }
+      catch (err) { log(`shadow lane: capture build failed: ${err.message}`); out.ineligible += 1; if (!anyShed) { out.consumedThroughTs = opp.decisionTs; out.cursorSafeDisposed.push(disposedRecord(opp)); } continue; }
       for (const rec of built.ineligible) { store.appendIneligible(rec); out.ineligible += 1; }
       for (const rec of built.eligible) {
         // dedupe FIRST (a duplicate is never an evaluation and never consumes quota), then the quotas at
@@ -68,7 +71,7 @@ export function createShadowLane({ store, recipe, quotas = {}, clock = () => Dat
         else log(`shadow lane: capture refused (${r.refused}): ${r.detail}`);
       }
       if (oppShed) anyShed = true;
-      else if (!anyShed) out.consumedThroughTs = opp.decisionTs;
+      else if (!anyShed) { out.consumedThroughTs = opp.decisionTs; out.cursorSafeDisposed.push(disposedRecord(opp)); }
     }
     lastBatchEndedMono = monotonic();
     return deepFreeze(out);
@@ -85,7 +88,7 @@ export function createShadowLane({ store, recipe, quotas = {}, clock = () => Dat
       if (stopped) { out.stopped = true; break; }
       if (processed >= Q.maxBatch || monotonic() - startMono > Q.maxBatchWallMs) break;
       const existing = outcomeHeads.get(captureId);
-      if (existing && existing.label !== 'PENDING_BEFORE_HORIZON') continue; // one terminal outcome, ever
+      if (existing && existing.label.startsWith('MATURED')) continue; // one terminal look; PENDING and UNMATURABLE stay retriable (a later adjacent segment may complete the path)
       const path = paths?.[captureId] ?? paths?.[capture.opportunityId] ?? null;
       if (!path) continue;
       processed += 1;

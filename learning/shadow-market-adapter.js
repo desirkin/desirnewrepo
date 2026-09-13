@@ -26,8 +26,11 @@
 //   - NO ZERO-FILL: an unobserved volume component stays absent (Coinbase reports base volume with a null
 //     quote — the real component passes through, nothing synthesizes the other); no trades + no coverage
 //     proof = no flow; no snapshot = no depth. Absence is absence.
-//   - BOUNDED SYNC WORK: members above the segment byte/row bounds are refused by name (the owner shards
-//     segments; this adapter never parses hundreds of megabytes on the host's thread).
+//   - BOUNDED BYTES, HONESTLY STATED: members above the strict per-member byte/row bounds are refused by
+//     name, and the runner adds a per-step byte budget on top. These bounds cap BYTES, not wall time — a
+//     maximal read still parses synchronously and is not preemptible mid-member. The bound is sized small
+//     enough to keep that work modest; worker/streaming isolation is the documented next step if hosts need
+//     hard wall-time guarantees. No "never jams" claim is made.
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync, existsSync } from 'node:fs';
 import path from 'node:path';
@@ -47,8 +50,8 @@ export const MIRRORED_INCOMPLETE_REASONS = Object.freeze(['PAGINATION_INCOMPLETE
 export const MIRRORED_DESYNC_BOOK_STATES = Object.freeze(['DESYNCHRONIZED', 'GAP', 'UNSUBSCRIBED']);
 const MINUTE = 60_000;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
-export const MAX_SEGMENT_BYTES = 32 * 1024 * 1024; // small sealed segments; the owner shards larger runs
-export const MAX_SEGMENT_ROWS = 200_000;
+export const MAX_SEGMENT_BYTES = 8 * 1024 * 1024; // strict per-member cap: a byte bound, not a wall-time guarantee
+export const MAX_SEGMENT_ROWS = 50_000;
 
 // market-lab's canonical JSON (keys sorted, UNDEFINED DROPPED, no whitespace) — parity-tested byte-for-byte
 export const mirrorCanonicalJson = (v) => {
@@ -103,7 +106,8 @@ export function readSealedMarketCapture(dir) {
     seenIds.add(row.observationId);
   }
   for (const c of coverage.rows) if (!isPlainObject(c) || c.recordVersion !== MIRRORED_COVERAGE_VERSION) return refuse('COVERAGE_ROW_MALFORMED', `recordVersion ${c?.recordVersion}`);
-  return deepFreeze({ ok: true, bundleId: manifest.bundleId ?? null, rows: observations.rows, coverage: coverage.rows, observationCount: observations.rows.length });
+  const bytesRead = manifest.members.filter((m) => ['observations.jsonl', 'coverage.jsonl'].includes(m?.name)).reduce((a, m) => a + (Number.isSafeInteger(m.bytes) ? m.bytes : 0), 0);
+  return deepFreeze({ ok: true, bundleId: manifest.bundleId ?? null, rows: observations.rows, coverage: coverage.rows, observationCount: observations.rows.length, bytesRead });
 }
 
 // ---- coverage interval law ------------------------------------------------------------------------------------
@@ -129,9 +133,10 @@ export function intervalProvenComplete(records, startTs, endTs) {
 const marketMatches = (row, { venue, canonicalCoin }) => isPlainObject(row.subject)
   && row.subject.subjectKind === 'MARKET' && row.subject.canonicalCoin === canonicalCoin && row.subject.venue === venue;
 
-export function normalizeMarketRows({ rows, coverage = [] }, { venue, canonicalCoin }) {
+export function normalizeMarketRows({ rows, coverage = [] }, { venue, canonicalCoin, candlePeriodMs = MINUTE }) {
   const candles = []; const trades = []; const depths = []; const bookStates = [];
   const subjectIds = new Set();
+  const granularityCensus = {}; // observed intervalMs -> row count: a declared-granularity mismatch is REPORTED, never silent
   for (const row of rows) {
     if (!marketMatches(row, { venue, canonicalCoin })) continue;
     subjectIds.add(mirrorSubjectId(row.subject));
@@ -140,7 +145,11 @@ export function normalizeMarketRows({ rows, coverage = [] }, { venue, canonicalC
       const p = row.payload;
       if (!isPlainObject(p) || p.closed !== true || p.provisional === true) continue;
       if (row.quality?.state !== MIRRORED_CANDLE_QUALITY) continue; // KNOWN, per the REAL vocabulary — 'FINAL' does not exist
-      if (!isTs(row.periodStartTs) || !isTs(row.periodEndTs) || row.periodEndTs - row.periodStartTs !== MINUTE) continue;
+      if (isTs(row.periodStartTs) && isTs(row.periodEndTs)) { const g = row.periodEndTs - row.periodStartTs; granularityCensus[g] = (granularityCensus[g] ?? 0) + 1; }
+      // the DECLARED granularity law: the recipe names which bars it consumes (60s Kraken, 3600s Coinbase, ...);
+      // bars of another granularity are counted in the census and reported as incompatible scope, never mixed in
+      if (!isTs(row.periodStartTs) || !isTs(row.periodEndTs) || row.periodEndTs - row.periodStartTs !== candlePeriodMs) continue;
+      if (isFiniteNum(p.intervalMs) && p.intervalMs !== candlePeriodMs) continue;
       if (![p.open, p.high, p.low, p.close].every((v) => isFiniteNum(v) && v > 0)) continue; // a no-trade candle (null prices) is not a decision candle
       candles.push({
         periodStartTs: row.periodStartTs, periodEndTs: row.periodEndTs,
@@ -166,12 +175,14 @@ export function normalizeMarketRows({ rows, coverage = [] }, { venue, canonicalC
   }
   const covFor = (kind) => coverage.filter((r) => subjectIds.has(r.subjectId) && r.kind === kind);
   const candleCov = covFor('CANDLE'); const tradeCov = covFor('TRADE');
+  const bookCov = coverage.filter((r) => subjectIds.has(r.subjectId) && ['BOOK_SNAPSHOT', 'BOOK_COVERAGE'].includes(r.kind));
   candles.sort((a, b) => a.periodStartTs - b.periodStartTs || a.knownAtTs - b.knownAtTs);
   const byPeriod = new Map();
   for (const c of candles) if (!byPeriod.has(c.periodStartTs)) byPeriod.set(c.periodStartTs, c); // the EARLIEST-known committed bar stands; later revisions never rewrite known history
   let uniq = [...byPeriod.values()];
-  // a candle whose period overlaps a broken/incomplete CANDLE-family interval is NOT decision evidence
-  if (candleCov.length) uniq = uniq.filter((c) => intervalProvenComplete(candleCov, c.periodStartTs, c.periodEndTs));
+  // FAIL CLOSED (review item 4): a candle is decision evidence ONLY inside an interval the sealed coverage
+  // PROVES complete — absent coverage proves nothing, so absent coverage admits nothing
+  uniq = uniq.filter((c) => intervalProvenComplete(candleCov, c.periodStartTs, c.periodEndTs));
   // trade-flow: only over intervals the sealed coverage PROVES complete. A proven-complete interval with zero
   // trades is a REAL zero (the SUBSCRIBED-continuity law); an unproven interval yields NO flow at all.
   for (const c of uniq) {
@@ -183,34 +194,58 @@ export function normalizeMarketRows({ rows, coverage = [] }, { venue, canonicalC
     c.tradeFlow = gross > 0 ? Math.round((net / gross) * 1e6) / 1e6 : 0;
     if (inPeriod.length) c.knownAtTs = Math.max(c.knownAtTs, ...inPeriod.map((t) => t.knownAtTs)); // the flow (and so the candle) is fully known only when its last contributing trade was
   }
-  // depth admissibility also respects the STANDING book-coverage fact at the snapshot's clock
+  // depth admissibility at the snapshot's OWN clock: the standing book fact (from the observation stream)
+  // must not be desynchronized there. Later gaps are handled at USE time via bookBreaks (below): a snapshot
+  // taken before a gap can never serve a decision made after it.
   bookStates.sort((a, b) => a.knownAtTs - b.knownAtTs);
   const admissibleDepths = depths.filter((d) => {
     const standing = [...bookStates].reverse().find((s) => s.knownAtTs <= d.knownAtTs);
     return !standing || !MIRRORED_DESYNC_BOOK_STATES.includes(standing.state);
   });
   admissibleDepths.sort((a, b) => a.knownAtTs - b.knownAtTs);
-  return deepFreeze({ candles: uniq, depths: admissibleDepths, tradeCount: trades.length });
+  // book BREAK intervals, from BOTH real sources (review item 4): the sealed coverage.jsonl records for the
+  // book kinds (broken states / incomplete reasons), AND the observation-stream BOOK_COVERAGE facts (a
+  // desync opens a break that the next SYNCHRONIZED fact closes)
+  const bookBreaks = [];
+  for (const r of bookCov) {
+    const broken = MIRRORED_BROKEN_COVER_STATES.includes(r.state) || (Array.isArray(r.reasonCodes) && r.reasonCodes.some((x) => MIRRORED_INCOMPLETE_REASONS.includes(x) || x === 'DESYNCHRONIZED'));
+    if (broken) bookBreaks.push({ startTs: r.startTs, endTs: r.endTs ?? null });
+  }
+  for (let i = 0; i < bookStates.length; i += 1) {
+    if (!MIRRORED_DESYNC_BOOK_STATES.includes(bookStates[i].state)) continue;
+    const next = bookStates.slice(i + 1).find((sf) => sf.state === 'SYNCHRONIZED');
+    bookBreaks.push({ startTs: bookStates[i].knownAtTs, endTs: next ? next.knownAtTs : null });
+  }
+  return deepFreeze({ candles: uniq, depths: admissibleDepths, bookBreaks, tradeCount: trades.length, granularityCensus, declaredPeriodMs: candlePeriodMs });
 }
 
 // ---- deterministic opportunity extraction ----------------------------------------------------------------------
 // Ordered by decision clock ascending, then NEWEST window first at an equal clock (one REST receipt stamps many
 // candles with the same knownAt: the stale window must never be captured ahead of the fresh one), then the
-// immutable window identity. afterDecisionTs is the restart cursor; maxOpportunities bounds work.
-export function extractShadowOpportunities({ normalized, recipe, venue, canonicalCoin, afterDecisionTs = null, maxOpportunities = 1000 }) {
+// immutable window identity. afterCursor is the COMPOSITE restart cursor { lastDecisionTs, lastWindowEndTs }:
+// within one decision clock, windows are processed newest-first, so the consumed set at the cursor's clock is
+// exactly the windows ending AT OR AFTER lastWindowEndTs — a scalar clock would drop same-clock siblings.
+export function extractShadowOpportunities({ normalized, recipe, venue, canonicalCoin, afterCursor = null, afterDecisionTs = null, maxOpportunities = 1000 }) {
   const w = recipe.candleWindowMin;
   const out = [];
-  const { candles, depths } = normalized;
+  const { candles, depths, bookBreaks = [] } = normalized;
+  const cursor = afterCursor ?? (afterDecisionTs !== null ? { lastDecisionTs: afterDecisionTs, lastWindowEndTs: -Infinity } : null);
+  const consumed = (decisionTs, windowEndTs) => cursor !== null
+    && (decisionTs < cursor.lastDecisionTs || (decisionTs === cursor.lastDecisionTs && windowEndTs >= (cursor.lastWindowEndTs ?? -Infinity)));
   for (let i = w - 1; i < candles.length; i += 1) {
     const window = candles.slice(i - w + 1, i + 1);
     let contiguous = true;
     for (let j = 1; j < window.length; j += 1) if (window[j].periodStartTs !== window[j - 1].periodEndTs) { contiguous = false; break; }
     if (!contiguous) continue; // a gapped window is simply not an opportunity here; the capture law would refuse it anyway
     const decisionTs = Math.max(...window.map((c) => c.knownAtTs));
-    if (afterDecisionTs !== null && decisionTs <= afterDecisionTs) continue; // the cursor: already-consumed history is never re-presented as fresh
-    if (decisionTs - window[window.length - 1].periodEndTs > recipe.maxInputAgeMs) continue; // received too late to have been a live decision
-    const depth = [...depths].reverse().find((d) => d.knownAtTs <= decisionTs && decisionTs - d.knownAtTs <= recipe.maxInputAgeMs) ?? null;
-    out.push(deepFreeze({ venue, assetId: canonicalCoin, decisionTs, windowEndTs: window[window.length - 1].periodEndTs, inputs: { candles: window, ...(depth ? { depth } : {}) } }));
+    const windowEndTs = window[window.length - 1].periodEndTs;
+    if (consumed(decisionTs, windowEndTs)) continue; // already-consumed history is never re-presented as fresh
+    if (decisionTs - windowEndTs > recipe.maxInputAgeMs) continue; // received too late to have been a live decision
+    // depth at USE time: fresh, known before the decision, AND no book break stands between its clock and the
+    // decision — a snapshot taken before a later gap/desync can never serve this decision (review item 4)
+    const depth = [...depths].reverse().find((d) => d.knownAtTs <= decisionTs && decisionTs - d.knownAtTs <= recipe.maxInputAgeMs
+      && !bookBreaks.some((b) => b.startTs <= decisionTs && (b.endTs === null || b.endTs > d.knownAtTs) && b.startTs >= d.knownAtTs)) ?? null;
+    out.push(deepFreeze({ venue, assetId: canonicalCoin, decisionTs, windowEndTs, inputs: { candles: window, ...(depth ? { depth } : {}) } }));
   }
   out.sort((a, b) => a.decisionTs - b.decisionTs || b.windowEndTs - a.windowEndTs || (a.assetId < b.assetId ? -1 : a.assetId > b.assetId ? 1 : 0));
   return deepFreeze(out.slice(0, maxOpportunities));
@@ -220,7 +255,8 @@ export function extractShadowOpportunities({ normalized, recipe, venue, canonica
 export function extractMaturationPaths({ normalized, captures, asOfTs }) {
   const paths = {};
   for (const capture of captures) {
-    const bound = Math.ceil(capture.decisionTs / MINUTE) * MINUTE;
+    const period = capture.inputUnits?.candlePeriodMs ?? MINUTE; // the capture's frozen granularity
+    const bound = Math.ceil(capture.decisionTs / period) * period;
     const pathCandles = normalized.candles.filter((c) => c.periodStartTs >= bound && c.knownAtTs > capture.decisionTs && c.knownAtTs <= asOfTs);
     if (pathCandles.length) paths[capture.captureId] = { candles: pathCandles };
   }

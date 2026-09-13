@@ -151,3 +151,47 @@ PARTIAL/desynced snapshots are never depth.
 Codex side), no promotion-gate consumer runs, shadow outputs remain `UNVALIDATED_RESEARCH_RESULT` with
 authority NONE and cannot reach activation, any ledger, or the Judge automatically — and no score anywhere is
 learned authority.
+
+## Step 4 (Codex review of b6a7964 — focused repair pass)
+
+1. **Timed lock takeover REMOVED (P0).** Liveness is never inferred from a lock file's age — the old rule
+   could mint two healthy writers. Now: FAIL CLOSED (a held lock means read-only, however old), and the only
+   recovery is `recoverStaleLock: { confirmedBy, expectedToken }` — an EXPLICIT, operator-verified takeover
+   naming the exact token it replaces (compare-and-swap; a stale expectation loses), disclosed as a
+   `WRITER_EPOCH` CONTROL row. Belt-and-braces, every append re-verifies lock custody: a displaced writer
+   stops with `WRITER_LOCK_LOST` instead of racing.
+2. **Aligned-bar horizon (P0).** The horizon is PREDECLARED as a whole number of declared bars after the
+   decision boundary (`horizonEndTs` = the aligned boundary, recorded on every outcome). Only bars ENDING at
+   or before that boundary are usable — an offset decision (:00.200) can no longer read seconds of a partial
+   bar's high/low/close from beyond the horizon. Spike-after-boundary regression proves a post-boundary bar
+   changes nothing; mixed-granularity path bars are refused outright.
+3. **Composite cursor (P0).** The per-market cursor persists `{ lastDecisionTs, lastWindowEndTs }` and the
+   lane reports the exact cursor-safe disposed PREFIX (each entry with its immutable identity). Same-clock
+   sibling windows are never dropped after a maxBatch/quota cut, and a market whose work was shed or deferred
+   never advances. Proven with 2 markets × 2 same-receipt windows under maxBatch 1 across a restart.
+4. **Producer parity tightened.** The declared-granularity law (`recipe.candlePeriodMs`): the real Coinbase
+   owner's 3600s bars are consumed lawfully by a declaring recipe, and a 1m recipe REPORTS them as
+   incompatible scope via the granularity census — never silent, never mixed. Candle coverage is now FAIL
+   CLOSED (no proven interval = no decision candles). Book gap/desync facts are enforced from BOTH real
+   sources — the sealed coverage.jsonl records and the observation-stream BOOK_COVERAGE facts — at USE time:
+   a snapshot taken before a later gap can never serve a decision made after it. Honest limit: fixtures are
+   real-contract-maker outputs validated by the real validators with the owner's exact parameters (3600s
+   Coinbase, KNOWN quality, null volumeQuote); they are not full client-transport runs.
+5. **Cross-segment outcomes.** Bundles of one market MERGE (rows deduped by observation id) within a step —
+   a second bundle never overwrites the first — and `UNMATURABLE_PATH_MISSING` is RETRIABLE, never terminal:
+   an adjacent sealed segment arriving later completes the path and the outcome matures then. Honest limit:
+   segments complete a split path only when co-read in one step (they sort adjacent under the source key, so
+   the rotation reads them together when the budget allows); persisting normalized candles across steps is a
+   possible future extension, not claimed.
+6. **Identities separated.** `opportunityId` (work identity) carries the window; `groupId` is the DECISION
+   MOMENT only (`fsmom-…`, no window) — several windows born of one receipt share ONE dependence group and
+   can never inflate independent evidence downstream. `primaryOpportunities` counts work items; groups count
+   moments.
+7. **Byte bounds, honestly stated.** Per-member cap cut to 8 MiB / 50k rows, plus a per-step 16 MiB byte
+   budget in the runner. These cap BYTES, not wall time — a maximal read still parses synchronously and is
+   not preemptible mid-member; worker/streaming isolation is the documented next step. No "never jams" claim
+   is made anywhere. Likewise: the journal's hydration and JOURNAL_BEHIND_HEAD refusal are LOCAL tamper
+   evidence on one filesystem — NOT external republish durability and NOT production durability; continuity
+   beyond the local chain requires an external backing adapter that does not exist here.
+8. **Windows portability.** The test fences resolve the repo root via `fileURLToPath` (the
+   `new URL(...).pathname` form mis-renders `C:\C:\` on Windows).
