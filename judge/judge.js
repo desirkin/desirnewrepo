@@ -12,8 +12,8 @@ import { evaluateEntry, sizeSearch, liquidationValue, COST_MODEL_VERSION } from 
 import { admitCandidate, riskBudgetFor, rankCandidates, clusterIdOf } from './risk.js';
 import { makeDecision, decisionIdentity, decisionRecord } from './contract.js';
 import { intakeDecision, consumeCase, primaryConfirmedCatalyst } from './intake.js';
-import { resolveLearningContribution, contributionMeasurement } from './learning-intake.js';
-import { evaluateSizeLadder, sizingMeasurement } from './size-ladder.js';
+import { resolveLearningContribution, contributionMeasurement, contributionCandidateLog } from './learning-intake.js';
+import { evaluateSizeLadder, sizingMeasurement, sizingCandidateLog } from './size-ladder.js';
 import { createScheduler } from './scheduler.js';
 import { judgeReadinessMatrix } from './readiness.js';
 import { entryBlockingRestrictions } from '../execution/reducer.js';
@@ -68,14 +68,17 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   }
   // the prepared-fact view handed to the learned-contribution selector: the SAME already-computed fast facts,
   // reshaped into the learning feature contract (value + availability; UNKNOWN stays unavailable, never zero)
-  const lf = (obj, key, unit, lookbackMs) => (obj && obj.state === 'KNOWN' && Number.isFinite(obj[key]) ? { value: obj[key], unit, lookbackMs, availability: 'KNOWN' } : { value: null, unit, lookbackMs, availability: 'UNAVAILABLE' });
-  const numFact = (v, unit) => (Number.isFinite(v) ? { value: v, unit, lookbackMs: 0, availability: 'KNOWN' } : { value: null, unit, lookbackMs: 0, availability: 'UNAVAILABLE' });
-  function learnedFactsOf(fast) {
+  const lf = (obj, key, unit, lookbackMs) => (obj && obj.state === 'KNOWN' && Number.isFinite(obj[key]) ? { value: obj[key], unit, lookbackMs, ageMs: 0, availability: 'KNOWN' } : { value: null, unit, lookbackMs, ageMs: null, availability: 'UNAVAILABLE' });
+  const numFact = (v, unit, ageMs = 0) => (Number.isFinite(v) ? { value: v, unit, lookbackMs: 0, ageMs, availability: 'KNOWN' } : { value: null, unit, lookbackMs: 0, ageMs: null, availability: 'UNAVAILABLE' });
+  function learnedFactsOf(fast, frozen = null) {
     const spreadBps = fast.bestBid && fast.bestAsk && fast.mid ? (Number(fast.bestAsk) - Number(fast.bestBid)) / Number(fast.mid) * 10_000 : null;
+    const bookAge = Number.isFinite(fast.bookAgeMs) ? fast.bookAgeMs : 0;
+    const atrPct = frozen && frozen.atr14 !== undefined && fast.mid && Number.isFinite(Number(frozen.atr14)) && Number(fast.mid) > 0 ? Number(frozen.atr14) / Number(fast.mid) * 100 : NaN;
     return {
       rv60: lf(fast.rv60, 'rv60', 'ratio', 60_000), fi15: lf(fast.fi15, 'fi', 'fraction', 15_000), fi60: lf(fast.fi60, 'fi', 'fraction', 60_000),
-      spreadBps: numFact(Number.isFinite(spreadBps) ? spreadBps : NaN, 'bps'),
-      depthUsd10bps: numFact(fast.depth10bps !== null && Number.isFinite(Number(fast.depth10bps)) ? Number(fast.depth10bps) : NaN, 'usd_notional'),
+      spreadBps: numFact(Number.isFinite(spreadBps) ? spreadBps : NaN, 'bps', bookAge),
+      depthUsd10bps: numFact(fast.depth10bps !== null && Number.isFinite(Number(fast.depth10bps)) ? Number(fast.depth10bps) : NaN, 'usd_notional', bookAge),
+      atrPct: numFact(atrPct, 'pct_of_mid', 0),
     };
   }
   function onBook(e) { const c = candidates.get(e.symbol); if (!c) return; const snap = e.snapshot; if (!snap.synced) return; counters.books += 1; c.lastBook = snap; if (keepSnapshots) { c.snapshots.push(snap); while (c.snapshots.length && c.snapshots[0].receiptTs < snap.receiptTs - 180_000) c.snapshots.shift(); } const f = bookFacts(snap); if (!f) return; c.books.push({ ts: snap.receiptTs, seq: snap.receiptSequence, mid: f.mid, bestBid: f.bestBid, depth: bidDepthWithinBps(snap, 10) }); while (c.books.length && c.books[0].ts < snap.receiptTs - 120_000) c.books.shift(); c.flow.advance(snap.receiptTs);
@@ -110,8 +113,8 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     // learned contribution (dormant without the injected port): resolved from the prepared snapshot and THIS
     // decision's already-prepared facts only; any resolver fault falls back to baseline with the fault logged
     let learned = null;
-    if (learning) { try { learned = resolveLearningContribution({ snapshot: learning.snapshot(), facts: { setupType: setupId, regime: 'LIVE_UNCLASSIFIED', features: learnedFactsOf(fast) }, mode, nowTs: D }); } catch (err) { log(`learned contribution resolver failed (baseline): ${err.message}`); learned = null; } }
-    let measurements = learned ? [...baseMeasurements, contributionMeasurement(learned)] : baseMeasurements;
+    if (learning) { try { learned = resolveLearningContribution({ snapshot: learning.snapshot(), facts: { setupType: setupId, regime: 'LIVE_UNCLASSIFIED', asset: c.assetId, venue: 'kraken', features: learnedFactsOf(fast, frozen) }, mode, nowTs: D }); } catch (err) { log(`learned contribution resolver failed (baseline): ${err.message}`); learned = null; } }
+    let measurements = learned ? [...baseMeasurements, contributionMeasurement(learned), ...contributionCandidateLog(learned)] : baseMeasurements;
     if (setup.state !== 'ELIGIBLE') { if (setup.state === 'NEEDS_DATA') counters.needsData += 1; tracker.decide(setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'NO_TRADE', setup.refused, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
     funnel.setupQualified += 1;
     // a seeded nomination control (focused completion §5): ONE deterministic draw per canonical episode, before any reservation, never redrawn
@@ -128,8 +131,18 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     // risk-bounded budget and SAME cost law when it is on, with every candidate size recorded
     let found;
     if (dynamicSizing) {
-      const ladder = evaluateSizeLadder({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget, fractions: dynamicSizing.fractions ?? undefined });
-      measurements = [...measurements, sizingMeasurement(ladder)];
+      // the ladder's prepared inputs come ONLY from what this decision already holds: the UNCHANGED admission law
+      // per size (concentration/cluster/reservations/risk caps), the freshness law from policy, and — only when a
+      // forward-validated candidate applies AND declares one — its maximum evidence-supported size. budget.cash is
+      // caps.cashAvailable, already net of open reservations. Nothing is invented; absent evidence keeps
+      // full-balance ineligible inside the ladder.
+      const prepared = {
+        admissible: (ev2) => admitCandidate({ state: s, candidate: { assetId: c.assetId, clusterId, entryCashOut: ev2.entryCashOut, riskUsd: ev2.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: s.limits, lockLevel: lockLevel(), clusters: clusters() }),
+        candidateMaxSizeUsd: learned?.applied && Number.isFinite(learned.selected?.maxSizeUsd) ? learned.selected.maxSizeUsd : null,
+        maxBookAgeMs: policy.execution.maxBookAgeMs,
+      };
+      const ladder = evaluateSizeLadder({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget, fractions: dynamicSizing.fractions ?? undefined, prepared, nowTs: D });
+      measurements = [...measurements, sizingMeasurement(ladder), ...sizingCandidateLog(ladder)];
       if (!ladder.selected) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', 'NO_ELIGIBLE_SIZE_ON_LADDER'], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
       found = ladder.selected.found;
     } else {

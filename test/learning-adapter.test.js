@@ -17,7 +17,7 @@ const applicability = { clauses: [{ feature: 'relVolume60m', op: 'GTE', threshol
 function activeActivation(over = {}) {
   const base = buildActivation({
     candidateId: 'lcand-a', patternId: 'lpat-a', trainingCutoffTs: T - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd',
-    maxAbsAdjust: 0.1, applicability, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T,
+    maxAbsAdjust: 0.1, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 },  applicability, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T,
   });
   return transitionActivation(base, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T, ...over });
 }
@@ -41,7 +41,7 @@ test('an adjustment beyond the activation\'s own allowed effect suspends learned
 
 test('correlated patterns cannot stack full boosts: the aggregate ceiling squeezes proportionally and discloses it', () => {
   const list = [1, 2, 3].map((i) => {
-    const base = buildActivation({ candidateId: `lcand-a${i}`, patternId: `lpat-a${i}`, trainingCutoffTs: T - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, applicability, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T });
+    const base = buildActivation({ candidateId: `lcand-a${i}`, patternId: `lpat-a${i}`, trainingCutoffTs: T - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 },  applicability, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T });
     return transitionActivation(base, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T });
   });
   const heads = new Map(list.map((a) => [a.activationId, a]));
@@ -86,7 +86,7 @@ test('O. degradation follows its predeclared rule: one ordinary loss cannot flip
   const dir = mkdtempSync(path.join(tmpdir(), 'cobra-learn-adapter-'));
   try {
     const store = createLearningStore({ dataDir: dir });
-    const pub = buildActivation({ candidateId: 'lcand-b', patternId: 'lpat-b', trainingCutoffTs: T - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, applicability, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T });
+    const pub = buildActivation({ candidateId: 'lcand-b', patternId: 'lpat-b', trainingCutoffTs: T - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 },  applicability, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T });
     store.appendActivation(pub);
     store.appendActivation(transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 }));
     const active = store.activationHeads().get(pub.activationId);

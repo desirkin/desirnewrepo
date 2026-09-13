@@ -60,11 +60,33 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       767bb48158adff3678d39b24ff5c1b45e12d5561e3cc8fb49de2ff4957a19c3f
+judge/*.js       c8e48d5c10b5b29ad685efd21713984bdb2f7f331e6b31f60d36486a241c1d10
 execution/*.js   d9ce90d9b08977048fb333bb8a22b7e949613832193a58763238d79a9d671965
 watch/watch.js   dc49a39444e2971dafb766f2a831fda6894968238606c7c6bfa8b5b782cf53a6
-all (41 files)   9012dd402d57c22ca1477eafd12128498ecef296146134f550d18ed4c161f90a
+all (41 files)   f9487cccf92fbf1329fc549a77cfc2414905cf4f8c4abcee3aa9e761b1bd5ff5
 ```
+
+### 4.3 Audited change — 2026-09-13 independent-review corrections (previous digests: judge `767bb48158ad…`, all `9012dd402d57…`; execution/ and watch/watch.js still byte-identical to the paper audit)
+
+The dormant ports from §4.2 were completed per the independent review, still null-default and still unwired in
+`fly.js`. Differential proof: `test/judge-differential.test.js` runs the ACTUAL `ea3bfbf` Judge (git archive)
+beside this tree on identical recorded inputs and requires raw deepEqual over complete decisions, refusals and
+account/execution state — passing, with zero normalizations.
+
+- `judge/learning-intake.js` — the selector now matches the COMPLETED candidate contract: asset/venue scope
+  lists (set membership, no name preference), mandatory eligibility envelope (liquidity + volatility ranges,
+  requiredFeatures, maxFactAgeMs freshness), featureRecipeVersion/policyVersion pinning; every candidate seen
+  is durably logged (`LEARNED_CANDIDATE` measurement rows). Still RANKING-only, bounded, baseline on any gap.
+- `judge/size-ladder.js` (`judge-size-ladder-2`) — sustainable objective (net-return degradation tolerance
+  anchored to the best smaller supported size); per-size records (entry/exit, fees, spread/slippage, net
+  return %, stressed loss, reward/risk, depth-haircut exit sensitivities, admission verdict, opportunity
+  cost); full-balance prerequisites (admission law, declared candidate max size, freshness, fresh book,
+  protective exit at the deepest haircut) — any gap ⇒ conservative smaller-size fallback, recorded by name.
+- `judge/judge.js` — the dynamic-sizing branch passes prepared inputs built ONLY from what the decision
+  already holds (the unchanged admitCandidate per size, policy freshness, the validated candidate's declared
+  maxSizeUsd or null); learned facts gain asset/venue/atrPct/ageMs. Ports still `null` by default; with both
+  absent the differential proof above holds. No threshold, gate, authority, order permission, admission rule
+  or risk rule was modified; sizing with the switch OFF is the exact §4.2 path.
 
 ### 4.2 Audited change — 2026-09-13 dormant learning/sizing ports (previous digests: judge `187fbace4d56…`, all `075ecd3aecef…`; execution/ and watch/watch.js byte-identical)
 

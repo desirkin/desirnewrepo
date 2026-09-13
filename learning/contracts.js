@@ -148,7 +148,8 @@ export const FLOORS_KEYS = Object.freeze(['minIndependentGroups', 'minDistinctUt
 export const DEFAULT_FLOORS = Object.freeze({ minIndependentGroups: 30, minDistinctUtcDates: 7, minDistinctAssets: 5, floorsLaw: 'ENGINEERING_DEFAULT_NOT_PROOF_OF_POWER' });
 export const ACTIVATION_KEYS = Object.freeze([
   'activationVersion', 'activationId', 'seq', 'state', 'candidateId', 'patternId', 'trainingCutoffTs', 'candidateDigest', 'evidenceDigest', 'reportDigest',
-  'scope', 'eligibility', 'allowedEffect', 'applicability', 'previousVersion', 'effectiveTs', 'expiresTs', 'cooldownUntilTs', 'degradeRule', 'transitionReason', 'ts', 'authority',
+  'scope', 'eligibility', 'featureRecipeVersion', 'policyVersion', 'validation', 'maxSizeUsd',
+  'allowedEffect', 'applicability', 'previousVersion', 'effectiveTs', 'expiresTs', 'cooldownUntilTs', 'degradeRule', 'transitionReason', 'ts', 'authority',
 ]);
 // the frozen learned parameter travels IN the artifact (adjust), inside its own declared bound (maxAbsAdjust) and
 // the code-level ceilings: active learned parameters are frozen — no external map can retune an active version.
@@ -156,11 +157,21 @@ export const ACTIVATION_KEYS = Object.freeze([
 // SIZING/EXIT_MANAGEMENT axis is a forward declaration nothing consumes yet, never implicit authority.
 export const ALLOWED_EFFECT_KEYS = Object.freeze(['kind', 'axes', 'adjust', 'maxAbsAdjust', 'units']);
 export const INFLUENCE_AXES = Object.freeze(['RANKING', 'SIZING', 'EXIT_MANAGEMENT']);
-// every candidate artifact declares its exact scope; 'ANY' is an explicit declaration, never a default the selector invents
-export const ACTIVATION_SCOPE_KEYS = Object.freeze(['setupType', 'regime']);
-// optional liquidity/coverage eligibility: when declared, the selector refuses the candidate unless the CURRENT
-// prepared facts prove the range (missing facts = OUT_OF_DOMAIN, never an optimistic pass)
-export const ACTIVATION_ELIGIBILITY_KEYS = Object.freeze(['maxSpreadBps', 'minDepthUsd10bps']);
+// every candidate artifact declares its exact scope; 'ANY' is an explicit declaration, never a default the selector
+// invents. assets/venues are 'ANY' or an explicit closed list of canonical identifiers — the selector matches set
+// membership only, never a name preference.
+export const ACTIVATION_SCOPE_KEYS = Object.freeze(['setupType', 'regime', 'assets', 'venues']);
+// MANDATORY declared eligibility envelope. Every field is an explicit declaration: a null bound means the candidate
+// DECLARED itself unbounded on that dimension, never that nobody thought about it. The selector refuses the
+// candidate unless the CURRENT prepared facts prove every declared bound (a missing or stale fact is out of
+// coverage, never an optimistic pass). requiredFeatures names the facts that MUST be KNOWN at decision time —
+// an LLM-evidence feature appears here only when the candidate genuinely requires it, so its absence never vetoes
+// an independent market-data candidate. maxFactAgeMs bounds the freshness of every consulted fact.
+export const ACTIVATION_ELIGIBILITY_KEYS = Object.freeze(['maxSpreadBps', 'minDepthUsd10bps', 'minAtrPct', 'maxAtrPct', 'requiredFeatures', 'maxFactAgeMs']);
+// the validation evidence the artifact was published on: forward basis, effective sample size (dependence GROUPS,
+// never raw rows), breadth, and the net effect AFTER the sealed cost model. Descriptive record of the terminal
+// report — the selector consumes it read-only; promotion floors remain the promotion gate's law.
+export const ACTIVATION_VALIDATION_KEYS = Object.freeze(['evidenceBasis', 'groupCount', 'assetCount', 'dateCount', 'netAfterCostsPct']);
 export const CAMPAIGN_MANIFEST_KEYS = Object.freeze([
   'campaignVersion', 'campaignId', 'createdTs', 'mode', 'fidelity', 'datasetId', 'datasetIdentity', 'universeRule', 'samplingSchedule',
   'captureRecipeVersion', 'featureRecipeVersion', 'baselineRuleVersion', 'candidateVersions', 'discoveryValidationBoundaryTs',
@@ -299,11 +310,32 @@ export function activationError(a) {
   if (a.expiresTs - a.effectiveTs > ADJUSTMENT_CEILINGS.maxLifetimeDays * 86_400_000) return 'activation: lifetime exceeds the ceiling';
   if (!isTs(a.trainingCutoffTs) || a.trainingCutoffTs > a.effectiveTs) return 'activation: training cutoff after effect';
   const sk = exactKeys(a.scope, ACTIVATION_SCOPE_KEYS); if (sk) return `activation: scope ${sk}`;
-  for (const f of ACTIVATION_SCOPE_KEYS) if (typeof a.scope[f] !== 'string' || a.scope[f].length === 0 || a.scope[f].length > 48) return `activation: scope ${f} malformed`;
-  if (a.eligibility !== null) {
-    const gk = exactKeys(a.eligibility, ACTIVATION_ELIGIBILITY_KEYS); if (gk) return `activation: eligibility ${gk}`;
-    for (const f of ACTIVATION_ELIGIBILITY_KEYS) if (a.eligibility[f] !== null && (!isFiniteNum(a.eligibility[f]) || a.eligibility[f] < 0)) return `activation: eligibility ${f} malformed`;
+  for (const f of ['setupType', 'regime']) if (typeof a.scope[f] !== 'string' || a.scope[f].length === 0 || a.scope[f].length > 48) return `activation: scope ${f} malformed`;
+  for (const f of ['assets', 'venues']) {
+    const v = a.scope[f];
+    if (v === 'ANY') continue; // an explicit declaration of unbounded scope
+    if (!Array.isArray(v) || v.length === 0 || v.length > 64) return `activation: scope ${f} must be 'ANY' or a bounded explicit list`;
+    if (v.some((x) => typeof x !== 'string' || x.length === 0 || x.length > 48) || new Set(v).size !== v.length) return `activation: scope ${f} entries malformed`;
   }
+  // the eligibility envelope is MANDATORY: null fields are explicit unbounded declarations, a missing object is not a record
+  if (!isPlainObject(a.eligibility)) return 'activation: eligibility envelope must be declared';
+  const gk = exactKeys(a.eligibility, ACTIVATION_ELIGIBILITY_KEYS); if (gk) return `activation: eligibility ${gk}`;
+  for (const f of ['maxSpreadBps', 'minDepthUsd10bps', 'minAtrPct', 'maxAtrPct', 'maxFactAgeMs']) if (a.eligibility[f] !== null && (!isFiniteNum(a.eligibility[f]) || a.eligibility[f] < 0)) return `activation: eligibility ${f} malformed`;
+  if (a.eligibility.minAtrPct !== null && a.eligibility.maxAtrPct !== null && a.eligibility.minAtrPct > a.eligibility.maxAtrPct) return 'activation: volatility range inverted';
+  const rf = a.eligibility.requiredFeatures;
+  if (!Array.isArray(rf) || rf.length > 32 || rf.some((x) => typeof x !== 'string' || x.length === 0 || x.length > 64) || new Set(rf).size !== rf.length) return 'activation: requiredFeatures malformed';
+  if (typeof a.featureRecipeVersion !== 'string' || a.featureRecipeVersion.length === 0 || a.featureRecipeVersion.length > 64) return 'activation: featureRecipeVersion must be declared';
+  if (typeof a.policyVersion !== 'string' || a.policyVersion.length === 0 || a.policyVersion.length > 64) return 'activation: policyVersion must be declared';
+  // validation evidence is MANDATORY on every artifact: what basis, how many independent groups, how broad, net after costs
+  if (!isPlainObject(a.validation)) return 'activation: validation evidence must be declared';
+  const vk = exactKeys(a.validation, ACTIVATION_VALIDATION_KEYS); if (vk) return `activation: validation ${vk}`;
+  if (a.validation.evidenceBasis !== 'PROSPECTIVE') return 'activation: only forward (PROSPECTIVE) validation evidence publishes an activation';
+  if (!isCount(a.validation.groupCount) || a.validation.groupCount < 1) return 'activation: validation groupCount malformed';
+  if (!isCount(a.validation.assetCount) || a.validation.assetCount < 1 || !isCount(a.validation.dateCount) || a.validation.dateCount < 1) return 'activation: validation breadth malformed';
+  if (!isFiniteNum(a.validation.netAfterCostsPct)) return 'activation: net-after-costs effect malformed';
+  // max size supported by evidence: null is the EXPLICIT declaration that no size evidence exists (candle-fidelity
+  // validation differentiates no sizes); a number requires genuine depth-supported size evidence
+  if (a.maxSizeUsd !== null && (!isFiniteNum(a.maxSizeUsd) || a.maxSizeUsd <= 0)) return 'activation: maxSizeUsd malformed';
   const ek = exactKeys(a.allowedEffect, ALLOWED_EFFECT_KEYS); if (ek) return `activation: allowedEffect ${ek}`;
   if (!Array.isArray(a.allowedEffect.axes) || a.allowedEffect.axes.length === 0 || a.allowedEffect.axes.some((x) => !INFLUENCE_AXES.includes(x)) || new Set(a.allowedEffect.axes).size !== a.allowedEffect.axes.length) return 'activation: influence axes malformed';
   if (a.allowedEffect.kind !== 'SETUP_QUALITY_SCORE_ADJUSTMENT') return 'activation: only the allowlisted score adjustment kind exists';

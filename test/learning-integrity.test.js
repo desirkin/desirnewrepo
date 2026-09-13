@@ -33,7 +33,7 @@ test('§04 memory separation: the research view exposes provisional patterns wit
     assert.equal(decision.view, 'DECISION');
     assert.equal(decision.activations.length, 0, 'a provisional pattern NEVER appears in the decision view');
     // an activation artifact appears in the decision view; a corrupted head is withheld with a reason
-    const pub = buildActivation({ candidateId: 'lcand-1', patternId: 'lpat-1', trainingCutoffTs: T - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, adjust: 0.1, applicability: predicate, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T });
+    const pub = buildActivation({ candidateId: 'lcand-1', patternId: 'lpat-1', trainingCutoffTs: T - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 },  adjust: 0.1, applicability: predicate, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T });
     store.appendActivation(pub);
     const d2 = readDecisionMemory({ store, nowTs: T + 1 });
     assert.equal(d2.activations.length, 1);

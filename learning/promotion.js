@@ -68,7 +68,21 @@ export function settleCandidate({ store, candidateId, nowTs, commonShockDates = 
       candidateDigest: candidateId, evidenceDigest: design.evidenceDigest, reportDigest: `terminal-${terminal.recordedTs}`,
       // the frozen learned parameter: the full permitted positive nudge, itself conservative — sealed at publication,
       // never retuned in place; the artifact also carries the design's exact declared scope for the selector
-      maxAbsAdjust, adjust: maxAbsAdjust, scope: { setupType: String(design.scope?.setupType ?? 'ANY'), regime: String(design.scope?.regime ?? 'ANY') },
+      maxAbsAdjust, adjust: maxAbsAdjust,
+      scope: {
+        setupType: String(design.scope?.setupType ?? 'ANY'), regime: String(design.scope?.regime ?? 'ANY'),
+        assets: Array.isArray(design.scope?.assets) && design.scope.assets.length ? [...design.scope.assets] : 'ANY',
+        venues: Array.isArray(design.scope?.venues) && design.scope.venues.length ? [...design.scope.venues] : 'ANY',
+      },
+      // the validation evidence travels IN the artifact, straight from the one sealed terminal look: effective
+      // sample size is dependence GROUPS, the effect is the paired net difference AFTER the sealed cost model
+      validation: {
+        evidenceBasis: 'PROSPECTIVE', groupCount: terminal.maturedGroups, assetCount: terminal.distinctAssets,
+        dateCount: terminal.distinctUtcDates, netAfterCostsPct: terminal.effect.pairedMeanDiff,
+      },
+      // candle-fidelity forward validation differentiates NO purchase sizes: the artifact explicitly declares
+      // no supported size (null) — dynamic sizing's full-balance path can therefore never cite it
+      maxSizeUsd: null,
       applicability: design.predicate, effectiveTs: nowTs,
       expiresTs: nowTs + PROMOTION_POLICY.activationLifetimeDays * 86_400_000,
       degradeRule: PROMOTION_POLICY.degradeRule, ts: nowTs,

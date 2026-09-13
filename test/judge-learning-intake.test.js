@@ -14,7 +14,7 @@ import { createJudge } from '../judge/judge.js';
 import { createScheduler } from '../judge/scheduler.js';
 import { loadJudgePolicy } from '../judge/policy.js';
 import { rankCandidates } from '../judge/risk.js';
-import { validateLearningActivation, resolveLearningContribution, contributionMeasurement, SELECTOR_VERSION } from '../judge/learning-intake.js';
+import { validateLearningActivation, resolveLearningContribution, contributionMeasurement, contributionCandidateLog, SELECTOR_VERSION } from '../judge/learning-intake.js';
 import { buildActivation, transitionActivation } from '../learning/adapter.js';
 import { eventsFor, fakeClock, SPEC, T0 } from './helpers/judge.js';
 import { feeContract } from '../execution/contract.js';
@@ -26,8 +26,8 @@ const KILL = { state: 'ARMED', reason: null, ts: T };
 const FACTS = (setupType, known = true) => ({ setupType, regime: 'LIVE_UNCLASSIFIED', features: { rv60: { value: known ? 3 : null, unit: 'ratio', lookbackMs: 60_000, availability: known ? 'KNOWN' : 'UNAVAILABLE' } } });
 const APPLIC = { clauses: [{ feature: 'rv60', op: 'GTE', threshold: 0 }] };
 
-function active({ pattern = 'lpat-a', candidate = 'lcand-a', setupType = 'RANGE_IGNITION', regime = 'ANY', adjust = 0.05, maxAbs = 0.1, effectiveTs = T } = {}) {
-  const pub = buildActivation({ candidateId: candidate, patternId: pattern, trainingCutoffTs: effectiveTs - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: maxAbs, adjust, scope: { setupType, regime }, applicability: APPLIC, effectiveTs, expiresTs: effectiveTs + 30 * DAY, ts: effectiveTs });
+function active({ pattern = 'lpat-a', candidate = 'lcand-a', setupType = 'RANGE_IGNITION', regime = 'ANY', assets = 'ANY', venues = 'ANY', eligibility = undefined, featureRecipeVersion = undefined, adjust = 0.05, maxAbs = 0.1, effectiveTs = T } = {}) {
+  const pub = buildActivation({ candidateId: candidate, patternId: pattern, trainingCutoffTs: effectiveTs - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: maxAbs, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 }, adjust, scope: { setupType, regime, assets, venues }, ...(eligibility !== undefined ? { eligibility } : {}), ...(featureRecipeVersion !== undefined ? { featureRecipeVersion } : {}), applicability: APPLIC, effectiveTs, expiresTs: effectiveTs + 30 * DAY, ts: effectiveTs });
   return transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: effectiveTs });
 }
 const snapOf = (activations, { preparedTs = T, kill = KILL } = {}) => ({ view: 'DECISION', preparedTs, activations, kill });
@@ -58,7 +58,7 @@ test('no match, stale snapshot, expired candidate, conflicting active versions a
 });
 
 test('a recent winner WITHOUT validation cannot be selected: waiting/rolled-back states are rejected, an outcome-bearing artifact fails the closed validator, and no outcome input exists to select on', () => {
-  const waiting = buildActivation({ candidateId: 'lcand-w', patternId: 'lpat-w', trainingCutoffTs: T - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, adjust: 0.1, scope: { setupType: 'RANGE_IGNITION', regime: 'ANY' }, applicability: APPLIC, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T });
+  const waiting = buildActivation({ candidateId: 'lcand-w', patternId: 'lpat-w', trainingCutoffTs: T - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 },  adjust: 0.1, scope: { setupType: 'RANGE_IGNITION', regime: 'ANY' }, applicability: APPLIC, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T });
   const r = resolveLearningContribution({ snapshot: snapOf([waiting]), facts: FACTS('RANGE_IGNITION'), mode: 'PAPER', nowTs: T + 1 });
   assert.equal(r.applied, false); assert.match(r.rejected[0].reason, /NOT_ACTIVE/);
   // an artifact carrying a win-rate field is not a lawful record at all -> learned influence suspends to baseline
@@ -111,7 +111,7 @@ async function rig({ accountId, learning = null, dynamicSizing = null }) {
   const feed = createExecutionFeed({ clock: clock.now }); feed.onConnect(clock.now()); const adapter = createPaperAdapter({ accountId, clock: clock.now, feed, fee: TEST_FEE, specOf: () => SPEC });
   const pclock = { now: clock.now, monotonic: clock.monotonic, status: () => ({ trusted: true }) }; const dispatcher = createDispatcher({ accountId, journal, writer, adapter, clock: pclock, specOf: () => SPEC }); await dispatcher.load(); await dispatcher.commit(F.init({ accountKind: 'PAPER' }));
   const scheduler = createScheduler({ monotonic: clock.monotonic }); const hist = { bars: (symbol, nowTs) => bars({ endTs: Math.floor(nowTs / 60_000) * 60_000 }) };
-  const judge = createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, history: hist, caseSource: { consumed: () => null }, controls: () => ({ kill: false, cage: false, vetoes: [] }), scheduler, mode: 'PAPER', learning, dynamicSizing });
+  const judge = createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, history: hist, caseSource: { consumed: () => null }, controls: () => ({ kill: false, cage: false, vetoes: [] }), scheduler, mode: 'PAPER', learning, dynamicSizing, log: (m) => process.env.RIG_DEBUG && console.error(`# RIGLOG ${m}`) });
   judge.admit('XBT/USD', { assetId: 'BTC', source: 'TEST' }); feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'XBT/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now()); feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), clock.now());
   const book = (asks, bids, type = 'snapshot') => feed.ingest(JSON.stringify({ channel: 'book', type, data: [{ symbol: 'XBT/USD', asks: asks.map(([price, qty]) => ({ price, qty })), bids: bids.map(([price, qty]) => ({ price, qty })), checksum: crcFor(asks, bids), timestamp: new Date(clock.now()).toISOString() }] }), clock.now());
   let tid = 0; const trade = (price, side = 'buy', qty = 0.05) => feed.ingest(JSON.stringify({ channel: 'trade', type: 'update', data: [{ symbol: 'XBT/USD', side, price, qty, ord_type: 'market', trade_id: ++tid, timestamp: new Date(clock.now()).toISOString() }] }), clock.now());
@@ -121,7 +121,7 @@ async function rig({ accountId, learning = null, dynamicSizing = null }) {
   async function ignite({ price = 100000, level = 100400, books = 3, spanMs = 2100 } = {}) { const start = Math.floor(clock.now() / 60_000) * 60_000 + 60_000; while (clock.now() < start) { adv(1000); } for (let k = 0; k < 20; k += 1) { adv(2000); trade(price + 50, 'buy', 0.2); } while (clock.now() % 60_000 !== 0) adv(1000); clock.advance(500); for (let i = 0; i < books; i += 1) { book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); trade(level + 10, 'buy', 0.1); await settle(); if (i < books - 1) clock.advance(Math.ceil(spanMs / (books - 1))); } await settle(); }
   return { judge, warm, ignite, state: () => dispatcher.state() };
 }
-const strip = (d) => ({ status: d.status, reasonCodes: d.reasonCodes, inputMode: d.inputMode, sizing: d.sizing, valuationRef: d.valuationRef, invalidation: d.invalidation, scenario: d.scenario, setupId: d.setupId, episodeId: d.episodeId, baseMeasurements: d.measurements.filter((m) => m.id !== 'LEARNED_RANK_ADJUSTMENT') });
+const strip = (d) => ({ status: d.status, reasonCodes: d.reasonCodes, inputMode: d.inputMode, sizing: d.sizing, valuationRef: d.valuationRef, invalidation: d.invalidation, scenario: d.scenario, setupId: d.setupId, episodeId: d.episodeId, baseMeasurements: d.measurements.filter((m) => !['LEARNED_RANK_ADJUSTMENT', 'LEARNED_CANDIDATE'].includes(m.id)) });
 
 test('PRESERVATION through the REAL decide() path: port absent = byte-identical baseline; port present with nothing eligible = identical decisions plus only the exclusion measurement; one validated in-scope candidate = identical statuses/sizing/risk plus the applied bounded contribution', async () => {
   const rigA = await rig({ accountId: 'lp-a' }); await rigA.warm(); await rigA.ignite();
@@ -151,19 +151,93 @@ test('PRESERVATION through the REAL decide() path: port absent = byte-identical 
   assert.match(mC.note, new RegExp(art.activationId));
   assert.deepEqual(strip(dC), strip(dA), 'ONLY the permitted assessment changed: sizing, risk, valuation, status and refusals are byte-equal');
   assert.deepEqual(dC.sizing, dA.sizing, 'no size/risk field moved');
-  // D: the SECOND independent switch — dynamic sizing on, learned selection off. On this book the full
-  // risk-bounded fraction wins the declared objective, so the selected size EQUALS the baseline sizeSearch result:
-  // identical sizing/risk plus only the recorded ladder measurement.
+  // D: the SECOND independent switch — dynamic sizing on, learned selection off. With NO validated candidate
+  // declaring evidence-supported size, the all-in prerequisites are missing, so the ladder CONSERVATIVELY selects
+  // a smaller fraction than the baseline's max-legal size (never larger), records the fraction-1 refusal by name,
+  // and changes nothing else about the decision.
   const rigD = await rig({ accountId: 'lp-d', dynamicSizing: {} });
   await rigD.warm(); await rigD.ignite();
   const dD = rigD.judge.decisions().find((d) => d.status === 'ENTRY_RESERVED');
-  assert.ok(dD, 'the dynamic-sizing run still reserves');
+  assert.ok(dD, `the dynamic-sizing run still reserves: ${JSON.stringify(rigD.judge.decisions().map((d) => [d.status, d.reasonCodes, d.measurements?.find((m) => m.id === 'DYNAMIC_SIZE_SELECTION')?.note]))}`);
   const mD = dD.measurements.find((m) => m.id === 'DYNAMIC_SIZE_SELECTION');
   assert.ok(mD && mD.ok === true, 'every candidate size and the selection are recorded');
   assert.equal(mD.unit, 'FRACTION_OF_RISK_BOUNDED_SPENDABLE');
-  assert.deepEqual(dD.sizing, dA.sizing, 'the winning full fraction equals the baseline max-legal size — risk caps identical');
-  const stripNoSizing = (d) => { const s = strip(d); s.baseMeasurements = s.baseMeasurements.filter((m) => m.id !== 'DYNAMIC_SIZE_SELECTION'); return s; };
-  assert.deepEqual(stripNoSizing(dD), strip(dA), 'statuses, refusals and valuation unchanged under the sizing switch');
+  assert.ok(mD.value < 1, 'without candidate size evidence the full fraction is never selected');
+  const fullRow = dD.measurements.find((m) => m.id === 'SIZE_CANDIDATE' && m.value === 1);
+  assert.match(fullRow.note, /^ALL_IN_PREREQUISITES_MISSING:.*CANDIDATE_MAX_SIZE_EVIDENCE/, 'the fraction-1 refusal is durable and names the missing prerequisite');
+  assert.ok(Number(dD.sizing.q) < Number(dA.sizing.q), `conservative: the selected size is STRICTLY SMALLER than baseline (${dD.sizing.q} vs ${dA.sizing.q})`);
+  assert.ok(Number(dD.sizing.riskUsd) <= Number(dA.sizing.riskUsd) + 1e-9, 'risk at the selected size never exceeds the baseline risk');
+  const stripNoSizing = (d) => { const s = strip(d); s.baseMeasurements = s.baseMeasurements.filter((m) => !['DYNAMIC_SIZE_SELECTION', 'SIZE_CANDIDATE'].includes(m.id)); delete s.sizing; delete s.valuationRef; return s; };
+  assert.deepEqual(stripNoSizing(dD), stripNoSizing(dA), 'statuses, refusals, scenario and invalidation unchanged under the sizing switch (sizing/valuation differ ONLY by the recorded conservative size)');
   // protective/account state unchanged across all four
   for (const r of [rigA, rigB, rigC, rigD]) { const s = r.state(); assert.equal(s.mode, 'PAPER'); assert.ok(Object.keys(s.positions).length >= 1); }
+});
+
+// ---- the COMPLETED candidate contract (review correction): asset/venue scope, required facts, freshness,
+// volatility range, version pinning, per-candidate logging and the no-name-preference law -------------------------
+const RICH_FACTS = ({ asset = 'BTC', venue = 'kraken', spread = 4, depth = 60_000, atrPct = 0.4, age = 500, llm = null } = {}) => ({
+  setupType: 'RANGE_IGNITION', regime: 'LIVE_UNCLASSIFIED', asset, venue,
+  features: {
+    rv60: { value: 3, unit: 'ratio', lookbackMs: 60_000, ageMs: 0, availability: 'KNOWN' },
+    spreadBps: { value: spread, unit: 'bps', lookbackMs: 0, ageMs: age, availability: 'KNOWN' },
+    depthUsd10bps: { value: depth, unit: 'usd_notional', lookbackMs: 0, ageMs: age, availability: 'KNOWN' },
+    atrPct: { value: atrPct, unit: 'pct_of_mid', lookbackMs: 0, ageMs: 0, availability: 'KNOWN' },
+    ...(llm ? { socialLlmScore: llm } : {}),
+  },
+});
+
+test('declared asset/venue scope is SET membership from prepared facts: out-of-list assets and venues are rejected with the exact reason; a missing fact never passes an explicit list', () => {
+  const scoped = active({ pattern: 'lpat-sc', candidate: 'lcand-sc', assets: ['BTC', 'ETH'], venues: ['kraken'] });
+  const ok = resolveLearningContribution({ snapshot: snapOf([scoped]), facts: RICH_FACTS({ asset: 'BTC' }), mode: 'PAPER', nowTs: T + 1 });
+  assert.equal(ok.applied, true);
+  const wrongAsset = resolveLearningContribution({ snapshot: snapOf([scoped]), facts: RICH_FACTS({ asset: 'DOGE' }), mode: 'PAPER', nowTs: T + 1 });
+  assert.equal(wrongAsset.applied, false); assert.equal(wrongAsset.rejected[0].reason, 'ASSET_OUT_OF_SCOPE');
+  const wrongVenue = resolveLearningContribution({ snapshot: snapOf([scoped]), facts: RICH_FACTS({ venue: 'other' }), mode: 'PAPER', nowTs: T + 1 });
+  assert.equal(wrongVenue.rejected[0].reason, 'VENUE_OUT_OF_SCOPE');
+  const noAssetFact = resolveLearningContribution({ snapshot: snapOf([scoped]), facts: { ...RICH_FACTS(), asset: undefined }, mode: 'PAPER', nowTs: T + 1 });
+  assert.equal(noAssetFact.rejected[0].reason, 'ASSET_OUT_OF_SCOPE', 'an unknown asset is out of a declared list, never optimistically inside it');
+});
+
+test('required data coverage/availability/freshness: a candidate REQUIRING an LLM-evidence fact is rejected when it is absent — while an independent market-data candidate in the same snapshot still qualifies (missing optional LLM evidence vetoes nothing)', () => {
+  const needsLlm = active({ pattern: 'lpat-llm', candidate: 'lcand-llm', adjust: 0.01, eligibility: { requiredFeatures: ['socialLlmScore'] } });
+  const marketOnly = active({ pattern: 'lpat-mkt', candidate: 'lcand-mkt', adjust: 0.05 });
+  const r = resolveLearningContribution({ snapshot: snapOf([needsLlm, marketOnly]), facts: RICH_FACTS(), mode: 'PAPER', nowTs: T + 1 });
+  assert.equal(r.applied, true, 'the market-data candidate is not vetoed by evidence it never required');
+  assert.equal(r.selected.patternId, 'lpat-mkt');
+  const rej = r.rejected.find((x) => x.activationId === needsLlm.activationId);
+  assert.equal(rej.reason, 'REQUIRED_FACT_MISSING');
+  // with the required fact present AND fresh, the LLM-requiring candidate becomes eligible (and wins the smaller-effect tie-break)
+  const withLlm = resolveLearningContribution({ snapshot: snapOf([needsLlm, marketOnly]), facts: RICH_FACTS({ llm: { value: 0.8, unit: 'score', lookbackMs: 0, ageMs: 1000, availability: 'KNOWN' } }), mode: 'PAPER', nowTs: T + 1 });
+  assert.equal(withLlm.selected.patternId, 'lpat-llm');
+});
+
+test('declared freshness and volatility bounds: a stale fact is FACT_STALE (never a pass), volatility outside the validated range is rejected, and an unknown-age fact fails a declared freshness bound', () => {
+  const bounded = active({ pattern: 'lpat-b', candidate: 'lcand-b', eligibility: { maxSpreadBps: 10, maxFactAgeMs: 2_000, minAtrPct: 0.1, maxAtrPct: 1.0 } });
+  assert.equal(resolveLearningContribution({ snapshot: snapOf([bounded]), facts: RICH_FACTS(), mode: 'PAPER', nowTs: T + 1 }).applied, true);
+  const stale = resolveLearningContribution({ snapshot: snapOf([bounded]), facts: RICH_FACTS({ age: 60_000 }), mode: 'PAPER', nowTs: T + 1 });
+  assert.equal(stale.rejected[0].reason, 'FACT_STALE');
+  const hotVol = resolveLearningContribution({ snapshot: snapOf([bounded]), facts: RICH_FACTS({ atrPct: 3.5 }), mode: 'PAPER', nowTs: T + 1 });
+  assert.equal(hotVol.rejected[0].reason, 'VOLATILITY_OUT_OF_RANGE');
+  const noAge = RICH_FACTS(); noAge.features = { ...noAge.features, spreadBps: { ...noAge.features.spreadBps, ageMs: null } };
+  assert.equal(resolveLearningContribution({ snapshot: snapOf([bounded]), facts: noAge, mode: 'PAPER', nowTs: T + 1 }).rejected[0].reason, 'FACT_STALE');
+});
+
+test('version pinning and the no-name-preference law: a foreign feature-recipe version is rejected; two identical candidates scoped to different assets tie-break by activation id only — the asset name itself confers NO preference; every candidate is logged in the durable measurement note', () => {
+  const v1 = active({ pattern: 'lpat-v1', candidate: 'lcand-v1', featureRecipeVersion: 'learning-features-0-obsolete' });
+  const r = resolveLearningContribution({ snapshot: snapOf([v1]), facts: RICH_FACTS(), mode: 'PAPER', nowTs: T + 1 });
+  assert.equal(r.rejected[0].reason, 'FEATURE_RECIPE_VERSION_MISMATCH');
+  // identical effects, scoped to different single assets; only the one matching the CURRENT fact is even eligible,
+  // and among equally scoped candidates the order is |adjust| -> effectiveTs -> id: no asset string enters the sort
+  const zzz = active({ pattern: 'lpat-z', candidate: 'lcand-z', assets: ['ZZZ', 'BTC'] });
+  const aaa = active({ pattern: 'lpat-0', candidate: 'lcand-0', assets: ['AAA', 'BTC'] });
+  const both = resolveLearningContribution({ snapshot: snapOf([zzz, aaa]), facts: RICH_FACTS({ asset: 'BTC' }), mode: 'PAPER', nowTs: T + 1 });
+  assert.equal(both.eligible.length, 2);
+  assert.equal(both.selected.activationId, [zzz, aaa].map((x) => x.activationId).sort()[0], 'lexicographic ACTIVATION id, never the ticker list');
+  const logRows = contributionCandidateLog(both);
+  assert.ok(logRows.some((x) => x.note === `${zzz.activationId}=ELIGIBLE` || x.note === `${zzz.activationId}=ELIGIBLE:SELECTED`), 'every eligible candidate gets its own durable log row');
+  assert.ok(logRows.some((x) => x.note.startsWith(`${aaa.activationId}=ELIGIBLE`)));
+  assert.ok(logRows.every((x) => x.note.length <= 300), 'log rows respect the closed decision note bound');
+  const rej = contributionCandidateLog(r);
+  assert.deepEqual(rej.map((x) => [x.ok, x.note]), [[false, `${v1.activationId}=FEATURE_RECIPE_VERSION_MISMATCH`]], 'the exact rejection reason is a durable row');
+  assert.match(contributionMeasurement(r).note, /seen=1:logged=1/);
 });

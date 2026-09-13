@@ -11,23 +11,32 @@
 // the BASELINE score with the reason exposed; rollback is an appended state transition, atomic through the store,
 // with a cooldown so one ordinary loss cannot flip behavior back and forth.
 import {
-  ACTIVATION_VERSION, ADJUSTMENT_CEILINGS, AUTHORITY_PAPER_ADJUSTMENT,
+  ACTIVATION_VERSION, ADJUSTMENT_CEILINGS, AUTHORITY_PAPER_ADJUSTMENT, FEATURE_RECIPE_VERSION, BASELINE_RULE_VERSION,
   activationError, activationIdOf, isFiniteNum, isTs, round4, deepFreeze,
 } from './contracts.js';
 import { evaluatePredicate } from './features.js';
 
 export const DEFAULT_DEGRADE_RULE = Object.freeze({ minGroups: 10, adverseFractionAbove: 0.7, consecutiveWindows: 2 });
 export const DEFAULT_COOLDOWN_MS = 24 * 3_600_000;
+// the full declared eligibility envelope with every dimension EXPLICITLY unbounded and no required facts — a
+// builder default is still a declaration recorded in the artifact, never something the selector invents later
+export const UNBOUNDED_ELIGIBILITY = Object.freeze({ maxSpreadBps: null, minDepthUsd10bps: null, minAtrPct: null, maxAtrPct: null, requiredFeatures: Object.freeze([]), maxFactAgeMs: null });
 
 export function buildActivation({
   candidateId, patternId, trainingCutoffTs, candidateDigest, evidenceDigest, reportDigest,
-  maxAbsAdjust, adjust = maxAbsAdjust, scope = { setupType: 'ANY', regime: 'ANY' }, eligibility = null, axes = ['RANKING'], applicability, previousVersion = null, effectiveTs, expiresTs,
+  maxAbsAdjust, adjust = maxAbsAdjust, scope = {}, eligibility = UNBOUNDED_ELIGIBILITY, axes = ['RANKING'],
+  featureRecipeVersion = FEATURE_RECIPE_VERSION, policyVersion = BASELINE_RULE_VERSION,
+  validation, maxSizeUsd = null, // candle-fidelity validation carries NO size evidence: null is that explicit declaration
+  applicability, previousVersion = null, effectiveTs, expiresTs,
   degradeRule = DEFAULT_DEGRADE_RULE, state = 'PUBLISHED_WAITING_FOR_PAPER', seq = 0, ts, transitionReason = 'FORWARD_GATE_PASSED', cooldownUntilTs = null,
 }) {
   const identity = { candidateId, patternId, candidateDigest, effectiveTs };
+  const fullScope = { setupType: 'ANY', regime: 'ANY', assets: 'ANY', venues: 'ANY', ...scope };
   const record = {
     activationVersion: ACTIVATION_VERSION, activationId: activationIdOf(identity), seq, state, candidateId, patternId,
-    trainingCutoffTs, candidateDigest, evidenceDigest, reportDigest, scope, eligibility,
+    trainingCutoffTs, candidateDigest, evidenceDigest, reportDigest, scope: fullScope,
+    eligibility: { ...UNBOUNDED_ELIGIBILITY, ...eligibility, requiredFeatures: [...(eligibility?.requiredFeatures ?? [])] },
+    featureRecipeVersion, policyVersion, validation, maxSizeUsd,
     allowedEffect: { kind: 'SETUP_QUALITY_SCORE_ADJUSTMENT', axes, adjust, maxAbsAdjust, units: 'BASELINE_SCORE_UNITS' },
     applicability, previousVersion, effectiveTs, expiresTs, cooldownUntilTs, degradeRule, transitionReason, ts,
     authority: AUTHORITY_PAPER_ADJUSTMENT,

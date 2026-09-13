@@ -56,3 +56,12 @@ test('no learning module writes to the Judge, Watch, execution journal, controls
     }
   }
 });
+
+test('ZERO network / LLM in the Judge admission path and The Watch: no node:http(s)/net/tls/dns, no fetch(, no WebSocket, and no socrates/ or research/ import in any decision-path module — the case source and every learned fact arrive PREPARED', () => {
+  const ADMISSION_PATH = ['judge/judge.js', 'judge/learning-intake.js', 'judge/size-ladder.js', 'judge/cost.js', 'judge/risk.js', 'judge/setups.js', 'judge/features.js', 'judge/readiness.js', 'judge/scheduler.js', 'judge/contract.js', 'watch/watch.js'];
+  for (const f of ADMISSION_PATH) {
+    const text = src(f);
+    assert.ok(!/node:https?\b|node:net\b|node:tls\b|node:dns\b|\bfetch\s*\(|new WebSocket/.test(text), `${f} contains no network primitive`);
+    assert.ok(!/from\s+['"][^'"]*(socrates|research)\//.test(text), `${f} imports no LLM/research module`);
+  }
+});
