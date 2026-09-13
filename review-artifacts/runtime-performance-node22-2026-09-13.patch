@@ -1,0 +1,105 @@
+diff --git a/tools/daily-study-process.js b/tools/daily-study-process.js
+index c768d68..6485762 100644
+--- a/tools/daily-study-process.js
++++ b/tools/daily-study-process.js
+@@ -75,6 +75,24 @@ const SAFE_ENV_KEYS = Object.freeze([
+   'TMPDIR', 'LANG', 'LC_ALL', 'TZ',
+ ]);
+ 
++// Snapshot the repository's already-active TEST guard when this module is
++// initialized. A caller may mutate NODE_OPTIONS later (the hostile-env test
++// deliberately does); that must neither erase the known guard from a child nor
++// cause arbitrary later loader text to cross the process boundary.
++const STARTUP_OFFLINE_GUARD = (() => {
++  const nativePath = OFFLINE_GUARD_FILE;
++  const fileUrl = pathToFileURL(OFFLINE_GUARD_FILE).href;
++  const startupOptions = [...process.execArgv, process.env.NODE_OPTIONS ?? ''].join(' ');
++  const active = (startupOptions.includes(nativePath) || startupOptions.includes(fileUrl))
++    && typeof process.env.COBRA_OFFLINE_GUARD_LOG === 'string'
++    && typeof process.env.COBRA_OFFLINE_GUARD_RUN === 'string';
++  return Object.freeze({
++    active,
++    log: active ? process.env.COBRA_OFFLINE_GUARD_LOG : null,
++    run: active ? process.env.COBRA_OFFLINE_GUARD_RUN : null,
++  });
++})();
++
+ const byteLength = (value) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+ const bounded = (value, max = 500) => String(value ?? '').slice(0, max);
+ const samePath = (a, b) => {
+@@ -182,15 +200,10 @@ function safeChildEnvironment() {
+   // known guard (never arbitrary NODE_OPTIONS) using a file URL. The harmless
+   // title marker contains the guard's native path, so its wrapper recognizes
+   // that the guard is already present and does not append a second loader.
+-  const argv = [...process.execArgv, process.env.NODE_OPTIONS ?? ''].join(' ');
+-  const guardRequested = typeof process.env.COBRA_OFFLINE_GUARD_LOG === 'string'
+-    && typeof process.env.COBRA_OFFLINE_GUARD_RUN === 'string'
+-    && (argv.includes(OFFLINE_GUARD_FILE) || argv.includes(pathToFileURL(OFFLINE_GUARD_FILE).href)
+-      || argv.includes('test/helpers/offline-guard.mjs'));
+-  if (guardRequested) {
++  if (STARTUP_OFFLINE_GUARD.active) {
+     env.NODE_OPTIONS = `--import="${pathToFileURL(OFFLINE_GUARD_FILE).href}" --title="${OFFLINE_GUARD_FILE}"`;
+-    env.COBRA_OFFLINE_GUARD_LOG = process.env.COBRA_OFFLINE_GUARD_LOG;
+-    env.COBRA_OFFLINE_GUARD_RUN = process.env.COBRA_OFFLINE_GUARD_RUN;
++    env.COBRA_OFFLINE_GUARD_LOG = STARTUP_OFFLINE_GUARD.log;
++    env.COBRA_OFFLINE_GUARD_RUN = STARTUP_OFFLINE_GUARD.run;
+   }
+   return env;
+ }
+diff --git a/test/daily-study-process.test.js b/test/daily-study-process.test.js
+index 09c8546..96215a4 100644
+--- a/test/daily-study-process.test.js
++++ b/test/daily-study-process.test.js
+@@ -10,6 +10,7 @@ import {
+ import { tmpdir } from 'node:os';
+ import path from 'node:path';
+ import { syncBuiltinESMExports } from 'node:module';
++import { fileURLToPath } from 'node:url';
+ import {
+   createDailyStudyProcessHost, DAILY_STUDY_PROCESS_HARD_LIMITS,
+   isDailyStudyProcessResult, isDailyStudyProcessSummary,
+@@ -168,6 +169,44 @@ test('runs the whole bounded planner/store in a sanitized child and returns only
+   assert.equal(retry.detailedStudyReturned, false);
+ });
+ 
++test('a startup NODE_OPTIONS-only offline guard is snapshotted before later hostile env mutation', (t) => {
++  const dirs = fixtureRoot(t); const spec = writeFixture(dirs, 'startup-guard');
++  const guardFile = fileURLToPath(new URL('./helpers/offline-guard.mjs', import.meta.url));
++  const guardUrl = new URL('./helpers/offline-guard.mjs', import.meta.url).href;
++  const hostUrl = `${new URL('../tools/daily-study-process.js', import.meta.url).href}?startup-guard=${Date.now()}`;
++  const script = `
++    import { createDailyStudyProcessHost, isDailyStudyProcessResult } from ${JSON.stringify(hostUrl)};
++    process.env.NODE_OPTIONS = '--import=./hostile-loader.js';
++    process.env.COBRA_OFFLINE_GUARD_LOG = 'hostile-later-log';
++    process.env.COBRA_OFFLINE_GUARD_RUN = 'hostile-later-run';
++    process.env.KRAKEN_API_KEY = 'must-not-cross-process-boundary';
++    const host = createDailyStudyProcessHost({ inputRoot: ${JSON.stringify(dirs.inputs)}, outputRoot: ${JSON.stringify(dirs.outputs)} });
++    try {
++      const result = await host.submit(${JSON.stringify(spec)}).result;
++      process.stdout.write(JSON.stringify({ valid: isDailyStudyProcessResult(result), environment: result.environment }));
++    } finally { await host.close(); }
++  `;
++  const env = {};
++  for (const key of ['SystemRoot', 'WINDIR', 'PATH', 'PATHEXT', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ']) {
++    if (typeof process.env[key] === 'string') env[key] = process.env[key];
++  }
++  const expectedLog = path.join(dirs.root, 'startup-guard.jsonl');
++  env.NODE_OPTIONS = `--import="${guardUrl}" --title="${guardFile}"`;
++  env.COBRA_OFFLINE_GUARD_LOG = expectedLog;
++  env.COBRA_OFFLINE_GUARD_RUN = 'startup-node-options-only';
++  const output = childProcess.execFileSync(process.execPath, ['--input-type=module', '-e', script], {
++    cwd: path.resolve(fileURLToPath(new URL('..', import.meta.url))), env, encoding: 'utf8', timeout: 30_000,
++  });
++  const result = JSON.parse(output);
++  assert.equal(result.valid, true);
++  assert.equal(result.environment.testOfflineGuardActive, true);
++  assert.equal(result.environment.nodeOptionsPresent, true);
++  assert.equal(result.environment.unapprovedNodeOptionsPresent, false);
++  assert.equal(result.environment.providerLikeKeyCount, 0);
++  assert.equal(result.environment.fixedAllowlistOnly, true);
++  assert.equal(existsSync(expectedLog), false, 'the isolated startup-guard run made zero outbound attempts');
++});
++
+ test('admission is bounded, rechecked per dequeue, and exact or nested store ownership cannot overlap', async (t) => {
+   const dirs = fixtureRoot(t); const a = writeFixture(dirs, 'a'); const b = writeFixture(dirs, 'b');
+   mkdirSync(a.outputDir);
