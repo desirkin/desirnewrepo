@@ -256,6 +256,15 @@ async function main() {
       return usage();
     }
 
+    case 'learning': {
+      // LEARN-1 readers and the bounded local replay campaign (learning/commands.js): read-only status/patterns/
+      // summary, dataset preflight over ACTUAL retained history, and the resumable offline counterfactual runner.
+      // No network, no orders, no paper/live start; the learned-influence kill switch is separate from collection.
+      const { runLearningCommand } = await import('../learning/commands.js');
+      await runLearningCommand(rest[0], flag, rest);
+      return;
+    }
+
     case 'press':
     case 'infra':
     case 'video': {
@@ -308,6 +317,7 @@ function usage() {
   cobra press status | tail [--source ID] [--limit N]   publisher headline observations (dark tier; read-only)
   cobra infra status | tail [--source ID] [--kind K] [--limit N]   NOAA / RIPE RIS / Cloudflare Radar observations (dark tier)
   cobra video status | tail [--query Q] [--limit N]     YouTube public video metadata observations (dark social-video tier)
+  cobra learning <sub>                             LEARN-1: status | preflight | campaign-* | patterns | summary | kill | arm
   cobra state clear                                clear KILL/CAGE latches`);
   process.exitCode = 1;
 }

@@ -70,6 +70,30 @@ function sensorsView() {
   const snap = sensorSnapshot({ profile, env, live: { judgeRun, persistence: getPersistence() } });
   return { enabled: true, profileApplied: Boolean(process.env.COBRA_PROFILE), ...snap };
 }
+// LEARN-1: the Learning view — read-only over the durable learning stores (data/learning). It distinguishes a
+// running collector from a running learner and a running learner from validated adaptive behavior; provisional
+// 'what I think I am noticing' (patterns + contradictions) is shown apart from 'what has earned decision influence'
+// (activations, expected empty while PAPER is stopped). Campaign counts come from checkpoints only here — the
+// heavy deduplicated read stays in `cobra learning campaign-status`.
+async function learningView() {
+  const { createLearningStore } = await import('../learning/store.js');
+  const { utcDateOf } = await import('../learning/contracts.js');
+  const store = createLearningStore({ dataDir: dataDir(), log: () => {} });
+  const status = store.readStatus();
+  const heads = [...store.patternHeads().values()];
+  const activations = [...store.activationHeads().values()];
+  const today = utcDateOf(Date.now());
+  const campaigns = store.listCampaigns().map((id) => ({ campaignId: id, checkpoint: store.readCampaignCheckpoint(id), terminalTarget: store.readCampaignManifest(id)?.terminalTarget ?? null }));
+  return {
+    enabled: status !== null, serviceStatus: status, killSwitch: store.readKill(),
+    patterns: heads.slice(0, 100).map((p) => ({ patternId: p.patternId, state: p.state, scope: p.scope, rawCount: p.evidence.rawCount, groupCount: p.evidence.groupCount, favorable: p.evidence.favorable, adverse: p.evidence.adverse, neutral: p.evidence.neutral, censored: p.evidence.censored, byBasis: p.evidence.byBasis, estimate: p.estimate, contradictions: p.contradictions.length, influencingPaper: p.state === 'ACTIVE_PAPER' })),
+    activations: activations.map((a) => ({ activationId: a.activationId, state: a.state, patternId: a.patternId, effectiveTs: a.effectiveTs, expiresTs: a.expiresTs, maxAbsAdjust: a.allowedEffect.maxAbsAdjust })),
+    campaigns, summaryToday: store.readSummary(today), summaryYesterday: store.readSummary(utcDateOf(Date.now() - 86_400_000)),
+    coverageDates: store.coverageDates().slice(-7),
+    law: 'PROVISIONAL_MEMORY_IS_NOT_DECISION_INFLUENCE; ACTIVE_PAPER requires a separately authorized paper runtime',
+    authority: 'NONE',
+  };
+}
 function judgeView() {
   // closeout R16: the view is bound to the running composition's account / mode; a projection file for another account or mode is REJECTED and never shown
   const raw = readJsonBounded(executionProjectionFile()); const summary = readExecutionProjection({ expected: judgeRun ? { accountId: judgeRun.accountId, runMode: judgeRun.mode } : null }); const rejectedReason = summary?.state === 'REJECTED' ? summary.reason : null; const projection = rejectedReason ? null : raw;
@@ -609,6 +633,12 @@ const server = http.createServer((req, res) => {
     } else if (url.pathname === '/api/sensors') {
       // SERPENT PAPER: read-only sensor / readiness panel data (never a control; never a secret)
       try { json(res, 200, sensorsView()); } catch (err) { console.error(`[api/sensors] ${err.constructor.name}: ${err.message}`); json(res, 200, { enabled: false, error: err.message, rows: [], groups: {}, authority: 'NONE', degraded: true }); }
+    } else if (url.pathname === '/api/learning') {
+      // LEARN-1: read-only learning panel — durable store readers only (async like /api/attention); a failure
+      // answers a degraded shape, never breaks the cockpit
+      learningView()
+        .then((v) => json(res, 200, v))
+        .catch((err) => { console.error(`[api/learning] ${err.constructor.name}: ${err.message}`); json(res, 200, { enabled: false, error: String(err.message).slice(0, 160), patterns: [], activations: [], campaigns: [], authority: 'NONE', degraded: true }); });
     } else if (url.pathname === '/api/status') {
       json(res, 200, statusPayload());
     } else if (url.pathname === '/api/ledger/summary') {

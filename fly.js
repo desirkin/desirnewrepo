@@ -147,6 +147,37 @@ if (process.env.JUDGE_ENABLED === 'true') {
     judgeRun = null;
   }
 }
+// LEARN-1 (documented OPT-IN; defaults change nothing): LEARNING_ENABLED=true starts the data-only learning
+// service (learning/service.js) — coverage-ledger capture over the wide eye's COMPLETED sweep population (the same
+// detached read-only seam Social uses), delayed outcome maturation against the immutable Childhood archive when one
+// is present, and provisional pattern-memory updates. Authority NONE; the one bounded PAPER adapter activates only
+// through its own validated activation records AND a separately authorized paper runtime — never from here. Timers
+// unref'd; a learning failure fails dark and never touches tape, sensors, controls or The Watch.
+let learningHandle = null;
+if (process.env.LEARNING_ENABLED === 'true') {
+  try {
+    const { startLearning } = await import('./learning/service.js');
+    const { readChildhoodArchive } = await import('./research/archive.js');
+    let archiveCache = null; let archiveTriedTs = 0;
+    learningHandle = startLearning({
+      dataDir: dataDir(), env: process.env, log: console.log,
+      populationSource: wideEye ? () => wideEye.sweepPopulationSnapshot() : null,
+      // lazy, bounded archive open (re-tried at most hourly); absent archive = honest ARCHIVE_UNAVAILABLE pending
+      archiveSource: () => {
+        if (archiveCache) return archiveCache;
+        const now = Date.now();
+        if (now - archiveTriedTs < 3_600_000) return null;
+        archiveTriedTs = now;
+        try { archiveCache = readChildhoodArchive(path.join(dataDir(), 'childhood')); } catch { archiveCache = null; }
+        return archiveCache;
+      },
+    });
+    console.log('LEARN-1 active (data-only, authority NONE): capture -> maturation -> provisional memory; PAPER adapter dormant');
+  } catch (err) {
+    console.error(`LEARN-1 failed to start (dark; nothing else affected): ${err.message}`);
+    learningHandle = null;
+  }
+}
 rumor2Handle = startRumor2({
   checkpointStore: rumor2CheckpointStore(), journal: rumor2JournalStore(),
   // SOCIAL-4F: DISCOVERY_CATALOG injection — read-only accessors only (no mutable survey map, no
@@ -188,6 +219,7 @@ try {
   await runTape({ executionFeed: judgeRun ? judgeRun.tapeFeed : null, observer: marketResearch ? marketResearch.observer : null }); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
   if (judgeRun) { try { await judgeRun.stop(); } catch (err) { console.error(`JUDGE stop failed: ${err.message}`); } }
   if (marketResearch) { try { await marketResearch.stop(); } catch (err) { console.error(`MARKET RESEARCH stop failed: ${err.message}`); } }
+  if (learningHandle) { try { learningHandle.stop(); } catch (err) { console.error(`LEARN-1 stop failed: ${err.message}`); } }
   // paper launch seam: components the paper launcher started stop cleanly BEFORE the process exits
   if (typeof globalThis.serpentPaperShutdown === 'function') { try { await globalThis.serpentPaperShutdown(); } catch (err) { console.error(`PAPER shutdown seam failed: ${err.message}`); } }
   process.exit(0);
