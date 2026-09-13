@@ -1,325 +1,134 @@
-diff --git a/persistence/runtime.js b/persistence/runtime.js
-index 451c549..77afd3a 100644
---- a/persistence/runtime.js
-+++ b/persistence/runtime.js
-@@ -100,7 +100,8 @@ function bootstrapApi() {
- let singleton = bootstrapApi();
- export const getPersistence = () => singleton;
- 
--export async function startPersistence({ log = console.log, dbOverrides = {}, _test = {} } = {}) {
-+export async function startPersistence({ log = console.log, dbOverrides = {}, registerSignals = true, _test = {} } = {}) {
-+  if (typeof registerSignals !== 'boolean') throw new Error('persistence: registerSignals must be boolean');
-   const db = new Db({ log, ...dbOverrides });
-   const repo = new Repository(db, { log });
-   const state = {
-@@ -118,6 +119,11 @@ export async function startPersistence({ log = console.log, dbOverrides = {}, _t
-     pump: { pendingWrites: 0, confirmedWrites: 0, spoolParseErrors: 0, pumpReadErrors: 0, cursorRecoveries: 0 },
-     retryTimer: null,
-     pumpTimer: null,
-+    pumpInFlight: null,
-+    finalPumpDrain: null,
-+    signalHandlers: null,
-+    stopPromise: null,
-+    registerSignals,
-     attemptInFlight: false,
-     stopped: false,
-     _test,
-@@ -617,7 +623,7 @@ function startPump(state, log) {
-     return pending;
-   }
- 
--  async function pumpOnce() {
-+  async function pumpCycle() {
-     if (!state.db.reachable) {
-       if (!(await state.db.connect())) return; // spool holds; health shows pending
-     }
-@@ -676,14 +682,44 @@ function startPump(state, log) {
-     }
-   }
- 
--  state.pumpOnce = pumpOnce;
-+  // Tail offsets and line counters are shared mutable cursor state. A second
-+  // cycle must never observe an offset advanced by a first cycle whose DB
-+  // write has not yet been acknowledged: it could otherwise publish EOF to
-+  // cursors.json and make a crash lose the still-pending source row. All
-+  // ordinary callers therefore coalesce onto one exact in-flight promise.
-+  function pumpOnce({ shutdownDrain = false } = {}) {
-+    if (state.stopped && !shutdownDrain) return Promise.resolve({ ran: false, refused: 'STOPPED' });
-+    if (state.pumpInFlight) return state.pumpInFlight;
-+    const cycle = pumpCycle().finally(() => {
-+      if (state.pumpInFlight === cycle) state.pumpInFlight = null;
-+    });
-+    state.pumpInFlight = cycle;
-+    return cycle;
-+  }
-+
-+  state.pumpOnce = () => pumpOnce();
-+  // Shutdown first fences new ordinary callers, waits for the current cycle
-+  // to settle, then starts ONE distinct final cycle. This captures rows that
-+  // landed after the active Tail read without racing that Tail or minting an
-+  // unconfirmed cursor.
-+  state.finalPumpDrain = async () => {
-+    const active = state.pumpInFlight;
-+    if (active) {
-+      try { await active; } catch { /* the final cycle still retries after an unexpected active-cycle failure */ }
-+    }
-+    return pumpOnce({ shutdownDrain: true });
-+  };
-   const timer = setInterval(() => {
--    pumpOnce().catch((err) => log(`PERSISTENCE pump error (contained): ${err.message}`));
-+    state.pumpOnce().catch((err) => log(`PERSISTENCE pump error (contained): ${err.message}`));
-   }, PUMP_MS);
-   timer.unref?.();
-   state.pumpTimer = timer;
--  process.once('SIGTERM', () => state.stop?.());
--  process.once('SIGINT', () => state.stop?.());
-+  if (state.registerSignals) {
-+    const stopOnSignal = () => { state.stop?.().catch((err) => log(`PERSISTENCE signal shutdown failed: ${err.message}`)); };
-+    state.signalHandlers = { SIGTERM: stopOnSignal, SIGINT: stopOnSignal };
-+    process.once('SIGTERM', stopOnSignal);
-+    process.once('SIGINT', stopOnSignal);
-+  }
- }
- 
- function api(state, log) {
-@@ -701,23 +737,31 @@ function api(state, log) {
- 
-   // stop() tears down EVERYTHING: retry loop first (no background retry
-   // callbacks after stop), then the pump with a final drain, then the pool.
--  state.stop = async () => {
--    if (state.stopped) return;
-+  state.stop = () => {
-+    if (state.stopPromise) return state.stopPromise;
-     state.stopped = true;
--    if (state.retryTimer) {
--      clearInterval(state.retryTimer);
--      state.retryTimer = null;
--    }
--    if (state.pumpTimer) {
--      clearInterval(state.pumpTimer);
--      state.pumpTimer = null;
--      try {
--        await state.pumpOnce?.(); // final drain
--      } catch {
--        // shutdown drain best-effort
-+    state.stopPromise = (async () => {
-+      if (state.signalHandlers) {
-+        process.removeListener('SIGTERM', state.signalHandlers.SIGTERM);
-+        process.removeListener('SIGINT', state.signalHandlers.SIGINT);
-+        state.signalHandlers = null;
-       }
--    }
--    await state.db.end();
-+      if (state.retryTimer) {
-+        clearInterval(state.retryTimer);
-+        state.retryTimer = null;
-+      }
-+      if (state.pumpTimer) {
-+        clearInterval(state.pumpTimer);
-+        state.pumpTimer = null;
-+        try {
-+          await state.finalPumpDrain?.(); // active cycle, then one final drain for late bytes
-+        } catch {
-+          // shutdown drain best-effort
-+        }
-+      }
-+      await state.db.end();
-+    })();
-+    return state.stopPromise;
-   };
- 
-   return {
-diff --git a/tools/data-only-runtime.mjs b/tools/data-only-runtime.mjs
-index 46c895e..e096959 100644
---- a/tools/data-only-runtime.mjs
-+++ b/tools/data-only-runtime.mjs
-@@ -141,7 +141,7 @@ let stopped = false;
- // Database restore and quota ownership precede construction of every provider.
- startupPhase = 'DATABASE_RESTORE';
- try {
--  persistence = await startPersistence({ log });
-+  persistence = await startPersistence({ log, registerSignals: false });
-   const health = persistence.health();
-   if (!health.databaseConfigured || !health.restored) throw new Error('PostgreSQL restore unavailable');
-   startupPhase = 'EXTERNAL_QUOTA_RESTORE';
-diff --git a/test/data-only-runtime.test.mjs b/test/data-only-runtime.test.mjs
-index b575ba1..94ebec8 100644
---- a/test/data-only-runtime.test.mjs
-+++ b/test/data-only-runtime.test.mjs
-@@ -123,7 +123,7 @@ test('both data-only launchers explicitly keep paid X collection disabled during
- test('startup publishes process identity and restores external quotas before any provider starts', () => {
-   const source = readFileSync(entry, 'utf8');
-   const initialStatus = source.indexOf('writeStartupStatus();');
--  const persistenceStart = source.indexOf('await startPersistence({ log })');
-+  const persistenceStart = source.indexOf('await startPersistence({ log, registerSignals: false })');
-   const checkpointStart = source.indexOf('await openDataOnlyCheckpoints(');
-   const marketStart = source.indexOf('await startDataOnlyMarket(');
-   const wideEyeStart = source.indexOf('wideEye = startWideEye(');
-diff --git a/test/persistence-pump-concurrency-review.test.js b/test/persistence-pump-concurrency-review.test.js
+diff --git a/lib/book-walk.js b/lib/book-walk.js
 new file mode 100644
 --- /dev/null
-+++ b/test/persistence-pump-concurrency-review.test.js
-@@ -0,0 +1,163 @@
-+// Two pumpOnce calls must never share/advance one Tail concurrently. All
-+// database behavior is an in-memory fake; no provider or database is called.
++++ b/lib/book-walk.js
+@@ -0,0 +1,14 @@
++// Pure displayed-depth arithmetic shared by descriptors and shadow research.
++// No provider, filesystem, runtime, or order dependency; callers validate and
++// causally align their books. FULL is hypothetical displayed depth, not a fill.
++const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
++const round = (v, d = 8) => { if (typeof v !== 'number' || !Number.isFinite(v)) return null; const r = Number(v.toFixed(d)); return Object.is(r, -0) ? 0 : r; };
++
++export function walkBook(levels, { quoteNotional = null, baseQty = null }) {
++  const requested = quoteNotional !== null ? { quoteNotional } : { baseQty };
++  if (!Array.isArray(levels) || !levels.length || (quoteNotional === null && baseQty === null)) return deepFreeze({ recipeId: 'book_walk', version: 1, requested, consumedLevels: 0, filledBase: 0, filledQuote: 0, residualQuote: quoteNotional, residualBase: baseQty, averagePrice: null, worstPrice: null, coverage: 'NO_BOOK', hypothetical: true });
++  let remQ = quoteNotional; let remB = baseQty; let fb = 0; let fq = 0; let consumed = 0; let worst = null;
++  for (const [p, q] of levels) { if (q <= 0) continue; let take; if (quoteNotional !== null) { take = Math.min(q, remQ / p); } else take = Math.min(q, remB); if (take <= 0) break; fb += take; fq += take * p; consumed += 1; worst = p; if (quoteNotional !== null) remQ -= take * p; else remB -= take; if ((quoteNotional !== null && remQ <= 1e-9) || (baseQty !== null && remB <= 1e-12)) { remQ = quoteNotional !== null ? 0 : null; remB = baseQty !== null ? 0 : null; break; } }
++  const full = quoteNotional !== null ? remQ <= 1e-9 : remB <= 1e-12;
++  return deepFreeze({ recipeId: 'book_walk', version: 1, requested, consumedLevels: consumed, filledBase: round(fb), filledQuote: round(fq), residualQuote: quoteNotional !== null ? round(Math.max(0, remQ)) : null, residualBase: baseQty !== null ? round(Math.max(0, remB)) : null, averagePrice: fb > 0 ? round(fq / fb) : null, worstPrice: worst, coverage: full ? 'FULL' : 'PARTIAL', hypothetical: true, preFee: true });
++}
+diff --git a/market-lab/recipes.js b/market-lab/recipes.js
+index d093568..52721e8 100644
+--- a/market-lab/recipes.js
++++ b/market-lab/recipes.js
+@@ -5,6 +5,8 @@
+ import { deepFreeze, isFiniteNum, isTs, round, fail } from './contracts.js';
+ import { selectNativeSeries, periodGrid } from './native-series.js';
+ import { inWindow } from './time.js';
++import { walkBook } from '../lib/book-walk.js';
++export { walkBook } from '../lib/book-walk.js';
+ 
+ export const RECIPE_SET_VERSION = 'market-lab-recipes-1';
+ const R = (id, o) => [id, deepFreeze({ recipeId: id, version: 1, ...o })];
+@@ -116,14 +118,6 @@ export function bookMetrics(book) {
+   for (const bps of BANDS_BPS) { const b = bandOf(bids, bps, 'bid'); const a = bandOf(asks, bps, 'ask'); const tot = b.notional + a.notional; bands[`${bps}bps`] = { bid: b, ask: a, imbalance: tot > 0 ? round((b.notional - a.notional) / tot) : null }; }
+   return deepFreeze({ recipeId: 'spread_bps', version: 1, mid: round(mid), spreadBps: round(1e4 * (ask - bid) / mid), bestBid: bid, bestAsk: ask, topBidQty: bq, topAskQty: aq, microprice: bq + aq > 0 ? round((ask * bq + bid * aq) / (bq + aq)) : null, bands, levelsRetained: { bids: bids.length, asks: asks.length }, support: support('COMPLETE', [], { attribution: 'AGGREGATE_L2_UNATTRIBUTED' }) });
+ }
+-export function walkBook(levels, { quoteNotional = null, baseQty = null }) {
+-  const requested = quoteNotional !== null ? { quoteNotional } : { baseQty };
+-  if (!Array.isArray(levels) || !levels.length || (quoteNotional === null && baseQty === null)) return deepFreeze({ recipeId: 'book_walk', version: 1, requested, consumedLevels: 0, filledBase: 0, filledQuote: 0, residualQuote: quoteNotional, residualBase: baseQty, averagePrice: null, worstPrice: null, coverage: 'NO_BOOK', hypothetical: true });
+-  let remQ = quoteNotional; let remB = baseQty; let fb = 0; let fq = 0; let consumed = 0; let worst = null;
+-  for (const [p, q] of levels) { if (q <= 0) continue; let take; if (quoteNotional !== null) { take = Math.min(q, remQ / p); } else take = Math.min(q, remB); if (take <= 0) break; fb += take; fq += take * p; consumed += 1; worst = p; if (quoteNotional !== null) remQ -= take * p; else remB -= take; if ((quoteNotional !== null && remQ <= 1e-9) || (baseQty !== null && remB <= 1e-12)) { remQ = quoteNotional !== null ? 0 : null; remB = baseQty !== null ? 0 : null; break; } }
+-  const full = quoteNotional !== null ? remQ <= 1e-9 : remB <= 1e-12;
+-  return deepFreeze({ recipeId: 'book_walk', version: 1, requested, consumedLevels: consumed, filledBase: round(fb), filledQuote: round(fq), residualQuote: quoteNotional !== null ? round(Math.max(0, remQ)) : null, residualBase: baseQty !== null ? round(Math.max(0, remB)) : null, averagePrice: fb > 0 ? round(fq / fb) : null, worstPrice: worst, coverage: full ? 'FULL' : 'PARTIAL', hypothetical: true, preFee: true });
+-}
+ export function roundTrip(book, N, { haircut = 1 } = {}) {
+   const scale = (ls) => ls.map(([p, q]) => [p, q * haircut]);
+   const buy = walkBook(scale(book.asks ?? []), { quoteNotional: N });
+diff --git a/learning/shadow-execution-evidence.js b/learning/shadow-execution-evidence.js
+index 8969582..49eb3dd 100644
+--- a/learning/shadow-execution-evidence.js
++++ b/learning/shadow-execution-evidence.js
+@@ -6,7 +6,7 @@
+ // the declared size could be fully walked through two causally aligned, proven-
+ // continuous observed books under the sealed latency/fee policy. It does not
+ // claim that an order was submitted or filled.
+-import { walkBook } from '../market-lab/recipes.js';
++import { walkBook } from '../lib/book-walk.js';
+ import {
+   canonicalDigest, captureError, deepFreeze, exactKeys, isFiniteNum, isPlainObject, isTs, round6,
+ } from './shadow-contracts.js';
+diff --git a/test/book-walk-shared.test.js b/test/book-walk-shared.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/book-walk-shared.test.js
+@@ -0,0 +1,34 @@
 +import test from 'node:test';
 +import assert from 'node:assert/strict';
-+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-+import { tmpdir } from 'node:os';
-+import path from 'node:path';
++import { readFileSync } from 'node:fs';
++import { walkBook } from '../lib/book-walk.js';
++import { walkBook as descriptorWalk, roundTrip } from '../market-lab/recipes.js';
 +
-+const dataDir = mkdtempSync(path.join(tmpdir(), 'persist-pump-overlap-'));
-+process.env.COBRA_DATA_DIR = dataDir;
-+
-+const { SCHEMA_VERSION } = await import('../persistence/schema.js');
-+const { startPersistence } = await import('../persistence/runtime.js');
-+
-+function fakePool({ onEnd = () => {} } = {}) {
-+  const empty = async (sql) => {
-+    if (String(sql).includes('SELECT version FROM serpent_schema_migrations')) {
-+      return { rows: Array.from({ length: SCHEMA_VERSION }, (_, i) => ({ version: i + 1 })), rowCount: SCHEMA_VERSION };
-+    }
-+    return { rows: [], rowCount: 0 };
-+  };
-+  const client = { query: empty, release() {} };
-+  return {
-+    query: empty,
-+    connect: async () => client,
-+    on() {},
-+    end: async () => { onEnd(); },
-+  };
-+}
-+
-+test('overlapping pumpOnce cannot publish a cursor beyond an unconfirmed durable write', async () => {
-+  let persistence;
-+  let releaseWrite;
-+  let firstPump;
-+  let dbEnded = false;
-+  const sigintBefore = process.listenerCount('SIGINT');
-+  const sigtermBefore = process.listenerCount('SIGTERM');
-+  try {
-+    persistence = await startPersistence({
-+      log: () => {},
-+      dbOverrides: {
-+        url: 'postgresql://offline-fake/pump-overlap',
-+        poolFactory: () => fakePool({ onEnd: () => { dbEnded = true; } }),
-+        retries: 1,
-+      },
-+      registerSignals: false,
-+    });
-+    assert.equal(persistence.health().restored, true);
-+    assert.equal(process.listenerCount('SIGINT'), sigintBefore);
-+    assert.equal(process.listenerCount('SIGTERM'), sigtermBefore);
-+
-+    const memoryDir = path.join(dataDir, 'memory');
-+    mkdirSync(memoryDir, { recursive: true });
-+    const memoryFile = path.join(memoryDir, 'events.jsonl');
-+    writeFileSync(memoryFile, `${JSON.stringify({ id: 'pending-durable-write' })}\n`, 'utf8');
-+
-+    // Keep protective-state sync deterministic and offline. The first pump
-+    // advances its shared Tail in readNew(), then blocks before DB ack.
-+    persistence.repo.loadControlState = async () => ({
-+      revision: 1,
-+      state: { kill: null, cage: null, vetoes: [] },
-+    });
-+    let markWriteStarted;
-+    const writeStarted = new Promise((resolve) => { markWriteStarted = resolve; });
-+    const heldWrite = new Promise((resolve) => { releaseWrite = resolve; });
-+    persistence.repo.insertMemoryEvent = async () => {
-+      markWriteStarted();
-+      await heldWrite;
-+      throw Object.assign(new Error('injected unconfirmed write'), { code: 'ECONNRESET' });
-+    };
-+
-+    firstPump = persistence.pumpOnce();
-+    await writeStarted;
-+
-+    // Without an in-flight guard, a second pump observes the already-advanced
-+    // shared Tail, sees no record, and publishes EOF while the first write is
-+    // still unconfirmed. A crash in this window would restart after evidence
-+    // that never became durable.
-+    const coalescedPump = persistence.pumpOnce();
-+    assert.equal(coalescedPump, firstPump, 'every ordinary caller receives the one in-flight cycle');
-+    const cursorFile = path.join(dataDir, 'persistence', 'cursors.json');
-+    assert.equal(existsSync(cursorFile), false, 'no cursor is published while its durable write is unresolved');
-+    assert.equal(statSync(memoryFile).size > 0, true);
-+
-+    releaseWrite();
-+    await Promise.all([firstPump, coalescedPump]);
-+    firstPump = null;
-+    assert.equal(JSON.parse(readFileSync(cursorFile, 'utf8')).offsets.memory, 0, 'a failed write rolls the cursor back');
-+
-+    const durableIds = [];
-+    persistence.repo.insertMemoryEvent = async (row) => {
-+      durableIds.push(row.id);
-+      return { durable: true, outcome: 'INSERTED' };
-+    };
-+    await persistence.pumpOnce();
-+    assert.deepEqual(durableIds, ['pending-durable-write'], 'the rolled-back row retries exactly once');
-+    assert.equal(JSON.parse(readFileSync(cursorFile, 'utf8')).offsets.memory, statSync(memoryFile).size);
-+
-+    let releaseShutdownWrite;
-+    let markShutdownWriteStarted;
-+    const shutdownWriteStarted = new Promise((resolve) => { markShutdownWriteStarted = resolve; });
-+    const heldShutdownWrite = new Promise((resolve) => { releaseShutdownWrite = resolve; });
-+    releaseWrite = releaseShutdownWrite;
-+    persistence.repo.insertMemoryEvent = async (row) => {
-+      if (row.id === 'active-before-stop') {
-+        markShutdownWriteStarted();
-+        await heldShutdownWrite;
-+      }
-+      durableIds.push(row.id);
-+      return { durable: true, outcome: 'INSERTED' };
-+    };
-+    appendFileSync(memoryFile, `${JSON.stringify({ id: 'active-before-stop' })}\n`, 'utf8');
-+    firstPump = persistence.pumpOnce();
-+    await shutdownWriteStarted;
-+    appendFileSync(memoryFile, `${JSON.stringify({ id: 'late-during-stop' })}\n`, 'utf8');
-+
-+    const stopping = persistence.stop();
-+    const repeatedStop = persistence.stop();
-+    assert.equal(repeatedStop, stopping, 'every stop caller awaits the exact same shutdown/drain promise');
-+    assert.equal(dbEnded, false, 'the database stays open while the ordered final drain is waiting');
-+    const refused = await persistence.pumpOnce();
-+    assert.deepEqual(refused, { ran: false, refused: 'STOPPED' }, 'new ordinary pump calls refuse after shutdown fences the runtime');
-+    releaseShutdownWrite();
-+    await stopping;
-+    firstPump = null;
-+    assert.equal(dbEnded, true, 'the database closes only after active and final pump drains settle');
-+    assert.deepEqual(durableIds, ['pending-durable-write', 'active-before-stop', 'late-during-stop']);
-+    assert.equal(JSON.parse(readFileSync(cursorFile, 'utf8')).offsets.memory, statSync(memoryFile).size, 'the one final drain captures bytes appended after the active Tail read');
-+  } finally {
-+    releaseWrite?.();
-+    await firstPump?.catch(() => {});
-+    await persistence?.stop();
-+    rmSync(dataDir, { recursive: true, force: true });
-+  }
++test('market descriptors re-export the exact same pure walk used by shadow research', () => {
++  assert.equal(descriptorWalk, walkBook);
++  const source = readFileSync(new URL('../lib/book-walk.js', import.meta.url), 'utf8');
++  assert.ok(!/\bimport\b|\brequire\s*\(/.test(source), 'shared arithmetic imports no authority-bearing pipeline');
++  const shadow = readFileSync(new URL('../learning/shadow-execution-evidence.js', import.meta.url), 'utf8');
++  assert.ok(shadow.includes("from '../lib/book-walk.js'"));
++  assert.ok(!shadow.includes('../market-lab'));
 +});
 +
-+test('standalone persistence owns exactly one signal handler per signal and removes both during its shared stop', async () => {
-+  const standaloneDir = mkdtempSync(path.join(tmpdir(), 'persist-signal-owner-'));
-+  process.env.COBRA_DATA_DIR = standaloneDir;
-+  const beforeInt = process.listenerCount('SIGINT');
-+  const beforeTerm = process.listenerCount('SIGTERM');
-+  let persistence;
-+  try {
-+    persistence = await startPersistence({
-+      log: () => {},
-+      dbOverrides: {
-+        url: 'postgresql://offline-fake/signal-owner',
-+        poolFactory: () => fakePool(),
-+        retries: 1,
-+      },
-+    });
-+    assert.equal(process.listenerCount('SIGINT'), beforeInt + 1);
-+    assert.equal(process.listenerCount('SIGTERM'), beforeTerm + 1);
-+    const stopping = persistence.stop();
-+    assert.equal(persistence.stop(), stopping);
-+    await stopping;
-+    assert.equal(process.listenerCount('SIGINT'), beforeInt);
-+    assert.equal(process.listenerCount('SIGTERM'), beforeTerm);
-+  } finally {
-+    await persistence?.stop();
-+    rmSync(standaloneDir, { recursive: true, force: true });
-+  }
++test('shared walk preserves full, partial, absent and zero-depth results without extrapolation', () => {
++  const full = walkBook([[100, 1], [110, 2]], { quoteNotional: 155 });
++  assert.deepEqual(full, {
++    recipeId: 'book_walk', version: 1, requested: { quoteNotional: 155 },
++    consumedLevels: 2, filledBase: 1.5, filledQuote: 155, residualQuote: 0,
++    residualBase: null, averagePrice: 103.33333333, worstPrice: 110,
++    coverage: 'FULL', hypothetical: true, preFee: true,
++  });
++  assert.ok(Object.isFrozen(full) && Object.isFrozen(full.requested));
++  const partial = walkBook([[100, 0], [99, 1]], { baseQty: 2 });
++  assert.equal(partial.coverage, 'PARTIAL');
++  assert.equal(partial.filledQuote, 99);
++  assert.equal(partial.residualBase, 1);
++  assert.equal(walkBook([], { quoteNotional: 100 }).coverage, 'NO_BOOK');
++  const trip = roundTrip({ asks: [[100, 2]], bids: [[99, 2]] }, 100);
++  assert.equal(trip.coverage, 'FULL');
++  assert.equal(trip.lossBps, 100);
++  assert.equal(trip.saleProceeds, 99);
 +});
+diff --git a/test/learning-fences.test.js b/test/learning-fences.test.js
+index 022b24b..d0cec62 100644
+--- a/test/learning-fences.test.js
++++ b/test/learning-fences.test.js
+@@ -19,7 +19,8 @@ test('every learning module imports only lib/, research pure modules and its own
+ });
+ 
+ test('the only cross-package imports are lib/ helpers — learning MIRRORS the offline label law (learning/labels.js) without importing the offline pipeline, per the operational fence', () => {
+-  const allowed = new Set(["'../lib/jsonl.js'", "'../lib/config.js'"]);
++  // Exactly one additional pure helper: no market pipeline or execution import.
++  const allowed = new Set(["'../lib/jsonl.js'", "'../lib/config.js'", "'../lib/book-walk.js'"]);
+   for (const f of readdirSync(LEARNING_DIR).filter((x) => x.endsWith('.js'))) {
+     const src = readFileSync(path.join(LEARNING_DIR, f), 'utf8');
+     for (const m of src.matchAll(/from ('\.\.\/[^']+')/g)) assert.ok(allowed.has(m[1]), `${f} imports ${m[1]} which is not in the allowed reuse set`);
+diff --git a/test/market-lab-fences.test.js b/test/market-lab-fences.test.js
+index c541a47..a21aad5 100644
+--- a/test/market-lab-fences.test.js
++++ b/test/market-lab-fences.test.js
+@@ -24,6 +24,7 @@ const LIVE_FILES = tracked.filter((f) => f === 'fly.js' || f === 'ui/server.js'
+ 
+ test('B08 (research -> live): no research module imports orders, ledger, cost, state, controls, risk, Judge, Watch, the RUMOR-2 runtime or Tape truth; the ONLY crossings are the exact allowlisted pure imports', () => {
+   const ALLOWED_CROSSINGS = {
++    'market-lab/recipes.js': ['lib/book-walk.js'], // dependency-free shared displayed-depth arithmetic only
+     'market-lab/deep-market-adapter.js': ['rumor2/social-research-market.js'], // the v1 deep-market window CONTRACT (validateDeepMarketWindow), never the strainer / collector
+     'evidence/social-projection.js': ['rumor2/social-research-dossier.js', 'rumor2/social-research-composite.js', 'rumor2/social-research-profile.js'], // pure validators / vocabularies of settled Social records
+     'market-lab/providers/kraken-spot.js': ['tape/book.js', 'survey/catalog.js'], // the pure L2 book state machine + the Kraken catalog normalizer (no tape runtime)
+@@ -45,7 +46,7 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
+   }
+   for (const [f, targets] of Object.entries(ALLOWED_CROSSINGS)) { assert.ok(existsSync(path.join(REPO, f)), f); for (const t of targets) assert.ok(existsSync(path.join(REPO, t)), t); }
+   // the pure crossings are pure: none of them imports a runtime
+-  for (const t of ['rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-composite.js', 'rumor2/social-research-profile.js', 'tape/book.js', 'survey/catalog.js']) for (const spec of imports(t)) assert.ok(spec.startsWith('node:') || /^\.\.?\//.test(spec) && !/collector|journal|run\.js|strainer|ledger|cost\/|state\//.test(spec), `${t} -> ${spec}`);
++  for (const t of ['lib/book-walk.js', 'rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-composite.js', 'rumor2/social-research-profile.js', 'tape/book.js', 'survey/catalog.js']) for (const spec of imports(t)) assert.ok(spec.startsWith('node:') || /^\.\.?\//.test(spec) && !/collector|journal|run\.js|strainer|ledger|cost\/|state\//.test(spec), `${t} -> ${spec}`);
+ });
+ 
+ test('B08 (live -> research): the live path never imports research/, socrates/ or evidence v2; market-lab is reached ONLY by fly.js (service, commands, deep-market adapter) and the read-only UI server (paths); Tape, ledger, cost, state, gateway, governance never mention the research modules', () => {
