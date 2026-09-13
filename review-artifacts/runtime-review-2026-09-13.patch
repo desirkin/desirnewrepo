@@ -1,246 +1,50 @@
-diff --git a/discovery/collector.js b/discovery/collector.js
-index 0daed86..c70bfe1 100644
---- a/discovery/collector.js
-+++ b/discovery/collector.js
-@@ -216,7 +216,7 @@ export function startPublicDiscovery({
-         };
-       }
-       writeAtomicDurable(discoveryStatusFile(dataDir), { v: DISCOVERY_STATUS_VERSION, tsMs: now, enabled: true, authority: 'NONE', paperStarted: false, tradingRoutesUsed: false,
--        durability: { deployment: checkpointFailure ? 'FAULT_LATCHED' : 'DURABLE', checkpointRevision: typeof durableCheckpoint.revision === 'function' ? durableCheckpoint.revision() : null, failure: checkpointFailure }, sources: out });
-+        durability: { deployment: checkpointFailure ? 'FAULT_LATCHED' : 'DURABLE', checkpointRevision: typeof durableCheckpoint.revision === 'function' ? durableCheckpoint.revision() : null, failure: checkpointFailure, importIntegrity: checkpoint.importIntegrity ?? null }, sources: out });
-     }
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 7e70180..c4b668d 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -68,6 +68,19 @@ all (41 files)   de596a9656405be2e463a3985f5d14667ca725cedf68a08e0a8aaac18c7ac19
  
-     async function pollInternal(id) {
-diff --git a/discovery/external-checkpoint.js b/discovery/external-checkpoint.js
-index 19f8b61..6fb811a 100644
---- a/discovery/external-checkpoint.js
-+++ b/discovery/external-checkpoint.js
-@@ -2,6 +2,7 @@
- // deployment-durable quota, pagination, and dedupe state. The generic external
- // checkpoint store owns PostgreSQL/CAS; this module owns discovery semantics.
- import { existsSync } from 'node:fs';
-+import { createHash } from 'node:crypto';
- import {
-   readJsonBounded, readJsonlTail,
- } from '../lib/jsonl.js';
-@@ -13,12 +14,15 @@ import {
- } from './reader.js';
+ ### 4.4 Audited change — 2026-09-13 fail-closed learning and sizing review (previous digests: judge `c8e48d5c10b5...`, all `f9487cccf92f...`; execution/ and watch/watch.js still byte-identical)
  
- export const DISCOVERY_DURABLE_CHECKPOINT_VERSION = 'public-discovery-durable-checkpoint-1';
-+export const DISCOVERY_IMPORT_INTEGRITY_VERSION = 'public-discovery-import-integrity-1';
- const LOCAL_CHECKPOINT_VERSION = 'public-discovery-checkpoint-1';
- const LOCAL_RECEIPT_VERSION = 'public-discovery-receipt-1';
- const MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024;
- const MAX_OBSERVATIONS_BYTES = 64 * 1024 * 1024;
- const MAX_RECEIPTS_BYTES = 16 * 1024 * 1024;
- const MAX_SEEN_IDS = 500_000;
-+const MAX_IMPORT_GAP_BUCKETS = 256;
-+const LEGACY_RECEIPT_WINDOW_MS = 60_000;
- const ID_RE = /^[0-9a-f]{64}$/;
- const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
- const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-@@ -48,6 +52,48 @@ function checkpointError(value, sources = DISCOVERY_SOURCES) {
-     totalSeen += source.seenIds.length;
-     if (totalSeen > MAX_SEEN_IDS) return 'combined seenIds exceed the durable bound';
-   }
-+  if (value.importIntegrity !== undefined) {
-+    const evidence = value.importIntegrity;
-+    if (!object(evidence) || evidence.v !== DISCOVERY_IMPORT_INTEGRITY_VERSION || !['EXACT', 'UNKNOWN_HISTORY'].includes(evidence.status)
-+      || !ID_RE.test(evidence.fingerprint) || !uint(evidence.reservations) || !uint(evidence.settlements)
-+      || !uint(evidence.recordedAdmissions) || !uint(evidence.presentObservations) || !uint(evidence.missingAdmissions)
-+      || !uint(evidence.pendingReservations) || evidence.settlements > evidence.reservations
-+      || evidence.pendingReservations !== evidence.reservations - evidence.settlements
-+      || evidence.presentObservations + evidence.missingAdmissions !== evidence.recordedAdmissions
-+      || !object(evidence.sources) || !Array.isArray(evidence.gaps) || evidence.gaps.length > MAX_IMPORT_GAP_BUCKETS) return 'filesystem import integrity evidence is invalid';
-+    if ((evidence.status === 'EXACT') !== (evidence.missingAdmissions === 0)
-+      || (evidence.status === 'UNKNOWN_HISTORY') !== (evidence.missingAdmissions > 0)
-+      || evidence.policy !== (evidence.status === 'UNKNOWN_HISTORY' ? 'FORWARD_ONLY_PRESENT_OBSERVATIONS' : 'EXACT_RECONSTRUCTION')
-+      || (evidence.status === 'UNKNOWN_HISTORY' && evidence.explicitAllowance !== true)
-+      || (evidence.status === 'EXACT' && evidence.explicitAllowance !== false)) return 'filesystem import integrity policy is inconsistent';
-+    const evidenceIds = Object.keys(evidence.sources).sort();
-+    if (expected.length !== evidenceIds.length || expected.some((id, index) => id !== evidenceIds[index])) return 'filesystem import integrity source set is invalid';
-+    let reservations = 0; let settlements = 0; let recordedAdmissions = 0; let presentObservations = 0; let missingAdmissions = 0; let pendingReservations = 0;
-+    for (const id of expected) {
-+      const summary = evidence.sources[id];
-+      if (!object(summary) || !uint(summary.reservations) || !uint(summary.settlements) || !uint(summary.recordedAdmissions)
-+        || !uint(summary.presentObservations) || !uint(summary.missingAdmissions) || !uint(summary.pendingReservations)
-+        || summary.settlements > summary.reservations || summary.pendingReservations !== summary.reservations - summary.settlements
-+        || summary.presentObservations + summary.missingAdmissions !== summary.recordedAdmissions) return `${id}: filesystem import integrity summary is invalid`;
-+      reservations += summary.reservations; settlements += summary.settlements; recordedAdmissions += summary.recordedAdmissions;
-+      presentObservations += summary.presentObservations; missingAdmissions += summary.missingAdmissions; pendingReservations += summary.pendingReservations;
-+    }
-+    if (reservations !== evidence.reservations || settlements !== evidence.settlements || recordedAdmissions !== evidence.recordedAdmissions
-+      || presentObservations !== evidence.presentObservations || missingAdmissions !== evidence.missingAdmissions || pendingReservations !== evidence.pendingReservations) return 'filesystem import integrity totals do not match source summaries';
-+    let gapMissing = 0; const gapKeys = new Set(); const gapMissingBySource = Object.fromEntries(expected.map((id) => [id, 0]));
-+    for (const gap of evidence.gaps) {
-+      if (!object(gap) || !expected.includes(gap.sourceId) || !uint(gap.requestOrdinal) || !Number.isSafeInteger(gap.requestedTs) || gap.requestedTs <= 0
-+        || !Number.isSafeInteger(gap.receiptTs) || gap.receiptTs < gap.requestedTs || gap.receiptTs - gap.requestedTs > LEGACY_RECEIPT_WINDOW_MS
-+        || !uint(gap.recordedAdmissions) || !uint(gap.presentObservations) || gap.recordedAdmissions <= gap.presentObservations
-+        || typeof gap.outcome !== 'string' || gap.outcome.length < 1 || gap.outcome.length > 64) return 'filesystem import integrity gap provenance is invalid';
-+      const gapKey = `${gap.sourceId}|${gap.requestOrdinal}`;
-+      if (gapKeys.has(gapKey) || gap.requestOrdinal >= evidence.sources[gap.sourceId].reservations) return 'filesystem import integrity gap identity is invalid';
-+      gapKeys.add(gapKey); gapMissing += gap.recordedAdmissions - gap.presentObservations;
-+      gapMissingBySource[gap.sourceId] += gap.recordedAdmissions - gap.presentObservations;
-+    }
-+    if (gapMissing !== evidence.missingAdmissions || expected.some((id) => gapMissingBySource[id] !== evidence.sources[id].missingAdmissions)
-+      || (evidence.status === 'EXACT') !== (evidence.gaps.length === 0)) return 'filesystem import integrity gaps do not reconcile';
-+  }
-   return null;
- }
- 
-@@ -76,7 +122,7 @@ const readCompleteJsonl = (file, maxBytes, label) => {
- 
- // One-time commissioning import. A running local writer is refused, and a
- // partial/missing receipt history can never be interpreted as zero usage.
--export function loadDiscoveryCheckpoint(dataDir, { now = Date.now(), sources = DISCOVERY_SOURCES } = {}) {
-+export function loadDiscoveryCheckpoint(dataDir, { now = Date.now(), sources = DISCOVERY_SOURCES, integrityGapAllowance = null } = {}) {
-   if (existsSync(discoveryWriterFile(dataDir))) throw new Error('discovery checkpoint import: writer.lock exists; stop the local collector before commissioning');
-   const checkpointFile = discoveryCheckpointFile(dataDir);
-   const receiptsFile = discoveryReceiptsFile(dataDir);
-@@ -96,6 +142,7 @@ export function loadDiscoveryCheckpoint(dataDir, { now = Date.now(), sources = D
-   const observations = readCompleteJsonl(observationsFile, MAX_OBSERVATIONS_BYTES, 'observation');
-   const reserved = new Map(); const settled = new Set(); const reservations = new Map([...sourceIds].map((id) => [id, []]));
-   let admittedTotal = 0; let successfulSettlement = false;
-+  const settlements = new Map();
-   for (const receipt of receipts) {
-     if (!object(receipt) || receipt.v !== LOCAL_RECEIPT_VERSION || !['RESERVED', 'SETTLED'].includes(receipt.phase) || !sourceIds.has(receipt.sourceId) || typeof receipt.requestId !== 'string' || !ID_RE.test(receipt.requestId) || !uint(receipt.requestOrdinal) || !canonicalDay(receipt.day) || !Number.isSafeInteger(receipt.requestedTs) || receipt.requestedTs <= 0) throw new Error('discovery checkpoint import: receipt history has an invalid record');
-     if (receipt.phase === 'RESERVED') {
-@@ -104,22 +151,62 @@ export function loadDiscoveryCheckpoint(dataDir, { now = Date.now(), sources = D
-     } else {
-       const prior = reserved.get(receipt.requestId);
-       if (!prior || settled.has(receipt.requestId) || prior.sourceId !== receipt.sourceId || prior.requestOrdinal !== receipt.requestOrdinal || prior.day !== receipt.day || prior.requestedTs !== receipt.requestedTs) throw new Error('discovery checkpoint import: settlement does not exactly match one reservation');
-+      if (!Number.isSafeInteger(receipt.receiptTs) || receipt.receiptTs < receipt.requestedTs || receipt.receiptTs - receipt.requestedTs > LEGACY_RECEIPT_WINDOW_MS
-+        || !uint(receipt.observed) || !uint(receipt.admitted) || receipt.admitted > receipt.observed
-+        || typeof receipt.outcome !== 'string' || receipt.outcome.length < 1 || receipt.outcome.length > 64) throw new Error('discovery checkpoint import: settlement receipt window or accounting is invalid');
-       settled.add(receipt.requestId);
-+      settlements.set(receipt.requestId, receipt);
-       if (receipt.outcome === 'OK') successfulSettlement = true;
--      if (!uint(receipt.admitted)) throw new Error('discovery checkpoint import: settlement admitted count is invalid');
-       admittedTotal += receipt.admitted;
-     }
-   }
-+  for (const id of sourceIds) {
-+    const sourceReservations = reservations.get(id);
-+    for (let index = 0; index < sourceReservations.length; index += 1) if (sourceReservations[index].requestOrdinal !== index) throw new Error(`discovery checkpoint import: ${id} reservation ordinals are not complete and contiguous`);
-+  }
-   if (successfulSettlement && !local) throw new Error('discovery checkpoint import: successful receipts exist but the cursor checkpoint is missing');
- 
-   const seenBySource = new Map([...sourceIds].map((id) => [id, new Set()]));
-+  const observationsByReceipt = new Map();
-   for (const observation of observations) {
-     if (!sourceIds.has(observation?.sourceId) || discoveryObservationError(observation)) throw new Error('discovery checkpoint import: observation history has an invalid record');
-     const seen = seenBySource.get(observation.sourceId);
-     if (seen.has(observation.observationId)) throw new Error('discovery checkpoint import: observation history contains a duplicate identity');
-     seen.add(observation.observationId);
-+    const key = `${observation.sourceId}|${observation.receiptTs}`;
-+    observationsByReceipt.set(key, (observationsByReceipt.get(key) ?? 0) + 1);
-   }
--  if (observations.length !== admittedTotal) throw new Error('discovery checkpoint import: receipt admissions and observation history do not match exactly');
++Configuration baseline correction: commit `db4b1a2` already carried the operator's
++`paper.baseBalanceUsd: 500` before this review (exact `cobra.config.json` SHA-256
++`687d136747ee1292cbcfec6c4ac57ddcc322499696d65e9ab3cd90b087c61d87`). The two
++closeout byte fences now protect that committed configuration instead of the stale
++pre-`db4b1a2` $100 digest. This correction does not edit configuration, runtime state,
++execution, Watch, or trading authority.
 +
-+  const settlementBuckets = new Map();
-+  for (const receipt of settlements.values()) {
-+    const key = `${receipt.sourceId}|${receipt.receiptTs}`;
-+    const bucket = settlementBuckets.get(key) ?? [];
-+    bucket.push(receipt); settlementBuckets.set(key, bucket);
-+  }
-+  const gaps = [];
-+  const sourceEvidence = Object.fromEntries([...sourceIds].map((id) => [id, { reservations: reservations.get(id).length, settlements: 0, recordedAdmissions: 0, presentObservations: 0, missingAdmissions: 0, pendingReservations: 0 }]));
-+  for (const receipt of settlements.values()) { sourceEvidence[receipt.sourceId].settlements += 1; sourceEvidence[receipt.sourceId].recordedAdmissions += receipt.admitted; }
-+  for (const observation of observations) sourceEvidence[observation.sourceId].presentObservations += 1;
-+  for (const id of sourceIds) sourceEvidence[id].pendingReservations = sourceEvidence[id].reservations - sourceEvidence[id].settlements;
-+  for (const [key, bucket] of settlementBuckets) {
-+    const present = observationsByReceipt.get(key) ?? 0;
-+    const recorded = bucket.reduce((sum, receipt) => sum + receipt.admitted, 0);
-+    observationsByReceipt.delete(key);
-+    if (present > recorded) throw new Error('discovery checkpoint import: observation history contains admissions without matching receipt provenance');
-+    if (present < recorded) {
-+      if (bucket.length !== 1) throw new Error('discovery checkpoint import: missing observation provenance is ambiguous');
-+      const receipt = bucket[0]; const missing = recorded - present;
-+      sourceEvidence[receipt.sourceId].missingAdmissions += missing;
-+      gaps.push({ sourceId: receipt.sourceId, requestOrdinal: receipt.requestOrdinal, requestedTs: receipt.requestedTs, receiptTs: receipt.receiptTs, outcome: receipt.outcome, recordedAdmissions: recorded, presentObservations: present });
-+    }
-+  }
-+  if ([...observationsByReceipt.values()].some((count) => count > 0)) throw new Error('discovery checkpoint import: observation history contains a receipt bucket with no settlement');
-+  if (gaps.length > MAX_IMPORT_GAP_BUCKETS) throw new Error('discovery checkpoint import: too many integrity-gap buckets for bounded commissioning');
-+  const missingAdmissions = admittedTotal - observations.length;
-+  if (missingAdmissions < 0 || gaps.reduce((sum, gap) => sum + gap.recordedAdmissions - gap.presentObservations, 0) !== missingAdmissions) throw new Error('discovery checkpoint import: receipt admissions and observation history do not reconcile');
-+  const fingerprint = createHash('sha256').update(JSON.stringify({ v: DISCOVERY_IMPORT_INTEGRITY_VERSION, local, receipts, observations })).digest('hex');
-+  const allowance = `v1:${missingAdmissions}:${fingerprint}`;
-+  if (missingAdmissions > 0 && integrityGapAllowance !== allowance) throw new Error(`discovery checkpoint import: UNKNOWN_HISTORY missing=${missingAdmissions}; explicit allowance required: ${allowance}`);
++The package fence likewise now protects the already-authorized data-only entrypoints
++(`data:only`, `data:only-ui`, and `data:status`) at exact `package.json` SHA-256
++`22868ac835d3be284b6cb3a63703b27c92c04a2bcf4301b360511fb5ff3208d8`. No dependency
++changed: `package-lock.json` remains exactly
++`85ade4bd1ce094c37c89574a0adbe4e057e7d1a39358c45dcc3336925ee4ac6e`.
++
+ This review repaired reproduced integrity and bounded-record defects in the dormant learning/sizing path. It does not
+ claim model quality, profitable behavior, paper readiness, or complete validation. Both ports remain null-default and
+ unwired in `fly.js`; no threshold, risk cap, admission rule, entry permission, execution path, Watch rule, or LIVE
+diff --git a/test/judge-focused-fences.test.js b/test/judge-focused-fences.test.js
+index c6bb96e..33c2fe9 100644
+--- a/test/judge-focused-fences.test.js
++++ b/test/judge-focused-fences.test.js
+@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
+ const sha = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');
+ const atHead = (file) => { try { return createHash('sha256').update(execFileSync('git', ['show', `HEAD:${file}`], { cwd: process.cwd(), maxBuffer: 64 * 1024 * 1024 })).digest('hex'); } catch { return null; } };
+ // the reviewed baseline hashes (§0): recorded before any production edit of this completion
+-const PROTECTED = { 'cobra.config.json': '68c16400fb0d776ce304cd97ae40ee742e32f2838d1b57f52bdefb0dd9c9c79a', 'package.json': '823094445a7070fe07987b19b33c4c6fa51e97df46bb54b4ee7d55b4634c4e87' /* SERPENT paper closeout: three paper scripts (paper, paper:preflight, paper:inventory); dependencies unchanged */, 'package-lock.json': '85ade4bd1ce094c37c89574a0adbe4e057e7d1a39358c45dcc3336925ee4ac6e' };
++const PROTECTED = { 'cobra.config.json': '687d136747ee1292cbcfec6c4ac57ddcc322499696d65e9ab3cd90b087c61d87' /* preexisting db4b1a2 operator paper base ($500), retained unchanged */, 'package.json': '22868ac835d3be284b6cb3a63703b27c92c04a2bcf4301b360511fb5ff3208d8' /* three preexisting authorized data-only scripts; dependencies unchanged */, 'package-lock.json': '85ade4bd1ce094c37c89574a0adbe4e057e7d1a39358c45dcc3336925ee4ac6e' };
+ const NEW_MODULES = ['judge/experiment-bundle.js', 'judge/experiment-replay.js', 'judge/experiment-store.js', 'judge/experiment.js', 'judge/experiment-records.js', 'test/helpers/offline-guard.mjs', 'test/helpers/scripted-ws.js', 'tools/offline-gate.mjs'];
  
-   const checkpoint = emptyDiscoveryCheckpoint({ now, sources }); const today = currentDay(now);
-   for (const id of sourceIds) {
-@@ -139,8 +226,14 @@ export function loadDiscoveryCheckpoint(dataDir, { now = Date.now(), sources = D
-       seenIds: [...seenBySource.get(id)].sort(),
-     };
-   }
-+  checkpoint.importIntegrity = {
-+    v: DISCOVERY_IMPORT_INTEGRITY_VERSION, status: missingAdmissions > 0 ? 'UNKNOWN_HISTORY' : 'EXACT',
-+    policy: missingAdmissions > 0 ? 'FORWARD_ONLY_PRESENT_OBSERVATIONS' : 'EXACT_RECONSTRUCTION', fingerprint,
-+    explicitAllowance: missingAdmissions > 0, reservations: reserved.size, settlements: settled.size, recordedAdmissions: admittedTotal,
-+    presentObservations: observations.length, missingAdmissions, pendingReservations: reserved.size - settled.size,
-+    sources: sourceEvidence, gaps,
-+  };
-   const validation = validateDiscoveryCheckpoint(checkpoint, { sources });
-   if (!validation.ok) throw new Error(`discovery checkpoint import: ${validation.error}`);
-   return checkpoint;
- }
--
-diff --git a/test/public-discovery.test.js b/test/public-discovery.test.js
-index 760980c..a1bac45 100644
---- a/test/public-discovery.test.js
-+++ b/test/public-discovery.test.js
-@@ -106,6 +106,40 @@ test('commissioning import refuses a missing receipt history instead of resettin
-   assert.throws(() => loadDiscoveryCheckpoint(dir, { now: T0 }), /receipt history is missing; zero usage is refused/);
+ test('C01. protected bytes and dependencies: cobra.config.json, package.json and the lockfile carry the reviewed baseline digests; doctrine/MISSION.md, the sample policies, the legacy evidence / analysis v1 contracts and every migration before 9 are byte-identical to the committed tree; the new modules import only relative modules and node builtins (no new dependency); research configuration is refused outside REPLAY and the experiment replay never initializes a PAPER / LIVE account or reads credentials', async () => {
+diff --git a/test/market-closeout-r07-e2e.test.js b/test/market-closeout-r07-e2e.test.js
+index 1e70cdb..e78dcb1 100644
+--- a/test/market-closeout-r07-e2e.test.js
++++ b/test/market-closeout-r07-e2e.test.js
+@@ -331,5 +331,7 @@ test('MC-E07 (joined). existing integrations are preserved: a populated Social-l
+   } finally { await o.stop({ seal: false }); rmSync(dir, { recursive: true, force: true }); }
+   // protected contracts and config: byte-identical to the committed baseline
+   for (const f of ['evidence/contract.js', 'socrates/contract.js', 'cobra.config.json']) { const head = execFileSync('git', ['show', `HEAD:${f}`], { cwd: REPO }); assert.equal(sha256Hex(readFileSync(path.join(REPO, f))), sha256Hex(head), `${f} unchanged`); }
+-  assert.equal(sha256Hex(readFileSync(path.join(REPO, 'cobra.config.json'))), '68c16400fb0d776ce304cd97ae40ee742e32f2838d1b57f52bdefb0dd9c9c79a');
++  // db4b1a2 had already raised the retained operator paper base from $100 to
++  // $500 before this closeout; protect those exact reviewed bytes.
++  assert.equal(sha256Hex(readFileSync(path.join(REPO, 'cobra.config.json'))), '687d136747ee1292cbcfec6c4ac57ddcc322499696d65e9ab3cd90b087c61d87');
  });
- 
-+test('commissioning requires an exact filesystem fingerprint before preserving a bounded unknown-history gap', async () => {
-+  const dir = tmp();
-+  const handle = startPublicDiscovery({
-+    env: { DISCOVERY_ENABLED: 'true', DISCOVERY_SOURCES: 'KALSHI_PUBLIC_DATA', DISCOVERY_KALSHI_MAX_DAILY_REQUESTS: '1' },
-+    dataDir: dir, catalogSource: { snapshot: () => snapshot() }, clock: () => T0, log: () => {}, timers, signals: false,
-+    durableCheckpoint: memoryDurable(),
-+    fetchImpl: async () => new Response(JSON.stringify({ markets: [{ ticker: 'KXETH-1', title: 'Will $ETH rise?', status: 'active', updated_time: '2026-09-12T19:59:00Z' }], cursor: '' }), { status: 200, headers: { 'content-type': 'application/json' } }),
-+  });
-+  assert.equal((await handle.pollOnce('KALSHI_PUBLIC_DATA')).admitted, 1); await handle.stop();
-+  writeFileSync(path.join(dir, 'public-discovery', 'observations.jsonl'), '');
-+  let required;
-+  assert.throws(() => loadDiscoveryCheckpoint(dir, { now: T0 }), (error) => {
-+    required = error.message.match(/explicit allowance required: (v1:1:[0-9a-f]{64})/)?.[1];
-+    return Boolean(required);
-+  });
-+  assert.throws(() => loadDiscoveryCheckpoint(dir, { now: T0, integrityGapAllowance: `${required}0` }), /explicit allowance required/);
-+  const imported = loadDiscoveryCheckpoint(dir, { now: T0, integrityGapAllowance: required });
-+  assert.equal(validateDiscoveryCheckpoint(imported).ok, true);
-+  assert.equal(imported.sources.KALSHI_PUBLIC_DATA.totalReservations, 1, 'the charged request is preserved');
-+  assert.equal(imported.sources.KALSHI_PUBLIC_DATA.sweepsCompleted, 1, 'the last durable cursor checkpoint is preserved');
-+  assert.deepEqual(imported.sources.KALSHI_PUBLIC_DATA.seenIds, [], 'missing identities are not invented');
-+  assert.deepEqual(imported.importIntegrity, {
-+    v: 'public-discovery-import-integrity-1', status: 'UNKNOWN_HISTORY', policy: 'FORWARD_ONLY_PRESENT_OBSERVATIONS',
-+    fingerprint: required.split(':')[2], explicitAllowance: true,
-+    reservations: 1, settlements: 1, recordedAdmissions: 1, presentObservations: 0, missingAdmissions: 1, pendingReservations: 0,
-+    sources: {
-+      GDELT_NEWS_DISCOVERY: { reservations: 0, settlements: 0, recordedAdmissions: 0, presentObservations: 0, missingAdmissions: 0, pendingReservations: 0 },
-+      KALSHI_PUBLIC_DATA: { reservations: 1, settlements: 1, recordedAdmissions: 1, presentObservations: 0, missingAdmissions: 1, pendingReservations: 0 },
-+      POLYMARKET_PUBLIC_DATA: { reservations: 0, settlements: 0, recordedAdmissions: 0, presentObservations: 0, missingAdmissions: 0, pendingReservations: 0 },
-+    },
-+    gaps: [{ sourceId: 'KALSHI_PUBLIC_DATA', requestOrdinal: 0, requestedTs: T0, receiptTs: T0, outcome: 'OK', recordedAdmissions: 1, presentObservations: 0 }],
-+  });
-+});
-+
- test('a durable settlement fault latches discovery and prevents every later wire request', async () => {
-   const dir = tmp(); const durableCheckpoint = memoryDurable(); const update = durableCheckpoint.update; let calls = 0;
-   durableCheckpoint.update = async (reducer, meta) => {
-diff --git a/tools/data-only-checkpoints.mjs b/tools/data-only-checkpoints.mjs
-index f1b9e3d..698fb96 100644
---- a/tools/data-only-checkpoints.mjs
-+++ b/tools/data-only-checkpoints.mjs
-@@ -32,7 +32,7 @@ export async function openDataOnlyCheckpoints({ persistence, dataDir, env = proc
-   const market = await restore('MARKET', EXTERNAL_CHECKPOINT_IDS.MARKET, validateMarketQuotaCheckpoint,
-     () => loadMarketQuotaCheckpoint(path.join(marketRoot, 'accounting')));
-   const discovery = await restore('PUBLIC_DISCOVERY', EXTERNAL_CHECKPOINT_IDS.DISCOVERY, validateDiscoveryCheckpoint,
--    () => loadDiscoveryCheckpoint(dataDir, { now: clock() }));
-+    () => loadDiscoveryCheckpoint(dataDir, { now: clock(), integrityGapAllowance: env.DISCOVERY_IMPORT_UNKNOWN_HISTORY_ALLOWANCE }));
-   const video = env.SOCIAL_VIDEO_ENABLED === 'true'
-     ? await restore('YOUTUBE', EXTERNAL_CHECKPOINT_IDS.YOUTUBE, validateVideoCheckpoint, () => loadVideoCheckpoint(dataDir)) : null;
-   const callbacks = (binding) => binding ? { restored: binding.snapshot(), reserve: binding.commit, settle: binding.commit } : null;
