@@ -1,0 +1,916 @@
+diff --git a/discovery/parse.js b/discovery/parse.js
+index 1b2cd5e..3d98189 100644
+--- a/discovery/parse.js
++++ b/discovery/parse.js
+@@ -3,6 +3,7 @@ import { matchCatalogText } from './query.js';
+ 
+ export const DISCOVERY_OBSERVATION_VERSION = 'public-discovery-observation-1';
+ export const DISCOVERY_LIMITS = Object.freeze({ maxTitle: 500, maxSummary: 1200, maxUrl: 2000, maxNativeId: 300, maxAssets: 32 });
++export const DISCOVERY_CLOCK_SKEW_MS = 5 * 60 * 1000;
+ const sha256 = (value) => createHash('sha256').update(String(value)).digest('hex');
+ const clip = (value, max) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
+ const safeNumber = (value) => { const n = Number(value); return Number.isFinite(n) ? n : null; };
+@@ -42,6 +43,9 @@ function baseObservation({ sourceId, kind, nativeId, versionToken, title, summar
+ export function mapGdeltArticles(json, { context, plan, receiptTs, limit = 50 } = {}) {
+   const rows = Array.isArray(json?.articles) ? json.articles : null;
+   if (!rows) return { error: 'GDELT response has no articles array' };
++  if (!context?.catalog?.contentId || !context?.scope || !Array.isArray(context.bases) || context.bases.length === 0) return { error: 'GDELT catalog context missing' };
++  if (!plan || !Array.isArray(plan.bases) || plan.bases.length === 0 || plan.bases.length > 12 || plan.catalogContentId !== context.catalog.contentId || plan.bases.some((base) => !context.bases.includes(base))) return { error: 'GDELT query plan does not match catalog context' };
++  if (!Number.isSafeInteger(receiptTs) || receiptTs <= 0) return { error: 'GDELT receipt clock invalid' };
+   const observations = []; let invalid = 0;
+   for (const row of rows.slice(0, Math.max(1, Math.min(limit, 250)))) {
+     const url = httpsUrl(row?.url); const title = clip(row?.title, DISCOVERY_LIMITS.maxTitle); const discoveredTs = gdeltTs(row?.seendate);
+@@ -55,6 +59,10 @@ export function mapGdeltArticles(json, { context, plan, receiptTs, limit = 50 }
+     // clock). An explicit provider publication field is kept separately when
+     // present; seendate is never relabelled as publication time.
+     const publishedTs = safeTs(row?.publicationdate ?? row?.published ?? row?.published_at);
++    // A provider clock may be a few minutes ahead due to ordinary skew, but
++    // it may not move knowledge into the future. Refuse the row rather than
++    // persisting negative delay or future-dated causal evidence.
++    if ((discoveredTs !== null && discoveredTs > receiptTs + DISCOVERY_CLOCK_SKEW_MS) || (publishedTs !== null && publishedTs > receiptTs + DISCOVERY_CLOCK_SKEW_MS)) { invalid += 1; continue; }
+     const observation = baseObservation({ sourceId: 'GDELT_NEWS_DISCOVERY', kind: 'NEWS_INDEX', nativeId: sha256(url), versionToken: discoveredTs ?? url, title, url, publisher: publisherHost, publisherHost, acquisition: 'INDEXED_DISCOVERY', scopeMode: 'CATALOG_ROTATION', queryBases: plan.bases, matched, catalogContentId: context.catalog.contentId, catalogPopulation: context.bases.length, publishedTs, sourceEventTs: null, discoveredTs, receiptTs, syndicationKey, market: null });
+     if (!observation) invalid += 1; else observations.push(observation);
+   }
+@@ -102,7 +110,7 @@ export function discoveryObservationError(observation) {
+   if (observation.authority !== 'NONE' || observation.bodyFetched !== false) return 'authority';
+   const expectedId = observation.kind === 'NEWS_INDEX' ? sha256(`${observation.sourceId}|${observation.syndicationKey}`) : sha256(`${observation.sourceId}|${observation.nativeId}|${observation.versionId}`);
+   if (observation.observationId !== expectedId) return 'identity does not re-derive';
+-  if (observation.sourceId === 'GDELT_NEWS_DISCOVERY' && (observation.acquisition !== 'INDEXED_DISCOVERY' || !/^[0-9a-f]{64}$/.test(observation.syndicationKey ?? '') || observation.market !== null)) return 'GDELT discovery law';
++  if (observation.sourceId === 'GDELT_NEWS_DISCOVERY' && (observation.acquisition !== 'INDEXED_DISCOVERY' || !/^[0-9a-f]{64}$/.test(observation.syndicationKey ?? '') || observation.market !== null || (observation.discoveredTs !== null && observation.discoveredTs > observation.receiptTs + DISCOVERY_CLOCK_SKEW_MS) || (observation.publishedTs !== null && observation.publishedTs > observation.receiptTs + DISCOVERY_CLOCK_SKEW_MS))) return 'GDELT discovery law';
+   if (observation.kind === 'PREDICTION_MARKET' && (observation.acquisition !== 'DIRECT_PUBLIC_METADATA' || observation.syndicationKey !== null || !observation.market || observation.matchedAssets.length === 0 || observation.matchEvidence.some((value) => !MARKET_MATCH_EVIDENCE.has(String(value).slice(String(value).lastIndexOf(':') + 1))))) return 'market law';
+   return null;
+ }
+diff --git a/discovery/registry.js b/discovery/registry.js
+index 91fc0b7..8f6903e 100644
+--- a/discovery/registry.js
++++ b/discovery/registry.js
+@@ -4,6 +4,11 @@ export const DISCOVERY_REGISTRY_VERSION = 'serpent-public-discovery-registry-1';
+ export const DISCOVERY_SOURCE_IDS = Object.freeze(['GDELT_NEWS_DISCOVERY', 'POLYMARKET_PUBLIC_DATA', 'KALSHI_PUBLIC_DATA']);
+ const ACCESSED = '2026-09-12';
+ const doc = (url, note) => Object.freeze({ url, accessedOn: ACCESSED, note });
++const PINNED_SOURCE_TRANSPORT = Object.freeze({
++  GDELT_NEWS_DISCOVERY: Object.freeze({ kind: 'NEWS_INDEX', route: 'GDELT_DOC_JSON', baseUrl: 'https://api.gdeltproject.org/api/v2/doc/doc', host: 'api.gdeltproject.org' }),
++  POLYMARKET_PUBLIC_DATA: Object.freeze({ kind: 'PREDICTION_MARKET', route: 'KEYSET_JSON', baseUrl: 'https://gamma-api.polymarket.com/markets/keyset', host: 'gamma-api.polymarket.com' }),
++  KALSHI_PUBLIC_DATA: Object.freeze({ kind: 'PREDICTION_MARKET', route: 'CURSOR_JSON', baseUrl: 'https://external-api.kalshi.com/trade-api/v2/markets', host: 'external-api.kalshi.com' }),
++});
+ 
+ export const DISCOVERY_SOURCES = Object.freeze([
+   Object.freeze({
+@@ -34,10 +39,11 @@ export function discoveryRegistryError(sources = DISCOVERY_SOURCES) {
+   for (const source of sources) {
+     if (!DISCOVERY_SOURCE_IDS.includes(source.id) || ids.has(source.id)) return `bad or duplicate source ${source.id}`;
+     ids.add(source.id);
+-    if (!['NEWS_INDEX', 'PREDICTION_MARKET'].includes(source.kind)) return `${source.id}: kind`;
+-    if (!['GDELT_DOC_JSON', 'KEYSET_JSON', 'CURSOR_JSON'].includes(source.route)) return `${source.id}: route`;
++    const pinned = PINNED_SOURCE_TRANSPORT[source.id];
++    if (source.kind !== pinned.kind) return `${source.id}: kind`;
++    if (source.route !== pinned.route) return `${source.id}: route`;
+     let url; try { url = new URL(source.baseUrl); } catch { return `${source.id}: URL`; }
+-    if (url.protocol !== 'https:' || url.hostname !== source.host || !Number.isSafeInteger(source.cadenceSec) || source.cadenceSec < 900) return `${source.id}: transport`;
++    if (source.baseUrl !== pinned.baseUrl || source.host !== pinned.host || url.protocol !== 'https:' || url.hostname !== pinned.host || url.username || url.password || url.port || url.search || url.hash || !Number.isSafeInteger(source.cadenceSec) || source.cadenceSec < 900) return `${source.id}: transport`;
+     if (!Array.isArray(source.docs) || source.docs.length === 0 || source.docs.some((d) => d.accessedOn !== ACCESSED || !d.url.startsWith('https://'))) return `${source.id}: docs`;
+   }
+   return ids.size === DISCOVERY_SOURCE_IDS.length ? null : 'registry is incomplete';
+diff --git a/lib/data-only-budget.js b/lib/data-only-budget.js
+index 900bc58..c6085ef 100644
+--- a/lib/data-only-budget.js
++++ b/lib/data-only-budget.js
+@@ -19,6 +19,7 @@ export const DEFAULT_DATA_ONLY_LANES = Object.freeze({
+   SEC_OFFICIAL: Object.freeze({ maxDailyRequests: 1_080, usdPerRequest: 0 }),
+   CFTC_OFFICIAL: Object.freeze({ maxDailyRequests: 1_080, usdPerRequest: 0 }),
+   OFAC_OFFICIAL: Object.freeze({ maxDailyRequests: 96, usdPerRequest: 0 }),
++  GDELT_NEWS_DISCOVERY: Object.freeze({ maxDailyRequests: 16, usdPerRequest: 0 }),
+   NOAA_SWPC: Object.freeze({ maxDailyRequests: 300, usdPerRequest: 0 }),
+   CLOUDFLARE_RADAR: Object.freeze({ maxDailyRequests: 30, usdPerRequest: 0 }),
+   COINDESK_NEWS: Object.freeze({ maxDailyRequests: 150, usdPerRequest: 0 }),
+@@ -43,6 +44,7 @@ const HOST_LANES = Object.freeze({
+   "sanctionslistservice.ofac.treas.gov": "OFAC_OFFICIAL",
+   "wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com":
+     "OFAC_OFFICIAL",
++  "api.gdeltproject.org": "GDELT_NEWS_DISCOVERY",
+   "services.swpc.noaa.gov": "NOAA_SWPC",
+   "api.cloudflare.com": "CLOUDFLARE_RADAR",
+   "www.coindesk.com": "COINDESK_NEWS",
+diff --git a/market-lab/contracts.js b/market-lab/contracts.js
+index 135bfd0..9e50f6a 100644
+--- a/market-lab/contracts.js
++++ b/market-lab/contracts.js
+@@ -557,7 +557,7 @@ export function payloadError(kind, p, where = 'payload') {
+       if (p.forecastValue !== null && p.forecastKnownAtTs === null) return `${where}: a forecast needs its knowledge clock`;
+       return null;
+     case 'CROSS_ASSET_BAR':
+-      if (!isId(p.instrument) || !isIdOrNull(p.exchange) || !isTs(p.intervalMs) || !SESSION_STATES.includes(p.sessionState) || !(p.delayed === null || typeof p.delayed === 'boolean') || !isIdOrNull(p.proxyFor) || !isId(p.currency)) return `${where}: cross-asset bar malformed`;
++      if (!isId(p.instrument) || !isIdOrNull(p.exchange) || !isTs(p.intervalMs) || !SESSION_STATES.includes(p.sessionState) || !(p.delayed === null || typeof p.delayed === 'boolean') || !isBoundedString(p.proxyFor, 80) || !isId(p.currency)) return `${where}: cross-asset bar malformed`;
+       e = ohlcError(p, where); if (e) return e;
+       if (!(p.volume === null || isNonNegative(p.volume))) return `${where}: volume malformed`;
+       return null;
+diff --git a/market-lab/owner.js b/market-lab/owner.js
+index 7dc47b8..992484a 100644
+--- a/market-lab/owner.js
++++ b/market-lab/owner.js
+@@ -37,7 +37,7 @@ import { createCryptoQuantClient, CRYPTOQUANT_METRICS } from './providers/crypto
+ import { createSantimentClient, SANTIMENT_METRICS } from './providers/santiment.js';
+ import { createCoinMetricsClient, COINMETRICS_METRICS } from './providers/coinmetrics.js';
+ import { createFredClient } from './providers/fred.js';
+-import { createTwelveDataClient } from './providers/twelvedata.js';
++import { createTwelveDataClient, TWELVEDATA_BAR_REFRESH_MS } from './providers/twelvedata.js';
+ import { createSettledProjection } from './providers/settled.js';
+ import { createTokenomistClient } from './providers/tokenomist.js';
+ import { ENDPOINTS } from './registry.js';
+@@ -90,6 +90,8 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+   const counters = { observations: 0, coverageRecords: 0, duplicateRecords: 0, tapeTrades: 0, tapeBooks: 0, tapeDropped: 0, observerErrors: 0, acquisitions: 0, acquisitionFailures: 0, rotations: 0, segmentRotations: 0, recordingRejected: 0, evictedObservations: 0 };
+   const markets = new Map(); // canonicalCoin -> { kraken, coinbase, coingecko }
+   let resolution = null; const streams = {}; const schedules = [];
++  let sweepFamilies = null; let sweepPromise = null;
++  const bootstrap = { initialState: 'NOT_STARTED', initialMode: null, initialStartedTs: null, initialFinishedTs: null, running: false, runsStarted: 0, runsCompleted: 0, runsFailed: 0, overlapSkips: 0, lastReason: null, lastStartedTs: null, lastFinishedTs: null, lastError: null };
+   const shared = new Map(); // bounded shared cross-subject cache: key -> { ts, observations }
+   const sharedPut = (k, v) => { shared.delete(k); shared.set(k, v); if (shared.size > limits.sharedCacheEntries) shared.delete(shared.keys().next().value); };
+   const bySubjectCoin = (coin) => subjects.subjects.find((s) => s.canonicalCoin === coin) ?? null;
+@@ -230,7 +232,7 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+       case 'STABLECOIN_LIQUIDITY': await run('DEFILLAMA', 'stablecoins', 'dls', () => clients.DEFILLAMA.stablecoins({ wanted: subjects.stablecoins, signal }), { ttlMs: HOUR_MS }); break;
+       case 'ETF_FLOWS': if (coin === 'BTC' || coin === 'ETH') await run('COINGLASS', coin === 'ETH' ? 'etf-ethereum-flow-history' : 'etf-bitcoin-flow-history', `etf:${coin}`, () => clients.COINGLASS.etfFlows({ asset: coin, canonicalCoin: coin, signal }), { ttlMs: HOUR_MS }); break;
+       case 'MACRO_RELEASES': for (const sid of subjects.macroSeries) { await run('FRED', 'series', `fs:${sid}`, () => clients.FRED.seriesMeta({ seriesId: sid, signal }), { ttlMs: DAY_MS }); await run('FRED', 'series-observations', `fo:${sid}`, () => clients.FRED.observations({ seriesId: sid, limit: 30, signal }), { ttlMs: HOUR_MS }); } await run('COINGLASS', 'economic-data', 'cge', () => clients.COINGLASS.economicCalendar({ startTs: clock() - DAY_MS, endTs: clock() + 7 * DAY_MS, signal }), { ttlMs: 600_000 }); break;
+-      case 'CROSS_ASSET': for (const x of subjects.crossAsset) { await run('TWELVEDATA', 'symbol-search', `tds:${x.symbol}`, () => clients.TWELVEDATA.resolve({ symbol: x.symbol, exchange: x.exchange, proxyFor: x.proxyFor, signal }), { ttlMs: DAY_MS }); await run('TWELVEDATA', 'time-series', `tdb:${x.symbol}`, () => clients.TWELVEDATA.bars({ symbol: x.symbol, interval: '1h', outputsize: 100, signal }), { ttlMs: 300_000 }); } break;
++      case 'CROSS_ASSET': for (const x of subjects.crossAsset) { await run('TWELVEDATA', 'symbol-search', `tds:${x.symbol}`, () => clients.TWELVEDATA.resolve({ symbol: x.symbol, exchange: x.exchange, proxyFor: x.proxyFor, signal }), { ttlMs: DAY_MS }); await run('TWELVEDATA', 'time-series', `tdb:${x.symbol}`, () => clients.TWELVEDATA.bars({ symbol: x.symbol, interval: '1h', outputsize: 100, signal }), { ttlMs: TWELVEDATA_BAR_REFRESH_MS }); } break;
+       case 'OFFICIAL_SOCIAL_EVENTS': case 'INFRASTRUCTURE_STATUS': if (enabled('SETTLED_RECORDS')) { const r = clients.SETTLED_RECORDS.project({ canonicalCoin: coin, asOfTs: clock(), receivedTs: clock() }); out.observations.push(...r.observations); out.coverage.push(...r.coverage); out.results.push({ providerId: 'SETTLED_RECORDS', endpointId: family === 'INFRASTRUCTURE_STATUS' ? 'gateway-status' : 'official-claims', state: 'OK', count: r.observations.length }); } if (family === 'OFFICIAL_SOCIAL_EVENTS' && s?.coinglass) await run('COINGLASS', 'article-list', 'cgn', () => clients.COINGLASS.headlines({ signal }), { ttlMs: 600_000 }); break;
+       default: fail('INVALID_REQUEST', 'unknown family');
+     }
+@@ -239,9 +241,32 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+     const after = usageSnapshot(); out.usage = { dispatched: after.dispatched - before.dispatched, credits: after.credits - before.credits, refused: after.refused - before.refused + preRefused, unresolved: after.unresolved - before.unresolved, reasons: refusals };
+     return deepFreeze(out);
+   }
++  async function sweep() { for (const coin of subjects.subjects.map((s) => s.canonicalCoin)) { if (stopped) return; for (const fam of sweepFamilies) { if (stopped) return; try { await acquire(fam, coin); } catch (err) { counters.acquisitionFailures += 1; log(`acquire ${fam}/${coin} failed: ${String(err?.message ?? err).slice(0, 120)}`); } } } }
++  function kickSweep(reason) {
++    if (stopped) return null;
++    if (sweepPromise) { bootstrap.overlapSkips += 1; return sweepPromise; }
++    bootstrap.running = true; bootstrap.runsStarted += 1; bootstrap.lastReason = reason; bootstrap.lastStartedTs = clock(); bootstrap.lastError = null;
++    if (reason === 'INITIAL') { bootstrap.initialState = 'RUNNING'; bootstrap.initialStartedTs = bootstrap.lastStartedTs; }
++    let task;
++    task = (async () => {
++      try {
++        await sweep(); bootstrap.runsCompleted += 1;
++        if (reason === 'INITIAL') { bootstrap.initialState = stopped ? 'STOPPED' : 'COMPLETE'; bootstrap.initialFinishedTs = clock(); }
++      } catch (err) {
++        bootstrap.runsFailed += 1; bootstrap.lastError = String(err?.message ?? err).slice(0, 160);
++        if (reason === 'INITIAL') { bootstrap.initialState = stopped ? 'STOPPED' : 'FAILED'; bootstrap.initialFinishedTs = clock(); }
++        throw err;
++      } finally {
++        bootstrap.lastFinishedTs = clock(); bootstrap.running = false; if (sweepPromise === task) sweepPromise = null;
++      }
++    })();
++    sweepPromise = task;
++    return task;
++  }
+   // ---- lifecycle -----------------------------------------------------------------------------------------------------
+-  async function start({ outDir = null, families = null, rotation = null } = {}) {
++  async function start({ outDir = null, families = null, rotation = null, awaitInitialSweep = true } = {}) {
+     if (started) fail('INVALID_REQUEST', 'owner already started'); if (lifecycle !== 'CREATED') fail('INVALID_REQUEST', `owner cannot start from ${lifecycle}`);
++    if (typeof awaitInitialSweep !== 'boolean') fail('INVALID_REQUEST', 'awaitInitialSweep must be boolean');
+     started = true; stopped = false; lifecycle = 'ACTIVE';
+     if (outDir) { const q = rootQuota(); if (q && q.exhausted) { lifecycle = 'RECORDING_FAILED'; stopped = true; recording.error = { code: 'RESOURCE_LIMIT_EXCEEDED', message: 'research root quota exhausted before start' }; recording.failedTs = clock(); recording.where = 'START'; fail('RESOURCE_LIMIT_EXCEEDED', 'research root quota exhausted'); } segmentBase = path.resolve(outDir); openSegment(outDir); }
+     resolution = await guard.withPurpose('CATALOG', () => resolveSubjects({ subjects, clients, enabled: (id) => enabled(id) && mayCall(id, ENDPOINTS.find((e) => e.providerId === id && e.method !== 'WS')?.endpointId ?? ''), log }));
+@@ -255,19 +280,19 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+       // round-robin: bounded rotation through eligible catalog subjects outside the explicit list (opt-in)
+       if (rotation && rotation.enabled && streams.KRAKEN_SPOT && clients.KRAKEN_SPOT.catalog()) { const explicit = new Set(subjects.subjects.map((s) => s.canonicalCoin)); const pool = clients.KRAKEN_SPOT.catalog().markets.map((m) => m.base).filter((b) => !explicit.has(b)); let idx = 0; const active = []; const slots = Math.max(1, Math.min(rotation.slots ?? 4, limits.hotSubjects - subjects.subjects.length)); const rotateSubjects = () => { if (stopped) return; while (active.length >= slots) { const old = active.shift(); streams.KRAKEN_SPOT.remove(old.wsname); hot.release(subjectId(old.subject), clock(), 'ROTATION'); } for (let n = 0; n < slots && pool.length; n += 1) { const base = pool[idx % pool.length]; idx += 1; const r = clients.KRAKEN_SPOT.resolveMarket({ canonicalCoin: base }); if (r.ok && !active.some((a) => a.wsname === r.market.wsname)) { streams.KRAKEN_SPOT.add(r.market); active.push(r.market); counters.rotations += 1; if (active.length >= slots) break; } } }; rotateSubjects(); const t = timers.setInterval(rotateSubjects, rotation.dwellMs ?? 600_000); t.unref?.(); schedules.push(t); }
+     }
+-    const fams = families ?? DEFAULT_SWEEP_FAMILIES;
+-    const sweep = async () => { for (const coin of subjects.subjects.map((s) => s.canonicalCoin)) { if (stopped) return; for (const fam of fams) { if (stopped) return; try { await acquire(fam, coin); } catch (err) { counters.acquisitionFailures += 1; log(`acquire ${fam}/${coin} failed: ${String(err?.message ?? err).slice(0, 120)}`); } } } };
++    sweepFamilies = families ?? DEFAULT_SWEEP_FAMILIES; bootstrap.initialMode = awaitInitialSweep ? 'AWAITED' : 'BACKGROUND';
+     const drain = timers.setInterval(() => { try { drainQueue(); } catch (err) { counters.observerErrors += 1; } }, 250); drain.unref?.(); schedules.push(drain);
+-    await sweep();
+-    if (!stopped) { const sweepTimer = timers.setInterval(() => { sweep().catch(() => {}); }, 300_000); sweepTimer.unref?.(); schedules.push(sweepTimer); }
+-    return { resolution, segmentDir: segment?.dir ?? null };
++    const initialSweep = kickSweep('INITIAL');
++    const scheduleSweeps = () => { if (stopped) return; const sweepTimer = timers.setInterval(() => { const p = kickSweep('PERIODIC'); p?.catch(() => {}); }, 300_000); sweepTimer.unref?.(); schedules.push(sweepTimer); };
++    if (awaitInitialSweep) { await initialSweep; scheduleSweeps(); } else { initialSweep.catch((err) => log(`initial sweep failed: ${String(err?.message ?? err).slice(0, 120)}`)); scheduleSweeps(); }
++    return { resolution, segmentDir: segment?.dir ?? null, bootstrap: { ...bootstrap } };
+   }
+   let stopPromise = null; let stopResult = null;
+   // the bounded drain: resolves DRAINED when every in-flight acquisition and wire request completed, TIMEOUT at the deadline
+   async function drainInFlight() {
+-    if (!inFlightAcquisitions.size && !http.inFlight()) return 'DRAINED';
++    if (!inFlightAcquisitions.size && !http.inFlight() && !sweepPromise) return 'DRAINED';
+     let timer = null; const deadline = new Promise((resolve) => { timer = timers.setTimeout(() => resolve('TIMEOUT'), closeDrainMs); timer.unref?.(); });
+-    const all = Promise.all([Promise.allSettled([...inFlightAcquisitions]), http.drained()]).then(() => 'DRAINED');
++    const all = Promise.all([Promise.allSettled([...inFlightAcquisitions, ...(sweepPromise ? [sweepPromise] : [])]), http.drained()]).then(() => 'DRAINED');
+     const outcome = await Promise.race([all, deadline]); timers.clearTimeout(timer); return outcome;
+   }
+   async function stopInternal({ seal, policyNonsecret, reason }) {
+@@ -294,6 +319,6 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+   }
+   // idempotent: the first stop drives the shutdown; every later stop returns the same result (the first error preserved)
+   function stop({ seal = true, policyNonsecret = null } = {}) { if (!stopPromise) { policyNonsecretForSeal = policyNonsecret ?? policy; stopPromise = stopInternal({ seal, policyNonsecret, reason: 'STOP' }); } return stopPromise.then(() => (recording.error && stopResult && !stopResult.error ? { ...stopResult, sealed: null, error: { ...recording.error, where: recording.where, failedTs: recording.failedTs } } : stopResult)); }
+-  const status = () => deepFreeze({ ownerVersion: OWNER_VERSION, mode, lifecycle, started, stopped, fenced, drain: { ...drainStats, deadlineMs: closeDrainMs, inFlightAcquisitions: inFlightAcquisitions.size, inFlightRequests: http.inFlight() }, counters: { ...counters }, recording: { error: recording.error, failedTs: recording.failedTs, where: recording.where, segmentDir: recording.segmentDir }, retained: retained.counters(), membership: retained.membership(), limits: { retainedObservations: limits.retainedObservations, retainedCoverage: limits.retainedCoverage, sealedSegmentIndex: limits.sealedSegmentIndex, segmentBytes: limits.segmentBytes, runBytes: limits.runBytes, sharedCacheEntries: limits.sharedCacheEntries }, hot: hot.status(), queue: queue.status(), streams: Object.fromEntries(Object.entries(streams).map(([k, s]) => [k, s.status()])), clients: Object.fromEntries(PROVIDER_IDS.map((id) => [id, clients[id].status()])), transport: http.accounting(), accounting: guard.snapshot(), sealed: sealed.slice(), sealedCount, runBytes, segment: segment ? { dir: segment.dir, ordinal: segment.ordinal, ...segment.obs.stats(), coverageLines: segment.cov.stats().lines } : null, observations: retained.counters().retainedObservations, coverageRecords: retained.counters().retainedCoverage, sharedCache: shared.size, resolution: resolution ? { population: resolution.population, catalogs: resolution.catalogs } : null, readiness: providerReadiness({ policy, env, clientStatus: Object.fromEntries(PROVIDER_IDS.map((id) => [id, clients[id].status()])) }), quota: rootQuota() });
++  const status = () => deepFreeze({ ownerVersion: OWNER_VERSION, mode, lifecycle, started, stopped, fenced, bootstrap: { ...bootstrap }, drain: { ...drainStats, deadlineMs: closeDrainMs, inFlightAcquisitions: inFlightAcquisitions.size, inFlightRequests: http.inFlight() }, counters: { ...counters }, recording: { error: recording.error, failedTs: recording.failedTs, where: recording.where, segmentDir: recording.segmentDir }, retained: retained.counters(), membership: retained.membership(), limits: { retainedObservations: limits.retainedObservations, retainedCoverage: limits.retainedCoverage, sealedSegmentIndex: limits.sealedSegmentIndex, segmentBytes: limits.segmentBytes, runBytes: limits.runBytes, sharedCacheEntries: limits.sharedCacheEntries }, hot: hot.status(), queue: queue.status(), streams: Object.fromEntries(Object.entries(streams).map(([k, s]) => [k, s.status()])), clients: Object.fromEntries(PROVIDER_IDS.map((id) => [id, clients[id].status()])), transport: http.accounting(), accounting: guard.snapshot(), sealed: sealed.slice(), sealedCount, runBytes, segment: segment ? { dir: segment.dir, ordinal: segment.ordinal, ...segment.obs.stats(), coverageLines: segment.cov.stats().lines } : null, observations: retained.counters().retainedObservations, coverageRecords: retained.counters().retainedCoverage, sharedCache: shared.size, resolution: resolution ? { population: resolution.population, catalogs: resolution.catalogs } : null, readiness: providerReadiness({ policy, env, clientStatus: Object.fromEntries(PROVIDER_IDS.map((id) => [id, clients[id].status()])) }), quota: rootQuota() });
+   return { observer, start, stop, acquire, status, clients, hot, guard, journal, snapshotPrefix, probe: (fn) => guard.withPurpose('PROBE', fn), markets: () => markets, subjectsOf: (coin) => markets.get(coin) ?? null, observations: () => retained.observations(), coverage: () => retained.coverage(), resolution: () => resolution, socialProjection, view: (coin) => { const m = markets.get(coin)?.kraken; return m ? hot.view(subjectId(m.subject)) : null; }, lifecycle: () => lifecycle, isTs };
+ }
+diff --git a/market-lab/providers/twelvedata.js b/market-lab/providers/twelvedata.js
+index 4b9eee6..ed857bf 100644
+--- a/market-lab/providers/twelvedata.js
++++ b/market-lab/providers/twelvedata.js
+@@ -6,6 +6,9 @@ import { createClientBase, num, str, bool, tsFromSeconds, arr, obj, seriesSubjec
+ import { quality, deepFreeze } from '../contracts.js';
+ 
+ export const TWELVEDATA_MAPPING_ID = 'twelvedata-symbol-search-v1';
++// Five declared paper proxies at this cadence consume 480 time-series calls/day; their five daily symbol resolutions
++// keep the complete route below the policy's 600-call/day ceiling. Cached observations retain their original clocks.
++export const TWELVEDATA_BAR_REFRESH_MS = 15 * 60_000;
+ const INTERVALS = deepFreeze({ '1min': 60_000, '5min': 300_000, '15min': 900_000, '1h': 3_600_000, '4h': 14_400_000, '1day': 86_400_000 });
+ const providerError = (j, receivedTs) => { const o = obj(j); if (!o || o.status !== 'error') return null; const code = num(o.code); const denied = code === 401 || code === 403 || /plan|upgrade|not available|grow|pro plan/i.test(str(o.message, 300) ?? ''); return { kind: 'SCHEMA', reason: `provider status error ${code ?? ''}`.trim(), coverageState: denied ? 'ACCESS_BLOCKED' : code === 429 ? 'FAILED' : 'FAILED', reasonCode: denied ? 'ENTITLEMENT_DENIED' : code === 429 ? 'RATE_LIMITED' : 'PROVIDER_ERROR', ts: receivedTs }; };
+ const parseDt = (s) => { if (typeof s !== 'string') return null; const ms = Date.parse(s.length === 10 ? `${s}T00:00:00Z` : `${s.replace(' ', 'T')}Z`); return Number.isFinite(ms) ? ms : null; };
+diff --git a/market-lab/service.js b/market-lab/service.js
+index af04a22..b75cde0 100644
+--- a/market-lab/service.js
++++ b/market-lab/service.js
+@@ -77,7 +77,7 @@ export function createResearchService({ policy, subjects, env = {}, researchRoot
+   }
+   function status() {
+     const ownerStatus = owner.status();
+-    return deepFreeze({ serviceVersion: SERVICE_VERSION, state, mode, policyMode: policy.mode, startedTs, nowTs: clock(), researchRoot: root, accountingDir, http: boundPort ? { host: httpHost, port: boundPort } : null, quota: quota(), recording: { failure: recordingFailure, owner: ownerStatus.recording, segment: ownerStatus.segment, sealedSegments: ownerStatus.sealedCount, runBytes: ownerStatus.runBytes, retained: ownerStatus.retained }, accounting: ownerStatus.accounting, owner: { lifecycle: ownerStatus.lifecycle, started: ownerStatus.started, stopped: ownerStatus.stopped, counters: ownerStatus.counters, hot: ownerStatus.hot, streams: ownerStatus.streams, clients: Object.fromEntries(Object.entries(ownerStatus.clients).map(([k, v]) => [k, { runtime: v.runtime, requests: v.counters?.requests ?? 0, ok: v.counters?.ok ?? 0, failed: v.counters?.failed ?? 0, lastFailure: v.lastFailure ?? null }])) }, cases: { queued: queue.length, running, counters: { ...counters, ...caseCounters, indexCap: caseCap }, recent: caseIndex.slice(-32).map((c) => ({ caseId: c.caseId, status: c.status, canonicalCoin: c.canonicalCoin, createdTs: c.createdTs, finishedTs: c.finishedTs, analysisId: c.analysisId, dir: c.dir ? path.basename(c.dir) : null, reason: c.reason ?? null, diagnostic: c.diagnostic ?? null, prefixId: c.prefixId ?? null, prefixDurable: c.prefixDurable ?? null, publication: c.publication ?? null })) }, runtime: runtime.status(), model: { enabled: policy.model.enabled, model: policy.model.model, credentialEnv: policy.model.credentialEnv, credentialPresent: typeof env[policy.model.credentialEnv] === 'string' && env[policy.model.credentialEnv].length > 0, caps: { perCase: policy.model.maxEstimatedUsdPerCase, perDay: policy.model.maxEstimatedUsdPerDay, perMonth: policy.model.maxEstimatedUsdPerMonth } }, lastError, authority: 'NONE', purpose: 'RESEARCH_ONLY' });
++    return deepFreeze({ serviceVersion: SERVICE_VERSION, state, mode, policyMode: policy.mode, startedTs, nowTs: clock(), researchRoot: root, accountingDir, http: boundPort ? { host: httpHost, port: boundPort } : null, quota: quota(), bootstrap: ownerStatus.bootstrap, recording: { failure: recordingFailure, owner: ownerStatus.recording, segment: ownerStatus.segment, sealedSegments: ownerStatus.sealedCount, runBytes: ownerStatus.runBytes, retained: ownerStatus.retained }, accounting: ownerStatus.accounting, owner: { lifecycle: ownerStatus.lifecycle, started: ownerStatus.started, stopped: ownerStatus.stopped, counters: ownerStatus.counters, hot: ownerStatus.hot, streams: ownerStatus.streams, clients: Object.fromEntries(Object.entries(ownerStatus.clients).map(([k, v]) => [k, { runtime: v.runtime, requests: v.counters?.requests ?? 0, ok: v.counters?.ok ?? 0, failed: v.counters?.failed ?? 0, lastFailure: v.lastFailure ?? null }])) }, cases: { queued: queue.length, running, counters: { ...counters, ...caseCounters, indexCap: caseCap }, recent: caseIndex.slice(-32).map((c) => ({ caseId: c.caseId, status: c.status, canonicalCoin: c.canonicalCoin, createdTs: c.createdTs, finishedTs: c.finishedTs, analysisId: c.analysisId, dir: c.dir ? path.basename(c.dir) : null, reason: c.reason ?? null, diagnostic: c.diagnostic ?? null, prefixId: c.prefixId ?? null, prefixDurable: c.prefixDurable ?? null, publication: c.publication ?? null })) }, runtime: runtime.status(), model: { enabled: policy.model.enabled, model: policy.model.model, credentialEnv: policy.model.credentialEnv, credentialPresent: typeof env[policy.model.credentialEnv] === 'string' && env[policy.model.credentialEnv].length > 0, caps: { perCase: policy.model.maxEstimatedUsdPerCase, perDay: policy.model.maxEstimatedUsdPerDay, perMonth: policy.model.maxEstimatedUsdPerMonth } }, lastError, authority: 'NONE', purpose: 'RESEARCH_ONLY' });
+   }
+   function readiness() { const rows = providerReadiness({ policy, env, clientStatus: owner.status().clients }); return liveReadinessManifest({ rows, familyCoverage: null, modelReadiness: { enabled: policy.model.enabled, credentialPresent: typeof env[policy.model.credentialEnv] === 'string' && env[policy.model.credentialEnv].length > 0, liveVerification: 'NOT_RUN' }, generatedTs: clock() }); }
+   function writeStatus() { try { writeAtomic(statusFile, `${JSON.stringify(status(), null, 1)}\n`); } catch (err) { log(`status write failed: ${String(err?.message ?? err).slice(0, 120)}`); } }
+@@ -97,12 +97,12 @@ export function createResearchService({ policy, subjects, env = {}, researchRoot
+     mkdirSync(casesDir, { recursive: true }); mkdirSync(capturesDir, { recursive: true }); mkdirSync(budgetDir, { recursive: true });
+     const q = quota(); if (q && q.exhausted) { state = 'FAILED'; fail('RESOURCE_LIMIT_EXCEEDED', 'research root quota exhausted'); }
+     const segmentDir = path.join(capturesDir, `cap-${String(startedTs).padStart(13, '0')}`);
+-    try { await owner.start({ outDir: segmentDir, families, rotation }); } catch (err) { state = 'FAILED'; lastError = String(err?.message ?? err).slice(0, 200); throw err; }
++    try { await owner.start({ outDir: segmentDir, families, rotation, awaitInitialSweep: false }); } catch (err) { state = 'FAILED'; lastError = String(err?.message ?? err).slice(0, 200); throw err; }
+     if (recordingFailure) { state = 'RECORDING_FAILED'; writeStatus(); return { state, http: null, segmentDir, error: recordingFailure }; }
+     if (httpPort !== null) { await new Promise((resolve, reject) => { server = http.createServer(handle); server.on('error', reject); server.listen(httpPort, httpHost, () => { boundPort = server.address().port; resolve(); }); }); }
+     state = 'ACTIVE'; writeStatus(); statusTimer = timers.setInterval(writeStatus, 5000); statusTimer.unref?.();
+     if (caseEverySeconds) { const tick = () => { for (const s of subjects.subjects) enqueueCase({ canonicalCoin: s.canonicalCoin, reason: 'SCHEDULED' }); }; caseTimer = timers.setInterval(tick, caseEverySeconds * 1000); caseTimer.unref?.(); }
+-    return { state, http: boundPort ? { host: httpHost, port: boundPort } : null, segmentDir, accountingDir };
++    return { state, http: boundPort ? { host: httpHost, port: boundPort } : null, segmentDir, accountingDir, bootstrap: owner.status().bootstrap };
+   }
+   // stop: admission closed -> runtime barrier awaited -> owner stopped (segment sealed) -> port released; idempotent, first error kept
+   async function stop({ seal = true } = {}) {
+diff --git a/rumor2/collector.js b/rumor2/collector.js
+index 9bd708d..f4758d6 100644
+--- a/rumor2/collector.js
++++ b/rumor2/collector.js
+@@ -23,7 +23,7 @@ import path from 'node:path';
+ import { existsSync, statSync, openSync, readSync, closeSync, readFileSync } from 'node:fs';
+ import { loadConfig, dataDir } from '../lib/config.js';
+ import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
+-import { PROVIDERS, PROVIDER_IDS, userAgentFor } from './registry.js';
++import { PROVIDERS, PROVIDER_IDS, normalizeHttpContact, userAgentFor } from './registry.js';
+ import { fetchProviderFeed } from './http.js';
+ import { parseFeed } from './feed.js';
+ import { parseEdgarConfig, parseEdgarSubmissions, edgarSubmissionsUrl } from './edgar.js';
+@@ -737,7 +737,7 @@ export function startRumor2({
+   // enable flag, or an invalid whitelist means the ear is NOT_QUERIED with
+   // the honest reason — never a crash, never an invented configuration.
+   function providerGate(p) {
+-    const hasContact = typeof contact === 'string' && contact.length > 0;
++    const hasContact = normalizeHttpContact(contact) !== null;
+     if (p.id === 'EDGAR_OFFICIAL') {
+       if (!edgarEnabled) return { ready: false, detail: 'disabled (RUMOR2_EDGAR_ENABLED)' };
+       if (!edgarCfg.ok) return { ready: false, detail: `EDGAR config invalid: ${edgarCfg.reason}` };
+diff --git a/rumor2/registry.js b/rumor2/registry.js
+index 1437d56..dcc1ee7 100644
+--- a/rumor2/registry.js
++++ b/rumor2/registry.js
+@@ -17,10 +17,24 @@ export const PROVIDERS = Object.freeze([KRAKEN_OFFICIAL, SEC_OFFICIAL, CFTC_OFFI
+ export const PROVIDER_IDS = Object.freeze(PROVIDERS.map((p) => p.id));
+ export const providerById = (id) => PROVIDERS.find((p) => p.id === id) ?? null;
+ 
++// SEC asks automated clients to identify an operator. Treat that value as
++// header material, not merely a truthy configuration string: blank/control
++// text or a value without a usable e-mail address keeps contact-gated ears
++// dark. The normalized value is the only form allowed into User-Agent.
++const EMAIL_IN_CONTACT_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
++const HEADER_CONTROL_RE = /[\u0000-\u001f\u007f]/;
++export function normalizeHttpContact(contact) {
++  if (typeof contact !== 'string') return null;
++  const normalized = contact.trim();
++  if (!normalized || normalized.length > 200 || HEADER_CONTROL_RE.test(normalized) || !EMAIL_IN_CONTACT_RE.test(normalized)) return null;
++  return normalized;
++}
++
+ // The one User-Agent policy: a clear research identity, with the operator
+ // contact appended when configured. Never a browser string, never personal
+ // data hardcoded.
+ export function userAgentFor(provider, contact) {
+   const base = 'SerpentResearch/1.0 (automated public-feed research; read-only)';
+-  return typeof contact === 'string' && contact.length > 0 && contact.length <= 200 ? `${base} contact: ${contact}` : base;
++  const normalizedContact = normalizeHttpContact(contact);
++  return normalizedContact ? `${base} contact: ${normalizedContact}` : base;
+ }
+diff --git a/rumor2/social-farcaster-runtime.js b/rumor2/social-farcaster-runtime.js
+index 22f7415..745572e 100644
+--- a/rumor2/social-farcaster-runtime.js
++++ b/rumor2/social-farcaster-runtime.js
+@@ -26,7 +26,7 @@ export function createFarcasterRuntime({ env = process.env, config = farcasterCo
+   const resultLimit = config.resultLimit ?? NEYNAR_SEARCH_DEFAULT_RESULT_LIMIT;
+   const queryMode = config.queryMode ?? (Array.isArray(config.queries) ? 'EXPLICIT_STATIC' : 'NOT_CONFIGURED');
+   const assetsPerQuery = config.assetsPerQuery ?? FARCASTER_CATALOG_ASSETS_PER_QUERY_DEFAULT;
+-  let gateReason = 'NOT_STARTED'; const counters = { requests: 0, pages: 0, admitted: 0, rejected: 0 };
++  let gateReason = 'NOT_STARTED'; const counters = { requests: 0, pages: 0, admitted: 0, rejected: 0, reservationAppendFailures: 0 };
+   const base = createSocialRuntime({ provider: FARCASTER_OFFICIAL, mapCommit: neynarEventToRaw, cursorOf: () => null, scopeSource, filter, now, log,
+     sourceFactory: ({ intake: i }) => { intake = i; const source = { start: () => { active = true; return source; }, stop: () => { active = false; intake = null; }, status: () => ({ mode: 'SEARCH_POLLING', connected: false, intake: i.stats() }) }; return source; } });
+   function gate() {
+@@ -90,7 +90,11 @@ export function createFarcasterRuntime({ env = process.env, config = farcasterCo
+       }
+       pendingReservation ??= { event: farcasterRequestEvent(day, used + 1, now()), query: activeQuery };
+       const reserved = await append([pendingReservation.event]);
+-      if (!reserved?.ok) return { ok: false, reason: reserved?.reason ?? 'REQUEST_RESERVATION_FAILED' };
++      if (!reserved?.ok) {
++        counters.reservationAppendFailures += 1;
++        lastError = reserved?.reason ?? 'REQUEST_RESERVATION_FAILED';
++        return { ok: false, reason: lastError };
++      }
+       totalRequests += 1;
+       if (!valid()) { stop('writer lost after reservation'); return { ok: false, reason: 'WRITER_FENCE_LOST' }; }
+       receipts = [pendingReservation.event]; receiptSeq = reserved.lastSeq; used = pendingReservation.event.ordinal; const requestedQuery = pendingReservation.query; pendingReservation = null;
+@@ -112,5 +116,8 @@ export function createFarcasterRuntime({ env = process.env, config = farcasterCo
+     } finally { abort = null; inFlight = false; }
+   }
+   return { provider: FARCASTER_OFFICIAL, hydrate, start, stop, settle, isActive: base.isActive,
+-    status: () => ({ ...base.status(), enabled: config.enabled, transportImplemented: true, gateReason: gate() ?? gateReason, transport: 'NEYNAR_SEARCH_REST', coverage, lastSuccessTs, lastError, queryPolicy: { mode: queryMode, assetsPerQuery: queryMode === 'CATALOG_ROTATION' ? assetsPerQuery : null, totalRequestReservations: totalRequests, last: lastQuery ? { catalogContentId: lastQuery.catalogContentId, bases: lastQuery.bases, requestOrdinal: lastQuery.requestOrdinal } : null }, quota: { day: meterDay, requests: used, maxDailyRequests: config.maxDailyRequests, resultLimit }, counters: { ...counters } }) };
++    status: () => {
++      const status = base.status();
++      return { ...status, stats: { ...status.stats, appendFailures: status.stats.appendFailures + counters.reservationAppendFailures }, enabled: config.enabled, transportImplemented: true, gateReason: gate() ?? gateReason, transport: 'NEYNAR_SEARCH_REST', coverage, lastSuccessTs, lastError, queryPolicy: { mode: queryMode, assetsPerQuery: queryMode === 'CATALOG_ROTATION' ? assetsPerQuery : null, totalRequestReservations: totalRequests, last: lastQuery ? { catalogContentId: lastQuery.catalogContentId, bases: lastQuery.bases, requestOrdinal: lastQuery.requestOrdinal } : null }, quota: { day: meterDay, requests: used, maxDailyRequests: config.maxDailyRequests, resultLimit }, counters: { ...counters } };
++    } };
+ }
+diff --git a/test/data-only-budget.test.js b/test/data-only-budget.test.js
+index 98e1b60..ef10e77 100644
+--- a/test/data-only-budget.test.js
++++ b/test/data-only-budget.test.js
+@@ -10,6 +10,12 @@ import {
+   DEFAULT_DATA_ONLY_LANES,
+ } from "../lib/data-only-budget.js";
+ 
++test("GDELT discovery has an exact zero-cost lane under the deployment daily cap", () => {
++  assert.equal(dataOnlyLaneForRequest("https://api.gdeltproject.org/api/v2/doc/doc?query=crypto"), "GDELT_NEWS_DISCOVERY");
++  assert.deepEqual(DEFAULT_DATA_ONLY_LANES.GDELT_NEWS_DISCOVERY, { maxDailyRequests: 16, usdPerRequest: 0 });
++  assert.equal(dataOnlyLaneForRequest("https://evil.example/gdelt"), null);
++});
++
+ test("data-only request reservations survive restart and stop at the exact daily cap", async () => {
+   const dir = mkdtempSync(path.join(os.tmpdir(), "serpent-data-budget-"));
+   const lanes = { TEST: { maxDailyRequests: 2, usdPerRequest: 0 } };
+diff --git a/test/data-only-runtime.test.mjs b/test/data-only-runtime.test.mjs
+index 1be5807..ef5d173 100644
+--- a/test/data-only-runtime.test.mjs
++++ b/test/data-only-runtime.test.mjs
+@@ -42,3 +42,44 @@ test('data-only launcher derives official/social scope from the accepted catalog
+   assert.doesNotMatch(source, /\b(?:BTC|ETH|SOL)\b/);
+   assert.match(source, /namedPreference:\s*false/);
+ });
++
++test('data-only deployment composes the existing YouTube collector behind explicit fail-closed gates and durable status', () => {
++  const source = readFileSync(entry, 'utf8');
++  const supervisor = readFileSync(path.join(root, 'tools', 'data-only-with-ui.mjs'), 'utf8');
++  for (const text of [source, supervisor]) {
++    assert.match(text, /SOCIAL_VIDEO_ENABLED:\s*process\.env\.SOCIAL_VIDEO_ENABLED === 'true' \? 'true' : 'false'/);
++    assert.doesNotMatch(text, /SOCIAL_VIDEO_ENABLED:\s*'true'/, 'the launcher must not invent YouTube authorization');
++  }
++  assert.match(source, /import\('\.\.\/video\/collector\.js'\)/);
++  assert.match(source, /import\('\.\.\/video\/reader\.js'\)/);
++  assert.match(source, /startVideo\(\{ env: process\.env, dataDir: root, log, signals: false \}\)/);
++  assert.match(source, /blockers\.YOUTUBE/);
++  assert.match(source, /youtube:\s*video \? readVideoStatus\(root\)/);
++  assert.match(source, /handles\.push\(video\)/, 'normal shutdown must stop the YouTube handle');
++});
++
++test('data-only news uses official feeds plus bounded GDELT metadata and withholds unverified publisher text', () => {
++  const source = readFileSync(entry, 'utf8');
++  assert.doesNotMatch(source, /startPress|readPressStatus|PRESS_ENABLED:\s*'true'/);
++  assert.doesNotMatch(source, /COINDESK_NEWS|THEBLOCK_NEWS|COINTELEGRAPH_NEWS|DECRYPT_NEWS/);
++  assert.match(source, /state:\s*'WITHHELD_TERMS_UNVERIFIED'/);
++  assert.match(source, /excerptsStored:\s*false/);
++  assert.match(source, /publisherFulltextStored:\s*false/);
++  assert.match(source, /publisherExcerptsStored:\s*false/);
++  assert.match(source, /DISCOVERY_SOURCES:\s*'GDELT_NEWS_DISCOVERY,POLYMARKET_PUBLIC_DATA,KALSHI_PUBLIC_DATA'/);
++  assert.match(source, /DISCOVERY_GDELT_MAX_DAILY_REQUESTS:\s*'16'/);
++  assert.match(source, /DISCOVERY_GDELT_RESULT_LIMIT:\s*'50'/);
++  assert.match(source, /DISCOVERY_GDELT_ASSETS_PER_QUERY:\s*'12'/);
++  assert.match(source, /contact:\s*process\.env\.SERPENT_HTTP_CONTACT \?\? null/);
++  assert.match(source, /edgarEnabled:\s*false/);
++  assert.match(source, /CFTC_OFFICIAL:\s*officialFeed\('CFTC_OFFICIAL'\)/);
++  assert.match(source, /SEC_OFFICIAL:\s*officialFeed\('SEC_OFFICIAL'\)/);
++  assert.match(source, /GDELT_NEWS_DISCOVERY:/);
++});
++
++test('Replit run and deployment commands select the data-only supervisor, not the paper runtime', () => {
++  const replit = readFileSync(path.join(root, '.replit'), 'utf8');
++  assert.match(replit, /^run = "npm run data:only-ui"/m);
++  assert.match(replit, /\[deployment\][\s\S]*run = \["npm", "run", "data:only-ui"\]/);
++  assert.doesNotMatch(replit, /npm run paper|paper run/);
++});
+diff --git a/test/farcaster-runtime.test.js b/test/farcaster-runtime.test.js
+index 117b2bd..309e19f 100644
+--- a/test/farcaster-runtime.test.js
++++ b/test/farcaster-runtime.test.js
+@@ -10,12 +10,12 @@ const T = Date.parse('2026-09-12T10:00:00Z');
+ const record = () => ({ approvalRef: 'fixture-only', status: 'ATTESTED', application: FARCASTER_APPLICATION_ID, useCaseVersion: FARCASTER_USE_CASE_VERSION, plan: 'FREE', credits: 'AVAILABLE', termsReview: 'REVIEWED_PERMITS', permittedUses: ['RETRIEVAL', 'DERIVED_FEATURES'], acquisitionPath: 'SEARCH_POLLING', acquisitionApproved: true, additionalAgreement: 'NOT_REQUIRED', additionalAgreementSatisfied: false, validUntil: null, retentionContent: 'COMPATIBLE_REVIEWED', retentionIdentity: 'COMPATIBLE_REVIEWED', reviewedOn: '2026-09-01' });
+ const cast = id => ({ object: 'cast', hash: `0x${id}`, author: { fid: 42, username: 'fixture' }, text: '$BTC fixture cast', timestamp: new Date(T - 10000).toISOString(), parent_hash: null });
+ function harness(extra = {}) {
+-  const events = []; let t = T, calls = 0, fail = false; let fence = true;
++  const events = []; let t = T, calls = 0, fail = false, reservationFail = false; let fence = true;
+   const options = { env: { NEYNAR_API_KEY: 'fixture-key' }, config: { enabled: true, queries: ['$BTC'], maxDailyRequests: 3, resultLimit: 10, intervalMs: 60000 }, accountRecord: record(), now: () => t, filter: buildSocialFilter({ terms: ['BTC'] }), fetchImpl: async (url, init) => { calls++; assert.ok(!url.includes('fixture-key')); assert.equal(init.headers['x-api-key'], 'fixture-key'); assert.equal(new URL(url).searchParams.get('limit'), '10'); const token = new URL(url).searchParams.get('cursor'); return Response.json({ result: { casts: [cast(token ? 'second' : 'first')], next: { cursor: token ? null : 'opaque-next' } } }); }, ...extra };
+-  const append = async batch => { if (fail && batch.some(e => SOCIAL_OBSERVATION_TYPES.includes(e.type))) return { ok: false, reason: 'disk unavailable' }; for (const e of batch) if (!events.some(x => x.sourceEventId === e.sourceEventId)) events.push(e); return { ok: true, lastSeq: events.length }; };
++  const append = async batch => { if (reservationFail && batch.some(e => e.type === FARCASTER_REQUEST_TYPE)) return { ok: false, reason: 'reservation storage unavailable' }; if (fail && batch.some(e => SOCIAL_OBSERVATION_TYPES.includes(e.type))) return { ok: false, reason: 'disk unavailable' }; for (const e of batch) if (!events.some(x => x.sourceEventId === e.sourceEventId)) events.push(e); return { ok: true, lastSeq: events.length }; };
+   const hooks = { append, fenceHeld: () => fence };
+   const make = () => { const rt = createFarcasterRuntime(options); assert.equal(rt.hydrate(events).ok, true); return rt; };
+-  return { make, hooks, events, advance: () => { t += 60000; }, calls: () => calls, fail: v => { fail = v; }, fence: v => { fence = v; } };
++  return { make, hooks, events, advance: () => { t += 60000; }, calls: () => calls, fail: v => { fail = v; }, reservationFail: v => { reservationFail = v; }, fence: v => { fence = v; } };
+ }
+ test('Farcaster composes documented REST -> normalized social journal -> replay; restart repeats safely with the spent budget intact', async () => {
+   const h = harness(); let r = h.make(); assert.equal(r.start().ok, true);
+@@ -30,6 +30,24 @@ test('Farcaster does not fetch the next page ahead of failed evidence storage an
+   h.advance(); await r.settle(h.hooks); assert.equal(h.calls(), 1); h.fail(false); await r.settle(h.hooks); assert.equal(replaySocialHistory(h.events).observed, 1);
+   await r.settle(h.hooks); assert.equal(h.calls(), 2); h.fence(false); assert.equal((await r.settle(h.hooks)).reason, 'WRITER_FENCE_LOST'); const n = h.events.length; await r.settle(h.hooks); assert.equal(h.events.length, n); r.stop();
+ });
++test('Farcaster exposes request-reservation append failures and retries the same unspent reservation', async () => {
++  const h = harness(); const r = h.make(); assert.equal(r.start().ok, true);
++  h.reservationFail(true);
++  assert.deepEqual(await r.settle(h.hooks), { ok: false, reason: 'reservation storage unavailable' });
++  let status = r.status();
++  assert.equal(h.calls(), 0, 'a request is never made before its durable quota reservation');
++  assert.equal(status.quota.requests, 0, 'a failed reservation is not counted as durably spent');
++  assert.equal(status.counters.reservationAppendFailures, 1);
++  assert.equal(status.stats.appendFailures, 1, 'the provider status aggregate includes reservation append failures');
++  assert.equal(status.lastError, 'reservation storage unavailable');
++  h.reservationFail(false);
++  assert.equal((await r.settle(h.hooks)).ok, true);
++  status = r.status();
++  assert.equal(h.calls(), 1);
++  assert.equal(status.quota.requests, 1);
++  assert.equal(h.events.filter(e => e.type === FARCASTER_REQUEST_TYPE).length, 1);
++  r.stop();
++});
+ test('Farcaster checks scoped access, explicit queries and caps independently; blocked gates make zero calls', () => {
+   for (const extra of [{ accountRecord: null }, { env: {} }, { config: { enabled: true, queries: [], maxDailyRequests: 1, resultLimit: 10, intervalMs: 60000 } }, { config: { enabled: true, queries: ['BTC'], maxDailyRequests: null, resultLimit: 10, intervalMs: 60000 } }, { config: { enabled: true, queries: ['BTC'], maxDailyRequests: 1, resultLimit: 101, intervalMs: 60000 } }, { accountRecord: { ...record(), acquisitionPath: 'WEBHOOK' } }, { accountRecord: { ...record(), permittedUses: ['RETRIEVAL'] } }]) {
+     const h = harness(extra); const r = h.make(); assert.equal(r.start().ok, false); assert.equal(h.calls(), 0); r.stop();
+diff --git a/test/market-lab-providers.test.js b/test/market-lab-providers.test.js
+index 623079c..81f2667 100644
+--- a/test/market-lab-providers.test.js
++++ b/test/market-lab-providers.test.js
+@@ -185,8 +185,9 @@ test('D12 FRED: series metadata is REQUIRED before observations (units come from
+ 
+ test('D13 Twelve Data: symbol search resolves an explicit exchange, quotes label a closed session STALE only for non-forex, bars keep provisional law; a provider status error with a plan message is ACCESS_BLOCKED; the key rides the documented header', async () => {
+   const c = createTwelveDataClient({ transport, clock, log: () => {}, credential: 'TDKEY' });
+-  const r = await c.resolve({ symbol: 'SPY', exchange: 'NYSE', proxyFor: 'US_EQUITIES' }); assert.equal(r.ok, true); assert.equal(last().headers.authorization, 'apikey TDKEY'); assert.equal(r.instrument.micCode, 'ARCX');
+-  const q = await c.quote({ symbol: 'SPY' }); assert.equal(q.ok, true); valid(q.observations); assert.equal(q.observations[0].payload.close, 641.2); assert.equal(q.observations[0].payload.proxyFor, 'US_EQUITIES');
++  const proxyFor = 'broad US equity benchmark ETF proxy';
++  const r = await c.resolve({ symbol: 'SPY', exchange: 'NYSE', proxyFor }); assert.equal(r.ok, true); assert.equal(last().headers.authorization, 'apikey TDKEY'); assert.equal(r.instrument.micCode, 'ARCX');
++  const q = await c.quote({ symbol: 'SPY' }); assert.equal(q.ok, true); valid(q.observations); assert.equal(q.observations[0].payload.close, 641.2); assert.equal(q.observations[0].payload.proxyFor, proxyFor);
+   const b = await c.bars({ symbol: 'SPY', interval: '1h', outputsize: 10 }); assert.equal(b.ok, true); valid(b.observations); assert.equal(b.observations.length, 2); assert.equal(b.observations[0].payload.close, 640);
+   const bad = createTwelveDataClient({ transport, clock, log: () => {}, credential: 'WRONG' }); await bad.resolve({ symbol: 'SPY', exchange: 'NYSE', proxyFor: 'X' }); const e = await bad.bars({ symbol: 'SPY' }); assert.equal(e.ok, false); assert.equal(e.failure.coverageState, 'ACCESS_BLOCKED');
+   assert.equal((await c.quote({ symbol: 'NOPE' })).failure.coverageState, 'NOT_QUERIED');
+diff --git a/test/market-lab-service-bootstrap.test.js b/test/market-lab-service-bootstrap.test.js
+new file mode 100644
+index 0000000..90495a0
+--- /dev/null
++++ b/test/market-lab-service-bootstrap.test.js
+@@ -0,0 +1,88 @@
++// The perpetual service must publish its control/status surface after catalogs resolve, without waiting for a potentially
++// slow all-provider REST sweep. Bounded captures keep the opposite default: their declared duration begins after bootstrap.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { createResearchOwner } from '../market-lab/owner.js';
++import { createResearchService } from '../market-lab/service.js';
++import { loadPolicy, loadSubjects, samplePolicy, sampleSubjects } from '../market-lab/policy.js';
++import * as H from './helpers/market-lab.js';
++
++const T0 = Date.parse('2026-09-08T12:00:00Z');
++const tmp = () => mkdtempSync(path.join(tmpdir(), 'mlab-bootstrap-'));
++const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
++
++function fredPolicy() { const p = structuredClone(samplePolicy()); p.providers.FRED.enabled = true; return loadPolicy(p); }
++function fredSubjects() { const s = structuredClone(sampleSubjects()); s.subjects = [s.subjects[0]]; s.macroSeries = ['CPIAUCSL']; s.crossAsset = []; return loadSubjects(s); }
++function controlledTimers() {
++  const intervals = [];
++  return {
++    intervals,
++    setInterval(fn, ms) { const h = { fn, ms, cleared: false, unref() {} }; intervals.push(h); return h; },
++    clearInterval(h) { if (h) h.cleared = true; },
++    setTimeout(fn, ms) { return setTimeout(fn, ms); },
++    clearTimeout(h) { clearTimeout(h); },
++  };
++}
++function hangingFetch() {
++  const state = { calls: 0, active: 0, maxActive: 0 };
++  const fetchImpl = (_url, { signal } = {}) => {
++    state.calls += 1; state.active += 1; state.maxActive = Math.max(state.maxActive, state.active);
++    return new Promise((_resolve, reject) => {
++      let done = false;
++      const abort = () => { if (done) return; done = true; state.active -= 1; reject(signal?.reason ?? new Error('aborted')); };
++      if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
++    });
++  };
++  return { state, fetchImpl };
++}
++async function within(promise, ms = 1000) {
++  let timer;
++  try { return await Promise.race([promise, new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms); })]); }
++  finally { clearTimeout(timer); }
++}
++
++test('service starts around a slow initial sweep, exposes bootstrap state, suppresses overlapping periodic sweeps, stops the sweep, and a new service can restart on the same root', async () => {
++  const root = tmp(); const timers = controlledTimers(); const slow = hangingFetch();
++  const service = createResearchService({ policy: fredPolicy(), subjects: fredSubjects(), env: { FRED_API_KEY: 'FREDKEY' }, researchRoot: root, mode: 'INTEGRATED', clock: () => T0, fetchImpl: slow.fetchImpl, timers, httpPort: null, families: ['MACRO_RELEASES'], closeDrainMs: 1000, log: () => {} });
++  try {
++    const started = await within(service.start());
++    assert.equal(started.state, 'ACTIVE');
++    await H.waitFor(() => slow.state.calls === 1);
++    assert.deepEqual({ state: service.status().bootstrap.initialState, mode: service.status().bootstrap.initialMode, running: service.status().bootstrap.running }, { state: 'RUNNING', mode: 'BACKGROUND', running: true });
++
++    const sweepTimer = timers.intervals.find((h) => h.ms === 300_000); assert.ok(sweepTimer, 'perpetual service schedules the provider sweep');
++    sweepTimer.fn(); sweepTimer.fn(); await Promise.resolve();
++    assert.equal(slow.state.calls, 1, 'periodic ticks join/skip the active sweep instead of dispatching an overlap');
++    assert.equal(slow.state.maxActive, 1);
++    assert.equal(service.status().bootstrap.overlapSkips, 2);
++
++    const stopped = await within(service.stop({ seal: false }));
++    assert.equal(stopped.state, 'STOPPED'); assert.equal(slow.state.active, 0);
++    assert.equal(service.status().bootstrap.initialState, 'STOPPED'); assert.equal(service.status().bootstrap.running, false);
++    assert.ok(timers.intervals.every((h) => h.cleared));
++    sweepTimer.fn(); await Promise.resolve(); assert.equal(slow.state.calls, 1, 'a cleared late tick has no authority after stop');
++
++    const timers2 = controlledTimers(); let calls2 = 0;
++    const fetch2 = async (url) => { calls2 += 1; return new URL(url).pathname === '/fred/series' ? json(H.FRED_SERIES) : json(H.FRED_OBSERVATIONS); };
++    const restarted = createResearchService({ policy: fredPolicy(), subjects: fredSubjects(), env: { FRED_API_KEY: 'FREDKEY' }, researchRoot: root, mode: 'INTEGRATED', clock: () => T0 + 1, fetchImpl: fetch2, timers: timers2, httpPort: null, families: ['MACRO_RELEASES'], log: () => {} });
++    assert.equal((await within(restarted.start())).state, 'ACTIVE');
++    await H.waitFor(() => restarted.status().bootstrap.initialState === 'COMPLETE');
++    assert.equal(calls2, 2); assert.equal(restarted.status().bootstrap.initialMode, 'BACKGROUND');
++    await restarted.stop({ seal: false });
++  } finally {
++    if (service.isActive()) await service.stop({ seal: false });
++    rmSync(root, { recursive: true, force: true });
++  }
++});
++
++test('owner keeps awaitInitialSweep=true by default for bounded capture callers', async () => {
++  const slow = hangingFetch(); const owner = createResearchOwner({ policy: fredPolicy(), subjects: fredSubjects(), env: { FRED_API_KEY: 'FREDKEY' }, mode: 'INTEGRATED', clock: () => T0, fetchImpl: slow.fetchImpl, closeDrainMs: 1000, log: () => {} });
++  let settled = false; const starting = owner.start({ families: ['MACRO_RELEASES'] }).then((v) => { settled = true; return v; });
++  await H.waitFor(() => slow.state.calls === 1); await Promise.resolve();
++  assert.equal(settled, false); assert.equal(owner.status().bootstrap.initialMode, 'AWAITED');
++  await within(owner.stop({ seal: false })); await within(starting);
++  assert.equal(owner.status().bootstrap.initialState, 'STOPPED'); assert.equal(owner.status().bootstrap.running, false);
++});
+diff --git a/test/market-lab-twelvedata-cadence.test.js b/test/market-lab-twelvedata-cadence.test.js
+new file mode 100644
+index 0000000..8022bbe
+--- /dev/null
++++ b/test/market-lab-twelvedata-cadence.test.js
+@@ -0,0 +1,55 @@
++// Twelve Data's cadence is provider-specific: slower cross-asset polling must not slow the faster venue chart/flow lanes.
++// Cache hits preserve the original receipt/knowledge clocks so a 15-minute refresh fence never pretends old data is new.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { createResearchOwner } from '../market-lab/owner.js';
++import { loadPolicy, samplePolicy, sampleSubjects } from '../market-lab/policy.js';
++import { TWELVEDATA_BAR_REFRESH_MS } from '../market-lab/providers/twelvedata.js';
++import * as H from './helpers/market-lab.js';
++
++const DAY_MS = 86_400_000;
++const T0 = Date.parse('2026-09-08T12:00:00Z');
++
++function twelveDataPolicy() {
++  const p = structuredClone(samplePolicy()); const td = p.providers.TWELVEDATA;
++  td.enabled = true;
++  td.plan = { name: 'Basic 8 fixture', billing: 'FREE', includedCallsPerMonth: null, remainingCalls: null, incrementalUsdPerCall: 0, attestation: 'fixture free plan', verifiedDate: '2026-09-08', quoteUsdPerMonth: 0 };
++  td.limits = { maxCallsPerDay: 600, maxCallsPerMonth: 18_000, maxConcurrency: 1 };
++  td.permittedEndpoints = ['symbol-search', 'quote', 'time-series'];
++  return loadPolicy(p);
++}
++
++test('Twelve Data cross-asset polling is quota-safe for the five paper proxies and cached rows keep their original clocks until the 15-minute provider refresh', async () => {
++  const subjects = sampleSubjects(); const clock = H.clockAt(T0);
++  const fixture = await H.startHttpFixture({
++    'GET /symbol_search': (req) => ({ json: { status: 'ok', data: [{ symbol: req.query.symbol, instrument_name: `${req.query.symbol} fixture`, exchange: 'TEST', mic_code: 'TEST', instrument_type: req.query.symbol.includes('/') ? 'Forex' : 'ETF', currency: 'USD' }] } }),
++    'GET /time_series': (req) => ({ json: { status: 'ok', meta: { symbol: req.query.symbol, interval: '1h', currency: 'USD', exchange: 'TEST', type: req.query.symbol.includes('/') ? 'Forex' : 'ETF' }, values: [{ datetime: '2026-09-08 10:00:00', open: '100', high: '102', low: '99', close: '101', volume: '10' }] } }),
++  });
++  const owner = createResearchOwner({ policy: twelveDataPolicy(), subjects, env: { TWELVEDATA_API_KEY: 'TDKEY' }, mode: 'INTEGRATED', clock, fetchImpl: H.fetchFor(fixture), log: () => {} });
++  try {
++    await owner.start({ families: ['CROSS_ASSET'] });
++    const pathCount = (pathname) => fixture.requests.filter((r) => r.path === pathname).length;
++    assert.equal(pathCount('/symbol_search'), subjects.crossAsset.length);
++    assert.equal(pathCount('/time_series'), subjects.crossAsset.length);
++
++    clock.advance(TWELVEDATA_BAR_REFRESH_MS - 1);
++    const cached = await owner.acquire('CROSS_ASSET', 'BTC');
++    assert.equal(pathCount('/time_series'), subjects.crossAsset.length, 'the provider is not repolled before its own cadence');
++    assert.ok(cached.results.filter((r) => r.endpointId === 'time-series').every((r) => r.state === 'CACHED'));
++    assert.ok(cached.observations.length > 0 && cached.observations.every((o) => o.receivedTs === T0 && o.knownAtTs === T0), 'cache hits keep source receipt/knowledge time; they are never restamped as fresh');
++
++    clock.advance(1);
++    const refreshed = await owner.acquire('CROSS_ASSET', 'BTC');
++    assert.equal(pathCount('/time_series'), subjects.crossAsset.length * 2);
++    assert.ok(refreshed.results.filter((r) => r.endpointId === 'time-series').every((r) => r.state === 'OK'));
++    assert.ok(refreshed.observations.length > 0 && refreshed.observations.every((o) => o.receivedTs === clock() && o.knownAtTs === clock()), 'a new clock appears only after a real provider response');
++    assert.ok(owner.observations().filter((o) => o.provider === 'TWELVEDATA').every((o) => o.receivedTs === T0 && o.knownAtTs === T0), 'an identical refetch is semantically deduplicated instead of restamping retained evidence as newer');
++
++    const maximumDailyCalls = subjects.crossAsset.length + subjects.crossAsset.length * Math.ceil(DAY_MS / TWELVEDATA_BAR_REFRESH_MS);
++    assert.equal(maximumDailyCalls, 485, 'five daily resolutions plus 96 five-symbol bar polls');
++    assert.ok(maximumDailyCalls <= twelveDataPolicy().providers.TWELVEDATA.limits.maxCallsPerDay);
++  } finally {
++    await owner.stop({ seal: false });
++    await fixture.close();
++  }
++});
+diff --git a/test/news-provider-hardening.test.js b/test/news-provider-hardening.test.js
+new file mode 100644
+index 0000000..cf46aaa
+--- /dev/null
++++ b/test/news-provider-hardening.test.js
+@@ -0,0 +1,105 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++
++import { normalizeKrakenAssetPairs } from '../survey/catalog.js';
++import { startRumor2 } from '../rumor2/collector.js';
++import { normalizeHttpContact, userAgentFor } from '../rumor2/registry.js';
++import { memJournal } from './helpers/rumor2-journal.js';
++import { DISCOVERY_SOURCES, discoveryRegistryError } from '../discovery/registry.js';
++import { discoveryCatalogContext, gdeltCatalogQuery } from '../discovery/query.js';
++import { DISCOVERY_CLOCK_SKEW_MS, discoveryObservationError, mapGdeltArticles } from '../discovery/parse.js';
++
++const T0 = Date.parse('2026-09-12T20:00:00Z');
++
++function catalogContext() {
++  const normalized = normalizeKrakenAssetPairs({
++    ADAUSD: { base: 'XADA', quote: 'ZUSD', wsname: 'ADA/USD', status: 'online' },
++    ETHUSD: { base: 'XETH', quote: 'ZUSD', wsname: 'ETH/USD', status: 'online' },
++  }, { observedTs: T0 - 1000 });
++  assert.equal(normalized.ok, true);
++  return discoveryCatalogContext({ status: 'ACCEPTED', fresh: true, catalog: normalized.catalog }, { nowTs: T0 });
++}
++
++test('contact-gated official providers accept normalized operator e-mail identity and reject unsafe header material', async () => {
++  assert.equal(normalizeHttpContact('  Operator <ops@example.com>  '), 'Operator <ops@example.com>');
++  for (const bad of [null, '', '   ', 'operator only', 'ops@example.com\r\nX-Injected: yes', `${'a'.repeat(196)}@x.io`]) {
++    assert.equal(normalizeHttpContact(bad), null);
++    assert.doesNotMatch(userAgentFor({}, bad), /contact:/);
++  }
++
++  const dir = mkdtempSync(path.join(tmpdir(), 'news-contact-gate-'));
++  const previousDataDir = process.env.COBRA_DATA_DIR;
++  process.env.COBRA_DATA_DIR = dir;
++  const calls = [];
++  const checkpointStore = {
++    async load() { return { outcome: 'NOT_FOUND' }; },
++    async save() { return { durable: true }; },
++  };
++  const collector = startRumor2({
++    enabled: true,
++    contact: 'ops@example.com\r\nX-Injected: yes',
++    config: { universe: ['BTC'] },
++    now: () => T0,
++    intervalMs: 2_147_000_000,
++    checkpointStore,
++    journal: memJournal([]),
++    fetchImpl: async (url) => { calls.push(String(url)); return new Response('', { status: 304 }); },
++    log: () => {},
++  });
++  try {
++    await collector.tickOnce();
++    assert.equal(calls.some((url) => url.includes('sec.gov')), false, 'unsafe contact must not activate the SEC ear');
++    const sec = collector.internals.coverageEntries(T0).find((entry) => entry.provider === 'SEC_OFFICIAL');
++    assert.equal(sec.state, 'NOT_QUERIED');
++    assert.match(sec.detail, /SERPENT_HTTP_CONTACT/);
++  } finally {
++    await collector.stop();
++    if (previousDataDir === undefined) delete process.env.COBRA_DATA_DIR; else process.env.COBRA_DATA_DIR = previousDataDir;
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++test('discovery registry pins every provider id to its exact audited HTTPS endpoint', () => {
++  assert.equal(discoveryRegistryError(), null);
++  const altered = (patch) => DISCOVERY_SOURCES.map((source) => source.id === 'GDELT_NEWS_DISCOVERY' ? { ...source, ...patch } : source);
++  assert.match(discoveryRegistryError(altered({ baseUrl: 'https://api.gdeltproject.org/api/v2/doc/other' })), /transport/);
++  assert.match(discoveryRegistryError(altered({ baseUrl: 'https://api.gdeltproject.org:8443/api/v2/doc/doc' })), /transport/);
++  assert.match(discoveryRegistryError(altered({ baseUrl: 'https://operator@api.gdeltproject.org/api/v2/doc/doc' })), /transport/);
++  assert.match(discoveryRegistryError(altered({ kind: 'PREDICTION_MARKET', route: 'CURSOR_JSON' })), /kind|route/);
++});
++
++test('GDELT parser refuses future causal clocks and never retains publisher body or fulltext fields', () => {
++  const context = catalogContext();
++  const plan = gdeltCatalogQuery(context, { requestOrdinal: 0, assetsPerQuery: 2 });
++  const future = new Date(T0 + DISCOVERY_CLOCK_SKEW_MS + 1000).toISOString();
++  const mapped = mapGdeltArticles({ articles: [
++    { title: 'ADA market update', url: 'https://publisher.example/valid', seendate: '20260912T200400Z', summary: 'feed excerpt', description: 'article description', content: 'unlicensed full article', body: 'unlicensed full article' },
++    { title: 'ETH future discovery', url: 'https://publisher.example/future-seen', seendate: '20260912T200501Z' },
++    { title: 'ETH future publication', url: 'https://publisher.example/future-published', seendate: '20260912T195900Z', publicationdate: future },
++  ] }, { context, plan, receiptTs: T0, limit: 50 });
++
++  assert.equal(mapped.invalid, 2);
++  assert.equal(mapped.observations.length, 1);
++  const observation = mapped.observations[0];
++  assert.equal(observation.summary, '');
++  assert.equal(observation.bodyFetched, false);
++  assert.equal('body' in observation, false);
++  assert.equal('content' in observation, false);
++  assert.equal('description' in observation, false);
++  assert.equal(discoveryObservationError(observation), null);
++
++  const forgedFuture = { ...observation, discoveredTs: T0 + DISCOVERY_CLOCK_SKEW_MS + 1 };
++  assert.equal(discoveryObservationError(forgedFuture), 'GDELT discovery law');
++});
++
++test('GDELT parser fails closed on missing or mismatched catalog provenance instead of throwing', () => {
++  const context = catalogContext();
++  const plan = gdeltCatalogQuery(context, { requestOrdinal: 0, assetsPerQuery: 2 });
++  const json = { articles: [{ title: 'ADA update', url: 'https://publisher.example/item' }] };
++  assert.match(mapGdeltArticles(json, {}).error, /catalog context/);
++  assert.match(mapGdeltArticles(json, { context, plan: { ...plan, catalogContentId: 'wrong' }, receiptTs: T0 }).error, /does not match/);
++  assert.match(mapGdeltArticles(json, { context, plan, receiptTs: NaN }).error, /receipt clock/);
++});
+diff --git a/tools/data-only-runtime.mjs b/tools/data-only-runtime.mjs
+index f24d1ca..890e3f1 100644
+--- a/tools/data-only-runtime.mjs
++++ b/tools/data-only-runtime.mjs
+@@ -28,8 +28,11 @@ Object.assign(process.env, {
+   RUMOR2_SOCIAL_FARCASTER_INTERVAL_SEC: '900',
+   RUMOR2_SOCIAL_FARCASTER_ASSETS_PER_QUERY: '6',
+   RUMOR2_SOCIAL_CURRENT_ENABLED: 'false',
+-  SOCIAL_VIDEO_ENABLED: 'false',
++  // YouTube is opt-in even in DATA-ONLY mode. Preserve only an exact explicit
++  // enable; absent, malformed, or differently-cased values stay fail-closed.
++  SOCIAL_VIDEO_ENABLED: process.env.SOCIAL_VIDEO_ENABLED === 'true' ? 'true' : 'false',
+   RUMOR2_EDGAR_ENABLED: 'false',
++  RUMOR2_OFAC_ENABLED: 'true',
+ });
+ 
+ const log = (message) => console.log(`[DATA-ONLY ${new Date().toISOString()}] ${message}`);
+@@ -40,13 +43,13 @@ const { atomicWriteJson, readJsonBounded } = await import('../lib/jsonl.js');
+ const { createDataOnlyFetch } = await import('../lib/data-only-budget.js');
+ const { startWideEye } = await import('../survey/wideeye.js');
+ const { readWideEyeStatus } = await import('../survey/reader.js');
+-const { startPress } = await import('../press/collector.js');
+-const { readPressStatus } = await import('../press/reader.js');
+ const { startInfra } = await import('../infra/collector.js');
+ const { readInfraStatus } = await import('../infra/reader.js');
+ const { startPublicDiscovery } = await import('../discovery/collector.js');
+ const { readDiscoveryStatus } = await import('../discovery/reader.js');
+ const { startGateway } = await import('../gateway/collector.js');
++const { startVideo } = await import('../video/collector.js');
++const { readVideoStatus } = await import('../video/reader.js');
+ const { startPersistence, getPersistence } = await import('../persistence/runtime.js');
+ const { rumor2CheckpointStore } = await import('../persistence/rumor2-checkpoint.js');
+ const { rumor2JournalStore } = await import('../persistence/rumor2-journal.js');
+@@ -76,7 +79,6 @@ writeFileSync(runtimeFd, JSON.stringify({ pid: process.pid, openedTs: Date.now()
+ 
+ // These collectors own explicit single-writer files. Recover only a proven
+ // dead PID; an unreadable or live lock fails closed.
+-recoverStaleLock(path.join(root, 'press', 'writer.lock'), 'press writer');
+ recoverStaleLock(path.join(root, 'public-discovery', 'writer.lock'), 'public discovery writer');
+ 
+ const base = loadConfig();
+@@ -88,8 +90,21 @@ const config = {
+ const governor = createDataOnlyFetch({ dataDir: root, maxMonthlyUsd: 0 });
+ const handles = [];
+ const blockers = {};
++const publisherNewsPolicy = Object.freeze({
++  enabled: false,
++  desired: 'OFF',
++  state: 'WITHHELD_TERMS_UNVERIFIED',
++  selectedSources: Object.freeze([]),
++  authority: 'NONE',
++  coverage: 'NO_PUBLISHER_CONTENT',
++  bodyFetched: false,
++  excerptsStored: false,
++  gateDetail: 'Publisher RSS terms are unverified; publisher requests, excerpts, and article bodies are withheld. Official CFTC/SEC feeds and GDELT link metadata provide the news path.',
++});
++blockers.PRESS = publisherNewsPolicy.gateDetail;
+ let wideEye = null;
+ let rumor2 = null;
++let video = null;
+ let persistence = null;
+ let stopped = false;
+ 
+@@ -117,24 +132,38 @@ if (!Array.isArray(catalog?.markets) || catalog.markets.length === 0) {
+   blockers.KRAKEN_CATALOG = 'no accepted full Kraken USD catalog; catalog-dependent collectors withheld (no named fallback)';
+ }
+ 
+-try {
+-  const env = { ...process.env, PRESS_ENABLED: 'true', PRESS_SOURCES: 'COINDESK_NEWS,THEBLOCK_NEWS,COINTELEGRAPH_NEWS,DECRYPT_NEWS' };
+-  const handle = startPress({ env, dataDir: root, fetchImpl: governor.fetch, log, signals: false });
+-  if (handle) handles.push(handle);
+-} catch (error) { blockers.PRESS = bounded(error.message); log(`PRESS blocked: ${blockers.PRESS}`); }
+-
+ try {
+   const env = { ...process.env, INFRA_OBS_ENABLED: 'true', INFRA_SOURCES: 'NOAA_SWPC,CLOUDFLARE_RADAR', INFRA_CLOUDFLARE_GLOBAL: 'true' };
+   const handle = startInfra({ env, dataDir: root, fetchImpl: governor.fetch, log, signals: false });
+   if (handle) handles.push(handle);
+ } catch (error) { blockers.INFRA = bounded(error.message); log(`INFRA blocked: ${blockers.INFRA}`); }
+ 
++try {
++  // The source owns its key/query/quota gates and durable checkpoint. Passing
++  // the deployment environment does not invent any defaults: a missing exact
++  // enable, key, query list, or daily budget causes zero YouTube requests.
++  video = startVideo({ env: process.env, dataDir: root, log, signals: false });
++  if (video) {
++    handles.push(video);
++    const gate = video.gate();
++    if (!gate.ok) blockers.YOUTUBE = `${gate.reason}: ${gate.detail}`;
++  } else {
++    blockers.YOUTUBE = 'DISABLED: SOCIAL_VIDEO_ENABLED is not true';
++  }
++} catch (error) {
++  blockers.YOUTUBE = bounded(error.message);
++  log(`YOUTUBE blocked: ${blockers.YOUTUBE}`);
++}
++
+ if (catalog) {
+   try {
+     const env = {
+       ...process.env,
+       DISCOVERY_ENABLED: 'true',
+-      DISCOVERY_SOURCES: 'POLYMARKET_PUBLIC_DATA,KALSHI_PUBLIC_DATA',
++      DISCOVERY_SOURCES: 'GDELT_NEWS_DISCOVERY,POLYMARKET_PUBLIC_DATA,KALSHI_PUBLIC_DATA',
++      DISCOVERY_GDELT_MAX_DAILY_REQUESTS: '16',
++      DISCOVERY_GDELT_RESULT_LIMIT: '50',
++      DISCOVERY_GDELT_ASSETS_PER_QUERY: '12',
+       DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS: '24',
+       DISCOVERY_KALSHI_MAX_DAILY_REQUESTS: '24',
+       DISCOVERY_POLYMARKET_PAGE_LIMIT: '100',
+@@ -170,6 +199,7 @@ if (!blockers.RUMOR2 && catalog) {
+       researchCatalogSource: { snapshot: () => wideEye.catalogSnapshot(), notices: () => wideEye.researchNotices(), population: () => wideEye.sweepPopulationSnapshot(), deepObservation: () => null },
+       officialCatalogSource: () => wideEye.catalogSnapshot(),
+       enabled: true,
++      contact: process.env.SERPENT_HTTP_CONTACT ?? null,
+       edgarEnabled: false,
+       ofacEnabled: true,
+       socialBlueskyEnabled: true,
+@@ -187,7 +217,26 @@ if (!blockers.RUMOR2 && catalog) {
+ function readIf(file) { try { return readJsonBounded(file, 8 * 1024 * 1024); } catch { return null; } }
+ function writeRuntimeStatus() {
+   const budget = governor.status();
+-  const currentCatalog = wideEye.catalogSnapshot()?.catalog ?? null;
++  const currentCatalog = wideEye?.catalogSnapshot?.()?.catalog ?? null;
++  const rumorStatus = rumor2?.status?.() ?? null;
++  const discoveryStatus = readDiscoveryStatus(root);
++  const officialFeed = (id) => {
++    const provider = rumorStatus?.providers?.[id] ?? null;
++    return provider ? {
++      desired: 'ON', enabled: provider.enabled === true, state: provider.coverage?.state ?? 'STARTING',
++      gateDetail: provider.gateDetail ?? provider.coverage?.detail ?? null, checkedTs: provider.coverage?.checkedTs ?? null,
++    } : { desired: 'ON', enabled: false, state: 'BLOCKED_RUNTIME', gateDetail: blockers.RUMOR2 ?? 'official feed runtime unavailable', checkedTs: null };
++  };
++  const gdelt = discoveryStatus?.sources?.GDELT_NEWS_DISCOVERY ?? null;
++  const newsSources = {
++    CFTC_OFFICIAL: officialFeed('CFTC_OFFICIAL'),
++    SEC_OFFICIAL: officialFeed('SEC_OFFICIAL'),
++    GDELT_NEWS_DISCOVERY: gdelt ? { desired: gdelt.desired, enabled: gdelt.desired === 'ON' && gdelt.state !== 'CONFIG_REQUIRED', state: gdelt.state, gateDetail: gdelt.lastError, checkedTs: gdelt.clocks?.lastSuccessTs ?? null } : { desired: 'ON', enabled: false, state: 'BLOCKED_RUNTIME', gateDetail: blockers.PUBLIC_DISCOVERY ?? blockers.KRAKEN_CATALOG ?? 'GDELT runtime unavailable', checkedTs: null },
++  };
++  const newsStates = Object.values(newsSources).map((source) => source.state);
++  const officialNewsState = newsStates.every((state) => ['OBSERVED', 'EMPTY'].includes(state)) ? 'ACTIVE'
++    : newsStates.some((state) => state === 'IDLE') ? 'STARTING'
++      : Object.values(newsSources).some((source) => source.enabled) ? 'DEGRADED' : 'BLOCKED';
+   const status = {
+     version: 'serpent-data-only-runtime-1',
+     tsMs: Date.now(),
+@@ -209,11 +258,23 @@ function writeRuntimeStatus() {
+     blockers,
+     collectors: {
+       wideeye: readWideEyeStatus(root),
+-      press: readPressStatus(root),
++      press: publisherNewsPolicy,
++      news: {
++        enabled: officialNewsState !== 'BLOCKED', state: officialNewsState, authority: 'NONE',
++        contentPolicy: 'OFFICIAL_FEEDS_AND_INDEXED_LINK_METADATA_ONLY', publisherFulltextStored: false, publisherExcerptsStored: false,
++        sources: newsSources,
++      },
+       infra: readInfraStatus(root),
+-      discovery: readDiscoveryStatus(root),
++      discovery: discoveryStatus,
++      youtube: video ? readVideoStatus(root) : {
++        enabled: process.env.SOCIAL_VIDEO_ENABLED === 'true',
++        state: process.env.SOCIAL_VIDEO_ENABLED === 'true' ? 'WITHHELD' : 'DISABLED',
++        gate: process.env.SOCIAL_VIDEO_ENABLED === 'true' ? 'WITHHELD' : 'DISABLED',
++        gateDetail: blockers.YOUTUBE ?? 'SOCIAL_VIDEO_ENABLED is not true',
++        authority: 'NONE',
++      },
+       gateway: { matrix: readIf(path.join(root, 'gateway', 'matrix.json')), receipts: Object.fromEntries(['KRAKEN_STATUS', 'COINBASE_STATUS', 'OKX_STATUS'].map((id) => [id, budget.lanes[id]])) },
+-      rumor2: rumor2?.status?.() ?? null,
++      rumor2: rumorStatus,
+       persistence: getPersistence().health(),
+     },
+     budget,
+diff --git a/tools/data-only-with-ui.mjs b/tools/data-only-with-ui.mjs
+index 1727caf..37ebdd5 100644
+--- a/tools/data-only-with-ui.mjs
++++ b/tools/data-only-with-ui.mjs
+@@ -43,7 +43,9 @@ const safetyEnv = {
+   RUMOR2_SOCIAL_FARCASTER_ACCOUNT_RETENTION_IDENTITY: 'COMPATIBLE_REVIEWED',
+   RUMOR2_SOCIAL_FARCASTER_ACCOUNT_REVIEWED_ON: '2026-09-12',
+   RUMOR2_SOCIAL_CURRENT_ENABLED: 'false',
+-  SOCIAL_VIDEO_ENABLED: 'false',
++  // Preserve only an exact operator/deployment opt-in. The collector still
++  // enforces the key, query-scope, and explicit daily-quota gates itself.
++  SOCIAL_VIDEO_ENABLED: process.env.SOCIAL_VIDEO_ENABLED === 'true' ? 'true' : 'false',
+   RUMOR2_EDGAR_ENABLED: 'false',
+ };
+ 
