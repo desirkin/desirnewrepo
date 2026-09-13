@@ -79,3 +79,31 @@ retries), run ONE normal existing discovery collector cycle — the collector
 lives in the concurrent Codex branch, not here — and confirm the saved
 article through its normal reader (`node bin/cobra.js discovery tail` on
 that branch). Keep continuous GDELT polling disabled until that succeeds.
+
+## 7. Addendum 2 / dynamic sizing — the two switches (both OFF)
+
+Nothing in the running host consumes learned selection or dynamic sizing:
+`fly.js` passes neither port. To run a SHADOW-mode experiment in a clone
+(NOT the live checkout; PAPER/LIVE stay off):
+
+```js
+// composition-level (snapshot cached 60s, staleness law still applies):
+const run = await composeJudge({
+  ...existingArgs,
+  learningActivationSource: () => readDecisionMemory({ store, nowTs: Date.now() }),
+  dynamicSizing: true,
+});
+```
+
+Every influenced decision then carries `LEARNED_RANK_ADJUSTMENT` and/or
+`DYNAMIC_SIZE_SELECTION` measurement rows (selector/ladder version, reason,
+every candidate size). Removing the two arguments restores baseline
+behavior exactly — proved by test/judge-learning-intake.test.js rigs.
+
+Diagnostics (no live transport in this branch — registration + fixtures only):
+the harness lives in learning/diagnostic.js; a real probe requires an
+authorized budget and a caller-supplied transport, and parks as
+WAITING_FOR_BUDGET when the budget is spent.
+
+Integrity/status surface: `GET /api/learning` → `integrity` section
+(evidence by basis, diagnostics, switch states, selector + sizing versions).

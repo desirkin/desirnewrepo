@@ -87,9 +87,26 @@ async function learningView() {
   return {
     enabled: status !== null, serviceStatus: status, killSwitch: store.readKill(),
     patterns: heads.slice(0, 100).map((p) => ({ patternId: p.patternId, state: p.state, scope: p.scope, rawCount: p.evidence.rawCount, groupCount: p.evidence.groupCount, favorable: p.evidence.favorable, adverse: p.evidence.adverse, neutral: p.evidence.neutral, censored: p.evidence.censored, byBasis: p.evidence.byBasis, estimate: p.estimate, contradictions: p.contradictions.length, influencingPaper: p.state === 'ACTIVE_PAPER' })),
-    activations: activations.map((a) => ({ activationId: a.activationId, state: a.state, patternId: a.patternId, effectiveTs: a.effectiveTs, expiresTs: a.expiresTs, maxAbsAdjust: a.allowedEffect.maxAbsAdjust })),
+    activations: activations.map((a) => ({ activationId: a.activationId, state: a.state, patternId: a.patternId, effectiveTs: a.effectiveTs, expiresTs: a.expiresTs, maxAbsAdjust: a.allowedEffect.maxAbsAdjust, adjust: a.allowedEffect.adjust ?? null, axes: a.allowedEffect.axes ?? null, scope: a.scope ?? null })),
     campaigns, summaryToday: store.readSummary(today), summaryYesterday: store.readSummary(utcDateOf(Date.now() - 86_400_000)),
     coverageDates: store.coverageDates().slice(-7),
+    // ADDENDUM-2 / SIZING ADDENDUM: provenance + integrity surface. Read-only; both consumer switches are shown
+    // as they are actually wired in THIS process (fly.js passes neither port, so both are structurally OFF).
+    integrity: await (async () => {
+      try {
+        const { SELECTOR_VERSION, SNAPSHOT_MAX_AGE_MS } = await import('../judge/learning-intake.js');
+        const { SIZE_LADDER_VERSION, SIZING_OBJECTIVE } = await import('../judge/size-ladder.js');
+        const byBasis = {};
+        for (const p of heads) for (const [k, v] of Object.entries(p.evidence.byBasis ?? {})) byBasis[k] = (byBasis[k] ?? 0) + v;
+        const diagnostics = store.listDiagnostics().slice(0, 50).map((id) => { const m = store.readDiagnosticManifest(id); const s = store.readDiagnosticState(id); return { diagnosticId: id, model: m?.model ?? null, state: s?.state ?? m?.state ?? null, calls: s?.calls ?? 0, maxCalls: m?.maxCalls ?? null }; });
+        return {
+          evidenceByBasis: byBasis, diagnostics,
+          switches: { learnedSelection: 'OFF_NOT_WIRED', dynamicSizing: 'OFF_NOT_WIRED' },
+          selector: { version: SELECTOR_VERSION, snapshotMaxAgeMs: SNAPSHOT_MAX_AGE_MS },
+          sizing: { version: SIZE_LADDER_VERSION, objective: SIZING_OBJECTIVE },
+        };
+      } catch (err) { return { error: String(err.message).slice(0, 160) }; }
+    })(),
     law: 'PROVISIONAL_MEMORY_IS_NOT_DECISION_INFLUENCE; ACTIVE_PAPER requires a separately authorized paper runtime',
     authority: 'NONE',
   };

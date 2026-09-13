@@ -196,3 +196,57 @@ no live parity; synthetic demonstrations never count as live success;
 insufficient real observations is an honest "collecting evidence" state.
 PAPER and real trading remain OFF and are not started, armed, or made more
 likely by anything in this ticket.
+
+## 12. Addendum 2 — integrity, provenance and the Judge preservation gate
+
+- **Model provenance is a manifest, not a vibe** (`learning/model-integrity.js`):
+  every LLM identity carries a closed `MODEL_PROVENANCE` record; a training
+  cutoff is `DOCUMENTED_ADVERTISED` (with docRef + retrievedTs),
+  `INDEPENDENTLY_AUDITED`, or `UNKNOWN` — and `UNKNOWN` carries **no**
+  boundary. A floating alias is `VERSION_UNPINNED`. `determinismClaim` must
+  be `false`: nobody may claim a deterministic LLM.
+- **Temporal evidence classes**: `DETERMINISTIC_REPLAY`,
+  `HISTORICAL_LLM_AT_RISK`, `DOCUMENTED_PIT_RECONSTRUCTION`,
+  `PROSPECTIVE_SHADOW`, `SYNTHETIC_DIAGNOSTIC`. Only genuinely forward
+  evidence (decision recorded before the outcome window opens, invocation
+  not after the recorded decision) is prospective; at-risk historical rows
+  are excluded from the prospective gate by the clock law, whatever their
+  label claims.
+- **Dependency risk propagates; ancestry is disclosed, never banned**:
+  `RUNTIME_INPUT`, `FITTED_PARAMETER` and `VALIDATION_EVIDENCE` carry
+  contamination flags transitively; `HYPOTHESIS_ANCESTRY` is visibility
+  only — an idea's origin never poisons evidence gathered cleanly.
+- **Memory separation** (`learning/memory-view.js`): the research view shows
+  provisional patterns with authority NONE; the decision view resolves ONLY
+  validated activation artifacts; invalid heads are withheld with a reason,
+  never repaired; no parameter converts one view into the other.
+- **Diagnostic harness** (`learning/masking.js`, `learning/diagnostic.js`):
+  named-vs-masked contamination probes are registered (manifest sealed)
+  before any call; every call has its own isolated cache identity; repeats
+  are repeats, groups are the unit; budgets park runs as
+  `WAITING_FOR_BUDGET`. Interpretation laws ride every summary: no
+  difference is NOT proof of cleanliness; period decay alone is NOT
+  confirmed memorization. No live transport exists in this branch.
+- **Judge preservation gate**: the Judge consumes learning through exactly
+  one bridge (`judge/learning-intake.js`, importing only
+  learning/contracts.js + learning/features.js) behind a null-default port,
+  and dynamic sizing through a second null-default port
+  (`judge/size-ladder.js` over the UNCHANGED cost law). fly.js wires
+  NEITHER: with both switches off the Judge's decisions, refusals, rankings
+  and risk math are byte-identical to baseline on identical recorded inputs
+  (proved by rig comparison). The selector is deterministic, versioned
+  (`learning-selector-1`), logged as a MEASUREMENT row, and falls back to
+  baseline on no-match, staleness (15 min), invalid artifacts, scope or
+  eligibility misses, and conflicting active versions — the conservative
+  tie-break is smallest |adjust|, then earliest effectiveTs, then
+  lexicographic id.
+- **Dynamic sizing law**: the ladder evaluates fractions of the
+  risk-bounded spendable amount (0.25/0.5/0.75/1) through the existing
+  `sizeSearch`; risk caps bind at every size; a missing or one-sided book
+  invents nothing; every candidate size and its rejection reason is
+  recorded (`DYNAMIC_SIZE_SELECTION`). All-in is "eligible" only when
+  fraction 1 strictly wins under DEPTH_SUPPORTED costs — candle-fidelity
+  inputs can NEVER validate all-in (structural, not configurable).
+- **Both switches are separate and default OFF**; enabling either — like
+  PAPER, LIVE, learned selection, or all-spendable-cash behavior — requires
+  David's separate explicit approval and is NOT done by this branch.

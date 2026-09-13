@@ -46,13 +46,23 @@ test('runtime wiring is opt-in: fly.js gates LEARN-1 on LEARNING_ENABLED and use
   assert.ok(cobra.includes("import('../learning/commands.js')"));
 });
 
-test('the adapter is NOT wired into the judge or paper composition (the declared boundary stays dormant while paper is off)', () => {
+test('ADDENDUM-2 §06/§07: judge/learning-intake.js is the ONE named consumer seam — the only judge module reaching learning/, importing only the two named pure modules; paper/execution/watch stay untouched; the seam defaults dormant', () => {
+  // the explicit, documented fence amendment: exactly one judge file may import learning/, and only these modules
+  const BRIDGE = 'judge/learning-intake.js';
+  const bridgeSrc = readFileSync(path.join(process.cwd(), BRIDGE), 'utf8');
+  const bridgeImports = [...bridgeSrc.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
+  assert.deepEqual(bridgeImports.sort(), ['../learning/contracts.js', '../learning/features.js'], 'the bridge imports ONLY the two named pure learning modules');
+  for (const forbidden of ['fetch(', 'WebSocket', 'node:http', 'node:fs', 'child_process', "'../execution", "'./composition", "'../socrates", "'./judge.js'"]) assert.ok(!bridgeSrc.includes(forbidden), `${BRIDGE} contains ${forbidden}`);
   for (const dir of ['judge', 'paper', 'execution', 'watch']) {
     for (const f of readdirSync(path.join(process.cwd(), dir)).filter((x) => x.endsWith('.js'))) {
+      if (`${dir}/${f}` === BRIDGE) continue;
       const src = readFileSync(path.join(process.cwd(), dir, f), 'utf8');
-      assert.ok(!src.includes('learning/'), `${dir}/${f} must not reference learning/ in this ticket`);
+      assert.ok(!src.includes('learning/'), `${dir}/${f} must not reference learning/ (only the named bridge may)`);
     }
   }
+  // the seam is DORMANT in every current composition: fly.js never passes a learning activation source to composeJudge
+  const fly = readFileSync(path.join(process.cwd(), 'fly.js'), 'utf8');
+  assert.ok(!fly.includes('learningActivationSource'), 'fly.js does not activate the Judge learning seam in this ticket');
 });
 
 test('activation authority is exactly the one bounded paper adjustment; everything else is authority NONE', () => {

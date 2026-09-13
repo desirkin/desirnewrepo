@@ -60,11 +60,36 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       187fbace4d564df0ea8426177b99706cd706e65a678ce5768b187022b52f0fcc
+judge/*.js       767bb48158adff3678d39b24ff5c1b45e12d5561e3cc8fb49de2ff4957a19c3f
 execution/*.js   d9ce90d9b08977048fb333bb8a22b7e949613832193a58763238d79a9d671965
 watch/watch.js   dc49a39444e2971dafb766f2a831fda6894968238606c7c6bfa8b5b782cf53a6
-all (39 files)   075ecd3aecefde6d836acc065b1a0e9a8b95eed5c6d7b6a9b804ea383f0e7ff5
+all (41 files)   9012dd402d57c22ca1477eafd12128498ecef296146134f550d18ed4c161f90a
 ```
+
+### 4.2 Audited change — 2026-09-13 dormant learning/sizing ports (previous digests: judge `187fbace4d56…`, all `075ecd3aecef…`; execution/ and watch/watch.js byte-identical)
+
+The continuous-learning branch (`claude/continuous-learning-2026-09-13`, ADDENDUM-2 + final sizing addendum)
+adds two null-default consumer ports to the Judge. Nothing operational changes while they are unwired, and the
+production composition root (`fly.js`) wires NEITHER — proved structurally by `test/integrity-boundary.test.js`
+and behaviorally by `test/judge-learning-intake.test.js` (rig comparison: with both ports absent, decisions,
+refusals, rankings, sizing and risk math are identical to baseline on identical recorded inputs).
+
+- `judge/learning-intake.js` (NEW) — the ONE bridge to validated learning artifacts. Imports only
+  `learning/contracts.js` + `learning/features.js`. Deterministic versioned selector (`learning-selector-1`),
+  conservative tie-break, baseline fallback on no-match / staleness (15 min) / invalid artifact / scope or
+  eligibility miss / conflicting active versions / kill switch. Consumable axis: RANKING only, bounded by the
+  frozen `adjust` within `maxAbsAdjust`. Contribution is logged as a `LEARNED_RANK_ADJUSTMENT` MEASUREMENT row.
+- `judge/size-ladder.js` (NEW) — the size ladder over the UNCHANGED `sizeSearch` cost law (imports only
+  `./cost.js` + `../execution/money.js`). Fractions 0.25/0.5/0.75/1 of the risk-bounded spendable; risk caps
+  bind at every size; a missing/one-sided book selects nothing; every candidate size and rejection reason is
+  recorded (`DYNAMIC_SIZE_SELECTION`). All-in is only ever flagged eligible when fraction 1 strictly wins.
+- `judge/judge.js` — `createJudge` gains `learning = null` and `dynamicSizing = null` parameters; when null
+  (the default and the production state) the decide() pipeline is unchanged. No threshold, gate, authority,
+  order permission, admission rule or risk rule was modified.
+- `judge/composition.js` — `composeJudge` gains pass-through parameters (`learningActivationSource`,
+  `dynamicSizing`), both defaulting to null/off, with a 60-second-cached snapshot accessor when supplied.
+- No change to thresholds, sizing defaults, risk, gates, authority, order permissions or the paper runtime;
+  PAPER and LIVE remain OFF; both new ports remain unwired in `fly.js`.
 
 ### 4.1 Audited change — 2026-09-12 operational repair (previous digests: judge `ca3b1c8f0b2e…`, execution `1885a471b7d2…`, all `cbdf08784769…`)
 

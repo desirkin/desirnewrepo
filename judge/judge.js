@@ -12,6 +12,8 @@ import { evaluateEntry, sizeSearch, liquidationValue, COST_MODEL_VERSION } from 
 import { admitCandidate, riskBudgetFor, rankCandidates, clusterIdOf } from './risk.js';
 import { makeDecision, decisionIdentity, decisionRecord } from './contract.js';
 import { intakeDecision, consumeCase, primaryConfirmedCatalyst } from './intake.js';
+import { resolveLearningContribution, contributionMeasurement } from './learning-intake.js';
+import { evaluateSizeLadder, sizingMeasurement } from './size-ladder.js';
 import { createScheduler } from './scheduler.js';
 import { judgeReadinessMatrix } from './readiness.js';
 import { entryBlockingRestrictions } from '../execution/reducer.js';
@@ -26,7 +28,17 @@ export const canaryDurationBound = (s, policyMs) => { const a = s?.authorization
 export const FUNNEL_STAGES = Object.freeze(['discovered', 'recorded', 'warmed', 'nominated', 'setupQualified', 'costQualifiedAtLegalSize', 'reserved', 'sent', 'filled', 'protected', 'closedReconciled']);
 const inc = (obj, k, n = 1) => { obj[k] = (obj[k] ?? 0) + n; };
 
-export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null }) {
+export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null }) {
+  // LEARN-1 consumer seam (ADDENDUM-2 §08): `learning` is an OPTIONAL injected read accessor over the prepared
+  // immutable decision-memory snapshot ({ snapshot: () => readDecisionMemory(...) }), refreshed outside this loop.
+  // Absent (every current composition; fly.js passes nothing), every path below is byte-identical to the baseline
+  // Judge. Present, its ONLY effect is a bounded rank-order nudge among ALREADY fully qualified candidates plus a
+  // measurement row recording what was consumed or why nothing was — never sizing, risk, permission, case intake,
+  // The Watch, or any committed event payload.
+  // DYNAMIC SIZING seam (final sizing addendum): `dynamicSizing` is the SECOND independent default-off switch
+  // ({ fractions? }). Absent, sizing is the exact existing sizeSearch call. Present, the size ladder evaluates
+  // multiple fractions of the SAME risk-bounded spendable budget through the SAME cost law and records every
+  // candidate size; risk caps, admission, permission and The Watch are untouched at every size.
   // armRule (focused completion §5): a research-only experiment arm — enabled setups, a named clause ablation, a deterministic nomination
   // thinning and the challengers whose verdicts gate admission. PAPER / LIVE compositions never pass one; a REPLAY arm is one account.
   if (armRule && mode !== 'REPLAY') throw new Error('an arm rule is research configuration: only a REPLAY composition may carry one');
@@ -53,6 +65,18 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   function refreshIndicators(c, nowTs) { const bars = history.bars(c.symbol, nowTs); c.lastBars = bars ?? null; if (!bars) { c.indicators = null; c.indicatorsReason = 'NO_HISTORY'; return null; } const v = validateBarBlock(bars, { referenceTs: nowTs }); if (!v.ok) { c.indicators = null; c.indicatorsReason = v.reason; return null; } c.indicatorsReason = null; const { value, hit } = cache.get({ blockDigest: bars.map((b) => `${b.periodStartTs}:${b.close}:${b.high}:${b.low}`).join('|'), referenceTs: bars[bars.length - 1].periodEndTs, featureVersion: FEATURE_VERSION }, () => indicatorBlock(bars)); c.indicators = value; c.indicatorsRef = { hit, bars }; return value; }
   function fastFacts(c, snap, decisionTs) { const f = bookFacts(snap); const cov = feed ? feed.coverage(c.symbol, decisionTs) : { continuous: true, startTs: c.admittedTs, endTs: decisionTs }; const health = feed ? feed.health(c.symbol, decisionTs) : { bookAgeMs: decisionTs - snap.receiptTs }; const depthNow = bidDepthWithinBps(snap, 10); const prior = c.books.filter((b) => b.ts >= decisionTs - 75_000 && b.ts < decisionTs - 15_000); const priorDepths = prior.map((b) => b.depth).filter(Boolean); const priorMids = prior.map((b) => b.mid); const lows60 = c.books.filter((b) => b.ts >= decisionTs - 60_000).map((b) => b.bestBid);
     return { mid: f?.mid ?? null, bestBid: f?.bestBid ?? null, bestAsk: f?.bestAsk ?? null, fi15: c.flow.fi(decisionTs - 15_000, decisionTs), fi60: c.flow.fi(decisionTs - 60_000, decisionTs), rv60: c.flow.rv60(decisionTs, cov), coverage: cov, decisionTs, bookAgeMs: health.bookAgeMs ?? (decisionTs - snap.receiptTs), crcVerified: snap.crcVerified, depth10bps: depthNow, vwap60: c.flow.vwap(decisionTs - 60_000, decisionTs), priorFi: c.flow.fi(decisionTs - 75_000, decisionTs - 15_000), reclaimFi: c.flow.fi(decisionTs - 15_000, decisionTs), priorMidChange: priorMids.length >= 2 ? M.sub(priorMids[priorMids.length - 1], priorMids[0]) : null, priorMedianDepth: priorDepths.length ? medianDecimal(priorDepths) : null, priorDepthSamples: priorDepths.length, priorLow60: lows60.length ? lows60.reduce((a, b) => (M.lt(a, b) ? a : b)) : null, receiptSequence: snap.receiptSequence, feedEpoch: snap.feedEpoch, snapshotDigest: snap.digest };
+  }
+  // the prepared-fact view handed to the learned-contribution selector: the SAME already-computed fast facts,
+  // reshaped into the learning feature contract (value + availability; UNKNOWN stays unavailable, never zero)
+  const lf = (obj, key, unit, lookbackMs) => (obj && obj.state === 'KNOWN' && Number.isFinite(obj[key]) ? { value: obj[key], unit, lookbackMs, availability: 'KNOWN' } : { value: null, unit, lookbackMs, availability: 'UNAVAILABLE' });
+  const numFact = (v, unit) => (Number.isFinite(v) ? { value: v, unit, lookbackMs: 0, availability: 'KNOWN' } : { value: null, unit, lookbackMs: 0, availability: 'UNAVAILABLE' });
+  function learnedFactsOf(fast) {
+    const spreadBps = fast.bestBid && fast.bestAsk && fast.mid ? (Number(fast.bestAsk) - Number(fast.bestBid)) / Number(fast.mid) * 10_000 : null;
+    return {
+      rv60: lf(fast.rv60, 'rv60', 'ratio', 60_000), fi15: lf(fast.fi15, 'fi', 'fraction', 15_000), fi60: lf(fast.fi60, 'fi', 'fraction', 60_000),
+      spreadBps: numFact(Number.isFinite(spreadBps) ? spreadBps : NaN, 'bps'),
+      depthUsd10bps: numFact(fast.depth10bps !== null && Number.isFinite(Number(fast.depth10bps)) ? Number(fast.depth10bps) : NaN, 'usd_notional'),
+    };
   }
   function onBook(e) { const c = candidates.get(e.symbol); if (!c) return; const snap = e.snapshot; if (!snap.synced) return; counters.books += 1; c.lastBook = snap; if (keepSnapshots) { c.snapshots.push(snap); while (c.snapshots.length && c.snapshots[0].receiptTs < snap.receiptTs - 180_000) c.snapshots.shift(); } const f = bookFacts(snap); if (!f) return; c.books.push({ ts: snap.receiptTs, seq: snap.receiptSequence, mid: f.mid, bestBid: f.bestBid, depth: bidDepthWithinBps(snap, 10) }); while (c.books.length && c.books[0].ts < snap.receiptTs - 120_000) c.books.shift(); c.flow.advance(snap.receiptTs);
     const ind = c.indicators ?? refreshIndicators(c, snap.receiptTs); if (!ind) return;
@@ -82,7 +106,12 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     if (!intake.ok) { if (intake.reasons.includes('CASE_INVALID_REJECTED_NOT_STRIPPED')) counters.modelStale += 1; tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, setupId === 'CATALYST_TRANSMISSION' && !consumed ? 'NEEDS_DATA' : 'ENTRY_REFUSED', intake.reasons, snap, { inputMode: intake.ok ? inputMode : 'MARKET_DIRECT' }); }
     // the absorption feature windows are anchored at the FROZEN trigger T (closeout R10): [T-15s,T) is measured from the tracker at D, never [D-15s,D)
     const atTrigger = setupId === 'ABSORPTION_RECLAIM' ? { reclaimFi: c.flow.fi(frozen.triggerTs - 15_000, frozen.triggerTs), vwap60: c.flow.vwap(frozen.triggerTs - 60_000, frozen.triggerTs) } : null;
-    const setup = evaluateSetup({ setupId, frozen, ind, fast: atTrigger ? { ...fast, atTrigger } : fast, bars: c.indicatorsRef.bars, entry, decisionTs: D, event: intake.event ?? c.catalystEvent ?? null, ablate: armRule?.ablate ?? null }); const measurements = setup.clauses;
+    const setup = evaluateSetup({ setupId, frozen, ind, fast: atTrigger ? { ...fast, atTrigger } : fast, bars: c.indicatorsRef.bars, entry, decisionTs: D, event: intake.event ?? c.catalystEvent ?? null, ablate: armRule?.ablate ?? null }); const baseMeasurements = setup.clauses;
+    // learned contribution (dormant without the injected port): resolved from the prepared snapshot and THIS
+    // decision's already-prepared facts only; any resolver fault falls back to baseline with the fault logged
+    let learned = null;
+    if (learning) { try { learned = resolveLearningContribution({ snapshot: learning.snapshot(), facts: { setupType: setupId, regime: 'LIVE_UNCLASSIFIED', features: learnedFactsOf(fast) }, mode, nowTs: D }); } catch (err) { log(`learned contribution resolver failed (baseline): ${err.message}`); learned = null; } }
+    let measurements = learned ? [...baseMeasurements, contributionMeasurement(learned)] : baseMeasurements;
     if (setup.state !== 'ELIGIBLE') { if (setup.state === 'NEEDS_DATA') counters.needsData += 1; tracker.decide(setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'NO_TRADE', setup.refused, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
     funnel.setupQualified += 1;
     // a seeded nomination control (focused completion §5): ONE deterministic draw per canonical episode, before any reservation, never redrawn
@@ -94,7 +123,18 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     if (setup.scenario.target === null) { tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', ['NO_SCENARIO_TARGET'], snap, { inputMode, caseRefs, measurements }); }
     // cost + size (largest legal lot inside cash, stressed risk, cluster caps) — computed OUTSIDE the account lock
     const clusterId = clusterIdOf(clusters(), c.assetId); const budget = riskBudgetFor({ state: s, limits: s.limits, lockLevel: lockLevel(), clusterId }); if (!budget) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['EQUITY_UNKNOWN'], snap, { inputMode, caseRefs, measurements }); }
-    const fee = feeOf(c.symbol); const found = sizeSearch({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget });
+    const fee = feeOf(c.symbol);
+    // sizing: the exact existing search when the dynamic-sizing switch is off; the size ladder over the SAME
+    // risk-bounded budget and SAME cost law when it is on, with every candidate size recorded
+    let found;
+    if (dynamicSizing) {
+      const ladder = evaluateSizeLadder({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget, fractions: dynamicSizing.fractions ?? undefined });
+      measurements = [...measurements, sizingMeasurement(ladder)];
+      if (!ladder.selected) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', 'NO_ELIGIBLE_SIZE_ON_LADDER'], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+      found = ladder.selected.found;
+    } else {
+      found = sizeSearch({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget });
+    }
     if (found.status !== 'OK') { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', found.reason, ...(found.binding ?? [])], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
     const e = found.evaluation; funnel.costQualifiedAtLegalSize += 1;
     const admission = admitCandidate({ state: s, candidate: { assetId: c.assetId, clusterId, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: s.limits, lockLevel: lockLevel(), clusters: clusters() });
@@ -105,7 +145,11 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     let verdicts = null; if (armRule?.challengers?.length) { const ch = challengerVerdicts({ c, D, snap, fast, found, e, fee, setupId, episodeId, frozen }); verdicts = ch.verdicts; if (ch.blocked.length) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ch.blocked, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); } }
     if (!admission.ok) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', admission.reasons, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); }
     // ranked admission: wait for this pass's batch to be ordered, then re-admit against the state the earlier winners left behind
-    const slot = await admissionGate({ rank: { rewardRiskRatio: e.rewardRiskRatio, costBps: e.costBps ?? null, firstKnownTs: c.nominationKnownAtTs, assetId: c.assetId } }); c.lastRank = { rank: slot.rank, of: slot.of, ts: D };
+    // the ONE allowlisted learned effect: a bounded nudge to the RANK KEY of an already fully qualified candidate.
+    // It can only reorder this admission batch; it cannot admit, size, or bypass anything, and the committed
+    // valuationRef/sizing keep the untouched baseline ratio.
+    const rankRatio = learned?.applied && e.rewardRiskRatio !== null && Number.isFinite(Number(e.rewardRiskRatio)) ? Number(e.rewardRiskRatio) + learned.adjust : e.rewardRiskRatio;
+    const slot = await admissionGate({ rank: { rewardRiskRatio: rankRatio, costBps: e.costBps ?? null, firstKnownTs: c.nominationKnownAtTs, assetId: c.assetId } }); c.lastRank = { rank: slot.rank, of: slot.of, ts: D };
     try {
     const again = admitCandidate({ state: state(), candidate: { assetId: c.assetId, clusterId, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: state().limits, lockLevel: lockLevel(), clusters: clusters() });
     if (!again.ok) { tracker.decide('ENTRY_REFUSED'); return await recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', [...again.reasons, `RANKED_${slot.rank}_OF_${slot.of}`], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); }

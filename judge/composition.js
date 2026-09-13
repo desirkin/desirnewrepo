@@ -57,7 +57,7 @@ const excluded = (policy, symbol) => policy.universe.excludeBases.includes(symbo
 export const paperCheckpointFile = (acct) => path.join(judgeDir(), `paper-checkpoint-${acct}.json`);
 function readPaperCheckpoint(acct) { try { const raw = JSON.parse(readFileSync(paperCheckpointFile(acct), 'utf8')); return raw && raw.version === 'paper-depletion-checkpoint-1' && raw.accountId === acct && Array.isArray(raw.levels) ? raw : null; } catch { return null; } }
 export const PERIODIC_RECONCILE_MS = 5 * 60_000; export const CLOCK_REQUALIFY_MS = 60_000; export const SCHEDULER_TICK_MS = 25;
-export async function composeJudge({ policyFile, mode, accountId = null, env = process.env, log = console.log, db = null, journal = null, clock = null, feed = null, transport = null, WebSocketImpl = null, specs = null, history = null, caseSource = null, casesDir = null, controlsSource = null, nominations = null, recordDir = null, allowPrivate = () => false, allowOrders = () => false, requireDb = null, writeProjection = true, codeDigest = undefined, caseWorker = null, exchangeContext = 'kraken-spot', experimentId = null, armRule = null, exitPolicy = null, verdictSink = null }) {
+export async function composeJudge({ policyFile, mode, accountId = null, env = process.env, log = console.log, db = null, journal = null, clock = null, feed = null, transport = null, WebSocketImpl = null, specs = null, history = null, caseSource = null, casesDir = null, controlsSource = null, nominations = null, recordDir = null, allowPrivate = () => false, allowOrders = () => false, requireDb = null, writeProjection = true, codeDigest = undefined, caseWorker = null, exchangeContext = 'kraken-spot', experimentId = null, armRule = null, exitPolicy = null, verdictSink = null, learningActivationSource = null, dynamicSizing = null }) {
   if (!RUN_MODES.includes(mode)) throw new Error(`mode ${mode} outside ${RUN_MODES.join('/')}`);
   const loaded = loadJudgePolicy(policyFile); const policy = loaded.policy; const policyDigest = loaded.digest; const acct = accountId ?? policy.account.accountId; const kind = accountKindOf(mode);
   if (mode.startsWith('LIVE') && policy.mode !== 'LIVE') throw new Error('a LIVE run needs a LIVE policy (the paper sample cannot be promoted by a flag)'); if (!mode.startsWith('LIVE') && policy.mode === 'LIVE') throw new Error('a LIVE policy cannot run a paper / observe mode account');
@@ -103,7 +103,14 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   // research seams (focused completion §5): an arm rule / alternative exit policy / verdict sink exist only for a REPLAY composition
   if ((armRule || exitPolicy || verdictSink) && mode !== 'REPLAY') throw new Error('armRule / exitPolicy / verdictSink are research configuration: only a REPLAY composition may carry them');
   const watch = createWatch({ accountId: acct, dispatcher, adapter, feed: fd, clock: pclock, specOf, feeOf: () => fee, controls, falsifiers: () => falsifierList, snapshotStore, log, exitPolicy });
-  const judge = createJudge({ accountId: acct, policy, policyDigest, dispatcher, feed: fd, clock: pclock, specOf, feeOf: () => fee, history: hist, caseSource: cases, controls, lockLevel, log, mode, snapshotStore, armRule, verdictSink });
+  // LEARN-1 consumer seam (ADDENDUM-2 §08): an OPTIONAL bounded read-only activation source injected beside the
+  // existing case/market accessors. Absent (fly.js and every current composition pass nothing), the Judge is the
+  // byte-identical baseline. When present, the prepared immutable snapshot is refreshed OUTSIDE the decision loop
+  // (here, lazily at most once per PERIODIC_RECONCILE window) — never a store read, network call or model call in
+  // admission; a source fault yields no snapshot, which the selector answers with BASELINE_ONLY.
+  let learningSnap = null; let learningSnapTs = 0;
+  const learning = learningActivationSource ? { snapshot: () => { const t = nowTs(); if (!learningSnap || t - learningSnapTs > 60_000) { try { learningSnap = learningActivationSource(); learningSnapTs = t; } catch (err) { log(`learning activation source failed (baseline): ${String(err?.message ?? err).slice(0, 160)}`); learningSnap = null; } } return learningSnap; } } : null;
+  const judge = createJudge({ accountId: acct, policy, policyDigest, dispatcher, feed: fd, clock: pclock, specOf, feeOf: () => fee, history: hist, caseSource: cases, controls, lockLevel, log, mode, snapshotStore, armRule, verdictSink, learning, dynamicSizing });
   if (hist.onTrade) fd.subscribe((e) => { if (e.kind === 'TRADE') hist.onTrade(e.trade); });
   // ---- nominations: the tape's current universe (bounded by the policy), never a research ranking, never a buy list ----
   const nominate = nominations ?? (() => { const u = readCurrentUniverse(); return (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); });
