@@ -41,7 +41,34 @@ This map fulfils Addendum 2 Part B: every requirement is tied to the **actual** 
    (states park honestly as `WAITING_FOR_BUDGET`). No CLI wrapper was added to avoid an unauthorized paid-call
    surface.
 
-8. **Frozen-tree audit (P-08) honored, not bypassed.** `judge/` is FROZEN_FOR_PAPER with digests pinned in
+8. **Independent review corrections (2026-09-13) applied.**
+   - **Baseline proof upgraded to a true differential:** the earlier rig comparison ran only the modified Judge
+     and filtered fields. `test/judge-differential.test.js` now extracts the ACTUAL `ea3bfbf` tree with
+     `git archive`, builds the complete rig twice (each side entirely from its own tree's modules), drives both
+     with identical recorded inputs under the same injected clock, and asserts **raw deepEqual over the complete
+     decision records, refusal census, funnel and account/execution state — nothing stripped, zero
+     normalizations applied or needed** (the shared shapes are proven byte-identical file-by-file inside the
+     test, not assumed).
+   - **Candidate contract completed:** scope now declares assets/venues (set membership, no name preference);
+     the mandatory eligibility envelope declares liquidity + volatility ranges, required facts
+     (`requiredFeatures` — an LLM fact only when genuinely required) and freshness (`maxFactAgeMs`);
+     `featureRecipeVersion`/`policyVersion` pin the validated versions; `validation` records forward basis,
+     dependence-group effective sample size, breadth and net-after-costs effect; `maxSizeUsd` records the
+     maximum evidence-supported size (null = candle-fidelity validation, which supports none). The selector
+     matches all of it from prepared facts only, and every candidate seen is durably logged
+     (`LEARNED_CANDIDATE` measurement rows + the summary row's seen=/logged= counts).
+   - **Sizing objective completed:** `judge-size-ladder-2` selects max buffered profit ONLY while net return
+     has not degraded beyond the predeclared tolerance (anchored to the best smaller supported size); per-size
+     rows record executable entry/exit, fee bound, spread/slippage attribution, net return %, stressed loss,
+     reward/risk, depth-haircut exit sensitivities, the UNCHANGED admitCandidate verdict per size, and the
+     opportunity cost vs STAY_OUT. Full-balance may not even compete unless every prerequisite is present and
+     fresh (admission law, declared candidate max size, freshness law, fresh book, protective exit at the
+     deepest haircut) — anything missing ⇒ conservative smaller-size fallback, recorded by name.
+   - **Latency measured on the host path, not microbenchmarks:** see §Latency below.
+   - **`test/social-5b-durable.test.js` is UNVERIFIED, not "pre-existing failure":** it requires
+     `PERSIST_TEST_DATABASE_URL` (an approved database test environment this session does not have). Until it
+     is run there, the full suite is NOT complete — the regression totals below say exactly that.
+9. **Frozen-tree audit (P-08) honored, not bypassed.** `judge/` is FROZEN_FOR_PAPER with digests pinned in
    `docs/JUDGE-PAPER-AUDIT.md`; the fence (test/paper-runtime.test.js P-08) refuses silent edits. The two new
    port files and the two null-default parameter edits are recorded as audited change **§4.2** in that
    document with recomputed digests (execution/ and watch/watch.js stayed byte-identical). The fence itself
@@ -52,7 +79,7 @@ This map fulfils Addendum 2 Part B: every requirement is tied to the **actual** 
 | Switch | Mechanism | Default | Where proven |
 |---|---|---|---|
 | Learned selection | `createJudge({ learning })` port; `composeJudge({ learningActivationSource })` | **OFF** — `fly.js` passes neither; port is `null` | test/integrity-boundary.test.js (fly wiring fence); test/judge-learning-intake.test.js rigs A/B (byte-identical decisions) |
-| Dynamic sizing | `createJudge({ dynamicSizing })` port | **OFF** — `null` default, unwired | same fence; rig A/D comparison (identical decisions minus the audit row) |
+| Dynamic sizing | `createJudge({ dynamicSizing })` port | **OFF** — `null` default, unwired | same fence; differential harness (ports absent = identical); rig A/D comparison (switch ON without size evidence = strictly smaller conservative size, refusal named) |
 
 Both OFF ⇒ the Judge reproduces its existing behavior exactly (rig-based equality over recorded inputs, and
 the pre-existing judge suites pass unchanged). The learning **kill switch** (`store.readKill()`) is a third,
@@ -91,3 +118,28 @@ separate control: it stops influence without stopping collection.
 - **No production files touched**: tools/data-only-with-ui.mjs, tools/data-only-runtime.mjs,
   cobra.config.json, .replit, hosting, Secrets, production databases and the live checkout are untouched
   (C01 protected-bytes test still passes).
+
+## Differential preservation proof + host latency (review items 2 and 5)
+
+| What | How | Result |
+|---|---|---|
+| Pre-change Judge | `git archive ea3bfbf` → complete base tree; rig built ENTIRELY from base modules | executed, not simulated |
+| Comparison | raw `deepEqual` over complete decision records, refusal census, funnel, account/execution state | IDENTICAL (working tree, ports absent) |
+| Normalizations | none applied; same injected clock both sides; shared shapes proven byte-identical file-by-file in-test | zero differences to explain |
+| Host admission latency | real wall-clock around judge.onTick + scheduler drain + dispatcher idle, 3 accounts × identical recorded inputs per tree | base: median 1.69ms, p95 31.8ms, max 31.8ms · working tree: median 1.49ms, p95 36.55ms, max 36.55ms (n=15 each) |
+| Deadlines | policy `maxReceiptToDecisionLagMs` = 500ms; 25ms admission bucket | 0 passes over 500ms on BOTH trees; 3/15 warm-up passes over 25ms on BOTH trees (the 22-minute warm ingest pass, identical count both trees) |
+| The Watch | `watch/watch.js` asserted byte-identical to ea3bfbf inside the differential test; e2e proves protection ACTIVE at the all-in size AND the conservative size | unchanged by construction + exercised at each size |
+
+Honest bound: these latency figures are the offline rig on this container's hardware over this recorded input
+set — a live host under real feed load is NOT measured here and is not claimed.
+
+## Verification status (review item 6)
+
+- Full regression: rerun after these corrections (totals in the completion report; the exact command is
+  `node --test 'test/*.test.js'`).
+- `test/social-5b-durable.test.js`: **UNVERIFIED** — requires `PERSIST_TEST_DATABASE_URL` (approved database
+  test environment). The suite is not complete until it runs there. It fails identically at base `ea3bfbf`
+  without that environment, so it is not a regression introduced by this branch — but "not mine" is not
+  "verified".
+- Pressure Chain Addendum 1: **text still missing** — the supplied material contains only references to it.
+  Nothing was guessed or duplicated from its name (no delta-divergence/absorption work invented).

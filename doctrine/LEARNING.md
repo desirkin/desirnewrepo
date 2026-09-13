@@ -250,3 +250,27 @@ likely by anything in this ticket.
 - **Both switches are separate and default OFF**; enabling either — like
   PAPER, LIVE, learned selection, or all-spendable-cash behavior — requires
   David's separate explicit approval and is NOT done by this branch.
+
+## 13. Review corrections (2026-09-13) — the completed candidate contract and sizing law
+
+- **A frozen candidate declares everything the selector may match on**: setup/regime, asset and venue scope
+  (set membership over explicit lists or a declared ANY — no ticker name ever confers preference), liquidity
+  and volatility ranges, required facts with a freshness bound (an LLM-evidence fact is required ONLY when the
+  candidate declares it — its absence never vetoes an independent market-data candidate), the exact feature
+  recipe and policy versions it was validated under, its forward validation evidence (dependence-group sample
+  size, breadth, net effect after the sealed costs), and the maximum size its evidence supports (`maxSizeUsd`;
+  null for every candle-fidelity validation — no size evidence exists there). A missing, stale or unknown
+  required fact is a rejection with its exact reason, never an optimistic pass, and EVERY candidate seen is
+  durably logged in the decision record (`LEARNED_CANDIDATE` rows).
+- **The sizing objective is sustainable account outcome** (`judge-size-ladder-2`): max buffered net profit,
+  accepted only while the net return has not degraded beyond the predeclared tolerance versus the best smaller
+  supported size; ties to the smaller fraction. Per size the record carries executable entry/exit, fees,
+  spread/slippage, net return %, stressed loss, reward/risk, depth-haircut exit sensitivities, the UNCHANGED
+  admission verdict, and the opportunity cost vs staying out. Full-balance may not even compete unless every
+  prerequisite is present and fresh (admission law, declared candidate max size, freshness, protective exit at
+  the deepest haircut); anything missing falls back to a smaller supported size, by name, inventing nothing.
+- **The baseline proof is a true differential**: test/judge-differential.test.js runs the ACTUAL ea3bfbf Judge
+  (git archive of the base tree) beside the working tree on identical recorded inputs and requires raw
+  deepEqual over complete decisions, refusals and account state — no field stripping, no normalization.
+- **Verification honesty**: test/social-5b-durable.test.js remains UNVERIFIED without the approved database
+  test environment; Pressure Chain Addendum 1 text remains missing and nothing was guessed from its title.
