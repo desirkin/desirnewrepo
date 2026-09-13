@@ -1,72 +1,325 @@
-diff --git a/learning/service.js b/learning/service.js
-index 2c7edb0..94a3587 100644
---- a/learning/service.js
-+++ b/learning/service.js
-@@ -28,15 +28,22 @@ const zFeature = (value, unit) => (Number.isFinite(value) ? { value, unit, lookb
+diff --git a/persistence/runtime.js b/persistence/runtime.js
+index 451c549..77afd3a 100644
+--- a/persistence/runtime.js
++++ b/persistence/runtime.js
+@@ -100,7 +100,8 @@ function bootstrapApi() {
+ let singleton = bootstrapApi();
+ export const getPersistence = () => singleton;
  
- export function startLearning({
-   dataDir, env = process.env, populationSource = null, archiveSource = null,
-+  // Optional research-only runner, constructed and owned by the composition.
-+  // No production caller supplies this port. It does not construct providers,
-+  // promote results, or change Judge. The current runner is synchronous and
-+  // byte/work bounded, NOT CPU-isolated or a hard wall-time guarantee.
-+  shadowRunner = null,
-   clock = Date.now, timers = { setInterval, clearInterval }, tickMs = DEFAULT_TICK_MS,
-   dailyTarget = DEFAULT_DAILY_TARGET, log = () => {},
- } = {}) {
-   if (env.LEARNING_ENABLED !== 'true') return { state: () => 'DISABLED', stop: () => {}, tick: () => null };
-+  if (shadowRunner !== null && (!shadowRunner || typeof shadowRunner !== 'object' || Array.isArray(shadowRunner)
-+      || typeof shadowRunner.step !== 'function' || typeof shadowRunner.status !== 'function')) throw new Error('SHADOW_RUNNER_PORT_INVALID');
-   const store = createLearningStore({ dataDir, log });
-   let counters = rollCounters(null, clock());
-   let lastTick = null; let ticking = false; let stopped = false;
-   const lastCapturedBySymbol = new Map();
--  const errors = { capture: 0, maturation: 0, learning: 0 };
-+  const errors = { capture: 0, maturation: 0, learning: 0, shadow: 0 };
+-export async function startPersistence({ log = console.log, dbOverrides = {}, _test = {} } = {}) {
++export async function startPersistence({ log = console.log, dbOverrides = {}, registerSignals = true, _test = {} } = {}) {
++  if (typeof registerSignals !== 'boolean') throw new Error('persistence: registerSignals must be boolean');
+   const db = new Db({ log, ...dbOverrides });
+   const repo = new Repository(db, { log });
+   const state = {
+@@ -118,6 +119,11 @@ export async function startPersistence({ log = console.log, dbOverrides = {}, _t
+     pump: { pendingWrites: 0, confirmedWrites: 0, spoolParseErrors: 0, pumpReadErrors: 0, cursorRecoveries: 0 },
+     retryTimer: null,
+     pumpTimer: null,
++    pumpInFlight: null,
++    finalPumpDrain: null,
++    signalHandlers: null,
++    stopPromise: null,
++    registerSignals,
+     attemptInFlight: false,
+     stopped: false,
+     _test,
+@@ -617,7 +623,7 @@ function startPump(state, log) {
+     return pending;
+   }
  
-   let lastRecordedSweepId = null;
-   function captureTick(nowTs) {
-@@ -147,6 +154,7 @@ export function startLearning({
-       lastTickTs: lastTick, nowTs, counters: { ...counters, perAsset: undefined, perAssetCount: Object.keys(counters.perAsset).length },
-       coverageAges: coverageAges({ lastCapturedBySymbol, nowTs }),
-       lastTickReport: tickReport, errors: { ...errors }, storeCounters: store.countersOf(),
-+      shadowLane: shadowRunner ? (() => { try { return shadowRunner.status(nowTs); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
-       killSwitch: kill, sourceDelayEvidence: PROVIDER_DELAY_EVIDENCE,
-       authority: AUTHORITY, purpose: PURPOSE,
-       law: 'COLLECTOR_RUNNING_IS_NOT_LEARNER_RUNNING_IS_NOT_VALIDATED_ADAPTIVE_BEHAVIOR',
-@@ -162,6 +170,10 @@ export function startLearning({
-     try { report.capture = captureTick(nowTs); } catch (err) { errors.capture += 1; report.capture = { failed: err.message }; }
-     try { report.maturation = maturationTick(nowTs); } catch (err) { errors.maturation += 1; report.maturation = { failed: err.message }; }
-     try { report.learning = learnTick(nowTs); } catch (err) { errors.learning += 1; report.learning = { failed: err.message }; }
-+    // One optional step; failure is reported without suppressing other lanes.
-+    // Absent port performs no shadow work. The owner must keep any heavy
-+    // learning workload isolated from the trading/Watch event loop.
-+    if (shadowRunner) { try { report.shadow = shadowRunner.step({ nowTs }); } catch (err) { errors.shadow += 1; report.shadow = { failed: String(err?.message ?? err).slice(0, 200) }; } }
-     try {
-       const yesterday = utcDateOf(nowTs - 86_400_000);
-       if (!store.readSummary(yesterday) && store.coverageDates().includes(yesterday)) {
-diff --git a/test/learning-shadow-service-port.test.js b/test/learning-shadow-service-port.test.js
+-  async function pumpOnce() {
++  async function pumpCycle() {
+     if (!state.db.reachable) {
+       if (!(await state.db.connect())) return; // spool holds; health shows pending
+     }
+@@ -676,14 +682,44 @@ function startPump(state, log) {
+     }
+   }
+ 
+-  state.pumpOnce = pumpOnce;
++  // Tail offsets and line counters are shared mutable cursor state. A second
++  // cycle must never observe an offset advanced by a first cycle whose DB
++  // write has not yet been acknowledged: it could otherwise publish EOF to
++  // cursors.json and make a crash lose the still-pending source row. All
++  // ordinary callers therefore coalesce onto one exact in-flight promise.
++  function pumpOnce({ shutdownDrain = false } = {}) {
++    if (state.stopped && !shutdownDrain) return Promise.resolve({ ran: false, refused: 'STOPPED' });
++    if (state.pumpInFlight) return state.pumpInFlight;
++    const cycle = pumpCycle().finally(() => {
++      if (state.pumpInFlight === cycle) state.pumpInFlight = null;
++    });
++    state.pumpInFlight = cycle;
++    return cycle;
++  }
++
++  state.pumpOnce = () => pumpOnce();
++  // Shutdown first fences new ordinary callers, waits for the current cycle
++  // to settle, then starts ONE distinct final cycle. This captures rows that
++  // landed after the active Tail read without racing that Tail or minting an
++  // unconfirmed cursor.
++  state.finalPumpDrain = async () => {
++    const active = state.pumpInFlight;
++    if (active) {
++      try { await active; } catch { /* the final cycle still retries after an unexpected active-cycle failure */ }
++    }
++    return pumpOnce({ shutdownDrain: true });
++  };
+   const timer = setInterval(() => {
+-    pumpOnce().catch((err) => log(`PERSISTENCE pump error (contained): ${err.message}`));
++    state.pumpOnce().catch((err) => log(`PERSISTENCE pump error (contained): ${err.message}`));
+   }, PUMP_MS);
+   timer.unref?.();
+   state.pumpTimer = timer;
+-  process.once('SIGTERM', () => state.stop?.());
+-  process.once('SIGINT', () => state.stop?.());
++  if (state.registerSignals) {
++    const stopOnSignal = () => { state.stop?.().catch((err) => log(`PERSISTENCE signal shutdown failed: ${err.message}`)); };
++    state.signalHandlers = { SIGTERM: stopOnSignal, SIGINT: stopOnSignal };
++    process.once('SIGTERM', stopOnSignal);
++    process.once('SIGINT', stopOnSignal);
++  }
+ }
+ 
+ function api(state, log) {
+@@ -701,23 +737,31 @@ function api(state, log) {
+ 
+   // stop() tears down EVERYTHING: retry loop first (no background retry
+   // callbacks after stop), then the pump with a final drain, then the pool.
+-  state.stop = async () => {
+-    if (state.stopped) return;
++  state.stop = () => {
++    if (state.stopPromise) return state.stopPromise;
+     state.stopped = true;
+-    if (state.retryTimer) {
+-      clearInterval(state.retryTimer);
+-      state.retryTimer = null;
+-    }
+-    if (state.pumpTimer) {
+-      clearInterval(state.pumpTimer);
+-      state.pumpTimer = null;
+-      try {
+-        await state.pumpOnce?.(); // final drain
+-      } catch {
+-        // shutdown drain best-effort
++    state.stopPromise = (async () => {
++      if (state.signalHandlers) {
++        process.removeListener('SIGTERM', state.signalHandlers.SIGTERM);
++        process.removeListener('SIGINT', state.signalHandlers.SIGINT);
++        state.signalHandlers = null;
+       }
+-    }
+-    await state.db.end();
++      if (state.retryTimer) {
++        clearInterval(state.retryTimer);
++        state.retryTimer = null;
++      }
++      if (state.pumpTimer) {
++        clearInterval(state.pumpTimer);
++        state.pumpTimer = null;
++        try {
++          await state.finalPumpDrain?.(); // active cycle, then one final drain for late bytes
++        } catch {
++          // shutdown drain best-effort
++        }
++      }
++      await state.db.end();
++    })();
++    return state.stopPromise;
+   };
+ 
+   return {
+diff --git a/tools/data-only-runtime.mjs b/tools/data-only-runtime.mjs
+index 46c895e..e096959 100644
+--- a/tools/data-only-runtime.mjs
++++ b/tools/data-only-runtime.mjs
+@@ -141,7 +141,7 @@ let stopped = false;
+ // Database restore and quota ownership precede construction of every provider.
+ startupPhase = 'DATABASE_RESTORE';
+ try {
+-  persistence = await startPersistence({ log });
++  persistence = await startPersistence({ log, registerSignals: false });
+   const health = persistence.health();
+   if (!health.databaseConfigured || !health.restored) throw new Error('PostgreSQL restore unavailable');
+   startupPhase = 'EXTERNAL_QUOTA_RESTORE';
+diff --git a/test/data-only-runtime.test.mjs b/test/data-only-runtime.test.mjs
+index b575ba1..94ebec8 100644
+--- a/test/data-only-runtime.test.mjs
++++ b/test/data-only-runtime.test.mjs
+@@ -123,7 +123,7 @@ test('both data-only launchers explicitly keep paid X collection disabled during
+ test('startup publishes process identity and restores external quotas before any provider starts', () => {
+   const source = readFileSync(entry, 'utf8');
+   const initialStatus = source.indexOf('writeStartupStatus();');
+-  const persistenceStart = source.indexOf('await startPersistence({ log })');
++  const persistenceStart = source.indexOf('await startPersistence({ log, registerSignals: false })');
+   const checkpointStart = source.indexOf('await openDataOnlyCheckpoints(');
+   const marketStart = source.indexOf('await startDataOnlyMarket(');
+   const wideEyeStart = source.indexOf('wideEye = startWideEye(');
+diff --git a/test/persistence-pump-concurrency-review.test.js b/test/persistence-pump-concurrency-review.test.js
 new file mode 100644
 --- /dev/null
-+++ b/test/learning-shadow-service-port.test.js
-@@ -0,0 +1,20 @@
++++ b/test/persistence-pump-concurrency-review.test.js
+@@ -0,0 +1,163 @@
++// Two pumpOnce calls must never share/advance one Tail concurrently. All
++// database behavior is an in-memory fake; no provider or database is called.
 +import test from 'node:test';
 +import assert from 'node:assert/strict';
-+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
++import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 +import { tmpdir } from 'node:os';
 +import path from 'node:path';
-+import { startLearning } from '../learning/service.js';
 +
-+test('disabled learning does not inspect the optional runner; invalid enabled ports refuse before creating a store', () => {
-+  const root = mkdtempSync(path.join(tmpdir(), 'learning-shadow-port-'));
-+  try {
-+    const dataDir = path.join(root, 'not-created');
-+    const poison = { get step() { throw new Error('must remain unread while disabled'); } };
-+    assert.equal(startLearning({ dataDir, env: {}, shadowRunner: poison }).state(), 'DISABLED');
-+    assert.equal(existsSync(dataDir), false);
-+    for (const shadowRunner of [true, [], {}, { step: () => ({}) }, { status: () => ({}) }]) {
-+      assert.throws(() => startLearning({ dataDir, env: { LEARNING_ENABLED: 'true' }, shadowRunner }), /SHADOW_RUNNER_PORT_INVALID/);
-+      assert.equal(existsSync(dataDir), false);
++const dataDir = mkdtempSync(path.join(tmpdir(), 'persist-pump-overlap-'));
++process.env.COBRA_DATA_DIR = dataDir;
++
++const { SCHEMA_VERSION } = await import('../persistence/schema.js');
++const { startPersistence } = await import('../persistence/runtime.js');
++
++function fakePool({ onEnd = () => {} } = {}) {
++  const empty = async (sql) => {
++    if (String(sql).includes('SELECT version FROM serpent_schema_migrations')) {
++      return { rows: Array.from({ length: SCHEMA_VERSION }, (_, i) => ({ version: i + 1 })), rowCount: SCHEMA_VERSION };
 +    }
-+  } finally { rmSync(root, { recursive: true, force: true }); }
++    return { rows: [], rowCount: 0 };
++  };
++  const client = { query: empty, release() {} };
++  return {
++    query: empty,
++    connect: async () => client,
++    on() {},
++    end: async () => { onEnd(); },
++  };
++}
++
++test('overlapping pumpOnce cannot publish a cursor beyond an unconfirmed durable write', async () => {
++  let persistence;
++  let releaseWrite;
++  let firstPump;
++  let dbEnded = false;
++  const sigintBefore = process.listenerCount('SIGINT');
++  const sigtermBefore = process.listenerCount('SIGTERM');
++  try {
++    persistence = await startPersistence({
++      log: () => {},
++      dbOverrides: {
++        url: 'postgresql://offline-fake/pump-overlap',
++        poolFactory: () => fakePool({ onEnd: () => { dbEnded = true; } }),
++        retries: 1,
++      },
++      registerSignals: false,
++    });
++    assert.equal(persistence.health().restored, true);
++    assert.equal(process.listenerCount('SIGINT'), sigintBefore);
++    assert.equal(process.listenerCount('SIGTERM'), sigtermBefore);
++
++    const memoryDir = path.join(dataDir, 'memory');
++    mkdirSync(memoryDir, { recursive: true });
++    const memoryFile = path.join(memoryDir, 'events.jsonl');
++    writeFileSync(memoryFile, `${JSON.stringify({ id: 'pending-durable-write' })}\n`, 'utf8');
++
++    // Keep protective-state sync deterministic and offline. The first pump
++    // advances its shared Tail in readNew(), then blocks before DB ack.
++    persistence.repo.loadControlState = async () => ({
++      revision: 1,
++      state: { kill: null, cage: null, vetoes: [] },
++    });
++    let markWriteStarted;
++    const writeStarted = new Promise((resolve) => { markWriteStarted = resolve; });
++    const heldWrite = new Promise((resolve) => { releaseWrite = resolve; });
++    persistence.repo.insertMemoryEvent = async () => {
++      markWriteStarted();
++      await heldWrite;
++      throw Object.assign(new Error('injected unconfirmed write'), { code: 'ECONNRESET' });
++    };
++
++    firstPump = persistence.pumpOnce();
++    await writeStarted;
++
++    // Without an in-flight guard, a second pump observes the already-advanced
++    // shared Tail, sees no record, and publishes EOF while the first write is
++    // still unconfirmed. A crash in this window would restart after evidence
++    // that never became durable.
++    const coalescedPump = persistence.pumpOnce();
++    assert.equal(coalescedPump, firstPump, 'every ordinary caller receives the one in-flight cycle');
++    const cursorFile = path.join(dataDir, 'persistence', 'cursors.json');
++    assert.equal(existsSync(cursorFile), false, 'no cursor is published while its durable write is unresolved');
++    assert.equal(statSync(memoryFile).size > 0, true);
++
++    releaseWrite();
++    await Promise.all([firstPump, coalescedPump]);
++    firstPump = null;
++    assert.equal(JSON.parse(readFileSync(cursorFile, 'utf8')).offsets.memory, 0, 'a failed write rolls the cursor back');
++
++    const durableIds = [];
++    persistence.repo.insertMemoryEvent = async (row) => {
++      durableIds.push(row.id);
++      return { durable: true, outcome: 'INSERTED' };
++    };
++    await persistence.pumpOnce();
++    assert.deepEqual(durableIds, ['pending-durable-write'], 'the rolled-back row retries exactly once');
++    assert.equal(JSON.parse(readFileSync(cursorFile, 'utf8')).offsets.memory, statSync(memoryFile).size);
++
++    let releaseShutdownWrite;
++    let markShutdownWriteStarted;
++    const shutdownWriteStarted = new Promise((resolve) => { markShutdownWriteStarted = resolve; });
++    const heldShutdownWrite = new Promise((resolve) => { releaseShutdownWrite = resolve; });
++    releaseWrite = releaseShutdownWrite;
++    persistence.repo.insertMemoryEvent = async (row) => {
++      if (row.id === 'active-before-stop') {
++        markShutdownWriteStarted();
++        await heldShutdownWrite;
++      }
++      durableIds.push(row.id);
++      return { durable: true, outcome: 'INSERTED' };
++    };
++    appendFileSync(memoryFile, `${JSON.stringify({ id: 'active-before-stop' })}\n`, 'utf8');
++    firstPump = persistence.pumpOnce();
++    await shutdownWriteStarted;
++    appendFileSync(memoryFile, `${JSON.stringify({ id: 'late-during-stop' })}\n`, 'utf8');
++
++    const stopping = persistence.stop();
++    const repeatedStop = persistence.stop();
++    assert.equal(repeatedStop, stopping, 'every stop caller awaits the exact same shutdown/drain promise');
++    assert.equal(dbEnded, false, 'the database stays open while the ordered final drain is waiting');
++    const refused = await persistence.pumpOnce();
++    assert.deepEqual(refused, { ran: false, refused: 'STOPPED' }, 'new ordinary pump calls refuse after shutdown fences the runtime');
++    releaseShutdownWrite();
++    await stopping;
++    firstPump = null;
++    assert.equal(dbEnded, true, 'the database closes only after active and final pump drains settle');
++    assert.deepEqual(durableIds, ['pending-durable-write', 'active-before-stop', 'late-during-stop']);
++    assert.equal(JSON.parse(readFileSync(cursorFile, 'utf8')).offsets.memory, statSync(memoryFile).size, 'the one final drain captures bytes appended after the active Tail read');
++  } finally {
++    releaseWrite?.();
++    await firstPump?.catch(() => {});
++    await persistence?.stop();
++    rmSync(dataDir, { recursive: true, force: true });
++  }
++});
++
++test('standalone persistence owns exactly one signal handler per signal and removes both during its shared stop', async () => {
++  const standaloneDir = mkdtempSync(path.join(tmpdir(), 'persist-signal-owner-'));
++  process.env.COBRA_DATA_DIR = standaloneDir;
++  const beforeInt = process.listenerCount('SIGINT');
++  const beforeTerm = process.listenerCount('SIGTERM');
++  let persistence;
++  try {
++    persistence = await startPersistence({
++      log: () => {},
++      dbOverrides: {
++        url: 'postgresql://offline-fake/signal-owner',
++        poolFactory: () => fakePool(),
++        retries: 1,
++      },
++    });
++    assert.equal(process.listenerCount('SIGINT'), beforeInt + 1);
++    assert.equal(process.listenerCount('SIGTERM'), beforeTerm + 1);
++    const stopping = persistence.stop();
++    assert.equal(persistence.stop(), stopping);
++    await stopping;
++    assert.equal(process.listenerCount('SIGINT'), beforeInt);
++    assert.equal(process.listenerCount('SIGTERM'), beforeTerm);
++  } finally {
++    await persistence?.stop();
++    rmSync(standaloneDir, { recursive: true, force: true });
++  }
 +});
