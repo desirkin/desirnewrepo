@@ -1,294 +1,278 @@
 diff --git a/judge/features.js b/judge/features.js
-index 840895a..3ffae5d 100644
+index 3ffae5d..82a52bd 100644
 --- a/judge/features.js
 +++ b/judge/features.js
-@@ -6,7 +6,7 @@
- import * as M from '../execution/money.js';
- import { digestOf } from '../execution/contract.js';
- 
--export const FEATURE_VERSION = 'judge-features-paper-reference-1';
-+export const FEATURE_VERSION = 'judge-features-paper-reference-2';
- export const BAR_MS = 60_000; export const BARS_REQUIRED = 61; export const FI_MIN_CLASSIFIED = 0.95; export const TOLERANCE = Object.freeze({ price: 1e-9, ratio: 1e-9 });
- export class FeatureError extends Error { constructor(code, message) { super(`${code}: ${message}`); this.code = code; } }
- const num = (v) => (typeof v === 'string' ? Number(v) : v);
-@@ -36,24 +36,48 @@ export function nearestResistanceAbove(bars, entry, { referenceTs = null } = {})
- }
- // ---- trade windows: half-open [start, end), native id dedup, taker side verbatim, unknown fraction retained ------------------
- export function dedupTrades(trades) { const seen = new Set(); const out = []; let dropped = 0; for (const t of trades) { const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (seen.has(k)) { dropped += 1; continue; } seen.add(k); out.push(t); } return { trades: out, duplicatesDropped: dropped }; }
--export function flowImbalance(trades, startTs, endTs) {
--  let buy = '0'; let sell = '0'; let unknown = '0'; let n = 0; for (const t of trades) { if (t.eventTs < startTs || t.eventTs >= endTs || t.fromSubscriptionSnapshot) continue; n += 1; if (t.side === 'buy') buy = M.add(buy, t.quoteNotional); else if (t.side === 'sell') sell = M.add(sell, t.quoteNotional); else unknown = M.add(unknown, t.quoteNotional); }
-+const validEpoch = (v) => Number.isSafeInteger(v) && v >= 0;
-+const validTradeClock = (t) => Number.isSafeInteger(t?.eventTs) && t.eventTs >= 0 && Number.isSafeInteger(t?.receiptTs) && t.receiptTs >= 0 && t.eventTs <= t.receiptTs;
-+function queryEpoch(trades, startTs, endTs, asOfTs, requested) {
-+  const epochs = new Set();
-+  for (const t of trades) {
-+    if (t?.fromSubscriptionSnapshot === true) continue;
-+    if (t?.fromSubscriptionSnapshot !== false || !Number.isSafeInteger(t.eventTs) || t.eventTs < 0) return { ok: false, epoch: null, reason: 'TRADE_INVALID' };
-+    if (t.eventTs < startTs || t.eventTs >= endTs) continue;
-+    if (!validTradeClock(t) || !validEpoch(t.feedEpoch)) return { ok: false, epoch: null, reason: 'TRADE_INVALID' };
-+    if (t.receiptTs <= asOfTs) epochs.add(t.feedEpoch);
-+  }
-+  if (requested !== null && requested !== undefined) return validEpoch(requested) ? { ok: true, epoch: requested } : { ok: false, epoch: null, reason: 'EPOCH_INVALID' };
-+  return epochs.size <= 1 ? { ok: true, epoch: epochs.size ? epochs.values().next().value : null } : { ok: false, epoch: null, reason: 'EPOCH_AMBIGUOUS' };
-+}
-+function tradesAsOf(trades, startTs, endTs, { asOfTs = endTs, feedEpoch = null } = {}) {
-+  if (!Array.isArray(trades) || !Number.isSafeInteger(startTs) || !Number.isSafeInteger(endTs) || !Number.isSafeInteger(asOfTs) || startTs > endTs) return { ok: false, trades: [] };
-+  const resolved = queryEpoch(trades, startTs, endTs, asOfTs, feedEpoch); if (!resolved.ok) return { ok: false, trades: [] };
-+  return { ok: true, trades: trades.filter((t) => t?.fromSubscriptionSnapshot === false && validTradeClock(t) && validEpoch(t.feedEpoch) && t.receiptTs <= asOfTs && t.eventTs >= startTs && t.eventTs < endTs && (resolved.epoch === null || t.feedEpoch === resolved.epoch)) };
-+}
-+export function flowImbalance(trades, startTs, endTs, query = {}) {
-+  const selected = tradesAsOf(trades, startTs, endTs, query); let buy = '0'; let sell = '0'; let unknown = '0'; let n = 0; for (const t of selected.trades) { n += 1; if (t.side === 'buy') buy = M.add(buy, t.quoteNotional); else if (t.side === 'sell') sell = M.add(sell, t.quoteNotional); else unknown = M.add(unknown, t.quoteNotional); }
-   const known = M.add(buy, sell); const total = M.add(known, unknown); const classified = M.isZero(total) ? null : M.toStatistic(M.div(known, total, 6, 'DOWN'));
-+  if (!selected.ok) return { state: 'UNKNOWN', reason: 'AS_OF_OR_EPOCH_INVALID', fi: null, buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
-   if (M.isZero(known) || n === 0) return { state: 'UNKNOWN', reason: 'ZERO_DENOMINATOR', fi: null, buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
-   if (classified !== null && classified < FI_MIN_CLASSIFIED) return { state: 'UNKNOWN', reason: 'CLASSIFIED_BELOW_95PCT', fi: null, buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
-   return { state: 'KNOWN', reason: null, fi: M.toStatistic(M.div(M.sub(buy, sell), known, 8, 'HALF_UP')), buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
- }
--export function windowNotional(trades, startTs, endTs) { let q = '0'; let n = 0; for (const t of trades) { if (t.eventTs < startTs || t.eventTs >= endTs || t.fromSubscriptionSnapshot) continue; q = M.add(q, t.quoteNotional); n += 1; } return { notional: q, count: n, startTs, endTs }; }
-+export function windowNotional(trades, startTs, endTs, query = {}) { const selected = tradesAsOf(trades, startTs, endTs, query); let q = '0'; let n = 0; for (const t of selected.trades) { q = M.add(q, t.quoteNotional); n += 1; } return { notional: q, count: n, startTs, endTs }; }
- // RV60: last complete 60s traded quote notional / median of the 20 preceding non-overlapping complete 60s windows; E = floor(D/60000)*60000
+@@ -68,7 +68,8 @@ export function windowNotional(trades, startTs, endTs, query = {}) { const selec
  export function relativeVolume60(trades, decisionTs, coverage) {
--  const E = Math.floor(decisionTs / BAR_MS) * BAR_MS; const need = { startTs: E - 21 * BAR_MS, endTs: E };
--  if (!coverage || !coverage.continuous || coverage.startTs > need.startTs || coverage.endTs < need.endTs) return { state: 'UNKNOWN', reason: 'COVERAGE_INCOMPLETE', rv60: null, E, numerator: null, baseline: null, completedMinuteDelayMs: decisionTs - E };
--  const numerator = windowNotional(trades, E - BAR_MS, E); const base = []; for (let k = 1; k <= 20; k += 1) base.push(windowNotional(trades, E - (k + 1) * BAR_MS, E - k * BAR_MS).notional);
-+  const validDecision = Number.isSafeInteger(decisionTs) && decisionTs >= 0; const E = validDecision ? Math.floor(decisionTs / BAR_MS) * BAR_MS : null; const unknown = (reason) => ({ state: 'UNKNOWN', reason, rv60: null, E, numerator: null, baseline: null, completedMinuteDelayMs: E === null ? null : decisionTs - E });
-+  if (!Array.isArray(trades) || !validDecision) return unknown('INPUT_INVALID');
-+  const coverageClockValid = coverage && coverage.continuous === true && Number.isSafeInteger(coverage.startTs) && coverage.startTs >= 0 && Number.isSafeInteger(coverage.endTs) && coverage.endTs >= 0 && coverage.startTs <= coverage.endTs && coverage.endTs <= decisionTs && (!Object.hasOwn(coverage, 'gapTs') || coverage.gapTs === null);
-+  const need = { startTs: E - 21 * BAR_MS, endTs: E };
-+  if (!coverageClockValid || coverage.startTs > need.startTs || coverage.endTs < need.endTs) return unknown('COVERAGE_INCOMPLETE');
-+  const resolved = queryEpoch(trades, need.startTs, need.endTs, decisionTs, coverage.epoch); if (!resolved.ok) return unknown(resolved.reason === 'TRADE_INVALID' ? 'INPUT_INVALID' : 'EPOCH_AMBIGUOUS');
-+  const query = { asOfTs: decisionTs, feedEpoch: resolved.epoch }; const numerator = windowNotional(trades, E - BAR_MS, E, query); const base = []; for (let k = 1; k <= 20; k += 1) base.push(windowNotional(trades, E - (k + 1) * BAR_MS, E - k * BAR_MS, query).notional);
-   const sorted = [...base].sort((a, b) => M.cmp(a, b)); const median = M.div(M.add(sorted[9], sorted[10]), '2', 8, 'HALF_UP');
-   if (M.isZero(median)) return { state: 'UNKNOWN', reason: 'ZERO_MEDIAN', rv60: null, E, numerator: numerator.notional, baseline: median, completedMinuteDelayMs: decisionTs - E };
-   return { state: 'KNOWN', reason: null, rv60: M.toStatistic(M.div(numerator.notional, median, 8, 'HALF_UP')), E, numerator: numerator.notional, baseline: median, baselineWindows: 20, completedMinuteDelayMs: decisionTs - E };
- }
--export function vwap(trades, startTs, endTs) { let q = '0'; let b = '0'; for (const t of trades) { if (t.eventTs < startTs || t.eventTs >= endTs || t.fromSubscriptionSnapshot) continue; q = M.add(q, t.quoteNotional); b = M.add(b, t.qty); } return M.isZero(b) ? null : M.div(q, b, 8, 'HALF_UP'); }
-+export function vwap(trades, startTs, endTs, query = {}) { const selected = tradesAsOf(trades, startTs, endTs, query); let q = '0'; let b = '0'; for (const t of selected.trades) { q = M.add(q, t.quoteNotional); b = M.add(b, t.qty); } return M.isZero(b) ? null : M.div(q, b, 8, 'HALF_UP'); }
- // ---- book features on an exact snapshot ---------------------------------------------------------------------------------------
- export function bookFacts(snapshot) { if (!snapshot || !snapshot.bids.length || !snapshot.asks.length) return null; const bid = snapshot.bids[0][0]; const ask = snapshot.asks[0][0]; const mid = M.div(M.add(bid, ask), '2', 9, 'HALF_UP'); return { bestBid: bid, bestAsk: ask, mid, spread: M.sub(ask, bid) }; }
- export function bidDepthWithinBps(snapshot, bps) { const f = bookFacts(snapshot); if (!f) return null; const floor = M.mul(f.mid, M.sub('1', M.div(String(bps), '10000', 8, 'DOWN'))); let notional = '0'; for (const [p, q] of snapshot.bids) { if (M.lt(p, floor)) break; notional = M.add(notional, M.mul(p, q)); } return notional; }
-@@ -62,11 +86,11 @@ export const medianDecimal = (list) => { if (!list.length) return null; const s
- export function createFlowTracker({ retentionMs = 22 * BAR_MS, maxTrades = 50_000 } = {}) {
-   const trades = []; const ids = new Set(); let dropped = 0; let overflow = 0; let epoch = null; let epochChanges = 0; let lastTs = 0;
-   return {
--    add(t) { if (t.fromSubscriptionSnapshot) return false; if (epoch !== null && t.feedEpoch !== epoch) { epochChanges += 1; } epoch = t.feedEpoch; const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (ids.has(k)) { dropped += 1; return false; } ids.add(k); trades.push(t); lastTs = Math.max(lastTs, t.eventTs); if (trades.length > maxTrades) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); overflow += 1; } return true; },
-+    add(t) { if (t?.fromSubscriptionSnapshot !== false || !validTradeClock(t) || !validEpoch(t.feedEpoch)) return false; if (epoch !== null && t.feedEpoch < epoch) return false; if (epoch !== null && t.feedEpoch > epoch) { epochChanges += 1; trades.length = 0; ids.clear(); lastTs = 0; } epoch = t.feedEpoch; const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (ids.has(k)) { dropped += 1; return false; } ids.add(k); trades.push(t); lastTs = Math.max(lastTs, t.eventTs); if (trades.length > maxTrades) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); overflow += 1; } return true; },
-     advance(now) { const cut = now - retentionMs; while (trades.length && trades[0].eventTs < cut) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); } },
--    fi(startTs, endTs) { return flowImbalance(trades, startTs, endTs); }, notional(startTs, endTs) { return windowNotional(trades, startTs, endTs); }, vwap(startTs, endTs) { return vwap(trades, startTs, endTs); }, rv60(decisionTs, coverage) { return relativeVolume60(trades, decisionTs, coverage); },
-+    fi(startTs, endTs, query = {}) { return flowImbalance(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, notional(startTs, endTs, query = {}) { return windowNotional(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, vwap(startTs, endTs, query = {}) { return vwap(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, rv60(decisionTs, coverage) { return relativeVolume60(trades, decisionTs, { ...coverage, epoch: coverage?.epoch ?? epoch }); },
-     // the trades inside [startTs, endTs) in receipt order: the challengers' window input (focused completion §5), never a copy of the whole tape
--    window(startTs, endTs) { return trades.filter((t) => t.eventTs >= startTs && t.eventTs < endTs); },
-+    window(startTs, endTs, query = {}) { return tradesAsOf(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }).trades; },
-     snapshot: () => trades.slice(), status: () => ({ trades: trades.length, duplicatesDropped: dropped, overflow, epoch, epochChanges, lastTs }),
-   };
- }
-diff --git a/judge/history.js b/judge/history.js
-index 0c17d8e..abea4d3 100644
---- a/judge/history.js
-+++ b/judge/history.js
-@@ -22,7 +22,7 @@ export function createBarHistory({ clock, fetchImpl = null, pairKeyOf = () => nu
-   function onTrade(t) { const st = s(t.symbol); if (t.fromSubscriptionSnapshot) return; const start = Math.floor(t.eventTs / BAR_MS) * BAR_MS; const p = Number(t.price); const q = Number(t.qty); const cur = st.live.get(start) ?? { periodStartTs: start, periodEndTs: start + BAR_MS, open: p, high: p, low: p, close: p, volumeBase: 0, volumeQuote: 0, tradeCount: 0, closed: false, source: 'LIVE_TRADES', knownAtTs: t.receiptTs, epoch: t.feedEpoch }; if (cur.epoch !== t.feedEpoch) cur.gap = true; cur.high = Math.max(cur.high, p); cur.low = Math.min(cur.low, p); cur.close = p; cur.volumeBase += q; cur.volumeQuote += Number(t.quoteNotional); cur.tradeCount += 1; cur.knownAtTs = Math.max(cur.knownAtTs, t.receiptTs); st.live.set(start, cur); }
-   function advance(symbol, nowTs, { coverage = null } = {}) { const st = s(symbol); for (const [start, bar] of [...st.live.entries()]) { if (nowTs >= bar.periodEndTs) { st.live.delete(start); const covered = coverage ? coverage.continuous && coverage.startTs <= bar.periodStartTs : true; if (covered && !bar.gap && !st.bars.has(start)) st.bars.set(start, { ...bar, closed: true, coverage: 'CONTINUOUS_TRADES' }); } } trim(st); }
-   // the 61 contiguous complete bars ending at the latest closed minute before nowTs (null when any is missing or has no price)
--  function bars(symbol, nowTs) { const st = series.get(symbol); if (!st) return null; const end = Math.floor(nowTs / BAR_MS) * BAR_MS; const out = []; for (let k = BARS_REQUIRED; k >= 1; k -= 1) { const b = st.bars.get(end - k * BAR_MS); if (!b || b.close === null) return null; out.push(b); } return out; }
-+  function bars(symbol, nowTs) { if (!Number.isSafeInteger(nowTs) || nowTs < 0) return null; const st = series.get(symbol); if (!st) return null; const end = Math.floor(nowTs / BAR_MS) * BAR_MS; const out = []; for (let k = BARS_REQUIRED; k >= 1; k -= 1) { const b = st.bars.get(end - k * BAR_MS); if (!b || b.close === null || !Number.isSafeInteger(b.knownAtTs) || b.knownAtTs < 0 || b.knownAtTs > nowTs) return null; out.push(b); } return out; }
-   function status(symbol) { const st = series.get(symbol); if (!st) return null; const end = Math.floor(clock() / BAR_MS) * BAR_MS; let missing = 0; const missingStarts = []; for (let k = BARS_REQUIRED; k >= 1; k -= 1) { const b = st.bars.get(end - k * BAR_MS); if (!b || b.close === null) { missing += 1; if (missingStarts.length < 8) missingStarts.push(end - k * BAR_MS); } } return { symbol, retained: st.bars.size, live: st.live.size, missingOf61: missing, missingStarts, lastRetrievalTs: st.lastRetrievalTs, knownAtFloorTs: st.retrievalKnownAtTs, failures: st.failures, earliestReadyTs: missing ? end + missing * BAR_MS : null }; }
-   function needsRefresh(symbol, nowTs) { const st = series.get(symbol); return !st || st.lastRetrievalTs === null || nowTs - st.lastRetrievalTs >= refreshMs; }
-   return { bars, refresh, onTrade, advance, status, needsRefresh, ingestRows, symbols: () => [...series.keys()] };
+   const validDecision = Number.isSafeInteger(decisionTs) && decisionTs >= 0; const E = validDecision ? Math.floor(decisionTs / BAR_MS) * BAR_MS : null; const unknown = (reason) => ({ state: 'UNKNOWN', reason, rv60: null, E, numerator: null, baseline: null, completedMinuteDelayMs: E === null ? null : decisionTs - E });
+   if (!Array.isArray(trades) || !validDecision) return unknown('INPUT_INVALID');
+-  const coverageClockValid = coverage && coverage.continuous === true && Number.isSafeInteger(coverage.startTs) && coverage.startTs >= 0 && Number.isSafeInteger(coverage.endTs) && coverage.endTs >= 0 && coverage.startTs <= coverage.endTs && coverage.endTs <= decisionTs && (!Object.hasOwn(coverage, 'gapTs') || coverage.gapTs === null);
++  const historicalGap = !coverage || !Object.hasOwn(coverage, 'gapTs') || coverage.gapTs === null || (Number.isSafeInteger(coverage.gapTs) && coverage.gapTs >= 0 && Number.isSafeInteger(coverage.startTs) && coverage.gapTs <= coverage.startTs);
++  const coverageClockValid = coverage && coverage.continuous === true && Number.isSafeInteger(coverage.startTs) && coverage.startTs >= 0 && Number.isSafeInteger(coverage.endTs) && coverage.endTs >= 0 && coverage.startTs <= coverage.endTs && coverage.endTs <= decisionTs && historicalGap;
+   const need = { startTs: E - 21 * BAR_MS, endTs: E };
+   if (!coverageClockValid || coverage.startTs > need.startTs || coverage.endTs < need.endTs) return unknown('COVERAGE_INCOMPLETE');
+   const resolved = queryEpoch(trades, need.startTs, need.endTs, decisionTs, coverage.epoch); if (!resolved.ok) return unknown(resolved.reason === 'TRADE_INVALID' ? 'INPUT_INVALID' : 'EPOCH_AMBIGUOUS');
 diff --git a/test/judge-feature-asof-review.test.js b/test/judge-feature-asof-review.test.js
+index ddd4017..a34291d 100644
+--- a/test/judge-feature-asof-review.test.js
++++ b/test/judge-feature-asof-review.test.js
+@@ -141,6 +141,8 @@ test('RV60 malformed clocks, collections and coverage fail closed without throwi
+     [rows, D, { ...valid, startTs: -1 }, 'COVERAGE_INCOMPLETE'],
+     [rows, D, { ...valid, startTs: D, endTs: D - 1 }, 'COVERAGE_INCOMPLETE'],
+     [rows, D, { ...valid, endTs: D + 1 }, 'COVERAGE_INCOMPLETE'],
++    [rows, D, { ...valid, gapTs: -1 }, 'COVERAGE_INCOMPLETE'],
++    [rows, D, { ...valid, gapTs: 'old' }, 'COVERAGE_INCOMPLETE'],
+     [rows, D, { ...valid, gapTs: D - 1 }, 'COVERAGE_INCOMPLETE'],
+   ]) assert.equal(relativeVolume60(trades, decisionTs, coverage).reason, reason);
+ 
+@@ -150,6 +152,35 @@ test('RV60 malformed clocks, collections and coverage fail closed without throwi
+   assert.equal(invalidBatch.reason, 'INPUT_INVALID');
+ });
+ 
++test('actual feed recovers RV only after 21 complete post-gap minutes and retains the historical gap diagnostic', () => {
++  const gapTs = T - 21 * BAR_MS;
++  const feed = createExecutionFeed({ clock: () => T + 5_000, limits: { impairedAfterMs: 90_000, criticalAfterMs: 180_000 } });
++  const tracker = createFlowTracker();
++  feed.subscribe((event) => { if (event.kind === 'TRADE') tracker.add(event.trade); });
++  feed.admit('XBT/USD', { priority: 'CANDIDATE' });
++  feed.onConnect(gapTs - 200_001);
++  feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), gapTs - 200_000);
++  feed.ingest(JSON.stringify({ channel: 'heartbeat' }), gapTs);
++
++  const ingestMinute = (minute) => {
++    const ts = gapTs + minute * BAR_MS + 1_000;
++    feed.ingest(JSON.stringify({
++      channel: 'trade', type: 'update',
++      data: [{ symbol: 'XBT/USD', side: 'buy', price: '1', qty: '100', ord_type: 'market', trade_id: minute + 1, timestamp: new Date(ts).toISOString() }],
++    }), ts);
++  };
++  for (let minute = 0; minute < 20; minute += 1) ingestMinute(minute);
++  const beforeD = gapTs + 20 * BAR_MS + 5_000;
++  assert.equal(tracker.rv60(beforeD, feed.coverage('XBT/USD', beforeD)).reason, 'COVERAGE_INCOMPLETE');
++
++  ingestMinute(20);
++  const after = tracker.rv60(T + 5_000, feed.coverage('XBT/USD', T + 5_000));
++  assert.equal(after.state, 'KNOWN');
++  assert.equal(after.rv60, 1);
++  assert.equal(feed.coverage('XBT/USD', T + 5_000).gapTs, gapTs, 'historical gap remains visible at the continuous-coverage start');
++  assert.equal(feed.status().counters.coverageGaps, 1, 'recovery does not erase the gap counter');
++});
++
+ test('RV60 does not mix a prior feed epoch into current coverage', () => {
+   const D = T + 5_000;
+   const E = Math.floor(D / BAR_MS) * BAR_MS;
+diff --git a/judge/learning-recipe.js b/judge/learning-recipe.js
+index d29801b..972f398 100644
+--- a/judge/learning-recipe.js
++++ b/judge/learning-recipe.js
+@@ -14,7 +14,7 @@ import { COST_MODEL_VERSION } from './cost.js';
+ import { RISK_VERSION } from './risk.js';
+ import { STRATEGY_VERSION } from './setups.js';
+ 
+-export const JUDGE_LEARNING_RECIPE_VERSION = 'judge-prepared-market-features-2';
++export const JUDGE_LEARNING_RECIPE_VERSION = 'judge-prepared-market-features-3';
+ export const JUDGE_LEARNING_PREPARED_FACTS_VERSION = 'judge-prepared-learning-facts-1';
+ export const JUDGE_LEARNING_CONSUMER_CONTRACT_VERSION = 'judge-prospective-consumer-1';
+ export const JUDGE_LEARNING_CONSUMER_ID = 'COBRA_JUDGE_ADMISSION_BATCH_RANK';
+@@ -99,19 +99,19 @@ const RECIPE_FEATURES = Object.freeze([
+   Object.freeze({
+     name: 'fi15', sourcePath: 'sourceEvidence.tradeEvidence.trades[D-15s,D)', transform: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION_FROM_RAW_TRADES',
+     units: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION', lookbackMs: 15_000,
+-    supportLaw: 'CONTINUOUS_TRADE_COVERAGE_AND_CLASSIFIED_QUOTE_NOTIONAL_GTE_0_95', ageBasis: 'decisionTs-fast.fi15.endTs',
++    supportLaw: 'CONTINUOUS_TRADE_COVERAGE_RESET_AFTER_ANY_RETAINED_GAP_AT_OR_BEFORE_START_AND_CLASSIFIED_QUOTE_NOTIONAL_GTE_0_95', ageBasis: 'decisionTs-fast.fi15.endTs',
+     domain: Object.freeze({ min: -1, max: 1, minInclusive: true, maxInclusive: true }),
+   }),
+   Object.freeze({
+     name: 'fi60', sourcePath: 'sourceEvidence.tradeEvidence.trades[D-60s,D)', transform: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION_FROM_RAW_TRADES',
+     units: 'SIGNED_CLASSIFIED_TAKER_QUOTE_NOTIONAL_FRACTION', lookbackMs: 60_000,
+-    supportLaw: 'CONTINUOUS_TRADE_COVERAGE_AND_CLASSIFIED_QUOTE_NOTIONAL_GTE_0_95', ageBasis: 'decisionTs-fast.fi60.endTs',
++    supportLaw: 'CONTINUOUS_TRADE_COVERAGE_RESET_AFTER_ANY_RETAINED_GAP_AT_OR_BEFORE_START_AND_CLASSIFIED_QUOTE_NOTIONAL_GTE_0_95', ageBasis: 'decisionTs-fast.fi60.endTs',
+     domain: Object.freeze({ min: -1, max: 1, minInclusive: true, maxInclusive: true }),
+   }),
+   Object.freeze({
+     name: 'rv60', sourcePath: 'sourceEvidence.tradeEvidence.trades[E-21m,E)', transform: 'LAST_CLOSED_60S_QUOTE_NOTIONAL_OVER_MEDIAN_PRIOR_20_FROM_RAW_TRADES',
+     units: 'RATIO_LAST_CLOSED_60S_QUOTE_NOTIONAL_TO_MEDIAN_PRIOR_20', lookbackMs: 21 * BAR_MS,
+-    supportLaw: 'CONTINUOUS_21_COMPLETE_1M_TRADE_WINDOWS', ageBasis: 'decisionTs-fast.rv60.E',
++    supportLaw: 'CONTINUOUS_21_COMPLETE_1M_TRADE_WINDOWS_RESET_AFTER_ANY_RETAINED_GAP_AT_OR_BEFORE_START', ageBasis: 'decisionTs-fast.rv60.E',
+     domain: Object.freeze({ min: 0, max: null, minInclusive: true, maxInclusive: null }),
+   }),
+   Object.freeze({
+@@ -160,8 +160,12 @@ const known = (name, value, sourceReferenceTs, decisionTs, factSupport) => {
+   const d = definition(name);
+   return { name, value, units: d.units, lookbackMs: d.lookbackMs, sourceReferenceTs, ageMs: decisionTs - sourceReferenceTs, availability: 'KNOWN', reason: null, support: factSupport };
+ };
++const nonNegativeTs = (v) => Number.isSafeInteger(v) && v >= 0;
++const retainedGapIsHistorical = (coverage) => coverage.gapTs === null
++  || (nonNegativeTs(coverage.gapTs) && coverage.gapTs <= coverage.startTs);
+ const coverageProves = (coverage, startTs, endTs) => isPlainObject(coverage) && coverage.continuous === true
+-  && ts(coverage.startTs) && ts(coverage.endTs) && coverage.startTs <= startTs && coverage.endTs >= endTs;
++  && ts(coverage.startTs) && ts(coverage.endTs) && coverage.startTs < coverage.endTs
++  && retainedGapIsHistorical(coverage) && coverage.startTs <= startTs && coverage.endTs >= endTs;
+ 
+ const selected = (v, keys) => {
+   if (!isPlainObject(v)) return null;
+@@ -171,7 +175,7 @@ const tradeEvidenceDigestOf = (e) => digestOf({ coverage: e.coverage, trades: e.
+ function rawTradeWindowError(input, decisionTs) {
+   if (!isPlainObject(input) || exactKeys(input, ['coverage', 'trades'])) return 'input shape malformed';
+   const coverage = input.coverage; const ck = exactKeys(coverage, COVERAGE_EVIDENCE_KEYS); if (ck) return `coverage ${ck}`;
+-  if (coverage.continuous !== true || !Number.isSafeInteger(coverage.epoch) || coverage.epoch < 0 || !ts(coverage.startTs) || coverage.endTs !== decisionTs || coverage.gapTs !== null) return 'coverage is not continuous through decisionTs';
++  if (coverage.continuous !== true || !Number.isSafeInteger(coverage.epoch) || coverage.epoch < 0 || !ts(coverage.startTs) || !ts(coverage.endTs) || coverage.startTs >= coverage.endTs || coverage.endTs !== decisionTs || !retainedGapIsHistorical(coverage)) return 'coverage is not continuous through decisionTs after its retained gap';
+   if (!Array.isArray(input.trades) || input.trades.length > JUDGE_LEARNING_MAX_RAW_TRADES) return 'raw trade window exceeds bound or is not an array';
+   let symbol = null; let coin = null; let priorReceiptTs = null; let priorSequence = null; const identities = new Set();
+   for (let i = 0; i < input.trades.length; i += 1) {
+diff --git a/test/judge-learning-recipe-review.test.js b/test/judge-learning-recipe-review.test.js
+index e8a479c..557a595 100644
+--- a/test/judge-learning-recipe-review.test.js
++++ b/test/judge-learning-recipe-review.test.js
+@@ -16,6 +16,7 @@ import {
+ } from '../judge/learning-recipe.js';
+ import { digestOf } from '../execution/contract.js';
+ import { FEATURE_VERSION, indicatorBlock } from '../judge/features.js';
++import { createExecutionFeed, FEED_DEFAULTS } from '../execution/feed.js';
+ import { COST_MODEL_VERSION } from '../judge/cost.js';
+ import { RISK_VERSION } from '../judge/risk.js';
+ import { STRATEGY_VERSION } from '../judge/setups.js';
+@@ -86,6 +87,7 @@ const inputs = (over = {}) => {
+ };
+ 
+ test('the canonical V3 recipe binds the actual six derivations, units, lookbacks and upstream versions—not a version alias', () => {
++  assert.equal(JUDGE_LEARNING_RECIPE_VERSION, 'judge-prepared-market-features-3');
+   assert.equal(judgeLearningFeatureRecipeError(JUDGE_LEARNING_FEATURE_RECIPE), null);
+   assert.equal(JUDGE_LEARNING_FEATURE_RECIPE.featureRecipeVersion, JUDGE_LEARNING_RECIPE_VERSION);
+   assert.deepEqual(JUDGE_LEARNING_FEATURE_RECIPE.upstreamVersions, { marketFeatureVersion: FEATURE_VERSION, strategyVersion: STRATEGY_VERSION, bookSnapshotVersion: 'execution-book-snapshot-1' });
+@@ -94,6 +96,8 @@ test('the canonical V3 recipe binds the actual six derivations, units, lookbacks
+   ]);
+   assert.equal(JUDGE_LEARNING_FEATURE_RECIPE.features.find((f) => f.name === 'bidDepthUsd10bps').units, 'USD_QUOTE_NOTIONAL_BID_SIDE_WITHIN_10BPS_OF_MID');
+   assert.equal(JUDGE_LEARNING_FEATURE_RECIPE.features.find((f) => f.name === 'rv60').units, 'RATIO_LAST_CLOSED_60S_QUOTE_NOTIONAL_TO_MEDIAN_PRIOR_20');
++  assert.match(JUDGE_LEARNING_FEATURE_RECIPE.features.find((f) => f.name === 'fi15').supportLaw, /RETAINED_GAP_AT_OR_BEFORE_START/);
++  assert.match(JUDGE_LEARNING_FEATURE_RECIPE.features.find((f) => f.name === 'rv60').supportLaw, /RETAINED_GAP_AT_OR_BEFORE_START/);
+   assert.equal(judgeLearningFeatureRecipeDigestOf(JUDGE_LEARNING_FEATURE_RECIPE), JUDGE_LEARNING_FEATURE_RECIPE_DIGEST);
+ 
+   const changed = clone(JUDGE_LEARNING_FEATURE_RECIPE);
+@@ -104,6 +108,49 @@ test('the canonical V3 recipe binds the actual six derivations, units, lookbacks
+   assert.match(judgeLearningFeatureRecipeError(duplicate), /duplicate/);
+   const unknown = clone(JUDGE_LEARNING_FEATURE_RECIPE); unknown.features[1].name = 'futureProfit';
+   assert.match(judgeLearningFeatureRecipeError(unknown), /unknown/);
++
++  const priorCapture = clone(buildJudgeLearningPreparedFacts(inputs()));
++  priorCapture.featureRecipeVersion = 'judge-prepared-market-features-2';
++  priorCapture.factsDigest = judgeLearningPreparedFactsDigestOf(priorCapture);
++  assert.match(judgeLearningPreparedFactsError(priorCapture), /recipe identity mismatch/, 'a pre-change capture cannot be relabelled under the historical-gap semantics');
++});
++
++test('a real retained feed gap is historical after a full clean window; an inside-window gap or short reset never earns RV credit', () => {
++  const gapAt = D - 21 * 60_000;
++  let now = gapAt - FEED_DEFAULTS.impairedAfterMs - 1;
++  const feed = createExecutionFeed({ clock: () => now });
++  feed.admit('XBT/USD', { priority: 'CANDIDATE' });
++  feed.onConnect(now);
++  feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), now);
++  now = gapAt;
++  feed.ingest(JSON.stringify({ channel: 'heartbeat' }), now);
++  for (now = gapAt + 4_000; now <= D; now += 4_000) feed.ingest(JSON.stringify({ channel: 'heartbeat' }), now);
++  now = D;
++  const recoveredCoverage = feed.coverage('XBT/USD', D);
++  assert.deepEqual(recoveredCoverage, { continuous: true, epoch: 1, startTs: gapAt, endTs: D, gapTs: gapAt });
++
++  const recovered = tradeWindowAt(D);
++  recovered.coverage = recoveredCoverage;
++  for (const row of recovered.trades) row.feedEpoch = recoveredCoverage.epoch;
++  const recoveredFacts = buildJudgeLearningPreparedFacts(inputs({ tradeEvidence: recovered }));
++  assert.equal(recoveredFacts.features.fi15.availability, 'KNOWN');
++  assert.equal(recoveredFacts.features.rv60.availability, 'KNOWN', 'the retained diagnostic gap does not poison the clean interval that begins at that gap');
++
++  for (const gapTs of [gapAt + 1, D + 1, -1, 1.5]) {
++    const invalid = clone(recovered);
++    invalid.coverage.gapTs = gapTs;
++    const facts = buildJudgeLearningPreparedFacts(inputs({ tradeEvidence: invalid }));
++    for (const name of ['fi15', 'fi60', 'rv60']) assert.equal(facts.features[name].availability, 'UNAVAILABLE');
++  }
++
++  const shortStart = D - 20 * 60_000;
++  const short = clone(recovered);
++  short.coverage.startTs = shortStart;
++  short.coverage.gapTs = shortStart;
++  short.trades = short.trades.filter((row) => row.receiptTs >= shortStart);
++  const shortFacts = buildJudgeLearningPreparedFacts(inputs({ tradeEvidence: short }));
++  assert.equal(shortFacts.features.fi15.availability, 'KNOWN', 'the recent FI window is independently covered');
++  assert.equal(shortFacts.features.rv60.availability, 'UNAVAILABLE', 'twenty clean minutes cannot satisfy the strict twenty-one-minute RV law');
+ });
+ 
+ test('pure prepared facts reproduce six current sources with truthful clocks/support and renamed bid-only depth', () => {
+diff --git a/test/learning-memory-burst-review.test.js b/test/learning-memory-burst-review.test.js
 new file mode 100644
 --- /dev/null
-+++ b/test/judge-feature-asof-review.test.js
-@@ -0,0 +1,192 @@
-+// Point-in-time feature boundaries: event time selects the market window while
-+// receipt time and feed epoch select what was actually knowable at that time.
++++ b/test/learning-memory-burst-review.test.js
+@@ -0,0 +1,72 @@
++// Bounded synthetic concurrency test. These calls are NOT trading simulations.
 +import test from 'node:test';
 +import assert from 'node:assert/strict';
-+import {
-+  BAR_MS,
-+  createFlowTracker,
-+  flowImbalance,
-+  relativeVolume60,
-+} from '../judge/features.js';
-+import { createExecutionFeed } from '../execution/feed.js';
-+import { createBarHistory } from '../judge/history.js';
++import { createHash } from 'node:crypto';
++import { createDecisionMemoryPortForTest, DECISION_MEMORY_WORKER_PROTOCOL, DECISION_MEMORY_REFRESH_MS } from '../lib/decision-memory-port.js';
 +
 +const T = Date.UTC(2026, 8, 13, 12);
-+
-+function trade({
-+  eventTs,
-+  receiptTs = eventTs,
-+  feedEpoch = 1,
-+  nativeTradeId = `t-${eventTs}-${receiptTs}-${feedEpoch}`,
-+  side = 'buy',
-+  quoteNotional = '100',
-+  snapshot = false,
-+} = {}) {
-+  return {
-+    tradeVersion: 'execution-trade-1',
-+    symbol: 'XBT/USD',
-+    canonicalCoin: 'BTC',
-+    feedEpoch,
-+    receiptSequence: Math.max(1, Math.floor(receiptTs - (T - 30 * BAR_MS))),
-+    nativeTradeId,
-+    side,
-+    price: '1',
-+    qty: quoteNotional,
-+    quoteNotional,
-+    eventTs,
-+    receiptTs,
-+    fromSubscriptionSnapshot: snapshot,
-+    orderType: 'market',
++const turn = () => new Promise((resolve) => setImmediate(resolve));
++const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
++function response(request) {
++  const snapshot = {
++    view: 'DECISION', version: 'learning-memory-view-1', law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY',
++    preparedTs: request.nowTs, activations: [], withheld: [], kill: { state: 'ARMED', reason: null, ts: null },
++    sourceProvenance: {
++      snapshotStoreVersion: 'learning-decision-snapshot-store-1', sourceSnapshotVersion: 'learning-decision-raw-snapshot-1',
++      sourceProvenanceVersion: 'learning-decision-read-provenance-1', trustBasis: 'FIXED_BOUNDED_READER_COMPLETE_RAW_BYTES',
++      canonicalStoreId: `sha256:${'a'.repeat(64)}`, sourceDigest: 'b'.repeat(64), totalBytes: 0, totalRows: 0,
++    },
 +  };
++  return { protocol: DECISION_MEMORY_WORKER_PROTOCOL, requestId: request.requestId, ok: true, preparedTs: request.nowTs,
++    snapshotDigest: createHash('sha256').update(JSON.stringify(snapshot)).digest('hex'), snapshot };
 +}
 +
-+test('control: subscription snapshots remain excluded from flow', () => {
-+  const result = flowImbalance([
-+    trade({ eventTs: T - 1_000, receiptTs: T - 500, snapshot: true }),
-+  ], T - 15_000, T);
-+  assert.equal(result.count, 0);
-+  assert.equal(result.state, 'UNKNOWN');
++test('5,000 refresh requests cannot fan out workers before response OR before physical exit', async () => {
++  let nowTs = T; let starts = 0; let cancels = 0; let request;
++  const result = deferred(); const closed = deferred();
++  const port = createDecisionMemoryPortForTest({ enabled: true, mode: 'OBSERVE', dataDir: 'unused-test-path', clock: () => nowTs }, (r) => {
++    starts += 1; request = r;
++    return { promise: result.promise, closed: closed.promise, cancel: () => { cancels += 1; return closed.promise; } };
++  });
++  const first = port.refresh();
++  for (let i = 0; i < 5_000; i += 1) assert.strictEqual(i % 2 ? port.refresh() : port.refreshIfDue(), first);
++  assert.equal(starts, 1);
++  result.resolve(response(request));
++  assert.equal((await first).ok, true);
++  nowTs += DECISION_MEMORY_REFRESH_MS;
++  for (let i = 0; i < 5_000; i += 1) assert.strictEqual(port.refresh(), first, 'cadence expiry does not release a still-running worker');
++  const snapshot = port.snapshot();
++  for (let i = 0; i < 10_000; i += 1) assert.strictEqual(port.snapshot(), snapshot);
++  assert.equal(starts, 1, 'RAM reads cannot trigger a source refresh');
++  const stopping = port.stop();
++  for (let i = 0; i < 1_000; i += 1) assert.strictEqual(port.stop(), stopping);
++  let stopped = false; stopping.then(() => { stopped = true; });
++  await turn(); assert.equal(stopped, false, 'shutdown must still await the physical exit');
++  assert.equal(cancels, 1);
++  assert.equal(port.snapshot(), null);
++  closed.resolve(); await stopping;
++  assert.equal(stopped, true);
++  assert.deepEqual(await port.refresh(), { ok: false, reason: 'STOPPED' });
 +});
 +
-+test('event-time window excludes a row received after its as-of end', () => {
-+  const result = flowImbalance([
-+    trade({ eventTs: T - 100, receiptTs: T + 100 }),
-+  ], T - 15_000, T);
-+  assert.equal(result.count, 0, 'the trade was not known at trigger T');
-+  assert.equal(result.state, 'UNKNOWN');
-+});
-+
-+test('direct flow batch fails closed when a relevant row has event-after-receipt chronology', () => {
-+  const result = flowImbalance([
-+    trade({ eventTs: T - 100, receiptTs: T - 90, side: 'buy', nativeTradeId: 'valid-buy' }),
-+    trade({ eventTs: T - 500, receiptTs: T - 600, side: 'sell', nativeTradeId: 'invalid-clock' }),
-+  ], T - 15_000, T);
-+  assert.equal(result.state, 'UNKNOWN');
-+  assert.equal(result.reason, 'AS_OF_OR_EPOCH_INVALID');
-+  assert.equal(result.count, 0, 'a valid subset is not promoted when its relevant batch is malformed');
-+});
-+
-+test('actual feed delivering an old-event trade after trigger T cannot backfill [T-15s,T)', () => {
-+  const feed = createExecutionFeed({ clock: () => T + 100 });
-+  const flow = createFlowTracker();
-+  feed.subscribe((event) => { if (event.kind === 'TRADE') flow.add(event.trade); });
-+  feed.admit('XBT/USD', { priority: 'CANDIDATE' });
-+  feed.onConnect(T - 5_000);
-+  feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), T - 4_000);
-+  feed.ingest(JSON.stringify({
-+    channel: 'trade',
-+    type: 'update',
-+    data: [{ symbol: 'XBT/USD', side: 'buy', price: '1', qty: '100', ord_type: 'market', trade_id: 7, timestamp: new Date(T - 100).toISOString() }],
-+  }), T + 100);
-+  const atTrigger = flow.fi(T - 15_000, T);
-+  assert.equal(atTrigger.count, 0, 'receipt T+100 cannot revise a fact frozen at T');
-+});
-+
-+function rvRows(D) {
-+  const E = Math.floor(D / BAR_MS) * BAR_MS;
-+  const rows = [trade({ eventTs: E - 30_000, receiptTs: E - 29_900, nativeTradeId: 'numerator' })];
-+  for (let k = 1; k <= 20; k += 1) {
-+    const eventTs = E - (k + 1) * BAR_MS + 1_000;
-+    rows.push(trade({ eventTs, receiptTs: eventTs + 100, nativeTradeId: `baseline-${k}` }));
-+  }
-+  return rows;
-+}
-+
-+test('RV60 excludes future-receipt rows even when their event time is in a completed minute', () => {
-+  const D = T + 5_000;
-+  const E = Math.floor(D / BAR_MS) * BAR_MS;
-+  const rows = rvRows(D);
-+  rows.push(trade({ eventTs: E - 20_000, receiptTs: D + 1, nativeTradeId: 'future-known', quoteNotional: '900' }));
-+  const coverage = { continuous: true, epoch: 1, startTs: E - 21 * BAR_MS, endTs: D, gapTs: null };
-+  const result = relativeVolume60(rows, D, coverage);
-+  assert.equal(result.rv60, 1, 'future-known numerator notional cannot inflate the point-in-time ratio');
-+});
-+
-+test('RV60 admits a delayed print received after its event window but by decision D', () => {
-+  const D = T + 5_000;
-+  const E = Math.floor(D / BAR_MS) * BAR_MS;
-+  const rows = rvRows(D);
-+  rows.push(trade({ eventTs: E - 20_000, receiptTs: E + 1_000, nativeTradeId: 'late-but-known', quoteNotional: '900' }));
-+  const coverage = { continuous: true, epoch: 1, startTs: E - 21 * BAR_MS, endTs: D, gapTs: null };
-+  assert.equal(relativeVolume60(rows, D, coverage).rv60, 10, 'decision-time as-of applies to every RV window');
-+});
-+
-+test('RV60 uses decision D as-of for delayed-but-known prints in baseline windows too', () => {
-+  const D = T + 5_000;
-+  const E = Math.floor(D / BAR_MS) * BAR_MS;
-+  const rows = rvRows(D);
-+  for (let k = 1; k <= 11; k += 1) rows.push(trade({
-+    eventTs: E - (k + 1) * BAR_MS + 2_000,
-+    receiptTs: E - k * BAR_MS + 1_000,
-+    nativeTradeId: `delayed-baseline-${k}`,
-+    quoteNotional: '900',
-+  }));
-+  const coverage = { continuous: true, epoch: 1, startTs: E - 21 * BAR_MS, endTs: D, gapTs: null };
-+  assert.equal(relativeVolume60(rows, D, coverage).rv60, 0.1, 'late prints known by D remain legitimate baseline evidence');
-+});
-+
-+test('RV60 malformed clocks, collections and coverage fail closed without throwing', () => {
-+  const D = T + 5_000;
-+  const E = Math.floor(D / BAR_MS) * BAR_MS;
-+  const rows = rvRows(D);
-+  const valid = { continuous: true, epoch: 1, startTs: E - 21 * BAR_MS, endTs: D, gapTs: null };
-+  for (const [trades, decisionTs, coverage, reason] of [
-+    [null, D, valid, 'INPUT_INVALID'],
-+    [rows, Number.NaN, valid, 'INPUT_INVALID'],
-+    [rows, -1, valid, 'INPUT_INVALID'],
-+    [rows, D + 0.5, valid, 'INPUT_INVALID'],
-+    [rows, D, undefined, 'COVERAGE_INCOMPLETE'],
-+    [rows, D, { ...valid, startTs: undefined }, 'COVERAGE_INCOMPLETE'],
-+    [rows, D, { ...valid, endTs: Number.NaN }, 'COVERAGE_INCOMPLETE'],
-+    [rows, D, { ...valid, startTs: -1 }, 'COVERAGE_INCOMPLETE'],
-+    [rows, D, { ...valid, startTs: D, endTs: D - 1 }, 'COVERAGE_INCOMPLETE'],
-+    [rows, D, { ...valid, endTs: D + 1 }, 'COVERAGE_INCOMPLETE'],
-+    [rows, D, { ...valid, gapTs: D - 1 }, 'COVERAGE_INCOMPLETE'],
-+  ]) assert.equal(relativeVolume60(trades, decisionTs, coverage).reason, reason);
-+
-+  const malformed = [...rows, trade({ eventTs: E - 20_000, receiptTs: E - 21_000, nativeTradeId: 'invalid-rv-clock' })];
-+  const invalidBatch = relativeVolume60(malformed, D, valid);
-+  assert.equal(invalidBatch.state, 'UNKNOWN');
-+  assert.equal(invalidBatch.reason, 'INPUT_INVALID');
-+});
-+
-+test('RV60 does not mix a prior feed epoch into current coverage', () => {
-+  const D = T + 5_000;
-+  const E = Math.floor(D / BAR_MS) * BAR_MS;
-+  const rows = rvRows(D);
-+  rows.push(trade({ eventTs: E - 20_000, receiptTs: E - 19_900, feedEpoch: 0, nativeTradeId: 'prior-epoch', quoteNotional: '900' }));
-+  const coverage = { continuous: true, epoch: 1, startTs: E - 21 * BAR_MS, endTs: D, gapTs: null };
-+  assert.equal(relativeVolume60(rows, D, coverage).rv60, 1);
-+});
-+
-+test('incremental flow queries do not retain rows from a prior feed epoch', () => {
-+  const tracker = createFlowTracker();
-+  tracker.add(trade({ eventTs: T - 1_000, feedEpoch: 1, nativeTradeId: 'old', side: 'buy' }));
-+  tracker.add(trade({ eventTs: T, feedEpoch: 2, nativeTradeId: 'new', side: 'sell' }));
-+  const current = tracker.fi(T - 5_000, T + 1_000);
-+  assert.equal(current.count, 1, 'only the current tracker epoch is eligible');
-+  assert.equal(current.fi, -1);
-+  assert.equal(tracker.add(trade({ eventTs: T + 1, receiptTs: T + 1, feedEpoch: 1, nativeTradeId: 'late-old-epoch' })), false, 'an older epoch cannot switch the tracker back');
-+});
-+
-+test('bar history lookup does not expose rows whose retrieval receipt is after query time', () => {
-+  const history = createBarHistory({ clock: () => T });
-+  const rows = [];
-+  for (let k = 61; k >= 1; k -= 1) {
-+    const open = T - k * BAR_MS;
-+    rows.push([open / 1_000, '100', '101', '99', '100', '100', '1', 1]);
-+  }
-+  history.ingestRows('XBT/USD', rows, T + 1_000, T);
-+  assert.equal(history.bars('XBT/USD', T) === null, true, 'the REST rows were not known at T');
-+  assert.equal(history.bars('XBT/USD', -1), null);
-+  assert.equal(history.bars('XBT/USD', Number.NaN), null);
-+  assert.equal(history.bars('XBT/USD', T + 0.5), null);
-+});
-+
-+test('tracker rejects event-after-receipt chronology before it reaches any query', () => {
-+  const tracker = createFlowTracker();
-+  assert.equal(tracker.add(trade({ eventTs: T + 1, receiptTs: T, nativeTradeId: 'future-event' })), false);
-+  assert.equal(tracker.add(trade({ eventTs: -1, receiptTs: 0, nativeTradeId: 'negative-event' })), false);
-+  assert.equal(tracker.add(trade({ eventTs: 0, receiptTs: -1, nativeTradeId: 'negative-receipt' })), false);
-+  assert.equal(tracker.status().trades, 0);
++test('a burst after a failed refresh respects cadence and a fresh successful cycle can recover', async () => {
++  let nowTs = T; let starts = 0;
++  const port = createDecisionMemoryPortForTest({ enabled: true, mode: 'OBSERVE', dataDir: 'unused-test-path', clock: () => nowTs }, (request) => {
++    starts += 1;
++    return { promise: Promise.resolve(starts === 1
++      ? { protocol: DECISION_MEMORY_WORKER_PROTOCOL, requestId: request.requestId, ok: false, code: 'MEMORY_SOURCE_REFUSED' }
++      : response(request)), closed: Promise.resolve(), cancel: () => {} };
++  });
++  try {
++    assert.deepEqual(await port.refresh(), { ok: false, reason: 'MEMORY_SOURCE_REFUSED' });
++    await turn();
++    const burst = await Promise.all(Array.from({ length: 5_000 }, () => port.refreshIfDue()));
++    assert.ok(burst.every((r) => !r.ok && r.reason === 'MEMORY_SOURCE_REFUSED'));
++    assert.equal(starts, 1); assert.equal(port.snapshot(), null);
++    nowTs += DECISION_MEMORY_REFRESH_MS;
++    assert.equal((await port.refresh()).ok, true);
++    assert.equal(starts, 2); assert.ok(Object.isFrozen(port.snapshot()));
++    nowTs -= 1;
++    assert.equal(port.snapshot(), null, 'clock rollback invalidates recovered cached data');
++  } finally { await port.stop(); }
 +});
