@@ -91,6 +91,95 @@ index 900bc58..c6085ef 100644
    "services.swpc.noaa.gov": "NOAA_SWPC",
    "api.cloudflare.com": "CLOUDFLARE_RADAR",
    "www.coindesk.com": "COINDESK_NEWS",
+diff --git a/lib/jsonl.js b/lib/jsonl.js
+index 169de7e..1954fec 100644
+--- a/lib/jsonl.js
++++ b/lib/jsonl.js
+@@ -4,6 +4,32 @@
+ import { appendFileSync, fstatSync, readSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync, fsyncSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
+ import path from 'node:path';
+ 
++const ATOMIC_IO = Object.freeze({ mkdirSync, openSync, fsyncSync, closeSync, writeFileSync, renameSync, unlinkSync });
++
++// Node/libuv reports EPERM when fsync is attempted on an otherwise-openable
++// directory on Windows. The temp file itself has already been fsynced before
++// rename. Only that exact platform/directory result is unsupported; file-fsync,
++// directory-open, other directory-fsync, and close errors still surface.
++const unsupportedDirectoryFsync = (error, platform) => platform === 'win32' && error?.code === 'EPERM';
++function fsyncAndClose(fd, { io, platform, directory = false }) {
++  let firstError = null;
++  try {
++    io.fsyncSync(fd);
++  } catch (error) {
++    if (!(directory && unsupportedDirectoryFsync(error, platform))) firstError = error;
++  }
++  try {
++    io.closeSync(fd);
++  } catch (error) {
++    if (firstError === null) firstError = error;
++  }
++  if (firstError !== null) throw firstError;
++}
++function fsyncDirectory(dir, { io = ATOMIC_IO, platform = process.platform } = {}) {
++  const fd = io.openSync(dir, 'r');
++  fsyncAndClose(fd, { io, platform, directory: true });
++}
++
+ // Atomic JSON write: UNIQUE same-directory temp file + rename, so a crash
+ // mid-write can never leave a torn state file AND two processes writing the
+ // same target can never collide on a shared temp name (PERSIST-0C §15 — a
+@@ -11,23 +37,36 @@ import path from 'node:path';
+ // rename). Each writer owns its temp exclusively (pid + counter + random)
+ // and cleans up only its own temp on failure.
+ let atomicSeq = 0;
+-export function atomicWriteJson(file, obj, { pretty = false, sync = false } = {}) {
+-  mkdirSync(path.dirname(file), { recursive: true });
++function atomicWriteJsonImpl(file, obj, { pretty, sync, io, platform }) {
++  io.mkdirSync(path.dirname(file), { recursive: true });
+   const tmp = `${file}.${process.pid}.${(atomicSeq++).toString(36)}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+   try {
+-    writeFileSync(tmp, pretty ? JSON.stringify(obj, null, 2) : JSON.stringify(obj));
+-    if (sync) { const fd = openSync(tmp, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } }
+-    renameSync(tmp, file);
+-    if (sync) { const fd = openSync(path.dirname(file), 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } }
++    io.writeFileSync(tmp, pretty ? JSON.stringify(obj, null, 2) : JSON.stringify(obj));
++    if (sync) {
++      // Windows requires a writable descriptor for FlushFileBuffers/fsync.
++      // The uniquely-owned temp is reopened r+; this does not alter its bytes.
++      const fd = io.openSync(tmp, 'r+');
++      fsyncAndClose(fd, { io, platform, directory: false });
++    }
++    io.renameSync(tmp, file);
++    if (sync) fsyncDirectory(path.dirname(file), { io, platform });
+   } catch (err) {
+     try {
+-      unlinkSync(tmp); // our own temp only — never another writer's
++      io.unlinkSync(tmp); // our own temp only — never another writer's
+     } catch {
+       // temp may not exist; the original target is untouched either way
+     }
+     throw err;
+   }
+ }
++export function atomicWriteJson(file, obj, { pretty = false, sync = false } = {}) {
++  return atomicWriteJsonImpl(file, obj, { pretty, sync, io: ATOMIC_IO, platform: process.platform });
++}
++// Narrow fault-injection seam for persistence regression tests. Production
++// callers use atomicWriteJson and cannot override the detected platform or IO.
++export function atomicWriteJsonForTest(file, obj, { pretty = false, sync = false, io = ATOMIC_IO, platform = process.platform } = {}) {
++  return atomicWriteJsonImpl(file, obj, { pretty, sync, io: io === ATOMIC_IO ? ATOMIC_IO : { ...ATOMIC_IO, ...io }, platform });
++}
+ 
+ export function appendJsonl(file, obj, { sync = false } = {}) {
+   mkdirSync(path.dirname(file), { recursive: true });
+@@ -84,6 +123,6 @@ export function readJsonBounded(file, maxBytes = 512 * 1024) {
+ export function replaceJsonl(file, records) {
+   mkdirSync(path.dirname(file), { recursive: true });
+   const tmp = `${file}.${process.pid}.${(atomicSeq++).toString(36)}.cache-tmp`; let fd;
+-  try { fd=openSync(tmp,'wx'); for(const record of records) writeSync(fd,JSON.stringify(record)+'\n'); fsyncSync(fd);closeSync(fd);fd=undefined;renameSync(tmp,file);const dir=openSync(path.dirname(file),'r');try{fsyncSync(dir);}finally{closeSync(dir);} }
++  try { fd=openSync(tmp,'wx'); for(const record of records) writeSync(fd,JSON.stringify(record)+'\n');const owned=fd;fd=undefined;fsyncAndClose(owned,{io:ATOMIC_IO,platform:process.platform,directory:false});renameSync(tmp,file);fsyncDirectory(path.dirname(file)); }
+   catch(e){if(fd!==undefined)closeSync(fd);try{unlinkSync(tmp);}catch{}throw e;}
+ }
 diff --git a/market-lab/contracts.js b/market-lab/contracts.js
 index 135bfd0..9e50f6a 100644
 --- a/market-lab/contracts.js
@@ -105,7 +194,7 @@ index 135bfd0..9e50f6a 100644
        if (!(p.volume === null || isNonNegative(p.volume))) return `${where}: volume malformed`;
        return null;
 diff --git a/market-lab/owner.js b/market-lab/owner.js
-index 7dc47b8..992484a 100644
+index 7dc47b8..b3e90e0 100644
 --- a/market-lab/owner.js
 +++ b/market-lab/owner.js
 @@ -37,7 +37,7 @@ import { createCryptoQuantClient, CRYPTOQUANT_METRICS } from './providers/crypto
@@ -117,16 +206,90 @@ index 7dc47b8..992484a 100644
  import { createSettledProjection } from './providers/settled.js';
  import { createTokenomistClient } from './providers/tokenomist.js';
  import { ENDPOINTS } from './registry.js';
-@@ -90,6 +90,8 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
-   const counters = { observations: 0, coverageRecords: 0, duplicateRecords: 0, tapeTrades: 0, tapeBooks: 0, tapeDropped: 0, observerErrors: 0, acquisitions: 0, acquisitionFailures: 0, rotations: 0, segmentRotations: 0, recordingRejected: 0, evictedObservations: 0 };
+@@ -51,6 +51,32 @@ export const ACCOUNTING_DIR = 'accounting';
+ // closeout P3: the bounded shutdown drain — in-flight acquisitions get this long to finish after abort before their continuations are
+ // fenced (same bound as the Socrates runtime's CLOSE_DRAIN_MS; not imported: the market owner never depends on Socrates)
+ export const CLOSE_DRAIN_MS = 10_000;
++// Provider-specific REST cadence under the shipped 1,000/day and 20,000/month
++// spot caps. The five-minute owner tick remains the scheduler; these clocks are
++// the effective wire cadence. Kraken's one-minute bars retain priority because
++// they carry price plus base/quote volume; public WebSockets remain the primary
++// continuous trade-flow path, with REST trades as a bounded recovery sample.
++export const SPOT_REST_CADENCE = deepFreeze({
++  schedulerMs: 300_000,
++  KRAKEN_SPOT: {
++    SPOT_PRICE_CHART: { endpointId: 'rest-ohlc', intervalRefreshMs: { 1: 600_000, 5: HOUR_MS, 15: 3 * HOUR_MS, 60: 6 * HOUR_MS, 240: 12 * HOUR_MS, 1440: DAY_MS } },
++    SPOT_FLOW: { endpointId: 'rest-trades', refreshMs: 2 * HOUR_MS, primary: 'ws-v2' },
++  },
++  COINBASE_SPOT: {
++    SPOT_PRICE_CHART: { endpointId: 'rest-candles', intervalSec: 3600, refreshMs: 15 * 60_000 },
++    SPOT_FLOW: { endpointId: 'rest-trades', refreshMs: 15 * 60_000, primary: 'ws-feed' },
++  },
++});
++export function spotRestCallPlan({ subjectCount, includeCharts = true, includeFlow = true, catalogStartsPerDay = 1, daysInMonth = 31 } = {}) {
++  if (![subjectCount, catalogStartsPerDay, daysInMonth].every((n) => Number.isSafeInteger(n) && n >= 0)) fail('INVALID_REQUEST', 'spot cadence plan needs non-negative integer counts');
++  const perDay = (ms) => Math.ceil(DAY_MS / ms);
++  const krakenCharts = includeCharts ? subjectCount * Object.values(SPOT_REST_CADENCE.KRAKEN_SPOT.SPOT_PRICE_CHART.intervalRefreshMs).reduce((n, ms) => n + perDay(ms), 0) : 0;
++  const coinbaseCharts = includeCharts ? subjectCount * perDay(SPOT_REST_CADENCE.COINBASE_SPOT.SPOT_PRICE_CHART.refreshMs) : 0;
++  const krakenFlow = includeFlow ? subjectCount * perDay(SPOT_REST_CADENCE.KRAKEN_SPOT.SPOT_FLOW.refreshMs) : 0;
++  const coinbaseFlow = includeFlow ? subjectCount * perDay(SPOT_REST_CADENCE.COINBASE_SPOT.SPOT_FLOW.refreshMs) : 0;
++  const row = (charts, flow) => ({ callsPerDay: catalogStartsPerDay + charts + flow, callsPerMonth: (catalogStartsPerDay + charts + flow) * daysInMonth, catalogStartsPerDay, chartCallsPerDay: charts, flowCallsPerDay: flow, daysInMonth });
++  return deepFreeze({ KRAKEN_SPOT: row(krakenCharts, krakenFlow), COINBASE_SPOT: row(coinbaseCharts, coinbaseFlow) });
++}
+ const FACTORIES = { KRAKEN_SPOT: createKrakenSpotClient, COINBASE_SPOT: createCoinbaseClient, KRAKEN_DERIVATIVES: createKrakenDerivativesClient, DERIBIT: createDeribitClient, BYBIT: createBybitClient, COINGECKO: createCoinGeckoClient, GECKOTERMINAL: createGeckoTerminalClient, DEFILLAMA: createDefiLlamaClient, COINGLASS: createCoinGlassClient, CRYPTOQUANT: createCryptoQuantClient, SANTIMENT: createSantimentClient, COINMETRICS: createCoinMetricsClient, FRED: createFredClient, TWELVEDATA: createTwelveDataClient, TOKENOMIST: createTokenomistClient };
+ export const DEFAULT_SWEEP_FAMILIES = Object.freeze(['SPOT_PRICE_CHART', 'DERIVATIVES_FUNDING_OI', 'OPTIONS_TERM_SKEW', 'SUPPLY_UNLOCKS', 'DEX_DEFI', 'ONCHAIN_ENTITY_FLOW', 'NETWORK_ACTIVITY', 'STABLECOIN_LIQUIDITY', 'ETF_FLOWS', 'MACRO_RELEASES', 'CROSS_ASSET', 'LIQUIDATIONS', 'OFFICIAL_SOCIAL_EVENTS', 'INFRASTRUCTURE_STATUS', 'CROSS_VENUE']);
+ // bars of history requested per interval (minutes -> bars): enough for every §7 indicator window (SMA/Bollinger 20, RSI 14,
+@@ -87,12 +113,18 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+   const enabled = (id) => providerEnabled(policy, id);
+   const mayCall = (id, endpointId) => guard.precheck({ providerId: id, endpointId }).ok;
+   const hot = createHotState({ limits, log }); const queue = createIntakeQueue({ limits }); const retained = createRetainedStore({ limits, clock });
+-  const counters = { observations: 0, coverageRecords: 0, duplicateRecords: 0, tapeTrades: 0, tapeBooks: 0, tapeDropped: 0, observerErrors: 0, acquisitions: 0, acquisitionFailures: 0, rotations: 0, segmentRotations: 0, recordingRejected: 0, evictedObservations: 0 };
++  const counters = { observations: 0, coverageRecords: 0, duplicateRecords: 0, tapeTrades: 0, tapeBooks: 0, tapeDropped: 0, observerErrors: 0, acquisitions: 0, acquisitionFailures: 0, cadenceSkips: 0, rotations: 0, segmentRotations: 0, recordingRejected: 0, evictedObservations: 0 };
    const markets = new Map(); // canonicalCoin -> { kraken, coinbase, coingecko }
    let resolution = null; const streams = {}; const schedules = [];
 +  let sweepFamilies = null; let sweepPromise = null;
 +  const bootstrap = { initialState: 'NOT_STARTED', initialMode: null, initialStartedTs: null, initialFinishedTs: null, running: false, runsStarted: 0, runsCompleted: 0, runsFailed: 0, overlapSkips: 0, lastReason: null, lastStartedTs: null, lastFinishedTs: null, lastError: null };
    const shared = new Map(); // bounded shared cross-subject cache: key -> { ts, observations }
    const sharedPut = (k, v) => { shared.delete(k); shared.set(k, v); if (shared.size > limits.sharedCacheEntries) shared.delete(shared.keys().next().value); };
++  const cadenceAttempts = new Map(); // bounded LRU of actual wire-attempt clocks, including failed responses
++  const cadenceAttemptPut = (k, ts) => { cadenceAttempts.delete(k); cadenceAttempts.set(k, ts); if (cadenceAttempts.size > limits.sharedCacheEntries) cadenceAttempts.delete(cadenceAttempts.keys().next().value); };
    const bySubjectCoin = (coin) => subjects.subjects.find((s) => s.canonicalCoin === coin) ?? null;
-@@ -230,7 +232,7 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
++  const spotCadencePlan = spotRestCallPlan({ subjectCount: subjects.subjects.length });
++  const cadenceStatus = deepFreeze({ schedulerMs: SPOT_REST_CADENCE.schedulerMs, providers: { KRAKEN_SPOT: SPOT_REST_CADENCE.KRAKEN_SPOT, COINBASE_SPOT: SPOT_REST_CADENCE.COINBASE_SPOT }, stableProcessPlan: spotCadencePlan, restartSemantics: 'Cadence caches are process memory. Every process start performs fresh catalogs plus one uncached initial family sweep; stableProcessPlan assumes one start per UTC day.' });
+   // content dedup (A02): identical provider / endpoint / subject / kind / sourceKey / revision AND payload is not a new observation
+   const seenKeys = new Set(); const seenOrder = [];
+   const duplicate = (o) => { if (o.sourceKey === null || o.sourceKey === undefined) return false; const key = `${o.provider}|${o.endpointId}|${subjectId(o.subject)}|${o.kind}|${o.sourceKey}|${o.sourceRevision ?? ''}|${canonicalDigest(o.payload)}`; if (seenKeys.has(key)) return true; seenKeys.add(key); seenOrder.push(key); if (seenOrder.length > SEEN_CAP) seenKeys.delete(seenOrder.shift()); return false; };
+@@ -188,14 +220,15 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+     const run = async (id, endpointId, key, fn, { ttlMs = null } = {}) => {
+       const pre = guard.precheck({ providerId: id, endpointId });
+       if (!pre.ok) { preRefused += 1; for (const r of pre.reasons) refusals[r] = (refusals[r] ?? 0) + 1; out.results.push({ providerId: id, endpointId, state: enabled(id) ? 'POLICY_REJECTED' : 'PROVIDER_DISABLED', reasons: pre.reasons }); const rc = refusalCoverage(id, endpointId, pre.reasons); if (rc) out.coverage.push(rc); return null; }
+-      if (ttlMs && !force && shared.has(key) && clock() - shared.get(key).ts < ttlMs) { out.observations.push(...shared.get(key).observations); out.results.push({ providerId: id, endpointId, state: 'CACHED', cachedTs: shared.get(key).ts }); return shared.get(key).result ?? null; }
++      if (ttlMs && !force && shared.has(key) && clock() - shared.get(key).ts < ttlMs) { counters.cadenceSkips += 1; out.observations.push(...shared.get(key).observations); out.results.push({ providerId: id, endpointId, state: 'CACHED', cachedTs: shared.get(key).ts, effectiveCadenceMs: ttlMs }); return shared.get(key).result ?? null; }
++      if (ttlMs && !force && cadenceAttempts.has(key) && clock() - cadenceAttempts.get(key) < ttlMs) { counters.cadenceSkips += 1; out.results.push({ providerId: id, endpointId, state: 'CADENCE_SKIPPED', lastAttemptTs: cadenceAttempts.get(key), effectiveCadenceMs: ttlMs }); return null; }
+       counters.acquisitions += 1; let r; const u0 = usageSnapshot(); const f0 = guard.failureCount();
+-      try { r = await fn(); } catch (err) { counters.acquisitionFailures += 1; out.results.push({ providerId: id, endpointId, state: 'FAILED', reason: String(err?.message ?? err).slice(0, 120) }); return null; }
++      try { r = await fn(); } catch (err) { const ue = usageSnapshot(); if (ttlMs && ue.dispatched > u0.dispatched) cadenceAttemptPut(key, clock()); counters.acquisitionFailures += 1; out.results.push({ providerId: id, endpointId, state: 'FAILED', reason: String(err?.message ?? err).slice(0, 120) }); return null; }
++      const u1 = usageSnapshot(); const used = { dispatched: u1.dispatched - u0.dispatched, credits: u1.credits - u0.credits, refused: u1.refused - u0.refused }; if (ttlMs && used.dispatched > 0) cadenceAttemptPut(key, clock());
+       // P3: a continuation returning after the owner fenced (generation advanced) has no authority — honest cancellation, nothing admitted
+       if (gen !== generation || fenced) { counters.acquisitionFailures += 1; out.results.push({ providerId: id, endpointId, state: 'CANCELLED', reason: 'OWNER_STOPPED_DURING_ACQUISITION' }); refusals.OWNER_STOPPED = (refusals.OWNER_STOPPED ?? 0) + 1; return null; }
+       // P2: an acquisition whose durable accounting transition failed is not a recorded acquisition — no data is admitted from it
+       if (guard.failureCount() > f0) { counters.acquisitionFailures += 1; out.results.push({ providerId: id, endpointId, state: 'ACCOUNTING_FAILED', reason: guard.accountingFailure()?.message ?? 'accounting transition failed', accounting: guard.accountingFailure() }); refusals.ACCOUNTING_UNAVAILABLE = (refusals.ACCOUNTING_UNAVAILABLE ?? 0) + 1; return null; }
+-      const u1 = usageSnapshot(); const used = { dispatched: u1.dispatched - u0.dispatched, credits: u1.credits - u0.credits, refused: u1.refused - u0.refused };
+       if (r.ok) { out.observations.push(...(r.observations ?? [])); out.coverage.push(...(r.coverage ?? [])); out.results.push({ providerId: id, endpointId, state: 'OK', count: r.observations?.length ?? 0, requestId: r.meta?.requestId ?? null, usage: used }); if (ttlMs) sharedPut(key, { ts: clock(), observations: r.observations ?? [], result: r }); return r; }
+       counters.acquisitionFailures += 1; out.coverage.push(...(r.coverage ?? []));
+       const refused = r.failure?.kind === 'QUOTA_REFUSED' || r.failure?.kind === 'CONCURRENCY_REFUSED' || r.failure?.kind === 'ADMISSION_UNBOUND'; if (refused) for (const x of r.failure.refusalReasons ?? ['QUOTA_REFUSED']) refusals[x] = (refusals[x] ?? 0) + 1;
+@@ -204,8 +237,8 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+     const wantedNetwork = (metricIds ?? Object.keys(NETWORK_NATIVE_IDS)).flatMap((id) => NETWORK_NATIVE_IDS[id] ?? []);
+     const histFrom = windowStartTs ?? clock() - 30 * DAY_MS; const histTo = windowEndTs ?? clock();
+     switch (family) {
+-      case 'SPOT_PRICE_CHART': if (m.kraken) for (const iv of [1, 5, 15, 60, 240, 1440]) await run('KRAKEN_SPOT', 'rest-ohlc', `ohlc:${coin}:${iv}`, () => clients.KRAKEN_SPOT.ohlc({ market: m.kraken, intervalMin: iv, sinceTs: clock() - BAR_DEPTH[iv] * iv * 60_000, signal })); if (m.coinbase) await run('COINBASE_SPOT', 'rest-candles', `cbc:${coin}`, () => clients.COINBASE_SPOT.candles({ market: m.coinbase, granularitySec: 3600, startTs: clock() - BAR_DEPTH[60] * 3_600_000, signal })); break;
+-      case 'SPOT_FLOW': if (m.kraken) await run('KRAKEN_SPOT', 'rest-trades', `ktr:${coin}`, () => clients.KRAKEN_SPOT.trades({ market: m.kraken, maxPages: 1, signal })); if (m.coinbase) await run('COINBASE_SPOT', 'rest-trades', `ctr:${coin}`, () => clients.COINBASE_SPOT.trades({ market: m.coinbase, limit: 200, signal })); break;
++      case 'SPOT_PRICE_CHART': if (m.kraken) for (const iv of [1, 5, 15, 60, 240, 1440]) await run('KRAKEN_SPOT', 'rest-ohlc', `ohlc:${coin}:${iv}`, () => clients.KRAKEN_SPOT.ohlc({ market: m.kraken, intervalMin: iv, sinceTs: clock() - BAR_DEPTH[iv] * iv * 60_000, signal }), { ttlMs: SPOT_REST_CADENCE.KRAKEN_SPOT.SPOT_PRICE_CHART.intervalRefreshMs[iv] }); if (m.coinbase) await run('COINBASE_SPOT', 'rest-candles', `cbc:${coin}`, () => clients.COINBASE_SPOT.candles({ market: m.coinbase, granularitySec: 3600, startTs: clock() - BAR_DEPTH[60] * 3_600_000, signal }), { ttlMs: SPOT_REST_CADENCE.COINBASE_SPOT.SPOT_PRICE_CHART.refreshMs }); break;
++      case 'SPOT_FLOW': if (m.kraken) await run('KRAKEN_SPOT', 'rest-trades', `ktr:${coin}`, () => clients.KRAKEN_SPOT.trades({ market: m.kraken, maxPages: 1, signal }), { ttlMs: SPOT_REST_CADENCE.KRAKEN_SPOT.SPOT_FLOW.refreshMs }); if (m.coinbase) await run('COINBASE_SPOT', 'rest-trades', `ctr:${coin}`, () => clients.COINBASE_SPOT.trades({ market: m.coinbase, limit: 200, signal }), { ttlMs: SPOT_REST_CADENCE.COINBASE_SPOT.SPOT_FLOW.refreshMs }); break;
+       case 'DISPLAYED_LIQUIDITY': case 'CROSS_VENUE': if (m.kraken) await run('KRAKEN_SPOT', 'rest-ticker', `ktk:${coin}`, () => clients.KRAKEN_SPOT.ticker({ markets: [m.kraken], signal })); if (m.coinbase) await run('COINBASE_SPOT', 'rest-book', `cbk:${coin}`, () => clients.COINBASE_SPOT.book({ market: m.coinbase, signal })); break;
+       case 'DERIVATIVES_FUNDING_OI': if (s?.krakenDerivatives) { await run('KRAKEN_DERIVATIVES', 'rest-tickers', `kft:${coin}`, () => clients.KRAKEN_DERIVATIVES.tickers({ symbols: [s.krakenDerivatives], signal })); await run('KRAKEN_DERIVATIVES', 'rest-funding-history', `kfh:${coin}`, () => clients.KRAKEN_DERIVATIVES.fundingHistory({ symbol: s.krakenDerivatives, maxRates: 48, signal }), { ttlMs: HOUR_MS }); } if (s?.deribit) { await run('DERIBIT', 'get-instruments', `dfi:${s.deribit}`, () => clients.DERIBIT.loadInstruments({ currency: s.deribit, kind: 'future', signal }), { ttlMs: HOUR_MS }); await run('DERIBIT', 'ticker', `dpt:${s.deribit}`, () => clients.DERIBIT.ticker({ instrumentName: `${s.deribit}-PERPETUAL`, signal })); } if (s?.bybit) await run('BYBIT', 'rest-tickers', `byt:${coin}`, () => clients.BYBIT.tickers({ symbols: [s.bybit], signal })); if (s?.coinglass) { await run('COINGLASS', 'oi-exchange-list', `cgoi:${coin}`, () => clients.COINGLASS.openInterest({ symbol: s.coinglass, canonicalCoin: coin, signal })); await run('COINGLASS', 'funding-exchange-list', 'cgfr', () => clients.COINGLASS.funding({ symbol: s.coinglass, canonicalCoin: coin, signal }), { ttlMs: 300_000 }); } break;
+       case 'LIQUIDATIONS': if (s?.coinglass) await run('COINGLASS', 'liquidation-aggregated-history', `cgl:${coin}`, () => clients.COINGLASS.liquidations({ symbol: s.coinglass, canonicalCoin: coin, signal })); break;
+@@ -230,7 +263,7 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
        case 'STABLECOIN_LIQUIDITY': await run('DEFILLAMA', 'stablecoins', 'dls', () => clients.DEFILLAMA.stablecoins({ wanted: subjects.stablecoins, signal }), { ttlMs: HOUR_MS }); break;
        case 'ETF_FLOWS': if (coin === 'BTC' || coin === 'ETH') await run('COINGLASS', coin === 'ETH' ? 'etf-ethereum-flow-history' : 'etf-bitcoin-flow-history', `etf:${coin}`, () => clients.COINGLASS.etfFlows({ asset: coin, canonicalCoin: coin, signal }), { ttlMs: HOUR_MS }); break;
        case 'MACRO_RELEASES': for (const sid of subjects.macroSeries) { await run('FRED', 'series', `fs:${sid}`, () => clients.FRED.seriesMeta({ seriesId: sid, signal }), { ttlMs: DAY_MS }); await run('FRED', 'series-observations', `fo:${sid}`, () => clients.FRED.observations({ seriesId: sid, limit: 30, signal }), { ttlMs: HOUR_MS }); } await run('COINGLASS', 'economic-data', 'cge', () => clients.COINGLASS.economicCalendar({ startTs: clock() - DAY_MS, endTs: clock() + 7 * DAY_MS, signal }), { ttlMs: 600_000 }); break;
@@ -135,7 +298,7 @@ index 7dc47b8..992484a 100644
        case 'OFFICIAL_SOCIAL_EVENTS': case 'INFRASTRUCTURE_STATUS': if (enabled('SETTLED_RECORDS')) { const r = clients.SETTLED_RECORDS.project({ canonicalCoin: coin, asOfTs: clock(), receivedTs: clock() }); out.observations.push(...r.observations); out.coverage.push(...r.coverage); out.results.push({ providerId: 'SETTLED_RECORDS', endpointId: family === 'INFRASTRUCTURE_STATUS' ? 'gateway-status' : 'official-claims', state: 'OK', count: r.observations.length }); } if (family === 'OFFICIAL_SOCIAL_EVENTS' && s?.coinglass) await run('COINGLASS', 'article-list', 'cgn', () => clients.COINGLASS.headlines({ signal }), { ttlMs: 600_000 }); break;
        default: fail('INVALID_REQUEST', 'unknown family');
      }
-@@ -239,9 +241,32 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+@@ -239,9 +272,32 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
      const after = usageSnapshot(); out.usage = { dispatched: after.dispatched - before.dispatched, credits: after.credits - before.credits, refused: after.refused - before.refused + preRefused, unresolved: after.unresolved - before.unresolved, reasons: refusals };
      return deepFreeze(out);
    }
@@ -169,7 +332,7 @@ index 7dc47b8..992484a 100644
      started = true; stopped = false; lifecycle = 'ACTIVE';
      if (outDir) { const q = rootQuota(); if (q && q.exhausted) { lifecycle = 'RECORDING_FAILED'; stopped = true; recording.error = { code: 'RESOURCE_LIMIT_EXCEEDED', message: 'research root quota exhausted before start' }; recording.failedTs = clock(); recording.where = 'START'; fail('RESOURCE_LIMIT_EXCEEDED', 'research root quota exhausted'); } segmentBase = path.resolve(outDir); openSegment(outDir); }
      resolution = await guard.withPurpose('CATALOG', () => resolveSubjects({ subjects, clients, enabled: (id) => enabled(id) && mayCall(id, ENDPOINTS.find((e) => e.providerId === id && e.method !== 'WS')?.endpointId ?? ''), log }));
-@@ -255,19 +280,19 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+@@ -255,19 +311,19 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
        // round-robin: bounded rotation through eligible catalog subjects outside the explicit list (opt-in)
        if (rotation && rotation.enabled && streams.KRAKEN_SPOT && clients.KRAKEN_SPOT.catalog()) { const explicit = new Set(subjects.subjects.map((s) => s.canonicalCoin)); const pool = clients.KRAKEN_SPOT.catalog().markets.map((m) => m.base).filter((b) => !explicit.has(b)); let idx = 0; const active = []; const slots = Math.max(1, Math.min(rotation.slots ?? 4, limits.hotSubjects - subjects.subjects.length)); const rotateSubjects = () => { if (stopped) return; while (active.length >= slots) { const old = active.shift(); streams.KRAKEN_SPOT.remove(old.wsname); hot.release(subjectId(old.subject), clock(), 'ROTATION'); } for (let n = 0; n < slots && pool.length; n += 1) { const base = pool[idx % pool.length]; idx += 1; const r = clients.KRAKEN_SPOT.resolveMarket({ canonicalCoin: base }); if (r.ok && !active.some((a) => a.wsname === r.market.wsname)) { streams.KRAKEN_SPOT.add(r.market); active.push(r.market); counters.rotations += 1; if (active.length >= slots) break; } } }; rotateSubjects(); const t = timers.setInterval(rotateSubjects, rotation.dwellMs ?? 600_000); t.unref?.(); schedules.push(t); }
      }
@@ -196,12 +359,12 @@ index 7dc47b8..992484a 100644
      const outcome = await Promise.race([all, deadline]); timers.clearTimeout(timer); return outcome;
    }
    async function stopInternal({ seal, policyNonsecret, reason }) {
-@@ -294,6 +319,6 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
+@@ -294,6 +350,6 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
    }
    // idempotent: the first stop drives the shutdown; every later stop returns the same result (the first error preserved)
    function stop({ seal = true, policyNonsecret = null } = {}) { if (!stopPromise) { policyNonsecretForSeal = policyNonsecret ?? policy; stopPromise = stopInternal({ seal, policyNonsecret, reason: 'STOP' }); } return stopPromise.then(() => (recording.error && stopResult && !stopResult.error ? { ...stopResult, sealed: null, error: { ...recording.error, where: recording.where, failedTs: recording.failedTs } } : stopResult)); }
 -  const status = () => deepFreeze({ ownerVersion: OWNER_VERSION, mode, lifecycle, started, stopped, fenced, drain: { ...drainStats, deadlineMs: closeDrainMs, inFlightAcquisitions: inFlightAcquisitions.size, inFlightRequests: http.inFlight() }, counters: { ...counters }, recording: { error: recording.error, failedTs: recording.failedTs, where: recording.where, segmentDir: recording.segmentDir }, retained: retained.counters(), membership: retained.membership(), limits: { retainedObservations: limits.retainedObservations, retainedCoverage: limits.retainedCoverage, sealedSegmentIndex: limits.sealedSegmentIndex, segmentBytes: limits.segmentBytes, runBytes: limits.runBytes, sharedCacheEntries: limits.sharedCacheEntries }, hot: hot.status(), queue: queue.status(), streams: Object.fromEntries(Object.entries(streams).map(([k, s]) => [k, s.status()])), clients: Object.fromEntries(PROVIDER_IDS.map((id) => [id, clients[id].status()])), transport: http.accounting(), accounting: guard.snapshot(), sealed: sealed.slice(), sealedCount, runBytes, segment: segment ? { dir: segment.dir, ordinal: segment.ordinal, ...segment.obs.stats(), coverageLines: segment.cov.stats().lines } : null, observations: retained.counters().retainedObservations, coverageRecords: retained.counters().retainedCoverage, sharedCache: shared.size, resolution: resolution ? { population: resolution.population, catalogs: resolution.catalogs } : null, readiness: providerReadiness({ policy, env, clientStatus: Object.fromEntries(PROVIDER_IDS.map((id) => [id, clients[id].status()])) }), quota: rootQuota() });
-+  const status = () => deepFreeze({ ownerVersion: OWNER_VERSION, mode, lifecycle, started, stopped, fenced, bootstrap: { ...bootstrap }, drain: { ...drainStats, deadlineMs: closeDrainMs, inFlightAcquisitions: inFlightAcquisitions.size, inFlightRequests: http.inFlight() }, counters: { ...counters }, recording: { error: recording.error, failedTs: recording.failedTs, where: recording.where, segmentDir: recording.segmentDir }, retained: retained.counters(), membership: retained.membership(), limits: { retainedObservations: limits.retainedObservations, retainedCoverage: limits.retainedCoverage, sealedSegmentIndex: limits.sealedSegmentIndex, segmentBytes: limits.segmentBytes, runBytes: limits.runBytes, sharedCacheEntries: limits.sharedCacheEntries }, hot: hot.status(), queue: queue.status(), streams: Object.fromEntries(Object.entries(streams).map(([k, s]) => [k, s.status()])), clients: Object.fromEntries(PROVIDER_IDS.map((id) => [id, clients[id].status()])), transport: http.accounting(), accounting: guard.snapshot(), sealed: sealed.slice(), sealedCount, runBytes, segment: segment ? { dir: segment.dir, ordinal: segment.ordinal, ...segment.obs.stats(), coverageLines: segment.cov.stats().lines } : null, observations: retained.counters().retainedObservations, coverageRecords: retained.counters().retainedCoverage, sharedCache: shared.size, resolution: resolution ? { population: resolution.population, catalogs: resolution.catalogs } : null, readiness: providerReadiness({ policy, env, clientStatus: Object.fromEntries(PROVIDER_IDS.map((id) => [id, clients[id].status()])) }), quota: rootQuota() });
++  const status = () => deepFreeze({ ownerVersion: OWNER_VERSION, mode, lifecycle, started, stopped, fenced, bootstrap: { ...bootstrap }, cadence: cadenceStatus, drain: { ...drainStats, deadlineMs: closeDrainMs, inFlightAcquisitions: inFlightAcquisitions.size, inFlightRequests: http.inFlight() }, counters: { ...counters }, recording: { error: recording.error, failedTs: recording.failedTs, where: recording.where, segmentDir: recording.segmentDir }, retained: retained.counters(), membership: retained.membership(), limits: { retainedObservations: limits.retainedObservations, retainedCoverage: limits.retainedCoverage, sealedSegmentIndex: limits.sealedSegmentIndex, segmentBytes: limits.segmentBytes, runBytes: limits.runBytes, sharedCacheEntries: limits.sharedCacheEntries }, hot: hot.status(), queue: queue.status(), streams: Object.fromEntries(Object.entries(streams).map(([k, s]) => [k, s.status()])), clients: Object.fromEntries(PROVIDER_IDS.map((id) => [id, clients[id].status()])), transport: http.accounting(), accounting: guard.snapshot(), sealed: sealed.slice(), sealedCount, runBytes, segment: segment ? { dir: segment.dir, ordinal: segment.ordinal, ...segment.obs.stats(), coverageLines: segment.cov.stats().lines } : null, observations: retained.counters().retainedObservations, coverageRecords: retained.counters().retainedCoverage, sharedCache: shared.size, resolution: resolution ? { population: resolution.population, catalogs: resolution.catalogs } : null, readiness: providerReadiness({ policy, env, clientStatus: Object.fromEntries(PROVIDER_IDS.map((id) => [id, clients[id].status()])) }), quota: rootQuota() });
    return { observer, start, stop, acquire, status, clients, hot, guard, journal, snapshotPrefix, probe: (fn) => guard.withPurpose('PROBE', fn), markets: () => markets, subjectsOf: (coin) => markets.get(coin) ?? null, observations: () => retained.observations(), coverage: () => retained.coverage(), resolution: () => resolution, socialProjection, view: (coin) => { const m = markets.get(coin)?.kraken; return m ? hot.view(subjectId(m.subject)) : null; }, lifecycle: () => lifecycle, isTs };
  }
 diff --git a/market-lab/providers/twelvedata.js b/market-lab/providers/twelvedata.js
@@ -219,7 +382,7 @@ index 4b9eee6..ed857bf 100644
  const providerError = (j, receivedTs) => { const o = obj(j); if (!o || o.status !== 'error') return null; const code = num(o.code); const denied = code === 401 || code === 403 || /plan|upgrade|not available|grow|pro plan/i.test(str(o.message, 300) ?? ''); return { kind: 'SCHEMA', reason: `provider status error ${code ?? ''}`.trim(), coverageState: denied ? 'ACCESS_BLOCKED' : code === 429 ? 'FAILED' : 'FAILED', reasonCode: denied ? 'ENTITLEMENT_DENIED' : code === 429 ? 'RATE_LIMITED' : 'PROVIDER_ERROR', ts: receivedTs }; };
  const parseDt = (s) => { if (typeof s !== 'string') return null; const ms = Date.parse(s.length === 10 ? `${s}T00:00:00Z` : `${s.replace(' ', 'T')}Z`); return Number.isFinite(ms) ? ms : null; };
 diff --git a/market-lab/service.js b/market-lab/service.js
-index af04a22..b75cde0 100644
+index af04a22..d204410 100644
 --- a/market-lab/service.js
 +++ b/market-lab/service.js
 @@ -77,7 +77,7 @@ export function createResearchService({ policy, subjects, env = {}, researchRoot
@@ -227,7 +390,7 @@ index af04a22..b75cde0 100644
    function status() {
      const ownerStatus = owner.status();
 -    return deepFreeze({ serviceVersion: SERVICE_VERSION, state, mode, policyMode: policy.mode, startedTs, nowTs: clock(), researchRoot: root, accountingDir, http: boundPort ? { host: httpHost, port: boundPort } : null, quota: quota(), recording: { failure: recordingFailure, owner: ownerStatus.recording, segment: ownerStatus.segment, sealedSegments: ownerStatus.sealedCount, runBytes: ownerStatus.runBytes, retained: ownerStatus.retained }, accounting: ownerStatus.accounting, owner: { lifecycle: ownerStatus.lifecycle, started: ownerStatus.started, stopped: ownerStatus.stopped, counters: ownerStatus.counters, hot: ownerStatus.hot, streams: ownerStatus.streams, clients: Object.fromEntries(Object.entries(ownerStatus.clients).map(([k, v]) => [k, { runtime: v.runtime, requests: v.counters?.requests ?? 0, ok: v.counters?.ok ?? 0, failed: v.counters?.failed ?? 0, lastFailure: v.lastFailure ?? null }])) }, cases: { queued: queue.length, running, counters: { ...counters, ...caseCounters, indexCap: caseCap }, recent: caseIndex.slice(-32).map((c) => ({ caseId: c.caseId, status: c.status, canonicalCoin: c.canonicalCoin, createdTs: c.createdTs, finishedTs: c.finishedTs, analysisId: c.analysisId, dir: c.dir ? path.basename(c.dir) : null, reason: c.reason ?? null, diagnostic: c.diagnostic ?? null, prefixId: c.prefixId ?? null, prefixDurable: c.prefixDurable ?? null, publication: c.publication ?? null })) }, runtime: runtime.status(), model: { enabled: policy.model.enabled, model: policy.model.model, credentialEnv: policy.model.credentialEnv, credentialPresent: typeof env[policy.model.credentialEnv] === 'string' && env[policy.model.credentialEnv].length > 0, caps: { perCase: policy.model.maxEstimatedUsdPerCase, perDay: policy.model.maxEstimatedUsdPerDay, perMonth: policy.model.maxEstimatedUsdPerMonth } }, lastError, authority: 'NONE', purpose: 'RESEARCH_ONLY' });
-+    return deepFreeze({ serviceVersion: SERVICE_VERSION, state, mode, policyMode: policy.mode, startedTs, nowTs: clock(), researchRoot: root, accountingDir, http: boundPort ? { host: httpHost, port: boundPort } : null, quota: quota(), bootstrap: ownerStatus.bootstrap, recording: { failure: recordingFailure, owner: ownerStatus.recording, segment: ownerStatus.segment, sealedSegments: ownerStatus.sealedCount, runBytes: ownerStatus.runBytes, retained: ownerStatus.retained }, accounting: ownerStatus.accounting, owner: { lifecycle: ownerStatus.lifecycle, started: ownerStatus.started, stopped: ownerStatus.stopped, counters: ownerStatus.counters, hot: ownerStatus.hot, streams: ownerStatus.streams, clients: Object.fromEntries(Object.entries(ownerStatus.clients).map(([k, v]) => [k, { runtime: v.runtime, requests: v.counters?.requests ?? 0, ok: v.counters?.ok ?? 0, failed: v.counters?.failed ?? 0, lastFailure: v.lastFailure ?? null }])) }, cases: { queued: queue.length, running, counters: { ...counters, ...caseCounters, indexCap: caseCap }, recent: caseIndex.slice(-32).map((c) => ({ caseId: c.caseId, status: c.status, canonicalCoin: c.canonicalCoin, createdTs: c.createdTs, finishedTs: c.finishedTs, analysisId: c.analysisId, dir: c.dir ? path.basename(c.dir) : null, reason: c.reason ?? null, diagnostic: c.diagnostic ?? null, prefixId: c.prefixId ?? null, prefixDurable: c.prefixDurable ?? null, publication: c.publication ?? null })) }, runtime: runtime.status(), model: { enabled: policy.model.enabled, model: policy.model.model, credentialEnv: policy.model.credentialEnv, credentialPresent: typeof env[policy.model.credentialEnv] === 'string' && env[policy.model.credentialEnv].length > 0, caps: { perCase: policy.model.maxEstimatedUsdPerCase, perDay: policy.model.maxEstimatedUsdPerDay, perMonth: policy.model.maxEstimatedUsdPerMonth } }, lastError, authority: 'NONE', purpose: 'RESEARCH_ONLY' });
++    return deepFreeze({ serviceVersion: SERVICE_VERSION, state, mode, policyMode: policy.mode, startedTs, nowTs: clock(), researchRoot: root, accountingDir, http: boundPort ? { host: httpHost, port: boundPort } : null, quota: quota(), bootstrap: ownerStatus.bootstrap, cadence: ownerStatus.cadence, recording: { failure: recordingFailure, owner: ownerStatus.recording, segment: ownerStatus.segment, sealedSegments: ownerStatus.sealedCount, runBytes: ownerStatus.runBytes, retained: ownerStatus.retained }, accounting: ownerStatus.accounting, owner: { lifecycle: ownerStatus.lifecycle, started: ownerStatus.started, stopped: ownerStatus.stopped, counters: ownerStatus.counters, hot: ownerStatus.hot, streams: ownerStatus.streams, clients: Object.fromEntries(Object.entries(ownerStatus.clients).map(([k, v]) => [k, { runtime: v.runtime, requests: v.counters?.requests ?? 0, ok: v.counters?.ok ?? 0, failed: v.counters?.failed ?? 0, lastFailure: v.lastFailure ?? null }])) }, cases: { queued: queue.length, running, counters: { ...counters, ...caseCounters, indexCap: caseCap }, recent: caseIndex.slice(-32).map((c) => ({ caseId: c.caseId, status: c.status, canonicalCoin: c.canonicalCoin, createdTs: c.createdTs, finishedTs: c.finishedTs, analysisId: c.analysisId, dir: c.dir ? path.basename(c.dir) : null, reason: c.reason ?? null, diagnostic: c.diagnostic ?? null, prefixId: c.prefixId ?? null, prefixDurable: c.prefixDurable ?? null, publication: c.publication ?? null })) }, runtime: runtime.status(), model: { enabled: policy.model.enabled, model: policy.model.model, credentialEnv: policy.model.credentialEnv, credentialPresent: typeof env[policy.model.credentialEnv] === 'string' && env[policy.model.credentialEnv].length > 0, caps: { perCase: policy.model.maxEstimatedUsdPerCase, perDay: policy.model.maxEstimatedUsdPerDay, perMonth: policy.model.maxEstimatedUsdPerMonth } }, lastError, authority: 'NONE', purpose: 'RESEARCH_ONLY' });
    }
    function readiness() { const rows = providerReadiness({ policy, env, clientStatus: owner.status().clients }); return liveReadinessManifest({ rows, familyCoverage: null, modelReadiness: { enabled: policy.model.enabled, credentialPresent: typeof env[policy.model.credentialEnv] === 'string' && env[policy.model.credentialEnv].length > 0, liveVerification: 'NOT_RUN' }, generatedTs: clock() }); }
    function writeStatus() { try { writeAtomic(statusFile, `${JSON.stringify(status(), null, 1)}\n`); } catch (err) { log(`status write failed: ${String(err?.message ?? err).slice(0, 120)}`); } }
@@ -334,6 +497,86 @@ index 22f7415..745572e 100644
 +      return { ...status, stats: { ...status.stats, appendFailures: status.stats.appendFailures + counters.reservationAppendFailures }, enabled: config.enabled, transportImplemented: true, gateReason: gate() ?? gateReason, transport: 'NEYNAR_SEARCH_REST', coverage, lastSuccessTs, lastError, queryPolicy: { mode: queryMode, assetsPerQuery: queryMode === 'CATALOG_ROTATION' ? assetsPerQuery : null, totalRequestReservations: totalRequests, last: lastQuery ? { catalogContentId: lastQuery.catalogContentId, bases: lastQuery.bases, requestOrdinal: lastQuery.requestOrdinal } : null }, quota: { day: meterDay, requests: used, maxDailyRequests: config.maxDailyRequests, resultLimit }, counters: { ...counters } };
 +    } };
  }
+diff --git a/rumor2/social-runtime.js b/rumor2/social-runtime.js
+index 1521705..4ee005b 100644
+--- a/rumor2/social-runtime.js
++++ b/rumor2/social-runtime.js
+@@ -372,8 +372,44 @@ export function createSocialRuntime({
+   async function reconcileScope({ fenceHeld, append, lookup }) {
+     const committed = { events: [], appended: 0, settled: 0, lastSeq: null };
+     const withCommitted = (r) => (committed.events.length > 0 ? { ...r, committed: { ...committed, events: [...committed.events] } } : r);
++    // Catalog content and freshness are GLOBAL operational facts shared by all
++    // provider-scoped ears. Every identity is checked at the durable door
++    // immediately before preparation. A fact another ear already committed is
++    // canonically adopted; it is never re-appended with this ear's later clock.
++    // This also closes the same race for a newly changed catalog-content row.
++    const durableIdentityExists = async (type, sourceEventId) => {
++      if (typeof lookup !== 'function') return { ok: false, reason: 'DURABLE_LOOKUP_REQUIRED' };
++      const found = await lookup(type, [sourceEventId]);
++      if (!found?.ok || !(found.existing instanceof Set || Array.isArray(found.existing))) return { ok: false, reason: found?.reason ?? 'DURABLE_LOOKUP_UNAVAILABLE' };
++      return { ok: true, exists: found.existing instanceof Set ? found.existing.has(sourceEventId) : found.existing.includes(sourceEventId) };
++    };
+     // a PREPARED operation is retried first, byte-identically — a changed candidate never overwrites it
+-    if (pendingScopeOp) return appendScopeOp({ fenceHeld, append });
++    // A prepared retry normally preserves the exact bytes. The one lawful
++    // exception is a shared catalog fact that another provider committed
++    // after this operation's prior whole-batch failure (or ambiguous ack):
++    // re-check its identity and canonically adopt it before retrying the
++    // provider-unique remainder. No truth is rewritten or discarded.
++    if (pendingScopeOp) {
++      const shared = pendingScopeOp.events.find((event) => event.type === SOCIAL_CATALOG_EVENT_TYPE || event.type === SOCIAL_CATALOG_VERIFIED_EVENT_TYPE);
++      if (shared) {
++        const existing = await durableIdentityExists(shared.type, shared.sourceEventId);
++        if (!existing.ok) { lastError = existing.reason; return { ok: false, reason: existing.reason, scopeOpPending: `${pendingScopeOp.kind}_LOOKUP` }; }
++        if (existing.exists && pendingScopeOp.kind === 'VERIFY') {
++          const op = pendingScopeOp;
++          pendingScopeOp = null;
++          lastVerified = { contentId: op.adopt.contentId, observedTs: op.adopt.observedTs, knownAtTs: op.knownAtTs };
++          stats.scopeOpRetries += 1;
++          stats.scopeVerifications += 1;
++          lastError = null;
++          return { ok: true, settled: 0, appended: 0, events: [], scopeVerified: true, scopeVerifiedExisting: true };
++        }
++        if (existing.exists && pendingScopeOp.kind === 'ACTIVATE') {
++          knownCatalogIds.add(shared.contentId);
++          pendingScopeOp = { ...pendingScopeOp, events: pendingScopeOp.events.filter((event) => event !== shared) };
++        }
++      }
++      return appendScopeOp({ fenceHeld, append });
++    }
+     const knownAtTs = Math.floor(now());
+     let cand;
+     try { cand = scopeSource.candidate({ knownAtTs }); } catch (err) { cand = { status: 'UNAVAILABLE', reason: `SCOPE_SOURCE_THREW: ${String(err?.message ?? err).slice(0, 120)}` }; }
+@@ -387,6 +423,14 @@ export function createSocialRuntime({
+         const seenObserved = Math.max(activeScope.catalogObservedTs ?? 0, lastVerified && lastVerified.contentId === cand.catalog.contentId ? lastVerified.observedTs : 0);
+         if (cand.catalog.observedTs > seenObserved) {
+           const ev = socialCatalogVerifiedEvent({ venue: cand.catalog.venue, contentId: cand.catalog.contentId, observedTs: cand.catalog.observedTs, knownAtTs });
++          const existing = await durableIdentityExists(ev.type, ev.sourceEventId);
++          if (!existing.ok) { lastError = existing.reason; return { ok: false, reason: existing.reason, scopeOpPending: 'VERIFY_LOOKUP' }; }
++          if (existing.exists) {
++            lastVerified = { contentId: ev.contentId, observedTs: ev.observedTs, knownAtTs };
++            stats.scopeVerifications += 1;
++            lastError = null;
++            return { ok: true, settled: 0, appended: 0, events: [], scopeVerified: true, scopeVerifiedExisting: true };
++          }
+           pendingScopeOp = { kind: 'VERIFY', events: [ev], knownAtTs, attempts: 0, adopt: { contentId: ev.contentId, observedTs: ev.observedTs } };
+           return appendScopeOp({ fenceHeld, append });
+         }
+@@ -407,7 +451,13 @@ export function createSocialRuntime({
+     if (owedWork()) { lastError = 'SCOPE_TRANSITION_OWED_WORK: bounded drain rounds exhausted'; return withCommitted({ ok: false, reason: 'SCOPE_TRANSITION_OWED_WORK', detail: lastError }); }
+     // PREPARE the exact activation batch: immutable content, next revision, predecessor binding, recorded clock
+     const events = [];
+-    if (cand.catalog && !knownCatalogIds.has(cand.catalog.contentId)) events.push(socialCatalogEvent({ catalog: cand.catalog, acceptedKnownAtTs: knownAtTs }));
++    if (cand.catalog && !knownCatalogIds.has(cand.catalog.contentId)) {
++      const catalogEvent = socialCatalogEvent({ catalog: cand.catalog, acceptedKnownAtTs: knownAtTs });
++      const existing = await durableIdentityExists(catalogEvent.type, catalogEvent.sourceEventId);
++      if (!existing.ok) { lastError = existing.reason; return withCommitted({ ok: false, reason: existing.reason, scopeOpPending: 'CATALOG_LOOKUP' }); }
++      if (existing.exists) knownCatalogIds.add(cand.catalog.contentId);
++      else events.push(catalogEvent);
++    }
+     const previous = activeScope ? { scopeRevision: activeScope.scopeRevision, filterId: activeScope.filterId } : null;
+     const scopeRevision = (activeScope ? activeScope.scopeRevision : durableScopeRevision) + 1;
+     const reason = !activeScope ? 'INITIAL_ACTIVATION' : activeScope.mode !== scope.mode ? 'MODE_CHANGED' : activeScope.restored && coverage.freshness !== 'FRESH' ? 'STALE_RESTORED_SCOPE_REPLACED' : activeScope.admission.policyVersion !== scope.policyVersion ? 'POLICY_CHANGED' : 'CATALOG_CHANGED';
 diff --git a/test/data-only-budget.test.js b/test/data-only-budget.test.js
 index 98e1b60..ef10e77 100644
 --- a/test/data-only-budget.test.js
@@ -351,14 +594,135 @@ index 98e1b60..ef10e77 100644
  test("data-only request reservations survive restart and stop at the exact daily cap", async () => {
    const dir = mkdtempSync(path.join(os.tmpdir(), "serpent-data-budget-"));
    const lanes = { TEST: { maxDailyRequests: 2, usdPerRequest: 0 } };
+diff --git a/test/data-only-market.test.mjs b/test/data-only-market.test.mjs
+new file mode 100644
+index 0000000..54763a9
+--- /dev/null
++++ b/test/data-only-market.test.mjs
+@@ -0,0 +1,106 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import path from 'node:path';
++import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { fileURLToPath } from 'node:url';
++import {
++  DATA_ONLY_MARKET_FAMILIES,
++  buildDataOnlyMarketPolicy,
++  loadDataOnlyMarketSubjects,
++  startDataOnlyMarket,
++} from '../tools/data-only-market.mjs';
++import * as H from './helpers/market-lab.js';
++
++const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
++const entry = path.join(REPO, 'tools', 'data-only-market.mjs');
++const tmp = () => mkdtempSync(path.join(tmpdir(), 'data-only-market-'));
++const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
++
++function importsOf(file, seen = new Set()) {
++  const absolute = path.resolve(file);
++  if (seen.has(absolute)) return seen;
++  seen.add(absolute);
++  const source = readFileSync(absolute, 'utf8');
++  const specs = [...source.matchAll(/(?:from\s*|import\s*\()(['"])(\.{1,2}\/[^'"]+)\1/g)].map((m) => m[2]);
++  for (const spec of specs) {
++    let next = path.resolve(path.dirname(absolute), spec);
++    if (!path.extname(next)) next += '.js';
++    importsOf(next, seen);
++  }
++  return seen;
++}
++
++test('data-only market policy is a zero-spend observation allowlist and missing keys block only their own sources', () => {
++  const withoutKeys = buildDataOnlyMarketPolicy({ env: {} });
++  assert.deepEqual(Object.entries(withoutKeys.providers).filter(([, p]) => p.enabled).map(([id]) => id), ['KRAKEN_SPOT', 'COINBASE_SPOT', 'GECKOTERMINAL', 'DEFILLAMA', 'COINMETRICS']);
++  assert.equal(withoutKeys.providers.FRED.enabled, false);
++  assert.equal(withoutKeys.providers.TWELVEDATA.enabled, false);
++  assert.equal(withoutKeys.providers.COINGECKO.enabled, false);
++  assert.equal(withoutKeys.providers.KRAKEN_SPOT.enabled, true, 'a missing unrelated key cannot disable public spot');
++
++  const withKeys = buildDataOnlyMarketPolicy({ env: { FRED_API_KEY: 'fixture', TWELVEDATA_API_KEY: 'fixture', COINGECKO_DEMO_API_KEY: 'fixture', COINGLASS_API_KEY: 'must-not-enable', KRAKEN_L3_DATA_API_KEY: 'must-not-enable' } });
++  for (const id of ['FRED', 'TWELVEDATA', 'COINGECKO']) assert.equal(withKeys.providers[id].enabled, true, id);
++  for (const id of ['KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'TOKENOMIST']) assert.equal(withKeys.providers[id].enabled, false, id);
++  assert.equal(withKeys.providers.KRAKEN_SPOT.l3.enabled, false);
++  assert.equal(withKeys.providers.KRAKEN_DERIVATIVES.charts.enabled, false);
++  assert.deepEqual({ enabled: withKeys.model.enabled, perCase: withKeys.model.maxEstimatedUsdPerCase, day: withKeys.model.maxEstimatedUsdPerDay, month: withKeys.model.maxEstimatedUsdPerMonth }, { enabled: false, perCase: 0, day: 0, month: 0 });
++  assert.deepEqual(loadDataOnlyMarketSubjects().subjects.map((s) => s.canonicalCoin), ['BTC', 'ETH', 'SOL']);
++  assert.ok(DATA_ONLY_MARKET_FAMILIES.includes('SPOT_PRICE_CHART') && DATA_ONLY_MARKET_FAMILIES.includes('SPOT_FLOW'));
++});
++
++test('fake provider transport starts scoped spot capture, publishes honest cap pressure, and stops without orders', async () => {
++  const root = tmp(); const calls = []; let handle = null;
++  const products = [...H.COINBASE_PRODUCTS, { id: 'SOL-USD', base_currency: 'SOL', quote_currency: 'USD', status: 'online', trading_disabled: false, quote_increment: '0.01', base_increment: '0.00000001' }];
++  const fetchImpl = async (input, init = {}) => {
++    const url = new URL(input); calls.push({ host: url.host, path: url.pathname, method: init.method ?? 'GET' });
++    if (url.pathname === '/0/public/AssetPairs') return json(H.KRAKEN_ASSET_PAIRS);
++    if (url.pathname === '/products') return json(products);
++    if (url.pathname === '/0/public/OHLC') return json(H.krakenOhlc(url.searchParams.get('pair'), { intervalMin: Number(url.searchParams.get('interval')), endTs: H.T0 }));
++    if (url.pathname === '/0/public/Trades') return json(H.krakenTrades(url.searchParams.get('pair'), { endTs: H.T0 }));
++    if (/\/products\/[^/]+\/candles$/.test(url.pathname)) return json([[Math.floor((H.T0 - 7_200_000) / 1000), 99, 102, 100, 101, 12], [Math.floor((H.T0 - 3_600_000) / 1000), 100, 103, 101, 102, 13]]);
++    if (/\/products\/[^/]+\/trades$/.test(url.pathname)) return json(H.coinbaseTrades({ endTs: H.T0 }));
++    return new Response('{"error":"unhandled fixture route"}', { status: 404, headers: { 'content-type': 'application/json' } });
++  };
++  try {
++    handle = await startDataOnlyMarket({ researchRoot: root, env: {}, fetchImpl, ownerMode: 'INTEGRATED', clock: () => H.T0, families: ['SPOT_PRICE_CHART', 'SPOT_FLOW'], log: () => {} });
++    assert.equal(handle.status().state, 'ACTIVE');
++    await H.waitFor(() => handle.status().bootstrap.initialState === 'COMPLETE');
++    const status = handle.status();
++    assert.deepEqual(status.scope.subjects, ['BTC', 'ETH', 'SOL']);
++    assert.equal(status.scope.allAssetCoverageClaim, false);
++    assert.equal(status.safety.orders, false);
++    assert.equal(status.safety.modelEnabled, false);
++    assert.deepEqual(status.persistence.processRestartSameFilesystem, { captures: true, quotaJournal: true, cadenceCache: false });
++    assert.equal(status.persistence.replitRepublish, 'NOT_GUARANTEED');
++    assert.equal(status.sources.KRAKEN_SPOT.state, 'OBSERVED');
++    assert.equal(status.sources.COINBASE_SPOT.state, 'OBSERVED');
++    assert.equal(status.sources.FRED.state, 'BLOCKED_CREDENTIAL');
++    assert.equal(status.sources.KRAKEN_DERIVATIVES.state, 'RESTRICTED_OFF');
++    assert.equal(status.sources.COINGLASS.state, 'DISABLED_ZERO_BUDGET');
++    assert.equal(status.quotaAudit.state, 'WITHIN_DECLARED_CAPS');
++    assert.deepEqual(status.quotaAudit.rows.KRAKEN_SPOT, { callsPerDay: 586, callsPerMonth: 18166, configuredDailyCap: 1000, configuredMonthlyCap: 20000, state: 'WITHIN_CAP' });
++    assert.deepEqual(status.quotaAudit.rows.COINBASE_SPOT, { callsPerDay: 577, callsPerMonth: 17887, configuredDailyCap: 1000, configuredMonthlyCap: 20000, state: 'WITHIN_CAP' });
++    assert.ok(status.counters.observations > 0);
++    assert.deepEqual([...new Set(calls.map((c) => c.host))].sort(), ['api.exchange.coinbase.com', 'api.kraken.com']);
++    assert.ok(calls.every((c) => c.method === 'GET'));
++    await handle.stop({ seal: false });
++    assert.equal(handle.status().state, 'STOPPED');
++  } finally {
++    if (handle?.status().running) await handle.stop({ seal: false });
++    rmSync(root, { recursive: true, force: true });
++  }
++});
++
++test('data-only market import graph has no trading, model, Judge, Watch, Paper, or Tape composition', () => {
++  const graph = [...importsOf(entry)];
++  const forbidden = ['paper', 'judge', 'execution', 'watch', 'socrates', 'ledger', 'state'];
++  for (const file of graph) {
++    const relative = path.relative(REPO, file).replace(/\\/g, '/');
++    for (const dir of forbidden) assert.equal(relative === `${dir}.js` || relative.startsWith(`${dir}/`), false, `forbidden data-only market dependency: ${relative}`);
++    if (relative.startsWith('tape/')) assert.equal(relative, 'tape/book.js', `only the pure order-book data structure is allowed from tape/: ${relative}`);
++  }
++  const direct = readFileSync(entry, 'utf8');
++  assert.doesNotMatch(direct, /createResearchService|enqueueCase|ANTHROPIC_API_KEY/);
++  assert.match(direct, /createResearchOwner/);
++});
 diff --git a/test/data-only-runtime.test.mjs b/test/data-only-runtime.test.mjs
-index 1be5807..ef5d173 100644
+index 1be5807..93f5640 100644
 --- a/test/data-only-runtime.test.mjs
 +++ b/test/data-only-runtime.test.mjs
-@@ -42,3 +42,44 @@ test('data-only launcher derives official/social scope from the accepted catalog
+@@ -42,3 +42,53 @@ test('data-only launcher derives official/social scope from the accepted catalog
    assert.doesNotMatch(source, /\b(?:BTC|ETH|SOL)\b/);
    assert.match(source, /namedPreference:\s*false/);
  });
++
++test('data-only launcher starts and reports zero-order market observations with its own guarded transport', () => {
++  const source = readFileSync(entry, 'utf8');
++  assert.match(source, /import\('\.\/data-only-market\.mjs'\)/);
++  assert.match(source, /market = await startDataOnlyMarket\(\{ env: process\.env, dataDir: root, log \}\)/);
++  assert.match(source, /handles\.push\(market\)/);
++  assert.match(source, /market:\s*market\?\.status\?\.\(\)/);
++  assert.match(source, /blockers\.MARKET/);
++});
 +
 +test('data-only deployment composes the existing YouTube collector behind explicit fail-closed gates and durable status', () => {
 +  const source = readFileSync(entry, 'utf8');
@@ -445,6 +809,85 @@ index 117b2bd..309e19f 100644
  test('Farcaster checks scoped access, explicit queries and caps independently; blocked gates make zero calls', () => {
    for (const extra of [{ accountRecord: null }, { env: {} }, { config: { enabled: true, queries: [], maxDailyRequests: 1, resultLimit: 10, intervalMs: 60000 } }, { config: { enabled: true, queries: ['BTC'], maxDailyRequests: null, resultLimit: 10, intervalMs: 60000 } }, { config: { enabled: true, queries: ['BTC'], maxDailyRequests: 1, resultLimit: 101, intervalMs: 60000 } }, { accountRecord: { ...record(), acquisitionPath: 'WEBHOOK' } }, { accountRecord: { ...record(), permittedUses: ['RETRIEVAL'] } }]) {
      const h = harness(extra); const r = h.make(); assert.equal(r.start().ok, false); assert.equal(h.calls(), 0); r.stop();
+diff --git a/test/helpers/rumor2-journal.js b/test/helpers/rumor2-journal.js
+index 43a0e9a..03f6393 100644
+--- a/test/helpers/rumor2-journal.js
++++ b/test/helpers/rumor2-journal.js
+@@ -26,4 +26,8 @@ export const memJournal = (arr, { failAppends = () => false, failReads = () => f
+     arr.push(...add); // atomic: nothing lands unless the whole batch does
+     return { ok: true, lastSeq: arr.length };
+   },
++  async hasEventIds(type, ids) {
++    const wanted = new Set(ids);
++    return { ok: true, existing: new Set(arr.filter((e) => e.type === type && wanted.has(e.sourceEventId)).map((e) => e.sourceEventId)) };
++  },
+ });
+diff --git a/test/jsonl-atomic-portable.test.js b/test/jsonl-atomic-portable.test.js
+new file mode 100644
+index 0000000..4d6c29e
+--- /dev/null
++++ b/test/jsonl-atomic-portable.test.js
+@@ -0,0 +1,60 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { atomicWriteJsonForTest, replaceJsonl } from '../lib/jsonl.js';
++
++const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'jsonl-atomic-'));
++const wrappedIo = (overrides = {}) => ({
++  mkdirSync: fs.mkdirSync,
++  openSync: fs.openSync,
++  fsyncSync: fs.fsyncSync,
++  closeSync: fs.closeSync,
++  writeFileSync: fs.writeFileSync,
++  renameSync: fs.renameSync,
++  unlinkSync: fs.unlinkSync,
++  ...overrides,
++});
++
++test('atomicWriteJson tolerates only Windows EPERM from the post-rename directory fsync', () => {
++  const dir = temp(); const file = path.join(dir, 'state.json'); let syncs = 0;
++  const io = wrappedIo({ fsyncSync(fd) { syncs += 1; if (syncs === 2) throw Object.assign(new Error('directory fsync unsupported'), { code: 'EPERM' }); return fs.fsyncSync(fd); } });
++  atomicWriteJsonForTest(file, { durable: true }, { sync: true, io, platform: 'win32' });
++  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { durable: true });
++  assert.equal(syncs, 2, 'the file was synced before the unsupported directory sync');
++});
++
++test('atomicWriteJson never swallows a file fsync failure, even on Windows', () => {
++  const dir = temp(); const file = path.join(dir, 'state.json'); fs.writeFileSync(file, '{"old":true}'); let syncs = 0;
++  const expected = Object.assign(new Error('file fsync failed'), { code: 'EPERM' });
++  const io = wrappedIo({ fsyncSync() { syncs += 1; throw expected; } });
++  assert.throws(() => atomicWriteJsonForTest(file, { old: false }, { sync: true, io, platform: 'win32' }), error => error === expected);
++  assert.equal(syncs, 1);
++  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { old: true }, 'rename never occurs after a failed file sync');
++});
++
++test('atomicWriteJson surfaces Linux directory fsync failures and non-EPERM Windows failures', () => {
++  for (const [platform, code] of [['linux', 'EPERM'], ['win32', 'EACCES']]) {
++    const dir = temp(); const file = path.join(dir, 'state.json'); let syncs = 0;
++    const io = wrappedIo({ fsyncSync(fd) { syncs += 1; if (syncs === 2) throw Object.assign(new Error(`${platform} directory sync failed`), { code }); return fs.fsyncSync(fd); } });
++    assert.throws(() => atomicWriteJsonForTest(file, { platform }, { sync: true, io, platform }), error => error?.code === code);
++    assert.equal(syncs, 2);
++    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { platform }, 'rename preceded the reported directory durability failure');
++  }
++});
++
++test('atomicWriteJson preserves the file-fsync error when descriptor close also fails', () => {
++  const dir = temp(); const file = path.join(dir, 'state.json');
++  const fsyncError = Object.assign(new Error('primary fsync failure'), { code: 'EIO' });
++  const io = wrappedIo({ fsyncSync() { throw fsyncError; }, closeSync(fd) { fs.closeSync(fd); throw Object.assign(new Error('secondary close failure'), { code: 'EBADF' }); } });
++  assert.throws(() => atomicWriteJsonForTest(file, { value: 1 }, { sync: true, io, platform: 'linux' }), error => error === fsyncError);
++  assert.equal(fs.existsSync(file), false);
++});
++
++test('replaceJsonl uses the same portable post-rename directory durability boundary', () => {
++  const dir = temp(); const file = path.join(dir, 'observations.jsonl');
++  replaceJsonl(file, [{ n: 1 }, { n: 2 }]);
++  assert.equal(fs.readFileSync(file, 'utf8'), '{"n":1}\n{"n":2}\n');
++});
++
 diff --git a/test/market-lab-providers.test.js b/test/market-lab-providers.test.js
 index 623079c..81f2667 100644
 --- a/test/market-lab-providers.test.js
@@ -554,6 +997,128 @@ index 0000000..90495a0
 +  assert.equal(settled, false); assert.equal(owner.status().bootstrap.initialMode, 'AWAITED');
 +  await within(owner.stop({ seal: false })); await within(starting);
 +  assert.equal(owner.status().bootstrap.initialState, 'STOPPED'); assert.equal(owner.status().bootstrap.running, false);
++});
+diff --git a/test/market-lab-spot-cadence.test.js b/test/market-lab-spot-cadence.test.js
+new file mode 100644
+index 0000000..011a561
+--- /dev/null
++++ b/test/market-lab-spot-cadence.test.js
+@@ -0,0 +1,116 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { createResearchOwner, SPOT_REST_CADENCE, spotRestCallPlan } from '../market-lab/owner.js';
++import { loadPolicy, loadSubjects, sampleSubjects } from '../market-lab/policy.js';
++import * as H from './helpers/market-lab.js';
++
++const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
++const products = [...H.COINBASE_PRODUCTS];
++
++function controlledTimers() {
++  const intervals = [];
++  return {
++    intervals,
++    setInterval(fn, ms) { const handle = { fn, ms, cleared: false, unref() {} }; intervals.push(handle); return handle; },
++    clearInterval(handle) { if (handle) handle.cleared = true; },
++    setTimeout,
++    clearTimeout,
++  };
++}
++
++test('spot REST cadence preserves one-minute candle/volume priority without exceeding shipped daily or monthly caps', async () => {
++  const plan = spotRestCallPlan({ subjectCount: 3 });
++  assert.deepEqual(plan.KRAKEN_SPOT, { callsPerDay: 586, callsPerMonth: 18166, catalogStartsPerDay: 1, chartCallsPerDay: 549, flowCallsPerDay: 36, daysInMonth: 31 });
++  assert.deepEqual(plan.COINBASE_SPOT, { callsPerDay: 577, callsPerMonth: 17887, catalogStartsPerDay: 1, chartCallsPerDay: 288, flowCallsPerDay: 288, daysInMonth: 31 });
++  assert.ok(plan.KRAKEN_SPOT.callsPerDay <= 1000 && plan.KRAKEN_SPOT.callsPerMonth <= 20000);
++  assert.ok(plan.COINBASE_SPOT.callsPerDay <= 1000 && plan.COINBASE_SPOT.callsPerMonth <= 20000);
++  assert.equal(SPOT_REST_CADENCE.KRAKEN_SPOT.SPOT_PRICE_CHART.intervalRefreshMs[1], 10 * 60_000);
++  assert.equal(SPOT_REST_CADENCE.KRAKEN_SPOT.SPOT_FLOW.primary, 'ws-v2');
++  assert.equal(SPOT_REST_CADENCE.COINBASE_SPOT.SPOT_FLOW.primary, 'ws-feed');
++});
++
++test('spot family cache clocks enforce the published effective cadence and never restamp cached observations', async () => {
++  const policy = loadPolicy(H.policyWith({ providers: ['KRAKEN_SPOT', 'COINBASE_SPOT'] }));
++  const rawSubjects = structuredClone(sampleSubjects());
++  rawSubjects.subjects = [rawSubjects.subjects[0]];
++  rawSubjects.macroSeries = []; rawSubjects.crossAsset = []; rawSubjects.stablecoins = []; rawSubjects.peers = []; rawSubjects.benchmarks = ['BTC'];
++  const subjects = loadSubjects(rawSubjects); const clock = H.clockAt(H.T0); const timers = controlledTimers(); const calls = [];
++  const fetchImpl = async (input) => {
++    const url = new URL(input); calls.push({ host: url.host, path: url.pathname, interval: url.searchParams.get('interval'), ts: clock() });
++    if (url.pathname === '/0/public/AssetPairs') return json(H.KRAKEN_ASSET_PAIRS);
++    if (url.pathname === '/products') return json(products);
++    if (url.pathname === '/0/public/OHLC') return json(H.krakenOhlc(url.searchParams.get('pair'), { intervalMin: Number(url.searchParams.get('interval')), endTs: clock() }));
++    if (url.pathname === '/0/public/Trades') return json(H.krakenTrades(url.searchParams.get('pair'), { endTs: clock() }));
++    if (/\/candles$/.test(url.pathname)) return json([[Math.floor((clock() - 7_200_000) / 1000), 99, 102, 100, 101, 12], [Math.floor((clock() - 3_600_000) / 1000), 100, 103, 101, 102, 13]]);
++    if (/\/trades$/.test(url.pathname)) return json(H.coinbaseTrades({ endTs: clock() }));
++    return new Response('{"error":"fixture route missing"}', { status: 404, headers: { 'content-type': 'application/json' } });
++  };
++  const owner = createResearchOwner({ policy, subjects, mode: 'INTEGRATED', clock, fetchImpl, timers, log: () => {} });
++  const count = (host, path, interval = undefined) => calls.filter((c) => c.host === host && c.path === path && (interval === undefined || c.interval === String(interval))).length;
++  try {
++    await owner.start({ families: [] });
++    const firstChart = await owner.acquire('SPOT_PRICE_CHART', 'BTC');
++    await owner.acquire('SPOT_FLOW', 'BTC');
++    const firstKnownAt = firstChart.observations[0].knownAtTs;
++    assert.deepEqual({ ohlc: count('api.kraken.com', '/0/public/OHLC'), kt: count('api.kraken.com', '/0/public/Trades'), candles: count('api.exchange.coinbase.com', '/products/BTC-USD/candles'), ct: count('api.exchange.coinbase.com', '/products/BTC-USD/trades') }, { ohlc: 6, kt: 1, candles: 1, ct: 1 });
++
++    clock.advance(5 * 60_000);
++    const cachedChart = await owner.acquire('SPOT_PRICE_CHART', 'BTC');
++    await owner.acquire('SPOT_FLOW', 'BTC');
++    assert.ok(cachedChart.results.every((r) => r.state === 'CACHED'));
++    assert.equal(cachedChart.observations[0].knownAtTs, firstKnownAt, 'cache hits retain the provider receipt clock');
++    assert.deepEqual({ ohlc: count('api.kraken.com', '/0/public/OHLC'), kt: count('api.kraken.com', '/0/public/Trades'), candles: count('api.exchange.coinbase.com', '/products/BTC-USD/candles'), ct: count('api.exchange.coinbase.com', '/products/BTC-USD/trades') }, { ohlc: 6, kt: 1, candles: 1, ct: 1 });
++
++    clock.advance(5 * 60_000);
++    const tenMinute = await owner.acquire('SPOT_PRICE_CHART', 'BTC');
++    await owner.acquire('SPOT_FLOW', 'BTC');
++    assert.equal(tenMinute.results.filter((r) => r.providerId === 'KRAKEN_SPOT' && r.state === 'OK').length, 1, 'only the prioritized 1m Kraken interval refreshes at ten minutes');
++    assert.equal(count('api.kraken.com', '/0/public/OHLC', 1), 2);
++    assert.equal(count('api.kraken.com', '/0/public/OHLC', 5), 1);
++
++    clock.advance(5 * 60_000);
++    await owner.acquire('SPOT_PRICE_CHART', 'BTC');
++    await owner.acquire('SPOT_FLOW', 'BTC');
++    assert.equal(count('api.exchange.coinbase.com', '/products/BTC-USD/candles'), 2, 'Coinbase candles refresh at 15m');
++    assert.equal(count('api.exchange.coinbase.com', '/products/BTC-USD/trades'), 2, 'Coinbase REST flow refreshes at 15m');
++    assert.equal(count('api.kraken.com', '/0/public/Trades'), 1, 'Kraken REST flow is a 2h recovery sample; WS remains primary');
++
++    clock.set(H.T0 + 60 * 60_000);
++    await owner.acquire('SPOT_PRICE_CHART', 'BTC');
++    assert.equal(count('api.kraken.com', '/0/public/OHLC', 1), 3);
++    assert.equal(count('api.kraken.com', '/0/public/OHLC', 5), 2, '5m native bars refresh hourly under the cap');
++    assert.equal(count('api.kraken.com', '/0/public/OHLC', 15), 1, '15m native bars keep their published 3h wire cadence');
++    assert.equal(owner.status().cadence.stableProcessPlan.KRAKEN_SPOT.callsPerDay, 196, 'status plan reflects this one-subject owner');
++    assert.equal(owner.status().cadence.providers.COINBASE_SPOT.SPOT_PRICE_CHART.refreshMs, 15 * 60_000);
++  } finally {
++    await owner.stop({ seal: false });
++  }
++});
++
++test('a malformed provider response is cadence-gated too, so failures cannot restore five-minute request flooding', async () => {
++  const policy = loadPolicy(H.policyWith({ providers: ['KRAKEN_SPOT', 'COINBASE_SPOT'] }));
++  const rawSubjects = structuredClone(sampleSubjects()); rawSubjects.subjects = [rawSubjects.subjects[0]]; rawSubjects.macroSeries = []; rawSubjects.crossAsset = []; rawSubjects.stablecoins = []; rawSubjects.peers = []; rawSubjects.benchmarks = ['BTC'];
++  const subjects = loadSubjects(rawSubjects); const clock = H.clockAt(H.T0); const timers = controlledTimers(); let ohlcCalls = 0;
++  const fetchImpl = async (input) => {
++    const url = new URL(input);
++    if (url.pathname === '/0/public/AssetPairs') return json(H.KRAKEN_ASSET_PAIRS);
++    if (url.pathname === '/products') return json(products);
++    if (url.pathname === '/0/public/OHLC') { ohlcCalls += 1; return json({ error: [], result: {} }); }
++    if (/\/candles$/.test(url.pathname)) return json([]);
++    return json([]);
++  };
++  const owner = createResearchOwner({ policy, subjects, mode: 'INTEGRATED', clock, fetchImpl, timers, log: () => {} });
++  try {
++    await owner.start({ families: [] });
++    await owner.acquire('SPOT_PRICE_CHART', 'BTC');
++    assert.equal(ohlcCalls, 6);
++    clock.advance(5 * 60_000);
++    const skipped = await owner.acquire('SPOT_PRICE_CHART', 'BTC');
++    assert.equal(ohlcCalls, 6);
++    assert.equal(skipped.results.filter((r) => r.providerId === 'KRAKEN_SPOT' && r.state === 'CADENCE_SKIPPED').length, 6);
++    clock.advance(5 * 60_000);
++    await owner.acquire('SPOT_PRICE_CHART', 'BTC');
++    assert.equal(ohlcCalls, 7, 'at ten minutes only the 1m interval retries');
++    assert.ok(owner.status().counters.cadenceSkips >= 6);
++  } finally { await owner.stop({ seal: false }); }
 +});
 diff --git a/test/market-lab-twelvedata-cadence.test.js b/test/market-lab-twelvedata-cadence.test.js
 new file mode 100644
@@ -727,8 +1292,479 @@ index 0000000..cf46aaa
 +  assert.match(mapGdeltArticles(json, { context, plan: { ...plan, catalogContentId: 'wrong' }, receiptTs: T0 }).error, /does not match/);
 +  assert.match(mapGdeltArticles(json, { context, plan, receiptTs: NaN }).error, /receipt clock/);
 +});
+diff --git a/test/social-catalog-verification-race.test.js b/test/social-catalog-verification-race.test.js
+new file mode 100644
+index 0000000..7b80da7
+--- /dev/null
++++ b/test/social-catalog-verification-race.test.js
+@@ -0,0 +1,88 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { createSocialRuntime } from '../rumor2/social-runtime.js';
++import { createResearchScopeSource, parseSocialResearchConfig } from '../rumor2/social-catalog.js';
++import { normalizeKrakenAssetPairs } from '../survey/catalog.js';
++import { replaySocialHistory, SOCIAL_CATALOG_EVENT_TYPE, SOCIAL_CATALOG_VERIFIED_EVENT_TYPE } from '../rumor2/social-settle.js';
++import { BLUESKY_OFFICIAL } from '../rumor2/providers/bluesky-official.js';
++import { FARCASTER_OFFICIAL } from '../rumor2/providers/farcaster-official.js';
++import { loadConfig } from '../lib/config.js';
++import { memJournal } from './helpers/rumor2-journal.js';
++
++const T0 = Date.parse('2026-09-13T09:00:00Z');
++const research = parseSocialResearchConfig(loadConfig()).research;
++const catalogAt = (observedTs) => normalizeKrakenAssetPairs({
++  XXBTZUSD: { wsname: 'XBT/USD', base: 'XXBT', quote: 'ZUSD', status: 'online' },
++}, { observedTs }).catalog;
++const accepted = (catalog) => ({ status: 'ACCEPTED', catalog, lastError: null, lastSuccessTs: catalog.observedTs, lastAttemptTs: catalog.observedTs });
++
++function runtime(provider, snapshot, now) {
++  const scopeSource = createResearchScopeSource({ research, source: { snapshot: () => snapshot.value, notices: () => [] }, now });
++  return createSocialRuntime({
++    provider,
++    scopeSource,
++    now,
++    cursorOf: () => null,
++    mapCommit: () => ({ skip: true, reason: 'no provider payload in this test' }),
++    sourceFactory: () => ({ start() { return this; }, stop() {}, status: () => ({}) }),
++  });
++}
++
++test('a second provider canonically adopts the first durable catalog verification instead of altering its identity', async () => {
++  const initial = catalogAt(T0);
++  const snapshot = { value: accepted(initial) };
++  const rows = [];
++  const journal = memJournal(rows);
++  const hooks = { fenceHeld: () => true, append: (events) => journal.append(events), lookup: (type, ids) => journal.hasEventIds(type, ids) };
++  const bClock = { ms: T0 + 10 };
++  const fClock = { ms: T0 + 19 };
++  const bluesky = runtime(BLUESKY_OFFICIAL, snapshot, () => bClock.ms);
++  const farcaster = runtime(FARCASTER_OFFICIAL, snapshot, () => fClock.ms);
++  assert.equal(bluesky.hydrate([]).ok, true);
++  assert.equal(farcaster.hydrate([]).ok, true);
++
++  // Initial activation has the same race on RUMOR2_SOCIAL_CATALOG. The
++  // second ear adopts the durable content and appends only its own scope.
++  assert.equal((await bluesky.settle(hooks)).ok, true);
++  assert.equal((await farcaster.settle(hooks)).ok, true);
++  assert.equal(rows.filter((e) => e.type === SOCIAL_CATALOG_EVENT_TYPE).length, 1);
++
++  snapshot.value = accepted(catalogAt(T0 + 300_000)); // same content, newer acquisition
++  bClock.ms = T0 + 300_010;
++  fClock.ms = T0 + 300_019;
++  const first = await bluesky.settle(hooks);
++  const second = await farcaster.settle(hooks);
++  assert.equal(first.scopeVerified, true);
++  assert.equal(second.scopeVerified, true);
++  assert.equal(second.scopeVerifiedExisting, true);
++  assert.equal(rows.filter((e) => e.type === SOCIAL_CATALOG_VERIFIED_EVENT_TYPE).length, 1);
++  assert.equal(replaySocialHistory(rows).ok, true);
++
++  // A failed first append retains a prepared byte-stable event. If the other
++  // ear commits the shared fact before the retry, the retry must re-check the
++  // durable identity and adopt it rather than collide with the other clock.
++  snapshot.value = accepted(catalogAt(T0 + 600_000));
++  bClock.ms = T0 + 600_010;
++  fClock.ms = T0 + 600_019;
++  const failed = await bluesky.settle({ ...hooks, append: async () => ({ ok: false, reason: 'UNAVAILABLE' }) });
++  assert.equal(failed.ok, false);
++  assert.equal(failed.scopeOpPending, 'VERIFY');
++  assert.equal((await farcaster.settle(hooks)).scopeVerified, true);
++  const retry = await bluesky.settle(hooks);
++  assert.equal(retry.ok, true);
++  assert.equal(retry.scopeVerifiedExisting, true);
++  assert.equal(rows.filter((e) => e.type === SOCIAL_CATALOG_VERIFIED_EVENT_TYPE).length, 2);
++  assert.equal(replaySocialHistory(rows).ok, true);
++});
++
++test('a durable lookup failure preserves fail-closed scope work and appends nothing', async () => {
++  const snapshot = { value: accepted(catalogAt(T0)) };
++  const rows = [];
++  const rt = runtime(BLUESKY_OFFICIAL, snapshot, () => T0 + 10);
++  assert.equal(rt.hydrate([]).ok, true);
++  const result = await rt.settle({ fenceHeld: () => true, append: async (events) => { rows.push(...events); return { ok: true, lastSeq: rows.length }; }, lookup: async () => ({ ok: false, reason: 'UNAVAILABLE' }) });
++  assert.equal(result.ok, false);
++  assert.equal(result.reason, 'UNAVAILABLE');
++  assert.equal(result.scopeOpPending, 'CATALOG_LOOKUP');
++  assert.equal(rows.length, 0);
++});
+diff --git a/test/social-storage-diagnose.test.mjs b/test/social-storage-diagnose.test.mjs
+new file mode 100644
+index 0000000..b80d673
+--- /dev/null
++++ b/test/social-storage-diagnose.test.mjs
+@@ -0,0 +1,139 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { farcasterRequestEvent, FARCASTER_REQUEST_TYPE } from '../rumor2/social-farcaster-meter.js';
++import { diagnoseSocialStorage, readSocialDbSnapshot, summarizeRuntimeStatus } from '../tools/social-storage-diagnose.mjs';
++
++const NOW = Date.parse('2026-09-13T10:00:04Z');
++const DAY = '2026-09-13';
++
++function runtimeStatus(overrides = {}) {
++  return {
++    ts: NOW,
++    running: true,
++    collectors: {
++      rumor2: {
++        socialFarcaster: {
++          enabled: true, state: 'ACTIVE', hydrated: true, gateReason: null, coverage: 'NOT_OBSERVED', lastSuccessTs: null, lastError: null,
++          stats: { appendFailures: 1 }, counters: { requests: 1, pages: 0, admitted: 0, rejected: 0, reservationAppendFailures: 0 },
++          quota: { day: DAY, requests: 4, maxDailyRequests: 20 },
++          queryPolicy: { mode: 'CATALOG_ROTATION', totalRequestReservations: 6, last: { requestOrdinal: 5, query: 'must never escape' } },
++          providerPayload: { text: 'raw social text must never escape' },
++          ...overrides,
++        },
++        socialX: { enabled: true, hydrated: true, lastError: null, lastStopReason: 'WATCH_SCOPE_NOT_CONFIGURED', secret: 'x-bearer-secret' },
++      },
++      persistence: { status: 'DEGRADED', databaseConfigured: true, databaseReachable: true, restored: true, migrationVersion: 9, transactionErrors: 1, durableConfirmedWrites: 0 },
++    },
++    env: { DATABASE_URL: 'postgres://secret' },
++  };
++}
++
++function snapshot(events) {
++  return {
++    ok: true,
++    selectOnly: true,
++    journal: { rowCount: events.length + 4, minSeq: 1, maxSeq: events.length + 4, farcasterReservations: events.length, primaryKeyPresent: true, identityUniqueIndexPresent: true },
++    reservations: events.map((event, i) => ({ seq: i + 5, event })),
++    observations: [],
++    catalogVerifications: [],
++    truncated: { reservations: false, observations: false, catalogVerifications: false, maxRows: 20_000 },
++  };
++}
++
++test('six lifetime reservations, four today, and planner ordinal five are consistent rather than a duplicate quota bug', () => {
++  const events = [
++    farcasterRequestEvent('2026-09-12', 1, Date.parse('2026-09-12T01:00:00Z')),
++    farcasterRequestEvent('2026-09-12', 2, Date.parse('2026-09-12T02:00:00Z')),
++    ...[1, 2, 3, 4].map((ordinal) => farcasterRequestEvent(DAY, ordinal, NOW + ordinal)),
++  ];
++  const report = diagnoseSocialStorage({ runtimeStatus: runtimeStatus(), dbSnapshot: snapshot(events), parsedConfig: { ok: true, reason: null, research: { xWatch: { mode: 'NOT_CONFIGURED', tickers: [], maxAssets: 25 } } }, nowMs: NOW });
++  assert.equal(report.verdict, 'DEGRADED_CAUSE_NARROWED_NOT_PROVEN');
++  assert.equal(report.database.reservations.currentDayCount, 4);
++  assert.equal(report.database.reservations.currentDayMaxOrdinal, 4);
++  assert.equal(report.findings.some((f) => f.code === 'RUNTIME_JOURNAL_RESERVATION_COUNT_MISMATCH'), false);
++  assert.equal(report.findings.some((f) => f.code === 'CURRENT_DAY_QUOTA_HIGH_WATER_MISMATCH'), false);
++  assert.equal(report.findings.some((f) => f.code === 'PLANNER_ORDINAL_MISMATCH'), false);
++  assert.equal(report.findings.some((f) => f.code === 'LIFETIME_AND_DAILY_COUNTERS_DIFFER'), true);
++  assert.equal(report.findings.some((f) => f.code === 'BASE_SETTLEMENT_APPEND_FAILURE_OBSERVED'), true);
++  assert.equal(report.errorRetention.historicalAppendExceptionRecoverable, false);
++});
++
++test('invalid identities, duplicate ordinals, and gaps fail the diagnostic closed', () => {
++  const one = farcasterRequestEvent(DAY, 1, NOW + 1);
++  const duplicate = { ...farcasterRequestEvent(DAY, 1, NOW + 2), ts: new Date(NOW + 2).toISOString() };
++  // Restore a valid identity for ordinal 1 with a different clock: the event is
++  // individually invalid because identity excludes the clock and ts must bind it.
++  const three = farcasterRequestEvent(DAY, 3, NOW + 3);
++  const invalid = { ...farcasterRequestEvent(DAY, 4, NOW + 4), provider: 'NOT_FARCASTER' };
++  const report = diagnoseSocialStorage({ runtimeStatus: runtimeStatus({ quota: { day: DAY, requests: 4, maxDailyRequests: 20 }, queryPolicy: { mode: 'CATALOG_ROTATION', totalRequestReservations: 4, last: { requestOrdinal: 3 } } }), dbSnapshot: snapshot([one, duplicate, three, invalid]), nowMs: NOW });
++  assert.equal(report.verdict, 'JOURNAL_INTEGRITY_FAILED');
++  assert.equal(report.findings.some((f) => f.code === 'INVALID_FARCASTER_RESERVATION_RECORD'), true);
++  assert.equal(report.findings.some((f) => f.code === 'DUPLICATE_CURRENT_DAY_ORDINAL'), true);
++  assert.equal(report.findings.some((f) => f.code === 'CURRENT_DAY_ORDINAL_GAP'), true);
++});
++
++test('runtime summary and full report never echo arbitrary payloads, queries, environment values, or credentials', () => {
++  const status = runtimeStatus();
++  const summary = summarizeRuntimeStatus(status);
++  const report = diagnoseSocialStorage({ runtimeStatus: status, dbSnapshot: snapshot([]), nowMs: NOW });
++  const serialized = JSON.stringify({ summary, report });
++  for (const secret of ['raw social text must never escape', 'must never escape', 'x-bearer-secret', 'postgres://secret']) assert.equal(serialized.includes(secret), false);
++});
++
++test('exact retained parent withhold reason identifies the catalog verification producer collision', () => {
++  const status = runtimeStatus();
++  status.collectors.rumor2.state = 'DARK';
++  status.collectors.rumor2.withholdReason = 'EVENT_HISTORY_INVALID: CORRUPTION: duplicate event identity with an altered payload (RUMOR2_SOCIAL_CATALOG_VERIFIED)';
++  status.collectors.rumor2.lastSettledEventSeq = 21427;
++  status.collectors.rumor2.writerEpoch = 19;
++  status.collectors.rumor2.checkpointRevision = 201;
++  const report = diagnoseSocialStorage({ runtimeStatus: status, dbSnapshot: snapshot([]), nowMs: NOW });
++  assert.equal(report.verdict, 'JOURNAL_INTEGRITY_FAILED');
++  assert.equal(report.findings.some((f) => f.code === 'CATALOG_VERIFICATION_IDENTITY_COLLISION_CONFIRMED'), true);
++  assert.equal(report.runtime.rumor2.lastSettledEventSeq, 21427);
++});
++
++test('database collector executes only fixed SELECTs and returns metadata rather than observation content', async () => {
++  const queries = [];
++  let ended = false;
++  const reservation = farcasterRequestEvent(DAY, 1, NOW);
++  const db = {
++    configured: () => true,
++    connect: async () => true,
++    query: async (sql, params = []) => {
++      queries.push(sql);
++      if (sql.includes('COUNT(*)::text')) return { rows: [{ row_count: '2', min_seq: '1', max_seq: '2', farcaster_reservations: '1' }] };
++      if (sql.includes('FROM pg_indexes')) return { rows: [
++        { indexname: 'serpent_rumor2_events_pkey', indexdef: 'CREATE UNIQUE INDEX serpent_rumor2_events_pkey ON public.serpent_rumor2_events USING btree (stream, event_seq)' },
++        { indexname: 'uq_rumor2_event_identity', indexdef: 'CREATE UNIQUE INDEX uq_rumor2_event_identity ON public.serpent_rumor2_events USING btree (stream, event_type, event_id)' },
++      ] };
++      if (sql.includes('diagnostic_event') && params[1] === FARCASTER_REQUEST_TYPE) return { rows: [{ event_seq: '1', diagnostic_event: reservation }] };
++      if (sql.includes('diagnostic_event')) return { rows: [] };
++      return { rows: [{ event_seq: '2', event_type: 'RUMOR2_SOCIAL_OBSERVED_V2', provider: 'FARCASTER_OFFICIAL', known_at_ts: String(NOW) }] };
++    },
++    end: async () => { ended = true; },
++  };
++  const result = await readSocialDbSnapshot({ db });
++  assert.equal(result.ok, true);
++  assert.equal(result.observations[0].provider, 'FARCASTER_OFFICIAL');
++  assert.equal(Object.hasOwn(result.observations[0], 'text'), false);
++  assert.equal(ended, true);
++  assert.equal(queries.length, 5);
++  for (const sql of queries) assert.match(sql.trim(), /^SELECT\b/i);
++});
++
++test('database errors expose only the PostgreSQL class code and never the server message', async () => {
++  const db = {
++    configured: () => true,
++    connect: async () => true,
++    query: async () => { throw Object.assign(new Error('postgres://user:password@host raw secret'), { code: '22P02' }); },
++    end: async () => {},
++  };
++  const result = await readSocialDbSnapshot({ db });
++  assert.deepEqual(result, { ok: false, category: 'DATABASE_READ_FAILED', error: { code: '22P02', name: 'Error' } });
++  assert.equal(JSON.stringify(result).includes('password'), false);
++});
++
++test('Farcaster reservation constant remains the expected journal discriminator', () => {
++  assert.equal(FARCASTER_REQUEST_TYPE, 'RUMOR2_FARCASTER_SEARCH_RESERVED');
++});
+diff --git a/tools/data-only-market.mjs b/tools/data-only-market.mjs
+new file mode 100644
+index 0000000..3163211
+--- /dev/null
++++ b/tools/data-only-market.mjs
+@@ -0,0 +1,226 @@
++// DATA-ONLY market composition. This module owns market observation only: no
++// Paper, Watch, Tape, Judge, Socrates, model, execution, or order runtime.
++import path from 'node:path';
++import { mkdirSync, readFileSync } from 'node:fs';
++import { fileURLToPath } from 'node:url';
++import { parseStrictJson, PROVIDER_IDS } from '../market-lab/contracts.js';
++import { loadPolicy, loadSubjects } from '../market-lab/policy.js';
++import { createResearchOwner, spotRestCallPlan } from '../market-lab/owner.js';
++import { marketResearchRootFromEnv } from '../market-lab/paths.js';
++
++export const DATA_ONLY_MARKET_VERSION = 'serpent-data-only-market-1';
++export const DATA_ONLY_MARKET_SWEEP_MS = 300_000;
++export const DATA_ONLY_MARKET_FAMILIES = Object.freeze([
++  'SPOT_PRICE_CHART',
++  'SPOT_FLOW',
++  'SUPPLY_UNLOCKS',
++  'DEX_DEFI',
++  'NETWORK_ACTIVITY',
++  'STABLECOIN_LIQUIDITY',
++  'MACRO_RELEASES',
++  'CROSS_ASSET',
++]);
++
++// This is a closed allowlist. Key-gated providers are enabled only when their
++// named credential is present. Unknown/metered sources and the restricted
++// derivative venues remain off regardless of environment contents.
++export const DATA_ONLY_MARKET_PROVIDERS = Object.freeze({
++  KRAKEN_SPOT: 'PUBLIC_FREE',
++  COINBASE_SPOT: 'PUBLIC_FREE',
++  COINGECKO: 'KEY_GATED_INCLUDED_QUOTA',
++  GECKOTERMINAL: 'PUBLIC_FREE',
++  DEFILLAMA: 'PUBLIC_FREE',
++  COINMETRICS: 'PUBLIC_FREE',
++  FRED: 'KEY_GATED_FREE',
++  TWELVEDATA: 'KEY_GATED_FREE',
++});
++export const DATA_ONLY_MARKET_RESTRICTED = Object.freeze(['KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT']);
++const ZERO_BUDGET = new Set(['COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'TOKENOMIST']);
++const HERE = path.dirname(fileURLToPath(import.meta.url));
++const REPO_ROOT = path.resolve(HERE, '..');
++const DEFAULT_POLICY_FILE = path.join(REPO_ROOT, 'config', 'market-research.paper.json');
++const DEFAULT_SUBJECTS_FILE = path.join(REPO_ROOT, 'config', 'market-subjects.paper.json');
++let captureSequence = 0;
++
++function readStrict(file, label) {
++  const parsed = parseStrictJson(readFileSync(file));
++  if (!parsed.ok) throw new Error(`${label} is not strict JSON: ${parsed.error}`);
++  return parsed.value;
++}
++
++const credentialPresent = (provider, env) => {
++  const name = provider.credentialEnv;
++  return name === null || (typeof name === 'string' && typeof env[name] === 'string' && env[name].length > 0);
++};
++
++export function buildDataOnlyMarketPolicy({ env = process.env, policyRaw = null } = {}) {
++  const raw = structuredClone(policyRaw ?? readStrict(DEFAULT_POLICY_FILE, 'market policy'));
++  for (const id of PROVIDER_IDS) {
++    const provider = raw.providers[id];
++    if (!provider) continue;
++    const approved = Object.hasOwn(DATA_ONLY_MARKET_PROVIDERS, id);
++    const zeroCost = provider.plan.billing === 'FREE'
++      || (provider.plan.billing === 'INCLUDED_QUOTA' && provider.plan.incrementalUsdPerCall === 0);
++    provider.enabled = provider.enabled === true && approved && zeroCost && credentialPresent(provider, env);
++    provider.smoke = { authorized: false, maxCalls: 0, maxEstimatedUsd: null };
++  }
++  // Dark/private market senses remain explicitly unavailable in this process.
++  if (raw.providers.KRAKEN_SPOT?.l3) raw.providers.KRAKEN_SPOT.l3.enabled = false;
++  if (raw.providers.KRAKEN_DERIVATIVES?.charts) raw.providers.KRAKEN_DERIVATIVES.charts.enabled = false;
++  raw.model.enabled = false;
++  raw.model.maxEstimatedUsdPerCase = 0;
++  raw.model.maxEstimatedUsdPerDay = 0;
++  raw.model.maxEstimatedUsdPerMonth = 0;
++  raw.model.totalSmokeMaxEstimatedUsd = 0;
++  return loadPolicy(raw);
++}
++
++export function loadDataOnlyMarketSubjects({ subjectsRaw = null } = {}) {
++  return loadSubjects(subjectsRaw ?? readStrict(DEFAULT_SUBJECTS_FILE, 'market subjects'));
++}
++
++function quotaAudit(policy, subjects, families) {
++  const spot = spotRestCallPlan({ subjectCount: subjects.subjects.length, includeCharts: families.includes('SPOT_PRICE_CHART'), includeFlow: families.includes('SPOT_FLOW') });
++  // Each venue has one baseline startup catalog call. Public WebSocket traffic
++  // is not counted here. The estimate assumes one start/day; every additional
++  // process restart repeats catalogs and one uncached initial family sweep.
++  const planned = {
++    KRAKEN_SPOT: spot.KRAKEN_SPOT,
++    COINBASE_SPOT: spot.COINBASE_SPOT,
++    TWELVEDATA: families.includes('CROSS_ASSET') ? subjects.crossAsset.length + 96 * subjects.crossAsset.length : 0,
++  };
++  const rows = Object.fromEntries(Object.entries(planned).map(([id, estimate]) => {
++    const callsPerDay = typeof estimate === 'number' ? estimate : estimate.callsPerDay;
++    const callsPerMonth = typeof estimate === 'number' ? estimate * 31 : estimate.callsPerMonth;
++    const p = policy.providers[id]; const dailyCap = p?.limits.maxCallsPerDay ?? 0; const monthlyCap = p?.limits.maxCallsPerMonth ?? 0;
++    return [id, { callsPerDay, callsPerMonth, configuredDailyCap: dailyCap, configuredMonthlyCap: monthlyCap, state: p?.enabled !== true ? 'SOURCE_DISABLED' : callsPerDay > dailyCap || callsPerMonth > monthlyCap ? 'CAP_WILL_BIND' : 'WITHIN_CAP' }];
++  }));
++  return Object.freeze({
++    state: Object.values(rows).some((r) => r.state === 'CAP_WILL_BIND') ? 'REVIEW_REQUIRED' : 'WITHIN_DECLARED_CAPS',
++    sweepIntervalMs: DATA_ONLY_MARKET_SWEEP_MS,
++    rows,
++    safeCurrentBehavior: 'The durable provider guard refuses REST dispatch after the declared cap; it never silently raises a quota.',
++    requestedReview: 'Replace arbitrary venue-wide caps with evidence-backed endpoint cadences/quotas before claiming uninterrupted REST candle coverage.',
++  });
++}
++
++function configuredState(id, policy, env) {
++  const provider = policy.providers[id];
++  if (DATA_ONLY_MARKET_RESTRICTED.includes(id)) return { desired: 'OFF', state: 'RESTRICTED_OFF', reason: 'restricted derivative provider disabled in data-only market composition' };
++  if (ZERO_BUDGET.has(id)) return { desired: 'OFF', state: 'DISABLED_ZERO_BUDGET', reason: 'paid or unverified entitlement has no data-only budget' };
++  if (!Object.hasOwn(DATA_ONLY_MARKET_PROVIDERS, id)) return { desired: 'OFF', state: 'OUT_OF_SCOPE', reason: 'not in the closed data-only market provider allowlist' };
++  if (provider?.credentialEnv && !(typeof env[provider.credentialEnv] === 'string' && env[provider.credentialEnv].length > 0)) return { desired: 'ON', state: 'BLOCKED_CREDENTIAL', reason: `missing ${provider.credentialEnv}` };
++  if (provider?.enabled !== true) return { desired: 'ON', state: 'DISABLED_BY_POLICY', reason: 'source disabled or not proven zero-cost by the shipped policy' };
++  return { desired: 'ON', state: 'STARTING', reason: null };
++}
++
++export async function startDataOnlyMarket({
++  env = process.env,
++  dataDir = null,
++  researchRoot = null,
++  policyRaw = null,
++  subjectsRaw = null,
++  families = DATA_ONLY_MARKET_FAMILIES,
++  clock = () => Date.now(),
++  log = () => {},
++  fetchImpl = globalThis.fetch,
++  WebSocketImpl = globalThis.WebSocket,
++  wsUrls = {},
++  timers = { setInterval, clearInterval, setTimeout, clearTimeout },
++  ownerMode = 'STANDALONE',
++  closeDrainMs = undefined,
++} = {}) {
++  if (researchRoot === null && !(typeof dataDir === 'string' && dataDir.length)) throw new Error('data-only market requires dataDir or researchRoot');
++  if (!Array.isArray(families) || families.some((f) => !DATA_ONLY_MARKET_FAMILIES.includes(f))) throw new Error('data-only market families must be a subset of the closed acquisition list');
++  const policy = buildDataOnlyMarketPolicy({ env, policyRaw });
++  const subjects = loadDataOnlyMarketSubjects({ subjectsRaw });
++  const root = path.resolve(researchRoot ?? marketResearchRootFromEnv(env, dataDir));
++  const capturesDir = path.join(root, 'captures');
++  mkdirSync(capturesDir, { recursive: true });
++  captureSequence += 1;
++  const segmentDir = path.join(capturesDir, `data-only-${String(clock()).padStart(13, '0')}-${process.pid}-${captureSequence}`);
++  const owner = createResearchOwner({
++    policy, subjects,
++    // Disabled/provider-unapproved credentials do not even enter a client
++    // closure. Only credentials for an enabled allowlisted source are copied.
++    env: Object.fromEntries(Object.values(policy.providers).filter((p) => p.enabled && p.credentialEnv && credentialPresent(p, env)).map((p) => [p.credentialEnv, env[p.credentialEnv]])),
++    researchRoot: root, mode: ownerMode, clock, log,
++    fetchImpl, WebSocketImpl, wsUrls, timers,
++    ...(closeDrainMs === undefined ? {} : { closeDrainMs }),
++  });
++  let state = 'STARTING'; let stopping = null; let stopResult = null; let started = null;
++  const planAudit = quotaAudit(policy, subjects, families);
++
++  function status() {
++    const current = owner.status();
++    const sources = {};
++    for (const id of PROVIDER_IDS) {
++      const configured = configuredState(id, policy, env);
++      const client = current.clients[id]; const accounting = current.accounting.providers?.[id] ?? null;
++      const ok = client?.counters?.ok ?? 0; const failed = client?.counters?.failed ?? 0;
++      sources[id] = {
++        ...configured,
++        state: configured.state === 'STARTING' ? (ok > 0 ? 'OBSERVED' : failed > 0 ? 'DEGRADED' : current.bootstrap.running ? 'STARTING' : 'NOT_OBSERVED') : configured.state,
++        credentialEnv: policy.providers[id]?.credentialEnv ?? null,
++        credentialPresent: policy.providers[id]?.credentialEnv ? credentialPresent(policy.providers[id], env) : null,
++        requests: client?.counters?.requests ?? 0,
++        succeeded: ok,
++        failed,
++        callsToday: accounting?.totals?.calls?.day ?? 0,
++        dailyCap: policy.providers[id]?.limits.maxCallsPerDay ?? 0,
++      };
++    }
++    return {
++      version: DATA_ONLY_MARKET_VERSION,
++      state,
++      running: state === 'ACTIVE',
++      authority: 'NONE',
++      purpose: 'OBSERVATION_ONLY',
++      safety: { orders: false, paperTrading: false, realTrading: false, modelEnabled: false, paidBudgetUsd: 0, krakenL3: false, derivatives: false },
++      persistence: { captures: 'FILE_BACKED_SAME_FILESYSTEM', quotaJournal: 'FILE_BACKED_SAME_FILESYSTEM', cadenceCache: 'MEMORY_ONLY', processRestartSameFilesystem: { captures: true, quotaJournal: true, cadenceCache: false }, replitRepublish: 'NOT_GUARANTEED', note: 'File-backed continuity applies only when the same deployment filesystem remains attached; no database or object-store replication is configured here.' },
++      scope: { subjectCount: subjects.subjects.length, subjects: subjects.subjects.map((s) => s.canonicalCoin), allAssetCoverageClaim: false, note: 'Only explicitly declared market subjects are captured; the wider discovery catalog is not claimed as covered.' },
++      families: [...families],
++      root,
++      segmentDir,
++      bootstrap: current.bootstrap,
++      cadence: current.cadence,
++      recording: current.recording,
++      counters: current.counters,
++      sources,
++      quotaAudit: planAudit,
++      stopped: stopResult,
++    };
++  }
++
++  async function stop({ seal = true } = {}) {
++    if (!stopping) {
++      state = 'STOPPING';
++      stopping = owner.stop({ seal, policyNonsecret: policy }).then((result) => {
++        stopResult = result;
++        state = result.error ? 'RECORDING_FAILED' : 'STOPPED';
++        return result;
++      });
++    }
++    return stopping;
++  }
++
++  try {
++    // Catalog identity is awaited. The potentially long provider sweep runs in
++    // the background so it cannot jam the perpetual data-only launcher.
++    started = await owner.start({ outDir: segmentDir, families, awaitInitialSweep: false });
++    state = owner.status().recording.error ? 'RECORDING_FAILED' : 'ACTIVE';
++  } catch (error) {
++    state = 'FAILED';
++    try { await owner.stop({ seal: false, policyNonsecret: policy }); } catch { /* preserve startup error */ }
++    throw error;
++  }
++
++  return Object.freeze({
++    version: DATA_ONLY_MARKET_VERSION,
++    status,
++    stop,
++    readiness: () => owner.status().readiness,
++    paths: Object.freeze({ root, segmentDir, accountingDir: path.join(root, 'accounting') }),
++    started: Object.freeze({ ...started }),
++  });
++}
 diff --git a/tools/data-only-runtime.mjs b/tools/data-only-runtime.mjs
-index f24d1ca..890e3f1 100644
+index f24d1ca..dfe2c3a 100644
 --- a/tools/data-only-runtime.mjs
 +++ b/tools/data-only-runtime.mjs
 @@ -28,8 +28,11 @@ Object.assign(process.env, {
@@ -744,7 +1780,7 @@ index f24d1ca..890e3f1 100644
  });
  
  const log = (message) => console.log(`[DATA-ONLY ${new Date().toISOString()}] ${message}`);
-@@ -40,13 +43,13 @@ const { atomicWriteJson, readJsonBounded } = await import('../lib/jsonl.js');
+@@ -40,17 +43,18 @@ const { atomicWriteJson, readJsonBounded } = await import('../lib/jsonl.js');
  const { createDataOnlyFetch } = await import('../lib/data-only-budget.js');
  const { startWideEye } = await import('../survey/wideeye.js');
  const { readWideEyeStatus } = await import('../survey/reader.js');
@@ -760,7 +1796,12 @@ index f24d1ca..890e3f1 100644
  const { startPersistence, getPersistence } = await import('../persistence/runtime.js');
  const { rumor2CheckpointStore } = await import('../persistence/rumor2-checkpoint.js');
  const { rumor2JournalStore } = await import('../persistence/rumor2-journal.js');
-@@ -76,7 +79,6 @@ writeFileSync(runtimeFd, JSON.stringify({ pid: process.pid, openedTs: Date.now()
+ const { startRumor2 } = await import('../rumor2/collector.js');
++const { startDataOnlyMarket } = await import('./data-only-market.mjs');
+ 
+ const root = resolveDataDir();
+ mkdirSync(path.join(root, 'data-only'), { recursive: true });
+@@ -76,7 +80,6 @@ writeFileSync(runtimeFd, JSON.stringify({ pid: process.pid, openedTs: Date.now()
  
  // These collectors own explicit single-writer files. Recover only a proven
  // dead PID; an unreadable or live lock fails closed.
@@ -768,7 +1809,7 @@ index f24d1ca..890e3f1 100644
  recoverStaleLock(path.join(root, 'public-discovery', 'writer.lock'), 'public discovery writer');
  
  const base = loadConfig();
-@@ -88,8 +90,21 @@ const config = {
+@@ -88,11 +91,35 @@ const config = {
  const governor = createDataOnlyFetch({ dataDir: root, maxMonthlyUsd: 0 });
  const handles = [];
  const blockers = {};
@@ -787,10 +1828,24 @@ index f24d1ca..890e3f1 100644
  let wideEye = null;
  let rumor2 = null;
 +let video = null;
++let market = null;
  let persistence = null;
  let stopped = false;
  
-@@ -117,24 +132,38 @@ if (!Array.isArray(catalog?.markets) || catalog.markets.length === 0) {
++try {
++  // Market observation has a separate closed host allowlist, zero-paid policy,
++  // and per-provider quota guard. The news/infra governor is not its transport.
++  market = await startDataOnlyMarket({ env: process.env, dataDir: root, log });
++  handles.push(market);
++} catch (error) {
++  blockers.MARKET = bounded(error.message);
++  log(`MARKET blocked: ${blockers.MARKET}`);
++}
++
+ try {
+   wideEye = startWideEye({
+     config,
+@@ -117,24 +144,38 @@ if (!Array.isArray(catalog?.markets) || catalog.markets.length === 0) {
    blockers.KRAKEN_CATALOG = 'no accepted full Kraken USD catalog; catalog-dependent collectors withheld (no named fallback)';
  }
  
@@ -836,7 +1891,7 @@ index f24d1ca..890e3f1 100644
        DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS: '24',
        DISCOVERY_KALSHI_MAX_DAILY_REQUESTS: '24',
        DISCOVERY_POLYMARKET_PAGE_LIMIT: '100',
-@@ -170,6 +199,7 @@ if (!blockers.RUMOR2 && catalog) {
+@@ -170,6 +211,7 @@ if (!blockers.RUMOR2 && catalog) {
        researchCatalogSource: { snapshot: () => wideEye.catalogSnapshot(), notices: () => wideEye.researchNotices(), population: () => wideEye.sweepPopulationSnapshot(), deepObservation: () => null },
        officialCatalogSource: () => wideEye.catalogSnapshot(),
        enabled: true,
@@ -844,7 +1899,7 @@ index f24d1ca..890e3f1 100644
        edgarEnabled: false,
        ofacEnabled: true,
        socialBlueskyEnabled: true,
-@@ -187,7 +217,26 @@ if (!blockers.RUMOR2 && catalog) {
+@@ -187,7 +229,26 @@ if (!blockers.RUMOR2 && catalog) {
  function readIf(file) { try { return readJsonBounded(file, 8 * 1024 * 1024); } catch { return null; } }
  function writeRuntimeStatus() {
    const budget = governor.status();
@@ -872,9 +1927,11 @@ index f24d1ca..890e3f1 100644
    const status = {
      version: 'serpent-data-only-runtime-1',
      tsMs: Date.now(),
-@@ -209,11 +258,23 @@ function writeRuntimeStatus() {
+@@ -208,12 +269,25 @@ function writeRuntimeStatus() {
+     spending: { maxPaidUsdPerMonth: 15, estimatedPaidUsdThisMonth: Math.max(budget.estimatedMonthUsd, Number(rumor2?.status?.()?.socialX?.budget?.estimatedUsdUsedMonth ?? 0)), note: 'X post reads are capped separately at 3,000/month and $0.50/day; all other enabled routes are free or plan-credit limited' },
      blockers,
      collectors: {
++      market: market?.status?.() ?? { state: 'BLOCKED', authority: 'NONE', reason: blockers.MARKET ?? 'market observation unavailable' },
        wideeye: readWideEyeStatus(root),
 -      press: readPressStatus(root),
 +      press: publisherNewsPolicy,
@@ -914,3 +1971,353 @@ index 1727caf..37ebdd5 100644
    RUMOR2_EDGAR_ENABLED: 'false',
  };
  
+diff --git a/tools/social-storage-diagnose.mjs b/tools/social-storage-diagnose.mjs
+new file mode 100644
+index 0000000..801abb5
+--- /dev/null
++++ b/tools/social-storage-diagnose.mjs
+@@ -0,0 +1,344 @@
++#!/usr/bin/env node
++// Read-only Social/Farcaster durability diagnostic.
++//
++// This command deliberately does not start persistence, run migrations, acquire
++// a writer fence, call a provider, or print an event body.  The only database
++// statements are fixed SELECTs through the normal Db boundary.  Farcaster
++// reservation records contain no post text; observation rows are reduced to
++// provider/clock metadata by PostgreSQL before they enter this process.
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { readJsonBounded } from '../lib/jsonl.js';
++import { dataDir, loadConfig } from '../lib/config.js';
++import { parseSocialResearchConfig, SOCIAL_X_WATCH_MAX_ASSETS } from '../rumor2/social-catalog.js';
++import { FARCASTER_REQUEST_TYPE, farcasterRequestError } from '../rumor2/social-farcaster-meter.js';
++import { SOCIAL_OBSERVATION_TYPES, SOCIAL_CATALOG_VERIFIED_EVENT_TYPE, validateSocialCatalogVerifiedEvent } from '../rumor2/social-settle.js';
++
++const STREAM = 'rumor2';
++const PROVIDER = 'FARCASTER_OFFICIAL';
++const MAX_DIAGNOSTIC_ROWS = 20_000;
++
++const int = (value) => {
++  const n = Number(value);
++  return Number.isSafeInteger(n) ? n : null;
++};
++const finite = (value) => {
++  const n = Number(value);
++  return Number.isFinite(n) ? n : null;
++};
++const bool = (value) => (typeof value === 'boolean' ? value : null);
++const code = (value) => (typeof value === 'string' && value.length <= 160 ? value : null);
++const dayOf = (value) => {
++  const n = int(value);
++  if (n === null || n < 0 || n > 8_640_000_000_000_000) return null;
++  try { return new Date(n).toISOString().slice(0, 10); } catch { return null; }
++};
++
++function summarizeProvider(status) {
++  if (!status || typeof status !== 'object' || Array.isArray(status)) return null;
++  return {
++    enabled: bool(status.enabled),
++    state: code(status.state),
++    hydrated: bool(status.hydrated),
++    gateReason: code(status.gateReason),
++    coverage: code(status.coverage),
++    lastSuccessTs: int(status.lastSuccessTs),
++    lastError: code(status.lastError),
++    lastStopReason: code(status.lastStopReason),
++    appendFailures: int(status.stats?.appendFailures),
++    reservationAppendFailures: int(status.counters?.reservationAppendFailures),
++    processRequests: int(status.counters?.requests),
++    pages: int(status.counters?.pages),
++    admitted: int(status.counters?.admitted),
++    rejected: int(status.counters?.rejected),
++    quota: {
++      day: code(status.quota?.day),
++      requests: int(status.quota?.requests),
++      maxDailyRequests: int(status.quota?.maxDailyRequests),
++    },
++    queryPolicy: {
++      mode: code(status.queryPolicy?.mode),
++      totalRequestReservations: int(status.queryPolicy?.totalRequestReservations),
++      lastRequestOrdinal: int(status.queryPolicy?.last?.requestOrdinal),
++    },
++  };
++}
++
++// Allowlist the runtime fields.  In particular, never echo query strings,
++// post bodies, author ids, access records, environment values, or credentials.
++export function summarizeRuntimeStatus(status) {
++  const rumor = status?.collectors?.rumor2;
++  const persistence = status?.collectors?.persistence;
++  return {
++    capturedTs: int(status?.tsMs ?? status?.ts),
++    running: bool(status?.running),
++    rumor2: rumor && typeof rumor === 'object' ? {
++      state: code(rumor.state),
++      lifecycle: code(rumor.lifecycle),
++      withholdReason: code(rumor.withholdReason),
++      lastSettledEventSeq: int(rumor.lastSettledEventSeq),
++      writerEpoch: int(rumor.writerEpoch),
++      checkpointRevision: int(rumor.checkpointRevision),
++    } : null,
++    farcaster: summarizeProvider(rumor?.socialFarcaster),
++    x: summarizeProvider(rumor?.socialX),
++    persistence: persistence && typeof persistence === 'object' ? {
++      status: code(persistence.status),
++      databaseConfigured: bool(persistence.databaseConfigured),
++      databaseReachable: bool(persistence.databaseReachable),
++      restored: bool(persistence.restored),
++      migrationVersion: int(persistence.migrationVersion),
++      failureCategory: code(persistence.failureCategory),
++      integrityLock: bool(persistence.integrityLock),
++      permissionLock: bool(persistence.permissionLock),
++      transactionErrors: int(persistence.transactionErrors),
++      connectionErrors: int(persistence.connectionErrors),
++      durableConfirmedWrites: int(persistence.durableConfirmedWrites),
++      pendingDurableWrites: int(persistence.pendingDurableWrites),
++    } : null,
++  };
++}
++
++function safeDbError(error) {
++  // PostgreSQL codes identify the exact error class without exposing a URL,
++  // SQL text, provider content, schema details, or a server-supplied message.
++  return {
++    code: typeof error?.code === 'string' && /^[A-Z0-9]{2,10}$/.test(error.code) ? error.code : null,
++    name: typeof error?.name === 'string' && /^[A-Za-z][A-Za-z0-9]*$/.test(error.name) ? error.name : 'Error',
++  };
++}
++
++export async function readSocialDbSnapshot({ db, maxRows = MAX_DIAGNOSTIC_ROWS } = {}) {
++  if (!db?.configured?.()) return { ok: false, category: 'DATABASE_URL_NOT_CONFIGURED', error: null };
++  if (!(await db.connect())) {
++    await db.end().catch(() => {});
++    return { ok: false, category: 'DATABASE_UNREACHABLE', error: null };
++  }
++  try {
++    const summary = await db.query(
++      `SELECT COUNT(*)::text AS row_count,
++              COALESCE(MIN(event_seq), 0)::text AS min_seq,
++              COALESCE(MAX(event_seq), 0)::text AS max_seq,
++              COUNT(*) FILTER (WHERE event_type = $2)::text AS farcaster_reservations
++         FROM serpent_rumor2_events
++        WHERE stream = $1`,
++      [STREAM, FARCASTER_REQUEST_TYPE]
++    );
++    const indexes = await db.query(
++      `SELECT indexname, indexdef
++         FROM pg_indexes
++        WHERE schemaname = current_schema() AND tablename = 'serpent_rumor2_events'
++        ORDER BY indexname`
++    );
++    const reservations = await db.query(
++      `SELECT event_seq::text AS event_seq, event::jsonb AS diagnostic_event
++         FROM serpent_rumor2_events
++        WHERE stream = $1 AND event_type = $2
++        ORDER BY event_seq DESC
++        LIMIT $3`,
++      [STREAM, FARCASTER_REQUEST_TYPE, maxRows + 1]
++    );
++    const observations = await db.query(
++      `SELECT event_seq::text AS event_seq,
++              event_type,
++              event::jsonb ->> 'provider' AS provider,
++              event::jsonb ->> 'knownAtTs' AS known_at_ts
++         FROM serpent_rumor2_events
++        WHERE stream = $1
++          AND event_type = ANY($2::text[])
++          AND event::jsonb ->> 'provider' = $3
++        ORDER BY event_seq DESC
++        LIMIT $4`,
++      [STREAM, [...SOCIAL_OBSERVATION_TYPES], PROVIDER, maxRows + 1]
++    );
++    const catalogVerifications = await db.query(
++      `SELECT event_seq::text AS event_seq, event::jsonb AS diagnostic_event
++         FROM serpent_rumor2_events
++        WHERE stream = $1 AND event_type = $2
++        ORDER BY event_seq DESC
++        LIMIT $3`,
++      [STREAM, SOCIAL_CATALOG_VERIFIED_EVENT_TYPE, maxRows + 1]
++    );
++    const row = summary.rows[0] ?? {};
++    const reservationTruncated = reservations.rows.length > maxRows;
++    const observationTruncated = observations.rows.length > maxRows;
++    const catalogVerificationTruncated = catalogVerifications.rows.length > maxRows;
++    const reservationRows = reservations.rows.slice(0, maxRows).reverse().map((r) => ({ seq: int(r.event_seq), event: r.diagnostic_event }));
++    const observationRows = observations.rows.slice(0, maxRows).reverse().map((r) => ({ seq: int(r.event_seq), type: code(r.event_type), provider: code(r.provider), knownAtTs: int(r.known_at_ts) }));
++    // Catalog verification events are operational metadata only: their closed
++    // contract contains no post body, author/query, provider payload, or key.
++    const catalogVerificationRows = catalogVerifications.rows.slice(0, maxRows).reverse().map((r) => ({ seq: int(r.event_seq), event: r.diagnostic_event }));
++    const definitions = indexes.rows.map((r) => ({ name: r.indexname, definition: String(r.indexdef ?? '') }));
++    return {
++      ok: true,
++      selectOnly: true,
++      journal: {
++        rowCount: int(row.row_count),
++        minSeq: int(row.min_seq),
++        maxSeq: int(row.max_seq),
++        farcasterReservations: int(row.farcaster_reservations),
++        primaryKeyPresent: definitions.some((r) => r.name === 'serpent_rumor2_events_pkey' && /UNIQUE INDEX/i.test(r.definition)),
++        identityUniqueIndexPresent: definitions.some((r) => r.name === 'uq_rumor2_event_identity' && /UNIQUE INDEX/i.test(r.definition)),
++      },
++      reservations: reservationRows,
++      observations: observationRows,
++      catalogVerifications: catalogVerificationRows,
++      truncated: { reservations: reservationTruncated, observations: observationTruncated, catalogVerifications: catalogVerificationTruncated, maxRows },
++    };
++  } catch (error) {
++    return { ok: false, category: 'DATABASE_READ_FAILED', error: safeDbError(error) };
++  } finally {
++    await db.end().catch(() => {});
++  }
++}
++
++function reservationAnalysis(snapshot, currentDay) {
++  const rows = Array.isArray(snapshot?.reservations) ? snapshot.reservations : [];
++  const invalid = [];
++  const valid = [];
++  for (const row of rows) {
++    const error = farcasterRequestError(row?.event);
++    if (row?.seq === null || error) invalid.push({ seq: row?.seq ?? null, error: code(error) ?? 'INVALID_SEQUENCE' });
++    else valid.push({ seq: row.seq, day: row.event.day, ordinal: row.event.ordinal, knownAtTs: row.event.knownAtTs });
++  }
++  const today = valid.filter((r) => r.day === currentDay).sort((a, b) => a.ordinal - b.ordinal || a.seq - b.seq);
++  const duplicateOrdinals = [...new Set(today.filter((r, i) => i > 0 && r.ordinal === today[i - 1].ordinal).map((r) => r.ordinal))];
++  const ordinalGaps = [];
++  let expected = 1;
++  for (const row of today) {
++    while (expected < row.ordinal) ordinalGaps.push(expected++);
++    if (row.ordinal >= expected) expected = row.ordinal + 1;
++  }
++  const observations = (Array.isArray(snapshot?.observations) ? snapshot.observations : []).filter((r) => r?.provider === PROVIDER && Number.isSafeInteger(r.seq));
++  const evidenceByReservation = valid.map((request, index) => {
++    const nextSeq = valid[index + 1]?.seq ?? Number.POSITIVE_INFINITY;
++    return { seq: request.seq, day: request.day, ordinal: request.ordinal, durableObservationsBeforeNextReservation: observations.filter((o) => o.seq > request.seq && o.seq < nextSeq).length };
++  });
++  return {
++    retrieved: rows.length,
++    invalid,
++    currentDay,
++    currentDayCount: today.length,
++    currentDayMaxOrdinal: today.length ? Math.max(...today.map((r) => r.ordinal)) : 0,
++    duplicateOrdinals,
++    ordinalGaps,
++    evidenceByReservation,
++  };
++}
++
++function xWatchSummary(parsedConfig) {
++  const x = parsedConfig?.research?.xWatch;
++  return {
++    configValid: parsedConfig?.ok === true,
++    configReason: code(parsedConfig?.reason),
++    currentMode: code(x?.mode) ?? 'NOT_CONFIGURED',
++    configuredTickerCount: Array.isArray(x?.tickers) ? x.tickers.length : 0,
++    maxAssets: int(x?.maxAssets),
++    activationLaw: {
++      mode: 'EXPLICIT_STATIC',
++      tickerRule: '1..maxAssets unique uppercase canonical bases, each present in the current fresh accepted Kraken USD catalog',
++      capRule: `maxAssets must be an integer from 1 through ${SOCIAL_X_WATCH_MAX_ASSETS}; verified tickers are never silently truncated`,
++      freshnessRule: 'a stale, unavailable, future-dated, or unaccepted catalog authorizes no new X scope',
++      fallbackRule: 'the broad catalog and PROPOSED watch plan never become a paid X rule set automatically',
++    },
++  };
++}
++
++function catalogVerificationAnalysis(snapshot) {
++  const rows = Array.isArray(snapshot?.catalogVerifications) ? snapshot.catalogVerifications : [];
++  const invalid = [];
++  for (const row of rows) {
++    const error = validateSocialCatalogVerifiedEvent(row?.event);
++    if (row?.seq === null || error) invalid.push({ seq: row?.seq ?? null, error: code(error) ?? 'INVALID_SEQUENCE' });
++  }
++  return { retrieved: rows.length, validSharedIdentities: rows.length - invalid.length, invalid };
++}
++
++export function diagnoseSocialStorage({ runtimeStatus = null, dbSnapshot = null, parsedConfig = null, nowMs = Date.now() } = {}) {
++  const runtime = summarizeRuntimeStatus(runtimeStatus);
++  const currentDay = runtime.farcaster?.quota?.day ?? dayOf(nowMs);
++  const reservations = dbSnapshot?.ok ? reservationAnalysis(dbSnapshot, currentDay) : null;
++  const catalogVerifications = dbSnapshot?.ok ? catalogVerificationAnalysis(dbSnapshot) : null;
++  const findings = [];
++  const add = (severity, findingCode, detail) => findings.push({ severity, code: findingCode, detail });
++
++  if (!dbSnapshot?.ok) {
++    add('ERROR', dbSnapshot?.category ?? 'DATABASE_SNAPSHOT_UNAVAILABLE', 'No journal conclusion is possible until the SELECT-only database snapshot succeeds.');
++  } else {
++    const j = dbSnapshot.journal;
++    const contiguous = j.rowCount === 0 ? j.minSeq === 0 && j.maxSeq === 0 : j.minSeq === 1 && j.rowCount === j.maxSeq;
++    if (!contiguous) add('CRITICAL', 'JOURNAL_SEQUENCE_NOT_CONTIGUOUS', `rowCount=${j.rowCount}, minSeq=${j.minSeq}, maxSeq=${j.maxSeq}`);
++    if (!j.primaryKeyPresent) add('CRITICAL', 'JOURNAL_PRIMARY_KEY_MISSING', 'The expected (stream,event_seq) primary-key index was not found.');
++    if (!j.identityUniqueIndexPresent) add('CRITICAL', 'JOURNAL_IDENTITY_INDEX_MISSING', 'The expected unique event-identity index was not found.');
++    if (dbSnapshot.truncated?.reservations) add('WARN', 'RESERVATION_DIAGNOSTIC_TRUNCATED', `Only the newest ${dbSnapshot.truncated.maxRows} reservation rows were inspected.`);
++    if (dbSnapshot.truncated?.catalogVerifications) add('WARN', 'CATALOG_VERIFICATION_DIAGNOSTIC_TRUNCATED', `Only the newest ${dbSnapshot.truncated.maxRows} catalog-verification rows were inspected.`);
++    if (reservations.invalid.length) add('CRITICAL', 'INVALID_FARCASTER_RESERVATION_RECORD', `${reservations.invalid.length} retained request reservation record(s) failed the closed meter contract.`);
++    if (reservations.duplicateOrdinals.length) add('CRITICAL', 'DUPLICATE_CURRENT_DAY_ORDINAL', `Duplicate ordinals: ${reservations.duplicateOrdinals.join(',')}`);
++    if (reservations.ordinalGaps.length) add('ERROR', 'CURRENT_DAY_ORDINAL_GAP', `Missing current-day ordinals: ${reservations.ordinalGaps.slice(0, 25).join(',')}`);
++    if (catalogVerifications.invalid.length) add('CRITICAL', 'INVALID_CATALOG_VERIFICATION_RECORD', `${catalogVerifications.invalid.length} retained catalog-verification record(s) failed their closed legacy/provider-scoped contracts.`);
++    const journalTotal = j.farcasterReservations;
++    const runtimeTotal = runtime.farcaster?.queryPolicy?.totalRequestReservations;
++    if (runtimeTotal !== null && journalTotal !== null && runtimeTotal !== journalTotal) add('WARN', 'RUNTIME_JOURNAL_RESERVATION_COUNT_MISMATCH', `runtime=${runtimeTotal}, journal=${journalTotal}; rule out status-file/SELECT timing skew before treating this as corruption.`);
++    const quotaUsed = runtime.farcaster?.quota?.requests;
++    if (quotaUsed !== null && reservations.currentDayMaxOrdinal !== quotaUsed) add('ERROR', 'CURRENT_DAY_QUOTA_HIGH_WATER_MISMATCH', `runtime=${quotaUsed}, journalHighWater=${reservations.currentDayMaxOrdinal}`);
++    const lastOrdinal = runtime.farcaster?.queryPolicy?.lastRequestOrdinal;
++    if (lastOrdinal !== null && runtimeTotal !== null && runtimeTotal > 0 && lastOrdinal !== runtimeTotal - 1) add('WARN', 'PLANNER_ORDINAL_MISMATCH', `lastRequestOrdinal=${lastOrdinal}, expected=${runtimeTotal - 1}`);
++    if (journalTotal !== null && quotaUsed !== null && journalTotal !== quotaUsed) add('INFO', 'LIFETIME_AND_DAILY_COUNTERS_DIFFER', `${journalTotal} is the lifetime durable reservation count; ${quotaUsed} is the current UTC-day ordinal high-water. These are intentionally different units.`);
++  }
++
++  const appendFailures = runtime.farcaster?.appendFailures;
++  const reservationFailures = runtime.farcaster?.reservationAppendFailures;
++  if (appendFailures !== null && appendFailures > 0) {
++    if (reservationFailures !== null && reservationFailures > 0) add('ERROR', 'RESERVATION_APPEND_RETRY_ACTIVE_OR_OBSERVED', `${reservationFailures} request-reservation append failure(s) occurred; the runtime retains and retries the same reservation identity before any provider call.`);
++    if (reservationFailures === 0 || reservationFailures === null) add('ERROR', 'BASE_SETTLEMENT_APPEND_FAILURE_OBSERVED', 'The append failure is not proven to be a reservation failure; a Social scope/evidence batch failure is the leading code-path explanation.');
++  }
++  if ((runtime.persistence?.transactionErrors ?? 0) > 0) add('ERROR', 'DATABASE_TRANSACTION_ERROR_OBSERVED', `${runtime.persistence.transactionErrors} database transaction error(s) occurred in this process; the health counter is global and does not identify the caller.`);
++  if (runtime.farcaster?.lastError === null && (appendFailures ?? 0) > 0) add('WARN', 'FARCASTER_LAST_ERROR_MASKED_OR_CLEARED', 'A null wrapper lastError does not clear the base Social append failure; the wrapper status currently overwrites the base field.');
++  if (/duplicate event identity with an altered payload \(RUMOR2_SOCIAL_CATALOG_VERIFIED\)/.test(runtime.rumor2?.withholdReason ?? '')) add('CRITICAL', 'CATALOG_VERIFICATION_IDENTITY_COLLISION_CONFIRMED', 'Two provider-scoped ears prepared one shared venue/content/observedTs identity with different truthful settle clocks. First durable truth remains valid; producers must durable-lookup and canonically adopt the shared identity before append and retry.');
++  if (runtime.x?.lastStopReason === 'WATCH_SCOPE_NOT_CONFIGURED' || runtime.x?.gateReason === 'WATCH_SCOPE_NOT_CONFIGURED') add('INFO', 'X_EXPLICIT_SCOPE_REQUIRED', 'X correctly makes zero requests until an explicit static ticker list is verified against a fresh accepted catalog.');
++
++  return {
++    version: 'social-storage-diagnostic-1',
++    generatedTs: int(nowMs),
++    safety: { databaseStatements: 'SELECT_ONLY', providerCalls: false, filesystemWrites: false, rawSocialContentPrinted: false, credentialsPrinted: false },
++    runtime,
++    xWatch: xWatchSummary(parsedConfig),
++    database: dbSnapshot?.ok ? { ok: true, selectOnly: dbSnapshot.selectOnly === true, journal: dbSnapshot.journal, truncated: dbSnapshot.truncated, reservations, catalogVerifications } : { ok: false, category: dbSnapshot?.category ?? 'UNAVAILABLE', error: dbSnapshot?.error ?? null },
++    errorRetention: {
++      historicalAppendExceptionRecoverable: false,
++      reason: 'rumor2JournalStore maps ordinary repository exceptions to UNAVAILABLE, persistence health retains only a counter, and Farcaster status can overwrite the base lastError. PostgreSQL does not retain the application exception after rollback.',
++      requiredFutureFix: 'retain a sanitized error code/category at the journal boundary and preserve base.lastError separately from transport.lastError',
++    },
++    verdict: findings.some((f) => f.severity === 'CRITICAL') ? 'JOURNAL_INTEGRITY_FAILED' : findings.some((f) => f.severity === 'ERROR') ? 'DEGRADED_CAUSE_NARROWED_NOT_PROVEN' : 'NO_STRUCTURAL_RESERVATION_BUG_PROVEN',
++    findings,
++  };
++}
++
++async function defaultDbFactory(url) {
++  // Keep the pg driver out of pure/unit-test imports.  Production invocation
++  // loads the existing database boundary only when it is about to run SELECTs.
++  const { Db } = await import('../persistence/db.js');
++  return new Db({ url, log: () => {} });
++}
++
++export async function runSocialStorageDiagnostic({ env = process.env, nowMs = Date.now(), dbFactory = defaultDbFactory, readStatus = null, config = null } = {}) {
++  const root = dataDir(config ?? loadConfig());
++  let runtimeStatus = null;
++  try {
++    runtimeStatus = readStatus ? await readStatus() : readJsonBounded(path.join(root, 'data-only', 'runtime-status.json'), 16 * 1024 * 1024);
++  } catch {
++    // The database diagnostic remains useful without the ephemeral status mirror.
++  }
++  const effectiveConfig = config ?? loadConfig();
++  const parsedConfig = parseSocialResearchConfig(effectiveConfig);
++  const db = await dbFactory(env.DATABASE_URL);
++  const dbSnapshot = await readSocialDbSnapshot({ db });
++  return diagnoseSocialStorage({ runtimeStatus, dbSnapshot, parsedConfig, nowMs });
++}
++
++const invoked = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
++if (invoked) {
++  const report = await runSocialStorageDiagnostic();
++  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
++  if (!report.database.ok || report.verdict === 'JOURNAL_INTEGRITY_FAILED') process.exitCode = 1;
++}
