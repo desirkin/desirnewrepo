@@ -101,6 +101,43 @@ core.status();
 store.close();
 ```
 
+`prepareAdaptiveCandleOutcome` is the narrow adapter for the current label
+producer. Given a saved adaptive prediction, a `readLearningArchive` result (or
+`null` for an unavailable poll), and the trusted current `asOfTs`, it calls the
+existing `labelOpportunity` implementation rather than recomputing returns.
+It returns `{status, outcomeInput, provenanceReceipt}`:
+
+- `MATURED` carries the exact 60m `logReturnPct`, horizon end, and archive-derived
+  known-at clock;
+- `PENDING` carries no label value, clock, or source digest while data may still
+  arrive by the presealed deadline;
+- `MISSING` is emitted only strictly after
+  `targetEndTs + procedure.target.maxLabelDelayMs` when the label is still
+  unavailable or censored.
+
+In v1, `maxLabelDelayMs` is therefore frozen before prediction as both the
+maximum update-eligible label delay and the terminal-missingness deadline. A
+real label first observed later is retained as a late, non-updating outcome if
+no prior terminal outcome exists. If deadline-missing was already appended,
+the core/store's first-settlement identity rejects the correction instead of
+rewriting history.
+
+The receipt binds the complete projected 60m label and the archive manifest
+SHA-256 (whose manifest binds the declared candle-source checksum). It is
+labelled `UNPERSISTED_CALLER_MUST_JOURNAL`; returning it does not make it
+durable. A caller with the source archive can ask the receipt validator to
+re-run the existing label recipe and detect a self-rehashed mutation. A
+detached digest alone establishes identity, not provider authenticity,
+first-write chronology, or durable custody. Integration must persist the
+receipt/source anchor before appending the outcome. The supplied `asOfTs` also
+must come from the integration's trusted clock; this pure adapter cannot prove
+the caller's wall clock.
+
+The candle outcome is a price-return target. It contains no fee, spread,
+slippage, fill, or profit field and must never be reinterpreted as an
+after-cost execution outcome. The separate policy qualification layer owns
+that comparison, preventing fee deduction here and a second netting later.
+
 All snapshots have `application.enabled === false` and `authority === 'NONE'`.
 Supplying a truthy or signature-shaped `qualification` value does not enable
 the result. The existing promotion owner must later verify a versioned,
