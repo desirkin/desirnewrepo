@@ -60,11 +60,41 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       c8e48d5c10b5b29ad685efd21713984bdb2f7f331e6b31f60d36486a241c1d10
+judge/*.js       58f04c37a1b569447ffac2868799a9c9ac2fed816942a3c2b81023560d90597a
 execution/*.js   d9ce90d9b08977048fb333bb8a22b7e949613832193a58763238d79a9d671965
 watch/watch.js   dc49a39444e2971dafb766f2a831fda6894968238606c7c6bfa8b5b782cf53a6
-all (41 files)   f9487cccf92fbf1329fc549a77cfc2414905cf4f8c4abcee3aa9e761b1bd5ff5
+all (41 files)   de596a9656405be2e463a3985f5d14667ca725cedf68a08e0a8aaac18c7ac19a
 ```
+
+### 4.4 Audited change — 2026-09-13 fail-closed learning and sizing review (previous digests: judge `c8e48d5c10b5...`, all `f9487cccf92f...`; execution/ and watch/watch.js still byte-identical)
+
+This review repaired reproduced integrity and bounded-record defects in the dormant learning/sizing path. It does not
+claim model quality, profitable behavior, paper readiness, or complete validation. Both ports remain null-default and
+unwired in `fly.js`; no threshold, risk cap, admission rule, entry permission, execution path, Watch rule, or LIVE
+authority changed.
+
+- `judge/learning-intake.js` + `judge/judge.js` — the consumer now requires the exact decision-view provenance,
+  non-future prepared clock, explicit feature-recipe and policy versions, finite prepared values, non-negative fact ages,
+  and every applicability feature. Corrupt/withheld records and conflicting versions fail to baseline with the affected
+  candidates logged; no default version or zero-age value is invented.
+- `judge/size-ladder.js` (`judge-size-ladder-4`) — fraction inputs are exact-decimal canonicalized, aliases cannot evade
+  the all-in prerequisites, duplicates/malformed/count-over-limit inputs fail closed, and admission callback faults refuse
+  only that candidate. Future books and negative freshness laws fail closed. The sustainability boundary uses exact decimal
+  cross-products, while its percentage remains display-only. The deepest protective-exit proof is independently priced at
+  the stop-stress mid with 25% recorded depth; target-exit sensitivity is not mislabelled as stop protection.
+- The maximum ladder is 16 candidates. The largest existing setup contributes 13 clauses; the learning side contributes
+  at most 24 candidate rows plus one summary; sizing contributes 16 rows plus one summary: `13 + 24 + 1 + 16 + 1 = 55`.
+  This stays inside the unchanged 64-measurement contract, so the final decision slice cannot silently discard an allowed
+  size row while its summary claims complete logging. Default fractions remain `0.25/0.5/0.75/1`.
+- Companion learning producers now bind published activations to canonical design/evidence/terminal digests, re-derive that
+  provenance in the decision view, leave a premature formal look pending without consuming the candidate, freeze the
+  formal estimate to the first predeclared groups, and reject backdated or forged terminals. The portable JSON replacement
+  path retains file-fsync/rename failure visibility while tolerating only Windows' unsupported directory-fsync `EPERM`.
+- Focused regressions: `test/judge-sizing-review.test.js`, `test/judge-learning-intake.test.js`,
+  `test/judge-e2e-preservation.test.js`, `test/learning-adapter-review.test.js`,
+  `test/learning-prospective-terminal-regression.test.js`, and `test/jsonl-atomic-portable.test.js`. The differential and
+  integrity-boundary tests continue to require the default-off Judge to match the archived baseline and forbid execution or
+  Watch imports. Digest proof is still `test/paper-runtime.test.js` P-08.
 
 ### 4.3 Audited change — 2026-09-13 independent-review corrections (previous digests: judge `767bb48158ad…`, all `9012dd402d57…`; execution/ and watch/watch.js still byte-identical to the paper audit)
 

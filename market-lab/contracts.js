@@ -557,7 +557,7 @@ export function payloadError(kind, p, where = 'payload') {
       if (p.forecastValue !== null && p.forecastKnownAtTs === null) return `${where}: a forecast needs its knowledge clock`;
       return null;
     case 'CROSS_ASSET_BAR':
-      if (!isId(p.instrument) || !isIdOrNull(p.exchange) || !isTs(p.intervalMs) || !SESSION_STATES.includes(p.sessionState) || !(p.delayed === null || typeof p.delayed === 'boolean') || !isIdOrNull(p.proxyFor) || !isId(p.currency)) return `${where}: cross-asset bar malformed`;
+      if (!isId(p.instrument) || !isIdOrNull(p.exchange) || !isTs(p.intervalMs) || !SESSION_STATES.includes(p.sessionState) || !(p.delayed === null || typeof p.delayed === 'boolean') || !isBoundedString(p.proxyFor, 80) || !isId(p.currency)) return `${where}: cross-asset bar malformed`;
       e = ohlcError(p, where); if (e) return e;
       if (!(p.volume === null || isNonNegative(p.volume))) return `${where}: volume malformed`;
       return null;

@@ -305,6 +305,12 @@ export function activationError(a) {
   const k = exactKeys(a, ACTIVATION_KEYS); if (k) return `activation: ${k}`;
   if (a.activationVersion !== ACTIVATION_VERSION) return 'activation: unsupported version';
   if (!ACTIVATION_STATES.includes(a.state)) return 'activation: unknown state';
+  if (!isId(a.candidateId) || !isId(a.patternId) || !isId(a.candidateDigest) || !isId(a.evidenceDigest) || !isId(a.reportDigest)) return 'activation: evidence references malformed';
+  if (a.activationId !== activationIdOf({ candidateId: a.candidateId, patternId: a.patternId, candidateDigest: a.candidateDigest, effectiveTs: a.effectiveTs })) return 'activation: identity mismatch';
+  if (a.state === 'ACTIVE_PAPER' && a.seq === 0) return 'activation: active state requires an adoption transition';
+  if (!a.applicability || exactKeys(a.applicability, ['clauses']) || !Array.isArray(a.applicability.clauses) || a.applicability.clauses.length === 0 || a.applicability.clauses.length > 32) return 'activation: applicability malformed';
+  if (a.applicability.clauses.some((c) => exactKeys(c, ['feature', 'op', 'threshold']) || !isId(c.feature) || !['GT', 'GTE', 'LT', 'LTE'].includes(c.op) || !isFiniteNum(c.threshold))) return 'activation: applicability clause malformed';
+  if (a.cooldownUntilTs !== null && !isTs(a.cooldownUntilTs)) return 'activation: cooldown clock malformed';
   if (!isCount(a.seq) || !isTs(a.ts) || !isTs(a.effectiveTs) || !isTs(a.expiresTs)) return 'activation: clocks malformed';
   if (a.expiresTs <= a.effectiveTs) return 'activation: expiry precedes effect';
   if (a.expiresTs - a.effectiveTs > ADJUSTMENT_CEILINGS.maxLifetimeDays * 86_400_000) return 'activation: lifetime exceeds the ceiling';

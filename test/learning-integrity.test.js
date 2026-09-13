@@ -36,8 +36,8 @@ test('§04 memory separation: the research view exposes provisional patterns wit
     const pub = buildActivation({ candidateId: 'lcand-1', patternId: 'lpat-1', trainingCutoffTs: T - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 },  adjust: 0.1, applicability: predicate, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T });
     store.appendActivation(pub);
     const d2 = readDecisionMemory({ store, nowTs: T + 1 });
-    assert.equal(d2.activations.length, 1);
-    assert.equal(d2.activations[0].state, 'PUBLISHED_WAITING_FOR_PAPER');
+    assert.equal(d2.activations.length, 0, 'a typed activation without its verified prospective evidence has no decision authority');
+    assert.equal(d2.withheld[0].reason, 'VALIDATED_EVIDENCE_MISSING');
     assert.equal(typeof readResearchMemory({ store, limit: 5 }).patterns[0].evidence.rawCount, 'number', 'the research view stays descriptive');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

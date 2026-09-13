@@ -20,16 +20,17 @@
 // admission-gate ordering of ALREADY fully qualified candidates. Hard gates, sizing, risk and The Watch are not
 // inputs and not outputs. The import fence for this file is explicit and tested (test/integrity-boundary.test.js):
 // it imports ONLY the two named pure learning modules below.
-import { activationError, ADJUSTMENT_CEILINGS, FEATURE_RECIPE_VERSION, BASELINE_RULE_VERSION, isFiniteNum, isTs, round4, deepFreeze } from '../learning/contracts.js';
+import { activationError, ADJUSTMENT_CEILINGS, isFiniteNum, isTs, round4, deepFreeze } from '../learning/contracts.js';
 import { evaluatePredicate } from '../learning/features.js';
 
 export const LEARNING_INTAKE_VERSION = 'judge-learning-intake-1';
-export const SELECTOR_VERSION = 'learning-selector-1';
+export const JUDGE_FACT_RECIPE_VERSION = 'judge-prepared-market-features-1';
+export const SELECTOR_VERSION = 'learning-selector-2';
 export const TIE_BREAK_LAW = 'SMALLEST_ABS_EFFECT_THEN_EARLIEST_EFFECTIVE_THEN_LEXICOGRAPHIC_ID';
 export const DISPOSITIONS = Object.freeze(['DECISION_ELIGIBLE', 'SHADOW_ONLY', 'BASELINE_ONLY']);
 export const NO_CONTRIBUTION_REASONS = Object.freeze([
   'NO_SNAPSHOT', 'SNAPSHOT_STALE', 'LEARNED_INFLUENCE_KILLED', 'ACTIVATION_RECORD_INVALID', 'NO_MATCHING_VALIDATED_CANDIDATE',
-  'CONFLICTING_ACTIVE_VERSIONS', 'MODE_NOT_PAPER_AUTHORIZED', 'ZERO_FROZEN_EFFECT',
+  'CONFLICTING_ACTIVE_VERSIONS', 'MODE_NOT_PAPER_AUTHORIZED', 'ZERO_FROZEN_EFFECT', 'SNAPSHOT_VIEW_INVALID', 'PREPARED_FACTS_INVALID',
 ]);
 // every per-candidate rejection reason the selector can log (closed vocabulary; the exact reason always rides the record)
 export const CANDIDATE_REJECTION_REASONS = Object.freeze([
@@ -37,7 +38,7 @@ export const CANDIDATE_REJECTION_REASONS = Object.freeze([
   'SCOPE_SETUP_MISMATCH', 'SCOPE_REGIME_MISMATCH', 'ASSET_OUT_OF_SCOPE', 'VENUE_OUT_OF_SCOPE',
   'FEATURE_RECIPE_VERSION_MISMATCH', 'POLICY_VERSION_MISMATCH', 'AXIS_NOT_CONSUMABLE',
   'REQUIRED_FACT_MISSING', 'FACT_STALE', 'LIQUIDITY_OUT_OF_RANGE', 'VOLATILITY_OUT_OF_RANGE',
-  'OUT_OF_DOMAIN_OR_COVERAGE', 'APPLICABILITY_FALSE',
+  'OUT_OF_DOMAIN_OR_COVERAGE', 'APPLICABILITY_FALSE', 'ACTIVATION_RECORD_INVALID', 'CONFLICTING_ACTIVE_VERSIONS',
 ]);
 export const SNAPSHOT_MAX_AGE_MS = 15 * 60_000; // a cache hit never refreshes old evidence: a stale snapshot is baseline
 
@@ -58,7 +59,9 @@ const scopeMatches = (declared, actual) => declared === 'ANY' || declared === ac
 // of scope (never optimistic); the list carries no order and grants no name a preference.
 const listScopeMatches = (declared, actual) => declared === 'ANY' || (typeof actual === 'string' && Array.isArray(declared) && declared.includes(actual));
 // a fact is usable when KNOWN and, when the candidate bounds freshness, provably fresh (unknown age = stale)
-const factUsable = (f, maxAgeMs) => Boolean(f && f.availability === 'KNOWN') && (maxAgeMs === null || maxAgeMs === undefined || (isFiniteNum(f.ageMs) && f.ageMs <= maxAgeMs));
+const factUsable = (f, maxAgeMs) => Boolean(f && f.availability === 'KNOWN' && isFiniteNum(f.value))
+  && (f.ageMs === undefined || f.ageMs === null || (isFiniteNum(f.ageMs) && f.ageMs >= 0))
+  && (maxAgeMs === null || maxAgeMs === undefined || (isFiniteNum(f.ageMs) && f.ageMs >= 0 && f.ageMs <= maxAgeMs));
 
 // The deterministic selector. Inputs are the prepared snapshot and the prepared facts of THIS decision — nothing else.
 //   snapshot: readDecisionMemory output ({ activations, kill, preparedTs })
@@ -68,15 +71,18 @@ const factUsable = (f, maxAgeMs) => Boolean(f && f.availability === 'KNOWN') && 
 export function resolveLearningContribution({ snapshot, facts, mode, nowTs }) {
   const baseline = (reason, extra = {}) => deepFreeze({
     selectorVersion: SELECTOR_VERSION, tieBreakLaw: TIE_BREAK_LAW, disposition: 'BASELINE_ONLY', applied: false,
-    selected: null, adjust: 0, eligible: [], rejected: extra.rejected ?? [], reason,
+    selected: null, adjust: 0, eligible: extra.eligible ?? [], rejected: extra.rejected ?? [], reason,
   });
   if (!snapshot || !Array.isArray(snapshot.activations)) return baseline('NO_SNAPSHOT');
-  if (!isTs(snapshot.preparedTs) || !isTs(nowTs) || nowTs - snapshot.preparedTs > SNAPSHOT_MAX_AGE_MS) return baseline('SNAPSHOT_STALE');
+  if (!isTs(snapshot.preparedTs) || !isTs(nowTs) || snapshot.preparedTs > nowTs || nowTs - snapshot.preparedTs > SNAPSHOT_MAX_AGE_MS) return baseline('SNAPSHOT_STALE');
+  if (snapshot.view !== 'DECISION') return baseline('SNAPSHOT_VIEW_INVALID');
+  if (snapshot.withheld?.length) return baseline('ACTIVATION_RECORD_INVALID', { rejected: snapshot.withheld });
+  if (!facts || typeof facts !== 'object' || Array.isArray(facts)) return baseline('PREPARED_FACTS_INVALID');
   if (!snapshot.kill || snapshot.kill.state !== 'ARMED') return baseline('LEARNED_INFLUENCE_KILLED');
   const rejected = []; const eligible = [];
   const reject = (a, reason) => rejected.push({ activationId: a.activationId, reason });
   for (const a of [...snapshot.activations].sort((x, y) => (String(x?.activationId) < String(y?.activationId) ? -1 : 1))) {
-    if (activationError(a)) return baseline('ACTIVATION_RECORD_INVALID'); // one corrupt artifact suspends learned influence entirely (fail toward baseline)
+    if (activationError(a)) return baseline('ACTIVATION_RECORD_INVALID', { rejected: [...rejected, { activationId: String(a?.activationId ?? 'UNKNOWN'), reason: 'ACTIVATION_RECORD_INVALID' }] }); // one corrupt artifact suspends learned influence entirely
     const v = validateLearningActivation(a, { nowTs });
     if (!v.ok) { reject(a, v.reasons[0]); continue; }
     // ---- declared scope, matched against the PREPARED facts only; a missing fact never passes an explicit bound ----
@@ -85,21 +91,23 @@ export function resolveLearningContribution({ snapshot, facts, mode, nowTs }) {
     if (!listScopeMatches(a.scope.assets, facts.asset)) { reject(a, 'ASSET_OUT_OF_SCOPE'); continue; }
     if (!listScopeMatches(a.scope.venues, facts.venue)) { reject(a, 'VENUE_OUT_OF_SCOPE'); continue; }
     // ---- version pinning: the artifact was validated under an exact feature recipe and policy; a consumer whose
-    //      prepared facts declare a different version never consumes it (silence = the contracts' own versions)
-    if (a.featureRecipeVersion !== (facts.featureRecipeVersion ?? FEATURE_RECIPE_VERSION)) { reject(a, 'FEATURE_RECIPE_VERSION_MISMATCH'); continue; }
-    if (a.policyVersion !== (facts.policyVersion ?? BASELINE_RULE_VERSION)) { reject(a, 'POLICY_VERSION_MISMATCH'); continue; }
+    //      prepared facts omit or declare a different version never consumes it (no optimistic version default).
+    if (a.featureRecipeVersion !== facts.featureRecipeVersion) { reject(a, 'FEATURE_RECIPE_VERSION_MISMATCH'); continue; }
+    if (a.policyVersion !== facts.policyVersion) { reject(a, 'POLICY_VERSION_MISMATCH'); continue; }
     if (!a.allowedEffect.axes.includes('RANKING')) { reject(a, 'AXIS_NOT_CONSUMABLE'); continue; } // only the RANKING axis is consumable in this release
     // ---- declared eligibility envelope (MANDATORY on every artifact): required facts, freshness, liquidity, volatility ----
     const el = a.eligibility; const maxAge = el.maxFactAgeMs;
     let bad = null;
-    for (const name of el.requiredFeatures) {
+    const required = new Set([...el.requiredFeatures, ...(a.applicability?.clauses ?? []).map((c) => c.feature)]);
+    for (const name of required) {
       const f = facts.features?.[name];
-      if (!f || f.availability !== 'KNOWN') { bad = 'REQUIRED_FACT_MISSING'; break; }
+      if (!f || f.availability !== 'KNOWN' || !isFiniteNum(f.value)) { bad = 'REQUIRED_FACT_MISSING'; break; }
       if (!factUsable(f, maxAge)) { bad = 'FACT_STALE'; break; }
     }
     if (bad) { reject(a, bad); continue; }
     const range = (f, min, max) => {
       if (min === null && max === null) return null;
+      if (!f || !isFiniteNum(f.value)) return 'OUT_OF_DOMAIN_OR_COVERAGE';
       if (!factUsable(f, maxAge)) return f && f.availability === 'KNOWN' ? 'FACT_STALE' : 'OUT_OF_DOMAIN_OR_COVERAGE';
       if (min !== null && f.value < min) return 'RANGE';
       if (max !== null && f.value > max) return 'RANGE';
@@ -117,11 +125,10 @@ export function resolveLearningContribution({ snapshot, facts, mode, nowTs }) {
   }
   if (eligible.length === 0) return baseline('NO_MATCHING_VALIDATED_CANDIDATE', { rejected });
   const patternIds = new Set(eligible.map((a) => a.patternId));
-  if (patternIds.size !== eligible.length) return baseline('CONFLICTING_ACTIVE_VERSIONS', { rejected }); // two active versions of one pattern is an integrity conflict, never a choice
+  if (patternIds.size !== eligible.length) return baseline('CONFLICTING_ACTIVE_VERSIONS', { rejected: [...rejected, ...eligible.map((a) => ({ activationId: a.activationId, reason: 'CONFLICTING_ACTIVE_VERSIONS' }))] });
   // predeclared conservative tie-break: smallest permitted absolute effect, then earliest effect, then id
   const ordered = [...eligible].sort((x, y) => (
     Math.abs(x.allowedEffect.adjust) - Math.abs(y.allowedEffect.adjust)
-    || x.allowedEffect.maxAbsAdjust - y.allowedEffect.maxAbsAdjust
     || x.effectiveTs - y.effectiveTs
     || (x.activationId < y.activationId ? -1 : 1)
   ));

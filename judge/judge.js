@@ -12,7 +12,7 @@ import { evaluateEntry, sizeSearch, liquidationValue, COST_MODEL_VERSION } from 
 import { admitCandidate, riskBudgetFor, rankCandidates, clusterIdOf } from './risk.js';
 import { makeDecision, decisionIdentity, decisionRecord } from './contract.js';
 import { intakeDecision, consumeCase, primaryConfirmedCatalyst } from './intake.js';
-import { resolveLearningContribution, contributionMeasurement, contributionCandidateLog } from './learning-intake.js';
+import { JUDGE_FACT_RECIPE_VERSION, resolveLearningContribution, contributionMeasurement, contributionCandidateLog } from './learning-intake.js';
 import { evaluateSizeLadder, sizingMeasurement, sizingCandidateLog } from './size-ladder.js';
 import { createScheduler } from './scheduler.js';
 import { judgeReadinessMatrix } from './readiness.js';
@@ -69,10 +69,10 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   // the prepared-fact view handed to the learned-contribution selector: the SAME already-computed fast facts,
   // reshaped into the learning feature contract (value + availability; UNKNOWN stays unavailable, never zero)
   const lf = (obj, key, unit, lookbackMs) => (obj && obj.state === 'KNOWN' && Number.isFinite(obj[key]) ? { value: obj[key], unit, lookbackMs, ageMs: 0, availability: 'KNOWN' } : { value: null, unit, lookbackMs, ageMs: null, availability: 'UNAVAILABLE' });
-  const numFact = (v, unit, ageMs = 0) => (Number.isFinite(v) ? { value: v, unit, lookbackMs: 0, ageMs, availability: 'KNOWN' } : { value: null, unit, lookbackMs: 0, ageMs: null, availability: 'UNAVAILABLE' });
+  const numFact = (v, unit, ageMs = 0) => (Number.isFinite(v) && Number.isFinite(ageMs) && ageMs >= 0 ? { value: v, unit, lookbackMs: 0, ageMs, availability: 'KNOWN' } : { value: null, unit, lookbackMs: 0, ageMs: null, availability: 'UNAVAILABLE' });
   function learnedFactsOf(fast, frozen = null) {
     const spreadBps = fast.bestBid && fast.bestAsk && fast.mid ? (Number(fast.bestAsk) - Number(fast.bestBid)) / Number(fast.mid) * 10_000 : null;
-    const bookAge = Number.isFinite(fast.bookAgeMs) ? fast.bookAgeMs : 0;
+    const bookAge = Number.isFinite(fast.bookAgeMs) && fast.bookAgeMs >= 0 ? fast.bookAgeMs : null;
     const atrPct = frozen && frozen.atr14 !== undefined && fast.mid && Number.isFinite(Number(frozen.atr14)) && Number(fast.mid) > 0 ? Number(frozen.atr14) / Number(fast.mid) * 100 : NaN;
     return {
       rv60: lf(fast.rv60, 'rv60', 'ratio', 60_000), fi15: lf(fast.fi15, 'fi', 'fraction', 15_000), fi60: lf(fast.fi60, 'fi', 'fraction', 60_000),
@@ -113,7 +113,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     // learned contribution (dormant without the injected port): resolved from the prepared snapshot and THIS
     // decision's already-prepared facts only; any resolver fault falls back to baseline with the fault logged
     let learned = null;
-    if (learning) { try { learned = resolveLearningContribution({ snapshot: learning.snapshot(), facts: { setupType: setupId, regime: 'LIVE_UNCLASSIFIED', asset: c.assetId, venue: 'kraken', features: learnedFactsOf(fast, frozen) }, mode, nowTs: D }); } catch (err) { log(`learned contribution resolver failed (baseline): ${err.message}`); learned = null; } }
+    if (learning) { try { learned = resolveLearningContribution({ snapshot: learning.snapshot(), facts: { setupType: setupId, regime: 'LIVE_UNCLASSIFIED', asset: c.assetId, venue: 'kraken', featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyVersion: policyDigest, features: learnedFactsOf(fast, frozen) }, mode, nowTs: D }); } catch (err) { log(`learned contribution resolver failed (baseline): ${err.message}`); learned = null; } }
     let measurements = learned ? [...baseMeasurements, contributionMeasurement(learned), ...contributionCandidateLog(learned)] : baseMeasurements;
     if (setup.state !== 'ELIGIBLE') { if (setup.state === 'NEEDS_DATA') counters.needsData += 1; tracker.decide(setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'NO_TRADE', setup.refused, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
     funnel.setupQualified += 1;

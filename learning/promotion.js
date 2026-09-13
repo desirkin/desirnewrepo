@@ -6,7 +6,7 @@
 //   (PUBLISHED_WAITING_FOR_PAPER while the paper runtime is stopped) and the pattern becomes VALIDATED_PAPER.
 // A failed terminal returns the pattern to ACCUMULATING with the failure retained; the candidate id stays consumed.
 // Nothing here starts paper, changes the Judge, or touches an order path.
-import { DEFAULT_FLOORS, deepFreeze } from './contracts.js';
+import { DEFAULT_FLOORS, canonicalDigest, deepFreeze } from './contracts.js';
 import { sealDesign, replayProspective, evaluateTerminal, MIN_COMPARISON_COVERAGE } from './prospective.js';
 import { buildActivation, DEFAULT_DEGRADE_RULE } from './adapter.js';
 import { buildPatternRecord } from './patterns.js';
@@ -56,6 +56,11 @@ export function settleCandidate({ store, candidateId, nowTs, commonShockDates = 
   const design = state.designs.get(candidateId);
   if (!design) throw new Error('settleCandidate: unknown candidate');
   const terminal = evaluateTerminal(state, candidateId, { nowTs, commonShockDates });
+  // Reaching the predeclared terminal sample is a precondition for the ONE formal look. An early operator/scheduler
+  // call is merely pending: it appends no terminal, consumes no candidate and changes no pattern state.
+  if (terminal.reasons.includes('TERMINAL_SAMPLE_NOT_REACHED')) {
+    return { terminal: null, activation: null, patternState: 'PROSPECTIVE_PENDING', note: 'TERMINAL_SAMPLE_NOT_REACHED' };
+  }
   store.appendProspective(terminal);
   const heads = store.patternHeads();
   const pattern = heads.get(design.patternId);
@@ -65,7 +70,9 @@ export function settleCandidate({ store, candidateId, nowTs, commonShockDates = 
   if (terminal.verdict === 'FORWARD_SUPPORTED') {
     const activation = buildActivation({
       candidateId, patternId: design.patternId, trainingCutoffTs: design.sealedTs,
-      candidateDigest: candidateId, evidenceDigest: design.evidenceDigest, reportDigest: `terminal-${terminal.recordedTs}`,
+      candidateDigest: canonicalDigest(design),
+      evidenceDigest: canonicalDigest(store.readProspective().filter((r) => (r.candidateId ?? r.design?.candidateId) === candidateId && r.kind !== 'TERMINAL_EVALUATED')),
+      reportDigest: canonicalDigest(terminal),
       // the frozen learned parameter: the full permitted positive nudge, itself conservative — sealed at publication,
       // never retuned in place; the artifact also carries the design's exact declared scope for the selector
       maxAbsAdjust, adjust: maxAbsAdjust,

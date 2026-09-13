@@ -21,13 +21,13 @@
 // behavior is unchanged by construction — no watch code path differs to measure.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASE_COMMIT = 'ea3bfbf';
 const T0 = Date.parse('2026-09-08T12:00:00Z');
 const SAMPLE_LIMITS = Object.freeze({ maxSimultaneousAssetPositions: 3, maxModelledRiskPerPositionFraction: 0.01, maxAggregateModelledRiskFraction: 0.02, maxCorrelatedClusterModelledRiskFraction: 0.015, dailyLossRestrictionFraction: 0.05, peakEquityDrawdownRestrictionFraction: 0.1, maxGrossExposureFraction: 1, maxAssetExposureFraction: 1 });
@@ -38,7 +38,9 @@ let baseDir = null;
 test.before(() => {
   baseDir = mkdtempSync(path.join(tmpdir(), 'cobra-base-ea3bfbf-'));
   mkdirSync(baseDir, { recursive: true });
-  execSync(`git -C ${JSON.stringify(ROOT)} archive ${BASE_COMMIT} | tar -x -C ${JSON.stringify(baseDir)}`, { stdio: 'pipe' }); // the COMPLETE base tree: the real pre-change Judge with its real imports
+  const archive = path.join(baseDir, 'baseline.tar');
+  execFileSync('git', ['-C', ROOT, 'archive', '--output', archive, BASE_COMMIT], { stdio: 'pipe' });
+  execFileSync('tar', ['-xf', archive, '-C', baseDir], { stdio: 'pipe' }); // complete base tree; arguments remain literal on Windows and Unix
 });
 test.after(() => { if (baseDir) rmSync(baseDir, { recursive: true, force: true }); });
 

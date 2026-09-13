@@ -21,6 +21,7 @@ import { createWatch } from '../watch/watch.js';
 import { createScheduler } from '../judge/scheduler.js';
 import { loadJudgePolicy } from '../judge/policy.js';
 import { buildActivation, transitionActivation } from '../learning/adapter.js';
+import { JUDGE_FACT_RECIPE_VERSION } from '../judge/learning-intake.js';
 import { eventsFor, fakeClock, SPEC, T0 } from './helpers/judge.js';
 import { feeContract } from '../execution/contract.js';
 import { crc32 } from '../lib/crc32.js';
@@ -34,10 +35,10 @@ const fmt = (v, d) => v.toFixed(d).replace('.', '').replace(/^0+/, ''); const cr
 function bars({ n = 61, endTs, close = 100000, range = 400, wickAt = 41, wickLow = 96000 } = {}) { const out = []; for (let i = 0; i < n; i += 1) out.push({ periodStartTs: endTs - (n - i) * 60_000, periodEndTs: endTs - (n - i - 1) * 60_000, open: close, high: close + range / 2, low: i === wickAt ? wickLow : close - range / 2, close, volumeQuote: 1000, volumeBase: 0.01, closed: true }); return out; }
 
 function validated({ maxSizeUsd = null, adjust = 0.05 } = {}) {
-  const pub = buildActivation({ candidateId: 'lcand-e2e', patternId: 'lpat-e2e', trainingCutoffTs: T0 - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, adjust, scope: { setupType: 'RANGE_IGNITION', regime: 'ANY' }, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 }, maxSizeUsd, applicability: APPLIC, effectiveTs: T0, expiresTs: T0 + 30 * DAY, ts: T0 });
+  const pub = buildActivation({ candidateId: 'lcand-e2e', patternId: 'lpat-e2e', trainingCutoffTs: T0 - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: 0.1, adjust, scope: { setupType: 'RANGE_IGNITION', regime: 'ANY' }, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 }, maxSizeUsd, featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyVersion: POLICY.digest, applicability: APPLIC, effectiveTs: T0, expiresTs: T0 + 30 * DAY, ts: T0 });
   return transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T0 });
 }
-const snapOf = (activations, { preparedTs = T0 + 40 * 60_000, kill = KILL } = {}) => ({ view: 'DECISION', preparedTs, activations, kill });
+const snapOf = (activations, { preparedTs = T0 + 24 * 60_000, kill = KILL } = {}) => ({ view: 'DECISION', preparedTs, activations, kill });
 
 async function rig({ accountId, learning = null, dynamicSizing = null, caseSource = null, clock = fakeClock() } = {}) {
   const journal = createMemoryJournal(); await journal.create(accountId, { accountKind: 'PAPER' }); const writer = await journal.acquireWriter(accountId); const F = eventsFor(accountId, clock);
@@ -52,7 +53,7 @@ async function rig({ accountId, learning = null, dynamicSizing = null, caseSourc
   const settle = async () => { await judge.onTick(clock.now()); await scheduler.drain(); await dispatcher.idle(); await watch.onTick(clock.now()); await dispatcher.idle(); };
   const heartbeat = () => feed.ingest(JSON.stringify({ channel: 'heartbeat' }), clock.now()); const adv = (ms) => { for (let t = 0; t < ms; t += 1000) { clock.advance(Math.min(1000, ms - t)); heartbeat(); } };
   async function warm({ minutes = 22, price = 100000 } = {}) { book([[price + 10, 5]], [[price - 10, 5]], 'snapshot'); for (let m = 0; m < minutes; m += 1) { for (let k = 0; k < 4; k += 1) { adv(15_000); trade(price + 1, 'buy'); trade(price - 1, 'sell'); book([[price + 10, 5]], [[price - 10, 5]]); } } await settle(); }
-  async function ignite({ price = 100000, level = 100400, books = 3, spanMs = 2100 } = {}) { const start = Math.floor(clock.now() / 60_000) * 60_000 + 60_000; while (clock.now() < start) { adv(1000); } for (let k = 0; k < 20; k += 1) { adv(2000); trade(price + 50, 'buy', 0.2); } while (clock.now() % 60_000 !== 0) adv(1000); clock.advance(500); for (let i = 0; i < books; i += 1) { book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); trade(level + 10, 'buy', 0.1); await settle(); if (i < books - 1) clock.advance(Math.ceil(spanMs / (books - 1))); } await settle(); }
+  async function ignite({ price = 100000, level = 100400, books = 3, spanMs = 2100 } = {}) { const start = Math.floor(clock.now() / 60_000) * 60_000 + 60_000; while (clock.now() < start) { adv(Math.min(1000, start - clock.now())); } for (let k = 0; k < 20; k += 1) { adv(2000); trade(price + 50, 'buy', 0.2); } if (clock.now() % 60_000 !== 0) adv(60_000 - clock.now() % 60_000); clock.advance(500); for (let i = 0; i < books; i += 1) { book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); trade(level + 10, 'buy', 0.1); await settle(); if (i < books - 1) clock.advance(Math.ceil(spanMs / (books - 1))); } await settle(); }
   async function fill({ level = 100400 } = {}) { clock.advance(300); book([[level + 20, 5]], [[level, 5]]); await settle(); }
   return { clock, journal, F, feed, adapter, dispatcher, judge, watch, scheduler, book, trade, settle, warm, ignite, fill, state: () => dispatcher.state() };
 }

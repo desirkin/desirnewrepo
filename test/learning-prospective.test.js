@@ -11,6 +11,7 @@ import { freezeCandidate, settleCandidate, PROMOTION_POLICY } from '../learning/
 import { buildPatternRecord, buildEvidence, estimateFromEvidence } from '../learning/patterns.js';
 import { applyLearnedAdjustment } from '../learning/adapter.js';
 import { DEFAULT_FLOORS } from '../learning/contracts.js';
+import { readDecisionMemory } from '../learning/memory-view.js';
 
 const T0 = Date.UTC(2026, 5, 1);
 const HOUR = 3_600_000; const DAY = 86_400_000;
@@ -122,6 +123,22 @@ test('K. the synthetic qualifying dataset proves the full promotion path — and
     assert.equal(result.terminal.verdict, 'FORWARD_SUPPORTED');
     assert.equal(result.patternState, 'VALIDATED_PAPER');
     assert.equal(result.activation.state, 'PUBLISHED_WAITING_FOR_PAPER', 'PAPER is stopped: published, never ACTIVE_PAPER');
+    const verifiedMemory = readDecisionMemory({ store, nowTs: T0 + 41 * DAY });
+    assert.equal(verifiedMemory.activations.length, 1, 'a genuine producer artifact is bound to replay-verified prospective evidence');
+    assert.deepEqual(verifiedMemory.withheld, []);
+    for (const mutation of [
+      { evidenceDigest: 'fabricated-evidence' },
+      { reportDigest: 'fabricated-report' },
+      { maxSizeUsd: 500 },
+      { scope: { ...result.activation.scope, regime: 'OTHER_REGIME' } },
+      { validation: { ...result.activation.validation, groupCount: 3000 } },
+    ]) {
+      const forged = { ...result.activation, ...mutation };
+      const tamperedStore = { ...store, activationHeads: () => new Map([[forged.activationId, forged]]) };
+      const withheld = readDecisionMemory({ store: tamperedStore, nowTs: T0 + 41 * DAY });
+      assert.equal(withheld.activations.length, 0, JSON.stringify(mutation));
+      assert.equal(withheld.withheld[0].reason, 'ACTIVATION_EVIDENCE_MISMATCH');
+    }
     // M/proof: the published-but-not-active version influences NOTHING — the adapter answers baseline
     const applied = applyLearnedAdjustment({ baselineScore: 1, activationHeads: store.activationHeads(), featureSet: { features: { relVolume60m: { value: 5, unit: 'ratio', lookbackMs: 1, availability: 'KNOWN' } } }, adjustments: { [result.activation.activationId]: 0.1 }, nowTs: T0 + 41 * DAY, kill: store.readKill() });
     assert.equal(applied.effectiveScore, 1);

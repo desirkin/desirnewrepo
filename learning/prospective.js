@@ -46,6 +46,16 @@ export function sealDesign({
 export const CAPTURE_KEYS = Object.freeze(['kind', 'candidateId', 'opportunityId', 'canonicalCoin', 'decisionTs', 'candidateDecision', 'baselineDecision', 'recordedTs', 'labelEndTs']);
 export const OUTCOME_KEYS = Object.freeze(['kind', 'candidateId', 'opportunityId', 'outcomeClass', 'metricValue', 'outcomeKnownAtTs', 'recordedTs']);
 
+const captureOrder = (a, b) => a.recordedTs - b.recordedTs || (a.opportunityId < b.opportunityId ? -1 : 1);
+
+function formalShockDates(commonShockDates) {
+  if (!(commonShockDates instanceof Set)) throw new Error('evaluateTerminal: commonShockDates must be a Set');
+  // The design currently seals only the grouping-law version, not a list of shock dates. Letting a caller supply
+  // dates at the formal look would make the terminal result impossible to reproduce from the journal alone.
+  if (commonShockDates.size > 0) throw new Error('evaluateTerminal: commonShockDates are not sealed in this design');
+  return commonShockDates;
+}
+
 // ---- validated replay: the ONLY way to obtain trusted prospective state ------------------------------------------
 export function replayProspective(records) {
   const designs = new Map(); const captures = new Map(); const outcomes = new Map(); const terminals = new Map(); const errors = [];
@@ -87,6 +97,13 @@ export function replayProspective(records) {
       continue;
     }
     if (r.kind === 'TERMINAL_EVALUATED') {
+      // A terminal is trusted only when it is the deterministic result of the evidence that precedes it. This also
+      // refuses a hand-written verdict, an early terminal and a terminal clock backdated before existing evidence.
+      try {
+        const expected = terminalRecord({ designs, captures, outcomes, terminals }, r.candidateId, { nowTs: r.recordedTs, commonShockDates: new Set() });
+        if (expected.reasons.includes('TERMINAL_SAMPLE_NOT_REACHED')) { at('terminal sample not reached'); continue; }
+        if (canonicalDigest(r) !== canonicalDigest(expected)) { at('terminal does not match the replayed prospective evidence'); continue; }
+      } catch (err) { at(`terminal invalid (${err.message})`); continue; }
       terminals.set(r.candidateId, r);
     }
   }
@@ -113,30 +130,52 @@ export function interimView(state, candidateId, { commonShockDates = new Set() }
 // the candidate takes the metric where it decided to select and 0 where it skipped, and vice versa for the baseline,
 // so newly admitted losers and forgone gains both count. Floors and coverage are machine-enforced before any effect
 // is read.
-export function evaluateTerminal(state, candidateId, { nowTs, commonShockDates = new Set() }) {
-  if (state.terminals.has(candidateId)) throw new Error('evaluateTerminal: the one terminal look is already recorded');
+function terminalRecord(state, candidateId, { nowTs, commonShockDates = new Set() }) {
   const d = state.designs.get(candidateId); if (!d) throw new Error('evaluateTerminal: unknown candidate');
-  const caps = [...state.captures.get(candidateId).values()].sort((a, b) => a.recordedTs - b.recordedTs || (a.opportunityId < b.opportunityId ? -1 : 1));
+  formalShockDates(commonShockDates);
+  if (!isTs(nowTs)) throw new Error('evaluateTerminal: terminal clock malformed');
+  const caps = [...state.captures.get(candidateId).values()].sort(captureOrder);
   const outs = state.outcomes.get(candidateId);
+  const latestEvidenceTs = Math.max(
+    d.sealedTs,
+    ...caps.map((c) => c.recordedTs),
+    ...[...outs.values()].flatMap((o) => [o.outcomeKnownAtTs, o.recordedTs]),
+  );
+  if (nowTs < latestEvidenceTs) throw new Error('evaluateTerminal: terminal recorded before existing prospective evidence');
   // groups over ALL captures (the denominator); matured coverage judged against it under the sealed missingness rule
-  const allGrouping = assignGroups(caps.map((c) => ({ canonicalCoin: c.canonicalCoin, decisionTs: c.decisionTs })), { commonShockDates });
   const maturedCaps = caps.filter((c) => outs.has(c.opportunityId));
   const maturedGrouping = assignGroups(maturedCaps.map((c) => ({ canonicalCoin: c.canonicalCoin, decisionTs: c.decisionTs })), { commonShockDates });
+
+  // Once the target is reachable, freeze exactly the first target groups in capture order. Later captures and later
+  // matured groups cannot change either the formal effect or its missingness denominator.
+  const targetReached = maturedGrouping.groupCount >= d.terminalGroupTarget;
+  const countedGroups = targetReached ? maturedGrouping.groups.slice(0, d.terminalGroupTarget) : maturedGrouping.groups;
+  const countedIndexes = new Set(countedGroups.flatMap((g) => g.members));
+  const countedCaps = maturedCaps.filter((_c, i) => countedIndexes.has(i));
+  const countedGrouping = assignGroups(countedCaps.map((c) => ({ canonicalCoin: c.canonicalCoin, decisionTs: c.decisionTs })), { commonShockDates });
+  const lastCountedId = countedCaps.length > 0 ? countedCaps[countedCaps.length - 1].opportunityId : null;
+  const captureCutoff = lastCountedId === null ? -1 : caps.findIndex((c) => c.opportunityId === lastCountedId);
+  const denominatorCaps = targetReached ? caps.slice(0, captureCutoff + 1) : caps;
+  const maturedDenominator = denominatorCaps.filter((c) => outs.has(c.opportunityId));
+  const allGrouping = assignGroups(denominatorCaps.map((c) => ({ canonicalCoin: c.canonicalCoin, decisionTs: c.decisionTs })), { commonShockDates });
   const reasons = [];
-  if (maturedGrouping.groupCount < d.terminalGroupTarget) reasons.push('TERMINAL_SAMPLE_NOT_REACHED');
-  if (maturedGrouping.groupCount < d.floors.minIndependentGroups) reasons.push('FLOOR_GROUPS_NOT_MET');
+  if (!targetReached) reasons.push('TERMINAL_SAMPLE_NOT_REACHED');
+  if (countedGrouping.groupCount < d.floors.minIndependentGroups) reasons.push('FLOOR_GROUPS_NOT_MET');
+  // Breadth floors describe all forward evidence available at the one terminal look; the effect estimate itself is
+  // still frozen to the first target groups. This preserves the existing rule that later dates/assets may establish
+  // transfer breadth without letting their returns alter the predeclared effect sample.
   if (maturedGrouping.distinctUtcDates < d.floors.minDistinctUtcDates) reasons.push('FLOOR_DATES_NOT_MET');
   if (maturedGrouping.distinctAssets < d.floors.minDistinctAssets) reasons.push('FLOOR_ASSETS_NOT_MET');
-  const coverage = caps.length === 0 ? 0 : maturedCaps.length / caps.length;
+  const coverage = denominatorCaps.length === 0 ? 0 : maturedDenominator.length / denominatorCaps.length;
   if (coverage < MIN_COMPARISON_COVERAGE) reasons.push('MATURED_COVERAGE_BELOW_RULE'); // dropping difficult outcomes cannot manufacture improvement
   if (reasons.length > 0) {
-    return deepFreeze({ kind: 'TERMINAL_EVALUATED', candidateId, verdict: 'INSUFFICIENT_COMPARISON', reasons, effect: null, coverage: round4(coverage), maturedGroups: maturedGrouping.groupCount, distinctAssets: maturedGrouping.distinctAssets, distinctUtcDates: maturedGrouping.distinctUtcDates, recordedTs: nowTs, alpha: d.alpha, authority: AUTHORITY, purpose: PURPOSE });
+    return deepFreeze({ kind: 'TERMINAL_EVALUATED', candidateId, verdict: 'INSUFFICIENT_COMPARISON', reasons, effect: null, coverage: round4(coverage), maturedGroups: countedGrouping.groupCount, distinctAssets: maturedGrouping.distinctAssets, distinctUtcDates: maturedGrouping.distinctUtcDates, recordedTs: nowTs, alpha: d.alpha, authority: AUTHORITY, purpose: PURPOSE });
   }
   // per-group paired difference (candidate minus baseline) of the primary metric
-  const diffs = maturedGrouping.groups.map((g) => {
+  const diffs = countedGrouping.groups.map((g) => {
     let sum = 0; let n = 0;
     for (const idx of g.members) {
-      const cap = maturedCaps[idx]; const out = outs.get(cap.opportunityId);
+      const cap = countedCaps[idx]; const out = outs.get(cap.opportunityId);
       const metric = isFiniteNum(out.metricValue) ? out.metricValue : null;
       if (metric === null) continue;
       const cand = cap.candidateDecision === 'SELECTED_FOR_SHADOW' ? metric : 0;
@@ -152,7 +191,12 @@ export function evaluateTerminal(state, candidateId, { nowTs, commonShockDates =
     kind: 'TERMINAL_EVALUATED', candidateId, verdict: supported ? 'FORWARD_SUPPORTED' : 'FORWARD_NOT_SUPPORTED',
     reasons: supported ? ['PAIRED_LOWER_BOUND_ABOVE_ZERO'] : ['PAIRED_LOWER_BOUND_NOT_ABOVE_ZERO'],
     effect: { pairedMeanDiff: est.posteriorMean, lower95: est.lower95, upper95: est.upper95, groups: est.effectiveGroups, metric: d.primaryMetric },
-    coverage: round4(coverage), maturedGroups: maturedGrouping.groupCount, distinctAssets: maturedGrouping.distinctAssets, distinctUtcDates: maturedGrouping.distinctUtcDates,
+    coverage: round4(coverage), maturedGroups: countedGrouping.groupCount, distinctAssets: maturedGrouping.distinctAssets, distinctUtcDates: maturedGrouping.distinctUtcDates,
     allGroups: allGrouping.groupCount, recordedTs: nowTs, alpha: d.alpha, authority: AUTHORITY, purpose: PURPOSE,
   });
+}
+
+export function evaluateTerminal(state, candidateId, options) {
+  if (state.terminals.has(candidateId)) throw new Error('evaluateTerminal: the one terminal look is already recorded');
+  return terminalRecord(state, candidateId, options);
 }

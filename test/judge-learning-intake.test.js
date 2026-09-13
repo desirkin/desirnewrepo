@@ -14,7 +14,7 @@ import { createJudge } from '../judge/judge.js';
 import { createScheduler } from '../judge/scheduler.js';
 import { loadJudgePolicy } from '../judge/policy.js';
 import { rankCandidates } from '../judge/risk.js';
-import { validateLearningActivation, resolveLearningContribution, contributionMeasurement, contributionCandidateLog, SELECTOR_VERSION } from '../judge/learning-intake.js';
+import { JUDGE_FACT_RECIPE_VERSION, validateLearningActivation, resolveLearningContribution, contributionMeasurement, contributionCandidateLog, SELECTOR_VERSION } from '../judge/learning-intake.js';
 import { buildActivation, transitionActivation } from '../learning/adapter.js';
 import { eventsFor, fakeClock, SPEC, T0 } from './helpers/judge.js';
 import { feeContract } from '../execution/contract.js';
@@ -23,14 +23,31 @@ import { crc32 } from '../lib/crc32.js';
 const T = Date.UTC(2026, 8, 13);
 const DAY = 86_400_000;
 const KILL = { state: 'ARMED', reason: null, ts: T };
-const FACTS = (setupType, known = true) => ({ setupType, regime: 'LIVE_UNCLASSIFIED', features: { rv60: { value: known ? 3 : null, unit: 'ratio', lookbackMs: 60_000, availability: known ? 'KNOWN' : 'UNAVAILABLE' } } });
+const FACTS = (setupType, known = true) => ({ setupType, regime: 'LIVE_UNCLASSIFIED', featureRecipeVersion: 'learning-features-1', policyVersion: 'learning-baseline-rule-1', features: { rv60: { value: known ? 3 : null, unit: 'ratio', lookbackMs: 60_000, availability: known ? 'KNOWN' : 'UNAVAILABLE' } } });
 const APPLIC = { clauses: [{ feature: 'rv60', op: 'GTE', threshold: 0 }] };
 
-function active({ pattern = 'lpat-a', candidate = 'lcand-a', setupType = 'RANGE_IGNITION', regime = 'ANY', assets = 'ANY', venues = 'ANY', eligibility = undefined, featureRecipeVersion = undefined, adjust = 0.05, maxAbs = 0.1, effectiveTs = T } = {}) {
-  const pub = buildActivation({ candidateId: candidate, patternId: pattern, trainingCutoffTs: effectiveTs - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: maxAbs, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 }, adjust, scope: { setupType, regime, assets, venues }, ...(eligibility !== undefined ? { eligibility } : {}), ...(featureRecipeVersion !== undefined ? { featureRecipeVersion } : {}), applicability: APPLIC, effectiveTs, expiresTs: effectiveTs + 30 * DAY, ts: effectiveTs });
+function active({ pattern = 'lpat-a', candidate = 'lcand-a', setupType = 'RANGE_IGNITION', regime = 'ANY', assets = 'ANY', venues = 'ANY', eligibility = undefined, featureRecipeVersion = undefined, policyVersion = undefined, adjust = 0.05, maxAbs = 0.1, effectiveTs = T } = {}) {
+  const pub = buildActivation({ candidateId: candidate, patternId: pattern, trainingCutoffTs: effectiveTs - DAY, candidateDigest: 'cd', evidenceDigest: 'ed', reportDigest: 'rd', maxAbsAdjust: maxAbs, validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 }, adjust, scope: { setupType, regime, assets, venues }, ...(eligibility !== undefined ? { eligibility } : {}), ...(featureRecipeVersion !== undefined ? { featureRecipeVersion } : {}), ...(policyVersion !== undefined ? { policyVersion } : {}), applicability: APPLIC, effectiveTs, expiresTs: effectiveTs + 30 * DAY, ts: effectiveTs });
   return transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: effectiveTs });
 }
 const snapOf = (activations, { preparedTs = T, kill = KILL } = {}) => ({ view: 'DECISION', preparedTs, activations, kill });
+
+test('review: future/research/corrupt snapshots, unknown recipe/policy and malformed facts fail closed', () => {
+  const a = active(); const facts = FACTS('RANGE_IGNITION');
+  const resolve = (snapshot, prepared = facts) => resolveLearningContribution({ snapshot, facts: prepared, mode: 'PAPER', nowTs: T });
+  assert.equal(resolve(snapOf([a], { preparedTs: T + 1 })).reason, 'SNAPSHOT_STALE');
+  assert.equal(resolve({ ...snapOf([a]), view: 'RESEARCH' }).reason, 'SNAPSHOT_VIEW_INVALID');
+  assert.equal(resolve({ ...snapOf([a]), withheld: [{ activationId: 'bad', reason: 'ACTIVATION_EVIDENCE_MISMATCH' }] }).reason, 'ACTIVATION_RECORD_INVALID');
+  assert.equal(resolve(snapOf([a]), null).reason, 'PREPARED_FACTS_INVALID');
+  assert.equal(resolve(snapOf([a]), { ...facts, featureRecipeVersion: undefined }).rejected[0].reason, 'FEATURE_RECIPE_VERSION_MISMATCH');
+  assert.equal(resolve(snapOf([a]), { ...facts, policyVersion: undefined }).rejected[0].reason, 'POLICY_VERSION_MISMATCH');
+  for (const value of [null, NaN, Infinity, '3']) {
+    assert.equal(resolve(snapOf([a]), { ...facts, features: { rv60: { value, availability: 'KNOWN' } } }).rejected[0].reason, 'REQUIRED_FACT_MISSING');
+  }
+  assert.equal(resolve(snapOf([a]), { ...facts, features: { rv60: { value: 3, availability: 'KNOWN', ageMs: -1 } } }).rejected[0].reason, 'FACT_STALE');
+  const invented = { ...a, activationId: 'lact-invented' };
+  assert.equal(resolve(snapOf([invented])).reason, 'ACTIVATION_RECORD_INVALID');
+});
 
 test('candidates are selected in their MATCHING scope only, deterministically; identical inputs always select the same candidate', () => {
   const a = active({ pattern: 'lpat-a', candidate: 'lcand-a', setupType: 'RANGE_IGNITION' });
@@ -53,7 +70,7 @@ test('no match, stale snapshot, expired candidate, conflicting active versions a
   const v1 = active({ pattern: 'lpat-x', candidate: 'lcand-x1' }); const v2 = active({ pattern: 'lpat-x', candidate: 'lcand-x2', effectiveTs: T + 1 });
   assert.equal(resolveLearningContribution({ snapshot: snapOf([v1, v2]), facts: FACTS('RANGE_IGNITION'), mode: 'PAPER', nowTs: T + 2 }).reason, 'CONFLICTING_ACTIVE_VERSIONS');
   const cov = resolveLearningContribution({ snapshot: snapOf([a]), facts: FACTS('RANGE_IGNITION', false), mode: 'PAPER', nowTs: T + 1 });
-  assert.equal(cov.applied, false); assert.equal(cov.rejected[0].reason, 'OUT_OF_DOMAIN_OR_COVERAGE');
+  assert.equal(cov.applied, false); assert.equal(cov.rejected[0].reason, 'REQUIRED_FACT_MISSING');
   assert.equal(resolveLearningContribution({ snapshot: null, facts: FACTS('RANGE_IGNITION'), mode: 'PAPER', nowTs: T }).reason, 'NO_SNAPSHOT');
 });
 
@@ -118,7 +135,7 @@ async function rig({ accountId, learning = null, dynamicSizing = null }) {
   const settle = async () => { await judge.onTick(clock.now()); await scheduler.drain(); await dispatcher.idle(); };
   const heartbeat = () => feed.ingest(JSON.stringify({ channel: 'heartbeat' }), clock.now()); const adv = (ms) => { for (let t = 0; t < ms; t += 1000) { clock.advance(Math.min(1000, ms - t)); heartbeat(); } };
   async function warm({ minutes = 22, price = 100000 } = {}) { book([[price + 10, 5]], [[price - 10, 5]], 'snapshot'); for (let m = 0; m < minutes; m += 1) { for (let k = 0; k < 4; k += 1) { adv(15_000); trade(price + 1, 'buy'); trade(price - 1, 'sell'); book([[price + 10, 5]], [[price - 10, 5]]); } } await settle(); }
-  async function ignite({ price = 100000, level = 100400, books = 3, spanMs = 2100 } = {}) { const start = Math.floor(clock.now() / 60_000) * 60_000 + 60_000; while (clock.now() < start) { adv(1000); } for (let k = 0; k < 20; k += 1) { adv(2000); trade(price + 50, 'buy', 0.2); } while (clock.now() % 60_000 !== 0) adv(1000); clock.advance(500); for (let i = 0; i < books; i += 1) { book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); trade(level + 10, 'buy', 0.1); await settle(); if (i < books - 1) clock.advance(Math.ceil(spanMs / (books - 1))); } await settle(); }
+  async function ignite({ price = 100000, level = 100400, books = 3, spanMs = 2100 } = {}) { const start = Math.floor(clock.now() / 60_000) * 60_000 + 60_000; while (clock.now() < start) { adv(Math.min(1000, start - clock.now())); } for (let k = 0; k < 20; k += 1) { adv(2000); trade(price + 50, 'buy', 0.2); } if (clock.now() % 60_000 !== 0) adv(60_000 - clock.now() % 60_000); clock.advance(500); for (let i = 0; i < books; i += 1) { book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); trade(level + 10, 'buy', 0.1); await settle(); if (i < books - 1) clock.advance(Math.ceil(spanMs / (books - 1))); } await settle(); }
   return { judge, warm, ignite, state: () => dispatcher.state() };
 }
 const strip = (d) => ({ status: d.status, reasonCodes: d.reasonCodes, inputMode: d.inputMode, sizing: d.sizing, valuationRef: d.valuationRef, invalidation: d.invalidation, scenario: d.scenario, setupId: d.setupId, episodeId: d.episodeId, baseMeasurements: d.measurements.filter((m) => !['LEARNED_RANK_ADJUSTMENT', 'LEARNED_CANDIDATE'].includes(m.id)) });
@@ -131,7 +148,7 @@ test('PRESERVATION through the REAL decide() path: port absent = byte-identical 
 
   // B: port present, empty decision memory — identical decisions except the recorded exclusion
   const emptySnap = () => ({ view: 'DECISION', preparedTs: Date.UTC(2026, 8, 8, 12), activations: [], kill: KILL });
-  const rigB = await rig({ accountId: 'lp-b', learning: { snapshot: () => ({ ...emptySnap(), preparedTs: T0 + 40 * 60_000 }) } });
+  const rigB = await rig({ accountId: 'lp-b', learning: { snapshot: () => ({ ...emptySnap(), preparedTs: T0 + 24 * 60_000 }) } });
   await rigB.warm(); await rigB.ignite();
   const dB = rigB.judge.decisions().find((d) => d.status === 'ENTRY_RESERVED');
   assert.ok(dB, 'the empty-memory run still reserves');
@@ -141,8 +158,8 @@ test('PRESERVATION through the REAL decide() path: port absent = byte-identical 
   assert.deepEqual(strip(dB), strip(dA), 'statuses, refusals, sizing, risk and scenario are unchanged');
 
   // C: one validated ACTIVE candidate scoped to this setup — only the allowlisted contribution appears
-  const art = active({ setupType: 'RANGE_IGNITION', adjust: 0.05, effectiveTs: T0 });
-  const rigC = await rig({ accountId: 'lp-c', learning: { snapshot: () => ({ view: 'DECISION', preparedTs: T0 + 40 * 60_000, activations: [art], kill: KILL }) } });
+  const art = active({ setupType: 'RANGE_IGNITION', adjust: 0.05, effectiveTs: T0, featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyVersion: POLICY.digest });
+  const rigC = await rig({ accountId: 'lp-c', learning: { snapshot: () => ({ view: 'DECISION', preparedTs: T0 + 24 * 60_000, activations: [art], kill: KILL }) } });
   await rigC.warm(); await rigC.ignite();
   const dC = rigC.judge.decisions().find((d) => d.status === 'ENTRY_RESERVED');
   assert.ok(dC, 'the candidate run still reserves');
@@ -176,7 +193,7 @@ test('PRESERVATION through the REAL decide() path: port absent = byte-identical 
 // ---- the COMPLETED candidate contract (review correction): asset/venue scope, required facts, freshness,
 // volatility range, version pinning, per-candidate logging and the no-name-preference law -------------------------
 const RICH_FACTS = ({ asset = 'BTC', venue = 'kraken', spread = 4, depth = 60_000, atrPct = 0.4, age = 500, llm = null } = {}) => ({
-  setupType: 'RANGE_IGNITION', regime: 'LIVE_UNCLASSIFIED', asset, venue,
+  setupType: 'RANGE_IGNITION', regime: 'LIVE_UNCLASSIFIED', featureRecipeVersion: 'learning-features-1', policyVersion: 'learning-baseline-rule-1', asset, venue,
   features: {
     rv60: { value: 3, unit: 'ratio', lookbackMs: 60_000, ageMs: 0, availability: 'KNOWN' },
     spreadBps: { value: spread, unit: 'bps', lookbackMs: 0, ageMs: age, availability: 'KNOWN' },

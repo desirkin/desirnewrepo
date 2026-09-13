@@ -6,7 +6,8 @@
 // content, there is no write-on-read, and neighbor/pattern selection is never outcome-aware here. Merely tagging a
 // prompt 'research only' is not isolation — isolation is that a decision-influencing consumer is HANDED the
 // decision view and cannot reach the research one through it.
-import { activationError, deepFreeze } from './contracts.js';
+import { activationError, canonicalDigest, deepFreeze } from './contracts.js';
+import { replayProspective } from './prospective.js';
 
 export const MEMORY_VIEW_VERSION = 'learning-memory-view-1';
 
@@ -28,9 +29,35 @@ export function readResearchMemory({ store, limit = 200 }) {
 export function readDecisionMemory({ store, nowTs }) {
   const heads = [...store.activationHeads().values()];
   const activations = []; const withheld = [];
+  let records = []; let prospective = null;
+  try {
+    if (heads.length) {
+      records = store.readProspective();
+      prospective = replayProspective(records);
+      if (prospective.errors.length) throw new Error('prospective evidence invalid');
+    }
+  } catch {
+    return deepFreeze({ view: 'DECISION', version: MEMORY_VIEW_VERSION, law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY', preparedTs: nowTs, activations: [], withheld: heads.map((a) => ({ activationId: a?.activationId ?? 'UNKNOWN', reason: 'PROSPECTIVE_EVIDENCE_INVALID' })), kill: store.readKill() });
+  }
   for (const a of heads) {
     const err = activationError(a);
     if (err) { withheld.push({ activationId: a?.activationId ?? 'UNKNOWN', reason: 'ACTIVATION_RECORD_INVALID' }); continue; }
+    const design = prospective?.designs.get(a.candidateId);
+    const terminal = prospective?.terminals.get(a.candidateId);
+    if (!design || !terminal || terminal.verdict !== 'FORWARD_SUPPORTED' || terminal.recordedTs > a.effectiveTs || a.ts > nowTs) {
+      withheld.push({ activationId: a.activationId, reason: 'VALIDATED_EVIDENCE_MISSING' }); continue;
+    }
+    const evidence = records.filter((r) => (r.candidateId ?? r.design?.candidateId) === a.candidateId && r.kind !== 'TERMINAL_EVALUATED');
+    const scope = { setupType: String(design.scope?.setupType ?? 'ANY'), regime: String(design.scope?.regime ?? 'ANY'), assets: Array.isArray(design.scope?.assets) && design.scope.assets.length ? design.scope.assets : 'ANY', venues: Array.isArray(design.scope?.venues) && design.scope.venues.length ? design.scope.venues : 'ANY' };
+    const validation = { evidenceBasis: 'PROSPECTIVE', groupCount: terminal.maturedGroups, assetCount: terminal.distinctAssets, dateCount: terminal.distinctUtcDates, netAfterCostsPct: terminal.effect?.pairedMeanDiff };
+    if (a.patternId !== design.patternId || a.trainingCutoffTs !== design.sealedTs
+        || a.candidateDigest !== canonicalDigest(design) || a.evidenceDigest !== canonicalDigest(evidence) || a.reportDigest !== canonicalDigest(terminal)
+        || canonicalDigest(a.applicability) !== canonicalDigest(design.predicate)
+        || canonicalDigest(a.scope) !== canonicalDigest(scope) || canonicalDigest(a.validation) !== canonicalDigest(validation)
+        || a.maxSizeUsd !== null) {
+      // This prospective producer has no depth-supported sizing study. A supplied size limit cannot invent one.
+      withheld.push({ activationId: a.activationId, reason: 'ACTIVATION_EVIDENCE_MISMATCH' }); continue;
+    }
     activations.push(a);
   }
   return deepFreeze({
