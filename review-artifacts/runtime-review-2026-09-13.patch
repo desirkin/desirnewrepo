@@ -1,14 +1,165 @@
-diff --git a/test/learning-decision-read-snapshot-review.test.js b/test/learning-decision-read-snapshot-review.test.js
---- a/test/learning-decision-read-snapshot-review.test.js
-+++ b/test/learning-decision-read-snapshot-review.test.js
-@@ -242,7 +242,9 @@
-     assert.equal(injected, true);
-     assert.equal(result.ok, false);
-     assert.equal(result.code, 'SOURCE_CHANGED');
--    assert.equal(result.journal, 'patterns');
-+    // POSIX can observe the directory-entry replacement before checking the
-+    // individual file. Either identity check must refuse the whole snapshot.
-+    assert.ok(result.journal === null || result.journal === 'patterns');
-     assert.equal(Object.hasOwn(result, 'provenance'), false);
-   } finally { rmSync(root, { recursive: true, force: true }); }
- });
+diff --git a/execution/contract.js b/execution/contract.js
+index 11cb9fd..d43ecda 100644
+--- a/execution/contract.js
++++ b/execution/contract.js
+@@ -3,7 +3,7 @@
+ // sets, canonical decimals for every amount, nullable versus optional fields stated per key, prototype hazards refused at
+ // the parser boundary. No generic JSON payload loophole: each event type names its exact payload schema.
+ import { createHash } from 'node:crypto';
+-import { isCanonicalDecimal, isPositive, isNegative, isZero } from './money.js';
++import { cmp, isCanonicalDecimal, isPositive, isNegative, isZero } from './money.js';
+ 
+ export const EXECUTION_CONTRACT_VERSION = 'serpent-execution-1';
+ export const ACCOUNT_STATE_VERSION = 'execution-account-state-2'; // 2: durable adjustment identities, net-basis realized P&L, unbounded execution identities (closeout R03 / R06)
+@@ -98,7 +98,7 @@ export const feeBoundQualified = (f) => f.scope === 'ORDER_TOTAL' || (f.scope ==
+ // ---- detached execution feed snapshot (ticket §4.3): exact lexemes, local receipt sequence, CRC facts, content digest ----------
+ const LEVEL = (v, where) => (Array.isArray(v) && v.length === 2 && isCanonicalDecimal(v[0]) && isPositive(v[0]) && isCanonicalDecimal(v[1]) && !isNegative(v[1]) ? null : `${where}: level malformed`);
+ export const BOOK_SNAPSHOT_SCHEMA = Object.freeze({ snapshotVersion: T.en(['execution-book-snapshot-1']), symbol: T.id, canonicalCoin: T.id, feedEpoch: T.count, receiptSequence: T.count, nativeSequence: (v) => v === null, sourceTs: T.tsOrNull, receiptTs: T.ts, crc: (v) => v === null || (Number.isSafeInteger(v) && v >= 0), crcVerified: T.boolOrNull, crcComputed: (v) => v === null || (Number.isSafeInteger(v) && v >= 0), synced: T.bool, instrumentDigest: T.hex64OrNull, priceDecimals: (v) => v === null || T.count(v), qtyDecimals: (v) => v === null || T.count(v), bids: listOf(LEVEL, 200), asks: listOf(LEVEL, 200), levelsCap: T.count, truncated: T.bool, kind: T.en(['SNAPSHOT', 'UPDATE']), digest: T.hex64 });
+-export const bookSnapshotError = (s) => { const e = shapeError(s, BOOK_SNAPSHOT_SCHEMA, 'bookSnapshot'); if (e) return e; if (digestOf({ ...s, digest: null }) !== s.digest) return 'bookSnapshot: digest does not match content'; for (let i = 1; i < s.bids.length; i += 1) if (!(s.bids[i][0] < s.bids[i - 1][0] || Number(s.bids[i][0]) < Number(s.bids[i - 1][0]))) return 'bookSnapshot: bids not descending'; for (let i = 1; i < s.asks.length; i += 1) if (!(Number(s.asks[i][0]) > Number(s.asks[i - 1][0]))) return 'bookSnapshot: asks not ascending'; if (s.bids.length && s.asks.length && Number(s.bids[0][0]) >= Number(s.asks[0][0])) return 'bookSnapshot: crossed'; return null; };
++export const bookSnapshotError = (s) => { const e = shapeError(s, BOOK_SNAPSHOT_SCHEMA, 'bookSnapshot'); if (e) return e; if (digestOf({ ...s, digest: null }) !== s.digest) return 'bookSnapshot: digest does not match content'; for (let i = 1; i < s.bids.length; i += 1) if (cmp(s.bids[i][0], s.bids[i - 1][0]) >= 0) return 'bookSnapshot: bids not descending'; for (let i = 1; i < s.asks.length; i += 1) if (cmp(s.asks[i][0], s.asks[i - 1][0]) <= 0) return 'bookSnapshot: asks not ascending'; if (s.bids.length && s.asks.length && cmp(s.bids[0][0], s.asks[0][0]) >= 0) return 'bookSnapshot: crossed'; return null; };
+ export const TRADE_SCHEMA = Object.freeze({ tradeVersion: T.en(['execution-trade-1']), symbol: T.id, canonicalCoin: T.id, feedEpoch: T.count, receiptSequence: T.count, nativeTradeId: T.idOrNull, side: T.en(['buy', 'sell']), price: T.posDec, qty: T.posDec, quoteNotional: T.posDec, eventTs: T.ts, receiptTs: T.ts, fromSubscriptionSnapshot: T.bool, orderType: T.idOrNull });
+ 
+ // ---- the closed event set --------------------------------------------------------------------------------------------------
+diff --git a/test/book-snapshot-order-review.test.js b/test/book-snapshot-order-review.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/book-snapshot-order-review.test.js
+@@ -0,0 +1,95 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { bookSnapshotError, digestOf } from '../execution/contract.js';
++
++const T = Date.UTC(2026, 8, 13, 12);
++
++function snapshot({ bids, asks }) {
++  const value = {
++    snapshotVersion: 'execution-book-snapshot-1',
++    symbol: 'XBT/USD',
++    canonicalCoin: 'BTC',
++    feedEpoch: 1,
++    receiptSequence: 1,
++    nativeSequence: null,
++    sourceTs: T,
++    receiptTs: T,
++    crc: null,
++    crcVerified: null,
++    crcComputed: null,
++    synced: true,
++    instrumentDigest: null,
++    priceDecimals: null,
++    qtyDecimals: null,
++    bids,
++    asks,
++    levelsCap: 200,
++    truncated: false,
++    kind: 'SNAPSHOT',
++    digest: 'x'.repeat(64),
++  };
++  value.digest = digestOf({ ...value, digest: null });
++  return value;
++}
++
++test('bid ordering uses exact decimal value, never lexical OR floating-point order', () => {
++  const lexicalTrap = snapshot({
++    bids: [['99', '1'], ['100', '1']],
++    asks: [['101', '1']],
++  });
++  assert.equal(bookSnapshotError(lexicalTrap), 'bookSnapshot: bids not descending');
++
++  const valid = snapshot({
++    bids: [['100', '1'], ['99.999999999999999999', '1'], ['9', '1']],
++    asks: [['100.000000000000000001', '1']],
++  });
++  assert.equal(bookSnapshotError(valid), null);
++});
++
++test('duplicate prices are refused on both sides', () => {
++  assert.equal(bookSnapshotError(snapshot({
++    bids: [['100', '1'], ['100', '2']],
++    asks: [['101', '1']],
++  })), 'bookSnapshot: bids not descending');
++
++  assert.equal(bookSnapshotError(snapshot({
++    bids: [['99', '1']],
++    asks: [['100', '1'], ['100', '2']],
++  })), 'bookSnapshot: asks not ascending');
++});
++
++test('malformed ask ordering is refused with exact decimal comparison', () => {
++  assert.equal(bookSnapshotError(snapshot({
++    bids: [['98', '1']],
++    asks: [['100', '1'], ['99', '1']],
++  })), 'bookSnapshot: asks not ascending');
++
++  assert.equal(bookSnapshotError(snapshot({
++    bids: [['9', '1']],
++    asks: [['9.999999999999999999', '1'], ['10', '1']],
++  })), null);
++});
++
++test('crossing is exact across decimal scales beyond IEEE-754 precision', () => {
++  const narrowButValid = snapshot({
++    bids: [['9.999999999999999999', '1']],
++    asks: [['10', '1']],
++  });
++  assert.equal(bookSnapshotError(narrowButValid), null, 'distinct exact prices must not collapse to Number(10)');
++
++  const largeButValid = snapshot({
++    bids: [['9007199254740992', '1']],
++    asks: [['9007199254740993', '1']],
++  });
++  assert.equal(bookSnapshotError(largeButValid), null, 'distinct integers beyond Number safe precision remain ordered');
++
++  assert.equal(bookSnapshotError(snapshot({
++    bids: [['10', '1']],
++    asks: [['9.999999999999999999', '1']],
++  })), 'bookSnapshot: crossed');
++
++  assert.equal(bookSnapshotError(snapshot({
++    bids: [['100', '1']],
++    asks: [['100', '1']],
++  })), 'bookSnapshot: crossed');
++});
+diff --git a/test/judge-differential.test.js b/test/judge-differential.test.js
+index 638cf12..dff9379 100644
+--- a/test/judge-differential.test.js
++++ b/test/judge-differential.test.js
+@@ -7,8 +7,8 @@
+ // account/execution state with deep equality. NOTHING substantive is stripped or normalized:
+ //   - the injected clock is the same object semantics on both sides, so every timestamp must match bit-for-bit;
+ //   - the policy file, fee contract, instrument spec and event bytes are constructed through EACH tree's own
+-//     contract module (execution/ is byte-identical between the trees — asserted below — so the shapes are the
+-//     same by proof, not by assumption);
++//     contract module (the exact decimal-ordering repair is the sole allowed contract source delta,
++//     asserted below; the event shapes and all other execution sources remain byte-identical);
+ //   - decision ids, digests, measurements, reason codes, sizing, valuation, scenario, invalidation, funnel and
+ //     dispatcher state are all inside the comparison.
+ // The ONLY tolerated difference would be a documented normalization, and there are none: the assertion is raw
+@@ -90,11 +90,25 @@ const pct = (arr, p) => { const s = [...arr].sort((a, b) => a - b); return s.len
+ const ms1 = (ns) => Math.round(ns / 1e4) / 100;
+ 
+ test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports absent) produce COMPLETE-record-identical decisions, refusals and account/execution state on identical recorded inputs — no substantive field stripped, no normalization applied', async () => {
+-  // The execution tree shared by these Judge rigs remains byte-identical.
++  // All execution bytes remain identical except the exact four textual edits
++  // that fix book ordering/crossing. The original baseline rig is NOT patched.
+   // Intentional Watch repairs have separate behavioral regressions; the full
+   // decision/refusal/account-state comparison below is not normalized or relaxed.
+   for (const f of ['execution/contract.js', 'execution/journal.js', 'execution/dispatcher.js', 'execution/paper-adapter.js', 'execution/feed.js', 'execution/reducer.js', 'execution/authority.js', 'execution/money.js', 'lib/crc32.js']) {
+-    assert.equal(readFileSync(path.join(ROOT, f), 'utf8'), readFileSync(path.join(baseDir, f), 'utf8'), `${f} is byte-identical to ${BASE_COMMIT}`);
++    let expected = readFileSync(path.join(baseDir, f), 'utf8');
++    if (f === 'execution/contract.js') {
++      const repairs = [
++        ["import { isCanonicalDecimal,", "import { cmp, isCanonicalDecimal,"],
++        ["!(s.bids[i][0] < s.bids[i - 1][0] || Number(s.bids[i][0]) < Number(s.bids[i - 1][0]))", "cmp(s.bids[i][0], s.bids[i - 1][0]) >= 0"],
++        ["!(Number(s.asks[i][0]) > Number(s.asks[i - 1][0]))", "cmp(s.asks[i][0], s.asks[i - 1][0]) <= 0"],
++        ["Number(s.bids[0][0]) >= Number(s.asks[0][0])", "cmp(s.bids[0][0], s.asks[0][0]) >= 0"],
++      ];
++      for (const [before, after] of repairs) {
++        assert.equal(expected.split(before).length - 1, 1, `baseline repair anchor is unique: ${before}`);
++        expected = expected.replace(before, after);
++      }
++    }
++    assert.equal(readFileSync(path.join(ROOT, f), 'utf8'), expected, `${f} has no source delta beyond the explicitly reviewed book-comparison repair`);
+   }
+   const base = await rigFor(baseDir, { accountId: 'diff-x' });
+   const next = await rigFor(ROOT, { accountId: 'diff-x' }); // the SAME account id: identical ids/digests must reproduce
