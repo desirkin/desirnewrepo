@@ -1,5 +1,5 @@
 // LEARN-1 test helpers — synthetic candle series / archives (marked FIXTURE; synthetic evidence never counts as
-// live success) shaped exactly like research/archive.js readChildhoodArchive output.
+// live success) shaped exactly like learning/labels.js readLearningArchive output.
 export function makeSeries(symbol, startSec, bars, { drift = () => 0, volume = () => 10, gapAt = new Set(), coverageEndSec = null } = {}) {
   const candles = []; let p = 100;
   for (let i = 0; i < bars; i += 1) {

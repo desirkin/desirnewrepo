@@ -1,19 +1,18 @@
-// LEARN-1 — delayed outcome maturation. REUSES the existing predetermined candle-only label recipe
-// (research/outcomes.js, social-research-candle-labels-1) rather than wiring a second labeler: the same anchor
-// arithmetic, the same censoring vocabulary, the same knowledge floors. An episode's outcome is attached as a
-// SEPARATE record; the snapshot is never rewritten. Readiness is judged by the label's own outcomeKnownAtTs against
-// the caller's as-of clock — elapsed wall time alone matures nothing, and computation cannot make tomorrow's
-// outcome known today.
+// LEARN-1 — delayed outcome maturation over the one learning label recipe (learning/labels.js), which MIRRORS the
+// repository's predetermined offline candle-label law without importing the offline pipeline (the operational
+// fence keeps offline research modules out of operational reach — see labels.js): the same anchor arithmetic, the
+// same censoring vocabulary, the same knowledge floors. An episode's outcome is attached as a SEPARATE record; the
+// snapshot is never rewritten. Readiness is judged by the label's own outcomeKnownAtTs against the caller's as-of
+// clock — elapsed wall time alone matures nothing, and computation cannot make tomorrow's outcome known today.
 //
 // The executable counterfactual is a THIRD dimension beside decision quality and market outcome: it is ESTABLISHED
 // only under CANDLE_SIMULATED_EXECUTION with explicit both-side fees and a conservative or unresolved intrabar rule.
 // A candle-descriptive excursion is descriptive movement, never captured or missed profit. An untradeable asset's
 // favorable path stays UNPROVEN_UNTRADEABLE; no liquidity safeguard is weakened to claim capture.
-import { labelRow } from '../research/outcomes.js';
-import { LABEL_RECIPE_VERSION } from '../research/contracts.js';
+import { labelOpportunity, LEARNING_LABEL_RECIPE_VERSION } from './labels.js';
 import { LEARNING_VERSION, AUTHORITY, PURPOSE, OUTCOME_CLASSES, outcomeAttachError, isFiniteNum, round4, deepFreeze } from './contracts.js';
 
-export { LABEL_RECIPE_VERSION };
+export { LEARNING_LABEL_RECIPE_VERSION };
 export const NEUTRAL_BAND_PCT = 0.25; // |60m log return| inside this band is NEUTRAL, not a win or a loss
 
 // classify ONE matured horizon into the closed outcome classes. CENSORED / NOT_YET_KNOWN / UNAVAILABLE are kept
@@ -57,8 +56,8 @@ export function simulateExecution({ series, anchorTsMs, horizonMin, feePctPerSid
 // Label one episode against the archive at asOfTs and, when execution fidelity is requested, attach the simulated
 // round trip. Returns null when nothing new is knowable yet (the episode stays pending — an honest state).
 export function matureEpisode({ episode, archive, asOfTs, attachedTs, costAssumptions = null, supersedes = null }) {
-  const row = labelRow(
-    { rowId: episode.opportunityId, cohort: 'PRIMARY', canonicalCoin: episode.canonicalCoin, decisionKnownAtTs: episode.usableAtTs },
+  const row = labelOpportunity(
+    { rowId: episode.opportunityId, canonicalCoin: episode.canonicalCoin, decisionKnownAtTs: episode.usableAtTs },
     { archive, asOfTs },
   );
   const anyKnowable = Object.values(row.horizons).some((h) => h.state !== 'NOT_YET_KNOWN');
@@ -77,7 +76,7 @@ export function matureEpisode({ episode, archive, asOfTs, attachedTs, costAssump
     counterfactual = { state: 'NOT_COMPUTED', fidelity: 'CANDLE_DESCRIPTIVE', entryDelayBars: 0, entryPrice: null, exitRule: 'NONE', grossPct: null, feePctPerSide: 0, slippageBps: 0, netPct: null, reasons: ['DESCRIPTIVE_ONLY_NO_EXECUTION_CLAIM'] };
   }
   const attach = {
-    learningVersion: LEARNING_VERSION, opportunityId: episode.opportunityId, labelRecipeVersion: LABEL_RECIPE_VERSION,
+    learningVersion: LEARNING_VERSION, opportunityId: episode.opportunityId, labelRecipeVersion: LEARNING_LABEL_RECIPE_VERSION,
     outcomeRow: row, counterfactual, attachedTs, supersedes, authority: AUTHORITY, purpose: PURPOSE,
   };
   const err = outcomeAttachError(attach); if (err) throw new Error(`matureEpisode: ${err}`);

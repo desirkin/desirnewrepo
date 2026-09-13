@@ -2,7 +2,7 @@
 // with finite configured values. No hidden TODO, no 'choose later' in the runtime gate. The path is:
 //   ACCUMULATING pattern -> freezeCandidate (seals the design, appends DESIGN_SEALED, pattern -> CANDIDATE_FROZEN
 //   -> PROSPECTIVE_PENDING) -> fresh forward captures/outcomes (learning/prospective.js law) -> the ONE terminal
-//   evaluation -> on PROSPECTIVE_SUPPORTED, publishValidated appends the immutable activation record
+//   evaluation -> on FORWARD_SUPPORTED, publishValidated appends the immutable activation record
 //   (PUBLISHED_WAITING_FOR_PAPER while the paper runtime is stopped) and the pattern becomes VALIDATED_PAPER.
 // A failed terminal returns the pattern to ACCUMULATING with the failure retained; the candidate id stays consumed.
 // Nothing here starts paper, changes the Judge, or touches an order path.
@@ -62,7 +62,7 @@ export function settleCandidate({ store, candidateId, nowTs, commonShockDates = 
   if (!pattern || pattern.state !== 'PROSPECTIVE_PENDING' || pattern.candidateId !== candidateId) {
     return { terminal, activation: null, patternState: pattern?.state ?? null, note: 'PATTERN_NOT_PENDING_FOR_THIS_CANDIDATE' };
   }
-  if (terminal.verdict === 'PROSPECTIVE_SUPPORTED') {
+  if (terminal.verdict === 'FORWARD_SUPPORTED') {
     const activation = buildActivation({
       candidateId, patternId: design.patternId, trainingCutoffTs: design.sealedTs,
       candidateDigest: candidateId, evidenceDigest: design.evidenceDigest, reportDigest: `terminal-${terminal.recordedTs}`,
@@ -73,7 +73,7 @@ export function settleCandidate({ store, candidateId, nowTs, commonShockDates = 
     store.appendActivation(activation);
     store.appendPattern(buildPatternRecord({
       predicate: pattern.predicate, scope: pattern.scope, origin: pattern.origin, createdTs: pattern.createdTs,
-      ts: nowTs, seq: pattern.seq + 1, state: 'VALIDATED_PAPER', previousState: pattern.state, transitionReason: 'TERMINAL_PROSPECTIVE_SUPPORTED',
+      ts: nowTs, seq: pattern.seq + 1, state: 'VALIDATED_PAPER', previousState: pattern.state, transitionReason: 'TERMINAL_FORWARD_SUPPORTED',
       evidence: { ...pattern.evidence, _grouping: null }, estimate: pattern.estimate, contradictions: pattern.contradictions,
       candidateId, activationId: activation.activationId,
     }));

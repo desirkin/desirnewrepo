@@ -34,12 +34,19 @@ in place).
 
 Live-order authority is supplied by none of these. Socrates remains the
 interpreter; the Judge remains the final decision function; The Watch keeps
-position priority. `learning/` imports no `execution/`, `judge/`, `watch/` or
-`tape/` module (fenced by `test/learning-fences.test.js`), and mirrors the
-referee's prospective law without importing `research/referee/` (its import
-fence is structural). It DOES reuse the existing label recipe — `labelRow`
-from `research/outcomes.js` — and the existing archive reader
-(`research/archive.js`): no second labeler, no second candle census.
+position priority. `learning/` is fully self-contained: it imports only
+`lib/` helpers (fenced by `test/learning-fences.test.js`), because the
+repository's structural fences keep BOTH the referee
+(`test/referee-authority.test.js` H2) and the whole offline research
+pipeline (`test/social-5b-fences.test.js` F2) out of operational reach.
+LEARN-1 therefore MIRRORS the offline candle-label law in
+`learning/labels.js` (`learning-candle-labels-1`) — the same anchor
+arithmetic, censoring vocabulary and knowledge floors, deliberately
+identical so Serpent cannot learn under one definition and evaluate under
+another — exactly as market-lab mirrors the Judge's experiment law without
+importing `judge/`. Mirror-with-the-same-semantics is the repo's lawful
+form of "no second labeler": one LAW, stated twice on opposite sides of a
+structural fence, with tests holding the semantics together.
 
 ## 2. Honest counting
 

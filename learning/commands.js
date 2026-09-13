@@ -12,14 +12,13 @@ import { utcDateOf } from './contracts.js';
 
 const out = (v) => console.log(typeof v === 'string' ? v : JSON.stringify(v, null, 1));
 
-function openArchive(dirOverride) {
+async function openArchive(dirOverride) {
   const config = loadConfig();
   const archiveDir = dirOverride ?? path.join(dataDir(config), 'childhood');
   if (!existsSync(archiveDir)) return { archive: null, archiveDir, reason: 'CHILDHOOD_ARCHIVE_ABSENT' };
-  return import('../research/archive.js').then(({ readChildhoodArchive }) => {
-    try { return { archive: readChildhoodArchive(archiveDir), archiveDir, reason: null }; }
-    catch (err) { return { archive: null, archiveDir, reason: `ARCHIVE_UNREADABLE: ${err.message}` }; }
-  });
+  const { readLearningArchive } = await import('./labels.js');
+  try { return { archive: readLearningArchive(archiveDir), archiveDir, reason: null }; }
+  catch (err) { return { archive: null, archiveDir, reason: `ARCHIVE_UNREADABLE: ${err.message}` }; }
 }
 
 export async function runLearningCommand(sub, flag, rest) {

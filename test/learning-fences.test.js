@@ -7,7 +7,7 @@ import path from 'node:path';
 import * as contracts from '../learning/contracts.js';
 
 const LEARNING_DIR = path.join(process.cwd(), 'learning');
-const FORBIDDEN_IMPORTS = ["'../execution", "'../judge", "'../watch", "'../tape", "'../socrates", "'../rumor2", "'../market-lab", "'../rumint", "'../gateway", "'../press", "'../infra", "'../video", "'../persistence", "'../research/referee", "'../state", "'../ledger", "'../cost"];
+const FORBIDDEN_IMPORTS = ["'../execution", "'../judge", "'../watch", "'../tape", "'../socrates", "'../rumor2", "'../market-lab", "'../rumint", "'../gateway", "'../press", "'../infra", "'../video", "'../persistence", "'../research", "'../state", "'../ledger", "'../cost", "'../memory", "'../childhood", "'../survey", "'../evidence"];
 const FORBIDDEN_RUNTIME = ['node:http', 'node:https', 'node:net', 'node:tls', 'node:dgram', 'WebSocket', 'fetch(', 'child_process'];
 
 test('every learning module imports only lib/, research pure modules and its own package — never execution, judge, watch, tape, providers, persistence or the referee', () => {
@@ -18,8 +18,8 @@ test('every learning module imports only lib/, research pure modules and its own
   }
 });
 
-test('the only cross-package imports are the label recipe, the archive reader and lib/ helpers (reuse, not duplication)', () => {
-  const allowed = new Set(["'../research/outcomes.js'", "'../research/contracts.js'", "'../research/archive.js'", "'../lib/jsonl.js'", "'../lib/config.js'"]);
+test('the only cross-package imports are lib/ helpers — learning MIRRORS the offline label law (learning/labels.js) without importing the offline pipeline, per the operational fence', () => {
+  const allowed = new Set(["'../lib/jsonl.js'", "'../lib/config.js'"]);
   for (const f of readdirSync(LEARNING_DIR).filter((x) => x.endsWith('.js'))) {
     const src = readFileSync(path.join(LEARNING_DIR, f), 'utf8');
     for (const m of src.matchAll(/from ('\.\.\/[^']+')/g)) assert.ok(allowed.has(m[1]), `${f} imports ${m[1]} which is not in the allowed reuse set`);

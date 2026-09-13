@@ -24,7 +24,7 @@ import {
 } from './contracts.js';
 import { buildFeatures, baselineDecision, WARMUP_BARS } from './features.js';
 import { FEATURE_RECIPE_VERSION, BASELINE_RULE_VERSION } from './contracts.js';
-import { labelRow } from '../research/outcomes.js';
+import { labelOpportunity } from './labels.js';
 import { classifyOutcome, simulateExecution } from './maturation.js';
 import { EPISODE_WINDOW_MS } from './grouping.js';
 
@@ -154,8 +154,8 @@ function evaluateOpportunity({ manifest, archive, series, symbol, decisionSec, o
     return { featureSet, decision: baselineDecision(featureSet) };
   };
   const outcomeOf = (decisionAtSec) => {
-    const row = labelRow(
-      { rowId: opportunityId, cohort: 'PRIMARY', canonicalCoin: symbol, decisionKnownAtTs: decisionAtSec * 1000 },
+    const row = labelOpportunity(
+      { rowId: opportunityId, canonicalCoin: symbol, decisionKnownAtTs: decisionAtSec * 1000 },
       { archive, asOfTs: nowTs },
     );
     const h60 = row.horizons['60m'];
@@ -183,8 +183,8 @@ function evaluateOpportunity({ manifest, archive, series, symbol, decisionSec, o
   const delaySec = DELAYED_ENTRY_VARIANT.extraDelayBars * 60;
   const late = decide(decisionSec + delaySec);
   if (late !== null) {
-    const lateOut = labelRow(
-      { rowId: `${opportunityId}#late`, cohort: 'PRIMARY', canonicalCoin: symbol, decisionKnownAtTs: (decisionSec + delaySec) * 1000 },
+    const lateOut = labelOpportunity(
+      { rowId: `${opportunityId}#late`, canonicalCoin: symbol, decisionKnownAtTs: (decisionSec + delaySec) * 1000 },
       { archive, asOfTs: nowTs },
     );
     const lh60 = lateOut.horizons['60m'];

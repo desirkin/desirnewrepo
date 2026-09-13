@@ -157,7 +157,7 @@ let learningHandle = null;
 if (process.env.LEARNING_ENABLED === 'true') {
   try {
     const { startLearning } = await import('./learning/service.js');
-    const { readChildhoodArchive } = await import('./research/archive.js');
+    const { readLearningArchive } = await import('./learning/labels.js');
     let archiveCache = null; let archiveTriedTs = 0;
     learningHandle = startLearning({
       dataDir: dataDir(), env: process.env, log: console.log,
@@ -168,7 +168,7 @@ if (process.env.LEARNING_ENABLED === 'true') {
         const now = Date.now();
         if (now - archiveTriedTs < 3_600_000) return null;
         archiveTriedTs = now;
-        try { archiveCache = readChildhoodArchive(path.join(dataDir(), 'childhood')); } catch { archiveCache = null; }
+        try { archiveCache = readLearningArchive(path.join(dataDir(), 'childhood')); } catch { archiveCache = null; }
         return archiveCache;
       },
     });

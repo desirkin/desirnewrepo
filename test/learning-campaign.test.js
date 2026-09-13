@@ -130,7 +130,7 @@ test('H-censoring + modes: gaps yield CENSORED rows with reasons; synthetic mode
 test('no network and no order path: the campaign/service modules import no transport, provider, execution, judge, watch or tape module', () => {
   for (const f of ['campaign.js', 'service.js', 'maturation.js', 'prospective.js', 'adapter.js', 'store.js', 'continuous.js', 'promotion.js']) {
     const src = readFileSync(path.join(process.cwd(), 'learning', f), 'utf8');
-    for (const forbidden of ["from '../execution", "from '../judge", "from '../watch", "from '../tape", "from '../socrates", "from '../rumor2", "from '../market-lab", "from '../research/referee", 'node:http', 'node:https', 'node:net', 'WebSocket', 'fetch(']) {
+    for (const forbidden of ["from '../execution", "from '../judge", "from '../watch", "from '../tape", "from '../socrates", "from '../rumor2", "from '../market-lab", "from '../research", 'node:http', 'node:https', 'node:net', 'WebSocket', 'fetch(']) {
       assert.ok(!src.includes(forbidden), `${f} must not contain ${forbidden}`);
     }
   }

@@ -91,7 +91,7 @@ test('E. the paired comparison counts newly admitted LOSERS: a candidate that ad
   // candidate selects everything; baseline skips everything; half the admitted trades are strongly negative
   const state = replayProspective(stream(d, { groups: 40, metricOf: (g) => (g % 2 === 0 ? 1 : -3) }));
   const t = evaluateTerminal(state, d.candidateId, { nowTs: T0 + 30 * DAY });
-  assert.equal(t.verdict, 'PROSPECTIVE_NOT_SUPPORTED');
+  assert.equal(t.verdict, 'FORWARD_NOT_SUPPORTED');
   assert.ok(t.effect.pairedMeanDiff < 0, 'the losers overturn the apparent gain');
 });
 
@@ -99,7 +99,7 @@ test('F. rejecting everything earns nothing: identical candidate and baseline de
   const d = design();
   const state = replayProspective(stream(d, { groups: 40, metricOf: () => 2, candidateOf: () => 'SKIPPED', baselineOf: () => 'SKIPPED' }));
   const t = evaluateTerminal(state, d.candidateId, { nowTs: T0 + 30 * DAY });
-  assert.notEqual(t.verdict, 'PROSPECTIVE_SUPPORTED');
+  assert.notEqual(t.verdict, 'FORWARD_SUPPORTED');
 });
 
 test('K. the synthetic qualifying dataset proves the full promotion path — and the failing twin proves no promotion', () => {
@@ -119,7 +119,7 @@ test('K. the synthetic qualifying dataset proves the full promotion path — and
     // fresh forward evidence AFTER the seal
     for (const r of stream(d, { groups: 34, assets: 6, days: 8, metricOf: () => 1.5 }).slice(1)) store.appendProspective(r);
     const result = settleCandidate({ store, candidateId: d.candidateId, nowTs: T0 + 40 * DAY });
-    assert.equal(result.terminal.verdict, 'PROSPECTIVE_SUPPORTED');
+    assert.equal(result.terminal.verdict, 'FORWARD_SUPPORTED');
     assert.equal(result.patternState, 'VALIDATED_PAPER');
     assert.equal(result.activation.state, 'PUBLISHED_WAITING_FOR_PAPER', 'PAPER is stopped: published, never ACTIVE_PAPER');
     // M/proof: the published-but-not-active version influences NOTHING — the adapter answers baseline
@@ -137,7 +137,7 @@ test('K. the synthetic qualifying dataset proves the full promotion path — and
       store.appendProspective({ ...r, ...(r.kind === 'CAPTURE' ? { decisionTs: r.decisionTs + 42 * DAY, recordedTs: r.recordedTs + 42 * DAY, labelEndTs: r.labelEndTs + 42 * DAY } : {}), ...(r.kind === 'OUTCOME' ? { outcomeKnownAtTs: r.outcomeKnownAtTs + 42 * DAY, recordedTs: r.recordedTs + 42 * DAY } : {}) });
     }
     const fail = settleCandidate({ store, candidateId: d2.candidateId, nowTs: T0 + 90 * DAY });
-    assert.equal(fail.terminal.verdict, 'PROSPECTIVE_NOT_SUPPORTED');
+    assert.equal(fail.terminal.verdict, 'FORWARD_NOT_SUPPORTED');
     assert.equal(fail.patternState, 'ACCUMULATING');
     assert.equal(fail.activation, null, 'a failed candidate publishes nothing');
     assert.equal([...store.activationHeads().values()].length, 1, 'only the passing candidate has an activation');

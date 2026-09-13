@@ -23,7 +23,7 @@ import { assignGroups } from './grouping.js';
 import { normalShrinkageGrouped } from './estimator.js';
 
 export const PROSPECTIVE_RECORD_KINDS = Object.freeze(['DESIGN_SEALED', 'CAPTURE', 'OUTCOME', 'TERMINAL_EVALUATED']);
-export const TERMINAL_VERDICTS = Object.freeze(['PROSPECTIVE_SUPPORTED', 'PROSPECTIVE_NOT_SUPPORTED', 'INSUFFICIENT_COMPARISON']);
+export const TERMINAL_VERDICTS = Object.freeze(['FORWARD_SUPPORTED', 'FORWARD_NOT_SUPPORTED', 'INSUFFICIENT_COMPARISON']);
 export const INTERIM_BANNER = 'INTERIM — NOT A FORMAL CONFIRMATION';
 export const MIN_COMPARISON_COVERAGE = 0.8; // predeclared: below this matured-outcome coverage the comparison is INSUFFICIENT
 
@@ -149,7 +149,7 @@ export function evaluateTerminal(state, candidateId, { nowTs, commonShockDates =
   // one-sided lower bound must clear zero at the sealed alpha (1.96 ≈ two-sided 5%; the sealed uncertainty method)
   const supported = est.lower95 !== null && est.lower95 > 0;
   return deepFreeze({
-    kind: 'TERMINAL_EVALUATED', candidateId, verdict: supported ? 'PROSPECTIVE_SUPPORTED' : 'PROSPECTIVE_NOT_SUPPORTED',
+    kind: 'TERMINAL_EVALUATED', candidateId, verdict: supported ? 'FORWARD_SUPPORTED' : 'FORWARD_NOT_SUPPORTED',
     reasons: supported ? ['PAIRED_LOWER_BOUND_ABOVE_ZERO'] : ['PAIRED_LOWER_BOUND_NOT_ABOVE_ZERO'],
     effect: { pairedMeanDiff: est.posteriorMean, lower95: est.lower95, upper95: est.upper95, groups: est.effectiveGroups, metric: d.primaryMetric },
     coverage: round4(coverage), maturedGroups: maturedGrouping.groupCount, distinctAssets: maturedGrouping.distinctAssets, distinctUtcDates: maturedGrouping.distinctUtcDates,

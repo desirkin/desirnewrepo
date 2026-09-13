@@ -89,3 +89,22 @@ test('wall: buildFeatures refuses a bar closing after the decision clock (future
   const window = series.candles.slice(idx - 74, idx + 2); // includes the bar CLOSING after T
   assert.throws(() => buildFeatures({ bars: window, decisionTsMs: decisionSec * 1000 }), /wall violation/);
 });
+
+test('mirror parity: the learning label law produces EXACTLY the offline recipe\'s values on the same archive (one law, stated twice across the fence)', async () => {
+  const { labelRow } = await import('../research/outcomes.js');
+  const { labelOpportunity } = await import('../learning/labels.js');
+  const asOf = archive.archiveCreatedTsMs + 86_400_000;
+  for (const dSec of [decisionSec, decisionSec + 37 * 60 + 12]) { // aligned and mid-minute decisions
+    const mine = labelOpportunity({ rowId: 'r', canonicalCoin: 'AAA', decisionKnownAtTs: dSec * 1000 }, { archive, asOfTs: asOf });
+    const theirs = labelRow({ rowId: 'r', cohort: 'PRIMARY', canonicalCoin: 'AAA', decisionKnownAtTs: dSec * 1000 }, { archive, asOfTs: asOf });
+    assert.equal(mine.anchorTsMs, theirs.anchorTsMs);
+    for (const h of ['1m', '3m', '5m', '15m', '30m', '60m', '240m']) {
+      assert.equal(mine.horizons[h].state, theirs.horizons[h].state, `state ${h}`);
+      assert.equal(mine.horizons[h].mfePct, theirs.horizons[h].mfePct, `mfe ${h}`);
+      assert.equal(mine.horizons[h].maePct, theirs.horizons[h].maePct, `mae ${h}`);
+      assert.equal(mine.horizons[h].logReturnPct, theirs.horizons[h].logReturnPct, `logret ${h}`);
+      assert.equal(mine.horizons[h].outcomeKnownAtTs, theirs.horizons[h].outcomeKnownAtTs, `floor ${h}`);
+    }
+    assert.equal(mine.reference.price, theirs.reference.price);
+  }
+});
