@@ -34,6 +34,7 @@ export const OPPORTUNITY_AUDIT_PURPOSE = 'PROSPECTIVE_OPPORTUNITY_AUDIT';
 export const OPPORTUNITY_AUDIT_MAX_HORIZONS = 16;
 export const OPPORTUNITY_AUDIT_MAX_COMPONENTS = 32;
 export const OPPORTUNITY_AUDIT_MAX_FEATURES = 32;
+export const OPPORTUNITY_AUDIT_MAX_DURABLE_CREATION_LAG_MS = 5_000;
 
 const HEX64_RE = /^[a-f0-9]{64}$/;
 const SAFE_TEXT_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
@@ -56,7 +57,7 @@ const AUDIT_TARGET = deepFreeze({
 const FRAME_KEYS = Object.freeze([
   'frameVersion', 'frameId', 'frameDigest', 'captureRecipeVersion', 'frameTs', 'knownAtTs',
   'catalog', 'sampling', 'target', 'horizonsMs', 'population', 'selectedOpportunityIds',
-  'authority', 'purpose', 'trainingAuthority',
+  'maxDurableCreationLagMs', 'authority', 'purpose', 'trainingAuthority',
 ]);
 const CATALOG_SEAL_KEYS = Object.freeze([
   'venue', 'quote', 'policyVersion', 'observedTs', 'contentId', 'marketCount', 'marketDigest',
@@ -224,6 +225,7 @@ export function auditFrameError(frame) {
   if (frame.frameVersion !== OPPORTUNITY_AUDIT_FRAME_VERSION || frame.captureRecipeVersion !== OPPORTUNITY_AUDIT_CAPTURE_RECIPE_VERSION
       || !FRAME_ID_RE.test(frame.frameId ?? '') || !HEX64_RE.test(frame.frameDigest ?? '')
       || !isTs(frame.frameTs) || !isTs(frame.knownAtTs) || frame.knownAtTs > frame.frameTs
+      || frame.maxDurableCreationLagMs !== OPPORTUNITY_AUDIT_MAX_DURABLE_CREATION_LAG_MS
       || frame.authority !== OPPORTUNITY_AUDIT_AUTHORITY || frame.purpose !== OPPORTUNITY_AUDIT_PURPOSE
       || frame.trainingAuthority !== 'NONE') return 'frame identity, clocks or authority malformed';
   if (!exact(frame.catalog, CATALOG_SEAL_KEYS) || frame.catalog.venue !== KRAKEN_CATALOG_VENUE
@@ -312,6 +314,7 @@ export function sealAuditFrame(input = {}) {
     },
     target: clone(AUDIT_TARGET),
     horizonsMs: horizons, population, selectedOpportunityIds,
+    maxDurableCreationLagMs: OPPORTUNITY_AUDIT_MAX_DURABLE_CREATION_LAG_MS,
     authority: OPPORTUNITY_AUDIT_AUTHORITY, purpose: OPPORTUNITY_AUDIT_PURPOSE, trainingAuthority: 'NONE',
   };
   const frameId = digest40('oaf', core);

@@ -80,6 +80,7 @@ function stateError(state, limits) {
   const annotationIds = new Set(); const annotatedOpportunities = new Set();
   for (const annotation of state.annotations) {
     if (auditAnnotationError(annotation, state.frame)) return 'annotation invalid';
+    if (annotation.observation.knownAtTs < state.createdTs) return 'annotation observation predates durable prospective frame creation';
     if (annotationIds.has(annotation.annotationId) || annotatedOpportunities.has(annotation.opportunityId)) return 'annotation identity duplicated or rewritten';
     annotationIds.add(annotation.annotationId); annotatedOpportunities.add(annotation.opportunityId);
   }
@@ -333,7 +334,10 @@ export function openOpportunityAuditStore({ rootDir, clock = () => Date.now(), l
       const slot = [...states.values()].find((state) => state.frame.frameTs === frame.frameTs && state.frame.catalog.contentId === frame.catalog.contentId);
       if (slot) fail('FRAME_SLOT_CONFLICT', 'catalog/frame timestamp already has a different durable random seed');
       if (states.size >= limits.maxFrames) fail('FRAME_LIMIT', 'no silent frame eviction is permitted');
-      const now = clock(); if (!isTs(now) || now < frame.frameTs) fail('CLOCK_INVALID', 'store clock precedes prospective frame');
+      const now = clock();
+      if (!isTs(now) || now < frame.frameTs || now - frame.frameTs > frame.maxDurableCreationLagMs) {
+        fail('CLOCK_INVALID', `prospective frame must become durable within ${frame.maxDurableCreationLagMs}ms of frameTs`);
+      }
       const state = {
         storeVersion: OPPORTUNITY_AUDIT_STORE_VERSION, revision: 0, frame: clone(frame), annotations: [], outcomes: [],
         createdTs: now, updatedTs: now, durability: clone(OPPORTUNITY_AUDIT_DURABILITY), stateDigest: '',
@@ -359,6 +363,7 @@ export function openOpportunityAuditStore({ rootDir, clock = () => Date.now(), l
   const appendAnnotation = ({ frameId, frameDigest, expectedRevision, annotation } = {}) => enqueue(() => {
     const prior = checkedMutation(frameId, frameDigest, expectedRevision);
     const error = auditAnnotationError(annotation, prior.frame); if (error) fail('ANNOTATION_INVALID', error);
+    if (annotation.observation.knownAtTs < prior.createdTs) fail('ANNOTATION_CLOCK_CONFLICT', 'observation knownAt predates durable frame creation');
     const existing = prior.annotations.find((row) => row.opportunityId === annotation.opportunityId);
     if (existing) {
       if (existing.annotationDigest !== annotation.annotationDigest) fail('ANNOTATION_CONFLICT', 'selected opportunity already has a different post-filter annotation');

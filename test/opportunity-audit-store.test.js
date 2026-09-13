@@ -29,8 +29,8 @@ function annotation(frame) {
     features: [{ name: 'zRet', value: 1.25, unit: 'ZSCORE', availability: 'KNOWN' }],
   });
   return annotateAuditOpportunity({
-    frame, opportunityId, recordedTs: T0 + 2_000,
-    observation: { state: 'EVALUATED', reasonCode: null, knownAtTs: T0 + 1_000, evidence },
+    frame, opportunityId, recordedTs: T0 + 3_000,
+    observation: { state: 'EVALUATED', reasonCode: null, knownAtTs: T0 + 2_000, evidence },
     nomination: { state: 'REJECTED', reasonCode: 'NOT_EARLY' },
     decision: { state: 'NOT_REACHED', reasonCode: 'NOMINATION_REJECTED' },
     components: [],
@@ -38,7 +38,7 @@ function annotation(frame) {
 }
 
 test('store durably creates, CAS-appends, follows missing outcomes, paginates pending work and restarts', async () => {
-  const root = tempDir(); let now = T0 + 10_000; const clock = () => now;
+  const root = tempDir(); let now = T0 + 2_000; const clock = () => now;
   try {
     const frame = makeFrame(); let store = openOpportunityAuditStore({ rootDir: root, clock });
     let view = await store.createFrame({ frame });
@@ -90,21 +90,21 @@ test('store durably creates, CAS-appends, follows missing outcomes, paginates pe
 });
 
 test('revision/content conflicts cannot rewrite a frame or rejected annotation', async () => {
-  const root = tempDir(); let now = T0 + 10_000;
+  const root = tempDir(); let now = T0 + 2_000;
   try {
     const frame = makeFrame(); const store = openOpportunityAuditStore({ rootDir: root, clock: () => now });
     await store.createFrame({ frame }); const original = annotation(frame); now += 1_000;
     await store.appendAnnotation({ frameId: frame.frameId, frameDigest: frame.frameDigest, expectedRevision: 0, annotation: original });
     const conflicting = annotateAuditOpportunity({
-      frame, opportunityId: original.opportunityId, recordedTs: T0 + 2_000,
+      frame, opportunityId: original.opportunityId, recordedTs: T0 + 3_000,
       observation: original.observation, nomination: { state: 'NOMINATED', reasonCode: null },
       decision: { state: 'ACCEPTED', reasonCode: null }, components: [],
     });
     await assert.rejects(store.appendAnnotation({ frameId: frame.frameId, frameDigest: frame.frameDigest, expectedRevision: 1, annotation: conflicting }), { code: 'ANNOTATION_CONFLICT' });
     const other = frame.selectedOpportunityIds[1];
     const second = annotateAuditOpportunity({
-      frame, opportunityId: other, recordedTs: T0 + 2_000,
-      observation: { state: 'MISSING_TICKER', reasonCode: 'NO_TICKER_ROW', knownAtTs: T0 + 1_000, evidence: null },
+      frame, opportunityId: other, recordedTs: T0 + 3_000,
+      observation: { state: 'MISSING_TICKER', reasonCode: 'NO_TICKER_ROW', knownAtTs: T0 + 2_000, evidence: null },
       nomination: { state: 'NOT_NOMINATED', reasonCode: 'NO_TICKER_ROW' }, decision: { state: 'NOT_REACHED', reasonCode: 'NO_TICKER_ROW' }, components: [],
     });
     await assert.rejects(store.appendAnnotation({ frameId: frame.frameId, frameDigest: frame.frameDigest, expectedRevision: 0, annotation: second }), { code: 'REVISION_CONFLICT' });
@@ -114,7 +114,7 @@ test('revision/content conflicts cannot rewrite a frame or rejected annotation',
 });
 
 test('lock loss fences a partial mutation and on-disk tampering refuses restart', async () => {
-  const root = tempDir(); let now = T0 + 10_000;
+  const root = tempDir(); let now = T0 + 2_000;
   try {
     const frame = makeFrame(); const store = openOpportunityAuditStore({ rootDir: root, clock: () => now });
     await store.createFrame({ frame });
@@ -137,7 +137,7 @@ test('lock loss fences a partial mutation and on-disk tampering refuses restart'
 test('restart rejects a rehashed-looking but untrusted modified state', async () => {
   const root = tempDir();
   try {
-    const frame = makeFrame(); const store = openOpportunityAuditStore({ rootDir: root, clock: () => T0 + 10_000 });
+    const frame = makeFrame(); const store = openOpportunityAuditStore({ rootDir: root, clock: () => T0 + 2_000 });
     await store.createFrame({ frame }); await store.close();
     const stateFile = path.join(root, `${frame.frameId}.json`);
     const value = JSON.parse(readFileSync(stateFile, 'utf8'));
@@ -145,4 +145,34 @@ test('restart rejects a rehashed-looking but untrusted modified state', async ()
     writeFileSync(stateFile, `${JSON.stringify(value)}\n`);
     assert.throws(() => openOpportunityAuditStore({ rootDir: root, clock: () => T0 + 20_000 }), /STORE_CORRUPT/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('prospective custody refuses late first persistence and observations known before durable frame creation', async () => {
+  const lateRoot = tempDir(); const clockRoot = tempDir();
+  try {
+    const frame = makeFrame();
+    const late = openOpportunityAuditStore({ rootDir: lateRoot, clock: () => T0 + 5_001 });
+    await assert.rejects(late.createFrame({ frame }), { code: 'CLOCK_INVALID' });
+    assert.equal(late.status().frameCount, 0, 'a restart cannot create a historical prospective frame after facts may exist');
+    await late.close();
+
+    let now = T0 + 2_000;
+    const store = openOpportunityAuditStore({ rootDir: clockRoot, clock: () => now });
+    await store.createFrame({ frame });
+    const ordinary = annotation(frame);
+    const backdated = annotateAuditOpportunity({
+      frame, opportunityId: ordinary.opportunityId, recordedTs: T0 + 3_000,
+      observation: { ...ordinary.observation, knownAtTs: T0 + 1_000 },
+      nomination: ordinary.nomination, decision: ordinary.decision, components: ordinary.components,
+    });
+    now = T0 + 4_000;
+    await assert.rejects(store.appendAnnotation({
+      frameId: frame.frameId, frameDigest: frame.frameDigest, expectedRevision: 0, annotation: backdated,
+    }), { code: 'ANNOTATION_CLOCK_CONFLICT' });
+    assert.equal((await store.loadFrame(frame.frameId)).annotations.length, 0);
+    await store.close();
+  } finally {
+    rmSync(lateRoot, { recursive: true, force: true });
+    rmSync(clockRoot, { recursive: true, force: true });
+  }
 });
