@@ -16,6 +16,7 @@ import {
   intervalOf,
   scoreShadowForecast,
   summarizeUncertaintyScores,
+  targetHorizonEndTs,
   updateScaleFreeOgd,
 } from './adaptive-uncertainty.js';
 import { canonicalDigest, canonicalJson, deepFreeze, isPlainObject, isTs } from './contracts.js';
@@ -116,7 +117,7 @@ function replay(rows, procedure) {
           || forecast.issuedTs !== row.ingestedTs
           || forecast.calibratorStateDigest !== state.digest || forecast.calibratorRevision !== state.revision
           || forecast.target?.kind !== procedure.target.kind
-          || forecast.horizonEndTs - forecast.decisionTs !== procedure.target.horizonMs
+          || forecast.horizonEndTs !== targetHorizonEndTs(forecast.decisionTs)
           || canonicalDigest(forecast.adaptiveInterval) !== canonicalDigest(intervalOf(forecast.predictor.value, state.radius))
           || canonicalDigest(forecast.comparatorInterval) !== canonicalDigest(intervalOf(forecast.predictor.value, procedure.comparator.radius))
           || forecasts.has(forecast.forecastId) || forecastsByOpportunity.has(forecast.opportunityId)) {

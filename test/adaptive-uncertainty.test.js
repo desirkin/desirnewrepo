@@ -12,6 +12,7 @@ import {
   intervalOf,
   scoreShadowForecast,
   summarizeUncertaintyScores,
+  targetHorizonEndTs,
   updateScaleFreeOgd,
 } from '../learning/adaptive-uncertainty.js';
 import { openAdaptiveUncertaintyStore } from '../learning/adaptive-uncertainty-store.js';
@@ -32,7 +33,7 @@ const input = (n, predictor = { kind: 'SHADOW_ZERO_RETURN_BASELINE' }) => ({
   catalogDigest: digest('catalog'),
   decisionTs: BASE_TS + n * 10_000,
   informationCutoffTs: BASE_TS + n * 10_000,
-  horizonEndTs: BASE_TS + n * 10_000 + TARGET.horizonMs,
+  horizonEndTs: targetHorizonEndTs(BASE_TS + n * 10_000),
   predictor,
 });
 const knownOutcome = (forecast, value) => ({
@@ -53,6 +54,8 @@ test('R01 procedure freezes one explicit numerical target and carries no behavio
   const p = procedure();
   assert.equal(p.target.kind, 'LOG_RETURN_PERCENT_60M');
   assert.equal(p.target.horizonMs, 3_600_000);
+  assert.equal(p.target.referenceAnchor, 'CEIL_DECISION_TO_1M_CANDLE_CLOSE');
+  assert.equal(targetHorizonEndTs(BASE_TS + 10_001), BASE_TS + 60_000 + 3_600_000);
   assert.equal(p.adaptiveMethod.version, SCALE_FREE_OGD_VERSION);
   assert.equal(p.authority, 'NONE');
   assert.equal(p.purpose, 'RESEARCH_ONLY');

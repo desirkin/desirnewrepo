@@ -11,6 +11,8 @@ export const TARGET = deepFreeze({
   kind: 'LOG_RETURN_PERCENT_60M',
   unit: 'PERCENT',
   horizonMs: 60 * 60_000,
+  candlePeriodMs: 60_000,
+  referenceAnchor: 'CEIL_DECISION_TO_1M_CANDLE_CLOSE',
   labelRecipeVersion: 'learning-candle-labels-1',
 });
 export const AUTHORITY = 'NONE';
@@ -24,6 +26,11 @@ const digest64 = (v) => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
 const exactKeys = (value, keys) => isPlainObject(value)
   && Object.keys(value).length === keys.length
   && keys.every((key) => Object.hasOwn(value, key));
+
+export function targetHorizonEndTs(decisionTs) {
+  if (!isTs(decisionTs)) throw new Error('adaptive uncertainty: decision timestamp malformed');
+  return Math.ceil(decisionTs / TARGET.candlePeriodMs) * TARGET.candlePeriodMs + TARGET.horizonMs;
+}
 
 function sealed(kind, body) {
   const base = { version: ADAPTIVE_UNCERTAINTY_VERSION, kind, ...body };
@@ -90,6 +97,8 @@ export function assertProcedure(procedure) {
       || procedure.authority !== AUTHORITY || procedure.purpose !== PURPOSE
       || procedure.shadowOnly !== true || procedure.target?.kind !== TARGET.kind
       || procedure.target?.horizonMs !== TARGET.horizonMs
+      || procedure.target?.candlePeriodMs !== TARGET.candlePeriodMs
+      || procedure.target?.referenceAnchor !== TARGET.referenceAnchor
       || procedure.adaptiveMethod?.id !== 'SCALE_FREE_OGD_DIRECT_RADIUS'
       || procedure.adaptiveMethod?.version !== SCALE_FREE_OGD_VERSION
       || !finite(procedure.adaptiveMethod?.targetCoverage)
@@ -167,7 +176,7 @@ export function buildShadowForecast({ procedure, state, input, issuedTs, issueSe
       || !isCoin(input.canonicalCoin) || !nonempty(input.catalogContentId) || !digest64(input.catalogDigest)
       || !isTs(input.decisionTs) || !isTs(input.informationCutoffTs) || !isTs(input.horizonEndTs)
       || input.informationCutoffTs > input.decisionTs
-      || input.horizonEndTs - input.decisionTs !== TARGET.horizonMs
+      || input.horizonEndTs !== targetHorizonEndTs(input.decisionTs)
       || !isTs(issuedTs) || issuedTs < input.decisionTs
       || !Number.isSafeInteger(issueSequence) || issueSequence <= 0) {
     throw new Error('adaptive uncertainty: forecast identity/clocks/60-minute target are malformed');

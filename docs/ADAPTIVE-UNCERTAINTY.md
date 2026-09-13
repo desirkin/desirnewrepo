@@ -23,9 +23,11 @@ This module therefore does not rename any of those outputs. It accepts either:
 2. `EXTERNAL_NUMERIC_FORECAST`: a caller-supplied finite point forecast with a version, state digest, and
    `knownAtTs` no later than the sealed information cutoff.
 
-The single target is `LOG_RETURN_PERCENT_60M` in percent units at exactly decision time + 60 minutes, using the
-existing `learning-candle-labels-1` label-recipe identity. Censored and unavailable labels remain nonnumeric and
-are never replaced by zero.
+The single target is `LOG_RETURN_PERCENT_60M` in percent units using the existing
+`learning-candle-labels-1` clock: `anchorTs = ceil(decisionTs / 60,000) * 60,000`, the reference is the close
+of the one-minute bar closing at that anchor, and `horizonEndTs = anchorTs + 60 minutes`. It is therefore not
+misstated as direct `decisionTs + 60 minutes` when a decision falls between candle boundaries. Censored and
+unavailable labels remain nonnumeric and are never replaced by zero.
 
 ## Selected published method
 
