@@ -1,31 +1,25 @@
-diff --git a/tools/data-only-runtime.mjs b/tools/data-only-runtime.mjs
-index 639aca0..41bad26 100644
---- a/tools/data-only-runtime.mjs
-+++ b/tools/data-only-runtime.mjs
-@@ -226,8 +226,11 @@ if (catalog) {
-       DISCOVERY_GDELT_MAX_DAILY_REQUESTS: '16',
-       DISCOVERY_GDELT_RESULT_LIMIT: '50',
-       DISCOVERY_GDELT_ASSETS_PER_QUERY: '12',
--      DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS: '24',
--      DISCOVERY_KALSHI_MAX_DAILY_REQUESTS: '24',
-+      // Local free-read ceilings, not provider entitlements. Hourly scheduling
-+      // remains unchanged; 48 leaves bounded maintenance-restart headroom.
-+      // Existing charged reservations are restored, never reset by this change.
-+      DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS: '48',
-+      DISCOVERY_KALSHI_MAX_DAILY_REQUESTS: '48',
-       DISCOVERY_POLYMARKET_PAGE_LIMIT: '100',
-       DISCOVERY_KALSHI_PAGE_LIMIT: '1000',
-     };
-diff --git a/test/data-only-runtime.test.mjs b/test/data-only-runtime.test.mjs
-index 360d18a..8222726 100644
---- a/test/data-only-runtime.test.mjs
-+++ b/test/data-only-runtime.test.mjs
-@@ -77,6 +77,8 @@ test('data-only news uses official feeds plus bounded GDELT metadata and withhol
-   assert.match(source, /publisherExcerptsStored:\s*false/);
-   assert.match(source, /DISCOVERY_SOURCES:\s*'GDELT_NEWS_DISCOVERY,POLYMARKET_PUBLIC_DATA,KALSHI_PUBLIC_DATA'/);
-   assert.match(source, /DISCOVERY_GDELT_MAX_DAILY_REQUESTS:\s*'16'/);
-+  assert.match(source, /DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS:\s*'48'/);
-+  assert.match(source, /DISCOVERY_KALSHI_MAX_DAILY_REQUESTS:\s*'48'/);
-   assert.match(source, /DISCOVERY_GDELT_RESULT_LIMIT:\s*'50'/);
-   assert.match(source, /DISCOVERY_GDELT_ASSETS_PER_QUERY:\s*'12'/);
-   assert.match(source, /contact:\s*process\.env\.SERPENT_HTTP_CONTACT \?\? null/);
+diff --git a/lib/data-only-status.js b/lib/data-only-status.js
+index c508e86..83d79a7 100644
+--- a/lib/data-only-status.js
++++ b/lib/data-only-status.js
+@@ -203,7 +203,7 @@ export function dataOnlyPublicStatus(evaluated) {
+     : observedMarket;
+   return {
+     mode: 'DATA_ONLY', version: source.version ?? DATA_ONLY_RUNTIME_STATUS_VERSION,
+-    healthState: evaluated?.healthState ?? 'UNAVAILABLE', statusReason: evaluated?.statusReason ?? 'STATUS_UNAVAILABLE',
++    healthState: evaluated?.healthState ?? 'UNAVAILABLE', statusReason: evaluated?.statusReason === undefined ? 'STATUS_UNAVAILABLE' : evaluated.statusReason,
+     running: evaluated?.effectiveRunning === true, reportedRunning: evaluated?.reportedRunning === true,
+     lifecycle: evaluated?.lifecycle ?? 'UNAVAILABLE', startupPhase: evaluated?.startupPhase ?? null,
+     tsMs: timestamp(source.tsMs) ? source.tsMs : null, heartbeatAgeMs: evaluated?.heartbeatAgeMs ?? null,
+diff --git a/test/data-only-status.test.js b/test/data-only-status.test.js
+index 223c831..1ae3d8b 100644
+--- a/test/data-only-status.test.js
++++ b/test/data-only-status.test.js
+@@ -97,6 +97,7 @@ test('public market and sensor views keep capture scope separate from the wider
+   });
+   const evaluated = evaluateDataOnlyRuntimeStatus(status, { now: NOW, lock: lock() });
+   const pub = dataOnlyPublicStatus(evaluated);
++  assert.equal(pub.healthState, 'ACTIVE'); assert.equal(pub.statusReason, null, 'healthy status preserves the evaluator\'s explicit null reason');
+   assert.equal(pub.market.scope.subjectCount, 3); assert.deepEqual(pub.market.scope.subjects, ['BTC', 'ETH', 'SOL']); assert.equal(pub.catalog.markets, 612);
+   assert.equal(pub.market.providerSources.KRAKEN_SPOT.succeeded, 9); assert.equal(pub.market.receipts.observations, 27);
+   assert.equal(pub.market.streams.KRAKEN_SPOT.healthState, 'HEALTHY'); assert.equal(pub.market.streamHealth.state, 'HEALTHY'); assert.equal(pub.market.recording.state, 'HEALTHY');
