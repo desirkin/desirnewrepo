@@ -1,402 +1,885 @@
-diff --git a/learning/contracts.js b/learning/contracts.js
-index 516edd0..3989c87 100644
---- a/learning/contracts.js
-+++ b/learning/contracts.js
-@@ -21,7 +21,8 @@ export const CAPTURE_RECIPE_VERSION = 'learning-capture-1';
- export const FEATURE_RECIPE_VERSION = 'learning-features-1';
- export const BASELINE_RULE_VERSION = 'learning-baseline-rule-1'; // an ENGINEERING baseline for replay, not the live Judge
- export const PATTERN_RECORD_VERSION = 'learning-pattern-1';
--export const PROSPECTIVE_VERSION = 'learning-prospective-1';
-+export const LEGACY_PROSPECTIVE_VERSION = 'learning-prospective-1';
-+export const PROSPECTIVE_VERSION = 'learning-prospective-2';
- export const CAMPAIGN_MANIFEST_VERSION = 'learning-campaign-1';
- export const ACTIVATION_VERSION = 'learning-activation-1';
- export const QUESTION_VERSION = 'learning-question-1';
-@@ -137,10 +138,13 @@ export const PATTERN_KEYS = Object.freeze([
- ]);
- export const PATTERN_EVIDENCE_KEYS = Object.freeze(['rawCount', 'groupCount', 'distinctAssets', 'distinctUtcDates', 'favorable', 'adverse', 'neutral', 'censored', 'byBasis', 'evidenceRefs', 'evidenceRefsTruncated']);
- export const ESTIMATE_KEYS = Object.freeze(['method', 'pooledMean', 'posteriorMean', 'lower95', 'upper95', 'effectiveGroups', 'priorStrength', 'baselineComparator', 'updatedTs']);
--export const DESIGN_KEYS = Object.freeze([
-+const DESIGN_BASE_KEYS = Object.freeze([
-   'prospectiveVersion', 'candidateId', 'patternId', 'predicate', 'predicateDigest', 'scope', 'primaryHorizonMin', 'primaryMetric', 'comparator',
-   'costModel', 'groupLaw', 'terminalGroupTarget', 'floors', 'missingnessRule', 'uncertaintyMethod', 'alpha', 'sealedTs', 'evidenceDigest',
- ]);
-+export const LEGACY_DESIGN_KEYS = DESIGN_BASE_KEYS;
-+export const DESIGN_KEYS = Object.freeze([...DESIGN_BASE_KEYS, 'consumerBinding']);
-+export const CONSUMER_BINDING_KEYS = Object.freeze(['featureRecipeVersion', 'policyDigest']);
- export const FLOORS_KEYS = Object.freeze(['minIndependentGroups', 'minDistinctUtcDates', 'minDistinctAssets', 'floorsLaw']);
- // The default anti-shortcut floors for the first broad transferable PAPER candidate. Engineering safeguards, NOT a
- // proof of statistical power; stricter existing requirements take precedence; a narrower scope that cannot meet them
-@@ -286,8 +290,17 @@ export function patternRecordError(p) {
- }
+diff --git a/judge/setups.js b/judge/setups.js
+index 01de34f..0cbc3ac 100644
+--- a/judge/setups.js
++++ b/judge/setups.js
+@@ -13,12 +13,39 @@ const setupBuffer = (atr, tick) => (M.gt(tick, M.mul('0.1', atr)) ? tick : M.mul
+ import { nearestResistanceAbove } from './features.js';
  
- export function designError(d) {
--  const k = exactKeys(d, DESIGN_KEYS); if (k) return `design: ${k}`;
--  if (d.prospectiveVersion !== PROSPECTIVE_VERSION) return 'design: unsupported version';
-+  if (!isPlainObject(d)) return 'design: not an object';
-+  const keys = d.prospectiveVersion === LEGACY_PROSPECTIVE_VERSION
-+    ? LEGACY_DESIGN_KEYS
-+    : d.prospectiveVersion === PROSPECTIVE_VERSION ? DESIGN_KEYS : null;
-+  if (keys === null) return 'design: unsupported version';
-+  const k = exactKeys(d, keys); if (k) return `design: ${k}`;
-+  if (d.prospectiveVersion === PROSPECTIVE_VERSION) {
-+    const ck = exactKeys(d.consumerBinding, CONSUMER_BINDING_KEYS); if (ck) return `design: consumer binding ${ck}`;
-+    if (!isId(d.consumerBinding.featureRecipeVersion) || d.consumerBinding.featureRecipeVersion.length > 64) return 'design: consumer feature recipe malformed';
-+    if (typeof d.consumerBinding.policyDigest !== 'string' || !/^[a-f0-9]{64}$/.test(d.consumerBinding.policyDigest)) return 'design: consumer policy digest malformed';
+ export const STRATEGY_VERSION = 'judge-strategy-paper-reference-1';
++export const STARTING_STYLE_CATALOG_VERSION = 'judge-starting-styles-1';
++// This is a starting playbook, not an exhaustive strategy enum. Newly learned
++// candidates remain untrusted/versioned hypotheses until prospective evidence
++// promotes them through the separate experiment path.
++export const SETUP_DEFINITIONS = Object.freeze({
++  MOMENTUM_CONTINUATION: Object.freeze({ familyId: 'MOMENTUM_CONTINUATION', label: 'Momentum / Continuation', horizon: Object.freeze({ kind: 'EDGE_STATE', intendedMinMs: null, intendedMaxMs: null, mandatoryTimer: false, exitBasis: 'THESIS_DECAY_EXHAUSTION_OR_REMAINING_EDGE' }), operationalMaxDurationMs: null, rv60Min: 1.5, startingPlaybook: true }),
++  RANGE_IGNITION: Object.freeze({ familyId: 'EARLY_IGNITION_BREAKOUT', label: 'Early Ignition / Breakout', horizon: Object.freeze({ kind: 'REFERENCE_MAX', intendedMinMs: null, intendedMaxMs: 14_400_000, mandatoryTimer: true, exitBasis: 'EXISTING_REFERENCE' }), operationalMaxDurationMs: 14_400_000, rv60Min: 2, startingPlaybook: true }),
++  TREND_PULLBACK_CONTINUATION: Object.freeze({ familyId: 'PULLBACK_REENTRY', label: 'Pullback / Re-entry', horizon: Object.freeze({ kind: 'REFERENCE_MAX', intendedMinMs: null, intendedMaxMs: 14_400_000, mandatoryTimer: true, exitBasis: 'EXISTING_REFERENCE' }), operationalMaxDurationMs: 14_400_000, rv60Min: 1.5, startingPlaybook: true }),
++  ABSORPTION_RECLAIM: Object.freeze({ familyId: 'PULLBACK_REENTRY', label: 'Pullback / Re-entry — Absorption Reclaim', horizon: Object.freeze({ kind: 'REFERENCE_MAX', intendedMinMs: null, intendedMaxMs: 14_400_000, mandatoryTimer: true, exitBasis: 'EXISTING_REFERENCE' }), operationalMaxDurationMs: 14_400_000, rv60Min: null, startingPlaybook: true }),
++  CATALYST_TRANSMISSION: Object.freeze({ familyId: 'RUMOR_CATALYST', label: 'Rumor / Catalyst', horizon: Object.freeze({ kind: 'REFERENCE_MAX', intendedMinMs: null, intendedMaxMs: 14_400_000, mandatoryTimer: true, exitBasis: 'EXISTING_REFERENCE' }), operationalMaxDurationMs: 14_400_000, rv60Min: 1.5, startingPlaybook: true }),
++  MICRO_BITE: Object.freeze({ familyId: 'MICRO_BITE', label: 'Micro-Bite', horizon: Object.freeze({ kind: 'EDGE_STATE', intendedMinMs: 60_000, intendedMaxMs: 300_000, mandatoryTimer: false, exitBasis: 'THESIS_DECAY_EXHAUSTION_OR_REMAINING_EDGE', thesisTransition: 'NEW_INDEPENDENT_THESIS_REQUIRED' }), operationalMaxDurationMs: null, rv60Min: 1.5, startingPlaybook: true }),
++});
++export const STARTING_STYLE_FAMILIES = Object.freeze([...new Set(Object.values(SETUP_DEFINITIONS).map((x) => x.familyId))]);
++export const SETUP_EVALUATORS = Object.freeze(Object.keys(SETUP_DEFINITIONS));
++export const setupDefinition = (setupId) => SETUP_DEFINITIONS[setupId] ?? null;
++// Compatibility: these are the four evaluators currently composed by Judge.
++// The two additions are deliberately not activated by this setup-layer patch.
+ export const SETUPS = Object.freeze(['RANGE_IGNITION', 'ABSORPTION_RECLAIM', 'TREND_PULLBACK_CONTINUATION', 'CATALYST_TRANSMISSION']);
+-export const SETUP_INPUT_MODES = Object.freeze({ RANGE_IGNITION: ['MARKET_DIRECT', 'CASE_ENRICHED'], ABSORPTION_RECLAIM: ['MARKET_DIRECT', 'CASE_ENRICHED'], TREND_PULLBACK_CONTINUATION: ['MARKET_DIRECT', 'CASE_ENRICHED'], CATALYST_TRANSMISSION: ['CATALYST_CASE'] });
++export const SETUP_INPUT_MODES = Object.freeze({ MOMENTUM_CONTINUATION: ['MARKET_DIRECT', 'CASE_ENRICHED'], RANGE_IGNITION: ['MARKET_DIRECT', 'CASE_ENRICHED'], ABSORPTION_RECLAIM: ['MARKET_DIRECT', 'CASE_ENRICHED'], TREND_PULLBACK_CONTINUATION: ['MARKET_DIRECT', 'CASE_ENRICHED'], CATALYST_TRANSMISSION: ['CATALYST_CASE'], MICRO_BITE: ['MARKET_DIRECT', 'CASE_ENRICHED'] });
+ export const REFERENCE = Object.freeze({ persistenceBooks: 3, persistenceSpanMs: 2000, proposalExpiryMs: 10_000, cooldownMs: 60_000, maxDurationMs: 4 * 3_600_000, fi15Min: 0.2, rv60Ignition: 2.0, rv60Trend: 1.5, rv60Catalyst: 1.5, catalystKnownWithinMs: 600_000, caseMaxAgeMs: 300_000 });
+ const d = (x, scale = 8) => (typeof x === 'string' ? x : M.fromStatistic(x, scale));
+ const clause = (id, ok, value, threshold, unit, note = null) => ({ id, ok, value, threshold, unit, note });
+ const known = (x) => x && x.state === 'KNOWN';
++const safePositive = (x) => { try { return x !== null && x !== undefined && M.isPositive(x); } catch { return false; } };
++const safeNonNegative = (x) => { try { return x !== null && x !== undefined && M.gte(x, '0'); } catch { return false; } };
++const freshFact = (x, decisionTs, maxAgeMs) => known(x) && Number.isSafeInteger(x.knownAtTs) && Number.isSafeInteger(decisionTs) && x.knownAtTs <= decisionTs && decisionTs - x.knownAtTs <= maxAgeMs;
++const CONTINUATION_DIMENSIONS = Object.freeze(['PRICE_ACCELERATION', 'EXECUTED_VOLUME', 'ORDER_FLOW', 'LIQUIDITY_DEPTH', 'SPREAD', 'VOLATILITY', 'CATALYST_PROPAGATION']);
++const CONTINUATION_PHASES = Object.freeze({
++  MOMENTUM_CONTINUATION: Object.freeze(['IGNITION', 'ACCELERATING', 'HEALTHY_CONTINUATION', 'EDGE_REACCELERATING', 'BREAKOUT_PRESSURE_BUILDING']),
++  MICRO_BITE: Object.freeze(['IGNITION', 'ACCELERATING', 'EDGE_REACCELERATING', 'BREAKOUT_PRESSURE_BUILDING']),
++});
++const POST_SIZE_EXECUTION_GATE_SETUPS = Object.freeze(['MOMENTUM_CONTINUATION', 'MICRO_BITE']);
++export const POST_SIZE_EXECUTION_GATE_VERSION = 'judge-post-size-execution-gate-1';
+ // the frozen reference bundle: what may never move after T
+ export function freezeReferences({ setupId, ind, spec, fast, event = null, triggerTs }) {
+   const tick = spec.priceIncrement; const atr = d(ind.atr14); const buffer = setupBuffer(atr, tick);
+@@ -27,6 +54,8 @@ export function freezeReferences({ setupId, ind, spec, fast, event = null, trigg
+   if (setupId === 'TREND_PULLBACK_CONTINUATION') { const p20h = d(ind.prior20High); const p20l = d(ind.prior20Low); const trigger = M.add(d(ind.last2High), tick); return { ...base, prior20High: p20h, prior20Low: p20l, last3Low: d(ind.last3Low), ema5: d(ind.ema5), ema20: d(ind.ema20), prior20Return: ind.prior20Return, prior20HighBarsFromEnd: ind.prior20HighBarsFromEnd, triggerLevel: trigger, structuralStop: M.sub(d(ind.last3Low), buffer), scenarioRaw: M.add(p20h, M.mul('0.5', M.sub(p20h, p20l))), maxEntryLevel: M.add(p20h, M.mul('0.75', atr)) }; }
+   if (setupId === 'ABSORPTION_RECLAIM') { const trigger = M.add(fast.vwap60, tick); return { ...base, priorFi: fast.priorFi, priorMidChange: fast.priorMidChange, priorMedianDepth: fast.priorMedianDepth, priorDepthSamples: fast.priorDepthSamples, priorLow: fast.priorLow60, vwap60: fast.vwap60, triggerLevel: trigger, structuralStop: M.sub(fast.priorLow60, buffer), scenarioRaw: d(ind.h20), maxEntryLevel: null }; }
+   if (setupId === 'CATALYST_TRANSMISSION') { if (!event) return null; const p0 = event.p0; const trigger = M.add(p0, M.mul('0.1', atr)); return { ...base, event: { eventId: event.eventId, knownAtTs: event.knownAtTs, taxonomy: event.taxonomy, caseId: event.caseId, analysisId: event.analysisId }, p0, preEventH20: d(ind.h20), preEventL20: d(ind.l20), preEventLow5: d(ind.low5), triggerLevel: trigger, structuralStop: M.sub(M.min(p0, d(ind.low5)), buffer), scenarioRaw: M.add(p0, M.sub(d(ind.h20), d(ind.l20))), maxEntryLevel: M.add(p0, M.mul('1', atr)) }; }
++  if (setupId === 'MOMENTUM_CONTINUATION') { const h20 = d(ind.h20); const l20 = d(ind.l20); return { ...base, ema5: d(ind.ema5), ema20: d(ind.ema20), lastClose: d(ind.lastClose), prior20Return: ind.prior20Return, triggerLevel: M.add(h20, buffer), structuralStop: M.sub(d(ind.low5), buffer), scenarioRaw: M.add(h20, M.mul('0.75', M.sub(h20, l20))), maxEntryLevel: null }; }
++  if (setupId === 'MICRO_BITE') { const trigger = M.add(d(ind.last2High), tick); return { ...base, ema5: d(ind.ema5), lastClose: d(ind.lastClose), envelope5: d(ind.envelope5), triggerLevel: trigger, structuralStop: M.sub(d(ind.low5), buffer), scenarioRaw: M.add(trigger, M.mul('0.5', atr)), maxEntryLevel: null }; }
+   return null;
+ }
+ export const hypothesisDigest = (frozen) => digestOf(frozen);
+@@ -37,6 +66,8 @@ export function structuralClauses(setupId, frozen, ind, fast, { decisionTs, even
+   if (setupId === 'TREND_PULLBACK_CONTINUATION') { c.push(clause('EMA5_ABOVE_EMA20', M.gt(frozen.ema5, frozen.ema20), frozen.ema5, frozen.ema20, 'QUOTE')); c.push(clause('PRIOR20_RETURN_POSITIVE', frozen.prior20Return > 0, frozen.prior20Return, 0, 'FRACTION')); c.push(clause('PRIOR20_HIGH_BEFORE_LAST3', frozen.prior20HighBarsFromEnd >= 3, frozen.prior20HighBarsFromEnd, 3, 'BARS', 'the prior20 high occurred before the last 3 completed bars')); c.push(clause('PULLBACK_WITHIN_1_5_ATR', M.lte(M.sub(frozen.prior20High, frozen.last3Low), M.mul('1.5', frozen.atr14)), M.sub(frozen.prior20High, frozen.last3Low), M.mul('1.5', frozen.atr14), 'QUOTE')); }
+   if (setupId === 'ABSORPTION_RECLAIM') { c.push(clause('PRIOR_FI_ABSORBED', known(frozen.priorFi) && frozen.priorFi.fi <= -0.15, frozen.priorFi?.fi ?? null, -0.15, 'FRACTION', 'prior episode [T-75s,T-15s) taker imbalance')); c.push(clause('PRIOR_MID_RESPONSE_SMALL', frozen.priorMidChange !== null && M.lte(M.abs(frozen.priorMidChange), M.mul('0.15', frozen.atr14)), frozen.priorMidChange, M.mul('0.15', frozen.atr14), 'QUOTE', 'absolute mid change in EITHER direction')); c.push(clause('BASELINE_DEPTH_SUPPORT', frozen.priorDepthSamples >= 30, frozen.priorDepthSamples, 30, 'BOOKS')); const atT = fast.atTrigger ?? fast; c.push(clause('RECLAIM_FI15', known(atT.reclaimFi) && atT.reclaimFi.fi >= 0.2, atT.reclaimFi?.fi ?? null, 0.2, 'FRACTION', 'FI over [T-15s,T): the frozen episode window, never the decision window')); c.push(clause('SCENARIO_LEVEL_EXISTS', frozen.scenarioRaw !== null && M.gt(frozen.scenarioRaw, frozen.triggerLevel), frozen.scenarioRaw, frozen.triggerLevel, 'QUOTE', 'previously observed H20 above entry; none -> NO_TRADE')); }
+   if (setupId === 'CATALYST_TRANSMISSION') { const ev = frozen.event; c.push(clause('EVENT_PRIMARY_CONFIRMED', Boolean(event?.primaryConfirmed), event?.primaryConfirmed ?? null, true, 'BOOL')); c.push(clause('EVENT_KNOWN_WITHIN_10M', Boolean(ev) && decisionTs - ev.knownAtTs <= REFERENCE.catalystKnownWithinMs && decisionTs >= ev.knownAtTs, ev ? decisionTs - ev.knownAtTs : null, REFERENCE.catalystKnownWithinMs, 'MS')); c.push(clause('EVENT_OCCURRED_NOT_SCHEDULED', Boolean(event?.occurred), event?.occurred ?? null, true, 'BOOL', 'a future scheduled date is not an occurrence')); c.push(clause('MECHANISM_UPWARD_PRESSURE_CITED', event?.mechanismDirection === 'UPWARD_PRESSURE' && Boolean(event?.mechanismCitesEvent), event?.mechanismDirection ?? null, 'UPWARD_PRESSURE', 'ENUM', 'MIXED / UNKNOWN never becomes UPWARD by prose')); c.push(clause('P0_FROM_PRE_EVENT_SNAPSHOT', Boolean(event?.p0) && Boolean(event?.p0Source === 'PRE_EVENT_SNAPSHOT'), event?.p0Source ?? null, 'PRE_EVENT_SNAPSHOT', 'ENUM')); }
++  if (setupId === 'MOMENTUM_CONTINUATION') { c.push(clause('LAST_CLOSE_ABOVE_EMA5', M.gt(frozen.lastClose, frozen.ema5), frozen.lastClose, frozen.ema5, 'QUOTE')); c.push(clause('EMA5_ABOVE_EMA20', M.gt(frozen.ema5, frozen.ema20), frozen.ema5, frozen.ema20, 'QUOTE')); c.push(clause('PRIOR20_RETURN_POSITIVE', typeof frozen.prior20Return === 'number' && Number.isFinite(frozen.prior20Return) && frozen.prior20Return > 0, Number.isFinite(frozen.prior20Return) ? frozen.prior20Return : null, 0, 'FRACTION')); }
++  if (setupId === 'MICRO_BITE') { c.push(clause('MICRO_PRICE_AT_OR_ABOVE_EMA5', M.gte(frozen.lastClose, frozen.ema5), frozen.lastClose, frozen.ema5, 'QUOTE')); c.push(clause('MICRO_RANGE_READY', M.lte(frozen.envelope5, M.mul('2', frozen.atr14)), frozen.envelope5, M.mul('2', frozen.atr14), 'QUOTE', 'five completed bars remain bounded before the micro ignition')); }
+   c.push(clause('ATR14_POSITIVE', M.isPositive(frozen.atr14), frozen.atr14, '0', 'QUOTE'));
+   return c;
+ }
+@@ -47,10 +78,22 @@ export function fastClauses(setupId, frozen, fast) {
+   if (frozen.maxEntryLevel !== null) c.push(clause('EXTENSION_CAP', M.lte(mid, frozen.maxEntryLevel), mid, frozen.maxEntryLevel, 'QUOTE', 'do not chase'));
+   c.push(clause('FI15', known(fast.fi15) && fast.fi15.fi >= REFERENCE.fi15Min, fast.fi15?.fi ?? null, REFERENCE.fi15Min, 'FRACTION', fast.fi15?.reason ?? null));
+   c.push(clause('FI60_POSITIVE', known(fast.fi60) && fast.fi60.fi > 0, fast.fi60?.fi ?? null, 0, 'FRACTION', fast.fi60?.reason ?? null));
+-  if (setupId !== 'ABSORPTION_RECLAIM') { const min = setupId === 'RANGE_IGNITION' ? REFERENCE.rv60Ignition : setupId === 'TREND_PULLBACK_CONTINUATION' ? REFERENCE.rv60Trend : REFERENCE.rv60Catalyst; c.push(clause('RV60', known(fast.rv60) && fast.rv60.rv60 >= min, fast.rv60?.rv60 ?? null, min, 'RATIO', fast.rv60?.reason ?? null)); }
++  if (setupId !== 'ABSORPTION_RECLAIM') { const min = setupDefinition(setupId)?.rv60Min ?? REFERENCE.rv60Catalyst; c.push(clause('RV60', known(fast.rv60) && fast.rv60.rv60 >= min, fast.rv60?.rv60 ?? null, min, 'RATIO', fast.rv60?.reason ?? null)); }
+   else { c.push(clause('DEPTH_HOLDS_80PCT_OF_BASELINE', fast.depth10bps !== null && frozen.priorMedianDepth !== null && M.gte(fast.depth10bps, M.mul('0.8', frozen.priorMedianDepth)), fast.depth10bps, frozen.priorMedianDepth ? M.mul('0.8', frozen.priorMedianDepth) : null, 'QUOTE', 'current 10bps bid notional vs the SAME frozen median')); c.push(clause('FI15_FRESH_AT_D', known(fast.fi15) && fast.fi15.fi >= 0.2, fast.fi15?.fi ?? null, 0.2, 'FRACTION', 'may overlap prior data; not independent confirmation')); }
+   c.push(clause('COVERAGE_60S', fast.coverage?.continuous === true && fast.coverage.startTs <= fast.decisionTs - 60_000, fast.coverage?.startTs ?? null, fast.decisionTs - 60_000, 'TS', '60s continuous trade coverage'));
+   c.push(clause('BOOK_FRESH', fast.bookAgeMs !== null && fast.bookAgeMs <= 1000 && fast.crcVerified === true, fast.bookAgeMs, 1000, 'MS', 'CRC-verified book at most 1s old'));
++  if (setupId === 'MOMENTUM_CONTINUATION' || setupId === 'MICRO_BITE') {
++    const depth = fast.depth10bps ?? null;
++    c.push(clause('LIQUIDITY_PRESENT', safePositive(depth), depth, '0', 'QUOTE', 'observed bid notional within 10bps; zero or missing is not liquidity'));
++    const evidence = fast.continuationEvidence; const evidenceFresh = freshFact(evidence, fast.decisionTs, 60_000);
++    const dimensions = evidenceFresh && Array.isArray(evidence.dimensions) && evidence.dimensions.every((x) => CONTINUATION_DIMENSIONS.includes(x)) && new Set(evidence.dimensions).size === evidence.dimensions.length ? evidence.dimensions : null;
++    const groups = evidenceFresh && Array.isArray(evidence.relianceGroups) && evidence.relianceGroups.every((x) => typeof x === 'string' && x.length > 0 && x.length <= 60) ? [...new Set(evidence.relianceGroups)] : null;
++    c.push(clause('CONTINUATION_PHASE_ELIGIBLE', evidenceFresh && CONTINUATION_PHASES[setupId].includes(evidence.phase), evidenceFresh ? evidence.phase : null, CONTINUATION_PHASES[setupId], 'ENUM', 'KNOWN means the observed/calculated inputs are current, not that the future outcome is certain'));
++    c.push(clause('DISTINCT_EVIDENCE_DIMENSIONS', dimensions !== null && dimensions.length >= 3 && groups !== null && groups.length >= 2, dimensions === null || groups === null ? null : { dimensions, relianceGroups: groups }, { minDimensions: 3, minRelianceGroups: 2 }, 'EVIDENCE_SET', 'distinct dimensions/reliance groups are corroboration inputs, not statistically independent wins'));
++    if (setupId === 'MOMENTUM_CONTINUATION') c.push(clause('CHALLENGE_NOT_FAILED', evidenceFresh && evidence.challengeState !== 'FAILED', evidenceFresh ? (evidence.challengeState ?? 'NOT_OBSERVED') : null, 'NOT_FAILED', 'ENUM', 'a survived challenge is preferred but NOT_OBSERVED is not a mandatory pullback refusal'));
++    const exhaustion = fast.exhaustion; const exhaustionKnown = freshFact(exhaustion, fast.decisionTs, 60_000) && typeof exhaustion.exhausted === 'boolean';
++    c.push(clause('NOT_EXHAUSTED', exhaustionKnown && exhaustion.exhausted === false, exhaustionKnown ? exhaustion.exhausted : null, false, 'BOOL', 'unknown exhaustion is not interpreted as room to run'));
 +  }
-   const fk = exactKeys(d.floors, FLOORS_KEYS); if (fk) return `design: floors ${fk}`;
-   for (const f of ['minIndependentGroups', 'minDistinctUtcDates', 'minDistinctAssets']) {
-     if (!isCount(d.floors[f]) || d.floors[f] < DEFAULT_FLOORS[f]) return `design: floor ${f} below the anti-shortcut default (${DEFAULT_FLOORS[f]}) — narrower scopes keep a descriptive estimate instead`;
-diff --git a/learning/prospective.js b/learning/prospective.js
-index f8edcfc..1ff77ef 100644
---- a/learning/prospective.js
-+++ b/learning/prospective.js
-@@ -31,14 +31,16 @@ export function sealDesign({
-   patternId, predicate, scope, primaryHorizonMin = 60, primaryMetric = 'NET_LOG_RETURN_60M_PCT',
-   comparator = 'BASELINE_RULE_SAME_STREAM', costModel, groupLaw = 'learning-group-law-1',
-   terminalGroupTarget, floors = DEFAULT_FLOORS, missingnessRule = `MATURED_COVERAGE_AT_LEAST_${MIN_COMPARISON_COVERAGE}`,
--  uncertaintyMethod = 'NORMAL_SE_OVER_GROUP_MEANS', alpha = 0.05, sealedTs, evidenceDigest,
-+  uncertaintyMethod = 'NORMAL_SE_OVER_GROUP_MEANS', alpha = 0.05, sealedTs, evidenceDigest, consumerBinding,
- }) {
-   const body = {
-     prospectiveVersion: PROSPECTIVE_VERSION, candidateId: 'lcand-UNBOUND', patternId, predicate, predicateDigest: canonicalDigest(predicate),
-     scope, primaryHorizonMin, primaryMetric, comparator, costModel, groupLaw, terminalGroupTarget, floors, missingnessRule,
--    uncertaintyMethod, alpha, sealedTs, evidenceDigest,
-+    uncertaintyMethod, alpha, sealedTs, evidenceDigest, consumerBinding: consumerBinding ?? null,
-   };
--  const design = { ...body, candidateId: candidateIdOf(body) };
-+  let design;
-+  try { design = { ...body, candidateId: candidateIdOf(body) }; }
-+  catch { throw new Error('sealDesign: consumer binding malformed'); }
-   const err = designError(design); if (err) throw new Error(`sealDesign: ${err}`);
-   return deepFreeze(design);
+   return c;
  }
-diff --git a/learning/promotion.js b/learning/promotion.js
-index d05b779..d38aa51 100644
---- a/learning/promotion.js
-+++ b/learning/promotion.js
-@@ -6,7 +6,7 @@
- //   (PUBLISHED_WAITING_FOR_PAPER while the paper runtime is stopped) and the pattern becomes VALIDATED_PAPER.
- // A failed terminal returns the pattern to ACCUMULATING with the failure retained; the candidate id stays consumed.
- // Nothing here starts paper, changes the Judge, or touches an order path.
--import { DEFAULT_FLOORS, canonicalDigest, deepFreeze } from './contracts.js';
-+import { DEFAULT_FLOORS, LEGACY_PROSPECTIVE_VERSION, canonicalDigest, deepFreeze } from './contracts.js';
- import { sealDesign, replayProspective, evaluateTerminal, MIN_COMPARISON_COVERAGE } from './prospective.js';
- import { buildActivation, DEFAULT_DEGRADE_RULE } from './adapter.js';
- import { buildPatternRecord } from './patterns.js';
-@@ -24,12 +24,13 @@ export const PROMOTION_POLICY = deepFreeze({
-   rationale: 'conservative engineering defaults, labelled defaults — not empirically proven sufficient sample sizes',
- });
+ // the target scenario capped by a nearer confirmed resistance above the proposed entry (never an invented level)
+@@ -58,8 +101,35 @@ export function scenarioTarget(frozen, bars, entry, referenceTs) { const raw = f
+ // ablate (focused completion §5, MOMENTUM_ABLATION): an explicit research-only removal of NAMED entry clauses of ONE setup; the removed
+ // clauses are still measured and reported (`ablated`), they simply do not decide. Nothing else changes; PAPER / LIVE never pass it.
+ export const ABLATABLE_CLAUSES = Object.freeze({ RANGE_IGNITION: ['FI15', 'FI60_POSITIVE'] });
++// This gate runs only AFTER the intended size has walked both sides of a real
++// book and the existing cost layer has produced executable facts. It is kept
++// separate from evaluateSetup to avoid circularly requiring cost before size.
++export function evaluateStyleExecutionGate({ setupId, executableEdge, decisionTs } = {}) {
++  if (!POST_SIZE_EXECUTION_GATE_SETUPS.includes(setupId)) return Object.freeze({ gateVersion: POST_SIZE_EXECUTION_GATE_VERSION, setupId, required: false, state: 'NOT_REQUIRED', clauses: [], refused: [], needsData: [] });
++  const fresh = freshFact(executableEdge, decisionTs, 1_000);
++  const priceInputs = fresh && safePositive(executableEdge.averageEntryPrice) && safePositive(executableEdge.averageExitPrice);
++  const costInputs = fresh && safeNonNegative(executableEdge.roundTripFeesQuote) && safeNonNegative(executableEdge.spreadCostQuote) && safeNonNegative(executableEdge.slippageCostQuote);
++  const edge = Number(executableEdge?.estimatedRemainingEdgeAfterCostsBps); const riskEdge = Number(executableEdge?.estimatedRemainingEdgeAfterCostsAndRiskBps);
++  const clauses = [
++    clause('EXECUTABLE_BOTH_DIRECTIONS', priceInputs && executableEdge.entryDepthSufficient === true && executableEdge.exitDepthSufficient === true, fresh ? { averageEntryPrice: executableEdge.averageEntryPrice ?? null, averageExitPrice: executableEdge.averageExitPrice ?? null, entryDepthSufficient: executableEdge.entryDepthSufficient ?? null, exitDepthSufficient: executableEdge.exitDepthSufficient ?? null } : null, true, 'EXECUTION_FACTS', 'realistic intended-size average fills and depth supplied by the cost/size layer'),
++    clause('ROUND_TRIP_COST_INPUTS_KNOWN', costInputs, costInputs ? { roundTripFeesQuote: executableEdge.roundTripFeesQuote, spreadCostQuote: executableEdge.spreadCostQuote, slippageCostQuote: executableEdge.slippageCostQuote } : null, 'NON_NEGATIVE', 'QUOTE', 'fees, spread and slippage are supplied facts; this gate does not recompute them'),
++    clause('ESTIMATED_REMAINING_EDGE_AFTER_COSTS_POSITIVE', fresh && Number.isFinite(edge) && edge > 0, fresh && Number.isFinite(edge) ? edge : null, 0, 'BPS', 'an estimate from valid inputs, never known future profit'),
++    clause('ESTIMATED_REMAINING_EDGE_AFTER_COSTS_AND_RISK_POSITIVE', fresh && Number.isFinite(riskEdge) && riskEdge > 0, fresh && Number.isFinite(riskEdge) ? riskEdge : null, 0, 'BPS', 'estimated remaining edge must survive both round-trip costs and risk'),
++  ];
++  const refused = clauses.filter((x) => !x.ok).map((x) => x.id); const needsData = clauses.filter((x) => !x.ok && x.value === null).map((x) => x.id);
++  const state = refused.length === 0 ? 'ELIGIBLE' : needsData.length === refused.length ? 'NEEDS_DATA' : 'REFUSED';
++  return Object.freeze({ gateVersion: POST_SIZE_EXECUTION_GATE_VERSION, setupId, required: true, state, clauses, refused, needsData });
++}
++export function setupStrengthFacts(frozen, fast) {
++  let priceBeyondTriggerAtr = null;
++  try { if (frozen && M.isPositive(frozen.atr14) && fast?.mid !== null && fast?.mid !== undefined) priceBeyondTriggerAtr = M.div(M.sub(fast.mid, frozen.triggerLevel), frozen.atr14, 8, 'HALF_UP'); } catch { priceBeyondTriggerAtr = null; }
++  const exhaustionKnown = fast?.exhaustion?.state === 'KNOWN' && typeof fast.exhaustion.exhausted === 'boolean';
++  const age = (fact) => Number.isSafeInteger(fact?.knownAtTs) && Number.isSafeInteger(fast?.decisionTs) ? Math.max(0, fast.decisionTs - fact.knownAtTs) : null;
++  const evidenceKnown = known(fast?.continuationEvidence);
++  return Object.freeze({ strengthFactsVersion: 'judge-setup-strength-facts-1', priceBeyondTriggerAtr, relativeVolume60: known(fast?.rv60) ? fast.rv60.rv60 : null, flow15: known(fast?.fi15) ? fast.fi15.fi : null, flow60: known(fast?.fi60) ? fast.fi60.fi : null, depth10bps: fast?.depth10bps ?? null, continuationPhase: evidenceKnown ? fast.continuationEvidence.phase ?? null : null, evidenceDimensions: evidenceKnown && Array.isArray(fast.continuationEvidence.dimensions) ? [...fast.continuationEvidence.dimensions] : null, exhausted: exhaustionKnown ? fast.exhaustion.exhausted : null, known: Object.freeze({ relativeVolume60: known(fast?.rv60), flow15: known(fast?.fi15), flow60: known(fast?.fi60), liquidity: fast?.depth10bps !== null && fast?.depth10bps !== undefined, continuation: evidenceKnown, exhaustion: exhaustionKnown }), sourceAgeMs: Object.freeze({ book: fast?.bookAgeMs ?? null, continuation: age(fast?.continuationEvidence), exhaustion: age(fast?.exhaustion) }) });
++}
+ export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisionTs, event = null, ablate = null }) {
+-  if (!SETUPS.includes(setupId)) throw new Error(`unknown setup ${setupId}`);
++  if (!SETUP_EVALUATORS.includes(setupId)) throw new Error(`unknown setup ${setupId}`);
+   if (ablate && ablate.setupId === setupId) { const allowed = ABLATABLE_CLAUSES[setupId] ?? []; const bad = (ablate.clauses ?? []).filter((id) => !allowed.includes(id)); if (bad.length) throw new Error(`clauses ${bad.join(',')} are not ablatable for ${setupId}`); }
+   const structural = structuralClauses(setupId, frozen, ind, fast, { decisionTs, event }); const quick = fastClauses(setupId, frozen, fast); const all = [...structural, ...quick];
+   let ablated = []; if (ablate && ablate.setupId === setupId) ablated = all.filter((x) => ablate.clauses.includes(x.id)).map((x) => ({ ...x, ablated: true }));
+@@ -68,7 +138,8 @@ export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisio
+   const t = scenarioTarget(frozen, bars, entry, frozen.referenceTs); const stopOk = M.isPositive(frozen.structuralStop) && M.lt(frozen.structuralStop, entry);
+   if (!stopOk) refused.push('STOP_GEOMETRY');
+   const state = refused.length === 0 ? 'ELIGIBLE' : needsData.length && needsData.length === refused.length ? 'NEEDS_DATA' : 'REFUSED';
+-  return Object.freeze({ setupId, strategyVersion: STRATEGY_VERSION, state, clauses: ablated.length ? [...clauses, ...ablated] : clauses, ablated: ablated.map((x) => x.id), refused, needsData, invalidation: { structuralStop: frozen.structuralStop, kind: 'ABSOLUTE_PRICE_BELOW' }, scenario: { target: t.target, cappedBy: t.cappedBy, kind: 'SCENARIO_NOT_FORECAST' }, maxEntryLevel: frozen.maxEntryLevel, maxDurationMs: REFERENCE.maxDurationMs, hypothesisDigest: hypothesisDigest(frozen), calibrationState: 'UNVALIDATED_HYPOTHESIS' });
++  const definition = setupDefinition(setupId);
++  return Object.freeze({ setupId, setupFamily: definition.familyId, startingStyleCatalogVersion: STARTING_STYLE_CATALOG_VERSION, strategyVersion: STRATEGY_VERSION, state, clauses: ablated.length ? [...clauses, ...ablated] : clauses, ablated: ablated.map((x) => x.id), refused, needsData, invalidation: { structuralStop: frozen.structuralStop, kind: 'ABSOLUTE_PRICE_BELOW' }, scenario: { target: t.target, cappedBy: t.cappedBy, kind: 'SCENARIO_NOT_FORECAST' }, maxEntryLevel: frozen.maxEntryLevel, horizon: definition.horizon, maxDurationMs: definition.operationalMaxDurationMs, executionGate: Object.freeze({ required: POST_SIZE_EXECUTION_GATE_SETUPS.includes(setupId), version: POST_SIZE_EXECUTION_GATE_VERSION, state: POST_SIZE_EXECUTION_GATE_SETUPS.includes(setupId) ? 'REQUIRED_DOWNSTREAM' : 'NOT_REQUIRED' }), strengthFacts: setupStrengthFacts(frozen, fast), hypothesisDigest: hypothesisDigest(frozen), calibrationState: 'UNVALIDATED_HYPOTHESIS' });
+ }
+ // ---- the persistence / expiry / cooldown law over accepted books --------------------------------------------------------------
+ export function createConfirmation({ level, triggerTs, expiryMs = REFERENCE.proposalExpiryMs, minBooks = REFERENCE.persistenceBooks, spanMs = REFERENCE.persistenceSpanMs }) {
+diff --git a/judge/judge.js b/judge/judge.js
+index 59f8aee..8b56932 100644
+--- a/judge/judge.js
++++ b/judge/judge.js
+@@ -7,13 +7,14 @@
+ // of authenticated controls, account mode / release, risk and health. NO_TRADE is a successful decision.
+ import * as M from '../execution/money.js';
+ import { indicatorBlock, createFlowTracker, createFeatureCache, bookFacts, bidDepthWithinBps, medianDecimal, validateBarBlock, FEATURE_VERSION } from './features.js';
+-import { SETUPS, SETUP_INPUT_MODES, REFERENCE, freezeReferences, evaluateSetup, createConfirmation, createEpisodeTracker, hypothesisDigest, STRATEGY_VERSION } from './setups.js';
++import { SETUPS, SETUP_INPUT_MODES, REFERENCE, freezeReferences, evaluateSetup, createConfirmation, createEpisodeTracker, hypothesisDigest, setupDefinition, STRATEGY_VERSION } from './setups.js';
+ import { evaluateEntry, sizeSearch, liquidationValue, COST_MODEL_VERSION } from './cost.js';
+ import { admitCandidate, riskBudgetFor, rankCandidates, clusterIdOf } from './risk.js';
+ import { makeDecision, decisionIdentity, decisionRecord } from './contract.js';
+ import { intakeDecision, consumeCase, primaryConfirmedCatalyst } from './intake.js';
+ import { JUDGE_FACT_RECIPE_VERSION, resolveLearningContribution, contributionMeasurement, contributionCandidateLog } from './learning-intake.js';
+ import { evaluateSizeLadder, sizingMeasurement, sizingCandidateLog } from './size-ladder.js';
++import { SETUP_SELECTION_VERSION, createUnderlyingClaimLedger, deterministicSetupTieOrder, selectionMeasurement, setupDurationBound, strategyFamilyOf } from './setup-selection.js';
+ import { createScheduler } from './scheduler.js';
+ import { judgeReadinessMatrix } from './readiness.js';
+ import { entryBlockingRestrictions } from '../execution/reducer.js';
+@@ -28,7 +29,7 @@ export const canaryDurationBound = (s, policyMs) => { const a = s?.authorization
+ export const FUNNEL_STAGES = Object.freeze(['discovered', 'recorded', 'warmed', 'nominated', 'setupQualified', 'costQualifiedAtLegalSize', 'reserved', 'sent', 'filled', 'protected', 'closedReconciled']);
+ const inc = (obj, k, n = 1) => { obj[k] = (obj[k] ?? 0) + n; };
  
--export function freezeCandidate({ store, pattern, costModel, terminalGroupTarget = PROMOTION_POLICY.minTerminalGroupTarget, nowTs }) {
-+export function freezeCandidate({ store, pattern, costModel, consumerBinding, terminalGroupTarget = PROMOTION_POLICY.minTerminalGroupTarget, nowTs }) {
-   if (pattern.state !== 'ACCUMULATING') throw new Error(`freezeCandidate: only an ACCUMULATING pattern can freeze (state ${pattern.state})`);
-   const design = sealDesign({
-     patternId: pattern.patternId, predicate: pattern.predicate, scope: pattern.scope,
-     costModel, terminalGroupTarget, alpha: PROMOTION_POLICY.alpha, sealedTs: nowTs,
-     evidenceDigest: pattern.evidence.evidenceRefs.length ? pattern.evidence.evidenceRefs.join('|') : 'NO_REFS',
-+    consumerBinding,
-   });
-   store.appendProspective({ kind: 'DESIGN_SEALED', design });
-   const frozen = buildPatternRecord({
-@@ -68,6 +69,19 @@ export function settleCandidate({ store, candidateId, nowTs, commonShockDates =
-     return { terminal, activation: null, patternState: pattern?.state ?? null, note: 'PATTERN_NOT_PENDING_FOR_THIS_CANDIDATE' };
-   }
-   if (terminal.verdict === 'FORWARD_SUPPORTED') {
-+    // v1 designs predate a sealed consumer recipe/policy binding. Their forward results remain replayable history,
-+    // but attaching today's binding after observing their outcomes would be retrospective selection. Consume the
-+    // candidate and return the pattern to accumulation; only a newly sealed v2 design can publish to Judge.
-+    if (design.prospectiveVersion === LEGACY_PROSPECTIVE_VERSION) {
-+      store.appendPattern(buildPatternRecord({
-+        predicate: pattern.predicate, scope: pattern.scope, origin: pattern.origin, createdTs: pattern.createdTs,
-+        ts: nowTs, seq: pattern.seq + 1, state: 'ACCUMULATING', previousState: pattern.state,
-+        transitionReason: 'LEGACY_CONSUMER_BINDING_UNSEALED',
-+        evidence: { ...pattern.evidence, _grouping: null }, estimate: pattern.estimate, contradictions: pattern.contradictions,
-+        candidateId: null, activationId: null,
-+      }));
-+      return { terminal, activation: null, patternState: 'ACCUMULATING', note: 'LEGACY_CONSUMER_UNBOUND_INELIGIBLE_FOR_JUDGE' };
+-export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null }) {
++export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null, setupSelection = null }) {
+   // LEARN-1 consumer seam (ADDENDUM-2 §08): `learning` is an OPTIONAL injected read accessor over the prepared
+   // immutable decision-memory snapshot ({ snapshot: () => readDecisionMemory(...) }), refreshed outside this loop.
+   // Absent (every current composition; fly.js passes nothing), every path below is byte-identical to the baseline
+@@ -42,8 +43,20 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+   // armRule (focused completion §5): a research-only experiment arm — enabled setups, a named clause ablation, a deterministic nomination
+   // thinning and the challengers whose verdicts gate admission. PAPER / LIVE compositions never pass one; a REPLAY arm is one account.
+   if (armRule && mode !== 'REPLAY') throw new Error('an arm rule is research configuration: only a REPLAY composition may carry one');
++  // Strategy-family selection is a separate, explicit version transition. The
++  // default path remains the exact legacy four-setup Judge. Fail closed on any
++  // malformed/future port instead of treating a truthy object as authority.
++  const selectionKeys = setupSelection === null ? [] : (setupSelection && typeof setupSelection === 'object' && !Array.isArray(setupSelection) ? Object.keys(setupSelection) : []);
++  if (setupSelection !== null && (selectionKeys.length !== 1 || selectionKeys[0] !== 'version' || setupSelection.version !== SETUP_SELECTION_VERSION)) throw new Error(`invalid setupSelection port; expected { version: '${SETUP_SELECTION_VERSION}' }`);
++  const setupSelectionEnabled = setupSelection !== null;
+   const keepSnapshots = Boolean(armRule?.challengers?.length);
+-  const S = scheduler ?? createScheduler({ monotonic: () => clock.monotonic() }); const setups = armRule?.setups ?? enabledSetups ?? policy.setups.enabled; const cache = createFeatureCache({ max: 128 });
++  const S = scheduler ?? createScheduler({ monotonic: () => clock.monotonic() }); const setups = armRule?.setups ?? enabledSetups ?? policy.setups.enabled;
++  // EDGE_STATE setups are research evaluators only until both their post-size
++  // execution gate and their Watch exit contract are composed. Check the
++  // effective list after every override so no caller can accidentally turn a
++  // null operational horizon into the generic policy duration.
++  for (const setupId of setups) if (setupDefinition(setupId)?.operationalMaxDurationMs === null) throw new Error(`NEW_SETUP_NOT_OPERATIONAL: ${setupId} requires a composed post-size execution gate and Watch EDGE_STATE contract`);
++  const cache = createFeatureCache({ max: 128 });
+   const candidates = new Map(); // symbol -> runtime
+   const funnel = Object.fromEntries(FUNNEL_STAGES.map((s) => [s, 0])); const refusals = {}; const counters = { books: 0, trades: 0, crossings: 0, confirmations: 0, expired: 0, decisions: 0, entries: 0, needsData: 0, missedDuringWarmup: 0, modelWait: 0, modelStale: 0, missedDuringAnalysis: 0, revalidationRefusals: 0, queueDelayExpired: 0, snapshotPersistFailures: 0 }; const decisions = []; let lastEntryMono = null; const provenance = new Map(); // episode|decision clock -> the already-known dependency identities (research report only)
+   const now = () => clock.now(); const state = () => dispatcher.state(); const ev = dispatcher.ev;
+@@ -52,7 +65,44 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+   // at a time in that order, each seeing the reservations the earlier ones committed — receipt order never decides
+   const gate = { pending: [], scheduled: false, batches: 0, lastBatch: null };
+   function admissionGate(entry) { return new Promise((resolve) => { gate.pending.push({ ...entry, resolve }); if (!gate.scheduled) { gate.scheduled = true; setImmediate(() => flushGate().catch((err) => log(`admission gate: ${err.message}`))); } }); }
+-  async function flushGate() { const batch = gate.pending; gate.pending = []; gate.scheduled = false; if (!batch.length) return; gate.batches += 1; const ranked = rankCandidates(batch.map((b) => ({ ...b.rank, entry: b }))); const unranked = batch.filter((b) => !ranked.some((r) => r.entry === b)); const order = [...ranked.map((r) => r.entry), ...unranked]; gate.lastBatch = { size: batch.length, order: order.map((b) => b.rank.assetId) }; for (let i = 0; i < order.length; i += 1) { await new Promise((done) => order[i].resolve({ rank: i + 1, of: order.length, done })); } }
++  async function flushGate() {
++    const batch = gate.pending; gate.pending = []; gate.scheduled = false; if (!batch.length) return;
++    gate.batches += 1;
++    if (!setupSelectionEnabled) {
++      const ranked = rankCandidates(batch.map((b) => ({ ...b.rank, entry: b })));
++      const unranked = batch.filter((b) => !ranked.some((r) => r.entry === b));
++      const order = [...ranked.map((r) => r.entry), ...unranked];
++      const batchReport = { size: batch.length, order: order.map((b) => b.rank.assetId) };
++      gate.lastBatch = batchReport;
++      for (let i = 0; i < order.length; i += 1) await new Promise((done) => order[i].resolve({ rank: i + 1, of: order.length, done }));
++      return;
 +    }
-     const activation = buildActivation({
-       candidateId, patternId: design.patternId, trainingCutoffTs: design.sealedTs,
-       candidateDigest: canonicalDigest(design),
-@@ -90,6 +104,8 @@ export function settleCandidate({ store, candidateId, nowTs, commonShockDates =
-       // candle-fidelity forward validation differentiates NO purchase sizes: the artifact explicitly declares
-       // no supported size (null) — dynamic sizing's full-balance path can therefore never cite it
-       maxSizeUsd: null,
-+      featureRecipeVersion: design.consumerBinding.featureRecipeVersion,
-+      policyVersion: design.consumerBinding.policyDigest,
-       applicability: design.predicate, effectiveTs: nowTs,
-       expiresTs: nowTs + PROMOTION_POLICY.activationLifetimeDays * 86_400_000,
-       degradeRule: PROMOTION_POLICY.degradeRule, ts: nowTs,
-diff --git a/learning/memory-view.js b/learning/memory-view.js
-index 81fe594..182507b 100644
---- a/learning/memory-view.js
-+++ b/learning/memory-view.js
-@@ -52,6 +52,8 @@ export function readDecisionMemory({ store, nowTs }) {
-     const validation = { evidenceBasis: 'PROSPECTIVE', groupCount: terminal.maturedGroups, assetCount: terminal.distinctAssets, dateCount: terminal.distinctUtcDates, netAfterCostsPct: terminal.effect?.pairedMeanDiff };
-     if (a.patternId !== design.patternId || a.trainingCutoffTs !== design.sealedTs
-         || a.candidateDigest !== canonicalDigest(design) || a.evidenceDigest !== canonicalDigest(evidence) || a.reportDigest !== canonicalDigest(terminal)
-+        || !design.consumerBinding || a.featureRecipeVersion !== design.consumerBinding.featureRecipeVersion
-+        || a.policyVersion !== design.consumerBinding.policyDigest
-         || canonicalDigest(a.applicability) !== canonicalDigest(design.predicate)
-         || canonicalDigest(a.scope) !== canonicalDigest(scope) || canonicalDigest(a.validation) !== canonicalDigest(validation)
-         || a.maxSizeUsd !== null) {
-diff --git a/test/learning-promotion-consumer-binding.test.js b/test/learning-promotion-consumer-binding.test.js
++    // The existing risk rank remains primary. The pre-order contributes only
++    // the deterministic family/setup tie which risk.js otherwise leaves equal
++    // for two setups of the same asset.
++    const tied = deterministicSetupTieOrder(batch);
++    const ranked = rankCandidates(tied.map((b) => ({ ...b.rank, entry: b })));
++    const unranked = tied.filter((b) => !ranked.some((r) => r.entry === b));
++    const order = [...ranked.map((r) => r.entry), ...unranked];
++    const claims = createUnderlyingClaimLedger(); const outcomes = [];
++    const batchReport = { size: batch.length, order: order.map((b) => b.rank.assetId), detail: order.map((b) => ({ assetId: b.rank.assetId, setupId: b.rank.setupId, family: strategyFamilyOf(b.rank.setupId) })) };
++    gate.lastBatch = batchReport;
++    for (let i = 0; i < order.length; i += 1) {
++      const entry = order[i]; const offered = claims.offer({ assetId: entry.rank.assetId, setupId: entry.rank.setupId });
++      if (!offered.selected) {
++        outcomes.push({ assetId: entry.rank.assetId, setupId: entry.rank.setupId, outcome: 'NOT_SELECTED', winnerSetupId: offered.winnerSetupId });
++        entry.resolve({ rank: i + 1, of: order.length, selected: false, winnerSetupId: offered.winnerSetupId, done: () => {} });
++        continue;
++      }
++      const result = await new Promise((done) => entry.resolve({ rank: i + 1, of: order.length, selected: true, winnerSetupId: null, done }));
++      const didClaim = result?.claimed === true;
++      outcomes.push({ assetId: entry.rank.assetId, setupId: entry.rank.setupId, outcome: didClaim ? 'CLAIMED' : 'FALLBACK_ALLOWED', winnerSetupId: null });
++      claims.settle({ assetId: entry.rank.assetId, setupId: entry.rank.setupId, claimed: didClaim });
++    }
++    // Capture the batch object before any await: a later batch may replace
++    // gate.lastBatch while this one is still settling.
++    batchReport.outcomes = outcomes;
++  }
+   function admit(symbol, { assetId = symbol.split('/')[0], priority = 'CANDIDATE', nominationKnownAtTs = now(), source = 'MANUAL' } = {}) {
+     if (candidates.has(symbol)) return candidates.get(symbol); const spec = specOf(symbol); if (!spec) { inc(refusals, 'INSTRUMENT_SPEC_UNKNOWN'); return null; }
+     if (policy.universe.excludeBases.includes(assetId)) { inc(refusals, 'EXCLUDED_BASE'); return null; } if (spec.status !== 'online') { inc(refusals, `INSTRUMENT_${spec.status.toUpperCase()}`); return null; }
+@@ -117,6 +167,12 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+     let measurements = learned ? [...baseMeasurements, contributionMeasurement(learned), ...contributionCandidateLog(learned)] : baseMeasurements;
+     if (setup.state !== 'ELIGIBLE') { if (setup.state === 'NEEDS_DATA') counters.needsData += 1; tracker.decide(setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'NO_TRADE', setup.refused, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+     funnel.setupQualified += 1;
++    let operationalDurationMs = policy.execution.maxDurationMs;
++    if (setupSelectionEnabled) {
++      const duration = setupDurationBound({ policyMaxDurationMs: policy.execution.maxDurationMs, setupMaxDurationMs: setup.maxDurationMs });
++      if (!duration.ok) { tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', [duration.reason], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
++      operationalDurationMs = duration.maxDurationMs;
++    }
+     // a seeded nomination control (focused completion §5): ONE deterministic draw per canonical episode, before any reservation, never redrawn
+     if (armRule?.nominationFilter && !armRule.nominationFilter({ episodeId, assetId: c.assetId, setupId })) { tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', ['SEEDED_CONTROL_NOT_SELECTED'], snap, { inputMode, caseRefs, measurements }); }
+     // permission intersection: controls, mode, restrictions, health, clock
+@@ -162,23 +218,30 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+     // It can only reorder this admission batch; it cannot admit, size, or bypass anything, and the committed
+     // valuationRef/sizing keep the untouched baseline ratio.
+     const rankRatio = learned?.applied && e.rewardRiskRatio !== null && Number.isFinite(Number(e.rewardRiskRatio)) ? Number(e.rewardRiskRatio) + learned.adjust : e.rewardRiskRatio;
+-    const slot = await admissionGate({ rank: { rewardRiskRatio: rankRatio, costBps: e.costBps ?? null, firstKnownTs: c.nominationKnownAtTs, assetId: c.assetId } }); c.lastRank = { rank: slot.rank, of: slot.of, ts: D };
++    const rank = { rewardRiskRatio: rankRatio, costBps: e.costBps ?? null, firstKnownTs: c.nominationKnownAtTs, assetId: c.assetId };
++    if (setupSelectionEnabled) Object.assign(rank, { setupId, decisionId: frozen.decisionId });
++    const slot = await admissionGate({ rank }); c.lastRank = { rank: slot.rank, of: slot.of, ts: D };
++    if (setupSelectionEnabled) {
++      measurements = [...measurements, selectionMeasurement({ setupId, selected: slot.selected, winnerSetupId: slot.winnerSetupId, rank: slot.rank, of: slot.of })];
++      if (!slot.selected) { tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', ['STRATEGY_NOT_SELECTED_SAME_UNDERLYING'], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); }
++    }
++    let claimedUnderlying = false;
+     try {
+     const again = admitCandidate({ state: state(), candidate: { assetId: c.assetId, clusterId, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: state().limits, lockLevel: lockLevel(), clusters: clusters() });
+     if (!again.ok) { tracker.decide('ENTRY_REFUSED'); return await recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', [...again.reasons, `RANKED_${slot.rank}_OF_${slot.of}`], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); }
+     // ONE transaction: decision + reservation + shell + pin + outbox intent, rechecked against the current revision
+     const decision = buildDecision({ c, setupId, episodeId, frozen, status: 'ENTRY_RESERVED', reasonCodes: [], snap, decisionTs: D, inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing });
+     const n = Object.keys(s.orders).length + 1; const positionId = `pos-${c.assetId}-${D}-${n}`; const reservationId = `res-${decision.decisionId.slice(4, 20)}`; const orderId = `ord-${c.assetId}-${D}-${n}`; const clientOrderId = `s${(D % 1e9).toString(36)}${n.toString(36)}`.slice(0, 18);
+-    const events = [ev('DECISION_RECORDED', decisionRecord(decision, verdicts)), ev('RESERVATION_OPENED', { reservationId, decisionId: decision.decisionId, assetId: c.assetId, pair: c.symbol, cashReserved: e.entryCashOut, riskReserved: e.scenarioStressedLoss, clusterId, expiresTs: D + policy.execution.proposalExpiryMs }), ev('POSITION_OPENED', { positionId, decisionId: decision.decisionId, assetId: c.assetId, pair: c.symbol, specDigest: c.spec.specDigest, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, targetProceedsRecipe: 'SHIFTED_BOOK_STRESS_50', atr14: frozen.atr14, maxDurationMs: canaryDurationBound(s, policy.execution.maxDurationMs), feedPinned: true, requestedQty: found.q, clusterId }), ev('FEED_PIN', { symbol: c.symbol, action: 'PIN', reason: `position shell ${positionId}`, ts: D }), ev('ORDER_INTENT', { intentId: `int-${orderId}`, orderId, clientOrderId, reservationId, positionId, kind: s.authorization && !s.authorization.ended && s.authorization.kind === 'CANARY' ? 'CANARY_ENTRY' : 'ENTRY', side: 'buy', pair: c.symbol, qty: found.q, limitPrice: e.entryLimitPrice, orderType: 'limit', timeInForce: 'IOC', protection: { ordertype: 'stop-loss', trigger: 'last', price: M.roundToStep(frozen.structuralStop, c.spec.priceIncrement, 'FLOOR') }, deadlineTs: D + policy.execution.entryDeadlineMs, feeDigest: fee.feeDigest, specDigest: c.spec.specDigest, snapshotDigest: snap.digest, createdTs: D })];
++    const events = [ev('DECISION_RECORDED', decisionRecord(decision, verdicts)), ev('RESERVATION_OPENED', { reservationId, decisionId: decision.decisionId, assetId: c.assetId, pair: c.symbol, cashReserved: e.entryCashOut, riskReserved: e.scenarioStressedLoss, clusterId, expiresTs: D + policy.execution.proposalExpiryMs }), ev('POSITION_OPENED', { positionId, decisionId: decision.decisionId, assetId: c.assetId, pair: c.symbol, specDigest: c.spec.specDigest, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, targetProceedsRecipe: 'SHIFTED_BOOK_STRESS_50', atr14: frozen.atr14, maxDurationMs: canaryDurationBound(s, operationalDurationMs), feedPinned: true, requestedQty: found.q, clusterId }), ev('FEED_PIN', { symbol: c.symbol, action: 'PIN', reason: `position shell ${positionId}`, ts: D }), ev('ORDER_INTENT', { intentId: `int-${orderId}`, orderId, clientOrderId, reservationId, positionId, kind: s.authorization && !s.authorization.ended && s.authorization.kind === 'CANARY' ? 'CANARY_ENTRY' : 'ENTRY', side: 'buy', pair: c.symbol, qty: found.q, limitPrice: e.entryLimitPrice, orderType: 'limit', timeInForce: 'IOC', protection: { ordertype: 'stop-loss', trigger: 'last', price: M.roundToStep(frozen.structuralStop, c.spec.priceIncrement, 'FLOOR') }, deadlineTs: D + policy.execution.entryDeadlineMs, feeDigest: fee.feeDigest, specDigest: c.spec.specDigest, snapshotDigest: snap.digest, createdTs: D })];
+     const revisionSeen = dispatcher.revision();
+     // the valued snapshot is persisted BEFORE the durable intent (closeout R11): a dispatched order references evidence on disk
+     if (snapshotStore) { const persisted = await snapshotStore.persist(snap, { purpose: 'DECISION', ref: decision.decisionId }); if (!persisted.ok) { counters.snapshotPersistFailures += 1; tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['DECISION_SNAPSHOT_NOT_PERSISTED'], snap, { inputMode, caseRefs, measurements, valuationRef, sizing }); } }
+-    try { await dispatcher.commit(events, { retryOnConflict: true, recheck: (cur) => (dispatcher.revision() === revisionSeen || admitCandidate({ state: cur, candidate: { assetId: c.assetId, clusterId, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: cur.limits, lockLevel: lockLevel(), clusters: clusters() }).ok) && !entryBlockingRestrictions(cur).length }); } catch (err) { counters.revalidationRefusals += 1; tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', [err.code === 'REDUCER_REFUSED' ? err.detail.code : err.code ?? 'COMMIT_FAILED'], snap, { inputMode, caseRefs, measurements, valuationRef, sizing }); }
++    try { await dispatcher.commit(events, { retryOnConflict: true, recheck: (cur) => (dispatcher.revision() === revisionSeen || admitCandidate({ state: cur, candidate: { assetId: c.assetId, clusterId, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: cur.limits, lockLevel: lockLevel(), clusters: clusters() }).ok) && !entryBlockingRestrictions(cur).length }); claimedUnderlying = true; } catch (err) { counters.revalidationRefusals += 1; tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', [err.code === 'REDUCER_REFUSED' ? err.detail.code : err.code ?? 'COMMIT_FAILED'], snap, { inputMode, caseRefs, measurements, valuationRef, sizing }); }
+     if (feed) feed.admit(c.symbol, { coin: c.assetId, priority: 'PENDING', reason: positionId }); funnel.reserved += 1; decisions.push(decision); if (decisions.length > 256) decisions.shift(); counters.decisions += 1; tracker.decide('ENTRY_RESERVED');
+     // last-moment revalidation on the freshest accepted book (one retry law: a changed book that cannot buy q at the limit refuses and releases the unsent reservation)
+     const fresh = c.lastBook; if (fresh && fresh.digest !== snap.digest) { const again = evaluateEntry({ snapshot: fresh, q: found.q, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel }); if (again.status !== 'OK' || M.gt(again.entryLimitPrice, e.entryLimitPrice) || (now() - fresh.receiptTs) > policy.execution.maxBookAgeMs) { counters.revalidationRefusals += 1; await dispatcher.commit([ev('ORDER_STATE', { orderId, state: 'CANCELLED', nativeOrderId: null, nativeCumQty: '0', reason: `revalidation refused before dispatch: ${again.reasons?.join(',') || 'limit would rise / book stale'}`, sourceTs: null, receiptTs: now() }), ev('RESERVATION_RELEASED', { reservationId, reason: 'REFUSED_AT_REVALIDATION', releasedCash: e.entryCashOut, releasedRisk: e.scenarioStressedLoss, ts: now() })]); if (feed) feed.admit(c.symbol, { coin: c.assetId, priority: 'CANDIDATE' }); return decision; } }
+     funnel.sent += 1; counters.entries += 1; lastEntryMono = clock.monotonic(); dispatcher.enqueue('ENTRY', () => dispatcher.dispatchEntry(orderId)).catch((err) => log(`dispatch ${orderId}: ${err.message}`)); return decision;
+-    } finally { slot.done(); }
++    } finally { if (setupSelectionEnabled) slot.done({ claimed: claimedUnderlying }); else slot.done(); }
+   }
+   // ---- challenger verdicts at D (research arms only) --------------------------------------------------------------------------------
+   const boundedFeature = (f) => JSON.parse(JSON.stringify(f, (k, v) => (Array.isArray(v) && v.length > 32 ? v.slice(0, 32) : v)));
+diff --git a/judge/setup-selection.js b/judge/setup-selection.js
 new file mode 100644
 --- /dev/null
-+++ b/test/learning-promotion-consumer-binding.test.js
-@@ -0,0 +1,182 @@
++++ b/judge/setup-selection.js
+@@ -0,0 +1,95 @@
++// JUDGE — strategy-family identity and deterministic selection metadata.
++//
++// A family is a label for an already-qualified setup, never a confidence
++// score or permission. Executable reward/risk and cost remain the admission
++// order in risk.js; these identifiers provide only a deterministic final tie
++// for two setups of the same underlying and an auditable mutual-exclusion
++// record. The risk and reducer one-position-per-underlying laws remain the
++// final hard backstops.
++
++export const SETUP_SELECTION_VERSION = 'judge-setup-selection-1';
++
++export const STRATEGY_FAMILIES = Object.freeze([
++  'MOMENTUM_CONTINUATION',
++  'EARLY_IGNITION_BREAKOUT',
++  'PULLBACK_REENTRY',
++  'RUMOR_CATALYST',
++  'MICRO_BITE',
++]);
++
++export const SETUP_FAMILY = Object.freeze({
++  MOMENTUM_CONTINUATION: 'MOMENTUM_CONTINUATION',
++  RANGE_IGNITION: 'EARLY_IGNITION_BREAKOUT',
++  TREND_PULLBACK_CONTINUATION: 'PULLBACK_REENTRY',
++  ABSORPTION_RECLAIM: 'PULLBACK_REENTRY',
++  CATALYST_TRANSMISSION: 'RUMOR_CATALYST',
++  MICRO_BITE: 'MICRO_BITE',
++});
++
++export function strategyFamilyOf(setupId) {
++  return typeof setupId === 'string' ? SETUP_FAMILY[setupId] ?? null : null;
++}
++
++// rankCandidates owns the economic order. JavaScript sorting is stable, so
++// pre-ordering only supplies its otherwise-equal same-asset/setup tie. It
++// cannot override reward/risk, cost, first-known time, or asset order.
++export function deterministicSetupTieOrder(entries) {
++  return [...entries].sort((left, right) => {
++    const a = left?.rank ?? {}; const b = right?.rank ?? {};
++    const aa = String(a.assetId ?? ''); const ba = String(b.assetId ?? '');
++    if (aa !== ba) return aa < ba ? -1 : 1;
++    const af = strategyFamilyOf(a.setupId) ?? 'UNKNOWN'; const bf = strategyFamilyOf(b.setupId) ?? 'UNKNOWN';
++    if (af !== bf) return af < bf ? -1 : 1;
++    const as = String(a.setupId ?? ''); const bs = String(b.setupId ?? '');
++    if (as !== bs) return as < bs ? -1 : 1;
++    const ad = String(a.decisionId ?? ''); const bd = String(b.decisionId ?? '');
++    return ad < bd ? -1 : ad > bd ? 1 : 0;
++  });
++}
++
++export function selectionMeasurement({ setupId, selected, winnerSetupId = null, rank = null, of = null }) {
++  const family = strategyFamilyOf(setupId);
++  const winnerFamily = strategyFamilyOf(winnerSetupId);
++  return {
++    id: 'STRATEGY_FAMILY_SELECTION',
++    ok: selected === true,
++    value: family,
++    threshold: selected === true ? family : winnerFamily,
++    unit: 'STRATEGY_FAMILY',
++    note: selected === true
++      ? `${SETUP_SELECTION_VERSION}:selected_for_commit_attempt:rank=${rank ?? 'n/a'}/${of ?? 'n/a'}:setup=${setupId}`
++      : `${SETUP_SELECTION_VERSION}:same_underlying_claimed:winner=${winnerSetupId ?? 'UNKNOWN'}:setup=${setupId}`,
++  };
++}
++
++export function createUnderlyingClaimLedger() {
++  const claims = new Map();
++  return Object.freeze({
++    offer({ assetId, setupId }) {
++      if (typeof assetId !== 'string' || !assetId || typeof setupId !== 'string' || !setupId) return Object.freeze({ selected: false, winnerSetupId: null, reason: 'SELECTION_IDENTITY_INVALID' });
++      const winnerSetupId = claims.get(assetId) ?? null;
++      return Object.freeze(winnerSetupId === null
++        ? { selected: true, winnerSetupId: null, reason: null }
++        : { selected: false, winnerSetupId, reason: 'STRATEGY_NOT_SELECTED_SAME_UNDERLYING' });
++    },
++    settle({ assetId, setupId, claimed }) {
++      if (claimed === true) {
++        const prior = claims.get(assetId);
++        if (prior && prior !== setupId) throw new Error(`underlying ${assetId} already claimed by ${prior}`);
++        claims.set(assetId, setupId);
++      }
++      return claims.get(assetId) ?? null;
++    },
++    snapshot: () => Object.freeze(Object.fromEntries([...claims.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))),
++  });
++}
++
++// A setup may shorten the policy horizon but can never lengthen it. Null is
++// intentional for a setup whose Watch semantics are not operational yet; it
++// refuses instead of silently inheriting the generic four-hour horizon.
++export function setupDurationBound({ policyMaxDurationMs, setupMaxDurationMs }) {
++  if (!Number.isSafeInteger(policyMaxDurationMs) || policyMaxDurationMs <= 0) return Object.freeze({ ok: false, maxDurationMs: null, reason: 'POLICY_DURATION_INVALID' });
++  if (setupMaxDurationMs === null || setupMaxDurationMs === undefined) return Object.freeze({ ok: false, maxDurationMs: null, reason: 'HORIZON_NOT_OPERATIONAL' });
++  if (!Number.isSafeInteger(setupMaxDurationMs) || setupMaxDurationMs <= 0) return Object.freeze({ ok: false, maxDurationMs: null, reason: 'SETUP_DURATION_INVALID' });
++  return Object.freeze({ ok: true, maxDurationMs: Math.min(policyMaxDurationMs, setupMaxDurationMs), reason: null });
++}
+diff --git a/judge/composition.js b/judge/composition.js
+index 9860bb7..a8d9031 100644
+--- a/judge/composition.js
++++ b/judge/composition.js
+@@ -73,12 +73,12 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
+   const fd = feed ?? createExecutionFeed({ clock: nowTs, limits: { maxCandidates: policy.universe.maxCandidates, maxResearch: policy.universe.maxResearch, maxHotSet: policy.universe.maxHotSet }, log });
+   // focused completion §3: the recording is an experiment INPUT BUNDLE — typed inputs (nominations, instruments, fees, history retrievals,
+   // consumed cases, control changes) are captured beside the raw feed rows under one capture sequence, validated before they are written
+-  const recorder = recordDir ? createFeedRecorder({ dir: recordDir, clock: nowTs, log, binding: bundleBinding({ experimentId, policyDigest, codeDigest: treeDigest, strategyVersion: policy.strategyVersion, sourcePrefix: `journal:${acct}`, seed: policy.evaluation?.seed ?? null }), validateTyped: (k, p) => recordError(k, p, 'capture') }) : null;
+-  const captureInput = (kind, payload) => { if (!recorder) return false; try { return recorder.record(null, nowTs(), { kind, payload }); } catch (err) { log(`capture ${kind}: ${String(err?.message ?? err).slice(0, 160)}`); return false; } };
++  const recorder = recordDir ? createFeedRecorder({ dir: recordDir, clock: nowTs, log, binding: bundleBinding({ experimentId, policyDigest, codeDigest: treeDigest, strategyVersion: policy.strategyVersion, sourcePrefix: `journal:${acct}`, seed: policy.evaluation?.seed ?? null }), validateTyped: (k, p) => recordError(k, p, 'capture') }) : null; let stopped = false;
++  const captureInput = (kind, payload) => { if (!recorder || stopped) return false; try { return recorder.record(null, nowTs(), { kind, payload }); } catch (err) { log(`capture ${kind}: ${String(err?.message ?? err).slice(0, 160)}`); return false; } };
+   // bounded decision / exit snapshots persisted before dispatch (closeout R11): beside the recording when one exists, else under the execution dir
+   const snapshotStore = writeProjection || recordDir ? createSnapshotStore({ dir: recordDir ? path.join(recordDir, 'snapshots') : path.join(judgeDir(), 'snapshots', acct), log }) : null;
+   // the tape-facing feed: recorded when a recorder exists, and a no-op after stop() (producers stop BEFORE the drain, closeout R08 / R15)
+-  let stopped = false; const droppedAfterStop = { messages: 0 };
++  const droppedAfterStop = { messages: 0 };
+   const tapeFeed = { ...fd, ingest: (raw, ts) => { if (stopped) { droppedAfterStop.messages += 1; return undefined; } if (recorder) recorder.record(raw, ts); return fd.ingest(raw, ts); }, onConnect: (ts) => { if (stopped) return undefined; if (recorder) recorder.record(null, ts, { connect: true }); return fd.onConnect(ts); }, onDisconnect: (ts) => { if (stopped) return undefined; if (recorder) recorder.record(null, ts, { disconnect: true }); return fd.onDisconnect(ts); } };
+   const fee = feeFromPolicy(policy, nowTs()); const specMap = new Map(); const captureSpec = (s) => { specMap.set(s.wsname, s); captureInput('INSTRUMENT', { spec: { ...s }, observedTs: nowTs() }); }; if (specs) for (const s of specs) captureSpec(s); const specOf = (symbol) => specMap.get(symbol) ?? null; captureInput('FEE', { fee: { ...fee }, observedTs: nowTs() });
+   // ---- adapter ----
+@@ -158,7 +158,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
+     const a = s?.authorization ?? null; const authorization = a ? { authorizationId: a.authorizationId, kind: a.kind, expiresTs: a.expiresTs, ended: a.ended, active: !a.ended && a.expiresTs > nowTs(), allocationCeiling: a.allocationCeiling, releaseDigest: a.releaseDigest } : null;
+     const exiting = open.some((p) => ['EXITING', 'CLOSING', 'DUST'].includes(p.state) || watch.positions().some((w) => w.positionId === p.positionId && w.exit.phase !== 'NONE'));
+     return { projectionVersion: PROJECTION_VERSION, compositionVersion: COMPOSITION_VERSION, ts: nowTs(), accountId: acct, mode: s?.mode ?? mode, runMode: mode, accountKind: kind, policyName: policy.policyName, policyDigest, codeDigest: treeDigest, revision: dispatcher.revision(), writerLost: dispatcher.writerLost(), adapter: adapter.kind, credentialsPresent: Boolean(credentials), keyFingerprint: fp, authorization,
+-      positions: open.map((p) => ({ positionId: p.positionId, pair: p.pair, state: p.state, base: ownedBase(p), confirmedBase: p.confirmedBase, soldBase: p.soldBase, baseFees: p.baseFees, protection: p.protection.state, trigger: p.protection.trigger, firstFillTs: p.firstFillTs, initialR: p.initialR?.value ?? null, structuralStop: p.structuralStop, exit: watch.positions().find((w) => w.positionId === p.positionId)?.exit ?? null })),
++      positions: open.map((p) => ({ positionId: p.positionId, pair: p.pair, state: p.state, base: ownedBase(p), confirmedBase: p.confirmedBase, soldBase: p.soldBase, baseFees: p.baseFees, protection: p.protection.state, trigger: p.protection.trigger, firstFillTs: p.firstFillTs, initialR: p.initialR?.value ?? null, structuralStop: p.structuralStop, exit: watch.positions().find((w) => w.positionId === p.positionId)?.exit ?? null })), runtimeLanes: laneStatus(),
+       pendingOrders: pending.map((o) => ({ orderId: o.orderId, state: o.state, kind: o.kind })), restrictions: Object.keys(s?.restrictions ?? {}), performance: s?.performance ?? null, valuation: s?.valuation ?? null, cash: s?.cash ?? null, limits: s?.limits ?? null, clock: pclock.status ? pclock.status() : null, feed: fd.status(), judge: judge.status(), decisions: judge.decisions().slice(-12), candidates: judge.candidates().map((c) => ({ symbol: c.symbol, priority: c.priority, readiness: c.readiness ?? null })), preparation: lastPreparation, watch: watch.status(), dispatcher: dispatcher.status(), latency: dispatcher.latency(), cases: cases.status(), recorder: recorder ? recorder.status() : null,
+       posture: open.length || pending.some((o) => o.kind === 'ENTRY' || o.kind === 'CANARY_ENTRY') ? (exiting ? 'DIGESTING' : 'STRIKE') : null, exposure: { openPositions: open.length, pendingOrders: pending.length }, projectionWrites: { failed: projectionWriteFailed, lastError: lastProjectionWriteError },
+       seals: sealsReport({ codeTested: 'SEE_TEST_LOG', paperOperational: mode === 'PAPER' ? 'RUNNING_UNSEALED' : 'NOT_RUN', livePreflight: lastPreflight ? (lastPreflight.ok ? 'PASSED_THIS_PROCESS' : `FAILED:${lastPreflight.reason}`) : 'NOT_RUN', liveArmed: authorization?.active ? 'ARMED_UNEXPIRED' : 'NOT_RUN' }) };
+@@ -174,26 +174,75 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
+   // ---- clock qualification wired to real venue inputs (closeout R08): REST Time at start, WS ping / REST Time on requalification; the
+   // durable CLOCK_ANCHOR follows every trust change; an untrusted clock is a durable restriction (no additions, safety continues) ----
+   let lastQualifyMono = null; const clockReport = { attempts: 0, ok: 0, lastReason: null, lastSource: null };
+-  async function qualifyClock() { if (kind !== 'LIVE' || typeof pclock.qualify !== 'function') return null; clockReport.attempts += 1; lastQualifyMono = pclock.monotonic(); let sample = null; try { if (adapter.ping && adapter.executionsState && adapter.executionsState().connected) sample = await adapter.ping(); if (!sample?.ok && typeof adapter.serverTime === 'function') sample = await adapter.serverTime(); } catch (err) { sample = { ok: false, reason: String(err?.message ?? err).slice(0, 120) }; } const r = sample?.ok ? pclock.qualify({ serverUtcTs: sample.serverUtcTs, sentMono: sample.sentMono, receivedMono: sample.receivedMono, precisionMs: sample.precisionMs, source: sample.source, requestIdMatched: sample.requestIdMatched ?? true, responseConsistent: sample.responseConsistent ?? true }) : { ok: false, reason: sample?.reason ?? 'NO_SAMPLE' }; if (r.ok) clockReport.ok += 1; clockReport.lastReason = r.ok ? null : r.reason; clockReport.lastSource = sample?.source ?? null; await anchorClock(); return r; }
+-  async function anchorClock() { if (typeof pclock.anchorRecord !== 'function') return; const s = dispatcher.state(); if (!s?.initialized || dispatcher.writerLost()) return; const rec = pclock.anchorRecord(); const prev = s.clockAnchor; if (prev && prev.trusted === rec.trusted && prev.source === rec.source) return; try { await dispatcher.commit(makeEvent({ type: 'CLOCK_ANCHOR', accountId: acct, knownAtTs: nowTs(), payload: { anchorUtcTs: rec.anchorUtcTs, monotonicMs: rec.monotonicMs, uncertaintyMs: rec.uncertaintyMs, source: rec.source, watermarkTs: Math.max(rec.watermarkTs, prev?.watermarkTs ?? 0), trusted: rec.trusted } })); } catch (err) { log(`clock anchor: ${err.message}`); } }
++  async function qualifyClock() { if (kind !== 'LIVE' || typeof pclock.qualify !== 'function') return null; clockReport.attempts += 1; lastQualifyMono = pclock.monotonic(); let sample = null; try { if (adapter.ping && adapter.executionsState && adapter.executionsState().connected) sample = await adapter.ping(); if (!sample?.ok && typeof adapter.serverTime === 'function') sample = await adapter.serverTime(); } catch (err) { sample = { ok: false, reason: String(err?.message ?? err).slice(0, 120) }; } const r = sample?.ok ? pclock.qualify({ serverUtcTs: sample.serverUtcTs, sentMono: sample.sentMono, receivedMono: sample.receivedMono, precisionMs: sample.precisionMs, source: sample.source, requestIdMatched: sample.requestIdMatched ?? true, responseConsistent: sample.responseConsistent ?? true }) : { ok: false, reason: sample?.reason ?? 'NO_SAMPLE' }; if (r.ok) clockReport.ok += 1; clockReport.lastReason = r.ok ? null : r.reason; clockReport.lastSource = sample?.source ?? null; if (!stopped) await anchorClock(); return r; }
++  async function anchorClock() { if (stopped || typeof pclock.anchorRecord !== 'function') return; const s = dispatcher.state(); if (!s?.initialized || dispatcher.writerLost()) return; const rec = pclock.anchorRecord(); const prev = s.clockAnchor; if (prev && prev.trusted === rec.trusted && prev.source === rec.source) return; try { await dispatcher.commit(makeEvent({ type: 'CLOCK_ANCHOR', accountId: acct, knownAtTs: nowTs(), payload: { anchorUtcTs: rec.anchorUtcTs, monotonicMs: rec.monotonicMs, uncertaintyMs: rec.uncertaintyMs, source: rec.source, watermarkTs: Math.max(rec.watermarkTs, prev?.watermarkTs ?? 0), trusted: rec.trusted } })); } catch (err) { log(`clock anchor: ${err.message}`); } }
+   // ---- instrument specs through the SHARED transport for nominated symbols that carry none (closeout R09) ----
+   let specLoad = null; function ensureSpecs() { if (!transport || specLoad) return specLoad; const missing = [...new Set(nominate().map((x) => x?.symbol).filter((s) => s && !specMap.has(s) && !excluded(policy, s)))]; if (!missing.length) return null; specLoad = loadSpecs({ transport, symbols: missing, nowTs: nowTs() }).then((list) => { for (const s of list) captureSpec(s); return list.length; }).catch((err) => { log(`specs: ${err.message}`); return 0; }).finally(() => { specLoad = null; }); return specLoad; }
+   // ---- periodic fallback reconciliation / after-gap completion (closeout R15) ----
+   let lastPeriodicMono = null; let reconcilePending = false; const reconcileReport = { periodic: 0, afterGap: 0, lastOutcome: null };
+   async function fallbackReconcile(t) { if (kind !== 'LIVE' || reconcilePending || dispatcher.writerLost()) return; const s = dispatcher.state(); const ex = adapter.executionsState ? adapter.executionsState() : null; const gap = Boolean(s?.restrictions?.RECONCILIATION_REQUIRED) && ex && (ex.reconnects > (reconcileReport.reconnectsSeen ?? 0) || ex.connected); const openWork = Object.values(s?.orders ?? {}).some((o) => !['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'].includes(o.state)) || Object.values(s?.positions ?? {}).some((p) => p.state !== 'FLAT'); const silent = ex && (!ex.connected || (ex.lastMessageTs !== null && t - ex.lastMessageTs > CLOCK_REQUALIFY_MS)); const due = lastPeriodicMono === null || pclock.monotonic() - lastPeriodicMono >= PERIODIC_RECONCILE_MS || (silent && openWork && pclock.monotonic() - lastPeriodicMono >= CLOCK_REQUALIFY_MS); if (!gap && !due) return; reconcilePending = true; try { const rec = await dispatcher.reconcileNow({ scope: gap ? 'AFTER_GAP' : 'PERIODIC' }); reconcileReport.lastOutcome = rec?.outcome ?? null; if (gap) { reconcileReport.afterGap += 1; reconcileReport.reconnectsSeen = ex?.reconnects ?? 0; } else reconcileReport.periodic += 1; lastPeriodicMono = pclock.monotonic(); } catch (err) { log(`fallback reconciliation: ${err.message}`); } finally { reconcilePending = false; } }
+   function writePaperCheckpoint() { if (kind !== 'PAPER' || typeof adapter.checkpoint !== 'function' || !writeProjection) return null; try { mkdirSync(judgeDir(), { recursive: true }); const cp = adapter.checkpoint(); atomicWriteJson(paperCheckpointFile(acct), cp); return cp; } catch (err) { log(`paper checkpoint: ${err.message}`); return null; } }
+-  let ticking = false; let overlappedTicks = 0; let recorderLatched = false;
+-  async function tick() { if (ticking) { overlappedTicks += 1; return; } ticking = true; try { await tickBody(); } finally { ticking = false; } }
+-  async function tickBody() { const t = nowTs(); if (pclock.observeWall) pclock.observeWall(); ticks += 1;
+-    if (ticks % 40 === 1) { try { admitNominations(); } catch (err) { log(`nominations: ${err.message}`); } ensureSpecs(); if (cases.refresh) cases.refresh().then(() => deliverEvidence(nowTs())).catch((err) => log(`cases: ${err.message}`)); else deliverEvidence(t); for (const c of judge.candidates()) { if (hist.needsRefresh && hist.refresh && hist.needsRefresh(c.symbol, t)) hist.refresh(c.symbol).catch((err) => log(`history ${c.symbol}: ${err.message}`)); } }
+-    // live bar continuation closes a minute on EVERY tick (focused completion): a closed minute that waited for the 10s maintenance pass left
+-    // the candidate without indicators (bars() needs the latest closed minute) and every confirmation book in between was ignored
+-    for (const c of judge.candidates()) if (hist.advance) hist.advance(c.symbol, t, { coverage: fd.coverage(c.symbol, t) });
+-    if (kind === 'LIVE' && (lastQualifyMono === null || pclock.monotonic() - lastQualifyMono >= CLOCK_REQUALIFY_MS || (pclock.status && pclock.status().needsRequalify))) await qualifyClock();
+-    await watch.onTick(t); await publishValuation(t); await judge.onTick(t); if (adapter.onTick) adapter.onTick(t); await fallbackReconcile(t);
+-    // a recorder that stopped recording closes admission (closeout R11): FEED_IMPAIRED latched (exits continue), never a silently partial recording
+-    if (recorder && !recorderLatched && recorder.status().state !== 'RECORDING' && !dispatcher.writerLost()) { recorderLatched = true; const st = recorder.status(); try { await dispatcher.commit(makeEvent({ type: 'RESTRICTION', accountId: acct, knownAtTs: t, payload: { code: 'FEED_IMPAIRED', action: 'LATCH', scope: null, source: 'recorder', sessionDate: null, reason: `feed recording ${st.state}: ${st.reason ?? 'not recording'}`.slice(0, 200), ownerRef: null, ts: t } })); } catch (err) { log(`recorder latch: ${err.message}`); } }
+-    if (ticks % 240 === 0) writePaperCheckpoint(); if (dirty) { dirty = false; publishProjection(); } }
++  // Runtime work is split into single-flight lanes. Watch is always attempted first; a slow valuation, Judge pass,
++  // periodic scan or clock request cannot make the next heartbeat skip Watch. setImmediate is only a priority boundary,
++  // not CPU isolation: synchronous work is still bounded by the candidate/preparation limits and measured below.
++  let safetyTask = null; let coreTask = null; let maintenanceTask = null; let maintenancePending = null; let clockTask = null; let recorderLatched = false; let overlappedTicks = 0;
++  const laneReport = { watchStarted: 0, watchCompleted: 0, watchOverlaps: 0, coreStarted: 0, coreCompleted: 0, coreCoalesced: 0, maintenanceStarted: 0, maintenanceCompleted: 0, maintenanceCoalesced: 0, clockStarted: 0, clockCompleted: 0, clockCoalesced: 0, errors: 0, maxCoreMs: 0, maxMaintenanceMs: 0 };
++  const elapsed = (start) => Math.max(0, pclock.monotonic() - start);
++  const laneStatus = () => ({ ...laneReport, safetyInFlight: Boolean(safetyTask), coreInFlight: Boolean(coreTask), maintenanceInFlight: Boolean(maintenanceTask), maintenancePending: Boolean(maintenancePending), clockInFlight: Boolean(clockTask) });
++  async function scanMaintenance(t, periodic) {
++    if (stopped) return;
++    if (periodic) { try { admitNominations(); } catch (err) { log(`nominations: ${err.message}`); } }
++    if (!periodic || stopped) return;
++    await (ensureSpecs() ?? Promise.resolve(0));
++    if (stopped) return;
++    if (cases.refresh) { try { await cases.refresh(); } catch (err) { log(`cases: ${err.message}`); } if (!stopped) deliverEvidence(nowTs()); } else deliverEvidence(t);
++    if (stopped) return;
++    const refreshes = []; for (const c of judge.candidates()) if (hist.needsRefresh && hist.refresh && hist.needsRefresh(c.symbol, t)) refreshes.push(Promise.resolve(hist.refresh(c.symbol)).catch((err) => log(`history ${c.symbol}: ${err.message}`)));
++    await Promise.all(refreshes);
++  }
++  function scheduleMaintenance(t, periodic) {
++    if (stopped) return null;
++    if (maintenanceTask) { maintenancePending = { t, periodic: Boolean(periodic || maintenancePending?.periodic) }; laneReport.maintenanceCoalesced += 1; return maintenanceTask; }
++    const started = pclock.monotonic(); laneReport.maintenanceStarted += 1;
++    maintenanceTask = new Promise((resolve) => setImmediate(resolve)).then(() => scanMaintenance(t, periodic)).catch((err) => { laneReport.errors += 1; log(`maintenance: ${err.message}`); }).finally(() => { laneReport.maintenanceCompleted += 1; laneReport.maxMaintenanceMs = Math.max(laneReport.maxMaintenanceMs, elapsed(started)); maintenanceTask = null; const pending = maintenancePending; maintenancePending = null; if (pending && !stopped) scheduleMaintenance(pending.t, pending.periodic); });
++    return maintenanceTask;
++  }
++  function scheduleClockQualification() {
++    if (stopped || kind !== 'LIVE' || typeof pclock.qualify !== 'function') return null;
++    let due; try { due = lastQualifyMono === null || pclock.monotonic() - lastQualifyMono >= CLOCK_REQUALIFY_MS || (pclock.status && pclock.status().needsRequalify); } catch (err) { laneReport.errors += 1; log(`clock qualification status: ${err.message}`); return null; }
++    if (!due) return clockTask;
++    if (clockTask) { laneReport.clockCoalesced += 1; return clockTask; }
++    laneReport.clockStarted += 1;
++    clockTask = new Promise((resolve) => setImmediate(resolve)).then(() => (stopped ? null : qualifyClock())).catch((err) => { laneReport.errors += 1; log(`clock qualification: ${err.message}`); }).finally(() => { laneReport.clockCompleted += 1; clockTask = null; });
++    return clockTask;
++  }
++  async function coreTick(t, tickNumber) {
++    const started = pclock.monotonic(); laneReport.coreStarted += 1;
++    try {
++      // Cheap bounded in-memory bar closure belongs after Watch but before
++      // Judge. A held case/network refresh must not freeze the candle clock.
++      // This still shares the event loop; it is not CPU isolation.
++      for (const c of judge.candidates()) if (hist.advance) { try { hist.advance(c.symbol, t, { coverage: fd.coverage(c.symbol, t) }); } catch (err) { log(`history advance ${c.symbol}: ${err.message}`); } }
++      await publishValuation(t); if (stopped) return;
++      await judge.onTick(t); if (stopped) return;
++      if (adapter.onTick) adapter.onTick(t); await fallbackReconcile(t); if (stopped) return;
++      // a recorder that stopped recording closes admission (closeout R11): FEED_IMPAIRED latched (exits continue), never a silently partial recording
++      if (recorder && !recorderLatched && recorder.status().state !== 'RECORDING' && !dispatcher.writerLost()) { recorderLatched = true; const st = recorder.status(); try { await dispatcher.commit(makeEvent({ type: 'RESTRICTION', accountId: acct, knownAtTs: t, payload: { code: 'FEED_IMPAIRED', action: 'LATCH', scope: null, source: 'recorder', sessionDate: null, reason: `feed recording ${st.state}: ${st.reason ?? 'not recording'}`.slice(0, 200), ownerRef: null, ts: t } })); } catch (err) { log(`recorder latch: ${err.message}`); } }
++      if (tickNumber % 240 === 0) writePaperCheckpoint(); if (dirty) { dirty = false; publishProjection(); }
++    } finally { laneReport.coreCompleted += 1; laneReport.maxCoreMs = Math.max(laneReport.maxCoreMs, elapsed(started)); }
++  }
++  async function tick() {
++    const t = nowTs(); try { if (pclock.observeWall) pclock.observeWall(); } catch (err) { laneReport.errors += 1; log(`clock wall observation: ${err.message}`); }
++    ticks += 1; const tickNumber = ticks;
++    if (safetyTask) { overlappedTicks += 1; laneReport.watchOverlaps += 1; await watch.onTick(t); return { state: 'WATCH_IN_FLIGHT' }; }
++    laneReport.watchStarted += 1; safetyTask = Promise.resolve().then(() => watch.onTick(t));
++    try { await safetyTask; laneReport.watchCompleted += 1; } finally { safetyTask = null; }
++    if (stopped) return { state: 'STOPPED' };
++    const maintenanceAlreadyInFlight = Boolean(maintenanceTask); const scheduledMaintenance = scheduleMaintenance(t, tickNumber % 40 === 1); scheduleClockQualification();
++    if (coreTask) { overlappedTicks += 1; laneReport.coreCoalesced += 1; return { state: 'CORE_IN_FLIGHT' }; }
++    coreTask = coreTick(t, tickNumber).catch((err) => { laneReport.errors += 1; throw err; }).finally(() => { coreTask = null; });
++    await coreTask; if (scheduledMaintenance && !maintenanceAlreadyInFlight) await scheduledMaintenance; return { state: 'COMPLETE' };
++  }
+   return {
+     compositionVersion: COMPOSITION_VERSION, accountId: acct, mode, kind, policy, policyDigest, codeDigest: treeDigest, journal: jr, writer, dispatcher, feed: fd, tapeFeed, adapter, judge, watch, history: hist, cases, clock: pclock, fee, specOf, credentialsPresent: Boolean(credentials), keyFingerprint: fp, projection, tick, preflight, arm, disarm, admitNominations, checkAuthorizationBinding, lastPreflight: () => lastPreflight, lockLevel, publishValuation,
+     registerSpec(spec) { captureSpec(spec); return spec; },
+@@ -218,13 +267,14 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
+     // stop: producers first (feed no-op, timers cleared, admission closed), then the drain, the SHUTDOWN reconciliation and the owner
+     // slot release ONLY after a verified handoff, the socket close, the checkpoint / projection, and the writer release LAST
+     async stop({ drainMs = 10_000 } = {}) { if (stopped) return null; stopped = true; lifecycle.push('PRODUCERS_STOPPED'); if (heartbeat) clearInterval(heartbeat); if (schedulerTimer) clearInterval(schedulerTimer); if (projectionTimer) clearInterval(projectionTimer); try { adapter.stopAdmission(); } catch { /* none */ }
++      await Promise.allSettled([safetyTask, coreTask, maintenanceTask, clockTask].filter(Boolean)); lifecycle.push('RUNTIME_LANES_SETTLED');
+       let shutdown = null; let ownerRelease = null;
+       if (kind === 'LIVE' && !dispatcher.writerLost()) { try { shutdown = await dispatcher.restart({ scope: 'SHUTDOWN' }); } catch (err) { shutdown = { error: err.message }; } lifecycle.push('SHUTDOWN_RECONCILED'); const reconciled = shutdown?.reconciliation?.outcome === 'COMPLETE' && !(shutdown?.uncertainOrders ?? []).length; if (typeof jr.releaseLiveOwner === 'function') { try { ownerRelease = reconciled ? await jr.releaseLiveOwner({ venue: 'kraken', accountId: acct, writerEpoch: writer.epoch, reason: 'run ended: shutdown reconciliation COMPLETE, no uncertain dispatch', reconciled: true }) : { ok: false, held: true, reason: `slot retained: shutdown reconciliation ${shutdown?.reconciliation?.outcome ?? 'ABSENT'}, ${(shutdown?.uncertainOrders ?? []).length} uncertain` }; } catch (err) { ownerRelease = { ok: false, held: true, reason: err.message }; } lifecycle.push(ownerRelease?.ok ? 'OWNER_RELEASED' : 'OWNER_RETAINED'); }
+         // a canary that ran ARMED and reconciled COMPLETE ends as COMPLETED: the durable evidence the ordinary arm needs (closeout R14); the reducer verifies terminal entries / flat position
+         const auth = dispatcher.state()?.authorization; if (mode === 'LIVE_ARMED' && auth && !auth.ended && auth.kind === 'CANARY' && !reconciled) lifecycle.push('CANARY_INCOMPLETE:UNRECONCILED'); if (reconciled && mode === 'LIVE_ARMED' && auth && !auth.ended && auth.kind === 'CANARY') { try { await dispatcher.commit(makeEvent({ type: 'AUTHORIZATION_ENDED', accountId: acct, knownAtTs: nowTs(), payload: { authorizationId: auth.authorizationId, reason: 'COMPLETED', ts: nowTs() } })); lifecycle.push('CANARY_COMPLETED'); } catch (err) { lifecycle.push(`CANARY_INCOMPLETE:${err.detail?.code ?? err.code ?? 'REFUSED'}`); } } }
+       const closed = await dispatcher.close({ drainMs }); lifecycle.push('DRAINED'); if (executions?.close) { try { executions.close(); } catch { /* gone */ } lifecycle.push('SOCKET_CLOSED'); }
+       if (recorder) recorder.stop(); writePaperCheckpoint(); publishProjection(); await writer.release(); lifecycle.push('WRITER_RELEASED'); if (ownDb) await ownDb.end(); return { ...closed, shutdown, ownerRelease, droppedAfterStop: { ...droppedAfterStop }, lifecycle: lifecycle.slice() }; },
+-    lifecycle: () => lifecycle.slice(), snapshotStore, recorder, evidenceReport: () => ({ ...evidenceReport, falsifiers: falsifierList.slice() }), deliverEvidence, clockReport: () => ({ ...clockReport }), reconcileReport: () => ({ ...reconcileReport }), overlappedTicks: () => overlappedTicks, executions: () => executions,
++    lifecycle: () => lifecycle.slice(), snapshotStore, recorder, evidenceReport: () => ({ ...evidenceReport, falsifiers: falsifierList.slice() }), deliverEvidence, clockReport: () => ({ ...clockReport }), reconcileReport: () => ({ ...reconcileReport }), runtimeLanes: laneStatus, overlappedTicks: () => overlappedTicks, executions: () => executions,
+     evaluate: (arm = 'REF_COMBINED') => evaluateAccount(dispatcher.state(), { arm }),
+   };
+ }
+diff --git a/test/judge-five-styles.test.js b/test/judge-five-styles.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/judge-five-styles.test.js
+@@ -0,0 +1,95 @@
 +import test from 'node:test';
 +import assert from 'node:assert/strict';
-+import { mkdtempSync, rmSync } from 'node:fs';
-+import { tmpdir } from 'node:os';
-+import path from 'node:path';
++import { readFileSync } from 'node:fs';
 +import {
-+  DEFAULT_FLOORS, LEGACY_PROSPECTIVE_VERSION, PROSPECTIVE_VERSION,
-+  candidateIdOf, canonicalDigest, designError,
-+} from '../learning/contracts.js';
-+import { sealDesign, replayProspective } from '../learning/prospective.js';
-+import { freezeCandidate, settleCandidate } from '../learning/promotion.js';
-+import { buildPatternRecord, buildEvidence, estimateFromEvidence } from '../learning/patterns.js';
-+import { transitionActivation } from '../learning/adapter.js';
-+import { createLearningStore } from '../learning/store.js';
-+import { readDecisionMemory } from '../learning/memory-view.js';
-+import { JUDGE_FACT_RECIPE_VERSION, resolveLearningContribution } from '../judge/learning-intake.js';
++  SETUPS, SETUP_DEFINITIONS, SETUP_EVALUATORS, STARTING_STYLE_FAMILIES,
++  evaluateSetup, evaluateStyleExecutionGate, freezeReferences,
++} from '../judge/setups.js';
 +
-+const T0 = Date.UTC(2026, 5, 1);
-+const HOUR = 3_600_000;
-+const DAY = 86_400_000;
-+const POLICY_DIGEST = 'a'.repeat(64);
-+const BINDING = Object.freeze({ featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyDigest: POLICY_DIGEST });
-+const predicate = { clauses: [{ feature: 'relVolume60m', op: 'GTE', threshold: 3 }] };
-+const scope = { setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED' };
-+const costModel = { feePctPerSide: 0.8, slippageBps: 10 };
++const T = Date.UTC(2026, 8, 13, 18, 0, 0);
++const SPEC = { priceIncrement: '0.1' };
++const IND = Object.freeze({
++  blockDigest: 'a'.repeat(64), referenceTs: T, atr14: 1, h20: 110, l20: 100,
++  low5: 106, last2High: 109, ema5: 107, ema20: 105, lastClose: 108,
++  prior20Return: 0.05, envelope5: 1,
++});
++const fast = (over = {}) => ({
++  mid: '110.2', fi15: { state: 'KNOWN', fi: 0.35 }, fi60: { state: 'KNOWN', fi: 0.2 },
++  rv60: { state: 'KNOWN', rv60: 2 }, coverage: { continuous: true, startTs: T - 120_000, endTs: T },
++  decisionTs: T, bookAgeMs: 100, crcVerified: true, depth10bps: '10000',
++  continuationEvidence: { state: 'KNOWN', knownAtTs: T - 100, phase: 'ACCELERATING', dimensions: ['PRICE_ACCELERATION', 'EXECUTED_VOLUME', 'ORDER_FLOW', 'LIQUIDITY_DEPTH'], relianceGroups: ['PRICE_BARS', 'TRADES', 'ORDER_BOOK'], challengeState: 'NOT_OBSERVED' },
++  exhaustion: { state: 'KNOWN', knownAtTs: T - 100, exhausted: false },
++  ...over,
++});
++const evaluate = (setupId, over = {}) => {
++  const facts = fast(over); const frozen = freezeReferences({ setupId, ind: IND, spec: SPEC, fast: facts, triggerTs: T });
++  return evaluateSetup({ setupId, frozen, ind: IND, fast: facts, bars: [], entry: facts.mid, decisionTs: T });
++};
++const executable = (over = {}) => ({
++  state: 'KNOWN', knownAtTs: T - 100, averageEntryPrice: '110.25', averageExitPrice: '110.8',
++  roundTripFeesQuote: '0.2', spreadCostQuote: '0.05', slippageCostQuote: '0.1',
++  entryDepthSufficient: true, exitDepthSufficient: true,
++  estimatedRemainingEdgeAfterCostsBps: 25, estimatedRemainingEdgeAfterCostsAndRiskBps: 10,
++  ...over,
++});
 +
-+function appendAccumulatingPattern(store) {
-+  const items = Array.from({ length: 8 }, (_, i) => ({
-+    opportunityId: `lop-h${i}`, canonicalCoin: `A${i % 5}A`, decisionTs: T0 - 20 * DAY + i * DAY,
-+    evidenceBasis: 'HISTORICAL_RECONSTRUCTION', outcomeClass: i % 4 === 3 ? 'ADVERSE' : 'FAVORABLE',
-+  }));
-+  const evidence = buildEvidence(items);
-+  const estimate = estimateFromEvidence(items, evidence, { pooledMean: 0.5, priorStrength: 8, updatedTs: T0 - DAY });
-+  const persistedEvidence = { ...evidence, _grouping: null };
-+  store.appendPattern(buildPatternRecord({
-+    predicate, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 20 * DAY, seq: 0,
-+    state: 'NOTICED', previousState: null, transitionReason: 'FIRST_OBSERVATION',
-+    evidence: persistedEvidence, estimate, contradictions: [],
-+  }));
-+  store.appendPattern(buildPatternRecord({
-+    predicate, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 10 * DAY, seq: 1,
-+    state: 'ACCUMULATING', previousState: 'NOTICED', transitionReason: 'NEW_MATURED_EVIDENCE',
-+    evidence: persistedEvidence, estimate, contradictions: [],
-+  }));
-+  return store.patternHeads().values().next().value;
-+}
++test('five starting families map to six evaluators without deleting Absorption or silently activating new Judge setups', () => {
++  assert.deepEqual(STARTING_STYLE_FAMILIES, ['MOMENTUM_CONTINUATION', 'EARLY_IGNITION_BREAKOUT', 'PULLBACK_REENTRY', 'RUMOR_CATALYST', 'MICRO_BITE']);
++  assert.deepEqual(SETUP_EVALUATORS, ['MOMENTUM_CONTINUATION', 'RANGE_IGNITION', 'TREND_PULLBACK_CONTINUATION', 'ABSORPTION_RECLAIM', 'CATALYST_TRANSMISSION', 'MICRO_BITE']);
++  assert.equal(SETUP_DEFINITIONS.TREND_PULLBACK_CONTINUATION.familyId, 'PULLBACK_REENTRY');
++  assert.equal(SETUP_DEFINITIONS.ABSORPTION_RECLAIM.familyId, 'PULLBACK_REENTRY');
++  assert.ok(SETUPS.includes('ABSORPTION_RECLAIM'));
++  assert.equal(SETUPS.includes('MOMENTUM_CONTINUATION'), false);
++  assert.equal(SETUPS.includes('MICRO_BITE'), false);
++  const policy = JSON.parse(readFileSync(new URL('../config/judge.paper.json', import.meta.url), 'utf8'));
++  assert.deepEqual(policy.setups.enabled, SETUPS, 'policy/version compatibility stays exact; another layer must explicitly activate candidates');
++});
 +
-+function appendForwardEvidence(store, design, groups = 34) {
-+  for (let g = 0; g < groups; g += 1) {
-+    const decisionTs = design.sealedTs + HOUR + (g % 8) * DAY + Math.floor(g / 8) * 5 * HOUR;
-+    const opportunityId = `lop-forward-${g}`;
-+    const labelEndTs = decisionTs + HOUR;
-+    store.appendProspective({
-+      kind: 'CAPTURE', candidateId: design.candidateId, opportunityId, canonicalCoin: `A${g % 6}A`,
-+      decisionTs, candidateDecision: 'SELECTED_FOR_SHADOW', baselineDecision: 'SKIPPED',
-+      recordedTs: decisionTs + 1_000, labelEndTs,
-+    });
-+    store.appendProspective({
-+      kind: 'OUTCOME', candidateId: design.candidateId, opportunityId,
-+      outcomeClass: 'FAVORABLE', metricValue: 1.5, outcomeKnownAtTs: labelEndTs, recordedTs: labelEndTs + 1_000,
-+    });
++test('Momentum and Micro-Bite are market-evidence hypotheses with no rigid percent/ATR extension cutoff and explicit non-timer horizons', () => {
++  const momentum = evaluate('MOMENTUM_CONTINUATION');
++  assert.equal(momentum.state, 'ELIGIBLE', momentum.refused.join(','));
++  assert.equal(momentum.setupFamily, 'MOMENTUM_CONTINUATION');
++  assert.equal(momentum.maxEntryLevel, null); assert.equal(momentum.maxDurationMs, null);
++  assert.equal(momentum.horizon.mandatoryTimer, false);
++  assert.equal(momentum.clauses.some((x) => x.id === 'EXTENSION_CAP'), false);
++  assert.equal(momentum.clauses.find((x) => x.id === 'CHALLENGE_NOT_FAILED').value, 'NOT_OBSERVED', 'a pullback/challenge is preferred, not mandatory');
++  assert.equal(momentum.executionGate.state, 'REQUIRED_DOWNSTREAM');
++  assert.equal('netEdgeAfterCostsBps' in momentum.strengthFacts, false, 'setup strength remains market-only; cost is size-specific later');
++
++  const micro = evaluate('MICRO_BITE');
++  assert.equal(micro.state, 'ELIGIBLE', micro.refused.join(','));
++  assert.equal(micro.horizon.intendedMinMs, 60_000); assert.equal(micro.horizon.intendedMaxMs, 300_000);
++  assert.equal(micro.horizon.mandatoryTimer, false); assert.equal(micro.horizon.thesisTransition, 'NEW_INDEPENDENT_THESIS_REQUIRED');
++  assert.equal(micro.maxDurationMs, null); assert.equal(micro.maxEntryLevel, null);
++});
++
++test('new setup evidence fails closed when metrics/liquidity/exhaustion are missing or stale, while known decay/exhaustion refuses', () => {
++  for (const [name, over, reason] of [
++    ['volume', { rv60: { state: 'UNKNOWN', rv60: null, reason: 'COVERAGE_INCOMPLETE' } }, 'RV60'],
++    ['continuation', { continuationEvidence: null }, 'CONTINUATION_PHASE_ELIGIBLE'],
++    ['liquidity', { depth10bps: null }, 'LIQUIDITY_PRESENT'],
++    ['exhaustion', { exhaustion: null }, 'NOT_EXHAUSTED'],
++    ['stale continuation', { continuationEvidence: { ...fast().continuationEvidence, knownAtTs: T - 60_001 } }, 'CONTINUATION_PHASE_ELIGIBLE'],
++  ]) {
++    const r = evaluate('MOMENTUM_CONTINUATION', over); assert.equal(r.state, 'NEEDS_DATA', name); assert.ok(r.needsData.includes(reason), name);
 +  }
-+}
++  const exhausted = evaluate('MOMENTUM_CONTINUATION', { exhaustion: { state: 'KNOWN', knownAtTs: T, exhausted: true } });
++  assert.equal(exhausted.state, 'REFUSED'); assert.ok(exhausted.refused.includes('NOT_EXHAUSTED'));
++  const decaying = evaluate('MOMENTUM_CONTINUATION', { continuationEvidence: { ...fast().continuationEvidence, phase: 'DECAYING' } });
++  assert.equal(decaying.state, 'REFUSED'); assert.ok(decaying.refused.includes('CONTINUATION_PHASE_ELIGIBLE'));
++  const singleSource = evaluate('MICRO_BITE', { continuationEvidence: { ...fast().continuationEvidence, dimensions: ['PRICE_ACCELERATION', 'EXECUTED_VOLUME', 'ORDER_FLOW'], relianceGroups: ['ONE_PIPELINE'] } });
++  assert.equal(singleSource.state, 'REFUSED'); assert.ok(singleSource.refused.includes('DISTINCT_EVIDENCE_DIMENSIONS'));
++});
 +
-+function legacyDesign(patternId) {
-+  const body = {
-+    prospectiveVersion: LEGACY_PROSPECTIVE_VERSION, candidateId: 'lcand-UNBOUND', patternId,
-+    predicate, predicateDigest: canonicalDigest(predicate), scope,
-+    primaryHorizonMin: 60, primaryMetric: 'NET_LOG_RETURN_60M_PCT', comparator: 'BASELINE_RULE_SAME_STREAM',
-+    costModel, groupLaw: 'learning-group-law-1', terminalGroupTarget: 30, floors: DEFAULT_FLOORS,
-+    missingnessRule: 'MATURED_COVERAGE_AT_LEAST_0.8', uncertaintyMethod: 'NORMAL_SE_OVER_GROUP_MEANS',
-+    alpha: 0.05, sealedTs: T0, evidenceDigest: 'legacy-evidence',
-+  };
-+  return { ...body, candidateId: candidateIdOf(body) };
-+}
++test('the separate post-size gate requires current two-way average-fill/depth and complete round-trip cost/risk evidence', () => {
++  const missing = evaluateStyleExecutionGate({ setupId: 'MICRO_BITE', executableEdge: null, decisionTs: T });
++  assert.equal(missing.state, 'NEEDS_DATA'); assert.equal(missing.needsData.length, 4);
++  const stale = evaluateStyleExecutionGate({ setupId: 'MICRO_BITE', executableEdge: executable({ knownAtTs: T - 1_001 }), decisionTs: T });
++  assert.equal(stale.state, 'NEEDS_DATA');
++  const noExitDepth = evaluateStyleExecutionGate({ setupId: 'MICRO_BITE', executableEdge: executable({ exitDepthSufficient: false }), decisionTs: T });
++  assert.equal(noExitDepth.state, 'REFUSED'); assert.ok(noExitDepth.refused.includes('EXECUTABLE_BOTH_DIRECTIONS'));
++  const costsWin = evaluateStyleExecutionGate({ setupId: 'MOMENTUM_CONTINUATION', executableEdge: executable({ estimatedRemainingEdgeAfterCostsAndRiskBps: -0.1 }), decisionTs: T });
++  assert.equal(costsWin.state, 'REFUSED'); assert.ok(costsWin.refused.includes('ESTIMATED_REMAINING_EDGE_AFTER_COSTS_AND_RISK_POSITIVE'));
++  const valid = evaluateStyleExecutionGate({ setupId: 'MICRO_BITE', executableEdge: executable(), decisionTs: T });
++  assert.equal(valid.state, 'ELIGIBLE', valid.refused.join(','));
++});
+diff --git a/test/judge-setup-selection.test.js b/test/judge-setup-selection.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/judge-setup-selection.test.js
+@@ -0,0 +1,112 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {
++  SETUP_SELECTION_VERSION,
++  STRATEGY_FAMILIES,
++  SETUP_FAMILY,
++  strategyFamilyOf,
++  deterministicSetupTieOrder,
++  createUnderlyingClaimLedger,
++  selectionMeasurement,
++  setupDurationBound,
++} from '../judge/setup-selection.js';
++import { createJudge } from '../judge/judge.js';
 +
-+test('a v2 candidate seals the exact consumer binding, promotion copies it, and Judge accepts only matching prepared facts', () => {
-+  const dir = mkdtempSync(path.join(tmpdir(), 'cobra-learn-consumer-binding-'));
-+  try {
-+    const store = createLearningStore({ dataDir: dir });
-+    const pattern = appendAccumulatingPattern(store);
-+    assert.throws(() => sealDesign({
-+      patternId: pattern.patternId, predicate, scope, costModel, terminalGroupTarget: 30,
-+      sealedTs: T0, evidenceDigest: 'unbound',
-+    }), /consumer binding/);
++const judgeConstructorArgs = () => ({
++  accountId: 'setup-selection-constructor',
++  policy: { setups: { enabled: [] } },
++  policyDigest: 'a'.repeat(64),
++  dispatcher: { ev: () => null, onCommit: () => {}, state: () => ({}) },
++  feed: null,
++  clock: { now: () => 0, monotonic: () => 0 },
++  specOf: () => null,
++  feeOf: () => null,
++});
 +
-+    const design = freezeCandidate({ store, pattern, costModel, consumerBinding: BINDING, nowTs: T0 });
-+    assert.equal(design.prospectiveVersion, PROSPECTIVE_VERSION);
-+    assert.deepEqual(design.consumerBinding, BINDING);
-+    assert.equal(Object.isFrozen(design.consumerBinding), true);
-+    for (const changedBinding of [
-+      { ...BINDING, featureRecipeVersion: 'judge-prepared-market-features-2' },
-+      { ...BINDING, policyDigest: 'b'.repeat(64) },
-+    ]) {
-+      const changed = sealDesign({
-+        patternId: pattern.patternId, predicate, scope, costModel, terminalGroupTarget: 30,
-+        sealedTs: T0, evidenceDigest: 'NO_REFS', consumerBinding: changedBinding,
-+      });
-+      assert.notEqual(changed.candidateId, design.candidateId, 'either consumer-binding field changes the content-hashed candidate identity');
-+    }
-+
-+    appendForwardEvidence(store, design);
-+    const settledTs = T0 + 40 * DAY;
-+    const result = settleCandidate({ store, candidateId: design.candidateId, nowTs: settledTs });
-+    assert.equal(result.terminal.verdict, 'FORWARD_SUPPORTED');
-+    assert.equal(result.activation.featureRecipeVersion, BINDING.featureRecipeVersion);
-+    assert.equal(result.activation.policyVersion, BINDING.policyDigest);
-+
-+    const active = transitionActivation(result.activation, {
-+      state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: settledTs + 1,
-+    });
-+    store.appendActivation(active);
-+    const nowTs = settledTs + 2;
-+    const snapshot = readDecisionMemory({ store, nowTs });
-+    assert.equal(snapshot.activations.length, 1);
-+    assert.deepEqual(snapshot.withheld, []);
-+    const facts = {
-+      setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED', asset: 'AAA', venue: 'KRAKEN',
-+      featureRecipeVersion: BINDING.featureRecipeVersion, policyVersion: BINDING.policyDigest,
-+      features: { relVolume60m: { value: 4, availability: 'KNOWN', ageMs: 0 } },
-+    };
-+    const matched = resolveLearningContribution({ snapshot, facts, mode: 'PAPER', nowTs });
-+    assert.equal(matched.applied, true);
-+    assert.equal(matched.selected.activationId, active.activationId);
-+
-+    const wrongRecipe = resolveLearningContribution({
-+      snapshot, facts: { ...facts, featureRecipeVersion: 'judge-prepared-market-features-2' }, mode: 'PAPER', nowTs,
-+    });
-+    assert.equal(wrongRecipe.rejected[0].reason, 'FEATURE_RECIPE_VERSION_MISMATCH');
-+    const wrongPolicy = resolveLearningContribution({
-+      snapshot, facts: { ...facts, policyVersion: 'b'.repeat(64) }, mode: 'PAPER', nowTs,
-+    });
-+    assert.equal(wrongPolicy.rejected[0].reason, 'POLICY_VERSION_MISMATCH');
-+
-+    for (const mutation of [
-+      { featureRecipeVersion: 'judge-prepared-market-features-2' },
-+      { policyVersion: 'b'.repeat(64) },
-+    ]) {
-+      const forged = { ...active, ...mutation };
-+      const tamperedStore = { ...store, activationHeads: () => new Map([[forged.activationId, forged]]) };
-+      const withheld = readDecisionMemory({ store: tamperedStore, nowTs });
-+      assert.equal(withheld.activations.length, 0);
-+      assert.equal(withheld.withheld[0].reason, 'ACTIVATION_EVIDENCE_MISMATCH');
-+    }
-+  } finally {
-+    rmSync(dir, { recursive: true, force: true });
++test('setupSelection is absent by default, activates only through the exact versioned port, and rejects malformed or future ports', () => {
++  assert.doesNotThrow(() => createJudge(judgeConstructorArgs()));
++  assert.doesNotThrow(() => createJudge({ ...judgeConstructorArgs(), setupSelection: { version: SETUP_SELECTION_VERSION } }));
++  for (const setupSelection of [true, [], {}, { version: 'future-version' }, { version: SETUP_SELECTION_VERSION, enabled: false }]) {
++    assert.throws(() => createJudge({ ...judgeConstructorArgs(), setupSelection }), /invalid setupSelection port/);
 +  }
 +});
 +
-+test('historical v1 designs retain their exact identity and replay, but an unbound winner cannot publish to Judge', () => {
-+  const dir = mkdtempSync(path.join(tmpdir(), 'cobra-learn-legacy-binding-'));
-+  try {
-+    const store = createLearningStore({ dataDir: dir });
-+    const pattern = appendAccumulatingPattern(store);
-+    const design = legacyDesign(pattern.patternId);
-+    assert.equal(design.candidateId, 'lcand-bc446aca2a9640238009358f72fd32d12006bb46', 'the historical v1 content hash is unchanged');
-+    assert.equal(designError(design), null);
-+    assert.deepEqual(replayProspective([{ kind: 'DESIGN_SEALED', design }]).errors, []);
-+
-+    store.appendProspective({ kind: 'DESIGN_SEALED', design });
-+    for (const [seq, state, previousState, transitionReason] of [
-+      [2, 'CANDIDATE_FROZEN', 'ACCUMULATING', 'CANDIDATE_SEALED'],
-+      [3, 'PROSPECTIVE_PENDING', 'CANDIDATE_FROZEN', 'AWAITING_FRESH_FORWARD_EVIDENCE'],
-+    ]) {
-+      store.appendPattern(buildPatternRecord({
-+        predicate: pattern.predicate, scope: pattern.scope, origin: pattern.origin, createdTs: pattern.createdTs,
-+        ts: T0, seq, state, previousState, transitionReason,
-+        evidence: { ...pattern.evidence, _grouping: null }, estimate: pattern.estimate, contradictions: pattern.contradictions,
-+        candidateId: design.candidateId, activationId: null,
-+      }));
-+    }
-+    appendForwardEvidence(store, design);
-+    const result = settleCandidate({ store, candidateId: design.candidateId, nowTs: T0 + 40 * DAY });
-+    assert.equal(result.terminal.verdict, 'FORWARD_SUPPORTED', 'the old forward result remains valid historical evidence');
-+    assert.equal(result.activation, null, 'no current binding is retrofitted after observing the outcome');
-+    assert.equal(result.patternState, 'ACCUMULATING');
-+    assert.equal(result.note, 'LEGACY_CONSUMER_UNBOUND_INELIGIBLE_FOR_JUDGE');
-+    assert.equal(store.activationHeads().size, 0);
-+  } finally {
-+    rmSync(dir, { recursive: true, force: true });
++test('null-horizon research evaluators cannot be activated through policy, enabledSetups, armRule, or setupSelection alone', () => {
++  const port = { version: SETUP_SELECTION_VERSION };
++  for (const setupId of ['MOMENTUM_CONTINUATION', 'MICRO_BITE']) {
++    assert.throws(() => createJudge({ ...judgeConstructorArgs(), policy: { setups: { enabled: [setupId] } } }), /NEW_SETUP_NOT_OPERATIONAL/);
++    assert.throws(() => createJudge({ ...judgeConstructorArgs(), enabledSetups: [setupId] }), /NEW_SETUP_NOT_OPERATIONAL/);
++    assert.throws(() => createJudge({ ...judgeConstructorArgs(), mode: 'REPLAY', armRule: { setups: [setupId] } }), /NEW_SETUP_NOT_OPERATIONAL/);
++    assert.throws(() => createJudge({ ...judgeConstructorArgs(), enabledSetups: [setupId], setupSelection: port }), /NEW_SETUP_NOT_OPERATIONAL/);
 +  }
++  assert.doesNotThrow(() => createJudge({ ...judgeConstructorArgs(), enabledSetups: ['RANGE_IGNITION'], setupSelection: port }), 'the versioned selection port remains usable with an operational legacy setup');
 +});
-diff --git a/test/learning-prospective.test.js b/test/learning-prospective.test.js
-index 53784f6..c6c9f35 100644
---- a/test/learning-prospective.test.js
-+++ b/test/learning-prospective.test.js
-@@ -17,7 +17,8 @@ const T0 = Date.UTC(2026, 5, 1);
- const HOUR = 3_600_000; const DAY = 86_400_000;
- const predicate = { clauses: [{ feature: 'relVolume60m', op: 'GTE', threshold: 3 }] };
- const scope = { setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED' };
--const design = () => sealDesign({ patternId: 'lpat-test', predicate, scope, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, terminalGroupTarget: 30, sealedTs: T0, evidenceDigest: 'ev' });
-+const consumerBinding = { featureRecipeVersion: 'judge-prepared-market-features-1', policyDigest: 'a'.repeat(64) };
-+const design = () => sealDesign({ patternId: 'lpat-test', predicate, scope, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, terminalGroupTarget: 30, sealedTs: T0, evidenceDigest: 'ev', consumerBinding });
++
++test('six setup evaluators map exactly to five strategy families without collapsing distinct setups', () => {
++  assert.equal(SETUP_SELECTION_VERSION, 'judge-setup-selection-1');
++  assert.deepEqual(STRATEGY_FAMILIES, [
++    'MOMENTUM_CONTINUATION',
++    'EARLY_IGNITION_BREAKOUT',
++    'PULLBACK_REENTRY',
++    'RUMOR_CATALYST',
++    'MICRO_BITE',
++  ]);
++  assert.equal(Object.keys(SETUP_FAMILY).length, 6);
++  assert.equal(strategyFamilyOf('MOMENTUM_CONTINUATION'), 'MOMENTUM_CONTINUATION');
++  assert.equal(strategyFamilyOf('RANGE_IGNITION'), 'EARLY_IGNITION_BREAKOUT');
++  assert.equal(strategyFamilyOf('TREND_PULLBACK_CONTINUATION'), 'PULLBACK_REENTRY');
++  assert.equal(strategyFamilyOf('ABSORPTION_RECLAIM'), 'PULLBACK_REENTRY');
++  assert.equal(strategyFamilyOf('CATALYST_TRANSMISSION'), 'RUMOR_CATALYST');
++  assert.equal(strategyFamilyOf('MICRO_BITE'), 'MICRO_BITE');
++  assert.equal(strategyFamilyOf('UNKNOWN_SETUP'), null, 'unknown is never guessed into a family');
++});
++
++test('the setup pre-order supplies only a deterministic same-asset tie and does not mutate candidates', () => {
++  const source = [
++    { rank: { assetId: 'BTC', setupId: 'TREND_PULLBACK_CONTINUATION', decisionId: 'd3', rewardRiskRatio: 3, costBps: 4 } },
++    { rank: { assetId: 'ETH', setupId: 'MICRO_BITE', decisionId: 'd4', rewardRiskRatio: 9, costBps: 1 } },
++    { rank: { assetId: 'BTC', setupId: 'ABSORPTION_RECLAIM', decisionId: 'd2', rewardRiskRatio: 3, costBps: 4 } },
++    { rank: { assetId: 'BTC', setupId: 'RANGE_IGNITION', decisionId: 'd1', rewardRiskRatio: 1, costBps: 9 } },
++  ];
++  const ordered = deterministicSetupTieOrder(source);
++  assert.deepEqual(ordered.map((row) => [row.rank.assetId, row.rank.setupId]), [
++    ['BTC', 'RANGE_IGNITION'],
++    ['BTC', 'ABSORPTION_RECLAIM'],
++    ['BTC', 'TREND_PULLBACK_CONTINUATION'],
++    ['ETH', 'MICRO_BITE'],
++  ]);
++  assert.equal(source[0].rank.setupId, 'TREND_PULLBACK_CONTINUATION');
++  assert.equal(ordered[0].rank.rewardRiskRatio, 1, 'this helper does not rank economics; risk.js still does that afterward');
++});
++
++test('selection measurements distinguish a commit attempt from an explicit same-underlying loser', () => {
++  const selected = selectionMeasurement({ setupId: 'MICRO_BITE', selected: true, rank: 1, of: 2 });
++  assert.deepEqual({ id: selected.id, ok: selected.ok, value: selected.value, threshold: selected.threshold, unit: selected.unit }, {
++    id: 'STRATEGY_FAMILY_SELECTION', ok: true, value: 'MICRO_BITE', threshold: 'MICRO_BITE', unit: 'STRATEGY_FAMILY',
++  });
++  assert.match(selected.note, /selected_for_commit_attempt/);
++  const loser = selectionMeasurement({ setupId: 'ABSORPTION_RECLAIM', selected: false, winnerSetupId: 'TREND_PULLBACK_CONTINUATION', rank: 2, of: 2 });
++  assert.equal(loser.ok, false); assert.equal(loser.value, 'PULLBACK_REENTRY'); assert.equal(loser.threshold, 'PULLBACK_REENTRY'); assert.match(loser.note, /same_underlying_claimed/);
++});
++
++test('an underlying is claimed only after commit, so a failed preferred candidate leaves the next setup available', () => {
++  const claims = createUnderlyingClaimLedger();
++  const first = claims.offer({ assetId: 'BTC', setupId: 'MOMENTUM_CONTINUATION' });
++  assert.equal(first.selected, true);
++  assert.equal(claims.settle({ assetId: 'BTC', setupId: 'MOMENTUM_CONTINUATION', claimed: false }), null);
++  const fallback = claims.offer({ assetId: 'BTC', setupId: 'RANGE_IGNITION' });
++  assert.equal(fallback.selected, true, 'failure before the reservation/position transaction cannot consume the underlying');
++  assert.equal(claims.settle({ assetId: 'BTC', setupId: 'RANGE_IGNITION', claimed: true }), 'RANGE_IGNITION');
++  const loser = claims.offer({ assetId: 'BTC', setupId: 'MICRO_BITE' });
++  assert.deepEqual(loser, { selected: false, winnerSetupId: 'RANGE_IGNITION', reason: 'STRATEGY_NOT_SELECTED_SAME_UNDERLYING' });
++  assert.equal(claims.offer({ assetId: 'ETH', setupId: 'MICRO_BITE' }).selected, true, 'different assets are not forced into one global strategy');
++  assert.deepEqual(claims.snapshot(), { BTC: 'RANGE_IGNITION' });
++});
++
++test('setup horizon can only shorten policy and an edge-state setup without an operational Watch horizon refuses', () => {
++  assert.deepEqual(setupDurationBound({ policyMaxDurationMs: 14_400_000, setupMaxDurationMs: 3_600_000 }), { ok: true, maxDurationMs: 3_600_000, reason: null });
++  assert.deepEqual(setupDurationBound({ policyMaxDurationMs: 300_000, setupMaxDurationMs: 14_400_000 }), { ok: true, maxDurationMs: 300_000, reason: null });
++  assert.deepEqual(setupDurationBound({ policyMaxDurationMs: 14_400_000, setupMaxDurationMs: null }), { ok: false, maxDurationMs: null, reason: 'HORIZON_NOT_OPERATIONAL' });
++  assert.equal(setupDurationBound({ policyMaxDurationMs: 0, setupMaxDurationMs: 300_000 }).reason, 'POLICY_DURATION_INVALID');
++  assert.equal(setupDurationBound({ policyMaxDurationMs: 14_400_000, setupMaxDurationMs: -1 }).reason, 'SETUP_DURATION_INVALID');
++});
+diff --git a/test/judge-differential.test.js b/test/judge-differential.test.js
+index 33e77d3..6999df3 100644
+--- a/test/judge-differential.test.js
++++ b/test/judge-differential.test.js
+@@ -26,6 +26,7 @@ import { mkdtempSync, rmSync, readFileSync, mkdirSync } from 'node:fs';
+ import { tmpdir } from 'node:os';
+ import path from 'node:path';
+ import { pathToFileURL, fileURLToPath } from 'node:url';
++import { SETUP_SELECTION_VERSION } from '../judge/setup-selection.js';
  
- // build a lawful forward stream: `groups` dependence groups over `assets` assets and `days` days.
- // metric > 0 where the candidate is right; candidate/baseline decisions per scenario.
-@@ -115,7 +116,7 @@ test('K. the synthetic qualifying dataset proves the full promotion path — and
-     store.appendPattern(buildPatternRecord({ predicate, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 20 * DAY, seq: 0, state: 'NOTICED', previousState: null, transitionReason: 'FIRST_OBSERVATION', evidence: strip, estimate: est, contradictions: [] }));
-     store.appendPattern(buildPatternRecord({ predicate, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 10 * DAY, seq: 1, state: 'ACCUMULATING', previousState: 'NOTICED', transitionReason: 'NEW_MATURED_EVIDENCE', evidence: strip, estimate: est, contradictions: [] }));
-     const head = store.patternHeads().values().next().value;
--    const d = freezeCandidate({ store, pattern: head, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, nowTs: T0 });
-+    const d = freezeCandidate({ store, pattern: head, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, consumerBinding, nowTs: T0 });
-     assert.equal(store.patternHeads().values().next().value.state, 'PROSPECTIVE_PENDING');
-     // fresh forward evidence AFTER the seal
-     for (const r of stream(d, { groups: 34, assets: 6, days: 8, metricOf: () => 1.5 }).slice(1)) store.appendProspective(r);
-@@ -149,7 +150,7 @@ test('K. the synthetic qualifying dataset proves the full promotion path — and
-     store.appendPattern(buildPatternRecord({ predicate: predicate2, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 20 * DAY, seq: 0, state: 'NOTICED', previousState: null, transitionReason: 'FIRST_OBSERVATION', evidence: strip2, estimate: est, contradictions: [] }));
-     store.appendPattern(buildPatternRecord({ predicate: predicate2, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 10 * DAY, seq: 1, state: 'ACCUMULATING', previousState: 'NOTICED', transitionReason: 'NEW_MATURED_EVIDENCE', evidence: strip2, estimate: est, contradictions: [] }));
-     const head2 = [...store.patternHeads().values()].find((p) => p.state === 'ACCUMULATING');
--    const d2 = freezeCandidate({ store, pattern: head2, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, nowTs: T0 + 41 * DAY });
-+    const d2 = freezeCandidate({ store, pattern: head2, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, consumerBinding, nowTs: T0 + 41 * DAY });
-     for (const r of stream(d2, { groups: 34, assets: 6, days: 8, metricOf: () => -1 }).slice(1)) {
-       store.appendProspective({ ...r, ...(r.kind === 'CAPTURE' ? { decisionTs: r.decisionTs + 42 * DAY, recordedTs: r.recordedTs + 42 * DAY, labelEndTs: r.labelEndTs + 42 * DAY } : {}), ...(r.kind === 'OUTCOME' ? { outcomeKnownAtTs: r.outcomeKnownAtTs + 42 * DAY, recordedTs: r.recordedTs + 42 * DAY } : {}) });
-     }
-diff --git a/test/learning-integrity.test.js b/test/learning-integrity.test.js
-index 875771c..545ac13 100644
---- a/test/learning-integrity.test.js
-+++ b/test/learning-integrity.test.js
-@@ -18,6 +18,7 @@ const T = Date.UTC(2026, 8, 13);
- const DAY = 86_400_000;
- const predicate = { clauses: [{ feature: 'relVolume60m', op: 'GTE', threshold: 3 }] };
- const scope = { setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED' };
-+const consumerBinding = { featureRecipeVersion: 'judge-prepared-market-features-1', policyDigest: 'a'.repeat(64) };
+ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+ const BASE_COMMIT = 'ea3bfbf';
+@@ -45,7 +46,7 @@ test.before(() => {
+ test.after(() => { if (baseDir) rmSync(baseDir, { recursive: true, force: true }); });
  
- test('§04 memory separation: the research view exposes provisional patterns with zero authority; the decision view resolves ONLY validated activation artifacts; no parameter flips one into the other; invalid artifacts are withheld, not repaired', () => {
-   const dir = mkdtempSync(path.join(tmpdir(), 'cobra-memview-'));
-@@ -43,7 +44,7 @@ test('§04 memory separation: the research view exposes provisional patterns wit
+ // the whole rig from ONE tree's modules; every input below is bytes/numbers, identical across trees
+-async function rigFor(root, { accountId }) {
++async function rigFor(root, { accountId, setupSelection = null }) {
+   const url = (p) => pathToFileURL(path.join(root, p)).href;
+   const [contract, journalMod, dispatcherMod, adapterMod, feedMod, judgeMod, schedulerMod, policyMod, crcMod] = await Promise.all([
+     import(url('execution/contract.js')), import(url('execution/journal.js')), import(url('execution/dispatcher.js')),
+@@ -64,7 +65,9 @@ async function rigFor(root, { accountId }) {
+   await dispatcher.commit(ev('ACCOUNT_INITIALIZED', { accountKind: 'PAPER', initialCapital: '500', quote: 'USD', venue: 'kraken', policyDigest: 'a'.repeat(64), policyVersion: 'judge-policy-paper-reference-1', ownerRef: 'owner-test', sessionDate: '2026-09-08', clockAnchorTs: clock.now(), limits: SAMPLE_LIMITS, compounding: 'NONE' }));
+   const scheduler = schedulerMod.createScheduler({ monotonic: clock.monotonic });
+   const bars = ({ n = 61, endTs, close = 100000, range = 400, wickAt = 41, wickLow = 96000 } = {}) => { const out = []; for (let i = 0; i < n; i += 1) out.push({ periodStartTs: endTs - (n - i) * 60_000, periodEndTs: endTs - (n - i - 1) * 60_000, open: close, high: close + range / 2, low: i === wickAt ? wickLow : close - range / 2, close, volumeQuote: 1000, volumeBase: 0.01, closed: true }); return out; };
+-  const judge = judgeMod.createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock, specOf: () => SPEC, feeOf: () => FEE, history: { bars: (s, nowTs) => bars({ endTs: Math.floor(nowTs / 60_000) * 60_000 }) }, caseSource: { consumed: () => null }, controls: () => ({ kill: false, cage: false, vetoes: [] }), scheduler, mode: 'PAPER' });
++  const judgeOptions = { accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock, specOf: () => SPEC, feeOf: () => FEE, history: { bars: (s, nowTs) => bars({ endTs: Math.floor(nowTs / 60_000) * 60_000 }) }, caseSource: { consumed: () => null }, controls: () => ({ kill: false, cage: false, vetoes: [] }), scheduler, mode: 'PAPER' };
++  if (setupSelection !== null) judgeOptions.setupSelection = setupSelection;
++  const judge = judgeMod.createJudge(judgeOptions);
+   judge.admit('XBT/USD', { assetId: 'BTC', source: 'TEST' });
+   feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'XBT/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now());
+   feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), clock.now());
+@@ -99,6 +102,22 @@ test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports a
+   assert.deepEqual(next.state(), base.state(), 'the complete account/execution state (positions, orders, reservations, protections, restrictions) is identical');
+   assert.deepEqual(next.judge.status().funnel, base.judge.status().funnel, 'the admission funnel is identical');
+   assert.deepEqual(next.judge.status().refusals, base.judge.status().refusals, 'the refusal census is identical');
++  assert.deepEqual(next.judge.admissionGate(), base.judge.admissionGate(), 'the default admission-batch report retains the exact legacy shape');
++  assert.ok(dn.every((d) => d.measurements.every((m) => m.id !== 'STRATEGY_FAMILY_SELECTION')), 'the default path adds no strategy-selection measurement');
++});
++
++test('VERSIONED OPT-IN: the exact setupSelection port activates family-selection evidence and captured batch outcomes without changing the default composition', async () => {
++  const next = await rigFor(ROOT, { accountId: 'selection-opt-in', setupSelection: { version: SETUP_SELECTION_VERSION } });
++  await next.warm(); await next.ignite();
++  const decisions = next.judge.decisions(); const reserved = decisions.find((d) => d.status === 'ENTRY_RESERVED');
++  assert.ok(reserved, JSON.stringify(decisions.map((d) => [d.status, d.reasonCodes])));
++  const selection = reserved.measurements.find((m) => m.id === 'STRATEGY_FAMILY_SELECTION');
++  assert.deepEqual({ ok: selection?.ok, value: selection?.value, threshold: selection?.threshold, unit: selection?.unit }, { ok: true, value: 'EARLY_IGNITION_BREAKOUT', threshold: 'EARLY_IGNITION_BREAKOUT', unit: 'STRATEGY_FAMILY' });
++  const gate = next.judge.admissionGate();
++  assert.deepEqual(gate.lastBatch.detail, [{ assetId: 'BTC', setupId: 'RANGE_IGNITION', family: 'EARLY_IGNITION_BREAKOUT' }]);
++  assert.deepEqual(gate.lastBatch.outcomes, [{ assetId: 'BTC', setupId: 'RANGE_IGNITION', outcome: 'CLAIMED', winnerSetupId: null }]);
++  const position = Object.values(next.state().positions).find((p) => p.decisionId === reserved.decisionId);
++  assert.equal(position?.maxDurationMs, next.policy.execution.maxDurationMs, 'the opt-in preserves the existing setup/policy duration for the legacy evaluator');
  });
  
- test('§12.11 at-risk historical rows cannot enter the prospective sample: the clock law refuses any capture decided before the seal, whatever its label claims', () => {
--  const d = sealDesign({ patternId: 'lpat-t', predicate, scope, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, terminalGroupTarget: 30, sealedTs: T, evidenceDigest: 'ev' });
-+  const d = sealDesign({ patternId: 'lpat-t', predicate, scope, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, terminalGroupTarget: 30, sealedTs: T, evidenceDigest: 'ev', consumerBinding });
-   const historicalRow = { kind: 'CAPTURE', candidateId: d.candidateId, opportunityId: 'lop-h', canonicalCoin: 'AAA', decisionTs: T - 10 * DAY, candidateDecision: 'SELECTED_FOR_SHADOW', baselineDecision: 'SKIPPED', recordedTs: T + 1, labelEndTs: T - 10 * DAY + 3_600_000 };
-   const state = replayProspective([{ kind: 'DESIGN_SEALED', design: d }, historicalRow]);
-   assert.match(state.errors[0], /before the design was sealed/, 'a replayed/backfilled historical decision is never fresh forward evidence');
-diff --git a/test/learning-prospective-terminal-regression.test.js b/test/learning-prospective-terminal-regression.test.js
-index 7b74e4c..e8bb08c 100644
---- a/test/learning-prospective-terminal-regression.test.js
-+++ b/test/learning-prospective-terminal-regression.test.js
-@@ -6,12 +6,13 @@ import { settleCandidate } from '../learning/promotion.js';
- const T0 = Date.UTC(2026, 5, 1);
- const HOUR = 3_600_000;
- const DAY = 86_400_000;
-+const consumerBinding = { featureRecipeVersion: 'judge-prepared-market-features-1', policyDigest: 'a'.repeat(64) };
+ test('HOST ADMISSION LATENCY measured on both trees over the identical recorded inputs (real wall-clock around judge.onTick + scheduler drain + dispatcher idle); deadline budgets reported against the policy receipt-to-decision limit and the 25ms admission bucket', async () => {
+diff --git a/test/judge-repair-runtime.test.js b/test/judge-repair-runtime.test.js
+index 2c5516f..1362393 100644
+--- a/test/judge-repair-runtime.test.js
++++ b/test/judge-repair-runtime.test.js
+@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+ import { tmpdir } from 'node:os';
+ const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-judge-repair-runtime-')); process.env.COBRA_DATA_DIR = TEST_DATA;
+ const M = await import('../execution/money.js'); const { createDispatcher, DISPATCHER_DEFAULTS } = await import('../execution/dispatcher.js'); const { createWatch } = await import('../watch/watch.js'); const { createExecutionFeed } = await import('../execution/feed.js'); const { createKrakenAdapter } = await import('../execution/kraken-adapter.js'); const { createPaperAdapter } = await import('../execution/paper-adapter.js');
+-const { composeJudge, initAccount, PERIODIC_RECONCILE_MS } = await import('../judge/composition.js'); const { createScriptedWebSocket } = await import('./helpers/scripted-ws.js'); const { loadJudgePolicy } = await import('../judge/policy.js'); const { createMemoryJournal } = await import('../execution/journal.js'); const { createJudge } = await import('../judge/judge.js'); const { createScheduler } = await import('../judge/scheduler.js');
++const { composeJudge, initAccount, PERIODIC_RECONCILE_MS } = await import('../judge/composition.js'); const { createScriptedWebSocket } = await import('./helpers/scripted-ws.js'); const { loadJudgePolicy } = await import('../judge/policy.js'); const { createMemoryJournal } = await import('../execution/journal.js'); const { createPermissionClock } = await import('../execution/clock.js'); const { createJudge } = await import('../judge/judge.js'); const { createScheduler } = await import('../judge/scheduler.js');
+ const { paperAccount, fakeClock, eventsFor, SPEC, SOL_SPEC, TAKER_FEE, T0 } = await import('./helpers/judge.js'); const { feeContract } = await import('../execution/contract.js'); const { crc32 } = await import('../lib/crc32.js');
+ // tolerant of the baseline (no shared authority module there): the fallback mirrors the baseline's restriction-only reading so every assertion below fails for its REAL reason on B
+ const A = await import('../execution/authority.js').catch(() => ({})); const entryPermission = A.entryPermission ?? ((st) => { const reasons = Object.keys(st.restrictions ?? {}); return { ok: reasons.length === 0, reasons }; });
+@@ -30,6 +30,34 @@ test('R08-01. clock qualification is wired to real venue inputs: a LIVE start qu
+   const rep2 = await run2.start({ heartbeatMs: 3_600_000 }); assert.equal(rep2.clock?.trusted, false); assert.equal(run2.clockReport().lastReason, 'EService:Unavailable'); const s2 = run2.dispatcher.state(); assert.ok(s2.restrictions.CLOCK_UNTRUSTED, 'R08-01: an unqualified clock is a durable restriction'); assert.ok(entryPermission(s2, { nowTs: Date.now(), clockTrusted: false }).reasons.includes('CLOCK_UNTRUSTED')); await run2.tick(); await run2.stop();
+ });
  
- function design() {
-   return sealDesign({
-     patternId: 'lpat-terminal-regression', predicate: { clauses: [] }, scope: {},
-     costModel: { feePctPerSide: 0.8, slippageBps: 10 }, terminalGroupTarget: 30,
--    sealedTs: T0, evidenceDigest: 'terminal-regression',
-+    sealedTs: T0, evidenceDigest: 'terminal-regression', consumerBinding,
-   });
++test('R08-01b. Watch runs before coalesced scan maintenance; a wall-observation fault and a held case refresh cannot hide later safety heartbeats', { timeout: 5000 }, async () => {
++  const bounded = (promise, label) => new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error(`timeout:${label}`)), 500); Promise.resolve(promise).then((value) => { clearTimeout(timer); resolve(value); }, (err) => { clearTimeout(timer); reject(err); }); });
++  const base = fakeClock(); const clock = { ...pclockOf(base), observeWall: () => { throw new Error('synthetic wall fault'); } }; const r = await paperAccount({ accountId: 'watch-first-maint', clock: base }); await r.writer.release();
++  let refreshConcurrent = 0; let refreshMax = 0; let releaseRefresh; let refreshStarted; const started = new Promise((resolve) => { refreshStarted = resolve; });
++  const cases = { consumed: () => null, status: () => ({ known: 0, verified: 0 }), refresh: async () => { refreshConcurrent += 1; refreshMax = Math.max(refreshMax, refreshConcurrent); refreshStarted(); await new Promise((resolve) => { releaseRefresh = resolve; }); refreshConcurrent -= 1; } };
++  const advances = [];
++  const history = { bars: () => null, advance: (symbol, t) => { advances.push({ symbol, t }); }, needsRefresh: () => false, refresh: async () => ({ ok: true }) }; const logs = [];
++  const run = await composeJudge({ policyFile: POLICY_FILE, mode: 'PAPER', accountId: 'watch-first-maint', journal: r.journal, clock, specs: [SPEC], nominations: () => [], history, caseSource: cases, writeProjection: false, codeDigest: CODE, log: (s) => logs.push(String(s)) });
++  run.judge.admit('XBT/USD', { assetId: 'BTC', source: 'TEST' });
++  const originalJudgeTick = run.judge.onTick;
++  run.judge.onTick = async (t) => { assert.equal(advances.at(-1)?.t, t, 'closed-bar clock advances before Judge, even while periodic maintenance is held'); return originalJudgeTick(t); };
++  const first = run.tick(); await bounded(started, 'maintenance-start'); assert.equal(run.runtimeLanes().watchCompleted, 1, 'Watch completed before the held maintenance lane'); assert.equal(run.runtimeLanes().maintenanceInFlight, true);
++  base.advance(60_000);
++  await bounded(run.tick(), 'second-watch'); const during = run.runtimeLanes(); assert.equal(during.watchCompleted, 2, 'a second heartbeat still reaches Watch while maintenance is held'); assert.equal(during.maintenanceStarted, 1); assert.ok(during.maintenanceCoalesced >= 1); assert.equal(refreshMax, 1, 'maintenance never overlaps itself'); assert.ok(logs.some((s) => s.includes('clock wall observation: synthetic wall fault')));
++  assert.equal(advances.length, 2); assert.equal(advances[1].t - advances[0].t, 60_000, 'a held refresh does not stall the next elapsed minute');
++  releaseRefresh(); await bounded(first, 'first-tick'); await new Promise((resolve) => setImmediate(resolve)); const stopped = await bounded(run.stop(), 'stop'); assert.ok(stopped.lifecycle.includes('RUNTIME_LANES_SETTLED')); assert.equal(run.runtimeLanes().maintenanceInFlight, false); assert.equal(run.runtimeLanes().clockInFlight, false);
++});
++
++test('R08-01c. periodic venue-clock I/O is single-flight and never holds the Watch heartbeat', { timeout: 5000 }, async () => {
++  const base = fakeClock(); const pclock = createPermissionClock({ wall: base.now, monotonic: base.monotonic }); let timeCalls = 0; let releaseTime; let heldTimeStarted; const held = new Promise((resolve) => { heldTimeStarted = resolve; });
++  const transport = transportDouble(liveRoutes({ '/0/public/Time': async () => { timeCalls += 1; if (timeCalls === 1) return { result: { unixtime: Math.floor(base.now() / 1000) } }; heldTimeStarted(); return new Promise((resolve) => { releaseTime = () => resolve({ result: { unixtime: Math.floor(base.now() / 1000) } }); }); } }));
++  const journal = await liveJournal('live-watch-clock', base); const ws = createScriptedWebSocket(); const run = await composeJudge({ policyFile: LIVE_FILE, mode: 'LIVE_UNARMED', accountId: 'live-watch-clock', env: ENV, journal, clock: pclock, transport, WebSocketImpl: ws.WebSocketImpl, specs: [SPEC], allowPrivate: () => true, allowOrders: () => false, writeProjection: false, codeDigest: CODE, log: () => {}, nominations: () => [] });
++  await run.start({ heartbeatMs: 3_600_000 }); await ws.waitForMessage((x) => x.event === 'MESSAGE' && x.channel === 'subscribe'); ws.latest().drop('force REST clock path'); base.advance(250_001);
++  await run.tick(); await held; const first = run.runtimeLanes(); assert.equal(first.watchCompleted, 1); assert.equal(first.clockInFlight, true, 'the periodic Time request is still held outside Watch');
++  await run.tick(); const second = run.runtimeLanes(); assert.equal(second.watchCompleted, 2, 'Watch runs again while periodic clock I/O is held'); assert.equal(second.clockStarted, 1); assert.ok(second.clockCoalesced >= 1, 'another due tick coalesces instead of starting a second clock request');
++  releaseTime(); await run.stop(); assert.equal(run.runtimeLanes().clockInFlight, false); assert.ok(run.lifecycle().includes('RUNTIME_LANES_SETTLED'));
++});
++
+ test('R08-02. bucket deadlines are independent of the 250 ms heartbeat: the composition drives the scheduler on its own 25 ms cadence, so a job submitted between heartbeats runs (never QUEUE_DELAY_EXPIRED)', async () => {
+   const r = await paperAccount({ accountId: 'sched' }); await r.writer.release();
+   const run = await composeJudge({ policyFile: POLICY_FILE, mode: 'PAPER', accountId: 'sched', journal: r.journal, specs: [SPEC], nominations: () => [], writeProjection: false, codeDigest: CODE, log: () => {} }); // the REAL permission clock: wall + hrtime
+@@ -106,7 +134,7 @@ test('R08-07/R15-02. producers stop before the drain: after stop() the tape-faci
+   assert.equal(run.feed.status().counters.messages, before, 'R08-07: nothing reaches the feed after stop'); assert.equal(run.adapter.status().admission, false); assert.equal(run.writer.held(), false); assert.deepEqual(stopped.lifecycle.filter((x) => ['PRODUCERS_STOPPED', 'DRAINED', 'WRITER_RELEASED'].includes(x)), ['PRODUCERS_STOPPED', 'DRAINED', 'WRITER_RELEASED']); assert.equal(stopped.lifecycle.indexOf('PRODUCERS_STOPPED') < stopped.lifecycle.indexOf('DRAINED') && stopped.lifecycle.indexOf('DRAINED') < stopped.lifecycle.indexOf('WRITER_RELEASED'), true);
+   // N02: a scripted executions-channel lifecycle (open -> subscribe with the token -> venue ack -> owner close), not an always-success stub
+   const ws = createScriptedWebSocket(); const t = transportDouble(liveRoutes()); const j = await liveJournal('live-ws', clock); const live = await composeJudge({ policyFile: LIVE_FILE, mode: 'LIVE_UNARMED', accountId: 'live-ws', env: ENV, journal: j, clock: pclockOf(clock), transport: t, WebSocketImpl: ws.WebSocketImpl, specs: [SPEC], allowPrivate: () => true, allowOrders: () => false, writeProjection: false, codeDigest: CODE, log: () => {}, nominations: () => [] });
+-  const rep = await live.start({ heartbeatMs: 3_600_000 }); assert.equal(rep.executions.ok, true); assert.equal(ws.sockets.length, 1); await new Promise((res) => setTimeout(res, 5)); assert.equal(ws.sockets[0].url, 'wss://ws-auth.kraken.com/v2', 'the fixed authenticated host'); assert.equal(ws.subscribed(0), true, 'the executions subscription carried the token'); assert.deepEqual(ws.log.map((x) => x.event).slice(0, 4), ['CONSTRUCT', 'OPEN', 'SEND', 'MESSAGE'], 'open, subscribe, venue acknowledgement'); assert.equal(live.adapter.executionsState().connected, true);
++  const rep = await live.start({ heartbeatMs: 3_600_000 }); assert.equal(rep.executions.ok, true); assert.equal(ws.sockets.length, 1); await ws.waitForMessage((x) => x.event === 'MESSAGE' && x.channel === 'subscribe'); assert.equal(ws.sockets[0].url, 'wss://ws-auth.kraken.com/v2', 'the fixed authenticated host'); assert.equal(ws.subscribed(0), true, 'the executions subscription carried the token'); assert.deepEqual(ws.log.map((x) => x.event).slice(0, 4), ['CONSTRUCT', 'OPEN', 'SEND', 'MESSAGE'], 'open, subscribe, venue acknowledgement'); assert.equal(live.adapter.executionsState().connected, true);
+   const st = await live.stop(); assert.equal(ws.sockets[0].closedByOwner, true, 'R15-02: the owned socket is closed on stop'); assert.ok(st.lifecycle.includes('SOCKET_CLOSED')); assert.equal(live.adapter.executionsState().connected, false); assert.equal(live.adapter.executionsState().reconnects, 0, 'an owner close never reconnects');
+ });
+ 
+@@ -146,7 +174,7 @@ test('R15-03/R15-04. reconnect after a socket close with a complete reconciliati
+   // N02: the scripted venue lifecycle — subscribe acknowledged, sequenced executions, a sequence gap, a venue-side drop, a reconnect with a fresh token, the owner's close
+   const ws = createScriptedWebSocket(); const { sockets } = ws;
+   const t = transportDouble(liveRoutes()); const clock = fakeClock(); const j = await liveJournal('live-rc', clock); const run = await composeJudge({ policyFile: LIVE_FILE, mode: 'LIVE_UNARMED', accountId: 'live-rc', env: ENV, journal: j, clock: pclockOf(clock), transport: t, WebSocketImpl: ws.WebSocketImpl, specs: [SPEC], allowPrivate: () => true, allowOrders: () => false, writeProjection: false, codeDigest: CODE, log: () => {}, nominations: () => [] });
+-  await run.start({ heartbeatMs: 3_600_000 }); assert.equal(sockets.length, 1); const tokens = () => t.calls.filter((c) => c.path === '/0/private/GetWebSocketsToken').length; const t0 = tokens(); await new Promise((res) => setTimeout(res, 5)); assert.equal(ws.subscribed(0), true, 'subscribed with the token'); assert.ok(ws.log.some((x) => x.event === 'MESSAGE' && x.channel === 'subscribe'), 'the venue acknowledged the subscription');
++  await run.start({ heartbeatMs: 3_600_000 }); assert.equal(sockets.length, 1); const tokens = () => t.calls.filter((c) => c.path === '/0/private/GetWebSocketsToken').length; const t0 = tokens(); await ws.waitForMessage((x) => x.event === 'MESSAGE' && x.channel === 'subscribe'); assert.equal(ws.subscribed(0), true, 'subscribed with the token'); assert.ok(ws.log.some((x) => x.event === 'MESSAGE' && x.channel === 'subscribe'), 'the venue acknowledged the subscription');
+   sockets[0].executions([], { sequence: 1, type: 'snapshot' }); sockets[0].executions([], { sequence: 2 }); assert.equal(run.adapter.executionsState().lastSeq, 2); assert.equal(run.dispatcher.state().restrictions.RECONCILIATION_REQUIRED, undefined, 'contiguous sequences are not a gap');
+   sockets[0].executions([], { sequence: 4 }); await run.dispatcher.idle(); assert.ok(run.dispatcher.state().restrictions.RECONCILIATION_REQUIRED, 'a sequence gap (2 -> 4) is a gap until reconciled'); assert.equal(run.adapter.executionsState().gaps, 1); await run.tick(); await run.dispatcher.idle(); assert.equal(run.reconcileReport().afterGap, 1); assert.equal(run.dispatcher.state().restrictions.RECONCILIATION_REQUIRED, undefined);
+   const pong = await run.adapter.ping(); assert.equal(pong.ok, true, JSON.stringify(pong)); assert.equal(pong.requestIdMatched, true, 'ping / pong through the scripted channel');
+diff --git a/test/helpers/scripted-ws.js b/test/helpers/scripted-ws.js
+index 9219950..9b1583f 100644
+--- a/test/helpers/scripted-ws.js
++++ b/test/helpers/scripted-ws.js
+@@ -3,19 +3,21 @@
+ // acknowledgement, native executions messages with sequence numbers (gaps included), ping / pong, a venue-side drop
+ // (reconnect), and the owner's close. Nothing here reaches a network: it is the venue, scripted.
+ export function createScriptedWebSocket({ ackSubscriptions = true, onSend = null } = {}) {
+-  const sockets = []; const log = [];
++  const sockets = []; const log = []; const messageWaiters = new Set();
++  const record = (entry) => { log.push(entry); for (const waiter of [...messageWaiters]) if (waiter.predicate(entry)) { messageWaiters.delete(waiter); clearTimeout(waiter.timer); waiter.resolve(entry); } };
+   class ScriptedWebSocket {
+-    constructor(url) { this.url = String(url); this.readyState = 0; this.sent = []; this.onopen = null; this.onmessage = null; this.onerror = null; this.onclose = null; this.closedByOwner = false; sockets.push(this); log.push({ event: 'CONSTRUCT', url: this.url }); setTimeout(() => { if (this.readyState !== 0) return; this.readyState = 1; log.push({ event: 'OPEN', url: this.url }); this.onopen?.({ type: 'open' }); }, 0); }
+-    send(text) { if (this.readyState !== 1) throw new Error('socket not open'); const raw = String(text); this.sent.push(raw); let msg = null; try { msg = JSON.parse(raw); } catch { msg = null; } log.push({ event: 'SEND', method: msg?.method ?? null });
++    constructor(url) { this.url = String(url); this.readyState = 0; this.sent = []; this.onopen = null; this.onmessage = null; this.onerror = null; this.onclose = null; this.closedByOwner = false; sockets.push(this); record({ event: 'CONSTRUCT', url: this.url }); setTimeout(() => { if (this.readyState !== 0) return; this.readyState = 1; record({ event: 'OPEN', url: this.url }); this.onopen?.({ type: 'open' }); }, 0); }
++    send(text) { if (this.readyState !== 1) throw new Error('socket not open'); const raw = String(text); this.sent.push(raw); let msg = null; try { msg = JSON.parse(raw); } catch { msg = null; } record({ event: 'SEND', method: msg?.method ?? null });
+       if (msg?.method === 'subscribe' && ackSubscriptions) { const token = msg.params?.token; this.token = typeof token === 'string' ? `${token.slice(0, 4)}…` : null; setTimeout(() => this.deliver({ method: 'subscribe', success: true, result: { channel: msg.params?.channel ?? 'executions', snap_orders: Boolean(msg.params?.snap_orders), snap_trades: Boolean(msg.params?.snap_trades) }, time_in: new Date().toISOString(), time_out: new Date().toISOString() }), 0); }
+       if (msg?.method === 'ping') setTimeout(() => this.deliver({ method: 'pong', req_id: msg.req_id, time_in: new Date().toISOString(), time_out: new Date().toISOString() }), 0);
+       if (onSend) onSend(this, msg, raw); }
+     // the venue speaks: a native message (object or exact wire text)
+-    deliver(msg) { if (this.readyState !== 1) return false; const data = typeof msg === 'string' ? msg : JSON.stringify(msg); log.push({ event: 'MESSAGE', channel: msg?.channel ?? msg?.method ?? null }); this.onmessage?.({ data }); return true; }
++    deliver(msg) { if (this.readyState !== 1) return false; const data = typeof msg === 'string' ? msg : JSON.stringify(msg); record({ event: 'MESSAGE', channel: msg?.channel ?? msg?.method ?? null }); this.onmessage?.({ data }); return true; }
+     executions(records, { sequence, type = 'update' } = {}) { return this.deliver({ channel: 'executions', type, sequence, data: records }); }
+     // the venue drops the connection (not the owner): the adapter must treat it as a gap and reconnect
+-    drop(reason = 'venue closed') { if (this.readyState === 3) return; this.readyState = 3; log.push({ event: 'DROP', reason }); this.onclose?.({ type: 'close', code: 1006, reason, wasClean: false }); }
+-    close() { if (this.readyState === 3) return; this.readyState = 3; this.closedByOwner = true; log.push({ event: 'OWNER_CLOSE' }); this.onclose?.({ type: 'close', code: 1000, reason: 'owner', wasClean: true }); }
++    drop(reason = 'venue closed') { if (this.readyState === 3) return; this.readyState = 3; record({ event: 'DROP', reason }); this.onclose?.({ type: 'close', code: 1006, reason, wasClean: false }); }
++    close() { if (this.readyState === 3) return; this.readyState = 3; this.closedByOwner = true; record({ event: 'OWNER_CLOSE' }); this.onclose?.({ type: 'close', code: 1000, reason: 'owner', wasClean: true }); }
+   }
+-  return { WebSocketImpl: ScriptedWebSocket, sockets, log, latest: () => sockets[sockets.length - 1] ?? null, subscribed: (i = sockets.length - 1) => Boolean(sockets[i]?.sent.some((r) => r.includes('"subscribe"'))) };
++  function waitForMessage(predicate, { timeoutMs = 250 } = {}) { const found = log.find(predicate); if (found) return Promise.resolve(found); return new Promise((resolve, reject) => { const waiter = { predicate, resolve, timer: null }; waiter.timer = setTimeout(() => { messageWaiters.delete(waiter); reject(new Error(`scripted WebSocket message not observed within ${timeoutMs}ms`)); }, timeoutMs); messageWaiters.add(waiter); }); }
++  return { WebSocketImpl: ScriptedWebSocket, sockets, log, waitForMessage, latest: () => sockets[sockets.length - 1] ?? null, subscribed: (i = sockets.length - 1) => Boolean(sockets[i]?.sent.some((r) => r.includes('"subscribe"'))) };
  }
- 
