@@ -84,12 +84,14 @@ export function matureEpisode({ episode, archive, asOfTs, attachedTs, costAssump
   return deepFreeze(attach);
 }
 
-// The maturation sweep over pending episodes: returns { matured, pending, unavailable } — distinct daily counts,
-// never one blended number. Only episodes WITHOUT a current attachment are considered pending.
+// The maturation sweep over pending episodes: returns { attachments, matured, pending, unavailable } — DISTINCT
+// counts, never one blended number: `matured` counts attachments carrying real label states, while an honest
+// UNAVAILABLE recording (missing series/archive for that asset) is written once but counted apart. Only episodes
+// without a settled attachment are considered pending.
 export function maturationSweep({ episodes, latestOutcomes, archive, asOfTs, attachedTs, costAssumptions = null, maxPerSweep = 500 }) {
-  const matured = []; let pending = 0; let unavailable = 0;
+  const attachments = []; let matured = 0; let pending = 0; let unavailable = 0;
   for (const e of episodes) {
-    if (matured.length >= maxPerSweep) break;
+    if (attachments.length >= maxPerSweep) break;
     const existing = latestOutcomes.get(e.opportunityId);
     if (existing && existing.outcomeRow.availability.state !== 'UNAVAILABLE') {
       const allSettled = Object.values(existing.outcomeRow.horizons).every((h) => h.state !== 'NOT_YET_KNOWN');
@@ -97,11 +99,11 @@ export function maturationSweep({ episodes, latestOutcomes, archive, asOfTs, att
     }
     const attach = matureEpisode({ episode: e, archive, asOfTs, attachedTs, costAssumptions, supersedes: existing ? existing.attachedTs : null });
     if (attach === null) { pending += 1; continue; }
-    if (attach.outcomeRow.availability.state === 'UNAVAILABLE') { unavailable += 1; if (existing) continue; }
+    if (attach.outcomeRow.availability.state === 'UNAVAILABLE') { unavailable += 1; if (existing) continue; attachments.push(attach); continue; }
     if (existing && JSON.stringify(existing.outcomeRow.horizons) === JSON.stringify(attach.outcomeRow.horizons)) continue; // nothing new matured
-    matured.push(attach);
+    attachments.push(attach); matured += 1;
   }
-  return { matured, pending, unavailable };
+  return { attachments, matured, pending, unavailable };
 }
 
 export const OUTCOME_CLASS_SET = OUTCOME_CLASSES;

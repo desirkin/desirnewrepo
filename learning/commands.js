@@ -41,8 +41,10 @@ export async function runLearningCommand(sub, flag, rest) {
     case 'campaign-declare': {
       const { archive, archiveDir, reason } = await openArchive(typeof flag('archive') === 'string' ? flag('archive') : undefined);
       if (!archive) { out({ declared: false, archiveDir, reason }); process.exitCode = 1; return; }
+      const mode = typeof flag('mode') === 'string' ? flag('mode') : 'HISTORICAL_REPLAY';
+      if (!['HISTORICAL_REPLAY', 'SYNTHETIC_STRESS'].includes(mode)) { out('learning campaign-declare: --mode must be HISTORICAL_REPLAY or SYNTHETIC_STRESS (prospective capture belongs to the continuous service)'); process.exitCode = 1; return; }
       const manifest = declareCampaign({
-        store, createdTs: now, datasetId: `childhood:${archive.census.identity.manifestSha256.slice(0, 16)}`,
+        store, createdTs: now, mode, datasetId: `childhood:${archive.census.identity.manifestSha256.slice(0, 16)}`,
         datasetIdentity: { kind: 'CHILDHOOD_ARCHIVE', dir: archiveDir, manifestSha256: archive.census.identity.manifestSha256, limitations: archive.limitations },
         terminalTarget: Number(flag('target') ?? 100_000), seed: String(flag('seed') ?? `seed-${now}`),
         gridMinutes: Number(flag('grid-minutes') ?? 30),

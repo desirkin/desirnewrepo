@@ -104,8 +104,10 @@ export function runCampaignChunk({ store, campaignId, archive, nowTs, maxOpportu
   const evidenceBasis = manifest.mode === 'SYNTHETIC_STRESS' ? 'SYNTHETIC' : 'HISTORICAL_RECONSTRUCTION';
   let { assetIndex, gridIndex } = cp.cursor;
   let processed = 0; let seq = Number.isSafeInteger(cp.seq) ? cp.seq : 0;
-  const completedSoFar = countPrimary(store, campaignId);
-  let primaryCount = completedSoFar;
+  // resume truth: the deduplicated results file decides what already exists — a stale checkpoint replays a chunk,
+  // and every already-recorded opportunity is skipped, so a crash can neither double-count nor stop early
+  const existingPrimary = new Set(store.readCampaignResults(campaignId).filter((r) => r.kind === 'PRIMARY').map((r) => r.opportunityId));
+  let primaryCount = existingPrimary.size;
   let state = 'RUNNING';
   while (assetIndex < symbols.length) {
     if (primaryCount >= manifest.terminalTarget) { state = 'COMPLETED'; break; }
@@ -120,11 +122,12 @@ export function runCampaignChunk({ store, campaignId, archive, nowTs, maxOpportu
     gridIndex += 1;
     const decisionTs = decisionSec * 1000;
     const opportunityId = opportunityIdOf({ canonicalCoin: symbol, decisionTs, captureRecipeVersion: manifest.captureRecipeVersion, datasetId: manifest.datasetId });
+    if (existingPrimary.has(opportunityId)) continue; // a replayed chunk's already-recorded opportunity: skipped, never re-counted
     const rows = evaluateOpportunity({ manifest, archive, series, symbol, decisionSec, opportunityId, nowTs, seq, evidenceBasis });
     for (const row of rows) store.appendCampaignResult(campaignId, row);
     seq += rows.length;
     processed += 1;
-    if (rows.some((r) => r.kind === 'PRIMARY')) primaryCount += 1; // censored primaries still consume their unique slot (honest denominator)
+    if (rows.some((r) => r.kind === 'PRIMARY')) { existingPrimary.add(opportunityId); primaryCount += 1; } // censored primaries still consume their unique slot (honest denominator)
   }
   if (assetIndex >= symbols.length && state === 'RUNNING') state = primaryCount >= manifest.terminalTarget ? 'COMPLETED' : 'EXHAUSTED_SUPPORTED_HISTORY';
   if (primaryCount >= manifest.terminalTarget) state = 'COMPLETED';
@@ -197,10 +200,6 @@ function evaluateOpportunity({ manifest, archive, series, symbol, decisionSec, o
     }));
   }
   return rows;
-}
-
-function countPrimary(store, campaignId) {
-  return store.readCampaignResults(campaignId).filter((r) => r.kind === 'PRIMARY').length;
 }
 
 // ---- honest status: every count derived from the deduplicated validated read --------------------------------------

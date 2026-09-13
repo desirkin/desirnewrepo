@@ -38,10 +38,13 @@ export function startLearning({
   const lastCapturedBySymbol = new Map();
   const errors = { capture: 0, maturation: 0, learning: 0 };
 
+  let lastRecordedSweepId = null;
   function captureTick(nowTs) {
     const pop = populationSource ? populationSource() : null;
     if (!pop || !Array.isArray(pop.rows) || pop.rows.length === 0) return { captured: 0, coverage: 0, reason: 'NO_POPULATION_SNAPSHOT' };
     const sweepId = `sweep-${pop.sweepId ?? pop.tsMs ?? nowTs}`;
+    if (sweepId === lastRecordedSweepId) return { captured: 0, coverage: 0, reason: 'SWEEP_ALREADY_RECORDED' }; // one completed sweep = one recording; replaying it is not new daily evidence
+    lastRecordedSweepId = sweepId;
     const sweepTs = Number.isSafeInteger(pop.tsMs) ? pop.tsMs : nowTs;
     if (utcDateOf(sweepTs) !== counters.utcDate) counters = rollCounters(counters, sweepTs);
     let coverage = 0;
@@ -91,8 +94,8 @@ export function startLearning({
     const episodes = store.readEpisodes();
     const latest = store.latestOutcomes();
     const sweep = maturationSweep({ episodes, latestOutcomes: latest, archive, asOfTs: nowTs, attachedTs: nowTs, maxPerSweep: MAX_MATURATION_PER_TICK });
-    for (const attach of sweep.matured) { try { store.appendOutcome(attach); counters.newlyMatured += 1; } catch (err) { errors.maturation += 1; log(`learning maturation: ${err.message}`); } }
-    return { matured: sweep.matured.length, pending: sweep.pending, unavailable: sweep.unavailable };
+    for (const attach of sweep.attachments) { try { store.appendOutcome(attach); if (attach.outcomeRow.availability.state !== 'UNAVAILABLE') counters.newlyMatured += 1; } catch (err) { errors.maturation += 1; log(`learning maturation: ${err.message}`); } }
+    return { matured: sweep.matured, pending: sweep.pending, unavailable: sweep.unavailable };
   }
 
   function learnTick(nowTs) {
