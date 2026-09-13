@@ -1,359 +1,138 @@
-diff --git a/lib/data-only-lifecycle.js b/lib/data-only-lifecycle.js
-new file mode 100644
-index 0000000..3553908
---- /dev/null
-+++ b/lib/data-only-lifecycle.js
-@@ -0,0 +1,16 @@
-+// Small pure helpers shared by the read-only runtime's status and shutdown.
-+export function onceAsync(action) {
-+  let pending;
-+  return (...args) => pending ??= Promise.resolve().then(() => action(...args));
-+}
-+
-+export function dataOnlySpending(budget, socialX) {
-+  const budgetKnown = Number.isFinite(budget?.estimatedMonthUsd) && budget.estimatedMonthUsd >= 0 && budget.state !== 'DURABILITY_BLOCKED';
-+  const xKnown = socialX?.hydrated === true && Number.isFinite(socialX?.budget?.estimatedUsdUsedMonth) && socialX.budget.estimatedUsdUsedMonth >= 0;
-+  return {
-+    maxPaidUsdPerMonth: 15,
-+    accountingState: budgetKnown && xKnown ? 'KNOWN_LOCAL_ESTIMATE' : 'UNKNOWN',
-+    estimatedPaidUsdThisMonth: budgetKnown && xKnown ? budget.estimatedMonthUsd + socialX.budget.estimatedUsdUsedMonth : null,
-+    note: 'Local accounting estimate, not a provider invoice. X post reads are capped separately at 3,000/month and $0.50/day; other enabled routes are free or plan-credit limited.',
-+  };
-+}
-diff --git a/persistence/external-checkpoint-store.js b/persistence/external-checkpoint-store.js
-index b7f8f1a..191d91f 100644
---- a/persistence/external-checkpoint-store.js
-+++ b/persistence/external-checkpoint-store.js
-@@ -98,6 +98,8 @@ export async function openExternalCheckpointStore({
+diff --git a/lib/data-only-budget.js b/lib/data-only-budget.js
+index 59a5e73..732f5db 100644
+--- a/lib/data-only-budget.js
++++ b/lib/data-only-budget.js
+@@ -19,7 +19,6 @@ export const DEFAULT_DATA_ONLY_LANES = Object.freeze({
+   SEC_OFFICIAL: Object.freeze({ maxDailyRequests: 1_080, usdPerRequest: 0 }),
+   CFTC_OFFICIAL: Object.freeze({ maxDailyRequests: 1_080, usdPerRequest: 0 }),
+   OFAC_OFFICIAL: Object.freeze({ maxDailyRequests: 96, usdPerRequest: 0 }),
+-  GDELT_NEWS_DISCOVERY: Object.freeze({ maxDailyRequests: 16, usdPerRequest: 0 }),
+   NOAA_SWPC: Object.freeze({ maxDailyRequests: 300, usdPerRequest: 0 }),
+   CLOUDFLARE_RADAR: Object.freeze({ maxDailyRequests: 30, usdPerRequest: 0 }),
+   COINDESK_NEWS: Object.freeze({ maxDailyRequests: 150, usdPerRequest: 0 }),
+@@ -29,8 +28,6 @@ export const DEFAULT_DATA_ONLY_LANES = Object.freeze({
+     usdPerRequest: 0,
+   }),
+   DECRYPT_NEWS: Object.freeze({ maxDailyRequests: 150, usdPerRequest: 0 }),
+-  X_OFFICIAL: Object.freeze({ maxDailyRequests: 120, usdPerRequest: 0 }),
+-  FARCASTER_OFFICIAL: Object.freeze({ maxDailyRequests: 96, usdPerRequest: 0 }),
+ });
  
-   const entries = new Map();
-   let closed = false;
-+  let closing = false;
-+  let closePromise = null;
-   let globalFailure = null;
-   const failures = new Map();
+ const HOST_LANES = Object.freeze({
+@@ -44,15 +41,12 @@ const HOST_LANES = Object.freeze({
+   "sanctionslistservice.ofac.treas.gov": "OFAC_OFFICIAL",
+   "wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com":
+     "OFAC_OFFICIAL",
+-  "api.gdeltproject.org": "GDELT_NEWS_DISCOVERY",
+   "services.swpc.noaa.gov": "NOAA_SWPC",
+   "api.cloudflare.com": "CLOUDFLARE_RADAR",
+   "www.coindesk.com": "COINDESK_NEWS",
+   "www.theblock.co": "THEBLOCK_NEWS",
+   "cointelegraph.com": "COINTELEGRAPH_NEWS",
+   "decrypt.co": "DECRYPT_NEWS",
+-  "api.x.com": "X_OFFICIAL",
+-  "api.neynar.com": "FARCASTER_OFFICIAL",
+ });
  
-@@ -114,16 +116,17 @@ export async function openExternalCheckpointStore({
-     log(`EXTERNAL CHECKPOINT BLOCKED: ${failure.code} ${failure.checkpointId ?? ''}`.trim());
-     return safe;
-   };
--  const assertLive = (checkpointId = null) => {
-+  const assertLive = (checkpointId = null, { acceptedBeforeClose = false } = {}) => {
-     if (closed) throw new ExternalCheckpointError('STORE_CLOSED', 'external checkpoint store is closed', checkpointId);
-+    if (closing && !acceptedBeforeClose) throw new ExternalCheckpointError('STORE_CLOSING', 'external checkpoint store is draining accepted mutations', checkpointId);
-     if (globalFailure) throw new ExternalCheckpointError('STORE_LATCHED', `${globalFailure.code}; no further checkpoint mutations permitted`, checkpointId);
-     const checkpointFailure = checkpointId === null ? null : failures.get(checkpointId);
-     if (checkpointFailure) throw new ExternalCheckpointError('CHECKPOINT_LATCHED', `${checkpointFailure.code}; no further mutations permitted for this checkpoint`, checkpointId);
-     if (typeof lock.held !== 'function' || !lock.held()) throw latch(new ExternalCheckpointError('LOCK_LOST', 'external checkpoint owner lock was lost', checkpointId), checkpointId, { global: true });
-   };
+ const utcDay = (ts) => new Date(ts).toISOString().slice(0, 10);
+diff --git a/test/data-only-budget.test.js b/test/data-only-budget.test.js
+index cc83c8f..cf56874 100644
+--- a/test/data-only-budget.test.js
++++ b/test/data-only-budget.test.js
+@@ -12,9 +12,9 @@ import {
+   loadDataOnlyBudgetCheckpoint,
+ } from "../lib/data-only-budget.js";
  
--  async function persist(entry, next) {
--    assertLive(entry.id);
-+  async function persist(entry, next, { acceptedBeforeClose = false } = {}) {
-+    assertLive(entry.id, { acceptedBeforeClose });
-     const jsonError = jsonValueError(next);
-     if (jsonError) throw latch(new ExternalCheckpointError('CHECKPOINT_INVALID', jsonError, entry.id), entry.id);
-     const invalid = validationError(entry.validate, next);
-@@ -145,6 +148,11 @@ export async function openExternalCheckpointStore({
+-test("GDELT discovery has an exact zero-cost lane under the deployment daily cap", () => {
+-  assert.equal(dataOnlyLaneForRequest("https://api.gdeltproject.org/api/v2/doc/doc?query=crypto"), "GDELT_NEWS_DISCOVERY");
+-  assert.deepEqual(DEFAULT_DATA_ONLY_LANES.GDELT_NEWS_DISCOVERY, { maxDailyRequests: 16, usdPerRequest: 0 });
++test("separately journaled discovery is not duplicated in the generic governor", () => {
++  assert.equal(dataOnlyLaneForRequest("https://api.gdeltproject.org/api/v2/doc/doc?query=crypto"), null);
++  assert.equal(DEFAULT_DATA_ONLY_LANES.GDELT_NEWS_DISCOVERY, undefined);
+   assert.equal(dataOnlyLaneForRequest("https://evil.example/gdelt"), null);
+ });
+ 
+@@ -74,24 +74,47 @@ test("zero-spend runtime refuses any paid lane before startup", () => {
    }
+ });
  
-   function enqueue(entry, operation) {
-+    // Admission is decided synchronously. Work accepted before close() owns a
-+    // place in this entry's tail and is allowed to finish while the store is
-+    // draining; work submitted after close begins is refused.
-+    try { assertLive(entry.id); }
-+    catch (error) { return Promise.reject(error); }
-     const pending = entry.tail.then(operation);
-     entry.tail = pending.catch(() => {});
-     return pending;
-@@ -214,14 +222,14 @@ export async function openExternalCheckpointStore({
-       snapshot: () => clone(entry.state),
-       revision: () => entry.revision,
-       commissioning: () => clone(entry.commissioning),
--      commit: (next, _meta = null) => enqueue(entry, () => persist(entry, clone(next))),
-+      commit: (next, _meta = null) => enqueue(entry, () => persist(entry, clone(next), { acceptedBeforeClose: true })),
-       update: (reducer, _meta = null) => {
-         if (typeof reducer !== 'function') return Promise.reject(new ExternalCheckpointError('REDUCER_REQUIRED', 'checkpoint update requires a synchronous reducer', id));
-         return enqueue(entry, async () => {
--          assertLive(id);
-+          assertLive(id, { acceptedBeforeClose: true });
-           const next = reducer(clone(entry.state));
-           if (next && typeof next.then === 'function') throw latch(new ExternalCheckpointError('ASYNC_REDUCER_REFUSED', 'checkpoint reducers must be synchronous and side-effect free', id), id);
--          return persist(entry, next);
-+          return persist(entry, next, { acceptedBeforeClose: true });
-         });
-       },
-       failed: () => {
-@@ -234,11 +242,20 @@ export async function openExternalCheckpointStore({
-     return binding;
-   }
- 
--  async function close() {
--    if (closed) return;
--    closed = true;
--    await Promise.all([...entries.values()].map((entry) => entry.tail));
--    try { await lock.release?.(); } catch { /* a dead session already released the lock */ }
-+  function close() {
-+    if (closed) return Promise.resolve();
-+    if (closePromise) return closePromise;
-+    closing = true;
-+    closePromise = (async () => {
-+      try {
-+        await Promise.all([...entries.values()].map((entry) => entry.tail));
-+      } finally {
-+        try { await lock.release?.(); } catch { /* a dead session already released the lock */ }
-+        closed = true;
-+        closing = false;
-+      }
-+    })();
-+    return closePromise;
-   }
- 
-   return Object.freeze({
-@@ -248,7 +265,7 @@ export async function openExternalCheckpointStore({
-       const failure = globalFailure ?? (id === null ? failures.values().next().value ?? null : failures.get(id) ?? null);
-       return failure ? { ...failure } : null;
-     },
--    status: () => Object.freeze({ version: EXTERNAL_CHECKPOINT_STORE_VERSION, closed, lockHeld: !closed && lock.held?.() === true, failure: globalFailure ? { ...globalFailure } : null, checkpointFailures: Object.fromEntries([...failures].map(([id, failure]) => [id, { ...failure }])), checkpoints: Object.fromEntries([...entries].map(([id, entry]) => [id, { revision: entry.revision }])) }),
-+    status: () => Object.freeze({ version: EXTERNAL_CHECKPOINT_STORE_VERSION, closed, closing, lockHeld: !closed && lock.held?.() === true, failure: globalFailure ? { ...globalFailure } : null, checkpointFailures: Object.fromEntries([...failures].map(([id, failure]) => [id, { ...failure }])), checkpoints: Object.fromEntries([...entries].map(([id, entry]) => [id, { revision: entry.revision }])) }),
-     close,
-   });
- }
-diff --git a/test/data-only-lifecycle.test.js b/test/data-only-lifecycle.test.js
-new file mode 100644
-index 0000000..368f02f
---- /dev/null
-+++ b/test/data-only-lifecycle.test.js
-@@ -0,0 +1,26 @@
-+import test from 'node:test';
-+import assert from 'node:assert/strict';
-+import { onceAsync, dataOnlySpending } from '../lib/data-only-lifecycle.js';
-+
-+test('shutdown callers share the same pending drain including repeated signals', async () => {
-+  let release; let calls = 0;
-+  const stop = onceAsync(async () => { calls++; await new Promise(resolve => { release = resolve; }); return 'drained'; });
-+  const first = stop('SIGTERM');
-+  assert.equal(stop('SIGINT'), first);
-+  await Promise.resolve();
-+  assert.equal(calls, 1);
-+  let done = false; first.then(() => { done = true; });
-+  await Promise.resolve(); assert.equal(done, false);
-+  release(); assert.equal(await first, 'drained'); assert.equal(stop(), first);
+-test("official social hosts are explicitly capped while unknown hosts still fail closed", () => {
++test("separately journaled social hosts are not duplicated while unknown hosts fail closed", () => {
+   assert.equal(
+     dataOnlyLaneForRequest("https://api.x.com/2/tweets/search/stream"),
+-    "X_OFFICIAL",
++    null,
+   );
+   assert.equal(
+     dataOnlyLaneForRequest("https://api.neynar.com/v2/farcaster/cast/search"),
+-    "FARCASTER_OFFICIAL",
++    null,
+   );
+   assert.equal(
+     dataOnlyLaneForRequest("https://example.com/not-approved"),
+     null,
+   );
+   assert.equal(dataOnlyLaneForRequest("http://api.x.com/2/tweets"), null);
+-  assert.equal(DEFAULT_DATA_ONLY_LANES.X_OFFICIAL.maxDailyRequests, 120);
+-  assert.equal(DEFAULT_DATA_ONLY_LANES.FARCASTER_OFFICIAL.maxDailyRequests, 96);
+-  assert.equal(DEFAULT_DATA_ONLY_LANES.X_OFFICIAL.usdPerRequest, 0);
+-  assert.equal(DEFAULT_DATA_ONLY_LANES.FARCASTER_OFFICIAL.usdPerRequest, 0);
++  assert.equal(DEFAULT_DATA_ONLY_LANES.X_OFFICIAL, undefined);
++  assert.equal(DEFAULT_DATA_ONLY_LANES.FARCASTER_OFFICIAL, undefined);
 +});
 +
-+test('unrestored spending is UNKNOWN, never an invented zero', () => {
-+  const knownX = { hydrated: true, budget: { estimatedUsdUsedMonth: 0.2 } };
-+  for (const budget of [null, { estimatedMonthUsd: null }, { state: 'DURABILITY_BLOCKED', estimatedMonthUsd: 0 }]) {
-+    assert.equal(dataOnlySpending(budget, knownX).estimatedPaidUsdThisMonth, null);
++test("deployed fourteen-lane checkpoint imports without resetting any counters", () => {
++  const expected = [
++    "KRAKEN_PUBLIC_REST", "KRAKEN_STATUS", "COINBASE_STATUS", "OKX_STATUS",
++    "KRAKEN_OFFICIAL", "SEC_OFFICIAL", "CFTC_OFFICIAL", "OFAC_OFFICIAL",
++    "NOAA_SWPC", "CLOUDFLARE_RADAR", "COINDESK_NEWS", "THEBLOCK_NEWS",
++    "COINTELEGRAPH_NEWS", "DECRYPT_NEWS",
++  ];
++  assert.deepEqual(Object.keys(DEFAULT_DATA_ONLY_LANES), expected);
++  const dir = mkdtempSync(path.join(os.tmpdir(), "serpent-data-budget-legacy-"));
++  try {
++    const state = createEmptyDataOnlyBudgetState({ ts: Date.UTC(2026, 8, 13) });
++    state.lanes.KRAKEN_PUBLIC_REST.reserved = 17;
++    state.lanes.KRAKEN_PUBLIC_REST.settled = 16;
++    state.lanes.KRAKEN_PUBLIC_REST.succeeded = 15;
++    state.lanes.KRAKEN_PUBLIC_REST.failed = 1;
++    mkdirSync(path.join(dir, "data-only"), { recursive: true });
++    writeFileSync(path.join(dir, "data-only", "budget-current.json"), JSON.stringify(state));
++    const restored = loadDataOnlyBudgetCheckpoint(dir, { lanes: DEFAULT_DATA_ONLY_LANES, maxMonthlyUsd: 0 });
++    assert.deepEqual(restored, state);
++    assert.deepEqual(restored.lanes.KRAKEN_PUBLIC_REST, state.lanes.KRAKEN_PUBLIC_REST);
++  } finally {
++    rmSync(dir, { recursive: true, force: true });
 +  }
-+  for (const socialX of [null, { hydrated: false, budget: { estimatedUsdUsedMonth: 0 } }]) {
-+    assert.equal(dataOnlySpending({ estimatedMonthUsd: 0 }, socialX).accountingState, 'UNKNOWN');
-+  }
-+  assert.equal(dataOnlySpending({ estimatedMonthUsd: 0 }, knownX).estimatedPaidUsdThisMonth, 0.2);
-+});
-diff --git a/test/data-only-runtime.test.mjs b/test/data-only-runtime.test.mjs
-index 0c49343..0411c94 100644
---- a/test/data-only-runtime.test.mjs
-+++ b/test/data-only-runtime.test.mjs
-@@ -88,9 +88,14 @@ test('data-only news uses official feeds plus bounded GDELT metadata and withhol
- 
- test('Replit run and deployment commands select the data-only supervisor, not the paper runtime', () => {
-   const replit = readFileSync(path.join(root, '.replit'), 'utf8');
-+  const supervisor = readFileSync(path.join(root, 'tools', 'data-only-with-ui.mjs'), 'utf8');
-   assert.match(replit, /^run = "npm run data:only-ui"/m);
-   assert.match(replit, /\[deployment\][\s\S]*run = \["npm", "run", "data:only-ui"\]/);
-   assert.doesNotMatch(replit, /npm run paper|paper run/);
-+  assert.match(supervisor, /let terminalExitCode = null/);
-+  assert.match(supervisor, /process\.exit\(terminalExitCode \?\? 0\)/);
-+  assert.match(supervisor, /const SHUTDOWN_GRACE_MS = 60_000/);
-+  assert.doesNotMatch(supervisor, /}, 10_000\)\.unref\(\)/, 'supervisor grace must exceed bounded collector drains');
  });
  
- test('startup publishes process identity and restores external quotas before any provider starts', () => {
-diff --git a/test/data-only-status.test.js b/test/data-only-status.test.js
-index 2cb3bce..7add649 100644
---- a/test/data-only-status.test.js
-+++ b/test/data-only-status.test.js
-@@ -121,7 +121,10 @@ test('paper readiness accepts keyed Rumor2 providers and requires a fresh collec
-   const root = mkdtempSync(path.join(tmpdir(), 'keyed-rumor-status-'));
-   try {
-     mkdirSync(path.join(root, 'rumor2'), { recursive: true });
--    const profile = loadProfile(); const env = { ...profileEnvironment(profile), SERPENT_HTTP_CONTACT: 'ops@example.com' };
-+    // Deployment shells deliberately carry COBRA_PROFILE=''. The test owns an
-+    // explicit fixture path so inherited runtime environment cannot redirect
-+    // loadProfile() to the repository directory.
-+    const profile = loadProfile('config/paper-runtime.json'); const env = { ...profileEnvironment(profile), SERPENT_HTTP_CONTACT: 'ops@example.com' };
-     const write = (tsMs) => writeFileSync(path.join(root, 'rumor2', 'status.json'), JSON.stringify({
-       tsMs, lifecycle: 'ACTIVE', durabilityMode: 'POSTGRES', writerAuthority: { state: 'ACTIVE' },
-       providers: { CFTC_OFFICIAL: { enabled: true, coverage: { state: 'OBSERVED', checkedTs: tsMs, detail: null } } },
-diff --git a/test/external-checkpoint-store.test.js b/test/external-checkpoint-store.test.js
-index f57ec4f..d92b856 100644
---- a/test/external-checkpoint-store.test.js
-+++ b/test/external-checkpoint-store.test.js
-@@ -70,3 +70,35 @@ test('store refuses startup before the durable core is restored or when another
-   const q = persistence(); q.db.lockAvailable = false;
-   await assert.rejects(() => openExternalCheckpointStore({ persistence: q }), /LOCK_HELD_ELSEWHERE/);
- });
-+
-+test('close drains mutations accepted before close and refuses later admission', async () => {
-+  const p = persistence();
-+  const store = await openExternalCheckpointStore({ persistence: p });
-+  const binding = await store.restore({
-+    id: EXTERNAL_CHECKPOINT_IDS.DATA_ONLY,
-+    validate: validator,
-+    commission: { allowCreate: true, state: { used: 0 }, reason: 'test owner', ts: 1 },
-+  });
-+
-+  let releaseWrite;
-+  const writeGate = new Promise((resolve) => { releaseWrite = resolve; });
-+  const save = p.repo.saveRuntimeState.bind(p.repo);
-+  let updateCalls = 0;
-+  p.repo.saveRuntimeState = async (...args) => {
-+    if (args[2] !== null && ++updateCalls === 1) await writeGate;
-+    return save(...args);
-+  };
-+
-+  const first = binding.commit({ used: 1 });
-+  const second = binding.commit({ used: 2 });
-+  const closing = store.close();
-+  assert.equal(store.status().closing, true);
-+  await assert.rejects(binding.commit({ used: 3 }), /STORE_CLOSING/);
-+  releaseWrite();
-+
-+  await assert.doesNotReject(Promise.all([first, second, closing]));
-+  assert.equal(store.status().closed, true);
-+  assert.equal(store.status().closing, false);
-+  assert.equal(p.repo.rows.get(EXTERNAL_CHECKPOINT_IDS.DATA_ONLY).state.checkpoint.used, 2);
-+  assert.equal(p.db.released, 1);
-+});
-diff --git a/test/video.test.js b/test/video.test.js
-index 3ba988f..0499970 100644
---- a/test/video.test.js
-+++ b/test/video.test.js
-@@ -76,7 +76,7 @@ test('VIDEO-3. composed collector under an injected transport: dark without the
- });
- 
- test('VIDEO-4. reader + profile + snapshot: corrupt lines counted not returned; the profile REQUESTS the tier (SOCIAL_VIDEO_ENABLED) and names the key as a secret it never derives; the snapshot reads the gate from env NAMES (BLOCKED_CREDENTIAL -> CONFIG_REQUIRED -> BLOCKED_BUDGET), NOT_OBSERVED without a status record, ACTIVE only from a fresh success, BLOCKED_BUDGET from a parked collector, and never a key fragment', () => {
--  const p = loadProfile(); const env = profileEnvironment(p); assert.equal(env.SOCIAL_VIDEO_ENABLED, 'true'); assert.ok(SECRET_ENV_NAMES.includes('YOUTUBE_API_KEY')); assert.ok(!('YOUTUBE_API_KEY' in env)); assert.equal(p.groups.social.YOUTUBE_DATA_API.desiredState, 'REQUEST');
-+  const p = loadProfile('config/paper-runtime.json'); const env = profileEnvironment(p); assert.equal(env.SOCIAL_VIDEO_ENABLED, 'true'); assert.ok(SECRET_ENV_NAMES.includes('YOUTUBE_API_KEY')); assert.ok(!('YOUTUBE_API_KEY' in env)); assert.equal(p.groups.social.YOUTUBE_DATA_API.desiredState, 'REQUEST');
-   const dir = tmp('video-snap-'); mkdirSync(path.join(dir, 'video'), { recursive: true }); const now = T0;
-   const o = searchItemsToObservations(page(['vid00001']), { query: 'q', receiptTs: now }).observations[0]; writeFileSync(path.join(dir, 'video', 'observations.jsonl'), `${JSON.stringify(o)}\n{bad\n${JSON.stringify({ ...o, transcript: 'x' })}\n`);
-   const r = readVideoObservations(dir, { query: 'q' }); assert.equal(r.observations.length, 1); assert.equal(r.corrupt, 2);
+ test("durable reservation is awaited before wire and a failed settlement latches further dispatch", async () => {
 diff --git a/tools/data-only-runtime.mjs b/tools/data-only-runtime.mjs
-index 24bd3e9..45b6763 100644
+index 85a06ae..cc4319e 100644
 --- a/tools/data-only-runtime.mjs
 +++ b/tools/data-only-runtime.mjs
-@@ -56,6 +56,7 @@ const { rumor2JournalStore } = await import('../persistence/rumor2-journal.js');
- const { startRumor2 } = await import('../rumor2/collector.js');
- const { startDataOnlyMarket } = await import('./data-only-market.mjs');
- const { openDataOnlyCheckpoints } = await import('./data-only-checkpoints.mjs');
-+const { onceAsync, dataOnlySpending } = await import('../lib/data-only-lifecycle.js');
- 
- const root = resolveDataDir();
- mkdirSync(path.join(root, 'data-only'), { recursive: true });
-@@ -148,7 +149,7 @@ try {
- const governor = checkpoints?.budget
-   ? createDataOnlyFetch({ dataDir: root, maxMonthlyUsd: 0, durableCheckpoint: checkpoints.budget })
-   : { fetch: async () => { throw new Error('DATA_ONLY_QUOTA_NOT_RESTORED'); },
--    status: () => ({ state: 'DURABILITY_BLOCKED', estimatedMonthUsd: 0, lanes: {} }) };
-+    status: () => ({ state: 'DURABILITY_BLOCKED', estimatedMonthUsd: null, lanes: {} }) };
- if (!checkpoints?.budget) blockers.BUDGET ??= 'DATA_ONLY_QUOTA_NOT_RESTORED';
- 
- try {
-@@ -313,7 +314,7 @@ function writeRuntimeStatus() {
-       entrypoint: 'tools/data-only-runtime.mjs',
-     },
-     catalog: currentCatalog ? { contentId: currentCatalog.contentId, observedTs: currentCatalog.observedTs, markets: currentCatalog.markets.length, policy: 'FULL_ACCEPTED_KRAKEN_USD_CATALOG_EQUAL_EVERY_SWEEP', namedPreference: false } : null,
--    spending: { maxPaidUsdPerMonth: 15, estimatedPaidUsdThisMonth: Math.max(budget.estimatedMonthUsd, Number(rumor2?.status?.()?.socialX?.budget?.estimatedUsdUsedMonth ?? 0)), note: 'X post reads are capped separately at 3,000/month and $0.50/day; all other enabled routes are free or plan-credit limited' },
-+    spending: dataOnlySpending(budget, rumorStatus?.socialX),
-     blockers,
-     collectors: {
-       market: market?.status?.() ?? { state: 'BLOCKED', authority: 'NONE', reason: blockers.MARKET ?? 'market observation unavailable' },
-@@ -350,8 +351,7 @@ startupPhase = 'COMPLETE';
- writeRuntimeStatus();
- const statusTimer = setInterval(() => { try { writeRuntimeStatus(); } catch (error) { log(`status write failed: ${bounded(error.message)}`); } }, 60_000);
- 
--async function shutdown(signal) {
--  if (stopped) return;
-+const shutdown = onceAsync(async (signal) => {
-   stopped = true;
-   lifecycle = 'STOPPING';
-   clearInterval(statusTimer);
-@@ -366,11 +366,16 @@ async function shutdown(signal) {
-   if (runtimeFd !== null) {
-     try { closeSync(runtimeFd); } finally { runtimeFd = null; try { unlinkSync(runtimeLock); } catch { } }
-   }
--}
-+});
- 
--process.once('SIGINT', () => { shutdown('SIGINT').finally(() => process.exit(0)); });
--process.once('SIGTERM', () => { shutdown('SIGTERM').finally(() => process.exit(0)); });
--process.once('uncaughtException', (error) => { log(`uncaught exception: ${bounded(error.message)}`); shutdown('UNCAUGHT_EXCEPTION').finally(() => process.exit(1)); });
--process.once('unhandledRejection', (error) => { log(`unhandled rejection: ${bounded(error?.message ?? error)}`); shutdown('UNHANDLED_REJECTION').finally(() => process.exit(1)); });
-+let terminalExitCode = 0;
-+function requestShutdown(signal, exitCode = 0) {
-+  terminalExitCode = Math.max(terminalExitCode, exitCode);
-+  shutdown(signal).then(() => process.exit(terminalExitCode), () => process.exit(1));
-+}
-+process.once('SIGINT', () => requestShutdown('SIGINT'));
-+process.once('SIGTERM', () => requestShutdown('SIGTERM'));
-+process.once('uncaughtException', (error) => { log(`uncaught exception: ${bounded(error.message)}`); requestShutdown('UNCAUGHT_EXCEPTION', 1); });
-+process.once('unhandledRejection', (error) => { log(`unhandled rejection: ${bounded(error?.message ?? error)}`); requestShutdown('UNHANDLED_REJECTION', 1); });
- 
- log(`active with ${catalog?.markets?.length ?? 0} equally eligible Kraken catalog markets; X post-read cap $15/month; trading imports absent`);
-diff --git a/tools/data-only-with-ui.mjs b/tools/data-only-with-ui.mjs
-index e74ddd4..a5a25fc 100644
---- a/tools/data-only-with-ui.mjs
-+++ b/tools/data-only-with-ui.mjs
-@@ -52,6 +52,10 @@ const safetyEnv = {
- 
- const children = new Map();
- let shuttingDown = false;
-+let terminalExitCode = null;
-+// Rumor2 has a bounded 30 s official-feed request and market closeout can use
-+// its own 10 s drain before persisting unresolved accounting and sealing.
-+const SHUTDOWN_GRACE_MS = 60_000;
- 
- 
- function start(name, file) {
-@@ -80,13 +84,14 @@ function finishWhenStopped(exitCode) {
- function handleExit(name, code, signal) {
-   children.delete(name);
-   if (shuttingDown) {
--    if (children.size === 0) process.exit(0);
-+    if (children.size === 0) process.exit(terminalExitCode ?? 0);
-     return;
-   }
- 
- 
-   shuttingDown = true;
-   const exitCode = Number.isInteger(code) && code !== 0 ? code : 1;
-+  terminalExitCode = exitCode;
-   console.error(`[DATA-ONLY SUPERVISOR] ${name} exited unexpectedly (${signal ?? `code ${code}`}); stopping sibling process`);
-   stopChildren();
-   if (children.size === 0) process.exit(exitCode);
-@@ -94,7 +99,7 @@ function handleExit(name, code, signal) {
-   setTimeout(() => {
-     stopChildren('SIGKILL');
-     process.exit(exitCode);
--  }, 10_000).unref();
-+  }, SHUTDOWN_GRACE_MS).unref();
+@@ -129,6 +129,7 @@ let wideEye = null;
+ let rumor2 = null;
+ let video = null;
+ let market = null;
++let publicDiscovery = null;
+ let persistence = null;
+ let checkpoints = null;
+ let stopped = false;
+@@ -231,6 +232,7 @@ if (catalog) {
+       DISCOVERY_KALSHI_PAGE_LIMIT: '1000',
+     };
+     const handle = startPublicDiscovery({ env, dataDir: root, catalogSource, log, signals: false, durableCheckpoint: checkpoints.discovery });
++    publicDiscovery = handle;
+     if (handle) handles.push(handle);
+   } catch (error) { blockers.PUBLIC_DISCOVERY = bounded(error.message); log(`PUBLIC DISCOVERY blocked: ${blockers.PUBLIC_DISCOVERY}`); }
  }
- 
- 
-@@ -109,6 +114,7 @@ ui.once('exit', (code, signal) => handleExit('ui', code, signal));
- for (const signal of ['SIGINT', 'SIGTERM']) {
-   process.once(signal, () => {
-     shuttingDown = true;
-+    terminalExitCode ??= 0;
-     stopChildren(signal);
-     if (children.size === 0) process.exit(0);
-     for (const child of children.values()) {
-@@ -119,6 +125,6 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
-     setTimeout(() => {
-       stopChildren('SIGKILL');
-       process.exit(0);
--    }, 10_000).unref();
-+  }, SHUTDOWN_GRACE_MS).unref();
-   });
- }
+@@ -275,7 +277,7 @@ function writeRuntimeStatus() {
+   const budget = governor.status();
+   const currentCatalog = wideEye?.catalogSnapshot?.()?.catalog ?? null;
+   const rumorStatus = rumor2?.status?.() ?? null;
+-  const discoveryStatus = readDiscoveryStatus(root);
++  const discoveryStatus = publicDiscovery ? readDiscoveryStatus(root) : null;
+   const officialFeed = (id) => {
+     const provider = rumorStatus?.providers?.[id] ?? null;
+     return provider ? {
