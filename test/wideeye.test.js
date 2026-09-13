@@ -79,14 +79,15 @@ test('nomination merge: relaxed floor, venue re-verification, cap 30, shed lowes
   const coins = pairs.map((p) => p.coin);
   assert.ok(coins.includes('NOMA')); // $5M nominee earns a seat
   assert.ok(!coins.includes('NOMB') && !coins.includes('GHOST'));
-  for (const c of config.universe) assert.ok(coins.includes(c), `major ${c} must never be shed`);
+  for (const c of config.universe) assert.ok(coins.includes(c), `${c} earns its seat on this fixture's high volume`);
+  assert.ok(pairs.every((p) => p.major === false && p.depth === config.universeExpansion.defaultDepth));
   // 29 base + 2 admitted nominees = 31 -> one shed, and shedding is by volume:
   // NOMC ($4M) is the lowest minor, so the nomination does NOT jump the queue.
   assert.deepEqual(shed, ['NOMC']);
   assert.ok(!coins.includes('NOMC'));
 });
 
-test('cap sheds by volume, majors exempt even at zero volume', () => {
+test('cap sheds by the same volume rule even when an incoming legacy row claims major status', () => {
   const config = { ...loadConfig(), wideeye: { ...CFG, deepUniverseCap: 6 } };
   const pairs = [
     { coin: 'BTC', major: true, usdVol24h: null },
@@ -99,8 +100,12 @@ test('cap sheds by volume, majors exempt even at zero volume', () => {
   ];
   const { pairs: kept, shed } = mergeNominationsAndCap(pairs, [], {}, {}, config);
   assert.equal(kept.length, 6);
-  assert.deepEqual(shed, ['E']);
-  assert.ok(kept.some((p) => p.coin === 'BTC') && kept.some((p) => p.coin === 'DOGE'));
+  assert.deepEqual(shed, ['DOGE']);
+  assert.ok(kept.some((p) => p.coin === 'E'));
+  assert.ok(kept.every((p) => p.major === false));
+  const noReservedSeats = mergeNominationsAndCap(pairs, [], {}, {}, { ...config, wideeye: { ...config.wideeye, deepUniverseCap: 5 } });
+  assert.deepEqual(noReservedSeats.pairs.map((p) => p.coin), ['A','B','C','D','E']);
+  assert.deepEqual(noReservedSeats.shed, ['BTC','DOGE']);
 });
 
 test('dark wide eye performs zero network calls', () => {

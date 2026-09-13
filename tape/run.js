@@ -1,9 +1,8 @@
 // The cobra's tongue, wide: continuous market taste for every liquid
-// USD-quoted Kraken pair, selected daily by the liquidity floor. Majors keep
-// deep books (engine-grade); minors run shallow. One pair going quiet marks
-// itself STALE/UNAVAILABLE and never blocks the rest of the tape; the
-// engine's NO TRADE — DATA INTEGRITY stays tied to the connection and the
-// majors, which are the only pairs the engine may ever trade.
+// USD-quoted Kraken pair, selected daily by the same liquidity rules. Broad
+// catalog monitoring is separate from this bounded deep-book set. Named
+// display seeds grant no special depth or seats. Only actual held/pending
+// exposure receives protected resources; stale pairs cannot supply fresh data.
 import { loadConfig, coinFromSymbol } from '../lib/config.js';
 import { nowIso, sessionDate } from '../lib/time.js';
 import { OrderBook, decimalsOf } from './book.js';
@@ -56,7 +55,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   const xp = config.universeExpansion ?? {};
   const staleMs = config.tape.staleFeedSec * 1000;
   const snapIntervalSec = config.tape.snapshotIntervalSec;
-  const minorEvery = Math.max(1, Math.round((xp.minorsSnapshotIntervalSec ?? 30) / snapIntervalSec));
+  const backgroundEvery = Math.max(1, Math.round((xp.minorsSnapshotIntervalSec ?? 30) / snapIntervalSec));
   const batchSize = xp.subscribeBatchSize ?? 50;
 
   // ---- universe (selected now, refreshed at ET session reset, never intraday)
@@ -105,6 +104,12 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
 
   async function loadUniverse(reason) {
     const selection = await selectUniverse(config);
+    if (selection.error) {
+      // Retain already-observed subscriptions and protected exposure through a
+      // catalog outage, but never adopt a guessed/fallback asset as fresh truth.
+      writeEvent('UNIVERSE_REFRESH_FAILED', { reason, error: selection.error });
+      return { added: [], removed: [] };
+    }
     const incoming = new Map(selection.pairs.map((p) => [p.symbol, p]));
     const added = [];
     const removed = [];
@@ -358,12 +363,13 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       lastAnyMsgMs,
       now: Date.now(),
       staleMs,
+      requiredSymbols: pinnedSymbols(),
     });
     if (health.anyData) {
       if (health.state === 'DEGRADED') {
         setTapeState(TAPE_STATES.DEGRADED, {
           connectionDead: health.connectionDead,
-          staleMajors: health.staleMajors,
+          staleRequired: health.staleRequired,
         });
       } else {
         setTapeState(TAPE_STATES.LIVE);
@@ -401,12 +407,13 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     }
   }, 1000);
 
-  // ---- snapshots: majors every tick, minors on a slower cadence
+  // ---- snapshots: equal background cadence; held/pending exposure is faster
   let snapTick = 0;
   const snapshotTimer = setInterval(() => {
     snapTick++;
+    const pinned = pinnedSymbols();
     for (const p of pairs.values()) {
-      if (!p.major && snapTick % minorEvery !== 0) continue;
+      if (!pinned.has(p.symbol) && snapTick % backgroundEvery !== 0) continue;
       const book = books.get(p.symbol);
       if (!book?.synced) continue;
       const bf = bookFeatures(book);
@@ -443,7 +450,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     });
   }, MICRO_LIMITS.evaluationIntervalMs);
 
-  // ---- resource safety: shed lowest-volume minors before ever falling over
+  // ---- resource safety: lowest observed volume first; exposure is never shed
   let lastResourceCheck = Date.now();
   const resourceTimer = setInterval(() => {
     const now = Date.now();
@@ -454,7 +461,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     if (heapMb > (limits.maxHeapMb ?? 512) || lagMs > (limits.maxLoopLagMs ?? 1000)) {
       const pinned = pinnedSymbols();
       const sheddable = [...pairs.values()]
-        .filter((p) => !p.major && !unavailable.has(p.symbol) && !pinned.has(p.symbol)) // held / pending exposure is never shed; caps stay
+        .filter((p) => !unavailable.has(p.symbol) && !pinned.has(p.symbol)) // held / pending exposure is never shed; caps stay
         .sort((a, b) => (a.usdVol24h ?? 0) - (b.usdVol24h ?? 0));
       const count = Math.max(1, Math.ceil(sheddable.length * (limits.shedFraction ?? 0.15)));
       const shed = sheddable.slice(0, count);
@@ -552,7 +559,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     depthOf: (symbol) => pairs.get(symbol)?.depth ?? null,
   }));
   writeEvent('TAPE_STARTED', { pairs: pairs.size, minutes, chaosAfterSec });
-  log(`[${nowIso()}] tape starting: ${pairs.size} pairs (majors at depth ${xp.majorsDepth ?? config.tape.bookDepth}, minors at ${xp.defaultDepth ?? 25})`);
+  log(`[${nowIso()}] tape starting: ${pairs.size} pairs (equal selected depth ${xp.defaultDepth ?? 25}; held/pending exposure protected)`);
   connect();
   return done;
 }
