@@ -63,12 +63,20 @@ export function matureShadowCapture({ capture, costPolicy, horizonMin, path, asO
   }
 
   if (asOfTs < horizonEnd) return base('PENDING_BEFORE_HORIZON', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
-  const inHorizon = candles.filter((c) => c.periodEndTs <= horizonEnd);
-  if (inHorizon.length === 0) return base('UNMATURABLE_PATH_MISSING', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
-  // the path must begin at the decision boundary and be contiguous — a hole is missing evidence, not zeros
+  // the usable path: candles that START inside the horizon (the candle CONTAINING horizonEnd is part of the
+  // observed span), beginning exactly at the decision boundary and CONTIGUOUS from there — the first hole ends
+  // the usable span; nothing after a hole may inform this outcome
+  const started = candles.filter((c) => c.periodStartTs < horizonEnd);
+  if (started.length === 0) return base('UNMATURABLE_PATH_MISSING', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
   const bound = Math.ceil(D / MINUTE) * MINUTE;
-  if (inHorizon[0].periodStartTs !== bound) return base('UNMATURABLE_PATH_MISSING', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
-  for (let i = 1; i < inHorizon.length; i += 1) if (inHorizon[i].periodStartTs !== inHorizon[i - 1].periodEndTs) return base('UNMATURABLE_PATH_MISSING', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
+  if (started[0].periodStartTs !== bound) return base('UNMATURABLE_PATH_MISSING', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
+  const inHorizon = [started[0]];
+  for (let i = 1; i < started.length; i += 1) { if (started[i].periodStartTs !== started[i - 1].periodEndTs) break; inHorizon.push(started[i]); }
+  // COVERAGE-THROUGH-HORIZON LAW (review P0): the observed span must reach horizonEnd before ANY claim that
+  // depends on "nothing happened for the rest of the horizon" — a shorter span can still mature ONLY through
+  // an exit that genuinely occurred inside it; it can never pretend a horizon outcome
+  const coverageEndTs = inHorizon[inHorizon.length - 1].periodEndTs;
+  const coversHorizon = coverageEndTs >= horizonEnd;
 
   const v = capture.variant;
   const flags = new Set(['LATENCY_ASSUMED_NOT_OBSERVED', 'SPREAD_ASSUMED_NOT_OBSERVED']);
@@ -84,7 +92,9 @@ export function matureShadowCapture({ capture, costPolicy, horizonMin, path, asO
       if (inHorizon[i].low <= limit) { entryPrice = limit; entryIdx = i; flags.add('ENTRY_FILL_ASSUMED_AT_CANDLE_FIDELITY'); break; }
     }
     if (entryPrice === null) {
-      // the limit never traded: an honest non-entry matures NEUTRAL with zero accounting (the abstain twin of this variant)
+      // "the limit never traded" is a claim about the WHOLE horizon: without coverage through horizonEnd the
+      // limit may have filled inside the unobserved tail — missing evidence, never a pretended non-entry
+      if (!coversHorizon) return base('UNMATURABLE_PATH_MISSING', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
       return base('MATURED_NEUTRAL', { horizonEndTs: horizonEnd, grossPct: 0, costsPct: 0, netPct: 0, pairedVsAbstainPct: 0, entry: { rule: v.entryRule, filled: false, price: null }, ambiguityFlags: [...flags], fidelity, sizeEvidence, pathDigest });
     }
   }
@@ -100,6 +110,9 @@ export function matureShadowCapture({ capture, costPolicy, horizonMin, path, asO
     else if (hitStop) exit = { kind: 'STOP', price: stop, ts: c.periodEndTs };
     else if (hitTarget) exit = { kind: 'TARGET', price: target, ts: c.periodEndTs };
   }
+  // a stop/target exit found inside the observed span genuinely happened; a HORIZON outcome is a claim about
+  // the ENTIRE horizon and requires the span to reach horizonEnd — a truncated tail is missing evidence
+  if (!exit && !coversHorizon) return base('UNMATURABLE_PATH_MISSING', { horizonEndTs: horizonEnd, fidelity, sizeEvidence, pathDigest });
   if (!exit) exit = { kind: 'HORIZON', price: inHorizon[inHorizon.length - 1].close, ts: inHorizon[inHorizon.length - 1].periodEndTs };
   const exitPrice = exit.price * (1 - halfSpread);
   const grossPct = round6((exitPrice / entryPrice - 1) * 100);

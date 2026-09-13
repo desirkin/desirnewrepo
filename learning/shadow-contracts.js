@@ -69,12 +69,13 @@ export function exactKeys(obj, keys) {
   return null;
 }
 
-// deterministic canonical digest: stable key order, no floating representation surprises for our numeric ranges
+// deterministic canonical digest: stable key order, undefined object values DROPPED (an unobserved field is
+// absent, and absence must digest identically however it is spelled), no other non-JSON values tolerated
 export function stableStringify(v) {
   if (v === null || typeof v === 'number' || typeof v === 'boolean') return JSON.stringify(v);
   if (typeof v === 'string') return JSON.stringify(v);
   if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
-  if (isPlainObject(v)) return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(',')}}`;
+  if (isPlainObject(v)) return `{${Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(',')}}`;
   throw new Error(`shadow digest: unsupported value ${typeof v}`);
 }
 export const canonicalDigest = (v) => createHash('sha256').update(stableStringify(v)).digest('hex');
@@ -84,8 +85,11 @@ export function deepFreeze(obj) {
   return obj;
 }
 
-// ---- identities (honest counting: 1 opportunity = venue+asset+decisionTs+recipe within THIS lane) -------------
-export const opportunityIdOf = ({ venue, assetId, decisionTs, recipeVersion }) => `fsop-${canonicalDigest({ lane: LANE, venue, assetId, decisionTs, recipeVersion }).slice(0, 24)}`;
+// ---- identities (honest counting: 1 opportunity = venue+asset+decisionTs+WINDOW+recipe within THIS lane).
+// The frozen window's end is part of the identity: one REST receipt can stamp SEVERAL completed candles with
+// the same knownAt clock, and two different windows sharing that decision clock are two different
+// opportunities — identity by clock alone would collide them and dedupe the newer window as a "duplicate".
+export const opportunityIdOf = ({ venue, assetId, decisionTs, recipeVersion, windowEndTs }) => `fsop-${canonicalDigest({ lane: LANE, venue, assetId, decisionTs, recipeVersion, windowEndTs }).slice(0, 24)}`;
 export const captureIdOf = ({ opportunityId, variantId }) => `fscap-${canonicalDigest({ opportunityId, variantId }).slice(0, 24)}`;
 
 // ---- validators -----------------------------------------------------------------------------------------------
@@ -128,7 +132,7 @@ export function captureError(c) {
   if (c.lane !== LANE) return 'capture: wrong lane';
   if (typeof c.venue !== 'string' || !c.venue.length || typeof c.assetId !== 'string' || !c.assetId.length) return 'capture: scope malformed';
   if (!isTs(c.decisionTs)) return 'capture: decision clock malformed';
-  if (c.opportunityId !== opportunityIdOf(c)) return 'capture: opportunityId is not the honest identity';
+  if (!isPlainObject(c.inputWindow) || c.opportunityId !== opportunityIdOf({ ...c, windowEndTs: c.inputWindow.endTs })) return 'capture: opportunityId is not the honest identity (venue+asset+decision clock+window+recipe)';
   if (c.captureId !== captureIdOf(c)) return 'capture: captureId is not the honest identity';
   if (c.groupId !== c.opportunityId) return 'capture: same-moment variants share ONE dependence group (groupId = opportunityId)';
   if (!/^[0-9a-f]{64}$/.test(c.inputDigest)) return 'capture: inputDigest malformed';

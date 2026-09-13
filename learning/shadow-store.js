@@ -12,7 +12,8 @@
 // refused as LATE_CAPTURE_AFTER_THE_FACT, and no caller field can backdate the chain. On open the whole chain
 // is re-verified (sequence contiguity, linkage, digests) and a corrupt journal refuses to accept ANY new row —
 // fail loudly, never silently continue on tampered evidence.
-import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { appendJsonl, readJsonl, atomicWriteJson, readJsonBounded } from '../lib/jsonl.js';
 import {
@@ -24,12 +25,38 @@ export const DEFAULT_MAX_CAPTURE_LAG_MS = 10 * 60_000; // a forward capture is r
 
 const utcDateOf = (ts) => new Date(ts).toISOString().slice(0, 10);
 
-export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptureLagMs = DEFAULT_MAX_CAPTURE_LAG_MS, log = () => {} }) {
+export const DEFAULT_STALE_LOCK_MS = 15 * 60_000;
+
+export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptureLagMs = DEFAULT_MAX_CAPTURE_LAG_MS, staleLockMs = DEFAULT_STALE_LOCK_MS, log = () => {} }) {
   if (typeof dataDir !== 'string' || !dataDir.length) throw new Error('shadow store: dataDir required');
   const dir = path.join(dataDir, 'learning-shadow');
   mkdirSync(dir, { recursive: true });
   const journalFile = path.join(dir, 'journal.jsonl');
   const headFile = path.join(dir, 'head.json');
+  const lockFile = path.join(dir, 'writer.lock');
+
+  // ---- SINGLE-WRITER law (review P1): the journal has ONE writer. A second store over the same directory
+  // opens READ-ONLY (appends refused WRITER_LOCK_HELD) while the lock stands; a lock older than staleLockMs is
+  // taken over with a NEW writer token, and the takeover is DISCLOSED as a CONTROL row on the chain — custody
+  // changed, and nothing pretends otherwise. The digest chain itself remains the continuity proof either way.
+  const writerToken = randomBytes(12).toString('hex');
+  let writeAuthority = false; let lockTakeover = null;
+  try {
+    writeFileSync(lockFile, JSON.stringify({ writerToken, pid: process.pid, acquiredTs: clock() }), { flag: 'wx' });
+    writeAuthority = true;
+  } catch {
+    let held = null;
+    try { held = JSON.parse(readFileSync(lockFile, 'utf8')); } catch { held = null; }
+    const age = held && Number.isSafeInteger(held.acquiredTs) ? clock() - held.acquiredTs : Infinity;
+    if (age > staleLockMs) {
+      // a stale lock (crashed writer) is taken over EXPLICITLY, never silently
+      writeFileSync(lockFile, JSON.stringify({ writerToken, pid: process.pid, acquiredTs: clock() }));
+      writeAuthority = true;
+      lockTakeover = { previousToken: held?.writerToken ?? null, previousAcquiredTs: held?.acquiredTs ?? null, staleForMs: age === Infinity ? null : age };
+    } else {
+      log(`shadow store: writer lock held by ${held?.writerToken ?? 'unknown'} — opening READ-ONLY`);
+    }
+  }
 
   // ---- open: replay + verify the full chain; build the indexes restart-safely -------------------------------
   let seq = 0; let lastDigest = 'GENESIS'; let corrupt = null;
@@ -38,6 +65,7 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
   const opportunities = new Set(); // opportunityId
   const ineligible = [];           // bodies
   const controls = new Map();      // control name -> latest body (e.g. the adapter's consumption cursor)
+  const capturesByDate = new Map(); // utcDate(ingestedTs) -> CAPTURE rows landed that day (daily-quota hydration)
   const bytesByDate = new Map();   // utcDate(ingestedTs) -> appended bytes (durable quota accounting)
   const rowDigest = (row) => canonicalDigest({ seq: row.seq, prevDigest: row.prevDigest, ingestedTs: row.ingestedTs, kind: row.kind, body: row.body });
   if (existsSync(journalFile)) {
@@ -52,7 +80,11 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
     }
     if (!corrupt && existsSync(headFile)) {
       const head = readJsonBounded(headFile);
-      if (head && (head.seq !== seq || head.digest !== lastDigest)) log(`shadow store: head file out of date (journal is the truth): ${head.seq}/${seq}`);
+      // REPUBLISH refusal (review P1): a head that claims MORE history than the journal carries means the
+      // journal was truncated or republished under the same identity. Continuity cannot be re-claimed from
+      // the inside — refuse to continue without external backing (a fresh directory or the missing bytes).
+      if (head && Number.isSafeInteger(head.seq) && head.seq > seq) corrupt = `JOURNAL_BEHIND_HEAD: the head claims seq ${head.seq} but the journal carries ${seq} — a truncated/republished journal cannot claim continuity`;
+      else if (head && (head.seq !== seq || head.digest !== lastDigest)) log(`shadow store: head file behind the journal (the journal is the truth): ${head.seq}/${seq}`);
     }
   }
   if (corrupt) log(`shadow store: CHAIN CORRUPT — ${corrupt}; the journal is read-only evidence now`);
@@ -60,7 +92,7 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
   function index(row) {
     const bytes = JSON.stringify(row).length + 1;
     const d = utcDateOf(row.ingestedTs); bytesByDate.set(d, (bytesByDate.get(d) ?? 0) + bytes);
-    if (row.kind === 'CAPTURE') { captures.set(row.body.captureId, row.body); opportunities.add(row.body.opportunityId); }
+    if (row.kind === 'CAPTURE') { captures.set(row.body.captureId, row.body); opportunities.add(row.body.opportunityId); capturesByDate.set(d, (capturesByDate.get(d) ?? 0) + 1); }
     else if (row.kind === 'OUTCOME') { outcomes.set(row.body.captureId, row.body); }
     else if (row.kind === 'INELIGIBLE') ineligible.push(row.body);
     else if (row.kind === 'CONTROL' && typeof row.body?.control === 'string') controls.set(row.body.control, row.body);
@@ -68,6 +100,7 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
 
   function append(kind, body) {
     if (corrupt) return { ok: false, refused: 'CHAIN_CORRUPT', detail: corrupt };
+    if (!writeAuthority) return { ok: false, refused: 'WRITER_LOCK_HELD', detail: 'another writer holds this journal; this store is read-only' };
     const ingestedTs = clock(); // the STORE owns this clock — no caller field reaches it
     const row = { seq: seq + 1, prevDigest: lastDigest, ingestedTs, kind, body };
     row.digest = rowDigest(row);
@@ -132,14 +165,20 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
     });
   };
 
+  // a stale-lock takeover is DISCLOSED on the chain the moment this writer first exists
+  if (writeAuthority && lockTakeover && !corrupt) append('CONTROL', { control: 'WRITER_EPOCH', writerToken, takeover: true, ...lockTakeover });
+
   return Object.freeze({
     dir, journalFile,
+    writeAuthority: () => writeAuthority,
+    close: () => { if (writeAuthority) { writeAuthority = false; try { const held = JSON.parse(readFileSync(lockFile, 'utf8')); if (held?.writerToken === writerToken) unlinkSync(lockFile); } catch { /* the lock is best-effort released; a stale lock is taken over explicitly later */ } } },
     appendCapture, appendIneligible, appendOutcome, verify, status,
     // a CONTROL row is lane bookkeeping riding the SAME tamper-evident chain (e.g. the consumption cursor):
     // restart reconstructs it from the journal, so consumed history is never re-presented as fresh work
     appendControl: (body) => (isPlainObject(body) && typeof body.control === 'string' && body.control.length ? append('CONTROL', body) : { ok: false, refused: 'CAPTURE_INVALID', detail: 'control record malformed' }),
     lastControl: (name) => controls.get(name) ?? null,
     hasCapture: (captureId) => captures.has(captureId),
+    evaluationsOn: (utcDate) => capturesByDate.get(utcDate) ?? 0, // daily-quota hydration: the journal, not RAM, is the day's truth
     captures: () => new Map(captures), outcomes: () => new Map(outcomes), ineligibleRows: () => [...ineligible],
     durableBytes: (date) => bytesByDate.get(date) ?? 0,
     journalBytes: () => (existsSync(journalFile) ? statSync(journalFile).size : 0),

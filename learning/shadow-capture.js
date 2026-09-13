@@ -19,7 +19,9 @@ export function buildShadowCapture({ recipe, venue, assetId, decisionTs, inputs 
   const rerr = recipeError(recipe); if (rerr) throw new Error(`shadow capture: ${rerr}`);
   if (typeof venue !== 'string' || !venue.length || typeof assetId !== 'string' || !assetId.length) throw new Error('shadow capture: scope required');
   if (!isTs(decisionTs)) throw new Error('shadow capture: decision clock required');
-  const opportunityId = opportunityIdOf({ venue, assetId, decisionTs, recipeVersion: recipe.recipeVersion });
+  // the identity needs the frozen window's end (same-receipt windows must not collide); resolved after the
+  // window is validated below — the refusal path uses a provisional identity over the decision clock alone
+  let opportunityId = opportunityIdOf({ venue, assetId, decisionTs, recipeVersion: recipe.recipeVersion, windowEndTs: null });
   const refuse = (reason, detail) => deepFreeze({
     eligible: [], ineligible: [{ kind: 'INELIGIBLE_OPPORTUNITY', opportunityId, lane: LANE, venue, assetId, decisionTs, recipeVersion: recipe.recipeVersion, reason, detail: String(detail).slice(0, 300), authority: AUTHORITY, purpose: PURPOSE }],
   });
@@ -37,9 +39,19 @@ export function buildShadowCapture({ recipe, venue, assetId, decisionTs, inputs 
     if (!isTs(c.knownAtTs) || c.knownAtTs > decisionTs) return refuse('FUTURE_KNOWN_INPUT', `candle known at ${c.knownAtTs} after the decision clock`);
     if (i > 0 && c.periodStartTs !== window[i - 1].periodEndTs) return refuse('NON_CONTIGUOUS_WINDOW', `gap before candle starting ${c.periodStartTs}`);
     for (const f of ['open', 'high', 'low', 'close']) if (!isFiniteNum(c[f]) || c[f] <= 0) return refuse('CANDLE_WINDOW_INCOMPLETE', `candle ${i} ${f} malformed`);
-    if (recipe.requiredInputs.includes('VOLUME') && (!isFiniteNum(c.volumeBase) || !isFiniteNum(c.volumeQuote))) return refuse('VOLUME_MISSING', `candle ending ${c.periodEndTs} carries no volume — a required fact is never zero-filled`);
+    // VOLUME law (P1): a REAL observed component is required — some venues (Coinbase) report base volume with
+    // a null quote volume, and that is real evidence in its declared unit. At least ONE finite component per
+    // candle; the OBSERVED component set is frozen into the capture; the absent component is never synthesized
+    // (no quote = base x close, no zero) — absence stays absence.
+    if (recipe.requiredInputs.includes('VOLUME') && !isFiniteNum(c.volumeBase) && !isFiniteNum(c.volumeQuote)) return refuse('VOLUME_MISSING', `candle ending ${c.periodEndTs} carries no real volume component — a required fact is never zero-filled`);
     if (recipe.requiredInputs.includes('TRADE_FLOW') && !isFiniteNum(c.tradeFlow)) return refuse('TRADE_FLOW_MISSING', `candle ending ${c.periodEndTs} carries no trade-flow`);
   }
+  // the observed volume component set must be CONSISTENT across the frozen window (a mid-window unit change is
+  // not one comparable series) and is declared in the capture's frozen units
+  const volumeComponents = [];
+  if (window.every((c) => isFiniteNum(c.volumeBase))) volumeComponents.push('BASE');
+  if (window.every((c) => isFiniteNum(c.volumeQuote))) volumeComponents.push('QUOTE');
+  if (recipe.requiredInputs.includes('VOLUME') && volumeComponents.length === 0) return refuse('VOLUME_MISSING', 'no volume component is observed across the WHOLE window — a partial series is not a unit');
   const last = window[window.length - 1];
   if (decisionTs - last.periodEndTs > recipe.maxInputAgeMs) return refuse('REQUIRED_INPUT_STALE', `last completed candle ended ${decisionTs - last.periodEndTs}ms before the decision (max ${recipe.maxInputAgeMs}ms)`);
 
@@ -58,9 +70,10 @@ export function buildShadowCapture({ recipe, venue, assetId, decisionTs, inputs 
   const frozenInputs = { window, depth, social: inputs?.social ?? null, news: inputs?.news ?? null };
   const inputDigest = canonicalDigest({ lane: LANE, venue, assetId, decisionTs, recipeVersion: recipe.recipeVersion, costPolicyVersion: recipe.costPolicy.costPolicyVersion, frozenInputs });
   const inputKnownAt = { lastCandle: last.knownAtTs, ...(depth ? { depth: depth.knownAtTs } : {}), ...(inputs?.social ? { social: inputs.social.knownAtTs } : {}), ...(inputs?.news ? { news: inputs.news.knownAtTs } : {}) };
-  const inputUnits = { price: 'QUOTE_PER_BASE', volumeBase: 'BASE', volumeQuote: 'QUOTE', tradeFlow: 'SIGNED_FRACTION', candlePeriodMs: MINUTE };
+  const inputUnits = { price: 'QUOTE_PER_BASE', volumeComponents, tradeFlow: 'SIGNED_FRACTION', candlePeriodMs: MINUTE };
   const frozenFacts = { lastClose: last.close, lastVolumeBase: last.volumeBase ?? null, lastVolumeQuote: last.volumeQuote ?? null, lastTradeFlow: last.tradeFlow ?? null, windowHigh: Math.max(...window.map((c) => c.high)), windowLow: Math.min(...window.map((c) => c.low)) };
 
+  opportunityId = opportunityIdOf({ venue, assetId, decisionTs, recipeVersion: recipe.recipeVersion, windowEndTs: last.periodEndTs });
   const eligible = recipe.variants.map((variant) => {
     const record = {
       captureVersion: SHADOW_CAPTURE_VERSION,

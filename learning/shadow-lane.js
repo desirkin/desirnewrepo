@@ -27,8 +27,10 @@ export function createShadowLane({ store, recipe, quotas = {}, clock = () => Dat
   const Q = { ...DEFAULT_QUOTAS, ...quotas };
   for (const [k, v] of Object.entries(Q)) if (!isCount(v) || v < 1) throw new Error(`shadow lane: quota ${k} malformed`);
   let stopped = false; let lastBatchEndedMono = null;
+  // daily counters HYDRATE from the journal (review P1): a restarted lane resumes the day's true count from
+  // durable CAPTURE rows — the 100k target can never reset to zero by restarting the process
   const dayCounters = new Map(); // utcDate -> { evaluations, shed }
-  const dc = (date) => { if (!dayCounters.has(date)) dayCounters.set(date, { evaluations: 0, shed: 0 }); return dayCounters.get(date); };
+  const dc = (date) => { if (!dayCounters.has(date)) dayCounters.set(date, { evaluations: typeof store.evaluationsOn === 'function' ? store.evaluationsOn(date) : 0, shed: 0 }); return dayCounters.get(date); };
 
   // one bounded capture batch over PREPARED opportunity inputs: [{ venue, assetId, decisionTs, inputs }]
   function runBatch({ opportunities, nowTs = clock() }) {

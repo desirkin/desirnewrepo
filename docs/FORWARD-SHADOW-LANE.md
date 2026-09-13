@@ -99,3 +99,55 @@ separation fences (no order/ledger/Judge/Watch/network surface). The repo-wide f
 
 No PR, no merge, no deployment, no PAPER/LIVE, no learned-selection or dynamic-sizing activation, no
 paid/model/provider calls, no secrets, no access changes. Authority is NONE on every artifact.
+
+## Step 3 (Codex review of 9200bef — activation-blocking defects fixed)
+
+**P0-1 — quality parity.** The adapter accepted a fictional `FINAL` state; the real vocabulary has none
+(`QUALITY_STATES`), and committed Kraken/Coinbase candles are `KNOWN` + `closed: true` + `provisional: false`.
+Fixed in `shadow-market-adapter-2`, and the fixture problem is fixed at the root: every test fixture is now
+built by the REAL market-lab makers (`makeObservation`/`makeCoverage`/`quality`/`subjectId` — imported by the
+TEST only; the adapter stays fenced), so fixtures are actual normalizer output shapes and validate against the
+real `observationError`/`coverageRecordError`. A parity test additionally pins every mirrored constant
+(observation schema, bundle version, coverage version, canonical-JSON bytes, subject identity) to the real
+contracts, asserts unique real observation ids, and the reader refuses `DUPLICATE_OBSERVATION_ID`. The root's
+proven live Kraken+Coinbase observations will therefore be ACCEPTED, not discarded.
+
+**P0-2 — through-horizon coverage.** `matureShadowCapture` previously let a contiguous prefix that never
+reached `horizonEnd` mature at its last candle. Now: a stop/target exit that genuinely occurred inside the
+observed span matures; every claim that depends on "nothing happened for the rest of the horizon" — the
+HORIZON exit AND the limit-never-filled NEUTRAL — requires observed coverage through `horizonEnd`; a missing
+tail is `UNMATURABLE_PATH_MISSING`, never a pretended maturity.
+
+**P0-3 — coverage.jsonl consumed.** The reader now hash-verifies BOTH sealed members; a missing/tampered
+coverage member refuses the bundle. Trade-flow exists ONLY over intervals the sealed coverage PROVES complete
+(`OBSERVED`/`SUBSCRIBED` union with no overlapping `GAP/FAILED/DROPPED/EVICTED/ACCESS_BLOCKED` and no
+`PAGINATION/ACQUISITION/CENSUS`-incomplete reason); a proven interval with zero trades is a REAL zero
+(the SUBSCRIBED-continuity law); trades without proof yield NO flow. A candle overlapped by an incomplete
+CANDLE interval is excluded. Depth obeys the KNOWN synchronized book law (`quality KNOWN`,
+`payload.synchronized === true`, checksum not failed, no standing DESYNCHRONIZED/GAP book fact at its clock);
+PARTIAL/desynced snapshots are never depth.
+
+**P1 fixes.**
+- Real Coinbase volume (observed `volumeBase`, `volumeQuote: null`) is eligible: the capture freezes the
+  OBSERVED component set (`inputUnits.volumeComponents`), requires component consistency across the window,
+  and synthesizes nothing.
+- Runner `shadow-runner-2`: deterministic durable round-robin over sources (a CONTROL row), bounded reads per
+  step with deferral (never starvation), and ONE merged batch per step sorted by decision clock → NEWEST
+  window first → market — the lane's pacing floor cannot self-collide per source. Proven with 3 sources under
+  a 2-bundle budget and real pacing.
+- Same-receipt windows: the opportunity identity now carries the frozen window end
+  (`opportunityIdOf(+windowEndTs)`), so one REST receipt stamping many candles yields distinct,
+  non-colliding identities, ordered newest-window-first at an equal clock.
+- Daily counters HYDRATE from the journal on restart (`store.evaluationsOn(utcDate)`): the 100k line cannot
+  reset by restarting; queued/shed work is still never counted as completed.
+- SINGLE WRITER: an exclusive `writer.lock`; a second store opens read-only (`WRITER_LOCK_HELD`); a stale
+  lock is taken over with a DISCLOSED `WRITER_EPOCH` CONTROL row; and a `head.json` claiming more history
+  than the journal carries refuses continuity outright (`JOURNAL_BEHIND_HEAD`) — a truncated/republished
+  journal can never re-claim continuity from the inside.
+- Sync-parse bounds: sealed members above 32 MB or 200k rows are refused
+  (`SEGMENT_TOO_LARGE_FOR_SYNC_READ`) — the owner shards segments; the host thread is never jammed.
+
+**Still true and unchanged:** no live bundleSource exists (no fly.js wiring; live-data proof stays on the
+Codex side), no promotion-gate consumer runs, shadow outputs remain `UNVALIDATED_RESEARCH_RESULT` with
+authority NONE and cannot reach activation, any ledger, or the Judge automatically — and no score anywhere is
+learned authority.
