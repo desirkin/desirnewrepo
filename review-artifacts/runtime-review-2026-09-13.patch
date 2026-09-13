@@ -1,140 +1,294 @@
-diff --git a/test/learning-worker-activation-withheld-review.test.js b/test/learning-worker-activation-withheld-review.test.js
+diff --git a/judge/features.js b/judge/features.js
+index 840895a..3ffae5d 100644
+--- a/judge/features.js
++++ b/judge/features.js
+@@ -6,7 +6,7 @@
+ import * as M from '../execution/money.js';
+ import { digestOf } from '../execution/contract.js';
+ 
+-export const FEATURE_VERSION = 'judge-features-paper-reference-1';
++export const FEATURE_VERSION = 'judge-features-paper-reference-2';
+ export const BAR_MS = 60_000; export const BARS_REQUIRED = 61; export const FI_MIN_CLASSIFIED = 0.95; export const TOLERANCE = Object.freeze({ price: 1e-9, ratio: 1e-9 });
+ export class FeatureError extends Error { constructor(code, message) { super(`${code}: ${message}`); this.code = code; } }
+ const num = (v) => (typeof v === 'string' ? Number(v) : v);
+@@ -36,24 +36,48 @@ export function nearestResistanceAbove(bars, entry, { referenceTs = null } = {})
+ }
+ // ---- trade windows: half-open [start, end), native id dedup, taker side verbatim, unknown fraction retained ------------------
+ export function dedupTrades(trades) { const seen = new Set(); const out = []; let dropped = 0; for (const t of trades) { const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (seen.has(k)) { dropped += 1; continue; } seen.add(k); out.push(t); } return { trades: out, duplicatesDropped: dropped }; }
+-export function flowImbalance(trades, startTs, endTs) {
+-  let buy = '0'; let sell = '0'; let unknown = '0'; let n = 0; for (const t of trades) { if (t.eventTs < startTs || t.eventTs >= endTs || t.fromSubscriptionSnapshot) continue; n += 1; if (t.side === 'buy') buy = M.add(buy, t.quoteNotional); else if (t.side === 'sell') sell = M.add(sell, t.quoteNotional); else unknown = M.add(unknown, t.quoteNotional); }
++const validEpoch = (v) => Number.isSafeInteger(v) && v >= 0;
++const validTradeClock = (t) => Number.isSafeInteger(t?.eventTs) && t.eventTs >= 0 && Number.isSafeInteger(t?.receiptTs) && t.receiptTs >= 0 && t.eventTs <= t.receiptTs;
++function queryEpoch(trades, startTs, endTs, asOfTs, requested) {
++  const epochs = new Set();
++  for (const t of trades) {
++    if (t?.fromSubscriptionSnapshot === true) continue;
++    if (t?.fromSubscriptionSnapshot !== false || !Number.isSafeInteger(t.eventTs) || t.eventTs < 0) return { ok: false, epoch: null, reason: 'TRADE_INVALID' };
++    if (t.eventTs < startTs || t.eventTs >= endTs) continue;
++    if (!validTradeClock(t) || !validEpoch(t.feedEpoch)) return { ok: false, epoch: null, reason: 'TRADE_INVALID' };
++    if (t.receiptTs <= asOfTs) epochs.add(t.feedEpoch);
++  }
++  if (requested !== null && requested !== undefined) return validEpoch(requested) ? { ok: true, epoch: requested } : { ok: false, epoch: null, reason: 'EPOCH_INVALID' };
++  return epochs.size <= 1 ? { ok: true, epoch: epochs.size ? epochs.values().next().value : null } : { ok: false, epoch: null, reason: 'EPOCH_AMBIGUOUS' };
++}
++function tradesAsOf(trades, startTs, endTs, { asOfTs = endTs, feedEpoch = null } = {}) {
++  if (!Array.isArray(trades) || !Number.isSafeInteger(startTs) || !Number.isSafeInteger(endTs) || !Number.isSafeInteger(asOfTs) || startTs > endTs) return { ok: false, trades: [] };
++  const resolved = queryEpoch(trades, startTs, endTs, asOfTs, feedEpoch); if (!resolved.ok) return { ok: false, trades: [] };
++  return { ok: true, trades: trades.filter((t) => t?.fromSubscriptionSnapshot === false && validTradeClock(t) && validEpoch(t.feedEpoch) && t.receiptTs <= asOfTs && t.eventTs >= startTs && t.eventTs < endTs && (resolved.epoch === null || t.feedEpoch === resolved.epoch)) };
++}
++export function flowImbalance(trades, startTs, endTs, query = {}) {
++  const selected = tradesAsOf(trades, startTs, endTs, query); let buy = '0'; let sell = '0'; let unknown = '0'; let n = 0; for (const t of selected.trades) { n += 1; if (t.side === 'buy') buy = M.add(buy, t.quoteNotional); else if (t.side === 'sell') sell = M.add(sell, t.quoteNotional); else unknown = M.add(unknown, t.quoteNotional); }
+   const known = M.add(buy, sell); const total = M.add(known, unknown); const classified = M.isZero(total) ? null : M.toStatistic(M.div(known, total, 6, 'DOWN'));
++  if (!selected.ok) return { state: 'UNKNOWN', reason: 'AS_OF_OR_EPOCH_INVALID', fi: null, buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
+   if (M.isZero(known) || n === 0) return { state: 'UNKNOWN', reason: 'ZERO_DENOMINATOR', fi: null, buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
+   if (classified !== null && classified < FI_MIN_CLASSIFIED) return { state: 'UNKNOWN', reason: 'CLASSIFIED_BELOW_95PCT', fi: null, buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
+   return { state: 'KNOWN', reason: null, fi: M.toStatistic(M.div(M.sub(buy, sell), known, 8, 'HALF_UP')), buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
+ }
+-export function windowNotional(trades, startTs, endTs) { let q = '0'; let n = 0; for (const t of trades) { if (t.eventTs < startTs || t.eventTs >= endTs || t.fromSubscriptionSnapshot) continue; q = M.add(q, t.quoteNotional); n += 1; } return { notional: q, count: n, startTs, endTs }; }
++export function windowNotional(trades, startTs, endTs, query = {}) { const selected = tradesAsOf(trades, startTs, endTs, query); let q = '0'; let n = 0; for (const t of selected.trades) { q = M.add(q, t.quoteNotional); n += 1; } return { notional: q, count: n, startTs, endTs }; }
+ // RV60: last complete 60s traded quote notional / median of the 20 preceding non-overlapping complete 60s windows; E = floor(D/60000)*60000
+ export function relativeVolume60(trades, decisionTs, coverage) {
+-  const E = Math.floor(decisionTs / BAR_MS) * BAR_MS; const need = { startTs: E - 21 * BAR_MS, endTs: E };
+-  if (!coverage || !coverage.continuous || coverage.startTs > need.startTs || coverage.endTs < need.endTs) return { state: 'UNKNOWN', reason: 'COVERAGE_INCOMPLETE', rv60: null, E, numerator: null, baseline: null, completedMinuteDelayMs: decisionTs - E };
+-  const numerator = windowNotional(trades, E - BAR_MS, E); const base = []; for (let k = 1; k <= 20; k += 1) base.push(windowNotional(trades, E - (k + 1) * BAR_MS, E - k * BAR_MS).notional);
++  const validDecision = Number.isSafeInteger(decisionTs) && decisionTs >= 0; const E = validDecision ? Math.floor(decisionTs / BAR_MS) * BAR_MS : null; const unknown = (reason) => ({ state: 'UNKNOWN', reason, rv60: null, E, numerator: null, baseline: null, completedMinuteDelayMs: E === null ? null : decisionTs - E });
++  if (!Array.isArray(trades) || !validDecision) return unknown('INPUT_INVALID');
++  const coverageClockValid = coverage && coverage.continuous === true && Number.isSafeInteger(coverage.startTs) && coverage.startTs >= 0 && Number.isSafeInteger(coverage.endTs) && coverage.endTs >= 0 && coverage.startTs <= coverage.endTs && coverage.endTs <= decisionTs && (!Object.hasOwn(coverage, 'gapTs') || coverage.gapTs === null);
++  const need = { startTs: E - 21 * BAR_MS, endTs: E };
++  if (!coverageClockValid || coverage.startTs > need.startTs || coverage.endTs < need.endTs) return unknown('COVERAGE_INCOMPLETE');
++  const resolved = queryEpoch(trades, need.startTs, need.endTs, decisionTs, coverage.epoch); if (!resolved.ok) return unknown(resolved.reason === 'TRADE_INVALID' ? 'INPUT_INVALID' : 'EPOCH_AMBIGUOUS');
++  const query = { asOfTs: decisionTs, feedEpoch: resolved.epoch }; const numerator = windowNotional(trades, E - BAR_MS, E, query); const base = []; for (let k = 1; k <= 20; k += 1) base.push(windowNotional(trades, E - (k + 1) * BAR_MS, E - k * BAR_MS, query).notional);
+   const sorted = [...base].sort((a, b) => M.cmp(a, b)); const median = M.div(M.add(sorted[9], sorted[10]), '2', 8, 'HALF_UP');
+   if (M.isZero(median)) return { state: 'UNKNOWN', reason: 'ZERO_MEDIAN', rv60: null, E, numerator: numerator.notional, baseline: median, completedMinuteDelayMs: decisionTs - E };
+   return { state: 'KNOWN', reason: null, rv60: M.toStatistic(M.div(numerator.notional, median, 8, 'HALF_UP')), E, numerator: numerator.notional, baseline: median, baselineWindows: 20, completedMinuteDelayMs: decisionTs - E };
+ }
+-export function vwap(trades, startTs, endTs) { let q = '0'; let b = '0'; for (const t of trades) { if (t.eventTs < startTs || t.eventTs >= endTs || t.fromSubscriptionSnapshot) continue; q = M.add(q, t.quoteNotional); b = M.add(b, t.qty); } return M.isZero(b) ? null : M.div(q, b, 8, 'HALF_UP'); }
++export function vwap(trades, startTs, endTs, query = {}) { const selected = tradesAsOf(trades, startTs, endTs, query); let q = '0'; let b = '0'; for (const t of selected.trades) { q = M.add(q, t.quoteNotional); b = M.add(b, t.qty); } return M.isZero(b) ? null : M.div(q, b, 8, 'HALF_UP'); }
+ // ---- book features on an exact snapshot ---------------------------------------------------------------------------------------
+ export function bookFacts(snapshot) { if (!snapshot || !snapshot.bids.length || !snapshot.asks.length) return null; const bid = snapshot.bids[0][0]; const ask = snapshot.asks[0][0]; const mid = M.div(M.add(bid, ask), '2', 9, 'HALF_UP'); return { bestBid: bid, bestAsk: ask, mid, spread: M.sub(ask, bid) }; }
+ export function bidDepthWithinBps(snapshot, bps) { const f = bookFacts(snapshot); if (!f) return null; const floor = M.mul(f.mid, M.sub('1', M.div(String(bps), '10000', 8, 'DOWN'))); let notional = '0'; for (const [p, q] of snapshot.bids) { if (M.lt(p, floor)) break; notional = M.add(notional, M.mul(p, q)); } return notional; }
+@@ -62,11 +86,11 @@ export const medianDecimal = (list) => { if (!list.length) return null; const s
+ export function createFlowTracker({ retentionMs = 22 * BAR_MS, maxTrades = 50_000 } = {}) {
+   const trades = []; const ids = new Set(); let dropped = 0; let overflow = 0; let epoch = null; let epochChanges = 0; let lastTs = 0;
+   return {
+-    add(t) { if (t.fromSubscriptionSnapshot) return false; if (epoch !== null && t.feedEpoch !== epoch) { epochChanges += 1; } epoch = t.feedEpoch; const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (ids.has(k)) { dropped += 1; return false; } ids.add(k); trades.push(t); lastTs = Math.max(lastTs, t.eventTs); if (trades.length > maxTrades) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); overflow += 1; } return true; },
++    add(t) { if (t?.fromSubscriptionSnapshot !== false || !validTradeClock(t) || !validEpoch(t.feedEpoch)) return false; if (epoch !== null && t.feedEpoch < epoch) return false; if (epoch !== null && t.feedEpoch > epoch) { epochChanges += 1; trades.length = 0; ids.clear(); lastTs = 0; } epoch = t.feedEpoch; const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (ids.has(k)) { dropped += 1; return false; } ids.add(k); trades.push(t); lastTs = Math.max(lastTs, t.eventTs); if (trades.length > maxTrades) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); overflow += 1; } return true; },
+     advance(now) { const cut = now - retentionMs; while (trades.length && trades[0].eventTs < cut) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); } },
+-    fi(startTs, endTs) { return flowImbalance(trades, startTs, endTs); }, notional(startTs, endTs) { return windowNotional(trades, startTs, endTs); }, vwap(startTs, endTs) { return vwap(trades, startTs, endTs); }, rv60(decisionTs, coverage) { return relativeVolume60(trades, decisionTs, coverage); },
++    fi(startTs, endTs, query = {}) { return flowImbalance(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, notional(startTs, endTs, query = {}) { return windowNotional(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, vwap(startTs, endTs, query = {}) { return vwap(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, rv60(decisionTs, coverage) { return relativeVolume60(trades, decisionTs, { ...coverage, epoch: coverage?.epoch ?? epoch }); },
+     // the trades inside [startTs, endTs) in receipt order: the challengers' window input (focused completion §5), never a copy of the whole tape
+-    window(startTs, endTs) { return trades.filter((t) => t.eventTs >= startTs && t.eventTs < endTs); },
++    window(startTs, endTs, query = {}) { return tradesAsOf(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }).trades; },
+     snapshot: () => trades.slice(), status: () => ({ trades: trades.length, duplicatesDropped: dropped, overflow, epoch, epochChanges, lastTs }),
+   };
+ }
+diff --git a/judge/history.js b/judge/history.js
+index 0c17d8e..abea4d3 100644
+--- a/judge/history.js
++++ b/judge/history.js
+@@ -22,7 +22,7 @@ export function createBarHistory({ clock, fetchImpl = null, pairKeyOf = () => nu
+   function onTrade(t) { const st = s(t.symbol); if (t.fromSubscriptionSnapshot) return; const start = Math.floor(t.eventTs / BAR_MS) * BAR_MS; const p = Number(t.price); const q = Number(t.qty); const cur = st.live.get(start) ?? { periodStartTs: start, periodEndTs: start + BAR_MS, open: p, high: p, low: p, close: p, volumeBase: 0, volumeQuote: 0, tradeCount: 0, closed: false, source: 'LIVE_TRADES', knownAtTs: t.receiptTs, epoch: t.feedEpoch }; if (cur.epoch !== t.feedEpoch) cur.gap = true; cur.high = Math.max(cur.high, p); cur.low = Math.min(cur.low, p); cur.close = p; cur.volumeBase += q; cur.volumeQuote += Number(t.quoteNotional); cur.tradeCount += 1; cur.knownAtTs = Math.max(cur.knownAtTs, t.receiptTs); st.live.set(start, cur); }
+   function advance(symbol, nowTs, { coverage = null } = {}) { const st = s(symbol); for (const [start, bar] of [...st.live.entries()]) { if (nowTs >= bar.periodEndTs) { st.live.delete(start); const covered = coverage ? coverage.continuous && coverage.startTs <= bar.periodStartTs : true; if (covered && !bar.gap && !st.bars.has(start)) st.bars.set(start, { ...bar, closed: true, coverage: 'CONTINUOUS_TRADES' }); } } trim(st); }
+   // the 61 contiguous complete bars ending at the latest closed minute before nowTs (null when any is missing or has no price)
+-  function bars(symbol, nowTs) { const st = series.get(symbol); if (!st) return null; const end = Math.floor(nowTs / BAR_MS) * BAR_MS; const out = []; for (let k = BARS_REQUIRED; k >= 1; k -= 1) { const b = st.bars.get(end - k * BAR_MS); if (!b || b.close === null) return null; out.push(b); } return out; }
++  function bars(symbol, nowTs) { if (!Number.isSafeInteger(nowTs) || nowTs < 0) return null; const st = series.get(symbol); if (!st) return null; const end = Math.floor(nowTs / BAR_MS) * BAR_MS; const out = []; for (let k = BARS_REQUIRED; k >= 1; k -= 1) { const b = st.bars.get(end - k * BAR_MS); if (!b || b.close === null || !Number.isSafeInteger(b.knownAtTs) || b.knownAtTs < 0 || b.knownAtTs > nowTs) return null; out.push(b); } return out; }
+   function status(symbol) { const st = series.get(symbol); if (!st) return null; const end = Math.floor(clock() / BAR_MS) * BAR_MS; let missing = 0; const missingStarts = []; for (let k = BARS_REQUIRED; k >= 1; k -= 1) { const b = st.bars.get(end - k * BAR_MS); if (!b || b.close === null) { missing += 1; if (missingStarts.length < 8) missingStarts.push(end - k * BAR_MS); } } return { symbol, retained: st.bars.size, live: st.live.size, missingOf61: missing, missingStarts, lastRetrievalTs: st.lastRetrievalTs, knownAtFloorTs: st.retrievalKnownAtTs, failures: st.failures, earliestReadyTs: missing ? end + missing * BAR_MS : null }; }
+   function needsRefresh(symbol, nowTs) { const st = series.get(symbol); return !st || st.lastRetrievalTs === null || nowTs - st.lastRetrievalTs >= refreshMs; }
+   return { bars, refresh, onTrade, advance, status, needsRefresh, ingestRows, symbols: () => [...series.keys()] };
+diff --git a/test/judge-feature-asof-review.test.js b/test/judge-feature-asof-review.test.js
 new file mode 100644
 --- /dev/null
-+++ b/test/learning-worker-activation-withheld-review.test.js
-@@ -0,0 +1,135 @@
++++ b/test/judge-feature-asof-review.test.js
+@@ -0,0 +1,192 @@
++// Point-in-time feature boundaries: event time selects the market window while
++// receipt time and feed epoch select what was actually knowable at that time.
 +import test from 'node:test';
 +import assert from 'node:assert/strict';
-+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
-+import { tmpdir } from 'node:os';
-+import path from 'node:path';
-+import { fileURLToPath } from 'node:url';
-+import { createDecisionMemoryPort } from '../lib/decision-memory-port.js';
-+import { UNSEALED_ACTIVATION_REASON } from '../learning/decision-memory-worker.js';
-+import { transitionActivation } from '../learning/adapter.js';
-+import { buildEvidence, buildPatternRecord, estimateFromEvidence } from '../learning/patterns.js';
-+import { freezeCandidate, settleCandidate } from '../learning/promotion.js';
-+import { readDecisionMemory } from '../learning/memory-view.js';
-+import { createLearningStore } from '../learning/store.js';
-+import { JUDGE_FACT_RECIPE_VERSION } from '../judge/learning-intake.js';
++import {
++  BAR_MS,
++  createFlowTracker,
++  flowImbalance,
++  relativeVolume60,
++} from '../judge/features.js';
++import { createExecutionFeed } from '../execution/feed.js';
++import { createBarHistory } from '../judge/history.js';
 +
-+const T0 = Date.UTC(2026, 5, 1);
-+const HOUR = 3_600_000;
-+const DAY = 86_400_000;
-+const POLICY_DIGEST = 'a'.repeat(64);
-+const PREDICATE = Object.freeze({ clauses: [Object.freeze({ feature: 'relVolume60m', op: 'GTE', threshold: 3 })] });
-+const SCOPE = Object.freeze({ setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED' });
-+const COST_MODEL = Object.freeze({ feePctPerSide: 0.8, slippageBps: 10 });
-+const CONSUMER_BINDING = Object.freeze({ featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyDigest: POLICY_DIGEST });
++const T = Date.UTC(2026, 8, 13, 12);
 +
-+function appendAccumulatingPattern(store) {
-+  const items = Array.from({ length: 8 }, (_, index) => ({
-+    opportunityId: `lop-history-${index}`,
-+    canonicalCoin: `A${index % 5}A`,
-+    decisionTs: T0 - 20 * DAY + index * DAY,
-+    evidenceBasis: 'HISTORICAL_RECONSTRUCTION',
-+    outcomeClass: index % 4 === 3 ? 'ADVERSE' : 'FAVORABLE',
-+  }));
-+  const evidence = buildEvidence(items);
-+  const estimate = estimateFromEvidence(items, evidence, { pooledMean: 0.5, priorStrength: 8, updatedTs: T0 - DAY });
-+  const persistedEvidence = { ...evidence, _grouping: null };
-+  store.appendPattern(buildPatternRecord({
-+    predicate: PREDICATE, scope: SCOPE, origin: 'TEST', createdTs: T0 - 20 * DAY,
-+    ts: T0 - 20 * DAY, seq: 0, state: 'NOTICED', previousState: null,
-+    transitionReason: 'FIRST_OBSERVATION', evidence: persistedEvidence, estimate, contradictions: [],
-+  }));
-+  store.appendPattern(buildPatternRecord({
-+    predicate: PREDICATE, scope: SCOPE, origin: 'TEST', createdTs: T0 - 20 * DAY,
-+    ts: T0 - 10 * DAY, seq: 1, state: 'ACCUMULATING', previousState: 'NOTICED',
-+    transitionReason: 'NEW_MATURED_EVIDENCE', evidence: persistedEvidence, estimate, contradictions: [],
-+  }));
-+  return store.patternHeads().values().next().value;
++function trade({
++  eventTs,
++  receiptTs = eventTs,
++  feedEpoch = 1,
++  nativeTradeId = `t-${eventTs}-${receiptTs}-${feedEpoch}`,
++  side = 'buy',
++  quoteNotional = '100',
++  snapshot = false,
++} = {}) {
++  return {
++    tradeVersion: 'execution-trade-1',
++    symbol: 'XBT/USD',
++    canonicalCoin: 'BTC',
++    feedEpoch,
++    receiptSequence: Math.max(1, Math.floor(receiptTs - (T - 30 * BAR_MS))),
++    nativeTradeId,
++    side,
++    price: '1',
++    qty: quoteNotional,
++    quoteNotional,
++    eventTs,
++    receiptTs,
++    fromSubscriptionSnapshot: snapshot,
++    orderType: 'market',
++  };
 +}
 +
-+function appendForwardEvidence(store, design) {
-+  for (let group = 0; group < 34; group += 1) {
-+    const decisionTs = design.sealedTs + HOUR + (group % 8) * DAY + Math.floor(group / 8) * 5 * HOUR;
-+    const labelEndTs = decisionTs + HOUR;
-+    const opportunityId = `lop-forward-${group}`;
-+    store.appendProspective({
-+      kind: 'CAPTURE', candidateId: design.candidateId, opportunityId,
-+      canonicalCoin: `A${group % 6}A`, decisionTs,
-+      candidateDecision: 'SELECTED_FOR_SHADOW', baselineDecision: 'SKIPPED',
-+      recordedTs: decisionTs + 1_000, labelEndTs,
-+    });
-+    store.appendProspective({
-+      kind: 'OUTCOME', candidateId: design.candidateId, opportunityId,
-+      outcomeClass: 'FAVORABLE', metricValue: 1.5,
-+      outcomeKnownAtTs: labelEndTs, recordedTs: labelEndTs + 1_000,
-+    });
-+  }
-+}
-+
-+function commissionLawfulActiveV1(dataDir) {
-+  const store = createLearningStore({ dataDir });
-+  const accumulating = appendAccumulatingPattern(store);
-+  const design = freezeCandidate({
-+    store, pattern: accumulating, costModel: COST_MODEL,
-+    consumerBinding: CONSUMER_BINDING, nowTs: T0,
-+  });
-+  appendForwardEvidence(store, design);
-+  const settledTs = T0 + 40 * DAY;
-+  const settled = settleCandidate({ store, candidateId: design.candidateId, nowTs: settledTs });
-+  assert.equal(settled.terminal.verdict, 'FORWARD_SUPPORTED');
-+  assert.equal(settled.activation.activationVersion, 'learning-activation-1');
-+  const active = transitionActivation(settled.activation, {
-+    state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: settledTs + 1,
-+  });
-+  store.appendActivation(active);
-+  const validated = store.patternHeads().get(design.patternId);
-+  store.appendPattern(buildPatternRecord({
-+    predicate: validated.predicate, scope: validated.scope, origin: validated.origin,
-+    createdTs: validated.createdTs, ts: settledTs + 1, seq: validated.seq + 1,
-+    state: 'ACTIVE_PAPER', previousState: validated.state, transitionReason: 'PAPER_RUNTIME_ADOPTED',
-+    evidence: validated.evidence, estimate: validated.estimate, contradictions: validated.contradictions,
-+    candidateId: validated.candidateId, activationId: active.activationId,
-+  }));
-+  return { store, active, nowTs: settledTs + 2 };
-+}
-+
-+test('the real fixed worker withholds a lawful active activation-v1 instead of retrofitting it', async () => {
-+  const dataDir = mkdtempSync(path.join(tmpdir(), 'cobra-worker-lawful-v1-'));
-+  try {
-+    const { store, active, nowTs } = commissionLawfulActiveV1(dataDir);
-+    const preWorker = readDecisionMemory({ store, nowTs });
-+    assert.equal(preWorker.activations.length, 1, 'fixture must be lawful before testing the worker fence');
-+    assert.equal(preWorker.activations[0].activationId, active.activationId);
-+    assert.deepEqual(preWorker.withheld, []);
-+
-+    const port = createDecisionMemoryPort({ enabled: true, mode: 'PAPER', dataDir, clock: () => nowTs });
-+    try {
-+      assert.deepEqual(await port.refresh(), { ok: true, preparedTs: nowTs, withheldCount: 1 });
-+      const snapshot = port.snapshot();
-+      assert.deepEqual(snapshot.activations, []);
-+      assert.deepEqual(snapshot.withheld, [{ activationId: active.activationId, reason: UNSEALED_ACTIVATION_REASON }]);
-+      assert.equal(snapshot.sourceProvenance.trustBasis, 'FIXED_BOUNDED_READER_COMPLETE_RAW_BYTES');
-+    } finally {
-+      await port.stop();
-+    }
-+  } finally {
-+    rmSync(dataDir, { recursive: true, force: true });
-+  }
++test('control: subscription snapshots remain excluded from flow', () => {
++  const result = flowImbalance([
++    trade({ eventTs: T - 1_000, receiptTs: T - 500, snapshot: true }),
++  ], T - 15_000, T);
++  assert.equal(result.count, 0);
++  assert.equal(result.state, 'UNKNOWN');
 +});
 +
-+test('production source cannot import or call the injectable test-only port constructor', () => {
-+  const runtimeRoot = fileURLToPath(new URL('..', import.meta.url));
-+  const excludedDirectories = new Set(['.git', 'coverage', 'data', 'node_modules', 'test']);
-+  const portSource = path.join(runtimeRoot, 'lib', 'decision-memory-port.js');
-+  const violations = [];
-+  const visit = (directory) => {
-+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-+      if (entry.isDirectory() && !excludedDirectories.has(entry.name)) visit(path.join(directory, entry.name));
-+      if (!entry.isFile() || !/\.(?:cjs|mjs|js)$/.test(entry.name)) continue;
-+      const file = path.join(directory, entry.name);
-+      if (file === portSource) continue;
-+      if (/\bcreateDecisionMemoryPortForTest\b/.test(readFileSync(file, 'utf8'))) violations.push(path.relative(runtimeRoot, file));
-+    }
-+  };
-+  visit(runtimeRoot);
-+  assert.deepEqual(violations, [], `test-only constructor referenced by production source: ${violations.join(', ')}`);
++test('event-time window excludes a row received after its as-of end', () => {
++  const result = flowImbalance([
++    trade({ eventTs: T - 100, receiptTs: T + 100 }),
++  ], T - 15_000, T);
++  assert.equal(result.count, 0, 'the trade was not known at trigger T');
++  assert.equal(result.state, 'UNKNOWN');
++});
++
++test('direct flow batch fails closed when a relevant row has event-after-receipt chronology', () => {
++  const result = flowImbalance([
++    trade({ eventTs: T - 100, receiptTs: T - 90, side: 'buy', nativeTradeId: 'valid-buy' }),
++    trade({ eventTs: T - 500, receiptTs: T - 600, side: 'sell', nativeTradeId: 'invalid-clock' }),
++  ], T - 15_000, T);
++  assert.equal(result.state, 'UNKNOWN');
++  assert.equal(result.reason, 'AS_OF_OR_EPOCH_INVALID');
++  assert.equal(result.count, 0, 'a valid subset is not promoted when its relevant batch is malformed');
++});
++
++test('actual feed delivering an old-event trade after trigger T cannot backfill [T-15s,T)', () => {
++  const feed = createExecutionFeed({ clock: () => T + 100 });
++  const flow = createFlowTracker();
++  feed.subscribe((event) => { if (event.kind === 'TRADE') flow.add(event.trade); });
++  feed.admit('XBT/USD', { priority: 'CANDIDATE' });
++  feed.onConnect(T - 5_000);
++  feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), T - 4_000);
++  feed.ingest(JSON.stringify({
++    channel: 'trade',
++    type: 'update',
++    data: [{ symbol: 'XBT/USD', side: 'buy', price: '1', qty: '100', ord_type: 'market', trade_id: 7, timestamp: new Date(T - 100).toISOString() }],
++  }), T + 100);
++  const atTrigger = flow.fi(T - 15_000, T);
++  assert.equal(atTrigger.count, 0, 'receipt T+100 cannot revise a fact frozen at T');
++});
++
++function rvRows(D) {
++  const E = Math.floor(D / BAR_MS) * BAR_MS;
++  const rows = [trade({ eventTs: E - 30_000, receiptTs: E - 29_900, nativeTradeId: 'numerator' })];
++  for (let k = 1; k <= 20; k += 1) {
++    const eventTs = E - (k + 1) * BAR_MS + 1_000;
++    rows.push(trade({ eventTs, receiptTs: eventTs + 100, nativeTradeId: `baseline-${k}` }));
++  }
++  return rows;
++}
++
++test('RV60 excludes future-receipt rows even when their event time is in a completed minute', () => {
++  const D = T + 5_000;
++  const E = Math.floor(D / BAR_MS) * BAR_MS;
++  const rows = rvRows(D);
++  rows.push(trade({ eventTs: E - 20_000, receiptTs: D + 1, nativeTradeId: 'future-known', quoteNotional: '900' }));
++  const coverage = { continuous: true, epoch: 1, startTs: E - 21 * BAR_MS, endTs: D, gapTs: null };
++  const result = relativeVolume60(rows, D, coverage);
++  assert.equal(result.rv60, 1, 'future-known numerator notional cannot inflate the point-in-time ratio');
++});
++
++test('RV60 admits a delayed print received after its event window but by decision D', () => {
++  const D = T + 5_000;
++  const E = Math.floor(D / BAR_MS) * BAR_MS;
++  const rows = rvRows(D);
++  rows.push(trade({ eventTs: E - 20_000, receiptTs: E + 1_000, nativeTradeId: 'late-but-known', quoteNotional: '900' }));
++  const coverage = { continuous: true, epoch: 1, startTs: E - 21 * BAR_MS, endTs: D, gapTs: null };
++  assert.equal(relativeVolume60(rows, D, coverage).rv60, 10, 'decision-time as-of applies to every RV window');
++});
++
++test('RV60 uses decision D as-of for delayed-but-known prints in baseline windows too', () => {
++  const D = T + 5_000;
++  const E = Math.floor(D / BAR_MS) * BAR_MS;
++  const rows = rvRows(D);
++  for (let k = 1; k <= 11; k += 1) rows.push(trade({
++    eventTs: E - (k + 1) * BAR_MS + 2_000,
++    receiptTs: E - k * BAR_MS + 1_000,
++    nativeTradeId: `delayed-baseline-${k}`,
++    quoteNotional: '900',
++  }));
++  const coverage = { continuous: true, epoch: 1, startTs: E - 21 * BAR_MS, endTs: D, gapTs: null };
++  assert.equal(relativeVolume60(rows, D, coverage).rv60, 0.1, 'late prints known by D remain legitimate baseline evidence');
++});
++
++test('RV60 malformed clocks, collections and coverage fail closed without throwing', () => {
++  const D = T + 5_000;
++  const E = Math.floor(D / BAR_MS) * BAR_MS;
++  const rows = rvRows(D);
++  const valid = { continuous: true, epoch: 1, startTs: E - 21 * BAR_MS, endTs: D, gapTs: null };
++  for (const [trades, decisionTs, coverage, reason] of [
++    [null, D, valid, 'INPUT_INVALID'],
++    [rows, Number.NaN, valid, 'INPUT_INVALID'],
++    [rows, -1, valid, 'INPUT_INVALID'],
++    [rows, D + 0.5, valid, 'INPUT_INVALID'],
++    [rows, D, undefined, 'COVERAGE_INCOMPLETE'],
++    [rows, D, { ...valid, startTs: undefined }, 'COVERAGE_INCOMPLETE'],
++    [rows, D, { ...valid, endTs: Number.NaN }, 'COVERAGE_INCOMPLETE'],
++    [rows, D, { ...valid, startTs: -1 }, 'COVERAGE_INCOMPLETE'],
++    [rows, D, { ...valid, startTs: D, endTs: D - 1 }, 'COVERAGE_INCOMPLETE'],
++    [rows, D, { ...valid, endTs: D + 1 }, 'COVERAGE_INCOMPLETE'],
++    [rows, D, { ...valid, gapTs: D - 1 }, 'COVERAGE_INCOMPLETE'],
++  ]) assert.equal(relativeVolume60(trades, decisionTs, coverage).reason, reason);
++
++  const malformed = [...rows, trade({ eventTs: E - 20_000, receiptTs: E - 21_000, nativeTradeId: 'invalid-rv-clock' })];
++  const invalidBatch = relativeVolume60(malformed, D, valid);
++  assert.equal(invalidBatch.state, 'UNKNOWN');
++  assert.equal(invalidBatch.reason, 'INPUT_INVALID');
++});
++
++test('RV60 does not mix a prior feed epoch into current coverage', () => {
++  const D = T + 5_000;
++  const E = Math.floor(D / BAR_MS) * BAR_MS;
++  const rows = rvRows(D);
++  rows.push(trade({ eventTs: E - 20_000, receiptTs: E - 19_900, feedEpoch: 0, nativeTradeId: 'prior-epoch', quoteNotional: '900' }));
++  const coverage = { continuous: true, epoch: 1, startTs: E - 21 * BAR_MS, endTs: D, gapTs: null };
++  assert.equal(relativeVolume60(rows, D, coverage).rv60, 1);
++});
++
++test('incremental flow queries do not retain rows from a prior feed epoch', () => {
++  const tracker = createFlowTracker();
++  tracker.add(trade({ eventTs: T - 1_000, feedEpoch: 1, nativeTradeId: 'old', side: 'buy' }));
++  tracker.add(trade({ eventTs: T, feedEpoch: 2, nativeTradeId: 'new', side: 'sell' }));
++  const current = tracker.fi(T - 5_000, T + 1_000);
++  assert.equal(current.count, 1, 'only the current tracker epoch is eligible');
++  assert.equal(current.fi, -1);
++  assert.equal(tracker.add(trade({ eventTs: T + 1, receiptTs: T + 1, feedEpoch: 1, nativeTradeId: 'late-old-epoch' })), false, 'an older epoch cannot switch the tracker back');
++});
++
++test('bar history lookup does not expose rows whose retrieval receipt is after query time', () => {
++  const history = createBarHistory({ clock: () => T });
++  const rows = [];
++  for (let k = 61; k >= 1; k -= 1) {
++    const open = T - k * BAR_MS;
++    rows.push([open / 1_000, '100', '101', '99', '100', '100', '1', 1]);
++  }
++  history.ingestRows('XBT/USD', rows, T + 1_000, T);
++  assert.equal(history.bars('XBT/USD', T) === null, true, 'the REST rows were not known at T');
++  assert.equal(history.bars('XBT/USD', -1), null);
++  assert.equal(history.bars('XBT/USD', Number.NaN), null);
++  assert.equal(history.bars('XBT/USD', T + 0.5), null);
++});
++
++test('tracker rejects event-after-receipt chronology before it reaches any query', () => {
++  const tracker = createFlowTracker();
++  assert.equal(tracker.add(trade({ eventTs: T + 1, receiptTs: T, nativeTradeId: 'future-event' })), false);
++  assert.equal(tracker.add(trade({ eventTs: -1, receiptTs: 0, nativeTradeId: 'negative-event' })), false);
++  assert.equal(tracker.add(trade({ eventTs: 0, receiptTs: -1, nativeTradeId: 'negative-receipt' })), false);
++  assert.equal(tracker.status().trades, 0);
 +});
