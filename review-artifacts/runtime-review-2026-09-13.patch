@@ -1,25 +1,405 @@
-diff --git a/lib/data-only-status.js b/lib/data-only-status.js
-index c508e86..83d79a7 100644
---- a/lib/data-only-status.js
-+++ b/lib/data-only-status.js
-@@ -203,7 +203,7 @@ export function dataOnlyPublicStatus(evaluated) {
-     : observedMarket;
-   return {
-     mode: 'DATA_ONLY', version: source.version ?? DATA_ONLY_RUNTIME_STATUS_VERSION,
--    healthState: evaluated?.healthState ?? 'UNAVAILABLE', statusReason: evaluated?.statusReason ?? 'STATUS_UNAVAILABLE',
-+    healthState: evaluated?.healthState ?? 'UNAVAILABLE', statusReason: evaluated?.statusReason === undefined ? 'STATUS_UNAVAILABLE' : evaluated.statusReason,
-     running: evaluated?.effectiveRunning === true, reportedRunning: evaluated?.reportedRunning === true,
-     lifecycle: evaluated?.lifecycle ?? 'UNAVAILABLE', startupPhase: evaluated?.startupPhase ?? null,
-     tsMs: timestamp(source.tsMs) ? source.tsMs : null, heartbeatAgeMs: evaluated?.heartbeatAgeMs ?? null,
-diff --git a/test/data-only-status.test.js b/test/data-only-status.test.js
-index 223c831..1ae3d8b 100644
---- a/test/data-only-status.test.js
-+++ b/test/data-only-status.test.js
-@@ -97,6 +97,7 @@ test('public market and sensor views keep capture scope separate from the wider
-   });
-   const evaluated = evaluateDataOnlyRuntimeStatus(status, { now: NOW, lock: lock() });
-   const pub = dataOnlyPublicStatus(evaluated);
-+  assert.equal(pub.healthState, 'ACTIVE'); assert.equal(pub.statusReason, null, 'healthy status preserves the evaluator\'s explicit null reason');
-   assert.equal(pub.market.scope.subjectCount, 3); assert.deepEqual(pub.market.scope.subjects, ['BTC', 'ETH', 'SOL']); assert.equal(pub.catalog.markets, 612);
-   assert.equal(pub.market.providerSources.KRAKEN_SPOT.succeeded, 9); assert.equal(pub.market.receipts.observations, 27);
-   assert.equal(pub.market.streams.KRAKEN_SPOT.healthState, 'HEALTHY'); assert.equal(pub.market.streamHealth.state, 'HEALTHY'); assert.equal(pub.market.recording.state, 'HEALTHY');
+diff --git a/rumor2/providers/x-official.js b/rumor2/providers/x-official.js
+index fd4e15d..97b3645 100644
+--- a/rumor2/providers/x-official.js
++++ b/rumor2/providers/x-official.js
+@@ -72,7 +72,11 @@ export function xStreamUrl({ backfillMinutes = 0 } = {}) {
+ }
+ export const xRulesUrl = ({ dryRun = false } = {}) => `https://${X_OFFICIAL.hosts[0]}${X_OFFICIAL.rulesPath}${dryRun ? '?dry_run=true' : ''}`;
+ export const xRulesCountsUrl = () => `https://${X_OFFICIAL.hosts[0]}${X_OFFICIAL.rulesCountsPath}`;
+-export const xUsageUrl = () => `https://${X_OFFICIAL.hosts[0]}${X_OFFICIAL.usageTweetsPath}`;
++// Request the project total and its UTC-day breakdown explicitly. `days=2`
++// covers the current UTC day across a boundary without permitting an older day
++// to stand in for today; parseXUsage selects only the observed UTC day.
++const X_USAGE_FIELDS = 'cap_reset_day,daily_project_usage,project_cap,project_usage';
++export const xUsageUrl = () => `https://${X_OFFICIAL.hosts[0]}${X_OFFICIAL.usageTweetsPath}?days=2&usage.fields=${X_USAGE_FIELDS}`;
+ export const xCreditsUrl = () => `https://${X_OFFICIAL.hosts[0]}${X_OFFICIAL.usageCreditsPath}`;
+ export function assertXHost(url) {
+   const h = new URL(url).host;
+@@ -216,21 +220,65 @@ export function xPostToRaw(line, { provider = 'X_OFFICIAL' } = {}) {
+ 
+ // Parse the current official usage response (§12) into a CLOSED shape or null.
+ //   { data: { project_usage, project_cap, cap_reset_day, daily_project_usage: [...] } }
++const usageUtcDay = (value) => {
++  if (typeof value !== 'string') return null;
++  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z)?$/);
++  if (!m) return null;
++  const canonicalDay = `${m[1]}-${m[2]}-${m[3]}`;
++  const ts = Date.parse(m[4] === undefined ? `${canonicalDay}T00:00:00.000Z` : value);
++  return Number.isFinite(ts) && new Date(ts).toISOString().slice(0, 10) === canonicalDay ? canonicalDay : null;
++};
++const safeUsageSum = (values) => {
++  let sum = 0;
++  for (const value of values) {
++    if (!Number.isSafeInteger(value) || value < 0 || !Number.isSafeInteger(sum + value)) return null;
++    sum += value;
++  }
++  return sum;
++};
++function parseDailyProjectUsage(value, observedDay, int) {
++  const byDay = new Map();
++  // Current endpoint reference: { project_id, usage:[{ date: RFC3339 UTC, usage }] }.
++  if (value && typeof value === 'object' && !Array.isArray(value)) {
++    if (!Array.isArray(value.usage)) return null;
++    for (const row of value.usage) {
++      if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
++      const day = usageUtcDay(row.date); const count = int(row.usage);
++      if (day === null || count === null || byDay.has(day)) return null;
++      byDay.set(day, count);
++    }
++  // Current usage overview: [{ date: YYYY-MM-DD, usage:[{ app_id, tweets_consumed }] }].
++  } else if (Array.isArray(value)) {
++    for (const row of value) {
++      if (!row || typeof row !== 'object' || Array.isArray(row) || !Array.isArray(row.usage) || row.usage.length === 0) return null;
++      const day = usageUtcDay(row.date);
++      if (day === null || byDay.has(day)) return null;
++      const apps = new Set(); const counts = [];
++      for (const app of row.usage) {
++        if (!app || typeof app !== 'object' || Array.isArray(app)) return null;
++        const appId = typeof app.app_id === 'string' || Number.isSafeInteger(app.app_id) ? String(app.app_id) : null;
++        const count = int(app.tweets_consumed);
++        if (!appId || apps.has(appId) || count === null) return null;
++        apps.add(appId); counts.push(count);
++      }
++      const total = safeUsageSum(counts); if (total === null) return null;
++      byDay.set(day, total);
++    }
++  } else return null;
++  // Absence of the observed UTC day is unknown, never an inferred zero.
++  return byDay.has(observedDay) ? byDay.get(observedDay) : null;
++}
+ export function parseXUsage(body, { observedTs }) {
+   const d = body && typeof body === 'object' ? body.data : null;
+-  if (!d || typeof d !== 'object') return null;
++  if (!d || typeof d !== 'object' || !Number.isSafeInteger(observedTs) || observedTs < 1) return null;
+   const int = (v) => { const n = typeof v === 'string' && /^\d{1,15}$/.test(v) ? Number(v) : v; return Number.isSafeInteger(n) && n >= 0 ? n : null; };
+   const projectUsage = int(d.project_usage);
+   const projectCap = int(d.project_cap);
+   if (projectUsage === null || projectCap === null) return null;
+   const capResetDay = int(d.cap_reset_day);
+-  let dailyProjectUsage = null;
+-  if (Array.isArray(d.daily_project_usage)) {
+-    for (const entry of d.daily_project_usage) {
+-      const usage = Array.isArray(entry?.usage) ? entry.usage : [];
+-      for (const u of usage) { const n = int(u?.usage); if (n !== null) dailyProjectUsage = Math.max(dailyProjectUsage ?? 0, n); }
+-    }
+-  }
++  let observedDay; try { observedDay = new Date(observedTs).toISOString().slice(0, 10); } catch { return null; }
++  const dailyProjectUsage = parseDailyProjectUsage(d.daily_project_usage, observedDay, int);
++  if (dailyProjectUsage === null) return null;
+   return { projectUsage, projectCap, capResetDay: capResetDay !== null && capResetDay >= 1 && capResetDay <= 31 ? capResetDay : null, dailyProjectUsage, observedTs: Math.floor(observedTs) };
+ }
+ // Parse the current official credits response (§13): { data: { free_balance, prepaid_balance, total_balance } }
+diff --git a/rumor2/x-runtime.js b/rumor2/x-runtime.js
+index 2f9f849..d5e5532 100644
+--- a/rumor2/x-runtime.js
++++ b/rumor2/x-runtime.js
+@@ -236,6 +236,15 @@ export function createXRuntime({
+   };
+   const estimatedUsd = (n) => Math.round(n * pricing.postReadUsd * 1e6) / 1e6;
+ 
++  // X does not promise that a usage snapshot has already acknowledged any
++  // particular local read. Treating server/local counts as overlapping would
++  // therefore invent evidence. Their full union is the conservative estimate
++  // (intentionally not a provider invoice; it may throttle early).
++  const usageUnion = (serverCount, localCount) => {
++    const total = serverCount + localCount;
++    return Number.isSafeInteger(total) ? total : null;
++  };
++
+   // ---- budget decision: the STRICTEST remaining allowance --------------------
+   function allowance(ts = now()) {
+     rollPeriods(ts);
+@@ -245,13 +254,16 @@ export function createXRuntime({
+     if (!adm.ok) return { ok: false, reason: adm.reason, detail: adm.detail, remaining: 0 };
+     if (!serverUsage) return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'no verified server usage snapshot', remaining: 0 };
+     if (ts - serverUsage.observedTs > usageMaxAgeMs) return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'server usage snapshot is stale', remaining: 0 };
++    if (utcDay(ts) !== utcDay(serverUsage.observedTs)) return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'server daily usage snapshot is from a different UTC day', remaining: 0 };
++    if (!Number.isSafeInteger(serverUsage.dailyProjectUsage) || serverUsage.dailyProjectUsage < 0) return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'current UTC-day project usage is unavailable', remaining: 0 };
+     if (credits.value && credits.value.totalBalance <= 0) return { ok: false, reason: 'NO_CREDITS', detail: 'credit balance is zero or negative', remaining: 0 };
+-    // COST-4: the server's observed usage is at least as large as our local month
+-    const observedMonth = Math.max(meter.monthDelivered, serverUsage.projectUsage);
++    const observedMonth = usageUnion(serverUsage.projectUsage, meter.monthDelivered);
++    const observedDay = usageUnion(serverUsage.dailyProjectUsage, meter.delivered);
++    if (observedMonth === null || observedDay === null) return { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'conservative server + local usage estimate overflowed', remaining: 0 };
+     const candidates = [
+-      ['BUDGET_DAILY', config.maxDailyPostReads - meter.delivered],
++      ['BUDGET_DAILY', config.maxDailyPostReads - observedDay],
+       ['BUDGET_MONTHLY', config.maxMonthlyPostReads - observedMonth],
+-      ['BUDGET_USD', Math.floor(config.maxEstimatedDailyUsd / pricing.postReadUsd) - meter.delivered],
++      ['BUDGET_USD', Math.floor(config.maxEstimatedDailyUsd / pricing.postReadUsd) - observedDay],
+       ['BUDGET_MONTHLY', serverUsage.projectCap - observedMonth], // COST-7: the platform cap itself
+     ];
+     if (posInt(config.maxSessionPostReads)) candidates.push(['BUDGET_SESSION', config.maxSessionPostReads - meter.session]);
+@@ -801,6 +813,8 @@ export function createXRuntime({
+       const g = xGate(config, { pricing, headroom });
+       const al = hydrated && serverUsage ? allowance() : null;
+       const sl = xSmokeLaw(config, headroom);
++      const estimateDay = serverUsage && Number.isSafeInteger(serverUsage.dailyProjectUsage) && meter.period === utcDay(serverUsage.observedTs) ? usageUnion(serverUsage.dailyProjectUsage, meter.delivered) : null;
++      const estimateMonth = serverUsage && meter.monthPeriod === utcMonth(serverUsage.observedTs) ? usageUnion(serverUsage.projectUsage, meter.monthDelivered) : null;
+       return {
+         provider: provider.id, accessState: 'AVAILABLE_REQUIRES_CREDENTIAL', enabled: !!config.enabled, credentialPresent: !!config.bearer,
+         gate: g.ok ? 'OPEN' : g.reason, gateDetail: g.detail, state, hydrated, authority: 'NONE',
+@@ -843,6 +857,7 @@ export function createXRuntime({
+           estimatedUsdUsedMonth: estimatedUsd(meter.monthDelivered), estimatedUsdUsedDay: estimatedUsd(meter.delivered),
+           estimatedUsdRemainingDay: Number.isFinite(config.maxEstimatedDailyUsd) ? Math.max(0, Math.round((config.maxEstimatedDailyUsd - estimatedUsd(meter.delivered)) * 1e6) / 1e6) : null,
+           unitPriceUsd: pricing.postReadUsd, pricingObservedOn: pricing.observedOn,
++          conservativeEstimate: estimateDay !== null && estimateMonth !== null ? { basis: 'SERVER_PLUS_LOCAL_NO_OVERLAP_ASSUMED', dayPostReads: estimateDay, monthPostReads: estimateMonth, dayUsd: estimatedUsd(estimateDay), providerInvoice: false } : null,
+           allowance: al ? { ok: al.ok, reason: al.reason, remaining: al.remaining === Infinity ? null : al.remaining, limiting: al.limiting ?? null } : null,
+           platformSpendingLimitVerified: 'UNKNOWN', // not machine-verifiable; the Developer Console spending limit is the recommended independent backstop
+         },
+diff --git a/test/x-daily-usage-allowance.test.js b/test/x-daily-usage-allowance.test.js
+new file mode 100644
+index 0000000..c0bd07c
+--- /dev/null
++++ b/test/x-daily-usage-allowance.test.js
+@@ -0,0 +1,139 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { parseXUsage, xUsageUrl } from '../rumor2/providers/x-official.js';
++import { createXRuntime } from '../rumor2/x-runtime.js';
++import { xMeterEvent } from '../rumor2/social-settle.js';
++
++const T = Date.parse('2026-09-13T12:00:00.000Z');
++const DAY = '2026-09-13';
++const MONTH = '2026-09';
++const cfg = (over = {}) => ({
++  enabled: true, bearer: 'fixture', maxDailyPostReads: 100,
++  maxMonthlyPostReads: 3000, maxEstimatedDailyUsd: 10,
++  maxSessionPostReads: 100, liveSmokeTargetPostReads: null,
++  liveSmokeMaxPostReads: null, liveSmokeRunId: null,
++  priorityAccounts: [], propagationFocus: [], ...over,
++});
++
++function fakeX(serverDay) {
++  const rules = []; let nextId = 1; let streamController = null;
++  const res = (status, json = null, body = null) => ({ status, json: async () => json, body });
++  return async (raw, init = {}) => {
++    const url = new URL(raw);
++    if (url.pathname === '/2/usage/tweets') return res(200, { data: { project_usage: String(serverDay), project_cap: '3000', cap_reset_day: 1, daily_project_usage: { project_id: 'fixture', usage: [{ date: `${DAY}T12:00:00.000Z`, usage: String(serverDay) }] } } });
++    if (url.pathname === '/2/usage/credits') return res(200, { data: { free_balance: 0, prepaid_balance: 10, total_balance: 10 } });
++    if (url.pathname.endsWith('/rules/counts')) return res(404);
++    if (url.pathname.endsWith('/rules')) {
++      if ((init.method ?? 'GET') === 'GET') return res(200, { data: rules.map((r) => ({ ...r })) });
++      const body = JSON.parse(init.body);
++      if (url.searchParams.get('dry_run') === 'true') return res(200, { meta: { summary: { valid: (body.add ?? []).length, invalid: 0 } } });
++      if (body.add) { for (const rule of body.add) rules.push({ ...rule, id: String(nextId++) }); return res(201, {}); }
++      if (body.delete) { for (const id of body.delete.ids) { const at = rules.findIndex((r) => r.id === id); if (at >= 0) rules.splice(at, 1); } return res(200, {}); }
++    }
++    if (url.pathname === '/2/tweets/search/stream') {
++      const body = new ReadableStream({ start(controller) { streamController = controller; } });
++      init.signal?.addEventListener('abort', () => { try { streamController?.error(new Error('stopped')); } catch {} });
++      return res(200, null, body);
++    }
++    return res(404);
++  };
++}
++
++function hydratedRuntime({ nowTs = T, localDay = 10, localMonth = 100, serverDay = 60, serverMonth = 200, observedTs = T, config = cfg() } = {}) {
++  const rt = createXRuntime({ config, universe: ['BTC'], now: () => nowTs });
++  const ev = xMeterEvent({
++    provider: 'X_OFFICIAL', period: new Date(observedTs).toISOString().slice(0, 10),
++    deliveredPostReads: localDay, monthPeriod: new Date(observedTs).toISOString().slice(0, 7),
++    monthDeliveredPostReads: localMonth, unitPriceUsd: 0.005,
++    serverUsage: { projectUsage: serverMonth, projectCap: 3_000_000, capResetDay: 1, dailyProjectUsage: serverDay, observedTs },
++    knownAtTs: observedTs,
++  });
++  assert.equal(rt.hydrate([ev]).ok, true);
++  return rt;
++}
++const hydratedAllowance = (options) => hydratedRuntime(options).allowance();
++
++test('X usage request explicitly asks for the two-day UTC breakdown and required fields', () => {
++  const url = new URL(xUsageUrl());
++  assert.equal(url.searchParams.get('days'), '2');
++  assert.deepEqual(url.searchParams.get('usage.fields').split(','), ['cap_reset_day', 'daily_project_usage', 'project_cap', 'project_usage']);
++});
++
++test('X usage parser accepts only documented daily-project variants and selects the observed UTC day', () => {
++  const common = { project_usage: '200', project_cap: '3000', cap_reset_day: 1 };
++  const objectShape = parseXUsage({ data: { ...common, daily_project_usage: { project_id: 1, usage: [
++    { date: '2026-09-12T23:59:59.000Z', usage: '90' }, { date: '2026-09-13T12:00:00.000Z', usage: '60' },
++  ] } } }, { observedTs: T });
++  assert.equal(objectShape.dailyProjectUsage, 60);
++  const arrayShape = parseXUsage({ data: { ...common, daily_project_usage: [
++    { date: DAY, usage: [{ app_id: 'a', tweets_consumed: '20' }, { app_id: 'b', tweets_consumed: 40 }] },
++  ] } }, { observedTs: T });
++  assert.equal(arrayShape.dailyProjectUsage, 60);
++
++  for (const daily_project_usage of [
++    [],
++    { project_id: 1, usage: [{ date: '2026-09-12T12:00:00.000Z', usage: 60 }] },
++    { project_id: 1, usage: [{ date: '2026-02-30T12:00:00.000Z', usage: 60 }] },
++    { project_id: 1, usage: [{ date: `${DAY}T01:00:00.000Z`, usage: 1 }, { date: `${DAY}T02:00:00.000Z`, usage: 2 }] },
++    [{ date: DAY, usage: [] }],
++    [{ date: DAY, usage: [{ app_id: 'a', tweets_consumed: 1 }, { app_id: 'a', tweets_consumed: 2 }] }],
++  ]) assert.equal(parseXUsage({ data: { ...common, daily_project_usage } }, { observedTs: T }), null);
++  assert.equal(parseXUsage({ data: { ...common, daily_project_usage: { project_id: 1, usage: [{ date: `${DAY}T12:00:00.000Z`, usage: 0 }] } } }, { observedTs: Number.MAX_SAFE_INTEGER }), null);
++});
++
++test('server and local usage are unioned for both Post and USD allowance because overlap is unproven', () => {
++  const daily = hydratedAllowance();
++  assert.deepEqual({ ok: daily.ok, remaining: daily.remaining, usable: daily.usable, limiting: daily.limiting },
++    { ok: true, remaining: 30, usable: 5, limiting: 'BUDGET_DAILY' });
++  const usd = hydratedAllowance({ config: cfg({ maxDailyPostReads: 1000, maxEstimatedDailyUsd: 0.50 }) });
++  assert.deepEqual({ ok: usd.ok, remaining: usd.remaining, usable: usd.usable, limiting: usd.limiting },
++    { ok: true, remaining: 30, usable: 5, limiting: 'BUDGET_USD' });
++});
++
++test('local usage greater than server usage is still unioned rather than assuming either side overlaps', () => {
++  const result = hydratedAllowance({ localDay: 70, localMonth: 100, serverDay: 20, serverMonth: 100 });
++  assert.deepEqual({ ok: result.ok, reason: result.reason, remaining: result.remaining, limiting: result.limiting },
++    { ok: false, reason: 'BUDGET_DAILY', remaining: 10, limiting: 'BUDGET_DAILY' });
++});
++
++test('snapshot 60 then ten local reads stays 70 across hydration; refresh and later reads remain additive', () => {
++  const afterTen = hydratedAllowance({ localDay: 10, localMonth: 10, serverDay: 60, serverMonth: 60 });
++  assert.equal(afterTen.remaining, 30, '60 server + 10 local, including after restart/hydration');
++  const refreshed = hydratedAllowance({ localDay: 10, localMonth: 10, serverDay: 70, serverMonth: 70 });
++  assert.equal(refreshed.remaining, 20, 'a refreshed 70 remains unioned with the durable local 10');
++  const fiveLater = hydratedAllowance({ localDay: 15, localMonth: 15, serverDay: 70, serverMonth: 70, config: cfg({ maxDailyPostReads: 120 }) });
++  assert.equal(fiveLater.remaining, 35, 'each later local read consumes allowance even while the snapshot is unchanged');
++  const monthly = hydratedAllowance({ localDay: 10, localMonth: 25, serverDay: 0, serverMonth: 900, config: cfg({ maxDailyPostReads: 1000, maxMonthlyPostReads: 1000, maxEstimatedDailyUsd: 10 }) });
++  assert.equal(monthly.remaining, 75); assert.equal(monthly.limiting, 'BUDGET_MONTHLY');
++  assert.deepEqual(hydratedRuntime({ localDay: 10, localMonth: 10, serverDay: 60, serverMonth: 60 }).status().budget.conservativeEstimate,
++    { basis: 'SERVER_PLUS_LOCAL_NO_OVERLAP_ASSUMED', dayPostReads: 70, monthPostReads: 70, dayUsd: 0.35, providerInvoice: false });
++});
++
++test('a live fake snapshot is consumed by each later local read, survives settlement/restart, and unions a refresh', async () => {
++  const config = cfg({ maxDailyPostReads: 120 }); const journal = [];
++  const rt = createXRuntime({ config, universe: ['BTC'], now: () => T, fetchImpl: fakeX(60) });
++  assert.equal(rt.hydrate([]).ok, true); assert.equal((await rt.start()).ok, true);
++  assert.equal(rt.allowance().remaining, 60);
++  for (let i = 1; i <= 10; i++) rt._feedLine({ data: { id: String(i), text: 'irrelevant', author_id: '1', created_at: `${DAY}T11:59:00.000Z`, edit_history_tweet_ids: [String(i)], conversation_id: String(i) }, matching_rules: [] }, T + i);
++  assert.equal(rt.allowance().remaining, 50, 'server 60 + ten local reads');
++  const settled = await rt.settle({ append: async (events) => { journal.push(...events); return { ok: true, lastSeq: journal.length }; } });
++  assert.equal(settled.ok, true); rt.stop('fixture stop');
++
++  const restored = createXRuntime({ config, universe: ['BTC'], now: () => T + 100, fetchImpl: fakeX(70) });
++  assert.equal(restored.hydrate(journal).ok, true);
++  assert.equal(restored.allowance().remaining, 50, 'the 60+10 conservative estimate survives hydration');
++  assert.equal((await restored.preflight()).ok, true);
++  assert.equal(restored.allowance().remaining, 40, 'the refreshed 70 is still unioned with durable local 10');
++});
++
++test('a fresh-by-age server snapshot from the prior UTC day cannot authorize today', () => {
++  const observedTs = Date.parse('2026-09-13T23:59:00.000Z');
++  const nowTs = Date.parse('2026-09-14T00:01:00.000Z');
++  const result = hydratedAllowance({ nowTs, observedTs, localDay: 5, localMonth: 100, serverDay: 20, serverMonth: 100 });
++  assert.deepEqual(result, { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'server daily usage snapshot is from a different UTC day', remaining: 0 });
++});
++
++test('a server plus local estimate that exceeds safe-integer arithmetic fails closed', () => {
++  const result = hydratedAllowance({ localDay: 1, localMonth: 1, serverDay: Number.MAX_SAFE_INTEGER, serverMonth: Number.MAX_SAFE_INTEGER });
++  assert.deepEqual(result, { ok: false, reason: 'USAGE_PREFLIGHT_FAILED', detail: 'conservative server + local usage estimate overflowed', remaining: 0 });
++});
+diff --git a/test/x-provider.test.js b/test/x-provider.test.js
+index 7f572d2..1e75e85 100644
+--- a/test/x-provider.test.js
++++ b/test/x-provider.test.js
+@@ -36,7 +36,8 @@ test('X-CONTRACT-1. the current official X contract is pinned: endpoints, bearer
+   assert.equal(X_OFFICIAL.pricing.billingDedupe, 'SOFT_UTC_DAY'); assert.equal(X_OFFICIAL.pricing.observedOn, '2026-09-06'); assert.ok(X_OFFICIAL.pricing.source.startsWith('https://docs.x.com/'));
+   const reg = socialProviderById('X_OFFICIAL');
+   assert.equal(reg.cost.postReadUsd, X_OFFICIAL.pricing.postReadUsd); assert.equal(reg.cost.monthlyPostReadCap, X_OFFICIAL.pricing.monthlyPostReadCap);
+-  assert.equal(xUsageUrl(), 'https://api.x.com/2/usage/tweets'); assert.equal(xCreditsUrl(), 'https://api.x.com/2/usage/credits');
++  { const usage = new URL(xUsageUrl()); assert.equal(usage.origin + usage.pathname, 'https://api.x.com/2/usage/tweets'); assert.equal(usage.searchParams.get('days'), '2'); assert.equal(usage.searchParams.get('usage.fields'), 'cap_reset_day,daily_project_usage,project_cap,project_usage'); }
++  assert.equal(xCreditsUrl(), 'https://api.x.com/2/usage/credits');
+   assert.equal(xRulesUrl({ dryRun: true }), 'https://api.x.com/2/tweets/search/stream/rules?dry_run=true');
+   assert.throws(() => assertXHost('https://evil.example.com/2/tweets/search/stream'), /allowlist/);
+ });
+@@ -169,7 +170,7 @@ test('X-RULES-3. tags: deterministic serpent:v1:<lane>:<hash16>; ownership is ex
+ 
+ // ---- §12/§13 closed usage/credit parsers ---------------------------------------
+ test('X-USAGE. the usage and credits responses are parsed into CLOSED shapes; arbitrary shapes are refused', () => {
+-  const u = parseXUsage({ data: { project_usage: '1234', project_cap: '3000000', cap_reset_day: 15, daily_project_usage: [{ usage: [{ date: '2026-09-06', usage: '200' }] }] } }, { observedTs: T });
++  const u = parseXUsage({ data: { project_usage: '1234', project_cap: '3000000', cap_reset_day: 15, daily_project_usage: { project_id: 'fixture', usage: [{ date: '2026-09-06T12:00:00.000Z', usage: '200' }] } } }, { observedTs: T });
+   assert.deepEqual(u, { projectUsage: 1234, projectCap: 3_000_000, capResetDay: 15, dailyProjectUsage: 200, observedTs: T });
+   assert.equal(parseXUsage({ data: { project_usage: 'lots' } }, { observedTs: T }), null); assert.equal(parseXUsage({}, { observedTs: T }), null); assert.equal(parseXUsage('x', { observedTs: T }), null);
+   assert.deepEqual(parseXCredits({ data: { free_balance: 0, prepaid_balance: 12.5, total_balance: 12.5 } }), { freeBalance: 0, prepaidBalance: 12.5, totalBalance: 12.5 });
+diff --git a/test/x-runtime.test.js b/test/x-runtime.test.js
+index 4ce7724..9e38cbd 100644
+--- a/test/x-runtime.test.js
++++ b/test/x-runtime.test.js
+@@ -35,7 +35,8 @@ function fakeStream() {
+   const body = new ReadableStream({ start(c) { ctrl = c; } });
+   return { body, push: (text) => ctrl.enqueue(enc.encode(text)), close: () => { try { ctrl.close(); } catch { /* closed */ } }, error: (e) => { try { ctrl.error(e); } catch { /* closed */ } } };
+ }
+-function fakeXApi({ usage = { project_usage: '100', project_cap: '3000000', cap_reset_day: 1, daily_project_usage: [] }, usageStatus = 200, credits = { free_balance: 0, prepaid_balance: 50, total_balance: 50 }, creditsStatus = 200, rules = [], dryRunInvalid = 0, streamStatus = 200, counts = null } = {}) {
++function fakeXApi({ usage: usageOverride = {}, usageDay = iso(T), usageStatus = 200, credits = { free_balance: 0, prepaid_balance: 50, total_balance: 50 }, creditsStatus = 200, rules = [], dryRunInvalid = 0, streamStatus = 200, counts = null } = {}) {
++  const usage = { project_usage: '100', project_cap: '3000000', cap_reset_day: 1, daily_project_usage: { project_id: 'fixture', usage: [{ date: usageDay, usage: '0' }] }, ...usageOverride };
+   const state = { rules: rules.map((r, i) => ({ id: r.id ?? `u${i}`, value: r.value, tag: r.tag })), nextId: 1000, streams: [], calls: [], mutations: [] };
+   const res = (status, json = null, body = null) => ({ status, json: async () => json, body });
+   const fetchImpl = async (url, opts = {}) => {
+@@ -157,7 +158,7 @@ test('X-STREAM-3 (§38/§20). 401/403 stops (AUTH_REJECTED); 429 backs off; repe
+ 
+ // ---- §9/§49 cost governor -----------------------------------------------------------
+ async function liveRuntime({ config = CFG(), apiOpts = {}, nowMs = T, journalEvents = [], over = {} } = {}) {
+-  const api = fakeXApi(apiOpts);
++  const api = fakeXApi({ usageDay: iso(nowMs), ...apiOpts });
+   const b = boot({ api, config, nowMs, over });
+   assert.equal(b.rt.hydrate(journalEvents).ok, true);
+   const st = await b.rt.start();
+diff --git a/test/x-paid-wire.test.js b/test/x-paid-wire.test.js
+index 0f2044e..e39d86c 100644
+--- a/test/x-paid-wire.test.js
++++ b/test/x-paid-wire.test.js
+@@ -45,7 +45,7 @@ function countingBody() {
+ }
+ 
+ // fake X API: rules with an optional external mutation injected DURING Serpent's add
+-function fakeXApi({ rules = [], onAdd = null, onDelete = null, onGet = null, usage = { project_usage: '0', project_cap: '3000000', cap_reset_day: 1, daily_project_usage: [] } } = {}) {
++function fakeXApi({ rules = [], onAdd = null, onDelete = null, onGet = null, usage = { project_usage: '0', project_cap: '3000000', cap_reset_day: 1, daily_project_usage: { project_id: 'fixture', usage: [{ date: iso(T), usage: '0' }] } } } = {}) {
+   const state = { rules: rules.map((r, i) => ({ id: r.id ?? `u${i}`, value: r.value, tag: r.tag })), nextId: 1000, streams: [], calls: [], mutations: [], addsSeen: 0, gets: 0 };
+   const res = (status, json = null) => ({ status, json: async () => json, body: null });
+   const fetchImpl = async (url, opts = {}) => {
+diff --git a/test/x-smoke-durable.test.js b/test/x-smoke-durable.test.js
+index db64a7e..c593ac3 100644
+--- a/test/x-smoke-durable.test.js
++++ b/test/x-smoke-durable.test.js
+@@ -47,7 +47,7 @@ function fakeXApi({ rules = [], projectUsage = 100 } = {}) {
+     const u = new URL(url);
+     state.calls.push({ path: u.pathname, method: opts.method ?? 'GET' });
+     assert.equal(u.host, 'api.x.com'); assert.equal(opts.headers?.Authorization, `Bearer ${BEARER}`);
+-    if (u.pathname === '/2/usage/tweets') return res(200, { data: { project_usage: String(state.projectUsage), project_cap: '3000000', cap_reset_day: 1, daily_project_usage: [] } });
++    if (u.pathname === '/2/usage/tweets') return res(200, { data: { project_usage: String(state.projectUsage), project_cap: '3000000', cap_reset_day: 1, daily_project_usage: { project_id: 'fixture', usage: [{ date: iso(WALL), usage: String(state.projectUsage) }] } } });
+     if (u.pathname === '/2/usage/credits') return res(200, { data: { free_balance: 0, prepaid_balance: 50, total_balance: 50 } });
+     if (u.pathname === '/2/tweets/search/stream/rules/counts') return res(404, null);
+     if (u.pathname === '/2/tweets/search/stream/rules') {
+diff --git a/test/social-4f-collector.test.js b/test/social-4f-collector.test.js
+index 6abdbdd..b4aa5a1 100644
+--- a/test/social-4f-collector.test.js
++++ b/test/social-4f-collector.test.js
+@@ -38,7 +38,7 @@ function fakeXApi({ unowned = [] } = {}) {
+   const fetchImpl = async (url, opts = {}) => {
+     const u = new URL(url); state.calls += 1; state.paths.push(u.pathname);
+     assert.equal(u.host, 'api.x.com'); assert.equal(opts.headers?.Authorization, `Bearer ${BEARER}`);
+-    if (u.pathname === '/2/usage/tweets') return res(200, { data: { project_usage: '10', project_cap: '3000000' } });
++    if (u.pathname === '/2/usage/tweets') return res(200, { data: { project_usage: '10', project_cap: '3000000', daily_project_usage: { project_id: 'fixture', usage: [{ date: iso(T1), usage: '0' }] } } });
+     if (u.pathname === '/2/usage/credits') return res(200, { data: { free_balance: 0, prepaid_balance: 20, total_balance: 20 } });
+     if (u.pathname.endsWith('/rules/counts')) return res(404, null);
+     if (u.pathname.endsWith('/rules')) {
+diff --git a/test/x-collector.test.js b/test/x-collector.test.js
+index 2a1f10d..36f0af5 100644
+--- a/test/x-collector.test.js
++++ b/test/x-collector.test.js
+@@ -36,7 +36,7 @@ function fakeXApi() {
+   const fetchImpl = async (url, opts = {}) => {
+     const u = new URL(url); state.calls += 1;
+     assert.equal(u.host, 'api.x.com'); assert.equal(opts.headers?.Authorization, `Bearer ${BEARER}`);
+-    if (u.pathname === '/2/usage/tweets') return res(200, { data: { project_usage: '10', project_cap: '3000000' } });
++    if (u.pathname === '/2/usage/tweets') return res(200, { data: { project_usage: '10', project_cap: '3000000', daily_project_usage: { project_id: 'fixture', usage: [{ date: iso(T1), usage: '0' }] } } });
+     if (u.pathname === '/2/usage/credits') return res(200, { data: { free_balance: 0, prepaid_balance: 20, total_balance: 20 } });
+     if (u.pathname.endsWith('/rules/counts')) return res(404, null);
+     if (u.pathname.endsWith('/rules')) {
+diff --git a/test/social-4f-closeout.test.js b/test/social-4f-closeout.test.js
+index 724ec11..1f547c4 100644
+--- a/test/social-4f-closeout.test.js
++++ b/test/social-4f-closeout.test.js
+@@ -312,7 +312,7 @@ function fakeXApi() {
+   const enc = new TextEncoder(); const res = (status, json) => ({ status, json: async () => json });
+   const fetchImpl = async (url, opts = {}) => {
+     const u = new URL(url); state.calls += 1; assert.equal(u.host, 'api.x.com'); assert.equal(opts.headers?.Authorization, `Bearer ${BEARER}`);
+-    if (u.pathname === '/2/usage/tweets') return res(200, { data: { project_usage: '10', project_cap: '3000000' } });
++    if (u.pathname === '/2/usage/tweets') return res(200, { data: { project_usage: '10', project_cap: '3000000', daily_project_usage: { project_id: 'fixture', usage: [{ date: iso(T0), usage: '0' }] } } });
+     if (u.pathname === '/2/usage/credits') return res(200, { data: { free_balance: 0, prepaid_balance: 20, total_balance: 20 } });
+     if (u.pathname.endsWith('/rules/counts')) return res(404, null);
+     if (u.pathname.endsWith('/rules')) {
