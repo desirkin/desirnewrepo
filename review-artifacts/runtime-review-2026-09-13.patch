@@ -1,112 +1,402 @@
-diff --git a/market-lab/broad-kraken.js b/market-lab/broad-kraken.js
-index 1190326..531c8d9 100644
---- a/market-lab/broad-kraken.js
-+++ b/market-lab/broad-kraken.js
-@@ -74,6 +74,10 @@ const marketIdentity = (m) => ({
-   catalogWsname: m.wsname,
-   wsSymbol: null,
- });
-+// A missing native candle interval is historical coverage evidence, not a
-+// transport disconnect or revocation of an acknowledged OHLC subscription.
-+// Keep it visible separately; never synthesize a zero candle to fill the gap.
-+const isNativeIntervalGap = (r) => r?.recordType === 'GAP' && r.channel === 'ohlc' && r.payload?.reason === 'NO_NATIVE_INTERVAL';
+diff --git a/learning/contracts.js b/learning/contracts.js
+index 516edd0..3989c87 100644
+--- a/learning/contracts.js
++++ b/learning/contracts.js
+@@ -21,7 +21,8 @@ export const CAPTURE_RECIPE_VERSION = 'learning-capture-1';
+ export const FEATURE_RECIPE_VERSION = 'learning-features-1';
+ export const BASELINE_RULE_VERSION = 'learning-baseline-rule-1'; // an ENGINEERING baseline for replay, not the live Judge
+ export const PATTERN_RECORD_VERSION = 'learning-pattern-1';
+-export const PROSPECTIVE_VERSION = 'learning-prospective-1';
++export const LEGACY_PROSPECTIVE_VERSION = 'learning-prospective-1';
++export const PROSPECTIVE_VERSION = 'learning-prospective-2';
+ export const CAMPAIGN_MANIFEST_VERSION = 'learning-campaign-1';
+ export const ACTIVATION_VERSION = 'learning-activation-1';
+ export const QUESTION_VERSION = 'learning-question-1';
+@@ -137,10 +138,13 @@ export const PATTERN_KEYS = Object.freeze([
+ ]);
+ export const PATTERN_EVIDENCE_KEYS = Object.freeze(['rawCount', 'groupCount', 'distinctAssets', 'distinctUtcDates', 'favorable', 'adverse', 'neutral', 'censored', 'byBasis', 'evidenceRefs', 'evidenceRefsTruncated']);
+ export const ESTIMATE_KEYS = Object.freeze(['method', 'pooledMean', 'posteriorMean', 'lower95', 'upper95', 'effectiveGroups', 'priorStrength', 'baselineComparator', 'updatedTs']);
+-export const DESIGN_KEYS = Object.freeze([
++const DESIGN_BASE_KEYS = Object.freeze([
+   'prospectiveVersion', 'candidateId', 'patternId', 'predicate', 'predicateDigest', 'scope', 'primaryHorizonMin', 'primaryMetric', 'comparator',
+   'costModel', 'groupLaw', 'terminalGroupTarget', 'floors', 'missingnessRule', 'uncertaintyMethod', 'alpha', 'sealedTs', 'evidenceDigest',
+ ]);
++export const LEGACY_DESIGN_KEYS = DESIGN_BASE_KEYS;
++export const DESIGN_KEYS = Object.freeze([...DESIGN_BASE_KEYS, 'consumerBinding']);
++export const CONSUMER_BINDING_KEYS = Object.freeze(['featureRecipeVersion', 'policyDigest']);
+ export const FLOORS_KEYS = Object.freeze(['minIndependentGroups', 'minDistinctUtcDates', 'minDistinctAssets', 'floorsLaw']);
+ // The default anti-shortcut floors for the first broad transferable PAPER candidate. Engineering safeguards, NOT a
+ // proof of statistical power; stricter existing requirements take precedence; a narrower scope that cannot meet them
+@@ -286,8 +290,17 @@ export function patternRecordError(p) {
+ }
  
- export function validateBroadKrakenCatalog(catalog, { maxMarkets = BROAD_KRAKEN_DEFAULTS.maxMarkets } = {}) {
-   if (!plain(catalog)) return { ok: false, reason: 'CATALOG_MISSING' };
-@@ -243,6 +247,7 @@ export function readBroadKrakenLatest({ dataDir, now = Date.now(), includeJourna
-         const coin = r.market?.canonicalCoin; if (!coin) continue;
-         latest[coin] ??= { instrument: null, subscription: {}, ticker: null, candleProvisional: null, candleClosed: null };
-         if (r.recordType === 'INSTRUMENT_MAP') latest[coin].instrument = r;
-+        else if (isNativeIntervalGap(r)) latest[coin].intervalGap = r;
-         else if (r.recordType === 'SUBSCRIPTION' || r.recordType === 'GAP') latest[coin].subscription[r.channel] = r;
-         else if (r.recordType === 'TICKER') latest[coin].ticker = r;
-         else if (r.recordType === 'OHLC' && r.quality === 'PROVISIONAL') latest[coin].candleProvisional = r;
-@@ -286,9 +291,10 @@ export function readBroadKrakenLatest({ dataDir, now = Date.now(), includeJourna
-               && r.sessionId === snap.sessionId && r.catalogContentId === snap.catalog.contentId;
-             if (!compatible) malformed += 1; else latest[coin].subscription[channel] = r;
-           }
--          for (const [field, target] of [['instrument', 'instrument'], ['ticker', 'ticker'], ['candleProvisional', 'candleProvisional'], ['candleClosed', 'candleClosed']]) {
-+          for (const [field, target] of [['instrument', 'instrument'], ['ticker', 'ticker'], ['candleProvisional', 'candleProvisional'], ['candleClosed', 'candleClosed'], ['intervalGap', 'intervalGap']]) {
-             const r = row[field]; if (r === null || r === undefined) continue;
-             const expected = field === 'instrument' ? r.recordType === 'INSTRUMENT_MAP'
-+              : field === 'intervalGap' ? isNativeIntervalGap(r) && positiveInt(r.payload.sinceTs) && positiveInt(r.payload.untilTs) && r.payload.sinceTs < r.payload.untilTs && r.payload.untilTs <= r.receivedTs + clockSkewMs
-               : field === 'ticker' ? r.recordType === 'TICKER'
-                 : r.recordType === 'OHLC' && (field === 'candleProvisional' ? r.quality === 'PROVISIONAL' : r.quality !== 'PROVISIONAL');
-             const compatible = clocksOk(r, field) && expected
-@@ -312,7 +318,7 @@ export function readBroadKrakenLatest({ dataDir, now = Date.now(), includeJourna
-       identity: row.market ?? t?.market ?? p?.market ?? c?.market ?? row.instrument?.market ?? null,
-       ticker: { record: t, ageMs: tickerAge, state: !t ? 'NEVER_OBSERVED' : !epochCurrent(t) ? 'EPOCH_STALE_PERSISTED' : !channelCurrent('ticker') ? 'RETAINED_ONLY_PERSISTED' : t.quality === 'FAILED' ? 'INVALID' : t.payload.lastPrice === null ? 'OBSERVED_MISSING_PRICE' : t.payload.messageType === 'snapshot' ? 'IDLE_SNAPSHOT_BASELINE_PERSISTED' : t.quality !== 'OBSERVED' ? 'OBSERVED_PARTIAL' : tickerAge <= tickerFreshMs ? 'FRESH_PERSISTED' : 'STALE_PERSISTED' },
-       candle: { provisional: p, provisionalAgeMs: candleAge(p), closed: c, closedAgeMs: candleAge(c), state: p ? (!epochCurrent(p) ? 'EPOCH_STALE_PERSISTED' : !channelCurrent('ohlc') ? 'RETAINED_ONLY_PERSISTED' : candleAge(p) <= candleFreshMs && p.periodStartTs <= now && p.periodEndTs >= now ? 'PROVISIONAL_FRESH_PERSISTED' : 'PROVISIONAL_STALE_PERSISTED') : c ? (!epochCurrent(c) ? 'EPOCH_STALE_PERSISTED' : !channelCurrent('ohlc') ? 'RETAINED_ONLY_PERSISTED' : candleAge(c) <= candleFreshMs ? 'CLOSED_FRESH_PERSISTED' : 'CLOSED_STALE_PERSISTED') : 'NEVER_OBSERVED' },
--      instrument: row.instrument, subscription: row.subscription,
-+      instrument: row.instrument, subscription: row.subscription, intervalGap: row.intervalGap ?? null,
-     };
+ export function designError(d) {
+-  const k = exactKeys(d, DESIGN_KEYS); if (k) return `design: ${k}`;
+-  if (d.prospectiveVersion !== PROSPECTIVE_VERSION) return 'design: unsupported version';
++  if (!isPlainObject(d)) return 'design: not an object';
++  const keys = d.prospectiveVersion === LEGACY_PROSPECTIVE_VERSION
++    ? LEGACY_DESIGN_KEYS
++    : d.prospectiveVersion === PROSPECTIVE_VERSION ? DESIGN_KEYS : null;
++  if (keys === null) return 'design: unsupported version';
++  const k = exactKeys(d, keys); if (k) return `design: ${k}`;
++  if (d.prospectiveVersion === PROSPECTIVE_VERSION) {
++    const ck = exactKeys(d.consumerBinding, CONSUMER_BINDING_KEYS); if (ck) return `design: consumer binding ${ck}`;
++    if (!isId(d.consumerBinding.featureRecipeVersion) || d.consumerBinding.featureRecipeVersion.length > 64) return 'design: consumer feature recipe malformed';
++    if (typeof d.consumerBinding.policyDigest !== 'string' || !/^[a-f0-9]{64}$/.test(d.consumerBinding.policyDigest)) return 'design: consumer policy digest malformed';
++  }
+   const fk = exactKeys(d.floors, FLOORS_KEYS); if (fk) return `design: floors ${fk}`;
+   for (const f of ['minIndependentGroups', 'minDistinctUtcDates', 'minDistinctAssets']) {
+     if (!isCount(d.floors[f]) || d.floors[f] < DEFAULT_FLOORS[f]) return `design: floor ${f} below the anti-shortcut default (${DEFAULT_FLOORS[f]}) — narrower scopes keep a descriptive estimate instead`;
+diff --git a/learning/prospective.js b/learning/prospective.js
+index f8edcfc..1ff77ef 100644
+--- a/learning/prospective.js
++++ b/learning/prospective.js
+@@ -31,14 +31,16 @@ export function sealDesign({
+   patternId, predicate, scope, primaryHorizonMin = 60, primaryMetric = 'NET_LOG_RETURN_60M_PCT',
+   comparator = 'BASELINE_RULE_SAME_STREAM', costModel, groupLaw = 'learning-group-law-1',
+   terminalGroupTarget, floors = DEFAULT_FLOORS, missingnessRule = `MATURED_COVERAGE_AT_LEAST_${MIN_COMPARISON_COVERAGE}`,
+-  uncertaintyMethod = 'NORMAL_SE_OVER_GROUP_MEANS', alpha = 0.05, sealedTs, evidenceDigest,
++  uncertaintyMethod = 'NORMAL_SE_OVER_GROUP_MEANS', alpha = 0.05, sealedTs, evidenceDigest, consumerBinding,
+ }) {
+   const body = {
+     prospectiveVersion: PROSPECTIVE_VERSION, candidateId: 'lcand-UNBOUND', patternId, predicate, predicateDigest: canonicalDigest(predicate),
+     scope, primaryHorizonMin, primaryMetric, comparator, costModel, groupLaw, terminalGroupTarget, floors, missingnessRule,
+-    uncertaintyMethod, alpha, sealedTs, evidenceDigest,
++    uncertaintyMethod, alpha, sealedTs, evidenceDigest, consumerBinding: consumerBinding ?? null,
+   };
+-  const design = { ...body, candidateId: candidateIdOf(body) };
++  let design;
++  try { design = { ...body, candidateId: candidateIdOf(body) }; }
++  catch { throw new Error('sealDesign: consumer binding malformed'); }
+   const err = designError(design); if (err) throw new Error(`sealDesign: ${err}`);
+   return deepFreeze(design);
+ }
+diff --git a/learning/promotion.js b/learning/promotion.js
+index d05b779..d38aa51 100644
+--- a/learning/promotion.js
++++ b/learning/promotion.js
+@@ -6,7 +6,7 @@
+ //   (PUBLISHED_WAITING_FOR_PAPER while the paper runtime is stopped) and the pattern becomes VALIDATED_PAPER.
+ // A failed terminal returns the pattern to ACCUMULATING with the failure retained; the candidate id stays consumed.
+ // Nothing here starts paper, changes the Judge, or touches an order path.
+-import { DEFAULT_FLOORS, canonicalDigest, deepFreeze } from './contracts.js';
++import { DEFAULT_FLOORS, LEGACY_PROSPECTIVE_VERSION, canonicalDigest, deepFreeze } from './contracts.js';
+ import { sealDesign, replayProspective, evaluateTerminal, MIN_COMPARISON_COVERAGE } from './prospective.js';
+ import { buildActivation, DEFAULT_DEGRADE_RULE } from './adapter.js';
+ import { buildPatternRecord } from './patterns.js';
+@@ -24,12 +24,13 @@ export const PROMOTION_POLICY = deepFreeze({
+   rationale: 'conservative engineering defaults, labelled defaults — not empirically proven sufficient sample sizes',
+ });
+ 
+-export function freezeCandidate({ store, pattern, costModel, terminalGroupTarget = PROMOTION_POLICY.minTerminalGroupTarget, nowTs }) {
++export function freezeCandidate({ store, pattern, costModel, consumerBinding, terminalGroupTarget = PROMOTION_POLICY.minTerminalGroupTarget, nowTs }) {
+   if (pattern.state !== 'ACCUMULATING') throw new Error(`freezeCandidate: only an ACCUMULATING pattern can freeze (state ${pattern.state})`);
+   const design = sealDesign({
+     patternId: pattern.patternId, predicate: pattern.predicate, scope: pattern.scope,
+     costModel, terminalGroupTarget, alpha: PROMOTION_POLICY.alpha, sealedTs: nowTs,
+     evidenceDigest: pattern.evidence.evidenceRefs.length ? pattern.evidence.evidenceRefs.join('|') : 'NO_REFS',
++    consumerBinding,
    });
-   return { version: BROAD_KRAKEN_VERSION, asOfTs: now, source: 'LOCAL_FILESYSTEM_NOT_REPUBLISH_DURABLE', historyIncluded: includeJournal, sessionId: snapshotSessionId, epochId: snapshotEpochId, catalog: snapshotCatalog, records: latest, markets, bytesRead: maxBytes - budget, truncated, malformed };
-@@ -349,7 +355,8 @@ export function startBroadKraken({
-   const applyLatest = (r) => {
-     const m = r.market ? markets.get(r.market.canonicalCoin) : null; if (!m) return;
-     if (r.recordType === 'INSTRUMENT_MAP') m.latestInstrument = r;
--    if (r.recordType === 'SUBSCRIPTION' || r.recordType === 'GAP') m.latestSubscription[r.channel] = r;
-+    if (isNativeIntervalGap(r)) m.latestIntervalGap = r;
-+    else if (r.recordType === 'SUBSCRIPTION' || r.recordType === 'GAP') m.latestSubscription[r.channel] = r;
-     if (r.recordType === 'TICKER') m.latestTicker = r;
-     if (r.recordType === 'OHLC' && r.quality === 'PROVISIONAL') m.latestProvisional = r;
-     if (r.recordType === 'OHLC' && r.quality !== 'PROVISIONAL') m.latestClosed = r;
-@@ -393,7 +400,7 @@ export function startBroadKraken({
-     latestTimer = null;
-     if (recordingError || !latestDirty) return;
-     const records = {};
--    for (const m of markets.values()) records[m.canonicalCoin] = { market: marketForRecord(m), instrument: m.latestInstrument ?? null, subscription: { ...m.latestSubscription }, ticker: m.currentTicker ?? m.latestTicker ?? null, candleProvisional: m.currentProvisional ?? m.latestProvisional ?? null, candleClosed: m.latestClosed ?? null };
-+    for (const m of markets.values()) records[m.canonicalCoin] = { market: marketForRecord(m), instrument: m.latestInstrument ?? null, subscription: { ...m.latestSubscription }, intervalGap: m.latestIntervalGap ?? null, ticker: m.currentTicker ?? m.latestTicker ?? null, candleProvisional: m.currentProvisional ?? m.latestProvisional ?? null, candleClosed: m.latestClosed ?? null };
-     try {
-       store.writeLatest({ version: BROAD_KRAKEN_VERSION, sessionId, currentEpoch, updatedTs: clock(), catalogContentId: acceptedCatalog?.contentId ?? null, catalog: acceptedCatalog ? { contentId: acceptedCatalog.contentId, observedTs: acceptedCatalog.observedTs, markets: acceptedCatalog.markets.length } : null, records }, cfg.maxLatestBytes);
-       counters.latestSnapshotWrites += 1;
-diff --git a/test/broad-kraken.test.js b/test/broad-kraken.test.js
-index c5e4d4a..e434bee 100644
---- a/test/broad-kraken.test.js
-+++ b/test/broad-kraken.test.js
-@@ -175,6 +175,44 @@ test('stale catalog never opens a socket; malformed instrument snapshot never ma
-   } finally { await bad.stop(); rmSync(dir, { recursive: true, force: true }); }
- });
- 
-+test('a missing native interval remains a gap without revoking the current OHLC subscription', async () => {
-+  FakeSocket.instances.length = 0; const dir = temp(); const timers = manualTimers(); let now = T;
-+  const c = catalog([market('BTC', 'XXBT', 'XBT')]);
-+  const handle = startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: c, fresh: true }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => now, timers });
+   store.appendProspective({ kind: 'DESIGN_SEALED', design });
+   const frozen = buildPatternRecord({
+@@ -68,6 +69,19 @@ export function settleCandidate({ store, candidateId, nowTs, commonShockDates =
+     return { terminal, activation: null, patternState: pattern?.state ?? null, note: 'PATTERN_NOT_PENDING_FOR_THIS_CANDIDATE' };
+   }
+   if (terminal.verdict === 'FORWARD_SUPPORTED') {
++    // v1 designs predate a sealed consumer recipe/policy binding. Their forward results remain replayable history,
++    // but attaching today's binding after observing their outcomes would be retrospective selection. Consume the
++    // candidate and return the pattern to accumulation; only a newly sealed v2 design can publish to Judge.
++    if (design.prospectiveVersion === LEGACY_PROSPECTIVE_VERSION) {
++      store.appendPattern(buildPatternRecord({
++        predicate: pattern.predicate, scope: pattern.scope, origin: pattern.origin, createdTs: pattern.createdTs,
++        ts: nowTs, seq: pattern.seq + 1, state: 'ACCUMULATING', previousState: pattern.state,
++        transitionReason: 'LEGACY_CONSUMER_BINDING_UNSEALED',
++        evidence: { ...pattern.evidence, _grouping: null }, estimate: pattern.estimate, contradictions: pattern.contradictions,
++        candidateId: null, activationId: null,
++      }));
++      return { terminal, activation: null, patternState: 'ACCUMULATING', note: 'LEGACY_CONSUMER_UNBOUND_INELIGIBLE_FOR_JUDGE' };
++    }
+     const activation = buildActivation({
+       candidateId, patternId: design.patternId, trainingCutoffTs: design.sealedTs,
+       candidateDigest: canonicalDigest(design),
+@@ -90,6 +104,8 @@ export function settleCandidate({ store, candidateId, nowTs, commonShockDates =
+       // candle-fidelity forward validation differentiates NO purchase sizes: the artifact explicitly declares
+       // no supported size (null) — dynamic sizing's full-balance path can therefore never cite it
+       maxSizeUsd: null,
++      featureRecipeVersion: design.consumerBinding.featureRecipeVersion,
++      policyVersion: design.consumerBinding.policyDigest,
+       applicability: design.predicate, effectiveTs: nowTs,
+       expiresTs: nowTs + PROMOTION_POLICY.activationLifetimeDays * 86_400_000,
+       degradeRule: PROMOTION_POLICY.degradeRule, ts: nowTs,
+diff --git a/learning/memory-view.js b/learning/memory-view.js
+index 81fe594..182507b 100644
+--- a/learning/memory-view.js
++++ b/learning/memory-view.js
+@@ -52,6 +52,8 @@ export function readDecisionMemory({ store, nowTs }) {
+     const validation = { evidenceBasis: 'PROSPECTIVE', groupCount: terminal.maturedGroups, assetCount: terminal.distinctAssets, dateCount: terminal.distinctUtcDates, netAfterCostsPct: terminal.effect?.pairedMeanDiff };
+     if (a.patternId !== design.patternId || a.trainingCutoffTs !== design.sealedTs
+         || a.candidateDigest !== canonicalDigest(design) || a.evidenceDigest !== canonicalDigest(evidence) || a.reportDigest !== canonicalDigest(terminal)
++        || !design.consumerBinding || a.featureRecipeVersion !== design.consumerBinding.featureRecipeVersion
++        || a.policyVersion !== design.consumerBinding.policyDigest
+         || canonicalDigest(a.applicability) !== canonicalDigest(design.predicate)
+         || canonicalDigest(a.scope) !== canonicalDigest(scope) || canonicalDigest(a.validation) !== canonicalDigest(validation)
+         || a.maxSizeUsd !== null) {
+diff --git a/test/learning-promotion-consumer-binding.test.js b/test/learning-promotion-consumer-binding.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/learning-promotion-consumer-binding.test.js
+@@ -0,0 +1,182 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import {
++  DEFAULT_FLOORS, LEGACY_PROSPECTIVE_VERSION, PROSPECTIVE_VERSION,
++  candidateIdOf, canonicalDigest, designError,
++} from '../learning/contracts.js';
++import { sealDesign, replayProspective } from '../learning/prospective.js';
++import { freezeCandidate, settleCandidate } from '../learning/promotion.js';
++import { buildPatternRecord, buildEvidence, estimateFromEvidence } from '../learning/patterns.js';
++import { transitionActivation } from '../learning/adapter.js';
++import { createLearningStore } from '../learning/store.js';
++import { readDecisionMemory } from '../learning/memory-view.js';
++import { JUDGE_FACT_RECIPE_VERSION, resolveLearningContribution } from '../judge/learning-intake.js';
++
++const T0 = Date.UTC(2026, 5, 1);
++const HOUR = 3_600_000;
++const DAY = 86_400_000;
++const POLICY_DIGEST = 'a'.repeat(64);
++const BINDING = Object.freeze({ featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyDigest: POLICY_DIGEST });
++const predicate = { clauses: [{ feature: 'relVolume60m', op: 'GTE', threshold: 3 }] };
++const scope = { setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED' };
++const costModel = { feePctPerSide: 0.8, slippageBps: 10 };
++
++function appendAccumulatingPattern(store) {
++  const items = Array.from({ length: 8 }, (_, i) => ({
++    opportunityId: `lop-h${i}`, canonicalCoin: `A${i % 5}A`, decisionTs: T0 - 20 * DAY + i * DAY,
++    evidenceBasis: 'HISTORICAL_RECONSTRUCTION', outcomeClass: i % 4 === 3 ? 'ADVERSE' : 'FAVORABLE',
++  }));
++  const evidence = buildEvidence(items);
++  const estimate = estimateFromEvidence(items, evidence, { pooledMean: 0.5, priorStrength: 8, updatedTs: T0 - DAY });
++  const persistedEvidence = { ...evidence, _grouping: null };
++  store.appendPattern(buildPatternRecord({
++    predicate, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 20 * DAY, seq: 0,
++    state: 'NOTICED', previousState: null, transitionReason: 'FIRST_OBSERVATION',
++    evidence: persistedEvidence, estimate, contradictions: [],
++  }));
++  store.appendPattern(buildPatternRecord({
++    predicate, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 10 * DAY, seq: 1,
++    state: 'ACCUMULATING', previousState: 'NOTICED', transitionReason: 'NEW_MATURED_EVIDENCE',
++    evidence: persistedEvidence, estimate, contradictions: [],
++  }));
++  return store.patternHeads().values().next().value;
++}
++
++function appendForwardEvidence(store, design, groups = 34) {
++  for (let g = 0; g < groups; g += 1) {
++    const decisionTs = design.sealedTs + HOUR + (g % 8) * DAY + Math.floor(g / 8) * 5 * HOUR;
++    const opportunityId = `lop-forward-${g}`;
++    const labelEndTs = decisionTs + HOUR;
++    store.appendProspective({
++      kind: 'CAPTURE', candidateId: design.candidateId, opportunityId, canonicalCoin: `A${g % 6}A`,
++      decisionTs, candidateDecision: 'SELECTED_FOR_SHADOW', baselineDecision: 'SKIPPED',
++      recordedTs: decisionTs + 1_000, labelEndTs,
++    });
++    store.appendProspective({
++      kind: 'OUTCOME', candidateId: design.candidateId, opportunityId,
++      outcomeClass: 'FAVORABLE', metricValue: 1.5, outcomeKnownAtTs: labelEndTs, recordedTs: labelEndTs + 1_000,
++    });
++  }
++}
++
++function legacyDesign(patternId) {
++  const body = {
++    prospectiveVersion: LEGACY_PROSPECTIVE_VERSION, candidateId: 'lcand-UNBOUND', patternId,
++    predicate, predicateDigest: canonicalDigest(predicate), scope,
++    primaryHorizonMin: 60, primaryMetric: 'NET_LOG_RETURN_60M_PCT', comparator: 'BASELINE_RULE_SAME_STREAM',
++    costModel, groupLaw: 'learning-group-law-1', terminalGroupTarget: 30, floors: DEFAULT_FLOORS,
++    missingnessRule: 'MATURED_COVERAGE_AT_LEAST_0.8', uncertaintyMethod: 'NORMAL_SE_OVER_GROUP_MEANS',
++    alpha: 0.05, sealedTs: T0, evidenceDigest: 'legacy-evidence',
++  };
++  return { ...body, candidateId: candidateIdOf(body) };
++}
++
++test('a v2 candidate seals the exact consumer binding, promotion copies it, and Judge accepts only matching prepared facts', () => {
++  const dir = mkdtempSync(path.join(tmpdir(), 'cobra-learn-consumer-binding-'));
 +  try {
-+    const socket = FakeSocket.instances.at(-1); socket.open();
-+    ack(socket, socket.sent.find((r) => r.params.channel === 'instrument'));
-+    instrumentSnapshot(socket, [{ symbol: 'BTC/USD', base: 'BTC', quote: 'USD', status: 'online' }]);
-+    timers.runAll();
-+    for (const request of socket.sent.filter((r) => ['ticker', 'ohlc'].includes(r.params.channel))) ack(socket, request, 'BTC/USD');
-+    socket.emit({ channel: 'ohlc', type: 'snapshot', data: [ohlc('BTC/USD', T - 200_000), ohlc('BTC/USD', T - 20_000)] });
-+    timers.runAll(); await handle.drain();
-+    const latest = readBroadKrakenLatest({ dataDir: dir, now }); const row = latest.markets[0];
-+    assert.equal(latest.malformed, 0);
-+    assert.equal(handle.status().subscription.ackedOhlc, 1);
-+    assert.equal(row.subscription.ohlc.recordType, 'SUBSCRIPTION');
-+    assert.equal(row.subscription.ohlc.payload.state, 'SUBSCRIBED');
-+    assert.equal(row.candle.state, 'PROVISIONAL_FRESH_PERSISTED');
-+    assert.equal(row.intervalGap.payload.reason, 'NO_NATIVE_INTERVAL');
-+    assert.equal(row.intervalGap.payload.sinceTs, T - 140_000);
-+    assert.equal(row.intervalGap.payload.untilTs, T - 20_000);
-+    assert.equal(row.candle.provisional.payload.learningEligible, false);
-+    const historical = readBroadKrakenLatest({ dataDir: dir, now, includeJournal: true });
-+    assert.equal(historical.markets[0].candle.state, 'PROVISIONAL_FRESH_PERSISTED');
-+    assert.equal(historical.markets[0].intervalGap.recordId, row.intervalGap.recordId);
-+    const journal = readdirSync(path.join(dir, 'broad-kraken')).filter((name) => /^events-\d+\.jsonl$/.test(name)).flatMap((name) => readFileSync(path.join(dir, 'broad-kraken', name), 'utf8').trim().split('\n').map(JSON.parse));
-+    assert.equal(journal.filter((r) => r.recordType === 'GAP' && r.payload.reason === 'NO_NATIVE_INTERVAL').length, 1);
-+    assert.equal(journal.filter((r) => r.recordType === 'OHLC').length, 1, 'only the observed prior close is journaled, never invented zero bars');
-+    now += 190_000;
-+    assert.equal(readBroadKrakenLatest({ dataDir: dir, now }).markets[0].candle.state, 'PROVISIONAL_STALE_PERSISTED');
-+    socket.close(); await handle.drain();
-+    const disconnected = readBroadKrakenLatest({ dataDir: dir, now }).markets[0];
-+    assert.equal(disconnected.candle.state, 'RETAINED_ONLY_PERSISTED', 'a real transport gap still revokes current-channel readiness');
-+    assert.equal(disconnected.subscription.ohlc.recordType, 'GAP');
-+    assert.equal(disconnected.intervalGap.recordId, row.intervalGap.recordId, 'historical gap evidence survives a later disconnect');
-+  } finally { await handle.stop(); rmSync(dir, { recursive: true, force: true }); }
++    const store = createLearningStore({ dataDir: dir });
++    const pattern = appendAccumulatingPattern(store);
++    assert.throws(() => sealDesign({
++      patternId: pattern.patternId, predicate, scope, costModel, terminalGroupTarget: 30,
++      sealedTs: T0, evidenceDigest: 'unbound',
++    }), /consumer binding/);
++
++    const design = freezeCandidate({ store, pattern, costModel, consumerBinding: BINDING, nowTs: T0 });
++    assert.equal(design.prospectiveVersion, PROSPECTIVE_VERSION);
++    assert.deepEqual(design.consumerBinding, BINDING);
++    assert.equal(Object.isFrozen(design.consumerBinding), true);
++    for (const changedBinding of [
++      { ...BINDING, featureRecipeVersion: 'judge-prepared-market-features-2' },
++      { ...BINDING, policyDigest: 'b'.repeat(64) },
++    ]) {
++      const changed = sealDesign({
++        patternId: pattern.patternId, predicate, scope, costModel, terminalGroupTarget: 30,
++        sealedTs: T0, evidenceDigest: 'NO_REFS', consumerBinding: changedBinding,
++      });
++      assert.notEqual(changed.candidateId, design.candidateId, 'either consumer-binding field changes the content-hashed candidate identity');
++    }
++
++    appendForwardEvidence(store, design);
++    const settledTs = T0 + 40 * DAY;
++    const result = settleCandidate({ store, candidateId: design.candidateId, nowTs: settledTs });
++    assert.equal(result.terminal.verdict, 'FORWARD_SUPPORTED');
++    assert.equal(result.activation.featureRecipeVersion, BINDING.featureRecipeVersion);
++    assert.equal(result.activation.policyVersion, BINDING.policyDigest);
++
++    const active = transitionActivation(result.activation, {
++      state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: settledTs + 1,
++    });
++    store.appendActivation(active);
++    const nowTs = settledTs + 2;
++    const snapshot = readDecisionMemory({ store, nowTs });
++    assert.equal(snapshot.activations.length, 1);
++    assert.deepEqual(snapshot.withheld, []);
++    const facts = {
++      setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED', asset: 'AAA', venue: 'KRAKEN',
++      featureRecipeVersion: BINDING.featureRecipeVersion, policyVersion: BINDING.policyDigest,
++      features: { relVolume60m: { value: 4, availability: 'KNOWN', ageMs: 0 } },
++    };
++    const matched = resolveLearningContribution({ snapshot, facts, mode: 'PAPER', nowTs });
++    assert.equal(matched.applied, true);
++    assert.equal(matched.selected.activationId, active.activationId);
++
++    const wrongRecipe = resolveLearningContribution({
++      snapshot, facts: { ...facts, featureRecipeVersion: 'judge-prepared-market-features-2' }, mode: 'PAPER', nowTs,
++    });
++    assert.equal(wrongRecipe.rejected[0].reason, 'FEATURE_RECIPE_VERSION_MISMATCH');
++    const wrongPolicy = resolveLearningContribution({
++      snapshot, facts: { ...facts, policyVersion: 'b'.repeat(64) }, mode: 'PAPER', nowTs,
++    });
++    assert.equal(wrongPolicy.rejected[0].reason, 'POLICY_VERSION_MISMATCH');
++
++    for (const mutation of [
++      { featureRecipeVersion: 'judge-prepared-market-features-2' },
++      { policyVersion: 'b'.repeat(64) },
++    ]) {
++      const forged = { ...active, ...mutation };
++      const tamperedStore = { ...store, activationHeads: () => new Map([[forged.activationId, forged]]) };
++      const withheld = readDecisionMemory({ store: tamperedStore, nowTs });
++      assert.equal(withheld.activations.length, 0);
++      assert.equal(withheld.withheld[0].reason, 'ACTIVATION_EVIDENCE_MISMATCH');
++    }
++  } finally {
++    rmSync(dir, { recursive: true, force: true });
++  }
 +});
 +
- test('a legitimate asset-only instrument delta does not fail a mapped collector', async () => {
-   FakeSocket.instances.length = 0; const dir = temp();
-   const c = catalog([market('BTC', 'XXBT', 'XBT')]);
++test('historical v1 designs retain their exact identity and replay, but an unbound winner cannot publish to Judge', () => {
++  const dir = mkdtempSync(path.join(tmpdir(), 'cobra-learn-legacy-binding-'));
++  try {
++    const store = createLearningStore({ dataDir: dir });
++    const pattern = appendAccumulatingPattern(store);
++    const design = legacyDesign(pattern.patternId);
++    assert.equal(design.candidateId, 'lcand-bc446aca2a9640238009358f72fd32d12006bb46', 'the historical v1 content hash is unchanged');
++    assert.equal(designError(design), null);
++    assert.deepEqual(replayProspective([{ kind: 'DESIGN_SEALED', design }]).errors, []);
++
++    store.appendProspective({ kind: 'DESIGN_SEALED', design });
++    for (const [seq, state, previousState, transitionReason] of [
++      [2, 'CANDIDATE_FROZEN', 'ACCUMULATING', 'CANDIDATE_SEALED'],
++      [3, 'PROSPECTIVE_PENDING', 'CANDIDATE_FROZEN', 'AWAITING_FRESH_FORWARD_EVIDENCE'],
++    ]) {
++      store.appendPattern(buildPatternRecord({
++        predicate: pattern.predicate, scope: pattern.scope, origin: pattern.origin, createdTs: pattern.createdTs,
++        ts: T0, seq, state, previousState, transitionReason,
++        evidence: { ...pattern.evidence, _grouping: null }, estimate: pattern.estimate, contradictions: pattern.contradictions,
++        candidateId: design.candidateId, activationId: null,
++      }));
++    }
++    appendForwardEvidence(store, design);
++    const result = settleCandidate({ store, candidateId: design.candidateId, nowTs: T0 + 40 * DAY });
++    assert.equal(result.terminal.verdict, 'FORWARD_SUPPORTED', 'the old forward result remains valid historical evidence');
++    assert.equal(result.activation, null, 'no current binding is retrofitted after observing the outcome');
++    assert.equal(result.patternState, 'ACCUMULATING');
++    assert.equal(result.note, 'LEGACY_CONSUMER_UNBOUND_INELIGIBLE_FOR_JUDGE');
++    assert.equal(store.activationHeads().size, 0);
++  } finally {
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
+diff --git a/test/learning-prospective.test.js b/test/learning-prospective.test.js
+index 53784f6..c6c9f35 100644
+--- a/test/learning-prospective.test.js
++++ b/test/learning-prospective.test.js
+@@ -17,7 +17,8 @@ const T0 = Date.UTC(2026, 5, 1);
+ const HOUR = 3_600_000; const DAY = 86_400_000;
+ const predicate = { clauses: [{ feature: 'relVolume60m', op: 'GTE', threshold: 3 }] };
+ const scope = { setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED' };
+-const design = () => sealDesign({ patternId: 'lpat-test', predicate, scope, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, terminalGroupTarget: 30, sealedTs: T0, evidenceDigest: 'ev' });
++const consumerBinding = { featureRecipeVersion: 'judge-prepared-market-features-1', policyDigest: 'a'.repeat(64) };
++const design = () => sealDesign({ patternId: 'lpat-test', predicate, scope, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, terminalGroupTarget: 30, sealedTs: T0, evidenceDigest: 'ev', consumerBinding });
+ 
+ // build a lawful forward stream: `groups` dependence groups over `assets` assets and `days` days.
+ // metric > 0 where the candidate is right; candidate/baseline decisions per scenario.
+@@ -115,7 +116,7 @@ test('K. the synthetic qualifying dataset proves the full promotion path — and
+     store.appendPattern(buildPatternRecord({ predicate, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 20 * DAY, seq: 0, state: 'NOTICED', previousState: null, transitionReason: 'FIRST_OBSERVATION', evidence: strip, estimate: est, contradictions: [] }));
+     store.appendPattern(buildPatternRecord({ predicate, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 10 * DAY, seq: 1, state: 'ACCUMULATING', previousState: 'NOTICED', transitionReason: 'NEW_MATURED_EVIDENCE', evidence: strip, estimate: est, contradictions: [] }));
+     const head = store.patternHeads().values().next().value;
+-    const d = freezeCandidate({ store, pattern: head, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, nowTs: T0 });
++    const d = freezeCandidate({ store, pattern: head, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, consumerBinding, nowTs: T0 });
+     assert.equal(store.patternHeads().values().next().value.state, 'PROSPECTIVE_PENDING');
+     // fresh forward evidence AFTER the seal
+     for (const r of stream(d, { groups: 34, assets: 6, days: 8, metricOf: () => 1.5 }).slice(1)) store.appendProspective(r);
+@@ -149,7 +150,7 @@ test('K. the synthetic qualifying dataset proves the full promotion path — and
+     store.appendPattern(buildPatternRecord({ predicate: predicate2, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 20 * DAY, seq: 0, state: 'NOTICED', previousState: null, transitionReason: 'FIRST_OBSERVATION', evidence: strip2, estimate: est, contradictions: [] }));
+     store.appendPattern(buildPatternRecord({ predicate: predicate2, scope, origin: 'TEST', createdTs: T0 - 20 * DAY, ts: T0 - 10 * DAY, seq: 1, state: 'ACCUMULATING', previousState: 'NOTICED', transitionReason: 'NEW_MATURED_EVIDENCE', evidence: strip2, estimate: est, contradictions: [] }));
+     const head2 = [...store.patternHeads().values()].find((p) => p.state === 'ACCUMULATING');
+-    const d2 = freezeCandidate({ store, pattern: head2, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, nowTs: T0 + 41 * DAY });
++    const d2 = freezeCandidate({ store, pattern: head2, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, consumerBinding, nowTs: T0 + 41 * DAY });
+     for (const r of stream(d2, { groups: 34, assets: 6, days: 8, metricOf: () => -1 }).slice(1)) {
+       store.appendProspective({ ...r, ...(r.kind === 'CAPTURE' ? { decisionTs: r.decisionTs + 42 * DAY, recordedTs: r.recordedTs + 42 * DAY, labelEndTs: r.labelEndTs + 42 * DAY } : {}), ...(r.kind === 'OUTCOME' ? { outcomeKnownAtTs: r.outcomeKnownAtTs + 42 * DAY, recordedTs: r.recordedTs + 42 * DAY } : {}) });
+     }
+diff --git a/test/learning-integrity.test.js b/test/learning-integrity.test.js
+index 875771c..545ac13 100644
+--- a/test/learning-integrity.test.js
++++ b/test/learning-integrity.test.js
+@@ -18,6 +18,7 @@ const T = Date.UTC(2026, 8, 13);
+ const DAY = 86_400_000;
+ const predicate = { clauses: [{ feature: 'relVolume60m', op: 'GTE', threshold: 3 }] };
+ const scope = { setupType: 'BASELINE_SWEEP', regime: 'UNCLASSIFIED' };
++const consumerBinding = { featureRecipeVersion: 'judge-prepared-market-features-1', policyDigest: 'a'.repeat(64) };
+ 
+ test('§04 memory separation: the research view exposes provisional patterns with zero authority; the decision view resolves ONLY validated activation artifacts; no parameter flips one into the other; invalid artifacts are withheld, not repaired', () => {
+   const dir = mkdtempSync(path.join(tmpdir(), 'cobra-memview-'));
+@@ -43,7 +44,7 @@ test('§04 memory separation: the research view exposes provisional patterns wit
+ });
+ 
+ test('§12.11 at-risk historical rows cannot enter the prospective sample: the clock law refuses any capture decided before the seal, whatever its label claims', () => {
+-  const d = sealDesign({ patternId: 'lpat-t', predicate, scope, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, terminalGroupTarget: 30, sealedTs: T, evidenceDigest: 'ev' });
++  const d = sealDesign({ patternId: 'lpat-t', predicate, scope, costModel: { feePctPerSide: 0.8, slippageBps: 10 }, terminalGroupTarget: 30, sealedTs: T, evidenceDigest: 'ev', consumerBinding });
+   const historicalRow = { kind: 'CAPTURE', candidateId: d.candidateId, opportunityId: 'lop-h', canonicalCoin: 'AAA', decisionTs: T - 10 * DAY, candidateDecision: 'SELECTED_FOR_SHADOW', baselineDecision: 'SKIPPED', recordedTs: T + 1, labelEndTs: T - 10 * DAY + 3_600_000 };
+   const state = replayProspective([{ kind: 'DESIGN_SEALED', design: d }, historicalRow]);
+   assert.match(state.errors[0], /before the design was sealed/, 'a replayed/backfilled historical decision is never fresh forward evidence');
+diff --git a/test/learning-prospective-terminal-regression.test.js b/test/learning-prospective-terminal-regression.test.js
+index 7b74e4c..e8bb08c 100644
+--- a/test/learning-prospective-terminal-regression.test.js
++++ b/test/learning-prospective-terminal-regression.test.js
+@@ -6,12 +6,13 @@ import { settleCandidate } from '../learning/promotion.js';
+ const T0 = Date.UTC(2026, 5, 1);
+ const HOUR = 3_600_000;
+ const DAY = 86_400_000;
++const consumerBinding = { featureRecipeVersion: 'judge-prepared-market-features-1', policyDigest: 'a'.repeat(64) };
+ 
+ function design() {
+   return sealDesign({
+     patternId: 'lpat-terminal-regression', predicate: { clauses: [] }, scope: {},
+     costModel: { feePctPerSide: 0.8, slippageBps: 10 }, terminalGroupTarget: 30,
+-    sealedTs: T0, evidenceDigest: 'terminal-regression',
++    sealedTs: T0, evidenceDigest: 'terminal-regression', consumerBinding,
+   });
+ }
+ 
