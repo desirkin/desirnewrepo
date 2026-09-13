@@ -1,17 +1,326 @@
-diff --git a/test/social-4f-scope.test.js b/test/social-4f-scope.test.js
-index ec03020..1246b57 100644
---- a/test/social-4f-scope.test.js
-+++ b/test/social-4f-scope.test.js
-@@ -263,6 +263,12 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
-     assert.deepEqual(added.sort(), [...authorizedAdded].sort(), `${f}: only the SOCIAL-5 authorized lines were added`);
-     assert.deepEqual(removed.sort(), [...AUTHORIZED_DELTA[f].removed].sort(), `${f}: only the SOCIAL-5 authorized lines were replaced`);
+diff --git a/watch/watch.js b/watch/watch.js
+index 05dccf2..b45494a 100644
+--- a/watch/watch.js
++++ b/watch/watch.js
+@@ -27,7 +27,7 @@ export function createWatch({ accountId, dispatcher, adapter, feed = null, clock
+   const P = policy; const T = new Map(); const now = () => clock.now(); const mono = () => clock.monotonic(); const counters = { books: 0, trades: 0, exitsStarted: 0, amends: 0, amendsCoalesced: 0, targetsHit: 0, deteriorations: 0, noProgress: 0, durations: 0, halted: 0, killRequested: 0, protectionMismatch: 0, reductionRefusals: 0, overlappedTicks: 0, snapshotPersistFailures: 0, eventLoopDelaySamples: [] }; let killComplete = false; let haltedLatched = false; let lastTickMono = null;
+   const state = () => dispatcher.state(); const ev = dispatcher.ev;
+   // durable restore (closeout R07): the per-unit target basis (POSITION_R), an in-progress exit (WATCH_STATE), the trail / highest bid
+-  const restoredExit = (pos) => { const x = pos.exit; if (!x || !['REQUESTED', 'IN_PROGRESS'].includes(x.state)) return { phase: 'NONE', reason: null, priority: null, startedMono: null, orderId: null, startedTs: null }; const openSell = Object.values(state()?.orders ?? {}).find((o) => o.positionId === pos.positionId && o.side === 'sell' && o.kind !== 'PROTECTIVE_STOP' && !TERMINAL_ORDER_STATES.includes(o.state)) ?? null; return { phase: 'CANCELLING_REMAINDER', reason: x.primaryReason, priority: x.priority, startedMono: mono(), startedTs: x.ts ?? now(), orderId: openSell?.orderId ?? null, protective: x.primaryReason ? PROTECTIVE.has(x.primaryReason) : true, restored: true }; };
++  const restoredExit = (pos) => { const x = pos.exit; if (!x || !['REQUESTED', 'IN_PROGRESS'].includes(x.state)) return { phase: 'NONE', reason: null, priority: null, startedMono: null, orderId: null, startedTs: null, protective: false, plannedOrigin: false, protectiveRequested: false }; const openSell = Object.values(state()?.orders ?? {}).find((o) => o.positionId === pos.positionId && o.side === 'sell' && o.kind !== 'PROTECTIVE_STOP' && !TERMINAL_ORDER_STATES.includes(o.state)) ?? null; const protective = x.primaryReason ? PROTECTIVE.has(x.primaryReason) : true; const plannedOrigin = openSell?.kind === 'PLANNED_EXIT' || (openSell === null && x.primaryReason ? !protective : false); return { phase: 'CANCELLING_REMAINDER', reason: x.primaryReason, priority: x.priority, startedMono: mono(), startedTs: x.ts ?? now(), orderId: openSell?.orderId ?? null, protective, plannedOrigin, protectiveRequested: protective && plannedOrigin, restored: true }; };
+   const track = (pos) => { if (!T.has(pos.positionId)) T.set(pos.positionId, { positionId: pos.positionId, symbol: pos.pair, flow: createFlowTracker({ retentionMs: 120_000, maxTrades: 20_000 }), depth: [], det: [], highestBid: pos.highestBid ?? null, maxNetPnl: null, lastNetPnl: null, lastBook: null, lastAmendMono: null, exit: restoredExit(pos), firstFillMono: pos.firstFillTs ? mono() - Math.max(0, now() - pos.firstFillTs) : null, protectionAlertedTs: null, remainderCancel: 'NONE', targetPerUnit: pos.initialR?.targetPerUnit ?? null, restored: Boolean(pos.firstFillTs), latencies: { firstFillToWatchMs: null, firstFillToProtectionMs: null, firstFillToExitMs: null } }); return T.get(pos.positionId); };
+   const openPositions = () => Object.values(state()?.positions ?? {}).filter((p) => !['FLAT'].includes(p.state));
+   const residualOf = (pos) => ownedBase(pos);
+@@ -64,7 +64,14 @@ export function createWatch({ accountId, dispatcher, adapter, feed = null, clock
    }
+   // ---- the serialized exit coordinator ----------------------------------------------------------------------------------------------
+   async function cancelOrder(pos, orderId, nowTs) { const o = state().orders[orderId]; if (!o || TERMINAL_ORDER_STATES.includes(o.state) || o.state === 'CANCEL_PENDING') return o?.state ?? null; const attemptId = `cx-${orderId}-${(o.cancelAttempts ?? []).length + 1}`; await dispatcher.commit(ev('CANCEL_REQUESTED', { orderId, attemptId, ts: nowTs })); let r; try { r = await adapter.cancelOwnedOrder({ orderId, nativeOrderId: o.nativeOrderId, attemptId }); } catch (err) { r = { outcome: 'UNCERTAIN', reason: String(err?.message ?? err).slice(0, 120) }; } await dispatcher.commit(ev('CANCEL_RESULT', { orderId, attemptId, outcome: r.outcome, reason: r.reason ?? null, receiptTs: now() })); return state().orders[orderId]?.state ?? null; }
+-  async function startExit(pos, t, primary, priority, reasons, nowTs) { if (t.exit.phase !== 'NONE' && t.exit.phase !== 'DONE') return; counters.exitsStarted += 1; t.exit = { phase: 'CANCELLING_REMAINDER', reason: primary, priority, startedMono: mono(), startedTs: nowTs, orderId: null, protective: PROTECTIVE.has(primary) }; if (t.firstFillMono !== null) t.latencies.firstFillToExitMs = mono() - t.firstFillMono; if (primary === 'OWNER_KILL') { counters.killRequested += 1; if (!state().restrictions.KILL) await dispatcher.commit(ev('RESTRICTION', { code: 'KILL', action: 'LATCH', scope: null, source: 'watch:owner-kill', sessionDate: null, reason: 'owner KILL: halt additions, attempt a safe flatten, stay killed', ownerRef: null, ts: nowTs })); } if (primary === 'PROTECTION_INVALID') { counters.protectionMismatch += 1; await dispatcher.commit(ev('RESTRICTION', { code: 'PROTECTION_MISMATCH', action: 'LATCH', scope: pos.positionId, source: 'watch', sessionDate: null, reason: `protection ${pos.protection.state} ${P.protectionConfirmMs}ms after the first fill`, ownerRef: null, ts: nowTs })); } if (primary === 'DETERIORATION') counters.deteriorations += 1; if (primary === 'NO_PROGRESS') counters.noProgress += 1; if (primary === 'MAX_DURATION') counters.durations += 1; if (primary === 'PLANNED_TARGET') counters.targetsHit += 1; await dispatcher.commit(ev('WATCH_STATE', { positionId: pos.positionId, trailActive: pos.trailActive, highestBid: t.highestBid, exitState: 'REQUESTED', primaryReason: primary, priority, supportedReasons: reasons, ts: nowTs })); }
++  const killLatchEvent = (nowTs) => ev('RESTRICTION', { code: 'KILL', action: 'LATCH', scope: null, source: 'watch:owner-kill', sessionDate: null, reason: 'owner KILL: halt additions, attempt a safe flatten, stay killed', ownerRef: null, ts: nowTs });
++  async function startExit(pos, t, primary, priority, reasons, nowTs) { if (t.exit.phase !== 'NONE' && t.exit.phase !== 'DONE') return; const next = { phase: 'CANCELLING_REMAINDER', reason: primary, priority, startedMono: mono(), startedTs: nowTs, orderId: null, protective: PROTECTIVE.has(primary), plannedOrigin: !PROTECTIVE.has(primary), protectiveRequested: false }; const events = []; if (primary === 'OWNER_KILL' && !state().restrictions.KILL) events.push(killLatchEvent(nowTs)); if (primary === 'PROTECTION_INVALID') events.push(ev('RESTRICTION', { code: 'PROTECTION_MISMATCH', action: 'LATCH', scope: pos.positionId, source: 'watch', sessionDate: null, reason: `protection ${pos.protection.state} ${P.protectionConfirmMs}ms after the first fill`, ownerRef: null, ts: nowTs })); events.push(ev('WATCH_STATE', { positionId: pos.positionId, trailActive: pos.trailActive, highestBid: t.highestBid, exitState: 'REQUESTED', primaryReason: primary, priority, supportedReasons: reasons, ts: nowTs })); await dispatcher.commit(events); t.exit = next; counters.exitsStarted += 1; if (t.firstFillMono !== null) t.latencies.firstFillToExitMs = mono() - t.firstFillMono; if (primary === 'OWNER_KILL') counters.killRequested += 1; if (primary === 'PROTECTION_INVALID') counters.protectionMismatch += 1; if (primary === 'DETERIORATION') counters.deteriorations += 1; if (primary === 'NO_PROGRESS') counters.noProgress += 1; if (primary === 'MAX_DURATION') counters.durations += 1; if (primary === 'PLANNED_TARGET') counters.targetsHit += 1; }
++  // An owner KILL does not create another exit coordinator. It durably upgrades
++  // the existing one in place, preserving its phase/order/start clocks. A
++  // planned sell already on the wire remains a planned-origin liability until
++  // its cancellation is confirmed terminal; only then may the residual use a
++  // protective market exit.
++  async function escalateOwnerKill(pos, t, nowTs) { const e = t.exit; const s = state(); if (e.reason === 'OWNER_KILL' && s.restrictions.KILL) return false; const priorReason = e.reason; const priorSupported = s.positions[pos.positionId]?.exit?.supportedReasons ?? []; const events = []; if (!s.restrictions.KILL) events.push(killLatchEvent(nowTs)); if (e.reason !== 'OWNER_KILL') events.push(ev('WATCH_STATE', { positionId: pos.positionId, trailActive: pos.trailActive, highestBid: t.highestBid, exitState: 'REQUESTED', primaryReason: 'OWNER_KILL', priority: PRIORITY.OWNER_KILL, supportedReasons: [...new Set(['OWNER_KILL', ...priorSupported, priorReason].filter(Boolean))], ts: nowTs })); if (events.length) await dispatcher.commit(events); if (e.reason !== 'OWNER_KILL') { const openPlanned = e.orderId ? state().orders[e.orderId] : null; e.reason = 'OWNER_KILL'; e.priority = PRIORITY.OWNER_KILL; e.protective = true; e.plannedOrigin = e.plannedOrigin === true || (openPlanned?.kind === 'PLANNED_EXIT' && !TERMINAL_ORDER_STATES.includes(openPlanned.state)); e.protectiveRequested = e.plannedOrigin; counters.killRequested += 1; } return true; }
+   async function advanceExit(pos, t, nowTs) {
+     const s = state(); pos = s.positions[pos.positionId]; const e = t.exit; if (e.phase === 'NONE' || e.phase === 'DONE' || e.phase === 'UNRESOLVED') return;
+     if (e.phase === 'CANCELLING_REMAINDER') { const eo = pos.entryOrderId ? s.orders[pos.entryOrderId] : null; if (eo && !TERMINAL_ORDER_STATES.includes(eo.state)) { const st = await cancelOrder(pos, pos.entryOrderId, nowTs); if (st === 'RECONCILIATION_REQUIRED') { e.phase = 'UNRESOLVED'; return; } if (!TERMINAL_ORDER_STATES.includes(st)) return; } e.phase = 'CANCELLING_PROTECTION'; }
+@@ -79,7 +86,7 @@ export function createWatch({ accountId, dispatcher, adapter, feed = null, clock
+     if (e.phase === 'AWAITING_TERMINAL') { const prot = state().positions[pos.positionId].protection; const kids = Object.values(prot.children ?? {}); const open = kids.filter((c) => c.orderId && state().orders[c.orderId] && !TERMINAL_ORDER_STATES.includes(state().orders[c.orderId].state)); if (open.length) return; e.phase = 'RECONCILING'; }
+     // confirm the race through the venue BEFORE any sale (closeout R02): a late child fill that arrives now is the truth; the sale (if any) is the confirmed net residual
+     if (e.phase === 'RECONCILING') { if (typeof dispatcher.reconcileNow !== 'function') { e.phase = 'SELLING'; } else { let rec; try { rec = await dispatcher.reconcileNow({ scope: 'REQUESTED' }); } catch (err) { rec = { outcome: 'FAILED', reason: String(err?.message ?? err).slice(0, 120) }; } e.reconciliation = { outcome: rec?.outcome ?? 'ABSENT', reason: rec?.reason ?? null, ts: nowTs }; if (rec?.outcome !== 'COMPLETE') { e.phase = 'UNRESOLVED'; await halt(pos, `reconciliation ${rec?.outcome ?? 'ABSENT'} before the residual sale`, nowTs); return; } const after = state().positions[pos.positionId]; const kidsAfter = Object.values(after.protection.children ?? {}); if (kidsAfter.some((c) => c.orderId && state().orders[c.orderId] && !TERMINAL_ORDER_STATES.includes(state().orders[c.orderId].state))) { e.phase = 'AWAITING_TERMINAL'; return; } e.phase = M.isZero(residualOf(after)) ? 'CLOSING' : 'SELLING'; } }
+-    if (e.phase === 'SELLING') { pos = state().positions[pos.positionId]; const openSells = Object.values(state().orders).filter((o) => o.positionId === pos.positionId && o.side === 'sell' && !TERMINAL_ORDER_STATES.includes(o.state)); if (openSells.length) { if (!e.protective && e.orderId && mono() - e.startedMono > P.plannedExitTimeoutMs) { const st = await cancelOrder(pos, e.orderId, nowTs); if (st === 'RECONCILIATION_REQUIRED') { e.phase = 'UNRESOLVED'; return; } e.protective = true; } return; } const q = residualOf(pos); if (M.isZero(q)) { e.phase = 'CLOSING'; } else { const spec = specOf(pos.pair); if (M.lt(q, spec.orderMin)) { e.phase = 'CLOSING'; } else { if (s.restrictions.RECONCILIATION_REQUIRED && adapter.kind === 'KRAKEN') { e.phase = 'UNRESOLVED'; await halt(pos, 'RECONCILIATION_REQUIRED blocks a safe sell', nowTs); return; } const f = t.lastBook ? bookFacts(t.lastBook) : null; if (!f && adapter.kind === 'PAPER') { e.phase = 'UNRESOLVED'; await halt(pos, 'no accepted book: paper exit coverage unknown', nowTs); return; } const n = Object.keys(s.orders).length + 1; const orderId = `${e.protective ? 'px' : 'tx'}-${pos.positionId}-${n}`; const limit = e.protective ? null : M.roundToStep(M.sub(f.bestBid, bufferOf(pos.atr14, spec.priceIncrement)), spec.priceIncrement, 'FLOOR'); const intent = { intentId: `int-${orderId}`, orderId, clientOrderId: `x${orderId.slice(-17)}`.slice(0, 18), reservationId: null, positionId: pos.positionId, kind: e.protective ? 'PROTECTIVE_EXIT' : 'PLANNED_EXIT', side: 'sell', pair: pos.pair, qty: M.roundToStep(q, spec.qtyIncrement, 'DOWN'), limitPrice: limit, orderType: e.protective ? 'market' : 'limit', timeInForce: 'IOC', protection: null, deadlineTs: nowTs + 5000, feeDigest: feeOf(pos.pair).feeDigest, specDigest: spec.specDigest, snapshotDigest: t.lastBook?.digest ?? null, createdTs: nowTs };
++    if (e.phase === 'SELLING') { pos = state().positions[pos.positionId]; const openSells = Object.values(state().orders).filter((o) => o.positionId === pos.positionId && o.side === 'sell' && !TERMINAL_ORDER_STATES.includes(o.state)); if (openSells.length) { if (e.plannedOrigin && e.orderId && (e.protectiveRequested || mono() - e.startedMono > P.plannedExitTimeoutMs)) { const st = await cancelOrder(pos, e.orderId, nowTs); if (st === 'RECONCILIATION_REQUIRED') { e.phase = 'UNRESOLVED'; return; } if (!TERMINAL_ORDER_STATES.includes(st)) return; e.plannedOrigin = false; e.protectiveRequested = false; e.protective = true; } return; } if (e.protectiveRequested) { e.plannedOrigin = false; e.protectiveRequested = false; e.protective = true; } const q = residualOf(pos); if (M.isZero(q)) { e.phase = 'CLOSING'; } else { const spec = specOf(pos.pair); if (M.lt(q, spec.orderMin)) { e.phase = 'CLOSING'; } else { if (s.restrictions.RECONCILIATION_REQUIRED && adapter.kind === 'KRAKEN') { e.phase = 'UNRESOLVED'; await halt(pos, 'RECONCILIATION_REQUIRED blocks a safe sell', nowTs); return; } const f = t.lastBook ? bookFacts(t.lastBook) : null; if (!f && adapter.kind === 'PAPER') { e.phase = 'UNRESOLVED'; await halt(pos, 'no accepted book: paper exit coverage unknown', nowTs); return; } const n = Object.keys(s.orders).length + 1; const orderId = `${e.protective ? 'px' : 'tx'}-${pos.positionId}-${n}`; const limit = e.protective ? null : M.roundToStep(M.sub(f.bestBid, bufferOf(pos.atr14, spec.priceIncrement)), spec.priceIncrement, 'FLOOR'); const intent = { intentId: `int-${orderId}`, orderId, clientOrderId: `x${orderId.slice(-17)}`.slice(0, 18), reservationId: null, positionId: pos.positionId, kind: e.protective ? 'PROTECTIVE_EXIT' : 'PLANNED_EXIT', side: 'sell', pair: pos.pair, qty: M.roundToStep(q, spec.qtyIncrement, 'DOWN'), limitPrice: limit, orderType: e.protective ? 'market' : 'limit', timeInForce: 'IOC', protection: null, deadlineTs: nowTs + 5000, feeDigest: feeOf(pos.pair).feeDigest, specDigest: spec.specDigest, snapshotDigest: t.lastBook?.digest ?? null, createdTs: nowTs };
+             // an owned protective reduction needs ownership, a held writer and an open sender — never the NEW-exposure authority (closeout R01)
+             const ra = reductionAuthority(state(), intent, { writerHeld: dispatcher.writerHeld ? dispatcher.writerHeld() && !dispatcher.writerLost() : true, senderOpen: !dispatcher.status().closed }); if (!ra.ok) { counters.reductionRefusals += 1; log(`exit ${pos.positionId} reduction refused: ${ra.reasons.join(',')}`); if (ra.reasons.includes('WRITER_LOST') || ra.reasons.includes('SENDER_CLOSED')) { e.phase = 'UNRESOLVED'; } return; }
+             e.orderId = orderId;
+@@ -101,6 +108,7 @@ export function createWatch({ accountId, dispatcher, adapter, feed = null, clock
+       try { await finalizeR(pos, t); const cur = state().positions[pos.positionId]; const hb = t.lastBook ? nowTs - t.lastBook.receiptTs : null; const eo = cur.entryOrderId ? state().orders[cur.entryOrderId] : null;
+         if (hb !== null && hb > P.health.impairedMs && eo && !TERMINAL_ORDER_STATES.includes(eo.state) && t.remainderCancel === 'NONE') { t.remainderCancel = 'REQUESTED'; await cancelOrder(cur, cur.entryOrderId, nowTs); t.remainderCancel = 'DONE'; }
+         if (t.exit.phase === 'NONE' || t.exit.phase === 'DONE') { const r = evaluateReasons(cur, t, nowTs); if (r.primary) { if (r.primary === 'FEED_UNUSABLE' && !(adapter.kind === 'KRAKEN' && !state().restrictions.RECONCILIATION_REQUIRED && cur.initialR.state === 'FINAL')) { await halt(cur, 'public feed unusable > 10s and no safe sell is known: native stops retained', nowTs); continue; } await startExit(cur, t, r.primary, r.priority, r.reasons, nowTs); } else await trail(cur, t, nowTs); }
++        else { const c = controls(); if (c.kill || state().restrictions.KILL) await escalateOwnerKill(cur, t, nowTs); }
+         if (t.exit.phase !== 'NONE') await advanceExit(cur, t, nowTs);
+       } catch (err) { log(`watch ${pos.positionId}: ${err.message}`); if (err.code === 'WRITER_LOST' || err.code === 'EPOCH_FENCED') return; } }
+     if (adapter?.onTick) adapter.onTick(nowTs);
+diff --git a/test/judge-watch-escalation-review.test.js b/test/judge-watch-escalation-review.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/judge-watch-escalation-review.test.js
+@@ -0,0 +1,245 @@
++// Focused review: an owner KILL arriving during an already-serialized planned
++// exit must upgrade that coordinator, not start a competing sell and not wait
++// behind the lower-priority planned-exit policy.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import * as M from '../execution/money.js';
++import { createMemoryJournal } from '../execution/journal.js';
++import { createDispatcher } from '../execution/dispatcher.js';
++import { createPaperAdapter } from '../execution/paper-adapter.js';
++import { createExecutionFeed } from '../execution/feed.js';
++import { createWatch } from '../watch/watch.js';
++import { eventsFor, fakeClock, SPEC, TAKER_FEE } from './helpers/judge.js';
++
++async function plannedExitInProgress() {
++  const accountId = 'watch-kill-escalation-review';
++  const clock = fakeClock();
++  const journal = createMemoryJournal();
++  await journal.create(accountId, { accountKind: 'PAPER' });
++  const writer = await journal.acquireWriter(accountId);
++  const F = eventsFor(accountId, clock);
++  const feed = createExecutionFeed({ clock: clock.now });
++  feed.admit('XBT/USD', { priority: 'PENDING', reason: 'test' });
++  feed.onConnect(clock.now());
++  feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'XBT/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now());
++  const adapter = createPaperAdapter({ accountId, clock: clock.now, feed, fee: TAKER_FEE, specOf: () => SPEC });
++  const pclock = { now: clock.now, monotonic: clock.monotonic };
++  const dispatcher = createDispatcher({ accountId, journal, writer, adapter, clock: pclock, specOf: () => SPEC });
++  await dispatcher.load();
++  const controls = { kill: false, cage: false };
++  const watch = createWatch({ accountId, dispatcher, adapter, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TAKER_FEE, controls: () => controls });
++  await dispatcher.commit(F.init());
++
++  const book = (asks, bids, type = 'update') => feed.ingest(JSON.stringify({ channel: 'book', type, data: [{ symbol: 'XBT/USD', asks: asks.map(([price, qty]) => ({ price, qty })), bids: bids.map(([price, qty]) => ({ price, qty })), timestamp: new Date(clock.now()).toISOString() }] }), clock.now());
++  const settle = async () => { await dispatcher.idle(); await watch.onTick(clock.now()); await dispatcher.idle(); };
++
++  await dispatcher.commit([
++    F.hypothesis('d1'),
++    F.decision('d1', { sizing: { q: '0.001', entryLimitPrice: '100000', entryCashOut: '101', riskUsd: '4', bufferedScenarioNetProfit: '2' } }),
++    F.reserve('r1', 'd1', { cashReserved: '101' }),
++    F.position('p1', 'd1', { structuralStop: '99500', targetPrice: '102000' }),
++    F.pin(),
++    F.intent('o1', 'p1', 'r1', { protection: { ordertype: 'stop-loss', trigger: 'last', price: '99500' } }),
++  ]);
++  book([[99990, 5]], [[99980, 5], [99970, 5]], 'snapshot');
++  await dispatcher.dispatchEntry('o1');
++  clock.advance(300);
++  book([[99990, 5]], [[99980, 5], [99970, 5]]);
++  await settle();
++  assert.equal(dispatcher.state().positions.p1.initialR.state, 'FINAL');
++  assert.equal(dispatcher.state().positions.p1.protection.state, 'ACTIVE');
++
++  clock.advance(1_000);
++  book([[102400, 5]], [[102390, 5], [102380, 5]]);
++  await settle();
++  const exit = watch.positions()[0].exit;
++  assert.equal(exit.reason, 'PLANNED_TARGET');
++  assert.notEqual(exit.phase, 'NONE');
++  const openBefore = Object.values(dispatcher.state().orders).filter((o) => o.positionId === 'p1' && o.side === 'sell' && !['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'].includes(o.state));
++  assert.equal(openBefore.length, 1, `the fixture needs one ordinary sell in flight: ${JSON.stringify(openBefore.map((o) => [o.orderId, o.kind, o.state]))}`);
++  assert.equal(openBefore[0].kind, 'PLANNED_EXIT');
++  return { accountId, clock, journal, feed, adapter, dispatcher, watch, controls, book, settle };
++}
++
++async function escalationEvents(r) {
++  const rows = await r.journal.page(r.accountId, { afterSeq: 0, limit: 500 });
++  return {
++    kill: rows.filter(({ event }) => event.type === 'RESTRICTION' && event.payload.code === 'KILL').length,
++    ownerWatch: rows.filter(({ event }) => event.type === 'WATCH_STATE' && event.payload.primaryReason === 'OWNER_KILL').length,
++  };
++}
++
++const openSellsOf = (r) => Object.values(r.dispatcher.state().orders).filter((o) => o.positionId === 'p1' && o.side === 'sell' && !['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'].includes(o.state));
++
++test('owner KILL escalates an in-progress planned exit in place without a second competing sell', async () => {
++  const r = await plannedExitInProgress();
++  r.controls.kill = true;
++  r.clock.advance(1);
++  await r.settle();
++
++  const exit = r.watch.positions()[0].exit;
++  const openSells = openSellsOf(r);
++  assert.ok(openSells.length <= 1, `the escalation reuses the coordinator and never exposes two sells: ${JSON.stringify(openSells.map((o) => [o.orderId, o.kind, o.state]))}`);
++  assert.ok(openSells.every((o) => M.lte(M.sub(o.qty, o.filledBase), '0.001')), 'the reducer-visible outstanding quantity never exceeds owned inventory');
++  assert.deepEqual({
++    reason: exit.reason,
++    priority: exit.priority,
++    protective: exit.protective,
++    killLatched: Boolean(r.dispatcher.state().restrictions.KILL),
++    killRequested: r.watch.status().counters.killRequested,
++  }, {
++    reason: 'OWNER_KILL',
++    priority: 'P1_KILL_OR_INVALID_PROTECTION',
++    protective: true,
++    killLatched: true,
++    killRequested: 1,
++  }, 'the lower-priority exit coordinator must be upgraded and owner KILL durably latched exactly once');
 +});
 +
-+// Keep current authority boundaries independently executable when an older
-+// historical byte-differential reports unrelated intentional source changes.
-+// The historical assertions above remain intact and still report those changes.
-+test('SCOPE-9. current catalog consumers and Social authority fences remain exact', () => {
-   const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
-   const read = (f) => readFileSync(path.join(REPO, f), 'utf8');
-   const code = (f) => read(f).split('\n').filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')); }).join('\n');
++test('a delayed planned-order cancel may book a partial fill; KILL then sells only the confirmed residual and repeated heartbeats append no extra escalation', async () => {
++  const r = await plannedExitInProgress();
++  const planned = openSellsOf(r)[0];
++  const originalCancel = r.adapter.cancelOwnedOrder.bind(r.adapter);
++  let releaseCancel;
++  const held = new Promise((resolve) => { releaseCancel = resolve; });
++  let cancelStarted;
++  const started = new Promise((resolve) => { cancelStarted = resolve; });
++  r.adapter.cancelOwnedOrder = async (request) => {
++    if (request.orderId === planned.orderId) { cancelStarted(); await held; }
++    return originalCancel(request);
++  };
++
++  r.controls.kill = true;
++  r.clock.advance(1);
++  const killTick = r.watch.onTick(r.clock.now());
++  await started;
++  assert.equal(r.dispatcher.state().orders[planned.orderId].state, 'CANCEL_PENDING', 'the original planned sell is the only sell while its cancellation is unresolved');
++  assert.equal(openSellsOf(r).length, 1);
++
++  // The planned IOC executes partially while its cancel acknowledgement is in
++  // flight. Those received economics win; the eventual replacement must use
++  // only the reducer-confirmed residual.
++  r.clock.advance(300);
++  r.book([[102400, 5]], [[102390, 0.0004]], 'snapshot');
++  await r.dispatcher.idle();
++  assert.equal(r.dispatcher.state().orders[planned.orderId].state, 'EXPIRED');
++  assert.equal(r.dispatcher.state().positions.p1.soldBase, '0.0004');
++  assert.equal(r.dispatcher.state().positions.p1.state, 'EXITING', 'partial execution is not flat');
++  releaseCancel();
++  await killTick;
++  await r.dispatcher.idle();
++  assert.equal(openSellsOf(r).length, 0, 'terminal confirmation precedes any replacement');
++
++  const once = await escalationEvents(r);
++  assert.deepEqual(once, { kill: 1, ownerWatch: 1 });
++  r.clock.advance(1);
++  await r.settle();
++  const afterRepeat = await escalationEvents(r);
++  assert.deepEqual(afterRepeat, once, 'a held KILL and repeated heartbeat append no duplicate escalation records');
++  const protective = openSellsOf(r);
++  assert.equal(protective.length, 1);
++  assert.equal(protective[0].kind, 'PROTECTIVE_EXIT');
++  assert.equal(protective[0].qty, '0.0006', 'replacement is exactly the confirmed residual after the partial planned fill');
++  assert.equal(r.dispatcher.state().positions.p1.state, 'EXITING', 'submission/acknowledgement is never called flat');
++
++  r.clock.advance(300);
++  r.book([[102400, 5]], [[102380, 1]]);
++  await r.dispatcher.idle();
++  await r.watch.onTick(r.clock.now());
++  await r.dispatcher.idle();
++  assert.equal(r.dispatcher.state().positions.p1.state, 'FLAT', 'only the confirmed residual fill permits closure');
++  assert.equal(r.watch.killComplete(), true);
++  assert.equal(openSellsOf(r).length, 0);
++});
++
++test('an unknown planned-order cancellation latches KILL but fails closed with no protective replacement or flat fiction', async () => {
++  const r = await plannedExitInProgress();
++  const planned = openSellsOf(r)[0];
++  const originalCancel = r.adapter.cancelOwnedOrder.bind(r.adapter);
++  r.adapter.cancelOwnedOrder = async (request) => (request.orderId === planned.orderId ? { outcome: 'UNCERTAIN', reason: 'response lost after cancel send' } : originalCancel(request));
++  r.controls.kill = true;
++  r.clock.advance(1);
++  await r.settle();
++
++  assert.equal(r.watch.positions()[0].exit.reason, 'OWNER_KILL');
++  assert.equal(r.watch.positions()[0].exit.phase, 'UNRESOLVED');
++  assert.equal(r.dispatcher.state().orders[planned.orderId].state, 'RECONCILIATION_REQUIRED');
++  assert.ok(r.dispatcher.state().restrictions.KILL);
++  assert.ok(r.dispatcher.state().restrictions.RECONCILIATION_REQUIRED);
++  assert.equal(Object.values(r.dispatcher.state().orders).filter((o) => o.kind === 'PROTECTIVE_EXIT').length, 0, 'unknown cancellation cannot authorize a second sell');
++  assert.notEqual(r.dispatcher.state().positions.p1.state, 'FLAT');
++  const once = await escalationEvents(r);
++  r.clock.advance(250);
++  await r.settle();
++  assert.deepEqual(await escalationEvents(r), once, 'the unresolved loop does not duplicate the owner escalation');
++  assert.equal(Object.values(r.dispatcher.state().orders).filter((o) => o.kind === 'PROTECTIVE_EXIT').length, 0);
++});
++
++test('restart reconstructs a pending protective conversion from durable OWNER_KILL plus an open planned-origin sell', async () => {
++  const r = await plannedExitInProgress();
++  const planned = openSellsOf(r)[0];
++  const prior = r.dispatcher.state().positions.p1.exit;
++  await r.dispatcher.commit([
++    r.dispatcher.ev('RESTRICTION', { code: 'KILL', action: 'LATCH', scope: null, source: 'watch:owner-kill', sessionDate: null, reason: 'owner KILL: halt additions, attempt a safe flatten, stay killed', ownerRef: null, ts: r.clock.now() }),
++    r.dispatcher.ev('WATCH_STATE', { positionId: 'p1', trailActive: false, highestBid: prior.highestBid ?? null, exitState: 'REQUESTED', primaryReason: 'OWNER_KILL', priority: 'P1_KILL_OR_INVALID_PROTECTION', supportedReasons: ['OWNER_KILL', 'PLANNED_TARGET'], ts: r.clock.now() }),
++  ]);
++
++  const pclock = { now: r.clock.now, monotonic: r.clock.monotonic };
++  const restored = createWatch({ accountId: r.accountId, dispatcher: r.dispatcher, adapter: r.adapter, feed: r.feed, clock: pclock, specOf: () => SPEC, feeOf: () => TAKER_FEE, controls: () => ({ kill: false, cage: false }) });
++  const before = restored.track(r.dispatcher.state().positions.p1).exit;
++  assert.deepEqual({ reason: before.reason, orderId: before.orderId, protective: before.protective, plannedOrigin: before.plannedOrigin, protectiveRequested: before.protectiveRequested }, {
++    reason: 'OWNER_KILL', orderId: planned.orderId, protective: true, plannedOrigin: true, protectiveRequested: true,
++  });
++  await restored.onTick(r.clock.now());
++  await r.dispatcher.idle();
++  assert.ok(['CANCELLED', 'EXPIRED', 'FILLED', 'REJECTED'].includes(r.dispatcher.state().orders[planned.orderId].state), 'restart does not wait a fresh timeout: cancel/reconciliation first makes the planned sell terminal');
++  const open = openSellsOf(r);
++  assert.ok(open.length <= 1 && open.every((o) => o.kind === 'PROTECTIVE_EXIT'), `terminal planned-order resolution precedes a single protective replacement: ${JSON.stringify(open.map((o) => [o.orderId, o.kind, o.state]))}`);
++  assert.deepEqual(await escalationEvents(r), { kill: 1, ownerWatch: 1 }, 'restore reuses durable escalation and appends no duplicate owner event');
++});
++
++test('a failed atomic KILL upgrade leaves the coordinator untouched; retry commits one escalation and preserves identity clocks', async () => {
++  const r = await plannedExitInProgress();
++  let failUpgrade = true;
++  const proxy = {
++    state: r.dispatcher.state,
++    ev: r.dispatcher.ev,
++    writerHeld: r.dispatcher.writerHeld,
++    writerLost: r.dispatcher.writerLost,
++    status: r.dispatcher.status,
++    reconcileNow: r.dispatcher.reconcileNow,
++    commit: async (events, options) => {
++      const list = Array.isArray(events) ? events : [events];
++      const atomicUpgrade = list.some((e) => e.type === 'RESTRICTION' && e.payload.code === 'KILL') && list.some((e) => e.type === 'WATCH_STATE' && e.payload.primaryReason === 'OWNER_KILL');
++      if (failUpgrade && atomicUpgrade) { failUpgrade = false; throw new Error('injected journal append failure'); }
++      return r.dispatcher.commit(events, options);
++    },
++  };
++  const logs = [];
++  const pclock = { now: r.clock.now, monotonic: r.clock.monotonic };
++  const retrying = createWatch({ accountId: r.accountId, dispatcher: proxy, adapter: r.adapter, feed: r.feed, clock: pclock, specOf: () => SPEC, feeOf: () => TAKER_FEE, controls: () => ({ kill: true, cage: false }), log: (line) => logs.push(line) });
++  const before = structuredClone(retrying.track(r.dispatcher.state().positions.p1).exit);
++
++  r.clock.advance(1);
++  await retrying.onTick(r.clock.now());
++  const failed = retrying.positions()[0].exit;
++  assert.deepEqual(failed, before, 'failed durable upgrade cannot mutate phase, reason, order, clocks, or protective state');
++  assert.equal(retrying.status().counters.killRequested, 0);
++  assert.deepEqual(await escalationEvents(r), { kill: 0, ownerWatch: 0 });
++  assert.ok(logs.some((line) => /injected journal append failure/.test(line)));
++
++  r.clock.advance(1);
++  await retrying.onTick(r.clock.now());
++  await r.dispatcher.idle();
++  const retried = retrying.positions()[0].exit;
++  assert.equal(retried.reason, 'OWNER_KILL');
++  assert.equal(retried.orderId, before.orderId);
++  assert.equal(retried.startedMono, before.startedMono);
++  assert.equal(retried.startedTs, before.startedTs);
++  assert.equal(retrying.status().counters.killRequested, 1);
++  assert.deepEqual(await escalationEvents(r), { kill: 1, ownerWatch: 1 });
++  r.clock.advance(250);
++  await retrying.onTick(r.clock.now());
++  assert.equal(retrying.status().counters.killRequested, 1);
++  assert.deepEqual(await escalationEvents(r), { kill: 1, ownerWatch: 1 }, 'held KILL is not re-appended after the successful retry');
++});
+diff --git a/test/judge-differential.test.js b/test/judge-differential.test.js
+index 6999df3..638cf12 100644
+--- a/test/judge-differential.test.js
++++ b/test/judge-differential.test.js
+@@ -17,8 +17,10 @@
+ // Latency (item 5): the same run measures REAL wall-clock duration of every host admission pass (judge.onTick +
+ // scheduler drain + dispatcher idle) on both trees over the identical recorded inputs, and reports median / p95 /
+ // max and the count of passes exceeding the policy's receipt-to-decision budget (maxReceiptToDecisionLagMs) and
+-// the 25ms admission bucket. watch/watch.js is asserted BYTE-IDENTICAL to the base tree, so Watch deadline
+-// behavior is unchanged by construction — no watch code path differs to measure.
++// the 25ms admission bucket. Watch now has an intentional owner-KILL escalation
++// repair, verified separately by judge-watch-escalation-review and Watch/exit/
++// restart regressions. This Judge admission differential makes no claim that
++// Watch code or deadline behavior is unchanged.
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { execFileSync } from 'node:child_process';
+@@ -88,8 +90,10 @@ const pct = (arr, p) => { const s = [...arr].sort((a, b) => a - b); return s.len
+ const ms1 = (ns) => Math.round(ns / 1e4) / 100;
+ 
+ test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports absent) produce COMPLETE-record-identical decisions, refusals and account/execution state on identical recorded inputs — no substantive field stripped, no normalization applied', async () => {
+-  // proof, not assumption: the execution tree and watch/watch.js the two rigs share by shape are byte-identical
+-  for (const f of ['execution/contract.js', 'execution/journal.js', 'execution/dispatcher.js', 'execution/paper-adapter.js', 'execution/feed.js', 'execution/reducer.js', 'execution/authority.js', 'execution/money.js', 'watch/watch.js', 'lib/crc32.js']) {
++  // The execution tree shared by these Judge rigs remains byte-identical.
++  // Intentional Watch repairs have separate behavioral regressions; the full
++  // decision/refusal/account-state comparison below is not normalized or relaxed.
++  for (const f of ['execution/contract.js', 'execution/journal.js', 'execution/dispatcher.js', 'execution/paper-adapter.js', 'execution/feed.js', 'execution/reducer.js', 'execution/authority.js', 'execution/money.js', 'lib/crc32.js']) {
+     assert.equal(readFileSync(path.join(ROOT, f), 'utf8'), readFileSync(path.join(baseDir, f), 'utf8'), `${f} is byte-identical to ${BASE_COMMIT}`);
+   }
+   const base = await rigFor(baseDir, { accountId: 'diff-x' });
