@@ -50,6 +50,14 @@ function evaluatedRows(catalog) {
   }));
 }
 
+function selfValidToken({ frameTs, catalogContentId }) {
+  const core = {
+    tokenVersion: 'opportunity-audit-wideeye-token-1', frameId: `oaf-${'a'.repeat(40)}`,
+    frameDigest: 'b'.repeat(64), catalogContentId, frameTs,
+  };
+  return { ...core, tokenDigest: canonicalDigest(core) };
+}
+
 test('default-off worker port starts no worker, timer, directory, provider or authority', async () => {
   const parent = tempRoot(); const root = path.join(parent, 'never-created');
   try {
@@ -208,6 +216,11 @@ test('CLOSED response is not physical exit, and the close watchdog never reports
     assert.equal(port.status().workerLive, true);
     assert.equal(port.status().forcedTermination, true);
     assert.equal(port.status().failed.code, 'WORKER_EXIT_TIMEOUT');
+    setTimeout(() => fake.emit('exit', 0), 5);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(port.status().state, 'STOPPED', 'a later observed physical exit converges terminal status');
+    assert.equal(port.status().workerLive, false); assert.equal(port.status().workerExits, 1);
+    assert.deepEqual(await port.close(), result, 'the original deadline receipt remains immutable and conservative');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -295,4 +308,36 @@ test('exit after queue acceptance records annotation durability as UNKNOWN, neve
       stopped: true, physicalExit: true, drained: false, annotationOutcome: 'UNKNOWN',
     });
   } finally { await port.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('self-valid worker tokens are still rejected when frame or catalog identity differs from the exact request', async () => {
+  const parent = tempRoot(); const frameTs = Date.now(); const catalog = catalog612(frameTs - 100);
+  const cases = [
+    selfValidToken({ frameTs: frameTs - 1, catalogContentId: catalog.contentId }),
+    selfValidToken({ frameTs, catalogContentId: 'f'.repeat(40) }),
+  ];
+  try {
+    for (let index = 0; index < cases.length; index += 1) {
+      class WrongTokenWorker extends EventEmitter {
+        postMessage(request) {
+          queueMicrotask(() => this.emit('message', {
+            protocol: request.protocol, requestId: request.requestId, ok: true,
+            operation: request.operation,
+            result: { status: 'DURABLE_FRAME', token: cases[index] },
+          }));
+        }
+        terminate() { queueMicrotask(() => this.emit('exit', 1)); return Promise.resolve(1); }
+      }
+      const root = path.join(parent, `case-${index}`); const fake = new WrongTokenWorker();
+      const port = createOpportunityAuditWorkerPortForTest({
+        enabled: true, rootDir: root, sampleSize: 8, horizonsMs: [HOUR],
+        minFrameIntervalMs: 15 * 60_000, wideEyeComponent: component,
+      }, () => fake);
+      try {
+        await assert.rejects(port.beforeSweep({ catalogSnapshot: snapshot(catalog), frameTs }), { code: 'RESPONSE_INVALID' });
+        assert.equal(port.status().lastDurableFrameId, null);
+        assert.equal(port.status().forcedTermination, true);
+      } finally { await port.close(); }
+    }
+  } finally { rmSync(parent, { recursive: true, force: true }); }
 });
