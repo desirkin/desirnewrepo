@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   createOpportunityAuditWorkerPort,
+  createOpportunityAuditWorkerPortForTest,
   OPPORTUNITY_AUDIT_WORKER_MAX_MESSAGE_BYTES,
   OPPORTUNITY_AUDIT_WORKER_RESOURCE_LIMITS,
 } from '../lib/opportunity-audit-worker-port.js';
@@ -161,5 +163,65 @@ test('parent rejects malformed or over-bound inputs before worker construction',
     assert.deepEqual(OPPORTUNITY_AUDIT_WORKER_RESOURCE_LIMITS, {
       maxOldGenerationSizeMb: 96, maxYoungGenerationSizeMb: 16, stackSizeMb: 4,
     });
+  } finally { await port.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('CLOSED response is not physical exit, and the close watchdog never reports a still-live worker as stopped', async () => {
+  const root = tempRoot(); const frameTs = Date.now(); const catalog = catalog612(frameTs - 1);
+  class ReplyWithoutExitWorker extends EventEmitter {
+    terminateCalls = 0;
+    postMessage(request) {
+      if (request.operation === 'BEFORE_SWEEP') {
+        queueMicrotask(() => this.emit('message', {
+          protocol: request.protocol, requestId: request.requestId, ok: true,
+          operation: request.operation, result: { status: 'CADENCE_SKIPPED', token: null },
+        }));
+      } else if (request.operation === 'CLOSE') {
+        queueMicrotask(() => this.emit('message', {
+          protocol: request.protocol, requestId: request.requestId, ok: true,
+          operation: request.operation, result: { status: 'CLOSED' },
+        }));
+      }
+    }
+    terminate() { this.terminateCalls += 1; return Promise.resolve(1); }
+  }
+  const fake = new ReplyWithoutExitWorker();
+  const port = createOpportunityAuditWorkerPortForTest({
+    enabled: true, rootDir: root, sampleSize: 8, horizonsMs: [HOUR],
+    minFrameIntervalMs: 15 * 60_000, wideEyeComponent: component,
+    requestTimeoutMs: 100, closeTimeoutMs: 20,
+  }, () => fake);
+  try {
+    assert.equal(await port.beforeSweep({ catalogSnapshot: snapshot(catalog), frameTs }), null);
+    const result = await port.close();
+    assert.deepEqual(result, { stopped: false, physicalExit: false, reason: 'WORKER_EXIT_TIMEOUT' });
+    assert.equal(fake.terminateCalls, 1);
+    assert.equal(port.status().workerLive, true);
+    assert.equal(port.status().forcedTermination, true);
+    assert.equal(port.status().failed.code, 'WORKER_EXIT_TIMEOUT');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('worker exit while close awaits an earlier request settles it and cannot construct a replacement', async () => {
+  const root = tempRoot(); const frameTs = Date.now(); const catalog = catalog612(frameTs - 1);
+  class ExitDuringRequestWorker extends EventEmitter {
+    postMessage() {}
+    terminate() { return Promise.resolve(1); }
+  }
+  const fake = new ExitDuringRequestWorker(); let starts = 0;
+  const port = createOpportunityAuditWorkerPortForTest({
+    enabled: true, rootDir: root, sampleSize: 8, horizonsMs: [HOUR],
+    minFrameIntervalMs: 15 * 60_000, wideEyeComponent: component,
+    requestTimeoutMs: 1_000, closeTimeoutMs: 100,
+  }, () => { starts += 1; return fake; });
+  try {
+    const before = port.beforeSweep({ catalogSnapshot: snapshot(catalog), frameTs });
+    const rejected = assert.rejects(before, { code: 'WORKER_ERROR' });
+    const closing = port.close();
+    queueMicrotask(() => fake.emit('exit', 1));
+    await rejected;
+    assert.deepEqual(await closing, { stopped: true, physicalExit: true });
+    assert.equal(starts, 1, 'close never creates a replacement after the original exits');
+    assert.equal(port.status().workerStarts, 1); assert.equal(port.status().workerExits, 1);
   } finally { await port.close(); rmSync(root, { recursive: true, force: true }); }
 });
