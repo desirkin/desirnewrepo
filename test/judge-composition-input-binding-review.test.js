@@ -13,9 +13,15 @@ import { fakeClock, T0 } from './helpers/judge.js';
 const POLICY_FILE = path.resolve('judge/samples/policy.paper-reference.json');
 const POLICY = loadJudgePolicy(POLICY_FILE);
 const ROOT = mkdtempSync(path.join(tmpdir(), 'judge-input-binding-'));
+const PREVIOUS_DATA_DIR = process.env.COBRA_DATA_DIR;
+process.env.COBRA_DATA_DIR = ROOT;
 const permissionClock = (clock) => ({ now: clock.now, monotonic: clock.monotonic, observeWall: () => null, status: () => ({ trusted: true }), expired: (ts) => clock.now() > ts });
 
-test.after(() => rmSync(ROOT, { recursive: true, force: true }));
+test.after(() => {
+  if (PREVIOUS_DATA_DIR === undefined) delete process.env.COBRA_DATA_DIR;
+  else process.env.COBRA_DATA_DIR = PREVIOUS_DATA_DIR;
+  rmSync(ROOT, { recursive: true, force: true });
+});
 
 const pair = ({ wsname, altname, base, pairDecimals = 1 }) => ({
   altname, wsname, base, quote: 'ZUSD', status: 'online', pair_decimals: pairDecimals, lot_decimals: 8,
@@ -63,7 +69,7 @@ test('normalized BTC/DOGE requests produce admissible specs while retaining Krak
 
   const clock = fakeClock(); const accountId = 'alias-admission'; const journal = await initializedJournal(accountId);
   const run = await composeJudge({
-    policyFile: POLICY_FILE, mode: 'OBSERVE', accountId, journal, clock: permissionClock(clock), specs,
+    policyFile: POLICY_FILE, mode: 'PAPER', accountId, journal, clock: permissionClock(clock), specs,
     nominations: () => [{ symbol: 'BTC/USD', assetId: 'BTC', nominationKnownAtTs: T0 }],
     writeProjection: false, codeDigest: 'c'.repeat(64), log: () => {},
   });
@@ -82,7 +88,7 @@ test('initialized account digest or version mismatch refuses before adapter cons
     const accountId = `policy-mismatch-${mismatch.name}`;
     const journal = await initializedJournal(accountId, mismatch);
     await assert.rejects(
-      composeJudge({ policyFile: POLICY_FILE, mode: 'OBSERVE', accountId, journal, specs: [], nominations: () => [], writeProjection: false, codeDigest: 'c'.repeat(64), log: () => {} }),
+      composeJudge({ policyFile: POLICY_FILE, mode: 'PAPER', accountId, journal, specs: [], nominations: () => [], writeProjection: false, codeDigest: 'c'.repeat(64), log: () => {} }),
       (error) => error?.code === 'ACCOUNT_POLICY_MISMATCH',
     );
     const nextWriter = await journal.acquireWriter(accountId);

@@ -14,6 +14,10 @@ const { paperAccount, fakeClock, eventsFor, SPEC, SOL_SPEC, TAKER_FEE, T0 } = aw
 // tolerant of the baseline (no shared authority module there): the fallback mirrors the baseline's restriction-only reading so every assertion below fails for its REAL reason on B
 const A = await import('../execution/authority.js').catch(() => ({})); const entryPermission = A.entryPermission ?? ((st) => { const reasons = Object.keys(st.restrictions ?? {}); return { ok: reasons.length === 0, reasons }; });
 const POLICY_FILE = path.resolve('judge/samples/policy.paper-reference.json'); const paperRaw = JSON.parse(readFileSync(POLICY_FILE, 'utf8')); const POLICY = loadJudgePolicy(POLICY_FILE);
+// Runtime composition now requires the account's real immutable policy binding.
+// Keep pure reducer fixtures synthetic; only composed PAPER fixtures use this
+// exact policy. All lifecycle, Watch-priority and deadline assertions stay intact.
+const COMPOSED_PAPER_INIT = Object.freeze({ policyDigest: POLICY.digest, policyVersion: POLICY.policy.policyName });
 const LIVE_FILE = path.join(TEST_DATA, 'live.json'); writeFileSync(LIVE_FILE, JSON.stringify({ ...paperRaw, policyName: 'runtime-live', mode: 'LIVE', account: { accountId: 'live-rt', initialCapital: '500', compounding: 'NONE' }, execution: { ...paperRaw.execution, adapter: 'KRAKEN' }, live: { allocationCeiling: '500', reinvestment: 'NONE', ownerLimits: null, armExpiryMs: 7 * 86_400_000, canaryMaxBuyConsiderationWithFees: '25', keyEnv: 'RT_KEY', secretEnv: 'RT_SECRET' }, authorityNote: 'runtime LIVE test policy against a scripted venue' })); const LIVE = loadJudgePolicy(LIVE_FILE);
 const KEY = 'SYNTHETIC-RUNTIME-KEY'; const SECRET = Buffer.from('synthetic').toString('base64'); const ENV = { RT_KEY: KEY, RT_SECRET: SECRET }; const CODE = 'c'.repeat(64);
 const pclockOf = (clock) => ({ now: clock.now, monotonic: clock.monotonic, observeWall: () => null, status: () => ({ trusted: true, kind: 'TEST' }), expired: (t) => clock.now() > t });
@@ -32,7 +36,7 @@ test('R08-01. clock qualification is wired to real venue inputs: a LIVE start qu
 
 test('R08-01b. Watch runs before coalesced scan maintenance; a wall-observation fault and a held case refresh cannot hide later safety heartbeats', { timeout: 5000 }, async () => {
   const bounded = (promise, label) => new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error(`timeout:${label}`)), 500); Promise.resolve(promise).then((value) => { clearTimeout(timer); resolve(value); }, (err) => { clearTimeout(timer); reject(err); }); });
-  const base = fakeClock(); const clock = { ...pclockOf(base), observeWall: () => { throw new Error('synthetic wall fault'); } }; const r = await paperAccount({ accountId: 'watch-first-maint', clock: base }); await r.writer.release();
+  const base = fakeClock(); const clock = { ...pclockOf(base), observeWall: () => { throw new Error('synthetic wall fault'); } }; const r = await paperAccount({ accountId: 'watch-first-maint', clock: base, init: COMPOSED_PAPER_INIT }); await r.writer.release();
   let refreshConcurrent = 0; let refreshMax = 0; let releaseRefresh; let refreshStarted; const started = new Promise((resolve) => { refreshStarted = resolve; });
   const cases = { consumed: () => null, status: () => ({ known: 0, verified: 0 }), refresh: async () => { refreshConcurrent += 1; refreshMax = Math.max(refreshMax, refreshConcurrent); refreshStarted(); await new Promise((resolve) => { releaseRefresh = resolve; }); refreshConcurrent -= 1; } };
   const advances = [];
@@ -59,7 +63,7 @@ test('R08-01c. periodic venue-clock I/O is single-flight and never holds the Wat
 });
 
 test('R08-02. bucket deadlines are independent of the 250 ms heartbeat: the composition drives the scheduler on its own 25 ms cadence, so a job submitted between heartbeats runs (never QUEUE_DELAY_EXPIRED)', async () => {
-  const r = await paperAccount({ accountId: 'sched' }); await r.writer.release();
+  const r = await paperAccount({ accountId: 'sched', init: COMPOSED_PAPER_INIT }); await r.writer.release();
   const run = await composeJudge({ policyFile: POLICY_FILE, mode: 'PAPER', accountId: 'sched', journal: r.journal, specs: [SPEC], nominations: () => [], writeProjection: false, codeDigest: CODE, log: () => {} }); // the REAL permission clock: wall + hrtime
   await run.start({ heartbeatMs: 250 }); let ran = 0; run.judge.scheduler.submit({ key: 'BTC|ep', episodeId: 'ep', snapshotSeq: 1, receiptMono: run.clock.monotonic(), job: () => { ran += 1; } });
   await new Promise((res) => setTimeout(res, 120)); assert.equal(ran, 1, 'R08-02: the job ran within the scheduler cadence, long before the heartbeat'); assert.equal(run.judge.scheduler.status().counters.expired, 0); await run.stop();
@@ -129,7 +133,7 @@ test('R08-06. ticks / exits are serialized: two overlapping Watch ticks during a
 });
 
 test('R08-07/R15-02. producers stop before the drain: after stop() the tape-facing feed drops messages (no adapter / Watch / Judge work), admission is closed, the socket handle is closed, and the writer is released LAST (lifecycle order recorded)', async () => {
-  const clock = fakeClock(); const r = await paperAccount({ accountId: 'stop-order', clock }); await r.writer.release(); const run = await composeJudge({ policyFile: POLICY_FILE, mode: 'PAPER', accountId: 'stop-order', journal: r.journal, clock: pclockOf(clock), specs: [SPEC], nominations: () => [{ symbol: 'XBT/USD', assetId: 'BTC' }], writeProjection: false, codeDigest: CODE, log: () => {} });
+  const clock = fakeClock(); const r = await paperAccount({ accountId: 'stop-order', clock, init: COMPOSED_PAPER_INIT }); await r.writer.release(); const run = await composeJudge({ policyFile: POLICY_FILE, mode: 'PAPER', accountId: 'stop-order', journal: r.journal, clock: pclockOf(clock), specs: [SPEC], nominations: () => [{ symbol: 'XBT/USD', assetId: 'BTC' }], writeProjection: false, codeDigest: CODE, log: () => {} });
   await run.start({ heartbeatMs: 3_600_000 }); await run.tick(); run.tapeFeed.onConnect(clock.now()); const before = run.feed.status().counters.messages; const stopped = await run.stop(); run.tapeFeed.ingest(JSON.stringify({ channel: 'heartbeat' }), clock.now()); run.tapeFeed.ingest(JSON.stringify({ channel: 'trade', type: 'update', data: [{ symbol: 'XBT/USD', side: 'sell', price: 1, qty: 1, trade_id: 1, timestamp: new Date(clock.now()).toISOString() }] }), clock.now());
   assert.equal(run.feed.status().counters.messages, before, 'R08-07: nothing reaches the feed after stop'); assert.equal(run.adapter.status().admission, false); assert.equal(run.writer.held(), false); assert.deepEqual(stopped.lifecycle.filter((x) => ['PRODUCERS_STOPPED', 'DRAINED', 'WRITER_RELEASED'].includes(x)), ['PRODUCERS_STOPPED', 'DRAINED', 'WRITER_RELEASED']); assert.equal(stopped.lifecycle.indexOf('PRODUCERS_STOPPED') < stopped.lifecycle.indexOf('DRAINED') && stopped.lifecycle.indexOf('DRAINED') < stopped.lifecycle.indexOf('WRITER_RELEASED'), true);
   // N02: a scripted executions-channel lifecycle (open -> subscribe with the token -> venue ack -> owner close), not an always-success stub
@@ -154,7 +158,7 @@ test('R09-01/R09-02/R09-03. book snapshots are deeply immutable; the tape\'s dep
 });
 
 test('R09-04. startup loads instrument specs through the SHARED transport (public AssetPairs) for nominated symbols without a fixture, and bar history through the same transport (public OHLC): candidates are admitted with a spec', async () => {
-  const clock = fakeClock(); const r = await paperAccount({ accountId: 'specs', clock }); await r.writer.release(); const calls = [];
+  const clock = fakeClock(); const r = await paperAccount({ accountId: 'specs', clock, init: COMPOSED_PAPER_INIT }); await r.writer.release(); const calls = [];
   const transport = async (url) => { const u = new URL(url); calls.push(u.pathname); if (u.origin !== 'https://api.kraken.com') throw new Error('outbound denied'); if (u.pathname === '/0/public/AssetPairs') return { ok: true, status: 200, text: async () => JSON.stringify({ error: [], result: { XXBTZUSD: { altname: 'XBTUSD', wsname: 'XBT/USD', base: 'XXBT', quote: 'ZUSD', status: 'online', pair_decimals: 1, lot_decimals: 8, ordermin: '0.00005', costmin: '0.5', tick_size: '0.1' } } }) }; if (u.pathname === '/0/public/OHLC') { const end = Math.floor(clock.now() / 60_000) * 60_000; const rows = []; for (let k = 70; k >= 1; k -= 1) rows.push([(end - k * 60_000) / 1000, '100000', '100100', '99900', '100050', '100020', '1.5', 12]); return { ok: true, status: 200, text: async () => JSON.stringify({ error: [], result: { XXBTZUSD: rows, last: (end - 60_000) / 1000 } }) }; } return { ok: false, status: 404, text: async () => 'no' }; };
   const run = await composeJudge({ policyFile: POLICY_FILE, mode: 'PAPER', accountId: 'specs', journal: r.journal, clock: pclockOf(clock), transport, specs: [], nominations: () => [{ symbol: 'XBT/USD', assetId: 'BTC' }], writeProjection: false, codeDigest: CODE, log: () => {} });
   assert.equal(run.specOf('XBT/USD'), null, 'no fixture'); const rep = await run.start({ heartbeatMs: 3_600_000 }); assert.equal(rep.specsLoaded, 1, 'R09-04: the spec came through the shared transport'); assert.equal(run.specOf('XBT/USD')?.source, 'REST_ASSET_PAIRS'); assert.ok(calls.includes('/0/public/AssetPairs'));
