@@ -1,240 +1,168 @@
-diff --git a/discovery/collector.js b/discovery/collector.js
-index 4840a54..3228df1 100644
---- a/discovery/collector.js
-+++ b/discovery/collector.js
-@@ -72,10 +72,30 @@ function endpointFor(source, st, context) {
-   return { url: `${source.baseUrl}?${q}`, plan: null };
+diff --git a/rumor2/providers/x-official.js b/rumor2/providers/x-official.js
+index 97b3645..9b1703d 100644
+--- a/rumor2/providers/x-official.js
++++ b/rumor2/providers/x-official.js
+@@ -268,6 +268,28 @@ function parseDailyProjectUsage(value, observedDay, int) {
+   // Absence of the observed UTC day is unknown, never an inferred zero.
+   return byDay.has(observedDay) ? byDay.get(observedDay) : null;
  }
- 
--function normalizeProviderEnvelope(sourceId, json) {
-+function normalizeProviderEnvelope(sourceId, json, { pageLimit, currentCursor } = {}) {
-   if (sourceId === 'POLYMARKET_PUBLIC_DATA') {
--    if (Array.isArray(json)) return { markets: json, next_cursor: null };
--    if (Array.isArray(json?.data)) return { markets: json.data, next_cursor: json.next_cursor ?? json.nextCursor ?? null };
-+    // The pinned /markets/keyset contract is cursor based. In particular, a
-+    // full page must carry next_cursor; treating a malformed/legacy array as
-+    // the end of a sweep would silently keep restarting at page one.
-+    const rows = Array.isArray(json?.markets) ? json.markets : null;
-+    if (!rows) return { error: 'Polymarket keyset response has no markets array' };
-+    if (rows.length > pageLimit) return { error: 'Polymarket keyset response exceeds the requested page limit' };
-+    const raw = json.next_cursor;
-+    if (!(raw === undefined || raw === null || typeof raw === 'string')) return { error: 'Polymarket next cursor is malformed' };
-+    if (typeof raw === 'string' && raw.length > 4096) return { error: 'Polymarket next cursor exceeds the durable bound' };
-+    const nextCursor = typeof raw === 'string' && raw.length > 0 ? raw : null;
-+    if (rows.length === pageLimit && nextCursor === null) return { error: 'Polymarket full keyset page is missing next cursor' };
-+    if (nextCursor !== null && nextCursor === currentCursor) return { error: 'Polymarket next cursor did not advance' };
-+    return { markets: rows, next_cursor: nextCursor };
++const plainUsageRecord = (value) => {
++  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
++  const proto = Object.getPrototypeOf(value);
++  return proto === Object.prototype || proto === null;
++};
++const xProjectId = (value) => typeof value === 'string' && /^[1-9]\d{0,18}$/.test(value) ? value : null;
++function exactZeroProjectDailyUpperBound(body, data, { projectUsage, projectCap, capResetDay }) {
++  // A brand-new project may return the aggregate total and project identity
++  // while omitting daily usage rows. Only an explicit aggregate zero can
++  // prove a daily upper bound of zero: any positive/ambiguous total remains
++  // unknown. cap_reset_day is the documented bounded days-remaining value,
++  // not a calendar day-of-month.
++  if (!plainUsageRecord(body) || !plainUsageRecord(data) || Object.hasOwn(body, 'errors') || Object.hasOwn(data, 'errors')) return false;
++  if (!(data.project_usage === '0' || (data.project_usage === 0 && !Object.is(data.project_usage, -0)))) return false;
++  if (projectUsage !== 0 || !Number.isSafeInteger(projectCap) || projectCap <= 0) return false;
++  if (!Number.isSafeInteger(capResetDay) || capResetDay < 1 || capResetDay > 31) return false;
++  const daily = data.daily_project_usage;
++  if (!plainUsageRecord(daily) || Object.hasOwn(daily, 'usage')) return false;
++  if (Object.keys(daily).some((key) => key !== 'project_id')) return false;
++  const outerProjectId = xProjectId(data.project_id); const dailyProjectId = xProjectId(daily.project_id);
++  return outerProjectId !== null && outerProjectId === dailyProjectId;
++}
+ export function parseXUsage(body, { observedTs }) {
+   const d = body && typeof body === 'object' ? body.data : null;
+   if (!d || typeof d !== 'object' || !Number.isSafeInteger(observedTs) || observedTs < 1) return null;
+@@ -278,7 +300,10 @@ export function parseXUsage(body, { observedTs }) {
+   const capResetDay = int(d.cap_reset_day);
+   let observedDay; try { observedDay = new Date(observedTs).toISOString().slice(0, 10); } catch { return null; }
+   const dailyProjectUsage = parseDailyProjectUsage(d.daily_project_usage, observedDay, int);
+-  if (dailyProjectUsage === null) return null;
++  if (dailyProjectUsage === null) {
++    if (!exactZeroProjectDailyUpperBound(body, d, { projectUsage, projectCap, capResetDay })) return null;
++    return { projectUsage, projectCap, capResetDay, dailyProjectUsage: 0, observedTs: Math.floor(observedTs), dailyUsageBasis: 'PROJECT_TOTAL_ZERO_UPPER_BOUND' };
 +  }
-+  if (sourceId === 'KALSHI_PUBLIC_DATA') {
-+    if (!Array.isArray(json?.markets)) return { error: 'Kalshi response has no markets array' };
-+    if (json.markets.length > pageLimit) return { error: 'Kalshi response exceeds the requested page limit' };
-+    if (typeof json.cursor !== 'string') return { error: 'Kalshi response cursor is missing or malformed' };
-+    if (json.cursor.length > 4096) return { error: 'Kalshi next cursor exceeds the durable bound' };
-+    const nextCursor = json.cursor.length > 0 ? json.cursor : null;
-+    if (nextCursor !== null && nextCursor === currentCursor) return { error: 'Kalshi next cursor did not advance' };
-+    return { ...json, cursor: nextCursor };
-   }
-   return json;
+   return { projectUsage, projectCap, capResetDay: capResetDay !== null && capResetDay >= 1 && capResetDay <= 31 ? capResetDay : null, dailyProjectUsage, observedTs: Math.floor(observedTs) };
  }
-@@ -258,10 +278,11 @@ export function startPublicDiscovery({
-         const result = await fetchJsonBounded(endpoint.url, { host: st.source.host, fetchImpl, timeoutMs: DISCOVERY_RUNTIME.timeoutMs, maxBytes: DISCOVERY_RUNTIME.maxBytes, maxRedirects: 0, headers: { 'user-agent': researchUserAgent } });
-         const receiptTs = clock(); st.lastReceiptTs = receiptTs; let mapped = null; let outcome = result.outcome;
-         if (result.outcome === 'OK') {
--          const envelope = normalizeProviderEnvelope(id, result.json);
--          mapped = id === 'GDELT_NEWS_DISCOVERY' ? mapGdeltArticles(envelope, { context, plan: endpoint.plan, receiptTs, limit: st.pageLimit })
--            : id === 'POLYMARKET_PUBLIC_DATA' ? mapPolymarketMarkets(envelope, { context, receiptTs })
--            : mapKalshiMarkets(envelope, { context, receiptTs });
-+          const envelope = normalizeProviderEnvelope(id, result.json, { pageLimit: st.pageLimit, currentCursor: st.cursor });
-+          mapped = envelope?.error ? envelope
-+            : id === 'GDELT_NEWS_DISCOVERY' ? mapGdeltArticles(envelope, { context, plan: endpoint.plan, receiptTs, limit: st.pageLimit })
-+              : id === 'POLYMARKET_PUBLIC_DATA' ? mapPolymarketMarkets(envelope, { context, receiptTs })
-+                : mapKalshiMarkets(envelope, { context, receiptTs });
-           if (mapped.error) outcome = 'PARSE_FAILED';
-         }
-         let admitted = 0; let duplicates = 0; const admittedIds = [];
-diff --git a/test/discovery-pagination-safety.test.js b/test/discovery-pagination-safety.test.js
+ // Parse the current official credits response (§13): { data: { free_balance, prepaid_balance, total_balance } }
+diff --git a/rumor2/social-settle.js b/rumor2/social-settle.js
+index 83689d8..c50aa83 100644
+--- a/rumor2/social-settle.js
++++ b/rumor2/social-settle.js
+@@ -878,10 +878,15 @@ export function xMeterEvent({ provider, period, deliveredPostReads, monthPeriod,
+ const okServerUsage = (u) => {
+   if (u === null) return true;
+   if (u === undefined || typeof u !== 'object' || Array.isArray(u)) return false;
+-  const k = exactKeys(u, ['projectUsage', 'projectCap', 'capResetDay', 'dailyProjectUsage', 'observedTs']); if (k) return false;
++  const derived = Object.hasOwn(u, 'dailyUsageBasis');
++  const k = exactKeys(u, derived
++    ? ['projectUsage', 'projectCap', 'capResetDay', 'dailyProjectUsage', 'observedTs', 'dailyUsageBasis']
++    : ['projectUsage', 'projectCap', 'capResetDay', 'dailyProjectUsage', 'observedTs']);
++  if (k) return false;
+   for (const f of ['projectUsage', 'projectCap']) if (!Number.isSafeInteger(u[f]) || u[f] < 0) return false;
+   if (u.capResetDay !== null && (!Number.isSafeInteger(u.capResetDay) || u.capResetDay < 1 || u.capResetDay > 31)) return false;
+   if (u.dailyProjectUsage !== null && (!Number.isSafeInteger(u.dailyProjectUsage) || u.dailyProjectUsage < 0)) return false;
++  if (derived && (u.dailyUsageBasis !== 'PROJECT_TOTAL_ZERO_UPPER_BOUND' || u.projectUsage !== 0 || u.projectCap <= 0 || u.capResetDay === null || u.dailyProjectUsage !== 0)) return false;
+   return isTs(u.observedTs);
+ };
+ export function validateXMeterEvent(ev) {
+diff --git a/test/x-zero-project-usage.test.js b/test/x-zero-project-usage.test.js
 new file mode 100644
 --- /dev/null
-+++ b/test/discovery-pagination-safety.test.js
-@@ -0,0 +1,168 @@
++++ b/test/x-zero-project-usage.test.js
+@@ -0,0 +1,97 @@
 +import test from 'node:test';
 +import assert from 'node:assert/strict';
-+import { mkdtempSync } from 'node:fs';
-+import { tmpdir } from 'node:os';
-+import path from 'node:path';
-+import { normalizeKrakenAssetPairs } from '../survey/catalog.js';
-+import { startPublicDiscovery } from '../discovery/collector.js';
-+import { emptyDiscoveryCheckpoint } from '../discovery/external-checkpoint.js';
-+import { readDiscoveryReceipts } from '../discovery/reader.js';
++import { parseXUsage } from '../rumor2/providers/x-official.js';
++import { xMeterEvent, validateXMeterEvent } from '../rumor2/social-settle.js';
 +
-+const T0 = Date.parse('2026-09-13T12:00:00.000Z');
-+const timers = { setTimeout: () => ({}), clearTimeout() {}, setInterval: () => ({}), clearInterval() {} };
-+const tmp = () => mkdtempSync(path.join(tmpdir(), 'discovery-pagination-'));
++const T = Date.parse('2026-09-13T12:00:00.000Z');
++const PROJECT_ID = '2098817204913401858';
 +
-+function catalogSnapshot() {
-+  const normalized = normalizeKrakenAssetPairs({
-+    XBTUSD: { base: 'XXBT', quote: 'ZUSD', wsname: 'XBT/USD', status: 'online' },
-+    ETHUSD: { base: 'XETH', quote: 'ZUSD', wsname: 'ETH/USD', status: 'online' },
-+  }, { observedTs: T0 - 1_000 });
-+  assert.equal(normalized.ok, true);
-+  return { status: 'ACCEPTED', fresh: true, catalog: normalized.catalog };
-+}
++const zeroBody = (over = {}) => ({
++  data: {
++    cap_reset_day: 12,
++    daily_project_usage: { project_id: PROJECT_ID },
++    project_cap: '3000000',
++    project_id: PROJECT_ID,
++    project_usage: '0',
++    ...over,
++  },
++});
 +
-+function memoryDurable({ sourceId = null, cursor = null } = {}) {
-+  let state = emptyDiscoveryCheckpoint({ now: T0 });
-+  if (sourceId) state.sources[sourceId].cursor = cursor;
-+  let revision = 1;
-+  let failure = null;
-+  return {
-+    snapshot: () => structuredClone(state),
-+    revision: () => revision,
-+    failed: () => failure,
-+    update: async (reducer) => {
-+      state = reducer(structuredClone(state));
-+      revision += 1;
-+      return structuredClone(state);
-+    },
-+    fail: (code = 'TEST_FAILURE') => { failure = { code }; },
++test('explicit aggregate project zero with matching identities proves a closed daily zero upper bound', () => {
++  const expected = {
++    projectUsage: 0,
++    projectCap: 3_000_000,
++    capResetDay: 12,
++    dailyProjectUsage: 0,
++    observedTs: T,
++    dailyUsageBasis: 'PROJECT_TOTAL_ZERO_UPPER_BOUND',
 +  };
-+}
-+
-+function envFor(sourceId) {
-+  const env = { DISCOVERY_ENABLED: 'true', DISCOVERY_SOURCES: sourceId };
-+  if (sourceId === 'POLYMARKET_PUBLIC_DATA') {
-+    env.DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS = '48';
-+    env.DISCOVERY_POLYMARKET_PAGE_LIMIT = '2';
-+  } else {
-+    env.DISCOVERY_KALSHI_MAX_DAILY_REQUESTS = '48';
-+    env.DISCOVERY_KALSHI_PAGE_LIMIT = '2';
-+  }
-+  return env;
-+}
-+
-+const jsonResponse = (value) => new Response(JSON.stringify(value), {
-+  status: 200,
-+  headers: { 'content-type': 'application/json' },
++  assert.deepEqual(parseXUsage(zeroBody(), { observedTs: T }), expected);
++  assert.deepEqual(parseXUsage(zeroBody({ project_usage: 0, project_cap: 3_000_000 }), { observedTs: T }), expected);
 +});
 +
-+function options({ dir, sourceId, durableCheckpoint, fetchImpl }) {
-+  return {
-+    env: envFor(sourceId), dataDir: dir, durableCheckpoint, fetchImpl,
-+    catalogSource: { snapshot: catalogSnapshot }, clock: () => T0,
-+    timers, signals: false, log: () => {},
-+  };
-+}
-+
-+test('Polymarket keyset cursor advances durably, survives restart, and an empty terminal page completes the sweep', async () => {
-+  const dir = tmp();
-+  const durableCheckpoint = memoryDurable();
-+  const urls = [];
-+  let handle = startPublicDiscovery(options({
-+    dir, sourceId: 'POLYMARKET_PUBLIC_DATA', durableCheckpoint,
-+    fetchImpl: async (url) => {
-+      urls.push(url);
-+      return jsonResponse({
-+        markets: [
-+          { id: 'p1', question: 'Will $BTC rise?', slug: 'btc-rise' },
-+          { id: 'p2', question: 'Will $ETH rise?', slug: 'eth-rise' },
-+        ],
-+        next_cursor: 'cursor-1',
-+      });
-+    },
-+  }));
-+  assert.equal((await handle.pollOnce('POLYMARKET_PUBLIC_DATA')).outcome, 'OK');
-+  assert.equal(durableCheckpoint.snapshot().sources.POLYMARKET_PUBLIC_DATA.cursor, 'cursor-1');
-+  assert.equal(durableCheckpoint.snapshot().sources.POLYMARKET_PUBLIC_DATA.sweepsCompleted, 0);
-+  await handle.stop();
-+
-+  handle = startPublicDiscovery(options({
-+    dir, sourceId: 'POLYMARKET_PUBLIC_DATA', durableCheckpoint,
-+    fetchImpl: async (url) => { urls.push(url); return jsonResponse({ markets: [] }); },
-+  }));
-+  assert.equal((await handle.pollOnce('POLYMARKET_PUBLIC_DATA')).outcome, 'OK');
-+  assert.equal(new URL(urls[1]).searchParams.get('after_cursor'), 'cursor-1');
-+  const settled = durableCheckpoint.snapshot().sources.POLYMARKET_PUBLIC_DATA;
-+  assert.equal(settled.cursor, null);
-+  assert.equal(settled.sweepsCompleted, 1);
-+  assert.equal(settled.totalReservations, 2);
-+  await handle.stop();
-+});
-+
-+test('Kalshi accepts its documented empty-string terminal cursor without inventing another page', async () => {
-+  const dir = tmp();
-+  const durableCheckpoint = memoryDurable();
-+  const handle = startPublicDiscovery(options({
-+    dir, sourceId: 'KALSHI_PUBLIC_DATA', durableCheckpoint,
-+    fetchImpl: async () => jsonResponse({ markets: [], cursor: '' }),
-+  }));
-+  assert.equal((await handle.pollOnce('KALSHI_PUBLIC_DATA')).outcome, 'OK');
-+  const settled = durableCheckpoint.snapshot().sources.KALSHI_PUBLIC_DATA;
-+  assert.equal(settled.cursor, null);
-+  assert.equal(settled.sweepsCompleted, 1);
-+  await handle.stop();
-+});
-+
-+test('malformed, false-terminal, repeated, and oversized provider cursors fail locally without advancing durable coverage', async (t) => {
++test('aggregate-zero fallback refuses every ambiguous identity, total, cap, reset, error, or daily shape', () => {
 +  const cases = [
-+    {
-+      name: 'Polymarket legacy bare array', sourceId: 'POLYMARKET_PUBLIC_DATA', cursor: null,
-+      body: [], error: /no markets array/i,
-+    },
-+    {
-+      name: 'Polymarket legacy data wrapper even with cursor', sourceId: 'POLYMARKET_PUBLIC_DATA', cursor: null,
-+      body: { data: [], next_cursor: 'legacy' }, error: /no markets array/i,
-+    },
-+    {
-+      name: 'Polymarket full page without next cursor', sourceId: 'POLYMARKET_PUBLIC_DATA', cursor: null,
-+      body: { markets: [{ id: 'p1' }, { id: 'p2' }] }, error: /full keyset page is missing next cursor/i,
-+    },
-+    {
-+      name: 'Polymarket repeated cursor', sourceId: 'POLYMARKET_PUBLIC_DATA', cursor: 'stay',
-+      body: { markets: [{ id: 'p1' }, { id: 'p2' }], next_cursor: 'stay' }, error: /did not advance/i,
-+    },
-+    {
-+      name: 'Kalshi missing cursor', sourceId: 'KALSHI_PUBLIC_DATA', cursor: null,
-+      body: { markets: [] }, error: /cursor is missing or malformed/i,
-+    },
-+    {
-+      name: 'Kalshi repeated cursor', sourceId: 'KALSHI_PUBLIC_DATA', cursor: 'stay',
-+      body: { markets: [], cursor: 'stay' }, error: /did not advance/i,
-+    },
-+    {
-+      name: 'Kalshi oversized cursor', sourceId: 'KALSHI_PUBLIC_DATA', cursor: null,
-+      body: { markets: [], cursor: 'x'.repeat(4097) }, error: /exceeds the durable bound/i,
-+    },
++    zeroBody({ project_usage: '1' }),
++    zeroBody({ project_usage: 1 }),
++    zeroBody({ project_usage: undefined }),
++    zeroBody({ project_usage: '00' }),
++    zeroBody({ project_usage: -0 }),
++    zeroBody({ project_cap: '0' }),
++    zeroBody({ project_cap: 'not-a-count' }),
++    zeroBody({ cap_reset_day: 0 }),
++    zeroBody({ cap_reset_day: 32 }),
++    zeroBody({ cap_reset_day: undefined }),
++    zeroBody({ project_id: undefined }),
++    zeroBody({ project_id: 'other' }),
++    zeroBody({ project_id: '12345678901234567890', daily_project_usage: { project_id: '12345678901234567890' } }),
++    zeroBody({ daily_project_usage: { project_id: '2098817204913401859' } }),
++    zeroBody({ daily_project_usage: {} }),
++    zeroBody({ daily_project_usage: [] }),
++    zeroBody({ daily_project_usage: { project_id: PROJECT_ID, usage: [] } }),
++    zeroBody({ daily_project_usage: { project_id: PROJECT_ID, usage: undefined } }),
++    zeroBody({ daily_project_usage: { project_id: PROJECT_ID, unexpected: true } }),
++    { errors: [], ...zeroBody() },
++    zeroBody({ errors: [] }),
 +  ];
++  for (const body of cases) assert.equal(parseXUsage(body, { observedTs: T }), null);
++  assert.equal(parseXUsage(zeroBody(), { observedTs: 0 }), null);
++  assert.equal(parseXUsage(zeroBody(), { observedTs: T + 0.5 }), null);
++});
 +
-+  for (const fixture of cases) await t.test(fixture.name, async () => {
-+    const dir = tmp();
-+    const durableCheckpoint = memoryDurable({ sourceId: fixture.sourceId, cursor: fixture.cursor });
-+    const before = durableCheckpoint.snapshot().sources[fixture.sourceId];
-+    const handle = startPublicDiscovery(options({
-+      dir, sourceId: fixture.sourceId, durableCheckpoint,
-+      fetchImpl: async () => jsonResponse(fixture.body),
-+    }));
-+    assert.equal((await handle.pollOnce(fixture.sourceId)).outcome, 'PARSE_FAILED');
-+    const after = durableCheckpoint.snapshot().sources[fixture.sourceId];
-+    assert.equal(after.cursor, before.cursor, 'the last proven cursor remains authoritative');
-+    assert.equal(after.sweepsCompleted, before.sweepsCompleted, 'malformed input cannot declare a sweep complete');
-+    assert.equal(after.totalReservations, before.totalReservations + 1, 'the attempted wire request stays charged');
-+    assert.equal(durableCheckpoint.failed(), null, 'a provider parse failure must not fault-latch checkpoint storage');
-+    const receipts = readDiscoveryReceipts(dir).receipts;
-+    const settlement = receipts.find((receipt) => receipt.phase === 'SETTLED');
-+    assert.equal(settlement.outcome, 'PARSE_FAILED');
-+    assert.match(settlement.error, fixture.error);
-+    await handle.stop();
++test('a documented current-day daily row remains the legacy five-field snapshot, including explicit zero', () => {
++  const body = zeroBody({
++    daily_project_usage: {
++      project_id: PROJECT_ID,
++      usage: [{ date: '2026-09-13T12:00:00.000Z', usage: '0' }],
++    },
++  });
++  assert.deepEqual(parseXUsage(body, { observedTs: T }), {
++    projectUsage: 0,
++    projectCap: 3_000_000,
++    capResetDay: 12,
++    dailyProjectUsage: 0,
++    observedTs: T,
 +  });
 +});
-diff --git a/test/public-discovery.test.js b/test/public-discovery.test.js
-index 8e826aa..e2d39fe 100644
---- a/test/public-discovery.test.js
-+++ b/test/public-discovery.test.js
-@@ -75,7 +75,7 @@ test('composed collector is dark by default, reserves budget before requests, pe
-   const fetchImpl = async (url, init) => {
-     calls.push({ url, userAgent: init?.headers?.['user-agent'] }); events.push('WIRE');
-     if (url.includes('gdeltproject')) return new Response(JSON.stringify({ articles: [{ title: 'ADA crypto market update', url: 'https://www.cnn.com/story', domain: 'cnn.com', seendate: '20260912T195500Z' }, { title: 'ADA crypto market update', url: 'https://www.reuters.com/story', domain: 'reuters.com', seendate: '20260912T195501Z' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
--    if (url.includes('polymarket')) return new Response(JSON.stringify({ data: [{ id: 'p1', question: 'Will $ADA rise?', slug: 'ada', active: true, updatedAt: '2026-09-12T19:59:00Z' }], next_cursor: 'next' }), { status: 200, headers: { 'content-type': 'application/json' } });
-+    if (url.includes('polymarket')) return new Response(JSON.stringify({ markets: [{ id: 'p1', question: 'Will $ADA rise?', slug: 'ada', active: true, updatedAt: '2026-09-12T19:59:00Z' }], next_cursor: 'next' }), { status: 200, headers: { 'content-type': 'application/json' } });
-     return new Response(JSON.stringify({ markets: [{ ticker: 'KXETH-1', title: 'Will $ETH rise?', status: 'active', updated_time: '2026-09-12T19:59:00Z' }], cursor: '' }), { status: 200, headers: { 'content-type': 'application/json' } });
-   };
-   const base = { dataDir: dir, catalogSource: { snapshot: () => snapshot() }, fetchImpl, clock: () => now, log: () => {}, timers, signals: false, durableCheckpoint };
++
++test('meter validation preserves legacy snapshots and closes the derived-zero provenance shape', () => {
++  const legacy = { projectUsage: 2, projectCap: 3_000_000, capResetDay: 12, dailyProjectUsage: 1, observedTs: T };
++  const derived = parseXUsage(zeroBody(), { observedTs: T });
++  const event = (serverUsage) => xMeterEvent({
++    provider: 'X_OFFICIAL', period: '2026-09-13', deliveredPostReads: 1,
++    monthPeriod: '2026-09', monthDeliveredPostReads: 1,
++    unitPriceUsd: 0.005, serverUsage, knownAtTs: T,
++  });
++  assert.equal(validateXMeterEvent(event(legacy)), null);
++  assert.equal(validateXMeterEvent(event(derived)), null);
++  for (const invalid of [
++    { ...derived, dailyUsageBasis: 'INFERRED_ZERO' },
++    { ...derived, projectUsage: 1 },
++    { ...derived, projectCap: 0 },
++    { ...derived, capResetDay: null },
++    { ...derived, dailyProjectUsage: 1 },
++    { ...derived, extra: true },
++    { ...legacy, dailyUsageBasis: undefined },
++  ]) assert.match(validateXMeterEvent(event(invalid)), /serverUsage invalid/);
++});
