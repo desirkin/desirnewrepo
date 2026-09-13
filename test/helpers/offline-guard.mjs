@@ -54,8 +54,13 @@ if (typeof globalThis.WebSocket === 'function') {
   GuardedWebSocket.prototype = OrigWS.prototype; for (const k of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) GuardedWebSocket[k] = OrigWS[k]; globalThis.WebSocket = GuardedWebSocket;
 }
 // ---- child processes: a Node child with a replaced env still carries the guard (NODE_OPTIONS --import) ----
-const IMPORT_FLAG = `--import=${GUARD_PATH}`;
-export function guardedEnv(env) { const base = env && typeof env === 'object' ? { ...env } : { ...process.env }; const opts = String(base.NODE_OPTIONS ?? ''); if (!opts.includes(GUARD_PATH)) base.NODE_OPTIONS = `${opts} ${IMPORT_FLAG}`.trim(); if (!base.COBRA_OFFLINE_GUARD_LOG) base.COBRA_OFFLINE_GUARD_LOG = LOG; if (!base.COBRA_OFFLINE_GUARD_RUN) base.COBRA_OFFLINE_GUARD_RUN = RUN; return base; }
+// Node ESM --import requires file: URLs for Windows absolute paths; quoting
+// also keeps spaces safe when a child replaces its environment. The same
+// outbound fence is retained in every child, rather than weakened to get a
+// platform-specific test through.
+const GUARD_URL = import.meta.url;
+const IMPORT_FLAG = `--import=${JSON.stringify(GUARD_URL)}`;
+export function guardedEnv(env) { const base = env && typeof env === 'object' ? { ...env } : { ...process.env }; const opts = String(base.NODE_OPTIONS ?? ''); if (!opts.includes(GUARD_URL) && !opts.includes(GUARD_PATH)) base.NODE_OPTIONS = `${opts} ${IMPORT_FLAG}`.trim(); if (!base.COBRA_OFFLINE_GUARD_LOG) base.COBRA_OFFLINE_GUARD_LOG = LOG; if (!base.COBRA_OFFLINE_GUARD_RUN) base.COBRA_OFFLINE_GUARD_RUN = RUN; return base; }
 const withEnv = (args, idx) => { const opts = args[idx]; if (opts && typeof opts === 'object' && !Array.isArray(opts) && typeof opts !== 'function') { args[idx] = { ...opts, env: guardedEnv(opts.env) }; } else { args.splice(idx, 0, { env: guardedEnv(undefined) }); } return args; };
 const optionsIndex = (args, from) => { for (let i = from; i < args.length; i += 1) { if (typeof args[i] === 'function') return i; if (args[i] && typeof args[i] === 'object' && !Array.isArray(args[i])) return i; } return args.length; };
 function wrapSpawnLike(name) { const orig = childProcess[name]; if (typeof orig !== 'function') return; const wrapped = function guardedSpawnLike(...args) { const a = [...args]; return orig.apply(childProcess, withEnv(a, optionsIndex(a, 1))); }; if (orig[promisify.custom]) { const oc = orig[promisify.custom]; wrapped[promisify.custom] = function guardedPromisified(...args) { const a = [...args]; return oc.apply(childProcess, withEnv(a, optionsIndex(a, 1))); }; } childProcess[name] = wrapped; }

@@ -51,9 +51,11 @@ decision-memory source. A collector heartbeat is not adaptive behavior.
   verification; advanced delayed-hint work queued. No active-state publisher.
 
 Shared identities are account-independent for market evidence. Financial
-state and decisions remain account-specific. `opportunityId` identifies asset,
-catalog, decision time, and target; `episodeId` groups variants/horizons of one
-underlying observation for influence accounting. Event/receipt/available-at
+state and decisions remain account-specific. Reuse the existing
+`opportunityIdOf` (asset, decision time, capture recipe, dataset/catalog); targets,
+horizons and strategy variants DO NOT mint another primary opportunity.
+Prediction/update identities additionally bind their declared target/horizon.
+The primary opportunity groups variants for influence accounting. Event/receipt/available-at
 times must not be conflated. Every score binds its saved prediction digest.
 
 The first allowed active effect is a bounded ranking/selection contribution

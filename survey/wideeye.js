@@ -92,7 +92,12 @@ export function startWideEye({
   // mutate any future trading/deep-tape selection input.
   nominationEnabled = true,
   deepCoinsSource = () => new Set((readCurrentUniverse()?.pairs ?? []).map((p) => p.coin)),
+  // Optional independent audit owner. It seals its sample BEFORE the Ticker
+  // request, without receiving nomination status, then annotates afterwards.
+  // No transport, orders, or independent allocator are supplied to this port.
+  opportunityAudit = null,
 } = {}) {
+  if (opportunityAudit !== null && (typeof opportunityAudit.beforeSweep !== 'function' || typeof opportunityAudit.afterSweep !== 'function')) throw new TypeError('INVALID_OPPORTUNITY_AUDIT_PORT');
   if (!wideeyeEnabled(config)) {
     log(`[${nowIso()}] WIDE EYE closed — surveying off, zero network`);
     return null;
@@ -117,6 +122,21 @@ export function startWideEye({
   let refreshToken = 0;
   const notices = []; // bounded ring of already-computed RIPPLE/MISSED records (research context only)
   let population = null; // SOCIAL-5 §36.6: the latest COMPLETED sweep's observed research population (detached, frozen)
+  let auditObservations = null;
+  let auditError = null;
+  let auditDisabled = false;
+  // The independent audit never gets an unbounded wait ahead of ingestion.
+  // Timeout latches the port off; its late completion is not used as a frame.
+  const auditCall = async (call) => {
+    let timeout;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(call),
+        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('AUDIT_WAIT_BUDGET_EXCEEDED')), 250); }),
+      ]);
+    } catch (err) { auditDisabled = true; throw err; }
+    finally { clearTimeout(timeout); }
+  };
   // Full-catalog durable history is sampled from the SAME sweep (no second
   // client/request). Every accepted Kraken base has equal eligibility.
   let lastArchiveTs = null;
@@ -228,19 +248,20 @@ export function startWideEye({
     // evaluated (with the values it already computed) plus counts of rows it could not evaluate.
     // Recording only; the sweep's own control flow, formulas and decisions are untouched.
     const rows = []; const excluded = { NO_TICKER_ROW: 0, PRICE_INVALID: 0, INSUFFICIENT_SERIES: 0 };
+    const auditRows = opportunityAudit ? [] : null;
     const num2 = (v) => (Number.isFinite(v) ? Number(v.toFixed(2)) : null);
 
     for (const [key, coin] of keyToCoin) {
       const t = tickers[key];
-      if (!t) { excluded.NO_TICKER_ROW += 1; continue; }
+      if (!t) { excluded.NO_TICKER_ROW += 1; auditRows?.push({ coin, evaluated: false, reason: 'NO_TICKER_ROW' }); continue; }
       const price = Number(t.c?.[0]);
       const cumVol = Number(t.v?.[1]);
-      if (!Number.isFinite(price) || price <= 0) { excluded.PRICE_INVALID += 1; continue; }
+      if (!Number.isFinite(price) || price <= 0) { excluded.PRICE_INVALID += 1; auditRows?.push({ coin, evaluated: false, reason: 'PRICE_INVALID' }); continue; }
       const s = series.get(coin) ?? [];
       s.push({ t: nowMs, price, cumVol });
       while (s.length > 16) s.shift();
       series.set(coin, s);
-      if (s.length < 2) { excluded.INSUFFICIENT_SERIES += 1; continue; }
+      if (s.length < 2) { excluded.INSUFFICIENT_SERIES += 1; auditRows?.push({ coin, evaluated: false, reason: 'INSUFFICIENT_SERIES' }); continue; }
 
       const at = (minAgo) => s.findLast((p) => p.t <= nowMs - minAgo * 60_000 + 5000);
       const p1 = at(1);
@@ -264,6 +285,7 @@ export function startWideEye({
       // emitted notices (below) and stays null otherwise — never recomputed for the record
       const row = { coin, evaluated: true, zVol: num2(zVol), zRet: num2(zRet5), extension: num2(ret15Pct), preCooldownVerdict: verdict ?? null, cooldownSuppressed: cooled, noticeEmitted: !!verdict && !cooled, usdVol24h: null, inDeepTape: deep.has(coin) };
       rows.push(row);
+      auditRows?.push(row);
       if (!verdict) continue;
       if (cooled) continue;
       lastRipple.set(coin, nowMs);
@@ -319,6 +341,7 @@ export function startWideEye({
     const catalogContentId = catalog.accepted?.contentId ?? null;
     const sweepId = `ws-${createHash('sha1').update(`${nowMs}|${catalogContentId ?? 'NO_CATALOG'}|${keyToCoin.size}|${today}`).digest('hex')}`;
     population = deepFreeze({ version: SWEEP_POPULATION_VERSION, sweepId, tsMs: nowMs, ts: new Date(nowMs).toISOString(), sessionDate: today, catalogContentId, catalogStatus: catalogContentId ? 'ACCEPTED' : 'UNAVAILABLE', scanned: keyToCoin.size, tickerRows: Object.keys(tickers ?? {}).length, evaluated: rows.length, excluded: { ...excluded }, rows, coverageNote: 'one public Ticker sweep; rows not evaluated are counted by reason, never scored' });
+    auditObservations = auditRows ? deepFreeze({ sweepId, catalogContentId, observedTs: nowMs, rows: auditRows.map((row) => ({ ...row })) }) : null;
     // The first ticker sample only primes the return windows. Do not consume an
     // archive interval with an empty population; the next completed sweep can
     // then become the first durable full-catalog observation set.
@@ -364,14 +387,30 @@ export function startWideEye({
   }
 
   let sweeping = false;
+  async function auditedSweep() {
+    let auditToken = null;
+    if (opportunityAudit && !auditDisabled) {
+      try {
+        const frameTs = now();
+        auditToken = await auditCall(() => opportunityAudit.beforeSweep({ catalogSnapshot: deepFreeze({ ...catalogStatus(frameTs), catalog: catalog.accepted }), frameTs }));
+        auditError = null;
+      } catch (err) { auditError = `AUDIT_FRAME_REFUSED:${String(err?.message ?? err).slice(0, 160)}`; }
+    }
+    const tickers = await fetchJson(TICKER_URL);
+    const result = sweep(tickers);
+    if (auditToken !== null && auditToken !== undefined) {
+      try { await auditCall(() => opportunityAudit.afterSweep({ auditToken, observation: auditObservations, recordedTs: now() })); }
+      catch (err) { auditError = `AUDIT_ANNOTATION_REFUSED:${String(err?.message ?? err).slice(0, 160)}`; }
+    }
+    return result;
+  }
   const timer = setIntervalImpl(async () => {
     if (sweeping || stopping || now() < backoffUntil) return;
     sweeping = true;
     try {
       if (!keyToCoin.size) await loadWideUniverse({ initial: true });
       else if (catalogDue(now())) await loadWideUniverse(); // bounded refresh on the existing tick; failures are recorded, never a sweep backoff
-      const tickers = await fetchJson(TICKER_URL); // ONE request covers the whole universe
-      sweep(tickers);
+      await auditedSweep(); // ONE Ticker request, preceded by independent audit sampling
       backoffMs = 60_000;
     } catch (err) {
       backoffUntil = now() + backoffMs;
@@ -409,8 +448,9 @@ export function startWideEye({
     // SOCIAL-5 §36.6: the latest COMPLETED sweep's observed research population (already-computed facts
     // only; null until the first sweep completes) — the false-negative denominator seam, never authority
     sweepPopulationSnapshot: () => population,
+    opportunityAuditStatus: () => ({ configured: opportunityAudit !== null, disabled: auditDisabled, maxWaitMs: 250, error: auditError }),
     // test/diagnostic: drive one refresh attempt directly (still bounded by the same law)
     _refreshCatalog: () => loadWideUniverse({ initial: !keyToCoin.size }),
-    _sweepOnce: async () => { if (!keyToCoin.size) await loadWideUniverse({ initial: true }); else if (catalogDue(now())) await loadWideUniverse(); sweep(await fetchJson(TICKER_URL)); },
+    _sweepOnce: async () => { if (!keyToCoin.size) await loadWideUniverse({ initial: true }); else if (catalogDue(now())) await loadWideUniverse(); await auditedSweep(); },
   };
 }
