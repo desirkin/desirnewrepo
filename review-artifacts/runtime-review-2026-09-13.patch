@@ -1,134 +1,36 @@
-diff --git a/lib/book-walk.js b/lib/book-walk.js
-new file mode 100644
---- /dev/null
-+++ b/lib/book-walk.js
-@@ -0,0 +1,14 @@
-+// Pure displayed-depth arithmetic shared by descriptors and shadow research.
-+// No provider, filesystem, runtime, or order dependency; callers validate and
-+// causally align their books. FULL is hypothetical displayed depth, not a fill.
-+const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
-+const round = (v, d = 8) => { if (typeof v !== 'number' || !Number.isFinite(v)) return null; const r = Number(v.toFixed(d)); return Object.is(r, -0) ? 0 : r; };
-+
-+export function walkBook(levels, { quoteNotional = null, baseQty = null }) {
-+  const requested = quoteNotional !== null ? { quoteNotional } : { baseQty };
-+  if (!Array.isArray(levels) || !levels.length || (quoteNotional === null && baseQty === null)) return deepFreeze({ recipeId: 'book_walk', version: 1, requested, consumedLevels: 0, filledBase: 0, filledQuote: 0, residualQuote: quoteNotional, residualBase: baseQty, averagePrice: null, worstPrice: null, coverage: 'NO_BOOK', hypothetical: true });
-+  let remQ = quoteNotional; let remB = baseQty; let fb = 0; let fq = 0; let consumed = 0; let worst = null;
-+  for (const [p, q] of levels) { if (q <= 0) continue; let take; if (quoteNotional !== null) { take = Math.min(q, remQ / p); } else take = Math.min(q, remB); if (take <= 0) break; fb += take; fq += take * p; consumed += 1; worst = p; if (quoteNotional !== null) remQ -= take * p; else remB -= take; if ((quoteNotional !== null && remQ <= 1e-9) || (baseQty !== null && remB <= 1e-12)) { remQ = quoteNotional !== null ? 0 : null; remB = baseQty !== null ? 0 : null; break; } }
-+  const full = quoteNotional !== null ? remQ <= 1e-9 : remB <= 1e-12;
-+  return deepFreeze({ recipeId: 'book_walk', version: 1, requested, consumedLevels: consumed, filledBase: round(fb), filledQuote: round(fq), residualQuote: quoteNotional !== null ? round(Math.max(0, remQ)) : null, residualBase: baseQty !== null ? round(Math.max(0, remB)) : null, averagePrice: fb > 0 ? round(fq / fb) : null, worstPrice: worst, coverage: full ? 'FULL' : 'PARTIAL', hypothetical: true, preFee: true });
-+}
-diff --git a/market-lab/recipes.js b/market-lab/recipes.js
-index d093568..52721e8 100644
---- a/market-lab/recipes.js
-+++ b/market-lab/recipes.js
-@@ -5,6 +5,8 @@
- import { deepFreeze, isFiniteNum, isTs, round, fail } from './contracts.js';
- import { selectNativeSeries, periodGrid } from './native-series.js';
- import { inWindow } from './time.js';
-+import { walkBook } from '../lib/book-walk.js';
-+export { walkBook } from '../lib/book-walk.js';
- 
- export const RECIPE_SET_VERSION = 'market-lab-recipes-1';
- const R = (id, o) => [id, deepFreeze({ recipeId: id, version: 1, ...o })];
-@@ -116,14 +118,6 @@ export function bookMetrics(book) {
-   for (const bps of BANDS_BPS) { const b = bandOf(bids, bps, 'bid'); const a = bandOf(asks, bps, 'ask'); const tot = b.notional + a.notional; bands[`${bps}bps`] = { bid: b, ask: a, imbalance: tot > 0 ? round((b.notional - a.notional) / tot) : null }; }
-   return deepFreeze({ recipeId: 'spread_bps', version: 1, mid: round(mid), spreadBps: round(1e4 * (ask - bid) / mid), bestBid: bid, bestAsk: ask, topBidQty: bq, topAskQty: aq, microprice: bq + aq > 0 ? round((ask * bq + bid * aq) / (bq + aq)) : null, bands, levelsRetained: { bids: bids.length, asks: asks.length }, support: support('COMPLETE', [], { attribution: 'AGGREGATE_L2_UNATTRIBUTED' }) });
- }
--export function walkBook(levels, { quoteNotional = null, baseQty = null }) {
--  const requested = quoteNotional !== null ? { quoteNotional } : { baseQty };
--  if (!Array.isArray(levels) || !levels.length || (quoteNotional === null && baseQty === null)) return deepFreeze({ recipeId: 'book_walk', version: 1, requested, consumedLevels: 0, filledBase: 0, filledQuote: 0, residualQuote: quoteNotional, residualBase: baseQty, averagePrice: null, worstPrice: null, coverage: 'NO_BOOK', hypothetical: true });
--  let remQ = quoteNotional; let remB = baseQty; let fb = 0; let fq = 0; let consumed = 0; let worst = null;
--  for (const [p, q] of levels) { if (q <= 0) continue; let take; if (quoteNotional !== null) { take = Math.min(q, remQ / p); } else take = Math.min(q, remB); if (take <= 0) break; fb += take; fq += take * p; consumed += 1; worst = p; if (quoteNotional !== null) remQ -= take * p; else remB -= take; if ((quoteNotional !== null && remQ <= 1e-9) || (baseQty !== null && remB <= 1e-12)) { remQ = quoteNotional !== null ? 0 : null; remB = baseQty !== null ? 0 : null; break; } }
--  const full = quoteNotional !== null ? remQ <= 1e-9 : remB <= 1e-12;
--  return deepFreeze({ recipeId: 'book_walk', version: 1, requested, consumedLevels: consumed, filledBase: round(fb), filledQuote: round(fq), residualQuote: quoteNotional !== null ? round(Math.max(0, remQ)) : null, residualBase: baseQty !== null ? round(Math.max(0, remB)) : null, averagePrice: fb > 0 ? round(fq / fb) : null, worstPrice: worst, coverage: full ? 'FULL' : 'PARTIAL', hypothetical: true, preFee: true });
--}
- export function roundTrip(book, N, { haircut = 1 } = {}) {
-   const scale = (ls) => ls.map(([p, q]) => [p, q * haircut]);
-   const buy = walkBook(scale(book.asks ?? []), { quoteNotional: N });
-diff --git a/learning/shadow-execution-evidence.js b/learning/shadow-execution-evidence.js
-index 8969582..49eb3dd 100644
---- a/learning/shadow-execution-evidence.js
-+++ b/learning/shadow-execution-evidence.js
-@@ -6,7 +6,7 @@
- // the declared size could be fully walked through two causally aligned, proven-
- // continuous observed books under the sealed latency/fee policy. It does not
- // claim that an order was submitted or filled.
--import { walkBook } from '../market-lab/recipes.js';
-+import { walkBook } from '../lib/book-walk.js';
- import {
-   canonicalDigest, captureError, deepFreeze, exactKeys, isFiniteNum, isPlainObject, isTs, round6,
- } from './shadow-contracts.js';
-diff --git a/test/book-walk-shared.test.js b/test/book-walk-shared.test.js
-new file mode 100644
---- /dev/null
-+++ b/test/book-walk-shared.test.js
-@@ -0,0 +1,34 @@
-+import test from 'node:test';
-+import assert from 'node:assert/strict';
-+import { readFileSync } from 'node:fs';
-+import { walkBook } from '../lib/book-walk.js';
-+import { walkBook as descriptorWalk, roundTrip } from '../market-lab/recipes.js';
-+
-+test('market descriptors re-export the exact same pure walk used by shadow research', () => {
-+  assert.equal(descriptorWalk, walkBook);
-+  const source = readFileSync(new URL('../lib/book-walk.js', import.meta.url), 'utf8');
-+  assert.ok(!/\bimport\b|\brequire\s*\(/.test(source), 'shared arithmetic imports no authority-bearing pipeline');
-+  const shadow = readFileSync(new URL('../learning/shadow-execution-evidence.js', import.meta.url), 'utf8');
-+  assert.ok(shadow.includes("from '../lib/book-walk.js'"));
-+  assert.ok(!shadow.includes('../market-lab'));
-+});
-+
-+test('shared walk preserves full, partial, absent and zero-depth results without extrapolation', () => {
-+  const full = walkBook([[100, 1], [110, 2]], { quoteNotional: 155 });
-+  assert.deepEqual(full, {
-+    recipeId: 'book_walk', version: 1, requested: { quoteNotional: 155 },
-+    consumedLevels: 2, filledBase: 1.5, filledQuote: 155, residualQuote: 0,
-+    residualBase: null, averagePrice: 103.33333333, worstPrice: 110,
-+    coverage: 'FULL', hypothetical: true, preFee: true,
-+  });
-+  assert.ok(Object.isFrozen(full) && Object.isFrozen(full.requested));
-+  const partial = walkBook([[100, 0], [99, 1]], { baseQty: 2 });
-+  assert.equal(partial.coverage, 'PARTIAL');
-+  assert.equal(partial.filledQuote, 99);
-+  assert.equal(partial.residualBase, 1);
-+  assert.equal(walkBook([], { quoteNotional: 100 }).coverage, 'NO_BOOK');
-+  const trip = roundTrip({ asks: [[100, 2]], bids: [[99, 2]] }, 100);
-+  assert.equal(trip.coverage, 'FULL');
-+  assert.equal(trip.lossBps, 100);
-+  assert.equal(trip.saleProceeds, 99);
-+});
-diff --git a/test/learning-fences.test.js b/test/learning-fences.test.js
-index 022b24b..d0cec62 100644
---- a/test/learning-fences.test.js
-+++ b/test/learning-fences.test.js
-@@ -19,7 +19,8 @@ test('every learning module imports only lib/, research pure modules and its own
- });
- 
- test('the only cross-package imports are lib/ helpers — learning MIRRORS the offline label law (learning/labels.js) without importing the offline pipeline, per the operational fence', () => {
--  const allowed = new Set(["'../lib/jsonl.js'", "'../lib/config.js'"]);
-+  // Exactly one additional pure helper: no market pipeline or execution import.
-+  const allowed = new Set(["'../lib/jsonl.js'", "'../lib/config.js'", "'../lib/book-walk.js'"]);
-   for (const f of readdirSync(LEARNING_DIR).filter((x) => x.endsWith('.js'))) {
-     const src = readFileSync(path.join(LEARNING_DIR, f), 'utf8');
-     for (const m of src.matchAll(/from ('\.\.\/[^']+')/g)) assert.ok(allowed.has(m[1]), `${f} imports ${m[1]} which is not in the allowed reuse set`);
 diff --git a/test/market-lab-fences.test.js b/test/market-lab-fences.test.js
-index c541a47..a21aad5 100644
+index a21aad5..5e20db7 100644
 --- a/test/market-lab-fences.test.js
 +++ b/test/market-lab-fences.test.js
-@@ -24,6 +24,7 @@ const LIVE_FILES = tracked.filter((f) => f === 'fly.js' || f === 'ui/server.js'
- 
+@@ -25,6 +25,7 @@ const LIVE_FILES = tracked.filter((f) => f === 'fly.js' || f === 'ui/server.js'
  test('B08 (research -> live): no research module imports orders, ledger, cost, state, controls, risk, Judge, Watch, the RUMOR-2 runtime or Tape truth; the ONLY crossings are the exact allowlisted pure imports', () => {
    const ALLOWED_CROSSINGS = {
-+    'market-lab/recipes.js': ['lib/book-walk.js'], // dependency-free shared displayed-depth arithmetic only
+     'market-lab/recipes.js': ['lib/book-walk.js'], // dependency-free shared displayed-depth arithmetic only
++    'market-lab/broad-kraken.js': ['survey/catalog.js'], // pure accepted-catalog identity and documented aliases only
      'market-lab/deep-market-adapter.js': ['rumor2/social-research-market.js'], // the v1 deep-market window CONTRACT (validateDeepMarketWindow), never the strainer / collector
      'evidence/social-projection.js': ['rumor2/social-research-dossier.js', 'rumor2/social-research-composite.js', 'rumor2/social-research-profile.js'], // pure validators / vocabularies of settled Social records
      'market-lab/providers/kraken-spot.js': ['tape/book.js', 'survey/catalog.js'], // the pure L2 book state machine + the Kraken catalog normalizer (no tape runtime)
-@@ -45,7 +46,7 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
-   }
-   for (const [f, targets] of Object.entries(ALLOWED_CROSSINGS)) { assert.ok(existsSync(path.join(REPO, f)), f); for (const t of targets) assert.ok(existsSync(path.join(REPO, t)), t); }
-   // the pure crossings are pure: none of them imports a runtime
--  for (const t of ['rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-composite.js', 'rumor2/social-research-profile.js', 'tape/book.js', 'survey/catalog.js']) for (const spec of imports(t)) assert.ok(spec.startsWith('node:') || /^\.\.?\//.test(spec) && !/collector|journal|run\.js|strainer|ledger|cost\/|state\//.test(spec), `${t} -> ${spec}`);
-+  for (const t of ['lib/book-walk.js', 'rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-composite.js', 'rumor2/social-research-profile.js', 'tape/book.js', 'survey/catalog.js']) for (const spec of imports(t)) assert.ok(spec.startsWith('node:') || /^\.\.?\//.test(spec) && !/collector|journal|run\.js|strainer|ledger|cost\/|state\//.test(spec), `${t} -> ${spec}`);
+@@ -50,7 +51,7 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
  });
  
  test('B08 (live -> research): the live path never imports research/, socrates/ or evidence v2; market-lab is reached ONLY by fly.js (service, commands, deep-market adapter) and the read-only UI server (paths); Tape, ledger, cost, state, gateway, governance never mention the research modules', () => {
+-  const ALLOWED = { 'fly.js': ['market-lab/deep-market-adapter.js', 'market-lab/service.js', 'market-lab/commands.js', 'market-lab/paths.js'], 'ui/server.js': ['market-lab/paths.js', 'market-lab/time.js'], 'persistence/social-research-export.js': ['research/'] };
++  const ALLOWED = { 'fly.js': ['market-lab/deep-market-adapter.js', 'market-lab/service.js', 'market-lab/commands.js', 'market-lab/paths.js'], 'ui/server.js': ['market-lab/paths.js', 'market-lab/time.js', 'market-lab/broad-kraken.js'], 'persistence/social-research-export.js': ['research/'] };
+   assert.ok(LIVE_FILES.length >= 30, `live files ${LIVE_FILES.length}`);
+   for (const f of LIVE_FILES) {
+     for (const spec of imports(f)) {
+@@ -61,6 +62,14 @@ test('B08 (live -> research): the live path never imports research/, socrates/ o
+   for (const f of LIVE_FILES.filter((f) => /^(tape|ledger|cost|state|gateway|governance)\//.test(f))) assert.ok(!/market-lab|socrates\/|research-builder|social-projection|createResearchService|createCaseRuntime/.test(code(f)), `${f} mentions the research modules`);
+   // ui/server.js: the research routes are file-based reads; no enqueue, no toggle, no write
+   const ui = read('ui/server.js'); const a = ui.indexOf('function marketResearchSummary'); const b = ui.indexOf('function marketResearchCase'); const c = ui.indexOf('\n}', b);
++  // The broad-market UI seam may read recorded snapshots only. It cannot
++  // import/start the collector or acquire a writer through this exception.
++  assert.deepEqual([...ui.matchAll(/import\s*\{([^}]+)\}\s*from '\.\.\/market-lab\/broad-kraken\.js'/g)].map((m) => m[1].trim()), ['readBroadKrakenLatest']);
++  assert.ok(!/startBroadKraken|createWsClient/.test(ui));
++  const broad = code('market-lab/broad-kraken.js');
++  const reader = broad.slice(broad.indexOf('export function readBroadKrakenLatest('), broad.indexOf('export function startBroadKraken('));
++  assert.ok(reader.length > 500);
++  assert.ok(!/writeFileSync|writeSync|appendFile|unlinkSync|renameSync|mkdirSync|openSync|createWsClient|fetch\(/.test(reader), 'broad UI reader cannot write, start collectors or dispatch');
+   const helpers = ui.slice(a, c); assert.ok(helpers.length > 100); assert.ok(!/writeFile|appendFile|unlink|rename|mkdir|spawn|exec|fetch\(|enqueue|createResearch|process\.env\.\w+\s*=/.test(helpers), 'the UI research helpers only read');
+ });
+ 
