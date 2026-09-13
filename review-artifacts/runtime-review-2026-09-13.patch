@@ -1,36 +1,381 @@
-diff --git a/test/market-lab-fences.test.js b/test/market-lab-fences.test.js
-index a21aad5..5e20db7 100644
---- a/test/market-lab-fences.test.js
-+++ b/test/market-lab-fences.test.js
-@@ -25,6 +25,7 @@ const LIVE_FILES = tracked.filter((f) => f === 'fly.js' || f === 'ui/server.js'
- test('B08 (research -> live): no research module imports orders, ledger, cost, state, controls, risk, Judge, Watch, the RUMOR-2 runtime or Tape truth; the ONLY crossings are the exact allowlisted pure imports', () => {
-   const ALLOWED_CROSSINGS = {
-     'market-lab/recipes.js': ['lib/book-walk.js'], // dependency-free shared displayed-depth arithmetic only
-+    'market-lab/broad-kraken.js': ['survey/catalog.js'], // pure accepted-catalog identity and documented aliases only
-     'market-lab/deep-market-adapter.js': ['rumor2/social-research-market.js'], // the v1 deep-market window CONTRACT (validateDeepMarketWindow), never the strainer / collector
-     'evidence/social-projection.js': ['rumor2/social-research-dossier.js', 'rumor2/social-research-composite.js', 'rumor2/social-research-profile.js'], // pure validators / vocabularies of settled Social records
-     'market-lab/providers/kraken-spot.js': ['tape/book.js', 'survey/catalog.js'], // the pure L2 book state machine + the Kraken catalog normalizer (no tape runtime)
-@@ -50,7 +51,7 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
- });
+diff --git a/learning/activation-chain.js b/learning/activation-chain.js
+new file mode 100644
+--- /dev/null
++++ b/learning/activation-chain.js
+@@ -0,0 +1,79 @@
++// LEARN-1 — pure replay law for the append-only activation journal.
++//
++// An activation is published once, in PUBLISHED_WAITING_FOR_PAPER, then may
++// move only through the closed paper-assessment lifecycle below.  Replaying
++// history never repairs, reorders, or skips a bad row: a malformed origin,
++// gap, immutable-field mutation, clock regression, or illegal edge withholds
++// that activation from decision memory while retaining every stored byte.
++import { activationError, canonicalDigest } from './contracts.js';
++
++export const ACTIVATION_TRANSITIONS = Object.freeze({
++  PUBLISHED_WAITING_FOR_PAPER: Object.freeze(['ACTIVE_PAPER', 'SUSPENDED', 'EXPIRED']),
++  ACTIVE_PAPER: Object.freeze(['SUSPENDED', 'ROLLED_BACK', 'EXPIRED']),
++  SUSPENDED: Object.freeze(['ACTIVE_PAPER', 'ROLLED_BACK', 'EXPIRED']),
++  ROLLED_BACK: Object.freeze([]),
++  EXPIRED: Object.freeze([]),
++});
++
++export const ACTIVATION_MUTABLE_FIELDS = Object.freeze([
++  'seq', 'state', 'transitionReason', 'ts', 'cooldownUntilTs',
++]);
++const MUTABLE = new Set(ACTIVATION_MUTABLE_FIELDS);
++const MAX_REPLAY_ERRORS = 1_000;
++
++export function activationImmutableDigest(record) {
++  if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
++  return canonicalDigest(Object.fromEntries(Object.entries(record).filter(([key]) => !MUTABLE.has(key))));
++}
++
++export function activationTransitionError(previous, next) {
++  const currentErr = activationError(next);
++  if (currentErr) return currentErr;
++  if (previous === null) {
++    if (next.seq !== 0) return 'activation origin must have seq 0';
++    if (next.state !== 'PUBLISHED_WAITING_FOR_PAPER') return 'activation origin must be PUBLISHED_WAITING_FOR_PAPER';
++    return null;
++  }
++  const previousErr = activationError(previous);
++  if (previousErr) return `previous activation invalid (${previousErr})`;
++  if (next.activationId !== previous.activationId) return 'activation identity changed';
++  if (next.seq !== previous.seq + 1) return `activation sequence is not contiguous (${previous.seq} -> ${next.seq})`;
++  if (next.ts < previous.ts) return 'activation clock regressed';
++  if (activationImmutableDigest(next) !== activationImmutableDigest(previous)) return 'activation immutable binding changed';
++  if (!(ACTIVATION_TRANSITIONS[previous.state] ?? []).includes(next.state)) return `activation transition ${previous.state} -> ${next.state} is not lawful`;
++  return null;
++}
++
++export function replayActivationHistory(records) {
++  if (!Array.isArray(records)) return { heads: new Map(), invalid: new Map(), globalErrors: ['activation history is not an array'] };
++  const heads = new Map();
++  const invalid = new Map();
++  const globalErrors = [];
++  const report = (activationId, reason, index) => {
++    const detail = `record ${index + 1}: ${reason}`;
++    if (activationId === null) {
++      if (globalErrors.length < MAX_REPLAY_ERRORS) globalErrors.push(detail);
++      return;
++    }
++    if (!invalid.has(activationId)) invalid.set(activationId, detail);
++    heads.delete(activationId);
++  };
++
++  for (let index = 0; index < records.length; index += 1) {
++    const record = records[index];
++    const activationId = record && typeof record === 'object' && !Array.isArray(record)
++      && typeof record.activationId === 'string' && record.activationId.length > 0 ? record.activationId : null;
++    if (activationId !== null && invalid.has(activationId)) continue;
++    const err = activationTransitionError(activationId === null ? null : (heads.get(activationId) ?? null), record);
++    if (err) { report(activationId, err, index); continue; }
++    heads.set(activationId, record);
++  }
++
++  // An unidentifiable malformed row could belong to any activation.  Failing
++  // closed globally is the only replay result that does not guess around it.
++  if (globalErrors.length > 0) {
++    for (const activationId of heads.keys()) if (!invalid.has(activationId)) invalid.set(activationId, globalErrors[0]);
++    heads.clear();
++  }
++  return { heads, invalid, globalErrors };
++}
+diff --git a/learning/store.js b/learning/store.js
+index 3b0f651..7b6b176 100644
+--- a/learning/store.js
++++ b/learning/store.js
+@@ -10,6 +10,7 @@ import {
+   LIMITS, coverageRowError, episodeError, outcomeAttachError, patternRecordError, activationError, questionError,
+   isPlainObject, isTs, KILL_STATES,
+ } from './contracts.js';
++import { activationTransitionError, replayActivationHistory } from './activation-chain.js';
  
- test('B08 (live -> research): the live path never imports research/, socrates/ or evidence v2; market-lab is reached ONLY by fly.js (service, commands, deep-market adapter) and the read-only UI server (paths); Tape, ledger, cost, state, gateway, governance never mention the research modules', () => {
--  const ALLOWED = { 'fly.js': ['market-lab/deep-market-adapter.js', 'market-lab/service.js', 'market-lab/commands.js', 'market-lab/paths.js'], 'ui/server.js': ['market-lab/paths.js', 'market-lab/time.js'], 'persistence/social-research-export.js': ['research/'] };
-+  const ALLOWED = { 'fly.js': ['market-lab/deep-market-adapter.js', 'market-lab/service.js', 'market-lab/commands.js', 'market-lab/paths.js'], 'ui/server.js': ['market-lab/paths.js', 'market-lab/time.js', 'market-lab/broad-kraken.js'], 'persistence/social-research-export.js': ['research/'] };
-   assert.ok(LIVE_FILES.length >= 30, `live files ${LIVE_FILES.length}`);
-   for (const f of LIVE_FILES) {
-     for (const spec of imports(f)) {
-@@ -61,6 +62,14 @@ test('B08 (live -> research): the live path never imports research/, socrates/ o
-   for (const f of LIVE_FILES.filter((f) => /^(tape|ledger|cost|state|gateway|governance)\//.test(f))) assert.ok(!/market-lab|socrates\/|research-builder|social-projection|createResearchService|createCaseRuntime/.test(code(f)), `${f} mentions the research modules`);
-   // ui/server.js: the research routes are file-based reads; no enqueue, no toggle, no write
-   const ui = read('ui/server.js'); const a = ui.indexOf('function marketResearchSummary'); const b = ui.indexOf('function marketResearchCase'); const c = ui.indexOf('\n}', b);
-+  // The broad-market UI seam may read recorded snapshots only. It cannot
-+  // import/start the collector or acquire a writer through this exception.
-+  assert.deepEqual([...ui.matchAll(/import\s*\{([^}]+)\}\s*from '\.\.\/market-lab\/broad-kraken\.js'/g)].map((m) => m[1].trim()), ['readBroadKrakenLatest']);
-+  assert.ok(!/startBroadKraken|createWsClient/.test(ui));
-+  const broad = code('market-lab/broad-kraken.js');
-+  const reader = broad.slice(broad.indexOf('export function readBroadKrakenLatest('), broad.indexOf('export function startBroadKraken('));
-+  assert.ok(reader.length > 500);
-+  assert.ok(!/writeFileSync|writeSync|appendFile|unlinkSync|renameSync|mkdirSync|openSync|createWsClient|fetch\(/.test(reader), 'broad UI reader cannot write, start collectors or dispatch');
-   const helpers = ui.slice(a, c); assert.ok(helpers.length > 100); assert.ok(!/writeFile|appendFile|unlink|rename|mkdir|spawn|exec|fetch\(|enqueue|createResearch|process\.env\.\w+\s*=/.test(helpers), 'the UI research helpers only read');
- });
+ export const LEARNING_DIR_NAME = 'learning';
+ export const learningDir = (dataDirPath) => path.join(dataDirPath, LEARNING_DIR_NAME);
+@@ -135,16 +136,38 @@ export function createLearningStore({ dataDir, log = () => {} }) {
+   const readProspective = () => { const out = []; if (!existsSync(fileOf('prospective'))) return out; for (const r of readJsonl(fileOf('prospective'))) out.push(r); return out; };
  
+   // ---- activations
++  // Activation history is replayed from every physical row rather than from
++  // readValidated(): skipping one malformed transition could otherwise leave
++  // an older ACTIVE_PAPER head looking authoritative.  An unparseable row has
++  // no trustworthy identity and therefore fails the whole activation view
++  // closed; an attributable bad row withholds only that activation.
++  const activationHistory = () => {
++    const file = fileOf('activations');
++    if (!existsSync(file)) return replayActivationHistory([]);
++    const rows = []; let unidentifiable = false; let nonEmpty = 0;
++    for (const line of readFileSync(file, 'utf8').split('\n')) {
++      const text = line.trim(); if (!text) continue;
++      nonEmpty += 1;
++      if (nonEmpty > LIMITS.maxReadRecords) { unidentifiable = true; counters.invalidRejected += 1; break; }
++      try { rows.push(JSON.parse(text)); }
++      catch { unidentifiable = true; counters.corruptSkipped += 1; }
++    }
++    if (unidentifiable) rows.push(null); // pure replay treats this as an unattributable, fail-closed history error
++    const replay = replayActivationHistory(rows);
++    counters.invalidRejected += replay.invalid.size;
++    return replay;
++  };
+   const appendActivation = (a) => {
+-    const rows = readValidated('activations').filter((r) => r.activationId === a.activationId);
+-    const expectedSeq = rows.length === 0 ? 0 : rows[rows.length - 1].seq + 1;
+-    if (a.seq !== expectedSeq) throw new Error(`learning store: activation seq ${a.seq} is not the expected ${expectedSeq}`);
++    const replay = activationHistory();
++    if (replay.globalErrors.length) throw new Error(`learning store: activation journal invalid (${replay.globalErrors[0]})`);
++    if (typeof a?.activationId === 'string' && replay.invalid.has(a.activationId)) throw new Error(`learning store: activation ${a.activationId} history invalid (${replay.invalid.get(a.activationId)})`);
++    const err = activationTransitionError(replay.heads.get(a?.activationId) ?? null, a);
++    if (err) throw new Error(`learning store: refuse activation transition: ${err}`);
+     return append('activations', a);
+   };
+   const activationHeads = () => {
+-    const byId = new Map();
+-    for (const r of readValidated('activations')) { const prev = byId.get(r.activationId); if (!prev || r.seq === prev.seq + 1) byId.set(r.activationId, r); }
+-    return byId;
++    const replay = activationHistory();
++    return replay.globalErrors.length ? new Map() : replay.heads;
+   };
+ 
+   // ---- questions
+@@ -252,7 +275,7 @@ export function createLearningStore({ dataDir, log = () => {} }) {
+     appendOutcome, readOutcomes, latestOutcomes,
+     appendPattern, patternHeads, patternHistory,
+     appendProspective, readProspective,
+-    appendActivation, activationHeads,
++    appendActivation, activationHeads, activationHistory,
+     appendQuestion, readQuestions,
+     appendCoverage, readCoverage, coverageDates,
+     writeCampaignManifest, readCampaignManifest, appendCampaignResult, readCampaignResults,
+diff --git a/learning/memory-view.js b/learning/memory-view.js
+index dd9a9ad..74edc0e 100644
+--- a/learning/memory-view.js
++++ b/learning/memory-view.js
+@@ -27,8 +27,19 @@ export function readResearchMemory({ store, limit = 200 }) {
+ // decision-influencing consumers: immutable validated activation artifacts only. Every head re-earns its way
+ // through the closed validator at read time; an invalid record is EXCLUDED and reported, never repaired.
+ export function readDecisionMemory({ store, nowTs }) {
+-  const heads = [...store.activationHeads().values()];
+-  const activations = []; const withheld = [];
++  const history = typeof store.activationHistory === 'function'
++    ? store.activationHistory()
++    : { heads: new Map(), invalid: new Map(), globalErrors: ['ACTIVATION_HISTORY_UNAVAILABLE'] };
++  const heads = [...history.heads.values()];
++  const activations = [];
++  const withheld = [
++    ...[...history.invalid.entries()].map(([activationId, reason]) => ({ activationId, reason: `ACTIVATION_HISTORY_INVALID:${reason}` })),
++    ...history.globalErrors.map((reason) => ({ activationId: 'UNKNOWN', reason: `ACTIVATION_HISTORY_INVALID:${reason}` })),
++  ];
++  if (history.globalErrors.length) {
++    return deepFreeze({ view: 'DECISION', version: MEMORY_VIEW_VERSION, law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY', preparedTs: nowTs, activations: [], withheld, kill: store.readKill() });
++  }
++  const patterns = store.patternHeads();
+   let records = []; let prospective = null;
+   try {
+     if (heads.length) {
+@@ -37,11 +48,23 @@ export function readDecisionMemory({ store, nowTs }) {
+       if (prospective.errors.length) throw new Error('prospective evidence invalid');
+     }
+   } catch {
+-    return deepFreeze({ view: 'DECISION', version: MEMORY_VIEW_VERSION, law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY', preparedTs: nowTs, activations: [], withheld: heads.map((a) => ({ activationId: a?.activationId ?? 'UNKNOWN', reason: 'PROSPECTIVE_EVIDENCE_INVALID' })), kill: store.readKill() });
++    return deepFreeze({ view: 'DECISION', version: MEMORY_VIEW_VERSION, law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY', preparedTs: nowTs, activations: [], withheld: [...withheld, ...heads.map((a) => ({ activationId: a?.activationId ?? 'UNKNOWN', reason: 'PROSPECTIVE_EVIDENCE_INVALID' }))], kill: store.readKill() });
+   }
+   for (const a of heads) {
+     const err = activationError(a);
+     if (err) { withheld.push({ activationId: a?.activationId ?? 'UNKNOWN', reason: 'ACTIVATION_RECORD_INVALID' }); continue; }
++    if (a.state === 'ACTIVE_PAPER') {
++      const pattern = patterns.get(a.patternId);
++      if (!pattern || pattern.state !== 'ACTIVE_PAPER' || pattern.activationId !== a.activationId || pattern.candidateId !== a.candidateId) {
++        // Adoption spans two append-only journals.  Until both exact heads are
++        // present, the partial write has no decision authority and remains
++        // visible for deterministic operator recovery.
++        withheld.push({ activationId: a.activationId, reason: 'ACTIVE_PATTERN_BINDING_MISSING' }); continue;
++      }
++      if (!Number.isSafeInteger(pattern.ts) || pattern.ts > nowTs) {
++        withheld.push({ activationId: a.activationId, reason: 'ACTIVE_PATTERN_NOT_EFFECTIVE' }); continue;
++      }
++    }
+     const design = prospective?.designs.get(a.candidateId);
+     const terminal = prospective?.terminals.get(a.candidateId);
+     if (!design || !terminal || terminal.verdict !== 'FORWARD_SUPPORTED' || terminal.recordedTs > a.effectiveTs || a.ts > nowTs) {
+diff --git a/test/learning-activation-chain.test.js b/test/learning-activation-chain.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/learning-activation-chain.test.js
+@@ -0,0 +1,133 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { buildActivation, transitionActivation } from '../learning/adapter.js';
++import {
++  activationImmutableDigest, activationTransitionError, replayActivationHistory,
++} from '../learning/activation-chain.js';
++import { createLearningStore } from '../learning/store.js';
++import { readDecisionMemory } from '../learning/memory-view.js';
++
++const T = Date.UTC(2026, 8, 13);
++const DAY = 86_400_000;
++const predicate = { clauses: [{ feature: 'rv60', op: 'GTE', threshold: 2 }] };
++
++function published(overrides = {}) {
++  return buildActivation({
++    candidateId: 'lcand-chain', patternId: 'lpat-chain', trainingCutoffTs: T - DAY,
++    candidateDigest: 'candidate-digest', evidenceDigest: 'evidence-digest', reportDigest: 'report-digest',
++    maxAbsAdjust: 0.1, adjust: 0.05,
++    validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 },
++    scope: { setupType: 'RANGE_IGNITION', regime: 'LIVE_UNCLASSIFIED', assets: 'ANY', venues: ['kraken'] },
++    featureRecipeVersion: 'judge-prepared-market-features-1', policyVersion: 'a'.repeat(64),
++    applicability: predicate, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T,
++    ...overrides,
++  });
++}
++
++test('activation replay accepts only the closed contiguous lifecycle and keeps immutable publication binding fixed', () => {
++  const pub = published();
++  const active = transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
++  const suspended = transitionActivation(active, { state: 'SUSPENDED', transitionReason: 'OPERATOR_SUSPENDED', ts: T + 2 });
++  const resumed = transitionActivation(suspended, { state: 'ACTIVE_PAPER', transitionReason: 'OWNER_RESUMED', ts: T + 3 });
++  const rolled = transitionActivation(resumed, { state: 'ROLLED_BACK', transitionReason: 'PREDECLARED_DEGRADATION_RULE_MET', ts: T + 4, cooldownUntilTs: T + DAY });
++  const replay = replayActivationHistory([pub, active, suspended, resumed, rolled]);
++  assert.equal(replay.invalid.size, 0);
++  assert.equal(replay.globalErrors.length, 0);
++  assert.equal(replay.heads.get(pub.activationId).state, 'ROLLED_BACK');
++  assert.equal(activationImmutableDigest(pub), activationImmutableDigest(rolled));
++  assert.match(activationTransitionError(rolled, transitionActivation(rolled, { state: 'ACTIVE_PAPER', transitionReason: 'ILLEGAL', ts: T + 5 })), /not lawful/);
++});
++
++test('bad origin, gaps, clock regression, immutable mutation and illegal edges withhold the exact activation', () => {
++  const pub = published();
++  const active = transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
++  const cases = [
++    [{ ...active }],
++    [pub, { ...active, seq: 2 }],
++    [pub, { ...active, ts: T - 1 }],
++    [pub, { ...active, featureRecipeVersion: 'judge-prepared-market-features-2' }],
++    [pub, transitionActivation(pub, { state: 'ROLLED_BACK', transitionReason: 'ILLEGAL', ts: T + 1 })],
++  ];
++  for (const rows of cases) {
++    const replay = replayActivationHistory(rows);
++    assert.equal(replay.heads.has(pub.activationId), false);
++    assert.equal(replay.invalid.has(pub.activationId), true);
++  }
++});
++
++test('the store refuses unlawful appends and an attributable bad physical row is retained but never a head', () => {
++  const dir = mkdtempSync(path.join(tmpdir(), 'cobra-activation-chain-'));
++  try {
++    const store = createLearningStore({ dataDir: dir });
++    const pub = published();
++    const active = transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
++    assert.throws(() => store.appendActivation(active), /origin must have seq 0/);
++    store.appendActivation(pub);
++    assert.throws(() => store.appendActivation({ ...active, seq: 2 }), /not contiguous/);
++    store.appendActivation(active);
++    assert.equal(store.activationHeads().get(pub.activationId).state, 'ACTIVE_PAPER');
++
++    const file = path.join(dir, 'learning', 'activations.jsonl');
++    const bad = { ...transitionActivation(active, { state: 'SUSPENDED', transitionReason: 'TAMPER', ts: T + 2 }), policyVersion: 'b'.repeat(64) };
++    appendFileSync(file, `${JSON.stringify(bad)}\n`, 'utf8');
++    const bytes = readFileSync(file, 'utf8');
++    const replay = store.activationHistory();
++    assert.equal(replay.invalid.has(pub.activationId), true);
++    assert.equal(replay.heads.has(pub.activationId), false);
++    assert.equal(readFileSync(file, 'utf8'), bytes, 'replay withholds; it never deletes or repairs stored history');
++
++    appendFileSync(file, '{torn-json\n', 'utf8');
++    assert.equal(store.activationHistory().globalErrors.length, 1);
++    assert.equal(store.activationHeads().size, 0, 'an unattributable corrupt row fails the entire activation view closed');
++  } finally {
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++test('decision memory withholds an ACTIVE activation until the exact pattern head is also ACTIVE', () => {
++  const pub = published();
++  const active = transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
++  const store = {
++    activationHistory: () => ({ heads: new Map([[active.activationId, active]]), invalid: new Map(), globalErrors: [] }),
++    activationHeads: () => new Map([[active.activationId, active]]),
++    patternHeads: () => new Map(),
++    readProspective: () => [],
++    readKill: () => ({ state: 'ARMED', reason: null, ts: null }),
++  };
++  const snapshot = readDecisionMemory({ store, nowTs: T + 2 });
++  assert.equal(snapshot.activations.length, 0);
++  assert.deepEqual(snapshot.withheld, [{ activationId: active.activationId, reason: 'ACTIVE_PATTERN_BINDING_MISSING' }]);
++});
++
++test('decision memory has no legacy activation-head fallback when replayable history is unavailable', () => {
++  const active = transitionActivation(published(), { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
++  const store = {
++    activationHeads: () => new Map([[active.activationId, active]]),
++    patternHeads: () => new Map(),
++    readProspective: () => [],
++    readKill: () => ({ state: 'ARMED', reason: null, ts: null }),
++  };
++  const snapshot = readDecisionMemory({ store, nowTs: T + 2 });
++  assert.equal(snapshot.activations.length, 0);
++  assert.deepEqual(snapshot.withheld, [{ activationId: 'UNKNOWN', reason: 'ACTIVATION_HISTORY_INVALID:ACTIVATION_HISTORY_UNAVAILABLE' }]);
++});
++
++test('decision memory never lets a future ACTIVE pattern complete a partial two-journal adoption', () => {
++  const active = transitionActivation(published(), { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
++  const futurePattern = {
++    patternId: active.patternId, candidateId: active.candidateId, activationId: active.activationId,
++    state: 'ACTIVE_PAPER', ts: T + 10,
++  };
++  const store = {
++    activationHistory: () => ({ heads: new Map([[active.activationId, active]]), invalid: new Map(), globalErrors: [] }),
++    patternHeads: () => new Map([[futurePattern.patternId, futurePattern]]),
++    readProspective: () => [],
++    readKill: () => ({ state: 'ARMED', reason: null, ts: null }),
++  };
++  const snapshot = readDecisionMemory({ store, nowTs: T + 2 });
++  assert.equal(snapshot.activations.length, 0);
++  assert.deepEqual(snapshot.withheld, [{ activationId: active.activationId, reason: 'ACTIVE_PATTERN_NOT_EFFECTIVE' }]);
++});
+diff --git a/test/learning-promotion-consumer-binding.test.js b/test/learning-promotion-consumer-binding.test.js
+index dbe49d1..a602a7e 100644
+--- a/test/learning-promotion-consumer-binding.test.js
++++ b/test/learning-promotion-consumer-binding.test.js
+@@ -110,6 +110,14 @@ test('a v2 candidate seals the exact consumer binding, promotion copies it, and
+       state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: settledTs + 1,
+     });
+     store.appendActivation(active);
++    const validatedPattern = store.patternHeads().get(pattern.patternId);
++    store.appendPattern(buildPatternRecord({
++      predicate: validatedPattern.predicate, scope: validatedPattern.scope, origin: validatedPattern.origin,
++      createdTs: validatedPattern.createdTs, ts: settledTs + 1, seq: validatedPattern.seq + 1,
++      state: 'ACTIVE_PAPER', previousState: validatedPattern.state, transitionReason: 'PAPER_RUNTIME_ADOPTED',
++      evidence: validatedPattern.evidence, estimate: validatedPattern.estimate, contradictions: validatedPattern.contradictions,
++      candidateId: validatedPattern.candidateId, activationId: active.activationId,
++    }));
+     const nowTs = settledTs + 2;
+     const snapshot = readDecisionMemory({ store, nowTs });
+     assert.equal(snapshot.activations.length, 1);
+@@ -137,7 +145,8 @@ test('a v2 candidate seals the exact consumer binding, promotion copies it, and
+       { policyVersion: 'b'.repeat(64) },
+     ]) {
+       const forged = { ...active, ...mutation };
+-      const tamperedStore = { ...store, activationHeads: () => new Map([[forged.activationId, forged]]) };
++      const forgedHeads = new Map([[forged.activationId, forged]]);
++      const tamperedStore = { ...store, activationHeads: () => forgedHeads, activationHistory: () => ({ heads: forgedHeads, invalid: new Map(), globalErrors: [] }) };
+       const withheld = readDecisionMemory({ store: tamperedStore, nowTs });
+       assert.equal(withheld.activations.length, 0);
+       assert.equal(withheld.withheld[0].reason, 'ACTIVATION_EVIDENCE_MISMATCH');
+diff --git a/test/learning-prospective.test.js b/test/learning-prospective.test.js
+index d175f9a..68ba60c 100644
+--- a/test/learning-prospective.test.js
++++ b/test/learning-prospective.test.js
+@@ -135,7 +135,7 @@ test('K. the synthetic qualifying dataset proves the full promotion path — and
+       { validation: { ...result.activation.validation, groupCount: 3000 } },
+     ]) {
+       const forged = { ...result.activation, ...mutation };
+-      const tamperedStore = { ...store, activationHeads: () => new Map([[forged.activationId, forged]]) };
++      const forgedHeads = new Map([[forged.activationId, forged]]); const tamperedStore = { ...store, activationHeads: () => forgedHeads, activationHistory: () => ({ heads: forgedHeads, invalid: new Map(), globalErrors: [] }) };
+       const withheld = readDecisionMemory({ store: tamperedStore, nowTs: T0 + 41 * DAY });
+       assert.equal(withheld.activations.length, 0, JSON.stringify(mutation));
+       assert.equal(withheld.withheld[0].reason, 'ACTIVATION_EVIDENCE_MISMATCH');
