@@ -19,6 +19,9 @@ export const AUTHORITY = 'NONE';
 export const PURPOSE = 'RESEARCH_ONLY';
 export const MAX_SCALE_D = 1_000_000;
 export const MAX_ABS_FORECAST_PERCENT = 1_000_000;
+// Engineering custody bound, not a statistical theorem: a decision-time
+// forecast must reach this store almost immediately or the frame is refused.
+export const MAX_FORECAST_PERSISTENCE_LAG_MS = 5_000;
 
 const nonempty = (v, max = 200) => typeof v === 'string' && v.length > 0 && v.length <= max && !/[\r\n\0]/.test(v);
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -84,6 +87,7 @@ export function initialScaleFreeOgdState(procedure) {
     radius: procedure.adaptiveMethod.initialRadius,
     gradientNormSquared: 0,
     boundAssumptionViolations: 0,
+    availableAtTs: null,
   });
 }
 
@@ -127,6 +131,7 @@ export function assertScaleFreeOgdState(state, procedure) {
       || !finite(state.radius) || state.radius < 0
       || !finite(state.gradientNormSquared) || state.gradientNormSquared < 0
       || !Number.isSafeInteger(state.boundAssumptionViolations) || state.boundAssumptionViolations < 0
+      || !(state.availableAtTs === null || isTs(state.availableAtTs))
       || state.digest !== canonicalDigest(Object.fromEntries(Object.entries(state).filter(([key]) => key !== 'digest')))) {
     throw new Error('adaptive uncertainty: invalid or altered Scale-Free OGD state');
   }
@@ -178,8 +183,11 @@ export function buildShadowForecast({ procedure, state, input, issuedTs, issueSe
       || input.informationCutoffTs > input.decisionTs
       || input.horizonEndTs !== targetHorizonEndTs(input.decisionTs)
       || !isTs(issuedTs) || issuedTs < input.decisionTs
+      || issuedTs - input.decisionTs > MAX_FORECAST_PERSISTENCE_LAG_MS
+      || issuedTs >= input.horizonEndTs
+      || (state.availableAtTs !== null && state.availableAtTs > input.informationCutoffTs)
       || !Number.isSafeInteger(issueSequence) || issueSequence <= 0) {
-    throw new Error('adaptive uncertainty: forecast identity/clocks/60-minute target are malformed');
+    throw new Error('adaptive uncertainty: forecast identity/clocks/state availability/60-minute target are malformed or late');
   }
   const predictor = normalizePredictor(input.predictor, input.informationCutoffTs);
   const adaptiveInterval = intervalOf(predictor.value, state.radius);
@@ -288,7 +296,7 @@ export function scoreShadowForecast({ procedure, forecast, outcome, scoredTs }) 
   });
 }
 
-export function updateScaleFreeOgd({ procedure, state, score }) {
+export function updateScaleFreeOgd({ procedure, state, score, appliedTs }) {
   assertProcedure(procedure);
   assertScaleFreeOgdState(state, procedure);
   if (!isPlainObject(score) || score.kind !== 'SCORE' || score.version !== ADAPTIVE_UNCERTAINTY_VERSION
@@ -298,6 +306,9 @@ export function updateScaleFreeOgd({ procedure, state, score }) {
   }
   if (!score.updateEligible) {
     return { state, applied: false, reason: score.updateReason, gradient: null, boundAssumptionViolated: false };
+  }
+  if (!isTs(appliedTs) || appliedTs < score.scoredTs) {
+    throw new Error('adaptive uncertainty: update availability precedes its durable score');
   }
   if (!finite(score.residual) || score.residual < 0) throw new Error('adaptive uncertainty: update residual is invalid');
   const coverage = procedure.adaptiveMethod.targetCoverage;
@@ -321,6 +332,7 @@ export function updateScaleFreeOgd({ procedure, state, score }) {
     radius,
     gradientNormSquared,
     boundAssumptionViolations: state.boundAssumptionViolations + (violated ? 1 : 0),
+    availableAtTs: appliedTs,
   });
   return { state: next, applied: true, reason: 'KNOWN_TARGET', gradient, boundAssumptionViolated: violated };
 }

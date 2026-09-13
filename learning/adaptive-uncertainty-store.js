@@ -152,7 +152,7 @@ function replay(rows, procedure) {
           || update.appliedTs !== row.ingestedTs) {
         throw new Error('adaptive uncertainty store: update is out of issue order or has no exact score/state join');
       }
-      const computed = updateScaleFreeOgd({ procedure, state, score });
+      const computed = updateScaleFreeOgd({ procedure, state, score, appliedTs: update.appliedTs });
       const expected = buildUpdateRecord({ forecast, score, priorState: state, computed, appliedTs: update.appliedTs });
       if (expected.digest !== update.digest) throw new Error('adaptive uncertainty store: update does not reproduce exactly');
       state = computed.state;
@@ -291,8 +291,8 @@ export function openAdaptiveUncertaintyStore({ dataDir, procedure, clock = () =>
       const score = view.scores.get(forecast.forecastId);
       if (!score) break; // Delayed/missing label blocks this and every later issue; nothing is imputed or reordered.
       const priorState = view.state;
-      const computed = updateScaleFreeOgd({ procedure, state: priorState, score });
       const appliedTs = readClock();
+      const computed = updateScaleFreeOgd({ procedure, state: priorState, score, appliedTs });
       const update = buildUpdateRecord({ forecast, score, priorState, computed, appliedTs });
       append('UPDATE', update, appliedTs);
       view.state = computed.state;
@@ -310,14 +310,9 @@ export function openAdaptiveUncertaintyStore({ dataDir, procedure, clock = () =>
     assertWritable();
     const prior = view.forecastsByOpportunity.get(input?.opportunityId);
     if (prior) {
-      const attempted = buildShadowForecast({
-        procedure,
-        state: view.state,
-        input,
-        issuedTs: prior.issuedTs,
-        issueSequence: prior.issueSequence,
-      });
-      if (attempted.sourceInputDigest === prior.sourceInputDigest) return prior;
+      let attemptedDigest = null;
+      try { attemptedDigest = canonicalDigest(input); } catch { /* conflict below */ }
+      if (attemptedDigest === prior.sourceInputDigest) return prior;
       throw new Error('adaptive uncertainty store: one primary opportunity cannot be duplicated by a variant/account');
     }
     if (view.forecasts.size >= STORE_LIMITS.maxForecasts) throw new Error('adaptive uncertainty store: forecast bound reached');

@@ -29,6 +29,12 @@ of the one-minute bar closing at that anchor, and `horizonEndTs = anchorTs + 60 
 misstated as direct `decisionTs + 60 minutes` when a decision falls between candle boundaries. Censored and
 unavailable labels remain nonnumeric and are never replaced by zero.
 
+The store assigns the durable `issuedTs` and refuses a forecast arriving more than 5 seconds after its declared
+`decisionTs` or at/after its target horizon. This is an engineering custody bound, not a zero-lag claim. Because
+the candle anchor can equal the decision instant, the bound does not prove that no tick on the eventual target
+path was observable before the forecast fsync completed. Evaluation must use the actual durable `issuedTs`; it
+must never backdate the forecast to the caller's intended `decisionTs`.
+
 ## Selected published method
 
 The method is the direct-radius Scale-Free Online Gradient Descent (SF-OGD) comparator from Algorithm 2 of
@@ -75,6 +81,9 @@ arrive later, and may be missing. This implementation therefore changes the feed
 An unresolved earlier forecast blocks later scored forecasts. No later label jumps the queue, no missing label is
 zero-filled, and variants/accounts cannot mint another forecast for the same primary `opportunityId`.
 `CENSORED` and `UNAVAILABLE` terminal scores advance the ordered prefix without changing SF-OGD state.
+Every state-changing update records an `availableAtTs` at or after the durable score timestamp. A later forecast
+can use that state only when `availableAtTs <= informationCutoffTs`, preventing learned calibrator state from
+being backdated into an earlier decision.
 
 The journal is capped at 64 MiB, 200,000 rows, 50,000 primary forecasts, and 64 KiB per line. It is hash chained,
 fully replayed before writes, protected by a single `wx` writer lock, and paired with a head record that detects
@@ -103,6 +112,9 @@ guarantees. One market episode remains one primary opportunity even if it has mu
   `NONE_FOR_DELAYED_MISSING_OR_CENSORED_IMPLEMENTATION`.
 - **No alpha claim:** the zero-return predictor is a null research baseline. An external predictor must earn its own
   prospective evidence; supplying one does not make it valid.
+- **Point-forecast custody is not raw-feature custody:** the external port seals the supplied scalar value,
+  predictor version/state digest, and `knownAtTs`; it does not independently capture or reproduce every raw fact
+  or formula used by the caller. That evidence boundary remains an integration prerequisite.
 - **No profitability or execution claim:** return coverage says nothing about fill probability, spread, fees,
   slippage, market impact, realized P&L, or safe size.
 - **No behavioral authority:** diagnostics cannot veto, promote, size, trade, or modify paper behavior.
