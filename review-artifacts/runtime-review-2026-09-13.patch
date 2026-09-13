@@ -1,50 +1,90 @@
-diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
-index 7e70180..c4b668d 100644
---- a/docs/JUDGE-PAPER-AUDIT.md
-+++ b/docs/JUDGE-PAPER-AUDIT.md
-@@ -68,6 +68,19 @@ all (41 files)   de596a9656405be2e463a3985f5d14667ca725cedf68a08e0a8aaac18c7ac19
- 
- ### 4.4 Audited change — 2026-09-13 fail-closed learning and sizing review (previous digests: judge `c8e48d5c10b5...`, all `f9487cccf92f...`; execution/ and watch/watch.js still byte-identical)
- 
-+Configuration baseline correction: commit `db4b1a2` already carried the operator's
-+`paper.baseBalanceUsd: 500` before this review (exact `cobra.config.json` SHA-256
-+`687d136747ee1292cbcfec6c4ac57ddcc322499696d65e9ab3cd90b087c61d87`). The two
-+closeout byte fences now protect that committed configuration instead of the stale
-+pre-`db4b1a2` $100 digest. This correction does not edit configuration, runtime state,
-+execution, Watch, or trading authority.
+diff --git a/lib/bounded-fetch.js b/lib/bounded-fetch.js
+index f136db1..c459844 100644
+--- a/lib/bounded-fetch.js
++++ b/lib/bounded-fetch.js
+@@ -22,7 +22,7 @@ async function requestBounded(url, options, json) {
+     etag = null, lastModified = null, signal = null, method = 'GET', body = undefined, jsonReviver = undefined } = options;
+   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || !Number.isSafeInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > 5 || !['GET', 'POST'].includes(method)) return { outcome: 'FAILED', reason: 'invalid transport bounds or method' };
+   if (signal?.aborted) return { outcome: 'FAILED', reason: 'request stopped' };
+-  const ctl = new AbortController(); let reader = null; let response = null; let timer;
++  const ctl = new AbortController(); let reader = null; let response = null; let timer; let failureStage = 'transport';
+   const abort = () => ctl.abort(); signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
+   const deadline = new Promise((_, reject) => {
+     const fail = () => reject(new Error(signal?.aborted ? 'request stopped' : `timeout after ${timeoutMs}ms`));
+@@ -37,7 +37,9 @@ async function requestBounded(url, options, json) {
+       if (bad) return { outcome: 'FAILED', reason: bad };
+       const h = { ...(json ? { accept: 'application/json' } : {}), ...headers };
+       if (etag) h['if-none-match'] = etag; if (lastModified) h['if-modified-since'] = lastModified;
++      failureStage = 'network request';
+       response = await race(fetchImpl(current, { method, body, headers: h, redirect: 'manual', signal: ctl.signal }));
++      failureStage = 'transport';
+       const status = response.status;
+       if (status === 304) return etag || lastModified ? { outcome: 'NOT_MODIFIED', status } : { outcome: 'FAILED', status, reason: 'unsolicited 304 without conditional request' };
+       if (status === 429) return { outcome: 'RATE_LIMITED', status, retryAfterSec: retryAfterSeconds(header(response, 'retry-after')) };
+@@ -54,12 +56,15 @@ async function requestBounded(url, options, json) {
+       if (Number.isFinite(declared) && declared > maxBytes) return { outcome: 'FAILED', status, reason: `body over ${maxBytes} bytes` };
+       if (!response.body?.getReader) return { outcome: 'FAILED', status, reason: 'response has no readable body' };
+       reader = response.body.getReader(); const parts = []; let size = 0;
++      failureStage = 'response body read';
+       for (;;) {
+         const { value, done } = await race(reader.read()); if (done) break;
+         size += value.byteLength; if (size > maxBytes) return { outcome: 'FAILED', status, reason: `body over ${maxBytes} bytes` };
+         parts.push(Buffer.from(value));
+       }
++      failureStage = 'response UTF-8 decoding';
+       const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(parts));
++      failureStage = 'transport';
+       const result = { outcome: response.ok ? 'OK' : 'FAILED', status, contentType, etag: header(response, 'etag'), lastModified: header(response, 'last-modified') };
+       result.rateHeaders = Object.fromEntries(['x-ratelimit-remaining','x-ratelimit-reset','x-ratelimit-used'].map(k => [k, header(response, k)]));
+       if (!response.ok) result.reason = `HTTP ${status}`;
+@@ -72,7 +77,9 @@ async function requestBounded(url, options, json) {
+     return { outcome: 'FAILED', reason: `more than ${maxRedirects} redirects` };
+   } catch (err) {
+     // Neither URLs, response text, nor transport error messages may echo credentials into status.
+-    return { outcome: 'FAILED', reason: ctl.signal.aborted ? (signal?.aborted ? 'request stopped' : `timeout after ${timeoutMs}ms`) : err instanceof TypeError ? 'network or response decoding failed' : 'transport failed' };
++    return { outcome: 'FAILED', reason: ctl.signal.aborted
++      ? (signal?.aborted ? 'request stopped' : `timeout after ${timeoutMs}ms`)
++      : `${failureStage} failed` };
+   } finally {
+     clearTimeout(timer); signal?.removeEventListener('abort', abort);
+     if (reader) { cancel(reader); try { reader.releaseLock(); } catch { /* pending read */ } }
+diff --git a/test/bounded-fetch-diagnostics.test.js b/test/bounded-fetch-diagnostics.test.js
+new file mode 100644
+index 0000000..adda873
+--- /dev/null
++++ b/test/bounded-fetch-diagnostics.test.js
+@@ -0,0 +1,34 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { fetchJsonBounded } from '../lib/bounded-fetch.js';
 +
-+The package fence likewise now protects the already-authorized data-only entrypoints
-+(`data:only`, `data:only-ui`, and `data:status`) at exact `package.json` SHA-256
-+`22868ac835d3be284b6cb3a63703b27c92c04a2bcf4301b360511fb5ff3208d8`. No dependency
-+changed: `package-lock.json` remains exactly
-+`85ade4bd1ce094c37c89574a0adbe4e057e7d1a39358c45dcc3336925ee4ac6e`.
++const url = 'https://sensor.example/feed';
++const base = { host: 'sensor.example', timeoutMs: 100, maxBytes: 1024 };
 +
- This review repaired reproduced integrity and bounded-record defects in the dormant learning/sizing path. It does not
- claim model quality, profitable behavior, paper readiness, or complete validation. Both ports remain null-default and
- unwired in `fly.js`; no threshold, risk cap, admission rule, entry permission, execution path, Watch rule, or LIVE
-diff --git a/test/judge-focused-fences.test.js b/test/judge-focused-fences.test.js
-index c6bb96e..33c2fe9 100644
---- a/test/judge-focused-fences.test.js
-+++ b/test/judge-focused-fences.test.js
-@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
- const sha = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');
- const atHead = (file) => { try { return createHash('sha256').update(execFileSync('git', ['show', `HEAD:${file}`], { cwd: process.cwd(), maxBuffer: 64 * 1024 * 1024 })).digest('hex'); } catch { return null; } };
- // the reviewed baseline hashes (§0): recorded before any production edit of this completion
--const PROTECTED = { 'cobra.config.json': '68c16400fb0d776ce304cd97ae40ee742e32f2838d1b57f52bdefb0dd9c9c79a', 'package.json': '823094445a7070fe07987b19b33c4c6fa51e97df46bb54b4ee7d55b4634c4e87' /* SERPENT paper closeout: three paper scripts (paper, paper:preflight, paper:inventory); dependencies unchanged */, 'package-lock.json': '85ade4bd1ce094c37c89574a0adbe4e057e7d1a39358c45dcc3336925ee4ac6e' };
-+const PROTECTED = { 'cobra.config.json': '687d136747ee1292cbcfec6c4ac57ddcc322499696d65e9ab3cd90b087c61d87' /* preexisting db4b1a2 operator paper base ($500), retained unchanged */, 'package.json': '22868ac835d3be284b6cb3a63703b27c92c04a2bcf4301b360511fb5ff3208d8' /* three preexisting authorized data-only scripts; dependencies unchanged */, 'package-lock.json': '85ade4bd1ce094c37c89574a0adbe4e057e7d1a39358c45dcc3336925ee4ac6e' };
- const NEW_MODULES = ['judge/experiment-bundle.js', 'judge/experiment-replay.js', 'judge/experiment-store.js', 'judge/experiment.js', 'judge/experiment-records.js', 'test/helpers/offline-guard.mjs', 'test/helpers/scripted-ws.js', 'tools/offline-gate.mjs'];
- 
- test('C01. protected bytes and dependencies: cobra.config.json, package.json and the lockfile carry the reviewed baseline digests; doctrine/MISSION.md, the sample policies, the legacy evidence / analysis v1 contracts and every migration before 9 are byte-identical to the committed tree; the new modules import only relative modules and node builtins (no new dependency); research configuration is refused outside REPLAY and the experiment replay never initializes a PAPER / LIVE account or reads credentials', async () => {
-diff --git a/test/market-closeout-r07-e2e.test.js b/test/market-closeout-r07-e2e.test.js
-index 1e70cdb..e78dcb1 100644
---- a/test/market-closeout-r07-e2e.test.js
-+++ b/test/market-closeout-r07-e2e.test.js
-@@ -331,5 +331,7 @@ test('MC-E07 (joined). existing integrations are preserved: a populated Social-l
-   } finally { await o.stop({ seal: false }); rmSync(dir, { recursive: true, force: true }); }
-   // protected contracts and config: byte-identical to the committed baseline
-   for (const f of ['evidence/contract.js', 'socrates/contract.js', 'cobra.config.json']) { const head = execFileSync('git', ['show', `HEAD:${f}`], { cwd: REPO }); assert.equal(sha256Hex(readFileSync(path.join(REPO, f))), sha256Hex(head), `${f} unchanged`); }
--  assert.equal(sha256Hex(readFileSync(path.join(REPO, 'cobra.config.json'))), '68c16400fb0d776ce304cd97ae40ee742e32f2838d1b57f52bdefb0dd9c9c79a');
-+  // db4b1a2 had already raised the retained operator paper base from $100 to
-+  // $500 before this closeout; protect those exact reviewed bytes.
-+  assert.equal(sha256Hex(readFileSync(path.join(REPO, 'cobra.config.json'))), '687d136747ee1292cbcfec6c4ac57ddcc322499696d65e9ab3cd90b087c61d87');
- });
++test('bounded JSON transport distinguishes a request failure without exposing its message', async () => {
++  const secretBearingError = new TypeError('fetch https://sensor.example/?token=do-not-echo failed');
++  const result = await fetchJsonBounded(url, {
++    ...base,
++    fetchImpl: async () => { throw secretBearingError; }
++  });
++  assert.deepEqual(result, { outcome: 'FAILED', reason: 'network request failed' });
++  assert.doesNotMatch(JSON.stringify(result), /do-not-echo/);
++});
++
++test('bounded JSON transport distinguishes invalid UTF-8 from a network failure', async () => {
++  const bytes = new Uint8Array([0xc3, 0x28]);
++  const result = await fetchJsonBounded(url, {
++    ...base,
++    fetchImpl: async () => new Response(bytes, { headers: { 'content-type': 'application/json' } })
++  });
++  assert.deepEqual(result, { outcome: 'FAILED', reason: 'response UTF-8 decoding failed' });
++});
++
++test('bounded JSON transport still rejects a successful HTML response without exposing its body', async () => {
++  const result = await fetchJsonBounded(url, {
++    ...base,
++    fetchImpl: async () => new Response('<html>publisher error detail</html>', { headers: { 'content-type': 'text/html' } })
++  });
++  assert.deepEqual(result, { outcome: 'PARSE_FAILED', status: 200, reason: 'JSON content type required' });
++  assert.doesNotMatch(JSON.stringify(result), /publisher error detail/);
++});
