@@ -28,6 +28,12 @@ const zFeature = (value, unit) => (Number.isFinite(value) ? { value, unit, lookb
 
 export function startLearning({
   dataDir, env = process.env, populationSource = null, archiveSource = null,
+  // FORWARD-SHADOW hook (Codex coordination): an OPTIONAL, already-constructed shadow runner
+  // (learning/shadow-runner.js createShadowRunner — its own store, its own journal, authority NONE). DEFAULT
+  // OFF: nothing constructs one here, fly.js passes nothing, and with it absent every path below is byte-
+  // identical to before. Present, each tick calls one bounded runner.step() fail-dark — data-only research
+  // capture/maturation through the paced lane; no order, ledger, activation or Judge surface exists below it.
+  shadowRunner = null,
   clock = Date.now, timers = { setInterval, clearInterval }, tickMs = DEFAULT_TICK_MS,
   dailyTarget = DEFAULT_DAILY_TARGET, log = () => {},
 } = {}) {
@@ -36,7 +42,7 @@ export function startLearning({
   let counters = rollCounters(null, clock());
   let lastTick = null; let ticking = false; let stopped = false;
   const lastCapturedBySymbol = new Map();
-  const errors = { capture: 0, maturation: 0, learning: 0 };
+  const errors = { capture: 0, maturation: 0, learning: 0, shadow: 0 };
 
   let lastRecordedSweepId = null;
   function captureTick(nowTs) {
@@ -147,6 +153,7 @@ export function startLearning({
       lastTickTs: lastTick, nowTs, counters: { ...counters, perAsset: undefined, perAssetCount: Object.keys(counters.perAsset).length },
       coverageAges: coverageAges({ lastCapturedBySymbol, nowTs }),
       lastTickReport: tickReport, errors: { ...errors }, storeCounters: store.countersOf(),
+      shadowLane: shadowRunner ? (() => { try { return shadowRunner.status(nowTs); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
       killSwitch: kill, sourceDelayEvidence: PROVIDER_DELAY_EVIDENCE,
       authority: AUTHORITY, purpose: PURPOSE,
       law: 'COLLECTOR_RUNNING_IS_NOT_LEARNER_RUNNING_IS_NOT_VALIDATED_ADAPTIVE_BEHAVIOR',
@@ -162,6 +169,8 @@ export function startLearning({
     try { report.capture = captureTick(nowTs); } catch (err) { errors.capture += 1; report.capture = { failed: err.message }; }
     try { report.maturation = maturationTick(nowTs); } catch (err) { errors.maturation += 1; report.maturation = { failed: err.message }; }
     try { report.learning = learnTick(nowTs); } catch (err) { errors.learning += 1; report.learning = { failed: err.message }; }
+    // the forward-shadow lane (only when a runner was injected; a shadow failure never touches the ticks above)
+    if (shadowRunner) { try { report.shadow = shadowRunner.step({ nowTs }); } catch (err) { errors.shadow += 1; report.shadow = { failed: String(err.message).slice(0, 200) }; } }
     try {
       const yesterday = utcDateOf(nowTs - 86_400_000);
       if (!store.readSummary(yesterday) && store.coverageDates().includes(yesterday)) {

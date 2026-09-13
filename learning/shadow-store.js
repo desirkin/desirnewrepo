@@ -37,6 +37,7 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
   const outcomes = new Map();      // captureId -> terminal/pending head body
   const opportunities = new Set(); // opportunityId
   const ineligible = [];           // bodies
+  const controls = new Map();      // control name -> latest body (e.g. the adapter's consumption cursor)
   const bytesByDate = new Map();   // utcDate(ingestedTs) -> appended bytes (durable quota accounting)
   const rowDigest = (row) => canonicalDigest({ seq: row.seq, prevDigest: row.prevDigest, ingestedTs: row.ingestedTs, kind: row.kind, body: row.body });
   if (existsSync(journalFile)) {
@@ -62,6 +63,7 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
     if (row.kind === 'CAPTURE') { captures.set(row.body.captureId, row.body); opportunities.add(row.body.opportunityId); }
     else if (row.kind === 'OUTCOME') { outcomes.set(row.body.captureId, row.body); }
     else if (row.kind === 'INELIGIBLE') ineligible.push(row.body);
+    else if (row.kind === 'CONTROL' && typeof row.body?.control === 'string') controls.set(row.body.control, row.body);
   }
 
   function append(kind, body) {
@@ -133,6 +135,10 @@ export function createShadowStore({ dataDir, clock = () => Date.now(), maxCaptur
   return Object.freeze({
     dir, journalFile,
     appendCapture, appendIneligible, appendOutcome, verify, status,
+    // a CONTROL row is lane bookkeeping riding the SAME tamper-evident chain (e.g. the consumption cursor):
+    // restart reconstructs it from the journal, so consumed history is never re-presented as fresh work
+    appendControl: (body) => (isPlainObject(body) && typeof body.control === 'string' && body.control.length ? append('CONTROL', body) : { ok: false, refused: 'CAPTURE_INVALID', detail: 'control record malformed' }),
+    lastControl: (name) => controls.get(name) ?? null,
     hasCapture: (captureId) => captures.has(captureId),
     captures: () => new Map(captures), outcomes: () => new Map(outcomes), ineligibleRows: () => [...ineligible],
     durableBytes: (date) => bytesByDate.get(date) ?? 0,

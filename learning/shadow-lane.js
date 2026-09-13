@@ -35,31 +35,38 @@ export function createShadowLane({ store, recipe, quotas = {}, clock = () => Dat
     if (!Array.isArray(opportunities)) throw new Error('shadow lane: opportunities must be an array');
     if (!isTs(nowTs)) throw new Error('shadow lane: clock malformed');
     const date = utcDateOf(nowTs); const day = dc(date);
-    const out = { captured: 0, ineligible: 0, deduped: 0, refusedLate: 0, shed: 0, stopped: false, quota: null };
+    const out = { captured: 0, ineligible: 0, deduped: 0, refusedLate: 0, shed: 0, stopped: false, quota: null, consumedThroughTs: null };
     if (stopped) { out.stopped = true; return deepFreeze(out); }
     if (lastBatchEndedMono !== null && monotonic() - lastBatchEndedMono < Q.minInterBatchMs) { out.quota = 'PACING_MIN_INTERVAL'; out.shed = 0; return deepFreeze(out); }
     const startMono = monotonic();
     const slice = opportunities.slice(0, Q.maxBatch);
     if (opportunities.length > Q.maxBatch) { out.shed += opportunities.length - Q.maxBatch; out.quota = 'BATCH_BOUND'; }
+    // consumedThroughTs: the decision clock of the LAST opportunity fully DISPOSED (captured / ineligible /
+    // deduped / refused-late) with nothing shed at or before it — the durable consumption cursor may advance
+    // to exactly here; shed work stays in front of the cursor and is retried, never silently skipped
+    let anyShed = false;
     for (const opp of slice) {
       if (stopped) { out.stopped = true; break; }
-      if (monotonic() - startMono > Q.maxBatchWallMs) { out.quota = 'BATCH_WALL_CLOCK'; out.shed += 1; continue; }
+      if (monotonic() - startMono > Q.maxBatchWallMs) { out.quota = 'BATCH_WALL_CLOCK'; out.shed += 1; anyShed = true; continue; }
+      let oppShed = false;
       let built;
       try { built = buildShadowCapture({ recipe, venue: opp.venue, assetId: opp.assetId, decisionTs: opp.decisionTs, inputs: opp.inputs }); }
-      catch (err) { log(`shadow lane: capture build failed: ${err.message}`); out.ineligible += 1; continue; }
+      catch (err) { log(`shadow lane: capture build failed: ${err.message}`); out.ineligible += 1; if (!anyShed) out.consumedThroughTs = opp.decisionTs; continue; }
       for (const rec of built.ineligible) { store.appendIneligible(rec); out.ineligible += 1; }
       for (const rec of built.eligible) {
         // dedupe FIRST (a duplicate is never an evaluation and never consumes quota), then the quotas at
         // VARIANT granularity — the target counts evaluations, so it binds exactly, never approximately
         if (store.hasCapture(rec.captureId)) { out.deduped += 1; continue; } // never recounted, never inflated
-        if (day.evaluations >= Q.dailyEvaluationTarget) { out.quota = 'DAILY_TARGET_REACHED'; out.shed += 1; day.shed += 1; continue; }
-        if (store.durableBytes(date) > Q.maxDurableBytesPerDay) { out.quota = 'BACKPRESSURE_DURABLE_QUOTA'; out.shed += 1; day.shed += 1; continue; }
+        if (day.evaluations >= Q.dailyEvaluationTarget) { out.quota = 'DAILY_TARGET_REACHED'; out.shed += 1; day.shed += 1; oppShed = true; continue; }
+        if (store.durableBytes(date) > Q.maxDurableBytesPerDay) { out.quota = 'BACKPRESSURE_DURABLE_QUOTA'; out.shed += 1; day.shed += 1; oppShed = true; continue; }
         const r = store.appendCapture(rec);
         if (r.ok) { out.captured += 1; day.evaluations += 1; }
         else if (r.refused === 'DUPLICATE_CAPTURE') out.deduped += 1;
         else if (r.refused === 'LATE_CAPTURE_AFTER_THE_FACT') out.refusedLate += 1;
         else log(`shadow lane: capture refused (${r.refused}): ${r.detail}`);
       }
+      if (oppShed) anyShed = true;
+      else if (!anyShed) out.consumedThroughTs = opp.decisionTs;
     }
     lastBatchEndedMono = monotonic();
     return deepFreeze(out);

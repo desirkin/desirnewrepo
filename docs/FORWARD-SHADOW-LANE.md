@@ -44,28 +44,56 @@ separation fences (no order/ledger/Judge/Watch/network surface). The repo-wide f
 - **No order surface.** No order, ledger, Judge, Watch, execution or network import can exist in the lane
   (fenced by test); the only durable artifact is the immutable research journal.
 
-## Base-branch gaps this lane does NOT solve (named honestly, per the coordination brief)
+## Step 2 (Codex follow-up, same branch): adapter + runner + default-off service hook
 
-1. `learning/service.js` still advances `simulated += 0` against its 10k/day budget — the daily simulation
-   budget is NOT yet routed to this lane (service.js deliberately untouched; the hook is a one-line
-   integration for the owning agent).
-2. `learning/campaign.js` still rejects `PROSPECTIVE_SHADOW` as a campaign mode — the historical campaign and
-   this lane remain separate by design, and the campaign's own mode handling is unchanged.
-3. `fly.js` still caches the historical childhood archive once at startup — the host cannot feed this lane
-   live candles yet (no fly wiring was added, per instruction).
-4. `learning/prospective.js` still trusts self-reported clocks and `metricValue` — the sealed prospective
-   pipeline (owned elsewhere) does not yet consume this lane's store-owned clocks and net-after-costs
-   outcomes. `shadow-result.js` is shaped for that future consumption; nothing consumes it automatically.
+- **`learning/shadow-market-adapter.js`** — the deterministic market-capture-to-shadow adapter. It MIRRORS
+  the market-lab sealed CAPTURE bundle format (manifest member sha256/bytes verified before a single row is
+  trusted; a truncated/partial or altered member refuses the WHOLE bundle) and the `market-observation-1`
+  row shape, without importing any market-lab module (the learning fence forbids it — same
+  mirror-without-import pattern as learning/labels.js). Only FINAL, closed, non-provisional one-minute
+  candles with real prices become decision candles; volume passes through EXACTLY as observed (absence stays
+  absence); trade-flow exists only where TRADE observations were actually received and RAISES the candle's
+  knownAt clock (never lowers it); depth only where a BOOK_SNAPSHOT exists. The decision clock of an
+  opportunity is the LATEST actual receipt (knownAt) of its frozen window — no invented clocks. Maturation
+  paths carry only observations known strictly AFTER the capture and at/before asOf.
+- **`learning/shadow-runner.js`** — the bounded restart-safe driver: consumes injected bundle references
+  (it starts no polling), drives the existing paced lane, and persists a per-market consumption cursor as a
+  CONTROL row ON the tamper-evident chain. The cursor advances exactly to the last fully DISPOSED decision
+  (captured/ineligible/deduped/refused-late); SHED work stays in front of it and is retried — queued work is
+  never counted as completed, and a restarted runner over the same bundles replays NOTHING as fresh (proven:
+  zero captured AND zero deduped after restart — the cursor filters before the lane; dedupe remains the
+  structural backstop).
+- **`learning/service.js` hook (the ONE allowed modification)** — a new optional `shadowRunner` injection,
+  DEFAULT OFF: absent (every current composition; fly.js passes nothing), the tick report has no shadow leg
+  and the status says `shadowLane: null` — behavior is unchanged. Present, each tick runs one bounded
+  `runner.step()` fail-dark (a shadow failure never touches capture/maturation/learning) and the status
+  carries the lane's honest counts. The service never constructs the lane itself (fenced by test).
 
-## Remaining integration blockers (for the owning agents)
+## Base-branch gaps — updated honestly
 
-- Route `learning/service.js`'s daily simulation budget to `createShadowLane.runBatch` (smallest hook; the
-  lane already paces itself) and its maturation sweep to `matureBatch`.
-- A live candle/trade-flow feed adapter for opportunity preparation (host-side; the lane takes prepared
-  inputs only).
-- Promotion-gate consumption of `buildShadowResearchResult` output (validation stays the gate's law; the
-  result is explicitly UNVALIDATED until then).
-- CLI/UI surfaces if wanted (`status()` is JSON-ready).
+1. ~~service integration absent~~ → the default-off hook now exists; the `simulated += 0` line itself is
+   UNCHANGED (that counter belongs to the historical campaign runner, which is still the only thing that may
+   increment it). The shadow lane reports its own counts in `status.shadowLane` instead of borrowing that one.
+2. `learning/campaign.js` still rejects `PROSPECTIVE_SHADOW` as a campaign mode — unchanged, by design.
+3. `fly.js` still caches the historical archive once and wires NO shadow runner — the lane runs only where a
+   composition injects a runner; no live feed reaches it yet. **Live data remains unproven: the Replit sensor
+   patch (local commit 1b87dd3, 64/64 focused tests) has no live-data proof yet and none is claimed here.**
+4. `learning/prospective.js` still trusts self-reported clocks/metricValue — unchanged (owned elsewhere);
+   `shadow-result.js` remains shaped for that future consumption, explicitly UNVALIDATED until the gate runs.
+
+## Remaining integration blockers (exact)
+
+- **fly.js wiring (deliberately absent):** construct `createShadowStore` + `createShadowRunner` with a real
+  `bundleSource` naming the market-lab owner's sealed capture directories, and pass it as
+  `startLearning({ shadowRunner })` — one composition-root change, owned by the host integration agent.
+- **A live bundle source:** something must tell the runner which sealed CAPTURE bundles exist as the day
+  progresses (the market-lab owner writes them; the runner only reads). Until then the lane processes only
+  bundles it is explicitly pointed at.
+- **Live-data proof:** no feed is claimed live; the Replit sensor patch's live verification is pending on the
+  Codex side.
+- **Promotion-gate consumption** of `buildShadowResearchResult` (validation stays the gate's law).
+- **CLI/UI surfaces** if wanted (`runner.status()` / `store.status()` are JSON-ready).
+- Judge-side integration waits for `codex/judge-review-2026-09-13` (`06d24a0`) — not merged, not edited here.
 
 ## What is OFF
 
