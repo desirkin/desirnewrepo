@@ -1,381 +1,693 @@
-diff --git a/learning/activation-chain.js b/learning/activation-chain.js
+diff --git a/learning/decision-memory-worker.js b/learning/decision-memory-worker.js
 new file mode 100644
 --- /dev/null
-+++ b/learning/activation-chain.js
-@@ -0,0 +1,79 @@
-+// LEARN-1 — pure replay law for the append-only activation journal.
-+//
-+// An activation is published once, in PUBLISHED_WAITING_FOR_PAPER, then may
-+// move only through the closed paper-assessment lifecycle below.  Replaying
-+// history never repairs, reorders, or skips a bad row: a malformed origin,
-+// gap, immutable-field mutation, clock regression, or illegal edge withholds
-+// that activation from decision memory while retaining every stored byte.
-+import { activationError, canonicalDigest } from './contracts.js';
++++ b/learning/decision-memory-worker.js
+@@ -0,0 +1,84 @@
++// Authoritative decision-memory reader. All learning-store filesystem work stays
++// in this worker thread; the Judge-facing port receives only a bounded,
++// structured-cloneable snapshot. A missing learning directory is NOT
++// commissioned here: the decision consumer is read-only and fails closed.
++import { createHash } from 'node:crypto';
++import { existsSync, statSync } from 'node:fs';
++import { isMainThread, parentPort, workerData } from 'node:worker_threads';
++import { createLearningStore, learningDir } from './store.js';
++import { readDecisionMemory } from './memory-view.js';
 +
-+export const ACTIVATION_TRANSITIONS = Object.freeze({
-+  PUBLISHED_WAITING_FOR_PAPER: Object.freeze(['ACTIVE_PAPER', 'SUSPENDED', 'EXPIRED']),
-+  ACTIVE_PAPER: Object.freeze(['SUSPENDED', 'ROLLED_BACK', 'EXPIRED']),
-+  SUSPENDED: Object.freeze(['ACTIVE_PAPER', 'ROLLED_BACK', 'EXPIRED']),
-+  ROLLED_BACK: Object.freeze([]),
-+  EXPIRED: Object.freeze([]),
-+});
++export const DECISION_MEMORY_WORKER_PROTOCOL = 'learning-decision-memory-worker-1';
++export const DECISION_MEMORY_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
++export const UNSEALED_ACTIVATION_REASON = 'ACTIVATION_V1_EFFECT_AND_FEATURE_RECIPE_BODY_UNSEALED';
 +
-+export const ACTIVATION_MUTABLE_FIELDS = Object.freeze([
-+  'seq', 'state', 'transitionReason', 'ts', 'cooldownUntilTs',
-+]);
-+const MUTABLE = new Set(ACTIVATION_MUTABLE_FIELDS);
-+const MAX_REPLAY_ERRORS = 1_000;
++const sha256 = (text) => createHash('sha256').update(text).digest('hex');
++const safeId = (value) => (typeof value === 'string' && value.length > 0 && value.length <= 200 && !/\s/.test(value));
++const safeTs = (value) => Number.isSafeInteger(value) && value >= 0;
 +
-+export function activationImmutableDigest(record) {
-+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
-+  return canonicalDigest(Object.fromEntries(Object.entries(record).filter(([key]) => !MUTABLE.has(key))));
++// Activation v1 prospectively bound a policy digest and a feature recipe name,
++// but not the feature recipe body/digest or the rank-effect transform/units.
++// Those durable rows remain readable history; they are never retrofitted after
++// their outcomes and cannot enter a decision snapshot through this boundary.
++export function withholdUnsealedDecisionEffects(memory) {
++  const activations = Array.isArray(memory?.activations) ? memory.activations : [];
++  const prior = Array.isArray(memory?.withheld) ? memory.withheld : [];
++  const withheld = [...prior];
++  for (const activation of activations) {
++    withheld.push({
++      activationId: safeId(activation?.activationId) ? activation.activationId : 'UNKNOWN',
++      reason: activation?.activationVersion === 'learning-activation-1'
++        ? UNSEALED_ACTIVATION_REASON
++        : 'ACTIVATION_CONSUMER_CONTRACT_NOT_SUPPORTED',
++    });
++  }
++  return {
++    view: memory?.view,
++    version: memory?.version,
++    law: memory?.law,
++    preparedTs: memory?.preparedTs,
++    activations: [],
++    withheld,
++    kill: memory?.kill,
++  };
 +}
 +
-+export function activationTransitionError(previous, next) {
-+  const currentErr = activationError(next);
-+  if (currentErr) return currentErr;
-+  if (previous === null) {
-+    if (next.seq !== 0) return 'activation origin must have seq 0';
-+    if (next.state !== 'PUBLISHED_WAITING_FOR_PAPER') return 'activation origin must be PUBLISHED_WAITING_FOR_PAPER';
-+    return null;
++function failure(requestId, code) {
++  return { protocol: DECISION_MEMORY_WORKER_PROTOCOL, requestId, ok: false, code };
++}
++
++function runRequest(request) {
++  const requestId = safeId(request?.requestId) ? request.requestId : 'INVALID';
++  if (request?.protocol !== DECISION_MEMORY_WORKER_PROTOCOL || !safeId(request?.requestId)
++      || typeof request?.dataDir !== 'string' || request.dataDir.length === 0 || request.dataDir.length > 4096
++      || !safeTs(request?.nowTs)) return failure(requestId, 'REQUEST_INVALID');
++  try {
++    const dir = learningDir(request.dataDir);
++    if (!existsSync(dir)) return failure(requestId, 'STORE_NOT_COMMISSIONED');
++    if (!statSync(dir).isDirectory()) return failure(requestId, 'STORE_NOT_DIRECTORY');
++    const store = createLearningStore({ dataDir: request.dataDir });
++    const snapshot = withholdUnsealedDecisionEffects(readDecisionMemory({ store, nowTs: request.nowTs }));
++    const serialized = JSON.stringify(snapshot);
++    if (Buffer.byteLength(serialized, 'utf8') > DECISION_MEMORY_MAX_RESPONSE_BYTES) {
++      return failure(requestId, 'RESPONSE_TOO_LARGE');
++    }
++    return {
++      protocol: DECISION_MEMORY_WORKER_PROTOCOL,
++      requestId,
++      ok: true,
++      preparedTs: request.nowTs,
++      snapshotDigest: sha256(serialized),
++      snapshot,
++    };
++  } catch {
++    return failure(requestId, 'MEMORY_READ_FAILED');
 +  }
-+  const previousErr = activationError(previous);
-+  if (previousErr) return `previous activation invalid (${previousErr})`;
-+  if (next.activationId !== previous.activationId) return 'activation identity changed';
-+  if (next.seq !== previous.seq + 1) return `activation sequence is not contiguous (${previous.seq} -> ${next.seq})`;
-+  if (next.ts < previous.ts) return 'activation clock regressed';
-+  if (activationImmutableDigest(next) !== activationImmutableDigest(previous)) return 'activation immutable binding changed';
-+  if (!(ACTIVATION_TRANSITIONS[previous.state] ?? []).includes(next.state)) return `activation transition ${previous.state} -> ${next.state} is not lawful`;
++}
++
++if (!isMainThread && parentPort) {
++  let response;
++  try { response = runRequest(workerData); }
++  catch { response = failure(safeId(workerData?.requestId) ? workerData.requestId : 'INVALID', 'MEMORY_READ_FAILED'); }
++  parentPort.postMessage(response);
++}
++
+diff --git a/lib/decision-memory-port.js b/lib/decision-memory-port.js
+new file mode 100644
+--- /dev/null
++++ b/lib/decision-memory-port.js
+@@ -0,0 +1,259 @@
++// RAM-only Judge boundary for authoritative learning decision memory.
++//
++// The production constructor has one fixed worker implementation and accepts no
++// store, snapshot, loader, callback, or transport. snapshot() is deliberately
++// synchronous and never starts I/O. Refresh is explicit and intended for an
++// out-of-admission maintenance lane. Nothing composes this port yet.
++import { createHash, randomBytes } from 'node:crypto';
++import { Worker } from 'node:worker_threads';
++
++export const DECISION_MEMORY_PORT_VERSION = 'decision-memory-port-1';
++export const DECISION_MEMORY_WORKER_PROTOCOL = 'learning-decision-memory-worker-1';
++export const DECISION_MEMORY_REFRESH_MS = 60_000;
++export const DECISION_MEMORY_MAX_AGE_MS = 15 * 60_000;
++export const DECISION_MEMORY_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
++export const DECISION_MEMORY_WORKER_TIMEOUT_MS = 30_000;
++const ALLOWED_MODES = Object.freeze(['OBSERVE', 'PAPER']);
++const SNAPSHOT_KEYS = Object.freeze(['view', 'version', 'law', 'preparedTs', 'activations', 'withheld', 'kill']);
++const ENVELOPE_KEYS = Object.freeze(['protocol', 'requestId', 'ok', 'preparedTs', 'snapshotDigest', 'snapshot']);
++const FAILURE_KEYS = Object.freeze(['protocol', 'requestId', 'ok', 'code']);
++const FAILURE_CODES = new Set([
++  'REQUEST_INVALID', 'STORE_NOT_COMMISSIONED', 'STORE_NOT_DIRECTORY', 'MEMORY_READ_FAILED',
++  'RESPONSE_TOO_LARGE', 'WORKER_TIMEOUT', 'WORKER_ERROR', 'WORKER_EXITED',
++  'RESPONSE_INVALID', 'CLOCK_INVALID', 'CLOCK_ROLLBACK', 'SNAPSHOT_FUTURE', 'SNAPSHOT_STALE',
++  'STOPPED', 'DISABLED',
++]);
++
++const exactKeys = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value)
++  && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
++const safeTs = (value) => Number.isSafeInteger(value) && value >= 0;
++const safeText = (value, max = 300) => typeof value === 'string' && value.length > 0 && value.length <= max;
++const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
++const deepFreeze = (value) => {
++  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
++  Object.freeze(value);
++  for (const key of Object.keys(value)) deepFreeze(value[key]);
++  return value;
++};
++
++function snapshotError(snapshot, expectedTs) {
++  if (!exactKeys(snapshot, SNAPSHOT_KEYS)) return 'RESPONSE_INVALID';
++  if (snapshot.view !== 'DECISION' || snapshot.version !== 'learning-memory-view-1'
++      || snapshot.law !== 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY') return 'RESPONSE_INVALID';
++  if (!safeTs(snapshot.preparedTs) || snapshot.preparedTs !== expectedTs) return 'RESPONSE_INVALID';
++  // Until a future activation schema seals the feature body and rank-effect
++  // transform before capture, the authoritative worker must pass no activation.
++  if (!Array.isArray(snapshot.activations) || snapshot.activations.length !== 0) return 'RESPONSE_INVALID';
++  if (!Array.isArray(snapshot.withheld) || snapshot.withheld.length > 2_000) return 'RESPONSE_INVALID';
++  for (const row of snapshot.withheld) {
++    if (!exactKeys(row, ['activationId', 'reason']) || !safeText(row.activationId, 200) || !safeText(row.reason, 1_000)) return 'RESPONSE_INVALID';
++  }
++  if (!exactKeys(snapshot.kill, ['state', 'reason', 'ts']) || !['ARMED', 'KILLED'].includes(snapshot.kill.state)
++      || (snapshot.kill.reason !== null && !safeText(snapshot.kill.reason, 1_000))
++      || (snapshot.kill.ts !== null && !safeTs(snapshot.kill.ts))) return 'RESPONSE_INVALID';
 +  return null;
 +}
 +
-+export function replayActivationHistory(records) {
-+  if (!Array.isArray(records)) return { heads: new Map(), invalid: new Map(), globalErrors: ['activation history is not an array'] };
-+  const heads = new Map();
-+  const invalid = new Map();
-+  const globalErrors = [];
-+  const report = (activationId, reason, index) => {
-+    const detail = `record ${index + 1}: ${reason}`;
-+    if (activationId === null) {
-+      if (globalErrors.length < MAX_REPLAY_ERRORS) globalErrors.push(detail);
++function envelopeError(response, requestId, requestTs) {
++  if (response?.ok === false) {
++    if (!exactKeys(response, FAILURE_KEYS) || response.protocol !== DECISION_MEMORY_WORKER_PROTOCOL
++        || response.requestId !== requestId || !FAILURE_CODES.has(response.code)) return 'RESPONSE_INVALID';
++    return response.code;
++  }
++  if (!exactKeys(response, ENVELOPE_KEYS) || response.protocol !== DECISION_MEMORY_WORKER_PROTOCOL
++      || response.requestId !== requestId || response.ok !== true || response.preparedTs !== requestTs
++      || !/^[a-f0-9]{64}$/.test(response.snapshotDigest ?? '')) return 'RESPONSE_INVALID';
++  let serialized;
++  try { serialized = JSON.stringify(response.snapshot); } catch { return 'RESPONSE_INVALID'; }
++  if (Buffer.byteLength(serialized, 'utf8') > DECISION_MEMORY_MAX_RESPONSE_BYTES
++      || digest(response.snapshot) !== response.snapshotDigest) return 'RESPONSE_INVALID';
++  return snapshotError(response.snapshot, requestTs);
++}
++
++function fixedWorkerTask(request) {
++  let worker;
++  let responseSettled = false;
++  let workerClosed = false;
++  let timer = null;
++  let resolveClosed;
++  const closed = new Promise((resolve) => { resolveClosed = resolve; });
++  const markClosed = () => {
++    if (workerClosed) return;
++    workerClosed = true;
++    if (timer) clearTimeout(timer);
++    resolveClosed();
++  };
++  const promise = new Promise((resolve) => {
++    const done = (value) => {
++      if (responseSettled) return;
++      responseSettled = true;
++      if (timer) clearTimeout(timer);
++      resolve(value);
++    };
++    try {
++      worker = new Worker(new URL('../learning/decision-memory-worker.js', import.meta.url), { workerData: request });
++    } catch {
++      done({ protocol: DECISION_MEMORY_WORKER_PROTOCOL, requestId: request.requestId, ok: false, code: 'WORKER_ERROR' });
++      markClosed();
 +      return;
 +    }
-+    if (!invalid.has(activationId)) invalid.set(activationId, detail);
-+    heads.delete(activationId);
++    timer = setTimeout(() => {
++      done({ protocol: DECISION_MEMORY_WORKER_PROTOCOL, requestId: request.requestId, ok: false, code: 'WORKER_TIMEOUT' });
++      worker.terminate().catch(() => {});
++    }, DECISION_MEMORY_WORKER_TIMEOUT_MS);
++    timer.unref?.();
++    worker.once('message', done);
++    worker.once('error', () => done({ protocol: DECISION_MEMORY_WORKER_PROTOCOL, requestId: request.requestId, ok: false, code: 'WORKER_ERROR' }));
++    worker.once('exit', (code) => {
++      if (!responseSettled) done({ protocol: DECISION_MEMORY_WORKER_PROTOCOL, requestId: request.requestId, ok: false, code: code === 0 ? 'WORKER_EXITED' : 'WORKER_ERROR' });
++      markClosed();
++    });
++  });
++  return {
++    promise,
++    closed,
++    cancel: () => {
++      if (worker && !workerClosed) worker.terminate().catch(() => {});
++      return closed;
++    },
 +  };
-+
-+  for (let index = 0; index < records.length; index += 1) {
-+    const record = records[index];
-+    const activationId = record && typeof record === 'object' && !Array.isArray(record)
-+      && typeof record.activationId === 'string' && record.activationId.length > 0 ? record.activationId : null;
-+    if (activationId !== null && invalid.has(activationId)) continue;
-+    const err = activationTransitionError(activationId === null ? null : (heads.get(activationId) ?? null), record);
-+    if (err) { report(activationId, err, index); continue; }
-+    heads.set(activationId, record);
-+  }
-+
-+  // An unidentifiable malformed row could belong to any activation.  Failing
-+  // closed globally is the only replay result that does not guess around it.
-+  if (globalErrors.length > 0) {
-+    for (const activationId of heads.keys()) if (!invalid.has(activationId)) invalid.set(activationId, globalErrors[0]);
-+    heads.clear();
-+  }
-+  return { heads, invalid, globalErrors };
 +}
-diff --git a/learning/store.js b/learning/store.js
-index 3b0f651..7b6b176 100644
---- a/learning/store.js
-+++ b/learning/store.js
-@@ -10,6 +10,7 @@ import {
-   LIMITS, coverageRowError, episodeError, outcomeAttachError, patternRecordError, activationError, questionError,
-   isPlainObject, isTs, KILL_STATES,
- } from './contracts.js';
-+import { activationTransitionError, replayActivationHistory } from './activation-chain.js';
- 
- export const LEARNING_DIR_NAME = 'learning';
- export const learningDir = (dataDirPath) => path.join(dataDirPath, LEARNING_DIR_NAME);
-@@ -135,16 +136,38 @@ export function createLearningStore({ dataDir, log = () => {} }) {
-   const readProspective = () => { const out = []; if (!existsSync(fileOf('prospective'))) return out; for (const r of readJsonl(fileOf('prospective'))) out.push(r); return out; };
- 
-   // ---- activations
-+  // Activation history is replayed from every physical row rather than from
-+  // readValidated(): skipping one malformed transition could otherwise leave
-+  // an older ACTIVE_PAPER head looking authoritative.  An unparseable row has
-+  // no trustworthy identity and therefore fails the whole activation view
-+  // closed; an attributable bad row withholds only that activation.
-+  const activationHistory = () => {
-+    const file = fileOf('activations');
-+    if (!existsSync(file)) return replayActivationHistory([]);
-+    const rows = []; let unidentifiable = false; let nonEmpty = 0;
-+    for (const line of readFileSync(file, 'utf8').split('\n')) {
-+      const text = line.trim(); if (!text) continue;
-+      nonEmpty += 1;
-+      if (nonEmpty > LIMITS.maxReadRecords) { unidentifiable = true; counters.invalidRejected += 1; break; }
-+      try { rows.push(JSON.parse(text)); }
-+      catch { unidentifiable = true; counters.corruptSkipped += 1; }
-+    }
-+    if (unidentifiable) rows.push(null); // pure replay treats this as an unattributable, fail-closed history error
-+    const replay = replayActivationHistory(rows);
-+    counters.invalidRejected += replay.invalid.size;
-+    return replay;
-+  };
-   const appendActivation = (a) => {
--    const rows = readValidated('activations').filter((r) => r.activationId === a.activationId);
--    const expectedSeq = rows.length === 0 ? 0 : rows[rows.length - 1].seq + 1;
--    if (a.seq !== expectedSeq) throw new Error(`learning store: activation seq ${a.seq} is not the expected ${expectedSeq}`);
-+    const replay = activationHistory();
-+    if (replay.globalErrors.length) throw new Error(`learning store: activation journal invalid (${replay.globalErrors[0]})`);
-+    if (typeof a?.activationId === 'string' && replay.invalid.has(a.activationId)) throw new Error(`learning store: activation ${a.activationId} history invalid (${replay.invalid.get(a.activationId)})`);
-+    const err = activationTransitionError(replay.heads.get(a?.activationId) ?? null, a);
-+    if (err) throw new Error(`learning store: refuse activation transition: ${err}`);
-     return append('activations', a);
-   };
-   const activationHeads = () => {
--    const byId = new Map();
--    for (const r of readValidated('activations')) { const prev = byId.get(r.activationId); if (!prev || r.seq === prev.seq + 1) byId.set(r.activationId, r); }
--    return byId;
-+    const replay = activationHistory();
-+    return replay.globalErrors.length ? new Map() : replay.heads;
-   };
- 
-   // ---- questions
-@@ -252,7 +275,7 @@ export function createLearningStore({ dataDir, log = () => {} }) {
-     appendOutcome, readOutcomes, latestOutcomes,
-     appendPattern, patternHeads, patternHistory,
-     appendProspective, readProspective,
--    appendActivation, activationHeads,
-+    appendActivation, activationHeads, activationHistory,
-     appendQuestion, readQuestions,
-     appendCoverage, readCoverage, coverageDates,
-     writeCampaignManifest, readCampaignManifest, appendCampaignResult, readCampaignResults,
-diff --git a/learning/memory-view.js b/learning/memory-view.js
-index dd9a9ad..74edc0e 100644
---- a/learning/memory-view.js
-+++ b/learning/memory-view.js
-@@ -27,8 +27,19 @@ export function readResearchMemory({ store, limit = 200 }) {
- // decision-influencing consumers: immutable validated activation artifacts only. Every head re-earns its way
- // through the closed validator at read time; an invalid record is EXCLUDED and reported, never repaired.
- export function readDecisionMemory({ store, nowTs }) {
--  const heads = [...store.activationHeads().values()];
--  const activations = []; const withheld = [];
-+  const history = typeof store.activationHistory === 'function'
-+    ? store.activationHistory()
-+    : { heads: new Map(), invalid: new Map(), globalErrors: ['ACTIVATION_HISTORY_UNAVAILABLE'] };
-+  const heads = [...history.heads.values()];
-+  const activations = [];
-+  const withheld = [
-+    ...[...history.invalid.entries()].map(([activationId, reason]) => ({ activationId, reason: `ACTIVATION_HISTORY_INVALID:${reason}` })),
-+    ...history.globalErrors.map((reason) => ({ activationId: 'UNKNOWN', reason: `ACTIVATION_HISTORY_INVALID:${reason}` })),
-+  ];
-+  if (history.globalErrors.length) {
-+    return deepFreeze({ view: 'DECISION', version: MEMORY_VIEW_VERSION, law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY', preparedTs: nowTs, activations: [], withheld, kill: store.readKill() });
++
++function createPort({ enabled = false, mode = null, dataDir = null, clock = Date.now, log = () => {} } = {}, startTask) {
++  if (typeof enabled !== 'boolean') throw new Error('decision memory port: enabled must be boolean');
++  if (!enabled) {
++    const disabledStatus = Object.freeze({ portVersion: DECISION_MEMORY_PORT_VERSION, enabled: false, mode: null, state: 'DISABLED', preparedTs: null, ageMs: null, withheldCount: 0, lastAttemptTs: null, lastSuccessTs: null, lastFailure: null, refreshInFlight: false });
++    return Object.freeze({ snapshot: () => null, refresh: () => Promise.resolve({ ok: false, reason: 'DISABLED' }), refreshIfDue: () => Promise.resolve({ ok: false, reason: 'DISABLED' }), stop: () => Promise.resolve({ stopped: true }), status: () => disabledStatus });
 +  }
-+  const patterns = store.patternHeads();
-   let records = []; let prospective = null;
-   try {
-     if (heads.length) {
-@@ -37,11 +48,23 @@ export function readDecisionMemory({ store, nowTs }) {
-       if (prospective.errors.length) throw new Error('prospective evidence invalid');
-     }
-   } catch {
--    return deepFreeze({ view: 'DECISION', version: MEMORY_VIEW_VERSION, law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY', preparedTs: nowTs, activations: [], withheld: heads.map((a) => ({ activationId: a?.activationId ?? 'UNKNOWN', reason: 'PROSPECTIVE_EVIDENCE_INVALID' })), kill: store.readKill() });
-+    return deepFreeze({ view: 'DECISION', version: MEMORY_VIEW_VERSION, law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY', preparedTs: nowTs, activations: [], withheld: [...withheld, ...heads.map((a) => ({ activationId: a?.activationId ?? 'UNKNOWN', reason: 'PROSPECTIVE_EVIDENCE_INVALID' }))], kill: store.readKill() });
-   }
-   for (const a of heads) {
-     const err = activationError(a);
-     if (err) { withheld.push({ activationId: a?.activationId ?? 'UNKNOWN', reason: 'ACTIVATION_RECORD_INVALID' }); continue; }
-+    if (a.state === 'ACTIVE_PAPER') {
-+      const pattern = patterns.get(a.patternId);
-+      if (!pattern || pattern.state !== 'ACTIVE_PAPER' || pattern.activationId !== a.activationId || pattern.candidateId !== a.candidateId) {
-+        // Adoption spans two append-only journals.  Until both exact heads are
-+        // present, the partial write has no decision authority and remains
-+        // visible for deterministic operator recovery.
-+        withheld.push({ activationId: a.activationId, reason: 'ACTIVE_PATTERN_BINDING_MISSING' }); continue;
-+      }
-+      if (!Number.isSafeInteger(pattern.ts) || pattern.ts > nowTs) {
-+        withheld.push({ activationId: a.activationId, reason: 'ACTIVE_PATTERN_NOT_EFFECTIVE' }); continue;
-+      }
++  // This check precedes worker construction or any filesystem activity.
++  if (!ALLOWED_MODES.includes(mode)) throw new Error(`decision memory port: enabled mode ${mode ?? 'MISSING'} is not OBSERVE/PAPER`);
++  if (typeof dataDir !== 'string' || dataDir.length === 0 || dataDir.length > 4096) throw new Error('decision memory port: dataDir required');
++  if (typeof clock !== 'function' || typeof log !== 'function') throw new Error('decision memory port: clock/log malformed');
++
++  let cached = null;
++  let lastObservedTs = null;
++  let lastAttemptTs = null;
++  let lastSuccessTs = null;
++  let lastFailure = null;
++  let inFlight = null;
++  const openTasks = new Set();
++  let stopPromise = null;
++  let stopped = false;
++
++  const clear = (reason) => { cached = null; lastFailure = reason; };
++  const observeClock = () => {
++    let nowTs;
++    try { nowTs = clock(); } catch { clear('CLOCK_INVALID'); return null; }
++    if (!safeTs(nowTs)) { clear('CLOCK_INVALID'); return null; }
++    if (lastObservedTs !== null && nowTs < lastObservedTs) { lastObservedTs = nowTs; clear('CLOCK_ROLLBACK'); return null; }
++    lastObservedTs = nowTs;
++    return nowTs;
++  };
++  const usableSnapshot = () => {
++    if (stopped || !cached) return null;
++    const nowTs = observeClock();
++    if (nowTs === null) return null;
++    if (cached.preparedTs > nowTs) { clear('SNAPSHOT_FUTURE'); return null; }
++    if (nowTs - cached.preparedTs > DECISION_MEMORY_MAX_AGE_MS) { clear('SNAPSHOT_STALE'); return null; }
++    return cached;
++  };
++
++  function refresh() {
++    if (stopped) return Promise.resolve({ ok: false, reason: 'STOPPED' });
++    if (inFlight) return inFlight;
++    const requestTs = observeClock();
++    if (requestTs === null) return Promise.resolve({ ok: false, reason: lastFailure });
++    lastAttemptTs = requestTs;
++    const requestId = `dm-${requestTs.toString(36)}-${randomBytes(8).toString('hex')}`;
++    const request = { protocol: DECISION_MEMORY_WORKER_PROTOCOL, requestId, dataDir, nowTs: requestTs };
++    let task;
++    try { task = startTask(request); }
++    catch { clear('WORKER_ERROR'); return Promise.resolve({ ok: false, reason: 'WORKER_ERROR' }); }
++    if (!task || !(task.promise instanceof Promise) || !(task.closed instanceof Promise) || typeof task.cancel !== 'function') {
++      clear('WORKER_ERROR'); return Promise.resolve({ ok: false, reason: 'WORKER_ERROR' });
 +    }
-     const design = prospective?.designs.get(a.candidateId);
-     const terminal = prospective?.terminals.get(a.candidateId);
-     if (!design || !terminal || terminal.verdict !== 'FORWARD_SUPPORTED' || terminal.recordedTs > a.effectiveTs || a.ts > nowTs) {
-diff --git a/test/learning-activation-chain.test.js b/test/learning-activation-chain.test.js
++    openTasks.add(task);
++    task.closed.catch(() => {}).finally(() => { openTasks.delete(task); });
++    const cycle = task.promise.then((response) => {
++      if (stopped) return { ok: false, reason: 'STOPPED' };
++      const err = envelopeError(response, requestId, requestTs);
++      if (err) { clear(err); return { ok: false, reason: err }; }
++      const nowTs = observeClock();
++      if (nowTs === null) return { ok: false, reason: lastFailure };
++      if (response.snapshot.preparedTs > nowTs) { clear('SNAPSHOT_FUTURE'); return { ok: false, reason: 'SNAPSHOT_FUTURE' }; }
++      if (nowTs - response.snapshot.preparedTs > DECISION_MEMORY_MAX_AGE_MS) { clear('SNAPSHOT_STALE'); return { ok: false, reason: 'SNAPSHOT_STALE' }; }
++      cached = deepFreeze(response.snapshot);
++      lastSuccessTs = nowTs;
++      lastFailure = null;
++      return { ok: true, preparedTs: cached.preparedTs, withheldCount: cached.withheld.length };
++    }).catch(() => {
++      clear('WORKER_ERROR');
++      return { ok: false, reason: 'WORKER_ERROR' };
++    });
++    inFlight = cycle;
++    // The response may be consumed promptly, but the single-flight slot is not
++    // released until the worker has also exited. Repeated refresh calls during
++    // that interval receive this same response promise and cannot fan out more
++    // workers behind an already-settled result.
++    Promise.allSettled([cycle, task.closed]).then(() => {
++      if (inFlight === cycle) inFlight = null;
++    });
++    return cycle;
++  }
++
++  function refreshIfDue() {
++    if (stopped) return Promise.resolve({ ok: false, reason: 'STOPPED' });
++    if (inFlight) return inFlight;
++    const nowTs = observeClock();
++    if (nowTs === null) return Promise.resolve({ ok: false, reason: lastFailure });
++    if (lastAttemptTs !== null && nowTs - lastAttemptTs < DECISION_MEMORY_REFRESH_MS) {
++      const current = usableSnapshot();
++      return Promise.resolve(current ? { ok: true, preparedTs: current.preparedTs, withheldCount: current.withheld.length, cached: true } : { ok: false, reason: lastFailure ?? 'SNAPSHOT_STALE' });
++    }
++    return refresh();
++  }
++
++  function stop() {
++    if (stopPromise) return stopPromise;
++    stopped = true;
++    cached = null;
++    const pending = inFlight;
++    const tasks = [...openTasks];
++    const closures = tasks.map((task) => {
++      try { return Promise.resolve(task.cancel()).catch(() => task.closed); }
++      catch { return task.closed; }
++    });
++    // Response processing and physical worker closure are separate obligations:
++    // stop never reports completion merely because a worker posted its result.
++    stopPromise = Promise.allSettled([Promise.resolve(pending), ...closures, ...tasks.map((task) => task.closed)])
++      .then(() => ({ stopped: true }));
++    return stopPromise;
++  }
++
++  function status() {
++    const nowTs = stopped ? null : observeClock();
++    const snap = nowTs === null ? null : usableSnapshot();
++    return Object.freeze({
++      portVersion: DECISION_MEMORY_PORT_VERSION, enabled: true, mode,
++      state: stopped ? 'STOPPED' : snap ? 'READY' : lastFailure ? 'WITHHELD' : 'EMPTY',
++      preparedTs: snap?.preparedTs ?? null,
++      ageMs: snap && nowTs !== null ? nowTs - snap.preparedTs : null,
++      withheldCount: snap?.withheld.length ?? 0,
++      lastAttemptTs, lastSuccessTs, lastFailure,
++      refreshInFlight: Boolean(inFlight),
++    });
++  }
++
++  return Object.freeze({ snapshot: usableSnapshot, refresh, refreshIfDue, stop, status });
++}
++
++export function createDecisionMemoryPort(options = {}) {
++  return createPort(options, fixedWorkerTask);
++}
++
++// TEST ONLY. Production composition must use createDecisionMemoryPort, whose
++// fixed worker URL cannot be replaced by a caller-supplied source.
++export function createDecisionMemoryPortForTest(options = {}, startTask) {
++  if (typeof startTask !== 'function') throw new Error('decision memory port test constructor: startTask required');
++  return createPort(options, startTask);
++}
+diff --git a/test/learning-memory-port-review.test.js b/test/learning-memory-port-review.test.js
 new file mode 100644
 --- /dev/null
-+++ b/test/learning-activation-chain.test.js
-@@ -0,0 +1,133 @@
++++ b/test/learning-memory-port-review.test.js
+@@ -0,0 +1,274 @@
 +import test from 'node:test';
 +import assert from 'node:assert/strict';
-+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
++import { createHash } from 'node:crypto';
++import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 +import { tmpdir } from 'node:os';
 +import path from 'node:path';
-+import { buildActivation, transitionActivation } from '../learning/adapter.js';
 +import {
-+  activationImmutableDigest, activationTransitionError, replayActivationHistory,
-+} from '../learning/activation-chain.js';
-+import { createLearningStore } from '../learning/store.js';
-+import { readDecisionMemory } from '../learning/memory-view.js';
++  createDecisionMemoryPort,
++  createDecisionMemoryPortForTest,
++  DECISION_MEMORY_MAX_AGE_MS,
++  DECISION_MEMORY_WORKER_PROTOCOL,
++} from '../lib/decision-memory-port.js';
++import {
++  UNSEALED_ACTIVATION_REASON,
++  withholdUnsealedDecisionEffects,
++} from '../learning/decision-memory-worker.js';
 +
-+const T = Date.UTC(2026, 8, 13);
-+const DAY = 86_400_000;
-+const predicate = { clauses: [{ feature: 'rv60', op: 'GTE', threshold: 2 }] };
-+
-+function published(overrides = {}) {
-+  return buildActivation({
-+    candidateId: 'lcand-chain', patternId: 'lpat-chain', trainingCutoffTs: T - DAY,
-+    candidateDigest: 'candidate-digest', evidenceDigest: 'evidence-digest', reportDigest: 'report-digest',
-+    maxAbsAdjust: 0.1, adjust: 0.05,
-+    validation: { evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5, dateCount: 7, netAfterCostsPct: 0.4 },
-+    scope: { setupType: 'RANGE_IGNITION', regime: 'LIVE_UNCLASSIFIED', assets: 'ANY', venues: ['kraken'] },
-+    featureRecipeVersion: 'judge-prepared-market-features-1', policyVersion: 'a'.repeat(64),
-+    applicability: predicate, effectiveTs: T, expiresTs: T + 30 * DAY, ts: T,
-+    ...overrides,
-+  });
-+}
-+
-+test('activation replay accepts only the closed contiguous lifecycle and keeps immutable publication binding fixed', () => {
-+  const pub = published();
-+  const active = transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
-+  const suspended = transitionActivation(active, { state: 'SUSPENDED', transitionReason: 'OPERATOR_SUSPENDED', ts: T + 2 });
-+  const resumed = transitionActivation(suspended, { state: 'ACTIVE_PAPER', transitionReason: 'OWNER_RESUMED', ts: T + 3 });
-+  const rolled = transitionActivation(resumed, { state: 'ROLLED_BACK', transitionReason: 'PREDECLARED_DEGRADATION_RULE_MET', ts: T + 4, cooldownUntilTs: T + DAY });
-+  const replay = replayActivationHistory([pub, active, suspended, resumed, rolled]);
-+  assert.equal(replay.invalid.size, 0);
-+  assert.equal(replay.globalErrors.length, 0);
-+  assert.equal(replay.heads.get(pub.activationId).state, 'ROLLED_BACK');
-+  assert.equal(activationImmutableDigest(pub), activationImmutableDigest(rolled));
-+  assert.match(activationTransitionError(rolled, transitionActivation(rolled, { state: 'ACTIVE_PAPER', transitionReason: 'ILLEGAL', ts: T + 5 })), /not lawful/);
++const T = Date.UTC(2026, 8, 13, 12);
++const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
++const memory = (preparedTs, overrides = {}) => ({
++  view: 'DECISION',
++  version: 'learning-memory-view-1',
++  law: 'IMMUTABLE_VERSION_BOUND_VALIDATED_CONTENT_ONLY',
++  preparedTs,
++  activations: [],
++  withheld: [],
++  kill: { state: 'ARMED', reason: null, ts: null },
++  ...overrides,
++});
++const success = (request, snapshot = memory(request.nowTs)) => ({
++  protocol: DECISION_MEMORY_WORKER_PROTOCOL,
++  requestId: request.requestId,
++  ok: true,
++  preparedTs: request.nowTs,
++  snapshotDigest: digest(snapshot),
++  snapshot,
++});
++const failure = (request, code = 'MEMORY_READ_FAILED') => ({
++  protocol: DECISION_MEMORY_WORKER_PROTOCOL,
++  requestId: request.requestId,
++  ok: false,
++  code,
++});
++const immediate = (makeResponse) => (request) => ({
++  promise: Promise.resolve(makeResponse(request)),
++  closed: Promise.resolve(),
++  cancel: () => {},
 +});
 +
-+test('bad origin, gaps, clock regression, immutable mutation and illegal edges withhold the exact activation', () => {
-+  const pub = published();
-+  const active = transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
-+  const cases = [
-+    [{ ...active }],
-+    [pub, { ...active, seq: 2 }],
-+    [pub, { ...active, ts: T - 1 }],
-+    [pub, { ...active, featureRecipeVersion: 'judge-prepared-market-features-2' }],
-+    [pub, transitionActivation(pub, { state: 'ROLLED_BACK', transitionReason: 'ILLEGAL', ts: T + 1 })],
-+  ];
-+  for (const rows of cases) {
-+    const replay = replayActivationHistory(rows);
-+    assert.equal(replay.heads.has(pub.activationId), false);
-+    assert.equal(replay.invalid.has(pub.activationId), true);
++test('default-off port has no worker or snapshot and is not composed into Judge or fly', async () => {
++  const port = createDecisionMemoryPort();
++  assert.equal(port.snapshot(), null);
++  assert.deepEqual(await port.refresh(), { ok: false, reason: 'DISABLED' });
++  assert.equal(port.status().state, 'DISABLED');
++  const composition = readFileSync(new URL('../judge/composition.js', import.meta.url), 'utf8');
++  const fly = readFileSync(new URL('../fly.js', import.meta.url), 'utf8');
++  assert.doesNotMatch(composition, /decision-memory-port|createDecisionMemoryPort/);
++  assert.doesNotMatch(fly, /decision-memory-port|createDecisionMemoryPort/);
++});
++
++test('enabled mode is rejected before a worker or filesystem side effect', () => {
++  const root = path.join(tmpdir(), `cobra-memory-never-created-${process.pid}-${Date.now()}`);
++  for (const mode of ['REPLAY', 'LIVE_UNARMED', 'LIVE_ARMED', null]) {
++    assert.throws(() => createDecisionMemoryPort({ enabled: true, mode, dataDir: root, clock: () => T }), /not OBSERVE\/PAPER/);
 +  }
++  assert.equal(existsSync(root), false);
 +});
 +
-+test('the store refuses unlawful appends and an attributable bad physical row is retained but never a head', () => {
-+  const dir = mkdtempSync(path.join(tmpdir(), 'cobra-activation-chain-'));
++test('authoritative worker refuses an absent learning store without commissioning it', async () => {
++  const root = mkdtempSync(path.join(tmpdir(), 'cobra-memory-absent-'));
++  const learning = path.join(root, 'learning');
++  const port = createDecisionMemoryPort({ enabled: true, mode: 'PAPER', dataDir: root, clock: () => T });
 +  try {
-+    const store = createLearningStore({ dataDir: dir });
-+    const pub = published();
-+    const active = transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
-+    assert.throws(() => store.appendActivation(active), /origin must have seq 0/);
-+    store.appendActivation(pub);
-+    assert.throws(() => store.appendActivation({ ...active, seq: 2 }), /not contiguous/);
-+    store.appendActivation(active);
-+    assert.equal(store.activationHeads().get(pub.activationId).state, 'ACTIVE_PAPER');
-+
-+    const file = path.join(dir, 'learning', 'activations.jsonl');
-+    const bad = { ...transitionActivation(active, { state: 'SUSPENDED', transitionReason: 'TAMPER', ts: T + 2 }), policyVersion: 'b'.repeat(64) };
-+    appendFileSync(file, `${JSON.stringify(bad)}\n`, 'utf8');
-+    const bytes = readFileSync(file, 'utf8');
-+    const replay = store.activationHistory();
-+    assert.equal(replay.invalid.has(pub.activationId), true);
-+    assert.equal(replay.heads.has(pub.activationId), false);
-+    assert.equal(readFileSync(file, 'utf8'), bytes, 'replay withholds; it never deletes or repairs stored history');
-+
-+    appendFileSync(file, '{torn-json\n', 'utf8');
-+    assert.equal(store.activationHistory().globalErrors.length, 1);
-+    assert.equal(store.activationHeads().size, 0, 'an unattributable corrupt row fails the entire activation view closed');
++    const result = await port.refresh();
++    assert.deepEqual(result, { ok: false, reason: 'STORE_NOT_COMMISSIONED' });
++    assert.equal(existsSync(learning), false, 'a read consumer never creates the missing learning directory');
++    assert.equal(port.snapshot(), null);
++    assert.equal(port.status().withheldCount, 0);
 +  } finally {
-+    rmSync(dir, { recursive: true, force: true });
++    await port.stop();
++    rmSync(root, { recursive: true, force: true });
 +  }
 +});
 +
-+test('decision memory withholds an ACTIVE activation until the exact pattern head is also ACTIVE', () => {
-+  const pub = published();
-+  const active = transitionActivation(pub, { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
-+  const store = {
-+    activationHistory: () => ({ heads: new Map([[active.activationId, active]]), invalid: new Map(), globalErrors: [] }),
-+    activationHeads: () => new Map([[active.activationId, active]]),
-+    patternHeads: () => new Map(),
-+    readProspective: () => [],
-+    readKill: () => ({ state: 'ARMED', reason: null, ts: null }),
-+  };
-+  const snapshot = readDecisionMemory({ store, nowTs: T + 2 });
-+  assert.equal(snapshot.activations.length, 0);
-+  assert.deepEqual(snapshot.withheld, [{ activationId: active.activationId, reason: 'ACTIVE_PATTERN_BINDING_MISSING' }]);
++test('real worker reads an existing store; later snapshot calls are frozen RAM-only reads', async () => {
++  const root = mkdtempSync(path.join(tmpdir(), 'cobra-memory-existing-'));
++  const learning = path.join(root, 'learning');
++  mkdirSync(learning);
++  const port = createDecisionMemoryPort({ enabled: true, mode: 'OBSERVE', dataDir: root, clock: () => T });
++  try {
++    assert.deepEqual(await port.refresh(), { ok: true, preparedTs: T, withheldCount: 0 });
++    const first = port.snapshot();
++    assert.equal(first.view, 'DECISION');
++    assert.equal(first.activations.length, 0);
++    assert.equal(Object.isFrozen(first), true);
++    assert.equal(Object.isFrozen(first.kill), true);
++    rmSync(learning, { recursive: true, force: true });
++    assert.strictEqual(port.snapshot(), first, 'snapshot() performs no filesystem read or refresh');
++    assert.equal(existsSync(learning), false);
++  } finally {
++    await port.stop();
++    rmSync(root, { recursive: true, force: true });
++  }
 +});
 +
-+test('decision memory has no legacy activation-head fallback when replayable history is unavailable', () => {
-+  const active = transitionActivation(published(), { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
-+  const store = {
-+    activationHeads: () => new Map([[active.activationId, active]]),
-+    patternHeads: () => new Map(),
-+    readProspective: () => [],
-+    readKill: () => ({ state: 'ARMED', reason: null, ts: null }),
-+  };
-+  const snapshot = readDecisionMemory({ store, nowTs: T + 2 });
-+  assert.equal(snapshot.activations.length, 0);
-+  assert.deepEqual(snapshot.withheld, [{ activationId: 'UNKNOWN', reason: 'ACTIVATION_HISTORY_INVALID:ACTIVATION_HISTORY_UNAVAILABLE' }]);
++test('activation-v1 history is explicitly withheld, never retrofitted into the RAM view', () => {
++  const filtered = withholdUnsealedDecisionEffects(memory(T, {
++    activations: [{ activationVersion: 'learning-activation-1', activationId: 'lact-existing' }],
++  }));
++  assert.deepEqual(filtered.activations, []);
++  assert.deepEqual(filtered.withheld, [{ activationId: 'lact-existing', reason: UNSEALED_ACTIVATION_REASON }]);
 +});
 +
-+test('decision memory never lets a future ACTIVE pattern complete a partial two-journal adoption', () => {
-+  const active = transitionActivation(published(), { state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T + 1 });
-+  const futurePattern = {
-+    patternId: active.patternId, candidateId: active.candidateId, activationId: active.activationId,
-+    state: 'ACTIVE_PAPER', ts: T + 10,
++test('refresh calls coalesce, publish only a validated frozen snapshot, and report counts only', async () => {
++  let calls = 0;
++  let release;
++  const held = new Promise((resolve) => { release = resolve; });
++  let request;
++  const task = (r) => {
++    calls += 1; request = r;
++    return { promise: held, closed: held.then(() => {}), cancel: () => held.then(() => {}) };
 +  };
-+  const store = {
-+    activationHistory: () => ({ heads: new Map([[active.activationId, active]]), invalid: new Map(), globalErrors: [] }),
-+    patternHeads: () => new Map([[futurePattern.patternId, futurePattern]]),
-+    readProspective: () => [],
-+    readKill: () => ({ state: 'ARMED', reason: null, ts: null }),
-+  };
-+  const snapshot = readDecisionMemory({ store, nowTs: T + 2 });
-+  assert.equal(snapshot.activations.length, 0);
-+  assert.deepEqual(snapshot.withheld, [{ activationId: active.activationId, reason: 'ACTIVE_PATTERN_NOT_EFFECTIVE' }]);
++  const port = createDecisionMemoryPortForTest({ enabled: true, mode: 'PAPER', dataDir: 'unused', clock: () => T }, task);
++  const a = port.refresh();
++  const b = port.refresh();
++  assert.strictEqual(a, b);
++  assert.equal(calls, 1);
++  release(success(request, memory(T, { withheld: [{ activationId: 'lact-old', reason: UNSEALED_ACTIVATION_REASON }] })));
++  assert.deepEqual(await a, { ok: true, preparedTs: T, withheldCount: 1 });
++  assert.equal(port.status().withheldCount, 1);
++  assert.equal(Object.hasOwn(port.status(), 'activations'), false);
++  assert.equal(port.snapshot().activations.length, 0);
++  await port.stop();
 +});
-diff --git a/test/learning-promotion-consumer-binding.test.js b/test/learning-promotion-consumer-binding.test.js
-index dbe49d1..a602a7e 100644
---- a/test/learning-promotion-consumer-binding.test.js
-+++ b/test/learning-promotion-consumer-binding.test.js
-@@ -110,6 +110,14 @@ test('a v2 candidate seals the exact consumer binding, promotion copies it, and
-       state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: settledTs + 1,
-     });
-     store.appendActivation(active);
-+    const validatedPattern = store.patternHeads().get(pattern.patternId);
-+    store.appendPattern(buildPatternRecord({
-+      predicate: validatedPattern.predicate, scope: validatedPattern.scope, origin: validatedPattern.origin,
-+      createdTs: validatedPattern.createdTs, ts: settledTs + 1, seq: validatedPattern.seq + 1,
-+      state: 'ACTIVE_PAPER', previousState: validatedPattern.state, transitionReason: 'PAPER_RUNTIME_ADOPTED',
-+      evidence: validatedPattern.evidence, estimate: validatedPattern.estimate, contradictions: validatedPattern.contradictions,
-+      candidateId: validatedPattern.candidateId, activationId: active.activationId,
-+    }));
-     const nowTs = settledTs + 2;
-     const snapshot = readDecisionMemory({ store, nowTs });
-     assert.equal(snapshot.activations.length, 1);
-@@ -137,7 +145,8 @@ test('a v2 candidate seals the exact consumer binding, promotion copies it, and
-       { policyVersion: 'b'.repeat(64) },
-     ]) {
-       const forged = { ...active, ...mutation };
--      const tamperedStore = { ...store, activationHeads: () => new Map([[forged.activationId, forged]]) };
-+      const forgedHeads = new Map([[forged.activationId, forged]]);
-+      const tamperedStore = { ...store, activationHeads: () => forgedHeads, activationHistory: () => ({ heads: forgedHeads, invalid: new Map(), globalErrors: [] }) };
-       const withheld = readDecisionMemory({ store: tamperedStore, nowTs });
-       assert.equal(withheld.activations.length, 0);
-       assert.equal(withheld.withheld[0].reason, 'ACTIVATION_EVIDENCE_MISMATCH');
-diff --git a/test/learning-prospective.test.js b/test/learning-prospective.test.js
-index d175f9a..68ba60c 100644
---- a/test/learning-prospective.test.js
-+++ b/test/learning-prospective.test.js
-@@ -135,7 +135,7 @@ test('K. the synthetic qualifying dataset proves the full promotion path — and
-       { validation: { ...result.activation.validation, groupCount: 3000 } },
-     ]) {
-       const forged = { ...result.activation, ...mutation };
--      const tamperedStore = { ...store, activationHeads: () => new Map([[forged.activationId, forged]]) };
-+      const forgedHeads = new Map([[forged.activationId, forged]]); const tamperedStore = { ...store, activationHeads: () => forgedHeads, activationHistory: () => ({ heads: forgedHeads, invalid: new Map(), globalErrors: [] }) };
-       const withheld = readDecisionMemory({ store: tamperedStore, nowTs: T0 + 41 * DAY });
-       assert.equal(withheld.activations.length, 0, JSON.stringify(mutation));
-       assert.equal(withheld.withheld[0].reason, 'ACTIVATION_EVIDENCE_MISMATCH');
++
++test('stale, rollback/future, worker failure, and malformed response all clear cached memory', async () => {
++  let now = T;
++  let call = 0;
++  const task = immediate((request) => (++call === 1 ? success(request) : failure(request)));
++  const port = createDecisionMemoryPortForTest({ enabled: true, mode: 'PAPER', dataDir: 'unused', clock: () => now }, task);
++  assert.equal((await port.refresh()).ok, true);
++  assert.ok(port.snapshot());
++  await new Promise((resolve) => setImmediate(resolve)); // response + worker-close gate releases
++  assert.deepEqual(await port.refresh(), { ok: false, reason: 'MEMORY_READ_FAILED' });
++  assert.equal(port.snapshot(), null, 'a refresh fault cannot leave an older snapshot active');
++
++  const stale = createDecisionMemoryPortForTest({ enabled: true, mode: 'PAPER', dataDir: 'unused', clock: () => now }, immediate(success));
++  assert.equal((await stale.refresh()).ok, true);
++  now = T + DECISION_MEMORY_MAX_AGE_MS + 1;
++  assert.equal(stale.snapshot(), null);
++  assert.equal(stale.status().lastFailure, 'SNAPSHOT_STALE');
++
++  now = T;
++  let release;
++  let pendingRequest;
++  const future = createDecisionMemoryPortForTest({ enabled: true, mode: 'PAPER', dataDir: 'unused', clock: () => now }, (request) => {
++    pendingRequest = request;
++    const promise = new Promise((resolve) => { release = resolve; });
++    return { promise, closed: promise.then(() => {}), cancel: () => promise.then(() => {}) };
++  });
++  const pending = future.refresh();
++  now = T - 1;
++  release(success(pendingRequest));
++  assert.deepEqual(await pending, { ok: false, reason: 'CLOCK_ROLLBACK' });
++  assert.equal(future.snapshot(), null);
++
++  now = T;
++  const malformed = createDecisionMemoryPortForTest({ enabled: true, mode: 'OBSERVE', dataDir: 'unused', clock: () => now }, immediate((request) => ({ ...success(request), extra: 'forged' })));
++  assert.deepEqual(await malformed.refresh(), { ok: false, reason: 'RESPONSE_INVALID' });
++  assert.equal(malformed.snapshot(), null);
++  await Promise.all([port.stop(), stale.stop(), future.stop(), malformed.stop()]);
++});
++
++test('an otherwise shaped worker response above the physical UTF-8 byte bound is refused whole', async () => {
++  const rows = Array.from({ length: 2_000 }, (_, index) => ({
++    activationId: `lact-${index}`,
++    reason: '界'.repeat(1_000),
++  }));
++  const port = createDecisionMemoryPortForTest(
++    { enabled: true, mode: 'OBSERVE', dataDir: 'unused', clock: () => T },
++    immediate((request) => success(request, memory(T, { withheld: rows }))),
++  );
++  assert.deepEqual(await port.refresh(), { ok: false, reason: 'RESPONSE_INVALID' });
++  assert.equal(port.snapshot(), null, 'an oversized response is never truncated into a usable snapshot');
++  await port.stop();
++});
++
++test('a posted response stays single-flight until that worker actually exits', async () => {
++  const requests = [];
++  const responseResolvers = [];
++  const closeResolvers = [];
++  let calls = 0;
++  const port = createDecisionMemoryPortForTest(
++    { enabled: true, mode: 'PAPER', dataDir: 'unused', clock: () => T },
++    (request) => {
++      const index = calls++;
++      requests[index] = request;
++      const promise = new Promise((resolve) => { responseResolvers[index] = resolve; });
++      const closed = new Promise((resolve) => { closeResolvers[index] = resolve; });
++      return { promise, closed, cancel: () => closed };
++    },
++  );
++  const first = port.refresh();
++  responseResolvers[0](success(requests[0]));
++  assert.equal((await first).ok, true);
++  const repeated = port.refresh();
++  assert.strictEqual(repeated, first, 'the settled response promise remains the coalescing result until exit');
++  assert.equal(calls, 1, 'no second worker starts behind a first worker that has not exited');
++  closeResolvers[0]();
++  await new Promise((resolve) => setImmediate(resolve));
++
++  const second = port.refresh();
++  assert.notStrictEqual(second, first);
++  assert.equal(calls, 2, 'the slot reopens only after response and exit have both settled');
++  responseResolvers[1](success(requests[1]));
++  closeResolvers[1]();
++  assert.equal((await second).ok, true);
++  await port.stop();
++});
++
++test('stop cancels and awaits the one in-flight refresh, clears RAM, and refuses later work', async () => {
++  let request;
++  let releaseResponse;
++  let releaseClosed;
++  let cancelled = 0;
++  const task = (r) => {
++    request = r;
++    const promise = new Promise((resolve) => { releaseResponse = resolve; });
++    const closed = new Promise((resolve) => { releaseClosed = resolve; });
++    return {
++      promise,
++      closed,
++      cancel: () => { cancelled += 1; releaseResponse(failure(request, 'WORKER_EXITED')); return closed; },
++    };
++  };
++  const port = createDecisionMemoryPortForTest({ enabled: true, mode: 'PAPER', dataDir: 'unused', clock: () => T }, task);
++  const refresh = port.refresh();
++  const stopping = port.stop();
++  assert.strictEqual(port.stop(), stopping);
++  assert.equal(cancelled, 1);
++  assert.deepEqual(await refresh, { ok: false, reason: 'STOPPED' });
++  let stopSettled = false;
++  stopping.then(() => { stopSettled = true; });
++  await new Promise((resolve) => setImmediate(resolve));
++  assert.equal(stopSettled, false, 'a settled response is not proof that the worker closed');
++  releaseClosed();
++  assert.deepEqual(await stopping, { stopped: true });
++  assert.equal(port.snapshot(), null);
++  assert.deepEqual(await port.refresh(), { ok: false, reason: 'STOPPED' });
++  assert.equal(port.status().state, 'STOPPED');
++});
++
++test('a timeout response triggers shutdown cancellation and stop still waits for worker exit', async () => {
++  let releaseClosed;
++  let cancellations = 0;
++  const closed = new Promise((resolve) => { releaseClosed = resolve; });
++  const port = createDecisionMemoryPortForTest(
++    { enabled: true, mode: 'OBSERVE', dataDir: 'unused', clock: () => T },
++    (request) => ({
++      promise: Promise.resolve(failure(request, 'WORKER_TIMEOUT')),
++      closed,
++      cancel: () => { cancellations += 1; return closed; },
++    }),
++  );
++  assert.deepEqual(await port.refresh(), { ok: false, reason: 'WORKER_TIMEOUT' });
++  const stopping = port.stop();
++  assert.equal(cancellations, 1);
++  let settled = false;
++  stopping.then(() => { settled = true; });
++  await new Promise((resolve) => setImmediate(resolve));
++  assert.equal(settled, false);
++  releaseClosed();
++  assert.deepEqual(await stopping, { stopped: true });
++});
+diff --git a/test/social-4f-scope.test.js b/test/social-4f-scope.test.js
+index a2012aa..ec03020 100644
+--- a/test/social-4f-scope.test.js
++++ b/test/social-4f-scope.test.js
+@@ -277,9 +277,10 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
+     for (const forbidden of ['fetch(', 'WebSocket', 'setTimeout', 'setInterval', 'node:fs', 'node:http', 'child_process', 'Date.now', 'Math.random', 'process.env']) assert.ok(!src.includes(forbidden), `${f}: ${forbidden}`);
+     assert.ok(!/ledger|cost\/|tape\/|strike|exec|socrates|attention|hyped|stalk|nominat|placeOrder|createOrder/i.test(src), `${f} touches no authority`);
+   }
+-  // survey/catalog.js is consumed by the wide eye and the tests only; rumor2 never imports the survey tier
++  // survey/catalog.js is consumed by the wide eye, the two exact Kraken market
++  // readers, and tests only; rumor2 never imports the survey tier.
+   const consumers = tracked.filter((f) => !f.startsWith('test/') && /from\s+'(\.\/|[^']*survey\/)catalog\.js'/.test(read(f)));
+-  assert.deepEqual(consumers, ['market-lab/providers/kraken-spot.js', 'survey/wideeye.js']); // MARKET-LAB: the Kraken client reuses the pure pair normalizer
++  assert.deepEqual(consumers, ['market-lab/broad-kraken.js', 'market-lab/providers/kraken-spot.js', 'survey/wideeye.js']); // MARKET-LAB: the Kraken readers reuse the pure pair normalizer
+   for (const f of tracked.filter((f) => f.startsWith('rumor2/'))) assert.ok(!/from\s+'[^']*(survey|tape|cost|ledger|state|controls)\//.test(read(f)), `${f} imports no survey/trading tier`);
+   assert.ok(!/config\.universe/.test(code('rumor2/social-runtime.js')) && !/config\.universe/.test(code('rumor2/x-runtime.js')) && !/config\.universe/.test(code('rumor2/social-scope.js')), 'no Social runtime reads config.universe');
+ });
+diff --git a/test/broad-reader-isolation-review.test.js b/test/broad-reader-isolation-review.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/broad-reader-isolation-review.test.js
+@@ -0,0 +1,39 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { spawnSync } from 'node:child_process';
++import { fileURLToPath } from 'node:url';
++
++const REPO = fileURLToPath(new URL('..', import.meta.url));
++const BROAD_URL = new URL('../market-lab/broad-kraken.js', import.meta.url).href;
++
++test('importing the broad-market reader cannot write or start network acquisition', () => {
++  const permissionFlag = process.allowedNodeEnvironmentFlags.has('--permission')
++    ? '--permission'
++    : process.allowedNodeEnvironmentFlags.has('--experimental-permission')
++      ? '--experimental-permission'
++      : null;
++  assert.ok(permissionFlag, 'the supported Node runtime must expose its filesystem permission fence');
++
++  const source = `
++    let fetchCalls = 0;
++    let socketConstructs = 0;
++    globalThis.fetch = () => { fetchCalls += 1; throw new Error('network forbidden during import'); };
++    globalThis.WebSocket = class ForbiddenWebSocket {
++      constructor() { socketConstructs += 1; throw new Error('socket forbidden during import'); }
++    };
++    const mod = await import(${JSON.stringify(BROAD_URL)});
++    if (typeof mod.readBroadKrakenLatest !== 'function') throw new Error('reader export absent');
++    if (fetchCalls !== 0 || socketConstructs !== 0) throw new Error('import started network acquisition');
++  `;
++  const child = spawnSync(process.execPath, [
++    permissionFlag,
++    `--allow-fs-read=${REPO}`,
++    '--input-type=module',
++    '--eval',
++    source,
++  ], { cwd: REPO, encoding: 'utf8', timeout: 10_000 });
++
++  assert.equal(child.error, undefined);
++  assert.equal(child.signal, null);
++  assert.equal(child.status, 0, `isolated import failed:\n${child.stderr || child.stdout}`);
++});
