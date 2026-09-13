@@ -31,6 +31,7 @@ const manualTimers = () => {
     setTimeout: (fn) => later(fn), clearTimeout: (token) => { if (token) token.cleared = true; },
     setInterval: (fn) => { const token = { fn, cleared: false, unref() {} }; intervals.add(token); return token; },
     clearInterval: (token) => { if (token) token.cleared = true; intervals.delete(token); },
+    tickIntervals() { for (const token of [...intervals]) if (!token.cleared) token.fn(); },
     runAll(limit = 20_000) { let count = 0; while (queue.length) { const token = queue.shift(); if (!token.cleared) token.fn(); if (++count > limit) throw new Error('manual timer runaway'); } },
   };
 };
@@ -45,6 +46,21 @@ test('catalog validation is atomic and never slices the accepted population', ()
   assert.deepEqual(validateBroadKrakenCatalog(c), { ok: true, count: 3 });
   assert.equal(validateBroadKrakenCatalog({ ...c, markets: [...c.markets, c.markets[0]] }).ok, false);
   assert.equal(validateBroadKrakenCatalog(c, { maxMarkets: 2 }).reason, 'CATALOG_OVERFLOW');
+});
+
+test('broad collector waits for a missing startup catalog then adopts a later accepted full population', async () => {
+  FakeSocket.instances.length = 0;
+  const dir = temp(); const timers = manualTimers(); let available = null;
+  const handle = startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: available, fresh: available !== null }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => T, timers });
+  try {
+    assert.equal(FakeSocket.instances.length, 0, 'no guessed universe or socket before catalog');
+    available = catalog([market('AAA'), market('BBB')]);
+    timers.tickIntervals(); timers.runAll();
+    assert.equal(FakeSocket.instances.length, 1);
+    assert.equal(handle.status().catalog.markets, 2);
+    timers.tickIntervals();
+    assert.equal(FakeSocket.instances.length, 1, 'no duplicate socket from subsequent catalog polling');
+  } finally { await handle.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('full accepted population is classified without a named/top-N cap and every mapped symbol reaches both bounded channel requests', async () => {

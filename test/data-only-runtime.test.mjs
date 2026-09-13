@@ -62,6 +62,10 @@ test('outer market funnel subscribes the complete accepted catalog independently
   assert.ok(source.indexOf('await wideEye._refreshCatalog()') < source.indexOf('await startBroadKraken('));
   assert.ok(source.indexOf('await openDataOnlyCheckpoints(') < source.indexOf('await startBroadKraken('));
   assert.doesNotMatch(source, /\b(?:BTC|ETH|SOL)\b|composeDataOnlySocialConfig/);
+  const broad = source.slice(source.indexOf('if (catalogSource)'), source.indexOf("const env = { ...process.env, INFRA_OBS_ENABLED"));
+  assert.match(broad, /startBroadKraken/);
+  assert.doesNotMatch(broad, /checkpoints\?\.market|if \(catalog\)/);
+  assert.match(source, /if \(!checkpoints\?\.market\) throw/, 'deep REST quota gate is preserved');
 });
 
 test('data-only deployment composes the existing YouTube collector behind explicit fail-closed gates and durable status', () => {

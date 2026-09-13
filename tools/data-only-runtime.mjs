@@ -200,10 +200,12 @@ if (!Array.isArray(catalog?.markets) || catalog.markets.length === 0) {
 // Every accepted catalog market gets the same public price/volume/candle
 // subscription opportunity. Observed coverage is reported by the collector,
 // never inferred from catalog size or from the deep collector's health.
-if (catalog) {
+// Construct the waiting collector even if the first catalog request failed.
+// Public WS collection has no dependency on the separate deep REST quota.
+// Catalog acquisition itself still uses its existing budget/checkpoint gate.
+if (catalogSource) {
   try {
     startupPhase = 'BROAD_MARKET_CAPTURE';
-    if (!checkpoints?.market) throw new Error(blockers.MARKET ?? 'MARKET_QUOTA_NOT_RESTORED');
     broadMarket = await startBroadKraken({ catalogSource, dataDir: root, log });
     handles.push(broadMarket);
   } catch (error) {
