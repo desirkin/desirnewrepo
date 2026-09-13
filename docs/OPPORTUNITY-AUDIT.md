@@ -91,6 +91,12 @@ catalog identity and clocks, seed and sampling law, requested horizons,
 positive inclusion probability, and `authority: NONE` /
 `trainingAuthority: NONE`.
 
+The frame also seals `maxDurableCreationLagMs: 5000`. The store refuses first
+creation after that deadline. An annotation's observation `knownAtTs` must be
+at or after the store's durable frame-creation clock. Restart therefore cannot
+manufacture a historical prospective frame after ticker facts or outcomes may
+already be known.
+
 It also seals one target before outcomes exist:
 
 ```text
@@ -199,6 +205,49 @@ The store truthfully reports:
 An empty directory means no durable frames, never zero opportunities or a
 completed audit. Replit republish durability requires a separately reviewed
 external checkpoint/archive integration.
+
+## Optional WideEye adapter (not runtime-wired)
+
+`learning/opportunity-audit-wideeye-port.js` supplies the collector-facing
+two-phase interface without importing or changing WideEye:
+
+```text
+createOpportunityAuditWideEyePort({
+  store, sampleSize, horizonsMs, minFrameIntervalMs,
+  wideEyeComponent, maxRememberedFrames, clock
+})
+
+beforeSweep({ catalogSnapshot, frameTs }) -> auditToken | null
+afterSweep({ auditToken, observation, recordedTs }) -> receipt
+status()
+```
+
+`beforeSweep` requires a fresh accepted catalog and awaits durable frame
+creation. Calls inside the configured cadence return null rather than throwing
+and disabling an unrelated collector. A repeated same-process slot reloads
+the durable frame and returns the same token. After restart, an attempt to draw
+a different seed for an existing catalog/timestamp slot is refused; an exact
+previous token can resume its incomplete frame. There is no retrospective
+cadence catch-up.
+
+`afterSweep` validates the complete bounded sweep before its first write, then
+annotates every selected opportunity. Missing rows, invalid price, and warmup
+remain explicit. Evaluated rows seal the exact sweep/row digest and feature
+summaries. A RIPPLE/MISSED verdict, cooldown state, or emitted notice is never
+translated into nomination: nomination and decision remain `UNAVAILABLE`
+until a real downstream source is supplied.
+
+This adapter is intentionally **not safe to wire directly into the collector
+yet**. The current durable store serializes synchronous read/fsync/atomic-
+replace work. A JavaScript `Promise.race(..., 250ms)` cannot preempt synchronous
+filesystem work. On the 2026-09-13 Windows development host, one offline run
+with a 612-market frame took about 81ms for `beforeSweep`; annotating eight
+selected rows took about 2450ms (one selected row took about 146ms). These are
+measurements, not hard upper bounds. `status()` reports
+`directCollectorSafe:false` and `requiresWorkerIsolation:true`. Runtime
+activation requires a separately reviewed fixed-worker or batch-commit owner,
+shutdown/drain protocol, and target-host benchmark within the collector's
+latency budget.
 
 ## Runtime integration boundary
 

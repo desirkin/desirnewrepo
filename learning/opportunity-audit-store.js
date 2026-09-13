@@ -433,7 +433,9 @@ export function openOpportunityAuditStore({ rootDir, clock = () => Date.now(), l
 
   const status = () => {
     let annotations = 0; let outcomes = 0; let selected = 0; let pendingTargets = 0;
+    let latestFrameTs = null;
     for (const state of states.values()) {
+      latestFrameTs = latestFrameTs === null ? state.frame.frameTs : Math.max(latestFrameTs, state.frame.frameTs);
       annotations += state.annotations.length; outcomes += state.outcomes.length;
       selected += state.frame.sampling.sampleSize;
       const terminal = new Set(state.outcomes.filter((row) => opportunityAuditOutcomeTerminal(row.status)).map((row) => `${row.opportunityId}|${row.horizonMs}`));
@@ -441,7 +443,7 @@ export function openOpportunityAuditStore({ rootDir, clock = () => Date.now(), l
     }
     return deepFreeze({
       storeVersion: OPPORTUNITY_AUDIT_STORE_VERSION, open: !closing && !closed,
-      frameCount: states.size, selectedOpportunities: selected, annotations, outcomes, pendingTargets,
+      frameCount: states.size, latestFrameTs, selectedOpportunities: selected, annotations, outcomes, pendingTargets,
       failed: latched === null ? null : { code: latched.code, detail: String(latched.message).slice(0, 500) },
       durability: clone(OPPORTUNITY_AUDIT_DURABILITY),
       emptyStoreMeaning: 'NO_FRAMES_IS_NOT_A_COMPLETION_OR_ZERO_OPPORTUNITY_RECEIPT',
