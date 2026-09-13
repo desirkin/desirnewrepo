@@ -10,6 +10,7 @@ import {
   ADAPTIVE_EFFECT_REGISTRY, ADAPTIVE_HORIZON_MS, adaptiveProcedureError,
   sealAdaptiveProcedure,
 } from '../learning/adaptive-registry.js';
+import { adaptiveSettlementSubmission } from './helpers/adaptive-outcome-fixture.js';
 
 const T0 = Date.UTC(2026, 8, 13, 12);
 const DIGEST = (char) => char.repeat(64);
@@ -71,6 +72,17 @@ test('registry seals an actual binary 60m probability forecast and only rank sel
   assert.equal(p.target.score, 'BRIER_LOSS');
   assert.equal(p.target.horizonMs, ADAPTIVE_HORIZON_MS);
   assert.equal(p.target.maxPredictionPersistenceDelayMs, 5_000);
+  assert.equal(p.procedureVersion, 'adaptive-ranking-procedure-2');
+  assert.deepEqual(p.target.provenanceContract, {
+    contractVersion: 'adaptive-outcome-provenance-contract-1',
+    kind: 'CANDLE_LABEL_RECEIPT',
+    receiptVersion: 'adaptive-candle-label-receipt-2',
+    adapterVersion: 'adaptive-candle-outcome-adapter-2',
+    sourceDigestLaw: 'EXACT_RECEIPT_DIGEST',
+    persistenceLaw: 'SAME_JOURNAL_EVENT_AS_OUTCOME_SCORES_UPDATE',
+    authority: 'NONE',
+    qualificationLaw: 'EXTERNAL_SOURCE_AUTHENTICITY_FIRST_WRITE_AND_AFTER_COST_REQUIRED',
+  });
   assert.equal(p.effectRegistry.RANKING_SELECTION.state, 'SUPPORTED_AFTER_EXTERNAL_QUALIFICATION');
   assert.deepEqual(p.effectRegistry, ADAPTIVE_EFFECT_REGISTRY);
   for (const field of ['ENTRY', 'EXIT', 'SIZING']) assert.match(p.effectRegistry[field].state, /^UNSUPPORTED_/);
@@ -118,7 +130,7 @@ test('saved forecast is scored before one bounded update and changes a later imm
 
   const matured = matureInput(first.prediction);
   h.setNow(matured.knownAtTs);
-  const learned = h.core.recordOutcome(matured);
+  const learned = h.core.recordOutcome(adaptiveSettlementSubmission(h.procedure, first.prediction, matured));
   assert.equal(learned.status, 'UPDATED');
   assert.equal(learned.scores[0].forecastProbability, 0.5);
   assert.equal(learned.scores[0].targetValue, 1);
@@ -151,13 +163,14 @@ test('primary opportunity/horizon is exactly once across retries, accounts, and 
 
   const outcome = matureInput(saved);
   h.setNow(outcome.knownAtTs);
-  const first = h.core.recordOutcome(outcome);
+  const submission = adaptiveSettlementSubmission(h.procedure, saved, outcome);
+  const first = h.core.recordOutcome(submission);
   const sequence = first.state.sequence;
   h.setNow(outcome.knownAtTs + 50_000);
-  const retry = h.core.recordOutcome(outcome);
+  const retry = h.core.recordOutcome(submission);
   assert.equal(retry.status, 'EXISTING');
   assert.equal(h.store.state().sequence, sequence);
-  assert.throws(() => h.core.recordOutcome({ ...outcome, logReturnPct: -1 }), /OUTCOME_CONFLICT/);
+  assert.throws(() => h.core.recordOutcome(adaptiveSettlementSubmission(h.procedure, saved, { ...outcome, logReturnPct: -1 })), /OUTCOME_CONFLICT/);
 });
 
 test('future and missing labels never update; valid delayed label updates and over-limit late label is retained without update', (t) => {
@@ -165,34 +178,37 @@ test('future and missing labels never update; valid delayed label updates and ov
   const pendingInput = predictionInput(h.procedure, 3);
   h.setNow(pendingInput.predictionTs + 100);
   const pendingPrediction = h.core.recordPrediction(pendingInput).prediction;
-  assert.throws(() => h.core.recordOutcome({
+  assert.throws(() => h.core.recordOutcome({ outcomeInput: {
     opportunityId: 'lop-0000000000000000000000000000000000000000', horizonMs: ADAPTIVE_HORIZON_MS,
     state: 'PENDING', logReturnPct: null, sourceEventTs: null, knownAtTs: null,
     sourceDigest: null, reasonCode: 'HORIZON_NOT_MATURE',
-  }), /PREDICTION_NOT_FOUND/);
-  const pending = h.core.recordOutcome({
+  }, provenanceReceipt: null }), /PREDICTION_NOT_FOUND/);
+  const pendingOutcomeInput = {
     opportunityId: pendingPrediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
     state: 'PENDING', logReturnPct: null, sourceEventTs: null, knownAtTs: null,
     sourceDigest: null, reasonCode: 'HORIZON_NOT_MATURE',
-  });
+  };
+  const pending = h.core.recordOutcome(adaptiveSettlementSubmission(h.procedure, pendingPrediction, pendingOutcomeInput));
   assert.equal(pending.status, 'PENDING_NO_DURABLE_OUTCOME');
   assert.equal(h.store.state().sequence, 0);
-  assert.throws(() => h.core.recordOutcome({ ...matureInput(pendingPrediction), knownAtTs: pendingPrediction.targetEndTs + 2_000 }), /OUTCOME_INVALID/, 'knownAt in the future is refused');
+  const futureSubmission = adaptiveSettlementSubmission(h.procedure, pendingPrediction, { ...matureInput(pendingPrediction), knownAtTs: pendingPrediction.targetEndTs + 2_000 });
+  assert.throws(() => h.core.recordOutcome(futureSubmission), /OUTCOME_INVALID/, 'knownAt in the future is refused');
   h.setNow(pendingPrediction.targetEndTs + 120_000);
-  assert.throws(() => h.core.recordOutcome({
+  assert.throws(() => h.core.recordOutcome(adaptiveSettlementSubmission(h.procedure, pendingPrediction, {
     ...matureInput(pendingPrediction), sourceEventTs: pendingPrediction.targetEndTs + 60_000,
     knownAtTs: pendingPrediction.targetEndTs + 120_000,
-  }), /OUTCOME_INVALID/, 'a different source horizon cannot be scored as the sealed 60m target');
+  })), /OUTCOME_PROVENANCE_INVALID/, 'a different source horizon cannot be scored as the sealed 60m target');
 
   const missingInput = predictionInput(h.procedure, 400);
   h.setNow(missingInput.predictionTs + 100);
   const missingPrediction = h.core.recordPrediction(missingInput).prediction;
-  h.setNow(missingPrediction.targetEndTs + 1_000);
-  const missing = h.core.recordOutcome({
+  h.setNow(missingPrediction.targetEndTs + 5_001);
+  const missingOutcomeInput = {
     opportunityId: missingPrediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
     state: 'MISSING', logReturnPct: null, sourceEventTs: null,
-    knownAtTs: missingPrediction.targetEndTs + 1_000, sourceDigest: DIGEST('1'), reasonCode: 'SOURCE_GAP',
-  });
+    knownAtTs: missingPrediction.targetEndTs + 5_001, sourceDigest: DIGEST('1'), reasonCode: 'SOURCE_GAP',
+  };
+  const missing = h.core.recordOutcome(adaptiveSettlementSubmission(h.procedure, missingPrediction, missingOutcomeInput));
   assert.equal(missing.status, 'APPENDED_NO_UPDATE');
   assert.equal(h.store.state().sequence, 0);
 
@@ -201,7 +217,7 @@ test('future and missing labels never update; valid delayed label updates and ov
   const validPrediction = h.core.recordPrediction(validInput).prediction;
   const valid = matureInput(validPrediction, { knownDelayMs: 4_999 });
   h.setNow(valid.knownAtTs);
-  assert.equal(h.core.recordOutcome(valid).status, 'UPDATED');
+  assert.equal(h.core.recordOutcome(adaptiveSettlementSubmission(h.procedure, validPrediction, valid)).status, 'UPDATED');
   assert.equal(h.store.state().sequence, 1);
 
   const lateInput = predictionInput(h.procedure, 1_200);
@@ -209,7 +225,7 @@ test('future and missing labels never update; valid delayed label updates and ov
   const latePrediction = h.core.recordPrediction(lateInput).prediction;
   const late = matureInput(latePrediction, { knownDelayMs: 5_001 });
   h.setNow(late.knownAtTs);
-  const lateResult = h.core.recordOutcome(late);
+  const lateResult = h.core.recordOutcome(adaptiveSettlementSubmission(h.procedure, latePrediction, late));
   assert.equal(lateResult.status, 'APPENDED_NO_UPDATE');
   assert.equal(lateResult.reason, 'INELIGIBLE_LATE');
   assert.equal(h.store.state().sequence, 1);
@@ -225,12 +241,13 @@ test('one primary episode has a hard aggregate influence cap and cap exhaustion 
   const prediction = h.core.recordPrediction(input).prediction;
   const outcome = matureInput(prediction);
   h.setNow(outcome.knownAtTs);
-  const result = h.core.recordOutcome(outcome);
+  const submission = adaptiveSettlementSubmission(h.procedure, prediction, outcome);
+  const result = h.core.recordOutcome(submission);
   const movement = result.update.deltas.reduce((sum, row) => sum + Math.abs(row.rankDeltaRrPoints), 0);
   assert.ok(movement <= 0.005 + 1e-9);
   assert.equal(result.update.episodeInfluenceAfter, movement);
   assert.equal(result.state.totalRankMovementRrPoints, movement);
-  const retry = h.core.recordOutcome(outcome);
+  const retry = h.core.recordOutcome(submission);
   assert.equal(retry.status, 'EXISTING');
   assert.equal(h.core.status().movement.exhausted, true);
 });

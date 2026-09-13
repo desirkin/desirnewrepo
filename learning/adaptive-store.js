@@ -7,7 +7,7 @@
 import path from 'node:path';
 import {
   closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
-  readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync, writeSync,
+  readFileSync, readSync, readdirSync, realpathSync, unlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { atomicWriteJson } from '../lib/jsonl.js';
@@ -18,10 +18,11 @@ import {
   adaptiveStateError, adaptiveUpdateError, applyAdaptiveUpdate,
   initialAdaptiveState,
 } from './adaptive-registry.js';
+import { adaptiveCandleSettlementError } from './adaptive-candle-outcome.js';
 
-export const ADAPTIVE_STORE_VERSION = 'adaptive-local-store-1';
-export const ADAPTIVE_JOURNAL_EVENT_VERSION = 'adaptive-journal-event-1';
-export const ADAPTIVE_HEAD_VERSION = 'adaptive-acknowledged-head-1';
+export const ADAPTIVE_STORE_VERSION = 'adaptive-local-store-2';
+export const ADAPTIVE_JOURNAL_EVENT_VERSION = 'adaptive-journal-event-2';
+export const ADAPTIVE_HEAD_VERSION = 'adaptive-acknowledged-head-2';
 export const ADAPTIVE_DURABILITY = deepFreeze({
   kind: 'LOCAL_FILESYSTEM_ONLY',
   fsync: true,
@@ -50,8 +51,8 @@ const EVENT_TYPES = new Set(['PROCEDURE_REGISTERED', 'PREDICTION_RECORDED', 'OUT
 const BODY_KEYS = Object.freeze({
   PROCEDURE_REGISTERED: ['procedure', 'state'],
   PREDICTION_RECORDED: ['prediction'],
-  OUTCOME_RECORDED: ['outcome'],
-  OUTCOME_UPDATED: ['outcome', 'scores', 'update', 'nextStateDigest'],
+  OUTCOME_RECORDED: ['outcome', 'provenanceReceipt'],
+  OUTCOME_UPDATED: ['outcome', 'provenanceReceipt', 'scores', 'update', 'nextStateDigest'],
 });
 
 export class AdaptiveStoreError extends Error {
@@ -110,6 +111,49 @@ function statIdentity(stat) {
   return `${stat.dev}:${stat.ino}`;
 }
 
+// Format mismatches are detected before acquiring writer custody. In
+// particular, a v1 directory is preserved byte-for-byte; this v2 store never
+// migrates, truncates, resets, or inspects it as current state.
+function assertExistingStoreVersion(journalFile, headFile, limits) {
+  if (existsSync(journalFile)) {
+    const stat = lstatSync(journalFile);
+    if (stat.isFile() && !stat.isSymbolicLink() && stat.size >= 2) {
+      try {
+        const fd = openSync(journalFile, 'r');
+        let firstChunk;
+        try {
+          const buffer = Buffer.alloc(Math.min(stat.size, limits.maxEventBytes + 1));
+          const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+          firstChunk = buffer.subarray(0, bytes).toString('utf8');
+        } finally { closeSync(fd); }
+        const firstLine = firstChunk.split('\n').find((line) => line.length > 0);
+        const event = firstLine ? JSON.parse(firstLine) : null;
+        if (isPlainObject(event)
+            && (event.storeVersion !== ADAPTIVE_STORE_VERSION
+              || event.eventVersion !== ADAPTIVE_JOURNAL_EVENT_VERSION)) {
+          fail('STORE_VERSION_UNSUPPORTED', 'existing adaptive journal uses a different immutable format; it was not modified');
+        }
+      } catch (error) {
+        if (error instanceof AdaptiveStoreError) throw error;
+      }
+    }
+  }
+  if (existsSync(headFile)) {
+    const stat = lstatSync(headFile);
+    if (stat.isFile() && !stat.isSymbolicLink() && stat.size >= 2 && stat.size <= 16 * 1024) {
+      try {
+        const head = JSON.parse(readFileSync(headFile, 'utf8'));
+        if (isPlainObject(head)
+            && (head.storeVersion !== ADAPTIVE_STORE_VERSION || head.headVersion !== ADAPTIVE_HEAD_VERSION)) {
+          fail('STORE_VERSION_UNSUPPORTED', 'existing adaptive head uses a different immutable format; it was not modified');
+        }
+      } catch (error) {
+        if (error instanceof AdaptiveStoreError) throw error;
+      }
+    }
+  }
+}
+
 function parseJournal(file, procedure, limits) {
   const stat = lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink()) fail('PATH_ESCAPE', 'journal must be one regular file');
@@ -119,7 +163,7 @@ function parseJournal(file, procedure, limits) {
   if (!encoded.endsWith('\n')) fail('STORE_CORRUPT', 'journal has a partial final line');
   const nonEmpty = encoded.split('\n').filter((line) => line.length > 0);
   if (nonEmpty.length === 0 || nonEmpty.length > limits.maxEvents) fail('STORE_CORRUPT', 'journal event count outside bounds');
-  const predictions = new Map(); const outcomes = new Map(); const updates = new Map();
+  const predictions = new Map(); const outcomes = new Map(); const updates = new Map(); const settlements = new Map();
   let state = null; let lastDigest = null; let lastTs = null; let registered = null;
   for (let index = 0; index < nonEmpty.length; index += 1) {
     const line = nonEmpty[index];
@@ -151,6 +195,8 @@ function parseJournal(file, procedure, limits) {
       const prediction = predictions.get(key);
       if (!prediction) fail('STORE_CORRUPT', 'outcome has no saved prediction');
       const outcomeError = adaptiveOutcomeError(outcome, procedure, prediction); if (outcomeError) fail('STORE_CORRUPT', `outcome ${outcomeError}`);
+      const settlementError = adaptiveCandleSettlementError({ outcome, provenanceReceipt: event.body.provenanceReceipt }, procedure, prediction);
+      if (settlementError) fail('STORE_CORRUPT', `settlement ${settlementError}`);
       if (outcomes.has(key)) fail('STORE_CORRUPT', 'duplicate outcome key in journal');
       if (event.eventType === 'OUTCOME_RECORDED') {
         if (outcome.updateEligibility === 'ELIGIBLE') fail('STORE_CORRUPT', 'eligible outcome stored without score/update');
@@ -164,11 +210,19 @@ function parseJournal(file, procedure, limits) {
         updates.set(event.body.update.updateId, event.body.update); state = transition.nextState;
       }
       outcomes.set(key, outcome);
+      settlements.set(key, {
+        outcome,
+        provenanceReceipt: event.body.provenanceReceipt,
+        scores: event.eventType === 'OUTCOME_UPDATED' ? event.body.scores : null,
+        update: event.eventType === 'OUTCOME_UPDATED' ? event.body.update : null,
+        eventSequence: event.sequence,
+        eventDigest: event.eventDigest,
+      });
     }
     lastDigest = event.eventDigest; lastTs = event.recordedTs;
   }
   if (!registered || !state) fail('STORE_CORRUPT', 'registration/state absent');
-  return { registered, state, predictions, outcomes, updates, lastDigest, lastTs, eventCount: nonEmpty.length, size: stat.size };
+  return { registered, state, predictions, outcomes, updates, settlements, lastDigest, lastTs, eventCount: nonEmpty.length, size: stat.size };
 }
 
 function makeEvent({ sequence, previousDigest, eventType, recordedTs, body }) {
@@ -244,6 +298,7 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
   const lockFile = path.join(root, 'writer.lock');
   const journalFile = path.join(root, 'journal.jsonl');
   const headFile = path.join(root, 'head.json');
+  assertExistingStoreVersion(journalFile, headFile, limits);
   const writerToken = randomBytes(16).toString('hex');
   const acquiredTs = clock(); if (!isTs(acquiredTs)) fail('CLOCK_INVALID', 'clock returned invalid timestamp');
   const lockValue = { storeVersion: ADAPTIVE_STORE_VERSION, writerToken, pid: process.pid, acquiredTs };
@@ -289,7 +344,7 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
         procedure, eventCount: 1, lastEventDigest: first.eventDigest,
         journalBytes: initialBytes, stateDigest: state.stateDigest, committedTs: first.recordedTs,
       }), procedure);
-      replay = { registered: procedure, state, predictions: new Map(), outcomes: new Map(), updates: new Map(), lastDigest: first.eventDigest, lastTs: first.recordedTs, eventCount: 1, size: initialBytes, head };
+      replay = { registered: procedure, state, predictions: new Map(), outcomes: new Map(), updates: new Map(), settlements: new Map(), lastDigest: first.eventDigest, lastTs: first.recordedTs, eventCount: 1, size: initialBytes, head };
     } else {
       replay = parseJournal(journalFile, procedure, limits);
       replay.head = readAcknowledgedHead(headFile, procedure, replay);
@@ -304,7 +359,7 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
   let journalIdentity = statIdentity(fstatSync(journalFd));
   let expectedSize = replay.size;
   let currentState = replay.state;
-  const predictions = replay.predictions; const outcomes = replay.outcomes; const updates = replay.updates;
+  const predictions = replay.predictions; const outcomes = replay.outcomes; const updates = replay.updates; const settlements = replay.settlements;
   let lastDigest = replay.lastDigest; let lastTs = replay.lastTs; let eventCount = replay.eventCount;
   let acknowledgedHead = replay.head;
 
@@ -361,41 +416,51 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
     return deepFreeze({ status: 'APPENDED', prediction: clone(prediction) });
   }
 
-  function appendOutcomeOnly(outcome) {
+  function appendOutcomeOnly({ outcome, provenanceReceipt }) {
     ready();
     const key = adaptivePredictionKeyOf(outcome); const prediction = predictions.get(key);
     if (!prediction) fail('PREDICTION_NOT_FOUND', key);
     const error = adaptiveOutcomeError(outcome, procedure, prediction); if (error) fail('OUTCOME_INVALID', error);
+    const settlementError = adaptiveCandleSettlementError({ outcome, provenanceReceipt }, procedure, prediction);
+    if (settlementError) fail('SETTLEMENT_INVALID', settlementError);
     if (outcome.updateEligibility === 'ELIGIBLE') fail('OUTCOME_INVALID', 'eligible outcome requires one score/update transaction');
     const existing = outcomes.get(key);
     if (existing) {
       if (existing.outcomeDigest !== outcome.outcomeDigest) fail('OUTCOME_CONFLICT', 'outcome already settled with different content');
+      const prior = settlements.get(key);
+      if (!prior || prior.provenanceReceipt.receiptDigest !== provenanceReceipt.receiptDigest) fail('PROVENANCE_CONFLICT', 'outcome already settled with different provenance');
       return deepFreeze({ status: 'EXISTING', outcome: clone(existing) });
     }
-    appendEvent('OUTCOME_RECORDED', { outcome }, outcome.recordedTs);
+    const event = appendEvent('OUTCOME_RECORDED', { outcome, provenanceReceipt }, outcome.recordedTs);
     outcomes.set(key, clone(outcome));
+    settlements.set(key, { outcome: clone(outcome), provenanceReceipt: clone(provenanceReceipt), scores: null, update: null, eventSequence: event.sequence, eventDigest: event.eventDigest });
     return deepFreeze({ status: 'APPENDED_NO_UPDATE', outcome: clone(outcome) });
   }
 
-  function appendOutcomeUpdate({ outcome, scores, update, nextState }) {
+  function appendOutcomeUpdate({ outcome, provenanceReceipt, scores, update, nextState }) {
     ready();
     const key = adaptivePredictionKeyOf(outcome); const prediction = predictions.get(key);
     if (!prediction) fail('PREDICTION_NOT_FOUND', key);
     const existing = outcomes.get(key);
     if (existing) {
       if (existing.outcomeDigest !== outcome.outcomeDigest) fail('OUTCOME_CONFLICT', 'outcome already settled with different content');
+      const prior = settlements.get(key);
+      if (!prior || prior.provenanceReceipt.receiptDigest !== provenanceReceipt.receiptDigest) fail('PROVENANCE_CONFLICT', 'outcome already settled with different provenance');
       const priorUpdate = updates.get(update.updateId);
       if (!priorUpdate || priorUpdate.updateDigest !== update.updateDigest) fail('UPDATE_CONFLICT', 'existing outcome does not bind this update');
       return deepFreeze({ status: 'EXISTING', outcome: clone(existing), update: clone(priorUpdate), state: clone(currentState) });
     }
     const outcomeError = adaptiveOutcomeError(outcome, procedure, prediction); if (outcomeError) fail('OUTCOME_INVALID', outcomeError);
+    const settlementError = adaptiveCandleSettlementError({ outcome, provenanceReceipt }, procedure, prediction);
+    if (settlementError) fail('SETTLEMENT_INVALID', settlementError);
     const scoreError = adaptiveScoresError(scores, procedure, prediction, outcome); if (scoreError) fail('SCORE_INVALID', scoreError);
     const updateError = adaptiveUpdateError(update, procedure, currentState, prediction, outcome, scores, nextState); if (updateError) fail('UPDATE_INVALID', updateError);
     const recomputed = applyAdaptiveUpdate({ procedure, state: currentState, prediction, outcome, scores, appliedTs: update.appliedTs });
     if (!same(recomputed.update, update) || !same(recomputed.nextState, nextState)) fail('UPDATE_INVALID', 'transition differs from frozen algorithm');
     if (updates.has(update.updateId)) fail('UPDATE_CONFLICT', 'update key already consumed');
-    appendEvent('OUTCOME_UPDATED', { outcome, scores, update, nextStateDigest: nextState.stateDigest }, update.appliedTs);
+    const event = appendEvent('OUTCOME_UPDATED', { outcome, provenanceReceipt, scores, update, nextStateDigest: nextState.stateDigest }, update.appliedTs);
     outcomes.set(key, clone(outcome)); updates.set(update.updateId, clone(update)); currentState = clone(nextState);
+    settlements.set(key, { outcome: clone(outcome), provenanceReceipt: clone(provenanceReceipt), scores: clone(scores), update: clone(update), eventSequence: event.sequence, eventDigest: event.eventDigest });
     return deepFreeze({ status: 'UPDATED', outcome: clone(outcome), scores: clone(scores), update: clone(update), state: clone(currentState) });
   }
 
@@ -408,6 +473,8 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
       stateSequence: currentState.sequence,
       predictionCount: predictions.size,
       outcomeCount: outcomes.size,
+      provenanceReceiptCount: settlements.size,
+      unbackedOutcomeCount: outcomes.size - settlements.size,
       updateCount: updates.size,
       eventCount,
       journalBytes: expectedSize,
@@ -423,6 +490,14 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
         stateDigest: acknowledgedHead.stateDigest,
       },
       durability: ADAPTIVE_DURABILITY,
+      provenanceLimitations: {
+        receiptContentBound: true,
+        declaredArchiveIdentityBound: true,
+        externalSourceAuthenticityVerified: false,
+        firstWriteCustodyVerified: false,
+        afterCostQualificationVerified: false,
+        authority: 'NONE',
+      },
       emptyHistoryMeaning: 'EXPLICIT_PROCEDURE_REGISTRATION_ONLY_NOT_EVIDENCE_OR_COMPLETION',
     });
   }
@@ -443,6 +518,26 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
     },
     outcome: ({ opportunityId, horizonMs }) => {
       ready(); const row = outcomes.get(adaptivePredictionKeyOf({ procedureId: procedure.procedureId, opportunityId, horizonMs })); return row ? deepFreeze(clone(row)) : null;
+    },
+    settlement: ({ opportunityId, horizonMs }) => {
+      ready();
+      const row = settlements.get(adaptivePredictionKeyOf({ procedureId: procedure.procedureId, opportunityId, horizonMs }));
+      if (!row) return null;
+      return deepFreeze({
+        ...clone(row),
+        custody: {
+          storeVersion: ADAPTIVE_STORE_VERSION,
+          eventVersion: ADAPTIVE_JOURNAL_EVENT_VERSION,
+          durability: ADAPTIVE_DURABILITY,
+          acknowledgedHead: clone(acknowledgedHead),
+          receiptContentBound: true,
+          declaredArchiveIdentityBound: true,
+          externalSourceAuthenticityVerified: false,
+          firstWriteCustodyVerified: false,
+          afterCostQualificationVerified: false,
+          authority: 'NONE',
+        },
+      });
     },
     appendPrediction, appendOutcomeOnly, appendOutcomeUpdate, status, close,
   });

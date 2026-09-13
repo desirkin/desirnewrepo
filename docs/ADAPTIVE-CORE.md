@@ -1,4 +1,4 @@
-# Adaptive core v1
+# Adaptive core v2
 
 This module is a bounded, state-only learner for research and, only after a
 separate trusted qualification, a possible PAPER ranking input. It does not
@@ -12,7 +12,7 @@ recipe, strategy registry, target, update algorithm, numerical limits, and
 effect registry into one immutable procedure digest. Changing any of those
 values creates a different procedure and cannot reuse the existing journal.
 
-The v1 forecast is an actual number in `[0,1]`: the estimated probability that
+The v2 forecast is an actual number in `[0,1]`: the estimated probability that
 the existing candle-label recipe's 60-minute log return is positive,
 conditional on an existing strategy being eligible at the saved decision.
 It is explicitly uncalibrated until evaluated prospectively. It is not the
@@ -50,7 +50,7 @@ strategy, per primary episode, and lifetime cumulative movement ceilings are
 all explicit. Exhaustion remains visible in status and is never reset because
 of restart.
 
-The primary identity comes from the existing `opportunityIdOf` law. V1 has one
+The primary identity comes from the existing `opportunityIdOf` law. V2 has one
 sealed horizon, so `(procedure, opportunityId, 60m)` can produce at most one
 prediction, one outcome, and one update. Variant names and account identities
 are not accepted inputs and therefore cannot multiply evidence. Additional
@@ -68,8 +68,10 @@ state transition. A partial line, malformed event, changed procedure, custody
 loss, or external file mutation fails the whole store closed; records are not
 skipped or repaired.
 
-An update event stores the immutable outcome, pre-update scores, bounded
-update, and expected next-state digest. After the journal fsync, the store
+An update event stores the immutable outcome, its exact candle-label
+provenance receipt, pre-update scores, bounded update, and expected next-state
+digest. An ineligible terminal outcome and its receipt likewise share one
+event. There is no parallel provenance file or second receipt write. After the journal fsync, the store
 atomically replaces and directory-syncs an acknowledged head binding the event
 count, terminal digest, journal bytes, and state digest. Replay must agree with
 that head. A clean whole-event suffix truncation, or a crash leaving the journal
@@ -95,9 +97,11 @@ const store = createAdaptiveStore({ rootDir, procedure, clock });
 const core = createAdaptiveCore({ store, procedure, clock });
 
 core.recordPrediction(input); // immutable pre-outcome probability
-core.recordOutcome(input);    // missing/late retention or exactly-one score/update
+core.recordOutcome({ outcomeInput, provenanceReceipt });
+// missing/late retention or exactly-one score/update, atomically receipt-bound
 core.snapshot({ mode: 'SHADOW', nowTs, qualification: null });
 core.status();
+store.settlement({ opportunityId, horizonMs }); // durable replay/readback
 store.close();
 ```
 
@@ -115,23 +119,37 @@ It returns `{status, outcomeInput, provenanceReceipt}`:
   `targetEndTs + procedure.target.maxLabelDelayMs` when the label is still
   unavailable or censored.
 
-In v1, `maxLabelDelayMs` is therefore frozen before prediction as both the
+In v2, `maxLabelDelayMs` is therefore frozen before prediction as both the
 maximum update-eligible label delay and the terminal-missingness deadline. A
 real label first observed later is retained as a late, non-updating outcome if
 no prior terminal outcome exists. If deadline-missing was already appended,
 the core/store's first-settlement identity rejects the correction instead of
 rewriting history.
 
-The receipt binds the complete projected 60m label and the archive manifest
-SHA-256 (whose manifest binds the declared candle-source checksum). It is
-labelled `UNPERSISTED_CALLER_MUST_JOURNAL`; returning it does not make it
-durable. A caller with the source archive can ask the receipt validator to
-re-run the existing label recipe and detect a self-rehashed mutation. A
-detached digest alone establishes identity, not provider authenticity,
-first-write chronology, or durable custody. Integration must persist the
-receipt/source anchor before appending the outcome. The supplied `asOfTs` also
-must come from the integration's trusted clock; this pure adapter cannot prove
-the caller's wall clock.
+The receipt binds the complete projected 60m label and the declared archive
+manifest SHA-256 (whose manifest binds the declared candle-source checksum).
+It is labelled `CALLER_MUST_ATOMICALLY_PERSIST_WITH_OUTCOME`. The v2 core and
+store enforce that law: a terminal call without the receipt is refused, the
+receipt digest must equal the outcome source digest, and the complete pair is
+written in the same bounded journal event. `store.settlement(...)` returns the
+receipt, outcome, scores/update, event identity, and current acknowledged-head
+custody after normal replay.
+
+A caller with the source archive can ask the receipt validator to re-run the
+existing label recipe and detect a self-rehashed mutation. Detached validation
+only proves content and declared archive identity. It does **not** prove that
+the archive came from the provider, was first-written before the decision, or
+was not rolled back as a whole directory. It also does not prove an after-cost
+policy result and grants no qualification or Judge authority. Those remain
+external integration and existing promotion-manager responsibilities. The
+supplied `asOfTs` must likewise come from the integration's trusted clock.
+
+The v2 procedure digest freezes this exact provenance contract and the store,
+journal-event, head, outcome, adapter, and receipt formats have new immutable
+versions. A v1 directory is detected before writer-lock acquisition and is
+refused as `STORE_VERSION_UNSUPPORTED`. It is never migrated, truncated,
+reset, or silently reinterpreted; commissioning a distinct v2 directory is an
+explicit operator/integration action.
 
 The candle outcome is a price-return target. It contains no fee, spread,
 slippage, fill, or profit field and must never be reinterpreted as an
@@ -150,7 +168,7 @@ prospective evidence, after-cost qualification, and consumer contract.
 
 ## Operational constraint
 
-The v1 store performs synchronous append and fsync for deterministic local
+The v2 store performs synchronous append and fsync for deterministic local
 durability. It must run on a dedicated learner worker or otherwise outside the
 collector, Watch, and Judge ingestion loops. Direct hot-path composition is an
 activation blocker, not an optimization to postpone.

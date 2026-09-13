@@ -8,6 +8,7 @@ import { canonicalDigest, opportunityIdOf } from '../learning/contracts.js';
 import { createAdaptiveCore } from '../learning/adaptive-core.js';
 import {
   ADAPTIVE_CANDLE_RECEIPT_DURABILITY, adaptiveCandleOutcomeReceiptError,
+  adaptiveCandleOutcomeSubmissionError, adaptiveCandleSettlementError,
   prepareAdaptiveCandleOutcome,
 } from '../learning/adaptive-candle-outcome.js';
 import { sealAdaptiveProcedure } from '../learning/adaptive-registry.js';
@@ -95,8 +96,23 @@ test('actual existing 60m candle label becomes the exact price-return outcome wi
   assert.equal(prepared.provenanceReceipt.label.horizon60m.logReturnPct, prepared.outcomeInput.logReturnPct);
   assert.equal(prepared.provenanceReceipt.durability, ADAPTIVE_CANDLE_RECEIPT_DURABILITY);
   assert.equal(adaptiveCandleOutcomeReceiptError(prepared.provenanceReceipt, h.procedure, h.prediction, { archive: source.archive }), null);
+  const submission = { outcomeInput: prepared.outcomeInput, provenanceReceipt: prepared.provenanceReceipt };
+  assert.equal(adaptiveCandleOutcomeSubmissionError(submission, h.procedure, h.prediction, { archive: source.archive }), null);
   h.setNow(h.prediction.targetEndTs);
-  assert.equal(h.core.recordOutcome(prepared.outcomeInput).status, 'UPDATED');
+  const beforeRefusal = h.store.status().acknowledgedHead.headDigest;
+  assert.throws(() => h.core.recordOutcome({ outcomeInput: prepared.outcomeInput, provenanceReceipt: null }), /OUTCOME_PROVENANCE_INVALID/);
+  assert.equal(h.store.status().acknowledgedHead.headDigest, beforeRefusal, 'invalid provenance causes no journal/head mutation');
+  const result = h.core.recordOutcome(submission);
+  assert.equal(result.status, 'UPDATED');
+  const settlement = h.store.settlement({ opportunityId: h.prediction.opportunityId, horizonMs: h.prediction.horizonMs });
+  assert.equal(adaptiveCandleSettlementError({ outcome: settlement.outcome, provenanceReceipt: settlement.provenanceReceipt }, h.procedure, h.prediction, { archive: source.archive }), null);
+  assert.equal(settlement.eventDigest, settlement.custody.acknowledgedHead.lastEventDigest);
+  assert.equal(settlement.custody.authority, 'NONE');
+  const events = readFileSync(path.join(h.rootDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const terminal = events.at(-1);
+  assert.equal(terminal.eventType, 'OUTCOME_UPDATED');
+  assert.equal(terminal.body.outcome.sourceDigest, terminal.body.provenanceReceipt.receiptDigest);
+  assert.equal(events.some((event) => /RECEIPT/.test(event.eventType)), false, 'receipt is not a separate crash-window write');
 });
 
 test('one unavailable poll remains pending until the presealed missingness deadline', (t) => {
@@ -110,7 +126,7 @@ test('one unavailable poll remains pending until the presealed missingness deadl
     sourceDigest: null, reasonCode: 'LABEL_PENDING:ARCHIVE_ABSENT',
   });
   h.setNow(asOfTs);
-  assert.equal(h.core.recordOutcome(prepared.outcomeInput).status, 'PENDING_NO_DURABLE_OUTCOME');
+  assert.equal(h.core.recordOutcome({ outcomeInput: prepared.outcomeInput, provenanceReceipt: prepared.provenanceReceipt }).status, 'PENDING_NO_DURABLE_OUTCOME');
   assert.equal(h.store.status().outcomeCount, 0);
   assert.equal(h.store.state().sequence, 0);
 });
@@ -158,7 +174,7 @@ test('after a deadline-missing settlement, a later correction cannot rewrite evi
   const missingTs = h.prediction.targetEndTs + 10_001;
   const missing = prepareAdaptiveCandleOutcome({ procedure: h.procedure, prediction: h.prediction, archive: null, asOfTs: missingTs });
   h.setNow(missingTs);
-  assert.equal(h.core.recordOutcome(missing.outcomeInput).status, 'APPENDED_NO_UPDATE');
+  assert.equal(h.core.recordOutcome({ outcomeInput: missing.outcomeInput, provenanceReceipt: missing.provenanceReceipt }).status, 'APPENDED_NO_UPDATE');
   const source = archiveFixture(t, h.prediction, { retrievedTs: h.prediction.targetEndTs + 20_000 });
   const correction = prepareAdaptiveCandleOutcome({
     procedure: h.procedure, prediction: h.prediction, archive: source.archive,
@@ -166,7 +182,7 @@ test('after a deadline-missing settlement, a later correction cannot rewrite evi
   });
   assert.equal(correction.status, 'MATURED');
   h.setNow(h.prediction.targetEndTs + 20_000);
-  assert.throws(() => h.core.recordOutcome(correction.outcomeInput), /OUTCOME_CONFLICT/);
+  assert.throws(() => h.core.recordOutcome({ outcomeInput: correction.outcomeInput, provenanceReceipt: correction.provenanceReceipt }), /OUTCOME_CONFLICT/);
   assert.equal(h.store.state().sequence, 0);
   assert.equal(h.store.status().outcomeCount, 1);
 });
@@ -189,6 +205,7 @@ test('tampered predictions and rehashed receipt content fail closed', (t) => {
   changed.receiptId = `aclr-${changed.receiptDigest.slice(0, 40)}`;
   assert.equal(adaptiveCandleOutcomeReceiptError(changed, h.procedure, h.prediction), null, 'a detached self-consistent receipt is identity, not source authentication');
   assert.match(adaptiveCandleOutcomeReceiptError(changed, h.procedure, h.prediction, { archive: source.archive }), /does not match supplied archive/);
+  assert.match(adaptiveCandleOutcomeSubmissionError({ outcomeInput: prepared.outcomeInput, provenanceReceipt: changed }, h.procedure, h.prediction), /does not exactly project/);
   assert.throws(() => prepareAdaptiveCandleOutcome({
     procedure: h.procedure, prediction: h.prediction, archive: source.archive,
     asOfTs: h.prediction.recordedTs - 1,

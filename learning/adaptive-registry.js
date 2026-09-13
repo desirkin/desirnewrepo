@@ -12,15 +12,17 @@ import {
 } from './contracts.js';
 import { LEARNING_LABEL_RECIPE_VERSION, anchorOf } from './labels.js';
 
-export const ADAPTIVE_PROCEDURE_VERSION = 'adaptive-ranking-procedure-1';
+export const ADAPTIVE_PROCEDURE_VERSION = 'adaptive-ranking-procedure-2';
 export const ADAPTIVE_STATE_VERSION = 'adaptive-ranking-state-1';
 export const ADAPTIVE_PREDICTION_VERSION = 'adaptive-ranking-prediction-1';
-export const ADAPTIVE_OUTCOME_VERSION = 'adaptive-ranking-outcome-1';
+export const ADAPTIVE_OUTCOME_VERSION = 'adaptive-ranking-outcome-2';
 export const ADAPTIVE_SCORE_VERSION = 'adaptive-brier-score-1';
 export const ADAPTIVE_UPDATE_VERSION = 'adaptive-ranking-update-1';
 export const ADAPTIVE_SNAPSHOT_VERSION = 'adaptive-state-snapshot-1';
 export const ADAPTIVE_TARGET_VERSION = 'positive-60m-log-return-target-1';
 export const ADAPTIVE_ALGORITHM_VERSION = 'bounded-residual-rank-offset-1';
+export const ADAPTIVE_CANDLE_OUTCOME_ADAPTER_VERSION = 'adaptive-candle-outcome-adapter-2';
+export const ADAPTIVE_CANDLE_RECEIPT_VERSION = 'adaptive-candle-label-receipt-2';
 export const ADAPTIVE_HORIZON_MS = 60 * 60_000;
 export const ADAPTIVE_PRECISION = 1e-9;
 
@@ -62,6 +64,11 @@ const TARGET_KEYS = Object.freeze([
   'targetVersion', 'labelRecipeVersion', 'name', 'horizonMs', 'anchorLaw',
   'referenceLaw', 'sourceValue', 'sourceUnits', 'eventLaw', 'knownAtLaw',
   'forecastUnits', 'score', 'maxLabelDelayMs', 'maxPredictionPersistenceDelayMs',
+  'provenanceContract',
+]);
+const PROVENANCE_CONTRACT_KEYS = Object.freeze([
+  'contractVersion', 'kind', 'receiptVersion', 'adapterVersion',
+  'sourceDigestLaw', 'persistenceLaw', 'authority', 'qualificationLaw',
 ]);
 const ALGORITHM_KEYS = Object.freeze([
   'algorithmVersion', 'initialProbability', 'minProbability', 'maxProbability',
@@ -184,6 +191,16 @@ export function sealAdaptiveProcedure({
       score: 'BRIER_LOSS',
       maxLabelDelayMs,
       maxPredictionPersistenceDelayMs,
+      provenanceContract: {
+        contractVersion: 'adaptive-outcome-provenance-contract-1',
+        kind: 'CANDLE_LABEL_RECEIPT',
+        receiptVersion: ADAPTIVE_CANDLE_RECEIPT_VERSION,
+        adapterVersion: ADAPTIVE_CANDLE_OUTCOME_ADAPTER_VERSION,
+        sourceDigestLaw: 'EXACT_RECEIPT_DIGEST',
+        persistenceLaw: 'SAME_JOURNAL_EVENT_AS_OUTCOME_SCORES_UPDATE',
+        authority: 'NONE',
+        qualificationLaw: 'EXTERNAL_SOURCE_AUTHENTICITY_FIRST_WRITE_AND_AFTER_COST_REQUIRED',
+      },
     },
     algorithm: {
       algorithmVersion: ADAPTIVE_ALGORITHM_VERSION,
@@ -228,6 +245,17 @@ export function adaptiveProcedureError(procedure) {
       || procedure.target.forecastUnits !== 'PROBABILITY_0_TO_1' || procedure.target.score !== 'BRIER_LOSS'
       || !count(procedure.target.maxLabelDelayMs, 30 * 24 * 60 * 60_000)
       || !count(procedure.target.maxPredictionPersistenceDelayMs, 60_000)) return 'target contract malformed';
+  const provenanceKeys = exactKeys(procedure.target.provenanceContract, PROVENANCE_CONTRACT_KEYS);
+  if (provenanceKeys) return `target provenance contract ${provenanceKeys}`;
+  const provenance = procedure.target.provenanceContract;
+  if (provenance.contractVersion !== 'adaptive-outcome-provenance-contract-1'
+      || provenance.kind !== 'CANDLE_LABEL_RECEIPT'
+      || provenance.receiptVersion !== ADAPTIVE_CANDLE_RECEIPT_VERSION
+      || provenance.adapterVersion !== ADAPTIVE_CANDLE_OUTCOME_ADAPTER_VERSION
+      || provenance.sourceDigestLaw !== 'EXACT_RECEIPT_DIGEST'
+      || provenance.persistenceLaw !== 'SAME_JOURNAL_EVENT_AS_OUTCOME_SCORES_UPDATE'
+      || provenance.authority !== 'NONE'
+      || provenance.qualificationLaw !== 'EXTERNAL_SOURCE_AUTHENTICITY_FIRST_WRITE_AND_AFTER_COST_REQUIRED') return 'target provenance contract malformed';
   const algorithmKeys = exactKeys(procedure.algorithm, ALGORITHM_KEYS); if (algorithmKeys) return `algorithm ${algorithmKeys}`;
   const a = procedure.algorithm;
   if (a.algorithmVersion !== ADAPTIVE_ALGORITHM_VERSION || a.precision !== ADAPTIVE_PRECISION) return 'algorithm version or precision mismatch';
@@ -606,7 +634,7 @@ function computeAdaptiveTransition({ procedure, state, prediction, outcome, scor
     const dr = clamp(rankOffsetOf(candidate, procedure) - prior.rankOffsetRrPoints, -algorithm.maxRankDeltaPerStrategyPerOutcome, algorithm.maxRankDeltaPerStrategyPerOutcome);
     raw.push({ strategyId, prior, rankDelta: dr });
   }
-  // V1 has exactly one horizon and the store permits exactly one outcome for a
+  // V2 has exactly one horizon and the store permits exactly one outcome for a
   // primary opportunity. Variants and household accounts are not identities,
   // so this is the complete per-primary episode budget rather than a growing
   // in-state map. The append-only outcome/update indexes enforce the one use.

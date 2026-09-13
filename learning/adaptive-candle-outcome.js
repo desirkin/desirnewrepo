@@ -5,11 +5,17 @@ import {
   canonicalDigest, deepFreeze, exactKeys, isFiniteNum, isPlainObject, isTs,
 } from './contracts.js';
 import { labelOpportunity } from './labels.js';
-import { ADAPTIVE_HORIZON_MS, adaptivePredictionError, adaptiveProcedureError } from './adaptive-registry.js';
+import {
+  ADAPTIVE_CANDLE_OUTCOME_ADAPTER_VERSION,
+  ADAPTIVE_CANDLE_RECEIPT_VERSION,
+  ADAPTIVE_HORIZON_MS,
+  adaptiveOutcomeError,
+  adaptivePredictionError,
+  adaptiveProcedureError,
+} from './adaptive-registry.js';
 
-export const ADAPTIVE_CANDLE_OUTCOME_ADAPTER_VERSION = 'adaptive-candle-outcome-adapter-1';
-export const ADAPTIVE_CANDLE_RECEIPT_VERSION = 'adaptive-candle-label-receipt-1';
-export const ADAPTIVE_CANDLE_RECEIPT_DURABILITY = 'UNPERSISTED_CALLER_MUST_JOURNAL';
+export { ADAPTIVE_CANDLE_OUTCOME_ADAPTER_VERSION, ADAPTIVE_CANDLE_RECEIPT_VERSION };
+export const ADAPTIVE_CANDLE_RECEIPT_DURABILITY = 'CALLER_MUST_ATOMICALLY_PERSIST_WITH_OUTCOME';
 
 const HEX64 = /^[a-f0-9]{64}$/;
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,199}$/;
@@ -35,6 +41,11 @@ const REFERENCE_KEYS = Object.freeze(['state', 'barOpenSec', 'price', 'knownAtTs
 const HORIZON_KEYS = Object.freeze([
   'state', 'reason', 'horizonEndTs', 'outcomeKnownAtTs', 'mfePct', 'maePct',
   'logReturnPct', 'logReturnUnit',
+]);
+const SUBMISSION_KEYS = Object.freeze(['outcomeInput', 'provenanceReceipt']);
+const OUTCOME_INPUT_KEYS = Object.freeze([
+  'opportunityId', 'horizonMs', 'state', 'logReturnPct', 'sourceEventTs',
+  'knownAtTs', 'sourceDigest', 'reasonCode',
 ]);
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -184,6 +195,78 @@ export function adaptiveCandleOutcomeReceiptError(receipt, procedure, prediction
   return null;
 }
 
+function outcomeInputOfReceipt(receipt, prediction) {
+  const common = { opportunityId: prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS };
+  if (receipt.disposition === 'MATURED') {
+    return {
+      ...common, state: 'MATURED', logReturnPct: receipt.label.horizon60m.logReturnPct,
+      sourceEventTs: receipt.label.horizon60m.horizonEndTs,
+      knownAtTs: receipt.label.horizon60m.outcomeKnownAtTs,
+      sourceDigest: receipt.receiptDigest, reasonCode: null,
+    };
+  }
+  if (receipt.disposition === 'PENDING') {
+    return {
+      ...common, state: 'PENDING', logReturnPct: null, sourceEventTs: null,
+      knownAtTs: null, sourceDigest: null, reasonCode: receipt.dispositionReason,
+    };
+  }
+  return {
+    ...common, state: 'MISSING', logReturnPct: null, sourceEventTs: null,
+    knownAtTs: receipt.preparedTs, sourceDigest: receipt.receiptDigest,
+    reasonCode: receipt.dispositionReason,
+  };
+}
+
+// This validator proves that the submitted scalar outcome is an exact
+// projection of the supplied candle-label receipt. Unless `archive` is also
+// supplied, it does not authenticate the external archive or prove first-write
+// chronology. It never grants after-cost qualification or decision authority.
+export function adaptiveCandleOutcomeSubmissionError(
+  submission,
+  procedure,
+  prediction,
+  { archive = undefined } = {},
+) {
+  const keys = exactKeys(submission, SUBMISSION_KEYS); if (keys) return `submission ${keys}`;
+  const outcomeKeys = exactKeys(submission.outcomeInput, OUTCOME_INPUT_KEYS); if (outcomeKeys) return `outcome input ${outcomeKeys}`;
+  const receiptError = adaptiveCandleOutcomeReceiptError(
+    submission.provenanceReceipt,
+    procedure,
+    prediction,
+    { archive },
+  );
+  if (receiptError) return `provenance receipt ${receiptError}`;
+  if (!same(submission.outcomeInput, outcomeInputOfReceipt(submission.provenanceReceipt, prediction))) {
+    return 'outcome input does not exactly project the provenance receipt';
+  }
+  return null;
+}
+
+export function adaptiveCandleSettlementError(
+  settlement,
+  procedure,
+  prediction,
+  { archive = undefined } = {},
+) {
+  const keys = exactKeys(settlement, ['outcome', 'provenanceReceipt']); if (keys) return `settlement ${keys}`;
+  const receiptError = adaptiveCandleOutcomeReceiptError(
+    settlement.provenanceReceipt,
+    procedure,
+    prediction,
+    { archive },
+  );
+  if (receiptError) return `provenance receipt ${receiptError}`;
+  const outcomeError = adaptiveOutcomeError(settlement.outcome, procedure, prediction);
+  if (outcomeError) return `outcome ${outcomeError}`;
+  if (settlement.provenanceReceipt.disposition === 'PENDING') return 'pending receipt cannot back a durable outcome';
+  if (settlement.provenanceReceipt.preparedTs > settlement.outcome.recordedTs) return 'receipt was prepared after the outcome was recorded';
+  const projected = outcomeInputOfReceipt(settlement.provenanceReceipt, prediction);
+  const outcomeInput = Object.fromEntries(OUTCOME_INPUT_KEYS.map((key) => [key, settlement.outcome[key]]));
+  if (!same(outcomeInput, projected)) return 'durable outcome does not exactly project the provenance receipt';
+  return null;
+}
+
 export function prepareAdaptiveCandleOutcome({ procedure, prediction, archive = null, asOfTs } = {}) {
   const procedureError = adaptiveProcedureError(procedure); if (procedureError) throw new Error(`prepareAdaptiveCandleOutcome: ${procedureError}`);
   const predictionError = adaptivePredictionError(prediction, procedure); if (predictionError) throw new Error(`prepareAdaptiveCandleOutcome: ${predictionError}`);
@@ -218,27 +301,9 @@ export function prepareAdaptiveCandleOutcome({ procedure, prediction, archive = 
   receipt.receiptDigest = receiptDigestOf(receipt); receipt.receiptId = receiptIdOf(receipt);
   const receiptError = adaptiveCandleOutcomeReceiptError(receipt, procedure, prediction, { archive });
   if (receiptError) throw new Error(`prepareAdaptiveCandleOutcome: ${receiptError}`);
-  let outcomeInput;
-  if (disposition === 'MATURED') {
-    outcomeInput = {
-      opportunityId: prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
-      state: 'MATURED', logReturnPct: label.horizon60m.logReturnPct,
-      sourceEventTs: label.horizon60m.horizonEndTs,
-      knownAtTs: label.horizon60m.outcomeKnownAtTs,
-      sourceDigest: receipt.receiptDigest, reasonCode: null,
-    };
-  } else if (disposition === 'PENDING') {
-    outcomeInput = {
-      opportunityId: prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
-      state: 'PENDING', logReturnPct: null, sourceEventTs: null, knownAtTs: null,
-      sourceDigest: null, reasonCode: dispositionReason,
-    };
-  } else {
-    outcomeInput = {
-      opportunityId: prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
-      state: 'MISSING', logReturnPct: null, sourceEventTs: null, knownAtTs: asOfTs,
-      sourceDigest: receipt.receiptDigest, reasonCode: dispositionReason,
-    };
-  }
-  return deepFreeze({ status: disposition, outcomeInput, provenanceReceipt: receipt });
+  const outcomeInput = outcomeInputOfReceipt(receipt, prediction);
+  const submission = { outcomeInput, provenanceReceipt: receipt };
+  const submissionError = adaptiveCandleOutcomeSubmissionError(submission, procedure, prediction, { archive });
+  if (submissionError) throw new Error(`prepareAdaptiveCandleOutcome: ${submissionError}`);
+  return deepFreeze({ status: disposition, ...submission });
 }

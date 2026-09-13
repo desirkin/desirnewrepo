@@ -7,6 +7,7 @@ import { opportunityIdOf } from '../learning/contracts.js';
 import { createAdaptiveCore } from '../learning/adaptive-core.js';
 import { AdaptiveStoreError, createAdaptiveStore } from '../learning/adaptive-store.js';
 import { ADAPTIVE_HORIZON_MS, sealAdaptiveProcedure } from '../learning/adaptive-registry.js';
+import { adaptiveSettlementSubmission } from './helpers/adaptive-outcome-fixture.js';
 
 const T0 = Date.UTC(2026, 8, 13, 15);
 const hex = (char) => char.repeat(64);
@@ -51,8 +52,19 @@ test('durable replay restores the exact state and dedup identities after a clean
   const original = input(p);
   const prediction = core.recordPrediction(original).prediction;
   now = prediction.targetEndTs + 1_000;
-  const first = core.recordOutcome(mature(prediction));
+  const submission = adaptiveSettlementSubmission(p, prediction, mature(prediction));
+  const first = core.recordOutcome(submission);
   const before = store.state(); const updateDigest = first.update.updateDigest;
+  const committed = store.settlement({ opportunityId: prediction.opportunityId, horizonMs: prediction.horizonMs });
+  assert.equal(committed.provenanceReceipt.receiptDigest, submission.provenanceReceipt.receiptDigest);
+  assert.equal(committed.outcome.sourceDigest, committed.provenanceReceipt.receiptDigest);
+  assert.equal(committed.update.updateDigest, first.update.updateDigest);
+  assert.equal(committed.custody.receiptContentBound, true);
+  assert.equal(committed.custody.declaredArchiveIdentityBound, true);
+  assert.equal(committed.custody.externalSourceAuthenticityVerified, false);
+  assert.equal(committed.custody.firstWriteCustodyVerified, false);
+  assert.equal(committed.custody.afterCostQualificationVerified, false);
+  assert.equal(committed.custody.authority, 'NONE');
   store.close();
 
   now += 1_000;
@@ -60,9 +72,12 @@ test('durable replay restores the exact state and dedup identities after a clean
   core = createAdaptiveCore({ store, procedure: p, clock: () => now });
   assert.deepEqual(store.state(), before);
   assert.equal(core.recordPrediction(original).status, 'EXISTING');
-  assert.equal(core.recordOutcome(mature(prediction)).status, 'EXISTING');
+  assert.equal(core.recordOutcome(submission).status, 'EXISTING');
   assert.equal(store.state().sequence, 1);
   assert.equal(store.status().updateCount, 1);
+  assert.equal(store.status().provenanceReceiptCount, 1);
+  assert.equal(store.status().unbackedOutcomeCount, 0);
+  assert.equal(store.settlement({ opportunityId: prediction.opportunityId, horizonMs: prediction.horizonMs }).provenanceReceipt.receiptDigest, submission.provenanceReceipt.receiptDigest);
   assert.equal(first.update.updateDigest, updateDigest);
   assert.equal(store.status().durability.kind, 'LOCAL_FILESYSTEM_ONLY');
   assert.equal(store.status().durability.republishSafe, false);
@@ -70,6 +85,23 @@ test('durable replay restores the exact state and dedup identities after a clean
   assert.equal(store.status().acknowledgedHead.stateDigest, before.stateDigest);
   assert.equal(store.status().remaining.events, store.status().limits.maxEvents - store.status().eventCount);
   store.close();
+});
+
+test('a v1 directory is refused without migration, reset, or writer-lock mutation', (t) => {
+  const rootDir = tempRoot(t); const p = procedure();
+  const journalFile = path.join(rootDir, 'journal.jsonl');
+  const headFile = path.join(rootDir, 'head.json');
+  const journal = `${JSON.stringify({ storeVersion: 'adaptive-local-store-1', eventVersion: 'adaptive-journal-event-1' })}\n`;
+  const head = JSON.stringify({ storeVersion: 'adaptive-local-store-1', headVersion: 'adaptive-acknowledged-head-1' });
+  writeFileSync(journalFile, journal);
+  writeFileSync(headFile, head);
+  assert.throws(
+    () => createAdaptiveStore({ rootDir, procedure: p, clock: () => T0 + 1 }),
+    (error) => error instanceof AdaptiveStoreError && error.code === 'STORE_VERSION_UNSUPPORTED',
+  );
+  assert.equal(readFileSync(journalFile, 'utf8'), journal);
+  assert.equal(readFileSync(headFile, 'utf8'), head);
+  assert.equal(existsSync(path.join(rootDir, 'writer.lock')), false);
 });
 
 test('single ownership is exclusive and never uses age or PID takeover', (t) => {
@@ -111,7 +143,7 @@ test('a valid whole-event suffix truncation cannot roll state back behind the ac
   const core = createAdaptiveCore({ store, procedure: p, clock: () => now });
   const prediction = core.recordPrediction(input(p, 1)).prediction;
   now = prediction.targetEndTs + 1_000;
-  core.recordOutcome(mature(prediction));
+  core.recordOutcome(adaptiveSettlementSubmission(p, prediction, mature(prediction)));
   store.close();
   const journalFile = path.join(rootDir, 'journal.jsonl');
   const lines = readFileSync(journalFile, 'utf8').trimEnd().split('\n');
@@ -177,6 +209,32 @@ test('bounded journal refusal is visible and latched, never an implicit reset', 
   store.close();
 });
 
+test('the event byte ceiling covers the receipt and refuses the whole settlement before any split write', (t) => {
+  const rootDir = tempRoot(t); const p = procedure(); let now = T0 + 10_100;
+  let store = createAdaptiveStore({ rootDir, procedure: p, clock: () => now });
+  let core = createAdaptiveCore({ store, procedure: p, clock: () => now });
+  const prediction = core.recordPrediction(input(p, 1)).prediction;
+  store.close();
+  const journalFile = path.join(rootDir, 'journal.jsonl');
+  const initialLines = readFileSync(journalFile, 'utf8').trim().split('\n');
+  const preSettlementBytes = Math.max(...initialLines.map((line) => Buffer.byteLength(line, 'utf8') + 1));
+  store = createAdaptiveStore({
+    rootDir, procedure: p, clock: () => now,
+    limits: { maxEventBytes: preSettlementBytes + 64 },
+  });
+  core = createAdaptiveCore({ store, procedure: p, clock: () => now });
+  now = prediction.targetEndTs + 1_000;
+  const submission = adaptiveSettlementSubmission(p, prediction, mature(prediction));
+  assert.throws(
+    () => core.recordOutcome(submission),
+    (error) => error instanceof AdaptiveStoreError && error.code === 'JOURNAL_LIMIT',
+  );
+  assert.equal(readFileSync(journalFile, 'utf8').trim().split('\n').length, 2);
+  assert.equal(store.status().outcomeCount, 0);
+  assert.equal(store.status().provenanceReceiptCount, 0);
+  store.close();
+});
+
 test('one thousand updates retain bounded state and linear journal bytes rather than repeated history snapshots', (t) => {
   const rootDir = tempRoot(t); const p = procedure({ maxCumulativeRankMovementRrPoints: 100 });
   let now = T0 + 100;
@@ -191,7 +249,7 @@ test('one thousand updates retain bounded state and linear journal bytes rather 
     now = row.predictionTs + 100;
     const prediction = core.recordPrediction(row).prediction;
     now = prediction.targetEndTs + 1_000;
-    core.recordOutcome(mature(prediction, n % 2 === 0 ? -1 : 1));
+    core.recordOutcome(adaptiveSettlementSubmission(p, prediction, mature(prediction, n % 2 === 0 ? -1 : 1)));
     if (marks.has(n)) marks.set(n, store.status().journalBytes);
   }
   const firstHundredAverage = marks.get(100) / 100;

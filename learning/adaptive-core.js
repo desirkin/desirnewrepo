@@ -8,8 +8,12 @@ import {
   adaptiveProcedureError, applyAdaptiveUpdate, buildAdaptiveOutcome,
   buildAdaptivePrediction, scoreAdaptiveOutcome,
 } from './adaptive-registry.js';
+import {
+  adaptiveCandleOutcomeSubmissionError,
+  adaptiveCandleSettlementError,
+} from './adaptive-candle-outcome.js';
 
-export const ADAPTIVE_CORE_VERSION = 'adaptive-core-1';
+export const ADAPTIVE_CORE_VERSION = 'adaptive-core-2';
 export const ADAPTIVE_CORE_MODES = Object.freeze(['SHADOW', 'OBSERVE', 'PAPER']);
 
 const PREDICTION_INPUT_KEYS = Object.freeze([
@@ -21,6 +25,7 @@ const OUTCOME_INPUT_KEYS = Object.freeze([
   'knownAtTs', 'sourceDigest', 'reasonCode',
 ]);
 const PENDING_INPUT_KEYS = OUTCOME_INPUT_KEYS;
+const OUTCOME_SUBMISSION_KEYS = Object.freeze(['outcomeInput', 'provenanceReceipt']);
 
 export class AdaptiveCoreError extends Error {
   constructor(code, detail = '') {
@@ -65,7 +70,7 @@ function outcomeInputProjection(outcome) {
 
 function storeError(store) {
   const required = [
-    'procedure', 'state', 'prediction', 'outcome', 'appendPrediction',
+    'procedure', 'state', 'prediction', 'outcome', 'settlement', 'appendPrediction',
     'appendOutcomeOnly', 'appendOutcomeUpdate', 'status',
   ];
   if (!store || typeof store !== 'object' || Array.isArray(store)) return 'store is not an object';
@@ -108,13 +113,17 @@ export function createAdaptiveCore({ store, procedure, clock = Date.now } = {}) 
     return deepFreeze({ ...result, updateAuthority: 'NONE' });
   }
 
-  function recordOutcome(input) {
+  function recordOutcome(submission) {
     outcomeCalls += 1;
+    const submissionKeys = exactKeys(submission, OUTCOME_SUBMISSION_KEYS);
+    if (submissionKeys) fail('OUTCOME_PROVENANCE_INVALID', submissionKeys);
+    const input = submission.outcomeInput;
     const keys = exactKeys(input, OUTCOME_INPUT_KEYS); if (keys) fail('OUTCOME_INVALID', keys);
-    const recordedTs = now();
     if (!['PENDING', 'MATURED', 'MISSING'].includes(input.state)) fail('OUTCOME_INVALID', 'state must be PENDING, MATURED, or MISSING');
     const prediction = store.prediction({ opportunityId: input.opportunityId, horizonMs: input.horizonMs });
     if (!prediction) fail('PREDICTION_NOT_FOUND', 'outcome cannot precede its saved forecast');
+    const provenanceError = adaptiveCandleOutcomeSubmissionError(submission, procedure, prediction);
+    if (provenanceError) fail('OUTCOME_PROVENANCE_INVALID', provenanceError);
     if (input.state === 'PENDING') {
       const pendingKeys = exactKeys(input, PENDING_INPUT_KEYS); if (pendingKeys) fail('OUTCOME_INVALID', pendingKeys);
       if (input.logReturnPct !== null || input.sourceEventTs !== null || input.knownAtTs !== null
@@ -122,18 +131,31 @@ export function createAdaptiveCore({ store, procedure, clock = Date.now } = {}) 
       pendingOutcomes += 1;
       return deepFreeze({ status: 'PENDING_NO_DURABLE_OUTCOME', reason: input.reasonCode, update: null, updateAuthority: 'NONE' });
     }
-    const existing = store.outcome({ opportunityId: input.opportunityId, horizonMs: input.horizonMs });
+    const existing = store.settlement({ opportunityId: input.opportunityId, horizonMs: input.horizonMs });
     if (existing) {
-      if (!same(outcomeInputProjection(existing), input)) fail('OUTCOME_CONFLICT', 'primary opportunity/horizon already binds a different outcome');
+      if (!same(outcomeInputProjection(existing.outcome), input)
+          || !same(existing.provenanceReceipt, submission.provenanceReceipt)) fail('OUTCOME_CONFLICT', 'primary opportunity/horizon already binds a different outcome or provenance receipt');
       idempotentOutcomes += 1;
-      return deepFreeze({ status: 'EXISTING', outcome: clone(existing), update: null, updateAuthority: 'NONE' });
+      return deepFreeze({
+        status: 'EXISTING', outcome: clone(existing.outcome),
+        provenanceReceipt: clone(existing.provenanceReceipt),
+        update: existing.update ? clone(existing.update) : null,
+        custody: clone(existing.custody), updateAuthority: 'NONE',
+      });
     }
+    const recordedTs = now();
     let outcome;
     try { outcome = buildAdaptiveOutcome({ procedure, prediction, input, recordedTs }); }
     catch (error) { fail('OUTCOME_INVALID', error.message); }
+    const settlementError = adaptiveCandleSettlementError({ outcome, provenanceReceipt: submission.provenanceReceipt }, procedure, prediction);
+    if (settlementError) fail('OUTCOME_PROVENANCE_INVALID', settlementError);
     if (outcome.updateEligibility !== 'ELIGIBLE') {
-      const result = store.appendOutcomeOnly(outcome);
-      return deepFreeze({ ...result, reason: outcome.updateEligibility, update: null, updateAuthority: 'NONE' });
+      const result = store.appendOutcomeOnly({ outcome, provenanceReceipt: submission.provenanceReceipt });
+      const durable = store.settlement({ opportunityId: input.opportunityId, horizonMs: input.horizonMs });
+      return deepFreeze({
+        ...result, provenanceReceipt: clone(durable.provenanceReceipt), custody: clone(durable.custody),
+        reason: outcome.updateEligibility, update: null, updateAuthority: 'NONE',
+      });
     }
     // The score is constructed first from the immutable saved probability.
     // Only then is the transition computed from the current model state.
@@ -142,8 +164,12 @@ export function createAdaptiveCore({ store, procedure, clock = Date.now } = {}) 
       scores = scoreAdaptiveOutcome({ procedure, prediction, outcome, scoredTs: recordedTs });
       transition = applyAdaptiveUpdate({ procedure, state: store.state(), prediction, outcome, scores, appliedTs: recordedTs });
     } catch (error) { fail('UPDATE_INVALID', error.message); }
-    const result = store.appendOutcomeUpdate({ outcome, scores, update: transition.update, nextState: transition.nextState });
-    return deepFreeze({ ...result, updateAuthority: 'NONE' });
+    const result = store.appendOutcomeUpdate({ outcome, provenanceReceipt: submission.provenanceReceipt, scores, update: transition.update, nextState: transition.nextState });
+    const durable = store.settlement({ opportunityId: input.opportunityId, horizonMs: input.horizonMs });
+    return deepFreeze({
+      ...result, provenanceReceipt: clone(durable.provenanceReceipt), custody: clone(durable.custody),
+      updateAuthority: 'NONE',
+    });
   }
 
   function snapshot({ mode, nowTs, qualification = null } = {}) {
