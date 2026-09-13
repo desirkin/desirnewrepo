@@ -11,6 +11,8 @@ import {
   OPPORTUNITY_AUDIT_WORKER_RESOURCE_LIMITS,
 } from '../lib/opportunity-audit-worker-port.js';
 import { openOpportunityAuditStore } from '../learning/opportunity-audit-store.js';
+import { sealAuditFrame } from '../learning/opportunity-audit.js';
+import { canonicalDigest } from '../learning/contracts.js';
 import { normalizeKrakenAssetPairs } from '../survey/catalog.js';
 
 const HOUR = 60 * 60 * 1000;
@@ -59,7 +61,9 @@ test('default-off worker port starts no worker, timer, directory, provider or au
     assert.equal(port.status().runtimeWired, false);
     assert.equal(port.status().authority, 'NONE');
     assert.equal(existsSync(root), false);
-    assert.deepEqual(await port.close(), { stopped: true, physicalExit: true });
+    assert.deepEqual(await port.close(), {
+      stopped: true, physicalExit: true, drained: true, annotationOutcome: 'NONE',
+    });
   } finally { rmSync(parent, { recursive: true, force: true }); }
 });
 
@@ -94,7 +98,9 @@ test('real fixed worker seals a 612-market sample before facts, queues without f
 
     const atClose = ticks; const closeA = port.close(); const closeB = port.close();
     assert.strictEqual(closeA, closeB, 'close is idempotent and shares one physical-exit obligation');
-    assert.deepEqual(await closeA, { stopped: true, physicalExit: true });
+    assert.deepEqual(await closeA, {
+      stopped: true, physicalExit: true, drained: true, annotationOutcome: 'COMMITTED',
+    });
     assert.ok(ticks > atClose, 'parent event loop stayed responsive while the child drained fsync work');
     assert.equal(port.status().workerLive, false); assert.equal(port.status().workerExits, 1);
     assert.equal(port.status().state, 'STOPPED');
@@ -194,7 +200,10 @@ test('CLOSED response is not physical exit, and the close watchdog never reports
   try {
     assert.equal(await port.beforeSweep({ catalogSnapshot: snapshot(catalog), frameTs }), null);
     const result = await port.close();
-    assert.deepEqual(result, { stopped: false, physicalExit: false, reason: 'WORKER_EXIT_TIMEOUT' });
+    assert.deepEqual(result, {
+      stopped: false, physicalExit: false, drained: false,
+      annotationOutcome: 'NONE', reason: 'WORKER_EXIT_TIMEOUT',
+    });
     assert.equal(fake.terminateCalls, 1);
     assert.equal(port.status().workerLive, true);
     assert.equal(port.status().forcedTermination, true);
@@ -220,8 +229,70 @@ test('worker exit while close awaits an earlier request settles it and cannot co
     const closing = port.close();
     queueMicrotask(() => fake.emit('exit', 1));
     await rejected;
-    assert.deepEqual(await closing, { stopped: true, physicalExit: true });
+    assert.deepEqual(await closing, {
+      stopped: true, physicalExit: true, drained: true, annotationOutcome: 'NONE',
+    });
     assert.equal(starts, 1, 'close never creates a replacement after the original exits');
     assert.equal(port.status().workerStarts, 1); assert.equal(port.status().workerExits, 1);
+  } finally { await port.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('exit after queue acceptance records annotation durability as UNKNOWN, never failed or committed', async () => {
+  const root = tempRoot(); const frameTs = Date.now(); const catalog = catalog612(frameTs - 1);
+  const frame = sealAuditFrame({
+    catalog, frameTs, knownAtTs: catalog.observedTs, sampleSize: 8,
+    horizonsMs: [HOUR], seedHex: '1'.repeat(64),
+  });
+  const tokenCore = {
+    tokenVersion: 'opportunity-audit-wideeye-token-1', frameId: frame.frameId,
+    frameDigest: frame.frameDigest, catalogContentId: catalog.contentId, frameTs,
+  };
+  const token = { ...tokenCore, tokenDigest: canonicalDigest(tokenCore) };
+  class ExitAfterQueueWorker extends EventEmitter {
+    postMessage(request) {
+      if (request.operation === 'BEFORE_SWEEP') {
+        queueMicrotask(() => this.emit('message', {
+          protocol: request.protocol, requestId: request.requestId, ok: true,
+          operation: request.operation, result: { status: 'DURABLE_FRAME', token },
+        }));
+      } else if (request.operation === 'QUEUE_AFTER_SWEEP') {
+        queueMicrotask(() => this.emit('message', {
+          protocol: request.protocol, requestId: request.requestId, ok: true,
+          operation: request.operation,
+          result: {
+            status: 'QUEUED_NOT_COMMITTED', queueId: request.payload.queueId,
+            queuedRows: request.payload.batch.observation.rows.length,
+            persistence: 'WORKER_MEMORY_PENDING',
+          },
+        }));
+      }
+    }
+    terminate() { return Promise.resolve(1); }
+  }
+  const fake = new ExitAfterQueueWorker();
+  const port = createOpportunityAuditWorkerPortForTest({
+    enabled: true, rootDir: root, sampleSize: 8, horizonsMs: [HOUR],
+    minFrameIntervalMs: 15 * 60_000, wideEyeComponent: component,
+  }, () => fake);
+  try {
+    const accepted = await port.beforeSweep({ catalogSnapshot: snapshot(catalog), frameTs });
+    const observedTs = Date.now();
+    const queued = await port.afterSweep({
+      auditToken: accepted,
+      observation: {
+        sweepId: `ws-unknown-${observedTs}`, catalogContentId: catalog.contentId,
+        observedTs, rows: evaluatedRows(catalog),
+      },
+      recordedTs: observedTs,
+    });
+    fake.emit('exit', 1);
+    const status = port.status();
+    assert.equal(status.pendingAnnotation, null);
+    assert.equal(status.lastCommittedBatch, null); assert.equal(status.lastFailedBatch, null);
+    assert.equal(status.lastUnknownBatch.queueId, queued.queueId);
+    assert.equal(status.lastUnknownBatch.reason, 'WORKER_EXITED_BEFORE_CONFIRMATION');
+    assert.deepEqual(await port.close(), {
+      stopped: true, physicalExit: true, drained: false, annotationOutcome: 'UNKNOWN',
+    });
   } finally { await port.close(); rmSync(root, { recursive: true, force: true }); }
 });
