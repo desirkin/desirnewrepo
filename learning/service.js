@@ -33,17 +33,24 @@ export function startLearning({
   // promote results, or change Judge. The current runner is synchronous and
   // byte/work bounded, NOT CPU-isolated or a hard wall-time guarantee.
   shadowRunner = null,
+  // Optional prospective opportunity-audit outcome owner. Sampling and its
+  // durable pre-selection frame live outside this service; this callsite only
+  // advances already-due follow-up work. The composition retains ownership.
+  opportunityAuditFollowup = null,
   clock = Date.now, timers = { setInterval, clearInterval }, tickMs = DEFAULT_TICK_MS,
   dailyTarget = DEFAULT_DAILY_TARGET, log = () => {},
 } = {}) {
   if (env.LEARNING_ENABLED !== 'true') return { state: () => 'DISABLED', stop: () => {}, tick: () => null };
   if (shadowRunner !== null && (!shadowRunner || typeof shadowRunner !== 'object' || Array.isArray(shadowRunner)
       || typeof shadowRunner.step !== 'function' || typeof shadowRunner.status !== 'function')) throw new Error('SHADOW_RUNNER_PORT_INVALID');
+  if (opportunityAuditFollowup !== null && (!opportunityAuditFollowup || typeof opportunityAuditFollowup !== 'object'
+      || Array.isArray(opportunityAuditFollowup) || typeof opportunityAuditFollowup.step !== 'function'
+      || typeof opportunityAuditFollowup.status !== 'function')) throw new Error('OPPORTUNITY_AUDIT_FOLLOWUP_PORT_INVALID');
   const store = createLearningStore({ dataDir, log });
   let counters = rollCounters(null, clock());
   let lastTick = null; let ticking = false; let stopped = false;
   const lastCapturedBySymbol = new Map();
-  const errors = { capture: 0, maturation: 0, learning: 0, shadow: 0 };
+  const errors = { capture: 0, maturation: 0, learning: 0, shadow: 0, opportunityAudit: 0 };
 
   let lastRecordedSweepId = null;
   function captureTick(nowTs) {
@@ -155,6 +162,7 @@ export function startLearning({
       coverageAges: coverageAges({ lastCapturedBySymbol, nowTs }),
       lastTickReport: tickReport, errors: { ...errors }, storeCounters: store.countersOf(),
       shadowLane: shadowRunner ? (() => { try { return shadowRunner.status(nowTs); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
+      opportunityAuditLane: opportunityAuditFollowup ? (() => { try { return opportunityAuditFollowup.status(); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
       killSwitch: kill, sourceDelayEvidence: PROVIDER_DELAY_EVIDENCE,
       authority: AUTHORITY, purpose: PURPOSE,
       law: 'COLLECTOR_RUNNING_IS_NOT_LEARNER_RUNNING_IS_NOT_VALIDATED_ADAPTIVE_BEHAVIOR',
@@ -174,6 +182,16 @@ export function startLearning({
     // Absent port performs no shadow work. The owner must keep any heavy
     // learning workload isolated from the trading/Watch event loop.
     if (shadowRunner) { try { report.shadow = shadowRunner.step({ nowTs }); } catch (err) { errors.shadow += 1; report.shadow = { failed: String(err?.message ?? err).slice(0, 200) }; } }
+    if (opportunityAuditFollowup) {
+      try {
+        const task = opportunityAuditFollowup.step({ nowTs });
+        if (!task || typeof task.then !== 'function') throw new Error('FOLLOWUP_STEP_MUST_RETURN_PROMISE');
+        task.catch((err) => { errors.opportunityAudit += 1; log(`opportunity audit follow-up: ${String(err?.message ?? err).slice(0, 200)}`); });
+        report.opportunityAudit = { state: 'STARTED', authority: 'NONE' };
+      } catch (err) {
+        errors.opportunityAudit += 1; report.opportunityAudit = { failed: String(err?.message ?? err).slice(0, 200) };
+      }
+    }
     try {
       const yesterday = utcDateOf(nowTs - 86_400_000);
       if (!store.readSummary(yesterday) && store.coverageDates().includes(yesterday)) {

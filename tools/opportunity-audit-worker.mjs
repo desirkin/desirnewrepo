@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { isMainThread, parentPort, resourceLimits, workerData } from 'node:worker_threads';
 import { openOpportunityAuditStore } from '../learning/opportunity-audit-store.js';
 import { createOpportunityAuditWideEyePort } from '../learning/opportunity-audit-wideeye-port.js';
+import { buildOpportunityAuditFollowup } from '../learning/opportunity-audit-followup.js';
 
 const PROTOCOL = 'opportunity-audit-worker-1';
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
@@ -16,6 +17,10 @@ const COMPONENT_KEYS = Object.freeze(['componentId', 'version', 'configDigest'])
 const HEX64_RE = /^[a-f0-9]{64}$/;
 const REQUEST_ID_RE = /^oaw-[0-9]+-[a-z0-9]+$/;
 const QUEUE_ID_RE = /^oaq-[a-f0-9]{40}$/;
+const PENDING_ITEM_KEYS = Object.freeze([
+  'cursor', 'frameId', 'frameDigest', 'opportunityId', 'canonicalCoin', 'horizonMs', 'dueTs',
+  'lastOutcomeId', 'lastStatus', 'annotationPresent', 'observationInclusionProbability', 'actionPropensity',
+]);
 
 const plain = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
   && Object.getPrototypeOf(value) === Object.prototype;
@@ -191,6 +196,66 @@ if (!isMainThread && parentPort) {
           response(request, token === null
             ? { status: 'CADENCE_SKIPPED', token: null }
             : { status: 'DURABLE_FRAME', token });
+        } catch (error) { operationFailure(request, error); }
+      }).catch(() => { failed = 'OPERATION_FAILED'; });
+      return;
+    }
+
+    if (request.operation === 'PENDING') {
+      if (!exact(request.payload, ['asOfTs', 'limit', 'cursor']) || !Number.isSafeInteger(request.payload.asOfTs)
+          || request.payload.asOfTs < 0 || !positive(request.payload.limit) || request.payload.limit > 100
+          || !(request.payload.cursor === null || (typeof request.payload.cursor === 'string' && request.payload.cursor.length <= 2_000))) {
+        failure(request, 'REQUEST_INVALID'); return;
+      }
+      operationTail = operationTail.then(async () => {
+        try { response(request, await store.pending(request.payload)); }
+        catch (error) { operationFailure(request, error); }
+      }).catch(() => { failed = 'OPERATION_FAILED'; });
+      return;
+    }
+
+    if (request.operation === 'SETTLE') {
+      if (!exact(request.payload, ['item', 'resolution', 'recordedTs']) || !exact(request.payload.item, PENDING_ITEM_KEYS)
+          || typeof request.payload.item.frameId !== 'string' || typeof request.payload.item.frameDigest !== 'string'
+          || typeof request.payload.item.opportunityId !== 'string' || !positive(request.payload.item.horizonMs)
+          || !Number.isSafeInteger(request.payload.recordedTs) || request.payload.recordedTs < 0) {
+        failure(request, 'REQUEST_INVALID'); return;
+      }
+      operationTail = operationTail.then(async () => {
+        try {
+          let view = await store.loadFrame(request.payload.item.frameId);
+          if (!view || view.frame.frameDigest !== request.payload.item.frameDigest) throw Object.assign(new Error('pending frame identity changed'), { code: 'STORE_UNAVAILABLE' });
+          const item = request.payload.item;
+          const entry = view.frame.population.find((row) => row.selected && row.opportunityId === item.opportunityId);
+          const annotation = view.annotations.find((row) => row.opportunityId === item.opportunityId);
+          if (!entry || !annotation || entry.market.base !== item.canonicalCoin || !view.frame.horizonsMs.includes(item.horizonMs)) {
+            throw Object.assign(new Error('pending target lacks exact durable frame/annotation custody'), { code: 'STORE_UNAVAILABLE' });
+          }
+          const chain = view.outcomes.filter((row) => row.opportunityId === item.opportunityId && row.horizonMs === item.horizonMs);
+          const current = chain.at(-1) ?? null;
+          if (current && current.status !== 'PENDING') {
+            response(request, { state: current.status, outcomeId: current.outcomeId, outcomeDigest: current.outcomeDigest, storeRevision: view.revision, durable: true });
+            return;
+          }
+          const built = buildOpportunityAuditFollowup({
+            frame: view.frame, opportunityId: item.opportunityId, horizonMs: item.horizonMs,
+            resolution: request.payload.resolution, recordedTs: request.payload.recordedTs,
+            supersedes: current?.outcomeId ?? null,
+          });
+          if (built.outcome === null) {
+            response(request, { state: built.state, outcomeId: null, outcomeDigest: null, storeRevision: view.revision, durable: false });
+            return;
+          }
+          view = await store.appendOutcome({
+            frameId: view.frame.frameId, frameDigest: view.frame.frameDigest,
+            expectedRevision: view.revision, outcome: built.outcome,
+          });
+          const confirmed = await store.loadFrame(view.frame.frameId);
+          const exactOutcome = confirmed?.outcomes?.find((row) => row.outcomeId === built.outcome.outcomeId);
+          if (!exactOutcome || exactOutcome.outcomeDigest !== built.outcome.outcomeDigest || confirmed.revision !== view.revision) {
+            throw Object.assign(new Error('durable settlement readback mismatch'), { code: 'STORE_UNAVAILABLE' });
+          }
+          response(request, { state: built.state, outcomeId: built.outcome.outcomeId, outcomeDigest: built.outcome.outcomeDigest, storeRevision: confirmed.revision, durable: true });
         } catch (error) { operationFailure(request, error); }
       }).catch(() => { failed = 'OPERATION_FAILED'; });
       return;
