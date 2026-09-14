@@ -32,8 +32,8 @@ function makeFakeDb() {
       case SQL.DAY_INSERT: { t.day.set(dkey(p[0], p[1]), { revision: 0, target: p[2], rotation_index: 0, shortfall: null }); return { rows: [], rowCount: 1 }; }
       case SQL.DAY_UPDATE_CAS: { const r = t.day.get(dkey(p[0], p[1])); if (r && r.revision === p[2]) { r.revision = p[3]; if (p[4] !== undefined) r.rotation_index = p[4]; return { rows: [], rowCount: 1 }; } return { rows: [], rowCount: 0 }; }
       case SQL.DAY_SET_SHORTFALL: { const r = t.day.get(dkey(p[0], p[1])); if (r) { r.shortfall = typeof p[2] === 'string' ? JSON.parse(p[2]) : p[2]; return { rows: [], rowCount: 1 }; } return { rows: [], rowCount: 0 }; }
-      case SQL.BATCH_GET: { const r = t.batch.get(bkey(p[0], p[1], p[2])); return { rows: r ? [{ batch_id: r.batch_id, payload_digest: r.payload_digest, resulting_revision: r.resulting_revision, tally: r.tally }] : [] }; }
-      case SQL.BATCH_INSERT: { const r = { identity: p[0], day_key: p[1], batch_id: p[2], job_id: p[3], job_digest: p[4], payload_digest: p[5], parent_revision: p[6], resulting_revision: p[7], cursor_before: p[8], next_cursor: p[9], done: p[10], tally: p[11], executor_counters: p[12], observed_utc_ms: p[13] }; if (t.batch.has(bkey(p[0], p[1], p[2]))) throw new Error('duplicate batch pk'); t.batch.set(bkey(p[0], p[1], p[2]), r); return { rows: [], rowCount: 1 }; }
+      case SQL.BATCH_GET: { const r = t.batch.get(bkey(p[0], p[1], p[2])); return { rows: r ? [{ batch_id: r.batch_id, payload_digest: r.payload_digest, resulting_revision: r.resulting_revision, tally: r.tally, evidence_digest: r.evidence_digest }] : [] }; }
+      case SQL.BATCH_INSERT: { const r = { identity: p[0], day_key: p[1], batch_id: p[2], job_id: p[3], job_digest: p[4], payload_digest: p[5], parent_revision: p[6], resulting_revision: p[7], cursor_before: p[8], next_cursor: p[9], done: p[10], tally: p[11], executor_counters: p[12], observed_utc_ms: p[13], evidence_digest: p[14] }; if (t.batch.has(bkey(p[0], p[1], p[2]))) throw new Error('duplicate batch pk'); t.batch.set(bkey(p[0], p[1], p[2]), r); return { rows: [], rowCount: 1 }; }
       case SQL.RESULT_INSERT: { t.result.push({ identity: p[0], day_key: p[1], batch_id: p[2], row_ordinal: p[3], sim_id: p[4], status: p[5], completed: p[6], valid_modeled: p[7], prospective_eligible: p[8], digest: p[9] }); return { rows: [], rowCount: 1 }; }
       case SQL.RESULT_COUNT_FOR_BATCH: { const n = t.result.filter((r) => r.identity === p[0] && r.day_key === p[1] && r.batch_id === p[2]).length; return { rows: [{ n }] }; }
       case SQL.EVIDENCE_AGGREGATE_DAY: { const g = new Map(); for (const r of t.result) { if (r.identity !== p[0] || r.day_key !== p[1]) continue; const e = g.get(r.status) || { status: r.status, n: 0, completed: 0, valid_modeled: 0, prospective_eligible: 0 }; e.n += 1; e.completed += r.completed ? 1 : 0; e.valid_modeled += r.valid_modeled ? 1 : 0; e.prospective_eligible += r.prospective_eligible ? 1 : 0; g.set(r.status, e); } return { rows: [...g.values()] }; }
@@ -41,13 +41,13 @@ function makeFakeDb() {
       case SQL.EVIDENCE_DISTINCT_COMPLETED: { const s = new Set(); for (const r of t.result) { if (r.identity === p[0] && r.day_key === p[1] && r.completed) s.add(r.sim_id); } return { rows: [{ n: s.size }] }; }
       case SQL.COMPLETED_HAS: { return { rows: t.completed.has(bkey(p[0], p[1], p[2])) ? [{ one: 1 }] : [] }; }
       case SQL.COMPLETED_INSERT: { const k = bkey(p[0], p[1], p[2]); if (t.completed.has(k)) throw new Error('duplicate completed pk'); t.completed.set(k, { batch_id: p[3] }); return { rows: [], rowCount: 1 }; }
-      case SQL.COMPLETED_LIST: { const out = []; for (const [k] of t.completed) { const [id, dk, sim] = k.split('|'); if (id === p[0] && dk === p[1]) out.push(sim); } out.sort(); return { rows: out.map((sim_id) => ({ sim_id })) }; }
+      case SQL.COMPLETED_LIST: { const out = []; for (const [k] of t.completed) { const [id, dk, sim] = k.split('|'); if (id === p[0] && dk === p[1]) out.push(sim); } out.sort(); const lim = p[2] ?? out.length; return { rows: out.slice(0, lim).map((sim_id) => ({ sim_id })) }; }
       case SQL.COMPLETED_COUNT: { let n = 0; for (const [k] of t.completed) { const [id, dk] = k.split('|'); if (id === p[0] && dk === p[1]) n += 1; } return { rows: [{ n }] }; }
-      case SQL.PENDING_LIST: { const out = []; for (const [k, v] of t.pending) { const [id, dk, sim] = k.split('|'); if (id === p[0] && dk === p[1]) out.push({ sim_id: sim, status: v.status, digest: v.digest, first_seen_rev: v.first_seen_rev, last_seen_rev: v.last_seen_rev, attempts: v.attempts }); } out.sort((a, b) => (a.sim_id < b.sim_id ? -1 : 1)); return { rows: out }; }
+      case SQL.PENDING_LIST: { const out = []; for (const [k, v] of t.pending) { const [id, dk, sim] = k.split('|'); if (id === p[0] && dk === p[1]) out.push({ sim_id: sim, status: v.status, digest: v.digest, first_seen_rev: v.first_seen_rev, last_seen_rev: v.last_seen_rev, attempts: v.attempts }); } out.sort((a, b) => (a.sim_id < b.sim_id ? -1 : 1)); const lim = p[2] ?? out.length; return { rows: out.slice(0, lim) }; }
       case SQL.PENDING_UPSERT: { const k = bkey(p[0], p[1], p[2]); const prev = t.pending.get(k); t.pending.set(k, { status: p[3], digest: p[4], first_seen_rev: prev ? prev.first_seen_rev : p[5], last_seen_rev: p[6], attempts: p[7] }); return { rows: [], rowCount: 1 }; }
       case SQL.PENDING_DELETE: { t.pending.delete(bkey(p[0], p[1], p[2])); return { rows: [], rowCount: 1 }; }
-      case SQL.BATCH_LIST_DAY: { const out = []; for (const [, v] of t.batch) { if (v.identity === p[0] && v.day_key === p[1]) out.push({ batch_id: v.batch_id, job_id: v.job_id, next_cursor: v.next_cursor, cursor_before: v.cursor_before, payload_digest: v.payload_digest, done: v.done, resulting_revision: v.resulting_revision }); } out.sort((a, b) => a.resulting_revision - b.resulting_revision); return { rows: out.map(({ batch_id, job_id, next_cursor, cursor_before, payload_digest, done }) => ({ batch_id, job_id, next_cursor, cursor_before, payload_digest, done })) }; }
-      case SQL.JOBSCHED_LIST: { const out = []; for (const [k, v] of t.jobsched) { const [id, d, job] = k.split('|'); if (id === p[0] && d === p[1]) out.push({ job_id: job, next_eligible_ts: v.next_eligible_ts, backoff_attempts: v.backoff_attempts }); } return { rows: out }; }
+      case SQL.BATCH_LIST_DAY: { const out = []; for (const [, v] of t.batch) { if (v.identity === p[0] && v.day_key === p[1]) out.push({ batch_id: v.batch_id, job_id: v.job_id, next_cursor: v.next_cursor, cursor_before: v.cursor_before, payload_digest: v.payload_digest, done: v.done, resulting_revision: v.resulting_revision }); } out.sort((a, b) => a.resulting_revision - b.resulting_revision); const lim = p[2] ?? out.length; return { rows: out.slice(0, lim).map(({ batch_id, job_id, next_cursor, cursor_before, payload_digest, done }) => ({ batch_id, job_id, next_cursor, cursor_before, payload_digest, done })) }; }
+      case SQL.JOBSCHED_LIST: { const out = []; for (const [k, v] of t.jobsched) { const [id, d, job] = k.split('|'); if (id === p[0] && d === p[1]) out.push({ job_id: job, next_eligible_ts: v.next_eligible_ts, backoff_attempts: v.backoff_attempts }); } const lim = p[2] ?? out.length; return { rows: out.slice(0, lim) }; }
       case SQL.JOBSCHED_UPSERT: { t.jobsched.set(bkey(p[0], p[1], p[2]), { next_eligible_ts: p[3], backoff_attempts: p[4] }); return { rows: [], rowCount: 1 }; }
       default: throw new Error(`fake Db: unhandled token ${tok}`);
     }
@@ -345,6 +345,73 @@ test('review#3: validModeled/prospectiveEligible on RESUME never exceed complete
   assert.ok(led.totals.validModeled <= led.totals.completed, `validModeled(${led.totals.validModeled}) <= completed(${led.totals.completed})`);
   assert.equal(led.totals.validModeled, 2, 'credited valid rows only (S#0 once, S#1 once)');
   assert.equal(led.totals.prospectiveEligible, 1, 'credited prospective only once (S#0)');
+});
+
+// ---- Phase-13: receipt semantics beyond caller flags/digests ----------------
+test('phase13: same batchId+payloadDigest but CHANGED contents => content conflict, not false idempotent', async () => {
+  const { db, store } = await commissioned('iso:cc');
+  await store.commitBatch(receipt({ batchId: 'X', payloadDigest: 'pd', resultEvidence: [{ id: 'A#0', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: false, digest: 'a' }] }));
+  const rowsBefore = db._t.result.length;
+  // replay same batchId + same claimed payloadDigest but DIFFERENT evidence
+  const res = await store.commitBatch(receipt({ batchId: 'X', payloadDigest: 'pd', resultEvidence: [{ id: 'A#9', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: false, digest: 'z' }], newCompletedIds: ['A#9'] }));
+  assert.equal(res.ok, false); assert.equal(res.reason, 'BATCH_ID_CONTENT_CONFLICT');
+  assert.equal(db._t.result.length, rowsBefore, 'changed replay wrote nothing');
+});
+
+test('phase13: an exact replay (same contents) still returns idempotent first ACK', async () => {
+  const { store } = await commissioned('iso:cc2');
+  const a = await store.commitBatch(receipt({ batchId: 'Y' }));
+  const b = await store.commitBatch(receipt({ batchId: 'Y' }));
+  assert.equal(b.idempotent, true); assert.equal(b.revision, a.revision);
+});
+
+test('phase13: status/flag contradictions are refused', async () => {
+  const { db, store } = await commissioned('iso:contra');
+  const bad = [
+    { rows: [{ id: 'C#0', status: 'COMPLETED_MODELED', completed: false, valid: true, prospective: false, digest: 'a' }], why: 'valid without completed' },
+    { rows: [{ id: 'C#1', status: 'COMPLETED_MODELED', completed: false, valid: false, prospective: true, digest: 'b' }], why: 'prospective without completed' },
+    { rows: [{ id: 'C#2', status: 'PENDING_HORIZON', completed: true, valid: false, prospective: false, digest: 'c' }], why: 'completed with pending status' },
+  ];
+  for (const [i, b] of bad.entries()) {
+    const res = await store.commitBatch(receipt({ batchId: `C${i}`, resultEvidence: b.rows, newCompletedIds: b.rows.filter((e) => e.completed).map((e) => e.id), tally: { completed: b.rows.filter((e) => e.completed).length, validModeled: 0, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 1 } }));
+    assert.equal(res.ok, false, b.why); assert.equal(res.reason, 'RESULT_ROW_CONTRADICTION');
+  }
+  assert.equal(db._t.result.length, 0, 'no contradictory evidence persisted');
+});
+
+// ---- Phase-14: commission/version, malformed counters, orphans, bounded reads
+test('phase14: store commissioned under a different policy version is refused/LOST', async () => {
+  const db = makeFakeDb();
+  await createDailySimulationStore({ db, storeIdentity: 'iso:pol', policyVersion: 'sim2-policy-1' }).commissionStore();
+  const other = createDailySimulationStore({ db, storeIdentity: 'iso:pol', policyVersion: 'sim2-policy-OTHER', dailyTarget: 5 });
+  const c = await other.commissionStore();
+  assert.equal(c.commissioned, false); assert.equal(c.reason, 'STORE_IDENTITY_MISMATCH');
+  const load = await other.loadDay('2026-09-14');
+  assert.equal(load.status, 'LOST');
+});
+
+test('phase14: malformed stored day counters load as LOST', async () => {
+  const { db, store } = await commissioned('iso:mal');
+  await store.commitBatch(receipt({ batchId: 'M1' }));
+  db._t.day.get('iso:mal|2026-09-14').revision = -5; // corrupt
+  assert.equal((await store.loadDay('2026-09-14')).status, 'LOST');
+});
+
+test('phase14: missing day row with orphan batch records => LOST, not NEW', async () => {
+  const { db, store } = await commissioned('iso:orph');
+  await store.commitBatch(receipt({ batchId: 'O1', dayKey: '2026-09-14' }));
+  db._t.day.delete('iso:orph|2026-09-14'); // day row lost, batch/result rows remain
+  assert.equal((await store.loadDay('2026-09-14')).status, 'LOST');
+});
+
+test('phase14: bounded restart read refuses an over-cap day', async () => {
+  const db = makeFakeDb();
+  await createDailySimulationStore({ db, storeIdentity: 'iso:big' }).commissionStore();
+  const store = createDailySimulationStore({ db, storeIdentity: 'iso:big', dailyTarget: 100, maxDayRows: 2 });
+  const ev = Array.from({ length: 3 }, (_, i) => ({ id: `B#${i}`, status: 'COMPLETED_MODELED', completed: true, valid: false, prospective: false, digest: `d${i}` }));
+  await store.commitBatch(receipt({ batchId: 'BIG', resultEvidence: ev, newCompletedIds: ev.map((e) => e.id), tally: { completed: 3, validModeled: 0, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 3 } }));
+  const load = await store.loadDay('2026-09-14');
+  assert.equal(load.status, 'LOST'); assert.match(load.detail, /day too large/);
 });
 
 // ---- direct store integrity --------------------------------------------------

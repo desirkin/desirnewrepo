@@ -50,6 +50,7 @@ export const PROPOSED_DDL = Object.freeze([
      tally             jsonb NOT NULL,
      executor_counters jsonb,
      observed_utc_ms   bigint NOT NULL,
+     evidence_digest   text,
      PRIMARY KEY (identity, day_key, batch_id))`,
   // Immutable evidence — one row per result row, ALL statuses retained.
   `CREATE TABLE IF NOT EXISTS serpent_dsim_result (
@@ -90,6 +91,19 @@ export const PROPOSED_DDL = Object.freeze([
      next_eligible_ts bigint NOT NULL,
      backoff_attempts integer NOT NULL,
      PRIMARY KEY (identity, day_key, job_id))`,
+  // Crediting-join index (additive): the restart CREDITED_AGGREGATE joins
+  // serpent_dsim_result to serpent_dsim_completed on (identity, day_key,
+  // sim_id, batch_id). serpent_dsim_result's PRIMARY KEY leads with batch_id,
+  // so without this index the planner has no sim_id-keyed access into result
+  // and can pick a nested loop that seq-scans result once per completed row —
+  // O(n^2), which exceeds the Db query timeout on a full 100k day. This index
+  // gives both join directions an index-driven path (hash- or nested-loop),
+  // bounding a full-day rebuild to well under the timeout.
+  // NOTE: the index NAME must not contain 'serpent_' — the Db qualifies every
+  // 'serpent_' token with its schema, and a schema-qualified index name is a
+  // syntax error. Only the table reference below is meant to be qualified.
+  `CREATE INDEX IF NOT EXISTS dsim_result_credit_idx
+     ON serpent_dsim_result (identity, day_key, sim_id, batch_id)`,
 ]);
 
 // ---- exact DML the store issues (matched by identity in tests) --------------
@@ -117,6 +131,8 @@ export const SQL = Object.freeze({
   JOBSCHED_UPSERT: 'DSIM/jobsched/upsert',
   CREDITED_AGGREGATE: 'DSIM/result/credited_aggregate',
   EVIDENCE_DISTINCT_COMPLETED: 'DSIM/result/distinct_completed',
+  ANALYZE_RESULT: 'DSIM/result/analyze',
+  ANALYZE_COMPLETED: 'DSIM/completed/analyze',
 });
 
 // The real parameterized SQL bodies, keyed by the tokens above. The store uses
@@ -129,8 +145,8 @@ export const SQL_BODY = Object.freeze({
   [SQL.DAY_INSERT]: 'INSERT INTO serpent_dsim_day (identity, day_key, revision, target, rotation_index, shortfall) VALUES ($1,$2,0,$3,0,NULL)',
   [SQL.DAY_UPDATE_CAS]: 'UPDATE serpent_dsim_day SET revision = $4, rotation_index = $5 WHERE identity = $1 AND day_key = $2 AND revision = $3',
   [SQL.DAY_SET_SHORTFALL]: 'UPDATE serpent_dsim_day SET shortfall = $3::jsonb WHERE identity = $1 AND day_key = $2',
-  [SQL.BATCH_GET]: 'SELECT batch_id, payload_digest, resulting_revision, tally FROM serpent_dsim_batch WHERE identity = $1 AND day_key = $2 AND batch_id = $3',
-  [SQL.BATCH_INSERT]: 'INSERT INTO serpent_dsim_batch (identity, day_key, batch_id, job_id, job_digest, payload_digest, parent_revision, resulting_revision, cursor_before, next_cursor, done, tally, executor_counters, observed_utc_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12::jsonb,$13::jsonb,$14)',
+  [SQL.BATCH_GET]: 'SELECT batch_id, payload_digest, resulting_revision, tally, evidence_digest FROM serpent_dsim_batch WHERE identity = $1 AND day_key = $2 AND batch_id = $3',
+  [SQL.BATCH_INSERT]: 'INSERT INTO serpent_dsim_batch (identity, day_key, batch_id, job_id, job_digest, payload_digest, parent_revision, resulting_revision, cursor_before, next_cursor, done, tally, executor_counters, observed_utc_ms, evidence_digest) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12::jsonb,$13::jsonb,$14,$15)',
   [SQL.RESULT_INSERT]: 'INSERT INTO serpent_dsim_result (identity, day_key, batch_id, row_ordinal, sim_id, status, completed, valid_modeled, prospective_eligible, digest) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
   [SQL.RESULT_COUNT_FOR_BATCH]: 'SELECT count(*)::int AS n FROM serpent_dsim_result WHERE identity = $1 AND day_key = $2 AND batch_id = $3',
   [SQL.EVIDENCE_AGGREGATE_DAY]: `SELECT status, count(*)::int AS n,
@@ -140,13 +156,13 @@ export const SQL_BODY = Object.freeze({
      FROM serpent_dsim_result WHERE identity = $1 AND day_key = $2 GROUP BY status`,
   [SQL.COMPLETED_HAS]: 'SELECT 1 FROM serpent_dsim_completed WHERE identity = $1 AND day_key = $2 AND sim_id = $3',
   [SQL.COMPLETED_INSERT]: 'INSERT INTO serpent_dsim_completed (identity, day_key, sim_id, batch_id) VALUES ($1,$2,$3,$4)',
-  [SQL.COMPLETED_LIST]: 'SELECT sim_id FROM serpent_dsim_completed WHERE identity = $1 AND day_key = $2 ORDER BY sim_id',
+  [SQL.COMPLETED_LIST]: 'SELECT sim_id FROM serpent_dsim_completed WHERE identity = $1 AND day_key = $2 ORDER BY sim_id LIMIT $3',
   [SQL.COMPLETED_COUNT]: 'SELECT count(*)::int AS n FROM serpent_dsim_completed WHERE identity = $1 AND day_key = $2',
-  [SQL.PENDING_LIST]: 'SELECT sim_id, status, digest, first_seen_rev, last_seen_rev, attempts FROM serpent_dsim_pending WHERE identity = $1 AND day_key = $2 ORDER BY sim_id',
+  [SQL.PENDING_LIST]: 'SELECT sim_id, status, digest, first_seen_rev, last_seen_rev, attempts FROM serpent_dsim_pending WHERE identity = $1 AND day_key = $2 ORDER BY sim_id LIMIT $3',
   [SQL.PENDING_UPSERT]: 'INSERT INTO serpent_dsim_pending (identity, day_key, sim_id, status, digest, first_seen_rev, last_seen_rev, attempts) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (identity, day_key, sim_id) DO UPDATE SET status = EXCLUDED.status, digest = EXCLUDED.digest, last_seen_rev = EXCLUDED.last_seen_rev, attempts = EXCLUDED.attempts',
   [SQL.PENDING_DELETE]: 'DELETE FROM serpent_dsim_pending WHERE identity = $1 AND day_key = $2 AND sim_id = $3',
-  [SQL.BATCH_LIST_DAY]: 'SELECT batch_id, job_id, next_cursor, cursor_before, payload_digest, done FROM serpent_dsim_batch WHERE identity = $1 AND day_key = $2 ORDER BY resulting_revision',
-  [SQL.JOBSCHED_LIST]: 'SELECT job_id, next_eligible_ts, backoff_attempts FROM serpent_dsim_job_schedule WHERE identity = $1 AND day_key = $2',
+  [SQL.BATCH_LIST_DAY]: 'SELECT batch_id, job_id, next_cursor, cursor_before, payload_digest, done FROM serpent_dsim_batch WHERE identity = $1 AND day_key = $2 ORDER BY resulting_revision LIMIT $3',
+  [SQL.JOBSCHED_LIST]: 'SELECT job_id, next_eligible_ts, backoff_attempts FROM serpent_dsim_job_schedule WHERE identity = $1 AND day_key = $2 LIMIT $3',
   [SQL.JOBSCHED_UPSERT]: 'INSERT INTO serpent_dsim_job_schedule (identity, day_key, job_id, next_eligible_ts, backoff_attempts) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (identity, day_key, job_id) DO UPDATE SET next_eligible_ts = EXCLUDED.next_eligible_ts, backoff_attempts = EXCLUDED.backoff_attempts',
   // validModeled/prospectiveEligible counted ONLY over the credited (unique)
   // completed rows — join evidence to the completed index on (sim_id,batch_id) —
@@ -158,6 +174,14 @@ export const SQL_BODY = Object.freeze({
      JOIN serpent_dsim_completed c ON c.identity = r.identity AND c.day_key = r.day_key AND c.sim_id = r.sim_id AND c.batch_id = r.batch_id
      WHERE r.identity = $1 AND r.day_key = $2 AND r.completed`,
   [SQL.EVIDENCE_DISTINCT_COMPLETED]: 'SELECT count(DISTINCT sim_id)::int AS n FROM serpent_dsim_result WHERE identity = $1 AND day_key = $2 AND completed',
+  // Best-effort stats refresh for the restart rebuild. A rebuild runs right
+  // after up to 100k rows were bulk-inserted, before autovacuum has ANALYZEd;
+  // with reltuples still 0 the planner picks a seqscan nested loop for the
+  // crediting join (O(n^2)) and blows the query timeout. ANALYZE (a fast,
+  // data-neutral maintenance scan) gives it real row counts so the indexed
+  // plan is chosen. Issued outside any transaction; failure is swallowed.
+  [SQL.ANALYZE_RESULT]: 'ANALYZE serpent_dsim_result',
+  [SQL.ANALYZE_COMPLETED]: 'ANALYZE serpent_dsim_completed',
 });
 
 // ---- bounded multi-row INSERT (perf: one round-trip per bounded chunk) -------

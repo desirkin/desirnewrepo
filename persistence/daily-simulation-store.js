@@ -34,7 +34,40 @@ export const STORE_PORT_VERSION = 'daily-sim-scheduler-2';
 export const DEFAULT_POLICY_VERSION = 'sim2-policy-1';
 export const DEFAULT_MAX_RESULT_ROWS = 4096;      // 64 frames * up to 64 variant rows
 export const DEFAULT_MAX_RECEIPT_BYTES = 8 * 1024 * 1024;
+export const DEFAULT_MAX_DAY_ROWS = 1_000_000;    // bounded restart read guard per list
 const REVISITABLE = new Set(['PENDING_HORIZON', 'OUTCOME_PATH_INCOMPLETE', 'OUTCOME_PATH_MISSING']);
+
+// Store-side canonical content digest (zero-dependency FNV-1a/64 over stable
+// JSON). Used to VERIFY batch idempotency against the actual receipt contents,
+// not the caller's claimed payloadDigest — a repeated batchId whose contents
+// differ is refused, never returned as false idempotent success.
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+}
+function fnv1a64Hex(str) {
+  let h = 0xcbf29ce484222325n; const prime = 0x100000001b3n; const mask = 0xffffffffffffffffn;
+  for (let i = 0; i < str.length; i += 1) { h ^= BigInt(str.charCodeAt(i)); h = (h * prime) & mask; }
+  return h.toString(16).padStart(16, '0');
+}
+function evidenceDigestOf(receipt) {
+  return `ev:${fnv1a64Hex(stableStringify({
+    jobId: receipt.jobId ?? null, jobDigest: receipt.jobDigest ?? null,
+    cursorBefore: receipt.cursorBefore ?? null, nextCursor: receipt.nextCursor ?? null,
+    parentRevision: receipt.parentRevision, done: receipt.done === true, tally: receipt.tally ?? null,
+    evidence: (receipt.resultEvidence || []).map((e) => [e.id, e.status, e.completed === true, e.valid === true, e.prospective === true, e.digest ?? '']),
+  }))}`;
+}
+// Per-row status/flag consistency. Caller BOOLEANS are not evidence of a real
+// outcome (see Phase-15 note), but internally contradictory rows are refused.
+function rowContradiction(e) {
+  if (e.valid === true && e.completed !== true) return 'valid_modeled without completed';
+  if (e.prospective === true && e.completed !== true) return 'prospective_eligible without completed';
+  if (e.completed === true && REVISITABLE.has(e.status)) return `completed with non-completed status ${e.status}`;
+  return null;
+}
 
 export class DsimStoreError extends Error { constructor(m) { super(`DSIM_STORE: ${m}`); this.name = 'DsimStoreError'; } }
 
@@ -46,20 +79,35 @@ const isRevisitableEvidence = (e) => e && e.completed !== true && REVISITABLE.ha
 
 export function createDailySimulationStore({
   db, storeIdentity, policyVersion = DEFAULT_POLICY_VERSION, dailyTarget = 0,
-  maxResultRows = DEFAULT_MAX_RESULT_ROWS, maxReceiptBytes = DEFAULT_MAX_RECEIPT_BYTES, clock = () => Date.now(),
+  maxResultRows = DEFAULT_MAX_RESULT_ROWS, maxReceiptBytes = DEFAULT_MAX_RECEIPT_BYTES,
+  maxDayRows = DEFAULT_MAX_DAY_ROWS, clock = () => Date.now(),
 } = {}) {
   if (!db || typeof db.query !== 'function' || typeof db.tx !== 'function') throw new DsimStoreError('an injected already-started Db (query/tx) is required');
   if (typeof storeIdentity !== 'string' || !storeIdentity) throw new DsimStoreError('storeIdentity is required (explicit isolated commissioning)');
+  const listLimit = maxDayRows + 1; // fetch one past the cap to detect overflow
+
+  // A commissioned store row must match THIS store's policy/store version, or the
+  // handle is talking to a store commissioned under a different contract.
+  function identityMismatch(row) {
+    if (row.policy_version !== policyVersion) return `policy_version ${row.policy_version} != ${policyVersion}`;
+    if (row.store_version !== DSIM_STORE_VERSION) return `store_version ${row.store_version} != ${DSIM_STORE_VERSION}`;
+    return null;
+  }
 
   async function isCommissioned() {
     const r = await db.query(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
-    return r.rows.length > 0;
+    return r.rows.length > 0 && !identityMismatch(r.rows[0]);
   }
 
-  // Explicit, isolated commissioning. NOT a migration and NOT implicit.
+  // Explicit, isolated commissioning. NOT a migration and NOT implicit. A row
+  // commissioned under a different policy/store version is refused, not adopted.
   async function commissionStore() {
     const existing = await db.query(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
-    if (existing.rows.length) return { commissioned: true, already: true };
+    if (existing.rows.length) {
+      const m = identityMismatch(existing.rows[0]);
+      if (m) return { commissioned: false, reason: 'STORE_IDENTITY_MISMATCH', detail: m };
+      return { commissioned: true, already: true };
+    }
     await db.query(SQL_BODY[SQL.STORE_INSERT], [storeIdentity, policyVersion, DSIM_STORE_VERSION, clock()]);
     return { commissioned: true, already: false };
   }
@@ -67,14 +115,40 @@ export function createDailySimulationStore({
   async function loadDay(dayKey) {
     const store = await db.query(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
     if (!store.rows.length) return { status: 'LOST', detail: 'store not commissioned — cannot prove NEW vs lost custody' };
+    const m = identityMismatch(store.rows[0]);
+    if (m) return { status: 'LOST', detail: `store identity mismatch: ${m}` };
     const dayRes = await db.query(SQL_BODY[SQL.DAY_GET], [storeIdentity, dayKey]);
-    if (!dayRes.rows.length) return { status: 'NEW' };
+    if (!dayRes.rows.length) {
+      // Missing day row, but orphan batch rows for this day => lost custody, not NEW.
+      const orphan = await db.query(SQL_BODY[SQL.BATCH_LIST_DAY], [storeIdentity, dayKey, 1]);
+      if (orphan.rows.length) return { status: 'LOST', detail: 'missing day row with orphan batch records' };
+      return { status: 'NEW' };
+    }
     try { return { status: 'RESUME', ledger: await rebuildLedger(dayKey, dayRes.rows[0]) }; }
     catch (err) { return { status: 'LOST', detail: String(err && err.message) }; }
   }
 
+  // Best-effort ANALYZE of the two heavy tables so the restart rebuild's join
+  // plans against real row counts. Never throws — a permission-restricted role
+  // or a fake Db that does not model ANALYZE just proceeds unanalyzed.
+  async function refreshRebuildStats() {
+    try { await db.query(SQL_BODY[SQL.ANALYZE_RESULT], []); } catch { /* best-effort */ }
+    try { await db.query(SQL_BODY[SQL.ANALYZE_COMPLETED], []); } catch { /* best-effort */ }
+  }
+
   async function rebuildLedger(dayKey, dayRow) {
-    const completed = await db.query(SQL_BODY[SQL.COMPLETED_LIST], [storeIdentity, dayKey]);
+    const revision = Number(dayRow.revision);
+    const target = Number(dayRow.target);
+    if (!Number.isSafeInteger(revision) || revision < 0) throw new DsimStoreError('durable corruption: day revision malformed');
+    if (!Number.isSafeInteger(target) || target < 0) throw new DsimStoreError('durable corruption: day target malformed');
+    // Refresh planner stats before the crediting join. A rebuild runs right
+    // after a bulk-loaded day was written; with stale (0-row) stats the planner
+    // picks an O(n^2) seqscan nested loop for CREDITED_AGGREGATE and exceeds the
+    // Db query timeout on a full day. Best-effort: ANALYZE changes no data, and
+    // a deployment that forbids it (or an already-analyzed table) simply skips.
+    await refreshRebuildStats();
+    const completed = await db.query(SQL_BODY[SQL.COMPLETED_LIST], [storeIdentity, dayKey, listLimit]);
+    if (completed.rows.length > maxDayRows) throw new DsimStoreError(`day too large for bounded restart read (completed > ${maxDayRows}); a paged restore is required`);
     const completedIds = completed.rows.map((r) => r.sim_id);
     const agg = await db.query(SQL_BODY[SQL.EVIDENCE_AGGREGATE_DAY], [storeIdentity, dayKey]);
     const byStatus = {}; let evRows = 0; let evCompleted = 0;
@@ -90,10 +164,12 @@ export function createDailySimulationStore({
     const credited = await db.query(SQL_BODY[SQL.CREDITED_AGGREGATE], [storeIdentity, dayKey]);
     const evValid = Number(credited.rows[0].valid) || 0;
     const evProspective = Number(credited.rows[0].prospective) || 0;
-    const pend = await db.query(SQL_BODY[SQL.PENDING_LIST], [storeIdentity, dayKey]);
+    const pend = await db.query(SQL_BODY[SQL.PENDING_LIST], [storeIdentity, dayKey, listLimit]);
+    if (pend.rows.length > maxDayRows) throw new DsimStoreError(`day too large for bounded restart read (pending > ${maxDayRows}); a paged restore is required`);
     const pendingCustody = {};
     for (const r of pend.rows) pendingCustody[r.sim_id] = { status: r.status, digest: r.digest, firstSeenRev: Number(r.first_seen_rev), lastSeenRev: Number(r.last_seen_rev), attempts: Number(r.attempts) };
-    const batches = await db.query(SQL_BODY[SQL.BATCH_LIST_DAY], [storeIdentity, dayKey]);
+    const batches = await db.query(SQL_BODY[SQL.BATCH_LIST_DAY], [storeIdentity, dayKey, listLimit]);
+    if (batches.rows.length > maxDayRows) throw new DsimStoreError(`day too large for bounded restart read (batches > ${maxDayRows}); a paged restore is required`);
     const appliedBatchIds = batches.rows.map((r) => r.batch_id);
     const jobs = {};
     // batches are ordered by resulting_revision, so the LAST row per job carries
@@ -104,14 +180,12 @@ export function createDailySimulationStore({
       jobs[r.job_id] = { cursor: parseJson(r.next_cursor), done: r.done === true, completed: 0, attempts: 0, lastStatus: 'APPLIED', stalled: false, lastPayloadDigest: r.payload_digest, lastCursor: parseJson(r.cursor_before), backoffAttempts: 0, nextEligibleTs: 0 };
     }
     // sim2-revisit-1: restore persisted backoff timing/counters.
-    const sched = await db.query(SQL_BODY[SQL.JOBSCHED_LIST], [storeIdentity, dayKey]);
+    const sched = await db.query(SQL_BODY[SQL.JOBSCHED_LIST], [storeIdentity, dayKey, listLimit]);
     for (const r of sched.rows) {
       const j = jobs[r.job_id] || (jobs[r.job_id] = { cursor: null, done: false, completed: 0, attempts: 0, lastStatus: 'BACKOFF', stalled: false, lastPayloadDigest: null, lastCursor: undefined, backoffAttempts: 0, nextEligibleTs: 0 });
       j.nextEligibleTs = Number(r.next_eligible_ts) || 0;
       j.backoffAttempts = Number(r.backoff_attempts) || 0;
     }
-    const revision = Number(dayRow.revision);
-    const target = Number(dayRow.target);
     const completedTotal = completedIds.length;
     const totals = {
       attempted: evRows, completed: completedTotal, validModeled: evValid, prospectiveEligible: evProspective,
@@ -137,6 +211,11 @@ export function createDailySimulationStore({
     if (!Number.isSafeInteger(receipt.parentRevision) || receipt.parentRevision < 0) return { ok: false, reason: 'BAD_RECEIPT' };
     if (typeof receipt.payloadDigest !== 'string' || !receipt.payloadDigest) return { ok: false, reason: 'BAD_RECEIPT' };
     if (!receipt.tally || receipt.resultEvidence.length !== receipt.tally.pageSize) return { ok: false, reason: 'PAGE_SIZE_MISMATCH' };
+    // Per-row status/flag contradictions are refused before any write. (Caller
+    // booleans are not proof of a real outcome — see Phase-15 note — but an
+    // internally contradictory row is never storable.)
+    for (const e of receipt.resultEvidence) { const c = rowContradiction(e); if (c) return { ok: false, reason: 'RESULT_ROW_CONTRADICTION', detail: c, sim: e.id }; }
+    const evDigest = evidenceDigestOf(receipt);
 
     return db.tx(async (q) => {
       // Use the schema-QUALIFYING executor q (never helpers.raw): the injected
@@ -146,12 +225,16 @@ export function createDailySimulationStore({
       const store = await raw(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
       if (!store.rows.length) return { ok: false, reason: 'STORE_NOT_COMMISSIONED' };
 
-      // idempotency by batchId (records payload_digest for conflict detection)
+      // idempotency by batchId — content-VERIFIED, not caller-claimed. A repeat
+      // with a different claimed payloadDigest is a payload conflict; a repeat
+      // whose actual contents differ (even if the claimed payloadDigest is
+      // unchanged) is a CONTENT conflict — never a false idempotent success.
       const existing = await raw(SQL_BODY[SQL.BATCH_GET], [storeIdentity, receipt.dayKey, receipt.batchId]);
       if (existing.rows.length) {
         const b = existing.rows[0];
-        if (b.payload_digest === receipt.payloadDigest) return { ok: true, batchId: receipt.batchId, payloadDigest: b.payload_digest, revision: Number(b.resulting_revision), idempotent: true };
-        return { ok: false, reason: 'BATCH_ID_PAYLOAD_CONFLICT', storedDigest: b.payload_digest };
+        if (b.payload_digest !== receipt.payloadDigest) return { ok: false, reason: 'BATCH_ID_PAYLOAD_CONFLICT', storedDigest: b.payload_digest };
+        if (b.evidence_digest && b.evidence_digest !== evDigest) return { ok: false, reason: 'BATCH_ID_CONTENT_CONFLICT', storedEvidenceDigest: b.evidence_digest };
+        return { ok: true, batchId: receipt.batchId, payloadDigest: b.payload_digest, revision: Number(b.resulting_revision), idempotent: true };
       }
 
       // CAS parent revision
@@ -206,7 +289,7 @@ export function createDailySimulationStore({
         if (off + MAX_INSERT_ROWS_PER_STATEMENT < evidence.length) await yieldNow();
       }
 
-      await raw(SQL_BODY[SQL.BATCH_INSERT], [storeIdentity, receipt.dayKey, receipt.batchId, receipt.jobId ?? '', receipt.jobDigest ?? '', receipt.payloadDigest, receipt.parentRevision, resultingRevision, jstr(receipt.cursorBefore), jstr(receipt.nextCursor), receipt.done === true, jstr(receipt.tally), jstr(receipt.executorCounters ?? null), receipt.observedUtcMs ?? clock()]);
+      await raw(SQL_BODY[SQL.BATCH_INSERT], [storeIdentity, receipt.dayKey, receipt.batchId, receipt.jobId ?? '', receipt.jobDigest ?? '', receipt.payloadDigest, receipt.parentRevision, resultingRevision, jstr(receipt.cursorBefore), jstr(receipt.nextCursor), receipt.done === true, jstr(receipt.tally), jstr(receipt.executorCounters ?? null), receipt.observedUtcMs ?? clock(), evDigest]);
 
       // completed dedupe index — bounded multi-row INSERT (4 columns).
       for (let off = 0; off < derivedCompleted.length; off += MAX_INSERT_ROWS_PER_STATEMENT) {
