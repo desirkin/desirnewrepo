@@ -178,3 +178,43 @@ test('SBODY-FENCE: scheduler uses the pure body module, not persistence; store +
   const store = readFileSync(new URL('../persistence/daily-simulation-store.js', import.meta.url), 'utf8');
   assert.ok(store.includes("from '../learning/daily-simulation-body.js'"), 'store reuses the same pure body codec');
 });
+
+test('SBODY-6: whole-page strict preflight rejects a getter field (no getter invoked) before digest/selectors', async () => {
+  const db = makeFakeDb(); const ID = 'sbody:6'; await mkStore(db, ID).commissionStore();
+  let getterInvoked = false;
+  const gExec = { async executeDailySimulationBatch({ job }) {
+    const row = { simulationId: 'G#0', status: 'PENDING_HORIZON', completed: false, validModeledOutcome: false, prospectiveQualificationEligible: false };
+    Object.defineProperty(row, 'extra', { enumerable: true, get() { getterInvoked = true; return 1; } });
+    return { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: [row], counters: { frames: 1 }, laws: ['x'] };
+  } };
+  const r = await mkScheduler(db, ID, gExec, { dailyTarget: 10 }).tick();
+  assert.equal(r.tick, 'PAGE_REJECTED');
+  assert.equal(r.reason, 'PAGE_NONCANONICAL');
+  assert.equal(getterInvoked, false, 'the page preflight read via descriptors — the getter was never invoked');
+  assert.equal(db._t.result.length, 0);
+});
+
+test('SBODY-7: same sim id with DIFFERENT bodies is rejected, never silently the first body', async () => {
+  const db = makeFakeDb(); const ID = 'sbody:7'; await mkStore(db, ID).commissionStore();
+  const dExec = { async executeDailySimulationBatch({ job }) {
+    const mk = (body) => ({ simulationId: 'X#0', status: 'COMPLETED_MODELED', completed: true, validModeledOutcome: false, prospectiveQualificationEligible: false, body });
+    return { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: [mk({ v: 1 }), mk({ v: 2 })], counters: { frames: 1 }, laws: ['x'] };
+  } };
+  const r = await mkScheduler(db, ID, dExec, { dailyTarget: 10 }).tick();
+  assert.equal(r.tick, 'BODY_REJECTED');
+  assert.equal(r.reason, 'DUPLICATE_SIM_BODY_CONFLICT');
+  assert.equal(db._t.result.length, 0, 'nothing written on conflict');
+  assert.equal(db._t.payload.size, 0);
+});
+
+test('SBODY-8: exact-duplicate same-id body dedups (one credit, one body) through the real scheduler', async () => {
+  const db = makeFakeDb(); const ID = 'sbody:8'; await mkStore(db, ID).commissionStore();
+  const sameExec = { async executeDailySimulationBatch({ job }) {
+    const mk = () => ({ simulationId: 'Y#0', status: 'COMPLETED_MODELED', completed: true, validModeledOutcome: true, prospectiveQualificationEligible: false, body: { v: 7 } });
+    return { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: [mk(), mk()], counters: { frames: 1 }, laws: ['x'] };
+  } };
+  const run = await mkScheduler(db, ID, sameExec, { dailyTarget: 1 }).runToIdle();
+  assert.equal(run.last, 'TARGET_MET');
+  const led = (await mkStore(db, ID).loadDay(DAY)).ledger;
+  assert.equal(led.totals.completed, 1); assert.equal(led.totals.replayable, 1);
+});

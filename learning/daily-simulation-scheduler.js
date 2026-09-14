@@ -42,7 +42,7 @@
 //     replay body. No body means metadata-only (unchanged); the store is still
 //     the authority on body byte bounds.
 
-import { encodeOutcomeBody, DEFAULT_MAX_OUTCOME_BODY_BYTES } from './daily-simulation-body.js';
+import { encodeOutcomeBody, assertBoundedCanonical, DEFAULT_MAX_OUTCOME_BODY_BYTES } from './daily-simulation-body.js';
 
 export const SCHEDULER_PORT_VERSION = 'daily-sim-scheduler-2';
 export const DEFAULT_POLICY_VERSION = 'sim2-policy-1';
@@ -74,6 +74,15 @@ export const DEFAULT_PENDING_BACKOFF = Object.freeze({ baseMs: 60_000, maxMs: 3_
 // unbounded cap and only rejected later at the store. A caller may lower the
 // bound but never raise it past this ceiling.
 export const HARD_MAX_OUTCOME_BODY_BYTES = 64 * 1024;
+// Finite ceilings for the ENTIRE raw result page. The whole page (every row,
+// all fields — pending/terminal/extra metadata/duplicate ids, not only credited
+// bodies) is strict-bounded (byte/node/depth, getter-free) BEFORE its digest or
+// any selector runs, so a pathological page cannot allocate unboundedly or
+// trigger a getter. The byte cap dominates; a full 4096-row page carrying
+// 16 KiB bodies is ~64 MiB, so the ceiling sits above that.
+export const HARD_MAX_PAGE_BYTES = 128 * 1024 * 1024;
+export const HARD_MAX_PAGE_NODES = 20_000_000;
+export const HARD_MAX_PAGE_DEPTH = 128;
 
 export class SchedulerStorageError extends Error { constructor(m) { super(`SCHEDULER_STORAGE: ${m}`); this.name = 'SchedulerStorageError'; } }
 export class SchedulerContractError extends Error { constructor(m) { super(`SCHEDULER_CONTRACT: ${m}`); this.name = 'SchedulerContractError'; } }
@@ -302,29 +311,43 @@ export function createDailySimulationScheduler({
       catch (err) { st.attempts += 1; st.lastStatus = 'EXEC_FAILED'; parkIfExhausted(st); return { tick: 'EXEC_FAILED', jobId, attempts: st.attempts, stalled: st.stalled, error: String(err && err.message) }; }
       finally { metrics.execMsTotal += monotonic() - execStart; }
 
-      // Bounded outcome-body preflight — BEFORE the raw page digest. Each credited
-      // body is canonicalized with the FINITE maxOutcomeBodyBytes so an oversized
-      // or non-canonical body is refused before the page is canonicalized and
-      // before a large string is allocated (here or in the store). A rejected
-      // body fails the batch (no commit, bounded retries); the store re-validates
-      // and re-bounds on commit. Cached for reuse in the evidence loop below.
+      // WHOLE-PAGE bounded strict preflight — BEFORE the page digest AND before
+      // any selector reads a field. Charges every row and every field (pending,
+      // terminal, extra metadata, duplicate ids, bodies) against finite
+      // byte/node/depth caps and reads via descriptors (no getter is invoked), so
+      // a pathological page cannot allocate unboundedly or trigger a getter in
+      // the digest or the selectors below. Fail-closed: reject the batch.
+      try { assertBoundedCanonical(res.results, { maxBytes: HARD_MAX_PAGE_BYTES, maxNodes: HARD_MAX_PAGE_NODES, maxDepth: HARD_MAX_PAGE_DEPTH }); }
+      catch (err) {
+        st.attempts += 1; st.lastStatus = 'PAGE_REJECTED'; parkIfExhausted(st);
+        return { tick: 'PAGE_REJECTED', jobId, reason: err && err.code === 'BODY_TOO_LARGE' ? 'PAGE_BYTES_LIMIT' : 'PAGE_NONCANONICAL', detail: String(err && err.message) };
+      }
+
+      // Bounded outcome-body preflight — each credited body is canonicalized with
+      // the FINITE maxOutcomeBodyBytes and cached by sim id. A repeat of the SAME
+      // id with a DIFFERENT body is a conflict, refused here — a later row's body
+      // is NEVER silently replaced by the first. Exact-duplicate bodies dedup.
       const bodyEnc = new Map(); // idk -> { digest, body }
       for (const r of res.results) {
         if (!completedOf(r)) continue;
         const b = bodyOf(r);
         if (b === undefined) continue;
         const idk = String(identityOf(r));
-        if (bodyEnc.has(idk)) continue;
         let enc;
         try { enc = encodeOutcomeBody(b, maxOutcomeBodyBytes); }
         catch (err) {
           st.attempts += 1; st.lastStatus = 'BODY_REJECTED'; parkIfExhausted(st);
           return { tick: 'BODY_REJECTED', jobId, sim: idk, reason: err && err.code === 'BODY_TOO_LARGE' ? 'OUTCOME_BODY_BYTES_LIMIT' : 'OUTCOME_BODY_NONCANONICAL', detail: String(err && err.message) };
         }
+        const prev = bodyEnc.get(idk);
+        if (prev) {
+          if (prev.digest !== enc.digest) { st.attempts += 1; st.lastStatus = 'BODY_REJECTED'; parkIfExhausted(st); return { tick: 'BODY_REJECTED', jobId, sim: idk, reason: 'DUPLICATE_SIM_BODY_CONFLICT' }; }
+          continue; // exact-duplicate body — dedup, keep the first
+        }
         bodyEnc.set(idk, { digest: enc.digest, body: b });
       }
 
-      const payloadDigest = digest(res.results); // raw page digest — deterministic, retry-stable (bodies already bounded)
+      const payloadDigest = digest(res.results); // raw page digest — deterministic, retry-stable (page already bounded + getter-free)
       const batchId = batchIdOf({ jobDigest, cursorBefore, parentRevision, payloadDigest });
       if (day.appliedBatchIds.includes(batchId)) return { tick: 'BATCH_ALREADY_APPLIED', jobId, batchId };
 
