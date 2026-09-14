@@ -22,7 +22,7 @@ import { evaluatePredicate } from './features.js';
 import { captureError } from './shadow-contracts.js';
 import { matureShadowCapture } from './shadow-outcome.js';
 
-export const ADAPTIVE_PROCEDURE_CONSUMER_VERSION = 'adaptive-ranking-procedure-consumer-1';
+export const ADAPTIVE_PROCEDURE_CONSUMER_VERSION = 'adaptive-ranking-procedure-consumer-2';
 export const ADAPTIVE_PROCEDURE_PUBLICATION_VERSION = 'adaptive-ranking-procedure-publication-1';
 export const ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION = 'adaptive-ranking-trial-decision-1';
 export const ADAPTIVE_PROCEDURE_TRIAL_EXECUTION_VERSION = 'adaptive-ranking-trial-execution-2';
@@ -167,6 +167,7 @@ export function sealAdaptiveProcedureConsumerContract({ preparedFactsContract } 
       baselineArm: 'SAME_BATCH_UNADJUSTED_REWARD_RISK_RATIO',
       candidateArm: 'SAME_BATCH_CURRENT_ACKED_ADAPTIVE_STATE',
       decisionOutput: 'SELECTED_STRATEGY_ID', noOrderAuthority: true,
+      currentFactFreshnessLaw: 'REQUIRED_OR_CONSTRAINED_FACT_AGE_AT_DECISION_PLUS_ELAPSED_TO_CONSUMPTION_LTE_PARENT_MAX_FACT_AGE',
     },
     activationLifetimeMs: preparedFactsContract.activationLifetimeMs,
     degradeRule: clone(preparedFactsContract.degradeRule), authority: 'NONE',
@@ -203,6 +204,7 @@ export function adaptiveProcedureConsumerContractError(contract) {
   if (!same(contract.validationSemantics, {
     experimentalUnit: 'ADMISSION_BATCH', baselineArm: 'SAME_BATCH_UNADJUSTED_REWARD_RISK_RATIO',
     candidateArm: 'SAME_BATCH_CURRENT_ACKED_ADAPTIVE_STATE', decisionOutput: 'SELECTED_STRATEGY_ID', noOrderAuthority: true,
+    currentFactFreshnessLaw: 'REQUIRED_OR_CONSTRAINED_FACT_AGE_AT_DECISION_PLUS_ELAPSED_TO_CONSUMPTION_LTE_PARENT_MAX_FACT_AGE',
   }) || contract.activationLifetimeMs !== contract.preparedFactsContract.activationLifetimeMs
       || !same(contract.degradeRule, contract.preparedFactsContract.degradeRule)
       || contract.authority !== 'NONE' || !HEX64.test(contract.consumerContractDigest ?? '')
@@ -970,6 +972,18 @@ export function resolveQualifiedAdaptiveProcedureRanking({
       || section.currentState.updatedTs > preparedFacts.decisionTs
       || section.stateSource.durableAcknowledgment.acknowledgedTs > preparedFacts.decisionTs) {
     return baseline('PREPARED_FACTS_CLOCK_OR_STATE_ASOF_MISMATCH');
+  }
+  const elapsedMs = nowTs - preparedFacts.decisionTs;
+  const freshnessFeatures = new Set(consumerContract.eligibility.requiredFeatures);
+  if (consumerContract.eligibility.maxSpreadBps !== null) freshnessFeatures.add('spreadBps');
+  if (consumerContract.eligibility.minBidDepthUsd10bps !== null) freshnessFeatures.add('bidDepthUsd10bps');
+  if (consumerContract.eligibility.minAtrPct !== null || consumerContract.eligibility.maxAtrPct !== null) freshnessFeatures.add('atrPct');
+  for (const name of freshnessFeatures) {
+    const fact = preparedFacts.features?.[name];
+    if (fact?.availability !== 'KNOWN' || !Number.isSafeInteger(fact.ageMs)
+        || fact.ageMs + elapsedMs > consumerContract.eligibility.maxFactAgeMs) {
+      return baseline('PREPARED_FACTS_STALE_AT_CONSUMPTION');
+    }
   }
   if (preparedFacts.marketIdentity?.canonicalCoin !== context?.asset) {
     return baseline('PREPARED_FACTS_ASSET_MISMATCH');

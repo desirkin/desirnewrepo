@@ -711,6 +711,23 @@ test('typed trial refuses shared metrics, caller-edited costs/path, lookahead, d
   });
   assert.equal(wrongVenue.applied, false);
   assert.equal(wrongVenue.reason, 'PREPARED_FACTS_VENUE_NOT_SINGLE_QUALIFIED_SOURCE');
+  const freshnessNow = f.now.value + 2 * MIN;
+  const freshnessSnapshot = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer, currentStateSettlement: f.trial.at(-1).stateSettlement,
+    validatePreparedFacts: (facts, contract) => judgeLearningPreparedFactsError(facts, { consumerContract: contract }),
+    nowTs: freshnessNow, mode: 'PAPER',
+  });
+  const resolveAtFreshnessTime = (value) => resolveQualifiedAdaptiveProcedureRanking({
+    snapshot: freshnessSnapshot, consumerContract: f.consumer, preparedFacts: value,
+    validatePreparedFacts: (facts, contract) => judgeLearningPreparedFactsError(facts, { consumerContract: contract }),
+    context: { ...original.context, asset: 'BTC' }, strategyId: 'IGNITION',
+    baselineRewardRiskRatio: 1, mode: 'PAPER', nowTs: freshnessNow,
+  });
+  const internallyFreshButNowOld = resolveAtFreshnessTime(preparedFacts(f.base, f.now.value, 'BTC'));
+  assert.equal(internallyFreshButNowOld.applied, false);
+  assert.equal(internallyFreshButNowOld.reason, 'PREPARED_FACTS_STALE_AT_CONSUMPTION');
+  assert.equal(resolveAtFreshnessTime(preparedFacts(f.base, freshnessNow, 'BTC')).applied, true);
   assert.equal(currentBtcFacts.decisionTs, f.now.value);
   const observe = resolveQualifiedAdaptiveProcedureRanking({
     snapshot: missingCustody, consumerContract: f.consumer, preparedFacts: original.facts,
