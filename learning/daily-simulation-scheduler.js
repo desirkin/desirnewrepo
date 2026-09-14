@@ -39,10 +39,17 @@
 export const SCHEDULER_PORT_VERSION = 'daily-sim-scheduler-2';
 export const DEFAULT_POLICY_VERSION = 'sim2-policy-1';
 export const DEFAULT_DAILY_TARGET = 100_000;
-export const HARD_MAX_EVALS_PER_BATCH = 64;     // matches SIM-1 executor hard cap
-export const DEFAULT_MAX_EVALS_PER_TICK = 64;
+// UNIT LAW: maxEvaluations counts DECISION FRAMES (SIM-1 hard cap 64/frames per
+// page). Each frame may emit up to 64 variant RESULT ROWS, so one page can hold
+// up to 64*64 = 4096 raw result rows. One evaluation != one result. The daily
+// target is measured in completed RESULT ROWS (raw simulations/evaluations),
+// deduped by simulation identity. Pages are bounded by rows and frames; the
+// last bounded page may overshoot the target honestly — results are never
+// truncated then advanced past.
+export const HARD_MAX_EVALS_PER_BATCH = 64;      // DECISION FRAMES per page (executor hard cap)
+export const MAX_RESULT_ROWS_PER_PAGE = 4096;    // 64 frames * up to 64 variant rows
+export const DEFAULT_MAX_EVALS_PER_TICK = 1;     // frames; default 1 => <=64 result rows until larger pages are tested
 export const DEFAULT_MAX_JOB_ATTEMPTS = 8;
-export const MAX_RECEIPT_RESULTS = HARD_MAX_EVALS_PER_BATCH;
 export const MAX_IDENTITY_BYTES = 256;
 
 export class SchedulerStorageError extends Error { constructor(m) { super(`SCHEDULER_STORAGE: ${m}`); this.name = 'SchedulerStorageError'; } }
@@ -81,7 +88,7 @@ function emptyDay(dayKey, target, policyVersion) {
   return {
     port: SCHEDULER_PORT_VERSION, policyVersion, dayKey, target,
     revision: 0, commissioned: true, rotationIndex: 0,
-    totals: { attempted: 0, completed: 0, validModeled: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, batchesApplied: 0, overshoot: 0 },
+    totals: { attempted: 0, completed: 0, validModeled: 0, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, batchesApplied: 0, overshoot: 0 },
     byStatus: {},
     jobs: {},                 // jobId -> { cursor, done, completed, attempts, lastStatus, stalled }
     completedIds: [],         // unique completed simulation identities (dedupe + budget)
@@ -94,6 +101,7 @@ function emptyDay(dayKey, target, policyVersion) {
 export function createDailySimulationScheduler({
   store, jobSource, executor, outcomePathSource,
   statusOf, identityOf, completedOf, validOf,
+  prospectiveOf = () => false, // distinct from completed/validModeled; injected when known
   isRevisitable = (r) => !completedOf(r) && REVISITABLE_DEFAULT.has(statusOf(r)),
   digest = defaultDigest,
   jobDigestOf = (job) => defaultDigest(job),
@@ -189,7 +197,9 @@ export function createDailySimulationScheduler({
     if (!res || typeof res !== 'object') throw new SchedulerContractError('executor returned a non-object result');
     if (res.jobId !== expectJobId) throw new SchedulerContractError(`executor jobId ${res.jobId} != scheduled ${expectJobId}`);
     if (!Array.isArray(res.results)) throw new SchedulerContractError('executor result.results must be an array');
-    if (res.results.length > MAX_RECEIPT_RESULTS) throw new SchedulerIntegrityError(`page of ${res.results.length} exceeds hard cap ${MAX_RECEIPT_RESULTS} — refusing to truncate`);
+    // results are RESULT ROWS (frames * variants), bounded by the row cap; the
+    // frame count is bounded separately by the maxEvaluations we requested.
+    if (res.results.length > MAX_RESULT_ROWS_PER_PAGE) throw new SchedulerIntegrityError(`page of ${res.results.length} result rows exceeds hard cap ${MAX_RESULT_ROWS_PER_PAGE} — refusing to truncate`);
     if (typeof res.done !== 'boolean') throw new SchedulerContractError('executor result.done must be boolean');
     if (!('nextCursor' in res)) throw new SchedulerContractError('executor result must carry nextCursor');
     return res;
@@ -253,7 +263,7 @@ export function createDailySimulationScheduler({
       const completedResults = [];
       const resultEvidence = [];
       const pendingDelta = [];
-      let tCompleted = 0; let tValid = 0; let tPending = 0; let tTerminal = 0; let tDup = 0;
+      let tCompleted = 0; let tValid = 0; let tProspective = 0; let tPending = 0; let tTerminal = 0; let tDup = 0;
       const seen = new Set(day.completedIds);
       for (const r of res.results) {
         const status = statusOf(r);
@@ -262,11 +272,12 @@ export function createDailySimulationScheduler({
         const idk = String(idv);
         if (idk.length > MAX_IDENTITY_BYTES) throw new SchedulerIntegrityError('result identity exceeds byte bound');
         byStatus[status] = (byStatus[status] || 0) + 1;
-        resultEvidence.push({ id: idk, status, completed: !!completedOf(r), valid: !!validOf(r), digest: digest(r) });
+        resultEvidence.push({ id: idk, status, completed: !!completedOf(r), valid: !!validOf(r), prospective: !!prospectiveOf(r), digest: digest(r) });
         if (completedOf(r)) {
           if (seen.has(idk) || newCompletedIds.includes(idk)) { tDup += 1; continue; }
           newCompletedIds.push(idk); completedResults.push(r); tCompleted += 1;
-          if (validOf(r)) tValid += 1;
+          if (validOf(r)) tValid += 1;             // valid modeled outcome — subset of completed
+          if (prospectiveOf(r)) tProspective += 1; // prospective-eligible — DISTINCT from completed/valid
         } else if (isRevisitable(r)) {
           pendingDelta.push({ id: idk, status, digest: digest(r) }); tPending += 1;
         } else { tTerminal += 1; }
@@ -277,7 +288,7 @@ export function createDailySimulationScheduler({
         cursorBefore, nextCursor: res.nextCursor ?? null, done: res.done === true,
         parentRevision, expectedRevision: parentRevision + 1, payloadDigest,
         completedResults, newCompletedIds, pendingDelta, resultEvidence, byStatus,
-        tally: { completed: tCompleted, validModeled: tValid, pending: tPending, terminalNonCompleted: tTerminal, duplicates: tDup, pageSize: res.results.length },
+        tally: { completed: tCompleted, validModeled: tValid, prospectiveEligible: tProspective, pending: tPending, terminalNonCompleted: tTerminal, duplicates: tDup, pageSize: res.results.length },
         executorCounters: res.counters ?? null, executorLaws: res.laws ?? null, observedUtcMs: nowTs,
       };
 
@@ -306,6 +317,7 @@ export function createDailySimulationScheduler({
       day.totals.attempted += res.results.length;
       day.totals.completed += tCompleted;
       day.totals.validModeled += tValid;   // separate; NOT summed into completed as "valid learning"
+      day.totals.prospectiveEligible += tProspective; // distinct again from completed/validModeled
       day.totals.pending += tPending;
       day.totals.terminalNonCompleted += tTerminal;
       day.totals.duplicates += tDup;

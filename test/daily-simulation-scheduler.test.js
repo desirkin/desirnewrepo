@@ -160,10 +160,26 @@ test('honest bounded-page overshoot — never truncate to hit target', async () 
   assert.equal(store._peek('2026-09-14').totals.completed, 10);
 });
 
-test('per-batch page is hard-capped at 64; an oversized page is refused (not truncated)', async () => {
+test('a single frame may emit many variant result rows (unit: frames != rows)', async () => {
   const store = makeStore();
-  const bigExec = { async executeDailySimulationBatch({ job }) { return { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: Array.from({ length: 65 }, (_, i) => ({ simulationId: `X#${i}`, status: 'COMPLETED_MODELED', completed: true, validModeledOutcome: true })), counters: {}, laws: [] }; } };
-  const s = createDailySimulationScheduler({ ...deps([modeled('X', 1)], store), executor: bigExec, dailyTarget: 100, maxEvalsPerTick: 64 });
+  // one frame -> 3 variant rows with distinct ids
+  const multiExec = { async executeDailySimulationBatch({ job }) { return { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: [
+    { simulationId: 'MV#0a', status: 'COMPLETED_MODELED', completed: true, validModeledOutcome: true },
+    { simulationId: 'MV#0b', status: 'COMPLETED_AMBIGUOUS', completed: true, validModeledOutcome: false },
+    { simulationId: 'MV#0c', status: 'PENDING_HORIZON', completed: false, validModeledOutcome: false },
+  ], counters: { frames: 1, rows: 3 }, laws: [] }; } };
+  const s = createDailySimulationScheduler({ ...deps([modeled('MV', 1)], store), executor: multiExec, dailyTarget: 10, maxEvalsPerTick: 1 });
+  await s.runToIdle();
+  const t = s.status().totals;
+  assert.equal(t.completed, 2, 'two completed variant rows from one frame');
+  assert.equal(t.validModeled, 1);
+  assert.equal(t.pending, 1);
+});
+
+test('result-row page cap (>4096) is refused, never truncated', async () => {
+  const store = makeStore();
+  const bigExec = { async executeDailySimulationBatch({ job }) { return { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: Array.from({ length: 4097 }, (_, i) => ({ simulationId: `X#${i}`, status: 'COMPLETED_MODELED', completed: true, validModeledOutcome: true })), counters: {}, laws: [] }; } };
+  const s = createDailySimulationScheduler({ ...deps([modeled('X', 1)], store), executor: bigExec, dailyTarget: 100000, maxEvalsPerTick: 64 });
   const t = await s.tick();
   assert.equal(t.tick, 'EXEC_FAILED');
   assert.equal(s.status().totals.completed, 0);
