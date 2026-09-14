@@ -159,28 +159,37 @@ async function attemptStartup(state, log) {
   if (state.attemptInFlight || state.stopped) return false;
   state.attemptInFlight = true;
   try {
-    if (!(await state.db.connect())) {
+    const connected = await state.db.connect();
+    if (state.stopped) return false;
+    if (!connected) {
       state.failureCategory = 'UNREACHABLE';
       log('PERSISTENCE UNAVAILABLE: database configured but unreachable — PERSISTENCE_PERMISSION_LOCK engaged (CLEAR and future permission-increasing behavior fail closed; defensive controls still work locally)');
       return false;
     }
     const m = await runMigrations(state.db, { log });
+    if (state.stopped) return false;
     state.migrationVersion = m.schemaVersion;
     // Check BEFORE reconciliation can materialize any local mirror. An
     // unresolved cache loss is a separate permission lock, not a reason to
     // suppress the protective-state restore or read-only collection pump.
-    state.storeGuard = await checkStoreAnchors({ db: state.db, dataRoot: dataDir(), log });
-    await restoreDurableCore(state, log);
+    const storeGuard = await checkStoreAnchors({ db: state.db, dataRoot: dataDir(), log });
+    if (state.stopped) return false;
+    state.storeGuard = storeGuard;
+    if (!(await restoreDurableCore(state, log))) return false;
+    if (state.stopped) return false;
     // PERSIST-0B §7: restored may become TRUE only after ALL startup steps
     // succeed, INCLUDING the durability pump / current-state sync machinery.
     // "Restore reported true but durability machinery never started" is
     // forbidden — a startPump failure leaves restored=false and retry armed.
-    startPump(state, log);
+    if (!startPump(state, log)) return false;
     state.restored = true;
     state.failureCategory = null;
     log(`PERSISTENCE: durable core connected (schema ${state.migrationVersion}); restore complete; pump running`);
     return true;
   } catch (err) {
+    // Shutdown is an intentional terminal fence, not a startup failure and
+    // never a reason to log or schedule recovery work on a closed owner.
+    if (state.stopped) return false;
     state.failureCategory =
       err instanceof FutureSchemaError
         ? 'FUTURE_SCHEMA'
@@ -202,6 +211,7 @@ function scheduleRetry(state, log) {
   state.retryTimer = setInterval(async () => {
     if (state.stopped) return;
     if (await attemptStartup(state, log)) {
+      if (state.stopped) return;
       clearInterval(state.retryTimer);
       state.retryTimer = null;
       log('PERSISTENCE recovered: durable core reconnected and reconciled');
@@ -235,6 +245,7 @@ async function restoreDurableCore(state, log) {
 
   // ---- controls (through THE local control store, PERSIST-0C §12) --------
   const durable = await repo.loadControlState();
+  if (state.stopped) return false;
   if (durable?.invalid) {
     // an invalid durable control row is NEVER interpreted as CLEAR: restore
     // fails, the permission lock holds, CLEAR refuses, retries continue
@@ -250,6 +261,7 @@ async function restoreDurableCore(state, log) {
     log('PERSISTENCE INTEGRITY LOCK: local control state was corrupt — fail-closed KILL stands; CLEAR refused until the integrity marker is resolved');
   }
   const saved = await repo.saveControlState(merged, durable?.revision ?? null);
+  if (state.stopped) return false;
   if (saved.refused) throw new InvalidDurableStateError(`control restore refused: ${saved.reason}`);
   state.controlRevision = saved.revision;
   if (durable && canonicalJson(durable.state) !== canonicalJson(merged)) {
@@ -257,28 +269,29 @@ async function restoreDurableCore(state, log) {
   }
 
   // ---- current posture + sim/lock state (validated, LESS PERMISSION WINS) -
-  await reconcileRuntimeFile(state, log, {
+  if (!(await reconcileRuntimeFile(state, log, {
     id: 'posture',
     file: path.join(dataDir(), 'state', 'posture.json'),
     validate: validatePostureState,
     lessPermissive: (a, b) => lessPermissivePosture(a, b),
     describe: (s) => s?.posture ?? '?',
-  });
-  await reconcileRuntimeFile(state, log, {
+  }))) return false;
+  if (!(await reconcileRuntimeFile(state, log, {
     id: 'sim_pnl',
     file: path.join(dataDir(), 'state', 'sim_pnl.json'),
     validate: validateSimState,
     lessPermissive: (a, b) => lessPermissiveSim(a, b),
     describe: (s) => (s?.simulated ? `sim ${s.date}` : 'cleared'),
-  });
+  }))) return false;
 
   // ---- operational paper ledger: the RUNNING APP reads local JSONL, so a
   // fresh body materializes its reconciled ledger BEFORE consumers run (§10)
-  await reconcileLedgerFiles(state, log);
+  if (!(await reconcileLedgerFiles(state, log))) return false;
 
   // ---- childhood manifest identity (metadata only; bulk stays on files) --
   const manifestFile = path.join(dataDir(), 'childhood', 'manifest.json');
   if (existsSync(manifestFile)) {
+    if (state.stopped) return false;
     try {
       const m = JSON.parse(readFileSync(manifestFile, 'utf8'));
       await repo.recordChildhoodManifest({
@@ -293,9 +306,11 @@ async function restoreDurableCore(state, log) {
     } catch {
       // a malformed local manifest is the childhood validator's concern
     }
+    if (state.stopped) return false;
   }
   // STALKING / HYPED are deliberately NOT restored: SAFE_TO_FORGET —
   // forgetting them reduces permission; live sensors re-nominate (doctrine).
+  return !state.stopped;
 }
 
 // Exact reconciliation rules (doctrine/PERSISTENCE.md):
@@ -309,6 +324,7 @@ async function restoreDurableCore(state, log) {
 async function reconcileRuntimeFile(state, log, { id, file, validate, lessPermissive, describe }) {
   const { repo } = state;
   const durable = await repo.loadRuntimeState(id);
+  if (state.stopped) return false;
   if (durable?.invalid) {
     throw new InvalidDurableStateError(`durable ${id} state invalid: ${durable.errors.join('; ')}`);
   }
@@ -329,25 +345,26 @@ async function reconcileRuntimeFile(state, log, { id, file, validate, lessPermis
     quarantineCopy(file, localRaw, log);
     log(`PERSISTENCE DEGRADED: local ${path.basename(file)} malformed/invalid — quarantined; durable truth stands`);
   }
-  if (!durable && !local) return; // nothing anywhere; watcher picks up first write
+  if (!durable && !local) return true; // nothing anywhere; watcher picks up first write
   if (durable && !local) {
     atomicWriteJson(file, durable.state, { pretty: true });
     slot.revision = durable.revision;
     slot.digest = sha1(readFileSync(file, 'utf8'));
     log(`PERSISTENCE restored ${id} (${describe(durable.state)}) from durable core`);
-    return;
+    return true;
   }
   if (!durable && local) {
     const r = await repo.saveRuntimeState(id, local, null);
+    if (state.stopped) return false;
     slot.revision = r.revision;
     slot.digest = sha1(localRaw);
-    return;
+    return true;
   }
   // both exist and are valid
   if (canonicalJson(durable.state) === canonicalJson(local)) {
     slot.revision = durable.revision;
     slot.digest = sha1(localRaw);
-    return;
+    return true;
   }
   const winner = lessPermissive(durable.state, local);
   if (winner === durable.state) {
@@ -358,10 +375,12 @@ async function reconcileRuntimeFile(state, log, { id, file, validate, lessPermis
     log(`PERSISTENCE reconciliation: ${id} adopted durable ${describe(durable.state)} over local ${describe(local)} (less permission wins)`);
   } else {
     const r = await repo.saveRuntimeState(id, local, durable.revision);
+    if (state.stopped) return false;
     slot.revision = r.revision;
     slot.digest = sha1(localRaw);
     log(`PERSISTENCE reconciliation: ${id} local ${describe(local)} pushed durable (less permission wins)`);
   }
+  return !state.stopped;
 }
 
 const LEDGER_KINDS = [
@@ -381,6 +400,7 @@ async function reconcileLedgerFiles(state, log) {
   const { repo } = state;
   for (const { kind, name, pumpKey, tsOf } of LEDGER_KINDS) {
     const durable = await repo.loadLedgerAll(kind); // validated, chunked, complete-or-reported
+    if (state.stopped) return false;
     if (!durable.complete) {
       // PERSIST-0B §12: a withheld corrupt durable row could BE the open
       // position — the operational ledger is NOT safely restored; missing
@@ -441,6 +461,7 @@ async function reconcileLedgerFiles(state, log) {
       log(`PERSISTENCE ledger restore: ${name} materialized (${durableRows.length} durable, ${localOnly} local-only pending)`);
     }
   }
+  return !state.stopped;
 }
 
 // ---- the pump: tail local spools, write durably, advance cursors ---------
@@ -458,7 +479,8 @@ function pumpSources() {
 }
 
 function startPump(state, log) {
-  if (state.pumpTimer) return; // recovery must never double the pump
+  if (state.stopped) return false; // shutdown always wins over late startup
+  if (state.pumpTimer) return true; // recovery must never double the pump
   if (state._test?.failPumpStart) throw new Error('injected pump bootstrap failure (test seam)');
   // PERSIST-0B §8: the cursor file is ephemeral bookkeeping, NOT durable
   // truth. A malformed cursor file is quarantined for audit and the spools
@@ -727,6 +749,7 @@ function startPump(state, log) {
     process.once('SIGTERM', stopOnSignal);
     process.once('SIGINT', stopOnSignal);
   }
+  return true;
 }
 
 function api(state, log) {
@@ -755,6 +778,7 @@ function api(state, log) {
   state.stop = () => {
     if (state.stopPromise) return state.stopPromise;
     state.stopped = true;
+    state.restored = false;
     state.stopPromise = (async () => {
       if (state.signalHandlers) {
         process.removeListener('SIGTERM', state.signalHandlers.SIGTERM);
@@ -842,7 +866,9 @@ function api(state, log) {
         return { durable: false, reason: 'WRITE_FAILED' };
       }
     },
-    pumpOnce: () => state.pumpOnce?.(),
+    pumpOnce: () => state.stopped
+      ? Promise.resolve({ ran: false, refused: 'STOPPED' })
+      : state.pumpOnce?.(),
     stop: () => state.stop(),
   };
 }
