@@ -192,3 +192,55 @@ test('fixed worker owns the store and returns only a durable terminal receipt to
     } finally { await reopened.close(); }
   } finally { await port.close().catch(() => {}); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('lost post-commit ACK latches ambiguity; restart observes the one terminal outcome and cannot learn it twice', async () => {
+  const root = temp(); const frame = frameOf(['BTC']); const nowRef = { value: T0 + HOUR + 10_000 };
+  try {
+    let store = await readyStore(root, frame, nowRef); const realAppend = store.appendOutcome;
+    const ambiguous = Object.freeze({
+      ...store,
+      appendOutcome: async (input) => { await realAppend(input); throw Object.assign(new Error('ACK_LOST_AFTER_FSYNC'), { code: 'ACK_LOST' }); },
+    });
+    const source = async () => ({ state: 'AVAILABLE', evidence: candleEvidence(frame, 'BTC', 100, 103) });
+    const owner = createOpportunityAuditFollowup({ store: ambiguous, outcomeSource: source, clock: () => nowRef.value });
+    await assert.rejects(owner.step({ nowTs: nowRef.value }), { code: 'CUSTODY_FAILED' });
+    assert.equal(owner.status().state, 'FAILED'); assert.equal(owner.status().matured, 0);
+    await assert.rejects(owner.step({ nowTs: nowRef.value }), { code: 'CUSTODY_FAILED' });
+    await owner.close().catch(() => {}); await store.close();
+    store = openOpportunityAuditStore({ rootDir: root, clock: () => nowRef.value });
+    assert.equal((await store.loadFrame(frame.frameId)).outcomes.length, 1);
+    const recovered = createOpportunityAuditFollowup({ store, outcomeSource: source, clock: () => nowRef.value });
+    assert.equal((await recovered.step({ nowTs: nowRef.value })).considered, 0);
+    assert.equal((await store.loadFrame(frame.frameId)).outcomes.length, 1);
+    await recovered.close(); await store.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('one in-flight source call bounds the queue; timeout refuses evidence and close drains without a late write', async () => {
+  const root = temp(); const frame = frameOf(['BTC']); const nowRef = { value: T0 + HOUR + 10_000 };
+  try {
+    const store = await readyStore(root, frame, nowRef); let lateResolve;
+    const neverOnTime = new Promise((resolve) => { lateResolve = resolve; });
+    const owner = createOpportunityAuditFollowup({
+      store, outcomeSource: () => neverOnTime, clock: () => nowRef.value, sourceTimeoutMs: 10,
+    });
+    const first = owner.step({ nowTs: nowRef.value });
+    assert.equal((await owner.step({ nowTs: nowRef.value })).state, 'BUSY');
+    const report = await first; assert.equal(report.refused, 1); assert.equal(report.matured, 0);
+    const closing = owner.close();
+    lateResolve({ state: 'AVAILABLE', evidence: candleEvidence(frame, 'BTC', 100, 120) });
+    await closing; await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(owner.status().state, 'STOPPED');
+    assert.equal((await store.loadFrame(frame.frameId)).outcomes.length, 0, 'late source success has no custody capability');
+    await store.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('cadence and sample ceilings provide a deterministic daily work bound without changing equal inclusion', () => {
+  const maxFramesPerDayAtWorkerMinimumCadence = 86_400_000 / 60_000;
+  assert.equal(maxFramesPerDayAtWorkerMinimumCadence, 1_440);
+  assert.equal(maxFramesPerDayAtWorkerMinimumCadence * 8, 11_520);
+  const frame = frameOf(Array.from({ length: 64 }, (_, index) => `C${index}`));
+  assert.equal(frame.sampling.inclusionProbability, 1);
+  assert.ok(frame.population.every((row) => row.observationInclusionProbability === 1));
+});

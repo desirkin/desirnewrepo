@@ -191,10 +191,24 @@ function validateOwner({ store, outcomeSource, clock, maxPerStep }) {
   }
 }
 
+async function boundedSourceCall(outcomeSource, request, timeoutMs) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new OpportunityAuditFollowupError('SOURCE_TIMEOUT')), timeoutMs);
+  });
+  const call = Promise.resolve().then(() => outcomeSource(request));
+  // A timed-out source is untrusted and receives only immutable detached input.
+  // Consume any late rejection; its late success is never submitted to custody.
+  call.catch(() => {});
+  try { return await Promise.race([call, timeout]); }
+  finally { clearTimeout(timer); }
+}
+
 export function createOpportunityAuditFollowup({
-  store, outcomeSource, clock = () => Date.now(), maxPerStep = 32,
+  store, outcomeSource, clock = () => Date.now(), maxPerStep = 32, sourceTimeoutMs = 5_000,
 } = {}) {
   validateOwner({ store, outcomeSource, clock, maxPerStep });
+  if (!Number.isSafeInteger(sourceTimeoutMs) || sourceTimeoutMs < 1 || sourceTimeoutMs > 60_000) fail('CONFIG_INVALID', 'source timeout malformed');
   const workerCustody = typeof store.settle === 'function';
   let cursor = null; let inFlight = null; let closing = false; let closed = false; let closePromise = null;
   let steps = 0; let matured = 0; let terminalMissing = 0; let pending = 0; let refused = 0;
@@ -216,11 +230,11 @@ export function createOpportunityAuditFollowup({
       }
       let resolution;
       try {
-        resolution = await outcomeSource(deepFreeze({
+        resolution = await boundedSourceCall(outcomeSource, deepFreeze({
           followupVersion: OPPORTUNITY_AUDIT_FOLLOWUP_VERSION,
           item: clone(item), frame: view === null ? null : clone(view.frame),
           annotation: annotation === null ? null : clone(annotation), asOfTs: nowTs,
-        }));
+        }), sourceTimeoutMs);
       } catch {
         report.refused += 1; continue;
       }
@@ -265,11 +279,14 @@ export function createOpportunityAuditFollowup({
 
   const step = ({ nowTs = clock() } = {}) => {
     if (closing || closed) return Promise.reject(new OpportunityAuditFollowupError('FOLLOWUP_CLOSED'));
+    if (failed) return Promise.reject(new OpportunityAuditFollowupError(failed.code, failed.message));
     if (!isTs(nowTs) || nowTs > clock()) return Promise.reject(new OpportunityAuditFollowupError('CLOCK_INVALID'));
     if (inFlight !== null) return Promise.resolve(deepFreeze({ state: 'BUSY', considered: 0, matured: 0, terminalMissing: 0, pending: 0, refused: 0, asOfTs: nowTs }));
     const task = run(nowTs).catch((error) => {
-      if (error instanceof OpportunityAuditFollowupError) failed ??= error;
-      throw error;
+      const stopped = error instanceof OpportunityAuditFollowupError
+        ? error : new OpportunityAuditFollowupError('CUSTODY_FAILED', error?.code ?? error?.message ?? error);
+      failed ??= stopped;
+      throw stopped;
     }).finally(() => { if (inFlight === task) inFlight = null; });
     inFlight = task; return task;
   };
@@ -279,14 +296,14 @@ export function createOpportunityAuditFollowup({
     state: closed ? 'STOPPED' : closing ? 'CLOSING' : failed ? 'FAILED' : inFlight ? 'RUNNING' : 'READY',
     inFlight: inFlight !== null, steps, matured, terminalMissing, pending, refused, last,
     failed: failed === null ? null : { code: failed.code, detail: String(failed.message).slice(0, 500) },
-    maxPerStep, authority: 'NONE', trainingAuthority: 'NONE',
+    maxPerStep, sourceTimeoutMs, authority: 'NONE', trainingAuthority: 'NONE',
     durability: 'INJECTED_STORE_ACK_AND_EXACT_READBACK', republishSafe: false,
   });
 
   const close = () => {
     if (closePromise) return closePromise;
     closing = true;
-    closePromise = (async () => { if (inFlight) await inFlight; closed = true; })();
+    closePromise = (async () => { try { if (inFlight) await inFlight; } finally { closed = true; } })();
     return closePromise;
   };
   return Object.freeze({ step, status, close });
