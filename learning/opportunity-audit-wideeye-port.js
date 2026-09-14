@@ -4,11 +4,12 @@
 // frame before the caller fetches Ticker; afterSweep can only annotate that
 // frame. Notices and verdicts are observations, never inferred nominations.
 import {
-  annotateAuditOpportunity, auditFrameError, sealAuditFrame, sealAuditObservationEvidence,
+  annotateAuditOpportunity, auditFrameError, sealAuditFrame, sealAuditFrameV2, sealAuditObservationEvidence,
+  OPPORTUNITY_AUDIT_MAX_LABEL_DELAY_MS, OPPORTUNITY_AUDIT_MIN_LABEL_DELAY_MS,
 } from './opportunity-audit.js';
 import { canonicalDigest, deepFreeze, exactKeys, isCoin, isId, isPlainObject, isTs } from './contracts.js';
 
-export const OPPORTUNITY_AUDIT_WIDEEYE_PORT_VERSION = 'opportunity-audit-wideeye-port-1';
+export const OPPORTUNITY_AUDIT_WIDEEYE_PORT_VERSION = 'opportunity-audit-wideeye-port-2';
 export const OPPORTUNITY_AUDIT_WIDEEYE_FEATURE_RECIPE_VERSION = 'wideeye-audit-features-1';
 export const OPPORTUNITY_AUDIT_WIDEEYE_MAX_SAMPLE_SIZE = 8;
 export const OPPORTUNITY_AUDIT_WIDEEYE_MAX_ROWS = 5_000;
@@ -145,11 +146,14 @@ function annotationFor(frame, entry, observation, row, component) {
   });
 }
 
-function validateConfiguration({ store, sampleSize, horizonsMs, minFrameIntervalMs, wideEyeComponent, maxRememberedFrames, clock }) {
+function validateConfiguration({ store, sampleSize, horizonsMs, maxLabelDelayMs, minFrameIntervalMs, wideEyeComponent, maxRememberedFrames, clock }) {
   if (!isPlainObject(store) && (typeof store !== 'object' || store === null)) fail('CONFIG_INVALID', 'store malformed');
   for (const method of ['createFrame', 'loadFrame', 'appendAnnotation', 'status']) if (typeof store[method] !== 'function') fail('CONFIG_INVALID', `store.${method} missing`);
   if (!safePositive(sampleSize) || sampleSize > OPPORTUNITY_AUDIT_WIDEEYE_MAX_SAMPLE_SIZE) fail('CONFIG_INVALID', `sampleSize must be 1..${OPPORTUNITY_AUDIT_WIDEEYE_MAX_SAMPLE_SIZE}`);
   if (!Array.isArray(horizonsMs) || horizonsMs.length < 1) fail('CONFIG_INVALID', 'horizonsMs missing');
+  if (!(maxLabelDelayMs === null || (Number.isSafeInteger(maxLabelDelayMs)
+      && maxLabelDelayMs >= OPPORTUNITY_AUDIT_MIN_LABEL_DELAY_MS
+      && maxLabelDelayMs <= OPPORTUNITY_AUDIT_MAX_LABEL_DELAY_MS))) fail('CONFIG_INVALID', 'maxLabelDelayMs must be null for V1 replay or an explicit V2 bound');
   if (!safePositive(minFrameIntervalMs) || minFrameIntervalMs < 60_000 || minFrameIntervalMs > 86_400_000) fail('CONFIG_INVALID', 'minFrameIntervalMs must be 1 minute..1 day');
   if (!exact(wideEyeComponent, COMPONENT_KEYS) || wideEyeComponent.componentId !== 'wideeye'
       || !isId(wideEyeComponent.version) || !HEX64_RE.test(wideEyeComponent.configDigest ?? '')) fail('CONFIG_INVALID', 'sealed WideEye component identity required');
@@ -158,9 +162,9 @@ function validateConfiguration({ store, sampleSize, horizonsMs, minFrameInterval
 
 export function createOpportunityAuditWideEyePort({
   store, sampleSize = 4, horizonsMs = [60 * 60 * 1000], minFrameIntervalMs = 15 * 60 * 1000,
-  wideEyeComponent, maxRememberedFrames = 256, clock = () => Date.now(),
+  maxLabelDelayMs = null, wideEyeComponent, maxRememberedFrames = 256, clock = () => Date.now(),
 } = {}) {
-  validateConfiguration({ store, sampleSize, horizonsMs, minFrameIntervalMs, wideEyeComponent, maxRememberedFrames, clock });
+  validateConfiguration({ store, sampleSize, horizonsMs, maxLabelDelayMs, minFrameIntervalMs, wideEyeComponent, maxRememberedFrames, clock });
   const component = deepFreeze(clone(wideEyeComponent)); const remembered = new Map();
   const initialStoreStatus = store.status();
   if (!isPlainObject(initialStoreStatus) || !(initialStoreStatus.latestFrameTs === null || isTs(initialStoreStatus.latestFrameTs))) fail('CONFIG_INVALID', 'store status lacks a valid durable latestFrameTs');
@@ -190,9 +194,10 @@ export function createOpportunityAuditWideEyePort({
     }
     if (remembered.size >= maxRememberedFrames) return Promise.reject(new OpportunityAuditWideEyePortError('FRAME_MEMORY_LIMIT', 'no remembered frame is silently evicted'));
     const task = (async () => {
-      const frame = sealAuditFrame({
-        catalog, frameTs, knownAtTs: catalog.observedTs, sampleSize, horizonsMs,
-      });
+      const frameInput = { catalog, frameTs, knownAtTs: catalog.observedTs, sampleSize, horizonsMs };
+      const frame = maxLabelDelayMs === null
+        ? sealAuditFrame(frameInput)
+        : sealAuditFrameV2({ ...frameInput, maxLabelDelayMs });
       let view;
       try { view = await store.createFrame({ frame }); }
       catch (error) {

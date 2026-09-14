@@ -4,13 +4,16 @@ import { createHash } from 'node:crypto';
 import { isMainThread, parentPort, resourceLimits, workerData } from 'node:worker_threads';
 import { openOpportunityAuditStore } from '../learning/opportunity-audit-store.js';
 import { createOpportunityAuditWideEyePort } from '../learning/opportunity-audit-wideeye-port.js';
-import { buildOpportunityAuditFollowup } from '../learning/opportunity-audit-followup.js';
+import {
+  buildOpportunityAuditFollowup, opportunityAuditPendingItemV2,
+  opportunityAuditPendingItemV2Error, sealOpportunityAuditSettlementReceiptV2,
+} from '../learning/opportunity-audit-followup.js';
 
-const PROTOCOL = 'opportunity-audit-worker-1';
+const PROTOCOL = 'opportunity-audit-worker-2';
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 const MAX_TREE_NODES = 60_000;
 const CONFIG_KEYS = Object.freeze([
-  'protocol', 'rootDir', 'sampleSize', 'horizonsMs', 'minFrameIntervalMs', 'wideEyeComponent',
+  'protocol', 'rootDir', 'sampleSize', 'horizonsMs', 'maxLabelDelayMs', 'minFrameIntervalMs', 'wideEyeComponent',
 ]);
 const REQUEST_KEYS = Object.freeze(['protocol', 'requestId', 'operation', 'payload']);
 const COMPONENT_KEYS = Object.freeze(['componentId', 'version', 'configDigest']);
@@ -61,6 +64,8 @@ function configError(config) {
       || !positive(config.sampleSize) || config.sampleSize > 8
       || !Array.isArray(config.horizonsMs) || config.horizonsMs.length < 1 || config.horizonsMs.length > 16
       || config.horizonsMs.some((value) => !positive(value))
+      || !(config.maxLabelDelayMs === null || (positive(config.maxLabelDelayMs)
+        && config.maxLabelDelayMs >= 60_000 && config.maxLabelDelayMs <= 30 * 24 * 60 * 60 * 1000))
       || !positive(config.minFrameIntervalMs) || config.minFrameIntervalMs < 60_000
       || config.minFrameIntervalMs > 86_400_000
       || !exact(config.wideEyeComponent, COMPONENT_KEYS)
@@ -110,6 +115,7 @@ if (!isMainThread && parentPort) {
         store,
         sampleSize: workerData.sampleSize,
         horizonsMs: workerData.horizonsMs,
+        maxLabelDelayMs: workerData.maxLabelDelayMs,
         minFrameIntervalMs: workerData.minFrameIntervalMs,
         wideEyeComponent: workerData.wideEyeComponent,
       });
@@ -208,16 +214,30 @@ if (!isMainThread && parentPort) {
         failure(request, 'REQUEST_INVALID'); return;
       }
       operationTail = operationTail.then(async () => {
-        try { response(request, await store.pending(request.payload)); }
+        try {
+          const page = await store.pending(request.payload);
+          const items = [];
+          for (const item of page.items) {
+            const view = await store.loadFrame(item.frameId);
+            if (!view || view.frame.frameDigest !== item.frameDigest) throw Object.assign(new Error('pending frame lost'), { code: 'STORE_UNAVAILABLE' });
+            items.push(view.frame.frameVersion === 'opportunity-audit-frame-2'
+              ? opportunityAuditPendingItemV2(view.frame, item) : item);
+          }
+          response(request, { ...page, items });
+        }
         catch (error) { operationFailure(request, error); }
       }).catch(() => { failed = 'OPERATION_FAILED'; });
       return;
     }
 
     if (request.operation === 'SETTLE') {
-      if (!exact(request.payload, ['item', 'resolution', 'recordedTs']) || !exact(request.payload.item, PENDING_ITEM_KEYS)
+      const v2 = request.payload?.item?.itemVersion === 'opportunity-audit-pending-item-2';
+      if (!exact(request.payload, v2 ? ['item', 'resolution', 'asOfTs', 'recordedTs'] : ['item', 'resolution', 'recordedTs'])
+          || (v2 ? opportunityAuditPendingItemV2Error(request.payload.item) : !exact(request.payload.item, PENDING_ITEM_KEYS))
           || typeof request.payload.item.frameId !== 'string' || typeof request.payload.item.frameDigest !== 'string'
           || typeof request.payload.item.opportunityId !== 'string' || !positive(request.payload.item.horizonMs)
+          || (v2 && (!Number.isSafeInteger(request.payload.asOfTs) || request.payload.asOfTs < 0
+            || request.payload.asOfTs > request.payload.recordedTs))
           || !Number.isSafeInteger(request.payload.recordedTs) || request.payload.recordedTs < 0) {
         failure(request, 'REQUEST_INVALID'); return;
       }
@@ -228,22 +248,47 @@ if (!isMainThread && parentPort) {
           const item = request.payload.item;
           const entry = view.frame.population.find((row) => row.selected && row.opportunityId === item.opportunityId);
           const annotation = view.annotations.find((row) => row.opportunityId === item.opportunityId);
-          if (!entry || !annotation || entry.market.base !== item.canonicalCoin || !view.frame.horizonsMs.includes(item.horizonMs)) {
+          if (!entry || !annotation || entry.market.base !== (v2 ? item.market.base : item.canonicalCoin)
+              || !view.frame.horizonsMs.includes(item.horizonMs)) {
             throw Object.assign(new Error('pending target lacks exact durable frame/annotation custody'), { code: 'STORE_UNAVAILABLE' });
+          }
+          if (v2) {
+            const legacyItem = {
+              cursor: item.cursor, frameId: item.frameId, frameDigest: item.frameDigest,
+              opportunityId: item.opportunityId, canonicalCoin: item.market.base, horizonMs: item.horizonMs,
+              dueTs: item.dueTs, lastOutcomeId: item.lastOutcomeId, lastStatus: item.lastStatus,
+              annotationPresent: item.annotationPresent,
+              observationInclusionProbability: item.observationInclusionProbability,
+              actionPropensity: item.actionPropensity,
+            };
+            const expected = opportunityAuditPendingItemV2(view.frame, legacyItem);
+            if (canonicalJson(expected) !== canonicalJson(item)) throw Object.assign(new Error('V2 pending request differs from durable frame'), { code: 'STORE_UNAVAILABLE' });
           }
           const chain = view.outcomes.filter((row) => row.opportunityId === item.opportunityId && row.horizonMs === item.horizonMs);
           const current = chain.at(-1) ?? null;
           if (current && current.status !== 'PENDING') {
-            response(request, { state: current.status, outcomeId: current.outcomeId, outcomeDigest: current.outcomeDigest, storeRevision: view.revision, durable: true });
+            if (v2) {
+              response(request, sealOpportunityAuditSettlementReceiptV2({
+                item, resolution: request.payload.resolution, recordedTs: request.payload.recordedTs,
+                outcome: current,
+                readback: { frameId: view.frame.frameId, frameDigest: view.frame.frameDigest, storeRevision: view.revision, outcomeId: current.outcomeId, outcomeDigest: current.outcomeDigest },
+              }));
+            } else response(request, { state: current.status, outcomeId: current.outcomeId, outcomeDigest: current.outcomeDigest, storeRevision: view.revision, durable: true });
             return;
           }
           const built = buildOpportunityAuditFollowup({
             frame: view.frame, opportunityId: item.opportunityId, horizonMs: item.horizonMs,
             resolution: request.payload.resolution, recordedTs: request.payload.recordedTs,
             supersedes: current?.outcomeId ?? null,
+            item: v2 ? item : null, asOfTs: v2 ? request.payload.asOfTs : null,
           });
           if (built.outcome === null) {
-            response(request, { state: built.state, outcomeId: null, outcomeDigest: null, storeRevision: view.revision, durable: false });
+            if (v2) response(request, sealOpportunityAuditSettlementReceiptV2({
+              item, resolution: request.payload.resolution, recordedTs: request.payload.recordedTs,
+              outcome: null,
+              readback: { frameId: view.frame.frameId, frameDigest: view.frame.frameDigest, storeRevision: view.revision, outcomeId: null, outcomeDigest: null },
+            }));
+            else response(request, { state: built.state, outcomeId: null, outcomeDigest: null, storeRevision: view.revision, durable: false });
             return;
           }
           view = await store.appendOutcome({
@@ -255,7 +300,12 @@ if (!isMainThread && parentPort) {
           if (!exactOutcome || exactOutcome.outcomeDigest !== built.outcome.outcomeDigest || confirmed.revision !== view.revision) {
             throw Object.assign(new Error('durable settlement readback mismatch'), { code: 'STORE_UNAVAILABLE' });
           }
-          response(request, { state: built.state, outcomeId: built.outcome.outcomeId, outcomeDigest: built.outcome.outcomeDigest, storeRevision: confirmed.revision, durable: true });
+          if (v2) response(request, sealOpportunityAuditSettlementReceiptV2({
+            item, resolution: request.payload.resolution, recordedTs: request.payload.recordedTs,
+            outcome: exactOutcome,
+            readback: { frameId: confirmed.frame.frameId, frameDigest: confirmed.frame.frameDigest, storeRevision: confirmed.revision, outcomeId: exactOutcome.outcomeId, outcomeDigest: exactOutcome.outcomeDigest },
+          }));
+          else response(request, { state: built.state, outcomeId: built.outcome.outcomeId, outcomeDigest: built.outcome.outcomeDigest, storeRevision: confirmed.revision, durable: true });
         } catch (error) { operationFailure(request, error); }
       }).catch(() => { failed = 'OPERATION_FAILED'; });
       return;

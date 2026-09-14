@@ -9,7 +9,9 @@ import { sealAuditFrame, annotateAuditOpportunity, sealAuditObservationEvidence 
 import { openOpportunityAuditStore } from '../learning/opportunity-audit-store.js';
 import {
   buildOpportunityAuditFollowup, createOpportunityAuditFollowup,
-  sealOpportunityAuditCandleEvidence,
+  opportunityAuditPendingItemV2, opportunityAuditSettlementReceiptV2Error,
+  sealOpportunityAuditBroadDayManifest, sealOpportunityAuditBroadDaySourceReceipt,
+  sealOpportunityAuditCandleEvidence, sealOpportunityAuditSettlementReceiptV2,
 } from '../learning/opportunity-audit-followup.js';
 import { startLearning } from '../learning/service.js';
 import { canonicalDigest, canonicalJson } from '../learning/contracts.js';
@@ -271,8 +273,161 @@ test('the shared worker port overlap is deferred without latching; write ambigui
   await owner.close();
 });
 
+test('V2 worker returns an exact request-bound nonterminal receipt without inventing durable outcome custody', { timeout: 15_000 }, async () => {
+  const root = temp();
+  const frameTs = Date.now();
+  const accepted = catalog(['BTC']); accepted.observedTs = frameTs;
+  const body = { venue: accepted.venue, quote: accepted.quote, policyVersion: accepted.policyVersion, markets: accepted.markets };
+  accepted.contentId = createHash('sha1').update(canonicalJson(body)).digest('hex'); accepted.counts = { supported: 1 };
+  const port = createOpportunityAuditWorkerPort({
+    enabled: true, rootDir: root, sampleSize: 1, horizonsMs: [1], maxLabelDelayMs: 60_000,
+    minFrameIntervalMs: 60_000,
+    wideEyeComponent: { componentId: 'wideeye', version: 'wideeye-1', configDigest: hex('v2-wideeye') },
+  });
+  try {
+    const token = await port.beforeSweep({ catalogSnapshot: { status: 'ACCEPTED', fresh: true, contentId: accepted.contentId, catalog: accepted }, frameTs });
+    const observedTs = Date.now();
+    await port.afterSweep({
+      auditToken: token, recordedTs: observedTs,
+      observation: { sweepId: `v2-sweep-${observedTs}`, catalogContentId: accepted.contentId, observedTs, rows: [] },
+    });
+    const waitUntil = Date.now() + 5_000;
+    while (port.status().lastCommittedBatch === null && Date.now() < waitUntil) await new Promise((resolve) => setTimeout(resolve, 5));
+    const asOfTs = Date.now();
+    const page = await port.pending({ asOfTs, limit: 2, cursor: null });
+    assert.equal(page.items.length, 1); assert.equal(page.items[0].itemVersion, 'opportunity-audit-pending-item-2');
+    assert.deepEqual(page.items[0].market, accepted.markets[0]);
+    const recordedTs = Date.now();
+    const resolution = { state: 'PENDING', reasonCode: 'ARCHIVE_NOT_READY', preparedTs: recordedTs, sourceReceipt: null, evidence: null };
+    const receipt = await port.settle({ item: page.items[0], resolution, asOfTs, recordedTs });
+    assert.equal(opportunityAuditSettlementReceiptV2Error(receipt, { item: page.items[0], resolution, recordedTs }), null);
+    assert.equal(receipt.state, 'PENDING'); assert.equal(receipt.durableOutcome, false);
+    assert.equal(receipt.outcome, null); assert.equal(receipt.readback.outcomeId, null);
+    await port.close();
+    const reopened = openOpportunityAuditStore({ rootDir: root });
+    try {
+      const view = await reopened.loadFrame(token.frameId);
+      assert.equal(view.frame.frameVersion, 'opportunity-audit-frame-2');
+      assert.equal(view.outcomes.length, 0);
+    } finally { await reopened.close(); }
+  } finally { await port.close().catch(() => {}); rmSync(root, { recursive: true, force: true }); }
+});
+const frameV2Of = (coins = ['BTC'], maxLabelDelayMs = 60_000) => auditContract.sealAuditFrameV2({
+  catalog: catalog(coins), frameTs: T0, knownAtTs: T0, sampleSize: coins.length,
+  horizonsMs: [HOUR], maxLabelDelayMs, seedHex: '32'.repeat(32),
+});
+const pendingV2Of = (frame, coin = 'BTC') => {
+  const entry = frame.population.find((row) => row.market.base === coin);
+  return opportunityAuditPendingItemV2(frame, {
+    cursor: 'cursor-v2', frameId: frame.frameId, frameDigest: frame.frameDigest,
+    opportunityId: entry.opportunityId, canonicalCoin: coin, horizonMs: HOUR,
+    dueTs: frame.frameTs + HOUR, lastOutcomeId: null, lastStatus: null, annotationPresent: true,
+    observationInclusionProbability: entry.observationInclusionProbability,
+    actionPropensity: entry.actionPropensity,
+  });
+};
+const sourceBinding = () => ({
+  bindingVersion: 'broad-day-local-source-binding-1', sourceId: 'broad-day-local-source',
+  sourceRootDigest: hex('source-root'), archiveVersion: 'broad-day-archive-v2',
+  durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
+});
+const sourceRecords = (evidenceValue) => evidenceValue.bars.map((bar, index) => ({
+  recordId: `broad-row-${index}`, recordDigest: hex(`broad-row-${index}-${bar.openTs}-${bar.close}`),
+  periodStartTs: bar.openTs, periodEndTs: bar.openTs + 60_000, knownAtTs: bar.knownAtTs, close: bar.close,
+}));
+const datasetOf = (item, asOfTs) => ({
+  datasetVersion: 'broad-day-dataset-v1', datasetId: 'broad-day-dataset', datasetDigest: hex('dataset'),
+  dayStartTs: T0 - 12 * HOUR, dayEndTs: T0 + 12 * HOUR, asOfTs,
+  sourceRootDigest: hex('source-root'), catalogEpochDigest: hex('catalog-epoch'),
+  sourceMarketIdentityDigest: item.marketIdentityDigest,
+});
+
 test('V2 predeclares a finite label delay and refuses terminal missingness through the deadline', () => {
-  assert.equal(typeof auditContract.sealAuditFrameV2, 'function', 'the base lacks a delay-bearing capture contract');
+  const frame = frameV2Of(); const item = pendingV2Of(frame); const atDeadline = item.deadlineTs;
+  assert.equal(frame.target.maxLabelDelayMs, 60_000);
+  assert.equal(item.deadlineTs, T0 + HOUR + 60_000);
+  assert.throws(() => sealOpportunityAuditBroadDaySourceReceipt({
+    item, asOfTs: atDeadline, preparedTs: atDeadline, resolutionState: 'MISSING',
+    resolutionReason: 'LOCAL_ARCHIVE_UNAVAILABLE_AFTER_DEADLINE', sourceBinding: sourceBinding(),
+    archiveManifest: null, records: [], evidence: null,
+  }), /SOURCE_RECEIPT_INVALID/);
+  const pending = buildOpportunityAuditFollowup({
+    frame, opportunityId: item.opportunityId, horizonMs: item.horizonMs, item, asOfTs: atDeadline,
+    resolution: { state: 'PENDING', reasonCode: 'ARCHIVE_NOT_READY', preparedTs: atDeadline, sourceReceipt: null, evidence: null },
+    recordedTs: atDeadline,
+  });
+  assert.deepEqual(pending, { state: 'PENDING', reasonCode: 'ARCHIVE_NOT_READY', outcome: null });
+  const after = atDeadline + 1;
+  const sourceReceipt = sealOpportunityAuditBroadDaySourceReceipt({
+    item, asOfTs: after, preparedTs: after, resolutionState: 'MISSING',
+    resolutionReason: 'LOCAL_ARCHIVE_UNAVAILABLE_AFTER_DEADLINE', sourceBinding: sourceBinding(),
+    archiveManifest: null, records: [], evidence: null,
+  });
+  const missing = buildOpportunityAuditFollowup({
+    frame, opportunityId: item.opportunityId, horizonMs: item.horizonMs, item, asOfTs: after,
+    resolution: { state: 'MISSING', reasonCode: 'LOCAL_ARCHIVE_UNAVAILABLE_AFTER_DEADLINE', preparedTs: after, sourceReceipt, evidence: null },
+    recordedTs: after,
+  });
+  assert.equal(missing.state, 'MISSING');
+  assert.equal(missing.outcome.outcomeKnownAtTs, after);
+  assert.equal(missing.outcome.sourceReference.sourceDigest, sourceReceipt.receiptDigest);
+});
+
+test('V2 available receipt binds the exact market, retained records, prepared clock and settlement readback', () => {
+  const frame = frameV2Of(); const item = pendingV2Of(frame); const preparedTs = item.dueTs + 10_000;
+  const evidenceValue = candleEvidence(frame, 'BTC', 100, 105, 10_000);
+  const records = sourceRecords(evidenceValue); const binding = sourceBinding();
+  const manifest = sealOpportunityAuditBroadDayManifest({
+    item, sourceBinding: binding, readerDatasets: [datasetOf(item, preparedTs)],
+    catalogMembershipDigest: hex('catalog-membership'), records,
+  });
+  const sourceReceipt = sealOpportunityAuditBroadDaySourceReceipt({
+    item, asOfTs: preparedTs, preparedTs, resolutionState: 'AVAILABLE', resolutionReason: null,
+    sourceBinding: binding, archiveManifest: manifest, records, evidence: evidenceValue,
+  });
+  const resolution = { state: 'AVAILABLE', reasonCode: null, preparedTs, sourceReceipt, evidence: evidenceValue };
+  const built = buildOpportunityAuditFollowup({
+    frame, opportunityId: item.opportunityId, horizonMs: item.horizonMs, item,
+    asOfTs: preparedTs, resolution, recordedTs: preparedTs,
+  });
+  const receipt = sealOpportunityAuditSettlementReceiptV2({
+    item, resolution, recordedTs: preparedTs, outcome: built.outcome,
+    readback: { frameId: item.frameId, frameDigest: item.frameDigest, storeRevision: 4, outcomeId: built.outcome.outcomeId, outcomeDigest: built.outcome.outcomeDigest },
+  });
+  assert.equal(opportunityAuditSettlementReceiptV2Error(receipt, { item, resolution, recordedTs: preparedTs }), null);
+  const wrongItem = structuredClone(item); wrongItem.market.base = 'ETH';
+  assert.notEqual(opportunityAuditSettlementReceiptV2Error(receipt, { item: wrongItem, resolution, recordedTs: preparedTs }), null);
+  const wrongReceipt = structuredClone(receipt); wrongReceipt.readback.outcomeDigest = hex('other');
+  assert.notEqual(opportunityAuditSettlementReceiptV2Error(wrongReceipt, { item, resolution, recordedTs: preparedTs }), null);
+});
+
+test('V2 terminal source content survives durable restart and an exact retry cannot duplicate the outcome', async () => {
+  const root = temp(); const frame = frameV2Of(); const item = pendingV2Of(frame);
+  const nowRef = { value: item.deadlineTs + 1 };
+  try {
+    let store = await readyStore(root, frame, nowRef);
+    const sourceReceipt = sealOpportunityAuditBroadDaySourceReceipt({
+      item, asOfTs: nowRef.value, preparedTs: nowRef.value, resolutionState: 'MISSING',
+      resolutionReason: 'LOCAL_ARCHIVE_UNAVAILABLE_AFTER_DEADLINE', sourceBinding: sourceBinding(),
+      archiveManifest: null, records: [], evidence: null,
+    });
+    const built = buildOpportunityAuditFollowup({
+      frame, opportunityId: item.opportunityId, horizonMs: item.horizonMs, item, asOfTs: nowRef.value,
+      resolution: { state: 'MISSING', reasonCode: 'LOCAL_ARCHIVE_UNAVAILABLE_AFTER_DEADLINE', preparedTs: nowRef.value, sourceReceipt, evidence: null },
+      recordedTs: nowRef.value,
+    });
+    let view = await store.loadFrame(frame.frameId);
+    view = await store.appendOutcome({ frameId: frame.frameId, frameDigest: frame.frameDigest, expectedRevision: view.revision, outcome: built.outcome });
+    const firstRevision = view.revision;
+    await store.close();
+    store = openOpportunityAuditStore({ rootDir: root, clock: () => nowRef.value });
+    view = await store.loadFrame(frame.frameId);
+    assert.deepEqual(view.outcomes[0].settlementSourceReceipt, sourceReceipt);
+    assert.equal(view.outcomes[0].outcomeDigest, built.outcome.outcomeDigest);
+    const retried = await store.appendOutcome({ frameId: frame.frameId, frameDigest: frame.frameDigest, expectedRevision: view.revision, outcome: built.outcome });
+    assert.equal(retried.status, 'EXISTING'); assert.equal(retried.revision, firstRevision); assert.equal(retried.outcomes.length, 1);
+    await store.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('worker custody cannot promote a bare state label into a durable settlement acknowledgment', async () => {
