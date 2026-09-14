@@ -60,11 +60,18 @@ Replit wipes the filesystem on publish. Nothing has been republish-tested.
 
 **Durable (Postgres):** controls, posture, audit, paper ledger mirror, memory events, rumor2 journal + checkpoints, execution journal, experiment records, four quota counters. Schema version 10.
 
-**Local-only — LOST on republish:** broad-kraken segments, deep market captures, all of `data/learning/`, tape sessions, survey/gateway/infra/discovery/video files.
+**Local-only — LOST on republish UNLESS the PERSIST-1 object store is active:** broad-kraken segments, deep market captures, all of `data/learning/`, tape sessions, survey/gateway/infra/discovery/video files. With `SERPENT_OBJECT_STORE_PROVIDER` set to a durable bucket, the uploader mirrors these and restore-on-boot pulls them back before consumers read them.
 
 **The pump** (`persistence/runtime.js`): every 5 s tails seven small spool files into Postgres. Store anchors (schema 10) can snapshot ≤1 MiB files — but zero stores are commissioned; the guard reports `UNCOMMISSIONED`.
 
-**PERSIST-1 needs:** an object-store bucket for the bulk streams plus an uploader, manifest, and restore-on-boot. **There is no S3/GCS adapter, stub, or env name anywhere in the repo.** That's a build, not a config.
+**PERSIST-1 (landed 2026-09-14):** `persistence/object-store.js` (adapter contract + dependency-free FILESYSTEM
+backend + env-NAME config gate, fail-closed — unset DISABLED, S3/GCS NOT_COMMISSIONED until a client is wired),
+`persistence/object-manifest.js` (the bucket's self-describing `manifest.json`), `persistence/object-uploader.js`
+(changed-only mirror of the backed bulk sources, never prunes durable evidence) and `persistence/object-restore.js`
+(restore-on-boot, digest-verified, never clobbers a newer local append). The runtime spine restores before any
+collector/tape reads a file and mirrors on a 60 s timer in BOTH modes; the object-store state is in
+`runtime-status.json` under `collectors.objectStore`. Set `SERPENT_OBJECT_STORE_PROVIDER=FILESYSTEM` +
+`SERPENT_OBJECT_STORE_DIR=<persistent mount>` to activate today; the S3/GCS client is the remaining commissioning step.
 
 ---
 

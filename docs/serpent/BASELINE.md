@@ -16,7 +16,9 @@ Branch `serpent/baseline` on `desirkin/desirnewrepo`. GitHub tip = this branch (
 - `5afee32` — worker standing orders + queue (docs/serpent/README.md); baseline at 679f358.
 - `cc17c9c` — runtime unification step 3: fly.js is the mode-switched root (`SERPENT_MODE` derived fail-closed; bare start refuses); PAPER runs on the spine — one lock per data dir any mode, runtime-owned persistence signals, external-quota restore, collector additions (market catalogs + broad Kraken + public discovery); DATA_ONLY delegates to the spine. Audit §4.7; frozen digests unchanged. `test/serpent-paper-spine.test.js`, `test/serpent-mode-law.test.js`.
 - `0533251` — runtime unification step 4: in-process cockpit. `data:only-ui` is ONE process — the shim pins the full DATA-ONLY posture and enters fly.js; the DATA_ONLY branch serves ui/server.js in-process after the spine (PERSIST-0A §2), judgeRun null; the two-process supervisor is retired; honest `entrypoint` in the status file.
-- (this commit) — runtime unification step 5: mode-agnostic paths. Canonical `serpent/runtime.lock` + `serpent/runtime-status.json` in both modes; byte-equal `data-only/` mirrors for one release; readers prefer canonical with mirror fallback; a pre-step-5 legacy lock still refuses. PR-4.
+- `b0f5373` — runtime unification step 5: mode-agnostic paths. Canonical `serpent/runtime.lock` + `serpent/runtime-status.json` in both modes; byte-equal `data-only/` mirrors for one release; readers prefer canonical with mirror fallback; a pre-step-5 legacy lock still refuses. PR-4.
+- `839bb62` — PERSIST-1 step 1: object-store substrate (adapter contract + FILESYSTEM backend + env-NAME fail-closed config gate). `test/object-store.test.js`.
+- (this commit) — PERSIST-1 steps 2+3: the self-describing manifest, the changed-only uploader (never prunes durable evidence), restore-on-boot (digest-verified, never clobbers a newer local append), and the spine wiring (restore before any consumer reads, mirror on a 60 s timer, `collectors.objectStore` in the status) for both modes. `test/object-manifest`/`object-uploader`/`object-restore`, spine PR-5.
 
 ## Test recipe
 ```

@@ -14,6 +14,8 @@ import path from 'node:path';
 import { openPaperRuntime, startDataOnlyRuntime } from '../lib/serpent-runtime.js';
 import { PAPER_DISCOVERY_ENV } from '../lib/collectors.js';
 import { readDataOnlyRuntimeStatus } from '../lib/data-only-status.js';
+import { OBJECT_STORE_ENV } from '../persistence/object-store.js';
+import { MANIFEST_OBJECT_KEY, parseManifest } from '../persistence/object-manifest.js';
 
 const CATALOG = { contentId: 'cat-1', observedTs: 1_700_000_000_000, markets: [{ base: 'BBB' }, { base: 'AAA' }] };
 
@@ -150,4 +152,36 @@ test('PR-4 (step 5). mode-agnostic paths: canonical serpent/ lock + status with 
     assert.equal(existsSync(canonicalLock), false, 'the refused instance left nothing behind');
     unlinkSync(legacyLock);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('PR-5 (PERSIST-1). the PAPER spine restores the durable bulk streams BEFORE the root reads them, mirrors on shutdown, and reports the object store honestly', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'serpent-pr-'));
+  const bucket = mkdtempSync(path.join(os.tmpdir(), 'serpent-bkt-'));
+  const env = { ...ENV, [OBJECT_STORE_ENV.provider]: 'FILESYSTEM', [OBJECT_STORE_ENV.dir]: bucket, [OBJECT_STORE_ENV.prefix]: 'serpent/bulk' };
+  const readFs = (rel) => readFileSync(path.join(root, rel), 'utf8');
+  try {
+    // seed the durable bucket with a prior run's tape session, then wipe local disk (a republish)
+    {
+      const f = fakes();
+      const seed = await openPaperRuntime({ root, env, log: () => {}, quotaStarters: f.quotaStarters, additionStarters: f.additionStarters });
+      mkdirSync(path.join(root, 'tape'), { recursive: true });
+      writeFileSync(path.join(root, 'tape', 'session.jsonl'), 'seed-line\n');
+      // the uploader's shutdown-drain mirrors it into the bucket
+      await seed.shutdown('TEST');
+      assert.ok(parseManifest(readFileSync(path.join(bucket, 'serpent/bulk', MANIFEST_OBJECT_KEY))), 'a manifest is durable in the bucket after the drain');
+    }
+    rmSync(path.join(root, 'tape'), { recursive: true, force: true });
+    assert.equal(existsSync(path.join(root, 'tape', 'session.jsonl')), false, 'local disk is wiped, as a republish would');
+
+    // the next boot restores it before returning — i.e. before the root would start the tape / collectors
+    const f2 = fakes();
+    const rt = await openPaperRuntime({ root, env, log: () => {}, quotaStarters: f2.quotaStarters, additionStarters: f2.additionStarters });
+    assert.equal(readFs('tape/session.jsonl'), 'seed-line\n', 'the bulk stream is back on disk before the root reads it');
+    rt.markActive();
+    const status = statusOf(root);
+    assert.equal(status.collectors.objectStore.provider, 'FILESYSTEM');
+    assert.equal(status.collectors.objectStore.state, 'ACTIVE');
+    assert.equal(status.collectors.objectStore.restore.restored, 1, 'the status reports the one restored stream');
+    await rt.shutdown('TEST');
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(bucket, { recursive: true, force: true }); }
 });
