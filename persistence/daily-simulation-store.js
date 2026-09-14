@@ -27,17 +27,21 @@
 //   * Not an authority — this is storage only; it grants no learning/promotion
 //     authority.
 import { createHash } from 'node:crypto';
-import { SQL, SQL_BODY, DSIM_STORE_VERSION, RESULT_COLS, COMPLETED_COLS, MAX_INSERT_ROWS_PER_STATEMENT, MAX_INSERT_PARAMS, RESULT_INSERT_BULK_PREFIX, COMPLETED_INSERT_BULK_PREFIX, buildValuesTuples } from './daily-simulation-schema.js';
+import { SQL, SQL_BODY, DSIM_STORE_VERSION, RESULT_COLS, COMPLETED_COLS, MAX_INSERT_ROWS_PER_STATEMENT, MAX_INSERT_PARAMS, RESULT_INSERT_BULK_PREFIX, COMPLETED_INSERT_BULK_PREFIX, RESULT_BODY_COLS, RESULT_BODY_INSERT_BULK_PREFIX, buildValuesTuples } from './daily-simulation-schema.js';
 
 const yieldNow = () => new Promise((resolve) => setImmediate(resolve));
 const EVIDENCE_DIGEST_SCHEME = 'sha256:'; // content-identity scheme tag for new receipts
 const MAX_REBUILD_SNAPSHOT_ATTEMPTS = 6;   // bounded retry for a consistent-revision read
+const DEFAULT_BODY_VERIFY_PAGE = 1000;     // keyset page size for streaming body verification
 
 export const STORE_PORT_VERSION = 'daily-sim-scheduler-2';
 export const DEFAULT_POLICY_VERSION = 'sim2-policy-1';
 export const DEFAULT_MAX_RESULT_ROWS = 4096;      // 64 frames * up to 64 variant rows
 export const DEFAULT_MAX_RECEIPT_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_MAX_DAY_ROWS = 1_000_000;    // bounded restart read guard per list
+export const DEFAULT_MAX_OUTCOME_BODY_BYTES = 16 * 1024;        // 16 KiB per credited sim
+export const DEFAULT_MAX_BATCH_BODY_BYTES = 4 * 1024 * 1024;    // 4 MiB per commit
+export const DEFAULT_MAX_DAY_BODY_BYTES = 1024 * 1024 * 1024;   // 1 GiB per day (fail-closed ceiling)
 const REVISITABLE = new Set(['PENDING_HORIZON', 'OUTCOME_PATH_INCOMPLETE', 'OUTCOME_PATH_MISSING']);
 
 // Store-side canonical content digest. Used to VERIFY batch idempotency against
@@ -53,6 +57,52 @@ function stableStringify(value) {
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
 }
 function sha256Hex(str) { return createHash('sha256').update(str, 'utf8').digest('hex'); }
+// STRICT canonical JSON for outcome bodies. Unlike stableStringify (which leans
+// on JSON.stringify and silently collapses undefined/NaN/Infinity to null and
+// drops functions), this REJECTS anything that is not exactly representable and
+// deterministic: undefined, functions, symbols, bigint, non-finite numbers,
+// sparse-array holes, accessor (getter/setter) properties, and non-plain
+// objects (Date/Map/class instances/etc.). Keys are sorted for determinism.
+function canonicalStringifyStrict(value) {
+  const t = typeof value;
+  if (value === null) return 'null';
+  if (t === 'string') return JSON.stringify(value);
+  if (t === 'boolean') return value ? 'true' : 'false';
+  if (t === 'number') { if (!Number.isFinite(value)) throw new DsimStoreError('non-canonical outcome body: non-finite number'); return JSON.stringify(value); }
+  if (t === 'undefined') throw new DsimStoreError('non-canonical outcome body: undefined');
+  if (t === 'bigint' || t === 'function' || t === 'symbol') throw new DsimStoreError(`non-canonical outcome body: ${t}`);
+  if (Array.isArray(value)) {
+    let out = '[';
+    for (let i = 0; i < value.length; i += 1) {
+      if (!(i in value)) throw new DsimStoreError('non-canonical outcome body: sparse array hole');
+      out += (i ? ',' : '') + canonicalStringifyStrict(value[i]);
+    }
+    return `${out}]`;
+  }
+  if (t === 'object') {
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== null && proto !== Object.prototype) throw new DsimStoreError('non-canonical outcome body: non-plain object');
+    const keys = Object.keys(value).sort();
+    let out = '{'; let first = true;
+    for (const k of keys) {
+      const d = Object.getOwnPropertyDescriptor(value, k);
+      if (!d || !('value' in d) || typeof d.get === 'function' || typeof d.set === 'function') throw new DsimStoreError('non-canonical outcome body: accessor property');
+      out += (first ? '' : ',') + JSON.stringify(k) + ':' + canonicalStringifyStrict(d.value);
+      first = false;
+    }
+    return `${out}}`;
+  }
+  throw new DsimStoreError(`non-canonical outcome body: unsupported type ${t}`);
+}
+// Canonical outcome-body encoding. Content identity is SHA-256 over the STRICT
+// canonical bytes; the executor MUST bind the same digest to the result row
+// (row.digest), so the store can verify the body it stores/reads is exactly the
+// one the digest names. Throws DsimStoreError on a non-canonical body.
+function encodeOutcomeBody(body) {
+  const canon = canonicalStringifyStrict(body);
+  const bytes = Buffer.byteLength(canon, 'utf8');
+  return { canon, bytes, digest: `${EVIDENCE_DIGEST_SCHEME}${sha256Hex(canon)}` };
+}
 function evidenceDigestOf(receipt) {
   return `${EVIDENCE_DIGEST_SCHEME}${sha256Hex(stableStringify({
     jobId: receipt.jobId ?? null, jobDigest: receipt.jobDigest ?? null,
@@ -85,6 +135,8 @@ export function createDailySimulationStore({
   db, storeIdentity, policyVersion = DEFAULT_POLICY_VERSION, dailyTarget = 0,
   maxResultRows = DEFAULT_MAX_RESULT_ROWS, maxReceiptBytes = DEFAULT_MAX_RECEIPT_BYTES,
   maxDayRows = DEFAULT_MAX_DAY_ROWS, clock = () => Date.now(),
+  maxOutcomeBodyBytes = DEFAULT_MAX_OUTCOME_BODY_BYTES, maxBatchBodyBytes = DEFAULT_MAX_BATCH_BODY_BYTES,
+  maxDayBodyBytes = DEFAULT_MAX_DAY_BODY_BYTES, requireOutcomeBody = false,
 } = {}) {
   if (!db || typeof db.query !== 'function' || typeof db.tx !== 'function') throw new DsimStoreError('an injected already-started Db (query/tx) is required');
   if (typeof storeIdentity !== 'string' || !storeIdentity) throw new DsimStoreError('storeIdentity is required (explicit isolated commissioning)');
@@ -95,6 +147,9 @@ export function createDailySimulationStore({
   posInt(maxResultRows, 'maxResultRows');
   posInt(maxReceiptBytes, 'maxReceiptBytes');
   posInt(maxDayRows, 'maxDayRows');
+  posInt(maxOutcomeBodyBytes, 'maxOutcomeBodyBytes');
+  posInt(maxBatchBodyBytes, 'maxBatchBodyBytes');
+  posInt(maxDayBodyBytes, 'maxDayBodyBytes');
   if (!isSafeNonNegInt(dailyTarget)) throw new DsimStoreError(`dailyTarget must be a non-negative safe integer (got ${dailyTarget})`);
   if (typeof clock !== 'function') throw new DsimStoreError('clock must be a function');
   if (typeof policyVersion !== 'string' || !policyVersion) throw new DsimStoreError('policyVersion must be a non-empty string');
@@ -236,11 +291,21 @@ export function createDailySimulationStore({
       j.nextEligibleTs = nextEligibleTs;
       j.backoffAttempts = backoffAttempts;
     }
+    // Outcome-body custody (Option A): `replayable` is a COUNT, never a
+    // materialized id list — a day of bodies is NEVER loaded into memory here
+    // (the per-day byte quota is a disk bound, not license to materialize).
+    // Content verification is a separate bounded/streaming pass
+    // (verifyOutcomeBodies); a plain count does not prove contents. A count that
+    // exceeds credited completions is durable corruption.
+    const bodyCountRes = await db.query(SQL_BODY[SQL.RESULT_BODY_COUNT], [storeIdentity, dayKey]);
+    const replayable = Number(bodyCountRes.rows[0].n) || 0;
     const completedTotal = completedIds.length;
+    if (replayable > completedTotal) throw new DsimStoreError('durable corruption: more outcome bodies than credited completions');
     const totals = {
       attempted: evRows, completed: completedTotal, validModeled: evValid, prospectiveEligible: evProspective,
       pending: Object.keys(pendingCustody).length, terminalNonCompleted: 0, duplicates: 0,
       batchesApplied: appliedBatchIds.length, overshoot: Math.max(0, completedTotal - target),
+      replayable,
     };
     return {
       port: STORE_PORT_VERSION, policyVersion, dayKey, target, revision, commissioned: true,
@@ -279,6 +344,24 @@ export function createDailySimulationStore({
       }
     }
     const evDigest = evidenceDigestOf(receipt);
+
+    // Option A outcome-body custody: gather bounded bodies for completed rows
+    // that carry one (first occurrence per sim_id). Per-result byte ceiling and
+    // digest binding are pure and checked BEFORE the transaction; the per-batch
+    // ceiling too. The per-day ceiling (durable running total) is inside the tx.
+    const bodyById = new Map(); // sim_id -> { canon, bytes, digest }
+    let batchBodyBytes = 0;
+    for (const e of receipt.resultEvidence) {
+      if (e.completed !== true || e.outcomeBody === undefined || bodyById.has(e.id)) continue;
+      let enc;
+      try { enc = encodeOutcomeBody(e.outcomeBody); }
+      catch (err) { return { ok: false, reason: 'OUTCOME_BODY_NONCANONICAL', sim: e.id, detail: String(err && err.message) }; }
+      if (enc.digest !== e.digest) return { ok: false, reason: 'OUTCOME_BODY_DIGEST_MISMATCH', sim: e.id };
+      if (enc.bytes > maxOutcomeBodyBytes) return { ok: false, reason: 'OUTCOME_BODY_BYTES_LIMIT', sim: e.id, got: enc.bytes, limit: maxOutcomeBodyBytes };
+      bodyById.set(e.id, enc);
+      batchBodyBytes += enc.bytes;
+    }
+    if (batchBodyBytes > maxBatchBodyBytes) return { ok: false, reason: 'OUTCOME_BODY_BATCH_BYTES_LIMIT', got: batchBodyBytes, limit: maxBatchBodyBytes };
 
     return db.tx(async (q) => {
       // Use the schema-QUALIFYING executor q (never helpers.raw): the injected
@@ -339,6 +422,21 @@ export function createDailySimulationStore({
       if (tally.validModeled !== dValid) return { ok: false, reason: 'FORGED_TALLY_MISMATCH', field: 'validModeled', derived: dValid };
       if (tally.prospectiveEligible !== dProspective) return { ok: false, reason: 'FORGED_TALLY_MISMATCH', field: 'prospectiveEligible', derived: dProspective };
 
+      // Outcome-body custody for the NEWLY credited sims. requireOutcomeBody
+      // makes a bodyless credit a hard refusal. The per-day byte ceiling is
+      // checked against the durable running total before any write, fail-closed.
+      const bodiesToWrite = []; let bytesToWrite = 0;
+      for (const id of derivedCompleted) {
+        const enc = bodyById.get(id);
+        if (enc) { bodiesToWrite.push([id, enc]); bytesToWrite += enc.bytes; }
+        else if (requireOutcomeBody) return { ok: false, reason: 'OUTCOME_BODY_REQUIRED', sim: id };
+      }
+      if (bytesToWrite > 0) {
+        const dayBytesRes = await raw(SQL_BODY[SQL.RESULT_BODY_DAY_BYTES], [storeIdentity, receipt.dayKey]);
+        const dayBytes = Number(dayBytesRes.rows[0].bytes) || 0;
+        if (dayBytes + bytesToWrite > maxDayBodyBytes) return { ok: false, reason: 'OUTCOME_BODY_DAY_BYTES_LIMIT', got: dayBytes + bytesToWrite, limit: maxDayBodyBytes };
+      }
+
       // All validation passed — now write (materialize day only here). Result
       // evidence and completed-index rows go in BOUNDED multi-row INSERTs (one
       // round-trip per chunk), yielding between chunks so a big page does not
@@ -371,6 +469,21 @@ export function createDailySimulationStore({
         for (const id of chunk) params.push(storeIdentity, receipt.dayKey, id, receipt.batchId);
         await raw(COMPLETED_INSERT_BULK_PREFIX + buildValuesTuples(chunk.length, COMPLETED_COLS), params);
         if (off + MAX_INSERT_ROWS_PER_STATEMENT < derivedCompleted.length) await yieldNow();
+      }
+
+      // Outcome-body rows — bounded multi-row INSERT (7 cols; body cast ::jsonb),
+      // one per newly-credited sim that carried a body. Same transaction as the
+      // evidence/completed/CAS above, so a throw rolls the whole batch back.
+      for (let off = 0; off < bodiesToWrite.length; off += MAX_INSERT_ROWS_PER_STATEMENT) {
+        const chunk = bodiesToWrite.slice(off, off + MAX_INSERT_ROWS_PER_STATEMENT);
+        const params = []; const tuples = [];
+        chunk.forEach(([id, enc], i) => {
+          const base = i * RESULT_BODY_COLS;
+          tuples.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7}::jsonb)`);
+          params.push(storeIdentity, receipt.dayKey, id, receipt.batchId, enc.digest, enc.bytes, enc.canon);
+        });
+        await raw(RESULT_BODY_INSERT_BULK_PREFIX + tuples.join(','), params);
+        if (off + MAX_INSERT_ROWS_PER_STATEMENT < bodiesToWrite.length) await yieldNow();
       }
       for (const p of (receipt.pendingDelta || [])) await raw(SQL_BODY[SQL.PENDING_UPSERT], [storeIdentity, receipt.dayKey, p.id, p.status, p.digest ?? '', resultingRevision, resultingRevision, 1]);
       for (const id of derivedCompleted) await raw(SQL_BODY[SQL.PENDING_DELETE], [storeIdentity, receipt.dayKey, id]); // matured pending removed
@@ -420,5 +533,46 @@ export function createDailySimulationStore({
     });
   }
 
-  return Object.freeze({ STORE_PORT_VERSION, STORE_VERSION: DSIM_STORE_VERSION, isCommissioned, commissionStore, loadDay, commitBatch, recordPendingBackoff, recordShortfall });
+  // Read one credited sim's durable outcome body, re-verifying it against its
+  // stored content_digest before returning — a mismatch is durable corruption,
+  // never silently returned. Enables actual replay (recompute off the body).
+  async function readOutcomeBody({ dayKey, simId } = {}) {
+    if (typeof dayKey !== 'string' || !dayKey || typeof simId !== 'string' || !simId) return { ok: false, reason: 'BAD_ARGS' };
+    const r = await db.query(SQL_BODY[SQL.RESULT_BODY_GET], [storeIdentity, dayKey, simId]);
+    if (!r.rows.length) return { found: false, verified: false, body: null, contentDigest: null };
+    const rowB = r.rows[0];
+    const body = parseJson(rowB.body);
+    const enc = encodeOutcomeBody(body);
+    if (enc.digest !== rowB.content_digest) throw new DsimStoreError('durable corruption: outcome body does not match its content_digest');
+    return { found: true, verified: true, contentDigest: rowB.content_digest, bytes: Number(rowB.body_bytes), body };
+  }
+
+  // Bounded/STREAMING content verification of a day's outcome bodies. Walks the
+  // body table by KEYSET pages (sim_id > cursor), holding only ONE page in
+  // memory at a time — a day of 100k bodies is verified without materializing
+  // it. Each body is re-encoded and checked against its stored content_digest
+  // (contents, not just counted). Returns at the first mismatch with the
+  // offending sim id. `pageSize` is bounded by maxResultRows.
+  async function verifyOutcomeBodies({ dayKey, pageSize = DEFAULT_BODY_VERIFY_PAGE } = {}) {
+    if (typeof dayKey !== 'string' || !dayKey) return { ok: false, reason: 'BAD_ARGS' };
+    if (!Number.isSafeInteger(pageSize) || pageSize <= 0 || pageSize > maxResultRows) return { ok: false, reason: 'BAD_PAGE_SIZE', limit: maxResultRows };
+    let after = ''; let checked = 0; let pages = 0;
+    for (;;) {
+      const res = await db.query(SQL_BODY[SQL.RESULT_BODY_PAGE], [storeIdentity, dayKey, after, pageSize]);
+      if (!res.rows.length) break;
+      for (const r of res.rows) {
+        let enc;
+        try { enc = encodeOutcomeBody(parseJson(r.body)); }
+        catch (err) { return { ok: true, verified: false, corruptSim: r.sim_id, checked, detail: String(err && err.message) }; }
+        if (enc.digest !== r.content_digest) return { ok: true, verified: false, corruptSim: r.sim_id, checked };
+        checked += 1; after = r.sim_id;
+      }
+      pages += 1;
+      if (checked > maxDayRows) return { ok: false, reason: 'BODY_SET_OVER_CAP', checked };
+      if (res.rows.length < pageSize) break;
+    }
+    return { ok: true, verified: true, checked, pages };
+  }
+
+  return Object.freeze({ STORE_PORT_VERSION, STORE_VERSION: DSIM_STORE_VERSION, isCommissioned, commissionStore, loadDay, commitBatch, recordPendingBackoff, recordShortfall, readOutcomeBody, verifyOutcomeBodies });
 }

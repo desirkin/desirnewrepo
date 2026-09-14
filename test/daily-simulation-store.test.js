@@ -49,6 +49,10 @@ function makeFakeDb() {
       case SQL.BATCH_LIST_DAY: { const out = []; for (const [, v] of t.batch) { if (v.identity === p[0] && v.day_key === p[1]) out.push({ batch_id: v.batch_id, job_id: v.job_id, next_cursor: v.next_cursor, cursor_before: v.cursor_before, payload_digest: v.payload_digest, done: v.done, resulting_revision: v.resulting_revision }); } out.sort((a, b) => a.resulting_revision - b.resulting_revision); const lim = p[2] ?? out.length; return { rows: out.slice(0, lim).map(({ batch_id, job_id, next_cursor, cursor_before, payload_digest, done }) => ({ batch_id, job_id, next_cursor, cursor_before, payload_digest, done })) }; }
       case SQL.JOBSCHED_LIST: { const out = []; for (const [k, v] of t.jobsched) { const [id, d, job] = k.split('|'); if (id === p[0] && d === p[1]) out.push({ job_id: job, next_eligible_ts: v.next_eligible_ts, backoff_attempts: v.backoff_attempts }); } const lim = p[2] ?? out.length; return { rows: out.slice(0, lim) }; }
       case SQL.JOBSCHED_UPSERT: { t.jobsched.set(bkey(p[0], p[1], p[2]), { next_eligible_ts: p[3], backoff_attempts: p[4] }); return { rows: [], rowCount: 1 }; }
+      case SQL.RESULT_BODY_COUNT: return { rows: [{ n: 0 }] };
+      case SQL.RESULT_BODY_PAGE: return { rows: [] };
+      case SQL.RESULT_BODY_DAY_BYTES: return { rows: [{ bytes: 0 }] };
+      case SQL.RESULT_BODY_GET: return { rows: [] };
       default: throw new Error(`fake Db: unhandled token ${tok}`);
     }
   }

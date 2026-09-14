@@ -91,6 +91,19 @@ export const PROPOSED_DDL = Object.freeze([
      next_eligible_ts bigint NOT NULL,
      backoff_attempts integer NOT NULL,
      PRIMARY KEY (identity, day_key, job_id))`,
+  // Option A outcome-body custody (additive): one immutable, bounded body per
+  // CREDITED sim (keyed like the completed index, never per raw variant row).
+  // content_digest MUST equal the sim's serpent_dsim_result.digest; body_bytes
+  // is the exact canonical byte length used for the per-result/batch/day quota.
+  `CREATE TABLE IF NOT EXISTS serpent_dsim_result_body (
+     identity        text NOT NULL,
+     day_key         text NOT NULL,
+     sim_id          text NOT NULL,
+     batch_id        text NOT NULL,
+     content_digest  text NOT NULL,
+     body_bytes      integer NOT NULL,
+     body            jsonb NOT NULL,
+     PRIMARY KEY (identity, day_key, sim_id))`,
   // Crediting-join index (additive): the restart CREDITED_AGGREGATE joins
   // serpent_dsim_result to serpent_dsim_completed on (identity, day_key,
   // sim_id, batch_id). serpent_dsim_result's PRIMARY KEY leads with batch_id,
@@ -133,6 +146,10 @@ export const SQL = Object.freeze({
   EVIDENCE_DISTINCT_COMPLETED: 'DSIM/result/distinct_completed',
   ANALYZE_RESULT: 'DSIM/result/analyze',
   ANALYZE_COMPLETED: 'DSIM/completed/analyze',
+  RESULT_BODY_GET: 'DSIM/result_body/get',
+  RESULT_BODY_COUNT: 'DSIM/result_body/count',
+  RESULT_BODY_PAGE: 'DSIM/result_body/page',
+  RESULT_BODY_DAY_BYTES: 'DSIM/result_body/day_bytes',
 });
 
 // The real parameterized SQL bodies, keyed by the tokens above. The store uses
@@ -190,6 +207,14 @@ export const SQL_BODY = Object.freeze({
   // plan is chosen. Issued outside any transaction; failure is swallowed.
   [SQL.ANALYZE_RESULT]: 'ANALYZE serpent_dsim_result',
   [SQL.ANALYZE_COMPLETED]: 'ANALYZE serpent_dsim_completed',
+  // Option A outcome-body custody. RESULT_BODY_COUNT is an O(1)-memory count for
+  // the `replayable` total (counts, never materializes). RESULT_BODY_PAGE is a
+  // KEYSET page (sim_id > $3) for bounded/streaming content verification — a day
+  // of bodies is walked one bounded page at a time, never loaded whole.
+  [SQL.RESULT_BODY_GET]: 'SELECT content_digest, body_bytes, body FROM serpent_dsim_result_body WHERE identity = $1 AND day_key = $2 AND sim_id = $3',
+  [SQL.RESULT_BODY_COUNT]: 'SELECT count(*)::bigint AS n FROM serpent_dsim_result_body WHERE identity = $1 AND day_key = $2',
+  [SQL.RESULT_BODY_PAGE]: 'SELECT sim_id, content_digest, body_bytes, body FROM serpent_dsim_result_body WHERE identity = $1 AND day_key = $2 AND sim_id > $3 ORDER BY sim_id LIMIT $4',
+  [SQL.RESULT_BODY_DAY_BYTES]: 'SELECT coalesce(sum(body_bytes),0)::bigint AS bytes FROM serpent_dsim_result_body WHERE identity = $1 AND day_key = $2',
 });
 
 // ---- bounded multi-row INSERT (perf: one round-trip per bounded chunk) -------
@@ -204,6 +229,11 @@ export const MAX_INSERT_ROWS_PER_STATEMENT = 400;         // 400 * 10 = 4000 par
 export const MAX_INSERT_PARAMS = 60000;                   // hard param ceiling guard
 export const RESULT_INSERT_BULK_PREFIX = 'INSERT INTO serpent_dsim_result (identity, day_key, batch_id, row_ordinal, sim_id, status, completed, valid_modeled, prospective_eligible, digest) VALUES ';
 export const COMPLETED_INSERT_BULK_PREFIX = 'INSERT INTO serpent_dsim_completed (identity, day_key, sim_id, batch_id) VALUES ';
+// Option A outcome-body bulk insert (7 cols/row): identity, day_key, sim_id,
+// batch_id, content_digest, body_bytes, body. body is cast ::jsonb per tuple by
+// the store when composing the VALUES list.
+export const RESULT_BODY_COLS = 7;
+export const RESULT_BODY_INSERT_BULK_PREFIX = 'INSERT INTO serpent_dsim_result_body (identity, day_key, sim_id, batch_id, content_digest, body_bytes, body) VALUES ';
 
 // Build "($1,$2,...,$cols),($cols+1,...)" for nRows rows of nCols columns.
 export function buildValuesTuples(nRows, nCols) {

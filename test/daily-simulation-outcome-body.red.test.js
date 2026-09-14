@@ -16,12 +16,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createDailySimulationStore } from '../persistence/daily-simulation-store.js';
-import { SQL, SQL_BODY, RESULT_INSERT_BULK_PREFIX, COMPLETED_INSERT_BULK_PREFIX } from '../persistence/daily-simulation-schema.js';
+import { SQL, SQL_BODY, RESULT_INSERT_BULK_PREFIX, COMPLETED_INSERT_BULK_PREFIX, RESULT_BODY_INSERT_BULK_PREFIX } from '../persistence/daily-simulation-schema.js';
 
-// Canonical content digest the executor is expected to bind to a body. The
-// proposed contract requires content_digest === sha256 over the canonical body
-// bytes, so the store can verify the body it stores is the one the digest names.
-const bodyDigest = (body) => `sha256:${createHash('sha256').update(JSON.stringify(body)).digest('hex')}`;
+// Canonical content digest the executor binds to a body. The contract requires
+// content_digest === sha256 over the store's canonical stableStringify bytes
+// (key-sorted), so the store can verify the body it stores is the one named.
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+}
+const bodyDigest = (body) => `sha256:${createHash('sha256').update(stableStringify(body), 'utf8').digest('hex')}`;
 
 // Minimal transactional fake Db. It models the CURRENT statements plus a
 // forward-compatible serpent_dsim_result_payload table so that, once the store
@@ -35,7 +41,12 @@ function makeFakeDb() {
     if (body === 'BEGIN' || body === 'COMMIT' || body === 'ROLLBACK') return { rows: [], rowCount: 0 };
     if (body.startsWith(RESULT_INSERT_BULK_PREFIX)) { const n = p.length / 10; for (let i = 0; i < n; i++) { const b = i * 10; t.result.push({ identity: p[b], day_key: p[b + 1], batch_id: p[b + 2], sim_id: p[b + 4], status: p[b + 5], completed: p[b + 6], valid_modeled: p[b + 7], prospective_eligible: p[b + 8], digest: p[b + 9] }); } return { rows: [], rowCount: n }; }
     if (body.startsWith(COMPLETED_INSERT_BULK_PREFIX)) { const n = p.length / 4; for (let i = 0; i < n; i++) { const b = i * 4; t.completed.set(bk(p[b], p[b + 1], p[b + 2]), { batch_id: p[b + 3] }); } return { rows: [], rowCount: n }; }
+    if (body.startsWith(RESULT_BODY_INSERT_BULK_PREFIX)) { if (t._failBodyInsert) throw new Error('SIMULATED body-insert failure'); const n = p.length / 7; for (let i = 0; i < n; i++) { const b = i * 7; t.payload.set(bk(p[b], p[b + 1], p[b + 2]), { batch_id: p[b + 3], content_digest: p[b + 4], body_bytes: p[b + 5], body: JSON.parse(p[b + 6]) }); } return { rows: [], rowCount: n }; }
     switch (B2T.get(body)) {
+      case SQL.RESULT_BODY_GET: { const r = t.payload.get(bk(p[0], p[1], p[2])); return { rows: r ? [{ content_digest: r.content_digest, body_bytes: r.body_bytes, body: r.body }] : [] }; }
+      case SQL.RESULT_BODY_COUNT: { let n = 0; for (const k of t.payload.keys()) { const [id, d] = k.split('|'); if (id === p[0] && d === p[1]) n++; } return { rows: [{ n }] }; }
+      case SQL.RESULT_BODY_PAGE: { const out = []; for (const [k, v] of t.payload) { const [id, d, sim] = k.split('|'); if (id === p[0] && d === p[1] && sim > p[2]) out.push({ sim_id: sim, content_digest: v.content_digest, body_bytes: v.body_bytes, body: v.body }); } out.sort((a, b) => (a.sim_id < b.sim_id ? -1 : 1)); return { rows: out.slice(0, p[3]) }; }
+      case SQL.RESULT_BODY_DAY_BYTES: { let bytes = 0; for (const [k, v] of t.payload) { const [id, d] = k.split('|'); if (id === p[0] && d === p[1]) bytes += v.body_bytes; } return { rows: [{ bytes }] }; }
       case SQL.STORE_GET: { const r = t.store.get(p[0]); return { rows: r ? [r] : [] }; }
       case SQL.STORE_INSERT: { t.store.set(p[0], { identity: p[0], policy_version: p[1], store_version: p[2], commissioned_at: p[3] }); return { rowCount: 1, rows: [] }; }
       case SQL.DAY_GET: { const r = t.day.get(dk(p[0], p[1])); return { rows: r ? [{ revision: r.revision, target: r.target, rotation_index: r.rotation_index || 0, shortfall: r.shortfall }] : [] }; }
@@ -55,7 +66,9 @@ function makeFakeDb() {
       default: return { rows: [], rowCount: 0 }; // forward-compatible: unknown/payload SQL no-ops for now
     }
   }
-  return { _t: t, async query(b, p) { return run(b, p); }, async tx(fn) { return fn((b, p) => Promise.resolve(run(b, p)), {}); } };
+  const snap = () => ({ store: new Map(t.store), day: new Map([...t.day].map(([k, v]) => [k, { ...v }])), batch: new Map(t.batch), completed: new Map(t.completed), pending: new Map(t.pending), result: t.result.slice(), jobsched: new Map(t.jobsched), payload: new Map(t.payload) });
+  const rest = (s) => { const keep = t._failBodyInsert; Object.assign(t, s); t._failBodyInsert = keep; };
+  return { _t: t, async query(b, p) { return run(b, p); }, async tx(fn) { const s = snap(); try { return await fn((b, p) => Promise.resolve(run(b, p)), {}); } catch (e) { rest(s); throw e; } } };
 }
 
 const ID = 'obody:iso', DAY = '2026-09-14';
@@ -139,4 +152,81 @@ test('RED contract 6: metadata-only credited rows do NOT count as replayable', a
   const led = (await store.loadDay(DAY)).ledger;
   assert.equal(led.totals.completed, 2, 'counted for accounting');
   assert.equal(led.totals.replayable, 0, 'replayable total excludes metadata-only rows — MISSING today');
+});
+
+// ---- Additional Option A acceptance witnesses (root-required) ---------------
+
+// Build a receipt carrying ONE completed row with an arbitrary (possibly
+// non-canonical) body. digest is set to a benign value; the store rejects a
+// non-canonical body at encode time, before the digest is ever compared.
+function receiptRawBody(body, digest = 'sha256:placeholder') {
+  const evidence = [{ id: 'S#0', status: 'COMPLETED_MODELED', completed: true, valid: false, prospective: false, digest, outcomeBody: body }];
+  return { batchId: 'B1', dayKey: DAY, jobId: 'J', jobDigest: 'jd', payloadDigest: 'pd', cursorBefore: null, nextCursor: 1, done: false, parentRevision: 0, rotationIndex: 1, completedResults: [], newCompletedIds: ['S#0'], pendingDelta: [], resultEvidence: evidence, tally: { completed: 1, validModeled: 0, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 1 }, executorCounters: null, observedUtcMs: 1 };
+}
+
+test('W1: non-canonical bodies are rejected (undefined/nonfinite/function/accessor/non-plain), nothing written', async () => {
+  const cases = [
+    { x: undefined },
+    { x: Number.NaN },
+    { x: Infinity },
+    { x: () => 1 },
+    (() => { const o = {}; Object.defineProperty(o, 'g', { get() { return 1; }, enumerable: true }); return o; })(),
+    { d: new Date() },
+    { m: new Map() },
+    [1, , 3], // sparse hole
+  ];
+  for (const body of cases) {
+    const db = makeFakeDb(); const store = mkStore(db); await store.commissionStore();
+    const r = await store.commitBatch(receiptRawBody(body));
+    assert.equal(r.ok, false, `should reject ${JSON.stringify(body)}`);
+    assert.equal(r.reason, 'OUTCOME_BODY_NONCANONICAL');
+    assert.equal(db._t.result.length, 0, 'no evidence written on non-canonical body');
+    assert.equal(db._t.payload.size, 0, 'no body written');
+  }
+});
+
+test('W2: body+result+completion+day commit atomically — a body-write failure rolls back everything', async () => {
+  const db = makeFakeDb(); const store = mkStore(db); await store.commissionStore();
+  db._t._failBodyInsert = true;
+  await assert.rejects(() => store.commitBatch(receiptWithBodies([{ v: 1 }])), /body-insert failure/);
+  assert.equal(db._t.result.length, 0, 'result rolled back');
+  assert.equal(db._t.completed.size, 0, 'completed index rolled back');
+  assert.equal(db._t.payload.size, 0, 'bodies rolled back');
+  db._t._failBodyInsert = false;
+  const load = await store.loadDay(DAY);
+  assert.equal(load.status, 'NEW', 'day cleanly rolled back to NEW (no partial revision)');
+});
+
+test('W3: exact same sim+body retry (same batchId) is idempotent and content-verified; body not duplicated', async () => {
+  const db = makeFakeDb(); const store = mkStore(db); await store.commissionStore();
+  const body = { path: [1, 2, 3], pnl: 4 };
+  const r1 = await store.commitBatch(receiptWithBodies([body]));
+  assert.equal(r1.ok, true);
+  const r2 = await store.commitBatch(receiptWithBodies([body]));
+  assert.equal(r2.ok, true); assert.equal(r2.idempotent, true); assert.equal(r2.contentVerified, true);
+  assert.equal(db._t.payload.size, 1, 'body stored exactly once across the retry');
+});
+
+test('W4: a conflicting body for the same sim in one batch is refused (before any write)', async () => {
+  const db = makeFakeDb(); const store = mkStore(db); await store.commissionStore();
+  const a = { id: 'S#0', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: false, digest: bodyDigest({ v: 1 }), outcomeBody: { v: 1 } };
+  const b = { id: 'S#0', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: false, digest: bodyDigest({ v: 2 }), outcomeBody: { v: 2 } };
+  const rec = { batchId: 'B1', dayKey: DAY, jobId: 'J', jobDigest: 'jd', payloadDigest: 'pd', cursorBefore: null, nextCursor: 1, done: false, parentRevision: 0, rotationIndex: 1, completedResults: [], newCompletedIds: ['S#0'], pendingDelta: [], resultEvidence: [a, b], tally: { completed: 1, validModeled: 1, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 2 }, executorCounters: null, observedUtcMs: 1 };
+  const r = await store.commitBatch(rec);
+  assert.equal(r.ok, false); assert.equal(r.reason, 'DUPLICATE_SIM_CONFLICT');
+  assert.equal(db._t.payload.size, 0);
+});
+
+test('W5: per-day quota is serialized with concurrent commits (CAS-fenced stale parent cannot land bodies)', async () => {
+  const db = makeFakeDb();
+  await mkStore(db).commissionStore();
+  const A = mkStore(db); const B = mkStore(db);
+  // A commits at parent revision 0 and advances the day to revision 1.
+  const ra = await A.commitBatch(receiptWithBodies([{ a: 1 }], { batchId: 'A', parentRevision: 0 }));
+  assert.equal(ra.ok, true);
+  // B still believes parent is 0 (concurrent) — the CAS fence rejects it, so its
+  // body never lands and the day-byte total cannot be raced past the quota.
+  const rb = await B.commitBatch(receiptWithBodies([{ b: 2 }], { batchId: 'B', parentRevision: 0 }));
+  assert.equal(rb.ok, false); assert.equal(rb.reason, 'STALE_PARENT_REVISION');
+  assert.equal(db._t.payload.size, 1, 'only the winning commit persisted a body');
 });
