@@ -164,15 +164,23 @@ export const SQL_BODY = Object.freeze({
   [SQL.BATCH_LIST_DAY]: 'SELECT batch_id, job_id, next_cursor, cursor_before, payload_digest, done FROM serpent_dsim_batch WHERE identity = $1 AND day_key = $2 ORDER BY resulting_revision LIMIT $3',
   [SQL.JOBSCHED_LIST]: 'SELECT job_id, next_eligible_ts, backoff_attempts FROM serpent_dsim_job_schedule WHERE identity = $1 AND day_key = $2 LIMIT $3',
   [SQL.JOBSCHED_UPSERT]: 'INSERT INTO serpent_dsim_job_schedule (identity, day_key, job_id, next_eligible_ts, backoff_attempts) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (identity, day_key, job_id) DO UPDATE SET next_eligible_ts = EXCLUDED.next_eligible_ts, backoff_attempts = EXCLUDED.backoff_attempts',
-  // validModeled/prospectiveEligible counted ONLY over the credited (unique)
-  // completed rows — join evidence to the completed index on (sim_id,batch_id) —
-  // so duplicate completed evidence rows cannot inflate these tallies on RESUME.
+  // validModeled/prospectiveEligible counted ONCE per CREDITED sim. Even within
+  // the crediting batch a sim_id may appear on several raw result rows (raw
+  // evidence is immutable and deduped only for crediting), so a plain SUM over
+  // the join would double-count valid/prospective after restart. DISTINCT ON
+  // (sim_id) with ORDER BY sim_id, row_ordinal picks ONE deterministic
+  // representative row per credited sim (lowest ordinal), then sums — matching
+  // the single credit granted at commit time.
   [SQL.CREDITED_AGGREGATE]: `SELECT
-     sum(CASE WHEN r.valid_modeled THEN 1 ELSE 0 END)::int AS valid,
-     sum(CASE WHEN r.prospective_eligible THEN 1 ELSE 0 END)::int AS prospective
-     FROM serpent_dsim_result r
-     JOIN serpent_dsim_completed c ON c.identity = r.identity AND c.day_key = r.day_key AND c.sim_id = r.sim_id AND c.batch_id = r.batch_id
-     WHERE r.identity = $1 AND r.day_key = $2 AND r.completed`,
+     sum(CASE WHEN x.valid_modeled THEN 1 ELSE 0 END)::int AS valid,
+     sum(CASE WHEN x.prospective_eligible THEN 1 ELSE 0 END)::int AS prospective
+     FROM (
+       SELECT DISTINCT ON (r.sim_id) r.valid_modeled, r.prospective_eligible
+       FROM serpent_dsim_result r
+       JOIN serpent_dsim_completed c ON c.identity = r.identity AND c.day_key = r.day_key AND c.sim_id = r.sim_id AND c.batch_id = r.batch_id
+       WHERE r.identity = $1 AND r.day_key = $2 AND r.completed
+       ORDER BY r.sim_id, r.row_ordinal
+     ) x`,
   [SQL.EVIDENCE_DISTINCT_COMPLETED]: 'SELECT count(DISTINCT sim_id)::int AS n FROM serpent_dsim_result WHERE identity = $1 AND day_key = $2 AND completed',
   // Best-effort stats refresh for the restart rebuild. A rebuild runs right
   // after up to 100k rows were bulk-inserted, before autovacuum has ANALYZEd;

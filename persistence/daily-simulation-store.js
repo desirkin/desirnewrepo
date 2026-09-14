@@ -26,9 +26,12 @@
 //     oversized receipt is refused, never truncated.
 //   * Not an authority — this is storage only; it grants no learning/promotion
 //     authority.
+import { createHash } from 'node:crypto';
 import { SQL, SQL_BODY, DSIM_STORE_VERSION, RESULT_COLS, COMPLETED_COLS, MAX_INSERT_ROWS_PER_STATEMENT, MAX_INSERT_PARAMS, RESULT_INSERT_BULK_PREFIX, COMPLETED_INSERT_BULK_PREFIX, buildValuesTuples } from './daily-simulation-schema.js';
 
 const yieldNow = () => new Promise((resolve) => setImmediate(resolve));
+const EVIDENCE_DIGEST_SCHEME = 'sha256:'; // content-identity scheme tag for new receipts
+const MAX_REBUILD_SNAPSHOT_ATTEMPTS = 6;   // bounded retry for a consistent-revision read
 
 export const STORE_PORT_VERSION = 'daily-sim-scheduler-2';
 export const DEFAULT_POLICY_VERSION = 'sim2-policy-1';
@@ -37,29 +40,30 @@ export const DEFAULT_MAX_RECEIPT_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_MAX_DAY_ROWS = 1_000_000;    // bounded restart read guard per list
 const REVISITABLE = new Set(['PENDING_HORIZON', 'OUTCOME_PATH_INCOMPLETE', 'OUTCOME_PATH_MISSING']);
 
-// Store-side canonical content digest (zero-dependency FNV-1a/64 over stable
-// JSON). Used to VERIFY batch idempotency against the actual receipt contents,
-// not the caller's claimed payloadDigest — a repeated batchId whose contents
-// differ is refused, never returned as false idempotent success.
+// Store-side canonical content digest. Used to VERIFY batch idempotency against
+// the actual receipt contents, not the caller's claimed payloadDigest — a
+// repeated batchId whose contents differ is refused, never returned as false
+// idempotent success. Content identity uses SHA-256 (a real content hash),
+// scheme-tagged so a stored digest that predates this scheme (or is null) is
+// treated as legacy/unverifiable rather than falsely claimed verified.
 function stableStringify(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   const keys = Object.keys(value).sort();
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
 }
-function fnv1a64Hex(str) {
-  let h = 0xcbf29ce484222325n; const prime = 0x100000001b3n; const mask = 0xffffffffffffffffn;
-  for (let i = 0; i < str.length; i += 1) { h ^= BigInt(str.charCodeAt(i)); h = (h * prime) & mask; }
-  return h.toString(16).padStart(16, '0');
-}
+function sha256Hex(str) { return createHash('sha256').update(str, 'utf8').digest('hex'); }
 function evidenceDigestOf(receipt) {
-  return `ev:${fnv1a64Hex(stableStringify({
+  return `${EVIDENCE_DIGEST_SCHEME}${sha256Hex(stableStringify({
     jobId: receipt.jobId ?? null, jobDigest: receipt.jobDigest ?? null,
     cursorBefore: receipt.cursorBefore ?? null, nextCursor: receipt.nextCursor ?? null,
     parentRevision: receipt.parentRevision, done: receipt.done === true, tally: receipt.tally ?? null,
     evidence: (receipt.resultEvidence || []).map((e) => [e.id, e.status, e.completed === true, e.valid === true, e.prospective === true, e.digest ?? '']),
   }))}`;
 }
+const isVersionedDigest = (d) => typeof d === 'string' && d.startsWith(EVIDENCE_DIGEST_SCHEME);
+// Safe non-negative integer guard used for restored durable counters/indices.
+const isSafeNonNegInt = (n) => Number.isSafeInteger(n) && n >= 0;
 // Per-row status/flag consistency. Caller BOOLEANS are not evidence of a real
 // outcome (see Phase-15 note), but internally contradictory rows are refused.
 function rowContradiction(e) {
@@ -84,6 +88,16 @@ export function createDailySimulationStore({
 } = {}) {
   if (!db || typeof db.query !== 'function' || typeof db.tx !== 'function') throw new DsimStoreError('an injected already-started Db (query/tx) is required');
   if (typeof storeIdentity !== 'string' || !storeIdentity) throw new DsimStoreError('storeIdentity is required (explicit isolated commissioning)');
+  // Validate bounds and injected primitives up front — a non-positive or
+  // non-finite cap, or an unsafe target/clock, is a construction error, never
+  // silently coerced.
+  const posInt = (v, name) => { if (!Number.isSafeInteger(v) || v <= 0) throw new DsimStoreError(`${name} must be a positive safe integer (got ${v})`); };
+  posInt(maxResultRows, 'maxResultRows');
+  posInt(maxReceiptBytes, 'maxReceiptBytes');
+  posInt(maxDayRows, 'maxDayRows');
+  if (!isSafeNonNegInt(dailyTarget)) throw new DsimStoreError(`dailyTarget must be a non-negative safe integer (got ${dailyTarget})`);
+  if (typeof clock !== 'function') throw new DsimStoreError('clock must be a function');
+  if (typeof policyVersion !== 'string' || !policyVersion) throw new DsimStoreError('policyVersion must be a non-empty string');
   const listLimit = maxDayRows + 1; // fetch one past the cap to detect overflow
 
   // A commissioned store row must match THIS store's policy/store version, or the
@@ -124,8 +138,35 @@ export function createDailySimulationStore({
       if (orphan.rows.length) return { status: 'LOST', detail: 'missing day row with orphan batch records' };
       return { status: 'NEW' };
     }
-    try { return { status: 'RESUME', ledger: await rebuildLedger(dayKey, dayRes.rows[0]) }; }
+    try { return { status: 'RESUME', ledger: await rebuildLedgerConsistent(dayKey) }; }
     catch (err) { return { status: 'LOST', detail: String(err && err.message) }; }
+  }
+
+  const dayRowOf = async (dayKey) => { const r = await db.query(SQL_BODY[SQL.DAY_GET], [storeIdentity, dayKey]); return r.rows.length ? r.rows[0] : null; };
+
+  // rebuildLedger issues several separate reads; a concurrent commit could
+  // advance the day revision between them, yielding a mixed-version view. Pin a
+  // consistent snapshot by bounded revision retry: read the revision before and
+  // after the reads, and retry if it changed (or if a mid-read integrity guard
+  // tripped only because a concurrent write landed). A guard that trips while
+  // the revision is stable is genuine corruption and propagates to LOST.
+  async function rebuildLedgerConsistent(dayKey) {
+    for (let attempt = 1; attempt <= MAX_REBUILD_SNAPSHOT_ATTEMPTS; attempt += 1) {
+      const startRow = await dayRowOf(dayKey);
+      if (!startRow) throw new DsimStoreError('day row vanished during rebuild');
+      const startRev = Number(startRow.revision);
+      try {
+        const ledger = await rebuildLedger(dayKey, startRow);
+        const endRow = await dayRowOf(dayKey);
+        if (!endRow || Number(endRow.revision) !== startRev) continue; // concurrent commit landed; re-snapshot
+        return ledger;
+      } catch (err) {
+        const nowRow = await dayRowOf(dayKey);
+        if (nowRow && Number(nowRow.revision) !== startRev) continue; // inconsistency caused by a concurrent write, not corruption
+        throw err; // stable revision + failing guard => genuine durable corruption
+      }
+    }
+    throw new DsimStoreError('day revision kept advancing during rebuild — no consistent snapshot within bounded retries');
   }
 
   // Best-effort ANALYZE of the two heavy tables so the restart rebuild's join
@@ -141,6 +182,8 @@ export function createDailySimulationStore({
     const target = Number(dayRow.target);
     if (!Number.isSafeInteger(revision) || revision < 0) throw new DsimStoreError('durable corruption: day revision malformed');
     if (!Number.isSafeInteger(target) || target < 0) throw new DsimStoreError('durable corruption: day target malformed');
+    const rotationIndex = Number(dayRow.rotation_index);
+    if (!isSafeNonNegInt(rotationIndex)) throw new DsimStoreError('durable corruption: day rotation_index malformed');
     // Refresh planner stats before the crediting join. A rebuild runs right
     // after a bulk-loaded day was written; with stale (0-row) stats the planner
     // picks an O(n^2) seqscan nested loop for CREDITED_AGGREGATE and exceeds the
@@ -179,12 +222,19 @@ export function createDailySimulationStore({
       if (r.job_id === '__shortfall__') continue;
       jobs[r.job_id] = { cursor: parseJson(r.next_cursor), done: r.done === true, completed: 0, attempts: 0, lastStatus: 'APPLIED', stalled: false, lastPayloadDigest: r.payload_digest, lastCursor: parseJson(r.cursor_before), backoffAttempts: 0, nextEligibleTs: 0 };
     }
-    // sim2-revisit-1: restore persisted backoff timing/counters.
+    // sim2-revisit-1: restore persisted backoff timing/counters. Bounded like
+    // the other lists (cap+1 then refuse), and malformed/negative/non-finite
+    // timing or counters are durable corruption (LOST), never coerced to 0.
     const sched = await db.query(SQL_BODY[SQL.JOBSCHED_LIST], [storeIdentity, dayKey, listLimit]);
+    if (sched.rows.length > maxDayRows) throw new DsimStoreError(`day too large for bounded restart read (job_schedule > ${maxDayRows}); a paged restore is required`);
     for (const r of sched.rows) {
+      const nextEligibleTs = Number(r.next_eligible_ts);
+      const backoffAttempts = Number(r.backoff_attempts);
+      if (!isSafeNonNegInt(nextEligibleTs)) throw new DsimStoreError('durable corruption: job_schedule next_eligible_ts malformed');
+      if (!isSafeNonNegInt(backoffAttempts)) throw new DsimStoreError('durable corruption: job_schedule backoff_attempts malformed');
       const j = jobs[r.job_id] || (jobs[r.job_id] = { cursor: null, done: false, completed: 0, attempts: 0, lastStatus: 'BACKOFF', stalled: false, lastPayloadDigest: null, lastCursor: undefined, backoffAttempts: 0, nextEligibleTs: 0 });
-      j.nextEligibleTs = Number(r.next_eligible_ts) || 0;
-      j.backoffAttempts = Number(r.backoff_attempts) || 0;
+      j.nextEligibleTs = nextEligibleTs;
+      j.backoffAttempts = backoffAttempts;
     }
     const completedTotal = completedIds.length;
     const totals = {
@@ -194,7 +244,7 @@ export function createDailySimulationStore({
     };
     return {
       port: STORE_PORT_VERSION, policyVersion, dayKey, target, revision, commissioned: true,
-      rotationIndex: Number(dayRow.rotation_index) || 0, totals, byStatus, jobs, completedIds, pendingCustody, appliedBatchIds,
+      rotationIndex, totals, byStatus, jobs, completedIds, pendingCustody, appliedBatchIds,
       shortfall: parseJson(dayRow.shortfall),
     };
   }
@@ -215,6 +265,19 @@ export function createDailySimulationStore({
     // booleans are not proof of a real outcome — see Phase-15 note — but an
     // internally contradictory row is never storable.)
     for (const e of receipt.resultEvidence) { const c = rowContradiction(e); if (c) return { ok: false, reason: 'RESULT_ROW_CONTRADICTION', detail: c, sim: e.id }; }
+    // Within-batch duplicate sim_id must be internally consistent. Raw evidence
+    // is preserved (immutability), but a credit is granted ONCE per id; a repeat
+    // that disagrees on status/flags/digest is a conflict, refused before any
+    // write (otherwise the rebuild join would credit a contradictory row).
+    {
+      const sigById = new Map();
+      const sig = (e) => `${e.status}|${e.completed === true}|${e.valid === true}|${e.prospective === true}|${e.digest ?? ''}`;
+      for (const e of receipt.resultEvidence) {
+        const s = sig(e); const prev = sigById.get(e.id);
+        if (prev === undefined) sigById.set(e.id, s);
+        else if (prev !== s) return { ok: false, reason: 'DUPLICATE_SIM_CONFLICT', sim: e.id };
+      }
+    }
     const evDigest = evidenceDigestOf(receipt);
 
     return db.tx(async (q) => {
@@ -224,17 +287,27 @@ export function createDailySimulationStore({
       const raw = q;
       const store = await raw(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
       if (!store.rows.length) return { ok: false, reason: 'STORE_NOT_COMMISSIONED' };
+      // Enforce commissioned policy/store identity on the WRITE path too, not
+      // only in loadDay — a handle bound to a different contract must not write.
+      const idm = identityMismatch(store.rows[0]);
+      if (idm) return { ok: false, reason: 'STORE_IDENTITY_MISMATCH', detail: idm };
 
       // idempotency by batchId — content-VERIFIED, not caller-claimed. A repeat
       // with a different claimed payloadDigest is a payload conflict; a repeat
       // whose actual contents differ (even if the claimed payloadDigest is
       // unchanged) is a CONTENT conflict — never a false idempotent success.
+      // A stored digest that is null or predates the versioned (sha256) scheme
+      // cannot be content-verified, so idempotency is returned WITHOUT a
+      // verified-content claim (contentVerified:false), never falsely verified.
       const existing = await raw(SQL_BODY[SQL.BATCH_GET], [storeIdentity, receipt.dayKey, receipt.batchId]);
       if (existing.rows.length) {
         const b = existing.rows[0];
         if (b.payload_digest !== receipt.payloadDigest) return { ok: false, reason: 'BATCH_ID_PAYLOAD_CONFLICT', storedDigest: b.payload_digest };
-        if (b.evidence_digest && b.evidence_digest !== evDigest) return { ok: false, reason: 'BATCH_ID_CONTENT_CONFLICT', storedEvidenceDigest: b.evidence_digest };
-        return { ok: true, batchId: receipt.batchId, payloadDigest: b.payload_digest, revision: Number(b.resulting_revision), idempotent: true };
+        if (isVersionedDigest(b.evidence_digest)) {
+          if (b.evidence_digest !== evDigest) return { ok: false, reason: 'BATCH_ID_CONTENT_CONFLICT', storedEvidenceDigest: b.evidence_digest };
+          return { ok: true, batchId: receipt.batchId, payloadDigest: b.payload_digest, revision: Number(b.resulting_revision), idempotent: true, contentVerified: true };
+        }
+        return { ok: true, batchId: receipt.batchId, payloadDigest: b.payload_digest, revision: Number(b.resulting_revision), idempotent: true, contentVerified: false };
       }
 
       // CAS parent revision
@@ -322,6 +395,8 @@ export function createDailySimulationStore({
     return db.tx(async (q) => {
       const store = await q(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
       if (!store.rows.length) return { ok: false, reason: 'STORE_NOT_COMMISSIONED' };
+      const idm = identityMismatch(store.rows[0]);
+      if (idm) return { ok: false, reason: 'STORE_IDENTITY_MISMATCH', detail: idm };
       await q(SQL_BODY[SQL.JOBSCHED_UPSERT], [storeIdentity, dayKey, jobId, nextEligibleTs, backoffAttempts]);
       return { ok: true, jobId, nextEligibleTs, backoffAttempts };
     });
@@ -336,6 +411,8 @@ export function createDailySimulationStore({
     return db.tx(async (q) => {
       const store = await q(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
       if (!store.rows.length) return { ok: false, reason: 'STORE_NOT_COMMISSIONED' };
+      const idm = identityMismatch(store.rows[0]);
+      if (idm) return { ok: false, reason: 'STORE_IDENTITY_MISMATCH', detail: idm };
       const dayRes = await q(SQL_BODY[SQL.DAY_GET], [storeIdentity, dayKey]);
       if (!dayRes.rows.length) await q(SQL_BODY[SQL.DAY_INSERT], [storeIdentity, dayKey, dailyTarget]);
       await q(SQL_BODY[SQL.DAY_SET_SHORTFALL], [storeIdentity, dayKey, jstr(shortfall)]);

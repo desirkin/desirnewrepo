@@ -26,7 +26,7 @@ function makeCountingDb({ failOnResultStatement = null } = {}) {
     if (body.startsWith(COMPLETED_INSERT_BULK_PREFIX)) { counts.completedStatements += 1; const n = p.length / 4; for (let i = 0; i < n; i++) { const b = i * 4; t.completed.set(bk(p[b], p[b + 1], p[b + 2]), 1); } return { rows: [], rowCount: n }; }
     switch (B2T.get(body)) {
       case SQL.STORE_GET: { const r = t.store.get(p[0]); return { rows: r ? [r] : [] }; }
-      case SQL.STORE_INSERT: { t.store.set(p[0], { identity: p[0] }); return { rowCount: 1, rows: [] }; }
+      case SQL.STORE_INSERT: { t.store.set(p[0], { identity: p[0], policy_version: p[1], store_version: p[2], commissioned_at: p[3] }); return { rowCount: 1, rows: [] }; }
       case SQL.DAY_GET: { const r = t.day.get(dk(p[0], p[1])); return { rows: r ? [{ revision: r.revision, target: r.target, rotation_index: 0, shortfall: r.shortfall }] : [] }; }
       case SQL.DAY_INSERT: { t.day.set(dk(p[0], p[1]), { revision: 0, target: p[2], shortfall: null }); return { rowCount: 1, rows: [] }; }
       case SQL.DAY_UPDATE_CAS: { const r = t.day.get(dk(p[0], p[1])); if (r && r.revision === p[2]) { r.revision = p[3]; return { rowCount: 1, rows: [] }; } return { rowCount: 0, rows: [] }; }
