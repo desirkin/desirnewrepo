@@ -6,10 +6,11 @@ import { tmpdir } from 'node:os';
 import {
   openDailyShardControlAggregatorForTest,
 } from '../learning/daily-shard-control-aggregator.js';
+import { sealDailySurgeAnchorInventory } from '../learning/daily-shard-prefix-facts.js';
 import { createDailyShardedStudyClassifier } from '../learning/daily-sharded-study-classifier.js';
 import { openDailyShardedStudyRunnerForTest } from '../learning/daily-sharded-study-runner.js';
 import { DAILY_BROAD_ARCHIVE_MARKET_DAY_VERSION } from '../learning/daily-broad-archive-shards.js';
-import { sealDailyMoveStudyManifestV2, SUPPORT_FAMILIES } from '../learning/daily-move-study.js';
+import { buildDailyMoveStudy, sealDailyMoveStudyManifestV2, SUPPORT_FAMILIES } from '../learning/daily-move-study.js';
 import { canonicalDigest } from '../learning/shadow-contracts.js';
 import { marketIdentityDigest, sealAcceptedCatalogSnapshot } from '../learning/shadow-catalog-snapshot.js';
 
@@ -190,6 +191,18 @@ test('complete classifier ACKs persist one prefix artifact at a time, restart, a
     'FAILED_BREAKOUT_CONTROL', 'FALLING_CONTROL', 'FLAT_CONTROL',
   ]));
   assert.equal(done.result.controlMatches[0].missingClasses.length, 0);
+  const reference = buildDailyMoveStudy({
+    manifest: definition.manifest, acceptedCatalogSnapshot: definition.catalog,
+    marketDays: definition.shards.map((shard, index) => marketDayFor(shard, definition.kindList[index])),
+  });
+  const referenceSurge = reference.cases.find((row) => row.retrospectiveLabels.disposition === 'SURGE_CASE');
+  const expectedMatches = referenceSurge.matches.map((match) => ({
+    controlClass: match.controlClass,
+    marketIdentityDigest: reference.cases.find((row) => row.caseId === match.caseId).marketIdentityDigest,
+  })).sort((a, b) => a.controlClass.localeCompare(b.controlClass));
+  const actualMatches = done.result.controlMatches[0].matches.map(({ controlClass, marketIdentityDigest }) => ({ controlClass, marketIdentityDigest }))
+    .sort((a, b) => a.controlClass.localeCompare(b.controlClass));
+  assert.deepEqual(actualMatches, expectedMatches, 'sharded prefix matching must select the same controls as the existing whole-object law');
   assert.equal(done.result.attemptedSimulations, 0); assert.equal(done.result.completedSimulations, 0);
   assert.equal(done.result.validSimulationOutcomes, 0); assert.equal(done.result.learningEligible, false);
   await resumed.close();
@@ -298,4 +311,46 @@ test('equal-distance controls retain the existing daily-study caseId tie-break',
   const selected = done.result.controlMatches[0].matches.find((row) => row.controlClass === 'FLAT_CONTROL');
   assert.equal(selected.marketIdentityDigest, expected);
   await aggregate.close();
+});
+
+test('more than 1500 surge anchors refuses the whole inventory without a silent prefix', () => {
+  const size = 1_501; const manifestDigest = canonicalDigest({ manifest: 'anchor-overflow' });
+  const catalogContentDigest = canonicalDigest({ catalog: size }); const datasetDigest = canonicalDigest({ dataset: size });
+  const sourceDatasetDigest = canonicalDigest({ source: size });
+  const catalogEpochDigest = canonicalDigest({ epoch: size });
+  const job = {
+    jobId: 'overflow', jobDigest: canonicalDigest({ job: size }), datasetId: 'overflow-dataset', datasetDigest,
+    sourceDatasetDigest, catalogSnapshotDigest: catalogContentDigest, catalogEpochDigest, shardCount: size,
+  };
+  const descriptor = { shardCount: size, shards: [] }; const acknowledgments = []; let prior = null;
+  for (let index = 0; index < size; index += 1) {
+    const marketIdentity = canonicalDigest({ market: index }); const shardDigest = canonicalDigest({ shard: index });
+    const shard = { shardIndex: index, shardId: `dbams-${shardDigest}`, shardDigest, marketIdentityDigest: marketIdentity };
+    descriptor.shards.push(shard);
+    const marketDayDigest = canonicalDigest({ day: index }); const receiptDigest = canonicalDigest({ receipt: index });
+    const output = {
+      outputVersion: 'daily-shard-classification-output-1', marketIdentityDigest: marketIdentity,
+      marketDayDigest, jobDigest: job.jobDigest, manifestId: `dmstudy-${manifestDigest.slice(0, 24)}`,
+      manifestDigest, catalogContentDigest, sourceDatasetDigest,
+      catalogEpochDigest, acceptedDenominatorCount: size,
+      observedMarketDayCount: 1, placeholderMissingCount: size - 1,
+      classifiedCaseDigest: canonicalDigest({ case: index }), chronologyDigest: canonicalDigest({ chronology: index }),
+      disposition: 'SURGE_CASE', anchorTs: START + (index + 1) * MINUTE,
+      anchorPrefixDigest: canonicalDigest({ prefix: index }), plannedDecisionMoments: 1,
+      matchedControlCount: 0, globalControlMatchingState: 'DEFERRED_UNTIL_ALL_SHARD_CLASSIFICATIONS_ACKNOWLEDGED',
+      resultState: 'RETROSPECTIVE_CLASSIFIED_NO_SIMULATION', attemptedSimulations: 0,
+      completedSimulations: 0, validSimulationOutcomes: 0, authority: 'NONE',
+      learningEligible: false, simulationCredit: 0,
+    };
+    const ack = {
+      ackVersion: 'daily-shard-consumer-ack-1', ackDigest: '', jobId: 'overflow', jobDigest: job.jobDigest,
+      datasetId: 'overflow-dataset', datasetDigest, revision: index + 1, shardIndex: index,
+      shardId: shard.shardId, shardDigest, receiptDigest, marketDayDigest,
+      output, outputDigest: canonicalDigest(output), previousAckDigest: prior?.ackDigest ?? null,
+      acknowledgedTs: AS_OF + index, authority: 'NONE', learningEligible: false, simulationCredit: 0,
+    };
+    ack.ackDigest = canonicalDigest(Object.fromEntries(Object.entries(ack).filter(([key]) => key !== 'ackDigest')));
+    acknowledgments.push(ack); prior = ack;
+  }
+  assert.throws(() => sealDailySurgeAnchorInventory({ job, descriptor, acknowledgments }), { code: 'PREFIX_ANCHOR_LIMIT' });
 });
