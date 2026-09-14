@@ -302,8 +302,12 @@ export function opportunityAuditBroadDaySourceReceiptError(value, { item, asOfTs
       || value.valueLaw !== 'SIMPLE_RETURN_PCT_FROM_FIRST_AND_LAST_VERIFIED_CLOSED_1M_CLOSES'
       || value.authority !== 'NONE' || value.trainingAuthority !== 'NONE') return 'broad-day source receipt shape, request or timing malformed';
   if (value.resolutionState === 'AVAILABLE') {
-    const evidenceError = opportunityAuditCandleEvidenceError(evidence, { nowTs: value.preparedTs });
+    const evidenceError = opportunityAuditCandleEvidenceError(evidence, { nowTs: asOfTs });
+    const window = expectedWindow({ frameTs: item.frameTs }, item.horizonMs);
     if (evidenceError || value.resolutionReason !== null || value.archiveManifest === null
+        || window === null || evidence.canonicalCoin !== item.market.base
+        || evidence.bars.length !== window.count || evidence.bars[0].openTs !== window.anchorOpenTs
+        || evidence.bars.at(-1).openTs !== window.terminalOpenTs
         || value.recordCount !== evidence.bars.length || value.evidenceDigest !== evidence.evidenceDigest
         || value.anchorRecord === null || value.terminalRecord === null
         || value.anchorOpenTs !== evidence.bars[0].openTs || value.terminalOpenTs !== evidence.bars.at(-1).openTs
@@ -325,6 +329,8 @@ export function opportunityAuditBroadDaySourceReceiptError(value, { item, asOfTs
     // the named LOCAL_FILESYSTEM_ONLY datasets.
     const window = expectedWindow({ frameTs: item.frameTs }, item.horizonMs);
     if (!exact(value.archiveManifest, MANIFEST_KEYS) || !Array.isArray(value.archiveManifest.readerDatasets)
+        || value.archiveManifest.manifestVersion !== 'opportunity-audit-broad-day-manifest-1'
+        || !HEX64_RE.test(value.archiveManifest.catalogMembershipDigest ?? '')
         || value.archiveManifest.readerDatasets.length < 1 || value.archiveManifest.readerDatasets.length > 2
         || window === null || value.archiveManifest.requestedWindowStartTs !== window.anchorOpenTs
         || value.archiveManifest.requestedWindowEndTs !== window.terminalOpenTs + MINUTE_MS
@@ -357,6 +363,16 @@ export function sealOpportunityAuditBroadDaySourceReceipt(input = {}) {
     if (input.records[index].periodStartTs <= input.records[index - 1].periodStartTs) fail('SOURCE_RECEIPT_INVALID', 'source records duplicated or reordered');
   }
   const records = clone(input.records); const item = clone(input.item); const sourceBinding = clone(input.sourceBinding);
+  if (records.some((row) => row.knownAtTs > input.asOfTs)) fail('SOURCE_RECEIPT_INVALID', 'source record was unknown at the requested cutoff');
+  if (input.resolutionState === 'AVAILABLE') {
+    if (opportunityAuditCandleEvidenceError(input.evidence, { nowTs: input.asOfTs })
+        || records.length !== input.evidence.bars.length
+        || records.some((row, index) => {
+          const bar = input.evidence.bars[index];
+          return row.periodStartTs !== bar.openTs || row.periodEndTs !== bar.openTs + MINUTE_MS
+            || row.close !== bar.close || row.knownAtTs !== bar.knownAtTs;
+        })) fail('SOURCE_RECEIPT_INVALID', 'retained inventory disagrees with the complete candle evidence');
+  }
   if (input.archiveManifest !== null) {
     const error = manifestError(input.archiveManifest, item, sourceBinding, records, input.asOfTs);
     if (error) fail('SOURCE_RECEIPT_INVALID', error);
@@ -466,6 +482,16 @@ export function buildOpportunityAuditFollowup({ frame, opportunityId, horizonMs,
   if (frame.frameVersion === OPPORTUNITY_AUDIT_FRAME_VERSION_V2 && opportunityAuditPendingItemV2Error(requestItem)) {
     fail('SETTLEMENT_INVALID', 'V2 settlement requires its exact enriched pending request');
   }
+  if (frame.frameVersion === OPPORTUNITY_AUDIT_FRAME_VERSION_V2
+      && (requestItem.frameId !== frame.frameId || requestItem.frameDigest !== frame.frameDigest
+        || requestItem.frameTs !== frame.frameTs || requestItem.targetDigest !== canonicalDigest(frame.target)
+        || requestItem.opportunityId !== opportunityId || requestItem.horizonMs !== horizonMs
+        || requestItem.marketIdentityDigest !== entry.marketIdentityDigest || !same(requestItem.market, entry.market)
+        || requestItem.maxLabelDelayMs !== frame.target.maxLabelDelayMs
+        || requestItem.observationInclusionProbability !== entry.observationInclusionProbability
+        || !same(requestItem.actionPropensity, entry.actionPropensity))) {
+    fail('SETTLEMENT_INVALID', 'V2 pending request does not belong to this exact frame target');
+  }
   const copied = clone(resolution);
   const error = resolutionError(copied, frame, entry, horizonMs, recordedTs, { item: requestItem, asOfTs });
   if (error) fail('SETTLEMENT_INVALID', error);
@@ -549,6 +575,22 @@ export function opportunityAuditSettlementReceiptV2Error(receipt, { item, resolu
       item, asOfTs: receipt.sourceReceipt?.asOfTs, evidence: resolution.evidence,
     });
     if (sourceError) return sourceError;
+    const outcome = receipt.outcome; const source = receipt.sourceReceipt;
+    if (!same(outcome.settlementSourceReceipt, source)
+        || outcome.outcomeKnownAtTs !== source.preparedTs
+        || outcome.sourceReference?.sourceId !== source.sourceBinding.sourceId
+        || outcome.sourceReference?.sourceDigest !== source.receiptDigest
+        || outcome.authority !== 'NONE') return 'settlement outcome is detached from its exact source';
+    if (receipt.state === 'MATURED') {
+      const expectedReturn = ((source.terminalRecord.close / source.anchorRecord.close) - 1) * 100;
+      if (!isPlainObject(outcome.outcome) || outcome.outcome.returnPct !== expectedReturn
+          || outcome.outcome.targetDigest !== item.targetDigest || outcome.outcome.targetVersion !== item.targetVersion
+          || outcome.outcome.evidenceDigest !== source.evidenceDigest || outcome.missingReason !== null) {
+        return 'settlement outcome value disagrees with verified boundary prices';
+      }
+    } else if (outcome.outcome !== null || outcome.missingReason !== source.resolutionReason) {
+      return 'terminal missingness outcome disagrees with source';
+    }
   }
   const core = settlementReceiptCore(receipt);
   if (receipt.receiptId !== digest40('oasr', core)
