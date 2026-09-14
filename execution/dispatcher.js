@@ -71,6 +71,14 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     if (closed || writerLost) { counters.fencedCallbacks += 1; log(`adapter event ${ae?.type} after ${closed ? 'close' : 'lease loss'}: fenced (owner reconciliation books it)`); return null; }
     counters.adapterEvents += 1; if (revision === null) await load();
     const events = mapAdapterEvent(ae); for (const e of events) { try { await commit(e); } catch (err) { if (err.code === 'REDUCER_REFUSED' && ['DUPLICATE_EXECUTION'].includes(err.detail?.code)) continue; if (err.code === 'REDUCER_REFUSED') { log(`adapter event ${ae.type} refused: ${err.message}`); try { await commit(ev('RESTRICTION', { code: 'RECONCILIATION_REQUIRED', action: 'LATCH', scope: null, source: 'dispatcher', sessionDate: null, reason: `${ae.type} refused: ${err.detail?.code ?? err.code}`.slice(0, 200), ownerRef: null, ts: now() })); } catch { /* fenced or closed */ } continue; } throw err; } }
+    // RESERVATION SETTLEMENT (2026-09-14): a reservation is an entry's cash/risk hold. Once the venue reports the entry order
+    // TERMINAL (FILLED / EXPIRED / CANCELLED / REJECTED), the hold must be settled EXACTLY ONCE: the consumed part becomes the
+    // position's cost, the unused remainder is released. Before this seam the only settlement paths were pre-send refusals and
+    // the restart reconciliation of DISPATCH_UNCERTAIN orders, so every normally filled paper entry left its reservation OPEN
+    // forever: available cash was double-debited (cash already spent AND still reserved), the asset stayed "held" after the
+    // position went FLAT and the slot never came back. One trade froze the account. settleReservation is idempotent (it
+    // refuses unless the reservation is still OPEN and the order is terminal) and its release math is the existing law.
+    if (ae.type === 'ORDER_STATE' && TERMINAL_ORDER_STATES.includes(ae.payload?.state)) { const o = state.orders[ae.payload.orderId]; if (o && o.reservationId && (o.kind === 'ENTRY' || o.kind === 'CANARY_ENTRY')) { try { await settleReservation(o.orderId); } catch (err) { if (err.code === 'REDUCER_REFUSED') { log(`reservation settlement refused for ${o.orderId}: ${err.message}`); } else throw err; } } }
   }
   // two INDEPENDENT serialized pumps (closeout R08): a slow entry send never holds fill / protection / reconciliation work; the safety
   // bound is never a drop — an overflow latches OVERLOAD (no new entries) with the fills still processed
