@@ -1,6 +1,6 @@
 {
  "inventoryVersion": "serpent-sensor-inventory-1",
- "generatedTs": 1789233698646,
+ "generatedTs": 1789409562550,
  "profile": "paper",
  "policyFile": "config/market-research.paper.json",
  "classifications": [
@@ -455,7 +455,6 @@
    ],
    "paid": false,
    "budgetGovernor": "request reservation acknowledged in the existing journal before dispatch",
-   "activationReceipt": "none — Neynar entitlement, terms, retention classification and owner approval are unresolved; offline transport smoke is not live activation",
    "retentionTermsGate": "approved DERIVED_FEATURES and compatible existing Social journal retention",
    "liveTransport": true,
    "durableTruth": "existing epoch-fenced social journal",
@@ -481,7 +480,6 @@
    ],
    "paid": true,
    "budgetGovernor": "x-runtime governor: daily / monthly / USD caps + explicit paid smoke",
-   "activationReceipt": "none — paid smoke has not been performed; credential presence and configured budgets are not a receipt",
    "retentionTermsGate": "AVAILABLE_REQUIRES_CREDENTIAL",
    "liveTransport": true,
    "durableTruth": "PostgreSQL social journal",

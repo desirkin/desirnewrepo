@@ -60,11 +60,26 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       58f04c37a1b569447ffac2868799a9c9ac2fed816942a3c2b81023560d90597a
-execution/*.js   d9ce90d9b08977048fb333bb8a22b7e949613832193a58763238d79a9d671965
-watch/watch.js   dc49a39444e2971dafb766f2a831fda6894968238606c7c6bfa8b5b782cf53a6
-all (41 files)   de596a9656405be2e463a3985f5d14667ca725cedf68a08e0a8aaac18c7ac19a
+judge/*.js       b0f322af56481d14b17ed9b38f095c86b140837ff156abe3db378c350d9d3c49
+execution/*.js   9e03f82702ced8a112e25052f00c053f15a82e762d06f02883339cd047e27467
+watch/watch.js   be41c4bed1ce80fa185f3b1dca6151447200a4a1b33dd785a9ea65234251578d
+all (47 files)   5a36c0ebc96ff68da5b3360ada4edf1be8e4377843acab622e85b1915df049f4
 ```
+
+### 4.5 Audited change — 2026-09-14 release-acceptance assembly + reservation settlement (previous digests: judge `58f04c37a1b5…`, execution `d9ce90d9b089…`, watch `dc49a39444e2…`, all `de596a965640…`, 41 files)
+
+Scope: 27 commits between GitHub `main` (`ea3bfbf`) and `serpent/baseline` (`cbe2de5`) touched the frozen set — 24 files, +3,380 / −128 lines, six new `judge/` modules. These are the isolated repairs assembled into `codex/release-acceptance-20260914` on 2026-09-14 plus one dispatcher fix found by the full read-through. None of them had updated this section: the P-08 fence was red from the Replit patch series onward and stayed red because only focused files were ever run. This entry records the audit performed before re-pinning.
+
+What changed, by law:
+
+- **Five strategy families / edge-state exits** (`c3798ee`, `a659649`, `1aa979c`, `9affa73`): `judge/edge-state.js`, `judge/setup-selection.js`, `judge/size-ladder.js` added; `judge/setups.js`, `judge/policy.js`, `judge/judge.js`, `watch/watch.js` extended. Momentum and Micro-Bite become operational PAPER setups behind an explicit opt-in policy; Watch gains versioned edge-state exit reasons (`EDGE_STATE_UNKNOWN`, `EDGE_DECAY`, `DISTRIBUTION_EXHAUSTION`). Entry-time management versions are preserved across policy rollback. Catalyst evidence (exact crossing-time event/price) is frozen through confirmation and cannot be substituted later. Default policy unchanged.
+- **Learning intake and adaptive ranking hook** (`b775d05`, `33a06f0`, `c695632`, `893e92f`, `c70d103`, `d4986c2`, `f4c23d7`, `1ab37fa`, `c76feac`): `judge/learning-intake.js`, `judge/learning-recipe.js`, `judge/learning-snapshot-cache.js`, `judge/adaptive-facts-source.js`, `judge/adaptive-ranking-port.js` added. The Judge accepts a dormant-by-default adaptive ranking port whose only permitted effect is a bounded rank offset (`ADAPTIVE_EFFECT_REGISTRY.RANKING_SELECTION`); entry, exit and sizing remain `UNSUPPORTED`. Lossy fact inputs are rejected; the sidecar market identity is bound; escaped JSON is bounded before serialization. Any invalid or absent port input resolves to pure baseline. `composeJudge` passes no port today, so the running Judge is byte-for-byte the baseline decision path.
+- **Input history identity** (`ea26d03`): `judge/history.js` preserves exact Kraken pair identity, actual candle availability, and refuses falsely early live-bar closure.
+- **Account / input bindings** (`42edffe`): XBT/XDG alias mapping, PAPER policy-digest gate, non-QUOTE fee-mode refusal.
+- **Queue / canary / closeout integrity** (`4ff852e`, `c1b008f`, `5aa531d`, `f8525d6`, `a1d1396`, `167aa2c`, `e4dcf27`): zero-attempt entries recover after queue refusal; canary completion requires a dispatch attempt; unexecuted shells are excluded from trade evidence; executed closes with unknown outcomes are classified; composed ARM is guarded on persistence integrity; the CLI is bound to the persistence lifecycle; entry-only integrity gates (store guard) are added — unactivated.
+- **Reservation settlement** (`cbe2de5`, `execution/dispatcher.js`): a normally FILLED / EXPIRED / CANCELLED paper entry now settles its `RESERVATION_OPENED` hold exactly once when the venue reports the order terminal. Before this, the hold stayed OPEN forever after a fill: on a USD 500 account, cash 65.96 but availableCash −368.27 after one trade; the asset stayed held after FLAT and the slot never returned. Reproduced through the real Judge → dispatcher → paper adapter → Watch path (`test/judge-reservation-settlement.test.js`). The release math is the pre-existing `settleReservation` law; no reducer rule changed.
+
+Laws re-proved on the assembled tree (serial, offline guard, real PostgreSQL 16): 3,076 tests, 3,066 pass, 0 cancelled, 0 outbound attempts. `entryPermission()` remains the single permission law and is still evaluated pre-commit and twice pre-send. The paper profile still forces `JUDGE_MODE=PAPER`, `JUDGE_ALLOW_ORDERS=false`, `JUDGE_ALLOW_PRIVATE=false`. No LIVE path, threshold, or dark-Kraken authority changed.
 
 ### 4.4 Audited change — 2026-09-13 fail-closed learning and sizing review (previous digests: judge `c8e48d5c10b5...`, all `f9487cccf92f...`; execution/ and watch/watch.js still byte-identical)
 
