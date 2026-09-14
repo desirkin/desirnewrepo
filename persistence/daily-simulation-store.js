@@ -77,9 +77,19 @@ export function createDailySimulationStore({
     const completed = await db.query(SQL_BODY[SQL.COMPLETED_LIST], [storeIdentity, dayKey]);
     const completedIds = completed.rows.map((r) => r.sim_id);
     const agg = await db.query(SQL_BODY[SQL.EVIDENCE_AGGREGATE_DAY], [storeIdentity, dayKey]);
-    const byStatus = {}; let evRows = 0; let evCompleted = 0; let evValid = 0; let evProspective = 0;
-    for (const row of agg.rows) { byStatus[row.status] = Number(row.n); evRows += Number(row.n); evCompleted += Number(row.completed); evValid += Number(row.valid_modeled); evProspective += Number(row.prospective_eligible); }
+    const byStatus = {}; let evRows = 0; let evCompleted = 0;
+    for (const row of agg.rows) { byStatus[row.status] = Number(row.n); evRows += Number(row.n); evCompleted += Number(row.completed); }
     if (evCompleted < completedIds.length) throw new DsimStoreError('durable corruption: fewer completed evidence rows than completed index');
+    // Symmetric corruption guard: a completed evidence sim absent from the
+    // completed index would let it be re-credited later — that is LOST, not a
+    // healthy resume.
+    const distinct = await db.query(SQL_BODY[SQL.EVIDENCE_DISTINCT_COMPLETED], [storeIdentity, dayKey]);
+    if (Number(distinct.rows[0].n) > completedIds.length) throw new DsimStoreError('durable corruption: a completed evidence sim is missing from the completed index');
+    // validModeled/prospectiveEligible from the CREDITED (unique) rows only, so
+    // duplicate completed evidence cannot make them exceed completed.
+    const credited = await db.query(SQL_BODY[SQL.CREDITED_AGGREGATE], [storeIdentity, dayKey]);
+    const evValid = Number(credited.rows[0].valid) || 0;
+    const evProspective = Number(credited.rows[0].prospective) || 0;
     const pend = await db.query(SQL_BODY[SQL.PENDING_LIST], [storeIdentity, dayKey]);
     const pendingCustody = {};
     for (const r of pend.rows) pendingCustody[r.sim_id] = { status: r.status, digest: r.digest, firstSeenRev: Number(r.first_seen_rev), lastSeenRev: Number(r.last_seen_rev), attempts: Number(r.attempts) };
@@ -210,8 +220,10 @@ export function createDailySimulationStore({
       for (const id of derivedCompleted) await raw(SQL_BODY[SQL.PENDING_DELETE], [storeIdentity, receipt.dayKey, id]); // matured pending removed
       if (receipt.shortfall) await raw(SQL_BODY[SQL.DAY_SET_SHORTFALL], [storeIdentity, receipt.dayKey, jstr(receipt.shortfall)]);
 
-      // CAS fence — advance the day revision only from the exact parent.
-      const upd = await raw(SQL_BODY[SQL.DAY_UPDATE_CAS], [storeIdentity, receipt.dayKey, currentRev, resultingRevision]);
+      // CAS fence — advance the day revision only from the exact parent. Persist
+      // the rotation index too so fair-rotation position survives restart.
+      const rotationIndex = Number.isSafeInteger(receipt.rotationIndex) ? receipt.rotationIndex : 0;
+      const upd = await raw(SQL_BODY[SQL.DAY_UPDATE_CAS], [storeIdentity, receipt.dayKey, currentRev, resultingRevision, rotationIndex]);
       if (rowCountOf(upd) !== 1) throw new DsimStoreError('CAS revision advance affected != 1 row (concurrent writer fenced)');
       return { ok: true, batchId: receipt.batchId, payloadDigest: receipt.payloadDigest, revision: resultingRevision };
     });
@@ -232,5 +244,21 @@ export function createDailySimulationStore({
     });
   }
 
-  return Object.freeze({ STORE_PORT_VERSION, STORE_VERSION: DSIM_STORE_VERSION, isCommissioned, commissionStore, loadDay, commitBatch, recordPendingBackoff });
+  // Record a day's shortfall marker WITHOUT advancing the revision or writing a
+  // batch row (so repeated post-exhaustion ticks cannot inflate the revision or
+  // spam batch rows). Idempotent; materializes the day row if absent so a
+  // zero-progress day still records its shortfall durably.
+  async function recordShortfall({ dayKey, shortfall } = {}) {
+    if (typeof dayKey !== 'string' || !dayKey || !shortfall || typeof shortfall !== 'object') return { ok: false, reason: 'BAD_ARGS' };
+    return db.tx(async (q) => {
+      const store = await q(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
+      if (!store.rows.length) return { ok: false, reason: 'STORE_NOT_COMMISSIONED' };
+      const dayRes = await q(SQL_BODY[SQL.DAY_GET], [storeIdentity, dayKey]);
+      if (!dayRes.rows.length) await q(SQL_BODY[SQL.DAY_INSERT], [storeIdentity, dayKey, dailyTarget]);
+      await q(SQL_BODY[SQL.DAY_SET_SHORTFALL], [storeIdentity, dayKey, jstr(shortfall)]);
+      return { ok: true, dayKey };
+    });
+  }
+
+  return Object.freeze({ STORE_PORT_VERSION, STORE_VERSION: DSIM_STORE_VERSION, isCommissioned, commissionStore, loadDay, commitBatch, recordPendingBackoff, recordShortfall });
 }

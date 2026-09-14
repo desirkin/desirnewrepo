@@ -70,6 +70,16 @@ function makeStore() {
       const payloadDigest = corruptAck ? (corruptAck = false, 'fnv1a64:deadbeefdeadbeef') : receipt.payloadDigest;
       return { ok: true, batchId: receipt.batchId, payloadDigest, revision: led.revision };
     },
+    async recordShortfall({ dayKey, shortfall }) {
+      const led = days[dayKey] || (days[dayKey] = emptyLedger(dayKey)); // no revision advance
+      led.shortfall = shortfall;
+      return { ok: true, dayKey };
+    },
+    async recordPendingBackoff({ dayKey, jobId, nextEligibleTs, backoffAttempts }) {
+      const led = days[dayKey] || (days[dayKey] = emptyLedger(dayKey));
+      led.jobs[jobId] = { ...(led.jobs[jobId] || {}), nextEligibleTs, backoffAttempts };
+      return { ok: true, jobId, nextEligibleTs, backoffAttempts };
+    },
   };
 }
 

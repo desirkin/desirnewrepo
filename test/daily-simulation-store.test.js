@@ -30,13 +30,15 @@ function makeFakeDb() {
       case SQL.STORE_INSERT: { t.store.set(p[0], { identity: p[0], policy_version: p[1], store_version: p[2], commissioned_at: p[3] }); return { rows: [], rowCount: 1 }; }
       case SQL.DAY_GET: { const r = t.day.get(dkey(p[0], p[1])); return { rows: r ? [{ revision: r.revision, target: r.target, rotation_index: r.rotation_index, shortfall: r.shortfall }] : [] }; }
       case SQL.DAY_INSERT: { t.day.set(dkey(p[0], p[1]), { revision: 0, target: p[2], rotation_index: 0, shortfall: null }); return { rows: [], rowCount: 1 }; }
-      case SQL.DAY_UPDATE_CAS: { const r = t.day.get(dkey(p[0], p[1])); if (r && r.revision === p[2]) { r.revision = p[3]; return { rows: [], rowCount: 1 }; } return { rows: [], rowCount: 0 }; }
+      case SQL.DAY_UPDATE_CAS: { const r = t.day.get(dkey(p[0], p[1])); if (r && r.revision === p[2]) { r.revision = p[3]; if (p[4] !== undefined) r.rotation_index = p[4]; return { rows: [], rowCount: 1 }; } return { rows: [], rowCount: 0 }; }
       case SQL.DAY_SET_SHORTFALL: { const r = t.day.get(dkey(p[0], p[1])); if (r) { r.shortfall = typeof p[2] === 'string' ? JSON.parse(p[2]) : p[2]; return { rows: [], rowCount: 1 }; } return { rows: [], rowCount: 0 }; }
       case SQL.BATCH_GET: { const r = t.batch.get(bkey(p[0], p[1], p[2])); return { rows: r ? [{ batch_id: r.batch_id, payload_digest: r.payload_digest, resulting_revision: r.resulting_revision, tally: r.tally }] : [] }; }
       case SQL.BATCH_INSERT: { const r = { identity: p[0], day_key: p[1], batch_id: p[2], job_id: p[3], job_digest: p[4], payload_digest: p[5], parent_revision: p[6], resulting_revision: p[7], cursor_before: p[8], next_cursor: p[9], done: p[10], tally: p[11], executor_counters: p[12], observed_utc_ms: p[13] }; if (t.batch.has(bkey(p[0], p[1], p[2]))) throw new Error('duplicate batch pk'); t.batch.set(bkey(p[0], p[1], p[2]), r); return { rows: [], rowCount: 1 }; }
       case SQL.RESULT_INSERT: { t.result.push({ identity: p[0], day_key: p[1], batch_id: p[2], row_ordinal: p[3], sim_id: p[4], status: p[5], completed: p[6], valid_modeled: p[7], prospective_eligible: p[8], digest: p[9] }); return { rows: [], rowCount: 1 }; }
       case SQL.RESULT_COUNT_FOR_BATCH: { const n = t.result.filter((r) => r.identity === p[0] && r.day_key === p[1] && r.batch_id === p[2]).length; return { rows: [{ n }] }; }
       case SQL.EVIDENCE_AGGREGATE_DAY: { const g = new Map(); for (const r of t.result) { if (r.identity !== p[0] || r.day_key !== p[1]) continue; const e = g.get(r.status) || { status: r.status, n: 0, completed: 0, valid_modeled: 0, prospective_eligible: 0 }; e.n += 1; e.completed += r.completed ? 1 : 0; e.valid_modeled += r.valid_modeled ? 1 : 0; e.prospective_eligible += r.prospective_eligible ? 1 : 0; g.set(r.status, e); } return { rows: [...g.values()] }; }
+      case SQL.CREDITED_AGGREGATE: { let valid = 0; let prospective = 0; for (const r of t.result) { if (r.identity !== p[0] || r.day_key !== p[1] || !r.completed) continue; const c = t.completed.get(bkey(p[0], p[1], r.sim_id)); if (c && c.batch_id === r.batch_id) { valid += r.valid_modeled ? 1 : 0; prospective += r.prospective_eligible ? 1 : 0; } } return { rows: [{ valid, prospective }] }; }
+      case SQL.EVIDENCE_DISTINCT_COMPLETED: { const s = new Set(); for (const r of t.result) { if (r.identity === p[0] && r.day_key === p[1] && r.completed) s.add(r.sim_id); } return { rows: [{ n: s.size }] }; }
       case SQL.COMPLETED_HAS: { return { rows: t.completed.has(bkey(p[0], p[1], p[2])) ? [{ one: 1 }] : [] }; }
       case SQL.COMPLETED_INSERT: { const k = bkey(p[0], p[1], p[2]); if (t.completed.has(k)) throw new Error('duplicate completed pk'); t.completed.set(k, { batch_id: p[3] }); return { rows: [], rowCount: 1 }; }
       case SQL.COMPLETED_LIST: { const out = []; for (const [k] of t.completed) { const [id, dk, sim] = k.split('|'); if (id === p[0] && dk === p[1]) out.push(sim); } out.sort(); return { rows: out.map((sim_id) => ({ sim_id })) }; }
@@ -298,6 +300,51 @@ test('backoff: source maturity hint sets the revisit time', async () => {
   await s.tick(); // APPLIED
   const b = await s.tick(); assert.equal(b.tick, 'PENDING_BACKOFF');
   assert.equal(b.nextEligibleTs, HINT, 'source maturity hint used as revisit time (within cap)');
+});
+
+// ---- Phase-11 review regressions --------------------------------------------
+test('review#1: repeated ticks after exhaustion do not inflate revision or spam shortfall rows', async () => {
+  const db = makeFakeDb();
+  await createDailySimulationStore({ db, storeIdentity: 'iso:sf2' }).commissionStore();
+  const store = createDailySimulationStore({ db, storeIdentity: 'iso:sf2', dailyTarget: 10 });
+  const s = createDailySimulationScheduler({ store, jobSource: jobSource([modeledFrames('A', 3)]), executor: makeExecutor(), outcomePathSource, statusOf, identityOf, completedOf, validOf, prospectiveOf, dailyTarget: 10, maxEvalsPerTick: 1, clock: () => DAY1 });
+  await s.runToIdle(); // 3 completed then SHORTFALL
+  const rev1 = db._t.day.get('iso:sf2|2026-09-14').revision;
+  await s.tick(); await s.tick(); await s.tick(); // a periodic caller keeps ticking after exhaustion
+  const rev2 = db._t.day.get('iso:sf2|2026-09-14').revision;
+  assert.equal(rev2, rev1, 'revision did not inflate on repeated post-exhaustion ticks');
+  const sfRows = [...db._t.batch.values()].filter((b) => b.job_id === '__shortfall__');
+  assert.equal(sfRows.length, 0, 'shortfall is not a revision-advancing batch');
+  assert.ok(db._t.day.get('iso:sf2|2026-09-14').shortfall, 'shortfall still recorded durably');
+});
+
+test('review#2: a cursor-ADVANCING unchanged pending page still backs off (no duplicate evidence, no spin)', async () => {
+  const db = makeFakeDb();
+  await createDailySimulationStore({ db, storeIdentity: 'iso:adv' }).commissionStore();
+  const store = createDailySimulationStore({ db, storeIdentity: 'iso:adv', dailyTarget: 5 });
+  // pending page that ADVANCES the cursor each call while re-emitting the same pending sim
+  const override = ({ job, cursor }) => ({ jobId: job.jobId, cursor: cursor ?? 0, nextCursor: (cursor ?? 0) + 1, done: false, results: [{ simulationId: 'AP#0', status: 'PENDING_HORIZON', completed: false, validModeledOutcome: false, prospectiveQualificationEligible: false }], counters: {}, laws: [] });
+  const s = createDailySimulationScheduler({ store, jobSource: jobSource([{ jobId: 'AP', frames: [] }]), executor: makeExecutor({ override }), outcomePathSource, statusOf, identityOf, completedOf, validOf, prospectiveOf, dailyTarget: 5, maxEvalsPerTick: 1, pendingBackoff: { baseMs: 1000, maxMs: 60000, maxAttempts: 3 }, clock: () => DAY1 });
+  const t1 = await s.tick(); assert.equal(t1.tick, 'APPLIED');
+  const t2 = await s.tick(); assert.equal(t2.tick, 'PENDING_BACKOFF', 'no new completed and no new pending sim => backoff even though cursor advanced');
+  assert.equal(db._t.result.length, 1, 'no duplicate pending evidence from the cursor-advancing rescan');
+});
+
+test('review#3: validModeled/prospectiveEligible on RESUME never exceed completed despite duplicate completed evidence', async () => {
+  const db = makeFakeDb();
+  await createDailySimulationStore({ db, storeIdentity: 'iso:vm' }).commissionStore();
+  const store = createDailySimulationStore({ db, storeIdentity: 'iso:vm', dailyTarget: 100 });
+  // batch1: S#0 completed+valid+prospective
+  await store.commitBatch(receipt({ batchId: 'V1', dayKey: '2026-09-14', parentRevision: 0, resultEvidence: [{ id: 'S#0', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: true, digest: 'a' }] }));
+  // batch2: re-emits S#0 (already completed) as completed+valid+prospective again, plus a genuinely new S#1
+  await store.commitBatch(receipt({ batchId: 'V2', dayKey: '2026-09-14', parentRevision: 1,
+    resultEvidence: [{ id: 'S#0', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: true, digest: 'a' }, { id: 'S#1', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: false, digest: 'b' }],
+    newCompletedIds: ['S#1'], tally: { completed: 1, validModeled: 1, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 2 } }));
+  const led = (await store.loadDay('2026-09-14')).ledger;
+  assert.equal(led.totals.completed, 2, 'two unique completed');
+  assert.ok(led.totals.validModeled <= led.totals.completed, `validModeled(${led.totals.validModeled}) <= completed(${led.totals.completed})`);
+  assert.equal(led.totals.validModeled, 2, 'credited valid rows only (S#0 once, S#1 once)');
+  assert.equal(led.totals.prospectiveEligible, 1, 'credited prospective only once (S#0)');
 });
 
 // ---- direct store integrity --------------------------------------------------

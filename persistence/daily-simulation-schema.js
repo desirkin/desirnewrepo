@@ -115,6 +115,8 @@ export const SQL = Object.freeze({
   BATCH_LIST_DAY: 'DSIM/batch/list_day',
   JOBSCHED_LIST: 'DSIM/jobsched/list',
   JOBSCHED_UPSERT: 'DSIM/jobsched/upsert',
+  CREDITED_AGGREGATE: 'DSIM/result/credited_aggregate',
+  EVIDENCE_DISTINCT_COMPLETED: 'DSIM/result/distinct_completed',
 });
 
 // The real parameterized SQL bodies, keyed by the tokens above. The store uses
@@ -125,7 +127,7 @@ export const SQL_BODY = Object.freeze({
   [SQL.STORE_INSERT]: 'INSERT INTO serpent_dsim_store (identity, policy_version, store_version, commissioned_at) VALUES ($1,$2,$3,$4)',
   [SQL.DAY_GET]: 'SELECT revision, target, rotation_index, shortfall FROM serpent_dsim_day WHERE identity = $1 AND day_key = $2',
   [SQL.DAY_INSERT]: 'INSERT INTO serpent_dsim_day (identity, day_key, revision, target, rotation_index, shortfall) VALUES ($1,$2,0,$3,0,NULL)',
-  [SQL.DAY_UPDATE_CAS]: 'UPDATE serpent_dsim_day SET revision = $4 WHERE identity = $1 AND day_key = $2 AND revision = $3',
+  [SQL.DAY_UPDATE_CAS]: 'UPDATE serpent_dsim_day SET revision = $4, rotation_index = $5 WHERE identity = $1 AND day_key = $2 AND revision = $3',
   [SQL.DAY_SET_SHORTFALL]: 'UPDATE serpent_dsim_day SET shortfall = $3::jsonb WHERE identity = $1 AND day_key = $2',
   [SQL.BATCH_GET]: 'SELECT batch_id, payload_digest, resulting_revision, tally FROM serpent_dsim_batch WHERE identity = $1 AND day_key = $2 AND batch_id = $3',
   [SQL.BATCH_INSERT]: 'INSERT INTO serpent_dsim_batch (identity, day_key, batch_id, job_id, job_digest, payload_digest, parent_revision, resulting_revision, cursor_before, next_cursor, done, tally, executor_counters, observed_utc_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12::jsonb,$13::jsonb,$14)',
@@ -146,6 +148,16 @@ export const SQL_BODY = Object.freeze({
   [SQL.BATCH_LIST_DAY]: 'SELECT batch_id, job_id, next_cursor, cursor_before, payload_digest, done FROM serpent_dsim_batch WHERE identity = $1 AND day_key = $2 ORDER BY resulting_revision',
   [SQL.JOBSCHED_LIST]: 'SELECT job_id, next_eligible_ts, backoff_attempts FROM serpent_dsim_job_schedule WHERE identity = $1 AND day_key = $2',
   [SQL.JOBSCHED_UPSERT]: 'INSERT INTO serpent_dsim_job_schedule (identity, day_key, job_id, next_eligible_ts, backoff_attempts) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (identity, day_key, job_id) DO UPDATE SET next_eligible_ts = EXCLUDED.next_eligible_ts, backoff_attempts = EXCLUDED.backoff_attempts',
+  // validModeled/prospectiveEligible counted ONLY over the credited (unique)
+  // completed rows — join evidence to the completed index on (sim_id,batch_id) —
+  // so duplicate completed evidence rows cannot inflate these tallies on RESUME.
+  [SQL.CREDITED_AGGREGATE]: `SELECT
+     sum(CASE WHEN r.valid_modeled THEN 1 ELSE 0 END)::int AS valid,
+     sum(CASE WHEN r.prospective_eligible THEN 1 ELSE 0 END)::int AS prospective
+     FROM serpent_dsim_result r
+     JOIN serpent_dsim_completed c ON c.identity = r.identity AND c.day_key = r.day_key AND c.sim_id = r.sim_id AND c.batch_id = r.batch_id
+     WHERE r.identity = $1 AND r.day_key = $2 AND r.completed`,
+  [SQL.EVIDENCE_DISTINCT_COMPLETED]: 'SELECT count(DISTINCT sim_id)::int AS n FROM serpent_dsim_result WHERE identity = $1 AND day_key = $2 AND completed',
 });
 
 // ---- bounded multi-row INSERT (perf: one round-trip per bounded chunk) -------

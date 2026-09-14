@@ -105,6 +105,7 @@ function emptyDay(dayKey, target, policyVersion) {
     pendingCustody: {},       // simulationId -> { status, digest, firstSeenRev, lastSeenRev, attempts }
     appliedBatchIds: [],      // idempotency ledger
     shortfall: null,
+    shortfallPersisted: false,
   };
 }
 
@@ -182,6 +183,7 @@ export function createDailySimulationScheduler({
       pendingCustody: { ...l.pendingCustody },
       appliedBatchIds: [...l.appliedBatchIds],
       shortfall: l.shortfall ?? null,
+      shortfallPersisted: !!l.shortfall,
       revision: l.revision,
       rotationIndex: Number.isSafeInteger(l.rotationIndex) ? l.rotationIndex : 0,
     };
@@ -200,7 +202,11 @@ export function createDailySimulationScheduler({
   function targetMet() { return completedTotal() >= day.target; }
 
   function batchIdOf({ jobDigest, cursorBefore, parentRevision, payloadDigest }) {
-    return [SCHEDULER_PORT_VERSION, policyVersion, day.dayKey, jobDigest, cursorBefore === null || cursorBefore === undefined ? 'INIT' : String(cursorBefore), `r${parentRevision}`, payloadDigest].join('|');
+    // canonical cursor serialization (never String()) so object-valued cursors
+    // don't collide (String({}) === '[object Object]') and structurally-equal
+    // cursors map to one batchId.
+    const cur = cursorBefore === null || cursorBefore === undefined ? 'INIT' : `c:${stableStringify(cursorBefore)}`;
+    return [SCHEDULER_PORT_VERSION, policyVersion, day.dayKey, jobDigest, cur, `r${parentRevision}`, payloadDigest].join('|');
   }
 
   function jobRunnable(st, nowTs) { return !st || (!st.done && !st.stalled && !(st.nextEligibleTs > nowTs)); }
@@ -310,13 +316,18 @@ export function createDailySimulationScheduler({
         } else { tTerminal += 1; }
       }
 
-      // sim2-revisit-1: an UNCHANGED pending page (already committed once at this
-      // cursor with this exact payload, zero new completed) is NOT re-committed —
-      // no duplicate evidence, no manufactured completed/prospective. Apply a
-      // bounded, persisted backoff (source maturity hint if present, else capped
-      // exponential) so a never-maturing job cannot spin, and let other
-      // candidates rotate. Evidence is never expired.
-      if (tCompleted === 0 && res.results.length > 0 && st.lastPayloadDigest === payloadDigest && st.lastCursor === cursorBefore) {
+      // sim2-revisit-1: a NO-PROGRESS pending page is NOT re-committed — no
+      // duplicate evidence, no manufactured completed/prospective. "Progress" is
+      // a new completed OR a new pending sim (custody not seen before); a page
+      // with neither, whose content is unchanged from the last committed page
+      // (same payload digest), backs off. This is cursor-agnostic: a rescan that
+      // merely ADVANCES the cursor while re-emitting the same sims still backs
+      // off (finding #2). The first occurrence of any page has a changed digest,
+      // so terminal/pending evidence is always recorded once before backoff.
+      const newPendingCount = pendingDelta.reduce((n, p) => n + (day.pendingCustody[p.id] ? 0 : 1), 0);
+      const madeProgress = tCompleted > 0 || newPendingCount > 0;
+      const contentUnchanged = st.lastPayloadDigest === payloadDigest;
+      if (!madeProgress && contentUnchanged && res.results.length > 0) {
         st.backoffAttempts = (st.backoffAttempts || 0) + 1;
         const capExp = Math.min(st.backoffAttempts - 1, 30);
         const expDelay = Math.min(pendingBackoff.maxMs, pendingBackoff.baseMs * Math.pow(2, capExp));
@@ -337,7 +348,7 @@ export function createDailySimulationScheduler({
       const receipt = {
         port: SCHEDULER_PORT_VERSION, policyVersion, batchId, dayKey: day.dayKey, jobId, jobDigest,
         cursorBefore, nextCursor: res.nextCursor ?? null, done: res.done === true,
-        parentRevision, expectedRevision: parentRevision + 1, payloadDigest,
+        parentRevision, expectedRevision: parentRevision + 1, payloadDigest, rotationIndex: day.rotationIndex,
         completedResults, newCompletedIds, pendingDelta, resultEvidence, byStatus,
         tally: { completed: tCompleted, validModeled: tValid, prospectiveEligible: tProspective, pending: tPending, terminalNonCompleted: tTerminal, duplicates: tDup, pageSize: res.results.length },
         executorCounters: res.counters ?? null, executorLaws: res.laws ?? null, observedUtcMs: nowTs,
@@ -401,16 +412,12 @@ export function createDailySimulationScheduler({
   function parkIfExhausted(st) { if (st.attempts >= maxJobAttempts) { st.stalled = true; st.lastStatus = 'STALLED'; } }
 
   async function persistShortfall(shortfall) {
-    const batchId = `${SCHEDULER_PORT_VERSION}|${policyVersion}|${day.dayKey}|__shortfall__|r${day.revision}|${shortfall.completed}`;
-    if (day.appliedBatchIds.includes(batchId)) return;
-    const receipt = {
-      port: SCHEDULER_PORT_VERSION, policyVersion, batchId, dayKey: day.dayKey, jobId: '__shortfall__', jobDigest: '__shortfall__',
-      cursorBefore: null, nextCursor: null, done: true, parentRevision: day.revision, expectedRevision: day.revision + 1,
-      payloadDigest: digest(shortfall), completedResults: [], newCompletedIds: [], pendingDelta: [], resultEvidence: [], byStatus: {},
-      tally: { completed: 0, validModeled: 0, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 0 },
-      executorCounters: null, executorLaws: null, observedUtcMs: shortfall.observedUtcMs, shortfall,
-    };
-    try { const ack = await store.commitBatch(receipt); if (ack && ack.ok === true) { day.appliedBatchIds.push(batchId); day.revision = ack.revision; } }
+    // Record the shortfall marker WITHOUT advancing the revision (a shortfall is
+    // not progress). Persist once per day so repeated post-exhaustion ticks
+    // cannot inflate the revision or spam rows (finding #1).
+    if (day.shortfallPersisted) return;
+    if (typeof store.recordShortfall !== 'function') { day.shortfallPersisted = true; return; }
+    try { const w = await store.recordShortfall({ dayKey: day.dayKey, shortfall }); if (w && w.ok === true) day.shortfallPersisted = true; else log(`shortfall persist refused (${w && w.reason})`); }
     catch (err) { log(`shortfall persist unacked: ${err && err.message}`); }
   }
 
