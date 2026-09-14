@@ -14,7 +14,7 @@ import { SQL, SQL_BODY, RESULT_INSERT_BULK_PREFIX, COMPLETED_INSERT_BULK_PREFIX 
 
 // compact in-memory transactional fake Db (same emulation as the store suite)
 function makeFakeDb() {
-  const t = { store: new Map(), day: new Map(), batch: new Map(), completed: new Map(), pending: new Map(), result: [] };
+  const t = { store: new Map(), day: new Map(), batch: new Map(), completed: new Map(), pending: new Map(), result: [], jobsched: new Map() };
   const B2T = new Map(Object.entries(SQL_BODY).map(([tok, body]) => [body, tok]));
   const dk = (a, b) => `${a}|${b}`; const bk = (a, b, c) => `${a}|${b}|${c}`;
   function run(body, p) {
@@ -29,7 +29,7 @@ function makeFakeDb() {
       case SQL.DAY_UPDATE_CAS: { const r = t.day.get(dk(p[0], p[1])); if (r && r.revision === p[2]) { r.revision = p[3]; return { rowCount: 1, rows: [] }; } return { rowCount: 0, rows: [] }; }
       case SQL.DAY_SET_SHORTFALL: { const r = t.day.get(dk(p[0], p[1])); if (r) r.shortfall = JSON.parse(p[2]); return { rowCount: 1, rows: [] }; }
       case SQL.BATCH_GET: { const r = t.batch.get(bk(p[0], p[1], p[2])); return { rows: r ? [{ batch_id: r.batch_id, payload_digest: r.payload_digest, resulting_revision: r.resulting_revision, tally: r.tally }] : [] }; }
-      case SQL.BATCH_INSERT: { const k = bk(p[0], p[1], p[2]); if (t.batch.has(k)) throw new Error('dup batch'); t.batch.set(k, { identity: p[0], day_key: p[1], batch_id: p[2], job_id: p[3], payload_digest: p[5], resulting_revision: p[7], next_cursor: p[9], done: p[10] }); return { rowCount: 1, rows: [] }; }
+      case SQL.BATCH_INSERT: { const k = bk(p[0], p[1], p[2]); if (t.batch.has(k)) throw new Error('dup batch'); t.batch.set(k, { identity: p[0], day_key: p[1], batch_id: p[2], job_id: p[3], payload_digest: p[5], resulting_revision: p[7], cursor_before: p[8], next_cursor: p[9], done: p[10] }); return { rowCount: 1, rows: [] }; }
       case SQL.RESULT_INSERT: { t.result.push({ identity: p[0], day_key: p[1], batch_id: p[2], sim_id: p[4], status: p[5], completed: p[6], valid_modeled: p[7], prospective_eligible: p[8] }); return { rowCount: 1, rows: [] }; }
       case SQL.EVIDENCE_AGGREGATE_DAY: { const g = new Map(); for (const r of t.result) { if (r.identity !== p[0] || r.day_key !== p[1]) continue; const e = g.get(r.status) || { status: r.status, n: 0, completed: 0, valid_modeled: 0, prospective_eligible: 0 }; e.n++; e.completed += r.completed ? 1 : 0; e.valid_modeled += r.valid_modeled ? 1 : 0; e.prospective_eligible += r.prospective_eligible ? 1 : 0; g.set(r.status, e); } return { rows: [...g.values()] }; }
       case SQL.COMPLETED_HAS: return { rows: t.completed.has(bk(p[0], p[1], p[2])) ? [{ one: 1 }] : [] };
@@ -39,7 +39,9 @@ function makeFakeDb() {
       case SQL.PENDING_LIST: { const out = []; for (const [k, v] of t.pending) { const [id, d, sim] = k.split('|'); if (id === p[0] && d === p[1]) out.push({ sim_id: sim, ...v }); } return { rows: out }; }
       case SQL.PENDING_UPSERT: { t.pending.set(bk(p[0], p[1], p[2]), { status: p[3], digest: p[4], first_seen_rev: p[5], last_seen_rev: p[6], attempts: p[7] }); return { rowCount: 1, rows: [] }; }
       case SQL.PENDING_DELETE: { t.pending.delete(bk(p[0], p[1], p[2])); return { rowCount: 1, rows: [] }; }
-      case SQL.BATCH_LIST_DAY: { const out = []; for (const v of t.batch.values()) if (v.identity === p[0] && v.day_key === p[1]) out.push({ batch_id: v.batch_id, job_id: v.job_id, next_cursor: v.next_cursor, done: v.done, resulting_revision: v.resulting_revision }); out.sort((a, b) => a.resulting_revision - b.resulting_revision); return { rows: out.map(({ batch_id, job_id, next_cursor, done }) => ({ batch_id, job_id, next_cursor, done })) }; }
+      case SQL.BATCH_LIST_DAY: { const out = []; for (const v of t.batch.values()) if (v.identity === p[0] && v.day_key === p[1]) out.push({ batch_id: v.batch_id, job_id: v.job_id, next_cursor: v.next_cursor, cursor_before: v.cursor_before, payload_digest: v.payload_digest, done: v.done, resulting_revision: v.resulting_revision }); out.sort((a, b) => a.resulting_revision - b.resulting_revision); return { rows: out.map(({ batch_id, job_id, next_cursor, cursor_before, payload_digest, done }) => ({ batch_id, job_id, next_cursor, cursor_before, payload_digest, done })) }; }
+      case SQL.JOBSCHED_LIST: { const out = []; for (const [k, v] of t.jobsched) { const [id, d, job] = k.split('|'); if (id === p[0] && d === p[1]) out.push({ job_id: job, next_eligible_ts: v.next_eligible_ts, backoff_attempts: v.backoff_attempts }); } return { rows: out }; }
+      case SQL.JOBSCHED_UPSERT: { t.jobsched.set(bk(p[0], p[1], p[2]), { next_eligible_ts: p[3], backoff_attempts: p[4] }); return { rowCount: 1, rows: [] }; }
       default: throw new Error('fake: ' + body);
     }
   }

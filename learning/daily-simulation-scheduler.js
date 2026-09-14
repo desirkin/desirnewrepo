@@ -51,6 +51,15 @@ export const MAX_RESULT_ROWS_PER_PAGE = 4096;    // 64 frames * up to 64 variant
 export const DEFAULT_MAX_EVALS_PER_TICK = 1;     // frames; default 1 => <=64 result rows until larger pages are tested
 export const DEFAULT_MAX_JOB_ATTEMPTS = 8;
 export const MAX_IDENTITY_BYTES = 256;
+// sim2-revisit-1 (additive): bounded persisted revisit/backoff for UNCHANGED
+// PENDING_HORIZON pages so a never-maturing job cannot spin. An unchanged
+// pending page (same job+cursor+payloadDigest, zero new completed) is NOT
+// re-committed; the job is delayed until next_eligible_ts (a source maturity
+// hint if present, else capped exponential backoff) and other candidates rotate
+// in the meantime. Backoff timing/counters persist across restart. Nothing here
+// fabricates completed/zero outcomes or expires evidence.
+export const REVISIT_CONTRACT_VERSION = 'sim2-revisit-1';
+export const DEFAULT_PENDING_BACKOFF = Object.freeze({ baseMs: 60_000, maxMs: 3_600_000, maxAttempts: 32 });
 
 export class SchedulerStorageError extends Error { constructor(m) { super(`SCHEDULER_STORAGE: ${m}`); this.name = 'SchedulerStorageError'; } }
 export class SchedulerContractError extends Error { constructor(m) { super(`SCHEDULER_CONTRACT: ${m}`); this.name = 'SchedulerContractError'; } }
@@ -103,6 +112,8 @@ export function createDailySimulationScheduler({
   store, jobSource, executor, outcomePathSource,
   statusOf, identityOf, completedOf, validOf,
   prospectiveOf = () => false, // distinct from completed/validModeled; injected when known
+  maturityOf = () => undefined, // optional: source-provided availability/maturity ts (ms) for a pending result
+  pendingBackoff = DEFAULT_PENDING_BACKOFF,
   isRevisitable = (r) => !completedOf(r) && REVISITABLE_DEFAULT.has(statusOf(r)),
   digest = defaultDigest,
   jobDigestOf = (job) => defaultDigest(job),
@@ -177,8 +188,13 @@ export function createDailySimulationScheduler({
   }
 
   function jobState(jobId) {
-    if (!day.jobs[jobId]) day.jobs[jobId] = { cursor: null, done: false, completed: 0, attempts: 0, lastStatus: 'NEW', stalled: false };
-    return day.jobs[jobId];
+    if (!day.jobs[jobId]) day.jobs[jobId] = { cursor: null, done: false, completed: 0, attempts: 0, lastStatus: 'NEW', stalled: false, lastPayloadDigest: null, lastCursor: undefined, backoffAttempts: 0, nextEligibleTs: 0 };
+    const st = day.jobs[jobId];
+    if (st.backoffAttempts === undefined) st.backoffAttempts = 0;
+    if (st.nextEligibleTs === undefined) st.nextEligibleTs = 0;
+    if (!('lastPayloadDigest' in st)) st.lastPayloadDigest = null;
+    if (!('lastCursor' in st)) st.lastCursor = undefined;
+    return st;
   }
   function completedTotal() { return day.totals.completed; }
   function targetMet() { return completedTotal() >= day.target; }
@@ -187,8 +203,9 @@ export function createDailySimulationScheduler({
     return [SCHEDULER_PORT_VERSION, policyVersion, day.dayKey, jobDigest, cursorBefore === null || cursorBefore === undefined ? 'INIT' : String(cursorBefore), `r${parentRevision}`, payloadDigest].join('|');
   }
 
-  function pickJob(readyJobs) {
-    const runnable = readyJobs.filter((j) => { const st = day.jobs[j.jobId]; return !st || (!st.done && !st.stalled); });
+  function jobRunnable(st, nowTs) { return !st || (!st.done && !st.stalled && !(st.nextEligibleTs > nowTs)); }
+  function pickJob(readyJobs, nowTs) {
+    const runnable = readyJobs.filter((j) => jobRunnable(day.jobs[j.jobId], nowTs));
     if (runnable.length === 0) return null;
     runnable.sort((a, b) => (a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0));
     const idx = day.rotationIndex % runnable.length;
@@ -224,11 +241,19 @@ export function createDailySimulationScheduler({
       catch (err) { throw new SchedulerStorageError(`jobSource.readyJobs failed: ${err && err.message}`); }
       if (!Array.isArray(readyJobs)) throw new SchedulerContractError('readyJobs() must return an array');
 
-      const picked = pickJob(readyJobs);
+      const picked = pickJob(readyJobs, nowTs);
       if (!picked) {
         const knownJobIds = new Set([...readyJobs.map((j) => j.jobId), ...Object.keys(day.jobs)]);
-        const anyOpen = [...knownJobIds].some((id) => { const st = day.jobs[id]; return !st || (!st.done && !st.stalled); });
-        if (!anyOpen && !targetMet()) {
+        // A job that is neither done nor stalled but is waiting on a backoff
+        // window is NOT exhausted input — it may still mature.
+        const backedOff = [...knownJobIds].filter((id) => { const st = day.jobs[id]; return st && !st.done && !st.stalled && st.nextEligibleTs > nowTs; });
+        const anyOpenNow = [...knownJobIds].some((id) => jobRunnable(day.jobs[id], nowTs));
+        if (!anyOpenNow && backedOff.length > 0) {
+          const earliest = Math.min(...backedOff.map((id) => day.jobs[id].nextEligibleTs));
+          return { tick: 'ALL_BACKED_OFF', dayKey, earliestNextEligibleTs: earliest, backedOff: backedOff.length };
+        }
+        const anyOpenEver = [...knownJobIds].some((id) => { const st = day.jobs[id]; return !st || (!st.done && !st.stalled); });
+        if (!anyOpenEver && !targetMet()) {
           day.shortfall = { dayKey, target: day.target, completed: completedTotal(), shortfall: day.target - completedTotal(), pending: Object.keys(day.pendingCustody).length, reason: 'INPUT_EXHAUSTED', observedUtcMs: nowTs };
           await persistShortfall(day.shortfall);
           return { tick: 'SHORTFALL', ...day.shortfall };
@@ -285,6 +310,30 @@ export function createDailySimulationScheduler({
         } else { tTerminal += 1; }
       }
 
+      // sim2-revisit-1: an UNCHANGED pending page (already committed once at this
+      // cursor with this exact payload, zero new completed) is NOT re-committed —
+      // no duplicate evidence, no manufactured completed/prospective. Apply a
+      // bounded, persisted backoff (source maturity hint if present, else capped
+      // exponential) so a never-maturing job cannot spin, and let other
+      // candidates rotate. Evidence is never expired.
+      if (tCompleted === 0 && res.results.length > 0 && st.lastPayloadDigest === payloadDigest && st.lastCursor === cursorBefore) {
+        st.backoffAttempts = (st.backoffAttempts || 0) + 1;
+        const capExp = Math.min(st.backoffAttempts - 1, 30);
+        const expDelay = Math.min(pendingBackoff.maxMs, pendingBackoff.baseMs * Math.pow(2, capExp));
+        let nextEligibleTs = nowTs + expDelay;
+        const hints = [];
+        for (const r of res.results) { const m = maturityOf(r); if (Number.isFinite(m) && m > nowTs) hints.push(m); }
+        if (hints.length) nextEligibleTs = Math.min(nowTs + pendingBackoff.maxMs, Math.max(...hints)); // source-provided maturity, capped
+        const stalled = st.backoffAttempts > pendingBackoff.maxAttempts;
+        if (stalled) st.stalled = true;
+        st.nextEligibleTs = nextEligibleTs; st.lastStatus = stalled ? 'PENDING_STALLED' : 'PENDING_BACKOFF';
+        if (typeof store.recordPendingBackoff === 'function') {
+          const w = await store.recordPendingBackoff({ dayKey: day.dayKey, jobId, nextEligibleTs, backoffAttempts: st.backoffAttempts });
+          if (!w || w.ok !== true) log(`pending backoff persist refused (${w && w.reason})`);
+        }
+        return { tick: stalled ? 'PENDING_STALLED' : 'PENDING_BACKOFF', jobId, backoffAttempts: st.backoffAttempts, nextEligibleTs, pending: tPending, credited: 0 };
+      }
+
       const receipt = {
         port: SCHEDULER_PORT_VERSION, policyVersion, batchId, dayKey: day.dayKey, jobId, jobDigest,
         cursorBefore, nextCursor: res.nextCursor ?? null, done: res.done === true,
@@ -331,6 +380,13 @@ export function createDailySimulationScheduler({
         day.pendingCustody[p.id] = { status: p.status, digest: p.digest, firstSeenRev: prev ? prev.firstSeenRev : ack.revision, lastSeenRev: ack.revision, attempts: (prev ? prev.attempts : 0) + 1 };
       }
       st.cursor = receipt.nextCursor; st.completed += tCompleted; st.attempts = 0; st.lastStatus = 'APPLIED';
+      // A committed batch means progress or a CHANGED page — record it and reset
+      // the pending backoff so a later genuine change is retried promptly. If the
+      // job had a persisted backoff, clear it durably too (a stale future
+      // next_eligible_ts must not hold it after a restart).
+      const hadBackoff = st.backoffAttempts > 0 || st.nextEligibleTs > 0;
+      st.lastPayloadDigest = payloadDigest; st.lastCursor = cursorBefore; st.backoffAttempts = 0; st.nextEligibleTs = 0;
+      if (hadBackoff && typeof store.recordPendingBackoff === 'function') { const w = await store.recordPendingBackoff({ dayKey: day.dayKey, jobId, nextEligibleTs: 0, backoffAttempts: 0 }); if (!w || w.ok !== true) log(`backoff reset persist refused (${w && w.reason})`); }
       if (receipt.done) st.done = true;
       if (completedTotal() > day.target) day.totals.overshoot = completedTotal() - day.target;
 
@@ -363,7 +419,7 @@ export function createDailySimulationScheduler({
     while (n < maxTicks && !draining) {
       const t = await tick(nowTs === null ? {} : { nowTs });
       outcomes.push(t.tick); n += 1;
-      if (['TARGET_MET', 'SHORTFALL', 'NO_READY_JOBS', 'DRAINING'].includes(t.tick)) break;
+      if (['TARGET_MET', 'SHORTFALL', 'NO_READY_JOBS', 'DRAINING', 'ALL_BACKED_OFF'].includes(t.tick)) break;
       await new Promise((resolve) => setImmediate(resolve)); // CPU/backpressure yield
     }
     return { ticks: n, outcomes, last: outcomes[outcomes.length - 1] ?? null };

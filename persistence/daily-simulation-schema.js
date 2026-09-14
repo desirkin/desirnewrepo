@@ -80,6 +80,16 @@ export const PROPOSED_DDL = Object.freeze([
      last_seen_rev  bigint NOT NULL,
      attempts       integer NOT NULL,
      PRIMARY KEY (identity, day_key, sim_id))`,
+  // sim2-revisit-1 (additive): bounded persisted revisit/backoff for unchanged
+  // PENDING_HORIZON jobs. Scheduling metadata only — carries no evidence or
+  // counters and never advances the day revision.
+  `CREATE TABLE IF NOT EXISTS serpent_dsim_job_schedule (
+     identity        text NOT NULL,
+     day_key         text NOT NULL,
+     job_id          text NOT NULL,
+     next_eligible_ts bigint NOT NULL,
+     backoff_attempts integer NOT NULL,
+     PRIMARY KEY (identity, day_key, job_id))`,
 ]);
 
 // ---- exact DML the store issues (matched by identity in tests) --------------
@@ -103,6 +113,8 @@ export const SQL = Object.freeze({
   PENDING_UPSERT: 'DSIM/pending/upsert',
   PENDING_DELETE: 'DSIM/pending/delete',
   BATCH_LIST_DAY: 'DSIM/batch/list_day',
+  JOBSCHED_LIST: 'DSIM/jobsched/list',
+  JOBSCHED_UPSERT: 'DSIM/jobsched/upsert',
 });
 
 // The real parameterized SQL bodies, keyed by the tokens above. The store uses
@@ -131,7 +143,9 @@ export const SQL_BODY = Object.freeze({
   [SQL.PENDING_LIST]: 'SELECT sim_id, status, digest, first_seen_rev, last_seen_rev, attempts FROM serpent_dsim_pending WHERE identity = $1 AND day_key = $2 ORDER BY sim_id',
   [SQL.PENDING_UPSERT]: 'INSERT INTO serpent_dsim_pending (identity, day_key, sim_id, status, digest, first_seen_rev, last_seen_rev, attempts) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (identity, day_key, sim_id) DO UPDATE SET status = EXCLUDED.status, digest = EXCLUDED.digest, last_seen_rev = EXCLUDED.last_seen_rev, attempts = EXCLUDED.attempts',
   [SQL.PENDING_DELETE]: 'DELETE FROM serpent_dsim_pending WHERE identity = $1 AND day_key = $2 AND sim_id = $3',
-  [SQL.BATCH_LIST_DAY]: 'SELECT batch_id, job_id, next_cursor, done FROM serpent_dsim_batch WHERE identity = $1 AND day_key = $2 ORDER BY resulting_revision',
+  [SQL.BATCH_LIST_DAY]: 'SELECT batch_id, job_id, next_cursor, cursor_before, payload_digest, done FROM serpent_dsim_batch WHERE identity = $1 AND day_key = $2 ORDER BY resulting_revision',
+  [SQL.JOBSCHED_LIST]: 'SELECT job_id, next_eligible_ts, backoff_attempts FROM serpent_dsim_job_schedule WHERE identity = $1 AND day_key = $2',
+  [SQL.JOBSCHED_UPSERT]: 'INSERT INTO serpent_dsim_job_schedule (identity, day_key, job_id, next_eligible_ts, backoff_attempts) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (identity, day_key, job_id) DO UPDATE SET next_eligible_ts = EXCLUDED.next_eligible_ts, backoff_attempts = EXCLUDED.backoff_attempts',
 });
 
 // ---- bounded multi-row INSERT (perf: one round-trip per bounded chunk) -------

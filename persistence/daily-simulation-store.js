@@ -86,7 +86,20 @@ export function createDailySimulationStore({
     const batches = await db.query(SQL_BODY[SQL.BATCH_LIST_DAY], [storeIdentity, dayKey]);
     const appliedBatchIds = batches.rows.map((r) => r.batch_id);
     const jobs = {};
-    for (const r of batches.rows) { if (r.job_id === '__shortfall__') continue; jobs[r.job_id] = { cursor: parseJson(r.next_cursor), done: r.done === true, completed: 0, attempts: 0, lastStatus: 'APPLIED', stalled: false }; }
+    // batches are ordered by resulting_revision, so the LAST row per job carries
+    // its current cursor + the payload_digest/cursor it last committed at (used
+    // by the scheduler's unchanged-pending backoff detection after a restart).
+    for (const r of batches.rows) {
+      if (r.job_id === '__shortfall__') continue;
+      jobs[r.job_id] = { cursor: parseJson(r.next_cursor), done: r.done === true, completed: 0, attempts: 0, lastStatus: 'APPLIED', stalled: false, lastPayloadDigest: r.payload_digest, lastCursor: parseJson(r.cursor_before), backoffAttempts: 0, nextEligibleTs: 0 };
+    }
+    // sim2-revisit-1: restore persisted backoff timing/counters.
+    const sched = await db.query(SQL_BODY[SQL.JOBSCHED_LIST], [storeIdentity, dayKey]);
+    for (const r of sched.rows) {
+      const j = jobs[r.job_id] || (jobs[r.job_id] = { cursor: null, done: false, completed: 0, attempts: 0, lastStatus: 'BACKOFF', stalled: false, lastPayloadDigest: null, lastCursor: undefined, backoffAttempts: 0, nextEligibleTs: 0 });
+      j.nextEligibleTs = Number(r.next_eligible_ts) || 0;
+      j.backoffAttempts = Number(r.backoff_attempts) || 0;
+    }
     const revision = Number(dayRow.revision);
     const target = Number(dayRow.target);
     const completedTotal = completedIds.length;
@@ -204,5 +217,20 @@ export function createDailySimulationStore({
     });
   }
 
-  return Object.freeze({ STORE_PORT_VERSION, STORE_VERSION: DSIM_STORE_VERSION, isCommissioned, commissionStore, loadDay, commitBatch });
+  // sim2-revisit-1: persist a job's bounded revisit/backoff schedule. This is
+  // scheduling metadata only — it writes NO evidence/counters and does NOT
+  // advance the day revision, so it cannot manufacture completed/prospective
+  // counts or expire evidence. Idempotent upsert keyed by (identity,day,job).
+  async function recordPendingBackoff({ dayKey, jobId, nextEligibleTs, backoffAttempts } = {}) {
+    if (typeof dayKey !== 'string' || !dayKey || typeof jobId !== 'string' || !jobId) return { ok: false, reason: 'BAD_ARGS' };
+    if (!Number.isSafeInteger(nextEligibleTs) || !Number.isSafeInteger(backoffAttempts) || backoffAttempts < 0) return { ok: false, reason: 'BAD_ARGS' };
+    return db.tx(async (q) => {
+      const store = await q(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
+      if (!store.rows.length) return { ok: false, reason: 'STORE_NOT_COMMISSIONED' };
+      await q(SQL_BODY[SQL.JOBSCHED_UPSERT], [storeIdentity, dayKey, jobId, nextEligibleTs, backoffAttempts]);
+      return { ok: true, jobId, nextEligibleTs, backoffAttempts };
+    });
+  }
+
+  return Object.freeze({ STORE_PORT_VERSION, STORE_VERSION: DSIM_STORE_VERSION, isCommissioned, commissionStore, loadDay, commitBatch, recordPendingBackoff });
 }

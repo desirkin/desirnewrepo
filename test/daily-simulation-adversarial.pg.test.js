@@ -7,6 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { createDailySimulationStore } from '../persistence/daily-simulation-store.js';
+import { createDailySimulationScheduler } from '../learning/daily-simulation-scheduler.js';
 import { PROPOSED_DDL } from '../persistence/daily-simulation-schema.js';
 
 const TEST_URL = process.env.PERSIST_TEST_DATABASE_URL ?? null;
@@ -74,6 +75,30 @@ if (!RUN) {
         const b = await store.commitBatch(r); assert.equal(b.idempotent, true); assert.equal(b.revision, 1);
         const { rows } = await db.query('SELECT count(*)::int AS n FROM serpent_dsim_result WHERE identity = $1 AND day_key = $2', [id, '2026-09-22']);
         assert.equal(rows[0].n, 1, 'replay added no evidence rows');
+      });
+
+      await t.test('restart through pending backoff on real PG (no duplicate evidence, then matures once)', async () => {
+        const bid = `advbo:${SCHEMA}`; const bday = '2026-09-24';
+        await createDailySimulationStore({ db, storeIdentity: bid }).commissionStore();
+        let now = Date.UTC(2026, 8, 24, 0, 0, 0); let matured = false;
+        const st2 = () => ({ status: (r) => r.status, id: (r) => r.simulationId });
+        const sel = { statusOf: (r) => r.status, identityOf: (r) => r.simulationId, completedOf: (r) => r.completed === true, validOf: (r) => r.validModeledOutcome === true, prospectiveOf: (r) => r.prospectiveQualificationEligible === true };
+        const exec = { async executeDailySimulationBatch({ job, cursor }) { return matured
+          ? { jobId: job.jobId, cursor: cursor ?? 0, nextCursor: null, done: true, results: [{ simulationId: 'BO#0', status: 'COMPLETED_MODELED', completed: true, validModeledOutcome: true, prospectiveQualificationEligible: false }], counters: {}, laws: [] }
+          : { jobId: job.jobId, cursor: cursor ?? 0, nextCursor: cursor ?? null, done: false, results: [{ simulationId: 'BO#0', status: 'PENDING_HORIZON', completed: false, validModeledOutcome: false, prospectiveQualificationEligible: false }], counters: {}, laws: [] }; } };
+        const src = { async readyJobs() { return [{ jobId: 'BO' }]; } };
+        const paths = { async pathsFor() { return { label: 'S' }; } };
+        const mk = () => createDailySimulationScheduler({ store: createDailySimulationStore({ db, storeIdentity: bid, dailyTarget: 1 }), jobSource: src, executor: exec, outcomePathSource: paths, ...sel, dailyTarget: 1, maxEvalsPerTick: 1, pendingBackoff: { baseMs: 1000, maxMs: 60000, maxAttempts: 5 }, clock: () => now });
+        const s1 = mk();
+        await s1.tick(); const b = await s1.tick(); assert.equal(b.tick, 'PENDING_BACKOFF');
+        const { rows: ev1 } = await db.query('SELECT count(*)::int AS n FROM serpent_dsim_result WHERE identity = $1 AND day_key = $2', [bid, bday]);
+        assert.equal(ev1[0].n, 1, 'pending evidence recorded once, not per revisit');
+        // restart after the window; outcome matured
+        now += 5000; matured = true;
+        const s2 = mk(); await s2.runToIdle();
+        assert.equal(s2.status().totals.completed, 1);
+        const { rows: comp } = await db.query('SELECT count(*)::int AS n FROM serpent_dsim_completed WHERE identity = $1 AND day_key = $2', [bid, bday]);
+        assert.equal(comp[0].n, 1, 'matured and credited exactly once across the restart');
       });
 
       await t.test('cursor + pending readback survive; corrupt evidence => LOST', async () => {

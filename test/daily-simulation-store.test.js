@@ -14,7 +14,7 @@ const DAY2 = Date.UTC(2026, 8, 15, 12, 0, 0);
 
 // ---- FAKE transactional Db: emulates SQL_BODY by exact-string match ----------
 function makeFakeDb() {
-  const t = { store: new Map(), day: new Map(), batch: new Map(), completed: new Map(), pending: new Map(), result: [] };
+  const t = { store: new Map(), day: new Map(), batch: new Map(), completed: new Map(), pending: new Map(), result: [], jobsched: new Map() };
   const B2T = new Map(Object.entries(SQL_BODY).map(([tok, body]) => [body, tok]));
   let preCommitFail = null;
   const dkey = (a, b) => `${a}|${b}`;
@@ -44,12 +44,14 @@ function makeFakeDb() {
       case SQL.PENDING_LIST: { const out = []; for (const [k, v] of t.pending) { const [id, dk, sim] = k.split('|'); if (id === p[0] && dk === p[1]) out.push({ sim_id: sim, status: v.status, digest: v.digest, first_seen_rev: v.first_seen_rev, last_seen_rev: v.last_seen_rev, attempts: v.attempts }); } out.sort((a, b) => (a.sim_id < b.sim_id ? -1 : 1)); return { rows: out }; }
       case SQL.PENDING_UPSERT: { const k = bkey(p[0], p[1], p[2]); const prev = t.pending.get(k); t.pending.set(k, { status: p[3], digest: p[4], first_seen_rev: prev ? prev.first_seen_rev : p[5], last_seen_rev: p[6], attempts: p[7] }); return { rows: [], rowCount: 1 }; }
       case SQL.PENDING_DELETE: { t.pending.delete(bkey(p[0], p[1], p[2])); return { rows: [], rowCount: 1 }; }
-      case SQL.BATCH_LIST_DAY: { const out = []; for (const [, v] of t.batch) { if (v.identity === p[0] && v.day_key === p[1]) out.push({ batch_id: v.batch_id, job_id: v.job_id, next_cursor: v.next_cursor, done: v.done, resulting_revision: v.resulting_revision }); } out.sort((a, b) => a.resulting_revision - b.resulting_revision); return { rows: out.map(({ batch_id, job_id, next_cursor, done }) => ({ batch_id, job_id, next_cursor, done })) }; }
+      case SQL.BATCH_LIST_DAY: { const out = []; for (const [, v] of t.batch) { if (v.identity === p[0] && v.day_key === p[1]) out.push({ batch_id: v.batch_id, job_id: v.job_id, next_cursor: v.next_cursor, cursor_before: v.cursor_before, payload_digest: v.payload_digest, done: v.done, resulting_revision: v.resulting_revision }); } out.sort((a, b) => a.resulting_revision - b.resulting_revision); return { rows: out.map(({ batch_id, job_id, next_cursor, cursor_before, payload_digest, done }) => ({ batch_id, job_id, next_cursor, cursor_before, payload_digest, done })) }; }
+      case SQL.JOBSCHED_LIST: { const out = []; for (const [k, v] of t.jobsched) { const [id, d, job] = k.split('|'); if (id === p[0] && d === p[1]) out.push({ job_id: job, next_eligible_ts: v.next_eligible_ts, backoff_attempts: v.backoff_attempts }); } return { rows: out }; }
+      case SQL.JOBSCHED_UPSERT: { t.jobsched.set(bkey(p[0], p[1], p[2]), { next_eligible_ts: p[3], backoff_attempts: p[4] }); return { rows: [], rowCount: 1 }; }
       default: throw new Error(`fake Db: unhandled token ${tok}`);
     }
   }
-  const snap = () => ({ store: new Map(t.store), day: new Map([...t.day].map(([k, v]) => [k, { ...v }])), batch: new Map([...t.batch].map(([k, v]) => [k, { ...v }])), completed: new Map([...t.completed].map(([k, v]) => [k, { ...v }])), pending: new Map([...t.pending].map(([k, v]) => [k, { ...v }])), result: t.result.map((r) => ({ ...r })) });
-  const restore = (s) => { t.store = s.store; t.day = s.day; t.batch = s.batch; t.completed = s.completed; t.pending = s.pending; t.result = s.result; };
+  const snap = () => ({ store: new Map(t.store), day: new Map([...t.day].map(([k, v]) => [k, { ...v }])), batch: new Map([...t.batch].map(([k, v]) => [k, { ...v }])), completed: new Map([...t.completed].map(([k, v]) => [k, { ...v }])), pending: new Map([...t.pending].map(([k, v]) => [k, { ...v }])), result: t.result.map((r) => ({ ...r })), jobsched: new Map([...t.jobsched].map(([k, v]) => [k, { ...v }])) });
+  const restore = (s) => { t.store = s.store; t.day = s.day; t.batch = s.batch; t.completed = s.completed; t.pending = s.pending; t.result = s.result; t.jobsched = s.jobsched; };
   return {
     _t: t,
     setPreCommitFail(fn) { preCommitFail = fn; },
@@ -228,6 +230,74 @@ test('scheduler+store: daily rollover keeps separate ledgers', async () => {
   await s2.runToIdle();
   assert.equal(db._t.day.get('iso:roll|2026-09-14').revision, 2);
   assert.equal(db._t.day.get('iso:roll|2026-09-15').revision, 2);
+});
+
+// ---- sim2-revisit-1: bounded pending backoff --------------------------------
+function pendingOverride(getMatured) {
+  // a stuck pending does NOT advance the cursor: nextCursor === cursorBefore
+  return ({ job, cursor }) => (!getMatured()
+    ? { jobId: job.jobId, cursor: cursor ?? 0, nextCursor: cursor ?? null, done: false, results: [{ simulationId: 'PP#0', status: 'PENDING_HORIZON', completed: false, validModeledOutcome: false, prospectiveQualificationEligible: false }], counters: {}, laws: [] }
+    : { jobId: job.jobId, cursor: cursor ?? 0, nextCursor: null, done: true, results: [{ simulationId: 'PP#0', status: 'COMPLETED_MODELED', completed: true, validModeledOutcome: true, prospectiveQualificationEligible: false }], counters: {}, laws: [] });
+}
+
+test('backoff: an unchanged pending page is not re-committed; job backs off, no spin', async () => {
+  const db = makeFakeDb();
+  await createDailySimulationStore({ db, storeIdentity: 'iso:pp' }).commissionStore();
+  const store = createDailySimulationStore({ db, storeIdentity: 'iso:pp', dailyTarget: 5 });
+  const s = createDailySimulationScheduler({ store, jobSource: jobSource([{ jobId: 'PP', frames: [] }]), executor: makeExecutor({ override: pendingOverride(() => false) }), outcomePathSource, statusOf, identityOf, completedOf, validOf, prospectiveOf, dailyTarget: 5, maxEvalsPerTick: 1, pendingBackoff: { baseMs: 1000, maxMs: 60000, maxAttempts: 3 }, clock: () => DAY1 });
+  const t1 = await s.tick(); assert.equal(t1.tick, 'APPLIED'); assert.equal(t1.credited, 0); // first pending committed once
+  assert.equal(db._t.result.length, 1, 'pending evidence recorded once');
+  const t2 = await s.tick(); assert.equal(t2.tick, 'PENDING_BACKOFF'); assert.equal(t2.backoffAttempts, 1);
+  assert.equal(db._t.result.length, 1, 'unchanged pending page did NOT add duplicate evidence');
+  const t3 = await s.tick(); assert.equal(t3.tick, 'ALL_BACKED_OFF'); // no spin — job waits, no other candidate
+  assert.equal(s.status().totals.completed, 0);
+  assert.ok(db._t.jobsched.size >= 1, 'backoff persisted');
+});
+
+test('backoff: survives restart, then matures and credits once', async () => {
+  const db = makeFakeDb();
+  await createDailySimulationStore({ db, storeIdentity: 'iso:mb' }).commissionStore();
+  let now = DAY1; let matured = false;
+  const mk = () => createDailySimulationScheduler({ store: createDailySimulationStore({ db, storeIdentity: 'iso:mb', dailyTarget: 1 }), jobSource: jobSource([{ jobId: 'PP', frames: [] }]), executor: makeExecutor({ override: pendingOverride(() => matured) }), outcomePathSource, statusOf, identityOf, completedOf, validOf, prospectiveOf, dailyTarget: 1, maxEvalsPerTick: 1, pendingBackoff: { baseMs: 1000, maxMs: 60000, maxAttempts: 5 }, clock: () => now });
+  const s1 = mk();
+  await s1.tick();                 // APPLIED (pending)
+  const b = await s1.tick(); assert.equal(b.tick, 'PENDING_BACKOFF');
+  const persistedNext = [...db._t.jobsched.values()][0].next_eligible_ts;
+  assert.ok(persistedNext > DAY1, 'next_eligible_ts persisted in the future');
+  // restart: fresh scheduler+store reads persisted backoff
+  now = DAY1 + 5000; matured = true; // window passed + outcome matured
+  const s2 = mk();
+  const r = await s2.runToIdle();
+  assert.equal(s2.status().totals.completed, 1, 'matured and credited exactly once after restart');
+  assert.equal(db._t.completed.size, 1);
+  assert.equal(new Set([...db._t.completed.keys()]).size, 1, 'no double credit');
+});
+
+test('backoff: a backed-off pending job does not block a ready candidate (fairness)', async () => {
+  const db = makeFakeDb();
+  await createDailySimulationStore({ db, storeIdentity: 'iso:fair2' }).commissionStore();
+  const store = createDailySimulationStore({ db, storeIdentity: 'iso:fair2', dailyTarget: 4 });
+  // PP is perpetually pending; RDY has 4 completed frames.
+  const execByJob = { async executeDailySimulationBatch(args) {
+    if (args.job.jobId === 'PP') return pendingOverride(() => false)(args);
+    return makeExecutor().executeDailySimulationBatch(args);
+  } };
+  const s = createDailySimulationScheduler({ store, jobSource: jobSource([{ jobId: 'PP', frames: [] }, modeledFrames('RDY', 4)]), executor: execByJob, outcomePathSource, statusOf, identityOf, completedOf, validOf, prospectiveOf, dailyTarget: 4, maxEvalsPerTick: 1, pendingBackoff: { baseMs: 1000, maxMs: 60000, maxAttempts: 3 }, clock: () => DAY1 });
+  const run = await s.runToIdle();
+  assert.equal(run.last, 'TARGET_MET');
+  assert.equal(s.status().totals.completed, 4, 'ready job completed despite PP backing off');
+});
+
+test('backoff: source maturity hint sets the revisit time', async () => {
+  const db = makeFakeDb();
+  await createDailySimulationStore({ db, storeIdentity: 'iso:mat' }).commissionStore();
+  const store = createDailySimulationStore({ db, storeIdentity: 'iso:mat', dailyTarget: 5 });
+  const HINT = DAY1 + 123456;
+  const override = ({ job, cursor }) => ({ jobId: job.jobId, cursor: cursor ?? 0, nextCursor: cursor ?? null, done: false, results: [{ simulationId: 'PP#0', status: 'PENDING_HORIZON', completed: false, validModeledOutcome: false, prospectiveQualificationEligible: false, availableAtTs: HINT }], counters: {}, laws: [] });
+  const s = createDailySimulationScheduler({ store, jobSource: jobSource([{ jobId: 'PP', frames: [] }]), executor: makeExecutor({ override }), outcomePathSource, statusOf, identityOf, completedOf, validOf, prospectiveOf, maturityOf: (r) => r.availableAtTs, dailyTarget: 5, maxEvalsPerTick: 1, pendingBackoff: { baseMs: 1000, maxMs: 10_000_000, maxAttempts: 3 }, clock: () => DAY1 });
+  await s.tick(); // APPLIED
+  const b = await s.tick(); assert.equal(b.tick, 'PENDING_BACKOFF');
+  assert.equal(b.nextEligibleTs, HINT, 'source maturity hint used as revisit time (within cap)');
 });
 
 // ---- direct store integrity --------------------------------------------------
