@@ -47,7 +47,7 @@ function normalizeLimits(input) {
   return value;
 }
 
-function rowError(row, descriptor) {
+export function dailyBroadArchiveRowError(row, descriptor) {
   if (!exact(row, ROW_KEYS) || row.rowVersion !== 'broad-day-candle-row-v1'
       || !exact(row.market, MARKET_KEYS) || typeof row.recordId !== 'string' || !/^bkr2-[a-f0-9]{64}$/.test(row.recordId)
       || typeof row.recordDigest !== 'string' || !/^[a-f0-9]{64}$/.test(row.recordDigest)
@@ -67,6 +67,15 @@ function rowError(row, descriptor) {
   return null;
 }
 
+export function dailyBroadArchiveCandleFromRow(row) {
+  return {
+    observationId: row.recordId, periodStartTs: row.periodStartTs, periodEndTs: row.periodEndTs,
+    open: row.open, high: row.high, low: row.low, close: row.close,
+    volumeBase: row.volumeBase, volumeQuote: null, closed: true,
+    receivedTs: row.receivedTs, knownAtTs: row.asOfEligibleTs, sourceDigest: row.recordDigest,
+  };
+}
+
 const absent = (state, reason) => ({
   state, observedCount: 0, coverageStartTs: null, coverageEndTs: null,
   gapCount: 0, sourceDigests: [], reason,
@@ -79,6 +88,61 @@ function complete(observedCount, dayStartTs, dayEndTs, sourceDigest) {
   };
 }
 
+export function dailyBroadArchiveDescriptorError(descriptor, { maxMarkets = DAILY_BROAD_ARCHIVE_LIMITS.maxMarkets } = {}) {
+  if (!positive(maxMarkets) || maxMarkets > HARD.maxMarkets) return { code: 'INPUT_LIMITS_INVALID', message: 'descriptor market bound malformed' };
+  if (descriptor?.datasetVersion !== BROAD_DAY_DATASET_VERSION
+      || descriptor.archiveVersion !== BROAD_DAY_ARCHIVE_VERSION_V2
+      || descriptor.sourceProvenance?.sourceKind !== 'LOCAL_BROAD_DAY_ARCHIVE_V2'
+      || descriptor.sourceProvenance?.durability !== 'LOCAL_FILESYSTEM_ONLY'
+      || descriptor.sourceProvenance?.republishSafe !== false
+      || descriptor.completeness?.physicalControlAndShardIntegrityVerified !== true
+      || descriptor.completeness?.sourceRecordIdentityRecomputableAfterCanonicalArchiveWrite !== true
+      || descriptor.completeness?.catalogEpochContinuityVerified !== true
+      || descriptor.completeness?.sessionFinalizationVerified !== true
+      || descriptor.completeness?.fullPopulationVerified !== true
+      || descriptor.completeness?.fullDaySimulationReady !== true) {
+    return { code: 'DATASET_PROOF_INCOMPLETE', message: 'reader v2 full-day proof is incomplete' };
+  }
+  if (!Array.isArray(descriptor.catalogUnion) || descriptor.catalogUnion.length < 1
+      || descriptor.catalogUnion.length > maxMarkets || !Array.isArray(descriptor.catalogEpochs)
+      || !Array.isArray(descriptor.coverage) || descriptor.coverage.length !== descriptor.catalogUnion.length) {
+    return { code: 'CATALOG_UNION_INVALID', message: 'catalog union/coverage inventory malformed or over bound' };
+  }
+  if (new Set(descriptor.catalogEpochs.map((row) => row.catalogContentId)).size !== 1) {
+    return { code: 'CATALOG_CHURN_UNREPRESENTABLE', message: 'daily-move-study v1 market days cannot encode per-market membership intervals; no partial union is returned' };
+  }
+  return null;
+}
+
+export function sealDailyBroadArchiveCatalog(descriptor) {
+  const firstEpoch = descriptor.catalogEpochs[0];
+  return sealAcceptedCatalogSnapshot({
+    observedTs: firstEpoch.sourceObservedTs,
+    knownAtTs: firstEpoch.membershipKnownSinceTs,
+    maxAgeMs: 24 * 60 * 60_000,
+    markets: descriptor.catalogUnion.map((row) => ({
+      subjectKind: 'MARKET', canonicalCoin: row.market.canonicalCoin,
+      providerAssetId: row.market.pairKey, venue: 'kraken',
+      nativeSymbol: row.market.catalogWsname, base: row.market.canonicalCoin,
+      quote: 'USD', marketType: 'SPOT', quoteAliasGroup: 'USD',
+    })),
+  });
+}
+
+export function sealDailyBroadArchiveProvenance(descriptor, acceptedCatalogSnapshot) {
+  const catalogEpochDigest = canonicalDigest(descriptor.catalogEpochs);
+  return deepFreeze({
+    provenanceVersion: DAILY_BROAD_ARCHIVE_PROVENANCE_VERSION,
+    state: 'VERIFIED_LOCAL_V2_ARCHIVE_FULL_DAY', provenanceVerified: true,
+    durableFullDayEpochUnionVerified: true,
+    sourceDatasetVersion: descriptor.datasetVersion, sourceDatasetId: descriptor.datasetId,
+    sourceDatasetDigest: descriptor.datasetDigest, sourceArchiveVersion: descriptor.archiveVersion,
+    catalogEpochDigest, catalogUnionContentDigest: acceptedCatalogSnapshot.contentDigest,
+    durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
+    warning: 'Verified for this retained local archive only; no external/republish durability or prospective qualification is claimed.',
+  });
+}
+
 export async function prepareDailyBroadArchiveInput({
   rootDir, dayStartTs, dayEndTs, asOfTs, limits: suppliedLimits, readerLimits, signal = null,
 } = {}) {
@@ -88,35 +152,9 @@ export async function prepareDailyBroadArchiveInput({
   try {
     reader = await openBroadDayReader({ rootDir, dayStartTs, dayEndTs, asOfTs, limits: readerLimits, signal });
     const descriptor = reader.descriptor;
-    if (descriptor.datasetVersion !== BROAD_DAY_DATASET_VERSION
-        || descriptor.archiveVersion !== BROAD_DAY_ARCHIVE_VERSION_V2
-        || descriptor.sourceProvenance?.sourceKind !== 'LOCAL_BROAD_DAY_ARCHIVE_V2'
-        || descriptor.sourceProvenance?.durability !== 'LOCAL_FILESYSTEM_ONLY'
-        || descriptor.sourceProvenance?.republishSafe !== false
-        || descriptor.completeness?.physicalControlAndShardIntegrityVerified !== true
-        || descriptor.completeness?.sourceRecordIdentityRecomputableAfterCanonicalArchiveWrite !== true
-        || descriptor.completeness?.catalogEpochContinuityVerified !== true
-        || descriptor.completeness?.sessionFinalizationVerified !== true
-        || descriptor.completeness?.fullPopulationVerified !== true
-        || descriptor.completeness?.fullDaySimulationReady !== true) return fail('DATASET_PROOF_INCOMPLETE', 'reader v2 full-day proof is incomplete');
-    if (!Array.isArray(descriptor.catalogUnion) || descriptor.catalogUnion.length < 1
-        || descriptor.catalogUnion.length > limits.maxMarkets || !Array.isArray(descriptor.catalogEpochs)
-        || !Array.isArray(descriptor.coverage) || descriptor.coverage.length !== descriptor.catalogUnion.length) return fail('CATALOG_UNION_INVALID', 'catalog union/coverage inventory malformed or over bound');
-    const catalogContentIds = new Set(descriptor.catalogEpochs.map((row) => row.catalogContentId));
-    if (catalogContentIds.size !== 1) return fail('CATALOG_CHURN_UNREPRESENTABLE', 'daily-move-study v1 market days cannot encode per-market membership intervals; no partial union is returned');
-
-    const firstEpoch = descriptor.catalogEpochs[0];
-    const acceptedCatalogSnapshot = sealAcceptedCatalogSnapshot({
-      observedTs: firstEpoch.sourceObservedTs,
-      knownAtTs: firstEpoch.membershipKnownSinceTs,
-      maxAgeMs: 24 * 60 * 60_000,
-      markets: descriptor.catalogUnion.map((row) => ({
-        subjectKind: 'MARKET', canonicalCoin: row.market.canonicalCoin,
-        providerAssetId: row.market.pairKey, venue: 'kraken',
-        nativeSymbol: row.market.catalogWsname, base: row.market.canonicalCoin,
-        quote: 'USD', marketType: 'SPOT', quoteAliasGroup: 'USD',
-      })),
-    });
+    const descriptorError = dailyBroadArchiveDescriptorError(descriptor, { maxMarkets: limits.maxMarkets });
+    if (descriptorError) return fail(descriptorError.code, descriptorError.message);
+    const acceptedCatalogSnapshot = sealDailyBroadArchiveCatalog(descriptor);
     const acceptedByPair = new Map(acceptedCatalogSnapshot.markets.map((market) => [market.providerAssetId, market]));
     const states = new Map(acceptedCatalogSnapshot.markets.map((market) => [marketIdentityDigest(market), {
       market, rows: [], periods: new Set(), bytes: 0,
@@ -133,7 +171,7 @@ export async function prepareDailyBroadArchiveInput({
           || page.rowCount !== page.rows?.length || !Number.isSafeInteger(page.rowBytes) || page.rowBytes < 0
           || !Array.isArray(page.rows)) return fail('PAGE_INTEGRITY_INVALID', 'reader page identity, census, or body digest mismatch');
       for (const row of page.rows) {
-        const error = rowError(row, descriptor); if (error) return fail('ROW_INVALID', error);
+        const error = dailyBroadArchiveRowError(row, descriptor); if (error) return fail('ROW_INVALID', error);
         rows += 1; if (rows > limits.maxRows) return fail('ROW_LIMIT', 'archive row inventory exceeds adapter bound');
         const accepted = acceptedByPair.get(row.market.pairKey);
         if (!accepted || accepted.canonicalCoin !== row.market.canonicalCoin
@@ -141,12 +179,7 @@ export async function prepareDailyBroadArchiveInput({
         const state = states.get(marketIdentityDigest(accepted));
         if (state.periods.has(row.periodStartTs)) return fail('DUPLICATE_CANDLE_PERIOD', 'reader returned a repeated market minute');
         state.periods.add(row.periodStartTs);
-        const candle = {
-          observationId: row.recordId, periodStartTs: row.periodStartTs, periodEndTs: row.periodEndTs,
-          open: row.open, high: row.high, low: row.low, close: row.close,
-          volumeBase: row.volumeBase, volumeQuote: null, closed: true,
-          receivedTs: row.receivedTs, knownAtTs: row.asOfEligibleTs, sourceDigest: row.recordDigest,
-        };
+        const candle = dailyBroadArchiveCandleFromRow(row);
         const bytes = Buffer.byteLength(JSON.stringify(candle), 'utf8');
         materializedBytes += bytes; state.bytes += bytes;
         if (materializedBytes > limits.maxMaterializedBytes) return fail('MATERIALIZED_BYTE_LIMIT', 'planner candle materialization exceeds adapter bound');
@@ -188,17 +221,8 @@ export async function prepareDailyBroadArchiveInput({
       // canonical string would duplicate a large all-market payload in memory.
       marketDayDigests.push({ marketIdentityDigest: digest, marketDayDigest: canonicalDigest(marketDay) });
     }
-    const catalogEpochDigest = canonicalDigest(descriptor.catalogEpochs);
-    const provenance = {
-      provenanceVersion: DAILY_BROAD_ARCHIVE_PROVENANCE_VERSION,
-      state: 'VERIFIED_LOCAL_V2_ARCHIVE_FULL_DAY', provenanceVerified: true,
-      durableFullDayEpochUnionVerified: true,
-      sourceDatasetVersion: descriptor.datasetVersion, sourceDatasetId: descriptor.datasetId,
-      sourceDatasetDigest: descriptor.datasetDigest, sourceArchiveVersion: descriptor.archiveVersion,
-      catalogEpochDigest, catalogUnionContentDigest: acceptedCatalogSnapshot.contentDigest,
-      durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
-      warning: 'Verified for this retained local archive only; no external/republish durability or prospective qualification is claimed.',
-    };
+    const provenance = sealDailyBroadArchiveProvenance(descriptor, acceptedCatalogSnapshot);
+    const { catalogEpochDigest } = provenance;
     const body = {
       ok: true, version: DAILY_BROAD_ARCHIVE_INPUT_VERSION,
       acceptedCatalogSnapshot, marketDays, manifestCatalogProvenance: provenance,

@@ -26,6 +26,8 @@ import {
 export const BROAD_DAY_DATASET_VERSION = 'broad-day-dataset-v1';
 export const BROAD_DAY_CURSOR_VERSION = 'broad-day-reader-cursor-v1';
 export const BROAD_DAY_PAGE_VERSION = 'broad-day-reader-page-v1';
+export const BROAD_DAY_MARKET_CURSOR_VERSION = 'broad-day-market-cursor-v1';
+export const BROAD_DAY_MARKET_PAGE_VERSION = 'broad-day-market-page-v1';
 export const BROAD_DAY_READER_DEFAULTS = Object.freeze({
   maxSessions: 256,
   maxControlRows: 4_000_000,
@@ -462,6 +464,22 @@ function cursorError(cursor, descriptor, shardCount) {
   return null;
 }
 
+function marketCursorError(cursor, descriptor, marketIdentityDigest, shardCount) {
+  if (cursor === null) return null;
+  const keys = exactKeys(cursor, [
+    'cursorVersion', 'datasetDigest', 'marketIdentityDigest', 'shardIndex',
+    'rowOffset', 'emittedRows', 'cursorDigest',
+  ]);
+  if (keys || cursor.cursorVersion !== BROAD_DAY_MARKET_CURSOR_VERSION
+      || cursor.datasetDigest !== descriptor.datasetDigest
+      || cursor.marketIdentityDigest !== marketIdentityDigest
+      || !count(cursor.shardIndex) || cursor.shardIndex > shardCount || !count(cursor.rowOffset)
+      || !count(cursor.emittedRows) || (cursor.shardIndex === shardCount && cursor.rowOffset !== 0)
+      || !HEX64.test(cursor.cursorDigest ?? '')
+      || cursor.cursorDigest !== digestWithout(cursor, 'cursorDigest', 4_096)) return 'market cursor identity or position malformed';
+  return null;
+}
+
 function pageRow(entry, sessionId, fileName) {
   const record = entry.record;
   return {
@@ -859,6 +877,8 @@ export async function openBroadDayReader({
     ...clone(descriptorBody), datasetDigest, datasetId: `bdd-${datasetDigest}`,
   });
   const pageShards = sessionMetas.flatMap((session) => session.shards).sort((a, b) => a.sessionId.localeCompare(b.sessionId) || a.fileName.localeCompare(b.fileName));
+  const marketPageShards = new Map(descriptor.catalogUnion.map((row) => [row.marketIdentityDigest, []]));
+  for (const shard of pageShards) marketPageShards.get(shard.identityDigest)?.push(shard);
   let closed = false;
 
   const status = () => freeze({
@@ -869,17 +889,33 @@ export async function openBroadDayReader({
     fullDaySimulationReady: descriptor.completeness.fullDaySimulationReady, authority: 'NONE',
   });
 
-  const readPage = async ({ cursor = null, maxRows = limits.maxPageRows, signal: pageSignal = null } = {}) => {
-    if (closed) fail('READER_CLOSED', 'reader is closed');
-    const pageAbortError = signalError(pageSignal); if (pageAbortError) fail('READER_ARGUMENT_INVALID', pageAbortError);
-    throwIfCancelled(signal); throwIfCancelled(pageSignal);
-    const cursorErr = cursorError(cursor, descriptor, pageShards.length); if (cursorErr) fail('READER_CURSOR_INVALID', cursorErr);
-    if (!positive(maxRows) || maxRows > limits.maxPageRows) fail('READER_PAGE_LIMIT', 'maxRows outside configured bound');
+  const assertInventoryUnchanged = () => {
+    if (existsSync(path.join(archiveRoot, 'writer.lock'))
+        || JSON.stringify(readdirSync(sessionsRoot).sort()) !== JSON.stringify(initialNames)) {
+      fail('READER_ARCHIVE_CHANGED', 'archive ownership/session inventory changed after reader construction');
+    }
+    for (const session of sessionMetas) {
+      const sessionDir = path.join(sessionsRoot, session.sessionId);
+      const entries = readdirSync(sessionDir).sort();
+      if (JSON.stringify(entries) !== JSON.stringify(['controls.jsonl', 'shards']) && !session.empty) {
+        fail('READER_ARCHIVE_CHANGED', 'session inventory changed after reader construction', { sessionId: session.sessionId });
+      }
+      if (session.empty && JSON.stringify(entries) !== JSON.stringify(['shards'])) {
+        fail('READER_ARCHIVE_CHANGED', 'empty session inventory changed after reader construction', { sessionId: session.sessionId });
+      }
+      const shardNames = readdirSync(path.join(sessionDir, 'shards')).sort();
+      if (JSON.stringify(shardNames) !== JSON.stringify(session.shards.map((row) => row.fileName).sort())) {
+        fail('READER_ARCHIVE_CHANGED', 'session shard inventory changed after reader construction', { sessionId: session.sessionId });
+      }
+    }
+  };
+
+  const scanProjectedPage = async ({ shards, cursor, maxRows, pageSignal }) => {
     let shardIndex = cursor?.shardIndex ?? 0; let rowOffset = cursor?.rowOffset ?? 0;
-    const priorEmitted = cursor?.emittedRows ?? 0; const rows = []; let rowBytes = 0;
-    let stopped = false; let nextShardIndex = pageShards.length; let nextRowOffset = 0;
-    while (shardIndex < pageShards.length && !stopped) {
-      const meta = pageShards[shardIndex]; let physicalRow = 0;
+    const rows = []; let rowBytes = 0;
+    let stopped = false; let nextShardIndex = shards.length; let nextRowOffset = 0;
+    while (shardIndex < shards.length && !stopped) {
+      const meta = shards[shardIndex]; let physicalRow = 0;
       if (rowOffset > meta.rows) fail('READER_CURSOR_INVALID', 'cursor rowOffset exceeds shard rows');
       const rescanned = await scanJsonl(meta.file, {
         maxFileBytes: limits.maxShardBytes, maxLineBytes: limits.maxRecordLineBytes, maxRows: limits.maxShardRows,
@@ -904,7 +940,20 @@ export async function openBroadDayReader({
       if (rescanned.digest !== meta.digest || rescanned.bytes !== meta.bytes || rescanned.rows !== meta.rows) fail('READER_FILE_CHANGED', 'verified shard changed before/during page read', { sessionId: meta.sessionId, fileName: meta.fileName });
       if (!stopped) { shardIndex += 1; rowOffset = 0; nextShardIndex = shardIndex; nextRowOffset = 0; }
     }
-    const done = nextShardIndex >= pageShards.length;
+    return { rows, rowBytes, nextShardIndex, nextRowOffset, done: nextShardIndex >= shards.length };
+  };
+
+  const readPage = async ({ cursor = null, maxRows = limits.maxPageRows, signal: pageSignal = null } = {}) => {
+    if (closed) fail('READER_CLOSED', 'reader is closed');
+    const pageAbortError = signalError(pageSignal); if (pageAbortError) fail('READER_ARGUMENT_INVALID', pageAbortError);
+    throwIfCancelled(signal); throwIfCancelled(pageSignal);
+    const cursorErr = cursorError(cursor, descriptor, pageShards.length); if (cursorErr) fail('READER_CURSOR_INVALID', cursorErr);
+    if (!positive(maxRows) || maxRows > limits.maxPageRows) fail('READER_PAGE_LIMIT', 'maxRows outside configured bound');
+    assertInventoryUnchanged();
+    const scanned = await scanProjectedPage({ shards: pageShards, cursor, maxRows, pageSignal });
+    assertInventoryUnchanged();
+    const { rows, rowBytes, nextShardIndex, nextRowOffset, done } = scanned;
+    const priorEmitted = cursor?.emittedRows ?? 0;
     const nextCursor = {
       cursorVersion: BROAD_DAY_CURSOR_VERSION, datasetDigest: descriptor.datasetDigest,
       shardIndex: done ? pageShards.length : nextShardIndex,
@@ -923,6 +972,42 @@ export async function openBroadDayReader({
     return freeze({ ...body, pageDigest });
   };
 
+  const readMarketPage = async ({ marketIdentityDigest, cursor = null, maxRows = limits.maxPageRows, signal: pageSignal = null } = {}) => {
+    if (closed) fail('READER_CLOSED', 'reader is closed');
+    const pageAbortError = signalError(pageSignal); if (pageAbortError) fail('READER_ARGUMENT_INVALID', pageAbortError);
+    throwIfCancelled(signal); throwIfCancelled(pageSignal);
+    if (!HEX64.test(marketIdentityDigest ?? '') || !marketPageShards.has(marketIdentityDigest)) {
+      fail('READER_MARKET_INVALID', 'market identity is absent from the sealed dataset denominator');
+    }
+    const shards = marketPageShards.get(marketIdentityDigest);
+    const cursorErr = marketCursorError(cursor, descriptor, marketIdentityDigest, shards.length);
+    if (cursorErr) fail('READER_CURSOR_INVALID', cursorErr);
+    if (!positive(maxRows) || maxRows > limits.maxPageRows) fail('READER_PAGE_LIMIT', 'maxRows outside configured bound');
+    assertInventoryUnchanged();
+    const scanned = await scanProjectedPage({ shards, cursor, maxRows, pageSignal });
+    assertInventoryUnchanged();
+    const { rows, rowBytes, nextShardIndex, nextRowOffset, done } = scanned;
+    if (rows.some((row) => row.marketIdentityDigest !== marketIdentityDigest)) {
+      fail('READER_MARKET_PAGE_INVALID', 'market page crossed the requested identity boundary');
+    }
+    const priorEmitted = cursor?.emittedRows ?? 0;
+    const nextCursor = {
+      cursorVersion: BROAD_DAY_MARKET_CURSOR_VERSION, datasetDigest: descriptor.datasetDigest,
+      marketIdentityDigest, shardIndex: done ? shards.length : nextShardIndex,
+      rowOffset: done ? 0 : nextRowOffset, emittedRows: priorEmitted + rows.length,
+      cursorDigest: '',
+    };
+    nextCursor.cursorDigest = digestWithout(nextCursor, 'cursorDigest', 4_096);
+    const body = {
+      pageVersion: BROAD_DAY_MARKET_PAGE_VERSION, datasetId: descriptor.datasetId,
+      datasetDigest: descriptor.datasetDigest, marketIdentityDigest,
+      cursor, nextCursor, done, rows, rowBytes, rowCount: rows.length,
+      authority: 'NONE', learningEligible: false, simulationCredit: 0,
+    };
+    const pageDigest = sha256(canonicalBounded(body, limits.maxPageBytes + 512 * 1024).text);
+    return freeze({ ...body, pageDigest });
+  };
+
   const close = () => { closed = true; return status(); };
-  return Object.freeze({ version: 'broad-day-reader-v1', descriptor, readPage, status, close });
+  return Object.freeze({ version: 'broad-day-reader-v1', descriptor, readPage, readMarketPage, status, close });
 }
