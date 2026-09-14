@@ -40,6 +40,24 @@ const save = ({ storeId = id('cas'), relativePath = `persist1/${suffix}/cas.json
 });
 const rejectsCode = (promise, code) => assert.rejects(promise, (error) => error?.code === code);
 
+async function observeAdvisoryWait(db, applicationName, { maxProbes = 256 } = {}) {
+  for (let probe = 0; probe < maxProbes; probe += 1) {
+    const { rows } = await db.query(`SELECT pid, state, wait_event_type, wait_event
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND application_name = $1
+        AND state = 'active'
+        AND wait_event_type = 'Lock'
+        AND lower(COALESCE(wait_event, '')) = 'advisory'
+        AND position('pg_advisory_xact_lock(hashtext($1))' in query) > 0`, [applicationName]);
+    if (rows.length > 0) return rows;
+    // Each probe is a real server round trip and setImmediate only yields to
+    // the contender. There is no elapsed-time assertion or guessed sleep.
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`no active advisory-lock waiter observed after ${maxProbes} server probes`);
+}
+
 if (!TEST_URL) {
   test('PERSIST-1 real PostgreSQL anchor integration', (t) => {
     t.skip('PERSIST_TEST_DATABASE_URL absent: an explicitly attested isolated test database is required');
@@ -135,6 +153,38 @@ if (!TEST_URL) {
         ], 'history is retained by revision; no rejected write alters an acknowledged prefix');
       });
 
+      await t.test('save waits on the exact per-store transaction advisory lock held by another pool', async () => {
+        const peer = new Db({ url: TEST_URL, schema: SCHEMA, retries: 1, log: () => {} });
+        let holder = null; let contender = null; let releaseLock = null;
+        try {
+          assert.equal(await peer.connect(), true);
+          const input = save({ storeId: id('observed-lock'), relativePath: `persist1/${suffix}/observed-lock.json` });
+          const lockKey = `store-anchor:${input.storeId}`;
+          let signalHeld; let rejectHeld;
+          const held = new Promise((resolve, reject) => { signalHeld = resolve; rejectHeld = reject; });
+          const released = new Promise((resolve) => { releaseLock = resolve; });
+          holder = db.tx(async (_q, { raw }) => {
+            await raw('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
+            signalHeld();
+            await released;
+          });
+          holder.catch(rejectHeld);
+          await held;
+          contender = saveStoreSnapshot(peer, input);
+          const waiting = await observeAdvisoryWait(db, applicationNameOf(SCHEMA));
+          assert.ok(waiting.length >= 1, 'PostgreSQL reports the independent save blocked on an advisory lock');
+          releaseLock();
+          await holder; holder = null;
+          const result = await contender; contender = null;
+          assert.equal(result.status, 'CREATED', 'the blocked save proceeds only after the owning transaction releases the lock');
+        } finally {
+          releaseLock?.();
+          await holder?.catch(() => {});
+          await contender?.catch(() => {});
+          await peer.end();
+        }
+      });
+
       await t.test('two independent pools serialize same-store CAS and same-path ownership', async () => {
         const peer = new Db({ url: TEST_URL, schema: SCHEMA, retries: 1, log: () => {} });
         try {
@@ -203,11 +253,14 @@ if (!TEST_URL) {
         }
       });
     } finally {
-      if (connected) {
-        assert.equal(db.schema, SCHEMA);
-        await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+      try {
+        if (connected) {
+          assert.equal(db.schema, SCHEMA);
+          await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+        }
+      } finally {
+        await db.end();
       }
-      await db.end();
     }
   });
 }
