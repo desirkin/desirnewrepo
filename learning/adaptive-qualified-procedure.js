@@ -25,9 +25,9 @@ import { matureShadowCapture } from './shadow-outcome.js';
 export const ADAPTIVE_PROCEDURE_CONSUMER_VERSION = 'adaptive-ranking-procedure-consumer-1';
 export const ADAPTIVE_PROCEDURE_PUBLICATION_VERSION = 'adaptive-ranking-procedure-publication-1';
 export const ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION = 'adaptive-ranking-trial-decision-1';
-export const ADAPTIVE_PROCEDURE_TRIAL_EXECUTION_VERSION = 'adaptive-ranking-trial-execution-1';
+export const ADAPTIVE_PROCEDURE_TRIAL_EXECUTION_VERSION = 'adaptive-ranking-trial-execution-2';
 export const ADAPTIVE_PROCEDURE_QUALIFICATION_VERSION = 'adaptive-ranking-procedure-qualification-1';
-export const ADAPTIVE_PROCEDURE_DECISION_VERSION = 'adaptive-ranking-procedure-decision-1';
+export const ADAPTIVE_PROCEDURE_DECISION_VERSION = 'adaptive-ranking-procedure-decision-2';
 export const MAX_ADAPTIVE_PROCEDURE_PUBLICATIONS = 32;
 export const MAX_ADAPTIVE_TRIAL_RECORD_BYTES = 1_048_576;
 export const MAX_ADAPTIVE_DECISION_INPUT_BYTES = 262_144;
@@ -92,7 +92,10 @@ const TRIAL_EXECUTION_KEYS = Object.freeze([
   'candidateId', 'opportunityId', 'decisionId', 'candidate', 'baseline',
   'outcomeKnownAtTs', 'recordedTs', 'authority', 'purpose',
 ]);
-const EXECUTION_ARM_KEYS = Object.freeze(['selectedStrategyId', 'path', 'depthPath', 'asOfTs', 'outcome']);
+const EXECUTION_ARM_KEYS = Object.freeze([
+  'selectedStrategyId', 'sourceIdentity', 'path', 'depthPath', 'asOfTs', 'outcome',
+]);
+const EXECUTION_SOURCE_KEYS = Object.freeze(['venue', 'assetId', 'entryEpochId', 'exitEpochId']);
 const QUALIFICATION_KEYS = Object.freeze([
   'qualificationVersion', 'qualificationId', 'qualificationDigest',
   'publicationId', 'publicationDigest', 'procedureId', 'procedureDigest',
@@ -103,7 +106,7 @@ const QUALIFICATION_KEYS = Object.freeze([
 ]);
 const STATE_SOURCE_KEYS = Object.freeze([
   'opportunityId', 'horizonMs', 'predictionId', 'outcomeId', 'updateId',
-  'receiptDigest', 'eventSequence', 'eventDigest', 'durableAcknowledgment',
+  'receiptDigest', 'stateDigest', 'eventSequence', 'eventDigest', 'durableAcknowledgment',
 ]);
 const SETTLEMENT_ACK_KEYS = Object.freeze(['ackVersion', 'sequence', 'eventDigest', 'headDigest', 'acknowledgedTs']);
 const DECISION_KEYS = Object.freeze([
@@ -490,11 +493,35 @@ export function adaptiveRankingTrialDecisionError(receipt, {
   return null;
 }
 
+export function adaptiveRankingExecutionSourceIdentity({ decisionArm, depthPath } = {}) {
+  const capture = decisionArm?.executionCapture;
+  const identity = {
+    venue: capture?.venue ?? null,
+    assetId: capture?.assetId ?? null,
+    entryEpochId: depthPath?.entry?.snapshot?.epochId ?? null,
+    exitEpochId: depthPath?.exit?.snapshot?.epochId ?? null,
+  };
+  if (exactKeys(identity, EXECUTION_SOURCE_KEYS)
+      || !boundedId(identity.venue) || !boundedId(identity.assetId)
+      || !boundedId(identity.entryEpochId) || !boundedId(identity.exitEpochId)) {
+    throw new TypeError('execution source identity malformed');
+  }
+  return deepFreeze(identity);
+}
+
 function recomputeExecutionArm(arm, decisionArm) {
   if (exactKeys(arm, EXECUTION_ARM_KEYS)
       || arm.selectedStrategyId !== decisionArm.selectedStrategyId
       || !isTs(arm.asOfTs)) return { error: 'execution arm shape or identity malformed' };
   const capture = decisionArm.executionCapture;
+  let expectedSourceIdentity;
+  try {
+    expectedSourceIdentity = adaptiveRankingExecutionSourceIdentity({ decisionArm, depthPath: arm.depthPath });
+  } catch (error) { return { error: error.message }; }
+  if (exactKeys(arm.sourceIdentity, EXECUTION_SOURCE_KEYS)
+      || !same(arm.sourceIdentity, expectedSourceIdentity)) {
+    return { error: 'execution arm source identity differs from decision/depth evidence' };
+  }
   const expectedRows = capture.recipeSeal.recipe.horizonMin * 60_000
     / capture.recipeSeal.recipe.candlePeriodMs;
   if (!Number.isSafeInteger(expectedRows) || !Array.isArray(arm.path)
@@ -662,13 +689,14 @@ function stateSourceOf(settlement) {
     outcomeId: settlement.outcome.outcomeId,
     updateId: settlement.update.updateId,
     receiptDigest: settlement.provenanceReceipt.receiptDigest,
+    stateDigest: settlement.update.nextStateDigest,
     eventSequence: settlement.eventSequence,
     eventDigest: settlement.eventDigest,
     durableAcknowledgment: clone(settlement.custody.durableAcknowledgment),
   };
 }
 
-function currentStateSourceError(source, settlement, state, procedure) {
+function currentStateSourceError(source, settlement, state, procedure, nowTs) {
   if (exactKeys(source, STATE_SOURCE_KEYS) || !settlement?.outcome || !settlement?.update
       || !settlement?.provenanceReceipt || !settlement?.custody) return 'current state settlement absent or malformed';
   if (exactKeys(source.durableAcknowledgment, SETTLEMENT_ACK_KEYS)
@@ -677,10 +705,13 @@ function currentStateSourceError(source, settlement, state, procedure) {
   if (!boundedId(source.opportunityId) || source.horizonMs !== ADAPTIVE_HORIZON_MS
       || !boundedId(source.predictionId) || !boundedId(source.outcomeId)
       || !boundedId(source.updateId) || !HEX64.test(source.receiptDigest ?? '')
+      || source.stateDigest !== state.stateDigest
       || !Number.isSafeInteger(source.eventSequence) || source.eventSequence < 1
       || !HEX64.test(source.eventDigest ?? '') || !boundedId(ack.ackVersion)
       || ack.sequence !== source.eventSequence || ack.eventDigest !== source.eventDigest
       || !HEX64.test(ack.headDigest ?? '') || !isTs(ack.acknowledgedTs)
+      || state.updatedTs > nowTs || ack.acknowledgedTs > nowTs
+      || ack.acknowledgedTs < state.updatedTs
       || settlement.update.nextStateDigest !== state.stateDigest
       || settlement.update.previousSequence + 1 !== state.sequence
       || settlement.update.appliedTs !== state.updatedTs
@@ -862,7 +893,9 @@ export function readQualifiedAdaptiveProcedureDecision({
         if (bindingError) { withheld.push({ publicationId: id, reason: bindingError }); continue; }
         let source;
         try { source = stateSourceOf(currentStateSettlement); } catch { source = null; }
-        const sourceError = source ? currentStateSourceError(source, currentStateSettlement, state, procedure) : 'current state source absent';
+        const sourceError = source
+          ? currentStateSourceError(source, currentStateSettlement, state, procedure, nowTs)
+          : 'current state source absent';
         if (sourceError) { withheld.push({ publicationId: id, reason: `CURRENT_ACK_LINEAGE_INVALID:${sourceError}` }); continue; }
         qualified.push({ publication, qualification: qualificationOf(publication, activation, design, terminal), stateSource: source });
       }
@@ -908,6 +941,7 @@ export function resolveQualifiedAdaptiveProcedureRanking({
   if (snapshot.kill?.state !== 'ARMED') return baseline('LEARNED_INFLUENCE_KILLED');
   if (snapshot.withheld?.length || !snapshot.adaptiveRankingProcedure) return baseline('QUALIFICATION_WITHHELD');
   const section = snapshot.adaptiveRankingProcedure;
+  const ack = section?.stateSource?.durableAcknowledgment;
   if (exactKeys(section, ADAPTIVE_SECTION_KEYS)
       || adaptiveProcedureConsumerContractError(consumerContract)
       || section.consumerContractDigest !== consumerContract.consumerContractDigest
@@ -916,6 +950,13 @@ export function resolveQualifiedAdaptiveProcedureRanking({
       || adaptiveStateError(section.currentState, section.publication.procedure)
       || section.currentState.procedureDigest !== section.procedureDigest
       || section.qualification.procedureDigest !== section.procedureDigest
+      || exactKeys(section.stateSource, STATE_SOURCE_KEYS)
+      || exactKeys(ack, SETTLEMENT_ACK_KEYS)
+      || section.stateSource.stateDigest !== section.currentState.stateDigest
+      || ack.sequence !== section.stateSource.eventSequence
+      || ack.eventDigest !== section.stateSource.eventDigest
+      || ack.acknowledgedTs > snapshot.preparedTs
+      || ack.acknowledgedTs < section.currentState.updatedTs
       || nowTs < section.qualification.effectiveTs || nowTs >= section.qualification.expiresTs
       || section.legacyActivationEffectReinterpreted !== false) return baseline('QUALIFICATION_INVALID');
   if (typeof validatePreparedFacts !== 'function') return baseline('PREPARED_FACT_VALIDATOR_MISSING');
@@ -923,6 +964,21 @@ export function resolveQualifiedAdaptiveProcedureRanking({
   try { factsError = validatePreparedFacts(preparedFacts, consumerContract.preparedFactsContract); }
   catch { return baseline('PREPARED_FACTS_INVALID'); }
   if (factsError !== null || preparedFacts.featureRecipeDigest !== consumerContract.featureRecipeDigest) return baseline('PREPARED_FACTS_INVALID');
+  if (!isTs(preparedFacts.decisionTs)
+      || preparedFacts.decisionTs > snapshot.preparedTs
+      || snapshot.preparedTs - preparedFacts.decisionTs > MAX_ADAPTIVE_PROCEDURE_DECISION_AGE_MS
+      || section.currentState.updatedTs > preparedFacts.decisionTs
+      || section.stateSource.durableAcknowledgment.acknowledgedTs > preparedFacts.decisionTs) {
+    return baseline('PREPARED_FACTS_CLOCK_OR_STATE_ASOF_MISMATCH');
+  }
+  if (preparedFacts.marketIdentity?.canonicalCoin !== context?.asset) {
+    return baseline('PREPARED_FACTS_ASSET_MISMATCH');
+  }
+  if (!Array.isArray(section.qualification.scope.venues)
+      || section.qualification.scope.venues.length !== 1
+      || section.qualification.scope.venues[0] !== context?.venue) {
+    return baseline('PREPARED_FACTS_VENUE_NOT_SINGLE_QUALIFIED_SOURCE');
+  }
   if (!context || !scopeAllows(section.qualification.scope, context)) return baseline('SCOPE_MISMATCH');
   if (evaluatePredicate(section.qualification.applicability, preparedFacts) !== 'TRUE') return baseline('APPLICABILITY_FALSE_OR_UNKNOWN');
   const row = section.currentState.strategies.find((entry) => entry.strategyId === strategyId);

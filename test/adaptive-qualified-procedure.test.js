@@ -8,6 +8,7 @@ import {
   ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION,
   ADAPTIVE_RANKING_TRIAL_COMPARATOR, ADAPTIVE_RANKING_TRIAL_COST_MODEL,
   ADAPTIVE_RANKING_TRIAL_PRIMARY_METRIC, adaptiveRankingTrialRecordValidator,
+  adaptiveRankingExecutionSourceIdentity,
   readQualifiedAdaptiveProcedureDecision, resolveQualifiedAdaptiveProcedureRanking,
   sealAdaptiveProcedureConsumerContract, sealAdaptiveProcedurePublication,
   sealAdaptiveRankingTrialDecision, sealAdaptiveRankingTrialExecution,
@@ -20,7 +21,9 @@ import {
   openDurableAdaptiveStore,
 } from '../learning/adaptive-durable-store.js';
 import { createAdaptiveProspectiveOwner } from '../learning/adaptive-prospective-owner.js';
-import { ADAPTIVE_HORIZON_MS, initialAdaptiveState, sealAdaptiveProcedure } from '../learning/adaptive-registry.js';
+import {
+  ADAPTIVE_HORIZON_MS, adaptiveStateDigestOf, initialAdaptiveState, sealAdaptiveProcedure,
+} from '../learning/adaptive-registry.js';
 import {
   ADAPTIVE_JOURNAL_EVENT_VERSION, ADAPTIVE_STORE_VERSION,
   createAdaptiveStore, validateAdaptiveStoreSnapshot,
@@ -35,7 +38,7 @@ import { buildEvidence, buildPatternRecord, estimateFromEvidence } from '../lear
 import { freezeCandidate, settleCandidate } from '../learning/promotion.js';
 import { transitionActivation } from '../learning/adapter.js';
 import { createLearningStore } from '../learning/store.js';
-import { replayProspective } from '../learning/prospective.js';
+import { interimView, replayProspective } from '../learning/prospective.js';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -215,7 +218,19 @@ function executionArm(decisionArm, decisionTs, exitBid) {
   assert.equal(evidence.state, 'COMPLETE', evidence.reason);
   const outcome = matureShadowCapture({ capture, path, depthPath, asOfTs });
   assert.equal(outcome.sizeEvidence, 'DEPTH_SUPPORTED_OBSERVED', JSON.stringify(outcome));
-  return { selectedStrategyId: decisionArm.selectedStrategyId, path, depthPath, asOfTs, outcome };
+  const accounting = evidence.accounting;
+  const feeFraction = COST.feePctPerSide / 100;
+  assert.equal(
+    accounting.roundTripFeesQuote,
+    Number(((accounting.entryQuote + accounting.exitQuote) * feeFraction).toFixed(6)),
+    'the round-trip fee is one entry charge plus one exit charge',
+  );
+  assert.equal(outcome.netPct, accounting.netPct, 'the matured outcome reuses, rather than re-deducts, exact cost accounting');
+  return {
+    selectedStrategyId: decisionArm.selectedStrategyId,
+    sourceIdentity: adaptiveRankingExecutionSourceIdentity({ decisionArm, depthPath }),
+    path, depthPath, asOfTs, outcome,
+  };
 }
 
 function appendAccumulatingPattern(store, publication) {
@@ -242,7 +257,7 @@ function appendAccumulatingPattern(store, publication) {
   return store.patternHeads().values().next().value;
 }
 
-async function fixture(t, { sameSelection = false } = {}) {
+async function fixture(t, { sameSelection = false, sameCohortPair = false } = {}) {
   const base = staticConsumer();
   const consumer = sealAdaptiveProcedureConsumerContract({ preparedFactsContract: base });
   const procedure = sealAdaptiveProcedure({
@@ -303,10 +318,15 @@ async function fixture(t, { sameSelection = false } = {}) {
     adaptiveStore: durable,
   });
   const trial = [];
+  const trialBaseTs = sameCohortPair
+    ? Math.ceil((design.sealedTs + HOUR) / (4 * HOUR)) * (4 * HOUR) + MIN
+    : null;
   for (let group = 0; group < 34; group += 1) {
-    const decisionTs = Math.ceil((design.sealedTs + HOUR + group * 6 * HOUR) / MIN) * MIN;
+    const decisionTs = sameCohortPair
+      ? (group === 1 ? trialBaseTs + 3 * HOUR + 2 * MIN : trialBaseTs + group * 6 * HOUR)
+      : Math.ceil((design.sealedTs + HOUR + group * 6 * HOUR) / MIN) * MIN;
     now.value = decisionTs;
-    const coin = `A${group % 6}`;
+    const coin = sameCohortPair && group === 1 ? 'A0' : `A${group % 6}`;
     const facts = preparedFacts(base, decisionTs, coin);
     const saved = await owner.recordPrediction(predictionInput(procedure, facts.factsDigest, decisionTs, coin, 'IGNITION'));
     const context = { setupType: 'IGNITION', regime: 'UNCLASSIFIED', asset: coin, venue: 'KRAKEN' };
@@ -390,7 +410,7 @@ async function fixture(t, { sameSelection = false } = {}) {
     candidateId: validated.candidateId, activationId: active.activationId,
   }));
   now.value = active.ts + MIN;
-  return { base, consumer, procedure, publication, learning, learningDir, design, trial, active, owner, durable, port, now, validator, bootstrap, adverseSeed, rootDir };
+  return { base, consumer, procedure, publication, learning, learningDir, design, trial, settled, active, owner, durable, port, now, validator, bootstrap, adverseSeed, rootDir };
 }
 
 test('whole frozen procedure earns one typed qualification from independent per-arm executions and later ACKed state evolves without requalification', async (t) => {
@@ -413,7 +433,16 @@ test('whole frozen procedure earns one typed qualification from independent per-
   assert.equal(snapshot.withheld.length, 0);
   assert.equal(snapshot.adaptiveRankingProcedure.qualification.qualificationVersion, 'adaptive-ranking-procedure-qualification-1');
   const qualificationId = snapshot.adaptiveRankingProcedure.qualification.qualificationId;
-  const facts = f.trial[0].facts; const context = f.trial[0].context;
+  const historicalFacts = preparedFacts(f.base, f.trial[0].facts.decisionTs, 'BTC');
+  const context = { ...f.trial[0].context, asset: 'BTC' };
+  const facts = preparedFacts(f.base, f.now.value, 'BTC');
+  const historical = resolveQualifiedAdaptiveProcedureRanking({
+    snapshot, consumerContract: f.consumer, preparedFacts: historicalFacts,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    context, strategyId: 'IGNITION', baselineRewardRiskRatio: 1, mode: 'PAPER', nowTs: f.now.value,
+  });
+  assert.equal(historical.applied, false, 'a current learned state cannot be projected onto an old decision frame');
+  assert.equal(historical.reason, 'PREPARED_FACTS_CLOCK_OR_STATE_ASOF_MISMATCH');
   const positive = resolveQualifiedAdaptiveProcedureRanking({
     snapshot, consumerContract: f.consumer, preparedFacts: facts,
     validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
@@ -455,6 +484,40 @@ test('whole frozen procedure earns one typed qualification from independent per-
   f.owner = createAdaptiveProspectiveOwner({ store: f.durable, procedure: f.procedure, clock: () => f.now.value });
   f.learning = createLearningStore({ dataDir: f.learningDir });
   const laterSettlement = f.durable.settlement({ opportunityId: laterPrediction.prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS });
+  const beforeStateWasKnown = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer, currentStateSettlement: laterSettlement,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    nowTs: laterSettlement.update.appliedTs - 1, mode: 'PAPER',
+  });
+  assert.equal(beforeStateWasKnown.adaptiveRankingProcedure, null, 'a later state cannot influence an earlier snapshot');
+  assert.match(beforeStateWasKnown.withheld[0].reason, /CURRENT_ACK_LINEAGE_INVALID/);
+  const futureAcknowledgment = clone(laterSettlement);
+  futureAcknowledgment.custody.durableAcknowledgment.acknowledgedTs = f.now.value + 1;
+  const beforeDurableAck = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer, currentStateSettlement: futureAcknowledgment,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    nowTs: f.now.value, mode: 'PAPER',
+  });
+  assert.equal(beforeDurableAck.adaptiveRankingProcedure, null, 'a future durable ACK cannot authorize a current snapshot');
+  assert.match(beforeDurableAck.withheld[0].reason, /CURRENT_ACK_LINEAGE_INVALID/);
+  const acknowledgmentBeforeState = clone(laterSettlement);
+  acknowledgmentBeforeState.custody.durableAcknowledgment.acknowledgedTs = laterSettlement.update.appliedTs - 1;
+  const invalidAckOrder = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer, currentStateSettlement: acknowledgmentBeforeState,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    nowTs: f.now.value, mode: 'PAPER',
+  });
+  assert.equal(invalidAckOrder.adaptiveRankingProcedure, null, 'the durable ACK cannot precede the state it acknowledges');
+  const staleStateSettlement = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer, currentStateSettlement: initialSettlement,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    nowTs: f.now.value, mode: 'PAPER',
+  });
+  assert.equal(staleStateSettlement.adaptiveRankingProcedure, null, 'a prior ACK cannot authorize the latest learned state');
   snapshot = readQualifiedAdaptiveProcedureDecision({
     qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
     currentConsumerContract: f.consumer, currentStateSettlement: laterSettlement,
@@ -462,14 +525,15 @@ test('whole frozen procedure earns one typed qualification from independent per-
     nowTs: f.now.value, mode: 'PAPER',
   });
   assert.equal(snapshot.adaptiveRankingProcedure.qualification.qualificationId, qualificationId, 'state evolution does not mint another approval');
+  const postUpdateFacts = preparedFacts(f.base, f.now.value, 'BTC');
   const zero = resolveQualifiedAdaptiveProcedureRanking({
-    snapshot, consumerContract: f.consumer, preparedFacts: laterFacts,
+    snapshot, consumerContract: f.consumer, preparedFacts: postUpdateFacts,
     validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
     context: { ...context, asset: 'BTC' }, strategyId: 'IGNITION', baselineRewardRiskRatio: 1,
     mode: 'PAPER', nowTs: f.now.value,
   });
   const negative = resolveQualifiedAdaptiveProcedureRanking({
-    snapshot, consumerContract: f.consumer, preparedFacts: laterFacts,
+    snapshot, consumerContract: f.consumer, preparedFacts: postUpdateFacts,
     validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
     context: { ...context, asset: 'BTC' }, strategyId: 'PULLBACK', baselineRewardRiskRatio: 1,
     mode: 'PAPER', nowTs: f.now.value,
@@ -478,6 +542,30 @@ test('whole frozen procedure earns one typed qualification from independent per-
   assert.ok(zero.adjustmentRrPoints < preChangeState.strategies.find((row) => row.strategyId === 'IGNITION').rankOffsetRrPoints, 'new adverse evidence deteriorates the positive influence under the frozen update law');
   assert.equal(negative.applied, true); assert.ok(negative.adjustmentRrPoints < 0);
   assert.ok(negative.effectiveRewardRiskRatio < 1);
+  const outsideEnvelope = clone(snapshot);
+  outsideEnvelope.adaptiveRankingProcedure.currentState.strategies[0].rankOffsetRrPoints = 0.151;
+  outsideEnvelope.adaptiveRankingProcedure.currentState.stateDigest = adaptiveStateDigestOf(
+    outsideEnvelope.adaptiveRankingProcedure.currentState,
+  );
+  const refusedOutsideEnvelope = resolveQualifiedAdaptiveProcedureRanking({
+    snapshot: outsideEnvelope, consumerContract: f.consumer, preparedFacts: postUpdateFacts,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    context: { ...context, asset: 'BTC' }, strategyId: 'IGNITION', baselineRewardRiskRatio: 1,
+    mode: 'PAPER', nowTs: f.now.value,
+  });
+  assert.equal(refusedOutsideEnvelope.applied, false, 'a rehashed state outside the qualified envelope is refused');
+  const mismatchedStateSource = clone(snapshot);
+  mismatchedStateSource.adaptiveRankingProcedure.currentState.strategies[0].rankOffsetRrPoints += 0.001;
+  mismatchedStateSource.adaptiveRankingProcedure.currentState.stateDigest = adaptiveStateDigestOf(
+    mismatchedStateSource.adaptiveRankingProcedure.currentState,
+  );
+  const refusedMismatchedSource = resolveQualifiedAdaptiveProcedureRanking({
+    snapshot: mismatchedStateSource, consumerContract: f.consumer, preparedFacts: postUpdateFacts,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    context: { ...context, asset: 'BTC' }, strategyId: 'IGNITION', baselineRewardRiskRatio: 1,
+    mode: 'PAPER', nowTs: f.now.value,
+  });
+  assert.equal(refusedMismatchedSource.applied, false, 'a rehashed state without its matching durable source is refused');
   await f.owner.close();
 });
 
@@ -487,6 +575,18 @@ test('same selected strategy uses one exact control arm and cannot manufacture a
   assert.equal(f.settled.terminal.verdict, 'FORWARD_NOT_SUPPORTED');
   assert.equal(f.settled.activation, null);
   assert.equal(f.learning.activationHeads().size, 0);
+  await f.owner.close();
+});
+
+test('same-asset captures in one predeclared episode remain two records but one dependence group', async (t) => {
+  const f = await fixture(t, { sameCohortPair: true });
+  const replay = replayProspective(f.learning.readProspective(), { adaptiveRankingTrialValidator: f.validator });
+  assert.deepEqual(replay.errors, []);
+  const view = interimView(replay, f.design.candidateId);
+  assert.equal(view.matured, 34);
+  assert.equal(view.maturedGroups, 33, 'the nearby same-asset capture does not add independent evidence');
+  assert.equal(f.settled.terminal.maturedGroups, 30, 'the terminal remains frozen to its predeclared group target');
+  assert.equal(f.settled.terminal.verdict, 'FORWARD_SUPPORTED');
   await f.owner.close();
 });
 
@@ -517,6 +617,30 @@ test('typed trial refuses shared metrics, caller-edited costs/path, lookahead, d
   const partialDepth = clone(original.outcome);
   partialDepth.executionReceipt.candidate.depthPath.intended.quoteNotional = 1_000_000;
   assert.match(f.validator(partialDepth, { stage: 'OUTCOME', design: f.design, capture: original.capture }).error, /deterministic replay/);
+  const swappedArms = clone(original.outcome);
+  [swappedArms.executionReceipt.candidate, swappedArms.executionReceipt.baseline] = [
+    swappedArms.executionReceipt.baseline, swappedArms.executionReceipt.candidate,
+  ];
+  swappedArms.executionReceipt.executionDigest = canonicalDigest(Object.fromEntries(
+    Object.entries(swappedArms.executionReceipt).filter(([key]) => !['executionId', 'executionDigest'].includes(key)),
+  ));
+  swappedArms.executionReceipt.executionId = `artriale-${swappedArms.executionReceipt.executionDigest.slice(0, 40)}`;
+  assert.match(
+    f.validator(swappedArms, { stage: 'OUTCOME', design: f.design, capture: original.capture }).error,
+    /shape or identity malformed/,
+    'candidate-selected A and baseline-selected B executions cannot be swapped after the label',
+  );
+  const mixedSource = clone(original.outcome);
+  mixedSource.executionReceipt.candidate.sourceIdentity.assetId = 'ETH';
+  mixedSource.executionReceipt.executionDigest = canonicalDigest(Object.fromEntries(
+    Object.entries(mixedSource.executionReceipt).filter(([key]) => !['executionId', 'executionDigest'].includes(key)),
+  ));
+  mixedSource.executionReceipt.executionId = `artriale-${mixedSource.executionReceipt.executionDigest.slice(0, 40)}`;
+  assert.match(
+    f.validator(mixedSource, { stage: 'OUTCOME', design: f.design, capture: original.capture }).error,
+    /source identity differs/,
+    'rehashed cross-market execution identity is refused',
+  );
   const wrongArm = clone(original.capture);
   wrongArm.decisionReceipt.candidateArm.executionCapture.assetId = 'ETH';
   assert.match(f.validator(wrongArm, { stage: 'CAPTURE', design: f.design, capture: null }).error, /capture\/strategy\/market mismatch/);
@@ -541,6 +665,53 @@ test('typed trial refuses shared metrics, caller-edited costs/path, lookahead, d
   });
   assert.equal(missingCustody.adaptiveRankingProcedure, null);
   assert.match(missingCustody.withheld[0].reason, /CURRENT_ACK_LINEAGE_INVALID/);
+  const wrongAcknowledgment = clone(f.trial.at(-1).stateSettlement);
+  wrongAcknowledgment.custody.durableAcknowledgment.eventDigest = '9'.repeat(64);
+  const mismatchedCustody = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer, currentStateSettlement: wrongAcknowledgment,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    nowTs: f.now.value, mode: 'PAPER',
+  });
+  assert.equal(mismatchedCustody.adaptiveRankingProcedure, null);
+  assert.match(mismatchedCustody.withheld[0].reason, /CURRENT_ACK_LINEAGE_INVALID/);
+  const currentBtcFacts = preparedFacts(f.base, f.now.value, 'BTC');
+  const wrongAssetFacts = preparedFacts(f.base, f.now.value, 'ETH');
+  const futureFacts = preparedFacts(f.base, f.now.value + MIN, 'BTC');
+  for (const [value, expectedReason] of [
+    [wrongAssetFacts, 'PREPARED_FACTS_ASSET_MISMATCH'],
+    [futureFacts, 'PREPARED_FACTS_CLOCK_OR_STATE_ASOF_MISMATCH'],
+  ]) {
+    const result = resolveQualifiedAdaptiveProcedureRanking({
+      snapshot: readQualifiedAdaptiveProcedureDecision({
+        qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+        currentConsumerContract: f.consumer, currentStateSettlement: f.trial.at(-1).stateSettlement,
+        validatePreparedFacts: (facts, contract) => judgeLearningPreparedFactsError(facts, { consumerContract: contract }),
+        nowTs: f.now.value, mode: 'PAPER',
+      }),
+      consumerContract: f.consumer, preparedFacts: value,
+      validatePreparedFacts: (facts, contract) => judgeLearningPreparedFactsError(facts, { consumerContract: contract }),
+      context: { ...original.context, asset: 'BTC' }, strategyId: 'IGNITION',
+      baselineRewardRiskRatio: 1, mode: 'PAPER', nowTs: f.now.value,
+    });
+    assert.equal(result.applied, false);
+    assert.equal(result.reason, expectedReason);
+  }
+  const wrongVenue = resolveQualifiedAdaptiveProcedureRanking({
+    snapshot: readQualifiedAdaptiveProcedureDecision({
+      qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+      currentConsumerContract: f.consumer, currentStateSettlement: f.trial.at(-1).stateSettlement,
+      validatePreparedFacts: (facts, contract) => judgeLearningPreparedFactsError(facts, { consumerContract: contract }),
+      nowTs: f.now.value, mode: 'PAPER',
+    }),
+    consumerContract: f.consumer, preparedFacts: currentBtcFacts,
+    validatePreparedFacts: (facts, contract) => judgeLearningPreparedFactsError(facts, { consumerContract: contract }),
+    context: { ...original.context, asset: 'BTC', venue: 'COINBASE' }, strategyId: 'IGNITION',
+    baselineRewardRiskRatio: 1, mode: 'PAPER', nowTs: f.now.value,
+  });
+  assert.equal(wrongVenue.applied, false);
+  assert.equal(wrongVenue.reason, 'PREPARED_FACTS_VENUE_NOT_SINGLE_QUALIFIED_SOURCE');
+  assert.equal(currentBtcFacts.decisionTs, f.now.value);
   const observe = resolveQualifiedAdaptiveProcedureRanking({
     snapshot: missingCustody, consumerContract: f.consumer, preparedFacts: original.facts,
     validatePreparedFacts: () => null, context: original.context,
