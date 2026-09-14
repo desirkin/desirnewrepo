@@ -19,6 +19,7 @@ import { catalogContentId, KRAKEN_BASE_ALIASES } from '../survey/catalog.js';
 
 export const BROAD_KRAKEN_VERSION = 'broad-kraken-v1';
 export const BROAD_KRAKEN_RECORD_VERSION = 'broad-kraken-record-v1';
+export const BROAD_KRAKEN_RECORD_VERSION_V2 = 'broad-kraken-record-v2';
 export const BROAD_KRAKEN_STATES = Object.freeze([
   'WAITING_CATALOG', 'CONNECTING', 'AWAITING_INSTRUMENT', 'SUBSCRIBING',
   'ACTIVE', 'DEGRADED', 'STOPPING', 'STOPPED', 'RECORDING_FAILED',
@@ -66,6 +67,36 @@ const plain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const boundedText = (v, max = 160) => typeof v === 'string' ? v.slice(0, max) : String(v ?? '').slice(0, max);
 const clone = (v) => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
 const hash = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
+const canonicalText = (value, { maxBytes = 256 * 1024, maxDepth = 24, maxEntries = 100_000 } = {}) => {
+  let bytes = 0; let entries = 0; const parts = []; const stack = new Set();
+  const add = (part) => {
+    if (typeof part !== 'string' || bytes + Buffer.byteLength(part, 'utf8') > maxBytes) throw new Error('canonical record identity exceeds byte bound');
+    bytes += Buffer.byteLength(part, 'utf8'); parts.push(part);
+  };
+  const walk = (current, depth) => {
+    if (depth > maxDepth) throw new Error('canonical record identity exceeds depth bound');
+    if (current === null || typeof current === 'boolean' || typeof current === 'string') { add(JSON.stringify(current)); return; }
+    if (typeof current === 'number') { if (!Number.isFinite(current)) throw new Error('canonical record identity contains a non-finite number'); add(JSON.stringify(current)); return; }
+    if (!plain(current) && !Array.isArray(current)) throw new Error('canonical record identity contains a non-JSON value');
+    if (stack.has(current)) throw new Error('canonical record identity is cyclic');
+    stack.add(current);
+    if (Array.isArray(current)) {
+      add('[');
+      for (let i = 0; i < current.length; i += 1) { if (++entries > maxEntries) throw new Error('canonical record identity exceeds entry bound'); if (i) add(','); walk(current[i], depth + 1); }
+      add(']');
+    } else {
+      add('{'); let emitted = 0;
+      for (const key of Object.keys(current).sort()) {
+        if (current[key] === undefined || ++entries > maxEntries) throw new Error('canonical record identity contains undefined or too many entries');
+        if (emitted) add(','); add(JSON.stringify(key)); add(':'); walk(current[key], depth + 1); emitted += 1;
+      }
+      add('}');
+    }
+    stack.delete(current);
+  };
+  walk(value, 0); return parts.join('');
+};
+const canonicalHash = (value) => createHash('sha256').update(canonicalText(value)).digest('hex');
 const normalizeAsset = (v) => typeof v === 'string' ? (KRAKEN_BASE_ALIASES[v] ?? v) : null;
 const marketIdentity = (m) => ({
   canonicalCoin: m.base,
@@ -193,9 +224,16 @@ function openBroadStore({ dataDir, clock, segmentBytes, maxSegments, lineBytes, 
   };
 }
 
-function sealRecord({ sessionId, sequence, clock, body }) {
+export function broadKrakenRecordIdOf(record) {
+  if (!plain(record) || ![BROAD_KRAKEN_RECORD_VERSION, BROAD_KRAKEN_RECORD_VERSION_V2].includes(record.recordVersion)) throw new Error('record version malformed');
+  const copy = { ...record, recordId: null };
+  return record.recordVersion === BROAD_KRAKEN_RECORD_VERSION_V2
+    ? `bkr2-${canonicalHash(copy)}` : `bkr-${hash(copy)}`;
+}
+
+function sealRecord({ sessionId, sequence, clock, body, recordVersion }) {
   const record = {
-    recordVersion: BROAD_KRAKEN_RECORD_VERSION,
+    recordVersion,
     recordId: null,
     sessionId,
     sequence,
@@ -212,16 +250,18 @@ function sealRecord({ sessionId, sequence, clock, body }) {
     periodEndTs: body.periodEndTs ?? null,
     payload: body.payload,
   };
-  record.recordId = `bkr-${hash(record)}`;
+  record.recordId = broadKrakenRecordIdOf(record);
   return Object.freeze(record);
 }
 
 export function broadKrakenRecordError(record) {
-  if (!plain(record) || record.recordVersion !== BROAD_KRAKEN_RECORD_VERSION || typeof record.recordId !== 'string' || !record.recordId.startsWith('bkr-')) return 'record envelope malformed';
+  if (!plain(record) || ![BROAD_KRAKEN_RECORD_VERSION, BROAD_KRAKEN_RECORD_VERSION_V2].includes(record.recordVersion)
+      || typeof record.recordId !== 'string'
+      || (record.recordVersion === BROAD_KRAKEN_RECORD_VERSION ? !/^bkr-[a-f0-9]{64}$/.test(record.recordId) : !/^bkr2-[a-f0-9]{64}$/.test(record.recordId))) return 'record envelope malformed';
   if (!positiveInt(record.recordedTs) || !positiveInt(record.receivedTs) || !plain(record.payload)) return 'record clocks/payload malformed';
   if (record.market !== null && (!plain(record.market) || !BASE_RE.test(String(record.market.canonicalCoin)) || !PAIR_KEY_RE.test(String(record.market.pairKey)))) return 'record market malformed';
-  const copy = { ...record, recordId: null };
-  if (`bkr-${hash(copy)}` !== record.recordId) return 'record identity mismatch';
+  try { if (broadKrakenRecordIdOf(record) !== record.recordId) return 'record identity mismatch'; }
+  catch { return 'record identity uncomputable'; }
   return null;
 }
 
@@ -333,10 +373,12 @@ export function startBroadKraken({
   log = () => {},
   timers = { setTimeout, clearTimeout, setInterval, clearInterval },
   onRecord = () => {},
+  recordVersion = BROAD_KRAKEN_RECORD_VERSION,
   limits = {},
 } = {}) {
   if (!catalogSource || typeof catalogSource.snapshot !== 'function') throw new Error('broad Kraken catalogSource.snapshot required');
   if (typeof WebSocketImpl !== 'function') throw new Error('broad Kraken WebSocket implementation required');
+  if (![BROAD_KRAKEN_RECORD_VERSION, BROAD_KRAKEN_RECORD_VERSION_V2].includes(recordVersion)) throw new Error('broad Kraken recordVersion invalid');
   const cfg = { ...BROAD_KRAKEN_DEFAULTS, ...limits };
   for (const key of Object.keys(BROAD_KRAKEN_DEFAULTS)) if (!positiveInt(cfg[key])) throw new Error(`invalid broad Kraken ${key}`);
   if (cfg.subscribeChunkSize > cfg.maxMarkets || cfg.writeBatchSize > cfg.maxQueue) throw new Error('broad Kraken limits contradict');
@@ -390,7 +432,7 @@ export function startBroadKraken({
   const enqueue = (body, { duringStop = false } = {}) => {
     if (recordingError || (stopping && !duringStop)) return false;
     if (writeQueue.length >= cfg.maxQueue) { failRecording(Object.assign(new Error(`broad market write queue exceeded ${cfg.maxQueue}`), { code: 'BROAD_MARKET_BACKPRESSURE' })); return false; }
-    const r = sealRecord({ sessionId, sequence: ++sequence, clock, body });
+    const r = sealRecord({ sessionId, sequence: ++sequence, clock, body, recordVersion });
     const e = broadKrakenRecordError(r); if (e) { failRecording(Object.assign(new Error(e), { code: 'BROAD_MARKET_RECORD_INVALID' })); return false; }
     writeQueue.push(r); counters.queueHighWater = Math.max(counters.queueHighWater, writeQueue.length);
     if (!draining && drainTimer === null) drainTimer = schedule(drainWrites, 0);
@@ -414,7 +456,7 @@ export function startBroadKraken({
   };
   const stageLatest = (m, field, body) => {
     if (recordingError || stopping) return false;
-    const record = sealRecord({ sessionId, sequence: ++sequence, clock, body });
+    const record = sealRecord({ sessionId, sequence: ++sequence, clock, body, recordVersion });
     const e = broadKrakenRecordError(record); if (e) { failRecording(Object.assign(new Error(e), { code: 'BROAD_MARKET_RECORD_INVALID' })); return false; }
     const key = `${m.canonicalCoin}:${field}`; if (dirtyLatest.has(key)) counters.coalescedSnapshotRecords += 1;
     dirtyLatest.set(key, record); latestDirty = true;

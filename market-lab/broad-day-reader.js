@@ -12,11 +12,15 @@ import {
 import { createHash } from 'node:crypto';
 import {
   BROAD_KRAKEN_RECORD_VERSION,
+  BROAD_KRAKEN_RECORD_VERSION_V2,
+  broadKrakenRecordIdOf,
   validateBroadKrakenCatalog,
 } from './broad-kraken.js';
 import {
   BROAD_DAY_ARCHIVE_ENTRY_VERSION,
+  BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2,
   BROAD_DAY_ARCHIVE_VERSION,
+  BROAD_DAY_ARCHIVE_VERSION_V2,
 } from './broad-day-archive.js';
 
 export const BROAD_DAY_DATASET_VERSION = 'broad-day-dataset-v1';
@@ -36,6 +40,7 @@ export const BROAD_DAY_READER_DEFAULTS = Object.freeze({
   maxPageRows: 5_000,
   maxPageBytes: 32 * 1024 * 1024,
   maxCatalogAgeMs: 24 * 60 * 60_000,
+  maxCatalogHeartbeatGapMs: 20 * 60_000,
   maxFinalizationLagMs: 48 * 60 * 60_000,
 });
 
@@ -53,6 +58,7 @@ const CEILINGS = Object.freeze({
   maxPageRows: 50_000,
   maxPageBytes: 256 * 1024 * 1024,
   maxCatalogAgeMs: 7 * 24 * 60 * 60_000,
+  maxCatalogHeartbeatGapMs: 24 * 60 * 60_000,
   maxFinalizationLagMs: 7 * 24 * 60 * 60_000,
 });
 
@@ -67,6 +73,9 @@ const CONTROL_COMMON = Object.freeze([
 const CATALOG_CONTROL_KEYS = Object.freeze([
   ...CONTROL_COMMON, 'sourceObservedTs', 'contentId', 'catalogBodyDigest', 'catalog',
 ]);
+const CATALOG_CONTROL_V2_KEYS = Object.freeze([
+  ...CATALOG_CONTROL_KEYS, 'priorCatalogControlDigest', 'priorCatalogContentId', 'catalogChange',
+]);
 const SOURCE_CONTROL_KEYS = Object.freeze([
   ...CONTROL_COMMON, 'recordId', 'recordDigest', 'catalogContentId',
   'catalogControlDigest', 'record',
@@ -79,6 +88,11 @@ const CANDLE_INDEX_KEYS = Object.freeze([
 const SHARD_KEYS = Object.freeze([
   'entryVersion', 'kind', 'globalOrdinal', 'globalControlDigest', 'shardOrdinal',
   'admittedTs', 'knownAtTs', 'recordDigest', 'conflict', 'record',
+]);
+const FINALIZATION_KEYS = Object.freeze([
+  ...CONTROL_COMMON, 'sessionId', 'sessionStartedTs', 'cutoffTs', 'lastDataOrdinal',
+  'lastDataControlDigest', 'activeCatalogContentId', 'activeCatalogControlDigest',
+  'admittedCounts', 'shardFiles', 'plannedPhysicalRows', 'plannedBytes',
 ]);
 const CLOSED_PAYLOAD_KEYS = Object.freeze([
   'close', 'finality', 'high', 'learningEligible', 'low', 'messageType', 'open',
@@ -274,30 +288,43 @@ function digestWithout(value, key, maximum) {
 }
 function chainDigest(previous, row) { return sha256(canonicalBounded({ previous, row }, 512 * 1024).text); }
 
-function commonControlError(row, priorDigest, expectedOrdinal) {
-  if (row.entryVersion !== BROAD_DAY_ARCHIVE_ENTRY_VERSION || row.globalOrdinal !== expectedOrdinal
+function commonControlError(row, priorDigest, expectedOrdinal, entryVersion) {
+  if (row.entryVersion !== entryVersion || row.globalOrdinal !== expectedOrdinal
       || row.previousControlDigest !== priorDigest || !positive(row.admittedTs) || !positive(row.knownAtTs)
       || row.knownAtTs > row.admittedTs || !HEX64.test(row.controlDigest ?? '')) return 'control identity, chain, or clocks malformed';
   if (digestWithout(row, 'controlDigest', 16 * 1024 * 1024) !== row.controlDigest) return 'control digest mismatch';
   return null;
 }
 
-function catalogControlError(row, limits) {
-  const keys = exactKeys(row, CATALOG_CONTROL_KEYS); if (keys) return keys;
-  if (row.kind !== 'CATALOG_CONTROL' || !positive(row.sourceObservedTs)
+function catalogControlError(row, limits, entryVersion, lastCatalog = null) {
+  const v2 = entryVersion === BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2;
+  const keys = exactKeys(row, v2 ? CATALOG_CONTROL_V2_KEYS : CATALOG_CONTROL_KEYS); if (keys) return keys;
+  if (!['CATALOG_CONTROL', ...(v2 ? ['CATALOG_HEARTBEAT'] : [])].includes(row.kind) || !positive(row.sourceObservedTs)
       || row.sourceObservedTs > row.knownAtTs || row.contentId !== row.catalog?.contentId) return 'catalog control clocks/content malformed';
   const valid = validateBroadKrakenCatalog(row.catalog, { maxMarkets: 5_000 });
   if (!valid.ok || row.catalog.observedTs !== row.sourceObservedTs) return `catalog invalid (${valid.reason ?? 'observed clock mismatch'})`;
   const catalogBody = canonicalBounded(row.catalog, limits.maxCatalogLineBytes);
   if (sha256(catalogBody.text) !== row.catalogBodyDigest) return 'catalog body digest mismatch';
+  if (v2) {
+    const initial = lastCatalog === null;
+    const expectedChange = initial ? 'INITIAL' : row.contentId === lastCatalog.contentId ? 'UNCHANGED' : 'CHANGED';
+    const expectedKind = expectedChange === 'UNCHANGED' ? 'CATALOG_HEARTBEAT' : 'CATALOG_CONTROL';
+    if (row.catalogChange !== expectedChange || row.kind !== expectedKind
+        || row.priorCatalogControlDigest !== (lastCatalog?.controlDigest ?? null)
+        || row.priorCatalogContentId !== (lastCatalog?.contentId ?? null)
+        || (lastCatalog && (row.sourceObservedTs < lastCatalog.sourceObservedTs
+          || row.knownAtTs < lastCatalog.knownAtTs))) return 'catalog heartbeat/change chain malformed';
+  }
   return null;
 }
 
-function commonRecordError(record, entry) {
+function commonRecordError(record, entry, entryVersion = BROAD_DAY_ARCHIVE_ENTRY_VERSION) {
   const keys = exactKeys(record, BROAD_RECORD_KEYS); if (keys) return `record envelope ${keys}`;
   const marketKeys = exactKeys(record.market, BROAD_MARKET_KEYS); if (marketKeys) return `record market ${marketKeys}`;
-  if (record.recordVersion !== BROAD_KRAKEN_RECORD_VERSION
-      || typeof record.recordId !== 'string' || !/^bkr-[a-f0-9]{64}$/.test(record.recordId)
+  const requiredRecordVersion = entryVersion === BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2 ? BROAD_KRAKEN_RECORD_VERSION_V2 : BROAD_KRAKEN_RECORD_VERSION;
+  if (record.recordVersion !== requiredRecordVersion
+      || typeof record.recordId !== 'string'
+      || (requiredRecordVersion === BROAD_KRAKEN_RECORD_VERSION ? !/^bkr-[a-f0-9]{64}$/.test(record.recordId) : !/^bkr2-[a-f0-9]{64}$/.test(record.recordId))
       || !positive(record.recordedTs)
       || !positive(record.receivedTs) || record.receivedTs > record.recordedTs
       || record.recordedTs > entry.knownAtTs || record.catalogContentId !== entry.catalogContentId
@@ -307,6 +334,10 @@ function commonRecordError(record, entry) {
         && record.market.wsSymbol.length > 0 && record.market.wsSymbol.length <= 80))) return 'record clocks/identity disagree with archive custody';
   const digest = sha256(canonicalBounded(record, CEILINGS.maxRecordLineBytes).text);
   if (digest !== entry.recordDigest || record.recordId !== entry.recordId) return 'record digest/identity differs from control';
+  if (requiredRecordVersion === BROAD_KRAKEN_RECORD_VERSION_V2) {
+    try { if (broadKrakenRecordIdOf(record) !== record.recordId) return 'canonical source record identity mismatch'; }
+    catch { return 'canonical source record identity uncomputable'; }
+  }
   return null;
 }
 
@@ -383,7 +414,7 @@ function actualShardSummary(row) {
 
 function coverageState(identity, minutes) {
   return {
-    identity, marketIdentityDigest: marketDigest(identity), minuteState: new Uint8Array(minutes),
+    identity, marketIdentityDigest: marketDigest(identity), minuteState: new Uint8Array(minutes), expectedMinuteState: new Uint8Array(minutes),
     rows: 0, eligibleRows: 0, duplicateRows: 0, futureWithheldRows: 0, conflictRows: 0,
     firstPeriodStartTs: null, lastPeriodEndTs: null,
     sessions: new Set(), catalogControls: new Set(), eligibleRecordIds: new Set(), gaps: 0,
@@ -391,14 +422,17 @@ function coverageState(identity, minutes) {
 }
 
 function publicCoverage(state, dayStartTs, dayEndTs, siblingCount) {
-  let uniqueMinutes = 0; let conflictMinutes = 0;
-  for (const value of state.minuteState) {
-    if (value > 0) uniqueMinutes += 1;
-    if (value > 1) conflictMinutes += 1;
+  let uniqueMinutes = 0; let conflictMinutes = 0; let expectedMinutes = 0; let outsideExpectedMinutes = 0;
+  for (let i = 0; i < state.minuteState.length; i += 1) {
+    const value = state.minuteState[i]; const expected = state.expectedMinuteState[i] === 1;
+    if (expected) expectedMinutes += 1;
+    if (value > 0 && expected) uniqueMinutes += 1;
+    if (value > 1 && expected) conflictMinutes += 1;
+    if (value > 0 && !expected) outsideExpectedMinutes += 1;
   }
-  const expectedMinutes = (dayEndTs - dayStartTs) / MINUTE;
   const missingMinutes = expectedMinutes - uniqueMinutes;
-  const gridState = conflictMinutes > 0 ? 'CONFLICT'
+  const gridState = outsideExpectedMinutes > 0 ? 'OUTSIDE_CATALOG_EPOCH'
+    : conflictMinutes > 0 ? 'CONFLICT'
     : uniqueMinutes === 0 ? 'MISSING'
       : missingMinutes === 0 && state.gaps === 0 ? 'COMPLETE_OBSERVED_GRID' : 'PARTIAL';
   return {
@@ -408,7 +442,8 @@ function publicCoverage(state, dayStartTs, dayEndTs, siblingCount) {
     physicalRows: state.rows, asOfEligibleRows: state.eligibleRows, exactDuplicateRows: state.duplicateRows,
     futureAdmissionWithheldRows: state.futureWithheldRows,
     conflictRows: state.conflictRows, conflictMinutes, explicitGapControls: state.gaps,
-    expectedCivilDayMinutes: expectedMinutes, uniqueObservedMinutes: uniqueMinutes, missingMinutes,
+    expectedCatalogMembershipMinutes: expectedMinutes, expectedCivilDayMinutes: (dayEndTs - dayStartTs) / MINUTE,
+    uniqueObservedMinutes: uniqueMinutes, missingMinutes, outsideCatalogEpochMinutes: outsideExpectedMinutes,
     firstPeriodStartTs: state.firstPeriodStartTs, lastPeriodEndTs: state.lastPeriodEndTs,
     gridState,
     observedGridComplete: gridState === 'COMPLETE_OBSERVED_GRID',
@@ -470,11 +505,12 @@ export async function openBroadDayReader({
   if (initialNames.length < 1 || initialNames.length > limits.maxSessions || initialNames.some((name) => !SESSION_RE.test(name))) fail('READER_SESSION_INVENTORY_INVALID', 'session inventory empty, malformed, or over bound');
 
   const dayMinutes = (dayEndTs - dayStartTs) / MINUTE;
-  const sessionMetas = []; const epochs = []; const identities = new Map(); const eligibleIdentities = new Set(); const coverage = new Map();
+  const sessionMetas = []; const catalogObservations = []; const identities = new Map(); const eligibleIdentities = new Set(); const coverage = new Map();
   let totalBytes = 0; let totalControlRows = 0; let catalogControlCount = 0;
-  let sourceControlCount = 0; let candleIndexCount = 0; let candleRowCount = 0;
+  let catalogHeartbeatCount = 0; let sessionFinalizationCount = 0;
+  let sourceControlCount = 0; let candleIndexCount = 0; let candleRowCount = 0; let canonicalV2CandleRows = 0;
   let relevantRows = 0; let asOfEligibleRows = 0; let futureWithheldRows = 0; let staleCatalogControls = 0;
-  let futureCatalogControlsWithheld = 0; let totalShardFiles = 0; let duplicateCandleRows = 0;
+  let futureCatalogControlsWithheld = 0; let totalShardFiles = 0; let duplicateCandleRows = 0; let catalogAsOfWithheldRows = 0;
   const seenRecordDigests = new Map(); const eligibleCandleLocations = new Set();
 
   for (const sessionId of initialNames) {
@@ -488,57 +524,86 @@ export async function openBroadDayReader({
     const controlFile = path.join(sessionDir, 'controls.jsonl');
     if (!existsSync(controlFile)) {
       if (shardNames.length) fail('READER_CONTROL_MISSING', 'session has shards without a control ledger', { sessionId });
-      sessionMetas.push({ sessionId, controls: null, shards: [], empty: true, sourceDigest: sha256(`EMPTY:${sessionId}`) });
+      sessionMetas.push({
+        sessionId, controls: null, shards: [], empty: true, sourceDigest: sha256(`EMPTY:${sessionId}`),
+        entryVersion: null, archiveVersion: null, startedTs: Number(SESSION_RE.exec(sessionId)?.[1]),
+        firstCatalogAdmittedTs: null, finalized: null,
+      });
       continue;
     }
 
-    const catalogs = new Map(); const catalogsByContentId = new Map(); const expectedShards = new Map();
+    const catalogs = new Map(); const expectedShards = new Map();
     let lastDigest = null; let nextOrdinal = 1; let lastAdmittedTs = 0;
+    let sessionEntryVersion = null; let lastCatalog = null; let finalized = null; let finalizationLineBytes = 0;
+    const sessionCounts = { catalogControls: 0, catalogHeartbeats: 0, sourceControls: 0, closedCandles: 0 };
     const controls = await scanJsonl(controlFile, {
       maxFileBytes: limits.maxControlFileBytes,
       maxLineBytes: limits.maxCatalogLineBytes,
       maxRows: limits.maxControlRows,
       signal,
-      onRow: async (row) => {
+      onRow: async (row, rowMeta) => {
         totalControlRows += 1; if (totalControlRows > limits.maxControlRows) fail('READER_ROW_LIMIT', 'aggregate control rows exceed bound');
+        if (sessionEntryVersion === null) {
+          if (![BROAD_DAY_ARCHIVE_ENTRY_VERSION, BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2].includes(row?.entryVersion)) fail('READER_CONTROL_INVALID', 'unsupported session entry version', { sessionId, ordinal: nextOrdinal });
+          sessionEntryVersion = row.entryVersion;
+        }
         let keys;
-        if (row?.kind === 'CATALOG_CONTROL') keys = exactKeys(row, CATALOG_CONTROL_KEYS);
+        if (['CATALOG_CONTROL', 'CATALOG_HEARTBEAT'].includes(row?.kind)) keys = exactKeys(row, sessionEntryVersion === BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2 ? CATALOG_CONTROL_V2_KEYS : CATALOG_CONTROL_KEYS);
         else if (row?.kind === 'SOURCE_CONTROL') keys = exactKeys(row, SOURCE_CONTROL_KEYS);
         else if (row?.kind === 'CLOSED_CANDLE_INDEX') keys = exactKeys(row, CANDLE_INDEX_KEYS);
+        else if (row?.kind === 'SESSION_FINALIZATION') keys = exactKeys(row, FINALIZATION_KEYS);
         else fail('READER_CONTROL_INVALID', 'unsupported control kind', { sessionId, ordinal: nextOrdinal });
         if (keys) fail('READER_CONTROL_INVALID', keys, { sessionId, ordinal: nextOrdinal });
-        const common = commonControlError(row, lastDigest, nextOrdinal);
+        if (finalized) fail('READER_FINALIZATION_INVALID', 'control appears after session finalization', { sessionId, ordinal: nextOrdinal });
+        const common = commonControlError(row, lastDigest, nextOrdinal, sessionEntryVersion);
         if (common || row.admittedTs < lastAdmittedTs) fail('READER_CONTROL_INVALID', common ?? 'control admission clock regressed', { sessionId, ordinal: nextOrdinal });
-        if (row.kind === 'CATALOG_CONTROL') {
-          catalogControlCount += 1; if (catalogControlCount > limits.maxCatalogControls) fail('READER_ROW_LIMIT', 'catalog-control count exceeds bound');
-          const error = catalogControlError(row, limits); if (error) fail('READER_CATALOG_CONTROL_INVALID', error, { sessionId, ordinal: row.globalOrdinal });
-          catalogs.set(row.controlDigest, row); catalogsByContentId.set(row.contentId, row);
+        if (['CATALOG_CONTROL', 'CATALOG_HEARTBEAT'].includes(row.kind)) {
+          if (row.kind === 'CATALOG_CONTROL') { catalogControlCount += 1; sessionCounts.catalogControls += 1; }
+          else { catalogHeartbeatCount += 1; sessionCounts.catalogHeartbeats += 1; }
+          if (catalogControlCount + catalogHeartbeatCount > limits.maxCatalogControls) fail('READER_ROW_LIMIT', 'catalog-control count exceeds bound');
+          const error = catalogControlError(row, limits, sessionEntryVersion, lastCatalog); if (error) fail('READER_CATALOG_CONTROL_INVALID', error, { sessionId, ordinal: row.globalOrdinal });
+          const catalogState = Object.freeze({
+            ...row,
+            membershipKnownSinceTs: lastCatalog?.contentId === row.contentId
+              ? lastCatalog.membershipKnownSinceTs : row.admittedTs,
+          });
+          catalogs.set(row.controlDigest, catalogState);
           const members = [];
           for (const market of row.catalog.markets) {
             const identity = marketIdentity(market); const digest = marketDigest(identity);
             if (!identities.has(digest)) identities.set(digest, identity);
             if (!coverage.has(digest)) coverage.set(digest, coverageState(identity, dayMinutes));
-            if (row.admittedTs <= asOfTs) {
-              eligibleIdentities.add(digest); coverage.get(digest).catalogControls.add(row.controlDigest);
-            }
             members.push(digest);
           }
-          if (row.admittedTs <= asOfTs) {
-            if (row.knownAtTs - row.sourceObservedTs > limits.maxCatalogAgeMs) staleCatalogControls += 1;
-            epochs.push({
-              sessionId, globalOrdinal: row.globalOrdinal, controlDigest: row.controlDigest,
-              catalogContentId: row.contentId, sourceObservedTs: row.sourceObservedTs,
-              knownAtTs: row.knownAtTs, admittedTs: row.admittedTs,
-              staleAtAdmission: row.knownAtTs - row.sourceObservedTs > limits.maxCatalogAgeMs,
-              marketIdentityDigests: members.sort(),
-            });
-          } else futureCatalogControlsWithheld += 1;
+          catalogObservations.push({
+            sessionId, globalOrdinal: row.globalOrdinal, controlDigest: row.controlDigest,
+            catalogContentId: row.contentId, sourceObservedTs: row.sourceObservedTs,
+            knownAtTs: row.knownAtTs, admittedTs: row.admittedTs,
+            staleAtAdmission: row.knownAtTs - row.sourceObservedTs > limits.maxCatalogAgeMs,
+            marketIdentityDigests: members.sort(), kind: row.kind, entryVersion: sessionEntryVersion,
+            membershipKnownSinceTs: catalogState.membershipKnownSinceTs,
+          });
+          if (row.admittedTs > asOfTs) futureCatalogControlsWithheld += 1;
+          lastCatalog = catalogState;
+        } else if (row.kind === 'SESSION_FINALIZATION') {
+          sessionFinalizationCount += 1;
+          if (sessionEntryVersion !== BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2
+              || row.sessionId !== sessionId || row.sessionStartedTs !== Number(SESSION_RE.exec(sessionId)?.[1])
+              || row.cutoffTs < row.sessionStartedTs || row.cutoffTs > row.admittedTs
+              || row.lastDataOrdinal !== row.globalOrdinal - 1 || row.lastDataControlDigest !== row.previousControlDigest
+              || row.activeCatalogContentId !== (lastCatalog?.contentId ?? null)
+              || row.activeCatalogControlDigest !== (lastCatalog?.controlDigest ?? null)
+              || !plain(row.admittedCounts) || exactKeys(row.admittedCounts, Object.keys(sessionCounts))
+              || Object.keys(sessionCounts).some((key) => row.admittedCounts[key] !== sessionCounts[key])
+              || !count(row.shardFiles) || !count(row.plannedPhysicalRows) || !count(row.plannedBytes)) fail('READER_FINALIZATION_INVALID', 'session finalization receipt does not bind the preceding session', { sessionId, ordinal: row.globalOrdinal });
+          finalized = row; finalizationLineBytes = rowMeta.lineBytes;
         } else {
           const catalog = catalogs.get(row.catalogControlDigest);
           if (!catalog || catalog.contentId !== row.catalogContentId || catalog.admittedTs > row.admittedTs) fail('READER_CATALOG_REFERENCE_INVALID', 'record control does not reference a prior catalog control', { sessionId, ordinal: row.globalOrdinal });
           if (row.kind === 'SOURCE_CONTROL') {
             sourceControlCount += 1;
-            const commonRecord = commonRecordError(row.record, row);
+            sessionCounts.sourceControls += 1;
+            const commonRecord = commonRecordError(row.record, row, sessionEntryVersion);
             const membership = recordMembershipError(row.record, catalog);
             const source = sourceControlError(row.record);
             if (commonRecord || membership || source) fail('READER_SOURCE_CONTROL_INVALID', commonRecord ?? membership ?? source, { sessionId, ordinal: row.globalOrdinal });
@@ -550,7 +615,7 @@ export async function openBroadDayReader({
               if (state && row.knownAtTs <= asOfTs) state.gaps += 1;
             }
           } else {
-            candleIndexCount += 1;
+            candleIndexCount += 1; sessionCounts.closedCandles += 1;
             if (!positive(row.periodStartTs) || !positive(row.periodEndTs) || row.periodEndTs - row.periodStartTs !== MINUTE
                 || row.utcDate !== utcDate(row.periodStartTs) || !positive(row.shardOrdinal)
                 || typeof row.conflict !== 'boolean' || row.knownAtTs !== row.admittedTs
@@ -563,9 +628,11 @@ export async function openBroadDayReader({
             const meta = expectedShards.get(key) ?? {
               key, fileName, identityDigest: row.marketIdentityDigest, utcDate: row.utcDate,
               expectedRows: 0, expectedChain: 'GENESIS', nextOrdinal: 1,
+              catalogControlDigests: [],
             };
             if (meta.fileName !== fileName || meta.nextOrdinal !== row.shardOrdinal) fail('READER_CANDLE_INDEX_INVALID', 'shard ordinal or identity changed', { sessionId, ordinal: row.globalOrdinal });
             meta.expectedRows += 1; meta.nextOrdinal += 1;
+            meta.catalogControlDigests.push(row.catalogControlDigest);
             meta.expectedChain = chainDigest(meta.expectedChain, expectedShardSummary(row));
             expectedShards.set(key, meta);
           }
@@ -591,12 +658,12 @@ export async function openBroadDayReader({
         signal,
         onRow: async (row) => {
           const keys = exactKeys(row, SHARD_KEYS); if (keys) fail('READER_SHARD_ROW_INVALID', keys, { sessionId, fileName, row: nextShardOrdinal });
-          if (row.entryVersion !== BROAD_DAY_ARCHIVE_ENTRY_VERSION || row.kind !== 'CLOSED_CANDLE'
+          if (row.entryVersion !== sessionEntryVersion || row.kind !== 'CLOSED_CANDLE'
               || row.shardOrdinal !== nextShardOrdinal || row.knownAtTs !== row.admittedTs
               || typeof row.conflict !== 'boolean' || !HEX64.test(row.globalControlDigest ?? '')
               || !HEX64.test(row.recordDigest ?? '')) fail('READER_SHARD_ROW_INVALID', 'shard identity/clocks malformed', { sessionId, fileName, row: nextShardOrdinal });
-          const commonRecord = commonRecordError(row.record, { ...row, catalogContentId: row.record.catalogContentId, recordId: row.record.recordId });
-          const catalog = catalogsByContentId.get(row.record.catalogContentId);
+          const commonRecord = commonRecordError(row.record, { ...row, catalogContentId: row.record.catalogContentId, recordId: row.record.recordId }, sessionEntryVersion);
+          const catalog = catalogs.get(expected.catalogControlDigests[nextShardOrdinal - 1]);
           const membership = catalog ? recordMembershipError(row.record, catalog, expected.identityDigest) : 'shard record catalog is not present in session controls';
           const closed = closedRecordError(row.record);
           if (commonRecord || membership || closed) fail('READER_SHARD_ROW_INVALID', commonRecord ?? membership ?? closed, { sessionId, fileName, row: nextShardOrdinal });
@@ -609,10 +676,13 @@ export async function openBroadDayReader({
           actualChain = chainDigest(actualChain, actualShardSummary(row)); nextShardOrdinal += 1; candleRowCount += 1;
           if (row.record.periodStartTs >= dayStartTs && row.record.periodStartTs < dayEndTs) {
             relevantRows += 1; relevantInShard += 1;
+            if (sessionEntryVersion === BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2) canonicalV2CandleRows += 1;
             const state = coverage.get(expected.identityDigest); state.rows += 1; state.sessions.add(sessionId);
             if (exactDuplicate) { state.duplicateRows += 1; duplicateCandleRows += 1; }
-            if (row.knownAtTs > asOfTs || row.record.recordedTs > asOfTs) {
+            if (row.knownAtTs > asOfTs || row.record.recordedTs > asOfTs
+                || catalog.membershipKnownSinceTs > row.record.periodStartTs) {
               state.futureWithheldRows += 1; futureWithheldRows += 1;
+              if (catalog.membershipKnownSinceTs > row.record.periodStartTs) catalogAsOfWithheldRows += 1;
             } else if (!exactDuplicate || !state.eligibleRecordIds.has(row.record.recordId)) {
               state.eligibleRecordIds.add(row.record.recordId); eligibleCandleLocations.add(location);
               state.eligibleRows += 1; asOfEligibleRows += 1;
@@ -639,45 +709,119 @@ export async function openBroadDayReader({
       sessionId, controlsDigest: controls.digest,
       shards: shardMetas.map((row) => ({ fileName: row.fileName, digest: row.digest, rows: row.rows, bytes: row.bytes })),
     }, 4 * 1024 * 1024).text);
+    if (finalized) {
+      const expectedPhysicalRows = finalized.lastDataOrdinal + sessionCounts.closedCandles;
+      const expectedPhysicalBytes = controls.bytes - finalizationLineBytes + shardMetas.reduce((sum, shard) => sum + shard.bytes, 0);
+      if (finalized.shardFiles !== shardMetas.length
+          || finalized.plannedPhysicalRows !== expectedPhysicalRows
+          || finalized.plannedBytes !== expectedPhysicalBytes) fail('READER_FINALIZATION_INVALID', 'session finalization physical counts do not match retained files', { sessionId });
+    }
     sessionMetas.push({
       sessionId, controls: { file: controlFile, rows: controls.rows, bytes: controls.bytes, digest: controls.digest },
-      shards: shardMetas, empty: false, sourceDigest,
+      shards: shardMetas, empty: false, sourceDigest, entryVersion: sessionEntryVersion,
+      archiveVersion: sessionEntryVersion === BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2 ? BROAD_DAY_ARCHIVE_VERSION_V2 : BROAD_DAY_ARCHIVE_VERSION,
+      startedTs: Number(SESSION_RE.exec(sessionId)?.[1]), firstCatalogAdmittedTs: catalogObservations.filter((row) => row.sessionId === sessionId).at(0)?.admittedTs ?? null,
+      finalized: finalized ? { ordinal: finalized.globalOrdinal, controlDigest: finalized.controlDigest, cutoffTs: finalized.cutoffTs, admittedTs: finalized.admittedTs } : null,
     });
   }
 
   const finalNames = readdirSync(sessionsRoot).sort();
   if (existsSync(path.join(archiveRoot, 'writer.lock')) || JSON.stringify(finalNames) !== JSON.stringify(initialNames)) fail('READER_ARCHIVE_CHANGED', 'archive ownership/session inventory changed during read');
-  epochs.sort((a, b) => a.admittedTs - b.admittedTs || a.sessionId.localeCompare(b.sessionId) || a.globalOrdinal - b.globalOrdinal);
+  catalogObservations.sort((a, b) => a.admittedTs - b.admittedTs || a.sessionId.localeCompare(b.sessionId) || a.globalOrdinal - b.globalOrdinal);
+  const knownCatalogObservations = catalogObservations.filter((row) => row.admittedTs <= asOfTs);
+  const epochs = [];
+  for (let i = 0; i < knownCatalogObservations.length; i += 1) {
+    const observation = knownCatalogObservations[i];
+    const activeUntilTs = knownCatalogObservations[i + 1]?.admittedTs ?? Number.MAX_SAFE_INTEGER;
+    if (observation.admittedTs >= dayEndTs || activeUntilTs <= dayStartTs) continue;
+    const expectedStart = Math.max(dayStartTs, observation.admittedTs);
+    const expectedEnd = Math.min(dayEndTs, activeUntilTs);
+    const startMinute = Math.max(0, Math.ceil((expectedStart - dayStartTs) / MINUTE));
+    const endMinute = Math.min(dayMinutes, Math.ceil((expectedEnd - dayStartTs) / MINUTE));
+    for (const digest of observation.marketIdentityDigests) {
+      eligibleIdentities.add(digest); coverage.get(digest).catalogControls.add(observation.controlDigest);
+      for (let minute = startMinute; minute < endMinute; minute += 1) coverage.get(digest).expectedMinuteState[minute] = 1;
+    }
+    if (observation.staleAtAdmission) staleCatalogControls += 1;
+    epochs.push({ ...observation, activeUntilTs: Math.min(activeUntilTs, dayEndTs) });
+  }
+
+  const relevantSessions = sessionMetas.filter((session) => session.empty
+    ? session.startedTs < dayEndTs
+    : session.firstCatalogAdmittedTs !== null && session.firstCatalogAdmittedTs < dayEndTs
+      && (session.finalized?.cutoffTs ?? Number.MAX_SAFE_INTEGER) > dayStartTs);
+  const allRelevantSessionsV2 = relevantSessions.length > 0
+    && relevantSessions.every((session) => session.entryVersion === BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2);
+  const sessionIntervals = relevantSessions.filter((session) => session.entryVersion === BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2 && session.finalized)
+    .map((session) => ({ startTs: session.firstCatalogAdmittedTs, endTs: session.finalized.cutoffTs, sessionId: session.sessionId }))
+    .sort((a, b) => a.startTs - b.startTs || a.sessionId.localeCompare(b.sessionId));
+  let sessionCursor = dayStartTs;
+  for (const interval of sessionIntervals) {
+    if (interval.endTs <= sessionCursor) continue;
+    if (interval.startTs > sessionCursor) break;
+    sessionCursor = Math.max(sessionCursor, interval.endTs);
+  }
+  const sessionFinalizationVerified = allRelevantSessionsV2
+    && relevantSessions.every((session) => session.finalized !== null) && sessionCursor >= dayEndTs;
+
+  const scheduleStartIndex = knownCatalogObservations.findLastIndex((row) => row.admittedTs <= dayStartTs);
+  let scheduleEndIndex = -1;
+  if (scheduleStartIndex >= 0) {
+    scheduleEndIndex = knownCatalogObservations.findIndex((row, index) => index >= scheduleStartIndex && row.admittedTs >= dayEndTs);
+  }
+  const schedule = scheduleStartIndex >= 0 && scheduleEndIndex >= scheduleStartIndex
+    ? knownCatalogObservations.slice(scheduleStartIndex, scheduleEndIndex + 1) : [];
+  let scheduleGapMaxMs = null;
+  if (schedule.length > 1) scheduleGapMaxMs = schedule.slice(1).reduce((maximum, row, index) => Math.max(maximum, row.admittedTs - schedule[index].admittedTs), 0);
+  const catalogHeartbeatContinuityVerified = schedule.length > 0
+    && schedule.every((row) => row.entryVersion === BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2 && !row.staleAtAdmission)
+    && schedule.slice(1).every((row, index) => row.sourceObservedTs >= schedule[index].sourceObservedTs)
+    && schedule[0].admittedTs <= dayStartTs && schedule.at(-1).admittedTs >= dayEndTs
+    && scheduleGapMaxMs !== null && scheduleGapMaxMs <= limits.maxCatalogHeartbeatGapMs;
+
   const siblingCounts = new Map();
   for (const [digest, identity] of identities) if (eligibleIdentities.has(digest)) siblingCounts.set(identity.canonicalCoin, (siblingCounts.get(identity.canonicalCoin) ?? 0) + 1);
   const publicCoverageRows = [...coverage.values()].filter((state) => eligibleIdentities.has(state.marketIdentityDigest)).map((state) => publicCoverage(state, dayStartTs, dayEndTs, siblingCounts.get(state.identity.canonicalCoin))).sort((a, b) => a.marketIdentityDigest.localeCompare(b.marketIdentityDigest));
   const completeGrids = publicCoverageRows.filter((row) => row.gridState === 'COMPLETE_OBSERVED_GRID').length;
   const conflicts = publicCoverageRows.filter((row) => row.gridState === 'CONFLICT').length;
   const identityChanges = [...siblingCounts.values()].filter((value) => value > 1).length;
-  const reasons = [
-    'WRITER_V1_HAS_NO_DURABLE_SESSION_FINALIZATION_CONTROL',
-    'WRITER_V1_HAS_NO_CATALOG_REFRESH_HEARTBEAT_OR_FULL_DAY_EPOCH_CONTINUITY_PROOF',
-    'WRITER_V1_CANONICALIZES_KEY_ORDER_AFTER_AN_ORDER_SENSITIVE_SOURCE_RECORD_ID_WAS_COMPUTED',
-  ];
+  const sourceRecordIdentityRecomputable = relevantRows > 0 && canonicalV2CandleRows === relevantRows;
+  const fullPopulationVerified = sourceRecordIdentityRecomputable && sessionFinalizationVerified && catalogHeartbeatContinuityVerified && eligibleIdentities.size > 0;
+  const allExpectedGridsComplete = publicCoverageRows.length === eligibleIdentities.size
+    && publicCoverageRows.length > 0 && publicCoverageRows.every((row) => row.gridState === 'COMPLETE_OBSERVED_GRID' && row.expectedCatalogMembershipMinutes > 0);
+  const fullDaySimulationReady = fullPopulationVerified && allExpectedGridsComplete
+    && futureWithheldRows === 0 && catalogAsOfWithheldRows === 0;
+  const reasons = [];
+  if (!sourceRecordIdentityRecomputable) reasons.push('SOURCE_RECORD_IDENTITY_NOT_CANONICALLY_RECOMPUTABLE_FOR_ALL_DAY_ROWS');
+  if (!sessionFinalizationVerified) reasons.push('SESSION_FINALIZATION_OR_EXACT_CROSS_SESSION_COVERAGE_MISSING');
+  if (!catalogHeartbeatContinuityVerified) reasons.push('CATALOG_HEARTBEAT_SCHEDULE_OR_BOUNDARY_PROOF_MISSING');
   if (sessionMetas.some((row) => row.empty)) reasons.push('EMPTY_ARCHIVE_SESSION_PRESENT');
   if (staleCatalogControls) reasons.push('STALE_CATALOG_CONTROL_PRESENT');
   if (futureWithheldRows) reasons.push('ROWS_KNOWN_AFTER_DATASET_ASOF_WITHHELD');
   if (futureCatalogControlsWithheld) reasons.push('CATALOG_CONTROLS_KNOWN_AFTER_DATASET_ASOF_WITHHELD');
+  if (catalogAsOfWithheldRows) reasons.push('CANDLE_CATALOG_MEMBERSHIP_NOT_KNOWN_AT_PERIOD_START');
   if (conflicts) reasons.push('CONFLICTING_CANDLE_MINUTES_PRESENT');
-  if (publicCoverageRows.some((row) => row.gridState === 'MISSING' || row.gridState === 'PARTIAL')) reasons.push('CANDLE_GRID_INCOMPLETE');
+  if (!allExpectedGridsComplete) {
+    reasons.push('CANDLE_GRID_INCOMPLETE');
+    reasons.push('CANDLE_GRID_INCOMPLETE_FOR_OBSERVED_MEMBERSHIP_EPOCHS');
+  }
   if (identityChanges) reasons.push('CANONICAL_COIN_IDENTITY_CHANGED_ACROSS_OBSERVED_CATALOG_EPOCHS');
 
   const sessionSources = sessionMetas.map((session) => ({
     sessionId: session.sessionId, empty: session.empty, sourceDigest: session.sourceDigest,
+    archiveVersion: session.archiveVersion ?? null, entryVersion: session.entryVersion ?? null,
+    startedTs: session.startedTs ?? null, finalized: session.finalized,
     controlRows: session.controls?.rows ?? 0, controlBytes: session.controls?.bytes ?? 0,
     shards: session.shards.map((shard) => ({ fileName: shard.fileName, digest: shard.digest, rows: shard.rows, bytes: shard.bytes })),
   }));
   const descriptorBody = {
     datasetVersion: BROAD_DAY_DATASET_VERSION,
-    archiveVersion: BROAD_DAY_ARCHIVE_VERSION,
+    archiveVersion: sessionMetas.some((row) => !row.empty)
+      && sessionMetas.every((row) => row.empty || row.archiveVersion === BROAD_DAY_ARCHIVE_VERSION_V2)
+      ? BROAD_DAY_ARCHIVE_VERSION_V2 : BROAD_DAY_ARCHIVE_VERSION,
     dayStartTs, dayEndTs, asOfTs,
     sourceProvenance: {
-      sourceKind: 'LOCAL_BROAD_DAY_ARCHIVE_V1',
+      sourceKind: allRelevantSessionsV2 ? 'LOCAL_BROAD_DAY_ARCHIVE_V2' : 'LOCAL_BROAD_DAY_ARCHIVE_MIXED_OR_V1',
       sourceRootDigest: sha256(archiveRoot), sessions: sessionSources,
       durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
     },
@@ -686,22 +830,25 @@ export async function openBroadDayReader({
     coverage: publicCoverageRows,
     counters: {
       sessions: sessionMetas.length, emptySessions: sessionMetas.filter((row) => row.empty).length,
-      catalogControls: catalogControlCount, futureCatalogControlsWithheld, staleCatalogControls, sourceControls: sourceControlCount,
+      catalogControls: catalogControlCount, catalogHeartbeats: catalogHeartbeatCount,
+      sessionFinalizations: sessionFinalizationCount, futureCatalogControlsWithheld, staleCatalogControls, sourceControls: sourceControlCount,
       candleIndexes: candleIndexCount, candleRows: candleRowCount,
       civilDayRows: relevantRows, asOfEligibleCivilDayRows: asOfEligibleRows,
-      futureAdmissionWithheldRows: futureWithheldRows, observedCatalogUnionMarkets: eligibleIdentities.size,
+      futureAdmissionWithheldRows: futureWithheldRows, catalogAsOfWithheldRows, observedCatalogUnionMarkets: eligibleIdentities.size,
       exactDuplicateCandleRows: duplicateCandleRows,
       completeObservedMinuteGrids: completeGrids, conflictMarkets: conflicts,
       canonicalCoinsWithIdentityChanges: identityChanges, totalPhysicalBytes: totalBytes,
     },
     completeness: {
       physicalControlAndShardIntegrityVerified: true,
-      sourceRecordIdentityRecomputableAfterCanonicalArchiveWrite: false,
+      sourceRecordIdentityRecomputableAfterCanonicalArchiveWrite: sourceRecordIdentityRecomputable,
       observedCatalogEpochUnionConstructed: true,
-      catalogEpochContinuityVerified: false,
-      sessionFinalizationVerified: false,
-      fullPopulationVerified: false,
-      fullDaySimulationReady: false,
+      catalogEpochContinuityVerified: catalogHeartbeatContinuityVerified,
+      catalogHeartbeatMaxObservedGapMs: scheduleGapMaxMs,
+      catalogHeartbeatRequiredMaximumGapMs: limits.maxCatalogHeartbeatGapMs,
+      sessionFinalizationVerified,
+      fullPopulationVerified,
+      fullDaySimulationReady,
       reasons: [...new Set(reasons)].sort(),
     },
     ordering: 'SESSION_ID_THEN_SHARD_FILENAME_THEN_PHYSICAL_SHARD_ORDINAL',
@@ -719,7 +866,7 @@ export async function openBroadDayReader({
     datasetId: descriptor.datasetId, datasetDigest: descriptor.datasetDigest,
     shards: pageShards.length, rows: descriptor.counters.asOfEligibleCivilDayRows,
     durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
-    fullDaySimulationReady: false, authority: 'NONE',
+    fullDaySimulationReady: descriptor.completeness.fullDaySimulationReady, authority: 'NONE',
   });
 
   const readPage = async ({ cursor = null, maxRows = limits.maxPageRows, signal: pageSignal = null } = {}) => {
