@@ -13,9 +13,10 @@ profile and every forced authority name holds; a bare `node fly.js` refuses (exi
 status file, one persistence pump, one external-quota restore. PAPER = today's ship sequence PLUS the collector
 additions the split kept away from it (market catalogs, broad Kraken capture, public discovery).
 
-The launchers still exist as entries: `cobra paper run` (applies the profile, imports fly.js) and
-`tools/data-only-runtime.mjs` (pins the safety env, calls the spine directly — it routes through fly.js at step 4,
-when the cockpit goes in-process for both modes and `.replit` flips to the unified root).
+The launchers still exist as entries: `cobra paper run` (applies the profile, imports fly.js);
+`tools/data-only-with-ui.mjs` (what Replit runs — pins the safety posture, enters fly.js: spine + IN-PROCESS cockpit,
+one process, step 4); `tools/data-only-runtime.mjs` (headless collector, pins + spine directly, fenced) until step 6
+retires the shims.
 
 ---
 

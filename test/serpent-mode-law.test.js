@@ -56,7 +56,7 @@ test('MODE-3. the dispatch shape is pinned: the data-only pin routes to the spin
   assert.match(source, /process\.env\.SERPENT_DATA_ONLY === 'true' \? 'DATA_ONLY'/);
   assert.match(source, /process\.env\.COBRA_PROFILE && process\.env\.JUDGE_MODE === 'PAPER' && process\.env\.JUDGE_ALLOW_PRIVATE === 'false' && process\.env\.JUDGE_ALLOW_ORDERS === 'false' \? 'PAPER'/);
   assert.match(source, /if \(SERPENT_MODE === 'DATA_ONLY'\) \{/);
-  assert.match(source, /await startDataOnlyRuntime\(\);/);
+  assert.match(source, /await startDataOnlyRuntime\(\{ entrypoint: 'fly\.js' \}\);/);
   assert.match(source, /openPaperRuntime\(/);
   assert.equal((source.match(/process\.exit\(1\)/g) ?? []).length, 1, 'one refusal path; every other exit is the tape resolving');
   assert.ok(source.indexOf('process.exit(1)') < source.indexOf('openPaperRuntime('), 'the refusal precedes every composition');

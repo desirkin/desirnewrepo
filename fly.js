@@ -46,7 +46,11 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // The data-only composition IS the spine (steps 1–2): single-instance lock, runtime status, durable external-quota
   // restore, the shared collector set, signals and the ordered shutdown. Nothing of the trading composition below is
   // constructed in this mode; the launcher's safety pins were applied before this module was evaluated.
-  await startDataOnlyRuntime();
+  await startDataOnlyRuntime({ entrypoint: 'fly.js' });
+  // In-process cockpit (runtime unification step 4): the shell listens only AFTER the spine established the
+  // persistence bootstrap (PERSIST-0A §2 — same law as PAPER below). judgeRun is never registered in this mode, so
+  // the cockpit serves the read-only data-only surface; controls still fail closed without auth.
+  await import('./ui/server.js');
 } else {
   console.log('COBRA FLYING — tape + cockpit. Default answer is NO TRADE.');
   // SERPENT PAPER profile (COBRA_PROFILE, applied by `cobra paper run`): the composition

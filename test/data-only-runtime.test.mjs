@@ -114,16 +114,22 @@ test('data-only news uses official feeds plus bounded GDELT metadata and withhol
   assert.match(source, /GDELT_NEWS_DISCOVERY:/);
 });
 
-test('Replit run and deployment commands select the data-only supervisor, not the paper runtime', () => {
+test('Replit run and deployment commands select the ONE-process data-only entry, not the paper runtime (runtime unification step 4)', () => {
   const replit = readFileSync(path.join(root, '.replit'), 'utf8');
-  const supervisor = readFileSync(path.join(root, 'tools', 'data-only-with-ui.mjs'), 'utf8');
+  const shim = readFileSync(path.join(root, 'tools', 'data-only-with-ui.mjs'), 'utf8');
   assert.match(replit, /^run = "npm run data:only-ui"/m);
   assert.match(replit, /\[deployment\][\s\S]*run = \["npm", "run", "data:only-ui"\]/);
   assert.doesNotMatch(replit, /npm run paper|paper run/);
-  assert.match(supervisor, /let terminalExitCode = null/);
-  assert.match(supervisor, /process\.exit\(terminalExitCode \?\? 0\)/);
-  assert.match(supervisor, /const SHUTDOWN_GRACE_MS = 60_000/);
-  assert.doesNotMatch(supervisor, /}, 10_000\)\.unref\(\)/, 'supervisor grace must exceed bounded collector drains');
+  // the two-process supervisor is retired: the deployment entry pins the safety posture, then enters the one root,
+  // which runs the spine and serves the cockpit in-process (no child process, no second pump, no port race)
+  assert.match(shim, /SERPENT_DATA_ONLY:\s*'true'/);
+  assert.match(shim, /await import\('\.\.\/fly\.js'\)/);
+  assert.doesNotMatch(shim, /child_process|spawn\(/, 'one process: nothing is supervised');
+  assert.ok(shim.indexOf('Object.assign(process.env') < shim.indexOf("await import('../fly.js')"), 'the safety posture is established before any project module is evaluated');
+  assert.ok(shim.indexOf('delete process.env.COBRA_PROFILE') >= 0 && shim.indexOf('delete process.env.COBRA_PROFILE') < shim.indexOf("await import('../fly.js')"), 'a stray profile name cannot make the shim derive PAPER');
+  // and the one root serves the cockpit in-process in DATA_ONLY, after the spine (persistence bootstrap first)
+  const fly = readFileSync(path.join(root, 'fly.js'), 'utf8');
+  assert.ok(fly.indexOf("startDataOnlyRuntime({ entrypoint: 'fly.js' })") < fly.indexOf("await import('./ui/server.js')"), 'DATA_ONLY: the cockpit listens only after the spine established the persistence bootstrap');
 });
 
 test('both data-only launchers explicitly keep paid X collection disabled during broad-market rollout', () => {

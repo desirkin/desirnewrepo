@@ -14,7 +14,8 @@ Branch `serpent/baseline` on `desirkin/desirnewrepo`. GitHub tip = this branch (
 - `679f358` — runtime unification step 2: spine → lib/external-quota.js + lib/collectors.js with injectable starters; test/serpent-runtime-composition.test.js RC-1..3 (order, options, status, reverse stop, lock, fail-closed). Targeted fences green; full run to be confirmed by the worker.
 - `65a48eb` — lean trim step 1: one bankroll, one daily-lock law; legacy JSONL ledger retired to `attic/`; `execution/ledger-view.js` + projection `dailyLock`/`ledger`; audit §4.6.
 - `5afee32` — worker standing orders + queue (docs/serpent/README.md); baseline at 679f358.
-- (this commit) — runtime unification step 3: fly.js is the mode-switched root (`SERPENT_MODE` derived fail-closed; bare start refuses); PAPER runs on the spine — one lock per data dir any mode, runtime-owned persistence signals, external-quota restore, collector additions (market catalogs + broad Kraken + public discovery); DATA_ONLY delegates to the spine. Audit §4.7; frozen digests unchanged. `test/serpent-paper-spine.test.js`, `test/serpent-mode-law.test.js`.
+- `cc17c9c` — runtime unification step 3: fly.js is the mode-switched root (`SERPENT_MODE` derived fail-closed; bare start refuses); PAPER runs on the spine — one lock per data dir any mode, runtime-owned persistence signals, external-quota restore, collector additions (market catalogs + broad Kraken + public discovery); DATA_ONLY delegates to the spine. Audit §4.7; frozen digests unchanged. `test/serpent-paper-spine.test.js`, `test/serpent-mode-law.test.js`.
+- (this commit) — runtime unification step 4: in-process cockpit. `data:only-ui` is ONE process — the shim pins the full DATA-ONLY posture and enters fly.js; the DATA_ONLY branch serves ui/server.js in-process after the spine (PERSIST-0A §2), judgeRun null; the two-process supervisor is retired; honest `entrypoint` in the status file.
 
 ## Test recipe
 ```
