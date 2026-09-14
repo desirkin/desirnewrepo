@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ADAPTIVE_RANKING_MEASUREMENT_ID, ADAPTIVE_RANKING_PORT_VERSION,
-  ADAPTIVE_RANKING_UNITS, adaptiveRankingPortInputError,
+  ADAPTIVE_RANKING_UNITS, MAX_ADAPTIVE_RANKING_INPUT_BYTES, adaptiveRankingPortInputError,
   adaptiveRankingPortResultError, createAdaptiveRankingPort,
 } from '../judge/adaptive-ranking-port.js';
 import { prepareAdaptiveJudgeFacts } from '../judge/adaptive-facts-source.js';
@@ -253,7 +253,22 @@ test('post-cost identity and arithmetic must match the full facts source before 
   assert.equal(port.resolve(wrongRatio).reason, 'POST_COST_RATIO_INVALID');
   const nonfinite = fixture(); nonfinite.postCostEvaluation = { ...nonfinite.postCostEvaluation, rewardRiskRatio: Infinity };
   assert.equal(port.resolve(nonfinite).reason, 'INPUT_NON_JSON_VALUE_REFUSED');
-  assert.equal(calls, 0, 'invalid cost evidence never reaches the qualification resolver');
+  const detailed = fixture();
+  detailed.postCostEvaluation = {
+    ...detailed.postCostEvaluation,
+    scenarioExitDetail: {
+      avgPrice: '100', proceeds: detailed.postCostEvaluation.scenarioExitCashIn,
+      fees: '0', slippage: '0', haircut: '0.5', levels: 1,
+    },
+  };
+  assert.equal(port.resolve(detailed).applied, true, 'the exact current cost wire shape remains eligible');
+  const decoratedDetail = clone(detailed);
+  decoratedDetail.postCostEvaluation.scenarioExitDetail.extra = 'ignored-by-old-readers';
+  assert.equal(port.resolve(decoratedDetail).reason, 'POST_COST_EXIT_DETAIL_INVALID');
+  const wrongDetail = clone(detailed);
+  wrongDetail.postCostEvaluation.scenarioExitDetail.fees = '1';
+  assert.equal(port.resolve(wrongDetail).reason, 'POST_COST_EXIT_DETAIL_INVALID');
+  assert.equal(calls, 1, 'only the one exact current cost wire shape reaches the qualification resolver');
 });
 
 test('throwing, asynchronous, malformed and out-of-envelope resolver outputs fail baseline', async () => {
@@ -266,6 +281,15 @@ test('throwing, asynchronous, malformed and out-of-envelope resolver outputs fai
 
   const malformed = createAdaptiveRankingPort({ resolveQualifiedRanking: () => ({ applied: true }) });
   assert.equal(malformed.resolve(fixture()).reason, 'RESOLVER_RESULT_INVALID');
+
+  let getterCalls = 0;
+  const getterResult = {};
+  Object.defineProperty(getterResult, 'applied', {
+    enumerable: true, get: () => { getterCalls += 1; return true; },
+  });
+  const accessorResolver = createAdaptiveRankingPort({ resolveQualifiedRanking: () => getterResult });
+  assert.equal(accessorResolver.resolve(fixture()).reason, 'RESOLVER_RESULT_INVALID');
+  assert.equal(getterCalls, 0, 'resolver result accessors are refused before property access');
 
   const outside = createAdaptiveRankingPort({ resolveQualifiedRanking: (args) => ({
     ...resolveQualifiedAdaptiveProcedureRanking(args), adjustmentRrPoints: 0.2,
@@ -329,6 +353,25 @@ test('accessors, hidden values and source/context relabeling are rejected before
   assert.equal(refusedCost.reason, 'INPUT_ACCESSOR_OR_HIDDEN_PROPERTY_REFUSED');
   assert.equal(refusedCost.baselineRewardRiskRatio, null);
   assert.equal(accessorCalls, 0, 'baseline construction must not invoke a refused nested accessor');
+
+  const coerciveCost = fixture();
+  coerciveCost.postCostEvaluation = clone(coerciveCost.postCostEvaluation);
+  coerciveCost.postCostEvaluation.rewardRiskRatio = {
+    valueOf: () => { accessorCalls += 1; return 2; },
+  };
+  const refusedCoercion = port.resolve(coerciveCost);
+  assert.equal(refusedCoercion.reason, 'INPUT_NON_JSON_VALUE_REFUSED');
+  assert.equal(refusedCoercion.baselineRewardRiskRatio, null);
+  assert.equal(accessorCalls, 0, 'baseline construction never coerces caller objects');
+
+  const sparse = fixture(); sparse.snapshot.withheld = new Array(1);
+  assert.equal(port.resolve(sparse).reason, 'INPUT_ARRAY_NOT_DENSE');
+  const decorated = fixture(); decorated.snapshot.withheld.extra = true;
+  assert.equal(port.resolve(decorated).reason, 'INPUT_ARRAY_NOT_DENSE');
+  const cyclic = fixture(); cyclic.snapshot.kill.loop = cyclic.snapshot;
+  assert.equal(port.resolve(cyclic).reason, 'INPUT_CYCLE_REFUSED');
+  const escaped = fixture(); escaped.snapshot.kill.note = '\u0000'.repeat(Math.floor(MAX_ADAPTIVE_RANKING_INPUT_BYTES / 6) + 1);
+  assert.equal(port.resolve(escaped).reason, 'INPUT_BYTE_LIMIT_EXCEEDED');
 
   const hidden = fixture(); Object.defineProperty(hidden, 'secret', { enumerable: false, value: 'x' });
   assert.equal(port.resolve(hidden).reason, 'INPUT_ACCESSOR_OR_HIDDEN_PROPERTY_REFUSED');
