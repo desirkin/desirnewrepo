@@ -87,6 +87,74 @@ test('durable replay restores the exact state and dedup identities after a clean
   store.close();
 });
 
+test('idempotent update retries validate every supplied body after durable replay', (t) => {
+  const rootDir = tempRoot(t); const p = procedure(); let now = T0 + 10_100;
+  let store = createAdaptiveStore({ rootDir, procedure: p, clock: () => now });
+  const core = createAdaptiveCore({ store, procedure: p, clock: () => now });
+  const prediction = core.recordPrediction(input(p)).prediction;
+  now = prediction.targetEndTs + 1_000;
+  const submission = adaptiveSettlementSubmission(p, prediction, mature(prediction));
+  const first = core.recordOutcome(submission);
+  const committedState = first.state;
+  store.close();
+
+  now += 1_000;
+  store = createAdaptiveStore({ rootDir, procedure: p, clock: () => now });
+  const settlement = store.settlement({
+    opportunityId: prediction.opportunityId,
+    horizonMs: prediction.horizonMs,
+  });
+  const exact = {
+    outcome: settlement.outcome,
+    provenanceReceipt: settlement.provenanceReceipt,
+    scores: settlement.scores,
+    update: settlement.update,
+    nextState: committedState,
+  };
+  assert.equal(store.appendOutcomeUpdate(exact).status, 'EXISTING');
+  const before = store.status(); const stateBefore = store.state();
+  const badRetries = [
+    {
+      name: 'outcome body with its old digest',
+      change(value) { value.outcome.logReturnPct += 1; },
+      code: 'OUTCOME_INVALID',
+    },
+    {
+      name: 'receipt body with its old digest',
+      change(value) { value.provenanceReceipt.label.availability.reason = 'ALTERED'; },
+      code: 'SETTLEMENT_INVALID',
+    },
+    {
+      name: 'score body with its old digest',
+      change(value) { value.scores[0].brierLoss += 0.01; },
+      code: 'SCORE_INVALID',
+    },
+    {
+      name: 'update body with its old digest',
+      change(value) { value.update.episodeInfluenceAfter += 0.000001; },
+      code: 'UPDATE_CONFLICT',
+    },
+    {
+      name: 'next-state body with its old digest',
+      change(value) { value.nextState.updatedTs += 1; },
+      code: 'STATE_CONFLICT',
+    },
+  ];
+  for (const scenario of badRetries) {
+    const altered = JSON.parse(JSON.stringify(exact));
+    scenario.change(altered);
+    assert.throws(
+      () => store.appendOutcomeUpdate(altered),
+      (error) => error instanceof AdaptiveStoreError && error.code === scenario.code,
+      scenario.name,
+    );
+    assert.equal(store.status().eventCount, before.eventCount, `${scenario.name}: no journal append`);
+    assert.deepEqual(store.state(), stateBefore, `${scenario.name}: no state mutation`);
+  }
+  assert.equal(store.status().failed, null, 'rejected retry content does not latch or mutate the store');
+  store.close();
+});
+
 test('a v1 directory is refused without migration, reset, or writer-lock mutation', (t) => {
   const rootDir = tempRoot(t); const p = procedure();
   const journalFile = path.join(rootDir, 'journal.jsonl');

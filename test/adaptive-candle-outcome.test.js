@@ -17,6 +17,16 @@ import { readLearningArchive } from '../learning/labels.js';
 
 const T0 = Date.UTC(2026, 8, 13, 17);
 const hex = (char) => char.repeat(64);
+const clone = (value) => JSON.parse(JSON.stringify(value));
+
+function rehashReceipt(receipt) {
+  receipt.labelDigest = canonicalDigest(receipt.label);
+  receipt.receiptDigest = canonicalDigest(Object.fromEntries(
+    Object.entries(receipt).filter(([key]) => !['receiptId', 'receiptDigest'].includes(key)),
+  ));
+  receipt.receiptId = `aclr-${receipt.receiptDigest.slice(0, 40)}`;
+  return receipt;
+}
 
 function procedure(extra = {}) {
   return sealAdaptiveProcedure({
@@ -210,4 +220,65 @@ test('tampered predictions and rehashed receipt content fail closed', (t) => {
     procedure: h.procedure, prediction: h.prediction, archive: source.archive,
     asOfTs: h.prediction.recordedTs - 1,
   }), /asOfTs precedes/);
+});
+
+test('self-consistent receipt hashes cannot legitimize contradictory source, availability, reference, or known-at claims', (t) => {
+  const cases = [
+    {
+      name: 'an absent source with a known label',
+      mutate(receipt) {
+        receipt.sourceIdentity = {
+          state: 'ABSENT_AT_POLL', manifestSha256: null, schemaVersion: null,
+          childhoodVersion: null, archiveCreatedTsMs: null,
+          limitations: ['ARCHIVE_ABSENT'],
+        };
+      },
+      error: /known label requires a present archive source/,
+    },
+    {
+      name: 'an unavailable availability state with a known label',
+      mutate(receipt) {
+        receipt.label.availability = { state: 'UNAVAILABLE', reason: 'ARCHIVE_ABSENT' };
+      },
+      error: /unavailable label cannot contain known values/,
+    },
+    {
+      name: 'a different reference candle',
+      mutate(receipt) { receipt.label.reference.barOpenSec += 60; },
+      error: /known reference bar does not match the sealed anchor/,
+    },
+    {
+      name: 'a reference first known after preparation',
+      mutate(receipt) { receipt.label.reference.knownAtTs = receipt.preparedTs + 1; },
+      error: /known reference was unavailable when the receipt was prepared/,
+    },
+  ];
+
+  for (const scenario of cases) {
+    const h = rig(t); const source = archiveFixture(t, h.prediction);
+    const prepared = prepareAdaptiveCandleOutcome({
+      procedure: h.procedure, prediction: h.prediction, archive: source.archive,
+      asOfTs: h.prediction.targetEndTs,
+    });
+    const receipt = clone(prepared.provenanceReceipt);
+    scenario.mutate(receipt);
+    rehashReceipt(receipt);
+    const submission = {
+      outcomeInput: { ...prepared.outcomeInput, sourceDigest: receipt.receiptDigest },
+      provenanceReceipt: receipt,
+    };
+    const error = adaptiveCandleOutcomeReceiptError(receipt, h.procedure, h.prediction);
+    assert.match(error, scenario.error, scenario.name);
+    const before = h.store.status();
+    h.setNow(h.prediction.targetEndTs);
+    assert.throws(
+      () => h.core.recordOutcome(submission),
+      (caught) => caught?.code === 'OUTCOME_PROVENANCE_INVALID',
+      scenario.name,
+    );
+    const after = h.store.status();
+    assert.equal(after.eventCount, before.eventCount, `${scenario.name}: no event appended`);
+    assert.equal(after.outcomeCount, 0, `${scenario.name}: no outcome admitted`);
+    assert.equal(after.stateSequence, 0, `${scenario.name}: no model update credited`);
+  }
 });

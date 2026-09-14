@@ -142,6 +142,9 @@ function labelProjectionError(label, procedure, prediction) {
     if (!Number.isSafeInteger(label.reference.barOpenSec) || label.reference.barOpenSec <= 0
         || !isFiniteNum(label.reference.price) || label.reference.price <= 0
         || !isTs(label.reference.knownAtTs)) return 'known reference malformed';
+    if (label.reference.barOpenSec !== expectedAnchor / 1_000 - 60) {
+      return 'known reference bar does not match the sealed anchor';
+    }
   } else if (label.reference.price !== null || label.reference.barOpenSec !== null
       || (label.reference.knownAtTs !== null && !isTs(label.reference.knownAtTs))) return 'unknown reference exposes values';
   const h = label.horizon60m;
@@ -160,6 +163,15 @@ export function adaptiveCandleOutcomeReceiptError(receipt, procedure, prediction
   if (adaptiveProcedureError(procedure) || adaptivePredictionError(prediction, procedure)) return 'procedure or prediction invalid';
   const sourceError = sourceIdentityError(receipt.sourceIdentity); if (sourceError) return sourceError;
   const labelError = labelProjectionError(receipt.label, procedure, prediction); if (labelError) return labelError;
+  const hasKnownValue = receipt.label.reference.state === 'KNOWN'
+    || receipt.label.horizon60m.state === 'KNOWN';
+  if (receipt.sourceIdentity.state === 'ABSENT_AT_POLL') {
+    if (hasKnownValue) return 'known label requires a present archive source';
+    if (receipt.label.availability.state !== 'UNAVAILABLE') return 'absent source must have unavailable label availability';
+  }
+  if (receipt.label.availability.state === 'UNAVAILABLE' && hasKnownValue) {
+    return 'unavailable label cannot contain known values';
+  }
   if (receipt.receiptVersion !== ADAPTIVE_CANDLE_RECEIPT_VERSION
       || receipt.adapterVersion !== ADAPTIVE_CANDLE_OUTCOME_ADAPTER_VERSION
       || receipt.procedureId !== procedure.procedureId || receipt.procedureDigest !== procedure.procedureDigest
@@ -173,6 +185,10 @@ export function adaptiveCandleOutcomeReceiptError(receipt, procedure, prediction
       || receipt.durability !== ADAPTIVE_CANDLE_RECEIPT_DURABILITY
       || receipt.authority !== 'NONE' || receipt.purpose !== 'ADAPTIVE_CANDLE_TARGET_PROVENANCE') return 'receipt identity/content malformed';
   const h = receipt.label.horizon60m;
+  if (receipt.label.reference.state === 'KNOWN'
+      && receipt.label.reference.knownAtTs > receipt.preparedTs) {
+    return 'known reference was unavailable when the receipt was prepared';
+  }
   if (receipt.disposition === 'MATURED') {
     if (h.state !== 'KNOWN' || h.outcomeKnownAtTs > receipt.preparedTs || receipt.dispositionReason !== 'LABEL_KNOWN') return 'matured receipt is not an available exact label';
   } else if (h.state === 'KNOWN') return 'non-matured receipt contains a known label';

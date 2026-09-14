@@ -215,6 +215,7 @@ function parseJournal(file, procedure, limits) {
         provenanceReceipt: event.body.provenanceReceipt,
         scores: event.eventType === 'OUTCOME_UPDATED' ? event.body.scores : null,
         update: event.eventType === 'OUTCOME_UPDATED' ? event.body.update : null,
+        nextStateDigest: event.eventType === 'OUTCOME_UPDATED' ? event.body.nextStateDigest : null,
         eventSequence: event.sequence,
         eventDigest: event.eventDigest,
       });
@@ -433,7 +434,11 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
     }
     const event = appendEvent('OUTCOME_RECORDED', { outcome, provenanceReceipt }, outcome.recordedTs);
     outcomes.set(key, clone(outcome));
-    settlements.set(key, { outcome: clone(outcome), provenanceReceipt: clone(provenanceReceipt), scores: null, update: null, eventSequence: event.sequence, eventDigest: event.eventDigest });
+    settlements.set(key, {
+      outcome: clone(outcome), provenanceReceipt: clone(provenanceReceipt),
+      scores: null, update: null, nextStateDigest: null,
+      eventSequence: event.sequence, eventDigest: event.eventDigest,
+    });
     return deepFreeze({ status: 'APPENDED_NO_UPDATE', outcome: clone(outcome) });
   }
 
@@ -441,26 +446,33 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
     ready();
     const key = adaptivePredictionKeyOf(outcome); const prediction = predictions.get(key);
     if (!prediction) fail('PREDICTION_NOT_FOUND', key);
-    const existing = outcomes.get(key);
-    if (existing) {
-      if (existing.outcomeDigest !== outcome.outcomeDigest) fail('OUTCOME_CONFLICT', 'outcome already settled with different content');
-      const prior = settlements.get(key);
-      if (!prior || prior.provenanceReceipt.receiptDigest !== provenanceReceipt.receiptDigest) fail('PROVENANCE_CONFLICT', 'outcome already settled with different provenance');
-      const priorUpdate = updates.get(update.updateId);
-      if (!priorUpdate || priorUpdate.updateDigest !== update.updateDigest) fail('UPDATE_CONFLICT', 'existing outcome does not bind this update');
-      return deepFreeze({ status: 'EXISTING', outcome: clone(existing), update: clone(priorUpdate), state: clone(currentState) });
-    }
     const outcomeError = adaptiveOutcomeError(outcome, procedure, prediction); if (outcomeError) fail('OUTCOME_INVALID', outcomeError);
     const settlementError = adaptiveCandleSettlementError({ outcome, provenanceReceipt }, procedure, prediction);
     if (settlementError) fail('SETTLEMENT_INVALID', settlementError);
     const scoreError = adaptiveScoresError(scores, procedure, prediction, outcome); if (scoreError) fail('SCORE_INVALID', scoreError);
+    const existing = outcomes.get(key);
+    if (existing) {
+      if (!same(existing, outcome)) fail('OUTCOME_CONFLICT', 'outcome already settled with different content');
+      const prior = settlements.get(key);
+      if (!prior || !same(prior.provenanceReceipt, provenanceReceipt)) fail('PROVENANCE_CONFLICT', 'outcome already settled with different provenance');
+      if (!same(prior.scores, scores)) fail('SCORE_CONFLICT', 'existing outcome does not bind these scores');
+      const priorUpdate = isPlainObject(update) ? updates.get(update.updateId) : null;
+      if (!priorUpdate || !same(priorUpdate, update)) fail('UPDATE_CONFLICT', 'existing outcome does not bind this update');
+      const stateError = adaptiveStateError(nextState, procedure); if (stateError) fail('STATE_CONFLICT', stateError);
+      if (prior.nextStateDigest !== nextState.stateDigest) fail('STATE_CONFLICT', 'existing update does not bind this next state');
+      return deepFreeze({ status: 'EXISTING', outcome: clone(existing), update: clone(priorUpdate), state: clone(currentState) });
+    }
     const updateError = adaptiveUpdateError(update, procedure, currentState, prediction, outcome, scores, nextState); if (updateError) fail('UPDATE_INVALID', updateError);
     const recomputed = applyAdaptiveUpdate({ procedure, state: currentState, prediction, outcome, scores, appliedTs: update.appliedTs });
     if (!same(recomputed.update, update) || !same(recomputed.nextState, nextState)) fail('UPDATE_INVALID', 'transition differs from frozen algorithm');
     if (updates.has(update.updateId)) fail('UPDATE_CONFLICT', 'update key already consumed');
     const event = appendEvent('OUTCOME_UPDATED', { outcome, provenanceReceipt, scores, update, nextStateDigest: nextState.stateDigest }, update.appliedTs);
     outcomes.set(key, clone(outcome)); updates.set(update.updateId, clone(update)); currentState = clone(nextState);
-    settlements.set(key, { outcome: clone(outcome), provenanceReceipt: clone(provenanceReceipt), scores: clone(scores), update: clone(update), eventSequence: event.sequence, eventDigest: event.eventDigest });
+    settlements.set(key, {
+      outcome: clone(outcome), provenanceReceipt: clone(provenanceReceipt),
+      scores: clone(scores), update: clone(update), nextStateDigest: nextState.stateDigest,
+      eventSequence: event.sequence, eventDigest: event.eventDigest,
+    });
     return deepFreeze({ status: 'UPDATED', outcome: clone(outcome), scores: clone(scores), update: clone(update), state: clone(currentState) });
   }
 
@@ -523,8 +535,9 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
       ready();
       const row = settlements.get(adaptivePredictionKeyOf({ procedureId: procedure.procedureId, opportunityId, horizonMs }));
       if (!row) return null;
+      const { nextStateDigest: _internalNextStateDigest, ...publicRow } = clone(row);
       return deepFreeze({
-        ...clone(row),
+        ...publicRow,
         custody: {
           storeVersion: ADAPTIVE_STORE_VERSION,
           eventVersion: ADAPTIVE_JOURNAL_EVENT_VERSION,
