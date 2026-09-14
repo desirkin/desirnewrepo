@@ -154,7 +154,11 @@ test('SCOPE-5 (7). research configuration is closed: no wildcard, bounded caps, 
   const baseline = JSON.parse(execSync('git show 9c173729be979202b7feba822aba59ca383314dc:cobra.config.json', { cwd: REPO, encoding: 'utf8' }));
   const current = JSON.parse(readFileSync(path.join(REPO, 'cobra.config.json'), 'utf8'));
   assert.ok(!('socialResearch' in baseline)); assert.deepEqual(Object.keys(current).filter((k) => !(k in baseline)), ['socialResearch']);
-  for (const k of Object.keys(baseline)) assert.deepEqual(current[k], baseline[k], `config.${k} unchanged`);
+  // ONE audited value change since the 9c17372 pin: paper.baseBalanceUsd 100 -> 500 (2026-09-13, Replit data-only series) aligns the
+  // legacy daily-lock bankroll (state/locks.js) with the Judge PAPER account `paper-reference-usd500` (initialCapital "500") so the
+  // two lock computations share one bankroll. Every other pre-existing key stays deep-equal to the pinned baseline.
+  assert.equal(current.paper.baseBalanceUsd, 500, 'paper bankroll matches the USD 500 Judge account');
+  for (const k of Object.keys(baseline)) assert.deepEqual(k === 'paper' ? { ...current[k], baseBalanceUsd: baseline.paper.baseBalanceUsd } : current[k], baseline[k], `config.${k} unchanged`);
   assert.deepEqual(current.universe, ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'], 'the legacy permission set is untouched');
 });
 
@@ -223,7 +227,10 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
   //   rumor2/social.js — propagationVsIndependence exposes family membership (memberSourceIds) so no primitive is duplicated
   const AUTHORIZED_DELTA = {
     // SERPENT PAPER closeout: the three paper operator scripts (ONE preflight, ONE launch, the inventory); nothing else moves
-    'package.json': { added: ['    "cobra": "node bin/cobra.js",', '    "paper": "node bin/cobra.js paper run",', '    "paper:preflight": "node bin/cobra.js paper preflight",', '    "paper:inventory": "node bin/cobra.js paper inventory"'], removed: ['    "cobra": "node bin/cobra.js"'] },
+    // DATA-ONLY (2026-09-12/13): the three data-only operator scripts (the published Replit process, its UI wrapper, its status
+    // reader) — the second live composition root named in test/helpers/composition-roots.js. TEST GLOB (2026-09-14, f6978cf):
+    // `npm test` scopes node --test to *.test.{js,mjs} so helpers/ and fixtures/ are no longer executed as tests.
+    'package.json': { added: ['    "cobra": "node bin/cobra.js",', '    "paper": "node bin/cobra.js paper run",', '    "paper:preflight": "node bin/cobra.js paper preflight",', '    "paper:inventory": "node bin/cobra.js paper inventory",', '    "data:only": "node tools/data-only-runtime.mjs",', '    "data:only-ui": "node tools/data-only-with-ui.mjs",', '    "data:status": "node tools/data-only-status.mjs"', '    "test": "node --test \'test/**/*.test.js\' \'test/**/*.test.mjs\'",'], removed: ['    "cobra": "node bin/cobra.js"', '    "test": "node --test",'] },
     // MARKET-LAB: the optional accepted-trade / applied-book OBSERVER seam (copies of values + receipt clock; guarded; never propagates) — exact line delta
     // JUDGE (ticket §4.3 / §9.1): the optional EXECUTION FEED seam (exact accepted bytes + receipt clock; guarded; pins held / pending symbols against shedding and universe refresh; optional, null by default) — exact line delta, recomputed against 9c17372
     // OPERATIONAL REPAIR (2026-09-12): the venue answers a subscription with exactly ONE book snapshot, so a symbol the execution feed
@@ -239,15 +246,31 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     'rumor2/social-registry.js': { added: ["  // Legacy YouTube source boundary. This is a pure request/fixture", "  // descriptor retained for backward compatibility; the live metadata", "  // collector is the separate video/ tier and never enters this registry.", "  Object.freeze({", "    id: 'YOUTUBE_OFFICIAL',", "    providerKind: 'SOCIAL_MICROBLOG',", "    accessState: 'AVAILABLE_REQUIRES_CREDENTIAL',", "    transport: 'REST_SEARCH_LIST',", "    hosts: Object.freeze(['www.googleapis.com']),", "    streamPath: null,", "    subprotocol: null,", "    requiresCredential: true,", "    credentialEnv: 'YOUTUBE_API_KEY',", "    implemented: true,", "    durable: false,", "    runtimeGated: true,", "    highPriority: false,", "    cost: Object.freeze({", "      model: 'QUOTA_UNITS',", "      searchListUnits: 100,", "      dailyBudgetEnv: 'RUMOR2_SOCIAL_YOUTUBE_MAX_DAILY_QUOTA_UNITS',", "      monthlyBudgetEnv: 'RUMOR2_SOCIAL_YOUTUBE_MAX_MONTHLY_QUOTA_UNITS',", "      maxWatchlistAssets: 25,", "      maxResults: 50,", "      observedOn: '2026-09-12',", "    }),", "    docUrl: 'https://developers.google.com/youtube/v3/docs/search/list',", "    reason: 'Official YouTube Data API v3 search.list read-only request/fixture boundary. No RUMOR-2 collector, durable social journal, posting, OAuth account mutation, or authority path exists; the composed metadata collector remains separate under video/.',", "  }),"], removed: [] },
     'rumor2/social.js': { added: ["export const MAX_NEAR_DUP_CANDIDATES = 256; // SOCIAL-7 §50: bounded near-duplicate family comparisons per post (creation order; cap disclosed)", "  const families = []; // { anchorSourceId, kind, authorIds:Set, memberSourceIds:[], normalizedText, shingles }", "  // SOCIAL-7 §50: the SAME deterministic near-duplicate law (first matching family in creation order, Jaccard >= threshold", "  // over the bounded shingle sets) without an unbounded pairwise scan — shingles are computed ONCE per text, an exact", "  // normalized-text map answers identical copies in O(1), and an inverted shingle index yields the ONLY families that can", "  // reach the threshold (Jaccard >= t implies >= t*|A| shared shingles); comparisons per post are capped and the cap is reported", "  const familyOfSource = new Map(); // socialSourceId -> family (explicit native echoes attach to the parent's family)", "  const familyByExactText = new Map(); // normalized text -> first family with that exact text", "  const shingleIndex = new Map(); // shingle -> [family index, ...] in creation order", "  let nearDupCandidatesCapped = 0;", "      const fam = familyOfSource.get(parent.socialSourceId);", "      if (fam) { fam.memberSourceIds.push(o.socialSourceId); fam.echoCount += 1; familyOfSource.set(o.socialSourceId, fam); continue; }", "    let matched = null; let shingles = null; const na = normalizeSocialText(o.normalizedText ?? '');", "    if (na.length > 0) {", "      matched = familyByExactText.get(na) ?? null;", "      if (!matched) {", "        shingles = textShingles(na);", "        const shared = new Map(); // family index -> shared shingle count", "        for (const sh of shingles) for (const fi of shingleIndex.get(sh) ?? []) shared.set(fi, (shared.get(fi) ?? 0) + 1);", "        const need = nearDupThreshold * shingles.size;", "        const candidates = [...shared].filter(([, n]) => n >= need).map(([fi]) => fi).sort((a, b) => a - b);", "        if (candidates.length > MAX_NEAR_DUP_CANDIDATES) { nearDupCandidatesCapped += 1; candidates.length = MAX_NEAR_DUP_CANDIDATES; }", "        for (const fi of candidates) { const f = families[fi]; if (f.shingles && shingleSimilarity(shingles, f.shingles) >= nearDupThreshold) { matched = f; break; } }", "      familyOfSource.set(o.socialSourceId, matched);", "    const fam = {", "      shingles: na.length > 0 ? (shingles ?? textShingles(na)) : null,", "    };", "    families.push(fam); familyOfSource.set(o.socialSourceId, fam);", "    if (na.length > 0) { if (!familyByExactText.has(na)) familyByExactText.set(na, fam); const fi = families.length - 1; for (const sh of fam.shingles) { let list = shingleIndex.get(sh); if (!list) { list = []; shingleIndex.set(sh, new Map()); } list.push(fi); } }", "    nearDupCandidatesCapped, // SOCIAL-7 §50: posts whose near-duplicate candidate families exceeded the comparison cap (deterministic, disclosed)", "      memberSourceIds: [...f.memberSourceIds], // SOCIAL-5 §36.3: membership exposed so a dependency manifest never re-derives families"], removed: ["  const families = []; // { anchorSourceId, kind, authorIds:Set, memberSourceIds:[], normalizedText }", "      const fam = families.find((f) => f.memberSourceIds.includes(parent.socialSourceId));", "      if (fam) { fam.memberSourceIds.push(o.socialSourceId); fam.echoCount += 1; continue; }", "    let matched = null;", "    if (o.normalizedText && o.normalizedText.length > 0) {", "      for (const f of families) {", "        if (!f.normalizedText) continue;", "        const nd = nearDuplicate(o.normalizedText, f.normalizedText, nearDupThreshold);", "        if (nd.candidate) { matched = f; break; }", "    families.push({", "    });"] },
   };
+  // AUDITED RE-PINS (2026-09-14). Each names the law change and where its own tests live; the file is pinned to
+  // its complete resulting bytes because the 9c17372 checkout is no longer the authority for it:
+  //   tape/universe.js, tape/run.js — 947a750 "Remove named-coin deep-tape privileges while protecting actual
+  //     exposure": equal eligibility, volume-ranked, no majors seat/depth/fallback; a failed venue read yields
+  //     UNAVAILABLE. Tests: test/universe.test.js, test/wideeye.test.js. Matches the whole-market doctrine.
+  //   rumor2/providers/x-official.js — X paid-wire usage parser (2026-09-13) + SOCIAL-4D day projection through
+  //     the time boundary (7abf365). Tests: test/x-paid-wire.test.js, test/social-4d-completion.test.js.
+  //   rumor2/social-time.js — ONE pure export utcDayLabel (7abf365). Tests: test/social-time.test.js.
+  //   rumor2/social-registry.js — every social provider gained a frozen `activation` descriptor (ownerApproval, credential
+  //     NAME, retention, quota, scope, receipt) in the 2026-09-13 data-only series; the earlier line-delta entry and its
+  //     unreachable digest constant are superseded. Tests: test/social-census.test.js, test/social-7-readiness.test.js.
+  const REPINNED = {
+    'rumor2/social-registry.js': 'ee5afa5bf0accfcb641465e94ee1f52d142cb53b4449c2cfd36b06843cc144af',
+    'tape/universe.js': 'ed0a16130fee4c841b5f5ba78bac52c5403d6fe4e2ebfd5844bed96c5c05bad1',
+    'tape/run.js': 'ff97a45fb365fc119245b1a5555f0562980225b076b4300ddc7812eb39c1bed2',
+    'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
+    'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
+  };
   for (const f of pinned) {
     const committed = execSync(`git show 9c173729be979202b7feba822aba59ca383314dc:${f}`, { cwd: REPO, encoding: 'buffer' });
-    if (!AUTHORIZED_DELTA[f]) {
+    if (REPINNED[f] || !AUTHORIZED_DELTA[f]) {
       // The legacy YouTube foundation descriptor is an intentional merged
       // authority-boundary restoration; pin its complete resulting bytes
       // rather than treating the older 9c17372 checkout as the authority.
-      const protectedDigest = f === 'rumor2/social-registry.js'
-        ? 'e1b57f8ecd1bcf9018de2e5f6fee325b73e12afba33ce638e8442a32d026851b'
-        : createHash('sha256').update(committed).digest('hex');
+      const protectedDigest = REPINNED[f] ?? createHash('sha256').update(committed).digest('hex');
       assert.equal(sha(f), protectedDigest, `${f} protected digest`);
       continue;
     }

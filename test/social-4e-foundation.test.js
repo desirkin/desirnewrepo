@@ -156,10 +156,16 @@ test('4E-5. protected provider / contract / truth surfaces are byte-identical to
   const pinned = {
     'rumor2/providers/farcaster-official.js': '47d8e8c3ce6ab5bf4993b7a3f7fb6ea312bb6b916e39139b47641aed6879feea',
     'rumor2/providers/bluesky-official.js': '8c8403e553961fe4024c57101b386ef16c0084621f5f5126974420c0c2182fdd',
-    'rumor2/providers/x-official.js': '33e846128c6eca467a1b46ce414e7c14ef70cc7f326d68ebca0490445bbaff2a',
+    // AUDITED RE-PIN (2026-09-14): x-official.js moved twice after the 4E pin — the X paid-wire usage parser (Replit
+    // data-only series, 2026-09-13: parseXUsage / daily_project_usage / cap_reset_day, tested in test/x-paid-wire.test.js)
+    // and the SOCIAL-4D closure that routes usage-row days through the social-time boundary instead of Date.parse
+    // (7abf365, tested in test/social-time.test.js + test/social-4d-completion.test.js). Pinned to the resulting bytes.
+    'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/x-stream.js': '5a21881ea009f2be65a47de3c39842951fde4c517163f39534dde713499cfb43',
     'rumor2/social.js': '5d9df174b4043f78cddfef3e85ba67a970bfa78c7ed4183b58ca93a595ad9721',
-    'rumor2/social-time.js': '952a79e8ea1426c6c2ac1e05727faca181999ad66418827ff4e3eb748bb4e42a',
+    // AUDITED RE-PIN (2026-09-14, 7abf365): social-time.js gained ONE pure export, utcDayLabel(ms) — civil-date arithmetic,
+    // no Date construction — so provider code has a sanctioned ms -> day projection. Nothing else in the file changed.
+    'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
     'rumor2/social-reddit.js': 'a451febebb1c9f19ad59431ccee640ced220633b3775f340ee574d3c688372f6',
     'rumor2/social-stocktwits.js': 'f97c662435a21263b5cd8cf51549099adaa65c6749f342e7bf4c6ec1b1c506ee',
     'rumor2/truth.js': 'f8aa2578000d7590e7710a47cbdd1a2b79f763a8baf0a832f89c42eeb6093c2e',

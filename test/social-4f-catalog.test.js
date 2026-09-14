@@ -126,12 +126,19 @@ test('CAT-4 (E/F). adoption law: a >50% drop is SUSPECTED_INCOMPLETE (previous t
   assert.equal(catalogFreshness(t0, T0 + 900_000, 900), 'FRESH'); assert.equal(catalogFreshness(t0, T0 + 900_001, 900), 'STALE'); assert.equal(catalogFreshness(t0, T0 - 120_000, 900), 'FUTURE');
 });
 
-test('CAT-5 (D). the deep-observation selection and the legacy permission set are UNCHANGED by the catalog: tape/universe.js still applies its floor / majors / cap; cost + ledger still refuse a non-major', async () => {
-  assert.equal(sha('tape/universe.js'), sha('tape/universe.js')); // (identity is pinned in social-4f-scope.test.js against 9c17372)
+test('CAT-5 (D). the deep-observation selection and the legacy permission set are UNCHANGED by the catalog: tape/universe.js still applies its floor / cap under EQUAL eligibility (no named-coin seat); cost + ledger still refuse a non-major', async () => {
+  // 947a750 (2026-09-13) "Remove named-coin deep-tape privileges": the config majors no longer hold a reserved seat, depth or
+  // floor exemption in the deep selection — every candidate clears the same liquidity floor and competes by volume (whole-market
+  // doctrine; law + tests in test/universe.test.js). The catalog still must not WIDEN the selection: with every market below the
+  // floor, nothing is selected — not the seeds, not the broad catalog.
   const v = venue({ nonMajors: 30 }); const tickers = {};
   for (const k of Object.keys(v)) tickers[k] = { v: ['1', '1000'], p: ['1', '10'] }; // $10k volume everywhere: below the deep floor
   const deep = selectFromRaw(v, tickers, loadConfig());
-  assert.deepEqual(deep.map((p) => p.coin).sort(), [...SEEDS].sort(), 'the deep selection keeps its floor + major preference; broad discovery does not widen it');
+  assert.deepEqual(deep.map((p) => p.coin), [], 'below the floor nothing is selected: no seed privilege, and broad discovery does not widen it');
+  const above = {}; for (const k of Object.keys(v)) above[k] = { v: ['1', '1000000'], p: ['1', '1000'] }; // $1B everywhere: all clear the floor
+  const wide = selectFromRaw(v, above, loadConfig());
+  assert.ok(wide.length > SEEDS.length, 'above the floor the deep selection is the whole eligible venue, not the seeds');
+  assert.ok(wide.every((p) => p.major === false), 'no asset carries the retired major privilege');
   const { evaluateCost } = await import('../cost/model.js');
   const r = evaluateCost('ZQQQ', 100);
   assert.equal(r.available ?? r.ok ?? false, false); assert.match(JSON.stringify(r), /not in universe/, 'the legacy cost permission set is intact');
