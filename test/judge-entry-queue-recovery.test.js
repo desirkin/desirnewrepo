@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDispatcher, DISPATCHER_DEFAULTS } from '../execution/dispatcher.js';
-import { paperAccount, SPEC, TAKER_FEE } from './helpers/judge.js';
+import { paperAccount, SPEC, TAKER_FEE, canaryAuthorization, canaryCompleted } from './helpers/judge.js';
 
 function adapter({ uncertain = false } = {}) {
   const calls = { entries: 0, reductions: 0, reconciles: 0 };
@@ -113,4 +113,60 @@ test('concurrent dispatch and compensation serialize on journal CAS: exactly one
     assert.equal(dispatch.status, 'rejected');
   }
   assert.equal((await r.journal.replayVerify(r.accountId)).ok, true);
+});
+
+test('a queue-refused zero-attempt canary cannot become COMPLETED evidence or unlock an ordinary LIVE arm', async () => {
+  const r = await paperAccount({ accountId: 'queue-canary-integrity', init: { accountKind: 'LIVE' } });
+  const { F, clock } = r;
+  await r.append([
+    canaryAuthorization(F, { authorizationId: 'canary-queue' }),
+    F.mode('LIVE_UNARMED', 'LIVE_ARMED', { authorizationId: 'canary-queue' }),
+    F.hypothesis('canary-d'),
+    F.decision('canary-d', { sizing: { q: '0.0001', entryLimitPrice: '100000', entryCashOut: '10.08', riskUsd: '1', bufferedScenarioNetProfit: '0.1' } }),
+    F.reserve('canary-r', 'canary-d', { cashReserved: '10.08', riskReserved: '1' }),
+    F.position('canary-p', 'canary-d', { requestedQty: '0.0001' }),
+    F.pin(),
+    F.intent('canary-o', 'canary-p', 'canary-r', { kind: 'CANARY_ENTRY', qty: '0.0001' }),
+  ]);
+  const venue = adapter();
+  const feed = { release() {}, health: () => ({ usable: true }) };
+  const dispatcher = createDispatcher({ accountId: r.accountId, journal: r.journal, writer: r.writer, adapter: venue, clock, feed, specOf: () => SPEC, feeOf: () => TAKER_FEE, limits: { ...DISPATCHER_DEFAULTS, maxEntryQueue: 1 } });
+  await dispatcher.load();
+
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const active = dispatcher.enqueue('ENTRY', () => held);
+  const queued = dispatcher.enqueue('ENTRY', async () => 'placeholder');
+  await assert.rejects(dispatcher.queueEntry('canary-o'), (error) => error.code === 'ENTRY_QUEUE_FULL');
+  release(); await Promise.all([active, queued]);
+
+  const compensated = dispatcher.state();
+  assert.equal(compensated.orders['canary-o'].state, 'CANCELLED');
+  assert.equal(compensated.orders['canary-o'].attempts.length, 0);
+  assert.equal(compensated.positions['canary-p'].state, 'FLAT');
+  assert.equal(venue.calls.entries, 0, 'the canary was never offered to the venue');
+
+  await dispatcher.commit(F.ev('RECONCILIATION', { reconciliationId: 'rec-canary-shutdown', scope: 'SHUTDOWN', outcome: 'COMPLETE', balances: null, openOrdersSeen: 0, executionsSeen: 0, unmatched: 0, pagesRead: 1, pageIncomplete: false, cursorTs: null, reason: null, ts: clock.now() }));
+  await assert.rejects(
+    dispatcher.commit(F.ev('AUTHORIZATION_ENDED', { authorizationId: 'canary-queue', reason: 'COMPLETED', ts: clock.now() })),
+    (error) => error.detail?.code === 'CANARY_INCOMPLETE' && /dispatch-attempt/.test(error.message),
+    'a clean shutdown reconciliation cannot convert a never-attempted canary into evidence',
+  );
+  assert.equal(dispatcher.state().canaryEvidence, null);
+  await dispatcher.commit(F.ev('AUTHORIZATION_ENDED', { authorizationId: 'canary-queue', reason: 'REVOKED', ts: clock.now() }));
+  await assert.rejects(
+    dispatcher.commit(F.authorized('ordinary-arm')),
+    (error) => error.detail?.code === 'CANARY_EVIDENCE_REQUIRED',
+    'the ordinary arm remains closed without real canary evidence',
+  );
+});
+
+test('a properly attempted, filled, closed canary remains valid positive evidence', async () => {
+  const r = await paperAccount({ accountId: 'queue-canary-positive', init: { accountKind: 'LIVE' } });
+  await r.append(canaryCompleted(r.F, r.clock));
+  const state = await r.state();
+  assert.equal(state.canaryEvidence?.authorizationId, 'canary-0');
+  assert.equal(state.canaryEvidence?.filled, 1);
+  await r.append(r.F.authorized('ordinary-arm'));
+  assert.equal((await r.state()).authorization.kind, 'LIVE_ARM');
 });
