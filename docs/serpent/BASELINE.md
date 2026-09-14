@@ -1,6 +1,6 @@
 # Serpent baseline — 2026-09-14
 
-Branch `serpent/baseline` on `desirkin/desirnewrepo`. GitHub tip `65a48eb` (116 commits); local tip `af77a84` (121 commits) pending the next bundle upload. orphan history (no common ancestor with `main`; `main` is the 2026-09-12 state, the Replit data-only series lived only in Replit and was recovered from bundles).
+Branch `serpent/baseline` on `desirkin/desirnewrepo`. GitHub tip `65a48eb` (116 commits); bundle tip `679f358` pending the next upload from the repo-attached session. orphan history (no common ancestor with `main`; `main` is the 2026-09-12 state, the Replit data-only series lived only in Replit and was recovered from bundles).
 
 ## Suite: GREEN — 3,036 tests, 0 fail, 0 cancelled, 0 outbound (serial, offline guard, real PostgreSQL 16) — last full run at 5dbe8d9 + the market-lab fence fix
 
@@ -11,6 +11,7 @@ Branch `serpent/baseline` on `desirkin/desirnewrepo`. GitHub tip `65a48eb` (116 
 - `f6978cf` … `c90f053` — test glob scoped to real tests; JUDGE-PAPER-AUDIT §4.5 written and FROZEN_FOR_PAPER re-pinned; sensor inventory regenerated from its derivation; fence pins moved to the audited laws; the Judge differential keeps its behavioral proof (the 2026-09-12 Judge and today's Judge make identical decisions on identical inputs with the new ports absent).
 - `0f752f2` `7dca1f8` `1b7e7a8` — docs in the repo (docs/serpent/): philosophy, map, plan, baseline, the learning/ finding (no superseded drafts; nothing atticked), and the runtime-unification design.
 - `5dbe8d9` `af77a84` — runtime unification step 1: the data-only composition body moved verbatim to lib/serpent-runtime.js; entry keeps the safety pins. No behavior change; fences name the spine.
+- `679f358` — runtime unification step 2: spine → lib/external-quota.js + lib/collectors.js with injectable starters; test/serpent-runtime-composition.test.js RC-1..3 (order, options, status, reverse stop, lock, fail-closed). Targeted fences green; full run to be confirmed by the worker.
 - `65a48eb` — lean trim step 1: one bankroll, one daily-lock law; legacy JSONL ledger retired to `attic/`; `execution/ledger-view.js` + projection `dailyLock`/`ledger`; audit §4.6.
 
 ## Test recipe
