@@ -26,10 +26,16 @@ function importGraph(file, seen = new Set()) {
   return seen;
 }
 
+// runtime unification step 1 (2026-09-14): the entry keeps the safety pins and calls lib/serpent-runtime.js, which holds the
+// spine verbatim. Source-shape assertions read the entry PLUS the spine; the import-graph fence covers both.
+const spine = path.join(root, 'lib', 'serpent-runtime.js');
+const entryAndSpine = () => readFileSync(entry, 'utf8') + '\n' + readFileSync(spine, 'utf8');
+
 test('data-only entrypoint import graph contains no trading composition or order runtime', () => {
-  const graph = [...importGraph(entry)];
+  const graph = [...importGraph(entry), ...importGraph(spine)];
   for (const file of graph) for (const denied of forbidden) assert.equal(file.includes(denied), false, `forbidden data-only dependency: ${file}`);
-  const source = readFileSync(entry, 'utf8');
+  assert.ok(graph.includes(path.resolve(spine)), 'the entry reaches the spine');
+  const source = entryAndSpine();
   assert.match(source, /JUDGE_ENABLED:\s*'false'/);
   assert.match(source, /JUDGE_ALLOW_ORDERS:\s*'false'/);
   assert.match(source, /nominationEnabled:\s*false/);
@@ -37,15 +43,15 @@ test('data-only entrypoint import graph contains no trading composition or order
 });
 
 test('data-only launcher derives official/social scope from the accepted catalog without a named fallback', () => {
-  const source = readFileSync(entry, 'utf8');
+  const source = entryAndSpine();
   assert.match(source, /catalog\.markets\.map\(\(market\) => market\.base\)/);
   assert.doesNotMatch(source, /\b(?:BTC|ETH|SOL)\b/);
   assert.match(source, /namedPreference:\s*false/);
 });
 
 test('data-only launcher starts and reports zero-order market observations with its own guarded transport', () => {
-  const source = readFileSync(entry, 'utf8');
-  assert.match(source, /import\('\.\/data-only-market\.mjs'\)/);
+  const source = entryAndSpine();
+  assert.match(source, /from '\.\.\/tools\/data-only-market\.mjs'/);
   assert.match(source, /market = await startDataOnlyMarket\(\{ env: process\.env, dataDir: root, log, quotaJournal: checkpoints\.market \}\)/);
   assert.match(source, /handles\.push\(market\)/);
   assert.match(source, /market:\s*market\?\.status\?\.\(\)/);
@@ -53,8 +59,8 @@ test('data-only launcher starts and reports zero-order market observations with 
 });
 
 test('outer market funnel subscribes the complete accepted catalog independently of the deep subject list', () => {
-  const source = readFileSync(entry, 'utf8');
-  assert.match(source, /import\('\.\.\/market-lab\/broad-kraken\.js'\)/);
+  const source = entryAndSpine();
+  assert.match(source, /from '\.\.\/market-lab\/broad-kraken\.js'/);
   assert.match(source, /broadMarket = await startBroadKraken\(\{ catalogSource, dataDir: root, log \}\)/);
   assert.match(source, /handles\.push\(broadMarket\)/);
   assert.match(source, /broadMarket:\s*broadMarket\?\.status\?\.\(\)/);
@@ -69,14 +75,14 @@ test('outer market funnel subscribes the complete accepted catalog independently
 });
 
 test('data-only deployment composes the existing YouTube collector behind explicit fail-closed gates and durable status', () => {
-  const source = readFileSync(entry, 'utf8');
+  const source = entryAndSpine();
   const supervisor = readFileSync(path.join(root, 'tools', 'data-only-with-ui.mjs'), 'utf8');
   for (const text of [source, supervisor]) {
     assert.match(text, /SOCIAL_VIDEO_ENABLED:\s*process\.env\.SOCIAL_VIDEO_ENABLED === 'true' \? 'true' : 'false'/);
     assert.doesNotMatch(text, /SOCIAL_VIDEO_ENABLED:\s*'true'/, 'the launcher must not invent YouTube authorization');
   }
-  assert.match(source, /import\('\.\.\/video\/collector\.js'\)/);
-  assert.match(source, /import\('\.\.\/video\/reader\.js'\)/);
+  assert.match(source, /from '\.\.\/video\/collector\.js'/);
+  assert.match(source, /from '\.\.\/video\/reader\.js'/);
   assert.match(source, /startVideo\(\{ env: process\.env, dataDir: root, log, signals: false, durableCheckpoint: checkpoints\?\.video \?\? null \}\)/);
   assert.match(source, /blockers\.YOUTUBE/);
   assert.match(source, /youtube:\s*video \? readVideoStatus\(root\)/);
@@ -84,7 +90,7 @@ test('data-only deployment composes the existing YouTube collector behind explic
 });
 
 test('data-only news uses official feeds plus bounded GDELT metadata and withholds unverified publisher text', () => {
-  const source = readFileSync(entry, 'utf8');
+  const source = entryAndSpine();
   assert.doesNotMatch(source, /startPress|readPressStatus|PRESS_ENABLED:\s*'true'/);
   assert.doesNotMatch(source, /COINDESK_NEWS|THEBLOCK_NEWS|COINTELEGRAPH_NEWS|DECRYPT_NEWS/);
   assert.match(source, /state:\s*'WITHHELD_TERMS_UNVERIFIED'/);
@@ -125,7 +131,7 @@ test('both data-only launchers explicitly keep paid X collection disabled during
 });
 
 test('startup publishes process identity and restores external quotas before any provider starts', () => {
-  const source = readFileSync(entry, 'utf8');
+  const source = entryAndSpine();
   const initialStatus = source.indexOf('writeStartupStatus();');
   const persistenceStart = source.indexOf('await startPersistence({ log, registerSignals: false })');
   const checkpointStart = source.indexOf('await openDataOnlyCheckpoints(');

@@ -13,6 +13,10 @@
 // and (for the tools) is imported by no tracked module.
 export const TRADING_COMPOSITION_ROOT = 'fly.js';
 export const DATA_ONLY_COMPOSITION_ROOT = 'tools/data-only-runtime.mjs';
+// runtime unification step 1 (2026-09-14): the data-only root keeps only the safety env pins; its composition body moved
+// verbatim to this spine. The spine is a wiring point by the same law (it starts the collectors) and carries the same
+// no-trading-tier import fence. Step 3 folds fly.js onto it; step 6 collapses the list to one root.
+export const DATA_ONLY_RUNTIME_SPINE = 'lib/serpent-runtime.js';
 export const OPERATOR_SETUP_SMOKE_TOOLS = Object.freeze(['tools/bluesky-setup-smoke.mjs', 'tools/farcaster-setup-smoke.mjs', 'tools/official-setup-smoke.mjs']);
-export const RUMOR2_LIVE_WIRING_POINTS = Object.freeze([TRADING_COMPOSITION_ROOT, DATA_ONLY_COMPOSITION_ROOT, ...OPERATOR_SETUP_SMOKE_TOOLS]);
+export const RUMOR2_LIVE_WIRING_POINTS = Object.freeze([TRADING_COMPOSITION_ROOT, DATA_ONLY_COMPOSITION_ROOT, DATA_ONLY_RUNTIME_SPINE, ...OPERATOR_SETUP_SMOKE_TOOLS]);
 export const TRADING_TIER_IMPORT_RE = /from\s+'[^']*(\/|^)(judge|execution|ledger|cost|tape|state|controls|governance|socrates|paper|watch)\//;
