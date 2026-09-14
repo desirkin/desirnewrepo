@@ -22,7 +22,12 @@ import {
 import { assignGroups } from './grouping.js';
 import { normalShrinkageGrouped } from './estimator.js';
 
-export const PROSPECTIVE_RECORD_KINDS = Object.freeze(['DESIGN_SEALED', 'CAPTURE', 'OUTCOME', 'TERMINAL_EVALUATED']);
+export const ADAPTIVE_RANKING_TRIAL_CAPTURE = 'ADAPTIVE_RANKING_TRIAL_CAPTURE';
+export const ADAPTIVE_RANKING_TRIAL_OUTCOME = 'ADAPTIVE_RANKING_TRIAL_OUTCOME';
+export const PROSPECTIVE_RECORD_KINDS = Object.freeze([
+  'DESIGN_SEALED', 'CAPTURE', 'OUTCOME', ADAPTIVE_RANKING_TRIAL_CAPTURE,
+  ADAPTIVE_RANKING_TRIAL_OUTCOME, 'TERMINAL_EVALUATED',
+]);
 export const TERMINAL_VERDICTS = Object.freeze(['FORWARD_SUPPORTED', 'FORWARD_NOT_SUPPORTED', 'INSUFFICIENT_COMPARISON']);
 export const INTERIM_BANNER = 'INTERIM — NOT A FORMAL CONFIRMATION';
 export const MIN_COMPARISON_COVERAGE = 0.8; // predeclared: below this matured-outcome coverage the comparison is INSUFFICIENT
@@ -47,6 +52,10 @@ export function sealDesign({
 
 export const CAPTURE_KEYS = Object.freeze(['kind', 'candidateId', 'opportunityId', 'canonicalCoin', 'decisionTs', 'candidateDecision', 'baselineDecision', 'recordedTs', 'labelEndTs']);
 export const OUTCOME_KEYS = Object.freeze(['kind', 'candidateId', 'opportunityId', 'outcomeClass', 'metricValue', 'outcomeKnownAtTs', 'recordedTs']);
+export const ADAPTIVE_RANKING_TRIAL_CAPTURE_KEYS = Object.freeze(['kind', 'candidateId', 'opportunityId', 'publicationId', 'decisionReceipt']);
+export const ADAPTIVE_RANKING_TRIAL_OUTCOME_KEYS = Object.freeze(['kind', 'candidateId', 'opportunityId', 'publicationId', 'executionReceipt']);
+const ADAPTIVE_CAPTURE_PROJECTION_KEYS = Object.freeze(['canonicalCoin', 'decisionTs', 'recordedTs', 'labelEndTs', 'candidateDecision', 'baselineDecision']);
+const ADAPTIVE_OUTCOME_PROJECTION_KEYS = Object.freeze(['outcomeKnownAtTs', 'recordedTs', 'candidateMetricValue', 'baselineMetricValue']);
 
 const captureOrder = (a, b) => a.recordedTs - b.recordedTs || (a.opportunityId < b.opportunityId ? -1 : 1);
 
@@ -59,7 +68,7 @@ function formalShockDates(commonShockDates) {
 }
 
 // ---- validated replay: the ONLY way to obtain trusted prospective state ------------------------------------------
-export function replayProspective(records) {
+export function replayProspective(records, { adaptiveRankingTrialValidator = null } = {}) {
   const designs = new Map(); const captures = new Map(); const outcomes = new Map(); const terminals = new Map(); const errors = [];
   for (let i = 0; i < records.length; i += 1) {
     const r = records[i];
@@ -75,9 +84,53 @@ export function replayProspective(records) {
     const d = designs.get(r.candidateId);
     if (!d) { at('record precedes its sealed design'); continue; }
     if (terminals.has(r.candidateId)) { at('record after the one terminal look'); continue; }
+    if (r.kind === ADAPTIVE_RANKING_TRIAL_CAPTURE) {
+      const k = exactKeys(r, ADAPTIVE_RANKING_TRIAL_CAPTURE_KEYS); if (k) { at(`adaptive ranking capture ${k}`); continue; }
+      if (typeof adaptiveRankingTrialValidator !== 'function') { at('adaptive ranking trial validator absent'); continue; }
+      const caps = captures.get(r.candidateId);
+      if ([...caps.values()].some((row) => row.comparisonKind !== ADAPTIVE_RANKING_TRIAL_CAPTURE)) { at('cannot mix adaptive and legacy captures in one candidate'); continue; }
+      if (caps.has(r.opportunityId)) { at('duplicate capture'); continue; }
+      let checked;
+      try { checked = adaptiveRankingTrialValidator(r, { stage: 'CAPTURE', design: d, capture: null }); }
+      catch (error) { at(`adaptive ranking capture invalid (${error?.message ?? 'validator threw'})`); continue; }
+      if (!checked || checked.error !== null || exactKeys(checked.projection, ADAPTIVE_CAPTURE_PROJECTION_KEYS)) {
+        at(`adaptive ranking capture invalid (${checked?.error ?? 'projection malformed'})`); continue;
+      }
+      const p = checked.projection;
+      if (!isTs(p.decisionTs) || !isTs(p.recordedTs) || !isTs(p.labelEndTs)) { at('adaptive ranking capture clocks malformed'); continue; }
+      if (p.decisionTs < d.sealedTs || p.recordedTs < p.decisionTs || p.recordedTs >= p.labelEndTs
+          || p.labelEndTs - p.decisionTs < d.primaryHorizonMin * 60_000) { at('adaptive ranking capture chronology malformed'); continue; }
+      if (!['SELECTED_FOR_SHADOW', 'SKIPPED'].includes(p.candidateDecision)
+          || !['SELECTED_FOR_SHADOW', 'SKIPPED'].includes(p.baselineDecision)) { at('adaptive ranking capture decision malformed'); continue; }
+      caps.set(r.opportunityId, deepFreeze({ ...r, ...p, comparisonKind: ADAPTIVE_RANKING_TRIAL_CAPTURE }));
+      continue;
+    }
+    if (r.kind === ADAPTIVE_RANKING_TRIAL_OUTCOME) {
+      const k = exactKeys(r, ADAPTIVE_RANKING_TRIAL_OUTCOME_KEYS); if (k) { at(`adaptive ranking outcome ${k}`); continue; }
+      if (typeof adaptiveRankingTrialValidator !== 'function') { at('adaptive ranking trial validator absent'); continue; }
+      const caps = captures.get(r.candidateId); const outs = outcomes.get(r.candidateId);
+      const cap = caps.get(r.opportunityId);
+      if (!cap || cap.comparisonKind !== ADAPTIVE_RANKING_TRIAL_CAPTURE) { at('adaptive ranking outcome without its typed prior capture'); continue; }
+      if (outs.has(r.opportunityId)) { at('second outcome for one capture'); continue; }
+      let checked;
+      try { checked = adaptiveRankingTrialValidator(r, { stage: 'OUTCOME', design: d, capture: cap }); }
+      catch (error) { at(`adaptive ranking outcome invalid (${error?.message ?? 'validator threw'})`); continue; }
+      if (!checked || checked.error !== null || exactKeys(checked.projection, ADAPTIVE_OUTCOME_PROJECTION_KEYS)) {
+        at(`adaptive ranking outcome invalid (${checked?.error ?? 'projection malformed'})`); continue;
+      }
+      const p = checked.projection;
+      if (!isTs(p.outcomeKnownAtTs) || p.outcomeKnownAtTs < cap.labelEndTs
+          || !isTs(p.recordedTs) || p.recordedTs < p.outcomeKnownAtTs
+          || !isFiniteNum(p.candidateMetricValue) || !isFiniteNum(p.baselineMetricValue)) {
+        at('adaptive ranking outcome chronology or arm metric malformed'); continue;
+      }
+      outs.set(r.opportunityId, deepFreeze({ ...r, ...p, comparisonKind: ADAPTIVE_RANKING_TRIAL_OUTCOME }));
+      continue;
+    }
     if (r.kind === 'CAPTURE') {
       const k = exactKeys(r, CAPTURE_KEYS); if (k) { at(`capture ${k}`); continue; }
       const caps = captures.get(r.candidateId);
+      if ([...caps.values()].some((row) => row.comparisonKind === ADAPTIVE_RANKING_TRIAL_CAPTURE)) { at('cannot mix legacy and adaptive captures in one candidate'); continue; }
       if (caps.has(r.opportunityId)) { at('duplicate capture'); continue; }
       if (!isTs(r.decisionTs) || !isTs(r.recordedTs) || !isTs(r.labelEndTs)) { at('capture clocks malformed'); continue; }
       if (r.decisionTs < d.sealedTs) { at('capture decided before the design was sealed'); continue; }
@@ -92,6 +145,7 @@ export function replayProspective(records) {
       const caps = captures.get(r.candidateId); const outs = outcomes.get(r.candidateId);
       const cap = caps.get(r.opportunityId);
       if (!cap) { at('outcome without a prior capture'); continue; }
+      if (cap.comparisonKind === ADAPTIVE_RANKING_TRIAL_CAPTURE) { at('legacy outcome cannot settle an adaptive capture'); continue; }
       if (outs.has(r.opportunityId)) { at('second outcome for one capture'); continue; }
       if (!isTs(r.outcomeKnownAtTs) || r.outcomeKnownAtTs < cap.labelEndTs) { at('outcome known before its horizon end'); continue; }
       if (!isTs(r.recordedTs) || r.recordedTs < r.outcomeKnownAtTs) { at('outcome recorded before it was known'); continue; }
@@ -178,10 +232,12 @@ function terminalRecord(state, candidateId, { nowTs, commonShockDates = new Set(
     let sum = 0; let n = 0;
     for (const idx of g.members) {
       const cap = countedCaps[idx]; const out = outs.get(cap.opportunityId);
-      const metric = isFiniteNum(out.metricValue) ? out.metricValue : null;
-      if (metric === null) continue;
-      const cand = cap.candidateDecision === 'SELECTED_FOR_SHADOW' ? metric : 0;
-      const base = cap.baselineDecision === 'SELECTED_FOR_SHADOW' ? metric : 0;
+      const adaptive = cap.comparisonKind === ADAPTIVE_RANKING_TRIAL_CAPTURE
+        && out.comparisonKind === ADAPTIVE_RANKING_TRIAL_OUTCOME;
+      const metric = adaptive ? null : (isFiniteNum(out.metricValue) ? out.metricValue : null);
+      if (!adaptive && metric === null) continue;
+      const cand = adaptive ? out.candidateMetricValue : (cap.candidateDecision === 'SELECTED_FOR_SHADOW' ? metric : 0);
+      const base = adaptive ? out.baselineMetricValue : (cap.baselineDecision === 'SELECTED_FOR_SHADOW' ? metric : 0);
       sum += cand - base; n += 1;
     }
     return n > 0 ? sum / n : null;

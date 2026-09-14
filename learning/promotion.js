@@ -24,11 +24,22 @@ export const PROMOTION_POLICY = deepFreeze({
   rationale: 'conservative engineering defaults, labelled defaults — not empirically proven sufficient sample sizes',
 });
 
-export function freezeCandidate({ store, pattern, costModel, consumerBinding, terminalGroupTarget = PROMOTION_POLICY.minTerminalGroupTarget, nowTs }) {
+export function freezeCandidate({
+  store, pattern, costModel, consumerBinding,
+  primaryMetric = 'NET_LOG_RETURN_60M_PCT',
+  comparator = 'BASELINE_RULE_SAME_STREAM',
+  terminalGroupTarget = PROMOTION_POLICY.minTerminalGroupTarget, nowTs,
+}) {
   if (pattern.state !== 'ACCUMULATING') throw new Error(`freezeCandidate: only an ACCUMULATING pattern can freeze (state ${pattern.state})`);
+  const comparison = `${primaryMetric}|${comparator}`;
+  if (![
+    'NET_LOG_RETURN_60M_PCT|BASELINE_RULE_SAME_STREAM',
+    'PAIRED_EXECUTABLE_NET_RETURN_PCT|EVOLVING_ADAPTIVE_RANKING_VS_UNADJUSTED_SAME_BATCH',
+  ].includes(comparison)) throw new Error('freezeCandidate: unsupported primary metric/comparator pair');
   const design = sealDesign({
     patternId: pattern.patternId, predicate: pattern.predicate, scope: pattern.scope,
-    costModel, terminalGroupTarget, alpha: PROMOTION_POLICY.alpha, sealedTs: nowTs,
+    primaryMetric, comparator, costModel, terminalGroupTarget,
+    alpha: PROMOTION_POLICY.alpha, sealedTs: nowTs,
     evidenceDigest: pattern.evidence.evidenceRefs.length ? pattern.evidence.evidenceRefs.join('|') : 'NO_REFS',
     consumerBinding,
   });
@@ -51,8 +62,12 @@ export function freezeCandidate({ store, pattern, costModel, consumerBinding, te
 }
 
 // Run the one terminal look for a candidate whose sample target is reached; record it; publish or demote.
-export function settleCandidate({ store, candidateId, nowTs, commonShockDates = new Set(), maxAbsAdjust = PROMOTION_POLICY.maxAbsAdjustDefault }) {
-  const state = replayProspective(store.readProspective());
+export function settleCandidate({
+  store, candidateId, nowTs, commonShockDates = new Set(),
+  maxAbsAdjust = PROMOTION_POLICY.maxAbsAdjustDefault,
+  adaptiveRankingTrialValidator = null,
+}) {
+  const state = replayProspective(store.readProspective(), { adaptiveRankingTrialValidator });
   if (state.errors.length > 0) throw new Error(`settleCandidate: prospective journal invalid (${state.errors[0]})`);
   const design = state.designs.get(candidateId);
   if (!design) throw new Error('settleCandidate: unknown candidate');

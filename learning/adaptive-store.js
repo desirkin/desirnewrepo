@@ -23,6 +23,10 @@ import { adaptiveCandleSettlementError } from './adaptive-candle-outcome.js';
 export const ADAPTIVE_STORE_VERSION = 'adaptive-local-store-2';
 export const ADAPTIVE_JOURNAL_EVENT_VERSION = 'adaptive-journal-event-2';
 export const ADAPTIVE_HEAD_VERSION = 'adaptive-acknowledged-head-2';
+// Internal owner-to-adapter seam. Existing append return shapes stay closed;
+// only the durable owner imports this symbol to retrieve the exact local
+// event/head that already survived the journal+head fsync sequence.
+export const ADAPTIVE_LOCAL_COMMIT_RECEIPT = Symbol('ADAPTIVE_LOCAL_COMMIT_RECEIPT');
 export const ADAPTIVE_DURABILITY = deepFreeze({
   kind: 'LOCAL_FILESYSTEM_ONLY',
   fsync: true,
@@ -154,17 +158,18 @@ function assertExistingStoreVersion(journalFile, headFile, limits) {
   }
 }
 
-function parseJournal(file, procedure, limits) {
-  const stat = lstatSync(file);
-  if (!stat.isFile() || stat.isSymbolicLink()) fail('PATH_ESCAPE', 'journal must be one regular file');
-  if (stat.size < 2 || stat.size > limits.maxJournalBytes) fail('STORE_CORRUPT', `journal size ${stat.size} outside bounds`);
-  let encoded;
-  try { encoded = readFileSync(file, 'utf8'); } catch (error) { fail('STORE_IO', error.message); }
+function parseJournalText(encoded, procedure, limits, { collectEvents = false, collectHeadDigests = false } = {}) {
+  if (typeof encoded !== 'string') fail('STORE_CORRUPT', 'journal snapshot must be text');
+  const size = Buffer.byteLength(encoded, 'utf8');
+  if (Buffer.from(encoded, 'utf8').toString('utf8') !== encoded) fail('STORE_CORRUPT', 'journal snapshot is not lossless UTF-8');
+  if (size < 2 || size > limits.maxJournalBytes) fail('STORE_CORRUPT', `journal size ${size} outside bounds`);
   if (!encoded.endsWith('\n')) fail('STORE_CORRUPT', 'journal has a partial final line');
   const nonEmpty = encoded.split('\n').filter((line) => line.length > 0);
   if (nonEmpty.length === 0 || nonEmpty.length > limits.maxEvents) fail('STORE_CORRUPT', 'journal event count outside bounds');
   const predictions = new Map(); const outcomes = new Map(); const updates = new Map(); const settlements = new Map();
-  let state = null; let lastDigest = null; let lastTs = null; let registered = null;
+  const events = collectEvents ? [] : null; const eventHeadDigests = collectHeadDigests ? [] : null;
+  let journalBytes = 0;
+  let state = null; let lastDigest = null; let lastTs = null; let registered = null; let lastEvent = null;
   for (let index = 0; index < nonEmpty.length; index += 1) {
     const line = nonEmpty[index];
     if (Buffer.byteLength(line, 'utf8') > limits.maxEventBytes) fail('STORE_CORRUPT', `event ${index} exceeds byte limit`);
@@ -220,10 +225,34 @@ function parseJournal(file, procedure, limits) {
         eventDigest: event.eventDigest,
       });
     }
+    journalBytes += Buffer.byteLength(`${line}\n`, 'utf8');
+    if (events) events.push(event);
+    lastEvent = event;
+    if (eventHeadDigests) {
+      eventHeadDigests.push(makeAcknowledgedHead({
+        procedure,
+        eventCount: index + 1,
+        lastEventDigest: event.eventDigest,
+        journalBytes,
+        stateDigest: state.stateDigest,
+        committedTs: event.recordedTs,
+      }).headDigest);
+    }
     lastDigest = event.eventDigest; lastTs = event.recordedTs;
   }
   if (!registered || !state) fail('STORE_CORRUPT', 'registration/state absent');
-  return { registered, state, predictions, outcomes, updates, settlements, lastDigest, lastTs, eventCount: nonEmpty.length, size: stat.size };
+  return { registered, state, predictions, outcomes, updates, settlements, events, eventHeadDigests, lastEvent, lastDigest, lastTs, eventCount: nonEmpty.length, size };
+}
+
+function parseJournal(file, procedure, limits) {
+  const stat = lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink()) fail('PATH_ESCAPE', 'journal must be one regular file');
+  if (stat.size < 2 || stat.size > limits.maxJournalBytes) fail('STORE_CORRUPT', `journal size ${stat.size} outside bounds`);
+  let encoded;
+  try { encoded = readFileSync(file, 'utf8'); } catch (error) { fail('STORE_IO', error.message); }
+  const replay = parseJournalText(encoded, procedure, limits);
+  if (replay.size !== stat.size) fail('STORE_CORRUPT', 'journal bytes are not lossless UTF-8');
+  return replay;
 }
 
 function makeEvent({ sequence, previousDigest, eventType, recordedTs, body }) {
@@ -288,10 +317,52 @@ function writeAcknowledgedHead(headFile, head, procedure) {
   return confirmed;
 }
 
-export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limits: suppliedLimits = null } = {}) {
+// Validate an exact durable replay candidate without touching the filesystem.
+// The returned clone is immutable and safe to hand to createAdaptiveStore as
+// its one bootstrap candidate. It is still not a commissioning instruction.
+export function validateAdaptiveStoreSnapshot(input) {
+  if (!isPlainObject(input)) fail('BOOTSTRAP_INVALID', 'snapshot must be a plain object');
+  const allowed = ['journalText', 'acknowledgedHead', 'procedure', 'limits'];
+  if (Object.keys(input).some((key) => !allowed.includes(key))
+      || !Object.hasOwn(input, 'journalText') || !Object.hasOwn(input, 'acknowledgedHead')
+      || !Object.hasOwn(input, 'procedure')) fail('BOOTSTRAP_INVALID', 'snapshot keys are not closed');
+  const procedureError = adaptiveProcedureError(input.procedure); if (procedureError) fail('PROCEDURE_INVALID', procedureError);
+  const limits = normalizedLimits(input.limits ?? null);
+  const journalText = typeof input.journalText === 'string' ? input.journalText.slice(0) : input.journalText;
+  const replay = parseJournalText(journalText, input.procedure, limits, {
+    collectEvents: true, collectHeadDigests: true,
+  });
+  const canonicalJournalText = replay.events.map((event) => `${canonicalJson(event)}\n`).join('');
+  if (journalText !== canonicalJournalText) fail('BOOTSTRAP_INVALID', 'durable journal is not exact canonical event bytes');
+  if (!isPlainObject(input.acknowledgedHead)) fail('BOOTSTRAP_INVALID', 'acknowledged head must be a plain object');
+  const head = clone(input.acknowledgedHead);
+  const headError = acknowledgedHeadError(head, input.procedure, replay);
+  if (headError) fail('ACKNOWLEDGED_HEAD_MISMATCH', headError);
+  return deepFreeze({
+    journalText,
+    acknowledgedHead: head,
+    events: replay.events.map((event) => clone(event)),
+    eventHeadDigests: [...replay.eventHeadDigests],
+    eventCount: replay.eventCount,
+    journalBytes: replay.size,
+  });
+}
+
+export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limits: suppliedLimits = null, durableBootstrap = null } = {}) {
   const procedureError = adaptiveProcedureError(procedure); if (procedureError) fail('PROCEDURE_INVALID', procedureError);
   if (typeof clock !== 'function') fail('CLOCK_INVALID', 'clock must be a function');
   const limits = normalizedLimits(suppliedLimits);
+  let bootstrap = null;
+  if (durableBootstrap !== null) {
+    const bootstrapKeys = exactKeys(durableBootstrap, ['journalText', 'acknowledgedHead']);
+    if (bootstrapKeys) fail('BOOTSTRAP_INVALID', `bootstrap ${bootstrapKeys}`);
+    bootstrap = validateAdaptiveStoreSnapshot({
+      journalText: durableBootstrap.journalText,
+      acknowledgedHead: durableBootstrap.acknowledgedHead,
+      procedure,
+      limits,
+    });
+  }
   const root = assertDedicatedRoot(rootDir);
   const actualEntries = readdirSync(root);
   if (actualEntries.length > limits.maxDirectoryEntries || actualEntries.some((entry) => !['head.json', 'journal.jsonl', 'writer.lock'].includes(entry))) fail('PATH_INVALID', 'store root is not dedicated');
@@ -331,6 +402,14 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
 
   let replay;
   try {
+    if (bootstrap) {
+      if (existsSync(journalFile) || existsSync(headFile)) fail('BOOTSTRAP_CONFLICT', 'durable bootstrap is allowed only when journal and head are both absent');
+      writeFileSync(journalFile, bootstrap.journalText, { flag: 'wx', mode: 0o600 });
+      const bootstrapFd = openSync(journalFile, 'r+');
+      try { fsyncSync(bootstrapFd); } finally { closeSync(bootstrapFd); }
+      writeAcknowledgedHead(headFile, bootstrap.acknowledgedHead, procedure);
+      fsyncDirectory(root);
+    }
     if (!existsSync(journalFile)) {
       if (existsSync(headFile)) fail('ACKNOWLEDGED_HEAD_MISMATCH', 'head exists without its journal');
       writeFileSync(journalFile, '', { flag: 'wx', mode: 0o600 }); fsyncDirectory(root);
@@ -345,7 +424,7 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
         procedure, eventCount: 1, lastEventDigest: first.eventDigest,
         journalBytes: initialBytes, stateDigest: state.stateDigest, committedTs: first.recordedTs,
       }), procedure);
-      replay = { registered: procedure, state, predictions: new Map(), outcomes: new Map(), updates: new Map(), settlements: new Map(), lastDigest: first.eventDigest, lastTs: first.recordedTs, eventCount: 1, size: initialBytes, head };
+      replay = { registered: procedure, state, predictions: new Map(), outcomes: new Map(), updates: new Map(), settlements: new Map(), events: [first], lastEvent: first, lastDigest: first.eventDigest, lastTs: first.recordedTs, eventCount: 1, size: initialBytes, head };
     } else {
       replay = parseJournal(journalFile, procedure, limits);
       replay.head = readAcknowledgedHead(headFile, procedure, replay);
@@ -363,6 +442,7 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
   const predictions = replay.predictions; const outcomes = replay.outcomes; const updates = replay.updates; const settlements = replay.settlements;
   let lastDigest = replay.lastDigest; let lastTs = replay.lastTs; let eventCount = replay.eventCount;
   let acknowledgedHead = replay.head;
+  let lastLocalCommit = { event: clone(replay.lastEvent), acknowledgedHead: clone(acknowledgedHead) };
 
   function ready() {
     if (closed) fail('STORE_CLOSED');
@@ -400,6 +480,7 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
       }), procedure);
       expectedSize = nextSize; lastDigest = event.eventDigest; lastTs = recordedTs; eventCount += 1;
       acknowledgedHead = nextHead;
+      lastLocalCommit = { event: clone(event), acknowledgedHead: clone(nextHead) };
       return event;
     } catch (error) { return latch(error); }
   }
@@ -551,6 +632,10 @@ export function createAdaptiveStore({ rootDir, procedure, clock = Date.now, limi
           authority: 'NONE',
         },
       });
+    },
+    [ADAPTIVE_LOCAL_COMMIT_RECEIPT]: () => {
+      ready();
+      return deepFreeze(clone(lastLocalCommit));
     },
     appendPrediction, appendOutcomeOnly, appendOutcomeUpdate, status, close,
   });
