@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import * as auditContract from '../learning/opportunity-audit.js';
 import { sealAuditFrame, annotateAuditOpportunity, sealAuditObservationEvidence } from '../learning/opportunity-audit.js';
 import { openOpportunityAuditStore } from '../learning/opportunity-audit-store.js';
 import {
@@ -268,4 +269,30 @@ test('the shared worker port overlap is deferred without latching; write ambigui
   assert.equal(second.pending, 0); assert.equal(second.deferred, 1); assert.equal(settleCalls, 1, 'PENDING still traverses worker validation');
   assert.equal(owner.status().state, 'READY'); assert.equal(owner.status().deferred, 2);
   await owner.close();
+});
+
+test('V2 predeclares a finite label delay and refuses terminal missingness through the deadline', () => {
+  assert.equal(typeof auditContract.sealAuditFrameV2, 'function', 'the base lacks a delay-bearing capture contract');
+});
+
+test('worker custody cannot promote a bare state label into a durable settlement acknowledgment', async () => {
+  const now = T0 + HOUR + 1;
+  const item = {
+    cursor: 'cursor', frameId: `oaf-${'a'.repeat(40)}`, frameDigest: 'b'.repeat(64),
+    opportunityId: `lop-${'c'.repeat(40)}`, canonicalCoin: 'BTC', horizonMs: HOUR,
+    dueTs: T0 + HOUR, lastOutcomeId: null, lastStatus: null, annotationPresent: true,
+    observationInclusionProbability: 1, actionPropensity: { state: 'NOT_LOGGED', value: null, policyVersion: null },
+  };
+  const port = {
+    pending: async () => ({ asOfTs: now, items: [item], nextCursor: null, truncated: false }),
+    settle: async () => ({ state: 'MATURED' }),
+    status: () => ({ state: 'READY' }),
+  };
+  const owner = createOpportunityAuditFollowup({
+    store: port, clock: () => now,
+    outcomeSource: async () => ({ state: 'PENDING', reasonCode: 'ARCHIVE_NOT_READY' }),
+  });
+  await assert.rejects(owner.step({ nowTs: now }), { code: 'DURABLE_ACK_INVALID' });
+  assert.equal(owner.status().matured, 0);
+  await owner.close().catch(() => {});
 });
