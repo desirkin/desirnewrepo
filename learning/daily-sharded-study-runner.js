@@ -12,6 +12,9 @@ import { atomicWriteJson, readJsonBounded } from '../lib/jsonl.js';
 import {
   dailyBroadArchiveMarketDayReceiptError, openDailyBroadArchiveShardSource,
 } from './daily-broad-archive-shards.js';
+import {
+  DAILY_SHARD_CLASSIFICATION_OUTPUT_VERSION, dailyShardClassificationOutputError,
+} from './daily-sharded-study-classifier.js';
 import { canonicalDigest, deepFreeze, stableStringify } from './shadow-contracts.js';
 
 export const DAILY_SHARDED_STUDY_RUNNER_VERSION = 'daily-sharded-study-runner-1';
@@ -88,6 +91,13 @@ export function dailyShardTraversalOutputError(value, { shard = null, receipt = 
   return null;
 }
 
+function dailyShardConsumerOutputError(value, context = {}) {
+  if (value?.outputVersion === DAILY_SHARD_CLASSIFICATION_OUTPUT_VERSION) {
+    return dailyShardClassificationOutputError(value, context);
+  }
+  return dailyShardTraversalOutputError(value, context);
+}
+
 export function sealDailyShardTraversalOutput({ marketDay, receipt } = {}) {
   const value = {
     outputVersion: DAILY_SHARD_TRAVERSAL_OUTPUT_VERSION,
@@ -109,7 +119,7 @@ const ackDigestBody = (ack) => Object.fromEntries(Object.entries(ack).filter(([k
 
 export function dailyShardConsumerAckError(ack, { job = null, shard = null, receipt = null, prior = null } = {}) {
   if (!exact(ack, ACK_KEYS)) return 'consumer acknowledgment shape malformed';
-  const outputError = dailyShardTraversalOutputError(ack.output, { shard, receipt });
+  const outputError = dailyShardConsumerOutputError(ack.output, { job, shard, receipt });
   if (outputError || ack.ackVersion !== DAILY_SHARD_CONSUMER_ACK_VERSION
       || !HEX64.test(ack.ackDigest ?? '') || ack.ackDigest !== canonicalDigest(ackDigestBody(ack))
       || !HEX64.test(ack.outputDigest ?? '') || ack.outputDigest !== canonicalDigest(ack.output)
@@ -125,6 +135,13 @@ export function dailyShardConsumerAckError(ack, { job = null, shard = null, rece
       || ack.receiptDigest !== receipt?.receiptDigest)) return 'consumer acknowledgment shard mismatch';
   if ((prior?.ackDigest ?? null) !== ack.previousAckDigest
       || (prior ? prior.revision + 1 : 1) !== ack.revision) return 'consumer acknowledgment chain mismatch';
+  if (prior && prior.output?.outputVersion !== ack.output.outputVersion) {
+    return 'consumer output version changed within one immutable job';
+  }
+  if (prior && ack.output.outputVersion === DAILY_SHARD_CLASSIFICATION_OUTPUT_VERSION
+      && prior.output.manifestDigest !== ack.output.manifestDigest) {
+    return 'classification manifest changed within one immutable job';
+  }
   return null;
 }
 
@@ -279,7 +296,7 @@ async function openDailyShardedStudyRunnerImpl({
             let output;
             try { output = clone(returned); } catch { throw fail('RUNNER_CONSUMER_OUTPUT_INVALID', 'consumer output is not canonical JSON'); }
             if (Buffer.byteLength(stableStringify(output), 'utf8') > limits.maxConsumerOutputBytes) throw fail('RUNNER_CONSUMER_OUTPUT_INVALID', 'consumer output exceeds byte bound');
-            const outputError = dailyShardTraversalOutputError(output, { shard, receipt: loaded.receipt });
+            const outputError = dailyShardConsumerOutputError(output, { job: state.job, shard, receipt: loaded.receipt });
             if (outputError) throw fail('RUNNER_CONSUMER_OUTPUT_INVALID', outputError);
             if (executeSignal?.aborted) return publicStatus('CANCELLED');
             const acknowledgedTs = clock(); if (!positiveTs(acknowledgedTs)) throw fail('RUNNER_CLOCK_INVALID', 'acknowledgment clock malformed');
