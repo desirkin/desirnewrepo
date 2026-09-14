@@ -14,6 +14,7 @@ import { entryAuthority, UNCHECKED } from './authority.js';
 
 export const DISPATCHER_DEFAULTS = Object.freeze({ maxSafetyQueue: 4096, maxEntryQueue: 64, drainMs: 10_000 });
 const PERSISTENCE_PERMISSION_REASON = 'PERSISTENCE_PERMISSION_LOCK';
+const ENTRY_QUEUE_REFUSALS = new Set(['ENTRY_QUEUE_FULL', 'OVERLOAD']);
 const pct = (arr, p) => { if (!arr.length) return null; const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(p * (s.length - 1)))]; };
 export function latencyStats(samples) { return { count: samples.length, p50: pct(samples, 0.5), p95: pct(samples, 0.95), p99: pct(samples, 0.99), max: samples.length ? Math.max(...samples) : null, note: 'measured software delays on this host, not exchange matching latency' }; }
 
@@ -24,7 +25,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
   const ctx = { runMode: null, binding: null, clockTrusted: () => true, maxBookAgeMs: 1000, ...(authority ?? {}) };
   const writerHeld = () => (typeof writer?.held === 'function' ? writer.held() : true);
   const loseWriter = (why) => { if (!writerLost) { writerLost = true; counters.fenced += 1; log(`writer lost: ${why}; admission closed`); } try { adapter.stopAdmission(); } catch { /* adapter may be gone */ } };
-  const safety = []; const entries = []; const commitListeners = new Set(); const counters = { commits: 0, revisionRetries: 0, fenced: 0, adapterEvents: 0, droppedEntries: 0, uncertainRereads: 0, stopIntentsSynthesized: 0, authorityRefusals: 0, childBelowMinimum: 0, reconciliations: 0, overload: 0, fencedCallbacks: 0 }; const latency = { receiptToJournal: [], journalToSend: [], receiptToQueue: [], queueToCompute: [] };
+  const safety = []; const entries = []; const commitListeners = new Set(); const counters = { commits: 0, revisionRetries: 0, fenced: 0, adapterEvents: 0, droppedEntries: 0, uncertainRereads: 0, stopIntentsSynthesized: 0, authorityRefusals: 0, queueCompensations: 0, childBelowMinimum: 0, reconciliations: 0, overload: 0, fencedCallbacks: 0 }; const latency = { receiptToJournal: [], journalToSend: [], receiptToQueue: [], queueToCompute: [] };
   const now = () => clock.now();
   const ev = (type, payload, causeId = null, knownAtTs = now()) => makeEvent({ type, accountId, payload, causeId, knownAtTs });
   async function load() { const l = await journal.load(accountId); if (!l) throw new JournalError('ACCOUNT_UNKNOWN', accountId); revision = l.revision; state = l.state; return l; }
@@ -100,6 +101,54 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     const persistence = permissionIncreaseGate();
     return persistence.ok ? result : { ...result, ok: false, reasons: [...new Set([...(result.reasons ?? []), persistence.reason])] };
   }
+  const entryKind = (order) => order?.kind === 'ENTRY' || order?.kind === 'CANARY_ENTRY';
+  function compensatedEntry(s, orderId) {
+    const o = s?.orders?.[orderId]; const r = o?.reservationId ? s?.reservations?.[o.reservationId] : null; const pos = o?.positionId ? s?.positions?.[o.positionId] : null;
+    return entryKind(o) && o.state === 'CANCELLED' && Array.isArray(o.attempts) && o.attempts.length === 0 && M.isZero(o.filledBase ?? '0') && o.nativeOrderId === null &&
+      r?.state === 'RELEASED' && r.releaseReason === 'CANCELLED_UNSENT' && pos?.state === 'FLAT' && M.isZero(ownedBaseOf(pos)) && !s?.pins?.[o.pair];
+  }
+  function compensableEntry(s, orderId) {
+    const o = s?.orders?.[orderId]; if (!entryKind(o) || o.state !== 'UNSENT' || !Array.isArray(o.attempts) || o.attempts.length !== 0 || o.nativeOrderId !== null) return false;
+    if (!M.isZero(o.filledBase ?? '0') || !M.isZero(o.filledQuote ?? '0') || !M.isZero(o.feesQuote ?? '0') || !M.isZero(o.feesBase ?? '0')) return false;
+    const r = o.reservationId ? s?.reservations?.[o.reservationId] : null; const pos = o.positionId ? s?.positions?.[o.positionId] : null;
+    return r?.state === 'OPEN' && r.orderId === orderId && pos?.state === 'PENDING_ENTRY' && pos.entryOrderId === orderId && M.isZero(pos.confirmedBase ?? '0') && M.isZero(pos.soldBase ?? '0') && M.isZero(ownedBaseOf(pos));
+  }
+  // A zero-attempt entry has a stronger fact than an ordinary "not found":
+  // this dispatcher durably appends DISPATCH_ATTEMPTED before invoking the
+  // adapter, so the authoritative journal proves that this exact intent was
+  // never offered to the venue. Only that closed case may be compensated.
+  // The four events are one CAS transaction; a concurrent dispatch attempt
+  // either wins first (compensation refuses) or loses its recheck (no send).
+  async function compensateUnattemptedEntry(orderId, reasonCode = 'ENTRY_QUEUE_REFUSED') {
+    await load(); // authoritative journal head, never an in-memory absence inference
+    if (compensatedEntry(state, orderId)) { try { feed?.release?.(state.orders[orderId].pair, { force: true }); } catch { /* journal truth already says unpinned */ } return { outcome: 'EXISTING', orderId }; }
+    const o = state.orders?.[orderId];
+    if (!o) throw new JournalError('ORDER_UNKNOWN', orderId);
+    if (!entryKind(o)) throw new JournalError('ENTRY_COMPENSATION_REFUSED', `${orderId} is ${o.kind}: exits/protection are never entry compensation`);
+    if (!compensableEntry(state, orderId)) throw new JournalError('ENTRY_COMPENSATION_UNSAFE', `${orderId} is not an authoritative zero-attempt unfilled entry`);
+    const r = state.reservations[o.reservationId]; const t = now(); const reason = String(reasonCode).replace(/[^A-Z0-9_:-]/g, '_').slice(0, 80) || 'ENTRY_QUEUE_REFUSED';
+    const events = [
+      ev('ORDER_STATE', { orderId, state: 'CANCELLED', nativeOrderId: null, nativeCumQty: '0', reason: `never sent: ${reason}`, sourceTs: null, receiptTs: t }),
+      ev('RESERVATION_RELEASED', { reservationId: r.reservationId, reason: 'CANCELLED_UNSENT', releasedCash: r.cashReserved, releasedRisk: r.riskReserved, ts: t }),
+      ev('POSITION_CLOSED', { positionId: o.positionId, reason: `entry never sent: ${reason}`, residualBase: '0', state: 'FLAT', ts: t }),
+      ev('FEED_PIN', { symbol: o.pair, action: 'RELEASE', reason: `entry never sent: ${reason}`, ts: t }),
+    ];
+    try {
+      await commit(events, { retryOnConflict: true, recheck: (cur) => compensableEntry(cur, orderId) });
+    } catch (error) {
+      if (error?.code === 'RECHECK_FAILED') { await load(); if (compensatedEntry(state, orderId)) return { outcome: 'EXISTING', orderId }; }
+      throw error;
+    }
+    try { feed?.release?.(o.pair, { force: true }); } catch { /* durable release is authoritative; caller can reconcile its feed */ }
+    counters.queueCompensations += 1;
+    return { outcome: 'COMPENSATED', orderId, reason };
+  }
+  function queueEntry(orderId) {
+    return enqueue('ENTRY', () => dispatchEntry(orderId)).catch(async (error) => {
+      if (ENTRY_QUEUE_REFUSALS.has(error?.code)) await compensateUnattemptedEntry(orderId, error.code);
+      throw error;
+    });
+  }
   async function refuseUnsent(o, reasons) { counters.authorityRefusals += 1; const t = now(); await commit(ev('ORDER_STATE', { orderId: o.orderId, state: 'CANCELLED', nativeOrderId: null, nativeCumQty: '0', reason: `authority refused before dispatch: ${reasons.join(',')}`.slice(0, 300), sourceTs: null, receiptTs: t })); const r = o.reservationId ? state.reservations[o.reservationId] : null; if (r && r.state === 'OPEN') await commit(ev('RESERVATION_RELEASED', { reservationId: r.reservationId, reason: 'REFUSED_AT_REVALIDATION', releasedCash: r.cashReserved, releasedRisk: r.riskReserved, ts: t })); return { outcome: 'REJECTED', nativeOrderId: null, reason: `AUTHORITY_REFUSED:${reasons.join(',')}`.slice(0, 120), guaranteesNoAcceptance: true, sent: false, reasons }; }
   async function dispatchEntry(orderId) {
     if (revision === null) await load(); const o = state.orders[orderId]; if (!o) throw new JournalError('ORDER_UNKNOWN', orderId); if (o.state !== 'UNSENT') throw new JournalError('NOT_UNSENT', `${orderId} is ${o.state}: never resend`);
@@ -126,8 +175,15 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
   async function reconcileNow({ scope = 'REQUESTED', sinceTs = null } = {}) { if (revision === null) await load(); counters.reconciliations += 1; if (typeof adapter.hydrate === 'function') adapter.hydrate(state); const known = new Set(Object.keys(state.execIds).map((k) => k.split('|')[1])); const since = sinceTs ?? Math.min(now() - 86_400_000, ...Object.values(state.orders).filter((o) => !TERMINAL_ORDER_STATES.includes(o.state)).map((o) => o.createdTs)); const rec = await adapter.reconcile({ scope, sinceTs: since, knownExecIds: known, state }); await enqueue('SAFETY', async () => null); await chain.catch(() => {}); await load(); return rec; }
   // ---- restart: exclusive writer already acquired by the composition; reconcile BEFORE any addition ------------------------
   async function restart({ scope = 'STARTUP' } = {}) {
-    await load(); const uncertain = Object.values(state.orders).filter((o) => ['DISPATCH_UNCERTAIN', 'CANCEL_PENDING', 'RECONCILIATION_REQUIRED'].includes(o.state) || (o.state === 'UNSENT' && o.attempts.length));
+    await load();
+    // A process may die after its atomic intent commit but before queue
+    // admission. Recover only journal-proven zero-attempt entries. Attempted
+    // or sell orders retain the existing reconciliation/protection path.
+    const abandoned = Object.values(state.orders).filter((o) => entryKind(o) && o.state === 'UNSENT' && Array.isArray(o.attempts) && o.attempts.length === 0);
+    const recovered = []; for (const o of abandoned) { const r = await compensateUnattemptedEntry(o.orderId, 'ABANDONED_BEFORE_DISPATCH'); if (r.outcome === 'COMPENSATED' || r.outcome === 'EXISTING') recovered.push(o.orderId); }
+    const uncertain = Object.values(state.orders).filter((o) => ['DISPATCH_UNCERTAIN', 'CANCEL_PENDING', 'RECONCILIATION_REQUIRED'].includes(o.state) || (o.state === 'UNSENT' && o.attempts.length));
     const exposed = Object.values(state.positions).filter((p) => !['FLAT'].includes(p.state)); const report = { uncertainOrders: uncertain.map((o) => o.orderId), exposedPositions: exposed.map((p) => p.positionId), reconciliation: null, resolved: [] };
+    report.resolved.push(...recovered);
     if (uncertain.length || exposed.length || adapter.kind === 'KRAKEN' || typeof adapter.hydrate === 'function') { const rec = await reconcileNow({ scope, sinceTs: Math.min(...[now() - 86_400_000, ...uncertain.map((o) => o.createdTs)]) }); report.reconciliation = rec;
       for (const o of uncertain) { const cur = state.orders[o.orderId]; if (!cur || cur.state !== 'DISPATCH_UNCERTAIN') continue; const deadlinePassed = cur.deadlineTs !== null && now() > cur.deadlineTs; if (rec?.outcome === 'COMPLETE' && deadlinePassed && M.isZero(cur.filledBase) && !cur.nativeOrderId) { await commit(ev('ORDER_STATE', { orderId: o.orderId, state: 'EXPIRED', nativeOrderId: null, nativeCumQty: null, reason: 'not found at venue after COMPLETE reconciliation past the IOC deadline', sourceTs: null, receiptTs: now() })); await settleReservation(o.orderId); report.resolved.push(o.orderId); } }
       if (rec?.outcome !== 'COMPLETE') { try { await commit(ev('RESTRICTION', { code: 'RECONCILIATION_REQUIRED', action: 'LATCH', scope: null, source: 'restart', sessionDate: null, reason: `startup reconciliation ${rec?.outcome ?? 'ABSENT'}`, ownerRef: null, ts: now() })); } catch (err) { log(`restart restriction: ${err.message}`); } }
@@ -135,7 +191,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     return report;
   }
   async function close({ drainMs = L.drainMs } = {}) { closed = closed || false; try { adapter.stopAdmission(); } catch { /* none */ } const d = await adapter.drain({ maxWaitMs: drainMs }); await chain.catch(() => {}); closed = true; return { drained: d, revision, writerLost }; }
-  return { commit, enqueue, dispatchEntry, settleReservation, restart, reconcileNow, close, load, applyAdapterEvent, authorityOf, writerHeld, onCommit(fn) { commitListeners.add(fn); return () => commitListeners.delete(fn); }, ev,
+  return { commit, enqueue, queueEntry, compensateUnattemptedEntry, dispatchEntry, settleReservation, restart, reconcileNow, close, load, applyAdapterEvent, authorityOf, writerHeld, onCommit(fn) { commitListeners.add(fn); return () => commitListeners.delete(fn); }, ev,
     // test / shutdown helper: resolves when every queued job and the commit chain have settled
     async idle() { for (let i = 0; i < 10_000; i += 1) { await chain.catch(() => {}); if (!safety.length && !entries.length && !pumping && !pumpingEntry) { await new Promise((r) => setImmediate(r)); if (!safety.length && !entries.length && !pumping && !pumpingEntry) return; } await new Promise((r) => setTimeout(r, 1)); } },
     state: () => state, revision: () => revision, writerLost: () => writerLost,
