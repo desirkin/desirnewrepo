@@ -20,7 +20,7 @@ export const FEE_RATE_KINDS = Object.freeze(['ACTUAL_VERIFIED', 'CONSERVATIVE_BO
 export const FEE_CURRENCY_PREFERENCES = Object.freeze(['QUOTE', 'BASE']);
 export const RESTRICTION_CODES = Object.freeze(['KILL', 'CAGE', 'VETO', 'DAILY_LOSS', 'PEAK_DRAWDOWN', 'GAIN_LOCK_PROTECT', 'GAIN_LOCK_HARD', 'PROTECTION_MISMATCH', 'RECONCILIATION_REQUIRED', 'CLOCK_UNTRUSTED', 'FEED_IMPAIRED', 'DB_UNAVAILABLE', 'FEE_BOUND_MISMATCH', 'WRITER_LOST', 'ARM_EXPIRED', 'OWNER_LIMITS_REQUIRED', 'OVERLOAD', 'PAPER_LIQUIDITY_UNCERTAIN']);
 export const EXIT_PRIORITIES = Object.freeze(['P1_KILL_OR_INVALID_PROTECTION', 'P2_STRUCTURAL_INVALIDATION', 'P3_FLOW_LIQUIDITY_DETERIORATION', 'P4_TRAIL_OR_TARGET', 'P5_NO_PROGRESS_DURATION_RISK']);
-export const EXIT_REASONS = Object.freeze(['OWNER_KILL', 'CRITICAL_OPERATIONAL', 'PROTECTION_INVALID', 'NATIVE_STOP', 'STRUCTURAL_STOP', 'THESIS_FALSIFIED', 'DETERIORATION', 'TRAIL_CROSSED', 'PLANNED_TARGET', 'NO_PROGRESS', 'MAX_DURATION', 'RISK_POLICY', 'FEED_UNUSABLE']);
+export const EXIT_REASONS = Object.freeze(['OWNER_KILL', 'CRITICAL_OPERATIONAL', 'PROTECTION_INVALID', 'NATIVE_STOP', 'STRUCTURAL_STOP', 'THESIS_FALSIFIED', 'EDGE_STATE_UNKNOWN', 'EDGE_DECAY', 'DISTRIBUTION_EXHAUSTION', 'DETERIORATION', 'TRAIL_CROSSED', 'PLANNED_TARGET', 'NO_PROGRESS', 'MAX_DURATION', 'RISK_POLICY', 'FEED_UNUSABLE']);
 export const DISPATCH_OUTCOMES = Object.freeze(['ACKNOWLEDGED', 'REJECTED', 'UNCERTAIN']);
 export const CANCEL_OUTCOMES = Object.freeze(['CANCELLED', 'REJECTED', 'UNCERTAIN', 'ALREADY_TERMINAL']);
 export const AMEND_OUTCOMES = Object.freeze(['REQUESTED', 'ACKNOWLEDGED', 'FAILED', 'UNCERTAIN']);
@@ -104,6 +104,11 @@ export const TRADE_SCHEMA = Object.freeze({ tradeVersion: T.en(['execution-trade
 // ---- the closed event set --------------------------------------------------------------------------------------------------
 const FEE = Object.freeze({ asset: T.id, amount: T.nonNegDec });
 const PROTECTION_TEMPLATE = Object.freeze({ ordertype: T.en(['stop-loss']), trigger: T.en(['last']), price: T.posDec });
+// Optional only for newly entered v2 EDGE_STATE positions. Historical
+// POSITION_OPENED payloads remain valid byte-for-byte; a new edge position
+// carries its exact entry-time management identity so restart never infers
+// semantics from today's policy or a setup label.
+const EDGE_POSITION_MANAGEMENT = Object.freeze({ managementVersion: T.en(['judge-position-edge-state-1']), policyVersion: T.en(['judge-policy-2']), strategyVersion: T.en(['judge-strategy-starting-styles-edge-2']), setupId: T.en(['MOMENTUM_CONTINUATION', 'MICRO_BITE']), edgeStateVersion: T.en(['judge-edge-state-1']), executionGateVersion: T.en(['judge-post-size-execution-gate-1']), watchVersion: T.en(['watch-paper-edge-state-2']), selectionVersion: T.en(['judge-setup-selection-1']), horizonKind: T.en(['EDGE_STATE']), hardMaxDurationMs: T.count });
 export const LIMITS = Object.freeze({ maxSimultaneousAssetPositions: T.count, maxModelledRiskPerPositionFraction: T.fraction, maxAggregateModelledRiskFraction: T.fraction, maxCorrelatedClusterModelledRiskFraction: T.fraction, dailyLossRestrictionFraction: T.fraction, peakEquityDrawdownRestrictionFraction: T.fraction, maxGrossExposureFraction: T.fraction, maxAssetExposureFraction: T.fraction });
 export const EVENT_SCHEMAS = Object.freeze({
   ACCOUNT_INITIALIZED: { accountKind: T.en(ACCOUNT_KINDS), initialCapital: T.posDec, quote: T.en(['USD']), venue: T.en(['kraken']), policyDigest: T.hex64, policyVersion: T.id, ownerRef: T.id, sessionDate: T.text, clockAnchorTs: T.ts, limits: LIMITS, compounding: T.en(['NONE', 'REALIZED_WITHIN_CEILING']) },
@@ -122,7 +127,7 @@ export const EVENT_SCHEMAS = Object.freeze({
   CANCEL_RESULT: { orderId: T.id, attemptId: T.id, outcome: T.en(CANCEL_OUTCOMES), reason: T.textOrNull, receiptTs: T.ts },
   PROTECTION_STATE: { positionId: T.id, orderId: T.idOrNull, state: T.en(PROTECTION_STATES), nativeOrderId: T.idOrNull, trigger: T.decOrNull, qty: T.decOrNull, sourceTs: T.tsOrNull, receiptTs: T.ts, reason: T.textOrNull },
   PROTECTION_AMEND: { positionId: T.id, orderId: T.id, amendId: T.id, requestedTrigger: T.posDec, outcome: T.en(AMEND_OUTCOMES), confirmedTrigger: T.decOrNull, receiptTs: T.ts, reason: T.textOrNull },
-  POSITION_OPENED: { positionId: T.id, decisionId: T.id, assetId: T.id, pair: T.id, specDigest: T.hex64, structuralStop: T.posDec, targetPrice: T.decOrNull, targetProceedsRecipe: T.id, atr14: T.posDec, maxDurationMs: T.count, feedPinned: T.bool, requestedQty: T.posDec, clusterId: T.id },
+  POSITION_OPENED: { positionId: T.id, decisionId: T.id, assetId: T.id, pair: T.id, specDigest: T.hex64, structuralStop: T.posDec, targetPrice: T.decOrNull, targetProceedsRecipe: T.id, atr14: T.posDec, maxDurationMs: T.count, feedPinned: T.bool, requestedQty: T.posDec, clusterId: T.id, management: T.opt((v, where) => shapeError(v, EDGE_POSITION_MANAGEMENT, where)) },
   POSITION_R: { positionId: T.id, state: T.en(R_STATES), initialR: T.decOrNull, entryVwap: T.decOrNull, entryCashOut: T.decOrNull, confirmedBase: T.nonNegDec, reason: T.textOrNull, ts: T.ts, targetPerUnit: T.opt(T.decOrNull) },
   WATCH_STATE: { positionId: T.id, trailActive: T.bool, highestBid: T.decOrNull, exitState: T.en(['NONE', 'REQUESTED', 'IN_PROGRESS', 'DONE', 'UNRESOLVED']), primaryReason: T.enOrNull(EXIT_REASONS), priority: T.enOrNull(EXIT_PRIORITIES), supportedReasons: T.idList, ts: T.ts },
   POSITION_CLOSED: { positionId: T.id, reason: T.text, residualBase: T.nonNegDec, state: T.en(['FLAT', 'DUST_UNRESOLVED', 'UNRESOLVED']), ts: T.ts },
@@ -145,6 +150,8 @@ export function eventIdentity(ev) { return sha256Hex(`${EXECUTION_CONTRACT_VERSI
 export function eventError(ev, where = 'event') {
   const e = shapeError(ev, EVENT_ENVELOPE_SCHEMA, where); if (e) return e;
   const p = shapeError(ev.payload, EVENT_SCHEMAS[ev.type], `${where}.payload(${ev.type})`); if (p) return p;
+  if (ev.type === 'POSITION_OPENED' && ev.payload.management && ev.payload.management.hardMaxDurationMs !== ev.payload.maxDurationMs) return `${where}.payload(POSITION_OPENED): edge management hard maximum differs from position maximum`;
+  if (ev.type === 'POSITION_OPENED' && ev.payload.management && ev.payload.management.hardMaxDurationMs <= 0) return `${where}.payload(POSITION_OPENED): edge management hard maximum must be positive`;
   if (eventIdentity(ev) !== ev.eventId) return `${where}: eventId does not match content`;
   return null;
 }

@@ -8,6 +8,7 @@
 // cooldown 60s after a close. These values are hypotheses, not calibrated thresholds; nothing here is a win probability.
 import * as M from '../execution/money.js';
 import { digestOf } from '../execution/contract.js';
+import { EDGE_EXECUTION_GATE_VERSION } from './edge-state.js';
 // setup geometry buffer: max(1 tick, 0.10 * ATR14) (the cost model's execution buffer is max(2 tick, 0.10 ATR) and lives in cost.js)
 const setupBuffer = (atr, tick) => (M.gt(tick, M.mul('0.1', atr)) ? tick : M.mul('0.1', atr));
 import { nearestResistanceAbove } from './features.js';
@@ -45,17 +46,17 @@ const CONTINUATION_PHASES = Object.freeze({
   MICRO_BITE: Object.freeze(['IGNITION', 'ACCELERATING', 'EDGE_REACCELERATING', 'BREAKOUT_PRESSURE_BUILDING']),
 });
 const POST_SIZE_EXECUTION_GATE_SETUPS = Object.freeze(['MOMENTUM_CONTINUATION', 'MICRO_BITE']);
-export const POST_SIZE_EXECUTION_GATE_VERSION = 'judge-post-size-execution-gate-1';
+export const POST_SIZE_EXECUTION_GATE_VERSION = EDGE_EXECUTION_GATE_VERSION;
 // the frozen reference bundle: what may never move after T
-export function freezeReferences({ setupId, ind, spec, fast, event = null, triggerTs }) {
+export function freezeReferences({ setupId, ind, spec, fast, event = null, triggerTs, strategyVersion = STRATEGY_VERSION }) {
   const tick = spec.priceIncrement; const atr = d(ind.atr14); const buffer = setupBuffer(atr, tick);
-  const base = { setupId, strategyVersion: STRATEGY_VERSION, triggerTs, blockDigest: ind.blockDigest, referenceTs: ind.referenceTs, atr14: atr, tick, buffer };
+  const base = { setupId, strategyVersion, triggerTs, blockDigest: ind.blockDigest, referenceTs: ind.referenceTs, atr14: atr, tick, buffer };
   if (setupId === 'RANGE_IGNITION') { const h20 = d(ind.h20); const l20 = d(ind.l20); const trigger = M.add(h20, buffer); const stop = M.sub(d(ind.low5), buffer); const scenario = M.add(h20, M.sub(h20, l20)); return { ...base, h20, l20, envelope5: d(ind.envelope5), triggerLevel: trigger, structuralStop: stop, scenarioRaw: scenario, maxEntryLevel: M.add(h20, M.mul('0.75', atr)) }; }
   if (setupId === 'TREND_PULLBACK_CONTINUATION') { const p20h = d(ind.prior20High); const p20l = d(ind.prior20Low); const trigger = M.add(d(ind.last2High), tick); return { ...base, prior20High: p20h, prior20Low: p20l, last3Low: d(ind.last3Low), ema5: d(ind.ema5), ema20: d(ind.ema20), prior20Return: ind.prior20Return, prior20HighBarsFromEnd: ind.prior20HighBarsFromEnd, triggerLevel: trigger, structuralStop: M.sub(d(ind.last3Low), buffer), scenarioRaw: M.add(p20h, M.mul('0.5', M.sub(p20h, p20l))), maxEntryLevel: M.add(p20h, M.mul('0.75', atr)) }; }
   if (setupId === 'ABSORPTION_RECLAIM') { const trigger = M.add(fast.vwap60, tick); return { ...base, priorFi: fast.priorFi, priorMidChange: fast.priorMidChange, priorMedianDepth: fast.priorMedianDepth, priorDepthSamples: fast.priorDepthSamples, priorLow: fast.priorLow60, vwap60: fast.vwap60, triggerLevel: trigger, structuralStop: M.sub(fast.priorLow60, buffer), scenarioRaw: d(ind.h20), maxEntryLevel: null }; }
   if (setupId === 'CATALYST_TRANSMISSION') { if (!event) return null; const p0 = event.p0; const trigger = M.add(p0, M.mul('0.1', atr)); return { ...base, event: { eventId: event.eventId, knownAtTs: event.knownAtTs, taxonomy: event.taxonomy, caseId: event.caseId, analysisId: event.analysisId }, p0, preEventH20: d(ind.h20), preEventL20: d(ind.l20), preEventLow5: d(ind.low5), triggerLevel: trigger, structuralStop: M.sub(M.min(p0, d(ind.low5)), buffer), scenarioRaw: M.add(p0, M.sub(d(ind.h20), d(ind.l20))), maxEntryLevel: M.add(p0, M.mul('1', atr)) }; }
   if (setupId === 'MOMENTUM_CONTINUATION') { const h20 = d(ind.h20); const l20 = d(ind.l20); return { ...base, ema5: d(ind.ema5), ema20: d(ind.ema20), lastClose: d(ind.lastClose), prior20Return: ind.prior20Return, triggerLevel: M.add(h20, buffer), structuralStop: M.sub(d(ind.low5), buffer), scenarioRaw: M.add(h20, M.mul('0.75', M.sub(h20, l20))), maxEntryLevel: null }; }
-  if (setupId === 'MICRO_BITE') { const trigger = M.add(d(ind.last2High), tick); return { ...base, ema5: d(ind.ema5), lastClose: d(ind.lastClose), envelope5: d(ind.envelope5), triggerLevel: trigger, structuralStop: M.sub(d(ind.low5), buffer), scenarioRaw: M.add(trigger, M.mul('0.5', atr)), maxEntryLevel: null }; }
+  if (setupId === 'MICRO_BITE') { const trigger = M.add(d(ind.last2High), tick); return { ...base, ema5: d(ind.ema5), lastClose: d(ind.lastClose), envelope5: d(ind.envelope5), h20: d(ind.h20), triggerLevel: trigger, structuralStop: M.sub(d(ind.low5), buffer), scenarioRaw: d(ind.h20), maxEntryLevel: null }; }
   return null;
 }
 export const hypothesisDigest = (frozen) => digestOf(frozen);
@@ -139,7 +140,7 @@ export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisio
   if (!stopOk) refused.push('STOP_GEOMETRY');
   const state = refused.length === 0 ? 'ELIGIBLE' : needsData.length && needsData.length === refused.length ? 'NEEDS_DATA' : 'REFUSED';
   const definition = setupDefinition(setupId);
-  return Object.freeze({ setupId, setupFamily: definition.familyId, startingStyleCatalogVersion: STARTING_STYLE_CATALOG_VERSION, strategyVersion: STRATEGY_VERSION, state, clauses: ablated.length ? [...clauses, ...ablated] : clauses, ablated: ablated.map((x) => x.id), refused, needsData, invalidation: { structuralStop: frozen.structuralStop, kind: 'ABSOLUTE_PRICE_BELOW' }, scenario: { target: t.target, cappedBy: t.cappedBy, kind: 'SCENARIO_NOT_FORECAST' }, maxEntryLevel: frozen.maxEntryLevel, horizon: definition.horizon, maxDurationMs: definition.operationalMaxDurationMs, executionGate: Object.freeze({ required: POST_SIZE_EXECUTION_GATE_SETUPS.includes(setupId), version: POST_SIZE_EXECUTION_GATE_VERSION, state: POST_SIZE_EXECUTION_GATE_SETUPS.includes(setupId) ? 'REQUIRED_DOWNSTREAM' : 'NOT_REQUIRED' }), strengthFacts: setupStrengthFacts(frozen, fast), hypothesisDigest: hypothesisDigest(frozen), calibrationState: 'UNVALIDATED_HYPOTHESIS' });
+  return Object.freeze({ setupId, setupFamily: definition.familyId, startingStyleCatalogVersion: STARTING_STYLE_CATALOG_VERSION, strategyVersion: frozen.strategyVersion ?? STRATEGY_VERSION, state, clauses: ablated.length ? [...clauses, ...ablated] : clauses, ablated: ablated.map((x) => x.id), refused, needsData, invalidation: { structuralStop: frozen.structuralStop, kind: 'ABSOLUTE_PRICE_BELOW' }, scenario: { target: t.target, cappedBy: t.cappedBy, kind: 'SCENARIO_NOT_FORECAST' }, maxEntryLevel: frozen.maxEntryLevel, horizon: definition.horizon, maxDurationMs: definition.operationalMaxDurationMs, executionGate: Object.freeze({ required: POST_SIZE_EXECUTION_GATE_SETUPS.includes(setupId), version: POST_SIZE_EXECUTION_GATE_VERSION, state: POST_SIZE_EXECUTION_GATE_SETUPS.includes(setupId) ? 'REQUIRED_DOWNSTREAM' : 'NOT_REQUIRED' }), strengthFacts: setupStrengthFacts(frozen, fast), hypothesisDigest: hypothesisDigest(frozen), calibrationState: 'UNVALIDATED_HYPOTHESIS' });
 }
 // ---- the persistence / expiry / cooldown law over accepted books --------------------------------------------------------------
 export function createConfirmation({ level, triggerTs, expiryMs = REFERENCE.proposalExpiryMs, minBooks = REFERENCE.persistenceBooks, spanMs = REFERENCE.persistenceSpanMs }) {

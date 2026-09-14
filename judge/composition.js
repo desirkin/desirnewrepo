@@ -28,7 +28,7 @@ import { lockLevelForPnlPct } from '../state/locks.js';
 import { loadConfig } from '../lib/config.js';
 import * as M from '../execution/money.js';
 import { readCurrentUniverse } from '../tape/universe.js';
-import { loadJudgePolicy } from './policy.js';
+import { loadJudgePolicy, strategyRuntimePorts } from './policy.js';
 import { evaluateAccount } from './challengers.js';
 import { ownedBase } from '../execution/reducer.js';
 import { sealsReport, buildLiveAuthorization } from './arming.js';
@@ -71,7 +71,7 @@ function synchronousPermissionGate(callback) {
 export async function composeJudge({ policyFile, mode, accountId = null, env = process.env, log = console.log, db = null, journal = null, clock = null, feed = null, transport = null, WebSocketImpl = null, specs = null, history = null, caseSource = null, casesDir = null, controlsSource = null, nominations = null, recordDir = null, allowPrivate = () => false, allowOrders = () => false, requireDb = null, writeProjection = true, codeDigest = undefined, caseWorker = null, exchangeContext = 'kraken-spot', experimentId = null, armRule = null, exitPolicy = null, verdictSink = null, learningActivationSource = null, dynamicSizing = null, persistenceHealth = null, permissionIncreaseAllowed = null }) {
   if (!RUN_MODES.includes(mode)) throw new Error(`mode ${mode} outside ${RUN_MODES.join('/')}`);
   if (permissionIncreaseAllowed !== null && permissionIncreaseAllowed !== undefined && typeof permissionIncreaseAllowed !== 'function') throw new Error('permissionIncreaseAllowed must be a synchronous boolean callback');
-  const loaded = loadJudgePolicy(policyFile); const policy = loaded.policy; const policyDigest = loaded.digest; const acct = accountId ?? policy.account.accountId; const kind = accountKindOf(mode);
+  const loaded = loadJudgePolicy(policyFile); const policy = loaded.policy; const policyDigest = loaded.digest; const acct = accountId ?? policy.account.accountId; const kind = accountKindOf(mode); const strategyPorts = strategyRuntimePorts(policy);
   if (mode.startsWith('LIVE') && policy.mode !== 'LIVE') throw new Error('a LIVE run needs a LIVE policy (the paper sample cannot be promoted by a flag)'); if (!mode.startsWith('LIVE') && policy.mode === 'LIVE') throw new Error('a LIVE policy cannot run a paper / observe mode account');
   // The current cost/reservation model is denominated in quote currency. A BASE contract is syntactically readable for
   // historical records, but cannot enter a new Judge composition until its basis, rounding and both-side accounting are specified.
@@ -132,7 +132,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
     for (const assetId of assets) { let consumed = null; try { consumed = cases.consumed(assetId, { decisionTs: t }); } catch (err) { log(`evidence ${assetId}: ${err.message}`); continue; } const symbols = judge.candidates().filter((c) => c.assetId === assetId).map((c) => c.symbol); if (!consumed?.ok) { for (const s of symbols) judge.setCatalystEvent(s, null); continue; } captureCase(assetId, consumed, t); const cat = primaryConfirmedCatalyst({ packet: consumed.packet, analysis: consumed.analysis, canonicalCoin: assetId, decisionTs: t }); for (const s of symbols) judge.setCatalystEvent(s, cat.ok ? cat.event : null); if (cat.ok) evidenceReport.catalysts += 1; if (held.some((p) => p.assetId === assetId)) { const corr = primaryCorrections({ packet: consumed.packet, canonicalCoin: assetId, decisionTs: t }); falsifierList.push(...corr); evidenceReport.corrections += corr.length; } } evidenceReport.lastTs = t; }
   // research seams (focused completion §5): an arm rule / alternative exit policy / verdict sink exist only for a REPLAY composition
   if ((armRule || exitPolicy || verdictSink) && mode !== 'REPLAY') throw new Error('armRule / exitPolicy / verdictSink are research configuration: only a REPLAY composition may carry them');
-  const watch = createWatch({ accountId: acct, dispatcher, adapter, feed: fd, clock: pclock, specOf, feeOf: () => fee, controls, falsifiers: () => falsifierList, snapshotStore, log, exitPolicy });
+  const watch = createWatch({ accountId: acct, dispatcher, adapter, feed: fd, clock: pclock, specOf, feeOf: () => fee, controls, falsifiers: () => falsifierList, snapshotStore, log, exitPolicy, edgeState: strategyPorts.edgeState });
   // LEARN-1 consumer seam (ADDENDUM-2 §08): an OPTIONAL bounded read-only activation source injected beside the
   // existing case/market accessors. Absent (fly.js and every current composition pass nothing), the Judge is the
   // byte-identical baseline. When present, the prepared immutable snapshot is refreshed OUTSIDE the decision loop
@@ -140,7 +140,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   // admission; a source fault yields no snapshot, which the selector answers with BASELINE_ONLY.
   let learningSnap = null; let learningSnapTs = 0;
   const learning = learningActivationSource ? { snapshot: () => { const t = nowTs(); if (!learningSnap || t - learningSnapTs > 60_000) { try { learningSnap = learningActivationSource(); learningSnapTs = t; } catch (err) { log(`learning activation source failed (baseline): ${String(err?.message ?? err).slice(0, 160)}`); learningSnap = null; } } return learningSnap; } } : null;
-  const judge = createJudge({ accountId: acct, policy, policyDigest, dispatcher, feed: fd, clock: pclock, specOf, feeOf: () => fee, history: hist, caseSource: cases, controls, lockLevel, log, mode, snapshotStore, armRule, verdictSink, learning, dynamicSizing, permissionIncreaseAllowed: entryPermissionIncreaseAllowed });
+  const judge = createJudge({ accountId: acct, policy, policyDigest, dispatcher, feed: fd, clock: pclock, specOf, feeOf: () => fee, history: hist, caseSource: cases, controls, lockLevel, log, mode, snapshotStore, armRule, verdictSink, learning, dynamicSizing, setupSelection: strategyPorts.setupSelection, edgeState: strategyPorts.edgeState, permissionIncreaseAllowed: entryPermissionIncreaseAllowed });
   if (hist.onTrade) fd.subscribe((e) => { if (e.kind === 'TRADE') hist.onTrade(e.trade); });
   // ---- nominations: the tape's current universe (bounded by the policy), never a research ranking, never a buy list ----
   const nominate = nominations ?? (() => { const u = readCurrentUniverse(); return (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); });

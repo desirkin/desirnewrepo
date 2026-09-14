@@ -28,7 +28,9 @@ export function scenarioExit({ snapshot, q, scenarioMid, spec, fee, haircut = RE
   const shift = M.div(scenarioMid, f.mid, 12, 'DOWN'); const w = walkSide(snapshot.bids, 'bids', q, { haircut, shift, tick: spec.priceIncrement });
   if (w.exhausted) return { status: 'REFUSED', reason: 'SCENARIO_DEPTH_INSUFFICIENT', priced: w.base, unpriced: w.remaining, label: 'SHIFTED_BOOK_STRESS', haircut };
   const fees = feesForExecutions(fee, w.fills); const cashIn = M.sub(w.quote, fees.total);
-  return { status: 'OK', label: 'SHIFTED_BOOK_STRESS', haircut, scenarioMid, shift, proceeds: w.quote, fees: fees.total, cashIn, levels: w.levels, avgPrice: w.avgPrice };
+  const shiftedBestBid = M.roundToStep(M.mul(f.bestBid, shift), spec.priceIncrement, 'FLOOR');
+  const slippage = M.max('0', M.sub(M.mul(shiftedBestBid, q), w.quote));
+  return { status: 'OK', label: 'SHIFTED_BOOK_STRESS', haircut, scenarioMid, shift, proceeds: w.quote, fees: fees.total, cashIn, levels: w.levels, avgPrice: w.avgPrice, slippage };
 }
 // conservative executable liquidation value of `q` on the CURRENT book (100% displayed depth, fees included)
 export function liquidationValue({ snapshot, q, spec, fee }) { if (M.isZero(q)) return { status: 'OK', cashIn: '0', proceeds: '0', fees: '0' }; const w = walkSide(snapshot.bids, 'bids', q, { haircut: '1' }); if (w.exhausted) return { status: 'UNKNOWN', reason: 'DEPTH_INSUFFICIENT', priced: w.base }; const fees = feesForExecutions(fee, w.fills); return { status: 'OK', cashIn: M.sub(w.quote, fees.total), proceeds: w.quote, fees: fees.total, avgPrice: w.avgPrice, worstPrice: w.worstPrice, snapshotDigest: snapshot.digest }; }
@@ -54,17 +56,55 @@ export function evaluateEntry({ snapshot, q, spec, fee, atr14, structuralStop, t
   if (ratio === null) reasons.push('STRESSED_LOSS_NONPOSITIVE_UNKNOWN_RATIO'); else if (M.lt(ratio, REWARD_RISK_MIN)) reasons.push('REWARD_RISK_BELOW_1_5');
   const sensitivities = {}; for (const h of HAIRCUTS) { const s = scenarioExit({ snapshot, q: netBase, scenarioMid: targetPrice, spec, fee, haircut: h }); sensitivities[`depth_${Math.round(Number(h) * 100)}pct`] = s.status === 'OK' ? { cashIn: s.cashIn, net: M.sub(s.cashIn, entryCashOut) } : { cashIn: null, reason: s.reason }; }
   const spreadAttribution = M.mul(q, f.spread); const slippageAttribution = M.sub(est.quote, M.mul(q, f.bestAsk));
-  return Object.freeze({ status: reasons.length ? 'REFUSED' : 'OK', reasons, costModelVersion: COST_MODEL_VERSION, q, netBase, entryLimitPrice: limit, capped, maxEntryLevel, entryCashOut, entryNotionalBound: notionalBound, entryFeeBound: feeBound.fee, feeBasis: feeBound.basis, entryBookEstimate, actualEntryCashOut: null, scenarioExitCashIn: target.cashIn, scenarioNetProfit, executionUncertaintyBuffer, bufferedScenarioNetProfit, scenarioStressedLoss, stressMid, rewardRiskRatio: ratio, sensitivities, attribution: { spread: spreadAttribution, slippage: slippageAttribution, note: 'already inside walked cash flows; displayed, never deducted twice' }, expectancyState: EXPECTANCY_STATE, feeDigest: fee.feeDigest, specDigest: spec.specDigest, snapshotDigest: snapshot.digest, units: { money: 'USD', base: spec.canonicalCoin } });
+  return Object.freeze({ status: reasons.length ? 'REFUSED' : 'OK', reasons, costModelVersion: COST_MODEL_VERSION, q, netBase, entryLimitPrice: limit, capped, maxEntryLevel, entryCashOut, entryNotionalBound: notionalBound, entryFeeBound: feeBound.fee, feeBasis: feeBound.basis, entryBookEstimate, actualEntryCashOut: null, scenarioExitCashIn: target.cashIn, scenarioExitDetail: Object.freeze({ avgPrice: target.avgPrice, proceeds: target.proceeds, fees: target.fees, slippage: target.slippage, haircut: target.haircut, levels: target.levels }), scenarioNetProfit, executionUncertaintyBuffer, bufferedScenarioNetProfit, scenarioStressedLoss, stressMid, rewardRiskRatio: ratio, sensitivities, attribution: { spread: spreadAttribution, slippage: slippageAttribution, note: 'already inside walked cash flows; displayed, never deducted twice' }, expectancyState: EXPECTANCY_STATE, feeDigest: fee.feeDigest, specDigest: spec.specDigest, snapshotDigest: snapshot.digest, units: { money: 'USD', base: spec.canonicalCoin } });
 }
-// ---- bounded lot search: the largest legal q passing every constraint; boundary candidates validated explicitly ------------------
+// ---- bounded lot search: reference maximum when the minimum is feasible; otherwise the largest q actually verified on a bounded
+// deterministic non-monotone ladder. Every returned q passes every constraint; a narrow unprobed interval is a safe false negative.
 export function sizeSearch({ snapshot, spec, fee, atr14, structuralStop, targetPrice, maxEntryLevel = null, cashAvailable, riskBudget, maxIterations = 40 }) {
   const f = bookFacts(snapshot); if (!f) return { status: 'NO_TRADE_SIZE', reason: 'NO_TWO_SIDED_BOOK' };
   const lot = spec.qtyIncrement; const passes = (q) => { const e = evaluateEntry({ snapshot, q, spec, fee, atr14, structuralStop, targetPrice, maxEntryLevel }); if (e.status !== 'OK') return { ok: false, e, why: e.reasons }; const why = []; if (M.gt(e.entryCashOut, cashAvailable)) why.push('CASH'); if (M.gt(e.scenarioStressedLoss, riskBudget)) why.push('RISK_BUDGET'); return { ok: why.length === 0, e, why }; };
   let lo = spec.orderMin; const cap = M.roundToStep(M.div(cashAvailable, f.bestAsk, 18, 'DOWN'), lot, 'DOWN'); if (M.lt(cap, lo)) return { status: 'NO_TRADE_SIZE', reason: 'CASH_BELOW_MINIMUM_LOT', binding: ['CASH'] };
-  const first = passes(lo); if (!first.ok) return { status: 'NO_TRADE_SIZE', reason: 'MINIMUM_LOT_FAILS', binding: first.why, evaluation: first.e };
-  let hi = cap; let best = { q: lo, e: first.e }; let iterations = 0; let hiPass = passes(hi); if (hiPass.ok) best = { q: hi, e: hiPass.e }; else { while (iterations < maxIterations && M.gt(M.sub(hi, lo), lot)) { iterations += 1; const mid = M.roundToStep(M.div(M.add(lo, hi), '2', 18, 'DOWN'), lot, 'DOWN'); const r = passes(mid); if (r.ok) { lo = mid; best = { q: mid, e: r.e }; } else hi = mid; } }
+  const first = passes(lo);
+  // A fixed per-order rounding quantum can make the minimum legal lot fail
+  // buffered reward/R while a larger lot on the SAME book passes. The old
+  // early return made that admissible interval unreachable. Search for its
+  // lower boundary only when the minimum failure is one of these explicit
+  // lower-size economic effects; structural/depth/malformed failures still
+  // refuse immediately. Every probe uses the unchanged full cost+risk law.
+  const lowerSizeReasons = new Set(['BELOW_MIN_NOTIONAL', 'BUFFERED_REWARD_ZERO', 'BUFFERED_REWARD_NEGATIVE', 'STRESSED_LOSS_NONPOSITIVE_UNKNOWN_RATIO', 'REWARD_RISK_BELOW_1_5']);
+  const isLowerSizeFailure = (r) => !r.ok && Array.isArray(r.why) && r.why.length > 0 && r.why.every((reason) => lowerSizeReasons.has(reason));
+  let hi = cap; let best = first.ok ? { q: lo, e: first.e } : null; let iterations = 0; let boundedFallback = false;
+  let hiPass = passes(hi);
+  if (!first.ok) {
+    if (!isLowerSizeFailure(first)) return { status: 'NO_TRADE_SIZE', reason: 'MINIMUM_LOT_FAILS', binding: first.why, evaluation: first.e };
+    // Feasibility is not globally monotone: fee rounding can make the minimum
+    // too small, a middle lot viable, and later depth/risk steps too large.
+    // Therefore do not bisect LOW/HIGH labels. Probe a deterministic bounded
+    // geometric ladder all the way to cap and retain only candidates that the
+    // full evaluator actually proves. Missing a narrow interval is a safe
+    // false negative; no untested size is ever authorized.
+    boundedFallback = true;
+    const observedFailures = new Set(first.why);
+    let probe = lo;
+    while (iterations < maxIterations && M.lt(probe, cap)) {
+      iterations += 1;
+      let next = M.roundToStep(M.mul(probe, '2'), lot, 'DOWN');
+      if (M.lte(next, probe)) next = M.add(probe, lot);
+      if (M.gt(next, cap)) next = cap;
+      const r = next === cap ? hiPass : passes(next);
+      if (r.ok && (!best || M.gt(next, best.q))) best = { q: next, e: r.e };
+      else if (!r.ok) for (const reason of r.why ?? []) observedFailures.add(reason);
+      probe = next;
+    }
+    if (!best) return { status: 'NO_TRADE_SIZE', reason: 'NO_BOUNDED_FEASIBLE_LOT', binding: [...observedFailures], evaluation: first.e, iterations, searchLaw: 'BOUNDED_VERIFIED_GEOMETRIC_NON_MONOTONE' };
+    lo = best.q;
+  }
+  if (!boundedFallback) {
+    if (hiPass.ok) best = { q: hi, e: hiPass.e };
+    else { while (iterations < maxIterations && M.gt(M.sub(hi, lo), lot)) { iterations += 1; const mid = M.roundToStep(M.div(M.add(lo, hi), '2', 18, 'DOWN'), lot, 'DOWN'); if (M.lte(mid, lo)) break; const r = passes(mid); if (r.ok) { lo = mid; best = { q: mid, e: r.e }; } else hi = mid; } }
+  }
   // rounded / minimum fees break monotonicity: validate the boundary candidates around the found size explicitly
-  const bindingSet = new Set(); for (const cand of [M.add(best.q, lot), M.add(best.q, M.mul(lot, '2'))]) { if (M.gt(cand, cap)) continue; const r = passes(cand); if (r.ok) best = { q: cand, e: r.e }; else for (const w of r.why) bindingSet.add(w); }
-  return { status: 'OK', q: best.q, evaluation: best.e, iterations, binding: [...bindingSet], cap, cashAvailable, riskBudget };
+  const bindingSet = new Set(boundedFallback ? ['BOUNDED_NON_MONOTONE_FALLBACK'] : []); for (const cand of [M.add(best.q, lot), M.add(best.q, M.mul(lot, '2'))]) { if (M.gt(cand, cap)) continue; const r = passes(cand); if (r.ok) best = { q: cand, e: r.e }; else for (const w of r.why) bindingSet.add(w); }
+  return { status: 'OK', q: best.q, evaluation: best.e, iterations, binding: [...bindingSet], cap, cashAvailable, riskBudget, searchLaw: boundedFallback ? 'BOUNDED_VERIFIED_GEOMETRIC_NON_MONOTONE' : 'REFERENCE_BINARY_FROM_FEASIBLE_MINIMUM' };
 }
 export { chargeFor };
