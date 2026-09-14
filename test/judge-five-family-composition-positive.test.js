@@ -221,7 +221,7 @@ function closedBars(kind, endTs, { executableScenario = false } = {}) {
 const fmt = (v, digits) => Number(v).toFixed(digits).replace('.', '').replace(/^0+/, '');
 const crcFor = (asks, bids) => crc32([...asks.slice(0, 10), ...bids.slice(0, 10)].map(([p, q]) => fmt(p, 1) + fmt(q, 8)).join(''));
 
-async function composedFamilyRun(setupId, { enabledSetups = [setupId], invalidTrigger = false, executableScenario = false } = {}) {
+async function composedFamilyRun(setupId, { enabledSetups = [setupId], invalidTrigger = false, executableScenario = false, accountSuffix = '' } = {}) {
   const [{ composeJudge, initAccount }, { createMemoryJournal }, { loadJudgePolicy }, { fakeClock, SPEC: executionSpec }, { indicatorBlock }, { assembleAnalysis2 }] = await Promise.all([
     import('../judge/composition.js'), import('../execution/journal.js'), import('../judge/policy.js'), import('./helpers/judge.js'), import('../judge/features.js'), import('../socrates/contract-v2.js'),
   ]);
@@ -229,7 +229,7 @@ async function composedFamilyRun(setupId, { enabledSetups = [setupId], invalidTr
   raw.setups.enabled = enabledSetups;
   const policyFile = path.join(suiteData, `${setupId}-${enabledSetups.length}-${invalidTrigger ? 'invalid' : 'valid'}.json`); writeFileSync(policyFile, JSON.stringify(raw));
   const loaded = loadJudgePolicy(policyFile); const journal = createMemoryJournal(); const clock = fakeClock(D - 22 * 60_000);
-  const accountId = `five-positive-${setupId.toLowerCase()}`;
+  const accountId = `five-positive-${setupId.toLowerCase()}${accountSuffix ? `-${accountSuffix}` : ''}`;
   await initAccount({ journal, policy: loaded.policy, policyDigest: loaded.digest, accountId, mode: 'PAPER', ownerRef: 'TEST_ONLY', nowTs: clock.now() });
   let consumed = null; let catalystEvent = null;
   if (setupId === 'CATALYST_TRANSMISSION') {
@@ -242,7 +242,7 @@ async function composedFamilyRun(setupId, { enabledSetups = [setupId], invalidTr
     consumed = { ok: true, packet, analysis, packetId: packet.packetId, analysisId: analysis.analysisId, caseId: 'case-five-family-catalyst', completionTs: D - 500, receiptTs: D - 400, direction: 'UPWARD_PRESSURE', provenance: 'SYNTHETIC_FIXTURE' };
     const mapped = primaryConfirmedCatalyst({ packet, analysis, canonicalCoin: fixture.coin, decisionTs: D }); assert.equal(mapped.ok, true, JSON.stringify(mapped)); catalystEvent = mapped.event;
   }
-  const run = await composeJudge({
+  const compose = () => composeJudge({
     policyFile, mode: 'PAPER', accountId, journal, env: {},
     clock: { ...clock, observeWall: () => null, status: () => ({ trusted: true }), expired: (ts) => clock.now() > ts },
     specs: [executionSpec], history: { bars: (_symbol, nowTs) => closedBars(setupId, Math.floor(nowTs / 60_000) * 60_000, { executableScenario }) },
@@ -252,15 +252,15 @@ async function composedFamilyRun(setupId, { enabledSetups = [setupId], invalidTr
     allowPrivate: () => false, allowOrders: () => false,
     persistenceHealth: () => ({ permissionLock: false }), writeProjection: false, codeDigest: 'f'.repeat(64), log: () => {},
   });
+  const run = await compose();
   run.admitNominations();
-  const feed = run.tapeFeed; feed.onConnect(clock.now());
-  feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'XBT/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now());
-  feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), clock.now());
   let tradeId = 0;
-  const heartbeat = () => feed.ingest(JSON.stringify({ channel: 'heartbeat' }), clock.now());
-  const advance = (ms) => { for (let elapsed = 0; elapsed < ms; elapsed += 1_000) { const step = Math.min(1_000, ms - elapsed); clock.advance(step); heartbeat(); } };
-  const trade = (price, side, qty) => feed.ingest(JSON.stringify({ channel: 'trade', type: 'update', data: [{ symbol: 'XBT/USD', side, price, qty, ord_type: 'market', trade_id: ++tradeId, timestamp: new Date(clock.now()).toISOString() }] }), clock.now());
-  const book = (mid, qty = 100) => { const asks = [[mid + 1, qty]]; const bids = [[mid - 1, qty]]; feed.ingest(JSON.stringify({ channel: 'book', type: 'snapshot', data: [{ symbol: 'XBT/USD', asks: asks.map(([price, q]) => ({ price, qty: q })), bids: bids.map(([price, q]) => ({ price, qty: q })), checksum: crcFor(asks, bids), timestamp: new Date(clock.now()).toISOString() }] }), clock.now()); };
+  const connect = (target = run) => { const feed = target.tapeFeed; feed.onConnect(clock.now()); feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'XBT/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now()); feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), clock.now()); };
+  const heartbeat = (target = run) => target.tapeFeed.ingest(JSON.stringify({ channel: 'heartbeat' }), clock.now());
+  const advance = (ms, target = run) => { for (let elapsed = 0; elapsed < ms; elapsed += 1_000) { const step = Math.min(1_000, ms - elapsed); clock.advance(step); heartbeat(target); } };
+  const trade = (price, side, qty, target = run) => target.tapeFeed.ingest(JSON.stringify({ channel: 'trade', type: 'update', data: [{ symbol: 'XBT/USD', side, price, qty, ord_type: 'market', trade_id: ++tradeId, timestamp: new Date(clock.now()).toISOString() }] }), clock.now());
+  const book = (mid, qty = 100, target = run) => { const asks = [[mid + 1, qty]]; const bids = [[mid - 1, qty]]; target.tapeFeed.ingest(JSON.stringify({ channel: 'book', type: 'snapshot', data: [{ symbol: 'XBT/USD', asks: asks.map(([price, q]) => ({ price, qty: q })), bids: bids.map(([price, q]) => ({ price, qty: q })), checksum: crcFor(asks, bids), timestamp: new Date(clock.now()).toISOString() }] }), clock.now()); };
+  connect(run);
   book(100_000);
   const ordinaryMinutes = setupId === 'ABSORPTION_RECLAIM' ? 21 : 22;
   for (let minute = 0; minute < ordinaryMinutes; minute += 1) {
@@ -285,7 +285,7 @@ async function composedFamilyRun(setupId, { enabledSetups = [setupId], invalidTr
   const triggerMid = setupId === 'ABSORPTION_RECLAIM' ? 100_100 : Math.ceil(Number(triggerProbe.triggerLevel));
   for (let i = 0; i < 3; i += 1) { if (i) advance(1_050); trade(triggerMid, invalidTrigger ? 'sell' : 'buy', invalidTrigger ? 10 : 0.2); book(triggerMid); await run.tick(); }
   await run.judge.drain(); await run.dispatcher.idle();
-  return { run, loaded, executionSpec };
+  return { run, loaded, executionSpec, accountId, journal, clock, connect, advance, trade, book, reopen: compose };
 }
 
 test('normal PAPER composition can qualify Range / Early-Ignition under the unchanged 0.8% reference fee', async () => {
@@ -365,6 +365,138 @@ test('normal all-style composition arbitrates same-underlying qualified setups b
     assert.equal(gate.lastBatch.outcomes.filter((x) => x.outcome === 'CLAIMED').length, 1, JSON.stringify(gate));
     assert.ok(gate.lastBatch.outcomes.some((x) => x.outcome === 'NOT_SELECTED'), JSON.stringify(gate));
     assert.equal(r.run.judge.decisions().filter((x) => x.status === 'ENTRY_RESERVED').length, 1, JSON.stringify(r.run.judge.decisions()));
+    assert.equal(r.run.fee.rate, '0.008');
+  } finally { await r.run.stop(); }
+});
+
+const LIFECYCLE_SETUPS = Object.freeze([
+  'MOMENTUM_CONTINUATION',
+  'RANGE_IGNITION',
+  'TREND_PULLBACK_CONTINUATION',
+  'CATALYST_TRANSMISSION',
+  'MICRO_BITE',
+]);
+
+for (const [index, setupId] of LIFECYCLE_SETUPS.entries()) test(`normal PAPER ${FAMILY_BY_SETUP[setupId]} lifecycle settles, restores protection, and exits through Watch`, async () => {
+  const r = await composedFamilyRun(setupId, { executableScenario: setupId !== 'RANGE_IGNITION', accountSuffix: `life${index}` });
+  let active = r.run;
+  try {
+    let state = active.dispatcher.state();
+    const decision = Object.values(state.decisions).find((x) => x.setupId === setupId && x.state === 'ENTRY_RESERVED');
+    assert.ok(decision, JSON.stringify(active.judge.decisions()));
+    let position = Object.values(state.positions).find((x) => x.decisionId === decision.decisionId);
+    assert.ok(position, JSON.stringify(state.positions));
+    let entry = Object.values(state.orders).find((x) => x.positionId === position.positionId && x.kind === 'ENTRY');
+    assert.equal(entry?.state, 'ACKNOWLEDGED', JSON.stringify(entry));
+    assert.equal(active.kind, 'PAPER');
+    assert.equal(active.adapter.kind, 'PAPER');
+    assert.equal(active.credentialsPresent, false);
+    assert.equal(active.fee.rate, '0.008');
+
+    // The order exists durably before the paper venue can sample a book. Its
+    // first post-latency executable book is the only entry-fill witness.
+    const entryBookMid = Number((Number(entry.limitPrice) - 1).toFixed(1));
+    r.advance(300, active);
+    r.book(entryBookMid, 100, active);
+    await active.dispatcher.idle();
+    await active.tick();
+    await active.dispatcher.idle();
+    state = active.dispatcher.state();
+    position = state.positions[position.positionId];
+    entry = state.orders[entry.orderId];
+    assert.equal(entry.state, 'FILLED', JSON.stringify(entry));
+    assert.equal(position.state, 'OPEN', JSON.stringify(position));
+    assert.equal(position.protection.state, 'ACTIVE', JSON.stringify(position.protection));
+    assert.ok(Number(position.confirmedBase) > 0);
+    assert.ok(Number(position.firstFillReceiptTs) >= decision.decisionKnownAtTs);
+    const entryIdentity = structuredClone({
+      decisionId: position.decisionId,
+      structuralStop: position.structuralStop,
+      targetPrice: position.targetPrice,
+      maxDurationMs: position.maxDurationMs,
+      management: position.management ?? null,
+    });
+    if (setupId === 'MOMENTUM_CONTINUATION' || setupId === 'MICRO_BITE') {
+      assert.equal(position.management.setupId, setupId);
+      assert.equal(position.management.managementVersion, 'judge-position-edge-state-1');
+      assert.equal(position.management.hardMaxDurationMs, position.maxDurationMs);
+    } else assert.equal(position.management, undefined, 'legacy-style management must not be invented on restart');
+
+    // Reopen the account while it owns inventory. The fresh composition must
+    // reconstruct the native paper child from the durable chain, retain the
+    // exact entry-time management recipe, and make no private connection.
+    await active.stop();
+    active = null;
+    const reopened = await r.reopen();
+    active = reopened;
+    const report = await reopened.start({ heartbeatMs: 3_600_000, schedulerMs: 3_600_000, projectionMs: 3_600_000 });
+    assert.equal(report.reconciliation.outcome, 'COMPLETE', JSON.stringify(report.reconciliation));
+    assert.equal(report.executions, null);
+    assert.equal(report.liveOwner, null);
+    assert.equal(reopened.credentialsPresent, false);
+    assert.equal(reopened.adapter.status().stops.length, 1, JSON.stringify(reopened.adapter.status()));
+    let restored = reopened.dispatcher.state().positions[position.positionId];
+    assert.deepEqual({
+      decisionId: restored.decisionId,
+      structuralStop: restored.structuralStop,
+      targetPrice: restored.targetPrice,
+      maxDurationMs: restored.maxDurationMs,
+      management: restored.management ?? null,
+    }, entryIdentity);
+
+    r.connect(reopened);
+    r.book(entryBookMid, 100, reopened);
+    await reopened.tick();
+    await reopened.dispatcher.idle();
+    restored = reopened.dispatcher.state().positions[position.positionId];
+    const stop = Number(Number(restored.protection.trigger ?? restored.structuralStop).toFixed(1));
+    r.trade(Number((stop - 1).toFixed(1)), 'sell', 0.2, reopened);
+    await reopened.dispatcher.idle();
+    r.advance(300, reopened);
+    r.book(Number((stop - 10).toFixed(1)), 100, reopened);
+    for (let i = 0; i < 6; i += 1) { r.advance(250, reopened); await reopened.tick(); await reopened.dispatcher.idle(); }
+
+    const flat = reopened.dispatcher.state().positions[position.positionId];
+    assert.equal(flat.state, 'FLAT', `${flat.state} ${JSON.stringify(reopened.watch.positions()[0]?.exit)}`);
+    const edgeManaged = setupId === 'MOMENTUM_CONTINUATION' || setupId === 'MICRO_BITE';
+    assert.equal(flat.closeReason, edgeManaged ? 'EDGE_STATE_UNKNOWN' : 'NATIVE_STOP');
+    assert.ok(Number(flat.realizedPnl) < 0, `expected fee-and-stop loss, got ${flat.realizedPnl}`);
+    assert.equal(flat.executions.length, 2, JSON.stringify(flat.executions));
+    assert.equal(flat.executions.filter((x) => x.side === 'buy' && x.origin === 'PAPER').length, 1);
+    assert.equal(flat.executions.filter((x) => x.side === 'sell' && x.origin === 'PAPER').length, 1);
+    assert.deepEqual(flat.management ?? null, entryIdentity.management);
+    assert.equal(reopened.adapter.status().counters.stopsTriggered, edgeManaged ? 0 : 1);
+    assert.equal(reopened.watch.positions().find((x) => x.positionId === flat.positionId)?.exit.phase, 'DONE');
+    const durable = await r.journal.load(r.accountId);
+    assert.equal(durable.state.positions[flat.positionId].state, 'FLAT');
+    assert.equal(durable.state.cash, reopened.dispatcher.state().cash);
+    assert.ok(Number(durable.state.cash) < 500, 'the restart must retain the actual fee-and-stop loss, not reset capital');
+    const verified = await r.journal.replayVerify(r.accountId);
+    assert.equal(verified.ok, true, verified.reason);
+  } finally { if (active) await active.stop(); }
+});
+
+test('PAPER latency refuses to invent a fill from a stale book after a valid five-family reservation', async () => {
+  const r = await composedFamilyRun('RANGE_IGNITION', { accountSuffix: 'stale' });
+  try {
+    let state = r.run.dispatcher.state();
+    const entry = Object.values(state.orders).find((x) => x.kind === 'ENTRY');
+    const position = Object.values(state.positions).find((x) => x.entryOrderId === entry?.orderId || x.positionId === entry?.positionId);
+    assert.equal(entry?.state, 'ACKNOWLEDGED', JSON.stringify(entry));
+    assert.ok(position);
+    r.advance(1_300, r.run);
+    await r.run.tick();
+    await r.run.dispatcher.idle();
+    state = r.run.dispatcher.state();
+    const expired = state.orders[entry.orderId];
+    const unfilled = state.positions[position.positionId];
+    assert.equal(expired.state, 'EXPIRED');
+    assert.ok(Number.isSafeInteger(expired.terminalTs));
+    assert.equal(unfilled.confirmedBase, '0');
+    assert.equal(unfilled.state, 'SHELL');
+    assert.equal(Object.keys(state.execIds).length, 0);
+    assert.equal(r.run.adapter.status().stops.length, 0);
+    assert.equal(r.run.adapter.status().counters.unfilledCoverageUnknown, 1);
     assert.equal(r.run.fee.rate, '0.008');
   } finally { await r.run.stop(); }
 });
