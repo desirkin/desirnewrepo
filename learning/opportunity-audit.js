@@ -24,17 +24,24 @@ const catalogContentId = (catalog) => createHash('sha1').update(canonicalJson({
 })).digest('hex');
 
 export const OPPORTUNITY_AUDIT_FRAME_VERSION = 'opportunity-audit-frame-1';
+export const OPPORTUNITY_AUDIT_FRAME_VERSION_V2 = 'opportunity-audit-frame-2';
 export const OPPORTUNITY_AUDIT_ANNOTATION_VERSION = 'opportunity-audit-annotation-1';
 export const OPPORTUNITY_AUDIT_OUTCOME_VERSION = 'opportunity-audit-outcome-1';
+export const OPPORTUNITY_AUDIT_OUTCOME_VERSION_V2 = 'opportunity-audit-outcome-2';
 export const OPPORTUNITY_AUDIT_CAPTURE_RECIPE_VERSION = 'opportunity-audit-capture-1';
+export const OPPORTUNITY_AUDIT_CAPTURE_RECIPE_VERSION_V2 = 'opportunity-audit-capture-2';
 export const OPPORTUNITY_AUDIT_SAMPLING_RULE_VERSION = 'sha256-rejection-fisher-yates-1';
 export const OPPORTUNITY_AUDIT_TARGET_VERSION = 'opportunity-audit-simple-return-target-1';
+export const OPPORTUNITY_AUDIT_TARGET_VERSION_V2 = 'opportunity-audit-simple-return-target-2';
 export const OPPORTUNITY_AUDIT_AUTHORITY = 'NONE';
 export const OPPORTUNITY_AUDIT_PURPOSE = 'PROSPECTIVE_OPPORTUNITY_AUDIT';
 export const OPPORTUNITY_AUDIT_MAX_HORIZONS = 16;
 export const OPPORTUNITY_AUDIT_MAX_COMPONENTS = 32;
 export const OPPORTUNITY_AUDIT_MAX_FEATURES = 32;
 export const OPPORTUNITY_AUDIT_MAX_DURABLE_CREATION_LAG_MS = 5_000;
+export const OPPORTUNITY_AUDIT_MIN_LABEL_DELAY_MS = 60_000;
+export const OPPORTUNITY_AUDIT_MAX_LABEL_DELAY_MS = 30 * 24 * 60 * 60 * 1000;
+export const OPPORTUNITY_AUDIT_MAX_TARGET_HORIZON_MS_V2 = 24 * 60 * 60 * 1000;
 
 const HEX64_RE = /^[a-f0-9]{64}$/;
 const SAFE_TEXT_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
@@ -53,6 +60,18 @@ const AUDIT_TARGET = deepFreeze({
   neutralBandPct: 0.25,
   requiredEvidence: ['CONTEMPORANEOUS_CLOSED_1M_ANCHOR', 'CONTEMPORANEOUS_CLOSED_1M_TERMINAL'],
   feasibility: 'DESCRIPTIVE_ONLY_EXECUTION_FEASIBILITY_UNSUPPORTED',
+});
+const auditTargetV2 = (maxLabelDelayMs) => deepFreeze({
+  targetVersion: OPPORTUNITY_AUDIT_TARGET_VERSION_V2,
+  metric: 'SIMPLE_RETURN_PCT', units: 'PERCENT',
+  anchorRule: 'FIRST_VERIFIED_CLOSED_1M_OPEN_AT_OR_AFTER_FRAME_TS',
+  terminalRule: 'LAST_VERIFIED_CLOSED_1M_CLOSE_AT_OR_BEFORE_FRAME_PLUS_HORIZON',
+  classificationRule: 'FAVORABLE_GT_BAND_ADVERSE_LT_NEGATIVE_BAND_ELSE_NEUTRAL',
+  neutralBandPct: 0.25,
+  requiredEvidence: ['CONTEMPORANEOUS_CLOSED_1M_ANCHOR', 'CONTEMPORANEOUS_CLOSED_1M_TERMINAL'],
+  feasibility: 'DESCRIPTIVE_ONLY_EXECUTION_FEASIBILITY_UNSUPPORTED',
+  maxLabelDelayMs,
+  missingnessRule: 'PENDING_THROUGH_DUE_PLUS_DELAY_INCLUSIVE_TERMINAL_ONLY_AFTER_DEADLINE_WITH_SOURCE_RECEIPT',
 });
 const FRAME_KEYS = Object.freeze([
   'frameVersion', 'frameId', 'frameDigest', 'captureRecipeVersion', 'frameTs', 'knownAtTs',
@@ -75,6 +94,7 @@ const TARGET_KEYS = Object.freeze([
   'targetVersion', 'metric', 'units', 'anchorRule', 'terminalRule', 'classificationRule',
   'neutralBandPct', 'requiredEvidence', 'feasibility',
 ]);
+const TARGET_KEYS_V2 = Object.freeze([...TARGET_KEYS, 'maxLabelDelayMs', 'missingnessRule']);
 const ANNOTATION_KEYS = Object.freeze([
   'annotationVersion', 'annotationId', 'annotationDigest', 'frameId', 'frameDigest',
   'opportunityId', 'recordedTs', 'observation', 'nomination', 'decision', 'components',
@@ -89,6 +109,15 @@ const OUTCOME_KEYS = Object.freeze([
   'outcomeVersion', 'outcomeId', 'outcomeDigest', 'frameId', 'frameDigest', 'opportunityId',
   'horizonMs', 'status', 'recordedTs', 'outcomeKnownAtTs', 'outcome', 'missingReason',
   'sourceReference', 'diagnostic', 'supersedes', 'authority', 'purpose',
+]);
+const OUTCOME_KEYS_V2 = Object.freeze([...OUTCOME_KEYS, 'settlementSourceReceipt']);
+const V2_SOURCE_RECEIPT_KEYS = Object.freeze([
+  'receiptVersion', 'receiptId', 'receiptDigest', 'requestDigest', 'frameId', 'frameDigest',
+  'targetDigest', 'opportunityId', 'marketIdentityDigest', 'market', 'horizonMs', 'dueTs',
+  'maxLabelDelayMs', 'deadlineTs', 'anchorOpenTs', 'terminalOpenTs', 'terminalCloseTs',
+  'asOfTs', 'preparedTs', 'resolutionState', 'resolutionReason', 'sourceBinding',
+  'archiveManifest', 'recordCount', 'recordInventoryDigest', 'anchorRecord', 'terminalRecord',
+  'evidenceDigest', 'valueLaw', 'authority', 'trainingAuthority',
 ]);
 const MATURED_OUTCOME_KEYS = Object.freeze(['targetVersion', 'targetDigest', 'returnKind', 'outcomeClass', 'returnPct', 'evidenceDigest']);
 const MATURED_OUTCOME_INPUT_KEYS = Object.freeze(['outcomeClass', 'returnPct', 'evidenceDigest']);
@@ -165,6 +194,25 @@ function normalizedHorizons(horizonsMs) {
   return out;
 }
 
+function validLabelDelay(value) {
+  return Number.isSafeInteger(value) && value >= OPPORTUNITY_AUDIT_MIN_LABEL_DELAY_MS
+    && value <= OPPORTUNITY_AUDIT_MAX_LABEL_DELAY_MS;
+}
+
+function isV2Frame(frame) {
+  return frame?.frameVersion === OPPORTUNITY_AUDIT_FRAME_VERSION_V2;
+}
+
+export function opportunityAuditTargetTiming(frame, horizonMs) {
+  if (auditFrameError(frame) || !Number.isSafeInteger(horizonMs) || !frame.horizonsMs.includes(horizonMs)) return null;
+  const dueTs = frame.frameTs + horizonMs;
+  if (!Number.isSafeInteger(dueTs)) return null;
+  if (!isV2Frame(frame)) return deepFreeze({ dueTs, maxLabelDelayMs: null, deadlineTs: null });
+  const deadlineTs = dueTs + frame.target.maxLabelDelayMs;
+  return Number.isSafeInteger(deadlineTs)
+    ? deepFreeze({ dueTs, maxLabelDelayMs: frame.target.maxLabelDelayMs, deadlineTs }) : null;
+}
+
 export function generateAuditSeed() {
   return randomBytes(32).toString('hex');
 }
@@ -222,7 +270,11 @@ function populationEntryError(entry, frame) {
 
 export function auditFrameError(frame) {
   if (!exact(frame, FRAME_KEYS)) return 'frame shape malformed';
-  if (frame.frameVersion !== OPPORTUNITY_AUDIT_FRAME_VERSION || frame.captureRecipeVersion !== OPPORTUNITY_AUDIT_CAPTURE_RECIPE_VERSION
+  const v1 = frame.frameVersion === OPPORTUNITY_AUDIT_FRAME_VERSION
+    && frame.captureRecipeVersion === OPPORTUNITY_AUDIT_CAPTURE_RECIPE_VERSION;
+  const v2 = frame.frameVersion === OPPORTUNITY_AUDIT_FRAME_VERSION_V2
+    && frame.captureRecipeVersion === OPPORTUNITY_AUDIT_CAPTURE_RECIPE_VERSION_V2;
+  if ((!v1 && !v2)
       || !FRAME_ID_RE.test(frame.frameId ?? '') || !HEX64_RE.test(frame.frameDigest ?? '')
       || !isTs(frame.frameTs) || !isTs(frame.knownAtTs) || frame.knownAtTs > frame.frameTs
       || frame.maxDurableCreationLagMs !== OPPORTUNITY_AUDIT_MAX_DURABLE_CREATION_LAG_MS
@@ -242,10 +294,17 @@ export function auditFrameError(frame) {
       || frame.sampling.inclusionProbability !== frame.sampling.sampleSize / frame.sampling.populationSize
       || frame.sampling.designInferenceEligible !== (frame.sampling.seedProvenance === 'CRYPTO_RANDOM_BYTES_32')
       || frame.sampling.pseudorandomAssumption !== SAMPLE_ASSUMPTION) return 'sampling law malformed';
-  if (!exact(frame.target, TARGET_KEYS) || !same(frame.target, AUDIT_TARGET)) return 'prospective target malformed or changed after frame creation';
+  if (v1) {
+    if (!exact(frame.target, TARGET_KEYS) || !same(frame.target, AUDIT_TARGET)) return 'prospective target malformed or changed after frame creation';
+  } else if (!exact(frame.target, TARGET_KEYS_V2) || !validLabelDelay(frame.target.maxLabelDelayMs)
+      || !same(frame.target, auditTargetV2(frame.target.maxLabelDelayMs))) {
+    return 'V2 prospective target or sealed missingness deadline malformed';
+  }
   if (!Array.isArray(frame.horizonsMs) || frame.horizonsMs.length < 1 || frame.horizonsMs.length > OPPORTUNITY_AUDIT_MAX_HORIZONS
       || frame.horizonsMs.some((x) => !positiveSafe(x))
       || frame.horizonsMs.some((x) => !Number.isSafeInteger(frame.frameTs + x))
+      || (v2 && frame.horizonsMs.some((x) => x > OPPORTUNITY_AUDIT_MAX_TARGET_HORIZON_MS_V2
+        || !Number.isSafeInteger(frame.frameTs + x + frame.target.maxLabelDelayMs)))
       || frame.horizonsMs.some((x, i) => i > 0 && x <= frame.horizonsMs[i - 1])) return 'horizons malformed';
   if (!Array.isArray(frame.population) || frame.population.length !== frame.catalog.marketCount) return 'population count differs from sealed catalog';
   const identities = new Set(); const opportunities = new Set();
@@ -321,6 +380,67 @@ export function sealAuditFrame(input = {}) {
   const frame = { ...core, frameId, frameDigest: canonicalDigest({ ...core, frameId }) };
   const error = auditFrameError(frame);
   if (error) throw Object.assign(new Error(`opportunity audit: internally invalid frame: ${error}`), { code: 'AUDIT_FRAME_INVALID' });
+  return deepFreeze(frame);
+}
+
+export function sealAuditFrameV2(input = {}) {
+  const shape = inputShapeError(input,
+    ['catalog', 'frameTs', 'knownAtTs', 'sampleSize', 'horizonsMs', 'maxLabelDelayMs'], ['seedHex']);
+  if (shape) throw Object.assign(new Error(`opportunity audit: ${shape}`), { code: 'AUDIT_FRAME_INVALID' });
+  const { catalog, frameTs, knownAtTs, sampleSize, horizonsMs, maxLabelDelayMs } = input;
+  const catalogError = acceptedCatalogError(catalog);
+  if (catalogError || !isTs(frameTs) || !isTs(knownAtTs) || catalog.observedTs > knownAtTs || knownAtTs > frameTs
+      || !positiveSafe(sampleSize) || sampleSize > catalog.markets.length || !validLabelDelay(maxLabelDelayMs)) {
+    throw Object.assign(new Error(`opportunity audit: ${catalogError ?? 'V2 frame clocks, sample size or label delay malformed'}`), { code: 'AUDIT_FRAME_INVALID' });
+  }
+  const explicitSeed = input.seedHex !== undefined;
+  const seedHex = explicitSeed ? input.seedHex : generateAuditSeed();
+  if (!HEX64_RE.test(seedHex ?? '')) throw Object.assign(new Error('opportunity audit: seed must be exactly 256 bits of lowercase hex'), { code: 'AUDIT_FRAME_INVALID' });
+  const horizons = normalizedHorizons(horizonsMs);
+  if (horizons.some((value) => value > OPPORTUNITY_AUDIT_MAX_TARGET_HORIZON_MS_V2
+      || !Number.isSafeInteger(frameTs + value + maxLabelDelayMs))) {
+    throw Object.assign(new Error('opportunity audit: V2 horizon or deadline exceeds its bound'), { code: 'AUDIT_FRAME_INVALID' });
+  }
+  const inclusionProbability = sampleSize / catalog.markets.length;
+  const barePopulation = catalog.markets.map((market) => {
+    const copied = Object.fromEntries(CATALOG_MARKET_KEYS.map((key) => [key, market[key]]));
+    const digest = marketIdentityDigest(catalog, copied);
+    return {
+      market: copied, marketIdentityDigest: digest,
+      opportunityId: opportunityIdOf({ canonicalCoin: copied.base, decisionTs: frameTs, captureRecipeVersion: OPPORTUNITY_AUDIT_CAPTURE_RECIPE_VERSION_V2, datasetId: catalog.contentId }),
+    };
+  }).sort((a, b) => a.marketIdentityDigest.localeCompare(b.marketIdentityDigest));
+  const selectedOpportunityIds = selectedOrder(barePopulation, sampleSize, seedHex);
+  const selected = new Set(selectedOpportunityIds);
+  const population = barePopulation.map((entry) => ({
+    ...entry, selected: selected.has(entry.opportunityId), observationInclusionProbability: inclusionProbability,
+    actionPropensity: clone(ACTION_PROPENSITY),
+  }));
+  const core = {
+    frameVersion: OPPORTUNITY_AUDIT_FRAME_VERSION_V2,
+    captureRecipeVersion: OPPORTUNITY_AUDIT_CAPTURE_RECIPE_VERSION_V2,
+    frameTs, knownAtTs,
+    catalog: {
+      venue: catalog.venue, quote: catalog.quote, policyVersion: catalog.policyVersion,
+      observedTs: catalog.observedTs, contentId: catalog.contentId, marketCount: population.length,
+      marketDigest: canonicalDigest(population.map((entry) => entry.market)),
+    },
+    sampling: {
+      ruleVersion: OPPORTUNITY_AUDIT_SAMPLING_RULE_VERSION, algorithm: SAMPLE_ALGORITHM, seedHex,
+      seedProvenance: explicitSeed ? 'CALLER_SUPPLIED_REPLAY' : 'CRYPTO_RANDOM_BYTES_32',
+      populationSize: population.length, sampleSize, inclusionProbability,
+      designInferenceEligible: !explicitSeed,
+      pseudorandomAssumption: SAMPLE_ASSUMPTION,
+    },
+    target: clone(auditTargetV2(maxLabelDelayMs)),
+    horizonsMs: horizons, population, selectedOpportunityIds,
+    maxDurableCreationLagMs: OPPORTUNITY_AUDIT_MAX_DURABLE_CREATION_LAG_MS,
+    authority: OPPORTUNITY_AUDIT_AUTHORITY, purpose: OPPORTUNITY_AUDIT_PURPOSE, trainingAuthority: 'NONE',
+  };
+  const frameId = digest40('oaf', core);
+  const frame = { ...core, frameId, frameDigest: canonicalDigest({ ...core, frameId }) };
+  const error = auditFrameError(frame);
+  if (error) throw Object.assign(new Error(`opportunity audit: internally invalid V2 frame: ${error}`), { code: 'AUDIT_FRAME_INVALID' });
   return deepFreeze(frame);
 }
 
@@ -440,15 +560,15 @@ function diagnosticError(value) {
   if (value.state === 'UNSUPPORTED') return value.modelVersion === null && value.resultDigest === null ? null : 'unsupported diagnostic invents a model result';
   return SAFE_TEXT_RE.test(value.modelVersion ?? '') && HEX64_RE.test(value.resultDigest ?? '') ? null : 'model diagnostic lacks sealed model/result identity';
 }
-function outcomeValueError(value) {
-  if (!exact(value, MATURED_OUTCOME_KEYS) || value.targetVersion !== OPPORTUNITY_AUDIT_TARGET_VERSION
+function outcomeValueError(value, target) {
+  if (!exact(value, MATURED_OUTCOME_KEYS) || value.targetVersion !== target.targetVersion
       || !HEX64_RE.test(value.targetDigest ?? '') || value.returnKind !== 'SIMPLE_RETURN_PCT'
       || !['FAVORABLE', 'ADVERSE', 'NEUTRAL'].includes(value.outcomeClass)
       || typeof value.returnPct !== 'number' || !Number.isFinite(value.returnPct) || value.returnPct < -100 || value.returnPct > 1_000_000
       || !HEX64_RE.test(value.evidenceDigest ?? '')) return 'matured outcome malformed';
-  if (value.targetDigest !== canonicalDigest(AUDIT_TARGET)) return 'matured outcome target digest mismatch';
-  const expectedClass = value.returnPct > AUDIT_TARGET.neutralBandPct ? 'FAVORABLE'
-    : value.returnPct < -AUDIT_TARGET.neutralBandPct ? 'ADVERSE' : 'NEUTRAL';
+  if (value.targetDigest !== canonicalDigest(target)) return 'matured outcome target digest mismatch';
+  const expectedClass = value.returnPct > target.neutralBandPct ? 'FAVORABLE'
+    : value.returnPct < -target.neutralBandPct ? 'ADVERSE' : 'NEUTRAL';
   if (value.outcomeClass !== expectedClass) return 'matured outcome class disagrees with the sealed simple-return target';
   return null;
 }
@@ -456,9 +576,48 @@ function outcomeCore(outcome) {
   const copy = clone(outcome); delete copy.outcomeId; delete copy.outcomeDigest; return copy;
 }
 
+function retainedSourceReceiptError(value, outcome, frame) {
+  const entry = frame.population.find((row) => row.selected && row.opportunityId === outcome.opportunityId) ?? null;
+  if (!exact(value, V2_SOURCE_RECEIPT_KEYS)
+      || value.receiptVersion !== 'opportunity-audit-broad-day-source-receipt-1'
+      || !/^oasrc-[a-f0-9]{40}$/.test(value.receiptId ?? '') || !HEX64_RE.test(value.receiptDigest ?? '')
+      || value.frameId !== frame.frameId || value.frameDigest !== frame.frameDigest
+      || value.targetDigest !== canonicalDigest(frame.target) || value.opportunityId !== outcome.opportunityId
+      || entry === null || value.marketIdentityDigest !== entry.marketIdentityDigest || !same(value.market, entry.market)
+      || value.horizonMs !== outcome.horizonMs || value.dueTs !== frame.frameTs + outcome.horizonMs
+      || value.maxLabelDelayMs !== frame.target.maxLabelDelayMs
+      || value.deadlineTs !== value.dueTs + value.maxLabelDelayMs
+      || !isTs(value.asOfTs) || !isTs(value.preparedTs) || value.preparedTs < value.asOfTs
+      || value.preparedTs !== outcome.outcomeKnownAtTs || value.preparedTs > outcome.recordedTs
+      || !exact(value.sourceBinding, ['bindingVersion', 'sourceId', 'sourceRootDigest', 'archiveVersion', 'durability', 'republishSafe'])
+      || value.sourceBinding.bindingVersion !== 'broad-day-local-source-binding-1'
+      || !isId(value.sourceBinding.sourceId) || !HEX64_RE.test(value.sourceBinding.sourceRootDigest ?? '')
+      || value.sourceBinding.archiveVersion !== 'broad-day-archive-v2'
+      || value.sourceBinding.durability !== 'LOCAL_FILESYSTEM_ONLY' || value.sourceBinding.republishSafe !== false
+      || outcome.sourceReference?.sourceKind !== 'CLOSED_CANDLE_ARCHIVE'
+      || outcome.sourceReference?.sourceId !== value.sourceBinding.sourceId
+      || value.authority !== 'NONE' || value.trainingAuthority !== 'NONE') {
+    return 'retained V2 source receipt identity or clocks malformed';
+  }
+  const core = clone(value); delete core.receiptId; delete core.receiptDigest;
+  if (value.receiptId !== digest40('oasrc', core)
+      || value.receiptDigest !== canonicalDigest({ ...core, receiptId: value.receiptId })) return 'retained V2 source receipt digest mismatch';
+  if (outcome.sourceReference?.sourceDigest !== value.receiptDigest) return 'outcome source reference does not bind retained V2 source receipt';
+  if (outcome.status === 'MATURED') {
+    if (value.resolutionState !== 'AVAILABLE' || value.resolutionReason !== null
+        || value.archiveManifest === null || value.recordCount < 1 || value.anchorRecord === null
+        || value.terminalRecord === null || value.evidenceDigest !== outcome.outcome?.evidenceDigest) return 'matured outcome disagrees with retained V2 source receipt';
+  } else if (value.resolutionState !== outcome.status || value.resolutionReason !== outcome.missingReason
+      || value.evidenceDigest !== null || value.preparedTs <= value.deadlineTs) return 'terminal missingness disagrees with retained V2 source receipt';
+  if (value.archiveManifest === null && (value.recordCount !== 0 || value.recordInventoryDigest !== canonicalDigest([])
+      || value.anchorRecord !== null || value.terminalRecord !== null)) return 'retained V2 receipt without manifest invents records';
+  return null;
+}
+
 export function auditOutcomeError(outcome, frame) {
   if (auditFrameError(frame)) return 'parent frame invalid';
-  if (!exact(outcome, OUTCOME_KEYS) || outcome.outcomeVersion !== OPPORTUNITY_AUDIT_OUTCOME_VERSION
+  const expectedOutcomeVersion = isV2Frame(frame) ? OPPORTUNITY_AUDIT_OUTCOME_VERSION_V2 : OPPORTUNITY_AUDIT_OUTCOME_VERSION;
+  if (!exact(outcome, isV2Frame(frame) ? OUTCOME_KEYS_V2 : OUTCOME_KEYS) || outcome.outcomeVersion !== expectedOutcomeVersion
       || !OUTCOME_ID_RE.test(outcome.outcomeId ?? '') || !HEX64_RE.test(outcome.outcomeDigest ?? '')
       || outcome.frameId !== frame.frameId || outcome.frameDigest !== frame.frameDigest
       || !selectedEntry(frame, outcome.opportunityId) || !frame.horizonsMs.includes(outcome.horizonMs)
@@ -466,16 +625,25 @@ export function auditOutcomeError(outcome, frame) {
       || !isTs(outcome.recordedTs) || outcome.recordedTs < frame.frameTs
       || !(outcome.supersedes === null || OUTCOME_ID_RE.test(outcome.supersedes ?? ''))
       || outcome.authority !== OPPORTUNITY_AUDIT_AUTHORITY || outcome.purpose !== OPPORTUNITY_AUDIT_PURPOSE) return 'outcome identity, parent, horizon, clocks or authority malformed';
+  if (isV2Frame(frame) && !['MATURED', 'MISSING', 'DELISTED_OR_UNAVAILABLE'].includes(outcome.status)) return 'V2 stored outcome status is outside the sealed settlement law';
   const diagnosticProblem = diagnosticError(outcome.diagnostic); if (diagnosticProblem) return diagnosticProblem;
   if (outcome.status === 'PENDING') {
     if (outcome.outcomeKnownAtTs !== null || outcome.outcome !== null || outcome.missingReason !== null || outcome.sourceReference !== null) return 'pending outcome invents evidence or missingness';
   } else {
     if (!isTs(outcome.outcomeKnownAtTs) || outcome.outcomeKnownAtTs < frame.frameTs + outcome.horizonMs || outcome.outcomeKnownAtTs > outcome.recordedTs) return 'terminal outcome known-at clock malformed';
     if (outcome.status === 'MATURED') {
-      const valueProblem = outcomeValueError(outcome.outcome); if (valueProblem) return valueProblem;
+      const valueProblem = outcomeValueError(outcome.outcome, frame.target); if (valueProblem) return valueProblem;
       if (outcome.missingReason !== null || sourceReferenceError(outcome.sourceReference)) return 'matured outcome evidence malformed';
     } else if (outcome.outcome !== null || !boundedText(outcome.missingReason, 200)
         || !(outcome.sourceReference === null || sourceReferenceError(outcome.sourceReference) === null)) return 'missing/censored/unavailable outcome evidence malformed';
+    if (isV2Frame(frame) && outcome.status !== 'MATURED') {
+      const timing = opportunityAuditTargetTiming(frame, outcome.horizonMs);
+      if (timing === null || outcome.outcomeKnownAtTs <= timing.deadlineTs) return 'V2 missingness became terminal before its sealed deadline elapsed';
+    }
+    if (isV2Frame(frame)) {
+      const receiptProblem = retainedSourceReceiptError(outcome.settlementSourceReceipt, outcome, frame);
+      if (receiptProblem) return receiptProblem;
+    }
   }
   const core = outcomeCore(outcome);
   if (outcome.outcomeId !== digest40('oao', core) || outcome.outcomeDigest !== canonicalDigest({ ...core, outcomeId: outcome.outcomeId })) return 'outcome digest mismatch';
@@ -485,7 +653,7 @@ export function auditOutcomeError(outcome, frame) {
 export function attachAuditOutcome(input = {}) {
   const shape = inputShapeError(input,
     ['frame', 'opportunityId', 'horizonMs', 'status', 'recordedTs'],
-    ['outcomeKnownAtTs', 'outcome', 'missingReason', 'sourceReference', 'diagnostic', 'supersedes']);
+    ['outcomeKnownAtTs', 'outcome', 'missingReason', 'sourceReference', 'settlementSourceReceipt', 'diagnostic', 'supersedes']);
   if (shape) throw Object.assign(new Error(`opportunity audit: ${shape}`), { code: 'AUDIT_OUTCOME_INVALID' });
   if (!selectedEntry(input.frame, input.opportunityId)) throw Object.assign(new Error('opportunity audit: outcome is not for one selected frame opportunity'), { code: 'AUDIT_OUTCOME_INVALID' });
   let outcome = null;
@@ -497,7 +665,7 @@ export function attachAuditOutcome(input = {}) {
     };
   }
   const core = {
-    outcomeVersion: OPPORTUNITY_AUDIT_OUTCOME_VERSION, frameId: input.frame.frameId,
+    outcomeVersion: isV2Frame(input.frame) ? OPPORTUNITY_AUDIT_OUTCOME_VERSION_V2 : OPPORTUNITY_AUDIT_OUTCOME_VERSION, frameId: input.frame.frameId,
     frameDigest: input.frame.frameDigest, opportunityId: input.opportunityId,
     horizonMs: input.horizonMs, status: input.status, recordedTs: input.recordedTs,
     outcomeKnownAtTs: input.outcomeKnownAtTs ?? null, outcome,
@@ -505,6 +673,8 @@ export function attachAuditOutcome(input = {}) {
     diagnostic: input.diagnostic === undefined ? { state: 'UNSUPPORTED', modelVersion: null, resultDigest: null } : clone(input.diagnostic),
     supersedes: input.supersedes ?? null, authority: OPPORTUNITY_AUDIT_AUTHORITY, purpose: OPPORTUNITY_AUDIT_PURPOSE,
   };
+  if (isV2Frame(input.frame)) core.settlementSourceReceipt = input.settlementSourceReceipt === undefined
+    ? null : clone(input.settlementSourceReceipt);
   const outcomeId = digest40('oao', core);
   const attachment = { ...core, outcomeId, outcomeDigest: canonicalDigest({ ...core, outcomeId }) };
   const error = auditOutcomeError(attachment, input.frame);
