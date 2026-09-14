@@ -132,7 +132,7 @@ function descriptorCore(descriptor) {
 
 function descriptorError(descriptor, { dayStartTs, dayEndTs, asOfTs, expectedRootDigest, limits }) {
   if (!exact(descriptor, DESCRIPTOR_KEYS) || descriptor.datasetVersion !== 'broad-day-dataset-v1'
-      || descriptor.archiveVersion !== 'broad-day-archive-v2'
+      || descriptor.archiveVersion !== 'broad-day-archive-local-v2'
       || descriptor.dayStartTs !== dayStartTs || descriptor.dayEndTs !== dayEndTs || descriptor.asOfTs !== asOfTs
       || !/^bdd-[a-f0-9]{64}$/.test(descriptor.datasetId ?? '') || !HEX64.test(descriptor.datasetDigest ?? '')
       || descriptor.datasetId !== `bdd-${descriptor.datasetDigest}` || descriptor.authority !== 'NONE'
@@ -218,7 +218,7 @@ function sourceBinding(expectedRootDigest) {
     bindingVersion: 'broad-day-local-source-binding-1',
     sourceId: 'broad-day-local-archive-v2',
     sourceRootDigest: expectedRootDigest,
-    archiveVersion: 'broad-day-archive-v2',
+    archiveVersion: 'broad-day-archive-local-v2',
     durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
   });
 }
@@ -238,6 +238,7 @@ export function createOpportunityAuditBroadDayOutcomeSource({
   const expectedRootDigest = rootDigest(archiveRoot);
   const binding = sourceBinding(expectedRootDigest);
   let active = false; let calls = 0; let available = 0; let pending = 0; let missing = 0; let refused = 0; let last = null;
+  let lastIntegrityError = null;
 
   async function outcomeSource(rawRequest) {
     let request;
@@ -422,6 +423,10 @@ export function createOpportunityAuditBroadDayOutcomeSource({
       missing += 1; last = resolution; return resolution;
     } catch (error) {
       if (error instanceof OpportunityAuditBroadDaySourceError && ['REQUEST_INVALID', 'CLOCK_INVALID'].includes(error.code)) throw error;
+      // Only this adapter's bounded, non-payload diagnostics are exposed. Never
+      // copy arbitrary reader/provider exception messages into health output.
+      lastIntegrityError = error instanceof OpportunityAuditBroadDaySourceError
+        ? { code: error.code, detail: error.message } : { code: 'UNEXPECTED_SOURCE_ERROR', detail: null };
       const preparedTs = clock(); if (!isTs(preparedTs) || preparedTs < asOfTs) throw error;
       const resolution = deepFreeze({ state: 'REFUSED', reasonCode: error?.code === 'SOURCE_BOUND_EXCEEDED' ? 'LOCAL_ARCHIVE_SOURCE_BOUND_EXCEEDED' : 'LOCAL_ARCHIVE_INTEGRITY_REFUSED', preparedTs, sourceReceipt: null, evidence: null });
       refused += 1; last = resolution; return resolution;
@@ -433,7 +438,7 @@ export function createOpportunityAuditBroadDayOutcomeSource({
 
   const status = () => deepFreeze({
     version: OPPORTUNITY_AUDIT_BROAD_DAY_OUTCOME_SOURCE_VERSION,
-    state: active ? 'READING' : 'READY', calls, available, pending, missing, refused,
+    state: active ? 'READING' : 'READY', calls, available, pending, missing, refused, lastIntegrityError,
     last: last === null ? null : { state: last.state, reasonCode: last.reasonCode, preparedTs: last.preparedTs },
     sourceBinding: binding, limits, authority: 'NONE', trainingAuthority: 'NONE',
     durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,

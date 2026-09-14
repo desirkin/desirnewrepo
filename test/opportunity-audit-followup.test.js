@@ -328,7 +328,7 @@ const pendingV2Of = (frame, coin = 'BTC') => {
 };
 const sourceBinding = () => ({
   bindingVersion: 'broad-day-local-source-binding-1', sourceId: 'broad-day-local-source',
-  sourceRootDigest: hex('source-root'), archiveVersion: 'broad-day-archive-v2',
+  sourceRootDigest: hex('source-root'), archiveVersion: 'broad-day-archive-local-v2',
   durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
 });
 const sourceRecords = (evidenceValue) => evidenceValue.bars.map((bar, index) => ({

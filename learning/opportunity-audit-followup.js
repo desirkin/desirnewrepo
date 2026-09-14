@@ -293,7 +293,7 @@ export function opportunityAuditBroadDaySourceReceiptError(value, { item, asOfTs
       || !exact(value.sourceBinding, SOURCE_BINDING_KEYS)
       || value.sourceBinding.bindingVersion !== 'broad-day-local-source-binding-1'
       || !isId(value.sourceBinding.sourceId) || !HEX64_RE.test(value.sourceBinding.sourceRootDigest ?? '')
-      || value.sourceBinding.archiveVersion !== 'broad-day-archive-v2'
+      || value.sourceBinding.archiveVersion !== 'broad-day-archive-local-v2'
       || value.sourceBinding.durability !== 'LOCAL_FILESYSTEM_ONLY' || value.sourceBinding.republishSafe !== false
       || !Number.isSafeInteger(value.recordCount) || value.recordCount < 0 || value.recordCount > OPPORTUNITY_AUDIT_FOLLOWUP_MAX_BARS
       || !HEX64_RE.test(value.recordInventoryDigest ?? '')

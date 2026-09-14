@@ -97,7 +97,7 @@ function sealedDescriptor({ item, openArgs, epochEndTs = null, readiness = true 
     activeUntilTs: epochEndTs ?? openArgs.dayEndTs,
   };
   const core = {
-    datasetVersion: 'broad-day-dataset-v1', archiveVersion: 'broad-day-archive-v2',
+    datasetVersion: 'broad-day-dataset-v1', archiveVersion: 'broad-day-archive-local-v2',
     dayStartTs: openArgs.dayStartTs, dayEndTs: openArgs.dayEndTs, asOfTs: openArgs.asOfTs,
     sourceProvenance: {
       sourceKind: 'LOCAL_BROAD_DAY_ARCHIVE_V2', sourceRootDigest: rootDigest,

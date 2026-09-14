@@ -65,8 +65,8 @@ test('actual V2 writer -> actual paged reader -> audit source produces exact mat
     assert.equal(archive.finalize({ cutoffTs: now }).accepted, true);
     await archive.drain(); await archive.close();
     const result = await source(req);
-    assert.equal(result.state, 'AVAILABLE', JSON.stringify(result));
-    assert.equal(opportunityAuditBroadDaySourceReceiptError(result.sourceReceipt, { item: req.item }), null);
+    assert.equal(result.state, 'AVAILABLE', JSON.stringify({ result, diagnostic: source.status().lastIntegrityError }));
+    assert.equal(opportunityAuditBroadDaySourceReceiptError(result.sourceReceipt, { item: req.item, asOfTs: req.asOfTs, evidence: result.evidence }), null);
     assert.equal(result.evidence.bars.length, 60);
     assert.equal(result.evidence.bars[0].close, 113.8);
     assert.equal(result.evidence.bars.at(-1).close, 114.39);

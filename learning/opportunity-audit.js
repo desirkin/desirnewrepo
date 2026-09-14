@@ -592,7 +592,7 @@ function retainedSourceReceiptError(value, outcome, frame) {
       || !exact(value.sourceBinding, ['bindingVersion', 'sourceId', 'sourceRootDigest', 'archiveVersion', 'durability', 'republishSafe'])
       || value.sourceBinding.bindingVersion !== 'broad-day-local-source-binding-1'
       || !isId(value.sourceBinding.sourceId) || !HEX64_RE.test(value.sourceBinding.sourceRootDigest ?? '')
-      || value.sourceBinding.archiveVersion !== 'broad-day-archive-v2'
+      || value.sourceBinding.archiveVersion !== 'broad-day-archive-local-v2'
       || value.sourceBinding.durability !== 'LOCAL_FILESYSTEM_ONLY' || value.sourceBinding.republishSafe !== false
       || outcome.sourceReference?.sourceKind !== 'CLOSED_CANDLE_ARCHIVE'
       || outcome.sourceReference?.sourceId !== value.sourceBinding.sourceId
