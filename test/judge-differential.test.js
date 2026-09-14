@@ -7,8 +7,8 @@
 // account/execution state with deep equality. NOTHING substantive is stripped or normalized:
 //   - the injected clock is the same object semantics on both sides, so every timestamp must match bit-for-bit;
 //   - the policy file, fee contract, instrument spec and event bytes are constructed through EACH tree's own
-//     contract module (the exact decimal-ordering repair is the sole allowed contract source delta,
-//     asserted below; the event shapes and all other execution sources remain byte-identical);
+//     contract module (execution/ source identity is owned by the P-08 digest fence + docs/JUDGE-PAPER-AUDIT.md,
+//     not by this test — see the note inside the DIFFERENTIAL test);
 //   - decision ids, digests, measurements, reason codes, sizing, valuation, scenario, invalidation, funnel and
 //     dispatcher state are all inside the comparison.
 // The ONLY tolerated difference would be a documented normalization, and there are none: the assertion is raw
@@ -24,7 +24,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -90,26 +90,14 @@ const pct = (arr, p) => { const s = [...arr].sort((a, b) => a - b); return s.len
 const ms1 = (ns) => Math.round(ns / 1e4) / 100;
 
 test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports absent) produce COMPLETE-record-identical decisions, refusals and account/execution state on identical recorded inputs — no substantive field stripped, no normalization applied', async () => {
-  // All execution bytes remain identical except the exact four textual edits
-  // that fix book ordering/crossing. The original baseline rig is NOT patched.
-  // Intentional Watch repairs have separate behavioral regressions; the full
-  // decision/refusal/account-state comparison below is not normalized or relaxed.
-  for (const f of ['execution/contract.js', 'execution/journal.js', 'execution/dispatcher.js', 'execution/paper-adapter.js', 'execution/feed.js', 'execution/reducer.js', 'execution/authority.js', 'execution/money.js', 'lib/crc32.js']) {
-    let expected = readFileSync(path.join(baseDir, f), 'utf8');
-    if (f === 'execution/contract.js') {
-      const repairs = [
-        ["import { isCanonicalDecimal,", "import { cmp, isCanonicalDecimal,"],
-        ["!(s.bids[i][0] < s.bids[i - 1][0] || Number(s.bids[i][0]) < Number(s.bids[i - 1][0]))", "cmp(s.bids[i][0], s.bids[i - 1][0]) >= 0"],
-        ["!(Number(s.asks[i][0]) > Number(s.asks[i - 1][0]))", "cmp(s.asks[i][0], s.asks[i - 1][0]) <= 0"],
-        ["Number(s.bids[0][0]) >= Number(s.asks[0][0])", "cmp(s.bids[0][0], s.asks[0][0]) >= 0"],
-      ];
-      for (const [before, after] of repairs) {
-        assert.equal(expected.split(before).length - 1, 1, `baseline repair anchor is unique: ${before}`);
-        expected = expected.replace(before, after);
-      }
-    }
-    assert.equal(readFileSync(path.join(ROOT, f), 'utf8'), expected, `${f} has no source delta beyond the explicitly reviewed book-comparison repair`);
-  }
+  // 2026-09-14: the execution/ source-identity precondition that used to sit here (bytes equal to ea3bfbf except the
+  // book-comparison repair) is retired. execution/ has since changed by audited law — contract exit reasons, closeout
+  // classification, canary/queue integrity, reservation settlement — each recorded in docs/JUDGE-PAPER-AUDIT.md §4.5 and
+  // pinned by the P-08 digest fence (test/paper-runtime.test.js), which is the single owner of "execution/ moved".
+  // What THIS test still proves, unrelaxed: with every new port absent, the working-tree Judge and the ACTUAL ea3bfbf
+  // Judge produce deepEqual decisions, refusals, funnel, admission-gate report and account/execution state on identical
+  // recorded inputs. (The recorded inputs end at ENTRY_RESERVED before any fill, so reservation settlement — which
+  // differs by design after a fill — is outside this comparison; test/judge-reservation-settlement.test.js owns it.)
   const base = await rigFor(baseDir, { accountId: 'diff-x' });
   const next = await rigFor(ROOT, { accountId: 'diff-x' }); // the SAME account id: identical ids/digests must reproduce
   await base.warm(); await base.ignite();
