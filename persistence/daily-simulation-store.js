@@ -80,8 +80,10 @@ function bodyError(code, msg) { const e = new DsimStoreError(`outcome body: ${ms
 //     the walk so a deep/huge/exponential input is refused BEFORE a big string
 //     is built. Byte overflow throws code BODY_TOO_LARGE (→ size limit); every
 //     structural violation throws code BODY_NONCANONICAL.
-// Returns { canon, bytes, digest }.
-function encodeOutcomeBody(body, maxBytes) {
+// Returns { canon, bytes, digest }. EXPORTED so the scheduler's production
+// receipt-body handoff binds the credited result-row digest to the SAME
+// canonical SHA-256 law the store enforces — one implementation, no drift.
+export function encodeOutcomeBody(body, maxBytes) {
   const ancestors = new Set();
   let bytes = 0; let nodes = 0; let out = '';
   const emit = (s) => { bytes += Buffer.byteLength(s, 'utf8'); if (bytes > maxBytes) throw bodyError('BODY_TOO_LARGE', `exceeds ${maxBytes} bytes`); out += s; };

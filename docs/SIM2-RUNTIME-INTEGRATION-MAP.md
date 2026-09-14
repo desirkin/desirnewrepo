@@ -27,6 +27,7 @@ hard-codes none of them (contract-checked at construction):
 | --- | --- | --- | --- |
 | `store` | loadDay / commitBatch / … | **REAL** (this durable store) — but only once root applies migration 11; DDL is proposed, unapplied | fake tx Db + real PG in a dropped schema |
 | `executor` | `executeDailySimulationBatch({job,outcomePaths,cursor,maxEvaluations})` | **NONE** — no non-test implementation exists anywhere in the repo | `syntheticExecutor` emitting `COMPLETED_MODELED` rows |
+| `bodyOf` (optional) | `bodyOf(result)` → replayable outcome body | **NONE** — no real executor supplies one; the scheduler NOW forwards it (bound to the store's SHA-256 canonical law) when injected | synthetic body `{idx,tag,label:'SYNTHETIC'}` |
 | `jobSource` | `readyJobs({dayKey,max})` | **NONE** | inline `{ readyJobs: async () => [...] }` |
 | `outcomePathSource` | `pathsFor({job,cursor,maxEvaluations})` | **NONE** | returns `{ label: 'SYNTHETIC' }` |
 | selectors | statusOf/identityOf/completedOf/validOf/prospectiveOf/… | supplied by whoever wires the real executor's result shape | synthetic field pickers |
@@ -53,9 +54,11 @@ hard-codes none of them (contract-checked at construction):
 1. **Migration 11 applied by root** so the seven `serpent_dsim_*` tables +
    crediting index + body table exist in the real schema.
 2. **A real executor** implementing `executeDailySimulationBatch` (or a
-   `campaign.js` → executor adapter) that emits real result rows AND real outcome
-   bodies whose `digest` is the SHA-256 of the canonical body — required for
-   Option A replay to hold real evidence rather than synthetic rows.
+   `campaign.js` → executor adapter) that emits real result rows AND a real
+   `bodyOf(result)` outcome body. The scheduler→store body handoff now EXISTS
+   (the scheduler forwards `bodyOf` bound to the store's SHA-256 canonical law,
+   proven by test/daily-simulation-scheduler-body.test.js); what remains is a
+   real executor to produce real bodies instead of synthetic ones.
 3. **DATA-1 archive reader** (full-day catalog/candle/volume + coverage) to
    supply `outcomePathSource.pathsFor` and a real `jobSource.readyJobs`.
 4. **Runtime wiring** in `learning/service.js` (or a dedicated SIM-2 runner) that

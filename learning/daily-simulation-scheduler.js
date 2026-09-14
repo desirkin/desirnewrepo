@@ -35,6 +35,14 @@
 //     outcomes are separate tallies; neither is qualified learning.
 //   * Single-flight, fair rotation, CPU yield, fail-closed storage, idempotent
 //     lost-ACK retry, restart without double-count.
+//   * Outcome-body handoff — when a bodyOf(result) selector is injected, a
+//     credited result's outcome body is forwarded into the receipt and its
+//     result-row digest is bound to the store's EXACT SHA-256 canonical law
+//     (imported encodeOutcomeBody), so the durable store can retain a verifiable
+//     replay body. No body means metadata-only (unchanged); the store is still
+//     the authority on body byte bounds.
+
+import { encodeOutcomeBody } from '../persistence/daily-simulation-store.js';
 
 export const SCHEDULER_PORT_VERSION = 'daily-sim-scheduler-2';
 export const DEFAULT_POLICY_VERSION = 'sim2-policy-1';
@@ -113,6 +121,7 @@ export function createDailySimulationScheduler({
   store, jobSource, executor, outcomePathSource,
   statusOf, identityOf, completedOf, validOf,
   prospectiveOf = () => false, // distinct from completed/validModeled; injected when known
+  bodyOf = () => undefined, // optional: the credited result's replayable outcome body (opaque); forwarded to the store bound to the SHA-256 canonical law
   maturityOf = () => undefined, // optional: source-provided availability/maturity ts (ms) for a pending result
   pendingBackoff = DEFAULT_PENDING_BACKOFF,
   isRevisitable = (r) => !completedOf(r) && REVISITABLE_DEFAULT.has(statusOf(r)),
@@ -305,7 +314,23 @@ export function createDailySimulationScheduler({
         const idk = String(idv);
         if (idk.length > MAX_IDENTITY_BYTES) throw new SchedulerIntegrityError('result identity exceeds byte bound');
         byStatus[status] = (byStatus[status] || 0) + 1;
-        resultEvidence.push({ id: idk, status, completed: !!completedOf(r), valid: !!validOf(r), prospective: !!prospectiveOf(r), digest: digest(r) });
+        const isCompleted = !!completedOf(r);
+        const ev = { id: idk, status, completed: isCompleted, valid: !!validOf(r), prospective: !!prospectiveOf(r), digest: digest(r) };
+        // Outcome-body handoff: for a CREDITED result carrying a body, forward
+        // the opaque body and bind THIS row's digest to the store's exact SHA-256
+        // canonical law (encodeOutcomeBody). A non-canonical body is a loud
+        // integrity failure, never a silent drop. Byte bounds stay the store's.
+        if (isCompleted) {
+          const body = bodyOf(r);
+          if (body !== undefined) {
+            let enc;
+            try { enc = encodeOutcomeBody(body, Number.MAX_SAFE_INTEGER); }
+            catch (err) { throw new SchedulerIntegrityError(`non-canonical outcome body for ${idk}: ${err && err.message}`); }
+            ev.digest = enc.digest;      // credited row digest == body content digest (store binds body<->result)
+            ev.outcomeBody = body;       // forwarded; store re-validates + enforces byte ceilings
+          }
+        }
+        resultEvidence.push(ev);
         if (completedOf(r)) {
           if (seen.has(idk) || newCompletedIds.includes(idk)) { tDup += 1; continue; }
           newCompletedIds.push(idk); completedResults.push(r); tCompleted += 1;
