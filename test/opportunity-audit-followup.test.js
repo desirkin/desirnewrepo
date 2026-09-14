@@ -342,6 +342,49 @@ const datasetOf = (item, asOfTs) => ({
   sourceMarketIdentityDigest: item.marketIdentityDigest,
 });
 
+test('independent V2 review: every retained row must match evidence and be known at the requested cutoff', () => {
+  const frame = frameV2Of(); const item = pendingV2Of(frame); const asOfTs = item.dueTs + 10_000;
+  const evidence = candleEvidence(frame, 'BTC', 100, 105, 10_000);
+  for (const kind of ['interior-close', 'future-known-at']) {
+    const records = sourceRecords(evidence);
+    if (kind === 'interior-close') records[1].close += 20;
+    else records[1].knownAtTs = asOfTs + 1;
+    const manifest = sealOpportunityAuditBroadDayManifest({ item, sourceBinding: sourceBinding(),
+      readerDatasets: [datasetOf(item, asOfTs)], catalogMembershipDigest: hex('catalog-membership'), records });
+    assert.throws(() => sealOpportunityAuditBroadDaySourceReceipt({ item, asOfTs, preparedTs: asOfTs + 2,
+      resolutionState: 'AVAILABLE', resolutionReason: null, sourceBinding: sourceBinding(),
+      archiveManifest: manifest, records, evidence }), /SOURCE_RECEIPT_INVALID/, kind);
+  }
+});
+
+test('independent V2 review: pure followup rejects a well-formed pending item from a different frame', () => {
+  const frame = frameV2Of(); const other = frameV2Of(['BTC'], 120_000); const item = pendingV2Of(other);
+  const now = item.dueTs + 1;
+  assert.throws(() => buildOpportunityAuditFollowup({ frame,
+    opportunityId: frame.population[0].opportunityId, horizonMs: HOUR, item, asOfTs: now, recordedTs: now,
+    resolution: { state: 'PENDING', reasonCode: 'ARCHIVE_NOT_READY', preparedTs: now, sourceReceipt: null, evidence: null },
+  }), /SETTLEMENT_INVALID/);
+});
+
+test('independent V2 review: a rehashed settlement cannot invent return values inconsistent with its source', () => {
+  const frame = frameV2Of(); const item = pendingV2Of(frame); const now = item.dueTs + 10_000;
+  const evidence = candleEvidence(frame, 'BTC', 100, 105, 10_000); const records = sourceRecords(evidence);
+  const manifest = sealOpportunityAuditBroadDayManifest({ item, sourceBinding: sourceBinding(),
+    readerDatasets: [datasetOf(item, now)], catalogMembershipDigest: hex('catalog-membership'), records });
+  const sourceReceipt = sealOpportunityAuditBroadDaySourceReceipt({ item, asOfTs: now, preparedTs: now,
+    resolutionState: 'AVAILABLE', resolutionReason: null, sourceBinding: sourceBinding(), archiveManifest: manifest, records, evidence });
+  const resolution = { state: 'AVAILABLE', reasonCode: null, preparedTs: now, sourceReceipt, evidence };
+  const built = buildOpportunityAuditFollowup({ frame, opportunityId: item.opportunityId,
+    horizonMs: HOUR, item, asOfTs: now, resolution, recordedTs: now });
+  const outcome = structuredClone(built.outcome); outcome.outcome.returnPct = 999;
+  const core = structuredClone(outcome); delete core.outcomeId; delete core.outcomeDigest;
+  outcome.outcomeId = `oao-${canonicalDigest(core).slice(0, 40)}`;
+  outcome.outcomeDigest = canonicalDigest({ ...core, outcomeId: outcome.outcomeId });
+  assert.throws(() => sealOpportunityAuditSettlementReceiptV2({ item, resolution, recordedTs: now, outcome,
+    readback: { frameId: item.frameId, frameDigest: item.frameDigest, storeRevision: 4,
+      outcomeId: outcome.outcomeId, outcomeDigest: outcome.outcomeDigest } }), /DURABLE_ACK_INVALID/);
+});
+
 test('V2 predeclares a finite label delay and refuses terminal missingness through the deadline', () => {
   const frame = frameV2Of(); const item = pendingV2Of(frame); const atDeadline = item.deadlineTs;
   assert.equal(frame.target.maxLabelDelayMs, 60_000);
