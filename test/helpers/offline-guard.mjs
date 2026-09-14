@@ -17,11 +17,30 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { syncBuiltinESMExports } from 'node:module';
+import { getEnvironmentData, setEnvironmentData } from 'node:worker_threads';
 
 const GUARD_PATH = fileURLToPath(import.meta.url);
-const RUN = process.env.COBRA_OFFLINE_GUARD_RUN ?? 'suite';
-const LOG = process.env.COBRA_OFFLINE_GUARD_LOG ?? path.join(tmpdir(), 'cobra-offline-guard', `${RUN.replace(/[^A-Za-z0-9_.-]/g, '_')}.jsonl`);
-process.env.COBRA_OFFLINE_GUARD_LOG = LOG; process.env.COBRA_OFFLINE_GUARD_RUN = RUN;
+const GUARD_VERSION = 'cobra-offline-guard-1';
+const WORKER_METADATA_KEY = 'cobra-offline-guard-worker-metadata-1';
+const inheritedWorkerMetadata = getEnvironmentData(WORKER_METADATA_KEY);
+const inheritedMetadataValid = inheritedWorkerMetadata !== null
+  && typeof inheritedWorkerMetadata === 'object'
+  && inheritedWorkerMetadata.version === GUARD_VERSION
+  && inheritedWorkerMetadata.path === GUARD_PATH
+  && typeof inheritedWorkerMetadata.log === 'string'
+  && inheritedWorkerMetadata.log.length > 0
+  && typeof inheritedWorkerMetadata.run === 'string'
+  && inheritedWorkerMetadata.run.length > 0;
+const RUN = process.env.COBRA_OFFLINE_GUARD_RUN
+  ?? (inheritedMetadataValid ? inheritedWorkerMetadata.run : 'suite');
+const LOG = process.env.COBRA_OFFLINE_GUARD_LOG
+  ?? (inheritedMetadataValid ? inheritedWorkerMetadata.log : path.join(tmpdir(), 'cobra-offline-guard', `${RUN.replace(/[^A-Za-z0-9_.-]/g, '_')}.jsonl`));
+// Native Workers can deliberately use env: {} as an authority boundary. Pass
+// only this test guard's fixed evidence identity through worker environmentData;
+// never repopulate the Worker's process.env or forward ambient credentials.
+setEnvironmentData(WORKER_METADATA_KEY, Object.freeze({
+  version: GUARD_VERSION, path: GUARD_PATH, log: LOG, run: RUN,
+}));
 const LOOPBACK_RE = /^(127(\.\d{1,3}){3}|::1|0:0:0:0:0:0:0:1|::ffff:127(\.\d{1,3}){3}|localhost|0\.0\.0\.0|::)$/i;
 export const isLoopbackHost = (host) => { if (host === undefined || host === null || host === '') return true; const h = String(host).replace(/^\[|\]$/g, '').toLowerCase(); return LOOPBACK_RE.test(h); };
 const testFile = () => { const a = process.argv.find((x) => /\.test\.(m?js|cjs)$/.test(x)); return a ? path.basename(a) : null; };
@@ -66,4 +85,4 @@ const optionsIndex = (args, from) => { for (let i = from; i < args.length; i += 
 function wrapSpawnLike(name) { const orig = childProcess[name]; if (typeof orig !== 'function') return; const wrapped = function guardedSpawnLike(...args) { const a = [...args]; return orig.apply(childProcess, withEnv(a, optionsIndex(a, 1))); }; if (orig[promisify.custom]) { const oc = orig[promisify.custom]; wrapped[promisify.custom] = function guardedPromisified(...args) { const a = [...args]; return oc.apply(childProcess, withEnv(a, optionsIndex(a, 1))); }; } childProcess[name] = wrapped; }
 for (const n of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) wrapSpawnLike(n);
 syncBuiltinESMExports(); // ESM named imports of the builtins see the guarded functions
-export const OFFLINE_GUARD = Object.freeze({ path: GUARD_PATH, log: LOG, run: RUN, version: 'cobra-offline-guard-1' });
+export const OFFLINE_GUARD = Object.freeze({ path: GUARD_PATH, log: LOG, run: RUN, version: GUARD_VERSION });
