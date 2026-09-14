@@ -12,6 +12,7 @@ import {
 
 export const DAILY_MOVE_STUDY_VERSION = 'daily-move-study-1';
 export const DAILY_MOVE_MANIFEST_VERSION = 'daily-move-study-manifest-1';
+export const DAILY_MOVE_MANIFEST_VERSION_V2 = 'daily-move-study-manifest-2';
 export const DEFAULT_STUDY_TIME_ZONE = 'America/New_York';
 export const SUPPORT_FAMILIES = Object.freeze([
   'PRICE', 'CANDLES', 'BASE_VOLUME', 'QUOTE_VOLUME', 'TRADES', 'TRADE_FLOW', 'SPREAD', 'DEPTH', 'CATALYST',
@@ -29,6 +30,11 @@ const MANIFEST_KEYS = Object.freeze([
   'dayStartTs', 'dayEndTs', 'catalogSnapshot', 'catalogProvenance', 'recipeSeals', 'rules', 'authority', 'purpose',
 ]);
 const CATALOG_PROVENANCE_KEYS = Object.freeze(['state', 'provenanceVerified', 'durableFullDayEpochUnionVerified', 'warning']);
+const CATALOG_PROVENANCE_V2_KEYS = Object.freeze([
+  'provenanceVersion', 'state', 'provenanceVerified', 'durableFullDayEpochUnionVerified',
+  'sourceDatasetVersion', 'sourceDatasetId', 'sourceDatasetDigest', 'sourceArchiveVersion',
+  'catalogEpochDigest', 'catalogUnionContentDigest', 'durability', 'republishSafe', 'warning',
+]);
 const RULE_KEYS = Object.freeze([
   'riseThresholdPct', 'comparison', 'failedRiseFloorPct', 'failedRetracePct', 'fallingThresholdPct',
   'flatRangePct', 'preWindowMs', 'decisionGridMs', 'controlsPerClass', 'episodeUnit',
@@ -98,16 +104,32 @@ const manifestDigestOf = (m) => canonicalDigest({
 
 export function dailyMoveStudyManifestError(manifest) {
   const keys = exactKeys(manifest, MANIFEST_KEYS); if (keys) return `manifest: ${keys}`;
-  if (manifest.manifestVersion !== DAILY_MOVE_MANIFEST_VERSION || manifest.analysisBasis !== 'RETROSPECTIVE_COHORT_STUDY') return 'manifest: version/basis malformed';
+  if (![DAILY_MOVE_MANIFEST_VERSION, DAILY_MOVE_MANIFEST_VERSION_V2].includes(manifest.manifestVersion)
+      || manifest.analysisBasis !== 'RETROSPECTIVE_COHORT_STUDY') return 'manifest: version/basis malformed';
   if (!isTs(manifest.createdTs) || manifest.createdTs < manifest.dayEndTs) return 'manifest: retrospective declaration must be at/after the completed day';
   const terr = timeBoundaryError(manifest); if (terr) return `manifest: ${terr}`;
   const cerr = acceptedCatalogSnapshotError(manifest.catalogSnapshot); if (cerr) return `manifest: catalog ${cerr}`;
   if (manifest.catalogSnapshot.knownAtTs > manifest.createdTs || manifest.catalogSnapshot.knownAtTs >= manifest.dayEndTs || manifest.catalogSnapshot.observedTs >= manifest.dayEndTs
       || manifest.dayStartTs - manifest.catalogSnapshot.observedTs > manifest.catalogSnapshot.maxAgeMs) return 'manifest: catalog snapshot cannot identify the population monitored during this day';
-  const pk = exactKeys(manifest.catalogProvenance, CATALOG_PROVENANCE_KEYS); if (pk) return `manifest: catalog provenance ${pk}`;
-  if (manifest.catalogProvenance.state !== 'SEALED_SNAPSHOT_ONLY_UNVERIFIED_FULL_DAY_UNION'
-      || manifest.catalogProvenance.provenanceVerified !== false || manifest.catalogProvenance.durableFullDayEpochUnionVerified !== false
-      || typeof manifest.catalogProvenance.warning !== 'string') return 'manifest: this version must disclose unverified catalog epoch provenance';
+  if (manifest.manifestVersion === DAILY_MOVE_MANIFEST_VERSION) {
+    const pk = exactKeys(manifest.catalogProvenance, CATALOG_PROVENANCE_KEYS); if (pk) return `manifest: catalog provenance ${pk}`;
+    if (manifest.catalogProvenance.state !== 'SEALED_SNAPSHOT_ONLY_UNVERIFIED_FULL_DAY_UNION'
+        || manifest.catalogProvenance.provenanceVerified !== false || manifest.catalogProvenance.durableFullDayEpochUnionVerified !== false
+        || typeof manifest.catalogProvenance.warning !== 'string') return 'manifest: this version must disclose unverified catalog epoch provenance';
+  } else {
+    const pk = exactKeys(manifest.catalogProvenance, CATALOG_PROVENANCE_V2_KEYS); if (pk) return `manifest: catalog provenance ${pk}`;
+    const p = manifest.catalogProvenance;
+    if (p.provenanceVersion !== 'daily-broad-archive-provenance-1'
+        || p.state !== 'VERIFIED_LOCAL_V2_ARCHIVE_FULL_DAY' || p.provenanceVerified !== true
+        || p.durableFullDayEpochUnionVerified !== true
+        || p.sourceDatasetVersion !== 'broad-day-dataset-v1'
+        || !SHA256_RE.test(String(p.sourceDatasetDigest)) || p.sourceDatasetId !== `bdd-${p.sourceDatasetDigest}`
+        || p.sourceArchiveVersion !== 'broad-day-archive-local-v2'
+        || !SHA256_RE.test(String(p.catalogEpochDigest))
+        || p.catalogUnionContentDigest !== manifest.catalogSnapshot.contentDigest
+        || p.durability !== 'LOCAL_FILESYSTEM_ONLY' || p.republishSafe !== false
+        || typeof p.warning !== 'string' || p.warning.length < 1 || p.warning.length > 400) return 'manifest: v2 local archive provenance malformed or unbound';
+  }
   if (!Array.isArray(manifest.recipeSeals) || manifest.recipeSeals.length > 64 || manifest.recipeSeals.some((s) => recipeSealError(s))) return 'manifest: recipe seals malformed or exceed 64';
   const recipeDigests = manifest.recipeSeals.map((s) => s.recipeDigest);
   if (new Set(recipeDigests).size !== recipeDigests.length || recipeDigests.join('\n') !== [...recipeDigests].sort().join('\n')) return 'manifest: recipe seals duplicated or not canonical-sorted';
@@ -143,6 +165,24 @@ export function sealDailyMoveStudyManifest({
       durableFullDayEpochUnionVerified: false,
       warning: 'A content-valid snapshot does not prove the union of every catalog epoch monitored throughout this civil day; operational full-day claims require durable epoch controls.',
     },
+    recipeSeals: recipeSeals.map(clone).sort((a, b) => a.recipeDigest.localeCompare(b.recipeDigest)),
+    rules: { ...DEFAULT_RULES, ...rules }, authority: AUTHORITY, purpose: PURPOSE,
+  };
+  manifest.manifestDigest = manifestDigestOf(manifest);
+  manifest.manifestId = `dmstudy-${manifest.manifestDigest.slice(0, 24)}`;
+  const err = dailyMoveStudyManifestError(manifest); if (err) throw new Error(`daily move study: ${err}`);
+  return deepFreeze(manifest);
+}
+
+export function sealDailyMoveStudyManifestV2({
+  createdTs, timeZone = DEFAULT_STUDY_TIME_ZONE, localDay, dayStartTs, dayEndTs,
+  acceptedCatalogSnapshot, catalogProvenance, recipeSeals = [], rules = {},
+}) {
+  if (!Array.isArray(recipeSeals) || recipeSeals.length > 64) throw new Error('daily move study: manifest recipe seals malformed or exceed 64');
+  const manifest = {
+    manifestVersion: DAILY_MOVE_MANIFEST_VERSION_V2, manifestId: '', manifestDigest: '',
+    analysisBasis: 'RETROSPECTIVE_COHORT_STUDY', createdTs, timeZone, localDay, dayStartTs, dayEndTs,
+    catalogSnapshot: clone(acceptedCatalogSnapshot), catalogProvenance: clone(catalogProvenance),
     recipeSeals: recipeSeals.map(clone).sort((a, b) => a.recipeDigest.localeCompare(b.recipeDigest)),
     rules: { ...DEFAULT_RULES, ...rules }, authority: AUTHORITY, purpose: PURPOSE,
   };
@@ -372,7 +412,10 @@ export function buildDailyDecisionFrame({ manifest, marketDay, decisionTs }) {
   return decisionFrame(manifest, marketDay, decisionTs);
 }
 
-function preFacts(day, manifest, anchorTs) {
+// Exact existing control-matching prefix law, exported for the sharded
+// retrospective aggregator. Callers must supply an already validated market
+// day and manifest. The strict-before clocks intentionally remain unchanged.
+export function dailyMoveControlPrefixFacts(day, manifest, anchorTs) {
   const from = anchorTs - manifest.rules.preWindowMs;
   const prices = day.priceEvents.filter((e) => e.sourceEventTs >= from && e.sourceEventTs < anchorTs && e.knownAtTs < anchorTs)
     .sort((a, b) => a.sourceEventTs - b.sourceEventTs || a.observationId.localeCompare(b.observationId)).map((e) => e.price);
@@ -394,7 +437,7 @@ function preFacts(day, manifest, anchorTs) {
   return { realizedVolPct, logQuoteVolume: quoteVolume === null ? null : Math.log1p(quoteVolume), supportSignature, sampleCount: series.length };
 }
 
-function matchDistance(a, b) {
+export function dailyMoveControlMatchDistance(a, b) {
   if (!a || !b || a.supportSignature !== b.supportSignature || (a.logQuoteVolume === null) !== (b.logQuoteVolume === null)) return null;
   return Math.abs(a.realizedVolPct - b.realizedVolPct) + (a.logQuoteVolume === null ? 0 : Math.abs(a.logQuoteVolume - b.logQuoteVolume));
 }
@@ -476,12 +519,12 @@ export function buildDailyMoveStudy({ manifest, acceptedCatalogSnapshot, marketD
   for (const surge of byDisposition.get('SURGE_CASE')) {
     const anchorTs = surge.retrospectiveLabels.anchorTs;
     const surgeDay = dayByDigest.get(surge.marketIdentityDigest);
-    const sf = preFacts(surgeDay, manifest, anchorTs);
+    const sf = dailyMoveControlPrefixFacts(surgeDay, manifest, anchorTs);
     for (const controlClass of controlClasses) {
       const ranked = [];
       for (const candidate of byDisposition.get(controlClass)) {
         if (used.has(candidate.caseId)) continue;
-        const distance = matchDistance(sf, preFacts(dayByDigest.get(candidate.marketIdentityDigest), manifest, anchorTs));
+        const distance = dailyMoveControlMatchDistance(sf, dailyMoveControlPrefixFacts(dayByDigest.get(candidate.marketIdentityDigest), manifest, anchorTs));
         if (distance !== null) ranked.push({ candidate, distance });
       }
       ranked.sort((a, b) => a.distance - b.distance || a.candidate.caseId.localeCompare(b.candidate.caseId));
@@ -504,6 +547,7 @@ export function buildDailyMoveStudy({ manifest, acceptedCatalogSnapshot, marketD
   const completeSupportMatrixCases = rows.filter((row) => row.retrospectiveLabels.disposition !== 'INVALID_DATA'
     && SUPPORT_FAMILIES.every((family) => row.support?.[family]?.state === 'COMPLETE')).length;
   const observedGroupDispositions = new Set(['SURGE_CASE', 'AMBIGUOUS_INTRABAR', 'FAILED_BREAKOUT_CONTROL', 'FALLING_CONTROL', 'FLAT_CONTROL', 'OTHER_OBSERVED']);
+  const verifiedLocalV2Archive = manifest.manifestVersion === DAILY_MOVE_MANIFEST_VERSION_V2;
 
   return deepFreeze({
     studyVersion: DAILY_MOVE_STUDY_VERSION, manifest,
@@ -531,8 +575,12 @@ export function buildDailyMoveStudy({ manifest, acceptedCatalogSnapshot, marketD
     laws: {
       qualification: 'ANY STRICTLY ORDERED EARLIER_TO_LATER RISE >8% WITHIN THE DECLARED LOCAL DAY; LATER COLLAPSE DOES NOT UNQUALIFY',
       sameCandle: 'OHLC LOW/HIGH ORDER UNKNOWN; SAME-BAR EXTREMA ALONE ARE AMBIGUOUS',
-      denominator: 'EVERY MARKET IN THE SEALED SNAPSHOT HAS EXACTLY ONE ROW; FULL-DAY CATALOG EPOCH UNION IS NOT YET PROVEN',
-      catalogProvenance: 'CONTENT-VALID SNAPSHOT ONLY; provenanceVerified=false until durable day catalog controls are bound',
+      denominator: verifiedLocalV2Archive
+        ? 'EVERY MARKET IN THE VERIFIED LOCAL V2 ARCHIVE FULL-DAY CATALOG UNION HAS EXACTLY ONE ROW; THIS DOES NOT PROVE EXTERNAL CUSTODY OR PROSPECTIVE ELIGIBILITY'
+        : 'EVERY MARKET IN THE SEALED SNAPSHOT HAS EXACTLY ONE ROW; FULL-DAY CATALOG EPOCH UNION IS NOT YET PROVEN',
+      catalogProvenance: verifiedLocalV2Archive
+        ? 'VERIFIED AGAINST THE CONTENT-BOUND LOCAL V2 ARCHIVE SESSION/CATALOG CONTROLS; durability=LOCAL_FILESYSTEM_ONLY and republishSafe=false'
+        : 'CONTENT-VALID SNAPSHOT ONLY; provenanceVerified=false until durable day catalog controls are bound',
       separation: 'RETROSPECTIVE LABELS NEVER ENTER REPLAY-FRAME DIGESTS; GROSS PLANNED SLOTS ARE NOT INPUT-ELIGIBLE, ATTEMPTED, COMPLETED, VALID, OR PROSPECTIVE',
       inference: 'MARKET-DAY GROUPS ARE DEPENDENCE LABELS, NOT STATISTICAL INDEPENDENCE OR CAUSAL PROOF',
       authority: 'NO ORDER/JUDGE/PROMOTION/FULL_DETAIL/CAUSAL/PROSPECTIVE/EXECUTABLE CLAIM',

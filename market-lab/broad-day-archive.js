@@ -11,12 +11,15 @@ import { open as openFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   BROAD_KRAKEN_RECORD_VERSION,
+  BROAD_KRAKEN_RECORD_VERSION_V2,
   broadKrakenRecordError,
   validateBroadKrakenCatalog,
 } from './broad-kraken.js';
 
 export const BROAD_DAY_ARCHIVE_VERSION = 'broad-day-archive-local-v1';
 export const BROAD_DAY_ARCHIVE_ENTRY_VERSION = 'broad-day-archive-entry-v1';
+export const BROAD_DAY_ARCHIVE_VERSION_V2 = 'broad-day-archive-local-v2';
+export const BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2 = 'broad-day-archive-entry-v2';
 export const BROAD_DAY_ARCHIVE_DURABILITY = 'LOCAL_FILESYSTEM_ONLY';
 export const BROAD_DAY_ARCHIVE_DEFAULTS = Object.freeze({
   maxMarkets: 5_000,
@@ -149,10 +152,10 @@ async function writeAll(handle, buffer) {
   }
 }
 
-function validateArchiveRecord(record, catalog, nowTs, limits) {
+function validateArchiveRecord(record, catalog, nowTs, limits, requiredRecordVersion = BROAD_KRAKEN_RECORD_VERSION) {
   const baseError = broadKrakenRecordError(record);
   if (baseError) return { ok: false, code: 'ARCHIVE_RECORD_INVALID', reason: baseError };
-  if (record.recordVersion !== BROAD_KRAKEN_RECORD_VERSION) return { ok: false, code: 'ARCHIVE_RECORD_INVALID', reason: 'record version mismatch' };
+  if (record.recordVersion !== requiredRecordVersion) return { ok: false, code: 'ARCHIVE_RECORD_INVALID', reason: 'record version mismatch' };
   if (!positiveInt(record.sequence)) return { ok: false, code: 'ARCHIVE_RECORD_INVALID', reason: 'producer sequence malformed' };
   if (typeof record.sessionId !== 'string' || !record.sessionId.length || record.sessionId.length > 128) return { ok: false, code: 'ARCHIVE_RECORD_INVALID', reason: 'session identity malformed' };
   if (typeof record.epochId !== 'string' || !record.epochId.length || record.epochId.length > 160) return { ok: false, code: 'ARCHIVE_RECORD_INVALID', reason: 'epoch identity malformed' };
@@ -205,14 +208,18 @@ function validateArchiveRecord(record, catalog, nowTs, limits) {
 
 export function openBroadDayArchive({
   rootDir,
+  formatVersion = BROAD_DAY_ARCHIVE_VERSION,
   limits = undefined,
   clock = () => Date.now(),
   onFault = () => {},
   io = { open: openFile },
 } = {}) {
   if (typeof rootDir !== 'string' || !rootDir.trim()) throw new BroadDayArchiveError('ARCHIVE_ROOT_INVALID', 'rootDir required');
+  if (![BROAD_DAY_ARCHIVE_VERSION, BROAD_DAY_ARCHIVE_VERSION_V2].includes(formatVersion)) throw new BroadDayArchiveError('ARCHIVE_VERSION_INVALID', 'unsupported archive formatVersion');
   if (typeof clock !== 'function' || typeof onFault !== 'function' || !io || typeof io.open !== 'function') throw new BroadDayArchiveError('ARCHIVE_ARGUMENT_INVALID', 'clock, onFault and io.open are required functions');
   const cfg = limitsOf(limits);
+  const entryVersion = formatVersion === BROAD_DAY_ARCHIVE_VERSION_V2 ? BROAD_DAY_ARCHIVE_ENTRY_VERSION_V2 : BROAD_DAY_ARCHIVE_ENTRY_VERSION;
+  const requiredRecordVersion = formatVersion === BROAD_DAY_ARCHIVE_VERSION_V2 ? BROAD_KRAKEN_RECORD_VERSION_V2 : BROAD_KRAKEN_RECORD_VERSION;
   const startedTs = clock();
   if (!positiveInt(startedTs)) throw new BroadDayArchiveError('ARCHIVE_CLOCK_INVALID', 'opening clock must be positive epoch-ms');
 
@@ -224,7 +231,7 @@ export function openBroadDayArchive({
   const lockPath = path.join(archiveRoot, 'writer.lock');
   const token = randomBytes(24).toString('hex');
   const sessionId = `bda-${startedTs}-${process.pid}-${randomBytes(8).toString('hex')}`;
-  const lockText = `${JSON.stringify({ version: BROAD_DAY_ARCHIVE_VERSION, token, sessionId, pid: process.pid, acquiredTs: startedTs })}\n`;
+  const lockText = `${JSON.stringify({ version: formatVersion, token, sessionId, pid: process.pid, acquiredTs: startedTs })}\n`;
   const lockBytes = Buffer.byteLength(lockText, 'utf8');
   const ownLockMatches = () => existsSync(lockPath) && statSync(lockPath).size === lockBytes && readFileSync(lockPath, 'utf8') === lockText;
   let lockFd = null;
@@ -258,9 +265,9 @@ export function openBroadDayArchive({
   let activeCatalog = null; let lastControlDigest = null; let nextOrdinal = 1; let lastAdmissionTs = startedTs;
   let admittedOrdinal = 0; let writtenOrdinal = 0; let fsyncedOrdinal = 0;
   let queuedBytes = 0; let writing = false; let scheduled = false; let inFlight = null; let ioFailed = false;
-  let closing = false; let closed = false; let closePromise = null; let failure = null; let onFaultCalled = false; let writesSinceSync = 0;
+  let closing = false; let closed = false; let closePromise = null; let failure = null; let onFaultCalled = false; let writesSinceSync = 0; let finalizedControl = null;
   const counters = {
-    admitted: 0, written: 0, catalogControls: 0, sourceControls: 0, closedCandles: 0,
+    admitted: 0, written: 0, catalogControls: 0, catalogHeartbeats: 0, sourceControls: 0, closedCandles: 0, finalizations: 0,
     idempotent: 0, conflicts: 0, rejected: 0, queueHighWaterRows: 0, queueHighWaterBytes: 0,
     writtenPhysicalRows: 0, writtenBytes: 0,
   };
@@ -289,19 +296,19 @@ export function openBroadDayArchive({
   const faultError = () => new BroadDayArchiveError(failure.code, failure.message, failure);
 
   const status = () => Object.freeze({
-    version: BROAD_DAY_ARCHIVE_VERSION,
+    version: formatVersion,
     state: closed ? (failure ? 'CLOSED_FAILED' : 'CLOSED') : failure ? 'FAILED' : closing ? 'CLOSING' : writing ? 'WRITING' : 'OPEN',
     startedTs, lastAdmissionTs, sessionId, rootDir: archiveRoot, sessionDir,
     durability: BROAD_DAY_ARCHIVE_DURABILITY, republishSafe: false,
     authority: 'NONE', learningEligible: false, simulationCredit: 0,
-    claims: Object.freeze({ fullDay: false, fullPopulation: false, continuity: false, finalized: false, externallyDurable: false }),
-    ordinals: Object.freeze({ admitted: admittedOrdinal, written: writtenOrdinal, fsynced: fsyncedOrdinal, sealed: null }),
+    claims: Object.freeze({ fullDay: false, fullPopulation: false, continuity: false, finalized: Boolean(finalizedControl) && fsyncedOrdinal >= finalizedControl.globalOrdinal, externallyDurable: false }),
+    ordinals: Object.freeze({ admitted: admittedOrdinal, written: writtenOrdinal, fsynced: fsyncedOrdinal, sealed: finalizedControl?.globalOrdinal ?? null }),
     queue: Object.freeze({ rows: queue.length + (inFlight ? 1 : 0), bytes: queuedBytes, inFlightOrdinal: inFlight?.ordinal ?? null, maxRows: cfg.maxQueueRows, maxBytes: cfg.maxQueueBytes }),
-    files: Object.freeze({ controlRows: counters.catalogControls + counters.sourceControls + counters.closedCandles, shards: shardStats.size, openShards: openShards.size, sealedShards: 0, unsealedShards: shardStats.size, maxShardFiles: cfg.maxShardFiles, maxOpenShards: cfg.maxOpenShards }),
+    files: Object.freeze({ controlRows: counters.catalogControls + counters.catalogHeartbeats + counters.sourceControls + counters.closedCandles + counters.finalizations, shards: shardStats.size, openShards: openShards.size, sealedShards: finalizedControl ? shardStats.size : 0, unsealedShards: finalizedControl ? 0 : shardStats.size, maxShardFiles: cfg.maxShardFiles, maxOpenShards: cfg.maxOpenShards }),
     planned: Object.freeze({ physicalRows: plannedPhysicalRows, bytes: plannedBytes, maxRows: cfg.maxTotalRows, maxBytes: cfg.maxTotalBytes }),
     counters: Object.freeze({ ...counters }),
     catalog: activeCatalog ? Object.freeze({ contentId: activeCatalog.contentId, sourceObservedTs: activeCatalog.sourceObservedTs, knownAtTs: activeCatalog.knownAtTs, controlOrdinal: activeCatalog.ordinal, controlDigest: activeCatalog.controlDigest, markets: activeCatalog.members.size }) : null,
-    completeness: Object.freeze({ denominatorReconciled: false, recordContinuityVerified: false, marketDataComplete: false, localDayFinalized: false, externalDurabilityVerified: false, incomplete: true, failureLatched: Boolean(failure) }),
+    completeness: Object.freeze({ denominatorReconciled: false, recordContinuityVerified: false, marketDataComplete: false, localDayFinalized: Boolean(finalizedControl) && fsyncedOrdinal >= finalizedControl.globalOrdinal, externalDurabilityVerified: false, incomplete: true, failureLatched: Boolean(failure) }),
     failure: publicFailure(),
   });
 
@@ -378,7 +385,7 @@ export function openBroadDayArchive({
   };
 
   const reserve = ({ control, shard = null, kind, recordId = null, conflict = false }) => {
-    const controlBound = canonicalBounded(control, kind === 'CATALOG_CONTROL' ? cfg.maxCatalogBytes + 8_192 : cfg.maxRecordBytes + 8_192);
+    const controlBound = canonicalBounded(control, ['CATALOG_CONTROL', 'CATALOG_HEARTBEAT'].includes(kind) ? cfg.maxCatalogBytes + 8_192 : cfg.maxRecordBytes + 8_192);
     const controlLine = Buffer.from(`${controlBound.text}\n`, 'utf8');
     let shardLine = null;
     if (shard) {
@@ -389,7 +396,7 @@ export function openBroadDayArchive({
     const physicalBytes = controlLine.length + (shardLine?.length ?? 0);
     if (queue.length + (inFlight ? 1 : 0) >= cfg.maxQueueRows || queuedBytes + physicalBytes > cfg.maxQueueBytes) return rejection('ARCHIVE_BACKPRESSURE', 'archive admission queue bound reached');
     if (plannedPhysicalRows + physicalRows > cfg.maxTotalRows || plannedBytes + physicalBytes > cfg.maxTotalBytes) return rejection('ARCHIVE_CAP_REACHED', 'archive aggregate row/byte cap reached');
-    if (counters.catalogControls + counters.sourceControls + counters.closedCandles + 1 > cfg.maxControlRows) return rejection('ARCHIVE_CAP_REACHED', 'archive control ledger row cap reached');
+    if (counters.catalogControls + counters.catalogHeartbeats + counters.sourceControls + counters.closedCandles + counters.finalizations + 1 > cfg.maxControlRows) return rejection('ARCHIVE_CAP_REACHED', 'archive control ledger row cap reached');
     if (shard) {
       const meta = shardStats.get(shard.key) ?? { key: shard.key, file: shard.file, rows: 0, bytes: 0, nextOrdinal: 1, opened: false };
       if (!shardStats.has(shard.key) && shardStats.size >= cfg.maxShardFiles) return rejection('ARCHIVE_CAP_REACHED', 'archive shard-file cap reached');
@@ -401,7 +408,9 @@ export function openBroadDayArchive({
     queue.push(item); queuedBytes += physicalBytes; plannedPhysicalRows += physicalRows; plannedBytes += physicalBytes;
     admittedOrdinal = item.ordinal; counters.admitted += 1;
     if (kind === 'CATALOG_CONTROL') counters.catalogControls += 1;
+    else if (kind === 'CATALOG_HEARTBEAT') counters.catalogHeartbeats += 1;
     else if (kind === 'CLOSED_CANDLE') counters.closedCandles += 1;
+    else if (kind === 'SESSION_FINALIZATION') counters.finalizations += 1;
     else counters.sourceControls += 1;
     if (recordId) seenRecordIds.set(recordId, { digest: control.recordDigest, ordinal: control.globalOrdinal });
     if (conflict) counters.conflicts += 1;
@@ -414,6 +423,7 @@ export function openBroadDayArchive({
 
   const tryAcceptCatalog = ({ catalog, sourceObservedTs, knownAtTs } = {}) => {
     if (closing || closed) return rejection('ARCHIVE_CLOSED', 'archive is closing or closed', { fatal: false });
+    if (finalizedControl) return rejection('ARCHIVE_FINALIZED', 'archive session is already finalized', { fatal: false });
     if (failure) return rejection('ARCHIVE_FAILED', failure.message, { fatal: false });
     let nowTs;
     try { nowTs = clock(); } catch (error) { return rejection('ARCHIVE_CLOCK_INVALID', error?.message ?? 'archive clock failed'); }
@@ -427,15 +437,22 @@ export function openBroadDayArchive({
     if (counters.catalogControls >= cfg.maxCatalogControls) return rejection('ARCHIVE_CAP_REACHED', 'catalog-control cap reached');
     const exactCatalog = JSON.parse(body.text);
     const ordinal = nextOrdinal;
+    const isHeartbeat = formatVersion === BROAD_DAY_ARCHIVE_VERSION_V2 && activeCatalog?.contentId === exactCatalog.contentId;
+    const kind = isHeartbeat ? 'CATALOG_HEARTBEAT' : 'CATALOG_CONTROL';
     const base = {
-      entryVersion: BROAD_DAY_ARCHIVE_ENTRY_VERSION, kind: 'CATALOG_CONTROL', globalOrdinal: ordinal,
+      entryVersion, kind, globalOrdinal: ordinal,
       previousControlDigest: lastControlDigest, admittedTs: nowTs, knownAtTs, sourceObservedTs,
       contentId: exactCatalog.contentId, catalogBodyDigest: sha256(body.text), catalog: exactCatalog,
     };
+    if (formatVersion === BROAD_DAY_ARCHIVE_VERSION_V2) {
+      base.priorCatalogControlDigest = activeCatalog?.controlDigest ?? null;
+      base.priorCatalogContentId = activeCatalog?.contentId ?? null;
+      base.catalogChange = activeCatalog === null ? 'INITIAL' : isHeartbeat ? 'UNCHANGED' : 'CHANGED';
+    }
     const controlDigest = sha256(canonicalBounded(base, cfg.maxCatalogBytes + 4_096).text);
     const control = { ...base, controlDigest };
     let result;
-    try { result = reserve({ control, kind: 'CATALOG_CONTROL' }); } catch (error) { return rejection(error.code ?? 'ARCHIVE_CATALOG_INVALID', error.message); }
+    try { result = reserve({ control, kind }); } catch (error) { return rejection(error.code ?? 'ARCHIVE_CATALOG_INVALID', error.message); }
     if (result.accepted) {
       activeCatalog = {
         contentId: exactCatalog.contentId, sourceObservedTs, knownAtTs, ordinal, controlDigest,
@@ -447,6 +464,7 @@ export function openBroadDayArchive({
 
   const tryAcceptRecord = (record) => {
     if (closing || closed) return rejection('ARCHIVE_CLOSED', 'archive is closing or closed', { fatal: false });
+    if (finalizedControl) return rejection('ARCHIVE_FINALIZED', 'archive session is already finalized', { fatal: false });
     if (failure) return rejection('ARCHIVE_FAILED', failure.message, { fatal: false });
     if (!activeCatalog) return rejection('ARCHIVE_CATALOG_REQUIRED', 'a catalog control must be admitted before records');
     let nowTs;
@@ -455,8 +473,9 @@ export function openBroadDayArchive({
     lastAdmissionTs = nowTs;
     let raw;
     try { raw = canonicalBounded(record, cfg.maxRecordBytes); } catch (error) { return rejection(error.code ?? 'ARCHIVE_RECORD_INVALID', error.message); }
-    const checked = validateArchiveRecord(record, activeCatalog, nowTs, cfg);
+    const checked = validateArchiveRecord(record, activeCatalog, nowTs, cfg, requiredRecordVersion);
     if (!checked.ok) return rejection(checked.code, checked.reason, { fatal: checked.eligible !== false });
+    if (record.recordVersion !== requiredRecordVersion) return rejection('ARCHIVE_RECORD_VERSION_MISMATCH', 'record version does not match archive format');
     const recordDigest = sha256(raw.text);
     if (seenRecordIds.has(record.recordId)) {
       const prior = seenRecordIds.get(record.recordId);
@@ -476,7 +495,7 @@ export function openBroadDayArchive({
       const key = `${identityDigest}:${day}`; const file = path.join(shardsDir, `market-${identityDigest.slice(0, 24)}-${day}.jsonl`);
       const meta = shardStats.get(key); const shardOrdinal = meta?.nextOrdinal ?? 1;
       const indexBase = {
-        entryVersion: BROAD_DAY_ARCHIVE_ENTRY_VERSION, kind: 'CLOSED_CANDLE_INDEX', globalOrdinal: ordinal,
+        entryVersion, kind: 'CLOSED_CANDLE_INDEX', globalOrdinal: ordinal,
         previousControlDigest: lastControlDigest, admittedTs: nowTs, knownAtTs,
         recordId: record.recordId, recordDigest, catalogContentId: record.catalogContentId,
         catalogControlDigest: activeCatalog.controlDigest, marketIdentityDigest: identityDigest,
@@ -486,7 +505,7 @@ export function openBroadDayArchive({
       const controlDigest = sha256(canonicalBounded(indexBase, cfg.maxRecordBytes).text);
       const control = { ...indexBase, controlDigest };
       const shardBody = {
-        entryVersion: BROAD_DAY_ARCHIVE_ENTRY_VERSION, kind: 'CLOSED_CANDLE', globalOrdinal: ordinal,
+        entryVersion, kind: 'CLOSED_CANDLE', globalOrdinal: ordinal,
         globalControlDigest: controlDigest, shardOrdinal, admittedTs: nowTs, knownAtTs,
         recordDigest, conflict, record: JSON.parse(raw.text),
       };
@@ -500,7 +519,7 @@ export function openBroadDayArchive({
     }
 
     const base = {
-      entryVersion: BROAD_DAY_ARCHIVE_ENTRY_VERSION, kind: 'SOURCE_CONTROL', globalOrdinal: ordinal,
+      entryVersion, kind: 'SOURCE_CONTROL', globalOrdinal: ordinal,
       previousControlDigest: lastControlDigest, admittedTs: nowTs, knownAtTs,
       recordId: record.recordId, recordDigest, catalogContentId: record.catalogContentId,
       catalogControlDigest: activeCatalog.controlDigest, record: JSON.parse(raw.text),
@@ -523,6 +542,41 @@ export function openBroadDayArchive({
     scheduleWriter(); await awaitWriter();
     if (failure) throw faultError();
     return status();
+  };
+
+  const finalize = ({ cutoffTs } = {}) => {
+    if (formatVersion !== BROAD_DAY_ARCHIVE_VERSION_V2) return rejection('ARCHIVE_FINALIZATION_UNSUPPORTED', 'explicit finalization requires archive v2', { fatal: false });
+    if (closing || closed) return rejection('ARCHIVE_CLOSED', 'archive is closing or closed', { fatal: false });
+    if (failure) return rejection('ARCHIVE_FAILED', failure.message, { fatal: false });
+    if (finalizedControl) return cutoffTs === finalizedControl.cutoffTs
+      ? Object.freeze({ accepted: true, code: 'IDEMPOTENT', ordinal: finalizedControl.globalOrdinal, controlDigest: finalizedControl.controlDigest, durable: fsyncedOrdinal >= finalizedControl.globalOrdinal })
+      : rejection('ARCHIVE_FINALIZATION_CONFLICT', 'session was finalized with a different cutoff', { fatal: false });
+    let nowTs;
+    try { nowTs = clock(); } catch (error) { return rejection('ARCHIVE_CLOCK_INVALID', error?.message ?? 'archive clock failed'); }
+    if (!positiveInt(nowTs) || nowTs < lastAdmissionTs || !positiveInt(cutoffTs)
+        || cutoffTs < lastAdmissionTs || cutoffTs > nowTs) return rejection('ARCHIVE_FINALIZATION_CLOCK_INVALID', 'finalization cutoff/admission clocks are invalid');
+    lastAdmissionTs = nowTs;
+    const ordinal = nextOrdinal;
+    const base = {
+      entryVersion, kind: 'SESSION_FINALIZATION', globalOrdinal: ordinal,
+      previousControlDigest: lastControlDigest, admittedTs: nowTs, knownAtTs: nowTs,
+      sessionId, sessionStartedTs: startedTs, cutoffTs,
+      lastDataOrdinal: ordinal - 1, lastDataControlDigest: lastControlDigest,
+      activeCatalogContentId: activeCatalog?.contentId ?? null,
+      activeCatalogControlDigest: activeCatalog?.controlDigest ?? null,
+      admittedCounts: {
+        catalogControls: counters.catalogControls, catalogHeartbeats: counters.catalogHeartbeats,
+        sourceControls: counters.sourceControls, closedCandles: counters.closedCandles,
+      },
+      shardFiles: shardStats.size, plannedPhysicalRows, plannedBytes,
+    };
+    const controlDigest = sha256(canonicalBounded(base, cfg.maxRecordBytes + 8_192).text);
+    const control = { ...base, controlDigest };
+    let result;
+    try { result = reserve({ control, kind: 'SESSION_FINALIZATION' }); }
+    catch (error) { return rejection(error.code ?? 'ARCHIVE_FINALIZATION_INVALID', error.message); }
+    if (result.accepted) finalizedControl = Object.freeze(control);
+    return result;
   };
 
   const releaseOwnLock = () => {
@@ -552,9 +606,10 @@ export function openBroadDayArchive({
   };
 
   return Object.freeze({
-    version: BROAD_DAY_ARCHIVE_VERSION,
+    version: formatVersion,
     tryAcceptCatalog,
     tryAcceptRecord,
+    finalize,
     drain,
     status,
     close,
