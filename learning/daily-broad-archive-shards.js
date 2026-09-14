@@ -261,7 +261,12 @@ export async function openDailyBroadArchiveShardSource({
       receipt.receiptDigest = canonicalDigest(receiptDigestBody(receipt));
       const receiptError = dailyBroadArchiveMarketDayReceiptError(receipt, { descriptor, shard, marketDay });
       if (receiptError) throw fail('SHARD_RECEIPT_INVALID', receiptError);
-      return deepFreeze({ marketDay, receipt });
+      // The source retains no market-day cache. The explicit release hook lets
+      // bounded runners close the custody interval before advancing progress
+      // and gives test sources a deterministic reclamation contract.
+      let released = false;
+      const release = () => { released = true; return Object.freeze({ released }); };
+      return Object.freeze({ marketDay: deepFreeze(marketDay), receipt, release });
     };
 
     const status = () => deepFreeze({

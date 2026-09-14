@@ -210,11 +210,11 @@ function sealJob({ jobId, declaredTs, descriptor }) {
   job.jobDigest = digestWithout(job, 'jobDigest'); return job;
 }
 
-export async function openDailyShardedStudyRunner({
+async function openDailyShardedStudyRunnerImpl({
   archiveRoot, stateRoot, dayStartTs, dayEndTs, asOfTs, jobId, declaredTs,
   consumeShard, clock = () => Date.now(), limits: suppliedLimits,
   readerLimits, shardLimits, signal = null,
-} = {}) {
+} = {}, sourceFactory) {
   const limits = limitsOf(suppliedLimits);
   if (typeof stateRoot !== 'string' || stateRoot.length < 1 || !ID_RE.test(jobId ?? '')
       || !positiveTs(declaredTs) || declaredTs < asOfTs || typeof consumeShard !== 'function') {
@@ -226,10 +226,7 @@ export async function openDailyShardedStudyRunner({
   const stateFile = path.join(root, 'state.json');
   try {
     if (existsSync(stateFile) && lstatSync(stateFile).isSymbolicLink()) throw fail('RUNNER_STATE_INVALID', 'state.json cannot be a symlink');
-    source = await openDailyBroadArchiveShardSource({
-      rootDir: archiveRoot, dayStartTs, dayEndTs, asOfTs,
-      limits: shardLimits, readerLimits, signal,
-    });
+    source = await sourceFactory({ archiveRoot, dayStartTs, dayEndTs, asOfTs, shardLimits, readerLimits, signal });
     const descriptor = source.descriptor; const job = sealJob({ jobId, declaredTs, descriptor });
     const jerr = jobError(job, descriptor, limits); if (jerr) throw fail('RUNNER_JOB_INVALID', jerr);
     let state;
@@ -269,44 +266,52 @@ export async function openDailyShardedStudyRunner({
         while (!state.completed && processed < maxShards && !closing) {
           if (executeSignal?.aborted) return publicStatus('CANCELLED');
           lock.assertOwned(); const shard = descriptor.shards[state.nextShardIndex];
-          const loaded = await source.loadShard({ shardId: shard.shardId, signal: executeSignal });
-          const receiptError = dailyBroadArchiveMarketDayReceiptError(loaded.receipt, { descriptor, shard, marketDay: loaded.marketDay });
-          if (receiptError) throw fail('RUNNER_SHARD_RECEIPT_INVALID', receiptError);
-          if (executeSignal?.aborted) return publicStatus('CANCELLED');
-          const returned = await consumeShard(deepFreeze({
-            job: clone(state.job), shard: clone(shard), marketDay: loaded.marketDay,
-            receipt: loaded.receipt,
-          }));
-          let output;
-          try { output = clone(returned); } catch { throw fail('RUNNER_CONSUMER_OUTPUT_INVALID', 'consumer output is not canonical JSON'); }
-          if (Buffer.byteLength(stableStringify(output), 'utf8') > limits.maxConsumerOutputBytes) throw fail('RUNNER_CONSUMER_OUTPUT_INVALID', 'consumer output exceeds byte bound');
-          const outputError = dailyShardTraversalOutputError(output, { shard, receipt: loaded.receipt });
-          if (outputError) throw fail('RUNNER_CONSUMER_OUTPUT_INVALID', outputError);
-          if (executeSignal?.aborted) return publicStatus('CANCELLED');
-          const acknowledgedTs = clock(); if (!positiveTs(acknowledgedTs)) throw fail('RUNNER_CLOCK_INVALID', 'acknowledgment clock malformed');
-          const prior = state.acknowledgments.at(-1) ?? null;
-          const ack = {
-            ackVersion: DAILY_SHARD_CONSUMER_ACK_VERSION, ackDigest: '',
-            jobId: state.job.jobId, jobDigest: state.job.jobDigest,
-            datasetId: state.job.datasetId, datasetDigest: state.job.datasetDigest,
-            revision: state.revision + 1, shardIndex: shard.shardIndex,
-            shardId: shard.shardId, shardDigest: shard.shardDigest,
-            receiptDigest: loaded.receipt.receiptDigest, marketDayDigest: loaded.receipt.marketDayDigest,
-            output, outputDigest: canonicalDigest(output), previousAckDigest: prior?.ackDigest ?? null,
-            acknowledgedTs, authority: 'NONE', learningEligible: false, simulationCredit: 0,
-          };
-          ack.ackDigest = canonicalDigest(ackDigestBody(ack));
-          const ackError = dailyShardConsumerAckError(ack, { job: state.job, shard, receipt: loaded.receipt, prior });
-          if (ackError) throw fail('RUNNER_ACK_INVALID', ackError);
-          const next = {
-            ...state, stateDigest: '', revision: ack.revision,
-            nextShardIndex: state.nextShardIndex + 1,
-            acknowledgments: [...state.acknowledgments, ack],
-            completed: state.nextShardIndex + 1 === state.job.shardCount,
-          };
-          next.stateDigest = digestWithout(next, 'stateDigest');
-          const stateBytes = Buffer.byteLength(stableStringify(next), 'utf8');
-          if (stateBytes > limits.maxStateBytes) throw fail('RUNNER_STATE_LIMIT', 'next durable state exceeds byte bound');
+          let loaded; let next;
+          try {
+            loaded = await source.loadShard({ shardId: shard.shardId, signal: executeSignal });
+            const receiptError = dailyBroadArchiveMarketDayReceiptError(loaded.receipt, { descriptor, shard, marketDay: loaded.marketDay });
+            if (receiptError) throw fail('RUNNER_SHARD_RECEIPT_INVALID', receiptError);
+            if (executeSignal?.aborted) return publicStatus('CANCELLED');
+            const returned = await consumeShard(deepFreeze({
+              job: clone(state.job), shard: clone(shard), marketDay: loaded.marketDay,
+              receipt: loaded.receipt,
+            }));
+            let output;
+            try { output = clone(returned); } catch { throw fail('RUNNER_CONSUMER_OUTPUT_INVALID', 'consumer output is not canonical JSON'); }
+            if (Buffer.byteLength(stableStringify(output), 'utf8') > limits.maxConsumerOutputBytes) throw fail('RUNNER_CONSUMER_OUTPUT_INVALID', 'consumer output exceeds byte bound');
+            const outputError = dailyShardTraversalOutputError(output, { shard, receipt: loaded.receipt });
+            if (outputError) throw fail('RUNNER_CONSUMER_OUTPUT_INVALID', outputError);
+            if (executeSignal?.aborted) return publicStatus('CANCELLED');
+            const acknowledgedTs = clock(); if (!positiveTs(acknowledgedTs)) throw fail('RUNNER_CLOCK_INVALID', 'acknowledgment clock malformed');
+            const prior = state.acknowledgments.at(-1) ?? null;
+            const ack = {
+              ackVersion: DAILY_SHARD_CONSUMER_ACK_VERSION, ackDigest: '',
+              jobId: state.job.jobId, jobDigest: state.job.jobDigest,
+              datasetId: state.job.datasetId, datasetDigest: state.job.datasetDigest,
+              revision: state.revision + 1, shardIndex: shard.shardIndex,
+              shardId: shard.shardId, shardDigest: shard.shardDigest,
+              receiptDigest: loaded.receipt.receiptDigest, marketDayDigest: loaded.receipt.marketDayDigest,
+              output, outputDigest: canonicalDigest(output), previousAckDigest: prior?.ackDigest ?? null,
+              acknowledgedTs, authority: 'NONE', learningEligible: false, simulationCredit: 0,
+            };
+            ack.ackDigest = canonicalDigest(ackDigestBody(ack));
+            const ackError = dailyShardConsumerAckError(ack, { job: state.job, shard, receipt: loaded.receipt, prior });
+            if (ackError) throw fail('RUNNER_ACK_INVALID', ackError);
+            next = {
+              ...state, stateDigest: '', revision: ack.revision,
+              nextShardIndex: state.nextShardIndex + 1,
+              acknowledgments: [...state.acknowledgments, ack],
+              completed: state.nextShardIndex + 1 === state.job.shardCount,
+            };
+            next.stateDigest = digestWithout(next, 'stateDigest');
+            const stateBytes = Buffer.byteLength(stableStringify(next), 'utf8');
+            if (stateBytes > limits.maxStateBytes) throw fail('RUNNER_STATE_LIMIT', 'next durable state exceeds byte bound');
+          } finally {
+            if (loaded !== undefined) {
+              if (typeof loaded.release !== 'function') throw fail('RUNNER_SHARD_RELEASE_INVALID', 'source omitted the bounded shard release contract');
+              loaded.release(); loaded = null;
+            }
+          }
           lock.assertOwned(); atomicWriteJson(stateFile, next, { sync: true }); state = next;
           processed += 1;
           await new Promise((resolve) => setImmediate(resolve));
@@ -336,4 +341,24 @@ export async function openDailyShardedStudyRunner({
     try { lock.release(); } catch {}
     throw error;
   }
+}
+
+export function openDailyShardedStudyRunner(options = {}) {
+  return openDailyShardedStudyRunnerImpl(options, ({
+    archiveRoot, dayStartTs, dayEndTs, asOfTs, shardLimits, readerLimits, signal,
+  }) => openDailyBroadArchiveShardSource({
+    rootDir: archiveRoot, dayStartTs, dayEndTs, asOfTs,
+    limits: shardLimits, readerLimits, signal,
+  }));
+}
+
+// Explicit test-only constructor for synthetic scale/fault fixtures. Production
+// composition has no source injection and always opens the fixed verified
+// archive shard source above.
+export function openDailyShardedStudyRunnerForTest(options = {}, { source } = {}) {
+  if (!source || typeof source !== 'object' || typeof source.loadShard !== 'function'
+      || typeof source.close !== 'function' || !source.descriptor) {
+    return Promise.reject(fail('RUNNER_TEST_SOURCE_INVALID', 'test source contract malformed'));
+  }
+  return openDailyShardedStudyRunnerImpl(options, async () => source);
 }
