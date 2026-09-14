@@ -128,7 +128,12 @@ function sourceIdentityError(source) {
         || source.archiveCreatedTsMs !== null || source.limitations.length !== 1
         || source.limitations[0] !== 'ARCHIVE_ABSENT') return 'absent source claims archive identity';
   } else if (!HEX64.test(source.manifestSha256 ?? '') || !boundedToken(source.schemaVersion)
-      || !boundedToken(source.childhoodVersion) || !isTs(source.archiveCreatedTsMs)) return 'present source identity or archive creation clock malformed';
+      || !boundedToken(source.childhoodVersion)
+      || !(source.archiveCreatedTsMs === null || isTs(source.archiveCreatedTsMs))) {
+    return 'present source identity or archive creation clock malformed';
+  } else if (source.archiveCreatedTsMs === null && !source.limitations.includes('PROVENANCE_CLOCK_MISSING')) {
+    return 'present source without an archive creation clock must declare provenance clock missing';
+  }
   return null;
 }
 
@@ -176,6 +181,9 @@ function labelProjectionError(label, procedure, prediction) {
   }
   if (label.reference.knownAtTs !== null && h.outcomeKnownAtTs !== null
       && label.reference.knownAtTs > h.outcomeKnownAtTs) return 'reference clock follows horizon knowledge clock';
+  if (h.state === 'NOT_YET_KNOWN' && label.reference.state === 'OUTCOME_UNAVAILABLE') {
+    return 'not-yet-known horizon cannot coexist with an unavailable reference';
+  }
   if (label.availability.state === 'UNAVAILABLE') {
     if (!UNAVAILABLE_REASONS.has(label.availability.reason)
         || label.reference.state !== 'OUTCOME_UNAVAILABLE' || h.state !== 'OUTCOME_UNAVAILABLE'
@@ -221,13 +229,22 @@ export function adaptiveCandleOutcomeReceiptError(receipt, procedure, prediction
   const reference = receipt.label.reference;
   if (receipt.sourceIdentity.state === 'PRESENT_MANIFEST_BOUND') {
     const createdTs = receipt.sourceIdentity.archiveCreatedTsMs;
-    if (createdTs > receipt.preparedTs) return 'archive source was unavailable when the receipt was prepared';
-    if (receipt.label.availability.state === 'UNAVAILABLE'
-        && ['ARCHIVE_ABSENT', 'PROVENANCE_CLOCK_MISSING'].includes(receipt.label.availability.reason)) {
-      return 'present source contradicts the label availability reason';
+    if (createdTs === null) {
+      if (receipt.label.availability.state !== 'UNAVAILABLE'
+          || receipt.label.availability.reason !== 'PROVENANCE_CLOCK_MISSING'
+          || reference.state !== 'OUTCOME_UNAVAILABLE' || h.state !== 'OUTCOME_UNAVAILABLE'
+          || h.reason !== 'PROVENANCE_CLOCK_MISSING') {
+        return 'present source without an archive clock must carry only unavailable provenance-clock-missing labels';
+      }
+    } else {
+      if (createdTs > receipt.preparedTs) return 'archive source was unavailable when the receipt was prepared';
+      if (receipt.label.availability.state === 'UNAVAILABLE'
+          && ['ARCHIVE_ABSENT', 'PROVENANCE_CLOCK_MISSING'].includes(receipt.label.availability.reason)) {
+        return 'present source contradicts the label availability reason';
+      }
+      if ((reference.knownAtTs !== null && createdTs > reference.knownAtTs)
+          || (h.outcomeKnownAtTs !== null && createdTs > h.outcomeKnownAtTs)) return 'archive creation clock follows a claimed label knowledge clock';
     }
-    if ((reference.knownAtTs !== null && createdTs > reference.knownAtTs)
-        || (h.outcomeKnownAtTs !== null && createdTs > h.outcomeKnownAtTs)) return 'archive creation clock follows a claimed label knowledge clock';
   }
   if (reference.state === 'KNOWN' && reference.knownAtTs > receipt.preparedTs) {
     return 'known reference was unavailable when the receipt was prepared';

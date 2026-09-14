@@ -58,7 +58,7 @@ function rig(t, extra = {}) {
   return { rootDir, procedure: p, store, core, prediction, setNow: (value) => { now = value; } };
 }
 
-function archiveFixture(t, prediction, { retrievedTs = prediction.targetEndTs, omitOpenSec = null } = {}) {
+function archiveFixture(t, prediction, { retrievedTs = prediction.targetEndTs, omitOpenSec = null, archiveCreated = true } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'adaptive-candle-archive-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const anchorSec = (prediction.targetEndTs - prediction.horizonMs) / 1_000;
@@ -81,12 +81,12 @@ function archiveFixture(t, prediction, { retrievedTs = prediction.targetEndTs, o
   writeFileSync(path.join(dir, 'candles-1m.jsonl'), candleBody);
   const manifest = {
     schemaVersion: 'childhood-observation-3-b0b', childhoodVersion: 'B0B.2A',
-    archiveCreatedTs: new Date(retrievedTs).toISOString(),
     sourceChecksumsSha256_16: {
       'candles-1m.jsonl': createHash('sha256').update(candleBody).digest('hex').slice(0, 16),
     },
     universeCoverageStatus: 'FIXTURE_SINGLE_ASSET',
   };
+  if (archiveCreated) manifest.archiveCreatedTs = new Date(retrievedTs).toISOString();
   writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
   return { dir, archive: readLearningArchive(dir) };
 }
@@ -138,6 +138,49 @@ test('one unavailable poll remains pending until the presealed missingness deadl
   h.setNow(asOfTs);
   assert.equal(h.core.recordOutcome({ outcomeInput: prepared.outcomeInput, provenanceReceipt: prepared.provenanceReceipt }).status, 'PENDING_NO_DURABLE_OUTCOME');
   assert.equal(h.store.status().outcomeCount, 0);
+  assert.equal(h.store.state().sequence, 0);
+});
+
+test('a manifest-bound archive with no creation clock stays provenance-missing and never updates', (t) => {
+  const h = rig(t); const source = archiveFixture(t, h.prediction, { archiveCreated: false });
+  assert.equal(source.archive.archiveCreatedTsMs, null);
+  assert.ok(source.archive.limitations.includes('PROVENANCE_CLOCK_MISSING'));
+
+  const pendingTs = h.prediction.targetEndTs + 5_000;
+  const pending = prepareAdaptiveCandleOutcome({
+    procedure: h.procedure, prediction: h.prediction, archive: source.archive, asOfTs: pendingTs,
+  });
+  assert.equal(pending.status, 'PENDING');
+  assert.equal(pending.provenanceReceipt.sourceIdentity.state, 'PRESENT_MANIFEST_BOUND');
+  assert.equal(pending.provenanceReceipt.sourceIdentity.archiveCreatedTsMs, null);
+  assert.deepEqual(pending.provenanceReceipt.label.availability, { state: 'UNAVAILABLE', reason: 'PROVENANCE_CLOCK_MISSING' });
+  assert.equal(pending.provenanceReceipt.label.reference.state, 'OUTCOME_UNAVAILABLE');
+  assert.equal(pending.provenanceReceipt.label.horizon60m.state, 'OUTCOME_UNAVAILABLE');
+  assert.equal(adaptiveCandleOutcomeReceiptError(pending.provenanceReceipt, h.procedure, h.prediction, { archive: source.archive }), null);
+  const wrongReason = clone(pending.provenanceReceipt);
+  wrongReason.label.availability.reason = 'ARCHIVE_ABSENT';
+  wrongReason.label.horizon60m.reason = 'ARCHIVE_ABSENT';
+  wrongReason.dispositionReason = 'LABEL_PENDING:ARCHIVE_ABSENT';
+  rehashReceipt(wrongReason);
+  assert.match(
+    adaptiveCandleOutcomeReceiptError(wrongReason, h.procedure, h.prediction),
+    /must carry only unavailable provenance-clock-missing labels/,
+    'rehashing cannot relabel a manifest-bound missing-clock source as an absent archive',
+  );
+  h.setNow(pendingTs);
+  assert.equal(h.core.recordOutcome({ outcomeInput: pending.outcomeInput, provenanceReceipt: pending.provenanceReceipt }).status, 'PENDING_NO_DURABLE_OUTCOME');
+  assert.equal(h.store.status().outcomeCount, 0);
+  assert.equal(h.store.state().sequence, 0);
+
+  const missingTs = h.prediction.targetEndTs + 10_001;
+  const missing = prepareAdaptiveCandleOutcome({
+    procedure: h.procedure, prediction: h.prediction, archive: source.archive, asOfTs: missingTs,
+  });
+  assert.equal(missing.status, 'MISSING');
+  assert.equal(missing.outcomeInput.reasonCode, 'LABEL_DEADLINE_EXPIRED:PROVENANCE_CLOCK_MISSING');
+  h.setNow(missingTs);
+  assert.equal(h.core.recordOutcome({ outcomeInput: missing.outcomeInput, provenanceReceipt: missing.provenanceReceipt }).status, 'APPENDED_NO_UPDATE');
+  assert.equal(h.store.status().outcomeCount, 1);
   assert.equal(h.store.state().sequence, 0);
 });
 
@@ -256,7 +299,15 @@ test('self-consistent receipt hashes cannot legitimize contradictory source, ava
     {
       name: 'a present source without its archive creation clock',
       mutate(receipt) { receipt.sourceIdentity.archiveCreatedTsMs = null; },
-      error: /present source identity or archive creation clock malformed/,
+      error: /must declare provenance clock missing/,
+    },
+    {
+      name: 'a present source without a clock claiming a known label',
+      mutate(receipt) {
+        receipt.sourceIdentity.archiveCreatedTsMs = null;
+        receipt.sourceIdentity.limitations.push('PROVENANCE_CLOCK_MISSING');
+      },
+      error: /must carry only unavailable provenance-clock-missing labels/,
     },
     {
       name: 'a source created after receipt preparation',
@@ -282,6 +333,22 @@ test('self-consistent receipt hashes cannot legitimize contradictory source, ava
       name: 'a known horizon carrying a missing-data reason',
       mutate(receipt) { receipt.label.horizon60m.reason = 'INTERIOR_BAR_MISSING'; },
       error: /known 60m label malformed/,
+    },
+    {
+      name: 'a not-yet-known horizon with an unavailable reference',
+      mutate(receipt) {
+        receipt.label.availability = { state: 'PARTIAL', reason: 'COMPLETE' };
+        receipt.label.reference = { state: 'OUTCOME_UNAVAILABLE', barOpenSec: null, price: null, knownAtTs: null };
+        receipt.label.horizon60m = {
+          ...receipt.label.horizon60m,
+          state: 'NOT_YET_KNOWN', reason: 'NOT_YET_KNOWN_AT_AS_OF',
+          outcomeKnownAtTs: receipt.preparedTs + 1,
+          mfePct: null, maePct: null, logReturnPct: null,
+        };
+        receipt.disposition = 'PENDING';
+        receipt.dispositionReason = 'LABEL_PENDING:NOT_YET_KNOWN_AT_AS_OF';
+      },
+      error: /not-yet-known horizon cannot coexist with an unavailable reference/,
     },
   ];
 
