@@ -80,7 +80,7 @@ test('matures no-nomination, quiet and failed-breakout samples from exact closed
     };
     const owner = createOpportunityAuditFollowup({ store, outcomeSource: source, clock: () => nowRef.value, maxPerStep: 8 });
     const report = await owner.step({ nowTs: nowRef.value });
-    assert.deepEqual({ matured: report.matured, missing: report.terminalMissing, pending: report.pending, refused: report.refused }, { matured: 3, missing: 1, pending: 0, refused: 0 });
+    assert.deepEqual({ matured: report.matured, missing: report.terminalMissing, pending: report.pending, refused: report.refused, deferred: report.deferred }, { matured: 3, missing: 1, pending: 0, refused: 0, deferred: 0 });
     const view = await store.loadFrame(frame.frameId);
     assert.equal(view.outcomes.length, 4);
     assert.deepEqual(view.outcomes.filter((row) => row.status === 'MATURED').map((row) => row.outcome.outcomeClass).sort(), ['ADVERSE', 'FAVORABLE', 'NEUTRAL']);
@@ -243,4 +243,29 @@ test('cadence and sample ceilings provide a deterministic daily work bound witho
   const frame = frameOf(Array.from({ length: 64 }, (_, index) => `C${index}`));
   assert.equal(frame.sampling.inclusionProbability, 1);
   assert.ok(frame.population.every((row) => row.observationInclusionProbability === 1));
+});
+
+test('the shared worker port overlap is deferred without latching; write ambiguity still is not', async () => {
+  const now = T0 + HOUR; let pendingCalls = 0; let settleCalls = 0;
+  const item = {
+    cursor: 'cursor', frameId: `oaf-${'a'.repeat(40)}`, frameDigest: 'b'.repeat(64),
+    opportunityId: `lop-${'c'.repeat(40)}`, canonicalCoin: 'BTC', horizonMs: HOUR,
+    dueTs: now, lastOutcomeId: null, lastStatus: null, annotationPresent: true,
+    observationInclusionProbability: 0.5, actionPropensity: { state: 'NOT_LOGGED', value: null, policyVersion: null },
+  };
+  const busy = Object.assign(new Error('busy'), { code: 'WORKER_BUSY' });
+  const port = {
+    pending: async () => { pendingCalls += 1; if (pendingCalls === 1) throw busy; return { asOfTs: now, items: [item], nextCursor: null, truncated: false }; },
+    settle: async () => { settleCalls += 1; throw Object.assign(new Error('queue'), { code: 'QUEUE_FULL' }); },
+    status: () => ({ state: 'READY' }),
+  };
+  const owner = createOpportunityAuditFollowup({
+    store: port, clock: () => now,
+    outcomeSource: async () => ({ state: 'PENDING', reasonCode: 'ARCHIVE_NOT_READY' }),
+  });
+  assert.equal((await owner.step({ nowTs: now })).state, 'BUSY');
+  const second = await owner.step({ nowTs: now });
+  assert.equal(second.pending, 0); assert.equal(second.deferred, 1); assert.equal(settleCalls, 1, 'PENDING still traverses worker validation');
+  assert.equal(owner.status().state, 'READY'); assert.equal(owner.status().deferred, 2);
+  await owner.close();
 });

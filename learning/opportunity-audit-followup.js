@@ -31,6 +31,7 @@ const RESOLUTION_KEYS = Object.freeze({
 });
 const SOURCE_KEYS = Object.freeze(['sourceKind', 'sourceId', 'sourceDigest']);
 const TERMINAL_STATES = new Set(['MISSING', 'CENSORED', 'DELISTED_OR_UNAVAILABLE', 'UNSUPPORTED']);
+const TRANSIENT_CUSTODY_CODES = new Set(['WORKER_BUSY', 'QUEUE_FULL']);
 const clone = (value) => structuredClone(value);
 const exact = (value, keys) => isPlainObject(value) && exactKeys(value, keys) === null;
 const text = (value, max = 200) => typeof value === 'string' && value.length > 0 && value.length <= max;
@@ -211,13 +212,13 @@ export function createOpportunityAuditFollowup({
   if (!Number.isSafeInteger(sourceTimeoutMs) || sourceTimeoutMs < 1 || sourceTimeoutMs > 60_000) fail('CONFIG_INVALID', 'source timeout malformed');
   const workerCustody = typeof store.settle === 'function';
   let cursor = null; let inFlight = null; let closing = false; let closed = false; let closePromise = null;
-  let steps = 0; let matured = 0; let terminalMissing = 0; let pending = 0; let refused = 0;
+  let steps = 0; let matured = 0; let terminalMissing = 0; let pending = 0; let refused = 0; let deferred = 0;
   let last = null; let failed = null;
 
   const run = async (nowTs) => {
     const page = await store.pending({ asOfTs: nowTs, limit: maxPerStep, cursor });
     if (!page || !Array.isArray(page.items) || typeof page.truncated !== 'boolean') fail('STORE_VIEW_INVALID', 'pending page malformed');
-    const report = { state: 'COMPLETE', considered: page.items.length, matured: 0, terminalMissing: 0, pending: 0, refused: 0 };
+    const report = { state: 'COMPLETE', considered: page.items.length, matured: 0, terminalMissing: 0, pending: 0, refused: 0, deferred: 0 };
     for (const original of page.items) {
       if (closing) { report.state = 'INTERRUPTED'; break; }
       const item = deepFreeze(clone(original));
@@ -239,7 +240,12 @@ export function createOpportunityAuditFollowup({
         report.refused += 1; continue;
       }
       if (workerCustody) {
-        const receipt = await store.settle({ item: clone(item), resolution: clone(resolution), recordedTs: nowTs });
+        let receipt;
+        try { receipt = await store.settle({ item: clone(item), resolution: clone(resolution), recordedTs: nowTs }); }
+        catch (error) {
+          if (TRANSIENT_CUSTODY_CODES.has(error?.code)) { report.deferred += 1; continue; }
+          throw error;
+        }
         if (!isPlainObject(receipt) || !['MATURED', 'MISSING', 'CENSORED', 'DELISTED_OR_UNAVAILABLE', 'UNSUPPORTED', 'PENDING', 'REFUSED'].includes(receipt.state)) {
           fail('DURABLE_ACK_INVALID', 'worker custody returned an invalid settlement receipt');
         }
@@ -273,7 +279,8 @@ export function createOpportunityAuditFollowup({
     }
     cursor = page.nextCursor ?? null;
     steps += 1; matured += report.matured; terminalMissing += report.terminalMissing;
-    pending += report.pending; refused += report.refused; last = deepFreeze({ ...report, asOfTs: nowTs });
+    pending += report.pending; refused += report.refused; deferred += report.deferred;
+    last = deepFreeze({ ...report, asOfTs: nowTs });
     return last;
   };
 
@@ -281,8 +288,13 @@ export function createOpportunityAuditFollowup({
     if (closing || closed) return Promise.reject(new OpportunityAuditFollowupError('FOLLOWUP_CLOSED'));
     if (failed) return Promise.reject(new OpportunityAuditFollowupError(failed.code, failed.message));
     if (!isTs(nowTs) || nowTs > clock()) return Promise.reject(new OpportunityAuditFollowupError('CLOCK_INVALID'));
-    if (inFlight !== null) return Promise.resolve(deepFreeze({ state: 'BUSY', considered: 0, matured: 0, terminalMissing: 0, pending: 0, refused: 0, asOfTs: nowTs }));
+    if (inFlight !== null) return Promise.resolve(deepFreeze({ state: 'BUSY', considered: 0, matured: 0, terminalMissing: 0, pending: 0, refused: 0, deferred: 1, asOfTs: nowTs }));
     const task = run(nowTs).catch((error) => {
+      if (TRANSIENT_CUSTODY_CODES.has(error?.code)) {
+        deferred += 1;
+        last = deepFreeze({ state: 'BUSY', considered: 0, matured: 0, terminalMissing: 0, pending: 0, refused: 0, deferred: 1, asOfTs: nowTs });
+        return last;
+      }
       const stopped = error instanceof OpportunityAuditFollowupError
         ? error : new OpportunityAuditFollowupError('CUSTODY_FAILED', error?.code ?? error?.message ?? error);
       failed ??= stopped;
@@ -294,7 +306,7 @@ export function createOpportunityAuditFollowup({
   const status = () => deepFreeze({
     followupVersion: OPPORTUNITY_AUDIT_FOLLOWUP_VERSION,
     state: closed ? 'STOPPED' : closing ? 'CLOSING' : failed ? 'FAILED' : inFlight ? 'RUNNING' : 'READY',
-    inFlight: inFlight !== null, steps, matured, terminalMissing, pending, refused, last,
+    inFlight: inFlight !== null, steps, matured, terminalMissing, pending, refused, deferred, last,
     failed: failed === null ? null : { code: failed.code, detail: String(failed.message).slice(0, 500) },
     maxPerStep, sourceTimeoutMs, authority: 'NONE', trainingAuthority: 'NONE',
     durability: 'INJECTED_STORE_ACK_AND_EXACT_READBACK', republishSafe: false,
