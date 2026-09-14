@@ -5,7 +5,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { primaryConfirmedCatalyst } from '../judge/intake.js';
-import { freezeReferences } from '../judge/setups.js';
+import { freezeReferences, structuralClauses } from '../judge/setups.js';
 import { catalystPacket, analysisFor } from './helpers/case-fixture.js';
 import { evidenceIdentity, packetIdentityV2, validateEvidencePacketV2 } from '../evidence/contract-v2.js';
 import { crc32 } from '../lib/crc32.js';
@@ -144,6 +144,36 @@ test('a re-labelled or time-shifted p0 binding cannot be frozen', () => {
     mutate(event);
     assert.equal(freezeReferences({ setupId: 'CATALYST_TRANSMISSION', ind: IND, spec: SPEC, fast: {}, event, triggerTs: D }), null);
   }
+});
+
+test('catalyst confirmation cannot substitute a different valid event or price evidence after crossing', () => {
+  const fixture = catalystPacket();
+  const packet = packetWithChart(fixture);
+  const event = primaryConfirmedCatalyst({ packet, analysis: analysisFor(fixture.claim.claimId), canonicalCoin: fixture.coin, decisionTs: D }).event;
+  const frozen = freezeReferences({ setupId: 'CATALYST_TRANSMISSION', ind: IND, spec: SPEC, fast: {}, event, triggerTs: D });
+  assert.ok(frozen);
+  assert.equal(structuralClauses('CATALYST_TRANSMISSION', frozen, IND, {}, { decisionTs: D, event }).every((c) => c.ok), true);
+  for (const mutate of [
+    (replacement) => { replacement.eventId = 'clm-' + 'a'.repeat(40); replacement.p0Evidence.eventId = replacement.eventId; },
+    (replacement) => { replacement.p0 = '101'; replacement.p0Evidence.price = '101'; },
+    (replacement) => { replacement.p0Evidence.evidenceId = 'evd-' + 'a'.repeat(40); },
+    (replacement) => { replacement.p0Evidence.sourceRefs = ['src-' + 'a'.repeat(40)]; },
+  ]) {
+    const replacement = structuredClone(event); mutate(replacement);
+    assert.ok(freezeReferences({ setupId: 'CATALYST_TRANSMISSION', ind: IND, spec: SPEC, fast: {}, event: replacement, triggerTs: D }), 'replacement alone is structurally valid');
+    assert.ok(structuralClauses('CATALYST_TRANSMISSION', frozen, IND, {}, { decisionTs: D, event: replacement }).some((c) => !c.ok), 'changed evidence must start a new hypothesis');
+  }
+});
+
+test('frozen catalyst price evidence is detached from later caller mutation', () => {
+  const fixture = catalystPacket();
+  const packet = packetWithChart(fixture);
+  const event = structuredClone(primaryConfirmedCatalyst({ packet, analysis: analysisFor(fixture.claim.claimId), canonicalCoin: fixture.coin, decisionTs: D }).event);
+  const frozen = freezeReferences({ setupId: 'CATALYST_TRANSMISSION', ind: IND, spec: SPEC, fast: {}, event, triggerTs: D });
+  const original = structuredClone(frozen.event.p0Evidence);
+  event.p0Evidence.sourceRefs.push('src-' + 'a'.repeat(40));
+  event.p0Evidence.price = '200';
+  assert.deepEqual(frozen.event.p0Evidence, original);
 });
 
 const suiteData = mkdtempSync(path.join(tmpdir(), 'judge-five-positive-'));
