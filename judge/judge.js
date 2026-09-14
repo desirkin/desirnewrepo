@@ -21,17 +21,28 @@ import { judgeReadinessMatrix } from './readiness.js';
 import { entryBlockingRestrictions } from '../execution/reducer.js';
 import { entryPermission } from '../execution/authority.js';
 import { d1Feature, d2Feature, d3Feature, transferAnomaly, peerMembership } from './challengers.js';
-import { VERDICT_WORDS } from '../execution/contract.js';
+import { VERDICT_WORDS, digestOf } from '../execution/contract.js';
+import {
+  ADAPTIVE_RANKING_MEASUREMENT_ID, ADAPTIVE_RANKING_PORT_VERSION,
+  ADAPTIVE_RANKING_UNITS, adaptiveRankingInputCaptureError,
+  adaptiveRankingPortResultError,
+} from './adaptive-ranking-port.js';
 export const VERDICT_RECORD_VERSION = 'judge-challenger-verdict-1';
 
 export const JUDGE_VERSION = 'judge-1';
+export const ADAPTIVE_RANKING_HOOK_VERSION = 'judge-adaptive-ranking-hook-1';
 const PERSISTENCE_PERMISSION_REASON = 'PERSISTENCE_PERMISSION_LOCK';
+const ownDataProperty = (value, key) => {
+  if (!value || typeof value !== 'object') return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+};
 // a CANARY authorization bounds the position duration (closeout R14): the shorter of the policy duration and the owner's canary bound
 export const canaryDurationBound = (s, policyMs) => { const a = s?.authorization; const bound = a && !a.ended && a.kind === 'CANARY' && Number.isSafeInteger(a.canary?.maxDurationMs) ? a.canary.maxDurationMs : null; return bound === null ? policyMs : Math.min(policyMs, bound); };
 export const FUNNEL_STAGES = Object.freeze(['discovered', 'recorded', 'warmed', 'nominated', 'setupQualified', 'costQualifiedAtLegalSize', 'reserved', 'sent', 'filled', 'protected', 'closedReconciled']);
 const inc = (obj, k, n = 1) => { obj[k] = (obj[k] ?? 0) + n; };
 
-export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null, setupSelection = null, edgeState = null, permissionIncreaseAllowed = null }) {
+export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null, setupSelection = null, edgeState = null, permissionIncreaseAllowed = null, adaptiveRanking = null }) {
   // LEARN-1 consumer seam (ADDENDUM-2 §08): `learning` is an OPTIONAL injected read accessor over the prepared
   // immutable decision-memory snapshot ({ snapshot: () => readDecisionMemory(...) }), refreshed outside this loop.
   // Absent (every current composition; fly.js passes nothing), every path below is byte-identical to the baseline
@@ -50,6 +61,19 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   // malformed/future port instead of treating a truthy object as authority.
   const selectionKeys = setupSelection === null ? [] : (setupSelection && typeof setupSelection === 'object' && !Array.isArray(setupSelection) ? Object.keys(setupSelection) : []);
   if (setupSelection !== null && (selectionKeys.length !== 1 || selectionKeys[0] !== 'version' || setupSelection.version !== SETUP_SELECTION_VERSION)) throw new Error(`invalid setupSelection port; expected { version: '${SETUP_SELECTION_VERSION}' }`);
+  const hookKeys = adaptiveRanking === null ? [] : (adaptiveRanking && typeof adaptiveRanking === 'object' && !Array.isArray(adaptiveRanking) ? Reflect.ownKeys(adaptiveRanking) : []);
+  const adaptivePort = ownDataProperty(adaptiveRanking, 'port');
+  const adaptivePreparedInputAt = ownDataProperty(adaptiveRanking, 'preparedInputAt');
+  const hookVersion = ownDataProperty(adaptiveRanking, 'version');
+  const portKeys = adaptivePort && typeof adaptivePort === 'object' && !Array.isArray(adaptivePort) ? Reflect.ownKeys(adaptivePort) : [];
+  const adaptiveHookConfigured = hookKeys.length === 3
+    && hookKeys.every((key) => typeof key === 'string' && ['version', 'port', 'preparedInputAt'].includes(key))
+    && hookVersion === ADAPTIVE_RANKING_HOOK_VERSION
+    && portKeys.length === 2
+    && portKeys.every((key) => typeof key === 'string' && ['version', 'resolve'].includes(key))
+    && ownDataProperty(adaptivePort, 'version') === ADAPTIVE_RANKING_PORT_VERSION
+    && typeof ownDataProperty(adaptivePort, 'resolve') === 'function'
+    && typeof adaptivePreparedInputAt === 'function';
   const setupSelectionEnabled = setupSelection !== null;
   if (edgeState !== null && edgeStatePortError(edgeState)) throw new Error(`invalid edgeState port; expected { version: '${EDGE_STATE_VERSION}' }`);
   const edgeStateEnabled = edgeState !== null;
@@ -84,6 +108,88 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
       return observed === true ? { ok: true, reason: null } : { ok: false, reason: PERSISTENCE_PERMISSION_REASON };
     }
     catch { return { ok: false, reason: PERSISTENCE_PERMISSION_REASON }; }
+  }
+  const adaptiveNoEffect = (reason, baseline) => Object.freeze({
+    applied: false, effectiveRewardRiskRatio: baseline,
+    measurement: Object.freeze({
+      id: ADAPTIVE_RANKING_MEASUREMENT_ID, ok: false, value: null, threshold: null,
+      unit: ADAPTIVE_RANKING_UNITS,
+      note: `${ADAPTIVE_RANKING_HOOK_VERSION}:${reason}:NO_EVIDENCE`.slice(0, 300),
+    }),
+  });
+  function resolveAdaptiveRanking({ c, setupId, D, snap, evaluation }) {
+    if (adaptiveRanking === null) return null;
+    const baseline = Number(evaluation.rewardRiskRatio);
+    if (!adaptiveHookConfigured) return adaptiveNoEffect('HOOK_CONTRACT_INVALID', baseline);
+    const context = Object.freeze({ setupType: setupId, regime: 'LIVE_UNCLASSIFIED', asset: c.assetId, venue: c.spec.venue });
+    const query = Object.freeze({
+      decisionTs: D, context, strategyId: setupId, pair: c.symbol,
+      specDigest: c.spec.specDigest, bookSnapshotDigest: snap.digest,
+    });
+    let prepared;
+    try { prepared = adaptivePreparedInputAt(query); }
+    catch { return adaptiveNoEffect('PRE_DECISION_INPUT_READER_FAILED', baseline); }
+    try {
+      if (prepared instanceof Promise) {
+        Promise.resolve(prepared).catch(() => {});
+        return adaptiveNoEffect('PRE_DECISION_INPUT_ASYNC_REFUSED', baseline);
+      }
+    } catch { return adaptiveNoEffect('PRE_DECISION_INPUT_INVALID', baseline); }
+    if (prepared === null || prepared === undefined) return adaptiveNoEffect('PRE_DECISION_INPUT_UNAVAILABLE', baseline);
+    const keys = prepared && typeof prepared === 'object' && !Array.isArray(prepared) ? Reflect.ownKeys(prepared) : [];
+    if (keys.length !== 4 || keys.some((key) => typeof key !== 'string'
+        || !['snapshot', 'factsEnvelope', 'consumerContract', 'captureReceipt'].includes(key))) {
+      return adaptiveNoEffect('PRE_DECISION_INPUT_INVALID', baseline);
+    }
+    const snapshot = ownDataProperty(prepared, 'snapshot');
+    const factsEnvelope = ownDataProperty(prepared, 'factsEnvelope');
+    const consumerContract = ownDataProperty(prepared, 'consumerContract');
+    const captureReceipt = ownDataProperty(prepared, 'captureReceipt');
+    if ([snapshot, factsEnvelope, consumerContract, captureReceipt].some((value) => value === undefined)) {
+      return adaptiveNoEffect('PRE_DECISION_INPUT_INVALID', baseline);
+    }
+    const input = {
+      snapshot, factsEnvelope, consumerContract, context, strategyId: setupId,
+      postCostEvaluation: evaluation, mode, decisionTs: D,
+    };
+    let captureError;
+    try { captureError = adaptiveRankingInputCaptureError(captureReceipt, input); }
+    catch { captureError = 'CAPTURE_VALIDATION_FAILED'; }
+    if (captureError) {
+      return adaptiveNoEffect('PRE_DECISION_DURABLE_CAPTURE_INVALID', baseline);
+    }
+    let result;
+    try { result = ownDataProperty(adaptivePort, 'resolve')(input); }
+    catch { return adaptiveNoEffect('PORT_RESOLVER_FAILED', baseline); }
+    try {
+      if (result instanceof Promise) {
+        Promise.resolve(result).catch(() => {});
+        return adaptiveNoEffect('PORT_ASYNC_REFUSED', baseline);
+      }
+    } catch { return adaptiveNoEffect('PORT_RESULT_INVALID', baseline); }
+    try {
+      if (adaptiveRankingPortResultError(result)
+          || result.strategyId !== setupId
+          || result.baselineRewardRiskRatio !== baseline
+          || result.effectiveRewardRiskRatio !== (result.applied
+            ? Number((baseline + result.adjustmentRrPoints).toFixed(9)) : baseline)
+          || (result.evidence !== null && (
+            result.evidence.decisionTs !== D
+            || result.evidence.strategyId !== setupId
+            || result.evidence.context?.asset !== c.assetId
+            || result.evidence.context?.venue !== c.spec.venue
+            || result.evidence.sourceDigest !== factsEnvelope.sourceBinding?.sourceDigest
+            || result.evidence.consumerContractDigest !== consumerContract.consumerContractDigest
+            || result.evidence.costEvaluationDigest !== digestOf(evaluation)
+            || result.evidence.specDigest !== c.spec.specDigest
+            || result.evidence.snapshotDigest !== snap.digest
+          ))) return adaptiveNoEffect('PORT_RESULT_INVALID', baseline);
+    } catch { return adaptiveNoEffect('PORT_RESULT_INVALID', baseline); }
+    return Object.freeze({
+      applied: result.applied,
+      effectiveRewardRiskRatio: result.effectiveRewardRiskRatio,
+      measurement: result.measurement,
+    });
   }
   // deterministic ranking BEFORE reservation (closeout R08): every candidate that reaches the admission point inside one scheduler
   // pass registers here; the batch is ranked (rankCandidates: reward / stressed risk, cost bps, first known, asset) and admitted ONE
@@ -250,11 +356,16 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     // on its declared law (D1 KNOWN ALLOW, D2 KNOWN ALLOW / NO_RULE, D3 KNOWN ALLOW); UNKNOWN never admits; every verdict is a closed record
     let verdicts = null; if (armRule?.challengers?.length) { const ch = challengerVerdicts({ c, D, snap, fast, found, e, fee, setupId, episodeId, frozen }); verdicts = ch.verdicts; if (ch.blocked.length) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ch.blocked, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); } }
     if (!admission.ok) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', admission.reasons, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); }
+    const adaptiveRank = resolveAdaptiveRanking({ c, setupId, D, snap, evaluation: e });
+    if (adaptiveRank) measurements = [...measurements, adaptiveRank.measurement];
     // ranked admission: wait for this pass's batch to be ordered, then re-admit against the state the earlier winners left behind
     // the ONE allowlisted learned effect: a bounded nudge to the RANK KEY of an already fully qualified candidate.
     // It can only reorder this admission batch; it cannot admit, size, or bypass anything, and the committed
     // valuationRef/sizing keep the untouched baseline ratio.
-    const rankRatio = learned?.applied && e.rewardRiskRatio !== null && Number.isFinite(Number(e.rewardRiskRatio)) ? Number(e.rewardRiskRatio) + learned.adjust : e.rewardRiskRatio;
+    const rankRatio = adaptiveRank?.applied
+      ? adaptiveRank.effectiveRewardRiskRatio
+      : learned?.applied && e.rewardRiskRatio !== null && Number.isFinite(Number(e.rewardRiskRatio))
+        ? Number(e.rewardRiskRatio) + learned.adjust : e.rewardRiskRatio;
     const rank = { rewardRiskRatio: rankRatio, costBps: e.costBps ?? null, firstKnownTs: c.nominationKnownAtTs, assetId: c.assetId };
     if (setupSelectionEnabled) Object.assign(rank, { setupId, decisionId: frozen.decisionId });
     const slot = await admissionGate({ rank }); c.lastRank = { rank: slot.rank, of: slot.of, ts: D };

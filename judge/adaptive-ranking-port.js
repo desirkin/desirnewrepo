@@ -8,7 +8,7 @@
 import { digestOf } from '../execution/contract.js';
 import * as M from '../execution/money.js';
 import { adaptiveJudgeFactsEnvelopeError } from './adaptive-facts-source.js';
-import { COST_MODEL_VERSION } from './cost.js';
+import { COST_MODEL_VERSION, REFERENCE_HAIRCUT } from './cost.js';
 import { judgeLearningConsumerContractError, judgeLearningPreparedFactsError } from './learning-recipe.js';
 
 export const ADAPTIVE_RANKING_PORT_VERSION = 'judge-adaptive-ranking-port-1';
@@ -16,6 +16,8 @@ export const ADAPTIVE_RANKING_RESULT_VERSION = 'judge-adaptive-ranking-result-1'
 export const ADAPTIVE_RANKING_EVIDENCE_VERSION = 'judge-adaptive-ranking-evidence-1';
 export const ADAPTIVE_RANKING_MEASUREMENT_ID = 'QUALIFIED_ADAPTIVE_RANKING_RR_POINTS';
 export const ADAPTIVE_RANKING_UNITS = 'REWARD_RISK_RATIO_POINTS';
+export const ADAPTIVE_RANKING_CAPTURE_VERSION = 'judge-adaptive-ranking-input-capture-1';
+export const ADAPTIVE_RANKING_CAPTURE_ACK_VERSION = 'judge-adaptive-ranking-input-durable-ack-1';
 export const MAX_ADAPTIVE_RANKING_INPUT_BYTES = 9 * 1024 * 1024;
 export const MAX_ADAPTIVE_RANKING_INPUT_NODES = 300_000;
 export const MAX_ADAPTIVE_RANKING_INPUT_DEPTH = 20;
@@ -53,6 +55,16 @@ const STATE_SOURCE_KEYS = Object.freeze([
   'receiptDigest', 'stateDigest', 'eventSequence', 'eventDigest', 'durableAcknowledgment',
 ]);
 const ACK_KEYS = Object.freeze(['ackVersion', 'sequence', 'eventDigest', 'headDigest', 'acknowledgedTs']);
+const CAPTURE_KEYS = Object.freeze([
+  'receiptVersion', 'receiptId', 'receiptDigest', 'captureEventDigest', 'decisionTs',
+  'capturedTs', 'snapshotDigest', 'factsEnvelopeDigest', 'preparedFactsDigest',
+  'sourceDigest', 'consumerContractDigest', 'contextDigest', 'strategyId',
+  'marketIdentityDigest', 'durableAcknowledgment', 'authority',
+]);
+const CAPTURE_ACK_KEYS = Object.freeze([
+  'ackVersion', 'storeId', 'storeVersion', 'sequence', 'eventDigest',
+  'headDigest', 'acknowledgedTs',
+]);
 const COST_KEYS = Object.freeze([
   'status', 'reasons', 'costModelVersion', 'q', 'netBase', 'entryLimitPrice',
   'capped', 'maxEntryLevel', 'entryCashOut', 'entryNotionalBound', 'entryFeeBound',
@@ -60,6 +72,14 @@ const COST_KEYS = Object.freeze([
   'scenarioNetProfit', 'executionUncertaintyBuffer', 'bufferedScenarioNetProfit',
   'scenarioStressedLoss', 'stressMid', 'rewardRiskRatio', 'sensitivities',
   'attribution', 'expectancyState', 'feeDigest', 'specDigest', 'snapshotDigest', 'units',
+]);
+const COST_KEYS_WITH_EXIT_DETAIL = Object.freeze([
+  ...COST_KEYS.slice(0, COST_KEYS.indexOf('scenarioExitCashIn') + 1),
+  'scenarioExitDetail',
+  ...COST_KEYS.slice(COST_KEYS.indexOf('scenarioExitCashIn') + 1),
+]);
+const EXIT_DETAIL_KEYS = Object.freeze([
+  'avgPrice', 'proceeds', 'fees', 'slippage', 'haircut', 'levels',
 ]);
 const RESOLVER_RESULT_KEYS = Object.freeze([
   'applied', 'reason', 'strategyId', 'baselineRewardRiskRatio',
@@ -91,7 +111,8 @@ const exactKeys = (value, keys) => isPlainObject(value)
   && Object.keys(value).length === keys.length
   && keys.every((key) => Object.hasOwn(value, key));
 const isTs = (value) => Number.isSafeInteger(value) && value > 0;
-const finite = (value) => Number.isFinite(Number(value));
+const finite = (value) => (typeof value === 'number' && Number.isFinite(value))
+  || (typeof value === 'string' && M.isCanonicalDecimal(value) && Number.isFinite(Number(value)));
 const clone = (value) => structuredClone(value);
 const deepFreeze = (value) => {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
@@ -106,34 +127,123 @@ const digestWithout = (value, keys) => {
   return digestOf(body);
 };
 
+// Count the exact JSON string escape size before allocating the encoded string.
+function jsonStringBytes(value, limit) {
+  if (value.length + 2 > limit) return limit + 1;
+  let bytes = 2;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 34 || code === 92 || [8, 9, 10, 12, 13].includes(code)) bytes += 2;
+    else if (code < 32) bytes += 6;
+    else if (code < 128) bytes += 1;
+    else if (code < 2048) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) { bytes += 4; index += 1; } else bytes += 6;
+    } else if (code >= 0xdc00 && code <= 0xdfff) bytes += 6;
+    else bytes += 3;
+    if (bytes > limit) return bytes;
+  }
+  return bytes;
+}
+
 function boundedPlainDataError(root) {
   const stack = [{ value: root, depth: 0 }];
   const seen = new WeakSet();
-  let nodes = 0;
+  let nodes = 0; let bytes = 0;
   while (stack.length) {
-    const { value, depth } = stack.pop();
+    const { value, depth, leave = false } = stack.pop();
+    if (leave) { seen.delete(value); continue; }
     nodes += 1;
     if (nodes > MAX_ADAPTIVE_RANKING_INPUT_NODES) return 'INPUT_NODE_LIMIT_EXCEEDED';
     if (depth > MAX_ADAPTIVE_RANKING_INPUT_DEPTH) return 'INPUT_DEPTH_LIMIT_EXCEEDED';
-    if (value === undefined || typeof value === 'function' || typeof value === 'symbol'
-        || typeof value === 'bigint' || (typeof value === 'number' && !Number.isFinite(value))) {
-      return 'INPUT_NON_JSON_VALUE_REFUSED';
+    if (typeof value === 'string') {
+      bytes += jsonStringBytes(value, MAX_ADAPTIVE_RANKING_INPUT_BYTES - bytes);
+      if (bytes > MAX_ADAPTIVE_RANKING_INPUT_BYTES) return 'INPUT_BYTE_LIMIT_EXCEEDED';
+      continue;
     }
-    if (value === null || typeof value !== 'object') continue;
-    if (seen.has(value)) continue;
+    if (value === null || typeof value === 'boolean') { bytes += 5; continue; }
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) return 'INPUT_NON_JSON_VALUE_REFUSED';
+      bytes += String(value).length;
+      if (bytes > MAX_ADAPTIVE_RANKING_INPUT_BYTES) return 'INPUT_BYTE_LIMIT_EXCEEDED';
+      continue;
+    }
+    if (typeof value !== 'object') return 'INPUT_NON_JSON_VALUE_REFUSED';
+    const array = Array.isArray(value);
+    if (array ? Object.getPrototypeOf(value) !== Array.prototype : !isPlainObject(value)) {
+      return 'INPUT_NON_PLAIN_OBJECT_REFUSED';
+    }
+    if (seen.has(value)) return 'INPUT_CYCLE_REFUSED';
     seen.add(value);
-    if (!Array.isArray(value) && !isPlainObject(value)) return 'INPUT_NON_PLAIN_OBJECT_REFUSED';
-    if (Object.getOwnPropertySymbols(value).length) return 'INPUT_SYMBOL_PROPERTY_REFUSED';
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    for (const [key, descriptor] of Object.entries(descriptors)) {
-      if (Array.isArray(value) && key === 'length') continue;
+    stack.push({ value, leave: true });
+    const keys = Reflect.ownKeys(value);
+    if (nodes + stack.length + keys.length > MAX_ADAPTIVE_RANKING_INPUT_NODES) return 'INPUT_NODE_LIMIT_EXCEEDED';
+    if (array && (value.length > MAX_ADAPTIVE_RANKING_INPUT_NODES || keys.length !== value.length + 1)) {
+      return 'INPUT_ARRAY_NOT_DENSE';
+    }
+    bytes += 2 + Math.max(0, keys.length - (array ? 2 : 1));
+    if (bytes > MAX_ADAPTIVE_RANKING_INPUT_BYTES) return 'INPUT_BYTE_LIMIT_EXCEEDED';
+    for (const key of keys) {
+      if (array && key === 'length') continue;
+      if (typeof key !== 'string') return 'INPUT_SYMBOL_PROPERTY_REFUSED';
+      if (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length)) {
+        return 'INPUT_ARRAY_EXTRA_PROPERTY';
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return 'INPUT_ACCESSOR_OR_HIDDEN_PROPERTY_REFUSED';
+      if (!array) bytes += jsonStringBytes(key, MAX_ADAPTIVE_RANKING_INPUT_BYTES - bytes) + 1;
+      if (bytes > MAX_ADAPTIVE_RANKING_INPUT_BYTES) return 'INPUT_BYTE_LIMIT_EXCEEDED';
       stack.push({ value: descriptor.value, depth: depth + 1 });
     }
   }
   let text;
   try { text = JSON.stringify(root); } catch { return 'INPUT_NOT_JSON_SERIALIZABLE'; }
   if (text === undefined || Buffer.byteLength(text, 'utf8') > MAX_ADAPTIVE_RANKING_INPUT_BYTES) return 'INPUT_BYTE_LIMIT_EXCEEDED';
+  return null;
+}
+
+export function adaptiveRankingInputCaptureEventDigest({
+  snapshot, factsEnvelope, consumerContract, context, strategyId, decisionTs,
+} = {}) {
+  return digestOf({
+    captureVersion: ADAPTIVE_RANKING_CAPTURE_VERSION,
+    decisionTs, snapshot, factsEnvelope, consumerContract, context, strategyId,
+  });
+}
+
+export function adaptiveRankingInputCaptureError(receipt, input) {
+  const inputError = adaptiveRankingPortInputError(input); if (inputError) return `CAPTURE_INPUT_INVALID:${inputError}`;
+  const bounded = boundedPlainDataError(receipt); if (bounded) return bounded;
+  if (!exactKeys(receipt, CAPTURE_KEYS)
+      || receipt.receiptVersion !== ADAPTIVE_RANKING_CAPTURE_VERSION
+      || !isTs(receipt.decisionTs) || receipt.decisionTs !== input?.decisionTs
+      || !isTs(receipt.capturedTs) || receipt.capturedTs > receipt.decisionTs
+      || !ID.test(receipt.strategyId ?? '') || receipt.strategyId !== input?.strategyId
+      || receipt.authority !== 'NONE') return 'CAPTURE_RECEIPT_SHAPE_OR_IDENTITY_INVALID';
+  const expectedEventDigest = adaptiveRankingInputCaptureEventDigest(input);
+  const market = input?.factsEnvelope?.sourceBinding?.market;
+  if (!HEX64.test(receipt.captureEventDigest ?? '') || receipt.captureEventDigest !== expectedEventDigest
+      || receipt.snapshotDigest !== digestOf(input.snapshot)
+      || receipt.factsEnvelopeDigest !== digestOf(input.factsEnvelope)
+      || receipt.preparedFactsDigest !== input.factsEnvelope.facts.factsDigest
+      || receipt.sourceDigest !== input.factsEnvelope.sourceBinding.sourceDigest
+      || receipt.consumerContractDigest !== input.consumerContract.consumerContractDigest
+      || receipt.contextDigest !== digestOf(input.context)
+      || receipt.marketIdentityDigest !== digestOf(market)) return 'CAPTURE_CONTENT_BINDING_INVALID';
+  const ack = receipt.durableAcknowledgment;
+  if (!exactKeys(ack, CAPTURE_ACK_KEYS)
+      || ack.ackVersion !== ADAPTIVE_RANKING_CAPTURE_ACK_VERSION
+      || !ID.test(ack.storeId ?? '') || !ID.test(ack.storeVersion ?? '')
+      || !Number.isSafeInteger(ack.sequence) || ack.sequence < 1
+      || ack.eventDigest !== receipt.captureEventDigest || !HEX64.test(ack.headDigest ?? '')
+      || !isTs(ack.acknowledgedTs) || ack.acknowledgedTs < receipt.capturedTs
+      || ack.acknowledgedTs > receipt.decisionTs) return 'CAPTURE_DURABLE_ACK_INVALID';
+  const body = { ...receipt }; delete body.receiptId; delete body.receiptDigest;
+  if (!HEX64.test(receipt.receiptDigest ?? '') || digestOf(body) !== receipt.receiptDigest
+      || receipt.receiptId !== `jarcap-${receipt.receiptDigest.slice(0, 40)}`) {
+    return 'CAPTURE_RECEIPT_DIGEST_INVALID';
+  }
   return null;
 }
 
@@ -222,7 +332,9 @@ function snapshotIdentityError(snapshot, contract, decisionTs) {
 }
 
 function postCostError(evaluation, envelope) {
-  if (!exactKeys(evaluation, COST_KEYS)
+  const legacyShape = exactKeys(evaluation, COST_KEYS);
+  const detailedShape = exactKeys(evaluation, COST_KEYS_WITH_EXIT_DETAIL);
+  if ((!legacyShape && !detailedShape)
       || evaluation.status !== 'OK' || !Array.isArray(evaluation.reasons) || evaluation.reasons.length
       || evaluation.costModelVersion !== COST_MODEL_VERSION
       || evaluation.actualEntryCashOut !== null
@@ -236,6 +348,19 @@ function postCostError(evaluation, envelope) {
     return 'POST_COST_EVALUATION_INVALID';
   }
   try {
+    if (detailedShape) {
+      const detail = evaluation.scenarioExitDetail;
+      if (!exactKeys(detail, EXIT_DETAIL_KEYS)
+          || !M.isCanonicalDecimal(detail.avgPrice) || !M.isPositive(detail.avgPrice)
+          || !M.isCanonicalDecimal(detail.proceeds) || !M.isPositive(detail.proceeds)
+          || !M.isCanonicalDecimal(detail.fees) || M.isNegative(detail.fees)
+          || !M.isCanonicalDecimal(detail.slippage) || M.isNegative(detail.slippage)
+          || detail.haircut !== REFERENCE_HAIRCUT
+          || !Number.isSafeInteger(detail.levels) || detail.levels < 1
+          || M.sub(detail.proceeds, detail.fees) !== evaluation.scenarioExitCashIn) {
+        return 'POST_COST_EXIT_DETAIL_INVALID';
+      }
+    }
     if (!M.isPositive(evaluation.bufferedScenarioNetProfit)
         || !M.isPositive(evaluation.scenarioStressedLoss)
         || !M.isPositive(evaluation.rewardRiskRatio)
@@ -324,7 +449,8 @@ function safeStrategyId(input) {
 
 function resultOf({ input, applied, reason, effective, adjustment, evidence, threshold }) {
   const baseline = safeBaseline(input);
-  const note = `${ADAPTIVE_RANKING_PORT_VERSION}:${applied ? 'APPLIED' : reason}:${evidence?.evidenceId ?? 'NO_EVIDENCE'}`.slice(0, 300);
+  const evidenceIdentity = evidence ? `${evidence.evidenceId}:${evidence.evidenceDigest}` : 'NO_EVIDENCE';
+  const note = `${ADAPTIVE_RANKING_PORT_VERSION}:${applied ? 'APPLIED' : reason}:${evidenceIdentity}`.slice(0, 300);
   return deepFreeze({
     resultVersion: ADAPTIVE_RANKING_RESULT_VERSION,
     portVersion: ADAPTIVE_RANKING_PORT_VERSION,
@@ -425,9 +551,16 @@ export function createAdaptiveRankingPort({ resolveQualifiedRanking } = {}) {
     } catch {
       return resultOf({ input, applied: false, reason: 'RESOLVER_THROW', evidence, threshold });
     }
-    if (resolved && typeof resolved.then === 'function') {
-      Promise.resolve(resolved).catch(() => {});
-      return resultOf({ input, applied: false, reason: 'RESOLVER_ASYNC_REFUSED', evidence, threshold });
+    try {
+      if (resolved instanceof Promise) {
+        Promise.resolve(resolved).catch(() => {});
+        return resultOf({ input, applied: false, reason: 'RESOLVER_ASYNC_REFUSED', evidence, threshold });
+      }
+    } catch {
+      return resultOf({ input, applied: false, reason: 'RESOLVER_RESULT_INVALID', evidence, threshold });
+    }
+    if (boundedPlainDataError(resolved)) {
+      return resultOf({ input, applied: false, reason: 'RESOLVER_RESULT_INVALID', evidence, threshold });
     }
     if (validAppliedResolverResult(resolved, input)) {
       const out = resultOf({
