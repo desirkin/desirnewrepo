@@ -15,3 +15,13 @@ Wire the senses to Socrates to the Judge. Today no case is ever enqueued (`enque
 
 ## Order
 lean trim (in progress) → PERSIST-1 (object store + restore-on-boot) → learning seam (record on every PAPER decision from go-live, dormant until qualified, bite-window yardstick) → Watch exit law (thesis invalidation; timers as backstops) → collector/ship coexistence → PAPER publish → senses→Socrates→Judge → DATA-1 / SIM / three accounts (David, Cerulean, Cody).
+
+## Finding — learning/ (trim step 2, 2026-09-14)
+A full import-graph map of the 67 files found NO superseded drafts sitting next to replacements: each concern has one implementation, versioned by constants inside the file. What makes `learning/` large is unwired capability, not duplication:
+- CURRENT (reached from fly.js / judge / tools): the LEARN-1 tier (14 files), the bounded daily-study planner (4), the shadow vocabulary (2).
+- UNWIRED but wanted (David's design): the adaptive loop (11), the forward-shadow lane (9), the full-day archive/sharded study — DATA-1 (7), opportunity audit (5), decision-memory worker (3), the prospective/promotion write path (3), memory-view, six standalone research tools.
+Decision: nothing in learning/ goes to the attic. The learning seam and DATA-1 tickets wire these; the two daily-study pipelines converge when DATA-1 replaces the bounded planner.
+Real numbers: 85.3k lines of application code outside test/ and attic/ (the earlier "157k" counted differently), 73k of tests.
+
+## Next trim target — unify the two runtimes
+`fly.js` (trading ship) and `tools/data-only-runtime.mjs` (collector) share sensors and a data directory but cannot run together (wide-eye status file, rumor2 checkpoints, research quota lock collide). One composition root with a mode flag (`DATA_ONLY` vs `PAPER`) is both the trim and the coexistence decision publish needs.
