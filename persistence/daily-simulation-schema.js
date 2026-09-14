@@ -148,6 +148,7 @@ export const SQL = Object.freeze({
   ANALYZE_COMPLETED: 'DSIM/completed/analyze',
   RESULT_BODY_GET: 'DSIM/result_body/get',
   RESULT_BODY_COUNT: 'DSIM/result_body/count',
+  RESULT_BODY_ORPHAN_COUNT: 'DSIM/result_body/orphan_count',
   RESULT_BODY_PAGE: 'DSIM/result_body/page',
   RESULT_BODY_DAY_BYTES: 'DSIM/result_body/day_bytes',
 });
@@ -211,9 +212,32 @@ export const SQL_BODY = Object.freeze({
   // the `replayable` total (counts, never materializes). RESULT_BODY_PAGE is a
   // KEYSET page (sim_id > $3) for bounded/streaming content verification — a day
   // of bodies is walked one bounded page at a time, never loaded whole.
-  [SQL.RESULT_BODY_GET]: 'SELECT content_digest, body_bytes, body FROM serpent_dsim_result_body WHERE identity = $1 AND day_key = $2 AND sim_id = $3',
+  // GET/PAGE BIND each body to its crediting completion and result row: the
+  // completed index's batch for the sim (completed_batch) and the credited
+  // result row's digest for (sim,batch) (result_digest). A caller compares
+  // these to the body's own batch_id / content_digest so an ORPHAN (no
+  // completion), a MOVED body (completed under a different batch), or a MISBOUND
+  // body (digest != the result row it claims) is caught — not merely counted.
+  [SQL.RESULT_BODY_GET]: `SELECT b.content_digest, b.body_bytes, b.body, b.batch_id,
+     c.batch_id AS completed_batch,
+     (SELECT r.digest FROM serpent_dsim_result r WHERE r.identity = b.identity AND r.day_key = b.day_key AND r.sim_id = b.sim_id AND r.batch_id = b.batch_id AND r.completed ORDER BY r.row_ordinal LIMIT 1) AS result_digest
+     FROM serpent_dsim_result_body b
+     LEFT JOIN serpent_dsim_completed c ON c.identity = b.identity AND c.day_key = b.day_key AND c.sim_id = b.sim_id
+     WHERE b.identity = $1 AND b.day_key = $2 AND b.sim_id = $3`,
   [SQL.RESULT_BODY_COUNT]: 'SELECT count(*)::bigint AS n FROM serpent_dsim_result_body WHERE identity = $1 AND day_key = $2',
-  [SQL.RESULT_BODY_PAGE]: 'SELECT sim_id, content_digest, body_bytes, body FROM serpent_dsim_result_body WHERE identity = $1 AND day_key = $2 AND sim_id > $3 ORDER BY sim_id LIMIT $4',
+  // Unbound-body count: bodies with no crediting completion for the SAME batch,
+  // or no credited result row whose digest equals the body's content_digest.
+  [SQL.RESULT_BODY_ORPHAN_COUNT]: `SELECT count(*)::bigint AS n
+     FROM serpent_dsim_result_body b
+     WHERE b.identity = $1 AND b.day_key = $2 AND NOT (
+       EXISTS (SELECT 1 FROM serpent_dsim_completed c WHERE c.identity = b.identity AND c.day_key = b.day_key AND c.sim_id = b.sim_id AND c.batch_id = b.batch_id)
+       AND EXISTS (SELECT 1 FROM serpent_dsim_result r WHERE r.identity = b.identity AND r.day_key = b.day_key AND r.sim_id = b.sim_id AND r.batch_id = b.batch_id AND r.completed AND r.digest = b.content_digest))`,
+  [SQL.RESULT_BODY_PAGE]: `SELECT b.sim_id, b.content_digest, b.body_bytes, b.body, b.batch_id,
+     c.batch_id AS completed_batch,
+     (SELECT r.digest FROM serpent_dsim_result r WHERE r.identity = b.identity AND r.day_key = b.day_key AND r.sim_id = b.sim_id AND r.batch_id = b.batch_id AND r.completed ORDER BY r.row_ordinal LIMIT 1) AS result_digest
+     FROM serpent_dsim_result_body b
+     LEFT JOIN serpent_dsim_completed c ON c.identity = b.identity AND c.day_key = b.day_key AND c.sim_id = b.sim_id
+     WHERE b.identity = $1 AND b.day_key = $2 AND b.sim_id > $3 ORDER BY b.sim_id LIMIT $4`,
   [SQL.RESULT_BODY_DAY_BYTES]: 'SELECT coalesce(sum(body_bytes),0)::bigint AS bytes FROM serpent_dsim_result_body WHERE identity = $1 AND day_key = $2',
 });
 

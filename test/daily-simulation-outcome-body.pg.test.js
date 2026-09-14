@@ -104,6 +104,41 @@ if (!RUN) {
         assert.equal(v.verified, false);
         assert.equal(v.corruptSim, target);
       });
+
+      await t.test('ORPHAN body (no crediting completion) cannot raise replayable and fails verify', async () => {
+        const id5 = `${ID}:e`; const store = createDailySimulationStore({ db, storeIdentity: id5, dailyTarget: 100000 });
+        await store.commissionStore();
+        assert.equal((await store.commitBatch(receipt([rowB('S#0', { a: 1 }), rowB('S#1', { b: 2 })]))).ok, true);
+        // Remove the crediting completion for S#0 — its body is now an orphan.
+        await db.query('DELETE FROM serpent_dsim_completed WHERE identity=$1 AND sim_id=$2', [id5, 'S#0']);
+        const load = await store.loadDay(DAY);
+        assert.equal(load.status, 'LOST', 'orphan body forces LOST — replayable is never reported (cannot be raised)');
+        const v = await store.verifyOutcomeBodies({ dayKey: DAY, pageSize: 10 });
+        assert.equal(v.verified, false); assert.equal(v.corruptSim, 'S#0');
+      });
+
+      await t.test('MOVED body (completion under a different batch) fails binding', async () => {
+        const id6 = `${ID}:f`; const store = createDailySimulationStore({ db, storeIdentity: id6, dailyTarget: 100000 });
+        await store.commissionStore();
+        assert.equal((await store.commitBatch(receipt([rowB('S#0', { a: 1 })]))).ok, true);
+        await db.query('UPDATE serpent_dsim_completed SET batch_id=$3 WHERE identity=$1 AND sim_id=$2', [id6, 'S#0', 'OTHER_BATCH']);
+        assert.equal((await store.loadDay(DAY)).status, 'LOST', 'moved body -> LOST');
+        const v = await store.verifyOutcomeBodies({ dayKey: DAY, pageSize: 10 });
+        assert.equal(v.verified, false); assert.equal(v.corruptSim, 'S#0');
+      });
+
+      await t.test('MISBOUND body (result digest != body content_digest) fails binding', async () => {
+        const id7 = `${ID}:g`; const store = createDailySimulationStore({ db, storeIdentity: id7, dailyTarget: 100000 });
+        await store.commissionStore();
+        assert.equal((await store.commitBatch(receipt([rowB('S#0', { a: 1 })]))).ok, true);
+        // Tamper the credited result row's digest so it no longer matches the body.
+        await db.query('UPDATE serpent_dsim_result SET digest=$3 WHERE identity=$1 AND sim_id=$2', [id7, 'S#0', 'sha256:not-the-body']);
+        assert.equal((await store.loadDay(DAY)).status, 'LOST', 'misbound body -> LOST');
+        const v = await store.verifyOutcomeBodies({ dayKey: DAY, pageSize: 10 });
+        assert.equal(v.verified, false); assert.equal(v.corruptSim, 'S#0');
+        // A direct read of the misbound body is corruption, never a verified replay.
+        await assert.rejects(() => store.readOutcomeBody({ dayKey: DAY, simId: 'S#0' }), /bound/);
+      });
     } finally {
       try { assert.equal(db.schema, SCHEMA); await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`); } finally { await db.end(); }
     }

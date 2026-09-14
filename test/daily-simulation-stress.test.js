@@ -45,6 +45,7 @@ function makeFakeDb() {
       case SQL.JOBSCHED_LIST: { const out = []; for (const [k, v] of t.jobsched) { const [id, d, job] = k.split('|'); if (id === p[0] && d === p[1]) out.push({ job_id: job, next_eligible_ts: v.next_eligible_ts, backoff_attempts: v.backoff_attempts }); } const lim = p[2] ?? out.length; return { rows: out.slice(0, lim) }; }
       case SQL.JOBSCHED_UPSERT: { t.jobsched.set(bk(p[0], p[1], p[2]), { next_eligible_ts: p[3], backoff_attempts: p[4] }); return { rowCount: 1, rows: [] }; }
       case SQL.RESULT_BODY_COUNT: return { rows: [{ n: 0 }] };
+      case SQL.RESULT_BODY_ORPHAN_COUNT: return { rows: [{ n: 0 }] };
       case SQL.RESULT_BODY_PAGE: return { rows: [] };
       case SQL.RESULT_BODY_DAY_BYTES: return { rows: [{ bytes: 0 }] };
       case SQL.RESULT_BODY_GET: return { rows: [] };

@@ -54,6 +54,7 @@ function makeFakeDb() {
       case SQL.JOBSCHED_UPSERT: { t.jobsched.set(bk(p[0], p[1], p[2]), { next_eligible_ts: p[3], backoff_attempts: p[4] }); return { rowCount: 1, rows: [] }; }
       case SQL.ANALYZE_RESULT: case SQL.ANALYZE_COMPLETED: return { rows: [], rowCount: 0 };
       case SQL.RESULT_BODY_COUNT: return { rows: [{ n: 0 }] };
+      case SQL.RESULT_BODY_ORPHAN_COUNT: return { rows: [{ n: 0 }] };
       case SQL.RESULT_BODY_PAGE: return { rows: [] };
       case SQL.RESULT_BODY_DAY_BYTES: return { rows: [{ bytes: 0 }] };
       case SQL.RESULT_BODY_GET: return { rows: [] };

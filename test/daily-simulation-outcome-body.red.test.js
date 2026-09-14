@@ -37,15 +37,20 @@ function makeFakeDb() {
   const t = { store: new Map(), day: new Map(), batch: new Map(), completed: new Map(), pending: new Map(), result: [], jobsched: new Map(), payload: new Map() };
   const B2T = new Map(Object.entries(SQL_BODY).map(([tok, body]) => [body, tok]));
   const dk = (a, b) => `${a}|${b}`; const bk = (a, b, c) => `${a}|${b}|${c}`;
+  // binding helpers: crediting completion's batch for a sim, and the credited
+  // (min row_ordinal) result row's digest for (sim, batch).
+  const bodyCompletedBatch = (id, d, sim) => { const c = t.completed.get(bk(id, d, sim)); return c ? c.batch_id : null; };
+  const bodyResultDigest = (id, d, sim, batch) => { const rr = t.result.filter((x) => x.identity === id && x.day_key === d && x.sim_id === sim && x.batch_id === batch && x.completed).sort((a, b) => a.row_ordinal - b.row_ordinal)[0]; return rr ? rr.digest : null; };
   function run(body, p) {
     if (body === 'BEGIN' || body === 'COMMIT' || body === 'ROLLBACK') return { rows: [], rowCount: 0 };
-    if (body.startsWith(RESULT_INSERT_BULK_PREFIX)) { const n = p.length / 10; for (let i = 0; i < n; i++) { const b = i * 10; t.result.push({ identity: p[b], day_key: p[b + 1], batch_id: p[b + 2], sim_id: p[b + 4], status: p[b + 5], completed: p[b + 6], valid_modeled: p[b + 7], prospective_eligible: p[b + 8], digest: p[b + 9] }); } return { rows: [], rowCount: n }; }
+    if (body.startsWith(RESULT_INSERT_BULK_PREFIX)) { const n = p.length / 10; for (let i = 0; i < n; i++) { const b = i * 10; t.result.push({ identity: p[b], day_key: p[b + 1], batch_id: p[b + 2], row_ordinal: p[b + 3], sim_id: p[b + 4], status: p[b + 5], completed: p[b + 6], valid_modeled: p[b + 7], prospective_eligible: p[b + 8], digest: p[b + 9] }); } return { rows: [], rowCount: n }; }
     if (body.startsWith(COMPLETED_INSERT_BULK_PREFIX)) { const n = p.length / 4; for (let i = 0; i < n; i++) { const b = i * 4; t.completed.set(bk(p[b], p[b + 1], p[b + 2]), { batch_id: p[b + 3] }); } return { rows: [], rowCount: n }; }
     if (body.startsWith(RESULT_BODY_INSERT_BULK_PREFIX)) { if (t._failBodyInsert) throw new Error('SIMULATED body-insert failure'); const n = p.length / 7; for (let i = 0; i < n; i++) { const b = i * 7; t.payload.set(bk(p[b], p[b + 1], p[b + 2]), { batch_id: p[b + 3], content_digest: p[b + 4], body_bytes: p[b + 5], body: JSON.parse(p[b + 6]) }); } return { rows: [], rowCount: n }; }
     switch (B2T.get(body)) {
-      case SQL.RESULT_BODY_GET: { const r = t.payload.get(bk(p[0], p[1], p[2])); return { rows: r ? [{ content_digest: r.content_digest, body_bytes: r.body_bytes, body: r.body }] : [] }; }
+      case SQL.RESULT_BODY_GET: { const r = t.payload.get(bk(p[0], p[1], p[2])); if (!r) return { rows: [] }; return { rows: [{ content_digest: r.content_digest, body_bytes: r.body_bytes, body: r.body, batch_id: r.batch_id, completed_batch: bodyCompletedBatch(p[0], p[1], p[2]), result_digest: bodyResultDigest(p[0], p[1], p[2], r.batch_id) }] }; }
       case SQL.RESULT_BODY_COUNT: { let n = 0; for (const k of t.payload.keys()) { const [id, d] = k.split('|'); if (id === p[0] && d === p[1]) n++; } return { rows: [{ n }] }; }
-      case SQL.RESULT_BODY_PAGE: { const out = []; for (const [k, v] of t.payload) { const [id, d, sim] = k.split('|'); if (id === p[0] && d === p[1] && sim > p[2]) out.push({ sim_id: sim, content_digest: v.content_digest, body_bytes: v.body_bytes, body: v.body }); } out.sort((a, b) => (a.sim_id < b.sim_id ? -1 : 1)); return { rows: out.slice(0, p[3]) }; }
+      case SQL.RESULT_BODY_ORPHAN_COUNT: { let n = 0; for (const [k, v] of t.payload) { const [id, d, sim] = k.split('|'); if (id !== p[0] || d !== p[1]) continue; const cb = bodyCompletedBatch(id, d, sim); const rd = bodyResultDigest(id, d, sim, v.batch_id); if (!(cb === v.batch_id && rd === v.content_digest)) n++; } return { rows: [{ n }] }; }
+      case SQL.RESULT_BODY_PAGE: { const out = []; for (const [k, v] of t.payload) { const [id, d, sim] = k.split('|'); if (id === p[0] && d === p[1] && sim > p[2]) out.push({ sim_id: sim, content_digest: v.content_digest, body_bytes: v.body_bytes, body: v.body, batch_id: v.batch_id, completed_batch: bodyCompletedBatch(id, d, sim), result_digest: bodyResultDigest(id, d, sim, v.batch_id) }); } out.sort((a, b) => (a.sim_id < b.sim_id ? -1 : 1)); return { rows: out.slice(0, p[3]) }; }
       case SQL.RESULT_BODY_DAY_BYTES: { let bytes = 0; for (const [k, v] of t.payload) { const [id, d] = k.split('|'); if (id === p[0] && d === p[1]) bytes += v.body_bytes; } return { rows: [{ bytes }] }; }
       case SQL.STORE_GET: { const r = t.store.get(p[0]); return { rows: r ? [r] : [] }; }
       case SQL.STORE_INSERT: { t.store.set(p[0], { identity: p[0], policy_version: p[1], store_version: p[2], commissioned_at: p[3] }); return { rowCount: 1, rows: [] }; }
@@ -229,4 +234,25 @@ test('W5: per-day quota is serialized with concurrent commits (CAS-fenced stale 
   const rb = await B.commitBatch(receiptWithBodies([{ b: 2 }], { batchId: 'B', parentRevision: 0 }));
   assert.equal(rb.ok, false); assert.equal(rb.reason, 'STALE_PARENT_REVISION');
   assert.equal(db._t.payload.size, 1, 'only the winning commit persisted a body');
+});
+
+// ---- W6: encoder strictness holes found in review of 292d345 -----------------
+test('W6: encoder rejects symbol/non-enumerable keys, array getters/extra props, cycles, and over-deep', async () => {
+  // helper that submits a raw body and returns the refusal
+  async function reject(body) {
+    const db = makeFakeDb(); const store = mkStore(db); await store.commissionStore();
+    return store.commitBatch(receiptRawBody(body));
+  }
+  // symbol key (Object.keys silently ignored it before)
+  { const b = { ok: 1 }; b[Symbol('s')] = 2; const r = await reject(b); assert.equal(r.ok, false); assert.equal(r.reason, 'OUTCOME_BODY_NONCANONICAL'); }
+  // non-enumerable data key (silently dropped before)
+  { const b = {}; Object.defineProperty(b, 'hidden', { value: 1, enumerable: false }); const r = await reject(b); assert.equal(r.ok, false); assert.equal(r.reason, 'OUTCOME_BODY_NONCANONICAL'); }
+  // array indexed getter (was invoked / accepted via `i in value`)
+  { const a = []; Object.defineProperty(a, '0', { get() { return 7; }, enumerable: true }); a.length = 1; const r = await reject(a); assert.equal(r.ok, false); assert.equal(r.reason, 'OUTCOME_BODY_NONCANONICAL'); }
+  // array extra (non-index) own property (ignored before)
+  { const a = [1, 2]; a.tag = 'x'; const r = await reject(a); assert.equal(r.ok, false); assert.equal(r.reason, 'OUTCOME_BODY_NONCANONICAL'); }
+  // cycle — must be detected explicitly (detail says cycle), not via stack overflow
+  { const b = { n: 1 }; b.self = b; const r = await reject(b); assert.equal(r.ok, false); assert.equal(r.reason, 'OUTCOME_BODY_NONCANONICAL'); assert.match(String(r.detail), /cycle/); }
+  // over-deep acyclic nesting — rejected by the depth ceiling (detail says depth)
+  { let d = {}; for (let i = 0; i < 5000; i++) d = { c: d }; const r = await reject(d); assert.equal(r.ok, false); assert.equal(r.reason, 'OUTCOME_BODY_NONCANONICAL'); assert.match(String(r.detail), /deep|depth|node/); }
 });
