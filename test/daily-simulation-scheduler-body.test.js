@@ -218,3 +218,101 @@ test('SBODY-8: exact-duplicate same-id body dedups (one credit, one body) throug
   const led = (await mkStore(db, ID).loadDay(DAY)).ledger;
   assert.equal(led.totals.completed, 1); assert.equal(led.totals.replayable, 1);
 });
+
+// A GOOD credited row shared by the envelope REDs below — proves the refusal is
+// the ENVELOPE, not the page: a page that would otherwise credit cleanly is
+// still rejected with zero write when the wrapper metadata is hostile.
+const okRow = () => ({ simulationId: 'W#0', status: 'COMPLETED_MODELED', completed: true, validModeledOutcome: false, prospectiveQualificationEligible: false, body: { v: 1 } });
+async function assertZeroWrite(db, ID) {
+  assert.equal(db._t.result.length, 0, 'no evidence written');
+  assert.equal(db._t.completed.size, 0, 'zero false completions');
+  assert.equal(db._t.payload.size, 0, 'no body written');
+  assert.equal((await mkStore(db, ID).loadDay(DAY)).status, 'NEW', 'day never commissioned a batch');
+}
+
+test('SBODY-9: a getter on the result WRAPPER is refused and NEVER invoked (descriptor-first envelope)', async () => {
+  const db = makeFakeDb(); const ID = 'sbody:9'; await mkStore(db, ID).commissionStore();
+  let getterInvoked = false;
+  const gExec = { async executeDailySimulationBatch({ job }) {
+    const res = { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: [okRow()], laws: ['x'] };
+    // A hostile accessor planted on the ENVELOPE itself (not a row). It must be
+    // caught by the descriptor read — never executed by validation or by the
+    // later direct reads (res.counters, res.nextCursor, res.done, res.laws).
+    Object.defineProperty(res, 'counters', { enumerable: true, get() { getterInvoked = true; return { frames: 1 }; } });
+    return res;
+  } };
+  const r = await mkScheduler(db, ID, gExec, { dailyTarget: 10 }).tick();
+  assert.equal(r.tick, 'EXEC_FAILED', 'envelope accessor is an honest zero-write refusal');
+  assert.equal(getterInvoked, false, 'the wrapper getter was NEVER invoked (validated via descriptors)');
+  assert.match(r.error, /accessor/);
+  await assertZeroWrite(db, ID);
+});
+
+test('SBODY-10: an oversized nextCursor is bounded and refused with zero write (before the page runs)', async () => {
+  const db = makeFakeDb(); const ID = 'sbody:10'; await mkStore(db, ID).commissionStore();
+  const bigCursorExec = { async executeDailySimulationBatch({ job }) {
+    return { jobId: job.jobId, cursor: 0, nextCursor: 'x'.repeat(70 * 1024), done: false, results: [okRow()], counters: { frames: 1 }, laws: ['x'] };
+  } };
+  const r = await mkScheduler(db, ID, bigCursorExec, { dailyTarget: 10 }).tick();
+  assert.equal(r.tick, 'EXEC_FAILED');
+  assert.match(r.error, /nextCursor.*envelope metadata bounds/);
+  await assertZeroWrite(db, ID);
+});
+
+test('SBODY-11: a cyclic nextCursor is refused fail-fast (no stack overflow), zero write', async () => {
+  const db = makeFakeDb(); const ID = 'sbody:11'; await mkStore(db, ID).commissionStore();
+  const cycExec = { async executeDailySimulationBatch({ job }) {
+    const c = { a: 1 }; c.self = c;
+    return { jobId: job.jobId, cursor: 0, nextCursor: c, done: false, results: [okRow()], counters: { frames: 1 }, laws: ['x'] };
+  } };
+  const r = await mkScheduler(db, ID, cycExec, { dailyTarget: 10 }).tick();
+  assert.equal(r.tick, 'EXEC_FAILED');
+  assert.match(r.error, /nextCursor.*envelope metadata bounds/);
+  await assertZeroWrite(db, ID);
+});
+
+test('SBODY-12: oversized/cyclic executor counters are bounded and refused with zero write', async () => {
+  const bigDb = makeFakeDb(); const BIG = 'sbody:12a'; await mkStore(bigDb, BIG).commissionStore();
+  const bigCountersExec = { async executeDailySimulationBatch({ job }) {
+    return { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: [okRow()], counters: { blob: 'y'.repeat(70 * 1024) }, laws: ['x'] };
+  } };
+  const rBig = await mkScheduler(bigDb, BIG, bigCountersExec, { dailyTarget: 10 }).tick();
+  assert.equal(rBig.tick, 'EXEC_FAILED');
+  assert.match(rBig.error, /counters.*envelope metadata bounds/);
+  await assertZeroWrite(bigDb, BIG);
+
+  const cycDb = makeFakeDb(); const CYC = 'sbody:12b'; await mkStore(cycDb, CYC).commissionStore();
+  const cycCountersExec = { async executeDailySimulationBatch({ job }) {
+    const c = { frames: 1 }; c.loop = c;
+    return { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: [okRow()], counters: c, laws: ['x'] };
+  } };
+  const rCyc = await mkScheduler(cycDb, CYC, cycCountersExec, { dailyTarget: 10 }).tick();
+  assert.equal(rCyc.tick, 'EXEC_FAILED');
+  assert.match(rCyc.error, /counters.*envelope metadata bounds/);
+  await assertZeroWrite(cycDb, CYC);
+});
+
+test('SBODY-13: a symbol / non-plain / prototype-bearing envelope is refused with zero write; a normal envelope still credits', async () => {
+  // symbol key on the envelope
+  const symDb = makeFakeDb(); const SYM = 'sbody:13a'; await mkStore(symDb, SYM).commissionStore();
+  const symExec = { async executeDailySimulationBatch({ job }) {
+    const res = { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: [okRow()], counters: { frames: 1 }, laws: ['x'] };
+    res[Symbol('evil')] = 1;
+    return res;
+  } };
+  const rSym = await mkScheduler(symDb, SYM, symExec, { dailyTarget: 10 }).tick();
+  assert.equal(rSym.tick, 'EXEC_FAILED');
+  assert.match(rSym.error, /symbol/);
+  await assertZeroWrite(symDb, SYM);
+
+  // control: an otherwise identical PLAIN envelope credits normally, proving the
+  // descriptor-first pass does not reject well-formed documented output.
+  const okDb = makeFakeDb(); const OK = 'sbody:13b'; await mkStore(okDb, OK).commissionStore();
+  const okExec = { async executeDailySimulationBatch({ job }) {
+    return { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: [okRow()], counters: { frames: 1 }, laws: ['synthetic'] };
+  } };
+  const run = await mkScheduler(okDb, OK, okExec, { dailyTarget: 1 }).runToIdle();
+  assert.equal(run.last, 'TARGET_MET');
+  assert.equal(okDb._t.payload.size, 1, 'normal envelope credited one body');
+  assert.equal((await mkStore(okDb, OK).loadDay(DAY)).ledger.totals.replayable, 1);
+});

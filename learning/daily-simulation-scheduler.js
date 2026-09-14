@@ -83,6 +83,13 @@ export const HARD_MAX_OUTCOME_BODY_BYTES = 64 * 1024;
 export const HARD_MAX_PAGE_BYTES = 128 * 1024 * 1024;
 export const HARD_MAX_PAGE_NODES = 20_000_000;
 export const HARD_MAX_PAGE_DEPTH = 128;
+// Finite ceiling for the ENVELOPE metadata around the page — jobId, cursor,
+// nextCursor, executor counters/laws, and any extra top-level field. These are
+// bounded strictly (byte/node/depth, getter-free) so arbitrary/oversized/cyclic
+// cursor or counters metadata is refused BEFORE it is read, WITHOUT walking the
+// huge res.results page (which the whole-page preflight walks exactly once). The
+// page dwarfs its metadata, so this cap is small on purpose.
+export const HARD_MAX_ENVELOPE_META_BYTES = 64 * 1024;
 
 export class SchedulerStorageError extends Error { constructor(m) { super(`SCHEDULER_STORAGE: ${m}`); this.name = 'SchedulerStorageError'; } }
 export class SchedulerContractError extends Error { constructor(m) { super(`SCHEDULER_CONTRACT: ${m}`); this.name = 'SchedulerContractError'; } }
@@ -244,15 +251,53 @@ export function createDailySimulationScheduler({
     return { job: runnable[idx], jobId: runnable[idx].jobId };
   }
 
+  // DESCRIPTOR-FIRST validation of the ENTIRE executor result envelope, before
+  // ANY property of `res` is read as a value. Every own key is enumerated via
+  // Reflect.ownKeys and inspected through getOwnPropertyDescriptor — so a getter
+  // or setter planted on the wrapper (jobId, done, nextCursor, counters, an extra
+  // field, …) is REFUSED and never invoked, not here and not by the later direct
+  // reads (res.done, res.nextCursor, res.counters, res.laws), which this proves
+  // to be plain data. Every metadata field (anything but the huge results page)
+  // is then strict-bounded, so arbitrary/oversized/cyclic cursor or counters
+  // metadata is rejected up front. res.results is NOT walked here — the
+  // whole-page preflight walks that page exactly once, so there is no double
+  // walk of the large payload.
   function validateExecResult(res, expectJobId) {
-    if (!res || typeof res !== 'object') throw new SchedulerContractError('executor returned a non-object result');
-    if (res.jobId !== expectJobId) throw new SchedulerContractError(`executor jobId ${res.jobId} != scheduled ${expectJobId}`);
-    if (!Array.isArray(res.results)) throw new SchedulerContractError('executor result.results must be an array');
+    if (res === null || typeof res !== 'object' || Array.isArray(res)) throw new SchedulerContractError('executor returned a non-object result');
+    const proto = Object.getPrototypeOf(res);
+    if (proto !== null && proto !== Object.prototype) throw new SchedulerContractError('executor result must be a plain object');
+
+    const ownKeys = Reflect.ownKeys(res);
+    const val = Object.create(null); // values read ONCE, via descriptor (never a live getter)
+    for (const k of ownKeys) {
+      if (typeof k === 'symbol') throw new SchedulerContractError('executor result carries a symbol key');
+      const d = Object.getOwnPropertyDescriptor(res, k);
+      if (typeof d.get === 'function' || typeof d.set === 'function' || !('value' in d)) throw new SchedulerContractError(`executor result field '${k}' is an accessor — refusing to invoke it`);
+      if (!d.enumerable) throw new SchedulerContractError(`executor result field '${k}' is non-enumerable`);
+      val[k] = d.value;
+    }
+
+    // Required envelope shape (read from the descriptor-materialized values).
+    if (val.jobId !== expectJobId) throw new SchedulerContractError(`executor jobId ${val.jobId} != scheduled ${expectJobId}`);
+    if (!Array.isArray(val.results)) throw new SchedulerContractError('executor result.results must be an array');
     // results are RESULT ROWS (frames * variants), bounded by the row cap; the
     // frame count is bounded separately by the maxEvaluations we requested.
-    if (res.results.length > MAX_RESULT_ROWS_PER_PAGE) throw new SchedulerIntegrityError(`page of ${res.results.length} result rows exceeds hard cap ${MAX_RESULT_ROWS_PER_PAGE} — refusing to truncate`);
-    if (typeof res.done !== 'boolean') throw new SchedulerContractError('executor result.done must be boolean');
-    if (!('nextCursor' in res)) throw new SchedulerContractError('executor result must carry nextCursor');
+    if (val.results.length > MAX_RESULT_ROWS_PER_PAGE) throw new SchedulerIntegrityError(`page of ${val.results.length} result rows exceeds hard cap ${MAX_RESULT_ROWS_PER_PAGE} — refusing to truncate`);
+    if (typeof val.done !== 'boolean') throw new SchedulerContractError('executor result.done must be boolean');
+    if (!('nextCursor' in val)) throw new SchedulerContractError('executor result must carry nextCursor');
+
+    // Bound EVERY envelope metadata field — cursor, nextCursor, counters, laws
+    // and any extra top-level field — against the finite envelope-meta ceiling.
+    // The huge results page is skipped (the whole-page preflight bounds it once).
+    // A provably inert `undefined` optional field is tolerated (JSON drops it and
+    // the consumers coalesce with ?? null); anything object-shaped/oversized/
+    // cyclic is walked strictly, getter-free, and refused.
+    for (const k of ownKeys) {
+      if (k === 'results') continue;
+      if (val[k] === undefined) continue;
+      try { assertBoundedCanonical(val[k], { maxBytes: HARD_MAX_ENVELOPE_META_BYTES }); }
+      catch (err) { throw new SchedulerContractError(`executor result field '${k}' exceeds envelope metadata bounds: ${err && err.message}`); }
+    }
     return res;
   }
 
