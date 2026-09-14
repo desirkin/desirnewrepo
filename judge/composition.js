@@ -102,6 +102,17 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   // and therefore do not inherit an unrelated production persistence lock.
   const persistencePermissionBase = () => (mode === 'PAPER' || kind === 'LIVE' ? getPersistence().health().permissionLock === false : true);
   const entryPermissionIncreaseAllowed = () => persistencePermissionBase() && (permissionIncreaseAllowed ? permissionIncreaseAllowed() : true);
+  // ARM changes durable account authority, so it uses the same exact
+  // synchronous permission intersection as entry admission. A thenable is
+  // never permission; consume a rejection so malformed async policy cannot
+  // become an unhandled process failure.
+  const permissionIncreaseGate = () => {
+    try {
+      const observed = entryPermissionIncreaseAllowed();
+      if (observed !== null && (typeof observed === 'object' || typeof observed === 'function') && typeof observed.then === 'function') { Promise.resolve(observed).catch(() => {}); return { ok: false, reason: 'PERSISTENCE_PERMISSION_LOCK' }; }
+      return observed === true ? { ok: true, reason: null } : { ok: false, reason: 'PERSISTENCE_PERMISSION_LOCK' };
+    } catch { return { ok: false, reason: 'PERSISTENCE_PERMISSION_LOCK' }; }
+  };
   // the dispatcher's authority context (closeout R01): run mode, binding digests / key, controls, clock trust — checked again at the send
   const dispatcher = createDispatcher({ accountId: acct, journal: jr, writer, adapter, clock: pclock, feed: fd, specOf, feeOf: () => fee, controls, authority: { runMode: mode, binding: { policyDigest, codeDigest: treeDigest, keyFingerprint: fp, releaseDigest: null }, clockTrusted: () => (kind === 'LIVE' && pclock.status ? pclock.status().trusted !== false : true), maxBookAgeMs: policy.execution.maxBookAgeMs, permissionIncreaseAllowed: entryPermissionIncreaseAllowed }, log }); await dispatcher.load();
   // gain restrictions are account-specific (closeout R06): THIS account's session P&L against the configured lock thresholds, never the legacy ledger's daily lock
@@ -164,7 +175,17 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
     const pf = usablePreflight(given ?? lastPreflight); if (policy.live && (expiresTs - nowTs() > policy.live.armExpiryMs)) return { ok: false, reasons: ['OWNER_EXPIRY_EXCEEDS_POLICY'], state: 'BLOCKED' };
     const ce = dispatcher.state()?.canaryEvidence ?? null; const built = buildLiveAuthorization({ accountId: acct, releaseDigest, policyDigest, codeDigest: treeDigest, allocationCeiling, reinvestment, ownerLimits, keyFingerprint: fp, ownerRef, expiresTs, restrictionRevision: dispatcher.revision(), nowTs: nowTs(), verifiedAvailableUsd: pf ? pf.checks?.balance?.quoteAvailable ?? null : null, preflight: pf, approval, canary, canaryEvidence: ce ? { ...ce, accountId: acct } : null });
     if (!built.ok) return built;
-    try { await dispatcher.commit(built.event()); } catch (err) { return { ok: false, reasons: [err.detail?.code ?? err.code ?? 'COMMIT_FAILED'], state: 'BLOCKED', detail: String(err.message ?? '').slice(0, 200) }; }
+    const permission = permissionIncreaseGate(); if (!permission.ok) return { ok: false, reasons: [permission.reason], state: 'BLOCKED' };
+    try {
+      // The dispatcher serializes this recheck with account mutations and
+      // repeats it after a revision-conflict reload. Persistence health is
+      // external to the account transaction, so this is the narrowest
+      // available pre-append boundary; it is not claimed as a database lock.
+      await dispatcher.commit(built.event(), { recheck: () => permissionIncreaseGate().ok });
+    } catch (err) {
+      if (err.code === 'RECHECK_FAILED') return { ok: false, reasons: ['PERSISTENCE_PERMISSION_LOCK'], state: 'BLOCKED' };
+      return { ok: false, reasons: [err.detail?.code ?? err.code ?? 'COMMIT_FAILED'], state: 'BLOCKED', detail: String(err.message ?? '').slice(0, 200) };
+    }
     publishProjection(); return { ok: true, reasons: [], authorizationId: built.payload.authorizationId, expiresTs };
   }
   async function disarm(reason = 'REVOKED') { const a = dispatcher.state()?.authorization; if (!a || a.ended) return { ok: false, reason: 'NO_ACTIVE_AUTHORIZATION' }; await dispatcher.commit(makeEvent({ type: 'AUTHORIZATION_ENDED', accountId: acct, knownAtTs: nowTs(), payload: { authorizationId: a.authorizationId, reason, ts: nowTs() } })); publishProjection(); return { ok: true, authorizationId: a.authorizationId }; }
