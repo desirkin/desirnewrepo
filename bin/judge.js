@@ -81,11 +81,11 @@ export function parseArgs(argv) {
   if (command === 'arm-live' && flags.confirm === true && !('expires-at' in flags)) throw new CommandError('INVALID_REQUEST', 'arm-live --confirm needs --expires-at (an owner choice, never a default)');
   return { command, flags };
 }
-export async function runCli(argv, { env = process.env, stdin = process.stdin, stdout = (s) => process.stdout.write(s), stderr = (s) => process.stderr.write(s), clock = () => Date.now(), transport = null, dbFactory = null, tapeRunner = null, specsSource = null, cwd = process.cwd(), experimentStore = null } = {}) {
+export async function runCli(argv, { env = process.env, stdin = process.stdin, stdout = (s) => process.stdout.write(s), stderr = (s) => process.stderr.write(s), clock = () => Date.now(), transport = null, dbFactory = null, persistence = null, persistenceFactory = null, tapeRunner = null, WebSocketImpl = null, specsSource = null, cwd = process.cwd(), experimentStore = null } = {}) {
   let parsed; try { parsed = parseArgs(argv); } catch (err) { stderr(`${JSON.stringify({ ok: false, error: err instanceof CommandError ? err.toJSON() : { code: 'INVALID_REQUEST', exitCode: EXIT.INVALID_REQUEST } })}\n${USAGE}`); return EXIT.INVALID_REQUEST; }
   if (parsed.help) { stdout(USAGE); return EXIT.OK; }
   const { command, flags } = parsed; const log = (m) => stderr(`${JSON.stringify({ log: String(m).slice(0, 300) })}\n`);
-  const cmds = createCommands({ env, clock, stdin, log, transport, dbFactory, tapeRunner, specsSource, cwd, experimentStore });
+  const cmds = createCommands({ env, clock, stdin, log, transport, dbFactory, persistence, persistenceFactory, tapeRunner, WebSocketImpl, specsSource, cwd, experimentStore });
   try { const result = await cmds[command](flags); stdout(`${JSON.stringify(result)}\n`); return result.ok === false ? EXIT.INVALID_INPUT : EXIT.OK; }
   catch (err) { const e = err instanceof CommandError ? err.toJSON() : { code: err.code ?? 'INTERNAL_FAILURE', message: `${err?.constructor?.name ?? 'failure'}: ${String(err?.message ?? '').slice(0, 200)}`, exitCode: EXIT.FAILURE }; stderr(`${JSON.stringify({ ok: false, command, error: e })}\n`); return e.exitCode ?? EXIT.FAILURE; }
 }

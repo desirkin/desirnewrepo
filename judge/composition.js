@@ -60,7 +60,15 @@ const excluded = (policy, symbol) => policy.universe.excludeBases.includes(symbo
 export const paperCheckpointFile = (acct) => path.join(judgeDir(), `paper-checkpoint-${acct}.json`);
 function readPaperCheckpoint(acct) { try { const raw = JSON.parse(readFileSync(paperCheckpointFile(acct), 'utf8')); return raw && raw.version === 'paper-depletion-checkpoint-1' && raw.accountId === acct && Array.isArray(raw.levels) ? raw : null; } catch { return null; } }
 export const PERIODIC_RECONCILE_MS = 5 * 60_000; export const CLOCK_REQUALIFY_MS = 60_000; export const SCHEDULER_TICK_MS = 25;
-export async function composeJudge({ policyFile, mode, accountId = null, env = process.env, log = console.log, db = null, journal = null, clock = null, feed = null, transport = null, WebSocketImpl = null, specs = null, history = null, caseSource = null, casesDir = null, controlsSource = null, nominations = null, recordDir = null, allowPrivate = () => false, allowOrders = () => false, requireDb = null, writeProjection = true, codeDigest = undefined, caseWorker = null, exchangeContext = 'kraken-spot', experimentId = null, armRule = null, exitPolicy = null, verdictSink = null, learningActivationSource = null, dynamicSizing = null, permissionIncreaseAllowed = null }) {
+function synchronousPermissionGate(callback) {
+  try {
+    const observed = callback();
+    if (observed !== null && (typeof observed === 'object' || typeof observed === 'function') && typeof observed.then === 'function') { Promise.resolve(observed).catch(() => {}); return { ok: false, reason: 'PERSISTENCE_PERMISSION_LOCK' }; }
+    return observed === true ? { ok: true, reason: null } : { ok: false, reason: 'PERSISTENCE_PERMISSION_LOCK' };
+  } catch { return { ok: false, reason: 'PERSISTENCE_PERMISSION_LOCK' }; }
+}
+
+export async function composeJudge({ policyFile, mode, accountId = null, env = process.env, log = console.log, db = null, journal = null, clock = null, feed = null, transport = null, WebSocketImpl = null, specs = null, history = null, caseSource = null, casesDir = null, controlsSource = null, nominations = null, recordDir = null, allowPrivate = () => false, allowOrders = () => false, requireDb = null, writeProjection = true, codeDigest = undefined, caseWorker = null, exchangeContext = 'kraken-spot', experimentId = null, armRule = null, exitPolicy = null, verdictSink = null, learningActivationSource = null, dynamicSizing = null, persistenceHealth = null, permissionIncreaseAllowed = null }) {
   if (!RUN_MODES.includes(mode)) throw new Error(`mode ${mode} outside ${RUN_MODES.join('/')}`);
   if (permissionIncreaseAllowed !== null && permissionIncreaseAllowed !== undefined && typeof permissionIncreaseAllowed !== 'function') throw new Error('permissionIncreaseAllowed must be a synchronous boolean callback');
   const loaded = loadJudgePolicy(policyFile); const policy = loaded.policy; const policyDigest = loaded.digest; const acct = accountId ?? policy.account.accountId; const kind = accountKindOf(mode);
@@ -100,19 +108,14 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   // persistence health. An optional caller predicate may further restrict,
   // never replace, that lock. OBSERVE/REPLAY are isolated research accounts
   // and therefore do not inherit an unrelated production persistence lock.
-  const persistencePermissionBase = () => (mode === 'PAPER' || kind === 'LIVE' ? getPersistence().health().permissionLock === false : true);
+  const persistenceHealthSource = persistenceHealth ?? (() => getPersistence().health());
+  const persistencePermissionBase = () => (mode === 'PAPER' || kind === 'LIVE' ? synchronousPermissionGate(() => { const health = persistenceHealthSource(); if (health !== null && (typeof health === 'object' || typeof health === 'function') && typeof health.then === 'function') return health; return health?.permissionLock === false; }).ok : true);
   const entryPermissionIncreaseAllowed = () => persistencePermissionBase() && (permissionIncreaseAllowed ? permissionIncreaseAllowed() : true);
   // ARM changes durable account authority, so it uses the same exact
   // synchronous permission intersection as entry admission. A thenable is
   // never permission; consume a rejection so malformed async policy cannot
   // become an unhandled process failure.
-  const permissionIncreaseGate = () => {
-    try {
-      const observed = entryPermissionIncreaseAllowed();
-      if (observed !== null && (typeof observed === 'object' || typeof observed === 'function') && typeof observed.then === 'function') { Promise.resolve(observed).catch(() => {}); return { ok: false, reason: 'PERSISTENCE_PERMISSION_LOCK' }; }
-      return observed === true ? { ok: true, reason: null } : { ok: false, reason: 'PERSISTENCE_PERMISSION_LOCK' };
-    } catch { return { ok: false, reason: 'PERSISTENCE_PERMISSION_LOCK' }; }
-  };
+  const permissionIncreaseGate = () => synchronousPermissionGate(entryPermissionIncreaseAllowed);
   // the dispatcher's authority context (closeout R01): run mode, binding digests / key, controls, clock trust — checked again at the send
   const dispatcher = createDispatcher({ accountId: acct, journal: jr, writer, adapter, clock: pclock, feed: fd, specOf, feeOf: () => fee, controls, authority: { runMode: mode, binding: { policyDigest, codeDigest: treeDigest, keyFingerprint: fp, releaseDigest: null }, clockTrusted: () => (kind === 'LIVE' && pclock.status ? pclock.status().trusted !== false : true), maxBookAgeMs: policy.execution.maxBookAgeMs, permissionIncreaseAllowed: entryPermissionIncreaseAllowed }, log }); await dispatcher.load();
   // gain restrictions are account-specific (closeout R06): THIS account's session P&L against the configured lock thresholds, never the legacy ledger's daily lock
@@ -189,6 +192,26 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
     publishProjection(); return { ok: true, reasons: [], authorizationId: built.payload.authorizationId, expiresTs };
   }
   async function disarm(reason = 'REVOKED') { const a = dispatcher.state()?.authorization; if (!a || a.ended) return { ok: false, reason: 'NO_ACTIVE_AUTHORIZATION' }; await dispatcher.commit(makeEvent({ type: 'AUTHORIZATION_ENDED', accountId: acct, knownAtTs: nowTs(), payload: { authorizationId: a.authorizationId, reason, ts: nowTs() } })); publishProjection(); return { ok: true, authorizationId: a.authorizationId }; }
+  // Restarting an authorized LIVE account is itself a permission increase.
+  // The lock is checked at admission and again inside the dispatcher's
+  // serialized pre-append boundary. Refusal leaves reconciliation,
+  // cancellation and owned reductions available.
+  async function resumeLiveArmed({ authorizationId, reason }) {
+    if (kind !== 'LIVE') return { ok: false, reasons: ['NOT_A_LIVE_ACCOUNT'], state: 'BLOCKED' };
+    const current = dispatcher.state(); const a = current?.authorization;
+    if (!a || a.ended || a.expiresTs <= nowTs() || !['LIVE_ARM', 'CANARY'].includes(a.kind) || a.authorizationId !== authorizationId) return { ok: false, reasons: ['ARM_REQUIRED'], state: 'BLOCKED' };
+    if (current.mode === 'LIVE_ARMED') return { ok: true, existing: true, authorizationId };
+    const permission = permissionIncreaseGate(); if (!permission.ok) return { ok: false, reasons: [permission.reason], state: 'BLOCKED' };
+    const from = current.mode; const ts = nowTs();
+    const event = makeEvent({ type: 'MODE_TRANSITION', accountId: acct, knownAtTs: ts, payload: { from, to: 'LIVE_ARMED', reason, authorizationId, ts } });
+    try {
+      await dispatcher.commit(event, { recheck: () => permissionIncreaseGate().ok });
+    } catch (err) {
+      if (err.code === 'RECHECK_FAILED') return { ok: false, reasons: ['PERSISTENCE_PERMISSION_LOCK'], state: 'BLOCKED' };
+      return { ok: false, reasons: [err.detail?.code ?? err.code ?? 'COMMIT_FAILED'], state: 'BLOCKED', detail: String(err.message ?? '').slice(0, 200) };
+    }
+    publishProjection(); return { ok: true, existing: false, authorizationId };
+  }
   let projectionTimer = null;
   function projection() {
     const s = dispatcher.state(); const positions = Object.values(s?.positions ?? {}); const open = positions.filter((p) => p.state !== 'FLAT'); const pending = Object.values(s?.orders ?? {}).filter((o) => !['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'].includes(o.state));
@@ -281,7 +304,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
     await coreTask; if (scheduledMaintenance && !maintenanceAlreadyInFlight) await scheduledMaintenance; return { state: 'COMPLETE' };
   }
   return {
-    compositionVersion: COMPOSITION_VERSION, accountId: acct, mode, kind, policy, policyDigest, codeDigest: treeDigest, journal: jr, writer, dispatcher, feed: fd, tapeFeed, adapter, judge, watch, history: hist, cases, clock: pclock, fee, specOf, credentialsPresent: Boolean(credentials), keyFingerprint: fp, projection, tick, preflight, arm, disarm, admitNominations, checkAuthorizationBinding, lastPreflight: () => lastPreflight, lockLevel, publishValuation,
+    compositionVersion: COMPOSITION_VERSION, accountId: acct, mode, kind, policy, policyDigest, codeDigest: treeDigest, journal: jr, writer, dispatcher, feed: fd, tapeFeed, adapter, judge, watch, history: hist, cases, clock: pclock, fee, specOf, credentialsPresent: Boolean(credentials), keyFingerprint: fp, projection, tick, preflight, arm, disarm, resumeLiveArmed, admitNominations, checkAuthorizationBinding, lastPreflight: () => lastPreflight, lockLevel, publishValuation,
     registerSpec(spec) { captureSpec(spec); return spec; },
     async start({ heartbeatMs = 250, projectionMs = 2000, schedulerMs = SCHEDULER_TICK_MS } = {}) {
       lifecycle.push('START');
@@ -316,5 +339,19 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   };
 }
 // owner-intent account initialization (refuses to reset an existing account; no implicit deposit on restart)
-export async function initAccount({ journal, policy, policyDigest, mode, ownerRef, nowTs, limits = null, accountId = null }) { const acct = accountId ?? policy.account.accountId; const kind = accountKindOf(mode); if (await journal.exists(acct)) { const l = await journal.load(acct); if (l.state.initialized) throw new JournalError('ACCOUNT_EXISTS', `${acct} is already initialized (revision ${l.revision}); refusing to reset`); } else await journal.create(acct, { accountKind: kind }); const writer = await journal.acquireWriter(acct); if (!writer) throw new JournalError('WRITER_HELD', acct); try { const ev = makeEvent({ type: 'ACCOUNT_INITIALIZED', accountId: acct, knownAtTs: nowTs, payload: { accountKind: kind, initialCapital: policy.account.initialCapital, quote: 'USD', venue: 'kraken', policyDigest, policyVersion: policy.policyName, ownerRef, sessionDate: sessionDate(new Date(nowTs)), clockAnchorTs: nowTs, limits: limits ?? policy.limits, compounding: policy.account.compounding } }); const l = await journal.load(acct); return journal.append(acct, { expectedRevision: l.revision, writerEpoch: writer.epoch, events: [ev] }); } finally { await writer.release(); } }
+export async function initAccount({ journal, policy, policyDigest, mode, ownerRef, nowTs, limits = null, accountId = null, permissionIncreaseAllowed = null }) {
+  const acct = accountId ?? policy.account.accountId; const kind = accountKindOf(mode);
+  // Low-level REPLAY/tests retain the legacy behavior when no gate is
+  // supplied. Every production economic caller supplies this exact,
+  // synchronous predicate. Thenables are refused and their rejection is
+  // consumed by synchronousPermissionGate.
+  const requirePermission = () => { if (permissionIncreaseAllowed === null || permissionIncreaseAllowed === undefined) return; if (!synchronousPermissionGate(permissionIncreaseAllowed).ok) throw new JournalError('PERSISTENCE_PERMISSION_LOCK', 'account initialization refused while durable persistence permission is locked'); };
+  requirePermission();
+  if (await journal.exists(acct)) { const l = await journal.load(acct); if (l.state.initialized) throw new JournalError('ACCOUNT_EXISTS', `${acct} is already initialized (revision ${l.revision}); refusing to reset`); }
+  else { requirePermission(); await journal.create(acct, { accountKind: kind }); }
+  requirePermission(); const writer = await journal.acquireWriter(acct); if (!writer) throw new JournalError('WRITER_HELD', acct);
+  try {
+    requirePermission(); const ev = makeEvent({ type: 'ACCOUNT_INITIALIZED', accountId: acct, knownAtTs: nowTs, payload: { accountKind: kind, initialCapital: policy.account.initialCapital, quote: 'USD', venue: 'kraken', policyDigest, policyVersion: policy.policyName, ownerRef, sessionDate: sessionDate(new Date(nowTs)), clockAnchorTs: nowTs, limits: limits ?? policy.limits, compounding: policy.account.compounding } }); const l = await journal.load(acct); requirePermission(); return await journal.append(acct, { expectedRevision: l.revision, writerEpoch: writer.epoch, writer, events: [ev] });
+  } finally { await writer.release(); }
+}
 export { specFromAssetPair, instrumentSpec };
