@@ -5,15 +5,8 @@ import { loadConfig } from '../lib/config.js';
 import { sessionDate } from '../lib/time.js';
 import { runTape } from '../tape/run.js';
 import { evaluateCost } from '../cost/model.js';
-import {
-  recordPrediction,
-  simulateEntry,
-  simulateExit,
-  openPositions,
-  EXIT_REASONS,
-} from '../ledger/ledger.js';
-import { dailyRollup } from '../ledger/rollup.js';
-import { isVetoed, readControls } from '../state/controls.js';
+import { readControls } from '../state/controls.js';
+import { readExecutionProjection } from '../state/execution-projection.js';
 import { dailyLockStatus, injectSimulatedPnlPct, clearSimulatedPnl } from '../state/locks.js';
 import { getEngineState, STATES } from '../state/machine.js';
 import { applyRestriction, requestClear } from '../persistence/control-plane.js';
@@ -58,22 +51,6 @@ async function reportRestrictionDurability(first) {
   await p.stop();
 }
 
-function refuseStrikeIfCaged(predictionId) {
-  const config = loadConfig();
-  const engine = getEngineState(config);
-  if (engine.state === STATES.RETREAT) {
-    throw new Error(`STRIKE REFUSED — engine in RETREAT (${engine.reasons.join('; ')})`);
-  }
-  const controls = readControls();
-  if (controls.cage?.active) throw new Error('STRIKE REFUSED — CAGE active (no new strikes)');
-  if (predictionId && isVetoed(predictionId)) {
-    throw new Error(`STRIKE REFUSED — prediction ${predictionId} is VETOED`);
-  }
-  const locks = dailyLockStatus();
-  if (!locks.strikes_allowed) {
-    throw new Error(`STRIKE REFUSED — daily lock ${locks.level} at ${locks.pnl_pct.toFixed(2)}%`);
-  }
-}
 
 async function main() {
   const config = loadConfig();
@@ -135,61 +112,6 @@ async function main() {
           `    maker path [${r.makerPath.flag}]: friction ${fmtUsd(r.makerPath.frictionUsd)} (${r.makerPath.frictionBps.toFixed(1)} bps), break-even +${r.makerPath.breakEvenMovePct.toFixed(3)}%`
         );
       }
-      return;
-    }
-
-    case 'ledger': {
-      const sub = rest[0];
-      if (sub === 'predict') {
-        const coin = rest[1]?.toUpperCase();
-        const sizeUsd = Number(rest[2]);
-        const thesis = flag('thesis');
-        if (!coin || !sizeUsd || typeof thesis !== 'string') return usage();
-        const row = recordPrediction({
-          coin,
-          sizeUsd,
-          thesis,
-          horizonMin: flag('horizon') ? Number(flag('horizon')) : null,
-          predictedNetMovePct: flag('move') ? Number(flag('move')) : null,
-        });
-        console.log(`PREDICTION PERSISTED (price-blind) ${row.prediction_id}`);
-        console.log(`  ${row.coin} $${row.size_usd} — "${row.thesis}"`);
-        console.log(`  next: cobra ledger enter ${row.prediction_id}`);
-        return;
-      }
-      if (sub === 'enter') {
-        const id = rest[1];
-        if (!id) return usage();
-        refuseStrikeIfCaged(id);
-        const fill = simulateEntry(id);
-        console.log(
-          `ENTRY FILLED (paper, taker walk) ${fill.coin} qty ${fill.base_qty.toFixed(8)} @ avg ${fill.avg_price.toFixed(6)} fee ${fmtUsd(fill.fee_usd)}`
-        );
-        return;
-      }
-      if (sub === 'exit') {
-        const [, id, reason] = rest;
-        if (!id || !reason) return usage();
-        const exit = simulateExit(id, reason.toUpperCase());
-        console.log(
-          `EXIT FILLED (paper) ${exit.coin} ${exit.reason_code} @ avg ${exit.avg_price.toFixed(6)} — realized net ${fmtUsd(exit.realized_net_usd)} (${exit.realized_net_pct.toFixed(3)}%)`
-        );
-        return;
-      }
-      if (sub === 'open') {
-        const open = openPositions();
-        if (!open.length) return console.log('no open paper positions — COILED');
-        for (const f of open) {
-          console.log(`${f.prediction_id} ${f.coin} $${f.size_usd} qty ${f.base_qty.toFixed(8)} @ ${f.avg_price.toFixed(6)} since ${f.ts}`);
-        }
-        return;
-      }
-      return usage();
-    }
-
-    case 'rollup': {
-      const rollup = dailyRollup(rest[0] ?? sessionDate());
-      console.log(JSON.stringify(rollup, null, 2));
       return;
     }
 
@@ -290,8 +212,8 @@ async function main() {
         );
       }
       for (const r of engine.reasons) console.log(`  ! ${r}`);
-      const open = openPositions();
-      console.log(`open paper positions: ${open.length}`);
+      const projection = readExecutionProjection();
+      console.log(projection && projection.state !== 'UNREADABLE' && projection.state !== 'REJECTED' ? `open positions (journal, ${projection.state}): ${projection.openPositions}` : 'open positions: no execution projection');
       return;
     }
 
@@ -305,11 +227,6 @@ function usage() {
 
   cobra tape run [--minutes N] [--chaos-after S]   run the market tape
   cobra cost <COIN> <USD> [--ladder]               execution cost from live book
-  cobra ledger predict <COIN> <USD> --thesis "…" [--horizon MIN] [--move PCT]
-  cobra ledger enter <prediction_id>               simulated taker fill
-  cobra ledger exit <prediction_id> <REASON>       reasons: ${EXIT_REASONS.join(' ')}
-  cobra ledger open                                list open paper positions
-  cobra rollup [YYYY-MM-DD]                        daily rollup (ET session)
   cobra status                                     engine posture + locks + tape
   cobra kill | cobra cage | cobra veto <id>        human controls
   cobra state simulate <pct> [--clear]             inject simulated daily P&L

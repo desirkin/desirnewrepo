@@ -142,8 +142,7 @@ test('CAT-5 (D). the deep-observation selection and the legacy permission set ar
   const { evaluateCost } = await import('../cost/model.js');
   const r = evaluateCost('ZQQQ', 100);
   assert.equal(r.available ?? r.ok ?? false, false); assert.match(JSON.stringify(r), /not in universe/, 'the legacy cost permission set is intact');
-  const { recordPrediction } = await import('../ledger/ledger.js');
-  assert.throws(() => recordPrediction({ coin: 'ZQQQ', thesis: 'research only', horizonMin: 5, predictedNetMovePct: 1, sizeUsd: 100 }), /not in universe/, 'the ledger permission set is intact');
+  // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired — case moved to attic/test
 });
 
 // ---- the wide eye seam: bounded refresh with injected clock / transport / timers ----------------

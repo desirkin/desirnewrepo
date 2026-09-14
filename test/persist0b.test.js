@@ -24,7 +24,6 @@ const { Repository } = await import('../persistence/repository.js');
 const { runMigrations } = await import('../persistence/migrate.js');
 const { persistenceHealth } = await import('../persistence/health.js');
 const { startPersistence } = await import('../persistence/runtime.js');
-const { validateLedgerRow } = await import('../persistence/validate-state.js');
 const { kill, cage, veto, readControls } = await import('../state/controls.js');
 const { envelope } = await import('../memory/schema.js');
 
@@ -48,17 +47,6 @@ const mkEnv = (over = {}) =>
     provenance: { source: 'fixture', sourceTs: NOW_SEC - 120, availableTs: NOW_SEC - 120, retrievedTs: ISO, kind: 'live', form: 'raw' },
     ...over,
   });
-
-const validPred = (id, over = {}) => ({
-  prediction_id: id,
-  timestamp_prediction_persisted: ISO,
-  coin: 'BTC',
-  thesis: 'fixture thesis',
-  size_usd: 100,
-  predicted_horizon_min: 30,
-  predicted_net_move_pct: 1,
-  ...over,
-});
 
 // run the REAL CLI in a child process with a controlled environment
 async function cli(args, { dataDir, env = {} }) {
@@ -90,23 +78,7 @@ test('§9 failureCategory participates in permission truth: restored=true cannot
   assert.equal(ok.permissionLock, false);
 });
 
-test('§13 complete ledger validators: operational numeric fields are required', () => {
-  const fill = { prediction_id: 'p', ts: ISO, coin: 'BTC', size_usd: 100, base_qty: 0.001, avg_price: 100000, fee_usd: 0.4 };
-  assert.equal(validateLedgerRow('fill', fill).ok, true);
-  const { base_qty, ...fillNoQty } = fill;
-  assert.equal(validateLedgerRow('fill', fillNoQty).ok, false); // openPositions needs base_qty
-  const exit = { prediction_id: 'p', ts: ISO, coin: 'BTC', reason_code: 'TARGET', base_qty: 0.001, avg_price: 101000, proceeds_usd: 101, fee_usd: 0.4, realized_net_usd: 0.2, realized_net_pct: 0.2 };
-  assert.equal(validateLedgerRow('exit', exit).ok, true);
-  const { proceeds_usd, ...exitNoProceeds } = exit;
-  assert.equal(validateLedgerRow('exit', exitNoProceeds).ok, false);
-  const { realized_net_pct, ...exitNoPct } = exit;
-  assert.equal(validateLedgerRow('exit', exitNoPct).ok, false);
-  assert.equal(validateLedgerRow('prediction', validPred('p')).ok, true);
-  const { thesis, ...predNoThesis } = validPred('p');
-  assert.equal(validateLedgerRow('prediction', predNoThesis).ok, false); // no thesis, no trade
-  assert.equal(validateLedgerRow('prediction', validPred('p', { predicted_horizon_min: null })).ok, true); // CLI writes null legitimately
-  assert.equal(validateLedgerRow('prediction', validPred('p', { predicted_net_move_pct: 'soon' })).ok, false);
-});
+// (lean trim step 1, 2026-09-14) legacy JSONL ledger retired — case moved to attic/test
 
 // ---------------- CLI door drills (real child processes) ----------------
 
@@ -315,53 +287,5 @@ if (!TEST_URL) {
     process.env.COBRA_DATA_DIR = TEST_DATA;
   });
 
-  test('§12 corrupt durable OPEN-FILL row: operational restore is INCOMPLETE and permission locks', async () => {
-    assert.equal((await repo.upsertLedgerRow('fill', { prediction_id: 'open-1', ts: ISO, coin: 'BTC', size_usd: 100, base_qty: 0.001, avg_price: 100000, fee_usd: 0.4 })).accepted, true);
-    await db.query(`UPDATE serpent_ledger_fills SET row = $1 WHERE prediction_id = 'open-1'`, [{ prediction_id: 'open-1', corrupted: true }], { write: true });
-    const dir = mkdtempSync(path.join(tmpdir(), 'cobra-0b-openfill-'));
-    process.env.COBRA_DATA_DIR = dir;
-    const p = await startPersistence({ log: () => {}, dbOverrides: { url: TEST_URL, schema: SCHEMA } });
-    // the app does NOT emerge unlocked with an apparently empty position:
-    assert.equal(p.health().integrityLock, true);
-    assert.equal(p.health().permissionLock, true);
-    assert.notEqual(p.health().status, 'HEALTHY');
-    await p.stop();
-    await db.query(`DELETE FROM serpent_ledger_fills WHERE prediction_id = 'open-1'`, [], { write: true });
-    rmSync(dir, { recursive: true, force: true });
-    process.env.COBRA_DATA_DIR = TEST_DATA;
-  });
-
-  test('§14 runtime LEDGER_ID_CONTENT_CONFLICT engages the permission lock immediately', async () => {
-    assert.equal((await repo.upsertLedgerRow('prediction', validPred('rt-conflict'))).accepted, true);
-    const dir = mkdtempSync(path.join(tmpdir(), 'cobra-0b-rtconflict-'));
-    process.env.COBRA_DATA_DIR = dir;
-    const p = await startPersistence({ log: () => {}, dbOverrides: { url: TEST_URL, schema: SCHEMA } });
-    assert.equal(p.health().permissionLock, false); // healthy before the conflict
-    // a DIFFERENT row with the same id lands in the local spool at runtime
-    appendFileSync(path.join(dir, 'ledger', 'predictions.jsonl'), JSON.stringify(validPred('rt-conflict', { size_usd: 999999, thesis: 'rewritten' })) + '\n');
-    await p.pumpOnce();
-    assert.ok(p.repo.ledgerIdConflicts >= 1);
-    assert.equal(p.health().integrityLock, true); // locked IMMEDIATELY, not just counted
-    assert.equal(p.health().permissionLock, true);
-    const stored = (await p.repo.loadLedgerAll('prediction')).rows.find((r) => r.prediction_id === 'rt-conflict');
-    assert.equal(stored.size_usd, 100); // first durable truth stands
-    await p.stop();
-    await db.query(`DELETE FROM serpent_ledger_predictions WHERE prediction_id = 'rt-conflict'`, [], { write: true });
-    rmSync(dir, { recursive: true, force: true });
-    process.env.COBRA_DATA_DIR = TEST_DATA;
-  });
-
-  test('§15 malformed local pending ledger evidence engages the integrity lock (not just a cosmetic degrade)', async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'cobra-0b-badlocal-'));
-    process.env.COBRA_DATA_DIR = dir;
-    mkdirSync(path.join(dir, 'ledger'), { recursive: true });
-    writeFileSync(path.join(dir, 'ledger', 'fills.jsonl'), '{a torn fill that might BE a position\n');
-    const p = await startPersistence({ log: () => {}, dbOverrides: { url: TEST_URL, schema: SCHEMA } });
-    assert.equal(p.health().integrityLock, true); // unreadable possible position != "no position"
-    assert.equal(p.health().permissionLock, true);
-    assert.ok(readdirSync(path.join(dir, 'ledger')).some((f) => f.startsWith('fills.jsonl.quarantine-'))); // evidence preserved
-    await p.stop();
-    rmSync(dir, { recursive: true, force: true });
-    process.env.COBRA_DATA_DIR = TEST_DATA;
-  });
+  // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired — case moved to attic/test
 }

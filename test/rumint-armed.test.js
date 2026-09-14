@@ -89,7 +89,8 @@ test('strike-capable code provably reads no RUMINT fields', () => {
   // Static proof: the modules that price, fill, or could ever fire a strike
   // must not import rumint or the stalk set. Display (ui/) and the posture
   // sync (arming) are the only sanctioned consumers.
-  const strikeCapable = ['cost/model.js', 'ledger/ledger.js', 'ledger/rollup.js', 'state/posture.js', 'bin/cobra.js'];
+  // (lean trim step 1, 2026-09-14) the legacy JSONL ledger is retired; the strike-capable set is the execution journal path
+  const strikeCapable = ['cost/model.js', 'execution/dispatcher.js', 'execution/paper-adapter.js', 'execution/reducer.js', 'judge/judge.js', 'state/posture.js', 'bin/cobra.js'];
   for (const rel of strikeCapable) {
     const src = readFileSync(path.join(ROOT, rel), 'utf8');
     assert.ok(!/from\s+['"][^'"]*rumint/.test(src), `${rel} must not import rumint`);

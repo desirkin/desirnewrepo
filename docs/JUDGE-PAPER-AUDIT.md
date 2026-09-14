@@ -60,11 +60,32 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       b0f322af56481d14b17ed9b38f095c86b140837ff156abe3db378c350d9d3c49
-execution/*.js   9e03f82702ced8a112e25052f00c053f15a82e762d06f02883339cd047e27467
+judge/*.js       638038da03d8f16c8d6cbd375e7d1dd757ad2e915122570108956743369e2608
+execution/*.js   dd321ce97e24f21eb1bec9bb515a3729b07ac8ba50761a432fc7eceb0b05d6cc
 watch/watch.js   be41c4bed1ce80fa185f3b1dca6151447200a4a1b33dd785a9ea65234251578d
-all (47 files)   5a36c0ebc96ff68da5b3360ada4edf1be8e4377843acab622e85b1915df049f4
+all (48 files)   345b28be7c89c3c18e166e125f8ef6076ed4d005e402e517749bbb63d92f493a
 ```
+
+### 4.6 Audited change — 2026-09-14 lean trim step 1: one bankroll, one daily-lock law (previous digests: judge `b0f322af5648…`, execution `9e03f82702ce…`, all `5a36c0ebc96f…`, 47 files; watch/watch.js unchanged)
+
+Scope: two files. No decision, sizing, permission, exit or risk law changed; the Judge's admission path is untouched.
+
+- `execution/ledger-view.js` (new, pure): `ledgerView(state, { nowMs })` derives the cockpit ledger summary — closed trades with
+  entry/exit/fees/realized P&L and close reason, open positions with the Watch's conservative mark, session P&L, win rate, profit
+  factor, exit-reason census — from the reduced execution-journal state. Exact decimals in, display numbers out at this edge only.
+  It is read by nothing in the decision path.
+- `judge/composition.js`: the projection now publishes `dailyLock` (the journal's session P&L against opening equity under
+  `config.locks` — the SAME `lockLevelForPnlPct` law `lockLevel()` already consulted in-process) and `ledger` (the view above).
+  `composeJudge` gains one import; nothing passed to `createJudge` changed.
+
+Why: the legacy JSONL ledger (`ledger/`, now `attic/ledger/`) computed a SECOND daily-lock answer from CLI-written files the
+running app never wrote, so the cockpit could show "no lock" while the Judge refused. `state/locks.js dailyLockStatus()` now reads
+`dailyLock` from the projection (or the simulated-P&L drill file); with no projection it reports level NONE, `source:
+NO_PROJECTION`, and no fabricated P&L. The persistence pump no longer mirrors `ledger/*.jsonl`; `serpent_ledger_*` tables remain by
+the additive migration law and are unused. `cobra ledger …` / `cobra rollup` are gone; `cobra status` reads the projection.
+
+Proof: suite green after the change (see the commit); `test/judge-reservation-settlement.test.js`, `test/judge-e2e-preservation.test.js`
+and the Judge differential (ea3bfbf Judge == working-tree Judge, ports absent) unchanged and passing.
 
 ### 4.5 Audited change — 2026-09-14 release-acceptance assembly + reservation settlement (previous digests: judge `58f04c37a1b5…`, execution `d9ce90d9b089…`, watch `dc49a39444e2…`, all `de596a965640…`, 41 files)
 

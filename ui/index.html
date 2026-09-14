@@ -1308,7 +1308,7 @@ function renderLedger(L) {
   if (!L) { b.innerHTML = '<div class="line"><span>ledger unreadable — shell link lost</span></div>'; return; }
   if (L.totalTrades === 0 && !L.openPositions.length) {
     b.innerHTML = `
-      <div class="net">$${L.startingBalance.toFixed(2)} <span style="color:var(--dim)">— untouched</span></div>
+      <div class="net">$${(L.startingBalance ?? 0).toFixed(2)} <span style="color:var(--dim)">— untouched</span></div>
       <div class="empty">
         <div class="big">NO STRIKES YET</div>
         <div class="sub">the snake declines bad meals</div>
@@ -1337,7 +1337,7 @@ function renderLedger(L) {
     </div>`).join('');
   const card = (k, v) => `<div class="kcard"><div class="k">${k}</div><div class="v">${v}</div></div>`;
   const cards = [
-    card('REALIZED BALANCE', `$${L.currentBalance.toFixed(2)}`),
+    card('REALIZED BALANCE', `$${(L.currentBalance ?? 0).toFixed(2)}`),
     card('TOTAL NET P&amp;L', `<span class="${cls(L.netPnl.usd)}">${fmt$(L.netPnl.usd)}</span> <small>${fmtPct(L.netPnl.pct)}</small>`),
     card('TODAY', `<span class="${cls(L.todayPnl.usd)}">${fmt$(L.todayPnl.usd)}</span> <small>${fmtPct(L.todayPnl.pct)}</small>`),
     card('CLOSED TRADES', `${L.totalTrades} <small>${L.wins}W–${L.losses}L</small>`),
@@ -1355,7 +1355,7 @@ function renderLedger(L) {
   ].filter(Boolean).join(' <span>·</span> ');
   const reasons = Object.entries(L.exitReasons ?? {}).map(([r, n]) => `<div>${r} × ${n}</div>`).join('');
   b.innerHTML = `
-    <div class="net">$${L.startingBalance.toFixed(2)} → $${L.currentBalance.toFixed(2)}
+    <div class="net">$${(L.startingBalance ?? 0).toFixed(2)} → $${(L.currentBalance ?? 0).toFixed(2)}
       <span class="${cls(L.netPnl.usd)}">· ${fmtPct(L.netPnl.pct)}</span></div>
     <div class="cards">${cards}</div>
     ${stats ? `<div class="line">${stats}</div>` : ''}

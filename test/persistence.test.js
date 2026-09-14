@@ -159,18 +159,7 @@ if (!TEST_URL) {
     assert.equal(rows[0].n, 1);
   });
 
-  test('ledger round-trip: deterministic ids, idempotent replay never duplicates a fill', async () => {
-    const pred = { prediction_id: 'pred-1', timestamp_prediction_persisted: ISO, coin: 'BTC', thesis: 'fixture thesis', size_usd: 100, predicted_horizon_min: 30, predicted_net_move_pct: 1 };
-    const fill = { prediction_id: 'pred-1', ts: ISO, coin: 'BTC', size_usd: 100, base_qty: 1, avg_price: 100.2, fee_usd: 0.4 };
-    assert.equal((await repo.upsertLedgerRow('prediction', pred)).accepted, true);
-    assert.equal((await repo.upsertLedgerRow('prediction', pred)).duplicate, true);
-    assert.equal((await repo.upsertLedgerRow('fill', fill)).accepted, true);
-    assert.equal((await repo.upsertLedgerRow('fill', structuredClone(fill))).duplicate, true);
-    const fills = await repo.loadLedger('fill');
-    assert.equal(fills.length, 1);
-    assert.equal(fills[0].avg_price, 100.2);
-    assert.equal((await repo.upsertLedgerRow('prediction', { ts: ISO })).accepted, false); // no id, no row
-  });
+  // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired
 
   test('MEMORY round-trip: durable insert, bounded queries, restored envelopes re-earn validation', async () => {
     const e1 = mkEnv({ ts: NOW_SEC - 300, correlation: { eventId: 'ev-1', clusterId: 'cl-1' } });
@@ -228,15 +217,12 @@ if (!TEST_URL) {
     const dirA = mkdtempSync(path.join(tmpdir(), 'cobra-bodyA-'));
     process.env.COBRA_DATA_DIR = dirA;
     mkdirSync(path.join(dirA, 'state'), { recursive: true });
-    mkdirSync(path.join(dirA, 'ledger'), { recursive: true });
+    // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired
     mkdirSync(path.join(dirA, 'memory'), { recursive: true });
     writeFileSync(path.join(dirA, 'state', 'controls.json'), JSON.stringify({ kill: { active: true, ts: ISO }, cage: { active: true, ts: ISO }, vetoes: [] }));
     writeFileSync(path.join(dirA, 'state', 'posture.json'), JSON.stringify({ posture: 'COILED', ts: ISO, cause: 'redeploy fixture' }));
     writeFileSync(path.join(dirA, 'state', 'transitions.jsonl'), JSON.stringify({ ts: ISO, from: 'COILED', to: 'COILED', cause: 'fixture' }) + '\n');
-    writeFileSync(
-      path.join(dirA, 'ledger', 'predictions.jsonl'),
-      JSON.stringify({ prediction_id: 'redeploy-pred', timestamp_prediction_persisted: ISO, coin: 'ETH', thesis: 'redeploy fixture', size_usd: 50, predicted_horizon_min: null, predicted_net_move_pct: null }) + '\n'
-    );
+    // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired
     const memFix = mkEnv({ ts: NOW_SEC - 80, symbol: 'XRP', correlation: { eventId: 'redeploy-ev' } });
     writeFileSync(path.join(dirA, 'memory', 'events.jsonl'), JSON.stringify(memFix) + '\n');
     const a = await startPersistence({ log: () => {}, dbOverrides: { url: TEST_URL, schema: SCHEMA } });
@@ -255,8 +241,8 @@ if (!TEST_URL) {
     assert.equal(controls.cage.active, true);
     // posture restored
     assert.equal(JSON.parse(readFileSync(path.join(dirB, 'state', 'posture.json'), 'utf8')).posture, 'COILED');
-    // ledger + memory fixtures answer from the durable core
-    assert.ok((await b.repo.loadLedger('prediction', { limit: 100 })).some((r) => r.prediction_id === 'redeploy-pred'));
+    // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired
+    // memory fixture answers from the durable core
     assert.equal((await b.repo.memoryByEventId('redeploy-ev'))[0].symbol, 'XRP');
     // and NOTHING depended on instance A's filesystem
     rmSync(dirA, { recursive: true, force: true });
@@ -303,14 +289,11 @@ if (!TEST_URL) {
     const dirM = mkdtempSync(path.join(tmpdir(), 'cobra-migrate-'));
     process.env.COBRA_DATA_DIR = dirM;
     mkdirSync(path.join(dirM, 'state'), { recursive: true });
-    mkdirSync(path.join(dirM, 'ledger'), { recursive: true });
+    // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired
     mkdirSync(path.join(dirM, 'memory'), { recursive: true });
     writeFileSync(path.join(dirM, 'state', 'controls.json'), JSON.stringify({ kill: null, cage: null, vetoes: [{ prediction_id: 'mig-v', ts: ISO }] }));
     writeFileSync(path.join(dirM, 'state', 'posture.json'), JSON.stringify({ posture: 'COILED', ts: ISO, cause: 'mig' }));
-    writeFileSync(
-      path.join(dirM, 'ledger', 'fills.jsonl'),
-      JSON.stringify({ prediction_id: 'mig-fill', ts: ISO, coin: 'BTC', size_usd: 10, base_qty: 0.1, avg_price: 100, fee_usd: 0.04 }) + '\n' + '{broken json\n'
-    );
+    // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired
     const good = mkEnv({ ts: NOW_SEC - 60, symbol: 'UNI' });
     writeFileSync(
       path.join(dirM, 'memory', 'events.jsonl'),
@@ -319,12 +302,11 @@ if (!TEST_URL) {
     const r1 = await migrateLocalData({ db, log: () => {} });
     assert.equal(r1.subsystems.memory.accepted, 1);
     assert.equal(r1.subsystems.memory.invalid, 1); // schema-invalid refused, counted
-    assert.equal(r1.subsystems.ledger_fill.accepted, 1);
-    assert.equal(r1.subsystems.ledger_fill.invalid, 1); // malformed line refused
+    // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired
     const r2 = await migrateLocalData({ db, log: () => {} }); // re-run safe
     assert.equal(r2.subsystems.memory.accepted, 0);
     assert.equal(r2.subsystems.memory.duplicates, 1);
-    assert.equal(r2.subsystems.ledger_fill.duplicates, 1);
+    // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired
     // vetoes survived the restrictive merge; sources untouched
     assert.ok((await repo.loadControlState()).state.vetoes.some((v) => v.prediction_id === 'mig-v'));
     assert.ok(existsSync(path.join(dirM, 'memory', 'events.jsonl'))); // never deleted

@@ -251,7 +251,8 @@ test('NO RETURN PATH: only fly.js touches memory/, and memory/ imports no sensor
     readdirSync(path.join(root, dir))
       .filter((f) => f.endsWith('.js'))
       .map((f) => path.join(dir, f));
-  const sensorDirs = ['tape', 'survey', 'rumint', 'gateway', 'governance', 'cost', 'state', 'ledger', 'ui', 'childhood', 'lib'];
+  // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired — 'ledger' dir no longer exists
+  const sensorDirs = ['tape', 'survey', 'rumint', 'gateway', 'governance', 'cost', 'state', 'ui', 'childhood', 'lib'];
   // 1) no sensor, state, ledger, UI or childhood module references memory
   for (const f of sensorDirs.flatMap(jsFiles)) {
     const src = readFileSync(path.join(root, f), 'utf8');

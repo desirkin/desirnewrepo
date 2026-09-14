@@ -35,7 +35,6 @@ import { checkStoreAnchors } from './store-guard.js';
 import {
   validatePostureState,
   validateSimState,
-  validateLedgerRow,
   lessPermissivePosture,
   lessPermissiveSim,
 } from './validate-state.js';
@@ -284,9 +283,9 @@ async function restoreDurableCore(state, log) {
     describe: (s) => (s?.simulated ? `sim ${s.date}` : 'cleared'),
   }))) return false;
 
-  // ---- operational paper ledger: the RUNNING APP reads local JSONL, so a
-  // fresh body materializes its reconciled ledger BEFORE consumers run (§10)
-  if (!(await reconcileLedgerFiles(state, log))) return false;
+  // ---- (lean trim step 1, 2026-09-14) the legacy JSONL paper ledger is retired: the execution journal
+  // (persistence/db.js + execution/journal.js, schema 8) is the ONE durable ledger and needs no file mirror.
+  // The serpent_ledger_* tables stay in the schema (additive migration law); nothing writes or reads them now.
 
   // ---- childhood manifest identity (metadata only; bulk stays on files) --
   const manifestFile = path.join(dataDir(), 'childhood', 'manifest.json');
@@ -383,87 +382,6 @@ async function reconcileRuntimeFile(state, log, { id, file, validate, lessPermis
   return !state.stopped;
 }
 
-const LEDGER_KINDS = [
-  { kind: 'prediction', name: 'predictions.jsonl', pumpKey: 'predictions', tsOf: (r) => r.timestamp_prediction_persisted ?? '' },
-  { kind: 'fill', name: 'fills.jsonl', pumpKey: 'fills', tsOf: (r) => r.ts ?? '' },
-  { kind: 'exit', name: 'exits.jsonl', pumpKey: 'exits', tsOf: (r) => r.ts ?? '' },
-];
-
-// PERSIST-0A §10 — merge the COMPLETE validated durable ledger with local
-// pending rows and atomically materialize the reconciled canonical local
-// mirror files, so the existing synchronous ledger consumers
-// (allPredictions/openPositions/realizedPnlUsd/ledgerSummary) actually see
-// durable history after a fresh filesystem. Conflicting local evidence is
-// preserved in a quarantine copy — first durable truth is never silently
-// overwritten, and the conflict locks permission until resolved.
-async function reconcileLedgerFiles(state, log) {
-  const { repo } = state;
-  for (const { kind, name, pumpKey, tsOf } of LEDGER_KINDS) {
-    const durable = await repo.loadLedgerAll(kind); // validated, chunked, complete-or-reported
-    if (state.stopped) return false;
-    if (!durable.complete) {
-      // PERSIST-0B §12: a withheld corrupt durable row could BE the open
-      // position — the operational ledger is NOT safely restored; missing
-      // history is never interpreted as "no position"
-      state.integrityLock = true;
-      log(`PERSISTENCE INTEGRITY LOCK: ${durable.invalid} corrupt durable ${kind} row(s) — operational ledger restore INCOMPLETE; permission locked pending manual resolution`);
-    }
-    const durableRows = durable.rows;
-    const file = path.join(dataDir(), 'ledger', name);
-    const rawText = existsSync(file) ? readFileSync(file, 'utf8') : '';
-    let malformed = 0;
-    let invalidLocal = 0;
-    const localValid = [];
-    for (const line of rawText.split('\n')) {
-      const t = line.trim();
-      if (!t) continue;
-      try {
-        const rec = JSON.parse(t);
-        if (validateLedgerRow(kind, rec).ok) localValid.push(rec);
-        else invalidLocal++;
-      } catch {
-        malformed++;
-      }
-    }
-    const byId = new Map(durableRows.map((r) => [r.prediction_id, r]));
-    let conflicts = 0;
-    let localOnly = 0;
-    for (const rec of localValid) {
-      const d = byId.get(rec.prediction_id);
-      if (!d) {
-        byId.set(rec.prediction_id, rec); // valid local pending: preserved, pumped durable
-        localOnly++;
-      } else if (canonicalJson(d) !== canonicalJson(rec)) {
-        // LEDGER_ID_CONTENT_CONFLICT: first durable truth stays in the
-        // mirror; the local variant survives in the quarantine copy
-        conflicts++;
-      }
-    }
-    if (conflicts > 0) {
-      state.integrityLock = true;
-      repo.ledgerIdConflicts += conflicts;
-      log(`PERSISTENCE INTEGRITY LOCK: ${conflicts} LEDGER_ID_CONTENT_CONFLICT in ${name} — first durable truth stands; permission locked pending manual resolution`);
-    }
-    if (malformed + invalidLocal > 0) {
-      // PERSIST-0B §15: an unreadable local pending ledger row could be a
-      // prediction/fill/exit that never reached durable storage — never
-      // assumed to mean "no position"; evidence quarantined, permission locked
-      state.integrityLock = true;
-      state.pump.spoolParseErrors += malformed + invalidLocal;
-      log(`PERSISTENCE INTEGRITY LOCK: ${name} carried ${malformed} malformed + ${invalidLocal} invalid local pending rows — quarantined, never invented, permission locked pending manual resolution`);
-    }
-    const mergedRows = [...byId.values()].sort((a, b) => String(tsOf(a)).localeCompare(String(tsOf(b))));
-    const newText = mergedRows.map((r) => JSON.stringify(r)).join('\n') + (mergedRows.length ? '\n' : '');
-    if (newText !== rawText) {
-      if (rawText && (malformed > 0 || invalidLocal > 0 || conflicts > 0)) quarantineCopy(file, rawText, log);
-      atomicWriteText(file, newText);
-      state.resetCursorKeys.add(pumpKey); // replay is idempotent; conflicts stay counted, not re-fought
-      log(`PERSISTENCE ledger restore: ${name} materialized (${durableRows.length} durable, ${localOnly} local-only pending)`);
-    }
-  }
-  return !state.stopped;
-}
-
 // ---- the pump: tail local spools, write durably, advance cursors ---------
 function pumpSources() {
   const d = dataDir();
@@ -472,9 +390,6 @@ function pumpSources() {
     { key: 'posture', file: path.join(d, 'state', 'transitions.jsonl') },
     { key: 'controls_log', file: path.join(d, 'state', 'controls_log.jsonl') },
     { key: 'auth_log', file: path.join(d, 'state', 'control_auth_log.jsonl') },
-    { key: 'predictions', file: path.join(d, 'ledger', 'predictions.jsonl') },
-    { key: 'fills', file: path.join(d, 'ledger', 'fills.jsonl') },
-    { key: 'exits', file: path.join(d, 'ledger', 'exits.jsonl') },
   ];
 }
 
@@ -530,25 +445,6 @@ function startPump(state, log) {
     if (key === 'controls_log' || key === 'auth_log') {
       await repo.appendControlAudit(key, lineNo, rec);
       return true;
-    }
-    if (key === 'predictions' || key === 'fills' || key === 'exits') {
-      const kind = { predictions: 'prediction', fills: 'fill', exits: 'exit' }[key];
-      const r = await repo.upsertLedgerRow(kind, rec);
-      if (r.invalid) {
-        // PERSIST-0B §15: an unreadable possible position is never assumed
-        // to mean "no position" — evidence stays in the spool, permission locks
-        state.pump.spoolParseErrors++;
-        state.integrityLock = true;
-        log(`PERSISTENCE INTEGRITY LOCK: invalid ${kind} spool row refused (${r.reason})`);
-      }
-      if (r.conflict) {
-        // PERSIST-0B §14: a runtime LEDGER_ID_CONTENT_CONFLICT means the
-        // local synchronous ledger may disagree with durable first truth —
-        // permission locks IMMEDIATELY; the corrupt row is not retried forever
-        state.integrityLock = true;
-        log(`PERSISTENCE INTEGRITY LOCK: runtime LEDGER_ID_CONTENT_CONFLICT (${kind} ${rec.prediction_id}) — first durable truth stands; permission locked`);
-      }
-      return true; // accepted, duplicate, conflict (locked+counted) and invalid (locked+counted) are all handled
     }
     return true;
   }

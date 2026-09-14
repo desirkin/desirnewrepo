@@ -397,7 +397,7 @@ test('RUNTIME-4/L2/L5/L6. lost acknowledgement retries the identical bytes and c
 });
 
 // ================================ M / N3 — RESOURCE, NO-SPEND, PERMISSION UNCHANGED ================================
-test('M1-M5/N3. the research path performs zero provider calls, starts no timer, opens no socket, and changes no config; a PROPOSED market/Social observation is a record with authority NONE and activation NOT_AUTHORIZED; the ledger/cost permission set is exactly the five legacy assets', async () => {
+test('M1-M5/N3. the research path performs zero provider calls, starts no timer, opens no socket, and changes no config; a PROPOSED market/Social observation is a record with authority NONE and activation NOT_AUTHORIZED; the cost permission set is exactly the five legacy assets (the JSONL ledger retired 2026-09-14)', async () => {
   const cfg = loadConfig(); assert.deepEqual(cfg.universe, ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']); assert.equal(cfg.socialResearch.xWatch.mode, 'NOT_CONFIGURED');
   const hist = scopeHistory(['LINK']); const b = bootRuntime({ nowMs: T0 + 5000, arr: [...hist] }); b.rt.hydrate(hist);
   globalThis.__socialFiveAProbe = 0; const origFetch = globalThis.fetch; globalThis.fetch = () => { globalThis.__socialFiveAProbe += 1; throw new Error('no network'); };

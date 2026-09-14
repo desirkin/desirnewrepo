@@ -18,7 +18,6 @@ const { lockLevelForPnlPct, injectSimulatedPnlPct, clearSimulatedPnl, dailyLockS
 );
 const { kill, cage, veto, isVetoed, clearLatches, readControls } = await import('../state/controls.js');
 const { getEngineState, STATES } = await import('../state/machine.js');
-const { recordPrediction, simulateEntry, PriceBlindViolation } = await import('../ledger/ledger.js');
 const { loadConfig } = await import('../lib/config.js');
 
 test.after(() => rmSync(TEST_DATA, { recursive: true, force: true }));
@@ -185,29 +184,4 @@ test('simulated P&L injection trips each lock and KILL forces RETREAT', () => {
   assert.equal(isVetoed('another-id'), false);
 });
 
-test('price-blind gate: no persisted prediction, no price fetch', () => {
-  // With no prediction on disk the entry path must refuse at the gate —
-  // PriceBlindViolation, not a tape/availability error (which would prove the
-  // price read was attempted first).
-  assert.throws(() => simulateEntry('00000000-0000-0000-0000-000000000000'), PriceBlindViolation);
-});
-
-test('prediction persists price-blind, then entry requires live tape', () => {
-  const row = recordPrediction({
-    coin: 'BTC',
-    thesis: 'unit drill',
-    horizonMin: 30,
-    predictedNetMovePct: 1,
-    sizeUsd: 100,
-  });
-  assert.ok(row.prediction_id);
-  assert.ok(row.timestamp_prediction_persisted);
-  // Prediction exists on disk, but there is no live tape in the test sandbox:
-  // now the failure must be an availability refusal, not a price-blind one.
-  assert.throws(() => simulateEntry(row.prediction_id), /UNAVAILABLE — NO TRADE/);
-});
-
-test('thesis is mandatory', () => {
-  assert.throws(() => recordPrediction({ coin: 'BTC', thesis: '  ', sizeUsd: 100 }));
-  assert.throws(() => recordPrediction({ coin: 'SHIB', thesis: 'nope', sizeUsd: 100 }), /not in universe/);
-});
+// (lean trim step 1, 2026-09-14) legacy JSONL ledger retired — case moved to attic/test

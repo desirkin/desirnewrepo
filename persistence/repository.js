@@ -13,7 +13,6 @@ import {
   validateControlState,
   validatePostureState,
   validateSimState,
-  validateLedgerRow,
   lessPermissivePosture,
   lessPermissiveSim,
 } from './validate-state.js';
@@ -29,11 +28,6 @@ const isValidWriterEpoch = (e) => typeof e === 'number' && Number.isSafeInteger(
 const ATTENTION_CANDIDATES_PER_SYMBOL = 4;
 const sha1 = (s) => createHash('sha1').update(s).digest('hex');
 
-const LEDGER_TABLES = {
-  prediction: 'serpent_ledger_predictions',
-  fill: 'serpent_ledger_fills',
-  exit: 'serpent_ledger_exits',
-};
 
 // MOST RESTRICTIVE STATE WINS (doctrine/PERSISTENCE.md): disagreements
 // between two control states resolve toward less permission, always.
@@ -226,76 +220,8 @@ export class Repository {
     return out;
   }
 
-  // ---------------- paper ledger (idempotent by upstream ids) ----------------
-  // PERSIST-0A §14: an id collision with DIFFERENT content is corruption,
-  // not harmless replay. First durable truth stands; the conflict is counted
-  // and refused, never retried into an overwrite.
-  async upsertLedgerRow(kind, row) {
-    const table = LEDGER_TABLES[kind];
-    if (!table) throw new Error(`unknown ledger kind ${kind}`);
-    const v = validateLedgerRow(kind, row);
-    if (!v.ok) return { accepted: false, invalid: true, reason: v.errors.join('; ') };
-    const r = await this.db.query(
-      `INSERT INTO ${table} (prediction_id, ts, row) VALUES ($1, $2, $3) ON CONFLICT (prediction_id) DO NOTHING`,
-      [row.prediction_id, row.ts ?? null, row],
-      { write: true }
-    );
-    if (r.rowCount === 1) return { accepted: true, duplicate: false };
-    const existing = await this.db.query(`SELECT row FROM ${table} WHERE prediction_id = $1`, [row.prediction_id]);
-    if (existing.rows[0] && canonicalJson(existing.rows[0].row) === canonicalJson(row)) {
-      return { accepted: false, duplicate: true };
-    }
-    this.ledgerIdConflicts++;
-    this.log(`PERSISTENCE DEGRADED: LEDGER_ID_CONTENT_CONFLICT (${kind} ${row.prediction_id}) — first truth stands`);
-    return { accepted: false, duplicate: false, conflict: true, outcome: 'LEDGER_ID_CONTENT_CONFLICT' };
-  }
-
-  // Bounded recent view (display); rows re-earn validation before serving.
-  async loadLedger(kind, { limit } = {}) {
-    const table = LEDGER_TABLES[kind];
-    const { rows } = await this.db.query(`SELECT row FROM ${table} ORDER BY durable_at DESC LIMIT $1`, [clamp(limit)]);
-    return this.#reviveLedgerRows(kind, rows);
-  }
-
-  // COMPLETE durable ledger for operational restore — chunked keyset
-  // pagination, never truncated to the display bound (PERSIST-0A §10).
-  // PERSIST-0B §12: the result distinguishes COMPLETE_VALID from
-  // INCOMPLETE — a withheld corrupt row is REPORTED, because a missing
-  // open position must never be mistaken for "no position".
-  async loadLedgerAll(kind) {
-    const table = LEDGER_TABLES[kind];
-    if (!table) throw new Error(`unknown ledger kind ${kind}`);
-    const out = [];
-    let invalid = 0;
-    let after = '';
-    for (;;) {
-      const { rows } = await this.db.query(
-        `SELECT prediction_id, row FROM ${table} WHERE prediction_id > $1 ORDER BY prediction_id LIMIT ${MAX_QUERY_LIMIT}`,
-        [after]
-      );
-      if (!rows.length) break;
-      const before = this.invalidDurableRecords;
-      out.push(...this.#reviveLedgerRows(kind, rows));
-      invalid += this.invalidDurableRecords - before;
-      after = rows[rows.length - 1].prediction_id;
-      if (rows.length < MAX_QUERY_LIMIT) break;
-    }
-    return { rows: out, invalid, complete: invalid === 0 };
-  }
-
-  #reviveLedgerRows(kind, rows) {
-    const out = [];
-    for (const r of rows) {
-      const v = validateLedgerRow(kind, r.row);
-      if (!v.ok) {
-        this.invalidDurableRecords++;
-        this.log(`PERSISTENCE DEGRADED: durable ${kind} row failed validation (${v.errors.join('; ')}) — withheld`);
-        continue;
-      }
-      out.push(r.row);
-    }
-    return out;
-  }
+  // (lean trim step 1, 2026-09-14) the legacy paper-ledger row store (upsertLedgerRow / loadLedgerAll over
+  // serpent_ledger_*) is retired; the execution journal is the ONE durable ledger. Tables remain by migration law.
 
   // ---------------- canonical memory (MEMORY-0C model, durable) ----------------
   // Insert rule: new id -> insert; same id + identical digest -> deterministic

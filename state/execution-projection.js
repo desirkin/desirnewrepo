@@ -28,3 +28,11 @@ export function readExecutionProjection({ now = Date.now(), file = projectionFil
   const open = Array.isArray(p.positions) ? p.positions.length : 0; const pending = Array.isArray(p.pendingOrders) ? p.pendingOrders.filter((o) => o.kind === 'ENTRY' || o.kind === 'CANARY_ENTRY').length : 0;
   return { state: fresh ? 'FRESH' : 'STALE', ageMs, ts: p.ts, accountId: p.accountId, mode: p.mode ?? null, runMode: p.runMode, revision: p.revision, accountKind: p.accountKind ?? null, adapter: p.adapter ?? null, posture: fresh && (p.posture === 'STRIKE' || p.posture === 'DIGESTING') && (open > 0 || pending > 0) ? p.posture : null, openPositions: open, pendingEntries: pending, restrictions: Array.isArray(p.restrictions) ? p.restrictions : [], exposure: open > 0 || pending > 0 };
 }
+
+// The composition's published daily-lock fact (lean trim step 1): { sessionDate, openingEquityUsd, dayPnlUsd, pnlPct, level,
+// thresholds, supported } or null when there is no readable projection. Bounded read; never a write; no binding is required
+// because the fact is advisory to the posture machine / cockpit — the Judge enforces the same law in-process.
+export function readProjectionDailyLock({ file = projectionFile() } = {}) {
+  if (!existsSync(file)) return null;
+  try { const buf = readFileSync(file); if (buf.length > PROJECTION_MAX_BYTES) return null; const p = JSON.parse(buf.toString('utf8')); const d = p?.dailyLock; return d && typeof d === 'object' && typeof d.level === 'string' ? d : null; } catch { return null; }
+}

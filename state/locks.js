@@ -1,12 +1,18 @@
 // Session locks. THE DAILY TARGET MAY STOP TRADING. THE DAILY TARGET MAY
 // NEVER CAUSE TRADING. Locks only ever remove permission to strike; they
 // reset at the next ET session date because daily P&L does.
+//
+// ONE bankroll, ONE law (lean trim step 1, 2026-09-14): the day's P&L is the execution journal's session P&L against its
+// opening equity, as published by the Judge composition in <data>/execution/projection.json (`dailyLock`). This module
+// no longer reads the legacy JSONL ledger; with no projection there is no P&L fact and therefore NO lock (level NONE,
+// supported:false) — a missing fact never fabricates a restriction, and the Judge's own permission law is unaffected
+// because it computes the same level from the same journal in-process.
 import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { atomicWriteJson } from '../lib/jsonl.js';
 import { loadConfig, dataDir } from '../lib/config.js';
 import { sessionDate, nowIso } from '../lib/time.js';
-import { realizedPnlUsd } from '../ledger/rollup.js';
+import { readProjectionDailyLock } from './execution-projection.js';
 
 export const LOCK_LEVELS = ['NONE', 'SELECTIVE', 'PROTECT', 'HARD_LOCK'];
 
@@ -43,15 +49,19 @@ export function dailyLockStatus(date = sessionDate()) {
   const config = loadConfig();
   const sim = readSimulatedPnl(date);
   const bankroll = config.paper.baseBalanceUsd;
-  const pnlUsd = sim ? (sim.pnlPct / 100) * bankroll : realizedPnlUsd(date);
-  const pnlPct = (pnlUsd / bankroll) * 100;
-  const level = lockLevelForPnlPct(pnlPct, config.locks);
+  const published = sim ? null : readProjectionDailyLock();
+  // the projection's session date is the journal's; a different day is stale evidence, not today's P&L
+  const journal = published && published.supported && (published.sessionDate === null || published.sessionDate === date) ? published : null;
+  const pnlPct = sim ? sim.pnlPct : journal ? journal.pnlPct : null;
+  const pnlUsd = sim ? (sim.pnlPct / 100) * bankroll : journal ? journal.dayPnlUsd : null;
+  const level = pnlPct === null ? 'NONE' : lockLevelForPnlPct(pnlPct, config.locks);
   return {
     session_date: date,
-    bankroll_usd: bankroll,
+    bankroll_usd: journal?.openingEquityUsd ?? bankroll,
     pnl_usd: pnlUsd,
     pnl_pct: pnlPct,
     simulated: Boolean(sim),
+    source: sim ? 'SIMULATED' : journal ? 'JOURNAL_PROJECTION' : 'NO_PROJECTION',
     level,
     thresholds: config.locks,
     strikes_allowed: level === 'NONE' || level === 'SELECTIVE',

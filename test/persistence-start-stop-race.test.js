@@ -15,7 +15,7 @@ const deferred = () => {
 };
 
 function heldFinalLedgerPool({ entered, release, onEnd }) {
-  let held = false;
+  let held = false; let runtimeStateReads = 0;
   const query = async (sql) => {
     const text = String(sql);
     if (text.includes('SELECT version FROM serpent_schema_migrations')) {
@@ -24,7 +24,9 @@ function heldFinalLedgerPool({ entered, release, onEnd }) {
         rowCount: SCHEMA_VERSION,
       };
     }
-    if (!held && text.includes('FROM serpent_ledger_exits')) {
+    // (lean trim step 1) the legacy ledger restore is gone; the FINAL restore query is now the second runtime-state read
+    // (posture, then sim_pnl) — hold that one
+    if (!held && text.includes('FROM serpent_runtime_state') && ++runtimeStateReads === 2) {
       held = true;
       entered.resolve();
       await release.promise;

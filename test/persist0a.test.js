@@ -27,7 +27,6 @@ const {
   validateControlState,
   validatePostureState,
   validateSimState,
-  validateLedgerRow,
   lessPermissivePosture,
   lessPermissiveSim,
 } = await import('../persistence/validate-state.js');
@@ -150,9 +149,7 @@ test('validators: invalid durable safety shapes are refused; permission rankings
   assert.equal(validateSimState({ date: '2026-09-03', pnlPct: -2, ts: ISO, simulated: true }).ok, true);
   assert.equal(validateSimState({ cleared: true, ts: ISO }).ok, true);
   assert.equal(validateSimState({ pnlPct: -2 }).ok, false); // neither shape: NOT "no lock"
-  // ledger
-  assert.equal(validateLedgerRow('fill', { prediction_id: 'p', ts: ISO, coin: 'BTC', size_usd: 1, base_qty: 1, avg_price: 1, fee_usd: 0 }).ok, true);
-  assert.equal(validateLedgerRow('fill', { prediction_id: 'p', ts: ISO, coin: 'BTC', size_usd: Number.POSITIVE_INFINITY }).ok, false);
+  // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired — case moved to attic/test
   // rankings
   assert.equal(lessPermissivePosture({ posture: 'STALKING' }, { posture: 'RETREAT' }).posture, 'RETREAT');
   assert.equal(lessPermissivePosture({ posture: 'COILED' }, { posture: 'STRIKE' }).posture, 'COILED');
@@ -299,66 +296,7 @@ if (!TEST_URL) {
     assert.equal(trs.rows[0].n, 2);
   });
 
-  test('O. same ledger id + different content is a CONFLICT, not a duplicate; first truth stands', async () => {
-    const truth = { prediction_id: 'conflict-pred', timestamp_prediction_persisted: ISO, coin: 'BTC', size_usd: 100, thesis: 'original' };
-    const impostor = { ...truth, size_usd: 100000, thesis: 'rewritten history' };
-    assert.equal((await repo.upsertLedgerRow('prediction', truth)).accepted, true);
-    const r = await repo.upsertLedgerRow('prediction', impostor);
-    assert.equal(r.conflict, true);
-    assert.equal(r.outcome, 'LEDGER_ID_CONTENT_CONFLICT');
-    assert.equal(r.duplicate, false);
-    assert.ok(repo.ledgerIdConflicts >= 1);
-    const stored = (await repo.loadLedgerAll('prediction')).rows.find((x) => x.prediction_id === 'conflict-pred');
-    assert.equal(stored.size_usd, 100); // first durable truth untouched
-    assert.equal((await repo.upsertLedgerRow('prediction', structuredClone(truth))).duplicate, true); // exact replay is still a duplicate
-    await db.query(`DELETE FROM serpent_ledger_predictions WHERE prediction_id = 'conflict-pred'`, [], { write: true });
-  });
-
-  test('K. REDEPLOY: the EXISTING ledger APIs see durable history on a fresh filesystem', async () => {
-    const { allPredictions, allFills, allExits, openPositions } = await import('../ledger/ledger.js');
-    const { realizedPnlUsd } = await import('../ledger/rollup.js');
-    const { ledgerSummary } = await import('../ledger/summary.js');
-    const nowIso = new Date().toISOString();
-    const p1 = { prediction_id: 'k-closed', timestamp_prediction_persisted: nowIso, coin: 'BTC', thesis: 'closed trade', predicted_horizon_min: 30, predicted_net_move_pct: 1, size_usd: 100 };
-    const p2 = { prediction_id: 'k-open', timestamp_prediction_persisted: nowIso, coin: 'ETH', thesis: 'open position', predicted_horizon_min: 30, predicted_net_move_pct: 1, size_usd: 50 };
-    const f1 = { prediction_id: 'k-closed', ts: nowIso, coin: 'BTC', side: 'buy', size_usd: 100, base_qty: 0.001, avg_price: 100000, fee_usd: 0.4 };
-    const f2 = { prediction_id: 'k-open', ts: nowIso, coin: 'ETH', side: 'buy', size_usd: 50, base_qty: 0.01, avg_price: 5000, fee_usd: 0.2 };
-    const x1 = { prediction_id: 'k-closed', ts: nowIso, coin: 'BTC', reason_code: 'TARGET', base_qty: 0.001, avg_price: 101000, proceeds_usd: 101, fee_usd: 0.4, realized_net_usd: 0.2, realized_net_pct: 0.2 };
-
-    // ---- instance A lives, trades on paper, pumps durable, and dies
-    const dirA = mkdtempSync(path.join(tmpdir(), 'cobra-0a-KA-'));
-    process.env.COBRA_DATA_DIR = dirA;
-    mkdirSync(path.join(dirA, 'ledger'), { recursive: true });
-    writeFileSync(path.join(dirA, 'ledger', 'predictions.jsonl'), [p1, p2].map((r) => JSON.stringify(r)).join('\n') + '\n');
-    writeFileSync(path.join(dirA, 'ledger', 'fills.jsonl'), [f1, f2].map((r) => JSON.stringify(r)).join('\n') + '\n');
-    writeFileSync(path.join(dirA, 'ledger', 'exits.jsonl'), JSON.stringify(x1) + '\n');
-    const a = await startPersistence({ log: () => {}, dbOverrides: { url: TEST_URL, schema: SCHEMA } });
-    await a.pumpOnce();
-    await a.stop();
-    rmSync(dirA, { recursive: true, force: true }); // the old body is GONE
-
-    // ---- instance B: fresh filesystem, same database
-    const dirB = mkdtempSync(path.join(tmpdir(), 'cobra-0a-KB-'));
-    process.env.COBRA_DATA_DIR = dirB;
-    const b = await startPersistence({ log: () => {}, dbOverrides: { url: TEST_URL, schema: SCHEMA } });
-    assert.equal(b.health().permissionLock, false);
-    // the RUNNING APP's own functions — not repository calls — see history
-    assert.ok(allPredictions().some((r) => r.prediction_id === 'k-closed'));
-    assert.ok(allPredictions().some((r) => r.prediction_id === 'k-open'));
-    assert.equal(allFills().length, 2);
-    assert.equal(allExits().length, 1);
-    const open = openPositions();
-    assert.equal(open.length, 1);
-    assert.equal(open[0].prediction_id, 'k-open'); // Serpent remembers his open paper position
-    assert.equal(realizedPnlUsd(), 0.2); // and his realized P&L
-    const summary = ledgerSummary();
-    assert.equal(summary.totalTrades, 1); // cockpit summary reflects durable history
-    assert.equal(summary.openPositions.length, 1);
-    assert.equal(summary.netPnl.usd, 0.2);
-    await b.stop();
-    rmSync(dirB, { recursive: true, force: true });
-    process.env.COBRA_DATA_DIR = TEST_DATA;
-  });
+  // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired — case moved to attic/test
 
   test('L. Memory consumer facade: durable Memory answers on a fresh filesystem; local pending merges deduped', async () => {
     const eOld = mkEnv({ ts: NOW_SEC - 500, symbol: 'SOL', correlation: { eventId: 'facade-ev', clusterId: 'facade-cl' } });

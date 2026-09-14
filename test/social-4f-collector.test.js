@@ -324,8 +324,9 @@ if (!TEST_URL) {
       assert.equal(r.legacyPermission.count, 5); assert.match(r.legacyPermission.label, /LEGACY_PERMISSION_SET.*not the discovery count/);
       assert.match(r.historicalCoverage, /LEGACY_SCOPE_UNKNOWN/); assert.ok(!/all crypto|full universe|monitored every/i.test(JSON.stringify(r)));
       // D: catalog admission + planning changed no trade permission
-      const { evaluateCost } = await import('../cost/model.js'); const { recordPrediction } = await import('../ledger/ledger.js');
-      assert.match(JSON.stringify(evaluateCost(Z7, 100)), /not in universe/); assert.throws(() => recordPrediction({ coin: Z7, thesis: 'research', horizonMin: 5, predictedNetMovePct: 1, sizeUsd: 100 }), /not in universe/);
+      const { evaluateCost } = await import('../cost/model.js');
+      assert.match(JSON.stringify(evaluateCost(Z7, 100)), /not in universe/);
+      // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired — case moved to attic/test
       const full = b.c.status(); assert.equal(full.activeClaims, 0); assert.equal(full.state, 'DARK'); assert.equal(full.social.authority, 'NONE');
       for (const k of ['attention', 'hyped', 'stalk', 'eligib', 'order', 'posture']) assert.ok(!Object.keys(full).some((key) => key.toLowerCase().includes(k)), `status carries no ${k} field`);
       // O: the blocked / foundation-only sources are untouched by research scope

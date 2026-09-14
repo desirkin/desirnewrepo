@@ -12,8 +12,6 @@ import { sessionDate } from '../lib/time.js';
 import { getEngineState } from '../state/machine.js';
 import { readCurrentBook, readTapeStatus, TAPE_STATES } from '../tape/store.js';
 import { bookFeatures } from '../tape/features.js';
-import { openPositions, allPredictions, allFills } from '../ledger/ledger.js';
-import { ledgerSummary } from '../ledger/summary.js';
 import { isVetoed, readControls } from '../state/controls.js';
 import { applyRestriction, requestClear } from '../persistence/control-plane.js';
 import { existsSync, readFileSync as readFs, readdirSync } from 'node:fs';
@@ -312,12 +310,8 @@ function statusPayload() {
     };
   }
   const engine = getEngineState(); // syncs + logs posture transitions
-  let open = 0;
-  try {
-    open = openPositions().length;
-  } catch {
-    // no ledger yet
-  }
+  // open exposure is the journal's (lean trim step 1): the bound projection's positions, or 0 with no projection
+  const open = judgeView().projection?.positions?.length ?? 0;
   return {
     posture: engine.state,
     // JUDGE: the read-only execution projection summary (null when the Judge is off)
@@ -707,15 +701,10 @@ const server = http.createServer((req, res) => {
     } else if (url.pathname === '/api/status') {
       json(res, 200, statusPayload());
     } else if (url.pathname === '/api/ledger/summary') {
-      // Read-only, computed from disk; an empty or missing ledger is a valid
-      // empty-state summary, never an error. Real failures get logged with
-      // their class and stack so the deployment logs name the truth.
-      try {
-        json(res, 200, ledgerSummary());
-      } catch (err) {
-        console.error(`[ledger/summary] ${err.constructor.name}: ${err.message}\n${err.stack}`);
-        json(res, 500, { error: err.message, errorClass: err.constructor.name });
-      }
+      // Read-only (lean trim step 1): the journal's ledger view as published in the bound execution projection
+      // (execution/ledger-view.js). No projection = an honest empty state, never an error and never a second ledger.
+      const view = judgeView(); const ledger = view.projection?.ledger ?? null;
+      json(res, 200, ledger ? { ...ledger, projectionFresh: view.projectionFresh, rejected: view.rejected } : { ledgerViewVersion: null, empty: true, reason: view.rejected ? `PROJECTION_REJECTED:${view.rejected}` : 'NO_PROJECTION', projectionFresh: false, rejected: view.rejected, startingBalance: 0, currentBalance: 0, pendingPredictions: 0, totalTrades: 0, wins: 0, losses: 0, netPnl: { usd: 0, pct: null }, todayPnl: { usd: 0, pct: null }, exitReasons: {}, perSymbol: {}, lastTrades: [], openPositions: [] });
     } else if (url.pathname === '/api/attention') {
       // UI-1: read-only DISPLAY attention (async — durable Memory
       // continuity rides in). A failure here must never break the home

@@ -101,28 +101,8 @@ export async function migrateLocalData({ db, log = console.log } = {}) {
     report.subsystems[key] = t;
   }
 
-  // ---- paper ledger (deterministic prediction_id keys)
-  for (const [kind, file] of [
-    ['prediction', path.join(d, 'ledger', 'predictions.jsonl')],
-    ['fill', path.join(d, 'ledger', 'fills.jsonl')],
-    ['exit', path.join(d, 'ledger', 'exits.jsonl')],
-  ]) {
-    const rows = readJsonl(file);
-    if (!rows) continue;
-    const t = tally();
-    for (const row of rows) {
-      if (row.invalid || !row.rec.prediction_id) {
-        t.invalid++;
-        continue;
-      }
-      const r = await repo.upsertLedgerRow(kind, row.rec);
-      if (r.accepted) t.accepted++;
-      else if (r.conflict) t.conflicts++;
-      else if (r.invalid) t.invalid++;
-      else t.duplicates++;
-    }
-    report.subsystems[`ledger_${kind}`] = t;
-  }
+  // (lean trim step 1, 2026-09-14) the legacy JSONL paper ledger is no longer imported: the execution journal is the
+  // ONE durable ledger and was never file-backed. Historical ledger/*.jsonl files are archived, not migrated.
 
   // ---- canonical memory: every record re-earns its way through the
   // canonical validator before it may become durable
