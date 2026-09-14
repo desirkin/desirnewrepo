@@ -13,7 +13,7 @@
   "scripts": {
     "start": "node index.js",
     "drill": "node index.js && npm test",
-    "test": "node --test",
+    "test": "node --test 'test/**/*.test.js' 'test/**/*.test.mjs'",
     "tape": "node bin/cobra.js tape run",
     "ui": "node ui/server.js",
     "fly": "node fly.js",
