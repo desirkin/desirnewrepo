@@ -89,6 +89,7 @@ function boundedStructureError(value) {
   let nodes = 0; let lowerBoundBytes = 0;
   while (stack.length) {
     const current = stack.pop();
+    if (current.leave) { seen.delete(current.value); continue; }
     nodes += 1;
     if (nodes > MAX_ADAPTIVE_FACTS_SOURCE_NODES) return 'SOURCE_NODE_LIMIT_EXCEEDED';
     if (current.depth > MAX_ADAPTIVE_FACTS_SOURCE_DEPTH) return 'SOURCE_DEPTH_LIMIT_EXCEEDED';
@@ -98,14 +99,29 @@ function boundedStructureError(value) {
       if (lowerBoundBytes > MAX_ADAPTIVE_FACTS_SOURCE_BYTES) return 'SOURCE_BYTE_LIMIT_EXCEEDED';
       continue;
     }
-    if (item === null || typeof item !== 'object') continue;
+    if (item === null || typeof item === 'boolean') { lowerBoundBytes += 5; continue; }
+    if (typeof item === 'number') {
+      if (!Number.isFinite(item)) return 'SOURCE_NON_JSON_VALUE';
+      lowerBoundBytes += 32; continue;
+    }
+    if (typeof item !== 'object') return 'SOURCE_NON_JSON_VALUE';
+    const array = Array.isArray(item);
+    if (array ? Object.getPrototypeOf(item) !== Array.prototype : !isPlainObject(item)) return 'SOURCE_NON_PLAIN_OBJECT';
     if (seen.has(item)) return 'SOURCE_CYCLE_REFUSED';
     seen.add(item);
-    const keys = Object.keys(item);
+    stack.push({ value: item, leave: true });
+    const keys = Reflect.ownKeys(item);
+    if (nodes + stack.length + keys.length > MAX_ADAPTIVE_FACTS_SOURCE_NODES) return 'SOURCE_NODE_LIMIT_EXCEEDED';
+    if (array && (item.length > MAX_ADAPTIVE_FACTS_SOURCE_NODES || keys.length !== item.length + 1)) return 'SOURCE_ARRAY_NOT_DENSE';
     for (const key of keys) {
+      if (array && key === 'length') continue;
+      if (typeof key !== 'string') return 'SOURCE_NON_JSON_KEY';
+      if (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= item.length)) return 'SOURCE_ARRAY_EXTRA_PROPERTY';
+      const descriptor = Object.getOwnPropertyDescriptor(item, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return 'SOURCE_UNSUPPORTED_DESCRIPTOR';
       lowerBoundBytes += Buffer.byteLength(key, 'utf8');
       if (lowerBoundBytes > MAX_ADAPTIVE_FACTS_SOURCE_BYTES) return 'SOURCE_BYTE_LIMIT_EXCEEDED';
-      stack.push({ value: item[key], depth: current.depth + 1 });
+      stack.push({ value: descriptor.value, depth: current.depth + 1 });
     }
   }
   let exactBytes;
@@ -222,12 +238,20 @@ function flowError(flowWindow, request, bookSnapshot, decisionTs) {
 }
 
 export function adaptiveJudgeFactsSourceError(input) {
+  // Cheap capacity checks inspect descriptors, never caller getters.
+  if (isPlainObject(input)) {
+    const flow = Object.getOwnPropertyDescriptor(input, 'flowWindow')?.value;
+    const trades = isPlainObject(flow) ? Object.getOwnPropertyDescriptor(flow, 'trades')?.value : null;
+    const bars = Object.getOwnPropertyDescriptor(input, 'historicalBars')?.value;
+    if (Array.isArray(trades) && trades.length > JUDGE_LEARNING_MAX_RAW_TRADES) return 'FLOW_TRADE_LIMIT_EXCEEDED';
+    if (Array.isArray(bars) && bars.length > 61) return 'HISTORICAL_BARS_EXACT_61_REQUIRED';
+  }
+  const bounded = boundedStructureError(input); if (bounded) return bounded;
   if (!exactKeys(input, TOP_KEYS)) return 'SOURCE_INPUT_SCHEMA_NOT_CLOSED';
   if (!isTs(input.decisionTs)) return 'SOURCE_DECISION_CLOCK_INVALID';
   if (Array.isArray(input.flowWindow?.trades)
       && input.flowWindow.trades.length > JUDGE_LEARNING_MAX_RAW_TRADES) return 'FLOW_TRADE_LIMIT_EXCEEDED';
   if (Array.isArray(input.historicalBars) && input.historicalBars.length > 61) return 'HISTORICAL_BARS_EXACT_61_REQUIRED';
-  const bounded = boundedStructureError(input); if (bounded) return bounded;
   return marketError(input.requestedMarket, input.instrumentSpec, input.decisionTs)
     ?? bookError(input.bookSnapshot, input.requestedMarket, input.instrumentSpec, input.decisionTs)
     ?? barsError(input.frozenIndicator, input.historicalBars, input.decisionTs)
@@ -287,6 +311,7 @@ function sourceBindingOf(input, facts) {
 }
 
 export function adaptiveJudgeFactsEnvelopeError(envelope) {
+  const bounded = boundedStructureError(envelope); if (bounded) return bounded;
   if (!exactKeys(envelope, ENVELOPE_KEYS)
       || envelope.envelopeVersion !== ADAPTIVE_JUDGE_FACTS_ENVELOPE_VERSION
       || judgeLearningPreparedFactsError(envelope.facts)) return 'ENVELOPE_OR_PREPARED_FACTS_INVALID';
@@ -305,6 +330,9 @@ export function adaptiveJudgeFactsEnvelopeError(envelope) {
   const instrumentQuote = binding.instrument.wsname.split('/')[1] ?? null;
   if (binding.decisionTs !== envelope.facts.decisionTs
       || binding.preparedFactsDigest !== envelope.facts.factsDigest
+      || (envelope.facts.marketIdentity !== null
+        && (envelope.facts.marketIdentity.symbol !== binding.market.symbol
+          || envelope.facts.marketIdentity.canonicalCoin !== binding.market.canonicalCoin))
       || binding.instrument.venue !== binding.market.venue
       || binding.instrument.wsname !== binding.market.symbol
       || binding.instrument.canonicalCoin !== binding.market.canonicalCoin
