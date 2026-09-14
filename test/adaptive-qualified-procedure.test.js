@@ -6,12 +6,15 @@ import path from 'node:path';
 import { canonicalDigest, canonicalJson, opportunityIdOf } from '../learning/contracts.js';
 import {
   ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION,
+  ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION_V2,
   ADAPTIVE_RANKING_TRIAL_COMPARATOR, ADAPTIVE_RANKING_TRIAL_COST_MODEL,
   ADAPTIVE_RANKING_TRIAL_PRIMARY_METRIC, adaptiveRankingTrialRecordValidator,
   adaptiveRankingExecutionSourceIdentity,
   readQualifiedAdaptiveProcedureDecision, resolveQualifiedAdaptiveProcedureRanking,
   sealAdaptiveProcedureConsumerContract, sealAdaptiveProcedurePublication,
+  sealAdaptiveProcedurePublicationV2, sealAdaptiveRankingAbstainExecutionArm,
   sealAdaptiveRankingTrialDecision, sealAdaptiveRankingTrialExecution,
+  sealAdaptiveRankingTrialDecisionV2, sealAdaptiveRankingTrialExecutionV2,
 } from '../learning/adaptive-qualified-procedure.js';
 import { buildShadowCapture } from '../learning/shadow-capture.js';
 import { matureShadowCapture } from '../learning/shadow-outcome.js';
@@ -38,7 +41,7 @@ import { buildEvidence, buildPatternRecord, estimateFromEvidence } from '../lear
 import { freezeCandidate, settleCandidate } from '../learning/promotion.js';
 import { transitionActivation } from '../learning/adapter.js';
 import { createLearningStore } from '../learning/store.js';
-import { interimView, replayProspective } from '../learning/prospective.js';
+import { evaluateTerminal, interimView, replayProspective } from '../learning/prospective.js';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -257,7 +260,9 @@ function appendAccumulatingPattern(store, publication) {
   return store.patternHeads().values().next().value;
 }
 
-async function fixture(t, { sameSelection = false, sameCohortPair = false } = {}) {
+async function fixture(t, {
+  sameSelection = false, sameCohortPair = false, trialVersion = 'V1', abstainGroups = new Set(),
+} = {}) {
   const base = staticConsumer();
   const consumer = sealAdaptiveProcedureConsumerContract({ preparedFactsContract: base });
   const procedure = sealAdaptiveProcedure({
@@ -293,7 +298,7 @@ async function fixture(t, { sameSelection = false, sameCohortPair = false } = {}
   assert.equal(signedState.strategies.find((row) => row.strategyId === 'PULLBACK').rankOffsetRrPoints, -0.015);
   assert.equal(signedState.strategies.find((row) => row.strategyId === 'RANGE').rankOffsetRrPoints, 0);
 
-  const publication = sealAdaptiveProcedurePublication({
+  const publication = (trialVersion === 'V2' ? sealAdaptiveProcedurePublicationV2 : sealAdaptiveProcedurePublication)({
     procedure, initialState: initialAdaptiveState(procedure),
     consumerContract: consumer,
     scope: { setupType: 'ANY', regime: 'ANY', assets: 'ANY', venues: ['KRAKEN'] },
@@ -328,21 +333,41 @@ async function fixture(t, { sameSelection = false, sameCohortPair = false } = {}
     now.value = decisionTs;
     const coin = sameCohortPair && group === 1 ? 'A0' : `A${group % 6}`;
     const facts = preparedFacts(base, decisionTs, coin);
-    const saved = await owner.recordPrediction(predictionInput(procedure, facts.factsDigest, decisionTs, coin, 'IGNITION'));
+    const abstain = trialVersion === 'V2' && abstainGroups.has(group);
+    const eligible = trialVersion === 'V2' ? (abstain ? [] : ['IGNITION', 'PULLBACK']) : procedure.strategies;
+    const savedInput = predictionInput(
+      procedure, facts.factsDigest, decisionTs, coin, abstain ? null : 'IGNITION', eligible,
+    );
+    if (trialVersion === 'V2') {
+      savedInput.strategyAssessments[2] = {
+        strategyId: 'RANGE', eligibility: 'INELIGIBLE', reasonCode: 'FIXTURE_RISK_GATE',
+      };
+    }
+    const saved = await owner.recordPrediction(savedInput);
     const context = { setupType: 'IGNITION', regime: 'UNCLASSIFIED', asset: coin, venue: 'KRAKEN' };
-    const candidateArm = { selectedStrategyId: 'IGNITION', executionCapture: shadowCapture('IGNITION', decisionTs, coin) };
-    const baselineArm = sameSelection
+    const candidateArm = abstain
+      ? { selectedStrategyId: null, executionCapture: null }
+      : { selectedStrategyId: 'IGNITION', executionCapture: shadowCapture('IGNITION', decisionTs, coin) };
+    const baselineArm = abstain
+      ? candidateArm
+      : sameSelection
       ? candidateArm
       : { selectedStrategyId: 'PULLBACK', executionCapture: shadowCapture('PULLBACK', decisionTs, coin) };
-    const decisionReceipt = sealAdaptiveRankingTrialDecision({
+    const decisionSeal = trialVersion === 'V2' ? sealAdaptiveRankingTrialDecisionV2 : sealAdaptiveRankingTrialDecision;
+    const rankCandidates = trialVersion === 'V2' ? [
+      { strategyId: 'IGNITION', eligibility: abstain ? 'UNAVAILABLE' : 'ELIGIBLE', reasonCode: abstain ? 'FIXTURE_NOT_ASSESSED' : null, baselineRewardRiskRatio: abstain ? null : (sameSelection ? 1.02 : 1) },
+      { strategyId: 'PULLBACK', eligibility: abstain ? 'UNAVAILABLE' : 'ELIGIBLE', reasonCode: abstain ? 'FIXTURE_NOT_ASSESSED' : null, baselineRewardRiskRatio: abstain ? null : 1.01 },
+      { strategyId: 'RANGE', eligibility: 'INELIGIBLE', reasonCode: 'FIXTURE_RISK_GATE', baselineRewardRiskRatio: null },
+    ] : [
+      { strategyId: 'IGNITION', baselineRewardRiskRatio: sameSelection ? 1.02 : 1 },
+      { strategyId: 'PULLBACK', baselineRewardRiskRatio: 1.01 },
+      { strategyId: 'RANGE', baselineRewardRiskRatio: 0.5 },
+    ];
+    const decisionReceipt = decisionSeal({
       publication, candidateId: design.candidateId, opportunityId: saved.prediction.opportunityId,
       adaptiveState: owner.state(), prediction: saved.prediction,
       predictionAck: saved.durableAcknowledgment, preparedFacts: facts, context,
-      rankCandidates: [
-        { strategyId: 'IGNITION', baselineRewardRiskRatio: sameSelection ? 1.02 : 1 },
-        { strategyId: 'PULLBACK', baselineRewardRiskRatio: 1.01 },
-        { strategyId: 'RANGE', baselineRewardRiskRatio: 0.5 },
-      ], baselineArm, candidateArm, recordedTs: now.value,
+      rankCandidates, baselineArm, candidateArm, recordedTs: now.value,
       validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
       adaptiveStore: durable,
     });
@@ -352,10 +377,13 @@ async function fixture(t, { sameSelection = false, sameCohortPair = false } = {}
       decisionReceipt,
     };
     learning.appendProspective(capture);
-    const candidate = executionArm(candidateArm, decisionTs, 103);
-    const baseline = sameSelection ? candidate : executionArm(baselineArm, decisionTs, 100);
+    const candidate = abstain
+      ? sealAdaptiveRankingAbstainExecutionArm({ asOfTs: decisionTs + HOUR + 1_000 })
+      : executionArm(candidateArm, decisionTs, 103);
+    const baseline = abstain ? candidate : sameSelection ? candidate : executionArm(baselineArm, decisionTs, 100);
     now.value = decisionTs + HOUR + 1_000;
-    const executionReceipt = sealAdaptiveRankingTrialExecution({
+    const executionSeal = trialVersion === 'V2' ? sealAdaptiveRankingTrialExecutionV2 : sealAdaptiveRankingTrialExecution;
+    const executionReceipt = executionSeal({
       publication, decisionReceipt, candidate, baseline, recordedTs: now.value,
       validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
       adaptiveStore: durable,
@@ -578,6 +606,98 @@ test('same selected strategy uses one exact control arm and cannot manufacture a
   await f.owner.close();
 });
 
+test('V2 ranks the exact eligible subset, includes explicit no-eligible abstentions in the denominator, and can qualify through the sole promoter', async (t) => {
+  const f = await fixture(t, { trialVersion: 'V2', abstainGroups: new Set([5]) });
+  assert.equal(f.publication.publicationVersion, 'adaptive-ranking-procedure-publication-2');
+  const selected = f.trial[0].decisionReceipt;
+  assert.equal(selected.decisionVersion, ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION_V2);
+  assert.deepEqual(selected.rankCandidates.map((row) => [row.strategyId, row.eligibility]), [
+    ['IGNITION', 'ELIGIBLE'], ['PULLBACK', 'ELIGIBLE'], ['RANGE', 'INELIGIBLE'],
+  ]);
+  assert.equal(selected.rankCandidates[2].baselineRewardRiskRatio, null);
+  assert.equal(selected.candidateSelectedStrategyId, 'IGNITION');
+  assert.equal(selected.baselineSelectedStrategyId, 'PULLBACK');
+
+  const abstained = f.trial[5];
+  assert.equal(abstained.decisionReceipt.candidateSelectedStrategyId, null);
+  assert.equal(abstained.decisionReceipt.baselineSelectedStrategyId, null);
+  for (const arm of [abstained.executionReceipt.candidate, abstained.executionReceipt.baseline]) {
+    assert.equal(arm.outcome.netPct, 0);
+    assert.equal(arm.outcome.label, 'ABSTAINED_NO_ELIGIBLE_STRATEGY');
+    assert.equal(arm.outcome.actualFillObserved, false);
+    assert.equal(arm.outcome.sizeEvidence, 'NONE');
+    assert.equal(arm.sourceIdentity, null);
+    assert.equal(arm.path, null);
+    assert.equal(arm.depthPath, null);
+    assert.equal(arm.outcome.entry, null);
+    assert.equal(arm.outcome.exit, null);
+  }
+  const replay = replayProspective(f.learning.readProspective(), { adaptiveRankingTrialValidator: f.validator });
+  assert.deepEqual(replay.errors, []);
+  const view = interimView(replay, f.design.candidateId);
+  assert.equal(view.captured, 34);
+  assert.equal(view.matured, 34, 'the abstention remains in the exact paired denominator');
+  assert.equal(f.settled.terminal.maturedGroups, 30);
+  assert.equal(f.settled.terminal.verdict, 'FORWARD_SUPPORTED');
+  assert.ok(f.active, 'V2 evidence uses the existing promotion and activation manager');
+  await f.owner.close();
+});
+
+test('V2 refuses rehashed status scores and forged abstain fills while missing outcomes remain denominator failures, not zeros', async (t) => {
+  const f = await fixture(t, { trialVersion: 'V2', abstainGroups: new Set([5]) });
+  const selected = clone(f.trial[0].capture);
+  selected.decisionReceipt.rankCandidates[2].baselineRewardRiskRatio = 9;
+  selected.decisionReceipt.decisionDigest = canonicalDigest(Object.fromEntries(
+    Object.entries(selected.decisionReceipt).filter(([key]) => !['decisionId', 'decisionDigest'].includes(key)),
+  ));
+  selected.decisionReceipt.decisionId = `artriald2-${selected.decisionReceipt.decisionDigest.slice(0, 40)}`;
+  assert.match(
+    f.validator(selected, { stage: 'CAPTURE', design: f.design, capture: null }).error,
+    /unavailable\/ineligible values malformed/,
+  );
+
+  const forgedAbstain = clone(f.trial[5].outcome);
+  forgedAbstain.executionReceipt.candidate.outcome.netPct = 1;
+  forgedAbstain.executionReceipt.candidate.path = [];
+  forgedAbstain.executionReceipt.executionDigest = canonicalDigest(Object.fromEntries(
+    Object.entries(forgedAbstain.executionReceipt).filter(([key]) => !['executionId', 'executionDigest'].includes(key)),
+  ));
+  forgedAbstain.executionReceipt.executionId = `artriale2-${forgedAbstain.executionReceipt.executionDigest.slice(0, 40)}`;
+  assert.match(
+    f.validator(forgedAbstain, { stage: 'OUTCOME', design: f.design, capture: f.trial[5].capture }).error,
+    /exact zero with no fill/,
+  );
+
+  const omitted = new Set(f.trial.slice(0, 8).map((row) => row.outcome.opportunityId));
+  const incompleteRecords = f.learning.readProspective().filter((row) => row.kind !== 'TERMINAL_EVALUATED'
+    && !(row.kind === 'ADAPTIVE_RANKING_TRIAL_OUTCOME' && omitted.has(row.opportunityId)));
+  const incomplete = replayProspective(incompleteRecords, { adaptiveRankingTrialValidator: f.validator });
+  assert.deepEqual(incomplete.errors, []);
+  const view = interimView(incomplete, f.design.candidateId);
+  assert.equal(view.captured, 34);
+  assert.equal(view.matured, 26);
+  const terminal = evaluateTerminal(incomplete, f.design.candidateId, { nowTs: f.now.value + 1 });
+  assert.equal(terminal.verdict, 'INSUFFICIENT_COMPARISON');
+  assert.ok(terminal.reasons.includes('TERMINAL_SAMPLE_NOT_REACHED'));
+
+  const duplicate = replayProspective([
+    { kind: 'DESIGN_SEALED', design: f.design }, f.trial[0].capture, f.trial[0].capture,
+  ], { adaptiveRankingTrialValidator: f.validator });
+  assert.match(duplicate.errors[0], /duplicate capture/);
+  await f.owner.close();
+});
+
+test('V2 exact same-arm control earns zero and no promotion', async (t) => {
+  const f = await fixture(t, { trialVersion: 'V2', sameSelection: true });
+  assert.equal(f.trial[0].decisionReceipt.candidateSelectedStrategyId, 'IGNITION');
+  assert.equal(f.trial[0].decisionReceipt.baselineSelectedStrategyId, 'IGNITION');
+  assert.deepEqual(f.trial[0].executionReceipt.candidate, f.trial[0].executionReceipt.baseline);
+  assert.equal(f.settled.terminal.effect.pairedMeanDiff, 0);
+  assert.equal(f.settled.terminal.verdict, 'FORWARD_NOT_SUPPORTED');
+  assert.equal(f.settled.activation, null);
+  await f.owner.close();
+});
+
 test('same-asset captures in one predeclared episode remain two records but one dependence group', async (t) => {
   const f = await fixture(t, { sameCohortPair: true });
   const replay = replayProspective(f.learning.readProspective(), { adaptiveRankingTrialValidator: f.validator });
@@ -711,6 +831,21 @@ test('typed trial refuses shared metrics, caller-edited costs/path, lookahead, d
   });
   assert.equal(wrongVenue.applied, false);
   assert.equal(wrongVenue.reason, 'PREPARED_FACTS_VENUE_NOT_SINGLE_QUALIFIED_SOURCE');
+  const cachedSnapshot = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer, currentStateSettlement: f.trial.at(-1).stateSettlement,
+    validatePreparedFacts: (facts, contract) => judgeLearningPreparedFactsError(facts, { consumerContract: contract }),
+    nowTs: f.now.value, mode: 'PAPER',
+  });
+  const laterDecisionTs = f.now.value + 30_000;
+  const laterFreshFacts = preparedFacts(f.base, laterDecisionTs, 'BTC');
+  const cachedForLaterDecision = resolveQualifiedAdaptiveProcedureRanking({
+    snapshot: cachedSnapshot, consumerContract: f.consumer, preparedFacts: laterFreshFacts,
+    validatePreparedFacts: (facts, contract) => judgeLearningPreparedFactsError(facts, { consumerContract: contract }),
+    context: { ...original.context, asset: 'BTC' }, strategyId: 'IGNITION',
+    baselineRewardRiskRatio: 1, mode: 'PAPER', nowTs: laterDecisionTs,
+  });
+  assert.equal(cachedForLaterDecision.applied, true, 'a fresh later decision may consume a still-fresh cached state snapshot whose state/ACK existed first');
   const freshnessNow = f.now.value + 2 * MIN;
   const freshnessSnapshot = readQualifiedAdaptiveProcedureDecision({
     qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],

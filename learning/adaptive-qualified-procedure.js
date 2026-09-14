@@ -24,8 +24,11 @@ import { matureShadowCapture } from './shadow-outcome.js';
 
 export const ADAPTIVE_PROCEDURE_CONSUMER_VERSION = 'adaptive-ranking-procedure-consumer-2';
 export const ADAPTIVE_PROCEDURE_PUBLICATION_VERSION = 'adaptive-ranking-procedure-publication-1';
+export const ADAPTIVE_PROCEDURE_PUBLICATION_VERSION_V2 = 'adaptive-ranking-procedure-publication-2';
 export const ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION = 'adaptive-ranking-trial-decision-1';
 export const ADAPTIVE_PROCEDURE_TRIAL_EXECUTION_VERSION = 'adaptive-ranking-trial-execution-2';
+export const ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION_V2 = 'adaptive-ranking-trial-decision-2';
+export const ADAPTIVE_PROCEDURE_TRIAL_EXECUTION_VERSION_V2 = 'adaptive-ranking-trial-execution-3';
 export const ADAPTIVE_PROCEDURE_QUALIFICATION_VERSION = 'adaptive-ranking-procedure-qualification-1';
 export const ADAPTIVE_PROCEDURE_DECISION_VERSION = 'adaptive-ranking-procedure-decision-2';
 export const MAX_ADAPTIVE_PROCEDURE_PUBLICATIONS = 32;
@@ -86,6 +89,7 @@ const ACK_KEYS = Object.freeze([
 ]);
 const CONTEXT_KEYS = Object.freeze(['setupType', 'regime', 'asset', 'venue']);
 const RANK_KEYS = Object.freeze(['strategyId', 'baselineRewardRiskRatio']);
+const RANK_V2_KEYS = Object.freeze(['strategyId', 'eligibility', 'reasonCode', 'baselineRewardRiskRatio']);
 const ARM_KEYS = Object.freeze(['selectedStrategyId', 'executionCapture']);
 const TRIAL_EXECUTION_KEYS = Object.freeze([
   'executionVersion', 'executionId', 'executionDigest', 'publicationId',
@@ -96,6 +100,11 @@ const EXECUTION_ARM_KEYS = Object.freeze([
   'selectedStrategyId', 'sourceIdentity', 'path', 'depthPath', 'asOfTs', 'outcome',
 ]);
 const EXECUTION_SOURCE_KEYS = Object.freeze(['venue', 'assetId', 'entryEpochId', 'exitEpochId']);
+const ABSTAIN_OUTCOME_KEYS = Object.freeze([
+  'outcomeVersion', 'label', 'netPct', 'actualFillObserved', 'sizeEvidence',
+  'entry', 'exit', 'reasonCode',
+]);
+const ADAPTIVE_RANKING_ABSTAIN_OUTCOME_VERSION = 'adaptive-ranking-abstain-outcome-1';
 const QUALIFICATION_KEYS = Object.freeze([
   'qualificationVersion', 'qualificationId', 'qualificationDigest',
   'publicationId', 'publicationDigest', 'procedureId', 'procedureDigest',
@@ -225,6 +234,19 @@ function trialLaw() {
   };
 }
 
+function trialLawV2() {
+  return {
+    captureVersion: ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION_V2,
+    executionVersion: ADAPTIVE_PROCEDURE_TRIAL_EXECUTION_VERSION_V2,
+    primaryMetric: ADAPTIVE_RANKING_TRIAL_PRIMARY_METRIC,
+    comparator: ADAPTIVE_RANKING_TRIAL_COMPARATOR,
+    decisionInputLaw: 'FULL_REGISTERED_ELIGIBLE_INELIGIBLE_UNAVAILABLE_ROWS_PLUS_ACKED_ORIGINAL_PREDICTION_BEFORE_LABEL',
+    stateLaw: 'INITIAL_STATE_AND_UPDATE_EQUATIONS_FROZEN_AT_LEAST_TWO_ACKED_STATE_DIGESTS_AND_POSITIVE_NEGATIVE_ZERO_EFFECTS_OBSERVED',
+    armOutcomeLaw: 'EACH_SELECTED_STRATEGY_RECOMPUTED_FROM_OWN_SUBSEQUENT_OBSERVED_DEPTH_PATH_AFTER_COSTS_OR_NO_ELIGIBLE_STRATEGY_ABSTAINS_WITH_ZERO_AND_NO_FILL_EVIDENCE',
+    actualFillClaim: false,
+  };
+}
+
 export function sealAdaptiveProcedurePublication({
   procedure, initialState, consumerContract, scope, applicability, sealedTs,
 } = {}) {
@@ -251,9 +273,40 @@ export function sealAdaptiveProcedurePublication({
   return deepFreeze(out);
 }
 
+export function sealAdaptiveProcedurePublicationV2({
+  procedure, initialState, consumerContract, scope, applicability, sealedTs,
+} = {}) {
+  if (adaptiveProcedureError(procedure)) throw new TypeError('procedure invalid');
+  if (adaptiveProcedureConsumerContractError(consumerContract)) throw new TypeError('dynamic consumer invalid');
+  const expectedInitial = initialAdaptiveState(procedure, { initializedTs: procedure.createdTs });
+  if (adaptiveStateError(initialState, procedure) || !same(initialState, expectedInitial)) throw new TypeError('exact initial procedure state required');
+  if (procedure.parent.policyDigest !== consumerContract.policyDigest
+      || procedure.parent.consumerContractDigest !== consumerContract.consumerContractDigest
+      || procedure.parent.featureRecipeDigest !== consumerContract.featureRecipeDigest
+      || procedure.algorithm.maxAbsRankOffsetRrPoints > consumerContract.stateEffect.maximum) throw new TypeError('procedure parent/envelope differs from dynamic consumer');
+  if (scopeError(scope) || applicabilityError(applicability) || !isTs(sealedTs)
+      || sealedTs < procedure.createdTs || sealedTs < initialState.updatedTs) throw new TypeError('publication scope, applicability or clock malformed');
+  const body = {
+    publicationVersion: ADAPTIVE_PROCEDURE_PUBLICATION_VERSION_V2,
+    procedure: clone(procedure), initialState: clone(initialState), consumerContract: clone(consumerContract),
+    scope: clone(scope), applicability: clone(applicability), trialLaw: trialLawV2(), sealedTs,
+    authority: 'NONE', purpose: 'EXACT_EVOLVING_PROCEDURE_REQUIRING_PROSPECTIVE_PROMOTION',
+  };
+  const publicationDigest = canonicalDigest(body);
+  const out = { ...body, publicationId: `arproc-${publicationDigest.slice(0, 40)}`, publicationDigest };
+  const error = adaptiveProcedurePublicationError(out);
+  if (error) throw new TypeError(error);
+  return deepFreeze(out);
+}
+
 export function adaptiveProcedurePublicationError(publication, { currentConsumerContract = null } = {}) {
+  const expectedTrialLaw = publication?.publicationVersion === ADAPTIVE_PROCEDURE_PUBLICATION_VERSION
+    ? trialLaw()
+    : publication?.publicationVersion === ADAPTIVE_PROCEDURE_PUBLICATION_VERSION_V2
+      ? trialLawV2()
+      : null;
   if (exactKeys(publication, PUBLICATION_KEYS)) return 'procedure publication shape malformed';
-  if (publication.publicationVersion !== ADAPTIVE_PROCEDURE_PUBLICATION_VERSION
+  if (expectedTrialLaw === null
       || adaptiveProcedureError(publication.procedure)
       || adaptiveStateError(publication.initialState, publication.procedure)
       || !same(publication.initialState, initialAdaptiveState(publication.procedure, { initializedTs: publication.procedure.createdTs }))
@@ -263,7 +316,7 @@ export function adaptiveProcedurePublicationError(publication, { currentConsumer
       || publication.procedure.parent.featureRecipeDigest !== publication.consumerContract.featureRecipeDigest
       || publication.procedure.algorithm.maxAbsRankOffsetRrPoints > publication.consumerContract.stateEffect.maximum
       || scopeError(publication.scope) || applicabilityError(publication.applicability)
-      || exactKeys(publication.trialLaw, TRIAL_LAW_KEYS) || !same(publication.trialLaw, trialLaw())
+      || exactKeys(publication.trialLaw, TRIAL_LAW_KEYS) || !same(publication.trialLaw, expectedTrialLaw)
       || !isTs(publication.sealedTs) || publication.sealedTs < publication.procedure.createdTs
       || publication.authority !== 'NONE'
       || publication.purpose !== 'EXACT_EVOLVING_PROCEDURE_REQUIRING_PROSPECTIVE_PROMOTION'
@@ -332,7 +385,8 @@ export function sealAdaptiveRankingTrialDecision({
   predictionAck, preparedFacts, context, rankCandidates, baselineArm,
   candidateArm, recordedTs, validatePreparedFacts, adaptiveStore,
 } = {}) {
-  if (adaptiveProcedurePublicationError(publication)) throw new TypeError('publication invalid');
+  if (publication?.publicationVersion !== ADAPTIVE_PROCEDURE_PUBLICATION_VERSION
+      || adaptiveProcedurePublicationError(publication)) throw new TypeError('V1 publication invalid');
   if (!boundedId(candidateId) || opportunityId !== prediction?.opportunityId
       || adaptiveStateError(adaptiveState, publication.procedure)
       || adaptivePredictionError(prediction, publication.procedure, adaptiveState)) {
@@ -427,7 +481,8 @@ export function adaptiveRankingTrialDecisionError(receipt, {
   publication, validatePreparedFacts, adaptiveStore, requireCurrentState = true,
 } = {}) {
   if (exactKeys(receipt, TRIAL_CAPTURE_KEYS)) return 'trial decision shape malformed';
-  if (adaptiveProcedurePublicationError(publication)
+  if (publication?.publicationVersion !== ADAPTIVE_PROCEDURE_PUBLICATION_VERSION
+      || adaptiveProcedurePublicationError(publication)
       || receipt.decisionVersion !== ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION
       || receipt.publicationId !== publication.publicationId
       || receipt.procedureId !== publication.procedure.procedureId
@@ -491,6 +546,199 @@ export function adaptiveRankingTrialDecisionError(receipt, {
     const stored = adaptiveStore.prediction({ opportunityId: receipt.opportunityId, horizonMs: receipt.prediction.horizonMs });
     if (!stored || !same(stored, receipt.prediction)
         || (requireCurrentState && !same(adaptiveStore.state(), receipt.adaptiveState))) return 'trial state/prediction not ACK-backed content';
+  } catch { return 'ACK-backed adaptive reader unavailable'; }
+  return null;
+}
+
+function rankEligibleSubset(procedure, state, rows, adaptive) {
+  const byState = new Map(state.strategies.map((row) => [row.strategyId, row]));
+  const ranked = rows.flatMap((row, index) => {
+    if (row.eligibility !== 'ELIGIBLE') return [];
+    const offset = adaptive ? byState.get(row.strategyId)?.rankOffsetRrPoints : 0;
+    return [{ strategyId: row.strategyId, value: row.baselineRewardRiskRatio + offset, index }];
+  });
+  ranked.sort((a, b) => b.value - a.value || a.index - b.index);
+  return ranked[0]?.strategyId ?? null;
+}
+
+function canonicalSubsetRanks(publication, prediction, rankCandidates) {
+  if (!Array.isArray(rankCandidates) || rankCandidates.length !== publication.procedure.strategies.length) {
+    throw new TypeError('every registered strategy requires one canonical eligibility row');
+  }
+  return rankCandidates.map((row, index) => {
+    const assessment = prediction.strategyAssessments[index];
+    if (exactKeys(row, RANK_V2_KEYS)
+        || row.strategyId !== publication.procedure.strategies[index]
+        || row.strategyId !== assessment?.strategyId
+        || !['ELIGIBLE', 'INELIGIBLE', 'UNAVAILABLE'].includes(row.eligibility)
+        || row.eligibility !== assessment?.eligibility
+        || row.reasonCode !== assessment?.reasonCode) {
+      throw new TypeError(`rank candidate ${index} eligibility differs from the saved forecast`);
+    }
+    if (row.eligibility === 'ELIGIBLE') {
+      if (row.reasonCode !== null || !isFiniteNum(row.baselineRewardRiskRatio)
+          || row.baselineRewardRiskRatio < -100 || row.baselineRewardRiskRatio > 100) {
+        throw new TypeError(`rank candidate ${index} eligible score malformed`);
+      }
+    } else if (!boundedId(row.reasonCode) || row.baselineRewardRiskRatio !== null) {
+      throw new TypeError(`rank candidate ${index} unavailable/ineligible values malformed`);
+    }
+    return clone(row);
+  });
+}
+
+function subsetDecisionArmError(arm, selectedStrategyId, publication, decisionTs, context) {
+  if (selectedStrategyId === null) {
+    return exactKeys(arm, ARM_KEYS) || arm.selectedStrategyId !== null || arm.executionCapture !== null
+      ? 'abstain decision arm must contain no execution capture'
+      : null;
+  }
+  return armCaptureError(arm, selectedStrategyId, publication, decisionTs, context);
+}
+
+function subsetLabelEnd(prediction, ...arms) {
+  return Math.max(prediction.targetEndTs, ...arms.flatMap((arm) => (
+    arm.executionCapture === null ? [] : [
+      arm.executionCapture.decisionTs + arm.executionCapture.recipeSeal.recipe.horizonMin * 60_000,
+    ]
+  )));
+}
+
+export function sealAdaptiveRankingTrialDecisionV2({
+  publication, candidateId, opportunityId, adaptiveState, prediction,
+  predictionAck, preparedFacts, context, rankCandidates, baselineArm,
+  candidateArm, recordedTs, validatePreparedFacts, adaptiveStore,
+} = {}) {
+  if (publication?.publicationVersion !== ADAPTIVE_PROCEDURE_PUBLICATION_VERSION_V2
+      || adaptiveProcedurePublicationError(publication)) throw new TypeError('V2 publication invalid');
+  if (!boundedId(candidateId) || opportunityId !== prediction?.opportunityId
+      || adaptiveStateError(adaptiveState, publication.procedure)
+      || adaptivePredictionError(prediction, publication.procedure, adaptiveState)) {
+    throw new TypeError('trial identity, state, or prediction invalid');
+  }
+  if (!adaptiveStore || typeof adaptiveStore.prediction !== 'function'
+      || typeof adaptiveStore.state !== 'function') throw new TypeError('ACK-backed adaptive reader required');
+  let storedPrediction; let storedState;
+  try {
+    storedPrediction = adaptiveStore.prediction({ opportunityId, horizonMs: prediction.horizonMs });
+    storedState = adaptiveStore.state();
+  } catch { throw new TypeError('ACK-backed adaptive reader unavailable'); }
+  if (!storedPrediction || !same(storedPrediction, prediction) || !same(storedState, adaptiveState)) {
+    throw new TypeError('prediction or state is not the current ACK-backed content');
+  }
+  if (!isTs(recordedTs) || recordedTs < prediction.recordedTs
+      || recordedTs >= prediction.targetEndTs || recordedTs - prediction.decisionTs > MAX_ADAPTIVE_PROCEDURE_DECISION_AGE_MS) {
+    throw new TypeError('trial decision clock malformed or stale');
+  }
+  const ackError = predictionAckError(predictionAck, prediction, recordedTs);
+  if (ackError) throw new TypeError(ackError);
+  if (typeof validatePreparedFacts !== 'function'
+      || validatePreparedFacts(preparedFacts, publication.consumerContract.preparedFactsContract) !== null
+      || bytes(preparedFacts) > MAX_ADAPTIVE_DECISION_INPUT_BYTES
+      || preparedFacts.decisionTs !== prediction.decisionTs
+      || preparedFacts.factsDigest !== prediction.factsDigest
+      || preparedFacts.featureRecipeDigest !== publication.consumerContract.featureRecipeDigest) {
+    throw new TypeError('full prepared decision facts invalid or differ from prediction');
+  }
+  if (exactKeys(context, CONTEXT_KEYS) || context.asset !== prediction.identity.canonicalCoin
+      || preparedFacts.marketIdentity?.canonicalCoin !== context.asset
+      || !scopeAllows(publication.scope, context)
+      || evaluatePredicate(publication.applicability, preparedFacts) !== 'TRUE') {
+    throw new TypeError('trial context is outside publication scope/applicability');
+  }
+  const ranks = canonicalSubsetRanks(publication, prediction, rankCandidates);
+  const baselineSelectedStrategyId = rankEligibleSubset(publication.procedure, adaptiveState, ranks, false);
+  const candidateSelectedStrategyId = rankEligibleSubset(publication.procedure, adaptiveState, ranks, true);
+  if (prediction.selection.strategyId !== candidateSelectedStrategyId) {
+    throw new TypeError('saved adaptive selection differs from recomputed eligible-subset rank');
+  }
+  const baselineError = subsetDecisionArmError(baselineArm, baselineSelectedStrategyId, publication, prediction.decisionTs, context);
+  const candidateError = subsetDecisionArmError(candidateArm, candidateSelectedStrategyId, publication, prediction.decisionTs, context);
+  if (baselineError || candidateError) throw new TypeError(baselineError ?? candidateError);
+  if (baselineSelectedStrategyId === candidateSelectedStrategyId && !same(baselineArm, candidateArm)) {
+    throw new TypeError('unchanged selection requires the exact same decision arm');
+  }
+  const body = {
+    decisionVersion: ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION_V2,
+    publicationId: publication.publicationId, candidateId, opportunityId,
+    canonicalCoin: context.asset, decisionTs: prediction.decisionTs,
+    labelEndTs: subsetLabelEnd(prediction, baselineArm, candidateArm), recordedTs,
+    procedureId: publication.procedure.procedureId,
+    procedureDigest: publication.procedure.procedureDigest,
+    adaptiveState: clone(adaptiveState), prediction: clone(prediction),
+    predictionAck: clone(predictionAck), preparedFacts: clone(preparedFacts),
+    preparedFactsDigest: canonicalDigest(preparedFacts), context: clone(context),
+    rankCandidates: ranks, baselineSelectedStrategyId, candidateSelectedStrategyId,
+    baselineArm: clone(baselineArm), candidateArm: clone(candidateArm),
+    authority: 'NONE', purpose: 'PRE_LABEL_ELIGIBLE_SUBSET_EVOLVING_RANKING_TRIAL_DECISION',
+  };
+  const decisionDigest = canonicalDigest(body);
+  const out = { ...body, decisionId: `artriald2-${decisionDigest.slice(0, 40)}`, decisionDigest };
+  const error = adaptiveRankingTrialDecisionV2Error(out, {
+    publication, validatePreparedFacts, adaptiveStore,
+  });
+  if (error) throw new TypeError(error);
+  if (bytes(out) > MAX_ADAPTIVE_TRIAL_RECORD_BYTES) throw new TypeError('trial decision exceeds record byte limit');
+  return deepFreeze(out);
+}
+
+export function adaptiveRankingTrialDecisionV2Error(receipt, {
+  publication, validatePreparedFacts, adaptiveStore, requireCurrentState = true,
+} = {}) {
+  if (exactKeys(receipt, TRIAL_CAPTURE_KEYS)) return 'V2 trial decision shape malformed';
+  if (publication?.publicationVersion !== ADAPTIVE_PROCEDURE_PUBLICATION_VERSION_V2
+      || adaptiveProcedurePublicationError(publication)
+      || receipt.decisionVersion !== ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION_V2
+      || receipt.publicationId !== publication.publicationId
+      || receipt.procedureId !== publication.procedure.procedureId
+      || receipt.procedureDigest !== publication.procedure.procedureDigest
+      || !boundedId(receipt.candidateId) || receipt.opportunityId !== receipt.prediction?.opportunityId
+      || receipt.canonicalCoin !== receipt.context?.asset
+      || adaptiveStateError(receipt.adaptiveState, publication.procedure)
+      || adaptivePredictionError(receipt.prediction, publication.procedure, receipt.adaptiveState)
+      || receipt.decisionTs !== receipt.prediction.decisionTs
+      || !isTs(receipt.recordedTs) || !isTs(receipt.labelEndTs)
+      || receipt.recordedTs < receipt.prediction.recordedTs
+      || receipt.recordedTs >= receipt.labelEndTs
+      || receipt.recordedTs - receipt.decisionTs > MAX_ADAPTIVE_PROCEDURE_DECISION_AGE_MS) {
+    return 'V2 trial decision identity/state/clock malformed';
+  }
+  const ackError = predictionAckError(receipt.predictionAck, receipt.prediction, receipt.recordedTs);
+  if (ackError) return ackError;
+  if (typeof validatePreparedFacts !== 'function'
+      || validatePreparedFacts(receipt.preparedFacts, publication.consumerContract.preparedFactsContract) !== null
+      || bytes(receipt.preparedFacts) > MAX_ADAPTIVE_DECISION_INPUT_BYTES
+      || receipt.preparedFacts.decisionTs !== receipt.decisionTs
+      || receipt.preparedFacts.factsDigest !== receipt.prediction.factsDigest
+      || receipt.preparedFacts.featureRecipeDigest !== publication.consumerContract.featureRecipeDigest
+      || receipt.preparedFactsDigest !== canonicalDigest(receipt.preparedFacts)) return 'V2 trial prepared facts invalid or unbound';
+  if (exactKeys(receipt.context, CONTEXT_KEYS)
+      || receipt.preparedFacts.marketIdentity?.canonicalCoin !== receipt.context.asset
+      || !scopeAllows(publication.scope, receipt.context)
+      || evaluatePredicate(publication.applicability, receipt.preparedFacts) !== 'TRUE') return 'V2 trial context/applicability mismatch';
+  let ranks;
+  try { ranks = canonicalSubsetRanks(publication, receipt.prediction, receipt.rankCandidates); }
+  catch (error) { return error.message; }
+  const baseline = rankEligibleSubset(publication.procedure, receipt.adaptiveState, ranks, false);
+  const candidate = rankEligibleSubset(publication.procedure, receipt.adaptiveState, ranks, true);
+  if (receipt.baselineSelectedStrategyId !== baseline || receipt.candidateSelectedStrategyId !== candidate
+      || receipt.prediction.selection.strategyId !== candidate) return 'V2 trial selected strategy was not recomputed';
+  const baselineError = subsetDecisionArmError(receipt.baselineArm, baseline, publication, receipt.decisionTs, receipt.context);
+  const candidateError = subsetDecisionArmError(receipt.candidateArm, candidate, publication, receipt.decisionTs, receipt.context);
+  if (baselineError || candidateError) return baselineError ?? candidateError;
+  if (baseline === candidate && !same(receipt.baselineArm, receipt.candidateArm)) return 'same selection decision arm mismatch';
+  if (receipt.labelEndTs !== subsetLabelEnd(receipt.prediction, receipt.baselineArm, receipt.candidateArm)
+      || receipt.authority !== 'NONE'
+      || receipt.purpose !== 'PRE_LABEL_ELIGIBLE_SUBSET_EVOLVING_RANKING_TRIAL_DECISION'
+      || !HEX64.test(receipt.decisionDigest ?? '')
+      || digestWithout(receipt, ['decisionId', 'decisionDigest']) !== receipt.decisionDigest
+      || receipt.decisionId !== `artriald2-${receipt.decisionDigest.slice(0, 40)}`
+      || bytes(receipt) > MAX_ADAPTIVE_TRIAL_RECORD_BYTES) return 'V2 trial decision digest, horizon, authority, or bound malformed';
+  if (!adaptiveStore || typeof adaptiveStore.prediction !== 'function' || typeof adaptiveStore.state !== 'function') return 'ACK-backed adaptive reader absent';
+  try {
+    const stored = adaptiveStore.prediction({ opportunityId: receipt.opportunityId, horizonMs: receipt.prediction.horizonMs });
+    if (!stored || !same(stored, receipt.prediction)
+        || (requireCurrentState && !same(adaptiveStore.state(), receipt.adaptiveState))) return 'V2 trial state/prediction not ACK-backed content';
   } catch { return 'ACK-backed adaptive reader unavailable'; }
   return null;
 }
@@ -614,6 +862,99 @@ export function adaptiveRankingTrialExecutionError(receipt, {
   return null;
 }
 
+function abstainOutcome() {
+  return {
+    outcomeVersion: ADAPTIVE_RANKING_ABSTAIN_OUTCOME_VERSION,
+    label: 'ABSTAINED_NO_ELIGIBLE_STRATEGY', netPct: 0,
+    actualFillObserved: false, sizeEvidence: 'NONE', entry: null, exit: null,
+    reasonCode: 'NO_ELIGIBLE_STRATEGY',
+  };
+}
+
+export function sealAdaptiveRankingAbstainExecutionArm({ asOfTs } = {}) {
+  if (!isTs(asOfTs)) throw new TypeError('abstain evidence clock malformed');
+  return deepFreeze({
+    selectedStrategyId: null, sourceIdentity: null, path: null, depthPath: null,
+    asOfTs, outcome: abstainOutcome(),
+  });
+}
+
+function recomputeExecutionArmV2(arm, decisionArm) {
+  if (decisionArm.selectedStrategyId === null) {
+    if (exactKeys(arm, EXECUTION_ARM_KEYS) || arm.selectedStrategyId !== null
+        || arm.sourceIdentity !== null || arm.path !== null || arm.depthPath !== null
+        || !isTs(arm.asOfTs) || exactKeys(arm.outcome, ABSTAIN_OUTCOME_KEYS)
+        || !same(arm.outcome, abstainOutcome())) {
+      return { error: 'abstain execution must be exact zero with no fill, path, depth, or source evidence' };
+    }
+    return { error: null, outcome: arm.outcome };
+  }
+  return recomputeExecutionArm(arm, decisionArm);
+}
+
+export function sealAdaptiveRankingTrialExecutionV2({
+  publication, decisionReceipt, candidate, baseline, recordedTs,
+  validatePreparedFacts, adaptiveStore,
+} = {}) {
+  const decisionError = adaptiveRankingTrialDecisionV2Error(decisionReceipt, {
+    publication, validatePreparedFacts, adaptiveStore, requireCurrentState: false,
+  });
+  if (decisionError) throw new TypeError(decisionError);
+  const candidateResult = recomputeExecutionArmV2(candidate, decisionReceipt.candidateArm);
+  const baselineResult = recomputeExecutionArmV2(baseline, decisionReceipt.baselineArm);
+  if (candidateResult.error || baselineResult.error) throw new TypeError(candidateResult.error ?? baselineResult.error);
+  if (decisionReceipt.candidateSelectedStrategyId === decisionReceipt.baselineSelectedStrategyId
+      && !same(candidate, baseline)) throw new TypeError('unchanged selection requires identical execution evidence');
+  const outcomeKnownAtTs = Math.max(candidate.asOfTs, baseline.asOfTs);
+  if (!isTs(recordedTs) || recordedTs < outcomeKnownAtTs
+      || outcomeKnownAtTs < decisionReceipt.labelEndTs) throw new TypeError('trial execution clock precedes maturity');
+  const body = {
+    executionVersion: ADAPTIVE_PROCEDURE_TRIAL_EXECUTION_VERSION_V2,
+    publicationId: publication.publicationId, candidateId: decisionReceipt.candidateId,
+    opportunityId: decisionReceipt.opportunityId, decisionId: decisionReceipt.decisionId,
+    candidate: clone(candidate), baseline: clone(baseline), outcomeKnownAtTs,
+    recordedTs, authority: 'NONE', purpose: 'POST_LABEL_ELIGIBLE_SUBSET_PAIRED_HYPOTHETICAL_EXECUTION',
+  };
+  const executionDigest = canonicalDigest(body);
+  const out = { ...body, executionId: `artriale2-${executionDigest.slice(0, 40)}`, executionDigest };
+  const error = adaptiveRankingTrialExecutionV2Error(out, {
+    publication, decisionReceipt, validatePreparedFacts, adaptiveStore,
+  });
+  if (error) throw new TypeError(error);
+  if (bytes(out) > MAX_ADAPTIVE_TRIAL_RECORD_BYTES) throw new TypeError('trial execution exceeds record byte limit');
+  return deepFreeze(out);
+}
+
+export function adaptiveRankingTrialExecutionV2Error(receipt, {
+  publication, decisionReceipt, validatePreparedFacts, adaptiveStore,
+} = {}) {
+  if (exactKeys(receipt, TRIAL_EXECUTION_KEYS)) return 'V2 trial execution shape malformed';
+  const decisionError = adaptiveRankingTrialDecisionV2Error(decisionReceipt, {
+    publication, validatePreparedFacts, adaptiveStore, requireCurrentState: false,
+  });
+  if (decisionError) return `V2 trial execution decision invalid (${decisionError})`;
+  if (receipt.executionVersion !== ADAPTIVE_PROCEDURE_TRIAL_EXECUTION_VERSION_V2
+      || receipt.publicationId !== publication.publicationId
+      || receipt.candidateId !== decisionReceipt.candidateId
+      || receipt.opportunityId !== decisionReceipt.opportunityId
+      || receipt.decisionId !== decisionReceipt.decisionId) return 'V2 trial execution identity mismatch';
+  const candidate = recomputeExecutionArmV2(receipt.candidate, decisionReceipt.candidateArm);
+  const baseline = recomputeExecutionArmV2(receipt.baseline, decisionReceipt.baselineArm);
+  if (candidate.error || baseline.error) return candidate.error ?? baseline.error;
+  if (decisionReceipt.candidateSelectedStrategyId === decisionReceipt.baselineSelectedStrategyId
+      && !same(receipt.candidate, receipt.baseline)) return 'unchanged selection execution differs';
+  const knownAt = Math.max(receipt.candidate.asOfTs, receipt.baseline.asOfTs);
+  if (receipt.outcomeKnownAtTs !== knownAt || receipt.outcomeKnownAtTs < decisionReceipt.labelEndTs
+      || !isTs(receipt.recordedTs) || receipt.recordedTs < knownAt
+      || receipt.authority !== 'NONE'
+      || receipt.purpose !== 'POST_LABEL_ELIGIBLE_SUBSET_PAIRED_HYPOTHETICAL_EXECUTION'
+      || !HEX64.test(receipt.executionDigest ?? '')
+      || digestWithout(receipt, ['executionId', 'executionDigest']) !== receipt.executionDigest
+      || receipt.executionId !== `artriale2-${receipt.executionDigest.slice(0, 40)}`
+      || bytes(receipt) > MAX_ADAPTIVE_TRIAL_RECORD_BYTES) return 'V2 trial execution clock, digest, authority, or bound malformed';
+  return null;
+}
+
 export function adaptiveRankingTrialRecordValidator({
   publications, validatePreparedFacts, adaptiveStore,
 } = {}) {
@@ -641,17 +982,23 @@ export function adaptiveRankingTrialRecordValidator({
         return { error: 'typed design/publication binding mismatch', projection: null };
       }
       if (stage === 'CAPTURE') {
-        const error = adaptiveRankingTrialDecisionError(record.decisionReceipt, {
-          publication, validatePreparedFacts, adaptiveStore, requireCurrentState: false,
-        });
+        const v2 = record.decisionReceipt?.decisionVersion === ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION_V2;
+        const error = v2
+          ? adaptiveRankingTrialDecisionV2Error(record.decisionReceipt, {
+            publication, validatePreparedFacts, adaptiveStore, requireCurrentState: false,
+          })
+          : adaptiveRankingTrialDecisionError(record.decisionReceipt, {
+            publication, validatePreparedFacts, adaptiveStore, requireCurrentState: false,
+          });
         if (error || record.candidateId !== design.candidateId
             || record.opportunityId !== record.decisionReceipt?.opportunityId
             || record.decisionReceipt?.candidateId !== design.candidateId) return { error: error ?? 'typed capture wrapper mismatch', projection: null };
         const d = record.decisionReceipt;
         return { error: null, projection: {
           canonicalCoin: d.canonicalCoin, decisionTs: d.decisionTs, recordedTs: d.recordedTs,
-          labelEndTs: d.labelEndTs, candidateDecision: 'SELECTED_FOR_SHADOW',
-          baselineDecision: 'SELECTED_FOR_SHADOW',
+          labelEndTs: d.labelEndTs,
+          candidateDecision: d.candidateSelectedStrategyId === null ? 'SKIPPED' : 'SELECTED_FOR_SHADOW',
+          baselineDecision: d.baselineSelectedStrategyId === null ? 'SKIPPED' : 'SELECTED_FOR_SHADOW',
         } };
       }
       if (stage === 'OUTCOME') {
@@ -659,9 +1006,14 @@ export function adaptiveRankingTrialRecordValidator({
             || record.opportunityId !== capture.opportunityId
             || record.publicationId !== capture.publicationId) return { error: 'typed outcome wrapper mismatch', projection: null };
         const decisionReceipt = capture.decisionReceipt;
-        const error = adaptiveRankingTrialExecutionError(record.executionReceipt, {
-          publication, decisionReceipt, validatePreparedFacts, adaptiveStore,
-        });
+        const v2 = decisionReceipt?.decisionVersion === ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION_V2;
+        const error = v2
+          ? adaptiveRankingTrialExecutionV2Error(record.executionReceipt, {
+            publication, decisionReceipt, validatePreparedFacts, adaptiveStore,
+          })
+          : adaptiveRankingTrialExecutionError(record.executionReceipt, {
+            publication, decisionReceipt, validatePreparedFacts, adaptiveStore,
+          });
         if (error) return { error, projection: null };
         const e = record.executionReceipt;
         return { error: null, projection: {
@@ -967,8 +1319,8 @@ export function resolveQualifiedAdaptiveProcedureRanking({
   catch { return baseline('PREPARED_FACTS_INVALID'); }
   if (factsError !== null || preparedFacts.featureRecipeDigest !== consumerContract.featureRecipeDigest) return baseline('PREPARED_FACTS_INVALID');
   if (!isTs(preparedFacts.decisionTs)
-      || preparedFacts.decisionTs > snapshot.preparedTs
-      || snapshot.preparedTs - preparedFacts.decisionTs > MAX_ADAPTIVE_PROCEDURE_DECISION_AGE_MS
+      || preparedFacts.decisionTs > nowTs
+      || nowTs - preparedFacts.decisionTs > MAX_ADAPTIVE_PROCEDURE_DECISION_AGE_MS
       || section.currentState.updatedTs > preparedFacts.decisionTs
       || section.stateSource.durableAcknowledgment.acknowledgedTs > preparedFacts.decisionTs) {
     return baseline('PREPARED_FACTS_CLOCK_OR_STATE_ASOF_MISMATCH');
