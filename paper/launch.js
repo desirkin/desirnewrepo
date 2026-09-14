@@ -1,11 +1,13 @@
 // SERPENT PAPER — the ONE launch entry (`npm run paper` / `node bin/cobra.js paper run`): apply the paper profile to the
 // process environment (forced authority names ALWAYS win: JUDGE_MODE=PAPER, JUDGE_ALLOW_PRIVATE/ORDERS=false), start the
 // dark research capture runner (segments; authority NONE) a few seconds after the core composition begins, then hand the
-// process to fly.js — the existing, proven composition order (persistence bootstrap -> cockpit -> memory mirror -> RUMINT ->
-// gateway -> wide eye -> governance -> market research owner + Socrates case runtime -> Judge PAPER (+ Watch, paper
-// execution) -> RUMOR2 official + social ears + strainer -> Tape feed loop). fly.js resolves on SIGINT / SIGTERM after the
-// Tape's clean shutdown, stops the Judge and the research service, calls the paper shutdown seam (this runner), then exits.
-// Nothing here constructs an order path: the paper profile cannot become LIVE.
+// process to fly.js — the existing, proven composition order (runtime spine: single-instance lock -> persistence
+// bootstrap -> external-quota restore -> cockpit -> memory mirror -> RUMINT -> gateway -> wide eye -> governance ->
+// collector additions (market catalogs + broad Kraken + public discovery) -> market research owner + Socrates case
+// runtime -> Judge PAPER (+ Watch, paper execution) -> RUMOR2 official + social ears + strainer -> Tape feed loop).
+// fly.js resolves on SIGINT / SIGTERM after the Tape's clean shutdown, stops the Judge and the research service, calls
+// the paper shutdown seam (this runner), stops the runtime spine last (additions reverse, checkpoints, persistence,
+// lock release), then exits. Nothing here constructs an order path: the paper profile cannot become LIVE.
 import path from 'node:path';
 import { dataDir as dataDirOf, loadConfig } from '../lib/config.js';
 import { marketResearchRootFromEnv, darkResearchRootOf } from '../market-lab/paths.js';
@@ -13,7 +15,7 @@ import { loadProfile, applyProfileEnvironment, profileFileOf, PROFILE_ENV, autho
 
 export const LAUNCH_VERSION = 'serpent-paper-launch-1';
 export const DARK_CAPTURE_START_DELAY_MS = 5_000;
-export const COMPOSITION_ORDER = Object.freeze(['persistence bootstrap (restrictive first)', 'cockpit status server', 'memory mirror', 'RUMINT legacy ear', 'gateway (exchange infrastructure)', 'wide eye / universe', 'governance (dark; off)', 'market research owner + Socrates case runtime', 'Judge PAPER (+ Watch + paper execution)', 'RUMOR2 official + social ears + research strainer', 'dark research capture (segments; authority NONE)', 'Tape feed loop (execution feed + research observer seams)']);
+export const COMPOSITION_ORDER = Object.freeze(['runtime spine: single-instance lock -> persistence bootstrap (restrictive first) -> external-quota restore', 'cockpit status server', 'memory mirror', 'RUMINT legacy ear', 'gateway (exchange infrastructure)', 'wide eye / universe', 'governance (dark; off)', 'collector additions (market catalogs + broad Kraken + public discovery)', 'market research owner + Socrates case runtime', 'Judge PAPER (+ Watch + paper execution)', 'RUMOR2 official + social ears + research strainer', 'dark research capture (segments; authority NONE)', 'Tape feed loop (execution feed + research observer seams)']);
 
 export function prepareLaunch({ profileFile = process.env[PROFILE_ENV] ?? 'config/paper-runtime.json', env = process.env, log = console.log } = {}) {
   const profile = loadProfile(profileFile); const applied = applyProfileEnvironment(profile, env);

@@ -66,6 +66,30 @@ watch/watch.js   be41c4bed1ce80fa185f3b1dca6151447200a4a1b33dd785a9ea65234251578
 all (48 files)   345b28be7c89c3c18e166e125f8ef6076ed4d005e402e517749bbb63d92f493a
 ```
 
+### 4.7 Audited change — 2026-09-14 runtime unification step 3: fly.js onto the spine (frozen digests UNCHANGED)
+
+Scope: the composition root only. `judge/`, `execution/` and `watch/watch.js` are byte-identical — the digests above did
+not move — and `judge/composition.js` is untouched. fly.js is the root, not a frozen tree.
+
+- `fly.js` derives `SERPENT_MODE` fail-closed (DATA_ONLY iff the data-only launcher pinned `SERPENT_DATA_ONLY`; PAPER iff
+  `COBRA_PROFILE` is present AND every forced authority name holds — `JUDGE_MODE=PAPER`, `JUDGE_ALLOW_PRIVATE=false`,
+  `JUDGE_ALLOW_ORDERS=false`; anything else exits 1 before composing anything: `test/serpent-mode-law.test.js`).
+  DATA_ONLY delegates to the step-2 spine. PAPER runs today's sequence on the spine: the single-instance runtime lock is
+  taken FIRST (a second instance on the same data dir refuses in either mode), then `startPersistence` (signals now owned
+  by the runtime, `registerSignals: false`), the external-quota restore, and — new to the ship — the collector additions
+  (market catalogs, broad Kraken capture, public discovery; `lib/collectors.js startPaperCollectorAdditions`, authority
+  NONE, own transports and durable quotas). The Tape remains the signal owner; the spine's ordered stop (additions in
+  reverse, checkpoints closed, persistence stopped, lock released) runs after the tape drains and after the Judge, the
+  research service and the paper seam have stopped — so the DB is alive for every drain that needs it.
+- What did NOT change: the Judge composition call and everything passed to it, `entryPermission()` and its call sites,
+  the paper profile's forced names, the RUMOR-2 wiring (strainer, catalog source, Childhood bridge — byte-identical in
+  fly.js), press/infra/video/gateway/wide-eye/governance/rumint starts, the learning opt-in, the cockpit order
+  (PERSIST-0A §2 holds: the runtime establishes the persistence bootstrap before `ui/server.js` listens).
+
+Proof: `test/serpent-paper-spine.test.js` PR-1..3 (injected starters: restore order, exact addition set and options, no
+spine signals in PAPER, reverse stop, one-lock law both modes, fail-closed restore), `test/serpent-mode-law.test.js`
+MODE-1..3 (spawned refusals before any write), and the untouched P-0x / fence suites; full suite green at this commit.
+
 ### 4.6 Audited change — 2026-09-14 lean trim step 1: one bankroll, one daily-lock law (previous digests: judge `b0f322af5648…`, execution `9e03f82702ce…`, all `5a36c0ebc96f…`, 47 files; watch/watch.js unchanged)
 
 Scope: two files. No decision, sizing, permission, exit or risk law changed; the Judge's admission path is untouched.

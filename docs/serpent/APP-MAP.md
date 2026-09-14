@@ -4,14 +4,18 @@ Read from the actual code, branch `serpent/baseline` @ `7abf365`, 2026-09-14. Sh
 
 ---
 
-## 1. Two apps in one repo
+## 1. One root, two modes (runtime unification step 3, 2026-09-14)
 
-There are two programs, and they don't run together.
+`fly.js` is the one composition root, mode-switched by a DERIVED `SERPENT_MODE` (never trusted from the environment
+alone): DATA_ONLY iff the data-only launcher pinned the safety posture, PAPER iff the paper launcher applied the
+profile and every forced authority name holds; a bare `node fly.js` refuses (exit 1). Both modes share the spine
+(`lib/serpent-runtime.js`): ONE single-instance lock per data dir — a second instance refuses in either mode — one
+status file, one persistence pump, one external-quota restore. PAPER = today's ship sequence PLUS the collector
+additions the split kept away from it (market catalogs, broad Kraken capture, public discovery).
 
-- **The ship** — `fly.js` (`cobra paper run`). Tape + cockpit + Judge + paper execution. This is what trades paper.
-- **The collector** — `tools/data-only-runtime.mjs` (`npm run data:only-ui`). This is what Replit is running. It forces Judge OFF and runs the broad sensors.
-
-Nothing connects them except files on disk. Running both on one data folder would collide (wide-eye status file, rumor2 checkpoints, research quota lock). Going live on paper means deciding how these two coexist. That decision is not made yet.
+The launchers still exist as entries: `cobra paper run` (applies the profile, imports fly.js) and
+`tools/data-only-runtime.mjs` (pins the safety env, calls the spine directly — it routes through fly.js at step 4,
+when the cockpit goes in-process for both modes and `.replit` flips to the unified root).
 
 ---
 

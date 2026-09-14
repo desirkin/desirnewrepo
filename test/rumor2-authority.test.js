@@ -22,7 +22,7 @@ import { classifyOfficialItem } from '../rumor2/truth.js';
 import { SOCIAL_PROVIDER_KINDS, normalizeSocialObservation } from '../rumor2/social.js';
 import { SOCIAL_PROVIDERS, SOCIAL_PROVIDER_IDS, socialProviderById } from '../rumor2/social-registry.js';
 import { socialObservationToEvent, validateSocialEvent, SOCIAL_EVENT_TYPE } from '../rumor2/social-settle.js';
-import { DATA_ONLY_COMPOSITION_ROOT, RUNTIME_SPINE_MODULES, RUNTIME_SPINE_IMPORTER, OPERATOR_SETUP_SMOKE_TOOLS, RUMOR2_LIVE_WIRING_POINTS, RUMOR2_IMPORTING_WIRING_POINTS, TRADING_TIER_IMPORT_RE } from './helpers/composition-roots.js';
+import { DATA_ONLY_COMPOSITION_ROOT, RUNTIME_SPINE_MODULES, RUNTIME_SPINE_IMPORTERS, OPERATOR_SETUP_SMOKE_TOOLS, RUMOR2_LIVE_WIRING_POINTS, RUMOR2_IMPORTING_WIRING_POINTS, TRADING_TIER_IMPORT_RE } from './helpers/composition-roots.js';
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
@@ -97,8 +97,8 @@ test('DATA-ONLY / SMOKE roots. the data-only composition root and the operator s
     assert.ok(!/from\s+'pg'/.test(code(f)), `${f} never touches the pg driver directly`);
     const base = f.slice(f.lastIndexOf('/') + 1);
     const importers = tracked.filter((x) => x !== f && !x.startsWith('test/') && new RegExp(`from\\s+'[^']*${base.replace('.', '\\.')}'|import\\('[^']*${base.replace('.', '\\.')}'\\)`).test(code(x)));
-    const owner = RUNTIME_SPINE_IMPORTER[f] ?? null;
-    assert.deepEqual(importers, owner ? [owner] : [], owner ? `${f} is imported ONLY by ${owner}` : `${f} is a leaf entry point, imported by no tracked module`);
+    const owners = RUNTIME_SPINE_IMPORTERS[f] ?? null;
+    assert.deepEqual(importers.sort(), owners ? [...owners].sort() : [], owners ? `${f} is imported ONLY by ${owners.join(' + ')}` : `${f} is a leaf entry point, imported by no tracked module`);
   }
   assert.match(read('package.json'), /"data:only":\s*"node tools\/data-only-runtime\.mjs"/, 'the data-only root is the declared npm entry');
 });
