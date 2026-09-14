@@ -339,8 +339,13 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     // the ONE allowlisted learned effect: a bounded nudge to the RANK KEY of an already fully qualified candidate.
     // It can only reorder this admission batch; it cannot admit, size, or bypass anything, and the committed
     // valuationRef/sizing keep the untouched baseline ratio.
-    const rankRatio = adaptiveRank?.applied
-      ? adaptiveRank.effectiveRewardRiskRatio
+    // The adaptive and legacy selectors carry different units and different
+    // qualification contracts. Configuring the typed adaptive hook selects
+    // that rank channel for the entire batch: an individual adaptive baseline
+    // result remains the executable baseline, never an invitation to add the
+    // legacy RANK_SCORE_UNITS effect for another candidate in the same batch.
+    const rankRatio = adaptiveHookConfigured
+      ? (adaptiveRank?.applied ? adaptiveRank.effectiveRewardRiskRatio : e.rewardRiskRatio)
       : learned?.applied && e.rewardRiskRatio !== null && Number.isFinite(Number(e.rewardRiskRatio))
         ? Number(e.rewardRiskRatio) + learned.adjust : e.rewardRiskRatio;
     const rank = { rewardRiskRatio: rankRatio, costBps: e.costBps ?? null, firstKnownTs: c.nominationKnownAtTs, assetId: c.assetId };

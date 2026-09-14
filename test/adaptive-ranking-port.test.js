@@ -291,6 +291,16 @@ test('throwing, asynchronous, malformed and out-of-envelope resolver outputs fai
   assert.equal(accessorResolver.resolve(fixture()).reason, 'RESOLVER_RESULT_INVALID');
   assert.equal(getterCalls, 0, 'resolver result accessors are refused before property access');
 
+  let publicValidatorGetterCalls = 0;
+  const maliciousPublicResult = {};
+  Object.defineProperty(maliciousPublicResult, 'applied', {
+    enumerable: true, get: () => { publicValidatorGetterCalls += 1; return true; },
+  });
+  assert.equal(adaptiveRankingPortResultError(maliciousPublicResult),
+    'INPUT_ACCESSOR_OR_HIDDEN_PROPERTY_REFUSED');
+  assert.equal(publicValidatorGetterCalls, 0,
+    'the exported result validator is safe for an injected untrusted port result');
+
   const outside = createAdaptiveRankingPort({ resolveQualifiedRanking: (args) => ({
     ...resolveQualifiedAdaptiveProcedureRanking(args), adjustmentRrPoints: 0.2,
     effectiveRewardRiskRatio: Number((Number(args.baselineRewardRiskRatio) + 0.2).toFixed(9)),
