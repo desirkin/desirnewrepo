@@ -130,6 +130,14 @@ test('source sidecar cannot re-label bar/flow market identity when the book is a
   assert.notEqual(adaptiveJudgeFactsEnvelopeError(envelope), null);
 });
 
+test('JSON escaping cannot amplify a source past the byte ceiling before preflight refusal', () => {
+  const input = validInput();
+  input.historicalBars[0].source = '\u0000'.repeat(Math.floor(MAX_ADAPTIVE_FACTS_SOURCE_BYTES / 6) + 1);
+  assert.equal(adaptiveJudgeFactsSourceError(input), 'SOURCE_BYTE_LIMIT_EXCEEDED');
+  const cyclic = validInput(); cyclic.historicalBars[0].coverage = cyclic;
+  assert.equal(adaptiveJudgeFactsSourceError(cyclic), 'SOURCE_CYCLE_REFUSED');
+});
+
 test('real-shaped accepted inputs produce immutable V3 facts and an explicit non-authenticating source sidecar', () => {
   const input = validInput();
   const envelope = prepareAdaptiveJudgeFacts(input);

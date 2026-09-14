@@ -83,6 +83,26 @@ const serializedBytes = (value) => Buffer.byteLength(JSON.stringify(value), 'utf
 const sameNumber = (a, b) => Number.isFinite(Number(a)) && Number.isFinite(Number(b))
   && Math.abs(Number(a) - Number(b)) <= 1e-9 * Math.max(1, Math.abs(Number(a)), Math.abs(Number(b)));
 
+// Count JSON string escaping before allocating its encoded representation.
+function jsonStringBytes(value, limit) {
+  if (value.length + 2 > limit) return limit + 1;
+  let bytes = 2;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code === 34 || code === 92 || [8, 9, 10, 12, 13].includes(code)) bytes += 2;
+    else if (code < 32) bytes += 6;
+    else if (code < 128) bytes += 1;
+    else if (code < 2048) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) { bytes += 4; i += 1; } else bytes += 6;
+    } else if (code >= 0xdc00 && code <= 0xdfff) bytes += 6;
+    else bytes += 3;
+    if (bytes > limit) return bytes;
+  }
+  return bytes;
+}
+
 function boundedStructureError(value) {
   const stack = [{ value, depth: 0 }];
   const seen = new WeakSet();
@@ -95,14 +115,16 @@ function boundedStructureError(value) {
     if (current.depth > MAX_ADAPTIVE_FACTS_SOURCE_DEPTH) return 'SOURCE_DEPTH_LIMIT_EXCEEDED';
     const item = current.value;
     if (typeof item === 'string') {
-      lowerBoundBytes += Buffer.byteLength(item, 'utf8');
+      lowerBoundBytes += jsonStringBytes(item, MAX_ADAPTIVE_FACTS_SOURCE_BYTES - lowerBoundBytes);
       if (lowerBoundBytes > MAX_ADAPTIVE_FACTS_SOURCE_BYTES) return 'SOURCE_BYTE_LIMIT_EXCEEDED';
       continue;
     }
     if (item === null || typeof item === 'boolean') { lowerBoundBytes += 5; continue; }
     if (typeof item === 'number') {
       if (!Number.isFinite(item)) return 'SOURCE_NON_JSON_VALUE';
-      lowerBoundBytes += 32; continue;
+      lowerBoundBytes += String(item).length;
+      if (lowerBoundBytes > MAX_ADAPTIVE_FACTS_SOURCE_BYTES) return 'SOURCE_BYTE_LIMIT_EXCEEDED';
+      continue;
     }
     if (typeof item !== 'object') return 'SOURCE_NON_JSON_VALUE';
     const array = Array.isArray(item);
@@ -113,13 +135,14 @@ function boundedStructureError(value) {
     const keys = Reflect.ownKeys(item);
     if (nodes + stack.length + keys.length > MAX_ADAPTIVE_FACTS_SOURCE_NODES) return 'SOURCE_NODE_LIMIT_EXCEEDED';
     if (array && (item.length > MAX_ADAPTIVE_FACTS_SOURCE_NODES || keys.length !== item.length + 1)) return 'SOURCE_ARRAY_NOT_DENSE';
+    lowerBoundBytes += 2 + Math.max(0, keys.length - (array ? 2 : 1));
     for (const key of keys) {
       if (array && key === 'length') continue;
       if (typeof key !== 'string') return 'SOURCE_NON_JSON_KEY';
       if (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= item.length)) return 'SOURCE_ARRAY_EXTRA_PROPERTY';
       const descriptor = Object.getOwnPropertyDescriptor(item, key);
       if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return 'SOURCE_UNSUPPORTED_DESCRIPTOR';
-      lowerBoundBytes += Buffer.byteLength(key, 'utf8');
+      if (!array) lowerBoundBytes += jsonStringBytes(key, MAX_ADAPTIVE_FACTS_SOURCE_BYTES - lowerBoundBytes) + 1;
       if (lowerBoundBytes > MAX_ADAPTIVE_FACTS_SOURCE_BYTES) return 'SOURCE_BYTE_LIMIT_EXCEEDED';
       stack.push({ value: descriptor.value, depth: current.depth + 1 });
     }
