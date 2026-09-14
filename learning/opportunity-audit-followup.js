@@ -652,15 +652,17 @@ export function createOpportunityAuditFollowup({
   if (!Number.isSafeInteger(sourceTimeoutMs) || sourceTimeoutMs < 1 || sourceTimeoutMs > 60_000) fail('CONFIG_INVALID', 'source timeout malformed');
   const workerCustody = typeof store.settle === 'function';
   let cursor = null; let inFlight = null; let closing = false; let closed = false; let closePromise = null;
+  let sourceActive = null;
   let steps = 0; let matured = 0; let terminalMissing = 0; let pending = 0; let refused = 0; let deferred = 0;
   let last = null; let failed = null;
 
   const run = async (nowTs) => {
     const page = await store.pending({ asOfTs: nowTs, limit: maxPerStep, cursor });
     if (!page || !Array.isArray(page.items) || typeof page.truncated !== 'boolean') fail('STORE_VIEW_INVALID', 'pending page malformed');
-    const report = { state: 'COMPLETE', considered: page.items.length, matured: 0, terminalMissing: 0, pending: 0, refused: 0, deferred: 0 };
+    const report = { state: 'COMPLETE', considered: 0, matured: 0, terminalMissing: 0, pending: 0, refused: 0, deferred: 0 };
     for (const original of page.items) {
       if (closing) { report.state = 'INTERRUPTED'; break; }
+      report.considered += 1;
       const item = deepFreeze(clone(original));
       let view = null; let annotation = null;
       if (!workerCustody) {
@@ -673,14 +675,24 @@ export function createOpportunityAuditFollowup({
         ? opportunityAuditPendingItemV2(view.frame, item) : item;
       let resolution;
       try {
-        resolution = await boundedSourceCall(outcomeSource, deepFreeze({
+        const request = deepFreeze({
           followupVersion: requestItem.itemVersion === OPPORTUNITY_AUDIT_PENDING_ITEM_VERSION_V2
             ? OPPORTUNITY_AUDIT_FOLLOWUP_VERSION_V2 : OPPORTUNITY_AUDIT_FOLLOWUP_VERSION,
           item: clone(requestItem), frame: view === null ? null : clone(view.frame),
           annotation: annotation === null ? null : clone(annotation), asOfTs: nowTs,
-        }), sourceTimeoutMs);
+        });
+        const call = Promise.resolve().then(() => outcomeSource(request));
+        sourceActive = call;
+        const settled = () => { if (sourceActive === call) sourceActive = null; };
+        call.then(settled, settled);
+        resolution = await boundedSourceCall(() => call, request, sourceTimeoutMs);
       } catch {
-        report.refused += 1; continue;
+        report.refused += 1;
+        // A timeout is not cancellation. Do not launch the next page item or
+        // next step until the original read really settles. Its late result
+        // has no settlement path and is never credited.
+        if (sourceActive !== null) { report.state = 'SOURCE_PENDING'; break; }
+        continue;
       }
       const recordedTs = clock();
       if (!isTs(recordedTs) || recordedTs < nowTs) fail('CLOCK_INVALID', 'settlement receipt clock predates its source request');
@@ -741,7 +753,7 @@ export function createOpportunityAuditFollowup({
       }
       if (built.state === 'MATURED') report.matured += 1; else report.terminalMissing += 1;
     }
-    cursor = page.nextCursor ?? null;
+    if (report.state === 'COMPLETE') cursor = page.nextCursor ?? null;
     steps += 1; matured += report.matured; terminalMissing += report.terminalMissing;
     pending += report.pending; refused += report.refused; deferred += report.deferred;
     last = deepFreeze({ ...report, asOfTs: nowTs });
@@ -752,7 +764,7 @@ export function createOpportunityAuditFollowup({
     if (closing || closed) return Promise.reject(new OpportunityAuditFollowupError('FOLLOWUP_CLOSED'));
     if (failed) return Promise.reject(new OpportunityAuditFollowupError(failed.code, failed.message));
     if (!isTs(nowTs) || nowTs > clock()) return Promise.reject(new OpportunityAuditFollowupError('CLOCK_INVALID'));
-    if (inFlight !== null) return Promise.resolve(deepFreeze({ state: 'BUSY', considered: 0, matured: 0, terminalMissing: 0, pending: 0, refused: 0, deferred: 1, asOfTs: nowTs }));
+    if (inFlight !== null || sourceActive !== null) return Promise.resolve(deepFreeze({ state: 'BUSY', considered: 0, matured: 0, terminalMissing: 0, pending: 0, refused: 0, deferred: 1, asOfTs: nowTs }));
     const task = run(nowTs).catch((error) => {
       if (TRANSIENT_CUSTODY_CODES.has(error?.code)) {
         deferred += 1;
@@ -769,8 +781,8 @@ export function createOpportunityAuditFollowup({
 
   const status = () => deepFreeze({
     followupVersion: OPPORTUNITY_AUDIT_FOLLOWUP_VERSION,
-    state: closed ? 'STOPPED' : closing ? 'CLOSING' : failed ? 'FAILED' : inFlight ? 'RUNNING' : 'READY',
-    inFlight: inFlight !== null, steps, matured, terminalMissing, pending, refused, deferred, last,
+    state: closed ? 'STOPPED' : closing ? 'CLOSING' : failed ? 'FAILED' : inFlight ? 'RUNNING' : sourceActive ? 'SOURCE_PENDING' : 'READY',
+    inFlight: inFlight !== null, sourceReadPending: sourceActive !== null, steps, matured, terminalMissing, pending, refused, deferred, last,
     failed: failed === null ? null : { code: failed.code, detail: String(failed.message).slice(0, 500) },
     maxPerStep, sourceTimeoutMs, authority: 'NONE', trainingAuthority: 'NONE',
     durability: 'INJECTED_STORE_ACK_AND_EXACT_READBACK', republishSafe: false,
