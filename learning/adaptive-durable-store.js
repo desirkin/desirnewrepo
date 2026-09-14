@@ -18,6 +18,7 @@ import {
   validateAdaptiveStoreSnapshot,
 } from './adaptive-store.js';
 import {
+  applyAdaptiveUpdate,
   adaptivePredictionKeyOf,
   adaptiveProcedureError,
 } from './adaptive-registry.js';
@@ -204,6 +205,108 @@ function pendingCountFromEvents(events) {
   return count;
 }
 
+// This projection is rebuilt only from the exact stream accepted by
+// validateLoadResponse, then advanced only after validateAppendAck succeeds.
+// The local store may be one event ahead while a port call is unresolved; no
+// value from that speculative local state is reachable through this view.
+function createAcknowledgedProjection({ events, acknowledgments, procedure }) {
+  let state = null;
+  const predictions = new Map();
+  const outcomes = new Map();
+  const settlements = new Map();
+  let eventCount = 0;
+
+  const apply = (event, acknowledgment) => {
+    if (!event || event.sequence !== eventCount || !acknowledgment
+        || acknowledgment.sequence !== event.sequence
+        || acknowledgment.eventDigest !== event.eventDigest) {
+      fail('ACKNOWLEDGED_VIEW_INVALID', 'event/acknowledgment sequence differs from the validated durable stream');
+    }
+    if (event.eventType === 'PROCEDURE_REGISTERED') {
+      if (eventCount !== 0) fail('ACKNOWLEDGED_VIEW_INVALID', 'procedure registration is not the origin event');
+      state = clone(event.body.state);
+    } else if (event.eventType === 'PREDICTION_RECORDED') {
+      predictions.set(adaptivePredictionKeyOf(event.body.prediction), clone(event.body.prediction));
+    } else {
+      const key = adaptivePredictionKeyOf(event.body.outcome);
+      outcomes.set(key, clone(event.body.outcome));
+      let nextStateDigest = null;
+      if (event.eventType === 'OUTCOME_UPDATED') {
+        const prediction = predictions.get(key);
+        const transition = applyAdaptiveUpdate({
+          procedure,
+          state,
+          prediction,
+          outcome: event.body.outcome,
+          scores: event.body.scores,
+          appliedTs: event.body.update.appliedTs,
+        });
+        if (transition.nextState.stateDigest !== event.body.nextStateDigest) {
+          fail('ACKNOWLEDGED_VIEW_INVALID', 'recomputed state differs from the validated durable event');
+        }
+        state = clone(transition.nextState);
+        nextStateDigest = event.body.nextStateDigest;
+      }
+      settlements.set(key, {
+        outcome: clone(event.body.outcome),
+        provenanceReceipt: clone(event.body.provenanceReceipt),
+        scores: event.eventType === 'OUTCOME_UPDATED' ? clone(event.body.scores) : null,
+        update: event.eventType === 'OUTCOME_UPDATED' ? clone(event.body.update) : null,
+        nextStateDigest,
+        eventSequence: event.sequence,
+        eventDigest: event.eventDigest,
+        durableAcknowledgment: clone(acknowledgment),
+      });
+    }
+    eventCount += 1;
+  };
+
+  for (let index = 0; index < events.length; index += 1) apply(events[index], acknowledgments[index]);
+  if (state === null) fail('ACKNOWLEDGED_VIEW_INVALID', 'validated durable stream has no procedure state');
+
+  const keyOf = ({ opportunityId, horizonMs } = {}) => adaptivePredictionKeyOf({
+    procedureId: procedure.procedureId,
+    opportunityId,
+    horizonMs,
+  });
+  return {
+    apply,
+    procedure: () => deepFreeze(clone(procedure)),
+    state: () => deepFreeze(clone(state)),
+    prediction: (query) => {
+      const row = predictions.get(keyOf(query));
+      return row ? deepFreeze(clone(row)) : null;
+    },
+    outcome: (query) => {
+      const row = outcomes.get(keyOf(query));
+      return row ? deepFreeze(clone(row)) : null;
+    },
+    settlement: (query, acknowledgedHead) => {
+      const row = settlements.get(keyOf(query));
+      if (!row) return null;
+      const { nextStateDigest: _internalNextStateDigest, durableAcknowledgment, ...publicRow } = clone(row);
+      return deepFreeze({
+        ...publicRow,
+        custody: {
+          storeVersion: ADAPTIVE_STORE_VERSION,
+          eventVersion: ADAPTIVE_JOURNAL_EVENT_VERSION,
+          streamVersion: ADAPTIVE_DURABLE_STREAM_VERSION,
+          durableAcknowledgment,
+          acknowledgedHead: clone(acknowledgedHead),
+          receiptContentBound: true,
+          declaredArchiveIdentityBound: true,
+          externalSourceAuthenticityVerified: false,
+          firstWriteCustodyVerified: false,
+          afterCostQualificationVerified: false,
+          externalImplementationVerified: false,
+          republishSafe: false,
+          authority: 'NONE',
+        },
+      });
+    },
+  };
+}
+
 export function openDurableAdaptiveStore(input = {}) {
   // All caller-controlled options are validated/copied before the first await.
   const options = normalizeOptions(input);
@@ -259,6 +362,12 @@ export function openDurableAdaptiveStore(input = {}) {
     let durableRevision = loaded.revision;
     let durableHead = clone(loaded.snapshot.acknowledgedHead);
     const acknowledgedEvents = loaded.snapshot.events.map((event) => clone(event));
+    const acknowledgedAcks = loaded.acknowledgments.map((ack) => clone(ack));
+    const acknowledgedView = createAcknowledgedProjection({
+      events: acknowledgedEvents,
+      acknowledgments: acknowledgedAcks,
+      procedure: options.procedure,
+    });
     let lastReceivedTs = openedTs;
     let failed = null; let closing = false; let closed = false; let localAhead = false;
     let tail = Promise.resolve(); let closePromise = null; let inFlight = 0; let queued = 0;
@@ -326,7 +435,17 @@ export function openDurableAdaptiveStore(input = {}) {
       let ack;
       try { ack = validateAppendAck(rawAck, { procedure: options.procedure, expectedRevision: durableRevision, event, nextHead, receivedTs }); }
       catch (error) { return latch(error); }
-      durableRevision = ack.revision; durableHead = clone(nextHead); acknowledgedEvents.push(clone(event));
+      const eventAcknowledgment = {
+        ackVersion: ack.ackVersion,
+        sequence: event.sequence,
+        eventDigest: ack.eventDigest,
+        headDigest: ack.headDigest,
+        acknowledgedTs: ack.acknowledgedTs,
+      };
+      try { acknowledgedView.apply(event, eventAcknowledgment); }
+      catch (error) { return latch(error); }
+      durableRevision = ack.revision; durableHead = clone(nextHead);
+      acknowledgedEvents.push(clone(event)); acknowledgedAcks.push(clone(eventAcknowledgment));
       lastReceivedTs = receivedTs; localAhead = false;
       if (event.eventType === 'PREDICTION_RECORDED') {
         const deadline = event.body.prediction.predictionTs + options.procedure.target.maxPredictionPersistenceDelayMs;
@@ -343,6 +462,26 @@ export function openDurableAdaptiveStore(input = {}) {
     });
 
     const api = {
+      procedure() {
+        assertOpen();
+        return acknowledgedView.procedure();
+      },
+      state() {
+        assertOpen();
+        return acknowledgedView.state();
+      },
+      prediction(query) {
+        assertOpen();
+        return acknowledgedView.prediction(query);
+      },
+      outcome(query) {
+        assertOpen();
+        return acknowledgedView.outcome(query);
+      },
+      settlement(query) {
+        assertOpen();
+        return acknowledgedView.settlement(query, durableHead);
+      },
       appendPrediction(prediction) {
         const copied = immutableJson(prediction, options.maxInputBytes, 'prediction');
         return appendAndAcknowledge(() => localStore.appendPrediction(copied));
