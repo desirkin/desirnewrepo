@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runCli, USAGE, parseArgs } from '../bin/social-research.js';
+import { RUMOR2_LIVE_WIRING_POINTS, TRADING_COMPOSITION_ROOT } from './helpers/composition-roots.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
@@ -37,7 +38,10 @@ test('F2. no operational module imports the offline dataset / evaluator / CLI; f
   for (const f of operational) { for (const i of importsOf(f)) assert.ok(!/(^|\/)research\/|bin\/social-research\.js|social-research-export\.js/.test(i), `${f}: operational module imports the offline pipeline (${i})`); }
   for (const f of tracked.filter((x) => !x.startsWith('test/'))) if (f !== 'persistence/db.js') assert.ok(!/from\s+'pg'/.test(code(f)), `${f}: only persistence/db.js touches pg`);
   const roots = tracked.filter((f) => !f.startsWith('test/') && /startRumor2\(/.test(code(f)) && f !== 'rumor2/collector.js');
-  assert.deepEqual(roots, ['fly.js'], 'fly.js is the only live collector composition root');
+  // the collector may be started ONLY from the named live wiring points (test/helpers/composition-roots.js); fly.js remains
+  // the only one of them that composes trading — the data-only root and the operator smoke tools never import a trading tier
+  for (const f of roots) assert.ok(RUMOR2_LIVE_WIRING_POINTS.includes(f), `${f}: starts the collector outside the named live wiring points`);
+  assert.ok(roots.includes(TRADING_COMPOSITION_ROOT), 'fly.js is the trading composition root');
 });
 
 test('F3. purity: the pipeline reads no wall clock, no randomness, no network, no timers, no config universe and no ambient credential; the environment is read only through the named variable of `snapshot`; git is the only child process and only for identity', () => {

@@ -160,6 +160,29 @@ export function accessDate(v) {
 const DAY_MS = 86_400_000;
 export const utcDayStart = (ms) => ms - (((ms % DAY_MS) + DAY_MS) % DAY_MS);
 
+// The UTC calendar-day LABEL (YYYY-MM-DD) of an integer-millisecond instant, or
+// null. Pure civil-date arithmetic (proleptic Gregorian, days-from-epoch
+// inverse): no Date construction, no locale, no heuristic string parse. This is
+// the ONLY sanctioned ms -> day-label projection in the Social tier; provider
+// code never derives a day through `new Date(x).toISOString()`.
+export function utcDayLabel(ms) {
+  if (!Number.isSafeInteger(ms)) return null;
+  const days = Math.floor(ms / DAY_MS);
+  // Howard Hinnant's civil_from_days, shifted so the era starts on 0000-03-01.
+  const z = days + 719_468;
+  const era = Math.floor(z / 146_097);
+  const doe = z - era * 146_097;
+  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36_524) - Math.floor(doe / 146_096)) / 365);
+  const y0 = yoe + era * 400;
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+  const mp = Math.floor((5 * doy + 2) / 153);
+  const d = doy - Math.floor((153 * mp + 2) / 5) + 1;
+  const m = mp < 10 ? mp + 3 : mp - 9;
+  const y = m <= 2 ? y0 + 1 : y0;
+  if (y < 1 || y > 9999) return null;
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
 // =====================================================================================
 // SOCIAL-4D COMPLETION — the bounded TEMPORAL WITNESS and precision-aware comparison
 // =====================================================================================

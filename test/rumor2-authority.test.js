@@ -22,6 +22,7 @@ import { classifyOfficialItem } from '../rumor2/truth.js';
 import { SOCIAL_PROVIDER_KINDS, normalizeSocialObservation } from '../rumor2/social.js';
 import { SOCIAL_PROVIDERS, SOCIAL_PROVIDER_IDS, socialProviderById } from '../rumor2/social-registry.js';
 import { socialObservationToEvent, validateSocialEvent, SOCIAL_EVENT_TYPE } from '../rumor2/social-settle.js';
+import { DATA_ONLY_COMPOSITION_ROOT, OPERATOR_SETUP_SMOKE_TOOLS, RUMOR2_LIVE_WIRING_POINTS, TRADING_TIER_IMPORT_RE } from './helpers/composition-roots.js';
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
@@ -70,7 +71,36 @@ OFFLINE_RESEARCH_RUMOR2_IMPORTS['paper/inventory.js'] = { 'registry.js': ['PROVI
 // function of text — and NOTHING else: not the official transport, not the collector, not a provider, not the event root. The
 // official-primary registry and its claim / packet authority stay frozen; publisher headlines are observations with authority NONE.
 OFFLINE_RESEARCH_RUMOR2_IMPORTS['press/collector.js'] = { 'feed.js': ['parseFeed'] };
+// DATA-ONLY (2026-09-12/13, codex/data-only-runtime): the public-discovery tier reuses two PURE rumor-layer surfaces —
+// the HTTP contact normalizer (registry.js) and the social catalog / admission-scope validators — as functions of their
+// arguments only. No collector, no provider runtime, no strainer; discovery carries authority NONE (it is a sensor).
+OFFLINE_RESEARCH_RUMOR2_IMPORTS['discovery/collector.js'] = { 'registry.js': ['normalizeHttpContact'] };
+OFFLINE_RESEARCH_RUMOR2_IMPORTS['discovery/query.js'] = { 'social-catalog.js': ['validateCatalogContent', 'catalogBases', 'aliasFactsFor'], 'social-scope.js': ['compileAdmissionScope', 'admitSocialText'] };
+// the operator storage diagnostic reads frozen vocabularies / validators only (a read-only status surface, never a runtime)
+OFFLINE_RESEARCH_RUMOR2_IMPORTS['tools/social-storage-diagnose.mjs'] = { 'social-catalog.js': ['parseSocialResearchConfig', 'SOCIAL_X_WATCH_MAX_ASSETS'], 'social-farcaster-meter.js': ['FARCASTER_REQUEST_TYPE', 'farcasterRequestError'], 'social-settle.js': ['SOCIAL_OBSERVATION_TYPES', 'SOCIAL_CATALOG_VERIFIED_EVENT_TYPE', 'validateSocialCatalogVerifiedEvent'] };
 const OFFLINE_RESEARCH_RUMOR2_IMPORTERS = Object.keys(OFFLINE_RESEARCH_RUMOR2_IMPORTS);
+// DATA-ONLY COMPOSITION ROOT (2026-09-12, codex/data-only-runtime): the published Replit process is `npm run data:only-ui`
+// -> tools/data-only-runtime.mjs. It is the SECOND live composition root, declared here by name: it starts the collectors
+// (rumor2 via a dynamic import, discovery, infra, video, broad Kraken) and NOTHING that can trade — the assertions below
+// pin that it never imports the order path, Judge, execution, cost, tape, state, controls or Socrates. fly.js stays the only
+// root that composes trading; this is not a weakened fence, it is the data-only process named where the law is written.
+// OPERATOR SETUP SMOKE TOOLS (2026-09-12/13): stand-alone CLIs an operator runs ONCE to prove a source's credentials and
+// transport (Bluesky, Farcaster, the official feeds). Each starts a collector / social runtime for a bounded check and exits.
+// They are enumerated by name, must live under tools/, must be imported by NO tracked module, and carry the same
+// no-trading-tier import law as the data-only root. They are not composition roots of the running application.
+// The names live in ONE place: test/helpers/composition-roots.js (shared with the SOCIAL-5B fences).
+test('DATA-ONLY / SMOKE roots. the data-only composition root and the operator smoke tools are named, tracked, tools/-only, imported by nothing, and import no trading tier', () => {
+  for (const f of [DATA_ONLY_COMPOSITION_ROOT, ...OPERATOR_SETUP_SMOKE_TOOLS]) {
+    assert.ok(tracked.includes(f), `${f} is tracked`);
+    assert.ok(f.startsWith('tools/'), `${f} lives under tools/`);
+    assert.ok(!TRADING_TIER_IMPORT_RE.test(read(f)), `${f} imports no trading / control / model tier`);
+    assert.ok(!/from\s+'pg'/.test(code(f)), `${f} never touches the pg driver directly`);
+    const base = f.slice('tools/'.length);
+    const importers = tracked.filter((x) => x !== f && !x.startsWith('test/') && new RegExp(`from\\s+'[^']*${base.replace('.', '\\.')}'|import\\('[^']*${base.replace('.', '\\.')}'\\)`).test(code(x)));
+    assert.deepEqual(importers, [], `${f} is a leaf entry point, imported by no tracked module`);
+  }
+  assert.match(read('package.json'), /"data:only":\s*"node tools\/data-only-runtime\.mjs"/, 'the data-only root is the declared npm entry');
+});
 assert.ok(socialFiles.length >= 6, 'the social surface is actually scanned');
 assert.ok(frozenCoreFiles.length >= 8, 'the frozen non-social core is actually scanned');
 
@@ -118,11 +148,13 @@ test('R2A-76+77. STRIKE-capable and order-path modules never read RUMOR-2', () =
   assert.ok(orderPath.length > 5, 'the order-path scan actually covers modules');
   for (const f of orderPath) assert.ok(!read(f).toLowerCase().includes('rumor2'), `${f} cannot read RUMOR-2 fields`);
   // only the composition root wires the collector; only persistence stores it
-  const importers = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && /from\s+'[^']*rumor2/.test(read(f)));
+  // static AND dynamic imports: a `await import('../rumor2/...')` is a wiring point exactly like a static one (the data-only
+  // root reaches the collector that way); the fence must not be dodgeable by import form
+  const importers = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && /from\s+'[^']*rumor2|import\('[^']*rumor2/.test(code(f)));
   // SOCIAL-5B: the OFFLINE research readers are the only other importers — enumerated by file, each limited to the pure
   // validators / replay helpers / constants it names, never a collector, provider runtime, strainer or startup path.
   // fly.js stays the ONLY live collector composition root; this is a read-only exception, not a weakened fence.
-  assert.deepEqual(importers.sort(), ['fly.js', ...OFFLINE_RESEARCH_RUMOR2_IMPORTERS].sort(), 'exactly one LIVE wiring point (the composition root) plus the enumerated offline research readers');
+  assert.deepEqual(importers.sort(), [...RUMOR2_LIVE_WIRING_POINTS, ...OFFLINE_RESEARCH_RUMOR2_IMPORTERS].sort(), 'exactly the named LIVE wiring points (fly.js, the data-only root, the operator smoke tools) plus the enumerated offline research readers');
   for (const [f, allowed] of Object.entries(OFFLINE_RESEARCH_RUMOR2_IMPORTS)) {
     const specs = [...read(f).matchAll(/import\s+\{([^}]*)\}\s+from\s+'\.\.\/rumor2\/([a-z0-9-]+\.js)'/g)].map((m) => [m[2], m[1].split(',').map((x) => x.trim().split(/\s+as\s+/)[0]).filter(Boolean)]);
     assert.ok(specs.length > 0, `${f}: imports rumor2 through named specifiers only`);
@@ -233,7 +265,7 @@ test('R2A-SOCIAL-8 (SOCIAL-4F). the discovery-catalog / admission-scope / watch-
   assert.deepEqual(mentions.sort(), [...CATALOG_ALLOWLIST].sort(), `the research scope may only be wired in ${CATALOG_ALLOWLIST.join(', ')}`);
   // survey/catalog.js: imported by the wide eye and tests only; the rumor tier NEVER imports survey/, tape/, cost/, ledger/, state/, controls/
   const consumers = tracked.filter((f) => !f.startsWith('test/') && /from\s+'(\.\/|[^']*survey\/)catalog\.js'/.test(read(f)));
-  assert.deepEqual(consumers, ['market-lab/providers/kraken-spot.js', 'survey/wideeye.js']); // MARKET-LAB: the Kraken client reuses the survey's pure pair normalizer (D01 instrument mapping)
+  assert.deepEqual(consumers, ['market-lab/broad-kraken.js', 'market-lab/providers/kraken-spot.js', 'survey/wideeye.js']); // MARKET-LAB: the Kraken clients (deep + broad WideEye capture) reuse the survey's pure pair normalizer (D01 instrument mapping)
   for (const f of rumor2Files) assert.ok(!/from\s+'[^']*(survey|tape|cost|ledger|state|controls|governance|rumint)\//.test(read(f)), `${f} imports no survey/trading/control tier`);
   // the Social runtimes no longer derive their outer boundary from config.universe; the official claim registry is still built from it (a separate, retained scope)
   assert.ok(!/config\.universe/.test(code('rumor2/social-runtime.js')) && !/config\.universe/.test(code('rumor2/x-runtime.js')), 'Social runtimes never read config.universe');
@@ -277,7 +309,7 @@ test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT all
   const outside = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && /social-research|researchStrainer|RUMOR2_RESEARCH_DOSSIER/.test(read(f)));
   // SOCIAL-5B: the offline research family readers are enumerated by file; none enables, wires or starts the strainer
   assert.ok(outside.includes('fly.js'), 'the composition root enables the strainer');
-  for (const f of outside) assert.ok(f === 'fly.js' || OFFLINE_RESEARCH_FILES.includes(f), `${f}: only the composition root and the enumerated offline research readers may name the research family (no tape / ledger / cost / controls / ui reader)`);
+  for (const f of outside) assert.ok(RUMOR2_LIVE_WIRING_POINTS.includes(f) || OFFLINE_RESEARCH_FILES.includes(f), `${f}: only the named live wiring points and the enumerated offline research readers may name the research family (no tape / ledger / cost / controls / ui reader)`);
   for (const f of OFFLINE_RESEARCH_FILES) assert.ok(!/researchStrainer|createResearchStrainer|startRumor2|startPersistence|tickOnce/.test(code(f)), `${f}: an offline reader never enables or drives the strainer`);
   // SOCIAL-6: the source-behavior layer is derived (no new durable family), scores are forbidden by name, the ONLY historical-outcome seam is the
   // read-only Childhood bridge injected by fly.js (Social never imports memory/ or childhood/), and no claim-association is minted anywhere

@@ -23,7 +23,7 @@
 // X IS NOT THE WHOLE FIREHOSE (§6): X server-side rules are the FIRST cost/noise
 // boundary, Serpent's universe filter the SECOND, RUMOR analysis the THIRD.
 import { createHash } from 'node:crypto';
-import { temporalWitness, SOCIAL_TIME_POLICIES } from '../social-time.js';
+import { temporalWitness, parseSocialTime, utcDayLabel, SOCIAL_TIME_POLICIES } from '../social-time.js';
 
 // Local, dependency-free hashing: the provider layer imports nothing from the
 // rumor core (R2A-75). Same canonical form + sha1-hex as rumor2/truth.js.
@@ -220,13 +220,17 @@ export function xPostToRaw(line, { provider = 'X_OFFICIAL' } = {}) {
 
 // Parse the current official usage response (§12) into a CLOSED shape or null.
 //   { data: { project_usage, project_cap, cap_reset_day, daily_project_usage: [...] } }
+// The usage row `date` is either a bare UTC day (YYYY-MM-DD) or a UTC instant with
+// at most millisecond precision and an explicit `Z`. The shape gate is the same
+// closed regex as before; calendar validity and the day projection now come from
+// the Social time boundary (SOCIAL-4D: no heuristic Date.parse / new Date(string)).
+const X_USAGE_DAY_SHAPE_RE = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z)?$/;
 const usageUtcDay = (value) => {
-  if (typeof value !== 'string') return null;
-  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z)?$/);
-  if (!m) return null;
-  const canonicalDay = `${m[1]}-${m[2]}-${m[3]}`;
-  const ts = Date.parse(m[4] === undefined ? `${canonicalDay}T00:00:00.000Z` : value);
-  return Number.isFinite(ts) && new Date(ts).toISOString().slice(0, 10) === canonicalDay ? canonicalDay : null;
+  if (typeof value !== 'string' || !X_USAGE_DAY_SHAPE_RE.test(value)) return null;
+  const parsed = parseSocialTime(value, SOCIAL_TIME_POLICIES.ACCESS_DATE);
+  const projectedDay = parsed.outcome === 'DATE_ONLY' ? utcDayLabel(parsed.dayStartMs)
+    : parsed.outcome === 'INSTANT' ? utcDayLabel(parsed.instantMs) : null;
+  return projectedDay !== null && projectedDay === value.slice(0, 10) ? projectedDay : null;
 };
 const safeUsageSum = (values) => {
   let sum = 0;
@@ -298,7 +302,8 @@ export function parseXUsage(body, { observedTs }) {
   const projectCap = int(d.project_cap);
   if (projectUsage === null || projectCap === null) return null;
   const capResetDay = int(d.cap_reset_day);
-  let observedDay; try { observedDay = new Date(observedTs).toISOString().slice(0, 10); } catch { return null; }
+  const observedDay = utcDayLabel(observedTs); // boundary projection; a non-integer or out-of-range clock yields null
+  if (observedDay === null) return null;
   const dailyProjectUsage = parseDailyProjectUsage(d.daily_project_usage, observedDay, int);
   if (dailyProjectUsage === null) {
     if (!exactZeroProjectDailyUpperBound(body, d, { projectUsage, projectCap, capResetDay })) return null;
