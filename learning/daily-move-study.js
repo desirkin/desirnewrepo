@@ -412,7 +412,10 @@ export function buildDailyDecisionFrame({ manifest, marketDay, decisionTs }) {
   return decisionFrame(manifest, marketDay, decisionTs);
 }
 
-function preFacts(day, manifest, anchorTs) {
+// Exact existing control-matching prefix law, exported for the sharded
+// retrospective aggregator. Callers must supply an already validated market
+// day and manifest. The strict-before clocks intentionally remain unchanged.
+export function dailyMoveControlPrefixFacts(day, manifest, anchorTs) {
   const from = anchorTs - manifest.rules.preWindowMs;
   const prices = day.priceEvents.filter((e) => e.sourceEventTs >= from && e.sourceEventTs < anchorTs && e.knownAtTs < anchorTs)
     .sort((a, b) => a.sourceEventTs - b.sourceEventTs || a.observationId.localeCompare(b.observationId)).map((e) => e.price);
@@ -434,7 +437,7 @@ function preFacts(day, manifest, anchorTs) {
   return { realizedVolPct, logQuoteVolume: quoteVolume === null ? null : Math.log1p(quoteVolume), supportSignature, sampleCount: series.length };
 }
 
-function matchDistance(a, b) {
+export function dailyMoveControlMatchDistance(a, b) {
   if (!a || !b || a.supportSignature !== b.supportSignature || (a.logQuoteVolume === null) !== (b.logQuoteVolume === null)) return null;
   return Math.abs(a.realizedVolPct - b.realizedVolPct) + (a.logQuoteVolume === null ? 0 : Math.abs(a.logQuoteVolume - b.logQuoteVolume));
 }
@@ -516,12 +519,12 @@ export function buildDailyMoveStudy({ manifest, acceptedCatalogSnapshot, marketD
   for (const surge of byDisposition.get('SURGE_CASE')) {
     const anchorTs = surge.retrospectiveLabels.anchorTs;
     const surgeDay = dayByDigest.get(surge.marketIdentityDigest);
-    const sf = preFacts(surgeDay, manifest, anchorTs);
+    const sf = dailyMoveControlPrefixFacts(surgeDay, manifest, anchorTs);
     for (const controlClass of controlClasses) {
       const ranked = [];
       for (const candidate of byDisposition.get(controlClass)) {
         if (used.has(candidate.caseId)) continue;
-        const distance = matchDistance(sf, preFacts(dayByDigest.get(candidate.marketIdentityDigest), manifest, anchorTs));
+        const distance = dailyMoveControlMatchDistance(sf, dailyMoveControlPrefixFacts(dayByDigest.get(candidate.marketIdentityDigest), manifest, anchorTs));
         if (distance !== null) ranked.push({ candidate, distance });
       }
       ranked.sort((a, b) => a.distance - b.distance || a.candidate.caseId.localeCompare(b.candidate.caseId));
