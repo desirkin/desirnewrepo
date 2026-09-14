@@ -46,7 +46,7 @@ test('STRAT-C02: normal composition supplies all five families and exact v2 port
     controlsSource: () => ({ kill: false, cage: false, vetoes: [] }),
     transport: async () => { transportCalls += 1; throw new Error('unexpected transport'); },
     allowPrivate: () => false, allowOrders: () => false,
-    persistenceHealth: () => ({ allowPermissionIncrease: true }),
+    persistenceHealth: () => ({ permissionLock: false }),
     writeProjection: false, codeDigest: 'f'.repeat(64), log: () => {},
   };
   let run = await composeJudge(options);
