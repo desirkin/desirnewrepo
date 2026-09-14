@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { createDailySimulationScheduler } from '../learning/daily-simulation-scheduler.js';
 import { createDailySimulationStore } from '../persistence/daily-simulation-store.js';
-import { SQL, SQL_BODY } from '../persistence/daily-simulation-schema.js';
+import { SQL, SQL_BODY, RESULT_INSERT_BULK_PREFIX, COMPLETED_INSERT_BULK_PREFIX } from '../persistence/daily-simulation-schema.js';
 
 // compact in-memory transactional fake Db (same emulation as the store suite)
 function makeFakeDb() {
@@ -19,6 +19,8 @@ function makeFakeDb() {
   const dk = (a, b) => `${a}|${b}`; const bk = (a, b, c) => `${a}|${b}|${c}`;
   function run(body, p) {
     if (body === 'BEGIN' || body === 'COMMIT' || body === 'ROLLBACK') return { rows: [], rowCount: 0 };
+    if (body.startsWith(RESULT_INSERT_BULK_PREFIX)) { const n = p.length / 10; for (let i = 0; i < n; i++) { const b = i * 10; t.result.push({ identity: p[b], day_key: p[b + 1], batch_id: p[b + 2], sim_id: p[b + 4], status: p[b + 5], completed: p[b + 6], valid_modeled: p[b + 7], prospective_eligible: p[b + 8] }); } return { rows: [], rowCount: n }; }
+    if (body.startsWith(COMPLETED_INSERT_BULK_PREFIX)) { const n = p.length / 4; for (let i = 0; i < n; i++) { const b = i * 4; const k = bk(p[b], p[b + 1], p[b + 2]); if (t.completed.has(k)) throw new Error('dup completed'); t.completed.set(k, 1); } return { rows: [], rowCount: n }; }
     switch (B2T.get(body)) {
       case SQL.STORE_GET: { const r = t.store.get(p[0]); return { rows: r ? [r] : [] }; }
       case SQL.STORE_INSERT: { t.store.set(p[0], { identity: p[0] }); return { rowCount: 1, rows: [] }; }

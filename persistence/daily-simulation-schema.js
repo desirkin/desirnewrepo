@@ -133,3 +133,28 @@ export const SQL_BODY = Object.freeze({
   [SQL.PENDING_DELETE]: 'DELETE FROM serpent_dsim_pending WHERE identity = $1 AND day_key = $2 AND sim_id = $3',
   [SQL.BATCH_LIST_DAY]: 'SELECT batch_id, job_id, next_cursor, done FROM serpent_dsim_batch WHERE identity = $1 AND day_key = $2 ORDER BY resulting_revision',
 });
+
+// ---- bounded multi-row INSERT (perf: one round-trip per bounded chunk) -------
+// The store composes `<PREFIX> ($1,..,$10),($11,..,$20),...` with a bounded row
+// count so a page of many result rows is written in a few statements instead of
+// one round-trip per row. Column order is fixed and canonical; row_ordinal is
+// assigned by the store. PostgreSQL caps a statement at 65535 bind parameters;
+// with 10 columns per result row the row cap keeps params well under that.
+export const RESULT_COLS = 10;
+export const COMPLETED_COLS = 4; // identity, day_key, sim_id, batch_id
+export const MAX_INSERT_ROWS_PER_STATEMENT = 400;         // 400 * 10 = 4000 params (<< 65535)
+export const MAX_INSERT_PARAMS = 60000;                   // hard param ceiling guard
+export const RESULT_INSERT_BULK_PREFIX = 'INSERT INTO serpent_dsim_result (identity, day_key, batch_id, row_ordinal, sim_id, status, completed, valid_modeled, prospective_eligible, digest) VALUES ';
+export const COMPLETED_INSERT_BULK_PREFIX = 'INSERT INTO serpent_dsim_completed (identity, day_key, sim_id, batch_id) VALUES ';
+
+// Build "($1,$2,...,$cols),($cols+1,...)" for nRows rows of nCols columns.
+export function buildValuesTuples(nRows, nCols) {
+  const tuples = new Array(nRows);
+  for (let r = 0; r < nRows; r += 1) {
+    const base = r * nCols;
+    const ph = new Array(nCols);
+    for (let c = 0; c < nCols; c += 1) ph[c] = `$${base + c + 1}`;
+    tuples[r] = `(${ph.join(',')})`;
+  }
+  return tuples.join(',');
+}

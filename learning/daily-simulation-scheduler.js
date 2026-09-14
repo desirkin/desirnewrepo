@@ -92,6 +92,7 @@ function emptyDay(dayKey, target, policyVersion) {
     byStatus: {},
     jobs: {},                 // jobId -> { cursor, done, completed, attempts, lastStatus, stalled }
     completedIds: [],         // unique completed simulation identities (dedupe + budget)
+    completedSet: new Set(),  // hot-path dedupe: O(page)/tick, NOT rebuilt from full history each tick
     pendingCustody: {},       // simulationId -> { status, digest, firstSeenRev, lastSeenRev, attempts }
     appliedBatchIds: [],      // idempotency ledger
     shortfall: null,
@@ -166,6 +167,7 @@ export function createDailySimulationScheduler({
       byStatus: { ...(l.byStatus || {}) },
       jobs: { ...(l.jobs || {}) },
       completedIds: [...l.completedIds],
+      completedSet: new Set(l.completedIds), // rebuilt ONCE at load/restart, not per tick
       pendingCustody: { ...l.pendingCustody },
       appliedBatchIds: [...l.appliedBatchIds],
       shortfall: l.shortfall ?? null,
@@ -264,7 +266,7 @@ export function createDailySimulationScheduler({
       const resultEvidence = [];
       const pendingDelta = [];
       let tCompleted = 0; let tValid = 0; let tProspective = 0; let tPending = 0; let tTerminal = 0; let tDup = 0;
-      const seen = new Set(day.completedIds);
+      const seen = day.completedSet; // persistent set — O(page) per tick, not O(history)
       for (const r of res.results) {
         const status = statusOf(r);
         const idv = identityOf(r);
@@ -323,7 +325,7 @@ export function createDailySimulationScheduler({
       day.totals.duplicates += tDup;
       day.totals.batchesApplied += 1;
       for (const [s, n] of Object.entries(byStatus)) day.byStatus[s] = (day.byStatus[s] || 0) + n;
-      for (const idk of newCompletedIds) { day.completedIds.push(idk); if (day.pendingCustody[idk]) delete day.pendingCustody[idk]; } // matured pending removed
+      for (const idk of newCompletedIds) { day.completedIds.push(idk); day.completedSet.add(idk); if (day.pendingCustody[idk]) delete day.pendingCustody[idk]; } // matured pending removed
       for (const p of pendingDelta) {
         const prev = day.pendingCustody[p.id];
         day.pendingCustody[p.id] = { status: p.status, digest: p.digest, firstSeenRev: prev ? prev.firstSeenRev : ack.revision, lastSeenRev: ack.revision, attempts: (prev ? prev.attempts : 0) + 1 };

@@ -26,7 +26,9 @@
 //     oversized receipt is refused, never truncated.
 //   * Not an authority — this is storage only; it grants no learning/promotion
 //     authority.
-import { SQL, SQL_BODY, DSIM_STORE_VERSION } from './daily-simulation-schema.js';
+import { SQL, SQL_BODY, DSIM_STORE_VERSION, RESULT_COLS, COMPLETED_COLS, MAX_INSERT_ROWS_PER_STATEMENT, MAX_INSERT_PARAMS, RESULT_INSERT_BULK_PREFIX, COMPLETED_INSERT_BULK_PREFIX, buildValuesTuples } from './daily-simulation-schema.js';
+
+const yieldNow = () => new Promise((resolve) => setImmediate(resolve));
 
 export const STORE_PORT_VERSION = 'daily-sim-scheduler-2';
 export const DEFAULT_POLICY_VERSION = 'sim2-policy-1';
@@ -158,13 +160,39 @@ export function createDailySimulationStore({
       if (tally.validModeled !== dValid) return { ok: false, reason: 'FORGED_TALLY_MISMATCH', field: 'validModeled', derived: dValid };
       if (tally.prospectiveEligible !== dProspective) return { ok: false, reason: 'FORGED_TALLY_MISMATCH', field: 'prospectiveEligible', derived: dProspective };
 
-      // All validation passed — now write (materialize day only here).
+      // All validation passed — now write (materialize day only here). Result
+      // evidence and completed-index rows go in BOUNDED multi-row INSERTs (one
+      // round-trip per chunk), yielding between chunks so a big page does not
+      // monopolize the event loop. All chunks are in this one transaction — a
+      // throw in any chunk rolls the whole batch back; nothing is acknowledged
+      // until the CAS commit below.
       if (!dayRes.rows.length) await raw(SQL_BODY[SQL.DAY_INSERT], [storeIdentity, receipt.dayKey, dailyTarget]);
-      let ord = 0;
-      for (const e of evidence) await raw(SQL_BODY[SQL.RESULT_INSERT], [storeIdentity, receipt.dayKey, receipt.batchId, ord++, e.id, e.status, e.completed === true, e.valid === true, e.prospective === true, e.digest ?? '']);
       const resultingRevision = currentRev + 1;
+
+      // Immutable result evidence — ALL statuses, canonical column order, ordinal preserved.
+      for (let off = 0; off < evidence.length; off += MAX_INSERT_ROWS_PER_STATEMENT) {
+        const chunk = evidence.slice(off, off + MAX_INSERT_ROWS_PER_STATEMENT);
+        const params = new Array(chunk.length * RESULT_COLS);
+        for (let i = 0; i < chunk.length; i += 1) {
+          const e = chunk[i]; const b = i * RESULT_COLS;
+          params[b] = storeIdentity; params[b + 1] = receipt.dayKey; params[b + 2] = receipt.batchId; params[b + 3] = off + i;
+          params[b + 4] = e.id; params[b + 5] = e.status; params[b + 6] = e.completed === true; params[b + 7] = e.valid === true; params[b + 8] = e.prospective === true; params[b + 9] = e.digest ?? '';
+        }
+        if (params.length > MAX_INSERT_PARAMS) throw new DsimStoreError('result insert param bound exceeded');
+        await raw(RESULT_INSERT_BULK_PREFIX + buildValuesTuples(chunk.length, RESULT_COLS), params);
+        if (off + MAX_INSERT_ROWS_PER_STATEMENT < evidence.length) await yieldNow();
+      }
+
       await raw(SQL_BODY[SQL.BATCH_INSERT], [storeIdentity, receipt.dayKey, receipt.batchId, receipt.jobId ?? '', receipt.jobDigest ?? '', receipt.payloadDigest, receipt.parentRevision, resultingRevision, jstr(receipt.cursorBefore), jstr(receipt.nextCursor), receipt.done === true, jstr(receipt.tally), jstr(receipt.executorCounters ?? null), receipt.observedUtcMs ?? clock()]);
-      for (const id of derivedCompleted) await raw(SQL_BODY[SQL.COMPLETED_INSERT], [storeIdentity, receipt.dayKey, id, receipt.batchId]);
+
+      // completed dedupe index — bounded multi-row INSERT (4 columns).
+      for (let off = 0; off < derivedCompleted.length; off += MAX_INSERT_ROWS_PER_STATEMENT) {
+        const chunk = derivedCompleted.slice(off, off + MAX_INSERT_ROWS_PER_STATEMENT);
+        const params = [];
+        for (const id of chunk) params.push(storeIdentity, receipt.dayKey, id, receipt.batchId);
+        await raw(COMPLETED_INSERT_BULK_PREFIX + buildValuesTuples(chunk.length, COMPLETED_COLS), params);
+        if (off + MAX_INSERT_ROWS_PER_STATEMENT < derivedCompleted.length) await yieldNow();
+      }
       for (const p of (receipt.pendingDelta || [])) await raw(SQL_BODY[SQL.PENDING_UPSERT], [storeIdentity, receipt.dayKey, p.id, p.status, p.digest ?? '', resultingRevision, resultingRevision, 1]);
       for (const id of derivedCompleted) await raw(SQL_BODY[SQL.PENDING_DELETE], [storeIdentity, receipt.dayKey, id]); // matured pending removed
       if (receipt.shortfall) await raw(SQL_BODY[SQL.DAY_SET_SHORTFALL], [storeIdentity, receipt.dayKey, jstr(receipt.shortfall)]);
