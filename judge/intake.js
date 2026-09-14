@@ -14,6 +14,7 @@ import { readFileSync, statSync, readdirSync } from 'node:fs';
 import { verifyCase } from '../socrates/runtime.js';
 import { openBundle, readMemberJson, readMemberJsonl } from '../market-lab/store.js';
 import { RESOURCE_DEFAULTS } from '../market-lab/policy.js';
+import { fromStatistic } from '../execution/money.js';
 
 export const INTAKE_VERSION = 'judge-intake-1';
 export const INPUT_MODES = Object.freeze(['MARKET_DIRECT', 'CASE_ENRICHED', 'CATALYST_CASE']);
@@ -69,7 +70,60 @@ export const OFFICIAL_SOURCE_TYPES = Object.freeze(['PRIMARY_OFFICIAL', 'EXCHANG
 export const CATALYST_CLAIM_TYPES = Object.freeze({ LISTING_OR_INTEGRATION: ['EXCHANGE_LISTING', 'EXCHANGE_ASSET_SUPPORT', 'LISTING', 'INTEGRATION'], EXECUTED_GOVERNANCE_OR_PROTOCOL_CHANGE: ['GOVERNANCE_EXECUTED', 'PROTOCOL_UPGRADE_EXECUTED', 'UPGRADE_ACTIVATED'], OFFICIAL_DISCLOSURE_DIRECTLY_RELEVANT: ['OTHER_OFFICIAL_CRYPTO_CLAIM', 'OFFICIAL_DISCLOSURE', 'PARTNERSHIP_OFFICIAL', 'TREASURY_ACTION_OFFICIAL'] });
 const subjectBound = (claim, canonicalCoin) => typeof claim.normalizedSubject === 'string' && (claim.normalizedSubject === canonicalCoin || claim.normalizedSubject.startsWith(`${canonicalCoin}:`));
 const officialSourceIds = (packet) => new Set((Array.isArray(packet.sources) ? packet.sources : []).filter((s) => s && OFFICIAL_SOURCE_TYPES.includes(s.sourceType) && s.authorityClass === 'OFFICIAL').map((s) => s.sourceId));
-export function primaryConfirmedCatalyst({ packet, analysis, canonicalCoin, decisionTs, knownWithinMs = 600_000 }) {
+export const CATALYST_PRE_EVENT_SNAPSHOT_VERSION = 'judge-catalyst-pre-event-snapshot-1';
+const PRE_EVENT_SUPPORT = new Set(['COMPLETE']);
+const boundedIds = (xs, max = 32) => Array.isArray(xs) && xs.length > 0 && xs.length <= max && xs.every((x) => typeof x === 'string' && x.length > 0 && x.length <= 160) && new Set(xs).size === xs.length;
+export function preEventPriceSnapshot({ packet, event, canonicalCoin, executionVenue = 'kraken', executionQuote = 'USD' } = {}) {
+  if (!packet || !event || packet.subject?.canonicalCoin !== canonicalCoin) return null;
+  // A publication clock is an observed occurrence bound. Confirmation time is
+  // only a decision-time proxy and cannot establish that a chart preceded the
+  // event, so it deliberately yields no P0.
+  if (event.occurrenceClockBasis !== 'SOURCE_PUBLISHED_TS') return null;
+  if (!Number.isSafeInteger(event.knownAtTs) || !Number.isSafeInteger(event.occurredTs) || event.occurredTs <= 0) return null;
+  const cutoffTs = Math.min(event.knownAtTs, event.occurredTs);
+  const contextId = packet.researchContext?.marketContextRef ?? null;
+  const evidence = Array.isArray(packet.evidence) ? packet.evidence : [];
+  const summary = evidence.find((x) => x?.evidenceId === contextId && x.kind === 'MARKET_CONTEXT_SUMMARY' && x.state === 'KNOWN') ?? null;
+  const componentIds = summary?.value?.fields?.componentIds;
+  if (!boundedIds(componentIds, 64)) return null;
+  const candidates = evidence.filter((x) => {
+    const v = x?.value; const f = v?.fields;
+    return componentIds.includes(x?.evidenceId)
+      && x?.kind === 'MARKET_CHART_WINDOW' && x?.state === 'KNOWN'
+      && v?.kind === 'MARKET_CHART_WINDOW' && v?.canonicalCoin === canonicalCoin
+      && PRE_EVENT_SUPPORT.has(v?.support?.state)
+      && f?.venue === executionVenue && f?.quote === executionQuote
+      && typeof f?.close === 'number' && Number.isFinite(f.close) && f.close > 0
+      && Number.isSafeInteger(x.observedTs) && Number.isSafeInteger(x.knownAtTs)
+      && x.observedTs === v.observedTs && x.knownAtTs === v.knownAtTs
+      && Number.isSafeInteger(v.windowEndTs)
+      && x.observedTs <= cutoffTs && x.knownAtTs <= cutoffTs && v.windowEndTs <= cutoffTs
+      && boundedIds(x.sourceRefs) && boundedIds(v.sourceIds);
+  }).sort((a, b) => b.value.windowEndTs - a.value.windowEndTs || b.knownAtTs - a.knownAtTs || String(a.evidenceId).localeCompare(String(b.evidenceId)));
+  const chosen = candidates[0] ?? null;
+  if (!chosen) return null;
+  let price; try { price = fromStatistic(chosen.value.fields.close, 8); } catch { return null; }
+  const binding = Object.freeze({
+    version: CATALYST_PRE_EVENT_SNAPSHOT_VERSION,
+    eventId: event.eventId,
+    canonicalCoin,
+    packetId: packet.packetId,
+    marketContextRef: contextId,
+    evidenceId: chosen.evidenceId,
+    sourceRefs: Object.freeze([...chosen.sourceRefs]),
+    componentSourceIds: Object.freeze([...chosen.value.sourceIds]),
+    observedTs: chosen.observedTs,
+    knownAtTs: chosen.knownAtTs,
+    windowEndTs: chosen.value.windowEndTs,
+    cutoffTs,
+    occurrenceClockBasis: event.occurrenceClockBasis,
+    venue: executionVenue,
+    quote: executionQuote,
+    price,
+  });
+  return Object.freeze({ p0: price, p0Source: 'PRE_EVENT_SNAPSHOT', p0Evidence: binding });
+}
+export function primaryConfirmedCatalyst({ packet, analysis, canonicalCoin, decisionTs, knownWithinMs = 600_000, executionVenue = 'kraken', executionQuote = 'USD' }) {
   if (!packet || !analysis) return { ok: false, reason: 'NO_PACKET_OR_ANALYSIS', event: null };
   if (packet.subject?.canonicalCoin !== canonicalCoin) return { ok: false, reason: 'PACKET_SUBJECT_MISMATCH', event: null };
   const claims = Array.isArray(packet.claims) ? packet.claims : []; const links = Array.isArray(packet.claimLinks) ? packet.claimLinks : []; const official = officialSourceIds(packet); const candidates = []; const refusals = [];
@@ -79,13 +133,19 @@ export function primaryConfirmedCatalyst({ packet, analysis, canonicalCoin, deci
     const link = links.find((l) => l && l.kind === 'PRIMARY_CONFIRMATION' && l.claimRef === c.claimId && official.has(l.sourceRef)); if (!link) { refusals.push('NO_OFFICIAL_PRIMARY_CONFIRMATION'); continue; }
     const knownAt = Number.isSafeInteger(link.observedTs) ? link.observedTs : Number.isSafeInteger(c.firstObservedTs) ? c.firstObservedTs : null; if (knownAt === null) { refusals.push('CONFIRMATION_CLOCK_ABSENT'); continue; }
     if (knownAt > decisionTs) { refusals.push('CONFIRMATION_FROM_THE_FUTURE'); continue; } if (decisionTs - knownAt > knownWithinMs) { refusals.push('CONFIRMATION_STALE'); continue; }
-    candidates.push({ eventId: c.claimId, taxonomy, knownAtTs: knownAt, occurredTs: knownAt, occurred: true, sourceId: link.sourceRef, claimType: c.claimType, claimKind: c.claimType });
+    const source = (Array.isArray(packet.sources) ? packet.sources : []).find((s) => s?.sourceId === link.sourceRef) ?? null;
+    const hasPublishedOccurrence = Number.isSafeInteger(source?.publishedTs) && source.publishedTs > 0;
+    const occurredTs = hasPublishedOccurrence ? source.publishedTs : knownAt;
+    if (occurredTs > knownAt) { refusals.push('OCCURRENCE_AFTER_CONFIRMATION'); continue; }
+    candidates.push({ eventId: c.claimId, canonicalCoin, taxonomy, knownAtTs: knownAt, occurredTs, occurrenceClockBasis: hasPublishedOccurrence ? 'SOURCE_PUBLISHED_TS' : 'CONFIRMATION_KNOWN_AT_PROXY', occurred: true, sourceId: link.sourceRef, claimType: c.claimType, claimKind: c.claimType });
   }
   if (!candidates.length) return { ok: false, reason: 'NO_PRIMARY_CONFIRMED_MAPPED_EVENT', refusals: [...new Set(refusals)], event: null };
   const mech = analysis.mechanism ?? null; const cited = candidates.find((e) => Array.isArray(mech?.claimRefs) && mech.claimRefs.includes(e.eventId));
   if (!cited) return { ok: false, reason: 'MECHANISM_DOES_NOT_CITE_EVENT', event: null };
   if (analysis.marketImplication?.direction !== 'UPWARD_PRESSURE') return { ok: false, reason: `DIRECTION_${analysis.marketImplication?.direction ?? 'ABSENT'}_NOT_UPWARD`, event: null };
-  return { ok: true, reason: null, event: { ...cited, primaryConfirmed: true, mechanismDirection: 'UPWARD_PRESSURE', mechanismCitesEvent: true } };
+  const baseEvent = { ...cited, primaryConfirmed: true, mechanismDirection: 'UPWARD_PRESSURE', mechanismCitesEvent: true };
+  const snapshot = preEventPriceSnapshot({ packet, event: baseEvent, canonicalCoin, executionVenue, executionQuote });
+  return { ok: true, reason: null, event: Object.freeze(snapshot ? { ...baseEvent, ...snapshot } : baseEvent) };
 }
 // a verified PRIMARY correction (closeout R10): a RETRACTED / CONTRADICTED claim bound to the coin, linked by a RETRACTION /
 // CONTRADICTION relation to an OFFICIAL source -> a Watch falsifier (THESIS_FALSIFIED), never prose

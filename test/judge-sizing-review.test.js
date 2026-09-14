@@ -102,7 +102,8 @@ test('maximum setup, learning, and sizing logs all fit the unchanged 64-measurem
     ABSORPTION_RECLAIM: { ...common, maxEntryLevel: null, priorFi: { state: 'KNOWN', fi: -0.2 }, priorMidChange: '1', priorDepthSamples: 30, priorMedianDepth: '1000' },
     CATALYST_TRANSMISSION: { ...common, event: { knownAtTs: T0 - 1_000 } },
   };
-  const event = { primaryConfirmed: true, occurred: true, mechanismDirection: 'UPWARD_PRESSURE', mechanismCitesEvent: true, p0: '100', p0Source: 'PRE_EVENT_SNAPSHOT' };
+  const p0Evidence = { version: 'judge-catalyst-pre-event-snapshot-1', eventId: 'claim-sizing', canonicalCoin: 'BTC', packetId: `sep2-${'1'.repeat(40)}`, marketContextRef: `evd-${'2'.repeat(40)}`, evidenceId: `evd-${'3'.repeat(40)}`, sourceRefs: [`src-${'4'.repeat(40)}`], componentSourceIds: ['mcc-sizing-1'], observedTs: T0 - 2_000, knownAtTs: T0 - 2_000, windowEndTs: T0 - 2_000, cutoffTs: T0 - 1_000, occurrenceClockBasis: 'SOURCE_PUBLISHED_TS', venue: 'kraken', quote: 'USD', price: '100' };
+  const event = { eventId: 'claim-sizing', canonicalCoin: 'BTC', knownAtTs: T0 - 1_000, occurredTs: T0 - 1_000, occurrenceClockBasis: 'SOURCE_PUBLISHED_TS', primaryConfirmed: true, occurred: true, mechanismDirection: 'UPWARD_PRESSURE', mechanismCitesEvent: true, p0: '100', p0Source: 'PRE_EVENT_SNAPSHOT', p0Evidence };
   const baselineBySetup = SETUPS.map((setupId) => [
     ...structuralClauses(setupId, frozen[setupId], {}, fast, { decisionTs: T0, event }),
     ...fastClauses(setupId, frozen[setupId], fast),
