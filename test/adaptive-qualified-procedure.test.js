@@ -1,0 +1,590 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { canonicalDigest, canonicalJson, opportunityIdOf } from '../learning/contracts.js';
+import {
+  ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION,
+  ADAPTIVE_RANKING_TRIAL_COMPARATOR, ADAPTIVE_RANKING_TRIAL_COST_MODEL,
+  ADAPTIVE_RANKING_TRIAL_PRIMARY_METRIC, adaptiveRankingTrialRecordValidator,
+  readQualifiedAdaptiveProcedureDecision, resolveQualifiedAdaptiveProcedureRanking,
+  sealAdaptiveProcedureConsumerContract, sealAdaptiveProcedurePublication,
+  sealAdaptiveRankingTrialDecision, sealAdaptiveRankingTrialExecution,
+} from '../learning/adaptive-qualified-procedure.js';
+import { buildShadowCapture } from '../learning/shadow-capture.js';
+import { matureShadowCapture } from '../learning/shadow-outcome.js';
+import { evaluateShadowExecutionEvidence, SHADOW_EXECUTION_EVIDENCE_VERSION } from '../learning/shadow-execution-evidence.js';
+import {
+  ADAPTIVE_DURABLE_ACK_VERSION, ADAPTIVE_DURABLE_STREAM_VERSION,
+  openDurableAdaptiveStore,
+} from '../learning/adaptive-durable-store.js';
+import { createAdaptiveProspectiveOwner } from '../learning/adaptive-prospective-owner.js';
+import { ADAPTIVE_HORIZON_MS, initialAdaptiveState, sealAdaptiveProcedure } from '../learning/adaptive-registry.js';
+import {
+  ADAPTIVE_JOURNAL_EVENT_VERSION, ADAPTIVE_STORE_VERSION,
+  createAdaptiveStore, validateAdaptiveStoreSnapshot,
+} from '../learning/adaptive-store.js';
+import { adaptiveSettlementSubmission } from './helpers/adaptive-outcome-fixture.js';
+import {
+  buildJudgeLearningConsumerContract, buildJudgeLearningPreparedFacts,
+  judgeLearningPreparedFactsError,
+} from '../judge/learning-recipe.js';
+import { digestOf } from '../execution/contract.js';
+import { buildEvidence, buildPatternRecord, estimateFromEvidence } from '../learning/patterns.js';
+import { freezeCandidate, settleCandidate } from '../learning/promotion.js';
+import { transitionActivation } from '../learning/adapter.js';
+import { createLearningStore } from '../learning/store.js';
+import { replayProspective } from '../learning/prospective.js';
+
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+const T0 = Date.UTC(2026, 8, 1, 12);
+const POLICY = 'a'.repeat(64);
+const COST = { costPolicyVersion: 'adaptive-rank-trial-cost-1', feePctPerSide: 0.1, assumedHalfSpreadBps: 2, assumedLatencyMs: 500 };
+const clone = (value) => structuredClone(value);
+
+function tempRoot(t, prefix) {
+  const root = mkdtempSync(path.join(tmpdir(), prefix));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+function staticConsumer() {
+  return buildJudgeLearningConsumerContract({
+    policyDigest: POLICY,
+    eligibility: {
+      maxSpreadBps: 20, minBidDepthUsd10bps: null, minAtrPct: null,
+      maxAtrPct: null, maxFactAgeMs: 60_000, requiredFeatures: ['spreadBps'],
+    },
+    effectMagnitude: 0.01, activationLifetimeMs: 30 * DAY,
+    degradeRule: { minGroups: 10, adverseFractionAbove: 0.7, consecutiveWindows: 2 },
+  });
+}
+
+function bookAt(receiptTs, coin) {
+  const snapshot = {
+    snapshotVersion: 'execution-book-snapshot-1', symbol: `${coin}/USD`, canonicalCoin: coin,
+    feedEpoch: 7, receiptSequence: 99, nativeSequence: null,
+    sourceTs: receiptTs, receiptTs, crc: 1, crcVerified: true, crcComputed: 1,
+    synced: true, instrumentDigest: 'c'.repeat(64), priceDecimals: 2, qtyDecimals: 8,
+    bids: [['99.95', '250']], asks: [['100.05', '250']], levelsCap: 100,
+    truncated: false, kind: 'UPDATE', digest: 'x'.repeat(64),
+  };
+  snapshot.digest = digestOf({ ...snapshot, digest: null });
+  return snapshot;
+}
+
+function preparedFacts(consumer, decisionTs, coin) {
+  const facts = buildJudgeLearningPreparedFacts({
+    frozen: null, decisionTs, bookSnapshot: bookAt(decisionTs - 250, coin),
+    barEvidence: null, tradeEvidence: null,
+  });
+  assert.equal(judgeLearningPreparedFactsError(facts, { consumerContract: consumer }), null);
+  return facts;
+}
+
+function initialStream(t, procedure) {
+  const root = tempRoot(t, 'adaptive-procedure-origin-');
+  const local = createAdaptiveStore({ rootDir: root, procedure, clock: () => T0 });
+  local.close();
+  const journalText = readFileSync(path.join(root, 'journal.jsonl'), 'utf8');
+  const acknowledgedHead = JSON.parse(readFileSync(path.join(root, 'head.json'), 'utf8'));
+  const snapshot = validateAdaptiveStoreSnapshot({ journalText, acknowledgedHead, procedure });
+  return {
+    outcome: 'LOADED', streamVersion: ADAPTIVE_DURABLE_STREAM_VERSION,
+    storeVersion: ADAPTIVE_STORE_VERSION, eventVersion: ADAPTIVE_JOURNAL_EVENT_VERSION,
+    procedureId: procedure.procedureId, procedureDigest: procedure.procedureDigest,
+    revision: snapshot.eventCount, journalText, acknowledgedHead,
+    acknowledgments: snapshot.events.map((event, sequence) => ({
+      ackVersion: ADAPTIVE_DURABLE_ACK_VERSION, sequence,
+      eventDigest: event.eventDigest, headDigest: snapshot.eventHeadDigests[sequence],
+      acknowledgedTs: event.recordedTs,
+    })),
+  };
+}
+
+class MemoryPort {
+  constructor(stream, clock) { this.stream = clone(stream); this.clock = clock; }
+  async load() { return clone(this.stream); }
+  async append(request) {
+    assert.equal(request.expectedRevision, this.stream.revision);
+    assert.equal(request.expectedHeadDigest, this.stream.acknowledgedHead.headDigest);
+    const acknowledgedTs = this.clock();
+    this.stream.journalText += `${canonicalJson(request.event)}\n`;
+    this.stream.acknowledgedHead = clone(request.nextAcknowledgedHead);
+    this.stream.revision += 1;
+    this.stream.acknowledgments.push({
+      ackVersion: ADAPTIVE_DURABLE_ACK_VERSION, sequence: request.event.sequence,
+      eventDigest: request.event.eventDigest, headDigest: request.nextAcknowledgedHead.headDigest,
+      acknowledgedTs,
+    });
+    return {
+      outcome: 'APPENDED', ackVersion: ADAPTIVE_DURABLE_ACK_VERSION,
+      streamVersion: ADAPTIVE_DURABLE_STREAM_VERSION,
+      storeVersion: ADAPTIVE_STORE_VERSION, eventVersion: ADAPTIVE_JOURNAL_EVENT_VERSION,
+      procedureId: request.identity.procedureId, procedureDigest: request.identity.procedureDigest,
+      revision: this.stream.revision, eventDigest: request.event.eventDigest,
+      headDigest: request.nextAcknowledgedHead.headDigest, acknowledgedTs,
+    };
+  }
+}
+
+function predictionInput(procedure, facts, decisionTs, coin, selection, eligible = procedure.strategies) {
+  const identity = {
+    canonicalCoin: coin, decisionTs,
+    captureRecipeVersion: 'adaptive-ranking-trial-input-1', datasetId: 'adaptive-ranking-trial-fixture',
+  };
+  return {
+    opportunityId: opportunityIdOf(identity), identity, catalogContentId: 'catalog-ranking-trial-1',
+    predictionTs: decisionTs, horizonMs: ADAPTIVE_HORIZON_MS,
+    featureRecipeDigest: procedure.parent.featureRecipeDigest, factsDigest: facts,
+    strategyAssessments: procedure.strategies.map((strategyId) => ({
+      strategyId, eligibility: eligible.includes(strategyId) ? 'ELIGIBLE' : 'UNAVAILABLE',
+      reasonCode: eligible.includes(strategyId) ? null : 'FIXTURE_NOT_ASSESSED',
+    })),
+    selection: { strategyId: selection, reasonCode: 'DETERMINISTIC_RANK_SELECTION' },
+  };
+}
+
+function shadowRecipe(strategyId) {
+  return {
+    recipeVersion: `adaptive-${strategyId.toLowerCase()}-execution-1`, styleId: strategyId,
+    requiredInputs: ['CANDLES_1M', 'VOLUME'], contextualInputs: [],
+    candleWindowMin: 5, candlePeriodMs: MIN, maxInputAgeMs: 2 * MIN,
+    horizonMin: 60, costPolicy: COST,
+    variants: [
+      { variantId: `${strategyId.toLowerCase()}-take`, decision: 'TAKE', sizeTier: 'S', intendedAllocation: { kind: 'QUOTE_NOTIONAL', quoteCurrency: 'USD', amount: 600 }, entryRule: 'NEXT_CANDLE_OPEN', limitOffsetBps: null, exitRule: 'STOP_TARGET_OR_HORIZON', stopPct: 50, targetPct: 50 },
+      { variantId: `${strategyId.toLowerCase()}-abstain`, decision: 'ABSTAIN', sizeTier: 'S', intendedAllocation: { kind: 'NONE', quoteCurrency: null, amount: 0 }, entryRule: 'NEXT_CANDLE_OPEN', limitOffsetBps: null, exitRule: 'NONE', stopPct: null, targetPct: null },
+    ],
+  };
+}
+
+function shadowCapture(strategyId, decisionTs, coin) {
+  const candles = Array.from({ length: 5 }, (_, index) => ({
+    periodStartTs: decisionTs - (5 - index) * MIN,
+    periodEndTs: decisionTs - (4 - index) * MIN,
+    open: 100, high: 100.2, low: 99.8, close: 100,
+    volumeBase: 10, volumeQuote: 1_000, tradeFlow: 0,
+    closed: true, knownAtTs: decisionTs - (4 - index) * MIN,
+  }));
+  const built = buildShadowCapture({
+    recipe: shadowRecipe(strategyId), venue: 'KRAKEN', assetId: coin, decisionTs,
+    inputs: { candles, depth: { bids: [[99.9, 10]], asks: [[100.1, 10]], knownAtTs: decisionTs - 500 } },
+  });
+  assert.equal(built.ineligible.length, 0);
+  return built.eligible.find((row) => row.variant.decision === 'TAKE');
+}
+
+function point(side, signalKnownAtTs, price, epochId) {
+  return {
+    side, signalKnownAtTs, executionTs: signalKnownAtTs + COST.assumedLatencyMs,
+    snapshot: {
+      bids: [[price, 10], [price - 0.1, 10]], asks: [[price + 0.2, 10], [price + 0.3, 10]],
+      receivedTs: signalKnownAtTs + 100, knownAtTs: signalKnownAtTs + 200,
+      sourceEventTs: signalKnownAtTs + 50, epochId,
+      synchronized: true, checksumVerified: true, truncated: false,
+    },
+    coverage: {
+      state: 'CONTINUOUS', startTs: signalKnownAtTs - 1_000,
+      endTs: signalKnownAtTs + 600, epochId, droppedUpdates: 0,
+    },
+  };
+}
+
+function executionArm(decisionArm, decisionTs, exitBid) {
+  const capture = decisionArm.executionCapture;
+  const path = Array.from({ length: 60 }, (_, index) => ({
+    periodStartTs: decisionTs + index * MIN, periodEndTs: decisionTs + (index + 1) * MIN,
+    open: 100, high: 100.3, low: 99.7, close: 100,
+    volumeBase: 5, closed: true, knownAtTs: decisionTs + (index + 1) * MIN + 200,
+  }));
+  const depthPath = {
+    evidenceVersion: SHADOW_EXECUTION_EVIDENCE_VERSION,
+    captureId: capture.captureId, variantId: capture.variantId, sizeTier: capture.variant.sizeTier,
+    intended: { quoteNotional: 600, baseQty: null },
+    entry: point('BUY', decisionTs, 99.9, `entry-${capture.captureId}`),
+    exit: point('SELL', decisionTs + HOUR, exitBid, `exit-${capture.captureId}`),
+  };
+  const asOfTs = decisionTs + HOUR + 1_000;
+  const evidence = evaluateShadowExecutionEvidence({
+    capture, costPolicy: COST, depthPath, entrySignalTs: decisionTs,
+    exitSignalTs: decisionTs + HOUR, asOfTs,
+  });
+  assert.equal(evidence.state, 'COMPLETE', evidence.reason);
+  const outcome = matureShadowCapture({ capture, path, depthPath, asOfTs });
+  assert.equal(outcome.sizeEvidence, 'DEPTH_SUPPORTED_OBSERVED', JSON.stringify(outcome));
+  return { selectedStrategyId: decisionArm.selectedStrategyId, path, depthPath, asOfTs, outcome };
+}
+
+function appendAccumulatingPattern(store, publication) {
+  const observations = Array.from({ length: 8 }, (_, index) => ({
+    opportunityId: `lop-dynamic-history-${index}`, canonicalCoin: `H${index % 5}`,
+    decisionTs: T0 - 20 * DAY + index * DAY, evidenceBasis: 'HISTORICAL_RECONSTRUCTION',
+    outcomeClass: index % 4 === 3 ? 'ADVERSE' : 'FAVORABLE',
+  }));
+  const base = buildEvidence(observations);
+  const evidence = { ...base, evidenceRefs: [publication.publicationId], evidenceRefsTruncated: false };
+  const estimate = estimateFromEvidence(observations, evidence, { pooledMean: 0.5, priorStrength: 8, updatedTs: T0 - DAY });
+  store.appendPattern(buildPatternRecord({
+    predicate: publication.applicability, scope: publication.scope, origin: 'ADAPTIVE_PROCEDURE_PROPOSAL',
+    createdTs: T0 - 20 * DAY, ts: T0 - 20 * DAY, seq: 0, state: 'NOTICED',
+    previousState: null, transitionReason: 'FIRST_OBSERVATION', evidence, estimate, contradictions: [],
+  }));
+  const noticed = store.patternHeads().values().next().value;
+  store.appendPattern(buildPatternRecord({
+    predicate: noticed.predicate, scope: noticed.scope, origin: noticed.origin,
+    createdTs: noticed.createdTs, ts: T0 - 10 * DAY, seq: 1, state: 'ACCUMULATING',
+    previousState: 'NOTICED', transitionReason: 'NEW_MATURED_EVIDENCE',
+    evidence, estimate, contradictions: [],
+  }));
+  return store.patternHeads().values().next().value;
+}
+
+async function fixture(t, { sameSelection = false } = {}) {
+  const base = staticConsumer();
+  const consumer = sealAdaptiveProcedureConsumerContract({ preparedFactsContract: base });
+  const procedure = sealAdaptiveProcedure({
+    parentPolicyDigest: consumer.policyDigest, consumerContractDigest: consumer.consumerContractDigest,
+    featureRecipeDigest: consumer.featureRecipeDigest, strategyIds: ['IGNITION', 'PULLBACK', 'RANGE'], createdTs: T0,
+  });
+  const now = { value: T0 + MIN };
+  const port = new MemoryPort(initialStream(t, procedure), () => now.value);
+  const rootDir = tempRoot(t, 'adaptive-qualified-procedure-state-');
+  let durable = await openDurableAdaptiveStore({ rootDir, procedure, durablePort: port, clock: () => now.value, portTimeoutMs: 1_000 });
+  let owner = createAdaptiveProspectiveOwner({ store: durable, procedure, clock: () => now.value });
+
+  const bootstrapInput = predictionInput(procedure, 'b'.repeat(64), now.value, 'BTC', 'IGNITION', ['IGNITION']);
+  const bootstrap = await owner.recordPrediction(bootstrapInput);
+  now.value = bootstrap.prediction.targetEndTs + 1_000;
+  const bootstrapSettlement = adaptiveSettlementSubmission(procedure, bootstrap.prediction, {
+    opportunityId: bootstrap.prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
+    state: 'MATURED', logReturnPct: 1, sourceEventTs: bootstrap.prediction.targetEndTs,
+    knownAtTs: now.value, sourceDigest: 'c'.repeat(64), reasonCode: null,
+  });
+  assert.equal((await owner.recordOutcome(bootstrapSettlement)).status, 'UPDATED');
+  now.value += MIN;
+  const adverseSeed = await owner.recordPrediction(predictionInput(procedure, 'e'.repeat(64), now.value, 'ETH', 'PULLBACK', ['PULLBACK']));
+  now.value = adverseSeed.prediction.targetEndTs + 1_000;
+  const adverseSeedSubmission = adaptiveSettlementSubmission(procedure, adverseSeed.prediction, {
+    opportunityId: adverseSeed.prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
+    state: 'MATURED', logReturnPct: -1, sourceEventTs: adverseSeed.prediction.targetEndTs,
+    knownAtTs: now.value, sourceDigest: 'f'.repeat(64), reasonCode: null,
+  });
+  assert.equal((await owner.recordOutcome(adverseSeedSubmission)).status, 'UPDATED');
+  const signedState = owner.state();
+  assert.equal(signedState.strategies.find((row) => row.strategyId === 'IGNITION').rankOffsetRrPoints, 0.015);
+  assert.equal(signedState.strategies.find((row) => row.strategyId === 'PULLBACK').rankOffsetRrPoints, -0.015);
+  assert.equal(signedState.strategies.find((row) => row.strategyId === 'RANGE').rankOffsetRrPoints, 0);
+
+  const publication = sealAdaptiveProcedurePublication({
+    procedure, initialState: initialAdaptiveState(procedure),
+    consumerContract: consumer,
+    scope: { setupType: 'ANY', regime: 'ANY', assets: 'ANY', venues: ['KRAKEN'] },
+    applicability: { clauses: [{ feature: 'spreadBps', op: 'LTE', threshold: 20 }] },
+    sealedTs: now.value,
+  });
+  const learningDir = tempRoot(t, 'adaptive-procedure-promotion-');
+  const learning = createLearningStore({ dataDir: learningDir });
+  const pattern = appendAccumulatingPattern(learning, publication);
+  const design = freezeCandidate({
+    store: learning, pattern, costModel: ADAPTIVE_RANKING_TRIAL_COST_MODEL,
+    primaryMetric: ADAPTIVE_RANKING_TRIAL_PRIMARY_METRIC,
+    comparator: ADAPTIVE_RANKING_TRIAL_COMPARATOR,
+    consumerBinding: {
+      featureRecipeVersion: base.featureRecipe.featureRecipeVersion,
+      policyDigest: consumer.policyDigest,
+    }, nowTs: publication.sealedTs + 1_000,
+  });
+  const validator = adaptiveRankingTrialRecordValidator({
+    publications: [publication],
+    validatePreparedFacts: (facts, contract) => judgeLearningPreparedFactsError(facts, { consumerContract: contract }),
+    adaptiveStore: durable,
+  });
+  const trial = [];
+  for (let group = 0; group < 34; group += 1) {
+    const decisionTs = Math.ceil((design.sealedTs + HOUR + group * 6 * HOUR) / MIN) * MIN;
+    now.value = decisionTs;
+    const coin = `A${group % 6}`;
+    const facts = preparedFacts(base, decisionTs, coin);
+    const saved = await owner.recordPrediction(predictionInput(procedure, facts.factsDigest, decisionTs, coin, 'IGNITION'));
+    const context = { setupType: 'IGNITION', regime: 'UNCLASSIFIED', asset: coin, venue: 'KRAKEN' };
+    const candidateArm = { selectedStrategyId: 'IGNITION', executionCapture: shadowCapture('IGNITION', decisionTs, coin) };
+    const baselineArm = sameSelection
+      ? candidateArm
+      : { selectedStrategyId: 'PULLBACK', executionCapture: shadowCapture('PULLBACK', decisionTs, coin) };
+    const decisionReceipt = sealAdaptiveRankingTrialDecision({
+      publication, candidateId: design.candidateId, opportunityId: saved.prediction.opportunityId,
+      adaptiveState: owner.state(), prediction: saved.prediction,
+      predictionAck: saved.durableAcknowledgment, preparedFacts: facts, context,
+      rankCandidates: [
+        { strategyId: 'IGNITION', baselineRewardRiskRatio: sameSelection ? 1.02 : 1 },
+        { strategyId: 'PULLBACK', baselineRewardRiskRatio: 1.01 },
+        { strategyId: 'RANGE', baselineRewardRiskRatio: 0.5 },
+      ], baselineArm, candidateArm, recordedTs: now.value,
+      validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+      adaptiveStore: durable,
+    });
+    const capture = {
+      kind: 'ADAPTIVE_RANKING_TRIAL_CAPTURE', candidateId: design.candidateId,
+      opportunityId: saved.prediction.opportunityId, publicationId: publication.publicationId,
+      decisionReceipt,
+    };
+    learning.appendProspective(capture);
+    const candidate = executionArm(candidateArm, decisionTs, 103);
+    const baseline = sameSelection ? candidate : executionArm(baselineArm, decisionTs, 100);
+    now.value = decisionTs + HOUR + 1_000;
+    const executionReceipt = sealAdaptiveRankingTrialExecution({
+      publication, decisionReceipt, candidate, baseline, recordedTs: now.value,
+      validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+      adaptiveStore: durable,
+    });
+    const outcome = {
+      kind: 'ADAPTIVE_RANKING_TRIAL_OUTCOME', candidateId: design.candidateId,
+      opportunityId: saved.prediction.opportunityId, publicationId: publication.publicationId,
+      executionReceipt,
+    };
+    learning.appendProspective(outcome);
+    trial.push({ capture, outcome, decisionReceipt, executionReceipt, saved, facts, context });
+    const auxiliaryTs = decisionTs + 2 * HOUR;
+    now.value = auxiliaryTs;
+    const auxiliaryStrategy = group % 2 === 0 ? 'IGNITION' : 'PULLBACK';
+    const auxiliary = await owner.recordPrediction(predictionInput(
+      procedure, canonicalDigest({ auxiliary: group }), auxiliaryTs, `Z${group % 6}`,
+      auxiliaryStrategy, [auxiliaryStrategy],
+    ));
+    now.value = auxiliary.prediction.targetEndTs + 1_000;
+    const auxiliarySubmission = adaptiveSettlementSubmission(procedure, auxiliary.prediction, {
+      opportunityId: auxiliary.prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
+      state: 'MATURED', logReturnPct: auxiliaryStrategy === 'IGNITION' ? 1 : -1,
+      sourceEventTs: auxiliary.prediction.targetEndTs, knownAtTs: now.value,
+      sourceDigest: canonicalDigest({ auxiliarySource: group }), reasonCode: null,
+    });
+    assert.equal((await owner.recordOutcome(auxiliarySubmission)).status, 'UPDATED');
+    trial[group].stateSettlement = durable.settlement({
+      opportunityId: auxiliary.prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
+    });
+  }
+  const replay = replayProspective(learning.readProspective(), { adaptiveRankingTrialValidator: validator });
+  assert.deepEqual(replay.errors, []);
+  const settled = settleCandidate({
+    store: learning, candidateId: design.candidateId, nowTs: now.value + 1_000,
+    adaptiveRankingTrialValidator: validator,
+  });
+  assert.equal(settled.terminal.verdict, sameSelection ? 'FORWARD_NOT_SUPPORTED' : 'FORWARD_SUPPORTED');
+  if (sameSelection) {
+    return { base, consumer, procedure, publication, learning, learningDir, design, trial, settled, owner, durable, port, now, validator, bootstrap, rootDir };
+  }
+  const active = transitionActivation(settled.activation, {
+    state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: settled.activation.ts + 1,
+  });
+  learning.appendActivation(active);
+  const validated = learning.patternHeads().get(pattern.patternId);
+  learning.appendPattern(buildPatternRecord({
+    predicate: validated.predicate, scope: validated.scope, origin: validated.origin,
+    createdTs: validated.createdTs, ts: active.ts, seq: validated.seq + 1,
+    state: 'ACTIVE_PAPER', previousState: validated.state,
+    transitionReason: 'PAPER_RUNTIME_ADOPTED', evidence: validated.evidence,
+    estimate: validated.estimate, contradictions: validated.contradictions,
+    candidateId: validated.candidateId, activationId: active.activationId,
+  }));
+  now.value = active.ts + MIN;
+  return { base, consumer, procedure, publication, learning, learningDir, design, trial, active, owner, durable, port, now, validator, bootstrap, adverseSeed, rootDir };
+}
+
+test('whole frozen procedure earns one typed qualification from independent per-arm executions and later ACKed state evolves without requalification', async (t) => {
+  const f = await fixture(t);
+  assert.equal(f.trial[0].decisionReceipt.candidateSelectedStrategyId, 'IGNITION');
+  assert.equal(f.trial[0].decisionReceipt.baselineSelectedStrategyId, 'PULLBACK');
+  assert.notEqual(f.trial[0].executionReceipt.candidate.outcome.netPct, f.trial[0].executionReceipt.baseline.outcome.netPct, 'each selected strategy has its own recomputed after-cost outcome');
+  const settlement = f.durable.settlement({
+    opportunityId: f.trial[0].saved.prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
+  });
+  assert.equal(settlement, null, 'trial forecasts do not silently become adaptive outcomes');
+  const initialSettlement = f.trial.at(-1).stateSettlement;
+  assert.ok(initialSettlement, 'a genuinely matured scored update has durable readback');
+  let snapshot = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer, currentStateSettlement: initialSettlement,
+    validatePreparedFacts: (facts, contract) => judgeLearningPreparedFactsError(facts, { consumerContract: contract }),
+    nowTs: f.now.value, mode: 'PAPER',
+  });
+  assert.equal(snapshot.withheld.length, 0);
+  assert.equal(snapshot.adaptiveRankingProcedure.qualification.qualificationVersion, 'adaptive-ranking-procedure-qualification-1');
+  const qualificationId = snapshot.adaptiveRankingProcedure.qualification.qualificationId;
+  const facts = f.trial[0].facts; const context = f.trial[0].context;
+  const positive = resolveQualifiedAdaptiveProcedureRanking({
+    snapshot, consumerContract: f.consumer, preparedFacts: facts,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    context, strategyId: 'IGNITION', baselineRewardRiskRatio: 1, mode: 'PAPER', nowTs: f.now.value,
+  });
+  const preChangeState = snapshot.adaptiveRankingProcedure.currentState;
+  assert.equal(positive.applied, true);
+  assert.equal(positive.adjustmentRrPoints, preChangeState.strategies.find((row) => row.strategyId === 'IGNITION').rankOffsetRrPoints);
+  assert.ok(preChangeState.sequence > f.trial[0].decisionReceipt.adaptiveState.sequence, 'the prospective trial consumed later lawful procedure states');
+  assert.ok(preChangeState.strategies.find((row) => row.strategyId === 'IGNITION').rankOffsetRrPoints > 0);
+  assert.ok(preChangeState.strategies.find((row) => row.strategyId === 'PULLBACK').rankOffsetRrPoints < 0);
+  assert.equal(resolveQualifiedAdaptiveProcedureRanking({
+    snapshot, consumerContract: f.consumer, preparedFacts: facts,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    context, strategyId: 'RANGE', baselineRewardRiskRatio: 1, mode: 'PAPER', nowTs: f.now.value,
+  }).adjustmentRrPoints, 0, 'the registered zero state remains an exact qualified no-op');
+  const stale = resolveQualifiedAdaptiveProcedureRanking({
+    snapshot: { ...clone(snapshot), preparedTs: snapshot.preparedTs - 16 * MIN },
+    consumerContract: f.consumer, preparedFacts: facts,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    context, strategyId: 'IGNITION', baselineRewardRiskRatio: 1, mode: 'PAPER', nowTs: f.now.value,
+  });
+  assert.equal(stale.applied, false); assert.equal(stale.effectiveRewardRiskRatio, 1);
+
+  const laterDecisionTs = f.now.value + MIN;
+  f.now.value = laterDecisionTs;
+  const laterFacts = preparedFacts(f.base, laterDecisionTs, 'BTC');
+  const laterPrediction = await f.owner.recordPrediction(predictionInput(f.procedure, laterFacts.factsDigest, laterDecisionTs, 'BTC', 'IGNITION'));
+  f.now.value = laterPrediction.prediction.targetEndTs + 1_000;
+  const adverse = adaptiveSettlementSubmission(f.procedure, laterPrediction.prediction, {
+    opportunityId: laterPrediction.prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS,
+    state: 'MATURED', logReturnPct: -1, sourceEventTs: laterPrediction.prediction.targetEndTs,
+    knownAtTs: f.now.value, sourceDigest: 'd'.repeat(64), reasonCode: null,
+  });
+  assert.equal((await f.owner.recordOutcome(adverse)).status, 'UPDATED');
+  assert.equal((await f.owner.recordOutcome(adverse)).status, 'EXISTING', 'duplicate outcome cannot update the procedure twice');
+  await f.owner.close();
+  f.durable = await openDurableAdaptiveStore({ rootDir: f.rootDir, procedure: f.procedure, durablePort: f.port, clock: () => f.now.value, portTimeoutMs: 1_000 });
+  f.owner = createAdaptiveProspectiveOwner({ store: f.durable, procedure: f.procedure, clock: () => f.now.value });
+  f.learning = createLearningStore({ dataDir: f.learningDir });
+  const laterSettlement = f.durable.settlement({ opportunityId: laterPrediction.prediction.opportunityId, horizonMs: ADAPTIVE_HORIZON_MS });
+  snapshot = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer, currentStateSettlement: laterSettlement,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    nowTs: f.now.value, mode: 'PAPER',
+  });
+  assert.equal(snapshot.adaptiveRankingProcedure.qualification.qualificationId, qualificationId, 'state evolution does not mint another approval');
+  const zero = resolveQualifiedAdaptiveProcedureRanking({
+    snapshot, consumerContract: f.consumer, preparedFacts: laterFacts,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    context: { ...context, asset: 'BTC' }, strategyId: 'IGNITION', baselineRewardRiskRatio: 1,
+    mode: 'PAPER', nowTs: f.now.value,
+  });
+  const negative = resolveQualifiedAdaptiveProcedureRanking({
+    snapshot, consumerContract: f.consumer, preparedFacts: laterFacts,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    context: { ...context, asset: 'BTC' }, strategyId: 'PULLBACK', baselineRewardRiskRatio: 1,
+    mode: 'PAPER', nowTs: f.now.value,
+  });
+  assert.equal(zero.applied, true);
+  assert.ok(zero.adjustmentRrPoints < preChangeState.strategies.find((row) => row.strategyId === 'IGNITION').rankOffsetRrPoints, 'new adverse evidence deteriorates the positive influence under the frozen update law');
+  assert.equal(negative.applied, true); assert.ok(negative.adjustmentRrPoints < 0);
+  assert.ok(negative.effectiveRewardRiskRatio < 1);
+  await f.owner.close();
+});
+
+test('same selected strategy uses one exact control arm and cannot manufacture an improvement', async (t) => {
+  const f = await fixture(t, { sameSelection: true });
+  assert.equal(f.settled.terminal.effect.pairedMeanDiff, 0);
+  assert.equal(f.settled.terminal.verdict, 'FORWARD_NOT_SUPPORTED');
+  assert.equal(f.settled.activation, null);
+  assert.equal(f.learning.activationHeads().size, 0);
+  await f.owner.close();
+});
+
+test('typed trial refuses shared metrics, caller-edited costs/path, lookahead, duplicate/mixed records and unqualified fallbacks', async (t) => {
+  const f = await fixture(t);
+  const original = f.trial[0];
+  const sharedMetric = {
+    kind: 'OUTCOME', candidateId: f.design.candidateId,
+    opportunityId: original.capture.opportunityId, outcomeClass: 'FAVORABLE', metricValue: 99,
+    outcomeKnownAtTs: original.decisionReceipt.labelEndTs,
+    recordedTs: original.decisionReceipt.labelEndTs + 1,
+  };
+  const mixed = replayProspective([
+    { kind: 'DESIGN_SEALED', design: f.design }, original.capture, sharedMetric,
+  ], { adaptiveRankingTrialValidator: f.validator });
+  assert.match(mixed.errors[0], /legacy outcome cannot settle an adaptive capture/);
+  const edited = clone(original.outcome);
+  edited.executionReceipt.candidate.outcome.netPct += 1;
+  edited.executionReceipt.executionDigest = canonicalDigest(Object.fromEntries(
+    Object.entries(edited.executionReceipt).filter(([key]) => !['executionId', 'executionDigest'].includes(key)),
+  ));
+  edited.executionReceipt.executionId = `artriale-${edited.executionReceipt.executionDigest.slice(0, 40)}`;
+  const checked = f.validator(edited, { stage: 'OUTCOME', design: f.design, capture: original.capture });
+  assert.match(checked.error, /deterministic replay/);
+  const future = clone(original.outcome);
+  future.executionReceipt.candidate.path[0].knownAtTs = future.executionReceipt.candidate.asOfTs + 1;
+  assert.match(f.validator(future, { stage: 'OUTCOME', design: f.design, capture: original.capture }).error, /future evidence/);
+  const partialDepth = clone(original.outcome);
+  partialDepth.executionReceipt.candidate.depthPath.intended.quoteNotional = 1_000_000;
+  assert.match(f.validator(partialDepth, { stage: 'OUTCOME', design: f.design, capture: original.capture }).error, /deterministic replay/);
+  const wrongArm = clone(original.capture);
+  wrongArm.decisionReceipt.candidateArm.executionCapture.assetId = 'ETH';
+  assert.match(f.validator(wrongArm, { stage: 'CAPTURE', design: f.design, capture: null }).error, /capture\/strategy\/market mismatch/);
+  const preLabel = clone(original.outcome);
+  preLabel.executionReceipt.outcomeKnownAtTs = original.decisionReceipt.labelEndTs - 1;
+  assert.match(f.validator(preLabel, { stage: 'OUTCOME', design: f.design, capture: original.capture }).error, /clock/);
+  const duplicate = replayProspective([
+    { kind: 'DESIGN_SEALED', design: f.design }, original.capture, original.capture,
+  ], { adaptiveRankingTrialValidator: f.validator });
+  assert.match(duplicate.errors[0], /duplicate capture/);
+
+  const noValidator = replayProspective([{ kind: 'DESIGN_SEALED', design: f.design }, original.capture]);
+  assert.match(noValidator.errors[0], /validator absent/);
+  assert.throws(() => settleCandidate({
+    store: f.learning, candidateId: f.design.candidateId, nowTs: f.now.value + 1,
+  }), /prospective journal invalid/);
+  const missingCustody = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer, currentStateSettlement: null,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    nowTs: f.now.value, mode: 'PAPER',
+  });
+  assert.equal(missingCustody.adaptiveRankingProcedure, null);
+  assert.match(missingCustody.withheld[0].reason, /CURRENT_ACK_LINEAGE_INVALID/);
+  const observe = resolveQualifiedAdaptiveProcedureRanking({
+    snapshot: missingCustody, consumerContract: f.consumer, preparedFacts: original.facts,
+    validatePreparedFacts: () => null, context: original.context,
+    strategyId: 'IGNITION', baselineRewardRiskRatio: 1, mode: 'OBSERVE', nowTs: f.now.value,
+  });
+  assert.equal(observe.applied, false); assert.equal(observe.effectiveRewardRiskRatio, 1);
+  const rolledBack = transitionActivation(f.active, {
+    state: 'ROLLED_BACK', transitionReason: 'ADVERSE_PAPER_EVIDENCE', ts: f.now.value + 1,
+  });
+  f.learning.appendActivation(rolledBack);
+  const revoked = readQualifiedAdaptiveProcedureDecision({
+    qualificationStore: f.learning, adaptiveStore: f.durable, publications: [f.publication],
+    currentConsumerContract: f.consumer,
+    currentStateSettlement: f.trial.at(-1).stateSettlement,
+    validatePreparedFacts: (value, contract) => judgeLearningPreparedFactsError(value, { consumerContract: contract }),
+    nowTs: rolledBack.ts + 1, mode: 'PAPER',
+  });
+  assert.equal(revoked.adaptiveRankingProcedure, null, 'rollback revokes the evolving procedure immediately');
+  assert.equal(revoked.withheld[0].reason, 'EXACT_ACTIVE_QUALIFICATION_MISSING');
+  await f.owner.close();
+});
+
+test('promotion defaults preserve the existing design identity and arbitrary metric/comparator pairs are closed', () => {
+  const store = { appendProspective() {}, appendPattern() {} };
+  const observations = [{
+    opportunityId: 'lop-default-design', canonicalCoin: 'BTC', decisionTs: T0,
+    evidenceBasis: 'HISTORICAL_RECONSTRUCTION', outcomeClass: 'FAVORABLE',
+  }];
+  const evidence = buildEvidence(observations);
+  const pattern = {
+    patternId: 'lpat-fixture', state: 'ACCUMULATING', predicate: { clauses: [{ feature: 'x', op: 'GT', threshold: 0 }] },
+    scope: { setupType: 'ANY', regime: 'ANY' }, evidence, createdTs: T0,
+    seq: 1, origin: 'TEST', estimate: estimateFromEvidence(observations, evidence, { pooledMean: 0.5, priorStrength: 8, updatedTs: T0 }), contradictions: [],
+  };
+  const consumerBinding = { featureRecipeVersion: 'recipe-1', policyDigest: POLICY };
+  assert.throws(() => freezeCandidate({
+    store, pattern, costModel: {}, consumerBinding, primaryMetric: 'CALLER_DEFINED',
+    comparator: 'CALLER_DEFINED', nowTs: T0,
+  }), /unsupported primary metric\/comparator pair/);
+  const a = freezeCandidate({ store, pattern, costModel: {}, consumerBinding, nowTs: T0 });
+  const b = freezeCandidate({
+    store, pattern, costModel: {}, consumerBinding,
+    primaryMetric: 'NET_LOG_RETURN_60M_PCT', comparator: 'BASELINE_RULE_SAME_STREAM', nowTs: T0,
+  });
+  assert.equal(a.candidateId, b.candidateId);
+  assert.equal(ADAPTIVE_PROCEDURE_TRIAL_DECISION_VERSION, 'adaptive-ranking-trial-decision-1');
+});
