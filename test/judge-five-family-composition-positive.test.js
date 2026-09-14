@@ -180,7 +180,7 @@ const suiteData = mkdtempSync(path.join(tmpdir(), 'judge-five-positive-'));
 process.env.COBRA_DATA_DIR = suiteData;
 test.after(() => rmSync(suiteData, { recursive: true, force: true }));
 
-function closedBars(kind, endTs) {
+function closedBars(kind, endTs, { executableScenario = false } = {}) {
   let rows;
   if (kind === 'RANGE_IGNITION') {
     rows = Array.from({ length: 61 }, (_, i) => i === 42
@@ -208,13 +208,20 @@ function closedBars(kind, endTs) {
       return { close, high: close + 200, low: close - 200 };
     });
   }
+  // Separate high-range synthetic oracles: the original small-range fixtures
+  // can correctly fail net reward/risk after 0.8% fees on BOTH legs. These
+  // preserve all gates/fees and supply a wider actually observed prior range;
+  // they are capability tests, not forecasts or prospective learning evidence.
+  if (executableScenario && kind === 'MOMENTUM_CONTINUATION') rows[45].low = 80_000;
+  if (executableScenario && kind === 'TREND_PULLBACK_CONTINUATION') rows[41].low = 80_000;
+  if (executableScenario && kind === 'MICRO_BITE') rows[51].high = 110_000;
   return rows.map((r, i) => ({ periodStartTs: endTs - (61 - i) * 60_000, periodEndTs: endTs - (60 - i) * 60_000, open: r.close, high: r.high, low: r.low, close: r.close, volumeQuote: 1_000, volumeBase: 0.01, closed: true }));
 }
 
 const fmt = (v, digits) => Number(v).toFixed(digits).replace('.', '').replace(/^0+/, '');
 const crcFor = (asks, bids) => crc32([...asks.slice(0, 10), ...bids.slice(0, 10)].map(([p, q]) => fmt(p, 1) + fmt(q, 8)).join(''));
 
-async function composedFamilyRun(setupId, { enabledSetups = [setupId], invalidTrigger = false } = {}) {
+async function composedFamilyRun(setupId, { enabledSetups = [setupId], invalidTrigger = false, executableScenario = false } = {}) {
   const [{ composeJudge, initAccount }, { createMemoryJournal }, { loadJudgePolicy }, { fakeClock, SPEC: executionSpec }, { indicatorBlock }, { assembleAnalysis2 }] = await Promise.all([
     import('../judge/composition.js'), import('../execution/journal.js'), import('../judge/policy.js'), import('./helpers/judge.js'), import('../judge/features.js'), import('../socrates/contract-v2.js'),
   ]);
@@ -238,7 +245,7 @@ async function composedFamilyRun(setupId, { enabledSetups = [setupId], invalidTr
   const run = await composeJudge({
     policyFile, mode: 'PAPER', accountId, journal, env: {},
     clock: { ...clock, observeWall: () => null, status: () => ({ trusted: true }), expired: (ts) => clock.now() > ts },
-    specs: [executionSpec], history: { bars: (_symbol, nowTs) => closedBars(setupId, Math.floor(nowTs / 60_000) * 60_000) },
+    specs: [executionSpec], history: { bars: (_symbol, nowTs) => closedBars(setupId, Math.floor(nowTs / 60_000) * 60_000, { executableScenario }) },
     caseSource: { consumed: () => consumed, status: () => ({}) },
     nominations: () => [{ symbol: 'XBT/USD', assetId: 'BTC', nominationKnownAtTs: clock.now(), source: 'FIVE_FAMILY_TEST' }],
     controlsSource: () => ({ kill: false, cage: false, vetoes: [] }),
@@ -268,7 +275,7 @@ async function composedFamilyRun(setupId, { enabledSetups = [setupId], invalidTr
     for (let i = 0; i < 40; i += 1) { advance(1_500); const reclaim = i >= 30; trade(100_000, reclaim ? 'buy' : 'sell', reclaim ? 0.2 : 0.02); book(100_000); }
   }
   if (consumed) run.deliverEvidence(clock.now());
-  const bars = closedBars(setupId, Math.floor((D - 22 * 60_000) / 60_000) * 60_000); const ind = indicatorBlock(bars);
+  const bars = closedBars(setupId, Math.floor((D - 22 * 60_000) / 60_000) * 60_000, { executableScenario }); const ind = indicatorBlock(bars);
   const triggerProbe = setupId === 'ABSORPTION_RECLAIM'
     ? null
     : freezeReferences({ setupId, ind, spec: executionSpec, fast: {}, event: catalystEvent, triggerTs: clock.now() });
@@ -300,6 +307,25 @@ const FAMILY_BY_SETUP = Object.freeze({
   ABSORPTION_RECLAIM: 'PULLBACK_REENTRY',
   CATALYST_TRANSMISSION: 'RUMOR_CATALYST',
   MICRO_BITE: 'MICRO_BITE',
+});
+
+for (const setupId of ['MOMENTUM_CONTINUATION', 'TREND_PULLBACK_CONTINUATION', 'CATALYST_TRANSMISSION', 'MICRO_BITE']) test(`entry acceptance oracle for ${setupId}`, async () => {
+  const r = await composedFamilyRun(setupId, { executableScenario: true });
+  try {
+    const final = r.run.judge.decisions().filter((x) => x.setupId === setupId).at(-1);
+    assert.equal(final?.status, 'ENTRY_RESERVED', JSON.stringify(final));
+  } finally { await r.run.stop(); }
+});
+
+for (const setupId of ['MOMENTUM_CONTINUATION', 'TREND_PULLBACK_CONTINUATION', 'MICRO_BITE']) test(`wider observed range cannot bypass adverse flow for ${setupId}`, async () => {
+  const r = await composedFamilyRun(setupId, { executableScenario: true, invalidTrigger: true });
+  try {
+    const decisions = r.run.judge.decisions().filter((x) => x.setupId === setupId);
+    assert.ok(decisions.length);
+    assert.equal(decisions.some((x) => x.status === 'ENTRY_RESERVED'), false);
+    assert.ok(decisions.some((x) => x.measurements.some((m) => m.id === 'FI15' && m.ok === false)));
+    assert.equal(r.run.fee.rate, '0.008');
+  } finally { await r.run.stop(); }
 });
 
 for (const setupId of Object.keys(FAMILY_BY_SETUP).filter((x) => x !== 'RANGE_IGNITION')) test(`normal PAPER composition reaches positive setup eligibility for ${setupId}`, async () => {
