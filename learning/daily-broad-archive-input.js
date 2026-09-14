@@ -158,7 +158,7 @@ export async function prepareDailyBroadArchiveInput({
     }
     if (rows !== descriptor.counters.asOfEligibleCivilDayRows) return fail('ROW_CENSUS_MISMATCH', 'paged row census differs from verified reader descriptor');
 
-    const marketDays = [];
+    const marketDays = []; const marketDayDigests = [];
     for (const market of acceptedCatalogSnapshot.markets) {
       const digest = marketIdentityDigest(market); const state = states.get(digest);
       state.rows.sort((a, b) => a.periodStartTs - b.periodStartTs || a.observationId.localeCompare(b.observationId));
@@ -182,7 +182,11 @@ export async function prepareDailyBroadArchiveInput({
         DEPTH: absent('UNSUPPORTED', 'ORDER_BOOK_DEPTH_NOT_ARCHIVED'),
         CATALYST: absent('UNSUPPORTED', 'CATALYST_EVIDENCE_NOT_ARCHIVED_IN_MARKET_CANDLE_SOURCE'),
       };
-      marketDays.push({ marketIdentityDigest: digest, priceEvents: [], candles: state.rows, support });
+      const marketDay = { marketIdentityDigest: digest, priceEvents: [], candles: state.rows, support };
+      marketDays.push(marketDay);
+      // Hash one bounded market at a time. Hashing the full day object in one
+      // canonical string would duplicate a large all-market payload in memory.
+      marketDayDigests.push({ marketIdentityDigest: digest, marketDayDigest: canonicalDigest(marketDay) });
     }
     const catalogEpochDigest = canonicalDigest(descriptor.catalogEpochs);
     const provenance = {
@@ -202,13 +206,21 @@ export async function prepareDailyBroadArchiveInput({
         readerDatasetId: descriptor.datasetId, readerDatasetDigest: descriptor.datasetDigest,
         catalogEpochDigest, catalogEpochs: descriptor.catalogEpochs.length,
         catalogMarkets: acceptedCatalogSnapshot.acceptedMarketCount, rows, pages,
-        materializedBytes, candleProvenance: 'DIRECT_CONSERVATIVE_CLOSED_OHLC',
+        materializedBytes,
+        materializedByteBasis: 'SUM_UTF8_JSON_BYTES_OF_CANDLE_PROJECTIONS;NOT_PROCESS_HEAP_OR_CONTAINER_OVERHEAD',
+        candleProvenance: 'DIRECT_CONSERVATIVE_CLOSED_OHLC',
         baseVolumeProvenance: 'DIRECT_VENUE_CANDLE_BASE_VOLUME',
         quoteVolumeProvenance: 'UNAVAILABLE_NOT_DERIVED', fullDetailClaimed: false,
         authority: 'NONE', durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
       },
     };
-    const inputDigest = canonicalDigest(body);
+    // Content identity must not change when an operator chooses a different
+    // bounded page size. Page count/bytes remain useful diagnostics, but are
+    // transport observations rather than learning input content.
+    const inputDigest = canonicalDigest({
+      version: body.version, acceptedCatalogSnapshotDigest: acceptedCatalogSnapshot.contentDigest,
+      marketDayDigests, manifestCatalogProvenance: provenance,
+    });
     return deepFreeze({ ...body, inputDigest });
   } catch (error) {
     return fail(error?.code ?? 'ARCHIVE_INPUT_REFUSED', error?.message ?? 'archive input refused');
