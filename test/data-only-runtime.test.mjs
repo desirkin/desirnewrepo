@@ -27,14 +27,18 @@ function importGraph(file, seen = new Set()) {
 }
 
 // runtime unification step 1 (2026-09-14): the entry keeps the safety pins and calls lib/serpent-runtime.js, which holds the
-// spine verbatim. Source-shape assertions read the entry PLUS the spine; the import-graph fence covers both.
+// spine verbatim. Step 2: the spine delegates durable restore to lib/external-quota.js and the collector set to
+// lib/collectors.js (env injected as `env`, defaulting to process.env; phases set through phase()). Source-shape assertions
+// read entry + spine + quota + collectors IN THAT ORDER (the startup order), so the index comparisons below still hold; the
+// import-graph fence walks all of them.
 const spine = path.join(root, 'lib', 'serpent-runtime.js');
-const entryAndSpine = () => readFileSync(entry, 'utf8') + '\n' + readFileSync(spine, 'utf8');
+const spineModules = [spine, path.join(root, 'lib', 'external-quota.js'), path.join(root, 'lib', 'collectors.js')];
+const entryAndSpine = () => [entry, ...spineModules].map((file) => readFileSync(file, 'utf8')).join('\n');
 
 test('data-only entrypoint import graph contains no trading composition or order runtime', () => {
-  const graph = [...importGraph(entry), ...importGraph(spine)];
+  const graph = [...importGraph(entry), ...spineModules.flatMap((file) => [...importGraph(file)])];
   for (const file of graph) for (const denied of forbidden) assert.equal(file.includes(denied), false, `forbidden data-only dependency: ${file}`);
-  assert.ok(graph.includes(path.resolve(spine)), 'the entry reaches the spine');
+  for (const file of spineModules) assert.ok(graph.includes(path.resolve(file)), `the entry reaches ${path.basename(file)}`);
   const source = entryAndSpine();
   assert.match(source, /JUDGE_ENABLED:\s*'false'/);
   assert.match(source, /JUDGE_ALLOW_ORDERS:\s*'false'/);
@@ -52,7 +56,7 @@ test('data-only launcher derives official/social scope from the accepted catalog
 test('data-only launcher starts and reports zero-order market observations with its own guarded transport', () => {
   const source = entryAndSpine();
   assert.match(source, /from '\.\.\/tools\/data-only-market\.mjs'/);
-  assert.match(source, /market = await startDataOnlyMarket\(\{ env: process\.env, dataDir: root, log, quotaJournal: checkpoints\.market \}\)/);
+  assert.match(source, /market = await startDataOnlyMarket\(\{ env, dataDir: root, log, quotaJournal: checkpoints\.market \}\)/);
   assert.match(source, /handles\.push\(market\)/);
   assert.match(source, /market:\s*market\?\.status\?\.\(\)/);
   assert.match(source, /blockers\.MARKET/);
@@ -68,7 +72,7 @@ test('outer market funnel subscribes the complete accepted catalog independently
   assert.ok(source.indexOf('await wideEye._refreshCatalog()') < source.indexOf('await startBroadKraken('));
   assert.ok(source.indexOf('await openDataOnlyCheckpoints(') < source.indexOf('await startBroadKraken('));
   assert.doesNotMatch(source, /\b(?:BTC|ETH|SOL)\b|composeDataOnlySocialConfig/);
-  const broad = source.slice(source.indexOf('if (catalogSource)'), source.indexOf("const env = { ...process.env, INFRA_OBS_ENABLED"));
+  const broad = source.slice(source.indexOf('if (catalogSource)'), source.indexOf("const infraEnv = { ...env, INFRA_OBS_ENABLED"));
   assert.match(broad, /startBroadKraken/);
   assert.doesNotMatch(broad, /checkpoints\?\.market|if \(catalog\)/);
   assert.match(source, /if \(!checkpoints\?\.market\) throw/, 'deep REST quota gate is preserved');
@@ -83,7 +87,7 @@ test('data-only deployment composes the existing YouTube collector behind explic
   }
   assert.match(source, /from '\.\.\/video\/collector\.js'/);
   assert.match(source, /from '\.\.\/video\/reader\.js'/);
-  assert.match(source, /startVideo\(\{ env: process\.env, dataDir: root, log, signals: false, durableCheckpoint: checkpoints\?\.video \?\? null \}\)/);
+  assert.match(source, /startVideo\(\{ env, dataDir: root, log, signals: false, durableCheckpoint: checkpoints\?\.video \?\? null \}\)/);
   assert.match(source, /blockers\.YOUTUBE/);
   assert.match(source, /youtube:\s*video \? readVideoStatus\(root\)/);
   assert.match(source, /handles\.push\(video\)/, 'normal shutdown must stop the YouTube handle');
@@ -103,7 +107,7 @@ test('data-only news uses official feeds plus bounded GDELT metadata and withhol
   assert.match(source, /DISCOVERY_KALSHI_MAX_DAILY_REQUESTS:\s*'48'/);
   assert.match(source, /DISCOVERY_GDELT_RESULT_LIMIT:\s*'50'/);
   assert.match(source, /DISCOVERY_GDELT_ASSETS_PER_QUERY:\s*'12'/);
-  assert.match(source, /contact:\s*process\.env\.SERPENT_HTTP_CONTACT \?\? null/);
+  assert.match(source, /contact:\s*env\.SERPENT_HTTP_CONTACT \?\? null/);
   assert.match(source, /edgarEnabled:\s*false/);
   assert.match(source, /CFTC_OFFICIAL:\s*officialFeed\('CFTC_OFFICIAL'\)/);
   assert.match(source, /SEC_OFFICIAL:\s*officialFeed\('SEC_OFFICIAL'\)/);

@@ -22,7 +22,7 @@ import { classifyOfficialItem } from '../rumor2/truth.js';
 import { SOCIAL_PROVIDER_KINDS, normalizeSocialObservation } from '../rumor2/social.js';
 import { SOCIAL_PROVIDERS, SOCIAL_PROVIDER_IDS, socialProviderById } from '../rumor2/social-registry.js';
 import { socialObservationToEvent, validateSocialEvent, SOCIAL_EVENT_TYPE } from '../rumor2/social-settle.js';
-import { DATA_ONLY_COMPOSITION_ROOT, DATA_ONLY_RUNTIME_SPINE, OPERATOR_SETUP_SMOKE_TOOLS, RUMOR2_LIVE_WIRING_POINTS, TRADING_TIER_IMPORT_RE } from './helpers/composition-roots.js';
+import { DATA_ONLY_COMPOSITION_ROOT, RUNTIME_SPINE_MODULES, RUNTIME_SPINE_IMPORTER, OPERATOR_SETUP_SMOKE_TOOLS, RUMOR2_LIVE_WIRING_POINTS, RUMOR2_IMPORTING_WIRING_POINTS, TRADING_TIER_IMPORT_RE } from './helpers/composition-roots.js';
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
@@ -90,14 +90,15 @@ const OFFLINE_RESEARCH_RUMOR2_IMPORTERS = Object.keys(OFFLINE_RESEARCH_RUMOR2_IM
 // no-trading-tier import law as the data-only root. They are not composition roots of the running application.
 // The names live in ONE place: test/helpers/composition-roots.js (shared with the SOCIAL-5B fences).
 test('DATA-ONLY / SMOKE roots. the data-only composition root and the operator smoke tools are named, tracked, tools/-only, imported by nothing, and import no trading tier', () => {
-  for (const f of [DATA_ONLY_COMPOSITION_ROOT, DATA_ONLY_RUNTIME_SPINE, ...OPERATOR_SETUP_SMOKE_TOOLS]) {
+  for (const f of [DATA_ONLY_COMPOSITION_ROOT, ...RUNTIME_SPINE_MODULES, ...OPERATOR_SETUP_SMOKE_TOOLS]) {
     assert.ok(tracked.includes(f), `${f} is tracked`);
-    assert.ok(f.startsWith('tools/') || f === DATA_ONLY_RUNTIME_SPINE, `${f} lives under tools/ (or is the named spine)`);
+    assert.ok(f.startsWith('tools/') || RUNTIME_SPINE_MODULES.includes(f), `${f} lives under tools/ (or is a named spine module)`);
     assert.ok(!TRADING_TIER_IMPORT_RE.test(read(f)), `${f} imports no trading / control / model tier`);
     assert.ok(!/from\s+'pg'/.test(code(f)), `${f} never touches the pg driver directly`);
     const base = f.slice(f.lastIndexOf('/') + 1);
     const importers = tracked.filter((x) => x !== f && !x.startsWith('test/') && new RegExp(`from\\s+'[^']*${base.replace('.', '\\.')}'|import\\('[^']*${base.replace('.', '\\.')}'\\)`).test(code(x)));
-    assert.deepEqual(importers, f === DATA_ONLY_RUNTIME_SPINE ? [DATA_ONLY_COMPOSITION_ROOT] : [], f === DATA_ONLY_RUNTIME_SPINE ? 'the spine is imported ONLY by the data-only root' : `${f} is a leaf entry point, imported by no tracked module`);
+    const owner = RUNTIME_SPINE_IMPORTER[f] ?? null;
+    assert.deepEqual(importers, owner ? [owner] : [], owner ? `${f} is imported ONLY by ${owner}` : `${f} is a leaf entry point, imported by no tracked module`);
   }
   assert.match(read('package.json'), /"data:only":\s*"node tools\/data-only-runtime\.mjs"/, 'the data-only root is the declared npm entry');
 });
@@ -154,9 +155,10 @@ test('R2A-76+77. STRIKE-capable and order-path modules never read RUMOR-2', () =
   // SOCIAL-5B: the OFFLINE research readers are the only other importers — enumerated by file, each limited to the pure
   // validators / replay helpers / constants it names, never a collector, provider runtime, strainer or startup path.
   // fly.js stays the ONLY live collector composition root; this is a read-only exception, not a weakened fence.
-  // the data-only ROOT delegates to its spine since unification step 1, so the spine — not the root — is the rumor2 importer
-  const expectedLive = RUMOR2_LIVE_WIRING_POINTS.filter((f) => f !== DATA_ONLY_COMPOSITION_ROOT);
-  assert.deepEqual(importers.sort(), [...expectedLive, ...OFFLINE_RESEARCH_RUMOR2_IMPORTERS].sort(), 'exactly the named LIVE wiring points (fly.js, the data-only spine, the operator smoke tools) plus the enumerated offline research readers');
+  // the data-only ROOT delegates to its spine (step 1) and the spine to lib/collectors.js (step 2), so the collectors module —
+  // not the root, not the spine — is the rumor2 importer among the data-only wiring points
+  const expectedLive = RUMOR2_IMPORTING_WIRING_POINTS;
+  assert.deepEqual(importers.sort(), [...expectedLive, ...OFFLINE_RESEARCH_RUMOR2_IMPORTERS].sort(), 'exactly the named LIVE wiring points that import the collector (fly.js, lib/collectors.js, the operator smoke tools) plus the enumerated offline research readers');
   for (const [f, allowed] of Object.entries(OFFLINE_RESEARCH_RUMOR2_IMPORTS)) {
     const specs = [...read(f).matchAll(/import\s+\{([^}]*)\}\s+from\s+'\.\.\/rumor2\/([a-z0-9-]+\.js)'/g)].map((m) => [m[2], m[1].split(',').map((x) => x.trim().split(/\s+as\s+/)[0]).filter(Boolean)]);
     assert.ok(specs.length > 0, `${f}: imports rumor2 through named specifiers only`);

@@ -52,9 +52,10 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
 
 test('B08 (live -> research): the live path never imports research/, socrates/ or evidence v2; market-lab is reached ONLY by fly.js (service, commands, deep-market adapter) and the read-only UI server (paths); Tape, ledger, cost, state, gateway, governance never mention the research modules', () => {
   // runtime unification step 1 (2026-09-14): lib/serpent-runtime.js is the data-only composition spine (moved verbatim from
-  // tools/data-only-runtime.mjs, which was outside LIVE_FILES). It starts the broad Kraken capture and the data-only market
-  // catalogs owner — observation only; it imports no research/, socrates/ or evidence v2 module (asserted below).
-  const ALLOWED = { 'fly.js': ['market-lab/deep-market-adapter.js', 'market-lab/service.js', 'market-lab/commands.js', 'market-lab/paths.js'], 'ui/server.js': ['market-lab/paths.js', 'market-lab/time.js', 'market-lab/broad-kraken.js'], 'lib/serpent-runtime.js': ['market-lab/broad-kraken.js', 'tools/data-only-market.mjs', 'tools/data-only-checkpoints.mjs'], 'persistence/social-research-export.js': ['research/'] };
+  // tools/data-only-runtime.mjs, which was outside LIVE_FILES). Step 2: the collector set moved to lib/collectors.js, which
+  // starts the broad Kraken capture and the data-only market catalogs owner — observation only; lib/external-quota.js opens
+  // the quota checkpoints. None imports a research/, socrates/ or evidence v2 module (asserted below).
+  const ALLOWED = { 'fly.js': ['market-lab/deep-market-adapter.js', 'market-lab/service.js', 'market-lab/commands.js', 'market-lab/paths.js'], 'ui/server.js': ['market-lab/paths.js', 'market-lab/time.js', 'market-lab/broad-kraken.js'], 'lib/collectors.js': ['market-lab/broad-kraken.js', 'tools/data-only-market.mjs'], 'lib/external-quota.js': ['tools/data-only-checkpoints.mjs'], 'persistence/social-research-export.js': ['research/'] };
   assert.ok(LIVE_FILES.length >= 30, `live files ${LIVE_FILES.length}`);
   for (const f of LIVE_FILES) {
     for (const spec of imports(f)) {
