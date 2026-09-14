@@ -46,7 +46,7 @@ test('STRAT-C02: normal composition supplies all five families and exact v2 port
     controlsSource: () => ({ kill: false, cage: false, vetoes: [] }),
     transport: async () => { transportCalls += 1; throw new Error('unexpected transport'); },
     allowPrivate: () => false, allowOrders: () => false,
-    persistenceHealth: () => ({ allowPermissionIncrease: true }),
+    persistenceHealth: () => ({ permissionLock: false }),
     writeProjection: false, codeDigest: 'f'.repeat(64), log: () => {},
   };
   let run = await composeJudge(options);
@@ -92,4 +92,40 @@ test('STRAT-C04: selecting v2 for an existing v1 account refuses instead of sile
   const after = await journal.load(accountId);
   assert.equal(after.revision, before.revision);
   assert.deepEqual(after.state, before.state);
+});
+
+test('CACHE-C01: normal PAPER maintenance refreshes learning asynchronously while Judge/Watch ticks and stop remain available', async () => {
+  const journal = createMemoryJournal(); const clock = fakeClock(); const accountId = 'isolated-cache-composition';
+  await initAccount({ journal, policy: candidate.policy, policyDigest: candidate.digest, accountId,
+    mode: 'PAPER', ownerRef: 'TEST_ONLY', nowTs: clock.now() });
+  let calls = 0; let settleSource; let sourceSignal;
+  const run = await composeJudge({ policyFile: candidateFile, mode: 'PAPER', accountId, journal,
+    env: {}, clock: { ...clock, status: () => ({ trusted: true }) }, specs: [], nominations: () => [],
+    history: { bars: () => null }, caseSource: { consumed: () => null, status: () => ({}) },
+    controlsSource: () => ({ kill: false, cage: false, vetoes: [] }),
+    persistenceHealth: () => ({ permissionLock: false }), codeDigest: 'f'.repeat(64),
+    writeProjection: false, log: () => {}, learningActivationSource: ({ signal }) => {
+      calls += 1; sourceSignal = signal; return new Promise((resolve) => { settleSource = resolve; });
+    },
+  });
+  try {
+    await run.judge.onTick(clock.now());
+    assert.equal(calls, 0, 'Judge does not prepare learning data');
+    await run.tick();
+    assert.equal(calls, 1, 'maintenance requested the prepared source');
+    assert.equal(run.learningSnapshotStatus().inFlight, true);
+    const before = run.runtimeLanes().watchCompleted;
+    clock.advance(250); await run.tick();
+    assert.ok(run.runtimeLanes().watchCompleted > before);
+    assert.equal(calls, 1, 'held source does not start overlapping refreshes');
+    await run.stop();
+    assert.equal(sourceSignal.aborted, true);
+    settleSource({ preparedTs: clock.now(), activations: [], kill: { state: 'ARMED', ts: clock.now() } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(run.learningSnapshotStatus().disposed, true);
+    assert.equal(run.learningSnapshotStatus().accepted, 0, 'late publication after stop is refused');
+  } finally {
+    settleSource?.(null);
+    await run.stop();
+  }
 });

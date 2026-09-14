@@ -40,6 +40,7 @@ import { createSnapshotStore } from './snapshot-store.js';
 import { primaryConfirmedCatalyst, primaryCorrections } from './intake.js';
 import { selectPreparation } from './readiness.js';
 import { codeTreeDigest } from './owner.js';
+import { createLearningSnapshotCache } from './learning-snapshot-cache.js';
 
 export const COMPOSITION_VERSION = 'judge-composition-1';
 export const RUN_MODES = Object.freeze(['OBSERVE', 'REPLAY', 'PAPER', 'LIVE_UNARMED', 'LIVE_ARMED']);
@@ -134,12 +135,13 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   if ((armRule || exitPolicy || verdictSink) && mode !== 'REPLAY') throw new Error('armRule / exitPolicy / verdictSink are research configuration: only a REPLAY composition may carry them');
   const watch = createWatch({ accountId: acct, dispatcher, adapter, feed: fd, clock: pclock, specOf, feeOf: () => fee, controls, falsifiers: () => falsifierList, snapshotStore, log, exitPolicy, edgeState: strategyPorts.edgeState });
   // LEARN-1 consumer seam (ADDENDUM-2 §08): an OPTIONAL bounded read-only activation source injected beside the
-  // existing case/market accessors. Absent (fly.js and every current composition pass nothing), the Judge is the
-  // byte-identical baseline. When present, the prepared immutable snapshot is refreshed OUTSIDE the decision loop
-  // (here, lazily at most once per PERIODIC_RECONCILE window) — never a store read, network call or model call in
-  // admission; a source fault yields no snapshot, which the selector answers with BASELINE_ONLY.
-  let learningSnap = null; let learningSnapTs = 0;
-  const learning = learningActivationSource ? { snapshot: () => { const t = nowTs(); if (!learningSnap || t - learningSnapTs > 60_000) { try { learningSnap = learningActivationSource(); learningSnapTs = t; } catch (err) { log(`learning activation source failed (baseline): ${String(err?.message ?? err).slice(0, 160)}`); learningSnap = null; } } return learningSnap; } } : null;
+  // existing case/market accessors. Absent, the baseline is unchanged. Source
+  // reads happen only in maintenance; admission only reads an immutable cache.
+  // A source fault, pending result, stale snapshot or stop preserves baseline.
+  // This is not CPU isolation: source must itself be a prepared bounded port.
+  const learningCache = learningActivationSource && mode === 'PAPER'
+    ? createLearningSnapshotCache({ source: learningActivationSource, clock: nowTs }) : null;
+  const learning = learningCache ? { snapshot: learningCache.read } : null;
   const judge = createJudge({ accountId: acct, policy, policyDigest, dispatcher, feed: fd, clock: pclock, specOf, feeOf: () => fee, history: hist, caseSource: cases, controls, lockLevel, log, mode, snapshotStore, armRule, verdictSink, learning, dynamicSizing, setupSelection: strategyPorts.setupSelection, edgeState: strategyPorts.edgeState, permissionIncreaseAllowed: entryPermissionIncreaseAllowed });
   if (hist.onTrade) fd.subscribe((e) => { if (e.kind === 'TRADE') hist.onTrade(e.trade); });
   // ---- nominations: the tape's current universe (bounded by the policy), never a research ranking, never a buy list ----
@@ -250,6 +252,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   const elapsed = (start) => Math.max(0, pclock.monotonic() - start);
   const laneStatus = () => ({ ...laneReport, safetyInFlight: Boolean(safetyTask), coreInFlight: Boolean(coreTask), maintenanceInFlight: Boolean(maintenanceTask), maintenancePending: Boolean(maintenancePending), clockInFlight: Boolean(clockTask) });
   async function scanMaintenance(t, periodic) {
+    if (!stopped && learningCache) void learningCache.refresh();
     if (stopped) return;
     if (periodic) { try { admitNominations(); } catch (err) { log(`nominations: ${err.message}`); } }
     if (!periodic || stopped) return;
@@ -306,6 +309,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   return {
     compositionVersion: COMPOSITION_VERSION, accountId: acct, mode, kind, policy, policyDigest, codeDigest: treeDigest, journal: jr, writer, dispatcher, feed: fd, tapeFeed, adapter, judge, watch, history: hist, cases, clock: pclock, fee, specOf, credentialsPresent: Boolean(credentials), keyFingerprint: fp, projection, tick, preflight, arm, disarm, resumeLiveArmed, admitNominations, checkAuthorizationBinding, lastPreflight: () => lastPreflight, lockLevel, publishValuation,
     registerSpec(spec) { captureSpec(spec); return spec; },
+    learningSnapshotStatus: () => learningCache?.status() ?? null,
     async start({ heartbeatMs = 250, projectionMs = 2000, schedulerMs = SCHEDULER_TICK_MS } = {}) {
       lifecycle.push('START');
       // restoration law (closeout R16): the durable chain must verify against the stored projection; a reducer-version change re-derives
@@ -326,7 +330,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
       if (writeProjection) { projectionTimer = setInterval(publishProjection, projectionMs); projectionTimer.unref?.(); publishProjection(); } lifecycle.push('RUNNING'); return report; },
     // stop: producers first (feed no-op, timers cleared, admission closed), then the drain, the SHUTDOWN reconciliation and the owner
     // slot release ONLY after a verified handoff, the socket close, the checkpoint / projection, and the writer release LAST
-    async stop({ drainMs = 10_000 } = {}) { if (stopped) return null; stopped = true; lifecycle.push('PRODUCERS_STOPPED'); if (heartbeat) clearInterval(heartbeat); if (schedulerTimer) clearInterval(schedulerTimer); if (projectionTimer) clearInterval(projectionTimer); try { adapter.stopAdmission(); } catch { /* none */ }
+    async stop({ drainMs = 10_000 } = {}) { if (stopped) return null; stopped = true; learningCache?.dispose(); lifecycle.push('PRODUCERS_STOPPED'); if (heartbeat) clearInterval(heartbeat); if (schedulerTimer) clearInterval(schedulerTimer); if (projectionTimer) clearInterval(projectionTimer); try { adapter.stopAdmission(); } catch { /* none */ }
       await Promise.allSettled([safetyTask, coreTask, maintenanceTask, clockTask].filter(Boolean)); lifecycle.push('RUNTIME_LANES_SETTLED');
       let shutdown = null; let ownerRelease = null;
       if (kind === 'LIVE' && !dispatcher.writerLost()) { try { shutdown = await dispatcher.restart({ scope: 'SHUTDOWN' }); } catch (err) { shutdown = { error: err.message }; } lifecycle.push('SHUTDOWN_RECONCILED'); const reconciled = shutdown?.reconciliation?.outcome === 'COMPLETE' && !(shutdown?.uncertainOrders ?? []).length; if (typeof jr.releaseLiveOwner === 'function') { try { ownerRelease = reconciled ? await jr.releaseLiveOwner({ venue: 'kraken', accountId: acct, writerEpoch: writer.epoch, reason: 'run ended: shutdown reconciliation COMPLETE, no uncertain dispatch', reconciled: true }) : { ok: false, held: true, reason: `slot retained: shutdown reconciliation ${shutdown?.reconciliation?.outcome ?? 'ABSENT'}, ${(shutdown?.uncertainOrders ?? []).length} uncertain` }; } catch (err) { ownerRelease = { ok: false, held: true, reason: err.message }; } lifecycle.push(ownerRelease?.ok ? 'OWNER_RELEASED' : 'OWNER_RETAINED'); }
