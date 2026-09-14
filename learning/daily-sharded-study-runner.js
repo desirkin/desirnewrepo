@@ -184,6 +184,13 @@ function stateError(state, descriptor, limits) {
   return null;
 }
 
+export function dailyShardedStudyStateError(state, { descriptor, limits: suppliedLimits } = {}) {
+  if (!descriptor || typeof descriptor !== 'object') return 'runner state descriptor missing';
+  let limits;
+  try { limits = limitsOf(suppliedLimits); } catch (error) { return error.message; }
+  return stateError(state, descriptor, limits);
+}
+
 function fsyncDirectory(directory) {
   let fd;
   try { fd = openSync(directory, 'r'); fsyncSync(fd); }

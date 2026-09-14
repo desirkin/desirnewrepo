@@ -12,6 +12,7 @@ import { randomBytes } from 'node:crypto';
 import { atomicWriteJson, readJsonBounded } from '../lib/jsonl.js';
 import { dailyMoveControlMatchDistance, dailyMoveStudyManifestError } from './daily-move-study.js';
 import { openDailyBroadArchiveShardSource } from './daily-broad-archive-shards.js';
+import { dailyShardedStudyStateError } from './daily-sharded-study-runner.js';
 import {
   DAILY_SHARD_PREFIX_LIMITS, dailyShardPrefixArtifactError,
   sealDailyShardPrefixArtifact, sealDailySurgeAnchorInventory,
@@ -295,6 +296,8 @@ async function openImpl({
   try {
     source = await sourceFactory({ archiveRoot, dayStartTs, dayEndTs, asOfTs, readerLimits, shardLimits, signal });
     const descriptor = source.descriptor; const job = runnerState.job; const runnerAcks = runnerState.acknowledgments;
+    const runnerStateError = dailyShardedStudyStateError(runnerState, { descriptor });
+    if (runnerStateError) throw fail('CONTROL_CLASSIFICATION_STATE_INVALID', runnerStateError);
     if (!plain(job) || descriptor.datasetId !== job.datasetId || descriptor.datasetDigest !== job.datasetDigest
         || descriptor.sourceDatasetId !== job.sourceDatasetId || descriptor.sourceDatasetDigest !== job.sourceDatasetDigest
         || descriptor.acceptedCatalogSnapshot.contentDigest !== job.catalogSnapshotDigest

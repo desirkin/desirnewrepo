@@ -215,14 +215,20 @@ test('incomplete/mixed/forged classifier inventories and missing source shards r
   await assert.rejects(openDailyShardControlAggregatorForTest({
     stateRoot: tempRoot('daily-control-mixed-'), dayStartTs: START, dayEndTs: END, asOfTs: AS_OF,
     manifest: definition.manifest, runnerState,
-  }, { source: makeSource(definition, { changedDescriptor }) }), { code: 'CONTROL_SOURCE_BINDING_INVALID' });
+  }, { source: makeSource(definition, { changedDescriptor }) }), { code: 'CONTROL_CLASSIFICATION_STATE_INVALID' });
 
   const forged = structuredClone(runnerState);
   forged.acknowledgments[2].output.catalogContentDigest = 'e'.repeat(64);
   await assert.rejects(openDailyShardControlAggregatorForTest({
     stateRoot: tempRoot('daily-control-forged-'), dayStartTs: START, dayEndTs: END, asOfTs: AS_OF,
     manifest: definition.manifest, runnerState: forged,
-  }, { source: makeSource(definition) }), { code: 'PREFIX_ACK_INVENTORY_INVALID' });
+  }, { source: makeSource(definition) }), { code: 'CONTROL_CLASSIFICATION_STATE_INVALID' });
+
+  const malformedJob = structuredClone(runnerState); malformedJob.job.unexpected = true;
+  await assert.rejects(openDailyShardControlAggregatorForTest({
+    stateRoot: tempRoot('daily-control-malformed-job-'), dayStartTs: START, dayEndTs: END, asOfTs: AS_OF,
+    manifest: definition.manifest, runnerState: malformedJob,
+  }, { source: makeSource(definition) }), { code: 'CONTROL_CLASSIFICATION_STATE_INVALID' });
 
   const missingRoot = tempRoot('daily-control-missing-shard-');
   const missing = await openDailyShardControlAggregatorForTest({
