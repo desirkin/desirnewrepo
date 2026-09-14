@@ -26,123 +26,32 @@
 //     oversized receipt is refused, never truncated.
 //   * Not an authority — this is storage only; it grants no learning/promotion
 //     authority.
-import { createHash } from 'node:crypto';
 import { SQL, SQL_BODY, DSIM_STORE_VERSION, RESULT_COLS, COMPLETED_COLS, MAX_INSERT_ROWS_PER_STATEMENT, MAX_INSERT_PARAMS, RESULT_INSERT_BULK_PREFIX, COMPLETED_INSERT_BULK_PREFIX, RESULT_BODY_COLS, RESULT_BODY_INSERT_BULK_PREFIX, buildValuesTuples } from './daily-simulation-schema.js';
+// The outcome-body canonical SHA-256 law lives in ONE pure module shared by the
+// learning scheduler and this store (no drift, no fence violation). encodeOutcomeBody
+// is re-exported below to preserve this module's public API.
+import { encodeOutcomeBody, stableStringify, sha256Hex, EVIDENCE_DIGEST_SCHEME, DEFAULT_MAX_OUTCOME_BODY_BYTES } from '../learning/daily-simulation-body.js';
+export { encodeOutcomeBody, DEFAULT_MAX_OUTCOME_BODY_BYTES };
 
 const yieldNow = () => new Promise((resolve) => setImmediate(resolve));
-const EVIDENCE_DIGEST_SCHEME = 'sha256:'; // content-identity scheme tag for new receipts
 const MAX_REBUILD_SNAPSHOT_ATTEMPTS = 6;   // bounded retry for a consistent-revision read
 const DEFAULT_BODY_VERIFY_PAGE = 1000;     // keyset page size for streaming body verification
-const MAX_BODY_DEPTH = 64;                 // structural depth ceiling (rejects deep nesting before the stack)
-const MAX_BODY_NODES = 200000;             // node-count ceiling (rejects exponential shared-ref expansion)
-const INDEX_KEY_RE = /^(0|[1-9][0-9]*)$/;  // canonical array index string
 
 export const STORE_PORT_VERSION = 'daily-sim-scheduler-2';
 export const DEFAULT_POLICY_VERSION = 'sim2-policy-1';
 export const DEFAULT_MAX_RESULT_ROWS = 4096;      // 64 frames * up to 64 variant rows
 export const DEFAULT_MAX_RECEIPT_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_MAX_DAY_ROWS = 1_000_000;    // bounded restart read guard per list
-export const DEFAULT_MAX_OUTCOME_BODY_BYTES = 16 * 1024;        // 16 KiB per credited sim
 export const DEFAULT_MAX_BATCH_BODY_BYTES = 4 * 1024 * 1024;    // 4 MiB per commit
 export const DEFAULT_MAX_DAY_BODY_BYTES = 1024 * 1024 * 1024;   // 1 GiB per day (fail-closed ceiling)
 const REVISITABLE = new Set(['PENDING_HORIZON', 'OUTCOME_PATH_INCOMPLETE', 'OUTCOME_PATH_MISSING']);
 
-// Store-side canonical content digest. Used to VERIFY batch idempotency against
-// the actual receipt contents, not the caller's claimed payloadDigest — a
-// repeated batchId whose contents differ is refused, never returned as false
-// idempotent success. Content identity uses SHA-256 (a real content hash),
-// scheme-tagged so a stored digest that predates this scheme (or is null) is
-// treated as legacy/unverifiable rather than falsely claimed verified.
-function stableStringify(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const keys = Object.keys(value).sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
-}
-function sha256Hex(str) { return createHash('sha256').update(str, 'utf8').digest('hex'); }
-// Typed encode error so callers can map size vs structure to the right refusal.
-function bodyError(code, msg) { const e = new DsimStoreError(`outcome body: ${msg}`); e.code = code; return e; }
-
-// STRICT canonical JSON + SHA-256 content identity for outcome bodies, with
-// fail-fast ceilings. Unlike stableStringify (which leans on JSON.stringify and
-// silently collapses undefined/NaN/Infinity to null, drops functions, and via
-// Object.keys/`i in value` ignores symbol/non-enumerable/inherited keys), this:
-//   * enumerates OWN keys via Reflect.ownKeys and rejects any symbol key, any
-//     non-enumerable key, and any accessor (getter/setter) — read via
-//     getOwnPropertyDescriptor, never by property access (no getter is invoked);
-//   * accepts only STRICT PLAIN arrays: own keys are exactly the dense integer
-//     indices [0..length-1] as data descriptors plus `length` — indexed getters,
-//     holes, inherited indices, and extra (non-index) properties are rejected;
-//   * accepts only plain objects (proto null or Object.prototype);
-//   * rejects undefined/function/symbol/bigint/non-finite;
-//   * detects CYCLES explicitly via an ancestor set (never relies on catching a
-//     stack overflow), and enforces depth / node-count / byte ceilings during
-//     the walk so a deep/huge/exponential input is refused BEFORE a big string
-//     is built. Byte overflow throws code BODY_TOO_LARGE (→ size limit); every
-//     structural violation throws code BODY_NONCANONICAL.
-// Returns { canon, bytes, digest }. EXPORTED so the scheduler's production
-// receipt-body handoff binds the credited result-row digest to the SAME
-// canonical SHA-256 law the store enforces — one implementation, no drift.
-export function encodeOutcomeBody(body, maxBytes) {
-  const ancestors = new Set();
-  let bytes = 0; let nodes = 0; let out = '';
-  const emit = (s) => { bytes += Buffer.byteLength(s, 'utf8'); if (bytes > maxBytes) throw bodyError('BODY_TOO_LARGE', `exceeds ${maxBytes} bytes`); out += s; };
-  function walk(value, depth) {
-    if ((nodes += 1) > MAX_BODY_NODES) throw bodyError('BODY_NONCANONICAL', 'too many nodes');
-    if (depth > MAX_BODY_DEPTH) throw bodyError('BODY_NONCANONICAL', 'too deeply nested (depth)');
-    if (value === null) { emit('null'); return; }
-    const t = typeof value;
-    if (t === 'string') { emit(JSON.stringify(value)); return; }
-    if (t === 'boolean') { emit(value ? 'true' : 'false'); return; }
-    if (t === 'number') { if (!Number.isFinite(value)) throw bodyError('BODY_NONCANONICAL', 'non-finite number'); emit(JSON.stringify(value)); return; }
-    if (t === 'undefined' || t === 'bigint' || t === 'function' || t === 'symbol') throw bodyError('BODY_NONCANONICAL', t === 'undefined' ? 'undefined' : t);
-    if (t !== 'object') throw bodyError('BODY_NONCANONICAL', `unsupported type ${t}`);
-    if (ancestors.has(value)) throw bodyError('BODY_NONCANONICAL', 'cycle');
-    ancestors.add(value);
-    if (Array.isArray(value)) {
-      const len = value.length;
-      let idxCount = 0;
-      for (const k of Reflect.ownKeys(value)) {
-        if (typeof k === 'symbol') throw bodyError('BODY_NONCANONICAL', 'array symbol key');
-        if (k === 'length') continue;
-        if (!INDEX_KEY_RE.test(k) || Number(k) >= len) throw bodyError('BODY_NONCANONICAL', 'array extra/non-index property');
-        idxCount += 1;
-      }
-      if (idxCount !== len) throw bodyError('BODY_NONCANONICAL', 'array hole or sparse index');
-      emit('[');
-      for (let i = 0; i < len; i += 1) {
-        const d = Object.getOwnPropertyDescriptor(value, i);
-        if (!d || !('value' in d)) throw bodyError('BODY_NONCANONICAL', `array accessor/hole at ${i}`);
-        if (i) emit(',');
-        walk(d.value, depth + 1);
-      }
-      emit(']');
-    } else {
-      const proto = Object.getPrototypeOf(value);
-      if (proto !== null && proto !== Object.prototype) throw bodyError('BODY_NONCANONICAL', 'non-plain object');
-      const keys = [];
-      for (const k of Reflect.ownKeys(value)) {
-        if (typeof k === 'symbol') throw bodyError('BODY_NONCANONICAL', 'symbol key');
-        const d = Object.getOwnPropertyDescriptor(value, k);
-        if (!d.enumerable) throw bodyError('BODY_NONCANONICAL', 'non-enumerable key');
-        if (!('value' in d) || typeof d.get === 'function' || typeof d.set === 'function') throw bodyError('BODY_NONCANONICAL', 'accessor property');
-        keys.push(k);
-      }
-      keys.sort();
-      emit('{');
-      let first = true;
-      for (const k of keys) {
-        if (!first) emit(','); first = false;
-        emit(`${JSON.stringify(k)}:`);
-        walk(Object.getOwnPropertyDescriptor(value, k).value, depth + 1);
-      }
-      emit('}');
-    }
-    ancestors.delete(value);
-  }
-  walk(body, 0);
-  return { canon: out, bytes, digest: `${EVIDENCE_DIGEST_SCHEME}${sha256Hex(out)}` };
-}
+// Batch idempotency content digest (evidence_digest). Fingerprints the receipt's
+// already-validated primitive fields via the shared LENIENT stableStringify +
+// SHA-256; scheme-tagged (EVIDENCE_DIGEST_SCHEME) so a stored digest that is null
+// or predates this scheme is treated as legacy/unverifiable, never falsely
+// claimed verified. The strict outcome-body encoder (encodeOutcomeBody) is the
+// SAME shared law imported from learning/daily-simulation-body.js.
 function evidenceDigestOf(receipt) {
   return `${EVIDENCE_DIGEST_SCHEME}${sha256Hex(stableStringify({
     jobId: receipt.jobId ?? null, jobDigest: receipt.jobDigest ?? null,
@@ -341,6 +250,10 @@ export function createDailySimulationStore({
     const replayable = Number(bodyCountRes.rows[0].n) || 0;
     const completedTotal = completedIds.length;
     if (replayable > completedTotal) throw new DsimStoreError('durable corruption: more outcome bodies than credited completions');
+    // In strict body mode a credited sim MUST retain its body; a missing body is
+    // lost custody (LOST), never a healthy RESUME. In metadata-only mode
+    // (requireOutcomeBody=false) replayable < completed is expected and allowed.
+    if (requireOutcomeBody && replayable < completedTotal) throw new DsimStoreError(`durable corruption: requireOutcomeBody but ${completedTotal - replayable} credited sim(s) missing an outcome body`);
     // Every body must be BOUND to a crediting completion (same batch) and to a
     // credited result row whose digest equals the body's content_digest. Any
     // orphan / moved / misbound body is durable corruption (LOST) — so it can
@@ -559,7 +472,10 @@ export function createDailySimulationStore({
   // counts or expire evidence. Idempotent upsert keyed by (identity,day,job).
   async function recordPendingBackoff({ dayKey, jobId, nextEligibleTs, backoffAttempts } = {}) {
     if (typeof dayKey !== 'string' || !dayKey || typeof jobId !== 'string' || !jobId) return { ok: false, reason: 'BAD_ARGS' };
-    if (!Number.isSafeInteger(nextEligibleTs) || !Number.isSafeInteger(backoffAttempts) || backoffAttempts < 0) return { ok: false, reason: 'BAD_ARGS' };
+    // nextEligibleTs / backoffAttempts must be safe NON-NEGATIVE integers —
+    // symmetric with rebuild, which rejects a negative persisted value as
+    // corruption. Refuse before the write rather than persist an unloadable row.
+    if (!isSafeNonNegInt(nextEligibleTs) || !isSafeNonNegInt(backoffAttempts)) return { ok: false, reason: 'BAD_ARGS' };
     return db.tx(async (q) => {
       const store = await q(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
       if (!store.rows.length) return { ok: false, reason: 'STORE_NOT_COMMISSIONED' };
@@ -599,6 +515,10 @@ export function createDailySimulationStore({
     const body = parseJson(rowB.body);
     const enc = encodeOutcomeBody(body, maxOutcomeBodyBytes);
     if (enc.digest !== rowB.content_digest) throw new DsimStoreError('durable corruption: outcome body does not match its content_digest');
+    // body_bytes metadata must be a positive integer that EXACTLY equals the
+    // canonical byte length — a tampered/desynced byte count is corruption.
+    const storedBytes = Number(rowB.body_bytes);
+    if (!Number.isSafeInteger(storedBytes) || storedBytes <= 0 || storedBytes !== enc.bytes) throw new DsimStoreError(`durable corruption: outcome body_bytes ${rowB.body_bytes} != canonical ${enc.bytes}`);
     // Binding: the body must be credited by a completion for the SAME batch and
     // match the credited result row's digest — an orphan/moved/misbound body is
     // corruption, never returned as a verified replay source.
@@ -625,6 +545,8 @@ export function createDailySimulationStore({
         try { enc = encodeOutcomeBody(parseJson(r.body), maxOutcomeBodyBytes); }
         catch (err) { return { ok: true, verified: false, corruptSim: r.sim_id, checked, detail: String(err && err.message) }; }
         if (enc.digest !== r.content_digest) return { ok: true, verified: false, corruptSim: r.sim_id, checked, detail: 'body != content_digest' };
+        const sb = Number(r.body_bytes);
+        if (!Number.isSafeInteger(sb) || sb <= 0 || sb !== enc.bytes) return { ok: true, verified: false, corruptSim: r.sim_id, checked, detail: `body_bytes ${r.body_bytes} != canonical ${enc.bytes}` };
         // Binding: same-batch crediting completion + matching credited result digest.
         if (r.completed_batch !== r.batch_id) return { ok: true, verified: false, corruptSim: r.sim_id, checked, detail: 'orphan/moved: no completion for body batch' };
         if (r.result_digest !== r.content_digest) return { ok: true, verified: false, corruptSim: r.sim_id, checked, detail: 'misbound: result digest != content_digest' };

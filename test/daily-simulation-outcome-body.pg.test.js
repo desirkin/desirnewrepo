@@ -139,6 +139,25 @@ if (!RUN) {
         // A direct read of the misbound body is corruption, never a verified replay.
         await assert.rejects(() => store.readOutcomeBody({ dayKey: DAY, simId: 'S#0' }), /bound/);
       });
+      await t.test('altered body_bytes metadata is corruption on real PG (read throws, paged verify fails)', async () => {
+        const id8 = `${ID}:h`; const store = createDailySimulationStore({ db, storeIdentity: id8, dailyTarget: 100000 });
+        await store.commissionStore();
+        assert.equal((await store.commitBatch(receipt([rowB('S#0', { a: 1, b: [1, 2, 3] })]))).ok, true);
+        // desync ONLY the byte count; body + content_digest untouched.
+        await db.query('UPDATE serpent_dsim_result_body SET body_bytes = body_bytes + 1 WHERE identity=$1 AND sim_id=$2', [id8, 'S#0']);
+        await assert.rejects(() => store.readOutcomeBody({ dayKey: DAY, simId: 'S#0' }), /body_bytes/);
+        const v = await store.verifyOutcomeBodies({ dayKey: DAY, pageSize: 10 });
+        assert.equal(v.verified, false); assert.equal(v.corruptSim, 'S#0'); assert.match(String(v.detail), /body_bytes/);
+      });
+
+      await t.test('requireOutcomeBody: a missing credited body forces LOST on real PG', async () => {
+        const id9 = `${ID}:i`; const store = createDailySimulationStore({ db, storeIdentity: id9, dailyTarget: 100000, requireOutcomeBody: true });
+        await store.commissionStore();
+        assert.equal((await store.commitBatch(receipt([rowB('S#0', { a: 1 }), rowB('S#1', { a: 2 })]))).ok, true);
+        // delete a body but keep its completion+result -> replayable < completed.
+        await db.query('DELETE FROM serpent_dsim_result_body WHERE identity=$1 AND sim_id=$2', [id9, 'S#1']);
+        assert.equal((await store.loadDay(DAY)).status, 'LOST', 'strict mode: missing credited body is lost custody');
+      });
     } finally {
       try { assert.equal(db.schema, SCHEMA); await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`); } finally { await db.end(); }
     }

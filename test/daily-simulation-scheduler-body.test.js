@@ -146,3 +146,35 @@ test('SBODY-4: executor timeout/abort -> no bodies, zero false credit through th
   assert.equal(db._t.payload.size, 0, 'no bodies on abort');
   assert.equal((await mkStore(db, ID).loadDay(DAY)).status, 'NEW');
 });
+
+import { readFileSync } from 'node:fs';
+
+test('SBODY-5: oversized body is rejected by the scheduler (finite bound) with NO write', async () => {
+  const db = makeFakeDb(); const ID = 'sbody:5'; await mkStore(db, ID).commissionStore();
+  const bigExec = { async executeDailySimulationBatch({ job }) {
+    return { jobId: job.jobId, cursor: 0, nextCursor: null, done: true, results: [
+      { simulationId: 'H#0', status: 'COMPLETED_MODELED', completed: true, validModeledOutcome: false, prospectiveQualificationEligible: false, body: { blob: 'x'.repeat(20000) } },
+    ], counters: { frames: 1 }, laws: ['synthetic'] };
+  } };
+  // default maxOutcomeBodyBytes = 16 KiB; the 20 KB body must be refused before commit.
+  const r = await mkScheduler(db, ID, bigExec, { dailyTarget: 10 }).tick();
+  assert.equal(r.tick, 'BODY_REJECTED');
+  assert.equal(r.reason, 'OUTCOME_BODY_BYTES_LIMIT');
+  assert.equal(db._t.result.length, 0, 'no evidence written');
+  assert.equal(db._t.completed.size, 0, 'zero false completions');
+  assert.equal(db._t.payload.size, 0, 'no body written');
+  assert.equal((await mkStore(db, ID).loadDay(DAY)).status, 'NEW');
+});
+
+test('SBODY-FENCE: scheduler uses the pure body module, not persistence; store + body module obey the fence', () => {
+  const sched = readFileSync(new URL('../learning/daily-simulation-scheduler.js', import.meta.url), 'utf8');
+  assert.ok(!sched.includes("from '../persistence"), 'scheduler must not import persistence (learning fence)');
+  assert.ok(sched.includes("from './daily-simulation-body.js'"), 'scheduler imports the pure body codec');
+  const bodyMod = readFileSync(new URL('../learning/daily-simulation-body.js', import.meta.url), 'utf8');
+  assert.ok(bodyMod.includes("from 'node:crypto'"), 'body module uses node:crypto');
+  for (const forbidden of ["from '../persistence", "from '../judge", "from '../execution", 'node:fs', 'node:http', 'fetch(']) {
+    assert.ok(!bodyMod.includes(forbidden), `pure body module must not contain ${forbidden}`);
+  }
+  const store = readFileSync(new URL('../persistence/daily-simulation-store.js', import.meta.url), 'utf8');
+  assert.ok(store.includes("from '../learning/daily-simulation-body.js'"), 'store reuses the same pure body codec');
+});

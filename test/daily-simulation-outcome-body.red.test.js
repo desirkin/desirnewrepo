@@ -256,3 +256,49 @@ test('W6: encoder rejects symbol/non-enumerable keys, array getters/extra props,
   // over-deep acyclic nesting — rejected by the depth ceiling (detail says depth)
   { let d = {}; for (let i = 0; i < 5000; i++) d = { c: d }; const r = await reject(d); assert.equal(r.ok, false); assert.equal(r.reason, 'OUTCOME_BODY_NONCANONICAL'); assert.match(String(r.detail), /deep|depth|node/); }
 });
+
+// ---- W7/W8/W9: durability witnesses (root review of 3baefed) -----------------
+test('W7: requireOutcomeBody rebuild is LOST if a credited body is missing; metadata-only mode allows it', async () => {
+  // strict mode: commit a body then lose it -> LOST.
+  {
+    const db = makeFakeDb(); const store = createDailySimulationStore({ db, storeIdentity: ID, dailyTarget: 100000, requireOutcomeBody: true });
+    await store.commissionStore();
+    assert.equal((await store.commitBatch(receiptWithBodies([{ v: 1 }, { v: 2 }]))).ok, true);
+    // durably lose one body (keep its completion+result) -> replayable < completed.
+    db._t.payload.delete(`${ID}|${DAY}|S#1`);
+    const l = await store.loadDay(DAY);
+    assert.equal(l.status, 'LOST', 'strict mode: a missing credited body is lost custody');
+  }
+  // metadata-only mode (default): a completed row with no body is allowed to RESUME.
+  {
+    const db = makeFakeDb(); const store = createDailySimulationStore({ db, storeIdentity: ID, dailyTarget: 100000 });
+    await store.commissionStore();
+    const meta = { id: 'M#0', status: 'COMPLETED_MODELED', completed: true, valid: false, prospective: false, digest: 'plain' };
+    const rec = { batchId: 'MB', dayKey: DAY, jobId: 'J', jobDigest: 'jd', payloadDigest: 'pd', cursorBefore: null, nextCursor: 1, done: false, parentRevision: 0, rotationIndex: 1, completedResults: [], newCompletedIds: ['M#0'], pendingDelta: [], resultEvidence: [meta], tally: { completed: 1, validModeled: 0, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 1 }, executorCounters: null, observedUtcMs: 1 };
+    assert.equal((await store.commitBatch(rec)).ok, true);
+    const l = await store.loadDay(DAY);
+    assert.equal(l.status, 'RESUME');
+    assert.equal(l.ledger.totals.completed, 1);
+    assert.equal(l.ledger.totals.replayable, 0, 'metadata-only completed is not replayable, but not LOST');
+  }
+});
+
+test('W8: altered body_bytes metadata is corruption on read and paged verify (digest still matches)', async () => {
+  const db = makeFakeDb(); const store = mkStore(db); await store.commissionStore();
+  const body = { path: [1, 2, 3], pnl: 4 };
+  assert.equal((await store.commitBatch(receiptWithBodies([body]))).ok, true);
+  // tamper ONLY the byte count; body + content_digest untouched (digest would still match).
+  const row = db._t.payload.get(`${ID}|${DAY}|S#0`);
+  row.body_bytes = row.body_bytes + 1;
+  await assert.rejects(() => store.readOutcomeBody({ dayKey: DAY, simId: 'S#0' }), /body_bytes/);
+  const v = await store.verifyOutcomeBodies({ dayKey: DAY, pageSize: 10 });
+  assert.equal(v.verified, false); assert.equal(v.corruptSim, 'S#0'); assert.match(String(v.detail), /body_bytes/);
+});
+
+test('W9: recordPendingBackoff refuses a negative nextEligibleTs before any write', async () => {
+  const db = makeFakeDb(); const store = mkStore(db); await store.commissionStore();
+  const r = await store.recordPendingBackoff({ dayKey: DAY, jobId: 'J', nextEligibleTs: -1, backoffAttempts: 0 });
+  assert.equal(r.ok, false); assert.equal(r.reason, 'BAD_ARGS');
+  const r2 = await store.recordPendingBackoff({ dayKey: DAY, jobId: 'J', nextEligibleTs: 5, backoffAttempts: -1 });
+  assert.equal(r2.ok, false); assert.equal(r2.reason, 'BAD_ARGS');
+});

@@ -42,7 +42,7 @@
 //     replay body. No body means metadata-only (unchanged); the store is still
 //     the authority on body byte bounds.
 
-import { encodeOutcomeBody } from '../persistence/daily-simulation-store.js';
+import { encodeOutcomeBody, DEFAULT_MAX_OUTCOME_BODY_BYTES } from './daily-simulation-body.js';
 
 export const SCHEDULER_PORT_VERSION = 'daily-sim-scheduler-2';
 export const DEFAULT_POLICY_VERSION = 'sim2-policy-1';
@@ -68,6 +68,12 @@ export const MAX_IDENTITY_BYTES = 256;
 // fabricates completed/zero outcomes or expires evidence.
 export const REVISIT_CONTRACT_VERSION = 'sim2-revisit-1';
 export const DEFAULT_PENDING_BACKOFF = Object.freeze({ baseMs: 60_000, maxMs: 3_600_000, maxAttempts: 32 });
+// Finite hard ceiling for the outcome-body handoff. The scheduler encodes a
+// credited body with a bounded max (default 16 KiB) so an oversized body is
+// refused BEFORE full canonicalization/allocation here — never encoded with an
+// unbounded cap and only rejected later at the store. A caller may lower the
+// bound but never raise it past this ceiling.
+export const HARD_MAX_OUTCOME_BODY_BYTES = 64 * 1024;
 
 export class SchedulerStorageError extends Error { constructor(m) { super(`SCHEDULER_STORAGE: ${m}`); this.name = 'SchedulerStorageError'; } }
 export class SchedulerContractError extends Error { constructor(m) { super(`SCHEDULER_CONTRACT: ${m}`); this.name = 'SchedulerContractError'; } }
@@ -122,6 +128,7 @@ export function createDailySimulationScheduler({
   statusOf, identityOf, completedOf, validOf,
   prospectiveOf = () => false, // distinct from completed/validModeled; injected when known
   bodyOf = () => undefined, // optional: the credited result's replayable outcome body (opaque); forwarded to the store bound to the SHA-256 canonical law
+  maxOutcomeBodyBytes = DEFAULT_MAX_OUTCOME_BODY_BYTES, // finite per-body encode bound (<= HARD_MAX_OUTCOME_BODY_BYTES); the store still enforces its own byte ceilings
   maturityOf = () => undefined, // optional: source-provided availability/maturity ts (ms) for a pending result
   pendingBackoff = DEFAULT_PENDING_BACKOFF,
   isRevisitable = (r) => !completedOf(r) && REVISITABLE_DEFAULT.has(statusOf(r)),
@@ -144,6 +151,7 @@ export function createDailySimulationScheduler({
   }
   if (!Number.isSafeInteger(dailyTarget) || dailyTarget <= 0) throw new SchedulerContractError('dailyTarget must be a positive integer');
   if (!Number.isSafeInteger(maxEvalsPerTick) || maxEvalsPerTick <= 0) throw new SchedulerContractError('maxEvalsPerTick must be a positive integer');
+  if (!Number.isSafeInteger(maxOutcomeBodyBytes) || maxOutcomeBodyBytes <= 0 || maxOutcomeBodyBytes > HARD_MAX_OUTCOME_BODY_BYTES) throw new SchedulerContractError(`maxOutcomeBodyBytes must be a positive integer <= ${HARD_MAX_OUTCOME_BODY_BYTES}`);
   const perBatchCap = Math.min(maxEvalsPerTick, HARD_MAX_EVALS_PER_BATCH);
 
   let day = null;
@@ -294,7 +302,29 @@ export function createDailySimulationScheduler({
       catch (err) { st.attempts += 1; st.lastStatus = 'EXEC_FAILED'; parkIfExhausted(st); return { tick: 'EXEC_FAILED', jobId, attempts: st.attempts, stalled: st.stalled, error: String(err && err.message) }; }
       finally { metrics.execMsTotal += monotonic() - execStart; }
 
-      const payloadDigest = digest(res.results); // raw page digest — deterministic, retry-stable
+      // Bounded outcome-body preflight — BEFORE the raw page digest. Each credited
+      // body is canonicalized with the FINITE maxOutcomeBodyBytes so an oversized
+      // or non-canonical body is refused before the page is canonicalized and
+      // before a large string is allocated (here or in the store). A rejected
+      // body fails the batch (no commit, bounded retries); the store re-validates
+      // and re-bounds on commit. Cached for reuse in the evidence loop below.
+      const bodyEnc = new Map(); // idk -> { digest, body }
+      for (const r of res.results) {
+        if (!completedOf(r)) continue;
+        const b = bodyOf(r);
+        if (b === undefined) continue;
+        const idk = String(identityOf(r));
+        if (bodyEnc.has(idk)) continue;
+        let enc;
+        try { enc = encodeOutcomeBody(b, maxOutcomeBodyBytes); }
+        catch (err) {
+          st.attempts += 1; st.lastStatus = 'BODY_REJECTED'; parkIfExhausted(st);
+          return { tick: 'BODY_REJECTED', jobId, sim: idk, reason: err && err.code === 'BODY_TOO_LARGE' ? 'OUTCOME_BODY_BYTES_LIMIT' : 'OUTCOME_BODY_NONCANONICAL', detail: String(err && err.message) };
+        }
+        bodyEnc.set(idk, { digest: enc.digest, body: b });
+      }
+
+      const payloadDigest = digest(res.results); // raw page digest — deterministic, retry-stable (bodies already bounded)
       const batchId = batchIdOf({ jobDigest, cursorBefore, parentRevision, payloadDigest });
       if (day.appliedBatchIds.includes(batchId)) return { tick: 'BATCH_ALREADY_APPLIED', jobId, batchId };
 
@@ -316,19 +346,13 @@ export function createDailySimulationScheduler({
         byStatus[status] = (byStatus[status] || 0) + 1;
         const isCompleted = !!completedOf(r);
         const ev = { id: idk, status, completed: isCompleted, valid: !!validOf(r), prospective: !!prospectiveOf(r), digest: digest(r) };
-        // Outcome-body handoff: for a CREDITED result carrying a body, forward
-        // the opaque body and bind THIS row's digest to the store's exact SHA-256
-        // canonical law (encodeOutcomeBody). A non-canonical body is a loud
-        // integrity failure, never a silent drop. Byte bounds stay the store's.
+        // Outcome-body handoff: for a CREDITED result whose (bounded, validated)
+        // body was accepted in the preflight, forward the opaque body and bind
+        // THIS row's digest to the store's exact SHA-256 canonical law. No body
+        // => metadata-only (digest stays the structural page digest).
         if (isCompleted) {
-          const body = bodyOf(r);
-          if (body !== undefined) {
-            let enc;
-            try { enc = encodeOutcomeBody(body, Number.MAX_SAFE_INTEGER); }
-            catch (err) { throw new SchedulerIntegrityError(`non-canonical outcome body for ${idk}: ${err && err.message}`); }
-            ev.digest = enc.digest;      // credited row digest == body content digest (store binds body<->result)
-            ev.outcomeBody = body;       // forwarded; store re-validates + enforces byte ceilings
-          }
+          const m = bodyEnc.get(idk);
+          if (m) { ev.digest = m.digest; ev.outcomeBody = m.body; } // credited row digest == body content digest (store binds body<->result)
         }
         resultEvidence.push(ev);
         if (completedOf(r)) {
