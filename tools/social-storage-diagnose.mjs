@@ -7,6 +7,7 @@
 // reservation records contain no post text; observation rows are reduced to
 // provider/clock metadata by PostgreSQL before they enter this process.
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { readJsonBounded } from '../lib/jsonl.js';
 import { dataDir, loadConfig } from '../lib/config.js';
@@ -325,7 +326,9 @@ export async function runSocialStorageDiagnostic({ env = process.env, nowMs = Da
   const root = dataDir(config ?? loadConfig());
   let runtimeStatus = null;
   try {
-    runtimeStatus = readStatus ? await readStatus() : readJsonBounded(path.join(root, 'data-only', 'runtime-status.json'), 16 * 1024 * 1024);
+    // runtime unification step 5: canonical serpent/ path first, the one-release data-only/ mirror as fallback
+    const canonical = path.join(root, 'serpent', 'runtime-status.json');
+    runtimeStatus = readStatus ? await readStatus() : readJsonBounded(existsSync(canonical) ? canonical : path.join(root, 'data-only', 'runtime-status.json'), 16 * 1024 * 1024);
   } catch {
     // The database diagnostic remains useful without the ephemeral status mirror.
   }

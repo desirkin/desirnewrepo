@@ -8,11 +8,12 @@
 // fail-closed path when the durable restore is unavailable.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openPaperRuntime, startDataOnlyRuntime } from '../lib/serpent-runtime.js';
 import { PAPER_DISCOVERY_ENV } from '../lib/collectors.js';
+import { readDataOnlyRuntimeStatus } from '../lib/data-only-status.js';
 
 const CATALOG = { contentId: 'cat-1', observedTs: 1_700_000_000_000, markets: [{ base: 'BBB' }, { base: 'AAA' }] };
 
@@ -112,5 +113,41 @@ test('PR-3. durable restore unavailable → fail closed: no quota-bearing additi
     assert.deepEqual(status.collectors.market, { state: 'BLOCKED', authority: 'NONE', reason: 'MARKET_QUOTA_NOT_RESTORED' });
     await rt.shutdown('TEST');
     assert.deepEqual(f.stops, ['broadMarket', 'persistence'], 'the started persistence handle is still stopped even though its restore failed');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('PR-4 (step 5). mode-agnostic paths: canonical serpent/ lock + status with byte-equal data-only/ mirrors in BOTH modes; a pre-step-5 legacy lock still refuses; readers prefer the canonical file', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'serpent-pr-'));
+  const canonicalLock = path.join(root, 'serpent', 'runtime.lock');
+  const legacyLock = path.join(root, 'data-only', 'runtime.lock');
+  const canonicalStatus = path.join(root, 'serpent', 'runtime-status.json');
+  const legacyStatus = path.join(root, 'data-only', 'runtime-status.json');
+  try {
+    // PAPER: canonical + mirror exist and agree; both are gone on release
+    const f = fakes();
+    const rt = await openPaperRuntime({ root, env: ENV, log: () => {}, quotaStarters: f.quotaStarters, additionStarters: f.additionStarters });
+    for (const file of [canonicalLock, legacyLock, canonicalStatus, legacyStatus]) assert.ok(existsSync(file), `${path.basename(path.dirname(file))}/${path.basename(file)} exists`);
+    assert.equal(readFileSync(canonicalLock, 'utf8'), readFileSync(legacyLock, 'utf8'), 'the legacy lock mirrors the canonical identity');
+    assert.equal(readFileSync(canonicalStatus, 'utf8'), readFileSync(legacyStatus, 'utf8'), 'the legacy status mirrors the canonical one');
+    // the status reader prefers the canonical file: corrupt the mirror, the evaluation still sees the real run
+    writeFileSync(legacyStatus, '{not json');
+    const read = readDataOnlyRuntimeStatus({ root, checkPid: false });
+    assert.equal(read.status?.runId, rt.runId, 'the reader evaluated the canonical serpent/ status');
+    await rt.shutdown('TEST');
+    for (const file of [canonicalLock, legacyLock]) assert.equal(existsSync(file), false, 'both locks released');
+
+    // DATA_ONLY on the same helpers: canonical + mirror as well
+    const g = fakes();
+    const rt2 = await startDataOnlyRuntime({ root, env: {}, config: { wideeye: { enabled: false }, gateway: { enabled: false }, universe: ['ZZZ'] }, log: () => {}, signals: false, quotaStarters: g.quotaStarters, collectorStarters: { startDataOnlyMarket: async () => null, startWideEye: () => null, startBroadKraken: async () => null, startInfra: () => null, startVideo: () => null, startPublicDiscovery: () => null, startGateway: () => null, startRumor2: () => null } });
+    assert.ok(existsSync(canonicalLock) && existsSync(legacyLock), 'DATA_ONLY writes both locks');
+    assert.equal(readFileSync(canonicalStatus, 'utf8'), readFileSync(legacyStatus, 'utf8'), 'DATA_ONLY mirrors the status');
+    await rt2.shutdown('TEST');
+
+    // a pre-step-5 process announced only through the LEGACY lock is still refused while alive, recovered when dead
+    mkdirSync(path.join(root, 'data-only'), { recursive: true });
+    writeFileSync(legacyLock, JSON.stringify({ pid: process.pid }));
+    await assert.rejects(() => openPaperRuntime({ root, env: ENV, log: () => {}, quotaStarters: fakes().quotaStarters }), /serpent runtime already active as pid/);
+    assert.equal(existsSync(canonicalLock), false, 'the refused instance left nothing behind');
+    unlinkSync(legacyLock);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
