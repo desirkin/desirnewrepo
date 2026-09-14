@@ -3,9 +3,10 @@
 // for its catalog membership intervals without being a complete civil-day
 // market day. This contract never upgrades partial membership into 1,440
 // minutes, simulation credit, learning evidence, or external durability.
-import { BROAD_DAY_MARKET_PAGE_VERSION, openBroadDayReader } from '../market-lab/broad-day-reader.js';
-import { BROAD_DAY_ARCHIVE_VERSION_V2 } from '../market-lab/broad-day-archive.js';
-import { dailyBroadArchiveCandleFromRow, dailyBroadArchiveRowError } from './daily-broad-archive-input.js';
+import {
+  DAILY_BROAD_ARCHIVE_READER_CONTRACT, dailyBroadArchiveCandleFromRow,
+  dailyBroadArchiveReaderPortError, dailyBroadArchiveRowError,
+} from './daily-broad-archive-input.js';
 import { canonicalDigest, deepFreeze } from './shadow-contracts.js';
 import { marketIdentityDigest } from './shadow-catalog-snapshot.js';
 
@@ -80,7 +81,8 @@ function marketOf(source) {
 }
 
 function sourceProofError(descriptor, limits) {
-  if (descriptor?.archiveVersion !== BROAD_DAY_ARCHIVE_VERSION_V2
+  if (descriptor?.datasetVersion !== DAILY_BROAD_ARCHIVE_READER_CONTRACT.datasetVersion
+      || descriptor.archiveVersion !== DAILY_BROAD_ARCHIVE_READER_CONTRACT.archiveVersion
       || descriptor.sourceProvenance?.sourceKind !== 'LOCAL_BROAD_DAY_ARCHIVE_V2'
       || descriptor.sourceProvenance?.durability !== 'LOCAL_FILESYSTEM_ONLY'
       || descriptor.sourceProvenance?.republishSafe !== false
@@ -246,11 +248,15 @@ function supportFor(shard, candles, sourceDigest, dayStartTs, dayEndTs) {
 }
 
 export async function openDailyBroadMembershipShardSource({
-  rootDir, dayStartTs, dayEndTs, asOfTs, limits: suppliedLimits, readerLimits, signal = null,
+  rootDir, dayStartTs, dayEndTs, asOfTs, limits: suppliedLimits, readerLimits,
+  signal = null, openBroadDayReader,
 } = {}) {
   const limits = limitsOf(suppliedLimits);
+  if (typeof openBroadDayReader !== 'function') throw fail('READER_FACTORY_REQUIRED', 'a fixed broad-day reader factory must be injected by the composition owner');
   const reader = await openBroadDayReader({ rootDir, dayStartTs, dayEndTs, asOfTs, limits: readerLimits, signal });
   try {
+    const portError = dailyBroadArchiveReaderPortError(reader, { method: 'readMarketPage' });
+    if (portError) throw fail('READER_PORT_INVALID', portError);
     const sourceDescriptor = reader.descriptor;
     const sourceError = sourceProofError(sourceDescriptor, limits);
     if (sourceError) throw sourceError;
@@ -332,7 +338,7 @@ export async function openDailyBroadMembershipShardSource({
         marketIdentityDigest: shard.sourceMarketIdentityDigest, cursor, maxRows, signal: pageSignal,
       });
       const sourceBody = { ...sourcePage }; delete sourceBody.pageDigest;
-      if (sourcePage.pageVersion !== BROAD_DAY_MARKET_PAGE_VERSION
+      if (sourcePage.pageVersion !== DAILY_BROAD_ARCHIVE_READER_CONTRACT.marketPageVersion
           || sourcePage.pageDigest !== canonicalDigest(sourceBody)
           || sourcePage.datasetId !== descriptor.sourceDatasetId
           || sourcePage.datasetDigest !== descriptor.sourceDatasetDigest

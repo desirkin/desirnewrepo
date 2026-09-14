@@ -3,12 +3,9 @@
 // consumed. Each read holds at most one market-day in memory; no method grants
 // learning, simulation, Judge, or order authority.
 import {
-  BROAD_DAY_MARKET_PAGE_VERSION, openBroadDayReader,
-} from '../market-lab/broad-day-reader.js';
-import {
-  DAILY_BROAD_ARCHIVE_PROVENANCE_VERSION,
+  DAILY_BROAD_ARCHIVE_PROVENANCE_VERSION, DAILY_BROAD_ARCHIVE_READER_CONTRACT,
   dailyBroadArchiveCandleFromRow, dailyBroadArchiveDescriptorError,
-  dailyBroadArchiveRowError, sealDailyBroadArchiveCatalog,
+  dailyBroadArchiveReaderPortError, dailyBroadArchiveRowError, sealDailyBroadArchiveCatalog,
   sealDailyBroadArchiveProvenance,
 } from './daily-broad-archive-input.js';
 import { canonicalDigest, deepFreeze } from './shadow-contracts.js';
@@ -120,11 +117,15 @@ function marketDayOf({ shard, candles, dayStartTs, dayEndTs }) {
 }
 
 export async function openDailyBroadArchiveShardSource({
-  rootDir, dayStartTs, dayEndTs, asOfTs, limits: suppliedLimits, readerLimits, signal = null,
+  rootDir, dayStartTs, dayEndTs, asOfTs, limits: suppliedLimits, readerLimits,
+  signal = null, openBroadDayReader,
 } = {}) {
   const limits = limitsOf(suppliedLimits);
+  if (typeof openBroadDayReader !== 'function') throw fail('READER_FACTORY_REQUIRED', 'a fixed broad-day reader factory must be injected by the composition owner');
   const reader = await openBroadDayReader({ rootDir, dayStartTs, dayEndTs, asOfTs, limits: readerLimits, signal });
   try {
+    const portError = dailyBroadArchiveReaderPortError(reader, { method: 'readMarketPage' });
+    if (portError) throw fail('READER_PORT_INVALID', portError);
     const sourceDescriptor = reader.descriptor;
     const descriptorError = dailyBroadArchiveDescriptorError(sourceDescriptor, { maxMarkets: limits.maxMarkets });
     if (descriptorError) throw fail(descriptorError.code, descriptorError.message);
@@ -190,7 +191,7 @@ export async function openDailyBroadArchiveShardSource({
         marketIdentityDigest: shard.sourceMarketIdentityDigest, cursor, maxRows, signal: pageSignal,
       });
       const sourceBody = { ...sourcePage }; delete sourceBody.pageDigest;
-      if (sourcePage.pageVersion !== BROAD_DAY_MARKET_PAGE_VERSION
+      if (sourcePage.pageVersion !== DAILY_BROAD_ARCHIVE_READER_CONTRACT.marketPageVersion
           || sourcePage.pageDigest !== canonicalDigest(sourceBody)
           || sourcePage.datasetId !== descriptor.sourceDatasetId
           || sourcePage.datasetDigest !== descriptor.sourceDatasetDigest

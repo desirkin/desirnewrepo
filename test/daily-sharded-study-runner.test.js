@@ -9,9 +9,10 @@ import {
   BROAD_KRAKEN_RECORD_VERSION_V2, broadKrakenRecordIdOf,
 } from '../market-lab/broad-kraken.js';
 import { BROAD_DAY_ARCHIVE_VERSION_V2, openBroadDayArchive } from '../market-lab/broad-day-archive.js';
+import { openBroadDayReader } from '../market-lab/broad-day-reader.js';
 import { normalizeKrakenAssetPairs } from '../survey/catalog.js';
 import {
-  openDailyShardedStudyRunner, sealDailyShardTraversalOutput,
+  openDailyShardedStudyRunner as openDailyShardedStudyRunnerImpl, sealDailyShardTraversalOutput,
 } from '../learning/daily-sharded-study-runner.js';
 
 const MINUTE = 60_000;
@@ -19,11 +20,19 @@ const START = Date.UTC(2026, 8, 13, 4);
 const END = START + 1_440 * MINUTE;
 const AS_OF = END + MINUTE;
 const roots = [];
+const openDailyShardedStudyRunner = (options) => openDailyShardedStudyRunnerImpl({ ...options, openBroadDayReader });
 let archiveRoot;
 const makeRoot = (name) => {
   const root = mkdtempSync(path.join(tmpdir(), `sharded-runner-${name}-`)); roots.push(root); return root;
 };
 test.after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
+
+test('production runner refuses to choose a reader implementation implicitly', async () => {
+  await assert.rejects(
+    openDailyShardedStudyRunnerImpl({}),
+    (error) => error?.code === 'RUNNER_READER_FACTORY_REQUIRED',
+  );
+});
 
 function catalogAt(observedTs) {
   const result = normalizeKrakenAssetPairs({

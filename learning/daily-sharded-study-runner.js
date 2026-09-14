@@ -367,18 +367,21 @@ async function openDailyShardedStudyRunnerImpl({
   }
 }
 
-export function openDailyShardedStudyRunner(options = {}) {
+export function openDailyShardedStudyRunner({ openBroadDayReader, ...options } = {}) {
+  if (typeof openBroadDayReader !== 'function') {
+    return Promise.reject(fail('RUNNER_READER_FACTORY_REQUIRED', 'the composition owner must inject the fixed broad-day reader factory'));
+  }
   return openDailyShardedStudyRunnerImpl(options, ({
     archiveRoot, dayStartTs, dayEndTs, asOfTs, shardLimits, readerLimits, signal,
   }) => openDailyBroadArchiveShardSource({
     rootDir: archiveRoot, dayStartTs, dayEndTs, asOfTs,
-    limits: shardLimits, readerLimits, signal,
+    limits: shardLimits, readerLimits, signal, openBroadDayReader,
   }));
 }
 
 // Explicit test-only constructor for synthetic scale/fault fixtures. Production
-// composition has no source injection and always opens the fixed verified
-// archive shard source above.
+// composition injects the fixed verified reader; this seam injects a complete
+// already-sealed source for bounded deterministic fixtures only.
 export function openDailyShardedStudyRunnerForTest(options = {}, { source } = {}) {
   if (!source || typeof source !== 'object' || typeof source.loadShard !== 'function'
       || typeof source.close !== 'function' || !source.descriptor) {

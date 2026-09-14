@@ -443,9 +443,12 @@ async function openImpl({
   }
 }
 
-export function openDailyShardControlAggregator(options = {}) {
+export function openDailyShardControlAggregator({ openBroadDayReader, ...options } = {}) {
+  if (typeof openBroadDayReader !== 'function') {
+    return Promise.reject(fail('CONTROL_READER_FACTORY_REQUIRED', 'the composition owner must inject the fixed broad-day reader factory'));
+  }
   return openImpl(options, ({ archiveRoot, dayStartTs, dayEndTs, asOfTs, readerLimits, shardLimits, signal }) => openDailyBroadArchiveShardSource({
-    rootDir: archiveRoot, dayStartTs, dayEndTs, asOfTs, readerLimits, limits: shardLimits, signal,
+    rootDir: archiveRoot, dayStartTs, dayEndTs, asOfTs, readerLimits, limits: shardLimits, signal, openBroadDayReader,
   }));
 }
 

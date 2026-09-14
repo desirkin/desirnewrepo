@@ -7,8 +7,9 @@ import {
   BROAD_KRAKEN_RECORD_VERSION_V2, broadKrakenRecordError, broadKrakenRecordIdOf,
 } from '../market-lab/broad-kraken.js';
 import { BROAD_DAY_ARCHIVE_VERSION_V2, openBroadDayArchive } from '../market-lab/broad-day-archive.js';
+import { openBroadDayReader } from '../market-lab/broad-day-reader.js';
 import { normalizeKrakenAssetPairs } from '../survey/catalog.js';
-import { prepareDailyBroadArchiveInput } from '../learning/daily-broad-archive-input.js';
+import { prepareDailyBroadArchiveInput as prepareDailyBroadArchiveInputImpl } from '../learning/daily-broad-archive-input.js';
 
 const MINUTE = 60_000;
 const START = Date.UTC(2026, 8, 13, 4);
@@ -17,6 +18,7 @@ const MARKET_COUNT = 24;
 const ROW_COUNT = MARKET_COUNT * 1_440;
 
 const roots = [];
+const prepareDailyBroadArchiveInput = (options) => prepareDailyBroadArchiveInputImpl({ ...options, openBroadDayReader });
 test.after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
 
 function catalogAt(observedTs) {

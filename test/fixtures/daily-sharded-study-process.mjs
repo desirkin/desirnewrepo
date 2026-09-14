@@ -1,12 +1,14 @@
 import {
   openDailyShardedStudyRunner, sealDailyShardTraversalOutput,
 } from '../../learning/daily-sharded-study-runner.js';
+import { openBroadDayReader } from '../../market-lab/broad-day-reader.js';
 
 const [archiveRoot, stateRoot, jobId, declared, start, end, asOf, max] = process.argv.slice(2);
 let runner;
 try {
   runner = await openDailyShardedStudyRunner({
     archiveRoot, stateRoot, jobId,
+    openBroadDayReader,
     declaredTs: Number(declared), dayStartTs: Number(start), dayEndTs: Number(end), asOfTs: Number(asOf),
     consumeShard: async ({ marketDay, receipt }) => sealDailyShardTraversalOutput({ marketDay, receipt }),
   });
