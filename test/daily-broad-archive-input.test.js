@@ -7,8 +7,15 @@ import {
   BROAD_KRAKEN_RECORD_VERSION_V2, broadKrakenRecordError, broadKrakenRecordIdOf,
 } from '../market-lab/broad-kraken.js';
 import { BROAD_DAY_ARCHIVE_VERSION_V2, openBroadDayArchive } from '../market-lab/broad-day-archive.js';
+import {
+  BROAD_DAY_DATASET_VERSION, BROAD_DAY_MARKET_PAGE_VERSION,
+  BROAD_DAY_PAGE_VERSION, openBroadDayReader,
+} from '../market-lab/broad-day-reader.js';
 import { normalizeKrakenAssetPairs } from '../survey/catalog.js';
-import { prepareDailyBroadArchiveInput } from '../learning/daily-broad-archive-input.js';
+import {
+  DAILY_BROAD_ARCHIVE_READER_CONTRACT,
+  prepareDailyBroadArchiveInput as prepareDailyBroadArchiveInputImpl,
+} from '../learning/daily-broad-archive-input.js';
 import {
   buildDailyMoveStudy, dailyMoveStudyManifestError, sealDailyMoveStudyManifestV2,
 } from '../learning/daily-move-study.js';
@@ -18,10 +25,33 @@ const HOUR = 60 * MINUTE;
 const START = Date.UTC(2026, 8, 13, 4); // midnight America/New_York (EDT)
 const END = START + 24 * HOUR;
 const roots = [];
+const prepareDailyBroadArchiveInput = (options) => prepareDailyBroadArchiveInputImpl({ ...options, openBroadDayReader });
 const makeRoot = (name) => {
   const root = mkdtempSync(path.join(tmpdir(), `daily-broad-v2-${name}-`)); roots.push(root); return root;
 };
 test.after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
+
+test('the learning-side closed reader contract stays byte-exact with the actual injected reader', () => {
+  assert.deepEqual(DAILY_BROAD_ARCHIVE_READER_CONTRACT, {
+    archiveVersion: BROAD_DAY_ARCHIVE_VERSION_V2,
+    datasetVersion: BROAD_DAY_DATASET_VERSION,
+    pageVersion: BROAD_DAY_PAGE_VERSION,
+    marketPageVersion: BROAD_DAY_MARKET_PAGE_VERSION,
+  });
+});
+
+test('archive input refuses a missing or malformed injected reader before accepting source claims', async () => {
+  const common = { rootDir: 'unused', dayStartTs: START, dayEndTs: END, asOfTs: END + MINUTE };
+  const missing = await prepareDailyBroadArchiveInputImpl(common);
+  assert.equal(missing.code, 'READER_FACTORY_REQUIRED');
+  let closed = 0;
+  const malformed = await prepareDailyBroadArchiveInputImpl({
+    ...common,
+    openBroadDayReader: async () => ({ descriptor: {}, close: () => { closed += 1; } }),
+  });
+  assert.equal(malformed.code, 'READER_PORT_INVALID');
+  assert.equal(closed, 1, 'a malformed returned reader with a close method is still closed exactly once');
+});
 
 const PAIRS = Object.freeze({
   ADAUSD: { wsname: 'ADA/USD', base: 'ADA', quote: 'USD', status: 'online' },

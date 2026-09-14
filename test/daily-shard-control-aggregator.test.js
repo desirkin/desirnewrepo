@@ -4,6 +4,7 @@ import path from 'node:path';
 import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
+  openDailyShardControlAggregator,
   openDailyShardControlAggregatorForTest,
 } from '../learning/daily-shard-control-aggregator.js';
 import { sealDailySurgeAnchorInventory } from '../learning/daily-shard-prefix-facts.js';
@@ -22,6 +23,13 @@ const roots = [];
 test.after(() => roots.forEach((root) => rmSync(root, { recursive: true, force: true })));
 const tempRoot = (name) => { const root = mkdtempSync(path.join(tmpdir(), name)); roots.push(root); return root; };
 const kinds = ['SURGE', 'FALLING', 'FLAT', 'FAILED', 'OTHER', 'EXACT_EIGHT'];
+
+test('production control aggregator refuses an implicit reader implementation', async () => {
+  await assert.rejects(
+    openDailyShardControlAggregator({}),
+    (error) => error?.code === 'CONTROL_READER_FACTORY_REQUIRED',
+  );
+});
 
 function fixtureDefinition(kindList = kinds) {
   const catalog = sealAcceptedCatalogSnapshot({

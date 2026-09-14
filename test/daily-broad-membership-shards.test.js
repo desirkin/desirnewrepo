@@ -7,11 +7,12 @@ import {
   BROAD_KRAKEN_RECORD_VERSION_V2, broadKrakenRecordError, broadKrakenRecordIdOf,
 } from '../market-lab/broad-kraken.js';
 import { BROAD_DAY_ARCHIVE_VERSION_V2, openBroadDayArchive } from '../market-lab/broad-day-archive.js';
-import { prepareDailyBroadArchiveInput } from '../learning/daily-broad-archive-input.js';
+import { openBroadDayReader } from '../market-lab/broad-day-reader.js';
+import { prepareDailyBroadArchiveInput as prepareDailyBroadArchiveInputImpl } from '../learning/daily-broad-archive-input.js';
 import {
   DAILY_BROAD_MEMBERSHIP_DATASET_VERSION,
   dailyBroadMembershipReceiptError,
-  openDailyBroadMembershipShardSource,
+  openDailyBroadMembershipShardSource as openDailyBroadMembershipShardSourceImpl,
 } from '../learning/daily-broad-membership-shards.js';
 import { normalizeKrakenAssetPairs } from '../survey/catalog.js';
 
@@ -19,9 +20,29 @@ const MINUTE = 60_000;
 const DAY = Date.parse('2026-09-13T00:00:00.000Z');
 const END = DAY + 1_440 * MINUTE;
 const roots = [];
+const prepareDailyBroadArchiveInput = (options) => prepareDailyBroadArchiveInputImpl({ ...options, openBroadDayReader });
+const openDailyBroadMembershipShardSource = (options) => openDailyBroadMembershipShardSourceImpl({ ...options, openBroadDayReader });
 
 test.after(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
+});
+
+test('membership shard source requires a well-formed injected reader port', async () => {
+  const common = { rootDir: 'unused', dayStartTs: DAY, dayEndTs: END, asOfTs: END + MINUTE };
+  await assert.rejects(
+    openDailyBroadMembershipShardSourceImpl(common),
+    (error) => error?.code === 'READER_FACTORY_REQUIRED',
+  );
+
+  let closed = 0;
+  await assert.rejects(
+    openDailyBroadMembershipShardSourceImpl({
+      ...common,
+      openBroadDayReader: async () => ({ descriptor: {}, close() { closed += 1; } }),
+    }),
+    (error) => error?.code === 'READER_PORT_INVALID',
+  );
+  assert.equal(closed, 1);
 });
 
 function makeRoot(name) {

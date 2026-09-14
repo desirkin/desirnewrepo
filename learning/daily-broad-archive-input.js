@@ -1,16 +1,22 @@
 // Versioned bridge from the verified local broad-day archive v2 reader into
 // the existing retrospective daily-study market-day contract. This adapter
-// opens the fixed reader itself: a caller cannot substitute an object carrying
-// self-asserted readiness. It remains bounded, local-only and authority NONE.
-import {
-  openBroadDayReader, BROAD_DAY_DATASET_VERSION, BROAD_DAY_PAGE_VERSION,
-} from '../market-lab/broad-day-reader.js';
-import { BROAD_DAY_ARCHIVE_VERSION_V2 } from '../market-lab/broad-day-archive.js';
+// accepts the fixed reader factory from its composition owner. Learning never
+// imports the market pipeline; the returned reader and every byte it returns
+// are validated against the closed mirrored wire contract below. It remains
+// bounded, local-only and authority NONE.
 import { canonicalDigest, deepFreeze } from './shadow-contracts.js';
 import { marketIdentityDigest, sealAcceptedCatalogSnapshot } from './shadow-catalog-snapshot.js';
 
 export const DAILY_BROAD_ARCHIVE_INPUT_VERSION = 'daily-broad-archive-input-1';
 export const DAILY_BROAD_ARCHIVE_PROVENANCE_VERSION = 'daily-broad-archive-provenance-1';
+// Mirrored from the v2 archive/reader wire contract. Tests compose the actual
+// reader at the caller boundary and prove these literals remain byte-exact.
+export const DAILY_BROAD_ARCHIVE_READER_CONTRACT = Object.freeze({
+  archiveVersion: 'broad-day-archive-local-v2',
+  datasetVersion: 'broad-day-dataset-v1',
+  pageVersion: 'broad-day-reader-page-v1',
+  marketPageVersion: 'broad-day-market-page-v1',
+});
 export const DAILY_BROAD_ARCHIVE_LIMITS = Object.freeze({
   maxMarkets: 5_000,
   maxRows: 1_000_000,
@@ -37,6 +43,14 @@ const plain = (value) => value !== null && typeof value === 'object' && !Array.i
 const exact = (value, keys) => plain(value)
   && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 const fail = (code, message) => deepFreeze({ ok: false, version: DAILY_BROAD_ARCHIVE_INPUT_VERSION, code, message, authority: 'NONE' });
+
+export function dailyBroadArchiveReaderPortError(reader, { method = 'readPage' } = {}) {
+  if (!plain(reader) || !plain(reader.descriptor) || typeof reader.close !== 'function'
+      || !['readPage', 'readMarketPage'].includes(method) || typeof reader[method] !== 'function') {
+    return `reader port requires descriptor, close(), and ${method}()`;
+  }
+  return null;
+}
 
 function normalizeLimits(input) {
   if (input !== undefined && !plain(input)) return null;
@@ -90,8 +104,8 @@ function complete(observedCount, dayStartTs, dayEndTs, sourceDigest) {
 
 export function dailyBroadArchiveDescriptorError(descriptor, { maxMarkets = DAILY_BROAD_ARCHIVE_LIMITS.maxMarkets } = {}) {
   if (!positive(maxMarkets) || maxMarkets > HARD.maxMarkets) return { code: 'INPUT_LIMITS_INVALID', message: 'descriptor market bound malformed' };
-  if (descriptor?.datasetVersion !== BROAD_DAY_DATASET_VERSION
-      || descriptor.archiveVersion !== BROAD_DAY_ARCHIVE_VERSION_V2
+  if (descriptor?.datasetVersion !== DAILY_BROAD_ARCHIVE_READER_CONTRACT.datasetVersion
+      || descriptor.archiveVersion !== DAILY_BROAD_ARCHIVE_READER_CONTRACT.archiveVersion
       || descriptor.sourceProvenance?.sourceKind !== 'LOCAL_BROAD_DAY_ARCHIVE_V2'
       || descriptor.sourceProvenance?.durability !== 'LOCAL_FILESYSTEM_ONLY'
       || descriptor.sourceProvenance?.republishSafe !== false
@@ -144,13 +158,17 @@ export function sealDailyBroadArchiveProvenance(descriptor, acceptedCatalogSnaps
 }
 
 export async function prepareDailyBroadArchiveInput({
-  rootDir, dayStartTs, dayEndTs, asOfTs, limits: suppliedLimits, readerLimits, signal = null,
+  rootDir, dayStartTs, dayEndTs, asOfTs, limits: suppliedLimits, readerLimits,
+  signal = null, openBroadDayReader,
 } = {}) {
   const limits = normalizeLimits(suppliedLimits);
   if (!limits) return fail('INPUT_LIMITS_INVALID', 'adapter limits are malformed or exceed the hard ceiling');
+  if (typeof openBroadDayReader !== 'function') return fail('READER_FACTORY_REQUIRED', 'a fixed broad-day reader factory must be injected by the composition owner');
   let reader;
   try {
     reader = await openBroadDayReader({ rootDir, dayStartTs, dayEndTs, asOfTs, limits: readerLimits, signal });
+    const portError = dailyBroadArchiveReaderPortError(reader, { method: 'readPage' });
+    if (portError) return fail('READER_PORT_INVALID', portError);
     const descriptor = reader.descriptor;
     const descriptorError = dailyBroadArchiveDescriptorError(descriptor, { maxMarkets: limits.maxMarkets });
     if (descriptorError) return fail(descriptorError.code, descriptorError.message);
@@ -166,7 +184,7 @@ export async function prepareDailyBroadArchiveInput({
       pages += 1; if (pages > limits.maxPages) return fail('PAGE_LIMIT', 'reader page count exceeds adapter bound');
       const page = await reader.readPage({ cursor, maxRows: limits.pageRows, signal });
       const pageBody = { ...page }; delete pageBody.pageDigest;
-      if (page.pageVersion !== BROAD_DAY_PAGE_VERSION || page.pageDigest !== canonicalDigest(pageBody)
+      if (page.pageVersion !== DAILY_BROAD_ARCHIVE_READER_CONTRACT.pageVersion || page.pageDigest !== canonicalDigest(pageBody)
           || page.datasetDigest !== descriptor.datasetDigest || page.datasetId !== descriptor.datasetId
           || page.rowCount !== page.rows?.length || !Number.isSafeInteger(page.rowBytes) || page.rowBytes < 0
           || !Array.isArray(page.rows)) return fail('PAGE_INTEGRITY_INVALID', 'reader page identity, census, or body digest mismatch');
