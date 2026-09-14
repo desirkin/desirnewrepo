@@ -342,6 +342,31 @@ const datasetOf = (item, asOfTs) => ({
   sourceMarketIdentityDigest: item.marketIdentityDigest,
 });
 
+test('independent liveness review: timing out does not launch overlapping unresolved source calls', async () => {
+  const root = temp(); const frame = frameOf(['BTC', 'ETH']); const nowRef = { value: T0 + HOUR + 10_000 };
+  let resolveLate; let calls = 0;
+  const delayed = new Promise((resolve) => { resolveLate = resolve; });
+  let store; let owner;
+  try {
+    store = await readyStore(root, frame, nowRef);
+    owner = createOpportunityAuditFollowup({ store, clock: () => nowRef.value, sourceTimeoutMs: 10,
+      outcomeSource: () => { calls += 1; return calls === 1 ? delayed : { state: 'PENDING', reasonCode: 'WAITING' }; } });
+    const first = await owner.step({ nowTs: nowRef.value });
+    assert.equal(calls, 1, 'later items in the same page must not overlap the unresolved source');
+    assert.equal(first.considered, 1);
+    assert.equal((await owner.step({ nowTs: nowRef.value })).state, 'BUSY');
+    assert.equal(calls, 1, 'a fresh step cannot pretend timeout proves cancellation');
+    resolveLate({ state: 'AVAILABLE', evidence: candleEvidence(frame, 'BTC', 100, 120) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await store.loadFrame(frame.frameId)).outcomes.length, 0);
+    const recovered = await owner.step({ nowTs: nowRef.value });
+    assert.equal(recovered.pending, 2, 'deferred page targets remain eligible for later honest followup');
+  } finally {
+    resolveLate?.({ state: 'PENDING', reasonCode: 'WAITING' });
+    await owner?.close(); await store?.close(); rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('independent V2 review: every retained row must match evidence and be known at the requested cutoff', () => {
   const frame = frameV2Of(); const item = pendingV2Of(frame); const asOfTs = item.dueTs + 10_000;
   const evidence = candleEvidence(frame, 'BTC', 100, 105, 10_000);
