@@ -18,7 +18,8 @@ export function adaptiveSettlementSubmission(procedure, prediction, suppliedInpu
   const pending = state === 'PENDING';
   const preparedTs = pending ? prediction.targetEndTs : suppliedInput.knownAtTs;
   const disposition = matured ? 'MATURED' : pending ? 'PENDING' : 'MISSING';
-  const dispositionReason = matured ? 'LABEL_KNOWN' : suppliedInput.reasonCode;
+  const dispositionReason = matured ? 'LABEL_KNOWN'
+    : pending ? 'LABEL_PENDING:ARCHIVE_ABSENT' : 'LABEL_DEADLINE_EXPIRED:ARCHIVE_ABSENT';
   const label = {
     rowId: prediction.opportunityId,
     labelRecipeVersion: procedure.target.labelRecipeVersion,
@@ -27,19 +28,19 @@ export function adaptiveSettlementSubmission(procedure, prediction, suppliedInpu
     anchorTsMs: prediction.targetEndTs - prediction.horizonMs,
     anchorLagMs: prediction.targetEndTs - prediction.horizonMs - prediction.predictionTs,
     sourceTrack: '1m',
-    availability: { state: matured ? 'COMPLETE' : 'UNAVAILABLE', reason: matured ? 'AVAILABLE' : dispositionReason },
+    availability: { state: matured ? 'AVAILABLE' : 'UNAVAILABLE', reason: matured ? 'COMPLETE' : 'ARCHIVE_ABSENT' },
     reference: matured
-      ? { state: 'KNOWN', barOpenSec: (prediction.targetEndTs - prediction.horizonMs) / 1_000 - 60, price: 100, knownAtTs: prediction.targetEndTs - prediction.horizonMs }
-      : { state: 'UNKNOWN', barOpenSec: null, price: null, knownAtTs: null },
+      ? { state: 'KNOWN', barOpenSec: (prediction.targetEndTs - prediction.horizonMs) / 1_000 - 60, price: 100, knownAtTs: suppliedInput.knownAtTs }
+      : { state: 'OUTCOME_UNAVAILABLE', barOpenSec: null, price: null, knownAtTs: null },
     horizon60m: matured
       ? {
-        state: 'KNOWN', reason: 'AVAILABLE', horizonEndTs: prediction.targetEndTs,
+        state: 'KNOWN', reason: 'COMPLETE', horizonEndTs: prediction.targetEndTs,
         outcomeKnownAtTs: suppliedInput.knownAtTs, mfePct: Math.max(0, suppliedInput.logReturnPct),
         maePct: Math.min(0, suppliedInput.logReturnPct), logReturnPct: suppliedInput.logReturnPct,
         logReturnUnit: 'LOG_RETURN_PERCENT',
       }
       : {
-        state: pending ? 'NOT_YET_KNOWN' : 'CENSORED', reason: dispositionReason,
+        state: 'OUTCOME_UNAVAILABLE', reason: 'ARCHIVE_ABSENT',
         horizonEndTs: prediction.targetEndTs, outcomeKnownAtTs: null,
         mfePct: null, maePct: null, logReturnPct: null, logReturnUnit: 'LOG_RETURN_PERCENT',
       },

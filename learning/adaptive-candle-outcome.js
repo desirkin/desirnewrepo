@@ -20,6 +20,14 @@ export const ADAPTIVE_CANDLE_RECEIPT_DURABILITY = 'CALLER_MUST_ATOMICALLY_PERSIS
 const HEX64 = /^[a-f0-9]{64}$/;
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,199}$/;
 const REASON = /^[A-Z0-9][A-Z0-9_:.-]{0,159}$/;
+const AVAILABILITY_STATES = new Set(['AVAILABLE', 'PARTIAL', 'UNAVAILABLE']);
+const REFERENCE_STATES = new Set(['KNOWN', 'NOT_YET_KNOWN', 'OUTCOME_UNAVAILABLE']);
+const HORIZON_STATES = new Set(['KNOWN', 'NOT_YET_KNOWN', 'CENSORED', 'OUTCOME_UNAVAILABLE']);
+const UNAVAILABLE_REASONS = new Set([
+  'ARCHIVE_ABSENT', 'PROVENANCE_CLOCK_MISSING', 'NO_1M_TRACK',
+  'SERIES_ABSENT_FOR_ASSET', 'NO_TEMPORAL_OVERLAP', 'REFERENCE_BAR_MISSING',
+]);
+const CENSORED_REASONS = new Set(['SOURCE_COVERAGE_ENDS_BEFORE_HORIZON', 'INTERIOR_BAR_MISSING']);
 const RECEIPT_KEYS = Object.freeze([
   'receiptVersion', 'adapterVersion', 'receiptId', 'receiptDigest', 'procedureId',
   'procedureDigest', 'predictionId', 'predictionDigest', 'opportunityId',
@@ -120,8 +128,7 @@ function sourceIdentityError(source) {
         || source.archiveCreatedTsMs !== null || source.limitations.length !== 1
         || source.limitations[0] !== 'ARCHIVE_ABSENT') return 'absent source claims archive identity';
   } else if (!HEX64.test(source.manifestSha256 ?? '') || !boundedToken(source.schemaVersion)
-      || !boundedToken(source.childhoodVersion)
-      || (source.archiveCreatedTsMs !== null && !isTs(source.archiveCreatedTsMs))) return 'present source identity malformed';
+      || !boundedToken(source.childhoodVersion) || !isTs(source.archiveCreatedTsMs)) return 'present source identity or archive creation clock malformed';
   return null;
 }
 
@@ -131,13 +138,14 @@ function labelProjectionError(label, procedure, prediction) {
   const referenceKeys = exactKeys(label.reference, REFERENCE_KEYS); if (referenceKeys) return `reference ${referenceKeys}`;
   const horizonKeys = exactKeys(label.horizon60m, HORIZON_KEYS); if (horizonKeys) return `horizon ${horizonKeys}`;
   const expectedAnchor = Math.ceil(prediction.predictionTs / 60_000) * 60_000;
+  const h = label.horizon60m;
   if (label.rowId !== prediction.opportunityId || label.labelRecipeVersion !== procedure.target.labelRecipeVersion
       || label.canonicalCoin !== prediction.identity.canonicalCoin || label.decisionKnownAtTs !== prediction.predictionTs
       || label.anchorTsMs !== expectedAnchor || label.anchorLagMs !== expectedAnchor - prediction.predictionTs
-      || label.sourceTrack !== '1m' || label.horizon60m.horizonEndTs !== prediction.targetEndTs
-      || typeof label.availability.state !== 'string' || typeof label.availability.reason !== 'string'
-      || typeof label.reference.state !== 'string' || typeof label.horizon60m.state !== 'string'
-      || typeof label.horizon60m.reason !== 'string') return 'label identity/target malformed';
+      || label.sourceTrack !== '1m' || h.horizonEndTs !== prediction.targetEndTs
+      || !AVAILABILITY_STATES.has(label.availability.state) || !REASON.test(label.availability.reason ?? '')
+      || !REFERENCE_STATES.has(label.reference.state) || !HORIZON_STATES.has(h.state)
+      || !REASON.test(h.reason ?? '')) return 'label identity, target, state, or reason malformed';
   if (label.reference.state === 'KNOWN') {
     if (!Number.isSafeInteger(label.reference.barOpenSec) || label.reference.barOpenSec <= 0
         || !isFiniteNum(label.reference.price) || label.reference.price <= 0
@@ -145,16 +153,40 @@ function labelProjectionError(label, procedure, prediction) {
     if (label.reference.barOpenSec !== expectedAnchor / 1_000 - 60) {
       return 'known reference bar does not match the sealed anchor';
     }
-  } else if (label.reference.price !== null || label.reference.barOpenSec !== null
-      || (label.reference.knownAtTs !== null && !isTs(label.reference.knownAtTs))) return 'unknown reference exposes values';
-  const h = label.horizon60m;
+    if (label.reference.knownAtTs < expectedAnchor) return 'known reference clock precedes its sealed close anchor';
+  } else if (label.reference.price !== null || label.reference.barOpenSec !== null) return 'unknown reference exposes values';
+  else if (label.reference.state === 'NOT_YET_KNOWN') {
+    if (!isTs(label.reference.knownAtTs) || label.reference.knownAtTs < expectedAnchor) return 'not-yet-known reference clock malformed';
+  } else if (label.reference.knownAtTs !== null) return 'unavailable reference exposes a clock';
   if (h.state === 'KNOWN') {
     if (label.reference.state !== 'KNOWN' || !isTs(h.outcomeKnownAtTs)
         || !isFiniteNum(h.logReturnPct) || h.logReturnUnit !== 'LOG_RETURN_PERCENT'
-        || !isFiniteNum(h.mfePct) || h.mfePct < 0 || !isFiniteNum(h.maePct) || h.maePct > 0) return 'known 60m label malformed';
-  } else if (h.logReturnPct !== null || h.mfePct !== null || h.maePct !== null
-      || h.logReturnUnit !== 'LOG_RETURN_PERCENT'
-      || (h.outcomeKnownAtTs !== null && !isTs(h.outcomeKnownAtTs))) return 'unavailable 60m label exposes values';
+        || !isFiniteNum(h.mfePct) || h.mfePct < 0 || !isFiniteNum(h.maePct) || h.maePct > 0
+        || h.reason !== 'COMPLETE' || h.outcomeKnownAtTs < h.horizonEndTs) return 'known 60m label malformed';
+  } else {
+    if (h.logReturnPct !== null || h.mfePct !== null || h.maePct !== null
+        || h.logReturnUnit !== 'LOG_RETURN_PERCENT') return 'unavailable 60m label exposes values';
+    if (h.state === 'NOT_YET_KNOWN') {
+      if (h.reason !== 'NOT_YET_KNOWN_AT_AS_OF' || !isTs(h.outcomeKnownAtTs)
+          || h.outcomeKnownAtTs < h.horizonEndTs) return 'not-yet-known 60m label malformed';
+    } else if (h.state === 'CENSORED') {
+      if (!CENSORED_REASONS.has(h.reason) || !isTs(h.outcomeKnownAtTs)
+          || h.outcomeKnownAtTs < h.horizonEndTs || label.reference.state !== 'KNOWN') return 'censored 60m label malformed';
+    } else if (!UNAVAILABLE_REASONS.has(h.reason) || h.outcomeKnownAtTs !== null) return 'outcome-unavailable 60m label malformed';
+  }
+  if (label.reference.knownAtTs !== null && h.outcomeKnownAtTs !== null
+      && label.reference.knownAtTs > h.outcomeKnownAtTs) return 'reference clock follows horizon knowledge clock';
+  if (label.availability.state === 'UNAVAILABLE') {
+    if (!UNAVAILABLE_REASONS.has(label.availability.reason)
+        || label.reference.state !== 'OUTCOME_UNAVAILABLE' || h.state !== 'OUTCOME_UNAVAILABLE'
+        || h.reason !== label.availability.reason) return 'unavailable label states/reasons disagree';
+  } else if (label.availability.state === 'AVAILABLE') {
+    if (label.availability.reason !== 'COMPLETE' || !['KNOWN', 'NOT_YET_KNOWN'].includes(h.state)) return 'available label states/reasons disagree';
+  } else if (!['COMPLETE', 'INTERIOR_BAR_MISSING'].includes(label.availability.reason)
+      || h.state === 'OUTCOME_UNAVAILABLE'
+      || (['KNOWN', 'NOT_YET_KNOWN'].includes(h.state) && label.availability.reason !== 'COMPLETE')) {
+    return 'partial label states/reasons disagree';
+  }
   return null;
 }
 
@@ -168,6 +200,7 @@ export function adaptiveCandleOutcomeReceiptError(receipt, procedure, prediction
   if (receipt.sourceIdentity.state === 'ABSENT_AT_POLL') {
     if (hasKnownValue) return 'known label requires a present archive source';
     if (receipt.label.availability.state !== 'UNAVAILABLE') return 'absent source must have unavailable label availability';
+    if (receipt.label.availability.reason !== 'ARCHIVE_ABSENT') return 'absent source must carry the archive-absent label reason';
   }
   if (receipt.label.availability.state === 'UNAVAILABLE' && hasKnownValue) {
     return 'unavailable label cannot contain known values';
@@ -185,15 +218,36 @@ export function adaptiveCandleOutcomeReceiptError(receipt, procedure, prediction
       || receipt.durability !== ADAPTIVE_CANDLE_RECEIPT_DURABILITY
       || receipt.authority !== 'NONE' || receipt.purpose !== 'ADAPTIVE_CANDLE_TARGET_PROVENANCE') return 'receipt identity/content malformed';
   const h = receipt.label.horizon60m;
-  if (receipt.label.reference.state === 'KNOWN'
-      && receipt.label.reference.knownAtTs > receipt.preparedTs) {
+  const reference = receipt.label.reference;
+  if (receipt.sourceIdentity.state === 'PRESENT_MANIFEST_BOUND') {
+    const createdTs = receipt.sourceIdentity.archiveCreatedTsMs;
+    if (createdTs > receipt.preparedTs) return 'archive source was unavailable when the receipt was prepared';
+    if (receipt.label.availability.state === 'UNAVAILABLE'
+        && ['ARCHIVE_ABSENT', 'PROVENANCE_CLOCK_MISSING'].includes(receipt.label.availability.reason)) {
+      return 'present source contradicts the label availability reason';
+    }
+    if ((reference.knownAtTs !== null && createdTs > reference.knownAtTs)
+        || (h.outcomeKnownAtTs !== null && createdTs > h.outcomeKnownAtTs)) return 'archive creation clock follows a claimed label knowledge clock';
+  }
+  if (reference.state === 'KNOWN' && reference.knownAtTs > receipt.preparedTs) {
     return 'known reference was unavailable when the receipt was prepared';
+  }
+  if (reference.state === 'NOT_YET_KNOWN' && reference.knownAtTs <= receipt.preparedTs) {
+    return 'not-yet-known reference was already available when the receipt was prepared';
+  }
+  if (h.state === 'NOT_YET_KNOWN' && h.outcomeKnownAtTs <= receipt.preparedTs) {
+    return 'not-yet-known horizon was already available when the receipt was prepared';
+  }
+  if (h.state === 'CENSORED' && h.outcomeKnownAtTs > receipt.preparedTs) {
+    return 'censored horizon was unavailable when the receipt was prepared';
   }
   if (receipt.disposition === 'MATURED') {
     if (h.state !== 'KNOWN' || h.outcomeKnownAtTs > receipt.preparedTs || receipt.dispositionReason !== 'LABEL_KNOWN') return 'matured receipt is not an available exact label';
   } else if (h.state === 'KNOWN') return 'non-matured receipt contains a known label';
-  else if (receipt.disposition === 'PENDING' && receipt.preparedTs > receipt.missingnessDeadlineTs) return 'pending receipt is after its deadline';
-  else if (receipt.disposition === 'MISSING' && receipt.preparedTs <= receipt.missingnessDeadlineTs) return 'missing receipt is not after its deadline';
+  else if (receipt.disposition === 'PENDING'
+      && (receipt.preparedTs > receipt.missingnessDeadlineTs || receipt.dispositionReason !== `LABEL_PENDING:${h.reason}`)) return 'pending receipt timing/reason mismatch';
+  else if (receipt.disposition === 'MISSING'
+      && (receipt.preparedTs <= receipt.missingnessDeadlineTs || receipt.dispositionReason !== `LABEL_DEADLINE_EXPIRED:${h.reason}`)) return 'missing receipt timing/reason mismatch';
   if (!HEX64.test(receipt.receiptDigest ?? '') || receipt.receiptDigest !== receiptDigestOf(receipt)
       || receipt.receiptId !== receiptIdOf(receipt)) return 'receipt digest mismatch';
   if (archive !== undefined) {

@@ -141,16 +141,14 @@ test('one unavailable poll remains pending until the presealed missingness deadl
   assert.equal(h.store.state().sequence, 0);
 });
 
-test('a source acquired after the outcome is not exposed before its real known-at clock', (t) => {
+test('a future-acquired source is refused at an earlier as-of and is usable only at its real known-at clock', (t) => {
   const h = rig(t);
   const retrievedTs = h.prediction.targetEndTs + 7_000;
   const source = archiveFixture(t, h.prediction, { retrievedTs });
-  const early = prepareAdaptiveCandleOutcome({
+  assert.throws(() => prepareAdaptiveCandleOutcome({
     procedure: h.procedure, prediction: h.prediction, archive: source.archive,
     asOfTs: h.prediction.targetEndTs + 5_000,
-  });
-  assert.equal(early.status, 'PENDING');
-  assert.equal(early.provenanceReceipt.label.horizon60m.state, 'NOT_YET_KNOWN');
+  }), /archive source was unavailable when the receipt was prepared/);
   const known = prepareAdaptiveCandleOutcome({
     procedure: h.procedure, prediction: h.prediction, archive: source.archive,
     asOfTs: retrievedTs,
@@ -240,7 +238,7 @@ test('self-consistent receipt hashes cannot legitimize contradictory source, ava
       mutate(receipt) {
         receipt.label.availability = { state: 'UNAVAILABLE', reason: 'ARCHIVE_ABSENT' };
       },
-      error: /unavailable label cannot contain known values/,
+      error: /unavailable label states\/reasons disagree/,
     },
     {
       name: 'a different reference candle',
@@ -249,8 +247,41 @@ test('self-consistent receipt hashes cannot legitimize contradictory source, ava
     },
     {
       name: 'a reference first known after preparation',
-      mutate(receipt) { receipt.label.reference.knownAtTs = receipt.preparedTs + 1; },
+      mutate(receipt) {
+        receipt.label.reference.knownAtTs = receipt.preparedTs + 1;
+        receipt.label.horizon60m.outcomeKnownAtTs = receipt.preparedTs + 1;
+      },
       error: /known reference was unavailable when the receipt was prepared/,
+    },
+    {
+      name: 'a present source without its archive creation clock',
+      mutate(receipt) { receipt.sourceIdentity.archiveCreatedTsMs = null; },
+      error: /present source identity or archive creation clock malformed/,
+    },
+    {
+      name: 'a source created after receipt preparation',
+      mutate(receipt) { receipt.sourceIdentity.archiveCreatedTsMs = receipt.preparedTs + 1; },
+      error: /archive source was unavailable when the receipt was prepared/,
+    },
+    {
+      name: 'a source created after the claimed reference knowledge time',
+      mutate(receipt) { receipt.label.reference.knownAtTs = receipt.label.anchorTsMs; },
+      error: /archive creation clock follows a claimed label knowledge clock/,
+    },
+    {
+      name: 'a reference claimed known before its close anchor',
+      mutate(receipt) { receipt.label.reference.knownAtTs = receipt.label.anchorTsMs - 1; },
+      error: /known reference clock precedes its sealed close anchor/,
+    },
+    {
+      name: 'an unknown availability state',
+      mutate(receipt) { receipt.label.availability.state = 'AVAILABLEISH'; },
+      error: /label identity, target, state, or reason malformed/,
+    },
+    {
+      name: 'a known horizon carrying a missing-data reason',
+      mutate(receipt) { receipt.label.horizon60m.reason = 'INTERIOR_BAR_MISSING'; },
+      error: /known 60m label malformed/,
     },
   ];
 
