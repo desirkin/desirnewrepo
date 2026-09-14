@@ -730,8 +730,8 @@ function startPump(state, log) {
 }
 
 function api(state, log) {
-  const health = () =>
-    persistenceHealth({
+  const health = () => {
+    const observed = persistenceHealth({
       db: state.db,
       repo: state.repo,
       migrationVersion: state.migrationVersion,
@@ -742,6 +742,13 @@ function api(state, log) {
       pendingControlSync: state.pendingControlSync,
       storeGuard: state.storeGuard,
     });
+    // Database reachability and restore evidence describe the last active
+    // connection, not permission to use a stopped owner. Revoke immediately
+    // when stop() fences admission, even while its final drain still runs.
+    return state.stopped
+      ? { ...observed, stopped: true, status: 'UNAVAILABLE', failureCategory: 'STOPPED', permissionLock: true }
+      : { ...observed, stopped: false };
+  };
 
   // stop() tears down EVERYTHING: retry loop first (no background retry
   // callbacks after stop), then the pump with a final drain, then the pool.
@@ -782,6 +789,7 @@ function api(state, log) {
     // durability REQUIRED -> refuse (PERSISTENCE_REQUIRED_UNCONFIGURED);
     // explicit local development -> legacy local behavior (documented).
     async durableClearOrRefuse() {
+      if (state.stopped) return { allow: false, reason: 'STOPPED' };
       if (!state.db.configured()) {
         if (durabilityRequired()) return { allow: false, reason: 'PERSISTENCE_REQUIRED_UNCONFIGURED' };
         return { allow: true, mode: 'LOCAL_ONLY_UNCONFIGURED' };
@@ -790,6 +798,9 @@ function api(state, log) {
       if (h.permissionLock) return { allow: false, reason: 'PERSISTENCE_PERMISSION_LOCK' };
       try {
         const r = await state.repo.durableClear();
+        // An already-started durable write may settle during shutdown, but
+        // its acknowledgement cannot grant fresh permission in this body.
+        if (state.stopped) return { allow: false, reason: 'STOPPED' };
         if (r.refused) {
           // PERSIST-0B §10: the row-locked revalidation found corrupt durable
           // truth — CLEAR refused, row untouched, integrity lock engaged
@@ -806,6 +817,9 @@ function api(state, log) {
     // permission-REDUCING actions apply locally FIRST (caller already did),
     // then persist; failure leaves the restriction active and health honest
     async persistControlSnapshot(controls) {
+      // The caller's local restriction remains applied. A stopped owner
+      // cannot reopen its pool; recovery must sync it through a new owner.
+      if (state.stopped) return { durable: false, reason: 'STOPPED' };
       if (!state.db.configured()) return { durable: false, reason: 'UNCONFIGURED' };
       try {
         const r = await state.repo.saveControlState(controls, state.controlRevision);
