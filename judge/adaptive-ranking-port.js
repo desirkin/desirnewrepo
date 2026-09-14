@@ -499,6 +499,8 @@ function validBaselineResolverResult(result, input) {
 }
 
 export function adaptiveRankingPortResultError(result) {
+  const bounded = boundedPlainDataError(result);
+  if (bounded) return bounded;
   if (!exactKeys(result, RESULT_KEYS)
       || result.resultVersion !== ADAPTIVE_RANKING_RESULT_VERSION
       || result.portVersion !== ADAPTIVE_RANKING_PORT_VERSION

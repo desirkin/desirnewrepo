@@ -15,6 +15,8 @@ import {
 } from '../judge/adaptive-ranking-port.js';
 import { prepareAdaptiveJudgeFacts } from '../judge/adaptive-facts-source.js';
 import { buildJudgeLearningConsumerContract } from '../judge/learning-recipe.js';
+import { JUDGE_FACT_RECIPE_VERSION } from '../judge/learning-intake.js';
+import { buildActivation, transitionActivation } from '../learning/adapter.js';
 import {
   adaptiveStateDigestOf, initialAdaptiveState, sealAdaptiveProcedure,
 } from '../learning/adaptive-registry.js';
@@ -34,6 +36,12 @@ const SPEC = instrumentSpec({
   base: 'XXBT', quote: 'ZUSD', canonicalCoin: 'BTC', status: 'online',
   priceIncrement: '0.1', qtyIncrement: '0.00000001', orderMin: '0.00005',
   costMin: '0.5', priceDecimals: 1, qtyDecimals: 8, observedTs: T0, source: 'FIXTURE',
+});
+const SOL_SPEC = instrumentSpec({
+  venue: 'kraken', pairKey: 'SOLUSD', altname: 'SOLUSD', wsname: 'SOL/USD',
+  base: 'SOL', quote: 'ZUSD', canonicalCoin: 'SOL', status: 'online',
+  priceIncrement: '0.01', qtyIncrement: '0.00000001', orderMin: '0.02',
+  costMin: '0.5', priceDecimals: 2, qtyDecimals: 8, observedTs: T0, source: 'FIXTURE',
 });
 const TEST_FEE = feeContract({
   venue: 'kraken', pairKey: null, orderType: 'TAKER', rate: '0.001',
@@ -55,7 +63,16 @@ function bars(endTs, close = 100000) {
   }));
 }
 
-function adaptiveFixture() {
+function scaleInvariantBars(endTs, close, wickFraction = 0.96) {
+  return Array.from({ length: 61 }, (_, index) => ({
+    periodStartTs: endTs - (61 - index) * MIN,
+    periodEndTs: endTs - (60 - index) * MIN,
+    open: close, high: close * 1.002, low: index === 41 ? close * wickFraction : close * 0.998,
+    close, volumeQuote: 1000, volumeBase: 0.01, closed: true,
+  }));
+}
+
+function adaptiveFixture({ scope = { setupType: 'ANY', regime: 'ANY', assets: 'ANY', venues: ['kraken'] } } = {}) {
   const preparedFactsContract = buildJudgeLearningConsumerContract({
     policyDigest: POLICY.digest,
     eligibility: {
@@ -75,7 +92,7 @@ function adaptiveFixture() {
   const initialState = initialAdaptiveState(procedure);
   const publication = sealAdaptiveProcedurePublicationV2({
     procedure, initialState, consumerContract,
-    scope: { setupType: 'ANY', regime: 'ANY', assets: 'ANY', venues: ['kraken'] },
+    scope,
     applicability: { clauses: [{ feature: 'spreadBps', op: 'LTE', threshold: 20 }] },
     sealedTs: T0 + 1,
   });
@@ -109,7 +126,7 @@ function adaptiveFixture() {
   return { consumerContract, procedure, publication, currentState, qualification };
 }
 
-function captureReceipt(input) {
+function captureReceipt(input, { storeId = 'synthetic-fixed-reader-store', sequence = 11 } = {}) {
   const captureEventDigest = adaptiveRankingInputCaptureEventDigest(input);
   const body = {
     receiptVersion: ADAPTIVE_RANKING_CAPTURE_VERSION,
@@ -122,7 +139,7 @@ function captureReceipt(input) {
     marketIdentityDigest: digestOf(input.factsEnvelope.sourceBinding.market),
     durableAcknowledgment: {
       ackVersion: ADAPTIVE_RANKING_CAPTURE_ACK_VERSION,
-      storeId: 'synthetic-fixed-reader-store', storeVersion: 'synthetic-store-1', sequence: 11,
+      storeId, storeVersion: 'synthetic-store-1', sequence,
       eventDigest: captureEventDigest, headDigest: '6'.repeat(64), acknowledgedTs: input.decisionTs,
     },
     authority: 'NONE',
@@ -133,8 +150,13 @@ function captureReceipt(input) {
   };
 }
 
-function qualifiedInputAtFactory(snapshots, { missing = false, corruptReceipt = false, resolverCalls }) {
-  const fixed = adaptiveFixture();
+function qualifiedInputAtFactory(snapshots, {
+  missing = false, corruptReceipt = false, resolverCalls,
+  specOf = () => SPEC,
+  scope = { setupType: 'ANY', regime: 'ANY', assets: 'ANY', venues: ['kraken'] },
+  snapshotAgeMs = 0,
+} = {}) {
+  const fixed = adaptiveFixture({ scope });
   const port = createAdaptiveRankingPort({
     resolveQualifiedRanking(args) {
       resolverCalls.count += 1;
@@ -155,7 +177,7 @@ function qualifiedInputAtFactory(snapshots, { missing = false, corruptReceipt = 
           venue: query.context.venue, symbol: query.pair,
           canonicalCoin: query.context.asset, quote: 'USD',
         },
-        instrumentSpec: SPEC, bookSnapshot,
+        instrumentSpec: specOf(query.pair), bookSnapshot,
         frozenIndicator: null, historicalBars: null, flowWindow: null,
       });
       const stateSource = {
@@ -169,7 +191,7 @@ function qualifiedInputAtFactory(snapshots, { missing = false, corruptReceipt = 
         },
       };
       const snapshot = {
-        decisionVersion: 'adaptive-ranking-procedure-decision-2', preparedTs: query.decisionTs,
+        decisionVersion: 'adaptive-ranking-procedure-decision-2', preparedTs: query.decisionTs - snapshotAgeMs,
         mode: 'PAPER', kill: { state: 'ARMED' },
         adaptiveRankingProcedure: {
           consumerContractDigest: fixed.consumerContract.consumerContractDigest,
@@ -184,7 +206,10 @@ function qualifiedInputAtFactory(snapshots, { missing = false, corruptReceipt = 
         snapshot, factsEnvelope, consumerContract: fixed.consumerContract,
         context: query.context, strategyId: query.strategyId, decisionTs: query.decisionTs,
       };
-      const receipt = captureReceipt(partial);
+      const receipt = captureReceipt(partial, {
+        storeId: `synthetic-fixed-reader-${query.context.asset.toLowerCase()}`,
+        sequence: query.context.asset === 'BTC' ? 11 : 12,
+      });
       if (corruptReceipt) receipt.durableAcknowledgment.headDigest = '7'.repeat(64);
       return {
         snapshot, factsEnvelope, consumerContract: fixed.consumerContract,
@@ -265,6 +290,129 @@ async function rig({ adaptiveRanking = null, snapshotSink = null, controls = () 
   return { judge, dispatcher, snapshots, run };
 }
 
+function legacySolRanking(clock) {
+  const published = buildActivation({
+    candidateId: 'lcand-legacy-sol', patternId: 'lpat-legacy-sol',
+    trainingCutoffTs: T0 - DAY, candidateDigest: 'legacy-candidate',
+    evidenceDigest: 'legacy-evidence', reportDigest: 'legacy-report',
+    maxAbsAdjust: 0.1, adjust: 0.1,
+    scope: {
+      setupType: 'RANGE_IGNITION', regime: 'ANY', assets: ['SOL'], venues: ['kraken'],
+    },
+    validation: {
+      evidenceBasis: 'PROSPECTIVE', groupCount: 30, assetCount: 5,
+      dateCount: 7, netAfterCostsPct: 0.4,
+    },
+    featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyVersion: POLICY.digest,
+    applicability: { clauses: [{ feature: 'rv60', op: 'GTE', threshold: 0 }] },
+    effectiveTs: T0, expiresTs: T0 + 30 * DAY, ts: T0,
+  });
+  const active = transitionActivation(published, {
+    state: 'ACTIVE_PAPER', transitionReason: 'PAPER_RUNTIME_ADOPTED', ts: T0,
+  });
+  return {
+    snapshot: () => ({
+      view: 'DECISION', preparedTs: clock.now(), activations: [active],
+      kill: { state: 'ARMED', reason: null, ts: T0 },
+    }),
+  };
+}
+
+async function dualCandidateRig({ adaptiveRanking = null, snapshotSink = null, legacyFavorSol = false } = {}) {
+  const accountId = `adaptive-dual-${Math.random().toString(36).slice(2)}`;
+  const clock = fakeClock();
+  const journal = createMemoryJournal(); await journal.create(accountId, { accountKind: 'PAPER' });
+  const writer = await journal.acquireWriter(accountId); const F = eventsFor(accountId, clock);
+  const specOf = (symbol) => symbol === 'SOL/USD' ? SOL_SPEC : SPEC;
+  const feed = createExecutionFeed({ clock: clock.now }); feed.onConnect(clock.now());
+  const adapter = createPaperAdapter({ accountId, clock: clock.now, feed, fee: TEST_FEE, specOf });
+  const pclock = { now: clock.now, monotonic: clock.monotonic, status: () => ({ trusted: true }) };
+  const dispatcher = createDispatcher({ accountId, journal, writer, adapter, clock: pclock, specOf });
+  await dispatcher.load(); await dispatcher.commit(F.init());
+  const scheduler = createScheduler({ monotonic: clock.monotonic });
+  feed.subscribe((event) => {
+    if (event.kind === 'BOOK' && snapshotSink) snapshotSink.set(event.snapshot.digest, event.snapshot);
+  });
+  const judge = createJudge({
+    accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock,
+    specOf, feeOf: () => TEST_FEE,
+    history: { bars: (symbol, nowTs) => scaleInvariantBars(
+      Math.floor(nowTs / MIN) * MIN,
+      symbol === 'SOL/USD' ? 1000 : 100000,
+      symbol === 'SOL/USD' ? 0.95996 : 0.96,
+    ) },
+    caseSource: { consumed: () => null }, controls: () => ({ kill: false, cage: false, vetoes: [] }),
+    scheduler, mode: 'PAPER', adaptiveRanking,
+    learning: legacyFavorSol ? legacySolRanking(clock) : null,
+  });
+  const symbols = ['SOL/USD', 'BTC/USD'];
+  judge.admit('SOL/USD', { assetId: 'SOL', source: 'TEST' });
+  clock.advance(1);
+  judge.admit('BTC/USD', { assetId: 'BTC', source: 'TEST' });
+  for (const symbol of symbols) {
+    feed.ingest(JSON.stringify({
+      channel: 'instrument', type: 'snapshot',
+      data: { pairs: [{ symbol, price_precision: symbol === 'SOL/USD' ? 2 : 1, qty_precision: 8 }] },
+    }), clock.now());
+    feed.ingest(JSON.stringify({
+      method: 'subscribe', success: true, result: { channel: 'trade', symbol },
+    }), clock.now());
+  }
+  const decimals = (symbol) => symbol === 'SOL/USD' ? 2 : 1;
+  const scaled = (symbol, value) => symbol === 'SOL/USD' ? value / 100 : value;
+  const book = (symbol, asks, bids, type = 'snapshot') => feed.ingest(JSON.stringify({
+    channel: 'book', type, data: [{
+      symbol,
+      asks: asks.map(([price, qty]) => ({ price: scaled(symbol, price), qty })),
+      bids: bids.map(([price, qty]) => ({ price: scaled(symbol, price), qty })),
+      checksum: crc32([...asks.slice(0, 10), ...bids.slice(0, 10)]
+        .map(([price, qty]) => fmt(scaled(symbol, price), decimals(symbol)) + fmt(qty, 8)).join('')),
+      timestamp: new Date(clock.now()).toISOString(),
+    }],
+  }), clock.now());
+  let tradeId = 0;
+  const trade = (symbol, price, side = 'buy', qty = 0.05) => feed.ingest(JSON.stringify({
+    channel: 'trade', type: 'update', data: [{
+      symbol, side, price: scaled(symbol, price), qty: symbol === 'SOL/USD' ? qty * 100 : qty,
+      ord_type: 'market', trade_id: ++tradeId, timestamp: new Date(clock.now()).toISOString(),
+    }],
+  }), clock.now());
+  const heartbeat = () => feed.ingest(JSON.stringify({ channel: 'heartbeat' }), clock.now());
+  const advance = (milliseconds) => {
+    for (let elapsed = 0; elapsed < milliseconds; elapsed += 1000) {
+      clock.advance(Math.min(1000, milliseconds - elapsed)); heartbeat();
+    }
+  };
+  const settle = async () => { await judge.onTick(clock.now()); await scheduler.drain(); await dispatcher.idle(); };
+  async function run() {
+    for (const symbol of symbols) book(symbol, [[100010, 5]], [[99990, 5]]);
+    for (let minute = 0; minute < 22; minute += 1) for (let part = 0; part < 4; part += 1) {
+      advance(15_000);
+      for (const symbol of symbols) {
+        trade(symbol, 100001, 'buy'); trade(symbol, 99999, 'sell');
+        book(symbol, [[100010, 5]], [[99990, 5]]);
+      }
+    }
+    await settle();
+    const start = Math.floor(clock.now() / MIN) * MIN + MIN;
+    while (clock.now() < start) advance(Math.min(1000, start - clock.now()));
+    for (let index = 0; index < 20; index += 1) {
+      advance(2000); for (const symbol of symbols) trade(symbol, 100050, 'buy', 0.2);
+    }
+    while (clock.now() % MIN !== 0) advance(1000);
+    clock.advance(500);
+    for (let index = 0; index < 3; index += 1) {
+      for (const symbol of symbols) {
+        book(symbol, [[100420, 5], [100430, 5]], [[100400, 5], [100390, 5]]);
+        trade(symbol, 100410, 'buy', 0.1);
+      }
+      await settle(); if (index < 2) clock.advance(1050);
+    }
+    await settle(); await settle();
+  }
+  return { clock, judge, dispatcher, run };
+}
+
 test('normal Judge uses the actual qualified port only after legal post-cost admission and preserves baseline valuation', async () => {
   const resolverCalls = { count: 0 }; const snapshots = new Map();
   const adaptiveRanking = qualifiedInputAtFactory(snapshots, { resolverCalls });
@@ -320,4 +468,63 @@ test('entry gates and rejected executable costs cannot be bypassed or invoke the
   assert.equal(costCalls.readerCalls ?? 0, 0, 'an executable-cost refusal never reads adaptive evidence');
   assert.equal(rejected.judge.decisions().some((row) => row.status === 'ENTRY_RESERVED'), false);
   assert.ok(rejected.judge.decisions().some((row) => row.reasonCodes.includes('NO_TRADE_SIZE')));
+});
+
+test('actual normal batch ordering reverses a small baseline lead with one typed adaptive RR influence, never adds the legacy rank unit, and is deterministic across restart', async () => {
+  const baseline = await dualCandidateRig(); await baseline.run();
+  assert.deepEqual(baseline.judge.admissionGate().lastBatch.order, ['SOL', 'BTC'],
+    `SOL's deliberately small post-cost baseline lead wins without adaptive ranking: ${JSON.stringify(baseline.judge.decisions().map((row) => [row.asset.canonicalCoin, row.status, row.valuationRef?.rewardRiskRatio, row.reasonCodes]))}`);
+
+  async function adaptiveRun() {
+    const snapshots = new Map(); const calls = { count: 0 };
+    const specOf = (symbol) => symbol === 'SOL/USD' ? SOL_SPEC : SPEC;
+    const adaptiveRanking = qualifiedInputAtFactory(snapshots, {
+      resolverCalls: calls, specOf,
+      scope: { setupType: 'ANY', regime: 'ANY', assets: ['BTC'], venues: ['kraken'] },
+    });
+    const fixture = await dualCandidateRig({
+      adaptiveRanking, snapshotSink: snapshots, legacyFavorSol: true,
+    });
+    await fixture.run();
+    return { fixture, calls };
+  }
+
+  const first = await adaptiveRun();
+  assert.deepEqual(first.fixture.judge.admissionGate().lastBatch.order, ['BTC', 'SOL'],
+    `the BTC-only qualified +0.015 RR-point state reverses the small baseline ordering: ${JSON.stringify(first.fixture.judge.decisions().map((row) => [row.asset.canonicalCoin, row.status, row.valuationRef?.rewardRiskRatio, row.measurements.filter((m) => [ADAPTIVE_RANKING_MEASUREMENT_ID, 'LEARNED_RANK_ADJUSTMENT'].includes(m.id))]))}`);
+  const btc = first.fixture.judge.decisions().find((row) => row.asset.canonicalCoin === 'BTC' && row.valuationRef);
+  const sol = first.fixture.judge.decisions().find((row) => row.asset.canonicalCoin === 'SOL' && row.valuationRef);
+  assert.ok(btc && sol);
+  assert.equal(btc.measurements.find((row) => row.id === ADAPTIVE_RANKING_MEASUREMENT_ID)?.value, 0.015);
+  assert.equal(sol.measurements.find((row) => row.id === 'LEARNED_RANK_ADJUSTMENT')?.value, 0.1,
+    'the legacy selector genuinely favors SOL in its distinct RANK_SCORE_UNITS');
+  assert.equal(sol.measurements.find((row) => row.id === ADAPTIVE_RANKING_MEASUREMENT_ID)?.ok, false);
+  assert.equal(first.calls.count, 2, 'both fully qualified candidates reach the actual resolver');
+
+  const restarted = await adaptiveRun();
+  assert.deepEqual(restarted.fixture.judge.admissionGate().lastBatch.order, ['BTC', 'SOL']);
+  const notes = (run) => Object.fromEntries(run.fixture.judge.decisions().filter((decision) => decision.valuationRef).map((decision) => [
+    decision.asset.canonicalCoin,
+    decision.measurements.find((row) => row.id === ADAPTIVE_RANKING_MEASUREMENT_ID)?.note,
+  ]));
+  assert.deepEqual(notes(restarted), notes(first),
+    'a restarted fixed reader over the same ACKed state and exact inputs produces the same evidence identities');
+});
+
+test('a stale fixed-reader snapshot is measured as baseline in the normal caller and cannot reorder a batch', async () => {
+  const snapshots = new Map(); const calls = { count: 0 };
+  const adaptiveRanking = qualifiedInputAtFactory(snapshots, {
+    resolverCalls: calls, specOf: (symbol) => symbol === 'SOL/USD' ? SOL_SPEC : SPEC,
+    scope: { setupType: 'ANY', regime: 'ANY', assets: ['BTC'], venues: ['kraken'] },
+    snapshotAgeMs: 16 * MIN,
+  });
+  const fixture = await dualCandidateRig({ adaptiveRanking, snapshotSink: snapshots });
+  await fixture.run();
+  assert.deepEqual(fixture.judge.admissionGate().lastBatch.order, ['SOL', 'BTC']);
+  assert.equal(calls.count, 0, 'stale state is refused before the qualified resolver');
+  for (const decision of fixture.judge.decisions().filter((row) => row.valuationRef)) {
+    const measurement = decision.measurements.find((row) => row.id === ADAPTIVE_RANKING_MEASUREMENT_ID);
+    assert.equal(measurement?.ok, false);
+    assert.match(measurement?.note ?? '', /PRE_DECISION_DURABLE_CAPTURE_INVALID/);
+  }
 });
