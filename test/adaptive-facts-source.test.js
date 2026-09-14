@@ -98,6 +98,38 @@ function validInput() {
   };
 }
 
+test('source preflight refuses accessor and hidden/non-JSON values without invoking caller code', () => {
+  let calls = 0;
+  const input = validInput();
+  const original = input.decisionTs;
+  Object.defineProperty(input, 'decisionTs', { enumerable: true, get() { calls += 1; return original; } });
+  assert.notEqual(adaptiveJudgeFactsSourceError(input), null);
+  assert.equal(calls, 0);
+  for (const mutate of [
+    (v) => { v[Symbol('hidden')] = 'discarded'; },
+    (v) => { Object.defineProperty(v, 'hidden', { value: 'discarded', enumerable: false }); },
+    (v) => { v.flowWindow.trades.extra = true; },
+    (v) => { v.historicalBars[0].tradeCount = NaN; },
+  ]) {
+    const value = validInput(); mutate(value);
+    assert.notEqual(adaptiveJudgeFactsSourceError(value), null);
+  }
+});
+
+test('source sidecar cannot re-label bar/flow market identity when the book is absent', () => {
+  const input = validInput(); input.bookSnapshot = null;
+  const envelope = clone(prepareAdaptiveJudgeFacts(input));
+  assert.equal(adaptiveJudgeFactsEnvelopeError(envelope), null);
+  const rawSpec = { ...envelope.sourceBinding.instrument, pairKey: 'XETHZUSD', altname: 'ETHUSD', wsname: 'ETH/USD', base: 'XETH', canonicalCoin: 'ETH' };
+  delete rawSpec.specDigest;
+  envelope.sourceBinding.instrument = instrumentSpec(rawSpec);
+  envelope.sourceBinding.market = { venue: 'kraken', symbol: 'ETH/USD', canonicalCoin: 'ETH', quote: 'USD' };
+  const body = { ...envelope.sourceBinding }; delete body.sourceId; delete body.sourceDigest;
+  envelope.sourceBinding.sourceDigest = digestOf(body);
+  envelope.sourceBinding.sourceId = `jafsrc-${envelope.sourceBinding.sourceDigest.slice(0, 40)}`;
+  assert.notEqual(adaptiveJudgeFactsEnvelopeError(envelope), null);
+});
+
 test('real-shaped accepted inputs produce immutable V3 facts and an explicit non-authenticating source sidecar', () => {
   const input = validInput();
   const envelope = prepareAdaptiveJudgeFacts(input);
