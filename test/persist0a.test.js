@@ -196,7 +196,7 @@ if (!TEST_URL) {
   test('schema 5 applies; migrations remain idempotent', async () => {
     assert.equal(await db.connect(), true);
     const first = await runMigrations(db);
-    assert.equal(first.schemaVersion, 9); // old law: 8 (RUMOR-2 writer-epoch fencing 7 + JUDGE execution journal 8); new law: 9 adds the append-only experiment records (focused completion), additive
+    assert.equal(first.schemaVersion, 10); // laws 1-9 remain unchanged; law 10 adds bounded small-store snapshot anchors, additive
     const again = await runMigrations(db);
     assert.deepEqual(again.appliedNow, []);
   });

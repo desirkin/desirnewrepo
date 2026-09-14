@@ -24,12 +24,13 @@ import { VERDICT_WORDS } from '../execution/contract.js';
 export const VERDICT_RECORD_VERSION = 'judge-challenger-verdict-1';
 
 export const JUDGE_VERSION = 'judge-1';
+const PERSISTENCE_PERMISSION_REASON = 'PERSISTENCE_PERMISSION_LOCK';
 // a CANARY authorization bounds the position duration (closeout R14): the shorter of the policy duration and the owner's canary bound
 export const canaryDurationBound = (s, policyMs) => { const a = s?.authorization; const bound = a && !a.ended && a.kind === 'CANARY' && Number.isSafeInteger(a.canary?.maxDurationMs) ? a.canary.maxDurationMs : null; return bound === null ? policyMs : Math.min(policyMs, bound); };
 export const FUNNEL_STAGES = Object.freeze(['discovered', 'recorded', 'warmed', 'nominated', 'setupQualified', 'costQualifiedAtLegalSize', 'reserved', 'sent', 'filled', 'protected', 'closedReconciled']);
 const inc = (obj, k, n = 1) => { obj[k] = (obj[k] ?? 0) + n; };
 
-export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null, setupSelection = null }) {
+export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null, setupSelection = null, permissionIncreaseAllowed = null }) {
   // LEARN-1 consumer seam (ADDENDUM-2 §08): `learning` is an OPTIONAL injected read accessor over the prepared
   // immutable decision-memory snapshot ({ snapshot: () => readDecisionMemory(...) }), refreshed outside this loop.
   // Absent (every current composition; fly.js passes nothing), every path below is byte-identical to the baseline
@@ -60,6 +61,18 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   const candidates = new Map(); // symbol -> runtime
   const funnel = Object.fromEntries(FUNNEL_STAGES.map((s) => [s, 0])); const refusals = {}; const counters = { books: 0, trades: 0, crossings: 0, confirmations: 0, expired: 0, decisions: 0, entries: 0, needsData: 0, missedDuringWarmup: 0, modelWait: 0, modelStale: 0, missedDuringAnalysis: 0, revalidationRefusals: 0, queueDelayExpired: 0, snapshotPersistFailures: 0 }; const decisions = []; let lastEntryMono = null; const provenance = new Map(); // episode|decision clock -> the already-known dependency identities (research report only)
   const now = () => clock.now(); const state = () => dispatcher.state(); const ev = dispatcher.ev;
+  // Persistence integrity can only remove entry authority. Low-level callers
+  // that do not inject this seam retain the historical isolated-test law;
+  // any supplied non-true value or exception is an explicit fail-closed lock.
+  function permissionIncreaseGate() {
+    if (permissionIncreaseAllowed === undefined || permissionIncreaseAllowed === null) return { ok: true, reason: null };
+    try {
+      const observed = typeof permissionIncreaseAllowed === 'function' ? permissionIncreaseAllowed() : undefined;
+      if (observed !== null && (typeof observed === 'object' || typeof observed === 'function') && typeof observed.then === 'function') { Promise.resolve(observed).catch(() => {}); return { ok: false, reason: PERSISTENCE_PERMISSION_REASON }; }
+      return observed === true ? { ok: true, reason: null } : { ok: false, reason: PERSISTENCE_PERMISSION_REASON };
+    }
+    catch { return { ok: false, reason: PERSISTENCE_PERMISSION_REASON }; }
+  }
   // deterministic ranking BEFORE reservation (closeout R08): every candidate that reaches the admission point inside one scheduler
   // pass registers here; the batch is ranked (rankCandidates: reward / stressed risk, cost bps, first known, asset) and admitted ONE
   // at a time in that order, each seeing the reservations the earlier ones committed — receipt order never decides
@@ -177,7 +190,8 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     if (armRule?.nominationFilter && !armRule.nominationFilter({ episodeId, assetId: c.assetId, setupId })) { tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', ['SEEDED_CONTROL_NOT_SELECTED'], snap, { inputMode, caseRefs, measurements }); }
     // permission intersection: controls, mode, restrictions, health, clock
     // ONE shared law with the dispatcher's pre-send check (closeout R01): controls, restrictions, mode, authorization, clock, writer
-    const s = state(); const blocked = entryPermission(s, { controls: controls(), nowTs: D, assetId: c.assetId, pair: c.symbol, runMode: mode, clockTrusted: clock.status ? clock.status().trusted !== false : true, writerHeld: dispatcher.writerHeld ? dispatcher.writerHeld() && !dispatcher.writerLost() : true }).reasons;
+    const s = state(); const persistencePermission = permissionIncreaseGate(); const blocked = [...entryPermission(s, { controls: controls(), nowTs: D, assetId: c.assetId, pair: c.symbol, runMode: mode, clockTrusted: clock.status ? clock.status().trusted !== false : true, writerHeld: dispatcher.writerHeld ? dispatcher.writerHeld() && !dispatcher.writerLost() : true }).reasons];
+    if (!persistencePermission.ok) blocked.push(persistencePermission.reason);
     if (blocked.length) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', blocked, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
     if (setup.scenario.target === null) { tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', ['NO_SCENARIO_TARGET'], snap, { inputMode, caseRefs, measurements }); }
     // cost + size (largest legal lot inside cash, stressed risk, cluster caps) — computed OUTSIDE the account lock
@@ -236,7 +250,8 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     const revisionSeen = dispatcher.revision();
     // the valued snapshot is persisted BEFORE the durable intent (closeout R11): a dispatched order references evidence on disk
     if (snapshotStore) { const persisted = await snapshotStore.persist(snap, { purpose: 'DECISION', ref: decision.decisionId }); if (!persisted.ok) { counters.snapshotPersistFailures += 1; tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['DECISION_SNAPSHOT_NOT_PERSISTED'], snap, { inputMode, caseRefs, measurements, valuationRef, sizing }); } }
-    try { await dispatcher.commit(events, { retryOnConflict: true, recheck: (cur) => (dispatcher.revision() === revisionSeen || admitCandidate({ state: cur, candidate: { assetId: c.assetId, clusterId, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: cur.limits, lockLevel: lockLevel(), clusters: clusters() }).ok) && !entryBlockingRestrictions(cur).length }); claimedUnderlying = true; } catch (err) { counters.revalidationRefusals += 1; tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', [err.code === 'REDUCER_REFUSED' ? err.detail.code : err.code ?? 'COMMIT_FAILED'], snap, { inputMode, caseRefs, measurements, valuationRef, sizing }); }
+    let commitPermissionRefusal = null;
+    try { await dispatcher.commit(events, { retryOnConflict: true, recheck: (cur) => { const p = permissionIncreaseGate(); if (!p.ok) { commitPermissionRefusal = p.reason; return false; } return (dispatcher.revision() === revisionSeen || admitCandidate({ state: cur, candidate: { assetId: c.assetId, clusterId, entryCashOut: e.entryCashOut, riskUsd: e.scenarioStressedLoss, decisionId: frozen.decisionId }, limits: cur.limits, lockLevel: lockLevel(), clusters: clusters() }).ok) && !entryBlockingRestrictions(cur).length; } }); claimedUnderlying = true; } catch (err) { counters.revalidationRefusals += 1; tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', [commitPermissionRefusal ?? (err.code === 'REDUCER_REFUSED' ? err.detail.code : err.code ?? 'COMMIT_FAILED')], snap, { inputMode, caseRefs, measurements, valuationRef, sizing }); }
     if (feed) feed.admit(c.symbol, { coin: c.assetId, priority: 'PENDING', reason: positionId }); funnel.reserved += 1; decisions.push(decision); if (decisions.length > 256) decisions.shift(); counters.decisions += 1; tracker.decide('ENTRY_RESERVED');
     // last-moment revalidation on the freshest accepted book (one retry law: a changed book that cannot buy q at the limit refuses and releases the unsent reservation)
     const fresh = c.lastBook; if (fresh && fresh.digest !== snap.digest) { const again = evaluateEntry({ snapshot: fresh, q: found.q, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel }); if (again.status !== 'OK' || M.gt(again.entryLimitPrice, e.entryLimitPrice) || (now() - fresh.receiptTs) > policy.execution.maxBookAgeMs) { counters.revalidationRefusals += 1; await dispatcher.commit([ev('ORDER_STATE', { orderId, state: 'CANCELLED', nativeOrderId: null, nativeCumQty: '0', reason: `revalidation refused before dispatch: ${again.reasons?.join(',') || 'limit would rise / book stale'}`, sourceTs: null, receiptTs: now() }), ev('RESERVATION_RELEASED', { reservationId, reason: 'REFUSED_AT_REVALIDATION', releasedCash: e.entryCashOut, releasedRisk: e.scenarioStressedLoss, ts: now() })]); if (feed) feed.admit(c.symbol, { coin: c.assetId, priority: 'CANDIDATE' }); return decision; } }

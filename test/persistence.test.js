@@ -109,8 +109,8 @@ if (!TEST_URL) {
   test('database reachable; migrations apply once and are idempotent', async () => {
     assert.equal(await db.connect(), true);
     const first = await runMigrations(db);
-    assert.equal(first.schemaVersion, 9); // old law: 8 (RUMOR-2 writer-epoch fencing 7 + JUDGE execution journal 8); new law: 9 adds the append-only experiment records (focused completion), additive
-    assert.deepEqual(first.appliedNow, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert.equal(first.schemaVersion, 10); // additive store anchors + small acknowledged snapshots; versions 1-9 unchanged
+    assert.deepEqual(first.appliedNow, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const second = await runMigrations(db);
     assert.deepEqual(second.appliedNow, []); // idempotent
   });

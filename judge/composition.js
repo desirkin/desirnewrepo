@@ -13,6 +13,7 @@ import { dataDir } from '../lib/config.js';
 import { sessionDate } from '../lib/time.js';
 import { Db } from '../persistence/db.js';
 import { runMigrations } from '../persistence/migrate.js';
+import { getPersistence } from '../persistence/runtime.js';
 import { createPgJournal, createMemoryJournal, JournalError } from '../execution/journal.js';
 import { createDispatcher } from '../execution/dispatcher.js';
 import { createExecutionFeed } from '../execution/feed.js';
@@ -59,8 +60,9 @@ const excluded = (policy, symbol) => policy.universe.excludeBases.includes(symbo
 export const paperCheckpointFile = (acct) => path.join(judgeDir(), `paper-checkpoint-${acct}.json`);
 function readPaperCheckpoint(acct) { try { const raw = JSON.parse(readFileSync(paperCheckpointFile(acct), 'utf8')); return raw && raw.version === 'paper-depletion-checkpoint-1' && raw.accountId === acct && Array.isArray(raw.levels) ? raw : null; } catch { return null; } }
 export const PERIODIC_RECONCILE_MS = 5 * 60_000; export const CLOCK_REQUALIFY_MS = 60_000; export const SCHEDULER_TICK_MS = 25;
-export async function composeJudge({ policyFile, mode, accountId = null, env = process.env, log = console.log, db = null, journal = null, clock = null, feed = null, transport = null, WebSocketImpl = null, specs = null, history = null, caseSource = null, casesDir = null, controlsSource = null, nominations = null, recordDir = null, allowPrivate = () => false, allowOrders = () => false, requireDb = null, writeProjection = true, codeDigest = undefined, caseWorker = null, exchangeContext = 'kraken-spot', experimentId = null, armRule = null, exitPolicy = null, verdictSink = null, learningActivationSource = null, dynamicSizing = null }) {
+export async function composeJudge({ policyFile, mode, accountId = null, env = process.env, log = console.log, db = null, journal = null, clock = null, feed = null, transport = null, WebSocketImpl = null, specs = null, history = null, caseSource = null, casesDir = null, controlsSource = null, nominations = null, recordDir = null, allowPrivate = () => false, allowOrders = () => false, requireDb = null, writeProjection = true, codeDigest = undefined, caseWorker = null, exchangeContext = 'kraken-spot', experimentId = null, armRule = null, exitPolicy = null, verdictSink = null, learningActivationSource = null, dynamicSizing = null, permissionIncreaseAllowed = null }) {
   if (!RUN_MODES.includes(mode)) throw new Error(`mode ${mode} outside ${RUN_MODES.join('/')}`);
+  if (permissionIncreaseAllowed !== null && permissionIncreaseAllowed !== undefined && typeof permissionIncreaseAllowed !== 'function') throw new Error('permissionIncreaseAllowed must be a synchronous boolean callback');
   const loaded = loadJudgePolicy(policyFile); const policy = loaded.policy; const policyDigest = loaded.digest; const acct = accountId ?? policy.account.accountId; const kind = accountKindOf(mode);
   if (mode.startsWith('LIVE') && policy.mode !== 'LIVE') throw new Error('a LIVE run needs a LIVE policy (the paper sample cannot be promoted by a flag)'); if (!mode.startsWith('LIVE') && policy.mode === 'LIVE') throw new Error('a LIVE policy cannot run a paper / observe mode account');
   // The current cost/reservation model is denominated in quote currency. A BASE contract is syntactically readable for
@@ -94,8 +96,14 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   const adapter = kind === 'LIVE' ? createKrakenAdapter({ accountId: acct, clock: nowTs, credentials, nonceStore: fp ? createNonceStore({ dir: judgeDir(), fingerprint: fp, wall: nowTs }) : null, transport: transport ?? (mode.startsWith('LIVE') ? (u, i) => fetch(u, i) : null), WebSocketImpl: WebSocketImpl ?? globalThis.WebSocket ?? null, allowPrivate, allowOrders: () => mode === 'LIVE_ARMED' && allowOrders(), log, dataDir: judgeDir() }) : createPaperAdapter({ accountId: acct, clock: nowTs, feed: fd, fee, specOf, latencyMs: policy.execution.paperLatencyMs, maxObservationWaitMs: policy.execution.paperMaxObservationWaitMs, restore: { state: loadedAcct.state, checkpoint: mode === 'REPLAY' ? null : readPaperCheckpoint(acct) }, log });
   const controlsRaw = controlsSource ?? (() => { const c = readControls(); return { kill: Boolean(c.kill?.active), cage: Boolean(c.cage?.active), vetoes: (c.vetoes ?? []).map((v) => v.prediction_id) }; });
   let controlSeen = null; let controlRevision = 0; const controls = () => { const c = controlsRaw(); if (recorder) { const key = JSON.stringify([c.kill, c.cage, c.vetoes]); if (key !== controlSeen) { controlSeen = key; controlRevision += 1; captureInput('CONTROL', { kill: Boolean(c.kill), cage: Boolean(c.cage), vetoes: [...new Set((c.vetoes ?? []).map(String))], revision: controlRevision }); } } return c; };
+  // Economic PAPER/LIVE compositions always bind increases to live
+  // persistence health. An optional caller predicate may further restrict,
+  // never replace, that lock. OBSERVE/REPLAY are isolated research accounts
+  // and therefore do not inherit an unrelated production persistence lock.
+  const persistencePermissionBase = () => (mode === 'PAPER' || kind === 'LIVE' ? getPersistence().health().permissionLock === false : true);
+  const entryPermissionIncreaseAllowed = () => persistencePermissionBase() && (permissionIncreaseAllowed ? permissionIncreaseAllowed() : true);
   // the dispatcher's authority context (closeout R01): run mode, binding digests / key, controls, clock trust — checked again at the send
-  const dispatcher = createDispatcher({ accountId: acct, journal: jr, writer, adapter, clock: pclock, feed: fd, specOf, feeOf: () => fee, controls, authority: { runMode: mode, binding: { policyDigest, codeDigest: treeDigest, keyFingerprint: fp, releaseDigest: null }, clockTrusted: () => (kind === 'LIVE' && pclock.status ? pclock.status().trusted !== false : true), maxBookAgeMs: policy.execution.maxBookAgeMs }, log }); await dispatcher.load();
+  const dispatcher = createDispatcher({ accountId: acct, journal: jr, writer, adapter, clock: pclock, feed: fd, specOf, feeOf: () => fee, controls, authority: { runMode: mode, binding: { policyDigest, codeDigest: treeDigest, keyFingerprint: fp, releaseDigest: null }, clockTrusted: () => (kind === 'LIVE' && pclock.status ? pclock.status().trusted !== false : true), maxBookAgeMs: policy.execution.maxBookAgeMs, permissionIncreaseAllowed: entryPermissionIncreaseAllowed }, log }); await dispatcher.load();
   // gain restrictions are account-specific (closeout R06): THIS account's session P&L against the configured lock thresholds, never the legacy ledger's daily lock
   let lockThresholds = null; try { lockThresholds = loadConfig().locks ?? null; } catch { lockThresholds = null; }
   const lockLevel = () => { try { const s = dispatcher.state(); const sess = s?.performance?.session; if (!sess || !lockThresholds || !M.isPositive(sess.openingEquity ?? '0')) return 'NONE'; const pct = M.toStatistic(M.div(M.mul(sess.dayPnl, '100'), sess.openingEquity, 6, 'HALF_UP')); return lockLevelForPnlPct(pct, lockThresholds); } catch { return 'NONE'; } };
@@ -118,7 +126,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   // admission; a source fault yields no snapshot, which the selector answers with BASELINE_ONLY.
   let learningSnap = null; let learningSnapTs = 0;
   const learning = learningActivationSource ? { snapshot: () => { const t = nowTs(); if (!learningSnap || t - learningSnapTs > 60_000) { try { learningSnap = learningActivationSource(); learningSnapTs = t; } catch (err) { log(`learning activation source failed (baseline): ${String(err?.message ?? err).slice(0, 160)}`); learningSnap = null; } } return learningSnap; } } : null;
-  const judge = createJudge({ accountId: acct, policy, policyDigest, dispatcher, feed: fd, clock: pclock, specOf, feeOf: () => fee, history: hist, caseSource: cases, controls, lockLevel, log, mode, snapshotStore, armRule, verdictSink, learning, dynamicSizing });
+  const judge = createJudge({ accountId: acct, policy, policyDigest, dispatcher, feed: fd, clock: pclock, specOf, feeOf: () => fee, history: hist, caseSource: cases, controls, lockLevel, log, mode, snapshotStore, armRule, verdictSink, learning, dynamicSizing, permissionIncreaseAllowed: entryPermissionIncreaseAllowed });
   if (hist.onTrade) fd.subscribe((e) => { if (e.kind === 'TRADE') hist.onTrade(e.trade); });
   // ---- nominations: the tape's current universe (bounded by the policy), never a research ranking, never a buy list ----
   const nominate = nominations ?? (() => { const u = readCurrentUniverse(); return (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); });

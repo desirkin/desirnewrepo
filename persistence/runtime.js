@@ -31,6 +31,7 @@ import { Repository } from './repository.js';
 import { runMigrations, FutureSchemaError } from './migrate.js';
 import { persistenceHealth, durabilityRequired } from './health.js';
 import { canonicalJson } from './schema.js';
+import { checkStoreAnchors } from './store-guard.js';
 import {
   validatePostureState,
   validateSimState,
@@ -74,6 +75,7 @@ function bootstrapApi() {
     cursorRecoveries: 0,
     integrityLock: false,
     pendingControlSync: false,
+    storeGuard: { status: 'BOOTING', permissionLock: true, checked: 0 },
   };
   return {
     booting: true,
@@ -113,6 +115,7 @@ export async function startPersistence({ log = console.log, dbOverrides = {}, re
     failureCategory: null,
     integrityLock: false,
     pendingControlSync: false,
+    storeGuard: null,
     controlRevision: null,
     runtime: { posture: { digest: null, revision: null }, sim_pnl: { digest: null, revision: null } },
     resetCursorKeys: new Set(),
@@ -163,6 +166,10 @@ async function attemptStartup(state, log) {
     }
     const m = await runMigrations(state.db, { log });
     state.migrationVersion = m.schemaVersion;
+    // Check BEFORE reconciliation can materialize any local mirror. An
+    // unresolved cache loss is a separate permission lock, not a reason to
+    // suppress the protective-state restore or read-only collection pump.
+    state.storeGuard = await checkStoreAnchors({ db: state.db, dataRoot: dataDir(), log });
     await restoreDurableCore(state, log);
     // PERSIST-0B §7: restored may become TRUE only after ALL startup steps
     // succeed, INCLUDING the durability pump / current-state sync machinery.
@@ -733,6 +740,7 @@ function api(state, log) {
       failureCategory: state.failureCategory,
       integrityLock: state.integrityLock,
       pendingControlSync: state.pendingControlSync,
+      storeGuard: state.storeGuard,
     });
 
   // stop() tears down EVERYTHING: retry loop first (no background retry

@@ -13,7 +13,8 @@ import path from 'node:path';
 const execFileP = promisify(execFile);
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-0c-'));
 process.env.COBRA_DATA_DIR = TEST_DATA;
-const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const CONTROLS_URL = new URL('../state/controls.js', import.meta.url).href;
+const JSONL_URL = new URL('../lib/jsonl.js', import.meta.url).href;
 
 const { Db } = await import('../persistence/db.js');
 const { Repository } = await import('../persistence/repository.js');
@@ -85,7 +86,7 @@ test('C. malformed controls.json + VETO: fail-closed KILL + the veto both stand'
 const CHILD_CODE = `
 import { existsSync } from 'node:fs';
 while (!existsSync(process.env.BARRIER)) { /* barrier spin */ }
-const c = await import(process.env.REPO + '/state/controls.js');
+const c = await import(process.env.CONTROLS_URL);
 const [action, arg] = process.env.ACTION.split(':');
 if (action === 'kill') c.kill('race');
 else if (action === 'cage') c.cage('race');
@@ -97,7 +98,7 @@ async function racePair(actionA, actionB) {
   const barrier = path.join(d, 'go');
   const spawn = (action) =>
     execFileP(process.execPath, ['--input-type=module', '-e', CHILD_CODE], {
-      env: { ...process.env, COBRA_DATA_DIR: d, BARRIER: barrier, REPO: REPO_ROOT, ACTION: action },
+      env: { ...process.env, COBRA_DATA_DIR: d, BARRIER: barrier, CONTROLS_URL, ACTION: action },
       timeout: 30_000,
     });
   const a = spawn(actionA);
@@ -136,8 +137,8 @@ test('K. atomicWriteJson: concurrent independent writers never collide on a shar
   const d = mkdtempSync(path.join(tmpdir(), 'cobra-0c-K-'));
   const target = path.join(d, 'hammer.json');
   const writer = `
-import { atomicWriteJson } from '${REPO_ROOT}/lib/jsonl.js';
-for (let i = 0; i < 150; i++) atomicWriteJson('${target}', { pid: process.pid, i });
+import { atomicWriteJson } from ${JSON.stringify(JSONL_URL)};
+for (let i = 0; i < 150; i++) atomicWriteJson(${JSON.stringify(target)}, { pid: process.pid, i });
 `;
   const run = () => execFileP(process.execPath, ['--input-type=module', '-e', writer], { timeout: 30_000 });
   const [a, b] = await Promise.all([run(), run()]); // pre-fix: ENOENT on shared .tmp rename

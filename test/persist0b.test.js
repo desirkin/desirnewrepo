@@ -13,6 +13,7 @@ import { promisify } from 'node:util';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const execFileP = promisify(execFile);
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-0b-'));
@@ -31,7 +32,7 @@ const TEST_URL = process.env.PERSIST_TEST_DATABASE_URL ?? process.env.DATABASE_U
 const SCHEMA = `persist0b_${Date.now().toString(36)}`;
 const ISO = new Date().toISOString();
 const NOW_SEC = Math.floor(Date.now() / 1000);
-const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(REPO_ROOT, 'bin', 'cobra.js');
 
 const mkEnv = (over = {}) =>

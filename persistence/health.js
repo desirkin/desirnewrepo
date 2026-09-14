@@ -20,10 +20,13 @@ export function persistenceHealth({
   failureCategory = null,
   integrityLock = false,
   pendingControlSync = false,
+  storeGuard = null,
 }) {
   const configured = db?.configured() ?? false;
   const reachable = configured && (db?.reachable ?? false);
   const required = durabilityRequired();
+  const storeIntegrityLock = storeGuard?.permissionLock === true;
+  const effectiveFailureCategory = failureCategory ?? (storeIntegrityLock ? storeGuard.failureCategory ?? 'STORE_ANCHOR_VERIFICATION_FAILED' : null);
   const degradedCounters =
     (repo?.memoryIdConflicts ?? 0) > 0 ||
     (repo?.invalidDurableRecords ?? 0) > 0 ||
@@ -37,7 +40,7 @@ export function persistenceHealth({
   let status;
   if (!configured) status = 'UNAVAILABLE'; // not configured: no durable authority exists
   else if (!reachable) status = 'UNAVAILABLE';
-  else if (!restored || failureCategory || integrityLock || degradedCounters) status = 'DEGRADED';
+  else if (!restored || effectiveFailureCategory || integrityLock || degradedCounters) status = 'DEGRADED';
   else status = 'HEALTHY';
   return {
     status,
@@ -54,12 +57,14 @@ export function persistenceHealth({
     permissionLock:
       (configured && (!reachable || !restored)) ||
       (required && (!configured || !restored)) ||
-      ((configured || required) && failureCategory !== null) ||
-      integrityLock,
+      ((configured || required) && effectiveFailureCategory !== null) ||
+      integrityLock || storeIntegrityLock,
     restored,
     migrationVersion,
-    failureCategory, // safe category only — never connection details
+    failureCategory: effectiveFailureCategory, // safe category only — never connection details
     integrityLock,
+    storeIntegrityLock,
+    storeGuard: storeGuard ? structuredClone(storeGuard) : null,
     pendingControlSync,
     lastSuccessfulReadTs: db?.lastSuccessfulReadTs ?? null,
     lastSuccessfulWriteTs: db?.lastSuccessfulWriteTs ?? null,

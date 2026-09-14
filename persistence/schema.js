@@ -4,7 +4,7 @@
 // silently downgraded.
 import { createHash } from 'node:crypto';
 
-export const SCHEMA_VERSION = 9; // JUDGE-1 / EXECUTION-1 execution journal (8) + JUDGE focused-completion experiment records (9)
+export const SCHEMA_VERSION = 10; // PERSIST-1 bounded small-store snapshot anchors (10); migrations 1-9 remain additive and unchanged
 
 // Canonical key-sorted JSON — the stable content form durable event
 // identities are computed over (independent of key order and whitespace).
@@ -336,6 +336,45 @@ export const MIGRATIONS = [
         UNIQUE (experiment_id, digest)
       )`,
       `CREATE INDEX IF NOT EXISTS experiment_records_kind_idx ON serpent_experiment_records (experiment_id, kind, seq)`,
+    ],
+  },
+  {
+    version: 10,
+    name: 'PERSIST-1 bounded small-store snapshot anchors',
+    // PostgreSQL custody for small restart-critical filesystem stores. The
+    // exact payload text is immutable per (store, revision); a separate
+    // current anchor advances only in the same transaction that inserts the
+    // payload. This is intentionally not a bulk-archive table: one snapshot
+    // is at most 1 MiB. Existing stores remain unwired until their owners
+    // supply explicit migration/commissioning policy.
+    statements: [
+      `CREATE TABLE IF NOT EXISTS serpent_store_anchors (
+        store_id text PRIMARY KEY CHECK (store_id ~ '^[a-z0-9][a-z0-9:_-]{0,127}$'),
+        revision bigint NOT NULL CHECK (revision > 0),
+        relative_path text NOT NULL UNIQUE
+          CHECK (relative_path ~ '^[a-z0-9._-]+(/[a-z0-9._-]+)*$')
+          CHECK (relative_path !~ '(^|/)\\.\\.?($|/)')
+          CHECK (relative_path !~ '(^|/)[^/]*\\.($|/)')
+          CHECK (relative_path !~ '(^|/)(con|prn|aux|nul|com[1-9]|lpt[1-9])(\\.|$)'),
+        metadata jsonb NOT NULL CHECK (jsonb_typeof(metadata) = 'object')
+          CHECK (metadata->>'anchorVersion' = 'store-anchor-1')
+          CHECK (metadata->>'storeId' = store_id)
+          CHECK (metadata->>'relativePath' = relative_path)
+          CHECK (metadata->>'format' IN ('JSON', 'JSONL')),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+      `CREATE TABLE IF NOT EXISTS serpent_store_snapshots (
+        store_id text NOT NULL,
+        revision bigint NOT NULL CHECK (revision > 0),
+        payload text NOT NULL,
+        payload_digest char(64) NOT NULL CHECK (payload_digest ~ '^[a-f0-9]{64}$'),
+        byte_count bigint NOT NULL CHECK (byte_count >= 0 AND byte_count <= 1048576)
+          CHECK (byte_count = octet_length(convert_to(payload, 'UTF8'))),
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (store_id, revision),
+        FOREIGN KEY (store_id) REFERENCES serpent_store_anchors (store_id)
+          DEFERRABLE INITIALLY DEFERRED
+      )`,
     ],
   },
 ];

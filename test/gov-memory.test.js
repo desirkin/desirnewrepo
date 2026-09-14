@@ -4,10 +4,10 @@
 // trading state and no trading-side module can even reach them.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-govmem-'));
 process.env.COBRA_DATA_DIR = TEST_DATA;
@@ -24,7 +24,18 @@ const { startGovernance } = await import('../governance/collector.js');
 // live-path validation (mirror, bus) never sees "evidence about the future"
 const T0 = 1_750_000_000_000;
 const T0s = Math.floor(T0 / 1000);
-const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const REPO = fileURLToPath(new URL('..', import.meta.url));
+
+const jsFilesUnder = (dir) => {
+  if (!existsSync(dir)) return [];
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const candidate = path.join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...jsFilesUnder(candidate));
+    else if (entry.isFile() && entry.name.endsWith('.js')) files.push(candidate);
+  }
+  return files;
+};
 
 // a realistic collector-shaped source record
 const govRec = (over = {}) => ({
@@ -211,11 +222,12 @@ test('M6. ZERO TRADING WEIGHT: governance observation changes no trading state; 
     rmSync(d, { recursive: true, force: true });
   }
   // static import scan: no trading/control/UI module reaches governance...
-  const out = execSync(
-    `grep -rl "governance/" --include='*.js' state/ ledger/ cost/ persistence/ lib/ ui/ bin/ engine/ tape/ survey/ rumint/ 2>/dev/null || true`,
-    { cwd: REPO, encoding: 'utf8' }
-  ).trim();
-  assert.equal(out, '', `no trading-side module may import GOVERNANCE output (found: ${out})`);
+  const tradingRoots = ['state', 'ledger', 'cost', 'persistence', 'lib', 'ui', 'bin', 'engine', 'tape', 'survey', 'rumint'];
+  const reached = tradingRoots
+    .flatMap((dir) => jsFilesUnder(path.join(REPO, dir)))
+    .filter((file) => /governance\//.test(readFileSync(file, 'utf8')))
+    .map((file) => path.relative(REPO, file).replaceAll('\\', '/'));
+  assert.deepEqual(reached, [], `no trading-side module may import GOVERNANCE output (found: ${reached.join(', ')})`);
   // ...and governance imports no trading, state, memory, or UI machinery
   for (const f of ['collector.js', 'snapshot.js', 'tally.js', 'registry.js']) {
     const src = readFileSync(path.join(REPO, 'governance', f), 'utf8');
@@ -243,7 +255,7 @@ if (!TEST_URL) {
     try {
       assert.equal(await db.connect(), true);
       const m = await runMigrations(db);
-      assert.equal(m.schemaVersion, 9, 'old law 8, new law 9 (focused-completion experiment records, additive): GOV-1B schema (and later) landed; JUDGE execution schema 8 is additive');
+      assert.equal(m.schemaVersion, 10, 'laws 1-9 remain unchanged; law 10 adds bounded small-store snapshot anchors: GOV-1B schema (and later) landed');
       const repo = new Repository(db);
       const store = govCheckpointStore({ persistence: () => ({ repo, health: () => ({ databaseConfigured: true, restored: true }) }) });
       // GOV-1C tri-state contract: absence is NOT_FOUND, an answered read

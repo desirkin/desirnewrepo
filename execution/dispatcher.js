@@ -13,6 +13,7 @@ import * as M from './money.js';
 import { entryAuthority, UNCHECKED } from './authority.js';
 
 export const DISPATCHER_DEFAULTS = Object.freeze({ maxSafetyQueue: 4096, maxEntryQueue: 64, drainMs: 10_000 });
+const PERSISTENCE_PERMISSION_REASON = 'PERSISTENCE_PERMISSION_LOCK';
 const pct = (arr, p) => { if (!arr.length) return null; const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(p * (s.length - 1)))]; };
 export function latencyStats(samples) { return { count: samples.length, p50: pct(samples, 0.5), p95: pct(samples, 0.95), p99: pct(samples, 0.99), max: samples.length ? Math.max(...samples) : null, note: 'measured software delays on this host, not exchange matching latency' }; }
 
@@ -81,7 +82,24 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
   if (adapter?.subscribe) adapter.subscribe((ae) => { enqueue('SAFETY', () => applyAdapterEvent(ae)).catch((err) => log(`adapter event failed: ${err.message}`)); });
   // ---- the durable outbox -> wire -> acknowledgement path ----------------------------------------------------------------------
   // the current entry authority for ONE unsent intent on the state the journal holds NOW (never a cached precomputation)
-  function authorityOf(orderId, { expectedRevision = null, phase = 'BEFORE_ATTEMPT' } = {}) { const o = state.orders[orderId]; const spec = specOf ? (specOf(o?.pair ?? '') ?? null) : UNCHECKED; const fee = feeOf ? (feeOf(o?.pair ?? '') ?? null) : UNCHECKED; const quote = feed && o ? feed.health(o.pair, now()) : null; return entryAuthority(state, o, { controls: typeof controls === 'function' ? controls() : null, nowTs: now(), runMode: ctx.runMode, clockTrusted: ctx.clockTrusted(), writerHeld: writerHeld() && !writerLost && !closed, binding: ctx.binding, spec, fee, quote: quote ? { usable: quote.usable } : null, expectedRevision, revision, phase }); }
+  function permissionIncreaseGate() {
+    if (ctx.permissionIncreaseAllowed === undefined || ctx.permissionIncreaseAllowed === null) return { ok: true, reason: null };
+    try {
+      const observed = typeof ctx.permissionIncreaseAllowed === 'function' ? ctx.permissionIncreaseAllowed() : undefined;
+      // This is intentionally a synchronous permission seam. A returned
+      // thenable never grants authority, but its rejection is consumed so a
+      // malformed async callback cannot become an unhandled process failure.
+      if (observed !== null && (typeof observed === 'object' || typeof observed === 'function') && typeof observed.then === 'function') { Promise.resolve(observed).catch(() => {}); return { ok: false, reason: PERSISTENCE_PERMISSION_REASON }; }
+      return observed === true ? { ok: true, reason: null } : { ok: false, reason: PERSISTENCE_PERMISSION_REASON };
+    }
+    catch { return { ok: false, reason: PERSISTENCE_PERMISSION_REASON }; }
+  }
+  function authorityOf(orderId, { expectedRevision = null, phase = 'BEFORE_ATTEMPT' } = {}) {
+    const o = state.orders[orderId]; const spec = specOf ? (specOf(o?.pair ?? '') ?? null) : UNCHECKED; const fee = feeOf ? (feeOf(o?.pair ?? '') ?? null) : UNCHECKED; const quote = feed && o ? feed.health(o.pair, now()) : null;
+    const result = entryAuthority(state, o, { controls: typeof controls === 'function' ? controls() : null, nowTs: now(), runMode: ctx.runMode, clockTrusted: ctx.clockTrusted(), writerHeld: writerHeld() && !writerLost && !closed, binding: ctx.binding, spec, fee, quote: quote ? { usable: quote.usable } : null, expectedRevision, revision, phase });
+    const persistence = permissionIncreaseGate();
+    return persistence.ok ? result : { ...result, ok: false, reasons: [...new Set([...(result.reasons ?? []), persistence.reason])] };
+  }
   async function refuseUnsent(o, reasons) { counters.authorityRefusals += 1; const t = now(); await commit(ev('ORDER_STATE', { orderId: o.orderId, state: 'CANCELLED', nativeOrderId: null, nativeCumQty: '0', reason: `authority refused before dispatch: ${reasons.join(',')}`.slice(0, 300), sourceTs: null, receiptTs: t })); const r = o.reservationId ? state.reservations[o.reservationId] : null; if (r && r.state === 'OPEN') await commit(ev('RESERVATION_RELEASED', { reservationId: r.reservationId, reason: 'REFUSED_AT_REVALIDATION', releasedCash: r.cashReserved, releasedRisk: r.riskReserved, ts: t })); return { outcome: 'REJECTED', nativeOrderId: null, reason: `AUTHORITY_REFUSED:${reasons.join(',')}`.slice(0, 120), guaranteesNoAcceptance: true, sent: false, reasons }; }
   async function dispatchEntry(orderId) {
     if (revision === null) await load(); const o = state.orders[orderId]; if (!o) throw new JournalError('ORDER_UNKNOWN', orderId); if (o.state !== 'UNSENT') throw new JournalError('NOT_UNSENT', `${orderId} is ${o.state}: never resend`);
