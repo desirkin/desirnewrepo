@@ -239,11 +239,12 @@ async function aggregateArtifacts({ artifactRoot, job, manifest, inventory, desc
         if (distance !== null) ranked.push({
           controlClass, marketIdentityDigest: artifact.marketIdentityDigest, distance,
           surgeFactDigest: own.factDigest, controlFactDigest: candidate.factDigest,
+          caseId: `dmcase-${canonicalDigest({ manifestId: manifest.manifestId, marketIdentityDigest: artifact.marketIdentityDigest }).slice(0, 24)}`,
         });
         if (comparisons % 256 === 0) await new Promise((resolve) => setImmediate(resolve));
       }
-      ranked.sort((a, b) => a.distance - b.distance || a.marketIdentityDigest.localeCompare(b.marketIdentityDigest));
-      const selected = ranked[0] ?? null;
+      ranked.sort((a, b) => a.distance - b.distance || a.caseId.localeCompare(b.caseId));
+      const selected = ranked[0] ? Object.fromEntries(Object.entries(ranked[0]).filter(([key]) => key !== 'caseId')) : null;
       if (selected) { used.add(selected.marketIdentityDigest); matches.push(selected); }
       else { missingClasses.push(controlClass); missingControlMatches += 1; }
     }

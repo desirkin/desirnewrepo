@@ -276,3 +276,20 @@ test('a complete day with no surge anchors remains a valid empty retrospective m
   assert.deepEqual(done.result.controlMatches, []); assert.equal(done.result.missingControlMatches, 0);
   assert.equal(done.result.simulationCredit, 0); await aggregate.close();
 });
+
+test('equal-distance controls retain the existing daily-study caseId tie-break', async () => {
+  const { definition, runnerState } = await classifiedFixture(['SURGE', 'FLAT', 'FLAT']);
+  const aggregate = await openDailyShardControlAggregatorForTest({
+    stateRoot: tempRoot('daily-control-tie-break-'), dayStartTs: START, dayEndTs: END,
+    asOfTs: AS_OF, manifest: definition.manifest, runnerState,
+  }, { source: makeSource(definition) });
+  const done = await aggregate.execute({ maxShards: 3 });
+  const flats = runnerState.acknowledgments.filter((ack) => ack.output.disposition === 'FLAT_CONTROL');
+  const expected = flats.map((ack) => ({
+    digest: ack.output.marketIdentityDigest,
+    caseId: `dmcase-${canonicalDigest({ manifestId: definition.manifest.manifestId, marketIdentityDigest: ack.output.marketIdentityDigest }).slice(0, 24)}`,
+  })).sort((a, b) => a.caseId.localeCompare(b.caseId))[0].digest;
+  const selected = done.result.controlMatches[0].matches.find((row) => row.controlClass === 'FLAT_CONTROL');
+  assert.equal(selected.marketIdentityDigest, expected);
+  await aggregate.close();
+});
