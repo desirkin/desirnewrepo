@@ -1,0 +1,218 @@
+// Versioned bridge from the verified local broad-day archive v2 reader into
+// the existing retrospective daily-study market-day contract. This adapter
+// opens the fixed reader itself: a caller cannot substitute an object carrying
+// self-asserted readiness. It remains bounded, local-only and authority NONE.
+import {
+  openBroadDayReader, BROAD_DAY_DATASET_VERSION, BROAD_DAY_PAGE_VERSION,
+} from '../market-lab/broad-day-reader.js';
+import { BROAD_DAY_ARCHIVE_VERSION_V2 } from '../market-lab/broad-day-archive.js';
+import { canonicalDigest, deepFreeze } from './shadow-contracts.js';
+import { marketIdentityDigest, sealAcceptedCatalogSnapshot } from './shadow-catalog-snapshot.js';
+
+export const DAILY_BROAD_ARCHIVE_INPUT_VERSION = 'daily-broad-archive-input-1';
+export const DAILY_BROAD_ARCHIVE_PROVENANCE_VERSION = 'daily-broad-archive-provenance-1';
+export const DAILY_BROAD_ARCHIVE_LIMITS = Object.freeze({
+  maxMarkets: 5_000,
+  maxRows: 1_000_000,
+  maxPages: 20_000,
+  pageRows: 2_000,
+  maxMaterializedBytes: 1024 * 1024 * 1024,
+});
+
+const HARD = Object.freeze({
+  maxMarkets: 5_000, maxRows: 2_000_000, maxPages: 50_000,
+  pageRows: 10_000, maxMaterializedBytes: 2 * 1024 * 1024 * 1024,
+});
+const ROW_KEYS = Object.freeze([
+  'rowVersion', 'sessionId', 'shardFile', 'globalOrdinal', 'globalControlDigest',
+  'shardOrdinal', 'archiveAdmittedTs', 'asOfEligibleTs', 'recordId', 'recordDigest',
+  'catalogContentId', 'marketIdentityDigest', 'market', 'periodStartTs', 'periodEndTs',
+  'receivedTs', 'sourceRecordedTs', 'open', 'high', 'low', 'close', 'volumeBase',
+  'volumeQuote', 'trades', 'vwap', 'finality', 'conflict', 'recordIntegrityVerified',
+  'conflictFree', 'fullDaySimulationEligible',
+]);
+const MARKET_KEYS = Object.freeze(['canonicalCoin', 'pairKey', 'nativeBase', 'catalogWsname']);
+const positive = (value) => Number.isSafeInteger(value) && value > 0;
+const plain = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const exact = (value, keys) => plain(value)
+  && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+const fail = (code, message) => deepFreeze({ ok: false, version: DAILY_BROAD_ARCHIVE_INPUT_VERSION, code, message, authority: 'NONE' });
+
+function normalizeLimits(input) {
+  if (input !== undefined && !plain(input)) return null;
+  const unknown = Object.keys(input ?? {}).filter((key) => !(key in DAILY_BROAD_ARCHIVE_LIMITS));
+  if (unknown.length) return null;
+  const value = { ...DAILY_BROAD_ARCHIVE_LIMITS, ...(input ?? {}) };
+  for (const [key, ceiling] of Object.entries(HARD)) if (!positive(value[key]) || value[key] > ceiling) return null;
+  return value;
+}
+
+function rowError(row, descriptor) {
+  if (!exact(row, ROW_KEYS) || row.rowVersion !== 'broad-day-candle-row-v1'
+      || !exact(row.market, MARKET_KEYS) || typeof row.recordId !== 'string' || !/^bkr2-[a-f0-9]{64}$/.test(row.recordId)
+      || typeof row.recordDigest !== 'string' || !/^[a-f0-9]{64}$/.test(row.recordDigest)
+      || typeof row.marketIdentityDigest !== 'string' || !/^[a-f0-9]{64}$/.test(row.marketIdentityDigest)
+      || !positive(row.periodStartTs) || !positive(row.periodEndTs) || row.periodEndTs - row.periodStartTs !== 60_000
+      || row.periodStartTs < descriptor.dayStartTs || row.periodEndTs > descriptor.dayEndTs
+      || !positive(row.receivedTs) || !positive(row.sourceRecordedTs) || !positive(row.asOfEligibleTs)
+      || row.receivedTs < row.periodEndTs || row.sourceRecordedTs < row.receivedTs
+      || row.asOfEligibleTs < row.sourceRecordedTs || row.asOfEligibleTs > descriptor.asOfTs
+      || ![row.open, row.high, row.low, row.close].every((value) => typeof value === 'number' && Number.isFinite(value) && value > 0)
+      || row.high < Math.max(row.open, row.close) || row.low > Math.min(row.open, row.close) || row.high < row.low
+      || typeof row.volumeBase !== 'number' || !Number.isFinite(row.volumeBase) || row.volumeBase < 0
+      || row.volumeQuote !== null || !Number.isSafeInteger(row.trades) || row.trades < 0
+      || row.finality !== 'CONSERVATIVE_SAME_SYMBOL_NEXT_INTERVAL' || row.conflict !== false
+      || row.recordIntegrityVerified !== true || row.conflictFree !== true
+      || row.fullDaySimulationEligible !== false) return 'row envelope, clocks, values, or conservative custody malformed';
+  return null;
+}
+
+const absent = (state, reason) => ({
+  state, observedCount: 0, coverageStartTs: null, coverageEndTs: null,
+  gapCount: 0, sourceDigests: [], reason,
+});
+
+function complete(observedCount, dayStartTs, dayEndTs, sourceDigest) {
+  return {
+    state: 'COMPLETE', observedCount, coverageStartTs: dayStartTs, coverageEndTs: dayEndTs,
+    gapCount: 0, sourceDigests: [sourceDigest], reason: null,
+  };
+}
+
+export async function prepareDailyBroadArchiveInput({
+  rootDir, dayStartTs, dayEndTs, asOfTs, limits: suppliedLimits, readerLimits, signal = null,
+} = {}) {
+  const limits = normalizeLimits(suppliedLimits);
+  if (!limits) return fail('INPUT_LIMITS_INVALID', 'adapter limits are malformed or exceed the hard ceiling');
+  let reader;
+  try {
+    reader = await openBroadDayReader({ rootDir, dayStartTs, dayEndTs, asOfTs, limits: readerLimits, signal });
+    const descriptor = reader.descriptor;
+    if (descriptor.datasetVersion !== BROAD_DAY_DATASET_VERSION
+        || descriptor.archiveVersion !== BROAD_DAY_ARCHIVE_VERSION_V2
+        || descriptor.sourceProvenance?.sourceKind !== 'LOCAL_BROAD_DAY_ARCHIVE_V2'
+        || descriptor.sourceProvenance?.durability !== 'LOCAL_FILESYSTEM_ONLY'
+        || descriptor.sourceProvenance?.republishSafe !== false
+        || descriptor.completeness?.physicalControlAndShardIntegrityVerified !== true
+        || descriptor.completeness?.sourceRecordIdentityRecomputableAfterCanonicalArchiveWrite !== true
+        || descriptor.completeness?.catalogEpochContinuityVerified !== true
+        || descriptor.completeness?.sessionFinalizationVerified !== true
+        || descriptor.completeness?.fullPopulationVerified !== true
+        || descriptor.completeness?.fullDaySimulationReady !== true) return fail('DATASET_PROOF_INCOMPLETE', 'reader v2 full-day proof is incomplete');
+    if (!Array.isArray(descriptor.catalogUnion) || descriptor.catalogUnion.length < 1
+        || descriptor.catalogUnion.length > limits.maxMarkets || !Array.isArray(descriptor.catalogEpochs)
+        || !Array.isArray(descriptor.coverage) || descriptor.coverage.length !== descriptor.catalogUnion.length) return fail('CATALOG_UNION_INVALID', 'catalog union/coverage inventory malformed or over bound');
+    const catalogContentIds = new Set(descriptor.catalogEpochs.map((row) => row.catalogContentId));
+    if (catalogContentIds.size !== 1) return fail('CATALOG_CHURN_UNREPRESENTABLE', 'daily-move-study v1 market days cannot encode per-market membership intervals; no partial union is returned');
+
+    const firstEpoch = descriptor.catalogEpochs[0];
+    const acceptedCatalogSnapshot = sealAcceptedCatalogSnapshot({
+      observedTs: firstEpoch.sourceObservedTs,
+      knownAtTs: firstEpoch.membershipKnownSinceTs,
+      maxAgeMs: 24 * 60 * 60_000,
+      markets: descriptor.catalogUnion.map((row) => ({
+        subjectKind: 'MARKET', canonicalCoin: row.market.canonicalCoin,
+        providerAssetId: row.market.pairKey, venue: 'kraken',
+        nativeSymbol: row.market.catalogWsname, base: row.market.canonicalCoin,
+        quote: 'USD', marketType: 'SPOT', quoteAliasGroup: 'USD',
+      })),
+    });
+    const acceptedByPair = new Map(acceptedCatalogSnapshot.markets.map((market) => [market.providerAssetId, market]));
+    const states = new Map(acceptedCatalogSnapshot.markets.map((market) => [marketIdentityDigest(market), {
+      market, rows: [], periods: new Set(), bytes: 0,
+    }]));
+
+    let cursor = null; let pages = 0; let rows = 0; let materializedBytes = 0;
+    while (true) {
+      if (signal?.aborted) return fail('INPUT_CANCELLED', 'archive input materialization cancelled');
+      pages += 1; if (pages > limits.maxPages) return fail('PAGE_LIMIT', 'reader page count exceeds adapter bound');
+      const page = await reader.readPage({ cursor, maxRows: limits.pageRows, signal });
+      const pageBody = { ...page }; delete pageBody.pageDigest;
+      if (page.pageVersion !== BROAD_DAY_PAGE_VERSION || page.pageDigest !== canonicalDigest(pageBody)
+          || page.datasetDigest !== descriptor.datasetDigest || page.datasetId !== descriptor.datasetId
+          || page.rowCount !== page.rows?.length || !Number.isSafeInteger(page.rowBytes) || page.rowBytes < 0
+          || !Array.isArray(page.rows)) return fail('PAGE_INTEGRITY_INVALID', 'reader page identity, census, or body digest mismatch');
+      for (const row of page.rows) {
+        const error = rowError(row, descriptor); if (error) return fail('ROW_INVALID', error);
+        rows += 1; if (rows > limits.maxRows) return fail('ROW_LIMIT', 'archive row inventory exceeds adapter bound');
+        const accepted = acceptedByPair.get(row.market.pairKey);
+        if (!accepted || accepted.canonicalCoin !== row.market.canonicalCoin
+            || accepted.nativeSymbol !== row.market.catalogWsname) return fail('ROW_CATALOG_MISMATCH', 'archive row differs from sealed catalog union');
+        const state = states.get(marketIdentityDigest(accepted));
+        if (state.periods.has(row.periodStartTs)) return fail('DUPLICATE_CANDLE_PERIOD', 'reader returned a repeated market minute');
+        state.periods.add(row.periodStartTs);
+        const candle = {
+          observationId: row.recordId, periodStartTs: row.periodStartTs, periodEndTs: row.periodEndTs,
+          open: row.open, high: row.high, low: row.low, close: row.close,
+          volumeBase: row.volumeBase, volumeQuote: null, closed: true,
+          receivedTs: row.receivedTs, knownAtTs: row.asOfEligibleTs, sourceDigest: row.recordDigest,
+        };
+        const bytes = Buffer.byteLength(JSON.stringify(candle), 'utf8');
+        materializedBytes += bytes; state.bytes += bytes;
+        if (materializedBytes > limits.maxMaterializedBytes) return fail('MATERIALIZED_BYTE_LIMIT', 'planner candle materialization exceeds adapter bound');
+        state.rows.push(candle);
+      }
+      if (page.done) break;
+      if (page.nextCursor?.datasetDigest !== descriptor.datasetDigest) return fail('CURSOR_INVALID', 'reader returned an unbound restart cursor');
+      cursor = page.nextCursor;
+    }
+    if (rows !== descriptor.counters.asOfEligibleCivilDayRows) return fail('ROW_CENSUS_MISMATCH', 'paged row census differs from verified reader descriptor');
+
+    const marketDays = [];
+    for (const market of acceptedCatalogSnapshot.markets) {
+      const digest = marketIdentityDigest(market); const state = states.get(digest);
+      state.rows.sort((a, b) => a.periodStartTs - b.periodStartTs || a.observationId.localeCompare(b.observationId));
+      const coverage = descriptor.coverage.find((row) => row.market.pairKey === market.providerAssetId);
+      if (!coverage || coverage.gridState !== 'COMPLETE_OBSERVED_GRID'
+          || coverage.expectedCatalogMembershipMinutes !== (dayEndTs - dayStartTs) / 60_000
+          || state.rows.length !== coverage.uniqueObservedMinutes) return fail('MARKET_GRID_MISMATCH', 'a stable-union market lacks one exact closed candle for every day minute');
+      const sourceDigest = canonicalDigest({
+        provenanceVersion: DAILY_BROAD_ARCHIVE_PROVENANCE_VERSION,
+        datasetDigest: descriptor.datasetDigest, marketIdentityDigest: digest,
+        recordDigests: state.rows.map((row) => row.sourceDigest),
+      });
+      const support = {
+        PRICE: absent('MISSING', 'BROAD_DAY_ARCHIVE_EXCLUDES_TICKER_HISTORY'),
+        CANDLES: complete(state.rows.length, dayStartTs, dayEndTs, sourceDigest),
+        BASE_VOLUME: complete(state.rows.length, dayStartTs, dayEndTs, sourceDigest),
+        QUOTE_VOLUME: absent('UNSUPPORTED', 'VENUE_QUOTE_VOLUME_NOT_REPORTED;VWAP_TIMES_BASE_NOT_RELABELED_AS_OBSERVED_QUOTE_VOLUME'),
+        TRADES: absent('UNSUPPORTED', 'AGGREGATE_CANDLE_TRADE_COUNT_IS_NOT_RAW_TRADE_EVIDENCE'),
+        TRADE_FLOW: absent('UNSUPPORTED', 'RAW_TRADE_DIRECTION_NOT_ARCHIVED'),
+        SPREAD: absent('UNSUPPORTED', 'ORDER_BOOK_SPREAD_NOT_ARCHIVED'),
+        DEPTH: absent('UNSUPPORTED', 'ORDER_BOOK_DEPTH_NOT_ARCHIVED'),
+        CATALYST: absent('UNSUPPORTED', 'CATALYST_EVIDENCE_NOT_ARCHIVED_IN_MARKET_CANDLE_SOURCE'),
+      };
+      marketDays.push({ marketIdentityDigest: digest, priceEvents: [], candles: state.rows, support });
+    }
+    const catalogEpochDigest = canonicalDigest(descriptor.catalogEpochs);
+    const provenance = {
+      provenanceVersion: DAILY_BROAD_ARCHIVE_PROVENANCE_VERSION,
+      state: 'VERIFIED_LOCAL_V2_ARCHIVE_FULL_DAY', provenanceVerified: true,
+      durableFullDayEpochUnionVerified: true,
+      sourceDatasetVersion: descriptor.datasetVersion, sourceDatasetId: descriptor.datasetId,
+      sourceDatasetDigest: descriptor.datasetDigest, sourceArchiveVersion: descriptor.archiveVersion,
+      catalogEpochDigest, catalogUnionContentDigest: acceptedCatalogSnapshot.contentDigest,
+      durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
+      warning: 'Verified for this retained local archive only; no external/republish durability or prospective qualification is claimed.',
+    };
+    const body = {
+      ok: true, version: DAILY_BROAD_ARCHIVE_INPUT_VERSION,
+      acceptedCatalogSnapshot, marketDays, manifestCatalogProvenance: provenance,
+      diagnostics: {
+        readerDatasetId: descriptor.datasetId, readerDatasetDigest: descriptor.datasetDigest,
+        catalogEpochDigest, catalogEpochs: descriptor.catalogEpochs.length,
+        catalogMarkets: acceptedCatalogSnapshot.acceptedMarketCount, rows, pages,
+        materializedBytes, candleProvenance: 'DIRECT_CONSERVATIVE_CLOSED_OHLC',
+        baseVolumeProvenance: 'DIRECT_VENUE_CANDLE_BASE_VOLUME',
+        quoteVolumeProvenance: 'UNAVAILABLE_NOT_DERIVED', fullDetailClaimed: false,
+        authority: 'NONE', durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
+      },
+    };
+    const inputDigest = canonicalDigest(body);
+    return deepFreeze({ ...body, inputDigest });
+  } catch (error) {
+    return fail(error?.code ?? 'ARCHIVE_INPUT_REFUSED', error?.message ?? 'archive input refused');
+  } finally {
+    try { reader?.close(); } catch { /* fixed reader close is synchronous and non-authoritative */ }
+  }
+}
