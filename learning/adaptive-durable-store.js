@@ -106,10 +106,12 @@ function immutableJson(value, maxBytes, label) {
 }
 
 function withTimeout(operation, timeoutMs, code) {
+  // The timer is the ONLY guarantee a hung port operation settles. It must stay
+  // referenced: an unref'd timer lets the event loop drain first, so a stalled
+  // port never times out — the caller hangs forever instead of failing closed.
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new AdaptiveDurableStoreError(code)), timeoutMs);
-    timer.unref?.();
   });
   return Promise.race([Promise.resolve().then(operation), timeout]).finally(() => clearTimeout(timer));
 }
