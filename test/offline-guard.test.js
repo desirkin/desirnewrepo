@@ -78,6 +78,8 @@ test('N02. the baseline network-leak witness and its closure: a LIVE Kraken adap
   assert.equal(w.ok, true, 'the adapter hands back a handle: the application does not see the denial as an exception'); assert.equal(w.connected, false); assert.equal(w.gaps, 1, 'the denied socket closes -> AFTER_GAP reconciliation');
   assert.deepEqual(summary(witness), ['WEBSOCKET ws-auth.kraken.com:443'], 'N02 witness: the attempt is denied before the transport opens and recorded exactly once');
   // the closure in-process: the scripted lifecycle double drives the SAME adapter through subscribe / ack / sequences / gap / venue drop / reconnect / owner close without any record
+  // Wait for protocol evidence, not a five-millisecond scheduling guess: under
+  // suite pressure the open timer may run before the acknowledgement timer.
   const closure = await isolated('ws-scripted', `
     import { createKrakenAdapter } from '${moduleUrl('execution/kraken-adapter.js')}';
     import { createScriptedWebSocket } from '${moduleUrl('test/helpers/scripted-ws.js')}';
@@ -86,9 +88,11 @@ test('N02. the baseline network-leak witness and its closure: a LIVE Kraken adap
     const ws = createScriptedWebSocket(); let n = 0; const events = [];
     const ad = createKrakenAdapter({ accountId: 'scripted', clock: () => Date.now(), credentials: { key: 'k'.repeat(56), secret: Buffer.from('s'.repeat(64)).toString('base64') }, nonceStore: { next: async () => String(++n), peek: () => String(n) }, allowPrivate: () => true, allowOrders: () => false, transport, WebSocketImpl: ws.WebSocketImpl });
     ad.subscribe((e) => events.push(e.type + ':' + (e.payload?.scope ?? '')));
-    const h = await ad.connectExecutions(); await new Promise((r) => setTimeout(r, 5));
+    const h = await ad.connectExecutions(); await ws.waitForMessage((entry) => entry.event === 'MESSAGE' && entry.channel === 'subscribe', { timeoutMs: 5000 });
     const s0 = ws.sockets[0]; const subscribeMsg = JSON.parse(s0.sent[0]); s0.executions([], { sequence: 1, type: 'snapshot' }); s0.executions([], { sequence: 2 }); s0.executions([], { sequence: 5 });
-    const seqBefore = ad.executionsState().lastSeq; const pong = await ad.ping(); s0.drop('venue closed'); await new Promise((r) => setTimeout(r, 1100)); const s1 = ws.sockets[1]; await new Promise((r) => setTimeout(r, 5)); const st = ad.executionsState(); h.close(); await new Promise((r) => setTimeout(r, 20));
+    const seqBefore = ad.executionsState().lastSeq; const pong = await ad.ping(); s0.drop('venue closed');
+    await ws.waitForMessage((entry) => entry.event === 'MESSAGE' && entry.channel === 'subscribe' && ws.log.filter((row) => row.event === 'MESSAGE' && row.channel === 'subscribe').length === 2, { timeoutMs: 5000 });
+    const s1 = ws.sockets[1]; const st = ad.executionsState(); h.close(); await new Promise((r) => setTimeout(r, 20));
     console.log(JSON.stringify({ url: s0.url, subscribe: subscribeMsg.params, ackChannel: ws.log.filter((x) => x.event === 'MESSAGE').map((x) => x.channel), lastSeq: seqBefore, seqAfterReconnect: st.lastSeq, gaps: st.gaps, reconnects: st.reconnects, pong: pong.ok && pong.requestIdMatched, tokens, resubscribed: ws.subscribed(1), ownerClosed: s1.closedByOwner, sockets: ws.sockets.length, afterGap: events.filter((x) => x === 'RECONCILIATION:AFTER_GAP').length }));`);
   assert.equal(closure.failed, undefined, closure.stderr); const c = JSON.parse(closure.stdout.trim().split('\n').pop());
   assert.equal(c.url, 'wss://ws-auth.kraken.com/v2'); assert.deepEqual(c.subscribe, { channel: 'executions', token: 'SYNTHETIC-1', snap_orders: true, snap_trades: true }, 'the subscribe request carries the token'); assert.equal(c.ackChannel[0], 'subscribe', 'the venue acknowledgement is delivered'); assert.equal(c.lastSeq, 5); assert.equal(c.seqAfterReconnect, null, 'a reconnect resets the sequence: the next message cannot be judged contiguous'); assert.equal(c.gaps, 2, 'one sequence gap (2 -> 5) and one venue drop'); assert.equal(c.afterGap, 2); assert.equal(c.pong, true); assert.equal(c.reconnects, 1); assert.equal(c.tokens, 2, 'the reconnect fetched a fresh token'); assert.equal(c.resubscribed, true); assert.equal(c.ownerClosed, true); assert.equal(c.sockets, 2, 'no reconnect after the owner close');
