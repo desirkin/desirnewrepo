@@ -10,13 +10,17 @@ import { promisify } from 'node:util';
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 const execFileP = promisify(execFile);
-const GUARD = path.resolve('test/helpers/offline-guard.mjs'); const TMP = mkdtempSync(path.join(tmpdir(), 'cobra-guard-selftest-'));
+// ESM imports require file URLs on Windows; quoted NODE_OPTIONS also preserves
+// paths containing spaces. The exact same guard and behavioral assertions run.
+const moduleUrl = (file) => pathToFileURL(path.resolve(file)).href;
+const GUARD = moduleUrl('test/helpers/offline-guard.mjs'); const TMP = mkdtempSync(path.join(tmpdir(), 'cobra-guard-selftest-'));
 test.after(() => rmSync(TMP, { recursive: true, force: true }));
 // one isolated child per scenario: a fresh evidence file, a selftest run identity, the guard preloaded through NODE_OPTIONS only
 async function isolated(name, script, { env = {} } = {}) {
   const log = path.join(TMP, `${name}.jsonl`); const file = path.join(TMP, `${name}.mjs`); writeFileSync(file, script);
-  const childEnv = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_OPTIONS: `--import=${GUARD}`, COBRA_OFFLINE_GUARD_LOG: log, COBRA_OFFLINE_GUARD_RUN: `selftest:${name}:${randomUUID().slice(0, 8)}`, ...env };
+  const childEnv = { PATH: process.env.PATH, HOME: process.env.HOME, NODE_OPTIONS: `--import=${JSON.stringify(GUARD)}`, COBRA_OFFLINE_GUARD_LOG: log, COBRA_OFFLINE_GUARD_RUN: `selftest:${name}:${randomUUID().slice(0, 8)}`, ...env };
   let out; try { out = await execFileP(process.execPath, [file], { env: childEnv, timeout: 30_000 }); } catch (err) { out = { stdout: err.stdout ?? '', stderr: err.stderr ?? '', code: err.code, failed: true }; }
   const records = existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
   return { ...out, records, log };
@@ -64,7 +68,7 @@ test('N01-c. the gate checker: an empty log passes, a log with one non-selftest 
 test('N02. the baseline network-leak witness and its closure: a LIVE Kraken adapter WITHOUT an injected WebSocket falls back to the process WebSocket and is denied at wss://ws-auth.kraken.com (exactly one WEBSOCKET record, the application still gets a handle); the scripted lifecycle double satisfies the same adapter with ZERO records; the once-leaking suites run guarded in isolation with ZERO records', async () => {
   // the witness: the pattern the reviewer caught (composeJudge callers that omit a WebSocket double) reproduced in isolation as an exact denial record
   const witness = await isolated('ws-witness', `
-    import { createKrakenAdapter } from '${path.resolve('execution/kraken-adapter.js').replaceAll('\\', '/')}';
+    import { createKrakenAdapter } from '${moduleUrl('execution/kraken-adapter.js')}';
     const routes = { '/0/private/GetWebSocketsToken': { result: { token: 'SYNTHETIC-TOKEN', expires: 900 } } };
     const transport = async (url, init) => { const u = new URL(url); const r = routes[u.pathname]; return { status: r ? 200 : 404, ok: Boolean(r), text: async () => JSON.stringify(r ? { error: [], result: r.result } : {}) }; };
     let n = 0; const ad = createKrakenAdapter({ accountId: 'witness', clock: () => Date.now(), credentials: { key: 'k'.repeat(56), secret: Buffer.from('s'.repeat(64)).toString('base64') }, nonceStore: { next: async () => String(++n), peek: () => String(n) }, allowPrivate: () => true, allowOrders: () => false, transport, WebSocketImpl: globalThis.WebSocket });
@@ -75,8 +79,8 @@ test('N02. the baseline network-leak witness and its closure: a LIVE Kraken adap
   assert.deepEqual(summary(witness), ['WEBSOCKET ws-auth.kraken.com:443'], 'N02 witness: the attempt is denied before the transport opens and recorded exactly once');
   // the closure in-process: the scripted lifecycle double drives the SAME adapter through subscribe / ack / sequences / gap / venue drop / reconnect / owner close without any record
   const closure = await isolated('ws-scripted', `
-    import { createKrakenAdapter } from '${path.resolve('execution/kraken-adapter.js').replaceAll('\\', '/')}';
-    import { createScriptedWebSocket } from '${path.resolve('test/helpers/scripted-ws.js').replaceAll('\\', '/')}';
+    import { createKrakenAdapter } from '${moduleUrl('execution/kraken-adapter.js')}';
+    import { createScriptedWebSocket } from '${moduleUrl('test/helpers/scripted-ws.js')}';
     let tokens = 0; const routes = { '/0/private/GetWebSocketsToken': () => ({ result: { token: 'SYNTHETIC-' + (++tokens), expires: 900 } }) };
     const transport = async (url, init) => { const u = new URL(url); const r = routes[u.pathname]; const out = typeof r === 'function' ? r() : r; return { status: out ? 200 : 404, ok: Boolean(out), text: async () => JSON.stringify(out ? { error: [], result: out.result } : {}) }; };
     const ws = createScriptedWebSocket(); let n = 0; const events = [];
@@ -91,7 +95,7 @@ test('N02. the baseline network-leak witness and its closure: a LIVE Kraken adap
   assert.deepEqual(summary(closure), [], 'N02: a scripted lifecycle reaches no network');
   // the closure at suite level: the once-leaking non-PG suites run guarded in a separate process with a selftest run identity and produce ZERO records (the PG suites are covered by the full guarded gate)
   for (const file of ['test/judge-repair-runtime.test.js', 'test/judge-repair-kraken.test.js']) {
-    const log = path.join(TMP, `${path.basename(file)}.jsonl`); let out; try { out = await execFileP(process.execPath, ['--test', '--test-reporter=tap', file], { env: { PATH: process.env.PATH, HOME: process.env.HOME, NODE_OPTIONS: `--import=${GUARD}`, COBRA_OFFLINE_GUARD_LOG: log, COBRA_OFFLINE_GUARD_RUN: `selftest:suite:${randomUUID().slice(0, 8)}` }, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 }); } catch (err) { out = { stdout: err.stdout ?? '', stderr: err.stderr ?? '', failed: true }; }
+    const log = path.join(TMP, `${path.basename(file)}.jsonl`); let out; try { out = await execFileP(process.execPath, ['--test', '--test-reporter=tap', file], { env: { PATH: process.env.PATH, HOME: process.env.HOME, NODE_OPTIONS: `--import=${JSON.stringify(GUARD)}`, COBRA_OFFLINE_GUARD_LOG: log, COBRA_OFFLINE_GUARD_RUN: `selftest:suite:${randomUUID().slice(0, 8)}` }, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 }); } catch (err) { out = { stdout: err.stdout ?? '', stderr: err.stderr ?? '', failed: true }; }
     assert.equal(out.failed, undefined, `${file} failed under the guard: ${out.stderr.slice(-2000)}`); assert.match(out.stdout, /\n# fail 0\n/, file); assert.equal(existsSync(log) ? readFileSync(log, 'utf8').trim() : '', '', `${file}: zero denied attempts under the guard`);
   }
 });
