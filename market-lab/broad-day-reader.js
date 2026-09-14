@@ -808,7 +808,8 @@ export async function openBroadDayReader({
   const allExpectedGridsComplete = publicCoverageRows.length === eligibleIdentities.size
     && publicCoverageRows.length > 0 && publicCoverageRows.every((row) => row.gridState === 'COMPLETE_OBSERVED_GRID' && row.expectedCatalogMembershipMinutes > 0);
   const fullDaySimulationReady = fullPopulationVerified && allExpectedGridsComplete
-    && futureWithheldRows === 0 && catalogAsOfWithheldRows === 0;
+    && futureWithheldRows === 0 && catalogAsOfWithheldRows === 0
+    && identityChanges === 0;
   const reasons = [];
   if (!sourceRecordIdentityRecomputable) reasons.push('SOURCE_RECORD_IDENTITY_NOT_CANONICALLY_RECOMPUTABLE_FOR_ALL_DAY_ROWS');
   if (!sessionFinalizationVerified) reasons.push('SESSION_FINALIZATION_OR_EXACT_CROSS_SESSION_COVERAGE_MISSING');
