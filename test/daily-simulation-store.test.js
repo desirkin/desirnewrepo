@@ -231,13 +231,17 @@ test('scheduler+store: daily rollover keeps separate ledgers', async () => {
 // ---- direct store integrity --------------------------------------------------
 function receipt(over = {}) {
   const evidence = over.resultEvidence || [{ id: 'S#0', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: false, digest: 'd0' }];
-  const newCompletedIds = over.newCompletedIds || evidence.filter((e) => e.completed).map((e) => e.id);
+  const completed = evidence.filter((e) => e.completed);
+  const newCompletedIds = over.newCompletedIds || completed.map((e) => e.id);
+  // tallies consistent with evidence (what the real scheduler always sends)
+  const validModeled = completed.filter((e) => e.valid).length;
+  const prospectiveEligible = completed.filter((e) => e.prospective).length;
   return {
     port: 'daily-sim-scheduler-2', policyVersion: 'sim2-policy-1', batchId: over.batchId || 'B1', dayKey: over.dayKey || '2026-09-14',
     jobId: over.jobId || 'A', jobDigest: 'jd', payloadDigest: over.payloadDigest || 'pd1',
     cursorBefore: null, nextCursor: null, done: true, parentRevision: over.parentRevision ?? 0, expectedRevision: (over.parentRevision ?? 0) + 1,
     completedResults: [], newCompletedIds, pendingDelta: over.pendingDelta || [], resultEvidence: evidence, byStatus: {},
-    tally: { completed: newCompletedIds.length, validModeled: 0, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: evidence.length, ...(over.tally || {}) },
+    tally: { completed: completed.length, validModeled, prospectiveEligible, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: evidence.length, ...(over.tally || {}) },
     executorCounters: null, executorLaws: null, observedUtcMs: DAY1, shortfall: over.shortfall,
   };
 }
@@ -271,6 +275,43 @@ test('store: forged newCompletedIds are refused (totals derived from evidence)',
   const res = await store.commitBatch(r);
   assert.equal(res.ok, false); assert.equal(res.reason, 'FORGED_COMPLETED_MISMATCH');
   assert.equal(db._t.result.length, 0, 'nothing persisted on forged receipt');
+});
+
+test('store: forged validModeled tally is refused (recomputed from evidence)', async () => {
+  const { db, store } = await commissioned('iso:fv');
+  const evidence = [{ id: 'V#0', status: 'COMPLETED_MODELED', completed: true, valid: false, prospective: false, digest: 'a' }];
+  const r = receipt({ resultEvidence: evidence, tally: { completed: 1, validModeled: 1, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 1 } });
+  const res = await store.commitBatch(r);
+  assert.equal(res.ok, false); assert.equal(res.reason, 'FORGED_TALLY_MISMATCH'); assert.equal(res.field, 'validModeled');
+  assert.equal(db._t.result.length, 0);
+});
+
+test('store: forged prospectiveEligible tally is refused (recomputed from evidence)', async () => {
+  const { store } = await commissioned('iso:fp');
+  const evidence = [{ id: 'P#0', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: false, digest: 'a' }];
+  const r = receipt({ resultEvidence: evidence, tally: { completed: 1, validModeled: 1, prospectiveEligible: 1, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 1 } });
+  const res = await store.commitBatch(r);
+  assert.equal(res.ok, false); assert.equal(res.reason, 'FORGED_TALLY_MISMATCH'); assert.equal(res.field, 'prospectiveEligible');
+});
+
+test('store: idempotent replay does not duplicate evidence or advance revision', async () => {
+  const { db, store } = await commissioned('iso:idem');
+  await store.commitBatch(receipt({ batchId: 'B1' }));
+  const rowsAfter1 = db._t.result.length;
+  const rev1 = db._t.day.get('iso:idem|2026-09-14').revision;
+  const b = await store.commitBatch(receipt({ batchId: 'B1' }));
+  assert.equal(b.idempotent, true);
+  assert.equal(db._t.result.length, rowsAfter1, 'replay added no evidence rows');
+  assert.equal(db._t.day.get('iso:idem|2026-09-14').revision, rev1, 'replay did not advance revision');
+});
+
+test('store: two-writer CAS — only one advances from the same parent revision', async () => {
+  const { db, store } = await commissioned('iso:cas2');
+  const A = await store.commitBatch(receipt({ batchId: 'A1', parentRevision: 0, resultEvidence: [{ id: 'C#0', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: false, digest: 'a' }] }));
+  assert.equal(A.revision, 1);
+  const B = await store.commitBatch(receipt({ batchId: 'B1', parentRevision: 0, resultEvidence: [{ id: 'C#1', status: 'COMPLETED_MODELED', completed: true, valid: true, prospective: false, digest: 'b' }] }));
+  assert.equal(B.ok, false); assert.equal(B.reason, 'STALE_PARENT_REVISION'); assert.equal(B.revision, 1);
+  assert.equal(db._t.day.get('iso:cas2|2026-09-14').revision, 1, 'revision advanced exactly once');
 });
 
 test('store: result-rows limit refuses (no truncation)', async () => {

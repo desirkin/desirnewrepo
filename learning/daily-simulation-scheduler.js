@@ -349,7 +349,7 @@ export function createDailySimulationScheduler({
       port: SCHEDULER_PORT_VERSION, policyVersion, batchId, dayKey: day.dayKey, jobId: '__shortfall__', jobDigest: '__shortfall__',
       cursorBefore: null, nextCursor: null, done: true, parentRevision: day.revision, expectedRevision: day.revision + 1,
       payloadDigest: digest(shortfall), completedResults: [], newCompletedIds: [], pendingDelta: [], resultEvidence: [], byStatus: {},
-      tally: { completed: 0, validModeled: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 0 },
+      tally: { completed: 0, validModeled: 0, prospectiveEligible: 0, pending: 0, terminalNonCompleted: 0, duplicates: 0, pageSize: 0 },
       executorCounters: null, executorLaws: null, observedUtcMs: shortfall.observedUtcMs, shortfall,
     };
     try { const ack = await store.commitBatch(receipt); if (ack && ack.ok === true) { day.appliedBatchIds.push(batchId); day.revision = ack.revision; } }

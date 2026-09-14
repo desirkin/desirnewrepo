@@ -113,8 +113,11 @@ export function createDailySimulationStore({
     if (typeof receipt.payloadDigest !== 'string' || !receipt.payloadDigest) return { ok: false, reason: 'BAD_RECEIPT' };
     if (!receipt.tally || receipt.resultEvidence.length !== receipt.tally.pageSize) return { ok: false, reason: 'PAGE_SIZE_MISMATCH' };
 
-    return db.tx(async (q, helpers = {}) => {
-      const raw = typeof helpers.raw === 'function' ? helpers.raw : q;
+    return db.tx(async (q) => {
+      // Use the schema-QUALIFYING executor q (never helpers.raw): the injected
+      // Db rewrites serpent_* to <schema>.serpent_*, keeping this store inside
+      // the Db's schema on real PostgreSQL. The fake Db's q is identity.
+      const raw = q;
       const store = await raw(SQL_BODY[SQL.STORE_GET], [storeIdentity]);
       if (!store.rows.length) return { ok: false, reason: 'STORE_NOT_COMMISSIONED' };
 
@@ -131,9 +134,12 @@ export function createDailySimulationStore({
       const currentRev = dayRes.rows.length ? Number(dayRes.rows[0].revision) : 0;
       if (receipt.parentRevision !== currentRev) return { ok: false, reason: 'STALE_PARENT_REVISION', revision: currentRev };
 
-      // Derive completed truth from evidence + durable completed index; never trust the caller.
+      // Derive EVERY credited tally from evidence + the durable completed index;
+      // never trust the caller's newCompletedIds/tally to grant credit. This is
+      // storage integrity, not learning authority.
       const evidence = receipt.resultEvidence;
       const derivedCompleted = []; const seenInBatch = new Set();
+      let dValid = 0; let dProspective = 0;
       for (const e of evidence) {
         if (e.completed === true) {
           if (seenInBatch.has(e.id)) continue;
@@ -141,11 +147,16 @@ export function createDailySimulationStore({
           const has = await raw(SQL_BODY[SQL.COMPLETED_HAS], [storeIdentity, receipt.dayKey, e.id]);
           if (has.rows.length) continue; // already completed on a prior batch — not a new credit
           derivedCompleted.push(e.id);
+          if (e.valid === true) dValid += 1;              // valid modeled outcome — subset of completed
+          if (e.prospective === true) dProspective += 1;  // prospective-eligible — DISTINCT tally
         }
       }
       const claimedNew = Array.isArray(receipt.newCompletedIds) ? receipt.newCompletedIds : [];
+      const tally = receipt.tally || {};
       if (!sameSet(claimedNew, derivedCompleted)) return { ok: false, reason: 'FORGED_COMPLETED_MISMATCH', derived: derivedCompleted.length, claimed: claimedNew.length };
-      if (!receipt.tally || receipt.tally.completed !== derivedCompleted.length) return { ok: false, reason: 'FORGED_TALLY_MISMATCH', field: 'completed', derived: derivedCompleted.length };
+      if (tally.completed !== derivedCompleted.length) return { ok: false, reason: 'FORGED_TALLY_MISMATCH', field: 'completed', derived: derivedCompleted.length };
+      if (tally.validModeled !== dValid) return { ok: false, reason: 'FORGED_TALLY_MISMATCH', field: 'validModeled', derived: dValid };
+      if (tally.prospectiveEligible !== dProspective) return { ok: false, reason: 'FORGED_TALLY_MISMATCH', field: 'prospectiveEligible', derived: dProspective };
 
       // All validation passed — now write (materialize day only here).
       if (!dayRes.rows.length) await raw(SQL_BODY[SQL.DAY_INSERT], [storeIdentity, receipt.dayKey, dailyTarget]);
