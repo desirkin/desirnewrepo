@@ -60,11 +60,22 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       8702f68ebeeb27ff8671daa0d13c0df2b3af566890d13210f5b632fd0d3cdf89
-execution/*.js   dd321ce97e24f21eb1bec9bb515a3729b07ac8ba50761a432fc7eceb0b05d6cc
+judge/*.js       35f7be965c593fde769278a8adb04b6e1d9294481890d4613f5df40bd571d865
+execution/*.js   676e15339b6c19e897dc7d08d6ac862d7f099910fe3c4953ffd2ad00467c677e
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   43669403af154bb18499a5994fe6f98c662b10ccb5db0134e7c9fb058237369e
+all (48 files)   126b58d0e2d8396e437505a1f6686b1831f5a696f7d7d4cc983d0d96abcca272
 ```
+
+### 4.9 Audited change — 2026-09-15 Ticket P (paper realism): the paper fill delay is the live-measured Kraken round-trip, not a fixed 250ms (previous digests: judge `8702f68ebeeb…`, execution `dd321ce97e24…`, all `43669403af15…`; watch `0c6a43bf…` UNCHANGED)
+
+Scope: `execution/paper-adapter.js` and `judge/composition.js` (a new optional pass-through parameter). No decision, permission, sizing, reducer, reservation, fee or fill-sampling law changed; the fill still samples the FIRST accepted post-arrival book within the same bounded window, walks displayed depth with the same depletion, and takes the same taker fee. Only WHEN the arrival happens is now measured.
+
+David's decision (PHILOSOPHY.md, Decided doctrine c — paper realism): a paper fill happens against the recorded book a REALISTIC delay after the decision, and that delay is the LIVE-MEASURED Kraken round-trip from the gateway collector, widened when Kraken reports degraded — never a fixed assumption ("venue: stay on Kraken; latency measured, not assumed").
+
+- `execution/paper-adapter.js`: `createPaperAdapter` gains an optional `latencySource` (a `() => ms` reader). When present and returning a finite positive number it is the simulated arrival delay for every entry, exit and stop fill (read PER fill, so a mid-run degradation widens the very next arrival); a null / NaN / non-positive / throwing reading falls back to the fixed conservative default (entry `latencyMs` 250 / exit `exitLatencyMs` 250) — the sim never fills FASTER on a bad reading. With no source injected the adapter is byte-for-byte behaviour-identical to before (the fixed 250ms). The measurement itself, its bounds and the degraded widening live OUTSIDE the frozen tree in `lib/paper-fill-latency.js` (`effectiveFillLatencyMs`) fed by `gateway/collector.js` `readGatewayLatency`; the frozen adapter only consumes the injected number.
+- `judge/composition.js`: `composeJudge` gains a `paperLatencySource` pass-through, forwarded to the paper adapter as `latencySource` — but forced to `null` under REPLAY so an offline experiment stays deterministic (the C01/H-fences: a replay never reads the live gateway matrix). LIVE composes the Kraken adapter and never sees it. fly.js (the root, not frozen) supplies `() => effectiveFillLatencyMs(readGatewayLatency(dataDir()))`.
+
+Proof: `test/judge-adapters.test.js` P-LAT (an injected source drives arrival off the 250ms default; entry and stop fill; every bad reading and a throwing source fall back), `test/paper-fill-latency.test.js` PFL-1..6 (the model + the accessor), the existing P01..P-series (no source → identical 250ms behaviour), and the full suite green at this commit.
 
 ### 4.8 Audited change — 2026-09-15 Ticket 4 exit law: no live target; the D4 experiment flipped (previous digests: judge `638038da03d8…`, watch `be41c4bed1ce…`, all `345b28be7c89…`; execution `dd321ce9…` UNCHANGED)
 

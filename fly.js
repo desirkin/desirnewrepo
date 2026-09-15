@@ -14,7 +14,8 @@ import { sessionDate } from './lib/time.js';
 import { getChildhoodManifest, queryObservations, getOutcomeForObservation } from './memory/childhood.js';
 import { childhoodOutcomeRecord } from './rumor2/social-research-outcome.js';
 import { startRumint } from './rumint/poller.js';
-import { startGateway } from './gateway/collector.js';
+import { startGateway, readGatewayLatency } from './gateway/collector.js';
+import { effectiveFillLatencyMs } from './lib/paper-fill-latency.js';
 import { startPress } from './press/collector.js';
 import { startInfra } from './infra/collector.js';
 import { startVideo } from './video/collector.js';
@@ -167,7 +168,12 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       if (!process.env.JUDGE_POLICY || !process.env.JUDGE_MODE) throw new Error('JUDGE_POLICY (policy JSON file) and JUDGE_MODE (OBSERVE | PAPER | LIVE_UNARMED | LIVE_ARMED) are required');
       const universe = readCurrentUniverse(); const symbols = (universe?.pairs ?? []).map((p) => p.symbol);
       const specs = await loadSpecs({ transport: (u, i) => fetch(u, i), symbols, nowTs: Date.now() });
-      judgeRun = await composeJudge({ policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true' });
+      // Ticket P (paper realism): the paper fill delay is the live-measured Kraken round-trip from the gateway collector,
+      // widened when Kraken reports degraded — read per fill, bounded, falling back to the conservative reference when the
+      // gateway is dark or has no measurement. Ignored under REPLAY (composition forces null: an offline experiment stays
+      // deterministic) and never touched by a LIVE run.
+      const paperLatencySource = () => effectiveFillLatencyMs(readGatewayLatency(dataDir()));
+      judgeRun = await composeJudge({ policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource });
       const startup = await judgeRun.start();
       setJudgeRun(judgeRun);
       console.log(`JUDGE active: ${judgeRun.kind} account ${judgeRun.accountId} mode ${judgeRun.mode} (${judgeRun.kind === 'PAPER' ? 'NOT REAL MONEY' : 'LIVE: entries need an unexpired owner authorization'}); startup ${JSON.stringify({ uncertain: startup.uncertainOrders.length, exposed: startup.exposedPositions.length, authorizationEnded: startup.authorizationEnded })}`);

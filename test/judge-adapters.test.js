@@ -82,14 +82,29 @@ test('E04/E11-native. WebSocket v2 execution records: a partial trade before the
 
 // ---- PAPER ----------------------------------------------------------------------------------------------------------------
 const fmt = (v, d) => v.toFixed(d).replace('.', '').replace(/^0+/, ''); const crcFor = (asks, bids) => crc32([...asks, ...bids].map(([p, q]) => fmt(p, 1) + fmt(q, 8)).join(''));
-function paperFixture({ clock = fakeClock(), fee = TAKER_FEE, script, restore = null } = {}) {
+function paperFixture({ clock = fakeClock(), fee = TAKER_FEE, script, restore = null, latencySource = null } = {}) {
   const feed = createExecutionFeed({ clock: clock.now }); feed.admit('XBT/USD', { priority: 'PENDING', reason: 'test' }); feed.onConnect(clock.now()); feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'XBT/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now());
-  const adapter = createPaperAdapter({ accountId: 'paper-t', clock: clock.now, feed, fee, specOf: () => SPEC, script, restore }); const events = []; adapter.subscribe((e) => { assert.equal(adapterEventError(e), null); events.push(e); });
+  const adapter = createPaperAdapter({ accountId: 'paper-t', clock: clock.now, feed, fee, specOf: () => SPEC, script, restore, latencySource }); const events = []; adapter.subscribe((e) => { assert.equal(adapterEventError(e), null); events.push(e); });
   const book = (type, asks, bids, ts = clock.now()) => { feed.ingest(JSON.stringify({ channel: 'book', type, data: [{ symbol: 'XBT/USD', asks: asks.map(([price, qty]) => ({ price, qty })), bids: bids.map(([price, qty]) => ({ price, qty })), timestamp: new Date(ts).toISOString() }] }), ts); };
   const trade = (price, ts = clock.now()) => feed.ingest(JSON.stringify({ channel: 'trade', type: 'update', data: [{ symbol: 'XBT/USD', side: 'sell', price, qty: 0.01, ord_type: 'market', trade_id: Math.floor(Math.random() * 1e9), timestamp: new Date(ts).toISOString() }] }), ts);
   return { clock, feed, adapter, events, book, trade };
 }
 const full = (asks, bids) => ({ asks, bids });
+
+test('P-LAT. an injected latencySource drives the simulated arrival (Ticket P: measured, not assumed): a live measurement moves arrival off the 250ms default; a stop-fill uses it too; a bad reading (null / NaN / non-positive / throw) falls back to the fixed default', async () => {
+  let measured = 800;
+  const f = paperFixture({ latencySource: () => measured });
+  const { clock, adapter } = f;
+  f.book('snapshot', [[100000.0, 1]], [[99999.0, 1]]);
+  const r = await adapter.submitEntryWithProtection({ intent: intent({ limitPrice: '100001' }), spec: SPEC });
+  assert.equal(r.arrivalTs, clock.now() + 800, 'the measured round-trip is the arrival delay, not the 250ms default');
+  // a bad reading never fills faster than the fixed fallback
+  for (const bad of [null, NaN, 0, -5, 'x']) { measured = bad; const g = paperFixture({ latencySource: () => measured }); g.book('snapshot', [[100000.0, 1]], [[99999.0, 1]]); const rr = await g.adapter.submitEntryWithProtection({ intent: intent({ limitPrice: '100001' }), spec: SPEC }); assert.equal(rr.arrivalTs, g.clock.now() + 250, `bad reading ${String(bad)} => fixed fallback`); }
+  const thrower = paperFixture({ latencySource: () => { throw new Error('gateway read failed'); } });
+  thrower.book('snapshot', [[100000.0, 1]], [[99999.0, 1]]);
+  const tr = await thrower.adapter.submitEntryWithProtection({ intent: intent({ limitPrice: '100001' }), spec: SPEC });
+  assert.equal(tr.arrivalTs, thrower.clock.now() + 250, 'a throwing source never breaks the fill; it falls back');
+});
 
 test('P01. paper fill samples the FIRST accepted book at/after arrival (dispatch + 250ms) within 1000ms: a pre-dispatch book and a later better book are never used; the extra observation wait is logged; no book -> UNFILLED_COVERAGE_UNKNOWN, unscorable, never a fill', async () => {
   const f = paperFixture(); const { clock, adapter, events, book } = f; const snap = { asks: [[100000.0, 1], [100000.5, 1]], bids: [[99999.0, 1]] };
