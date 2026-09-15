@@ -333,9 +333,9 @@ test('MC-E07 (joined). existing integrations are preserved: a populated Social-l
     const ex = explainDeepMarket(o, 'BTC', base + 61_000); assert.equal(ex.ok, true, JSON.stringify(ex)); assert.equal(ex.input.book.source, 'kraken-ws-v2-accepted-book'); assert.equal(ex.input.trades, null); assert.equal(ex.coverage.withheld, 'TRADE_COVERAGE_UNKNOWN'); assert.ok(ex.coverage.observedCount >= 5, 'observations are available, the aggregate is not claimed');
     assert.equal(createDeepMarketSource(o)('DOGE', { knownAtTs: base + 61_000 }), null); assert.equal(explainDeepMarket(o, 'BTC', base + 30_000).reason, 'WINDOW_EMPTY', 'a minute with nothing accepted is honestly unsupported');
   } finally { await o.stop({ seal: false }); rmSync(dir, { recursive: true, force: true }); }
-  // protected contracts and config: byte-identical to the committed baseline
-  for (const f of ['evidence/contract.js', 'socrates/contract.js', 'cobra.config.json']) { const head = execFileSync('git', ['show', `HEAD:${f}`], { cwd: REPO }); assert.equal(sha256Hex(readFileSync(path.join(REPO, f))), sha256Hex(head), `${f} unchanged`); }
-  // db4b1a2 had already raised the retained operator paper base from $100 to
-  // $500 before this closeout; protect those exact reviewed bytes.
-  assert.equal(sha256Hex(readFileSync(path.join(REPO, 'cobra.config.json'))), '687d136747ee1292cbcfec6c4ac57ddcc322499696d65e9ab3cd90b087c61d87');
+  // protected v1 contracts: byte-identical to the committed baseline (the frozen evidence/socrates contracts)
+  for (const f of ['evidence/contract.js', 'socrates/contract.js']) { const head = execFileSync('git', ['show', `HEAD:${f}`], { cwd: REPO }); assert.equal(sha256Hex(readFileSync(path.join(REPO, f))), sha256Hex(head), `${f} unchanged`); }
+  // cobra.config.json: PUBLISH-FIX-2 (2026-09-15) emptied the legacy named-coin universe seed to [] so no hardcoded
+  // coins live in any config; the retained operator paper base stays $500 (db4b1a2). Pin the new reviewed bytes.
+  assert.equal(sha256Hex(readFileSync(path.join(REPO, 'cobra.config.json'))), 'af5b032b9989e4c52d3fcdb76179fbeedbd1f3a3295ed6d908eb6c2d54c7a4b7');
 });

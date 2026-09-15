@@ -86,13 +86,13 @@ test('3+4+5. live stalking, fresh Wide Eye and fresh RUMINT all outrank durable 
   process.env.COBRA_DATA_DIR = TEST_DATA;
 });
 
-test('6. fallback majors appear only after genuine/recent candidates, marked and never focal', async () => {
+test('6. genuine attention appears; with no universe configured no quiet fallback is invented', async () => {
   const d = seedDir();
   const snap = await attentionSnapshot({ now: NOW, memorySource: async () => [memRipple('WIF', 20 * 60_000)] });
   const idxWif = snap.orbit.findIndex((e) => e.symbol === 'WIF');
-  const firstMajor = snap.orbit.findIndex((e) => e.fallback);
-  assert.ok(idxWif >= 0 && firstMajor > idxWif, 'genuine attention precedes fallback');
-  assert.ok(snap.orbit.filter((e) => e.fallback).every((e) => e.tier === 5));
+  assert.ok(idxWif >= 0, 'genuine remembered attention appears in the orbit');
+  // PUBLISH-FIX-2: the cockpit seeds no coins — with no selected universe the orbit has NO fallback entries at all
+  assert.ok(!snap.orbit.some((e) => e.fallback), 'no hardcoded universe means no quiet fallback');
   rmSync(d, { recursive: true, force: true });
   process.env.COBRA_DATA_DIR = TEST_DATA;
 });

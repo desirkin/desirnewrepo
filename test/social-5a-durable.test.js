@@ -135,7 +135,7 @@ if (!TEST_URL) {
       assert.ok(d.dossier.dependencies.nodes.some((n) => n.kind === 'MARKET_SNAPSHOT' && n.id === `market:${d.dossier.marketDeep.features.windowId}`), 'the injected window is a dependency node of marketDeep');
       assert.ok(windows >= 1); assert.equal(b.c.status().research.deepMarket, 'INJECTED_ADAPTER');
       // proposals change nothing: the deep-observation snapshot is the same frozen object, config values are untouched, X made no call
-      assert.equal(b.deep.value, deep); assert.equal(Object.isFrozen(deep), true); assert.deepEqual(loadConfig().universe, ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']); assert.equal(loadConfig().socialResearch.xWatch.mode, 'NOT_CONFIGURED');
+      assert.equal(b.deep.value, deep); assert.equal(Object.isFrozen(deep), true); assert.deepEqual(loadConfig().universe, []); assert.equal(loadConfig().socialResearch.xWatch.mode, 'NOT_CONFIGURED');
       for (const p of d.dossier.nextObservationProposals) { assert.equal(p.authority, 'NONE'); assert.equal(p.activation, 'NOT_AUTHORIZED'); }
       await b.c.stop();
     });

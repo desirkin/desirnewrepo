@@ -1,6 +1,6 @@
 {
   "venue": "kraken",
-  "universe": ["BTC", "ETH", "SOL", "XRP", "DOGE"],
+  "universe": [],
   "quote": "USD",
   "locks": {
     "selectivePct": 5,

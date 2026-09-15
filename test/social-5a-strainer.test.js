@@ -397,8 +397,8 @@ test('RUNTIME-4/L2/L5/L6. lost acknowledgement retries the identical bytes and c
 });
 
 // ================================ M / N3 — RESOURCE, NO-SPEND, PERMISSION UNCHANGED ================================
-test('M1-M5/N3. the research path performs zero provider calls, starts no timer, opens no socket, and changes no config; a PROPOSED market/Social observation is a record with authority NONE and activation NOT_AUTHORIZED; the cost permission set is exactly the five legacy assets (the JSONL ledger retired 2026-09-14)', async () => {
-  const cfg = loadConfig(); assert.deepEqual(cfg.universe, ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']); assert.equal(cfg.socialResearch.xWatch.mode, 'NOT_CONFIGURED');
+test('M1-M5/N3. the research path performs zero provider calls, starts no timer, opens no socket, and changes no config; a PROPOSED market/Social observation is a record with authority NONE and activation NOT_AUTHORIZED; the config carries NO hardcoded coin universe (PUBLISH-FIX-2 emptied the legacy seed; the JSONL ledger retired 2026-09-14)', async () => {
+  const cfg = loadConfig(); assert.deepEqual(cfg.universe, [], 'PUBLISH-FIX-2: no hardcoded coin seed in config'); assert.equal(cfg.socialResearch.xWatch.mode, 'NOT_CONFIGURED');
   const hist = scopeHistory(['LINK']); const b = bootRuntime({ nowMs: T0 + 5000, arr: [...hist] }); b.rt.hydrate(hist);
   globalThis.__socialFiveAProbe = 0; const origFetch = globalThis.fetch; globalThis.fetch = () => { globalThis.__socialFiveAProbe += 1; throw new Error('no network'); };
   try { const m1 = obsEvent({ id: 'm1', text: '$LINK', nowMs: T0 + 1000 }); b.arr.push(m1); b.rt.ingest([m1]); await b.tick({ notices: [notice('LINK', T0)] }); } finally { globalThis.fetch = origFetch; }

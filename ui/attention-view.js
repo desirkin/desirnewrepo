@@ -2,8 +2,10 @@
 // HUMAN SEES on the home orbit, never what Serpent may trade: no brain, no
 // predictive score, no confidence, no trading permission. It consumes
 // truth the sensors already wrote (stalking state, Wide Eye ripple events,
-// RUMINT nominations/hyped, social baselines) and the configured majors as
-// FALLBACK ONLY. Display attention != biteable.
+// RUMINT nominations/hyped, social baselines) and the SELECTED universe as
+// FALLBACK ONLY (empty until one is selected — PUBLISH-FIX-2 removed the
+// hardcoded seed, so with none selected the orbit shows only real attention).
+// Display attention != biteable.
 //
 // DISPLAY hierarchy (deterministic, doctrine'd in the ticket; ATTENTION-1A
 // corrected this header to match the implemented tiers):
@@ -11,7 +13,7 @@
 //   TIER 2  fresh Wide Eye RIPPLE
 //   TIER 3  fresh RUMINT nomination / HYPED social attention
 //   TIER 4  remembered durable attention continuity (recent Memory)
-//   TIER 5  configured major fallback (quiet, never focal, fallback: true)
+//   TIER 5  selected-universe fallback (quiet, never focal, fallback: true; empty when no universe is selected)
 // Within a tier the most recent valid observation wins; dedupe by symbol.
 import path from 'node:path';
 import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs';
@@ -268,16 +270,17 @@ export async function attentionSnapshot({ now = Date.now(), config = loadConfig(
     if (!cur || e.tier < cur.tier || (e.tier === cur.tier && e.ts > cur.ts)) bySymbol.set(e.symbol, e);
   }
   const attention = [...bySymbol.values()].sort((a, b) => a.tier - b.tier || b.ts - a.ts);
-  // FOCUS: genuine evidence only — a fallback major is never focal
+  // FOCUS: genuine evidence only — a quiet fallback is never focal
   const focus = attention[0] ?? null;
-  // orbit: attention first, then configured majors as quiet TIER-5 fallback
-  // (visually quiet — never implied to be real current prey)
+  // orbit: attention first, then the SELECTED universe as quiet TIER-5 fallback (visually quiet — never implied to be
+  // real current prey). PUBLISH-FIX-2: config.universe is empty until a universe is selected, so with none selected the
+  // orbit is exactly the real attention (often nothing) — no hardcoded coins are ever synthesized here.
   const orbit = attention.slice(0, ORBIT_SIZE).map((e) => ({ ...e, fallback: false }));
-  for (const major of config.universe) {
+  for (const selected of config.universe) {
     if (orbit.length >= ORBIT_SIZE) break;
-    const sym = cleanSymbol(major);
+    const sym = cleanSymbol(selected);
     if (!sym || orbit.some((o) => o.symbol === sym)) continue;
-    orbit.push({ symbol: sym, tier: 5, kind: 'MAJOR', reason: 'configured major — quiet fallback', ts: 0, fallback: true });
+    orbit.push({ symbol: sym, tier: 5, kind: 'UNIVERSE', reason: 'selected universe — quiet fallback', ts: 0, fallback: true });
   }
   return {
     generatedTs: now,

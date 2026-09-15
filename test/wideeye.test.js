@@ -55,7 +55,11 @@ test('RIPPLE only when measures co-fire AND the move is still forming', () => {
 
 test('nomination merge: relaxed floor, venue re-verification, cap 30, shed lowest', () => {
   const config = loadConfig();
-  const majors = config.universe.map((c) => ({ coin: c, symbol: `${c}/USD`, major: true, depth: 100, usdVol24h: 1e9 }));
+  // PUBLISH-FIX-2: the config no longer seeds a coin universe, so this merge fixture provides its own five high-volume
+  // "major" holds (independent of any config) to exercise the 29-item base and the cap-30 shed. The logic under test is
+  // the merge/cap/shed by volume — not any configured coin list.
+  const majorCoins = ['MAJ0', 'MAJ1', 'MAJ2', 'MAJ3', 'MAJ4'];
+  const majors = majorCoins.map((c) => ({ coin: c, symbol: `${c}/USD`, major: true, depth: 100, usdVol24h: 1e9 }));
   // 24 existing minors + majors(5) = 29
   const minors = Array.from({ length: 24 }, (_, i) => ({
     coin: `MIN${i}`, symbol: `MIN${i}/USD`, major: false, depth: 25, usdVol24h: (30 - i) * 1e6,
@@ -79,7 +83,7 @@ test('nomination merge: relaxed floor, venue re-verification, cap 30, shed lowes
   const coins = pairs.map((p) => p.coin);
   assert.ok(coins.includes('NOMA')); // $5M nominee earns a seat
   assert.ok(!coins.includes('NOMB') && !coins.includes('GHOST'));
-  for (const c of config.universe) assert.ok(coins.includes(c), `${c} earns its seat on this fixture's high volume`);
+  for (const c of majorCoins) assert.ok(coins.includes(c), `${c} earns its seat on this fixture's high volume`);
   assert.ok(pairs.every((p) => p.major === false && p.depth === config.universeExpansion.defaultDepth));
   // 29 base + 2 admitted nominees = 31 -> one shed, and shedding is by volume:
   // NOMC ($4M) is the lowest minor, so the nomination does NOT jump the queue.

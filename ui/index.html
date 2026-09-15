@@ -205,7 +205,7 @@
                         box-shadow: 0 0 0 2px rgba(89,230,198,.55), 0 0 20px 5px rgba(89,230,198,.30); }
   .planet.focal .lbl { color: #eafffa; font-weight: 700; letter-spacing: .26em; font-size: 11px;
                        text-shadow: 0 0 8px rgba(89,230,198,.8); }
-  /* quiet fallback majors: present, but clearly NOT current prey */
+  /* quiet fallback (selected-universe members): present, but clearly NOT current prey */
   .planet.quiet .body { width: 24px; height: 24px; opacity: .5; }
   .planet.quiet .lbl { opacity: .55; font-size: 9px; }
   /* real RUMINT nomination: a quiet amber dot, distinct from demo's full treatment */
@@ -712,32 +712,16 @@
 
 const $ = (s) => document.querySelector(s);
 const body = document.body;
-const PLANET_STYLE = {
-  BTC:  'radial-gradient(circle at 34% 30%, #ffd9a0, #f7931a 55%, #7a4507)',
-  ETH:  'radial-gradient(circle at 34% 30%, #cdd2ff, #8a92ff 55%, #383e8f)',
-  SOL:  'radial-gradient(circle at 34% 30%, #b9ffe9, #14f195 55%, #0b6a52)',
-  XRP:  'radial-gradient(circle at 34% 30%, #bfe7ff, #25a4e8 55%, #114b6e)',
-  DOGE: 'radial-gradient(circle at 34% 30%, #f4e6b8, #cba635 55%, #6b5312)',
-  // UI-1C: recognisable badge colors for common prey — presentation only
-  SUI:  'radial-gradient(circle at 34% 30%, #c8e6ff, #4da2ff 55%, #1a4a86)',
-  AVAX: 'radial-gradient(circle at 34% 30%, #ffc4c1, #e84142 55%, #6e1414)',
-  LINK: 'radial-gradient(circle at 34% 30%, #c3d2ff, #2a5ada 55%, #12275e)',
-  ADA:  'radial-gradient(circle at 34% 30%, #b8ccff, #2456d8 55%, #0d2a6e)',
-  TON:  'radial-gradient(circle at 34% 30%, #bfe9ff, #0098ea 55%, #044a70)',
-  MATIC:'radial-gradient(circle at 34% 30%, #dcc9ff, #8247e5 55%, #3a1d6e)',
-  POL:  'radial-gradient(circle at 34% 30%, #dcc9ff, #8247e5 55%, #3a1d6e)',
-  PEPE: 'radial-gradient(circle at 34% 30%, #c9f0b8, #3d8130 55%, #1b3a14)',
-  BNB:  'radial-gradient(circle at 34% 30%, #ffe9b0, #f3ba2f 55%, #7a5a10)',
-  LTC:  'radial-gradient(circle at 34% 30%, #e6ecf2, #a5b3c2 55%, #4a5563)',
-  DOT:  'radial-gradient(circle at 34% 30%, #ffc4d8, #e6007a 55%, #6e0038)',
-};
-// badge glyph: a currency mark where one exists, else the first character.
-// Pure presentation drawn FROM the symbol — never data about the coin.
-const PLANET_GLYPH = { BTC: '₿', ETH: 'Ξ', DOGE: 'Ð', XRP: '✕', LTC: 'Ł', ADA: '₳' };
-const planetGlyph = (coin) => PLANET_GLYPH[coin] ?? coin[0] ?? '';
+// PUBLISH-FIX-2: the cockpit hardcodes NO coin table — not a universe, not a color map, not a glyph map. A planet's
+// badge color and glyph are both DERIVED from its symbol (a hash for the hue, the first character for the glyph), so any
+// symbol renders distinctly and NO coin name is ever seeded here. Every symbol shown arrives from live server data.
+const planetGlyph = (coin) => (typeof coin === 'string' && coin.length ? coin[0] : '');
 
 /* ---------- state ---------- */
-let universe = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
+// PUBLISH-FIX-2: NO hardcoded universe. The cockpit starts with an empty universe and shows only what the server's
+// selected universe reports. With none selected the tile reads UNIVERSE · NOT SELECTED and nothing is watched — a
+// named-coin seed list must never live here again.
+let universe = [];
 let lastStatus = null;
 let demo = new URLSearchParams(location.search).get('demo') === '1';
 let demoTimer = null, demoIdx = 0, demoTarget = null;
@@ -970,13 +954,13 @@ function renderLockRing(locks) {
 
 /* ---------- planets: the hunting orbit (UI-1: dynamic display attention) ----------
    The orbit shows what Serpent is actually WATCHING (stalks, ripples,
-   social attention) with the configured majors as quiet fallback. DISPLAY
+   social attention) with the selected universe as quiet fallback. DISPLAY
    ATTENTION != BITEABLE — appearing here never implies eligibility.
    Symbols come from our own server, are strict tokens (validated), and are
    rendered as text only. Focus changes glide; the page never rebuilds. */
 const SYM_RE = /^[A-Z0-9]{1,12}$/;
 function planetStyle(coin) {
-  if (PLANET_STYLE[coin]) return PLANET_STYLE[coin];
+  // hue derived from the symbol alone — deterministic, distinct per coin, and free of any hardcoded coin table
   let h = 0;
   for (const ch of coin) h = (h * 31 + ch.charCodeAt(0)) % 360;
   return `radial-gradient(circle at 34% 30%, hsl(${h} 82% 84%), hsl(${h} 72% 55%) 55%, hsl(${h} 60% 22%))`;
@@ -1056,15 +1040,15 @@ function syncOrbit(list, focus) {
     p.rank = i;
     p.dying = false;
     const what = entry.tier === 1 ? 'active stalking' : entry.tier === 2 ? 'wide eye ripple'
-      : entry.tier === 3 ? 'StockTwits attention' : entry.tier === 4 ? 'remembered attention' : 'watched major';
+      : entry.tier === 3 ? 'StockTwits attention' : entry.tier === 4 ? 'remembered attention' : 'watched (universe)';
     p.el.setAttribute('aria-label', `${entry.symbol} — ${what} — tap for details`);
   });
   for (const p of planets.values()) if (!want.has(p.coin)) p.dying = true;
   focusSymbol = focus && SYM_RE.test(focus) ? focus : null;
 }
 /* UI-1B2 §3 (pure): importance is SPATIAL — genuine attention orbits the
-   inner band, remembered attention the middle, quiet fallback majors the
-   outer rim. Display tier only — never a trading score. */
+   inner band, remembered attention the middle, the quiet selected-universe
+   fallback the outer rim. Display tier only — never a trading score. */
 function tierRadiusFactor(tier, rank) {
   const band = tier <= 2 ? 0.74 : tier <= 4 ? 0.95 : 1.15;
   return band + (rank % 3) * 0.045;
@@ -1118,11 +1102,11 @@ function layoutPlanets(t, dtMs = 16) {
     p.lblEl.style.transform = `translateY(${p.lblDy.toFixed(1)}px)`;
   });
 }
-// §37: attention arriving is truth; attention failing falls back to the
-// configured majors — nothing invented, nothing stale left focal forever.
-function majorsFallback() {
-  // tier 5 matches the server's snapshot tiers (4 = remembered attention)
-  return universe.map((symbol) => ({ symbol, tier: 5, fallback: true, reason: 'configured major — quiet fallback' }));
+// §37: attention arriving is truth; attention failing falls back to the SELECTED universe (empty until the server
+// selects one) — nothing invented, nothing seeded here, nothing stale left focal forever.
+function universeFallback() {
+  // tier 5 matches the server's snapshot tiers (4 = remembered attention). With no universe selected this is [].
+  return universe.map((symbol) => ({ symbol, tier: 5, fallback: true, reason: 'selected universe — quiet fallback' }));
 }
 function applyAttention(a) {
   if (a && Array.isArray(a.orbit)) {
@@ -1133,7 +1117,7 @@ function applyAttention(a) {
   }
   if (Date.now() - attentionAtMs > ATTENTION_STALE_MS) {
     lastAttention = null;
-    syncOrbit(majorsFallback(), null);
+    syncOrbit(universeFallback(), null);
   }
 }
 
@@ -1602,7 +1586,8 @@ $('#btnAsk').addEventListener('click', () => { showAsk(); refreshAskStatus(); as
 
 function renderStatus(s) {
   lastStatus = s;
-  if (Array.isArray(s.universe) && s.universe.length) universe = s.universe; // fallback majors
+  // the universe is whatever the server reports as SELECTED — never a local seed; empty means none selected
+  universe = Array.isArray(s.universe) ? s.universe : [];
   // the animal's quiet: KILL = dormant, CAGE = restrained (real state only)
   body.classList.toggle('killed', Boolean(s.controls?.kill));
   body.classList.toggle('caged', Boolean(s.controls?.cage) && !s.controls?.kill);
@@ -1631,8 +1616,8 @@ function renderStatus(s) {
     : 'OFF';
   const t = s.tape;
   const u = t.universe;
-  $('#capUniverse').classList.toggle('off', !u);
-  $('#capUniverseV').textContent = u ? `${u.total} · ${u.live} LIVE` : `${universe.length} WATCHED`;
+  $('#capUniverse').classList.toggle('off', !u && !universe.length);
+  $('#capUniverseV').textContent = u ? `${u.total} · ${u.live} LIVE` : universe.length ? `${universe.length} WATCHED` : 'NOT SELECTED';
   const w = s.wideeye;
   $('#capEye').classList.toggle('off', !(w && w.enabled && w.fresh));
   // truthful abbreviation beats truncation ("3R", never "3 r…")
@@ -1665,7 +1650,7 @@ async function poll() {
     $('#clockchip').classList.remove('live'); // a dead link never keeps a heartbeat
   }
   // display attention rides the SAME cadence — no extra polling loop; a
-  // failure falls back to the configured majors, never a broken screen
+  // failure falls back to the selected universe (empty if none), never a broken screen
   if (!demo) {
     try {
       applyAttention(await (await fetch('/api/attention', { cache: 'no-store' })).json());
@@ -1873,7 +1858,7 @@ function openHuntCard() {
     else bodyEl.append(obsRow(tierWord(a.focus.tier), a.focus.reason));
     if (a.focus.ts) bodyEl.append(obsRow('refreshed', agoStr(a.focus.ts)));
   } else {
-    bodyEl.append(el('div', 'quiet', 'NO CURRENT FOCUS — WATCHING THE MAJORS'));
+    bodyEl.append(el('div', 'quiet', 'NO CURRENT FOCUS — UNIVERSE NOT SELECTED'));
   }
   const others = (a?.orbit ?? []).filter((e) => !e.fallback && e.symbol !== a?.focus?.symbol);
   if (others.length) {
@@ -1889,14 +1874,15 @@ function openHuntCard() {
       bodyEl.append(row);
     }
   }
-  // §5: the quiet fallback majors, truthfully separated from real attention
+  // §5: the quiet selected-universe fallback, truthfully separated from real attention. With no universe selected there
+  // are no fallback entries, so this section is absent and the drawer lists nothing beyond the NOT SELECTED line.
   const quiet = (a?.orbit ?? []).filter((e) => e.fallback);
   if (quiet.length) {
     bodyEl.append(el('h3', 'sec', 'QUIET / FALLBACK'));
     for (const e of quiet) {
       const row = el('div', 'obs');
       row.append(el('span', 'm', e.symbol));
-      row.append(el('span', 'v', 'quiet fallback major'));
+      row.append(el('span', 'v', 'quiet fallback (universe)'));
       bodyEl.append(row);
     }
   }
@@ -2062,16 +2048,19 @@ for (const head of document.querySelectorAll('.dhead')) {
 }
 
 /* ---------- demo mode: staged tour, sealed off from all real state ---------- */
+// PUBLISH-FIX-2: the staged tour uses the synthetic symbol DEMO — never a real coin name. The cockpit hardcodes no
+// ticker anywhere; a real symbol only ever arrives from live server data.
+const DEMO_SYMBOL = 'DEMO';
 const DEMO_SEQ = [
   ['COILED', 5000, { sub: 'NO TRADE', why: 'demo' }],
-  ['STALKING', 6000, { sub: 'TARGET · SOL', why: 'demo — staged' }],
-  ['STRIKE', 2600, { sub: 'TARGET · SOL', why: 'demo — staged' }],
+  ['STALKING', 6000, { sub: `TARGET · ${DEMO_SYMBOL}`, why: 'demo — staged' }],
+  ['STRIKE', 2600, { sub: `TARGET · ${DEMO_SYMBOL}`, why: 'demo — staged' }],
   ['DIGESTING', 5200, { sub: 'HOLDING', why: 'demo — staged' }],
   ['RETREAT', 5000, { sub: '', why: 'demo — staged' }],
 ];
 function demoStep() {
   const [posture, ms, opts] = DEMO_SEQ[demoIdx % DEMO_SEQ.length];
-  demoTarget = (posture === 'STALKING' || posture === 'STRIKE') ? 'SOL' : null;
+  demoTarget = (posture === 'STALKING' || posture === 'STRIKE') ? DEMO_SYMBOL : null;
   applyPosture(posture, opts);
   demoIdx++;
   demoTimer = setTimeout(demoStep, ms);
@@ -2081,7 +2070,7 @@ function setDemo(on) {
   body.classList.toggle('demo', on);
   clearTimeout(demoTimer); demoTimer = null; demoTarget = null; demoIdx = 0;
   closeSheets();
-  if (on) { syncOrbit(majorsFallback(), null); demoStep(); } // staged tour uses the majors
+  if (on) { syncOrbit(universeFallback(), null); demoStep(); } // staged tour uses the selected universe (empty if none)
   else if (lastStatus) { renderStatus(lastStatus); poll(); } // true state, immediately
   else poll();
 }
@@ -2112,7 +2101,7 @@ setTimeout(endBoot, 1900);
 /* ---------- main loop ---------- */
 buildCoilRing();
 seedStars();
-syncOrbit(majorsFallback(), null); // quiet majors until real attention arrives
+syncOrbit(universeFallback(), null); // the quiet selected universe (empty until one is selected) until real attention arrives
 setReduced(reduced);
 if (demo) setDemo(true);
 addEventListener('resize', seedStars);

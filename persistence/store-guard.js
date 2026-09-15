@@ -8,16 +8,23 @@ import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { listStoreAnchors, readStoreSnapshot, validateStoreAnchor, MAX_STORE_SNAPSHOT_BYTES } from './store-anchors.js';
 import { canonicalJson } from './schema.js';
+import { dataGeneration } from '../lib/config.js';
 
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const inside = (root, target) => {
   const relative = path.relative(root, target);
   return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 };
+// HEALTHY and NOT_APPLICABLE are the two non-locking verdicts: a matched snapshot, or an anchor from another data
+// generation whose files legitimately live under a different root (PUBLISH-FIX-2 — a new generation must not read the
+// previous generation's anchors as WIPED and hold a permission lock).
+const NON_LOCKING = new Set(['HEALTHY', 'NOT_APPLICABLE']);
 const result = (anchor, status, reason) => ({
   storeId: anchor.storeId, revision: anchor.revision, status, reason,
-  permissionLock: status !== 'HEALTHY',
+  generation: anchor.generation ?? '',
+  permissionLock: !NON_LOCKING.has(status),
 });
+const anchorGenerationOf = (anchor) => (typeof anchor?.generation === 'string' ? anchor.generation : '');
 
 export async function inspectStoreAnchor({ dataRoot, anchor }) {
   // Strict persisted metadata validation is mandatory even when called
@@ -87,9 +94,17 @@ export async function inspectStoreAnchor({ dataRoot, anchor }) {
 
 export async function checkStoreAnchors({ db, dataRoot, log = () => {} }) {
   const stores = [];
+  const currentGeneration = dataGeneration();
   try {
     const anchors = await listStoreAnchors(db);
     for (const anchor of anchors) {
+      // PUBLISH-FIX-2: an anchor commissioned under a DIFFERENT data generation describes files under that generation's
+      // root, not this one — its absence here is expected, not a wiped cache. Report NOT_APPLICABLE (no permission lock),
+      // never WIPED/UNAVAILABLE. A legacy anchor with no generation is generation '' (the flat layout).
+      if (anchorGenerationOf(anchor) !== currentGeneration) {
+        stores.push(result(anchor, 'NOT_APPLICABLE', 'ANCHOR_FROM_ANOTHER_DATA_GENERATION'));
+        continue;
+      }
       // The listing alone is not proof that recoverable payload still
       // exists. Validate its exact bytes before trusting a matching cache.
       const snapshot = await readStoreSnapshot(db, anchor.storeId);
@@ -100,27 +115,37 @@ export async function checkStoreAnchors({ db, dataRoot, log = () => {} }) {
       }
     }
     const failed = stores.filter((store) => store.permissionLock);
-    const status = failed.length ? 'DEGRADED' : stores.length ? 'HEALTHY' : 'UNCOMMISSIONED';
+    const notApplicable = stores.filter((store) => store.status === 'NOT_APPLICABLE');
+    // Anchors from another generation are neither a pass nor a lock — they simply do not describe this generation's
+    // crib. They count toward neither HEALTHY nor DEGRADED so a boot that only sees prior-generation anchors is
+    // UNCOMMISSIONED for THIS generation, not falsely HEALTHY.
+    const applicable = stores.length - notApplicable.length;
+    const status = failed.length ? 'DEGRADED' : applicable ? 'HEALTHY' : 'UNCOMMISSIONED';
     // No anchor rows does NOT establish that all existing stores are new,
     // backed up, or safe to delete. This is coverage of commissioned stores
     // only. Owner-specific commissioning comes in subsequent PERSIST tickets.
     const report = {
       version: 'store-guard-1', status, coverage: 'COMMISSIONED_SNAPSHOTS_ONLY',
-      checked: stores.length, failed: failed.length,
+      generation: currentGeneration,
+      checked: stores.length, applicable, notApplicable: notApplicable.length, failed: failed.length,
       permissionLock: failed.length > 0,
       failureCategory: failed.length ? `STORE_ANCHOR_${failed[0].status}` : null,
       stores,
     };
-    log(`PERSISTENCE store anchors: ${status}; ${stores.length} checked, ${failed.length} unresolved`);
+    log(`PERSISTENCE store anchors: ${status}; ${stores.length} checked (${applicable} for generation ${currentGeneration || 'flat'}, ${notApplicable.length} from another generation), ${failed.length} unresolved`);
+    for (const store of notApplicable) log(`PERSISTENCE store anchor ${store.storeId}: NOT_APPLICABLE (${store.reason}; anchor generation ${store.generation || 'flat'}) — no permission lock; this generation's cache untouched`);
     for (const store of failed) log(`PERSISTENCE store anchor ${store.storeId}: ${store.status} (${store.reason}) — permission locked; cache untouched`);
     return report;
-  } catch {
-    // Deliberately omit raw DB/path/error text from operator-visible status.
-    log('PERSISTENCE store anchors: verification unavailable — permission locked; caches untouched');
+  } catch (error) {
+    // PUBLISH-FIX-2: name the error's CODE and CLASS (never raw DB/path/error text) so an operator can tell a query
+    // timeout from a schema mismatch from a filesystem fault — the empty catch here hid exactly this on the boot that
+    // locked. The raw message is still withheld from operator-visible status.
+    const errorCode = error?.code ?? error?.constructor?.name ?? 'ERROR';
+    log(`PERSISTENCE store anchors: verification unavailable (${errorCode}) — permission locked; caches untouched`);
     return {
       version: 'store-guard-1', status: 'UNAVAILABLE', coverage: 'COMMISSIONED_SNAPSHOTS_ONLY',
       checked: stores.length, failed: stores.filter((store) => store.permissionLock).length,
-      permissionLock: true, failureCategory: 'STORE_ANCHOR_VERIFICATION_FAILED', stores,
+      permissionLock: true, failureCategory: 'STORE_ANCHOR_VERIFICATION_FAILED', errorCode, stores,
     };
   }
 }

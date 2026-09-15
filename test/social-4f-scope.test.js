@@ -158,8 +158,13 @@ test('SCOPE-5 (7). research configuration is closed: no wildcard, bounded caps, 
   // legacy daily-lock bankroll (state/locks.js) with the Judge PAPER account `paper-reference-usd500` (initialCapital "500") so the
   // two lock computations share one bankroll. Every other pre-existing key stays deep-equal to the pinned baseline.
   assert.equal(current.paper.baseBalanceUsd, 500, 'paper bankroll matches the USD 500 Judge account');
-  for (const k of Object.keys(baseline)) assert.deepEqual(k === 'paper' ? { ...current[k], baseBalanceUsd: baseline.paper.baseBalanceUsd } : current[k], baseline[k], `config.${k} unchanged`);
-  assert.deepEqual(current.universe, ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'], 'the legacy permission set is untouched');
+  // TWO audited value changes since the pin: paper.baseBalanceUsd (above) and universe — PUBLISH-FIX-2 emptied the legacy
+  // named-coin seed so no hardcoded coins live in any config. Every OTHER pre-existing key stays deep-equal to the pin.
+  for (const k of Object.keys(baseline)) {
+    if (k === 'universe') continue; // audited below
+    assert.deepEqual(k === 'paper' ? { ...current[k], baseBalanceUsd: baseline.paper.baseBalanceUsd } : current[k], baseline[k], `config.${k} unchanged`);
+  }
+  assert.deepEqual(current.universe, [], 'PUBLISH-FIX-2: the legacy named-coin universe seed is removed — no hardcoded coins remain in any config');
 });
 
 test('SCOPE-6 (B/E). the research scope source: no injected source => CATALOG_UNAVAILABLE (never five majors); stale => STALE (no new scope); future => refused; malformed / not-accepted => unavailable with the reason; explicit-static labelled', () => {

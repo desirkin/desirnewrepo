@@ -100,9 +100,15 @@ function bootstrapApi() {
 
 let singleton = bootstrapApi();
 export const getPersistence = () => singleton;
+// PUBLISH-FIX-2: a monotonic boot counter. Every startPersistence() gets a distinct boot id that prefixes its startup
+// log lines, so a line that appears TWICE can be diagnosed for certain: the SAME boot id on both copies means one call
+// whose stdout the host (Replit) duplicated (a sink artifact — the data-only path has exactly one starter and the
+// cockpit only reads the module singleton); DIFFERENT boot ids would mean two real startPersistence() calls.
+let bootCounter = 0;
 
 export async function startPersistence({ log = console.log, dbOverrides = {}, registerSignals = true, _test = {} } = {}) {
   if (typeof registerSignals !== 'boolean') throw new Error('persistence: registerSignals must be boolean');
+  const bootId = `b${(bootCounter += 1)}`;
   const db = new Db({ log, ...dbOverrides });
   const repo = new Repository(db, { log });
   const state = {
@@ -120,6 +126,7 @@ export async function startPersistence({ log = console.log, dbOverrides = {}, re
     resetCursorKeys: new Set(),
     pump: { pendingWrites: 0, confirmedWrites: 0, spoolParseErrors: 0, pumpReadErrors: 0, cursorRecoveries: 0 },
     retryTimer: null,
+    retryAttempt: 0,
     pumpTimer: null,
     pumpInFlight: null,
     finalPumpDrain: null,
@@ -128,6 +135,7 @@ export async function startPersistence({ log = console.log, dbOverrides = {}, re
     registerSignals,
     attemptInFlight: false,
     stopped: false,
+    bootId,
     _test,
   };
 
@@ -157,33 +165,53 @@ export async function startPersistence({ log = console.log, dbOverrides = {}, re
 async function attemptStartup(state, log) {
   if (state.attemptInFlight || state.stopped) return false;
   state.attemptInFlight = true;
+  // PUBLISH-FIX-2: every startup line is tagged with this boot's id so a duplicated line can be told apart (same id =
+  // one call the host echoed twice; different id = two real starts). And attemptStartup must never return false
+  // silently — each early exit below logs exactly ONE reason, so a boot that ends restored=false without either
+  // "durable core connected" or "startup failed" (the production symptom) can no longer happen.
+  const blog = (message) => log(`[boot ${state.bootId}] ${message}`);
+  const aborted = (stage) => {
+    blog(`PERSISTENCE startup aborted (STOPPED at ${stage}): persistence.stop() was called mid-startup — restored=false; permission remains locked`);
+    return false;
+  };
   try {
     const connected = await state.db.connect();
-    if (state.stopped) return false;
+    if (state.stopped) return aborted('after-connect');
     if (!connected) {
       state.failureCategory = 'UNREACHABLE';
-      log('PERSISTENCE UNAVAILABLE: database configured but unreachable — PERSISTENCE_PERMISSION_LOCK engaged (CLEAR and future permission-increasing behavior fail closed; defensive controls still work locally)');
+      blog('PERSISTENCE UNAVAILABLE: database configured but unreachable — PERSISTENCE_PERMISSION_LOCK engaged (CLEAR and future permission-increasing behavior fail closed; defensive controls still work locally)');
       return false;
     }
     const m = await runMigrations(state.db, { log });
-    if (state.stopped) return false;
+    if (state.stopped) return aborted('after-migrations');
     state.migrationVersion = m.schemaVersion;
     // Check BEFORE reconciliation can materialize any local mirror. An
     // unresolved cache loss is a separate permission lock, not a reason to
     // suppress the protective-state restore or read-only collection pump.
-    const storeGuard = await checkStoreAnchors({ db: state.db, dataRoot: dataDir(), log });
-    if (state.stopped) return false;
+    const storeGuard = await checkStoreAnchors({ db: state.db, dataRoot: dataDir(), log: blog });
+    if (state.stopped) return aborted('after-store-anchors');
     state.storeGuard = storeGuard;
-    if (!(await restoreDurableCore(state, log))) return false;
-    if (state.stopped) return false;
+    // The store guard never fails the boot (restore still proceeds), but when it holds a permission lock the reason is
+    // named here too so /api/status's failureCategory and this log agree on WHY the lock is engaged.
+    if (storeGuard.permissionLock) {
+      blog(`PERSISTENCE store-integrity lock engaged during startup: storeGuard ${storeGuard.status} (${storeGuard.failureCategory ?? 'STORE_ANCHOR_VERIFICATION_FAILED'}) — durable restore continues; the lock is reported in health, not a boot failure`);
+    }
+    if (!(await restoreDurableCore(state, log))) {
+      blog('PERSISTENCE startup incomplete: restoreDurableCore returned false (owner stopped mid-restore) — restored=false; permission remains locked; will retry');
+      return false;
+    }
+    if (state.stopped) return aborted('after-restore');
     // PERSIST-0B §7: restored may become TRUE only after ALL startup steps
     // succeed, INCLUDING the durability pump / current-state sync machinery.
     // "Restore reported true but durability machinery never started" is
     // forbidden — a startPump failure leaves restored=false and retry armed.
-    if (!startPump(state, log)) return false;
+    if (!startPump(state, log)) {
+      blog('PERSISTENCE startup incomplete: startPump returned false (owner stopped before the durability pump armed) — restored=false; permission remains locked; will retry');
+      return false;
+    }
     state.restored = true;
     state.failureCategory = null;
-    log(`PERSISTENCE: durable core connected (schema ${state.migrationVersion}); restore complete; pump running`);
+    blog(`PERSISTENCE: durable core connected (schema ${state.migrationVersion}); restore complete; pump running`);
     return true;
   } catch (err) {
     // Shutdown is an intentional terminal fence, not a startup failure and
@@ -195,7 +223,7 @@ async function attemptStartup(state, log) {
         : err instanceof InvalidDurableStateError
           ? 'INVALID_DURABLE_STATE'
           : 'RESTORE_FAILED';
-    log(`PERSISTENCE startup failed (${state.failureCategory}): ${err.message} — permission remains locked; will retry`);
+    blog(`PERSISTENCE startup failed (${state.failureCategory}): ${err.message} — permission remains locked; will retry`);
     return false;
   } finally {
     state.attemptInFlight = false;
@@ -207,13 +235,22 @@ async function attemptStartup(state, log) {
 // timer is cleared on success and on stop(), never merely on connect.
 function scheduleRetry(state, log) {
   if (state.retryTimer || state.stopped) return;
+  // PUBLISH-FIX-2: announce each retry with its attempt number and the interval, so an operator watching the log can see
+  // the recovery loop is alive and how far it has run — a silent 30s loop was indistinguishable from a wedged boot.
+  const seconds = Math.round(RETRY_MS / 1000);
+  if (typeof state.retryAttempt !== 'number') state.retryAttempt = 0;
+  log(`PERSISTENCE retry ${state.retryAttempt + 1} in ${seconds}s (durable core not restored: ${state.failureCategory ?? 'RESTORE_FAILED'}; retrying until connect + migrations + restore all succeed)`);
   state.retryTimer = setInterval(async () => {
     if (state.stopped) return;
+    state.retryAttempt += 1;
+    log(`PERSISTENCE retry ${state.retryAttempt}: re-attempting durable startup`);
     if (await attemptStartup(state, log)) {
       if (state.stopped) return;
       clearInterval(state.retryTimer);
       state.retryTimer = null;
       log('PERSISTENCE recovered: durable core reconnected and reconciled');
+    } else if (!state.stopped) {
+      log(`PERSISTENCE retry ${state.retryAttempt} did not restore (${state.failureCategory ?? 'RESTORE_FAILED'}); next retry ${state.retryAttempt + 1} in ${seconds}s`);
     }
   }, RETRY_MS);
   state.retryTimer.unref?.();

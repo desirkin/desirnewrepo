@@ -31,11 +31,15 @@ function fakePool({ mode = 'ANCHORED', sqlLog = [] } = {}) {
   };
   return { query, connect: async () => ({ query, release() {} }), on() {}, end: async () => {} };
 }
-async function start(t, { mode, existing = false } = {}) {
+async function start(t, { mode, existing = false, generation } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'persist-anchor-runtime-'));
   const previousRoot = process.env.COBRA_DATA_DIR;
+  const previousGen = process.env.SERPENT_DATA_GENERATION;
   process.env.COBRA_DATA_DIR = root;
-  const file = path.join(root, 'learning', 'observations.jsonl');
+  if (generation === undefined) delete process.env.SERPENT_DATA_GENERATION; else process.env.SERPENT_DATA_GENERATION = generation;
+  // dataDir() nests under the generation when one is set; the flat root is where a pre-generation crib's files live
+  const activeRoot = generation ? path.join(root, generation) : root;
+  const file = path.join(activeRoot, 'learning', 'observations.jsonl');
   if (existing) { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, payload); }
   const sqlLog = []; const logs = [];
   const persistence = await startPersistence({
@@ -45,6 +49,7 @@ async function start(t, { mode, existing = false } = {}) {
   t.after(async () => {
     await persistence.stop();
     if (previousRoot === undefined) delete process.env.COBRA_DATA_DIR; else process.env.COBRA_DATA_DIR = previousRoot;
+    if (previousGen === undefined) delete process.env.SERPENT_DATA_GENERATION; else process.env.SERPENT_DATA_GENERATION = previousGen;
     rmSync(root, { recursive: true, force: true });
   });
   return { root, file, persistence, sqlLog, logs };
@@ -92,6 +97,27 @@ test('anchor-query failure cannot be laundered by successful core restore; it re
   assert.equal(f.persistence.health().permissionLock, true);
   assert.equal(f.persistence.health().failureCategory, 'STORE_ANCHOR_VERIFICATION_FAILED');
   assert.equal(existsSync(f.file), false);
+});
+
+test('PUBLISH-FIX-2 ROOT CAUSE: a prior generation\'s anchor is NOT_APPLICABLE under a new SERPENT_DATA_GENERATION — restored stays true, no store-integrity lock, the old cache is never read as WIPED', async (t) => {
+  // The durable anchor row was commissioned under the FLAT crib (generation ''); its file lived under the old flat root.
+  // Boot the same disk with SERPENT_DATA_GENERATION=gen1 (a Replit republish's clean crib). The gen1 root has no such
+  // file — but that absence is EXPECTED, not a wipe. Before this fix the guard read the missing file as WIPED and held a
+  // permission lock forever; now it reports NOT_APPLICABLE and the boot restores clean.
+  const f = await start(t, { generation: 'gen1' }); // default ANCHORED mode; the anchor const carries no generation => flat
+  const h = f.persistence.health();
+  assert.equal(h.restored, true, 'the durable core restores; a foreign-generation anchor never blocks the boot');
+  assert.equal(h.permissionLock, false, 'no permission lock: the missing gen1 file is not a wipe, it is another crib');
+  assert.equal(h.storeIntegrityLock, false);
+  assert.equal(h.failureCategory, null);
+  assert.equal(h.storeGuard.status, 'UNCOMMISSIONED', 'nothing is commissioned for gen1 yet');
+  assert.equal(h.storeGuard.notApplicable, 1);
+  assert.equal(h.storeGuard.applicable, 0);
+  assert.equal(h.storeGuard.stores[0].status, 'NOT_APPLICABLE');
+  assert.equal(h.storeGuard.stores[0].reason, 'ANCHOR_FROM_ANOTHER_DATA_GENERATION');
+  assert.equal(existsSync(f.file), false, 'the gen1 crib is never seeded from another generation\'s anchor');
+  assert.equal(f.sqlLog.some((sql) => /INSERT INTO serpent_store_|UPDATE serpent_store_|DELETE FROM serpent_store_/.test(sql)), false);
+  assert.equal((await f.persistence.durableClearOrRefuse()).allow, true, 'CLEAR is permitted — the store lock never engaged');
 });
 
 test('pre-commissioning checkout reports zero coverage explicitly; no automatic import occurs', async (t) => {

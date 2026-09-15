@@ -240,7 +240,7 @@ if (!TEST_URL) {
           const local = path.join(dataRoot, ...snapshot.anchor.relativePath.split('/'));
           mkdirSync(path.dirname(local), { recursive: true }); writeFileSync(local, snapshot.payload);
           assert.deepEqual(await inspectStoreAnchor({ dataRoot, anchor: snapshot.anchor }), {
-            storeId: input.storeId, revision: 1, status: 'HEALTHY', reason: 'EXACT_DURABLE_SNAPSHOT_MATCH', permissionLock: false,
+            storeId: input.storeId, revision: 1, status: 'HEALTHY', reason: 'EXACT_DURABLE_SNAPSHOT_MATCH', generation: '', permissionLock: false,
           });
           unlinkSync(local);
           assert.equal((await inspectStoreAnchor({ dataRoot, anchor: snapshot.anchor })).status, 'WIPED');

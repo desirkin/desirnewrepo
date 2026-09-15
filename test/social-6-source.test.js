@@ -155,7 +155,7 @@ test('S6-A1..A5 NO SCORE / NO AUTHORITY. no profile field, runtime status field,
   // S6-A4/A5: the profile path owns no side effect — only the same journal append happened; the config is untouched; no fetch
   globalThis.__s6Probe = 0; const orig = globalThis.fetch; globalThis.fetch = () => { globalThis.__s6Probe += 1; throw new Error('no network'); };
   try { b.rt.sourceProfile(o.socialAuthorId, { asOfTs: b.clock.ms }); b.rt.composite('LINK', { asOfTs: b.clock.ms }); } finally { globalThis.fetch = orig; }
-  assert.equal(globalThis.__s6Probe, 0); delete globalThis.__s6Probe; assert.deepEqual(loadConfig().universe, ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']); assert.equal(b.arr.filter((e) => !SOCIAL_EVENT_TYPES.includes(e.type)).length, 0);
+  assert.equal(globalThis.__s6Probe, 0); delete globalThis.__s6Probe; assert.deepEqual(loadConfig().universe, []); assert.equal(b.arr.filter((e) => !SOCIAL_EVENT_TYPES.includes(e.type)).length, 0);
   assert.equal(p.authority, 'NONE'); assert.equal(p.purpose, 'RESEARCH_ONLY');
 });
 

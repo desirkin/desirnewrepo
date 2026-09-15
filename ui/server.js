@@ -337,6 +337,11 @@ function statusPayload() {
   const engine = getEngineState(); // syncs + logs posture transitions
   // open exposure is the journal's (lean trim step 1): the bound projection's positions, or 0 with no projection
   const open = judgeView().projection?.positions?.length ?? 0;
+  const tape = tapeReport();
+  // PUBLISH-FIX-2: the cockpit reports the universe SELECTION STATE explicitly. The universe is the tape's selected daily
+  // set (never a hardcoded seed — config.universe is empty by law now); when the tape has selected none, the state is
+  // UNIVERSE_NOT_SELECTED and the cockpit invents no coin list.
+  const universeSelected = (tape.universe && (tape.universe.total ?? 0) > 0) || (Array.isArray(config.universe) && config.universe.length > 0);
   return {
     posture: engine.state,
     // JUDGE: the read-only execution projection summary (null when the Judge is off)
@@ -351,9 +356,10 @@ function statusPayload() {
           thresholds: engine.locks.thresholds,
         }
       : null,
-    tape: tapeReport(),
+    tape,
     session: sessionClock(),
     universe: config.universe,
+    universeState: universeSelected ? 'SELECTED' : 'UNIVERSE_NOT_SELECTED',
     openPositions: open,
     pendingStrikes: pendingStrikes(),
     stalking: Object.keys(engine.stalking ?? {}),
@@ -803,7 +809,9 @@ const server = http.createServer((req, res) => {
     } else if (url.pathname === '/api/attention') {
       // UI-1: read-only DISPLAY attention (async — durable Memory
       // continuity rides in). A failure here must never break the home
-      // screen — fall back to the configured majors honestly.
+      // screen — degrade to the SELECTED universe honestly (empty until one
+      // is selected; PUBLISH-FIX-2 removed the hardcoded seed, so a failure
+      // shows no invented coins).
       attentionSnapshot()
         .then((a) => json(res, 200, a))
         .catch((err) => {
@@ -812,7 +820,7 @@ const server = http.createServer((req, res) => {
             generatedTs: Date.now(),
             degraded: true,
             focus: null,
-            orbit: config.universe.map((symbol) => ({ symbol, tier: 5, kind: 'MAJOR', reason: 'configured major — quiet fallback', ts: 0, fallback: true })),
+            orbit: config.universe.map((symbol) => ({ symbol, tier: 5, kind: 'UNIVERSE', reason: 'selected universe — quiet fallback', ts: 0, fallback: true })),
           });
         });
     } else if (url.pathname === '/manifest.webmanifest') {

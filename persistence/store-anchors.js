@@ -3,6 +3,7 @@
 // transaction. This module does not inspect or restore filesystem paths and
 // cannot carry bulk archives: one payload is capped at 1 MiB.
 import { createHash } from 'node:crypto';
+import { dataGeneration } from '../lib/config.js';
 
 export const STORE_ANCHOR_VERSION = 'store-anchor-1';
 export const MAX_STORE_SNAPSHOT_BYTES = 1024 * 1024;
@@ -18,6 +19,12 @@ const ANCHOR_KEYS = Object.freeze([
   'recordCount', 'byteCount', 'headDigest', 'headTs', 'revision',
 ]);
 const METADATA_KEYS = Object.freeze(ANCHOR_KEYS.filter((key) => key !== 'revision'));
+// PUBLISH-FIX-2: an anchor may additionally carry the data generation it was commissioned under. It is OPTIONAL and
+// absent means the flat legacy generation (''), so pre-generation anchors and every existing DB row read back unchanged.
+// The generation is not part of the store's identity — it never enters the digest — it only lets the startup guard tell
+// "this cache belongs to another generation's crib" apart from "this cache was wiped".
+const ANCHOR_OPTIONAL_KEYS = Object.freeze(['generation']);
+const GENERATION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 const clone = (value) => structuredClone(value);
 const exactKeys = (value, keys) => {
@@ -25,6 +32,18 @@ const exactKeys = (value, keys) => {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+};
+// like exactKeys, but a fixed set of optional keys may also be present (used for the backward-compatible generation field)
+const keysWithin = (value, required, optional) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value);
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => actual.includes(key)) && actual.every((key) => allowed.has(key));
+};
+const normalizeGeneration = (value) => {
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value !== 'string' || !GENERATION_RE.test(value)) fail('ANCHOR_INVALID', 'generation must be a safe data-generation name or empty');
+  return value;
 };
 const isTs = (value) => Number.isSafeInteger(value) && value >= 0;
 const sha256 = (payload) => createHash('sha256').update(Buffer.from(payload, 'utf8')).digest('hex');
@@ -89,18 +108,22 @@ function payloadFacts(format, payload) {
 }
 
 function metadataOf(anchor) {
-  return Object.fromEntries(METADATA_KEYS.map((key) => [key, anchor[key]]));
+  const metadata = Object.fromEntries(METADATA_KEYS.map((key) => [key, anchor[key]]));
+  // Only persist the generation when it is set, so a flat-generation anchor's metadata is byte-for-byte what it was
+  // before PUBLISH-FIX-2 and no migration is required for existing rows.
+  if (anchor.generation) metadata.generation = anchor.generation;
+  return metadata;
 }
 
 function sameAnchorContent(left, right) {
-  return METADATA_KEYS.every((key) => left[key] === right[key]);
+  return METADATA_KEYS.every((key) => left[key] === right[key]) && (left.generation ?? '') === (right.generation ?? '');
 }
 
 // Public strict validator used by the startup inspector. It validates only
 // anchor metadata; readStoreSnapshot additionally re-derives facts from the
 // exact stored payload. A normalized frozen clone is returned on success.
 export function validateStoreAnchor(anchor) {
-  if (!exactKeys(anchor, ANCHOR_KEYS)) fail('ANCHOR_INVALID', 'anchor keys are not exact');
+  if (!keysWithin(anchor, ANCHOR_KEYS, ANCHOR_OPTIONAL_KEYS)) fail('ANCHOR_INVALID', 'anchor keys are not exact');
   if (anchor.anchorVersion !== STORE_ANCHOR_VERSION) fail('ANCHOR_INVALID', 'anchor version mismatch');
   if (typeof anchor.storeId !== 'string' || !STORE_ID_RE.test(anchor.storeId)) fail('ANCHOR_INVALID', 'storeId malformed');
   const pathError = relativePathError(anchor.relativePath); if (pathError) fail('ANCHOR_INVALID', pathError);
@@ -114,7 +137,9 @@ export function validateStoreAnchor(anchor) {
   if (anchor.format === 'JSON' && anchor.recordCount !== 1) fail('ANCHOR_INVALID', 'JSON recordCount must be one');
   if (anchor.byteCount === 0 && anchor.recordCount !== 0) fail('ANCHOR_INVALID', 'empty bytes cannot carry records');
   if (anchor.format === 'JSONL' && anchor.recordCount === 0 && anchor.byteCount !== 0) fail('ANCHOR_INVALID', 'zero-record JSONL must be empty');
-  return Object.freeze(clone(anchor));
+  // Normalize the optional generation so every returned anchor carries it explicitly (default '' — the flat legacy crib).
+  const generation = normalizeGeneration(anchor.generation);
+  return Object.freeze({ ...clone(anchor), generation });
 }
 
 function metadataFromDb(value) {
@@ -128,7 +153,7 @@ function metadataFromDb(value) {
 function anchorFromRow(row) {
   if (!row) return null;
   const metadata = metadataFromDb(row.metadata);
-  if (!exactKeys(metadata, METADATA_KEYS)) fail('DURABLE_ANCHOR_INVALID', 'durable metadata keys are not exact');
+  if (!keysWithin(metadata, METADATA_KEYS, ANCHOR_OPTIONAL_KEYS)) fail('DURABLE_ANCHOR_INVALID', 'durable metadata keys are not exact');
   const anchor = validateStoreAnchor({ ...clone(metadata), revision: Number(row.revision) });
   if (row.store_id !== anchor.storeId || row.relative_path !== anchor.relativePath) fail('DURABLE_ANCHOR_INVALID', 'durable anchor columns disagree with metadata');
   if (row.payload_digest === null || row.payload_digest === undefined || row.byte_count === null || row.byte_count === undefined) {
@@ -184,7 +209,10 @@ export async function readStoreSnapshot(db, storeId) {
 function prepareSave(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('INPUT_INVALID', 'save input must be an object');
   const expectedKeys = ['storeId', 'relativePath', 'format', 'storeVersion', 'payload', 'headTs', 'expectedRevision'];
-  if (!exactKeys(input, expectedKeys)) fail('INPUT_INVALID', 'save input keys are not exact');
+  if (!keysWithin(input, expectedKeys, ANCHOR_OPTIONAL_KEYS)) fail('INPUT_INVALID', 'save input keys are not exact');
+  // The commissioning generation: an explicit value wins (including '' to force the flat crib); when omitted the anchor
+  // is stamped with the generation the runtime is currently writing under, so a commission always records its own crib.
+  const generation = input.generation === undefined ? dataGeneration() : normalizeGeneration(input.generation);
   if (typeof input.storeId !== 'string' || !STORE_ID_RE.test(input.storeId)) fail('STORE_ID_INVALID', 'storeId malformed');
   const pathError = relativePathError(input.relativePath); if (pathError) fail('RELATIVE_PATH_INVALID', pathError);
   if (!FORMATS.includes(input.format)) fail('FORMAT_INVALID', 'format must be JSON or JSONL');
@@ -202,7 +230,7 @@ function prepareSave(input) {
   return Object.freeze({
     storeId: input.storeId.slice(0), relativePath: input.relativePath.slice(0),
     format: input.format, storeVersion: input.storeVersion.slice(0), payload,
-    headTs: input.headTs, expectedRevision: input.expectedRevision, facts,
+    headTs: input.headTs, expectedRevision: input.expectedRevision, generation, facts,
   });
 }
 
@@ -229,7 +257,7 @@ export async function saveStoreSnapshot(db, input) {
         anchorVersion: STORE_ANCHOR_VERSION, storeId: proposed.storeId,
         relativePath: proposed.relativePath, format: proposed.format,
         storeVersion: proposed.storeVersion, ...proposed.facts,
-        headTs: proposed.headTs, revision: existing.anchor.revision,
+        headTs: proposed.headTs, revision: existing.anchor.revision, generation: proposed.generation,
       });
       if (sameAnchorContent(existing.anchor, candidateAtCurrentRevision) && existing.payload === proposed.payload) {
         const current = proposed.expectedRevision === existing.anchor.revision;
@@ -255,7 +283,7 @@ export async function saveStoreSnapshot(db, input) {
       anchorVersion: STORE_ANCHOR_VERSION, storeId: proposed.storeId,
       relativePath: proposed.relativePath, format: proposed.format,
       storeVersion: proposed.storeVersion, ...proposed.facts,
-      headTs: proposed.headTs, revision,
+      headTs: proposed.headTs, revision, generation: proposed.generation,
     });
     const metadata = metadataOf(anchor);
 

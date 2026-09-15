@@ -26,7 +26,7 @@ function seedDir() {
   return d;
 }
 
-test('1+2. an active stalk on a NON-major appears in the orbit and beats the configured fallback for focus', async () => {
+test('1+2. an active stalk on a NON-major appears in the orbit and stands alone — no hardcoded universe fills the field', async () => {
   const d = seedDir();
   process.env.COBRA_DATA_DIR = d;
   writeFileSync(path.join(d, 'state', 'stalking.json'), JSON.stringify({
@@ -36,18 +36,18 @@ test('1+2. an active stalk on a NON-major appears in the orbit and beats the con
   assert.equal(snap.focus.symbol, 'SUI'); // dynamic attention wins focus
   assert.equal(snap.focus.tier, 1);
   assert.ok(snap.orbit.some((e) => e.symbol === 'SUI' && !e.fallback)); // no BTC/ETH/SOL/XRP/DOGE whitelist
-  assert.ok(snap.orbit.some((e) => e.symbol === 'BTC' && e.fallback)); // majors still fill the field quietly
+  // PUBLISH-FIX-2: with no universe configured there is NO quiet fallback fill — genuine attention stands alone
+  assert.ok(!snap.orbit.some((e) => e.fallback), 'no hardcoded universe means no quiet fallback orbit');
   rmSync(d, { recursive: true, force: true });
 });
 
-test('3. no genuine attention: configured majors are the honest fallback; nothing is invented as focus', async () => {
+test('3. no genuine attention and no configured universe: focus is null and NOTHING is invented as fallback', async () => {
   const d = seedDir();
   process.env.COBRA_DATA_DIR = d;
   const snap = await attentionSnapshot({ now: NOW });
   assert.equal(snap.focus, null); // no fake focal prey merely because the UI wants one
-  assert.ok(snap.orbit.length >= 5);
-  assert.ok(snap.orbit.every((e) => e.fallback === true && e.tier === 5));
-  assert.deepEqual(snap.orbit.map((e) => e.symbol).slice(0, 5), ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']);
+  // PUBLISH-FIX-2: the cockpit seeds no coins — with no universe and no attention the orbit is empty (UNIVERSE NOT SELECTED)
+  assert.deepEqual(snap.orbit, [], 'with no universe selected the cockpit invents no quiet fallback');
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -111,11 +111,12 @@ test('8. a coin with no rumor history reports truthful absence — null stays nu
   rmSync(d, { recursive: true, force: true });
 });
 
-test('21. a broken/missing attention source falls back to the majors without crashing', async () => {
+test('21. a broken/missing attention source degrades to an empty orbit without crashing', async () => {
   process.env.COBRA_DATA_DIR = path.join(tmpdir(), 'cobra-ui1-definitely-missing-' + Date.now());
   const snap = await attentionSnapshot({ now: NOW });
   assert.equal(snap.focus, null);
-  assert.ok(snap.orbit.every((e) => e.fallback));
+  // PUBLISH-FIX-2: a missing source never invents a hardcoded fallback — it degrades honestly to nothing
+  assert.deepEqual(snap.orbit, []);
   process.env.COBRA_DATA_DIR = TEST_DATA;
 });
 

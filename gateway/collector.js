@@ -127,8 +127,10 @@ function universeCoins(config, universeSource = null) {
   } catch {
     // A failed injected catalog read is absence, never permission to invent.
   }
+  // PUBLISH-FIX-2: the coin set is the tape's selected daily universe ONLY — never a hardcoded config seed. When the tape
+  // has selected none the set is empty (UNIVERSE_NOT_SELECTED) and the collector idles over it; it never invents a list.
   const uni = readCurrentUniverse();
-  return uni ? uni.pairs.map((p) => p.coin) : config.universe;
+  return uni ? uni.pairs.map((p) => p.coin) : [];
 }
 
 export function startGateway({ log = console.log, config = loadConfig(), fetchImpl = fetch, dataRoot = dataDir(), universeSource = null, signals = true } = {}) {

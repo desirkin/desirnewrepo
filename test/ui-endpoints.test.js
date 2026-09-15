@@ -46,7 +46,7 @@ test.after(async () => {
   rmSync(TEST_DATA, { recursive: true, force: true });
 });
 
-test('7a. /api/attention: real attention wins, dedupes, falls back to majors for the rest', async () => {
+test('7a. /api/attention: real attention wins and dedupes; no hardcoded universe fallback is invented', async () => {
   const r = await fetch(BASE + '/api/attention');
   assert.equal(r.status, 200);
   assert.equal(r.headers.get('cache-control'), 'no-store'); // dynamic truth is never cacheable
@@ -55,7 +55,8 @@ test('7a. /api/attention: real attention wins, dedupes, falls back to majors for
   assert.equal(a.focus.tier, 1);
   assert.equal(a.orbit.filter((e) => e.symbol === 'SUI').length, 1); // deduped
   assert.ok(a.orbit.some((e) => e.symbol === 'PEPE' && e.tier === 2 && !e.fallback));
-  assert.ok(a.orbit.some((e) => e.fallback)); // quiet majors still populate the field
+  // PUBLISH-FIX-2: with no universe selected the field carries only genuine attention — no quiet fallback is invented
+  assert.ok(!a.orbit.some((e) => e.fallback), 'no hardcoded universe means no fallback populates the field');
   assert.ok(!/score|confidence|probability/i.test(JSON.stringify(a)));
 });
 

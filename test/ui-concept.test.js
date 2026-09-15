@@ -35,13 +35,13 @@ test('3. concentric orbit guides sit under the scene', () => {
 test('4. badge glyph is pure presentation drawn FROM the symbol, via textContent', () => {
   // the glyph never enters innerHTML — it is assigned as text, like the label
   assert.ok(SCRIPT.includes(`el.querySelector('.glyph').textContent = planetGlyph(coin)`));
-  const glyphMap = SCRIPT.match(/const PLANET_GLYPH = \{[^}]*\};/);
+  // PUBLISH-FIX-2: no hardcoded coin glyph table — the glyph is derived from the symbol's own first character
+  assert.ok(!/PLANET_GLYPH/.test(SCRIPT), 'no hardcoded coin glyph table may live in the cockpit');
   const glyphFn = SCRIPT.match(/const planetGlyph = [^;]*;/);
-  assert.ok(glyphMap && glyphFn);
-  const planetGlyph = new Function(`${glyphMap[0]} ${glyphFn[0]} return planetGlyph;`)();
-  assert.equal(planetGlyph('BTC'), '₿');
-  assert.equal(planetGlyph('DOGE'), 'Ð');
-  assert.equal(planetGlyph('WIF'), 'W'); // unknown symbols fall back to a letter
+  assert.ok(glyphFn);
+  const planetGlyph = new Function(`${glyphFn[0]} return planetGlyph;`)();
+  assert.equal(planetGlyph('BTC'), 'B'); // the first character of the symbol, never a hardcoded currency mark
+  assert.equal(planetGlyph('WIF'), 'W');
   assert.equal(planetGlyph(''), '');
 });
 
