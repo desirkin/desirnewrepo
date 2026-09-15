@@ -438,6 +438,7 @@
   #ask .rmeta { font-size: 9.5px; letter-spacing: .06em; color: var(--dim); margin: 6px 0; line-height: 1.5; }
   #ask .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
   #ask .chip { position: static; font: inherit; font-size: 9.5px; letter-spacing: .04em; color: #d9c48f; background: transparent; border: 1px solid #5a4d2f; border-radius: 999px; padding: 6px 10px; cursor: pointer; min-height: 32px; }
+  #ask .askToggle.on { color: #0b1220; background: #d9c48f; border-color: #d9c48f; } /* the explainer half is ON (still read-only; never a trading control) */
   #ask .turn { padding: 8px 0; border-bottom: 1px solid #1b2739; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
   #ask .turn.q { color: var(--ink); } #ask .turn.a { color: #cfd8e6; } #ask .turn.err { color: #ff7a6b; }
   #ask .ev { display: block; font-size: 9px; letter-spacing: .06em; color: var(--dim); margin-top: 4px; }
@@ -675,6 +676,7 @@
   </div>
   <div id="askBody" class="dbody">
     <div id="askNotice" class="notice">loading…</div>
+    <div id="askToggles" class="chips" aria-label="explainer controls"></div>
     <div id="askChips" class="chips"></div>
     <div id="askLog"></div>
     <div class="rmeta">Answers quote what the Judge, the Watch and the senses recorded, with the evidence time. Nothing here places, cancels, arms, clears or resets anything.</div>
@@ -1543,9 +1545,33 @@ async function refreshAskStatus() {
   try { const res = await fetch('/api/ask/status', { cache: 'no-store' }); const d = await res.json(); askChat = d.chat ?? null;
     const ready = d.chat && d.chat.state === 'READY' ? 'AI chat READY (' + d.chat.model + '; caps per request ' + d.chat.caps.perRequestUsd + ' USD, per day ' + d.chat.caps.perDayUsd + ' USD; today ' + (d.chat.spend ? d.chat.spend.spentUsd : 0) + ' USD). Each send is one paid request.' : null;
     $('#askNotice').textContent = !d.chat ? 'status unavailable' : ready ? ready : 'Free-form AI chat is NOT configured (' + d.chat.reason + '). Answers below come from the recorded evidence only.';
+    renderAskToggles(d.explainer);
     $('#askChips').innerHTML = (d.suggestions ?? []).map((q) => '<button type="button" class="chip">' + esc(q) + '</button>').join('');
     for (const b of $('#askChips').querySelectorAll('.chip')) b.addEventListener('click', () => { $('#askInput').value = b.textContent; askSend(); });
   } catch (err) { console.error('ASK status failed:', err); $('#askNotice').textContent = 'SHELL LINK LOST — server unreachable'; }
+}
+// TALK-TO-THEM: the two protected toggles (ASK, SOCRATES), each with a today's-spend meter. Flipping is an authenticated
+// operator action (like a control latch) but changes no trading permission — only whether the read-only explainer / Socrates
+// may spend. A dormant half says why (no key, cap unset/reached, or toggle off).
+function askMeterText(m) {
+  if (!m) return '—';
+  if (m.dormant) return 'dormant · ' + esc(m.reason) + (m.capUsd > 0 ? ' · $' + m.spentUsdToday + ' / $' + m.capUsd + ' today' : '');
+  return 'ON · $' + m.spentUsdToday + ' / $' + m.capUsd + ' today · $' + m.remainingUsd + ' left';
+}
+function renderAskToggles(ex) {
+  const el = $('#askToggles'); if (!el) return;
+  if (!ex) { el.innerHTML = '<span class="rmeta">explainer controls unavailable</span>'; return; }
+  const one = (half, label, m) => '<button type="button" class="chip askToggle' + (m && m.on ? ' on' : '') + '" data-toggle="' + half + '" data-on="' + (m && m.on ? '1' : '0') + '" aria-pressed="' + (m && m.on ? 'true' : 'false') + '">' + label + ': ' + (m && m.on ? 'ON' : 'OFF') + '</button>';
+  el.innerHTML = one('ask', 'ASK', ex.ask) + one('socrates', 'SOCRATES', ex.socrates)
+    + '<span class="ev">ASK ' + askMeterText(ex.ask) + ' · SOCRATES ' + askMeterText(ex.socrates) + ' · caps are ceilings you set (' + esc(ex.caps.talk.name) + ', ' + esc(ex.caps.socrates.name) + '); flipping needs no publish</span>';
+  for (const b of el.querySelectorAll('.askToggle')) b.addEventListener('click', () => ensureAuth(() => askToggle(b.getAttribute('data-toggle'), b.getAttribute('data-on') !== '1')));
+}
+async function askToggle(toggle, on) {
+  try {
+    const headers = { 'content-type': 'application/json' }; if (typeof csrfToken === 'string' && csrfToken) headers['x-serpent-csrf'] = csrfToken;
+    const res = await fetch('/api/ask/toggle', { method: 'POST', headers, cache: 'no-store', body: JSON.stringify({ toggle, on }) });
+    const d = await res.json(); if (d && d.explainer) renderAskToggles(d.explainer); else refreshAskStatus();
+  } catch (err) { console.error('ASK toggle failed:', err); }
 }
 async function askSend() {
   const q = $('#askInput').value.trim(); if (!q || askBusy) return;

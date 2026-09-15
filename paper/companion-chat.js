@@ -15,7 +15,7 @@ import { repoRoot } from '../lib/config.js';
 import { READ_ONLY_LAW, boundHistory } from './companion.js';
 
 export const CHAT_VERSION = 'serpent-companion-chat-1';
-export const CHAT_ENV = Object.freeze({ key: 'ANTHROPIC_API_KEY', model: 'SERPENT_CHAT_MODEL', perRequestUsd: 'SERPENT_CHAT_MAX_USD_PER_REQUEST', perDayUsd: 'SERPENT_CHAT_MAX_USD_PER_DAY' });
+export const CHAT_ENV = Object.freeze({ key: 'ANTHROPIC_API_KEY', model: 'SERPENT_CHAT_MODEL', perRequestUsd: 'SERPENT_CHAT_MAX_USD_PER_REQUEST', dailyUsd: 'SERPENT_TALK_DAILY_USD', perDayUsd: 'SERPENT_CHAT_MAX_USD_PER_DAY' });
 export const CHAT_STATES = Object.freeze(['NOT_CONFIGURED', 'READY']);
 export const CHAT_REASONS = Object.freeze(['CREDENTIAL_MISSING', 'BUDGET_NOT_CONFIGURED', 'MODEL_NOT_KNOWN']);
 export const CHAT_MODELS_FILE = 'config/companion-chat.json';
@@ -57,9 +57,12 @@ export function chatStatus(env = process.env) {
   const known = chatModels();
   const model = typeof env[CHAT_ENV.model] === 'string' && env[CHAT_ENV.model].length ? env[CHAT_ENV.model] : known.defaultModel;
   const key = typeof env[CHAT_ENV.key] === 'string' && env[CHAT_ENV.key].length > 0;
-  const perRequestUsd = num(env[CHAT_ENV.perRequestUsd]); const perDayUsd = num(env[CHAT_ENV.perDayUsd]);
+  // TALK-TO-THEM: the daily cap is the named SERPENT_TALK_DAILY_USD (the ONE ceiling David sets); the legacy
+  // SERPENT_CHAT_MAX_USD_PER_DAY remains a fallback. Still explicit — an unset daily cap is BUDGET_NOT_CONFIGURED, never a
+  // chosen default. The cockpit's ASK toggle + this same daily cap are the day-to-day gate (lib/explainer-toggles.js).
+  const perRequestUsd = num(env[CHAT_ENV.perRequestUsd]); const perDayUsd = num(env[CHAT_ENV.dailyUsd]) ?? num(env[CHAT_ENV.perDayUsd]);
   const reason = !key ? 'CREDENTIAL_MISSING' : !(perRequestUsd && perDayUsd) ? 'BUDGET_NOT_CONFIGURED' : !(model && known.models[model]) ? 'MODEL_NOT_KNOWN' : null;
-  return Object.freeze({ version: CHAT_VERSION, state: reason ? 'NOT_CONFIGURED' : 'READY', reason, model, caps: { perRequestUsd, perDayUsd }, required: [CHAT_ENV.key, CHAT_ENV.perRequestUsd, CHAT_ENV.perDayUsd], notice: reason ? `free-form AI chat is not configured (${reason}); recorded-evidence answers still work` : 'free-form AI chat is configured under explicit caps; each send is one paid request' });
+  return Object.freeze({ version: CHAT_VERSION, state: reason ? 'NOT_CONFIGURED' : 'READY', reason, model, caps: { perRequestUsd, perDayUsd }, required: [CHAT_ENV.key, CHAT_ENV.perRequestUsd, CHAT_ENV.dailyUsd], notice: reason ? `free-form AI chat is not configured (${reason}); recorded-evidence answers still work` : 'free-form AI chat is configured under explicit caps; each send is one paid request' });
 }
 
 // ---- the bounded transport (own, minimal; never the research client) -----------------------------------------------------------

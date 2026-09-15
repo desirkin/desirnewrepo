@@ -31,6 +31,7 @@ import { sensorSnapshot } from '../paper/readiness.js';
 import { loadProfile as loadPaperProfile, profileEnvironment as paperProfileEnvironment } from '../paper/profile.js';
 import { answerQuestion, boundHistory, SUGGESTED_QUESTIONS, COMPANION_VERSION, COMPANION_LABEL, MAX_QUESTION_CHARS } from '../paper/companion.js';
 import { createChatDispatcher } from '../paper/companion-chat.js';
+import { explainerControlsView, setExplainerToggles } from '../lib/explainer-toggles.js';
 import { readDataOnlyRuntimeStatus, dataOnlyPublicStatus, dataOnlySensorSnapshot, dataOnlyMarketView } from '../lib/data-only-status.js';
 import { readBroadKrakenLatest } from '../market-lab/broad-kraken.js';
 import { assembleHuntTrail } from '../lib/hunt-trail.js';
@@ -126,7 +127,10 @@ const ASK_MAX_BODY = 16 * 1024; const askBucket = { tokens: 30, ts: Date.now() }
 function askAllowed() { const now = Date.now(); askBucket.tokens = Math.min(30, askBucket.tokens + ((now - askBucket.ts) / 60_000) * 30); askBucket.ts = now; if (askBucket.tokens < 1) return false; askBucket.tokens -= 1; return true; }
 // the ONE bounded journal read available to the companion: the newest page of the RUNNING account (never another account, never a path from a question)
 async function askJournalPage({ limit }) { if (!judgeRun || !judgeRun.journal || typeof judgeRun.journal.page !== 'function') return null; const h = await judgeRun.journal.load(judgeRun.accountId); const head = Number(h?.headSeq ?? 0); return judgeRun.journal.page(judgeRun.accountId, { afterSeq: Math.max(0, head - limit), limit }); }
-function askStatusView() { let c = null; try { c = chat().status(); } catch (err) { c = { state: 'NOT_CONFIGURED', reason: 'CHAT_UNAVAILABLE', notice: String(err.message).slice(0, 120) }; } return { label: COMPANION_LABEL, version: COMPANION_VERSION, suggestions: [...SUGGESTED_QUESTIONS], chat: c, authority: 'READ_ONLY' }; }
+// today's spend per half, read from the durable ledgers (never a client figure): the chat ledger for ASK; SOCRATES spends
+// from its own cap and its runtime is separate, so 0 until that journal is wired here (the meter is honest about it).
+function explainerView() { let talkUsd = 0; try { talkUsd = Number(chat().status()?.spend?.spentUsd) || 0; } catch { talkUsd = 0; } try { return explainerControlsView({ dataDir: dataDir(), env: process.env, spend: { talkUsd, socratesUsd: 0 } }); } catch { return null; } }
+function askStatusView() { let c = null; try { c = chat().status(); } catch (err) { c = { state: 'NOT_CONFIGURED', reason: 'CHAT_UNAVAILABLE', notice: String(err.message).slice(0, 120) }; } return { label: COMPANION_LABEL, version: COMPANION_VERSION, suggestions: [...SUGGESTED_QUESTIONS], chat: c, explainer: explainerView(), authority: 'READ_ONLY' }; }
 async function askHandler(req, res, body) {
   if (!askAllowed()) { json(res, 429, { ok: false, reason: 'RATE_LIMITED' }); return; }
   const question = typeof body?.question === 'string' ? body.question.trim() : ''; if (!question.length || question.length > MAX_QUESTION_CHARS) { json(res, 400, { ok: false, reason: 'QUESTION_REQUIRED', max: MAX_QUESTION_CHARS }); return; }
@@ -137,6 +141,10 @@ async function askHandler(req, res, body) {
   // a billed conversation request is an authenticated operator action: session + CSRF + same-origin, exactly like a control
   const gate = gateControl(auth, { cookieHeader: req.headers.cookie, csrfHeader: req.headers['x-serpent-csrf'], originHeader: req.headers.origin, hostHeader: req.headers.host, body });
   if (!gate.allow) { json(res, gate.code, { ...answer, chat: { ok: false, dispatched: false, reason: gate.reason, notice: 'free-form AI chat needs an authenticated operator session; the recorded-evidence answer is above' } }); return; }
+  // TALK-TO-THEM: the ASK toggle + the SERPENT_TALK_DAILY_USD ceiling are the day-to-day gate. Dormant (toggle off, cap
+  // unset/reached, no key) -> the recorded-evidence answer stands and nothing is dispatched (never a silent paid call).
+  const meter = explainerView()?.ask ?? null;
+  if (meter && meter.dormant) { json(res, 200, { ...answer, chat: { ok: false, dispatched: false, reason: meter.reason, notice: `the Ask explainer is dormant (${meter.reason}); the recorded-evidence answer is above` } }); return; }
   let r; try { r = await chat().ask({ question, history, evidence: { answer: answer.answer, availability: answer.availability, evidence: answer.evidence, intent: answer.intent } }); } catch (err) { r = { ok: false, dispatched: false, reason: 'CHAT_FAILED', notice: String(err.message).slice(0, 160) }; }
   json(res, 200, { ...answer, chat: r });
 }
@@ -565,6 +573,19 @@ const server = http.createServer((req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/ask') {
       readBody(req, res, (body) => { askHandler(req, res, body).catch((err) => { console.error(`[api/ask] ${err.constructor.name}: ${err.message}`); json(res, 500, { ok: false, reason: 'ASK_FAILED' }); }); }, ASK_MAX_BODY);
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/ask/toggle') {
+      // TALK-TO-THEM: flipping ASK / SOCRATES is a protected operator action (auth like a control latch), but it is NOT a
+      // trading control — it only changes whether the read-only explainer / Socrates may spend, in its own durable file.
+      readBody(req, res, (body) => {
+        const gate = gateControl(auth, { cookieHeader: req.headers.cookie, csrfHeader: req.headers['x-serpent-csrf'], originHeader: req.headers.origin, hostHeader: req.headers.host, body });
+        if (!gate.allow) { json(res, gate.code, { ok: false, reason: gate.reason }); return; }
+        const toggle = body?.toggle === 'ask' || body?.toggle === 'socrates' ? body.toggle : null;
+        if (!toggle || typeof body?.on !== 'boolean') { json(res, 400, { ok: false, reason: 'TOGGLE_REQUIRED', accepts: { toggle: ['ask', 'socrates'], on: 'boolean' } }); return; }
+        try { setExplainerToggles({ dataDir: dataDir(), patch: { [toggle]: body.on } }); try { appendJsonl(authLogFile(), { ts: nowIso(), event: 'EXPLAINER_TOGGLE', toggle, on: body.on, sessionTag: gate.sessionTag }); } catch { /* audit best-effort */ } json(res, 200, { ok: true, toggle, on: body.on, explainer: explainerView() }); }
+        catch (err) { json(res, 400, { ok: false, reason: 'TOGGLE_REFUSED', notice: String(err.message).slice(0, 160) }); }
+      }, ASK_MAX_BODY);
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/control') {

@@ -43,3 +43,21 @@ test('ASK-HTTP-3. mode "chat" is an authenticated operator action: without a ses
   const ok = await post('/api/ask', { question: 'How is the paper account doing after costs?', mode: 'chat' }, { cookie, 'x-serpent-csrf': csrfToken, origin: `http://127.0.0.1:${PORT}` }); assert.equal(ok.status, 200); const dok = await ok.json(); assert.equal(dok.ok, true); assert.equal(dok.chat.ok, false); assert.equal(dok.chat.dispatched, false); assert.equal(dok.chat.reason, 'CREDENTIAL_MISSING'); assert.ok(!JSON.stringify(dok).includes(PW));
   const wrongCsrf = await post('/api/ask', { question: 'q', mode: 'chat' }, { cookie, 'x-serpent-csrf': 'nope', origin: `http://127.0.0.1:${PORT}` }); assert.equal(wrongCsrf.status, 403);
 });
+
+test('ASK-HTTP-4 (TALK-TO-THEM). /api/ask/status carries the two toggles + meters (ASK on, SOCRATES off by default; both dormant CREDENTIAL_MISSING with no key); flipping is protected (401 without a session) and durable with one', async () => {
+  const st = await (await fetch(`${base}/api/ask/status`)).json();
+  assert.ok(st.explainer); assert.equal(st.explainer.credentialPresent, false);
+  assert.equal(st.explainer.ask.on, true); assert.equal(st.explainer.socrates.on, false);
+  assert.equal(st.explainer.ask.dormant, true); assert.equal(st.explainer.ask.reason, 'CREDENTIAL_MISSING');
+  assert.equal(st.explainer.caps.talk.name, 'SERPENT_TALK_DAILY_USD'); assert.equal(st.explainer.caps.socrates.name, 'SERPENT_SOCRATES_DAILY_USD');
+  assert.ok(!JSON.stringify(st).includes(PW));
+  // flipping is a protected operator action (like a control latch): no session -> refused, nothing changes
+  const noauth = await post('/api/ask/toggle', { toggle: 'socrates', on: true }); assert.equal(noauth.status, 401);
+  assert.equal((await (await fetch(`${base}/api/ask/status`)).json()).explainer.socrates.on, false, 'a refused flip changes nothing');
+  // with a real session + CSRF the flip succeeds and is durable (still dormant without the key, but the toggle state persists)
+  const login = await post('/api/auth/login', { password: PW }); const cookie = login.headers.get('set-cookie').split(';')[0]; const { csrfToken } = await login.json();
+  const on = await post('/api/ask/toggle', { toggle: 'socrates', on: true }, { cookie, 'x-serpent-csrf': csrfToken, origin: `http://127.0.0.1:${PORT}` });
+  assert.equal(on.status, 200); const don = await on.json(); assert.equal(don.ok, true); assert.equal(don.explainer.socrates.on, true);
+  assert.equal((await (await fetch(`${base}/api/ask/status`)).json()).explainer.socrates.on, true, 'the flip is durable across a fresh status read');
+  const bad = await post('/api/ask/toggle', { toggle: 'kill', on: true }, { cookie, 'x-serpent-csrf': csrfToken, origin: `http://127.0.0.1:${PORT}` }); assert.equal(bad.status, 400);
+});
