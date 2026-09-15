@@ -18,7 +18,25 @@ import {
   parseOkx,
   buildDoorMatrix,
   detectContagion,
+  DOOR,
 } from './parse.js';
+
+// Ticket P: the door severity order for the paper-fill latency signal; the worst live door widens the delay most.
+const DOOR_SEVERITY = Object.freeze({ OPEN: 0, DEGRADED: 1, MAINTENANCE: 2, CLOSED: 3 });
+function worstDoor(doorList) { let worst = DOOR.OPEN; let sev = -1; for (const d of doorList) { const s = DOOR_SEVERITY[d] ?? 0; if (s > sev) { sev = s; worst = d; } } return worst; }
+
+// Read-only accessor over the gateway's last written Kraken latency signal (rttMs + door). Returns null when the matrix
+// or the latency field is absent; the paper adapter treats that as "no measurement" and falls back to the reference.
+export function readGatewayLatency(root = dataDir()) {
+  try {
+    const file = path.join(root, 'gateway', 'matrix.json');
+    if (!existsSync(file)) return null;
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
+    const k = raw?.latency?.kraken;
+    if (!k || (k.rttMs !== null && !(typeof k.rttMs === 'number' && Number.isFinite(k.rttMs) && k.rttMs >= 0)) || typeof k.door !== 'string') return null;
+    return { measuredRttMs: k.rttMs, door: k.door, observedAt: typeof k.observedAt === 'string' ? k.observedAt : null };
+  } catch { return null; }
+}
 
 const SOURCES = {
   kraken: 'https://status.kraken.com/api/v2/summary.json',
@@ -121,6 +139,7 @@ export function startGateway({ log = console.log, config = loadConfig(), fetchIm
   const cfg = config.gateway;
   const pollMs = Math.max(60, cfg.pollSec ?? 60) * 1000; // politeness floor: >=60s
   const backoff = new Map(); // source -> {until, delayMs}
+  const sourceRtt = new Map(); // source -> last measured round-trip ms (Ticket P: paper-fill latency signal)
   const markTimers = new Set();
   let lastNoEventHourly = 0;
   let stopping = false;
@@ -151,6 +170,7 @@ export function startGateway({ log = console.log, config = loadConfig(), fetchIm
   async function fetchSource(name, url) {
     const b = backoff.get(name);
     if (b && Date.now() < b.until) return null;
+    const rttStart = Date.now();
     try {
       const res = await fetchImpl(url, { signal: AbortSignal.timeout(15000), headers: { accept: 'application/json' } });
       if (!res.ok) {
@@ -164,8 +184,13 @@ export function startGateway({ log = console.log, config = loadConfig(), fetchIm
         throw err;
       }
       backoff.delete(name);
-      return await res.json();
+      const body = await res.json();
+      // Ticket P: the successful round-trip is the live latency signal (measured, not assumed); a failure clears it so
+      // an unreachable venue reads as "no measurement + degraded", never a stale-fast number.
+      sourceRtt.set(name, Math.max(0, Date.now() - rttStart));
+      return body;
     } catch (err) {
+      sourceRtt.delete(name);
       const exponential = Math.min((b?.delayMs ?? 30_000) * 2, (cfg.backoffMaxSec ?? 300) * 1000);
       const delayMs = Math.max(exponential, Number.isFinite(err.retryAfterMs) ? err.retryAfterMs : 0);
       backoff.set(name, { until: Date.now() + delayMs, delayMs });
@@ -239,7 +264,13 @@ export function startGateway({ log = console.log, config = loadConfig(), fetchIm
     const coins = universeCoins(config, universeSource);
     const prevMatrix = readJsonIf(matrixFile(dataRoot), { doors: {} }).doors;
     const doors = buildDoorMatrix(coins, krakenComponents, events, prevMatrix);
-    atomicWriteJson(matrixFile(dataRoot), { ts: observedAt, doors }, { pretty: true });
+    // Ticket P: the Kraken latency signal for paper fills — the last measured status round-trip and the worst live
+    // Kraken door. A failed fetch this cycle (no rttMs) reads as DEGRADED so an unreachable venue widens the delay.
+    const krakenRttMs = sourceRtt.has('kraken') ? sourceRtt.get('kraken') : null;
+    const krakenEventDoor = worstDoor(events.filter((e) => e.venue === 'kraken').map((e) => e.door));
+    const krakenDoor = cfg.sources?.kraken && krakenRttMs === null ? DOOR.DEGRADED : krakenEventDoor;
+    const latency = { kraken: { rttMs: krakenRttMs, door: krakenDoor, observedAt } };
+    atomicWriteJson(matrixFile(dataRoot), { ts: observedAt, doors, latency }, { pretty: true });
 
     // non-events: the false-positive database starts day one
     const touchingUs = events.filter((e) => e.assets.some((a) => coins.includes(a)) && e.stage !== 'resolved' && e.stage !== 'completed');
