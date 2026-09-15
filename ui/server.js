@@ -33,6 +33,7 @@ import { answerQuestion, boundHistory, SUGGESTED_QUESTIONS, COMPANION_VERSION, C
 import { createChatDispatcher } from '../paper/companion-chat.js';
 import { readDataOnlyRuntimeStatus, dataOnlyPublicStatus, dataOnlySensorSnapshot, dataOnlyMarketView } from '../lib/data-only-status.js';
 import { readBroadKrakenLatest } from '../market-lab/broad-kraken.js';
+import { assembleHuntTrail } from '../lib/hunt-trail.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -448,6 +449,37 @@ function marketResearchCase(dir) {
   const cited = selected && packet ? [...new Set([selected.thesis, selected.mechanism, ...(selected.support ?? []), ...(selected.hypotheses ?? [])].filter(Boolean).flatMap((x) => x.evidenceRefs ?? []))].map((id) => { const e = packet.evidence.find((v) => v.evidenceId === id); return e ? { evidenceId: id, kind: e.kind, state: e.state, knownAtTs: e.knownAtTs, observedTs: e.observedTs, fields: e.value?.fields ?? null } : { evidenceId: id, kind: null }; }) : [];
   return { dir, manifest: manifest ? { bundleId: manifest.bundleId, createdTs: manifest.createdTs, summary: manifest.summary } : null, caseRecord, report, selectedAnalysis: selected ? { analysisId: selected.analysisId, packetId: selected.packetId, analysisState: selected.analysisState, revision: selected.revision, dataRequests: selected.dataRequests } : null, packet: packet ? { packetId: packet.packetId, asOfTs: packet.asOfTs, evidence: packet.evidence.length, providerCoverage: packet.providerCoverage, coverageLimitations: packet.researchContext?.coverageLimitations ?? [], mode: packet.researchContext?.mode ?? null, entrances: packet.researchContext?.entrances ?? [], trigger: packet.trigger } : null, citedFacts: cited, requestOutcomes: results.map((r) => ({ requestKey: r.requestKey, family: r.family, metricIds: r.metricIds, state: r.state, reason: r.reason, observationsAdmitted: r.observationsAdmitted, cacheStatus: r.cacheStatus })), attempts: usage.map((u) => ({ attemptNo: u.attemptNo, path: u.path, ok: u.ok, model: u.model, actualModel: u.actualModel, latencyMs: u.latencyMs, usage: u.usage, estimatedUsd: u.estimatedUsd, actualUsd: u.actualUsd, failure: u.failure })), authority: 'NONE', purpose: 'RESEARCH_ONLY' };
 }
+// HUNT-TRAIL (read-only): gather the pieces the cockpit already reads for ONE coin — the sealed cases (with their arrival
+// trigger), the projection's recent decisions (with their case refs), and the durable 5m-bite / 15m-continuation
+// outcomes — and hand them to the pure assembler. Bounded, authority NONE; the case link is exact only for the
+// decisions still in the projection window (older = coin-level; the assembler never invents a link).
+function decisionOutcomesForCoin(coin) {
+  const file = path.join(dataDir(), 'learning', 'decision-outcomes', 'decision-outcomes.jsonl');
+  let buf; try { buf = readFs(file); } catch { return []; }
+  if (buf.length > MR_MAX_BYTES) return []; // bounded read; the durable store is small
+  const out = [];
+  for (const line of buf.toString('utf8').split('\n')) {
+    if (!line) continue; let r; try { r = JSON.parse(line); } catch { continue; }
+    if (r?.assetId !== coin || typeof r.decisionId !== 'string') continue;
+    const y = r.yardstick ?? {};
+    out.push({ decisionId: r.decisionId, availability: y.availability ?? null, biteLogReturnPct: y.bite?.logReturnPct ?? null, continuationLogReturnPct: y.continuation?.logReturnPct ?? null });
+  }
+  return out;
+}
+function huntTrail(coin) {
+  const summary = marketResearchSummary();
+  const cases = (summary.cases ?? []).filter((c) => c.canonicalCoin === coin).map((c) => {
+    let trigger = null; try { trigger = marketResearchCase(c.dir)?.packet?.trigger ?? null; } catch { trigger = null; }
+    return { caseId: c.caseId, canonicalCoin: coin, status: c.status, selectedAnalysisId: c.selectedAnalysisId, createdTs: c.createdTs, finishedTs: c.finishedTs, trigger };
+  });
+  const projection = judgeView().projection ?? null;
+  const decisions = (projection?.decisions ?? []).filter((d) => (d.asset?.canonicalCoin ?? null) === coin).map((d) => ({
+    decisionId: d.decisionId, canonicalCoin: coin, setupId: d.setupId, inputMode: d.inputMode, status: d.status,
+    reasonCodes: d.reasonCodes ?? [], sizing: d.sizing ?? null, caseId: d.caseRefs?.caseId ?? null, decisionKnownAtTs: d.decisionKnownAtTs,
+  }));
+  const trail = assembleHuntTrail({ coin, cases, decisions, outcomes: decisionOutcomesForCoin(coin) });
+  return { ...trail, projectionBound: projection ? { accountId: projection.accountId ?? null, decisionWindow: (projection.decisions ?? []).length } : null };
+}
 
 function json(res, code, obj, extraHeaders = {}) {
   const body = JSON.stringify(obj);
@@ -680,6 +712,11 @@ const server = http.createServer((req, res) => {
       const dir = url.searchParams.get('dir') ?? '';
       const c = marketResearchCase(dir);
       if (!c) json(res, 404, { ok: false, error: 'no such sealed case' }); else json(res, 200, c);
+    } else if (url.pathname === '/api/hunt-trail') {
+      // HUNT-TRAIL read-only replay: how a coin came in -> what Socrates found -> what the Judge did -> what happened.
+      const coin = (url.searchParams.get('coin') ?? '').toUpperCase();
+      if (!/^[A-Z0-9]{1,15}$/.test(coin)) json(res, 400, { ok: false, error: 'coin required (e.g. ?coin=BTC)' });
+      else { try { json(res, 200, huntTrail(coin)); } catch (err) { console.error(`[api/hunt-trail] ${err.constructor.name}: ${err.message}`); json(res, 500, { ok: false, error: 'UNAVAILABLE' }); } }
     } else if (url.pathname === '/api/judge') {
       // JUDGE read-only explanation view: the projection FILE the composition writes from the actual journal
       json(res, 200, judgeView());

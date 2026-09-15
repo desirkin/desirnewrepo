@@ -109,6 +109,17 @@ test('19b. dynamic APIs all answer no-store (nothing offline-cacheable)', async 
   }
 });
 
+test('HUNT-TRAIL. /api/hunt-trail?coin= serves a read-only trail (authority NONE); a missing coin is 400', async () => {
+  const r = await fetch(BASE + '/api/hunt-trail?coin=BTC');
+  assert.equal(r.status, 200); assert.equal(r.headers.get('cache-control'), 'no-store');
+  const d = await r.json();
+  assert.equal(d.coin, 'BTC'); assert.equal(d.authority, 'NONE'); assert.equal(d.purpose, 'READ_ONLY_HUNT_TRAIL');
+  assert.ok(Array.isArray(d.arrivals) && Array.isArray(d.research) && Array.isArray(d.decisions));
+  assert.ok(d.linkage && typeof d.linkage.caseLinkedDecisions === 'number');
+  const bad = await fetch(BASE + '/api/hunt-trail');
+  assert.equal(bad.status, 400);
+});
+
 test('UI-1A §6. /api/ears: the rumor room is bounded, truthful, and null-preserving', async () => {
   const r = await fetch(BASE + '/api/ears');
   assert.equal(r.status, 200);
