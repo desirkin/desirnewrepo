@@ -136,13 +136,14 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // through the tape's observer seam, reads the RUMOR collector's detached Social projection accessor (late-bound below),
   // queues research cases, and exposes read-only status / report FILES the cockpit serves. Paid provider / model calls
   // need the policy's own explicit authorization: nothing is inferred from RUMOR2 flags or trading controls. Authority NONE.
-  let marketResearch = null; let rumor2Handle = null;
+  let marketResearch = null; let rumor2Handle = null; let marketResearchSubjects = null;
   if (process.env.MARKET_RESEARCH_ENABLED === 'true') {
     try {
       const { createResearchService, marketResearchRootFromEnv } = await import('./market-lab/service.js');
       const { readPolicyFile, readSubjectsFile } = await import('./market-lab/commands.js');
       if (!process.env.MARKET_RESEARCH_POLICY || !process.env.MARKET_RESEARCH_SUBJECTS) throw new Error('MARKET_RESEARCH_POLICY and MARKET_RESEARCH_SUBJECTS must name the policy / subjects JSON files');
-      marketResearch = createResearchService({ policy: readPolicyFile(process.env.MARKET_RESEARCH_POLICY), subjects: readSubjectsFile(process.env.MARKET_RESEARCH_SUBJECTS), env: process.env, researchRoot: marketResearchRootFromEnv(process.env, dataDir()), mode: 'INTEGRATED', log: console.log,
+      marketResearchSubjects = readSubjectsFile(process.env.MARKET_RESEARCH_SUBJECTS);
+      marketResearch = createResearchService({ policy: readPolicyFile(process.env.MARKET_RESEARCH_POLICY), subjects: marketResearchSubjects, env: process.env, researchRoot: marketResearchRootFromEnv(process.env, dataDir()), mode: 'INTEGRATED', log: console.log,
         socialSource: (coin, opts) => (rumor2Handle && typeof rumor2Handle.researchProjection === 'function' ? rumor2Handle.researchProjection(coin, opts) : null) });
       await marketResearch.start();
       console.log(`MARKET RESEARCH active (research only, authority NONE): root ${marketResearch.paths.root}`);
@@ -264,6 +265,26 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       // absent when the opt-in is off => the strainer keeps reporting absent deep-market evidence exactly as before.
       deepMarketSource: marketResearch ? createDeepMarketSource(marketResearch.owner) : null,
   });
+  // CASE TRIGGER (Ticket 6, the differentiator; documented OPT-IN): SERPENT_CASE_TRIGGER=true closes the senses -> case
+  // seam. A fresh rumor2 social dossier for a declared research subject (the flag source David chose) enqueues a Socrates
+  // case; the case builder gathers the senses, Socrates reports, and the Judge later consumes the SEALED, verified case
+  // read-only through its own case-source (never this wire). Authority NONE: it only asks the read-only research service
+  // to build a case. Dormant until David funds the model — with the model budget $0 the built case is not LIVE_MODEL and
+  // the Judge refuses it — so this stays OFF by default. 60 s unref'd timer, fails dark.
+  let caseTriggerTimer = null;
+  if (process.env.SERPENT_CASE_TRIGGER === 'true' && marketResearch && marketResearchSubjects) {
+    try {
+      const { createCaseTrigger } = await import('./market-lab/case-trigger.js');
+      const { createDossierFlagSource } = await import('./market-lab/dossier-flag-source.js');
+      const socialSource = (coin, opts) => (rumor2Handle && typeof rumor2Handle.researchProjection === 'function' ? rumor2Handle.researchProjection(coin, opts) : null);
+      const flaggedCoinsSource = createDossierFlagSource({ socialSource, subjects: marketResearchSubjects, log: console.log });
+      const caseTrigger = createCaseTrigger({ service: marketResearch, subjects: marketResearchSubjects, flaggedCoinsSource, clock: () => Date.now(), log: console.log });
+      const runTrigger = () => { try { caseTrigger.tick(); } catch (err) { console.error(`CASE TRIGGER tick: ${err.message}`); } };
+      caseTriggerTimer = setInterval(runTrigger, 60_000); if (typeof caseTriggerTimer?.unref === 'function') caseTriggerTimer.unref();
+      void runTrigger();
+      console.log('CASE TRIGGER active (senses -> case; authority NONE; dormant until the model budget is funded): fresh dossiers enqueue Socrates cases');
+    } catch (err) { console.error(`CASE TRIGGER failed to start (dark; nothing else affected): ${err.message}`); caseTriggerTimer = null; }
+  }
   const { setCurrentSocialSource } = await import('./ui/server.js');
   setCurrentSocialSource(() => {
     const current = rumor2Handle?.currentSocial() ?? { authority: 'NONE', retention: 'RAM_ONLY_MAX_5_MINUTES', observations: [] };
@@ -278,6 +299,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     if (marketResearch) { try { await marketResearch.stop(); } catch (err) { console.error(`MARKET RESEARCH stop failed: ${err.message}`); } }
     if (learningHandle) { try { learningHandle.stop(); } catch (err) { console.error(`LEARN-1 stop failed: ${err.message}`); } }
     if (decisionOutcomeTimer) { try { clearInterval(decisionOutcomeTimer); } catch { /* timer already cleared */ } decisionOutcomeTimer = null; }
+    if (caseTriggerTimer) { try { clearInterval(caseTriggerTimer); } catch { /* timer already cleared */ } caseTriggerTimer = null; }
     // paper launch seam: components the paper launcher started stop cleanly BEFORE the process exits
     if (typeof globalThis.serpentPaperShutdown === 'function') { try { await globalThis.serpentPaperShutdown(); } catch (err) { console.error(`PAPER shutdown seam failed: ${err.message}`); } }
     // the spine stops LAST — collector additions in reverse, quota checkpoints closed, persistence stopped, lock
