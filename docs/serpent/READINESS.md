@@ -1,0 +1,105 @@
+# Serpent — paper-day readiness checklist
+
+For David. This is the short, plain list: the secret **NAMES** the publish needs (you set the values in Replit; the code
+never logs them), the gates that must be green before a paper day starts, and exactly what you click, in order. It never
+asks you for a secret's value here — only which NAMES to add. The full engineering detail lives in `docs/PAPER-RUNBOOK.md`;
+this page is the checklist.
+
+Real money is **off**, live orders are **off**, withdrawals are **off** — by construction, and the launcher forces those
+names on even if the environment says otherwise. Nothing below turns money or a paid service on by itself.
+
+---
+
+## 1. Secret NAMES to add in Replit (Secrets tab / environment)
+
+Add the **name**, paste your value. The code reads names, never prints values.
+
+### Required — the publish will not be `READY_FOR_PAPER` without these
+| NAME | What it is |
+|---|---|
+| `COBRA_PROFILE` | Set to `config/paper-runtime.json` — the one profile the runtime, CLI and cockpit read. |
+| `COBRA_DATA_DIR` | The writable data directory. In deployment this must be a **persistent mount** (App Storage / a volume), not the ephemeral container disk. |
+| `DATABASE_URL` | The PostgreSQL connection URL. This is the Judge's journal authority — paper needs it. |
+| `SERPENT_CONTROL_PASSWORD` | A long random password. Gates the cockpit KILL / CAGE / CLEAR controls (human only). Also verifies owner intent when the paper account is created. |
+| `SERPENT_HTTP_CONTACT` | A contact email/name. Required by the SEC / EDGAR user-agent law for the official RUMOR ears; the law is never bypassed. |
+
+### Durable bulk storage — so a republish never loses a day of capture (Ticket 5)
+A Replit publish wipes the container disk. These point the durable object store at Replit **App Storage** (which is
+Google-Cloud-Storage-backed) so tape / broad-Kraken / learning / survey streams survive a republish. Unset = the store is
+**DISABLED** (honest; bulk streams are simply not backed) — never a silent failure.
+| NAME | What it is |
+|---|---|
+| `SERPENT_OBJECT_STORE_PROVIDER` | Set to `GCS`. |
+| `SERPENT_OBJECT_STORE_BUCKET` | The App Storage bucket name. |
+| `SERPENT_OBJECT_STORE_GCS_SERVICE_ACCOUNT_JSON` | The service-account JSON for that bucket (the secret). Used only to sign; never logged. |
+| `SERPENT_OBJECT_STORE_PREFIX` | *(optional)* A key prefix inside the bucket, e.g. `serpent/bulk`. |
+
+Missing the bucket or the service-account NAME while the provider is `GCS` is reported as **MISCONFIGURED** (fail-closed),
+not a boot crash.
+
+### The explainer — "Talk to them" (TALK-TO-THEM ticket; report only, after the fact, never feeds the Judge)
+Set these when you want the question box on the serpent page live. All optional; the two dollar caps are **ceilings** —
+the day-to-day on/off is the two protected toggles on the serpent page (ASK, SOCRATES), which never need a publish.
+| NAME | What it is | Default if unset |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | The one provider secret for the LLM explainer (Anthropic API). | (unset ⇒ the explainer is dormant) |
+| `SERPENT_TALK_DAILY_USD` | Daily spend ceiling for the free-form question box. | `2` |
+| `SERPENT_SOCRATES_DAILY_USD` | Daily spend ceiling for Socrates cases (they spend from this second cap). | `5` |
+
+`0` or unset on either cap ⇒ that half stays **dormant**, fail-closed, with no code change needed to toggle it.
+
+### Optional widening (each only adds a sense; none turns paid/private on by itself)
+`SERPENT_OBJECT_STORE_*` above; `TALLY_API_KEY` (governance, off by default); `CLOUDFLARE_API_TOKEN`, `YOUTUBE_API_KEY`,
+provider keys (`COINGECKO_DEMO_API_KEY`, `FRED_API_KEY`, paid provider keys) — all optional, all reported present/absent
+by name in preflight, none flips its own budget/plan gate on.
+
+**Never set** a Kraken trading key. There is none in the paper profile. A Kraken L3 key, if ever added, is a dedicated
+DATA-ONLY key proven `SAFE_L3_DATA_KEY` before use — never an execution credential.
+
+---
+
+## 2. Gates that must be green before you start
+
+Run the read-only preflight (step 3 below). It prints sections **A–L** and a verdict. Paper is ready only when the verdict
+is **`READY_FOR_PAPER`**, which needs *both* core blocker groups clear:
+
+- **`CORE_CODE_BLOCKER`** (section A): the commit is recorded, no dirty protected files, policy digests match, the forced
+  authority names hold (`JUDGE_MODE=PAPER`, no private, no orders).
+- **`CORE_RUNTIME_BLOCKER`** (section B): `DATABASE_URL` reachable, the schema is current, the PAPER account is initialized
+  (step 3b), and the writer advisory lock is free (no other writer holding it).
+
+These are reported but **never block** a paper run (they only narrow the sense set): `EXTERNAL_OPTIONAL_SENSE_BLOCKER`,
+`PAID_SENSE_NOT_AUTHORIZED`, `DARK_RESEARCH_BLOCKER`. So a `BLOCKED_GEOGRAPHY` (Binance / Bybit), a `BLOCKED_BUDGET` (a paid
+provider with no attestation), or `MODEL_DISABLED_IN_POLICY` (Socrates until you fund it) is expected and fine — the
+market-driven setups qualify without a model.
+
+Quick sanity after launch (cockpit drawers): fresh market data in the tape, a **PAPER** Judge + adapter (never LIVE),
+durable journal updates, candidates showing readiness or an explicit refusal reason, Watch running, and the SENSES drawer
+free of `UNKNOWN` rows.
+
+---
+
+## 3. What you click, in order
+
+1. **Set the secret NAMES** from section 1 in Replit (at least the five Required, plus the object-store four for durability).
+2. **Preflight** (read-only, zero paid calls): run `npm run paper:preflight`. Read the verdict. If it is not
+   `READY_FOR_PAPER`, the blocker lines say exactly what is missing — fix and re-run. (Add `--json` for the machine report.)
+3. **Initialize the paper account** — once per database: run `node bin/judge.js init-paper --policy config/judge.paper.json`
+   with `JUDGE_OWNER_PASSWORD` set (verified against `SERPENT_CONTROL_PASSWORD`). Creates the USD 500 paper account. Skip on
+   later runs — the account and journal are preserved across restarts.
+4. **Launch**: press Replit **Run** (or the deployment command) — both use `npm run paper`. The profile is applied (the
+   forced authority names always win), the dark capture runner starts a few seconds later, then the proven `fly.js`
+   composition takes over.
+5. **Watch the cockpit**: open the JUDGE and SENSES drawers; confirm the sanity list at the end of section 2. A candidate
+   needs 61 accepted closed one-minute bars and 21 minutes of continuous trade coverage before it can act — warmup is
+   per-coin and 21 minutes is not a promise of a trade.
+6. **To stop**: send SIGINT/SIGTERM (Replit Stop). The tape closes, the Judge and research service stop, the shutdown seam
+   seals any in-flight capture segment, and the process exits cleanly. The account and journal persist.
+
+Record for the run: the deployment commit, the policy digest, and the UTC paper-run start time.
+
+---
+
+_This checklist is derived from `paper/preflight.js` / `paper/readiness.js` (the real gates), `.env.paper.example` (the
+names), `persistence/object-store.js` (Ticket 5 durability), and the TALK-TO-THEM ticket (the explainer names). It states
+NAMES only; it never records a secret value._
