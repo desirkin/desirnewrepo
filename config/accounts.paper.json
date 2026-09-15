@@ -1,0 +1,11 @@
+{
+  "accountsVersion": "paper-accounts-1",
+  "quote": "USD",
+  "closedSet": true,
+  "note": "The three paper accounts (closed set). Identical USD 500 paper balances now; real Kraken keys per account come later, declared by ENV NAME only (never a value). Each account is isolated by its own data dir (one paper process per account); the cockpit selects which account it VIEWS.",
+  "accounts": [
+    { "id": "paper-david-usd500", "displayName": "David", "initialCapital": "500", "compounding": "NONE", "dataDirSegment": "david", "keyEnv": null, "secretEnv": null },
+    { "id": "paper-cerulean-usd500", "displayName": "Cerulean", "initialCapital": "500", "compounding": "NONE", "dataDirSegment": "cerulean", "keyEnv": null, "secretEnv": null },
+    { "id": "paper-cody-usd500", "displayName": "Cody", "initialCapital": "500", "compounding": "NONE", "dataDirSegment": "cody", "keyEnv": null, "secretEnv": null }
+  ]
+}
