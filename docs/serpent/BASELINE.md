@@ -22,7 +22,8 @@ Branch `serpent/baseline` on `desirkin/desirnewrepo`. GitHub tip = this branch (
 - `f7f65b8` — docs: David's decided doctrine (learning target, exit law, sizing, cadence, paper realism, venue, Strategy 6 IFR + Strategy 7 SDR) added to PHILOSOPHY.md.
 - `179c127` — Ticket 3 step 1: the decision yardstick — pure 5m bite + 15m continuation log-return scorer (labels.js discipline). `test/decision-yardstick.test.js`.
 - `e060db5` — Ticket 3 step 2: the dormant decision-outcome recorder + durable idempotent store; matures DECISION_RECORDED via the journal's public page() (no frozen change), sources injected. `test/decision-outcome-recorder.test.js`.
-- (this commit) — Ticket 3 step 3: the broad-Kraken 1m series source + always-on PAPER wiring in fly.js (the data clock records every PAPER decision, dormant). `test/broad-kraken-series.test.js`.
+- `7e79eef` — Ticket 3 step 3: the broad-Kraken 1m series source + always-on PAPER wiring in fly.js (the data clock records every PAPER decision, dormant). `test/broad-kraken-series.test.js`.
+- (this commit) — Ticket 4: the live exit law is no-target (thesis-invalidation exits, timers as backstops, protective stop kept); the D4 experiment flipped (REF = no-target, D4 = with-target counterfactual); `D4_TRAIL_CONTINUATION_*` → `D4_PLANNED_TARGET_*`. Frozen digests re-pinned (judge/*.js, watch/watch.js, all(48); execution/*.js unchanged); audit §4.8. `test/judge-watch.test.js` W06, `test/judge-experiment-replay.test.js` S01.
 
 ## Test recipe
 ```
