@@ -9,7 +9,7 @@
   "quote": "USD",
   "account": { "accountId": "paper-starting-styles-usd500", "initialCapital": "500", "compounding": "NONE" },
   "limits": {
-    "maxSimultaneousAssetPositions": 3,
+    "maxSimultaneousAssetPositions": 1,
     "maxModelledRiskPerPositionFraction": 0.01,
     "maxAggregateModelledRiskFraction": 0.02,
     "maxCorrelatedClusterModelledRiskFraction": 0.015,
