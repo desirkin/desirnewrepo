@@ -650,6 +650,7 @@
       </svg>
     </button>
   </div>
+  <div id="accountsBar" class="dbody" style="padding-bottom:0"></div>
   <div id="judgeBody" class="dbody"></div>
 </div>
 <div id="senses" role="dialog" aria-modal="true" aria-label="Senses">
@@ -1483,7 +1484,26 @@ function renderJudge(d) {
     <div class="rmeta">ARMING is a separate authenticated action (${esc(d.arm?.endpoint)}): ${esc((d.arm?.requires ?? []).join(', '))}. Never by ${esc((d.arm?.never ?? []).join(', '))}. Approvals on file: ${esc((d.approvals ?? []).length)}.</div>`;
 }
 async function refreshJudge() { let res; try { res = await fetch('/api/judge', { cache: 'no-store' }); } catch (err) { console.error('JUDGE fetch failed:', err); judgeError('SHELL LINK LOST — server unreachable'); return; } if (!res.ok) { judgeError(`JUDGE ERROR — HTTP ${res.status}`); return; } try { renderJudge(await res.json()); } catch (err) { console.error('JUDGE render error:', err); judgeError('JUDGE RENDER ERROR — see console'); } }
-$('#btnJudge').addEventListener('click', () => { showJudge(); refreshJudge(); });
+// THREE ACCOUNTS (read-only): a dropdown that switches which of the closed set (David / Cerulean / Cody) the page shows,
+// each read from its own data dir with the R16 binding preserved per account. Never drives posture; the serpent is untouched.
+let accountsCache = null;
+function renderAccountReadout(id) {
+  const el = $('#acctReadout'); if (!el) return;
+  const a = (accountsCache?.accounts ?? []).find((x) => x.id === id); if (!a) { el.innerHTML = ''; return; }
+  const p = a.projection;
+  if (a.state === 'NOT_INITIALIZED' || !p) { el.innerHTML = `<div class="jrow"><span>${esc(a.displayName)}</span><span>NOT INITIALIZED — starts at $${esc(a.initialCapital)} when its paper process is published</span></div>`; return; }
+  if (p.state === 'REJECTED' || p.state === 'UNREADABLE') { el.innerHTML = `<div class="jrow"><span>${esc(a.displayName)}</span><span>${esc(p.state)}${p.reason ? ' · ' + esc(p.reason) : ''} (a foreign or unreadable projection is never trusted)</span></div>`; return; }
+  el.innerHTML = `<div class="jrow"><span>${esc(a.displayName)} · ${esc(p.accountId)}</span><span>${esc(p.state)} · ${esc(p.mode ?? p.runMode)} · positions ${esc(p.openPositions)} · pending ${esc(p.pendingEntries)}${p.exposure ? ' · EXPOSED' : ''}</span></div>`;
+}
+function renderAccounts(d) {
+  accountsCache = d; const bar = $('#accountsBar'); if (!bar) return;
+  if (!d || !d.enabled) { bar.innerHTML = ''; return; }
+  const opts = d.accounts.map((a) => `<option value="${esc(a.id)}">${esc(a.displayName)} · ${esc(a.state)}</option>`).join('');
+  bar.innerHTML = `<div class="rmeta">ACCOUNT VIEW (read-only · authority NONE) <select id="acctSelect" aria-label="account">${opts}</select></div><div id="acctReadout"></div>`;
+  const sel = $('#acctSelect'); if (sel) { sel.addEventListener('change', () => renderAccountReadout(sel.value)); renderAccountReadout(d.accounts[0]?.id); }
+}
+async function refreshAccounts() { try { const r = await fetch('/api/accounts', { cache: 'no-store' }); if (!r.ok) return; renderAccounts(await r.json()); } catch (err) { console.error('ACCOUNTS fetch failed:', err); } }
+$('#btnJudge').addEventListener('click', () => { showJudge(); refreshJudge(); refreshAccounts(); });
 // SERPENT PAPER — SENSES: what is actually ON. Grouped rows from /api/sensors (state, last success, age, coverage, blocker, authority).
 function showSenses() { armDrawerHistory(); $('#senses').classList.add('open'); $('#backdrop').hidden = false; }
 const sState = (s) => (s === 'ACTIVE' || s === 'DARK_CAPTURE_OPERATIONAL' ? 'on' : s === 'ACTIVE_DEGRADED' || s === 'DARK_CAPTURE_DEGRADED' || s === 'NOT_OBSERVED' || s === 'KEY_PRESENT_UNPROVEN' ? 'deg' : s === 'DISABLED_BY_PAPER_POLICY' || s === 'DARK_CAPTURE_DISABLED_BY_POLICY' ? 'off' : 'blk');

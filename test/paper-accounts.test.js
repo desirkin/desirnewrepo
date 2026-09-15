@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { loadPaperAccounts, PaperAccountsError, PAPER_ACCOUNTS_VERSION } from '../lib/accounts.js';
+import { loadPaperAccounts, readPaperAccounts, accountDataDir, accountProjectionFile, PaperAccountsError, PAPER_ACCOUNTS_VERSION } from '../lib/accounts.js';
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const shipped = () => JSON.parse(readFileSync(path.join(REPO, 'config/accounts.paper.json'), 'utf8'));
@@ -37,4 +37,15 @@ test('PA-3. a later key binding by ENV NAME (both set) is accepted — the shape
   const bound = { ...base, accounts: base.accounts.map((a, i) => (i === 0 ? { ...a, keyEnv: 'KRAKEN_DAVID_KEY', secretEnv: 'KRAKEN_DAVID_SECRET' } : a)) };
   const set = loadPaperAccounts(bound);
   assert.equal(set.accounts[0].keyEnv, 'KRAKEN_DAVID_KEY'); assert.equal(set.accounts[0].secretEnv, 'KRAKEN_DAVID_SECRET');
+});
+
+test('PA-4. readPaperAccounts loads the shipped set; each account has an isolated data dir + projection path', () => {
+  const set = readPaperAccounts();
+  assert.ok(set); assert.equal(set.accounts.length, 3);
+  const dirs = set.accounts.map((a) => accountDataDir(a.dataDirSegment, '/data'));
+  assert.deepEqual(dirs, ['/data/accounts/david', '/data/accounts/cerulean', '/data/accounts/cody']);
+  assert.equal(accountProjectionFile('david', '/data'), '/data/accounts/david/execution/projection.json');
+  assert.equal(new Set(dirs).size, 3, 'no two accounts share a data dir');
+  assert.throws(() => accountDataDir('../escape', '/data'), PaperAccountsError);
+  assert.equal(readPaperAccounts('/nonexistent/accounts.json'), null, 'fail-closed to null when absent');
 });

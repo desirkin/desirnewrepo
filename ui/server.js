@@ -34,6 +34,7 @@ import { createChatDispatcher } from '../paper/companion-chat.js';
 import { readDataOnlyRuntimeStatus, dataOnlyPublicStatus, dataOnlySensorSnapshot, dataOnlyMarketView } from '../lib/data-only-status.js';
 import { readBroadKrakenLatest } from '../market-lab/broad-kraken.js';
 import { assembleHuntTrail } from '../lib/hunt-trail.js';
+import { readPaperAccounts, accountProjectionFile } from '../lib/accounts.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -466,6 +467,24 @@ function decisionOutcomesForCoin(coin) {
   }
   return out;
 }
+// THREE ACCOUNTS (read-only): the closed set (David / Cerulean / Cody), each read from its OWN data dir, R16 preserved
+// PER ACCOUNT — a projection is shown for an account only when its own accountId binds (a foreign file is REJECTED,
+// never trusted). Authority NONE: this view never feeds the posture machine or grants permission; the dropdown just
+// switches which account's read-only projection the page shows. An account with no projection yet reads NOT_INITIALIZED.
+function paperAccountsView() {
+  const set = readPaperAccounts();
+  if (!set) return { enabled: false, reason: 'ACCOUNTS_CONFIG_ABSENT', accounts: [], authority: 'NONE', purpose: 'READ_ONLY_MULTI_ACCOUNT_VIEW' };
+  const accounts = set.accounts.map((a) => {
+    let projection = null;
+    try { projection = readExecutionProjection({ file: accountProjectionFile(a.dataDirSegment), expected: { accountId: a.id } }); } catch { projection = null; }
+    return {
+      id: a.id, displayName: a.displayName, initialCapital: a.initialCapital,
+      state: projection === null ? 'NOT_INITIALIZED' : (projection.state ?? 'UNKNOWN'),
+      projection,
+    };
+  });
+  return { enabled: true, accountsVersion: set.accountsVersion, quote: set.quote, closedSet: true, accounts, authority: 'NONE', purpose: 'READ_ONLY_MULTI_ACCOUNT_VIEW' };
+}
 function huntTrail(coin) {
   const summary = marketResearchSummary();
   const cases = (summary.cases ?? []).filter((c) => c.canonicalCoin === coin).map((c) => {
@@ -712,6 +731,9 @@ const server = http.createServer((req, res) => {
       const dir = url.searchParams.get('dir') ?? '';
       const c = marketResearchCase(dir);
       if (!c) json(res, 404, { ok: false, error: 'no such sealed case' }); else json(res, 200, c);
+    } else if (url.pathname === '/api/accounts') {
+      // THREE ACCOUNTS read-only view: the closed set + each account's own projection (R16 per account, authority NONE)
+      json(res, 200, paperAccountsView());
     } else if (url.pathname === '/api/hunt-trail') {
       // HUNT-TRAIL read-only replay: how a coin came in -> what Socrates found -> what the Judge did -> what happened.
       const coin = (url.searchParams.get('coin') ?? '').toUpperCase();

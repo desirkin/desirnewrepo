@@ -109,6 +109,17 @@ test('19b. dynamic APIs all answer no-store (nothing offline-cacheable)', async 
   }
 });
 
+test('THREE-ACCOUNTS. /api/accounts serves the read-only closed set (authority NONE); each account carries its own state', async () => {
+  const r = await fetch(BASE + '/api/accounts');
+  assert.equal(r.status, 200); assert.equal(r.headers.get('cache-control'), 'no-store');
+  const d = await r.json();
+  assert.equal(d.enabled, true); assert.equal(d.authority, 'NONE'); assert.equal(d.closedSet, true);
+  assert.deepEqual(d.accounts.map((a) => a.displayName), ['David', 'Cerulean', 'Cody']);
+  for (const a of d.accounts) { assert.equal(a.initialCapital, '500'); assert.ok(typeof a.state === 'string'); }
+  // no paper account is initialized in this display-mode harness -> NOT_INITIALIZED, never a fabricated balance
+  assert.ok(d.accounts.every((a) => a.state === 'NOT_INITIALIZED'));
+});
+
 test('HUNT-TRAIL. /api/hunt-trail?coin= serves a read-only trail (authority NONE); a missing coin is 400', async () => {
   const r = await fetch(BASE + '/api/hunt-trail?coin=BTC');
   assert.equal(r.status, 200); assert.equal(r.headers.get('cache-control'), 'no-store');
