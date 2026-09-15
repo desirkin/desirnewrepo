@@ -43,10 +43,24 @@ NAME only and never enters source, logs, Memory, control history, or any API res
 A Replit publish wipes the container disk. These point the durable object store at Replit **App Storage** (which is
 Google-Cloud-Storage-backed) so tape / broad-Kraken / learning / survey streams survive a republish. Unset = the store is
 **DISABLED** (honest; bulk streams are simply not backed) — never a silent failure.
+
+**On Replit, use `REPLIT` — it needs no service-account JSON.** Replit App Storage does not expose a service-account key;
+credentials come from the Replit sidecar (`127.0.0.1:1106`), which the client uses to obtain and refresh a Google token
+automatically. This is the recommended mode on Replit.
+| NAME | What it is |
+|---|---|
+| `SERPENT_OBJECT_STORE_PROVIDER` | Set to `REPLIT`. |
+| `SERPENT_OBJECT_STORE_BUCKET` | *(optional)* The App Storage bucket ID. If unset, the sidecar's default bucket is used. |
+| `SERPENT_OBJECT_STORE_PREFIX` | *(optional)* A key prefix inside the bucket, e.g. `serpent/bulk`. |
+
+The `REPLIT` provider needs **no** credential NAME — the sidecar supplies it. A sidecar that is unreachable or refuses is
+reported as **MISCONFIGURED** (fail-closed; the uploader and restore-on-boot stay dark), not a boot crash.
+
+**`GCS` mode (non-Replit hosts / your own GCS bucket).** Only here is the service-account JSON used.
 | NAME | What it is |
 |---|---|
 | `SERPENT_OBJECT_STORE_PROVIDER` | Set to `GCS`. |
-| `SERPENT_OBJECT_STORE_BUCKET` | The App Storage bucket name. |
+| `SERPENT_OBJECT_STORE_BUCKET` | The GCS bucket name (required in this mode). |
 | `SERPENT_OBJECT_STORE_GCS_SERVICE_ACCOUNT_JSON` | The service-account JSON for that bucket (the secret). Used only to sign; never logged. |
 | `SERPENT_OBJECT_STORE_PREFIX` | *(optional)* A key prefix inside the bucket, e.g. `serpent/bulk`. |
 

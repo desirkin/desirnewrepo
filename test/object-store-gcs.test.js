@@ -66,3 +66,38 @@ test('GCS-E2E-1. uploader mirrors backed files into GCS; a fresh store on the sa
     assert.equal(again.restored, 0); assert.equal(again.state, 'OK');
   } finally { rmSync(data, { recursive: true, force: true }); }
 });
+
+// PERSIST-1 step 5 — the REPLIT provider wiring: same GCS JSON API and backend, a sidecar-authed client (injected here as
+// an in-memory double), bucket from the env NAME or the sidecar default, no service-account NAME required.
+function memReplitClient(bucket = 'replit-bucket', store = new Map()) {
+  return {
+    provider: 'REPLIT', bucket, _store: store,
+    async putObject(name, bytes) { store.set(name, Buffer.from(bytes)); return { key: name, bytes: bytes.byteLength }; },
+    async getObject(name) { return store.has(name) ? Buffer.from(store.get(name)) : null; },
+    async headObject(name) { return store.has(name) ? { key: name, bytes: store.get(name).byteLength } : null; },
+    async listObjects(prefix = '') { return [...store.entries()].filter(([k]) => k.startsWith(prefix)).map(([k, v]) => ({ key: k, bytes: v.byteLength })); },
+    async deleteObject(name) { return store.delete(name); },
+    describe: () => ({ provider: 'REPLIT', bucket }),
+  };
+}
+
+test('REP-BE-1. REPLIT is CONFIGURED with no service-account NAME (sidecar creds); the backend is ACTIVE and labels REPLIT; put/get/list round-trip under the prefix', async () => {
+  const client = memReplitClient();
+  const store = await openObjectStore({ env: { [OBJECT_STORE_ENV.provider]: 'REPLIT', [OBJECT_STORE_ENV.bucket]: 'replit-bucket', [OBJECT_STORE_ENV.prefix]: 'serpent/bulk' }, replitClient: client });
+  assert.equal(store.state, 'ACTIVE'); assert.equal(store.adapter.provider, 'REPLIT'); assert.equal(store.describe().provider, 'REPLIT');
+  const put = await store.adapter.put('tape/a.jsonl', Buffer.from('hi')); assert.equal(put.bytes, 2); assert.equal(put.sha256.length, 64);
+  assert.ok(client._store.has('serpent/bulk/tape/a.jsonl'), 'the prefix is applied in the durable bucket');
+  assert.equal((await store.adapter.get('tape/a.jsonl')).toString(), 'hi');
+  assert.deepEqual(await store.adapter.list('tape'), [{ key: 'tape/a.jsonl', bytes: 2 }]);
+});
+
+test('REP-BE-2. REPLIT needs no bucket NAME: with SERPENT_OBJECT_STORE_BUCKET unset the config is still CONFIGURED (bucket null, resolved from the sidecar at open); an injected client supplies the bucket', async () => {
+  const { resolveObjectStoreConfig } = await import('../persistence/object-store.js');
+  const noBucket = resolveObjectStoreConfig({ [OBJECT_STORE_ENV.provider]: 'REPLIT' });
+  assert.equal(noBucket.state, 'CONFIGURED'); assert.equal(noBucket.bucket, null); assert.deepEqual(noBucket.credentials, {});
+  const withBucket = resolveObjectStoreConfig({ [OBJECT_STORE_ENV.provider]: 'REPLIT', [OBJECT_STORE_ENV.bucket]: 'b' });
+  assert.equal(withBucket.state, 'CONFIGURED'); assert.equal(withBucket.bucket, 'b');
+  // with no env bucket, the open path takes the injected client's bucket (in production, the sidecar default-bucket)
+  const store = await openObjectStore({ env: { [OBJECT_STORE_ENV.provider]: 'REPLIT' }, replitClient: memReplitClient('app-storage-default') });
+  assert.equal(store.state, 'ACTIVE'); assert.equal(store.bucket, 'app-storage-default'); assert.equal(store.describe().bucket, 'app-storage-default');
+});

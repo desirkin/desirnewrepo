@@ -13,7 +13,7 @@ import { constants } from 'node:fs';
 import { mkdir, open, rename, readdir, stat, lstat, unlink, rm } from 'node:fs/promises';
 
 export const OBJECT_STORE_VERSION = 'serpent-object-store-1';
-export const OBJECT_STORE_PROVIDERS = Object.freeze(['NONE', 'FILESYSTEM', 'S3', 'GCS']);
+export const OBJECT_STORE_PROVIDERS = Object.freeze(['NONE', 'FILESYSTEM', 'S3', 'GCS', 'REPLIT']);
 // A single object is bulk but still bounded: a stream segment or a captured file, never an unbounded archive in one put.
 export const MAX_OBJECT_BYTES = 256 * 1024 * 1024;
 
@@ -89,6 +89,10 @@ export function resolveObjectStoreConfig(env = process.env) {
   const credentials = Object.fromEntries(names.map((n) => [n, typeof env[n] === 'string' && env[n].length > 0]));
   const bucket = typeof env[OBJECT_STORE_ENV.bucket] === 'string' ? env[OBJECT_STORE_ENV.bucket].trim() : '';
   const missing = [];
+  // REPLIT (App Storage) needs NO service-account NAME — credentials come from the sidecar — and the bucket is OPTIONAL
+  // here: an unset SERPENT_OBJECT_STORE_BUCKET is resolved from the sidecar default-bucket endpoint at open time. So REPLIT
+  // is CONFIGURED with whatever bucket the env names (null => resolve at boot); a sidecar failure surfaces at open, not here.
+  if (provider === 'REPLIT') return { ...base, state: 'CONFIGURED', credentials: {}, bucket: bucket || null };
   if (!bucket) missing.push(OBJECT_STORE_ENV.bucket);
   for (const n of names) if (!credentials[n]) missing.push(n);
   if (provider === 'GCS') {
@@ -197,8 +201,9 @@ function createFilesystemBackend({ dir, prefix, log }) {
 function createGcsBackend({ client, prefix, log }) {
   const keyPrefix = prefix ? `${prefix}/` : '';
   const fullName = (key) => { assertKey(key); return `${keyPrefix}${key}`; };
+  const label = client.provider === 'REPLIT' ? 'REPLIT' : 'GCS'; // same GCS JSON API; the label tracks the auth mode
   return Object.freeze({
-    provider: 'GCS',
+    provider: label,
     async put(key, bytes, { contentType = null } = {}) {
       if (!Buffer.isBuffer(bytes)) throw new ObjectStoreError('OBJECT_PAYLOAD_INVALID', 'put requires a Buffer');
       if (bytes.byteLength > MAX_OBJECT_BYTES) throw new ObjectStoreError('OBJECT_TOO_LARGE', `${bytes.byteLength} bytes exceeds the ${MAX_OBJECT_BYTES} object cap`);
@@ -234,7 +239,7 @@ function createGcsBackend({ client, prefix, log }) {
       try { return (await client.deleteObject(fullName(key))) === true; }
       catch (error) { throw new ObjectStoreError('OBJECT_DELETE_FAILED', error?.code ?? error?.message ?? error); }
     },
-    describe: () => ({ provider: 'GCS', bucket: client.bucket ?? null, prefix: prefix ?? null }),
+    describe: () => ({ provider: label, bucket: client.bucket ?? null, prefix: prefix ?? null }),
     log,
   });
 }
@@ -245,7 +250,7 @@ function createGcsBackend({ client, prefix, log }) {
 // MISCONFIGURED gate, never a thrown boot failure. FILESYSTEM ensures its root exists; GCS builds its client from the
 // service-account NAME (or accepts an injected `gcsClient` double in tests) — a bad credential is a MISCONFIGURED gate,
 // never a boot failure and never a logged value. S3 returns its NOT_COMMISSIONED gate unchanged.
-export async function openObjectStore({ env = process.env, log = () => {}, gcsClient = null } = {}) {
+export async function openObjectStore({ env = process.env, log = () => {}, gcsClient = null, replitClient = null } = {}) {
   const config = resolveObjectStoreConfig(env);
   if (config.state !== 'CONFIGURED') {
     if (config.state === 'DISABLED') log(`OBJECT STORE disabled: ${OBJECT_STORE_ENV.provider} unset (bulk streams not durably backed)`);
@@ -266,6 +271,24 @@ export async function openObjectStore({ env = process.env, log = () => {}, gcsCl
     const adapter = createGcsBackend({ client, prefix: config.prefix, log });
     log(`OBJECT STORE active: GCS bucket ${config.bucket}${config.prefix ? ` prefix ${config.prefix}` : ''}`);
     return Object.freeze({ ...config, state: 'ACTIVE', adapter, describe: adapter.describe });
+  }
+  if (config.provider === 'REPLIT') {
+    let client = replitClient;
+    let bucket = config.bucket;
+    try {
+      const { createReplitObjectClient, fetchReplitDefaultBucket } = await import('./gcs-client.js');
+      if (!client) {
+        if (!bucket) bucket = await fetchReplitDefaultBucket(globalThis.fetch); // sidecar default-bucket when the NAME is unset
+        client = createReplitObjectClient({ bucket, fetchImpl: globalThis.fetch, log });
+      } else if (!bucket) bucket = client.bucket;
+    } catch (error) {
+      // a sidecar that is unreachable / refuses is a MISCONFIGURED gate (dark uploader + restore), never a boot crash loop
+      log(`OBJECT STORE misconfigured: REPLIT client could not be built (${bounded(error?.code ?? error?.message ?? error)})`);
+      return Object.freeze({ ...config, state: 'MISCONFIGURED', adapter: null, reason: `REPLIT client could not be built: ${bounded(error?.code ?? error?.message ?? error)}`, describe: () => ({ provider: 'REPLIT', state: 'MISCONFIGURED' }) });
+    }
+    const adapter = createGcsBackend({ client, prefix: config.prefix, log });
+    log(`OBJECT STORE active: REPLIT bucket ${bucket}${config.prefix ? ` prefix ${config.prefix}` : ''}`);
+    return Object.freeze({ ...config, state: 'ACTIVE', bucket, adapter, describe: adapter.describe });
   }
   try {
     await mkdir(config.prefix ? path.join(config.dir, ...config.prefix.split('/')) : config.dir, { recursive: true });
