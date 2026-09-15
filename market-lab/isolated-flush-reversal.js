@@ -9,8 +9,9 @@
 // shadow record. It is SHADOW_ONLY / authority NONE / purpose RESEARCH: it can never reach an order, the Judge, Watch,
 // execution, a provider or a model — it only records where the strategy WOULD have fired, for episode / refusal /
 // counterfactual study, exactly like the forward-shadow lane. Pure and deterministic (no clock, I/O, or randomness),
-// imports nothing. Live sense wiring (a Binance book provider does NOT exist yet — see docs) comes later, behind the
-// paper publish; nothing here is wired into the runtime.
+// imports nothing. The live senses now exist (market-lab/providers/binance.js public book + coinbase + kraken-spot) and
+// market-lab/cross-venue-episode.js assembles this episode from them; the shadow record is written by
+// market-lab/cross-venue-shadow.js. Live composition into the runtime loop still waits behind the paper publish.
 export const IFR_DETECTOR_VERSION = 'ifr-shadow-1';
 export const IFR_FAMILY = 'CROSS_VENUE_DISLOCATION';
 export const IFR_SETUP = 'ISOLATED_FLUSH_REVERSAL';

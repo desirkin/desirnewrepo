@@ -1,6 +1,6 @@
 {
  "inventoryVersion": "serpent-sensor-inventory-1",
- "generatedTs": 1789409562550,
+ "generatedTs": 1789478321361,
  "profile": "paper",
  "policyFile": "config/market-research.paper.json",
  "classifications": [
@@ -16,7 +16,7 @@
   "OPERATIONAL_PUBLIC": 36,
   "OPERATIONAL_CREDENTIAL_GATED": 13,
   "IMPLEMENTED_NOT_LIVE_SMOKED": 2,
-  "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 10,
+  "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 11,
   "FOUNDATION_ONLY": 1,
   "DEPRECATED": 0,
   "NOT_PRESENT": 4
@@ -999,6 +999,29 @@
    "blockerPolicy": "PAID_GATE",
    "readinessBlocker": "CREDENTIAL_MISSING + BLOCKED_BUDGET",
    "smokeEvidence": "L02: BLOCKED"
+  },
+  {
+   "id": "BINANCE_SPOT",
+   "group": "MARKET_RESEARCH",
+   "family": "Binance public spot (read-only reference book / trades for Strategy 6)",
+   "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
+   "module": "market-lab/providers/binance.js",
+   "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+   "enable": "policy providers.BINANCE_SPOT.enabled",
+   "credentialEnv": [],
+   "paid": false,
+   "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+   "retentionTermsGate": "hosts api.binance.com, stream.binance.com",
+   "liveTransport": true,
+   "durableTruth": "sealed CAPTURE bundles + accounting journal",
+   "pointInTimeContract": "observation envelope (sourceEventTs / receivedTs / knownAtTs / revision)",
+   "replay": "REPLAY_AS_OF over sealed bundles",
+   "decisionAuthority": "EVIDENCE_ONLY (decision families)",
+   "paperAuthority": "EVIDENCE_ONLY",
+   "paperDesiredState": "OFF",
+   "blockerPolicy": "DEGRADE",
+   "readinessBlocker": "BLOCKED_GEOGRAPHY",
+   "smokeEvidence": "read-only reference sense (Strategy 6). NOT_PROBED live from this build environment (geographic restrictions apply to Binance; a 451/403 is ACCESS_BLOCKED, never evaded); offline scripted-WS coverage in test/binance-provider.test.js; docs/serpent/PHILOSOPHY.md §Strategy 6"
   },
   {
    "id": "KRAKEN_CHARTS_DARK",

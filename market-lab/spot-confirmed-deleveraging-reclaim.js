@@ -8,8 +8,10 @@
 // derives OI contraction from repeated snapshots, tags the liquidations, walks each venue's book for the size-supported
 // bid, and computes the perp discount from mark vs index), it decides FIRE / REFUSE-with-reason and returns a shadow
 // record marked STORM_PREY_SMALLEST. Authority NONE, purpose SHADOW_ONLY_RESEARCH: never an order / the Judge / Watch /
-// execution / a provider / a model. Pure, deterministic, imports nothing. Live wiring is BLOCKED today — there is no
-// Binance book provider (the third spot venue) and no Kraken-Futures liquidation stream sense — so nothing is wired.
+// execution / a provider / a model. Pure, deterministic, imports nothing. The two senses this needed now exist
+// (market-lab/providers/binance.js — the third spot venue — and market-lab/providers/kraken-futures-stream.js — the
+// public liquidation-tagged trade + native-unit OI stream); market-lab/cross-venue-episode.js assembles this episode from
+// them and market-lab/cross-venue-shadow.js records the shadow verdict. Live composition still waits behind the paper publish.
 export const SDR_DETECTOR_VERSION = 'sdr-shadow-1';
 export const SDR_FAMILY = 'DERIVATIVE_STATE_RECLAIM';
 export const SDR_SETUP = 'SPOT_CONFIRMED_DELEVERAGING_RECLAIM';

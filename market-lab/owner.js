@@ -40,6 +40,7 @@ import { createFredClient } from './providers/fred.js';
 import { createTwelveDataClient, TWELVEDATA_BAR_REFRESH_MS } from './providers/twelvedata.js';
 import { createSettledProjection } from './providers/settled.js';
 import { createTokenomistClient } from './providers/tokenomist.js';
+import { createBinanceClient } from './providers/binance.js';
 import { ENDPOINTS } from './registry.js';
 import { DAY_MS, HOUR_MS } from './time.js';
 
@@ -77,7 +78,7 @@ export function spotRestCallPlan({ subjectCount, includeCharts = true, includeFl
   const row = (charts, flow) => ({ callsPerDay: catalogStartsPerDay + charts + flow, callsPerMonth: (catalogStartsPerDay + charts + flow) * daysInMonth, catalogStartsPerDay, chartCallsPerDay: charts, flowCallsPerDay: flow, daysInMonth });
   return deepFreeze({ KRAKEN_SPOT: row(krakenCharts, krakenFlow), COINBASE_SPOT: row(coinbaseCharts, coinbaseFlow) });
 }
-const FACTORIES = { KRAKEN_SPOT: createKrakenSpotClient, COINBASE_SPOT: createCoinbaseClient, KRAKEN_DERIVATIVES: createKrakenDerivativesClient, DERIBIT: createDeribitClient, BYBIT: createBybitClient, COINGECKO: createCoinGeckoClient, GECKOTERMINAL: createGeckoTerminalClient, DEFILLAMA: createDefiLlamaClient, COINGLASS: createCoinGlassClient, CRYPTOQUANT: createCryptoQuantClient, SANTIMENT: createSantimentClient, COINMETRICS: createCoinMetricsClient, FRED: createFredClient, TWELVEDATA: createTwelveDataClient, TOKENOMIST: createTokenomistClient };
+const FACTORIES = { KRAKEN_SPOT: createKrakenSpotClient, COINBASE_SPOT: createCoinbaseClient, KRAKEN_DERIVATIVES: createKrakenDerivativesClient, DERIBIT: createDeribitClient, BYBIT: createBybitClient, COINGECKO: createCoinGeckoClient, GECKOTERMINAL: createGeckoTerminalClient, DEFILLAMA: createDefiLlamaClient, COINGLASS: createCoinGlassClient, CRYPTOQUANT: createCryptoQuantClient, SANTIMENT: createSantimentClient, COINMETRICS: createCoinMetricsClient, FRED: createFredClient, TWELVEDATA: createTwelveDataClient, TOKENOMIST: createTokenomistClient, BINANCE_SPOT: createBinanceClient };
 export const DEFAULT_SWEEP_FAMILIES = Object.freeze(['SPOT_PRICE_CHART', 'DERIVATIVES_FUNDING_OI', 'OPTIONS_TERM_SKEW', 'SUPPLY_UNLOCKS', 'DEX_DEFI', 'ONCHAIN_ENTITY_FLOW', 'NETWORK_ACTIVITY', 'STABLECOIN_LIQUIDITY', 'ETF_FLOWS', 'MACRO_RELEASES', 'CROSS_ASSET', 'LIQUIDATIONS', 'OFFICIAL_SOCIAL_EVENTS', 'INFRASTRUCTURE_STATUS', 'CROSS_VENUE']);
 // bars of history requested per interval (minutes -> bars): enough for every §7 indicator window (SMA/Bollinger 20, RSI 14,
 // prior-day/week ranges) without pulling a provider's whole 720-bar tail on every sweep

@@ -193,7 +193,7 @@ export const ALL_FAMILIES = Object.freeze([...FAMILIES, ...DARK_FAMILIES]);
 export const DARK_FAMILY_LAW = 'MARKET-EDGE-KRAKEN-1: dark families carry no trading, Judge or Socrates authority; they never enter Judge intake / features, Socrates broker requests, decision evidence, readiness, thresholds, execution, the Watch or the paper / live adapters';
 export const isDarkFamily = (f) => DARK_FAMILIES.includes(f);
 export const isDarkKind = (k) => DARK_PAYLOAD_KINDS.includes(k);
-export const PROVIDER_IDS = Object.freeze(['KRAKEN_SPOT', 'COINBASE_SPOT', 'KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGECKO', 'GECKOTERMINAL', 'DEFILLAMA', 'COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'COINMETRICS', 'FRED', 'TWELVEDATA', 'SETTLED_RECORDS', 'TOKENOMIST']);
+export const PROVIDER_IDS = Object.freeze(['KRAKEN_SPOT', 'COINBASE_SPOT', 'KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGECKO', 'GECKOTERMINAL', 'DEFILLAMA', 'COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'COINMETRICS', 'FRED', 'TWELVEDATA', 'SETTLED_RECORDS', 'TOKENOMIST', 'BINANCE_SPOT']);
 export const SUBJECT_KINDS = Object.freeze(['ASSET', 'MARKET', 'TOKEN', 'DERIVATIVE', 'SERIES', 'POOL', 'PROTOCOL', 'PROVIDER']);
 export const MARKET_TYPES = Object.freeze(['SPOT', 'PERPETUAL', 'FUTURE', 'OPTION']);
 export const QUALITY_STATES = Object.freeze(['KNOWN', 'PARTIAL', 'MISSING', 'UNAVAILABLE', 'STALE', 'PROVISIONAL', 'CLOCK_CONFLICT', 'FAILED', 'NOT_SUPPORTED']);
