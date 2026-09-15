@@ -25,10 +25,18 @@ export function usdReference({ venue, quote, mid, windowLow = null, stablecoinHe
   return { venue, usdMid: pos(mid) ? mid : null, usdWindowLow: pos(windowLow) ? windowLow : null, stablecoinHealthy: true, stablecoinReason: null };
 }
 
-// Assemble the IFR episode. `references` is the ordered [coinbase, binance] set of usdReference() results; a null usdMid
-// (absent venue OR an unhealthy stablecoin basis) flows straight into referenceMids, where the detector fails closed.
-export function assembleIsolatedFlushEpisode({ canonicalCoin = null, decisionKnownAtTs = null, kraken = {}, references = [], secondWaveAbsorbed = false, localLowHeld = false } = {}) {
-  const refs = references.slice(0, 2);
+// Assemble the IFR episode. `references` is the ordered set of usdReference() results for the REACHABLE venues (up to three
+// — Coinbase, Binance, Bitstamp; whichever answered at boot). A venue geo-blocked at boot is NOT a reachable reference and
+// is passed separately in `blockedReferences` ([{ venue, reason }]) so it is disclosed, not silently dropped and not a null
+// that fails the episode. A null usdMid among the REACHABLE references (an unhealthy stablecoin basis) still flows into
+// referenceMids, where the detector fails closed — a de-peg never reads as a Kraken-only flush. The `referenceCoverage`
+// note travels with the episode (and the shadow record) so a one-reference episode is honest about its weaker isolation.
+export function assembleIsolatedFlushEpisode({ canonicalCoin = null, decisionKnownAtTs = null, kraken = {}, references = [], blockedReferences = [], secondWaveAbsorbed = false, localLowHeld = false } = {}) {
+  const refs = references.slice(0, 3);
+  const blocked = (Array.isArray(blockedReferences) ? blockedReferences : []).slice(0, 3)
+    .filter((b) => b && typeof b.venue === 'string')
+    .map((b) => Object.freeze({ venue: b.venue, reason: typeof b.reason === 'string' ? b.reason : 'BLOCKED_GEOGRAPHY' }));
+  const reachableVenues = refs.map((r) => (typeof r?.venue === 'string' ? r.venue : null)).filter(Boolean);
   return Object.freeze({
     canonicalCoin, decisionKnownAtTs,
     preFlushReferenceMid: pos(kraken.preFlushReferenceMid) ? kraken.preFlushReferenceMid : undefined,
@@ -36,6 +44,13 @@ export function assembleIsolatedFlushEpisode({ canonicalCoin = null, decisionKno
     krakenExecutableBid: pos(kraken.executableBid) ? kraken.executableBid : undefined,
     referenceMids: Object.freeze(refs.map((r) => (pos(r?.usdMid) ? r.usdMid : null))),
     referenceFlushLows: Object.freeze(refs.map((r) => (pos(r?.usdWindowLow) ? r.usdWindowLow : null))),
+    referenceCoverage: Object.freeze({
+      reachableCount: refs.length,
+      reachableVenues: Object.freeze(reachableVenues),
+      blocked: Object.freeze(blocked),
+      sufficient: refs.length >= 1,
+      note: `IFR isolation measured against ${refs.length} reachable reference venue(s)${reachableVenues.length ? ` (${reachableVenues.join(', ')})` : ''}${blocked.length ? `; ${blocked.map((b) => `${b.venue}:${b.reason}`).join(', ')}` : ''}`,
+    }),
     secondWaveAbsorbed: secondWaveAbsorbed === true,
     localLowHeld: localLowHeld === true,
     assemblerVersion: CROSS_VENUE_EPISODE_VERSION,

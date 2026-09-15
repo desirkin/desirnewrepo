@@ -81,7 +81,8 @@
     "SANTIMENT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "SANTIMENT_API_KEY", "reason": "BLOCKED_BUDGET" },
     "TWELVEDATA": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "credentialEnv": "TWELVEDATA_API_KEY", "note": "Owner Basic 8 key verified with EUR/USD candles; free REST only, capped in research policy. Key must be installed in host Secrets; production collection remains unverified." },
     "TOKENOMIST": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "TOKENOMIST_API_KEY", "reason": "BLOCKED_BUDGET" },
-    "BINANCE_SPOT": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "reason": "BLOCKED_GEOGRAPHY" }
+    "BINANCE_SPOT": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "reason": "BLOCKED_GEOGRAPHY" },
+    "BITSTAMP_SPOT": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "reason": "SHADOW_ONLY reference sense (Strategy 6 IFR fallback book); reachable, no credential, no geo-block — dormant until IFR live composition is enabled behind the paper publish" }
    }
   },
   "darkEdgeCapture": {

@@ -63,3 +63,28 @@ test('CVS-4. counterfactual maturation: a forward path labels a fired shadow FAV
   assert.equal(rec.counterfactual.outcome, 'MATURED_FAVORABLE'); assert.deepEqual(rec.counterfactual.forwardPath, { maxFavorablePct: 2.5, maxAdversePct: -0.3 });
   assert.throws(() => recordCrossVenueShadow({ setup: 'NOPE', episode: ep }), /unknown setup/);
 });
+
+test('CVS-5 (READINESS b). the IFR runs with the REACHABLE references only, >= 1: three venues, one venue (Binance/Bitstamp geo-blocked at boot) still FIRES, and the episode + shadow record carry a reference-coverage note; zero reachable fails closed', () => {
+  const ref = (venue) => usdReference({ venue, quote: 'USD', mid: 100, windowLow: 100 });
+  const kraken = { preFlushReferenceMid: 100, flushLow: 96, executableBid: 99.5 };
+  // three reachable references: the strongest isolation claim
+  const three = assembleIsolatedFlushEpisode({ canonicalCoin: 'SOL', kraken, references: [ref('coinbase'), ref('binance'), ref('bitstamp')], secondWaveAbsorbed: true, localLowHeld: true });
+  assert.deepEqual(three.referenceMids, [100, 100, 100]);
+  assert.equal(three.referenceCoverage.reachableCount, 3); assert.deepEqual(three.referenceCoverage.reachableVenues, ['coinbase', 'binance', 'bitstamp']); assert.equal(three.referenceCoverage.sufficient, true); assert.deepEqual(three.referenceCoverage.blocked, []);
+  assert.equal(recordCrossVenueShadow({ setup: IFR_SETUP, episode: three }).fire, true);
+  // ONE reachable reference (Coinbase), Binance + Bitstamp geo-blocked at boot: the detector still runs and FIRES, and the
+  // coverage note discloses the weaker isolation (1 reachable, 2 blocked BLOCKED_GEOGRAPHY) at both the episode and record.
+  const one = assembleIsolatedFlushEpisode({ canonicalCoin: 'SOL', kraken, references: [ref('coinbase')], blockedReferences: [{ venue: 'binance', reason: 'BLOCKED_GEOGRAPHY' }, { venue: 'bitstamp', reason: 'BLOCKED_GEOGRAPHY' }], secondWaveAbsorbed: true, localLowHeld: true });
+  assert.deepEqual(one.referenceMids, [100]);
+  assert.equal(one.referenceCoverage.reachableCount, 1); assert.deepEqual(one.referenceCoverage.reachableVenues, ['coinbase']); assert.equal(one.referenceCoverage.sufficient, true);
+  assert.deepEqual(one.referenceCoverage.blocked, [{ venue: 'binance', reason: 'BLOCKED_GEOGRAPHY' }, { venue: 'bitstamp', reason: 'BLOCKED_GEOGRAPHY' }]);
+  assert.match(one.referenceCoverage.note, /1 reachable reference venue.*coinbase.*binance:BLOCKED_GEOGRAPHY/);
+  const rec = recordCrossVenueShadow({ setup: IFR_SETUP, episode: one, recordedAtTs: 5 });
+  assert.equal(rec.fire, true, 'one reachable reference is enough to run the detector'); assert.equal(rec.counterfactual.entryReference, 99.5);
+  assert.equal(rec.referenceCoverage.reachableCount, 1); assert.equal(rec.referenceCoverage.blocked.length, 2, 'the coverage flag rides to the top of the dossier');
+  // ZERO reachable references (every venue geo-blocked): the episode is fail-closed, never a fabricated isolation
+  const none = assembleIsolatedFlushEpisode({ canonicalCoin: 'SOL', kraken, references: [], blockedReferences: [{ venue: 'coinbase', reason: 'BLOCKED_GEOGRAPHY' }, { venue: 'binance', reason: 'BLOCKED_GEOGRAPHY' }, { venue: 'bitstamp', reason: 'BLOCKED_GEOGRAPHY' }], secondWaveAbsorbed: true, localLowHeld: true });
+  assert.equal(none.referenceCoverage.reachableCount, 0); assert.equal(none.referenceCoverage.sufficient, false);
+  const recNone = recordCrossVenueShadow({ setup: IFR_SETUP, episode: none });
+  assert.equal(recNone.fire, false); assert.ok(recNone.reasons.includes('INPUTS_UNAVAILABLE'), 'no reachable reference never fires');
+});

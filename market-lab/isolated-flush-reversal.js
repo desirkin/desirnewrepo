@@ -1,7 +1,8 @@
 // STRATEGY 6 — Isolated Flush Reversal (IFR), the SHADOW-ONLY detector (2026-09-15). Doctrine (PHILOSOPHY.md §Strategy 6):
 // family CROSS_VENUE_DISLOCATION, setup ISOLATED_FLUSH_REVERSAL. Buy a sharp KRAKEN-ONLY selloff ONLY AFTER Kraken starts
-// repairing it while the same asset HOLDS on two reference venues (Coinbase + Binance public books, read-only,
-// receipt-time ordered); recovery measured at the SIZE-AWARE EXECUTABLE BID; a SECOND-WAVE ABSORPTION test;
+// repairing it while the same asset HOLDS on the reachable reference venues (Coinbase + Binance + Bitstamp public books,
+// read-only, receipt-time ordered — whichever are reachable, >= 1; a venue geo-blocked at boot drops out and the episode
+// records the coverage); recovery measured at the SIZE-AWARE EXECUTABLE BID; a SECOND-WAVE ABSORPTION test;
 // RECOVERY-OWNERSHIP >= 0.80; exit when the gap repairs, the references confirm the drop, or the local low fails.
 //
 // This is the PURE detector: given a resolved cross-venue dislocation episode (plain, receipt-time-ordered numbers — the
@@ -50,8 +51,12 @@ export function detectIsolatedFlushReversal(episode = {}, cfg = IFR_DEFAULTS) {
     law: 'buy a KRAKEN-ONLY flush only after Kraken repairs it while two reference venues hold; recovery at the size-aware executable bid; recovery-ownership >= 0.80; record only, never an order',
   });
 
-  // inputs must be real numbers; anything absent is UNKNOWN, never guessed
-  if (!pos(preFlushReferenceMid) || !pos(krakenFlushLow) || !pos(krakenExecutableBid) || !Array.isArray(referenceMids) || referenceMids.length < 2 || !referenceMids.every(pos)) {
+  // inputs must be real numbers; anything absent is UNKNOWN, never guessed. references are the REACHABLE venues only (a
+  // venue geo-blocked at boot is excluded upstream, never a null here), so >= 1 reachable reference runs — with fewer
+  // venues the isolation is a weaker claim, which the episode's referenceCoverage note discloses. A reachable venue that
+  // returned a bad reading (e.g. a de-pegged stablecoin basis) is still a null in referenceMids and fails the whole
+  // episode closed, so a de-peg never masquerades as a Kraken-only flush.
+  if (!pos(preFlushReferenceMid) || !pos(krakenFlushLow) || !pos(krakenExecutableBid) || !Array.isArray(referenceMids) || referenceMids.length < 1 || !referenceMids.every(pos)) {
     reasons.push('INPUTS_UNAVAILABLE');
     return record(false, { flushDropPct: null, referenceDropsPct: null, recoveryOwnership: null });
   }

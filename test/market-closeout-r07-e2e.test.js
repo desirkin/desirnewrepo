@@ -281,7 +281,11 @@ test('MC-E04 (joined). partial truth stays visible from context to packet to cas
 });
 
 test('MC-E05 (joined). a recording failure while a model request is active: the service stops healthy admission, cancels and drains ownership, preserves the source prefix / error and accounts the in-flight charge conservatively; no late healthy case', async () => {
-  const root = tmp(); const p = H.policyWith({ providers: ['KRAKEN_SPOT'], model: MODEL }); p.resources.segmentBytes = 4000; p.resources.runBytes = 50_000;
+  // runBytes headroom scales with the provider registry: loadPolicy normalizes policy.providers to ALL PROVIDER_IDS and
+  // every sealed segment self-describes with that policy member, so the run budget must clear startup+dispatch with room
+  // for the flood to trip it (not startup). 70k keeps the intended "failure DURING an active model request" as the
+  // registry grows (was 50k at 16 providers; a reference-only sense like BITSTAMP_SPOT still enlarges the sealed policy).
+  const root = tmp(); const p = H.policyWith({ providers: ['KRAKEN_SPOT'], model: MODEL }); p.resources.segmentBytes = 4000; p.resources.runBytes = 70_000;
   let release = null; let dispatched; const gate = new Promise((r) => { dispatched = r; });
   const fetchImpl = async (url, init) => { const u = new URL(url); if (u.host === 'api.kraken.com') return json(H.KRAKEN_ASSET_PAIRS); if (u.pathname.endsWith('count_tokens')) return json({ input_tokens: 1000 }); dispatched(); return new Promise((res) => { release = () => res(json(message({}))); }); };
   const svc = createResearchService({ policy: loadPolicy(p), subjects: btcOnly(), env: { ANTHROPIC_API_KEY: KEY }, researchRoot: root, mode: 'INTEGRATED', clock: () => Date.now(), fetchImpl, httpPort: null, log: () => {} });

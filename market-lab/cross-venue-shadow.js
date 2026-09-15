@@ -38,6 +38,9 @@ export function recordCrossVenueShadow({ setup, episode, forwardPath = null, cfg
     setup, family: verdict.family, detectorVersion: verdict.detectorVersion,
     canonicalCoin: verdict.canonicalCoin ?? null, decisionKnownAtTs: verdict.decisionKnownAtTs ?? null, recordedAtTs,
     fire: verdict.fire, reasons: verdict.reasons, measurements: verdict.measurements,
+    // the IFR reference coverage travels to the top of the dossier: how many venues backed the isolation, which were
+    // reachable, which were geo-blocked. A one-reference fire is legible as such, never silently equal to a three-venue one.
+    referenceCoverage: episode?.referenceCoverage ?? null,
     episode,
     counterfactual: Object.freeze({
       wouldHaveFired: verdict.fire,

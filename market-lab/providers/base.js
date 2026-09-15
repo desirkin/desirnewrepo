@@ -31,7 +31,11 @@ export const obj = (v) => (v !== null && typeof v === 'object' && !Array.isArray
 export const pct = (v) => { const n = num(v); return n === null ? null : n / 100; }; // documented percent -> fraction
 export const idSafe = (v, max = 120) => { const s = str(v, max); return s !== null && /^[A-Za-z0-9][A-Za-z0-9._:@/+-]*$/.test(s) ? s : null; };
 
-export const isGeoBlock = (failure) => failure?.kind === 'HTTP_403' && failure.bytes && /country|region|geograph|cloudfront/i.test(failure.bytes.toString('utf8', 0, Math.min(400, failure.bytes.length)));
+// HTTP 451 ("Unavailable For Legal Reasons") is a definitional geographic/legal block — Binance's public API returns it
+// to US IPs — so it maps to GEO (ACCESS_BLOCKED / GEO_RESTRICTED) directly, whatever the body. A 403 is a geo-block only
+// when its body names a region/CDN cause (a plain 403 stays an entitlement denial). Either way it is reported, never evaded.
+export const isGeoBlock = (failure) => failure?.status === 451
+  || (failure?.kind === 'HTTP_403' && failure.bytes && /country|region|geograph|cloudfront/i.test(failure.bytes.toString('utf8', 0, Math.min(400, failure.bytes.length))));
 
 // ---- client base ----------------------------------------------------------------------------------------------
 export function createClientBase({ providerId, transport, clock = () => Date.now(), credential = null, log = () => {} }) {

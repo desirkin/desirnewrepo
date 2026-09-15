@@ -36,11 +36,16 @@ test('IFR-2. each gate refuses with its reason', () => {
   assert.equal(detectIsolatedFlushReversal({ ...fireEpisode(), localLowHeld: false }).reasons.includes('LOCAL_LOW_FAILED'), true);
 });
 
-test('IFR-3. absent/invalid inputs are UNKNOWN (refuse INPUTS_UNAVAILABLE), never guessed; only two reference venues satisfy the law', () => {
+test('IFR-3. absent/invalid inputs are UNKNOWN (refuse INPUTS_UNAVAILABLE), never guessed; the law runs on >= 1 reachable reference (READINESS b geo fallback)', () => {
   const r = detectIsolatedFlushReversal({ preFlushReferenceMid: 100, krakenFlushLow: null, krakenExecutableBid: 99, referenceMids: [100, 100] });
   assert.equal(r.fire, false); assert.deepEqual(r.reasons, ['INPUTS_UNAVAILABLE']); assert.equal(r.measurements.recoveryOwnership, null);
-  // only one reference venue present -> INPUTS_UNAVAILABLE (the law requires two)
-  assert.deepEqual(detectIsolatedFlushReversal({ ...fireEpisode(), referenceMids: [100] }).reasons, ['INPUTS_UNAVAILABLE']);
+  // ONE reachable reference is now enough (Binance geo-blocked -> Bitstamp/Coinbase alone): a clean episode still FIRES
+  const one = detectIsolatedFlushReversal({ ...fireEpisode(), referenceMids: [100], referenceFlushLows: [99.8] });
+  assert.equal(one.fire, true, JSON.stringify(one.reasons)); assert.deepEqual(one.reasons, []); assert.equal(one.measurements.recoveryOwnership, 0.9);
+  // but a reachable reference with a BAD (null) reading still fails the whole episode closed — a de-peg never guesses
+  assert.deepEqual(detectIsolatedFlushReversal({ ...fireEpisode(), referenceMids: [100, null] }).reasons, ['INPUTS_UNAVAILABLE']);
+  // and ZERO references is still UNKNOWN, never a fabricated isolation
+  assert.deepEqual(detectIsolatedFlushReversal({ ...fireEpisode(), referenceMids: [] }).reasons, ['INPUTS_UNAVAILABLE']);
 });
 
 test('IFR-4. the detector never carries order/Judge authority (SHADOW_ONLY record only)', () => {

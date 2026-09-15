@@ -13,7 +13,7 @@
   "NOT_PRESENT"
  ],
  "counts": {
-  "OPERATIONAL_PUBLIC": 36,
+  "OPERATIONAL_PUBLIC": 37,
   "OPERATIONAL_CREDENTIAL_GATED": 13,
   "IMPLEMENTED_NOT_LIVE_SMOKED": 2,
   "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 11,
@@ -1022,6 +1022,29 @@
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": "BLOCKED_GEOGRAPHY",
    "smokeEvidence": "read-only reference sense (Strategy 6). NOT_PROBED live from this build environment (geographic restrictions apply to Binance; a 451/403 is ACCESS_BLOCKED, never evaded); offline scripted-WS coverage in test/binance-provider.test.js; docs/serpent/PHILOSOPHY.md §Strategy 6"
+  },
+  {
+   "id": "BITSTAMP_SPOT",
+   "group": "MARKET_RESEARCH",
+   "family": "Bitstamp public spot (read-only USD-quoted reference book for Strategy 6)",
+   "classification": "OPERATIONAL_PUBLIC",
+   "module": "market-lab/providers/bitstamp.js",
+   "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+   "enable": "policy providers.BITSTAMP_SPOT.enabled",
+   "credentialEnv": [],
+   "paid": false,
+   "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+   "retentionTermsGate": "hosts www.bitstamp.net",
+   "liveTransport": true,
+   "durableTruth": "sealed CAPTURE bundles + accounting journal",
+   "pointInTimeContract": "observation envelope (sourceEventTs / receivedTs / knownAtTs / revision)",
+   "replay": "REPLAY_AS_OF over sealed bundles",
+   "decisionAuthority": "EVIDENCE_ONLY (decision families)",
+   "paperAuthority": "EVIDENCE_ONLY",
+   "paperDesiredState": "OFF",
+   "blockerPolicy": "DEGRADE",
+   "readinessBlocker": null,
+   "smokeEvidence": null
   },
   {
    "id": "KRAKEN_CHARTS_DARK",

@@ -73,7 +73,7 @@ These are David's decisions, recorded verbatim in intent as the law each ticket 
 
 ### Strategy 6 — Isolated Flush Reversal (IFR)
 - Family `CROSS_VENUE_DISLOCATION`, setup `ISOLATED_FLUSH_REVERSAL`.
-- Buy a sharp **Kraken-only** selloff **only after Kraken starts repairing it** while the same asset **holds on two reference venues** (Coinbase + Binance public books, read-only, receipt-time ordered).
+- Buy a sharp **Kraken-only** selloff **only after Kraken starts repairing it** while the same asset **holds on the reachable reference venues** (Coinbase + Binance + Bitstamp public books, read-only, receipt-time ordered — whichever are reachable, **≥ 1**). Reachability is decided **once at boot per venue**: a venue answering **HTTP 451** is `BLOCKED_GEOGRAPHY` for the session and dropped from the reference set (never retried per cycle, never evaded). Binance returns 451 to US IPs, so Bitstamp is the reachable USD-quoted fallback; a one-reference episode still runs and the dossier carries a **reference-coverage note** disclosing the weaker isolation. A reachable venue whose reading is bad (a de-pegged stablecoin basis) still fails the whole episode closed — a de-peg never reads as a Kraken-only flush.
 - Recovery measured at the **size-aware executable bid**; a **second-wave absorption test**; **recovery-ownership ≥ 0.80**; exit **when the gap repairs, the references confirm the drop, or the local low fails**.
 - `SHADOW_ONLY` after the paper publish, with episode / refusal / counterfactual recording and ablations.
 

@@ -94,6 +94,16 @@ by name in preflight, none flips its own budget/plan gate on.
 **Never set** a Kraken trading key. There is none in the paper profile. A Kraken L3 key, if ever added, is a dedicated
 DATA-ONLY key proven `SAFE_L3_DATA_KEY` before use — never an execution credential.
 
+### The IFR reference gate — cross-venue references (SHADOW_ONLY, read-only public books, no key)
+Strategy 6 (Isolated Flush Reversal) proves a flush is **Kraken-only** by checking the same asset held on **reference
+venues**: the reachable ones of **Coinbase + Binance + Bitstamp** public books. Reachability is decided **once at boot per
+venue** — a venue answering **HTTP 451** ("Unavailable For Legal Reasons") is marked `BLOCKED_GEOGRAPHY` for the session
+and dropped from the reference set, never retried per cycle and never evaded. Binance returns 451 to US IPs, which is why
+**Bitstamp** (`BITSTAMP_SPOT`, USD-quoted, no key) is the reachable fallback. The gate runs with **≥ 1** reachable
+reference; a one-reference episode still fires, and the shadow dossier carries a **reference-coverage note** (how many
+venues backed the isolation, which were blocked) so the weaker isolation is legible. No credential, no order authority —
+these senses are read-only and live composition stays behind the paper publish.
+
 ### The daily move study — the wide end of the funnel (research only, offline, no key)
 The retrospective daily study selects the day's cases from the full-day archive. The **threshold is 8%** (a strictly
 ordered intraday rise or fall — `riseThresholdPct` / `fallingThresholdPct`, both 8; the older "10%" was prose, never the
