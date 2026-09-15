@@ -33,6 +33,18 @@ export const TIE_ORDER_LAW = 'timers strictly before the next receipt (25ms buck
 // (REF_*, no explicit exitPolicy) run the live no-target law; the D4 arm is the counterfactual that ENABLES the planned
 // full exit at the frozen scenario target, measuring whether adding a target helps against the live no-target reference.
 export const D4_EXIT_POLICY = Object.freeze({ plannedTarget: true });
+// Ticket Z (2026-09-15): sizing side by side. Doctrine (PHILOSOPHY.md, Position & sizing): the paper runs PURE ALL-IN
+// vs DEPTH-CAPPED ALL-IN. Both are the whole-nut spirit; they differ in whether the book's absorption caps the bite.
+// The dynamic size ladder (judge/size-ladder.js) expresses both over the SAME risk-bounded budget and the SAME cost law:
+//   DEPTH_CAPPED = the full fraction ladder; the sustainability objective selects the largest size whose marginal fills
+//                  do not degrade the net return beyond tolerance — i.e. the largest bite the book absorbs cleanly.
+//                  Fraction 1 competes only with the all-in prerequisites (learning-supported max size), so without
+//                  qualified sizing evidence it caps below full balance — exactly the live "largest bite" law.
+//   PURE_ALL_IN  = the fraction-1 candidate ALONE (the whole nut regardless of the absorption cap). It is learning-gated:
+//                  ALL_IN_PREREQUISITES (incl. CANDIDATE_MAX_SIZE_EVIDENCE) hold it INELIGIBLE until SIZING is qualified,
+//                  so the arm is DORMANT (no eligible size, no trades) until then — SIZING stays UNSUPPORTED by doctrine.
+// Sizing is a REPLAY research dimension only (never wired into the live PAPER Judge; fly.js never passes dynamicSizing).
+export const SIZING_ARM_FRACTIONS = Object.freeze({ DEPTH_CAPPED: Object.freeze(['0.25', '0.5', '0.75', '1']), PURE_ALL_IN: Object.freeze(['1']) });
 export const EXPERIMENT_ARMS = Object.freeze({
   REF_RANGE_IGNITION: { kind: 'FUNDED', setups: ['RANGE_IGNITION'] },
   REF_ABSORPTION_RECLAIM: { kind: 'FUNDED', setups: ['ABSORPTION_RECLAIM'] },
@@ -47,6 +59,8 @@ export const EXPERIMENT_ARMS = Object.freeze({
   SEEDED_NOMINATION_CONTROL: { kind: 'FUNDED', setups: null, seeded: true },
   D4_PLANNED_TARGET_FUNDED: { kind: 'FUNDED', setups: null, exitPolicy: D4_EXIT_POLICY },
   D4_PLANNED_TARGET_MATCHED: { kind: 'MATCHED', follows: 'REF_COMBINED', exitPolicy: D4_EXIT_POLICY },
+  SIZING_DEPTH_CAPPED: { kind: 'FUNDED', setups: null, dynamicSizing: { fractions: SIZING_ARM_FRACTIONS.DEPTH_CAPPED } },
+  SIZING_PURE_ALL_IN: { kind: 'FUNDED', setups: null, dynamicSizing: { fractions: SIZING_ARM_FRACTIONS.PURE_ALL_IN } },
 });
 export const ARM_NAMES = Object.freeze(Object.keys(EXPERIMENT_ARMS));
 const BASE_NEEDS = ['FEED', 'INSTRUMENT', 'FEE', 'HISTORY', 'NOMINATION'];
@@ -115,7 +129,7 @@ export async function replayExperiment({ bundleDir, policyFile, arms = null, exp
     if (missing.length) { report.arms[arm] = { arm, kind: def.kind, accountId, binding, outcome: 'UNSCORABLE', reason: 'CAPABILITY_MISSING', missing, law: 'a missing input capability is named, never synthesized' }; continue; }
     if (def.kind === 'MATCHED') continue;
     const journal = createMemoryJournal({ log }); await initAccount({ journal, policy, policyDigest, mode: 'REPLAY', ownerRef: 'experiment', nowTs: first, accountId }); const verdicts = [];
-    const run = await composeJudge({ policyFile, mode: 'REPLAY', accountId, env: {}, log, journal, clock, specs: [], caseSource: stores.caseSource, controlsSource: controls, nominations: () => stores.nominations(), writeProjection: false, codeDigest, experimentId, armRule: armRuleOf(def, { seed: useSeed, stores }), exitPolicy: def.exitPolicy ?? null, verdictSink: (r) => { verdicts.push(r); } });
+    const run = await composeJudge({ policyFile, mode: 'REPLAY', accountId, env: {}, log, journal, clock, specs: [], caseSource: stores.caseSource, controlsSource: controls, nominations: () => stores.nominations(), writeProjection: false, codeDigest, experimentId, armRule: armRuleOf(def, { seed: useSeed, stores }), exitPolicy: def.exitPolicy ?? null, dynamicSizing: def.dynamicSizing ?? null, verdictSink: (r) => { verdicts.push(r); } });
     await run.dispatcher.restart({ scope: 'STARTUP' }); funded.push({ arm, def, binding, accountId, journal, run, verdicts, feeMismatch: null }); }
   const ref = funded.find((f) => f.arm === 'REF_COMBINED') ?? null; let matched = null; const matchedArms = armList.filter((a) => EXPERIMENT_ARMS[a].kind === 'MATCHED' && !report.arms[a]);
   for (const arm of matchedArms) { const def = EXPERIMENT_ARMS[arm]; if (!ref) { report.arms[arm] = { arm, kind: 'MATCHED', outcome: 'UNSCORABLE', reason: `REQUIRES_${def.follows}_IN_THE_SAME_REPLAY` }; continue; } matched = createMatchedRunner({ ref: ref.run, policy, policyDigest, codeDigest, clock, controls, exitPolicy: def.exitPolicy, idPrefix: `replay-${digestOf(armBinding({ experimentId, arm, policyDigest, codeDigest, strategyVersion: policy.strategyVersion, sourcePrefix, seed: useSeed })).slice(0, 16)}`, log }); }

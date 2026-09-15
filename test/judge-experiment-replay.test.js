@@ -118,3 +118,28 @@ test('S08. identity and restart: arm accounts are bound to experiment, code, pol
   const s1 = await replay({ arms: ['REF_COMBINED', 'D4_PLANNED_TARGET_FUNDED'], stopAtSeq: mid }); assert.equal(s1.outcome, 'STOPPED_AT_SEQ'); assert.equal(s1.stoppedAtSeq, mid); assert.equal(s1.observation.seq, mid); assert.ok(s1.arms.REF_COMBINED.censored.length === 1, 'stopped while the position is open: censored, not closed'); assert.ok(s1.observation.arms.REF_COMBINED.revision > 0);
   const s2 = await replay({ arms: ['REF_COMBINED', 'D4_PLANNED_TARGET_FUNDED'], stopAtSeq: mid }); assert.deepEqual(s2.observation, s1.observation, 'a fresh replay of the sealed prefix restores the same state in a fresh REPLAY namespace'); assert.notEqual(s1.observation.arms.REF_COMBINED.headDigest, r1.arms.REF_COMBINED.headDigest, 'the prefix is not the whole stream'); assert.equal(s1.observation.arms.REF_COMBINED.depletionDigest, s2.observation.arms.REF_COMBINED.depletionDigest);
 });
+
+test('S09. sizing side by side (Ticket Z): DEPTH_CAPPED runs the full size ladder over the same risk-bounded budget and enters, recording its size candidates; PURE_ALL_IN (fraction 1 alone) is learning-gated — ALL_IN_PREREQUISITES hold it ineligible without qualified sizing evidence, so it takes NO trade (dormant) — two independent USD 500 accounts on the same stream', async () => {
+  const r = await replay({ arms: ['REF_COMBINED', 'SIZING_DEPTH_CAPPED', 'SIZING_PURE_ALL_IN'] });
+  assert.equal(r.ok, true, JSON.stringify(r.fatal));
+  const ref = r.arms.REF_COMBINED, dc = r.arms.SIZING_DEPTH_CAPPED, pa = r.arms.SIZING_PURE_ALL_IN;
+  assert.equal(dc.outcome, 'SCORED'); assert.equal(pa.outcome, 'SCORED');
+  assert.notEqual(dc.accountId, pa.accountId); assert.notEqual(dc.accountId, ref.accountId, 'each arm is its own USD 500 account');
+  assert.equal(dc.initialCapital, '500'); assert.equal(pa.initialCapital, '500');
+  // DEPTH_CAPPED enters through the ladder and records the size selection + at least one candidate row
+  const dce = entryOf(dc); assert.ok(dce, JSON.stringify(dc.decisions.map((d) => [d.status, d.setupId, d.reasonCodes])));
+  assert.ok(M.isPositive(dce.sizing.q), 'the depth-capped arm sizes a real bite');
+  assert.ok(dce.measurements.some((m) => m.id === 'DYNAMIC_SIZE_SELECTION' && m.ok === true), 'the ladder made a selection (recorded)');
+  assert.ok(dce.measurements.some((m) => m.id === 'SIZE_CANDIDATE'), 'every candidate size is recorded');
+  // PURE_ALL_IN: the same RANGE_IGNITION opportunity, but fraction 1 alone is prerequisite-gated -> no eligible size -> refused
+  assert.equal(pa.denominators.positions, 0, 'the pure all-in arm is dormant until SIZING qualifies: no trade');
+  const par = pa.decisions.find((d) => d.setupId === 'RANGE_IGNITION' && d.status === 'ENTRY_REFUSED');
+  assert.ok(par, JSON.stringify(pa.decisions.map((d) => [d.status, d.setupId, d.reasonCodes])));
+  assert.ok(par.reasonCodes.includes('NO_ELIGIBLE_SIZE_ON_LADDER'), JSON.stringify(par.reasonCodes));
+  // the ladder ran but selected nothing: the size-selection measurement is recorded and NOT ok (fraction 1 ineligible)
+  assert.ok(par.measurements.some((m) => m.id === 'DYNAMIC_SIZE_SELECTION' && m.ok === false), 'the ladder recorded no eligible size');
+  assert.ok(par.measurements.some((m) => m.id === 'SIZE_CANDIDATE' && m.ok === false), 'the fraction-1 candidate is recorded as refused');
+  // deterministic
+  const r2 = await replay({ arms: ['SIZING_DEPTH_CAPPED', 'SIZING_PURE_ALL_IN'] });
+  assert.equal(r2.arms.SIZING_DEPTH_CAPPED.headDigest, dc.headDigest); assert.equal(r2.arms.SIZING_PURE_ALL_IN.headDigest, pa.headDigest);
+});

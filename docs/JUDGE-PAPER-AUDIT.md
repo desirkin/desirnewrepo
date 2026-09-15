@@ -60,11 +60,23 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       35f7be965c593fde769278a8adb04b6e1d9294481890d4613f5df40bd571d865
+judge/*.js       babd2f698e2d2fc25aaabd3f953d7ad8b5f163f84687b50c9f5b295471b376f3
 execution/*.js   676e15339b6c19e897dc7d08d6ac862d7f099910fe3c4953ffd2ad00467c677e
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   126b58d0e2d8396e437505a1f6686b1831f5a696f7d7d4cc983d0d96abcca272
+all (48 files)   5ef55b6e0a8a50d681e19630921edc39db05f3a59098aa94d4b6f5d8b979986e
 ```
+
+### 4.10 Audited change — 2026-09-15 Ticket Z (sizing side by side): two REPLAY-only sizing arms (pure all-in vs depth-capped) (previous digests: judge `35f7be96…`, all `126b58d0…`; execution `676e1533…` and watch `0c6a43bf…` UNCHANGED)
+
+Scope: `judge/experiment-replay.js` only (the offline REPLAY experiment engine). No decision, permission, exit, reducer, reservation, fee or fill law changed; `judge/judge.js`, `judge/cost.js`, `judge/size-ladder.js`, `judge/risk.js` and the live sizing path are byte-unchanged. The live PAPER Judge still runs the fixed `sizeSearch` (fly.js never passes `dynamicSizing`); SIZING remains UNSUPPORTED in `learning/adaptive-registry.js` until separately qualified.
+
+David's decision (PHILOSOPHY.md, Position & sizing): the paper runs **pure all-in vs depth-capped all-in side by side**. Both realise the whole-nut spirit over the SAME risk-bounded budget and cost law, differing only in whether the book's absorption caps the bite. The pre-existing dynamic size ladder (`judge/size-ladder.js`, default-off, unchanged) already expresses both; this change wires it as two REPLAY arms:
+- `SIZING_DEPTH_CAPPED` (`dynamicSizing.fractions = ['0.25','0.5','0.75','1']`): the full ladder; the sustainability objective selects the largest size whose marginal fills do not degrade the net return beyond tolerance — the largest bite the book absorbs cleanly. Fraction 1 competes only with the all-in prerequisites, so without qualified sizing evidence it caps below full balance — the live "largest bite" law.
+- `SIZING_PURE_ALL_IN` (`dynamicSizing.fractions = ['1']`): the whole-nut candidate alone. Learning-gated: `ALL_IN_PREREQUISITES` (incl. `CANDIDATE_MAX_SIZE_EVIDENCE`) hold it ineligible until SIZING qualifies, so the arm is DORMANT (no eligible size, no trades) until then.
+
+The arms live ONLY in `EXPERIMENT_ARMS` (invoked via `replay-experiment --arms …`), never in the policy's `evaluation.arms` (the legacy `evaluateArms` HISTORICAL_ATTRIBUTION path replays one recorded ledger and cannot re-size — it says so, and disclaims sizing comparison). `replayExperiment` threads `dynamicSizing: def.dynamicSizing ?? null` into each FUNDED arm's `composeJudge` (REPLAY); `composeJudge` already accepted and forced it null under nothing-but-REPLAY here. Both arms are their own USD-500 REPLAY accounts consuming the same stream.
+
+Proof: `test/judge-experiment-replay.test.js` S09 (DEPTH_CAPPED enters through the ladder at a sustainable sub-full size recording DYNAMIC_SIZE_SELECTION + SIZE_CANDIDATE rows; PURE_ALL_IN refuses NO_ELIGIBLE_SIZE_ON_LADDER with zero positions — dormant; two independent accounts; deterministic), S04 (the arm table stays closed: every arm FUNDED/MATCHED), and the full suite green at this commit.
 
 ### 4.9 Audited change — 2026-09-15 Ticket P (paper realism): the paper fill delay is the live-measured Kraken round-trip, not a fixed 250ms (previous digests: judge `8702f68ebeeb…`, execution `dd321ce97e24…`, all `43669403af15…`; watch `0c6a43bf…` UNCHANGED)
 
