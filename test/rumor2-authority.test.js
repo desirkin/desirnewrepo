@@ -256,7 +256,7 @@ test('R2A-SOCIAL-8 (SOCIAL-4F). the discovery-catalog / admission-scope / watch-
     assert.ok(!/config\.universe/.test(code(f)), `${f} never reads the legacy permission set`);
   }
   // the ONLY files in the rumor tier that may name the catalog / scope contracts
-  const CATALOG_ALLOWLIST = ['rumor2/social-farcaster-runtime.js', 'rumor2/social-catalog.js', 'rumor2/social-scope.js', 'rumor2/social-watch-plan.js', 'rumor2/social-settle.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/collector.js', 'rumor2/social-research-strainer.js']; // SOCIAL-5A: the strainer consumes the admission policy read-only (attribution under the scope in force)
+  const CATALOG_ALLOWLIST = ['rumor2/social-farcaster-runtime.js', 'rumor2/social-catalog.js', 'rumor2/social-scope.js', 'rumor2/social-watch-plan.js', 'rumor2/social-settle-operational.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/collector.js', 'rumor2/social-research-strainer.js']; // SOCIAL-5A: the strainer consumes the admission policy read-only (attribution under the scope in force). LEAN PASS 3 (2026-09-15): social-settle.js split into siblings; only social-settle-operational.js carries the catalog/scope event validators now (the barrel re-exports camelCase names, which do not match the hyphenated module tokens).
   const mentions = rumor2Files.filter((f) => /social-catalog|social-scope|social-watch-plan|compileAdmissionScope|admitSocialText|researchCatalogSource|scopeSource|watchScope/.test(code(f)));
   assert.deepEqual(mentions.sort(), [...CATALOG_ALLOWLIST].sort(), `the research scope may only be wired in ${CATALOG_ALLOWLIST.join(', ')}`);
   // survey/catalog.js: imported by the wide eye and tests only; the rumor tier NEVER imports survey/, tape/, cost/, ledger/, state/, controls/
@@ -299,7 +299,7 @@ test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT all
   }
   assert.ok(/Date\.now/.test(code('rumor2/social-research-runtime.js')) === true && !/Date\.now/.test(code('rumor2/social-research-strainer.js')), 'only the runtime carries an injectable default clock; the pure modules read no clock');
   // the ONLY files that may wire the research runtime / dossier family
-  const RESEARCH_ALLOWLIST = [...MODULES, 'rumor2/social-settle.js', 'rumor2/collector.js'];
+  const RESEARCH_ALLOWLIST = [...MODULES, 'rumor2/social-settle.js', 'rumor2/social-settle-common.js', 'rumor2/social-settle-replay.js', 'rumor2/collector.js']; // LEAN PASS 3 (2026-09-15): social-settle.js split into siblings; common.js re-exports the RESEARCH_*_EVENT_TYPE constants (and lists them in SOCIAL_EVENT_TYPES) and replay.js replays the dossier/shadow events — the barrel re-exports both types, so it still mentions them too
   const mentions = rumor2Files.filter((f) => MODULES.includes(f) || /social-research-|createResearchStrainer|RESEARCH_DOSSIER_EVENT_TYPE|replayResearchDossierEvent|RESEARCH_SHADOW_EVENT_TYPE|replayResearchShadowEvent/.test(code(f)));
   assert.deepEqual(mentions.sort(), [...RESEARCH_ALLOWLIST].sort(), `the research strainer may only be wired in ${RESEARCH_ALLOWLIST.join(', ')}`);
   const outside = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && !f.startsWith('attic/') && /social-research|researchStrainer|RUMOR2_RESEARCH_DOSSIER/.test(read(f)));

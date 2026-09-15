@@ -1,6 +1,6 @@
-import { CURRENT_REQUEST_TYPE, currentRequestError } from '../social-current-meter.js';
-import { FARCASTER_REQUEST_TYPE, farcasterRequestError } from '../social-farcaster-meter.js';
-import { contentHash, canonicalJson } from '../truth.js';
+import { CURRENT_REQUEST_TYPE, currentRequestError } from './social-current-meter.js';
+import { FARCASTER_REQUEST_TYPE, farcasterRequestError } from './social-farcaster-meter.js';
+import { contentHash, canonicalJson } from './truth.js';
 import {
   socialSourceIdentity, socialAuthorIdentity, socialVersionIdentity, socialMetaHash,
   normalizeSocialText, SOCIAL_RELATION_KINDS, ECHO_RELATIONS, SOCIAL_LIFECYCLE_STATES,
@@ -8,13 +8,11 @@ import {
   SOURCE_CLOCK_STATES, SOURCE_CLOCK_STATES_V2, classifySourceClock, classifyWitnessedSourceClock, socialWitnessHash,
   canonicalIngressTags, MAX_INGRESS_TAGS, MAX_INGRESS_TAG_CHARS,
   socialRetentionRefusal,
-} from '../social.js';
-import { socialProviderById } from '../social-registry.js';
-import { validateTemporalWitness, witnessesEquivalent, TEMPORAL_POLICY_VERSION } from '../social-time.js';
-import { validateCatalogContent, SOCIAL_CATALOG_MARKET_KEYS } from '../social-catalog.js';
-import { RESEARCH_DOSSIER_EVENT_TYPE, replayResearchDossierEvent } from '../social-research-dossier.js';
-import { RESEARCH_SHADOW_EVENT_TYPE, replayResearchShadowEvent, emptyShadowState } from '../social-research-shadow.js';
-import { socialAdmissionFilterId, SOCIAL_ADMISSION_POLICY_VERSION, SOCIAL_ADMISSION_MODES, SOCIAL_BASE_RE, SOCIAL_SCOPE_MAX_STATIC_TERMS, SOCIAL_SCOPE_MAX_ALIASES, SOCIAL_SCOPE_MAX_WATCH_AUTHORS } from '../social-scope.js';
+} from './social.js';
+import { socialProviderById } from './social-registry.js';
+import { validateTemporalWitness, witnessesEquivalent, TEMPORAL_POLICY_VERSION } from './social-time.js';
+import { RESEARCH_DOSSIER_EVENT_TYPE, replayResearchDossierEvent } from './social-research-dossier.js';
+import { RESEARCH_SHADOW_EVENT_TYPE, replayResearchShadowEvent, emptyShadowState } from './social-research-shadow.js';
 
 export const SOCIAL_EVENT_TYPE = 'RUMOR2_SOCIAL_OBSERVED';
 // SOCIAL-4D COMPLETION — the explicitly discriminated WITNESSED observation format.
