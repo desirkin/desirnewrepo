@@ -1094,7 +1094,7 @@
    "paperAuthority": "SEALED_CASE_INPUT_TO_JUDGE",
    "paperDesiredState": "REQUEST",
    "blockerPolicy": "PAID_GATE",
-   "readinessBlocker": "MODEL_DISABLED_IN_POLICY (cases seal BUDGET_BLOCKED; Judge runs MARKET_DIRECT setups)",
+   "readinessBlocker": "CREDENTIAL_MISSING",
    "smokeEvidence": "attic/docs/MARKET-SOCRATES-ACCEPTANCE.md (recorded-response evaluation; no paid call in tests)"
   },
   {

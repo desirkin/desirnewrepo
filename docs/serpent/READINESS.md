@@ -64,6 +64,21 @@ the day-to-day on/off is the two protected toggles on the serpent page (ASK, SOC
 
 `0` or unset on either cap ⇒ that half stays **dormant**, fail-closed, with no code change needed to toggle it.
 
+**The SOCRATES toggle is the runtime enable for paid research cases** — not just the after-the-fact explainer text. The
+paper research policy ships with `model.enabled: true` and a `$5/day` config ceiling, but **nothing spends until the
+operator flips SOCRATES on** on the password-protected serpent page. The toggle is **default OFF** and durable. Every
+paid case dispatch is gated live, per attempt (a flip takes effect without a restart):
+
+- **OFF** ⇒ the case seals `BUDGET_BLOCKED` (reason `TOGGLE_OFF`); the model is never called, no tokens are counted.
+- **ON but `ANTHROPIC_API_KEY` absent** ⇒ blocked, reason `CREDENTIAL_MISSING`.
+- **ON, key present, but `SERPENT_SOCRATES_DAILY_USD` is `0`/unset** ⇒ blocked, reason `SOCRATES_CAP_ZERO`.
+- **ON, key present, `SERPENT_SOCRATES_DAILY_USD > 0`** ⇒ dispatch is permitted, and the **effective daily ceiling is
+  `min(config $5/day, SERPENT_SOCRATES_DAILY_USD)`** — the env cap is the operator's live dial and can only tighten.
+
+Any failure to read the toggle fails **closed** (treated as OFF). The SOCRATES meter on the serpent page reads the
+research service's own budget journal — today's **reserved + settled** spend — so the operator sees real spend against
+the effective ceiling, never a client-supplied figure.
+
 ### Fees (paper pays exactly what a base-tier live account pays)
 The paper Judge's taker fee is Kraken Pro's **real base schedule: 0.40% taker / 0.25% maker** (30-day volume under the first tier — which a $500 paper account always is). No key is needed for this. A read-only fee-tier reader can confirm the account's actual tier when a dedicated read-only key is present; without it, it falls back to the base schedule.
 | NAME | What it is | Default |

@@ -47,7 +47,7 @@ export function createRequestCache(size = CASE_DEFAULTS.requestCacheSize) {
 // Default source for a case that owns nothing but a sealed packet: no observations, no acquisition (honest NOT_APPLICABLE).
 const emptyOwner = () => ({ observations: () => [], coverage: () => [], acquire: async () => ({ results: [], observations: [] }), status: () => ({ ownerVersion: 'none' }) });
 
-export function createCaseRuntime({ policy, env = {}, owner = null, clock = () => Date.now(), log = () => {}, fetchImpl = globalThis.fetch, budgetDir = null, budgetJournal = null, recordedResponse = null, contextRebuilder = null, socialProjectionOf = null, requestCache = null, identity = null, mode = null, timers = { setTimeout, clearTimeout }, maxPendingCases = null, closeDrainMs = CLOSE_DRAIN_MS } = {}) {
+export function createCaseRuntime({ policy, env = {}, owner = null, clock = () => Date.now(), log = () => {}, fetchImpl = globalThis.fetch, budgetDir = null, budgetJournal = null, recordedResponse = null, contextRebuilder = null, socialProjectionOf = null, requestCache = null, identity = null, mode = null, timers = { setTimeout, clearTimeout }, maxPendingCases = null, closeDrainMs = CLOSE_DRAIN_MS, socratesActivation = null } = {}) {
   if (!isPlainObject(policy)) fail('INVALID_INPUT', 'policy required');
   const caseMode = mode ?? policy.mode; const cases = policy.cases; const modelCfg = policy.model; const pd = policyDigest(policy); const src = owner ?? emptyOwner();
   const code = identity ?? codeIdentity(); const codeSha = code.sourceTreeSha256 ?? 'unknown';
@@ -105,9 +105,19 @@ export function createCaseRuntime({ policy, env = {}, owner = null, clock = () =
     const pathLabel = reevaluation ? 'MODEL_REEVALUATION_NOW' : 'LIVE_MODEL';
     // 3. live model: enabled + credential + budget reservation persisted BEFORE dispatch
     if (modelCfg.enabled !== true) return failure('MODEL_DISABLED', 'policy.model.enabled is false — no model call', { path: 'NONE' });
+    // SOCRATES cockpit toggle (David 2026-09-15): the day-to-day on/off gate for paid dispatch, evaluated live per
+    // attempt so a flip takes effect without a restart. OFF hard-blocks; ON requires the key AND env daily cap > 0; the
+    // effective daily cap is min(config, env). When no resolver is injected the behavior is exactly the former (config
+    // caps only), so every existing case test is unchanged.
+    let effectiveDailyCap = modelCfg.maxEstimatedUsdPerDay;
+    if (socratesActivation) {
+      let act; try { act = socratesActivation(); } catch (err) { act = { active: false, reason: 'ACTIVATION_ERROR', envDailyUsd: 0 }; }
+      if (!act || act.active !== true) return failure('BUDGET_BLOCKED', `socrates dispatch is not active (${act?.reason ?? 'INACTIVE'})`, { path: 'NONE', budget: { reasons: [act?.reason ?? 'INACTIVE'] } });
+      effectiveDailyCap = Math.min(modelCfg.maxEstimatedUsdPerDay, act.envDailyUsd); // the env cap is the operator's daily ceiling
+    }
     const c = getClient(); if (!c.keyPresent) return failure('CREDENTIAL_MISSING', `environment variable ${modelCfg.credentialEnv} is absent — no model call`, { path: 'NONE' });
     if (modelInFlight >= cases.maxConcurrentModelRequests) return failure('DEADLINE', 'model concurrency ceiling reached', { path: 'NONE' });
-    const caps = { maxEstimatedUsdPerCase: modelCfg.maxEstimatedUsdPerCase, maxEstimatedUsdPerDay: modelCfg.maxEstimatedUsdPerDay, maxEstimatedUsdPerMonth: modelCfg.maxEstimatedUsdPerMonth, totalSmokeMaxEstimatedUsd: modelCfg.totalSmokeMaxEstimatedUsd };
+    const caps = { maxEstimatedUsdPerCase: modelCfg.maxEstimatedUsdPerCase, maxEstimatedUsdPerDay: effectiveDailyCap, maxEstimatedUsdPerMonth: modelCfg.maxEstimatedUsdPerMonth, totalSmokeMaxEstimatedUsd: modelCfg.totalSmokeMaxEstimatedUsd };
     if (!(caps.maxEstimatedUsdPerCase > 0 && caps.maxEstimatedUsdPerDay > 0 && caps.maxEstimatedUsdPerMonth > 0)) return failure('BUDGET_BLOCKED', 'zero/absent paid authorization — no model call', { path: 'NONE', budget: { reasons: ['CAP_ZERO'] } });
     let j; try { j = ensureJournal(); } catch (err) { return failure('RESERVATION_FAILED', err.message, { path: 'NONE' }); }
     const remainingMs = () => deadlineTs - clock();

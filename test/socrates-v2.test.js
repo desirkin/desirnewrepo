@@ -45,8 +45,8 @@ function fakeAnthropic(script) {
   };
   return { fetchImpl, calls, messages: () => calls.filter((c) => c.path === '/v1/messages') };
 }
-const runLive = async ({ policy = LIVE(), script, packet = c01().packet, env = { ANTHROPIC_API_KEY: KEY }, clock = () => Date.now(), budgetDir = tmp(), owner = null, contextRebuilder = null, out = null, cache = null, signal = null }) => {
-  const api = fakeAnthropic(script); const rt = createCaseRuntime({ policy, env, owner, clock, fetchImpl: api.fetchImpl, budgetDir, requestCache: cache ?? undefined, contextRebuilder });
+const runLive = async ({ policy = LIVE(), script, packet = c01().packet, env = { ANTHROPIC_API_KEY: KEY }, clock = () => Date.now(), budgetDir = tmp(), owner = null, contextRebuilder = null, out = null, cache = null, signal = null, socratesActivation = null }) => {
+  const api = fakeAnthropic(script); const rt = createCaseRuntime({ policy, env, owner, clock, fetchImpl: api.fetchImpl, budgetDir, requestCache: cache ?? undefined, contextRebuilder, socratesActivation });
   try { const r = await rt.runCase({ packet, out, signal }).done; return { r, api, rt, budgetDir }; } finally { rt.close(); }
 };
 
@@ -160,6 +160,36 @@ test('C07. spend guard: zero caps => zero calls; the reservation is PERSISTED be
   // rollover: yesterday's spend leaves today's cap untouched, the month cap still sees it
   const odir = tmp(); const day = 86_400_000; const clk = clockAt(T0); const j6 = openBudgetJournal({ dir: odir, clock: clk }); j6.reserve({ reservationId: 'y', caseId: 'c', attemptId: 'a', estimatedUsd: 0.9, inputTokens: 1, maxOutputTokens: 1, pricing, caps: { ...caps, maxEstimatedUsdPerDay: 1 } }); clk.advance(day); assert.equal(j6.totals().dayUsd, 0); assert.equal(j6.totals().monthUsd, 0.9); j6.close();
   assert.equal(estimateCostUsd({ inputTokens: 12_000, maxOutputTokens: 3000, pricing }), 0.054, 'the planning illustration: 12,000 in + 3,000 out at Sonnet rates'); assert.equal(actualCostUsd({ usage: { inputTokens: 1000, outputTokens: 500, cacheCreationInputTokens: 2000, cacheReadInputTokens: 10_000 }, pricing }), Number(((1000 * 2 + 2000 * 2.5 + 10_000 * 0.2 + 500 * 10) / 1e6).toFixed(6)));
+});
+
+test('SOCRATES cockpit toggle (activation gate): an injected resolver hard-blocks dispatch when the toggle is OFF (BUDGET_BLOCKED / TOGGLE_OFF, provably no wire), permits it when active, applies the effective daily cap = min(config, env) in BOTH directions, fails closed on a throwing resolver, and — with NO resolver injected — leaves the config-only path byte-for-byte unchanged', async () => {
+  const c = c01();
+  const mustNotCall = () => { throw new Error('paid dispatch must not happen while the toggle blocks'); };
+  // OFF: the durable toggle is off -> the case seals BUDGET_BLOCKED naming TOGGLE_OFF and nothing reaches the provider.
+  const off = await runLive({ socratesActivation: () => ({ active: false, reason: 'TOGGLE_OFF', envDailyUsd: 0 }), script: mustNotCall });
+  assert.equal(off.r.status, 'BUDGET_BLOCKED'); assert.equal(off.r.manifest.diagnostic.kind, 'BUDGET_BLOCKED'); assert.match(off.r.manifest.diagnostic.reason, /TOGGLE_OFF/); assert.equal(off.api.calls.length, 0, 'toggle-off never counts tokens or dispatches');
+  // ON, credential missing / cap zero: the same hard block, each naming its own reason (fail-closed, provably no wire).
+  const noCred = await runLive({ socratesActivation: () => ({ active: false, reason: 'CREDENTIAL_MISSING', envDailyUsd: 5 }), script: mustNotCall });
+  assert.equal(noCred.r.manifest.diagnostic.kind, 'BUDGET_BLOCKED'); assert.match(noCred.r.manifest.diagnostic.reason, /CREDENTIAL_MISSING/); assert.equal(noCred.api.calls.length, 0);
+  const capZero = await runLive({ socratesActivation: () => ({ active: false, reason: 'SOCRATES_CAP_ZERO', envDailyUsd: 0 }), script: mustNotCall });
+  assert.equal(capZero.r.manifest.diagnostic.kind, 'BUDGET_BLOCKED'); assert.match(capZero.r.manifest.diagnostic.reason, /SOCRATES_CAP_ZERO/); assert.equal(capZero.api.calls.length, 0);
+  // a throwing resolver fails closed (ACTIVATION_ERROR), never open.
+  const thrown = await runLive({ socratesActivation: () => { throw new Error('toggle store unreadable'); }, script: mustNotCall });
+  assert.equal(thrown.r.manifest.diagnostic.kind, 'BUDGET_BLOCKED'); assert.match(thrown.r.manifest.diagnostic.reason, /ACTIVATION_ERROR/); assert.equal(thrown.api.calls.length, 0);
+  // ACTIVE with a generous env cap: dispatch proceeds exactly as the config-only path would.
+  const active = await runLive({ socratesActivation: () => ({ active: true, reason: null, envDailyUsd: 1000 }), script: () => ({ json: message(c.scripted) }) });
+  assert.equal(active.r.status, 'COMPLETED'); assert.equal(active.api.messages().length, 1);
+  // effective daily cap = min(config, env), env side binding: config day cap 5 would admit the ~$0.02 case, but the
+  // operator's env cap of $0.001 is smaller, so the reservation is refused by DAY_CAP — proving the env cap was applied.
+  const envBinds = await runLive({ policy: LIVE({ model: { maxEstimatedUsdPerDay: 5 } }), socratesActivation: () => ({ active: true, reason: null, envDailyUsd: 0.001 }), script: mustNotCall });
+  assert.equal(envBinds.r.status, 'BUDGET_BLOCKED'); assert.match(envBinds.r.manifest.diagnostic.reason, /DAY_CAP/); assert.equal(envBinds.api.messages().length, 0, 'the DAY_CAP block lands after the token count, before any /v1/messages');
+  // effective daily cap = min(config, env), config side binding: env cap $5 is generous but the config day cap $0.001
+  // is smaller and still binds — proving min() did not simply take the env value.
+  const cfgBinds = await runLive({ policy: LIVE({ model: { maxEstimatedUsdPerDay: 0.001 } }), socratesActivation: () => ({ active: true, reason: null, envDailyUsd: 5 }), script: mustNotCall });
+  assert.equal(cfgBinds.r.status, 'BUDGET_BLOCKED'); assert.match(cfgBinds.r.manifest.diagnostic.reason, /DAY_CAP/); assert.equal(cfgBinds.api.messages().length, 0);
+  // NO resolver injected: the former behavior exactly — config caps only, dispatch proceeds.
+  const noResolver = await runLive({ socratesActivation: null, script: () => ({ json: message(c.scripted) }) });
+  assert.equal(noResolver.r.status, 'COMPLETED'); assert.equal(noResolver.api.messages().length, 1);
 });
 
 test('C08. prompt injection in a headline cannot cause a call outside the allowlist, change policy, expose the key or emit execution fields: the injected text reaches the model only as data, a model that "obeys" (external subjectRef, execution field) is refused, the sole HTTP host is api.anthropic.com, and the report never carries the key', async () => {

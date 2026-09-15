@@ -11,6 +11,7 @@ import { readControls } from '../state/controls.js';
 import { dailyLockStatus } from '../state/locks.js';
 import { marketResearchRootFromEnv, darkResearchRootOf } from '../market-lab/paths.js';
 import { paidCallAuthorized } from '../market-lab/policy.js';
+import { resolveSocratesActivation } from '../lib/explainer-toggles.js';
 import { loadProfile, profileFileOf, RUNTIME_STATES, mergeOverlay } from './profile.js';
 import { PRESS_SOURCES } from '../press/registry.js';
 import { INFRA_SOURCES } from '../infra/registry.js';
@@ -158,9 +159,27 @@ export function sensorSnapshot({ profile = loadProfile(), env = process.env, con
   rows.push(R({ id: 'KRAKEN_L3_DARK', name: 'Kraken L3 order-level (dark capture)', group: 'DARK_RESEARCH', state: l3State, desiredState: desired('darkEdgeCapture', 'krakenL3'), lastSuccessTs: l3State === 'DARK_CAPTURE_OPERATIONAL' ? dsTs : null, ageMs: l3State === 'DARK_CAPTURE_OPERATIONAL' ? age(dsTs, now) : null, coverage: ds?.l3 ? `verdict ${l3Verdict ?? '—'}; started ${ds.l3.started ? 'yes' : 'no'}; markets ${(ds.l3.markets ?? []).length}` : l3On ? 'NO_CAPTURE_STATUS' : 'DISABLED', blocker: l3State === 'BLOCKED_NO_SAFE_L3_DATA_KEY' ? (l3Keys ? `${l3Verdict}${ds?.l3?.blocker ? ` (${ds.l3.blocker})` : ''}` : 'CREDENTIAL_MISSING (dedicated data-only key; never an execution key)') : l3State === 'KEY_PRESENT_UNPROVEN' ? 'verdict requires the read-only permission probe (preflight --smoke or a capture segment)' : null, detail: 'dark-sense blocker only: never a PAPER readiness blocker', authority: 'NONE' }));
   // ---- SOCRATES ----------------------------------------------------------------------------------------------------------------
   const modelEnabled = policy?.model?.enabled === true; const modelKey = present(env, policy?.model?.credentialEnv ?? 'ANTHROPIC_API_KEY'); const modelBudget = (policy?.model?.maxEstimatedUsdPerCase ?? 0) > 0 && (policy?.model?.maxEstimatedUsdPerDay ?? 0) > 0;
+  // SOCRATES cockpit toggle (David 2026-09-15): the paper model is ENABLED in the policy, but paid dispatch is gated live
+  // by the durable toggle (default OFF) + the env daily cap. The row reflects the RUNTIME truth, not just the policy: it is
+  // never ACTIVE while the toggle is off. Toggle-off is the intended default (dark, non-blocking); a toggle-ON-but-no-key /
+  // no-env-cap is a real misconfiguration the operator asked for.
+  const socAct = resolveSocratesActivation({ dataDir, env }); const effectiveSocratesDailyUsd = socAct.active ? Math.min(policy?.model?.maxEstimatedUsdPerDay ?? 0, socAct.envDailyUsd) : 0;
   const cases = mr?.cases ?? null; const recent = Array.isArray(cases?.recent) ? cases.recent : []; const lastCase = recent.length ? tsOf(recent[recent.length - 1].finishedTs ?? recent[recent.length - 1].createdTs) : null;
   rows.push(R({ id: 'SOCRATES_CASE_RUNTIME', name: 'Socrates case runtime', group: 'SOCRATES', state: !mrOn ? 'DISABLED_BY_PAPER_POLICY' : mr === null ? 'NOT_OBSERVED' : mr.state === 'ACTIVE' ? 'ACTIVE' : 'ACTIVE_DEGRADED', desiredState: desired('socrates', 'caseRuntime'), lastSuccessTs: lastCase, ageMs: age(lastCase, now), coverage: cases ? `queued ${cases.queued ?? 0}; running ${cases.running ?? 0}; recent ${recent.length}` : 'NO_STATUS', blocker: mr === null && mrOn ? 'no research status yet' : mr && mr.state !== 'ACTIVE' ? `service ${mr.state}` : null, detail: 'sealed cases are the ONLY Socrates output the Judge reads (read-only, validated); a case without a model seals BUDGET_BLOCKED', authority: 'SEALED_CASE_INPUT_ONLY' }));
-  rows.push(R({ id: 'SOCRATES_MODEL', name: 'Socrates model (interpretation only)', group: 'SOCRATES', state: !modelEnabled ? 'DISABLED_BY_PAPER_POLICY' : !modelKey ? 'BLOCKED_CREDENTIAL' : !modelBudget ? 'BLOCKED_BUDGET' : 'ACTIVE', desiredState: desired('socrates', 'model'), lastSuccessTs: null, ageMs: null, coverage: modelEnabled ? `USD caps per case ${policy?.model?.maxEstimatedUsdPerCase ?? 0} / day ${policy?.model?.maxEstimatedUsdPerDay ?? 0}` : 'model.enabled false in the paper policy', blocker: !modelEnabled ? 'MODEL_DISABLED_IN_POLICY (explicit USD caps + enable required; never inferred from a key)' : !modelKey ? `${policy?.model?.credentialEnv ?? 'ANTHROPIC_API_KEY'} missing` : !modelBudget ? 'BUDGET_NOT_CONFIGURED' : null, detail: 'output is interpretation, never source truth; schema-validated; fail-closed', authority: 'NONE' }));
+  rows.push(R({ id: 'SOCRATES_MODEL', name: 'Socrates model (interpretation only)', group: 'SOCRATES',
+    state: !modelEnabled ? 'DISABLED_BY_PAPER_POLICY'
+      : socAct.reason === 'TOGGLE_OFF' ? 'DISABLED_BY_PAPER_POLICY'  // dark by the operator's SOCRATES toggle (default OFF); intended, non-blocking
+      : socAct.reason === 'CREDENTIAL_MISSING' || !modelKey ? 'BLOCKED_CREDENTIAL'
+      : socAct.reason === 'SOCRATES_CAP_ZERO' || !modelBudget ? 'BLOCKED_BUDGET'
+      : 'ACTIVE',
+    desiredState: desired('socrates', 'model'), lastSuccessTs: null, ageMs: null,
+    coverage: !modelEnabled ? 'model.enabled false in the paper policy' : socAct.active ? `TOGGLE ON; effective daily cap USD ${effectiveSocratesDailyUsd} = min(config ${policy?.model?.maxEstimatedUsdPerDay ?? 0}, env ${socAct.envDailyUsd}); per-case ${policy?.model?.maxEstimatedUsdPerCase ?? 0}` : `config caps per case ${policy?.model?.maxEstimatedUsdPerCase ?? 0} / day ${policy?.model?.maxEstimatedUsdPerDay ?? 0}; runtime gated by the SOCRATES toggle`,
+    blocker: !modelEnabled ? 'MODEL_DISABLED_IN_POLICY (explicit USD caps + enable required; never inferred from a key)'
+      : socAct.reason === 'TOGGLE_OFF' ? 'SOCRATES toggle OFF (default) — flip it on the password-protected serpent page; no publish needed, and set SERPENT_SOCRATES_DAILY_USD > 0'
+      : socAct.reason === 'CREDENTIAL_MISSING' || !modelKey ? `${policy?.model?.credentialEnv ?? 'ANTHROPIC_API_KEY'} missing`
+      : socAct.reason === 'SOCRATES_CAP_ZERO' ? 'SERPENT_SOCRATES_DAILY_USD not set (> 0)'
+      : !modelBudget ? 'BUDGET_NOT_CONFIGURED' : null,
+    detail: 'output is interpretation, never source truth; schema-validated; fail-closed; paid dispatch is gated by the cockpit SOCRATES toggle (default OFF) + the env daily cap', authority: 'NONE' }));
   // ---- JUDGE / WATCH (the execution projection FILE, bound to the running composition when live) --------------------------------------
   const expected = live.judgeRun ? { accountId: live.judgeRun.accountId, runMode: live.judgeRun.mode } : null; const projFile = path.join(dataDir, 'execution', 'projection.json'); const proj = readExecutionProjection({ now, file: projFile, expected });
   const judgeOn = env.JUDGE_ENABLED === 'true'; const rawProj = readJsonBounded(path.join(dataDir, 'execution', 'projection.json')); const projTs = tsOf(rawProj?.ts);

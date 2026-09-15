@@ -5,7 +5,7 @@
 // suggestions and the chat law without any secret value.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -60,4 +60,21 @@ test('ASK-HTTP-4 (TALK-TO-THEM). /api/ask/status carries the two toggles + meter
   assert.equal(on.status, 200); const don = await on.json(); assert.equal(don.ok, true); assert.equal(don.explainer.socrates.on, true);
   assert.equal((await (await fetch(`${base}/api/ask/status`)).json()).explainer.socrates.on, true, 'the flip is durable across a fresh status read');
   const bad = await post('/api/ask/toggle', { toggle: 'kill', on: true }, { cookie, 'x-serpent-csrf': csrfToken, origin: `http://127.0.0.1:${PORT}` }); assert.equal(bad.status, 400);
+});
+
+test('ASK-HTTP-5 (SOCRATES meter). the SOCRATES half meter reads the research service budget journal (reserved + settled today = runtime.budget.dayUsd) out of the service status FILE — 0 with no service, the real figure once a status is written, and the UI never imports socrates/ to get it', async () => {
+  // no research service running yet: the meter is honestly 0.
+  const before = await (await fetch(`${base}/api/ask/status`)).json();
+  assert.equal(before.explainer.socrates.spentUsdToday, 0, 'no status file -> 0 spend');
+  // the research service writes <dataDir>/market-research/status.json with its runtime budget totals; the day figure is
+  // the reserved + settled spend for today. Drop one in and the SOCRATES meter must read exactly it.
+  const mrRoot = path.join(TEST_DATA, 'market-research'); mkdirSync(mrRoot, { recursive: true });
+  writeFileSync(path.join(mrRoot, 'status.json'), `${JSON.stringify({ serviceVersion: 'x', state: 'ACTIVE', runtime: { budget: { dayUsd: 1.234567, monthUsd: 9.1, unresolvedUsd: 0 } } })}\n`);
+  const after = await (await fetch(`${base}/api/ask/status`)).json();
+  assert.equal(after.explainer.socrates.spentUsdToday, 1.234567, 'the SOCRATES meter reflects the journal day total from the status file');
+  assert.equal(after.explainer.ask.spentUsdToday, before.explainer.ask.spentUsdToday, 'the ASK half is untouched by the research status');
+  // a malformed / absent day figure falls back to 0, never NaN or a client figure.
+  writeFileSync(path.join(mrRoot, 'status.json'), `${JSON.stringify({ runtime: { budget: { dayUsd: 'not-a-number' } } })}\n`);
+  assert.equal((await (await fetch(`${base}/api/ask/status`)).json()).explainer.socrates.spentUsdToday, 0, 'a non-finite day figure is treated as 0');
+  rmSync(mrRoot, { recursive: true, force: true });
 });

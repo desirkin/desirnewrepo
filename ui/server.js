@@ -136,9 +136,12 @@ const ASK_MAX_BODY = 16 * 1024; const askBucket = { tokens: 30, ts: Date.now() }
 function askAllowed() { const now = Date.now(); askBucket.tokens = Math.min(30, askBucket.tokens + ((now - askBucket.ts) / 60_000) * 30); askBucket.ts = now; if (askBucket.tokens < 1) return false; askBucket.tokens -= 1; return true; }
 // the ONE bounded journal read available to the companion: the newest page of the RUNNING account (never another account, never a path from a question)
 async function askJournalPage({ limit }) { if (!judgeRun || !judgeRun.journal || typeof judgeRun.journal.page !== 'function') return null; const h = await judgeRun.journal.load(judgeRun.accountId); const head = Number(h?.headSeq ?? 0); return judgeRun.journal.page(judgeRun.accountId, { afterSeq: Math.max(0, head - limit), limit }); }
-// today's spend per half, read from the durable ledgers (never a client figure): the chat ledger for ASK; SOCRATES spends
-// from its own cap and its runtime is separate, so 0 until that journal is wired here (the meter is honest about it).
-function explainerView() { let talkUsd = 0; try { talkUsd = Number(chat().status()?.spend?.spentUsd) || 0; } catch { talkUsd = 0; } try { return explainerControlsView({ dataDir: dataDir(), env: process.env, spend: { talkUsd, socratesUsd: 0 } }); } catch { return null; } }
+// today's spend per half, read from the durable ledgers (never a client figure): the chat ledger for ASK; the SOCRATES
+// half reads the research service's own budget journal totals (reserved + settled today = runtime.budget.dayUsd) out of
+// its status FILE — the UI never imports socrates/ (B08), the number flows in over the same bounded status read the rest
+// of the market-lab view uses, and stays 0 when the service is not running or has not written a status yet.
+function socratesSpendUsdToday() { try { const st = readJsonBounded(path.join(marketResearchRoot(), 'status.json')); const v = Number(st?.runtime?.budget?.dayUsd); return Number.isFinite(v) && v > 0 ? v : 0; } catch { return 0; } }
+function explainerView() { let talkUsd = 0; try { talkUsd = Number(chat().status()?.spend?.spentUsd) || 0; } catch { talkUsd = 0; } try { return explainerControlsView({ dataDir: dataDir(), env: process.env, spend: { talkUsd, socratesUsd: socratesSpendUsdToday() } }); } catch { return null; } }
 function askStatusView() { let c = null; try { c = chat().status(); } catch (err) { c = { state: 'NOT_CONFIGURED', reason: 'CHAT_UNAVAILABLE', notice: String(err.message).slice(0, 120) }; } return { label: COMPANION_LABEL, version: COMPANION_VERSION, suggestions: [...SUGGESTED_QUESTIONS], chat: c, explainer: explainerView(), authority: 'READ_ONLY' }; }
 async function askHandler(req, res, body) {
   if (!askAllowed()) { json(res, 429, { ok: false, reason: 'RATE_LIMITED' }); return; }

@@ -141,9 +141,12 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     try {
       const { createResearchService, marketResearchRootFromEnv } = await import('./market-lab/service.js');
       const { readPolicyFile, readSubjectsFile } = await import('./market-lab/commands.js');
+      const { resolveSocratesActivation } = await import('./lib/explainer-toggles.js');
       if (!process.env.MARKET_RESEARCH_POLICY || !process.env.MARKET_RESEARCH_SUBJECTS) throw new Error('MARKET_RESEARCH_POLICY and MARKET_RESEARCH_SUBJECTS must name the policy / subjects JSON files');
       marketResearchSubjects = readSubjectsFile(process.env.MARKET_RESEARCH_SUBJECTS);
       marketResearch = createResearchService({ policy: readPolicyFile(process.env.MARKET_RESEARCH_POLICY), subjects: marketResearchSubjects, env: process.env, researchRoot: marketResearchRootFromEnv(process.env, dataDir()), mode: 'INTEGRATED', log: console.log,
+        // SOCRATES cockpit toggle: paid Socrates dispatch is gated live by the durable toggle (default OFF) + the env daily cap; nothing spends until the operator flips it on the password-protected serpent page.
+        socratesActivation: () => resolveSocratesActivation({ dataDir: dataDir(), env: process.env }),
         socialSource: (coin, opts) => (rumor2Handle && typeof rumor2Handle.researchProjection === 'function' ? rumor2Handle.researchProjection(coin, opts) : null) });
       await marketResearch.start();
       console.log(`MARKET RESEARCH active (research only, authority NONE): root ${marketResearch.paths.root}`);
