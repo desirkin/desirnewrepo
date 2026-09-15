@@ -296,7 +296,7 @@ test('normal PAPER composition can qualify Range / Early-Ignition under the unch
     const final = decisions.at(-1);
     assert.equal(final.measurements.filter((x) => !x.ok).map((x) => x.id).join(','), '', JSON.stringify(final));
     assert.equal(final.status, 'ENTRY_RESERVED', JSON.stringify(final));
-    assert.equal(r.run.fee.rate, '0.008');
+    assert.equal(r.run.fee.rate, '0.004');
   } finally { await r.run.stop(); }
 });
 
@@ -324,7 +324,7 @@ for (const setupId of ['MOMENTUM_CONTINUATION', 'TREND_PULLBACK_CONTINUATION', '
     assert.ok(decisions.length);
     assert.equal(decisions.some((x) => x.status === 'ENTRY_RESERVED'), false);
     assert.ok(decisions.some((x) => x.measurements.some((m) => m.id === 'FI15' && m.ok === false)));
-    assert.equal(r.run.fee.rate, '0.008');
+    assert.equal(r.run.fee.rate, '0.004');
   } finally { await r.run.stop(); }
 });
 
@@ -337,7 +337,7 @@ for (const setupId of Object.keys(FAMILY_BY_SETUP).filter((x) => x !== 'RANGE_IG
     const failedSetupClauses = final.measurements.filter((x) => !x.ok && x.id !== 'EXECUTABLE_BOTH_DIRECTIONS' && !x.id.startsWith('ESTIMATED_REMAINING_EDGE') && x.id !== 'ROUND_TRIP_COST_INPUTS_KNOWN');
     assert.deepEqual(failedSetupClauses, [], JSON.stringify(final));
     assert.equal(r.run.judge.status().funnel.setupQualified >= 1, true, JSON.stringify(r.run.judge.status()));
-    assert.equal(r.run.fee.rate, '0.008');
+    assert.equal(r.run.fee.rate, '0.004');
     assert.equal(strategyFamilyOf(final.setupId), FAMILY_BY_SETUP[setupId]);
     assert.ok(['ENTRY_RESERVED', 'ENTRY_REFUSED', 'NO_TRADE'].includes(final.status), final.status);
     if (final.status !== 'ENTRY_RESERVED') assert.ok(final.reasonCodes.some((x) => /COST|REWARD|RISK|SIZE|EDGE/.test(x)), JSON.stringify(final));
@@ -351,7 +351,7 @@ for (const setupId of ['MOMENTUM_CONTINUATION', 'RANGE_IGNITION', 'TREND_PULLBAC
     assert.ok(decisions.length, JSON.stringify({ setupId, candidate: r.run.judge.candidates()[0], status: r.run.judge.status() }));
     assert.equal(decisions.some((x) => x.status === 'ENTRY_RESERVED'), false, JSON.stringify(decisions));
     assert.ok(decisions.some((x) => x.measurements.some((m) => m.id === 'FI15' && m.ok === false)), JSON.stringify(decisions));
-    assert.equal(r.run.fee.rate, '0.008');
+    assert.equal(r.run.fee.rate, '0.004');
   } finally { await r.run.stop(); }
 });
 
@@ -365,7 +365,7 @@ test('normal all-style composition arbitrates same-underlying qualified setups b
     assert.equal(gate.lastBatch.outcomes.filter((x) => x.outcome === 'CLAIMED').length, 1, JSON.stringify(gate));
     assert.ok(gate.lastBatch.outcomes.some((x) => x.outcome === 'NOT_SELECTED'), JSON.stringify(gate));
     assert.equal(r.run.judge.decisions().filter((x) => x.status === 'ENTRY_RESERVED').length, 1, JSON.stringify(r.run.judge.decisions()));
-    assert.equal(r.run.fee.rate, '0.008');
+    assert.equal(r.run.fee.rate, '0.004');
   } finally { await r.run.stop(); }
 });
 
@@ -391,7 +391,7 @@ for (const [index, setupId] of LIFECYCLE_SETUPS.entries()) test(`normal PAPER ${
     assert.equal(active.kind, 'PAPER');
     assert.equal(active.adapter.kind, 'PAPER');
     assert.equal(active.credentialsPresent, false);
-    assert.equal(active.fee.rate, '0.008');
+    assert.equal(active.fee.rate, '0.004');
 
     // The order exists durably before the paper venue can sample a book. Its
     // first post-latency executable book is the only entry-fill witness.
@@ -497,6 +497,6 @@ test('PAPER latency refuses to invent a fill from a stale book after a valid fiv
     assert.equal(Object.keys(state.execIds).length, 0);
     assert.equal(r.run.adapter.status().stops.length, 0);
     assert.equal(r.run.adapter.status().counters.unfilledCoverageUnknown, 1);
-    assert.equal(r.run.fee.rate, '0.008');
+    assert.equal(r.run.fee.rate, '0.004');
   } finally { await r.run.stop(); }
 });

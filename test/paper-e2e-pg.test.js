@@ -30,7 +30,7 @@ const PROFILE = loadProfile(); const PENV = { DATABASE_URL: TEST_URL ?? '' }; co
 assert.equal(PENV.JUDGE_MODE, 'PAPER'); assert.equal(PENV.JUDGE_ALLOW_PRIVATE, 'false'); assert.equal(PENV.JUDGE_ALLOW_ORDERS, 'false'); assert.ok(applied.applied.includes('JUDGE_POLICY'));
 const PROFILE_POLICY_FILE = profileFileOf(PROFILE, 'judgePolicy'); assert.equal(path.resolve(PROFILE_POLICY_FILE), path.resolve(PENV.JUDGE_POLICY), 'the environment names the profile policy file');
 const profileRaw = readFileSync(PROFILE_POLICY_FILE, 'utf8'); assert.equal(profileRaw, readFileSync(path.resolve('judge/samples/policy.paper-reference.json'), 'utf8'), 'the paper profile Judge policy IS the reviewed reference, byte for byte');
-const paperRaw = JSON.parse(profileRaw); assert.equal(paperRaw.mode, 'PAPER'); assert.equal(paperRaw.execution.adapter, 'PAPER'); assert.equal(paperRaw.fees.taker.rate, '0.008', 'the reference fee stands in the profile (no retune)');
+const paperRaw = JSON.parse(profileRaw); assert.equal(paperRaw.mode, 'PAPER'); assert.equal(paperRaw.execution.adapter, 'PAPER'); assert.equal(paperRaw.fees.taker.rate, '0.004', 'the reference fee is the Kraken Pro base taker (0.40%)');
 const feeOver = { taker: { ...paperRaw.fees.taker, rate: '0.001', scheduleId: 'synthetic-test-fee' } };
 const policyFor = (acct) => { const f = path.join(TEST_DATA, `${acct}.json`); writeFileSync(f, JSON.stringify({ ...paperRaw, policyName: acct, account: { ...paperRaw.account, accountId: acct }, fees: feeOver })); return { file: f, ...loadJudgePolicy(f) }; };
 const CODE = 'd'.repeat(64);

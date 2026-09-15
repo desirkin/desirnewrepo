@@ -48,6 +48,13 @@ the day-to-day on/off is the two protected toggles on the serpent page (ASK, SOC
 
 `0` or unset on either cap ⇒ that half stays **dormant**, fail-closed, with no code change needed to toggle it.
 
+### Fees (paper pays exactly what a base-tier live account pays)
+The paper Judge's taker fee is Kraken Pro's **real base schedule: 0.40% taker / 0.25% maker** (30-day volume under the first tier — which a $500 paper account always is). No key is needed for this. A read-only fee-tier reader can confirm the account's actual tier when a dedicated read-only key is present; without it, it falls back to the base schedule.
+| NAME | What it is | Default |
+|---|---|---|
+| `KRAKEN_FEE_TIER_API_KEY` | *(optional)* a dedicated READ-ONLY Kraken key to confirm the live fee tier — never a trading key. | (unset ⇒ base schedule) |
+| `KRAKEN_FEE_TIER_API_SECRET` | *(optional)* the secret for that read-only key. | (unset ⇒ base schedule) |
+
 ### Optional widening (each only adds a sense; none turns paid/private on by itself)
 `SERPENT_OBJECT_STORE_*` above; `TALLY_API_KEY` (governance, off by default); `CLOUDFLARE_API_TOKEN`, `YOUTUBE_API_KEY`,
 provider keys (`COINGECKO_DEMO_API_KEY`, `FRED_API_KEY`, paid provider keys) — all optional, all reported present/absent

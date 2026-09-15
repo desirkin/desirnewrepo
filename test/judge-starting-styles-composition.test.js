@@ -21,7 +21,7 @@ test('STRAT-C01: the explicit five-family policy preserves fees, limits and exec
   const baseline = loadJudgePolicy(baselineFile);
   assert.equal(baseline.policy.policyVersion, 'judge-policy-1');
   assert.deepEqual(candidate.policy.fees, baseline.policy.fees);
-  assert.equal(candidate.policy.fees.taker.rate, '0.008');
+  assert.equal(candidate.policy.fees.taker.rate, '0.004');
   assert.equal(candidate.policy.fees.taker.rateKind, 'PAPER_REFERENCE');
   assert.deepEqual(candidate.policy.limits, baseline.policy.limits);
   assert.deepEqual(candidate.policy.execution, baseline.policy.execution);

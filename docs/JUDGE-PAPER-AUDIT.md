@@ -66,6 +66,10 @@ watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f0
 all (48 files)   1a287ba4471a39123782fafd007c4729497fdd03fe668ce49643188ef6a2730b
 ```
 
+### 4.12 Audited change — 2026-09-15 Ticket A (fees): the paper taker reference is the Kraken Pro base rate 0.40%, not 0.8% (frozen digests UNCHANGED)
+
+Scope: CONFIGURATION ONLY — `config/judge.paper.json`, its byte-identical reference `judge/samples/policy.paper-reference.json`, and `config/judge.paper.starting-styles.json` change the taker `rate` from `0.008` to `0.004` (Kraken Pro's real base schedule: 0.40% taker / 0.25% maker; the maker rate lives in the separate read-only fee-tier reader, used by maker-first entry later). NO frozen `.js` byte changed: `judge/*.js`, `execution/*.js` and `watch/watch.js` read the rate as data from the loaded policy, so the fee flows into fills and cost-aware admission unchanged in code. The Judge's eligibility logic is robust to the correction — `test/judge-five-family-composition-positive.test.js` (all setups) qualifies / refuses exactly as before at the lower fee; only the reference `fee.rate` assertions moved to `0.004`. Paper now pays exactly what a base-tier live account pays as a taker. The whole frozen set digest is UNCHANGED (`all (48 files) 1a287ba4…`), which `test/paper-runtime.test.js` P-08 re-verifies from the working tree.
+
 ### 4.11 Audited change — 2026-09-15 Ticket Z part B: depth-capped whole-nut is the LIVE paper sizing law (previous digests: judge `babd2f69…`, all `5ef55b6e…`; execution `676e1533…` and watch `0c6a43bf…` UNCHANGED)
 
 Scope: `judge/size-ladder.js` (one new option) and `judge/judge.js` (thread it). No decision, permission, exit, reducer, reservation, fee, or fill law changed; the ladder still runs the UNCHANGED `sizeSearch` cost law and the risk caps still bind every size.
