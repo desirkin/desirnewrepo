@@ -17,6 +17,7 @@ import {
   writeCurrentBook,
   writeCurrentFeatureSnapshot,
   writeTapeStatus,
+  stopTapeWrites,
 } from './store.js';
 import {
   MicrostructureTracker,
@@ -528,6 +529,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       setTapeState(TAPE_STATES.OFFLINE, { reason });
       writeTapeStatus({ state: TAPE_STATES.OFFLINE, staleFeedSec: config.tape.staleFeedSec, coins: {} });
       writeEvent('TAPE_STOPPED', { reason });
+      stopTapeWrites(); // I/O LANE (Ticket B): drain any write-behind buffer so a clean stop loses nothing
       if (ws) ws.close();
       resolve(reason);
     };

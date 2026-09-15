@@ -260,7 +260,10 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
   const REPINNED = {
     'rumor2/social-registry.js': 'ee5afa5bf0accfcb641465e94ee1f52d142cb53b4449c2cfd36b06843cc144af',
     'tape/universe.js': 'ed0a16130fee4c841b5f5ba78bac52c5403d6fe4e2ebfd5844bed96c5c05bad1',
-    'tape/run.js': 'ff97a45fb365fc119245b1a5555f0562980225b076b4300ddc7812eb39c1bed2',
+    // Ticket B (I/O lane, 2026-09-15): stopTapeWrites import + a single drain call in the clean-stop path (write-behind
+    // buffer, opt-in SERPENT_TAPE_WRITE_BEHIND; no trading/control/model surface). Tests: test/write-behind.test.js,
+    // test/tape-store-write-behind.test.js.
+    'tape/run.js': '5ad288300107ba587c21bdbf2502aa7fae5e4c86959b65f72d504409617dd504',
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
   };

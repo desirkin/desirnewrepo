@@ -5,24 +5,39 @@ import path from 'node:path';
 import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { dataDir } from '../lib/config.js';
 import { nowIso, sessionDate } from '../lib/time.js';
+import { createWriteBehind } from '../lib/write-behind.js';
 
 export const TAPE_STATES = { LIVE: 'LIVE', DEGRADED: 'DEGRADED', OFFLINE: 'OFFLINE' };
+
+// I/O LANE (Ticket B): opt-in write-behind so the bite lane never blocks on the disk. SERPENT_TAPE_WRITE_BEHIND=true routes
+// the append writes (trades / snapshots / events) and the coalesced latest writes (current book / status / features)
+// through a background flusher; default OFF keeps today's synchronous, freshest-possible writes. A flush error never
+// reaches the bite lane; the shutdown seam calls flushTapeWrites/stopTapeWrites to drain.
+let _wb = null;
+const writeBehindOn = () => process.env.SERPENT_TAPE_WRITE_BEHIND === 'true';
+function wb() { if (!_wb) _wb = createWriteBehind({ log: (m) => { try { process.stderr.write(`tape write-behind: ${m}\n`); } catch { /* best effort */ } } }); return _wb; }
+export function flushTapeWrites() { if (_wb) _wb.flush(); }
+export function stopTapeWrites() { if (_wb) _wb.stop(); } // drain + mark stopped; late writes fall back to a direct write
+export function tapeWriteBehindStatus() { return _wb ? _wb.status() : { enabled: writeBehindOn(), active: false }; }
 
 function sessionDir() {
   return path.join(dataDir(), 'tape', sessionDate());
 }
 
 export function writeTrade(trade) {
-  appendJsonl(path.join(sessionDir(), 'trades.jsonl'), trade);
+  const file = path.join(sessionDir(), 'trades.jsonl');
+  if (writeBehindOn()) wb().enqueueAppend(file, trade); else appendJsonl(file, trade);
 }
 
 export function writeSnapshot(snapshot) {
-  appendJsonl(path.join(sessionDir(), 'snapshots.jsonl'), snapshot);
+  const file = path.join(sessionDir(), 'snapshots.jsonl');
+  if (writeBehindOn()) wb().enqueueAppend(file, snapshot); else appendJsonl(file, snapshot);
 }
 
 export function writeEvent(type, detail = {}) {
   const event = { ts: nowIso(), type, ...detail };
-  appendJsonl(path.join(sessionDir(), 'events.jsonl'), event);
+  const file = path.join(sessionDir(), 'events.jsonl');
+  if (writeBehindOn()) wb().enqueueAppend(file, event); else appendJsonl(file, event);
   return event;
 }
 
@@ -34,7 +49,8 @@ const statusFile = () => path.join(dataDir(), 'tape', 'status.json');
 
 // Full current book for one coin — the cost model's only price source.
 export function writeCurrentBook(coin, book) {
-  atomicWriteJson(bookFile(coin), { ts: nowIso(), tsMs: Date.now(), coin, ...book.toJSON() });
+  const payload = { ts: nowIso(), tsMs: Date.now(), coin, ...book.toJSON() };
+  if (writeBehindOn()) wb().enqueueLatest(bookFile(coin), payload); else atomicWriteJson(bookFile(coin), payload);
 }
 
 export function readCurrentBook(coin) {
@@ -44,7 +60,8 @@ export function readCurrentBook(coin) {
 }
 
 export function writeTapeStatus(status) {
-  atomicWriteJson(statusFile(), { ts: nowIso(), tsMs: Date.now(), ...status });
+  const payload = { ts: nowIso(), tsMs: Date.now(), ...status };
+  if (writeBehindOn()) wb().enqueueLatest(statusFile(), payload); else atomicWriteJson(statusFile(), payload);
 }
 
 export function readTapeStatus() {
@@ -68,7 +85,8 @@ const featureSnapshotFile = (coin) => path.join(dataDir(), 'tape', 'features', `
 
 export function writeCurrentFeatureSnapshot(coin, snapshot, { tsMs, session, symbol = null }) {
   if (!Number.isSafeInteger(tsMs) || tsMs <= 0) throw new Error('feature snapshot: tsMs must be the captured owner clock');
-  atomicWriteJson(featureSnapshotFile(coin), { version: FEATURE_SNAPSHOT_VERSION, coin, symbol, ts: new Date(tsMs).toISOString(), tsMs, session, ...snapshot });
+  const payload = { version: FEATURE_SNAPSHOT_VERSION, coin, symbol, ts: new Date(tsMs).toISOString(), tsMs, session, ...snapshot };
+  if (writeBehindOn()) wb().enqueueLatest(featureSnapshotFile(coin), payload); else atomicWriteJson(featureSnapshotFile(coin), payload);
 }
 
 // Pure read: a detached deep-frozen copy of the current file, or null when the tape
