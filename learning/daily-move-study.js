@@ -13,6 +13,13 @@ import {
 export const DAILY_MOVE_STUDY_VERSION = 'daily-move-study-1';
 export const DAILY_MOVE_MANIFEST_VERSION = 'daily-move-study-manifest-1';
 export const DAILY_MOVE_MANIFEST_VERSION_V2 = 'daily-move-study-manifest-2';
+// L-1 (David's daily-study selection widening): v3 is v2 + one additive rule,
+// topMoversPerDay, pinned to 30. It widens the selected population to the union
+// of the >8% threshold cohort and the 30 largest |close/open-1| markets, deduped
+// (see TOP_MOVER_CASE below). The threshold law itself is unchanged (rise/fall
+// stay strict >8%); no upstream DATA-1/catalog change.
+export const DAILY_MOVE_MANIFEST_VERSION_V3 = 'daily-move-study-manifest-3';
+export const DEFAULT_TOP_MOVERS_PER_DAY = 30;
 export const DEFAULT_STUDY_TIME_ZONE = 'America/New_York';
 export const SUPPORT_FAMILIES = Object.freeze([
   'PRICE', 'CANDLES', 'BASE_VOLUME', 'QUOTE_VOLUME', 'TRADES', 'TRADE_FLOW', 'SPREAD', 'DEPTH', 'CATALYST',
@@ -20,6 +27,10 @@ export const SUPPORT_FAMILIES = Object.freeze([
 export const SUPPORT_STATES = Object.freeze(['COMPLETE', 'PARTIAL', 'GAP', 'MISSING', 'UNSUPPORTED', 'INVALID', 'DEFERRED']);
 export const DISPOSITIONS = Object.freeze([
   'SURGE_CASE', 'AMBIGUOUS_INTRABAR', 'FAILED_BREAKOUT_CONTROL', 'FALLING_CONTROL', 'FLAT_CONTROL',
+  // TOP_MOVER_CASE (L-1, v3 only): a top-30 mover by |close/open-1| that did NOT
+  // cross the intraday threshold and is not already a threshold cohort row — the
+  // additive half of the widened selection. It is never emitted for v1/v2.
+  'TOP_MOVER_CASE',
   'OTHER_OBSERVED', 'MISSING_DATA', 'INVALID_DATA',
 ]);
 
@@ -40,6 +51,11 @@ const RULE_KEYS = Object.freeze([
   'flatRangePct', 'preWindowMs', 'decisionGridMs', 'controlsPerClass', 'episodeUnit',
   'sameCandleExtrema', 'maxObservationsPerMarket', 'maxDecisionFramesPerMarket',
 ]);
+// v3 carries exactly one more rule than v1/v2: topMoversPerDay. v1/v2 rules must
+// NOT carry it (exactKeys rejects the extra key), which keeps their digests and
+// behavior byte-identical.
+const RULE_KEYS_V3 = Object.freeze([...RULE_KEYS, 'topMoversPerDay']);
+const ruleKeysFor = (version) => (version === DAILY_MOVE_MANIFEST_VERSION_V3 ? RULE_KEYS_V3 : RULE_KEYS);
 const MARKET_DAY_KEYS = Object.freeze(['marketIdentityDigest', 'priceEvents', 'candles', 'support']);
 const PRICE_KEYS = Object.freeze(['observationId', 'kind', 'price', 'sourceEventTs', 'receivedTs', 'knownAtTs', 'sourceDigest']);
 const CANDLE_KEYS = Object.freeze([
@@ -104,7 +120,7 @@ const manifestDigestOf = (m) => canonicalDigest({
 
 export function dailyMoveStudyManifestError(manifest) {
   const keys = exactKeys(manifest, MANIFEST_KEYS); if (keys) return `manifest: ${keys}`;
-  if (![DAILY_MOVE_MANIFEST_VERSION, DAILY_MOVE_MANIFEST_VERSION_V2].includes(manifest.manifestVersion)
+  if (![DAILY_MOVE_MANIFEST_VERSION, DAILY_MOVE_MANIFEST_VERSION_V2, DAILY_MOVE_MANIFEST_VERSION_V3].includes(manifest.manifestVersion)
       || manifest.analysisBasis !== 'RETROSPECTIVE_COHORT_STUDY') return 'manifest: version/basis malformed';
   if (!isTs(manifest.createdTs) || manifest.createdTs < manifest.dayEndTs) return 'manifest: retrospective declaration must be at/after the completed day';
   const terr = timeBoundaryError(manifest); if (terr) return `manifest: ${terr}`;
@@ -134,7 +150,7 @@ export function dailyMoveStudyManifestError(manifest) {
   const recipeDigests = manifest.recipeSeals.map((s) => s.recipeDigest);
   if (new Set(recipeDigests).size !== recipeDigests.length || recipeDigests.join('\n') !== [...recipeDigests].sort().join('\n')) return 'manifest: recipe seals duplicated or not canonical-sorted';
   if (new Set(manifest.recipeSeals.map((s) => s.recipe.recipeVersion)).size !== manifest.recipeSeals.length) return 'manifest: one recipeVersion cannot name multiple study seals';
-  const rk = exactKeys(manifest.rules, RULE_KEYS); if (rk) return `manifest: rules ${rk}`;
+  const rk = exactKeys(manifest.rules, ruleKeysFor(manifest.manifestVersion)); if (rk) return `manifest: rules ${rk}`;
   const r = manifest.rules;
   if (![r.riseThresholdPct, r.failedRiseFloorPct, r.failedRetracePct, r.fallingThresholdPct, r.flatRangePct].every((n) => isFiniteNum(n) && n > 0)
       || r.riseThresholdPct !== 8 || r.comparison !== 'STRICT_GREATER_THAN' || r.failedRiseFloorPct >= r.riseThresholdPct
@@ -144,6 +160,10 @@ export function dailyMoveStudyManifestError(manifest) {
       || r.episodeUnit !== DEFAULT_RULES.episodeUnit || r.sameCandleExtrema !== DEFAULT_RULES.sameCandleExtrema
       || !Number.isSafeInteger(r.maxObservationsPerMarket) || r.maxObservationsPerMarket < 1
       || !Number.isSafeInteger(r.maxDecisionFramesPerMarket) || r.maxDecisionFramesPerMarket < 1) return 'manifest: rules violate the bounded >8% study law';
+  // v3 pins topMoversPerDay to exactly 30, the same way every version pins the
+  // rise threshold to 8 — a config that names any other value is refused.
+  if (manifest.manifestVersion === DAILY_MOVE_MANIFEST_VERSION_V3
+      && (!Number.isSafeInteger(r.topMoversPerDay) || r.topMoversPerDay !== DEFAULT_TOP_MOVERS_PER_DAY)) return 'manifest: v3 pins topMoversPerDay to 30';
   if (manifest.authority !== AUTHORITY || manifest.purpose !== PURPOSE) return 'manifest: authority must remain NONE / RESEARCH_ONLY';
   if (!SHA256_RE.test(String(manifest.manifestDigest)) || manifest.manifestDigest !== manifestDigestOf(manifest)
       || manifest.manifestId !== `dmstudy-${manifest.manifestDigest.slice(0, 24)}`) return 'manifest: content identity forged';
@@ -185,6 +205,27 @@ export function sealDailyMoveStudyManifestV2({
     catalogSnapshot: clone(acceptedCatalogSnapshot), catalogProvenance: clone(catalogProvenance),
     recipeSeals: recipeSeals.map(clone).sort((a, b) => a.recipeDigest.localeCompare(b.recipeDigest)),
     rules: { ...DEFAULT_RULES, ...rules }, authority: AUTHORITY, purpose: PURPOSE,
+  };
+  manifest.manifestDigest = manifestDigestOf(manifest);
+  manifest.manifestId = `dmstudy-${manifest.manifestDigest.slice(0, 24)}`;
+  const err = dailyMoveStudyManifestError(manifest); if (err) throw new Error(`daily move study: ${err}`);
+  return deepFreeze(manifest);
+}
+
+// v3: the v2 verified-local-archive manifest plus the additive topMoversPerDay
+// rule (pinned to 30). Everything else — the >8% threshold law, the catalog
+// provenance shape, the digest identity — is exactly v2.
+export function sealDailyMoveStudyManifestV3({
+  createdTs, timeZone = DEFAULT_STUDY_TIME_ZONE, localDay, dayStartTs, dayEndTs,
+  acceptedCatalogSnapshot, catalogProvenance, recipeSeals = [], rules = {},
+}) {
+  if (!Array.isArray(recipeSeals) || recipeSeals.length > 64) throw new Error('daily move study: manifest recipe seals malformed or exceed 64');
+  const manifest = {
+    manifestVersion: DAILY_MOVE_MANIFEST_VERSION_V3, manifestId: '', manifestDigest: '',
+    analysisBasis: 'RETROSPECTIVE_COHORT_STUDY', createdTs, timeZone, localDay, dayStartTs, dayEndTs,
+    catalogSnapshot: clone(acceptedCatalogSnapshot), catalogProvenance: clone(catalogProvenance),
+    recipeSeals: recipeSeals.map(clone).sort((a, b) => a.recipeDigest.localeCompare(b.recipeDigest)),
+    rules: { ...DEFAULT_RULES, topMoversPerDay: DEFAULT_TOP_MOVERS_PER_DAY, ...rules }, authority: AUTHORITY, purpose: PURPOSE,
   };
   manifest.manifestDigest = manifestDigestOf(manifest);
   manifest.manifestId = `dmstudy-${manifest.manifestDigest.slice(0, 24)}`;
@@ -460,6 +501,23 @@ function materializeFrames(row, day, manifest, anchorTs) {
   row.framePlan = { requested, materialized: frames.length, truncated: frames.length < requested, firstDecisionTs: frames[0]?.decisionTs ?? null, lastDecisionTs: frames.at(-1)?.decisionTs ?? null };
 }
 
+// The day's absolute move |close/open - 1| for the top-mover ranking (L-1, v3).
+// Open = the open of the earliest closed candle; close = the close of the latest
+// closed candle. With no candles it falls back to the first/last price event by
+// source-event time. A market with fewer than the two anchors needed (or a
+// non-positive open) is not rankable (null) — it can never become a top mover.
+function dailyMoveMagnitude(day) {
+  const candles = [...day.candles].sort((a, b) => a.periodStartTs - b.periodStartTs || a.observationId.localeCompare(b.observationId));
+  let open = null; let close = null;
+  if (candles.length > 0) { open = candles[0].open; close = candles.at(-1).close; }
+  else {
+    const events = [...day.priceEvents].sort((a, b) => a.sourceEventTs - b.sourceEventTs || a.observationId.localeCompare(b.observationId));
+    if (events.length > 0) { open = events[0].price; close = events.at(-1).price; }
+  }
+  if (!isFiniteNum(open) || !isFiniteNum(close) || open <= 0) return null;
+  return Math.abs(close / open - 1);
+}
+
 export function buildDailyMoveStudy({ manifest, acceptedCatalogSnapshot, marketDays }) {
   const merr = dailyMoveStudyManifestError(manifest); if (merr) throw new Error(`daily move study: ${merr}`);
   const cerr = acceptedCatalogSnapshotError(acceptedCatalogSnapshot); if (cerr) throw new Error(`daily move study: catalog ${cerr}`);
@@ -510,6 +568,26 @@ export function buildDailyMoveStudy({ manifest, acceptedCatalogSnapshot, marketD
     rows.push(base);
   }
 
+  // L-1 top-mover overlay (v3 only): widen the population to the union of the
+  // >8% threshold cohort and the 30 largest |close/open-1| markets, deduped. A
+  // top-30 mover that already carries a threshold disposition keeps it (dedup);
+  // one that was only OTHER_OBSERVED is re-labelled TOP_MOVER_CASE and gets its
+  // own full-day decision frames (anchored at the day open) so it is a real
+  // selected case, not a bare denominator row. v1/v2 never enter this branch, so
+  // their behavior and digests are byte-identical.
+  if (manifest.manifestVersion === DAILY_MOVE_MANIFEST_VERSION_V3) {
+    const ranked = rows
+      .filter((row) => row.retrospectiveLabels.disposition !== 'INVALID_DATA' && row.retrospectiveLabels.disposition !== 'MISSING_DATA')
+      .map((row) => ({ row, magnitude: dailyMoveMagnitude(dayByDigest.get(row.marketIdentityDigest)) }))
+      .filter((x) => x.magnitude !== null)
+      .sort((a, b) => b.magnitude - a.magnitude || a.row.marketIdentityDigest.localeCompare(b.row.marketIdentityDigest));
+    for (const { row } of ranked.slice(0, manifest.rules.topMoversPerDay)) {
+      if (row.retrospectiveLabels.disposition !== 'OTHER_OBSERVED') continue; // dedup: already in the cohort
+      row.retrospectiveLabels = { ...row.retrospectiveLabels, disposition: 'TOP_MOVER_CASE' };
+      materializeFrames(row.retrospectiveReplay, dayByDigest.get(row.marketIdentityDigest), manifest, manifest.dayStartTs);
+    }
+  }
+
   // Match controls only after every market-day has one exclusive disposition.
   // The full-day outcome chooses the control POOL; the distance sees only facts
   // that were known by the surge's first-breach clock.
@@ -546,7 +624,7 @@ export function buildDailyMoveStudy({ manifest, acceptedCatalogSnapshot, marketD
     + controlClasses.reduce((m, cls) => m + Math.max(0, manifest.rules.controlsPerClass - row.matches.filter((x) => x.controlClass === cls).length), 0), 0);
   const completeSupportMatrixCases = rows.filter((row) => row.retrospectiveLabels.disposition !== 'INVALID_DATA'
     && SUPPORT_FAMILIES.every((family) => row.support?.[family]?.state === 'COMPLETE')).length;
-  const observedGroupDispositions = new Set(['SURGE_CASE', 'AMBIGUOUS_INTRABAR', 'FAILED_BREAKOUT_CONTROL', 'FALLING_CONTROL', 'FLAT_CONTROL', 'OTHER_OBSERVED']);
+  const observedGroupDispositions = new Set(['SURGE_CASE', 'AMBIGUOUS_INTRABAR', 'FAILED_BREAKOUT_CONTROL', 'FALLING_CONTROL', 'FLAT_CONTROL', 'TOP_MOVER_CASE', 'OTHER_OBSERVED']);
   const verifiedLocalV2Archive = manifest.manifestVersion === DAILY_MOVE_MANIFEST_VERSION_V2;
 
   return deepFreeze({
@@ -574,6 +652,9 @@ export function buildDailyMoveStudy({ manifest, acceptedCatalogSnapshot, marketD
     },
     laws: {
       qualification: 'ANY STRICTLY ORDERED EARLIER_TO_LATER RISE >8% WITHIN THE DECLARED LOCAL DAY; LATER COLLAPSE DOES NOT UNQUALIFY',
+      ...(manifest.manifestVersion === DAILY_MOVE_MANIFEST_VERSION_V3 ? {
+        topMoverSelection: `SELECTED POPULATION = THE >8% THRESHOLD COHORT UNION THE TOP ${manifest.rules.topMoversPerDay} MARKETS BY |CLOSE/OPEN-1|, DEDUPED; TOP_MOVER_CASE MARKS A TOP MOVER THAT DID NOT CROSS THE INTRADAY THRESHOLD; THE THRESHOLD LAW IS UNCHANGED`,
+      } : {}),
       sameCandle: 'OHLC LOW/HIGH ORDER UNKNOWN; SAME-BAR EXTREMA ALONE ARE AMBIGUOUS',
       denominator: verifiedLocalV2Archive
         ? 'EVERY MARKET IN THE VERIFIED LOCAL V2 ARCHIVE FULL-DAY CATALOG UNION HAS EXACTLY ONE ROW; THIS DOES NOT PROVE EXTERNAL CUSTODY OR PROSPECTIVE ELIGIBILITY'

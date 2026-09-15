@@ -35,7 +35,7 @@ This is the doctrine every ticket is built against. Quotes are David's; the orga
 - Three accounts (David, Cerulean, Cody): one brain, three balances; identical paper balances now; real Kraken keys per account later.
 
 ## What this means for the build
-- The ≥10%-mover study is SIM-1/DATA-1: the full-day archive + daily move study is the wide end of the funnel, not a nice-to-have.
+- The ≥8%-mover study is SIM-1/DATA-1: the full-day archive + daily move study is the wide end of the funnel, not a nice-to-have. (The threshold is 8% in the study law — riseThresholdPct/fallingThresholdPct — and v3 widens the population to the union of the >8% cohort and the top 30 movers by |close/open−1|, deduped; the earlier "10%" was doctrine prose, never the number the code enforced.)
 - "Learning what to avoid" = outcomes on losers and non-trades count as much as wins.
 - "Immediately looking again" = no cooldown that outlasts the exit; slots and daily targets throttle by facts, not by clock.
 - Socrates needs the case-builder wire (senses → case → Socrates → Judge) — the differentiator ticket.

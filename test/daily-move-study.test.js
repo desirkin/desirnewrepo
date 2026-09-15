@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildDailyDecisionFrame, buildDailyMoveStudy, sealDailyMoveStudyManifest, SUPPORT_FAMILIES,
+  buildDailyDecisionFrame, buildDailyMoveStudy, sealDailyMoveStudyManifest, sealDailyMoveStudyManifestV3,
+  dailyMoveStudyManifestError, DAILY_MOVE_MANIFEST_VERSION_V3, SUPPORT_FAMILIES,
 } from '../learning/daily-move-study.js';
 import { sealAcceptedCatalogSnapshot, marketIdentityDigest } from '../learning/shadow-catalog-snapshot.js';
 import { sealShadowRecipe } from '../learning/shadow-recipe-seal.js';
@@ -175,4 +176,61 @@ test('invalid observations cannot earn complete-support credit from a complete-l
   assert.equal(row.retrospectiveLabels.disposition, 'INVALID_DATA');
   assert.ok(SUPPORT_FAMILIES.every((family) => row.support[family].state === 'MISSING'));
   assert.equal(report.counters.completeSupportMatrixCases, 0);
+});
+
+// L-1: the v3 manifest pins topMoversPerDay to 30 (the same way every version pins the rise
+// threshold to 8), and the study widens the population to the union of the >8% threshold cohort
+// and the top-30 |close/open-1| movers, deduped, marking the additive members TOP_MOVER_CASE.
+const v2Provenance = (catalogSnapshot) => ({
+  provenanceVersion: 'daily-broad-archive-provenance-1', state: 'VERIFIED_LOCAL_V2_ARCHIVE_FULL_DAY',
+  provenanceVerified: true, durableFullDayEpochUnionVerified: true,
+  sourceDatasetVersion: 'broad-day-dataset-v1', sourceDatasetDigest: 'b'.repeat(64), sourceDatasetId: `bdd-${'b'.repeat(64)}`,
+  sourceArchiveVersion: 'broad-day-archive-local-v2', catalogEpochDigest: 'c'.repeat(64),
+  catalogUnionContentDigest: catalogSnapshot.contentDigest, durability: 'LOCAL_FILESYSTEM_ONLY', republishSafe: false,
+  warning: 'test fixture: content-bound local v2 archive provenance',
+});
+const sealV3 = (rules = {}) => sealDailyMoveStudyManifestV3({
+  createdTs: CREATED, localDay: '2026-09-13', dayStartTs: START, dayEndTs: END,
+  acceptedCatalogSnapshot: catalog, catalogProvenance: v2Provenance(catalog), recipeSeals: [recipeSeal], rules,
+});
+
+test('L-1: v3 pins topMoversPerDay to exactly 30 and v1/v2 reject the extra rule key', () => {
+  const m = sealV3();
+  assert.equal(m.manifestVersion, DAILY_MOVE_MANIFEST_VERSION_V3);
+  assert.equal(m.rules.topMoversPerDay, 30);
+  assert.equal(m.rules.riseThresholdPct, 8, 'the >8% threshold law is unchanged');
+  assert.equal(dailyMoveStudyManifestError(m), null);
+  // exactly 30, the same way v2 pins 8: any other value is refused (both directions), whatever the config asks.
+  assert.throws(() => sealV3({ topMoversPerDay: 29 }), /topMoversPerDay to 30/);
+  assert.throws(() => sealV3({ topMoversPerDay: 31 }), /topMoversPerDay to 30/);
+  assert.throws(() => sealV3({ topMoversPerDay: 8 }), /topMoversPerDay to 30/);
+  assert.throws(() => sealV3({ topMoversPerDay: 30.5 }), /topMoversPerDay to 30/);
+  // a forged v3 whose rule is tampered after the seal still fails the validator.
+  const forged = JSON.parse(JSON.stringify(sealV3())); forged.rules.topMoversPerDay = 40;
+  assert.match(dailyMoveStudyManifestError(forged), /topMoversPerDay to 30|content identity forged/);
+  // v1/v2 carry no topMoversPerDay rule at all — the exact-keys law rejects it.
+  assert.throws(() => sealDailyMoveStudyManifest({
+    createdTs: CREATED, localDay: '2026-09-13', dayStartTs: START, dayEndTs: END,
+    acceptedCatalogSnapshot: catalog, recipeSeals: [recipeSeal], rules: { topMoversPerDay: 30 },
+  }), /rules/);
+});
+
+test('L-1: the widened selection unions the >8% cohort with the top movers, deduped — a surge stays SURGE_CASE, a sub-threshold top mover becomes TOP_MOVER_CASE with its own frames', () => {
+  const surge = day(0, { events: [event('s0', 1, 100), event('s1', 2, 100), event('s2', 3, 108.01), event('s3', 3.2, 90)] }); // ~10% move, strictly-ordered >8% rise
+  const modest = day(30, { events: [event('m0', 1, 100), event('m1', 2, 105)] }); // 5% move: a real mover, below the intraday threshold
+  const m3 = sealV3();
+  const report = buildDailyMoveStudy({ manifest: m3, acceptedCatalogSnapshot: catalog, marketDays: [surge, modest] });
+  assert.equal(disposition(report, 0), 'SURGE_CASE', 'a top mover already in the threshold cohort keeps its disposition (dedup)');
+  assert.equal(disposition(report, 30), 'TOP_MOVER_CASE', 'a top-30 mover that did not cross the threshold is the additive selection');
+  assert.equal(report.counters.dispositions.TOP_MOVER_CASE, 1);
+  const mover = report.cases.find((c) => c.market.canonicalCoin === market(30).canonicalCoin);
+  assert.ok(mover.retrospectiveReplay.decisionFrames.length > 0, 'a TOP_MOVER_CASE is a real selected case with decision frames, not a bare denominator row');
+  assert.ok(mover.retrospectiveReplay.decisionFrames.every((frame) => frame.knownAtCeilingTs <= frame.decisionTs), 'frames stay strictly decision-time prefixes');
+  assert.match(report.laws.topMoverSelection, /TOP 30 MARKETS BY \|CLOSE\/OPEN-1\|/);
+  // the SAME market days under v1 never produce a TOP_MOVER_CASE — the widening is v3-only, byte-identical otherwise.
+  const v1 = buildDailyMoveStudy({ manifest, acceptedCatalogSnapshot: catalog, marketDays: [surge, modest] });
+  assert.equal(disposition(v1, 0), 'SURGE_CASE');
+  assert.equal(disposition(v1, 30), 'OTHER_OBSERVED', 'v1 leaves a sub-threshold mover as OTHER_OBSERVED');
+  assert.equal(v1.counters.dispositions.TOP_MOVER_CASE, 0);
+  assert.equal(v1.laws.topMoverSelection, undefined, 'v1 carries no top-mover selection law');
 });

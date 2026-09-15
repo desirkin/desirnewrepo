@@ -94,6 +94,14 @@ by name in preflight, none flips its own budget/plan gate on.
 **Never set** a Kraken trading key. There is none in the paper profile. A Kraken L3 key, if ever added, is a dedicated
 DATA-ONLY key proven `SAFE_L3_DATA_KEY` before use — never an execution credential.
 
+### The daily move study — the wide end of the funnel (research only, offline, no key)
+The retrospective daily study selects the day's cases from the full-day archive. The **threshold is 8%** (a strictly
+ordered intraday rise or fall — `riseThresholdPct` / `fallingThresholdPct`, both 8; the older "10%" was prose, never the
+enforced number). The **v3 study law widens the selected population** to the union of that >8% cohort and the **top 30
+markets by absolute daily move `|close/open − 1|`** (`topMoversPerDay`, pinned to 30), deduped — a top-30 mover that did
+not cross the threshold is selected as a `TOP_MOVER_CASE`. It is config-driven but the manifest pins the value to 30, the
+same way it pins the threshold to 8; nothing here touches DATA-1 capture, the Judge, or any authority (RESEARCH_ONLY).
+
 ---
 
 ## 2. Gates that must be green before you start
