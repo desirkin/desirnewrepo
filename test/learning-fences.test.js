@@ -20,7 +20,7 @@ test('every learning module imports only lib/, research pure modules and its own
 
 test('the only cross-package imports are lib/ helpers — learning MIRRORS the offline label law (learning/labels.js) without importing the offline pipeline, per the operational fence', () => {
   // Exactly one additional pure helper: no market pipeline or execution import.
-  const allowed = new Set(["'../lib/jsonl.js'", "'../lib/config.js'", "'../lib/book-walk.js'"]);
+  const allowed = new Set(["'../lib/jsonl.js'", "'../lib/config.js'", "'../lib/book-walk.js'", "'../lib/main-lane-meter.js'"]);
   for (const f of readdirSync(LEARNING_DIR).filter((x) => x.endsWith('.js'))) {
     const src = readFileSync(path.join(LEARNING_DIR, f), 'utf8');
     for (const m of src.matchAll(/from ('\.\.\/[^']+')/g)) assert.ok(allowed.has(m[1]), `${f} imports ${m[1]} which is not in the allowed reuse set`);

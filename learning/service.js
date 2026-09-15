@@ -13,6 +13,7 @@
 import { createLearningStore } from './store.js';
 import { buildCoverageRow, buildEpisode } from './capture.js';
 import { maturationSweep } from './maturation.js';
+import { createMainLaneMeter } from '../lib/main-lane-meter.js';
 import { classifyOutcome, nextPatternStep, buildPatternRecord } from './patterns.js';
 import { planCaptureTick, rollCounters, countCapture, coverageAges, emptyDailyCounters, DEFAULT_DAILY_TARGET } from './continuous.js';
 import { buildDailySummary } from './summary.js';
@@ -39,6 +40,9 @@ export function startLearning({
   opportunityAuditFollowup = null,
   clock = Date.now, timers = { setInterval, clearInterval }, tickMs = DEFAULT_TICK_MS,
   dailyTarget = DEFAULT_DAILY_TARGET, log = () => {},
+  // CPU LANES (Ticket 6): measure how long each learning step occupies the main lane, so a heavy maintenance pass that
+  // could delay a bite is visible in status. Injected in tests; a fresh internal meter otherwise. Measurement only.
+  meter = createMainLaneMeter({ budgetMs: 50, now: clock }),
 } = {}) {
   if (env.LEARNING_ENABLED !== 'true') return { state: () => 'DISABLED', stop: () => {}, tick: () => null };
   if (shadowRunner !== null && (!shadowRunner || typeof shadowRunner !== 'object' || Array.isArray(shadowRunner)
@@ -164,6 +168,7 @@ export function startLearning({
       shadowLane: shadowRunner ? (() => { try { return shadowRunner.status(nowTs); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
       opportunityAuditLane: opportunityAuditFollowup ? (() => { try { return opportunityAuditFollowup.status(); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
       killSwitch: kill, sourceDelayEvidence: PROVIDER_DELAY_EVIDENCE,
+      mainLane: (() => { try { return meter.snapshot(); } catch { return null; } })(), // per-step main-lane occupancy (Ticket 6)
       authority: AUTHORITY, purpose: PURPOSE,
       law: 'COLLECTOR_RUNNING_IS_NOT_LEARNER_RUNNING_IS_NOT_VALIDATED_ADAPTIVE_BEHAVIOR',
     });
@@ -175,13 +180,13 @@ export function startLearning({
     const nowTs = clock();
     counters = rollCounters(counters, nowTs);
     const report = {};
-    try { report.capture = captureTick(nowTs); } catch (err) { errors.capture += 1; report.capture = { failed: err.message }; }
-    try { report.maturation = maturationTick(nowTs); } catch (err) { errors.maturation += 1; report.maturation = { failed: err.message }; }
-    try { report.learning = learnTick(nowTs); } catch (err) { errors.learning += 1; report.learning = { failed: err.message }; }
+    try { report.capture = meter.time('capture', () => captureTick(nowTs)); } catch (err) { errors.capture += 1; report.capture = { failed: err.message }; }
+    try { report.maturation = meter.time('maturation', () => maturationTick(nowTs)); } catch (err) { errors.maturation += 1; report.maturation = { failed: err.message }; }
+    try { report.learning = meter.time('learning', () => learnTick(nowTs)); } catch (err) { errors.learning += 1; report.learning = { failed: err.message }; }
     // One optional step; failure is reported without suppressing other lanes.
     // Absent port performs no shadow work. The owner must keep any heavy
     // learning workload isolated from the trading/Watch event loop.
-    if (shadowRunner) { try { report.shadow = shadowRunner.step({ nowTs }); } catch (err) { errors.shadow += 1; report.shadow = { failed: String(err?.message ?? err).slice(0, 200) }; } }
+    if (shadowRunner) { try { report.shadow = meter.time('shadow', () => shadowRunner.step({ nowTs })); } catch (err) { errors.shadow += 1; report.shadow = { failed: String(err?.message ?? err).slice(0, 200) }; } }
     if (opportunityAuditFollowup) {
       try {
         const task = opportunityAuditFollowup.step({ nowTs });
