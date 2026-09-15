@@ -207,6 +207,27 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       learningHandle = null;
     }
   }
+  // LEARNING DATA CLOCK (Ticket 3): from minute one, record the 5-minute bite + 15-minute continuation outcome of EVERY
+  // PAPER decision — a strike OR a refusal — by maturing the durable DECISION_RECORDED journal (read-only, via the
+  // Judge's own journal.page) against the broad-Kraken 1m candle capture, into a durable store under
+  // data/learning/decision-outcomes. Dormant by construction: it reads the journal and writes only its own outcome
+  // store; it never calls the Judge, grants authority, or touches entry / exit / sizing. It runs only for a PAPER Judge
+  // run (it needs the journal + account), on a 60 s unref'd timer, and fails dark — a fault never affects trading.
+  let decisionOutcomeTimer = null;
+  if (judgeRun && judgeRun.kind === 'PAPER' && judgeRun.journal && judgeRun.accountId) {
+    try {
+      const { createDecisionOutcomeRecorder } = await import('./learning/decision-outcome-recorder.js');
+      const { openDecisionOutcomeStore } = await import('./learning/decision-outcome-store.js');
+      const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js');
+      const store = openDecisionOutcomeStore({ dir: path.join(dataDir(), 'learning', 'decision-outcomes'), log: console.log });
+      const seriesSource = createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log });
+      const recorder = createDecisionOutcomeRecorder({ readPage: (afterSeq, limit) => judgeRun.journal.page(judgeRun.accountId, { afterSeq, limit }), seriesSource, store, clock: () => Date.now(), log: console.log });
+      const runOnce = () => recorder.tick().catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
+      decisionOutcomeTimer = setInterval(runOnce, 60_000); if (typeof decisionOutcomeTimer?.unref === 'function') decisionOutcomeTimer.unref();
+      void runOnce();
+      console.log('LEARNING DATA CLOCK active (dormant, authority NONE): recording the 5m bite + 15m continuation of every PAPER decision');
+    } catch (err) { console.error(`LEARNING DATA CLOCK failed to start (dark; nothing else affected): ${err.message}`); decisionOutcomeTimer = null; }
+  }
   rumor2Handle = startRumor2({
     checkpointStore: rumor2CheckpointStore(), journal: rumor2JournalStore(),
     // SOCIAL-4F: DISCOVERY_CATALOG injection — read-only accessors only (no mutable survey map, no
@@ -250,6 +271,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     if (judgeRun) { try { await judgeRun.stop(); } catch (err) { console.error(`JUDGE stop failed: ${err.message}`); } }
     if (marketResearch) { try { await marketResearch.stop(); } catch (err) { console.error(`MARKET RESEARCH stop failed: ${err.message}`); } }
     if (learningHandle) { try { learningHandle.stop(); } catch (err) { console.error(`LEARN-1 stop failed: ${err.message}`); } }
+    if (decisionOutcomeTimer) { try { clearInterval(decisionOutcomeTimer); } catch { /* timer already cleared */ } decisionOutcomeTimer = null; }
     // paper launch seam: components the paper launcher started stop cleanly BEFORE the process exits
     if (typeof globalThis.serpentPaperShutdown === 'function') { try { await globalThis.serpentPaperShutdown(); } catch (err) { console.error(`PAPER shutdown seam failed: ${err.message}`); } }
     // the spine stops LAST — collector additions in reverse, quota checkpoints closed, persistence stopped, lock
