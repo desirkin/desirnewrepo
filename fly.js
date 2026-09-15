@@ -280,10 +280,15 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   let caseTriggerTimer = null;
   if (process.env.SERPENT_CASE_TRIGGER === 'true' && marketResearch && marketResearchSubjects) {
     try {
-      const { createCaseTrigger } = await import('./market-lab/case-trigger.js');
+      const { createCaseTrigger, combineFlagSources } = await import('./market-lab/case-trigger.js');
       const { createDossierFlagSource } = await import('./market-lab/dossier-flag-source.js');
+      const { createJudgeCandidateFlagSource } = await import('./market-lab/judge-candidate-flag-source.js');
       const socialSource = (coin, opts) => (rumor2Handle && typeof rumor2Handle.researchProjection === 'function' ? rumor2Handle.researchProjection(coin, opts) : null);
-      const flaggedCoinsSource = createDossierFlagSource({ socialSource, subjects: marketResearchSubjects, log: console.log });
+      // Two flag sources side by side (David's decision): a fresh rumor2 dossier, AND a coin the Judge is actively
+      // weighing (a live candidate). The case trigger applies the same declared-subject filter and per-coin cooldown to both.
+      const dossierFlags = createDossierFlagSource({ socialSource, subjects: marketResearchSubjects, log: console.log });
+      const candidateFlags = createJudgeCandidateFlagSource({ candidatesSource: () => (judgeRun && judgeRun.judge && typeof judgeRun.judge.candidates === 'function' ? judgeRun.judge.candidates() : []), log: console.log });
+      const flaggedCoinsSource = combineFlagSources(dossierFlags, candidateFlags);
       const caseTrigger = createCaseTrigger({ service: marketResearch, subjects: marketResearchSubjects, flaggedCoinsSource, clock: () => Date.now(), log: console.log });
       const runTrigger = () => { try { caseTrigger.tick(); } catch (err) { console.error(`CASE TRIGGER tick: ${err.message}`); } };
       caseTriggerTimer = setInterval(runTrigger, 60_000); if (typeof caseTriggerTimer?.unref === 'function') caseTriggerTimer.unref();

@@ -12,6 +12,18 @@
 export const CASE_TRIGGER_VERSION = 'case-trigger-1';
 export const CASE_TRIGGER_DEFAULT_COOLDOWN_MS = 3_600_000; // one case per coin per hour at most, whatever the flag cadence
 
+// Merge several flag sources into one for the trigger. Each source is read fail-closed: a throwing or non-array source
+// contributes nothing and never sinks its siblings. The trigger's own dedup + cooldown handle a coin flagged by more
+// than one source. Used to run the fresh-dossier source and the Judge-candidate source side by side.
+export function combineFlagSources(...sources) {
+  const list = sources.filter((s) => typeof s === 'function');
+  return ({ asOfTs } = {}) => {
+    const flags = [];
+    for (const s of list) { let out; try { out = s({ asOfTs }); } catch { out = null; } if (Array.isArray(out)) flags.push(...out); }
+    return flags;
+  };
+}
+
 // subjects: the declared research subject set (only these can get a case) as { subjects: [{canonicalCoin}] }, an array of
 // {canonicalCoin} / strings, or a Set. flaggedCoinsSource({ asOfTs }) returns the currently flagged coins — each a
 // canonicalCoin string or { canonicalCoin, reason?, trigger?, entrances?, sourceEventId?, observedTs? }. service is the
