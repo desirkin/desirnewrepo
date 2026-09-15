@@ -19,6 +19,13 @@ export const DECISION_YARDSTICK_VERSION = 'decision-yardstick-1';
 export const BITE_WINDOW_MIN = 5;        // the bite window (David: "average maybe 4 to 6 minutes")
 export const CONTINUATION_MIN = 15;      // the minutes after ("it kept going after I sold")
 export const DECISION_YARDSTICK_HORIZONS_MIN = Object.freeze([BITE_WINDOW_MIN, CONTINUATION_MIN]);
+// L-2 (2026-09-15): longer RESEARCH horizons — 1h / 4h / 24h log returns as ADDITIONAL columns on every graded
+// decision, read from the SAME stored series. They are research-only: the 5m/15m bite+continuation stay the
+// qualification yardstick for authority; these longer horizons change NO sizing and NO permission. A column is a
+// finite log return only when the horizon is KNOWN; when the series has not reached the horizon yet (or is
+// unavailable/censored) it is NaN — never a fabricated zero.
+export const RESEARCH_HORIZONS_MIN = Object.freeze([60, 240, 1440]);
+export const RESEARCH_HORIZON_LABEL = Object.freeze({ 60: '1h', 240: '4h', 1440: '24h' });
 
 const HORIZON_STATES = Object.freeze(['KNOWN', 'CENSORED', 'NOT_YET_KNOWN', 'OUTCOME_UNAVAILABLE']);
 
@@ -27,6 +34,11 @@ const horizon = (horizonMin, state, reason, horizonEndTs, outcomeKnownAtTs, valu
   horizonMin, state, reason, horizonEndTs, outcomeKnownAtTs,
   logReturnPct: values.logReturnPct ?? null, mfePct: values.mfePct ?? null, maePct: values.maePct ?? null,
 });
+
+// A research-horizon column: the log return only, NaN unless the horizon is KNOWN. Keeps the state + clocks for
+// provenance so a NaN is always explained (NOT_YET_KNOWN / CENSORED / OUTCOME_UNAVAILABLE), never a bare hole.
+const researchColumn = (h) => ({ horizonMin: h.horizonMin, state: h.state, logReturnPct: h.state === 'KNOWN' ? h.logReturnPct : NaN, horizonEndTs: h.horizonEndTs, outcomeKnownAtTs: h.outcomeKnownAtTs });
+const researchHorizonsFrom = (scoreHorizonFn) => { const out = {}; for (const m of RESEARCH_HORIZONS_MIN) out[RESEARCH_HORIZON_LABEL[m]] = researchColumn(scoreHorizonFn(m)); return out; };
 
 // Score one decision against a validated 1-minute candle series (the shape learning/labels.js validateCandleSeriesRow
 // returns: { retrievedTsMs, coverageEndSec, candles:[[openSec,o,h,l,c,v]...], index:Map<openSec,i>, count, firstOpenSec,
@@ -41,6 +53,7 @@ export function scoreDecisionYardstick({ canonicalCoin, decisionKnownAtTs, serie
     ...base, availability: { state: 'OUTCOME_UNAVAILABLE', reason }, reference: { state: 'OUTCOME_UNAVAILABLE', barOpenSec: null, price: null, knownAtTs: null },
     bite: horizon(BITE_WINDOW_MIN, 'OUTCOME_UNAVAILABLE', reason, anchorTsMs + BITE_WINDOW_MIN * 60_000, null),
     continuation: horizon(CONTINUATION_MIN, 'OUTCOME_UNAVAILABLE', reason, anchorTsMs + CONTINUATION_MIN * 60_000, null),
+    researchHorizons: researchHorizonsFrom((m) => horizon(m, 'OUTCOME_UNAVAILABLE', reason, anchorTsMs + m * 60_000, null)),
   });
   if (!series) return unavailable('SERIES_ABSENT_FOR_ASSET');
   if (!isTs(series.retrievedTsMs) || !(series.index instanceof Map) || !Array.isArray(series.candles)) return unavailable('SERIES_MALFORMED');
@@ -81,7 +94,8 @@ export function scoreDecisionYardstick({ canonicalCoin, decisionKnownAtTs, serie
   const availability = states.some((s) => s === 'KNOWN' || s === 'NOT_YET_KNOWN')
     ? { state: states.every((s) => s === 'KNOWN' || s === 'NOT_YET_KNOWN') ? 'AVAILABLE' : 'PARTIAL', reason: 'COMPLETE' }
     : { state: 'PARTIAL', reason: 'INTERIOR_BAR_MISSING' };
-  return deepFreeze({ ...base, availability, reference, bite, continuation });
+  const researchHorizons = researchHorizonsFrom(scoreHorizon); // 1h / 4h / 24h — research columns only, never authority
+  return deepFreeze({ ...base, availability, reference, bite, continuation, researchHorizons });
 }
 
 // A cheap validator for a scored yardstick record (used by the recorder before it durably stores an outcome).
@@ -94,6 +108,18 @@ export function decisionYardstickError(record) {
     if (!h || typeof h !== 'object' || h.horizonMin !== horizonMin || !HORIZON_STATES.includes(h.state)) return `${field} horizon malformed`;
     if (h.state === 'KNOWN') { if (!isFiniteNum(h.logReturnPct) || !isFiniteNum(h.mfePct) || !isFiniteNum(h.maePct) || h.mfePct < 0 || h.maePct > 0) return `${field} KNOWN values malformed`; }
     else if (h.logReturnPct !== null || h.mfePct !== null || h.maePct !== null) return `${field} non-KNOWN carries values`;
+  }
+  // L-2: the research columns are present for every graded decision. Each carries a finite log return ONLY when KNOWN;
+  // otherwise it is NaN (never null, never a fabricated zero). They are research-only and gate no authority.
+  const rh = record.researchHorizons;
+  if (!rh || typeof rh !== 'object' || Array.isArray(rh)) return 'researchHorizons missing';
+  for (const m of RESEARCH_HORIZONS_MIN) {
+    const c = rh[RESEARCH_HORIZON_LABEL[m]];
+    if (!c || typeof c !== 'object' || c.horizonMin !== m || !HORIZON_STATES.includes(c.state)) return `research horizon ${RESEARCH_HORIZON_LABEL[m]} malformed`;
+    if (c.state === 'KNOWN') { if (!isFiniteNum(c.logReturnPct)) return `research horizon ${RESEARCH_HORIZON_LABEL[m]} KNOWN value malformed`; }
+    // NaN in memory (the fresh score); JSON.stringify turns NaN into null in the durable JSONL, so a re-read record
+    // legitimately carries null for a not-yet-known column. Accept either — never a finite number, never a zero.
+    else if (!(Number.isNaN(c.logReturnPct) || c.logReturnPct === null)) return `research horizon ${RESEARCH_HORIZON_LABEL[m]} not-yet-known must be NaN (or null on re-read)`;
   }
   return null;
 }

@@ -1,7 +1,7 @@
 // DECISION YARDSTICK (Ticket 3, 2026-09-15). The pure 5-minute bite + 15-minute continuation scorer. No I/O.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scoreDecisionYardstick, decisionYardstickError, DECISION_YARDSTICK_VERSION, BITE_WINDOW_MIN, CONTINUATION_MIN } from '../learning/decision-yardstick.js';
+import { scoreDecisionYardstick, decisionYardstickError, DECISION_YARDSTICK_VERSION, BITE_WINDOW_MIN, CONTINUATION_MIN, RESEARCH_HORIZONS_MIN, RESEARCH_HORIZON_LABEL } from '../learning/decision-yardstick.js';
 
 // Build a validated-shape 1m series (as learning/labels.js validateCandleSeriesRow returns) from a list of closes,
 // starting at openSec0. Each bar is [openSec, open, high, low, close, vol]; here high/low bracket open/close.
@@ -82,4 +82,54 @@ test('DY-5. coverage ending before a horizon CENSORS it; identity/clock breaches
   const r = scoreDecisionYardstick({ canonicalCoin: 'BTC', decisionKnownAtTs: decisionAtAnchorSec(anchorSec), series: s, asOfTs });
   assert.equal(r.bite.state, 'KNOWN'); assert.equal(r.continuation.state, 'CENSORED'); assert.equal(r.continuation.reason, 'SOURCE_COVERAGE_ENDS_BEFORE_HORIZON');
   assert.throws(() => scoreDecisionYardstick({ canonicalCoin: 'btc', decisionKnownAtTs: 1, series: null, asOfTs: 1 }), /identity \/ clocks malformed/);
+});
+
+// ---- L-2: the 1h / 4h / 24h research columns -------------------------------------------------
+test('L2-1. every graded decision carries the 1h/4h/24h research columns; a horizon the series has not reached is NaN (never a fabricated zero), and it never touches the authority bite/continuation', () => {
+  const refOpenSec = 6_000_000 * 60; const anchorSec = refOpenSec + 60;
+  // ref 100, then only 15 forward bars: the 15m continuation matures but 1h/4h/24h do not
+  const closes = [100]; for (let i = 1; i <= 15; i += 1) closes.push(100 + i);
+  const s = series(refOpenSec, closes);
+  const asOfTs = (anchorSec + 15 * 60) * 1000 + 60_000; // just past the 15m continuation, far before 1h
+  const r = scoreDecisionYardstick({ canonicalCoin: 'BTC', decisionKnownAtTs: decisionAtAnchorSec(anchorSec), series: s, asOfTs });
+  assert.equal(r.bite.state, 'KNOWN'); assert.equal(r.continuation.state, 'KNOWN', 'the authority yardstick is unaffected');
+  assert.ok(r.researchHorizons && typeof r.researchHorizons === 'object', 'research columns are present');
+  assert.deepEqual(Object.keys(r.researchHorizons).sort(), ['1h', '24h', '4h'], 'exactly the three research columns');
+  for (const m of RESEARCH_HORIZONS_MIN) {
+    const c = r.researchHorizons[RESEARCH_HORIZON_LABEL[m]];
+    assert.equal(c.horizonMin, m);
+    assert.equal(c.state, 'NOT_YET_KNOWN', `${RESEARCH_HORIZON_LABEL[m]} has not matured yet`);
+    assert.ok(Number.isNaN(c.logReturnPct), `${RESEARCH_HORIZON_LABEL[m]} is NaN when the series has not reached it — never 0/null`);
+  }
+  assert.equal(decisionYardstickError(r), null, 'the record with NaN research columns validates');
+  // the durable JSON shadow: NaN serializes to null; the validator still accepts it on re-read
+  const roundTripped = JSON.parse(JSON.stringify(r));
+  assert.equal(roundTripped.researchHorizons['1h'].logReturnPct, null, 'NaN becomes null through JSONL');
+  assert.equal(decisionYardstickError(roundTripped), null, 'a re-read record (null research columns) still validates');
+});
+
+test('L2-2. once the series reaches 24h, all three research columns are KNOWN finite log returns, computed off the same reference bar as the bite', () => {
+  const refOpenSec = 7_000_000 * 60; const anchorSec = refOpenSec + 60;
+  const closes = [100]; for (let i = 1; i <= 1440; i += 1) closes.push(100 + i * 0.01); // ref 100, 1440 forward bars (24h)
+  const s = series(refOpenSec, closes);
+  const asOfTs = (anchorSec + 1440 * 60) * 1000 + 60_000; // past the 24h horizon
+  const r = scoreDecisionYardstick({ canonicalCoin: 'BTC', decisionKnownAtTs: decisionAtAnchorSec(anchorSec), series: s, asOfTs });
+  for (const m of RESEARCH_HORIZONS_MIN) {
+    const c = r.researchHorizons[RESEARCH_HORIZON_LABEL[m]];
+    assert.equal(c.state, 'KNOWN', `${RESEARCH_HORIZON_LABEL[m]} matured`);
+    assert.ok(Number.isFinite(c.logReturnPct), `${RESEARCH_HORIZON_LABEL[m]} is a finite log return`);
+  }
+  // the 1h column is the log return of the 60th forward bar close vs the reference (100), same recipe as the bite
+  assert.equal(r.researchHorizons['1h'].logReturnPct, Number((100 * Math.log((100 + 60 * 0.01) / 100)).toFixed(4)));
+  assert.equal(decisionYardstickError(r), null);
+});
+
+test('L2-3. an OUTCOME_UNAVAILABLE decision still carries the three research columns, each NaN', () => {
+  const anchorSec = 8_000_000 * 60 + 60;
+  const asOfTs = (anchorSec + 1440 * 60) * 1000;
+  const r = scoreDecisionYardstick({ canonicalCoin: 'BTC', decisionKnownAtTs: decisionAtAnchorSec(anchorSec), series: null, asOfTs });
+  assert.equal(r.availability.state, 'OUTCOME_UNAVAILABLE');
+  assert.deepEqual(Object.keys(r.researchHorizons).sort(), ['1h', '24h', '4h']);
+  for (const m of RESEARCH_HORIZONS_MIN) assert.ok(Number.isNaN(r.researchHorizons[RESEARCH_HORIZON_LABEL[m]].logReturnPct));
+  assert.equal(decisionYardstickError(r), null);
 });
