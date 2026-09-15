@@ -21,3 +21,8 @@ Law (lean trim, 2026-09-14, approved by David):
   `test/learning-maturation.test.js`, retired with the pipeline). Its tests moved to `attic/test/` (the `social-5b-*` and
   `referee-*` suites + their helpers). The rumor2-authority / socrates-contract / social-scope fences that scanned the
   tree were updated to exclude `attic/` and to drop the retired files from their offline-research enumerations.
+- `tools/` — four fully-orphaned setup-smoke / recon scripts (LEAN PASS 2 target #4, 2026-09-15): `governance-setup-smoke.mjs`,
+  `youtube-setup-smoke.mjs`, `public-discovery-smoke.mjs`, `stocktwits_recon.js`. Proven zero references anywhere (no
+  importer, no package.json script, no `.replit`, no doc, no fence, no test) — one-off throwaway diagnostics superseded by
+  the unified runtime's own collector status; they moved no sense module. The live operator diagnostics stay
+  (`tools/social-storage-diagnose.mjs`, `tools/news-setup.mjs`, the fenced bluesky/farcaster/official setup smokes).
