@@ -258,6 +258,11 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
   //     NAME, retention, quota, scope, receipt) in the 2026-09-13 data-only series; the earlier line-delta entry and its
   //     unreachable digest constant are superseded. Tests: test/social-census.test.js, test/social-7-readiness.test.js.
   const REPINNED = {
+    // LEAN PASS 3 (2026-09-15): rumor2/truth.js is now a thin BARREL re-exporting the exact same 60 public
+    // names from sibling modules rumor2/truth-{core,classify,graph,validate,txn,replay}.js. The implementation
+    // is moved verbatim (byte-identical behavior; export surface unchanged, verified equal to the 60-name baseline);
+    // no trading/control/model surface. Tests: test/rumor2-*.test.js (the truth consumers), test/rumor2-authority.js R2A-75.
+    'rumor2/truth.js': 'ed965693f7f97d07913fe12758bed927364e39f6054cd6ac8c916c45ed833219',
     'rumor2/social-registry.js': 'ee5afa5bf0accfcb641465e94ee1f52d142cb53b4449c2cfd36b06843cc144af',
     'tape/universe.js': 'ed0a16130fee4c841b5f5ba78bac52c5403d6fe4e2ebfd5844bed96c5c05bad1',
     // Ticket B (I/O lane, 2026-09-15): stopTapeWrites import + a single drain call in the clean-stop path (write-behind

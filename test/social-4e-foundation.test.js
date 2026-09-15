@@ -168,7 +168,11 @@ test('4E-5. protected provider / contract / truth surfaces are byte-identical to
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
     'rumor2/social-reddit.js': 'a451febebb1c9f19ad59431ccee640ced220633b3775f340ee574d3c688372f6',
     'rumor2/social-stocktwits.js': 'f97c662435a21263b5cd8cf51549099adaa65c6749f342e7bf4c6ec1b1c506ee',
-    'rumor2/truth.js': 'f8aa2578000d7590e7710a47cbdd1a2b79f763a8baf0a832f89c42eeb6093c2e',
+    // AUDITED RE-PIN (LEAN PASS 3, 2026-09-15): rumor2/truth.js is now a thin BARREL re-exporting the exact same
+    // 60 public names from sibling modules rumor2/truth-{core,classify,graph,validate,txn,replay}.js. Code moved
+    // verbatim (byte-identical behavior; export surface verified equal to the 60-name baseline; the 68 importers
+    // are untouched). Pinned to the resulting barrel bytes. Tests: test/rumor2-*.test.js, test/rumor2-authority.js R2A-75.
+    'rumor2/truth.js': 'ed965693f7f97d07913fe12758bed927364e39f6054cd6ac8c916c45ed833219',
   };
   // SOCIAL-5 (master convoy §36.3): rumor2/social.js lawfully gained ONE line — propagationVsIndependence exposes
   // family membership (memberSourceIds) so the research dependency manifest never re-derives families. Every other
