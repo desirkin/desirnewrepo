@@ -64,6 +64,23 @@ test('CAS conflict latches only its checkpoint and a lost session lock blocks ev
   await store.close();
 });
 
+test('PUBLISH-FIX-1: a transient durable-write failure is retried with bounded backoff before latching; the underlying code + attempt count ride into CHECKPOINT_WRITE_FAILED; fail-closed is preserved', async () => {
+  const logs = []; const p = persistence();
+  const store = await openExternalCheckpointStore({ persistence: p, log: (m) => logs.push(String(m)), sleep: () => Promise.resolve(), writeRetries: 3, writeRetryBackoffMs: 1 });
+  const a = await store.restore({ id: EXTERNAL_CHECKPOINT_IDS.DATA_ONLY, validate: validator, commission: { allowCreate: true, state: { used: 1 }, reason: 'test owner', ts: 1 } });
+  // a transient failure that clears within the 3-try budget: the commit still succeeds, and a retry was logged with the code
+  const realSave = p.repo.saveRuntimeState.bind(p.repo); let fails = 2;
+  p.repo.saveRuntimeState = async (...args) => { if (fails > 0) { fails -= 1; throw Object.assign(new Error('db timeout'), { code: 'ETIMEDOUT' }); } return realSave(...args); };
+  assert.deepEqual(await a.commit({ used: 2 }), { used: 2 }, 'the write survives two transient timeouts');
+  assert.ok(logs.some((m) => /durable write attempt 1\/3 failed \(ETIMEDOUT\)/.test(m)), 'each retry logs the underlying code');
+  // a persistent failure exhausts the budget and latches CHECKPOINT_WRITE_FAILED naming the underlying code + attempt count
+  p.repo.saveRuntimeState = async () => { throw Object.assign(new Error('db timeout'), { code: 'ETIMEDOUT' }); };
+  await assert.rejects(() => a.commit({ used: 3 }), (e) => e.code === 'CHECKPOINT_WRITE_FAILED' && /ETIMEDOUT after 3 attempt/.test(e.message));
+  // fail-closed law unchanged: the checkpoint is latched, no further mutations
+  await assert.rejects(() => a.commit({ used: 4 }), /CHECKPOINT_LATCHED/);
+  await store.close();
+});
+
 test('store refuses startup before the durable core is restored or when another owner holds the lock', async () => {
   const p = persistence(); p.health = () => ({ databaseConfigured: true, restored: false, failureCategory: 'RESTORE_FAILED' });
   await assert.rejects(() => openExternalCheckpointStore({ persistence: p }), /PERSISTENCE_RESTORE_REQUIRED/);

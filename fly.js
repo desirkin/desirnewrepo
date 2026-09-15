@@ -6,7 +6,7 @@
 // NO TRADE.
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { dataDir } from './lib/config.js';
+import { dataDir, dataGeneration, purgeLegacyData } from './lib/config.js';
 import { runTape } from './tape/run.js';
 import { readCurrentUniverse } from './tape/universe.js';
 import { readCurrentFeatureSnapshot, readTapeStatus } from './tape/store.js';
@@ -41,6 +41,15 @@ if (SERPENT_MODE === null) {
       '`npm run data:only` (DATA_ONLY: pins the safety posture first). A bare `node fly.js` has no mode and never composes.'
   );
   process.exit(1);
+}
+
+// PUBLISH-FIX-1 — before any lock, journal or write: announce the data generation and run the one-shot legacy purge (a
+// republished VM keeps the old flat app's data). This runs once for BOTH modes, before the spine or the paper composition
+// touch the disk, so a new generation is a clean crib. The current generation is never touched by the purge.
+{
+  const gen = dataGeneration();
+  console.log(`SERPENT DATA generation: ${gen || '(flat, no generation)'} · root ${dataDir()}`);
+  purgeLegacyData({ env: process.env, log: (m) => console.log(`[DATA ${new Date().toISOString()}] ${m}`) });
 }
 
 if (SERPENT_MODE === 'DATA_ONLY') {

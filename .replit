@@ -20,6 +20,13 @@ deploymentTarget = "vm"
 
 [userenv.shared]
 COBRA_DATA_DIR = "./data"
+# The runtime writes under ./data/<generation> so a new generation is a clean crib on a disk the republish did not wipe.
+# Bump to gen2, gen3, … for a future fresh start; the legacy purge (SERPENT_PURGE_LEGACY_DATA=1) clears the old flat data.
+SERPENT_DATA_GENERATION = "gen1"
+# Durable object store = Replit App Storage (no service-account JSON; the sidecar supplies credentials). Boot logs the
+# resolved provider ("OBJECT STORE active/disabled"). These are not secrets.
+SERPENT_OBJECT_STORE_PROVIDER = "REPLIT"
+SERPENT_OBJECT_STORE_BUCKET = "replit-objstore-3adc1924-46b0-4b42-9d2d-898e6cda4f1a"
 PORT = "3000"
 DISCOVERY_SOURCES = "GDELT_NEWS_DISCOVERY,POLYMARKET_PUBLIC_DATA,KALSHI_PUBLIC_DATA"
 DISCOVERY_GDELT_MAX_DAILY_REQUESTS = "16"
@@ -31,11 +38,11 @@ DISCOVERY_KALSHI_MAX_DAILY_REQUESTS = "24"
 DISCOVERY_KALSHI_PAGE_LIMIT = "1000"
 
 [userenv.development]
-COBRA_PROFILE = ""
+COBRA_PROFILE = "config/paper-runtime.json"
 DISCOVERY_ENABLED = "true"
 
 [userenv.production]
-COBRA_PROFILE = ""
+COBRA_PROFILE = "config/paper-runtime.json"
 DISCOVERY_ENABLED = "true"
 
 [postMerge]

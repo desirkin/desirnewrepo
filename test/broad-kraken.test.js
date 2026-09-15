@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { catalogContentId } from '../survey/catalog.js';
@@ -291,5 +292,27 @@ test('invalid price/volume and malformed/future OHLC are never fresh; stop drain
   const reopened = open(); await reopened.stop();
   const source = readFileSync(new URL('../market-lab/broad-kraken.js', import.meta.url), 'utf8');
   for (const forbidden of ['addOrder', 'cancelOrder', "from '../judge", "from '../watch", "from '../tape", 'api_key', 'ws-auth']) assert.equal(source.includes(forbidden), false, forbidden);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('PUBLISH-FIX-1: the broad-Kraken writer lock recovers a DEAD owner (republished disk keeps the old lock) — logged, re-owned; a LIVE owner still refuses; an unreadable lock refuses for manual review', async () => {
+  FakeSocket.instances.length = 0; const dir = temp(); const now = T;
+  const c = catalog([market('BTC', 'XXBT', 'XBT')]);
+  const lockDir = path.join(dir, 'broad-kraken'); mkdirSync(lockDir, { recursive: true });
+  const lockFile = path.join(lockDir, 'writer.lock'); const logs = [];
+  const open = () => startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: c, fresh: true }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => now, log: (m) => logs.push(String(m)), limits: { catalogPollMs: 60_000 } });
+  // a lock owned by a DEAD pid (spawnSync's child has exited) is recovered, logged, and re-owned — never "operator verification required"
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  writeFileSync(lockFile, `${JSON.stringify({ version: 'x', pid: dead, token: 'zz', acquiredTs: now })}\n`);
+  const handle = open();
+  assert.ok(logs.some((m) => m.includes(`recovered stale broad Kraken writer lock from stopped pid ${dead}`)), 'the dead owner lock is recovered and logged');
+  assert.equal(JSON.parse(readFileSync(lockFile, 'utf8')).pid, process.pid, 'the lock is re-owned by this process');
+  await handle.stop();
+  // a lock owned by a LIVE pid (this process) is real contention — still refuses, never recovered
+  writeFileSync(lockFile, `${JSON.stringify({ version: 'x', pid: process.pid, token: 'zz', acquiredTs: now })}\n`);
+  assert.throws(open, (e) => e.code === 'BROAD_MARKET_LOCKED' && /live owner|already active/.test(e.message));
+  // an unreadable lock is never silently unlinked — it refuses for manual review
+  writeFileSync(lockFile, 'not json{');
+  assert.throws(open, (e) => e.code === 'BROAD_MARKET_LOCKED' && /manual review/.test(e.message));
   rmSync(dir, { recursive: true, force: true });
 });

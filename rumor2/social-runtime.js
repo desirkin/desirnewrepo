@@ -229,11 +229,15 @@ export function createSocialRuntime({
   // frame (they are redelivered from the durable cursor), keep durable truth,
   // never advance the cursor. No zombie stream may keep receiving (§21).
   function stop(reason = 'stopped') {
+    // Log hygiene (PUBLISH-FIX-1): a stop is announced only on an ACTUAL transition (a live stream or an ACTIVE state
+    // being torn down), never on the repeated no-op stops the per-tick authority guard issues while already stopped —
+    // otherwise "X stopped (collector not initialized)" prints every 15 s. State change, not per tick.
+    const wasLive = stream !== null || state === 'ACTIVE';
     if (stream) { stream.stop(); stream = null; stats.stops += 1; }
     if (intake) { intake.clear(); intake = null; }
     pendingBatch = null; retainedEnvelopes = []; streamHeld = false; pendingScopeOp = null; // the lawful writer re-hydrates from the journal before any new scope operation
     if (state === 'ACTIVE') state = 'STANDBY';
-    log(`social-runtime: ${provider.id} stopped (${reason})`);
+    if (wasLive) log(`social-runtime: ${provider.id} stopped (${reason})`);
   }
 
   // UNRESOLVED-CACHE LAW: a version that settled as an unresolved observation (a new PENDING record

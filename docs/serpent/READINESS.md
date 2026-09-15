@@ -67,6 +67,18 @@ reported as **MISCONFIGURED** (fail-closed; the uploader and restore-on-boot sta
 Missing the bucket or the service-account NAME while the provider is `GCS` is reported as **MISCONFIGURED** (fail-closed),
 not a boot crash.
 
+### A clean crib on a republished disk (PUBLISH-FIX-1)
+A Replit **republish does not wipe the deployment VM disk or the production PostgreSQL** — the previous app's `./data`,
+lock files, journals and checkpoint rows survive. Two mechanisms keep every republish a clean birth:
+| NAME | What it is |
+|---|---|
+| `SERPENT_DATA_GENERATION` | The data generation the runtime writes under: everything lives in `COBRA_DATA_DIR/<generation>` (`.replit` sets `gen1`). A new generation is an empty crib on an old disk; **bump to `gen2`, `gen3`, … for a future fresh start.** `COBRA_DATA_DIR` itself stays `./data`. |
+| `SERPENT_PURGE_LEGACY_DATA` | Set to `1` for **exactly one republish** to delete the old flat data (every top-level entry in `COBRA_DATA_DIR` that is not the current generation directory) at boot — logged with byte counts, the current generation never touched. **Remove it after that one boot** so it never runs again. |
+
+At boot the log prints the resolved generation and root (`SERPENT DATA generation: gen1 · root …/data/gen1`) and, when
+the purge runs, each removed entry with its byte count. A malformed `SERPENT_DATA_GENERATION`, or the purge env without a
+generation, fails closed (nothing is deleted).
+
 ### The explainer — "Talk to them" (TALK-TO-THEM ticket; report only, after the fact, never feeds the Judge)
 Set these when you want the question box on the serpent page live. All optional; the two dollar caps are **ceilings** —
 the day-to-day on/off is the two protected toggles on the serpent page (ASK, SOCRATES), which never need a publish.

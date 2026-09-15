@@ -10,7 +10,10 @@ export const MAX_EXTERNAL_CHECKPOINT_BYTES = 20 * 1024 * 1024;
 export const EXTERNAL_CHECKPOINT_LOCK = 'serpent:data-only-external-checkpoint:v1';
 export const EXTERNAL_CHECKPOINT_IDS = Object.freeze({
   DATA_ONLY: 'external_quota:data-only:v1',
-  DISCOVERY: 'external_quota:discovery:v1',
+  // PUBLISH-FIX-1: the public-discovery checkpoint shape changed (the GDELT / Polymarket / Kalshi source set), so the old
+  // deployment's v1 rows fail COMMISSIONING_CHECKPOINT_INVALID on this build. v2 commissions fresh; the v1 rows stay,
+  // untouched, under their own id. The other namespaces' shapes are unchanged, so they keep v1.
+  DISCOVERY: 'external_quota:discovery:v2',
   YOUTUBE: 'external_quota:youtube:v1',
   MARKET: 'external_quota:market:v1',
 });
@@ -80,6 +83,14 @@ export async function openExternalCheckpointStore({
   persistence,
   lockName = EXTERNAL_CHECKPOINT_LOCK,
   log = () => {},
+  // PUBLISH-FIX-1: production PostgreSQL times out intermittently (ETIMEDOUT), which was latching a checkpoint on the first
+  // failure and killing the sweep. Retry the durable write with bounded backoff before declaring it failed; the underlying
+  // error code rides into the CHECKPOINT_WRITE_FAILED message. The fail-closed law is unchanged: after the last attempt the
+  // checkpoint latches and no further mutations are permitted (authority is DATA_ONLY, collectors only). `sleep` is injected
+  // so tests exercise the retries without real delay.
+  writeRetries = 3,
+  writeRetryBackoffMs = 250,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!persistence || typeof persistence.health !== 'function' || !persistence.db || !persistence.repo) {
     throw new ExternalCheckpointError('PERSISTENCE_INVALID', 'a started persistence runtime is required');
@@ -125,6 +136,26 @@ export async function openExternalCheckpointStore({
     if (typeof lock.held !== 'function' || !lock.held()) throw latch(new ExternalCheckpointError('LOCK_LOST', 'external checkpoint owner lock was lost', checkpointId), checkpointId, { global: true });
   };
 
+  // Retry a durable write up to `writeRetries` times with linear backoff; on every failed attempt but the last, log the
+  // underlying error code and retry. After the last attempt the raw error is re-thrown (carrying `.attempts`) so the caller
+  // latches CHECKPOINT_WRITE_FAILED fail-closed. Only the WRITE call is retried — a CAS/content conflict is a separate,
+  // non-retried verdict below.
+  async function saveWithRetry(id, doSave) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= writeRetries; attempt += 1) {
+      try { return await doSave(); }
+      catch (error) {
+        lastError = error;
+        if (attempt < writeRetries) {
+          log(`external checkpoint ${id}: durable write attempt ${attempt}/${writeRetries} failed (${bounded(error?.code ?? error?.message ?? error)}); retrying`);
+          await sleep(writeRetryBackoffMs * attempt);
+        }
+      }
+    }
+    throw Object.assign(lastError instanceof Error ? lastError : new Error(String(lastError)), { attempts: writeRetries });
+  }
+  const writeFailureDetail = (error) => `${bounded(error?.code ?? error?.message ?? error)} after ${error?.attempts ?? writeRetries} attempt(s)`;
+
   async function persist(entry, next, { acceptedBeforeClose = false } = {}) {
     assertLive(entry.id, { acceptedBeforeClose });
     const jsonError = jsonValueError(next);
@@ -133,8 +164,8 @@ export async function openExternalCheckpointStore({
     if (invalid) throw latch(new ExternalCheckpointError('CHECKPOINT_INVALID', invalid, entry.id), entry.id);
     const record = makeRecord(entry.id, next, entry.commissioning);
     let saved;
-    try { saved = await persistence.repo.saveRuntimeState(entry.id, record, entry.revision); }
-    catch (error) { throw latch(new ExternalCheckpointError('CHECKPOINT_WRITE_FAILED', error?.code ?? error?.message ?? error) , entry.id); }
+    try { saved = await saveWithRetry(entry.id, () => persistence.repo.saveRuntimeState(entry.id, record, entry.revision)); }
+    catch (error) { throw latch(new ExternalCheckpointError('CHECKPOINT_WRITE_FAILED', writeFailureDetail(error), entry.id), entry.id); }
     if (!saved || saved.conflict === true || saved.revision !== entry.revision + 1) {
       throw latch(new ExternalCheckpointError('CHECKPOINT_CAS_CONFLICT', 'durable revision did not advance exactly from the owned revision', entry.id), entry.id);
     }
@@ -202,8 +233,8 @@ export async function openExternalCheckpointStore({
       if (invalid) throw latch(new ExternalCheckpointError('COMMISSIONING_CHECKPOINT_INVALID', invalid, id), id);
       const record = makeRecord(id, local, commissioning);
       let saved;
-      try { saved = await persistence.repo.saveRuntimeState(id, record, null); }
-      catch (error) { throw latch(new ExternalCheckpointError('COMMISSIONING_WRITE_FAILED', error?.code ?? error?.message ?? error, id), id); }
+      try { saved = await saveWithRetry(id, () => persistence.repo.saveRuntimeState(id, record, null)); }
+      catch (error) { throw latch(new ExternalCheckpointError('COMMISSIONING_WRITE_FAILED', writeFailureDetail(error), id), id); }
       if (!saved || saved.conflict === true || !Number.isSafeInteger(saved.revision) || canonicalJson(saved.state) !== canonicalJson(record)) {
         throw latch(new ExternalCheckpointError('COMMISSIONING_CONFLICT', 'filesystem checkpoint was not adopted exactly', id), id);
       }

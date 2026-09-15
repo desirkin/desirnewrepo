@@ -357,6 +357,9 @@ export function startRumor2({
   };
   // every operational social ear the collector drives under ONE writer authority
   const socialRuntimes = [social, socialX, socialFarcaster, socialCurrent].filter(Boolean);
+  // Log hygiene (PUBLISH-FIX-1): a provider that will not start (e.g. DISABLED) is announced ONCE per reason, not every
+  // 15 s tick. The map holds the last-logged reason per provider; a successful start clears it so a later failure re-logs.
+  const socialNotStartedReason = new Map();
   // SOCIAL-5A: the research strainer runtime (research dossiers + proposals; authority NONE)
   const research = researchStrainer && researchStrainer.enabled
     ? createResearchStrainer({
@@ -1231,7 +1234,10 @@ export function startRumor2({
         // preflight and only then a paid connection — a refused start is a
         // truthful status, never a retry storm (the next tick re-asks)
         const st = await rt.start();
-        if (!st.ok) { log(`RUMOR2 social ${rt.provider.id}: not started (${st.reason ?? 'unknown'})`); }
+        if (!st.ok) {
+          const reason = st.reason ?? 'unknown';
+          if (socialNotStartedReason.get(rt.provider.id) !== reason) { log(`RUMOR2 social ${rt.provider.id}: not started (${reason})`); socialNotStartedReason.set(rt.provider.id, reason); }
+        } else socialNotStartedReason.delete(rt.provider.id);
       }
       const res = await rt.settle({
         fenceHeld,
