@@ -145,7 +145,10 @@ async function askHandler(req, res, body) {
   // unset/reached, no key) -> the recorded-evidence answer stands and nothing is dispatched (never a silent paid call).
   const meter = explainerView()?.ask ?? null;
   if (meter && meter.dormant) { json(res, 200, { ...answer, chat: { ok: false, dispatched: false, reason: meter.reason, notice: `the Ask explainer is dormant (${meter.reason}); the recorded-evidence answer is above` } }); return; }
-  let r; try { r = await chat().ask({ question, history, evidence: { answer: answer.answer, availability: answer.availability, evidence: answer.evidence, intent: answer.intent } }); } catch (err) { r = { ok: false, dispatched: false, reason: 'CHAT_FAILED', notice: String(err.message).slice(0, 160) }; }
+  // TALK-TO-THEM grounding: when the question is about a coin, ground the model additionally in that coin's hunt-trail
+  // (arrival -> research -> decision -> outcome, read-only). Bounded, best-effort, never blocks the answer.
+  let trail = null; if (answer.symbol) { try { const t = huntTrail(answer.symbol); trail = { coin: t.coin, arrivals: (t.arrivals ?? []).slice(0, 6), research: (t.research ?? []).slice(0, 6), decisions: (t.decisions ?? []).slice(0, 6), linkage: t.linkage ?? null }; } catch { trail = null; } }
+  let r; try { r = await chat().ask({ question, history, evidence: { answer: answer.answer, availability: answer.availability, evidence: answer.evidence, intent: answer.intent, huntTrail: trail } }); } catch (err) { r = { ok: false, dispatched: false, reason: 'CHAT_FAILED', notice: String(err.message).slice(0, 160) }; }
   json(res, 200, { ...answer, chat: r });
 }
 function judgeArm(body, gate, res) {
