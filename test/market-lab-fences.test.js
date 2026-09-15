@@ -55,7 +55,7 @@ test('B08 (live -> research): the live path never imports research/, socrates/ o
   // tools/data-only-runtime.mjs, which was outside LIVE_FILES). Step 2: the collector set moved to lib/collectors.js, which
   // starts the broad Kraken capture and the data-only market catalogs owner — observation only; lib/external-quota.js opens
   // the quota checkpoints. None imports a research/, socrates/ or evidence v2 module (asserted below).
-  const ALLOWED = { 'fly.js': ['market-lab/deep-market-adapter.js', 'market-lab/service.js', 'market-lab/commands.js', 'market-lab/paths.js', 'market-lab/case-trigger.js', 'market-lab/dossier-flag-source.js', 'market-lab/judge-candidate-flag-source.js'], 'ui/server.js': ['market-lab/paths.js', 'market-lab/time.js', 'market-lab/broad-kraken.js'], 'lib/collectors.js': ['market-lab/broad-kraken.js', 'market-lab/broad-day-archive-sink.js', 'tools/data-only-market.mjs'], 'lib/external-quota.js': ['tools/data-only-checkpoints.mjs'], 'persistence/social-research-export.js': ['research/'] };
+  const ALLOWED = { 'fly.js': ['market-lab/deep-market-adapter.js', 'market-lab/service.js', 'market-lab/commands.js', 'market-lab/paths.js', 'market-lab/case-trigger.js', 'market-lab/dossier-flag-source.js', 'market-lab/judge-candidate-flag-source.js'], 'ui/server.js': ['market-lab/paths.js', 'market-lab/time.js', 'market-lab/broad-kraken.js'], 'lib/collectors.js': ['market-lab/broad-kraken.js', 'market-lab/broad-day-archive-sink.js', 'tools/data-only-market.mjs'], 'lib/external-quota.js': ['tools/data-only-checkpoints.mjs'] };
   assert.ok(LIVE_FILES.length >= 30, `live files ${LIVE_FILES.length}`);
   for (const f of LIVE_FILES) {
     for (const spec of imports(f)) {

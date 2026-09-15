@@ -308,7 +308,7 @@ test('SCOPE-9. current catalog consumers and Social authority fences remain exac
   }
   // survey/catalog.js is consumed by the wide eye, the two exact Kraken market
   // readers, and tests only; rumor2 never imports the survey tier.
-  const consumers = tracked.filter((f) => !f.startsWith('test/') && /from\s+'(\.\/|[^']*survey\/)catalog\.js'/.test(read(f)));
+  const consumers = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && /from\s+'(\.\/|[^']*survey\/)catalog\.js'/.test(read(f)));
   assert.deepEqual(consumers, ['market-lab/broad-kraken.js', 'market-lab/providers/kraken-spot.js', 'survey/wideeye.js']); // MARKET-LAB: the Kraken readers reuse the pure pair normalizer
   for (const f of tracked.filter((f) => f.startsWith('rumor2/'))) assert.ok(!/from\s+'[^']*(survey|tape|cost|ledger|state|controls)\//.test(read(f)), `${f} imports no survey/trading tier`);
   assert.ok(!/config\.universe/.test(code('rumor2/social-runtime.js')) && !/config\.universe/.test(code('rumor2/x-runtime.js')) && !/config\.universe/.test(code('rumor2/social-scope.js')), 'no Social runtime reads config.universe');

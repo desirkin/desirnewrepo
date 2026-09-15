@@ -12,3 +12,12 @@ Law (lean trim, 2026-09-14, approved by David):
 - `ledger/` — the legacy JSONL paper ledger (predictions / fills / exits, float math, CLI-driven) and its rollup / summary.
   Replaced by the PostgreSQL execution journal (`execution/journal.js`, `execution/reducer.js`) and its read-only
   `execution/ledger-view.js` published in the Judge projection. Retired so there is ONE bankroll and ONE daily-lock law.
+- `research/` (+ `research/referee/`), `persistence/social-research-export.js`, `bin/social-research.js` — the SOCIAL-5B
+  OFFLINE social-research analysis pipeline and its statistical referee library (LEAN PASS 2, 2026-09-15, approved by
+  David). Dead to production: proven by the import graph — reachable only from its own `bin/social-research.js` CLI (never
+  in package.json or `.replit`) and from test/. It is NOT the live research: `market-lab/` is the live research owner that
+  fly.js composes, and `rumor2/social-research-*.js` is the live social sense — both stay. `learning/` MIRRORS the
+  referee's label law rather than importing it (the mirror-parity test that proved the two agreed, in
+  `test/learning-maturation.test.js`, retired with the pipeline). Its tests moved to `attic/test/` (the `social-5b-*` and
+  `referee-*` suites + their helpers). The rumor2-authority / socrates-contract / social-scope fences that scanned the
+  tree were updated to exclude `attic/` and to drop the retired files from their offline-research enumerations.

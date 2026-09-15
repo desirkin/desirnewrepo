@@ -47,19 +47,11 @@ const frozenCoreFiles = rumor2Files.filter((f) => !SOCIAL_FILE_RE.test(f));
 // the exact read-only exception to the single-composition-root law, enumerated by filename and permitted pure exports
 // MARKET-LAB: two more pure readers of the research family's frozen vocabularies / contract validator (no runtime, no strainer):
 //   evidence/social-projection.js (the detached Social projection DTO) and market-lab/deep-market-adapter.js (validateDeepMarketWindow)
-const OFFLINE_RESEARCH_FILES = ['paper/inventory.js', 'press/collector.js', 'evidence/social-projection.js', 'market-lab/deep-market-adapter.js', 'bin/social-research.js', 'persistence/social-research-export.js', 'research/archive.js', 'research/artifacts.js', 'research/bundle.js', 'research/contracts.js', 'research/evaluation.js', 'research/features.js', 'research/identity.js', 'research/outcomes.js', 'research/pipeline.js', 'research/relations.js', 'research/schemas.js', 'research/snapshot.js'];
-const OFFLINE_RESEARCH_RUMOR2_IMPORTS = {
-  // the contracts module imports the AUTHORITATIVE closed vocabularies rather than restating them: pure frozen
-  // string lists, no runtime, no collector, no provider — provenance/vocabulary reuse, never an authority allowance
-  'research/contracts.js': { 'truth.js': ['canonicalJson', 'RUMOR2_CLAIM_TYPES'], 'social-research-dossier.js': ['RESEARCH_ENTRANCE_KINDS', 'RESEARCH_STATES', 'RESEARCH_PROPOSAL_KINDS', 'RESEARCH_CROSS_SENSE', 'RESEARCH_PACKET_REASON_CODES', 'RESEARCH_DEPENDENCY_NODE_KINDS', 'RESEARCH_DEPENDENCY_RELATIONS'] },
-  'research/bundle.js': { 'truth.js': ['canonicalJson'] },
-  // the breakdown key domains are the dossier contract's OWN frozen vocabularies: pure string lists, no runtime
-  'research/schemas.js': { 'social-research-dossier.js': ['RESEARCH_STATES', 'RESEARCH_SOCIAL_COVERAGE_STATES'] },
-  // the SHADOW record law is the source's own: pure frozen vocabularies / version lists, no runtime, no collector
-  'research/features.js': { 'truth.js': ['canonicalJson'], 'social-research-shadow.js': ['RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION', 'RESEARCH_SHADOW_EXCLUSION_REASONS', 'shadowRowRank'] },
-  'research/snapshot.js': { 'truth.js': ['canonicalJson'], 'social-research-dossier.js': ['RESEARCH_DOSSIER_EVENT_TYPE', 'RESEARCH_DOSSIER_SCHEMA_VERSION', 'RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION', 'replayResearchDossierEvent', 'isLegacyResearchDossierEvent'], 'social-research-shadow.js': ['RESEARCH_SHADOW_EVENT_TYPE', 'RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION', 'replayResearchShadowEvent', 'emptyShadowState'], 'social-settle.js': ['SOCIAL_OBSERVATION_TYPES'] },
-  'research/pipeline.js': { 'truth.js': ['canonicalJson'], 'social-research-dossier.js': ['RESEARCH_DOSSIER_SCHEMA_VERSION', 'RESEARCH_DOSSIER_LEGACY_SCHEMA_VERSION'], 'social-research-shadow.js': ['RESEARCH_SHADOW_POPULATION_VERSIONS', 'RESEARCH_SHADOW_RECIPE_VERSION'] },
-};
+// LEAN PASS 2 (2026-09-15): the SOCIAL-5B offline research pipeline (bin/social-research.js + research/ +
+// persistence/social-research-export.js) was retired to attic/ (dead to production; see attic/README.md). The live
+// readers that still name the research family stay enumerated here.
+const OFFLINE_RESEARCH_FILES = ['paper/inventory.js', 'press/collector.js', 'evidence/social-projection.js', 'market-lab/deep-market-adapter.js'];
+const OFFLINE_RESEARCH_RUMOR2_IMPORTS = {};
 // MARKET-LAB: the Social projection reuses the dossier / composite / profile vocabularies (pure frozen lists); the deep-market
 // adapter consumes the v1 market contract validator + version (pure function + constant). Neither names a runtime or collector.
 OFFLINE_RESEARCH_RUMOR2_IMPORTS['evidence/social-projection.js'] = { 'social-research-dossier.js': ['RESEARCH_ENTRANCE_KINDS', 'RESEARCH_STATES', 'RESEARCH_EPISODE_STATES', 'RESEARCH_PACKET_STATUSES'], 'social-research-composite.js': ['COMPOSITE_VIEW_VERSION', 'COMPOSITE_HISTORY_STATES'], 'social-research-profile.js': ['SOURCE_RETENTION_STATES', 'SOURCE_RESOURCE_HISTORY_STATES'] };
@@ -151,7 +143,7 @@ test('R2A-76+77. STRIKE-capable and order-path modules never read RUMOR-2', () =
   // only the composition root wires the collector; only persistence stores it
   // static AND dynamic imports: a `await import('../rumor2/...')` is a wiring point exactly like a static one (the data-only
   // root reaches the collector that way); the fence must not be dodgeable by import form
-  const importers = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && /from\s+'[^']*rumor2|import\('[^']*rumor2/.test(code(f)));
+  const importers = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && !f.startsWith('attic/') && /from\s+'[^']*rumor2|import\('[^']*rumor2/.test(code(f)));
   // SOCIAL-5B: the OFFLINE research readers are the only other importers — enumerated by file, each limited to the pure
   // validators / replay helpers / constants it names, never a collector, provider runtime, strainer or startup path.
   // fly.js stays the ONLY live collector composition root; this is a read-only exception, not a weakened fence.
@@ -268,7 +260,7 @@ test('R2A-SOCIAL-8 (SOCIAL-4F). the discovery-catalog / admission-scope / watch-
   const mentions = rumor2Files.filter((f) => /social-catalog|social-scope|social-watch-plan|compileAdmissionScope|admitSocialText|researchCatalogSource|scopeSource|watchScope/.test(code(f)));
   assert.deepEqual(mentions.sort(), [...CATALOG_ALLOWLIST].sort(), `the research scope may only be wired in ${CATALOG_ALLOWLIST.join(', ')}`);
   // survey/catalog.js: imported by the wide eye and tests only; the rumor tier NEVER imports survey/, tape/, cost/, ledger/, state/, controls/
-  const consumers = tracked.filter((f) => !f.startsWith('test/') && /from\s+'(\.\/|[^']*survey\/)catalog\.js'/.test(read(f)));
+  const consumers = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && /from\s+'(\.\/|[^']*survey\/)catalog\.js'/.test(read(f)));
   assert.deepEqual(consumers, ['market-lab/broad-kraken.js', 'market-lab/providers/kraken-spot.js', 'survey/wideeye.js']); // MARKET-LAB: the Kraken clients (deep + broad WideEye capture) reuse the survey's pure pair normalizer (D01 instrument mapping)
   for (const f of rumor2Files) assert.ok(!/from\s+'[^']*(survey|tape|cost|ledger|state|controls|governance|rumint)\//.test(read(f)), `${f} imports no survey/trading/control tier`);
   // the Social runtimes no longer derive their outer boundary from config.universe; the official claim registry is still built from it (a separate, retained scope)
@@ -310,7 +302,7 @@ test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT all
   const RESEARCH_ALLOWLIST = [...MODULES, 'rumor2/social-settle.js', 'rumor2/collector.js'];
   const mentions = rumor2Files.filter((f) => MODULES.includes(f) || /social-research-|createResearchStrainer|RESEARCH_DOSSIER_EVENT_TYPE|replayResearchDossierEvent|RESEARCH_SHADOW_EVENT_TYPE|replayResearchShadowEvent/.test(code(f)));
   assert.deepEqual(mentions.sort(), [...RESEARCH_ALLOWLIST].sort(), `the research strainer may only be wired in ${RESEARCH_ALLOWLIST.join(', ')}`);
-  const outside = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && /social-research|researchStrainer|RUMOR2_RESEARCH_DOSSIER/.test(read(f)));
+  const outside = tracked.filter((f) => !f.startsWith('rumor2/') && !f.startsWith('test/') && !f.startsWith('attic/') && /social-research|researchStrainer|RUMOR2_RESEARCH_DOSSIER/.test(read(f)));
   // SOCIAL-5B: the offline research family readers are enumerated by file; none enables, wires or starts the strainer
   assert.ok(outside.includes('fly.js'), 'the composition root enables the strainer');
   for (const f of outside) assert.ok(RUMOR2_LIVE_WIRING_POINTS.includes(f) || OFFLINE_RESEARCH_FILES.includes(f), `${f}: only the named live wiring points and the enumerated offline research readers may name the research family (no tape / ledger / cost / controls / ui reader)`);

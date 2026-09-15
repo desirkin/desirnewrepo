@@ -628,7 +628,7 @@ test('0A-48. undeclared raw text cannot bypass excerpt bounds', () => {
 
 test('0A-52. no runtime module imports the Socrates/evidence contracts', () => {
   const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
-  const runtime = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('evidence/') && !f.startsWith('socrates/'));
+  const runtime = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && !f.startsWith('evidence/') && !f.startsWith('socrates/'));
   assert.ok(runtime.length > 50, 'the runtime scan actually covers the codebase');
   // MARKET-LAB: the research service composition (market-lab/service.js) and the Socrates research CLI are the ONLY
   // runtime files that may reach the Socrates v2 runtime — research only, authority NONE; no execution / strike module.
