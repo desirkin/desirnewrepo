@@ -14,7 +14,7 @@ import {
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 const tmpRoot = () => mkdtempSync(path.join(os.tmpdir(), 'serpent-objstore-'));
 
-test('OS-1. provider selection is fail-closed: unset is DISABLED, S3/GCS are NOT_COMMISSIONED with the missing names, a bad provider or prefix is MISCONFIGURED — and never a credential value', () => {
+test('OS-1. provider selection is fail-closed: unset is DISABLED, S3 is NOT_COMMISSIONED, GCS is CONFIGURED only with its bucket + service-account NAME (else MISCONFIGURED), a bad provider or prefix is MISCONFIGURED — and never a credential value', () => {
   assert.equal(resolveObjectStoreConfig({}).state, 'DISABLED');
   assert.equal(resolveObjectStoreConfig({ [OBJECT_STORE_ENV.provider]: '  ' }).state, 'DISABLED');
   assert.equal(resolveObjectStoreConfig({ [OBJECT_STORE_ENV.provider]: 'sqlite' }).state, 'MISCONFIGURED');
@@ -25,9 +25,13 @@ test('OS-1. provider selection is fail-closed: unset is DISABLED, S3/GCS are NOT
   assert.ok(s3.missing.includes(OBJECT_STORE_ENV.bucket) && s3.missing.includes('SERPENT_OBJECT_STORE_SECRET_ACCESS_KEY'));
   assert.ok(!JSON.stringify(s3).includes('AKIA-not-read'), 'a credential value never appears in the resolved config');
 
-  const gcs = resolveObjectStoreConfig({ [OBJECT_STORE_ENV.provider]: 'GCS', [OBJECT_STORE_ENV.bucket]: 'b', SERPENT_OBJECT_STORE_GCS_SERVICE_ACCOUNT_JSON: '{"k":"v"}' });
-  assert.equal(gcs.state, 'NOT_COMMISSIONED'); assert.deepEqual(gcs.missing, []); assert.equal(gcs.bucket, 'b');
+  const gcs = resolveObjectStoreConfig({ [OBJECT_STORE_ENV.provider]: 'GCS', [OBJECT_STORE_ENV.bucket]: 'b', SERPENT_OBJECT_STORE_GCS_SERVICE_ACCOUNT_JSON: '{"private":"do-not-read"}' });
+  assert.equal(gcs.state, 'CONFIGURED'); assert.equal(gcs.bucket, 'b');
   assert.deepEqual(Object.keys(gcs.credentials), [...OBJECT_STORE_CREDENTIAL_NAMES.GCS]);
+  assert.ok(!JSON.stringify(gcs).includes('do-not-read'), 'the service-account value never appears in the resolved config');
+  const gcsMissing = resolveObjectStoreConfig({ [OBJECT_STORE_ENV.provider]: 'GCS', [OBJECT_STORE_ENV.bucket]: 'b' });
+  assert.equal(gcsMissing.state, 'MISCONFIGURED'); assert.deepEqual(gcsMissing.missing, ['SERPENT_OBJECT_STORE_GCS_SERVICE_ACCOUNT_JSON']);
+  assert.equal(resolveObjectStoreConfig({ [OBJECT_STORE_ENV.provider]: 'GCS', SERPENT_OBJECT_STORE_GCS_SERVICE_ACCOUNT_JSON: '{}' }).missing.includes(OBJECT_STORE_ENV.bucket), true);
 
   const fsMissing = resolveObjectStoreConfig({ [OBJECT_STORE_ENV.provider]: 'FILESYSTEM' });
   assert.equal(fsMissing.state, 'MISCONFIGURED'); assert.deepEqual(fsMissing.missing, [OBJECT_STORE_ENV.dir]);

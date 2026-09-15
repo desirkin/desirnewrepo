@@ -82,13 +82,20 @@ export function resolveObjectStoreConfig(env = process.env) {
     if (!dir) return { ...base, state: 'MISCONFIGURED', reason: `${OBJECT_STORE_ENV.provider}=FILESYSTEM requires ${OBJECT_STORE_ENV.dir}`, missing: [OBJECT_STORE_ENV.dir] };
     return { ...base, state: 'CONFIGURED', dir: path.resolve(dir) };
   }
-  // S3 / GCS: the client is not commissioned in this repo. Report the exact seam and which credential NAMES are present.
+  // GCS / S3: report which credential NAMES are present (presence only, never a value). GCS is commissioned (the
+  // Replit App Storage backend, GCS-backed): with a bucket and its service-account NAME present it is CONFIGURED, and
+  // anything missing is MISCONFIGURED — fail-closed, never a silent success and never ACTIVE without its credential.
   const names = OBJECT_STORE_CREDENTIAL_NAMES[provider] ?? [];
   const credentials = Object.fromEntries(names.map((n) => [n, typeof env[n] === 'string' && env[n].length > 0]));
   const bucket = typeof env[OBJECT_STORE_ENV.bucket] === 'string' ? env[OBJECT_STORE_ENV.bucket].trim() : '';
   const missing = [];
   if (!bucket) missing.push(OBJECT_STORE_ENV.bucket);
   for (const n of names) if (!credentials[n]) missing.push(n);
+  if (provider === 'GCS') {
+    if (missing.length) return { ...base, state: 'MISCONFIGURED', credentials, missing, bucket: bucket || null,
+      reason: `${OBJECT_STORE_ENV.provider}=GCS requires ${missing.join(', ')}; the uploader and restore-on-boot stay dark until present` };
+    return { ...base, state: 'CONFIGURED', credentials, bucket };
+  }
   return { ...base, state: 'NOT_COMMISSIONED', credentials, missing, bucket: bucket || null,
     reason: `${provider} object-store client is not commissioned in this build (persistence/object-store.js provider registry); the uploader and restore-on-boot stay dark until it is wired` };
 }
@@ -182,16 +189,83 @@ function createFilesystemBackend({ dir, prefix, log }) {
   });
 }
 
+// ---- GCS backend --------------------------------------------------------------------------------------------------
+// Wraps a low-level GCS object client (persistence/gcs-client.js, or an injected in-memory double in tests) in the SAME
+// adapter contract as the filesystem backend: key-validated, prefix-rooted, byte-capped, digest-reported. The client
+// speaks full object names within the bucket; this layer applies the prefix and strips it from listed names. No symlink
+// concerns (a bucket has none); the object cap is enforced on put and on get.
+function createGcsBackend({ client, prefix, log }) {
+  const keyPrefix = prefix ? `${prefix}/` : '';
+  const fullName = (key) => { assertKey(key); return `${keyPrefix}${key}`; };
+  return Object.freeze({
+    provider: 'GCS',
+    async put(key, bytes, { contentType = null } = {}) {
+      if (!Buffer.isBuffer(bytes)) throw new ObjectStoreError('OBJECT_PAYLOAD_INVALID', 'put requires a Buffer');
+      if (bytes.byteLength > MAX_OBJECT_BYTES) throw new ObjectStoreError('OBJECT_TOO_LARGE', `${bytes.byteLength} bytes exceeds the ${MAX_OBJECT_BYTES} object cap`);
+      try { await client.putObject(fullName(key), bytes, { contentType: contentType ?? 'application/octet-stream' }); return { key, bytes: bytes.byteLength, sha256: sha256(bytes) }; }
+      catch (error) { if (error instanceof ObjectStoreError) throw error; throw new ObjectStoreError('OBJECT_PUT_FAILED', error?.code ?? error?.message ?? error); }
+    },
+    async get(key) {
+      let bytes; try { bytes = await client.getObject(fullName(key)); } catch (error) { throw new ObjectStoreError('OBJECT_GET_FAILED', error?.code ?? error?.message ?? error); }
+      if (bytes === null || bytes === undefined) return null;
+      if (!Buffer.isBuffer(bytes)) throw new ObjectStoreError('OBJECT_GET_FAILED', 'client returned a non-buffer');
+      if (bytes.byteLength > MAX_OBJECT_BYTES) throw new ObjectStoreError('OBJECT_TOO_LARGE', `${bytes.byteLength} bytes exceeds the ${MAX_OBJECT_BYTES} object cap`);
+      return bytes;
+    },
+    async head(key) {
+      try { const meta = await client.headObject(fullName(key)); return meta ? { key, bytes: Number(meta.bytes) || 0 } : null; }
+      catch (error) { throw new ObjectStoreError('OBJECT_HEAD_FAILED', error?.code ?? error?.message ?? error); }
+    },
+    async list(listPrefix = '') {
+      if (listPrefix) { const e = objectKeyError(`${listPrefix.replace(/\/$/, '')}/probe`); if (e) throw new ObjectStoreError('OBJECT_PREFIX_INVALID', e); }
+      const full = listPrefix ? `${keyPrefix}${listPrefix.replace(/\/$/, '')}` : keyPrefix;
+      let items; try { items = await client.listObjects(full); } catch (error) { throw new ObjectStoreError('OBJECT_LIST_FAILED', error?.code ?? error?.message ?? error); }
+      const out = [];
+      for (const item of items ?? []) {
+        const name = typeof item?.key === 'string' ? item.key : null; if (name === null) continue;
+        if (keyPrefix && !name.startsWith(keyPrefix)) continue;
+        const key = keyPrefix ? name.slice(keyPrefix.length) : name;
+        if (!key || key.endsWith('.tmp') || objectKeyError(key)) continue;
+        out.push({ key, bytes: Number(item.bytes) || 0 });
+      }
+      return out.sort((a, b) => (a.key < b.key ? -1 : 1));
+    },
+    async delete(key) {
+      try { return (await client.deleteObject(fullName(key))) === true; }
+      catch (error) { throw new ObjectStoreError('OBJECT_DELETE_FAILED', error?.code ?? error?.message ?? error); }
+    },
+    describe: () => ({ provider: 'GCS', bucket: client.bucket ?? null, prefix: prefix ?? null }),
+    log,
+  });
+}
+
 // Open the configured object store. Returns a frozen handle whose `state` is authoritative: ACTIVE carries `adapter`
 // (the contract above), while DISABLED / NOT_COMMISSIONED / MISCONFIGURED carry no adapter and a reason — a caller must
 // check `state === 'ACTIVE'` before uploading or restoring. FILESYSTEM ensures its root exists; a create failure is a
-// MISCONFIGURED gate, never a thrown boot failure. S3 / GCS return their NOT_COMMISSIONED gate unchanged.
-export async function openObjectStore({ env = process.env, log = () => {} } = {}) {
+// MISCONFIGURED gate, never a thrown boot failure. FILESYSTEM ensures its root exists; GCS builds its client from the
+// service-account NAME (or accepts an injected `gcsClient` double in tests) — a bad credential is a MISCONFIGURED gate,
+// never a boot failure and never a logged value. S3 returns its NOT_COMMISSIONED gate unchanged.
+export async function openObjectStore({ env = process.env, log = () => {}, gcsClient = null } = {}) {
   const config = resolveObjectStoreConfig(env);
   if (config.state !== 'CONFIGURED') {
     if (config.state === 'DISABLED') log(`OBJECT STORE disabled: ${OBJECT_STORE_ENV.provider} unset (bulk streams not durably backed)`);
     else log(`OBJECT STORE ${config.state}: ${config.reason}`);
     return Object.freeze({ ...config, adapter: null, describe: () => ({ provider: config.provider, state: config.state }) });
+  }
+  if (config.provider === 'GCS') {
+    let client = gcsClient;
+    if (!client) {
+      try {
+        const { createGcsObjectClient } = await import('./gcs-client.js');
+        client = createGcsObjectClient({ serviceAccount: env[OBJECT_STORE_CREDENTIAL_NAMES.GCS[0]], bucket: config.bucket, fetchImpl: globalThis.fetch, log });
+      } catch (error) {
+        log(`OBJECT STORE misconfigured: GCS client could not be built (${bounded(error?.code ?? error?.message ?? error)})`);
+        return Object.freeze({ ...config, state: 'MISCONFIGURED', adapter: null, reason: `GCS client could not be built: ${bounded(error?.code ?? error?.message ?? error)}`, describe: () => ({ provider: 'GCS', state: 'MISCONFIGURED' }) });
+      }
+    }
+    const adapter = createGcsBackend({ client, prefix: config.prefix, log });
+    log(`OBJECT STORE active: GCS bucket ${config.bucket}${config.prefix ? ` prefix ${config.prefix}` : ''}`);
+    return Object.freeze({ ...config, state: 'ACTIVE', adapter, describe: adapter.describe });
   }
   try {
     await mkdir(config.prefix ? path.join(config.dir, ...config.prefix.split('/')) : config.dir, { recursive: true });
