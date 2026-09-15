@@ -174,7 +174,13 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       // gateway is dark or has no measurement. Ignored under REPLAY (composition forces null: an offline experiment stays
       // deterministic) and never touched by a LIVE run.
       const paperLatencySource = () => effectiveFillLatencyMs(readGatewayLatency(dataDir()));
-      judgeRun = await composeJudge({ policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource });
+      // Ticket Z part B (David's decision): the LIVE paper sizing law is depth-capped whole-nut — the size ladder over the
+      // same risk-bounded budget and cost law, absorption objective = the largest bite the book absorbs cleanly, fraction 1
+      // allowed under the RISK law (the 3% per-bite loss cap in the policy limits bounds full balance; the whole nut goes in
+      // when the structural stop is within the cap, the bite shrinks on wider stops, upside is never capped). Pure all-in
+      // (fraction 1 with the max-size-evidence gate) stays a REPLAY-only arm until SIZING qualifies, so it is NOT wired here.
+      const paperSizing = process.env.JUDGE_MODE === 'PAPER' ? { fractions: ['0.25', '0.5', '0.75', '1'], allInEvidence: 'RISK_BOUNDED' } : null;
+      judgeRun = await composeJudge({ policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing });
       const startup = await judgeRun.start();
       setJudgeRun(judgeRun);
       console.log(`JUDGE active: ${judgeRun.kind} account ${judgeRun.accountId} mode ${judgeRun.mode} (${judgeRun.kind === 'PAPER' ? 'NOT REAL MONEY' : 'LIVE: entries need an unexpired owner authorization'}); startup ${JSON.stringify({ uncertain: startup.uncertainOrders.length, exposed: startup.exposedPositions.length, authorizationEnded: startup.authorizationEnded })}`);

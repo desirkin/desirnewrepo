@@ -333,7 +333,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
         candidateMaxSizeUsd: learned?.applied && Number.isFinite(learned.selected?.maxSizeUsd) ? learned.selected.maxSizeUsd : null,
         maxBookAgeMs: policy.execution.maxBookAgeMs,
       };
-      const ladder = evaluateSizeLadder({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget, fractions: dynamicSizing.fractions ?? undefined, prepared, nowTs: D });
+      const ladder = evaluateSizeLadder({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget, fractions: dynamicSizing.fractions ?? undefined, allInEvidence: dynamicSizing.allInEvidence ?? undefined, prepared, nowTs: D });
       measurements = [...measurements, sizingMeasurement(ladder), ...sizingCandidateLog(ladder)];
       if (!ladder.selected) { tracker.decide('ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', 'NO_ELIGIBLE_SIZE_ON_LADDER'], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
       found = ladder.selected.found;

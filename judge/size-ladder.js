@@ -20,13 +20,17 @@
 // reward/risk, depth-haircut exit sensitivities (the recorded exit deterioration), the unchanged admission verdict
 // (concentration / cluster / reservations / risk caps via the injected admitCandidate law), and why it won or lost.
 //
-// FULL-BALANCE PREREQUISITES (conservative by construction): the fraction-1 candidate may even COMPETE only when
-// every required prepared input is present and fresh — the unchanged admission law, a validated candidate's
-// declared maximum supported size (maxSizeUsd; candle-fidelity validation declares null, so full-balance can never
-// cite it), the freshness law, and a protective exit that survives the deepest recorded depth haircut. Any absent
-// or stale prerequisite makes full-balance INELIGIBLE and the ladder falls back to the smaller supported sizes —
-// which is conservative relative to the unchanged baseline (baseline sizeSearch may use the whole budget).
-// Nothing is ever invented to fill a gap.
+// FULL-BALANCE PREREQUISITES: the fraction-1 candidate may even COMPETE only when every required prepared input is
+// present and fresh — the unchanged admission law, the freshness law, a protective exit that survives the deepest
+// recorded depth haircut, and (under allInEvidence 'REQUIRED', the default) a validated candidate's declared maximum
+// supported size (maxSizeUsd; candle-fidelity validation declares null, so evidence-gated full-balance can never cite
+// it). Under allInEvidence 'RISK_BOUNDED' the max-size-evidence prerequisite is dropped: full-balance is instead
+// bounded by the risk law (scenarioStressedLoss <= riskBudget, enforced inside sizeSearch for EVERY fraction) plus the
+// absorption/sustainability objective — this is the LIVE paper "depth-capped whole-nut" law (David's decision: the
+// whole nut goes in whenever the structural stop is within the loss cap, the bite shrinks on wider stops, upside is
+// never capped). 'REQUIRED' stays the default so the REPLAY "pure all-in" arm remains learning-gated until SIZING
+// qualifies. Any absent or stale prerequisite still makes full-balance INELIGIBLE and the ladder falls back to the
+// smaller supported sizes. Nothing is ever invented to fill a gap.
 import * as M from '../execution/money.js';
 import { scenarioExit, sizeSearch } from './cost.js';
 
@@ -87,17 +91,18 @@ function positiveDecimal(value) {
   try { return typeof value === 'string' && M.isPositive(value); } catch { return false; }
 }
 
-function missingPrerequisites({ prepared, snapshot, nowTs }) {
+function missingPrerequisites({ prepared, snapshot, nowTs, allInEvidence = 'REQUIRED' }) {
   const missing = [];
   if (!prepared || typeof prepared.admissible !== 'function') missing.push('ADMISSION_LAW');
-  if (!prepared || !Number.isFinite(prepared.candidateMaxSizeUsd) || prepared.candidateMaxSizeUsd <= 0) missing.push('CANDIDATE_MAX_SIZE_EVIDENCE');
+  // 'RISK_BOUNDED' drops the learning max-size gate: the risk law inside sizeSearch bounds full-balance instead.
+  if (allInEvidence !== 'RISK_BOUNDED' && (!prepared || !Number.isFinite(prepared.candidateMaxSizeUsd) || prepared.candidateMaxSizeUsd <= 0)) missing.push('CANDIDATE_MAX_SIZE_EVIDENCE');
   if (!prepared || !Number.isFinite(prepared.maxBookAgeMs) || prepared.maxBookAgeMs < 0 || !Number.isFinite(nowTs)) missing.push('FRESHNESS_LAW');
   else if (!Number.isFinite(snapshot?.receiptTs) || snapshot.receiptTs > nowTs || nowTs - snapshot.receiptTs > prepared.maxBookAgeMs) missing.push('FRESH_BOOK');
   return missing;
 }
 
-export function evaluateSizeLadder({ snapshot, spec, fee, atr14, structuralStop, targetPrice, maxEntryLevel = null, cashAvailable, riskBudget, fractions = DEFAULT_FRACTIONS, prepared = null, nowTs = null }) {
-  const allInMissing = missingPrerequisites({ prepared, snapshot, nowTs });
+export function evaluateSizeLadder({ snapshot, spec, fee, atr14, structuralStop, targetPrice, maxEntryLevel = null, cashAvailable, riskBudget, fractions = DEFAULT_FRACTIONS, prepared = null, nowTs = null, allInEvidence = 'REQUIRED' }) {
+  const allInMissing = missingPrerequisites({ prepared, snapshot, nowTs, allInEvidence });
   const candidates = [];
   if (!Array.isArray(fractions) || fractions.length > MAX_FRACTIONS) {
     candidates.push({ fraction: null, status: 'REFUSED', reason: Array.isArray(fractions) ? 'FRACTION_COUNT_EXCEEDS_LIMIT' : 'FRACTIONS_NOT_ARRAY' });

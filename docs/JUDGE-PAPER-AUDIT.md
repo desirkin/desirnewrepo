@@ -60,11 +60,23 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       babd2f698e2d2fc25aaabd3f953d7ad8b5f163f84687b50c9f5b295471b376f3
+judge/*.js       a38fa9ed86e5c29e931dd2f3cb14cadaae6d48af5d184ed0371ad9f596fc6794
 execution/*.js   676e15339b6c19e897dc7d08d6ac862d7f099910fe3c4953ffd2ad00467c677e
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   5ef55b6e0a8a50d681e19630921edc39db05f3a59098aa94d4b6f5d8b979986e
+all (48 files)   1a287ba4471a39123782fafd007c4729497fdd03fe668ce49643188ef6a2730b
 ```
+
+### 4.11 Audited change — 2026-09-15 Ticket Z part B: depth-capped whole-nut is the LIVE paper sizing law (previous digests: judge `babd2f69…`, all `5ef55b6e…`; execution `676e1533…` and watch `0c6a43bf…` UNCHANGED)
+
+Scope: `judge/size-ladder.js` (one new option) and `judge/judge.js` (thread it). No decision, permission, exit, reducer, reservation, fee, or fill law changed; the ladder still runs the UNCHANGED `sizeSearch` cost law and the risk caps still bind every size.
+
+David's decision: the live paper sizing law is **depth-capped whole-nut** — turn the size ladder on for the live PAPER Judge (fractions 0.25/0.5/0.75/1, absorption objective = the largest bite the book absorbs cleanly), with the loss law that the most one bite may lose is 3% of the nut, so the whole nut goes in whenever the structural stop is within 3% and the bite shrinks on wider stops; upside is never capped. Pure all-in stays a REPLAY arm until SIZING qualifies.
+
+- `judge/size-ladder.js`: `evaluateSizeLadder` gains `allInEvidence` (`'REQUIRED'` default | `'RISK_BOUNDED'`). Under `RISK_BOUNDED` the fraction-1 (whole-nut) candidate drops the `CANDIDATE_MAX_SIZE_EVIDENCE` prerequisite and competes bounded by the risk law (`scenarioStressedLoss ≤ riskBudget`, enforced inside `sizeSearch` for every fraction) plus the absorption/sustainability objective and the protective-exit-at-depth check. `'REQUIRED'` (the default) is byte-behaviour-identical to before — the evidence gate still holds full balance ineligible without qualified learning — so the REPLAY `SIZING_PURE_ALL_IN` arm stays learning-gated.
+- `judge/judge.js`: threads `allInEvidence: dynamicSizing.allInEvidence` into the ladder (default preserved when a caller omits it).
+- Not frozen: `fly.js` wires `dynamicSizing = { fractions: ['0.25','0.5','0.75','1'], allInEvidence: 'RISK_BOUNDED' }` for `JUDGE_MODE === 'PAPER'` only (REPLAY drives its own per-arm sizing; LIVE composes the Kraken adapter and is unaffected). `config/judge.paper.json` (byte-equal reference sample + starting-styles): `maxModelledRiskPerPositionFraction`/`maxAggregate…`/`maxCorrelatedCluster…` all → 0.03 (the 3% loss law); `maxGross`/`maxAsset` stay 1 so the whole nut is spendable. The `integrity-boundary` and `ui/server` dynamic-sizing status were updated to reflect the deliberate live wiring.
+
+Proof: `test/judge-size-ladder.test.js` (RISK_BOUNDED all-in: REQUIRED refuses fraction 1 without evidence, RISK_BOUNDED lets the whole nut win when the book absorbs it, a tight risk budget shrinks the bite), the existing ladder/learning-intake/sizing-review tests unchanged (default `'REQUIRED'`), and the full suite green at this commit.
 
 ### 4.10 Audited change — 2026-09-15 Ticket Z (sizing side by side): two REPLAY-only sizing arms (pure all-in vs depth-capped) (previous digests: judge `35f7be96…`, all `126b58d0…`; execution `676e1533…` and watch `0c6a43bf…` UNCHANGED)
 

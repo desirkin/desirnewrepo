@@ -134,3 +134,23 @@ test('learning-side joint study: cells are independent; candle-fidelity inputs c
   assert.equal(cheap.allInEligible, true);
   assert.equal(cheap.allInReason, 'ALL_IN_WON_UNDER_DEPTH_SUPPORTED_COSTS');
 });
+
+test('RISK_BOUNDED all-in (Ticket Z part B, LIVE paper "depth-capped whole-nut"): without max-size evidence, REQUIRED refuses fraction 1 but RISK_BOUNDED makes it eligible and lets the whole nut win when the book absorbs it; the risk law still binds every fraction', () => {
+  const deep = snap([['100000', '50'], ['100050', '50']], [['99990', '50'], ['99950', '50']]);
+  const noEvidence = { admissible: () => ({ ok: true, reasons: [] }), candidateMaxSizeUsd: null, maxBookAgeMs: 60_000 };
+  // default REQUIRED: fraction 1 is learning-gated (the REPLAY pure-all-in arm keeps this) -> refused, ladder caps below full balance
+  const gated = evaluateSizeLadder({ snapshot: deep, spec: SPEC, fee: FEE, ...GEOMETRY, cashAvailable: '10000', riskBudget: '100000', prepared: noEvidence, nowTs: NOW });
+  assert.deepEqual(gated.allInMissing, ['CANDIDATE_MAX_SIZE_EVIDENCE']);
+  const gatedOne = gated.candidates.find((c) => c.fraction === '1');
+  assert.equal(gatedOne.status, 'REFUSED'); assert.match(gatedOne.reason, /ALL_IN_PREREQUISITES_MISSING/);
+  assert.notEqual(gated.selected?.fraction, '1', 'without evidence the whole nut cannot win under REQUIRED');
+  // RISK_BOUNDED: the max-size-evidence gate is dropped; fraction 1 competes and wins here (deep book, huge risk budget)
+  const live = evaluateSizeLadder({ snapshot: deep, spec: SPEC, fee: FEE, ...GEOMETRY, cashAvailable: '10000', riskBudget: '100000', prepared: noEvidence, nowTs: NOW, allInEvidence: 'RISK_BOUNDED' });
+  assert.deepEqual(live.allInMissing, [], 'no evidence prerequisite under RISK_BOUNDED');
+  assert.equal(live.selected.fraction, '1', 'the whole nut goes in when the book absorbs it cleanly');
+  assert.equal(live.allInEligible, true);
+  // the risk law still binds every fraction: a tight risk budget shrinks the bite (it is risk, not evidence, that bounds full balance)
+  const tightRisk = evaluateSizeLadder({ snapshot: deep, spec: SPEC, fee: FEE, ...GEOMETRY, cashAvailable: '10000', riskBudget: '10', prepared: noEvidence, nowTs: NOW, allInEvidence: 'RISK_BOUNDED' });
+  assert.deepEqual(tightRisk.allInMissing, [], 'still no evidence gate under RISK_BOUNDED');
+  assert.ok(Number(tightRisk.selected.found.q) < Number(live.selected.found.q), 'the risk law shrinks the bite when the budget is tight — the whole nut only goes in when the stop is within the loss cap');
+});

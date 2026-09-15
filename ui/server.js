@@ -103,7 +103,7 @@ async function learningView() {
         const diagnostics = store.listDiagnostics().slice(0, 50).map((id) => { const m = store.readDiagnosticManifest(id); const s = store.readDiagnosticState(id); return { diagnosticId: id, model: m?.model ?? null, state: s?.state ?? m?.state ?? null, calls: s?.calls ?? 0, maxCalls: m?.maxCalls ?? null }; });
         return {
           evidenceByBasis: byBasis, diagnostics,
-          switches: { learnedSelection: 'OFF_NOT_WIRED', dynamicSizing: 'OFF_NOT_WIRED' },
+          switches: { learnedSelection: 'OFF_NOT_WIRED', dynamicSizing: 'LIVE_PAPER_DEPTH_CAPPED_WHOLE_NUT_RISK_BOUNDED' },
           selector: { version: SELECTOR_VERSION, snapshotMaxAgeMs: SNAPSHOT_MAX_AGE_MS },
           sizing: { version: SIZE_LADDER_VERSION, objective: SIZING_OBJECTIVE },
         };
