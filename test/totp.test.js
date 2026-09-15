@@ -4,7 +4,7 @@
 // `now`. A malformed anything fails CLOSED to false — never a throw, never true.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { verifyTotp, base32Decode, totpSecretUsable, TOTP } from '../lib/totp.js';
+import { verifyTotp, verifyTotpDetailed, base32Decode, totpSecretUsable, TOTP } from '../lib/totp.js';
 
 // base32 of ASCII "12345678901234567890" (RFC 6238 §B SHA-1 seed).
 const RFC_SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
@@ -60,6 +60,20 @@ test('TOTP-5. every malformed input fails closed to false (never throws, never t
   assert.equal(verifyTotp(undefined, '287082', at(59)), false);
   assert.ok(verifyTotp(RFC_SECRET, ' 287082 ', { ...at(59), window: 0 }), 'surrounding whitespace is trimmed'); // spaced code still accepted
   assert.ok(verifyTotp(RFC_SECRET, 287082, { ...at(59), window: 0 }), 'an integer code is zero-padded to width'); // numeric input
+});
+
+test('TOTP-7. verifyTotpDetailed returns the matched step, and afterCounter is a replay floor that refuses a spent step', () => {
+  const at = (s) => s * 1000;
+  const step = Math.floor(at(59) / 1000 / TOTP.periodSec);
+  const d = verifyTotpDetailed(RFC_SECRET, '287082', { now: () => at(59), window: 0 });
+  assert.deepEqual(d, { ok: true, counter: step }, 'a match reports the exact time step it belongs to');
+  // afterCounter at the match step (or later) refuses it; one below accepts it
+  assert.deepEqual(verifyTotpDetailed(RFC_SECRET, '287082', { now: () => at(59), window: 0, afterCounter: step }), { ok: false, counter: null }, 'the spent step is refused');
+  assert.deepEqual(verifyTotpDetailed(RFC_SECRET, '287082', { now: () => at(59), window: 0, afterCounter: step + 5 }), { ok: false, counter: null }, 'any earlier-or-equal floor refuses it');
+  assert.deepEqual(verifyTotpDetailed(RFC_SECRET, '287082', { now: () => at(59), window: 0, afterCounter: step - 1 }), { ok: true, counter: step }, 'a floor strictly below the step still accepts');
+  // a wrong code is { ok:false, counter:null } regardless of floor
+  assert.deepEqual(verifyTotpDetailed(RFC_SECRET, '000000', { now: () => at(59), window: 0 }), { ok: false, counter: null });
+  assert.equal(verifyTotp(RFC_SECRET, '287082', { now: () => at(59), window: 0 }), true, 'the boolean wrapper still works');
 });
 
 test('TOTP-6. totpSecretUsable is true only for a decodable, non-empty secret', () => {

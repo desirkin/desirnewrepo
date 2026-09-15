@@ -16,7 +16,7 @@
 // the former password-only ones (the cockpit still refuses to act without the
 // password), and the paper-day checklist requires the secret set.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { verifyTotp, totpSecretUsable } from '../lib/totp.js';
+import { verifyTotpDetailed, totpSecretUsable } from '../lib/totp.js';
 
 export const SESSION_LIFETIME_MS = 8 * 3600 * 1000; // absolute; restart invalidates — by design
 export const CLEAR_PHRASE = 'CLEAR SERPENT';
@@ -39,11 +39,32 @@ export class ControlAuth {
   #lockedUntil = 0;
   #accesses = 0;
 
-  constructor({ password, totpSecret, now = Date.now, audit = () => {} } = {}) {
+  // CONTROL-0B replay guard: the durable floor is the last TOTP time-step accepted
+  // for a SUCCESSFUL login/CLEAR/ARM. A code is bound to one step, so once that step
+  // is spent no code at that step or earlier is ever accepted again — a captured code
+  // cannot be replayed inside its own ±window. `totpReplayStore` is a tiny durable
+  // {get():number|null, set(n)} (production: an atomic file under <dataDir>/state);
+  // when none is injected an in-memory floor still blocks within-process replay.
+  #totpReplayStore;
+  constructor({ password, totpSecret, totpReplayStore, now = Date.now, audit = () => {} } = {}) {
     this.#fixedPassword = password;
     this.#fixedTotpSecret = totpSecret;
     this.now = now;
     this.audit = audit; // receives non-secret event objects only
+    if (totpReplayStore && typeof totpReplayStore.get === 'function' && typeof totpReplayStore.set === 'function') {
+      this.#totpReplayStore = totpReplayStore;
+    } else {
+      let floor = null; // in-memory fallback (per-process); a restart re-reads nothing but old codes have expired anyway
+      this.#totpReplayStore = { get: () => floor, set: (n) => { floor = n; } };
+    }
+  }
+
+  #totpReplayFloor() {
+    try { const v = this.#totpReplayStore.get(); return Number.isSafeInteger(v) ? v : -Infinity; } catch { return -Infinity; }
+  }
+  #advanceTotpReplayFloor(counter) {
+    if (!Number.isSafeInteger(counter)) return;
+    try { const cur = this.#totpReplayStore.get(); if (!Number.isSafeInteger(cur) || counter > cur) this.#totpReplayStore.set(counter); } catch { /* the accepted login stands even if the floor cannot persist */ }
   }
 
   #password() {
@@ -100,12 +121,17 @@ export class ControlAuth {
     if (!this.configured()) return { ok: false, reason: 'CONTROL_AUTH_UNCONFIGURED' };
     if (this.#locked()) return { ok: false, reason: 'RATE_LIMITED', retryAfterSec: this.lockRemainingSec() };
     const passwordOk = typeof password === 'string' && digestEqual(password, this.#password());
-    const totpOk = !this.secondFactorConfigured() || verifyTotp(this.#totpSecret(), totp, { now: this.now });
-    if (!passwordOk || !totpOk) {
+    const sf = this.secondFactorConfigured();
+    // the replay floor blocks a code re-used at (or before) an already-spent step
+    const totpResult = sf ? verifyTotpDetailed(this.#totpSecret(), totp, { now: this.now, afterCounter: this.#totpReplayFloor() }) : { ok: true, counter: null };
+    if (!passwordOk || !totpResult.ok) {
       this.#recordFailure();
-      return { ok: false, reason: 'AUTH_FAILED' }; // generic — no length/content/which-factor hints
+      return { ok: false, reason: 'AUTH_FAILED' }; // generic — no length/content/which-factor/replay hints
     }
     this.#failures = [];
+    // Spend the code ONLY on a fully-successful credential check, so a wrong-password
+    // attempt carrying a valid code never burns that step out from under the real login.
+    if (sf) this.#advanceTotpReplayFloor(totpResult.counter);
     return { ok: true };
   }
 

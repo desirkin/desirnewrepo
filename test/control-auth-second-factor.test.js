@@ -81,13 +81,15 @@ test('SF-5. CLEAR and ARM re-verify BOTH factors fresh at the instant they act',
   const { auth, clock } = mk({ totpSecret: SECRET });
   const s = auth.login(PW, codeAt(clock.now()));
   assert.equal(s.authenticated, true);
-  // CLEAR: correct password + exact phrase but NO / WRONG code -> refused
+  // CLEAR: correct password + exact phrase but NO / WRONG code -> refused (these fail, so they spend no code)
   assert.equal(auth.authorizeClear(s.sessionId, s.csrfToken, PW, CLEAR_PHRASE).ok, false);
   assert.equal(auth.authorizeClear(s.sessionId, s.csrfToken, PW, CLEAR_PHRASE, '000000').ok, false);
+  clock.advance(30_000); // next TOTP step: the replay guard needs a FRESH code, not the one the login already spent
   assert.equal(auth.authorizeClear(s.sessionId, s.csrfToken, PW, CLEAR_PHRASE, codeAt(clock.now())).ok, true);
   // ARM: same — a valid session is necessary but never sufficient
   assert.equal(auth.authorizeArm(s.sessionId, s.csrfToken, PW).ok, false);
   assert.equal(auth.authorizeArm(s.sessionId, s.csrfToken, PW, '000000').ok, false);
+  clock.advance(30_000);
   assert.equal(auth.authorizeArm(s.sessionId, s.csrfToken, PW, codeAt(clock.now())).ok, true);
 });
 
@@ -99,14 +101,39 @@ test('SF-6. gateControl carries the code on the CLEAR path; a KILL rides the 2FA
   assert.equal(gateControl(auth, { ...base, body: { action: 'kill' } }).allow, true);
   // CLEAR through the gate: needs the fresh code too
   assert.equal(gateControl(auth, { ...base, body: { action: 'clear', password: PW, confirmPhrase: CLEAR_PHRASE } }).allow, false);
+  clock.advance(30_000); // a fresh step: the login already spent the current code (replay guard)
   assert.equal(gateControl(auth, { ...base, body: { action: 'clear', password: PW, confirmPhrase: CLEAR_PHRASE, totp: codeAt(clock.now()) } }).allow, true);
+});
+
+test('SF-8. replay guard: a code is single-use — the spent step is refused even while still current; a failed login does not spend it; the durable floor survives a restart', () => {
+  const store = (() => { let floor = null; return { get: () => floor, set: (n) => { floor = n; } }; })(); // a durable {get,set}
+  let t = T0; const clock = { now: () => t, advance: (ms) => (t += ms) };
+  const auth = new ControlAuth({ password: PW, totpSecret: SECRET, totpReplayStore: store, now: clock.now });
+  const c0 = codeAt(t);
+  assert.equal(auth.login(PW, c0).authenticated, true, 'first use of the current-step code works');
+  assert.equal(auth.login(PW, c0).authenticated, false, 'immediate replay of the SAME code is refused (still the current step, but spent)');
+  assert.equal(auth.login(PW, codeAt(t)).authenticated, false, 'any code for the spent step is refused, even freshly recomputed');
+  // a WRONG-password attempt carrying the fresh valid code must NOT spend that step
+  clock.advance(30_000);
+  const fresh = codeAt(clock.now());
+  assert.equal(auth.login('wrong', fresh).authenticated, false, 'wrong password refused');
+  assert.equal(auth.login(PW, fresh).authenticated, true, 'the fresh step was not burned by the failed attempt — it still logs in');
+  assert.equal(auth.login(PW, fresh).authenticated, false, 'and now that step is spent too');
+  // durability: a fresh manager (a process restart) sharing the same durable store still refuses the CURRENT spent
+  // step — this isolates the persisted floor from the ±window (the code is otherwise perfectly valid right now)
+  const restarted = new ControlAuth({ password: PW, totpSecret: SECRET, totpReplayStore: store, now: clock.now });
+  assert.equal(restarted.login(PW, codeAt(clock.now())).authenticated, false, 'after a restart the durable floor still blocks the current spent step');
+  clock.advance(30_000);
+  assert.equal(restarted.login(PW, codeAt(clock.now())).authenticated, true, 'a fresh step still works after the restart');
 });
 
 test('SF-7. audit secrecy: neither the password nor the TOTP code ever reaches audit output', () => {
   const { auth, clock, events } = mk({ totpSecret: SECRET });
   const code = codeAt(clock.now());
   auth.login(PW, code);
+  clock.advance(30_000); // fresh step per accepted op (replay guard)
   const s = auth.login(PW, codeAt(clock.now()));
+  clock.advance(30_000);
   auth.authorizeClear(s.sessionId, s.csrfToken, PW, CLEAR_PHRASE, codeAt(clock.now()));
   const dump = JSON.stringify(events);
   assert.ok(!dump.includes(PW));

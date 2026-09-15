@@ -16,7 +16,7 @@ import { isVetoed, readControls } from '../state/controls.js';
 import { applyRestriction, requestClear } from '../persistence/control-plane.js';
 import { existsSync, readFileSync as readFs, readdirSync } from 'node:fs';
 import { dataDir } from '../lib/config.js';
-import { appendJsonl } from '../lib/jsonl.js';
+import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
 import { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_MS } from './auth.js';
 import { getPersistence } from '../persistence/runtime.js';
@@ -45,7 +45,16 @@ const DATA_ONLY_MODE = process.env.SERPENT_DATA_ONLY === 'true';
 // events carry categories and non-reversible session tags — never a
 // password, CSRF token, cookie, or full session id (doctrine/CONTROL.md).
 const authLogFile = () => path.join(dataDir(), 'state', 'control_auth_log.jsonl');
+// CONTROL-0B replay guard: the last accepted TOTP time-step, persisted atomically so a
+// captured code cannot be replayed even across a restart. A read/write failure degrades
+// to the in-memory floor rather than blocking auth (the code still expires with its window).
+const totpReplayFile = () => path.join(dataDir(), 'state', 'control_totp_replay.json');
+const totpReplayStore = {
+  get() { try { const j = JSON.parse(readFs(totpReplayFile(), 'utf8')); return Number.isSafeInteger(j?.lastCounter) ? j.lastCounter : null; } catch { return null; } },
+  set(n) { try { atomicWriteJson(totpReplayFile(), { lastCounter: n, updatedTs: Date.now() }); } catch { /* the accepted login stands even if the floor cannot persist */ } },
+};
 const auth = new ControlAuth({
+  totpReplayStore,
   audit: (event) => {
     try {
       appendJsonl(authLogFile(), { ts: nowIso(), ...event });
