@@ -60,11 +60,22 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       638038da03d8f16c8d6cbd375e7d1dd757ad2e915122570108956743369e2608
+judge/*.js       8702f68ebeeb27ff8671daa0d13c0df2b3af566890d13210f5b632fd0d3cdf89
 execution/*.js   dd321ce97e24f21eb1bec9bb515a3729b07ac8ba50761a432fc7eceb0b05d6cc
-watch/watch.js   be41c4bed1ce80fa185f3b1dca6151447200a4a1b33dd785a9ea65234251578d
-all (48 files)   345b28be7c89c3c18e166e125f8ef6076ed4d005e402e517749bbb63d92f493a
+watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
+all (48 files)   43669403af154bb18499a5994fe6f98c662b10ccb5db0134e7c9fb058237369e
 ```
+
+### 4.8 Audited change — 2026-09-15 Ticket 4 exit law: no live target; the D4 experiment flipped (previous digests: judge `638038da03d8…`, watch `be41c4bed1ce…`, all `345b28be7c89…`; execution `dd321ce9…` UNCHANGED)
+
+Scope: `watch/watch.js` and the frozen experiment framework (`judge/challengers.js`, `judge/experiment-replay.js`). No decision, permission, sizing or reducer law changed; `entryPermission()` and the reducer are untouched; the paper profile still forces `JUDGE_MODE=PAPER` / no private / no orders.
+
+David's decision (PHILOSOPHY.md, Decided doctrine): the live exit law has **no target price or percent anywhere**. A position rides until its ENTRY THESIS is invalidated (thesis falsification, flow/liquidity deterioration, edge-state decay), its protective stop or 1R trail is crossed, or a backstop timer fires; the 180 s no-progress and 4 h max timers are backstops, not the exit; the protective stop (native / structural / trail) is kept.
+
+- `watch/watch.js`: `plannedTargetEnabled` now defaults to **OFF** (`exitPolicy?.plannedTarget === true`) — the live PAPER path (no exitPolicy) never takes a planned target and computes no target basis. The planned full exit at the frozen scenario target is RETAINED only as an opt-in research counterfactual carried by a REPLAY experiment arm. `finalizeR` computes the target basis only under the opt-in; a new `lazyTargetBasis` derives the in-memory basis for an already-FINAL position under the opt-in (a restored position, or the experiment's matched clone that begins after its reference's R was FINAL) without re-committing POSITION_R. `PLANNED_TARGET` stays a valid `execution/contract.js` EXIT_REASON (replay/restore of an in-flight exit and the experiment fixtures depend on it — execution/ is byte-unchanged).
+- The D4 experiment is FLIPPED (`judge/experiment-replay.js`): `D4_EXIT_POLICY` is now `{ plannedTarget: true }`; the REFERENCE arms (no explicit exitPolicy) run the live no-target law; the D4 arm is the counterfactual that ENABLES the planned target, measuring whether adding it helps against the live no-target reference. The `D4_TRAIL_CONTINUATION_*` arms are renamed `D4_PLANNED_TARGET_*` (name follows meaning) across `judge/challengers.js`, `judge/experiment-replay.js`, the policy/config samples and docs.
+
+Proof: `test/judge-watch.test.js` W01/W06 (the live law never takes a target; rides past the scenario target; the opt-in counterfactual still exits at the target), `test/judge-watch-escalation-review.test.js`, `test/judge-repair-restart.test.js` (target basis durable under the opt-in), `test/judge-experiment-replay.test.js` S01/S04 (REF = no-target, D4 = with-target on the same entry), and the full suite green at this commit.
 
 ### 4.7 Audited change — 2026-09-14 runtime unification step 3: fly.js onto the spine (frozen digests UNCHANGED)
 

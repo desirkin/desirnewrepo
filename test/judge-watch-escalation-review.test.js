@@ -27,7 +27,9 @@ async function plannedExitInProgress() {
   const dispatcher = createDispatcher({ accountId, journal, writer, adapter, clock: pclock, specOf: () => SPEC });
   await dispatcher.load();
   const controls = { kill: false, cage: false };
-  const watch = createWatch({ accountId, dispatcher, adapter, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TAKER_FEE, controls: () => controls });
+  // this helper drives a PLANNED_TARGET full exit in progress to test owner-kill escalation over it, so it opts into the
+  // planned-target counterfactual (exitPolicy) — the live law has no target (see test/judge-watch.test.js W06).
+  const watch = createWatch({ accountId, dispatcher, adapter, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TAKER_FEE, controls: () => controls, exitPolicy: { plannedTarget: true } });
   await dispatcher.commit(F.init());
 
   const book = (asks, bids, type = 'update') => feed.ingest(JSON.stringify({ channel: 'book', type, data: [{ symbol: 'XBT/USD', asks: asks.map(([price, qty]) => ({ price, qty })), bids: bids.map(([price, qty]) => ({ price, qty })), timestamp: new Date(clock.now()).toISOString() }] }), clock.now());

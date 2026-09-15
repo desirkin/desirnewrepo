@@ -397,7 +397,7 @@ positions / Watch / Judge) composed through the production `composeJudge` with a
 the RANGE_IGNITION FI15 / FI60_POSITIVE ablation, the seeded nomination thinning, the challenger whose verdict gates
 admission) or an `exitPolicy` (`{ plannedTarget: false }` disables ONLY the planned full exit at the frozen target). Arms:
 `REF_<setup>`, `REF_COMBINED`, `CASH`, `D1_PRESSURE_TO_PROGRESS`, `D2_FLOW_EVENT_RESPONSE` (needs WHALE), `D3_RESIDUAL_IGNITION`
-(needs PEER), `MOMENTUM_ABLATION`, `SEEDED_NOMINATION_CONTROL`, `D4_TRAIL_CONTINUATION_FUNDED`, `D4_TRAIL_CONTINUATION_MATCHED`
+(needs PEER), `MOMENTUM_ABLATION`, `SEEDED_NOMINATION_CONTROL`, `D4_PLANNED_TARGET_FUNDED`, `D4_PLANNED_TARGET_MATCHED`
 (one isolated episode account per REF_COMBINED entry that reached its final R, the identical cloned entry, the alternative exit,
 never summed into a funded return). The admission law under a challenger arm: D1 admits only KNOWN ALLOW; D2 admits KNOWN ALLOW
 or KNOWN NO_RULE (a known absence of an anomaly) — missing evidence is UNKNOWN and refuses; D3 admits KNOWN ALLOW; every verdict
