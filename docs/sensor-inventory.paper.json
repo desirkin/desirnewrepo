@@ -158,7 +158,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "doctrine/SOCIAL.md §36"
+   "smokeEvidence": "attic/doctrine/SOCIAL.md §36"
   },
   {
    "id": "GATEWAY_KRAKEN_STATUS",
@@ -440,7 +440,7 @@
    "paperDesiredState": "ON",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
-   "smokeEvidence": "Jetstream public read 2026-09-12: open 461 ms, 200 messages in 3.3 s, 200/200 mapped to valid shared-contract observations (112 posts / 88 reposts), 0 skips, provider sequence 25754477318; durable delivery to the RUMOR2 event root NOT proven locally (no DATABASE_URL); docs/evidence/operational-repair-2026-09-12.md, doctrine/SOCIAL.md §5B"
+   "smokeEvidence": "Jetstream public read 2026-09-12: open 461 ms, 200 messages in 3.3 s, 200/200 mapped to valid shared-contract observations (112 posts / 88 reposts), 0 skips, provider sequence 25754477318; durable delivery to the RUMOR2 event root NOT proven locally (no DATABASE_URL); docs/evidence/operational-repair-2026-09-12.md, attic/doctrine/SOCIAL.md §5B"
   },
   {
    "id": "FARCASTER_OFFICIAL",
@@ -731,7 +731,7 @@
    "paperDesiredState": "OFF",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": "BLOCKED_GEOGRAPHY",
-   "smokeEvidence": "HTTP 403 from this build environment (geo / access), 2026-09-11 read-only probe; 2026-09-12 NOT_PROBED (PROVIDER_DISABLED by the paper policy); docs/MARKET-SOCRATES-ACCEPTANCE.md"
+   "smokeEvidence": "HTTP 403 from this build environment (geo / access), 2026-09-11 read-only probe; 2026-09-12 NOT_PROBED (PROVIDER_DISABLED by the paper policy); attic/docs/MARKET-SOCRATES-ACCEPTANCE.md"
   },
   {
    "id": "COINGECKO",
@@ -827,7 +827,7 @@
    "paperDesiredState": "OFF",
    "blockerPolicy": "PAID_GATE",
    "readinessBlocker": "CREDENTIAL_MISSING + BLOCKED_BUDGET",
-   "smokeEvidence": "docs/MARKET-SOCRATES-ACCEPTANCE.md L02: BLOCKED (no entitled plan)"
+   "smokeEvidence": "attic/docs/MARKET-SOCRATES-ACCEPTANCE.md L02: BLOCKED (no entitled plan)"
   },
   {
    "id": "CRYPTOQUANT",
@@ -1095,7 +1095,7 @@
    "paperDesiredState": "REQUEST",
    "blockerPolicy": "PAID_GATE",
    "readinessBlocker": "MODEL_DISABLED_IN_POLICY (cases seal BUDGET_BLOCKED; Judge runs MARKET_DIRECT setups)",
-   "smokeEvidence": "docs/MARKET-SOCRATES-ACCEPTANCE.md (recorded-response evaluation; no paid call in tests)"
+   "smokeEvidence": "attic/docs/MARKET-SOCRATES-ACCEPTANCE.md (recorded-response evaluation; no paid call in tests)"
   },
   {
    "id": "JUDGE",

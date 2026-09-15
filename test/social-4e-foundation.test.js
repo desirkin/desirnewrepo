@@ -230,7 +230,7 @@ test('4E-7. ONE coverage matrix over every route of the three providers, plus an
   for (const id of TIKTOK.TIKTOK_ROUTE_IDS) assert.equal(TIKTOK.evaluateTiktokRouteAccess({ routeId: id, record: null, env: {}, nowMs: NOW }).liveReason, 'FOUNDATION_ONLY_NO_LIVE_PATH');
   assert.equal(FC.evaluateFarcasterAccess({ record: null, env: {}, nowMs: NOW }).liveReason, 'FOUNDATION_ONLY_NO_LIVE_PATH');
   // the remaining-work list is written down in doctrine, not implied
-  const doc = read('doctrine/SOCIAL.md');
+  const doc = read('attic/doctrine/SOCIAL.md'); // LEAN PASS 3: the legacy social doctrine moved to attic/ (docs/serpent/ is the going-forward doctrine)
   assert.ok(doc.includes('## 5P. SOCIAL-4E'), 'doctrine section present');
   for (const item of ['FOUNDATION BUNDLE COMPLETE, NOT LIVE', 'DOCUMENTATION_UNVERIFIED', 'basic-format offset', 'Remaining work (SOCIAL-4E)']) assert.ok(doc.includes(item), `doctrine records: ${item}`);
   assert.ok(!/all socials operational|ready for trading|safe to publish/i.test(doc), 'no forbidden completion language');

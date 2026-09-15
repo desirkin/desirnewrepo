@@ -2,7 +2,7 @@
 // host, fixed path template, method, native version, authentication ENV NAME (never a value), families, mapping rule,
 // cadence, lag, units, pagination, quota, plan requirement, license note, documentation URL and verification date.
 // Provider URLs are chosen by this code, never by Socrates or by external text. Secret values never enter this file.
-// Verified against official documentation on 2026-09-08 (see docs/MARKET-SOCRATES-ACCEPTANCE.md for the sources).
+// Verified against official documentation on 2026-09-08 (see attic/docs/MARKET-SOCRATES-ACCEPTANCE.md for the sources).
 import { deepFreeze } from './contracts.js';
 
 export const REGISTRY_VERSION = 'market-source-registry-1';
@@ -112,7 +112,7 @@ export const ENDPOINTS = deepFreeze([
   ep('TWELVEDATA', 'time-series', { host: 'api.twelvedata.com', path: '/time_series', authEnv: 'TWELVEDATA_API_KEY', authPlacement: 'HEADER_APIKEY', families: ['CROSS_ASSET'], mapping: 'symbol, interval (1min..1day), outputsize, timezone=UTC; meta{exchange, currency, type}, values[{datetime, open, high, low, close, volume}]', cadenceMs: 60_000, planRequirement: 'PLAN_ENTITLEMENT', quota: 'credits per call by plan', docs: 'https://twelvedata.com/docs#time-series' }),
   // ---- D14 existing settled records (read-only projection; no network of its own)
   ep('SETTLED_RECORDS', 'official-claims', { host: null, path: null, families: ['OFFICIAL_SOCIAL_EVENTS'], mapping: 'RUMOR2 settled claim / source observations via the composition-injected read-only accessor', docs: 'doctrine/RUMOR2.md' }),
-  ep('SETTLED_RECORDS', 'social-dossier', { host: null, path: null, families: ['OFFICIAL_SOCIAL_EVENTS'], mapping: 'Social research dossier / composite projection (detached DTO) via the collector accessor', docs: 'doctrine/SOCIAL.md' }),
+  ep('SETTLED_RECORDS', 'social-dossier', { host: null, path: null, families: ['OFFICIAL_SOCIAL_EVENTS'], mapping: 'Social research dossier / composite projection (detached DTO) via the collector accessor', docs: 'attic/doctrine/SOCIAL.md' }),
   ep('SETTLED_RECORDS', 'governance-status', { host: null, path: null, families: ['OFFICIAL_SOCIAL_EVENTS'], mapping: 'governance collector status / proposal records (atomic status file)', docs: 'doctrine/GOVERNANCE.md' }),
   ep('SETTLED_RECORDS', 'gateway-status', { host: null, path: null, families: ['INFRASTRUCTURE_STATUS'], mapping: 'gateway friction collector door matrix (venue status pages; experimental)', docs: 'gateway/collector.js' }),
   // ---- D15 Tokenomist (alternative, paid)

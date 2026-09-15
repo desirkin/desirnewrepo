@@ -1,6 +1,6 @@
 // SOCIAL-1 — the access census as machine-checked truth (§2/§33). The system
 // knows WHY each social ear is or is not available, from current official docs
-// (citations in doctrine/SOCIAL.md). This test pins the census so drift is
+// (citations in attic/doctrine/SOCIAL.md). This test pins the census so drift is
 // caught, and asserts the SOCIAL-1 activation decisions.
 import test from 'node:test';
 import assert from 'node:assert/strict';
