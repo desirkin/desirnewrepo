@@ -43,3 +43,41 @@ This is the doctrine every ticket is built against. Quotes are David's; the orga
 - Learning yardstick: the adaptive target is currently the 60-minute log return. With 4–6 minute bites that is the wrong horizon; score the bite window and the minutes after.
 - The after-cost gate (book walk, fees, R/R after costs) already matches "clear spread + fees before you buy."
 - No sense, decision or learning module leaves in the lean trim (duplicates and five-agent scaffolding only).
+
+## Decided doctrine (2026-09-14 / 2026-09-15)
+These are David's decisions, recorded verbatim in intent as the law each ticket is built against.
+
+### Learning target (Ticket 3)
+- The yardstick is **two scores per PAPER decision, recorded from minute one on EVERY decision including refusals**: the **5-minute log return from the decision** (the bite window) AND a **15-minute continuation score** (to catch "it kept going after I sold"). Not the 60-minute log return.
+- Record through the durable `DECISION_RECORDED` journal if that is the cleaner seam; add a seam to the frozen Judge only if the journal cannot carry it — then with a `docs/JUDGE-PAPER-AUDIT.md` entry and a digest re-pin.
+- Dormant, never dark: recording has no effect on entry/exit/sizing. ENTRY/EXIT/SIZING stay UNSUPPORTED until separately qualified; RANKING is inert without external qualification.
+
+### Exit law (Ticket 4)
+- The live law is **thesis-invalidation exits; the fixed timers (180 s no-progress, 4 h max) are backstops, not the exit; the protective stop (native / structural / 1R trail) is kept; NO target price or percent anywhere.**
+- The D4 experiment is **flipped**: the reference arm is the live no-target law; a new arm tests "with target" as the counterfactual.
+
+### Position & sizing (paper ticket)
+- **One open position at a time.**
+- Sizing law: **every bite is the whole nut** — unless the order book cannot swallow the whole nut cleanly, in which case the **largest bite the book can absorb without moving the price**. **No fixed reserve.** SIZING stays learning-gated (UNSUPPORTED until qualified).
+- Paper runs **pure all-in vs depth-capped all-in side by side**.
+
+### Cadence
+- Target once learned: **6–7 trades a day, possibly more.** Throttles by **facts (capital + a qualified setup), never by a daily count.**
+
+### Paper realism (ticket, before the paper publish)
+- Paper fills happen against the **recorded book as it stood a realistic delay AFTER the decision**, walking depth, **partial when the book cannot absorb**, minus **Kraken's real fee tier**.
+- The delay is the **live-measured Kraken round-trip from the gateway collector**, widened when Kraken reports degraded.
+
+### Venue
+- **Stay on Kraken.** Latency is **measured, not assumed.**
+
+### Strategy 6 — Isolated Flush Reversal (IFR)
+- Family `CROSS_VENUE_DISLOCATION`, setup `ISOLATED_FLUSH_REVERSAL`.
+- Buy a sharp **Kraken-only** selloff **only after Kraken starts repairing it** while the same asset **holds on two reference venues** (Coinbase + Binance public books, read-only, receipt-time ordered).
+- Recovery measured at the **size-aware executable bid**; a **second-wave absorption test**; **recovery-ownership ≥ 0.80**; exit **when the gap repairs, the references confirm the drop, or the local low fails**.
+- `SHADOW_ONLY` after the paper publish, with episode / refusal / counterfactual recording and ablations.
+
+### Strategy 7 — Spot-Confirmed Deleveraging Reclaim (SDR)
+- Family `DERIVATIVE_STATE_RECLAIM`, setup `SPOT_CONFIRMED_DELEVERAGING_RECLAIM`.
+- After a **broad selloff** with **verified native-unit OI contraction** and **liquidation-tagged selling on Kraken Futures' public stream**, buy **Kraken spot only once all three spot venues' size-supported bids recover and the perpetual discount repairs upward**.
+- **Storm-prey class: smallest bite by law until paper-qualified**; the **last of the seven** to get paper authority. `SHADOW_ONLY` behind IFR.
