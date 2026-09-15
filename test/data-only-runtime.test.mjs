@@ -65,7 +65,8 @@ test('data-only launcher starts and reports zero-order market observations with 
 test('outer market funnel subscribes the complete accepted catalog independently of the deep subject list', () => {
   const source = entryAndSpine();
   assert.match(source, /from '\.\.\/market-lab\/broad-kraken\.js'/);
-  assert.match(source, /broadMarket = await startBroadKraken\(\{ catalogSource, dataDir: root, log \}\)/);
+  assert.match(source, /const broadOpts = \{ catalogSource, dataDir: root, log \}/);
+  assert.match(source, /broadMarket = await startBroadKraken\(broadOpts\)/);
   assert.match(source, /handles\.push\(broadMarket\)/);
   assert.match(source, /broadMarket:\s*broadMarket\?\.status\?\.\(\)/);
   assert.match(source, /blockers\.BROAD_MARKET/);
