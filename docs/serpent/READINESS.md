@@ -151,7 +151,7 @@ free of `UNKNOWN` rows.
 
 ## 3. What you click, in order
 
-1. **Set the secret NAMES** from section 1 in Replit (at least the five Required, plus the object-store four for durability).
+1. **Set the secret NAMES** from section 1 in Replit (at least the five Required, plus `SERPENT_OBJECT_STORE_PROVIDER=REPLIT` for durability — App Storage on Replit needs no service-account JSON; the bucket and prefix NAMES are optional).
 2. **Preflight** (read-only, zero paid calls): run `npm run paper:preflight`. Read the verdict. If it is not
    `READY_FOR_PAPER`, the blocker lines say exactly what is missing — fix and re-run. (Add `--json` for the machine report.)
 3. **Initialize the paper account** — once per database: run `node bin/judge.js init-paper --policy config/judge.paper.json`
