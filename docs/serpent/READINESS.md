@@ -18,7 +18,7 @@ Add the **name**, paste your value. The code reads names, never prints values.
 | NAME | What it is |
 |---|---|
 | `COBRA_PROFILE` | Set to `config/paper-runtime.json` — the one profile the runtime, CLI and cockpit read. |
-| `COBRA_DATA_DIR` | The writable data directory. In deployment this must be a **persistent mount** (App Storage / a volume), not the ephemeral container disk. |
+| `COBRA_DATA_DIR` | The writable data directory. **Any writable directory on the container disk is fine** — it does not need to be a persistent mount. The durability is the object store (PERSIST-1): the bulk capture is mirrored to App Storage and restored on boot before any consumer reads, so an ephemeral container disk loses nothing across a republish. |
 | `DATABASE_URL` | The PostgreSQL connection URL. This is the Judge's journal authority — paper needs it. |
 | `SERPENT_CONTROL_PASSWORD` | A long random password. First factor for every acting control (KILL / CAGE / CLEAR / ASK / SOCRATES toggles — human only). Also verifies owner intent when the paper account is created. |
 | `SERPENT_HTTP_CONTACT` | A contact email/name. Required by the SEC / EDGAR user-agent law for the official RUMOR ears; the law is never bypassed. |
