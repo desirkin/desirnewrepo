@@ -4,7 +4,19 @@
 // and authorized again HERE, on the server. Missing configuration fails
 // closed. Secrets never enter source, logs, Memory, control history, or
 // API responses. See doctrine/CONTROL.md.
+//
+// CONTROL-0B (control-plane hardening): acting authority is granted only with
+// password + a second factor (RFC 6238 TOTP; secret by NAME,
+// SERPENT_CONTROL_TOTP_SECRET — see lib/totp.js). login() requires both, so
+// the granted session — the sole key to every acting control (KILL, CAGE,
+// CLEAR, ASK / SOCRATES toggles) — carries the second factor; CLEAR and
+// ARM_LIVE additionally re-verify BOTH factors fresh at the instant they act.
+// The second factor rides the SAME failed-auth limiter as the password. It is
+// backward compatible: with no TOTP secret provisioned the checks are exactly
+// the former password-only ones (the cockpit still refuses to act without the
+// password), and the paper-day checklist requires the secret set.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { verifyTotp, totpSecretUsable } from '../lib/totp.js';
 
 export const SESSION_LIFETIME_MS = 8 * 3600 * 1000; // absolute; restart invalidates — by design
 export const CLEAR_PHRASE = 'CLEAR SERPENT';
@@ -21,13 +33,15 @@ const digestEqual = (a, b) => timingSafeEqual(sha256(a), sha256(b)); // fixed-le
 
 export class ControlAuth {
   #fixedPassword; // tests may inject; production reads the environment lazily
+  #fixedTotpSecret; // second factor; tests may inject, production reads the env by NAME lazily
   #sessions = new Map(); // sessionId -> { csrf, expiresAt, tag }
-  #failures = []; // failed password-verification timestamps (ms)
+  #failures = []; // failed credential-verification timestamps (ms) — password OR second factor
   #lockedUntil = 0;
   #accesses = 0;
 
-  constructor({ password, now = Date.now, audit = () => {} } = {}) {
+  constructor({ password, totpSecret, now = Date.now, audit = () => {} } = {}) {
     this.#fixedPassword = password;
+    this.#fixedTotpSecret = totpSecret;
     this.now = now;
     this.audit = audit; // receives non-secret event objects only
   }
@@ -36,9 +50,23 @@ export class ControlAuth {
     return this.#fixedPassword ?? process.env.SERPENT_CONTROL_PASSWORD;
   }
 
+  // Second-factor secret, provisioned by NAME. Never returned by any public
+  // method — only ever consumed inside a verification.
+  #totpSecret() {
+    return this.#fixedTotpSecret ?? process.env.SERPENT_CONTROL_TOTP_SECRET;
+  }
+
   configured() {
     const p = this.#password();
     return typeof p === 'string' && p.length > 0;
+  }
+
+  // CONTROL-0B: the second factor is REQUIRED whenever a usable TOTP secret is
+  // provisioned. A present-but-undecodable secret is not "configured" (it can
+  // never verify) — see lib/totp.js totpSecretUsable — so a garbled secret can
+  // never silently downgrade the acting controls to password-only.
+  secondFactorConfigured() {
+    return totpSecretUsable(this.#totpSecret());
   }
 
   // ---- failed-auth rate limiter (shared by login AND CLEAR re-entry) ----
@@ -60,14 +88,22 @@ export class ControlAuth {
     }
   }
 
-  // One password verification, limiter-governed. NEVER logs the supplied
-  // value; refuses without verifying while locked out.
-  #verifyPassword(supplied) {
+  // One credential verification, limiter-governed. Verifies the password AND —
+  // whenever a second factor is provisioned — the TOTP code, together. NEVER
+  // logs either supplied value; refuses without verifying while locked out.
+  // BOTH factors are evaluated before the verdict so that a password-correct /
+  // TOTP-wrong attempt still counts a failure (the limiter is not reset until
+  // both pass), closing a TOTP brute-force oracle. A single generic AUTH_FAILED
+  // never discloses which factor was wrong. When no second factor is
+  // configured this is exactly the former password-only check.
+  #verifyCredentials(password, totp) {
     if (!this.configured()) return { ok: false, reason: 'CONTROL_AUTH_UNCONFIGURED' };
     if (this.#locked()) return { ok: false, reason: 'RATE_LIMITED', retryAfterSec: this.lockRemainingSec() };
-    if (typeof supplied !== 'string' || !digestEqual(supplied, this.#password())) {
+    const passwordOk = typeof password === 'string' && digestEqual(password, this.#password());
+    const totpOk = !this.secondFactorConfigured() || verifyTotp(this.#totpSecret(), totp, { now: this.now });
+    if (!passwordOk || !totpOk) {
       this.#recordFailure();
-      return { ok: false, reason: 'AUTH_FAILED' }; // generic — no length/content hints
+      return { ok: false, reason: 'AUTH_FAILED' }; // generic — no length/content/which-factor hints
     }
     this.#failures = [];
     return { ok: true };
@@ -98,8 +134,8 @@ export class ControlAuth {
   // ---- login: the ONLY endpoint exempt from CSRF (no session exists yet
   // to carry a token); protected instead by SameSite=Strict cookies,
   // same-origin policy, the password itself, and the rate limiter.
-  login(password) {
-    const v = this.#verifyPassword(password);
+  login(password, totp) {
+    const v = this.#verifyCredentials(password, totp);
     if (!v.ok) {
       this.audit({ event: v.reason === 'AUTH_FAILED' ? 'AUTH_FAIL' : `AUTH_${v.reason}` });
       return { authenticated: false, ...v };
@@ -128,6 +164,7 @@ export class ControlAuth {
     const s = this.#session(sessionId);
     return {
       configured: this.configured(),
+      secondFactor: this.secondFactorConfigured() ? 'REQUIRED' : 'DISABLED',
       authenticated: Boolean(s),
       ...(s ? { csrfToken: s.csrf, expiresAt: s.expiresAt } : {}),
     };
@@ -145,10 +182,10 @@ export class ControlAuth {
   // intent than engaging a lock — a valid session does NOT exempt the fresh
   // password from the limiter, and both password and exact phrase are
   // verified server-side. Refusals never disclose which part was wrong.
-  authorizeClear(sessionId, csrfHeader, password, phrase) {
+  authorizeClear(sessionId, csrfHeader, password, phrase, totp) {
     const a = this.authorize(sessionId, csrfHeader);
     if (!a.ok) return a;
-    const v = this.#verifyPassword(password);
+    const v = this.#verifyCredentials(password, totp);
     if (!v.ok) {
       const code = v.reason === 'RATE_LIMITED' ? 429 : 403;
       this.audit({ event: 'CLEAR_REFUSED', category: v.reason, sessionTag: a.sessionTag });
@@ -167,10 +204,10 @@ export class ControlAuth {
   // limiter, and the caller then verifies the exact server-generated phrase and
   // the account / allocation / policy / release binding (judge/arming.js).
   // Refusals never say which part failed.
-  authorizeArm(sessionId, csrfHeader, password) {
+  authorizeArm(sessionId, csrfHeader, password, totp) {
     const a = this.authorize(sessionId, csrfHeader);
     if (!a.ok) return a;
-    const v = this.#verifyPassword(password);
+    const v = this.#verifyCredentials(password, totp);
     if (!v.ok) {
       const code = v.reason === 'RATE_LIMITED' ? 429 : 403;
       this.audit({ event: 'ARM_REFUSED', category: v.reason, sessionTag: a.sessionTag });
@@ -227,7 +264,7 @@ export function gateControl(auth, { cookieHeader, csrfHeader, originHeader, host
     const sessionId = parseCookies(cookieHeader).serpent_session;
     const action = String(body?.action ?? '').toLowerCase();
     if (action === 'clear') {
-      const r = auth.authorizeClear(sessionId, csrfHeader, body?.password, body?.confirmPhrase);
+      const r = auth.authorizeClear(sessionId, csrfHeader, body?.password, body?.confirmPhrase, body?.totp);
       return r.ok ? { allow: true, sessionTag: r.sessionTag } : { allow: false, code: r.code, reason: r.reason, retryAfterSec: r.retryAfterSec };
     }
     const r = auth.authorize(sessionId, csrfHeader);

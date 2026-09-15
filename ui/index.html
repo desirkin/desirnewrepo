@@ -1165,6 +1165,7 @@ function applyPosture(posture, { why = '', sub = null } = {}) {
    query string. The session rides an HttpOnly SameSite=Strict cookie the
    script cannot read. The server re-authorizes every mutation. */
 let csrfToken = null;
+let secondFactorRequired = false; // set from /api/auth/status; when true, acting auth needs the 6-digit code too
 /* UI-1: the auth indicator is a tiny glyph, not an overlay pill. Ordinary
    locked = quiet dim padlock; authenticated = accent; a REAL problem
    (unconfigured/error) = compact amber warning that demands attention. */
@@ -1183,6 +1184,7 @@ async function refreshAuth() {
     const r = await fetch('/api/auth/status');
     const d = await r.json();
     csrfToken = d.authenticated ? d.csrfToken : null;
+    secondFactorRequired = d.secondFactor === 'REQUIRED';
     renderAuthDot(d.controlAuth === 'CONTROL_AUTH_UNCONFIGURED' ? 'warn' : d.authenticated ? 'authed' : 'locked');
   } catch {
     renderAuthDot('warn'); // an auth endpoint we cannot read is a real problem
@@ -1194,16 +1196,19 @@ function openAuthCard(then) {
   $('#cardBody').innerHTML = `
     <div class="rows"><span>server authorization required</span></div>
     <input id="authPw" type="password" placeholder="control password" autocomplete="current-password">
+    ${secondFactorRequired ? '<input id="authTotp" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="6-digit code" autocomplete="one-time-code">' : ''}
     <button id="authGo">AUTHENTICATE</button>
     <div id="authMsg" class="rows"></div>`;
   $('#authGo').addEventListener('click', async () => {
     const pw = $('#authPw').value;
+    const totp = secondFactorRequired ? ($('#authTotp')?.value ?? '').trim() : undefined;
     $('#authPw').value = '';
+    if ($('#authTotp')) $('#authTotp').value = '';
     try {
       const r = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password: pw }),
+        body: JSON.stringify(secondFactorRequired ? { password: pw, totp } : { password: pw }),
       });
       const d = await r.json();
       if (d.authenticated) {
@@ -1224,16 +1229,19 @@ function ensureAuth(fire) { if (csrfToken) fire(); else openAuthCard(fire); }
 function openClearCard() {
   showCard({ kicker: 'CONTROL', title: 'CLEAR / RE-ARM' });
   $('#cardBody').innerHTML = `
-    <div class="rows"><span>restoring permission requires fresh intent — password again, and the exact phrase</span></div>
+    <div class="rows"><span>restoring permission requires fresh intent — password again${secondFactorRequired ? ', a fresh code,' : ''} and the exact phrase</span></div>
     <input id="clrPw" type="password" placeholder="control password" autocomplete="off">
+    ${secondFactorRequired ? '<input id="clrTotp" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="6-digit code" autocomplete="one-time-code">' : ''}
     <input id="clrPhrase" type="text" placeholder="type: CLEAR SERPENT" autocomplete="off" autocapitalize="characters">
     <button id="clrGo">CLEAR</button>
     <div id="clrMsg" class="rows"></div>`;
   $('#clrGo').addEventListener('click', async () => {
     const password = $('#clrPw').value;
     const confirmPhrase = $('#clrPhrase').value;
+    const totp = secondFactorRequired ? ($('#clrTotp')?.value ?? '').trim() : undefined;
     $('#clrPw').value = '';
-    const d = await postControl('clear', { password, confirmPhrase });
+    if ($('#clrTotp')) $('#clrTotp').value = '';
+    const d = await postControl('clear', secondFactorRequired ? { password, confirmPhrase, totp } : { password, confirmPhrase });
     if (d.ok) closeSheets();
     else $('#clrMsg').textContent =
       d.reason === 'RATE_LIMITED' ? `LOCKED OUT — retry in ${d.retryAfterSec ?? '?'}s`

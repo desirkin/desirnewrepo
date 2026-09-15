@@ -542,7 +542,7 @@ const server = http.createServer((req, res) => {
     // Every OTHER mutation (logout and controls included) needs session+CSRF.
     if (req.method === 'POST' && url.pathname === '/api/auth/login') {
       readBody(req, res, (body) => {
-        const r = auth.login(body.password);
+        const r = auth.login(body.password, body.totp);
         if (!r.authenticated) {
           const code = r.reason === 'RATE_LIMITED' ? 429 : r.reason === 'CONTROL_AUTH_UNCONFIGURED' ? 503 : 401;
           json(res, code, { authenticated: false, reason: r.reason, ...(r.retryAfterSec ? { retryAfterSec: r.retryAfterSec } : {}) });
@@ -628,7 +628,7 @@ const server = http.createServer((req, res) => {
         }
         // secrets never travel past the gate: the control layer sees only
         // the action fields it always saw
-        const { password, confirmPhrase, ...controlBody } = body;
+        const { password, confirmPhrase, totp, ...controlBody } = body;
         (async () => {
           const action = String(controlBody.action ?? '').toLowerCase();
           // PERSIST-0B §5: BOTH control doors (this cockpit and the CLI)
@@ -678,10 +678,10 @@ const server = http.createServer((req, res) => {
         if (!gate.allow) { json(res, gate.code, { ok: false, reason: gate.reason }); return; }
         const step = String(body.step ?? '').toLowerCase();
         if (step === 'confirm') {
-          const fresh = auth.authorizeArm(parseCookies(req.headers.cookie).serpent_session, req.headers['x-serpent-csrf'], body.password);
+          const fresh = auth.authorizeArm(parseCookies(req.headers.cookie).serpent_session, req.headers['x-serpent-csrf'], body.password, body.totp);
           if (!fresh.ok) { json(res, fresh.code, { ok: false, reason: fresh.reason, ...(fresh.retryAfterSec ? { retryAfterSec: fresh.retryAfterSec } : {}) }); return; }
         }
-        const { password, ...rest } = body; // the secret never travels past this line
+        const { password, totp, ...rest } = body; // the secrets never travel past this line
         try { judgeArm(rest, gate, res); } catch (err) { console.error(`[api/judge/arm] ${err.constructor.name}: ${err.message}`); json(res, 500, { ok: false, reason: 'ARM_FAILED' }); }
       });
       return;

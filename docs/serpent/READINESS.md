@@ -20,8 +20,24 @@ Add the **name**, paste your value. The code reads names, never prints values.
 | `COBRA_PROFILE` | Set to `config/paper-runtime.json` — the one profile the runtime, CLI and cockpit read. |
 | `COBRA_DATA_DIR` | The writable data directory. In deployment this must be a **persistent mount** (App Storage / a volume), not the ephemeral container disk. |
 | `DATABASE_URL` | The PostgreSQL connection URL. This is the Judge's journal authority — paper needs it. |
-| `SERPENT_CONTROL_PASSWORD` | A long random password. Gates the cockpit KILL / CAGE / CLEAR controls (human only). Also verifies owner intent when the paper account is created. |
+| `SERPENT_CONTROL_PASSWORD` | A long random password. First factor for every acting control (KILL / CAGE / CLEAR / ASK / SOCRATES toggles — human only). Also verifies owner intent when the paper account is created. |
 | `SERPENT_HTTP_CONTACT` | A contact email/name. Required by the SEC / EDGAR user-agent law for the official RUMOR ears; the law is never bypassed. |
+
+### Control-plane hardening — the second factor (Ticket C)
+The cockpit is **read-only without login**: anyone may watch, no one may act unbidden. Acting authority is granted only
+with password **+ a second factor** (RFC 6238 TOTP — the 6-digit code from any authenticator app). Set the secret NAME
+below and scan it into your authenticator once. The login then asks for the code as well; the granted session is the only
+key to every acting control (KILL, CAGE, CLEAR, ASK / SOCRATES toggles), and **CLEAR** and **ARM_LIVE** re-ask for both the
+password and a fresh code at the instant they act. Wrong codes count against the **same** failed-auth limiter as the
+password (5 failures in 5 min ⇒ 15-min lockout) — there is no separate code oracle. Confirm it is live before the paper
+day: `GET /api/auth/status` must report `"secondFactor":"REQUIRED"`.
+| NAME | What it is | Default if unset |
+|---|---|---|
+| `SERPENT_CONTROL_TOTP_SECRET` | The shared TOTP secret (base32, as an authenticator app shows/imports it). Provisions the second factor. | (unset ⇒ password-only; status reports `DISABLED` — set it for the paper day) |
+
+A present-but-undecodable secret is treated as `DISABLED` (password-only, never a bricked cockpit) — which is exactly why
+the checklist confirms `secondFactor:"REQUIRED"` rather than trusting that the NAME is merely set. The secret is read by
+NAME only and never enters source, logs, Memory, control history, or any API response.
 
 ### Durable bulk storage — so a republish never loses a day of capture (Ticket 5)
 A Replit publish wipes the container disk. These point the durable object store at Replit **App Storage** (which is
