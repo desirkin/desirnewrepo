@@ -42,7 +42,7 @@ async function fixtures() {
   const kws = await H.startWsFixture({ path: '/v2', onConnection: krakenWs }); const cws = await H.startWsFixture({ path: '/', onConnection: coinbaseWs });
   return { http, kws, cws, close: async () => { await kws.close(); await cws.close(); await http.close(); } };
 }
-const subjectsBtc = () => { const s = H.subjectsWith(); return { ...s, subjects: [s.subjects[0]], macroSeries: [], crossAsset: [] }; };
+const subjectsBtc = () => { const s = H.subjectsWith(); return { ...s, subjects: [s.subjects[0]], macroSeries: [] }; };
 const settled = { gatewayMatrix: () => ({ ts: new Date().toISOString(), doors: { BTC: { funding: 'OPEN', trading: 'OPEN' } } }), gatewayIncidents: () => ({}) };
 
 test('A09/B02. STANDALONE owner: real streams over loopback + REST fixtures -> sealed CAPTURE bundle; build -> CONTEXT twice gives the identical contextId; reopen against the capture verifies input clocks; the market-only v2 packet cites real provider sources and no invented Social item; a later as-of over the same capture is a different context', async () => {

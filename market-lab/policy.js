@@ -36,7 +36,7 @@ export const ALLOWED_MAX_AGE_MS = deepFreeze({
   SPOT_PRICE_CHART: [15_000, 60_000, 300_000, 3_600_000], SPOT_FLOW: [15_000, 60_000, 300_000], DISPLAYED_LIQUIDITY: [1_000, 15_000, 60_000], CROSS_VENUE: [15_000, 60_000, 300_000],
   DERIVATIVES_FUNDING_OI: [60_000, 300_000, 3_600_000], LIQUIDATIONS: [60_000, 300_000, 3_600_000], OPTIONS_TERM_SKEW: [300_000, 3_600_000], SUPPLY_UNLOCKS: [3_600_000, 86_400_000],
   DEX_DEFI: [300_000, 3_600_000, 86_400_000], ONCHAIN_ENTITY_FLOW: [3_600_000, 86_400_000], NETWORK_ACTIVITY: [3_600_000, 86_400_000], STABLECOIN_LIQUIDITY: [3_600_000, 86_400_000],
-  ETF_FLOWS: [86_400_000], MACRO_RELEASES: [3_600_000, 86_400_000], CROSS_ASSET: [60_000, 3_600_000, 86_400_000], OFFICIAL_SOCIAL_EVENTS: [60_000, 3_600_000], INFRASTRUCTURE_STATUS: [60_000, 3_600_000],
+  ETF_FLOWS: [86_400_000], MACRO_RELEASES: [3_600_000, 86_400_000], OFFICIAL_SOCIAL_EVENTS: [60_000, 3_600_000], INFRASTRUCTURE_STATUS: [60_000, 3_600_000],
 });
 
 const PROVIDER_POLICY_KEYS = ['enabled', 'credentialEnv', 'plan', 'limits', 'permittedEndpoints', 'smoke'];
@@ -187,7 +187,7 @@ export function samplePolicy() {
 
 // ---- subjects file ------------------------------------------------------------------------------------------------
 export const SUBJECT_ENTRY_KEYS = Object.freeze(['canonicalCoin', 'krakenSpot', 'coinbase', 'krakenDerivatives', 'deribit', 'bybit', 'coingecko', 'tokens', 'pools', 'protocols', 'cryptoquant', 'santiment', 'coinmetrics', 'tokenomist', 'coinglass']);
-export const SUBJECTS_KEYS = Object.freeze(['subjectsVersion', 'subjects', 'macroSeries', 'crossAsset', 'stablecoins', 'referenceNotionals', 'peers', 'benchmarks']);
+export const SUBJECTS_KEYS = Object.freeze(['subjectsVersion', 'subjects', 'macroSeries', 'stablecoins', 'referenceNotionals', 'peers', 'benchmarks']);
 export const MAX_SUBJECTS = 64;
 export function subjectsError(raw, where = 'subjects') {
   const shape = jsonShapeError(raw, where); if (shape) return shape;
@@ -206,7 +206,6 @@ export function subjectsError(raw, where = 'subjects') {
     if (!Array.isArray(s.protocols) || s.protocols.length > 8 || s.protocols.some((p) => !isId(p))) return `${w}: protocols malformed`;
   }
   if (!Array.isArray(raw.macroSeries) || raw.macroSeries.length > 16 || raw.macroSeries.some((x) => !isId(x))) return `${where}: macroSeries malformed`;
-  if (!Array.isArray(raw.crossAsset) || raw.crossAsset.length > 16 || raw.crossAsset.some((x) => exactKeys(x, ['symbol', 'exchange', 'proxyFor'], where) !== null || !isId(x.symbol) || !isIdOrNull(x.exchange) || !isBoundedString(x.proxyFor, 80))) return `${where}: crossAsset malformed (every instrument names what it is a proxy for)`;
   if (!Array.isArray(raw.stablecoins) || raw.stablecoins.length > 8 || raw.stablecoins.some((x) => exactKeys(x, ['stablecoinId', 'pegCurrency', 'defillamaId'], where) !== null || !isId(x.stablecoinId) || !isId(x.pegCurrency) || !isIdOrNull(x.defillamaId))) return `${where}: stablecoins malformed`;
   if (!Array.isArray(raw.referenceNotionals) || raw.referenceNotionals.length === 0 || raw.referenceNotionals.length > 8 || raw.referenceNotionals.some((n) => !(isFiniteNum(n) && n > 0)) || new Set(raw.referenceNotionals).size !== raw.referenceNotionals.length) return `${where}: referenceNotionals must be 1..8 distinct positive quote amounts`;
   if (!Array.isArray(raw.peers) || raw.peers.length > 64 || raw.peers.some((c) => !isCoin(c)) || new Set(raw.peers).size !== raw.peers.length) return `${where}: peers malformed`;
@@ -223,7 +222,6 @@ export function sampleSubjects() {
       { canonicalCoin: 'SOL', krakenSpot: 'SOL/USD', coinbase: 'SOL-USD', krakenDerivatives: 'PF_SOLUSD', deribit: null, bybit: 'SOLUSDT', coingecko: 'solana', tokens: [], pools: [], protocols: [], cryptoquant: null, santiment: 'solana', coinmetrics: 'sol', tokenomist: 'solana', coinglass: 'SOL' },
     ],
     macroSeries: ['DFF', 'DGS2', 'DGS10', 'DTWEXBGS', 'CPIAUCSL', 'UNRATE', 'WALCL', 'RRPONTSYD'],
-    crossAsset: [{ symbol: 'SPY', exchange: null, proxyFor: 'broad US equity benchmark ETF proxy' }, { symbol: 'QQQ', exchange: null, proxyFor: 'technology benchmark ETF proxy' }, { symbol: 'TLT', exchange: null, proxyFor: 'long Treasury bond ETF proxy (not a cash yield)' }, { symbol: 'EUR/USD', exchange: null, proxyFor: 'dollar pair proxy (not DXY)' }, { symbol: 'XAU/USD', exchange: null, proxyFor: 'gold spot proxy' }],
     stablecoins: [{ stablecoinId: 'USDT', pegCurrency: 'USD', defillamaId: '1' }, { stablecoinId: 'USDC', pegCurrency: 'USD', defillamaId: '2' }],
     referenceNotionals: [1000, 10000, 100000],
     peers: ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'ADA', 'LINK', 'AVAX'],

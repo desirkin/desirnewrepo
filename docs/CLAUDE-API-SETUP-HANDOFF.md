@@ -16,7 +16,6 @@ Use only a supported secret-store write capability in your own session. The owne
 |---|---|---|
 | `X_BEARER_TOKEN` | X account-usage endpoint returned HTTP 200; no post stream started | Installation unverified |
 | `NEYNAR_API_KEY` | One Farcaster cast-search request returned HTTP 200 | Installation unverified |
-| `TWELVEDATA_API_KEY` | EUR/USD one-minute request returned two bars; usage endpoint also succeeded | Installation unverified |
 
 Preserve existing `FRED_API_KEY`, `COINGECKO_DEMO_API_KEY`, `DATABASE_URL`, `SERPENT_CONTROL_PASSWORD`, `COBRA_DATA_DIR` and the public `SERPENT_HTTP_CONTACT` setting. Existing FRED/CoinGecko presence was reported by the owner; check presence without revealing values. Preserve the existing CoinGecko meter: the authorized two-call allowance must not be reset for another demonstration.
 

@@ -23,7 +23,7 @@ const noNet = async (url) => { throw new Error(`network reached: ${url}`); };
 const NoWs = class { constructor(url) { throw new Error(`websocket reached: ${url}`); } };
 function io() { const out = []; const err = []; return { stdout: (s) => out.push(s), stderr: (s) => err.push(s), out: () => out.join(''), err: () => err.join(''), last: () => JSON.parse(out[out.length - 1]) }; }
 function writeJson(dir, name, obj) { const f = path.join(dir, name); writeFileSync(f, `${JSON.stringify(obj, null, 1)}\n`); return f; }
-const subjectsBtc = () => { const s = H.subjectsWith(); return { ...s, subjects: [s.subjects[0]], macroSeries: [], crossAsset: [] }; };
+const subjectsBtc = () => { const s = H.subjectsWith(); return { ...s, subjects: [s.subjects[0]], macroSeries: [] }; };
 const utcNoMillis = (ms) => new Date(Math.ceil(ms / 1000) * 1000).toISOString().replace('.000Z', 'Z');
 
 // ---- source-shaped loopback fixtures (Kraken spot + Coinbase spot only: the smallest real pipeline) ---------------------

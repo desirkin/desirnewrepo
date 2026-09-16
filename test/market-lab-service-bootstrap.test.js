@@ -15,7 +15,7 @@ const tmp = () => mkdtempSync(path.join(tmpdir(), 'mlab-bootstrap-'));
 const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 
 function fredPolicy() { const p = structuredClone(samplePolicy()); p.providers.FRED.enabled = true; return loadPolicy(p); }
-function fredSubjects() { const s = structuredClone(sampleSubjects()); s.subjects = [s.subjects[0]]; s.macroSeries = ['CPIAUCSL']; s.crossAsset = []; return loadSubjects(s); }
+function fredSubjects() { const s = structuredClone(sampleSubjects()); s.subjects = [s.subjects[0]]; s.macroSeries = ['CPIAUCSL']; return loadSubjects(s); }
 function controlledTimers() {
   const intervals = [];
   return {

@@ -35,12 +35,11 @@ test('data-only market policy is a zero-spend observation allowlist and missing 
   const withoutKeys = buildDataOnlyMarketPolicy({ env: {} });
   assert.deepEqual(Object.entries(withoutKeys.providers).filter(([, p]) => p.enabled).map(([id]) => id), ['KRAKEN_SPOT', 'COINBASE_SPOT', 'GECKOTERMINAL', 'DEFILLAMA', 'COINMETRICS']);
   assert.equal(withoutKeys.providers.FRED.enabled, false);
-  assert.equal(withoutKeys.providers.TWELVEDATA.enabled, false);
   assert.equal(withoutKeys.providers.COINGECKO.enabled, false);
   assert.equal(withoutKeys.providers.KRAKEN_SPOT.enabled, true, 'a missing unrelated key cannot disable public spot');
 
-  const withKeys = buildDataOnlyMarketPolicy({ env: { FRED_API_KEY: 'fixture', TWELVEDATA_API_KEY: 'fixture', COINGECKO_DEMO_API_KEY: 'fixture', COINGLASS_API_KEY: 'must-not-enable', KRAKEN_L3_DATA_API_KEY: 'must-not-enable' } });
-  for (const id of ['FRED', 'TWELVEDATA', 'COINGECKO']) assert.equal(withKeys.providers[id].enabled, true, id);
+  const withKeys = buildDataOnlyMarketPolicy({ env: { FRED_API_KEY: 'fixture', COINGECKO_DEMO_API_KEY: 'fixture', COINGLASS_API_KEY: 'must-not-enable', KRAKEN_L3_DATA_API_KEY: 'must-not-enable' } });
+  for (const id of ['FRED', 'COINGECKO']) assert.equal(withKeys.providers[id].enabled, true, id);
   for (const id of ['KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'TOKENOMIST']) assert.equal(withKeys.providers[id].enabled, false, id);
   assert.equal(withKeys.providers.KRAKEN_SPOT.l3.enabled, false);
   assert.equal(withKeys.providers.KRAKEN_DERIVATIVES.charts.enabled, false);

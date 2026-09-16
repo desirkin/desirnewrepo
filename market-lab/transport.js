@@ -60,7 +60,6 @@ export function planRequest({ providerId, endpointId, pathParams = {}, query = {
     else if (e.authPlacement === 'HEADER_APIKEY') h.authorization = `Apikey ${credential}`;
     else if (e.authPlacement === 'HEADER' || e.authPlacement === 'HEADER_OPTIONAL') h[providerId === 'COINGLASS' ? 'CG-API-KEY' : providerId === 'COINGECKO' ? 'x-cg-demo-api-key' : 'x-api-key'] = credential;
     else if (e.authPlacement === 'QUERY') { const qq = `${q ? `${q}&` : ''}api_key=${encodeURIComponent(credential)}`; url = `https://${e.host}${path}?${qq}`; }
-    if (providerId === 'TWELVEDATA') { delete h.authorization; h.authorization = `apikey ${credential}`; }
   }
   const m = method ?? e.method;
   // a caller-encoded string body (form encoding for a signed Kraken private read) travels verbatim under the caller's content type;

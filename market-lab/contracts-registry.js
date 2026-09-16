@@ -1,7 +1,7 @@
 import { OBSERVATION_SCHEMA_VERSION, MARKET_LAB_VERSION, AUTHORITY, PURPOSE, ERROR_CODES, EXIT_CODES, MAX_REASON_CHARS, boundedReason, MarketLabError, fail, isPlainObject, isTs, isTsOrNull, isCount, isFiniteNum, isNumOrNull, isPositive, isNonNegative, isBoundedString, isStringOrNull, isUnitFraction, safeType, sha256Hex, SHA256_RE, ID_RE, CODE_RE, COIN_RE, isId, isIdOrNull, isCode, isCoin, deepFreeze, round, cmp, canonicalJson, canonicalDigest, utf8Bytes, exactKeys, enumError, MAX_DTO_DEPTH, jsonShapeError, MAX_JSON_DEPTH, parseStrictJson, wellFormedString } from './contracts-core.js';
 // ---- closed vocabularies ---------------------------------------------------------------------------------
-export const FAMILIES = Object.freeze(['SPOT_PRICE_CHART', 'SPOT_FLOW', 'DISPLAYED_LIQUIDITY', 'CROSS_VENUE', 'DERIVATIVES_FUNDING_OI', 'LIQUIDATIONS', 'OPTIONS_TERM_SKEW', 'SUPPLY_UNLOCKS', 'DEX_DEFI', 'ONCHAIN_ENTITY_FLOW', 'NETWORK_ACTIVITY', 'STABLECOIN_LIQUIDITY', 'ETF_FLOWS', 'MACRO_RELEASES', 'CROSS_ASSET', 'OFFICIAL_SOCIAL_EVENTS', 'INFRASTRUCTURE_STATUS']);
-export const PAYLOAD_KINDS = Object.freeze(['TRADE', 'BOOK_SNAPSHOT', 'BOOK_COVERAGE', 'CANDLE', 'INSTRUMENT', 'DERIVATIVE_TICK', 'LIQUIDATION', 'OPTION_TICK', 'ASSET_REFERENCE', 'UNLOCK_EVENT', 'DEX_POOL', 'DEFI_METRIC', 'ONCHAIN_METRIC', 'STABLECOIN_METRIC', 'ETF_FLOW', 'MACRO_OBSERVATION', 'ECONOMIC_EVENT', 'CROSS_ASSET_BAR', 'EVENT_REFERENCE', 'PROVIDER_STATUS', 'DERIVATIVE_ANALYTIC_BUCKET', 'L3_BOOK_SNAPSHOT', 'L3_ORDER_EVENT', 'L3_BOOK_COVERAGE']);
+export const FAMILIES = Object.freeze(['SPOT_PRICE_CHART', 'SPOT_FLOW', 'DISPLAYED_LIQUIDITY', 'CROSS_VENUE', 'DERIVATIVES_FUNDING_OI', 'LIQUIDATIONS', 'OPTIONS_TERM_SKEW', 'SUPPLY_UNLOCKS', 'DEX_DEFI', 'ONCHAIN_ENTITY_FLOW', 'NETWORK_ACTIVITY', 'STABLECOIN_LIQUIDITY', 'ETF_FLOWS', 'MACRO_RELEASES', 'OFFICIAL_SOCIAL_EVENTS', 'INFRASTRUCTURE_STATUS']);
+export const PAYLOAD_KINDS = Object.freeze(['TRADE', 'BOOK_SNAPSHOT', 'BOOK_COVERAGE', 'CANDLE', 'INSTRUMENT', 'DERIVATIVE_TICK', 'LIQUIDATION', 'OPTION_TICK', 'ASSET_REFERENCE', 'UNLOCK_EVENT', 'DEX_POOL', 'DEFI_METRIC', 'ONCHAIN_METRIC', 'STABLECOIN_METRIC', 'ETF_FLOW', 'MACRO_OBSERVATION', 'ECONOMIC_EVENT', 'EVENT_REFERENCE', 'PROVIDER_STATUS', 'DERIVATIVE_ANALYTIC_BUCKET', 'L3_BOOK_SNAPSHOT', 'L3_ORDER_EVENT', 'L3_BOOK_COVERAGE']);
 // MARKET-EDGE-KRAKEN-1 — DARK research families. They are deliberately NOT members of FAMILIES: every generic consumer of the
 // decision vocabulary (FAMILY_REGISTRY -> the Socrates broker metric registry, the evidence METRIC_MAP, readiness, the
 // coverage matrix, the context builder, the Socrates v2 contract) iterates FAMILIES and therefore never sees them. They live
@@ -12,7 +12,7 @@ export const ALL_FAMILIES = Object.freeze([...FAMILIES, ...DARK_FAMILIES]);
 export const DARK_FAMILY_LAW = 'MARKET-EDGE-KRAKEN-1: dark families carry no trading, Judge or Socrates authority; they never enter Judge intake / features, Socrates broker requests, decision evidence, readiness, thresholds, execution, the Watch or the paper / live adapters';
 export const isDarkFamily = (f) => DARK_FAMILIES.includes(f);
 export const isDarkKind = (k) => DARK_PAYLOAD_KINDS.includes(k);
-export const PROVIDER_IDS = Object.freeze(['KRAKEN_SPOT', 'COINBASE_SPOT', 'KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGECKO', 'GECKOTERMINAL', 'DEFILLAMA', 'COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'COINMETRICS', 'FRED', 'TWELVEDATA', 'SETTLED_RECORDS', 'TOKENOMIST', 'BINANCE_SPOT', 'BITSTAMP_SPOT', 'BINANCE_US_SPOT']);
+export const PROVIDER_IDS = Object.freeze(['KRAKEN_SPOT', 'COINBASE_SPOT', 'KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGECKO', 'GECKOTERMINAL', 'DEFILLAMA', 'COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'COINMETRICS', 'FRED', 'SETTLED_RECORDS', 'TOKENOMIST', 'BINANCE_SPOT', 'BITSTAMP_SPOT', 'BINANCE_US_SPOT']);
 export const SUBJECT_KINDS = Object.freeze(['ASSET', 'MARKET', 'TOKEN', 'DERIVATIVE', 'SERIES', 'POOL', 'PROTOCOL', 'PROVIDER']);
 export const MARKET_TYPES = Object.freeze(['SPOT', 'PERPETUAL', 'FUTURE', 'OPTION']);
 export const QUALITY_STATES = Object.freeze(['KNOWN', 'PARTIAL', 'MISSING', 'UNAVAILABLE', 'STALE', 'PROVISIONAL', 'CLOCK_CONFLICT', 'FAILED', 'NOT_SUPPORTED']);
@@ -84,7 +84,6 @@ export const FAMILY_REGISTRY = deepFreeze({
   STABLECOIN_LIQUIDITY: { kinds: ['STABLECOIN_METRIC'], providers: ['DEFILLAMA', 'CRYPTOQUANT'], metrics: { stablecoin_supply_change: 'USD', peg_deviation: 'BPS' } },
   ETF_FLOWS: { kinds: ['ETF_FLOW'], providers: ['COINGLASS'], metrics: { etf_daily_flow: 'USD', etf_flow_trailing: 'USD' } },
   MACRO_RELEASES: { kinds: ['MACRO_OBSERVATION', 'ECONOMIC_EVENT'], providers: ['FRED', 'COINGLASS'], metrics: { macro_level: 'NATIVE', macro_change: 'NATIVE', macro_surprise: 'PERCENTAGE_POINTS', release_schedule: 'COUNT' } },
-  CROSS_ASSET: { kinds: ['CROSS_ASSET_BAR'], providers: ['TWELVEDATA'], metrics: { cross_asset_return: 'FRACTION', pearson_correlation: 'RATIO' } },
   OFFICIAL_SOCIAL_EVENTS: { kinds: ['EVENT_REFERENCE'], providers: ['SETTLED_RECORDS', 'COINGLASS'], metrics: { event_references: 'COUNT' } },
   INFRASTRUCTURE_STATUS: { kinds: ['PROVIDER_STATUS'], providers: ['SETTLED_RECORDS'], metrics: { provider_status: 'COUNT' } },
 });

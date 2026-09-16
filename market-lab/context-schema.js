@@ -104,8 +104,6 @@ const dateOnly = (v, w) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(
 const macroLevelValue = obj({ seriesId: str(80), value: num, unit: en(UNITS), unitLabel: strN, observationDate: dateOnly, vintageDate: nullable(dateOnly), previous: nullable(obj({ value: num, observationDate: dateOnly })), change: numN, frequency: strN, ageMs: count, law });
 const surpriseSchema = obj({ recipeId: literal('macro_surprise'), version, surprise: numN, support: supportOf(['NO_EVENT', 'VALUE_MISSING', 'FORECAST_NOT_KNOWN_BEFORE_RELEASE', 'COMPLETE']) }, { actual: num, forecast: num, unit: str(40), previous: numN, revisedPrevious: literal(null), forecastKnownAtTs: ts, releaseTs: ts, law });
 const macroSurpriseValue = obj({ upcoming: arr(obj({ eventName: str(MAX_STR), countryCode: str(8), scheduledTs: tsN, timePrecision: en(TIME_PRECISIONS), forecastValue: numN, unit: nullable(en(UNITS)), importance: nullable(en([0, 1, 2, 3])) }), 256), released: arr(obj({ eventName: str(MAX_STR), countryCode: str(8), scheduledTs: tsN, actual: numN, forecast: numN, unit: nullable(en(UNITS)), surprise: surpriseSchema }), 256) });
-const pearsonSchema = obj({ recipeId: literal('pearson_correlation'), version, r: nullable((v, w) => (typeof v === 'number' && Number.isFinite(v) && v >= -1 && v <= 1 ? null : `${w}: must be a correlation in [-1, 1]`)), n: count, support: supportOf(['INSUFFICIENT_PAIRS', 'ZERO_VARIANCE', 'COMPLETE']) }, { law });
-const crossAssetValue = obj({ instrument: str(120), proxyFor: idN, exchange: idN, currency: str(20), sessionState: en(SESSION_STATES), intervalMs: count, lastClose: numN, lastBarEndTs: ts, logReturnLastBar: numN, ageMs: count, correlationWithTarget: pearsonSchema, delayed: boolN });
 const eventsValue = obj({ events: arr(obj({ observationId: str(120), eventKind: en(EVENT_KINDS), sourceProvider: str(80), nativeRef: str(120), sourceEventTs: tsN, knownAtTs: ts, status: nullable(str(40)), headline: nullable(str(MAX_STR)), untrusted: bool }), 512), law });
 const infraValue = obj({ statuses: arr(obj({ providerId: str(40), component: nullable(str(80)), status: en(PROVIDER_STATUS_STATES), knownAtTs: ts }), 128), incidents: arr(obj({ nativeRef: str(120), status: nullable(str(40)), sourceEventTs: tsN, headline: nullable(str(MAX_STR)), untrusted: literal(true) }), 128), law });
 
@@ -138,7 +136,6 @@ export const METRIC_SCHEMAS = deepFreeze(Object.fromEntries([
   ['etf_daily_flow', { support: ['COMPLETE', 'NO_FLOWS'], value: etfValue }],
   ['macro_level', { support: ['COMPLETE'], value: macroLevelValue }],
   ['macro_surprise', { support: ['COMPLETE'], value: macroSurpriseValue }],
-  ['cross_asset_return', { support: ['COMPLETE', 'PARTIAL'], value: crossAssetValue }],
   ['event_references', { support: ['COMPLETE'], value: eventsValue }],
   ['provider_status', { support: ['COMPLETE'], value: infraValue }],
 ]));

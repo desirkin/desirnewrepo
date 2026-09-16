@@ -55,8 +55,3 @@ test('NP04: ETF arithmetic refuses mixed aggregate series while a single asset k
  assert.throws(()=>etfFlowSummary([btc,eth]),e=>e.code==='INVALID_REQUEST');
  const built=buildContext({canonicalCoin:'BTC',asOfTs:T0,observations:[btc,eth],captureRef:SEALED_REF});assert.equal(contextError(built.context),null);const c=built.context.families.ETF_FLOWS.components[0];assert.equal(c.value.latest.flowUsd,100);assert.equal(c.inputObservationCount,1);
 });
-test('NP05: cross-asset contexts do not turn two exchanges into a synthetic two-bar return',()=>{
- const cross=(o,exchange,price)=>{const {observationId,...rest}=o;return makeObservation({...rest,provider:'TWELVEDATA',endpointId:'time-series',kind:'CROSS_ASSET_BAR',sourceKey:exchange,subject:{subjectKind:'SERIES',canonicalCoin:null,providerAssetId:null,seriesId:null,instrumentId:'SPY'},payload:{instrument:'SPY',exchange,intervalMs:3600000,open:price,high:price,low:price,close:price,volume:100,sessionState:'UNKNOWN',delayed:false,proxyFor:'US large-cap equity risk proxy',currency:'USD'}});};
- const observations=[cross(bars[0],'NYSE',100),cross(bars[1],'NASDAQ',200)];assert.ok(observations.every(o=>observationError(o)===null));
- const built=buildContext({canonicalCoin:'BTC',asOfTs:T0,observations,captureRef:SEALED_REF});assert.equal(contextError(built.context),null);const comps=built.context.families.CROSS_ASSET.components;assert.equal(comps.length,2);for(const c of comps){assert.equal(c.value.logReturnLastBar,null);assert.equal(c.support.state,'PARTIAL');}
-});

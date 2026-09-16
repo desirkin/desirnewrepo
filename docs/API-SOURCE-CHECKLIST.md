@@ -81,7 +81,6 @@ Use actual candles, trades and books for calculations. An LLM can explain select
 | `DERIBIT` | Public adapter present; latest check timed out | No key for configured public data; current host verification outstanding. |
 | `BYBIT` | Public adapter present; OFF for access/geography | REST and liquidation/ticker WebSocket code exist. Do not bypass observed access restrictions. |
 | `GECKOTERMINAL` | Public adapter present | No key. Verify configured pool coverage and host response within current allowance. |
-| `TWELVEDATA` | Key checked: two EUR/USD bars | Claude installs TWELVEDATA_API_KEY. Basic free allowance is configured; verify other instruments before claiming entitlement. |
 | `KRAKEN_CHARTS_DARK` | Public derivatives chart adapter present | No key. Separate research path; prior open-interest response does not establish current host coverage. |
 | `KRAKEN_L3_DARK` | Data-key-gated L3 adapter present | Requires a dedicated data-only pair and SAFE_L3_DATA_KEY proof; never reuse order/withdrawal credentials. |
 | `KRAKEN_OHLC_HISTORY` | Public OHLC/history adapter present | No key. Preserve recorded history and verify actual candle clocks/gaps. |

@@ -25,7 +25,8 @@ export const SCOPE = Object.freeze([
   R('M16', 'CoinGlass derivatives, liquidation, event / unlock and headline capabilities (each verified separately)', ['COINGLASS'], 'endpoints: oi-exchange-list, funding-exchange-list, liquidation-aggregated-history, coin-unlock-list, coin-vesting, economic-data, article-list'),
   R('M17', 'CryptoQuant on-chain / exchange metrics', ['CRYPTOQUANT']),
   R('M18', 'Santiment metrics / history', ['SANTIMENT']),
-  R('M19', 'Twelve Data cross-asset / history', ['TWELVEDATA']),
+  // M19 retired: the Twelve Data cross-asset provider and the whole CROSS_ASSET family were culled to attic/ (market-lab
+  // providers cut). M-ids are stable, not renumbered.
   R('M20', 'Tokenomist unlock events', ['TOKENOMIST']),
   // SOCIAL — 5 (LEAN PASS 4a retired the official StockTwits route S04, TikTok S06 and the Meta / Facebook + Instagram routes S07/S08;
   // the surviving social senses are Bluesky, X, the legacy StockTwits RUMINT aggregate, Reddit and Farcaster. S-ids are stable, not renumbered.)

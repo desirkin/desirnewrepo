@@ -23,8 +23,6 @@ test('A01. planRequest builds the documented request for every credential placem
   assert.equal(cq.headers.authorization, 'Bearer JWT'); assert.equal(cq.url, 'https://api.cryptoquant.com/v1/btc/exchange-flows/inflow?window=day');
   const san = planRequest({ providerId: 'SANTIMENT', endpointId: 'graphql-get-metric', method: 'POST', body: { query: 'q' }, query: {}, credential: 'SAN' });
   assert.equal(san.headers.authorization, 'Apikey SAN'); assert.equal(san.method, 'POST'); assert.equal(typeof san.body, 'string');
-  const td = planRequest({ providerId: 'TWELVEDATA', endpointId: 'quote', query: { symbol: 'SPY' }, credential: 'TD' });
-  assert.equal(td.headers.authorization, 'apikey TD');
   const tk = planRequest({ providerId: 'TOKENOMIST', endpointId: 'unlock-events', pathParams: { tokenId: 'solana' }, query: { page: 1 }, credential: 'TK' });
   assert.equal(tk.headers['x-api-key'], 'TK'); assert.equal(tk.url, 'https://api.tokenomist.ai/v5/unlock/events/solana?page=1');
   const fred = planRequest({ providerId: 'FRED', endpointId: 'series', query: { series_id: 'CPIAUCSL', file_type: 'json' }, credential: 'FREDKEY' });

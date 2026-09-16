@@ -30,7 +30,6 @@ export function seriesKeyOf(o) {
     case 'ONCHAIN_METRIC': return `${base}|${s(p.metricId)}|${s(p.entitySet)}|${s(p.chain)}|${s(p.unit)}|${s(p.window)}|${s(p.methodologyId)}`;
     case 'STABLECOIN_METRIC': return `${base}|${s(p.metricId)}|${s(p.stablecoinId)}|${s(p.chain)}|${s(p.unit)}`;
     case 'DEFI_METRIC': return `${base}|${s(p.metricId)}|${s(p.protocol)}|${s(p.chain)}|${s(p.unit)}|${s(p.periodKind)}|${s(p.methodologyId)}`;
-    case 'CROSS_ASSET_BAR': return `${base}|${s(p.instrument)}|${s(p.exchange)}|${s(p.intervalMs)}|${s(p.currency)}`;
     case 'ETF_FLOW': return `${base}|${s(p.asset)}|${s(p.fund)}`;
     case 'MACRO_OBSERVATION': return `${base}|${s(p.seriesId)}|${s(p.unit)}|${s(p.frequency)}`;
     default: return `${base}|${o.endpointId}|${s(p.metricId)}`;

@@ -31,15 +31,14 @@ const QUOTA_ROW_KEYS = Object.freeze({
 });
 
 // ---- the native charge of one actual request (documented accounting unit per request type) ------------------------------
-// CALL providers: every HTTP request is one call and one unit. CREDIT providers: Twelve Data bills one credit per symbol
-// per request (symbol-search / quote / time-series), Tokenomist bills one credit per SUCCESSFUL request (chargedOn SUCCESS).
-// WebSocket handshakes and messages are never HTTP calls or native credits. An unknown unit is null (denial), never 1.
-const CREDIT_PROVIDERS = deepFreeze({ TWELVEDATA: 'PER_SYMBOL', TOKENOMIST: 'PER_SUCCESS' });
+// CALL providers: every HTTP request is one call and one unit. CREDIT providers: Tokenomist bills one credit per SUCCESSFUL
+// request (chargedOn SUCCESS). WebSocket handshakes and messages are never HTTP calls or native credits. An unknown unit is
+// null (denial), never 1.
+const CREDIT_PROVIDERS = deepFreeze({ TOKENOMIST: 'PER_SUCCESS' });
 export function nativeCharge({ providerId, endpointId, query = null }) {
   const e = endpointOf(providerId, endpointId); if (!e || e.method === 'WS') return null;
   const rule = CREDIT_PROVIDERS[providerId];
   if (!rule) return { unit: 'CALL', calls: 1, credits: 1, chargedOn: 'DISPATCH' };
-  if (rule === 'PER_SYMBOL') { const sym = query && typeof query.symbol === 'string' ? query.symbol : null; const n = sym ? sym.split(',').filter((s) => s.length).length : 1; return { unit: 'CREDIT', calls: 1, credits: Math.max(1, Math.min(64, n)), chargedOn: 'DISPATCH' }; }
   return { unit: 'CREDIT', calls: 1, credits: 1, chargedOn: 'SUCCESS' };
 }
 export const planIdentity = (plan) => canonicalDigest({ name: plan.name, billing: plan.billing, includedCallsPerMonth: plan.includedCallsPerMonth, remainingCalls: plan.remainingCalls, incrementalUsdPerCall: plan.incrementalUsdPerCall, attestation: plan.attestation, verifiedDate: plan.verifiedDate });

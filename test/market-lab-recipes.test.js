@@ -3,7 +3,7 @@
 // insufficient peers, forecast learned after release, mismatched entity sets), and the point-in-time law.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { tradeWindow, bookMetrics, walkBook, roundTrip, haircutScenarios, pressureResponse, pressureResponseChange, peerRelativeMove, venueDispersion, convertQuote, basisBps, oiChange, fundingNative, optionsSurface, admitOptions, supplyRatios, exchangeNetFlow, liquidationTotals, etfFlowSummary, macroSurprise, pearson, relativeActivity, indicators, breakoutDistance, orderedFirstChanges, RECIPES, RECIPE_SET_VERSION } from '../market-lab/recipes.js';
+import { tradeWindow, bookMetrics, walkBook, roundTrip, haircutScenarios, pressureResponse, pressureResponseChange, peerRelativeMove, venueDispersion, convertQuote, basisBps, oiChange, fundingNative, optionsSurface, admitOptions, supplyRatios, exchangeNetFlow, liquidationTotals, etfFlowSummary, macroSurprise, relativeActivity, indicators, breakoutDistance, orderedFirstChanges, RECIPES, RECIPE_SET_VERSION } from '../market-lab/recipes.js';
 import { knowledgeFloor, admissibleAt, derivationClockError, inWindow, adjacentWindows, clockConflict } from '../market-lab/time.js';
 
 const T0 = Date.parse('2026-09-08T12:00:00Z');
@@ -128,7 +128,6 @@ test('H03 / misc. liquidation totals by side keep the unit and refuse mixed unit
   const zero = liquidationTotals([], { startTs: T0 - 60_000, endTs: T0, coverageKnown: true }); assert.equal(zero.longNotional, null); assert.equal(zero.zeroMeaningful, true); assert.equal(zero.support.state, 'COMPLETE_NO_EVENTS'); assert.equal(liquidationTotals([], { startTs: 1, endTs: 2, coverageKnown: false }).support.state, 'UNKNOWN_COVERAGE');
   const flows = Array.from({ length: 25 }, (_, i) => ({ kind: 'ETF_FLOW', periodStartTs: T0 - (25 - i) * 86_400_000, periodEndTs: T0 - (24 - i) * 86_400_000, receivedTs: T0, payload: { fund: null, flowUsd: 10, asset: 'BTC', estimate: false } }));
   const e = etfFlowSummary(flows); assert.equal(e.trailing5, 50); assert.equal(e.trailing20, 200); assert.equal(e.days, 25); assert.equal(e.law, 'DAILY_FLOW_IS_SLOW_CONTEXT');
-  assert.equal(pearson(Array.from({ length: 29 }, (_, i) => [i, i])).support.state, 'INSUFFICIENT_PAIRS'); near(pearson(Array.from({ length: 30 }, (_, i) => [i, 2 * i + 1])).r, 1); assert.equal(pearson(Array.from({ length: 30 }, () => [1, 2])).support.state, 'ZERO_VARIANCE');
   assert.equal(relativeActivity({ quoteNotional: 200 }, [{ quoteNotional: 100 }, { quoteNotional: 100 }], 'quoteNotional').support.state, 'INSUFFICIENT_TRAILING'); assert.equal(relativeActivity({ quoteNotional: 200 }, [{ quoteNotional: 100 }, { quoteNotional: 100 }, { quoteNotional: 50 }], 'quoteNotional').ratio, 2);
   assert.equal(RECIPE_SET_VERSION, 'market-lab-recipes-1'); assert.ok(Object.keys(RECIPES).length >= 20); assert.ok(Object.isFrozen(RECIPES));
 });

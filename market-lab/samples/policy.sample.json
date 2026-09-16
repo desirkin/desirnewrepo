@@ -363,31 +363,6 @@
     "maxEstimatedUsd": null
    }
   },
-  "TWELVEDATA": {
-   "enabled": false,
-   "credentialEnv": "TWELVEDATA_API_KEY",
-   "plan": {
-    "name": null,
-    "billing": "UNKNOWN",
-    "includedCallsPerMonth": null,
-    "remainingCalls": null,
-    "incrementalUsdPerCall": null,
-    "attestation": null,
-    "verifiedDate": null,
-    "quoteUsdPerMonth": null
-   },
-   "limits": {
-    "maxCallsPerDay": 1000,
-    "maxCallsPerMonth": 20000,
-    "maxConcurrency": 1
-   },
-   "permittedEndpoints": null,
-   "smoke": {
-    "authorized": false,
-    "maxCalls": 0,
-    "maxEstimatedUsd": null
-   }
-  },
   "SETTLED_RECORDS": {
    "enabled": false,
    "credentialEnv": null,

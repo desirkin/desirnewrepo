@@ -28,19 +28,16 @@ const cov = ({ state, startTs, endTs = null, subject = mkt, reasonCodes = [], ep
 const REF = SEALED_REF;
 
 // ---------------------------------------------------------------- R01 -----------------------------------------------------------
-test('MC-Q03 (R01). native charge units differ from HTTP counts and are enforced at the LAST dispatch boundary: a two-symbol Twelve Data quote is ONE call / TWO credits; a Tokenomist failure charges zero credits (charged on success); each page / retry is its own reservation; the per-provider concurrency slot serialises the wire', async () => {
+test('MC-Q03 (R01). native charge units differ from HTTP counts and are enforced at the LAST dispatch boundary: a Tokenomist failure charges zero credits (charged on success); a plain HTTP provider is ONE call / ONE unit; each page / retry is its own reservation; the per-provider concurrency slot serialises the wire', async () => {
   const raw = H.policyWith({ providers: ['KRAKEN_SPOT'] });
-  raw.providers.TWELVEDATA.enabled = true; raw.providers.TWELVEDATA.plan = { ...raw.providers.TWELVEDATA.plan, name: 'metered fixture', billing: 'METERED', incrementalUsdPerCall: 0.01, attestation: 'offline fixture only', verifiedDate: '2026-09-08', meteredAuthorization: { authorized: true, maxCallsPerMonth: 10, maxEstimatedUsdPerMonth: 1, attestation: 'offline fixture only' } };
   raw.providers.TOKENOMIST.enabled = true; includedPlan(raw, 'TOKENOMIST', { remaining: 5, included: 100 });
   const policy = loadPolicy(raw); const dir = tmp(); const journal = openQuotaJournal({ dir: path.join(dir, 'accounting'), clock: () => T0 });
-  const guard = createDispatchGuard({ policy, env: { TWELVEDATA_API_KEY: 'offline-fixture', TOKENOMIST_API_KEY: 'offline-fixture' }, journal, clock: () => T0 });
+  const guard = createDispatchGuard({ policy, env: { TOKENOMIST_API_KEY: 'offline-fixture' }, journal, clock: () => T0 });
   let inFlight = 0; let maxInFlight = 0; const calls = [];
-  const fetchImpl = async (url) => { const u = new URL(url); calls.push(u.host + u.pathname + u.search); inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight); await new Promise((r) => setTimeout(r, 15)); inFlight -= 1; if (u.host === 'api.tokenomist.ai') return json({ status: false }, 500); if (u.host === 'api.twelvedata.com') return json({ symbol: 'SPY', close: '1' }); return json(H.krakenTicker('XXBTZUSD')); };
+  const fetchImpl = async (url) => { const u = new URL(url); calls.push(u.host + u.pathname + u.search); inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight); await new Promise((r) => setTimeout(r, 15)); inFlight -= 1; if (u.host === 'api.tokenomist.ai') return json({ status: false }, 500); return json(H.krakenTicker('XXBTZUSD')); };
   const http = createHttpTransport({ fetchImpl, clock: () => T0, admission: guard });
   try {
-    assert.deepEqual(nativeCharge({ providerId: 'TWELVEDATA', endpointId: 'quote', query: { symbol: 'SPY,QQQ' } }), { unit: 'CREDIT', calls: 1, credits: 2, chargedOn: 'DISPATCH' }, 'the native unit is a credit per symbol');
-    const td = await http.request({ providerId: 'TWELVEDATA', endpointId: 'quote', query: { symbol: 'SPY,QQQ' }, credential: 'offline-fixture' }); assert.equal(td.ok, true);
-    const t1 = journal.totals('TWELVEDATA'); assert.equal(t1.calls.day, 1); assert.equal(t1.credits.day, 2, 'two symbols are two credits on one call'); assert.equal(t1.usd.day, 0.02);
+    assert.deepEqual(nativeCharge({ providerId: 'KRAKEN_SPOT', endpointId: 'rest-ticker', query: { pair: 'XXBTZUSD' } }), { unit: 'CALL', calls: 1, credits: 1, chargedOn: 'DISPATCH' }, 'a plain HTTP provider is one call and one unit');
     const tk = await http.request({ providerId: 'TOKENOMIST', endpointId: 'token-list', credential: 'offline-fixture' }); assert.equal(tk.ok, false); assert.equal(tk.failure.kind, 'HTTP_5XX');
     const t2 = journal.totals('TOKENOMIST'); assert.equal(t2.calls.day, 1, 'the HTTP call happened'); assert.equal(t2.credits.day, 0, 'a failed Tokenomist request costs zero credits (charged on success)'); assert.equal(journal.entitlementRemaining('TOKENOMIST'), 5);
     // page / retry: every wire request is its own reservation — never one reservation for a multi-page acquisition
@@ -209,10 +206,10 @@ test('MC-W06 (R02). a summary tick and its enriched ticker for one instrument ar
 });
 
 // ---------------------------------------------------------------- R03 -----------------------------------------------------------
-test('MC-J03 (R03). every registered metric of the 17 families has ONE explicit bounded mapping (component + build + evidence kind, or a declared unsupported reason); packet limits produce reconciled omission reasons and counts', () => {
+test('MC-J03 (R03). every registered metric of the 16 families has ONE explicit bounded mapping (component + build + evidence kind, or a declared unsupported reason); packet limits produce reconciled omission reasons and counts', () => {
   const rows = [];
   for (const fam of Object.keys(FAMILY_REGISTRY)) for (const metricId of familyMetricIds(fam)) { const m = METRIC_MAP[fam]?.[metricId]; assert.ok(m, `${fam}/${metricId} has no mapping`); rows.push({ fam, metricId, m }); if (m.component) { assert.ok(MARKET_EVIDENCE_KINDS.includes(m.kind), `${fam}/${metricId}: unknown evidence kind ${m.kind}`); assert.equal(typeof m.build, 'string'); assert.ok(Array.isArray(m.inputKinds) && m.inputKinds.length >= 1); } else assert.ok(typeof m.unsupported === 'string' && m.unsupported.length, `${fam}/${metricId}: unsupported without a reason`); }
-  assert.equal(new Set(rows.map((r) => r.fam)).size, 17); assert.ok(rows.filter((r) => r.m.component).length >= 40, 'the supported table is populated');
+  assert.equal(new Set(rows.map((r) => r.fam)).size, 16); assert.ok(rows.filter((r) => r.m.component).length >= 40, 'the supported table is populated');
   // omission reconciliation over a real context: a DETAIL request for an absent component and an unsupported metric are named, counts add up
   const obs = []; for (let i = 0; i < 30; i += 1) obs.push(trade(i, T0 - 600_000 + i * 15_000, 100 + i * 0.01)); for (let i = 0; i < 6; i += 1) obs.push(book(i, T0 - 300_000 + i * 50_000));
   const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: obs, coverage: [cov({ state: 'SUBSCRIBED', startTs: T0 - 900_000 })], captureRef: REF, referenceNotionals: [1000] }).context;

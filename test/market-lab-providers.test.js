@@ -19,7 +19,6 @@ import { createCryptoQuantClient } from '../market-lab/providers/cryptoquant.js'
 import { createSantimentClient } from '../market-lab/providers/santiment.js';
 import { createCoinMetricsClient } from '../market-lab/providers/coinmetrics.js';
 import { createFredClient } from '../market-lab/providers/fred.js';
-import { createTwelveDataClient } from '../market-lab/providers/twelvedata.js';
 import { createTokenomistClient } from '../market-lab/providers/tokenomist.js';
 import { createSettledProjection } from '../market-lab/providers/settled.js';
 import * as H from './helpers/market-lab.js';
@@ -43,7 +42,6 @@ test.before(async () => {
     'POST /graphql': (req) => ({ json: /exchange_inflow/.test(req.body) ? H.santimentSeries() : { errors: [{ message: 'Metric restricted for your plan' }] } }),
     'GET /v4/catalog-v2/asset-metrics': { json: H.COINMETRICS_CATALOG }, 'GET /v4/timeseries/asset-metrics': (req) => ({ json: H.coinmetricsSeries(req.query.next_page_token ? null : 'tok2') }),
     'GET /fred/series': { json: H.FRED_SERIES }, 'GET /fred/series/observations': { json: H.FRED_OBSERVATIONS }, 'GET /fred/series/vintagedates': { json: { vintage_dates: ['2026-08-08', '2026-09-05'] } }, 'GET /fred/releases/dates': { json: { release_dates: [{ release_id: 10, release_name: 'Consumer Price Index', date: '2026-09-11' }] } },
-    'GET /symbol_search': { json: H.TWELVEDATA_SEARCH }, 'GET /quote': { json: H.twelvedataQuote() }, 'GET /time_series': (req) => (req.headers.authorization === 'apikey TDKEY' ? { json: H.twelvedataSeries() } : { json: { status: 'error', code: 401, message: 'apikey' } }),
     'GET /v5/token/list': { json: H.TOKENOMIST_LIST }, 'GET /v5/unlock/events/solana': { json: H.tokenomistEvents() }, 'GET /v5/allocations/solana': { json: { metadata: { credit: { used: 5, limit: 1000, resetAt: '2026-10-01T00:00:00Z' } }, status: true, data: { maxSupply: 500_000_000, allocations: [{ standardAllocation: 'team', lockedAmount: 100, unlockedAmount: 50 }, { standardAllocation: 'tbd', isTBD: true }] } } },
   });
   transport = createHttpTransport({ fetchImpl: H.fetchFor(fx), clock });
@@ -183,15 +181,6 @@ test('D12 FRED: series metadata is REQUIRED before observations (units come from
   const r = await c.releaseDates({ startDate: '2026-09-08', endDate: '2026-09-15' }); assert.equal(r.ok, true); assert.equal(r.observations[0].kind, 'ECONOMIC_EVENT'); assert.equal(r.observations[0].payload.timePrecision, 'DAY');
 });
 
-test('D13 Twelve Data: symbol search resolves an explicit exchange, quotes label a closed session STALE only for non-forex, bars keep provisional law; a provider status error with a plan message is ACCESS_BLOCKED; the key rides the documented header', async () => {
-  const c = createTwelveDataClient({ transport, clock, log: () => {}, credential: 'TDKEY' });
-  const proxyFor = 'broad US equity benchmark ETF proxy';
-  const r = await c.resolve({ symbol: 'SPY', exchange: 'NYSE', proxyFor }); assert.equal(r.ok, true); assert.equal(last().headers.authorization, 'apikey TDKEY'); assert.equal(r.instrument.micCode, 'ARCX');
-  const q = await c.quote({ symbol: 'SPY' }); assert.equal(q.ok, true); valid(q.observations); assert.equal(q.observations[0].payload.close, 641.2); assert.equal(q.observations[0].payload.proxyFor, proxyFor);
-  const b = await c.bars({ symbol: 'SPY', interval: '1h', outputsize: 10 }); assert.equal(b.ok, true); valid(b.observations); assert.equal(b.observations.length, 2); assert.equal(b.observations[0].payload.close, 640);
-  const bad = createTwelveDataClient({ transport, clock, log: () => {}, credential: 'WRONG' }); await bad.resolve({ symbol: 'SPY', exchange: 'NYSE', proxyFor: 'X' }); const e = await bad.bars({ symbol: 'SPY' }); assert.equal(e.ok, false); assert.equal(e.failure.coverageState, 'ACCESS_BLOCKED');
-  assert.equal((await c.quote({ symbol: 'NOPE' })).failure.coverageState, 'NOT_QUERIED');
-});
 
 test('D15 Tokenomist v5: x-api-key header, credit metadata retained from every envelope, slug resolution refuses a symbol mismatch, unlock events + allocations (TBD allocations PARTIAL)', async () => {
   const c = createTokenomistClient({ transport, clock, log: () => {}, credential: 'TKKEY' });

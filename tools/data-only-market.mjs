@@ -18,7 +18,6 @@ export const DATA_ONLY_MARKET_FAMILIES = Object.freeze([
   'NETWORK_ACTIVITY',
   'STABLECOIN_LIQUIDITY',
   'MACRO_RELEASES',
-  'CROSS_ASSET',
 ]);
 
 // This is a closed allowlist. Key-gated providers are enabled only when their
@@ -32,7 +31,6 @@ export const DATA_ONLY_MARKET_PROVIDERS = Object.freeze({
   DEFILLAMA: 'PUBLIC_FREE',
   COINMETRICS: 'PUBLIC_FREE',
   FRED: 'KEY_GATED_FREE',
-  TWELVEDATA: 'KEY_GATED_FREE',
 });
 export const DATA_ONLY_MARKET_RESTRICTED = Object.freeze(['KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT']);
 const ZERO_BUDGET = new Set(['COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'TOKENOMIST']);
@@ -87,7 +85,6 @@ function quotaAudit(policy, subjects, families) {
   const planned = {
     KRAKEN_SPOT: spot.KRAKEN_SPOT,
     COINBASE_SPOT: spot.COINBASE_SPOT,
-    TWELVEDATA: families.includes('CROSS_ASSET') ? subjects.crossAsset.length + 96 * subjects.crossAsset.length : 0,
   };
   const rows = Object.fromEntries(Object.entries(planned).map(([id, estimate]) => {
     const callsPerDay = typeof estimate === 'number' ? estimate : estimate.callsPerDay;

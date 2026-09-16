@@ -11,7 +11,7 @@ export const T0 = H.T0;
 export const tmp = (prefix = 'mc-') => mkdtempSync(path.join(tmpdir(), prefix));
 export const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
 export const subjects = () => loadSubjects(H.subjectsWith());
-export const btcOnly = () => { const s = H.subjectsWith(); return loadSubjects({ ...s, subjects: [s.subjects[0]], macroSeries: [], crossAsset: [], stablecoins: [] }); };
+export const btcOnly = () => { const s = H.subjectsWith(); return loadSubjects({ ...s, subjects: [s.subjects[0]], macroSeries: [], stablecoins: [] }); };
 
 // an INCLUDED_QUOTA plan for a paid on-chain provider (offline attestation; nothing here authorizes real spend)
 export const includedPlan = (raw, id, { remaining = 100, included = 100, day = 100, month = 100, verifiedDate = '2026-09-08' } = {}) => {

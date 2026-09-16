@@ -13,7 +13,7 @@ export const SPLITS = Object.freeze(['DEVELOPMENT', 'HELD_OUT']);
 // instruction forms only: describing that participants sell into a book is observation, not an order
 export const FORBIDDEN_ACTION_RE = /\b((you|we|one|traders?) should (buy|sell|long|short|enter|exit)|recommend(ed|s)? (a |to )?(buy|sell|long|short)|(buy|sell) (now|signal|order|recommendation)|go (long|short)|position siz(e|ing)|stop[- ]loss|take[- ]profit|price target|target price|entry price|exit price|order size|leverage up|trade this|profit forecast|trading permission|execute (a |the )?(buy|sell|order))\b/i;
 const T0 = Date.UTC(2026, 8, 8, 12, 0, 0); // fixed corpus clock: 2026-09-08T12:00:00Z
-const PROVIDER_TYPE = { KRAKEN_SPOT: 'MARKET_DATA', COINBASE_SPOT: 'MARKET_DATA', KRAKEN_DERIVATIVES: 'MARKET_DATA', BYBIT: 'MARKET_DATA', COINGLASS: 'MARKET_DATA', TOKENOMIST: 'MARKET_DATA', CRYPTOQUANT: 'ONCHAIN', COINMETRICS: 'ONCHAIN', FRED: 'OTHER', TWELVEDATA: 'MARKET_DATA', SOCIAL_BLUESKY: 'SOCIAL_ACCOUNT', SETTLED_RECORDS: 'OTHER' };
+const PROVIDER_TYPE = { KRAKEN_SPOT: 'MARKET_DATA', COINBASE_SPOT: 'MARKET_DATA', KRAKEN_DERIVATIVES: 'MARKET_DATA', BYBIT: 'MARKET_DATA', COINGLASS: 'MARKET_DATA', TOKENOMIST: 'MARKET_DATA', CRYPTOQUANT: 'ONCHAIN', COINMETRICS: 'ONCHAIN', FRED: 'OTHER', SOCIAL_BLUESKY: 'SOCIAL_ACCOUNT', SETTLED_RECORDS: 'OTHER' };
 
 // ---- packet construction from typed values (the same identity / validation law as the real builder) -----------------------
 export function makeCorpusPacket({ canonicalCoin, asOfTs = T0, items, mode = 'LIVE_OBSERVATION', entrances = ['MARKET_LED'], trigger = { kind: 'MARKET_RESEARCH', sourceEventId: null, observedTs: null }, limitations = [], missing = [], contextTag = 'corpus' }) {

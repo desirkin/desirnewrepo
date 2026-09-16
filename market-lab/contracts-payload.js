@@ -37,7 +37,6 @@ export const PAYLOAD_KEYS = deepFreeze({
   ETF_FLOW: ['fund', 'asset', 'flowUsd', 'reportingPeriodStartTs', 'reportingPeriodEndTs', 'estimate', 'revision', 'priceUsd'],
   MACRO_OBSERVATION: ['seriesId', 'value', 'unit', 'observationDate', 'realtimeStart', 'realtimeEnd', 'frequency', 'vintageDate', 'unitLabel'],
   ECONOMIC_EVENT: ['eventName', 'countryCode', 'scheduledTs', 'timePrecision', 'forecastRaw', 'actualRaw', 'previousRaw', 'revisedPreviousRaw', 'forecastValue', 'actualValue', 'previousValue', 'unit', 'importance', 'forecastKnownAtTs', 'actualKnownAtTs'],
-  CROSS_ASSET_BAR: ['instrument', 'exchange', 'intervalMs', 'open', 'high', 'low', 'close', 'volume', 'sessionState', 'delayed', 'proxyFor', 'currency'],
   EVENT_REFERENCE: ['eventKind', 'sourceProvider', 'nativeRef', 'sourceEventTs', 'headline', 'untrusted', 'status'],
   PROVIDER_STATUS: ['providerId', 'status', 'component', 'incidentRef'],
   // MARKET-EDGE-KRAKEN-1 (dark): one Charts analytics bucket; one L3 book snapshot; one batch of L3 order events (one WS
@@ -214,11 +213,6 @@ export function payloadError(kind, p, where = 'payload') {
       if (p.actualValue !== null && p.actualKnownAtTs === null) return `${where}: an actual value needs its knowledge clock`;
       if (p.forecastValue !== null && p.forecastKnownAtTs === null) return `${where}: a forecast needs its knowledge clock`;
       return null;
-    case 'CROSS_ASSET_BAR':
-      if (!isId(p.instrument) || !isIdOrNull(p.exchange) || !isTs(p.intervalMs) || !SESSION_STATES.includes(p.sessionState) || !(p.delayed === null || typeof p.delayed === 'boolean') || !isBoundedString(p.proxyFor, 80) || !isId(p.currency)) return `${where}: cross-asset bar malformed`;
-      e = ohlcError(p, where); if (e) return e;
-      if (!(p.volume === null || isNonNegative(p.volume))) return `${where}: volume malformed`;
-      return null;
     case 'EVENT_REFERENCE':
       if (!EVENT_KINDS.includes(p.eventKind) || !isId(p.sourceProvider) || !isId(p.nativeRef) || !isTsOrNull(p.sourceEventTs) || !isStringOrNull(p.headline, MAX_TEXT_CHARS) || typeof p.untrusted !== 'boolean' || !isStringOrNull(p.status, 40)) return `${where}: event reference malformed`;
       if (p.headline !== null && !p.untrusted) return `${where}: provider text is untrusted by law`;
@@ -266,7 +260,7 @@ const PRIMARY_VALUE_KEYS = deepFreeze({
   TRADE: ['price'], BOOK_SNAPSHOT: ['bids'], BOOK_COVERAGE: ['state'], CANDLE: ['close'], INSTRUMENT: ['status'], DERIVATIVE_TICK: ['markPrice', 'indexPrice', 'lastPrice', 'openInterest', 'fundingRateNative'],
   LIQUIDATION: ['notional', 'longNotional', 'shortNotional', 'qtyBase'], OPTION_TICK: ['markIv', 'markPrice', 'openInterest'], ASSET_REFERENCE: ['priceUsd', 'marketCapUsd', 'circulatingSupply'], UNLOCK_EVENT: ['scheduledTs', 'amountToken'],
   DEX_POOL: ['priceUsd', 'liquidityUsd'], DEFI_METRIC: ['value'], ONCHAIN_METRIC: ['value'], STABLECOIN_METRIC: ['value'], ETF_FLOW: ['flowUsd'], MACRO_OBSERVATION: ['value'], ECONOMIC_EVENT: ['scheduledTs', 'actualValue', 'forecastValue'],
-  CROSS_ASSET_BAR: ['close'], EVENT_REFERENCE: ['nativeRef'], PROVIDER_STATUS: ['status'],
+  EVENT_REFERENCE: ['nativeRef'], PROVIDER_STATUS: ['status'],
   DERIVATIVE_ANALYTIC_BUCKET: ['values'], L3_BOOK_SNAPSHOT: ['bids', 'asks'], L3_ORDER_EVENT: ['events'], L3_BOOK_COVERAGE: ['state'],
 });
 const NULL_VALUE_STATES = new Set(['MISSING', 'UNAVAILABLE', 'FAILED', 'NOT_SUPPORTED']);

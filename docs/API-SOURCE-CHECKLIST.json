@@ -1006,36 +1006,6 @@
       "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
     },
     {
-      "id": "TWELVEDATA",
-      "classification": "OPERATIONAL_CREDENTIAL_GATED",
-      "module": "market-lab/providers/twelvedata.js",
-      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
-      "enable": "policy providers.TWELVEDATA.enabled",
-      "credentialEnv": [
-        "TWELVEDATA_API_KEY"
-      ],
-      "configurationEnv": [],
-      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
-      "retentionTermsGate": "hosts api.twelvedata.com",
-      "paperDesiredState": "REQUEST",
-      "sourceFiles": [
-        "docs/sensor-inventory.paper.json",
-        "paper/inventory.js",
-        "config/paper-runtime.json"
-      ],
-      "group": "charts",
-      "currentState": "Key checked: two EUR/USD bars",
-      "nextAction": "Claude installs TWELVEDATA_API_KEY. Basic free allowance is configured; verify other instruments before claiming entitlement.",
-      "currentReplitCollectionVerified": false,
-      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
-      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement.",
-      "sessionCredentialCheck": {
-        "status": "LIVE_IN_PARENT_SESSION",
-        "httpStatus": 200,
-        "scope": "EUR/USD 1-minute candles, 2 bars; api_usage plan_limit 8"
-      }
-    },
-    {
       "id": "KRAKEN_CHARTS_DARK",
       "classification": "OPERATIONAL_PUBLIC",
       "module": "market-lab/providers/kraken-charts.js",

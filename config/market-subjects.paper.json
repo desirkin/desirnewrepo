@@ -70,33 +70,6 @@
   "WALCL",
   "RRPONTSYD"
  ],
- "crossAsset": [
-  {
-   "symbol": "SPY",
-   "exchange": "NYSE",
-   "proxyFor": "broad US equity benchmark ETF proxy"
-  },
-  {
-   "symbol": "QQQ",
-   "exchange": "NASDAQ",
-   "proxyFor": "technology benchmark ETF proxy"
-  },
-  {
-   "symbol": "TLT",
-   "exchange": "NASDAQ",
-   "proxyFor": "long Treasury bond ETF proxy (not a cash yield)"
-  },
-  {
-   "symbol": "EUR/USD",
-   "exchange": null,
-   "proxyFor": "dollar pair proxy (not DXY)"
-  },
-  {
-   "symbol": "XAU/USD",
-   "exchange": null,
-   "proxyFor": "gold spot proxy"
-  }
- ],
  "stablecoins": [
   {
    "stablecoinId": "USDT",

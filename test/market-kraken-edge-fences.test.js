@@ -36,7 +36,7 @@ const ORDER_VERBS = /\b(add_order|amend_order|edit_order|cancel_order|cancel_all
 
 test('F-01. the dark families are OUTSIDE the decision vocabulary: not in FAMILIES, FAMILY_REGISTRY, METRIC_MAP, the broker metric registry, the Socrates v2 contract, the context component binding, ALLOWED_MAX_AGE_MS, the coverage route plan or any decision recipe; their kinds are closed dark kinds bound to dark families only; the law is declared', () => {
   assert.deepEqual([...DARK_FAMILIES], ['DERIVATIVES_PRESSURE', 'L3_MICROSTRUCTURE']); assert.deepEqual([...DARK_PAYLOAD_KINDS], ['DERIVATIVE_ANALYTIC_BUCKET', 'L3_BOOK_SNAPSHOT', 'L3_ORDER_EVENT', 'L3_BOOK_COVERAGE']);
-  assert.equal(FAMILIES.length, 17); assert.equal(ALL_FAMILIES.length, 19); assert.deepEqual(DARK_FAMILIES_EXCLUDED, [...DARK_FAMILIES]);
+  assert.equal(FAMILIES.length, 16); assert.equal(ALL_FAMILIES.length, 18); assert.deepEqual(DARK_FAMILIES_EXCLUDED, [...DARK_FAMILIES]);
   for (const f of DARK_FAMILIES) {
     assert.ok(!FAMILIES.includes(f), `${f} in FAMILIES`); assert.equal(FAMILY_REGISTRY[f], undefined, `${f} in FAMILY_REGISTRY`); assert.equal(METRIC_MAP[f], undefined, `${f} in METRIC_MAP`); assert.equal(METRIC_REGISTRY[f], undefined, `${f} in the broker registry`);
     assert.ok(!SOCRATES_FAMILIES.includes(f), `${f} in the Socrates v2 contract`); assert.ok(!Object.values(COMPONENT_FAMILY).includes(f), `${f} bound to a context component`); assert.equal(ALLOWED_MAX_AGE_MS[f], undefined); assert.equal(ROUTE_PLAN[f], undefined);
@@ -52,20 +52,20 @@ test('F-01. the dark families are OUTSIDE the decision vocabulary: not in FAMILI
   assert.ok(makeCoverage(body)); assert.throws(() => makeCoverage({ ...body, family: 'DISPLAYED_LIQUIDITY' }), /dark kind/); assert.throws(() => makeCoverage({ ...body, kind: 'BOOK_SNAPSHOT' }), /dark kind/); assert.throws(() => makeCoverage({ ...body, family: 'MARKET_EDGE' }), /identity/);
 });
 
-test('F-02. positive downstream absence: the Socrates broker refuses a dark-family request before any dispatch; the research builder refuses a dark detail request; a context naming a dark family fails validation and buildContext never emits one; the readiness manifest and the coverage matrix enumerate exactly the 17 decision families; the registry exposes the dark endpoints ONLY as dark', async () => {
+test('F-02. positive downstream absence: the Socrates broker refuses a dark-family request before any dispatch; the research builder refuses a dark detail request; a context naming a dark family fails validation and buildContext never emits one; the readiness manifest and the coverage matrix enumerate exactly the 16 decision families; the registry exposes the dark endpoints ONLY as dark', async () => {
   const policy = loadPolicy(H.policyWith({ providers: ['KRAKEN_SPOT', 'KRAKEN_DERIVATIVES'] })); const subjects = sampleSubjects();
   let dispatched = 0; const owner = { acquire: async () => { dispatched += 1; return { observations: [], coverage: [], results: [] }; }, markets: () => new Map(), subjectsOf: () => null, status: () => ({}), snapshotPrefix: () => null, clients: {} };
   const broker = createBroker({ owner, policy, clock: () => H.T0 });
   const caseSubject = { canonicalCoin: 'BTC', registeredRefs: [] };
   for (const family of DARK_FAMILIES) { const r = await broker.resolve({ requestKey: 'k1', requestKind: 'REFRESH', family, metricIds: ['oi_bucket_change'], subjectRef: 'BTC', windowStartTs: null, windowEndTs: null, requestedMaxAgeMs: null }, { analysisId: 'an-1', caseSubject, asOfTs: H.T0 }).catch((e) => ({ state: 'THROWN', message: String(e?.message) })); assert.ok(['POLICY_REJECTED', 'THROWN'].includes(r.state), family); assert.equal(dispatched, 0); assert.ok(/dark family/.test(String(r.reason ?? r.message ?? '')) || r.state === 'POLICY_REJECTED', `${family}: ${JSON.stringify(r).slice(0, 200)}`); }
-  assert.equal(Object.keys(broker.metricRegistry).length, 17);
+  assert.equal(Object.keys(broker.metricRegistry).length, 16);
   const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: H.T0, observations: [], coverage: [], captureRef: SEALED_REF }).context;
   const refused = buildResearchEvidenceV2({ marketContext: ctx, socialProjection: null, asOfTs: H.T0, trigger: { kind: 'MARKET_RESEARCH', canonicalCoin: 'BTC' }, mode: 'LIVE_OBSERVATION', detailRequests: [{ family: 'DERIVATIVES_PRESSURE', metricId: 'oi_bucket_change' }] });
   assert.equal(refused.ok, false); assert.match(String(refused.detail), /unregistered family/);
   assert.deepEqual(Object.keys(ctx.families), [...FAMILIES]); assert.ok(!Object.keys(ctx.families).some((f) => DARK_FAMILIES.includes(f)));
   const hostile = structuredClone(ctx); hostile.families.L3_MICROSTRUCTURE = { state: 'OBSERVED', components: [], coverage: [] }; assert.match(contextError(hostile) ?? '', /undeclared family/);
   const rows = providerReadiness({ policy, env: {} }); const manifest = liveReadinessManifest({ rows, familyCoverage: {}, modelReadiness: null, generatedTs: H.T0 }); assert.deepEqual(Object.keys(manifest.families), [...FAMILIES]);
-  const matrix = buildCoverageMatrix({ policy, subjects, env: {} }); assert.deepEqual(Object.keys(matrix.families), [...FAMILIES]); assert.equal(Object.keys(matrix.families).length, 17);
+  const matrix = buildCoverageMatrix({ policy, subjects, env: {} }); assert.deepEqual(Object.keys(matrix.families), [...FAMILIES]); assert.equal(Object.keys(matrix.families).length, 16);
   const dark = ENDPOINTS.filter((e) => e.families.some((f) => DARK_FAMILIES.includes(f))); assert.deepEqual(dark.map((e) => `${e.providerId}/${e.endpointId}`).sort(), ['KRAKEN_DERIVATIVES/charts-analytics', 'KRAKEN_SPOT/rest-private-key-info', 'KRAKEN_SPOT/rest-private-ws-token', 'KRAKEN_SPOT/ws-l3']);
   for (const e of dark) { assert.equal(e.dark, true); assert.ok(e.families.every((f) => DARK_FAMILIES.includes(f)), 'a dark endpoint serves dark families only'); assert.equal(e.authEnv, null, 'no generic credential placement: the narrow helper signs'); }
   for (const e of ENDPOINTS.filter((e) => e.dark !== true)) assert.ok(!e.families.some((f) => DARK_FAMILIES.includes(f)));
