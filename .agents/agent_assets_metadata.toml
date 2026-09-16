@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "q1AYd44vUYMBfPeZEIwNJ"
+uri = "file://exports/serpent-entire-app-d3eb00ca.zip"
+type = "unspecified"
+title = "Serpent entire app source"
+description = "Complete committed app source at d3eb00ca60328b372edf8952cd11b2a3db92389c. Excludes Git history, secrets, dependencies, runtime data, databases, logs, evidence, backups, and prior exports. Includes revision details and per-file SHA-256 checksums."
+logical_id = "ebde9b06-608f-4055-b315-c32e6845c9e7"
+content_hash = "sha256:7927762878ffe62317145c5c6011429b552c9f937c690c0d1659b2c6afdc2c54"
+size = 7059154
+mtime_ms = 1789599201177
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/ebde9b06-608f-4055-b315-c32e6845c9e7/dec700fc-6472-420c-a3a1-2388fdfa91eb"
+storage_version_token = "1789599208073423"
+content_type = "application/octet-stream"
