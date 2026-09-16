@@ -192,7 +192,7 @@ async function attemptStartup(state, log) {
     // permission lock, and BEFORE "durable core connected" is declared.
     const repair = await verifySchemaTables(state.db, { log: blog });
     if (state.stopped) return aborted('after-schema-verify');
-    if (repair.repaired.length) blog(`PERSISTENCE schema verified: repaired ${repair.repaired.length} missing table(s) [${repair.repaired.map((r) => r.table).join(', ')}] before durable core connect`);
+    if (repair.repaired.length) blog(`PERSISTENCE schema verified: repaired ${repair.repaired.length} missing table(s) [${repair.repaired.map((r) => r.qualifiedName ?? r.table).join(', ')}] before durable core connect`);
     // Check BEFORE reconciliation can materialize any local mirror. An
     // unresolved cache loss is a separate permission lock, not a reason to
     // suppress the protective-state restore or read-only collection pump.

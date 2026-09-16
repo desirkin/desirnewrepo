@@ -51,6 +51,27 @@ const CREATE_TABLE_RE = /CREATE TABLE IF NOT EXISTS\s+(serpent_[a-z0-9_]+)/i;
 // nothing (every table was just created); a real gap is closed, never guessed.
 export async function verifySchemaTables(db, { log = () => {} } = {}) {
   const repaired = [];
+  // The schema the durable-core DDL writes into. Tests isolate in db.schema (the
+  // qualified DDL and the qualified existence check both live there). Production
+  // runs schema-less: an unqualified CREATE TABLE lands in current_schema() (the
+  // first writable schema in search_path). PUBLISH-FIX-6: the old check asked
+  // `to_regclass('serpent_store_anchors')` UNQUALIFIED, which searches the whole
+  // search_path — a production connection whose search_path does not resolve the
+  // DDL's target schema first (a pooler that resets search_path, a role default
+  // that differs from the migration-time session) then reads a present table as
+  // null and "repairs" it on EVERY boot. Qualifying the lookup to the exact schema
+  // the DDL writes into removes that discrepancy: to_regclass of a schema-qualified
+  // name bypasses search_path entirely, so verify and the DDL always agree.
+  let schema = db.schema ?? null;
+  if (!schema) {
+    let rows;
+    // current_schema() is undeterminable on a fake pool (test mock) — bail to a
+    // clean no-op there, never a repair, exactly as an undeterminable to_regclass did.
+    try { ({ rows } = await db.query('SELECT current_schema() AS schema')); }
+    catch { return { repaired }; }
+    if (!Array.isArray(rows) || rows.length !== 1 || typeof rows[0].schema !== 'string' || !rows[0].schema) return { repaired };
+    schema = rows[0].schema;
+  }
   for (const m of MIGRATIONS) {
     const tables = m.statements.flatMap((s) => { const x = CREATE_TABLE_RE.exec(s); return x ? [x[1]] : []; });
     if (tables.length === 0) continue; // ALTER-only migrations (e.g. v2) create no table
@@ -59,21 +80,25 @@ export async function verifySchemaTables(db, { log = () => {} } = {}) {
       let rows;
       // A real PostgreSQL never errors on to_regclass (it returns null for a
       // missing object) and always returns exactly one row: reg is null when the
-      // table is absent, or its identity when present. Only a definitive one-row
-      // null means "missing". An error or an empty/odd result is an undeterminable
-      // backend (e.g. a test mock) — never a repair trigger, so a fake pool is
-      // never mistaken for a dropped table and its DDL is never re-issued.
-      try { ({ rows } = await db.query(`SELECT to_regclass('${t}') AS reg`)); }
+      // table is absent, or its identity when present. The relation name is passed
+      // schema-qualified as a bind parameter (so #qualify never rewrites it) — a
+      // qualified to_regclass checks EXACTLY db.schema / current_schema(), the DDL's
+      // target, not whatever the session's search_path happens to resolve. Only a
+      // definitive one-row null means "missing". An error or an empty/odd result is
+      // an undeterminable backend (e.g. a test mock) — never a repair trigger.
+      try { ({ rows } = await db.query('SELECT to_regclass($1) AS reg', [`${schema}.${t}`])); }
       catch { continue; }
       if (Array.isArray(rows) && rows.length === 1 && rows[0].reg === null) missing.push(t);
     }
     if (missing.length === 0) continue;
     // re-apply the whole migration's DDL: every statement is idempotent, so the
-    // present tables are untouched and the missing one is created
+    // present tables are untouched and the missing one is created. q qualifies the
+    // unqualified DDL to db.schema in tests and leaves it for current_schema() in
+    // production — the same schema the check above looked in.
     await db.tx(async (q) => { for (const s of m.statements) await q(s); });
     for (const t of missing) {
-      repaired.push({ table: t, version: m.version });
-      log(`PERSISTENCE schema repair: table ${t} was missing under a recorded schema; re-applied migration ${m.version} DDL`);
+      repaired.push({ table: t, schema, qualifiedName: `${schema}.${t}`, version: m.version });
+      log(`PERSISTENCE schema repair: table ${schema}.${t} was missing under a recorded schema; re-applied migration ${m.version} DDL`);
     }
   }
   return { repaired };

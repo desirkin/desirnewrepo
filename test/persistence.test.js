@@ -89,6 +89,36 @@ test('MOST RESTRICTIVE WINS: local CLEAR vs durable KILL -> KILL; local KILL vs 
   assert.equal(both.vetoes.length, 2); // vetoes union — a denied trade stays denied
 });
 
+test('PUBLISH-FIX-6 schema truth is search_path independent: a schema-less (production) Db resolves current_schema() and probes each table qualified to it, so a table present under the DDL schema is never mis-repaired when the session search_path differs', async () => {
+  // The failure this guards: production runs a schema-less Db; the old check asked
+  // `to_regclass('serpent_store_anchors')` UNQUALIFIED, which searches the session
+  // search_path. A connection whose search_path did not resolve the DDL's target
+  // schema read a present table as null and "repaired" it on every boot. Here the
+  // durable tables physically live in current_schema() = 'app'; a bare unqualified
+  // probe would answer MISSING (params[0] undefined) and drive a repair, while the
+  // fixed verifier probes the schema-qualified name and correctly finds them.
+  const queries = [];
+  const fake = {
+    schema: null,
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (/current_schema/.test(text)) return { rows: [{ schema: 'app' }] };
+      if (/to_regclass/.test(text)) { const name = params[0]; return { rows: [{ reg: typeof name === 'string' && name.startsWith('app.') ? name : null }] }; }
+      return { rows: [] };
+    },
+    async tx() { throw new Error('repair must not run: every table is present under the DDL schema'); },
+  };
+  const res = await verifySchemaTables(fake, { log: () => {} });
+  assert.deepEqual(res.repaired, [], 'a present-but-search_path-shadowed table is never mis-repaired');
+  assert.ok(queries.some((q) => /current_schema/.test(q.text)), 'a schema-less Db resolves current_schema() before probing');
+  const probes = queries.filter((q) => /to_regclass/.test(q.text));
+  assert.ok(probes.length >= 2, 'the store-anchor tables are probed');
+  for (const p of probes) {
+    assert.ok(!/'/.test(p.text), 'the relation name is a bind parameter, never an inlined literal');
+    assert.match(String(p.params[0]), /^app\.serpent_/, 'each existence probe is qualified to the DDL schema, not left to search_path');
+  }
+});
+
 // ---------------- integration against the Development database ----------------
 if (!TEST_URL) {
   test('PERSISTENCE integration', (t) => t.skip('no PERSIST_TEST_DATABASE_URL / DATABASE_URL configured — integration drills skipped'));
@@ -113,6 +143,30 @@ if (!TEST_URL) {
     assert.deepEqual(first.appliedNow, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const second = await runMigrations(db);
     assert.deepEqual(second.appliedNow, []); // idempotent
+  });
+
+  test('PUBLISH-FIX-6 (production path): a schema-less Db pinned to a dedicated search_path migrates, then a SECOND boot verifies with zero repair — the schema-qualified check matches where the unqualified DDL wrote', async () => {
+    const appSchema = `${SCHEMA}_prod`;
+    await db.query(`CREATE SCHEMA IF NOT EXISTS ${appSchema}`);
+    // The production shape: a schema-less Db (no test isolation). Its connections'
+    // search_path is pinned to appSchema through the connection options, so an
+    // unqualified CREATE TABLE lands in appSchema and current_schema() resolves there —
+    // the exact conditions under which the old unqualified to_regclass mis-repaired.
+    const url = new URL(TEST_URL); url.searchParams.set('options', `-c search_path=${appSchema}`);
+    const prod = new Db({ url: url.toString(), schema: null });
+    try {
+      assert.equal(await prod.connect(), true);
+      await runMigrations(prod);
+      assert.deepEqual((await verifySchemaTables(prod, { log: () => {} })).repaired, [], 'first verify after a fresh migrate repairs nothing');
+      const logs = [];
+      const second = await verifySchemaTables(prod, { log: (m) => logs.push(m) });
+      assert.deepEqual(second.repaired, [], 'a durable second boot repairs nothing');
+      assert.deepEqual(logs, [], 'and logs no schema repair');
+      assert.notEqual((await prod.query(`SELECT to_regclass('${appSchema}.serpent_store_anchors') AS reg`)).rows[0].reg, null, 'the store-anchor tables really do live under the DDL schema');
+    } finally {
+      await prod.end();
+      await db.query(`DROP SCHEMA ${appSchema} CASCADE`);
+    }
   });
 
   test('PUBLISH-FIX-4 schema truth: a table missing under a recorded version is repaired at boot, not raised as a 42P01', async () => {
