@@ -1,10 +1,10 @@
 // SOCIAL-4E — ONE small PURE primitive shared by the non-live social access
-// foundations added in this ticket (rumor2/social-meta.js, rumor2/social-tiktok.js,
-// rumor2/social-farcaster-access.js). It exists only because three new modules
-// would otherwise carry three copies of the same clock guard, closed record
-// vocabulary, operator-date judgement, and "no live path" facts. The earlier
-// forum/finance foundations keep their own byte-identical copies — nothing here
-// changes them, and nothing here is imported by any production runtime.
+// foundations. After LEAN PASS 4a retired the Meta and TikTok foundations to the
+// attic, rumor2/social-farcaster-access.js is the surviving 4E foundation that
+// reuses it (the clock guard, closed record vocabulary, operator-date judgement,
+// and "no live path" facts). The earlier forum/finance foundations keep their own
+// byte-identical copies — nothing here changes them, and nothing here is imported
+// by any production runtime.
 //
 // This module imports ONLY the sealed temporal boundary (rumor2/social-time.js)
 // and performs no network, timer, storage, wall-clock, or model call. It holds

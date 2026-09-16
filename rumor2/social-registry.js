@@ -12,7 +12,6 @@
 // doctrine/SOCIAL.md for citations, gathered 2026-09-05). The system knows WHY
 // each ear is or is not available — never a vague "disabled". (§2/§33)
 import { SOCIAL_PROVIDER_KINDS, SOCIAL_RETENTION_PROHIBITED_PROVIDERS } from './social.js';
-import { STOCKTWITS_LEGACY_RUMINT, STOCKTWITS_ROUTES, STOCKTWITS_SOURCES, STOCKTWITS_USE_CASE, STOCKTWITS_OFFICIAL as ST } from './social-stocktwits.js';
 
 // §2 access taxonomy — the closed set of truthful states.
 export const SOCIAL_ACCESS_STATES = Object.freeze([
@@ -108,36 +107,6 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     activation: Object.freeze({ ownerApproval: 'EXPLICIT_PAID_SMOKE_RUN_ID', credential: 'X_BEARER_TOKEN', retention: 'DURABLE_SOCIAL_JOURNAL', quota: ['MAX_DAILY_POST_READS', 'MAX_MONTHLY_POST_READS', 'MAX_ESTIMATED_DAILY_USD'], receipt: 'DURABLE_PAID_SMOKE_AND_METER' }),
     reason: 'Pay-per-use filtered stream (~4-5s P99), 1 connection / 1,000 rules / 1,024 chars per rule. Requires OAuth2 App-Only bearer + an explicit hard read/dollar budget under the 3M/month self-serve cap; DARK by default, no paid connection without every runtime gate.',
   }),
-  // Legacy YouTube source boundary. This is a pure request/fixture
-  // descriptor retained for backward compatibility; the live metadata
-  // collector is the separate video/ tier and never enters this registry.
-  Object.freeze({
-    id: 'YOUTUBE_OFFICIAL',
-    providerKind: 'SOCIAL_MICROBLOG',
-    accessState: 'AVAILABLE_REQUIRES_CREDENTIAL',
-    transport: 'REST_SEARCH_LIST',
-    hosts: Object.freeze(['www.googleapis.com']),
-    streamPath: null,
-    subprotocol: null,
-    requiresCredential: true,
-    credentialEnv: 'YOUTUBE_API_KEY',
-    implemented: true,
-    durable: false,
-    runtimeGated: true,
-    highPriority: false,
-    cost: Object.freeze({
-      model: 'QUOTA_UNITS',
-      searchListUnits: 100,
-      dailyBudgetEnv: 'RUMOR2_SOCIAL_YOUTUBE_MAX_DAILY_QUOTA_UNITS',
-      monthlyBudgetEnv: 'RUMOR2_SOCIAL_YOUTUBE_MAX_MONTHLY_QUOTA_UNITS',
-      maxWatchlistAssets: 25,
-      maxResults: 50,
-      observedOn: '2026-09-12',
-    }),
-    docUrl: 'https://developers.google.com/youtube/v3/docs/search/list',
-    activation: Object.freeze({ ownerApproval: 'EXPLICIT_PROFILE_ENABLE', credential: 'YOUTUBE_API_KEY', retention: 'METADATA_ONLY', quota: ['MAX_DAILY_QUOTA_UNITS', 'MAX_MONTHLY_QUOTA_UNITS'], scope: 'VERIFIED_SOCIAL_SCOPE_MAX_25_ASSETS', receipt: 'DURABLE_QUOTA_RESERVATION' }),
-    reason: 'Official YouTube Data API v3 search.list read-only request/fixture boundary. No RUMOR-2 collector, durable social journal, posting, OAuth account mutation, or authority path exists; the composed metadata collector remains separate under video/.',
-  }),
   Object.freeze({
     id: 'REDDIT_OFFICIAL',
     providerKind: 'SOCIAL_FORUM',
@@ -183,114 +152,6 @@ export const SOCIAL_PROVIDERS = Object.freeze([
     ]),
     docUrl: 'https://support.reddithelp.com/hc/en-us/articles/14945211791892-Developer-Platform-Accessing-Reddit-Data',
     reason: 'Official OAuth2 Data API exists (documented path); API data access requires explicit Reddit approval with honest disclosure of purpose and scope. Serpent is a private single-user personal project with intended personal research, paper trading, and possibly automated trading of the owner\'s own funds — its classification, any separate-agreement requirement, and retention compatibility are UNRESOLVED pending Reddit review. Scraping is prohibited. Fixture-only foundation; not an operational ear.',
-  }),
-  Object.freeze({
-    id: 'STOCKTWITS_OFFICIAL',
-    providerKind: 'SOCIAL_FINANCE',
-    // SOCIAL-4B (corrected): ONE originating platform with several documented
-    // routes/products. Self-service registration is paused (route-specific);
-    // the Firestream routes are documented and need a stream-authorized
-    // account; the applicable offering terms and this account's entitlement
-    // are unresolved. NOT "docs offline", NOT blanket NOT_ACCEPTING_NEW_ACCESS.
-    accessState: 'AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW',
-    transport: 'FIRESTREAM_HTTP',
-    hosts: ST.candidateDataHosts, // candidate DATA hosts — no host entry confers permission to send a request
-    documentationHosts: ST.documentationHosts, // documentation only; the portal is NOT the data stream
-    streamPath: '/stream', // FIRESTREAM_MESSAGES (documented; not implemented here)
-    subprotocol: null,
-    requiresCredential: true,
-    credentialEnv: 'STOCKTWITS_STREAM_USER', // + STOCKTWITS_STREAM_PASS (Firestream HTTP Basic); presence is not entitlement
-    implemented: true, // the NEW Social foundation only: fixture-only Firestream preview + access summary (rumor2/social-stocktwits.js); NOT the legacy RUMINT ear, NOT a transport
-    durable: false,
-    runtimeGated: false, // no runtime exists that an environment flag could activate
-    retentionProhibited: true, // SOCIAL-4B: the NEW raw Social path retains nothing until entitlement, permitted use, and retention are established
-    highPriority: true, // a high-value intended ear — blocked by entitlement/terms review, not by importance
-    routes: STOCKTWITS_ROUTES, // SELF_SERVE_REGISTRATION (paused) · LEGACY_SYMBOL_REST · FIRESTREAM_MESSAGES · FIRESTREAM_SYMBOL_ACTIVITY · FIRESTREAM_REFERENCE · FIRESTREAM_BACKUPS — routes, not six sources
-    legacy: STOCKTWITS_LEGACY_RUMINT, // the EXISTING aggregate ear, described (reporting only, no authority bridge)
-    access: Object.freeze({
-      platformPath: 'DOCUMENTED_FIRESTREAM_PATH',
-      useCaseClassification: 'UNRESOLVED',
-      entitlementStatus: 'NOT_VERIFIED',
-      additionalTermsRequirement: 'UNRESOLVED',
-      retentionCompatibility: 'UNRESOLVED',
-      liveStatus: 'DISABLED',
-      durableContentAllowed: false,
-      durableAuthorIdentityAllowed: false,
-    }),
-    useCase: STOCKTWITS_USE_CASE,
-    sources: STOCKTWITS_SOURCES,
-    activation: Object.freeze({ ownerApproval: 'STREAM_ENTITLEMENT_RECORD', credential: ['STOCKTWITS_STREAM_USER', 'STOCKTWITS_STREAM_PASS'], retention: 'CURRENT_VIEW_ONLY_AFTER_TERMS_REVIEW', quota: 'MAX_DAILY_REQUESTS', scope: 'BOUNDED_SAMPLE_WINDOW', receipt: 'ANONYMOUS_REQUEST_RESERVATION' }),
-    docUrl: 'https://firestream-portal.stocktwits.com/documentation/stream',
-    reason: 'One platform, several routes. Self-service registration is paused (S1, route-specific). Firestream message/activity/reference/backup routes are documented (S2-S6) for stream-authorized accounts under HTTP Basic; general Terms (S7, revised 2026-07-10) require authorized API/developer access and let offering-specific terms prevail. This account\'s entitlement, Serpent\'s permitted use, additional terms, and raw-content/author retention are UNRESOLVED. A legacy aggregate RUMINT ear exists separately (config-enabled; deployment unobserved; entitlement unresolved). New raw Social path: fixture-only, retention-blocked, not an operational ear.',
-  }),
-  Object.freeze({
-    id: 'META_PUBLIC',
-    providerKind: 'SOCIAL_MICROBLOG',
-    accessState: 'AVAILABLE_REQUIRES_APP_REVIEW',
-    transport: 'GRAPH_API',
-    hosts: Object.freeze(['graph.facebook.com']),
-    streamPath: null,
-    subprotocol: null,
-    requiresCredential: true,
-    credentialEnv: 'META_APP_TOKEN',
-    implemented: false,
-    durable: false,
-    highPriority: false,
-    docUrl: 'https://developers.facebook.com/docs/features-reference/page-public-content-access/',
-    // SOCIAL-4D census correction (first-party docs, 2026-09-06): routes have DIFFERENT
-    // prerequisites and scopes; none is a firehose; latency is unmeasured; eligibility for THIS
-    // project is NOT ESTABLISHED (no app, token, Page, professional account, or institutional
-    // affiliation supplied). No application was made and none was denied. Utility is a hypothesis.
-    routes: Object.freeze({
-      PAGE_PUBLIC_CONTENT: 'public posts/comments of Pages the app does not manage; App Review + Business Verification (+ possible contracts); use limited to analysis/display',
-      PAGE_PUBLIC_METADATA: 'Page metadata only — never feed or comments',
-      MANAGED_PAGES: 'content of Pages the operator administers (Page permissions) — not platform listening',
-      INSTAGRAM_LOGIN: 'own professional-account media/comments/mentions only',
-      INSTAGRAM_FACEBOOK_LOGIN: 'own media + hashtag search (30 unique hashtags / 7 days) + business discovery; professional account + Page linkage + App Review; no realtime delivery documented',
-      CONTENT_LIBRARY: 'FB/IG/Threads research archive in a controlled environment; academic or not-for-profit affiliation reviewed by a partner (CASD/ICPSR) — NOT ESTABLISHED FOR THIS PROJECT',
-      AD_LIBRARY: 'archived ads only — promotion data, not organic evidence',
-      GROUPS: 'Groups API deprecated (v19.0, removed 2024-04-22) — no sanctioned route',
-    }),
-    eligibilityForThisProject: 'NOT_ESTABLISHED', retention: 'UNRESOLVED_ROUTE_SPECIFIC_REVIEW_REQUIRED', latencyMeasured: false,
-    // SOCIAL-4E foundation stage (pure, non-live): ten route descriptors in two namespaces (FACEBOOK /
-    // INSTAGRAM — not checkpoint providers), route-bound readiness evaluators, and fixture-only Page-post /
-    // Page-comment / Instagram-media previews. NOT operational access; `implemented: false` and
-    // `durable: false` keep their meanings (no acquisition adapter into the shared contract, no durable truth).
-    foundation: Object.freeze({ ticket: 'SOCIAL-4E', stage: 'DESCRIPTORS_READINESS_AND_FIXTURE_PREVIEWS', module: 'rumor2/social-meta.js', namespaces: Object.freeze(['FACEBOOK', 'INSTAGRAM']), fixtureOnly: true, live: false, durable: false, operationalAccess: false, docsAccessedOn: '2026-09-07', docsUnverified: Object.freeze(['COMMENT_MESSAGE_CREATED_TIME_FROM']) }),
-    activation: Object.freeze({ ownerApproval: 'APPROVED_OFFICIAL_ROUTE_RECORD', credential: 'META_APP_TOKEN', retention: 'CURRENT_VIEW_ONLY_AFTER_ROUTE_REVIEW', quota: 'MAX_DAILY_REQUESTS', scope: 'APPROVED_PAGE_OR_PROFESSIONAL_ACCOUNT_IDS', receipt: 'ANONYMOUS_REQUEST_RESERVATION' }),
-    reason: 'Route-specific (SOCIAL-4D): Page Public Content Access reads public Page posts/comments only after Meta App Review + Business Verification; Page Public Metadata Access is metadata only; Instagram routes read an authorizing professional account (Instagram Login) or add capped hashtag search and business discovery (Facebook Login) with no realtime delivery documented; the Meta Content Library requires an academic/not-for-profit affiliation reviewed by a partner — not established for this project. No route is a firehose; latency is unmeasured; delete/retention and inference permissions need their own route-specific review. See doctrine/SOCIAL.md §2/§5H.',
-  }),
-  Object.freeze({
-    id: 'TIKTOK_PUBLIC',
-    providerKind: 'SOCIAL_MICROBLOG',
-    accessState: 'NOT_AUTHORIZED',
-    transport: null,
-    hosts: Object.freeze([]),
-    streamPath: null,
-    subprotocol: null,
-    requiresCredential: true,
-    credentialEnv: null,
-    implemented: false,
-    durable: false,
-    highPriority: false,
-    // SOCIAL-4D census correction (first-party docs, 2026-09-06): the CURRENT decision is
-    // inactive because no authorized minutes-scale organic route is established on the supplied
-    // facts. No application was made and none was denied; this is not a permanent exclusion
-    // approved by the operator, and it classifies Serpent neither as commercial nor as exempt.
-    currentDecision: 'INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED',
-    decisionStatus: 'OPERATOR_REVIEW_PENDING',
-    routes: Object.freeze({
-      RESEARCH: 'Research Tools/API: affiliation with an eligible academic or not-for-profit institution, non-commercial public-interest research, ethics review, project approval — NOT ESTABLISHED FOR THIS PROJECT; on THIS route new videos take up to 48 h to enter search and some metrics up to 10 days to refresh (route-specific)',
-      DISPLAY: 'Display API: the authorizing user\'s own videos only — not organic discovery',
-      COMMERCIAL_CONTENT: 'Commercial Content API: paid ads, advertiser data, and other commercial content (EU data in this phase, open application) — an ad/commercial dataset, not the organic feed and not a classification of Serpent\'s use',
-    }),
-    docUrl: 'https://developers.tiktok.com/products/research-api/',
-    // SOCIAL-4E foundation stage (pure, non-live): three product descriptors, product-bound readiness
-    // evaluators, and a fixture-only Research/Display video preview (documented epoch seconds parsed only
-    // as seconds; no identity from labels). The decision above is preserved unchanged. NOT operational access.
-    foundation: Object.freeze({ ticket: 'SOCIAL-4E', stage: 'DESCRIPTORS_READINESS_AND_FIXTURE_PREVIEWS', module: 'rumor2/social-tiktok.js', credentialEnvs: Object.freeze(['TIKTOK_CLIENT_KEY', 'TIKTOK_CLIENT_SECRET']), fixtureOnly: true, live: false, durable: false, operationalAccess: false, docsAccessedOn: '2026-09-07', docsUnverified: Object.freeze(['COMMERCIAL_CONTENT_SCHEMA']) }),
-    activation: Object.freeze({ ownerApproval: 'APPROVED_OFFICIAL_ROUTE_RECORD', credential: ['TIKTOK_CLIENT_KEY', 'TIKTOK_CLIENT_SECRET'], retention: 'ROUTE_SPECIFIC_REVIEW', quota: 'ROUTE_QUOTA', scope: 'APPROVED_OFFICIAL_ROUTE_SCOPE', receipt: 'NO_LIVE_RECEIPT_UNTIL_TRANSPORT' }),
-    reason: 'Product-by-product (SOCIAL-4D): Research Tools require an eligible institutional affiliation and project approval this project has not supplied, and that route indexes new videos with up to 48 h delay; the Display API reads only an authorizing user\'s own videos; the Commercial Content API is an ads/commercial dataset. No appropriate authorized minutes-scale organic route is established on the supplied facts. Inactive; operator review of any permanent decision is pending.',
   }),
 ]);
 

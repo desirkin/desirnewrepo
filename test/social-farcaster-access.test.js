@@ -120,7 +120,7 @@ test('FC-ACCESS-4 (Stage-3 gate). a key, a published Free plan, an unrelated app
 test('FC-ACCESS-5. only the scoped Farcaster runtime may consume the access boundary; the boundary stays pure and imports only the provider adapter and shared primitive', () => {
   const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
   assert.ok(tracked.includes('rumor2/social-farcaster-access.js'), 'the boundary is tracked');
-  const importers = tracked.filter((f) => !f.startsWith('test/') && /from\s+'[^']*social-farcaster-access/.test(read(f)));
+  const importers = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && /from\s+'[^']*social-farcaster-access/.test(read(f)));
   assert.deepEqual(importers, ['rumor2/social-farcaster-runtime.js'], 'only the owner-requested, gated search runtime consumes the boundary');
   const imports = [...read('rumor2/social-farcaster-access.js').matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
   assert.deepEqual(imports, ['./providers/farcaster-official.js', './social-foundation.js']);

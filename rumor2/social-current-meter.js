@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 export const CURRENT_REQUEST_TYPE = 'RUMOR2_SOCIAL_CURRENT_REQUEST_RESERVED';
-const LANES = ['REDDIT_OFFICIAL','STOCKTWITS_OFFICIAL','META_PUBLIC'];
+const LANES = ['REDDIT_OFFICIAL'];
 export function currentRequestEvent(provider, day, ordinal, knownAtTs) {
   return { type: CURRENT_REQUEST_TYPE, provider, day, ordinal, knownAtTs, ts: new Date(knownAtTs).toISOString(), sourceEventId: `r2cr-${createHash('sha256').update(JSON.stringify([provider,day,ordinal])).digest('hex')}` };
 }

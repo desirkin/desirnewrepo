@@ -1,10 +1,11 @@
 // S04/S05/S07/S08: one writer-controlled, erasable current view. The journal contains
 // only anonymous request counts, so request caps survive restart without retaining posts.
 import { createCurrentSocialStore } from './social-current-store.js';
-import { createRedditCurrentClient, createMetaCurrentClient, createStocktwitsCurrentClient } from './social-current-clients.js';
+import { createRedditCurrentClient } from './social-current-clients.js';
 import { CURRENT_REQUEST_TYPE, currentRequestEvent, currentRequestError } from './social-current-meter.js';
-export function createSocialCurrentRuntime({ env=process.env, now=Date.now, fetchImpl=fetch, records={}, streamWindowMs=5000 }={}) {
-  const store=createCurrentSocialStore({now}); const clients=[createRedditCurrentClient({env,now,fetchImpl,record:records.reddit}),createStocktwitsCurrentClient({env,now,fetchImpl,record:records.stocktwits,windowMs:streamWindowMs}),createMetaCurrentClient({env,now,fetchImpl,record:records.facebook}),createMetaCurrentClient({env,now,fetchImpl,instagram:true,record:records.instagram})];
+// LEAN PASS 4a retired the Meta (Facebook/Instagram) and StockTwits-official current clients; Reddit is the one kept CURRENT ear.
+export function createSocialCurrentRuntime({ env=process.env, now=Date.now, fetchImpl=fetch, records={} }={}) {
+  const store=createCurrentSocialStore({now}); const clients=[createRedditCurrentClient({env,now,fetchImpl,record:records.reddit})];
   const states=new Map(clients.map(c=>[c.id,{state:c.enabled?'NOT_OBSERVED':'DISABLED',nextAt:0,lastSuccessTs:null,lastError:null,coverage:'NOT_OBSERVED',requests:0}]));
   let active=false, hydrated=false, inFlight=false, ctl=null, generation=0, counts={}, meterDay=new Date(now()).toISOString().slice(0,10), pending=null;
   function stop(){generation++;active=false;ctl?.abort();store.clear();for(const c of clients)c.stop();}
@@ -51,8 +52,7 @@ export function createSocialCurrentRuntime({ env=process.env, now=Date.now, fetc
     status:()=>({enabled:true,state:active?'CURRENT_VIEW':'DARK',authority:'NONE',retention:'RAM_ONLY_MAX_5_MINUTES',sources:Object.fromEntries(clients.map(c=>{const s=states.get(c.id),blocked=gate(c);const fresh=Number.isSafeInteger(s.lastSuccessTs)&&s.lastSuccessTs<=now()&&now()-s.lastSuccessTs<=300000;return [c.id,{...s,enabled:c.enabled,gateReason:blocked,state:blocked??(!active?'DARK':['OBSERVED','CONNECTED_NO_MATCH'].includes(s.state)&&!fresh?'STALE':s.state)}];})),quota:{day:meterDay,requests:{...counts}}})};
 }
 
-// Meta's registry family contains two independent routes. Neither route may
-// stand in for the other; retain both states in the family status description.
+// LEAN PASS 4a: Reddit is the one kept CURRENT-view provider (Meta and StockTwits-official were retired).
 export function currentReadinessRuntimes(current) {
   const off = { enabled: false, state: 'DARK', transportImplemented: true };
   const source = id => {
@@ -60,12 +60,7 @@ export function currentReadinessRuntimes(current) {
     const value = current.sources?.[id] ?? off;
     return { ...value, transportImplemented: true, ...(current.state === 'DARK' ? { state: 'DARK' } : {}) };
   };
-  const facebook = source('META_FACEBOOK'), instagram = source('META_INSTAGRAM');
   return {
     REDDIT_OFFICIAL: source('REDDIT_OFFICIAL'),
-    STOCKTWITS_OFFICIAL: source('STOCKTWITS_OFFICIAL'),
-    META_PUBLIC: { transportImplemented: true, enabled: facebook.enabled !== false || instagram.enabled !== false,
-      state: `FACEBOOK:${facebook.state};INSTAGRAM:${instagram.state}`,
-      gateReason: [facebook.gateReason, instagram.gateReason].filter(Boolean).join(';') || null },
   };
 }

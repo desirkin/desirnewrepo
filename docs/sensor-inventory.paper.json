@@ -16,10 +16,10 @@
   "OPERATIONAL_PUBLIC": 34,
   "OPERATIONAL_CREDENTIAL_GATED": 13,
   "IMPLEMENTED_NOT_LIVE_SMOKED": 0,
-  "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 9,
-  "FOUNDATION_ONLY": 1,
+  "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 5,
+  "FOUNDATION_ONLY": 0,
   "DEPRECATED": 0,
-  "NOT_PRESENT": 1
+  "NOT_PRESENT": 0
  },
  "rows": [
   {
@@ -468,31 +468,6 @@
    "smokeEvidence": "never spent (paid; explicit smoke envelope required)"
   },
   {
-   "id": "YOUTUBE_OFFICIAL",
-   "group": "SOCIAL",
-   "family": "SOCIAL",
-   "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
-   "module": "rumor2/providers/youtube-official.js (fixture/request boundary; no collector)",
-   "compositionPath": "not composed (foundation / access boundary only)",
-   "enable": "RUMOR2_SOCIAL_YOUTUBE_ENABLED",
-   "credentialEnv": [
-    "YOUTUBE_API_KEY"
-   ],
-   "paid": false,
-   "budgetGovernor": "search.list hard cost 100 quota units/request + explicit daily/monthly quota-unit caps",
-   "retentionTermsGate": "AVAILABLE_REQUIRES_CREDENTIAL",
-   "liveTransport": false,
-   "durableTruth": "durable quota reservation boundary only; no RUMOR-2 collector",
-   "pointInTimeContract": "fixture only",
-   "replay": "FIXTURE_REPLAY_ONLY",
-   "decisionAuthority": "NONE",
-   "paperAuthority": "NONE",
-   "paperDesiredState": "OFF",
-   "blockerPolicy": "DEGRADE",
-   "readinessBlocker": "DISABLED_BY_PAPER_POLICY",
-   "smokeEvidence": "none (no live receipt; fixture/request boundary only; durable quota reservation is implemented but disabled by paper policy)"
-  },
-  {
    "id": "REDDIT_OFFICIAL",
    "group": "SOCIAL",
    "family": "SOCIAL",
@@ -516,82 +491,6 @@
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": "source-scoped approval, credentials, query/entity scope and explicit request allowance required",
    "smokeEvidence": "test/social-current-runtime.test.js (offline injected transport)"
-  },
-  {
-   "id": "STOCKTWITS_OFFICIAL",
-   "group": "SOCIAL",
-   "family": "SOCIAL",
-   "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
-   "module": "rumor2/social-current-runtime.js + rumor2/social-current-clients.js",
-   "compositionPath": "fly.js -> RUMOR2 collector -> erasable current view -> owner Senses panel",
-   "enable": "RUMOR2_SOCIAL_CURRENT_ENABLED plus provider-specific enable, access and request allowance",
-   "credentialEnv": [
-    "STOCKTWITS_STREAM_USER"
-   ],
-   "paid": false,
-   "budgetGovernor": "request reservation acknowledged in the existing journal before dispatch",
-   "retentionTermsGate": "approved RETRIEVAL; current content and identities RAM only, max five minutes",
-   "liveTransport": true,
-   "durableTruth": "anonymous request counts only; content/identity RAM expires within five minutes",
-   "pointInTimeContract": "fixture only",
-   "replay": "CURRENT_VIEW_ONLY (anonymous accounting replays; posts do not)",
-   "decisionAuthority": "NONE",
-   "paperAuthority": "NONE",
-   "paperDesiredState": "REQUEST",
-   "blockerPolicy": "DEGRADE",
-   "readinessBlocker": "source-scoped approval, credentials, query/entity scope and explicit request allowance required",
-   "smokeEvidence": "test/social-current-runtime.test.js (offline injected transport)"
-  },
-  {
-   "id": "META_PUBLIC",
-   "group": "SOCIAL",
-   "family": "SOCIAL",
-   "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
-   "module": "rumor2/social-current-runtime.js + rumor2/social-current-clients.js",
-   "compositionPath": "fly.js -> RUMOR2 collector -> erasable current view -> owner Senses panel",
-   "enable": "RUMOR2_SOCIAL_CURRENT_ENABLED plus provider-specific enable, access and request allowance",
-   "credentialEnv": [
-    "META_APP_TOKEN"
-   ],
-   "paid": false,
-   "budgetGovernor": "request reservation acknowledged in the existing journal before dispatch",
-   "retentionTermsGate": "approved RETRIEVAL; current content and identities RAM only, max five minutes",
-   "liveTransport": true,
-   "durableTruth": "anonymous request counts only; content/identity RAM expires within five minutes",
-   "pointInTimeContract": "fixture only",
-   "replay": "CURRENT_VIEW_ONLY (anonymous accounting replays; posts do not)",
-   "decisionAuthority": "NONE",
-   "paperAuthority": "NONE",
-   "paperDesiredState": "REQUEST",
-   "blockerPolicy": "DEGRADE",
-   "readinessBlocker": "source-scoped approval, credentials, query/entity scope and explicit request allowance required",
-   "smokeEvidence": "test/social-current-runtime.test.js (offline injected transport)"
-  },
-  {
-   "id": "TIKTOK_PUBLIC",
-   "group": "SOCIAL",
-   "family": "SOCIAL",
-   "classification": "FOUNDATION_ONLY",
-   "module": "rumor2/social-tiktok.js",
-   "compositionPath": "not composed (foundation / access boundary only)",
-   "enable": "not enableable",
-   "credentialEnv": [
-    "TIKTOK_CLIENT_KEY",
-    "TIKTOK_CLIENT_SECRET"
-   ],
-   "paid": false,
-   "budgetGovernor": "none",
-   "retentionTermsGate": "NOT_AUTHORIZED",
-   "liveTransport": false,
-   "durableTruth": "none",
-   "pointInTimeContract": "fixture only",
-   "replay": "FIXTURE_REPLAY_ONLY",
-   "decisionAuthority": "NONE",
-   "paperAuthority": "NONE",
-   "paperDesiredState": "OFF",
-   "blockerPolicy": "DEGRADE",
-   "readinessBlocker": "BLOCKED_TERMS",
-   "smokeEvidence": "none (no lawful live route)"
   },
   {
    "id": "KRAKEN_SPOT",
@@ -1332,31 +1231,6 @@
    "smokeEvidence": "2026-09-12: decrypt.co/feed HTTP 200 application/xml, 55 items; live read through press/collector.js: docs/evidence/sensor-implementation-2026-09-12.md"
   },
   {
-   "id": "META_REALTIME_TRANSPORT",
-   "group": "SOCIAL",
-   "family": "SOCIAL",
-   "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
-   "module": "rumor2/social-current-clients.js",
-   "compositionPath": "fly.js -> RUMOR2 collector -> provider runtime",
-   "enable": "requested paper social profile; source-specific credential, scope, access review and request allowance",
-   "credentialEnv": [
-    "META_APP_TOKEN"
-   ],
-   "paid": false,
-   "budgetGovernor": "journaled request reservations; Meta routes share a lane",
-   "retentionTermsGate": "operator/provider access review required",
-   "liveTransport": true,
-   "durableTruth": "current RAM view, five-minute expiry; anonymous request meter only is journaled",
-   "pointInTimeContract": "source timestamp separate from retrieval",
-   "replay": "no historical content; refetch current scope",
-   "decisionAuthority": "NONE",
-   "paperAuthority": "NONE",
-   "paperDesiredState": "REQUEST",
-   "blockerPolicy": "DEGRADE",
-   "readinessBlocker": "credentials / approved scope / explicit request cap",
-   "smokeEvidence": "new composed offline tests; NOT live verified"
-  },
-  {
    "id": "FARCASTER_LIVE_TRANSPORT",
    "group": "SOCIAL",
    "family": "SOCIAL",
@@ -1368,7 +1242,7 @@
     "NEYNAR_API_KEY"
    ],
    "paid": false,
-   "budgetGovernor": "journaled request reservations; Meta routes share a lane",
+   "budgetGovernor": "journaled request reservations",
    "retentionTermsGate": "operator/provider access review required",
    "liveTransport": true,
    "durableTruth": "existing fenced social journal",
@@ -1380,29 +1254,6 @@
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": "credentials / approved scope / explicit request cap",
    "smokeEvidence": "new composed offline tests; NOT live verified"
-  },
-  {
-   "id": "TIKTOK_REALTIME_TRANSPORT",
-   "group": "SOCIAL",
-   "family": "SOCIAL",
-   "classification": "NOT_PRESENT",
-   "module": null,
-   "compositionPath": "not composed",
-   "enable": "none",
-   "credentialEnv": [],
-   "paid": false,
-   "budgetGovernor": "none",
-   "retentionTermsGate": "no eligible public market-intelligence route established",
-   "liveTransport": false,
-   "durableTruth": "none",
-   "pointInTimeContract": "none",
-   "replay": "none",
-   "decisionAuthority": "NONE",
-   "paperAuthority": "NONE",
-   "paperDesiredState": "OFF",
-   "blockerPolicy": "DEGRADE",
-   "readinessBlocker": "NOT_IMPLEMENTED: institutional Research eligibility not established; own-account Display is insufficient",
-   "smokeEvidence": "2026-09-12 source inspection: rumor2/social-tiktok.js access review; no live transport or live smoke"
   }
  ],
  "secretNamesPresent": [],

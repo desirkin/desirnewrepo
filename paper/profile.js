@@ -74,11 +74,8 @@ export function profileEnvironment(profile, { dataDir = null } = {}) {
     // never spends: without a bearer / budget the runtime stays CREDENTIAL_MISSING / BUDGET_NOT_CONFIGURED.
     RUMOR2_SOCIAL_X_ENABLED: g.social.X_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.X_OFFICIAL) ? 'true' : 'false',
     RUMOR2_SOCIAL_FARCASTER_ENABLED: g.social.FARCASTER_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.FARCASTER_OFFICIAL) ? 'true' : 'false',
-    RUMOR2_SOCIAL_CURRENT_ENABLED: ['REDDIT_OFFICIAL','STOCKTWITS_OFFICIAL','META_PUBLIC'].some(id => g.social[id]?.desiredState === 'REQUEST' || on(g.social[id])) ? 'true' : 'false',
+    RUMOR2_SOCIAL_CURRENT_ENABLED: g.social.REDDIT_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.REDDIT_OFFICIAL) ? 'true' : 'false',
     RUMOR2_SOCIAL_REDDIT_ENABLED: g.social.REDDIT_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.REDDIT_OFFICIAL) ? 'true' : 'false',
-    RUMOR2_SOCIAL_STOCKTWITS_ENABLED: g.social.STOCKTWITS_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.STOCKTWITS_OFFICIAL) ? 'true' : 'false',
-    RUMOR2_SOCIAL_FACEBOOK_ENABLED: g.social.META_PUBLIC?.desiredState === 'REQUEST' || on(g.social.META_PUBLIC) ? 'true' : 'false',
-    RUMOR2_SOCIAL_INSTAGRAM_ENABLED: g.social.META_PUBLIC?.desiredState === 'REQUEST' || on(g.social.META_PUBLIC) ? 'true' : 'false',
     WIDEEYE_ENABLED: on(g.coreObservation.wideEye) ? 'true' : 'false', GATEWAY_ENABLED: on(g.infrastructure.gateway) ? 'true' : 'false', RUMINT_ENABLED: on(g.rumorOfficial.rumintLegacy) ? 'true' : 'false',
     // PUBLISHER observation tier (press/): the profile selects the crypto publisher feeds by id; ON rows are watched, OFF rows
     // never called. Headline / link only, authority NONE, outside the frozen RUMOR-2 evidence core.

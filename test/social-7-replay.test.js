@@ -134,7 +134,7 @@ test('§51-I/J/K/L. a corrupt closed schema (extra key / mutated field) fails hy
   b.rt.composite('LINK', { asOfTs: b.clock.ms + 86_400_000 });
   assert.equal(canonicalJson(arr), before, 'no journal byte changed'); assert.equal(canonicalJson(b.rt.sourceProfile(s.socialAuthorId, { asOfTs: T0 + 1000 })), earlier, 'the earlier as-of view is untouched'); assert.equal(canonicalJson(b.dossiers()[0]), canonicalJson(ev));
   // L
-  const forged = { ...obsEvent({ id: 'st1', author: 'did:plc:st', text: '$LINK forged retention-prohibited record', nowMs: T0 + 1500 }), provider: 'STOCKTWITS_OFFICIAL', providerKind: 'SOCIAL_FINANCE' };
+  const forged = { ...obsEvent({ id: 'st1', author: 'did:plc:st', text: '$LINK forged retention-prohibited record', nowMs: T0 + 1500 }), provider: 'REDDIT_OFFICIAL', providerKind: 'SOCIAL_FORUM' };
   assert.equal(replaySocialHistory([...hist, forged]).ok, false, 'the durable replay refuses the forged record');
   const rl = createResearchStrainer({ now: () => b.clock.ms }); assert.equal(rl.hydrate([...hist, forged]).ok, true); assert.equal(rl.status().stats.refusedRetention, 1); assert.equal(rl.status().subjects, 0); assert.equal(rl.status().sourceBehavior.profiles, 0);
   const rL = await rl.tick({ knownAtTs: b.clock.ms, providerStates: observed(b.clock.ms, [B, X]), fenceHeld: () => true, append: () => ({ ok: true, lastSeq: 1 }) }); assert.equal(rL.idle, true, 'no dossier derives from a retention-prohibited record');

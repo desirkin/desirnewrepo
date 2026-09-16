@@ -222,12 +222,12 @@ test('A9 (§45-A). an observation with no provider-native identity, and one from
   idx.observe(lawful);
   idx.observe({ ...lawful, socialAuthorId: idOf(did('X')), nativeAuthorId: '' }); // no native identity: never invented
   idx.observe({ ...lawful, provider: 'REDDIT_OFFICIAL', socialAuthorId: idOf(did('R'), 'REDDIT_OFFICIAL'), nativeAuthorId: 'u/someone' }); // retention prohibited
-  idx.observe({ ...lawful, provider: 'STOCKTWITS_OFFICIAL', socialAuthorId: idOf(did('S'), 'STOCKTWITS_OFFICIAL'), nativeAuthorId: 'st-1' });
+  idx.observe({ ...lawful, provider: 'FARCASTER_OFFICIAL', socialAuthorId: idOf(did('S'), 'FARCASTER_OFFICIAL'), nativeAuthorId: 'st-1' }); // not operational
   const st = idx.status();
   assert.equal(st.profiles, 1, 'only the lawful Bluesky source has a record');
   assert.equal(st.refusedRetention, 2);
   assert.equal(st.evictions, 0); assert.equal(st.evictionMarkers, 0, 'a refused record leaves no eviction marker behind');
-  assert.equal(idx.has(idOf(did('R'), 'REDDIT_OFFICIAL')), false); assert.equal(idx.has(idOf(did('S'), 'STOCKTWITS_OFFICIAL')), false);
+  assert.equal(idx.has(idOf(did('R'), 'REDDIT_OFFICIAL')), false); assert.equal(idx.has(idOf(did('S'), 'FARCASTER_OFFICIAL')), false);
   // provider-scoped identity is untouched: the same native id on two providers is two sources, never merged
   assert.notEqual(idOf('did:plc:same'), idOf('did:plc:same', 'X_OFFICIAL'));
   assert.equal(stateOf(idx, did('A')), 'NO_PRIOR_PROFILE_EVICTION');
@@ -434,11 +434,11 @@ test('B8 (§48). the whole matrix projects deterministically over injected runti
   assert.ok(READINESS_STATES.includes('LIVE_SMOKED_NOT_CURRENTLY_PROVEN_ACTIVE') && READINESS_BLOCKERS.includes('RUNTIME_NOT_ACTIVE'));
 });
 
-test('B9 (§48). correcting the smoke/activation vocabulary makes no other provider live: Reddit and StockTwits stay RETENTION_BLOCKED, Meta / TikTok / Farcaster stay FIXTURE_ONLY with external verification deferred, the legacy aggregate stays ACCESS_UNRESOLVED, and no row gains a new smoke claim', () => {
+test('B9 (§48). correcting the smoke/activation vocabulary makes no other provider live: Reddit stays RETENTION_BLOCKED, Farcaster stays FIXTURE_ONLY with external verification deferred, the legacy aggregate stays ACCESS_UNRESOLVED, and no row gains a new smoke claim', () => {
   const m = readinessMatrix({ knownAtTs: T0, runtimes: { BLUESKY_OFFICIAL: bsky(), X_OFFICIAL: xrt({ state: 'ACTIVE', smoke: DONE }) } });
   const row = (id) => m.providers.find((r) => r.provider === id);
-  for (const id of ['REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL']) { const r = row(id); assert.equal(r.readiness, 'RETENTION_BLOCKED', id); assert.equal(r.liveSmokeState, 'NOT_APPLICABLE', id); assert.equal(r.durableRawContentAllowed, false); assert.equal(r.durableAuthorIdentityAllowed, false); }
-  for (const id of ['META_PUBLIC', 'TIKTOK_PUBLIC', 'FARCASTER_OFFICIAL']) { const r = row(id); assert.equal(r.readiness, 'FIXTURE_ONLY', id); assert.equal(r.liveSmokeState, 'NOT_APPLICABLE', id); assert.ok(r.blockers.includes('EXTERNAL_VERIFICATION_DEFERRED'), id); assert.equal(r.operationalEvidenceAvailable, false, id); }
+  for (const id of ['REDDIT_OFFICIAL']) { const r = row(id); assert.equal(r.readiness, 'RETENTION_BLOCKED', id); assert.equal(r.liveSmokeState, 'NOT_APPLICABLE', id); assert.equal(r.durableRawContentAllowed, false); assert.equal(r.durableAuthorIdentityAllowed, false); }
+  for (const id of ['FARCASTER_OFFICIAL']) { const r = row(id); assert.equal(r.readiness, 'FIXTURE_ONLY', id); assert.equal(r.liveSmokeState, 'NOT_APPLICABLE', id); assert.ok(r.blockers.includes('EXTERNAL_VERIFICATION_DEFERRED'), id); assert.equal(r.operationalEvidenceAvailable, false, id); }
   const la = row('RUMINT_LEGACY_AGGREGATE');
   assert.equal(la.readiness, 'ACCESS_UNRESOLVED'); assert.equal(la.liveSmokeState, 'NOT_APPLICABLE'); assert.equal(la.historicalReplayCapability, 'AGGREGATE_CHECKPOINT_ONLY'); assert.equal(la.durableAuthorIdentityAllowed, false);
   for (const r of m.providers) { assert.equal(r.authority, 'NONE'); if (!['BLUESKY_OFFICIAL', 'X_OFFICIAL'].includes(r.provider)) assert.notEqual(r.liveSmokeState, 'PERFORMED_PRIOR_SESSION', `${r.provider}: no provider gains a smoke claim from this repair`); }

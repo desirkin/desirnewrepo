@@ -1,7 +1,7 @@
 // S04/S05/S07/S08 current observations: erasable RAM only, no journal/history/model input.
 // Retrieval rights do not authorize an immutable archive. Expiry and stop erase all content
 // and identities. The owner cockpit reads a detached snapshot through the composition root.
-export const CURRENT_SOCIAL_PROVIDERS = Object.freeze(['STOCKTWITS_OFFICIAL', 'REDDIT_OFFICIAL', 'META_FACEBOOK', 'META_INSTAGRAM']);
+export const CURRENT_SOCIAL_PROVIDERS = Object.freeze(['REDDIT_OFFICIAL']);
 export const CURRENT_SOCIAL_TTL_MS = 300000;
 const KEYS = ['v','provider','nativeId','authorId','text','title','link','sourceTs','knownAtTs','expiresAtTs','authority'];
 export function currentSocialError(o) {

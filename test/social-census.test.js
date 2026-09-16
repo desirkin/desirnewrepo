@@ -20,9 +20,9 @@ test('CENSUS-1. every intended provider has a truthful, closed access state — 
   }
 });
 
-test('CENSUS-2. the SOCIAL-1 provider set is exactly the intended universe', () => {
+test('CENSUS-2. the SOCIAL-1 provider set is exactly the intended universe (LEAN PASS 4a retired the official StockTwits, Meta, TikTok and YouTube ears; their exclusion doctrine is preserved in attic/doctrine/SOCIAL.md)', () => {
   assert.deepEqual([...SOCIAL_PROVIDER_IDS].sort(), [
-    'BLUESKY_OFFICIAL', 'FARCASTER_OFFICIAL', 'META_PUBLIC', 'REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL', 'TIKTOK_PUBLIC', 'X_OFFICIAL', 'YOUTUBE_OFFICIAL',
+    'BLUESKY_OFFICIAL', 'FARCASTER_OFFICIAL', 'REDDIT_OFFICIAL', 'X_OFFICIAL',
   ]);
 });
 
@@ -30,11 +30,7 @@ test('CENSUS-3. the recorded access decisions match the verified census', () => 
   assert.equal(socialProviderById('BLUESKY_OFFICIAL').accessState, 'AVAILABLE_AUTHORIZED');
   assert.equal(socialProviderById('FARCASTER_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
   assert.equal(socialProviderById('X_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
-  assert.equal(socialProviderById('YOUTUBE_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
   assert.equal(socialProviderById('REDDIT_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION', 'SOCIAL-3: classification-neutral — approval and use-case review pending, nothing assumed');
-  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW', 'SOCIAL-4B: route-specific — registration paused, Firestream documented, entitlement/terms unresolved');
-  assert.equal(socialProviderById('META_PUBLIC').accessState, 'AVAILABLE_REQUIRES_APP_REVIEW');
-  assert.equal(socialProviderById('TIKTOK_PUBLIC').accessState, 'NOT_AUTHORIZED');
 });
 
 test('CENSUS-4 (SOCIAL-2B §7). Bluesky is credential-free live; X is durable but RUNTIME-GATED (credential + budget + preflight + fence); the rest dark by access', () => {
@@ -51,14 +47,6 @@ test('CENSUS-4 (SOCIAL-2B §7). Bluesky is credential-free live; X is durable bu
   for (const p of SOCIAL_PROVIDERS) if (p.durable && !isLiveActivatable(p.accessState)) assert.equal(p.runtimeGated, true, `${p.id} needs runtime authorization`);
 });
 
-test('CENSUS-5. StockTwits stays HIGH PRIORITY though access-blocked; TikTok is a FINAL exclusion, not a TODO', () => {
-  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').highPriority, true, 'blocked by entitlement/terms review, not by importance');
-  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').routes.SELF_SERVE_REGISTRATION.status, 'PAUSED', 'the registration pause is route-specific');
-  assert.equal(socialProviderById('TIKTOK_PUBLIC').currentDecision, 'INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED'); assert.equal(socialProviderById('TIKTOK_PUBLIC').decisionStatus, 'OPERATOR_REVIEW_PENDING'); assert.ok(!('finalDecision' in socialProviderById('TIKTOK_PUBLIC')), 'no permanent exclusion is claimed on the operator\'s behalf');
-  assert.equal(socialProviderById('META_PUBLIC').eligibilityForThisProject, 'NOT_ESTABLISHED'); assert.equal(socialProviderById('FARCASTER_OFFICIAL').account.thisProjectPlan, 'UNKNOWN');
-  for (const id of ['META_PUBLIC', 'TIKTOK_PUBLIC']) { const p = socialProviderById(id); assert.equal(p.implemented, false); assert.equal(p.durable, false); assert.ok(!/commercial trading|bars commercial use/i.test(p.reason), `${id}: no commercial classification asserted`); }
-});
-
 test('CENSUS-6. no credential/secret value is ever embedded — only env var NAMES', () => {
   for (const p of SOCIAL_PROVIDERS) {
     if (p.credentialEnv !== null) assert.match(p.credentialEnv, /^[A-Z0-9_]+$/, `${p.id} names an env var, not a secret`);
@@ -69,16 +57,15 @@ test('CENSUS-6. no credential/secret value is ever embedded — only env var NAM
   }
 });
 
-test('CENSUS-7 (SOCIAL-4E). foundation-stage metadata is explicit and non-live; implemented/durable keep their meanings; the TikTok decision and Meta eligibility are unchanged; the stale v5 wording is gone', () => {
-  const expected = { META_PUBLIC: 'rumor2/social-meta.js', TIKTOK_PUBLIC: 'rumor2/social-tiktok.js', FARCASTER_OFFICIAL: 'rumor2/social-farcaster-access.js' };
+test('CENSUS-7 (SOCIAL-4E). the surviving foundation-stage metadata is explicit and non-live; implemented/durable keep their meanings; only Farcaster carries 4E metadata after the social-official cut; the stale v5 wording is gone', () => {
+  const expected = { FARCASTER_OFFICIAL: 'rumor2/social-farcaster-access.js' };
   for (const [id, module] of Object.entries(expected)) {
     const f = socialProviderById(id).foundation;
     assert.equal(f.ticket, 'SOCIAL-4E'); assert.equal(f.module, module); assert.equal(f.fixtureOnly, true); assert.equal(f.live, false); assert.equal(f.durable, false); assert.equal(f.operationalAccess, false); assert.match(f.docsAccessedOn, /^\d{4}-\d{2}-\d{2}$/);
   }
   for (const p of SOCIAL_PROVIDERS) if (!(p.id in expected)) assert.ok(!('foundation' in p), `${p.id} carries no 4E metadata`);
-  assert.equal(socialProviderById('META_PUBLIC').implemented, false); assert.equal(socialProviderById('TIKTOK_PUBLIC').implemented, false); assert.equal(socialProviderById('FARCASTER_OFFICIAL').implemented, true);
-  assert.equal(socialProviderById('TIKTOK_PUBLIC').currentDecision, 'INACTIVE_NO_AUTHORIZED_MINUTES_SCALE_ORGANIC_ROUTE_ESTABLISHED'); assert.equal(socialProviderById('TIKTOK_PUBLIC').decisionStatus, 'OPERATOR_REVIEW_PENDING');
-  assert.equal(socialProviderById('META_PUBLIC').eligibilityForThisProject, 'NOT_ESTABLISHED'); assert.equal(socialProviderById('FARCASTER_OFFICIAL').account.entitlement, 'UNVERIFIED');
+  assert.equal(socialProviderById('FARCASTER_OFFICIAL').implemented, true);
+  assert.equal(socialProviderById('FARCASTER_OFFICIAL').account.entitlement, 'UNVERIFIED'); assert.equal(socialProviderById('FARCASTER_OFFICIAL').account.thisProjectPlan, 'UNKNOWN');
   assert.deepEqual(ACTIVE_SOCIAL_PROVIDER_IDS, ['BLUESKY_OFFICIAL', 'X_OFFICIAL'], 'no 4E provider became durable');
   const src = readFileSync(new URL('../rumor2/social-registry.js', import.meta.url), 'utf8');
   assert.ok(!/checkpoint v5 migration|via v5/.test(src)); assert.ok(/checkpoint v4/.test(src) && /RUMOR2_SOCIAL_CURSOR/.test(src));

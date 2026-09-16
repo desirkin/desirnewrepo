@@ -51,7 +51,7 @@ export const MAX_INGRESS_TAG_CHARS = 64;
 export const SOCIAL_PROVIDER_KINDS = Object.freeze([
   'SOCIAL_MICROBLOG', // X, Bluesky, Farcaster, Threads-like short posts
   'SOCIAL_FORUM', // Reddit-like threaded communities
-  'SOCIAL_FINANCE', // StockTwits-like finance-native streams
+  'SOCIAL_FINANCE', // finance-native social streams (the legacy RUMINT finance ear kind)
 ]);
 
 // ---- relationship model (original vs echo) — §10 ---------------------------
@@ -131,11 +131,11 @@ export const SOCIAL_LIFECYCLE_STATES = Object.freeze(['CREATE', 'EDIT', 'DELETE'
 // application boundary (normalize, event build, validate, replay, settle) —
 // never a wrapper comment, never widened by a caller-provided list. The social
 // registry asserts its `retentionProhibited` flags agree with this set.
-// SOCIAL-4B: STOCKTWITS_OFFICIAL joins for the NEW raw Social path only — the
-// legacy aggregate RUMINT ear (rumint/*) is a separate subsystem this constant
-// never reaches. Its route entitlement, permitted downstream use, and raw
-// content/author retention compatibility are not established for this project.
-export const SOCIAL_RETENTION_PROHIBITED_PROVIDERS = Object.freeze(['REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL']);
+// The raw content/author retention firewall: these providers' raw retention
+// compatibility is not established for this project, so raw retention is refused.
+// (LEAN PASS 4a retired STOCKTWITS_OFFICIAL with the social-official cut; the
+// legacy aggregate RUMINT ear in rumint/* is a separate subsystem, unaffected.)
+export const SOCIAL_RETENTION_PROHIBITED_PROVIDERS = Object.freeze(['REDDIT_OFFICIAL']);
 export const socialRetentionRefusal = (provider) => (SOCIAL_RETENTION_PROHIBITED_PROVIDERS.includes(provider)
   ? `${provider}: durable content and author-identifying retention are not approved (entitlement/access approval, use-case classification, and retention compatibility unresolved)`
   : null);

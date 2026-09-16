@@ -40,7 +40,7 @@ const code = (f) =>
 const rumor2Files = tracked.filter((f) => f.startsWith('rumor2/'));
 assert.ok(rumor2Files.length >= 8, 'the rumor2 layer is actually scanned');
 // TIER SPLIT: the intentional SOCIAL-1 surface vs the frozen non-social core.
-const SOCIAL_FILE_RE = /(^|\/)social[a-z0-9-]*\.js$|(^|\/)x-[a-z0-9-]*\.js$|\/news-collector\.js$|\/providers\/(bluesky|farcaster|x)-official\.js$|\/providers\/(farcaster-client|meta-graph-official|reddit-client|stocktwits-official|tiktok-research-official|youtube-client|youtube-official|coindesk-official|the-block-official|cointelegraph-official|decrypt-official)\.js$/; // SOCIAL-2B: X and evidence-only adapters are audited in the social tier
+const SOCIAL_FILE_RE = /(^|\/)social[a-z0-9-]*\.js$|(^|\/)x-[a-z0-9-]*\.js$|\/news-collector\.js$|\/providers\/(bluesky|farcaster|x)-official\.js$|\/providers\/(farcaster-client|reddit-client|coindesk-official|the-block-official|cointelegraph-official|decrypt-official)\.js$/; // SOCIAL-2B: X and evidence-only adapters are audited in the social tier (LEAN PASS 4a retired the Meta / TikTok / YouTube / official-StockTwits provider adapters)
 const socialFiles = rumor2Files.filter((f) => SOCIAL_FILE_RE.test(f));
 const frozenCoreFiles = rumor2Files.filter((f) => !SOCIAL_FILE_RE.test(f));
 // SOCIAL-5B — the OFFLINE research pipeline (bin/social-research.js + research/ + the narrow read-only journal reader):
@@ -118,14 +118,14 @@ test('R2A-75. RUMOR-2 imports no STRIKE/execution/trading module', () => {
   // below to have no imports and no network/storage/model/execution capability (a lexical allowance
   // for one file, never a widening of the directory rule)
   const allowed = /^(node:[a-z_/]+|\.\.\/lib\/(config|jsonl)\.js|\.\.\/evidence\/contract\.js|\.\/[a-z0-9./-]+|\.\/providers\/[a-z-]+\.js|\.\.\/social-time\.js)$/;
-  const evidenceAdapterFiles = ['rumor2/providers/farcaster-client.js', 'rumor2/providers/meta-graph-official.js', 'rumor2/providers/reddit-client.js', 'rumor2/providers/stocktwits-official.js', 'rumor2/providers/tiktok-research-official.js', 'rumor2/providers/youtube-client.js', 'rumor2/providers/youtube-official.js', 'rumor2/news-collector.js', 'rumor2/providers/coindesk-official.js', 'rumor2/providers/the-block-official.js', 'rumor2/providers/cointelegraph-official.js', 'rumor2/providers/decrypt-official.js'];
+  const evidenceAdapterFiles = ['rumor2/providers/farcaster-client.js', 'rumor2/providers/reddit-client.js', 'rumor2/news-collector.js', 'rumor2/providers/coindesk-official.js', 'rumor2/providers/the-block-official.js', 'rumor2/providers/cointelegraph-official.js', 'rumor2/providers/decrypt-official.js'];
   const timeSrc = read('rumor2/social-time.js');
   assert.equal([...timeSrc.matchAll(/from\s+'([^']+)'/g)].length, 0, 'social-time.js imports nothing at all');
   for (const cap of ['fetch(', 'WebSocket', 'EventSource', 'setTimeout', 'setInterval', 'node:', 'process.', 'Date.now', 'Date.parse', 'require(', 'import(']) assert.ok(!code('rumor2/social-time.js').includes(cap), `social-time.js carries no capability marker ${cap}`);
   for (const f of rumor2Files) {
     const evidenceAdapterImport = evidenceAdapterFiles.includes(f);
     for (const m of read(f).matchAll(/from\s+'([^']+)'/g)) {
-      assert.ok(allowed.test(m[1]) || (['rumor2/social-farcaster-runtime.js', 'rumor2/social-current-clients.js'].includes(f) && m[1] === '../lib/bounded-fetch.js') || (evidenceAdapterImport && /^\.\.\/(social|social-meta|social-reddit|social-stocktwits|social-tiktok|truth)\.js$/.test(m[1])), `${f}: import ${m[1]} outside the rumor layer's narrow allowance`);
+      assert.ok(allowed.test(m[1]) || (['rumor2/social-farcaster-runtime.js', 'rumor2/social-current-clients.js'].includes(f) && m[1] === '../lib/bounded-fetch.js') || (evidenceAdapterImport && /^\.\.\/(social|social-reddit|truth)\.js$/.test(m[1])), `${f}: import ${m[1]} outside the rumor layer's narrow allowance`);
       assert.ok(!/ledger|state|cost|tape|strike|exec|socrates/i.test(m[1]), `${f}: forbidden import ${m[1]}`);
     }
   }
@@ -204,30 +204,23 @@ test('R2A-SOCIAL-5 (SOCIAL-3). the Reddit surface is an explicit filename allowl
   for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/social-stream.js']) assert.ok(!/reddit/i.test(read(f)), `${f} has no Reddit wiring`);
 });
 
-test('R2A-SOCIAL-6 (SOCIAL-4B). the StockTwits raw-Social surface is an explicit filename allowlist; fixture-only, never fetches, never imports legacy or authority; no collector wires it', () => {
-  // EXPLICIT allowlist of rumor2 files whose CODE may name StockTwits (the legacy
-  // rumint/* subsystem is a separate tier audited by R2A-rumint, untouched here)
-   const ST_ALLOWLIST = ['rumor2/providers/stocktwits-official.js', 'rumor2/social-current-clients.js', 'rumor2/social-current-meter.js', 'rumor2/social-current-runtime.js', 'rumor2/social-current-store.js', 'rumor2/social-stocktwits.js', 'rumor2/social-registry.js', 'rumor2/social.js'];
+test('R2A-SOCIAL-6 (SOCIAL-4B). the official StockTwits raw-Social surface is fully retired from the rumor2 layer (LEAN PASS 4a); no rumor2 file names it and no collector wires it (the legacy rumint/* StockTwits ear is a separate tier, audited by R2A-rumint)', () => {
   const mentions = rumor2Files.filter((f) => /stocktwits/i.test(code(f)));
-  assert.deepEqual(mentions.sort(), [...ST_ALLOWLIST].sort(), `StockTwits may only be named in ${ST_ALLOWLIST.join(', ')}`);
-  assert.ok(tracked.includes('rumor2/social-stocktwits.js'), 'the foundation is tracked (Git-index-aware)');
-  assert.ok(SOCIAL_FILE_RE.test('rumor2/social-stocktwits.js'), 'audited in the social tier, never as frozen core');
-  const src = read('rumor2/social-stocktwits.js');
-  for (const forbidden of ['fetch(', 'WebSocket', 'EventSource', 'setInterval', 'node:http', 'node:https', 'node:net', 'node:fs', 'child_process', 'zlib', 'Authorization', 'Date.now', 'randomUUID']) assert.ok(!src.includes(forbidden), `social-stocktwits.js: ${forbidden}`);
-  assert.ok(!/from '\.\.\//.test(src), 'imports nothing outside rumor2'); assert.ok(!/rumint|state\/|ui\/|persistence/.test(src.replace(/\/\/.*$/gm, '')), 'no legacy/state/ui/persistence import (inventory is reporting, not a bridge)');
-  assert.ok(!/ledger|cost\/|tape|strike|exec|socrates|attention|hyped|stalk|nominat/i.test(src.replace(/\/\/.*$/gm, '')), 'social-stocktwits.js touches no authority');
+  assert.deepEqual(mentions.sort(), [], 'no rumor2 file names the official StockTwits surface after the social-official cut');
+  assert.ok(!tracked.includes('rumor2/social-stocktwits.js'), 'the official StockTwits foundation is retired to the attic');
+  assert.ok(!tracked.includes('rumor2/providers/stocktwits-official.js'), 'the official StockTwits adapter is retired to the attic');
   for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/social-stream.js']) assert.ok(!/social-stocktwits|STOCKTWITS/.test(read(f)), `${f} has no StockTwits wiring`);
 });
 
-test('R2A-SOCIAL-7 (SOCIAL-4E). the Meta / TikTok / Farcaster-access foundations are EXPLICIT filename allowlists — each module added deliberately, fixture-only, never fetching, never importing authority; no collector or runtime wires them', () => {
-  // EXPLICIT allowlists: the only rumor2 files whose CODE may name each platform (never a wildcard over social* files)
-  const META_ALLOWLIST = ['rumor2/providers/meta-graph-official.js', 'rumor2/social-current-clients.js', 'rumor2/social-current-runtime.js', 'rumor2/social-current-store.js', 'rumor2/social-meta.js', 'rumor2/social-registry.js'];
-  const TIKTOK_ALLOWLIST = ['rumor2/providers/tiktok-research-official.js', 'rumor2/social-tiktok.js', 'rumor2/social-registry.js'];
+test('R2A-SOCIAL-7 (SOCIAL-4E). the Meta and TikTok foundations are retired to the attic (LEAN PASS 4a); the surviving Farcaster-access foundation is an EXPLICIT filename allowlist — fixture-only, never fetching, never importing authority; no collector or runtime wires it', () => {
+  // Meta / TikTok are fully removed from the rumor2 layer; their exclusion doctrine is preserved in attic/doctrine/SOCIAL.md
+  assert.deepEqual(rumor2Files.filter((f) => /facebook|instagram/i.test(code(f))).sort(), [], 'no rumor2 file names Facebook/Instagram after the Meta cut');
+  assert.deepEqual(rumor2Files.filter((f) => /tiktok/i.test(code(f))).sort(), [], 'no rumor2 file names TikTok after the TikTok cut');
+  assert.ok(!tracked.includes('rumor2/social-meta.js') && !tracked.includes('rumor2/social-tiktok.js'), 'the Meta / TikTok foundations are retired to the attic');
+  // Farcaster-access stays; the Neynar name is confined to an explicit allowlist
   const NEYNAR_ALLOWLIST = ['rumor2/providers/farcaster-client.js', 'rumor2/social-farcaster-runtime.js', 'rumor2/providers/farcaster-official.js', 'rumor2/social-farcaster-access.js', 'rumor2/social-registry.js'];
-  assert.deepEqual(rumor2Files.filter((f) => /facebook|instagram/i.test(code(f))).sort(), [...META_ALLOWLIST].sort(), `Facebook/Instagram may only be named in ${META_ALLOWLIST.join(', ')}`);
-  assert.deepEqual(rumor2Files.filter((f) => /tiktok/i.test(code(f))).sort(), [...TIKTOK_ALLOWLIST].sort(), `TikTok may only be named in ${TIKTOK_ALLOWLIST.join(', ')}`);
   assert.deepEqual(rumor2Files.filter((f) => /neynar/i.test(code(f))).sort(), [...NEYNAR_ALLOWLIST].sort(), `Neynar may only be named in ${NEYNAR_ALLOWLIST.join(', ')}`);
-  const MODULES = ['rumor2/social-foundation.js', 'rumor2/social-meta.js', 'rumor2/social-tiktok.js', 'rumor2/social-farcaster-access.js'];
+  const MODULES = ['rumor2/social-foundation.js', 'rumor2/social-farcaster-access.js'];
   for (const f of MODULES) {
     assert.ok(tracked.includes(f), `${f} is tracked (Git-index-aware)`);
     assert.ok(SOCIAL_FILE_RE.test(f), `${f} audited in the social tier, never as frozen core`);
@@ -237,8 +230,8 @@ test('R2A-SOCIAL-7 (SOCIAL-4E). the Meta / TikTok / Farcaster-access foundations
     assert.ok(!/ledger|cost\/|tape|strike|exec|socrates|attention|hyped|stalk|nominat/i.test(src.replace(/\/\/.*$/gm, '')), `${f} touches no authority`);
     assert.ok(!/reddit|stocktwits/i.test(code(f)), `${f} does not widen the Reddit/StockTwits allowlists`);
   }
-  for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/social-stream.js', 'rumor2/social-settle.js', 'rumor2/social.js']) assert.ok(!/social-(foundation|meta|tiktok|farcaster-access)|META_ROUTES|TIKTOK_ROUTES|evaluateFarcasterAccess/.test(read(f)), `${f} has no 4E wiring`);
-  assert.equal(socialProviderById('META_PUBLIC').durable, false); assert.equal(socialProviderById('TIKTOK_PUBLIC').durable, false); assert.equal(socialProviderById('FARCASTER_OFFICIAL').durable, false);
+  for (const f of ['rumor2/collector.js', 'rumor2/social-runtime.js', 'rumor2/x-runtime.js', 'rumor2/social-stream.js', 'rumor2/social-settle.js', 'rumor2/social.js']) assert.ok(!/social-(meta|tiktok|farcaster-access)|META_ROUTES|TIKTOK_ROUTES|evaluateFarcasterAccess/.test(read(f)), `${f} has no 4E wiring`);
+  assert.equal(socialProviderById('FARCASTER_OFFICIAL').durable, false);
 });
 
 test('R2A-SOCIAL-8 (SOCIAL-4F). the discovery-catalog / admission-scope / watch-plan modules are EXPLICIT allowlists: the survey tier is consumed only through the composition seam, the rumor tier never imports survey/tape/cost/ledger, no Social runtime reads config.universe, and no research module calls out or carries authority', () => {
@@ -333,7 +326,7 @@ test('R2A-SOCIAL-9 (SOCIAL-5). the research strainer modules are an EXPLICIT all
   // SOCIAL-7: the readiness matrix is a pure projection wired ONLY by the collector status (no file outside rumor2/test names it);
   // the ancestry / ablation seam re-derives in memory and never imports or touches a provider runtime, gate, budget or scope;
   // the research runtime refuses retention-prohibited records at its own seam (defense in depth under the existing law)
-  const readinessMentions = tracked.filter((f) => !f.startsWith('test/') && /social-readiness|readinessMatrix/.test(read(f)));
+  const readinessMentions = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && /social-readiness|readinessMatrix/.test(read(f)));
   assert.deepEqual(readinessMentions.sort(), ['rumor2/collector.js', 'rumor2/social-readiness.js'], 'readiness is wired only in the collector status');
   assert.ok(/socialReadiness: readinessMatrix\(\{ runtimes: \{ BLUESKY_OFFICIAL: /.test(read('rumor2/collector.js')), 'the collector projects readiness from its own live runtime statuses');
   for (const forbidden of ['x-runtime', 'social-runtime', 'x-stream', 'providers/', 'process.env', 'loadConfig', 'config.universe']) assert.ok(!read('rumor2/social-research-ancestry.js').includes(forbidden) && !read('rumor2/social-readiness.js').includes(forbidden), `${forbidden}: readiness / ancestry never reach a provider runtime, credential or config`);

@@ -129,12 +129,12 @@ test('PASS 10 — CRASH/RESTART: settlement is idempotent (durable PG restore is
 });
 
 test('PASS 11 — ACCESS FAILURE: providers report truthfully; there is no scraping fallback', () => {
-  // unavailable ears carry an honest state + reason, never a scrape path
-  assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_ENTITLEMENT_AND_TERMS_REVIEW'); assert.equal(socialProviderById('STOCKTWITS_OFFICIAL').access.liveStatus, 'DISABLED');
-  assert.equal(socialProviderById('TIKTOK_PUBLIC').accessState, 'NOT_AUTHORIZED');
+  // credential / approval-gated ears carry an honest state + reason, never a scrape path
+  assert.equal(socialProviderById('X_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_CREDENTIAL');
+  assert.equal(socialProviderById('REDDIT_OFFICIAL').accessState, 'AVAILABLE_REQUIRES_APPROVAL_AND_CLASSIFICATION'); assert.equal(socialProviderById('REDDIT_OFFICIAL').access.liveStatus, 'DISABLED');
   // Farcaster's live ear is dark without a credential — it does not fall back to scraping
   assert.equal(farcasterConfigured({}), false);
-  for (const id of ['STOCKTWITS_OFFICIAL', 'TIKTOK_PUBLIC', 'REDDIT_OFFICIAL', 'META_PUBLIC']) {
+  for (const id of ['BLUESKY_OFFICIAL', 'X_OFFICIAL', 'REDDIT_OFFICIAL', 'FARCASTER_OFFICIAL']) {
     assert.ok(socialProviderById(id).reason.length > 0, `${id} states why`);
   }
 });

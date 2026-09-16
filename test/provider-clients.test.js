@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRedditClient } from '../rumor2/providers/reddit-client.js';
-import { createYouTubeClient } from '../rumor2/providers/youtube-client.js';
 import { createFarcasterClient } from '../rumor2/providers/farcaster-client.js';
 
 const T = Date.parse('2026-09-12T10:00:01Z');
@@ -51,23 +50,6 @@ test('Reddit client distinguishes failed from empty and requires both access and
   assert.equal(out.durableItems[0].nativeAuthorId, 't2_fixture');
 });
 
-test('YouTube client spends search quota for every request, dedupes IDs, and paginates by page token', async () => {
-  const calls = [];
-  const item = (id) => ({ kind: 'youtube#searchResult', id: { kind: 'youtube#video', videoId: id }, snippet: { publishedAt: '2026-09-12T10:00:00Z', channelId: 'UCfixture', channelTitle: 'Fixture', title: 'BTC', description: '' } });
-  const fetch = async (url) => {
-    calls.push(url);
-    const page = new URL(url).searchParams.get('pageToken');
-    return response({ kind: 'youtube#searchListResponse', items: page ? [item('a'), item('b')] : [item('a')], ...(page ? {} : { nextPageToken: 'next' }) });
-  };
-  const client = createYouTubeClient({ fetch, apiKey: 'fixture-key', enabled: true, accessApproved: true, dailyRemainingUnits: 300, monthlyRemainingUnits: 300 });
-  const out = await client.poll({ watchlist: { ok: true, scopeId: 'b'.repeat(40), tickers: ['BTC'] }, maxPages: 2, nowMs: T });
-  assert.equal(out.status, 'OBSERVED');
-  assert.deepEqual(out.observations.map((o) => o.nativePostId), ['a', 'b']);
-  assert.equal(out.quotaUsed, 200);
-  assert.equal(calls.length, 2);
-  assert.equal((await createYouTubeClient({ fetch, apiKey: 'k', enabled: false, accessApproved: true, dailyRemainingUnits: 100, monthlyRemainingUnits: 100 }).poll({ watchlist: { ok: true, scopeId: 'b'.repeat(40), tickers: ['BTC'] }, nowMs: T })).status, 'FAILED');
-});
-
 test('Farcaster client requires Neynar key, maps search casts, and returns a cursor checkpoint', async () => {
   let seenInit;
   const fetch = async (url, init) => {
@@ -89,8 +71,8 @@ test('clients turn injected abort/timeout into a failed outcome', async () => {
   const fetch = (_url, { signal }) => new Promise((resolve, reject) => {
     signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
   });
-  const client = createYouTubeClient({ fetch, apiKey: 'k', enabled: true, accessApproved: true, dailyRemainingUnits: 100, monthlyRemainingUnits: 100, timeoutMs: 5 });
-  const out = await client.poll({ watchlist: { ok: true, scopeId: 'b'.repeat(40), tickers: ['BTC'] }, nowMs: T });
+  const client = createFarcasterClient({ fetch, apiKey: 'k', accessApproved: true, retentionApproved: true, timeoutMs: 5 });
+  const out = await client.poll({ q: 'BTC', nowMs: T });
   assert.equal(out.status, 'FAILED');
   assert.equal(out.error, 'TIMEOUT');
 });

@@ -27,15 +27,12 @@ export const SCOPE = Object.freeze([
   R('M18', 'Santiment metrics / history', ['SANTIMENT']),
   R('M19', 'Twelve Data cross-asset / history', ['TWELVEDATA']),
   R('M20', 'Tokenomist unlock events', ['TOKENOMIST']),
-  // SOCIAL — 10
+  // SOCIAL — 5 (LEAN PASS 4a retired the official StockTwits route S04, TikTok S06 and the Meta / Facebook + Instagram routes S07/S08;
+  // the surviving social senses are Bluesky, X, the legacy StockTwits RUMINT aggregate, Reddit and Farcaster. S-ids are stable, not renumbered.)
   R('S01', 'Bluesky Jetstream', ['BLUESKY_OFFICIAL']),
   R('S02', 'X / Twitter configured collection', ['X_OFFICIAL']),
   R('S03', 'Legacy StockTwits aggregate route', ['RUMINT_STOCKTWITS_AGGREGATE']),
-  R('S04', 'Official / raw StockTwits route (separate entitlement)', ['STOCKTWITS_OFFICIAL']),
   R('S05', 'Reddit', ['REDDIT_OFFICIAL']),
-  R('S06', 'TikTok', ['TIKTOK_PUBLIC', 'TIKTOK_REALTIME_TRANSPORT']),
-  R('S07', 'Meta / Facebook', ['META_PUBLIC', 'META_REALTIME_TRANSPORT'], 'FACEBOOK namespace of rumor2/social-meta.js'),
-  R('S08', 'Meta / Instagram', ['META_PUBLIC', 'META_REALTIME_TRANSPORT'], 'INSTAGRAM namespace of rumor2/social-meta.js (documented routes M3-M6M; hashtag search needs App Review)'),
   R('S09', 'Farcaster / Neynar', ['FARCASTER_OFFICIAL', 'FARCASTER_LIVE_TRANSPORT']),
   // OFFICIAL AND NEWS — 6
   R('N01', 'Kraken official announcements / news', ['KRAKEN_OFFICIAL']),

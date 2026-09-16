@@ -128,17 +128,13 @@ export async function runPreflight({ profileFile = process.env.COBRA_PROFILE ?? 
   // ---- E. SOCIAL -------------------------------------------------------------------------------------------------------------------
   // the social readiness projection is the collector's OWN (published in its status record); the preflight reads it, never recomputes it
   const matrix = readJsonBounded(path.join(dataDir, 'rumor2', 'status.json'))?.socialReadiness ?? null; const xState = xGovernorState(env);
-  const socialRows = ['BLUESKY_OFFICIAL', 'X_OFFICIAL', 'FARCASTER_OFFICIAL', 'REDDIT_OFFICIAL', 'STOCKTWITS_OFFICIAL', 'META_PUBLIC', 'TIKTOK_PUBLIC', 'YOUTUBE_OFFICIAL', 'YOUTUBE_DATA_API'].map((id) => { const r = row(id); const m = (Array.isArray(matrix?.providers) ? matrix.providers : []).find((p) => p.provider === id) ?? null; return { ...r, matrixReadiness: m?.readiness ?? null, matrixBlockers: m?.blockers ?? [], ...(id === 'X_OFFICIAL' ? { governor: xState, governorDetail: xState === 'READY_REQUIRES_EXPLICIT_PAID_SMOKE' ? 'credential + budgets present; an EXPLICIT paid smoke envelope is still the law before the stream connects' : xState } : {}) }; });
+  const socialRows = ['BLUESKY_OFFICIAL', 'X_OFFICIAL', 'FARCASTER_OFFICIAL', 'REDDIT_OFFICIAL'].map((id) => { const r = row(id); const m = (Array.isArray(matrix?.providers) ? matrix.providers : []).find((p) => p.provider === id) ?? null; return { ...r, matrixReadiness: m?.readiness ?? null, matrixBlockers: m?.blockers ?? [], ...(id === 'X_OFFICIAL' ? { governor: xState, governorDetail: xState === 'READY_REQUIRES_EXPLICIT_PAID_SMOKE' ? 'credential + budgets present; an EXPLICIT paid smoke envelope is still the law before the stream connects' : xState } : {}) }; });
   sections.E_SOCIAL = { blueskyRequested: eff.RUMOR2_SOCIAL_BLUESKY_ENABLED === 'true', providers: socialRows, matrixVersion: matrix?.version ?? null, matrixSource: matrix ? 'collector status (published projection)' : 'NOT_OBSERVED (the collector has not published its readiness projection yet)' };
   block('PAID_SENSE_NOT_AUTHORIZED', 'X_OFFICIAL', `X NOT OPERATIONAL: ${xState}`, xState === 'CREDENTIAL_MISSING' ? 'set X_BEARER_TOKEN + the three RUMOR2_SOCIAL_X_MAX_* budgets, then an explicit paid smoke envelope' : xState === 'BUDGET_NOT_CONFIGURED' ? 'set RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS / _MONTHLY_POST_READS / _ESTIMATED_DAILY_USD' : 'run the explicit paid smoke (RUMOR2_SOCIAL_X_LIVE_SMOKE_*)');
   for (const r of socialRows) if (['FOUNDATION_ONLY', 'BLOCKED_RETENTION', 'BLOCKED_TERMS', 'BLOCKED_EXTERNAL_APPROVAL'].includes(r.state)) block('EXTERNAL_OPTIONAL_SENSE_BLOCKER', r.id, `${r.state}: ${r.blocker}`);
   // The optional source families are intentionally reported from their
   // durable sensor rows as well; a social-only line must not imply that
-  // YouTube, infrastructure, or publisher news was observed.
-  const sensor = (id) => snap.rows.find((x) => x.id === id) ?? null;
-  sections.E_SOCIAL.youtube = sensor('YOUTUBE_DATA_API');
-  sections.E_SOCIAL.youtubeOfficial = sensor('YOUTUBE_OFFICIAL');
-  sections.E_SOCIAL.meta = sensor('META_PUBLIC');
+  // infrastructure or publisher news was observed.
   sections.D_RUMOR_OFFICIAL.infrastructure = snap.rows.filter((x) => x.group === 'INFRASTRUCTURE');
   sections.D_RUMOR_OFFICIAL.press = snap.rows.filter((x) => x.group === 'PUBLISHER_NEWS');
   // ---- F. MARKET RESEARCH -----------------------------------------------------------------------------------------------------
@@ -202,7 +198,6 @@ export function renderPreflight(r) {
   line(`D. OFFICIAL  rumor2 ${s.D_RUMOR_OFFICIAL.rumor2Enabled ? 'requested' : 'off'} · ${s.D_RUMOR_OFFICIAL.providers.map((p) => `${p.id} ${p.state}`).join(' · ')} · legacy ${s.D_RUMOR_OFFICIAL.legacyRumint.state}`);
   line(`E. SOCIAL    ${s.E_SOCIAL.providers.map((p) => `${p.id} ${p.state ?? 'NOT_OBSERVED'}${p.governor ? ` [${p.governor}]` : ''}`).join(' · ')}`);
   const infraRows = s.D_RUMOR_OFFICIAL.infrastructure ?? []; const pressRows = s.D_RUMOR_OFFICIAL.press ?? [];
-  line(`E2. YOUTUBE  official ${s.E_SOCIAL.youtubeOfficial?.state ?? 'NOT_OBSERVED'} · video ${s.E_SOCIAL.youtube?.state ?? 'NOT_OBSERVED'}${s.E_SOCIAL.youtube?.coverage ? ` (${s.E_SOCIAL.youtube.coverage})` : ''}`);
   line(`E3. INFRA    ${infraRows.length ? infraRows.map((p) => `${p.id} ${p.state ?? 'NOT_OBSERVED'}`).join(' · ') : 'NOT_OBSERVED'}`);
   line(`E4. PRESS    ${pressRows.length ? pressRows.map((p) => `${p.id} ${p.state ?? 'NOT_OBSERVED'}`).join(' · ') : 'NOT_OBSERVED'}`);
   const smokeText = (sp) => { if (!sp) return ''; const st = sp.state ?? sp.ok ?? '?'; const why = sp.reason ? ` ${sp.reason}` : ''; const n = sp.count === null || sp.count === undefined ? '' : ` ${sp.count} record${sp.count === 1 ? '' : 's'}${sp.count === 0 ? ' (successful empty response)' : ''}`; return ` [smoke ${st}${why}${n}]`; };

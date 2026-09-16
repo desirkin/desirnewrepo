@@ -61,14 +61,14 @@ test('S6-I1..I4 IDENTITY. the same visible handle on X and Bluesky => two provid
 test('S6-R1..R4 RETENTION. capability derives from the registry only: retention-prohibited providers append no durable profile; fixture-only / not-operational providers invent no live history; the legacy aggregate path stays aggregate-only; an unknown provider is ACCESS_UNRESOLVED; a later capability change does not retroactively create old content', () => {
   assert.deepEqual(SOURCE_RETENTION_STATES, ['DURABLE_PROFILE_ALLOWED', 'AGGREGATE_ONLY_ALLOWED', 'TRANSIENT_ONLY', 'RETENTION_PROHIBITED', 'ACCESS_UNRESOLVED', 'PROVIDER_NOT_OPERATIONAL']);
   assert.equal(retentionCapability('BLUESKY_OFFICIAL').state, 'DURABLE_PROFILE_ALLOWED'); assert.equal(retentionCapability('X_OFFICIAL').state, 'DURABLE_PROFILE_ALLOWED');
-  assert.equal(retentionCapability('REDDIT_OFFICIAL').state, 'RETENTION_PROHIBITED'); assert.equal(retentionCapability('STOCKTWITS_OFFICIAL').state, 'RETENTION_PROHIBITED');
-  for (const p of ['FARCASTER_OFFICIAL', 'META_PUBLIC', 'TIKTOK_PUBLIC']) assert.equal(retentionCapability(p).state, 'PROVIDER_NOT_OPERATIONAL', p);
+  assert.equal(retentionCapability('REDDIT_OFFICIAL').state, 'RETENTION_PROHIBITED');
+  for (const p of ['FARCASTER_OFFICIAL']) assert.equal(retentionCapability(p).state, 'PROVIDER_NOT_OPERATIONAL', p);
   assert.equal(retentionCapability(SOURCE_PROFILE_LEGACY_AGGREGATE_PROVIDER).state, 'AGGREGATE_ONLY_ALLOWED'); assert.equal(retentionCapability('NEW_PLATFORM').state, 'ACCESS_UNRESOLVED'); assert.equal(retentionCapability(null).state, 'ACCESS_UNRESOLVED');
   for (const p of SOCIAL_PROVIDERS) { const c = retentionCapability(p.id); if (p.retentionProhibited) assert.equal(c.state, 'RETENTION_PROHIBITED'); if (!p.durable) assert.notEqual(c.state, 'DURABLE_PROFILE_ALLOWED', `${p.id} never profiles durably without a durable ear`); }
   // S6-R1/R2: a record carrying a prohibited / non-operational provider never creates a profile (even if such a record were somehow presented)
   const idx = createSourceProfileIndex(); const b = obsEvent({ id: 'r1', text: '$LINK', nowMs: T0 + 1000 });
-  idx.observe({ ...b, provider: 'REDDIT_OFFICIAL', sourceEventId: 'r2sv-' + 'e'.repeat(40) }); idx.observe({ ...b, provider: 'FARCASTER_OFFICIAL', sourceEventId: 'r2sv-' + 'f'.repeat(40) }); idx.observe({ ...b, provider: 'STOCKTWITS_OFFICIAL', sourceEventId: 'r2sv-' + '1'.repeat(40) });
-  assert.equal(idx.status().profiles, 0); assert.equal(idx.status().refusedRetention, 3);
+  idx.observe({ ...b, provider: 'REDDIT_OFFICIAL', sourceEventId: 'r2sv-' + 'e'.repeat(40) }); idx.observe({ ...b, provider: 'FARCASTER_OFFICIAL', sourceEventId: 'r2sv-' + 'f'.repeat(40) });
+  assert.equal(idx.status().profiles, 0); assert.equal(idx.status().refusedRetention, 2);
   // S6-R4: the durable Bluesky record profiles; the earlier refused records do not appear later as history
   idx.observe(b); const p = idx.profile(idOf('BLUESKY_OFFICIAL', 'did:plc:a'), { asOfTs: T0 + 2000 }); assert.equal(p.coverage.observationCount, 1); assert.equal(p.retentionState, 'DURABLE_PROFILE_ALLOWED'); assert.equal(p.coverage.firstObservedKnownAtTs, T0 + 1000);
 });
