@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,4 +24,11 @@ test('ATTIC-2. attic/ documents itself and stays outside the test glob', () => {
   assert.ok(existsSync(path.join(ROOT, 'attic', 'README.md')), 'attic/README.md names what was retired and why');
   const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   assert.match(pkg.scripts.test, /^node --test 'test\/\*\*\/\*\.test\.js' 'test\/\*\*\/\*\.test\.mjs'$/, 'npm test runs test/ only — attic/test is never executed');
+});
+
+test('ATTIC-3. attic/README.md indexes every top-level entry under attic/ (B-7)', () => {
+  const readme = readFileSync(path.join(ROOT, 'attic', 'README.md'), 'utf8');
+  const entries = readdirSync(path.join(ROOT, 'attic')).filter((e) => e !== 'README.md');
+  const missing = entries.filter((e) => !readme.includes(`${e}/`));
+  assert.deepEqual(missing, [], 'every retired top-level dir must have a line in attic/README.md naming what it is and why');
 });

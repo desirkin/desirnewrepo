@@ -30,3 +30,16 @@ Law (lean trim, 2026-09-14, approved by David):
   (`composeDataOnlySocialConfig`), orphaned by LEAN PASS 4a (B-5 orphan sweep, 2026-09-16). Proven fully dead by the
   import graph: zero importers of any kind — no runtime root, no test, no sibling — its only remaining trace is the
   data-only fence asserting the entry does NOT compose it. The live data-only social path is gone; nothing replaced it.
+- `market-lab/providers/` (+ `market-lab/test/`) — retired market-data provider modules and their tests. `twelvedata.js`
+  (+ the CROSS_ASSET family / PER_SYMBOL credit path) from the market-lab providers cut; `fred.js` + `coinmetrics.js`
+  from SENSE-CULL-2; `deribit.js`, `bybit.js`, `binance.js` (Binance-global) and `santiment.js` from SENSE-CULL-3. The
+  LIVE research owner `market-lab/` stays in the tree and is what fly.js composes — only these retired providers moved.
+- `senses/` — the LEAN PASS 4a observation tiers that the sense set no longer runs: `discovery/`
+  (GDELT / Polymarket / Kalshi), `gateway-infrastructure/` (Cloudflare Radar), `governance/`, `infra/`, `press/`
+  (the licensed news-aggregator machinery), `social/` (Meta / TikTok / StockTwits official), `video/` (YouTube), and
+  their `senses/test/`. Retired as observation narrowed to the kept market + social providers.
+- `doctrine/` — retired doctrine kept for history: `GOVERNANCE.md` (the retired governance tier) and `SOCIAL.md` (the
+  Meta / TikTok social-exclusion doctrine the rumor2-authority fence still points at for its exclusion rationale).
+- `docs/` — superseded working docs kept for history (ADAPTIVE-PREMERGE-CHECKPOINT, ADDENDUM-2-INTEGRATION-MAP,
+  CURRENT-REVIEW-INTEGRATION-GATE, FOUR-VCPU-PERFORMANCE, JUDGE-CLOSEOUT-ACCEPTANCE, MARKET-SOCRATES-ACCEPTANCE,
+  REPLIT-PULL-AND-START) — one-time acceptance / checkpoint / integration notes, replaced by the current `docs/serpent/`.

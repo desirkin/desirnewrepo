@@ -61,11 +61,14 @@ driver and asserts every emitted line is prefix-free and that, once wrapped, eac
 `[PHASE <iso>]` prefix (a fake-DB boot repro of the corrected format; no local PG needed). No test pinned the old
 `[boot …]` bracket. Full suite green + gate 0.
 
-## B-7. attic/README.md index
-**Do:** write `attic/README.md` listing what is in the attic and why — one line each
-(module/dir → the ticket/law that retired it).
-**Acceptance:** every top-level entry under `attic/` appears in the index with a reason;
-a small fence asserts the index covers the attic's top-level entries; full suite green.
+## B-7. DONE — 2026-09-16: attic/README.md indexes every top-level entry; fence ATTIC-3 enforces it.
+Added Contents lines for the previously-unindexed top-level dirs — `docs/` (superseded acceptance/checkpoint notes),
+`doctrine/` (retired GOVERNANCE + Meta/TikTok SOCIAL doctrine), `senses/` (the LEAN PASS 4a observation tiers:
+discovery / gateway-infrastructure / governance / infra / press / social / video), and a truthful `market-lab/providers/`
+line (the retired twelvedata/fred/coinmetrics/deribit/bybit/binance/santiment provider modules, distinct from the LIVE
+market-lab/ owner) — each naming what it is and the ticket/law that retired it. `test/attic-fence.test.js` ATTIC-3
+reads `attic/`'s top-level entries and asserts each appears in the README, so a future retirement without an index line
+fails the fence. Full suite green + gate 0.
 
 ## B-8. Env-var audit
 **Do:** cross-check environment variable NAMES referenced in docs against those read by
