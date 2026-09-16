@@ -17,8 +17,6 @@ import { startRumint } from './rumint/poller.js';
 import { startGateway, readGatewayLatency } from './gateway/collector.js';
 import { effectiveFillLatencyMs } from './lib/paper-fill-latency.js';
 import { startPress } from './press/collector.js';
-import { startVideo } from './video/collector.js';
-import { readVideoObservations } from './video/reader.js';
 import { startWideEye } from './survey/wideeye.js';
 import { startGovernance } from './governance/collector.js';
 import { startRumor2 } from './rumor2/collector.js';
@@ -115,9 +113,6 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // zero timers unless PRESS_ENABLED says true (the paper profile derives it); JSONL observations + a status file only;
   // nothing downstream reads it for a decision. Authority NONE. (LEAN PASS 4a: the INFRA observation tier is retired.)
   try { startPress(); } catch { console.error('[press] startup withheld: observation storage requires review'); }
-  // VIDEO (YouTube public metadata, video/): the same dark pattern — zero requests unless SOCIAL_VIDEO_ENABLED says true AND the
-  // closed gate holds (key + the operator's own queries + an explicit daily search budget); never a RUMOR-2 social event.
-  try { startVideo(); } catch { console.error('[video] startup withheld: observation storage requires review'); }
   // SOCIAL-4F: the wide eye's handle is RETAINED so its detached read-only catalog snapshot can
   // be injected into the RUMOR collector below (Social never starts the wide eye itself).
   const wideEye = startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
@@ -309,8 +304,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   const { setCurrentSocialSource } = await import('./ui/server.js');
   setCurrentSocialSource(() => {
     const current = rumor2Handle?.currentSocial() ?? { authority: 'NONE', retention: 'RAM_ONLY_MAX_5_MINUTES', observations: [] };
-    const videos = readVideoObservations(dataDir(), { sinceReceiptTs: Date.now() - 300000, limit: 50 });
-    return { ...current, videos: videos.observations, videoCoverage: 'CURRENT_METADATA_ONLY' };
+    return { ...current };
   });
   serpentRuntime.markActive();
 

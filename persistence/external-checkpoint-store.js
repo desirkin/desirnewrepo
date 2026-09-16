@@ -14,7 +14,6 @@ export const EXTERNAL_CHECKPOINT_IDS = Object.freeze({
   // deployment's v1 rows fail COMMISSIONING_CHECKPOINT_INVALID on this build. v2 commissions fresh; the v1 rows stay,
   // untouched, under their own id. The other namespaces' shapes are unchanged, so they keep v1.
   DISCOVERY: 'external_quota:discovery:v2',
-  YOUTUBE: 'external_quota:youtube:v1',
   MARKET: 'external_quota:market:v1',
 });
 

@@ -28,8 +28,8 @@ const persistence = () => { const db = new FakeDb(); const repo = new FakeRepo()
 
 test('external checkpoint restore never treats absence as zero and one missing source does not poison another', async () => {
   const p = persistence(); const store = await openExternalCheckpointStore({ persistence: p });
-  await assert.rejects(() => store.restore({ id: EXTERNAL_CHECKPOINT_IDS.YOUTUBE, validate: validator }), /CHECKPOINT_ABSENT/);
-  assert.equal(store.failed(EXTERNAL_CHECKPOINT_IDS.YOUTUBE).code, 'CHECKPOINT_ABSENT');
+  await assert.rejects(() => store.restore({ id: EXTERNAL_CHECKPOINT_IDS.MARKET, validate: validator }), /CHECKPOINT_ABSENT/);
+  assert.equal(store.failed(EXTERNAL_CHECKPOINT_IDS.MARKET).code, 'CHECKPOINT_ABSENT');
   const budget = await store.restore({ id: EXTERNAL_CHECKPOINT_IDS.DATA_ONLY, validate: validator, commission: { allowCreate: true, state: { used: 0 }, reason: 'first request owner before any dispatch', ts: 123 } });
   assert.deepEqual(budget.snapshot(), { used: 0 });
   const row = p.repo.rows.get(EXTERNAL_CHECKPOINT_IDS.DATA_ONLY).state;

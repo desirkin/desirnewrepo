@@ -73,25 +73,19 @@ test('outer market funnel subscribes the complete accepted catalog independently
   assert.ok(source.indexOf('await wideEye._refreshCatalog()') < source.indexOf('await startBroadKraken('));
   assert.ok(source.indexOf('await openDataOnlyCheckpoints(') < source.indexOf('await startBroadKraken('));
   assert.doesNotMatch(source, /\b(?:BTC|ETH|SOL)\b|composeDataOnlySocialConfig/);
-  const broad = source.slice(source.indexOf('if (catalogSource)'), source.indexOf('// The source owns its key/query/quota gates'));
+  const broad = source.slice(source.indexOf('if (catalogSource)'), source.indexOf('  if (catalog) {'));
   assert.match(broad, /startBroadKraken/);
   assert.doesNotMatch(broad, /checkpoints\?\.market|if \(catalog\)/);
   assert.match(source, /if \(!checkpoints\?\.market\) throw/, 'deep REST quota gate is preserved');
 });
 
-test('data-only deployment composes the existing YouTube collector behind explicit fail-closed gates and durable status', () => {
+test('LEAN PASS 4a: the data-only deployment no longer composes a YouTube / social-video collector', () => {
   const source = entryAndSpine();
   const supervisor = readFileSync(path.join(root, 'tools', 'data-only-with-ui.mjs'), 'utf8');
   for (const text of [source, supervisor]) {
-    assert.match(text, /SOCIAL_VIDEO_ENABLED:\s*process\.env\.SOCIAL_VIDEO_ENABLED === 'true' \? 'true' : 'false'/);
-    assert.doesNotMatch(text, /SOCIAL_VIDEO_ENABLED:\s*'true'/, 'the launcher must not invent YouTube authorization');
+    assert.doesNotMatch(text, /SOCIAL_VIDEO_ENABLED/, 'the retired social-video tier leaves no env behind');
   }
-  assert.match(source, /from '\.\.\/video\/collector\.js'/);
-  assert.match(source, /from '\.\.\/video\/reader\.js'/);
-  assert.match(source, /startVideo\(\{ env, dataDir: root, log, signals: false, durableCheckpoint: checkpoints\?\.video \?\? null \}\)/);
-  assert.match(source, /blockers\.YOUTUBE/);
-  assert.match(source, /youtube:\s*video \? readVideoStatus\(root\)/);
-  assert.match(source, /handles\.push\(video\)/, 'normal shutdown must stop the YouTube handle');
+  assert.doesNotMatch(source, /video\/collector\.js|video\/reader\.js|startVideo|readVideoStatus|blockers\.YOUTUBE/, 'no video collector is imported or composed');
 });
 
 test('data-only news uses official feeds plus bounded GDELT metadata and withholds unverified publisher text', () => {

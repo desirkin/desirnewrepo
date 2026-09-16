@@ -19,7 +19,7 @@ function fakes({ restored = true } = {}) {
   const stops = [];
   const rec = (name, options) => { calls.push({ name, options }); };
   const handle = (name, extra = {}) => ({ stop: async () => { stops.push(name); }, status: () => ({ state: 'OK', name }), ...extra });
-  const checkpoints = { blockers: {}, budget: { id: 'budget' }, market: { id: 'market' }, video: { id: 'video' }, discovery: { id: 'discovery' }, status: () => ({ state: 'RESTORED' }), close: async () => { stops.push('checkpoints'); } };
+  const checkpoints = { blockers: {}, budget: { id: 'budget' }, market: { id: 'market' }, discovery: { id: 'discovery' }, status: () => ({ state: 'RESTORED' }), close: async () => { stops.push('checkpoints'); } };
   const governor = { fetch: async () => { throw new Error('offline'); }, status: () => ({ state: 'ACTIVE', estimatedMonthUsd: 0, lanes: { KRAKEN_STATUS: 1, COINBASE_STATUS: 2, OKX_STATUS: 3 } }) };
   const wideEye = handle('wideEye', {
     _refreshCatalog: async () => { calls.push({ name: '_refreshCatalog' }); },
@@ -35,7 +35,6 @@ function fakes({ restored = true } = {}) {
     startDataOnlyMarket: async (options) => { rec('startDataOnlyMarket', options); return handle('market'); },
     startWideEye: (options) => { rec('startWideEye', options); return wideEye; },
     startBroadKraken: async (options) => { rec('startBroadKraken', options); return handle('broadMarket'); },
-    startVideo: (options) => { rec('startVideo', options); return handle('video', { gate: () => ({ ok: true }) }); },
     startPublicDiscovery: (options) => { rec('startPublicDiscovery', options); return handle('discovery'); },
     startGateway: (options) => { rec('startGateway', options); return handle('gateway'); },
     startRumor2: (options) => { rec('startRumor2', options); return handle('rumor2', { tickOnce: async () => { calls.push({ name: 'tickOnce' }); }, status: () => null }); },
@@ -55,7 +54,7 @@ test('RC-1. DATA_ONLY composes the starters in the published order with the publ
     const rt = await startDataOnlyRuntime({ root, env: ENV, config: CONFIG, log, signals: false, quotaStarters: f.quotaStarters, collectorStarters: f.collectorStarters });
     assert.deepEqual(f.calls.map((c) => c.name), [
       'startPersistence', 'openDataOnlyCheckpoints', 'createDataOnlyFetch',
-      'startDataOnlyMarket', 'startWideEye', '_refreshCatalog', '_sweepOnce', 'startBroadKraken', 'startVideo', 'startPublicDiscovery', 'startGateway', 'startRumor2', 'tickOnce',
+      'startDataOnlyMarket', 'startWideEye', '_refreshCatalog', '_sweepOnce', 'startBroadKraken', 'startPublicDiscovery', 'startGateway', 'startRumor2', 'tickOnce',
     ]);
     const opt = (name) => f.calls.find((c) => c.name === name).options;
     assert.deepEqual(opt('startPersistence'), { log: opt('startPersistence').log, registerSignals: false });
@@ -66,9 +65,9 @@ test('RC-1. DATA_ONLY composes the starters in the published order with the publ
     assert.equal(we.config, CONFIG); assert.equal(we.fetchImpl, f.governor.fetch); assert.equal(we.registerSignals, false); assert.equal(we.nominationEnabled, false); assert.deepEqual([...we.deepCoinsSource()], []);
     const broad = opt('startBroadKraken');
     assert.equal(broad.dataDir, root); assert.deepEqual(broad.catalogSource.snapshot(), { catalog: CATALOG });
-    // LEAN PASS 4a: the infra observation tier is retired — startInfra is no longer composed.
+    // LEAN PASS 4a: the infra observation tier and the social-video (YouTube) tier are retired — neither is composed.
     assert.equal(f.calls.find((c) => c.name === 'startInfra'), undefined);
-    assert.deepEqual(opt('startVideo'), { env: ENV, dataDir: root, log: opt('startVideo').log, signals: false, durableCheckpoint: f.checkpoints.video });
+    assert.equal(f.calls.find((c) => c.name === 'startVideo'), undefined);
     const disc = opt('startPublicDiscovery');
     assert.equal(disc.durableCheckpoint, f.checkpoints.discovery); assert.equal(disc.signals, false); assert.equal(disc.catalogSource, broad.catalogSource);
     assert.deepEqual(disc.env, { ...ENV, DISCOVERY_ENABLED: 'true', DISCOVERY_SOURCES: 'GDELT_NEWS_DISCOVERY,POLYMARKET_PUBLIC_DATA,KALSHI_PUBLIC_DATA', DISCOVERY_GDELT_MAX_DAILY_REQUESTS: '16', DISCOVERY_GDELT_RESULT_LIMIT: '50', DISCOVERY_GDELT_ASSETS_PER_QUERY: '12', DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS: '48', DISCOVERY_KALSHI_MAX_DAILY_REQUESTS: '48', DISCOVERY_POLYMARKET_PAGE_LIMIT: '100', DISCOVERY_KALSHI_PAGE_LIMIT: '1000' });
@@ -94,7 +93,7 @@ test('RC-1. DATA_ONLY composes the starters in the published order with the publ
     assert.match(phases.at(-1), /^active with 3 equally eligible Kraken catalog markets/);
 
     await rt.shutdown('TEST');
-    assert.deepEqual(f.stops, ['rumor2', 'gateway', 'discovery', 'video', 'broadMarket', 'wideEye', 'market', 'checkpoints', 'persistence'], 'collectors stop in reverse start order, then the checkpoints close, then persistence stops');
+    assert.deepEqual(f.stops, ['rumor2', 'gateway', 'discovery', 'broadMarket', 'wideEye', 'market', 'checkpoints', 'persistence'], 'collectors stop in reverse start order, then the checkpoints close, then persistence stops');
     const stopped = statusOf(root);
     assert.equal(stopped.lifecycle, 'STOPPED'); assert.equal(stopped.running, false);
     assert.equal(existsSync(path.join(root, 'data-only', 'runtime.lock')), false, 'the lock is released');
@@ -131,10 +130,9 @@ test('RC-3. durable restore unavailable → fail closed: no quota-bearing collec
     assert.deepEqual(f.calls.map((c) => c.name), ['startPersistence', 'startWideEye', '_refreshCatalog', '_sweepOnce', 'startBroadKraken', 'startGateway'], 'no checkpoints → no market catalogs, no YouTube (enabled without a quota), no discovery, no RUMOR-2; the free public collectors still run');
     const status = statusOf(root);
     assert.equal(status.blockers.PERSISTENCE, 'PERSISTENCE_RESTORE_FAILED'); assert.equal(status.blockers.BUDGET, 'DATA_ONLY_QUOTA_NOT_RESTORED'); assert.equal(status.blockers.MARKET, 'MARKET_QUOTA_NOT_RESTORED');
-    assert.equal(status.blockers.YOUTUBE, 'YOUTUBE_QUOTA_NOT_RESTORED'); assert.equal(status.blockers.PUBLIC_DISCOVERY, 'DISCOVERY_QUOTA_NOT_RESTORED'); assert.match(status.blockers.RUMOR2, /durable PostgreSQL restore or quota ownership unavailable/);
+    assert.equal(status.blockers.YOUTUBE, undefined, 'LEAN PASS 4a: no YouTube collector, no YOUTUBE blocker'); assert.equal(status.blockers.PUBLIC_DISCOVERY, 'DISCOVERY_QUOTA_NOT_RESTORED'); assert.match(status.blockers.RUMOR2, /durable PostgreSQL restore or quota ownership unavailable/);
     assert.equal(status.budget.state, 'DURABILITY_BLOCKED'); assert.deepEqual(status.collectors.quotaPersistence, { state: 'DURABILITY_BLOCKED' });
     assert.deepEqual(status.collectors.market, { state: 'BLOCKED', authority: 'NONE', reason: 'MARKET_QUOTA_NOT_RESTORED' });
-    assert.equal(status.collectors.youtube.state, 'WITHHELD');
     await rt.shutdown('TEST');
     assert.deepEqual(f.stops, ['gateway', 'broadMarket', 'wideEye', 'persistence'], 'the started persistence handle is still stopped even though its restore failed');
   } finally { rmSync(root, { recursive: true, force: true }); }

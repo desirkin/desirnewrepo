@@ -82,10 +82,8 @@ export function profileEnvironment(profile, { dataDir = null } = {}) {
     WIDEEYE_ENABLED: on(g.coreObservation.wideEye) ? 'true' : 'false', GATEWAY_ENABLED: on(g.infrastructure.gateway) ? 'true' : 'false', RUMINT_ENABLED: on(g.rumorOfficial.rumintLegacy) ? 'true' : 'false',
     // PUBLISHER observation tier (press/): the profile selects publisher feeds by id; ON rows are watched, OFF / licensed rows
     // never called. Headline / link only, authority NONE, outside the frozen RUMOR-2 evidence core.
+    // PRESS is the last dark observation tier the profile derives (LEAN PASS 4a retired the INFRA and social-VIDEO tiers).
     PRESS_ENABLED: Object.values(g.publisherNews).some(on) ? 'true' : 'false', PRESS_SOURCES: Object.entries(g.publisherNews).filter(([, r]) => on(r)).map(([id]) => id).join(','),
-    // SOCIAL VIDEO (video/): REQUESTED like X — the collector's own closed gate decides (key + own queries + explicit daily
-    // search budget); the enable flag alone never spends a request. (LEAN PASS 4a: the INFRA observation tier is retired.)
-    SOCIAL_VIDEO_ENABLED: g.social.YOUTUBE_DATA_API?.desiredState === 'REQUEST' || on(g.social.YOUTUBE_DATA_API) ? 'true' : 'false',
   };
   if (dataDir) env.COBRA_DATA_DIR = dataDir;
   if (typeof g.judge.judge.accountId !== 'string' || !g.judge.judge.accountId.length) delete env.JUDGE_ACCOUNT;

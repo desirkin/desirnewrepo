@@ -30,9 +30,6 @@ Object.assign(process.env, {
   RUMOR2_SOCIAL_FARCASTER_INTERVAL_SEC: '900',
   RUMOR2_SOCIAL_FARCASTER_ASSETS_PER_QUERY: '6',
   RUMOR2_SOCIAL_CURRENT_ENABLED: 'false',
-  // YouTube is opt-in even in DATA-ONLY mode. Preserve only an exact explicit
-  // enable; absent, malformed, or differently-cased values stay fail-closed.
-  SOCIAL_VIDEO_ENABLED: process.env.SOCIAL_VIDEO_ENABLED === 'true' ? 'true' : 'false',
   RUMOR2_EDGAR_ENABLED: 'false',
   RUMOR2_OFAC_ENABLED: 'true',
 });

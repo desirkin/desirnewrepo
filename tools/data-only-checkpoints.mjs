@@ -3,7 +3,6 @@
 import path from 'node:path';
 import { openExternalCheckpointStore, EXTERNAL_CHECKPOINT_IDS } from '../persistence/external-checkpoint-store.js';
 import { DEFAULT_DATA_ONLY_LANES, loadDataOnlyBudgetCheckpoint, validateDataOnlyBudgetState } from '../lib/data-only-budget.js';
-import { loadVideoCheckpoint, validateVideoCheckpoint } from '../video/collector.js';
 import { marketResearchRootFromEnv } from '../market-lab/paths.js';
 import { loadMarketQuotaCheckpoint, validateMarketQuotaCheckpoint, createExternalQuotaJournal } from '../market-lab/external-quota-journal.js';
 import { loadDiscoveryCheckpoint, validateDiscoveryCheckpoint } from '../discovery/external-checkpoint.js';
@@ -33,15 +32,12 @@ export async function openDataOnlyCheckpoints({ persistence, dataDir, env = proc
     () => loadMarketQuotaCheckpoint(path.join(marketRoot, 'accounting')));
   const discovery = await restore('PUBLIC_DISCOVERY', EXTERNAL_CHECKPOINT_IDS.DISCOVERY, validateDiscoveryCheckpoint,
     () => loadDiscoveryCheckpoint(dataDir, { now: clock(), integrityGapAllowance: env.DISCOVERY_IMPORT_UNKNOWN_HISTORY_ALLOWANCE }));
-  const video = env.SOCIAL_VIDEO_ENABLED === 'true'
-    ? await restore('YOUTUBE', EXTERNAL_CHECKPOINT_IDS.YOUTUBE, validateVideoCheckpoint, () => loadVideoCheckpoint(dataDir)) : null;
   const callbacks = (binding) => binding ? { restored: binding.snapshot(), reserve: binding.commit, settle: binding.commit } : null;
   const marketJournal = market ? createExternalQuotaJournal({ binding: market, clock }) : null;
   return Object.freeze({
     blockers: Object.freeze(blockers),
     budget: callbacks(budget),
     market: marketJournal,
-    video: callbacks(video),
     discovery,
     status: () => external.status(),
     close: async () => { await marketJournal?.close?.(); await external.close(); },

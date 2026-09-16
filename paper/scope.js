@@ -37,7 +37,6 @@ export const SCOPE = Object.freeze([
   R('S07', 'Meta / Facebook', ['META_PUBLIC', 'META_REALTIME_TRANSPORT'], 'FACEBOOK namespace of rumor2/social-meta.js'),
   R('S08', 'Meta / Instagram', ['META_PUBLIC', 'META_REALTIME_TRANSPORT'], 'INSTAGRAM namespace of rumor2/social-meta.js (documented routes M3-M6M; hashtag search needs App Review)'),
   R('S09', 'Farcaster / Neynar', ['FARCASTER_OFFICIAL', 'FARCASTER_LIVE_TRANSPORT']),
-  R('S10', 'YouTube', ['YOUTUBE_DATA_API']),
   // OFFICIAL AND NEWS — 6
   R('N01', 'Kraken official announcements / news', ['KRAKEN_OFFICIAL']),
   R('N02', 'SEC press releases', ['SEC_OFFICIAL']),

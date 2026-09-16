@@ -94,7 +94,7 @@ test('opens the PostgreSQL store before source bindings and never supplies impli
     assert.equal(options.importMeta.ts, 1234);
     assert.match(options.importMeta.reason, /filesystem accounting before republish/);
   }
-  assert.equal(checkpoints.video, null, 'disabled video does not restore or commission a checkpoint');
+  assert.equal(checkpoints.video, undefined, 'LEAN PASS 4a: there is no video checkpoint — the social-video tier is retired');
   await checkpoints.close();
 });
 

@@ -15,7 +15,7 @@
  "counts": {
   "OPERATIONAL_PUBLIC": 35,
   "OPERATIONAL_CREDENTIAL_GATED": 13,
-  "IMPLEMENTED_NOT_LIVE_SMOKED": 1,
+  "IMPLEMENTED_NOT_LIVE_SMOKED": 0,
   "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 11,
   "FOUNDATION_ONLY": 1,
   "DEPRECATED": 0,
@@ -1470,31 +1470,6 @@
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": "NOT_IMPLEMENTED: LICENSED_INTERFACE_REQUIRED — a licensed CNN Newsource interface with an approved payload contract, or a working officially documented public feed; no key or endpoint is invented; press/registry.js names the source so the collector refuses it with zero calls (the frozen RUMOR-2 core stays publisher-free: doctrine/RUMOR2.md)",
    "smokeEvidence": "2026-09-12: CNN Newsource documents licensed syndication; legacy CNN top-stories and money RSS endpoints returned HTTP 502. No CNN credential or working feed configured. See docs/evidence/news-connections-2026-09-12.md"
-  },
-  {
-   "id": "YOUTUBE_DATA_API",
-   "group": "SOCIAL",
-   "family": "SOCIAL_VIDEO",
-   "classification": "IMPLEMENTED_NOT_LIVE_SMOKED",
-   "module": "video/collector.js (+ video/registry.js, video/parse.js, video/reader.js)",
-   "compositionPath": "fly.js -> startVideo (dark; SOCIAL_VIDEO_ENABLED from the profile; the closed gate decides with zero requests); observations <data>/video/observations.jsonl; status <data>/video/status.json; reader video/reader.js; CLI cobra video status | tail — NOT a RUMOR-2 social provider (rumor2/social-registry.js is sealed; its validators refuse unregistered providers)",
-   "enable": "profile social.YOUTUBE_DATA_API REQUEST -> SOCIAL_VIDEO_ENABLED=true; then YOUTUBE_API_KEY + SOCIAL_VIDEO_YOUTUBE_QUERIES + SOCIAL_VIDEO_YOUTUBE_MAX_DAILY_SEARCHES",
-   "credentialEnv": [
-    "YOUTUBE_API_KEY"
-   ],
-   "paid": false,
-   "budgetGovernor": "explicit daily search.list budget (no default is ever read) counted per Pacific accounting day in the durable checkpoint; one search per poll in query rotation; interval = max(900 s, day / budget); quotaExceeded parks until the next day; documented default quota 100 search.list calls / day",
-   "retentionTermsGate": "YouTube API Services Terms (owner accepts at key issue); METADATA_ONLY — title / description snippet / channel / publish clock / public counters; never captions, transcripts, comments, media or viewer identity; observations file capped at 50 MiB",
-   "liveTransport": true,
-   "durableTruth": "local JSONL observations + checkpoint; never a RUMOR-2 event",
-   "pointInTimeContract": "publishedAt (RFC 3339) + receiptTs / knownAtTs from the collector clock; future-dated items rejected",
-   "replay": "none",
-   "decisionAuthority": "NONE",
-   "paperAuthority": "NONE",
-   "paperDesiredState": "REQUEST",
-   "blockerPolicy": "DEGRADE",
-   "readinessBlocker": "CREDENTIAL_MISSING (YOUTUBE_API_KEY); zero requests until present",
-   "smokeEvidence": "2026-09-12: developers.google.com/youtube/v3/getting-started (200: default quota 100 search.list calls + 10,000 units / day), docs/search/list (200), docs/videos/list (200, 1 unit), cloud.google.com API-key header docs (200); live denied path observed: unauthenticated search.list HTTP 403 \"unregistered callers\", malformed header key HTTP 400; NOT live smoked with a real key (none in this environment)"
   },
   {
    "id": "META_REALTIME_TRANSPORT",

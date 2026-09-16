@@ -24,7 +24,7 @@ function fakes({ restored = true } = {}) {
   const stops = [];
   const rec = (name, options) => { calls.push({ name, options }); };
   const handle = (name) => ({ stop: async () => { stops.push(name); }, status: () => ({ state: 'OK', name }) });
-  const checkpoints = { blockers: {}, budget: { id: 'budget' }, market: { id: 'market' }, video: { id: 'video' }, discovery: { id: 'discovery' }, status: () => ({ state: 'RESTORED' }), close: async () => { stops.push('checkpoints'); } };
+  const checkpoints = { blockers: {}, budget: { id: 'budget' }, market: { id: 'market' }, discovery: { id: 'discovery' }, status: () => ({ state: 'RESTORED' }), close: async () => { stops.push('checkpoints'); } };
   const governor = { fetch: async () => { throw new Error('offline'); }, status: () => ({ state: 'ACTIVE', estimatedMonthUsd: 0, lanes: {} }) };
   const quotaStarters = {
     startPersistence: async (options) => { rec('startPersistence', options); return { health: () => ({ databaseConfigured: restored, restored }), stop: async () => { stops.push('persistence'); } }; },
@@ -140,7 +140,7 @@ test('PR-4 (step 5). mode-agnostic paths: canonical serpent/ lock + status with 
 
     // DATA_ONLY on the same helpers: canonical + mirror as well
     const g = fakes();
-    const rt2 = await startDataOnlyRuntime({ root, env: {}, config: { wideeye: { enabled: false }, gateway: { enabled: false }, universe: ['ZZZ'] }, log: () => {}, signals: false, quotaStarters: g.quotaStarters, collectorStarters: { startDataOnlyMarket: async () => null, startWideEye: () => null, startBroadKraken: async () => null, startInfra: () => null, startVideo: () => null, startPublicDiscovery: () => null, startGateway: () => null, startRumor2: () => null } });
+    const rt2 = await startDataOnlyRuntime({ root, env: {}, config: { wideeye: { enabled: false }, gateway: { enabled: false }, universe: ['ZZZ'] }, log: () => {}, signals: false, quotaStarters: g.quotaStarters, collectorStarters: { startDataOnlyMarket: async () => null, startWideEye: () => null, startBroadKraken: async () => null, startPublicDiscovery: () => null, startGateway: () => null, startRumor2: () => null } });
     assert.ok(existsSync(canonicalLock) && existsSync(legacyLock), 'DATA_ONLY writes both locks');
     assert.equal(readFileSync(canonicalStatus, 'utf8'), readFileSync(legacyStatus, 'utf8'), 'DATA_ONLY mirrors the status');
     await rt2.shutdown('TEST');
