@@ -91,6 +91,13 @@ export async function openExternalCheckpointStore({
   // so tests exercise the retries without real delay.
   writeRetries = 3,
   writeRetryBackoffMs = 250,
+  // PUBLISH-FIX-5: the owner lock is a BOOT-TIME lock — on a Replit Republish the previous
+  // deployment can still hold it for a short overlap. The boot caller (openDataOnlyCheckpoints)
+  // opts into a bounded wait so the new boot waits the overlap out instead of failing on first
+  // contention; every other caller keeps try-once (lockWaitMs 0). On timeout the fail-closed
+  // LOCK_HELD_ELSEWHERE below is unchanged.
+  lockWaitMs = 0,
+  lockRetryIntervalMs = 5_000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!persistence || typeof persistence.health !== 'function' || !persistence.db || !persistence.repo) {
@@ -104,7 +111,10 @@ export async function openExternalCheckpointStore({
     throw new ExternalCheckpointError('LOCK_UNAVAILABLE', 'the persistence database has no session-lock API');
   }
   let lock;
-  try { lock = await persistence.db.acquireSessionLock(lockName); }
+  const acquire = typeof persistence.db.acquireSessionLockWithWait === 'function'
+    ? () => persistence.db.acquireSessionLockWithWait(lockName, { timeoutMs: lockWaitMs, intervalMs: lockRetryIntervalMs, log, sleep })
+    : () => persistence.db.acquireSessionLock(lockName);
+  try { lock = await acquire(); }
   catch (error) { throw new ExternalCheckpointError('LOCK_FAILED', error?.code ?? error?.message ?? error); }
   if (!lock) throw new ExternalCheckpointError('LOCK_HELD_ELSEWHERE', 'another external-checkpoint owner is active');
 

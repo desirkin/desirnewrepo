@@ -8,7 +8,10 @@ import { loadMarketQuotaCheckpoint, validateMarketQuotaCheckpoint, createExterna
 import { dataGeneration } from '../lib/config.js';
 
 export async function openDataOnlyCheckpoints({ persistence, dataDir, env = process.env, log = () => {}, clock = () => Date.now(), openStore = openExternalCheckpointStore } = {}) {
-  const external = await openStore({ persistence, log });
+  // PUBLISH-FIX-5: this is the boot path — opt the owner lock into a bounded wait (180 s in 5 s
+  // steps) so a Replit Republish overlap (the outgoing container still holding the lock) is waited
+  // out instead of failing the boot with LOCK_HELD_ELSEWHERE. On timeout the fail-closed law holds.
+  const external = await openStore({ persistence, log, lockWaitMs: 180_000, lockRetryIntervalMs: 5_000 });
   const blockers = {};
   const bindings = {};
   // PUBLISH-FIX-3 birth commissioning: these two checkpoints carry a ZERO budget ceiling (the data-only news lanes and the

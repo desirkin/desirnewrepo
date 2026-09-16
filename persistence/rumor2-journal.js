@@ -27,7 +27,7 @@ const classifyWith = (persistence) => () => {
   return { kind: 'READY', p };
 };
 
-export function rumor2JournalStore({ persistence = getPersistence } = {}) {
+export function rumor2JournalStore({ persistence = getPersistence, lockWait = null } = {}) {
   const classify = classifyWith(persistence);
   // ONE ACTIVE RUMOR WRITER (freeze seal): the session-scoped advisory lock
   // held for the collector's lifetime. A second collector gets { reason:
@@ -49,7 +49,10 @@ export function rumor2JournalStore({ persistence = getPersistence } = {}) {
         fenceEpoch = null;
       }
       try {
-        fence = await c.p.repo.acquireRumor2WriterLock();
+        // PUBLISH-FIX-5: on the boot path the creator injects lockWait { waitMs, intervalMs } so a
+        // Replit Republish overlap (the outgoing deployment still holding the writer lock) is waited
+        // out in bounded steps, then fails closed (HELD). Absent (tests, smoke tools) it is try-once.
+        fence = await c.p.repo.acquireRumor2WriterLock(lockWait ?? {});
         if (!fence) return { ok: false, reason: 'HELD' };
         fenceEpoch = fence.epoch ?? null;
         return { ok: true, epoch: fenceEpoch };

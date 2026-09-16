@@ -278,6 +278,28 @@ export class Db {
     return { held: () => !lost, release, query };
   }
 
+  // PUBLISH-FIX-5 — bounded acquisition wait for a BOOT-TIME owner lock. Replit keeps
+  // the previous deployment container alive for a short overlap after a Republish; both
+  // connect to the same PostgreSQL, so the outgoing process can still hold a boot lock
+  // (the external-checkpoint owner lock, the RUMOR-2 writer lock) when the new boot tries
+  // to take it. acquireSessionLock is try-once by design (a runtime writer fence must
+  // fail fast on real contention); a boot lock instead waits out the overlap. This calls
+  // acquireSessionLock repeatedly until it returns a handle or the budget is spent, logs
+  // one line per waited attempt, and returns null on timeout — so every caller's existing
+  // fail-closed behaviour and error codes on a null handle are UNCHANGED. pg_try_advisory_lock
+  // semantics and the held()/release() contract are untouched; sleep is injected so tests
+  // run without real delay.
+  async acquireSessionLockWithWait(name, { timeoutMs = 180_000, intervalMs = 5_000, log = this.log, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+    const attempts = Math.max(1, Math.floor(timeoutMs / Math.max(1, intervalMs)));
+    for (let n = 1; ; n += 1) {
+      const lock = await this.acquireSessionLock(name);
+      if (lock) return lock;
+      if (n >= attempts) return null; // budget spent — fail closed, caller's null-handle path is unchanged
+      log(`PERSISTENCE lock ${name} held elsewhere; waiting ${n}/${attempts}`);
+      await sleep(intervalMs);
+    }
+  }
+
   async end() {
     // A held advisory-lock client is checked out for its lifetime, and
     // pool.end() waits for every client to return — so release the locks

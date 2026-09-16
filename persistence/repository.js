@@ -532,8 +532,17 @@ export class Repository {
   // lost by the time it returns, the lock is released — no half-authoritative
   // writer, no ambiguous token. There is NO public epoch-advance method: the
   // ONLY way the epoch moves is a real advisory-lock acquisition.
-  async acquireRumor2WriterLock() {
-    const lock = await this.db.acquireSessionLock(`serpent_rumor2_writer:${this.db.schema ?? 'public'}`);
+  // PUBLISH-FIX-5: the RUMOR-2 writer lock is a BOOT-TIME lock — on a Replit Republish the
+  // outgoing deployment can still hold it during the container overlap. The boot caller
+  // (rumor2-journal acquireWriter) opts into a bounded wait so the new boot waits the overlap
+  // out rather than giving up the epoch on first contention; every other caller keeps try-once
+  // (waitMs 0). On timeout the null-return fail-closed path is unchanged. sleep is injected so
+  // tests run without real delay.
+  async acquireRumor2WriterLock({ waitMs = 0, intervalMs = 5_000, sleep } = {}) {
+    const name = `serpent_rumor2_writer:${this.db.schema ?? 'public'}`;
+    const lock = typeof this.db.acquireSessionLockWithWait === 'function'
+      ? await this.db.acquireSessionLockWithWait(name, { timeoutMs: waitMs, intervalMs, ...(sleep ? { sleep } : {}) })
+      : await this.db.acquireSessionLock(name);
     if (!lock) return null;
     try {
       const { rows } = await lock.query(

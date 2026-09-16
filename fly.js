@@ -267,7 +267,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     } catch (err) { console.error(`LEARNING DATA CLOCK failed to start (dark; nothing else affected): ${err.message}`); decisionOutcomeTimer = null; }
   }
   rumor2Handle = startRumor2({
-    checkpointStore: rumor2CheckpointStore(), journal: rumor2JournalStore(),
+    checkpointStore: rumor2CheckpointStore(), journal: rumor2JournalStore({ lockWait: { waitMs: 180_000, intervalMs: 5_000 } }), // PUBLISH-FIX-5: boot path waits out a Republish overlap for the RUMOR-2 writer lock
     // SOCIAL-4F: DISCOVERY_CATALOG injection — read-only accessors only (no mutable survey map, no
     // posture callback, no authority to start market-data collection); absent when the wide eye is
     // off => Social reports CATALOG_UNAVAILABLE rather than inventing a universe or falling back
