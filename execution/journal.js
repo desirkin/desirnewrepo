@@ -60,7 +60,7 @@ export async function replayVerify(journal, accountId, { pageSize = MAX_PAGE, ma
 }
 
 // ---- PostgreSQL journal (the authority) --------------------------------------------------------------------------------------
-export function createPgJournal({ db, log = () => {}, lockTimeoutMs = 5000, statementTimeoutMs = 10_000 }) {
+export function createPgJournal({ db, log = () => {}, lockTimeoutMs = 5000, statementTimeoutMs = 10_000, lockWait = null }) {
   const stateOf = (r) => (typeof r.state === 'string' ? JSON.parse(r.state) : r.state);
   return {
     kind: 'PG',
@@ -71,7 +71,16 @@ export function createPgJournal({ db, log = () => {}, lockTimeoutMs = 5000, stat
     async load(accountId) { const { rows } = await db.query('SELECT account_id, revision, writer_epoch, head_seq, head_digest, state FROM serpent_execution_accounts WHERE account_id = $1', [accountId]); if (!rows.length) return null; const r = rows[0]; return { accountId, revision: Number(r.revision), writerEpoch: Number(r.writer_epoch), headSeq: Number(r.head_seq), headDigest: r.head_digest, state: stateOf(r) }; },
     // the writer fence: advisory session lock, epoch advanced ON the lock session, every committing write checks it
     async acquireWriter(accountId) {
-      const lock = await db.acquireSessionLock(`serpent_execution_writer:${db.schema ?? 'public'}:${accountId}`); if (!lock) return null;
+      const lockName = `serpent_execution_writer:${db.schema ?? 'public'}:${accountId}`;
+      // PUBLISH-FIX-5 / PAPER-FLIP-PREP: try-once by default (a runtime writer fence fails fast on real
+      // contention — every CLI, REPLAY and test caller keeps this). The paper boot creator injects lockWait
+      // { waitMs, intervalMs } so a Republish overlap (the outgoing deployment still holds the lock for a few
+      // seconds) is waited out instead of failing the boot. On timeout the wait returns null, unchanged fail-closed.
+      const waitMs = lockWait && Number.isFinite(lockWait.waitMs) ? lockWait.waitMs : 0;
+      const lock = waitMs > 0 && typeof db.acquireSessionLockWithWait === 'function'
+        ? await db.acquireSessionLockWithWait(lockName, { timeoutMs: waitMs, intervalMs: lockWait.intervalMs ?? 5000, ...(lockWait.sleep ? { sleep: lockWait.sleep } : {}) })
+        : await db.acquireSessionLock(lockName);
+      if (!lock) return null;
       try {
         const { rows } = await lock.query(`INSERT INTO serpent_execution_writer_epoch (account_id, epoch) VALUES ($1, 1) ON CONFLICT (account_id) DO UPDATE SET epoch = serpent_execution_writer_epoch.epoch + 1, updated_at = now() RETURNING epoch`, [accountId]);
         const epoch = Number(rows[0]?.epoch); if (!isValidEpoch(epoch)) throw new JournalError('EPOCH_INVALID', String(rows[0]?.epoch));

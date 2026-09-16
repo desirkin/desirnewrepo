@@ -60,11 +60,35 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       a38fa9ed86e5c29e931dd2f3cb14cadaae6d48af5d184ed0371ad9f596fc6794
-execution/*.js   676e15339b6c19e897dc7d08d6ac862d7f099910fe3c4953ffd2ad00467c677e
+judge/*.js       aae0b5dc189907cd235578150ddd3c90b0f97690d947e9caed20eebb8d32f47f
+execution/*.js   68222023e14481a4de7603465a18c2475d969838c9c638dec59824db3aba7712
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   1a287ba4471a39123782fafd007c4729497fdd03fe668ce49643188ef6a2730b
+all (48 files)   9dd72c5919bc87dbae218baa549fa5acab00030a43c947b9da67da641b3491df
 ```
+
+### 4.13 Audited change — 2026-09-16 PAPER-FLIP-PREP (a): the boot waits out a Republish overlap for the execution writer lock (previous digests: judge `a38fa9ed86e5…`, execution `676e15339b6c…`, all `1a287ba4471a…`; watch/watch.js UNCHANGED `0c6a43bf…`)
+
+Scope: `execution/journal.js` and `judge/composition.js` only; the writer FENCE, epoch establishment,
+per-commit epoch check, replay/verify, projection, sizing, reducer, reservation, fee and fill law are all
+byte-for-byte unchanged. This mirrors PUBLISH-FIX-5 for the RUMOR-2 / checkpoint owner locks.
+
+- `execution/journal.js`: `createPgJournal` gains an optional `lockWait = null`. `acquireWriter` is **try-once by
+  default** (a runtime writer fence must fail fast on real contention — every CLI, REPLAY, experiment-replay and
+  test caller keeps this, and `WRITER_HELD` still raises immediately). When the boot creator injects
+  `lockWait { waitMs, intervalMs }` AND the Db exposes `acquireSessionLockWithWait` (PUBLISH-FIX-5), the
+  acquisition polls that bounded wait so a Replit Republish overlap — the outgoing deployment still holds the
+  advisory lock for a few seconds — is waited out instead of failing the boot. On timeout the wait returns null
+  and the existing fail-closed path (`WRITER_HELD`) is unchanged. `pg_try_advisory_lock` semantics, the epoch
+  INSERT/UPDATE on the lock session, and `held()` / `release()` are untouched.
+- `judge/composition.js`: `composeJudge` gains a `writerLockWait = null` pass-through, forwarded to
+  `createPgJournal({ lockWait })` ONLY when it creates the PAPER / LIVE journal itself. An injected journal (tests,
+  experiment replay) is unchanged; the memory journal is unchanged. fly.js (the root, not frozen) supplies
+  `{ waitMs: 180_000, intervalMs: 5_000 }` at the real production boot, so only that boot opts into the wait.
+- Verified: `test/execution-journal-lock-wait.test.js` (pure — try-once default, waits then acquires, fail-closed
+  on spent budget, falls back to try-once without the waiting variant); the PostgreSQL journal / e2e tests
+  (`judge-journal-pg`, `judge-e2e-pg`, `paper-e2e-pg`) pass unchanged against PostgreSQL 16; and a local
+  `npm run paper` boot reaches `JUDGE active: PAPER account paper-reference-usd500 mode PAPER` and `TAPE LIVE`.
+  The whole frozen set digest moves to `9dd72c59…`, which `test/paper-runtime.test.js` P-08 re-verifies.
 
 ### 4.12 Audited change — 2026-09-15 Ticket A (fees): the paper taker reference is the Kraken Pro base rate 0.40%, not 0.8% (frozen digests UNCHANGED)
 
