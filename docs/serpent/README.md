@@ -19,6 +19,14 @@ Cadence: work continuously, one ticket at a time, push `serpent/baseline` after 
 
 First action on taking over: run the full suite (recipe in BASELINE.md; PostgreSQL 16 required) and fix anything red BEFORE the next ticket. Step 2 of the runtime unification (`679f358`) landed with its targeted fences green and the full run in flight in the previous session — confirm it here.
 
+## Standing order update (2026-09-16) — queue, backlog, open questions
+The session never idles while unblocked work exists. Three lists, in this precedence:
+1. **The queue** — the tickets David has handed the session (this file + the current session). Work them top to bottom, one green push each.
+2. **`BACKLOG.md`** — an ordered list of no-decision work, each with acceptance criteria the session writes itself. When the queue is empty, pull the top backlog item. Extend the backlog whenever no-decision work is noticed. Never hold with an unblocked backlog item remaining.
+3. **`OPEN-QUESTIONS.md`** — when a ticket needs a human answer, write the question there (ticket id + recommendation) and move on to the next item. Never park-and-wait on a question: keep moving.
+
+CI: the `serpent/baseline` workflow keeps `concurrency: cancel-in-progress: true` — a newer push supersedes an in-flight run; the branch tip is the run that must be green.
+
 Queue, in order (details in RUNTIME-UNIFICATION.md, PHILOSOPHY.md, LEAN-PLAN.md):
 1. Runtime unification steps 3–6: fly.js onto the spine with `SERPENT_MODE`, in-process cockpit, mode-agnostic lock/status paths, retire the shims. Audit §4.7 entry; composition.js untouched.
 2. PERSIST-1: object-store adapter + restore-on-boot (Replit's filesystem resets on publish).
