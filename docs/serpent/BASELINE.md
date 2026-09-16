@@ -63,6 +63,32 @@ Branch `serpent/baseline` on `desirkin/desirnewrepo`. GitHub tip = this branch (
 - READINESS(b): **Bitstamp** public-book provider (`market-lab/providers/bitstamp.js`, `BITSTAMP_SPOT`, D17; USD-quoted, no key, reachable) added like Binance (D16). HTTP **451 → BLOCKED_GEOGRAPHY** (`base.js isGeoBlock`). The IFR gate now runs on the **reachable** references only (Coinbase + Binance + Bitstamp, ≥1): a venue geo-blocked at boot is excluded (decided once per venue), a de-pegged reachable reference still fails the episode closed, and the episode + shadow record carry a `referenceCoverage` note. `isolated-flush-reversal.js`, `cross-venue-episode.js`, `cross-venue-shadow.js`; PROVIDER_IDS 18; PHILOSOPHY §Strategy 6 + READINESS IFR-gate subsection. Fences: `test/bitstamp-provider.test.js`, `cross-venue-shadow` CVS-5, `isolated-flush-reversal` IFR-3, PROVIDER_IDS length 18, MC-E05 runBytes 50k→70k (the sealed per-segment policy grows with the registry). Full suite 2828 pass / 0 fail; offline 0. App 84,235 JS lines; largest `rumor2/collector.js` 80 KB.
 - **LEAN PASS 3 — COMPLETE.** Every source file over 60 KB has been split by concern into small barrel siblings (behavior byte-identical, tests moved with them, importers untouched), EXCEPT the two single-closure runtimes that cannot be barrel-split byte-identically and are deliberately left as-is: `rumor2/collector.js` 80 KB (`startRumor2`) and `rumor2/x-runtime.js` 75 KB (`createXRuntime`). The frozen judge/execution/watch surfaces were never touched. Legacy doctrine (SOCIAL.md and the *-ACCEPTANCE.md family) is atticked; `docs/serpent/` is the only going-forward doctrine (with `docs/JUDGE-PAPER-AUDIT.md`). **Final figures: app 84,235 JS lines (.js + .mjs, excl `test/` + `attic/`); largest source .js `rumor2/collector.js` 80 KB (single closure).** Next: PERSIST-1 step 5 (REPLIT sidecar auth), then publish prep.
 
+## Post-cull baseline refresh — 2026-09-16 (B-3)
+
+The changelog above ends at LEAN PASS 3 (app 84,235 lines, PROVIDER_IDS 18); the market-lab
+culls and the paper-prep run since then changed those figures. Current state of the tree at
+`serpent/baseline` tip, so the doc no longer misstates a stale count:
+
+- **Market-lab providers:** the TwelveData cross-asset provider + the whole `CROSS_ASSET`
+  family + the `PER_SYMBOL` credit path were culled to `attic/` (market-lab providers cut),
+  then FRED / ALFRED and Coin Metrics Community were culled to `attic/` (SENSE-CULL-2).
+  `MACRO_RELEASES` survives on the CoinGlass economic calendar; `NETWORK_ACTIVITY` on
+  CryptoQuant / Santiment. **PROVIDER_IDS 16, FAMILIES 16, sensor scope 39** (M14/M15/M19
+  retired, ids stable). No retired provider/family/sense is named as live in READINESS.md.
+- **App size:** **78,165 JS lines** (`.js` + `.mjs`, excl `test/` + `attic/`) — down from
+  84,235 with the culls. The frozen judge/execution/watch surfaces are unchanged except the
+  audited PAPER-FLIP-PREP writer-lock wait (JUDGE-PAPER-AUDIT §4.13).
+- **Paper flip:** PUBLISH-FIX-5 (boot owner-lock wait), PUBLISH-FIX-6 (schema-qualified boot
+  verify — no more repeated store-anchor repair), PAPER-FLIP-PREP (writer-lock wait +
+  `docs/serpent/PAPER-FLIP.md` + the paper-vs-data-only composition fence) and UI-STATE-COLORS
+  (senses amber-waiting / red-only-for-blocked) have landed. A local `npm run paper` boots to
+  `JUDGE active … TAPE LIVE` with `durable core connected (schema 10)` and no repair line.
+- **Suite:** GREEN — 2,757 offline (2,703 pass, 54 PG-skipped locally; the 54 run green against
+  real PostgreSQL 16), 0 fail, offline gate records 0.
+
+A full per-ticket backfill of the intervening changelog is deliberately not attempted here (it
+would reconstruct ~15 already-pushed tickets from history); this entry is the current-state anchor.
+
 ## Test recipe
 ```
 PERSIST_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/cobra_test \

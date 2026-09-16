@@ -6,6 +6,28 @@ Nothing here is a decision — it is a queue for David.
 
 ---
 
+## BACKLOG B-1 — Prettier on all non-frozen code conflicts with the house style (needs a decision)
+
+**Ask (backlog item B-1):** add a repo Prettier config "that matches the house style as
+closely as automatable" and format every non-frozen `*.js`/`*.mjs`.
+
+**Why parked:** the house style is deliberately dense — long single-statement-per-line
+functions (e.g. `market-lab/*`, the `sState` / `extractFn` single-line forms). Prettier wraps
+at `printWidth` and cannot reproduce "keep it on one line", so a run would reformat thousands
+of lines, and many fences/tests read specific single-line shapes (the `extractFn` regex
+extractors, single-line map assertions, byte/digest pins). "Match the house style as closely
+as automatable" is unsatisfiable when the style is anti-Prettier. This is a taste/scope
+decision, not no-decision work, so per the standing order it is written here and skipped.
+
+**Recommendation:** pick one — (a) **drop B-1** (the dense house style is intentional and
+Prettier fights it); (b) choose an explicit `printWidth` and scope (which directories, which
+files excluded) and accept the large diff + the fence re-pins it forces; or (c) adopt a
+formatter/lint that only enforces trivia (semicolons, quotes, trailing commas) without
+re-wrapping lines. Needs David's call before any formatter lands. B-1 stays in BACKLOG.md
+marked parked-here until then.
+
+---
+
 ## SENSE-CULL-2 — MACRO_RELEASES interpretation on the FRED retirement (decision made; confirm)
 
 **Ask:** "Retire FRED (16 req/day) + Coin Metrics (2) to attic/ … modules, owner.js

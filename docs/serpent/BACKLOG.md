@@ -10,15 +10,12 @@ Standing order and how the queue/backlog/open-questions relate: `docs/serpent/RE
 
 ---
 
-## B-1. Lean pass 4 — Prettier on all non-frozen code
-**Do:** add a repo Prettier config that matches the house style as closely as is
-automatable, then format every tracked `*.js`/`*.mjs` that is NOT a frozen-core file.
-**Never touch:** any file pinned by a byte/digest fence (the SCOPE-8 protected set in
-`test/social-4f-scope.test.js`, `judge/`-focused byte fences, `persistence/migrate.js`
-HEAD pins, and any REPINNED digest). Confirm the pinned set first and exclude it.
-**Acceptance:** full suite green + offline gate 0; every byte/digest fence still passes
-(proving no frozen file moved); the diff is formatting-only (no token changes) on the
-files touched; the Prettier config is committed so the format is reproducible.
+## B-1. Lean pass 4 — Prettier on all non-frozen code — PARKED (needs a decision)
+**Parked to `OPEN-QUESTIONS.md`** (2026-09-16): the house style is deliberately dense
+(long single-line functions); Prettier's line-wrapping cannot match it and would reformat
+thousands of lines and break the many formatting-sensitive fences/tests. This is a
+taste/scope decision, not no-decision work — see OPEN-QUESTIONS.md for the options. Do not
+pull this item until David chooses; it is skipped, not held.
 
 ## B-2. L-2 follow-up — 24h maturation pass
 **Do:** the maturation pass that fills the 1h/4h/24h outcome columns of the research /
@@ -126,3 +123,13 @@ paper account. (Mirrors the gated queue tickets Strategy 9 GRO, L-3a, R-SRF, L-3
   discriminator over the L-3a opportunity records with a shadow evaluation. Acceptance: needs ≥ 2
   weeks of L-3a records; evaluation is read-only over the holdout-respecting record; no live
   influence; full suite green + gate 0.
+
+## B-14. Harden the market-lab-owner A09/B02 real-stream re-poll dedup (flake)
+**Do:** `test/market-lab-owner.test.js` A09/B02 (STANDALONE owner over real loopback WS +
+REST fixtures) intermittently miscounts an identical re-polled source record as a new
+observation (seen once as 182 vs 181; passes 3/3 in isolation and on a clean re-run). Make
+the re-poll dedup timing-robust so the observation count is deterministic regardless of WS
+arrival interleaving — the dedup key must not depend on wall-clock arrival order.
+**Acceptance:** the test is deterministic across ≥ 20 back-to-back runs and under the full
+concurrent suite (no off-by-one); the dedup is proven by an injected-timing unit case; the
+durable observation is never dropped, only the duplicate suppressed; full suite green + gate 0.
