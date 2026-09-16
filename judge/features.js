@@ -90,13 +90,21 @@ const MEDIAN_FAST_RE = /^-?(0|[1-9]\d*)(\.\d+)?$/;
 const medianExact = (list) => { const s = [...list].sort((a, b) => M.cmp(a, b)); const mid = Math.floor(s.length / 2); return s.length % 2 ? s[mid] : M.div(M.add(s[mid - 1], s[mid]), '2', 8, 'HALF_UP'); };
 export const medianDecimal = (list) => {
   if (!list.length) return null;
-  const n = list.length; const keyed = new Array(n);
-  for (let i = 0; i < n; i += 1) { const v = list[i]; if (typeof v !== 'string' || v.length > 20 || !MEDIAN_FAST_RE.test(v)) return medianExact(list); keyed[i] = [Number(v), v]; }
-  keyed.sort((a, b) => a[0] - b[0]); const mid = Math.floor(n / 2);
-  const collides = (i) => (i > 0 && keyed[i - 1][0] === keyed[i][0]) || (i + 1 < n && keyed[i + 1][0] === keyed[i][0]);
-  if (n % 2) return collides(mid) ? medianExact(list) : keyed[mid][1];
-  if (collides(mid) || collides(mid - 1)) return medianExact(list);
-  return M.div(M.add(keyed[mid - 1][1], keyed[mid][1]), '2', 8, 'HALF_UP');
+  const n = list.length; const keys = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) { const v = list[i]; if (typeof v !== 'string' || v.length > 20 || !MEDIAN_FAST_RE.test(v)) return medianExact(list); keys[i] = Number(v); }
+  const sorted = keys.slice().sort(); // native numeric sort — the double is a sort key only
+  // the exact lexeme at sorted position `pos`: everything with a smaller double is exactly smaller (monotonic rounding);
+  // within the run of equal doubles, identical strings need no ordering, differing strings are ordered exactly
+  const at = (pos) => {
+    const m = sorted[pos]; let less = 0; const run = [];
+    for (let i = 0; i < n; i += 1) { const k = keys[i]; if (k < m) less += 1; else if (k === m) run.push(list[i]); }
+    const first = run[0]; let same = true; for (let i = 1; i < run.length && same; i += 1) if (run[i] !== first) same = false;
+    if (same) return first;
+    run.sort((a, b) => M.cmp(a, b)); return run[pos - less];
+  };
+  const mid = Math.floor(n / 2);
+  if (n % 2) return at(mid);
+  return M.div(M.add(at(mid - 1), at(mid)), '2', 8, 'HALF_UP');
 };
 // ---- bounded incremental tracker: trades expire on time advance even without a new trade; a coverage change invalidates ----------
 export function createFlowTracker({ retentionMs = 22 * BAR_MS, maxTrades = 50_000 } = {}) {

@@ -60,10 +60,10 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       0bd99f91f3c849f15dfdf8c2f2e6897ec88bb7de29bdc7ca6fdda73da6f6be88
+judge/*.js       6b8908a4b256596fcdd49d5d73ca3551f7e25d7e7d3768421bc4608693df75d7
 execution/*.js   2551fcb6c4d00ee9e708e6740f87b5700e2469549abdef83e43b9cc03f36c16b
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   eaf7f2782bdd6aab4e12ae04894209e444a462489ac1ebf15651d770fabd48b4
+all (48 files)   b058952b392564d1d00cdd1edc531838748175f3f2746c57eaed146b47479255
 ```
 
 ### 4.14 Audited change — 2026-09-16 PUBLISH-FIX-10: the Judge's per-book evaluation no longer starves the event loop (previous digests: judge `aae0b5dc1899…`, execution `68222023e144…`, all `9dd72c5919bc…`; watch/watch.js UNCHANGED `0c6a43bf…`)
@@ -87,10 +87,19 @@ Scope: exactness is untouched — no Number ever enters arithmetic; three change
   long/non-plain. The returned value is the same exact string / exact half-up average.
 - `judge/judge.js`: `onBook` computes `fastFacts(c, snap, snap.receiptTs)` ONCE per book update and hands the same
   object to every setup (the inputs are identical per setup; nothing in the setup loop mutates flow, books or the snapshot).
+- `judge/judge.js` (second pass, same day — boot f566132c still showed `cmp` 57% with the tape shed to zero pairs, the
+  Judge draining a backlog of ticks): the WINDOW aggregates of `fastFacts` (fi15/fi60/rv60/vwap60/priorFi/reclaimFi, the
+  prior-mid change, the 60 s prior-depth median, the prior low) are recomputed at most once per 250 ms per candidate
+  (`windowFacts`, keyed on decision time and feed epoch); the per-snapshot facts (mid, best bid/ask, spread, book age,
+  depth within 10 bps, crc, receipt sequence, snapshot digest) are recomputed on every tick exactly as before. A decision
+  may therefore see flow windows up to 250 ms older than its snapshot — on the 5m/15m decision horizon this is below the
+  tape's own 5 s snapshot cadence, and it is the difference between a Judge that runs and one that starves.
+- `judge/features.js` (second pass): `medianDecimal` keys on a native `Float64Array` sort and resolves the exact lexeme at
+  the median position by counting doubles below it; a run of equal doubles is ordered exactly only when its strings differ.
 - Verified: `test/money-cmp-fast-path.test.js` (cmp vs exact ordering on adversarial near-equal lexemes and 20,000 random
   lexemes; medianDecimal vs an independent exact reference over 300 random lists plus collision / long-lexeme / trailing-
   zero cases; memo identity and non-default bounds), and the whole judge/execution/paper suite green. The frozen set
-  digest moves to `eaf7f2782bdd…`, which `test/paper-runtime.test.js` P-08 re-verifies.
+  digest moves to `b058952b3925…`, which `test/paper-runtime.test.js` P-08 re-verifies.
 
 ### 4.13 Audited change — 2026-09-16 PAPER-FLIP-PREP (a): the boot waits out a Republish overlap for the execution writer lock (previous digests: judge `a38fa9ed86e5…`, execution `676e15339b6c…`, all `1a287ba4471a…`; watch/watch.js UNCHANGED `0c6a43bf…`)
 
