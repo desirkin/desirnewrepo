@@ -1500,7 +1500,17 @@ async function refreshAccounts() { try { const r = await fetch('/api/accounts', 
 $('#btnJudge').addEventListener('click', () => { showJudge(); refreshJudge(); refreshAccounts(); });
 // SERPENT PAPER — SENSES: what is actually ON. Grouped rows from /api/sensors (state, last success, age, coverage, blocker, authority).
 function showSenses() { armDrawerHistory(); $('#senses').classList.add('open'); $('#backdrop').hidden = false; }
-const sState = (s) => (s === 'ACTIVE' || s === 'DARK_CAPTURE_OPERATIONAL' ? 'on' : s === 'ACTIVE_DEGRADED' || s === 'DARK_CAPTURE_DEGRADED' || s === 'NOT_OBSERVED' || s === 'KEY_PRESENT_UNPROVEN' ? 'deg' : s === 'DISABLED_BY_PAPER_POLICY' || s === 'DARK_CAPTURE_DISABLED_BY_POLICY' ? 'off' : 'blk');
+// UI-STATE-COLORS: the ONE state -> colour map. GREEN (on) = actively observing / operational; DIM (off) =
+// intentionally disabled by paper policy; RED (blk) = genuinely FAILED / BLOCKED (an explicit blocked state only);
+// AMBER (deg) = reachable but WAITING — no observation yet, degraded, unproven or config-required. Amber is the
+// default, so a reachable-but-not-yet-observing sense (NOT_OBSERVED / CONFIG_REQUIRED:* / FOUNDATION_ONLY /
+// KEY_PRESENT_UNPROVEN) and any state added later read amber, never a false red. Only the blocked set is red.
+function sState(s) {
+  if (s === 'ACTIVE' || s === 'DARK_CAPTURE_OPERATIONAL') return 'on';
+  if (s === 'DISABLED_BY_PAPER_POLICY' || s === 'DARK_CAPTURE_DISABLED_BY_POLICY') return 'off';
+  if (s === 'BLOCKED_CREDENTIAL' || s === 'BLOCKED_BUDGET' || s === 'BLOCKED_EXTERNAL_APPROVAL' || s === 'BLOCKED_TERMS' || s === 'BLOCKED_RETENTION' || s === 'BLOCKED_GEOGRAPHY' || s === 'BLOCKED_PROVIDER' || s === 'DARK_CAPTURE_BLOCKED_EXTERNAL' || s === 'BLOCKED_NO_SAFE_L3_DATA_KEY') return 'blk';
+  return 'deg';
+}
 const sAge = (ms) => (ms === null || ms === undefined ? '—' : ms < 60000 ? Math.round(ms / 1000) + 's' : ms < 3600000 ? Math.round(ms / 60000) + 'm' : Math.round(ms / 3600000) + 'h');
 function renderSenses(d) {
   const b = $('#sensesBody');
