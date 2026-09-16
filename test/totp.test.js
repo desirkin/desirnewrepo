@@ -4,11 +4,28 @@
 // `now`. A malformed anything fails CLOSED to false — never a throw, never true.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { verifyTotp, verifyTotpDetailed, base32Decode, totpSecretUsable, TOTP } from '../lib/totp.js';
 
 // base32 of ASCII "12345678901234567890" (RFC 6238 §B SHA-1 seed).
 const RFC_SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
 const at = (unixSec) => ({ now: () => unixSec * 1000 });
+
+// The valid 6-digit code at a given unix second — computed DIRECTLY (RFC 4226 dynamic truncation off the exported
+// base32Decode) instead of brute-forcing all 10^6 candidates through verifyTotp. The self-check below asserts it agrees
+// with the PRODUCTION verifier, so a wrong direct impl can never pass silently — the cross-check the brute force gave.
+const RFC_KEY = base32Decode(RFC_SECRET);
+const codeAtSec = (unixSec) => {
+  const counter = Math.floor(unixSec / TOTP.periodSec);
+  const msg = Buffer.alloc(8);
+  msg.writeUInt32BE(Math.floor(counter / 0x1_0000_0000), 0);
+  msg.writeUInt32BE(counter % 0x1_0000_0000, 4);
+  const mac = createHmac('sha1', RFC_KEY).update(msg).digest();
+  const off = mac[mac.length - 1] & 0x0f;
+  const bin = ((mac[off] & 0x7f) << 24) | (mac[off + 1] << 16) | (mac[off + 2] << 8) | mac[off + 3];
+  return String(bin % 1_000_000).padStart(6, '0');
+};
+assert.equal(verifyTotp(RFC_SECRET, codeAtSec(1111111111), { ...at(1111111111), window: 0 }), true, 'the direct TOTP generator agrees with the production verifier');
 
 test('TOTP-1. base32Decode round-trips a known ASCII seed and tolerates spaces/case/padding', () => {
   assert.equal(base32Decode(RFC_SECRET).toString('utf8'), '12345678901234567890');
@@ -36,17 +53,12 @@ test('TOTP-3. default 6-digit code is the low 6 digits of the vector, and a wron
 });
 
 test('TOTP-4. ±1 step skew is accepted; ±2 is not', () => {
-  const codeAt = (s) => {
-    // recover the code by trying all 6-digit strings is silly — instead confirm the prior/next step codes verify under window 1.
-    for (let n = 0; n < 1000000; n++) { const c = String(n).padStart(6, '0'); if (verifyTotp(RFC_SECRET, c, { ...at(s), window: 0 })) return c; }
-    throw new Error('no code found');
-  };
   const base = 1111111111;
-  const prev = codeAt(base - TOTP.periodSec); // one step earlier
-  const next = codeAt(base + TOTP.periodSec); // one step later
+  const prev = codeAtSec(base - TOTP.periodSec); // one step earlier
+  const next = codeAtSec(base + TOTP.periodSec); // one step later
   assert.ok(verifyTotp(RFC_SECRET, prev, { ...at(base), window: 1 }), 'previous step accepted within ±1');
   assert.ok(verifyTotp(RFC_SECRET, next, { ...at(base), window: 1 }), 'next step accepted within ±1');
-  const twoAgo = codeAt(base - 2 * TOTP.periodSec);
+  const twoAgo = codeAtSec(base - 2 * TOTP.periodSec);
   assert.equal(verifyTotp(RFC_SECRET, twoAgo, { ...at(base), window: 1 }), false, 'two steps away rejected at window 1');
 });
 

@@ -12,15 +12,15 @@ Standing order and how the queue/backlog/open-questions relate: `docs/serpent/RE
 
 ## B-1. DROPPED — 2026-09-16 (owner decision): Prettier fights the intentional dense house style; no formatter lands.
 
-## B-2. L-2 follow-up — 24h maturation pass
-**Do:** the maturation pass that fills the 1h/4h/24h outcome columns of the research /
-opportunity records once each horizon has elapsed (the columns L-1/L-2 left pending).
-**Acceptance:** a recorded decision older than each horizon gets its 1h/4h/24h outcome
-filled from the actual tape; a decision younger than a horizon leaves that column
-explicitly pending (never a fabricated zero); pure/deterministic test with injected
-clock + tape; full suite green + gate 0. Feeds R3-6 (weekly report) columns.
+## B-2. DONE — 2026-09-16 (8e488ed): the research-horizon maturation pass fills the 1h/4h/24h columns.
+`learning/research-maturation.js` re-scores only those columns with the pure yardstick against a later,
+fuller tape and appends to `learning/research-outcome-store.js` (head-selected supersede store), mirroring
+`learning/maturation.js`. Older-than-horizon → KNOWN from the tape; younger → explicitly pending (never a
+zero); series-absent → one OUTCOME_UNAVAILABLE attachment then skipped (no wedge). fly.js runs it after each
+recorder tick, PAPER-gated, authority NONE. `test/research-maturation.test.js` RM-1..6.
 
-## B-3. BASELINE.md + READINESS.md refresh after the cull
+## B-3. DONE — 2026-09-16 (2087ddb): post-cull BASELINE refresh. (READINESS refresh folds into the paper-profile / READINESS tickets.)
+~~BASELINE.md + READINESS.md refresh after the cull~~
 **Do:** update `docs/serpent/BASELINE.md` and `docs/serpent/READINESS.md` to reflect the
 post-cull tree (retired social ears, the TwelveData / CROSS_ASSET market-lab cut, the
 SENSE-CULL-2 FRED / Coin Metrics retirement, family count 16, provider count 16, sensor
@@ -29,12 +29,16 @@ scope 39, app line count).
 counts and app-line figure match the code; full suite green (docs are not test-read, so
 this is a truthfulness pass, not a fence change).
 
-## B-4. Test-time trims — the ten slowest tests
-**Do:** measure per-test wall clock (`node --test` timings), take the ten slowest, and
-cut their runtime without losing coverage (shrink fixtures, drop real sleeps for injected
-clocks, reduce redundant iterations).
-**Acceptance:** each trimmed test asserts the same behavior (no removed assertions); the
-suite's total wall clock drops measurably; full suite green + gate 0.
+## B-4. DONE — 2026-09-16: TOTP brute-force codeAt eliminated (`control-auth-second-factor.test.js`, `totp.test.js`).
+Both files recovered the current TOTP code by scanning all 10^6 six-digit candidates through `verifyTotp`
+(~500k HMAC-SHA1 per call, called ~10× across the two files — the SF file's whole cost). Replaced with a direct
+RFC-4226 dynamic truncation off the exported `base32Decode`, self-checked once against the production verifier so the
+two can't diverge. Every SF-*/TOTP-* assertion is byte-for-byte unchanged (identical codes). The SF file runs in
+0.22s in isolation (was the largest single concentration of removable waste); suite `duration_ms` 326.6s → 308.5s,
+gate 0. The other slowest tests (`broad-day-chain-stress`, `daily-sharded-study-scale`, `judge-experiment-replay`,
+`judge-holdout-truth`, `adaptive-store` 1,000-update) are scale / real-composition / real-I-O tests whose magnitude
+IS the asserted property (bounded heap at 34,560 rows; linear journal bytes over 1,000 updates), so trimming their
+scale would remove coverage — left intact per the acceptance.
 
 ## B-5. Orphan sweep — zero-importer modules to attic
 **Do:** find every living-tree module with zero non-test importers (and no runtime entry

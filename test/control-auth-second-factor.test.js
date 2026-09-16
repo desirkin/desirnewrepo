@@ -6,27 +6,34 @@
 // No network; an injected clock drives both the session lifetime and TOTP.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 
 delete process.env.SERPENT_CONTROL_PASSWORD;
 delete process.env.SERPENT_CONTROL_TOTP_SECRET; // this file owns its configuration
 
 const { ControlAuth, gateControl, CLEAR_PHRASE, RATE_LIMIT } = await import('../ui/auth.js');
-const { verifyTotp } = await import('../lib/totp.js');
+const { verifyTotp, base32Decode } = await import('../lib/totp.js');
 
 const PW = 'test-owner-password-9182';
 const SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'; // base32 of ASCII "12345678901234567890"
 const T0 = 1_000_000_000_000; // ms
+const KEY = base32Decode(SECRET);
 
-// The valid 6-digit code at a given ms clock — recovered by asking verifyTotp
-// (window 0) which candidate matches, so the test never re-implements HOTP.
+// The valid 6-digit code at a given ms clock. Computed DIRECTLY (RFC 4226 dynamic truncation off the exported
+// base32Decode) rather than brute-forcing all 10^6 candidates through verifyTotp (~500k HMACs per call — the dominant
+// cost of this file). A one-time self-check below asserts the direct generator agrees with the PRODUCTION verifier, so
+// the two can never diverge on secret / period / digits / algorithm — the same cross-check the brute force gave, O(1).
 function codeAt(ms) {
-  const now = () => ms;
-  for (let n = 0; n < 1_000_000; n++) {
-    const c = String(n).padStart(6, '0');
-    if (verifyTotp(SECRET, c, { now, window: 0 })) return c;
-  }
-  throw new Error('no code found');
+  const counter = Math.floor(ms / 1000 / 30); // TOTP period 30s
+  const msg = Buffer.alloc(8);
+  msg.writeUInt32BE(Math.floor(counter / 0x1_0000_0000), 0);
+  msg.writeUInt32BE(counter % 0x1_0000_0000, 4);
+  const mac = createHmac('sha1', KEY).update(msg).digest();
+  const off = mac[mac.length - 1] & 0x0f;
+  const bin = ((mac[off] & 0x7f) << 24) | (mac[off + 1] << 16) | (mac[off + 2] << 8) | mac[off + 3];
+  return String(bin % 1_000_000).padStart(6, '0');
 }
+assert.equal(verifyTotp(SECRET, codeAt(T0), { now: () => T0, window: 0 }), true, 'the direct TOTP generator agrees with the production verifier');
 
 const mk = (over = {}) => {
   let t = T0;
