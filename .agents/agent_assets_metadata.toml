@@ -14,3 +14,17 @@ mtime_ms = 1789599201177
 storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/ebde9b06-608f-4055-b315-c32e6845c9e7/dec700fc-6472-420c-a3a1-2388fdfa91eb"
 storage_version_token = "1789599208073423"
 content_type = "application/octet-stream"
+
+[[outputs]]
+id = "L8SvlWnMjyI_tBrY8AjJy"
+uri = "file://exports/serpent-whole-app-llm-review-e7d6f18e.zip"
+type = "unspecified"
+title = "Serpent whole-app LLM review bundle"
+description = "Comprehensive 1,040-file review bundle for commit e7d6f18e3609102ccf5b2bb4c37c746197032a6b. Includes the full committed codebase, tests, docs, doctrine, configuration, scripts, migrations, examples, evidence, Git/revision manifests, review guidance, and per-file hashes. Excludes only credentials, Git objects, installed dependencies, raw runtime/database data, caches, and prior generated exports."
+logical_id = "b9144760-e7ba-47c8-93a6-bcf593903b46"
+content_hash = "sha256:7e09dafa2c9d564f649172bab0cf83332dabb9303ea16abdcbad1dfc33d5f157"
+size = 7229062
+mtime_ms = 1789599363958
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/b9144760-e7ba-47c8-93a6-bcf593903b46/6c59b749-036b-41ba-a17c-7e41266706b1"
+storage_version_token = "1789599370530117"
+content_type = "application/octet-stream"
