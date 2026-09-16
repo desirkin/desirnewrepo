@@ -49,6 +49,7 @@ DISCOVERY_ENABLED = "true"
 NODE_OPTIONS = "--max-old-space-size=1400"
 SERPENT_TAPE_WRITE_BEHIND = "true"
 SERPENT_CPU_PROFILE = "true"
+SERPENT_STALL_WATCHDOG = "true"
 
 [postMerge]
 path = "scripts/post-merge.sh"
