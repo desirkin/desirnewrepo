@@ -55,10 +55,7 @@ export const SCOPE = Object.freeze([
   R('P07', 'Cointelegraph', ['COINTELEGRAPH_NEWS']),
   R('P08', 'Decrypt', ['DECRYPT_NEWS']),
   R('P09', 'Google News (aggregator; transport identity is Google, publisher identity is per item)', ['GOOGLE_NEWS_AGGREGATOR']),
-  // INFRASTRUCTURE, GOVERNANCE AND STATUS — 8
-  R('I01', 'Cloudflare Radar (verified current authentication requirements)', ['CLOUDFLARE_RADAR']),
-  R('I02', 'NOAA space weather (K-index / storm scales; experimental)', ['NOAA_SWPC_SPACE_WEATHER']),
-  R('I03', 'RIPE RIS / BGP (bounded supported route)', ['RIPE_RIS_BGP']),
+  // GOVERNANCE AND EXCHANGE STATUS — 5 (LEAN PASS 4a retired the NOAA / RIPE RIS / Cloudflare Radar infra observation tier)
   R('I04', 'Tally governance (configured entities / proposals; event and knowledge clocks)', ['GOVERNANCE_TALLY']),
   R('I05', 'Kraken Statuspage', ['GATEWAY_KRAKEN_STATUS']),
   R('I06', 'Kraken system-status API', ['GATEWAY_KRAKEN_SYSTEM']),

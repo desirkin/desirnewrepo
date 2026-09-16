@@ -37,10 +37,7 @@
    "socialStrainer": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "rumor2/social-research-strainer.js", "authority": "NONE" }
   },
   "infrastructure": {
-   "gateway": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "gateway/collector.js", "authority": "NONE", "sources": ["kraken", "krakenSystem", "coinbase", "okx"], "note": "public status pages / system-status endpoints, polite polling; never trading permission" },
-   "NOAA_SWPC": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "infra/collector.js", "authority": "NONE", "enableEnv": "INFRA_OBS_ENABLED", "experimental": true, "note": "NOAA SWPC planetary K-index + current R/S/G scales (public JSON, 10 min cadence); EXPERIMENTAL observation family, never a decision input" },
-   "RIPE_RIS": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "module": "infra/collector.js", "authority": "NONE", "enableEnv": "INFRA_OBS_ENABLED", "gate": "INFRA_RIPE_RESOURCES", "note": "RIPEstat routing-status for the operator's OWN monitored prefixes / ASNs (INFRA_RIPE_RESOURCES); CONFIG_REQUIRED until named — the profile never invents a watch list" },
-   "CLOUDFLARE_RADAR": { "desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "module": "infra/collector.js", "authority": "NONE", "enableEnv": "INFRA_OBS_ENABLED", "credentialEnv": "CLOUDFLARE_API_TOKEN", "note": "Cloudflare Radar BGP announcement time series (the provider requires API-token authorization); CREDENTIAL_REQUIRED until the token is present" }
+   "gateway": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "gateway/collector.js", "authority": "NONE", "sources": ["kraken", "krakenSystem", "coinbase", "okx"], "note": "public status pages / system-status endpoints, polite polling; never trading permission" }
   },
   "rumorOfficial": {
    "rumor2": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "rumor2/collector.js", "authority": "NONE", "enableEnv": "RUMOR2_ENABLED" },

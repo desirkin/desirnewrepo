@@ -17,7 +17,6 @@ import { startRumint } from './rumint/poller.js';
 import { startGateway, readGatewayLatency } from './gateway/collector.js';
 import { effectiveFillLatencyMs } from './lib/paper-fill-latency.js';
 import { startPress } from './press/collector.js';
-import { startInfra } from './infra/collector.js';
 import { startVideo } from './video/collector.js';
 import { readVideoObservations } from './video/reader.js';
 import { startWideEye } from './survey/wideeye.js';
@@ -112,11 +111,10 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // path) so a republish cannot erase the ear's statistical memory.
   startRumint({ checkpointStore: rumintCheckpointStore(), memoryBootstrapSource: rumintBootstrapSource() });
   startGateway(); // no-ops (zero network) unless gateway is enabled — collector only
-  // PRESS (publisher headline observation, press/) and INFRA (NOAA / RIPE RIS / Cloudflare Radar, infra/): dark collectors
-  // composed exactly like the gateway — zero network, zero timers unless PRESS_ENABLED / INFRA_OBS_ENABLED say true (the paper
-  // profile derives both); JSONL observations + a status file only; nothing downstream reads them for a decision. Authority NONE.
+  // PRESS (publisher headline observation, press/): a dark collector composed exactly like the gateway — zero network,
+  // zero timers unless PRESS_ENABLED says true (the paper profile derives it); JSONL observations + a status file only;
+  // nothing downstream reads it for a decision. Authority NONE. (LEAN PASS 4a: the INFRA observation tier is retired.)
   try { startPress(); } catch { console.error('[press] startup withheld: observation storage requires review'); }
-  try { startInfra(); } catch { console.error('[infra] startup withheld: observation storage requires review'); }
   // VIDEO (YouTube public metadata, video/): the same dark pattern — zero requests unless SOCIAL_VIDEO_ENABLED says true AND the
   // closed gate holds (key + the operator's own queries + an explicit daily search budget); never a RUMOR-2 social event.
   try { startVideo(); } catch { console.error('[video] startup withheld: observation storage requires review'); }

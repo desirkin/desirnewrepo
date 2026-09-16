@@ -19,7 +19,7 @@ export const OBJECT_UPLOADER_VERSION = 'serpent-object-uploader-1';
 export const DEFAULT_MAX_FILES_PER_SOURCE = 20_000;
 // The bulk streams a Replit republish wipes (APP-MAP §4), relative to the data dir. Each is a directory of append-only
 // files; the manifest keeps them individually addressed.
-export const DEFAULT_BACKED_SOURCES = Object.freeze(['tape', 'broad-kraken', 'market-research', 'learning', 'survey', 'gateway', 'infra', 'discovery', 'video', 'control']);
+export const DEFAULT_BACKED_SOURCES = Object.freeze(['tape', 'broad-kraken', 'market-research', 'learning', 'survey', 'gateway', 'discovery', 'video', 'control']);
 
 const bounded = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').slice(0, 180);
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');

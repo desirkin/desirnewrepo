@@ -1,6 +1,6 @@
 // PERSIST-1 object-store substrate (2026-09-14). Replit wipes the container filesystem on every publish, so the bulk
 // streams that are too large for the 1-MiB store anchors — broad-Kraken segments, deep market captures, all of
-// data/learning/, tape sessions, the survey / gateway / infra / discovery / video files — need a DURABLE external
+// data/learning/, tape sessions, the survey / gateway / discovery / video files — need a DURABLE external
 // bucket plus an uploader and a restore-on-boot. This module is the bottom of that build: the adapter CONTRACT every
 // higher layer speaks, a dependency-free FILESYSTEM backend (the lawful default and the one tests use — point it at a
 // persistent mount or a mounted bucket), and the env-NAME-only configuration resolver. Provider selection is

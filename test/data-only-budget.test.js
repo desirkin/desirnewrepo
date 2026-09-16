@@ -92,11 +92,12 @@ test("separately journaled social hosts are not duplicated while unknown hosts f
   assert.equal(DEFAULT_DATA_ONLY_LANES.FARCASTER_OFFICIAL, undefined);
 });
 
-test("deployed fourteen-lane checkpoint imports without resetting any counters", () => {
+test("deployed twelve-lane checkpoint imports without resetting any counters", () => {
+  // LEAN PASS 4a retired the NOAA_SWPC / CLOUDFLARE_RADAR infra lanes.
   const expected = [
     "KRAKEN_PUBLIC_REST", "KRAKEN_STATUS", "COINBASE_STATUS", "OKX_STATUS",
     "KRAKEN_OFFICIAL", "SEC_OFFICIAL", "CFTC_OFFICIAL", "OFAC_OFFICIAL",
-    "NOAA_SWPC", "CLOUDFLARE_RADAR", "COINDESK_NEWS", "THEBLOCK_NEWS",
+    "COINDESK_NEWS", "THEBLOCK_NEWS",
     "COINTELEGRAPH_NEWS", "DECRYPT_NEWS",
   ];
   assert.deepEqual(Object.keys(DEFAULT_DATA_ONLY_LANES), expected);

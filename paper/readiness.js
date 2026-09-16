@@ -14,7 +14,6 @@ import { paidCallAuthorized } from '../market-lab/policy.js';
 import { resolveSocratesActivation } from '../lib/explainer-toggles.js';
 import { loadProfile, profileFileOf, RUNTIME_STATES, mergeOverlay } from './profile.js';
 import { PRESS_SOURCES } from '../press/registry.js';
-import { INFRA_SOURCES } from '../infra/registry.js';
 import { loadRegistry, VERIFIED_MAPPINGS } from '../governance/registry.js';
 import { tallyStatus } from '../governance/tally.js';
 import { readJsonBounded as boundedJsonFile } from '../lib/jsonl.js';
@@ -23,7 +22,7 @@ export const SNAPSHOT_VERSION = 'serpent-sensor-snapshot-1';
 export const SNAPSHOT_GROUPS = Object.freeze(['MARKET', 'OFFICIAL', 'SOCIAL', 'INFRASTRUCTURE', 'DARK_RESEARCH', 'SOCRATES', 'JUDGE', 'WATCH', 'PUBLISHER_NEWS']);
 export const EXTRA_STATES = Object.freeze(['NOT_OBSERVED', 'DARK_CAPTURE_OPERATIONAL', 'DARK_CAPTURE_BLOCKED_EXTERNAL', 'DARK_CAPTURE_DEGRADED', 'DARK_CAPTURE_DISABLED_BY_POLICY', 'BLOCKED_NO_SAFE_L3_DATA_KEY', 'KEY_PRESENT_UNPROVEN']);
 export const ROW_KEYS = Object.freeze(['id', 'name', 'group', 'state', 'desiredState', 'lastSuccessTs', 'ageMs', 'coverage', 'blocker', 'detail', 'authority']);
-export const FRESH_MS = Object.freeze({ tape: 30_000, survey: 15 * 60_000, rumint: 60 * 60_000, gateway: 10 * 60_000, rumor2: 5 * 60_000, research: 5 * 60_000, judge: 15_000, dark: 30 * 60_000, press: 30 * 60_000, infraCadences: 3, video: 3 * 60 * 60_000 });
+export const FRESH_MS = Object.freeze({ tape: 30_000, survey: 15 * 60_000, rumint: 60 * 60_000, gateway: 10 * 60_000, rumor2: 5 * 60_000, research: 5 * 60_000, judge: 15_000, dark: 30 * 60_000, press: 30 * 60_000, video: 3 * 60 * 60_000 });
 const MAX_JSON = 2 * 1024 * 1024;
 export const readJsonBounded = (file) => { try { if (!existsSync(file)) return null; return boundedJsonFile(file, MAX_JSON); } catch { return null; } };
 const present = (env, names) => (Array.isArray(names) ? names : [names]).filter(Boolean).every((n) => typeof env[n] === 'string' && env[n].length > 0);
@@ -62,14 +61,6 @@ export function sensorSnapshot({ profile = loadProfile(), env = process.env, con
   for (const [src, name] of [['kraken', 'Kraken status page'], ['krakenSystem', 'Kraken system status'], ['coinbase', 'Coinbase status page'], ['okx', 'OKX system status']]) {
     const on = gwOn && config.gateway?.sources?.[src] !== false;
     rows.push(R({ id: `GATEWAY_${src.toUpperCase()}`, name: `Gateway: ${name}`, group: 'INFRASTRUCTURE', state: !on ? 'DISABLED_BY_PAPER_POLICY' : freshOr(gwTs, now, FRESH_MS.gateway, 'ACTIVE'), desiredState: on ? 'ON' : 'OFF', lastSuccessTs: on ? gwTs : null, ageMs: on ? age(gwTs, now) : null, coverage: matrix ? `door matrix ${Object.keys(matrix.doors ?? {}).length} coins` : 'NO_MATRIX_FILE', blocker: !on ? 'gateway or source disabled' : matrix === null ? 'no gateway matrix yet' : null, detail: 'public read-only; never trading permission', authority: 'NONE' }));
-  }
-  // ---- INFRASTRUCTURE observation tier (infra/: NOAA / RIPE RIS / Cloudflare Radar) — from the collector's status file only ------
-  const infra = readJsonBounded(path.join(dataDir, 'infra', 'status.json')); const infraOn = env.INFRA_OBS_ENABLED === 'true'; const infraSel = new Set(String(env.INFRA_SOURCES ?? '').split(',').map((x) => x.trim()).filter(Boolean));
-  for (const src of INFRA_SOURCES) {
-    const pr = g.infrastructure?.[src.id] ?? null; const desiredHere = pr?.desiredState ?? 'OFF'; const st = infra?.sources?.[src.id] ?? null; const okTs = tsOf(st?.lastSuccessTs); const freshMs = src.cadenceSec * 1000 * FRESH_MS.infraCadences;
-    const gate = src.credentialEnv && !present(env, src.credentialEnv) ? 'BLOCKED_CREDENTIAL' : src.configEnv && !present(env, src.configEnv) ? `CONFIG_REQUIRED:${src.configEnv}` : src.id==='CLOUDFLARE_RADAR'&&!present(env,'INFRA_CLOUDFLARE_ASN')&&!present(env,'INFRA_CLOUDFLARE_PREFIX')&&env.INFRA_CLOUDFLARE_GLOBAL!=='true' ? 'CONFIG_REQUIRED:RADAR_SCOPE' : st?.state==='CONFIG_REQUIRED' ? 'CONFIG_REQUIRED:INFRA_SCOPE' : null;
-    const state = desiredHere === 'OFF' || !infraOn || !infraSel.has(src.id) ? 'DISABLED_BY_PAPER_POLICY' : gate ? gate : infra === null || st === null ? 'NOT_OBSERVED' : st.state === 'IDLE' ? 'NOT_OBSERVED' : ['OBSERVED', 'EMPTY'].includes(st.state) ? freshOr(okTs, now, freshMs, 'ACTIVE') : okTs !== null && now - okTs <= freshMs ? 'ACTIVE_DEGRADED' : 'BLOCKED_PROVIDER';
-    rows.push(R({ id: `INFRA_${src.id}`, name: `Infrastructure observation: ${src.name}${src.experimental ? ' (EXPERIMENTAL)' : ''}`, group: 'INFRASTRUCTURE', state, desiredState: desiredHere, lastSuccessTs: okTs, ageMs: age(okTs, now), coverage: st ? `${st.state}; ${st.coverage ?? '—'}; admitted ${st.counters?.admitted ?? 0} / requests ${st.counters?.requests ?? 0}` : infra ? 'NOT_IN_STATUS' : 'NO_STATUS_FILE', blocker: state === 'DISABLED_BY_PAPER_POLICY' ? (pr?.reason ?? (!infraOn ? 'INFRA_OBS_ENABLED not true' : 'not selected in INFRA_SOURCES')) : gate ? (src.credentialEnv && gate === 'BLOCKED_CREDENTIAL' ? `${src.credentialEnv} missing` : `${src.configEnv ?? 'RADAR_SCOPE'} requires a valid monitored scope`) : st && !['OBSERVED', 'EMPTY', 'IDLE'].includes(st.state) ? String(st.lastError ?? st.state).slice(0, 160) : null, detail: `${src.kind}; cadence ${src.cadenceSec}s; measurement recorded only from a parsed payload (a connected socket is never a value); experimental ${src.experimental ? 'yes' : 'no'}`, authority: 'NONE' }));
   }
   // ---- OFFICIAL (RUMOR2 ears) ---------------------------------------------------------------------------------------------------
   const r2 = readJsonBounded(path.join(dataDir, 'rumor2', 'status.json')); const r2Ts = tsOf(r2?.tsMs); const r2On = env.RUMOR2_ENABLED === 'true';

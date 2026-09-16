@@ -90,7 +90,7 @@ npm run data:only                      # the data-only collector runtime
 npm run data:only-ui                   # data-only runtime + the in-process cockpit (the deployment entrypoint)
 npm run data:status                    # runtime status
 node bin/cobra.js learning status      # the learner's status
-node bin/cobra.js discovery status     # public-discovery collector status (also: press / infra / video)
+node bin/cobra.js discovery status     # public-discovery collector status (also: press / video)
 ```
 
 Daily locks (ET session anchor): **+5% SELECTIVE / +8% PROTECT / +11% HARD LOCK** — the

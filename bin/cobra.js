@@ -188,16 +188,15 @@ async function main() {
     }
 
     case 'press':
-    case 'infra':
     case 'video':
     case 'discovery': {
-      // read-only readers over the dark observation tiers (press/ publisher headlines, infra/ NOAA / RIPE RIS / Cloudflare Radar):
+      // read-only readers over the dark observation tiers (press/ publisher headlines, video/ YouTube, discovery/ public feeds):
       // status = the collector's status file; tail = the last N observations (--source ID, --kind KIND, --limit N). No network.
       const { dataDir } = await import('../lib/config.js');
-      const mod = command === 'press' ? await import('../press/reader.js') : command === 'infra' ? await import('../infra/reader.js') : command === 'video' ? await import('../video/reader.js') : await import('../discovery/reader.js');
+      const mod = command === 'press' ? await import('../press/reader.js') : command === 'video' ? await import('../video/reader.js') : await import('../discovery/reader.js');
       const dir = dataDir(config); const sub = rest[0]; const limit = Math.min(500, Math.max(1, Number(flag('limit') ?? 20) || 20));
-      if (sub === 'status') { const st = command === 'press' ? mod.readPressStatus(dir) : command === 'infra' ? mod.readInfraStatus(dir) : command === 'video' ? mod.readVideoStatus(dir) : mod.readDiscoveryStatus(dir); if (!st) { const folder = command === 'discovery' ? 'public-discovery' : command; console.log(`${command}: no status file at ${dir}/${folder}/status.json (collector dark or never started)`); process.exitCode = 1; return; } console.log(JSON.stringify(st, null, 1)); return; }
-      if (sub === 'tail') { const opts = { sourceId: typeof flag('source') === 'string' ? flag('source') : null, limit }; if (command === 'infra' && typeof flag('kind') === 'string') opts.kind = flag('kind'); if (command === 'video' && typeof flag('query') === 'string') opts.query = flag('query'); const r = command === 'press' ? mod.readPressObservations(dir, opts) : command === 'infra' ? mod.readInfraObservations(dir, opts) : command === 'video' ? mod.readVideoObservations(dir, opts) : mod.readDiscoveryObservations(dir, opts); for (const o of r.observations) console.log(JSON.stringify(o)); console.log(`# ${r.observations.length} observation(s); corrupt ${r.corrupt}; truncatedRead ${r.truncatedRead}`); return; }
+      if (sub === 'status') { const st = command === 'press' ? mod.readPressStatus(dir) : command === 'video' ? mod.readVideoStatus(dir) : mod.readDiscoveryStatus(dir); if (!st) { const folder = command === 'discovery' ? 'public-discovery' : command; console.log(`${command}: no status file at ${dir}/${folder}/status.json (collector dark or never started)`); process.exitCode = 1; return; } console.log(JSON.stringify(st, null, 1)); return; }
+      if (sub === 'tail') { const opts = { sourceId: typeof flag('source') === 'string' ? flag('source') : null, limit }; if (command === 'video' && typeof flag('query') === 'string') opts.query = flag('query'); const r = command === 'press' ? mod.readPressObservations(dir, opts) : command === 'video' ? mod.readVideoObservations(dir, opts) : mod.readDiscoveryObservations(dir, opts); for (const o of r.observations) console.log(JSON.stringify(o)); console.log(`# ${r.observations.length} observation(s); corrupt ${r.corrupt}; truncatedRead ${r.truncatedRead}`); return; }
       if (command === 'discovery' && sub === 'receipts') { const r = mod.readDiscoveryReceipts(dir, { sourceId: typeof flag('source') === 'string' ? flag('source') : null, limit }); for (const receipt of r.receipts) console.log(JSON.stringify(receipt)); console.log(`# ${r.receipts.length} receipt(s); corrupt ${r.corrupt}; truncatedRead ${r.truncatedRead}`); return; }
       return usage();
     }

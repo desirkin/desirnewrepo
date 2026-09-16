@@ -73,7 +73,7 @@ test('outer market funnel subscribes the complete accepted catalog independently
   assert.ok(source.indexOf('await wideEye._refreshCatalog()') < source.indexOf('await startBroadKraken('));
   assert.ok(source.indexOf('await openDataOnlyCheckpoints(') < source.indexOf('await startBroadKraken('));
   assert.doesNotMatch(source, /\b(?:BTC|ETH|SOL)\b|composeDataOnlySocialConfig/);
-  const broad = source.slice(source.indexOf('if (catalogSource)'), source.indexOf("const infraEnv = { ...env, INFRA_OBS_ENABLED"));
+  const broad = source.slice(source.indexOf('if (catalogSource)'), source.indexOf('// The source owns its key/query/quota gates'));
   assert.match(broad, /startBroadKraken/);
   assert.doesNotMatch(broad, /checkpoints\?\.market|if \(catalog\)/);
   assert.match(source, /if \(!checkpoints\?\.market\) throw/, 'deep REST quota gate is preserved');

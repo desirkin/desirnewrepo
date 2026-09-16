@@ -83,13 +83,9 @@ export function profileEnvironment(profile, { dataDir = null } = {}) {
     // PUBLISHER observation tier (press/): the profile selects publisher feeds by id; ON rows are watched, OFF / licensed rows
     // never called. Headline / link only, authority NONE, outside the frozen RUMOR-2 evidence core.
     PRESS_ENABLED: Object.values(g.publisherNews).some(on) ? 'true' : 'false', PRESS_SOURCES: Object.entries(g.publisherNews).filter(([, r]) => on(r)).map(([id]) => id).join(','),
-    // INFRASTRUCTURE observation tier (infra/): NOAA / RIPE RIS / Cloudflare Radar. REQUEST rows are selected but the collector's
-    // own gate decides (CONFIG_REQUIRED / CREDENTIAL_REQUIRED make zero calls); a credential alone never enables anything.
-    INFRA_OBS_ENABLED: Object.entries(g.infrastructure).some(([id, r]) => id !== 'gateway' && (on(r) || r?.desiredState === 'REQUEST')) ? 'true' : 'false',
     // SOCIAL VIDEO (video/): REQUESTED like X — the collector's own closed gate decides (key + own queries + explicit daily
-    // search budget); the enable flag alone never spends a request.
+    // search budget); the enable flag alone never spends a request. (LEAN PASS 4a: the INFRA observation tier is retired.)
     SOCIAL_VIDEO_ENABLED: g.social.YOUTUBE_DATA_API?.desiredState === 'REQUEST' || on(g.social.YOUTUBE_DATA_API) ? 'true' : 'false',
-    INFRA_SOURCES: Object.entries(g.infrastructure).filter(([id, r]) => id !== 'gateway' && (on(r) || r?.desiredState === 'REQUEST')).map(([id]) => id).join(','),
   };
   if (dataDir) env.COBRA_DATA_DIR = dataDir;
   if (typeof g.judge.judge.accountId !== 'string' || !g.judge.judge.accountId.length) delete env.JUDGE_ACCOUNT;
