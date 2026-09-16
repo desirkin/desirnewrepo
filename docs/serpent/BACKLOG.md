@@ -40,12 +40,15 @@ gate 0. The other slowest tests (`broad-day-chain-stress`, `daily-sharded-study-
 IS the asserted property (bounded heap at 34,560 rows; linear journal bytes over 1,000 updates), so trimming their
 scale would remove coverage — left intact per the acceptance.
 
-## B-5. Orphan sweep — zero-importer modules to attic
-**Do:** find every living-tree module with zero non-test importers (and no runtime entry
-point / CLI / composition-root reference), and `git mv` each to `attic/` (never delete),
-removing it completely from the living tree.
-**Acceptance:** an import-graph scan shows no living module is unreferenced after the
-sweep; nothing in `attic/` is imported by living code; full suite green + gate 0.
+## B-5. DONE — 2026-09-16: import-graph sweep; one genuine orphan retired to attic.
+A reachability scan (BFS over static + literal-dynamic + worker imports from every runtime entry point — package.json
+bin/scripts, fly.js, ui/server.js, bin/*, tools/*, the cpu-lane/decision-memory/case-verify workers, and the
+`Run: node <self>` manual entries childhood/build.js + persistence/migrate-local.js) plus a whole-tree importer map found
+exactly ONE module with zero importers of any kind (runtime, test, or sibling): `lib/data-only-social-config.js` —
+`git mv` to `attic/lib/`, README indexed. Everything else classified as either a tested dormant-by-design subsystem
+(imported by tests/reached modules) or a self-contained cluster (barrel + siblings, e.g. adaptive-qualified-procedure,
+broad-day-reader) — those have importers and are NOT orphans, so they stay. Attic isolation is already fenced by
+`test/attic-fence.test.js` ATTIC-1 (git-ls-files based, so the move is covered). Full suite green + gate 0.
 
 ## B-6. Boot-log consistency — one prefix, one timestamp per line
 **Do:** make every boot log line carry exactly one prefix and one timestamp (today's logs

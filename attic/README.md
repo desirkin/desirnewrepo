@@ -26,3 +26,7 @@ Law (lean trim, 2026-09-14, approved by David):
   importer, no package.json script, no `.replit`, no doc, no fence, no test) — one-off throwaway diagnostics superseded by
   the unified runtime's own collector status; they moved no sense module. The live operator diagnostics stay
   (`tools/social-storage-diagnose.mjs`, `tools/news-setup.mjs`, the fenced bluesky/farcaster/official setup smokes).
+- `lib/data-only-social-config.js` — the data-only composition policy for the bounded X commissioning smoke
+  (`composeDataOnlySocialConfig`), orphaned by LEAN PASS 4a (B-5 orphan sweep, 2026-09-16). Proven fully dead by the
+  import graph: zero importers of any kind — no runtime root, no test, no sibling — its only remaining trace is the
+  data-only fence asserting the entry does NOT compose it. The live data-only social path is gone; nothing replaced it.
