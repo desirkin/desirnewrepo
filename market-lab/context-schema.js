@@ -5,7 +5,7 @@
 // undeclared key, an unknown support state) is refused identically at every boundary — never coerced, never ignored.
 // Importing this module performs no I/O.
 import { QUALITY_STATES, TIME_PRECISIONS, UNLOCK_TYPES, SESSION_STATES, EVENT_KINDS, PROVIDER_STATUS_STATES, UNITS, WINDOWS, deepFreeze } from './contracts.js';
-import { INTERVAL_COVERAGE_STATES, TRADE_WINDOW_SUPPORT, OPTIONS_CENSUS_BASES } from './recipes.js';
+import { INTERVAL_COVERAGE_STATES, TRADE_WINDOW_SUPPORT } from './recipes.js';
 
 const MAX_REASONS = 16; const MAX_REASON_CHARS = 120; const MAX_STR = 300; const MAX_LIST = 4_096;
 const isPlain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -86,10 +86,6 @@ const oiChangeSchema = obj({ recipeId: literal('oi_change'), version, absolute: 
 const fundingSchema = obj({ recipeId: literal('funding_native'), version, value: numN, support: supportOf(['NO_FUNDING', 'UNIT_REJECTED', 'COMPLETE']) }, { unit: en(['FRACTION_PER_INTERVAL', 'ABSOLUTE_QUOTE_PER_CONTRACT_PER_INTERVAL']), intervalMs: count, relative: numN, payerConvention: en(['LONGS_PAY_SHORTS', 'SHORTS_PAY_LONGS', 'ZERO']), settlementCurrency: strN, linearity: strN, annualized: literal(null), law });
 const basisValue = obj({ instrument: str(120), marketType: str(40), basisBps: numN, markPrice: priceN, indexPrice: priceN, openInterest: obj({ value: nonnegN, unit: str(40), changeOverHour: oiChangeSchema }), funding: fundingSchema, ageMs: count, quality: en(QUALITY_STATES) });
 const liquidationValue = obj({ recipeId: literal('liquidation_notional_by_side'), version, longNotional: nonnegN, shortNotional: nonnegN, support: supportOf(['COMPLETE', 'COMPLETE_NO_EVENTS', 'UNKNOWN_COVERAGE', 'UNIT_MISMATCH']), venues: arr(str(80), 64) }, { startTs: ts, endTs: ts, events: count, unit: strN, unknownSideNotional: nonnegN, zeroMeaningful: bool, law });
-const optionLeg = obj({ instrumentId: str(120), delta: num, deltaDistance: nonneg, markIv: nonneg });
-const termEntry = obj({ expiryTs: ts, contracts: count, atm: nullable(obj({ instrumentId: str(120), strike: price, logDistance: nonneg, markIv: nonneg })), call25: nullable(optionLeg), put25: nullable(optionLeg), riskReversal25d: numN, butterfly25d: numN, atmIvBidAskSpread: nonnegN, putCallOiRatio: nonnegN, putCallVolumeRatio: nonnegN, ratioScope: en(['WHOLE_CHAIN', 'ADMITTED_SUBSET']), greeksMissing: count, support: supportOf(['PARTIAL_ADMITTED_SCOPE', 'PARTIAL_CENSUS', 'COMPLETE_ADMITTED_SCOPE']) });
-const censusSchema = obj({ complete: bool, basis: en(OPTIONS_CENSUS_BASES), total: countN, admitted: count, omitted: countN, rejected: countN, unticked: countN, censusId: idN, censusKnownAtTs: tsN });
-const optionsValue = obj({ recipeId: literal('atm_iv_term'), version, term: arr(termEntry, 256), support: supportOf(['NO_OPTIONS', 'SCOPE_MISMATCH', 'OVER_CAP', 'PARTIAL_CENSUS', 'ADMITTED_SUBSET', 'COMPLETE']), admission: obj({ ticksSeen: count, inCensus: count, notInCensus: count, admitted: count, omitted: count, recipe: str(120) }) }, { scope: str(200), admitted: count, admittedCap: count, censusComplete: bool, census: censusSchema, law });
 const supplyValue = obj({ recipeId: literal('supply_ratios'), version, support: supportOf(['NO_REFERENCE', 'COMPLETE']), reference: obj({ provider: str(40), marketCapUsd: nonnegN, fdvUsd: nonnegN, circulatingSupply: nonnegN, totalSupply: nonnegN, maxSupply: nonnegN, priceUsd: nonnegN, lastUpdatedTs: tsN, ageMs: count }) }, { circulatingOverTotal: nonnegN, circulatingOverMax: nonnegN, fdvOverMarketCap: nonnegN, volumeOverMarketCap: nonnegN, maxSupplyKnown: bool, capMethodologyId: idN });
 const unlockValue = obj({ upcoming: arr(obj({ provider: str(40), eventId: str(120), scheduledTs: tsN, timePrecision: en(TIME_PRECISIONS), amountToken: nonnegN, amountUsd: nonnegN, recipientCategory: strN, unlockType: en(UNLOCK_TYPES), tracked: bool, knownAtTs: ts }), 256), untrackedAllocations: count, laws });
 const poolValue = obj({ chain: str(80), poolAddress: str(120), dex: idN, baseToken: str(120), quoteToken: str(120), priceUsd: nonnegN, priceQuote: nonnegN, liquidityUsd: nonnegN, volume24hUsd: nonnegN, volume1hUsd: nonnegN, txCount24h: countN, poolCreatedTs: tsN, feePct: nonnegN, ageMs: count, provider: str(40), laws });
@@ -119,7 +115,6 @@ export const METRIC_SCHEMAS = deepFreeze(Object.fromEntries([
   ['peer_relative_move', { support: ['COMPLETE', 'INSUFFICIENT_PEERS'], value: peerValue }],
   ['basis_bps', { support: ['COMPLETE', 'PARTIAL'], value: basisValue }],
   ['liquidation_notional_by_side', { support: ['COMPLETE', 'COMPLETE_NO_EVENTS', 'UNKNOWN_COVERAGE', 'UNIT_MISMATCH'], value: liquidationValue }],
-  ['atm_iv_term', { support: ['COMPLETE', 'ADMITTED_SUBSET', 'PARTIAL_CENSUS', 'OVER_CAP', 'NO_OPTIONS', 'SCOPE_MISMATCH'], value: optionsValue }],
   ['supply_ratios', { support: ['COMPLETE'], value: supplyValue }],
   ['unlock_schedule', { support: ['COMPLETE', 'NO_UPCOMING_TRACKED'], value: unlockValue }],
   ['pool_liquidity', { support: ['COMPLETE', 'PARTIAL'], value: poolValue }],

@@ -23,7 +23,7 @@ test('B01. v1 stays v1: evidence/contract.js and socrates/contract.js are byte-i
   assert.equal(EVIDENCE_SCHEMA_VERSION, 'serpent-evidence-1'); assert.equal(EVIDENCE_SCHEMA_VERSION_2, 'serpent-evidence-2');
   const v1 = validateEvidencePacketAny({ schemaVersion: EVIDENCE_SCHEMA_VERSION, packetId: 'sep-x' }); assert.equal(v1.valid, false); const direct = validateEvidencePacket({ schemaVersion: EVIDENCE_SCHEMA_VERSION, packetId: 'sep-x' }); assert.equal(v1.valid, direct.valid); assert.deepEqual([...v1.reasons], [...direct.reasons], 'v1 packets are judged by the v1 validator, unchanged');
   assert.equal(validateEvidencePacketAny({ schemaVersion: 'serpent-evidence-9' }).valid, false); assert.equal(validateEvidencePacketAny(null).valid, false);
-  assert.ok(TRIGGER_KINDS_V2.includes('MARKET_RESEARCH') && TRIGGER_KINDS_V2.includes('RESEARCH_DOSSIER')); assert.equal(MARKET_EVIDENCE_KINDS.length, 20); assert.ok(COVERAGE_LIMITATION_REASONS.includes('REPLAY_NETWORK_OFF'));
+  assert.ok(TRIGGER_KINDS_V2.includes('MARKET_RESEARCH') && TRIGGER_KINDS_V2.includes('RESEARCH_DOSSIER')); assert.equal(MARKET_EVIDENCE_KINDS.length, 19); assert.ok(COVERAGE_LIMITATION_REASONS.includes('REPLAY_NETWORK_OFF'));
 });
 
 test('B02/B03. a market-only packet carries provider sources, MARKET sense only, marketContextRef -> the ONE summary, dossierRef null and SOCIAL_PROJECTION_ABSENT; the summary component graph refuses a dangling id, a cycle, a component of another subject / as-of, and a marketContextRef that names a chart item', () => {

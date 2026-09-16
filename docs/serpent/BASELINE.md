@@ -71,9 +71,17 @@ culls and the paper-prep run since then changed those figures. Current state of 
 
 - **Market-lab providers:** the TwelveData cross-asset provider + the whole `CROSS_ASSET`
   family + the `PER_SYMBOL` credit path were culled to `attic/` (market-lab providers cut),
-  then FRED / ALFRED and Coin Metrics Community were culled to `attic/` (SENSE-CULL-2).
-  `MACRO_RELEASES` survives on the CoinGlass economic calendar; `NETWORK_ACTIVITY` on
-  CryptoQuant / Santiment. **PROVIDER_IDS 16, FAMILIES 16, sensor scope 39** (M14/M15/M19
+  then FRED / ALFRED and Coin Metrics Community were culled to `attic/` (SENSE-CULL-2), then
+  Deribit, Bybit, Binance-global and Santiment were culled to `attic/` (SENSE-CULL-3). The whole
+  `OPTIONS_TERM_SKEW` family died with Deribit (its sole provider); `DERIVATIVES_FUNDING_OI` +
+  `LIQUIDATIONS` survive on CoinGlass (Kraken Derivatives too, for OI/funding);
+  `MACRO_RELEASES` on the CoinGlass economic calendar; `NETWORK_ACTIVITY` + `ONCHAIN_ENTITY_FLOW`
+  on **CryptoQuant alone**. The Binance frozen-USDT-basis gate was extracted to the living
+  `market-lab/usdt-basis-gate.js` (the IFR cross-venue episode still imports it). The whale
+  large-transfer metric vocabulary is retained decision machinery but is now UNFED (no provider;
+  a NETWORK_ACTIVITY sweep resolves them NOT_SUPPORTED) — whether to retire the unfed vocabulary
+  is parked in OPEN-QUESTIONS.md. **PROVIDER_IDS 12** (= the 11 kept market providers ∪
+  {SETTLED_RECORDS}, fenced), **FAMILIES 15, PAYLOAD_KINDS 21, sensor scope 36** (M09/M10/M14/M15/M18/M19
   retired, ids stable). No retired provider/family/sense is named as live in READINESS.md.
 - **App size:** **78,165 JS lines** (`.js` + `.mjs`, excl `test/` + `attic/`) — down from
   84,235 with the culls. The frozen judge/execution/watch surfaces are unchanged except the

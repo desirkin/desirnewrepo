@@ -15,17 +15,19 @@ export const SCOPE = Object.freeze([
   R('M06', 'Kraken Futures Charts historical / open-interest observations', ['KRAKEN_CHARTS_DARK']),
   R('M07', 'Kraken Level 3 (separately permissioned, data-only; never a substitute for M01)', ['KRAKEN_L3_DARK']),
   R('M08', 'Coinbase spot market, trade, book and candle capabilities', ['COINBASE_SPOT']),
-  R('M09', 'Deribit futures / options catalog and market observations', ['DERIBIT']),
-  R('M10', 'Bybit public market observations (geographic eligibility)', ['BYBIT']),
+  // M09 / M10 retired: the Deribit (options / futures) and Bybit providers were culled to attic/ (SENSE-CULL-3). The whole
+  // OPTIONS_TERM_SKEW family died with Deribit (its sole provider); DERIVATIVES_FUNDING_OI + LIQUIDATIONS survive on CoinGlass
+  // (Kraken Derivatives too, for OI/funding). M-ids are stable, not renumbered.
   R('M11', 'CoinGecko Demo catalog / market / detail capabilities', ['COINGECKO']),
   R('M12', 'GeckoTerminal DEX / pool observations', ['GECKOTERMINAL']),
   R('M13', 'DefiLlama TVL, fee and stablecoin observations', ['DEFILLAMA']),
   // M14 / M15 retired: the CoinMetrics Community and FRED / ALFRED providers were culled to attic/ (SENSE-CULL-2).
-  // NETWORK_ACTIVITY now runs on CryptoQuant / Santiment; MACRO_RELEASES runs on the CoinGlass economic calendar.
-  // M-ids are stable, not renumbered.
+  // NETWORK_ACTIVITY now runs on CryptoQuant alone (Santiment retired, SENSE-CULL-3); MACRO_RELEASES runs on the CoinGlass
+  // economic calendar. M-ids are stable, not renumbered.
   R('M16', 'CoinGlass derivatives, liquidation, event / unlock and headline capabilities (each verified separately)', ['COINGLASS'], 'endpoints: oi-exchange-list, funding-exchange-list, liquidation-aggregated-history, coin-unlock-list, coin-vesting, economic-data, article-list'),
   R('M17', 'CryptoQuant on-chain / exchange metrics', ['CRYPTOQUANT']),
-  R('M18', 'Santiment metrics / history', ['SANTIMENT']),
+  // M18 retired: the Santiment provider was culled to attic/ (SENSE-CULL-3); its whale large-transfer metrics are now unfed
+  // (no live provider), the honest NOT_SUPPORTED coverage state. M-ids are stable, not renumbered.
   // M19 retired: the Twelve Data cross-asset provider and the whole CROSS_ASSET family were culled to attic/ (market-lab
   // providers cut). M-ids are stable, not renumbered.
   R('M20', 'Tokenomist unlock events', ['TOKENOMIST']),

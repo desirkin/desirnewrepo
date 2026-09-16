@@ -39,7 +39,7 @@ test('data-only market policy is a zero-spend observation allowlist and missing 
 
   const withKeys = buildDataOnlyMarketPolicy({ env: { COINGECKO_DEMO_API_KEY: 'fixture', COINGLASS_API_KEY: 'must-not-enable', KRAKEN_L3_DATA_API_KEY: 'must-not-enable' } });
   for (const id of ['COINGECKO']) assert.equal(withKeys.providers[id].enabled, true, id);
-  for (const id of ['KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'TOKENOMIST']) assert.equal(withKeys.providers[id].enabled, false, id);
+  for (const id of ['KRAKEN_DERIVATIVES', 'COINGLASS', 'CRYPTOQUANT', 'TOKENOMIST']) assert.equal(withKeys.providers[id].enabled, false, id);
   assert.equal(withKeys.providers.KRAKEN_SPOT.l3.enabled, false);
   assert.equal(withKeys.providers.KRAKEN_DERIVATIVES.charts.enabled, false);
   assert.deepEqual({ enabled: withKeys.model.enabled, perCase: withKeys.model.maxEstimatedUsdPerCase, day: withKeys.model.maxEstimatedUsdPerDay, month: withKeys.model.maxEstimatedUsdPerMonth }, { enabled: false, perCase: 0, day: 0, month: 0 });

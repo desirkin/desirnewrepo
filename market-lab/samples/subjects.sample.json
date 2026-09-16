@@ -6,14 +6,11 @@
    "krakenSpot": "BTC/USD",
    "coinbase": "BTC-USD",
    "krakenDerivatives": "PF_XBTUSD",
-   "deribit": "BTC",
-   "bybit": "BTCUSDT",
    "coingecko": "bitcoin",
    "tokens": [],
    "pools": [],
    "protocols": [],
    "cryptoquant": "btc",
-   "santiment": "bitcoin",
    "tokenomist": null,
    "coinglass": "BTC"
   },
@@ -22,8 +19,6 @@
    "krakenSpot": "ETH/USD",
    "coinbase": "ETH-USD",
    "krakenDerivatives": "PF_ETHUSD",
-   "deribit": "ETH",
-   "bybit": "ETHUSDT",
    "coingecko": "ethereum",
    "tokens": [],
    "pools": [
@@ -36,7 +31,6 @@
     "aave"
    ],
    "cryptoquant": "eth",
-   "santiment": "ethereum",
    "tokenomist": null,
    "coinglass": "ETH"
   },
@@ -45,14 +39,11 @@
    "krakenSpot": "SOL/USD",
    "coinbase": "SOL-USD",
    "krakenDerivatives": "PF_SOLUSD",
-   "deribit": null,
-   "bybit": "SOLUSDT",
    "coingecko": "solana",
    "tokens": [],
    "pools": [],
    "protocols": [],
    "cryptoquant": null,
-   "santiment": "solana",
    "tokenomist": "solana",
    "coinglass": "SOL"
   }

@@ -6,15 +6,15 @@
 //     which makes the IFR episode INPUTS_UNAVAILABLE (fail-closed) — a de-peg never masquerades as a Kraken-only flush;
 //   - OI contraction is computed ONLY between two readings in the SAME verified native unit (CONTRACTS); a unit mismatch or
 //     an unverified unit yields null contraction, which makes SDR refuse (NO_VERIFIED_OI_CONTRACTION), never a guess.
-// Pure and deterministic (no clock, I/O, randomness); imports only the pure detector helpers and the Binance basis gate.
-import { usdBasisFromUsdt } from './providers/binance.js';
+// Pure and deterministic (no clock, I/O, randomness); imports only the pure detector helpers and the USDT frozen-basis gate.
+import { usdBasisFromUsdt } from './usdt-basis-gate.js';
 
 export const CROSS_VENUE_EPISODE_VERSION = 'cross-venue-episode-1';
 const finite = (x) => typeof x === 'number' && Number.isFinite(x);
 const pos = (x) => finite(x) && x > 0;
 const round = (x, d = 4) => (finite(x) ? Number(x.toFixed(d)) : null);
 
-// A venue reference for IFR: a USD-basis mid + window low. Kraken and Coinbase quote USD directly; Binance quotes USDT and
+// A venue reference for IFR: a USD-basis mid + window low. Kraken and Coinbase quote USD directly; a USDT-quoted venue
 // passes through the frozen-basis health gate, so an unhealthy peg returns { usdMid: null } and the reference drops out.
 export function usdReference({ venue, quote, mid, windowLow = null, stablecoinHealth = null }) {
   if (quote === 'USDT') {
@@ -26,8 +26,8 @@ export function usdReference({ venue, quote, mid, windowLow = null, stablecoinHe
 }
 
 // Assemble the IFR episode. `references` is the ordered set of usdReference() results for the REACHABLE venues (up to three
-// — Coinbase, Bitstamp, Binance.US are the USD-direct candidates, plus Binance global on the frozen USDT basis; whichever
-// answered at boot). A venue geo-blocked at boot is NOT a reachable reference and
+// — Coinbase, Bitstamp, Binance.US are the USD-direct candidates; a USDT-quoted venue would pass on the frozen USDT basis;
+// whichever answered at boot). A venue geo-blocked at boot is NOT a reachable reference and
 // is passed separately in `blockedReferences` ([{ venue, reason }]) so it is disclosed, not silently dropped and not a null
 // that fails the episode. A null usdMid among the REACHABLE references (an unhealthy stablecoin basis) still flows into
 // referenceMids, where the detector fails closed — a de-peg never reads as a Kraken-only flush. The `referenceCoverage`

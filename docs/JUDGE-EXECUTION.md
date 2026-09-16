@@ -35,7 +35,7 @@ doubles with synthetic credentials; live preflight, the canary and arming were N
 | `state/execution-projection.js`, `state/machine.js`, `state/posture.js` | STRIKE / DIGESTING projected ONLY from a FRESH projection written from the journal; stale exposure is a RETREAT cause, never a flat fiction |
 | `ui/server.js`, `ui/auth.js`, `ui/index.html` | read-only `/api/judge` view + drawer (PAPER prominent), the authenticated `POST /api/judge/arm` door |
 | `persistence/schema.js` | additive migration 8 (`serpent_execution_accounts`, `serpent_execution_events`, `serpent_execution_writer_epoch`, `serpent_execution_live_owner`); versions 1–7 untouched |
-| `market-lab/*`, `evidence/research-builder.js` | the four Santiment large-transfer metrics on their native 5m interval (registry → owner → provider → observation → context → packet → broker) |
+| `market-lab/*`, `evidence/research-builder.js` | the four large-transfer (whale) metrics remain the closed NETWORK_ACTIVITY decision vocabulary (registry → owner routing → context → packet → broker → Judge D2 whale input); SENSE-CULL-3 retired their only provider (Santiment), so they are currently UNFED (a sweep resolves them NOT_SUPPORTED) — retiring the unfed vocabulary is parked in `docs/serpent/OPEN-QUESTIONS.md` |
 
 ## Owner files
 

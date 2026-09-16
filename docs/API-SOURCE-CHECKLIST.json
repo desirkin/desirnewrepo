@@ -937,52 +937,6 @@
       "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
     },
     {
-      "id": "DERIBIT",
-      "classification": "OPERATIONAL_PUBLIC",
-      "module": "market-lab/providers/deribit.js",
-      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
-      "enable": "policy providers.DERIBIT.enabled",
-      "credentialEnv": [],
-      "configurationEnv": [],
-      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
-      "retentionTermsGate": "hosts www.deribit.com",
-      "paperDesiredState": "ON",
-      "sourceFiles": [
-        "docs/sensor-inventory.paper.json",
-        "paper/inventory.js",
-        "config/paper-runtime.json"
-      ],
-      "group": "charts",
-      "currentState": "Public adapter present; latest check timed out",
-      "nextAction": "No key for configured public data; current host verification outstanding.",
-      "currentReplitCollectionVerified": false,
-      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
-      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
-    },
-    {
-      "id": "BYBIT",
-      "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
-      "module": "market-lab/providers/bybit.js",
-      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
-      "enable": "policy providers.BYBIT.enabled",
-      "credentialEnv": [],
-      "configurationEnv": [],
-      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
-      "retentionTermsGate": "hosts api.bybit.com, stream.bybit.com",
-      "paperDesiredState": "OFF",
-      "sourceFiles": [
-        "docs/sensor-inventory.paper.json",
-        "paper/inventory.js",
-        "config/paper-runtime.json"
-      ],
-      "group": "charts",
-      "currentState": "Public adapter present; OFF for access/geography",
-      "nextAction": "REST and liquidation/ticker WebSocket code exist. Do not bypass observed access restrictions.",
-      "currentReplitCollectionVerified": false,
-      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
-      "llmAssistance": "Use actual candles, trades and books for calculations. An LLM can explain selected recorded anomalies; it cannot invent prices, fill unknown gaps or prove instrument entitlement."
-    },
-    {
       "id": "GECKOTERMINAL",
       "classification": "OPERATIONAL_PUBLIC",
       "module": "market-lab/providers/coingecko.js",
@@ -1190,31 +1144,6 @@
       "group": "macro",
       "currentState": "Credentialed adapter present; plan/budget blocked",
       "nextAction": "Needs entitled CRYPTOQUANT_API_KEY and allocated budget; no paid subscription created.",
-      "currentReplitCollectionVerified": false,
-      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
-      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
-    },
-    {
-      "id": "SANTIMENT",
-      "classification": "OPERATIONAL_CREDENTIAL_GATED",
-      "module": "market-lab/providers/santiment.js",
-      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
-      "enable": "policy providers.SANTIMENT.enabled",
-      "credentialEnv": [
-        "SANTIMENT_API_KEY"
-      ],
-      "configurationEnv": [],
-      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
-      "retentionTermsGate": "hosts api.santiment.net",
-      "paperDesiredState": "OFF",
-      "sourceFiles": [
-        "docs/sensor-inventory.paper.json",
-        "paper/inventory.js",
-        "config/paper-runtime.json"
-      ],
-      "group": "macro",
-      "currentState": "Credentialed adapter present; plan/budget blocked",
-      "nextAction": "Needs entitled SANTIMENT_API_KEY and allocated budget; no paid subscription created.",
       "currentReplitCollectionVerified": false,
       "credentialPresence": "NOT_CHECKED_ON_REPLIT",
       "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."

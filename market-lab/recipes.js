@@ -25,9 +25,6 @@ export const RECIPES = deepFreeze(Object.fromEntries([
   R('basis_bps', { family: 'DERIVATIVES_FUNDING_OI', inputs: ['DERIVATIVE_TICK'], formula: 'basisBps=10000*(mark/index-1)', window: 'point', units: 'BPS', required: ['payload.markPrice', 'payload.indexPrice'], optional: [], nullable: { value: true }, limitations: [] }),
   R('oi_change', { family: 'DERIVATIVES_FUNDING_OI', inputs: ['DERIVATIVE_TICK'], formula: 'same-specification OI absolute and percent change between two ticks; incomparable specs/units reject', window: 'two points', units: 'CONTRACTS', required: ['payload.openInterest', 'payload.openInterestUnit', 'subject.specificationId'], optional: [], nullable: { absolute: true, percent: true }, limitations: ['positive OI delta is not proof of new longs, shorts or leverage'] }),
   R('funding_native', { family: 'DERIVATIVES_FUNDING_OI', inputs: ['DERIVATIVE_TICK'], formula: 'native funding value with interval, unit and payer convention preserved; no silent annualization', window: 'point', units: 'NATIVE', required: ['payload.fundingRateNative', 'payload.fundingUnit', 'payload.fundingIntervalMs'], optional: ['payload.fundingRelative'], nullable: { value: true }, limitations: ['absolute native amounts are not percentages'] }),
-  R('atm_iv_term', { family: 'OPTIONS_TERM_SKEW', inputs: ['OPTION_TICK'], formula: 'per expiry: ATM = min abs(ln(strike/index)) (instrument-id tie-break); mark IV fraction', window: 'point', units: 'FRACTION', required: ['payload.markIv', 'payload.strike', 'payload.underlyingPrice'], optional: [], nullable: { atmIv: true }, limitations: ['same source, expiry, underlying and settlement convention required'] }),
-  R('risk_reversal_25d', { family: 'OPTIONS_TERM_SKEW', inputs: ['OPTION_TICK'], formula: 'nearest observed +0.25 call delta and -0.25 put delta per expiry; RR=callIV-putIV; butterfly=(callIV+putIV)/2-ATM_IV; actual deltas and distances exposed', window: 'point', units: 'FRACTION', required: ['payload.delta', 'payload.markIv'], optional: [], nullable: { riskReversal: true, butterfly: true }, limitations: ['no interpolation; no homemade pricing model'] }),
-  R('put_call_oi_ratio', { family: 'OPTIONS_TERM_SKEW', inputs: ['OPTION_TICK'], formula: 'sum(put OI)/sum(call OI) and volumes under a complete admitted same-scope census with positive denominators', window: 'point', units: 'RATIO', required: ['payload.openInterest'], optional: ['payload.volume24h'], nullable: { value: true }, limitations: ['partial-chain totals are never market totals; no dealer gamma inference'] }),
   R('supply_ratios', { family: 'SUPPLY_UNLOCKS', inputs: ['ASSET_REFERENCE'], formula: 'circulating/total, circulating/max, FDV/marketCap, volume24h/marketCap; unknown max => only its ratio null', window: 'point', units: 'FRACTION', required: ['payload.circulatingSupply'], optional: ['payload.maxSupply'], nullable: { all: true }, limitations: ['provider-reported cap is not overwritten with another venue price'] }),
   R('exchange_net_flow', { family: 'ONCHAIN_ENTITY_FLOW', inputs: ['ONCHAIN_METRIC'], formula: 'net=inflow-outflow ONLY for matching provider, entity set, chain, asset, unit, window and methodology', window: 'matched', units: 'NATIVE', required: ['inflow', 'outflow'], optional: [], nullable: { net: true }, limitations: ['transfers into exchange labels do not prove sales; wrapper transfers are not pooled'] }),
   R('indicators', { family: 'SPOT_PRICE_CHART', inputs: ['CANDLE'], formula: 'closed bars only, one selected version per native period (envelope repeats are not bars): SMA/EMA 5/20/60 (EMA seeded by SMA of its length), realized volatility of log returns 5/20/60, ATR14 and RSI14 with Wilder smoothing seeded by arithmetic averages (RSI: no gains and no losses => FLAT null; no losses => 100; no gains => 0), MACD 12/26/9, Bollinger 20 with population stdev, prior 20/60-bar high/low; warmup is null never zero', window: 'bars', units: 'QUOTE', required: ['closed bars'], optional: [], nullable: { warmup: true }, limitations: ['candle typical-price VWAP is never trade VWAP'] }),
@@ -159,7 +156,7 @@ export function convertQuote(value, fromQuote, toQuote, rate) {
   return { value: round(value * rate.rate), rawValue: value, rate: rate.rate, rateDirection: `${fromQuote}->${toQuote}`, rateSource: rate.sourceObservationId, rateAgeMs: rate.ageMs ?? null, conversionPath: [fromQuote, toQuote], support: support('CONVERTED') };
 }
 
-// ---- 7.3 derivatives / options -------------------------------------------------------------------------------------------
+// ---- 7.3 derivatives ------------------------------------------------------------------------------------------------------
 export const basisBps = (mark, index) => (isFiniteNum(mark) && isFiniteNum(index) && index > 0 ? round(1e4 * (mark / index - 1)) : null);
 export function oiChange(a, b) {
   if (!a || !b) return deepFreeze({ recipeId: 'oi_change', version: 1, absolute: null, percent: null, support: support('MISSING_TICK') });
@@ -173,45 +170,6 @@ export function fundingNative(tick) {
   if (!['FRACTION_PER_INTERVAL', 'ABSOLUTE_QUOTE_PER_CONTRACT_PER_INTERVAL'].includes(p.fundingUnit) || !isTs(p.fundingIntervalMs)) return deepFreeze({ recipeId: 'funding_native', version: 1, value: null, support: support('UNIT_REJECTED') });
   return deepFreeze({ recipeId: 'funding_native', version: 1, value: p.fundingRateNative, unit: p.fundingUnit, intervalMs: p.fundingIntervalMs, relative: p.fundingRelative, payerConvention: p.fundingRateNative > 0 ? 'LONGS_PAY_SHORTS' : p.fundingRateNative < 0 ? 'SHORTS_PAY_LONGS' : 'ZERO', settlementCurrency: p.settlementCurrency, linearity: p.linearity, annualized: null, support: support('COMPLETE'), law: 'NO_SILENT_ANNUALIZATION' });
 }
-export const OPTIONS_CENSUS_BASES = Object.freeze(['CENSUS_RECORD', 'NONE']);
-// closeout R02: census completeness is an INPUT established by a recorded instrument census (never a default); ticks are
-// deduplicated by full instrument / specification / source identity keeping the latest known record (a summary tick and its
-// enriched ticker are ONE contract); a ratio over an admitted subset is labelled as that subset; missing OI is never summed as zero
-export function optionsSurface(ticks, { admittedCap = 512, censusComplete = false, census = null } = {}) {
-  const latest = new Map();
-  for (const t of ticks.filter((x) => x.kind === 'OPTION_TICK')) { const k = `${t.provider}:${t.subject.venue}:${t.subject.instrumentId}:${t.subject.specificationId}`; const cur = latest.get(k); if (!cur || t.knownAtTs > cur.knownAtTs || (t.knownAtTs === cur.knownAtTs && t.sequence > cur.sequence)) latest.set(k, t); }
-  const usable = [...latest.values()]; const byExpiry = new Map();
-  for (const t of usable) { const k = t.payload.expiryTs; if (!byExpiry.has(k)) byExpiry.set(k, []); byExpiry.get(k).push(t); }
-  const source = new Set(usable.map((t) => `${t.provider}:${t.subject.venue}:${t.payload.settlementCurrency}:${t.payload.underlyingIndex}`));
-  if (!usable.length) return deepFreeze({ recipeId: 'atm_iv_term', version: 1, term: [], support: support('NO_OPTIONS') });
-  if (source.size > 1) return deepFreeze({ recipeId: 'atm_iv_term', version: 1, term: [], support: support('SCOPE_MISMATCH', [...source].sort()) });
-  const term = [];
-  for (const [expiryTs, list] of [...byExpiry.entries()].sort((a, b) => a[0] - b[0])) {
-    const withIv = list.filter((t) => isFiniteNum(t.payload.markIv) && isFiniteNum(t.payload.underlyingPrice) && t.payload.underlyingPrice > 0);
-    const atm = withIv.map((t) => ({ t, d: Math.abs(Math.log(t.payload.strike / t.payload.underlyingPrice)) })).sort((a, b) => a.d - b.d || (a.t.subject.instrumentId < b.t.subject.instrumentId ? -1 : 1))[0] ?? null;
-    const calls = withIv.filter((t) => t.payload.optionType === 'CALL' && isFiniteNum(t.payload.delta)); const puts = withIv.filter((t) => t.payload.optionType === 'PUT' && isFiniteNum(t.payload.delta));
-    const call25 = calls.map((t) => ({ t, d: Math.abs(t.payload.delta - 0.25) })).sort((a, b) => a.d - b.d || (a.t.subject.instrumentId < b.t.subject.instrumentId ? -1 : 1))[0] ?? null;
-    const put25 = puts.map((t) => ({ t, d: Math.abs(t.payload.delta + 0.25) })).sort((a, b) => a.d - b.d || (a.t.subject.instrumentId < b.t.subject.instrumentId ? -1 : 1))[0] ?? null;
-    const atmIv = atm ? atm.t.payload.markIv : null; const cIv = call25 ? call25.t.payload.markIv : null; const pIv = put25 ? put25.t.payload.markIv : null;
-    const putsAll = list.filter((t) => t.payload.optionType === 'PUT'); const callsAll = list.filter((t) => t.payload.optionType === 'CALL');
-    const oiKnown = list.every((t) => isFiniteNum(t.payload.openInterest)); const volKnown = list.every((t) => isFiniteNum(t.payload.volume24h));
-    const putOi = sum(putsAll.map((t) => t.payload.openInterest ?? 0)); const callOi = sum(callsAll.map((t) => t.payload.openInterest ?? 0));
-    const putVol = sum(putsAll.map((t) => t.payload.volume24h ?? 0)); const callVol = sum(callsAll.map((t) => t.payload.volume24h ?? 0));
-    const ivSpread = atm && isFiniteNum(atm.t.payload.bidIv) && isFiniteNum(atm.t.payload.askIv) ? round(atm.t.payload.askIv - atm.t.payload.bidIv) : null;
-    const wholeChain = censusComplete && (census?.omitted ?? 0) === 0 && (census?.unticked ?? 0) === 0; const ratioScope = wholeChain ? 'WHOLE_CHAIN' : 'ADMITTED_SUBSET';
-    const greeksMissing = withIv.filter((t) => !isFiniteNum(t.payload.delta)).length;
-    const reasons = [...(censusComplete ? [] : ['CENSUS_INCOMPLETE']), ...(wholeChain ? [] : ['ADMITTED_SUBSET']), ...((census?.unticked ?? 0) > 0 ? ['TICKS_MISSING'] : []), ...(oiKnown ? [] : ['OI_MISSING']), ...(greeksMissing ? ['GREEKS_MISSING'] : []), ...(list.length > withIv.length ? ['IV_MISSING'] : [])];
-    term.push({ expiryTs, contracts: list.length, atm: atm ? { instrumentId: atm.t.subject.instrumentId, strike: atm.t.payload.strike, logDistance: round(atm.d), markIv: atmIv } : null, call25: call25 ? { instrumentId: call25.t.subject.instrumentId, delta: call25.t.payload.delta, deltaDistance: round(call25.d), markIv: cIv } : null, put25: put25 ? { instrumentId: put25.t.subject.instrumentId, delta: put25.t.payload.delta, deltaDistance: round(put25.d), markIv: pIv } : null, riskReversal25d: isFiniteNum(cIv) && isFiniteNum(pIv) ? round(cIv - pIv) : null, butterfly25d: isFiniteNum(cIv) && isFiniteNum(pIv) && isFiniteNum(atmIv) ? round((cIv + pIv) / 2 - atmIv) : null, atmIvBidAskSpread: ivSpread, putCallOiRatio: oiKnown && callOi > 0 ? round(putOi / callOi) : null, putCallVolumeRatio: volKnown && callVol > 0 ? round(putVol / callVol) : null, ratioScope, greeksMissing, support: support(reasons.length ? (censusComplete ? 'PARTIAL_ADMITTED_SCOPE' : 'PARTIAL_CENSUS') : 'COMPLETE_ADMITTED_SCOPE', reasons) });
-  }
-  const censusFacts = { complete: censusComplete === true, basis: census?.basis ?? 'NONE', total: census?.total ?? null, admitted: usable.length, omitted: census?.omitted ?? null, rejected: census?.rejected ?? null, unticked: census?.unticked ?? null, censusId: census?.censusId ?? null, censusKnownAtTs: census?.knownAtTs ?? null };
-  return deepFreeze({ recipeId: 'atm_iv_term', version: 1, scope: [...source][0], admitted: usable.length, admittedCap, censusComplete: censusComplete === true, census: censusFacts, term, law: 'NO_DEALER_GAMMA_INFERENCE_FROM_PUBLIC_OI', support: support(usable.length > admittedCap ? 'OVER_CAP' : !censusComplete ? 'PARTIAL_CENSUS' : (census?.omitted ?? 0) > 0 || (census?.unticked ?? 0) > 0 ? 'ADMITTED_SUBSET' : 'COMPLETE', [...(censusComplete ? [] : ['CENSUS_INCOMPLETE']), ...((census?.omitted ?? 0) > 0 ? ['ADMISSION_CAP'] : []), ...((census?.unticked ?? 0) > 0 ? ['TICKS_MISSING'] : [])]) });
-}
-// deterministic admission of a large chain: nearest expiries first, then strikes nearest the index, capped
-export function admitOptions(ticks, { cap = 512, nowTs }) {
-  const sorted = [...ticks].filter((t) => isTs(t.payload.expiryTs) && t.payload.expiryTs > nowTs).sort((a, b) => (a.payload.expiryTs - b.payload.expiryTs) || (Math.abs(Math.log(a.payload.strike / (a.payload.underlyingPrice || a.payload.strike))) - Math.abs(Math.log(b.payload.strike / (b.payload.underlyingPrice || b.payload.strike)))) || (a.subject.instrumentId < b.subject.instrumentId ? -1 : 1));
-  return { admitted: sorted.slice(0, cap), omitted: sorted.length - Math.min(cap, sorted.length), census: ticks.length };
-}
-
 // ---- 7.4 supply / on-chain --------------------------------------------------------------------------------------------
 export function supplyRatios(ref) {
   const p = ref?.payload; if (!p) return deepFreeze({ recipeId: 'supply_ratios', version: 1, support: support('NO_REFERENCE') });

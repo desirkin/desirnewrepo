@@ -31,8 +31,8 @@ export const DATA_ONLY_MARKET_PROVIDERS = Object.freeze({
   GECKOTERMINAL: 'PUBLIC_FREE',
   DEFILLAMA: 'PUBLIC_FREE',
 });
-export const DATA_ONLY_MARKET_RESTRICTED = Object.freeze(['KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT']);
-const ZERO_BUDGET = new Set(['COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'TOKENOMIST']);
+export const DATA_ONLY_MARKET_RESTRICTED = Object.freeze(['KRAKEN_DERIVATIVES']);
+const ZERO_BUDGET = new Set(['COINGLASS', 'CRYPTOQUANT', 'TOKENOMIST']);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..');
 const DEFAULT_POLICY_FILE = path.join(REPO_ROOT, 'config', 'market-research.paper.json');

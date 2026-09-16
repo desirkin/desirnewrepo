@@ -59,17 +59,13 @@
     "KRAKEN_SPOT": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
     "COINBASE_SPOT": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
     "KRAKEN_DERIVATIVES": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
-    "DERIBIT": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
-    "BYBIT": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "reason": "BLOCKED_GEOGRAPHY" },
     "GECKOTERMINAL": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
     "DEFILLAMA": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
     "SETTLED_RECORDS": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
     "COINGECKO": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "credentialEnv": "COINGECKO_DEMO_API_KEY", "reason": "DEMO_INCLUDED_QUOTA_TWO_CALL_VERIFICATION" },
     "COINGLASS": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "COINGLASS_API_KEY", "reason": "BLOCKED_BUDGET" },
     "CRYPTOQUANT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "CRYPTOQUANT_API_KEY", "reason": "BLOCKED_BUDGET" },
-    "SANTIMENT": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "SANTIMENT_API_KEY", "reason": "BLOCKED_BUDGET" },
     "TOKENOMIST": { "desiredState": "OFF", "blockerPolicy": "PAID_GATE", "credentialEnv": "TOKENOMIST_API_KEY", "reason": "BLOCKED_BUDGET" },
-    "BINANCE_SPOT": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "reason": "BLOCKED_GEOGRAPHY" },
     "BITSTAMP_SPOT": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "reason": "SHADOW_ONLY reference sense (Strategy 6 IFR fallback book); reachable, no credential, no geo-block — dormant until IFR live composition is enabled behind the paper publish" },
     "BINANCE_US_SPOT": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "reason": "SHADOW_ONLY reference sense (Strategy 6 IFR; third USD-direct reference alongside Coinbase and Bitstamp); reachable, no credential, no geo-block — dormant until IFR live composition is enabled behind the paper publish" }
    }

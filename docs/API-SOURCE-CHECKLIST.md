@@ -78,8 +78,6 @@ Use actual candles, trades and books for calculations. An LLM can explain select
 | `KRAKEN_SPOT` | Public adapter present; latest check timed out | No key. Existing receipt is historical; current host connectivity still needs verification. |
 | `COINBASE_SPOT` | Public adapter present; latest check timed out | No key. Existing receipt is historical; current host connectivity still needs verification. |
 | `KRAKEN_DERIVATIVES` | Public adapter present | No key for configured public data; current host verification outstanding. |
-| `DERIBIT` | Public adapter present; latest check timed out | No key for configured public data; current host verification outstanding. |
-| `BYBIT` | Public adapter present; OFF for access/geography | REST and liquidation/ticker WebSocket code exist. Do not bypass observed access restrictions. |
 | `GECKOTERMINAL` | Public adapter present | No key. Verify configured pool coverage and host response within current allowance. |
 | `KRAKEN_CHARTS_DARK` | Public derivatives chart adapter present | No key. Separate research path; prior open-interest response does not establish current host coverage. |
 | `KRAKEN_L3_DARK` | Data-key-gated L3 adapter present | Requires a dedicated data-only pair and SAFE_L3_DATA_KEY proof; never reuse order/withdrawal credentials. |
@@ -96,7 +94,6 @@ An LLM can explain actual releases, on-chain metrics and unlock observations wit
 | `DEFILLAMA` | Fresh HTTP 200; one valid TVL scalar | No key. One response validated; continuous host collection remains unverified. |
 | `COINGLASS` | Credentialed adapter present; plan/budget blocked | Needs entitled COINGLASS_API_KEY and allocated budget; no paid subscription created. |
 | `CRYPTOQUANT` | Credentialed adapter present; plan/budget blocked | Needs entitled CRYPTOQUANT_API_KEY and allocated budget; no paid subscription created. |
-| `SANTIMENT` | Credentialed adapter present; plan/budget blocked | Needs entitled SANTIMENT_API_KEY and allocated budget; no paid subscription created. |
 | `TOKENOMIST` | Credentialed adapter present; plan/budget blocked | Needs entitled TOKENOMIST_API_KEY and allocated budget; no paid subscription created. |
 | `POLYMARKET_PUBLIC_DATA` | Proposed; not implemented | No public market-data client or registry row; no trading integration requested. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget |
 | `KALSHI_PUBLIC_DATA` | Proposed; not implemented | No public market-data client or registry row; no trading integration requested. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget |

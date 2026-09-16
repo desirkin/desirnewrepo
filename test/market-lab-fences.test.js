@@ -30,7 +30,6 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
     'evidence/social-projection.js': ['rumor2/social-research-dossier.js', 'rumor2/social-research-composite.js', 'rumor2/social-research-profile.js'], // pure validators / vocabularies of settled Social records
     'market-lab/providers/kraken-spot.js': ['tape/book.js', 'survey/catalog.js'], // the pure L2 book state machine + the Kraken catalog normalizer (no tape runtime)
     'market-lab/providers/coinbase.js': ['tape/book.js'],
-    'market-lab/providers/binance.js': ['tape/book.js'],
     'market-lab/providers/kraken-futures-stream.js': ['tape/book.js'],
   };
   assert.ok(RESEARCH_FILES.length >= 40, `research files ${RESEARCH_FILES.length}`);

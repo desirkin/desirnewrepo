@@ -155,7 +155,7 @@ is **`READY_FOR_PAPER`**, which needs *both* core blocker groups clear:
   (step 3b), and the writer advisory lock is free (no other writer holding it).
 
 These are reported but **never block** a paper run (they only narrow the sense set): `EXTERNAL_OPTIONAL_SENSE_BLOCKER`,
-`PAID_SENSE_NOT_AUTHORIZED`, `DARK_RESEARCH_BLOCKER`. So a `BLOCKED_GEOGRAPHY` (Binance / Bybit), a `BLOCKED_BUDGET` (a paid
+`PAID_SENSE_NOT_AUTHORIZED`, `DARK_RESEARCH_BLOCKER`. So a `BLOCKED_GEOGRAPHY` (a geo-restricted public venue), a `BLOCKED_BUDGET` (a paid
 provider with no attestation), or `MODEL_DISABLED_IN_POLICY` (Socrates until you fund it) is expected and fine — the
 market-driven setups qualify without a model.
 

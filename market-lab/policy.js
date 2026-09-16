@@ -19,22 +19,22 @@ export const MODEL_EFFORTS = Object.freeze(['low', 'medium', 'high']);
 export const RESOURCE_DEFAULTS = deepFreeze({
   catalogMaxMarkets: 5_000, hotSubjects: 64, tradesPerHotSymbol: 50_000, hotStateBytes: 64 * 1024 * 1024,
   bookLevelsPerSide: 200, bookSampleMinIntervalMs: 500, bookSamplesTwoMinutes: 241, bookMinuteEndpoints: 180,
-  barsPerInterval: 720, derivativesPerCase: 64, optionsAdmittedPerCase: 512, venueSnapshots: 16, onchainMetrics: 64, eventsPerCase: 128,
+  barsPerInterval: 720, derivativesPerCase: 64, venueSnapshots: 16, onchainMetrics: 64, eventsPerCase: 128,
   intakeQueueItems: 1_024, intakeQueueBytes: 8 * 1024 * 1024, transportResponseBytes: 8 * 1024 * 1024,
   observationLineBytes: 128 * 1024, coverageLineBytes: 128 * 1024, packetLineBytes: 256 * 1024, manifestBytes: 1024 * 1024,
   segmentBytes: 32 * 1024 * 1024, runBytes: 1024 * 1024 * 1024, contextBytes: 2 * 1024 * 1024, researchRootQuotaBytes: 4 * 1024 * 1024 * 1024,
   httpConcurrencyGlobal: 4, httpConcurrencyPerProvider: 1, httpTimeoutMs: 15_000, wsIdleTimeoutMs: 30_000, maxPagesPerRequest: 20, maxRecordsPerRequest: 5_000,
   // closeout R05 / R03 bounds (conservative, explicit; every retained collection is bounded, never an unbounded side array)
-  retainedObservations: 250_000, retainedCoverage: 20_000, sealedSegmentIndex: 4_096, retainedCaseDescriptors: 1_024, sharedCacheEntries: 4_096, optionsTickerEnrichmentPerSweep: 24,
+  retainedObservations: 250_000, retainedCoverage: 20_000, sealedSegmentIndex: 4_096, retainedCaseDescriptors: 1_024, sharedCacheEntries: 4_096,
 });
 // resource keys an OLDER policy file may omit: they default to the shipped bound (never above it) so existing policies stay loadable
-export const RESOURCE_OPTIONAL_KEYS = Object.freeze(['retainedObservations', 'retainedCoverage', 'sealedSegmentIndex', 'retainedCaseDescriptors', 'sharedCacheEntries', 'optionsTickerEnrichmentPerSweep']);
+export const RESOURCE_OPTIONAL_KEYS = Object.freeze(['retainedObservations', 'retainedCoverage', 'sealedSegmentIndex', 'retainedCaseDescriptors', 'sharedCacheEntries']);
 export const CASE_OPTIONAL_KEYS = Object.freeze([]);
 export const CASE_DEFAULTS = deepFreeze({ maxConcurrentModelRequests: 1, maxPendingCases: 16, maxDataRequestsPerCase: 6, maxFollowupRounds: 1, maxModelAttempts: 2, attemptTimeoutMs: 90_000, caseTimeoutMs: 180_000, maxModelInputBytes: 262_144, maxModelOutputBytes: 65_536, maxOutputTokens: 8_192, requestCacheSize: 256 });
 // allowed requestedMaxAgeMs values per family (a freshness REQUEST vocabulary; never a cadence change)
 export const ALLOWED_MAX_AGE_MS = deepFreeze({
   SPOT_PRICE_CHART: [15_000, 60_000, 300_000, 3_600_000], SPOT_FLOW: [15_000, 60_000, 300_000], DISPLAYED_LIQUIDITY: [1_000, 15_000, 60_000], CROSS_VENUE: [15_000, 60_000, 300_000],
-  DERIVATIVES_FUNDING_OI: [60_000, 300_000, 3_600_000], LIQUIDATIONS: [60_000, 300_000, 3_600_000], OPTIONS_TERM_SKEW: [300_000, 3_600_000], SUPPLY_UNLOCKS: [3_600_000, 86_400_000],
+  DERIVATIVES_FUNDING_OI: [60_000, 300_000, 3_600_000], LIQUIDATIONS: [60_000, 300_000, 3_600_000], SUPPLY_UNLOCKS: [3_600_000, 86_400_000],
   DEX_DEFI: [300_000, 3_600_000, 86_400_000], ONCHAIN_ENTITY_FLOW: [3_600_000, 86_400_000], NETWORK_ACTIVITY: [3_600_000, 86_400_000], STABLECOIN_LIQUIDITY: [3_600_000, 86_400_000],
   ETF_FLOWS: [86_400_000], MACRO_RELEASES: [3_600_000, 86_400_000], OFFICIAL_SOCIAL_EVENTS: [60_000, 3_600_000], INFRASTRUCTURE_STATUS: [60_000, 3_600_000],
 });
@@ -186,7 +186,7 @@ export function samplePolicy() {
 }
 
 // ---- subjects file ------------------------------------------------------------------------------------------------
-export const SUBJECT_ENTRY_KEYS = Object.freeze(['canonicalCoin', 'krakenSpot', 'coinbase', 'krakenDerivatives', 'deribit', 'bybit', 'coingecko', 'tokens', 'pools', 'protocols', 'cryptoquant', 'santiment', 'tokenomist', 'coinglass']);
+export const SUBJECT_ENTRY_KEYS = Object.freeze(['canonicalCoin', 'krakenSpot', 'coinbase', 'krakenDerivatives', 'coingecko', 'tokens', 'pools', 'protocols', 'cryptoquant', 'tokenomist', 'coinglass']);
 export const SUBJECTS_KEYS = Object.freeze(['subjectsVersion', 'subjects', 'stablecoins', 'referenceNotionals', 'peers', 'benchmarks']);
 export const MAX_SUBJECTS = 64;
 export function subjectsError(raw, where = 'subjects') {
@@ -200,7 +200,7 @@ export function subjectsError(raw, where = 'subjects') {
     const e = exactKeys(s, SUBJECT_ENTRY_KEYS, w); if (e) return e;
     if (!isCoin(s.canonicalCoin)) return `${w}: canonicalCoin malformed`;
     if (coins.has(s.canonicalCoin)) return `${w}: duplicate canonicalCoin`; coins.add(s.canonicalCoin);
-    for (const f of ['krakenSpot', 'coinbase', 'krakenDerivatives', 'bybit', 'deribit', 'coingecko', 'cryptoquant', 'santiment', 'tokenomist', 'coinglass']) if (!isIdOrNull(s[f])) return `${w}: ${f} must be a native identifier or null`;
+    for (const f of ['krakenSpot', 'coinbase', 'krakenDerivatives', 'coingecko', 'cryptoquant', 'tokenomist', 'coinglass']) if (!isIdOrNull(s[f])) return `${w}: ${f} must be a native identifier or null`;
     if (!Array.isArray(s.tokens) || s.tokens.length > 8 || s.tokens.some((t) => exactKeys(t, ['chain', 'contractAddress'], w) !== null || !isId(t.chain) || !isId(t.contractAddress))) return `${w}: tokens malformed`;
     if (!Array.isArray(s.pools) || s.pools.length > 8 || s.pools.some((p) => exactKeys(p, ['network', 'poolAddress'], w) !== null || !isId(p.network) || !isId(p.poolAddress))) return `${w}: pools malformed`;
     if (!Array.isArray(s.protocols) || s.protocols.length > 8 || s.protocols.some((p) => !isId(p))) return `${w}: protocols malformed`;
@@ -216,9 +216,9 @@ export function sampleSubjects() {
   return deepFreeze({
     subjectsVersion: SUBJECTS_VERSION,
     subjects: [
-      { canonicalCoin: 'BTC', krakenSpot: 'BTC/USD', coinbase: 'BTC-USD', krakenDerivatives: 'PF_XBTUSD', deribit: 'BTC', bybit: 'BTCUSDT', coingecko: 'bitcoin', tokens: [], pools: [], protocols: [], cryptoquant: 'btc', santiment: 'bitcoin', tokenomist: null, coinglass: 'BTC' },
-      { canonicalCoin: 'ETH', krakenSpot: 'ETH/USD', coinbase: 'ETH-USD', krakenDerivatives: 'PF_ETHUSD', deribit: 'ETH', bybit: 'ETHUSDT', coingecko: 'ethereum', tokens: [], pools: [{ network: 'eth', poolAddress: '0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640' }], protocols: ['aave'], cryptoquant: 'eth', santiment: 'ethereum', tokenomist: null, coinglass: 'ETH' },
-      { canonicalCoin: 'SOL', krakenSpot: 'SOL/USD', coinbase: 'SOL-USD', krakenDerivatives: 'PF_SOLUSD', deribit: null, bybit: 'SOLUSDT', coingecko: 'solana', tokens: [], pools: [], protocols: [], cryptoquant: null, santiment: 'solana', tokenomist: 'solana', coinglass: 'SOL' },
+      { canonicalCoin: 'BTC', krakenSpot: 'BTC/USD', coinbase: 'BTC-USD', krakenDerivatives: 'PF_XBTUSD', coingecko: 'bitcoin', tokens: [], pools: [], protocols: [], cryptoquant: 'btc', tokenomist: null, coinglass: 'BTC' },
+      { canonicalCoin: 'ETH', krakenSpot: 'ETH/USD', coinbase: 'ETH-USD', krakenDerivatives: 'PF_ETHUSD', coingecko: 'ethereum', tokens: [], pools: [{ network: 'eth', poolAddress: '0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640' }], protocols: ['aave'], cryptoquant: 'eth', tokenomist: null, coinglass: 'ETH' },
+      { canonicalCoin: 'SOL', krakenSpot: 'SOL/USD', coinbase: 'SOL-USD', krakenDerivatives: 'PF_SOLUSD', coingecko: 'solana', tokens: [], pools: [], protocols: [], cryptoquant: null, tokenomist: 'solana', coinglass: 'SOL' },
     ],
     stablecoins: [{ stablecoinId: 'USDT', pegCurrency: 'USD', defillamaId: '1' }, { stablecoinId: 'USDC', pegCurrency: 'USD', defillamaId: '2' }],
     referenceNotionals: [1000, 10000, 100000],

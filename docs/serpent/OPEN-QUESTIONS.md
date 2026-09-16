@@ -6,53 +6,33 @@ Nothing here is a decision — it is a queue for David.
 
 ---
 
-## BACKLOG B-1 — Prettier on all non-frozen code conflicts with the house style (needs a decision)
+## SENSE-CULL-3 tail — retire the now-unfed whale large-transfer vocabulary? (parked; touches the FROZEN Judge tree)
 
-**Ask (backlog item B-1):** add a repo Prettier config "that matches the house style as
-closely as automatable" and format every non-frozen `*.js`/`*.mjs`.
+**Context:** SENSE-CULL-3 retired Santiment, the ONLY provider that fed the four whale large-transfer
+metrics (`whale_transaction_count_100k_usd_to_inf`, `…_1m_…`, and the two volume variants). Its
+provider module + sweep path + config + tests went to attic. The whale metric **vocabulary** was
+KEPT: it is live decision machinery — the Judge D2 flow-event feature reads a `whale` input
+(`judge/judge.js` D2_FLOW_EVENT_RESPONSE), and the evidence / context / socrates layers bind
+`NETWORK_ACTIVITY`'s whale metrics (`WHALE_METRIC_IDS`, `ONCHAIN_METRIC_IDS`, `FAMILY_REGISTRY`,
+`METRIC_MAP`, `NETWORK_METRIC_OF`, `COMPONENT_FAMILY`, context-schema `networkValue`). With no
+provider, a `NETWORK_ACTIVITY` sweep resolves them `NOT_SUPPORTED` and the Judge whale input is
+`null` (`NO_WHALE_INPUT`) — the existing, honest coverage behaviour. `test/whale-vocab.test.js`
+fences the vocabulary's internal consistency so it cannot drift while parked.
 
-**Why parked:** the house style is deliberately dense — long single-statement-per-line
-functions (e.g. `market-lab/*`, the `sState` / `extractFn` single-line forms). Prettier wraps
-at `printWidth` and cannot reproduce "keep it on one line", so a run would reformat thousands
-of lines, and many fences/tests read specific single-line shapes (the `extractFn` regex
-extractors, single-line map assertions, byte/digest pins). "Match the house style as closely
-as automatable" is unsatisfiable when the style is anti-Prettier. This is a taste/scope
-decision, not no-decision work, so per the standing order it is written here and skipped.
+**Why parked (not decided autonomously):** retiring the unfed vocabulary from the decision layer
+would edit `judge/judge.js` (the D2 whale input mechanism) — the **FROZEN_FOR_PAPER** tree — which
+requires re-pinning the P-08 digests in `docs/JUDGE-PAPER-AUDIT.md §4` and a new audit entry, and it
+changes Judge's decision vocabulary while PAPER is frozen-pending. That is a FREEZE-relevant change,
+not a provider cull. SENSE-CULL-3's spec was to retire the four providers, which is done; the
+vocabulary retirement is a separate decision.
 
-**Recommendation:** pick one — (a) **drop B-1** (the dense house style is intentional and
-Prettier fights it); (b) choose an explicit `printWidth` and scope (which directories, which
-files excluded) and accept the large diff + the fence re-pins it forces; or (c) adopt a
-formatter/lint that only enforces trivia (semicolons, quotes, trailing commas) without
-re-wrapping lines. Needs David's call before any formatter lands. B-1 stays in BACKLOG.md
-marked parked-here until then.
-
----
-
-## SENSE-CULL-2 — MACRO_RELEASES interpretation on the FRED retirement (decision made; confirm)
-
-**Ask:** "Retire FRED (16 req/day) + Coin Metrics (2) to attic/ … modules, owner.js
-FACTORIES + MACRO_RELEASES recipe / macroSeries subjects / coinmetrics catalog run,
-config entries, tests, orphaned machinery."
-
-**Interpretation taken (2026-09-16, not a blocker — surfaced for reversal):** FRED was
-the only provider of the `MACRO_OBSERVATION` payload kind and the `macro_level` /
-`macro_change` metrics (economic level series with ALFRED vintages). The `MACRO_RELEASES`
-family itself SURVIVES: the CoinGlass economic calendar (`economic-data`, `ECONOMIC_EVENT`)
-still feeds `macro_surprise` / `release_schedule`, so the family, its evidence kind
-(`MARKET_MACRO_CONTEXT`) and the Socrates FAMILIES mirror are unchanged. So the cull
-removed: the `MACRO_OBSERVATION` payload kind, the `macro_level`/`macro_change` metrics and
-the `levels` field of `MARKET_MACRO_CONTEXT` (FRED-only), the `macroSeries` subjects key
-(FRED series list, now unconsumed), and dropped `NETWORK_ACTIVITY` + `MACRO_RELEASES` from
-the FREE data-only harvest (their only zero-cost providers, Coin Metrics and FRED, are
-gone — both families still run in the keyed PAPER runtime via CryptoQuant/Santiment and
-the CoinGlass calendar). The research-builder summary metric for `MACRO_RELEASES` moved to
-`macro_surprise`. Counts: PROVIDER_IDS 18→16, PAYLOAD_KINDS 23→22, FAMILIES 16 (unchanged),
-sensor scope 41→39 (M14/M15 retired).
-
-**Confirm:** this keeps macro *releases* (surprises vs forecast) but drops macro *levels*
-(CPI/rates index series) entirely, since no surviving free/keyed provider serves the level
-series. If a macro-level sense is still wanted, it needs a replacement provider decision —
-say so and it becomes its own ticket. **Not blocking: the cull shipped on this reading.**
+**Recommendation:** hold the whale vocabulary as-is (unfed but coherent) until either PAPER has run
+green (the freeze lifts) or a future provider re-feeds the whale metrics. If David wants it retired
+now, it is a small, well-scoped follow-up: remove the four ids from `WHALE_METRIC_IDS` /
+`ONCHAIN_METRIC_IDS` / `NETWORK_ACTIVITY.metrics` / the context + evidence + socrates bindings and
+the Judge D2 whale input, re-pin P-08 (§4.N), drop `test/whale-vocab.test.js`, and update the family
+metric-count fences (NETWORK_ACTIVITY 9 → 5). **Needs an explicit go because it edits the frozen
+Judge tree.**
 
 ---
 

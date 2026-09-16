@@ -21,8 +21,6 @@ test('A01. planRequest builds the documented request for every credential placem
   assert.equal(geckoPublic.ok, true, 'CoinGecko coins list is reachable keyless (demo key optional)');
   const cq = planRequest({ providerId: 'CRYPTOQUANT', endpointId: 'exchange-flows', pathParams: { asset: 'btc', metric: 'inflow' }, query: { window: 'day' }, credential: 'JWT' });
   assert.equal(cq.headers.authorization, 'Bearer JWT'); assert.equal(cq.url, 'https://api.cryptoquant.com/v1/btc/exchange-flows/inflow?window=day');
-  const san = planRequest({ providerId: 'SANTIMENT', endpointId: 'graphql-get-metric', method: 'POST', body: { query: 'q' }, query: {}, credential: 'SAN' });
-  assert.equal(san.headers.authorization, 'Apikey SAN'); assert.equal(san.method, 'POST'); assert.equal(typeof san.body, 'string');
   const tk = planRequest({ providerId: 'TOKENOMIST', endpointId: 'unlock-events', pathParams: { tokenId: 'solana' }, query: { page: 1 }, credential: 'TK' });
   assert.equal(tk.headers['x-api-key'], 'TK'); assert.equal(tk.url, 'https://api.tokenomist.ai/v5/unlock/events/solana?page=1');
   // missing credential on a keyed endpoint is refused BEFORE any dispatch; unknown endpoint / provider likewise

@@ -28,7 +28,7 @@ Required for PAPER:
 
 Optional — each only **widens** the sense set, none flips its own budget/plan gate on, and a preflight reports each present/absent by NAME:
 - `COINGECKO_DEMO_API_KEY` (CoinGecko demo quota) · `SERPENT_HTTP_CONTACT` (SEC / EDGAR user-agent law) · `RUMOR2_EDGAR_CIKS` (your own EDGAR CIK whitelist).
-- Paid providers, off until plan + budget are attested in `config/market-research.paper.json`: `COINGLASS_API_KEY`, `CRYPTOQUANT_API_KEY`, `SANTIMENT_API_KEY`, `TOKENOMIST_API_KEY`.
+- Paid providers, off until plan + budget are attested in `config/market-research.paper.json`: `COINGLASS_API_KEY`, `CRYPTOQUANT_API_KEY`, `TOKENOMIST_API_KEY`.
 - `ANTHROPIC_API_KEY` **plus** the durable SOCRATES toggle **plus** `SERPENT_SOCRATES_DAILY_USD` and the `model.*` USD caps in the policy — the model is never enabled from a key alone.
 - `X_BEARER_TOKEN` **plus** `RUMOR2_SOCIAL_X_MAX_DAILY_POST_READS`, `RUMOR2_SOCIAL_X_MAX_MONTHLY_POST_READS`, `RUMOR2_SOCIAL_X_MAX_ESTIMATED_DAILY_USD`, then an explicit paid smoke envelope.
 - `KRAKEN_L3_DATA_API_KEY` / `KRAKEN_L3_DATA_API_SECRET` — a DEDICATED data-only key (create-ws-token only; never trade / withdraw / funding, never an execution key) for the dark L3 capture.

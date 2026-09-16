@@ -27,7 +27,6 @@ export const PAYLOAD_KEYS = deepFreeze({
   INSTRUMENT: ['status', 'base', 'quote', 'marketType', 'pricePrecision', 'qtyPrecision', 'priceIncrement', 'qtyIncrement', 'contractSize', 'linearity', 'settlementCurrency', 'underlying', 'expiryTs', 'strike', 'optionType', 'quoteAliasGroup', 'tradeable', 'fundingIntervalMs', 'fundingUnit'],
   DERIVATIVE_TICK: ['markPrice', 'indexPrice', 'lastPrice', 'bid', 'ask', 'openInterest', 'openInterestUnit', 'fundingRateNative', 'fundingUnit', 'fundingIntervalMs', 'fundingRelative', 'fundingPredictedNative', 'nextFundingTs', 'volume24hBase', 'volume24hQuote', 'contractMultiplier', 'settlementCurrency', 'linearity'],
   LIQUIDATION: ['forcedOrderSide', 'liquidatedPositionSide', 'qtyBase', 'price', 'notional', 'notionalUnit', 'aggregated', 'aggregationIntervalMs', 'longNotional', 'shortNotional', 'venueScope'],
-  OPTION_TICK: ['markIv', 'bidIv', 'askIv', 'delta', 'gamma', 'vega', 'theta', 'markPrice', 'underlyingPrice', 'underlyingIndex', 'openInterest', 'volume24h', 'bid', 'ask', 'ivUnit', 'strike', 'expiryTs', 'optionType', 'settlementCurrency'],
   ASSET_REFERENCE: ['providerAssetId', 'name', 'symbolNative', 'marketCapUsd', 'fdvUsd', 'circulatingSupply', 'totalSupply', 'maxSupply', 'priceUsd', 'volume24hUsd', 'categories', 'platforms', 'capMethodologyId', 'lastUpdatedTs'],
   UNLOCK_EVENT: ['eventId', 'scheduledTs', 'timePrecision', 'amountToken', 'amountUsd', 'recipientCategory', 'unlockType', 'tracked', 'allocationName', 'totalLocked', 'totalUnlocked', 'totalUntracked', 'circulatingSupply', 'scheduleVersion'],
   DEX_POOL: ['chain', 'poolAddress', 'dex', 'baseToken', 'quoteToken', 'priceUsd', 'priceQuote', 'liquidityUsd', 'volume24hUsd', 'volume1hUsd', 'txCount24h', 'poolCreatedTs', 'feePct'],
@@ -150,16 +149,6 @@ export function payloadError(kind, p, where = 'payload') {
       else { if (p.longNotional !== null || p.shortNotional !== null) return `${where}: a single liquidation carries no side totals`; if (p.forcedOrderSide !== 'UNKNOWN' && p.liquidatedPositionSide !== 'UNKNOWN' && ((p.forcedOrderSide === 'SELL') !== (p.liquidatedPositionSide === 'LONG'))) return `${where}: forced-order side contradicts liquidated position side`; }
       if ((p.notional !== null || p.longNotional !== null || p.shortNotional !== null) && p.notionalUnit === 'UNKNOWN') return `${where}: a notional needs a unit`;
       return null;
-    case 'OPTION_TICK':
-      e = numOrNullKeys(p, ['markIv', 'bidIv', 'askIv', 'delta', 'gamma', 'vega', 'theta', 'markPrice', 'underlyingPrice', 'bid', 'ask'], where); if (e) return e;
-      e = nonNegOrNullKeys(p, ['openInterest', 'volume24h'], where); if (e) return e;
-      if (p.ivUnit !== 'FRACTION') return `${where}: ivUnit must be FRACTION (native units are normalized before this DTO)`;
-      for (const k of ['markIv', 'bidIv', 'askIv']) if (p[k] !== null && (p[k] < 0 || p[k] > 10)) return `${where}: ${k} outside a plausible fraction range`;
-      if (p.delta !== null && Math.abs(p.delta) > 1) return `${where}: delta outside [-1,1]`;
-      if (!isId(p.underlyingIndex) || !isPositive(p.strike) || !isTs(p.expiryTs) || !OPTION_TYPES.includes(p.optionType) || !isId(p.settlementCurrency)) return `${where}: option specification malformed`;
-      if (p.optionType === 'CALL' && p.delta !== null && p.delta < 0) return `${where}: a call delta is not negative`;
-      if (p.optionType === 'PUT' && p.delta !== null && p.delta > 0) return `${where}: a put delta is not positive`;
-      return null;
     case 'ASSET_REFERENCE':
       if (!isId(p.providerAssetId) || !isStringOrNull(p.name, 120) || !isId(p.symbolNative) || !isId(p.capMethodologyId)) return `${where}: reference identity malformed`;
       e = nonNegOrNullKeys(p, ['marketCapUsd', 'fdvUsd', 'circulatingSupply', 'totalSupply', 'maxSupply', 'priceUsd', 'volume24hUsd'], where); if (e) return e;
@@ -252,7 +241,7 @@ export function payloadError(kind, p, where = 'payload') {
 // The "primary value" of each kind: KNOWN requires it admissible; MISSING/UNAVAILABLE/FAILED/NOT_SUPPORTED require null.
 const PRIMARY_VALUE_KEYS = deepFreeze({
   TRADE: ['price'], BOOK_SNAPSHOT: ['bids'], BOOK_COVERAGE: ['state'], CANDLE: ['close'], INSTRUMENT: ['status'], DERIVATIVE_TICK: ['markPrice', 'indexPrice', 'lastPrice', 'openInterest', 'fundingRateNative'],
-  LIQUIDATION: ['notional', 'longNotional', 'shortNotional', 'qtyBase'], OPTION_TICK: ['markIv', 'markPrice', 'openInterest'], ASSET_REFERENCE: ['priceUsd', 'marketCapUsd', 'circulatingSupply'], UNLOCK_EVENT: ['scheduledTs', 'amountToken'],
+  LIQUIDATION: ['notional', 'longNotional', 'shortNotional', 'qtyBase'], ASSET_REFERENCE: ['priceUsd', 'marketCapUsd', 'circulatingSupply'], UNLOCK_EVENT: ['scheduledTs', 'amountToken'],
   DEX_POOL: ['priceUsd', 'liquidityUsd'], DEFI_METRIC: ['value'], ONCHAIN_METRIC: ['value'], STABLECOIN_METRIC: ['value'], ETF_FLOW: ['flowUsd'], ECONOMIC_EVENT: ['scheduledTs', 'actualValue', 'forecastValue'],
   EVENT_REFERENCE: ['nativeRef'], PROVIDER_STATUS: ['status'],
   DERIVATIVE_ANALYTIC_BUCKET: ['values'], L3_BOOK_SNAPSHOT: ['bids', 'asks'], L3_ORDER_EVENT: ['events'], L3_BOOK_COVERAGE: ['state'],

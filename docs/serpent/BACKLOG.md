@@ -10,12 +10,7 @@ Standing order and how the queue/backlog/open-questions relate: `docs/serpent/RE
 
 ---
 
-## B-1. Lean pass 4 — Prettier on all non-frozen code — PARKED (needs a decision)
-**Parked to `OPEN-QUESTIONS.md`** (2026-09-16): the house style is deliberately dense
-(long single-line functions); Prettier's line-wrapping cannot match it and would reformat
-thousands of lines and break the many formatting-sensitive fences/tests. This is a
-taste/scope decision, not no-decision work — see OPEN-QUESTIONS.md for the options. Do not
-pull this item until David chooses; it is skipped, not held.
+## B-1. DROPPED — 2026-09-16 (owner decision): Prettier fights the intentional dense house style; no formatter lands.
 
 ## B-2. L-2 follow-up — 24h maturation pass
 **Do:** the maturation pass that fills the 1h/4h/24h outcome columns of the research /

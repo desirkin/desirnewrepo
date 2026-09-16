@@ -302,7 +302,7 @@ export function ownerContextRebuilder(owner, { referenceNotionals = [1000, 10000
     rebuild.lastPeers = b.context.subjects.length ? [...new Set(obs.filter((o) => o.kind === 'TRADE' && o.subject.canonicalCoin !== canonicalCoin).map((o) => o.subject.canonicalCoin))].sort() : peers;
     return b.context;
   };
-  rebuild.params = ({ canonicalCoin }) => ({ canonicalCoin, referenceNotionals: [...referenceNotionals], peers: peers.length ? [...peers] : rebuild.lastPeers ?? [], limits: { retainedObservations: limits.retainedObservations, retainedCoverage: limits.retainedCoverage, optionsAdmittedPerCase: limits.optionsAdmittedPerCase, derivativesPerCase: limits.derivativesPerCase, barsPerInterval: limits.barsPerInterval } });
+  rebuild.params = ({ canonicalCoin }) => ({ canonicalCoin, referenceNotionals: [...referenceNotionals], peers: peers.length ? [...peers] : rebuild.lastPeers ?? [], limits: { retainedObservations: limits.retainedObservations, retainedCoverage: limits.retainedCoverage, derivativesPerCase: limits.derivativesPerCase, barsPerInterval: limits.barsPerInterval } });
   return rebuild;
 }
 

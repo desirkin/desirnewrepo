@@ -3,7 +3,7 @@
 // insufficient peers, forecast learned after release, mismatched entity sets), and the point-in-time law.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { tradeWindow, bookMetrics, walkBook, roundTrip, haircutScenarios, pressureResponse, pressureResponseChange, peerRelativeMove, venueDispersion, convertQuote, basisBps, oiChange, fundingNative, optionsSurface, admitOptions, supplyRatios, exchangeNetFlow, liquidationTotals, etfFlowSummary, macroSurprise, relativeActivity, indicators, breakoutDistance, orderedFirstChanges, RECIPES, RECIPE_SET_VERSION } from '../market-lab/recipes.js';
+import { tradeWindow, bookMetrics, walkBook, roundTrip, haircutScenarios, pressureResponse, pressureResponseChange, peerRelativeMove, venueDispersion, convertQuote, basisBps, oiChange, fundingNative, supplyRatios, exchangeNetFlow, liquidationTotals, etfFlowSummary, macroSurprise, relativeActivity, indicators, breakoutDistance, orderedFirstChanges, RECIPES, RECIPE_SET_VERSION } from '../market-lab/recipes.js';
 import { knowledgeFloor, admissibleAt, derivationClockError, inWindow, adjacentWindows, clockConflict } from '../market-lab/time.js';
 
 const T0 = Date.parse('2026-09-08T12:00:00Z');
@@ -64,19 +64,7 @@ test('G06/H02. index 100 / mark 101: basis 100 bps; open interest 1000 -> 1100: 
   const ordered = orderedFirstChanges([{ venue: 'coinbase', receivedTs: T0 + 40 }, { venue: 'kraken', receivedTs: T0 + 10, clockUncertaintyMs: 20 }]); assert.deepEqual(ordered.sequence.map((s) => s.venue), ['kraken', 'coinbase']); assert.equal(ordered.law, 'OBSERVED_SEQUENCE_NOT_CAUSATION');
 });
 
-test('G07. ATM IV 0.65; call IV 0.70 at delta +0.24; put IV 0.80 at delta -0.26: risk reversal -0.10, butterfly +0.10; nearest strike / delta selection is deterministic; a mixed scope refuses; admission is nearest expiry then nearest strike, capped', () => {
-  const tk = (id, type, strike, delta, iv, extra = {}) => ({ kind: 'OPTION_TICK', provider: 'DERIBIT', subject: { venue: 'deribit', instrumentId: id }, payload: { expiryTs: T0 + 7 * 86_400_000, markIv: iv, underlyingPrice: 100, strike, optionType: type, delta, bidIv: iv - 0.01, askIv: iv + 0.01, settlementCurrency: 'BTC', underlyingIndex: 'btc_usd', openInterest: 10, volume24h: 1, ...extra } });
-  const ticks = [tk('ATM-C', 'CALL', 100, 0.5, 0.65), tk('C24', 'CALL', 110, 0.24, 0.70), tk('C40', 'CALL', 105, 0.40, 0.68), tk('P26', 'PUT', 90, -0.26, 0.80), tk('P10', 'PUT', 80, -0.10, 0.9)];
-  const census = { basis: 'CENSUS_RECORD', total: 5, omitted: 0, rejected: 0, censusId: 'mc-census', knownAtTs: T0 - 1000 };
-  const s = optionsSurface(ticks, { censusComplete: true, census }); const t = s.term[0];
-  assert.equal(t.atm.markIv, 0.65); assert.equal(t.call25.instrumentId, 'C24'); assert.equal(t.put25.instrumentId, 'P26'); near(t.riskReversal25d, -0.10); near(t.butterfly25d, 0.10); assert.equal(s.law, 'NO_DEALER_GAMMA_INFERENCE_FROM_PUBLIC_OI'); assert.equal(s.support.state, 'COMPLETE'); assert.equal(t.ratioScope, 'WHOLE_CHAIN'); assert.equal(s.census.complete, true); assert.equal(s.census.censusId, 'mc-census');
-  // closeout R02: completeness is an INPUT from a recorded census, never a default; without it the surface is PARTIAL_CENSUS and its ratios are labelled as the admitted subset
-  const noCensus = optionsSurface(ticks); assert.equal(noCensus.support.state, 'PARTIAL_CENSUS'); assert.deepEqual(noCensus.support.reasons, ['CENSUS_INCOMPLETE']); assert.equal(noCensus.term[0].ratioScope, 'ADMITTED_SUBSET'); assert.equal(noCensus.census.basis, 'NONE');
-  const dup = optionsSurface([...ticks, { ...ticks[0], knownAtTs: 5, sequence: 9 }], { censusComplete: true, census }); assert.equal(dup.admitted, 5, 'a summary tick and its enriched ticker for one instrument are ONE contract');
-  const mixed = optionsSurface([...ticks, tk('X', 'CALL', 100, 0.5, 0.6, { settlementCurrency: 'USDC' })]); assert.equal(mixed.support.state, 'SCOPE_MISMATCH');
-  const many = Array.from({ length: 700 }, (_, i) => tk(`O${i}`, i % 2 ? 'PUT' : 'CALL', 50 + i, 0.3, 0.6, { expiryTs: T0 + (1 + (i % 5)) * 86_400_000 }));
-  const adm = admitOptions(many, { cap: 512, nowTs: T0 }); assert.equal(adm.admitted.length, 512); assert.equal(adm.omitted, 188); assert.equal(adm.census, 700); assert.ok(adm.admitted.every((x) => x.payload.expiryTs <= adm.admitted[511].payload.expiryTs));
-});
+// G07 (Deribit options surface / admission) was retired with the OPTIONS_TERM_SKEW family (SENSE-CULL-3).
 
 test('G08. venue mids 99 / 100 / 101: median 100, dispersion 200 bps; a mixed quote refuses; EUR/USD conversion without a sourced matching rate refuses; with a sourced rate it converts and records the path', () => {
   const d = venueDispersion([{ venue: 'a', mid: 99, quote: 'USD' }, { venue: 'b', mid: 100, quote: 'USD' }, { venue: 'c', mid: 101, quote: 'USD' }]); assert.equal(d.medianMid, 100); assert.equal(d.dispersionBps, 200);
@@ -90,7 +78,7 @@ test('G09/G10. supply ratios: circulating 80 / total 100 / max 120 / cap 160 / F
   assert.equal(supplyRatios({ payload: { circulatingSupply: 80, totalSupply: 100, maxSupply: null } }).circulatingOverMax, null);
   const leg = (metric, value, over = {}) => ({ provider: 'CRYPTOQUANT', periodStartTs: T0 - 86_400_000, periodEndTs: T0, subject: { canonicalCoin: 'BTC' }, payload: { value, entitySet: 'all_exchange', chain: 'bitcoin', unit: 'NATIVE', window: 'day', labelVintage: 'v1', methodologyId: `cryptoquant-${metric}-v1`, ...over } });
   const n = exchangeNetFlow(leg('inflow', 120), leg('outflow', 70)); assert.equal(n.net, 50); assert.equal(n.law, 'EXCHANGE_TRANSFER_IS_NOT_A_SALE');
-  assert.equal(exchangeNetFlow(leg('inflow', 120), { ...leg('outflow', 70), provider: 'SANTIMENT' }).support.state, 'RECIPE_MISMATCH'); assert.equal(exchangeNetFlow(leg('inflow', 120), leg('outflow', 70, { entitySet: 'binance' })).support.state, 'RECIPE_MISMATCH'); assert.equal(exchangeNetFlow(leg('inflow', 120), leg('outflow', 70, { unit: 'USD' })).support.state, 'RECIPE_MISMATCH');
+  assert.equal(exchangeNetFlow(leg('inflow', 120), { ...leg('outflow', 70), provider: 'DEFILLAMA' }).support.state, 'RECIPE_MISMATCH'); assert.equal(exchangeNetFlow(leg('inflow', 120), leg('outflow', 70, { entitySet: 'binance' })).support.state, 'RECIPE_MISMATCH'); assert.equal(exchangeNetFlow(leg('inflow', 120), leg('outflow', 70, { unit: 'USD' })).support.state, 'RECIPE_MISMATCH');
 });
 
 test('G11. twenty closed bars all at 100: SMA 100, population stdev 0, Bollinger bands 100/100/100, RSI FLAT (null); breakout distances against prior ranges; fewer bars than a window yield null, never a partial average', () => {

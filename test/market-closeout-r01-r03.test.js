@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { T0, tmp, json, subjects, btcOnly, includedPlan, cryptoquantPolicy, cryptoquantFetch, deribitOwner, deribitTicker, DERIBIT_FOUR, deribitFourSummaries, krakenBookOnly, bookObs, krakenWsScript, krakenTradeMsg, krakenRestFixture, H, SEALED_REF } from './helpers/market-closeout.js';
+import { T0, tmp, json, subjects, btcOnly, includedPlan, cryptoquantPolicy, cryptoquantFetch, krakenBookOnly, bookObs, krakenWsScript, krakenTradeMsg, krakenRestFixture, H, SEALED_REF } from './helpers/market-closeout.js';
 import { createResearchOwner } from '../market-lab/owner.js';
 import { loadPolicy } from '../market-lab/policy.js';
 import { openQuotaJournal, createDispatchGuard, nativeCharge } from '../market-lab/quota.js';
@@ -191,25 +191,13 @@ test('MC-W04 (R02). the repaired coverage support survives capture, reopen, rest
   } finally { await fx.owner.stop({ seal: false }); await fx.close(); rmSync(fx.root, { recursive: true, force: true }); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('MC-W06 (R02). a summary tick and its enriched ticker for one instrument are ONE contract; complete / partial surfaces and put-call counts reconcile to unique lawful instruments (4 census instruments, 2 puts + 2 calls with OI 100 each => put/call OI ratio 1 over the WHOLE chain; one instrument without any tick => an ADMITTED_SUBSET ratio labelled TICKS_MISSING)', async () => {
-  const paths = []; const full = deribitOwner(paths);
-  try {
-    const dq = await full.acquire('OPTIONS_TERM_SKEW', 'BTC'); const ticks = dq.observations.filter((o) => o.kind === 'OPTION_TICK'); assert.ok(ticks.length >= 8, 'summary + ticker records per instrument');
-    const surf = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: REF }).context.families.OPTIONS_TERM_SKEW.components[0].value;
-    assert.equal(surf.admitted, 4); assert.equal(surf.term[0].contracts, 4); assert.equal(surf.term[0].ratioScope, 'WHOLE_CHAIN'); assert.equal(surf.term[0].putCallOiRatio, 1); assert.equal(surf.census.unticked, 0); assert.equal(surf.support.state, 'COMPLETE');
-  } finally { await full.stop({ seal: false }); }
-  const p2 = []; const three = deribitOwner(p2, { summaries: deribitFourSummaries(['BTC-26SEP26-100000-C', 'BTC-26SEP26-110000-C', 'BTC-26SEP26-100000-P']) });
-  try {
-    const dq = await three.acquire('OPTIONS_TERM_SKEW', 'BTC'); const surf = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: REF }).context.families.OPTIONS_TERM_SKEW.components[0].value;
-    assert.equal(surf.census.total, 4); assert.equal(surf.admitted, 3); assert.equal(surf.census.unticked, 1, 'one census instrument has no tick'); assert.equal(surf.term[0].ratioScope, 'ADMITTED_SUBSET'); assert.ok(surf.term[0].support.reasons.includes('TICKS_MISSING')); assert.equal(surf.support.state, 'ADMITTED_SUBSET'); assert.equal(surf.term[0].putCallOiRatio, 0.5, 'one put against two calls over the ticked subset, labelled as that subset');
-  } finally { await three.stop({ seal: false }); }
-});
+// MC-W06 (R02, the Deribit options-census surface) was retired with the OPTIONS_TERM_SKEW family (SENSE-CULL-3).
 
 // ---------------------------------------------------------------- R03 -----------------------------------------------------------
-test('MC-J03 (R03). every registered metric of the 16 families has ONE explicit bounded mapping (component + build + evidence kind, or a declared unsupported reason); packet limits produce reconciled omission reasons and counts', () => {
+test('MC-J03 (R03). every registered metric of the 15 families has ONE explicit bounded mapping (component + build + evidence kind, or a declared unsupported reason); packet limits produce reconciled omission reasons and counts', () => {
   const rows = [];
   for (const fam of Object.keys(FAMILY_REGISTRY)) for (const metricId of familyMetricIds(fam)) { const m = METRIC_MAP[fam]?.[metricId]; assert.ok(m, `${fam}/${metricId} has no mapping`); rows.push({ fam, metricId, m }); if (m.component) { assert.ok(MARKET_EVIDENCE_KINDS.includes(m.kind), `${fam}/${metricId}: unknown evidence kind ${m.kind}`); assert.equal(typeof m.build, 'string'); assert.ok(Array.isArray(m.inputKinds) && m.inputKinds.length >= 1); } else assert.ok(typeof m.unsupported === 'string' && m.unsupported.length, `${fam}/${metricId}: unsupported without a reason`); }
-  assert.equal(new Set(rows.map((r) => r.fam)).size, 16); assert.ok(rows.filter((r) => r.m.component).length >= 40, 'the supported table is populated');
+  assert.equal(new Set(rows.map((r) => r.fam)).size, 15); assert.ok(rows.filter((r) => r.m.component).length >= 40, 'the supported table is populated');
   // omission reconciliation over a real context: a DETAIL request for an absent component and an unsupported metric are named, counts add up
   const obs = []; for (let i = 0; i < 30; i += 1) obs.push(trade(i, T0 - 600_000 + i * 15_000, 100 + i * 0.01)); for (let i = 0; i < 6; i += 1) obs.push(book(i, T0 - 300_000 + i * 50_000));
   const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: obs, coverage: [cov({ state: 'SUBSCRIBED', startTs: T0 - 900_000 })], captureRef: REF, referenceNotionals: [1000] }).context;
@@ -222,35 +210,19 @@ test('MC-J03 (R03). every registered metric of the 16 families has ONE explicit 
   assert.equal(admitted + om.detail.length, total, `admitted components (${admitted}) + omitted components (${om.detail.length}) reconcile to the context (${total})`); assert.equal(om.counts.components, om.detail.length);
 });
 
-test('MC-J05 (R03). missing / denied Greeks and an incompatible census stay PARTIAL: a ticker without greeks leaves delta null (GREEKS_MISSING, no 25-delta wings); a ticker refused by the provider keeps the summary-only contract; a tick outside the census is excluded and counted', async () => {
-  const paths = []; const noGreeks = deribitOwner(paths, { ticker: (name) => deribitTicker(name, { greeks: false }) });
-  try {
-    const dq = await noGreeks.acquire('OPTIONS_TERM_SKEW', 'BTC'); const s = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: REF }).context.families.OPTIONS_TERM_SKEW.components[0].value;
-    assert.equal(s.term[0].call25, null); assert.equal(s.term[0].put25, null); assert.equal(s.term[0].riskReversal25d, null); assert.equal(s.term[0].greeksMissing, 4); assert.ok(s.term[0].support.reasons.includes('GREEKS_MISSING')); assert.equal(s.term[0].support.state, 'PARTIAL_ADMITTED_SCOPE'); assert.equal(typeof s.term[0].atm.markIv, 'number', 'the ATM mark IV from the summary survives');
-  } finally { await noGreeks.stop({ seal: false }); }
-  const p2 = []; const denied = deribitOwner(p2, { ticker: (name) => (name === 'BTC-26SEP26-110000-C' ? null : deribitTicker(name)) });
-  try {
-    const dq = await denied.acquire('OPTIONS_TERM_SKEW', 'BTC'); const s = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: REF }).context.families.OPTIONS_TERM_SKEW.components[0].value;
-    assert.equal(s.term[0].contracts, 4, 'the refused ticker does not lose the instrument (summary contract retained)'); assert.equal(s.term[0].greeksMissing, 1); assert.ok(dq.results.some((r) => r.providerId === 'DERIBIT' && r.state !== 'OK'), 'the refused ticker is a visible result');
-  } finally { await denied.stop({ seal: false }); }
-  const p3 = []; const foreign = { result: [...deribitFourSummaries().result, { ...deribitFourSummaries().result[0], instrument_name: 'BTC-26SEP26-120000-C' }] }; const outside = deribitOwner(p3, { summaries: foreign, ticker: (name) => deribitTicker(name) });
-  try {
-    const dq = await outside.acquire('OPTIONS_TERM_SKEW', 'BTC'); const s = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: REF }).context.families.OPTIONS_TERM_SKEW.components[0].value;
-    assert.equal(s.admission.notInCensus >= 1 || s.admitted === 4, true, `a tick for an instrument outside the census is excluded (${JSON.stringify(s.admission)})`); assert.equal(s.admitted, 4);
-  } finally { await outside.stop({ seal: false }); }
-});
+// MC-J05 (R03, the Deribit Greeks / census PARTIAL surface) was retired with the OPTIONS_TERM_SKEW family (SENSE-CULL-3).
 
-test('MC-J07 (R03). a Santiment-only fixture supplies NETWORK_ACTIVITY through the mapped GraphQL request; exhausted primary AND fallback quota stays within R01 (zero dispatch); an already satisfied metric is served from the bounded cache without a second paid request', async () => {
-  const graphql = []; const raw = H.policyWith({ providers: ['SANTIMENT'] }); includedPlan(raw, 'SANTIMENT');
-  const san = createResearchOwner({ policy: loadPolicy(raw), subjects: btcOnly(), env: { SANTIMENT_API_KEY: 'offline-fixture' }, clock: () => T0, researchRoot: tmp(), fetchImpl: async (url, init) => { graphql.push(JSON.parse(init.body)); return json(H.santimentSeries()); } });
+test('MC-J07 (R03). CryptoQuant supplies NETWORK_ACTIVITY through the mapped REST request (its sole surviving provider after SENSE-CULL-3); an already satisfied metric is served from the bounded cache without a second paid request; exhausted entitlement stays within R01 (zero dispatch)', async () => {
+  const requests = [];
+  const cq = createResearchOwner({ policy: cryptoquantPolicy(), subjects: btcOnly(), env: { CRYPTOQUANT_API_KEY: 'offline-fixture' }, clock: () => T0, researchRoot: tmp(), fetchImpl: cryptoquantFetch(requests) });
   try {
-    const na = await san.acquire('NETWORK_ACTIVITY', 'BTC', { metricIds: ['active_addresses'] }); assert.ok(graphql.length >= 1, 'the mapped GraphQL request was issued'); assert.equal(graphql[0].variables.slug, 'bitcoin'); assert.ok(/daily_active_addresses|active_addresses/.test(graphql[0].variables.metric));
-    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: na.observations, coverage: na.coverage, captureRef: REF }).context; const comp = ctx.families.NETWORK_ACTIVITY.components.find((c) => c.metricId === 'active_addresses'); assert.ok(comp, 'active_addresses component from Santiment'); assert.equal(comp.value.provider, 'SANTIMENT'); assert.equal(comp.value.value, 7000);
-    const n = graphql.length; const again = await san.acquire('NETWORK_ACTIVITY', 'BTC', { metricIds: ['active_addresses'] }); assert.equal(graphql.length, n, 'a satisfied metric inside its cadence is not bought twice'); assert.equal(again.usage.dispatched, 0); assert.ok(again.results.some((r) => r.state === 'CACHED'));
-  } finally { await san.stop({ seal: false }); }
-  const wire = []; const both = H.policyWith({ providers: ['CRYPTOQUANT', 'SANTIMENT'] }); includedPlan(both, 'CRYPTOQUANT', { remaining: 0 }); includedPlan(both, 'SANTIMENT', { remaining: 0 });
-  const dry = createResearchOwner({ policy: loadPolicy(both), subjects: btcOnly(), env: { CRYPTOQUANT_API_KEY: 'offline-fixture', SANTIMENT_API_KEY: 'offline-fixture' }, clock: () => T0, researchRoot: tmp(), fetchImpl: async (url) => { wire.push(url); return json({}); } });
-  try { const r = await dry.acquire('NETWORK_ACTIVITY', 'BTC'); assert.equal(wire.length, 0, 'exhausted primary and fallback: nothing is dispatched'); assert.equal(r.usage.dispatched, 0); assert.ok(r.usage.reasons.ENTITLEMENT_EXHAUSTED >= 1, JSON.stringify(r.usage.reasons)); }
+    const na = await cq.acquire('NETWORK_ACTIVITY', 'BTC', { metricIds: ['active_addresses'] }); assert.ok(requests.some((r) => /addresses-count/.test(r)), 'the mapped REST request was issued');
+    const ctx = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: na.observations, coverage: na.coverage, captureRef: REF }).context; const comp = ctx.families.NETWORK_ACTIVITY.components.find((c) => c.metricId === 'active_addresses'); assert.ok(comp, 'active_addresses component from CryptoQuant'); assert.equal(comp.value.provider, 'CRYPTOQUANT'); assert.equal(comp.value.value, 7000);
+    const n = requests.length; const again = await cq.acquire('NETWORK_ACTIVITY', 'BTC', { metricIds: ['active_addresses'] }); assert.equal(requests.length, n, 'a satisfied metric inside its cadence is not bought twice'); assert.equal(again.usage.dispatched, 0); assert.ok(again.results.some((r) => r.state === 'CACHED'));
+  } finally { await cq.stop({ seal: false }); }
+  const wire = []; const dryP = H.policyWith({ providers: ['CRYPTOQUANT'] }); includedPlan(dryP, 'CRYPTOQUANT', { remaining: 0 });
+  const dry = createResearchOwner({ policy: loadPolicy(dryP), subjects: btcOnly(), env: { CRYPTOQUANT_API_KEY: 'offline-fixture' }, clock: () => T0, researchRoot: tmp(), fetchImpl: async (url) => { wire.push(url); return json({}); } });
+  try { const r = await dry.acquire('NETWORK_ACTIVITY', 'BTC'); assert.equal(wire.length, 0, 'exhausted entitlement: nothing is dispatched'); assert.equal(r.usage.dispatched, 0); assert.ok(r.usage.reasons.ENTITLEMENT_EXHAUSTED >= 1, JSON.stringify(r.usage.reasons)); }
   finally { await dry.stop({ seal: false }); }
 });
 

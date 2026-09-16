@@ -78,35 +78,7 @@ test('MC-W01 (R02). one Kraken book and NO trade-feed coverage: the 1 h trade wi
   } finally { await ko.stop({ seal: false }); }
 });
 
-const deribitTicker = (name) => { const spec = { 'BTC-26SEP26-100000-C': { iv: 65, delta: 0.55 }, 'BTC-26SEP26-110000-C': { iv: 60, delta: 0.25 }, 'BTC-26SEP26-100000-P': { iv: 70, delta: -0.45 }, 'BTC-26SEP26-90000-P': { iv: 72, delta: -0.25 } }[name]; if (!spec) return null; return { result: { instrument_name: name, mark_iv: spec.iv, bid_iv: spec.iv - 1, ask_iv: spec.iv + 1, greeks: { delta: spec.delta, gamma: 0.00001, vega: 50, theta: -20 }, mark_price: 0.05, underlying_price: 100_500, underlying_index: 'SYN.BTC-26SEP26', open_interest: 100, stats: { volume: 10, volume_usd: 1000 }, best_bid_price: 0.049, best_ask_price: 0.051, timestamp: T0 - 400 } }; };
-const DERIBIT_FOUR = { result: [...H.DERIBIT_INSTRUMENTS.result, { ...H.DERIBIT_INSTRUMENTS.result[0], instrument_name: 'BTC-26SEP26-110000-C', strike: 110000 }, { ...H.DERIBIT_INSTRUMENTS.result[1], instrument_name: 'BTC-26SEP26-90000-P', strike: 90000 }] };
-const deribitFourSummaries = () => ({ result: DERIBIT_FOUR.result.map((i) => ({ instrument_name: i.instrument_name, mark_iv: { 'BTC-26SEP26-100000-C': 65, 'BTC-26SEP26-110000-C': 60, 'BTC-26SEP26-100000-P': 70, 'BTC-26SEP26-90000-P': 72 }[i.instrument_name], open_interest: 100, mark_price: 0.05, underlying_price: 100_500, underlying_index: 'SYN.BTC-26SEP26', volume: 10, bid_price: 0.049, ask_price: 0.051, creation_timestamp: T0 - 500 })) });
-async function deribitOwner(paths) {
-  const dp = loadPolicy(H.policyWith({ providers: ['DERIBIT'] }));
-  return createResearchOwner({ policy: dp, subjects: subjects(), clock: () => T0, researchRoot: tmp(), fetchImpl: async (url) => { const u = new URL(url); paths.push(u.pathname + u.search); if (u.pathname.endsWith('get_instruments')) return json(DERIBIT_FOUR); if (u.pathname.endsWith('get_book_summary_by_currency')) return json(deribitFourSummaries()); if (u.pathname.endsWith('/ticker')) { const t = deribitTicker(u.searchParams.get('instrument_name')); return t ? json(t) : json({ error: { code: 1 } }, 400); } return json({}, 404); } });
-}
-test('MC-J04 (R03). the production owner enriches admitted Deribit options through the registered ticker path: Greeks reach the context surface and the 25-delta arithmetic reproduces the independent fixture oracle (RR = 0.60 - 0.72 = -0.12; butterfly = (0.60 + 0.72) / 2 - 0.65 = 0.01)', async () => {
-  const paths = []; const dout = await deribitOwner(paths);
-  try {
-    const dq = await dout.acquire('OPTIONS_TERM_SKEW', 'BTC');
-    assert.ok(paths.some((p) => /\/ticker\?/.test(p)), `the owner must call the registered ticker path (paths ${JSON.stringify(paths)})`);
-    const ticks = dq.observations.filter((o) => o.kind === 'OPTION_TICK'); assert.ok(ticks.some((o) => o.payload.delta !== null), 'a parsed Greek reaches the observations');
-    const dc = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: SEALED_REF });
-    const surf = dc.context.families.OPTIONS_TERM_SKEW.components.find((c) => c.metricId === 'atm_iv_term').value;
-    assert.equal(surf.term.length, 1); assert.equal(surf.term[0].contracts, 4, 'summary + ticker of one instrument is ONE contract'); assert.ok(Math.abs(surf.term[0].riskReversal25d - (-0.12)) < 1e-9, `RR ${surf.term[0].riskReversal25d}`); assert.ok(Math.abs(surf.term[0].butterfly25d - 0.01) < 1e-9, `BF ${surf.term[0].butterfly25d}`);
-  } finally { await dout.stop({ seal: false }); }
-});
-
-test('MC-W05 (R02). one OPTION_TICK without an instrument census cannot claim census completeness; a complete census (census record + all instruments) does', async () => {
-  const paths = []; const dout = await deribitOwner(paths);
-  try {
-    const dq = await dout.acquire('OPTIONS_TERM_SKEW', 'BTC'); const ticks = dq.observations.filter((o) => o.kind === 'OPTION_TICK');
-    const partial = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: ticks.slice(0, 1), coverage: [], captureRef: SEALED_REF }).context.families.OPTIONS_TERM_SKEW.components[0].value;
-    assert.equal(partial.censusComplete, false, 'no census evidence => not complete'); assert.notEqual(partial.support.state, 'COMPLETE');
-    const full = buildContext({ canonicalCoin: 'BTC', asOfTs: T0, observations: dq.observations, coverage: dq.coverage, captureRef: SEALED_REF }).context.families.OPTIONS_TERM_SKEW.components[0].value;
-    assert.equal(full.censusComplete, true, 'the real census (instruments + census coverage) establishes completeness for its named scope');
-  } finally { await dout.stop({ seal: false }); }
-});
+// MC-J04 and MC-W05 (the Deribit options enrichment / census witnesses) were retired with the OPTIONS_TERM_SKEW family (SENSE-CULL-3).
 
 test('MC-J01 (R03). the exact exit-liquidity oracle (asks 101x1, bids 99x3, notional 101 => 198.01980198 bps) is numeric evidence in the default summary AND under an explicit DETAIL request, and is present in the serialized model request', async () => {
   const { ko, market } = await krakenBookOnly();

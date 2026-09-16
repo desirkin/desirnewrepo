@@ -113,56 +113,6 @@
     "maxCallsPerDay": 2000
    }
   },
-  "DERIBIT": {
-   "enabled": false,
-   "credentialEnv": null,
-   "plan": {
-    "name": null,
-    "billing": "FREE",
-    "includedCallsPerMonth": null,
-    "remainingCalls": null,
-    "incrementalUsdPerCall": null,
-    "attestation": null,
-    "verifiedDate": null,
-    "quoteUsdPerMonth": null
-   },
-   "limits": {
-    "maxCallsPerDay": 1000,
-    "maxCallsPerMonth": 20000,
-    "maxConcurrency": 1
-   },
-   "permittedEndpoints": null,
-   "smoke": {
-    "authorized": false,
-    "maxCalls": 0,
-    "maxEstimatedUsd": null
-   }
-  },
-  "BYBIT": {
-   "enabled": false,
-   "credentialEnv": null,
-   "plan": {
-    "name": null,
-    "billing": "FREE",
-    "includedCallsPerMonth": null,
-    "remainingCalls": null,
-    "incrementalUsdPerCall": null,
-    "attestation": null,
-    "verifiedDate": null,
-    "quoteUsdPerMonth": null
-   },
-   "limits": {
-    "maxCallsPerDay": 1000,
-    "maxCallsPerMonth": 20000,
-    "maxConcurrency": 1
-   },
-   "permittedEndpoints": null,
-   "smoke": {
-    "authorized": false,
-    "maxCalls": 0,
-    "maxEstimatedUsd": null
-   }
-  },
   "COINGECKO": {
    "enabled": false,
    "credentialEnv": "COINGECKO_DEMO_API_KEY",
@@ -288,31 +238,6 @@
     "maxEstimatedUsd": null
    }
   },
-  "SANTIMENT": {
-   "enabled": false,
-   "credentialEnv": "SANTIMENT_API_KEY",
-   "plan": {
-    "name": null,
-    "billing": "UNKNOWN",
-    "includedCallsPerMonth": null,
-    "remainingCalls": null,
-    "incrementalUsdPerCall": null,
-    "attestation": null,
-    "verifiedDate": null,
-    "quoteUsdPerMonth": null
-   },
-   "limits": {
-    "maxCallsPerDay": 1000,
-    "maxCallsPerMonth": 20000,
-    "maxConcurrency": 1
-   },
-   "permittedEndpoints": null,
-   "smoke": {
-    "authorized": false,
-    "maxCalls": 0,
-    "maxEstimatedUsd": null
-   }
-  },
   "SETTLED_RECORDS": {
    "enabled": false,
    "credentialEnv": null,
@@ -399,7 +324,6 @@
   "bookMinuteEndpoints": 180,
   "barsPerInterval": 720,
   "derivativesPerCase": 64,
-  "optionsAdmittedPerCase": 512,
   "venueSnapshots": 16,
   "onchainMetrics": 64,
   "eventsPerCase": 128,

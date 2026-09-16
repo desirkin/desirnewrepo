@@ -27,7 +27,7 @@ test('A05/A06. strict JSON refuses duplicate keys, prototype hazards, unsafe int
   assert.equal(parseStrictJson('12345678901234567890').ok, false, 'unsafe integers are refused, not rounded'); assert.equal(parseStrictJson('{"a":1} x').ok, false); assert.equal(parseStrictJson(Buffer.from([0xff, 0xfe, 0x7b])).ok, false);
   assert.equal(parseStrictJson('['.repeat(200) + ']'.repeat(200)).ok, false, 'depth bounded'); assert.deepEqual(parseStrictJson('{"b":[1,2],"a":"é"}').value, { b: [1, 2], a: 'é' });
   assert.equal(canonicalJson({ b: 1, a: { d: 2, c: [3, { z: 1, y: 2 }] } }), '{"a":{"c":[3,{"y":2,"z":1}],"d":2},"b":1}'); assert.equal(canonicalDigest({ a: 1 }), canonicalDigest({ a: 1 })); assert.notEqual(canonicalDigest({ a: 1 }), canonicalDigest({ a: 2 }));
-  assert.equal(FAMILIES.length, 16); assert.equal(PROVIDER_IDS.length, 16); assert.ok(PAYLOAD_KINDS.length >= 20); assert.ok(Object.isFrozen(FAMILY_REGISTRY));
+  assert.equal(FAMILIES.length, 15); assert.equal(PROVIDER_IDS.length, 12); assert.ok(PAYLOAD_KINDS.length >= 20); assert.ok(Object.isFrozen(FAMILY_REGISTRY));
   for (const f of FAMILIES) { assert.ok(FAMILY_REGISTRY[f], f); for (const k of FAMILY_REGISTRY[f].kinds) assert.ok(PAYLOAD_KINDS.includes(k), `${f}: ${k}`); for (const p of FAMILY_REGISTRY[f].providers) assert.ok(PROVIDER_IDS.includes(p), `${f}: ${p}`); assert.ok(familyMetricIds(f).length >= 1); assert.equal(ALLOWED_MAX_AGE_MS[f]?.length > 0, true, `${f} has max-age policy values`); }
   assert.match(exactKeys({ a: 1, zz: 2 }, ['a', 'b'], 'x') ?? '', /position 2 of 2/, 'positional diagnostics never echo the hostile key');
 });
