@@ -16,7 +16,7 @@ process.env.COBRA_DATA_DIR = TEST_DATA;
 
 const { Db } = await import('../persistence/db.js');
 const { Repository, mostRestrictiveControls } = await import('../persistence/repository.js');
-const { runMigrations, FutureSchemaError } = await import('../persistence/migrate.js');
+const { runMigrations, verifySchemaTables, FutureSchemaError } = await import('../persistence/migrate.js');
 const { persistenceHealth } = await import('../persistence/health.js');
 const { startPersistence } = await import('../persistence/runtime.js');
 const { migrateLocalData } = await import('../persistence/migrate-local.js');
@@ -113,6 +113,27 @@ if (!TEST_URL) {
     assert.deepEqual(first.appliedNow, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const second = await runMigrations(db);
     assert.deepEqual(second.appliedNow, []); // idempotent
+  });
+
+  test('PUBLISH-FIX-4 schema truth: a table missing under a recorded version is repaired at boot, not raised as a 42P01', async () => {
+    // Simulate a connection lost mid-migration: the version ledger still reads 10
+    // but the version-10 store-anchor tables never landed (drop snapshots first —
+    // it carries the FK to anchors).
+    await db.query('DROP TABLE serpent_store_snapshots', [], { write: true });
+    await db.query('DROP TABLE serpent_store_anchors', [], { write: true });
+    assert.equal((await db.query(`SELECT to_regclass('serpent_store_anchors') AS reg`)).rows[0].reg, null, 'the anchors table is gone');
+    assert.deepEqual((await db.query('SELECT version FROM serpent_schema_migrations WHERE version = 10')).rows.map((r) => r.version), [10], 'yet the recorded version still claims 10');
+    // A fresh runMigrations does NOT repair it — version 10 is recorded, so the migration is skipped.
+    assert.deepEqual((await runMigrations(db)).appliedNow, [], 'the recorded version suppresses the migration');
+    assert.equal((await db.query(`SELECT to_regclass('serpent_store_anchors') AS reg`)).rows[0].reg, null, 'so the gap persists under version truth alone');
+    // Schema truth verifies the table set and re-applies the missing DDL.
+    const repair = await verifySchemaTables(db, { log: () => {} });
+    assert.deepEqual(repair.repaired.map((r) => r.table).sort(), ['serpent_store_anchors', 'serpent_store_snapshots']);
+    assert.ok(repair.repaired.every((r) => r.version === 10));
+    assert.notEqual((await db.query(`SELECT to_regclass('serpent_store_anchors') AS reg`)).rows[0].reg, null, 'the table is repaired');
+    assert.notEqual((await db.query(`SELECT to_regclass('serpent_store_snapshots') AS reg`)).rows[0].reg, null, 'its FK-linked snapshot table too');
+    // A second verify is a clean no-op — nothing is repaired when nothing is missing.
+    assert.deepEqual((await verifySchemaTables(db, { log: () => {} })).repaired, []);
   });
 
   test('unknown FUTURE schema is refused, never downgraded', async () => {

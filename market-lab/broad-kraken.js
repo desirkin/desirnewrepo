@@ -189,6 +189,10 @@ function openBroadStore({ dataDir, clock, segmentBytes, maxSegments, lineBytes, 
     lockFd = openSync(lockFile, 'wx');
     writeAll(lockFd, Buffer.from(`${JSON.stringify({ version: BROAD_KRAKEN_VERSION, pid: process.pid, bootId: currentBootId(), token: lockToken, acquiredTs: clock() })}\n`));
     fsyncSync(lockFd); closeSync(lockFd); lockFd = null;
+    // PUBLISH-FIX-4: name the owning process at acquisition so a boot log shows
+    // exactly one owner. A "already active as pid N" refusal on another boot then
+    // pairs against this line to tell a genuine second starter from a stale lock.
+    log(`broad Kraken writer owned by pid ${process.pid} (boot ${currentBootId()})`);
   } catch (error) {
     if (lockFd !== null) try { closeSync(lockFd); } catch { /* preserve first failure */ }
     // EEXIST here means a LIVE owner raced us in after recovery (recoverStaleBroadLock already recovered a dead one).

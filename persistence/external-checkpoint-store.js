@@ -9,8 +9,14 @@ export const EXTERNAL_CHECKPOINT_RECORD_VERSION = 'external-checkpoint-record-1'
 export const MAX_EXTERNAL_CHECKPOINT_BYTES = 20 * 1024 * 1024;
 export const EXTERNAL_CHECKPOINT_LOCK = 'serpent:data-only-external-checkpoint:v1';
 export const EXTERNAL_CHECKPOINT_IDS = Object.freeze({
-  DATA_ONLY: 'external_quota:data-only:v1',
-  MARKET: 'external_quota:market:v1',
+  // PUBLISH-FIX-4: bumped v1 -> v2 (as discovery was in PF1-4). A previous app's
+  // v1 row is a different-shape / different-generation account; it is left
+  // untouched and ignored, and the v2 namespace commissions fresh at zero
+  // (BIRTH_ZERO_BUDGET) rather than rejecting the old row as CHECKPOINT_INVALID.
+  // These carry a ZERO ceiling (no paid calls), so a fresh namespace loses no
+  // spend authority. Paid namespaces stay v1 and explicit.
+  DATA_ONLY: 'external_quota:data-only:v2',
+  MARKET: 'external_quota:market:v2',
 });
 
 const ID_RE = /^external_quota:[a-z0-9][a-z0-9_-]{0,63}:v[1-9][0-9]*$/;

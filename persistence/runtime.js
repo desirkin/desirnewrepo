@@ -28,7 +28,7 @@ import { Tail } from '../memory/mirror.js';
 import * as controlStore from '../state/control-store.js';
 import { Db } from './db.js';
 import { Repository } from './repository.js';
-import { runMigrations, FutureSchemaError } from './migrate.js';
+import { runMigrations, verifySchemaTables, FutureSchemaError } from './migrate.js';
 import { persistenceHealth, durabilityRequired } from './health.js';
 import { canonicalJson } from './schema.js';
 import { checkStoreAnchors } from './store-guard.js';
@@ -185,6 +185,14 @@ async function attemptStartup(state, log) {
     const m = await runMigrations(state.db, { log });
     if (state.stopped) return aborted('after-migrations');
     state.migrationVersion = m.schemaVersion;
+    // Schema truth: a recorded version is not proof every table it implies
+    // exists (a connection lost mid-migration can record the version yet leave
+    // a table absent). Verify and repair BEFORE the store-anchor check, so a
+    // missing serpent_store_anchors is re-created rather than raised as a 42P01
+    // permission lock, and BEFORE "durable core connected" is declared.
+    const repair = await verifySchemaTables(state.db, { log: blog });
+    if (state.stopped) return aborted('after-schema-verify');
+    if (repair.repaired.length) blog(`PERSISTENCE schema verified: repaired ${repair.repaired.length} missing table(s) [${repair.repaired.map((r) => r.table).join(', ')}] before durable core connect`);
     // Check BEFORE reconciliation can materialize any local mirror. An
     // unresolved cache loss is a separate permission lock, not a reason to
     // suppress the protective-state restore or read-only collection pump.
