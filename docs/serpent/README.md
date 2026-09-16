@@ -9,6 +9,7 @@ The Cobra Strike project on claude.ai holds the same documents; when they disagr
 4. `LEAN-PLAN.md` — the trim: duplicates and scaffolding out; no sense, decision or learning module leaves.
 5. `BASELINE.md` — branch, suite status, commits, test recipe.
 6. `RUNTIME-UNIFICATION.md` — one program, one mode switch: the six ordered steps (1–2 landed).
+7. `ENV.md` — the canonical environment-variable NAME registry (NAMES only, never values); `test/env-audit.test.js` keeps it matched to the names the code reads.
 
 Working law: one ticket at a time; full suite green before and after; fences updated deliberately, never silently; every audited change to judge/, execution/ or watch/ gets a `docs/JUDGE-PAPER-AUDIT.md` entry and a digest re-pin. David clicks Publish and turns paid senses on; everything else is the session's.
 
