@@ -7,13 +7,13 @@ import { SCOPE, SCOPE_IDS, SCOPE_VERSION, scopeInventory } from '../paper/scope.
 import { sensorInventory, INVENTORY_GROUPS } from '../paper/inventory.js';
 
 const T = Date.parse('2026-09-12T00:00:00Z');
-test('SCOPE-52. exactly the 52 stable ids (M01-M20, S01-S09, N01-N06, P01-P09, I04-I08, C01-C03), unique, each mapped to at least one EXISTING inventory row (LEAN PASS 4a retired the I01-I03 infra tier and S10 social-video/YouTube tier)', () => {
-  assert.equal(SCOPE_VERSION, 'serpent-sensor-scope-1'); assert.equal(SCOPE.length, 52); assert.equal(new Set(SCOPE_IDS).size, 52);
-  const expected = [...Array.from({ length: 20 }, (_, i) => `M${String(i + 1).padStart(2, '0')}`), ...Array.from({ length: 9 }, (_, i) => `S${String(i + 1).padStart(2, '0')}`), ...Array.from({ length: 6 }, (_, i) => `N${String(i + 1).padStart(2, '0')}`), ...Array.from({ length: 9 }, (_, i) => `P${String(i + 1).padStart(2, '0')}`), ...Array.from({ length: 5 }, (_, i) => `I${String(i + 4).padStart(2, '0')}`), ...Array.from({ length: 3 }, (_, i) => `C${String(i + 1).padStart(2, '0')}`)];
+test('SCOPE-51. exactly the 51 stable ids (M01-M20, S01-S09, N01-N06, P01-P09, I05-I08, C01-C03), unique, each mapped to at least one EXISTING inventory row (LEAN PASS 4a retired the I01-I03 infra tier, the S10 social-video/YouTube tier, and the I04 Tally governance sense)', () => {
+  assert.equal(SCOPE_VERSION, 'serpent-sensor-scope-1'); assert.equal(SCOPE.length, 51); assert.equal(new Set(SCOPE_IDS).size, 51);
+  const expected = [...Array.from({ length: 20 }, (_, i) => `M${String(i + 1).padStart(2, '0')}`), ...Array.from({ length: 9 }, (_, i) => `S${String(i + 1).padStart(2, '0')}`), ...Array.from({ length: 6 }, (_, i) => `N${String(i + 1).padStart(2, '0')}`), ...Array.from({ length: 9 }, (_, i) => `P${String(i + 1).padStart(2, '0')}`), ...Array.from({ length: 4 }, (_, i) => `I${String(i + 5).padStart(2, '0')}`), ...Array.from({ length: 3 }, (_, i) => `C${String(i + 1).padStart(2, '0')}`)];
   assert.deepEqual([...SCOPE_IDS], expected);
   const inv = sensorInventory({ env: {}, clock: () => T }); const ids = new Set(inv.rows.map((r) => r.id));
   for (const s of SCOPE) { assert.ok(s.inventoryIds.length >= 1, s.id); for (const id of s.inventoryIds) assert.ok(ids.has(id), `${s.id} -> ${id} exists in the inventory`); assert.ok(typeof s.label === 'string' && s.label.length > 3); }
-  const joined = scopeInventory(inv); assert.equal(joined.length, 52); assert.ok(joined.every((j) => j.rows.every((r) => r !== null)));
+  const joined = scopeInventory(inv); assert.equal(joined.length, 51); assert.ok(joined.every((j) => j.rows.every((r) => r !== null)));
 });
 
 test('SCOPE-56 blockers. a scope row whose inventory rows are ALL NOT_PRESENT names an exact blocker and dated route evidence; the licensed publisher rows name the frozen-core rule (publishers live outside it) and the licensing prerequisite; every NOT_PRESENT row is composed nowhere, paid nowhere and holds no authority', () => {

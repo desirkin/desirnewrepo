@@ -252,7 +252,7 @@ test('NO RETURN PATH: only fly.js touches memory/, and memory/ imports no sensor
       .filter((f) => f.endsWith('.js'))
       .map((f) => path.join(dir, f));
   // (lean trim step 1, 2026-09-14) legacy JSONL ledger retired — 'ledger' dir no longer exists
-  const sensorDirs = ['tape', 'survey', 'rumint', 'gateway', 'governance', 'cost', 'state', 'ui', 'childhood', 'lib'];
+  const sensorDirs = ['tape', 'survey', 'rumint', 'gateway', 'cost', 'state', 'ui', 'childhood', 'lib'];
   // 1) no sensor, state, ledger, UI or childhood module references memory
   for (const f of sensorDirs.flatMap(jsFiles)) {
     const src = readFileSync(path.join(root, f), 'utf8');
@@ -275,7 +275,7 @@ test('NO RETURN PATH: only fly.js touches memory/, and memory/ imports no sensor
   assert.ok(fly.includes("./memory/mirror.js"));
   const mirrorAt = fly.indexOf('startMemoryMirror(');
   assert.ok(mirrorAt > 0);
-  for (const sensor of ['startRumint(', 'startGateway()', 'startWideEye()', 'startGovernance(', 'startRumor2(', 'runTape(']) {
+  for (const sensor of ['startRumint(', 'startGateway()', 'startWideEye()', 'startRumor2(', 'runTape(']) {
     assert.ok(mirrorAt < fly.indexOf(sensor), `${sensor} starts before the memory mirror opens`);
   }
 });

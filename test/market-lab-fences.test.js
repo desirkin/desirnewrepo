@@ -19,7 +19,7 @@ const imports = (f) => [...code(f).matchAll(/(?:^|\n)\s*(?:import\s[^;]*?from\s*
 const resolveRel = (f, spec) => (spec.startsWith('.') ? path.normalize(path.join(path.dirname(f), spec)).replace(/\\/g, '/') : spec);
 const RESEARCH_FILES = tracked.filter((f) => /^(market-lab|socrates)\/.*\.js$/.test(f) || ['evidence/contract-v2.js', 'evidence/research-builder.js', 'evidence/social-projection.js', 'bin/market-research.js', 'bin/socrates-research.js'].includes(f));
 // the LIVE path: everything that runs when fly.js runs, plus the modules that hold trading / control / risk truth
-const LIVE_TRUTH_DIRS = ['tape', 'ledger', 'cost', 'state', 'gateway', 'governance', 'persistence', 'childhood', 'memory', 'rumint', 'survey', 'lib'];
+const LIVE_TRUTH_DIRS = ['tape', 'ledger', 'cost', 'state', 'gateway', 'persistence', 'childhood', 'memory', 'rumint', 'survey', 'lib'];
 const LIVE_FILES = tracked.filter((f) => f === 'fly.js' || f === 'ui/server.js' || LIVE_TRUTH_DIRS.some((d) => f.startsWith(`${d}/`))).filter((f) => f.endsWith('.js'));
 
 test('B08 (research -> live): no research module imports orders, ledger, cost, state, controls, risk, Judge, Watch, the RUMOR-2 runtime or Tape truth; the ONLY crossings are the exact allowlisted pure imports', () => {
@@ -40,7 +40,7 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
       const target = resolveRel(f, spec);
       const inside = /^(market-lab|socrates|evidence|bin)\//.test(target);
       if (!inside) assert.ok((ALLOWED_CROSSINGS[f] ?? []).includes(target), `${f} -> ${target} is not an allowlisted crossing`);
-      assert.ok(!/^(ledger|cost|state|controls|orders|risk|judge|watch|execution|rumint|research|persistence|gateway|governance|childhood|memory)\//.test(target), `${f} -> ${target} crosses an authority fence`);
+      assert.ok(!/^(ledger|cost|state|controls|orders|risk|judge|watch|execution|rumint|research|persistence|gateway|childhood|memory)\//.test(target), `${f} -> ${target} crosses an authority fence`);
       assert.ok(!/^rumor2\/(collector|journal|checkpoint|social-research-strainer|social-collector)/.test(target), `${f} -> ${target} reaches the RUMOR-2 runtime`);
       assert.ok(!/^tape\/(run|micro|features|heartbeat|integrity)/.test(target), `${f} -> ${target} reaches Tape truth`);
     }
@@ -52,7 +52,7 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
   for (const t of ['lib/book-walk.js', 'rumor2/social-research-market.js', 'rumor2/social-research-dossier.js', 'rumor2/social-research-composite.js', 'rumor2/social-research-profile.js', 'tape/book.js', 'survey/catalog.js']) for (const spec of imports(t)) assert.ok(spec.startsWith('node:') || /^\.\.?\//.test(spec) && !/collector|journal|run\.js|strainer|ledger|cost\/|state\//.test(spec), `${t} -> ${spec}`);
 });
 
-test('B08 (live -> research): the live path never imports research/, socrates/ or evidence v2; market-lab is reached ONLY by fly.js (service, commands, deep-market adapter) and the read-only UI server (paths); Tape, ledger, cost, state, gateway, governance never mention the research modules', () => {
+test('B08 (live -> research): the live path never imports research/, socrates/ or evidence v2; market-lab is reached ONLY by fly.js (service, commands, deep-market adapter) and the read-only UI server (paths); Tape, ledger, cost, state, gateway never mention the research modules', () => {
   // runtime unification step 1 (2026-09-14): lib/serpent-runtime.js is the data-only composition spine (moved verbatim from
   // tools/data-only-runtime.mjs, which was outside LIVE_FILES). Step 2: the collector set moved to lib/collectors.js, which
   // starts the broad Kraken capture and the data-only market catalogs owner — observation only; lib/external-quota.js opens
@@ -65,7 +65,7 @@ test('B08 (live -> research): the live path never imports research/, socrates/ o
       if (/^(market-lab|socrates|research|bin)\//.test(target) || /^evidence\/(contract-v2|research-builder|social-projection)\.js$/.test(target)) assert.ok((ALLOWED[f] ?? []).some((a) => target === a || target.startsWith(a)), `${f} -> ${target} is not an allowlisted live -> research seam`);
     }
   }
-  for (const f of LIVE_FILES.filter((f) => /^(tape|ledger|cost|state|gateway|governance)\//.test(f))) assert.ok(!/market-lab|socrates\/|research-builder|social-projection|createResearchService|createCaseRuntime/.test(code(f)), `${f} mentions the research modules`);
+  for (const f of LIVE_FILES.filter((f) => /^(tape|ledger|cost|state|gateway)\//.test(f))) assert.ok(!/market-lab|socrates\/|research-builder|social-projection|createResearchService|createCaseRuntime/.test(code(f)), `${f} mentions the research modules`);
   // ui/server.js: the research routes are file-based reads; no enqueue, no toggle, no write
   const ui = read('ui/server.js'); const a = ui.indexOf('function marketResearchSummary'); const b = ui.indexOf('function marketResearchCase'); const c = ui.indexOf('\n}', b);
   // The broad-market UI seam may read recorded snapshots only. It cannot

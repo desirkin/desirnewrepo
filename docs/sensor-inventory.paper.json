@@ -16,7 +16,7 @@
   "OPERATIONAL_PUBLIC": 35,
   "OPERATIONAL_CREDENTIAL_GATED": 13,
   "IMPLEMENTED_NOT_LIVE_SMOKED": 0,
-  "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 11,
+  "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 10,
   "FOUNDATION_ONLY": 1,
   "DEPRECATED": 0,
   "NOT_PRESENT": 4
@@ -251,31 +251,6 @@
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
    "smokeEvidence": "doctrine/GATEWAY.md (public status pages; polite polling); 2026-09-12 local reads through gateway/parse.js: status.kraken.com 200 (7 events, 0 unparsed, indicator minor), status.coinbase.com 200 (1 event, door UNKNOWN as parsed), api.kraken.com SystemStatus 200 (online), okx system status 200 (code 0)"
-  },
-  {
-   "id": "GOVERNANCE_TALLY",
-   "group": "INFRASTRUCTURE",
-   "family": "GOVERNANCE",
-   "classification": "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED",
-   "module": "governance/tally.js + governance/collector.js",
-   "compositionPath": "fly.js -> startGovernance -> pollTally -> governance/events.jsonl -> memory/adapters.js",
-   "enable": "cobra.config.json governance.enabled + governance.verifiedMappings",
-   "credentialEnv": [
-    "TALLY_API_KEY"
-   ],
-   "paid": false,
-   "budgetGovernor": "separate Tally GovBudget; >=1 second request spacing",
-   "retentionTermsGate": "verified governor mappings required",
-   "liveTransport": true,
-   "durableTruth": "shared governance source log, pending debt and checkpoints",
-   "pointInTimeContract": "provider event/start/end clocks separately from retrieval; exact Uint256 strings; INDEXED_BY_TALLY",
-   "replay": "source reconciliation + checkpoint restore",
-   "decisionAuthority": "NONE",
-   "paperAuthority": "NONE",
-   "paperDesiredState": "REQUEST",
-   "blockerPolicy": "DEGRADE",
-   "readinessBlocker": "TALLY_API_KEY and verified governor mappings not verified on the host",
-   "smokeEvidence": "test/tally-runtime.test.js; no live Tally request made"
   },
   {
    "id": "RUMINT_STOCKTWITS_AGGREGATE",
@@ -955,7 +930,7 @@
   {
    "id": "SETTLED_RECORDS",
    "group": "MARKET_RESEARCH",
-   "family": "Existing settled official / social / infrastructure / governance records (read-only projection)",
+   "family": "Existing settled official / social / infrastructure records (read-only projection)",
    "classification": "OPERATIONAL_PUBLIC",
    "module": "market-lab/providers/settled.js",
    "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",

@@ -139,7 +139,6 @@ export async function runPreflight({ profileFile = process.env.COBRA_PROFILE ?? 
   sections.E_SOCIAL.youtube = sensor('YOUTUBE_DATA_API');
   sections.E_SOCIAL.youtubeOfficial = sensor('YOUTUBE_OFFICIAL');
   sections.E_SOCIAL.meta = sensor('META_PUBLIC');
-  sections.D_RUMOR_OFFICIAL.tally = sensor('GOVERNANCE_TALLY');
   sections.D_RUMOR_OFFICIAL.infrastructure = snap.rows.filter((x) => x.group === 'INFRASTRUCTURE');
   sections.D_RUMOR_OFFICIAL.press = snap.rows.filter((x) => x.group === 'PUBLISHER_NEWS');
   // ---- F. MARKET RESEARCH -----------------------------------------------------------------------------------------------------
@@ -200,7 +199,7 @@ export function renderPreflight(r) {
   line(`A. CODE      commit ${A.commit ? A.commit.slice(0, 12) : 'no git'} · worktree ${A.worktreeClean === null ? 'unknown' : A.worktreeClean ? 'clean' : `DIRTY (${A.dirtyFiles})`} · research tree ${(A.researchSourceTreeSha256 ?? 'null').slice(0, 12)} · policy digests mr ${(A.policyDigests.marketResearch ?? 'INVALID').slice(0, 12)} judge ${(A.policyDigests.judge ?? 'INVALID').slice(0, 12)} · profile ${A.profile.version}${A.forcedOverrides.length ? ` · FORCED ${A.forcedOverrides.map((o) => `${o.name}=${o.now}`).join(',')}` : ''}`);
   line(`B. STORAGE   data dir ${mark(B.writable)}${B.dataDir} · PostgreSQL ${B.database.configured ? (B.database.reachable ? `reachable, schema ${B.database.schemaVersion}/${B.database.buildSchemaVersion}` : 'configured, UNREACHABLE') : 'NOT CONFIGURED'} · account ${B.database.accountInitialized === null ? 'unknown' : B.database.accountInitialized ? 'initialized' : 'NOT INITIALIZED'} · writer lock ${B.database.writerLockHeld === null ? 'unknown' : B.database.writerLockHeld ? 'HELD' : 'free'} · local journal fallback ${B.localJournalFallback ? 'ON (!)' : 'off'}`);
   const C = s.C_CORE_MARKET; line(`C. CORE      tape ${C.tape.state} (${C.tape.blocker ?? 'fresh'}) · wide eye ${C.wideEye.state} · universe ${C.universe.state} (${C.universe.coverage}) · feature freshness ${C.featureFreshness.ageMs === null ? 'n/a (not running)' : `${C.featureFreshness.ageMs} ms`}`);
-  line(`D. OFFICIAL  rumor2 ${s.D_RUMOR_OFFICIAL.rumor2Enabled ? 'requested' : 'off'} · ${s.D_RUMOR_OFFICIAL.providers.map((p) => `${p.id} ${p.state}`).join(' · ')} · legacy ${s.D_RUMOR_OFFICIAL.legacyRumint.state} · Tally ${s.D_RUMOR_OFFICIAL.tally?.state ?? 'NOT_OBSERVED'}`);
+  line(`D. OFFICIAL  rumor2 ${s.D_RUMOR_OFFICIAL.rumor2Enabled ? 'requested' : 'off'} · ${s.D_RUMOR_OFFICIAL.providers.map((p) => `${p.id} ${p.state}`).join(' · ')} · legacy ${s.D_RUMOR_OFFICIAL.legacyRumint.state}`);
   line(`E. SOCIAL    ${s.E_SOCIAL.providers.map((p) => `${p.id} ${p.state ?? 'NOT_OBSERVED'}${p.governor ? ` [${p.governor}]` : ''}`).join(' · ')}`);
   const infraRows = s.D_RUMOR_OFFICIAL.infrastructure ?? []; const pressRows = s.D_RUMOR_OFFICIAL.press ?? [];
   line(`E2. YOUTUBE  official ${s.E_SOCIAL.youtubeOfficial?.state ?? 'NOT_OBSERVED'} · video ${s.E_SOCIAL.youtube?.state ?? 'NOT_OBSERVED'}${s.E_SOCIAL.youtube?.coverage ? ` (${s.E_SOCIAL.youtube.coverage})` : ''}`);

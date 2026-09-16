@@ -21,7 +21,6 @@
   "runbook": "docs/PAPER-RUNBOOK.md"
  },
  "configOverlay": {
-  "governance": { "enabled": true, "snapshotEnabled": false },
   "wideeye": { "enabled": true },
   "rumint": { "enabled": true },
   "universeExpansion": { "enabled": true },

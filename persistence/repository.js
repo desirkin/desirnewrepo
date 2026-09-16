@@ -399,28 +399,9 @@ export class Repository {
     return rows[0].n;
   }
 
-  // ---------------- GOV-1B governance collector checkpoint (storage only) ----------------
-  // A small revision-counted snapshot of the GOV collector's state. No
-  // control/posture semantics, no most-restrictive reconciliation, no
-  // decision return path — the caller validates the content strictly
-  // before trusting it (the collector's own checkpoint validation).
-  async saveGovernanceCheckpoint(state) {
-    await this.db.query(
-      `INSERT INTO serpent_governance_checkpoint (id, revision, state) VALUES ('current', 1, $1)
-       ON CONFLICT (id) DO UPDATE SET revision = serpent_governance_checkpoint.revision + 1, state = $1, saved_at = now()`,
-      [state],
-      { write: true }
-    );
-  }
-
-  async loadGovernanceCheckpoint() {
-    const { rows } = await this.db.query(`SELECT state FROM serpent_governance_checkpoint WHERE id = 'current'`);
-    return rows[0]?.state ?? null;
-  }
-
   // ---------------- RUMINT-R1 rumor-ear checkpoint (storage only) ----------------
-  // Same contract as the GOV collector checkpoint: one revision-counted
-  // bounded snapshot, validated strictly by its collector before trust,
+  // One revision-counted bounded snapshot, validated strictly by its
+  // collector before trust,
   // carrying no control/posture semantics and no decision return path.
   async saveRumintCheckpoint(state) {
     await this.db.query(

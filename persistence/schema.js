@@ -162,11 +162,13 @@ export const MIGRATIONS = [
   {
     version: 3,
     name: 'GOV-1B durable governance collector checkpoint',
-    // The narrowest dedicated store for the GOV collector checkpoint: one
-    // revision-counted row, STORAGE ONLY. It carries no control/posture/sim
-    // semantics, participates in no most-restrictive reconciliation, and
-    // grants nothing — deployment disk is ephemeral, so the checkpoint that
-    // prevents governance history rewrites must survive a republish.
+    // RETIRED (LEAN PASS 4a): the governance/Tally sense was culled — no code
+    // reads or writes this table anymore. This migration entry is KEPT
+    // verbatim as an immutable schema-history record: applied databases
+    // already carry the table, and removing the entry would create a silent
+    // fresh-vs-existing schema divergence. The idempotent CREATE below is
+    // inert (the table is now unused), left only so the numbered migration
+    // ledger stays contiguous and honest about what version 3 once created.
     statements: [
       `CREATE TABLE IF NOT EXISTS serpent_governance_checkpoint (
         id text PRIMARY KEY,

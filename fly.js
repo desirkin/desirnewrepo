@@ -18,9 +18,7 @@ import { startGateway, readGatewayLatency } from './gateway/collector.js';
 import { effectiveFillLatencyMs } from './lib/paper-fill-latency.js';
 import { startPress } from './press/collector.js';
 import { startWideEye } from './survey/wideeye.js';
-import { startGovernance } from './governance/collector.js';
 import { startRumor2 } from './rumor2/collector.js';
-import { govCheckpointStore } from './persistence/gov-checkpoint.js';
 import { rumintCheckpointStore, rumintBootstrapSource } from './persistence/rumint-checkpoint.js';
 import { rumor2CheckpointStore } from './persistence/rumor2-checkpoint.js';
 import { rumor2JournalStore } from './persistence/rumor2-journal.js';
@@ -116,10 +114,6 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // SOCIAL-4F: the wide eye's handle is RETAINED so its detached read-only catalog snapshot can
   // be injected into the RUMOR collector below (Social never starts the wide eye itself).
   const wideEye = startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
-  // GOV-1 dark governance sense — no-ops (zero network) unless governance is
-  // enabled. GOV-1B: the durable checkpoint store is injected here from the
-  // persistence layer (composition-root wiring; STORAGE ONLY, no return path).
-  startGovernance({ checkpointStore: govCheckpointStore() });
   // COLLECTOR ADDITIONS (runtime unification step 3): the three collectors the ship never ran while the two-process
   // split existed — market catalogs (durable quota journal), broad Kraken capture (whole accepted catalog, 1-min),
   // public discovery (GDELT / Polymarket / Kalshi). They ride the spine's checkpoints and blockers; the wide eye's

@@ -202,7 +202,7 @@ test('D15 Tokenomist v5: x-api-key header, credit metadata retained from every e
 });
 
 test('D14 settled records projection: injected read-only accessors become INFRASTRUCTURE / OFFICIAL_SOCIAL_EVENTS observations; an absent accessor is NOT_QUERIED (never invented); a throwing accessor is contained', () => {
-  const p = createSettledProjection({ clock, log: () => {}, accessors: { gatewayMatrix: () => ({ ts: new Date(T0 - 1000).toISOString(), doors: { BTC: { funding: 'OPEN', trading: 'DEGRADED' } } }), gatewayIncidents: () => ({ 'inc-1': { assets: ['BTC'], announcedAt: new Date(T0 - 5000).toISOString(), title: 'wallet maintenance' } }), governanceStatus: () => { throw new Error('boom'); } } });
+  const p = createSettledProjection({ clock, log: () => {}, accessors: { gatewayMatrix: () => ({ ts: new Date(T0 - 1000).toISOString(), doors: { BTC: { funding: 'OPEN', trading: 'DEGRADED' } } }), gatewayIncidents: () => ({ 'inc-1': { assets: ['BTC'], announcedAt: new Date(T0 - 5000).toISOString(), title: 'wallet maintenance' } }), researchProjection: () => { throw new Error('boom'); } } });
   const r = p.project({ canonicalCoin: 'BTC', asOfTs: T0, receivedTs: T0 }); valid(r.observations); validCov(r.coverage);
   const doors = r.observations.filter((o) => o.kind === 'PROVIDER_STATUS'); assert.ok(doors.length >= 2); assert.ok(doors.some((o) => o.payload.status === 'DEGRADED'));
   assert.ok(r.observations.some((o) => o.kind === 'EVENT_REFERENCE'));

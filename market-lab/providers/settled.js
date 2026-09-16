@@ -1,6 +1,6 @@
-// D14 — EXISTING OFFICIAL / SOCIAL / INFRASTRUCTURE / GOVERNANCE OBSERVATIONS: read-only projections from their actual
+// D14 — EXISTING OFFICIAL / SOCIAL / INFRASTRUCTURE OBSERVATIONS: read-only projections from their actual
 // settled records into the new evidence path. This module opens NO network and NO Social connection; it consumes the
-// accessors the composition root injects (atomic status files of the gateway / governance collectors, the RUMOR
+// accessors the composition root injects (atomic status files of the gateway collector, the RUMOR
 // collector's narrow research accessor). Retention, identity, source status, time, independence and known-gap laws
 // of the originals are preserved: a settled record that lacks a clock is not given one.
 import { createClientBase, num, int, str, bool, tsFromIso, tsFromMs, arr, obj, assetSubject, providerSubject } from './base.js';
@@ -27,18 +27,6 @@ export function createSettledProjection({ clock, log, accessors = {} } = {}) {
       if (ob) out.push(ob); }
     return { observations: out, coverage: [base.coverage({ endpointId: 'gateway-status', subject: providerSubject('kraken-status'), family: 'INFRASTRUCTURE_STATUS', kind: 'PROVIDER_STATUS', state: 'OBSERVED', startTs: matrixTs ?? receivedTs, endTs: receivedTs, observationCount: out.length })] };
   }
-  // governance status (proposal counts) + governance events for a symbol -> EVENT_REFERENCE (GOVERNANCE_PROPOSAL)
-  function governance({ canonicalCoin, receivedTs, maxEvents = 32 }) {
-    const out = []; const s = safe('governanceStatus'); const st = obj(s.value);
-    if (!s.present) return { observations: out, coverage: [base.coverage({ endpointId: 'governance-status', subject: providerSubject('governance'), family: 'OFFICIAL_SOCIAL_EVENTS', kind: 'EVENT_REFERENCE', state: 'NOT_QUERIED', startTs: receivedTs, endTs: receivedTs })] };
-    const health = base.tryEmit({ endpointId: 'governance-status', subject: providerSubject('governance'), kind: 'PROVIDER_STATUS', sourceKey: 'governance', sourceEventTs: tsFromMs(st?.tsMs), receivedTs, knownAtTs: receivedTs, quality: quality(st ? 'KNOWN' : 'MISSING', { reasonCodes: st ? [] : ['FIELD_MISSING_AT_SOURCE'], methodologyId: 'governance-status-v1' }), provenance: prov('governance/status'), payload: { providerId: 'governance', status: !st ? 'UNKNOWN' : st.status === 'HEALTHY' ? 'OPERATIONAL' : st.status === 'DEGRADED' ? 'DEGRADED' : 'OUTAGE', component: str(st?.initState, 80), incidentRef: null } });
-    if (health) out.push(health);
-    const ev = safe('governanceEvents', canonicalCoin); const events = (arr(ev.value) ?? []).map(obj).filter((e) => e && e.type === 'GOVERNANCE_OBSERVATION' && e.symbol === canonicalCoin).slice(-maxEvents);
-    for (const e of events) { const ts = tsFromIso(e.ts); const pid = str(e.proposalId, 200); const entity = str(e.spaceId ?? e.governorId, 120); if (!pid || !entity || ts === null) continue;
-      const ob = base.tryEmit({ endpointId: 'governance-status', subject: assetSubject({ canonicalCoin }), kind: 'EVENT_REFERENCE', sourceKey: str(e.sourceEventId, 120) ?? `${entity}:${pid}`.slice(0, 120), sourceEventTs: ts, publishedTs: ts <= receivedTs ? ts : null, receivedTs, knownAtTs: Math.max(receivedTs, tsFromIso(e.retrievedTs) ?? receivedTs), quality: quality('KNOWN', { methodologyId: 'governance-observation-v1' }), provenance: prov(`governance/${entity.slice(0, 60)}/${pid.slice(0, 60)}`, str(e.stateFingerprint, 80)), payload: { eventKind: 'GOVERNANCE_PROPOSAL', sourceProvider: str(e.provider, 40) ?? 'governance', nativeRef: `${entity}:${pid}`.replace(/[^A-Za-z0-9._:@/+-]/g, '-').slice(0, 120), sourceEventTs: ts, headline: null, untrusted: false, status: `${str(e.proposalState, 20) ?? 'unknown'}${e.lifecycleTransition ? `:${str(e.lifecycleTransition, 30)}` : ''}`.slice(0, 40) } });
-      if (ob) out.push(ob); }
-    return { observations: out, coverage: [base.coverage({ endpointId: 'governance-status', subject: providerSubject('governance'), family: 'OFFICIAL_SOCIAL_EVENTS', kind: 'EVENT_REFERENCE', state: out.length ? 'OBSERVED' : 'GAP', startTs: receivedTs, endTs: receivedTs, observationCount: out.length })] };
-  }
   // RUMOR collector research accessor -> OFFICIAL_CLAIM references + SOCIAL_DOSSIER reference (the detached DTO itself
   // travels to the evidence builder through the Social projection adapter; here only the reference is projected)
   function official({ canonicalCoin, asOfTs, receivedTs }) {
@@ -53,8 +41,8 @@ export function createSettledProjection({ clock, log, accessors = {} } = {}) {
     return { observations: out, coverage: [base.coverage({ endpointId: 'official-claims', subject: providerSubject('rumor2'), family: 'OFFICIAL_SOCIAL_EVENTS', kind: 'EVENT_REFERENCE', state: p ? (out.length ? 'OBSERVED' : 'GAP') : 'GAP', startTs: receivedTs, endTs: receivedTs, observationCount: out.length })] };
   }
   function project({ canonicalCoin, asOfTs, receivedTs = clock ? clock() : Date.now() }) {
-    const a = infrastructure({ canonicalCoin, receivedTs }); const b = governance({ canonicalCoin, receivedTs }); const c = official({ canonicalCoin, asOfTs: asOfTs ?? receivedTs, receivedTs });
-    return { ok: true, observations: [...a.observations, ...b.observations, ...c.observations], coverage: [...a.coverage, ...b.coverage, ...c.coverage], meta: { accessors: Object.keys(accessors).filter((k) => typeof accessors[k] === 'function') } };
+    const a = infrastructure({ canonicalCoin, receivedTs }); const c = official({ canonicalCoin, asOfTs: asOfTs ?? receivedTs, receivedTs });
+    return { ok: true, observations: [...a.observations, ...c.observations], coverage: [...a.coverage, ...c.coverage], meta: { accessors: Object.keys(accessors).filter((k) => typeof accessors[k] === 'function') } };
   }
-  return { ...base, project, infrastructure, governance, official };
+  return { ...base, project, infrastructure, official };
 }
