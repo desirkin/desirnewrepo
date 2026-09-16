@@ -7,6 +7,10 @@ import { endpointOf } from '../registry.js';
 import { clockConflict } from '../time.js';
 
 export const RUNTIME_STATES = Object.freeze(['STOPPED', 'STARTING', 'ACTIVE', 'DEGRADED', 'BACKOFF', 'BLOCKED']);
+// B-12: identical provider rejection lines are bounded to at most 5 per rolling minute per message; the rest collapse.
+export const REJECT_LOG_WINDOW_MS = 60_000;
+export const REJECT_LOG_MAX_PER_WINDOW = 5;
+const REJECT_LOG_MAX_KEYS = 256;
 // transport failure kind -> (coverage state, quality reason code, access state)
 export const FAILURE_MAP = deepFreeze({
   CREDENTIAL_MISSING: ['ACCESS_BLOCKED', 'CREDENTIAL_MISSING', 'CREDENTIAL_MISSING'], CREDENTIAL_HOLD: ['ACCESS_BLOCKED', 'CREDENTIAL_MISSING', 'ENTITLEMENT_DENIED'],
@@ -64,7 +68,24 @@ export function createClientBase({ providerId, transport, clock = () => Date.now
     counters.observations += 1;
     return o;
   }
-  const tryEmit = (body, where = 'record') => { try { return emit(body); } catch (err) { counters.rejectedRecords += 1; log(`${providerId}: ${where} rejected (${String(err?.message ?? err).slice(0, 140)})`); return null; } };
+  // B-12: bound the rejection LOG so one provider cannot flood the log with identical "record rejected" lines (a local
+  // paper boot showed KRAKEN_DERIVATIVES repeating one line). At most REJECT_LOG_MAX_PER_WINDOW identical lines reach the
+  // log per rolling minute per distinct message; the rest are counted and collapse to ONE bounded summary line when the
+  // window rolls. The DURABLE record is untouched — counters.rejectedRecords still increments on EVERY rejection and the
+  // provider's DROPPED coverage markers are separate; only the log is rate-limited (the PF1-6 once-per-window + count law).
+  const rejectLog = new Map(); // message -> { windowStart, emitted, suppressed }
+  const logRejection = (line) => {
+    const now = clock();
+    let st = rejectLog.get(line);
+    if (!st || now - st.windowStart >= REJECT_LOG_WINDOW_MS) {
+      if (st && st.suppressed > 0) log(`${providerId}: ${line} — +${st.suppressed} identical suppressed in the last minute`);
+      if (rejectLog.size > REJECT_LOG_MAX_KEYS) rejectLog.clear(); // bound the key set against ever-varying messages
+      st = { windowStart: now, emitted: 0, suppressed: 0 };
+      rejectLog.set(line, st);
+    }
+    if (st.emitted < REJECT_LOG_MAX_PER_WINDOW) { log(`${providerId}: ${line}`); st.emitted += 1; } else st.suppressed += 1;
+  };
+  const tryEmit = (body, where = 'record') => { try { return emit(body); } catch (err) { counters.rejectedRecords += 1; logRejection(`${where} rejected (${String(err?.message ?? err).slice(0, 140)})`); return null; } };
   const coverage = ({ endpointId, subject, family, kind = null, state, reasonCodes = [], startTs, endTs = null, observationCount = 0, droppedCount = 0, epochId = null, sequenceStart = null, sequenceEnd = null }) => makeCoverage({ provider: providerId, endpointId, subjectId: subjectId(subject), family, kind, state, reasonCodes, startTs, endTs, observationCount, droppedCount, epochId, sequenceStart, sequenceEnd });
   const failureCoverage = (failure, { endpointId, subject, family, kind = null, startTs }) => coverage({ endpointId, subject, family, kind, state: failure.coverageState, reasonCodes: failure.reasonCode === 'NONE' ? [] : [failure.reasonCode], startTs, endTs: failure.ts });
   const provenance = (r, { nativeLocator = null, mappingId = null, specificationId = null, vintage = null } = {}) => ({ ...emptyProvenance(), requestId: r.requestId ?? null, bytesSha256: r.sha256 ?? null, nativeLocator, mappingId, specificationId, vintage });

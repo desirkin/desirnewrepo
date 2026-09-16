@@ -107,15 +107,15 @@ stall). `test/ws-idle-presubscribe.test.js` drives a scripted fake WS with node:
 pre-subscribe idle (silent, still reconnects) → subscribe ack → post-subscribe idle (logs one stall line), and proves
 the flag resets per connection. Full suite green + gate 0.
 
-## B-12. Rejection-rate fence — no provider floods identical rejections
-**Do:** a fence asserting no provider emits more than 5 identical rejection log lines per
-minute (the local paper boot showed a repeated `KRAKEN_DERIVATIVES: record rejected
-(observation.quality: …)` line). Either collapse repeats to a once-per-state-change +
-count line (the PF1-6 pattern) or rate-limit identical provider rejections, then fence it.
-**Acceptance:** a test feeds a provider a burst of identical rejections and asserts at most
-5 identical lines/minute reach the log (the rest collapse to a bounded summary); the real
-observation is never dropped from the durable record, only the log is bounded; full suite
-green + gate 0.
+## B-12. DONE — 2026-09-16: identical provider rejection log lines bounded to ≤5/minute.
+The shared client base (`market-lab/providers/base.js`) `tryEmit` logged `<provider>: <where> rejected (<msg>)` on EVERY
+rejected record, so one provider (the local paper boot showed KRAKEN_DERIVATIVES) could flood the log. A per-message
+rolling-minute limiter (the PF1-6 once-per-window + count law) now lets at most `REJECT_LOG_MAX_PER_WINDOW` (5) identical
+lines reach the log per minute per distinct message; the rest are counted and collapse to ONE bounded summary
+(`… — +N identical suppressed in the last minute`) when the window rolls. The DURABLE record is untouched —
+`counters.rejectedRecords` still increments on every rejection and the DROPPED coverage markers are separate; only the
+log is rate-limited. Distinct messages are bounded independently, and the key set is capped (256) against ever-varying
+text. `test/provider-rejection-rate.test.js` feeds bursts and asserts all three. Full suite green + gate 0.
 
 ## B-13. Post-PAPER research drafts — DO NOT START UNTIL PAPER IS GREEN
 These are research/shadow strategy drafts. **None may begin until PAPER has run green** (a
