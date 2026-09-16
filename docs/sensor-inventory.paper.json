@@ -13,7 +13,7 @@
   "NOT_PRESENT"
  ],
  "counts": {
-  "OPERATIONAL_PUBLIC": 35,
+  "OPERATIONAL_PUBLIC": 36,
   "OPERATIONAL_CREDENTIAL_GATED": 13,
   "IMPLEMENTED_NOT_LIVE_SMOKED": 0,
   "CODE_PATH_COMPLETE_EXTERNAL_ACCESS_BLOCKED": 10,
@@ -1020,6 +1020,29 @@
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
    "smokeEvidence": null
+  },
+  {
+   "id": "BINANCE_US_SPOT",
+   "group": "MARKET_RESEARCH",
+   "family": "Binance.US public spot (read-only USD-quoted reference book for Strategy 6)",
+   "classification": "OPERATIONAL_PUBLIC",
+   "module": "market-lab/providers/binance-us.js",
+   "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
+   "enable": "policy providers.BINANCE_US_SPOT.enabled",
+   "credentialEnv": [],
+   "paid": false,
+   "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
+   "retentionTermsGate": "hosts api.binance.us",
+   "liveTransport": true,
+   "durableTruth": "sealed CAPTURE bundles + accounting journal",
+   "pointInTimeContract": "observation envelope (sourceEventTs / receivedTs / knownAtTs / revision)",
+   "replay": "REPLAY_AS_OF over sealed bundles",
+   "decisionAuthority": "EVIDENCE_ONLY (decision families)",
+   "paperAuthority": "EVIDENCE_ONLY",
+   "paperDesiredState": "OFF",
+   "blockerPolicy": "DEGRADE",
+   "readinessBlocker": null,
+   "smokeEvidence": "read-only USD-direct reference sense (Strategy 6; third IFR reference alongside Coinbase and Bitstamp). 2026-09-16 read-only reachability probe from this build environment: api.binance.us/api/v3/ping HTTP 200, /api/v3/depth and /api/v3/exchangeInfo returned valid JSON (api.binance.us is not geo-blocked where api.binance.com answers 451). No credential, no order path; offline fixture coverage in test/binance-us-provider.test.js; docs/serpent/PHILOSOPHY.md §Strategy 6"
   },
   {
    "id": "KRAKEN_CHARTS_DARK",

@@ -26,7 +26,8 @@ export function usdReference({ venue, quote, mid, windowLow = null, stablecoinHe
 }
 
 // Assemble the IFR episode. `references` is the ordered set of usdReference() results for the REACHABLE venues (up to three
-// — Coinbase, Binance, Bitstamp; whichever answered at boot). A venue geo-blocked at boot is NOT a reachable reference and
+// — Coinbase, Bitstamp, Binance.US are the USD-direct candidates, plus Binance global on the frozen USDT basis; whichever
+// answered at boot). A venue geo-blocked at boot is NOT a reachable reference and
 // is passed separately in `blockedReferences` ([{ venue, reason }]) so it is disclosed, not silently dropped and not a null
 // that fails the episode. A null usdMid among the REACHABLE references (an unhealthy stablecoin basis) still flows into
 // referenceMids, where the detector fails closed — a de-peg never reads as a Kraken-only flush. The `referenceCoverage`
