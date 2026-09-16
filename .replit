@@ -47,6 +47,7 @@ DISCOVERY_ENABLED = "true"
 # PUBLISH-FIX-9: explicit heap ceiling for the ONE paper process — V8's default (~512MB on a 2 GiB machine) froze the
 # paper tape at 515MB (boot f7173376). The learning study child sets its own bounded ceiling and never inherits this.
 NODE_OPTIONS = "--max-old-space-size=1400"
+SERPENT_TAPE_WRITE_BEHIND = "true"
 
 [postMerge]
 path = "scripts/post-merge.sh"
