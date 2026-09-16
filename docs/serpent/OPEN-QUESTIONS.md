@@ -87,3 +87,47 @@ acquisition grace/retry for a same-boot lock whose owner is the outgoing deploym
 old process before starting the new. If it shows two owners, the ownership lines will
 name the second pid and the second starter can be identified. **Needs production
 process evidence to resolve — cannot be determined from code alone.**
+
+---
+
+## Remaining cull — market-subjects hardening (parked)
+
+**Ask (David's earlier decision):** market-subjects.paper.json STAYS as a
+translation table (venue-name registry). Two conditions: (a) it must never LIMIT
+which coins get researched — the research subject set comes from the tape's
+selected daily universe, and for any universe coin not in the table the venue
+symbols are DERIVED mechanically (Coinbase/Bitstamp/Binance.US = "<BASE>-USD",
+CoinGecko/CryptoQuant by id lookup), the curated table only overriding irregular
+ones (XBT vs BTC, PF_XBTUSD); (b) a named-coin-seed fence test whitelists this file
+as an identity registry and asserts no consumer uses its key list as a selection set.
+
+**What was found (2026-09-16):** condition (a) is a behavioral rewire of the PAPER
+research owner, not a fence. Today the research owner (`market-lab/owner.js`) sweeps
+`subjects.subjects` (the table entries) and reads each venue symbol from that entry
+(`bySubjectCoin(coin)` -> `s?.krakenDerivatives` etc.); a coin absent from the table
+is simply never researched. Making the subject set universe-driven requires: a seam
+that hands the research owner the tape's selected daily universe (the research owner
+runs only under MARKET_RESEARCH_ENABLED, i.e. PAPER, and does not today receive a
+universe accessor), a mechanical venue-symbol derivation per provider for coins not
+in the table, and a rework of the sweep loop + coverage/quota accounting for a
+dynamic coin set. This changes what PAPER researches — a FREEZE-relevant behavioral
+change, and PAPER is frozen-pending.
+
+**Recommendation:** confirm the universe-access seam for the research owner (reuse
+the wide-eye catalog / selected-universe source the tape already produces?) and the
+exact per-venue derivation table before implementing. The fence (b) is small and can
+land with (a) once the approach is set. Suggest doing this as its own ticket after
+PAPER intent is confirmed, not as an autonomous overnight change.
+
+---
+
+## Remaining cull — paper-profile provider enables (parked)
+
+**Ask:** "Paper profile: enable kept keyed providers + default RUMOR2_EDGAR_CIKS."
+
+**Why parked:** enabling keyed providers flips their desiredState/readiness and would
+have them attempt activation (keys, smoke) — a PAPER-readiness decision with fence
+impact, taken while PAPER is frozen-pending. It reads as a "ready PAPER for the run"
+step rather than a cleanup, so it wants an explicit go. **Recommendation:** confirm
+which kept keyed providers to turn ON (and the RUMOR2_EDGAR_CIKS default value) when
+PAPER is being readied; low-risk config change once the list is confirmed.
