@@ -23,6 +23,7 @@ Each registry line is `` - `NAME` — purpose ``.
 - `REPLIT_DEPLOYMENT` — host flag set on a published deployment; durability becomes required.
 - `SERPENT_DURABLE_REQUIRED` — explicit override forcing the durability-required posture (as a published deployment).
 - `SERPENT_HTTP_CONTACT` — contact string sent as the HTTP user-agent to official feeds (the SEC/EDGAR law); absent ⇒ those feeds are not queried.
+- `SERPENT_PAPER_INIT_ACCOUNT` — names the PAPER account the boot may initialize itself, under owner intent, when it is uninitialized (PUBLISH-FIX-7); requires `SERPENT_CONTROL_PASSWORD`. Absent ⇒ no boot init (today's dark refusal).
 
 ## Persistence
 - `DATABASE_URL` — PostgreSQL connection string (value is a host Secret). Absent ⇒ local files only, no durable authority.

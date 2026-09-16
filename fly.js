@@ -205,7 +205,25 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       // when the structural stop is within the cap, the bite shrinks on wider stops, upside is never capped). Pure all-in
       // (fraction 1 with the max-size-evidence gate) stays a REPLAY-only arm until SIZING qualifies, so it is NOT wired here.
       const paperSizing = process.env.JUDGE_MODE === 'PAPER' ? { fractions: ['0.25', '0.5', '0.75', '1'], allInEvidence: 'RISK_BOUNDED' } : null;
-      judgeRun = await composeJudge({ policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing, writerLockWait: { waitMs: 180_000, intervalMs: 5_000 } }); // PUBLISH-FIX-5 / PAPER-FLIP-PREP: the boot waits out a Republish overlap for the execution writer lock
+      const composeJudgeRun = () => composeJudge({ policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing, writerLockWait: { waitMs: 180_000, intervalMs: 5_000 } }); // PUBLISH-FIX-5 / PAPER-FLIP-PREP: the boot waits out a Republish overlap for the execution writer lock
+      // PUBLISH-FIX-7: if the PAPER account is uninitialized AND the owner asked for it through the deployment env
+      // (SERPENT_PAPER_INIT_ACCOUNT names the account, SERPENT_CONTROL_PASSWORD present), the boot runs the EXACT init-paper
+      // path once under owner intent (same config/judge.paper.json policy; refuses reset), then composes the Judge. Replit
+      // gives the deployment its own production PostgreSQL that no workspace shell can reach, so this is the only place the
+      // production account can be created. Without the env name, behaviour is unchanged. The password is never logged.
+      const { composePaperJudgeWithBootInit } = await import('./lib/paper-boot-init.js');
+      judgeRun = await composePaperJudgeWithBootInit({
+        env: process.env,
+        compose: composeJudgeRun,
+        log: console.log,
+        initPaper: async () => {
+          const { createCommands } = await import('./judge/commands.js');
+          // owner intent = the deployment's own SERPENT_CONTROL_PASSWORD, supplied as JUDGE_OWNER_PASSWORD only for this
+          // one command (never the ambient env, never logged); createCommands verifies it against SERPENT_CONTROL_PASSWORD.
+          const cmds = createCommands({ env: { ...process.env, JUDGE_OWNER_PASSWORD: process.env.SERPENT_CONTROL_PASSWORD }, log: console.log });
+          await cmds['init-paper']({ policy: process.env.JUDGE_POLICY, account: process.env.SERPENT_PAPER_INIT_ACCOUNT });
+        },
+      });
       const startup = await judgeRun.start();
       setJudgeRun(judgeRun);
       console.log(`JUDGE active: ${judgeRun.kind} account ${judgeRun.accountId} mode ${judgeRun.mode} (${judgeRun.kind === 'PAPER' ? 'NOT REAL MONEY' : 'LIVE: entries need an unexpired owner authorization'}); startup ${JSON.stringify({ uncertain: startup.uncertainOrders.length, exposed: startup.exposedPositions.length, authorizationEnded: startup.authorizationEnded })}`);

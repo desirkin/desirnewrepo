@@ -150,3 +150,21 @@ minute-aligned, few-minutes-past timestamp captured once per `fixtures()` instan
 byte-identical, wall-clock-committed bars. The A09/B02 re-poll now forces the chart THREE times, each at a later wall
 clock, and asserts the observation count stays put every pass while the duplicate counter grows (≥90). Verified
 deterministic across 36 parallel-loaded runs (0 failures). Full suite green + gate 0.
+
+## PUBLISH-FIX-7. DONE — 2026-09-16: the PAPER boot initializes its own account under owner intent (env).
+Production boot f7173376 (`npm run paper`, 8e488ed) died: `JUDGE failed to start … ACCOUNT_UNINITIALIZED: account
+paper-reference-usd500 is not initialized`. Root cause: Replit gives the deployment its own production PostgreSQL,
+separate from the workspace's development database; `init-paper` run from a workspace shell lands in development (there
+the account already EXISTS at revision 21), and no shell can reach the production database — so the account could never
+be created where the deployment reads it. Fix (fly.js PAPER path): when `composeJudge` throws `ACCOUNT_UNINITIALIZED`
+AND `SERPENT_PAPER_INIT_ACCOUNT` names the account AND `SERPENT_CONTROL_PASSWORD` is present, run the EXACT `init-paper`
+command once under owner intent (same `config/judge.paper.json` policy; the command still refuses to reset an account
+that exists), then re-compose the Judge and log `PAPER ACCOUNT initialized at boot under owner intent (env)`. Owner
+intent is proven by the deployment's own `SERPENT_CONTROL_PASSWORD`, supplied as `JUDGE_OWNER_PASSWORD` for that one
+command only — never the ambient env, never logged, never echoed. Without the env NAME the behaviour is unchanged
+(today's dark refusal). The trigger logic is a pure, injected helper (`lib/paper-boot-init.js`:
+`composePaperJudgeWithBootInit` / `paperBootInitWanted` / `PAPER_BOOT_INIT_LOG`). ENV.md registers
+`SERPENT_PAPER_INIT_ACCOUNT` (B-8 fence). Tests (`test/paper-boot-init.test.js` PF7-1..6): uninitialized + env →
+init once + compose + log, password never in the log; initialized + env → no init, no reset; uninitialized without the
+env name → error propagates; env without password → no init; a non-`ACCOUNT_UNINITIALIZED` failure never triggers init.
+Full suite green + gate 0.
