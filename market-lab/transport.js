@@ -249,18 +249,23 @@ export function createWsClient({ providerId, endpointId, WebSocketImpl = globalT
   const target = url ?? `wss://${e.host}${e.path}`;
   if (!target.startsWith(`wss://${e.host}`) && !/^wss?:\/\/(127\.0\.0\.1|localhost)(:\d+)?/.test(target)) fail('INVALID_REQUEST', 'websocket url must be the registry host (or a loopback test server)');
   let ws = null; let state = 'STOPPED'; let epoch = 0; let attempt = 0; let idleTimer = null; let reconnectTimer = null;
+  // B-11: has any message arrived since THIS connection opened? It is the one predicate that separates the expected
+  // pre-subscribe quiet window (open, subscribe sent, first ack/data not yet back — a normal gap, never a stall) from a
+  // genuine post-subscribe idle (data flowed, then went silent — a real stall an operator must see). The idle watchdog
+  // still reconnects in both cases; only the LOG line is gated, so a quiet boot no longer prints an alarming idle line.
+  let messagedSinceOpen = false;
   const counters = { messages: 0, bytes: 0, dropped: 0, invalidJson: 0, reconnects: 0, lastMessageTs: null, openedTs: null };
   const epochId = () => `${providerId}:${endpoint()}:${epoch}`; const endpoint = () => endpointId;
-  const armIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => { if (ws && state === 'OPEN') { log(`ws idle ${idleTimeoutMs} ms — reconnecting`); try { ws.close(); } catch { /* best effort */ } } }, idleTimeoutMs); };
+  const armIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => { if (ws && state === 'OPEN') { if (messagedSinceOpen) log(`ws idle ${idleTimeoutMs} ms — reconnecting`); try { ws.close(); } catch { /* best effort */ } } }, idleTimeoutMs); };
   function connect() {
     if (state === 'STOPPING' || state === 'STOPPED' && epoch > 0 && !reconnectTimer) return;
     state = 'CONNECTING'; epoch += 1;
     let sock;
     try { sock = new WebSocketImpl(target); } catch (err) { state = 'BACKOFF'; schedule(); return; }
     ws = sock;
-    sock.onopen = () => { state = 'OPEN'; attempt = 0; counters.openedTs = clock(); armIdle(); try { onOpen({ epochId: epochId(), send }); } catch (err) { log(`ws onOpen failed: ${String(err?.message).slice(0, 120)}`); } };
+    sock.onopen = () => { state = 'OPEN'; attempt = 0; messagedSinceOpen = false; counters.openedTs = clock(); armIdle(); try { onOpen({ epochId: epochId(), send }); } catch (err) { log(`ws onOpen failed: ${String(err?.message).slice(0, 120)}`); } };
     sock.onmessage = (ev) => {
-      const receivedTs = clock(); counters.lastMessageTs = receivedTs; armIdle();
+      const receivedTs = clock(); counters.lastMessageTs = receivedTs; messagedSinceOpen = true; armIdle();
       const raw = typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data);
       const size = typeof raw === 'string' ? Buffer.byteLength(raw) : raw.byteLength;
       counters.messages += 1; counters.bytes += size;
