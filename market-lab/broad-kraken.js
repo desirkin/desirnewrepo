@@ -138,16 +138,34 @@ function writeAll(fd, buffer) {
   }
 }
 
-// PUBLISH-FIX-1 — dead-pid recovery for the broad-Kraken writer lock, the same law acquireRuntimeLock uses: a lock whose
-// owning pid is no longer alive is a stale crash artifact (a republished disk keeps the old app's lock), so it is recovered
-// and logged, never "operator verification required". A lock whose pid IS alive still refuses (real contention); an
-// unreadable/invalid lock still refuses for manual review; a pid we cannot verify (EPERM) refuses rather than guess.
+// PUBLISH-FIX-3 — the kernel boot id (a UUID that changes on every boot / container start; /proc/sys/kernel/random/boot_id
+// on Linux). It is the ONLY reliable cross-restart identity: a low pid like 34 is routinely reused by an unrelated process
+// in a republished container, so `process.kill(pid, 0)` returning "alive" does NOT mean the real writer is alive. Recording
+// the boot id lets a lock from a PREVIOUS boot be recognized as stale even when its pid was reused.
+function currentBootId() {
+  try { const id = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); return id.length ? id : null; }
+  catch { return null; }
+}
+
+// PUBLISH-FIX-1/3 — dead-pid + prior-boot recovery for the broad-Kraken writer lock, the same law acquireRuntimeLock uses: a
+// lock left by a PREVIOUS boot (a republished disk keeps the old app's lock) is a stale artifact and is recovered and logged,
+// never "operator verification required". Staleness is decided by the boot id first (a different boot is always stale, even
+// if the recorded pid is now a live UNRELATED process — the Replit pid-34 false positive), then by pid liveness for a lock
+// from THIS boot. A lock from this boot whose pid IS alive still refuses (real contention); an unreadable/invalid lock still
+// refuses for manual review; a pid we cannot verify (EPERM) refuses rather than guess.
 function recoverStaleBroadLock(lockFile, clock, log) {
   if (!existsSync(lockFile)) return;
-  let pid;
-  try { pid = JSON.parse(readFileSync(lockFile, 'utf8')).pid; }
+  let payload;
+  try { payload = JSON.parse(readFileSync(lockFile, 'utf8')); }
   catch { throw Object.assign(new Error('broad Kraken writer lock is unreadable; manual review required'), { code: 'BROAD_MARKET_LOCKED' }); }
+  const pid = payload?.pid;
   if (!Number.isSafeInteger(pid) || pid < 1) throw Object.assign(new Error('broad Kraken writer lock has an invalid pid; manual review required'), { code: 'BROAD_MARKET_LOCKED' });
+  const bootNow = currentBootId();
+  if (typeof payload?.bootId === 'string' && payload.bootId.length && bootNow && payload.bootId !== bootNow) {
+    unlinkSync(lockFile);
+    log(`recovered stale broad Kraken writer lock from a previous boot (pid ${pid}; the pid may have been reused by this container)`);
+    return;
+  }
   try { process.kill(pid, 0); throw Object.assign(new Error(`broad Kraken writer already active as pid ${pid}`), { code: 'BROAD_MARKET_LOCKED' }); }
   catch (error) {
     if (error?.code === 'BROAD_MARKET_LOCKED') throw error;
@@ -169,7 +187,7 @@ function openBroadStore({ dataDir, clock, segmentBytes, maxSegments, lineBytes, 
   recoverStaleBroadLock(lockFile, clock, log); // clear a dead owner's lock before we try to take it (a republished disk keeps it)
   try {
     lockFd = openSync(lockFile, 'wx');
-    writeAll(lockFd, Buffer.from(`${JSON.stringify({ version: BROAD_KRAKEN_VERSION, pid: process.pid, token: lockToken, acquiredTs: clock() })}\n`));
+    writeAll(lockFd, Buffer.from(`${JSON.stringify({ version: BROAD_KRAKEN_VERSION, pid: process.pid, bootId: currentBootId(), token: lockToken, acquiredTs: clock() })}\n`));
     fsyncSync(lockFd); closeSync(lockFd); lockFd = null;
   } catch (error) {
     if (lockFd !== null) try { closeSync(lockFd); } catch { /* preserve first failure */ }

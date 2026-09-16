@@ -295,7 +295,7 @@ test('invalid price/volume and malformed/future OHLC are never fresh; stop drain
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('PUBLISH-FIX-1: the broad-Kraken writer lock recovers a DEAD owner (republished disk keeps the old lock) — logged, re-owned; a LIVE owner still refuses; an unreadable lock refuses for manual review', async () => {
+test('PUBLISH-FIX-1/3: the broad-Kraken writer lock recovers a DEAD owner and a PRIOR-BOOT owner whose pid was reused — logged, re-owned; a same-boot LIVE owner still refuses; an unreadable lock refuses for manual review', async () => {
   FakeSocket.instances.length = 0; const dir = temp(); const now = T;
   const c = catalog([market('BTC', 'XXBT', 'XBT')]);
   const lockDir = path.join(dir, 'broad-kraken'); mkdirSync(lockDir, { recursive: true });
@@ -308,9 +308,20 @@ test('PUBLISH-FIX-1: the broad-Kraken writer lock recovers a DEAD owner (republi
   assert.ok(logs.some((m) => m.includes(`recovered stale broad Kraken writer lock from stopped pid ${dead}`)), 'the dead owner lock is recovered and logged');
   assert.equal(JSON.parse(readFileSync(lockFile, 'utf8')).pid, process.pid, 'the lock is re-owned by this process');
   await handle.stop();
-  // a lock owned by a LIVE pid (this process) is real contention — still refuses, never recovered
+  // a lock owned by a LIVE pid (this process) FROM THIS BOOT is real contention — still refuses, never recovered
   writeFileSync(lockFile, `${JSON.stringify({ version: 'x', pid: process.pid, token: 'zz', acquiredTs: now })}\n`);
   assert.throws(open, (e) => e.code === 'BROAD_MARKET_LOCKED' && /live owner|already active/.test(e.message));
+  // PUBLISH-FIX-3: a lock from a PREVIOUS boot is stale even when its pid is now a LIVE (reused) process — the Replit pid-34
+  // false positive. Gated on the kernel boot id being readable (Linux); elsewhere the pid-only law above still holds.
+  let bootId = null; try { bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); } catch { bootId = null; }
+  if (bootId) {
+    const priorLogs = logs.length;
+    writeFileSync(lockFile, `${JSON.stringify({ version: 'x', pid: process.pid, bootId: 'prior-boot-0000', token: 'zz', acquiredTs: now })}\n`);
+    const reowned = open();
+    assert.ok(logs.slice(priorLogs).some((m) => /previous boot/.test(m) && m.includes(`pid ${process.pid}`)), 'a prior-boot lock with a reused live pid is recovered and logged');
+    assert.equal(JSON.parse(readFileSync(lockFile, 'utf8')).bootId, bootId, 're-owned with this boot id');
+    await reowned.stop();
+  }
   // an unreadable lock is never silently unlinked — it refuses for manual review
   writeFileSync(lockFile, 'not json{');
   assert.throws(open, (e) => e.code === 'BROAD_MARKET_LOCKED' && /manual review/.test(e.message));

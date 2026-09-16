@@ -1,9 +1,42 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { openDataOnlyCheckpoints } from '../tools/data-only-checkpoints.mjs';
-import { EXTERNAL_CHECKPOINT_IDS } from '../persistence/external-checkpoint-store.js';
+import { openExternalCheckpointStore, EXTERNAL_CHECKPOINT_IDS } from '../persistence/external-checkpoint-store.js';
 import { MARKET_QUOTA_CHECKPOINT_VERSION } from '../market-lab/external-quota-journal.js';
 import { QUOTA_JOURNAL_VERSION } from '../market-lab/quota.js';
+
+// PUBLISH-FIX-3 birth commissioning, end to end against the REAL external checkpoint store with an in-memory repo.
+class BirthFakeDb { constructor() { this.alive = true; } async acquireSessionLock() { return { held: () => this.alive, release: async () => { this.alive = false; } }; } }
+class BirthFakeRepo {
+  constructor() { this.rows = new Map(); }
+  async loadRuntimeState(id) { const r = this.rows.get(id); return r ? structuredClone(r) : null; }
+  async saveRuntimeState(id, state) { const row = { revision: 1, state: structuredClone(state) }; this.rows.set(id, row); return { ...structuredClone(row), conflict: false }; }
+}
+const birthPersistence = () => ({ db: new BirthFakeDb(), repo: new BirthFakeRepo(), health: () => ({ databaseConfigured: true, restored: true }) });
+
+test('PUBLISH-FIX-3: a fresh DB + new generation in DATA_ONLY commissions BOTH zero-budget checkpoints at zero (WIDE EYE / MARKET open, zero paid), and the durable row records BIRTH_ZERO_BUDGET', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'birth-'));
+  const p = birthPersistence();
+  try {
+    const logs = [];
+    const checkpoints = await openDataOnlyCheckpoints({ persistence: p, dataDir: dir, env: { SERPENT_DATA_ONLY: 'true', SERPENT_DATA_GENERATION: 'gen1' }, clock: () => 4242, log: (m) => logs.push(String(m)) });
+    // neither budget nor market is blocked: an absent checkpoint on a fresh deployment is a newborn account, not a failure.
+    assert.deepEqual(checkpoints.blockers, {}, 'no CHECKPOINT_ABSENT blocker on a fresh deployment');
+    assert.ok(checkpoints.budget, 'the news budget governor is live (WIDE EYE can open)');
+    assert.equal(checkpoints.budget.restored.estimatedMonthUsd, 0, 'born at zero spend');
+    assert.ok(checkpoints.market, 'the market quota journal is live (MARKET can open)');
+    assert.deepEqual(checkpoints.market.rows(), [], 'born with no reservations');
+    // the durable rows carry the BIRTH_ZERO_BUDGET provenance, logged once each.
+    for (const id of [EXTERNAL_CHECKPOINT_IDS.DATA_ONLY, EXTERNAL_CHECKPOINT_IDS.MARKET]) {
+      assert.equal(p.repo.rows.get(id).state.commissioning.reason, 'BIRTH_ZERO_BUDGET DATA_ONLY gen1', id);
+    }
+    assert.equal(logs.filter((l) => /BIRTH_ZERO_BUDGET/.test(l)).length, 2, 'commissioning logged once per checkpoint');
+    await checkpoints.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 const MARKET_STATE = Object.freeze({
   version: MARKET_QUOTA_CHECKPOINT_VERSION,
@@ -64,7 +97,7 @@ function fakeOpenStore({ missing = null } = {}) {
   return { openStore, events, restores, closed: () => storeClosed };
 }
 
-test('opens the PostgreSQL store before source bindings and never supplies implicit zero commissioning', async () => {
+test('opens the PostgreSQL store before source bindings and commissions the zero-budget checkpoints at BIRTH_ZERO_BUDGET when absent', async () => {
   const fake = fakeOpenStore();
   const checkpoints = await openDataOnlyCheckpoints({
     persistence: { restored: true },
@@ -84,7 +117,12 @@ test('opens the PostgreSQL store before source bindings and never supplies impli
     EXTERNAL_CHECKPOINT_IDS.MARKET,
   ]);
   for (const options of fake.restores) {
-    assert.equal(Object.hasOwn(options, 'commission'), false, `${options.id} must not create a zero checkpoint`);
+    // PUBLISH-FIX-3: both zero-budget checkpoints now carry a BIRTH_ZERO_BUDGET commission so an ABSENT checkpoint on a
+    // fresh deployment is born at zero (with allowCreate) instead of blocking WIDE EYE / MARKET. The store still prefers a
+    // durable or filesystem checkpoint; the birth commission is used only when both are absent.
+    assert.equal(options.commission.allowCreate, true, `${options.id} commissions at zero when absent`);
+    assert.match(options.commission.reason, /^BIRTH_ZERO_BUDGET (DATA_ONLY|PAPER) /, options.id);
+    assert.equal(options.commission.ts, 1234);
     assert.equal(typeof options.validate, 'function');
     assert.equal(typeof options.loadLocal, 'function');
     assert.equal(options.importMeta.ts, 1234);

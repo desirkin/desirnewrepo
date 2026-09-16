@@ -27,6 +27,9 @@ export class ExternalMarketQuotaError extends Error {
 }
 
 const checkpoint = (rows) => ({ version: MARKET_QUOTA_CHECKPOINT_VERSION, journalVersion: QUOTA_JOURNAL_VERSION, rows: clone(rows) });
+// PUBLISH-FIX-3 birth commissioning: the zero market-quota checkpoint (no reservations). Used to commission an ABSENT
+// checkpoint at zero on a fresh deployment — the market lane carries no paid budget, so zero is the honest starting truth.
+export const emptyMarketQuotaCheckpoint = () => checkpoint([]);
 const exactKeys = (value, allowed) => {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return false;
   const keys = Object.keys(value).sort(); return keys.length === allowed.length && keys.every((key, index) => key === allowed[index]);

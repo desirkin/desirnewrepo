@@ -84,6 +84,10 @@ export class Db {
       idleTimeoutMillis: IDLE_TIMEOUT_MS,
       query_timeout: QUERY_TIMEOUT_MS,
       statement_timeout: QUERY_TIMEOUT_MS,
+      // PUBLISH-FIX-3: a managed PostgreSQL behind a proxy silently drops idle TCP sockets; without SO_KEEPALIVE a pooled
+      // connection looks alive but the next query hangs until the OS timeout (production saw ETIMEDOUT with no prior sign).
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10_000,
       allowExitOnIdle: true, // persistence never keeps a dying process alive
       application_name: applicationNameOf(this.schema),
     };
@@ -104,6 +108,7 @@ export class Db {
     this.#ensurePool();
     const attempts = this.#everConnected || this.connectionErrors > 0 ? 1 : this.#retries;
     for (let attempt = 1; attempt <= attempts; attempt++) {
+      const startedAt = Date.now();
       try {
         await this.#pool.query('SELECT 1');
         if (this.schema) {
@@ -115,7 +120,9 @@ export class Db {
         return true;
       } catch (err) {
         this.connectionErrors++;
-        this.log(`PERSISTENCE connect probe ${attempt}/${attempts} failed: ${err.code ?? err.constructor.name}`);
+        // PUBLISH-FIX-3: name the code AND the elapsed ms so an ETIMEDOUT (connect that hung to the timeout) is legible in
+        // the production log, distinct from an instant ECONNREFUSED.
+        this.log(`PERSISTENCE connect probe ${attempt}/${attempts} failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}`);
         if (attempt < attempts) await sleep(1000 * attempt);
       }
     }
@@ -135,6 +142,7 @@ export class Db {
 
   async query(text, params = [], { write = false } = {}) {
     if (!this.#pool) throw new Error('database not connected');
+    const startedAt = Date.now();
     try {
       const r = await this.#pool.query(this.#qualify(text), params);
       this.reachable = true;
@@ -142,7 +150,10 @@ export class Db {
       else this.lastSuccessfulReadTs = Date.now();
       return r;
     } catch (err) {
-      this.#markConnectionFailure(err);
+      // PUBLISH-FIX-3: a connection-class failure (ETIMEDOUT / reset / statement timeout) is logged with its code and the
+      // elapsed ms before it propagates, so a query that hung to the timeout is never silent. Ordinary query errors
+      // (constraint, syntax) are the caller's to surface and are not logged here.
+      if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE query failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}`);
       throw err;
     }
   }
@@ -153,11 +164,13 @@ export class Db {
   // (q, helpers): q qualifies 'serpent_' names; helpers.raw does not.
   async tx(fn) {
     if (!this.#pool) throw new Error('database not connected');
+    const startedAt = Date.now();
     let client;
     try {
       client = await this.#pool.connect();
     } catch (err) {
-      this.#markConnectionFailure(err);
+      // PUBLISH-FIX-3: a checkout that hung to the connect timeout is logged with its code and elapsed ms.
+      if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE tx checkout failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}`);
       throw err;
     }
     const q = (text, params = []) => client.query(this.#qualify(text), params);
@@ -173,7 +186,9 @@ export class Db {
     } catch (err) {
       this.transactionErrors++;
       const connectionFailed = this.#markConnectionFailure(err);
-      if (connectionFailed) discardError = err;
+      // PUBLISH-FIX-3: a transaction that failed on a connection-class error (ETIMEDOUT / reset mid-tx) is logged with its
+      // code and the elapsed ms; ordinary constraint/callback errors are the caller's to surface.
+      if (connectionFailed) { discardError = err; this.log(`PERSISTENCE tx failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}`); }
       try {
         await q('ROLLBACK');
       } catch (rollbackError) {
@@ -203,11 +218,13 @@ export class Db {
   // connection dies, release() unlocks and returns the client to the pool.
   async acquireSessionLock(name) {
     if (!this.#pool) throw new Error('database not connected');
+    const startedAt = Date.now();
     let client;
     try {
       client = await this.#pool.connect();
     } catch (err) {
-      this.#markConnectionFailure(err);
+      // PUBLISH-FIX-3: a lock-session checkout that hung to the connect timeout is logged with its code and elapsed ms.
+      if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE lock checkout failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}`);
       throw err;
     }
     try {

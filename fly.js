@@ -4,6 +4,7 @@
 // applied by its launcher (COBRA_PROFILE present AND every forced authority name holding). Anything else refuses to
 // start — a bare `node fly.js` has no mode and composes nothing. The display still never decides, and the default is
 // NO TRADE.
+import http from 'node:http';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { dataDir, dataGeneration, purgeLegacyData } from './lib/config.js';
@@ -38,6 +39,27 @@ if (SERPENT_MODE === null) {
   process.exit(1);
 }
 
+// PUBLISH-FIX-3 PORT FIRST — bind PORT immediately, BEFORE the (slow) legacy purge and persistence restore, with a bootstrap
+// STARTING responder so the deployment's healthcheck passes within seconds (an instance was killed for "required port was
+// never opened" while the spine was still restoring). This window serves ONLY a STARTING body: it has NO control surface, so
+// PERSIST-0A §2 holds — the REAL cockpit (ui/server.js, with the auth-gated controls) still listens only after the spine has
+// established the persistence bootstrap. The boot phases update <data>/serpent-runtime status as they complete; the bootstrap
+// is closed the instant before the real cockpit binds the same port. PORT '0' (tests) skips this — the port is not fixed.
+const bootstrap = await (async () => {
+  if (process.env.PORT === '0') return { close: async () => {} };
+  const port = Number(process.env.PORT) || 3000;
+  const server = http.createServer((req, res) => {
+    const api = (req.url ?? '').startsWith('/api/');
+    res.writeHead(200, { 'content-type': api ? 'application/json' : 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(api
+      ? JSON.stringify({ lifecycle: 'STARTING', running: false, startupPhase: 'PORT_BOUND', mode: SERPENT_MODE, authority: 'NONE', advisories: ['boot in progress — the cockpit takes over once the persistence bootstrap is established'] })
+      : '<!doctype html><meta charset="utf-8"><title>COBRA — STARTING</title><body style="font-family:system-ui;background:#0b0e13;color:#cdd6e3;padding:2rem"><h1>COILED</h1><p>Boot in progress. The cockpit opens once the persistence bootstrap is established.</p></body>');
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '0.0.0.0', resolve); });
+  console.log(`PORT ${server.address().port} bound (bootstrap STARTING responder) — cockpit takes over after the spine`);
+  return { close: async () => { await new Promise((resolve) => server.close(resolve)); server.closeAllConnections?.(); } };
+})();
+
 // PUBLISH-FIX-1 — before any lock, journal or write: announce the data generation and run the one-shot legacy purge (a
 // republished VM keeps the old flat app's data). This runs once for BOTH modes, before the spine or the paper composition
 // touch the disk, so a new generation is a clean crib. The current generation is never touched by the purge.
@@ -54,7 +76,9 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   await startDataOnlyRuntime({ entrypoint: 'fly.js' });
   // In-process cockpit (runtime unification step 4): the shell listens only AFTER the spine established the
   // persistence bootstrap (PERSIST-0A §2 — same law as PAPER below). judgeRun is never registered in this mode, so
-  // the cockpit serves the read-only data-only surface; controls still fail closed without auth.
+  // the cockpit serves the read-only data-only surface; controls still fail closed without auth. The bootstrap
+  // STARTING responder is released the instant before the real cockpit binds the same port (PUBLISH-FIX-3).
+  await bootstrap.close();
   await import('./ui/server.js');
 } else {
   console.log('COBRA FLYING — tape + cockpit. Default answer is NO TRADE.');
@@ -90,7 +114,9 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   if (serpentRuntime.blockers.PERSISTENCE) console.error(`PERSIST-0 restore unavailable (observation continues; permission-increasing behavior locked): ${serpentRuntime.blockers.PERSISTENCE}`);
   // PERSIST-0A §2: the cockpit begins listening only AFTER the persistence
   // bootstrap state is established — no boot window where CLEAR could see
-  // "no persistence" as permission. (ui/server.js listens on import.)
+  // "no persistence" as permission. (ui/server.js listens on import.) The
+  // bootstrap STARTING responder is released the instant before it binds (PUBLISH-FIX-3).
+  await bootstrap.close();
   await import('./ui/server.js');
   try {
     // MEMORY-0 dark mirror opens BEFORE the live sensors begin writing

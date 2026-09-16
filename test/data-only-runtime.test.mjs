@@ -119,6 +119,12 @@ test('Replit run and deployment commands select the ONE-process data-only entry,
   // and the one root serves the cockpit in-process in DATA_ONLY, after the spine (persistence bootstrap first)
   const fly = readFileSync(path.join(root, 'fly.js'), 'utf8');
   assert.ok(fly.indexOf("startDataOnlyRuntime({ entrypoint: 'fly.js' })") < fly.indexOf("await import('./ui/server.js')"), 'DATA_ONLY: the cockpit listens only after the spine established the persistence bootstrap');
+  // PUBLISH-FIX-3 PORT FIRST: a bootstrap STARTING responder binds PORT before the legacy purge and the spine, then is
+  // closed the instant before the real cockpit binds the same port — so the healthcheck passes while PERSIST-0A §2 holds.
+  assert.ok(fly.indexOf('bootstrap STARTING responder') < fly.indexOf('purgeLegacyData('), 'the bootstrap binds PORT before the legacy purge');
+  assert.ok(fly.indexOf("server.listen(port, '0.0.0.0'") < fly.indexOf("startDataOnlyRuntime({ entrypoint: 'fly.js' })"), 'the bootstrap binds before the spine restores persistence');
+  assert.match(fly, /await bootstrap\.close\(\);\s*\n\s*await import\('\.\/ui\/server\.js'\)/g, 'the bootstrap is released the instant before the real cockpit binds the same port');
+  assert.doesNotMatch(fly.slice(fly.indexOf('bootstrap STARTING responder'), fly.indexOf('await bootstrap.close()')), /\/api\/control|gateControl|kill|cage/, 'the bootstrap window exposes no control surface');
 });
 
 test('both data-only launchers explicitly keep paid X collection disabled during broad-market rollout', () => {
