@@ -2,3 +2,13 @@ node_modules/
 data/
 *.log
 .DS_Store
+
+# Database dumps / backups must never be committed: a production PostgreSQL dump
+# carries real captured data and can carry credentials. Keep them out of the tree;
+# test/repo-dump-hygiene.test.js fails the suite if one is ever tracked.
+*.dump
+*.dmp
+*.bak
+*.sql
+*.sql.gz
+production-postgres.dump

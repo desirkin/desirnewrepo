@@ -86,9 +86,13 @@ the day-to-day on/off is the two protected toggles on the serpent page (ASK, SOC
 |---|---|---|
 | `ANTHROPIC_API_KEY` | The one provider secret for the LLM explainer (Anthropic API). | (unset ⇒ the explainer is dormant) |
 | `SERPENT_TALK_DAILY_USD` | Daily spend ceiling for the free-form question box. | `2` |
+| `SERPENT_CHAT_MAX_USD_PER_REQUEST` | Per-send ceiling for one free-form question. The box stays **NOT_CONFIGURED** (recorded-evidence answers only) until this **and** the daily cap are both set; a send whose estimate exceeds it is refused `REQUEST_CAP` before dispatch, never truncated. | (unset ⇒ the free-form box stays NOT_CONFIGURED) |
 | `SERPENT_SOCRATES_DAILY_USD` | Daily spend ceiling for Socrates cases (they spend from this second cap). | `5` |
 
-`0` or unset on either cap ⇒ that half stays **dormant**, fail-closed, with no code change needed to toggle it.
+The free-form question box needs **both** caps: `SERPENT_CHAT_MAX_USD_PER_REQUEST` (per send) **and** the daily
+`SERPENT_TALK_DAILY_USD` (legacy `SERPENT_CHAT_MAX_USD_PER_DAY` is still read as a fallback). With either unset the box
+reports NOT_CONFIGURED and answers only from recorded evidence — no paid call. `0` or unset on either **daily** cap ⇒ that
+half stays **dormant**, fail-closed, with no code change needed to toggle it.
 
 **The SOCRATES toggle is the runtime enable for paid research cases** — not just the after-the-fact explainer text. The
 paper research policy ships with `model.enabled: true` and a `$5/day` config ceiling, but **nothing spends until the
