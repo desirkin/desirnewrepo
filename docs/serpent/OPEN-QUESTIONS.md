@@ -131,3 +131,63 @@ impact, taken while PAPER is frozen-pending. It reads as a "ready PAPER for the 
 step rather than a cleanup, so it wants an explicit go. **Recommendation:** confirm
 which kept keyed providers to turn ON (and the RUMOR2_EDGAR_CIKS default value) when
 PAPER is being readied; low-risk config change once the list is confirmed.
+
+---
+
+## REVIEW-3 (R3-1 … R3-6) — detailed acceptance criteria not in the working context (parked)
+
+**Context:** REVIEW-2 (R2-1 … R2-5: README truth + CLI fence, CI workflow, committed
+9c17372 fixtures, empty-catch audit fence, chat-cap NAME + DB-dump hygiene) is DONE
+and CI-green. The queue then reaches REVIEW-3, whose six items are known by name —
+R3-1 doctrine=code sizing / PHILOSOPHY.md, R3-2 RELEASE.json manifest, R3-3 E2E-3
+lifecycle, R3-4 STRESS-1 tiers, R3-5 IFR reference-venue-lows fence, R3-6 weekly
+paper report tool — but whose per-item acceptance criteria are not recoverable from
+the docs + doctrine alone. Each branches on a design choice that is David's, not
+derivable, so building any of them now would be guessing. Recommendations per item;
+none is a decision.
+
+- **R3-1 doctrine=code sizing / PHILOSOPHY.md.** "Sizing" is ambiguous across three
+  readings: (a) an app line-count ceiling — but LEAN-PLAN states 85.3k as a
+  *measurement* (now 78.3k after the culls), never a ceiling, so there is no doctrine
+  number to pin; (b) the position-**sizing** law ("every bite is the whole nut",
+  PHILOSOPHY §Decided doctrine) matching the code; (c) doctrine numbers = code, the
+  drift PHILOSOPHY already flags (the "10% prose vs 8% code" study threshold, line 38).
+  **Recommendation:** reading (c) — a fence asserting the numbers PHILOSOPHY.md states
+  as code-enforced (study `riseThresholdPct`/`fallingThresholdPct` = 8%, the v3 top-30
+  movers population) equal the code constants, so prose can never drift from the
+  enforced number again. Confirm which reading before building.
+
+- **R3-2 RELEASE.json manifest.** No RELEASE.json exists (persistence/object-manifest.js
+  and ui/manifest.webmanifest are unrelated). **Recommendation:** a generated,
+  fence-validated manifest pinning release identity — `schemaVersion`
+  (persistence/schema.js), the composition roots (test/helpers/composition-roots.js),
+  app line count, test count, and the protected-surface digests already pinned in
+  social-4f-scope. Confirm the manifest's purpose (publish/deploy identity vs review
+  artifact) and the exact required fields.
+
+- **R3-3 E2E-3 lifecycle.** E2E-1 = judge-e2e-pg, E2E-2 = paper-e2e-pg. E2E-3 would be
+  a third full lifecycle E2E, but which lifecycle is unspecified — candidates: the
+  data-only capture → object-store restore → republish lifecycle, or the
+  senses → case → Socrates → Judge wire end to end. **Recommendation:** name the
+  lifecycle E2E-3 must cover and its acceptance (green under the CI PostgreSQL job).
+
+- **R3-4 STRESS-1 tiers.** broad-day-chain-stress.test.js is the only stress test today;
+  "tiers" implies graduated load levels. The stressed subsystem, the tier magnitudes,
+  and the pass criteria are all unspecified, and this is new test infrastructure.
+  **Recommendation:** specify the tiers (what is stressed — tape/book/collector
+  pipeline? — at what magnitudes, with what pass bar). Confirm it is wanted now vs held
+  under the FREEZE.
+
+- **R3-5 IFR reference-venue-lows fence.** IFR = market-lab/isolated-flush-reversal.js
+  (SHADOW_ONLY). PHILOSOPHY §Strategy 3 states IFR exits "when the gap repairs, the
+  references confirm the drop, or the local low fails," measured at "the size-aware
+  executable bid." **Recommendation:** a fence pinning IFR's reference-venue-low
+  invariant — that recovery/entry is measured against the reference venues' lows (not a
+  single venue) and the size-aware executable bid. Confirm the exact invariant to lock.
+
+- **R3-6 weekly paper report tool.** No paper report tool exists (socrates/report.js is
+  for Socrates cases, not the paper account). **Recommendation:** a read-only tool
+  (e.g. tools/paper-weekly-report.mjs) that reads the Judge paper account journals and
+  emits a weekly summary — realized/unrealized PnL, decisions, fills, per-day breakdown
+  — RESEARCH_ONLY, no authority. Confirm the report's contents, format, and destination
+  (stdout / file / UI drawer).
