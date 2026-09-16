@@ -29,9 +29,39 @@ import { emptyXState, socialCatalogEvent, socialCatalogVerifiedEvent, socialCurs
 // cursor regression (500, 600, 550) is refused; an inclusive repeat of the
 // SAME cursor is lawful at-least-once replay. Non-social events are ignored
 // here — the frozen replay owns them.
+//
+// PUBLISH-FIX-11 (2026-09-16): the pass is written ONCE as a generator that pauses every
+// REPLAY_SLICE_EVENTS events; `replaySocialHistory` drives it to the end synchronously (byte-for-byte
+// the same result as before), and `replaySocialHistoryAsync` drives it in bounded time slices,
+// handing the event loop back between slices. The paper boot's production journal takes ~100 µs
+// per event to re-validate (two canonical digests each); a few hundred thousand events held the
+// main thread for minutes, the health check failed, and the container was killed mid-hydration on
+// every boot. Same validation, same order, same fail-closed law — only WHEN the loop breathes changed.
+export const REPLAY_SLICE_EVENTS = 256;
+export const REPLAY_SLICE_MS = 20;
+
 export function replaySocialHistory(events) {
+  const g = replaySocialHistorySteps(events);
+  for (;;) { const r = g.next(); if (r.done) return r.value; }
+}
+
+// Same pass, sliced: at most `sliceMs` of work between pauses (checked every REPLAY_SLICE_EVENTS
+// events); `pause` defaults to one macrotask turn (setImmediate), so timers, sockets and the health
+// check run between slices. Returns exactly what replaySocialHistory returns.
+export async function replaySocialHistoryAsync(events, { sliceMs = REPLAY_SLICE_MS, pause = () => new Promise((resolve) => setImmediate(resolve)), now = () => performance.now(), onSlice = null } = {}) {
+  const g = replaySocialHistorySteps(events);
+  let sliceStart = now(); let slices = 0;
+  for (;;) {
+    const r = g.next();
+    if (r.done) { if (onSlice) onSlice({ slices, done: true }); return r.value; }
+    if (now() - sliceStart >= sliceMs) { slices += 1; if (onSlice) onSlice({ slices, done: false, events: r.value }); await pause(); sliceStart = now(); }
+  }
+}
+
+function* replaySocialHistorySteps(events) {
   const fail = (msg) => ({ ok: false, error: String(msg).slice(0, 300) });
   if (!Array.isArray(events)) return fail('SOCIAL_HISTORY_INVALID: history is not a list');
+  let stepped = 0;
   const durableIds = new Set();
   const digests = new Map(); // sourceEventId -> canonical digest (duplicate law)
   const cursors = {}; // provider -> durableCursor
@@ -85,6 +115,7 @@ export function replaySocialHistory(events) {
     return null;
   };
   for (const e of events) {
+    if ((stepped += 1) % REPLAY_SLICE_EVENTS === 0) yield stepped; // a pause point — the async driver may hand the loop back here
     if (e?.type === CURRENT_REQUEST_TYPE) { const error = currentRequestError(e); if (error) return fail(error); continue; }
     if (e?.type === FARCASTER_REQUEST_TYPE) { const error = farcasterRequestError(e); if (error) return fail(error); continue; }
     if (e === null || typeof e !== 'object' || Array.isArray(e) || typeof e.type !== 'string') return fail('SOCIAL_HISTORY_INVALID: malformed event record');

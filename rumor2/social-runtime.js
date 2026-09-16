@@ -188,8 +188,11 @@ export function createSocialRuntime({
 
   // Rebuild durable Social truth from the authoritative journal history:
   // version index + resume cursor. Fail-closed on any invalid social history.
-  function hydrate(events) {
-    const r = replaySocialHistory(events);
+  // PUBLISH-FIX-11: the collector may hand in ONE validated replay of the same journal (replaySocialHistory is a
+  // pure function of the events; every runtime reads the result, none mutates it) so the history is replayed once
+  // per initialization instead of once per runtime.
+  function hydrate(events, { replay = null } = {}) {
+    const r = replay ?? replaySocialHistory(events);
     if (!r.ok) { state = 'WITHHELD'; lastError = r.error; hydrated = false; return { ok: false, error: r.error }; }
     reconciler.hydrate(r);
     knownNative = new Set([...r.targets.values()].filter((e) => e.provider === provider.id).map((e) => e.nativePostId));

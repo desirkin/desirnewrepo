@@ -34,5 +34,5 @@ export {
   emptyXState, socialCatalogEvent, socialCatalogVerifiedEvent, socialCursorEvent, socialScopeEvent, validateSocialCatalogEvent, validateSocialCatalogVerifiedEvent, validateSocialCursorEvent, validateSocialScopeEvent, validateXGapEvent, validateXMeterEvent, validateXProgressEvent, validateXRuleSetEvent, validateXSmokeEvent, xGapEvent, xMeterEvent, xProgressEvent, xRuleSetEvent, xSmokeEvent,
 } from './social-settle-operational.js';
 export {
-  replaySocialHistory,
+  replaySocialHistory, replaySocialHistoryAsync, REPLAY_SLICE_EVENTS, REPLAY_SLICE_MS,
 } from './social-settle-replay.js';

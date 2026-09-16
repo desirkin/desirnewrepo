@@ -58,7 +58,7 @@ import { buildClaimPacket } from './packet.js';
 // SOCIAL-2A: the Bluesky Social ear runs INSIDE this collector's single-writer
 // authority domain — same journal, same epoch, same fence. Social events are
 // SOURCE-ONLY: they never enter the frozen replay, graph, claims, or packets.
-import { isSocialEventType, replaySocialHistory } from './social-settle.js';
+import { isSocialEventType, replaySocialHistoryAsync } from './social-settle.js';
 import { createSocialRuntime } from './social-runtime.js';
 import { createSocialCurrentRuntime, currentReadinessRuntimes } from './social-current-runtime.js';
 import { createFarcasterRuntime } from './social-farcaster-runtime.js';
@@ -601,17 +601,24 @@ export function startRumor2({
     // SOCIAL-4D COMPLETION (Q): Social history is validated on EVERY restore, with the
     // provider gates on OR off — a later-enabled provider can never reveal history that was
     // silently treated as valid without ever being checked. Fail-closed, like the core.
+    // PUBLISH-FIX-11: the social history is replayed ONCE per initialization, in bounded time slices that hand the
+    // event loop back (the tape, the Judge and the health check keep running while a large journal re-validates),
+    // and the one validated result is shared by every runtime. Before this, each of up to four runtimes replayed
+    // the whole journal on the main thread back to back: minutes of a frozen process on the production journal.
+    const t0 = Date.now();
+    const replaySliced = async () => { const r = await replaySocialHistoryAsync(jr.events); log(`RUMOR2 social history replayed once for ${socialRuntimes.length || 'no'} runtime(s): ${jr.events.length} journal events in ${Date.now() - t0} ms (sliced; loop kept breathing) — ${r.ok ? `${r.observed} observations` : `INVALID: ${boundedError(r.error)}`}`); return r; };
     if (socialRuntimes.length === 0) {
       if (jr.events.some((e) => e && typeof e === 'object' && isSocialEventType(e.type))) {
-        const sr = replaySocialHistory(jr.events);
+        const sr = await replaySliced();
         if (!sr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(sr.error); return false; }
       }
       if (research) { const rr = research.hydrate(jr.events); if (!rr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(rr.error); return false; } }
       socialHydratedForInit = true;
       return true;
     }
+    const replay = await replaySliced();
     for (const rt of socialRuntimes) {
-      const hr = rt.hydrate(jr.events);
+      const hr = rt.hydrate(jr.events, { replay });
       if (!hr.ok) {
         lifecycle = 'WITHHELD_INVALID_CHECKPOINT';
         withholdReason = boundedError(hr.error);

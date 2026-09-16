@@ -440,8 +440,8 @@ export function createXRuntime({
   }
 
   // ---- hydrate: durable X state from the SAME journal --------------------------
-  function hydrate(events) {
-    const r = replaySocialHistory(events);
+  function hydrate(events, { replay = null } = {}) { // PUBLISH-FIX-11: a shared validated replay of the same journal is lawful (pure function, read-only consumers)
+    const r = replay ?? replaySocialHistory(events);
     if (!r.ok) { state = 'WITHHELD'; lastError = r.error; hydrated = false; return { ok: false, error: r.error }; }
     reconciler.hydrate(r);
     x = r.x;
