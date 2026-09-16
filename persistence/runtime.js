@@ -169,7 +169,10 @@ async function attemptStartup(state, log) {
   // one call the host echoed twice; different id = two real starts). And attemptStartup must never return false
   // silently — each early exit below logs exactly ONE reason, so a boot that ends restored=false without either
   // "durable core connected" or "startup failed" (the production symptom) can no longer happen.
-  const blog = (message) => log(`[boot ${state.bootId}] ${message}`);
+  // B-6 (boot-log shape): the boot-id rides INLINE, never as a second bracketed prefix. The boot path's runtime wrapper
+  // (`[DATA-ONLY <iso>]` / `[SERPENT PAPER <iso>]`) owns the ONE bracketed prefix + timestamp; persistence adds none of
+  // its own, so every composed boot line carries exactly one prefix and one timestamp (test/persist-store-runtime B-6).
+  const blog = (message) => log(`boot ${state.bootId}: ${message}`);
   const aborted = (stage) => {
     blog(`PERSISTENCE startup aborted (STOPPED at ${stage}): persistence.stop() was called mid-startup — restored=false; permission remains locked`);
     return false;

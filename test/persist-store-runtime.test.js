@@ -55,6 +55,22 @@ async function start(t, { mode, existing = false, generation } = {}) {
   return { root, file, persistence, sqlLog, logs };
 }
 
+test('B-6. boot-log shape: persistence adds no prefix of its own — the runtime wrapper owns the single [PHASE iso] stamp, so every composed boot line carries exactly one prefix and one timestamp', async (t) => {
+  const f = await start(t); // ANCHORED: attemptStartup runs to "durable core connected", emitting the boot-id-tagged lines
+  assert.ok(f.logs.length > 0, 'the boot emitted at least one line');
+  // persistence emits RAW messages: no line begins with a bracketed prefix of its own (the boot-id rides inline)
+  for (const line of f.logs) assert.doesNotMatch(line, /^\s*\[/, `persistence must not add its own bracketed prefix: ${line}`);
+  assert.ok(f.logs.some((l) => /^boot [0-9a-z]+: /.test(l)), 'the PUBLISH-FIX-2 boot-id tag rides inline (boot <id>: …), never as a second bracket');
+  // under the real boot wrapper, each composed line carries EXACTLY ONE bracketed [PHASE iso] prefix — the remainder
+  // after it never opens with a second bracket (the two-prefix boot line B-6 retired)
+  const wrap = (line) => `[SERPENT PAPER ${new Date().toISOString()}] ${line}`;
+  for (const line of f.logs) {
+    const m = /^\[[^\]]+ \d{4}-\d\d-\d\dT[^\]]+\] (.*)$/.exec(wrap(line));
+    assert.ok(m, `composed line carries one [PHASE iso] prefix: ${wrap(line)}`);
+    assert.doesNotMatch(m[1], /^\s*\[/, `one prefix, one timestamp — no second bracketed prefix: ${wrap(line)}`);
+  }
+});
+
 test('WIPED cache locks CLEAR before consumers, preserves pump/core restore, and does not recreate missing study', async (t) => {
   const f = await start(t);
   const h = f.persistence.health();

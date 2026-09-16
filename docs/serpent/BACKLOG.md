@@ -50,12 +50,16 @@ exactly ONE module with zero importers of any kind (runtime, test, or sibling): 
 broad-day-reader) — those have importers and are NOT orphans, so they stay. Attic isolation is already fenced by
 `test/attic-fence.test.js` ATTIC-1 (git-ls-files based, so the move is covered). Full suite green + gate 0.
 
-## B-6. Boot-log consistency — one prefix, one timestamp per line
-**Do:** make every boot log line carry exactly one prefix and one timestamp (today's logs
-print two on some lines). One logger shape across the boot path.
-**Acceptance:** a boot-log fence asserts each emitted boot line matches the single-prefix,
-single-timestamp shape; the local fresh-DB boot repro shows the corrected format; full
-suite green + gate 0.
+## B-6. DONE — 2026-09-16: persistence boot lines no longer carry a second bracketed prefix.
+The boot path's runtime wrapper (`[DATA-ONLY <iso>]` / `[SERPENT PAPER <iso>]`, and fly's `[DATA <iso>]` legacy purge)
+owns the ONE bracketed prefix + timestamp; `persistence/runtime.js` was the sole nested wrapper, tagging each startup
+line `[boot <bootId>] …` so composed lines read `[SERPENT PAPER <iso>] [boot <id>] …` — TWO prefixes. Its `blog` now
+rides the boot-id INLINE (`boot <id>: …`, no bracket), preserving the PUBLISH-FIX-2 duplicate-line disambiguation while
+leaving exactly one prefix and one timestamp per line; the scheduleRetry lines were already bracketless, so the boot
+path is now uniform. Fence `test/persist-store-runtime.test.js` B-6 boots the real `startPersistence` over a fake DB
+driver and asserts every emitted line is prefix-free and that, once wrapped, each composed line has exactly one
+`[PHASE <iso>]` prefix (a fake-DB boot repro of the corrected format; no local PG needed). No test pinned the old
+`[boot …]` bracket. Full suite green + gate 0.
 
 ## B-7. attic/README.md index
 **Do:** write `attic/README.md` listing what is in the attic and why — one line each
