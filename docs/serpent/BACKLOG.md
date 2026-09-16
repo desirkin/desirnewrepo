@@ -168,3 +168,20 @@ command only — never the ambient env, never logged, never echoed. Without the 
 init once + compose + log, password never in the log; initialized + env → no init, no reset; uninitialized without the
 env name → error propagates; env without password → no init; a non-`ACCOUNT_UNINITIALIZED` failure never triggers init.
 Full suite green + gate 0.
+
+## PUBLISH-FIX-8. DONE — 2026-09-16: a DATA_ONLY-born zero-budget market checkpoint is accepted (re-commissioned) under PAPER.
+Same production log: `MARKET quota restore blocked: CHECKPOINT_INVALID external_quota:market:v2`. Root cause (verified
+in-memory): NOT a mode-tag refusal — the market checkpoint born this morning under DATA_ONLY carried a PLAN/RESERVE row
+for a provider that SENSE-CULL-3 later removed from `PROVIDER_IDS` (e.g. DERIBIT), so `validateMarketQuotaCheckpoint`
+now rejects the durable row (`quota journal row 1: plan malformed`). Fix: a zero-budget BIRTH namespace whose durable
+row no longer validates under the current code — a retired provider, a bumped checkpoint version, or an authority tag
+from another runtime mode — is RE-COMMISSIONED at zero under the current authority instead of blocking the boot. It
+carries no paid spend, so nothing is lost (the BIRTH_ZERO_BUDGET principle). The re-commission is CAS-guarded against
+the durable revision, tagged durably (`AUTHORITY_MIGRATION <reason>`), and a `binding.migrated()` flag is true only on
+the boot that performed it, so `tools/data-only-checkpoints.mjs` logs `MARKET quota authority migrated to PAPER <gen>
+(zero budget): …` exactly once; a later boot finds the valid zero row and never migrates again. Paid namespaces pass NO
+birth zero-state, so they keep the strict fail-closed `CHECKPOINT_INVALID` law. Tests
+(`test/external-checkpoint-authority-migration.test.mjs` PF8-1..3): store re-commissions the invalid DATA_ONLY-born row
+once (CAS advances the row exactly one revision), the second boot does not re-migrate; a paid namespace with an invalid
+row still fails closed; end-to-end `openDataOnlyCheckpoints` is not blocked and logs the migration exactly once. Full
+suite green + gate 0.
