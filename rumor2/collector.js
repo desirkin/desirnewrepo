@@ -606,13 +606,14 @@ export function startRumor2({
     // and the one validated result is shared by every runtime. Before this, each of up to four runtimes replayed
     // the whole journal on the main thread back to back: minutes of a frozen process on the production journal.
     const t0 = Date.now();
+    const researchSliced = async () => { const t1 = Date.now(); const rr = typeof research.hydrateAsync === 'function' ? await research.hydrateAsync(jr.events) : research.hydrate(jr.events); log(`RUMOR2 research strainer hydrated: ${jr.events.length} journal events in ${Date.now() - t1} ms (sliced) — ${rr.ok ? `${rr.subjects} subjects, ${rr.dossiers} dossiers` : `INVALID: ${boundedError(rr.error)}`}`); return rr; };
     const replaySliced = async () => { const r = await replaySocialHistoryAsync(jr.events); log(`RUMOR2 social history replayed once for ${socialRuntimes.length || 'no'} runtime(s): ${jr.events.length} journal events in ${Date.now() - t0} ms (sliced; loop kept breathing) — ${r.ok ? `${r.observed} observations` : `INVALID: ${boundedError(r.error)}`}`); return r; };
     if (socialRuntimes.length === 0) {
       if (jr.events.some((e) => e && typeof e === 'object' && isSocialEventType(e.type))) {
         const sr = await replaySliced();
         if (!sr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(sr.error); return false; }
       }
-      if (research) { const rr = research.hydrate(jr.events); if (!rr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(rr.error); return false; } }
+      if (research) { const rr = await researchSliced(); if (!rr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(rr.error); return false; } }
       socialHydratedForInit = true;
       return true;
     }
@@ -626,8 +627,9 @@ export function startRumor2({
       }
     }
     // SOCIAL-5A: the research strainer rebuilds its bounded subjects and dossier history from the SAME journal
-    if (research) { const rr = research.hydrate(jr.events); if (!rr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(rr.error); return false; } }
+    if (research) { const rr = await researchSliced(); if (!rr.ok) { lifecycle = 'WITHHELD_INVALID_CHECKPOINT'; withholdReason = boundedError(rr.error); return false; } }
     socialHydratedForInit = true;
+    log(`RUMOR2 hydrated from the journal: ${jr.events.length} events for ${socialRuntimes.length} social runtime(s)${research ? ' + research' : ''} in ${Date.now() - t0} ms total (sliced; loop kept breathing)`);
     return true;
   }
   async function ensureInitCore() {

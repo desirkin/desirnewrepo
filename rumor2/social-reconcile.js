@@ -49,8 +49,8 @@ export function createSocialReconciler({ provider } = {}) {
   const stats = { hydrations: 0, reconciled: 0, new: 0, known: 0, annotate: 0, pending: 0, invalid: 0 };
 
   const addTo = (map, key, id) => { if (!map.has(key)) map.set(key, new Set()); map.get(key).add(id); };
-  const addIndex = (e) => {
-    const entry = socialIndexEntry(e);
+  const addIndex = (e, known = null) => {
+    const entry = known ?? socialIndexEntry(e); // PUBLISH-FIX-11: the replay's entry (the same recipe) when it is handed in
     index.set(e.sourceEventId, entry);
     addTo(byNativeKey, entry.nativeKeyDigest, e.sourceEventId);
     addTo(byCoarseKey, entry.coarseKeyDigest, e.sourceEventId);
@@ -65,7 +65,8 @@ export function createSocialReconciler({ provider } = {}) {
   // Rebuild from an authoritative replay result (replaySocialHistory). Never partial.
   function hydrate(replay) {
     index.clear(); byNativeKey.clear(); byCoarseKey.clear(); targets.clear(); annotations.clear(); annotationIds.clear(); pendingIds.clear(); pendingSets.clear(); reconciledLegacy.clear();
-    for (const e of replay.targets.values()) addIndex(e);
+    const known = replay.index instanceof Map ? replay.index : null;
+    for (const e of replay.targets.values()) addIndex(e, known ? (known.get(e.sourceEventId) ?? null) : null);
     for (const [, list] of replay.annotations) for (const a of list) { addAnnotation(a); markReconciled(a.targetEventId, a.witness?.declared ?? null, a.clockRole); }
     for (const id of replay.pendingIds) { pendingIds.add(id); const rec = replay.pendingRecords?.get(id); if (rec) pendingSets.set(id, rec.candidateIds); }
     stats.hydrations += 1;

@@ -57,3 +57,30 @@ test('a runtime hydrates from a shared replay result instead of replaying again'
   const own = createSocialRuntime({ enabled: true, now: () => T0 + 10_000_000, provider: { id: 'BLUESKY_OFFICIAL', providerKind: 'SOCIAL_MICROBLOG' }, scoped: true, log: () => {} }).hydrate(hist);
   assert.equal(canonicalJson(shared), canonicalJson(own)); assert.equal(shared.ok, true, JSON.stringify(shared));
 });
+
+test('research strainer: sliced hydrate equals the synchronous hydrate and pauses', async () => {
+  const { createResearchStrainer } = await import('../rumor2/social-research-runtime.js');
+  const hist = history(3 * REPLAY_SLICE_EVENTS);
+  const a = createResearchStrainer({ now: () => T0 + 10_000_000 }); const b = createResearchStrainer({ now: () => T0 + 10_000_000 });
+  const sync = a.hydrate(hist);
+  let pauses = 0; const sliced = await b.hydrateAsync(hist, { sliceMs: 0, pause: async () => { pauses += 1; } });
+  assert.equal(canonicalJson(sliced), canonicalJson(sync)); assert.equal(sliced.ok, true); assert.ok(pauses >= 2, `pauses ${pauses}`);
+  assert.equal(canonicalJson(a.status(T0 + 10_000_000)), canonicalJson(b.status(T0 + 10_000_000)));
+});
+
+test('research scope source: the accepted catalog is validated once per catalog object, freshness judged per call', async () => {
+  const { createResearchScopeSource, parseSocialResearchConfig } = await import('../rumor2/social-catalog.js');
+  const { loadConfig } = await import('../lib/config.js');
+  const catalog = (await import('./helpers/social-7.js')).catalogOf(['BTC', 'ETH', 'SOL'], T0);
+  const snap = { status: 'ACCEPTED', catalog, lastError: null };
+  const src = createResearchScopeSource({ research: parseSocialResearchConfig(loadConfig()).research, source: { snapshot: () => ({ ...snap }) }, now: () => T0 + 1000 });
+  const first = src.candidate({ knownAtTs: T0 + 1000 });
+  assert.equal(first.status, 'CATALOG_BACKED', first.reason); const t = Date.now();
+  for (let i = 0; i < 2000; i += 1) src.candidate({ knownAtTs: T0 + 1000 + i });
+  assert.ok(Date.now() - t < 2000, 'two thousand candidate calls must be cheap once the catalog is validated');
+  assert.equal(src.candidate({ knownAtTs: T0 + 1000 }).scope.filterId, first.scope.filterId);
+  assert.equal(src.candidate({ knownAtTs: T0 - 5000 }).status, 'UNAVAILABLE', 'freshness is still judged per call (FUTURE)');
+  const replaced = (await import('./helpers/social-7.js')).catalogOf(['BTC', 'ETH', 'SOL', 'ADA'], T0 + 500);
+  snap.catalog = replaced;
+  assert.notEqual(src.candidate({ knownAtTs: T0 + 1000 }).scope.filterId, first.scope.filterId, 'a new accepted catalog object is validated afresh');
+});

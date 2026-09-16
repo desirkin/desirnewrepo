@@ -284,6 +284,11 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     'tape/run.js': '5ad288300107ba587c21bdbf2502aa7fae5e4c86959b65f72d504409617dd504',
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
+    // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the
+    // replay hands one in (replay.index — the ONE shared socialIndexEntry recipe) instead of recomputing three digests per
+    // target per runtime; addIndex(e) without a known entry is unchanged. No trading/control/model surface.
+    // Tests: test/social-replay-sliced.test.js, test/social-4d-*.test.js.
+    'rumor2/social-reconcile.js': 'e92d1b4cc5ed01f0534875337a9fb566b7d1059f2baca292860f8b21f7ce1847',
   };
   // R2-3: the 9c17372 baseline is committed, not read from `git show`, so the fence
   // survives a shallow clone or a rewritten ancestor (CI checks out no deep history).

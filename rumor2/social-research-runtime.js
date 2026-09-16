@@ -127,9 +127,14 @@ export function createResearchStrainer({
 
   // rebuild from the authoritative journal (validated social history is the caller's law; this runtime
   // consumes committed events in journal order and validates its own families strictly)
-  function hydrate(events) {
+  // PUBLISH-FIX-11: written once as a generator that pauses every 256 events; `hydrate` drives it to the end
+  // synchronously (unchanged result), `hydrateAsync` in bounded time slices that hand the event loop back — the
+  // paper boot hydrates ~100k journal events, and the process must keep answering while it does.
+  function* hydrateSteps(events) {
     subjects.clear(); seenObservations.clear(); attributionByNative.clear(); research.byCoin.clear(); research.count = 0; shadow.bySweep.clear(); shadow.order.length = 0; shadow.count = 0; journalOrder = 0; pendingOp = null; journalAhead = null; lastSampledSweepId = null; profilesIdx.clear();
+    let stepped = 0;
     for (const e of events) {
+      if ((stepped += 1) % 256 === 0) yield stepped;
       if (!e || typeof e !== 'object') continue;
       if (e.type === RESEARCH_DOSSIER_EVENT_TYPE) { const err = validateResearchDossierEvent(e); if (err) { hydrated = false; lastError = err; return { ok: false, error: `RESEARCH_HISTORY_INVALID: ${err}` }; } }
       if (e.type === RESEARCH_SHADOW_EVENT_TYPE) { const err = validateResearchShadowEvent(e); if (err) { hydrated = false; lastError = err; return { ok: false, error: `RESEARCH_HISTORY_INVALID: ${err}` }; } }
@@ -138,6 +143,11 @@ export function createResearchStrainer({
     }
     hydrated = true; stats.hydrations += 1; lastError = null;
     return { ok: true, subjects: subjects.size, dossiers: research.count, shadowSamples: shadow.count };
+  }
+  function hydrate(events) { const g = hydrateSteps(events); for (;;) { const r = g.next(); if (r.done) return r.value; } }
+  async function hydrateAsync(events, { sliceMs = 20, pause = () => new Promise((resolve) => setImmediate(resolve)), now: clock = () => performance.now() } = {}) {
+    const g = hydrateSteps(events); let sliceStart = clock();
+    for (;;) { const r = g.next(); if (r.done) return r.value; if (clock() - sliceStart >= sliceMs) { await pause(); sliceStart = clock(); } }
   }
   // committed events (the collector's receipts) in journal order
   function ingest(events) {
@@ -291,7 +301,7 @@ export function createResearchStrainer({
   }
   const stop = () => { pendingOp = null; };
   return {
-    hydrate, ingest, tick, status, stop,
+    hydrate, hydrateAsync, ingest, tick, status, stop,
     history: (coin) => (research.byCoin.get(coin) ?? []).map((x) => ({ ...x })),
     // SOCIAL-6: the as-of source profile (outcome records resolved through the injected accessor per research episode; associations through the injected accessor)
     sourceProfile: (socialAuthorId, { asOfTs = Math.floor(now()), availability = 'ACTUAL_OPERATIONAL_AVAILABILITY' } = {}) => {

@@ -148,6 +148,11 @@ export function aliasFactsFor(bases) {
 export function createResearchScopeSource({ research = SOCIAL_RESEARCH_DEFAULTS, configReason = null, source = null, now = null } = {}) {
   const local = research.localAdmission;
   let lastSnapshot = null; let lastValidation = null;
+  // PUBLISH-FIX-11: the accepted catalog is validated and compiled ONCE per catalog object (the wide eye hands out the
+  // same frozen `catalog.accepted` until a new sweep is accepted). Before this, every social observation — including
+  // each of ~100k during a journal hydrate — re-validated all ~600 markets, re-derived the content id, rebuilt the
+  // coin registry and recompiled the scope: minutes of a frozen main thread. Freshness is still judged per call.
+  let memo = null; // { catalogRef, catalog, scope } for the last validated accepted catalog object
   const unavailable = (reason, extra = {}) => ({ status: 'UNAVAILABLE', reason, catalog: null, scope: null, freshness: null, ...extra });
   function candidate({ knownAtTs = typeof now === 'function' ? now() : null } = {}) {
     if (!Number.isSafeInteger(knownAtTs)) return unavailable('CLOCK_UNAVAILABLE: the evaluation clock must be injected');
@@ -164,15 +169,19 @@ export function createResearchScopeSource({ research = SOCIAL_RESEARCH_DEFAULTS,
     lastSnapshot = snap;
     if (!isPlainObject(snap)) return unavailable('CATALOG_SNAPSHOT_MALFORMED');
     if (snap.status !== 'ACCEPTED' || !snap.catalog) return unavailable(`CATALOG_NOT_ACCEPTED: ${typeof snap.lastError === 'string' ? snap.lastError.slice(0, 160) : snap.status ?? 'no accepted catalog yet'}`);
-    const v = validateCatalogContent(snap.catalog, { maxMarkets: research.catalog.maxMarkets });
-    lastValidation = v.error ?? null;
-    if (v.error) return unavailable(`CATALOG_INVALID: ${v.error}`);
-    const freshness = catalogFreshness(v.catalog, knownAtTs, research.catalog.maxAgeSec);
-    if (freshness === 'FUTURE') return unavailable('CATALOG_OBSERVED_IN_FUTURE: the acquisition clock is ahead of the evaluation clock', { catalog: v.catalog, freshness });
-    const bases = catalogBases(v.catalog);
-    const c = compileAdmissionScope({ mode: 'CATALOG_BACKED', catalogContentId: v.catalog.contentId, terms: bases, aliases: aliasFactsFor(bases) });
-    if (c.error) return unavailable(`SCOPE_COMPILE_FAILED: ${c.error}`, { catalog: v.catalog, freshness });
-    return { status: freshness === 'FRESH' ? 'CATALOG_BACKED' : 'STALE', reason: freshness === 'FRESH' ? null : `CATALOG_STALE: observed ${knownAtTs - v.catalog.observedTs} ms ago exceeds maxAgeSec ${research.catalog.maxAgeSec} — no new scope from stale data`, catalog: v.catalog, scope: c.scope, freshness };
+    if (memo === null || memo.catalogRef !== snap.catalog) {
+      const v = validateCatalogContent(snap.catalog, { maxMarkets: research.catalog.maxMarkets });
+      lastValidation = v.error ?? null;
+      if (v.error) { memo = null; return unavailable(`CATALOG_INVALID: ${v.error}`); }
+      const bases = catalogBases(v.catalog);
+      const c = compileAdmissionScope({ mode: 'CATALOG_BACKED', catalogContentId: v.catalog.contentId, terms: bases, aliases: aliasFactsFor(bases) });
+      memo = { catalogRef: snap.catalog, catalog: v.catalog, scope: c.error ? null : c.scope, compileError: c.error ?? null };
+    } else lastValidation = null;
+    const { catalog: vc, scope, compileError } = memo;
+    const freshness = catalogFreshness(vc, knownAtTs, research.catalog.maxAgeSec);
+    if (freshness === 'FUTURE') return unavailable('CATALOG_OBSERVED_IN_FUTURE: the acquisition clock is ahead of the evaluation clock', { catalog: vc, freshness });
+    if (compileError) return unavailable(`SCOPE_COMPILE_FAILED: ${compileError}`, { catalog: vc, freshness });
+    return { status: freshness === 'FRESH' ? 'CATALOG_BACKED' : 'STALE', reason: freshness === 'FRESH' ? null : `CATALOG_STALE: observed ${knownAtTs - vc.observedTs} ms ago exceeds maxAgeSec ${research.catalog.maxAgeSec} — no new scope from stale data`, catalog: vc, scope, freshness };
   }
   function notices() {
     if (!source || typeof source.notices !== 'function') return [];
