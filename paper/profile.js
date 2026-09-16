@@ -80,9 +80,10 @@ export function profileEnvironment(profile, { dataDir = null } = {}) {
     RUMOR2_SOCIAL_FACEBOOK_ENABLED: g.social.META_PUBLIC?.desiredState === 'REQUEST' || on(g.social.META_PUBLIC) ? 'true' : 'false',
     RUMOR2_SOCIAL_INSTAGRAM_ENABLED: g.social.META_PUBLIC?.desiredState === 'REQUEST' || on(g.social.META_PUBLIC) ? 'true' : 'false',
     WIDEEYE_ENABLED: on(g.coreObservation.wideEye) ? 'true' : 'false', GATEWAY_ENABLED: on(g.infrastructure.gateway) ? 'true' : 'false', RUMINT_ENABLED: on(g.rumorOfficial.rumintLegacy) ? 'true' : 'false',
-    // PUBLISHER observation tier (press/): the profile selects publisher feeds by id; ON rows are watched, OFF / licensed rows
+    // PUBLISHER observation tier (press/): the profile selects the crypto publisher feeds by id; ON rows are watched, OFF rows
     // never called. Headline / link only, authority NONE, outside the frozen RUMOR-2 evidence core.
-    // PRESS is the last dark observation tier the profile derives (LEAN PASS 4a retired the INFRA and social-VIDEO tiers).
+    // PRESS is the last dark observation tier the profile derives (LEAN PASS 4a retired the INFRA, social-VIDEO and non-crypto
+    // publisher tiers).
     PRESS_ENABLED: Object.values(g.publisherNews).some(on) ? 'true' : 'false', PRESS_SOURCES: Object.entries(g.publisherNews).filter(([, r]) => on(r)).map(([id]) => id).join(','),
   };
   if (dataDir) env.COBRA_DATA_DIR = dataDir;

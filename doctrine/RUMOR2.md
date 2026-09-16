@@ -464,10 +464,10 @@ are enforced by tests, not comments.
   `rumor2/feed.js` (the hostile-XML-safe parser; enumerated in the authority
   fence as an offline-research-style allowance), records HEADLINE / LINK /
   PUBLISHER-TIMESTAMP observations only in `<data>/press/observations.jsonl`
-  (bodies are never fetched), keeps publisher and aggregator identities apart
-  (a Google News item carries its own `<source>` publisher with the aggregator
-  as transport), and answers LICENSED_INTERFACE_REQUIRED with zero requests for
-  Reuters / Bloomberg until the owner supplies a licensed interface.
+  (bodies are never fetched) for the four crypto publishers (CoinDesk / The
+  Block / Cointelegraph / Decrypt). LEAN PASS 4a retired the non-crypto
+  publishers with the AGGREGATOR (Google News per-item `<source>` split) and
+  LICENSED_INTERFACE_REQUIRED (Reuters / Bloomberg / CNN) machinery.
 - Unchanged authority: press observations carry `authority: NONE`; nothing in
   `rumor2/`, `judge/`, `execution/`, `watch/`, `tape/` or `market-lab/` reads
   them (`test/press.test.js` PRESS-5). The same pattern holds for the

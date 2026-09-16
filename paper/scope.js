@@ -44,16 +44,11 @@ export const SCOPE = Object.freeze([
   R('N04', 'SEC EDGAR filings for the configured issuer / watchlist scope', ['EDGAR_OFFICIAL']),
   R('N05', 'OFAC sanctions updates (identity / diff semantics)', ['OFAC_OFFICIAL']),
   R('N06', 'CoinGlass headlines (linked to M16; not a second poller)', ['COINGLASS'], 'the article-list endpoint of the SAME CoinGlass client and quota accounting'),
-  // PUBLISHER / NEWS CONNECTIONS — 9
-  R('P01', 'Reuters', ['REUTERS_NEWS']),
-  R('P02', 'Bloomberg', ['BLOOMBERG_NEWS']),
-  R('P03', 'CNBC', ['CNBC_NEWS']),
-  R('P04', 'Financial Times', ['FT_NEWS']),
+  // CRYPTO PUBLISHER CONNECTIONS — 4 (LEAN PASS 4a retired the non-crypto publishers: Reuters/Bloomberg/CNN licensed-only, CNBC/FT/Google-News aggregator)
   R('P05', 'CoinDesk', ['COINDESK_NEWS']),
   R('P06', 'The Block', ['THEBLOCK_NEWS']),
   R('P07', 'Cointelegraph', ['COINTELEGRAPH_NEWS']),
   R('P08', 'Decrypt', ['DECRYPT_NEWS']),
-  R('P09', 'Google News (aggregator; transport identity is Google, publisher identity is per item)', ['GOOGLE_NEWS_AGGREGATOR']),
   // EXCHANGE STATUS — 4 (LEAN PASS 4a retired the NOAA / RIPE RIS / Cloudflare Radar infra observation tier and the Tally governance sense)
   R('I05', 'Kraken Statuspage', ['GATEWAY_KRAKEN_STATUS']),
   R('I06', 'Kraken system-status API', ['GATEWAY_KRAKEN_SYSTEM']),

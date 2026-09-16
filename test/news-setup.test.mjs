@@ -15,13 +15,11 @@ test('news-only one pass collects exactly the profile ON public feeds without ke
   const dir = mkdtempSync(path.join(tmpdir(), 'news-only-'));
   try {
     const profile = loadProfile(); const calls = []; const logs = [];
-    const { report } = await setupNews({ profile, dataDir: dir, clock: () => now, env: { X_BEARER_TOKEN: 'fixture-secret-must-never-print', PRESS_SOURCES: 'CNBC_NEWS,CNN_NEWS', JUDGE_ENABLED: 'true' }, log: line => logs.push(line), fetchImpl: async (url, init) => { calls.push({ url, headers: init.headers }); return new Response(fixture, { headers: { 'content-type': 'application/rss+xml' } }); } });
+    const { report } = await setupNews({ profile, dataDir: dir, clock: () => now, env: { X_BEARER_TOKEN: 'fixture-secret-must-never-print', JUDGE_ENABLED: 'true' }, log: line => logs.push(line), fetchImpl: async (url, init) => { calls.push({ url, headers: init.headers }); return new Response(fixture, { headers: { 'content-type': 'application/rss+xml' } }); } });
     const expected = PRESS_SOURCES.filter(s => profile.groups.publisherNews[s.id]?.desiredState === 'ON').map(s => s.feedUrl);
     assert.deepEqual(calls.map(c => c.url), expected);
     assert.equal(report.mode, 'NEWS_ONLY_ONCE'); assert.equal(report.paperStarted, false); assert.equal(report.paidApiCalls, 0);
     assert.ok(report.rows.filter(r => r.selected).every(r => r.state === 'OBSERVED' && r.polls === 1 && r.admitted === 1));
-    assert.equal(report.rows.find(r => r.id === 'CNN_NEWS').state, 'LICENSED_INTERFACE_REQUIRED');
-    assert.equal(report.rows.find(r => r.id === 'CNN_NEWS').polls, 0);
     assert.ok(calls.every(c => !Object.keys(c.headers).some(k => /authorization|api.key/i.test(k))));
     assert.ok(!logs.join('\n').includes('fixture-secret'));
     assert.equal(existsSync(path.join(dir, 'press', 'writer.lock')), false);
