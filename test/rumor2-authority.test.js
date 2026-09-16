@@ -63,11 +63,8 @@ OFFLINE_RESEARCH_RUMOR2_IMPORTS['paper/inventory.js'] = { 'registry.js': ['PROVI
 // function of text — and NOTHING else: not the official transport, not the collector, not a provider, not the event root. The
 // official-primary registry and its claim / packet authority stay frozen; publisher headlines are observations with authority NONE.
 OFFLINE_RESEARCH_RUMOR2_IMPORTS['press/collector.js'] = { 'feed.js': ['parseFeed'] };
-// DATA-ONLY (2026-09-12/13, codex/data-only-runtime): the public-discovery tier reuses two PURE rumor-layer surfaces —
-// the HTTP contact normalizer (registry.js) and the social catalog / admission-scope validators — as functions of their
-// arguments only. No collector, no provider runtime, no strainer; discovery carries authority NONE (it is a sensor).
-OFFLINE_RESEARCH_RUMOR2_IMPORTS['discovery/collector.js'] = { 'registry.js': ['normalizeHttpContact'] };
-OFFLINE_RESEARCH_RUMOR2_IMPORTS['discovery/query.js'] = { 'social-catalog.js': ['validateCatalogContent', 'catalogBases', 'aliasFactsFor'], 'social-scope.js': ['compileAdmissionScope', 'admitSocialText'] };
+// LEAN PASS 4a: the public-discovery tier (which reused the pure rumor-layer contact normalizer and catalog / admission
+// validators) is retired to attic, so it no longer appears in the rumor-layer offline-import allow-map.
 // the operator storage diagnostic reads frozen vocabularies / validators only (a read-only status surface, never a runtime)
 OFFLINE_RESEARCH_RUMOR2_IMPORTS['tools/social-storage-diagnose.mjs'] = { 'social-catalog.js': ['parseSocialResearchConfig', 'SOCIAL_X_WATCH_MAX_ASSETS'], 'social-farcaster-meter.js': ['FARCASTER_REQUEST_TYPE', 'farcasterRequestError'], 'social-settle.js': ['SOCIAL_OBSERVATION_TYPES', 'SOCIAL_CATALOG_VERIFIED_EVENT_TYPE', 'validateSocialCatalogVerifiedEvent'] };
 const OFFLINE_RESEARCH_RUMOR2_IMPORTERS = Object.keys(OFFLINE_RESEARCH_RUMOR2_IMPORTS);

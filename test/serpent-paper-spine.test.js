@@ -12,7 +12,6 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, w
 import os from 'node:os';
 import path from 'node:path';
 import { openPaperRuntime, startDataOnlyRuntime } from '../lib/serpent-runtime.js';
-import { PAPER_DISCOVERY_ENV } from '../lib/collectors.js';
 import { readDataOnlyRuntimeStatus } from '../lib/data-only-status.js';
 import { OBJECT_STORE_ENV } from '../persistence/object-store.js';
 import { MANIFEST_OBJECT_KEY, parseManifest } from '../persistence/object-manifest.js';
@@ -24,7 +23,7 @@ function fakes({ restored = true } = {}) {
   const stops = [];
   const rec = (name, options) => { calls.push({ name, options }); };
   const handle = (name) => ({ stop: async () => { stops.push(name); }, status: () => ({ state: 'OK', name }) });
-  const checkpoints = { blockers: {}, budget: { id: 'budget' }, market: { id: 'market' }, discovery: { id: 'discovery' }, status: () => ({ state: 'RESTORED' }), close: async () => { stops.push('checkpoints'); } };
+  const checkpoints = { blockers: {}, budget: { id: 'budget' }, market: { id: 'market' }, status: () => ({ state: 'RESTORED' }), close: async () => { stops.push('checkpoints'); } };
   const governor = { fetch: async () => { throw new Error('offline'); }, status: () => ({ state: 'ACTIVE', estimatedMonthUsd: 0, lanes: {} }) };
   const quotaStarters = {
     startPersistence: async (options) => { rec('startPersistence', options); return { health: () => ({ databaseConfigured: restored, restored }), stop: async () => { stops.push('persistence'); } }; },
@@ -34,7 +33,6 @@ function fakes({ restored = true } = {}) {
   const additionStarters = {
     startDataOnlyMarket: async (options) => { rec('startDataOnlyMarket', options); return handle('market'); },
     startBroadKraken: async (options) => { rec('startBroadKraken', options); return handle('broadMarket'); },
-    startPublicDiscovery: (options) => { rec('startPublicDiscovery', options); return handle('discovery'); },
   };
   return { calls, stops, checkpoints, governor, quotaStarters, additionStarters };
 }
@@ -60,12 +58,9 @@ test('PR-1. PAPER folds onto the spine: lock, honest status, quota restore order
 
     const catalogAccessor = { snapshot: () => ({ catalog: CATALOG }) };
     const additions = await rt.startAdditions({ catalogAccessor });
-    assert.deepEqual(f.calls.map((c) => c.name), ['startPersistence', 'openDataOnlyCheckpoints', 'createDataOnlyFetch', 'startDataOnlyMarket', 'startBroadKraken', 'startPublicDiscovery']);
+    assert.deepEqual(f.calls.map((c) => c.name), ['startPersistence', 'openDataOnlyCheckpoints', 'createDataOnlyFetch', 'startDataOnlyMarket', 'startBroadKraken'], 'LEAN PASS 4a: public discovery is retired — the PAPER additions are market + broad Kraken only');
     assert.deepEqual(opt('startDataOnlyMarket'), { env: ENV, dataDir: root, log: opt('startDataOnlyMarket').log, quotaJournal: f.checkpoints.market });
     assert.equal(opt('startBroadKraken').catalogSource, catalogAccessor); assert.equal(opt('startBroadKraken').dataDir, root);
-    const disc = opt('startPublicDiscovery');
-    assert.equal(disc.durableCheckpoint, f.checkpoints.discovery); assert.equal(disc.signals, false); assert.equal(disc.catalogSource, catalogAccessor);
-    assert.deepEqual(disc.env, { ...ENV, ...PAPER_DISCOVERY_ENV }, 'the discovery additions run under the same bounded env as DATA_ONLY');
     assert.equal(additions.catalog, CATALOG);
 
     rt.markActive();
@@ -77,7 +72,7 @@ test('PR-1. PAPER folds onto the spine: lock, honest status, quota restore order
     assert.deepEqual(status.collectors.quotaPersistence, { state: 'RESTORED' });
 
     await rt.shutdown('TEST');
-    assert.deepEqual(f.stops, ['discovery', 'broadMarket', 'market', 'checkpoints', 'persistence'], 'additions stop in reverse start order, then the checkpoints close, then persistence stops');
+    assert.deepEqual(f.stops, ['broadMarket', 'market', 'checkpoints', 'persistence'], 'additions stop in reverse start order, then the checkpoints close, then persistence stops');
     const stopped = statusOf(root);
     assert.equal(stopped.lifecycle, 'STOPPED'); assert.equal(stopped.running, false);
     assert.equal(existsSync(lockFile), false, 'the lock is released');
@@ -110,7 +105,7 @@ test('PR-3. durable restore unavailable → fail closed: no quota-bearing additi
     assert.deepEqual(f.calls.map((c) => c.name), ['startPersistence', 'startBroadKraken'], 'no checkpoints → no market catalogs, no discovery; the free public capture still runs');
     rt.markActive();
     const status = statusOf(root);
-    assert.equal(status.blockers.PERSISTENCE, 'PERSISTENCE_RESTORE_FAILED'); assert.equal(status.blockers.MARKET, 'MARKET_QUOTA_NOT_RESTORED'); assert.equal(status.blockers.PUBLIC_DISCOVERY, 'DISCOVERY_QUOTA_NOT_RESTORED');
+    assert.equal(status.blockers.PERSISTENCE, 'PERSISTENCE_RESTORE_FAILED'); assert.equal(status.blockers.MARKET, 'MARKET_QUOTA_NOT_RESTORED'); assert.equal(status.blockers.PUBLIC_DISCOVERY, undefined, 'LEAN PASS 4a: no discovery addition, no PUBLIC_DISCOVERY blocker');
     assert.equal(status.budget.state, 'DURABILITY_BLOCKED'); assert.deepEqual(status.collectors.quotaPersistence, { state: 'DURABILITY_BLOCKED' });
     assert.deepEqual(status.collectors.market, { state: 'BLOCKED', authority: 'NONE', reason: 'MARKET_QUOTA_NOT_RESTORED' });
     await rt.shutdown('TEST');
@@ -140,7 +135,7 @@ test('PR-4 (step 5). mode-agnostic paths: canonical serpent/ lock + status with 
 
     // DATA_ONLY on the same helpers: canonical + mirror as well
     const g = fakes();
-    const rt2 = await startDataOnlyRuntime({ root, env: {}, config: { wideeye: { enabled: false }, gateway: { enabled: false }, universe: ['ZZZ'] }, log: () => {}, signals: false, quotaStarters: g.quotaStarters, collectorStarters: { startDataOnlyMarket: async () => null, startWideEye: () => null, startBroadKraken: async () => null, startPublicDiscovery: () => null, startGateway: () => null, startRumor2: () => null } });
+    const rt2 = await startDataOnlyRuntime({ root, env: {}, config: { wideeye: { enabled: false }, gateway: { enabled: false }, universe: ['ZZZ'] }, log: () => {}, signals: false, quotaStarters: g.quotaStarters, collectorStarters: { startDataOnlyMarket: async () => null, startWideEye: () => null, startBroadKraken: async () => null, startGateway: () => null, startRumor2: () => null } });
     assert.ok(existsSync(canonicalLock) && existsSync(legacyLock), 'DATA_ONLY writes both locks');
     assert.equal(readFileSync(canonicalStatus, 'utf8'), readFileSync(legacyStatus, 'utf8'), 'DATA_ONLY mirrors the status');
     await rt2.shutdown('TEST');

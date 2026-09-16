@@ -10,10 +10,6 @@ export const MAX_EXTERNAL_CHECKPOINT_BYTES = 20 * 1024 * 1024;
 export const EXTERNAL_CHECKPOINT_LOCK = 'serpent:data-only-external-checkpoint:v1';
 export const EXTERNAL_CHECKPOINT_IDS = Object.freeze({
   DATA_ONLY: 'external_quota:data-only:v1',
-  // PUBLISH-FIX-1: the public-discovery checkpoint shape changed (the GDELT / Polymarket / Kalshi source set), so the old
-  // deployment's v1 rows fail COMMISSIONING_CHECKPOINT_INVALID on this build. v2 commissions fresh; the v1 rows stay,
-  // untouched, under their own id. The other namespaces' shapes are unchanged, so they keep v1.
-  DISCOVERY: 'external_quota:discovery:v2',
   MARKET: 'external_quota:market:v1',
 });
 

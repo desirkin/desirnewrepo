@@ -88,25 +88,19 @@ test('LEAN PASS 4a: the data-only deployment no longer composes a YouTube / soci
   assert.doesNotMatch(source, /video\/collector\.js|video\/reader\.js|startVideo|readVideoStatus|blockers\.YOUTUBE/, 'no video collector is imported or composed');
 });
 
-test('data-only news uses official feeds plus bounded GDELT metadata and withholds unverified publisher text', () => {
+test('data-only news uses official feeds only and withholds unverified publisher text (LEAN PASS 4a retired the GDELT/discovery tier)', () => {
   const source = entryAndSpine();
   assert.doesNotMatch(source, /startPress|readPressStatus|PRESS_ENABLED:\s*'true'/);
   assert.doesNotMatch(source, /COINDESK_NEWS|THEBLOCK_NEWS|COINTELEGRAPH_NEWS|DECRYPT_NEWS/);
+  assert.doesNotMatch(source, /DISCOVERY_SOURCES|GDELT_NEWS_DISCOVERY|POLYMARKET_PUBLIC_DATA|KALSHI_PUBLIC_DATA|startPublicDiscovery/, 'no discovery collector is composed');
   assert.match(source, /state:\s*'WITHHELD_TERMS_UNVERIFIED'/);
   assert.match(source, /excerptsStored:\s*false/);
   assert.match(source, /publisherFulltextStored:\s*false/);
   assert.match(source, /publisherExcerptsStored:\s*false/);
-  assert.match(source, /DISCOVERY_SOURCES:\s*'GDELT_NEWS_DISCOVERY,POLYMARKET_PUBLIC_DATA,KALSHI_PUBLIC_DATA'/);
-  assert.match(source, /DISCOVERY_GDELT_MAX_DAILY_REQUESTS:\s*'16'/);
-  assert.match(source, /DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS:\s*'48'/);
-  assert.match(source, /DISCOVERY_KALSHI_MAX_DAILY_REQUESTS:\s*'48'/);
-  assert.match(source, /DISCOVERY_GDELT_RESULT_LIMIT:\s*'50'/);
-  assert.match(source, /DISCOVERY_GDELT_ASSETS_PER_QUERY:\s*'12'/);
   assert.match(source, /contact:\s*env\.SERPENT_HTTP_CONTACT \?\? null/);
   assert.match(source, /edgarEnabled:\s*false/);
   assert.match(source, /CFTC_OFFICIAL:\s*officialFeed\('CFTC_OFFICIAL'\)/);
   assert.match(source, /SEC_OFFICIAL:\s*officialFeed\('SEC_OFFICIAL'\)/);
-  assert.match(source, /GDELT_NEWS_DISCOVERY:/);
 });
 
 test('Replit run and deployment commands select the ONE-process data-only entry, not the paper runtime (runtime unification step 4)', () => {
@@ -146,6 +140,6 @@ test('startup publishes process identity and restores external quotas before any
   assert.ok(persistenceStart < checkpointStart && checkpointStart < marketStart && checkpointStart < wideEyeStart);
   assert.doesNotMatch(source, /await wideEye\._sweepOnce\(\)/);
   assert.match(source, /openedTs: startedTs/);
-  assert.match(source, /durableCheckpoint: checkpoints\.discovery/);
+  assert.doesNotMatch(source, /durableCheckpoint: checkpoints\.discovery/, 'LEAN PASS 4a: no discovery collector remains');
   assert.ok(source.indexOf('await checkpoints?.close?.()') < source.indexOf('await persistence?.stop?.()'));
 });

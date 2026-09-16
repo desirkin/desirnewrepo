@@ -45,8 +45,6 @@ function fakeOpenStore({ missing = null } = {}) {
   const states = {
     [EXTERNAL_CHECKPOINT_IDS.DATA_ONLY]: { version: 'budget-fixture', used: 7 },
     [EXTERNAL_CHECKPOINT_IDS.MARKET]: MARKET_STATE,
-    [EXTERNAL_CHECKPOINT_IDS.DISCOVERY]: { version: 'discovery-fixture', used: 3 },
-    [EXTERNAL_CHECKPOINT_IDS.YOUTUBE]: { version: 'youtube-fixture', used: 5 },
   };
   const openStore = async ({ persistence }) => {
     events.push('store:open');
@@ -76,16 +74,14 @@ test('opens the PostgreSQL store before source bindings and never supplies impli
     openStore: fake.openStore,
   });
 
-  assert.deepEqual(fake.events.slice(0, 4), [
+  assert.deepEqual(fake.events.slice(0, 3), [
     'store:open',
     `restore:${EXTERNAL_CHECKPOINT_IDS.DATA_ONLY}`,
     `restore:${EXTERNAL_CHECKPOINT_IDS.MARKET}`,
-    `restore:${EXTERNAL_CHECKPOINT_IDS.DISCOVERY}`,
   ]);
   assert.deepEqual(fake.restores.map(({ id }) => id), [
     EXTERNAL_CHECKPOINT_IDS.DATA_ONLY,
     EXTERNAL_CHECKPOINT_IDS.MARKET,
-    EXTERNAL_CHECKPOINT_IDS.DISCOVERY,
   ]);
   for (const options of fake.restores) {
     assert.equal(Object.hasOwn(options, 'commission'), false, `${options.id} must not create a zero checkpoint`);
@@ -98,8 +94,8 @@ test('opens the PostgreSQL store before source bindings and never supplies impli
   await checkpoints.close();
 });
 
-test('one absent source is isolated while valid budget and exact market journal remain injectable', async () => {
-  const fake = fakeOpenStore({ missing: EXTERNAL_CHECKPOINT_IDS.DISCOVERY });
+test('a valid budget and exact market journal both restore and remain injectable (LEAN PASS 4a retired the discovery/youtube sources)', async () => {
+  const fake = fakeOpenStore({});
   const checkpoints = await openDataOnlyCheckpoints({
     persistence: { restored: true },
     dataDir: 'unused-fixture-root',
@@ -109,8 +105,7 @@ test('one absent source is isolated while valid budget and exact market journal 
     openStore: fake.openStore,
   });
 
-  assert.equal(checkpoints.blockers.PUBLIC_DISCOVERY, 'CHECKPOINT_ABSENT');
-  assert.equal(checkpoints.discovery, null);
+  assert.equal(checkpoints.discovery, undefined, 'LEAN PASS 4a: there is no discovery checkpoint');
   assert.deepEqual(checkpoints.budget.restored, { version: 'budget-fixture', used: 7 });
   assert.equal(checkpoints.market.durable, true);
   assert.deepEqual(checkpoints.market.rows(), []);
