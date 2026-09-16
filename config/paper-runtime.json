@@ -23,7 +23,7 @@
  "configOverlay": {
   "wideeye": { "enabled": true },
   "rumint": { "enabled": true },
-  "universeExpansion": { "enabled": true },
+  "universeExpansion": { "enabled": true, "resource": { "maxHeapMb": 1100 } },
   "gateway": { "enabled": true, "sources": { "kraken": true, "krakenSystem": true, "coinbase": true, "okx": true } }
  },
  "groups": {

@@ -25,6 +25,8 @@ import { rumor2CheckpointStore } from './persistence/rumor2-checkpoint.js';
 import { rumor2JournalStore } from './persistence/rumor2-journal.js';
 import { startMemoryMirror } from './memory/mirror.js';
 import { openPaperRuntime, startDataOnlyRuntime } from './lib/serpent-runtime.js';
+import { initPaperAccountAtBoot } from './lib/paper-account-init.js';
+import { logBootSelfCheck, startMemoryReport } from './lib/boot-self-check.js';
 import { createDeepMarketSource } from './market-lab/deep-market-adapter.js';
 
 const SERPENT_MODE = process.env.SERPENT_DATA_ONLY === 'true' ? 'DATA_ONLY'
@@ -82,6 +84,10 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   await import('./ui/server.js');
 } else {
   console.log('COBRA FLYING — tape + cockpit. Default answer is NO TRADE.');
+  // PUBLISH-FIX-9: the boot says what it is running on BEFORE anything else runs (heap ceiling, node, database host by
+  // name only, secret NAMES present) and then reports memory once a minute — so a stalled deployment explains itself.
+  logBootSelfCheck({ env: process.env, log: console.log });
+  startMemoryReport({ log: console.log });
   // SERPENT PAPER profile (COBRA_PROFILE, applied by `cobra paper run`): the composition
   // below is unchanged; the profile only sets the documented enables and forces JUDGE_MODE=PAPER / no private / no orders.
   console.log(`PROFILE ${process.env.COBRA_PROFILE} — JUDGE_MODE ${process.env.JUDGE_MODE ?? 'unset'} · allowPrivate ${process.env.JUDGE_ALLOW_PRIVATE ?? 'unset'} · allowOrders ${process.env.JUDGE_ALLOW_ORDERS ?? 'unset'}`);
@@ -189,6 +195,9 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   if (process.env.JUDGE_ENABLED === 'true') {
     try {
       const { composeJudge, loadSpecs } = await import('./judge/composition.js');
+      // PUBLISH-FIX-7: Replit's production PostgreSQL is separate from the workspace's; the owner initializes the paper
+      // account at boot through the environment (SERPENT_PAPER_INIT_ACCOUNT + the control password). No-op when unset.
+      await initPaperAccountAtBoot({ env: process.env, log: console.log });
       const { setJudgeRun } = await import('./ui/server.js');
       const { marketResearchRootFromEnv } = await import('./market-lab/paths.js');
       if (!process.env.JUDGE_POLICY || !process.env.JUDGE_MODE) throw new Error('JUDGE_POLICY (policy JSON file) and JUDGE_MODE (OBSERVE | PAPER | LIVE_UNARMED | LIVE_ARMED) are required');
