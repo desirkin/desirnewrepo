@@ -16,7 +16,20 @@ const fail = (m, code) => { throw new MoneyError(m, code); };
 
 // ---- parsing / formatting ------------------------------------------------------------------------------------------------
 // a decimal lexeme -> { int: BigInt (value * 10^scale), scale }
+// PUBLISH-FIX-10: bounded memo for the default-bound parse. The Judge re-parses the same trade / level lexemes on every
+// book update (flow windows, medians); a parsed { int, scale } is immutable and identical for an identical lexeme, so a
+// cache hit is the same value the parser would produce. Bounded (cleared when full), never used for non-default bounds.
+const PARSE_MEMO_MAX = 65_536; const parseMemo = new Map();
 export function parseDecimal(text, { maxScale = MAX_SCALE, maxIntegerDigits = MAX_INTEGER_DIGITS } = {}) {
+  if (maxScale === MAX_SCALE && maxIntegerDigits === MAX_INTEGER_DIGITS && typeof text === 'string') {
+    const hit = parseMemo.get(text); if (hit !== undefined) return hit;
+    const v = Object.freeze(parseDecimalUncached(text, { maxScale, maxIntegerDigits }));
+    if (parseMemo.size >= PARSE_MEMO_MAX) parseMemo.clear();
+    parseMemo.set(text, v); return v;
+  }
+  return parseDecimalUncached(text, { maxScale, maxIntegerDigits });
+}
+function parseDecimalUncached(text, { maxScale = MAX_SCALE, maxIntegerDigits = MAX_INTEGER_DIGITS } = {}) {
   if (typeof text !== 'string' || !DEC_RE.test(text)) fail(`decimal lexeme malformed: ${typeof text === 'string' ? text.slice(0, 40) : typeof text}`);
   const neg = text.startsWith('-'); const body = neg ? text.slice(1) : text; const [ip, fpRaw = ''] = body.split('.');
   const fp = fpRaw.replace(/0+$/, '');
@@ -40,7 +53,7 @@ export function formatDecimal({ int, scale }) {
 export const isCanonicalDecimal = (v) => typeof v === 'string' && CANON_RE.test(v) && v !== '-0' && DEC_RE.test(v) && (() => { try { return formatDecimal(parseDecimal(v)) === v; } catch { return false; } })();
 const D = (v) => (typeof v === 'string' ? parseDecimal(v) : v && typeof v === 'object' && typeof v.int === 'bigint' ? v : fail(`decimal operand malformed (${typeof v})`));
 const align = (a, b) => { const s = Math.max(a.scale, b.scale); return [a.int * 10n ** BigInt(s - a.scale), b.int * 10n ** BigInt(s - b.scale), s]; };
-const out = (int, scale) => { const f = formatDecimal({ int, scale }); const chk = parseDecimal(f); return f; };
+const out = (int, scale) => formatDecimal({ int, scale }); // PUBLISH-FIX-10: formatDecimal is canonical by construction; the re-parse check was pure cost
 // ---- arithmetic (canonical string in, canonical string out; scale bounded by MAX_SCALE) -------------------------------------
 export const add = (a, b) => { const [x, y, s] = align(D(a), D(b)); return out(x + y, s); };
 export const sub = (a, b) => { const [x, y, s] = align(D(a), D(b)); return out(x - y, s); };
@@ -69,7 +82,19 @@ function roundDiv(num, den, mode) {
   return negative ? -q : q;
 }
 // ---- comparison ---------------------------------------------------------------------------------------------------------
-export const cmp = (a, b) => { const [x, y] = align(D(a), D(b)); return x < y ? -1 : x > y ? 1 : 0; };
+// PUBLISH-FIX-10 (2026-09-16): exact ordering with a fast path. Production profile: the execution feed sorts every book's
+// levels with cmp on EVERY update, and parseDecimal + align were 66% of a 108 s window (busy 101 s), blocking the loop for
+// up to 57 s. ECMAScript Number(string) is correctly rounded for lexemes of at most 20 significant digits, and correct
+// rounding is monotonic, so two such lexemes that convert to DIFFERENT doubles are ordered exactly as their doubles;
+// only equal doubles (or anything longer / not a plain decimal) take the exact BigInt path. Same result, no float in
+// any arithmetic — the double is a sort key only, never a value.
+const FAST_CMP_MAX_LEN = 20;
+export const cmp = (a, b) => {
+  if (typeof a === 'string' && typeof b === 'string' && a.length <= FAST_CMP_MAX_LEN && b.length <= FAST_CMP_MAX_LEN && DEC_RE.test(a) && DEC_RE.test(b)) {
+    const x = Number(a); const y = Number(b); if (x !== y) return x < y ? -1 : 1;
+  }
+  const [x, y] = align(D(a), D(b)); return x < y ? -1 : x > y ? 1 : 0;
+};
 export const eq = (a, b) => cmp(a, b) === 0; export const lt = (a, b) => cmp(a, b) < 0; export const lte = (a, b) => cmp(a, b) <= 0; export const gt = (a, b) => cmp(a, b) > 0; export const gte = (a, b) => cmp(a, b) >= 0;
 export const isZero = (a) => D(a).int === 0n; export const isPositive = (a) => D(a).int > 0n; export const isNegative = (a) => D(a).int < 0n;
 export const max = (a, b) => (cmp(a, b) >= 0 ? formatDecimal(D(a)) : formatDecimal(D(b)));

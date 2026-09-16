@@ -82,7 +82,22 @@ export function vwap(trades, startTs, endTs, query = {}) { const selected = trad
 // ---- book features on an exact snapshot ---------------------------------------------------------------------------------------
 export function bookFacts(snapshot) { if (!snapshot || !snapshot.bids.length || !snapshot.asks.length) return null; const bid = snapshot.bids[0][0]; const ask = snapshot.asks[0][0]; const mid = M.div(M.add(bid, ask), '2', 9, 'HALF_UP'); return { bestBid: bid, bestAsk: ask, mid, spread: M.sub(ask, bid) }; }
 export function bidDepthWithinBps(snapshot, bps) { const f = bookFacts(snapshot); if (!f) return null; const floor = M.mul(f.mid, M.sub('1', M.div(String(bps), '10000', 8, 'DOWN'))); let notional = '0'; for (const [p, q] of snapshot.bids) { if (M.lt(p, floor)) break; notional = M.add(notional, M.mul(p, q)); } return notional; }
-export const medianDecimal = (list) => { if (!list.length) return null; const s = [...list].sort((a, b) => M.cmp(a, b)); const mid = Math.floor(s.length / 2); return s.length % 2 ? s[mid] : M.div(M.add(s[mid - 1], s[mid]), '2', 8, 'HALF_UP'); };
+// PUBLISH-FIX-10: the exact median with a numeric fast path. Correctly rounded Number() is monotonic for lexemes of at
+// most 20 significant digits, so ordering by double is the exact ordering wherever the doubles differ; the exact BigInt
+// sort is used whenever any lexeme is long/non-plain or when the doubles around the middle collide (a tie could hide a
+// different exact order). Same value either way; the double is a sort key only.
+const MEDIAN_FAST_RE = /^-?(0|[1-9]\d*)(\.\d+)?$/;
+const medianExact = (list) => { const s = [...list].sort((a, b) => M.cmp(a, b)); const mid = Math.floor(s.length / 2); return s.length % 2 ? s[mid] : M.div(M.add(s[mid - 1], s[mid]), '2', 8, 'HALF_UP'); };
+export const medianDecimal = (list) => {
+  if (!list.length) return null;
+  const n = list.length; const keyed = new Array(n);
+  for (let i = 0; i < n; i += 1) { const v = list[i]; if (typeof v !== 'string' || v.length > 20 || !MEDIAN_FAST_RE.test(v)) return medianExact(list); keyed[i] = [Number(v), v]; }
+  keyed.sort((a, b) => a[0] - b[0]); const mid = Math.floor(n / 2);
+  const collides = (i) => (i > 0 && keyed[i - 1][0] === keyed[i][0]) || (i + 1 < n && keyed[i + 1][0] === keyed[i][0]);
+  if (n % 2) return collides(mid) ? medianExact(list) : keyed[mid][1];
+  if (collides(mid) || collides(mid - 1)) return medianExact(list);
+  return M.div(M.add(keyed[mid - 1][1], keyed[mid][1]), '2', 8, 'HALF_UP');
+};
 // ---- bounded incremental tracker: trades expire on time advance even without a new trade; a coverage change invalidates ----------
 export function createFlowTracker({ retentionMs = 22 * BAR_MS, maxTrades = 50_000 } = {}) {
   const trades = []; const ids = new Set(); let dropped = 0; let overflow = 0; let epoch = null; let epochChanges = 0; let lastTs = 0;

@@ -60,11 +60,37 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       aae0b5dc189907cd235578150ddd3c90b0f97690d947e9caed20eebb8d32f47f
-execution/*.js   68222023e14481a4de7603465a18c2475d969838c9c638dec59824db3aba7712
+judge/*.js       0bd99f91f3c849f15dfdf8c2f2e6897ec88bb7de29bdc7ca6fdda73da6f6be88
+execution/*.js   2551fcb6c4d00ee9e708e6740f87b5700e2469549abdef83e43b9cc03f36c16b
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   9dd72c5919bc87dbae218baa549fa5acab00030a43c947b9da67da641b3491df
+all (48 files)   eaf7f2782bdd6aab4e12ae04894209e444a462489ac1ebf15651d770fabd48b4
 ```
+
+### 4.14 Audited change — 2026-09-16 PUBLISH-FIX-10: the Judge's per-book evaluation no longer starves the event loop (previous digests: judge `aae0b5dc1899…`, execution `68222023e144…`, all `9dd72c5919bc…`; watch/watch.js UNCHANGED `0c6a43bf…`)
+
+Evidence: production PAPER boots 954229d8 / b88bca71 / 0972bcbe blocked the main thread for 9 s, 13 s, 57 s and 61 s at a
+time with a tiny heap (`RESOURCE_WARNING lag=61567ms heap=155MB`), starving the cockpit, the health check and the
+PostgreSQL socket. The in-process sampler (`lib/cpu-profile-report.js`, opt-in) named the code: `parseDecimal money.js`
+63%, `medianDecimal features.js` 16%, `normalize`/`align` money.js, `fastFacts judge.js:247`, `onBook judge.js:265` —
+every book update computed `fastFacts` once PER SETUP (six times) and each computation sorted the 60 s prior-depth window
+with `M.cmp` (a BigInt parse per comparison) and re-parsed every trade lexeme in the flow windows.
+
+Scope: exactness is untouched — no Number ever enters arithmetic; three changes, each a pure speed-up with the same result:
+- `execution/money.js`: (1) `cmp` fast path — for two plain decimal lexemes of at most 20 significant digits (ECMAScript's
+  correctly-rounded range) that convert to DIFFERENT doubles, the exact order equals the double order (correct rounding is
+  monotonic); equal doubles, longer or non-plain lexemes take the exact BigInt path. (2) `parseDecimal` memoizes the
+  default-bound parse in a bounded, cleared-when-full map of frozen `{ int, scale }` values (identical lexeme → identical
+  value). (3) `out()` no longer re-parses its own canonical `formatDecimal` output (pure cost; formatDecimal is canonical
+  by construction).
+- `judge/features.js`: `medianDecimal` sorts by double for plain ≤20-digit lexemes and falls back to the exact sort
+  whenever the doubles adjacent to the middle collide (a tie could hide a different exact order) or any lexeme is
+  long/non-plain. The returned value is the same exact string / exact half-up average.
+- `judge/judge.js`: `onBook` computes `fastFacts(c, snap, snap.receiptTs)` ONCE per book update and hands the same
+  object to every setup (the inputs are identical per setup; nothing in the setup loop mutates flow, books or the snapshot).
+- Verified: `test/money-cmp-fast-path.test.js` (cmp vs exact ordering on adversarial near-equal lexemes and 20,000 random
+  lexemes; medianDecimal vs an independent exact reference over 300 random lists plus collision / long-lexeme / trailing-
+  zero cases; memo identity and non-default bounds), and the whole judge/execution/paper suite green. The frozen set
+  digest moves to `eaf7f2782bdd…`, which `test/paper-runtime.test.js` P-08 re-verifies.
 
 ### 4.13 Audited change — 2026-09-16 PAPER-FLIP-PREP (a): the boot waits out a Republish overlap for the execution writer lock (previous digests: judge `a38fa9ed86e5…`, execution `676e15339b6c…`, all `1a287ba4471a…`; watch/watch.js UNCHANGED `0c6a43bf…`)
 
