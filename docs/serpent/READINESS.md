@@ -142,6 +142,23 @@ markets by absolute daily move `|close/open − 1|`** (`topMoversPerDay`, pinned
 not cross the threshold is selected as a `TOP_MOVER_CASE`. It is config-driven but the manifest pins the value to 30, the
 same way it pins the threshold to 8; nothing here touches DATA-1 capture, the Judge, or any authority (RESEARCH_ONLY).
 
+### PostgreSQL pool slots (one small pool, five connections)
+
+The durable core uses ONE `pg` pool of exactly **five** connections (`POOL_MAX = 5` in `persistence/db.js` — one personal
+app, one small pool). Two things to know so the count never surprises an operator:
+
+- A **session/advisory-lock HOLDER checks out one of the five slots for the lock's whole lifetime** — deliberately
+  long-lived, because the lock lives on that PostgreSQL session and the server releases it automatically when the session
+  dies (crash, connection loss, `pg_terminate_backend`), which is exactly the failover law the writer fences need. The
+  boot locks that hold a slot are the external-checkpoint owner lock and the RUMOR-2 writer lock; ordinary reads/writes and
+  transactions borrow a slot only for the round-trip and return it.
+- A caller that **LOSES** the advisory lock releases its client immediately, so the bounded wait helper
+  (`acquireSessionLockWithWait`, PUBLISH-FIX-5) **sleeps holding no slot** — a process waiting out a Republish overlap never
+  consumes one of the five while it is only waiting; it takes a slot the instant it wins, not before.
+
+`test/persistence-pool-slots.test.js` (B-9) fences all of this over a checkout-counting fake pool: the pool is sized to
+five, a holder occupies exactly one slot and a loser none, and every wait-helper sleep happens with zero clients checked out.
+
 ---
 
 ## 2. Gates that must be green before you start

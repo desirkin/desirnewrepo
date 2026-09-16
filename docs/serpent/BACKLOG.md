@@ -79,12 +79,15 @@ in ENV.md or in an allowlist, and (b) ENV.md names nothing the code no longer re
 the registry matches the code exactly and a new unregistered read (or a stale registry line) fails the fence. README.md
 doc-index points at it. Full suite green + gate 0.
 
-## B-9. Pool-slot accounting
-**Do:** document and test that session/advisory locks each hold one of the five PostgreSQL
-pool slots; make the count explicit and fenced.
-**Acceptance:** a test asserts the pool size and that concurrent lock holders never exceed
-the slot count (with the wait helper, a waiter does not consume a slot while sleeping);
-documented in READINESS.md; full suite green + gate 0.
+## B-9. DONE — 2026-09-16: pool-slot accounting fenced + documented.
+The durable core uses ONE `pg` pool of exactly five connections (`POOL_MAX = 5`, `persistence/db.js`). A session/advisory
+-lock HOLDER checks out one slot for the lock's lifetime (long-lived on purpose — the server frees the lock when the
+session dies); a caller that LOSES the lock releases its client immediately, so the bounded wait helper
+(`acquireSessionLockWithWait`) sleeps holding NO slot and takes one only the instant it wins. Already correct in code;
+now fenced. `test/persistence-pool-slots.test.js` drives the real `Db` over a checkout-counting fake pool: pool sized to
+five, a holder occupies exactly one slot and a loser none, `release()` returns it, and every wait-helper sleep happens
+with zero clients checked out (a waiter never consumes one of the five). Documented in READINESS.md §1 (PostgreSQL pool
+slots). Full suite green + gate 0.
 
 ## B-10. RELEASE.json (only if R3-2 has not landed)
 **Do:** the release manifest from R3-2 (commit/tree hash, build timestamp, node version,
