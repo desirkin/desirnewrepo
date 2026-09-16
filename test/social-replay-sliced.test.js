@@ -84,3 +84,15 @@ test('research scope source: the accepted catalog is validated once per catalog 
   snap.catalog = replaced;
   assert.notEqual(src.candidate({ knownAtTs: T0 + 1000 }).scope.filterId, first.scope.filterId, 'a new accepted catalog object is validated afresh');
 });
+
+test('the Farcaster wrapper forwards the shared replay to its base runtime (no second replay)', async () => {
+  const { createFarcasterRuntime } = await import('../rumor2/social-farcaster-runtime.js');
+  const hist = history(40); const replay = replaySocialHistory(hist);
+  // a replay result whose targets Map records whether it was read: the shared object is consulted, the events are not replayed again
+  let reads = 0; const spied = new Proxy(replay, { get(t, k) { if (k === 'targets') reads += 1; return t[k]; } });
+  const rt = createFarcasterRuntime({ env: {}, now: () => T0 + 10_000_000, log: () => {} });
+  const shared = rt.hydrate(hist, { replay: spied });
+  assert.equal(shared.ok, true, JSON.stringify(shared)); assert.ok(reads >= 1, 'the shared replay must be the one consulted');
+  const own = createFarcasterRuntime({ env: {}, now: () => T0 + 10_000_000, log: () => {} }).hydrate(hist);
+  assert.equal(canonicalJson(shared), canonicalJson(own));
+});

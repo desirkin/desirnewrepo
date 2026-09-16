@@ -53,10 +53,10 @@ export function createFarcasterRuntime({ env = process.env, config = farcasterCo
     return buildFarcasterCatalogQuery({ candidate, requestOrdinal: totalRequests, assetsPerQuery });
   }
   function stop(reason = 'stopped') { generation++; abort?.abort(); abort = null; base.stop(reason); page = null; cursor = null; pendingReservation = null; activeQuery = null; active = false; }
-  function hydrate(events) {
+  function hydrate(events, opts = {}) { // PUBLISH-FIX-11: the collector's shared replay rides through to the base runtime
     meterDay = dayOf(now()); used = 0; totalRequests = 0;
     for (const e of events) if (e?.type === FARCASTER_REQUEST_TYPE) { const err = farcasterRequestError(e); if (err) return { ok: false, error: err }; totalRequests += 1; if (e.day === meterDay) used = Math.max(used, e.ordinal); }
-    return base.hydrate(events);
+    return base.hydrate(events, opts);
   }
   function start() { gateReason = gate(); if (gateReason) { stop(gateReason); return { ok: false, reason: gateReason }; } return base.start(); }
   async function settle({ fenceHeld = () => false, append, lookup = null }) {
