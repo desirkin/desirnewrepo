@@ -44,6 +44,11 @@ jobs:
       - name: Full serial suite with isolated PostgreSQL and outbound guard
         env:
           PERSIST_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/cobra_test
+          # Attest that the target above is a disposable schema-only test database: the
+          # ephemeral postgres:16 service container is torn down with the job. Without this
+          # the real-PostgreSQL PERSIST-1 integration suite (test/persist-store-pg.test.js)
+          # refuses to run and fails closed rather than touch an unverified target.
+          PERSIST_TEST_DATABASE_ISOLATED: THROWAWAY_SCHEMA_ONLY
           NODE_OPTIONS: --import=${{ github.workspace }}/test/helpers/offline-guard.mjs
           COBRA_OFFLINE_GUARD_LOG: ${{ runner.temp }}/ci-offline-guard.jsonl
           COBRA_OFFLINE_GUARD_RUN: suite
