@@ -214,12 +214,40 @@ export async function openExternalCheckpointStore({
     let state;
     let revision;
     let commissioning;
+    let migrated = false; // PUBLISH-FIX-8: true only for the boot that re-commissioned an invalid zero-budget row (log once)
     if (durable) {
       const recError = recordError(durable.state, id);
-      if (recError) throw latch(new ExternalCheckpointError('CHECKPOINT_INVALID', recError, id), id);
-      state = durable.state.checkpoint;
-      revision = durable.revision;
-      commissioning = durable.state.commissioning;
+      // PUBLISH-FIX-8: a zero-budget BIRTH namespace whose durable row is no longer valid under the current code — a
+      // provider retired by a cull (SENSE-CULL-3 shrank PROVIDER_IDS, so a market-quota row for a retired provider no
+      // longer validates), a bumped checkpoint version, or an authority tag from another runtime mode (a checkpoint born
+      // under DATA_ONLY met by a PAPER boot) — is RE-COMMISSIONED at zero under the current authority instead of blocking
+      // the boot. It carries no paid spend, so nothing is lost (the BIRTH_ZERO_BUDGET principle). The migration rides the
+      // commissioning reason (AUTHORITY_MIGRATION …) so the caller logs it once; a later boot finds a valid zero row and
+      // never migrates again. Paid namespaces pass NO birth state, so they keep the strict fail-closed CHECKPOINT_INVALID.
+      const stateInvalid = recError ?? jsonValueError(durable.state?.checkpoint) ?? validationError(validate, durable.state?.checkpoint);
+      const canMigrate = commission?.allowCreate === true && commission.state !== undefined && commission.state !== null;
+      if (stateInvalid && canMigrate) {
+        const metaError = commissioningError(commission);
+        if (metaError) throw latch(new ExternalCheckpointError('COMMISSIONING_INVALID', metaError, id), id);
+        const zeroError = jsonValueError(commission.state) ?? validationError(validate, commission.state);
+        if (zeroError) throw latch(new ExternalCheckpointError('COMMISSIONING_CHECKPOINT_INVALID', zeroError, id), id);
+        commissioning = { mode: 'EXPLICIT_COMMISSION', reason: `AUTHORITY_MIGRATION ${commission.reason}`.slice(0, 180), ts: commission.ts };
+        const record = makeRecord(id, commission.state, commissioning);
+        let saved;
+        try { saved = await saveWithRetry(id, () => persistence.repo.saveRuntimeState(id, record, durable.revision)); }
+        catch (error) { throw latch(new ExternalCheckpointError('COMMISSIONING_WRITE_FAILED', writeFailureDetail(error), id), id); }
+        if (!saved || saved.conflict === true || !Number.isSafeInteger(saved.revision) || canonicalJson(saved.state) !== canonicalJson(record)) {
+          throw latch(new ExternalCheckpointError('COMMISSIONING_CONFLICT', 'authority migration was not adopted exactly', id), id);
+        }
+        state = saved.state.checkpoint;
+        revision = saved.revision;
+        migrated = true;
+      } else {
+        if (stateInvalid) throw latch(new ExternalCheckpointError('CHECKPOINT_INVALID', stateInvalid, id), id);
+        state = durable.state.checkpoint;
+        revision = durable.revision;
+        commissioning = durable.state.commissioning;
+      }
     } else {
       let local;
       if (typeof loadLocal === 'function') {
@@ -264,6 +292,7 @@ export async function openExternalCheckpointStore({
       snapshot: () => clone(entry.state),
       revision: () => entry.revision,
       commissioning: () => clone(entry.commissioning),
+      migrated: () => migrated, // PUBLISH-FIX-8: this boot re-commissioned an invalid zero-budget row under the current authority
       commit: (next, _meta = null) => enqueue(entry, () => persist(entry, clone(next), { acceptedBeforeClose: true })),
       update: (reducer, _meta = null) => {
         if (typeof reducer !== 'function') return Promise.reject(new ExternalCheckpointError('REDUCER_REQUIRED', 'checkpoint update requires a synchronous reducer', id));

@@ -29,7 +29,11 @@ export async function openDataOnlyCheckpoints({ persistence, dataDir, env = proc
         importMeta: { reason: `import stopped data-only ${name} filesystem accounting before republish`, ts: clock() } });
       bindings[name] = binding;
       const reason = binding.commissioning?.()?.reason ?? '';
-      if (reason.startsWith('BIRTH_ZERO_BUDGET')) log(`${name} quota commissioned at zero: ${reason}`);
+      // PUBLISH-FIX-8: a durable zero-budget checkpoint born under one runtime (or under old provider code) that no longer
+      // validates is re-commissioned at zero under the current authority. binding.migrated() is true ONLY on the boot that
+      // performed the re-commission, so the authority migration is logged exactly once; a later boot finds the valid zero row.
+      if (binding.migrated?.()) log(`${name} quota authority migrated to ${mode} ${generation} (zero budget): ${reason}`);
+      else if (reason.startsWith('BIRTH_ZERO_BUDGET')) log(`${name} quota commissioned at zero: ${reason}`);
       return binding;
     } catch (error) {
       // Error codes are sufficient here; do not expose database or source data.
