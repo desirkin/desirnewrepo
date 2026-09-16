@@ -256,14 +256,28 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     try {
       const { createDecisionOutcomeRecorder } = await import('./learning/decision-outcome-recorder.js');
       const { openDecisionOutcomeStore } = await import('./learning/decision-outcome-store.js');
+      const { openResearchOutcomeStore } = await import('./learning/research-outcome-store.js');
+      const { researchMaturationSweep } = await import('./learning/research-maturation.js');
       const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js');
-      const store = openDecisionOutcomeStore({ dir: path.join(dataDir(), 'learning', 'decision-outcomes'), log: console.log });
+      const outcomesDir = path.join(dataDir(), 'learning', 'decision-outcomes');
+      const store = openDecisionOutcomeStore({ dir: outcomesDir, log: console.log });
+      const researchStore = openResearchOutcomeStore({ dir: outcomesDir, log: console.log });
       const seriesSource = createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log });
       const recorder = createDecisionOutcomeRecorder({ readPage: (afterSeq, limit) => judgeRun.journal.page(judgeRun.accountId, { afterSeq, limit }), seriesSource, store, clock: () => Date.now(), log: console.log });
-      const runOnce = () => recorder.tick().catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
+      // B-2: after the recorder writes the 5m/15m outcome, mature the 1h/4h/24h research horizons of ALREADY-recorded
+      // decisions whose longer windows have since elapsed — re-scored from the fuller tape, appended as supersede
+      // attachments beside the outcomes. Dormant, authority NONE; a fault is logged and never affects the recorder.
+      const runResearch = () => {
+        try {
+          const nowTs = Date.now();
+          const sweep = researchMaturationSweep({ decisions: store.records(), latestAttachments: researchStore.latestAttachments(), seriesSource, asOfTs: nowTs, attachedTs: nowTs, maxPerSweep: 500 });
+          for (const a of sweep.attachments) { try { researchStore.append(a); } catch (err) { console.error(`RESEARCH MATURATION append: ${err.message}`); } }
+        } catch (err) { console.error(`RESEARCH MATURATION pass: ${err.message}`); }
+      };
+      const runOnce = () => recorder.tick().then(runResearch).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
       decisionOutcomeTimer = setInterval(runOnce, 60_000); if (typeof decisionOutcomeTimer?.unref === 'function') decisionOutcomeTimer.unref();
       void runOnce();
-      console.log('LEARNING DATA CLOCK active (dormant, authority NONE): recording the 5m bite + 15m continuation of every PAPER decision');
+      console.log('LEARNING DATA CLOCK active (dormant, authority NONE): recording the 5m bite + 15m continuation of every PAPER decision, and maturing the 1h/4h/24h research horizons');
     } catch (err) { console.error(`LEARNING DATA CLOCK failed to start (dark; nothing else affected): ${err.message}`); decisionOutcomeTimer = null; }
   }
   rumor2Handle = startRumor2({

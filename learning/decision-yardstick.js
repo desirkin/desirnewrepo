@@ -111,14 +111,21 @@ export function decisionYardstickError(record) {
   }
   // L-2: the research columns are present for every graded decision. Each carries a finite log return ONLY when KNOWN;
   // otherwise it is NaN (never null, never a fabricated zero). They are research-only and gate no authority.
-  const rh = record.researchHorizons;
+  const rhe = researchHorizonsError(record.researchHorizons); if (rhe) return rhe;
+  return null;
+}
+
+// Validate the 1h/4h/24h research-horizon columns as a standalone map. Shared by decisionYardstickError (a whole scored
+// yardstick) and the B-2 research-maturation attachment store (which re-scores ONLY these columns as a later horizon
+// elapses). A column carries a finite log return ONLY when KNOWN; otherwise it is NaN in memory. JSON.stringify turns
+// NaN into null in the durable JSONL, so a re-read column legitimately carries null for a not-yet-known horizon — accept
+// either, never a finite number, never a fabricated zero.
+export function researchHorizonsError(rh) {
   if (!rh || typeof rh !== 'object' || Array.isArray(rh)) return 'researchHorizons missing';
   for (const m of RESEARCH_HORIZONS_MIN) {
     const c = rh[RESEARCH_HORIZON_LABEL[m]];
     if (!c || typeof c !== 'object' || c.horizonMin !== m || !HORIZON_STATES.includes(c.state)) return `research horizon ${RESEARCH_HORIZON_LABEL[m]} malformed`;
     if (c.state === 'KNOWN') { if (!isFiniteNum(c.logReturnPct)) return `research horizon ${RESEARCH_HORIZON_LABEL[m]} KNOWN value malformed`; }
-    // NaN in memory (the fresh score); JSON.stringify turns NaN into null in the durable JSONL, so a re-read record
-    // legitimately carries null for a not-yet-known column. Accept either — never a finite number, never a zero.
     else if (!(Number.isNaN(c.logReturnPct) || c.logReturnPct === null)) return `research horizon ${RESEARCH_HORIZON_LABEL[m]} not-yet-known must be NaN (or null on re-read)`;
   }
   return null;
