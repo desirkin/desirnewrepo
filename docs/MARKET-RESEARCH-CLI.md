@@ -10,7 +10,7 @@ unless the owner's policy file authorizes it explicitly; the shipped samples aut
 | File | Sample | What it holds |
 |---|---|---|
 | policy.json | `market-lab/samples/policy.sample.json` | per-provider `enabled`, `credentialEnv` (an environment variable NAME, never a value), the supplied `plan` record (billing FREE / INCLUDED_QUOTA / METERED / UNKNOWN, remaining calls, incremental USD per call, attestation), call `limits`, optional `permittedEndpoints`, optional `smoke` ceiling; the model block (`enabled`, `model`, `credentialEnv`, `maxOutputTokens`, four USD caps, timeouts, pricing); case ceilings; resource limits |
-| subjects.json | `market-lab/samples/subjects.sample.json` | the declared asset set with the native identity per provider (`krakenSpot`, `coinbase`, `krakenDerivatives`, `deribit`, `bybit`, `coingecko`, `coinmetrics`, ...), pools / protocols / tokens, macro series, cross-asset proxies, stablecoins, reference notionals, peers, benchmarks |
+| subjects.json | `market-lab/samples/subjects.sample.json` | the declared asset set with the native identity per provider (`krakenSpot`, `coinbase`, `krakenDerivatives`, `deribit`, `bybit`, `coingecko`, `cryptoquant`, ...), pools / protocols / tokens, stablecoins, reference notionals, peers, benchmarks |
 
 Both files are validated by `market-lab/policy.js` (`loadPolicy`, `loadSubjects`): unknown keys, malformed values, a
 cap that is not a non-negative number, a credential that is not an environment variable name, or an ambiguous symbol

@@ -25,8 +25,6 @@ test('A01. planRequest builds the documented request for every credential placem
   assert.equal(san.headers.authorization, 'Apikey SAN'); assert.equal(san.method, 'POST'); assert.equal(typeof san.body, 'string');
   const tk = planRequest({ providerId: 'TOKENOMIST', endpointId: 'unlock-events', pathParams: { tokenId: 'solana' }, query: { page: 1 }, credential: 'TK' });
   assert.equal(tk.headers['x-api-key'], 'TK'); assert.equal(tk.url, 'https://api.tokenomist.ai/v5/unlock/events/solana?page=1');
-  const fred = planRequest({ providerId: 'FRED', endpointId: 'series', query: { series_id: 'CPIAUCSL', file_type: 'json' }, credential: 'FREDKEY' });
-  assert.ok(fred.url.includes('api_key=FREDKEY'), 'FRED documents the api_key query parameter'); assert.ok(!fred.redactedUrl.includes('FREDKEY') && !fred.requestKey.includes('FREDKEY'), 'the query credential is redacted from every recorded identity');
   // missing credential on a keyed endpoint is refused BEFORE any dispatch; unknown endpoint / provider likewise
   assert.equal(planRequest({ providerId: 'COINGLASS', endpointId: 'coin-vesting', query: {}, credential: null }).ok, false);
   assert.equal(planRequest({ providerId: 'COINGLASS', endpointId: 'coin-vesting', query: {}, credential: null }).failure.kind, 'CREDENTIAL_MISSING');

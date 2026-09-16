@@ -1220,54 +1220,6 @@
       "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
     },
     {
-      "id": "COINMETRICS",
-      "classification": "OPERATIONAL_PUBLIC",
-      "module": "market-lab/providers/coinmetrics.js",
-      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
-      "enable": "policy providers.COINMETRICS.enabled",
-      "credentialEnv": [],
-      "configurationEnv": [],
-      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
-      "retentionTermsGate": "hosts community-api.coinmetrics.io",
-      "paperDesiredState": "ON",
-      "sourceFiles": [
-        "docs/sensor-inventory.paper.json",
-        "paper/inventory.js",
-        "config/paper-runtime.json"
-      ],
-      "group": "macro",
-      "currentState": "Community adapter present; latest check timed out",
-      "nextAction": "No key for the implemented community route. Verify current host availability.",
-      "currentReplitCollectionVerified": false,
-      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
-      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
-    },
-    {
-      "id": "FRED",
-      "classification": "OPERATIONAL_CREDENTIAL_GATED",
-      "module": "market-lab/providers/fred.js",
-      "compositionPath": "fly.js -> createResearchService (MARKET_RESEARCH_ENABLED) -> owner",
-      "enable": "policy providers.FRED.enabled",
-      "credentialEnv": [
-        "FRED_API_KEY"
-      ],
-      "configurationEnv": [],
-      "budgetGovernor": "market-lab quota journal + dispatch guard (maxCallsPerDay / Month, smoke caps)",
-      "retentionTermsGate": "hosts api.stlouisfed.org",
-      "paperDesiredState": "REQUEST",
-      "sourceFiles": [
-        "docs/sensor-inventory.paper.json",
-        "paper/inventory.js",
-        "config/paper-runtime.json"
-      ],
-      "group": "macro",
-      "currentState": "Adapter present; reported existing key",
-      "nextAction": "Preserve FRED_API_KEY and existing series scope. Earlier 240 observations are historical evidence, not a new host check.",
-      "currentReplitCollectionVerified": false,
-      "credentialPresence": "NOT_CHECKED_ON_REPLIT",
-      "llmAssistance": "An LLM can explain actual releases, on-chain metrics and unlock observations with their units and timestamps. It cannot supply missing paid coverage or infer unavailable release values."
-    },
-    {
       "id": "TOKENOMIST",
       "classification": "OPERATIONAL_CREDENTIAL_GATED",
       "module": "market-lab/providers/tokenomist.js",

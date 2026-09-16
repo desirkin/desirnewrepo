@@ -218,7 +218,7 @@ function environmentSummary() {
     nodePathPresent: Object.prototype.hasOwnProperty.call(process.env, 'NODE_PATH'),
     testOfflineGuardActive,
     unapprovedNodeOptionsPresent: nodeOptions.length > 0 && !testOfflineGuardActive,
-    providerLikeKeyCount: keys.filter((key) => /(API|TOKEN|SECRET|PASSWORD|PRIVATE|KRAKEN|COINBASE|FRED|TWELVE)/i.test(key)).length,
+    providerLikeKeyCount: keys.filter((key) => /(API|TOKEN|SECRET|PASSWORD|PRIVATE|KRAKEN|COINBASE)/i.test(key)).length,
   };
 }
 

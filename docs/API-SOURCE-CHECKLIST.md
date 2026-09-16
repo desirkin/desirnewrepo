@@ -19,7 +19,7 @@ Evidence: [news checks](evidence/news-connections-2026-09-12.md) and [bounded pu
 
 Keep paper stopped and CAGE on. The initial ceiling is **$100/month combined for external data and models**. Existing per-provider governors do not establish a single aggregate cap. Allocate within that ceiling before paid activation. X must have a focused watch scope and explicit caps; its profile REQUEST can override a false enable environment variable, so keep the paper composition stopped during setup. New external text has no direct trading authority.
 
-Configuration blockers in the generated inventory were computed with an empty secret environment. They do **not** establish that a previously reported Replit Secret is absent. Preserve existing FRED, CoinGecko and database configuration; do not reset the exhausted CoinGecko demonstration meter.
+Configuration blockers in the generated inventory were computed with an empty secret environment. They do **not** establish that a previously reported Replit Secret is absent. Preserve existing CoinGecko and database configuration; do not reset the exhausted CoinGecko demonstration meter. (The Coin Metrics Community and FRED market senses were retired to `attic/` in SENSE-CULL-2; `FRED_API_KEY` is no longer read.)
 
 ## News and official announcements
 
@@ -97,8 +97,6 @@ An LLM can explain actual releases, on-chain metrics and unlock observations wit
 | `COINGLASS` | Credentialed adapter present; plan/budget blocked | Needs entitled COINGLASS_API_KEY and allocated budget; no paid subscription created. |
 | `CRYPTOQUANT` | Credentialed adapter present; plan/budget blocked | Needs entitled CRYPTOQUANT_API_KEY and allocated budget; no paid subscription created. |
 | `SANTIMENT` | Credentialed adapter present; plan/budget blocked | Needs entitled SANTIMENT_API_KEY and allocated budget; no paid subscription created. |
-| `COINMETRICS` | Community adapter present; latest check timed out | No key for the implemented community route. Verify current host availability. |
-| `FRED` | Adapter present; reported existing key | Preserve FRED_API_KEY and existing series scope. Earlier 240 observations are historical evidence, not a new host check. |
 | `TOKENOMIST` | Credentialed adapter present; plan/budget blocked | Needs entitled TOKENOMIST_API_KEY and allocated budget; no paid subscription created. |
 | `POLYMARKET_PUBLIC_DATA` | Proposed; not implemented | No public market-data client or registry row; no trading integration requested. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget |
 | `KALSHI_PUBLIC_DATA` | Proposed; not implemented | No public market-data client or registry row; no trading integration requested. Confirm documented read-only route, access eligibility and price, then implement bounded adapter if it fits the established combined budget |

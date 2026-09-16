@@ -6,6 +6,34 @@ Nothing here is a decision — it is a queue for David.
 
 ---
 
+## SENSE-CULL-2 — MACRO_RELEASES interpretation on the FRED retirement (decision made; confirm)
+
+**Ask:** "Retire FRED (16 req/day) + Coin Metrics (2) to attic/ … modules, owner.js
+FACTORIES + MACRO_RELEASES recipe / macroSeries subjects / coinmetrics catalog run,
+config entries, tests, orphaned machinery."
+
+**Interpretation taken (2026-09-16, not a blocker — surfaced for reversal):** FRED was
+the only provider of the `MACRO_OBSERVATION` payload kind and the `macro_level` /
+`macro_change` metrics (economic level series with ALFRED vintages). The `MACRO_RELEASES`
+family itself SURVIVES: the CoinGlass economic calendar (`economic-data`, `ECONOMIC_EVENT`)
+still feeds `macro_surprise` / `release_schedule`, so the family, its evidence kind
+(`MARKET_MACRO_CONTEXT`) and the Socrates FAMILIES mirror are unchanged. So the cull
+removed: the `MACRO_OBSERVATION` payload kind, the `macro_level`/`macro_change` metrics and
+the `levels` field of `MARKET_MACRO_CONTEXT` (FRED-only), the `macroSeries` subjects key
+(FRED series list, now unconsumed), and dropped `NETWORK_ACTIVITY` + `MACRO_RELEASES` from
+the FREE data-only harvest (their only zero-cost providers, Coin Metrics and FRED, are
+gone — both families still run in the keyed PAPER runtime via CryptoQuant/Santiment and
+the CoinGlass calendar). The research-builder summary metric for `MACRO_RELEASES` moved to
+`macro_surprise`. Counts: PROVIDER_IDS 18→16, PAYLOAD_KINDS 23→22, FAMILIES 16 (unchanged),
+sensor scope 41→39 (M14/M15 retired).
+
+**Confirm:** this keeps macro *releases* (surprises vs forecast) but drops macro *levels*
+(CPI/rates index series) entirely, since no surviving free/keyed provider serves the level
+series. If a macro-level sense is still wanted, it needs a replacement provider decision —
+say so and it becomes its own ticket. **Not blocking: the cull shipped on this reading.**
+
+---
+
 ## PUBLISH-FIX-4 item 3 — broad Kraken "exactly one starter" (partially done)
 
 **Ask:** "broad Kraken writer already active as pid 34 persists with the boot-id

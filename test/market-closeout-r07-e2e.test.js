@@ -182,14 +182,16 @@ test('MC-RD03 (readiness). an explicitly partial family keeps the overall state 
 });
 
 test('MC-RD04 (readiness). declared-policy counts are computed from the 17-family artifact; a disabled or unauthorised alternative provider never overrides the qualified source', () => {
-  const PUBLIC = ['KRAKEN_SPOT', 'COINBASE_SPOT', 'KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGECKO', 'GECKOTERMINAL', 'DEFILLAMA', 'COINMETRICS', 'SETTLED_RECORDS']; const subjects = btcOnly();
+  const PUBLIC = ['KRAKEN_SPOT', 'COINBASE_SPOT', 'KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGECKO', 'GECKOTERMINAL', 'DEFILLAMA', 'SETTLED_RECORDS']; const subjects = btcOnly();
   const count = (m) => { const c = {}; for (const v of Object.values(m.families)) c[v.state] = (c[v.state] ?? 0) + 1; return c; };
   const pub = buildCoverageMatrix({ policy: loadPolicy(H.policyWith({ providers: PUBLIC })), subjects, env: {} }); assert.equal(Object.keys(pub.families).length, 16); assert.deepEqual(Object.keys(pub.families), [...FAMILIES]);
   const pc = count(pub); assert.equal(pc.COVERED_BY_DECLARED_POLICY + (pc.ENABLED_BUT_BLOCKED ?? 0) + (pc.UNCOVERED ?? 0), 16, 'the counts partition the 16 families'); assert.equal(pub.families.ONCHAIN_ENTITY_FLOW.state, 'UNCOVERED', 'a paid-only family is UNCOVERED under a public policy');
   const raw = H.policyWith({ providers: [...PUBLIC, 'CRYPTOQUANT'] }); const unauthorised = buildCoverageMatrix({ policy: loadPolicy(raw), subjects, env: { CRYPTOQUANT_API_KEY: 'x' } }); assert.equal(unauthorised.families.ONCHAIN_ENTITY_FLOW.state, 'ENABLED_BUT_BLOCKED', 'an enabled paid provider without an attested plan is blocked, never covering');
   includedPlan(raw, 'CRYPTOQUANT'); const authorised = buildCoverageMatrix({ policy: loadPolicy(raw), subjects, env: { CRYPTOQUANT_API_KEY: 'x' } }); assert.equal(authorised.families.ONCHAIN_ENTITY_FLOW.state, 'COVERED_BY_DECLARED_POLICY'); assert.equal(authorised.families.ONCHAIN_ENTITY_FLOW.cheapestSupplied.providerId, 'CRYPTOQUANT');
   const withDisabledAlt = buildCoverageMatrix({ policy: loadPolicy(raw), subjects, env: { CRYPTOQUANT_API_KEY: 'x' } }); assert.equal(withDisabledAlt.families.ONCHAIN_ENTITY_FLOW.routes.find((r) => r.providerId === 'SANTIMENT').enabled, false); assert.equal(withDisabledAlt.families.ONCHAIN_ENTITY_FLOW.state, 'COVERED_BY_DECLARED_POLICY', 'a disabled alternative does not override the qualified source');
-  assert.equal(count(authorised).COVERED_BY_DECLARED_POLICY, pc.COVERED_BY_DECLARED_POLICY + 1); assert.ok(pub.providerCalls.every((p) => typeof p.withinLocalCaps === 'boolean'));
+  // Attesting CryptoQuant covers BOTH ONCHAIN_ENTITY_FLOW and NETWORK_ACTIVITY: since SENSE-CULL-2 retired Coin Metrics,
+  // CryptoQuant is the sole NETWORK_ACTIVITY provider too, so a public policy leaves both families UNCOVERED until it is attested.
+  assert.equal(count(authorised).COVERED_BY_DECLARED_POLICY, pc.COVERED_BY_DECLARED_POLICY + 2); assert.ok(pub.providerCalls.every((p) => typeof p.withinLocalCaps === 'boolean'));
 });
 
 // ---------------------------------------------------------------- E01-E07 --------------------------------------------------------

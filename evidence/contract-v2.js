@@ -57,7 +57,7 @@ export const FIELD_SCHEMAS = Object.freeze({
   MARKET_NETWORK_CONTEXT: { provider: T.str, metrics: T.arr },
   MARKET_STABLECOIN_CONTEXT: { stablecoinId: T.str, chain: T.strOrNull, current: T.numOrNull, change: T.numOrNull, unit: T.strOrNull, pegPrice: T.numOrNull, pegDeviationBps: T.numOrNull, fromTs: T.tsOrNull, toTs: T.tsOrNull },
   MARKET_ETF_CONTEXT: { asset: T.str, latestFlowUsd: T.numOrNull, latestPeriodStartTs: T.tsOrNull, latestPeriodEndTs: T.tsOrNull, trailing5: T.numOrNull, trailing20: T.numOrNull, estimate: T.boolOrNull, days: T.int },
-  MARKET_MACRO_CONTEXT: { levels: T.arr, upcoming: T.arr, released: T.arr },
+  MARKET_MACRO_CONTEXT: { upcoming: T.arr, released: T.arr },
   MARKET_EVENT_CONTEXT: { events: T.arr },
   MARKET_INFRA_CONTEXT: { statuses: T.arr, incidents: T.arr },
   SOCIAL_DOSSIER_CONTEXT: { dossierId: T.str, derivedKnownAtTs: T.ts, researchState: T.str, entrances: T.arr, packetStatus: T.strOrNull, packetId: T.strOrNull, episodeId: T.strOrNull, episodeIndex: T.intOrNull, compositeId: T.strOrNull, coverage: T.obj },

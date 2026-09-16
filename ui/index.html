@@ -1616,8 +1616,11 @@ function renderStatus(s) {
     : 'OFF';
   const t = s.tape;
   const u = t.universe;
-  $('#capUniverse').classList.toggle('off', !u && !universe.length);
-  $('#capUniverseV').textContent = u ? `${u.total} · ${u.live} LIVE` : universe.length ? `${universe.length} WATCHED` : 'NOT SELECTED';
+  // The UNIVERSE tile reads the wide-eye tape universe only: "<total> · <live> LIVE"
+  // once it exists, "WAKING" until then. The market-subjects registry count is a
+  // research roster, never a WATCHED live count — SENSE-CULL-2 removed it from this tile.
+  $('#capUniverse').classList.toggle('off', !u);
+  $('#capUniverseV').textContent = u ? `${u.total} · ${u.live} LIVE` : 'WAKING';
   const w = s.wideeye;
   $('#capEye').classList.toggle('off', !(w && w.enabled && w.fresh));
   // truthful abbreviation beats truncation ("3R", never "3 r…")

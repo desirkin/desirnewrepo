@@ -15,10 +15,11 @@ export const DATA_ONLY_MARKET_FAMILIES = Object.freeze([
   'SPOT_FLOW',
   'SUPPLY_UNLOCKS',
   'DEX_DEFI',
-  'NETWORK_ACTIVITY',
   'STABLECOIN_LIQUIDITY',
-  'MACRO_RELEASES',
 ]);
+// NETWORK_ACTIVITY and MACRO_RELEASES left the free data-only harvest with SENSE-CULL-2:
+// their only zero-cost providers (Coin Metrics Community, FRED) were culled to attic/. The
+// families still exist for the keyed paper runtime (CryptoQuant / Santiment, CoinGlass calendar).
 
 // This is a closed allowlist. Key-gated providers are enabled only when their
 // named credential is present. Unknown/metered sources and the restricted
@@ -29,8 +30,6 @@ export const DATA_ONLY_MARKET_PROVIDERS = Object.freeze({
   COINGECKO: 'KEY_GATED_INCLUDED_QUOTA',
   GECKOTERMINAL: 'PUBLIC_FREE',
   DEFILLAMA: 'PUBLIC_FREE',
-  COINMETRICS: 'PUBLIC_FREE',
-  FRED: 'KEY_GATED_FREE',
 });
 export const DATA_ONLY_MARKET_RESTRICTED = Object.freeze(['KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT']);
 const ZERO_BUDGET = new Set(['COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'TOKENOMIST']);

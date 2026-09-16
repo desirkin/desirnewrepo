@@ -35,7 +35,6 @@ export const PAYLOAD_KEYS = deepFreeze({
   ONCHAIN_METRIC: ['metricId', 'value', 'unit', 'entitySet', 'chain', 'window', 'methodologyId', 'labelVintage'],
   STABLECOIN_METRIC: ['metricId', 'value', 'unit', 'chain', 'stablecoinId', 'pegCurrency'],
   ETF_FLOW: ['fund', 'asset', 'flowUsd', 'reportingPeriodStartTs', 'reportingPeriodEndTs', 'estimate', 'revision', 'priceUsd'],
-  MACRO_OBSERVATION: ['seriesId', 'value', 'unit', 'observationDate', 'realtimeStart', 'realtimeEnd', 'frequency', 'vintageDate', 'unitLabel'],
   ECONOMIC_EVENT: ['eventName', 'countryCode', 'scheduledTs', 'timePrecision', 'forecastRaw', 'actualRaw', 'previousRaw', 'revisedPreviousRaw', 'forecastValue', 'actualValue', 'previousValue', 'unit', 'importance', 'forecastKnownAtTs', 'actualKnownAtTs'],
   EVENT_REFERENCE: ['eventKind', 'sourceProvider', 'nativeRef', 'sourceEventTs', 'headline', 'untrusted', 'status'],
   PROVIDER_STATUS: ['providerId', 'status', 'component', 'incidentRef'],
@@ -199,11 +198,6 @@ export function payloadError(kind, p, where = 'payload') {
       if (!isIdOrNull(p.fund) || !isId(p.asset) || !isNumOrNull(p.flowUsd) || !isTs(p.reportingPeriodStartTs) || !isTs(p.reportingPeriodEndTs) || p.reportingPeriodEndTs < p.reportingPeriodStartTs) return `${where}: etf flow malformed`;
       if (typeof p.estimate !== 'boolean' || !isIdOrNull(p.revision) || !(p.priceUsd === null || isPositive(p.priceUsd))) return `${where}: etf fields malformed`;
       return null;
-    case 'MACRO_OBSERVATION':
-      if (!isId(p.seriesId) || !isNumOrNull(p.value) || !UNITS.includes(p.unit) || !isDateOnly(p.observationDate)) return `${where}: macro observation malformed`;
-      if (!(p.realtimeStart === null || isDateOnly(p.realtimeStart)) || !(p.realtimeEnd === null || isDateOnly(p.realtimeEnd)) || !(p.vintageDate === null || isDateOnly(p.vintageDate))) return `${where}: vintage dates malformed`;
-      if (!isStringOrNull(p.frequency, 24) || !isStringOrNull(p.unitLabel, 120)) return `${where}: frequency/unit label malformed`;
-      return null;
     case 'ECONOMIC_EVENT':
       if (!isBoundedString(p.eventName, MAX_TEXT_CHARS) || !isBoundedString(p.countryCode, 8) || !isTsOrNull(p.scheduledTs) || !TIME_PRECISIONS.includes(p.timePrecision)) return `${where}: economic event malformed`;
       for (const k of ['forecastRaw', 'actualRaw', 'previousRaw', 'revisedPreviousRaw']) if (!isStringOrNull(p[k], 40)) return `${where}: ${k} malformed`;
@@ -259,7 +253,7 @@ export function payloadError(kind, p, where = 'payload') {
 const PRIMARY_VALUE_KEYS = deepFreeze({
   TRADE: ['price'], BOOK_SNAPSHOT: ['bids'], BOOK_COVERAGE: ['state'], CANDLE: ['close'], INSTRUMENT: ['status'], DERIVATIVE_TICK: ['markPrice', 'indexPrice', 'lastPrice', 'openInterest', 'fundingRateNative'],
   LIQUIDATION: ['notional', 'longNotional', 'shortNotional', 'qtyBase'], OPTION_TICK: ['markIv', 'markPrice', 'openInterest'], ASSET_REFERENCE: ['priceUsd', 'marketCapUsd', 'circulatingSupply'], UNLOCK_EVENT: ['scheduledTs', 'amountToken'],
-  DEX_POOL: ['priceUsd', 'liquidityUsd'], DEFI_METRIC: ['value'], ONCHAIN_METRIC: ['value'], STABLECOIN_METRIC: ['value'], ETF_FLOW: ['flowUsd'], MACRO_OBSERVATION: ['value'], ECONOMIC_EVENT: ['scheduledTs', 'actualValue', 'forecastValue'],
+  DEX_POOL: ['priceUsd', 'liquidityUsd'], DEFI_METRIC: ['value'], ONCHAIN_METRIC: ['value'], STABLECOIN_METRIC: ['value'], ETF_FLOW: ['flowUsd'], ECONOMIC_EVENT: ['scheduledTs', 'actualValue', 'forecastValue'],
   EVENT_REFERENCE: ['nativeRef'], PROVIDER_STATUS: ['status'],
   DERIVATIVE_ANALYTIC_BUCKET: ['values'], L3_BOOK_SNAPSHOT: ['bids', 'asks'], L3_ORDER_EVENT: ['events'], L3_BOOK_COVERAGE: ['state'],
 });

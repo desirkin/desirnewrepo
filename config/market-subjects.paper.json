@@ -14,7 +14,6 @@
    "protocols": [],
    "cryptoquant": "btc",
    "santiment": "bitcoin",
-   "coinmetrics": "btc",
    "tokenomist": null,
    "coinglass": "BTC"
   },
@@ -38,7 +37,6 @@
    ],
    "cryptoquant": "eth",
    "santiment": "ethereum",
-   "coinmetrics": "eth",
    "tokenomist": null,
    "coinglass": "ETH"
   },
@@ -55,20 +53,9 @@
    "protocols": [],
    "cryptoquant": null,
    "santiment": "solana",
-   "coinmetrics": "sol",
    "tokenomist": "solana",
    "coinglass": "SOL"
   }
- ],
- "macroSeries": [
-  "DFF",
-  "DGS2",
-  "DGS10",
-  "DTWEXBGS",
-  "CPIAUCSL",
-  "UNRATE",
-  "WALCL",
-  "RRPONTSYD"
  ],
  "stablecoins": [
   {

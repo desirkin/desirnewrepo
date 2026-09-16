@@ -94,7 +94,7 @@ test('owner shutdown awaits async UNRESOLVED fencing after its bounded wire drai
 
 test('data-only market accepts the injected durable journal and exposes honest stream/accounting status', async () => {
   const root = tmp('data-only-async-quota-'); const journal = asyncJournal(); let handle = null;
-  const rawSubjects = H.subjectsWith(); rawSubjects.subjects = [rawSubjects.subjects[0]]; rawSubjects.macroSeries = []; rawSubjects.stablecoins = [];
+  const rawSubjects = H.subjectsWith(); rawSubjects.subjects = [rawSubjects.subjects[0]]; rawSubjects.stablecoins = [];
   try {
     handle = await startDataOnlyMarket({ researchRoot: root, env: {}, quotaJournal: journal, ownerMode: 'INTEGRATED', families: [], clock: () => T0, policyRaw: H.policyWith({ providers: ['KRAKEN_SPOT'] }), subjectsRaw: rawSubjects, fetchImpl: async () => json(H.KRAKEN_ASSET_PAIRS), log: () => {} });
     const status = handle.status(); assert.equal(status.persistence.quotaJournal, 'INJECTED_DURABLE'); assert.equal(status.persistence.replitRepublish, 'JOURNAL_ADAPTER_DEFINED'); assert.deepEqual(status.streams, {});

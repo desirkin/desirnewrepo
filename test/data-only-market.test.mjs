@@ -33,13 +33,12 @@ function importsOf(file, seen = new Set()) {
 
 test('data-only market policy is a zero-spend observation allowlist and missing keys block only their own sources', () => {
   const withoutKeys = buildDataOnlyMarketPolicy({ env: {} });
-  assert.deepEqual(Object.entries(withoutKeys.providers).filter(([, p]) => p.enabled).map(([id]) => id), ['KRAKEN_SPOT', 'COINBASE_SPOT', 'GECKOTERMINAL', 'DEFILLAMA', 'COINMETRICS']);
-  assert.equal(withoutKeys.providers.FRED.enabled, false);
+  assert.deepEqual(Object.entries(withoutKeys.providers).filter(([, p]) => p.enabled).map(([id]) => id), ['KRAKEN_SPOT', 'COINBASE_SPOT', 'GECKOTERMINAL', 'DEFILLAMA']);
   assert.equal(withoutKeys.providers.COINGECKO.enabled, false);
   assert.equal(withoutKeys.providers.KRAKEN_SPOT.enabled, true, 'a missing unrelated key cannot disable public spot');
 
-  const withKeys = buildDataOnlyMarketPolicy({ env: { FRED_API_KEY: 'fixture', COINGECKO_DEMO_API_KEY: 'fixture', COINGLASS_API_KEY: 'must-not-enable', KRAKEN_L3_DATA_API_KEY: 'must-not-enable' } });
-  for (const id of ['FRED', 'COINGECKO']) assert.equal(withKeys.providers[id].enabled, true, id);
+  const withKeys = buildDataOnlyMarketPolicy({ env: { COINGECKO_DEMO_API_KEY: 'fixture', COINGLASS_API_KEY: 'must-not-enable', KRAKEN_L3_DATA_API_KEY: 'must-not-enable' } });
+  for (const id of ['COINGECKO']) assert.equal(withKeys.providers[id].enabled, true, id);
   for (const id of ['KRAKEN_DERIVATIVES', 'DERIBIT', 'BYBIT', 'COINGLASS', 'CRYPTOQUANT', 'SANTIMENT', 'TOKENOMIST']) assert.equal(withKeys.providers[id].enabled, false, id);
   assert.equal(withKeys.providers.KRAKEN_SPOT.l3.enabled, false);
   assert.equal(withKeys.providers.KRAKEN_DERIVATIVES.charts.enabled, false);
@@ -74,7 +73,6 @@ test('fake provider transport starts scoped spot capture, publishes honest cap p
     assert.equal(status.persistence.replitRepublish, 'NOT_GUARANTEED');
     assert.equal(status.sources.KRAKEN_SPOT.state, 'OBSERVED');
     assert.equal(status.sources.COINBASE_SPOT.state, 'OBSERVED');
-    assert.equal(status.sources.FRED.state, 'BLOCKED_CREDENTIAL');
     assert.equal(status.sources.KRAKEN_DERIVATIVES.state, 'RESTRICTED_OFF');
     assert.equal(status.sources.COINGLASS.state, 'DISABLED_ZERO_BUDGET');
     assert.deepEqual(status.streams, {}, 'the data-only status exposes the owner stream state (integrated fixture opens none)');

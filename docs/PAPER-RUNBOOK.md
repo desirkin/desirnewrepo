@@ -135,8 +135,8 @@ interface.
 
 - Provision PostgreSQL and set `DATABASE_URL`; run `init-paper` once with owner intent.
 - Set `SERPENT_HTTP_CONTACT` (SEC / EDGAR user-agent law) and, when wanted, an explicit `RUMOR2_EDGAR_CIKS` whitelist.
-- Optional free keys (FRED) widen the market set; paid providers and X stay off until plan, budget and an explicit paid
-  smoke are attested in the policy / environment.
+- Optional keys (CoinGecko Demo) widen the market set; paid providers and X stay off until plan, budget and an explicit
+  paid smoke are attested in the policy / environment.
 - A Kraken L3 DATA-ONLY key (never a trading key) unlocks the dark L3 capture after its permission proof.
 - Rotate any provider key value that was ever placed in a committed file (see the final report §15) and move it to the
   platform's secret store; this repository carries names and placeholders only.

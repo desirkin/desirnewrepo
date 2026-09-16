@@ -11,6 +11,7 @@ import { readControls } from '../state/controls.js';
 import { dailyLockStatus } from '../state/locks.js';
 import { marketResearchRootFromEnv, darkResearchRootOf } from '../market-lab/paths.js';
 import { paidCallAuthorized } from '../market-lab/policy.js';
+import { KEPT_MARKET_PROVIDERS } from '../market-lab/owner.js';
 import { resolveSocratesActivation } from '../lib/explainer-toggles.js';
 import { loadProfile, profileFileOf, RUNTIME_STATES, mergeOverlay } from './profile.js';
 import { PRESS_SOURCES } from '../press/registry.js';
@@ -99,7 +100,10 @@ export function sensorSnapshot({ profile = loadProfile(), env = process.env, con
   // ---- MARKET RESEARCH providers (from the service status file) -----------------------------------------------------------------
   const root = marketResearchRootFromEnv(env, dataDir); const mr = readJsonBounded(path.join(root, 'status.json')); const mrTs = tsOf(mr?.nowTs); const policy = readJsonBounded(profileFileOf(profile, 'marketResearchPolicy'));
   const clients = mr?.owner?.clients ?? {}; const mrOn = env.MARKET_RESEARCH_ENABLED === 'true';
+  // KEPT_MARKET_PROVIDERS is the only source of this page's market-provider rows. SETTLED_RECORDS is wired in the owner
+  // (a read-only RUMOR2 projection) but is deliberately not a market-research page row, so it is skipped here.
   for (const [id, pr] of Object.entries(g.marketResearch.providers)) {
+    if (!KEPT_MARKET_PROVIDERS.includes(id)) continue;
     const pol = policy?.providers?.[id] ?? null; const c = clients[id] ?? null; const cred = pol?.credentialEnv ?? null; const keyPresent = cred ? present(env, cred) : true; const quotaBlocked = pol && pol.plan?.billing !== 'FREE' && !paidCallAuthorized(policy, id);
     let state; let blocker = null;
     if (!mrOn || !pol?.enabled || pr.desiredState === 'OFF') { state = 'DISABLED_BY_PAPER_POLICY'; blocker = pr.reason ?? (pol?.enabled === false ? 'disabled in the paper policy' : 'research service off'); }

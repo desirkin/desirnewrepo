@@ -14,8 +14,8 @@ const T0 = Date.parse('2026-09-08T12:00:00Z');
 const tmp = () => mkdtempSync(path.join(tmpdir(), 'mlab-bootstrap-'));
 const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 
-function fredPolicy() { const p = structuredClone(samplePolicy()); p.providers.FRED.enabled = true; return loadPolicy(p); }
-function fredSubjects() { const s = structuredClone(sampleSubjects()); s.subjects = [s.subjects[0]]; s.macroSeries = ['CPIAUCSL']; return loadSubjects(s); }
+function stablePolicy() { const p = structuredClone(samplePolicy()); p.providers.DEFILLAMA.enabled = true; return loadPolicy(p); }
+function stableSubjects() { const s = structuredClone(sampleSubjects()); s.subjects = [s.subjects[0]]; return loadSubjects(s); }
 function controlledTimers() {
   const intervals = [];
   return {
@@ -46,7 +46,7 @@ async function within(promise, ms = 1000) {
 
 test('service starts around a slow initial sweep, exposes bootstrap state, suppresses overlapping periodic sweeps, stops the sweep, and a new service can restart on the same root', async () => {
   const root = tmp(); const timers = controlledTimers(); const slow = hangingFetch();
-  const service = createResearchService({ policy: fredPolicy(), subjects: fredSubjects(), env: { FRED_API_KEY: 'FREDKEY' }, researchRoot: root, mode: 'INTEGRATED', clock: () => T0, fetchImpl: slow.fetchImpl, timers, httpPort: null, families: ['MACRO_RELEASES'], closeDrainMs: 1000, log: () => {} });
+  const service = createResearchService({ policy: stablePolicy(), subjects: stableSubjects(), env: {}, researchRoot: root, mode: 'INTEGRATED', clock: () => T0, fetchImpl: slow.fetchImpl, timers, httpPort: null, families: ['STABLECOIN_LIQUIDITY'], closeDrainMs: 1000, log: () => {} });
   try {
     const started = await within(service.start());
     assert.equal(started.state, 'ACTIVE');
@@ -66,11 +66,11 @@ test('service starts around a slow initial sweep, exposes bootstrap state, suppr
     sweepTimer.fn(); await Promise.resolve(); assert.equal(slow.state.calls, 1, 'a cleared late tick has no authority after stop');
 
     const timers2 = controlledTimers(); let calls2 = 0;
-    const fetch2 = async (url) => { calls2 += 1; return new URL(url).pathname === '/fred/series' ? json(H.FRED_SERIES) : json(H.FRED_OBSERVATIONS); };
-    const restarted = createResearchService({ policy: fredPolicy(), subjects: fredSubjects(), env: { FRED_API_KEY: 'FREDKEY' }, researchRoot: root, mode: 'INTEGRATED', clock: () => T0 + 1, fetchImpl: fetch2, timers: timers2, httpPort: null, families: ['MACRO_RELEASES'], log: () => {} });
+    const fetch2 = async () => { calls2 += 1; return json(H.DEFILLAMA_STABLECOINS); };
+    const restarted = createResearchService({ policy: stablePolicy(), subjects: stableSubjects(), env: {}, researchRoot: root, mode: 'INTEGRATED', clock: () => T0 + 1, fetchImpl: fetch2, timers: timers2, httpPort: null, families: ['STABLECOIN_LIQUIDITY'], log: () => {} });
     assert.equal((await within(restarted.start())).state, 'ACTIVE');
     await H.waitFor(() => restarted.status().bootstrap.initialState === 'COMPLETE');
-    assert.equal(calls2, 2); assert.equal(restarted.status().bootstrap.initialMode, 'BACKGROUND');
+    assert.equal(calls2, 1); assert.equal(restarted.status().bootstrap.initialMode, 'BACKGROUND');
     await restarted.stop({ seal: false });
   } finally {
     if (service.isActive()) await service.stop({ seal: false });
@@ -79,8 +79,8 @@ test('service starts around a slow initial sweep, exposes bootstrap state, suppr
 });
 
 test('owner keeps awaitInitialSweep=true by default for bounded capture callers', async () => {
-  const slow = hangingFetch(); const owner = createResearchOwner({ policy: fredPolicy(), subjects: fredSubjects(), env: { FRED_API_KEY: 'FREDKEY' }, mode: 'INTEGRATED', clock: () => T0, fetchImpl: slow.fetchImpl, closeDrainMs: 1000, log: () => {} });
-  let settled = false; const starting = owner.start({ families: ['MACRO_RELEASES'] }).then((v) => { settled = true; return v; });
+  const slow = hangingFetch(); const owner = createResearchOwner({ policy: stablePolicy(), subjects: stableSubjects(), env: {}, mode: 'INTEGRATED', clock: () => T0, fetchImpl: slow.fetchImpl, closeDrainMs: 1000, log: () => {} });
+  let settled = false; const starting = owner.start({ families: ['STABLECOIN_LIQUIDITY'] }).then((v) => { settled = true; return v; });
   await H.waitFor(() => slow.state.calls === 1); await Promise.resolve();
   assert.equal(settled, false); assert.equal(owner.status().bootstrap.initialMode, 'AWAITED');
   await within(owner.stop({ seal: false })); await within(starting);

@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createResearchOwner } from '../market-lab/owner.js';
+import { createResearchOwner, KEPT_MARKET_PROVIDERS, MARKET_FACTORY_IDS } from '../market-lab/owner.js';
+import { PROVIDER_IDS } from '../market-lab/contracts.js';
 import { createResearchService } from '../market-lab/service.js';
 import { readCapture, runBuild, readContext } from '../market-lab/commands.js';
 import { openBundle } from '../market-lab/store.js';
@@ -25,7 +26,7 @@ import * as H from './helpers/market-lab.js';
 
 const { T0 } = H;
 const tmp = () => mkdtempSync(path.join(tmpdir(), 'mlab-owner-'));
-const PROVIDERS = ['KRAKEN_SPOT', 'COINBASE_SPOT', 'KRAKEN_DERIVATIVES', 'DERIBIT', 'COINGECKO', 'DEFILLAMA', 'COINMETRICS', 'SETTLED_RECORDS'];
+const PROVIDERS = ['KRAKEN_SPOT', 'COINBASE_SPOT', 'KRAKEN_DERIVATIVES', 'DERIBIT', 'COINGECKO', 'DEFILLAMA', 'SETTLED_RECORDS'];
 function krakenWs(conn) { conn.handlers.push((msg) => { if (msg.method !== 'subscribe') return; if (msg.params.channel === 'instrument') conn.send({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'BTC/USD', price_precision: 1, qty_precision: 8 }] } }); if (msg.params.channel === 'book') { conn.send({ channel: 'book', type: 'snapshot', data: [{ symbol: 'BTC/USD', bids: [{ price: 99.5, qty: 2 }, { price: 99.0, qty: 3 }], asks: [{ price: 100.5, qty: 2 }, { price: 101.0, qty: 3 }] }] }); let i = 0; const t = setInterval(() => { if (conn.closed) { clearInterval(t); return; } i += 1; conn.send({ channel: 'trade', type: 'update', data: [{ symbol: 'BTC/USD', side: i % 2 ? 'buy' : 'sell', price: 100 + (i % 3) * 0.1, qty: 0.2, ord_type: 'market', trade_id: 1000 + i, timestamp: new Date(Date.now()).toISOString() }] }); conn.send({ channel: 'book', type: 'update', data: [{ symbol: 'BTC/USD', bids: [{ price: 99.5, qty: 2 + (i % 2) }], asks: [] }] }); }, 40); } }); }
 function coinbaseWs(conn) { conn.handlers.push((msg) => { if (msg.type !== 'subscribe') return; conn.send({ type: 'snapshot', product_id: 'BTC-USD', bids: [['99.4', '2']], asks: [['100.6', '2']] }); let i = 0; const t = setInterval(() => { if (conn.closed) { clearInterval(t); return; } i += 1; conn.send({ type: 'match', product_id: 'BTC-USD', trade_id: 700 + i, sequence: i, side: 'sell', price: '100.2', size: '0.1', time: new Date(Date.now()).toISOString() }); conn.send({ type: 'l2update', product_id: 'BTC-USD', changes: [['buy', '99.4', String(2 + (i % 2))]], time: new Date(Date.now()).toISOString() }); }, 50); }); }
 async function fixtures() {
@@ -36,14 +37,28 @@ async function fixtures() {
     'GET /derivatives/api/v3/instruments': { json: H.KF_INSTRUMENTS }, 'GET /derivatives/api/v3/tickers': (req) => ({ json: H.kfTickers({ symbol: req.query.symbol }) }), 'GET /derivatives/api/v4/historicalfundingrates': () => ({ json: { rates: [{ timestamp: new Date(now() - 3_600_000).toISOString(), fundingRate: 0.00005, relativeFundingRate: 0.00001 }] } }),
     'GET /api/v2/public/get_instruments': () => ({ json: { result: H.DERIBIT_INSTRUMENTS.result.map((i) => ({ ...i, expiration_timestamp: now() + 18 * 86_400_000 })) } }), 'GET /api/v2/public/get_book_summary_by-currency': { json: { result: [] } }, 'GET /api/v2/public/get_book_summary_by_currency': () => ({ json: { result: H.deribitSummaries().result.map((x) => ({ ...x, creation_timestamp: now() - 500 })) } }),
     'GET /api/v3/coins/list': { json: H.COINGECKO_LIST }, 'GET /api/v3/coins/markets': () => ({ json: H.coingeckoMarkets().map((m) => ({ ...m, last_updated: new Date(now() - 60_000).toISOString() })) }),
-    'GET /stablecoins': { json: H.DEFILLAMA_STABLECOINS }, 'GET /v4/catalog-v2/asset-metrics': { json: H.COINMETRICS_CATALOG }, 'GET /v4/timeseries/asset-metrics': { json: H.coinmetricsSeries() },
+    'GET /stablecoins': { json: H.DEFILLAMA_STABLECOINS },
     '*': { status: 404, json: { error: 'no fixture' } },
   });
   const kws = await H.startWsFixture({ path: '/v2', onConnection: krakenWs }); const cws = await H.startWsFixture({ path: '/', onConnection: coinbaseWs });
   return { http, kws, cws, close: async () => { await kws.close(); await cws.close(); await http.close(); } };
 }
-const subjectsBtc = () => { const s = H.subjectsWith(); return { ...s, subjects: [s.subjects[0]], macroSeries: [] }; };
+const subjectsBtc = () => { const s = H.subjectsWith(); return { ...s, subjects: [s.subjects[0]] }; };
 const settled = { gatewayMatrix: () => ({ ts: new Date().toISOString(), doors: { BTC: { funding: 'OPEN', trading: 'OPEN' } } }), gatewayIncidents: () => ({}) };
+
+test('SENSE-CULL-2 fence: KEPT_MARKET_PROVIDERS is the closed roster of senses-page market providers and equals the owner factories; retired and owner-only providers are absent', () => {
+  // KEPT is the ONE source of the senses-page market-provider rows (paper/readiness.js filters to it) and the owner's
+  // market client factories are fenced to equal it: a provider added to one but not the other fails here.
+  assert.deepEqual([...KEPT_MARKET_PROVIDERS].sort(), [...MARKET_FACTORY_IDS].sort(), 'KEPT_MARKET_PROVIDERS and the owner market factories must be the same set');
+  for (const id of MARKET_FACTORY_IDS) assert.ok(KEPT_MARKET_PROVIDERS.includes(id), `${id} is an owner factory but not in KEPT_MARKET_PROVIDERS`);
+  for (const id of KEPT_MARKET_PROVIDERS) assert.ok(PROVIDER_IDS.includes(id), `${id} must be a registered provider id`);
+  // SETTLED_RECORDS survives in the owner (a read-only RUMOR2 projection) but is deliberately NOT a market-page row.
+  assert.ok(!KEPT_MARKET_PROVIDERS.includes('SETTLED_RECORDS'), 'SETTLED_RECORDS is owner-only, never a senses-page market provider');
+  assert.ok(!MARKET_FACTORY_IDS.includes('SETTLED_RECORDS'), 'SETTLED_RECORDS is projected, not built through the market factories');
+  assert.ok(PROVIDER_IDS.includes('SETTLED_RECORDS'), 'SETTLED_RECORDS remains a registered provider wired in the owner');
+  // The retired providers are gone from every roster.
+  for (const gone of ['FRED', 'COINMETRICS', 'TWELVEDATA']) { assert.ok(!KEPT_MARKET_PROVIDERS.includes(gone), `${gone} retired from KEPT`); assert.ok(!MARKET_FACTORY_IDS.includes(gone), `${gone} retired from the factories`); assert.ok(!PROVIDER_IDS.includes(gone), `${gone} retired from PROVIDER_IDS`); }
+});
 
 test('A09/B02. STANDALONE owner: real streams over loopback + REST fixtures -> sealed CAPTURE bundle; build -> CONTEXT twice gives the identical contextId; reopen against the capture verifies input clocks; the market-only v2 packet cites real provider sources and no invented Social item; a later as-of over the same capture is a different context', async () => {
   const fx = await fixtures(); const dir = tmp();

@@ -20,8 +20,9 @@ export const SCOPE = Object.freeze([
   R('M11', 'CoinGecko Demo catalog / market / detail capabilities', ['COINGECKO']),
   R('M12', 'GeckoTerminal DEX / pool observations', ['GECKOTERMINAL']),
   R('M13', 'DefiLlama TVL, fee and stablecoin observations', ['DEFILLAMA']),
-  R('M14', 'CoinMetrics Community asset metrics / history', ['COINMETRICS']),
-  R('M15', 'FRED and ALFRED series + historical vintages (revised vs then-known preserved)', ['FRED'], 'market-lab/providers/fred.js keeps realtime_start / realtime_end per observation and exposes vintage dates'),
+  // M14 / M15 retired: the CoinMetrics Community and FRED / ALFRED providers were culled to attic/ (SENSE-CULL-2).
+  // NETWORK_ACTIVITY now runs on CryptoQuant / Santiment; MACRO_RELEASES runs on the CoinGlass economic calendar.
+  // M-ids are stable, not renumbered.
   R('M16', 'CoinGlass derivatives, liquidation, event / unlock and headline capabilities (each verified separately)', ['COINGLASS'], 'endpoints: oi-exchange-list, funding-exchange-list, liquidation-aggregated-history, coin-unlock-list, coin-vesting, economic-data, article-list'),
   R('M17', 'CryptoQuant on-chain / exchange metrics', ['CRYPTOQUANT']),
   R('M18', 'Santiment metrics / history', ['SANTIMENT']),

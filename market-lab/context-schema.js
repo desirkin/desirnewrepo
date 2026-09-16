@@ -100,8 +100,6 @@ const onchainLatestValue = obj({ provider: str(40), ...onchainKeys, ageMs: count
 const networkValue = obj({ nativeMetric: en(['active_addresses', 'transaction_count', 'transfer_volume', 'fees_total', 'mvrv', 'sopr', 'realized_price', 'whale_transaction_count_100k_usd_to_inf', 'whale_transaction_count_1m_usd_to_inf', 'whale_transaction_volume_100k_usd_to_inf', 'whale_transaction_volume_1m_usd_to_inf']), provider: str(40), ...onchainKeys, previousValue: numN, change: numN, ageMs: count });
 const stableValue = obj({ stablecoinId: str(80), chain: idN, recipeId: literal('stablecoin_supply_change'), version, change: numN, support: supportOf(['MISSING_POINT', 'MATCH_FAILED', 'COMPLETE']), current: numN, pegPrice: numN, pegDeviationBps: numN, pegAgeMs: countN, ageMs: count, laws }, { from: numN, to: numN, unit: en(UNITS), fromTs: ts, toTs: ts });
 const etfValue = obj({ recipeId: literal('etf_daily_flow'), version, latest: nullable(obj({ periodStartTs: ts, periodEndTs: ts, flowUsd: num, estimate: bool, receivedTs: ts })), support: supportOf(['NO_FLOWS', 'COMPLETE']), ageMs: countN, funds: arr(str(80), 64) }, { asset: str(20), trailing5: num, trailing20: num, days: count, law });
-const dateOnly = (v, w) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? null : `${w}: must be a YYYY-MM-DD date`);
-const macroLevelValue = obj({ seriesId: str(80), value: num, unit: en(UNITS), unitLabel: strN, observationDate: dateOnly, vintageDate: nullable(dateOnly), previous: nullable(obj({ value: num, observationDate: dateOnly })), change: numN, frequency: strN, ageMs: count, law });
 const surpriseSchema = obj({ recipeId: literal('macro_surprise'), version, surprise: numN, support: supportOf(['NO_EVENT', 'VALUE_MISSING', 'FORECAST_NOT_KNOWN_BEFORE_RELEASE', 'COMPLETE']) }, { actual: num, forecast: num, unit: str(40), previous: numN, revisedPrevious: literal(null), forecastKnownAtTs: ts, releaseTs: ts, law });
 const macroSurpriseValue = obj({ upcoming: arr(obj({ eventName: str(MAX_STR), countryCode: str(8), scheduledTs: tsN, timePrecision: en(TIME_PRECISIONS), forecastValue: numN, unit: nullable(en(UNITS)), importance: nullable(en([0, 1, 2, 3])) }), 256), released: arr(obj({ eventName: str(MAX_STR), countryCode: str(8), scheduledTs: tsN, actual: numN, forecast: numN, unit: nullable(en(UNITS)), surprise: surpriseSchema }), 256) });
 const eventsValue = obj({ events: arr(obj({ observationId: str(120), eventKind: en(EVENT_KINDS), sourceProvider: str(80), nativeRef: str(120), sourceEventTs: tsN, knownAtTs: ts, status: nullable(str(40)), headline: nullable(str(MAX_STR)), untrusted: bool }), 512), law });
@@ -134,7 +132,6 @@ export const METRIC_SCHEMAS = deepFreeze(Object.fromEntries([
   ...NETWORK_METRICS.map((m) => [m, { support: ['COMPLETE', 'MISSING'], value: networkValue }]),
   ['stablecoin_supply_change', { support: ['COMPLETE', 'SINGLE_POINT'], value: stableValue }],
   ['etf_daily_flow', { support: ['COMPLETE', 'NO_FLOWS'], value: etfValue }],
-  ['macro_level', { support: ['COMPLETE'], value: macroLevelValue }],
   ['macro_surprise', { support: ['COMPLETE'], value: macroSurpriseValue }],
   ['event_references', { support: ['COMPLETE'], value: eventsValue }],
   ['provider_status', { support: ['COMPLETE'], value: infraValue }],

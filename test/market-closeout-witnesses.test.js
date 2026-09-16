@@ -166,7 +166,7 @@ test('MC-B01 (R04). a DETAIL request for active_addresses with only exchange_res
 
 test('MC-S03 (R05). the 4000-byte segment / two-trade hot-cap witness: collection must either rotate into sealed segments before overflow or stop at the resource boundary with the first error preserved; it can never keep an unbounded side array while hot state suggests two', async () => {
   const p = H.policyWith({ providers: ['KRAKEN_SPOT'] }); p.resources.segmentBytes = 4000; p.resources.tradesPerHotSymbol = 2;
-  const s = H.subjectsWith(); s.subjects = s.subjects.slice(0, 1); s.macroSeries = []; s.stablecoins = [];
+  const s = H.subjectsWith(); s.subjects = s.subjects.slice(0, 1); s.stablecoins = [];
   const schedules = []; const timers = { setInterval: (fn, ms) => { const h = { fn, ms, unref() {} }; schedules.push(h); return h; }, clearInterval: () => {}, setTimeout, clearTimeout };
   let now = T0; const dir = tmp();
   const o = createResearchOwner({ policy: loadPolicy(p), subjects: loadSubjects(s), clock: () => now, mode: 'INTEGRATED', timers, researchRoot: dir, fetchImpl: async () => json(H.KRAKEN_ASSET_PAIRS) });

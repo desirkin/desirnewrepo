@@ -118,7 +118,7 @@ The paper Judge's taker fee is Kraken Pro's **real base schedule: 0.40% taker / 
 
 ### Optional widening (each only adds a sense; none turns paid/private on by itself)
 `SERPENT_OBJECT_STORE_*` above; `TALLY_API_KEY` (governance, off by default); `CLOUDFLARE_API_TOKEN`, `YOUTUBE_API_KEY`,
-provider keys (`COINGECKO_DEMO_API_KEY`, `FRED_API_KEY`, paid provider keys) — all optional, all reported present/absent
+provider keys (`COINGECKO_DEMO_API_KEY`, paid provider keys) — all optional, all reported present/absent
 by name in preflight, none flips its own budget/plan gate on.
 
 **Never set** a Kraken trading key. There is none in the paper profile. A Kraken L3 key, if ever added, is a dedicated

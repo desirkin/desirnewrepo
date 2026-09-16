@@ -33,7 +33,7 @@ test('spot family cache clocks enforce the published effective cadence and never
   const policy = loadPolicy(H.policyWith({ providers: ['KRAKEN_SPOT', 'COINBASE_SPOT'] }));
   const rawSubjects = structuredClone(sampleSubjects());
   rawSubjects.subjects = [rawSubjects.subjects[0]];
-  rawSubjects.macroSeries = []; rawSubjects.stablecoins = []; rawSubjects.peers = []; rawSubjects.benchmarks = ['BTC'];
+  rawSubjects.stablecoins = []; rawSubjects.peers = []; rawSubjects.benchmarks = ['BTC'];
   const subjects = loadSubjects(rawSubjects); const clock = H.clockAt(H.T0); const timers = controlledTimers(); const calls = [];
   const fetchImpl = async (input) => {
     const url = new URL(input); calls.push({ host: url.host, path: url.pathname, interval: url.searchParams.get('interval'), ts: clock() });
@@ -89,7 +89,7 @@ test('spot family cache clocks enforce the published effective cadence and never
 
 test('a malformed provider response is cadence-gated too, so failures cannot restore five-minute request flooding', async () => {
   const policy = loadPolicy(H.policyWith({ providers: ['KRAKEN_SPOT', 'COINBASE_SPOT'] }));
-  const rawSubjects = structuredClone(sampleSubjects()); rawSubjects.subjects = [rawSubjects.subjects[0]]; rawSubjects.macroSeries = []; rawSubjects.stablecoins = []; rawSubjects.peers = []; rawSubjects.benchmarks = ['BTC'];
+  const rawSubjects = structuredClone(sampleSubjects()); rawSubjects.subjects = [rawSubjects.subjects[0]]; rawSubjects.stablecoins = []; rawSubjects.peers = []; rawSubjects.benchmarks = ['BTC'];
   const subjects = loadSubjects(rawSubjects); const clock = H.clockAt(H.T0); const timers = controlledTimers(); let ohlcCalls = 0;
   const fetchImpl = async (input) => {
     const url = new URL(input);

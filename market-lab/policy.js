@@ -186,8 +186,8 @@ export function samplePolicy() {
 }
 
 // ---- subjects file ------------------------------------------------------------------------------------------------
-export const SUBJECT_ENTRY_KEYS = Object.freeze(['canonicalCoin', 'krakenSpot', 'coinbase', 'krakenDerivatives', 'deribit', 'bybit', 'coingecko', 'tokens', 'pools', 'protocols', 'cryptoquant', 'santiment', 'coinmetrics', 'tokenomist', 'coinglass']);
-export const SUBJECTS_KEYS = Object.freeze(['subjectsVersion', 'subjects', 'macroSeries', 'stablecoins', 'referenceNotionals', 'peers', 'benchmarks']);
+export const SUBJECT_ENTRY_KEYS = Object.freeze(['canonicalCoin', 'krakenSpot', 'coinbase', 'krakenDerivatives', 'deribit', 'bybit', 'coingecko', 'tokens', 'pools', 'protocols', 'cryptoquant', 'santiment', 'tokenomist', 'coinglass']);
+export const SUBJECTS_KEYS = Object.freeze(['subjectsVersion', 'subjects', 'stablecoins', 'referenceNotionals', 'peers', 'benchmarks']);
 export const MAX_SUBJECTS = 64;
 export function subjectsError(raw, where = 'subjects') {
   const shape = jsonShapeError(raw, where); if (shape) return shape;
@@ -200,12 +200,11 @@ export function subjectsError(raw, where = 'subjects') {
     const e = exactKeys(s, SUBJECT_ENTRY_KEYS, w); if (e) return e;
     if (!isCoin(s.canonicalCoin)) return `${w}: canonicalCoin malformed`;
     if (coins.has(s.canonicalCoin)) return `${w}: duplicate canonicalCoin`; coins.add(s.canonicalCoin);
-    for (const f of ['krakenSpot', 'coinbase', 'krakenDerivatives', 'bybit', 'deribit', 'coingecko', 'cryptoquant', 'santiment', 'coinmetrics', 'tokenomist', 'coinglass']) if (!isIdOrNull(s[f])) return `${w}: ${f} must be a native identifier or null`;
+    for (const f of ['krakenSpot', 'coinbase', 'krakenDerivatives', 'bybit', 'deribit', 'coingecko', 'cryptoquant', 'santiment', 'tokenomist', 'coinglass']) if (!isIdOrNull(s[f])) return `${w}: ${f} must be a native identifier or null`;
     if (!Array.isArray(s.tokens) || s.tokens.length > 8 || s.tokens.some((t) => exactKeys(t, ['chain', 'contractAddress'], w) !== null || !isId(t.chain) || !isId(t.contractAddress))) return `${w}: tokens malformed`;
     if (!Array.isArray(s.pools) || s.pools.length > 8 || s.pools.some((p) => exactKeys(p, ['network', 'poolAddress'], w) !== null || !isId(p.network) || !isId(p.poolAddress))) return `${w}: pools malformed`;
     if (!Array.isArray(s.protocols) || s.protocols.length > 8 || s.protocols.some((p) => !isId(p))) return `${w}: protocols malformed`;
   }
-  if (!Array.isArray(raw.macroSeries) || raw.macroSeries.length > 16 || raw.macroSeries.some((x) => !isId(x))) return `${where}: macroSeries malformed`;
   if (!Array.isArray(raw.stablecoins) || raw.stablecoins.length > 8 || raw.stablecoins.some((x) => exactKeys(x, ['stablecoinId', 'pegCurrency', 'defillamaId'], where) !== null || !isId(x.stablecoinId) || !isId(x.pegCurrency) || !isIdOrNull(x.defillamaId))) return `${where}: stablecoins malformed`;
   if (!Array.isArray(raw.referenceNotionals) || raw.referenceNotionals.length === 0 || raw.referenceNotionals.length > 8 || raw.referenceNotionals.some((n) => !(isFiniteNum(n) && n > 0)) || new Set(raw.referenceNotionals).size !== raw.referenceNotionals.length) return `${where}: referenceNotionals must be 1..8 distinct positive quote amounts`;
   if (!Array.isArray(raw.peers) || raw.peers.length > 64 || raw.peers.some((c) => !isCoin(c)) || new Set(raw.peers).size !== raw.peers.length) return `${where}: peers malformed`;
@@ -217,11 +216,10 @@ export function sampleSubjects() {
   return deepFreeze({
     subjectsVersion: SUBJECTS_VERSION,
     subjects: [
-      { canonicalCoin: 'BTC', krakenSpot: 'BTC/USD', coinbase: 'BTC-USD', krakenDerivatives: 'PF_XBTUSD', deribit: 'BTC', bybit: 'BTCUSDT', coingecko: 'bitcoin', tokens: [], pools: [], protocols: [], cryptoquant: 'btc', santiment: 'bitcoin', coinmetrics: 'btc', tokenomist: null, coinglass: 'BTC' },
-      { canonicalCoin: 'ETH', krakenSpot: 'ETH/USD', coinbase: 'ETH-USD', krakenDerivatives: 'PF_ETHUSD', deribit: 'ETH', bybit: 'ETHUSDT', coingecko: 'ethereum', tokens: [], pools: [{ network: 'eth', poolAddress: '0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640' }], protocols: ['aave'], cryptoquant: 'eth', santiment: 'ethereum', coinmetrics: 'eth', tokenomist: null, coinglass: 'ETH' },
-      { canonicalCoin: 'SOL', krakenSpot: 'SOL/USD', coinbase: 'SOL-USD', krakenDerivatives: 'PF_SOLUSD', deribit: null, bybit: 'SOLUSDT', coingecko: 'solana', tokens: [], pools: [], protocols: [], cryptoquant: null, santiment: 'solana', coinmetrics: 'sol', tokenomist: 'solana', coinglass: 'SOL' },
+      { canonicalCoin: 'BTC', krakenSpot: 'BTC/USD', coinbase: 'BTC-USD', krakenDerivatives: 'PF_XBTUSD', deribit: 'BTC', bybit: 'BTCUSDT', coingecko: 'bitcoin', tokens: [], pools: [], protocols: [], cryptoquant: 'btc', santiment: 'bitcoin', tokenomist: null, coinglass: 'BTC' },
+      { canonicalCoin: 'ETH', krakenSpot: 'ETH/USD', coinbase: 'ETH-USD', krakenDerivatives: 'PF_ETHUSD', deribit: 'ETH', bybit: 'ETHUSDT', coingecko: 'ethereum', tokens: [], pools: [{ network: 'eth', poolAddress: '0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640' }], protocols: ['aave'], cryptoquant: 'eth', santiment: 'ethereum', tokenomist: null, coinglass: 'ETH' },
+      { canonicalCoin: 'SOL', krakenSpot: 'SOL/USD', coinbase: 'SOL-USD', krakenDerivatives: 'PF_SOLUSD', deribit: null, bybit: 'SOLUSDT', coingecko: 'solana', tokens: [], pools: [], protocols: [], cryptoquant: null, santiment: 'solana', tokenomist: 'solana', coinglass: 'SOL' },
     ],
-    macroSeries: ['DFF', 'DGS2', 'DGS10', 'DTWEXBGS', 'CPIAUCSL', 'UNRATE', 'WALCL', 'RRPONTSYD'],
     stablecoins: [{ stablecoinId: 'USDT', pegCurrency: 'USD', defillamaId: '1' }, { stablecoinId: 'USDC', pegCurrency: 'USD', defillamaId: '2' }],
     referenceNotionals: [1000, 10000, 100000],
     peers: ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'ADA', 'LINK', 'AVAX'],

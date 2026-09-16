@@ -17,7 +17,7 @@ Use only a supported secret-store write capability in your own session. The owne
 | `X_BEARER_TOKEN` | X account-usage endpoint returned HTTP 200; no post stream started | Installation unverified |
 | `NEYNAR_API_KEY` | One Farcaster cast-search request returned HTTP 200 | Installation unverified |
 
-Preserve existing `FRED_API_KEY`, `COINGECKO_DEMO_API_KEY`, `DATABASE_URL`, `SERPENT_CONTROL_PASSWORD`, `COBRA_DATA_DIR` and the public `SERPENT_HTTP_CONTACT` setting. Existing FRED/CoinGecko presence was reported by the owner; check presence without revealing values. Preserve the existing CoinGecko meter: the authorized two-call allowance must not be reset for another demonstration.
+Preserve existing `COINGECKO_DEMO_API_KEY`, `DATABASE_URL`, `SERPENT_CONTROL_PASSWORD`, `COBRA_DATA_DIR` and the public `SERPENT_HTTP_CONTACT` setting. Existing CoinGecko presence was reported by the owner; check presence without revealing values. Preserve the existing CoinGecko meter: the authorized two-call allowance must not be reset for another demonstration. (SENSE-CULL-2 retired the FRED / ALFRED and Coin Metrics Community market senses to `attic/`; `FRED_API_KEY` is no longer read.)
 
 If your session cannot write Replit Secrets, state that specific limitation and continue the independent Git, news and read-only setup work. Do not pretend an exported shell variable, a GitHub Actions secret or an `.env` file is a persistent Replit Secret. Do not ask for keys to nonexistent CNN/Reuters/Bloomberg clients. Report credential **names and presence only**.
 
