@@ -31,9 +31,16 @@ function krakenWs(conn) { conn.handlers.push((msg) => { if (msg.method !== 'subs
 function coinbaseWs(conn) { conn.handlers.push((msg) => { if (msg.type !== 'subscribe') return; conn.send({ type: 'snapshot', product_id: 'BTC-USD', bids: [['99.4', '2']], asks: [['100.6', '2']] }); let i = 0; const t = setInterval(() => { if (conn.closed) { clearInterval(t); return; } i += 1; conn.send({ type: 'match', product_id: 'BTC-USD', trade_id: 700 + i, sequence: i, side: 'sell', price: '100.2', size: '0.1', time: new Date(Date.now()).toISOString() }); conn.send({ type: 'l2update', product_id: 'BTC-USD', changes: [['buy', '99.4', String(2 + (i % 2))]], time: new Date(Date.now()).toISOString() }); }, 50); }); }
 async function fixtures() {
   const now = () => Date.now();
+  // B-14: the two chart sources (kraken OHLC + coinbase candles) are anchored to a FIXED, minute-aligned, few-minutes-past
+  // timestamp captured ONCE per fixtures() instance — not `now()` per request. Otherwise a forced re-poll a moment later
+  // crosses a wall-clock minute boundary (or flips the boundary bar provisional→closed via `closeTs > receivedTs`), so the
+  // provider returns genuinely different bars and the owner's content-based dedup correctly counts them as new — the
+  // intermittent 182-vs-181 flake. A fixed past anchor makes every re-poll byte-identical and every bar wall-clock-committed,
+  // so identical re-polled records are always duplicates regardless of arrival timing. The other fixtures keep live `now()`.
+  const chartAnchor = Math.floor((Date.now() - 180_000) / 60_000) * 60_000; // 3 minutes ago, minute-aligned, stable for this instance
   const http = await H.startHttpFixture({
-    'GET /0/public/AssetPairs': { json: H.KRAKEN_ASSET_PAIRS }, 'GET /0/public/OHLC': (req) => ({ json: H.krakenOhlc(req.query.pair, { intervalMin: Number(req.query.interval), endTs: now(), count: 30 }) }), 'GET /0/public/Trades': (req) => ({ json: H.krakenTrades(req.query.pair, { endTs: now() }) }), 'GET /0/public/Ticker': (req) => ({ json: H.krakenTicker(req.query.pair.split(',')[0]) }),
-    'GET /products': { json: H.COINBASE_PRODUCTS }, 'GET /products/BTC-USD/trades': () => ({ json: H.coinbaseTrades({ endTs: now() }) }), 'GET /products/BTC-USD/book': () => ({ json: H.coinbaseBook({ ts: now() }) }), 'GET /products/BTC-USD/candles': () => ({ json: [[Math.floor((now() - 120_000) / 60_000) * 60, 99, 101, 100, 100.5, 3]] }),
+    'GET /0/public/AssetPairs': { json: H.KRAKEN_ASSET_PAIRS }, 'GET /0/public/OHLC': (req) => ({ json: H.krakenOhlc(req.query.pair, { intervalMin: Number(req.query.interval), endTs: chartAnchor, count: 30 }) }), 'GET /0/public/Trades': (req) => ({ json: H.krakenTrades(req.query.pair, { endTs: now() }) }), 'GET /0/public/Ticker': (req) => ({ json: H.krakenTicker(req.query.pair.split(',')[0]) }),
+    'GET /products': { json: H.COINBASE_PRODUCTS }, 'GET /products/BTC-USD/trades': () => ({ json: H.coinbaseTrades({ endTs: now() }) }), 'GET /products/BTC-USD/book': () => ({ json: H.coinbaseBook({ ts: now() }) }), 'GET /products/BTC-USD/candles': () => ({ json: [[Math.floor((chartAnchor - 60_000) / 60_000) * 60, 99, 101, 100, 100.5, 3]] }),
     'GET /derivatives/api/v3/instruments': { json: H.KF_INSTRUMENTS }, 'GET /derivatives/api/v3/tickers': (req) => ({ json: H.kfTickers({ symbol: req.query.symbol }) }), 'GET /derivatives/api/v4/historicalfundingrates': () => ({ json: { rates: [{ timestamp: new Date(now() - 3_600_000).toISOString(), fundingRate: 0.00005, relativeFundingRate: 0.00001 }] } }),
     'GET /api/v3/coins/list': { json: H.COINGECKO_LIST }, 'GET /api/v3/coins/markets': () => ({ json: H.coingeckoMarkets().map((m) => ({ ...m, last_updated: new Date(now() - 60_000).toISOString() })) }),
     'GET /stablecoins': { json: H.DEFILLAMA_STABLECOINS },
@@ -72,8 +79,16 @@ test('A09/B02. STANDALONE owner: real streams over loopback + REST fixtures -> s
     await H.waitFor(() => owner.status().counters.observations > 40 && owner.status().streams.KRAKEN_SPOT?.trades >= 3 && owner.status().streams.COINBASE_SPOT?.trades >= 2, { timeoutMs: 8000 });
     // A02 re-poll law: a forced second acquisition of the chart family returns the same committed bars again; none is a new observation
     const chartObs = () => owner.observations().filter((o) => o.endpointId === 'rest-ohlc' || o.endpointId === 'rest-candles').length; // the streams keep flowing meanwhile: count the polled family only
-    const nBefore = chartObs(); const dupBefore = owner.status().counters.duplicateRecords; const again = await owner.acquire('SPOT_PRICE_CHART', 'BTC', { force: true }); assert.ok(again.observations.length >= 30, 'the provider answered again');
-    assert.equal(chartObs(), nBefore, 'identical re-polled source records are not new observations'); assert.ok(owner.status().counters.duplicateRecords - dupBefore >= 30, 'duplicates are counted, never silently written');
+    const nBefore = chartObs(); const dupBefore = owner.status().counters.duplicateRecords;
+    // B-14: force the chart re-poll several times, each landing at a later wall clock. With the chart fixtures anchored to a
+    // fixed past minute, every re-poll returns byte-identical committed bars, so the content-based dedup suppresses ALL of
+    // them regardless of arrival timing — the observation count stays put and only the duplicate counter grows. This is the
+    // determinism the intermittent 182-vs-181 flake violated when the fixture was `now()`-anchored.
+    for (let pass = 0; pass < 3; pass += 1) {
+      const again = await owner.acquire('SPOT_PRICE_CHART', 'BTC', { force: true }); assert.ok(again.observations.length >= 30, 'the provider answered again');
+      assert.equal(chartObs(), nBefore, `identical re-polled source records are not new observations (pass ${pass})`);
+    }
+    assert.ok(owner.status().counters.duplicateRecords - dupBefore >= 90, 'every re-polled duplicate is counted, never silently written');
     const before = owner.status(); assert.equal(before.streams.KRAKEN_SPOT.synced, 1); assert.ok(before.clients.KRAKEN_DERIVATIVES.counters.ok >= 1); assert.equal(before.clients.COINGLASS.counters.requests, 0, 'a disabled paid provider is never called');
     const stopped = await owner.stop({ seal: true, policyNonsecret: policy }); assert.ok(stopped.sealed); assert.equal(fx.http.requests.every((r) => r.host !== 'open-api-v4.coinglass.com'), true);
     const cap = readCapture(captureDir); assert.ok(cap.observations.length > 40); assert.ok(cap.observations.some((o) => o.kind === 'TRADE' && o.provider === 'KRAKEN_SPOT') && cap.observations.some((o) => o.kind === 'TRADE' && o.provider === 'COINBASE_SPOT') && cap.observations.some((o) => o.kind === 'BOOK_SNAPSHOT') && cap.observations.some((o) => o.kind === 'DERIVATIVE_TICK') && cap.observations.some((o) => o.kind === 'STABLECOIN_METRIC'));

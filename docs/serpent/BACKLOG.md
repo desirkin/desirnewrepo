@@ -140,12 +140,13 @@ paper account. (Mirrors the gated queue tickets Strategy 9 GRO, L-3a, R-SRF, L-3
   weeks of L-3a records; evaluation is read-only over the holdout-respecting record; no live
   influence; full suite green + gate 0.
 
-## B-14. Harden the market-lab-owner A09/B02 real-stream re-poll dedup (flake)
-**Do:** `test/market-lab-owner.test.js` A09/B02 (STANDALONE owner over real loopback WS +
-REST fixtures) intermittently miscounts an identical re-polled source record as a new
-observation (seen once as 182 vs 181; passes 3/3 in isolation and on a clean re-run). Make
-the re-poll dedup timing-robust so the observation count is deterministic regardless of WS
-arrival interleaving — the dedup key must not depend on wall-clock arrival order.
-**Acceptance:** the test is deterministic across ≥ 20 back-to-back runs and under the full
-concurrent suite (no off-by-one); the dedup is proven by an injected-timing unit case; the
-durable observation is never dropped, only the duplicate suppressed; full suite green + gate 0.
+## B-14. DONE — 2026-09-16: the A09/B02 re-poll dedup is deterministic; root cause was a `now()`-anchored fixture.
+Root cause: the owner's dedup key is already content-based and correct (`provider|endpoint|subject|kind|sourceKey|
+sourceRevision|payloadDigest`). The flake was the TEST fixture — the kraken-OHLC and coinbase-candles routes anchored
+their bars to `now()` PER REQUEST, so a forced re-poll a moment later crossed a wall-clock minute boundary (or flipped
+the boundary bar provisional→closed via the OHLC provider's `closeTs > receivedTs`), returning genuinely different bars
+that the dedup correctly counted as new. Fix (test-only, no production change): anchor both chart fixtures to a FIXED,
+minute-aligned, few-minutes-past timestamp captured once per `fixtures()` instance, so every re-poll returns
+byte-identical, wall-clock-committed bars. The A09/B02 re-poll now forces the chart THREE times, each at a later wall
+clock, and asserts the observation count stays put every pass while the duplicate counter grows (≥90). Verified
+deterministic across 36 parallel-loaded runs (0 failures). Full suite green + gate 0.
