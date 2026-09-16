@@ -13,7 +13,7 @@ localPort = 3000
 externalPort = 80
 
 [deployment]
-run = ["npm", "run", "data:only-ui"]
+run = ["npm", "run", "paper"]
 deploymentTarget = "vm"
 
 [userenv]

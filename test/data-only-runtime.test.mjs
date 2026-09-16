@@ -103,12 +103,14 @@ test('data-only news uses official feeds only and withholds unverified publisher
   assert.match(source, /SEC_OFFICIAL:\s*officialFeed\('SEC_OFFICIAL'\)/);
 });
 
-test('Replit run and deployment commands select the ONE-process data-only entry, not the paper runtime (runtime unification step 4)', () => {
+test('Replit workspace run stays the ONE-process data-only preview; the deployment run is the PAPER runtime (PAPER-FLIP)', () => {
   const replit = readFileSync(path.join(root, '.replit'), 'utf8');
   const shim = readFileSync(path.join(root, 'tools', 'data-only-with-ui.mjs'), 'utf8');
+  // the workspace preview stays data-only (no orders, no paper account); PAPER-FLIP moved ONLY the [deployment] run to
+  // `npm run paper` — the live paper runtime that David's Republish enters. The workspace run line is unchanged.
   assert.match(replit, /^run = "npm run data:only-ui"/m);
-  assert.match(replit, /\[deployment\][\s\S]*run = \["npm", "run", "data:only-ui"\]/);
-  assert.doesNotMatch(replit, /npm run paper|paper run/);
+  assert.match(replit, /\[deployment\][\s\S]*run = \["npm", "run", "paper"\]/);
+  assert.doesNotMatch(replit, /\[deployment\][\s\S]*run = \["npm", "run", "data:only-ui"\]/, 'the deployment no longer runs the data-only entry');
   // the two-process supervisor is retired: the deployment entry pins the safety posture, then enters the one root,
   // which runs the spine and serves the cockpit in-process (no child process, no second pump, no port race)
   assert.match(shim, /SERPENT_DATA_ONLY:\s*'true'/);
