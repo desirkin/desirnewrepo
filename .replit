@@ -48,6 +48,7 @@ DISCOVERY_ENABLED = "true"
 # paper tape at 515MB (boot f7173376). The learning study child sets its own bounded ceiling and never inherits this.
 NODE_OPTIONS = "--max-old-space-size=1400"
 SERPENT_TAPE_WRITE_BEHIND = "true"
+SERPENT_CPU_PROFILE = "true"
 
 [postMerge]
 path = "scripts/post-merge.sh"

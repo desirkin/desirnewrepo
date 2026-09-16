@@ -27,6 +27,7 @@ import { startMemoryMirror } from './memory/mirror.js';
 import { openPaperRuntime, startDataOnlyRuntime } from './lib/serpent-runtime.js';
 import { initPaperAccountAtBoot } from './lib/paper-account-init.js';
 import { logBootSelfCheck, startMemoryReport } from './lib/boot-self-check.js';
+import { startCpuProfileReport } from './lib/cpu-profile-report.js';
 import { createDeepMarketSource } from './market-lab/deep-market-adapter.js';
 
 const SERPENT_MODE = process.env.SERPENT_DATA_ONLY === 'true' ? 'DATA_ONLY'
@@ -88,6 +89,8 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // name only, secret NAMES present) and then reports memory once a minute — so a stalled deployment explains itself.
   logBootSelfCheck({ env: process.env, log: console.log });
   startMemoryReport({ log: console.log });
+  // PUBLISH-FIX-10 diagnostic: opt-in main-thread sampling so a blocked loop names the code that blocked it.
+  if (process.env.SERPENT_CPU_PROFILE === 'true') startCpuProfileReport({ log: console.log });
   // SERPENT PAPER profile (COBRA_PROFILE, applied by `cobra paper run`): the composition
   // below is unchanged; the profile only sets the documented enables and forces JUDGE_MODE=PAPER / no private / no orders.
   console.log(`PROFILE ${process.env.COBRA_PROFILE} — JUDGE_MODE ${process.env.JUDGE_MODE ?? 'unset'} · allowPrivate ${process.env.JUDGE_ALLOW_PRIVATE ?? 'unset'} · allowOrders ${process.env.JUDGE_ALLOW_ORDERS ?? 'unset'}`);
