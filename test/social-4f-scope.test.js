@@ -151,7 +151,7 @@ test('SCOPE-5 (7). research configuration is closed: no wildcard, bounded caps, 
   ]) { const r = bad(sec); assert.equal(r.ok, false, JSON.stringify(sec)); assert.match(r.reason, /^CONFIG_INVALID: /); assert.match(r.reason, re, JSON.stringify(sec)); assert.equal(r.research.localAdmission.mode, 'NOT_CONFIGURED', 'fail closed'); }
   const stricter = bad({ xWatch: { mode: 'EXPLICIT_STATIC', maxAssets: 3, tickers: ['SOL', 'BTC'] } }); assert.equal(stricter.ok, true); assert.deepEqual(stricter.research.xWatch.tickers, ['BTC', 'SOL']); assert.equal(stricter.research.xWatch.maxAssets, 3);
   // the config file: exactly ONE intentional addition; every pre-existing key deep-equal to the committed baseline
-  const baseline = JSON.parse(execSync('git show 9c173729be979202b7feba822aba59ca383314dc:cobra.config.json', { cwd: REPO, encoding: 'utf8' }));
+  const baseline = JSON.parse(readFileSync(path.join(REPO, 'test/fixtures/scope-baseline-9c17372/cobra.config.json'), 'utf8'));
   const current = JSON.parse(readFileSync(path.join(REPO, 'cobra.config.json'), 'utf8'));
   assert.ok(!('socialResearch' in baseline)); assert.deepEqual(Object.keys(current).filter((k) => !(k in baseline)), ['socialResearch']);
   // ONE audited value change since the 9c17372 pin: paper.baseBalanceUsd 100 -> 500 (2026-09-13, Replit data-only series) aligns the
@@ -285,17 +285,39 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
   };
+  // R2-3: the 9c17372 baseline is committed, not read from `git show`, so the fence
+  // survives a shallow clone or a rewritten ancestor (CI checks out no deep history).
+  // The two AUTHORIZED_DELTA files whose committed content is diffed line-by-line are
+  // stored whole under test/fixtures/scope-baseline-9c17372/; every other pinned file
+  // needs only its digest, so its 9c17372 sha256 is pinned here (each verified byte-equal
+  // to `git show 9c17372:<f>` when it was captured). A change to any pinned file still
+  // turns its assertion red — the fence is unchanged, only its baseline source moved.
+  const FIXTURE_DIR = path.join(REPO, 'test/fixtures/scope-baseline-9c17372');
+  const baseline9c17372 = (f) => readFileSync(path.join(FIXTURE_DIR, f), 'utf8');
+  const PROTECTED_9C17372_DIGEST = {
+    'survey/eyecore.js': '0e8dc39627f231f5b1279d62a6cda222b5cd3d97b39c626c5c3da12fac16ce60',
+    'cost/model.js': '1592c524274eb7617e1a839811884fef108081c22a3622b0cb3afa79cfa8274f',
+    'rumor2/social-reconcile.js': '0e488b7e35095338d6283a50dc13e54a0d52684a8d83e6936e9c201c5ce03c4d',
+    'rumor2/social-view.js': '238b9f86425f999c09d3af99b5b2c637aa41d19d87be59405320d34b8f1b663f',
+    'rumor2/x-stream.js': '5a21881ea009f2be65a47de3c39842951fde4c517163f39534dde713499cfb43',
+    'rumor2/providers/bluesky-official.js': '8c8403e553961fe4024c57101b386ef16c0084621f5f5126974420c0c2182fdd',
+    'rumor2/providers/farcaster-official.js': '47d8e8c3ce6ab5bf4993b7a3f7fb6ea312bb6b916e39139b47641aed6879feea',
+    'rumor2/social-reddit.js': 'a451febebb1c9f19ad59431ccee640ced220633b3775f340ee574d3c688372f6',
+    'rumor2/social-farcaster-access.js': 'f8639f75d8894caaee8d163b7f7c07107f2c11251531415fa35e20301f3a3209',
+    'doctrine/MISSION.md': 'fc337cd1778837595b4e5f57ce58a2d4dc21acd7f04f33a69fefc24e59bcb69f',
+    'package-lock.json': '85ade4bd1ce094c37c89574a0adbe4e057e7d1a39358c45dcc3336925ee4ac6e',
+  };
   for (const f of pinned) {
-    const committed = execSync(`git show 9c173729be979202b7feba822aba59ca383314dc:${f}`, { cwd: REPO, encoding: 'buffer' });
     if (REPINNED[f] || !AUTHORIZED_DELTA[f]) {
-      // The legacy YouTube foundation descriptor is an intentional merged
-      // authority-boundary restoration; pin its complete resulting bytes
-      // rather than treating the older 9c17372 checkout as the authority.
-      const protectedDigest = REPINNED[f] ?? createHash('sha256').update(committed).digest('hex');
+      // Byte-identity fence: the file must equal its 9c17372 baseline. REPINNED files
+      // carry their own post-9c17372 authorized digest; every other digest-only file is
+      // pinned above. Either way the digest is the authority — no dependency on git history.
+      const protectedDigest = REPINNED[f] ?? PROTECTED_9C17372_DIGEST[f];
+      assert.ok(protectedDigest, `${f}: no pinned 9c17372 digest`);
       assert.equal(sha(f), protectedDigest, `${f} protected digest`);
       continue;
     }
-    const before = committed.toString('utf8').split('\n'); const after = readFileSync(path.join(REPO, f), 'utf8').split('\n');
+    const before = baseline9c17372(f).split('\n'); const after = readFileSync(path.join(REPO, f), 'utf8').split('\n');
     const count = (lines) => { const m = new Map(); for (const l of lines) m.set(l, (m.get(l) ?? 0) + 1); return m; };
     const b = count(before); const a = count(after);
     const added = []; const removed = [];
