@@ -267,9 +267,37 @@ function pendingStrikes() {
 // RUMINT-R1: hyped is the ONE canonical snapshot {state, count, symbols,
 // sessionDate} — count is null (H?) whenever the state is not READY/EMPTY,
 // so the header can never show a false H0 while the room shows nothing.
+// PUBLISH-FIX-37 (2026-09-17): the EARS tile read only the retired RUMINT (StockTwits) poller's file and said OFF while the
+// real ear — RUMOR-2, the official/social ears + research strainer (on the second lane since fix36) — was running. When
+// the legacy file is absent the tile now reads RUMOR-2's own atomic status file: ON with the count of listening providers
+// and the social ear's state, fresh within its 5-minute heartbeat. Read-only, no authority, nothing else changes.
+function rumor2EarsReport() {
+  const file = path.join(dataDir(), 'rumor2', 'status.json');
+  if (!existsSync(file)) return { enabled: false };
+  try {
+    const s = JSON.parse(readFs(file, 'utf8'));
+    const ts = Number.isSafeInteger(s?.tsMs) ? s.tsMs : 0;
+    const providers = s?.providers && typeof s.providers === 'object' ? Object.values(s.providers) : [];
+    const listening = providers.filter((p) => p && p.enabled === true).length;
+    const social = s?.social && typeof s.social === 'object' ? s.social : null;
+    return {
+      enabled: true,
+      ear: 'RUMOR2',
+      status: typeof s?.lifecycle === 'string' ? s.lifecycle : null,
+      symbolsPolled: listening + (social && social.enabled === true ? 1 : 0), // listening ears, not symbols — the tile shows a count
+      symbolsReady: null,
+      hourCount: providers.reduce((n, p) => n + (Number.isSafeInteger(p?.itemsObserved) ? p.itemsObserved : 0), 0),
+      backoff: false,
+      hyped: null, // RUMINT's HYPED snapshot belongs to the retired poller; never faked here
+      fresh: ts > 0 && Date.now() - ts < 300_000,
+    };
+  } catch {
+    return { enabled: false };
+  }
+}
 function rumintReport() {
   const file = path.join(dataDir(), 'rumint', 'status.json');
-  if (!existsSync(file)) return { enabled: false };
+  if (!existsSync(file)) return rumor2EarsReport();
   try {
     const s = JSON.parse(readFs(file, 'utf8'));
     const h = s.hyped && typeof s.hyped === 'object' && !Array.isArray(s.hyped) ? s.hyped : null;
@@ -729,7 +757,11 @@ const server = http.createServer((req, res) => {
     } else if (url.pathname === '/api/ears') {
       // UI-1A: the rumor room — bounded, read-only, nulls stay null
       try {
-        json(res, 200, earsRoom());
+        // PUBLISH-FIX-37: the room's readiness line reads the real ear when the retired RUMINT poller has no file
+        // (attention-view stays fenced from the rumor layer — R2A-71; the overlay is display-only, here)
+        const room = earsRoom();
+        if (!room.status?.enabled) { const r2 = rumor2EarsReport(); if (r2.enabled) room.status = { ...room.status, enabled: true, statusWord: `RUMOR2 ${r2.status ?? ''}`.trim(), symbolsPolled: r2.symbolsPolled, symbolsReady: null, fresh: r2.fresh, ear: 'RUMOR2' }; }
+        json(res, 200, room);
       } catch (err) {
         console.error(`[api/ears] ${err.constructor.name}: ${err.message}`);
         json(res, 200, { status: { enabled: false, fresh: false }, symbols: [], degraded: true });

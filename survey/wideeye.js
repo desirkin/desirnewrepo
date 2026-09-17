@@ -372,6 +372,7 @@ export function startWideEye({
       // SOCIAL-4F: catalog truth beside the sweep — discovery count, never the deep/legacy sets
       catalog: catalogStatus(nowMs),
       archive: { intervalSec: WIDEEYE_ARCHIVE_INTERVAL_SEC, maxBytes: WIDEEYE_ARCHIVE_MAX_BYTES, lastArchiveTs, snapshots: archiveOrdinal, savedObservations: savedObservationCount, error: archiveError },
+      watchdog: { stalls, sweepDeadlineMs, silenceMs }, // PUBLISH-FIX-37: the sweep watchdog's count rides the status
     });
     return ripples;
   }
@@ -387,7 +388,21 @@ export function startWideEye({
   }
 
   let sweeping = false;
-  async function auditedSweep() {
+  // PUBLISH-FIX-37 (2026-09-17): the sweep watchdog. On 2026-09-17 the sweeper went silent twice (07:58–09:29 and from
+  // 09:33 on, ET) — no failure line, no status write, the cockpit tile reading OFF — because one in-flight sweep never
+  // settled and `sweeping` stayed true forever. Every sweep now runs under a hard deadline; a sweep that has not settled
+  // by then is STALLED: counted, logged loudly, disowned (its late completion may not write status or population), and
+  // the sweeper re-arms on the next tick. A second guard watches for silence (no completed sweep in silenceMs) and re-arms
+  // the interval itself, so no cause — known or not — can leave the eye quietly closed. Authority NONE, as before.
+  let sweepToken = 0;
+  let lastSweepCompletedTs = null;
+  let stalls = 0;
+  let lastSilenceLogTs = 0;
+  const sweepSec = cfg.sweepSec ?? 60;
+  const sweepDeadlineMs = Math.max(30_000, Math.min(55_000, sweepSec * 1000 - 5_000));
+  const silenceMs = Math.max(5 * 60_000, sweepSec * 5 * 1000);
+  const staleAttempt = (token) => stopping || token !== sweepToken;
+  async function auditedSweep(token = sweepToken) {
     let auditToken = null;
     if (opportunityAudit && !auditDisabled) {
       try {
@@ -397,21 +412,58 @@ export function startWideEye({
       } catch (err) { auditError = `AUDIT_FRAME_REFUSED:${String(err?.message ?? err).slice(0, 160)}`; }
     }
     const tickers = await fetchJson(TICKER_URL);
+    if (staleAttempt(token)) return { late: true }; // a stalled attempt that finally settled: disowned, never a status write
     const result = sweep(tickers);
+    lastSweepCompletedTs = now();
     if (auditToken !== null && auditToken !== undefined) {
       try { await auditCall(() => opportunityAudit.afterSweep({ auditToken, observation: auditObservations, recordedTs: now() })); }
       catch (err) { auditError = `AUDIT_ANNOTATION_REFUSED:${String(err?.message ?? err).slice(0, 160)}`; }
     }
     return result;
   }
-  const timer = setIntervalImpl(async () => {
+  async function sweepUnderDeadline() {
+    const token = ++sweepToken;
+    let deadline = null;
+    const work = (async () => {
+      if (!keyToCoin.size) await loadWideUniverse({ initial: true });
+      else if (catalogDue(now())) await loadWideUniverse(); // bounded refresh on the existing tick; failures are recorded, never a sweep backoff
+      if (staleAttempt(token)) return { late: true };
+      return auditedSweep(token); // ONE Ticker request, preceded by independent audit sampling
+    })();
+    work.catch(() => {}); // a late rejection of a disowned attempt is not unhandled
+    const stalled = new Promise((resolve) => { deadline = setTimeoutImpl(() => resolve({ stalled: true }), sweepDeadlineMs); });
+    try {
+      const out = await Promise.race([work, stalled]);
+      if (out && out.stalled) {
+        stalls += 1;
+        logEvent('SWEEP_STALLED', { deadlineSec: sweepDeadlineMs / 1000, stalls });
+        log(`[${nowIso()}] WIDE EYE sweep stalled (no completion in ${sweepDeadlineMs / 1000}s) — disowned and re-armed (stalls ${stalls})`);
+        return { stalled: true };
+      }
+      return out;
+    } finally { if (deadline !== null) clearTimeoutImpl(deadline); }
+  }
+  // the silence guard: whatever the cause, an eye that has not completed a sweep in silenceMs says so and re-arms
+  const startedTs = now();
+  let timer = null; // the sweep interval, assigned just below (the guard only ever runs after it exists)
+  const silence = setIntervalImpl(() => {
+    if (stopping) return;
+    const since = lastSweepCompletedTs ?? startedTs;
+    const quiet = now() - since;
+    if (quiet < silenceMs || now() - lastSilenceLogTs < silenceMs) return;
+    lastSilenceLogTs = now();
+    logEvent('SWEEP_SILENT', { quietSec: Math.floor(quiet / 1000), stalls, sweeping, backoffUntil });
+    log(`[${nowIso()}] WIDE EYE silent: no completed sweep for ${Math.floor(quiet / 1000)}s (stalls ${stalls}, in-flight ${sweeping}) — re-arming`);
+    sweepToken += 1; sweeping = false; backoffUntil = 0; backoffMs = 60_000;
+    try { timer.refresh?.(); } catch { /* the interval keeps its own schedule */ }
+  }, 60_000);
+  silence.unref?.();
+  timer = setIntervalImpl(async () => {
     if (sweeping || stopping || now() < backoffUntil) return;
     sweeping = true;
     try {
-      if (!keyToCoin.size) await loadWideUniverse({ initial: true });
-      else if (catalogDue(now())) await loadWideUniverse(); // bounded refresh on the existing tick; failures are recorded, never a sweep backoff
-      await auditedSweep(); // ONE Ticker request, preceded by independent audit sampling
-      backoffMs = 60_000;
+      const out = await sweepUnderDeadline();
+      if (!(out && out.stalled)) backoffMs = 60_000;
     } catch (err) {
       backoffUntil = now() + backoffMs;
       logEvent('SWEEP_ERROR', { error: err.message, backoffSec: backoffMs / 1000 });
@@ -420,14 +472,16 @@ export function startWideEye({
     } finally {
       sweeping = false;
     }
-  }, (cfg.sweepSec ?? 60) * 1000);
+  }, sweepSec * 1000);
   const first = setTimeoutImpl(() => timer.refresh?.() ?? null, 0); // first sweep on schedule; no burst at boot
 
   logEvent('WIDEEYE_STARTED', { sweepSec: cfg.sweepSec, catalogRefreshSec: resource.refreshSec, catalogMaxAgeSec: resource.maxAgeSec, catalogMaxMarkets: resource.maxMarkets, nominationEnabled });
   const stop = () => {
     stopping = true;
     refreshToken += 1; // any in-flight AssetPairs result is disowned
+    sweepToken += 1; // any in-flight sweep is disowned
     clearIntervalImpl(timer);
+    clearIntervalImpl(silence);
     clearTimeoutImpl(first);
     try {
       atomicWriteJson(baselinesFile(), baselines);
@@ -449,6 +503,9 @@ export function startWideEye({
     // only; null until the first sweep completes) — the false-negative denominator seam, never authority
     sweepPopulationSnapshot: () => population,
     opportunityAuditStatus: () => ({ configured: opportunityAudit !== null, disabled: auditDisabled, maxWaitMs: 250, error: auditError }),
+    // PUBLISH-FIX-37: the watchdog's view — last completed sweep, stall count, whether an attempt is in flight
+    health: () => ({ lastSweepCompletedTs, stalls, sweeping, backoffUntil, sweepDeadlineMs, silenceMs }),
+    _internals: { setBackoffUntil: (ts) => { backoffUntil = ts; } }, // test seam for the silence guard
     // test/diagnostic: drive one refresh attempt directly (still bounded by the same law)
     _refreshCatalog: () => loadWideUniverse({ initial: !keyToCoin.size }),
     _sweepOnce: async () => { if (!keyToCoin.size) await loadWideUniverse({ initial: true }); else if (catalogDue(now())) await loadWideUniverse(); await auditedSweep(); },
