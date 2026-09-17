@@ -7,7 +7,7 @@ import { rmSync } from 'node:fs';
 import { tmp, subjects, krakenWsScript, krakenRestFixture, H } from './helpers/market-closeout.js';
 import { createResearchOwner } from '../market-lab/owner.js';
 import { loadPolicy } from '../market-lab/policy.js';
-import { streamingFromEnv, DEFAULT_STREAM_SUBJECTS, DEFAULT_STREAM_DEPTH } from '../tools/data-only-market.mjs';
+import { streamingFromEnv, DEFAULT_STREAM_SUBJECTS, DEFAULT_STREAM_DEPTH, DEFAULT_STREAM_VENUES } from '../tools/data-only-market.mjs';
 
 async function ownerWith({ streaming, log = () => {} }) {
   const http = await krakenRestFixture(); const subs = []; const kws = await H.startWsFixture({ path: '/v2', onConnection: (c) => { c.handlers.push((msg) => { if (msg.method === 'subscribe') subs.push(msg.params); }); krakenWsScript()(c); } });
@@ -24,7 +24,7 @@ test('bounded: only the first maxSubjects declared subjects get a venue stream, 
     await H.waitFor(() => bookSubs(fx.subs).length >= 1, { timeoutMs: 5000 });
     const book = bookSubs(fx.subs); assert.equal(book.length, 1); assert.deepEqual(book[0].symbol, ['BTC/USD']); assert.equal(book[0].depth, 25);
     assert.equal(fx.owner.markets().size, 3, 'all three declared subjects are resolved for REST families');
-    assert.ok(lines.some((l) => /MARKET STREAMS bounded: 1 of 3 subjects streamed \(BTC\) at Kraken depth 25; REST families cover all 3/.test(l)), lines.join('\n'));
+    assert.ok(lines.some((l) => /MARKET STREAMS bounded: 1 of 3 subjects streamed \(BTC\) on KRAKEN_SPOT\+COINBASE_SPOT at Kraken depth 25; REST families cover all 3/.test(l)), lines.join('\n'));
   } finally { await fx.close(); }
 });
 
@@ -38,8 +38,8 @@ test('absent: every resolved subject streams at depth 100 (unchanged behaviour)'
 });
 
 test('the data-only market addition reads the bound from the environment, defaulting to 3 subjects at depth 25', () => {
-  assert.deepEqual(streamingFromEnv({}), { maxSubjects: DEFAULT_STREAM_SUBJECTS, depth: DEFAULT_STREAM_DEPTH });
-  assert.deepEqual(streamingFromEnv({ SERPENT_MARKET_STREAM_SUBJECTS: '0', SERPENT_MARKET_STREAM_DEPTH: '10' }), { maxSubjects: 0, depth: 10 });
-  assert.deepEqual(streamingFromEnv({ SERPENT_MARKET_STREAM_SUBJECTS: 'x', SERPENT_MARKET_STREAM_DEPTH: '-1' }), { maxSubjects: 3, depth: 25 });
-  assert.equal(DEFAULT_STREAM_SUBJECTS, 3); assert.equal(DEFAULT_STREAM_DEPTH, 25);
+  assert.deepEqual(streamingFromEnv({}), { maxSubjects: DEFAULT_STREAM_SUBJECTS, depth: DEFAULT_STREAM_DEPTH, venues: ['KRAKEN_SPOT'] });
+  assert.deepEqual(streamingFromEnv({ SERPENT_MARKET_STREAM_SUBJECTS: '0', SERPENT_MARKET_STREAM_DEPTH: '10', SERPENT_MARKET_STREAM_VENUES: 'KRAKEN_SPOT, COINBASE_SPOT' }), { maxSubjects: 0, depth: 10, venues: ['KRAKEN_SPOT', 'COINBASE_SPOT'] });
+  assert.deepEqual(streamingFromEnv({ SERPENT_MARKET_STREAM_SUBJECTS: 'x', SERPENT_MARKET_STREAM_DEPTH: '-1', SERPENT_MARKET_STREAM_VENUES: 'BINANCE' }), { maxSubjects: 3, depth: 25, venues: ['KRAKEN_SPOT'] });
+  assert.equal(DEFAULT_STREAM_SUBJECTS, 3); assert.equal(DEFAULT_STREAM_DEPTH, 25); assert.deepEqual([...DEFAULT_STREAM_VENUES], ['KRAKEN_SPOT']);
 });

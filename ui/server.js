@@ -553,6 +553,8 @@ function readBody(req, res, cb, maxBytes = 4096) {
   });
 }
 
+// PUBLISH-FIX-20 (review F7): the read routes that disclose account / strategy state — owner session required when control auth is configured.
+export const PRIVATE_READ_ROUTES = Object.freeze(new Set(['/api/accounts', '/api/judge', '/api/ledger/summary', '/api/hunt-trail', '/api/learning', '/api/market-research/case']));
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
@@ -712,6 +714,14 @@ const server = http.createServer((req, res) => {
     if (req.method !== 'GET') {
       json(res, 405, { error: 'METHOD_NOT_ALLOWED' }, { allow: 'GET' });
       return;
+    }
+    // PUBLISH-FIX-20 (independent review F7): read-only is not private. The routes that disclose the account, the
+    // Judge's state, the ledger, the research cases, the hunt trail and the learning memory require the OWNER SESSION
+    // (the same check /api/social/current makes) whenever control auth is configured; with control auth unconfigured
+    // (display-only harness, no password provisioned) there is no owner to authenticate and they stay open as before.
+    // Operational health (/api/status, /api/sensors, the rumor room, the wide eye, the broad market) stays public.
+    if (PRIVATE_READ_ROUTES.has(url.pathname) && auth.configured() && !auth.status(parseCookies(req.headers.cookie)[SESSION_COOKIE]).authenticated) {
+      json(res, 401, { error: 'OWNER_SESSION_REQUIRED', route: url.pathname, authority: 'NONE' }); return;
     }
     if (url.pathname === '/' || url.pathname === '/index.html') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });

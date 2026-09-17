@@ -50,3 +50,15 @@ test('FEE-5. the status names the two env NAMES, present/absent, and carries no 
   const on = feeTierStatus(ENV); assert.equal(on.credentialPresent, true); assert.equal(on.base.taker, 0.004);
   assert.ok(!JSON.stringify(feeTierStatus(ENV)).includes(SECRET));
 });
+
+// PUBLISH-FIX-19 (independent review F1b): null / missing / boolean / empty fee fields are never a verified zero tier.
+test('FEE-6. null, missing, boolean and empty fee fields fall back to FIELDS_MISSING (never a zero-percent ACCOUNT_TIER); a numeric string still resolves', async () => {
+  for (const bad of [{ fee: null }, {}, { fee: true }, { fee: '' }, { fee: 'abc' }]) {
+    const r = await readAccountFeeTier({ env: ENV, fetchImpl: stub({ body: { error: [], result: { fees: { XXBTZUSD: bad }, fees_maker: { XXBTZUSD: bad } } } }).fetchImpl });
+    assert.equal(r.source, 'BASE_SCHEDULE', JSON.stringify(bad)); assert.equal(r.reason, 'FIELDS_MISSING'); assert.equal(r.taker, 0.004);
+  }
+  const nullVol = await readAccountFeeTier({ env: ENV, fetchImpl: stub({ body: { error: [], result: { volume: null, fees: { XXBTZUSD: { fee: null } } } } }).fetchImpl });
+  assert.equal(nullVol.source, 'BASE_SCHEDULE'); assert.equal(nullVol.reason, 'FIELDS_MISSING');
+  const ok = await readAccountFeeTier({ env: ENV, fetchImpl: stub({ body: { error: [], result: { volume: 12, fees: { XXBTZUSD: { fee: '0.35' } }, fees_maker: { XXBTZUSD: { fee: 0.2 } } } } }).fetchImpl });
+  assert.equal(ok.source, 'ACCOUNT_TIER'); assert.equal(ok.takerPct, 0.35); assert.equal(ok.makerPct, 0.2);
+});

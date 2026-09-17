@@ -46,7 +46,13 @@ export function createPaperAdapter({ accountId, clock, feed = null, fee, specOf,
   function observeBook(ev) {
     const { symbol, snapshot, changes } = ev;
     if (snapshot.kind === 'SNAPSHOT') { const first = !firstSnapshotSeen.has(symbol); firstSnapshotSeen.add(symbol); if (!first) { for (const [k, d] of depletion) if (k.startsWith(`${symbol}|`) && !M.isZero(d.consumed) && !d.uncertain) { d.uncertain = true; counters.uncertainLevels += 1; } } for (const side of ['bids', 'asks']) for (const [price] of snapshot[side]) { const d = depletion.get(key(symbol, side, price)); if (d) d.lastObserved = snapshot.receiptTs; } return; }
-    for (const [side, price, qty] of changes ?? []) { const k = key(symbol, side, price); const d = dep(k); if (M.isZero(qty)) { d.tombstone = true; d.lastObserved = snapshot.receiptTs; continue; } if (d.tombstone) { d.generation += 1; d.consumed = '0'; d.uncertain = false; d.tombstone = false; } d.lastObserved = snapshot.receiptTs; }
+    // PUBLISH-FIX-17 (independent review F4): the depletion map holds ONLY levels that carry safety information — a
+    // consumed quantity or a continuity-loss mark. A level nothing was ever taken from answers `available` identically
+    // whether or not it has an entry, so it gets none; its removal (Q = 0) leaves nothing behind; a consumed level's
+    // removal keeps its tombstone so the generation law (reset only after an explicit removal followed by a newly
+    // observed positive level) still holds; a tombstoned level whose consumption was already reset is dropped. Before,
+    // every distinct price ever displayed stayed in the map and in every checkpoint for the life of the process.
+    for (const [side, price, qty] of changes ?? []) { const k = key(symbol, side, price); const d = depletion.get(k); if (M.isZero(qty)) { if (!d) continue; if (M.isZero(d.consumed) && !d.uncertain) { depletion.delete(k); continue; } d.tombstone = true; d.lastObserved = snapshot.receiptTs; continue; } if (!d) continue; if (d.tombstone) { d.generation += 1; d.consumed = '0'; d.uncertain = false; d.tombstone = false; } d.lastObserved = snapshot.receiptTs; }
   }
   // walk one side of the sampled book for qty at or better than `cap` (null cap = protective market), honoring depletion
   function walk(pair, snapshot, side, qty, cap) {

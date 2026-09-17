@@ -77,9 +77,15 @@ export function buildDataOnlyMarketPolicy({ env = process.env, policyRaw = null 
 // SERPENT_MARKET_STREAM_DEPTH (default 25, the tape's own depth). REST families cover every declared subject regardless.
 export const DEFAULT_STREAM_SUBJECTS = 3;
 export const DEFAULT_STREAM_DEPTH = 25;
+// PUBLISH-FIX-16b: SERPENT_MARKET_STREAM_VENUES (comma list; default KRAKEN_SPOT). The Coinbase level2 stream ships the
+// FULL book in one snapshot message; strict-parsing it on the main thread stalled production 5 s at a time. Cross-venue
+// Coinbase coverage continues through the bounded REST book in the DISPLAYED_LIQUIDITY sweep.
+export const DEFAULT_STREAM_VENUES = Object.freeze(['KRAKEN_SPOT']);
+const STREAM_VENUES = new Set(['KRAKEN_SPOT', 'COINBASE_SPOT']);
 export function streamingFromEnv(env = process.env) {
   const n = Number.parseInt(env?.SERPENT_MARKET_STREAM_SUBJECTS ?? '', 10); const d = Number.parseInt(env?.SERPENT_MARKET_STREAM_DEPTH ?? '', 10);
-  return { maxSubjects: Number.isInteger(n) && n >= 0 ? n : DEFAULT_STREAM_SUBJECTS, depth: Number.isInteger(d) && d > 0 ? d : DEFAULT_STREAM_DEPTH };
+  const v = typeof env?.SERPENT_MARKET_STREAM_VENUES === 'string' ? env.SERPENT_MARKET_STREAM_VENUES.split(',').map((x) => x.trim()).filter((x) => STREAM_VENUES.has(x)) : null;
+  return { maxSubjects: Number.isInteger(n) && n >= 0 ? n : DEFAULT_STREAM_SUBJECTS, depth: Number.isInteger(d) && d > 0 ? d : DEFAULT_STREAM_DEPTH, venues: v && v.length ? v : [...DEFAULT_STREAM_VENUES] };
 }
 
 export function loadDataOnlyMarketSubjects({ subjectsRaw = null } = {}) {

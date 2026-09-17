@@ -15,8 +15,8 @@ const MARKET_DAYS = [{ marketIdentityDigest: 'd1', candles: [
   { knownAtTs: 900, periodStartTs: 840, periodEndTs: 900, open: 105, close: 110 },
   { knownAtTs: 1060, periodStartTs: 1000, periodEndTs: 1060, open: 111, close: 115 },
 ] }];
-const INPUT = { study: STUDY, marketDays: MARKET_DAYS, detectorParams: { riseThresholdPct: 8 }, horizonMs: 300_000 };
-const inlineResult = () => JSON.parse(JSON.stringify(simulateDailyMoves({ study: STUDY, marketDays: MARKET_DAYS, detector: priceGeometryBreakoutDetector({ riseThresholdPct: 8 }), horizonMs: 300_000 })));
+const INPUT = { study: STUDY, marketDays: MARKET_DAYS, detectorParams: { riseThresholdPct: 8 }, horizonMs: 60 }; // PUBLISH-FIX-18: the one 60 ms forward candle covers a 60 ms horizon (a 300 s horizon is honestly NOT_YET_KNOWN now)
+const inlineResult = () => JSON.parse(JSON.stringify(simulateDailyMoves({ study: STUDY, marketDays: MARKET_DAYS, detector: priceGeometryBreakoutDetector({ riseThresholdPct: 8 }), horizonMs: 60 })));
 
 test('ML-1. the main-lane meter records per-step durations with p50/p95/max, an over-budget count, and never throws on a fast step', () => {
   let t = 0; const meter = createMainLaneMeter({ budgetMs: 10, now: () => t });

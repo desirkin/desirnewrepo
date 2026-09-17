@@ -95,3 +95,24 @@ test('SIM-I1. through the real study: a >8% surge day is classified SURGE_CASE, 
   assert.ok(simSurge, 'the surge case is simulated'); assert.equal(simSurge.fired, true, 'the detector fires on the >8% surge prefix');
   assert.ok(r.counters.firedSimulations >= 1); assert.equal(r.confusion.firedByDisposition.SURGE_CASE >= 1, true);
 });
+
+// PUBLISH-FIX-18 (independent review F3): a KNOWN bite covers the requested horizon with continuous candles.
+test('SIM-F3. the review witness: a five-minute horizon with ONE future one-minute candle is NOT_YET_KNOWN (effective 60 s), never a completed outcome; a gap censors; end-of-day truncation censors; a full contiguous run is KNOWN with both horizons stored', () => {
+  const study = (id, digest) => ({ manifest: { manifestId: 'm' }, cases: [{ caseId: id, marketIdentityDigest: digest, retrospectiveLabels: { disposition: 'SURGE_CASE' }, retrospectiveReplay: { decisionFrames: [frame(7)] } }] });
+  const prefix = []; for (let i = 0; i <= 6; i += 1) prefix.push(mkCandle(i, 100 + i * 2)); // fires at the minute-7 frame
+  // witness: one future candle only
+  const one = simulateDailyMoves({ study: study('one', 'd1'), marketDays: [{ marketIdentityDigest: 'd1', candles: [...prefix, mkCandle(7, 113)] }], horizonMs: 5 * MIN });
+  assert.equal(one.cases[0].fired, true); assert.equal(one.cases[0].bite.state, 'NOT_YET_KNOWN'); assert.equal(one.cases[0].bite.reason, 'HORIZON_NOT_COVERED');
+  assert.equal(one.cases[0].bite.effectiveHorizonMs, 60_000); assert.equal(one.cases[0].bite.requestedHorizonMs, 5 * MIN);
+  assert.equal(one.counters.completedSimulations, 0); assert.equal(one.counters.validSimulationOutcomes, 0); assert.equal(one.counters.notYetKnownSimulations, 1);
+  // end-of-day truncation: four of five minutes present (the day ends) => still not covered
+  const eod = simulateDailyMoves({ study: study('eod', 'd2'), marketDays: [{ marketIdentityDigest: 'd2', candles: [...prefix, mkCandle(7, 113), mkCandle(8, 114), mkCandle(9, 115), mkCandle(10, 116)] }], horizonMs: 5 * MIN });
+  assert.equal(eod.cases[0].bite.state, 'NOT_YET_KNOWN'); assert.equal(eod.cases[0].bite.effectiveHorizonMs, 4 * MIN); assert.equal(eod.counters.validSimulationOutcomes, 0);
+  // a gap inside the window: minute 9 missing => censored, the usable run ends at the gap
+  const gap = simulateDailyMoves({ study: study('gap', 'd3'), marketDays: [{ marketIdentityDigest: 'd3', candles: [...prefix, mkCandle(7, 113), mkCandle(8, 114), mkCandle(10, 116), mkCandle(11, 117)] }], horizonMs: 5 * MIN });
+  assert.equal(gap.cases[0].bite.state, 'OUTCOME_CENSORED'); assert.equal(gap.cases[0].bite.reason, 'CANDLE_GAP'); assert.equal(gap.cases[0].bite.effectiveHorizonMs, 2 * MIN); assert.equal(gap.counters.censoredSimulations, 1); assert.equal(gap.counters.validSimulationOutcomes, 0);
+  // the full contiguous run: KNOWN, effective == requested, the exit is the candle ending exactly at the horizon
+  const full = simulateDailyMoves({ study: study('full', 'd4'), marketDays: [{ marketIdentityDigest: 'd4', candles: [...prefix, mkCandle(7, 113), mkCandle(8, 114), mkCandle(9, 115), mkCandle(10, 116), mkCandle(11, 117), mkCandle(12, 118)] }], horizonMs: 5 * MIN });
+  assert.equal(full.cases[0].bite.state, 'KNOWN'); assert.equal(full.cases[0].bite.effectiveHorizonMs, 5 * MIN); assert.equal(full.cases[0].bite.requestedHorizonMs, 5 * MIN); assert.equal(full.cases[0].bite.exitTs, B + 12 * MIN); assert.equal(full.cases[0].bite.exitPrice, 117);
+  assert.equal(full.counters.completedSimulations, 1); assert.equal(full.requestedHorizonMs, 5 * MIN); assert.equal(DAILY_MOVE_SIMULATOR_VERSION, 'daily-move-simulator-2');
+});

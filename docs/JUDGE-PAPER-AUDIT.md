@@ -61,10 +61,49 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 ```
 FROZEN_FOR_PAPER
 judge/*.js       8b8b84332656812be401efc6e4fb08d86d699af5c3e1582583596553f52f3be5
-execution/*.js   2551fcb6c4d00ee9e708e6740f87b5700e2469549abdef83e43b9cc03f36c16b
+execution/*.js   83c4ce652d38fda80265ae48c702e936331d9c5fc3e6058c64e4a9e85c423dd0
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   f0526120a8797ef53d5aa64e9c955f06a14f42b0bd0d0111afe1894a0d6cb272
+all (48 files)   6166dc44ad3901715a0090b76072ebbd5add2b64c7eae545b4f532eac5994d4f
 ```
+
+### 4.18 Audited change — 2026-09-17 PUBLISH-FIX-19 (independent review F1 / F1b): the paper taker reference is an UNVERIFIED conservative 0.80%; null fee fields are never a verified tier (frozen digests UNCHANGED: judge `8b8b84332656…`, execution `83c4ce652d38…`, watch/watch.js `0c6a43bf…`, all `6166dc44ad39…`)
+
+Scope: `config/judge.paper.json` (+ its byte-identical reference `judge/samples/policy.paper-reference.json` and the
+opt-in `config/judge.paper.starting-styles.json`), `lib/kraken-fee-tier.js`. No frozen file changed. Finding: 4.12
+set the paper taker to 0.40% and called it the verified Kraken Pro base; the review read the public schedule on
+2026-09-16 and found a 0.80% spot taker base tier, and no account tier was ever read for this account. The review's
+witness on the identical book: rate 0.004 => OK at reward/risk 2.21; rate 0.008 => REFUSED at 1.04 — the fee input is
+authoritative and the 0.40% figure was not established. Separately (F1b) `lib/kraken-fee-tier.js` coerced a null /
+missing fee field with `Number()` (null → 0) into a VERIFIED zero-percent ACCOUNT_TIER.
+
+Law now: the paper fee is `0.008` `PAPER_REFERENCE`, labelled in its scheduleId as UNVERIFIED conservative, to be
+replaced ONLY by the owner's own tier read from TradeVolume through the read-only reader (David reads his tier; the
+figure is never assumed). Historical records keep the fee contract they were dispatched under (the fee digest travels
+in every decision and fill; nothing is rewritten). The reader accepts only a number or a numeric string as a fee
+figure; null / missing / boolean / empty / non-numeric fields answer `FIELDS_MISSING` and the base schedule. Proof:
+`test/kraken-fee-tier.test.js` FEE-6 (null / missing / boolean / empty / non-numeric → BASE_SCHEDULE FIELDS_MISSING;
+a numeric string still resolves), `test/judge-five-family-composition-positive.test.js` (all five families still
+qualify their fixtures under 0.8%, fee rate `0.008` recorded), `test/paper-runtime.test.js` P-01 (the paper policy IS
+the reviewed reference byte for byte), `test/judge-starting-styles-composition.test.js` STRAT-C01.
+
+### 4.17 Audited change — 2026-09-17 PUBLISH-FIX-17 (independent review F4): the paper depletion map holds only safety-relevant levels (previous digests: execution `2551fcb6c4d0…`, all `f0526120a879…`; judge `8b8b84332656…` and watch/watch.js `0c6a43bf…` UNCHANGED)
+
+Scope: `execution/paper-adapter.js` `observeBook` only. Finding: every distinct price ever displayed on any admitted
+book created a depletion entry (`dep(k)` on every change) and its removal left a tombstone forever; the review's witness
+(10,000 distinct levels added and removed with zero orders) left 10,000 map entries and 10,000 checkpoint rows. The map
+grew with price diversity for the life of the process, and every paper checkpoint carried it.
+
+Law now: an entry exists only for a level that carries safety information — a consumed quantity or a continuity-loss
+mark. A level nothing was ever taken from answers `available` identically with or without an entry (max(0, Q − 0) = Q),
+so it gets none, and its removal (Q = 0) leaves nothing. A CONSUMED level's removal keeps its tombstone, so the
+generation law (reset only after an explicit removal followed by a newly observed positive level) is unchanged; an
+uncertain level is kept the same way; a tombstoned level whose consumption was already reset is dropped at its next
+removal. `available`, `walk`, `consume`, the fill sampling rule, the continuity-loss marking, the checkpoint format and
+restore are byte-unchanged. Proof: `test/paper-depletion-compaction.test.js` (the review witness → 0 entries, empty
+checkpoint; consumed level survives 500 unrelated levels, keeps its tombstone through removal, restart conserves the
+consumed quantity, re-add is generation 2, reset level dropped at its next removal; continuity loss still marks and
+retains) and `test/judge-adapters.test.js` P09 unchanged. The execution digest moves to `83c4ce652d38…` and the whole
+frozen set to `6166dc44ad39…`, which `test/paper-runtime.test.js` P-08 re-verifies.
 
 ### 4.16 Audited change — 2026-09-17 PUBLISH-FIX-14 (independent review F5): learning wired into the Judge, ranking-only (frozen digests UNCHANGED: judge `8b8b84332656…`, execution `2551fcb6c4d0…`, watch/watch.js `0c6a43bf…`, all `f0526120a879…`)
 

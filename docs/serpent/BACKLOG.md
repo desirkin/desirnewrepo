@@ -134,6 +134,15 @@ entry + re-pin), accept v2 in the worker, land the child-process task, then move
 `lib/learning-ranking-source.js` behind the port. Until then the composed source is the in-process
 validated DECISION view (same law, same digests, no isolation boundary), ranking-only, kill-file armed.
 
+## B-15. RUMOR2 social history retained whole in RAM (after PAPER green)
+
+HEAP SAMPLE (boot 4d9c…, 2026-09-17): `loadRumor2Events repository.js:586` retains 175 MB — the 120,689
+journaled social events are held by the social reconcilers' `targets` maps (annotation binding, keep-first
+dedupe) for the life of the process, ×1 shared, plus ~140 MB of native Set/Map index entries. It grows with
+the journal every day. Ticket: keep only the index digests + a bounded recent window of full events in RAM,
+with an authoritative journal lookup for older targets (the reconciler already has that seam); measure with
+the sampler before/after. PUBLISH-FIX-11's sliced hydration stays.
+
 ## B-13. Post-PAPER research drafts — DO NOT START UNTIL PAPER IS GREEN
 These are research/shadow strategy drafts. **None may begin until PAPER has run green** (a
 live paper account observing + deciding, per PAPER-FLIP.md). They are recorded here so the

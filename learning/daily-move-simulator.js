@@ -10,7 +10,7 @@
 // Authority NONE, purpose RESEARCH_ONLY. It reads the study + the archived candles and emits its OWN simulation record;
 // it never mutates the study (whose counters stay zero-credit), never touches the Judge / Watch / execution / a model /
 // a provider, and is pure and deterministic (no clock, no I/O, no randomness) so an offline run reproduces exactly.
-export const DAILY_MOVE_SIMULATOR_VERSION = 'daily-move-simulator-1';
+export const DAILY_MOVE_SIMULATOR_VERSION = 'daily-move-simulator-2'; // PUBLISH-FIX-18: horizon coverage + continuity law
 export const DEFAULT_BITE_HORIZON_MS = 5 * 60_000; // the 5-minute bite window (the decision-yardstick horizon)
 
 // A prefix is the closed candles a decision clock could know: knownAtTs at/before the decision, sorted by period end.
@@ -40,14 +40,34 @@ export function priceGeometryBreakoutDetector({ riseThresholdPct = 8 } = {}) {
 // The forward bite, kept strictly separate from the decision: entry = the open of the first candle that OPENS at or
 // after the fire clock (a conservative post-decision fill), exit = the close of the last candle ending at or before the
 // fire clock + horizon. log return in %. Missing entry/exit candles => an honest UNAVAILABLE, never a fabricated zero.
+//
+// PUBLISH-FIX-18 (2026-09-17, independent review F3): a KNOWN outcome now REQUIRES the requested horizon to be covered
+// by a CONTINUOUS run of closed candles from the entry candle to the horizon end. Before, the last available candle
+// ending at or before the horizon was credited as the exit whatever it covered — the review's witness: a five-minute
+// horizon with ONE future one-minute candle was credited as a completed five-minute outcome (effective horizon 60 s).
+// End-of-day truncation and coverage gaps therefore mixed short outcomes into a nominal five-minute study. Now:
+//   - a candle gap between entry and exit           => OUTCOME_CENSORED / CANDLE_GAP        (effectiveHorizonMs recorded)
+//   - the run ends before the horizon (a whole
+//     candle period or more short)                  => NOT_YET_KNOWN  / HORIZON_NOT_COVERED (effectiveHorizonMs recorded)
+//   - the run reaches the horizon                   => KNOWN, with requestedHorizonMs and effectiveHorizonMs both stored.
+// Only KNOWN is counted as completed / valid; censored and not-yet-known rows are counted separately.
 function biteOutcome(candles, fireTs, horizonMs) {
   const entryCandle = candles.filter((c) => c.periodStartTs >= fireTs).sort((a, b) => a.periodStartTs - b.periodStartTs)[0] ?? null;
-  if (!entryCandle || typeof entryCandle.open !== 'number' || !(entryCandle.open > 0)) return { state: 'OUTCOME_UNAVAILABLE', reason: 'NO_POST_DECISION_ENTRY_CANDLE' };
+  if (!entryCandle || typeof entryCandle.open !== 'number' || !(entryCandle.open > 0)) return { state: 'OUTCOME_UNAVAILABLE', reason: 'NO_POST_DECISION_ENTRY_CANDLE', requestedHorizonMs: horizonMs };
   const horizonEndTs = fireTs + horizonMs;
+  const periodMs = entryCandle.periodEndTs - entryCandle.periodStartTs;
   const matured = candles.filter((c) => c.periodEndTs <= horizonEndTs && c.periodEndTs > entryCandle.periodStartTs).sort((a, b) => a.periodEndTs - b.periodEndTs);
-  const exit = matured[matured.length - 1] ?? null;
-  if (!exit || typeof exit.close !== 'number' || !(exit.close > 0)) return { state: 'NOT_YET_KNOWN', reason: 'HORIZON_NOT_COVERED', entryPrice: entryCandle.open };
-  return { state: 'KNOWN', entryPrice: entryCandle.open, exitPrice: exit.close, entryTs: entryCandle.periodStartTs, exitTs: exit.periodEndTs, logReturnPct: Number((100 * Math.log(exit.close / entryCandle.open)).toFixed(4)) };
+  // continuity: the run must chain candle to candle from the entry; the first gap ends the usable run
+  let run = [];
+  for (const c of matured) { const prev = run[run.length - 1] ?? null; if (prev && c.periodStartTs !== prev.periodEndTs) break; if (!prev && c.periodStartTs !== entryCandle.periodStartTs) break; run.push(c); }
+  const exit = run[run.length - 1] ?? null;
+  const effectiveHorizonMs = exit ? exit.periodEndTs - entryCandle.periodStartTs : 0;
+  const base = { requestedHorizonMs: horizonMs, effectiveHorizonMs, entryPrice: entryCandle.open, entryTs: entryCandle.periodStartTs, exitTs: exit?.periodEndTs ?? null };
+  if (!exit || typeof exit.close !== 'number' || !(exit.close > 0)) return { state: 'NOT_YET_KNOWN', reason: 'HORIZON_NOT_COVERED', ...base };
+  if (run.length < matured.length) return { state: 'OUTCOME_CENSORED', reason: 'CANDLE_GAP', ...base };
+  // the horizon is covered when no further whole candle would still end at or before it
+  if (!(periodMs > 0) || horizonEndTs - exit.periodEndTs >= periodMs) return { state: 'NOT_YET_KNOWN', reason: 'HORIZON_NOT_COVERED', ...base };
+  return { state: 'KNOWN', ...base, exitPrice: exit.close, logReturnPct: Number((100 * Math.log(exit.close / entryCandle.open)).toFixed(4)) };
 }
 
 const freeze = (o) => { if (o && typeof o === 'object') { for (const v of Object.values(o)) freeze(v); Object.freeze(o); } return o; };
@@ -61,7 +81,7 @@ export function simulateDailyMoves({ study, marketDays, detector = priceGeometry
   if (typeof detector !== 'function') throw new Error('daily-move-simulator: detector must be a function');
   const candlesByDigest = new Map((Array.isArray(marketDays) ? marketDays : []).map((d) => [d?.marketIdentityDigest, Array.isArray(d?.candles) ? d.candles : []]));
   const cases = [];
-  const counters = { casesWithFrames: 0, framesEvaluated: 0, attemptedSimulations: 0, firedSimulations: 0, completedSimulations: 0, validSimulationOutcomes: 0 };
+  const counters = { casesWithFrames: 0, framesEvaluated: 0, attemptedSimulations: 0, firedSimulations: 0, completedSimulations: 0, validSimulationOutcomes: 0, censoredSimulations: 0, notYetKnownSimulations: 0, unavailableSimulations: 0 };
   const firedByDisposition = {}; const casesByDisposition = {};
   for (const c of study.cases) {
     const frames = c?.retrospectiveReplay?.decisionFrames ?? [];
@@ -83,20 +103,20 @@ export function simulateDailyMoves({ study, marketDays, detector = priceGeometry
       firedByDisposition[disposition] = (firedByDisposition[disposition] ?? 0) + 1;
       const outcome = biteOutcome(candles, fired.decisionTs, horizonMs);
       row.bite = outcome;
-      if (outcome.state === 'KNOWN') { counters.completedSimulations += 1; counters.validSimulationOutcomes += 1; }
+      if (outcome.state === 'KNOWN') { counters.completedSimulations += 1; counters.validSimulationOutcomes += 1; } else if (outcome.state === 'OUTCOME_CENSORED') counters.censoredSimulations += 1; else if (outcome.state === 'NOT_YET_KNOWN') counters.notYetKnownSimulations += 1; else counters.unavailableSimulations += 1;
     }
     cases.push(row);
   }
   return freeze({
     simulatorVersion: DAILY_MOVE_SIMULATOR_VERSION,
     detector: { id: detector.id ?? 'CUSTOM', params: detector.params ?? null },
-    horizonMs,
+    horizonMs, requestedHorizonMs: horizonMs,
     manifestId: study.manifest?.manifestId ?? null,
     cases,
     counters,
     // the detector's split across the day's cohort: how firing lands on surges vs the matched controls (precision proxy)
     confusion: { casesByDisposition, firedByDisposition },
     authority: 'NONE', purpose: 'RESEARCH_ONLY',
-    law: 'the detector sees ONLY the decision-clock prefix; the forward bite is scored separately and NEVER enters the decision; this record is the simulator\'s own — the daily-move study\'s counters stay zero-credit',
+    law: 'the detector sees ONLY the decision-clock prefix; the forward bite is scored separately and NEVER enters the decision; a KNOWN bite covers the requested horizon with continuous candles (requested and effective horizons stored); this record is the simulator\'s own — the daily-move study\'s counters stay zero-credit',
   });
 }

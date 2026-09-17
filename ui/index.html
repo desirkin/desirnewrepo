@@ -1385,6 +1385,7 @@ async function refreshLedger() {
     console.error('LEDGER fetch failed (server unreachable):', err);
     return ledgerError('SHELL LINK LOST — server unreachable');
   }
+  if (res.status === 401) return ledgerError('LOCKED — unlock the owner session to view the ledger'); // PUBLISH-FIX-20 (F7)
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     console.error(`LEDGER HTTP ${res.status}:`, body.slice(0, 300));
@@ -1441,6 +1442,7 @@ function renderResearchCase(c) {
 }
 async function fetchResearch(url) {
   let res; try { res = await fetch(url, { cache: 'no-store' }); } catch (err) { console.error('RESEARCH fetch failed:', err); researchError('SHELL LINK LOST — server unreachable'); return null; }
+  if (res.status === 401) { researchError('LOCKED — unlock the owner session to open a sealed case'); return null; } // PUBLISH-FIX-20 (F7)
   if (!res.ok) { researchError(`RESEARCH ERROR — HTTP ${res.status}`); return null; }
   try { return await res.json(); } catch (err) { console.error('RESEARCH bad JSON:', err); researchError('RESEARCH ERROR — bad response'); return null; }
 }
@@ -1477,7 +1479,7 @@ function renderJudge(d) {
     <div class="rmeta">LAST DECISIONS · REFUSAL CLAUSES · COST</div>${decisions || '<div class="jrow"><span>no decisions yet — NO_TRADE is a successful decision</span></div>'}
     <div class="rmeta">ARMING is a separate authenticated action (${esc(d.arm?.endpoint)}): ${esc((d.arm?.requires ?? []).join(', '))}. Never by ${esc((d.arm?.never ?? []).join(', '))}. Approvals on file: ${esc((d.approvals ?? []).length)}.</div>`;
 }
-async function refreshJudge() { let res; try { res = await fetch('/api/judge', { cache: 'no-store' }); } catch (err) { console.error('JUDGE fetch failed:', err); judgeError('SHELL LINK LOST — server unreachable'); return; } if (!res.ok) { judgeError(`JUDGE ERROR — HTTP ${res.status}`); return; } try { renderJudge(await res.json()); } catch (err) { console.error('JUDGE render error:', err); judgeError('JUDGE RENDER ERROR — see console'); } }
+async function refreshJudge() { let res; try { res = await fetch('/api/judge', { cache: 'no-store' }); } catch (err) { console.error('JUDGE fetch failed:', err); judgeError('SHELL LINK LOST — server unreachable'); return; } if (res.status === 401) { judgeError('LOCKED — unlock the owner session to view the Judge'); return; } if (!res.ok) { judgeError(`JUDGE ERROR — HTTP ${res.status}`); return; } try { renderJudge(await res.json()); } catch (err) { console.error('JUDGE render error:', err); judgeError('JUDGE RENDER ERROR — see console'); } }
 // THREE ACCOUNTS (read-only): a dropdown that switches which of the closed set (David / Cerulean / Cody) the page shows,
 // each read from its own data dir with the R16 binding preserved per account. Never drives posture; the serpent is untouched.
 let accountsCache = null;

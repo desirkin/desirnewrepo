@@ -312,8 +312,13 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
       const streamCoins = Number.isInteger(streaming?.maxSubjects) && streaming.maxSubjects >= 0 ? new Set(subjects.subjects.slice(0, streaming.maxSubjects).map((s) => s.canonicalCoin)) : null;
       const streamed = [...markets.entries()].filter(([coin]) => !streamCoins || streamCoins.has(coin)).map(([, m]) => m);
       const streamDepth = Number.isInteger(streaming?.depth) && streaming.depth > 0 ? Math.min(streaming.depth, limits.bookLevelsPerSide) : Math.min(100, limits.bookLevelsPerSide);
-      if (streamCoins) log(`MARKET STREAMS bounded: ${streamed.length} of ${markets.size} subjects streamed (${[...streamCoins].join(' ') || 'none'}) at Kraken depth ${streamDepth}; REST families cover all ${markets.size}`);
-      const km = streamed.map((m) => m.kraken).filter(Boolean); const cm = streamed.map((m) => m.coinbase).filter(Boolean);
+      // PUBLISH-FIX-16b: `streaming.venues` names which venue streams may open at all (absent = both). Production boot
+      // 4d9c…: a Coinbase level2 snapshot (the full book, megabytes) strict-parsed on the main thread stalled the process
+      // 5 s (MAIN THREAD STACK parseStrictJson <- transport.js sock.onmessage); the REST cross-venue book still covers Coinbase.
+      const venues = Array.isArray(streaming?.venues) ? new Set(streaming.venues) : null;
+      const venueOn = (id) => !venues || venues.has(id);
+      if (streamCoins || venues) log(`MARKET STREAMS bounded: ${streamed.length} of ${markets.size} subjects streamed (${[...(streamCoins ?? new Set(streamed.map((m) => m.kraken?.subject?.canonicalCoin ?? '?')))].join(' ') || 'none'}) on ${[...(venues ?? new Set(['KRAKEN_SPOT', 'COINBASE_SPOT']))].join('+') || 'no venue'} at Kraken depth ${streamDepth}; REST families cover all ${markets.size}`);
+      const km = venueOn('KRAKEN_SPOT') ? streamed.map((m) => m.kraken).filter(Boolean) : []; const cm = venueOn('COINBASE_SPOT') ? streamed.map((m) => m.coinbase).filter(Boolean) : [];
       if (km.length && guard.mayStream('KRAKEN_SPOT', 'ws-v2').ok) { streams.KRAKEN_SPOT = clients.KRAKEN_SPOT.createStream({ markets: km, depth: streamDepth, WebSocketImpl, url: wsUrls.KRAKEN_SPOT ?? null, onTrade: (o) => ingestTrade(o), onBook: (ev) => ingestBook(clients.KRAKEN_SPOT, ev.market, ev), onCoverage: (c) => recordCoverage([c]) }); streams.KRAKEN_SPOT.start(); }
       if (cm.length && guard.mayStream('COINBASE_SPOT', 'ws-feed').ok) { streams.COINBASE_SPOT = clients.COINBASE_SPOT.createStream({ markets: cm, WebSocketImpl, url: wsUrls.COINBASE_SPOT ?? null, onTrade: (o) => ingestTrade(o), onBook: (ev) => ingestBook(clients.COINBASE_SPOT, ev.market, ev), onCoverage: (c) => recordCoverage([c]) }); streams.COINBASE_SPOT.start(); }
       // round-robin: bounded rotation through eligible catalog subjects outside the explicit list (opt-in)
