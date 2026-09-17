@@ -341,8 +341,21 @@ if (SERPENT_MODE === 'DATA_ONLY') {
           for (const a of sweep.attachments) { try { researchStore.append(a); } catch (err) { console.error(`RESEARCH MATURATION append: ${err.message}`); } }
         } catch (err) { console.error(`RESEARCH MATURATION pass: ${err.message}`); }
       };
-      const runOnce = () => recorder.tick().then(runResearch).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
+      // PUBLISH-FIX-29 (owner directive): recording confirmations IS learning even when the Judge's choice does not change —
+      // the ledger line names what was learned: decisions scored, outcomes known / unavailable, research horizons matured.
+      let ledger = { recorded: store.count(), matured: researchStore.latestAttachments().size, lastLogTs: 0 };
+      const logLedger = (summary, force = false) => {
+        const recorded = store.count(); const matured = researchStore.latestAttachments().size; const now = Date.now();
+        const changed = recorded !== ledger.recorded || matured !== ledger.matured;
+        if (!changed && !force && now - ledger.lastLogTs < 15 * 60_000) return;
+        const delta = recorded - ledger.recorded; const dm = matured - ledger.matured;
+        const active = learningRankingStore ? [...learningRankingStore.activationHeads().values()].filter((a) => a.state === 'ACTIVE_PAPER').length : null;
+        console.log(`LEARNING LEDGER: ${recorded} paper decisions scored (5m bite + 15m continuation)${delta ? ` (+${delta}: ${summary?.recorded ?? delta} scored, ${summary?.unavailable ?? 0} outcome unavailable)` : ''}; ${matured} carry matured 1h/4h/24h research horizons${dm ? ` (+${dm})` : ''}; ${summary?.pendingSeq ? 'more decisions maturing' : 'nothing pending'}${active === null ? '' : `; memory: ACTIVE_PAPER activations ${active}`} — every scored outcome is learning, whether or not the Judge's choice changed`);
+        ledger = { recorded, matured, lastLogTs: now };
+      };
+      const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
       decisionOutcomeTimer = setInterval(runOnce, 60_000); if (typeof decisionOutcomeTimer?.unref === 'function') decisionOutcomeTimer.unref();
+      setTimeout(() => { try { logLedger(recorder.status(), true); } catch { /* the ledger line is informational */ } }, 120_000).unref?.();
       void runOnce();
       console.log('LEARNING DATA CLOCK active (dormant, authority NONE): recording the 5m bite + 15m continuation of every PAPER decision, and maturing the 1h/4h/24h research horizons');
     } catch (err) { console.error(`LEARNING DATA CLOCK failed to start (dark; nothing else affected): ${err.message}`); decisionOutcomeTimer = null; }
