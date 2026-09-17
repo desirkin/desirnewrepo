@@ -120,12 +120,19 @@ const TOKEN_DELIM_RE = /(?:(?![$#./-])[\s\p{P}\p{S}\p{Z}\p{Cc}])+/u;
 // Deterministic admission of ONE post text under ONE scope. Returns { match, reasons,
 // candidates, unresolved }. `reasons` is the bounded string list the intake records as
 // `matchedBy`; candidates are sorted by base; unresolved tokens are bounded research notes.
+// PUBLISH-FIX-11d: the term set and alias map of a scope are built ONCE per (frozen) scope object, not once per post —
+// on the live Bluesky firehose that rebuild (~600 terms + aliases per post) was 13% of the paper process's CPU.
+const SCOPE_LOOKUPS = new WeakMap();
+const lookupsOf = (scope) => {
+  let l = SCOPE_LOOKUPS.get(scope);
+  if (!l) { l = { bases: new Set(scope.terms), aliasMap: new Map(scope.aliases.map((a) => [a.alias, a.base])) }; SCOPE_LOOKUPS.set(scope, l); }
+  return l;
+};
 export function admitSocialText(scope, { text, nativeAuthorId = null } = {}) {
   const reasons = []; const candidates = new Map(); const unresolved = new Map();
   if (scope && nativeAuthorId !== null && scope.watchAuthorIds.includes(nativeAuthorId)) reasons.push('watch-author');
   if (scope && typeof text === 'string' && text.length > 0) {
-    const bases = new Set(scope.terms);
-    const aliasMap = new Map(scope.aliases.map((a) => [a.alias, a.base]));
+    const { bases, aliasMap } = lookupsOf(scope);
     const raw = stripNoise(text.slice(0, MAX_SOCIAL_TEXT_CHARS)).split(TOKEN_DELIM_RE).filter(Boolean).slice(0, MAX_TOKENS);
     const tokens = raw.map((t) => (ASCII_RE.test(t) ? t.replace(/^[./-]+|[./-]+$/g, '') : '')).filter((t) => t.length > 0); // a token carrying ANY non-ASCII code point is dropped whole
     const lower = tokens.map((t) => t.toLowerCase());
