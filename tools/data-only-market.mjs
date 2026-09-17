@@ -72,6 +72,16 @@ export function buildDataOnlyMarketPolicy({ env = process.env, policyRaw = null 
   return loadPolicy(raw);
 }
 
+// PUBLISH-FIX-16: the venue WebSocket streams of this STANDALONE owner are bounded by env — SERPENT_MARKET_STREAM_SUBJECTS
+// (default 3: the first three declared subjects, as the registry shipped before PUBLISH-FIX-13 widened it to 16) and
+// SERPENT_MARKET_STREAM_DEPTH (default 25, the tape's own depth). REST families cover every declared subject regardless.
+export const DEFAULT_STREAM_SUBJECTS = 3;
+export const DEFAULT_STREAM_DEPTH = 25;
+export function streamingFromEnv(env = process.env) {
+  const n = Number.parseInt(env?.SERPENT_MARKET_STREAM_SUBJECTS ?? '', 10); const d = Number.parseInt(env?.SERPENT_MARKET_STREAM_DEPTH ?? '', 10);
+  return { maxSubjects: Number.isInteger(n) && n >= 0 ? n : DEFAULT_STREAM_SUBJECTS, depth: Number.isInteger(d) && d > 0 ? d : DEFAULT_STREAM_DEPTH };
+}
+
 export function loadDataOnlyMarketSubjects({ subjectsRaw = null } = {}) {
   return loadSubjects(subjectsRaw ?? readStrict(DEFAULT_SUBJECTS_FILE, 'market subjects'));
 }
@@ -148,6 +158,7 @@ export async function startDataOnlyMarket({
   ownerMode = 'STANDALONE',
   quotaJournal = null,
   closeDrainMs = undefined,
+  streaming = streamingFromEnv(env),
 } = {}) {
   if (researchRoot === null && !(typeof dataDir === 'string' && dataDir.length)) throw new Error('data-only market requires dataDir or researchRoot');
   if (!Array.isArray(families) || families.some((f) => !DATA_ONLY_MARKET_FAMILIES.includes(f))) throw new Error('data-only market families must be a subset of the closed acquisition list');
@@ -164,7 +175,7 @@ export async function startDataOnlyMarket({
     // closure. Only credentials for an enabled allowlisted source are copied.
     env: Object.fromEntries(Object.values(policy.providers).filter((p) => p.enabled && p.credentialEnv && credentialPresent(p, env)).map((p) => [p.credentialEnv, env[p.credentialEnv]])),
     researchRoot: root, mode: ownerMode, clock, log,
-    fetchImpl, WebSocketImpl, wsUrls, timers, quotaJournal,
+    fetchImpl, WebSocketImpl, wsUrls, timers, quotaJournal, streaming,
     ...(closeDrainMs === undefined ? {} : { closeDrainMs }),
   });
   let state = 'STARTING'; let stopping = null; let stopResult = null; let started = null;

@@ -369,7 +369,7 @@
  "resources": {
   "catalogMaxMarkets": 5000,
   "hotSubjects": 64,
-  "tradesPerHotSymbol": 50000,
+  "tradesPerHotSymbol": 10000,
   "hotStateBytes": 67108864,
   "bookLevelsPerSide": 200,
   "bookSampleMinIntervalMs": 500,
@@ -397,7 +397,7 @@
   "wsIdleTimeoutMs": 30000,
   "maxPagesPerRequest": 20,
   "maxRecordsPerRequest": 5000,
-  "retainedObservations": 250000,
+  "retainedObservations": 40000,
   "retainedCoverage": 20000,
   "sealedSegmentIndex": 4096,
   "retainedCaseDescriptors": 1024,
