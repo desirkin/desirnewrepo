@@ -20,7 +20,7 @@
 // Everything is derived from the store's own journals (episodes, outcomes, patterns, prospective), so a restart
 // resumes exactly where the journals say. Every failure is contained per candidate and counted.
 import { DEFAULT_FLOORS, canonicalDigest, utcDateOf } from './contracts.js';
-import { classifyOutcome, nextPatternStep, buildPatternRecord } from './patterns.js';
+import { classifyOutcome, nextPatternStep, buildPatternRecord, BITE_HORIZON_MIN, horizonForScope } from './patterns.js';
 import { freezeCandidate, settleCandidate, PROMOTION_POLICY } from './promotion.js';
 import { replayProspective } from './prospective.js';
 import { evaluatePredicate } from './features.js';
@@ -30,6 +30,15 @@ export const CANDIDATE_ORIGIN = 'CANDIDATE_STUMP';
 export const JUDGE_FACTS = Object.freeze(['rv60', 'fi15', 'fi60', 'spreadBps', 'depthUsd10bps', 'atrPct']);
 export const DEFAULT_MAX_PENDING = 4;
 export const PRIMARY_HORIZON_MIN = 60;
+// PUBLISH-FIX-56 (2026-09-17, independent review f32484ca finding 2): the promotion is judged on the horizon the trade
+// actually lives on. The Judge's setups are scored on the 5-minute BITE (learning/decision-yardstick.js: "did the move
+// we were hunting happen in the 4-6 minutes we would have held it"); the promoter used to freeze every candidate on the
+// 60-minute research horizon, so a lesson could look good over an hour while the short trade it changes would have been
+// poor (or the reverse). Now a Judge-setup cell freezes on the BITE horizon (net of the sealed cost model — a 5-minute
+// scalp must beat the fee both ways), the DAILY_MOVER cell keeps the hour its features describe, and the 15-minute
+// continuation and the 60-minute horizon stay diagnostics on every graded decision.
+export { BITE_HORIZON_MIN, horizonForScope };
+export const metricForHorizon = (h) => `NET_LOG_RETURN_${h}M_PCT`;
 const STUMP_QUANTILES = Object.freeze([0.25, 0.5, 0.75]);
 const STUMP_MIN_IN = 10;
 const STUMP_MIN_IN_FRACTION = 0.3;
@@ -49,12 +58,12 @@ export function netMetricOf(horizon, costModel) {
 }
 
 // items of one cell with a matured 60m outcome: the stump's training table (decision, features, net metric)
-export function cellItems({ episodes, outcomes, scope, costModel }) {
+export function cellItems({ episodes, outcomes, scope, costModel, horizonMin = horizonForScope(scope) }) {
   const items = [];
   for (const e of episodes) {
     if (e.setupType !== scope.setupType || e.regime !== scope.regime) continue;
     const o = outcomes.get(e.opportunityId); if (!o) continue;
-    const h = o.outcomeRow?.horizons?.[`${PRIMARY_HORIZON_MIN}m`];
+    const h = o.outcomeRow?.horizons?.[`${horizonMin}m`];
     const cls = classifyOutcome(h);
     if (cls === 'NOT_YET_KNOWN' || cls === 'UNAVAILABLE') continue;
     items.push({ opportunityId: e.opportunityId, canonicalCoin: e.canonicalCoin, decisionTs: e.decisionTs, evidenceBasis: e.evidenceBasis, outcomeClass: cls, decision: e.decision, features: e.features ?? {}, metric: netMetricOf(h, costModel) });
@@ -132,7 +141,8 @@ export function createPromoter({
         const accumulating = buildPatternRecord({ predicate: stump.predicate, scope: cell.scope, origin: CANDIDATE_ORIGIN, createdTs: head.createdTs, ts: nowTs, seq: head.seq + 1, state: 'ACCUMULATING', previousState: head.state, transitionReason: next.transitionReason, evidence: next.evidence, estimate: next.estimate, contradictions: next.contradictions });
         if (!floorsMet(accumulating.evidence, floors)) { store.appendPattern(accumulating); log(`promoter: stump for ${cell.scope.setupType} noted (${stump.predicate.clauses[0].feature} ${stump.predicate.clauses[0].op} ${stump.predicate.clauses[0].threshold}, lift ${stump.lift}) — its own evidence is below the floors; accumulating`); continue; }
         store.appendPattern(accumulating);
-        const design = freezeCandidate({ store, pattern: store.patternHeads().get(accumulating.patternId), costModel, consumerBinding, nowTs });
+        const horizonMin = horizonForScope(cell.scope);
+        const design = freezeCandidate({ store, pattern: store.patternHeads().get(accumulating.patternId), costModel, consumerBinding, nowTs, primaryHorizonMin: horizonMin, primaryMetric: metricForHorizon(horizonMin) });
         frozen += 1; counters.frozen += 1;
         log(`promoter: CANDIDATE FROZEN for ${cell.scope.setupType} — when ${stump.predicate.clauses[0].feature} ${stump.predicate.clauses[0].op} ${stump.predicate.clauses[0].threshold} (lift ${stump.lift} pct over ${stump.n} matured; ${stump.inItems.length} in-domain); forward test to ${design.terminalGroupTarget} groups begins now (${design.candidateId})`);
         if ([...store.patternHeads().values()].filter((p) => p.state === 'PROSPECTIVE_PENDING').length >= maxPending) break;

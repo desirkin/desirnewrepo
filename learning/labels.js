@@ -18,7 +18,7 @@ import { isTs, isFiniteNum, isCoin, round4, deepFreeze } from './contracts.js';
 
 export const LEARNING_LABEL_RECIPE_VERSION = 'learning-candle-labels-1';
 export const LABEL_HORIZONS_MIN = Object.freeze([1, 3, 5, 15, 30, 60, 240]);
-export const LOG_RETURN_HORIZONS_MIN = Object.freeze([60, 240]);
+export const LOG_RETURN_HORIZONS_MIN = Object.freeze([5, 15, 60, 240]); // PUBLISH-FIX-56: the bite (5m) and continuation (15m) horizons carry a log return too, so a promotion can be judged on the horizon the trade actually lives on
 export const SUPPORTED_ARCHIVE_SCHEMA_VERSIONS = Object.freeze(['childhood-observation-3-b0b']);
 export const SUPPORTED_CHILDHOOD_VERSIONS = Object.freeze(['B0B.2A']);
 const MAX_SANE_OPEN_SEC = 1e11; // seconds, never milliseconds

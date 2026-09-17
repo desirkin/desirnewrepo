@@ -14,7 +14,7 @@ import { createLearningStore } from './store.js';
 import { buildCoverageRow, buildEpisode } from './capture.js';
 import { maturationSweep } from './maturation.js';
 import { createMainLaneMeter } from '../lib/main-lane-meter.js';
-import { classifyOutcome, nextPatternStep, buildPatternRecord } from './patterns.js';
+import { classifyOutcome, nextPatternStep, buildPatternRecord, horizonKeyForScope } from './patterns.js';
 import { planCaptureTick, rollCounters, countCapture, coverageAges, emptyDailyCounters, DEFAULT_DAILY_TARGET } from './continuous.js';
 import { buildDailySummary } from './summary.js';
 import { LEARNING_VERSION, BASELINE_RULE_VERSION, AUTHORITY, PURPOSE, utcDateOf, canonicalDigest } from './contracts.js';
@@ -132,7 +132,7 @@ export function startLearning({
     const items = [];
     for (const e of episodes) {
       const o = outcomes.get(e.opportunityId); if (!o) continue;
-      const cls = classifyOutcome(o.outcomeRow.horizons['60m']);
+      const cls = classifyOutcome(o.outcomeRow.horizons[horizonKeyForScope(e)]); // PUBLISH-FIX-56: the cell is graded on the horizon its setup lives on
       if (cls === 'NOT_YET_KNOWN' || cls === 'UNAVAILABLE') continue;
       items.push({ opportunityId: e.opportunityId, canonicalCoin: e.canonicalCoin, decisionTs: e.decisionTs, evidenceBasis: e.evidenceBasis, outcomeClass: cls, setupType: e.setupType, regime: e.regime, decision: e.decision });
     }

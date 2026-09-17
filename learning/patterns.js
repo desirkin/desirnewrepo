@@ -82,3 +82,10 @@ export function nextPatternStep({ head, evidenceItems, pooledMean, priorStrength
 }
 
 export { classifyOutcome };
+// PUBLISH-FIX-56 (2026-09-17, review finding 2): the outcome horizon a scope is graded, promoted and rolled back on. The
+// Judge's setups live on the 5-minute BITE (learning/decision-yardstick.js); the DAILY_MOVER lessons describe an hour.
+// One rule for the cell (service.js), the promoter (promoter.js) and the steward's rollback (learning-activation-steward.js).
+export const BITE_HORIZON_MIN = 5;
+export const RESEARCH_HORIZON_MIN = 60;
+export const horizonForScope = (scope) => (scope?.setupType === 'DAILY_MOVER' ? RESEARCH_HORIZON_MIN : BITE_HORIZON_MIN);
+export const horizonKeyForScope = (scope) => `${horizonForScope(scope)}m`;

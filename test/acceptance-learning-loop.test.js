@@ -47,7 +47,7 @@ const refused = ({ coin, ts, rv60 }) => ({
 // the tape's verdict an hour later, attached as maturation attaches it (KNOWN 60m horizon)
 const outcomeAttach = (e, logReturnPct, knownAt) => ({
   learningVersion: LEARNING_VERSION, opportunityId: e.opportunityId, labelRecipeVersion: 'learning-candle-labels-1',
-  outcomeRow: { rowId: e.opportunityId, canonicalCoin: e.canonicalCoin, decisionKnownAtTs: e.decisionTs, availability: { state: 'AVAILABLE', reason: null }, horizons: { '60m': { state: 'KNOWN', reason: 'COMPLETE', horizonEndTs: e.decisionTs + HOUR, outcomeKnownAtTs: knownAt, mfePct: Math.max(0, logReturnPct), maePct: Math.min(0, logReturnPct), logReturnPct } } },
+  outcomeRow: { rowId: e.opportunityId, canonicalCoin: e.canonicalCoin, decisionKnownAtTs: e.decisionTs, availability: { state: 'AVAILABLE', reason: null }, horizons: { '5m': { state: 'KNOWN', reason: 'COMPLETE', horizonEndTs: e.decisionTs + 5 * 60_000, outcomeKnownAtTs: knownAt, mfePct: Math.max(0, logReturnPct), maePct: Math.min(0, logReturnPct), logReturnPct }, '60m': { state: 'KNOWN', reason: 'COMPLETE', horizonEndTs: e.decisionTs + HOUR, outcomeKnownAtTs: knownAt, mfePct: Math.max(0, logReturnPct), maePct: Math.min(0, logReturnPct), logReturnPct } } }, // PUBLISH-FIX-56: the Judge's setups are graded, promoted and rolled back on the 5m BITE; the 60m stays a diagnostic
   counterfactual: null, attachedTs: knownAt, supersedes: null, authority: 'NONE', purpose: 'RESEARCH_ONLY',
 });
 // the Judge's prepared facts for a LATER decision (judge.js:314 builds exactly this object for the selector)

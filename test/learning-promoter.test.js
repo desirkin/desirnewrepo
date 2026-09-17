@@ -37,7 +37,7 @@ function outcomeAttach(e, logReturnPct, knownAt) {
   const hz = (state, extra = {}) => ({ state, reason: state === 'KNOWN' ? 'COMPLETE' : 'NOT_YET_KNOWN_AT_AS_OF', horizonEndTs: e.decisionTs + HOUR, outcomeKnownAtTs: knownAt, mfePct: null, maePct: null, logReturnPct: null, ...extra });
   return {
     learningVersion: LEARNING_VERSION, opportunityId: e.opportunityId, labelRecipeVersion: 'learning-candle-labels-1',
-    outcomeRow: { rowId: e.opportunityId, canonicalCoin: e.canonicalCoin, decisionKnownAtTs: e.decisionTs, availability: { state: 'AVAILABLE', reason: null }, horizons: { '60m': hz('KNOWN', { logReturnPct, mfePct: Math.max(0, logReturnPct), maePct: Math.min(0, logReturnPct) }) } },
+    outcomeRow: { rowId: e.opportunityId, canonicalCoin: e.canonicalCoin, decisionKnownAtTs: e.decisionTs, availability: { state: 'AVAILABLE', reason: null }, horizons: { '5m': hz('KNOWN', { horizonEndTs: e.decisionTs + 5 * 60_000, logReturnPct, mfePct: Math.max(0, logReturnPct), maePct: Math.min(0, logReturnPct) }), '60m': hz('KNOWN', { logReturnPct, mfePct: Math.max(0, logReturnPct), maePct: Math.min(0, logReturnPct) }) } }, // PUBLISH-FIX-56: the bite horizon carries the same return in this fixture
     counterfactual: null, attachedTs: knownAt, supersedes: null, authority: 'NONE', purpose: 'RESEARCH_ONLY',
   };
 }
@@ -90,6 +90,8 @@ test('end to end: propose -> freeze -> capture new episodes -> outcomes -> the t
     assert.equal(promoter.step({ nowTs: T0 + 2 * HOUR }).proposed, 0, 'one live stump per scope');
     const design = replayProspective(store.readProspective()).designs.get(stump.candidateId);
     assert.equal(design.consumerBinding.policyDigest, BINDING.policyDigest); assert.equal(design.costModel.feePctPerSide, 0.8);
+    // PUBLISH-FIX-56 (review finding 2): a Judge-setup candidate is sealed on the 5-minute BITE, the horizon the trade lives on
+    assert.equal(design.primaryHorizonMin, 5); assert.equal(design.primaryMetric, 'NET_LOG_RETURN_5M_PCT');
     // 2+3. forward evidence: new in-scope episodes after the seal, captured before their window closes, outcomes once matured
     let now = T0 + 3 * HOUR; let capturedTotal = 0; let outcomesTotal = 0; let settledAt = null;
     const pending = () => [...store.patternHeads().values()].some((p) => p.origin === CANDIDATE_ORIGIN && p.state === 'PROSPECTIVE_PENDING');
@@ -143,4 +145,22 @@ test('a cell below the floors, or with no consumable fact, proposes nothing; fai
     assert.equal(cellItems({ episodes: store.readEpisodes(), outcomes: store.latestOutcomes(), scope: SCOPE, costModel: COST }).length, 16);
     assert.equal(canonicalDigest(SCOPE).length, 64);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// PUBLISH-FIX-56 (review finding 2): one horizon rule for the cell, the promoter and the rollback — the Judge's setups on
+// the 5-minute BITE, the mover lessons on their hour; the metric and the horizon of a sealed design cannot disagree
+test('PUBLISH-FIX-56: horizonForScope names the bite for every Judge setup and the hour for DAILY_MOVER; cellItems reads that horizon; the 5m label carries a log return', async () => {
+  const { horizonForScope, horizonKeyForScope } = await import('../learning/patterns.js');
+  const { cellItems, metricForHorizon } = await import('../learning/promoter.js');
+  const { LOG_RETURN_HORIZONS_MIN } = await import('../learning/labels.js');
+  for (const setupType of ['RANGE_IGNITION', 'ABSORPTION_RECLAIM', 'TREND_PULLBACK_CONTINUATION', 'CATALYST_TRANSMISSION', 'MOMENTUM_CONTINUATION', 'MICRO_BITE']) { assert.equal(horizonForScope({ setupType }), 5, setupType); assert.equal(horizonKeyForScope({ setupType }), '5m'); }
+  assert.equal(horizonForScope({ setupType: 'DAILY_MOVER' }), 60); assert.equal(metricForHorizon(5), 'NET_LOG_RETURN_5M_PCT'); assert.equal(metricForHorizon(60), 'NET_LOG_RETURN_60M_PCT');
+  assert.deepEqual([...LOG_RETURN_HORIZONS_MIN], [5, 15, 60, 240], 'the bite and the continuation carry log returns');
+  // a cell item is graded on the 5m horizon: a 60m-only outcome is not (yet) an item for a Judge setup
+  const e = { opportunityId: 'op', canonicalCoin: 'AAA', decisionTs: T0, evidenceBasis: 'PROSPECTIVE', setupType: 'RANGE_IGNITION', regime: 'LIVE_UNCLASSIFIED', decision: 'SKIPPED', features: {} };
+  const only60 = new Map([['op', { outcomeRow: { horizons: { '60m': { state: 'KNOWN', logReturnPct: 3 } } } }]]);
+  assert.equal(cellItems({ episodes: [e], outcomes: only60, scope: { setupType: 'RANGE_IGNITION', regime: 'LIVE_UNCLASSIFIED' }, costModel: { feePctPerSide: 0.8, slippageBps: 10 } }).length, 0);
+  const with5 = new Map([['op', { outcomeRow: { horizons: { '5m': { state: 'KNOWN', logReturnPct: 2.5 }, '60m': { state: 'KNOWN', logReturnPct: 9 } } } }]]);
+  const items = cellItems({ episodes: [e], outcomes: with5, scope: { setupType: 'RANGE_IGNITION', regime: 'LIVE_UNCLASSIFIED' }, costModel: { feePctPerSide: 0.8, slippageBps: 10 } });
+  assert.equal(items.length, 1); assert.equal(items[0].metric, 2.5 - 1.6 - 0.2, 'the 5m return net of the fee and slippage both ways, not the 60m');
 });
