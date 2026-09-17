@@ -28,3 +28,17 @@ mtime_ms = 1789599363958
 storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/b9144760-e7ba-47c8-93a6-bcf593903b46/6c59b749-036b-41ba-a17c-7e41266706b1"
 storage_version_token = "1789599370530117"
 content_type = "application/octet-stream"
+
+[[outputs]]
+id = "ctOufl48snTJA3Cm4o_Lb"
+uri = "file://exports/serpent-published-082e6f8.zip"
+type = "unspecified"
+title = "Latest Serpent export"
+description = "The exact newest ZIP from the exports folder, last modified September 17, 2026 at 12:18 UTC. SHA-256: 468a16627f65b822c574d39ae6c77cdb91946442e6973390b147bb5ee9ff2bee."
+logical_id = "962e7605-c7d1-4ce1-b01b-46cf98848d1a"
+content_hash = "sha256:468a16627f65b822c574d39ae6c77cdb91946442e6973390b147bb5ee9ff2bee"
+size = 7316955
+mtime_ms = 1789647516222
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/962e7605-c7d1-4ce1-b01b-46cf98848d1a/919d7d40-3bd5-4a88-8ca2-d9ef7c7cf831"
+storage_version_token = "1789649223235007"
+content_type = "application/octet-stream"
