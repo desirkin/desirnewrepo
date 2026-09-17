@@ -23,6 +23,8 @@ import { startRumor2 } from './rumor2/collector.js';
 import { rumintCheckpointStore, rumintBootstrapSource } from './persistence/rumint-checkpoint.js';
 import { rumor2CheckpointStore } from './persistence/rumor2-checkpoint.js';
 import { rumor2JournalStore } from './persistence/rumor2-journal.js';
+import { getPersistence } from './persistence/runtime.js';
+import { startLoopLag } from './lib/loop-lag.js';
 import { startMemoryMirror } from './memory/mirror.js';
 import { openPaperRuntime, startDataOnlyRuntime } from './lib/serpent-runtime.js';
 import { initPaperAccountAtBoot } from './lib/paper-account-init.js';
@@ -408,7 +410,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       // PUBLISH-FIX-43 (2026-09-17): the JUDGE FUNNEL line — 1,040 scored paper decisions and ZERO entries were only visible by
       // reading the bucket. Every 15 min: books/trades seen, crossings -> confirmations -> expired, decisions by status, the
       // top refusal reasons and the candidates that cross most (with their resets/expiries). Read-only; authority NONE.
-      let funnelLogTs = 0; let funnelLast = null;
+      let funnelLogTs = 0; let funnelLast = null; const loopLag = startLoopLag(); // PUBLISH-FIX-50: main-thread stalls, read per funnel line
       const logFunnel = (force = false) => {
         try {
           const now = Date.now(); if (!force && now - funnelLogTs < 15 * 60_000) return; funnelLogTs = now;
@@ -422,7 +424,11 @@ if (SERPENT_MODE === 'DATA_ONLY') {
           const ms = (x) => (x && Number.isFinite(x.p50) ? `p50 ${Math.round(x.p50)} / p95 ${Math.round(x.p95)} / max ${Math.round(x.max)} ms over ${x.count}` : 'no samples');
           let clocks = '';
           try { const dl = judgeRun.dispatcher?.latency?.() ?? null; const ds = judgeRun.dispatcher?.status?.() ?? null; const sl = st.scheduler?.latency ?? null; clocks = `; CLOCKS: journal commit ${ms(dl?.receiptToJournal)} (commits ${ds?.counters?.commits ?? '?'}, queues safety ${ds?.queues?.safety ?? '?'} / entry ${ds?.queues?.entry ?? '?'}); decision queue wait ${ms(sl?.queueWait)}; decision compute ${ms(sl?.compute)}; receipt->decision ${ms(sl?.receiptToDecision)}; scheduler queue-expired ${st.scheduler?.counters?.expired ?? '?'}`; } catch (err) { clocks = `; CLOCKS unavailable (${String(err?.message ?? err).slice(0, 80)})`; }
-          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}`);
+          // PUBLISH-FIX-50: the DATABASE clocks split the commit seconds — pool checkout wait vs the transaction itself (statements,
+          // bytes carried: the whole account state travels twice per commit) vs plain queries (the tape) — and the pool gauge
+          let dbClocks = '';
+          try { const c = getPersistence()?.db?.clocks?.() ?? null; if (c) { const kb = (x) => (x && Number.isFinite(x.p50) ? `p50 ${Math.round(x.p50 / 1024)} / max ${Math.round(x.max / 1024)} KB` : 'no samples'); dbClocks = `; DB: tx ${ms(c.tx)} (statements/tx p50 ${c.txStatements?.p50 ?? '?'}, bytes/tx ${kb(c.txParamBytes)}); pool checkout wait ${ms(c.checkoutWait)} (failures ${c.checkoutFailures}); query ${ms(c.query)}; pool ${c.pool?.total ?? '?'} open / ${c.pool?.idle ?? '?'} idle / ${c.pool?.waiting ?? '?'} waiting of ${c.pool?.max} (${c.pool?.lockSessions} held for life by locks)${c.slowestTx ? `; slowest tx ${c.slowestTx.ms} ms, ${c.slowestTx.statements} statements, ${Math.round(c.slowestTx.paramBytes / 1024)} KB, began '${c.slowestTx.first}'` : ''}`; } } catch (err) { dbClocks = `; DB clocks unavailable (${String(err?.message ?? err).slice(0, 80)})`; }
+          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}`);
         } catch (err) { console.error(`JUDGE FUNNEL line: ${err.message}`); }
       };
       const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); logFunnel(); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));

@@ -60,11 +60,33 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       df462599953cfc4ac7ccd1aef224db6d0cc1feb19708ca1c8865b67a71b93556
+judge/*.js       12508ea61c864ab837dd0d0cc2d942f5e22bdbf3d0949b5508276460d3ac6d44
 execution/*.js   83c4ce652d38fda80265ae48c702e936331d9c5fc3e6058c64e4a9e85c423dd0
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   600eb05e7792f1ea19c5190dd5dfa4bdfcd0e20677d98cce7b6422f9447e9853
+all (48 files)   247e0227dfc5004d48ceba52b8555a5e8168bfd43fa6ecb501cb43a12dbc3b74
 ```
+
+### 4.21 Audited change — 2026-09-17 PUBLISH-FIX-51: a decision cancelled as stale is offered again on the next fresh snapshot inside its own 10 s (previous judge digest `df462599953c…`; now `12508ea61c86…`; execution and watch UNCHANGED)
+
+Finding (production 4dd77a32, JUDGE FUNNEL 17:13 local, first line with the fix47 clocks): 17 confirmed decisions, 10
+cancelled by the scheduler's 100 ms queue rule before they ever ran (`scheduler queue-expired 10`), 0 entries. The rule is
+right — a job that waited more than 100 ms is stale for ITS snapshot (the main thread was blocked; the 25 ms bucket timer
+could not fire) — but `judge.js` marked the episode `submitted` once and never offered it again, so a cancelled episode
+sat idle until its 10 s ran out and was stamped `EXPIRED / PROPOSAL_EXPIRED_10S`. Over the day: 361 of 1,040 decisions.
+
+What changed: `judge/scheduler.js` `submit()` accepts an optional `onStale` and calls it (try/catch, logged) when THAT
+queued job is cancelled as `QUEUE_DELAY_EXPIRED` — unsent work only, the replay record unchanged; `judge/judge.js` passes
+`onStale` from the confirmation path: if the episode is still `PENDING` it clears `submitted`, so the NEXT accepted book
+(`observe` keeps answering `CONFIRMED`) re-submits the decision on a FRESH snapshot with the same key / episode; the
+re-offer is not a second confirmation (`counters.confirmations` unchanged) and is counted as `counters.staleReoffered`.
+
+What did NOT change: the episode's trigger T, its 10 s expiry (`decide()` still refuses `PROPOSAL_EXPIRED_10S` past it,
+`onTick` still expires the tracker), the confirmation law, the 100 ms staleness rule, the price-blind lock order, every
+status / refusal / sizing / risk input. A run with no stall is byte-identical (`test/judge-differential.test.js`
+unchanged); `test/judge-decisions.test.js` J10b pins the scheduler notice (stale only, never superseded, a throwing
+listener is logged) and J10c proves the live path: the same ignition with a 150 ms stall after confirmation now decides
+inside the original 10 s with the same episodes and the same statuses as the unstalled control, where before it died
+to `PROPOSAL_EXPIRED_10S`. Authority NONE changed: the Judge decides sooner, never differently.
 
 ### 4.20 Audited change — 2026-09-17 PUBLISH-FIX-38: the six prepared learning facts ride every decision's measurements (previous judge digest `8b8b84332656…`; now `df462599953c…`; execution and watch UNCHANGED)
 

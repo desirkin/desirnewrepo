@@ -114,3 +114,51 @@ test('J10. 25ms buckets: the same key inside one bucket coalesces to the latest 
   let safety = 0; await S.safety(async () => { safety += 1; }); assert.equal(safety, 1, 'safety work never waits for a bucket');
   const st = S.status(); assert.ok(st.latency.queueWait.count >= 2); assert.equal(st.bucketMs, 25); assert.ok(S.replayLog().some((x) => x.kind === 'SUPERSEDED') && S.replayLog().some((x) => x.kind === 'QUEUE_DELAY_EXPIRED'));
 });
+
+// PUBLISH-FIX-51 (2026-09-17): production 4dd77a32 17:13 local — 17 confirmed decisions, 10 cancelled as stale by the 100 ms
+// queue rule before they ever ran, and a cancelled episode was never offered again: it sat until the 10 s expiry and was
+// stamped EXPIRED. The scheduler now tells the submitter (onStale, unsent work only) and the Judge lets the NEXT fresh
+// snapshot re-offer the still-pending episode; the original T and the 10 s expiry never move.
+test('J10b. scheduler: a job cancelled as stale notifies its submitter with the wait; a superseded job does not; a throwing notice is logged, never fatal', async () => {
+  const c = fakeClock(); const logs = []; const S = createScheduler({ monotonic: c.monotonic, log: (m) => logs.push(m) }); const stale = []; const ran = [];
+  S.submit({ key: 'BTC|ep1', snapshotSeq: 1, receiptMono: c.monotonic(), job: async () => ran.push(1), onStale: (x) => stale.push(x) });
+  S.submit({ key: 'BTC|ep1', snapshotSeq: 2, receiptMono: c.monotonic(), job: async () => ran.push(2), onStale: (x) => stale.push(x) }); // supersedes seq 1 inside the bucket: no stale notice
+  c.advance(25); await S.tick(); await S.drain(); assert.deepEqual(ran, [2]); assert.deepEqual(stale, []);
+  S.submit({ key: 'ETH|ep2', snapshotSeq: 3, receiptMono: c.monotonic(), job: async () => ran.push(3), onStale: (x) => stale.push(x) });
+  S.submit({ key: 'SOL|ep3', snapshotSeq: 4, receiptMono: c.monotonic(), job: async () => ran.push(4), onStale: () => { throw new Error('listener broke'); } });
+  S.submit({ key: 'ADA|ep4', snapshotSeq: 5, receiptMono: c.monotonic(), job: async () => ran.push(5) }); // no listener: unchanged behaviour
+  c.advance(130); await S.tick(); await S.drain();
+  assert.deepEqual(ran, [2], 'all three stale jobs cancelled unsent'); assert.equal(S.status().counters.expired, 3);
+  assert.equal(stale.length, 1); assert.equal(stale[0].key, 'ETH|ep2'); assert.equal(stale[0].snapshotSeq, 3); assert.equal(stale[0].waitedMs, 130);
+  assert.ok(logs.some((m) => m.includes('stale notice SOL|ep3: listener broke')), logs.join(' | '));
+  assert.equal(S.replayLog().filter((x) => x.kind === 'QUEUE_DELAY_EXPIRED').length, 3, 'the replay record is unchanged');
+});
+
+test('J10c. live path: a confirmed decision cancelled as stale (main thread blocked > 100 ms) is re-offered by the next fresh book inside its 10 s and DECIDES, instead of dying to PROPOSAL_EXPIRED_10S', async () => {
+  // the ignition burst as ignite() runs it, but the confirming books are fed WITHOUT a scheduler tick in between; `block` = a
+  // main thread stuck for 150 ms after the confirmation (the production stall), `false` = the control with the same data
+  async function burst(r, { block }) {
+    const price = 100000; const level = 100400; const start = Math.floor(r.clock.now() / 60_000) * 60_000 + 60_000; while (r.clock.now() < start) r.clock.advance(1000);
+    for (let k = 0; k < 20; k += 1) { r.clock.advance(2000); r.trade(price + 50, 'buy', 0.2); } while (r.clock.now() % 60_000 !== 0) r.clock.advance(1000); r.clock.advance(500);
+    await r.judge.onTick(r.clock.now()); await r.dispatcher.idle();
+    for (let i = 0; i < 3; i += 1) { r.book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); r.trade(level + 10, 'buy', 0.1); if (i < 2) r.clock.advance(1050); }
+    await r.dispatcher.idle(); // the hypothesis locks commit; the decision jobs are queued but no bucket has run
+    const n = r.judge.status().counters.confirmations; assert.ok(n >= 1, JSON.stringify(r.judge.status().counters)); assert.equal(r.scheduler.queuedCount(), n, 'every confirmed setup episode waits for the bucket');
+    if (block) {
+      r.clock.advance(150); await r.scheduler.tick(); await r.scheduler.drain(); // stuck 150 ms: the queued jobs are stale and cancelled unsent
+      assert.equal(r.scheduler.status().counters.expired, n, 'QUEUE_DELAY_EXPIRED'); assert.equal(r.judge.status().counters.staleReoffered, n, 'the Judge was told and reopened every offer'); assert.equal(r.judge.decisions().length, 0, 'nothing decided yet');
+      r.book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); // a fresh snapshot ~1.3 s after T: the still-pending episodes are offered again
+      assert.equal(r.scheduler.queuedCount(), n, 're-offered on the fresh snapshot'); assert.equal(r.judge.status().counters.confirmations, n, 'a re-offer is not a new confirmation');
+    }
+    r.clock.advance(25);
+    await r.settle(); return n;
+  }
+  const r = await rig(); await r.warm(); const n = await burst(r, { block: true });
+  const d = r.judge.decisions(); assert.equal(d.length, n, JSON.stringify(r.judge.status().counters));
+  for (const x of d) { assert.notEqual(x.status, 'EXPIRED', x.reasonCodes.join(',')); assert.ok(!x.reasonCodes.includes('PROPOSAL_EXPIRED_10S')); assert.ok(x.decisionKnownAtTs - x.triggerTs <= 10_000, 'inside the original 10 s'); }
+  assert.equal(r.judge.status().counters.staleReoffered, n); assert.equal(r.judge.status().counters.expired, 0, 'no PROPOSAL_EXPIRED_10S');
+  // the control: the same data with no stall decides at the bucket; the stalled run reaches the same statuses on the same episodes (WHEN moved, WHAT did not)
+  const r2 = await rig(); await r2.warm(); await burst(r2, { block: false }); const c2 = r2.judge.decisions();
+  assert.equal(r2.judge.status().counters.staleReoffered, 0); assert.deepEqual(d.map((x) => [x.setupId, x.status]).sort(), c2.map((x) => [x.setupId, x.status]).sort());
+  assert.deepEqual(d.map((x) => x.episodeId).sort(), c2.map((x) => x.episodeId).sort(), 'the original episodes (T) were kept, never restarted');
+});

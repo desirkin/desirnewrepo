@@ -15,18 +15,20 @@ export function createScheduler({ monotonic, anchorMono = null, bucketMs = BUCKE
   const bucketOf = (mono) => Math.floor((mono - anchor) / bucketMs);
   const push = (arr, v) => { arr.push(v); if (arr.length > 2048) arr.shift(); };
   // enqueue the latest eligible expensive job for one underlying / episode; a newer snapshot supersedes the queued one
-  function submit({ key, episodeId = null, snapshotSeq, receiptMono, job }) {
-    const nowM = monotonic(); if (inFlight.has(key)) { const prev = queued.get(key); if (prev) { counters.superseded += 1; replay.push({ kind: 'SUPERSEDED', key, snapshotSeq: prev.snapshotSeq, by: snapshotSeq, bucket: bucketOf(nowM) }); } queued.set(key, { key, episodeId, snapshotSeq, receiptMono, job, queuedMono: nowM }); counters.queued += 1; return { state: 'QUEUED_BEHIND_INFLIGHT' }; }
+  // PUBLISH-FIX-51: onStale (optional) is told when THIS queued job is cancelled as stale (QUEUE_DELAY_EXPIRED) — unsent work
+  // only; the submitter may then offer the episode again on a FRESH snapshot while its original T / 10 s expiry still stand
+  function submit({ key, episodeId = null, snapshotSeq, receiptMono, job, onStale = null }) {
+    const nowM = monotonic(); if (inFlight.has(key)) { const prev = queued.get(key); if (prev) { counters.superseded += 1; replay.push({ kind: 'SUPERSEDED', key, snapshotSeq: prev.snapshotSeq, by: snapshotSeq, bucket: bucketOf(nowM) }); } queued.set(key, { key, episodeId, snapshotSeq, receiptMono, job, onStale, queuedMono: nowM }); counters.queued += 1; return { state: 'QUEUED_BEHIND_INFLIGHT' }; }
     if (queued.has(key)) { const prev = queued.get(key); counters.superseded += 1; replay.push({ kind: 'SUPERSEDED', key, snapshotSeq: prev.snapshotSeq, by: snapshotSeq, bucket: bucketOf(nowM) }); }
     else if (queued.size >= maxQueued) { counters.refusedFull += 1; return { state: 'REFUSED_QUEUE_FULL' }; }
-    queued.set(key, { key, episodeId, snapshotSeq, receiptMono, job, queuedMono: nowM }); counters.queued += 1; return { state: 'QUEUED', bucket: bucketOf(nowM) };
+    queued.set(key, { key, episodeId, snapshotSeq, receiptMono, job, onStale, queuedMono: nowM }); counters.queued += 1; return { state: 'QUEUED', bucket: bucketOf(nowM) };
   }
   // run at a bucket boundary: one job per key; stale queued work is cancelled (unsent) and counted
   async function tick() {
     const nowM = monotonic(); const bucket = bucketOf(nowM); if (lastBucket !== null && bucket === lastBucket) return { ran: 0, bucket, boundary: false }; lastBucket = bucket; let ran = 0;
     for (const [key, q] of [...queued.entries()].sort((a, b) => a[1].receiptMono - b[1].receiptMono || (a[0] < b[0] ? -1 : 1))) {
       if (inFlight.has(key)) continue; queued.delete(key);
-      if (nowM - q.queuedMono > queueExpiryMs) { counters.expired += 1; replay.push({ kind: 'QUEUE_DELAY_EXPIRED', key, snapshotSeq: q.snapshotSeq, waitedMs: nowM - q.queuedMono, bucket }); continue; }
+      if (nowM - q.queuedMono > queueExpiryMs) { counters.expired += 1; replay.push({ kind: 'QUEUE_DELAY_EXPIRED', key, snapshotSeq: q.snapshotSeq, waitedMs: nowM - q.queuedMono, bucket }); if (q.onStale) { try { q.onStale({ key, snapshotSeq: q.snapshotSeq, waitedMs: nowM - q.queuedMono, bucket }); } catch (err) { log(`stale notice ${key}: ${err.message}`); } } continue; }
       push(lat.queueWait, nowM - q.queuedMono); const started = monotonic(); const p = Promise.resolve().then(() => q.job({ bucket, snapshotSeq: q.snapshotSeq })).then((r) => { push(lat.compute, monotonic() - started); push(lat.receiptToDecision, monotonic() - q.receiptMono); return r; }).catch((err) => { log(`scheduled job ${key} failed: ${err?.message ?? err}`); return null; }).finally(() => { inFlight.delete(key); });
       inFlight.set(key, p); counters.run += 1; ran += 1; replay.push({ kind: 'RUN', key, snapshotSeq: q.snapshotSeq, bucket, episodeId: q.episodeId });
     }
