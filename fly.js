@@ -393,7 +393,23 @@ if (SERPENT_MODE === 'DATA_ONLY') {
         console.log(`LEARNING LEDGER: ${recorded} paper decisions scored (5m bite + 15m continuation)${delta ? ` (+${delta}: ${summary?.recorded ?? delta} scored, ${summary?.unavailable ?? 0} outcome unavailable)` : ''}; ${matured} carry matured 1h/4h/24h research horizons${dm ? ` (+${dm})` : ''}; ${summary?.pendingSeq ? 'more decisions maturing' : 'nothing pending'}${active === null ? '' : `; memory: ${memoryLine()} ACTIVE_PAPER activations ${active}`} — every scored outcome is learning, whether or not the Judge's choice changed`);
         ledger = { recorded, matured, lastLogTs: now };
       };
-      const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
+      // PUBLISH-FIX-43 (2026-09-17): the JUDGE FUNNEL line — 1,040 scored paper decisions and ZERO entries were only visible by
+      // reading the bucket. Every 15 min: books/trades seen, crossings -> confirmations -> expired, decisions by status, the
+      // top refusal reasons and the candidates that cross most (with their resets/expiries). Read-only; authority NONE.
+      let funnelLogTs = 0; let funnelLast = null;
+      const logFunnel = (force = false) => {
+        try {
+          const now = Date.now(); if (!force && now - funnelLogTs < 15 * 60_000) return; funnelLogTs = now;
+          const st = judgeRun.judge.status(); const k = st.counters ?? {}; const prev = funnelLast; funnelLast = { ...k };
+          const d = (key) => prev ? ` (+${Math.max(0, (k[key] ?? 0) - (prev[key] ?? 0))})` : '';
+          const byStatus = {}; for (const x of judgeRun.judge.decisions()) byStatus[x.status] = (byStatus[x.status] ?? 0) + 1;
+          const refusals = Object.entries(st.refusals ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([r, n]) => `${r} ${n}`).join(', ') || 'none';
+          const crossers = judgeRun.judge.candidates().map((c) => { let cr = 0, ex = 0, rs = 0; for (const ep of Object.values(c.episodes ?? {})) { cr += ep.counters?.crossings ?? 0; ex += ep.counters?.expired ?? 0; rs += ep.counters?.resets ?? 0; } return { s: c.symbol, cr, ex, rs, books: c.books }; }).filter((x) => x.cr > 0).sort((a, b) => b.cr - a.cr).slice(0, 5).map((x) => `${x.s} ${x.cr} crossed / ${x.ex} expired / ${x.rs} reset / ${x.books} books held`).join('; ') || 'no crossings yet';
+          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}`);
+        } catch (err) { console.error(`JUDGE FUNNEL line: ${err.message}`); }
+      };
+      const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); logFunnel(); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
+      setTimeout(() => logFunnel(true), 180_000).unref?.();
       decisionOutcomeTimer = setInterval(runOnce, 60_000); if (typeof decisionOutcomeTimer?.unref === 'function') decisionOutcomeTimer.unref();
       setTimeout(() => { try { logLedger(recorder.status(), true); } catch { /* the ledger line is informational */ } }, 120_000).unref?.();
       void runOnce();
