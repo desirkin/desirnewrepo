@@ -4,6 +4,7 @@
 // display seeds grant no special depth or seats. Only actual held/pending
 // exposure receives protected resources; stale pairs cannot supply fresh data.
 import { loadConfig, coinFromSymbol } from '../lib/config.js';
+import { createResourceLaw } from './resource-law.js';
 import { nowIso, sessionDate } from '../lib/time.js';
 import { OrderBook, decimalsOf } from './book.js';
 import { TradeFlow, bookFeatures } from './features.js';
@@ -94,6 +95,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   }
 
   function dropPair(symbol) {
+    resourceLaw.forget(symbol);
     pairs.delete(symbol);
     books.delete(symbol);
     flows.delete(symbol);
@@ -451,32 +453,35 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     });
   }, MICRO_LIMITS.evaluationIntervalMs);
 
-  // ---- resource safety: lowest observed volume first; exposure is never shed
+  // ---- resource safety: lowest observed volume first; exposure is never shed. PUBLISH-FIX-27: the decision lives in
+  // tape/resource-law.js — a lag breach must be sustained (two checks) before shedding, and a calm five minutes re-admits
+  // one resource-shed pair (highest volume first); shed pairs no longer stay out for the whole session.
+  const resourceLaw = createResourceLaw(xp.resource ?? {});
   let lastResourceCheck = Date.now();
   const resourceTimer = setInterval(() => {
     const now = Date.now();
     const lagMs = now - lastResourceCheck - 15_000;
     lastResourceCheck = now;
     const heapMb = process.memoryUsage().heapUsed / 1024 / 1024;
-    const limits = xp.resource ?? {};
-    if (heapMb > (limits.maxHeapMb ?? 512) || lagMs > (limits.maxLoopLagMs ?? 1000)) {
-      const pinned = pinnedSymbols();
-      const sheddable = [...pairs.values()]
-        .filter((p) => !unavailable.has(p.symbol) && !pinned.has(p.symbol)) // held / pending exposure is never shed; caps stay
-        .sort((a, b) => (a.usdVol24h ?? 0) - (b.usdVol24h ?? 0));
-      const count = Math.max(1, Math.ceil(sheddable.length * (limits.shedFraction ?? 0.15)));
-      const shed = sheddable.slice(0, count);
-      writeEvent('RESOURCE_WARNING', {
-        heapMb: Math.round(heapMb),
-        loopLagMs: Math.round(lagMs),
-        shedding: shed.map((p) => p.symbol),
-      });
-      log(`[${nowIso()}] RESOURCE_WARNING heap=${heapMb.toFixed(0)}MB lag=${lagMs.toFixed(0)}ms — shedding ${shed.length} lowest-volume pairs: ${shed.map((p) => p.coin).join(' ')}`);
-      for (const p of shed) {
+    const pinned = pinnedSymbols();
+    const sheddable = [...pairs.values()].filter((p) => !unavailable.has(p.symbol) && !pinned.has(p.symbol)); // held / pending exposure is never shed; caps stay
+    const d = resourceLaw.decide({ heapMb, lagMs, nowTs: now, sheddable: sheddable.map((p) => ({ symbol: p.symbol, coin: p.coin, usdVol24h: p.usdVol24h ?? 0 })) });
+    if (d.action === 'SHED') {
+      writeEvent('RESOURCE_WARNING', { heapMb: Math.round(heapMb), loopLagMs: Math.round(lagMs), reason: d.reason, shedding: d.shed.map((p) => p.symbol) });
+      log(`[${nowIso()}] RESOURCE_WARNING heap=${heapMb.toFixed(0)}MB lag=${lagMs.toFixed(0)}ms (${d.reason}) — shedding ${d.shed.length} lowest-volume pairs: ${d.shed.map((p) => p.coin).join(' ')}`);
+      for (const p of d.shed) {
         unsubscribePair(p.symbol);
         unavailable.add(p.symbol);
         writeEvent('PAIR_UNAVAILABLE', { symbol: p.symbol, reason: 'shed under resource pressure' });
       }
+    } else if (d.action === 'READMIT') {
+      if (!pairs.has(d.symbol)) { resourceLaw.forget(d.symbol); return; } // rotated out of the universe meanwhile: nothing to re-admit
+      unavailable.delete(d.symbol); subFailures.delete(d.symbol);
+      if (ws?.readyState === WebSocket.OPEN) subscribeSymbols([d.symbol]);
+      writeEvent('PAIR_READMITTED', { symbol: d.symbol, heapMb: Math.round(heapMb), loopLagMs: Math.round(lagMs), shedForMs: d.shedForMs, remainingShed: d.remainingShed });
+      log(`[${nowIso()}] RESOURCE CALM heap=${heapMb.toFixed(0)}MB lag=${lagMs.toFixed(0)}ms — re-admitting ${d.coin} after ${Math.round(d.shedForMs / 60000)} min shed (${d.remainingShed} still shed)`);
+    } else if (d.reason === 'LAG_ONCE') {
+      log(`[${nowIso()}] RESOURCE NOTE heap=${heapMb.toFixed(0)}MB lag=${lagMs.toFixed(0)}ms — one late check; shedding only if it repeats`);
     }
   }, 15_000);
 

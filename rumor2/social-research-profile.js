@@ -87,7 +87,22 @@ export function createSourceProfileIndex({ maxProfiles = SOURCE_PROFILE_MAX_PROF
   const evictedMarkers = new Set();
   let observations = 0; let refusedRetention = 0; let evictions = 0; let markerHistoryLost = false; let markersDiscarded = 0;
   const mark = (authorId) => { evictedMarkers.delete(authorId); evictedMarkers.add(authorId); while (evictedMarkers.size > maxProfiles) { evictedMarkers.delete(evictedMarkers.values().next().value); markerHistoryLost = true; markersDiscarded += 1; } };
-  const evict = () => { let victim = null; for (const [k, v] of profiles) if (!victim || v.latestKnownAtTs < profiles.get(victim).latestKnownAtTs) victim = k; if (victim) { profiles.delete(victim); evictions += 1; mark(victim); } }; // step 7: a re-evicted PARTIAL/UNKNOWN incarnation itself held observed history that is now gone — it still marks a definite loss
+  // PUBLISH-FIX-25 (2026-09-17): the victim (oldest latest-known; ties to the earliest-created record) used to be found by a
+  // full scan of the 2000 profiles on EVERY new author once the bound was reached — production boot 29e95c87 spent 8% of a
+  // saturated main thread in this scan. A binary min-heap over (latestKnownAtTs, creation order) with lazy invalidation
+  // answers the same victim in O(log n); stale heap entries (a profile touched again, or already evicted) are skipped at
+  // the top and the heap is rebuilt from the live profiles when it outgrows twice the bound. Same victims, same order.
+  let created = 0; const heap = []; const less = (a, b) => a.ts < b.ts || (a.ts === b.ts && a.seq < b.seq);
+  const heapPush = (n) => { heap.push(n); let i = heap.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (!less(heap[i], heap[p])) break; [heap[i], heap[p]] = [heap[p], heap[i]]; i = p; } };
+  const heapPop = () => { const top = heap[0]; const last = heap.pop(); if (heap.length) { heap[0] = last; let i = 0; for (;;) { const l = 2 * i + 1; const r = l + 1; let m = i; if (l < heap.length && less(heap[l], heap[m])) m = l; if (r < heap.length && less(heap[r], heap[m])) m = r; if (m === i) break; [heap[i], heap[m]] = [heap[m], heap[i]]; i = m; } } return top; };
+  const heapRebuild = () => { heap.length = 0; for (const [k, v] of profiles) heapPush({ id: k, ts: v.latestKnownAtTs, seq: v.seq }); };
+  const touch = (r) => { heapPush({ id: r.socialAuthorId, ts: r.latestKnownAtTs, seq: r.seq }); if (heap.length > 2 * maxProfiles + 1024) heapRebuild(); };
+  const evict = () => {
+    let victim = null;
+    while (heap.length) { const top = heapPop(); const live = profiles.get(top.id); if (live && live.latestKnownAtTs === top.ts && live.seq === top.seq) { victim = top.id; break; } }
+    if (victim === null && profiles.size) { heapRebuild(); return evict(); }
+    if (victim) { profiles.delete(victim); evictions += 1; mark(victim); }
+  }; // step 7: a re-evicted PARTIAL/UNKNOWN incarnation itself held observed history that is now gone — it still marks a definite loss
   const recordOf = (e) => {
     let r = profiles.get(e.socialAuthorId);
     if (r) return r; // step 1: an existing record keeps the resource-history state decided when it was created — an unrelated eviction never rewrites it
@@ -97,7 +112,7 @@ export function createSourceProfileIndex({ maxProfiles = SOURCE_PROFILE_MAX_PROF
     if (marked) evictedMarkers.delete(e.socialAuthorId); // step 3: the active record now carries the fact; the sticky overflow flag is never reset here
     if (profiles.size >= maxProfiles) evict(); // step 6
     r = { provider: e.provider, providerKind: e.providerKind, socialAuthorId: e.socialAuthorId, nativeAuthorId: e.nativeAuthorId, retention: retentionCapability(e.provider), firstKnownAtTs: e.knownAtTs, latestKnownAtTs: e.knownAtTs, total: 0, retained: [], dropped: 0, droppedUpToTs: 0, sources: new Set(), episodes: new Map(), refs: [], truncated: false, resourceHistoryState };
-    profiles.set(e.socialAuthorId, r);
+    created += 1; r.seq = created; profiles.set(e.socialAuthorId, r); touch(r);
     return r;
   };
   function observe(e) {
@@ -105,7 +120,7 @@ export function createSourceProfileIndex({ maxProfiles = SOURCE_PROFILE_MAX_PROF
     if (SOCIAL_OBSERVATION_TYPES.includes(e.type)) {
       if (typeof e.socialAuthorId !== 'string' || typeof e.nativeAuthorId !== 'string' || e.nativeAuthorId.length === 0) return; // no invented identity
       const cap = retentionCapability(e.provider); if (cap.state !== 'DURABLE_PROFILE_ALLOWED') { refusedRetention += 1; return; } // durable per-source facts only where the registry allows them
-      const r = recordOf(e); observations += 1; r.total += 1; r.latestKnownAtTs = Math.max(r.latestKnownAtTs, e.knownAtTs); r.firstKnownAtTs = Math.min(r.firstKnownAtTs, e.knownAtTs);
+      const r = recordOf(e); observations += 1; r.total += 1; if (e.knownAtTs > r.latestKnownAtTs) { r.latestKnownAtTs = e.knownAtTs; touch(r); } r.firstKnownAtTs = Math.min(r.firstKnownAtTs, e.knownAtTs);
       r.sources.add(e.socialSourceId); if (r.sources.size > 4096) r.sources.delete(r.sources.values().next().value);
       const created = bySourceCreate.get(e.socialSourceId);
       const summary = { sourceEventId: e.sourceEventId, socialSourceId: e.socialSourceId, knownAtTs: e.knownAtTs, retrievedTs: e.retrievedTs ?? null, relation: e.relation, lifecycle: e.lifecycle, clock: e.sourceClockStatus ?? 'UNKNOWN', parentNativePostId: e.parentNativePostId ?? null, deletionLagMs: (e.lifecycle === 'DELETE' || e.lifecycle === 'TOMBSTONE') && created && created.authorId === e.socialAuthorId ? Math.max(0, e.knownAtTs - created.knownAtTs) : null };
@@ -135,7 +150,7 @@ export function createSourceProfileIndex({ maxProfiles = SOURCE_PROFILE_MAX_PROF
       r.episodes.set(ev.episodeId, { episodeId: ev.episodeId, canonicalCoin: ev.canonicalCoin, dossierId: ev.dossierId, episodeKnownAtTs: ev.derivedKnownAtTs, firstKnownAtTs: first.knownAtTs, firstRetrievedTs: first.retrievedTs ?? null, marketNoticeTs, ordering: leadLagOrdering({ provider: r.provider, sourceKnownAtTs: first.knownAtTs, sourceRetrievedTs: first.retrievedTs ?? null, marketNoticeTs }), originAnchored: anchored, familyMembers: members });
     }
   }
-  function clear() { profiles.clear(); bySourceCreate.clear(); evictedMarkers.clear(); observations = 0; refusedRetention = 0; evictions = 0; markerHistoryLost = false; markersDiscarded = 0; }
+  function clear() { heap.length = 0; profiles.clear(); bySourceCreate.clear(); evictedMarkers.clear(); observations = 0; refusedRetention = 0; evictions = 0; markerHistoryLost = false; markersDiscarded = 0; }
 
   // THE AS-OF PROFILE VIEW: only facts known at or before `asOfTs` enter; associations and outcome records are
   // caller-supplied (already-authorized), each with its own known-at — a later association or outcome never rewrites an earlier view.

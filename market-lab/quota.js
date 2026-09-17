@@ -55,8 +55,25 @@ function rowError(r, i) {
   if (typeof r.reason !== 'string' || r.reason.length === 0 || r.reason.length > 64) return `${w}: reason malformed`;
   return null;
 }
+// PUBLISH-FIX-24 (2026-09-17): totals() used to walk EVERY reservation of the journal (all providers, all days) and format
+// two ISO dates per row on every dispatch admission and every status snapshot — production boot 29e95c87 spent ~14% of
+// the main thread in dayKey/monthKey alone. The journal now keeps per-provider aggregates (per-day and per-month spend,
+// state counts, smoke) that every transition updates by subtracting the row's old contribution and adding the new one,
+// so totals() is O(1) and answers exactly what the walk answered. The append-only records stay the single truth: a
+// replay rebuilds the aggregates from the rows.
+const emptyAgg = () => ({ reserved: 0, settled: 0, unresolved: 0, released: 0, dispatched: 0, smoke: { calls: 0, usd: 0 }, byDay: new Map(), byMonth: new Map() });
+const bucketOf = (map, key) => { let b = map.get(key); if (!b) { b = { calls: 0, credits: 0, usd: 0 }; map.set(key, b); } return b; };
+function contribute(aggs, x, sign) {
+  let a = aggs.get(x.providerId); if (!a) { a = emptyAgg(); aggs.set(x.providerId, a); }
+  if (x.state === 'RESERVED') a.reserved += sign; else if (x.state === 'SETTLED') a.settled += sign; else if (x.state === 'UNRESOLVED') a.unresolved += sign; else a.released += sign;
+  if (x.state !== 'RELEASED') a.dispatched += sign;
+  const c = spentCalls(x) * sign; const cr = spentCredits(x) * sign; const u = spentUsd(x) * sign;
+  const d = bucketOf(a.byDay, x.dayKey); d.calls += c; d.credits += cr; d.usd += u;
+  const m = bucketOf(a.byMonth, x.monthKey); m.calls += c; m.credits += cr; m.usd += u;
+  if (x.purpose === 'PROBE' || x.purpose === 'SMOKE') { a.smoke.calls += c; a.smoke.usd += u; }
+}
 function createState() {
-  const byId = new Map(); const plans = new Map(); let lastTs = 0; let rows = 0;
+  const byId = new Map(); const plans = new Map(); const aggs = new Map(); let lastTs = 0; let rows = 0;
   // closeout P2: prepare() validates the row and the transition WITHOUT touching state and returns the nonthrowing commit;
   // the journal persists the bytes between the two, so a rejected transition or a failed write changes no live counter
   const prepare = (r, i, strict) => {
@@ -64,15 +81,20 @@ function createState() {
     if (r.ts < lastTs && strict) fail('INVALID_INPUT', `quota journal row ${i}: clock runs backwards`);
     const advance = () => { lastTs = Math.max(lastTs, r.ts); rows += 1; };
     if (r.type === 'PLAN') return () => { advance(); plans.set(r.providerId, { ...r }); };
-    if (r.type === 'RESERVE') { if (byId.has(r.reservationId)) fail('INVALID_INPUT', `quota journal row ${i}: duplicate reservation id`); return () => { advance(); byId.set(r.reservationId, { ...r, state: 'RESERVED', settledCredits: null, ok: null, status: null }); }; }
+    if (r.type === 'RESERVE') { if (byId.has(r.reservationId)) fail('INVALID_INPUT', `quota journal row ${i}: duplicate reservation id`); return () => { advance(); const x = { ...r, state: 'RESERVED', settledCredits: null, ok: null, status: null, dayKey: dayKey(r.ts), monthKey: monthKey(r.ts) }; byId.set(r.reservationId, x); contribute(aggs, x, +1); }; }
     const x = byId.get(r.reservationId); if (!x) fail('INVALID_INPUT', `quota journal row ${i}: unknown reservation`);
     if (x.state !== 'RESERVED') fail('INVALID_INPUT', `quota journal row ${i}: impossible transition from ${x.state}`);
-    if (r.type === 'SETTLE') { if (r.credits > x.credits) fail('INVALID_INPUT', `quota journal row ${i}: settled credits exceed the reservation`); return () => { advance(); Object.assign(x, { state: 'SETTLED', settledCredits: r.credits, ok: r.ok, status: r.status, settledTs: r.ts }); }; }
-    if (r.type === 'UNRESOLVED') return () => { advance(); Object.assign(x, { state: 'UNRESOLVED', reason: r.reason, unresolvedTs: r.ts }); };
-    return () => { advance(); Object.assign(x, { state: 'RELEASED', reason: r.reason, releasedTs: r.ts }); };
+    if (r.type === 'SETTLE') { if (r.credits > x.credits) fail('INVALID_INPUT', `quota journal row ${i}: settled credits exceed the reservation`); return () => { advance(); contribute(aggs, x, -1); Object.assign(x, { state: 'SETTLED', settledCredits: r.credits, ok: r.ok, status: r.status, settledTs: r.ts }); contribute(aggs, x, +1); }; }
+    if (r.type === 'UNRESOLVED') return () => { advance(); contribute(aggs, x, -1); Object.assign(x, { state: 'UNRESOLVED', reason: r.reason, unresolvedTs: r.ts }); contribute(aggs, x, +1); };
+    return () => { advance(); contribute(aggs, x, -1); Object.assign(x, { state: 'RELEASED', reason: r.reason, releasedTs: r.ts }); contribute(aggs, x, +1); };
   };
   const apply = (r, i, strict) => prepare(r, i, strict)();
-  return { byId, plans, apply, prepare, lastTs: () => lastTs, rows: () => rows };
+  // O(1): the provider's aggregates read at the current day / month keys (a bucket that does not exist is zero)
+  const totals = (providerId, nowTs) => {
+    const a = aggs.get(providerId) ?? emptyAgg(); const d = a.byDay.get(dayKey(nowTs)) ?? { calls: 0, credits: 0, usd: 0 }; const m = a.byMonth.get(monthKey(nowTs)) ?? { calls: 0, credits: 0, usd: 0 };
+    return { calls: { day: d.calls, month: m.calls }, credits: { day: d.credits, month: m.credits }, usd: { day: Number(d.usd.toFixed(6)), month: Number(m.usd.toFixed(6)) }, reserved: a.reserved, settled: a.settled, unresolved: a.unresolved, released: a.released, smoke: { calls: a.smoke.calls, usd: Number(a.smoke.usd.toFixed(6)) }, dispatched: a.dispatched };
+  };
+  return { byId, plans, apply, prepare, totals, lastTs: () => lastTs, rows: () => rows };
 }
 // spent credits of one reservation against a limit: RESERVED and UNRESOLVED count in full (conservative); SETTLED counts the actual charge; RELEASED is zero
 const spentCredits = (x) => (x.state === 'RELEASED' ? 0 : x.state === 'SETTLED' ? x.settledCredits : x.credits);
@@ -91,15 +113,11 @@ export function replayQuotaRecords(records, { clock = () => Date.now() } = {}) {
     state.apply(records[i], i + 1, true);
   }
   const now = () => Math.max(clock(), state.lastTs());
-  function totals(providerId, nowTs = now()) {
-    const t = { calls: { day: 0, month: 0 }, credits: { day: 0, month: 0 }, usd: { day: 0, month: 0 }, reserved: 0, settled: 0, unresolved: 0, released: 0, smoke: { calls: 0, usd: 0 }, dispatched: 0 };
-    for (const x of state.byId.values()) { if (x.providerId !== providerId) continue; if (x.state === 'RESERVED') t.reserved += 1; else if (x.state === 'SETTLED') t.settled += 1; else if (x.state === 'UNRESOLVED') t.unresolved += 1; else t.released += 1; if (x.state !== 'RELEASED') t.dispatched += 1; const c = spentCalls(x); const cr = spentCredits(x); const u = spentUsd(x); if (dayKey(x.ts) === dayKey(nowTs)) { t.calls.day += c; t.credits.day += cr; t.usd.day += u; } if (monthKey(x.ts) === monthKey(nowTs)) { t.calls.month += c; t.credits.month += cr; t.usd.month += u; } if (x.purpose === 'PROBE' || x.purpose === 'SMOKE') { t.smoke.calls += c; t.smoke.usd += u; } }
-    t.usd.day = Number(t.usd.day.toFixed(6)); t.usd.month = Number(t.usd.month.toFixed(6)); t.smoke.usd = Number(t.smoke.usd.toFixed(6)); return t;
-  }
+  const totals = (providerId, nowTs = now()) => state.totals(providerId, nowTs);
   function entitlementRemaining(providerId) { const p = state.plans.get(providerId); if (!p || p.remainingCalls === null) return null; let used = 0; for (const x of state.byId.values()) if (x.providerId === providerId && x.ts >= p.ts) used += spentCredits(x); return Math.max(0, p.remainingCalls - used); }
   return Object.freeze({
     now, totals, entitlementRemaining,
-    reservations: () => deepFreeze([...state.byId.values()].map((x) => ({ ...x }))),
+    reservations: () => deepFreeze([...state.byId.values()].map(({ dayKey: _d, monthKey: _m, ...x }) => ({ ...x }))),
     plans: () => deepFreeze(Object.fromEntries([...state.plans.entries()].map(([k, v]) => [k, { ...v }]))),
     records: () => deepFreeze(records.map((r) => ({ ...r }))),
     rows: state.rows(), bytes,
@@ -117,12 +135,7 @@ function journalApi(state, { append, clock, durable, close, files }) {
   const now = () => Math.max(clock(), state.lastTs()); // clock rollback never regains a consumed bucket
   // validate -> persist -> commit (P2): live state changes only after the bytes are durable
   const write = (rec) => { guard(); const commit = state.prepare(rec, state.rows() + 1, false); try { append(rec); } catch (err) { if (err?.code !== 'RESOURCE_LIMIT_EXCEEDED' && !failure) failure = { code: err?.code ?? 'IO_FAILURE', message: String(err?.message ?? err).slice(0, 160) }; throw err; } commit(); };
-  function totals(providerId, nowTs = now()) {
-    const t = { calls: { day: 0, month: 0 }, credits: { day: 0, month: 0 }, usd: { day: 0, month: 0 }, reserved: 0, settled: 0, unresolved: 0, released: 0, smoke: { calls: 0, usd: 0 }, dispatched: 0 };
-    for (const x of state.byId.values()) { if (x.providerId !== providerId) continue; if (x.state === 'RESERVED') t.reserved += 1; else if (x.state === 'SETTLED') t.settled += 1; else if (x.state === 'UNRESOLVED') t.unresolved += 1; else t.released += 1; if (x.state !== 'RELEASED') t.dispatched += 1; const c = spentCalls(x); const cr = spentCredits(x); const u = spentUsd(x); if (dayKey(x.ts) === dayKey(nowTs)) { t.calls.day += c; t.credits.day += cr; t.usd.day += u; } if (monthKey(x.ts) === monthKey(nowTs)) { t.calls.month += c; t.credits.month += cr; t.usd.month += u; } if (x.purpose === 'PROBE' || x.purpose === 'SMOKE') { t.smoke.calls += c; t.smoke.usd += u; } }
-    t.usd.day = Number(t.usd.day.toFixed(6)); t.usd.month = Number(t.usd.month.toFixed(6)); t.smoke.usd = Number(t.smoke.usd.toFixed(6));
-    return t;
-  }
+  const totals = (providerId, nowTs = now()) => state.totals(providerId, nowTs);
   // PLAN snapshots: the same plan digest is never re-granted; a different digest needs a strictly newer verifiedDate (a
   // verified new snapshot reconciles: consumption after the snapshot clock counts against it); otherwise it conflicts
   function loadPlan(providerId, plan) {
@@ -146,7 +159,7 @@ function journalApi(state, { append, clock, durable, close, files }) {
   const release = (reservationId, reason) => { guard(); write({ type: 'RELEASE', reservationId, reason: String(reason).slice(0, 64), ts: now() }); };
   return {
     journalVersion: QUOTA_JOURNAL_VERSION, durable, files, loadPlan, entitlementRemaining, reserve, settle, unresolved, release, totals, now,
-    reservations: () => deepFreeze([...state.byId.values()].map((x) => ({ ...x }))), plans: () => deepFreeze(Object.fromEntries([...state.plans.entries()].map(([k, v]) => [k, { ...v }]))),
+    reservations: () => deepFreeze([...state.byId.values()].map(({ dayKey: _d, monthKey: _m, ...x }) => ({ ...x }))), plans: () => deepFreeze(Object.fromEntries([...state.plans.entries()].map(([k, v]) => [k, { ...v }]))),
     close: () => { if (closed) return; closed = true; close(); }, isClosed: () => closed, failed: () => (failure ? { ...failure } : null),
   };
 }
@@ -210,7 +223,7 @@ export function openQuotaJournal({ dir, clock = () => Date.now(), pid = process.
   return api;
 }
 // process-local accounting for FREE public providers when no stable research root is configured (never for paid dispatch)
-export function createMemoryQuotaJournal({ clock = () => Date.now() } = {}) { const state = createState(); return journalApi(state, { append: () => {}, clock, durable: false, close: () => {}, files: null }); }
+export function createMemoryQuotaJournal({ clock = () => Date.now(), record = null } = {}) { const state = createState(); return journalApi(state, { append: record ? (r) => record({ ...r }) : () => {}, clock, durable: false, close: () => {}, files: null }); }
 
 // ---- the guard: one admission decision immediately before dispatch --------------------------------------------------------
 export function createDispatchGuard({ policy, env = {}, journal, clock = () => Date.now(), mode = null, lifecycle = () => 'ACTIVE', log = () => {} }) {
