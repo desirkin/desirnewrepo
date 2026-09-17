@@ -81,7 +81,7 @@ test('F5: a promotion-published activation is invisible to the Judge until the s
 
     // idempotent: a second pass appends nothing
     const again = stewardActivations({ store, nowTs: settledTs + 3 });
-    assert.deepEqual(again, { activated: [], expired: [], skipped: [] });
+    assert.deepEqual(again, { activated: [], expired: [], rolledBack: [], skipped: [] });
     assert.equal(store.activationHeads().get(activation.activationId).seq, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -101,7 +101,7 @@ test('F5: the steward refuses to activate while paper is not active, and expires
     assert.equal(store.patternHeads().get(pattern.patternId).state, 'RETIRED');
     const gone = resolveLearningContribution({ snapshot: readDecisionMemory({ store, nowTs: late + 1 }), facts, mode: 'PAPER', nowTs: late + 1 });
     assert.equal(gone.applied, false); assert.match(gone.rejected[0].reason, /EXPIRED|NOT_ACTIVE/);
-    assert.equal(STEWARD_VERSION, 'learning-activation-steward-1');
+    assert.equal(STEWARD_VERSION, 'learning-activation-steward-2');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -113,7 +113,7 @@ test('F5: a waiting activation whose lifetime elapsed before paper ever ran expi
     assert.equal(store.activationHeads().get(activation.activationId).state, 'EXPIRED');
     const broken = { activationHeads: () => { throw new Error('disk gone'); }, patternHeads: () => new Map() };
     const lines = [];
-    assert.deepEqual(stewardActivations({ store: broken, nowTs: T0, log: (l) => lines.push(l) }), { activated: [], expired: [], skipped: [] });
+    assert.deepEqual(stewardActivations({ store: broken, nowTs: T0, log: (l) => lines.push(l) }), { activated: [], expired: [], rolledBack: [], skipped: [] });
     assert.match(lines[0], /journals unreadable/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
