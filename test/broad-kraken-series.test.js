@@ -2,7 +2,7 @@
 // label-series shape the yardstick consumes. No network.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createBroadKrakenSeriesSource } from '../learning/broad-kraken-series.js';
@@ -57,4 +57,29 @@ test('BKS-2. absent collector dir yields no series (honest, never a fabricated o
     clock += 31_000; // past the TTL: rebuild picks up the seeded segment
     assert.ok(source('BTC', { asOfTs: clock }), 'after the TTL the new data appears');
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+// PUBLISH-FIX-53: the index is incremental — appended lines are read from the last byte, a torn trailing line waits for
+// its rest, a rolled segment's bars survive until retention, an unchanged refresh reads nothing, and the shape is unchanged
+test('BKS-3. incremental: appends are picked up from the last byte (no full re-read), torn lines complete on the next append, a rolled segment keeps its bars, the shape and last-write-wins hold', () => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'bks3-')); const dir = path.join(dataDir, 'broad-kraken'); mkdirSync(dir, { recursive: true });
+  const T = 1_789_000_020; const seg1 = path.join(dir, 'events-000001.jsonl'); const seg2 = path.join(dir, 'events-000002.jsonl');
+  writeFileSync(seg1, [closedCandle('BTC', T, 100, 1), closedCandle('BTC', T + 60, 101, 2)].join('\n') + '\n');
+  let clock = 0; const source = createBroadKrakenSeriesSource({ dataDir, ttlMs: 0, now: () => (clock += 1) });
+  assert.equal(source('BTC').count, 2); const s0 = source.stats(); assert.equal(s0.fullReads, 1); assert.equal(s0.linesParsed, 2);
+  // an unchanged refresh reads nothing
+  source('BTC'); const s1 = source.stats(); assert.equal(s1.bytesRead, s0.bytesRead); assert.equal(s1.deltaReads, 0);
+  // an append (plus a torn line) is a delta read; the torn line is not parsed yet
+  const torn = closedCandle('BTC', T + 180, 103, 4); appendFileSync(seg1, closedCandle('BTC', T + 120, 102, 3) + '\n' + torn.slice(0, 40));
+  assert.equal(source('BTC').count, 3); const s2 = source.stats(); assert.equal(s2.deltaReads, 1); assert.equal(s2.linesParsed, 3); assert.equal(s2.fullReads, 1);
+  appendFileSync(seg1, torn.slice(40) + '\n'); assert.equal(source('BTC').count, 4, 'the torn line completed'); assert.equal(source('BTC').candles[3][4], 103);
+  // last write wins for the same minute, across a new (rolled) segment
+  writeFileSync(seg2, closedCandle('BTC', T + 180, 999, 5) + '\n' + closedCandle('ETH', T + 180, 7, 5) + '\n');
+  const btc = source('BTC'); assert.equal(btc.candles[3][4], 999); assert.equal(btc.retrievedTsMs, 5); assert.equal(btc.coverageEndSec, T + 240); assert.deepEqual(source.coins(), ['BTC', 'ETH']);
+  assert.equal(source.stats().segments, 2);
+  // the shape is the one the yardstick consumes
+  assert.deepEqual(Object.keys(btc).sort(), ['candles', 'count', 'coverageEndSec', 'firstOpenSec', 'index', 'intervalSec', 'lastOpenSec', 'retrievedTsMs', 'symbol']); assert.equal(btc.index.get(T + 120), 2);
+  // retention: a bar older than 6 h before the newest is evicted on the next change
+  appendFileSync(seg2, closedCandle('BTC', T + 7 * 3600, 5, 6) + '\n'); assert.equal(source('BTC').count, 1, 'only the newest bar survives a 7 h gap');
+  rmSync(dataDir, { recursive: true, force: true });
 });

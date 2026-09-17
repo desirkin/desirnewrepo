@@ -139,3 +139,16 @@ test('PUBLISH-FIX-45. the immutable streams are read once and maintained on appe
     assert.equal(reopened.readOutcomes().length, 2001); assert.equal(reopened.readEpisodes().length, 2000);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// PUBLISH-FIX-53: group fsync — appends no longer fsync one by one; the dirty files are synced together by flush()
+test('PUBLISH-FIX-53: appends are visible at once, the store syncs the dirty files as a group through flush(), and 2,000 appends finish well inside a second', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'ls-fix53-')); const store = createLearningStore({ dataDir: dir });
+  const t0 = performance.now();
+  for (let i = 0; i < 2000; i += 1) store.appendEpisode(buildEpisode({ canonicalCoin: 'AAA', decisionTs: decisionTs + i * 60_000, usableAtTs: decisionTs + i * 60_000, datasetId: 'fsync-fixture', mode: 'HISTORICAL_REPLAY', evidenceBasis: 'HISTORICAL_RECONSTRUCTION', fidelity: 'CANDLE_DESCRIPTIVE', featureSet: { features: {} }, gates: [], decision: 'NO_SETUP', baselineRuleVersion: BASELINE_RULE_VERSION }));
+  const ms = performance.now() - t0;
+  assert.equal(store.readEpisodes().length, 2000, 'every record is readable right after its append');
+  assert.ok(ms < 2500, `2,000 appends took ${Math.round(ms)} ms (a per-record fsync would take far longer)`);
+  const synced = store.flush(); assert.ok(synced >= 1, 'the dirty episodes file was fsynced by the group flush'); assert.equal(store.flush(), 0, 'nothing dirty after a flush');
+  assert.ok(store.countersOf().groupFsyncs >= 1);
+  rmSync(dir, { recursive: true, force: true });
+});

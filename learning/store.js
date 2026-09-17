@@ -4,7 +4,7 @@
 // repaired in place and nothing is deleted. Reads are bounded. The store owns bytes only; meaning lives in the
 // pure modules that produce and consume these records.
 import path from 'node:path';
-import { existsSync, mkdirSync, readdirSync, readFileSync, createReadStream, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, createReadStream, statSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { appendJsonl, atomicWriteJson, readJsonl, readJsonBounded } from '../lib/jsonl.js';
 import {
@@ -41,6 +41,16 @@ export function createLearningStore({ dataDir, log = () => {} }) {
   const dir = learningDir(dataDir);
   mkdirSync(dir, { recursive: true });
   const counters = { appended: 0, invalidRejected: 0, corruptSkipped: 0, duplicateSuppressed: 0 };
+  // PUBLISH-FIX-53 (2026-09-17): GROUP fsync. Every episode / outcome / prospective append used to open, write, fsync
+  // and close on the main thread — thousands of fsyncs an hour (every graded decision, up to 500 outcomes per
+  // maturation tick, every mover-study lesson), each a few ms of blocked event loop; production CPU profiles named
+  // fsync among the top frames and the LOOP clock counted hundreds of >100 ms stalls per 15 min. Appends still write
+  // synchronously and in order (a reader sees the record at once), and the dirty files are fsynced together within
+  // FSYNC_GROUP_MS, or at once through flush() (shutdown, tests). Same records, same order, same laws; the durability
+  // window is at most half a second instead of zero, and the bucket uploader mirrors the files regardless.
+  const FSYNC_GROUP_MS = 500; const dirtyFiles = new Set(); let flushTimer = null;
+  const flush = () => { if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; } let n = 0; for (const f of [...dirtyFiles]) { dirtyFiles.delete(f); try { const fd = openSync(f, 'a'); try { fsyncSync(fd); n += 1; } finally { closeSync(fd); } } catch { /* a missing file has nothing to sync */ } } counters.groupFsyncs = (counters.groupFsyncs ?? 0) + n; return n; };
+  const noteDirty = (f) => { dirtyFiles.add(f); if (!flushTimer) { flushTimer = setTimeout(flush, FSYNC_GROUP_MS); flushTimer.unref?.(); } };
   // restart-safe dedupe: id indexes rebuilt from the files at first touch, per stream
   const idIndex = new Map(); // stream -> Set(id)
   const idFieldOf = { episodes: 'opportunityId', outcomes: null, patterns: null, activations: null, questions: null };
@@ -103,7 +113,7 @@ export function createLearningStore({ dataDir, log = () => {} }) {
       idx.add(record[field]);
     }
     const bytesBefore = CACHED_STREAMS.has(stream) ? fileBytes(stream) : 0;
-    appendJsonl(fileOf(stream), record, { sync: true });
+    appendJsonl(fileOf(stream), record, { sync: false }); noteDirty(fileOf(stream));
     if (CACHED_STREAMS.has(stream)) noteAppended(stream, record, bytesBefore);
     counters.appended += 1;
     return { appended: true, duplicate: false };
@@ -157,7 +167,7 @@ export function createLearningStore({ dataDir, log = () => {} }) {
 
   // ---- prospective: the sealed-design / capture / outcome / terminal journal (validated by learning/prospective.js
   // replay — the store keeps bytes and framing only).
-  const appendProspective = (r) => { if (!isPlainObject(r)) throw new Error('learning store: prospective record malformed'); appendJsonl(fileOf('prospective'), r, { sync: true }); counters.appended += 1; return { appended: true }; };
+  const appendProspective = (r) => { if (!isPlainObject(r)) throw new Error('learning store: prospective record malformed'); appendJsonl(fileOf('prospective'), r, { sync: false }); noteDirty(fileOf('prospective')); counters.appended += 1; return { appended: true }; };
   const readProspective = () => { const out = []; if (!existsSync(fileOf('prospective'))) return out; for (const r of readJsonl(fileOf('prospective'))) out.push(r); return out; };
 
   // ---- activations
@@ -276,7 +286,7 @@ export function createLearningStore({ dataDir, log = () => {} }) {
   const readDiagnosticManifest = (id) => { const f = path.join(diagnosticDir(id), 'manifest.json'); return existsSync(f) ? readJsonBounded(f, 4 * 1024 * 1024) : null; };
   const writeDiagnosticState = (id, s) => atomicWriteJson(path.join(diagnosticDir(id), 'state.json'), s, { sync: true });
   const readDiagnosticState = (id) => { const f = path.join(diagnosticDir(id), 'state.json'); return existsSync(f) ? readJsonBounded(f) : null; };
-  const appendDiagnosticResult = (id, row) => { appendJsonl(path.join(diagnosticDir(id), 'results.jsonl'), row, { sync: true }); counters.appended += 1; };
+  const appendDiagnosticResult = (id, row) => { const f = path.join(diagnosticDir(id), 'results.jsonl'); appendJsonl(f, row, { sync: false }); noteDirty(f); counters.appended += 1; };
   const readDiagnosticResults = (id) => {
     const f = path.join(diagnosticDir(id), 'results.jsonl'); if (!existsSync(f)) return [];
     const out = []; const seen = new Set();
@@ -316,7 +326,7 @@ export function createLearningStore({ dataDir, log = () => {} }) {
 
   // shallow freeze: the API surface is fixed; the counters object stays live (session-local honesty counters)
   return Object.freeze({
-    dir, counters, countersOf: () => ({ ...counters }),
+    dir, counters, countersOf: () => ({ ...counters }), flush,
     appendEpisode, readEpisodes,
     appendOutcome, readOutcomes, latestOutcomes,
     appendPattern, patternHeads, patternHistory,

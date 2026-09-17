@@ -241,6 +241,6 @@ export function startLearning({
   return {
     state: () => (stopped ? 'STOPPED' : 'RUNNING'),
     tick, store,
-    stop: () => { stopped = true; timers.clearInterval(timer); try { writeStatus(clock(), { stopped: true }); } catch { /* status write is best effort on stop */ } },
+    stop: () => { stopped = true; timers.clearInterval(timer); try { store.flush?.(); } catch { /* group fsync is best effort on stop */ } try { writeStatus(clock(), { stopped: true }); } catch { /* status write is best effort on stop */ } },
   };
 }
