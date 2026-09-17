@@ -86,7 +86,7 @@ test('A01/A08. strict binding: the paper sample cannot arm (no live section, wro
 test('A02. ARM_LIVE over the real cockpit: GET is 405; unauthenticated 401; cookie without CSRF 403; cross-origin 403; confirm without the fresh password 403; a wrong / reused / expired phrase is refused; a payload naming another account is refused; nothing arms without a passed preflight; then a bound challenge + fresh password + exact phrase commits ONE authorization whose reasons are empty; the secret never appears in any response or log', async () => {
   process.env.SERPENT_CONTROL_PASSWORD = PW;
   assert.equal((await fetch(`${BASE}/api/judge/arm`)).status, 405, 'no GET arm');
-  assert.equal((await fetch(`${BASE}/api/judge`)).status, 401, 'PUBLISH-FIX-20 (F7): the Judge view is a private read once control auth is configured');
+  assert.equal((await fetch(`${BASE}/api/judge`)).status, 200, 'PUBLISH-FIX-46: the Judge VIEW opens without the owner session (strict law lives in test/ui-private-reads.test.js); arming below still fails closed');
   assert.equal((await post('/api/judge/arm', { step: 'challenge' })).status, 401);
   const login = await post('/api/auth/login', { password: PW }); const cookie = login.headers.get('set-cookie').split(';')[0]; const csrf = (await login.json()).csrfToken; const authed = (extra = {}) => ({ cookie, 'X-Serpent-CSRF': csrf, ...extra });
   const off = await (await fetch(`${BASE}/api/judge`, { headers: { cookie } })).json(); assert.equal(off.enabled, false); assert.equal(off.prominent, 'JUDGE OFF');
