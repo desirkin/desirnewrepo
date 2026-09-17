@@ -16,6 +16,19 @@ export const applicationNameOf = (schema) => (schema ? `serpent-test:${schema}` 
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// PUBLISH-FIX-50 (2026-09-17): the DATABASE CLOCKS. Production's journal commit measured p50 2.2 s / p95 3.5 s (fix47) and
+// that clock starts when the commit is CALLED, so it cannot say whether the seconds are spent waiting for the dispatcher's
+// serial chain, waiting for a free pooled connection (POOL_MAX 5, shared with the tape and every collector), or inside the
+// transaction itself (BEGIN, SET LOCAL x2, SELECT ... FOR UPDATE of the whole account state, INSERT per event, UPDATE the
+// whole state back, COMMIT — seven round trips, and the state JSON travels twice). These clocks split it: per transaction
+// the pool checkout wait, the transaction's own duration, its statement count and the bytes it carried in parameters;
+// per plain query() its duration; plus the pool gauge (total / idle / waiting). Bounded ring buffers; read-only.
+const CLOCK_SAMPLES = 2048;
+const pushSample = (list, v) => { list.push(v); if (list.length > CLOCK_SAMPLES) list.shift(); };
+const percentile = (samples, p) => { if (!samples.length) return null; const s = [...samples].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.max(0, Math.ceil(p * s.length) - 1))]; };
+export const clockStats = (samples) => ({ count: samples.length, p50: percentile(samples, 0.5), p95: percentile(samples, 0.95), max: samples.length ? Math.max(...samples) : null });
+const paramBytesOf = (params) => { let n = 0; for (const p of Array.isArray(params) ? params : []) { if (typeof p === 'string') n += p.length; else if (p !== null && p !== undefined) n += String(p).length; } return n; };
+
 // PERSIST-0A — ONE shared connection-failure classifier for connect/probe,
 // query() and tx(). A dead transaction must mark the database unreachable
 // exactly as a dead query does, so the permission lock tells the truth.
@@ -48,6 +61,7 @@ export class Db {
   #retries;
   #everConnected = false;
   #lockClients = new Set(); // advisory-lock sessions checked out for their lifetime
+  #clocks = { checkoutWait: [], tx: [], txStatements: [], txParamBytes: [], query: [], txCount: 0, queryCount: 0, checkoutFailures: 0, slowestTx: null }; // PUBLISH-FIX-50
 
   constructor({ url = process.env.DATABASE_URL, schema = null, log = () => {}, poolFactory = null, retries = STARTUP_RETRIES } = {}) {
     this.#url = url;
@@ -148,6 +162,7 @@ export class Db {
       this.reachable = true;
       if (write) this.lastSuccessfulWriteTs = Date.now();
       else this.lastSuccessfulReadTs = Date.now();
+      this.#clocks.queryCount += 1; pushSample(this.#clocks.query, Date.now() - startedAt); // PUBLISH-FIX-50
       return r;
     } catch (err) {
       // PUBLISH-FIX-3: a connection-class failure (ETIMEDOUT / reset / statement timeout) is logged with its code and the
@@ -170,11 +185,16 @@ export class Db {
       client = await this.#pool.connect();
     } catch (err) {
       // PUBLISH-FIX-3: a checkout that hung to the connect timeout is logged with its code and elapsed ms.
+      this.#clocks.checkoutFailures += 1;
       if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE tx checkout failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}`);
       throw err;
     }
-    const q = (text, params = []) => client.query(this.#qualify(text), params);
-    const helpers = { raw: (text, params = []) => client.query(text, params), db: this };
+    // PUBLISH-FIX-50: the checkout wait is what a pool of 5 shared with the tape costs this transaction; the transaction
+    // clock starts once the client is in hand; statements and parameter bytes count what travelled
+    const checkedOutAt = Date.now(); const meter = { statements: 0, paramBytes: 0, first: null };
+    const metered = (text, params) => { meter.statements += 1; meter.paramBytes += paramBytesOf(params); if (meter.first === null && !/^(BEGIN|COMMIT|ROLLBACK)$/.test(String(text))) meter.first = String(text).slice(0, 48); };
+    const q = (text, params = []) => { metered(text, params); return client.query(this.#qualify(text), params); };
+    const helpers = { raw: (text, params = []) => { metered(text, params); return client.query(text, params); }, db: this };
     let discardError = null;
     try {
       await q('BEGIN');
@@ -204,7 +224,24 @@ export class Db {
     } finally {
       if (discardError) client.release(discardError);
       else client.release();
+      try { // PUBLISH-FIX-50: sample every transaction, failed ones included (a failed one still held the connection)
+        const c = this.#clocks; const txMs = Date.now() - checkedOutAt; c.txCount += 1;
+        pushSample(c.checkoutWait, checkedOutAt - startedAt); pushSample(c.tx, txMs); pushSample(c.txStatements, meter.statements); pushSample(c.txParamBytes, meter.paramBytes);
+        if (!c.slowestTx || txMs > c.slowestTx.ms) c.slowestTx = { ms: txMs, statements: meter.statements, paramBytes: meter.paramBytes, first: meter.first, ts: Date.now() };
+      } catch { /* clocks never fail a transaction */ }
     }
+  }
+
+  // PUBLISH-FIX-50: the database clocks for the log line — never the URL, never a row. Pool gauges come from pg's Pool
+  // when it exposes them (totalCount / idleCount / waitingCount); a test pool without them reads null.
+  clocks() {
+    const c = this.#clocks; const pool = this.#pool;
+    const gauge = (k) => (pool && typeof pool[k] === 'number' ? pool[k] : null);
+    return {
+      tx: { ...clockStats(c.tx), total: c.txCount }, checkoutWait: clockStats(c.checkoutWait), txStatements: clockStats(c.txStatements), txParamBytes: clockStats(c.txParamBytes),
+      query: { ...clockStats(c.query), total: c.queryCount }, checkoutFailures: c.checkoutFailures, slowestTx: c.slowestTx ? { ...c.slowestTx } : null,
+      pool: { max: POOL_MAX, total: gauge('totalCount'), idle: gauge('idleCount'), waiting: gauge('waitingCount'), lockSessions: this.#lockClients.size },
+    };
   }
 
   // RUMOR-2 freeze seal — one named session-scoped advisory lock. Advisory
