@@ -39,7 +39,7 @@ import { createFeedRecorder } from './recorder.js';
 import { recordError, bundleBinding } from './experiment-bundle.js';
 import { createSnapshotStore } from './snapshot-store.js';
 import { primaryConfirmedCatalyst, primaryCorrections } from './intake.js';
-import { selectPreparation } from './readiness.js';
+import { selectPreparation, emptyRotation, PREP_TENURE_MS, PREP_ROTATION_INTERVAL_MS } from './readiness.js';
 import { codeTreeDigest } from './owner.js';
 import { createLearningSnapshotCache } from './learning-snapshot-cache.js';
 
@@ -151,6 +151,8 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   // bounded preparation (ticket §4.5 / J11): at most policy.universe.preparationSlots warm candidates, newest nomination first, held assets
   // outside the contest; a candidate that loses its slot is released (never a held / pending one: judge.release refuses those)
   let prepared = new Map(); let lastPreparation = null; const capturedNominations = new Set();
+  // PUBLISH-FIX-12 (review F2): the fair-rotation ledger (assetId -> when its last preparation ended; the last rotation clock)
+  let preparationRotation = emptyRotation();
   // A source that carries no nomination clock (the tape universe is a STANDING list, not an event stream) is stamped ONCE —
   // at the first pass that observed it — and merely RE-AFFIRMED afterwards. Re-stamping it with the current clock on every
   // pass made every standing nomination look newer than the candidates it was already preparing: with more nominations than
@@ -165,7 +167,8 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   }
   function admitNominations() { const t = nowTs(); const held = new Set(Object.values(dispatcher.state()?.positions ?? {}).filter((p) => p.state !== 'FLAT').map((p) => p.assetId)); const list = nominate().filter((x) => x?.symbol && !excluded(policy, x.symbol) && specOf(x.symbol)).map((x) => { const assetId = x.assetId ?? x.symbol.split('/')[0]; const source = x.source ?? 'UNIVERSE'; return { symbol: x.symbol, assetId, source, ...nominationClocksOf(`${assetId}|${x.symbol}|${source}`, x.nominationKnownAtTs, t) }; });
     for (const n of list) { const key = `${n.assetId}|${n.symbol}|${n.nominationKnownAtTs}`; if (!capturedNominations.has(key)) { capturedNominations.add(key); if (capturedNominations.size > 8192) capturedNominations.clear(); captureInput('NOMINATION', { symbol: n.symbol, assetId: n.assetId, source: n.source, nominationKnownAtTs: n.nominationKnownAtTs }); } }
-    const sel = selectPreparation({ nominations: list, held, remainingSlots: Math.min(policy.universe.preparationSlots, policy.universe.maxCandidates), previous: prepared, nowTs: t }); lastPreparation = { slots: sel.slots, selected: sel.selected.map((n) => n.assetId), preempted: sel.preempted, lost: sel.lost, held: sel.held, ts: t };
+    const sel = selectPreparation({ nominations: list, held, remainingSlots: Math.min(policy.universe.preparationSlots, policy.universe.maxCandidates), previous: prepared, nowTs: t, rotation: preparationRotation, tenureMs: policy.universe.preparationTenureMs ?? PREP_TENURE_MS, rotationIntervalMs: policy.universe.preparationRotationIntervalMs ?? PREP_ROTATION_INTERVAL_MS }); preparationRotation = sel.rotation; lastPreparation = { slots: sel.slots, selected: sel.selected.map((n) => n.assetId), preempted: sel.preempted, lost: sel.lost, held: sel.held, rotated: sel.rotated, ts: t };
+    for (const r of sel.rotated) log(`preparation rotated for fairness: ${r.out} out after ${Math.round(r.tenureMs / 60_000)} min, ${r.in} in (${r.waitedSinceTs === null ? 'never prepared before' : `last prepared ${Math.round((t - r.waitedSinceTs) / 60_000)} min ago`}); waiting: ${sel.preempted.map((p) => p.assetId).join(' ') || 'none'}`);
     for (const l of sel.lost) { const c = judge.candidates().find((x) => x.assetId === l.assetId); if (c) judge.release(c.symbol); }
     prepared = new Map(sel.selected.map((n) => [n.assetId, n]));
     for (const n of sel.selected) { if (judge.candidates().some((c) => c.symbol === n.symbol)) continue; judge.admit(n.symbol, { assetId: n.assetId, priority: 'CANDIDATE', source: n.source, nominationKnownAtTs: n.nominationKnownAtTs }); }

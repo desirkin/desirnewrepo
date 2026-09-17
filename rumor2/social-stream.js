@@ -85,7 +85,14 @@ export function socialIntake({
     seen.set(o.socialVersionId, socialSeenRecord(o));
     if (seen.size > seenCap) { const oldest = seen.keys().next().value; seen.delete(oldest); }
   };
-  const minPending = () => { let m = null; for (const k of pending.keys()) if (m === null || k < m) m = k; return m; };
+  // PUBLISH-FIX-11e: the smallest pending cursor is asked for on EVERY frame; scanning the whole map each time was 3% of
+  // the main thread. Pending keys are cursors that only ever grow at the tail, so the minimum is the first key in
+  // insertion order unless an older replayed frame re-entered; a one-value cache is invalidated on every mutation.
+  let minPendingCache = undefined; // undefined = unknown
+  const minPending = () => { if (minPendingCache !== undefined) return minPendingCache; let m = null; for (const k of pending.keys()) if (m === null || k < m) m = k; minPendingCache = m; return m; };
+  const pendingSet = (k, v) => { pending.set(k, v); if (minPendingCache === undefined) return; if (minPendingCache === null || k < minPendingCache) minPendingCache = k; };
+  const pendingDelete = (k) => { const had = pending.delete(k); if (had && k === minPendingCache) minPendingCache = undefined; return had; };
+  const pendingClear = () => { pending.clear(); minPendingCache = null; };
   // the contiguous cursor is MONOTONIC: it never regresses, even if a replayed
   // older frame re-enters pending (§24)
   const advance = () => {
@@ -98,11 +105,11 @@ export function socialIntake({
   const terminalDelivery = (cur) => {
     if (cur === null) return;
     const e = pending.get(cur); if (!e) return;
-    if (e.dropped) { e.dropped = false; if (e.owed === 0) pending.delete(cur); }
+    if (e.dropped) { e.dropped = false; if (e.owed === 0) pendingDelete(cur); }
   };
-  const owe = (cur) => { if (cur === null) return; const e = pending.get(cur) ?? { owed: 0, dropped: false }; e.owed += 1; e.dropped = false; pending.set(cur, e); };
-  const drop = (cur) => { if (cur === null) return; const e = pending.get(cur) ?? { owed: 0, dropped: false }; e.dropped = true; pending.set(cur, e); };
-  const release = (cur) => { if (cur === null) return; const e = pending.get(cur); if (!e) return; e.owed = Math.max(0, e.owed - 1); if (e.owed === 0 && !e.dropped) pending.delete(cur); };
+  const owe = (cur) => { if (cur === null) return; const e = pending.get(cur) ?? { owed: 0, dropped: false }; e.owed += 1; e.dropped = false; pendingSet(cur, e); };
+  const drop = (cur) => { if (cur === null) return; const e = pending.get(cur) ?? { owed: 0, dropped: false }; e.dropped = true; pendingSet(cur, e); };
+  const release = (cur) => { if (cur === null) return; const e = pending.get(cur); if (!e) return; e.owed = Math.max(0, e.owed - 1); if (e.owed === 0 && !e.dropped) pendingDelete(cur); };
 
   // Offer ONE already-JSON-parsed message object. Returns the outcome so the
   // transport and tests can assert on it. Never throws on adversarial input.
@@ -119,6 +126,18 @@ export function socialIntake({
     try { mapped = mapCommit(message, { provider: provider?.id }); }
     catch { stats.skipped += 1; return done('skipped', { reason: 'mapper threw' }); }
     if (!mapped || mapped.skip) { stats.skipped += 1; return done('skipped', { reason: mapped?.reason ?? 'skip' }); }
+    // PUBLISH-FIX-11e: the admission scope is judged on the RAW fields BEFORE normalization. Admission only ever reads
+    // text / nativeAuthorId / nativePostId / parentNativePostId, and the normalized observation carries those four raw
+    // (text verbatim), so the decision is identical — but the ~99% of firehose posts that are out of scope no longer pay
+    // for normalization (NFKC text fingerprint, three canonical-JSON identities, sha1 each): that was the main thread's
+    // single largest cost on the paper deployment. A raw record that is not even well-formed takes the old path so it is
+    // still counted as REJECTED, never as filtered.
+    const raw = mapped.raw; let fm = null;
+    if (raw && typeof raw === 'object' && typeof raw.text === 'string' && typeof raw.nativeAuthorId === 'string' && typeof raw.nativePostId === 'string') {
+      const pre = { text: raw.text, nativeAuthorId: raw.nativeAuthorId, nativePostId: raw.nativePostId, parentNativePostId: typeof raw.parentNativePostId === 'string' ? raw.parentNativePostId : null };
+      try { fm = typeof admit === 'function' ? admit(pre) : socialFilterMatches(filter, { text: pre.text, nativeAuthorId: pre.nativeAuthorId }); } catch { fm = { match: false, reasons: [] }; }
+      if (!fm || fm.match !== true) { stats.filtered += 1; return done('filtered'); }
+    }
     const norm = normalizeSocialObservation(mapped.raw, { nowMs });
     if (norm.reject) { stats.rejected += 1; return done('rejected', { reason: norm.reason }); }
     const o = norm.observation;
@@ -126,10 +145,11 @@ export function socialIntake({
     else if (o.sourceClockStatus === 'FUTURE_QUARANTINED') stats.sourceClockFutureQuarantined += 1;
     else if (o.sourceClockStatus === 'ORDER_UNRESOLVED') stats.sourceClockOrderUnresolved += 1;
     else stats.sourceClockUnknown += 1;
-    // bounded admission scope — no silent all-network intake (§24)
-    let fm;
-    try { fm = typeof admit === 'function' ? admit(o) : socialFilterMatches(filter, { text: o.text, nativeAuthorId: o.nativeAuthorId }); } catch { fm = { match: false, reasons: [] }; }
-    if (!fm || fm.match !== true) { stats.filtered += 1; return done('filtered'); }
+    // bounded admission scope — no silent all-network intake (§24); already judged above on the same raw fields
+    if (fm === null) {
+      try { fm = typeof admit === 'function' ? admit(o) : socialFilterMatches(filter, { text: o.text, nativeAuthorId: o.nativeAuthorId }); } catch { fm = { match: false, reasons: [] }; }
+      if (!fm || fm.match !== true) { stats.filtered += 1; return done('filtered'); }
+    }
     // KEEP-FIRST by VERSION identity (content facts only — a diagnostic-only
     // redelivery has the SAME id). The DURABLE index is authoritative: a version
     // already settled in the journal is a duplicate here whatever its current
@@ -210,7 +230,7 @@ export function socialIntake({
     cursor() { return { ...cursor }; },
     // forget everything non-durable (writer loss / shutdown): frames are
     // redelivered from the durable cursor, never lost
-    clear() { queue.length = 0; pending.clear(); owedNative.clear(); },
+    clear() { queue.length = 0; pendingClear(); owedNative.clear(); },
     size() { return queue.length; },
     seenSize() { return seen.size; },
     stats() { return { ...stats, queued: queue.length, pending: pending.size, receivedCursor: cursor.received, contiguousCursor: cursor.contiguous }; },

@@ -166,15 +166,22 @@ test('OR-2a. the composition prepares a STABLE six from fourteen standing nomina
     assert.equal(prep, null);
     // 80s of preparation actually accumulated: the candidates were never released and re-admitted
     assert.ok(run.judge.candidates().every((x) => kept.includes(x.assetId)));
-    // one hour later the SAME standing list is still affirmed: nothing expires
-    c.advance(3_600_000); const late = run.admitNominations();
+    // fifty-nine minutes later the SAME standing list is still affirmed: nothing expires and nothing rotates yet
+    c.advance(59 * 60_000 - 80_000); const late = run.admitNominations();
     assert.deepEqual([...late.selected].sort(), kept, 'a continuously affirmed standing nomination is not force-expired by the TTL');
     assert.deepEqual(late.lost, []);
+    // PUBLISH-FIX-12 (review F2): at the tenure (60 min) ONE tenant yields to a never-prepared nomination — fair rotation, never churn
+    c.advance(60_000 + 80_000); const rot = run.admitNominations();
+    assert.equal(rot.rotated.length, 1, 'exactly one rotation at the tenure'); assert.equal(rot.lost.length, 1); assert.equal(rot.lost[0].reason, 'ROTATED_FOR_FAIRNESS'); assert.ok(rot.lost[0].preparedMs >= 3_600_000);
+    assert.equal(kept.includes(rot.rotated[0].in), false, 'the newcomer was never prepared before'); assert.equal(rot.selected.length, 6);
+    const kept2 = [...rot.selected].sort();
+    for (let i = 0; i < 5; i += 1) { c.advance(60_000); const p = run.admitNominations(); assert.deepEqual([...p.selected].sort(), kept2, `no second rotation inside the interval (pass ${i + 1})`); assert.deepEqual(p.lost, []); }
     // a genuinely NEW asset entering the universe is a new nomination and legitimately takes a slot
     noms = [...noms, { symbol: 'TIA/USD', assetId: 'TIA' }]; run.registerSpec(specFor('TIA')); c.advance(10_000);
     const withNew = run.admitNominations();
     assert.equal(withNew.selected.includes('TIA'), true, 'a genuine new nomination is never suppressed');
     assert.equal(withNew.lost.length, 1); assert.equal(withNew.lost[0].reason, 'PREEMPTED_BY_NEWER_NOMINATION'); assert.ok(withNew.lost[0].preparedMs >= 3_600_000, 'the preempted candidate reports the real preparation it had');
+    assert.equal(withNew.selected.includes(rot.rotated[0].in), true, 'the rotated-in candidate is not the one a newer nomination preempts (it ranks by its rotation clock)');
     // and a source that DOES carry a nomination clock still ranks by it
     c.advance(10_000); noms = [...noms, { symbol: 'OP/USD', assetId: 'OP', source: 'RUMINT', nominationKnownAtTs: c.now() }]; run.registerSpec(specFor('OP'));
     assert.equal(run.admitNominations().selected.includes('OP'), true);

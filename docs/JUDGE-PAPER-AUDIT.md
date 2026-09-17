@@ -60,11 +60,36 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       6b8908a4b256596fcdd49d5d73ca3551f7e25d7e7d3768421bc4608693df75d7
+judge/*.js       8b8b84332656812be401efc6e4fb08d86d699af5c3e1582583596553f52f3be5
 execution/*.js   2551fcb6c4d00ee9e708e6740f87b5700e2469549abdef83e43b9cc03f36c16b
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   b058952b392564d1d00cdd1edc531838748175f3f2746c57eaed146b47479255
+all (48 files)   f0526120a8797ef53d5aa64e9c955f06a14f42b0bd0d0111afe1894a0d6cb272
 ```
+
+### 4.15 Audited change — 2026-09-17 PUBLISH-FIX-12 (independent review F2): fair rotation of the preparation slots (previous digests: judge `6b8908a4b256…`, all `b058952b3925…`; execution `2551fcb6c4d0…` and watch/watch.js `0c6a43bf…` UNCHANGED)
+
+Scope: `judge/readiness.js` (`selectPreparation`) and `judge/composition.js` (`admitNominations`). Finding: the standing
+tape universe is stamped once (4.13's OR-2 law, which stopped the six slots flipping every cadence), so with more
+nominations than slots the SAME six assets held the slots forever — the independent review's witness reproduced it: 30
+stable nominations, six slots, 100 refreshes, the same six every time, 24 never prepared. The Judge saw 14 pairs and
+could only ever evaluate six of them.
+
+Law now: a prepared candidate holds its slot for a TENURE (`PREP_TENURE_MS` = 60 min: enough to warm — 61 bars + 21 min
+of flow — and then be evaluated for a while). Once its tenure is up and other eligible nominations are waiting, the
+longest-tenured tenant yields to the nomination that has waited longest (never prepared first, then oldest last
+release), at most ONE rotation per `PREP_ROTATION_INTERVAL_MS` (10 min), so the warm set never churns. What is
+unchanged: held / pending exposure never contests a slot; a genuinely NEWER nomination (a real event, never a
+re-affirmation) still preempts the tenant with the oldest nomination; the nomination TTL still expires from the last
+affirmation. New: at equal clocks a current tenant outranks a non-tenant and a rotated-in tenant carries its rotation
+clock as its rank, so the tenant it replaced cannot bounce straight back and a newer nomination preempts an original
+tenant rather than the newcomer. A rotated-out candidate is released with the reason `ROTATED_FOR_FAIRNESS` and the
+composition logs every rotation (`preparation rotated for fairness: X out after N min, Y in …; waiting: …`). The
+policy may override both clocks (`universe.preparationTenureMs`, `universe.preparationRotationIntervalMs`); the paper
+policy carries neither, so the constants apply. Tests: `test/judge-preparation-rotation.test.js` (the review witness with
+the correct expectation: 30 assets, six slots, a day of refreshes — all 30 prepared, no tenant rotated before its tenure,
+at most one rotation per interval, no bounce-back, held untouched), `test/judge-operational-repair.test.js` OR-2a/OR-2b
+(updated to the tenure law), `test/judge-composition.test.js` J11/E03 (unchanged expectations). The judge digest moves to
+`8b8b84332656…` and the whole frozen set to `f0526120a879…`, which `test/paper-runtime.test.js` P-08 re-verifies.
 
 ### 4.14 Audited change — 2026-09-16 PUBLISH-FIX-10: the Judge's per-book evaluation no longer starves the event loop (previous digests: judge `aae0b5dc1899…`, execution `68222023e144…`, all `9dd72c5919bc…`; watch/watch.js UNCHANGED `0c6a43bf…`)
 
