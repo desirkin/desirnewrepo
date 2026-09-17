@@ -9,7 +9,10 @@ export const observationIdentity = (o) => { const basis = {}; for (const k of OB
 export const OBSERVATION_ID_RE = /^mo-[0-9a-f]{64}$/;
 
 // Validate ONE observation envelope. Returns null or a bounded closed reason. Never throws on hostile input.
-export function observationError(o, where = 'observation') {
+// PUBLISH-FIX-32 (2026-09-17): `identity` is the identity the caller has JUST computed from this same object (makeObservation);
+// the check then compares without recomputing it — canonical JSON + sha256 of a 25-level book ran twice per emitted
+// observation on the paper deployment. Every other caller (readers, validators) recomputes, unchanged.
+export function observationError(o, where = 'observation', { identity = null } = {}) {
   try {
     const shape = jsonShapeError(o, where); if (shape) return boundedReason(shape);
     const k = exactKeys(o, OBSERVATION_KEYS, where); if (k) return k;
@@ -43,15 +46,15 @@ export function observationError(o, where = 'observation') {
     }
     if (o.kind === 'L3_BOOK_SNAPSHOT' || o.kind === 'L3_ORDER_EVENT') { if (o.epochId === null) return `${where}: an L3 record names its connection epoch`; const orders = o.kind === 'L3_BOOK_SNAPSHOT' ? [...o.payload.bids, ...o.payload.asks] : o.payload.events; for (const x of orders) if (x.firstSeenTs > o.receivedTs || (x.providerTs !== null && x.providerTs > o.receivedTs + CLOCK_CONFLICT_TOLERANCE_MS)) return `${where}: an order clock cannot follow receipt`; }
     if (typeof o.observationId !== 'string' || !OBSERVATION_ID_RE.test(o.observationId)) return `${where}: observationId malformed`;
-    if (observationIdentity(o) !== o.observationId) return `${where}: observationId does not match content`;
+    if ((typeof identity === 'string' ? identity : observationIdentity(o)) !== o.observationId) return `${where}: observationId does not match content`;
     return null;
   } catch (err) { return boundedReason(`${where}: rejected hostile input (${err?.name ?? 'error'})`); }
 }
 // Build a sealed observation from a validated body; identity is recomputed here, never supplied.
 export function makeObservation(body) {
   const o = { schemaVersion: OBSERVATION_SCHEMA_VERSION, observationId: 'mo-0000000000000000000000000000000000000000000000000000000000000000', ...body };
-  o.observationId = observationIdentity(o);
-  const e = observationError(o); if (e) fail('VALIDATION_FAILURE', e);
+  const identity = observationIdentity(o); o.observationId = identity;
+  const e = observationError(o, 'observation', { identity }); if (e) fail('VALIDATION_FAILURE', e);
   return deepFreeze(o);
 }
 export const emptyProvenance = () => ({ requestId: null, bytesSha256: null, nativeLocator: null, mappingId: null, specificationId: null, vintage: null });
