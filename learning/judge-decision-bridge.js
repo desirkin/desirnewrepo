@@ -68,12 +68,18 @@ export function episodeOfDecision(d, { policyVersion }) {
   });
 }
 
-export function createJudgeDecisionBridge({ store, decisionsSource, policyVersion, log = () => {}, maxPerStep = 64 } = {}) {
+// PUBLISH-FIX-55 (2026-09-17, independent review f32484ca finding 3): the bridge could lose decisions two ways — a step
+// handled at most 64 of the Judge's last 256 decisions (a burst of more than 64 a minute outran it) and a decision whose
+// store write failed was marked seen anyway (never retried once storage recovered). Now a step handles up to 512, and a
+// refused write is NOT remembered: the decision is offered again on the next step, up to MAX_RETRIES times, before it is
+// given up on (logged). Same episodes, same law; nothing new is captured, nothing captured is lost to a hiccup.
+const MAX_RETRIES = 5;
+export function createJudgeDecisionBridge({ store, decisionsSource, policyVersion, log = () => {}, maxPerStep = 512 } = {}) {
   if (!store || typeof store.appendEpisode !== 'function') throw new Error('createJudgeDecisionBridge: a learning store is required');
   if (typeof decisionsSource !== 'function') throw new Error('createJudgeDecisionBridge: decisionsSource() is required');
   if (typeof policyVersion !== 'string' || !policyVersion.length) throw new Error('createJudgeDecisionBridge: policyVersion is required');
-  const seen = new Set(); const seenOrder = [];
-  const counters = { scanned: 0, appended: 0, duplicates: 0, refused: 0, skippedMalformed: 0 };
+  const seen = new Set(); const seenOrder = []; const retries = new Map();
+  const counters = { scanned: 0, appended: 0, duplicates: 0, refused: 0, skippedMalformed: 0, retried: 0, givenUp: 0 };
   let last = null;
   const remember = (id) => { seen.add(id); seenOrder.push(id); if (seenOrder.length > MAX_SEEN) seen.delete(seenOrder.shift()); };
   function step({ nowTs }) {
@@ -91,8 +97,12 @@ export function createJudgeDecisionBridge({ store, decisionsSource, policyVersio
       try {
         const r = store.appendEpisode(episode);
         if (r && r.appended) { appended += 1; counters.appended += 1; } else { duplicates += 1; counters.duplicates += 1; }
-      } catch (err) { refused += 1; counters.refused += 1; log(`judge decision bridge: store refused ${id}: ${String(err?.message ?? err).slice(0, 160)}`); }
-      remember(id);
+      } catch (err) {
+        refused += 1; counters.refused += 1; const n = (retries.get(id) ?? 0) + 1;
+        if (n < MAX_RETRIES) { retries.set(id, n); counters.retried += 1; log(`judge decision bridge: store refused ${id} (attempt ${n}/${MAX_RETRIES}, will retry): ${String(err?.message ?? err).slice(0, 160)}`); continue; }
+        retries.delete(id); counters.givenUp += 1; log(`judge decision bridge: store refused ${id} ${MAX_RETRIES} times — given up: ${String(err?.message ?? err).slice(0, 160)}`);
+      }
+      retries.delete(id); remember(id);
     }
     last = { nowTs, handled, appended, duplicates, refused, malformed, authority: 'NONE' };
     return last;

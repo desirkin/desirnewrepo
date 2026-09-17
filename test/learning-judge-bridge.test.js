@@ -70,7 +70,7 @@ test('the bridge appends each decision once (idempotent across steps and re-read
     const r3 = bridge.step({ nowTs: T0 + 3 * MIN });
     assert.equal(r3.appended, 1); assert.equal(r3.malformed, 1);
     assert.equal(store.readEpisodes().length, 3);
-    assert.deepEqual(bridge.status().counters, { scanned: 4, appended: 3, duplicates: 0, refused: 0, skippedMalformed: 1 });
+    assert.deepEqual(bridge.status().counters, { scanned: 4, appended: 3, duplicates: 0, refused: 0, skippedMalformed: 1, retried: 0, givenUp: 0 });
     // a second bridge over the same store and the same ring appends nothing new (recipe identity)
     const again = createJudgeDecisionBridge({ store: createLearningStore({ dataDir: dir, log: () => {} }), decisionsSource: () => ring, policyVersion: 'judge-policy-abc' });
     const r4 = again.step({ nowTs: T0 + 4 * MIN });
@@ -154,5 +154,28 @@ test('PUBLISH-FIX-41: a cell forms from GRADED decisions the Judge did NOT take 
     assert.ok(heads.some((h) => h.scope.setupType === 'MOMENTUM_IGNITION' && h.predicate.descriptor === 'EVALUATED_MOMENTUM_IGNITION'));
     assert.ok(heads.every((h) => ['NOTICED', 'ACCUMULATING'].includes(h.state)), 'descriptive only — never promoted by evidence alone');
     svc.stop();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// PUBLISH-FIX-55 (review f32484ca finding 3): a refused store write is retried on later steps (never marked seen), a
+// burst larger than the old 64-per-step cap is captured in one step, and a hopeless record is given up after 5 tries
+test('PUBLISH-FIX-55: a store hiccup does not lose a decision — the write is retried on the next steps and lands once storage recovers; a 300-decision burst is captured in one step; 5 failures give up', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-judge-bridge-55-'));
+  try {
+    const real = createLearningStore({ dataDir: dir, log: () => {} }); let failing = true; let attempts = 0;
+    const store = { ...real, appendEpisode: (e) => { attempts += 1; if (failing) throw new Error('disk hiccup'); return real.appendEpisode(e); } };
+    const ring = [decision({ decisionId: 'h1' })]; const logs = [];
+    const bridge = createJudgeDecisionBridge({ store, decisionsSource: () => ring, policyVersion: 'judge-policy-abc', log: (m) => logs.push(m) });
+    const r1 = bridge.step({ nowTs: T0 + MIN }); assert.equal(r1.refused, 1); assert.equal(r1.appended, 0);
+    const r2 = bridge.step({ nowTs: T0 + 2 * MIN }); assert.equal(r2.refused, 1, 'retried, still failing'); assert.equal(bridge.status().counters.retried, 2);
+    failing = false; const r3 = bridge.step({ nowTs: T0 + 3 * MIN }); assert.equal(r3.appended, 1, 'lands once storage recovers'); assert.equal(real.readEpisodes().length, 1);
+    assert.equal(bridge.step({ nowTs: T0 + 4 * MIN }).handled, 0, 'then it is seen'); assert.ok(logs.some((m) => m.includes('will retry')));
+    // a burst: 300 decisions before the bridge runs, all captured in one step (the old cap was 64)
+    for (let i = 0; i < 300; i += 1) ring.push(decision({ decisionId: `b${i}`, ts: T0 + (i + 1) * 1000 }));
+    const r5 = bridge.step({ nowTs: T0 + 5 * MIN }); assert.equal(r5.appended, 300); assert.equal(real.readEpisodes().length, 301);
+    // a hopeless record: 5 refusals, then given up (never blocks the ring)
+    failing = true; ring.push(decision({ decisionId: 'dead', ts: T0 + 400_000 }));
+    for (let i = 0; i < 5; i += 1) bridge.step({ nowTs: T0 + (10 + i) * MIN });
+    assert.equal(bridge.status().counters.givenUp, 1); assert.equal(bridge.step({ nowTs: T0 + 20 * MIN }).handled, 0, 'given up = seen'); assert.ok(logs.some((m) => m.includes('given up')));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
