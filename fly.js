@@ -25,6 +25,7 @@ import { rumor2CheckpointStore } from './persistence/rumor2-checkpoint.js';
 import { rumor2JournalStore } from './persistence/rumor2-journal.js';
 import { getPersistence } from './persistence/runtime.js';
 import { startLoopLag } from './lib/loop-lag.js';
+import { createRelookSource } from './learning/relook.js';
 import { startMemoryMirror } from './memory/mirror.js';
 import { openPaperRuntime, startDataOnlyRuntime } from './lib/serpent-runtime.js';
 import { initPaperAccountAtBoot } from './lib/paper-account-init.js';
@@ -221,6 +222,9 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // read, and registers itself with the cockpit so ARM_LIVE can bind to the actual account. Trade credentials come
   // only from the environment names the LIVE policy declares. Nothing here is constructed without the opt-in.
   let judgeRun = null; let learningRankingStore = null; let learningStewardTimer = null;
+  // PUBLISH-FIX-54: the LEARNED RE-LOOK adds its coins to the Judge's nominations (set once learning is up; empty until then)
+  let relookSource = null; let relookTimer = null;
+  const judgeNominations = () => { const u = readCurrentUniverse(); const base = (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); let extra = []; try { extra = relookSource ? relookSource.nominations() : []; } catch { extra = []; } return [...base, ...extra]; };
   if (process.env.JUDGE_ENABLED === 'true') {
     try {
       const { composeJudge, loadSpecs } = await import('./judge/composition.js');
@@ -262,7 +266,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
         learningRankingLine = `LEARNING RANKING: ON (ranking-only; learned influence ${kill.state}; ACTIVE_PAPER activations now: ${activeNow}; off switch: cobra learning kill; source ${rankingSource.version})`;
       }
       console.log(learningRankingLine);
-      judgeRun = await composeJudge({ learningActivationSource, policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing, writerLockWait: { waitMs: 180_000, intervalMs: 5_000 } }); // PUBLISH-FIX-5 / PAPER-FLIP-PREP: the boot waits out a Republish overlap for the execution writer lock
+      judgeRun = await composeJudge({ nominations: judgeNominations, learningActivationSource, policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing, writerLockWait: { waitMs: 180_000, intervalMs: 5_000 } }); // PUBLISH-FIX-5 / PAPER-FLIP-PREP: the boot waits out a Republish overlap for the execution writer lock
       const startup = await judgeRun.start();
       setJudgeRun(judgeRun);
       console.log(`JUDGE active: ${judgeRun.kind} account ${judgeRun.accountId} mode ${judgeRun.mode} (${judgeRun.kind === 'PAPER' ? 'NOT REAL MONEY' : 'LIVE: entries need an unexpired owner authorization'}); startup ${JSON.stringify({ uncertain: startup.uncertainOrders.length, exposed: startup.exposedPositions.length, authorizationEnded: startup.authorizationEnded })}`);
@@ -330,6 +334,17 @@ if (SERPENT_MODE === 'DATA_ONLY') {
         archiveSource, decisionBridge, promoter,
       });
       if (moverStudy && learningHandle?.store) { moverStudy.attachStore(learningHandle.store); console.log('MOVER STUDY: learning store attached — movers and their controls become DAILY_MOVER episodes with outcomes'); }
+      // PUBLISH-FIX-54: LEARNED RE-LOOK — a coin that rose after the Judge passed on it, or a mover whose hour after held, is
+      // offered to the Judge's watch again for two hours (through the tape's hot lane and the Judge's own nomination law),
+      // only while the mover study's evidence says late entries hold. Watch only; every rule of the Judge unchanged.
+      try {
+        if (learningHandle?.store) {
+          relookSource = createRelookSource({ store: learningHandle.store, moverStudy, dataDir: dataDir(), log: console.log });
+          relookSource.refresh();
+          relookTimer = setInterval(() => { try { relookSource.refresh(); } catch (err) { console.error(`LEARNED RE-LOOK refresh: ${String(err?.message ?? err).slice(0, 160)}`); } }, 60_000); relookTimer.unref?.();
+          console.log(`LEARNED RE-LOOK active (authority NONE; watch only): ${relookSource.line()}`);
+        }
+      } catch (err) { console.error(`LEARNED RE-LOOK failed to start (dark; nothing else affected): ${String(err?.message ?? err).slice(0, 160)}`); relookSource = null; }
       console.log(`LEARN-1 active (data-only, authority NONE): capture -> maturation -> provisional memory; PAPER adapter dormant${decisionBridge ? '; JUDGE DECISION BRIDGE on (every paper decision becomes an episode)' : ''}${promoter ? '; PROMOTER on (freeze -> forward test -> publish)' : ''}`);
     } catch (err) {
       console.error(`LEARN-1 failed to start (dark; nothing else affected): ${err.message}`);
@@ -428,7 +443,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
           // bytes carried: the whole account state travels twice per commit) vs plain queries (the tape) — and the pool gauge
           let dbClocks = '';
           try { const c = getPersistence()?.db?.clocks?.() ?? null; if (c) { const kb = (x) => (x && Number.isFinite(x.p50) ? `p50 ${Math.round(x.p50 / 1024)} / max ${Math.round(x.max / 1024)} KB` : 'no samples'); dbClocks = `; DB: tx ${ms(c.tx)} (statements/tx p50 ${c.txStatements?.p50 ?? '?'}, bytes/tx ${kb(c.txParamBytes)}); pool checkout wait ${ms(c.checkoutWait)} (failures ${c.checkoutFailures}); query ${ms(c.query)}; pool ${c.pool?.total ?? '?'} open / ${c.pool?.idle ?? '?'} idle / ${c.pool?.waiting ?? '?'} waiting of ${c.pool?.max} (${c.pool?.lockSessions} held for life by locks)${c.slowestTx ? `; slowest tx ${c.slowestTx.ms} ms, ${c.slowestTx.statements} statements, ${Math.round(c.slowestTx.paramBytes / 1024)} KB, began '${c.slowestTx.first}'` : ''}`; } } catch (err) { dbClocks = `; DB clocks unavailable (${String(err?.message ?? err).slice(0, 80)})`; }
-          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}`);
+          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}`);
         } catch (err) { console.error(`JUDGE FUNNEL line: ${err.message}`); }
       };
       const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); logFunnel(); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
@@ -523,6 +538,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     if (learningHandle) { try { learningHandle.stop(); } catch (err) { console.error(`LEARN-1 stop failed: ${err.message}`); } }
     if (decisionOutcomeTimer) { try { clearInterval(decisionOutcomeTimer); } catch { /* timer already cleared */ } decisionOutcomeTimer = null; }
     if (learningStewardTimer) { try { clearInterval(learningStewardTimer); } catch { /* timer already cleared */ } learningStewardTimer = null; }
+    if (relookTimer) { try { clearInterval(relookTimer); } catch { /* timer already cleared */ } relookTimer = null; }
     if (caseTriggerTimer) { try { clearInterval(caseTriggerTimer); } catch { /* timer already cleared */ } caseTriggerTimer = null; }
     // paper launch seam: components the paper launcher started stop cleanly BEFORE the process exits
     if (typeof globalThis.serpentPaperShutdown === 'function') { try { await globalThis.serpentPaperShutdown(); } catch (err) { console.error(`PAPER shutdown seam failed: ${err.message}`); } }

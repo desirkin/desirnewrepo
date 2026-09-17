@@ -3,8 +3,9 @@
 // catalog monitoring is separate from this bounded deep-book set. Named
 // display seeds grant no special depth or seats. Only actual held/pending
 // exposure receives protected resources; stale pairs cannot supply fresh data.
+import { readLearnedRelooksToday } from '../learning/relook.js';
 import { raceUniverseLoad, startupOutcomeLine, startupNeedsRetry, createUniverseRetry, createTapeDownWatchdog, STARTUP_UNIVERSE_DEADLINE_MS } from './startup.js';
-import { loadConfig, coinFromSymbol } from '../lib/config.js';
+import { loadConfig, coinFromSymbol, dataDir } from '../lib/config.js';
 import { createResourceLaw } from './resource-law.js';
 import { nowIso, sessionDate } from '../lib/time.js';
 import { OrderBook, decimalsOf } from './book.js';
@@ -146,7 +147,8 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   let hotSeen = new Set(); let hotLaneBusy = false; const hotLane = { slots: xp.hotLane?.slots ?? HOT_LANE_DEFAULTS.slots, tenureMs: xp.hotLane?.tenureMs ?? HOT_LANE_DEFAULTS.tenureMs };
   async function adoptHotNominations() {
     if (stopping || hotLaneBusy) return;
-    const nominations = readWideEyeNominationsToday().filter((n) => n && typeof n.coin === 'string' && !hotSeen.has(n.coin));
+    // PUBLISH-FIX-54: the LEARNED RE-LOOK's coins ride the same hot lane and the same venue verification as the wide eye's
+    const nominations = [...readWideEyeNominationsToday(), ...readLearnedRelooksToday({ dataDir: dataDir() })].filter((n) => n && typeof n.coin === 'string' && !hotSeen.has(n.coin));
     if (!nominations.length) return;
     hotLaneBusy = true;
     try {

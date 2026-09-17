@@ -292,7 +292,10 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     // every 30 s (adopting only what the venue verifies), and TAPE DOWN prints every minute after a 2-minute grace until LIVE
     // (tape/startup.js). Production b1ec3c6a: the tape never got past its startup load for 35 min; the Judge saw 0 books.
     // Subscriptions only; the venue is never guessed; no trading/control/model surface. Tests: test/tape-startup.test.js.
-    'tape/run.js': '311ad2a9ae4fc494ab9d2f2725858d667a0cdb3d023243ad7687d09634182c7b',
+    // PUBLISH-FIX-54 (2026-09-17, owner directive): the LEARNED RE-LOOK's coins ride the hot lane beside the wide eye's
+    // nominations (readLearnedRelooksToday; same venue verification, same slots, same tenure). Subscriptions only; no
+    // trading/control/model surface. Tests: test/learning-relook.test.js RL-04/RL-05.
+    'tape/run.js': '29447af411585fa12999717996ed81f1d445bd354e3c6354fdbc2633fc2119bb',
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
     // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the
