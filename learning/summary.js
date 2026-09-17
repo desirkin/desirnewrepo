@@ -6,9 +6,10 @@ import { SUMMARY_VERSION, AUTHORITY, PURPOSE, utcDateOf, deepFreeze } from './co
 import { reconcileCoverage } from './capture.js';
 import { classifyOutcome } from './maturation.js';
 
-export function buildDailySummary({ store, utcDate, nowTs, dailyCounters = null, workloadTarget = 10_000 }) {
-  const coverageRows = store.readCoverage(utcDate);
-  const coverage = reconcileCoverage(coverageRows);
+// PUBLISH-FIX-35: `coverage` may be supplied already counted (store.coverageCountsStreamed) so the runtime never reads the
+// whole day's journal on the main lane; absent, the synchronous read stands (CLI, tests).
+export function buildDailySummary({ store, utcDate, nowTs, dailyCounters = null, workloadTarget = 10_000, coverage = null }) {
+  if (!coverage || typeof coverage !== 'object' || !coverage.counts) coverage = reconcileCoverage(store.readCoverage(utcDate));
   const episodes = store.readEpisodes();
   const todayEpisodes = episodes.filter((e) => utcDateOf(e.decisionTs) === utcDate);
   const outcomes = store.latestOutcomes();

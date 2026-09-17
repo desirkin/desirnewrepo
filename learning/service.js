@@ -56,7 +56,7 @@ export function startLearning({
   const lastCapturedBySymbol = new Map();
   const errors = { capture: 0, maturation: 0, learning: 0, shadow: 0, opportunityAudit: 0 };
 
-  let lastRecordedSweepId = null;
+  let lastRecordedSweepId = null; let summaryJob = null;
   function captureTick(nowTs) {
     const pop = populationSource ? populationSource() : null;
     if (!pop || !Array.isArray(pop.rows) || pop.rows.length === 0) return { captured: 0, coverage: 0, reason: 'NO_POPULATION_SNAPSHOT' };
@@ -199,8 +199,15 @@ export function startLearning({
     }
     try {
       const yesterday = utcDateOf(nowTs - 86_400_000);
-      if (!store.readSummary(yesterday) && store.coverageDates().includes(yesterday)) {
-        store.writeSummary(buildDailySummary({ store, utcDate: yesterday, nowTs, dailyCounters: counters.utcDate === yesterday ? counters : emptyDailyCounters(yesterday), workloadTarget: dailyTarget }));
+      if (!summaryJob && !store.readSummary(yesterday) && store.coverageDates().includes(yesterday)) {
+        // PUBLISH-FIX-35: yesterday's coverage journal (~150 MB) is COUNTED BY STREAMING off the main lane; the summary is
+        // written when the count lands (one job at a time; a failure is logged and retried at a later tick)
+        const dailyCounters = counters.utcDate === yesterday ? counters : emptyDailyCounters(yesterday);
+        summaryJob = store.coverageCountsStreamed(yesterday)
+          .then((coverage) => { if (!store.readSummary(yesterday)) store.writeSummary(buildDailySummary({ store, utcDate: yesterday, nowTs: clock(), dailyCounters, workloadTarget: dailyTarget, coverage })); })
+          .catch((err) => log(`learning summary: ${String(err?.message ?? err).slice(0, 200)}`))
+          .finally(() => { summaryJob = null; });
+        report.summary = { state: 'COUNTING', utcDate: yesterday };
       }
     } catch (err) { log(`learning summary: ${err.message}`); }
     lastTick = nowTs;

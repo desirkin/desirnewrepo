@@ -4,7 +4,8 @@
 // repaired in place and nothing is deleted. Reads are bounded. The store owns bytes only; meaning lives in the
 // pure modules that produce and consume these records.
 import path from 'node:path';
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { appendJsonl, atomicWriteJson, readJsonl, readJsonBounded } from '../lib/jsonl.js';
 import {
   LIMITS, coverageRowError, episodeError, outcomeAttachError, patternRecordError, activationError, questionError,
@@ -186,6 +187,27 @@ export function createLearningStore({ dataDir, log = () => {} }) {
     for (const r of readJsonl(f)) { const err = coverageRowError(r); if (err) { counters.invalidRejected += 1; continue; } out.push(r); }
     return out;
   };
+  // PUBLISH-FIX-35 (2026-09-17): the day's coverage journal is 600+ rows a minute (one per surveyed USD pair per WIDE EYE
+  // sweep), ~150 MB by midnight. The daily summary needs only the attention COUNTS, so they are streamed line by line —
+  // the loop breathes between file chunks and no row array is retained — instead of readFileSync + split + parse of the
+  // whole day on the main lane (a 20-60 s block at the first tick after midnight). Same validation, same counting law:
+  // an invalid row is withheld and counted, a torn line is skipped.
+  const coverageCountsStreamed = async (utcDate) => {
+    const counts = { EVALUATED: 0, MISSED_DETECTION: 0, MISSED_EVALUATION: 0, OMITTED_CAPACITY: 0, STALE: 0, UNAVAILABLE: 0, INELIGIBLE: 0 };
+    let rows = 0; let invalid = 0; let torn = 0;
+    const f = coverageFileOf(dir, utcDate);
+    if (!existsSync(f)) return Object.freeze({ counts: Object.freeze(counts), denominator: 0, reconciles: true, rows: 0, invalid: 0, torn: 0 });
+    const rl = createInterface({ input: createReadStream(f, { encoding: 'utf8', highWaterMark: 256 * 1024 }), crlfDelay: Infinity });
+    for await (const line of rl) {
+      const trimmed = line.trim(); if (!trimmed) continue;
+      let r; try { r = JSON.parse(trimmed); } catch { torn += 1; continue; }
+      const err = coverageRowError(r); if (err) { invalid += 1; counters.invalidRejected += 1; continue; }
+      if (counts[r.attention] === undefined) { invalid += 1; continue; }
+      counts[r.attention] += 1; rows += 1;
+    }
+    const denominator = Object.values(counts).reduce((a, b) => a + b, 0);
+    return Object.freeze({ counts: Object.freeze(counts), denominator, reconciles: denominator === rows, rows, invalid, torn });
+  };
   const coverageDates = () => { const d = path.join(dir, 'coverage'); if (!existsSync(d)) return []; return readdirSync(d).filter((f) => f.endsWith('.jsonl')).map((f) => f.slice(0, -6)).sort(); };
 
   // ---- campaigns: <dir>/campaigns/<id>/{manifest.json, results.jsonl, checkpoint.json}
@@ -277,7 +299,7 @@ export function createLearningStore({ dataDir, log = () => {} }) {
     appendProspective, readProspective,
     appendActivation, activationHeads, activationHistory,
     appendQuestion, readQuestions,
-    appendCoverage, readCoverage, coverageDates,
+    appendCoverage, readCoverage, coverageDates, coverageCountsStreamed,
     writeCampaignManifest, readCampaignManifest, appendCampaignResult, readCampaignResults,
     writeCampaignCheckpoint, readCampaignCheckpoint, listCampaigns,
     writeDiagnosticManifest, readDiagnosticManifest, writeDiagnosticState, readDiagnosticState,
