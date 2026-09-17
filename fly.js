@@ -360,7 +360,21 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       console.log('LEARNING DATA CLOCK active (dormant, authority NONE): recording the 5m bite + 15m continuation of every PAPER decision, and maturing the 1h/4h/24h research horizons');
     } catch (err) { console.error(`LEARNING DATA CLOCK failed to start (dark; nothing else affected): ${err.message}`); decisionOutcomeTimer = null; }
   }
-  rumor2Handle = startRumor2({
+  // PUBLISH-FIX-36 (David's go, 2026-09-17): the SECOND LANE. SERPENT_RESEARCH_LANE=worker runs the whole RUMOR-2 ear (social
+  // firehose, official ears, research strainer, the 130k-event hydrate) on a worker thread (lanes/research-lane.js) so the
+  // main thread carries tape + Judge + execution with headroom for a market-wide burst. Same seams, serialized; same
+  // handle shape; authority NONE either way. Unset => the ear composes in-process exactly as before (the OFF position).
+  if (process.env.SERPENT_RESEARCH_LANE === 'worker' && process.env.RUMOR2_ENABLED === 'true') {
+    try {
+      const { startResearchLane } = await import('./lanes/research-lane.js');
+      rumor2Handle = startResearchLane({ wideEye, deepMarketSource: marketResearch ? createDeepMarketSource(marketResearch.owner) : null, subjects: (marketResearchSubjects?.subjects ?? []).map((s) => s?.canonicalCoin).filter((c) => typeof c === 'string'), readCurrentUniverse, log: console.log });
+      console.log('RESEARCH LANE: RUMOR-2 composed on the second lane (worker thread); the main thread keeps tape + Judge + execution');
+    } catch (err) {
+      console.error(`RESEARCH LANE failed to start (falling back to the in-process ear): ${err.message}`);
+      rumor2Handle = null;
+    }
+  }
+  if (!rumor2Handle) rumor2Handle = startRumor2({
     checkpointStore: rumor2CheckpointStore(), journal: rumor2JournalStore({ lockWait: { waitMs: 180_000, intervalMs: 5_000 } }), // PUBLISH-FIX-5: boot path waits out a Republish overlap for the RUMOR-2 writer lock
     // SOCIAL-4F: DISCOVERY_CATALOG injection — read-only accessors only (no mutable survey map, no
     // posture callback, no authority to start market-data collection); absent when the wide eye is
@@ -426,6 +440,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     await runTape({ executionFeed: judgeRun ? judgeRun.tapeFeed : null, observer: marketResearch ? marketResearch.observer : null }); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
     if (judgeRun) { try { await judgeRun.stop(); } catch (err) { console.error(`JUDGE stop failed: ${err.message}`); } }
     if (marketResearch) { try { await marketResearch.stop(); } catch (err) { console.error(`MARKET RESEARCH stop failed: ${err.message}`); } }
+    if (rumor2Handle && rumor2Handle.lane === 'WORKER') { try { const out = await rumor2Handle.stop(); console.log(`RESEARCH LANE stopped (${out})`); } catch (err) { console.error(`RESEARCH LANE stop failed: ${err.message}`); } } // PUBLISH-FIX-36: the in-process ear stops on the signal it already binds
     if (learningHandle) { try { learningHandle.stop(); } catch (err) { console.error(`LEARN-1 stop failed: ${err.message}`); } }
     if (decisionOutcomeTimer) { try { clearInterval(decisionOutcomeTimer); } catch { /* timer already cleared */ } decisionOutcomeTimer = null; }
     if (learningStewardTimer) { try { clearInterval(learningStewardTimer); } catch { /* timer already cleared */ } learningStewardTimer = null; }
