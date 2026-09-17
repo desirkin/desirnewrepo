@@ -277,11 +277,18 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     'rumor2/social-registry.js': '5272e921a82bb314f515004fe6d41f8eae0da99fd80be306b9f1c582663c2d82',
     'rumor2/social.js': '583d589323cb9f0e88f5749fabc1fb3a135460dc9a664e926afc56fcb01aa4e7',
     'rumor2/social-foundation.js': '512ec2b27b1ffcee7799837554ecd97769704daedfe726de74b335781f9bd1ba',
-    'tape/universe.js': 'ed0a16130fee4c841b5f5ba78bac52c5403d6fe4e2ebfd5844bed96c5c05bad1',
+    // PUBLISH-FIX-28 (2026-09-17, owner directive — hot lane): mergeCarriedIntoCurrentUniverse (the current record stays a
+    // superset of what the tape carries) + readWideEyeNominationsToday (this session's proposals only); the daily selection and
+    // the next-session merge are unchanged. No trading/control/model surface. Tests: test/tape-hot-lane.test.js, test/universe.test.js.
+    'tape/universe.js': '001d5ea14f3b604c1d79336a0f9169e065f78d384a18f8487c95fdc9b9cf28be',
     // Ticket B (I/O lane, 2026-09-15): stopTapeWrites import + a single drain call in the clean-stop path (write-behind
     // buffer, opt-in SERPENT_TAPE_WRITE_BEHIND; no trading/control/model surface). Tests: test/write-behind.test.js,
     // test/tape-store-write-behind.test.js.
-    'tape/run.js': '5ad288300107ba587c21bdbf2502aa7fae5e4c86959b65f72d504409617dd504',
+    // PUBLISH-FIX-27 + 28 (2026-09-17): the resource law moved to tape/resource-law.js (hysteresis: a sustained lag or a heap
+    // breach sheds, five calm minutes re-admit one shed pair) and the HOT LANE poll (tape/hot-lane.js: a verified WIDE EYE
+    // nominee joins the deep tape in-session, 3 slots, 2 h tenure). Subscriptions only; no trading/control/model surface.
+    // Tests: test/tape-resource-law.test.js, test/tape-hot-lane.test.js.
+    'tape/run.js': '660ffce83afa4ef311007cb291f00f1ba42abe2583721369dece0045006ea526',
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
     // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the

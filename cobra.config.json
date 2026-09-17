@@ -55,8 +55,7 @@
       "maxHeapMb": 512,
       "maxLoopLagMs": 1000,
       "shedFraction": 0.15
-    },
-    "hotLane": { "slots": 3, "tenureMs": 7200000 }
+    }
   },
   "tape": {
     "wsUrl": "wss://ws.kraken.com/v2",
