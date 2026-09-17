@@ -83,3 +83,41 @@ test('with a learning store attached, movers and controls become DAILY_MOVER epi
     svc.stop();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('PUBLISH-FIX-49: the day\'s TOP-N board keeps the biggest climbs regardless of the 10% line — a 6% climber makes the board with the same picture, controls and lessons; the board is written ranked when the day closes; a threshold mover on the board is marked, never duplicated', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-mover-top-'));
+  try {
+    let now = T0; const log = [];
+    const store = createLearningStore({ dataDir: dir });
+    const study = createMoverStudy({ dataDir: dir, clock: () => now, store, log: (m) => log.push(m), options: { controlsPerMover: 1, topMoversPerDay: 3 } });
+    const end = feed(study, 'PEPE', { top: 112 });           // crosses 10% -> an immediate MOVER event
+    feed(study, 'WIF', { top: 106, after: () => 106 });      // 6%: never a MOVER, but a top-of-day climb
+    feed(study, 'BONK', { top: 103, after: () => 103 });     // 3%
+    feed(study, 'BTC', { top: 100.5, after: () => 100.5 });  // 0.5%
+    feed(study, 'ETH', { top: 100.2, after: () => 100.2 });  // 0.2% (falls off a 3-entry board)
+    now = end + MIN;
+    const r = study.tick(now); assert.equal(r.movers, 1);
+    const board = study._internals.board();
+    assert.equal(board.date, '2026-09-17');
+    const coins = [...board.entries.keys()].sort(); assert.deepEqual(coins, ['BONK', 'PEPE', 'WIF'], `top 3 by climb: ${coins}`);
+    assert.equal(board.entries.get('PEPE').alsoMover, true); assert.equal(board.entries.get('WIF').alsoMover, false);
+    assert.ok(board.entries.get('WIF').climb > 5.5 && board.entries.get('WIF').climb < 6.5);
+    assert.equal(board.entries.get('WIF').lessons.length, 2, 'the entry holds its own lesson and one control lesson, built while the ring still had the hour after');
+    assert.ok(study.status().today.topSoFar.entries[0].coin === 'PEPE');
+    // the day closes: the board is written ranked; WIF and BONK become DAILY_MOVER lessons; PEPE (already a MOVER) is marked, not duplicated
+    const before = store.readEpisodes().length;
+    study.closeDay(now + 60 * MIN);
+    const rows = study.readDay('2026-09-17');
+    const top = rows.filter((x) => x.kind === 'DAILY_TOP').sort((a, b) => a.rank - b.rank);
+    assert.deepEqual(top.map((x) => [x.rank, x.coin, x.alsoMover]), [[1, 'PEPE', true], [2, 'WIF', false], [3, 'BONK', false]]);
+    assert.ok(top.every((x) => x.hourBefore && x.theMove && x.hourAfter && x.of === 3));
+    assert.equal(rows.filter((x) => x.kind === 'DAILY_TOP_CONTROL').length, 3);
+    const after = store.readEpisodes().length;
+    assert.ok(after - before >= 3 && after - before <= 4, `WIF + BONK + their controls became lessons, PEPE's were already there, a control that is itself on the board is one lesson not two: +${after - before}`);
+    assert.ok(['WIF', 'BONK'].every((c) => store.readEpisodes().some((e) => e.canonicalCoin === c && e.setupType === MOVER_SETUP_TYPE)));
+    assert.ok(store.readEpisodes().some((e) => e.canonicalCoin === 'WIF' && e.setupType === MOVER_SETUP_TYPE && e.gates[0].ok === false && e.gates[0].observed > 5), 'a below-threshold top mover is a lesson with its climb recorded and the 10% gate honestly false');
+    assert.ok(existsSync(path.join(dir, 'learning', 'mover-study', 'top-2026-09-17.json')));
+    assert.ok(log.some((m) => /MOVER STUDY 2026-09-17 TOP 3: 1\. PEPE/.test(m)), log.join(' | '));
+    assert.equal(study._internals.board().date, null, 'a fresh board for the next day');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

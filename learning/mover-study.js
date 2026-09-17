@@ -40,6 +40,7 @@ export const MOVER_STUDY_DEFAULTS = Object.freeze({
   dedupeMin: 120,         // one event per coin per two hours: a climb is not re-reported minute after minute
   maxCoins: 2_000,
   maxEventsPerTick: 50,
+  topMoversPerDay: 30,    // David: "the 30 biggest movers of the day, in case someone didn't make it to 10%" — kept beside the threshold events
 });
 const MIN = 60_000;
 const bounded = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').slice(0, 160);
@@ -93,7 +94,7 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
   const dir = path.join(dataDir, 'learning', MOVER_STUDY_DIR);
   const rings = new Map(); // coin -> { candles: [[openSec,o,h,l,c,v]...] ascending, receivedTs }
   const lastEventSec = new Map(); // coin -> openSec of the last reported event
-  const counters = { records: 0, candles: 0, ticks: 0, movers: 0, controls: 0, episodes: 0, outcomes: 0, errors: 0, dropped: 0 };
+  const counters = { records: 0, candles: 0, ticks: 0, movers: 0, controls: 0, dailyTop: 0, episodes: 0, outcomes: 0, errors: 0, dropped: 0 };
   const createdTs = clock();
   let learningStore = store;
   let day = { date: null, movers: 0, controls: 0, coins: new Set(), before: [], after: [] };
@@ -161,6 +162,7 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
       version: MOVER_STUDY_VERSION, date: day.date, movers: day.movers, controls: day.controls, distinctCoins: day.coins.size, thresholdPct: cfg.moveThresholdPct,
       hourBeforeMedian: b.length ? { retPct: median(b.map((x) => x.retPct)), rv1mPct: median(b.map((x) => x.rv1mPct)), rangePct: median(b.map((x) => x.rangePct)), volumeVsPriorHour: median(b.map((x) => x.volumeVsPriorHour)), maxDrawdownPct: median(b.map((x) => x.maxDrawdownPct)) } : null,
       hourAfterMedian: a.length ? { retPct: median(a.map((x) => x.retPct)), mfePct: median(a.map((x) => x.mfePct)), maePct: median(a.map((x) => x.maePct)), heldAboveStartShare: round4(a.filter((x) => x.heldAboveStart).length / a.length) } : null,
+      topSoFar: board.date ? { date: board.date, entries: [...board.entries.values()].sort((a, b) => b.climb - a.climb).slice(0, 10).map((en) => ({ coin: en.picture.coin, climbPct: en.climb, eventTs: en.picture.eventTs, alsoMover: en.alsoMover })) } : null,
       updatedTs: clock(),
     };
   }
@@ -170,25 +172,68 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
     catch (err) { counters.errors += 1; log(`MOVER STUDY summary failed: ${bounded(err?.message ?? err)}`); }
   }
 
-  // the study's episode + outcome for one picture, through the ordinary LEARN-1 laws (idempotent by opportunity identity)
-  function learn(p, kind, nowTs) {
-    if (!learningStore) return;
+  // the study's episode + outcome for one picture, through the ordinary LEARN-1 laws (idempotent by opportunity identity).
+  // lesson() builds both from the ring AS IT STANDS NOW (the candles will have rolled off by the day's end); commit() appends.
+  function lesson(p, kind, nowTs) {
+    if (!learningStore) return null;
     try {
-      const ring = rings.get(p.coin); if (!ring) return;
+      const ring = rings.get(p.coin); if (!ring) return null;
       const episode = buildEpisode({
         canonicalCoin: p.coin, decisionTs: p.eventTs, usableAtTs: p.eventTs, datasetId: MOVER_STUDY_DATASET,
         mode: 'PROSPECTIVE_SHADOW', evidenceBasis: 'PROSPECTIVE', fidelity: 'CANDLE_DESCRIPTIVE',
         featureSet: { features: featuresOf(p) },
-        gates: [{ id: 'MOVER_CLIMB_GTE', ok: kind === 'MOVER', observed: p.climbPct, threshold: cfg.moveThresholdPct, class: 'SOFT' }],
+        gates: [{ id: 'MOVER_CLIMB_GTE', ok: kind !== 'CONTROL' && p.climbPct >= cfg.moveThresholdPct, observed: p.climbPct, threshold: cfg.moveThresholdPct, class: 'SOFT' }],
         decision: 'NO_SETUP', baselineScore: Number.isFinite(p.climbPct) ? p.climbPct : null,
         setupType: MOVER_SETUP_TYPE, regime: 'LIVE_UNCLASSIFIED', baselineRuleVersion: BASELINE_RULE_VERSION,
       });
-      const r = learningStore.appendEpisode(episode); if (!r?.appended) return;
-      counters.episodes += 1;
       const archive = { version: MOVER_STUDY_VERSION, archiveCreatedTsMs: createdTs, oneMinute: new Map([[p.coin, seriesOf(p.coin, ring.candles, ring.receivedTs || nowTs)]]), source: 'mover-study-ring', limitations: ['ROLLING_WINDOW_ONLY'] };
       const attach = matureEpisode({ episode, archive, asOfTs: nowTs, attachedTs: nowTs });
-      if (attach) { learningStore.appendOutcome(attach); counters.outcomes += 1; }
-    } catch (err) { counters.errors += 1; log(`MOVER STUDY learning refused: ${bounded(err?.message ?? err)}`); }
+      return { episode, attach };
+    } catch (err) { counters.errors += 1; log(`MOVER STUDY lesson refused: ${bounded(err?.message ?? err)}`); return null; }
+  }
+  function commit(l) {
+    if (!l || !learningStore) return;
+    try { const r = learningStore.appendEpisode(l.episode); if (!r?.appended) return; counters.episodes += 1; if (l.attach) { learningStore.appendOutcome(l.attach); counters.outcomes += 1; } }
+    catch (err) { counters.errors += 1; log(`MOVER STUDY learning refused: ${bounded(err?.message ?? err)}`); }
+  }
+  const learn = (p, kind, nowTs) => commit(lesson(p, kind, nowTs));
+
+  // THE DAY'S TOP-N BOARD: every coin's best hour-climb of the UTC day competes; a coin that enters the current top N has
+  // its picture, its controls and its lessons captured at that minute (the ring still holds the hour after); the board
+  // is written when the day closes, ranked, marking which entries also crossed the threshold. Threshold events remain
+  // immediate; the board catches the day's biggest movers that never made 10%.
+  let board = { date: null, entries: new Map() };
+  const boardFloor = () => { if (board.entries.size < cfg.topMoversPerDay) return -Infinity; let m = Infinity; for (const e of board.entries.values()) if (e.climb < m) m = e.climb; return m; };
+  function drawControls(coin, eventTs, eligible) {
+    const seed = createHash('sha256').update(`${coin}|${eventTs}`).digest('hex');
+    return eligible.filter((e) => e.coin !== coin).map((e) => ({ e, h: createHash('sha256').update(`${seed}|${e.coin}`).digest('hex') })).sort((a, b) => (a.h < b.h ? -1 : 1)).slice(0, cfg.controlsPerMover).map((x) => x.e);
+  }
+  function finalizeBoard(nowTs) {
+    if (!board.date || !board.entries.size) { board = { date: null, entries: new Map() }; return; }
+    const ranked = [...board.entries.values()].sort((a, b) => b.climb - a.climb).slice(0, cfg.topMoversPerDay);
+    ranked.forEach((en, idx) => {
+      const rec = { version: MOVER_STUDY_VERSION, kind: 'DAILY_TOP', rank: idx + 1, of: ranked.length, alsoMover: en.alsoMover, ...en.picture, recordedTs: nowTs };
+      writeRecord(rec); counters.dailyTop += 1;
+      if (!en.alsoMover) for (const l of en.lessons) commit(l);
+      for (const c of en.controls) writeRecord({ version: MOVER_STUDY_VERSION, kind: 'DAILY_TOP_CONTROL', controlOf: { coin: en.picture.coin, eventTs: en.picture.eventTs, rank: idx + 1 }, ...c, recordedTs: nowTs });
+    });
+    try { mkdirSync(dir, { recursive: true }); const f = path.join(dir, `top-${board.date}.json`); writeFileSync(`${f}.tmp`, JSON.stringify({ version: MOVER_STUDY_VERSION, date: board.date, top: ranked.map((en, idx) => ({ rank: idx + 1, coin: en.picture.coin, climbPct: en.climb, eventTs: en.picture.eventTs, alsoMover: en.alsoMover, hourBefore: en.picture.hourBefore, hourAfter: en.picture.hourAfter })), closedTs: nowTs })); renameSync(`${f}.tmp`, f); }
+    catch (err) { counters.errors += 1; log(`MOVER STUDY top board write failed: ${bounded(err?.message ?? err)}`); }
+    const crossed = ranked.filter((en) => en.alsoMover).length;
+    log(`MOVER STUDY ${board.date} TOP ${ranked.length}: ${ranked.slice(0, 10).map((en, idx) => `${idx + 1}. ${en.picture.coin} +${en.climb}%`).join(', ')}${ranked.length > 10 ? ', …' : ''} (${crossed} of them crossed ${cfg.moveThresholdPct}%; the rest are kept as the day's biggest movers regardless)`);
+    board = { date: null, entries: new Map() };
+  }
+  function boardConsider({ coin, ring, i, climb, eventTs, alsoMover, eligible, nowTs }) {
+    const date = utcDateOf(eventTs);
+    if (board.date !== date) { finalizeBoard(nowTs); board = { date, entries: new Map() }; }
+    const prev = board.entries.get(coin);
+    if (prev && climb <= prev.climb) { if (alsoMover) prev.alsoMover = true; return; }
+    if (!prev && board.entries.size >= cfg.topMoversPerDay && climb <= boardFloor()) return;
+    const picture = pictureAt(coin, ring, i);
+    const ctl = drawControls(coin, eventTs, eligible).map((e) => pictureAt(e.coin, e.ring, e.i));
+    const lessons = [lesson(picture, 'TOP', nowTs), ...ctl.map((q) => lesson(q, 'CONTROL', nowTs))].filter(Boolean);
+    board.entries.set(coin, { climb, picture, controls: ctl, lessons, alsoMover: Boolean(alsoMover || prev?.alsoMover) });
+    if (board.entries.size > cfg.topMoversPerDay) { let worst = null; for (const [c, e] of board.entries) if (!worst || e.climb < worst[1].climb) worst = [c, e]; if (worst) board.entries.delete(worst[0]); }
   }
 
   function tick(nowTs = clock()) {
@@ -202,10 +247,13 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
       const last = lastEventSec.get(coin); if (last !== undefined && arr[i][0] - last < cfg.dedupeMin * 60) continue;
       let low = Infinity; for (let k = i - W; k < i; k += 1) if (arr[k][4] < low) low = arr[k][4];
       const climb = pct(arr[i][4], low);
-      if (climb !== null && climb >= cfg.moveThresholdPct) { if (events.length < cfg.maxEventsPerTick) events.push({ coin, ring, i }); }
-      else eligible.push({ coin, ring, i });
+      if (climb !== null && climb >= cfg.moveThresholdPct) { if (events.length < cfg.maxEventsPerTick) events.push({ coin, ring, i, climb }); }
+      else eligible.push({ coin, ring, i, climb });
     }
     let movers = 0; let controls = 0;
+    // the day's board: threshold movers enter it marked; every other coin competes on its climb
+    const boardEvents = new Set(events.map((ev) => ev.coin));
+    for (const x of [...events, ...eligible]) if (x.climb !== null && x.climb > 0) boardConsider({ coin: x.coin, ring: x.ring, i: x.i, climb: round4(x.climb), eventTs: x.ring.candles[x.i][0] * 1000, alsoMover: boardEvents.has(x.coin), eligible, nowTs });
     for (const ev of events) {
       const p = pictureAt(ev.coin, ev.ring, ev.i); lastEventSec.set(ev.coin, ev.ring.candles[ev.i][0]);
       const rec = { version: MOVER_STUDY_VERSION, kind: 'MOVER', ...p, recordedTs: nowTs };
@@ -226,12 +274,13 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
 
   function line() {
     const s = summary(); const b = s.hourBeforeMedian; const a = s.hourAfterMedian;
-    if (!s.date || !s.movers) return `MOVER STUDY: watching ${rings.size} coins (${counters.candles} closed minutes so far); no >=${cfg.moveThresholdPct}%/h climbs completed yet today`;
-    return `MOVER STUDY ${s.date}: ${s.movers} climbs >=${cfg.moveThresholdPct}% in an hour across ${s.distinctCoins} coins (${s.controls} controls beside them); the hour BEFORE a climb (median): return ${b.retPct}%, 1m vol ${b.rv1mPct}%, range ${b.rangePct}%, volume ${b.volumeVsPriorHour}x the hour before it; the hour AFTER: return ${a.retPct}% (best ${a.mfePct}%, worst ${a.maePct}%), ${Math.round((a.heldAboveStartShare ?? 0) * 100)}% still above where the climb ended`;
+    const top = s.topSoFar && s.topSoFar.entries.length ? `; today's board so far: ${s.topSoFar.entries.slice(0, 5).map((e) => `${e.coin} +${e.climbPct}%`).join(', ')} (top ${cfg.topMoversPerDay} kept regardless of the ${cfg.moveThresholdPct}% line)` : '';
+    if (!s.date || !s.movers) return `MOVER STUDY: watching ${rings.size} coins (${counters.candles} closed minutes so far); no >=${cfg.moveThresholdPct}%/h climbs completed yet today${top}`;
+    return `MOVER STUDY ${s.date}: ${s.movers} climbs >=${cfg.moveThresholdPct}% in an hour across ${s.distinctCoins} coins (${s.controls} controls beside them); the hour BEFORE a climb (median): return ${b.retPct}%, 1m vol ${b.rv1mPct}%, range ${b.rangePct}%, volume ${b.volumeVsPriorHour}x the hour before it; the hour AFTER: return ${a.retPct}% (best ${a.mfePct}%, worst ${a.maePct}%), ${Math.round((a.heldAboveStartShare ?? 0) * 100)}% still above where the climb ended${top}`;
   }
 
   function status() { return { version: MOVER_STUDY_VERSION, createdTs, lastTickTs, coins: rings.size, counters: { ...counters }, today: summary(), config: { ...cfg }, authority: 'NONE' }; }
   function attachStore(s) { learningStore = s; }
   function readDay(date) { try { const f = path.join(dir, `${date}.jsonl`); return existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : []; } catch { return []; } }
-  return { onRecord, tick, status, line, attachStore, readDay, _internals: { rings, summary } };
+  return { onRecord, tick, status, line, attachStore, readDay, closeDay: (nowTs = clock()) => finalizeBoard(nowTs), _internals: { rings, summary, board: () => board } };
 }
