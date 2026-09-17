@@ -1194,6 +1194,9 @@ function openAuthCard(then) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(secondFactorRequired ? { password: pw, totp } : { password: pw }),
       });
+      // PUBLISH-FIX-42: a non-JSON answer here is the deployment's password gate (its cookie expired) handing back its
+      // login page — not a lost server. Say so, instead of the dead-end SHELL LINK LOST.
+      if (!/json/i.test(r.headers.get('content-type') || '')) { $('#authMsg').textContent = 'PAGE EXPIRED — close this tab, open the app fresh and sign in again'; return; }
       const d = await r.json();
       if (d.authenticated) {
         csrfToken = d.csrfToken;
@@ -1386,6 +1389,7 @@ async function refreshLedger() {
     return ledgerError('SHELL LINK LOST — server unreachable');
   }
   if (res.status === 401) return ledgerError('LOCKED — unlock the owner session to view the ledger'); // PUBLISH-FIX-20 (F7)
+  if (res.ok && !/json/i.test(res.headers.get('content-type') || '')) return ledgerError('PAGE EXPIRED — close this tab, open the app fresh and sign in again'); // PUBLISH-FIX-42
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     console.error(`LEDGER HTTP ${res.status}:`, body.slice(0, 300));
@@ -1588,7 +1592,7 @@ async function askSend() {
     const res = await fetch('/api/ask', { method: 'POST', headers, cache: 'no-store', body: JSON.stringify({ question: q, history, mode }) });
     const d = await res.json();
     if (!d.ok && !d.answer) { askHistory.push({ role: 'assistant', text: 'ERROR ' + (d.reason ?? res.status), error: true }); }
-    else { askHistory.push({ role: 'assistant', text: d.chat && d.chat.ok ? d.chat.text : d.answer, availability: d.availability, evidence: d.evidence, chat: d.chat ? (d.chat.ok ? 'answered by ' + d.chat.model + ' from the evidence, charged ' + d.chat.chargedUsd + ' USD' : (d.chat.reason ?? 'not used') + (d.chat.notice ? ' — ' + d.chat.notice : '')) : null }); if (d.chat && d.chat.ok) askHistory.push({ role: 'assistant', text: 'Recorded evidence answer:\n' + d.answer, availability: d.availability, evidence: d.evidence }); }
+    else { askHistory.push({ role: 'assistant', text: d.chat && d.chat.ok ? d.chat.text : d.answer, availability: d.availability, evidence: d.evidence, chat: d.chat ? (d.chat.ok ? 'answered by ' + d.chat.model + (d.intent === 'HELP' ? ' from its own knowledge (the log had nothing specific), charged ' : ' (run facts from the evidence), charged ') + d.chat.chargedUsd + ' USD' : (d.chat.reason ?? 'not used') + (d.chat.notice ? ' — ' + d.chat.notice : '')) : null }); if (d.chat && d.chat.ok && d.intent !== 'HELP') askHistory.push({ role: 'assistant', text: 'Recorded evidence answer:\n' + d.answer, availability: d.availability, evidence: d.evidence }); }
   } catch (err) { askHistory.push({ role: 'assistant', text: 'SHELL LINK LOST — ' + String(err && err.message ? err.message : err), error: true }); }
   while (askHistory.length > 24) askHistory.shift();
   askBusy = false; $('#askSend').disabled = false; $('#askSend').textContent = 'SEND'; askRender();

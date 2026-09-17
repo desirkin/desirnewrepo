@@ -145,7 +145,7 @@ export async function answerQuestion({ question, judge = null, sensors = null, r
       break;
     }
     default: {
-      lines.push(`I answer from the recorded evidence only. Try: ${SUGGESTED_QUESTIONS.join(' · ')}`);
+      lines.push(`The recorded evidence has nothing specific on that question (with AI chat on, Ask Serpent answers it from its own knowledge). Try: ${SUGGESTED_QUESTIONS.join(' · ')}`);
     }
   }
   if (c.intent !== 'HELP' && c.intent !== 'SENSES' && !p) lines.push('Nothing else can be said about this run without a Judge projection.');
