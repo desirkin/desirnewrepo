@@ -30,7 +30,14 @@ export const RUNTIME_SPINE_IMPORTERS = Object.freeze({
   [RUNTIME_COLLECTORS]: Object.freeze([DATA_ONLY_RUNTIME_SPINE]),
 });
 export const OPERATOR_SETUP_SMOKE_TOOLS = Object.freeze(['tools/bluesky-setup-smoke.mjs', 'tools/farcaster-setup-smoke.mjs', 'tools/official-setup-smoke.mjs']);
-export const RUMOR2_LIVE_WIRING_POINTS = Object.freeze([TRADING_COMPOSITION_ROOT, DATA_ONLY_COMPOSITION_ROOT, ...RUNTIME_SPINE_MODULES, ...OPERATOR_SETUP_SMOKE_TOOLS]);
+// PUBLISH-FIX-36 (2026-09-17, David's go): the SECOND LANE. lanes/research-lane-worker.js is the worker-thread composition
+// of the RUMOR-2 ear (it imports and starts the collector on its own thread, exactly the seams fly.js wired in-process);
+// lanes/research-lane.js is the main-thread handle fly.js composes behind SERPENT_RESEARCH_LANE=worker (it names the
+// research family — status / current-social / research projection — and imports no rumor2 module at all). Both are live
+// wiring points of the trading root, reviewed like fly.js; neither is a data-only root, a spine module or a smoke tool.
+export const RESEARCH_LANE_HANDLE = 'lanes/research-lane.js';
+export const RESEARCH_LANE_WORKER = 'lanes/research-lane-worker.js';
+export const RUMOR2_LIVE_WIRING_POINTS = Object.freeze([TRADING_COMPOSITION_ROOT, DATA_ONLY_COMPOSITION_ROOT, ...RUNTIME_SPINE_MODULES, ...OPERATOR_SETUP_SMOKE_TOOLS, RESEARCH_LANE_HANDLE, RESEARCH_LANE_WORKER]);
 // the wiring points that actually import / start the RUMOR-2 collector (the data-only root and the spine delegate down)
-export const RUMOR2_IMPORTING_WIRING_POINTS = Object.freeze([TRADING_COMPOSITION_ROOT, RUNTIME_COLLECTORS, ...OPERATOR_SETUP_SMOKE_TOOLS]);
+export const RUMOR2_IMPORTING_WIRING_POINTS = Object.freeze([TRADING_COMPOSITION_ROOT, RUNTIME_COLLECTORS, ...OPERATOR_SETUP_SMOKE_TOOLS, RESEARCH_LANE_WORKER]);
 export const TRADING_TIER_IMPORT_RE = /from\s+'[^']*(\/|^)(judge|execution|ledger|cost|tape|state|controls|governance|socrates|paper|watch)\//;
