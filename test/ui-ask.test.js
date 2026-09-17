@@ -14,6 +14,7 @@ const PORT = 39100 + Math.floor(Math.random() * 300); process.env.PORT = String(
 delete process.env.DATABASE_URL; delete process.env.REPLIT_DEPLOYMENT; delete process.env.SERPENT_DURABLE_REQUIRED; delete process.env.JUDGE_ENABLED;
 delete process.env.ANTHROPIC_API_KEY; delete process.env.SERPENT_CHAT_MAX_USD_PER_REQUEST; delete process.env.SERPENT_CHAT_MAX_USD_PER_DAY;
 const PW = 'ask-test-password-FAKE'; process.env.SERPENT_CONTROL_PASSWORD = PW; // control auth CONFIGURED: chat mode must still demand a session
+process.env.SERPENT_PRIVATE_READS = 'strict'; // PUBLISH-FIX-46: these tests pin the STRICT law
 const { server } = await import('../ui/server.js');
 const base = `http://127.0.0.1:${PORT}`;
 const post = (p, body, headers = {}) => fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) });

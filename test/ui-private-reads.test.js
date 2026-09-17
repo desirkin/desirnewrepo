@@ -12,6 +12,7 @@ const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-uipriv-')); process.env
 const PORT = 39500 + Math.floor(Math.random() * 300); process.env.PORT = String(PORT);
 delete process.env.DATABASE_URL; delete process.env.REPLIT_DEPLOYMENT; delete process.env.SERPENT_DURABLE_REQUIRED; delete process.env.JUDGE_ENABLED; delete process.env.ANTHROPIC_API_KEY;
 const PW = 'private-reads-test-password-FAKE'; process.env.SERPENT_CONTROL_PASSWORD = PW;
+process.env.SERPENT_PRIVATE_READS = 'strict'; // PUBLISH-FIX-46: these tests pin the STRICT law
 const { server, PRIVATE_READ_ROUTES } = await import('../ui/server.js');
 const base = `http://127.0.0.1:${PORT}`;
 const post = (p, body, headers = {}) => fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });

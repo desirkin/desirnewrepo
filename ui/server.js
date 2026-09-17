@@ -154,8 +154,10 @@ async function askHandler(req, res, body) {
   const answer = await answerQuestion({ question, judge, sensors, research, journalPage: askJournalPage });
   if (mode !== 'chat') { json(res, 200, { ...answer, chat: null }); return; }
   // a billed conversation request is an authenticated operator action: session + CSRF + same-origin, exactly like a control
-  const gate = gateControl(auth, { cookieHeader: req.headers.cookie, csrfHeader: req.headers['x-serpent-csrf'], originHeader: req.headers.origin, hostHeader: req.headers.host, body });
-  if (!gate.allow) { json(res, gate.code, { ...answer, chat: { ok: false, dispatched: false, reason: gate.reason, notice: 'free-form AI chat needs an authenticated operator session; the recorded-evidence answer is above' } }); return; }
+  // PUBLISH-FIX-46: without SERPENT_PRIVATE_READS=strict a paid Ask needs only same-origin (the platform gate + the ASK
+  // toggle + the per-request and daily USD caps stay the ceilings); strict keeps the full session + CSRF law.
+  const gate = privateReadsStrict() ? gateControl(auth, { cookieHeader: req.headers.cookie, csrfHeader: req.headers['x-serpent-csrf'], originHeader: req.headers.origin, hostHeader: req.headers.host, body }) : sameOriginOnly(req);
+  if (!gate.allow) { json(res, gate.code, { ...answer, chat: { ok: false, dispatched: false, reason: gate.reason, notice: privateReadsStrict() ? 'free-form AI chat needs an authenticated operator session; the recorded-evidence answer is above' : 'free-form AI chat is same-origin only; the recorded-evidence answer is above' } }); return; }
   // TALK-TO-THEM: the ASK toggle + the SERPENT_TALK_DAILY_USD ceiling are the day-to-day gate. Dormant (toggle off, cap
   // unset/reached, no key) -> the recorded-evidence answer stands and nothing is dispatched (never a silent paid call).
   const meter = explainerView()?.ask ?? null;
@@ -560,6 +562,12 @@ function huntTrail(coin) {
   return { ...trail, projectionBound: projection ? { accountId: projection.accountId ?? null, decisionWindow: (projection.decisions ?? []).length } : null };
 }
 
+// PUBLISH-FIX-46: the origin law alone (a page served by this host), no session needed
+function sameOriginOnly(req) {
+  const origin = req.headers.origin; if (!origin) return { allow: true };
+  let originHost = null; try { originHost = new URL(origin).host; } catch { return { allow: false, code: 403, reason: 'CROSS_ORIGIN' }; }
+  return req.headers.host && originHost === req.headers.host ? { allow: true } : { allow: false, code: 403, reason: 'CROSS_ORIGIN' };
+}
 function json(res, code, obj, extraHeaders = {}) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', ...extraHeaders });
@@ -583,6 +591,7 @@ function readBody(req, res, cb, maxBytes = 4096) {
 
 // PUBLISH-FIX-20 (review F7): the read routes that disclose account / strategy state — owner session required when control auth is configured.
 export const PRIVATE_READ_ROUTES = Object.freeze(new Set(['/api/accounts', '/api/judge', '/api/ledger/summary', '/api/hunt-trail', '/api/learning', '/api/market-research/case']));
+export const privateReadsStrict = (env = process.env) => env.SERPENT_PRIVATE_READS === 'strict'; // PUBLISH-FIX-46
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
@@ -748,7 +757,11 @@ const server = http.createServer((req, res) => {
     // (the same check /api/social/current makes) whenever control auth is configured; with control auth unconfigured
     // (display-only harness, no password provisioned) there is no owner to authenticate and they stay open as before.
     // Operational health (/api/status, /api/sensors, the rumor room, the wide eye, the broad market) stays public.
-    if (PRIVATE_READ_ROUTES.has(url.pathname) && auth.configured() && !auth.status(parseCookies(req.headers.cookie)[SESSION_COOKIE]).authenticated) {
+    // PUBLISH-FIX-46 (David, 2026-09-17 evening: the ledger stays blank and the lock will not take his password on the
+    // phone): the whole deployment already sits behind the platform's password gate, so the OWNER SESSION now guards
+    // ACTIONS only (kill / cage / veto / clear / arm / toggles). The read-only views open without it. The stricter law
+    // stays one switch away: SERPENT_PRIVATE_READS=strict restores PUBLISH-FIX-20's 401 on these routes.
+    if (privateReadsStrict() && PRIVATE_READ_ROUTES.has(url.pathname) && auth.configured() && !auth.status(parseCookies(req.headers.cookie)[SESSION_COOKIE]).authenticated) {
       json(res, 401, { error: 'OWNER_SESSION_REQUIRED', route: url.pathname, authority: 'NONE' }); return;
     }
     if (url.pathname === '/' || url.pathname === '/index.html') {
