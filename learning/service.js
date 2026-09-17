@@ -142,14 +142,18 @@ export function startLearning({
     const heads = store.patternHeads();
     let updated = 0;
     const cells = new Map();
-    for (const i of items.filter((x) => x.decision === 'SELECTED_FOR_SHADOW' || x.decision === 'SELECTED_FOR_PAPER')) { // PUBLISH-FIX-38: the Judge's paper selections build cells too
+    // PUBLISH-FIX-41 (owner doctrine: "learn what to avoid as much as what to take"): a cell is every GRADED decision of a
+    // setup x regime — picks, refusals, expiries and no-trades alike — not only the selections. Production proved the old
+    // membership empty: 1,040 scored paper decisions and zero entries meant zero cells for as long as the Judge never bit.
+    // The cell stays descriptive (P(favorable | evaluated)); the promoter already trains its stump over the whole cell.
+    for (const i of items) {
       const key = `${i.setupType}|${i.regime}`;
       if (!cells.has(key)) cells.set(key, []);
       cells.get(key).push(i);
     }
     for (const [key, cellItems] of cells.entries()) {
       const [setupType, regime] = key.split('|');
-      const predicate = { clauses: [], descriptor: `SELECTED_${setupType}` }; // descriptive cell memory; candidate predicates are richer and sealed separately
+      const predicate = { clauses: [], descriptor: `EVALUATED_${setupType}` }; // descriptive cell memory over every graded decision; candidate predicates are richer and sealed separately
       const scope = { setupType, regime };
       const patternId = `lpat-${canonicalDigest({ predicateDigest: canonicalDigest(predicate), scopeDigest: canonicalDigest(scope) }).slice(0, 40)}`;
       const head = heads.get(patternId) ?? null;

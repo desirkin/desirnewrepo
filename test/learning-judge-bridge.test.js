@@ -128,3 +128,31 @@ test('end to end in the service: bridged Judge decisions mature against the live
     svc.stop();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('PUBLISH-FIX-41: a cell forms from GRADED decisions the Judge did NOT take (refusals, expiries, no-trades) — learning what to avoid needs no bite', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-judge-bridge-noselect-'));
+  try {
+    let now = T0;
+    const startSec = Math.floor((T0 - 30 * MIN) / 1000);
+    const src = (coin) => series(startSec, 400, now); src.coins = () => ['BTC', 'ETH', 'SOL'];
+    const archiveSource = createLiveArchiveSource({ seriesSource: src, createdTs: T0 - 60 * MIN });
+    const ring = [];
+    const svc = startLearning({
+      dataDir: dir, env: { LEARNING_ENABLED: 'true' }, clock: () => now, timers: { setInterval: () => ({ unref() {} }), clearInterval() {} },
+      populationSource: null, archiveSource, log: () => {},
+      decisionBridge: (store) => createJudgeDecisionBridge({ store, decisionsSource: () => ring, policyVersion: 'judge-policy-abc' }),
+    });
+    for (const [i, [coin, status]] of [['BTC', 'ENTRY_REFUSED'], ['ETH', 'EXPIRED'], ['SOL', 'NO_TRADE']].entries()) ring.push(decision({ decisionId: `n${i}`, coin, status, ts: T0 + i * MIN }));
+    let report = svc.tick();
+    assert.equal(report.decisionBridge.appended, 3);
+    assert.ok(svc.store.readEpisodes().every((e) => e.decision !== 'SELECTED_FOR_PAPER'), 'no selection among the episodes');
+    now = T0 + 120 * MIN;
+    report = svc.tick();
+    assert.ok(report.maturation.matured >= 3, `outcomes matured: ${JSON.stringify(report.maturation)}`);
+    assert.ok(report.learning.updated >= 1, `a cell formed without any pick: ${JSON.stringify(report.learning)}`);
+    const heads = [...svc.store.patternHeads().values()];
+    assert.ok(heads.some((h) => h.scope.setupType === 'MOMENTUM_IGNITION' && h.predicate.descriptor === 'EVALUATED_MOMENTUM_IGNITION'));
+    assert.ok(heads.every((h) => ['NOTICED', 'ACCUMULATING'].includes(h.state)), 'descriptive only — never promoted by evidence alone');
+    svc.stop();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
