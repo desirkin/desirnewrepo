@@ -3,6 +3,7 @@
 // catalog monitoring is separate from this bounded deep-book set. Named
 // display seeds grant no special depth or seats. Only actual held/pending
 // exposure receives protected resources; stale pairs cannot supply fresh data.
+import { raceUniverseLoad, startupOutcomeLine, startupNeedsRetry, createUniverseRetry, createTapeDownWatchdog, STARTUP_UNIVERSE_DEADLINE_MS } from './startup.js';
 import { loadConfig, coinFromSymbol } from '../lib/config.js';
 import { createResourceLaw } from './resource-law.js';
 import { nowIso, sessionDate } from '../lib/time.js';
@@ -112,7 +113,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       // Retain already-observed subscriptions and protected exposure through a
       // catalog outage, but never adopt a guessed/fallback asset as fresh truth.
       writeEvent('UNIVERSE_REFRESH_FAILED', { reason, error: selection.error });
-      return { added: [], removed: [] };
+      return { added: [], removed: [], failed: true, error: selection.error };
     }
     const incoming = new Map(selection.pairs.map((p) => [p.symbol, p]));
     const added = [];
@@ -165,6 +166,25 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     finally { hotLaneBusy = false; }
   }
   const hotLaneTimer = setInterval(() => { adoptHotNominations().catch(() => {}); }, 60_000);
+
+  // ---- PUBLISH-FIX-52: startup universe deadline, retry, and the TAPE DOWN watchdog (tape/startup.js) ------------------
+  let universeLoaded = false;
+  async function loadUniverseOnce(reason) {
+    const r = await loadUniverse(reason);
+    if (r.added.length && ws?.readyState === WebSocket.OPEN) subscribeSymbols(r.added.map((p) => p.symbol).filter((s) => !unavailable.has(s)));
+    if (!r.failed && pairs.size > 0) universeLoaded = true;
+    return r;
+  }
+  const universeRetry = createUniverseRetry({ load: loadUniverseOnce, done: () => universeLoaded, stopped: () => stopping, log, nowIso });
+  async function loadUniverseWithDeadline(reason) {
+    log(`[${nowIso()}] TAPE STARTUP: loading the universe (${reason}; deadline ${STARTUP_UNIVERSE_DEADLINE_MS / 1000}s)`);
+    const r = await raceUniverseLoad({ load: () => loadUniverseOnce(reason) });
+    if (r.stalled) writeEvent('UNIVERSE_LOAD_STALLED', { reason, afterMs: STARTUP_UNIVERSE_DEADLINE_MS, carried: pairs.size });
+    log(`[${nowIso()}] ${startupOutcomeLine(r, { reason, carried: pairs.size })}`);
+    if (startupNeedsRetry(r)) universeRetry.start();
+    return r;
+  }
+  const startupWatchdog = createTapeDownWatchdog({ isLive: () => tapeState === TAPE_STATES.LIVE, stopped: () => stopping, log, nowIso, snapshot: () => ({ state: tapeState, pairs: pairs.size, universeLoaded, socketState: ws ? (['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws.readyState] ?? String(ws.readyState)) : 'none', lastMessageAgeMs: lastAnyMsgMs ? Date.now() - lastAnyMsgMs : null }) });
 
   // ---- websocket
   let ws = null;
@@ -554,7 +574,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       clearInterval(heartbeatTimer);
       clearInterval(snapshotTimer);
       clearInterval(resourceTimer);
-      clearInterval(hotLaneTimer);
+      clearInterval(hotLaneTimer); universeRetry.stop(); startupWatchdog.stop();
       clearInterval(microTimer);
       if (chaosTimer) clearTimeout(chaosTimer);
       if (durationTimer) clearTimeout(durationTimer);
@@ -570,7 +590,13 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     process.once('SIGTERM', () => stop('SIGTERM'));
   });
 
-  await loadUniverse('startup');
+  // PUBLISH-FIX-52 (2026-09-17): the startup universe load is raced against a deadline. Production b1ec3c6a booted with the
+  // Judge, learning and the wide eye all live, but the tape never got past `await loadUniverse('startup')` — no
+  // UNIVERSE_SELECTED / UNIVERSE_REFRESH_FAILED event, no 'tape starting', no socket — for 35 minutes, so the Judge saw 0
+  // books while the same REST call answered in 289 ms from the workspace. The venue is never guessed: a stalled load is
+  // logged and retried every 30 s (adopting and subscribing what it verifies), the socket connects for the pairs carried
+  // (pinned exposure, hot-lane adoptions) meanwhile, and a TAPE DOWN line prints every minute until the tape is LIVE.
+  await loadUniverseWithDeadline('startup');
   // bounded admission seam: the feed may ask for a symbol the tape already carries (or re-adopt a HELD symbol from its
   // recorded instrument identity); it cannot widen the venue, raise depth or lift resource caps
   feedGuard(() => executionFeed.bindTape({
@@ -595,5 +621,6 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   writeEvent('TAPE_STARTED', { pairs: pairs.size, minutes, chaosAfterSec });
   log(`[${nowIso()}] tape starting: ${pairs.size} pairs (equal selected depth ${xp.defaultDepth ?? 25}; held/pending exposure protected)`);
   connect();
+  startupWatchdog.arm();
   return done;
 }
