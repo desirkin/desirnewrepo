@@ -38,6 +38,9 @@ export function startLearning({
   // durable pre-selection frame live outside this service; this callsite only
   // advances already-due follow-up work. The composition retains ownership.
   opportunityAuditFollowup = null,
+  // PUBLISH-FIX-38: the Judge decision bridge (learning/judge-decision-bridge.js) — every PAPER decision becomes an
+  // episode in this store, in the Judge's own setup vocabulary. Injected by the composition; absent = no bridge.
+  decisionBridge = null,
   clock = Date.now, timers = { setInterval, clearInterval }, tickMs = DEFAULT_TICK_MS,
   dailyTarget = DEFAULT_DAILY_TARGET, log = () => {},
   // CPU LANES (Ticket 6): measure how long each learning step occupies the main lane, so a heavy maintenance pass that
@@ -51,10 +54,12 @@ export function startLearning({
       || Array.isArray(opportunityAuditFollowup) || typeof opportunityAuditFollowup.step !== 'function'
       || typeof opportunityAuditFollowup.status !== 'function')) throw new Error('OPPORTUNITY_AUDIT_FOLLOWUP_PORT_INVALID');
   const store = createLearningStore({ dataDir, log });
+  if (typeof decisionBridge === 'function') decisionBridge = decisionBridge(store); // a factory receives THIS store (one writer, one journal)
+  if (decisionBridge !== null && (!decisionBridge || typeof decisionBridge !== 'object' || typeof decisionBridge.step !== 'function' || typeof decisionBridge.status !== 'function')) throw new Error('DECISION_BRIDGE_PORT_INVALID');
   let counters = rollCounters(null, clock());
   let lastTick = null; let ticking = false; let stopped = false;
   const lastCapturedBySymbol = new Map();
-  const errors = { capture: 0, maturation: 0, learning: 0, shadow: 0, opportunityAudit: 0 };
+  const errors = { capture: 0, maturation: 0, learning: 0, shadow: 0, opportunityAudit: 0, decisionBridge: 0 };
 
   let lastRecordedSweepId = null; let summaryJob = null;
   function captureTick(nowTs) {
@@ -132,7 +137,7 @@ export function startLearning({
     const heads = store.patternHeads();
     let updated = 0;
     const cells = new Map();
-    for (const i of items.filter((x) => x.decision === 'SELECTED_FOR_SHADOW')) {
+    for (const i of items.filter((x) => x.decision === 'SELECTED_FOR_SHADOW' || x.decision === 'SELECTED_FOR_PAPER')) { // PUBLISH-FIX-38: the Judge's paper selections build cells too
       const key = `${i.setupType}|${i.regime}`;
       if (!cells.has(key)) cells.set(key, []);
       cells.get(key).push(i);
@@ -167,6 +172,8 @@ export function startLearning({
       lastTickReport: tickReport, errors: { ...errors }, storeCounters: store.countersOf(),
       shadowLane: shadowRunner ? (() => { try { return shadowRunner.status(nowTs); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
       opportunityAuditLane: opportunityAuditFollowup ? (() => { try { return opportunityAuditFollowup.status(); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
+      decisionBridge: decisionBridge ? (() => { try { return decisionBridge.status(); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
+      memory: (() => { try { const heads = [...store.patternHeads().values()]; const byState = {}; for (const h of heads) byState[h.state] = (byState[h.state] ?? 0) + 1; return { patterns: heads.length, byState, cells: heads.map((h) => ({ setupType: h.scope?.setupType ?? null, regime: h.scope?.regime ?? null, state: h.state, rawCount: h.evidence?.rawCount ?? null, groups: h.evidence?.groupCount ?? null, dates: h.evidence?.distinctUtcDates ?? null, assets: h.evidence?.distinctAssets ?? null })).slice(0, 64), activations: [...store.activationHeads().values()].filter((a) => a.state === 'ACTIVE_PAPER').length }; } catch { return null; } })(),
       killSwitch: kill, sourceDelayEvidence: PROVIDER_DELAY_EVIDENCE,
       mainLane: (() => { try { return meter.snapshot(); } catch { return null; } })(), // per-step main-lane occupancy (Ticket 6)
       authority: AUTHORITY, purpose: PURPOSE,
@@ -181,6 +188,7 @@ export function startLearning({
     counters = rollCounters(counters, nowTs);
     const report = {};
     try { report.capture = meter.time('capture', () => captureTick(nowTs)); } catch (err) { errors.capture += 1; report.capture = { failed: err.message }; }
+    if (decisionBridge) { try { report.decisionBridge = meter.time('decisionBridge', () => decisionBridge.step({ nowTs })); } catch (err) { errors.decisionBridge += 1; report.decisionBridge = { failed: String(err?.message ?? err).slice(0, 200) }; } }
     try { report.maturation = meter.time('maturation', () => maturationTick(nowTs)); } catch (err) { errors.maturation += 1; report.maturation = { failed: err.message }; }
     try { report.learning = meter.time('learning', () => learnTick(nowTs)); } catch (err) { errors.learning += 1; report.learning = { failed: err.message }; }
     // One optional step; failure is reported without suppressing other lanes.

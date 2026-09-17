@@ -150,6 +150,21 @@ export function resolveLearningContribution({ snapshot, facts, mode, nowTs }) {
 // note is capped at 300 chars, so the durable per-candidate log is emitted as ITS OWN rows, one per candidate,
 // bounded and deterministically ordered; the summary row carries seen= and logged= so any truncation is visible).
 export const CANDIDATE_LOG_LIMIT = 24;
+// PUBLISH-FIX-38 (2026-09-17): the six prepared learning facts of a decision ride the decision's own measurements —
+// one row per fact (id LEARNED_FACT, note = the fact name, ok = KNOWN, value = the fact, unit as prepared). Until now
+// they lived only inside this selector call, so no learner could ever ask "what did the market look like when the
+// Judge decided?" — the learning bridge reads these rows. Pure; no decision path reads them back.
+export const LEARNED_FACT_MEASUREMENT_ID = 'LEARNED_FACT';
+export function learnedFactMeasurements(features) {
+  const rows = [];
+  for (const name of Object.keys(features ?? {})) {
+    const f = features[name]; if (!f || typeof f !== 'object') continue;
+    const known = f.availability === 'KNOWN' && Number.isFinite(f.value);
+    rows.push({ id: LEARNED_FACT_MEASUREMENT_ID, ok: known, value: known ? f.value : null, threshold: null, unit: typeof f.unit === 'string' && f.unit.length ? f.unit : 'value', note: String(name).slice(0, 64) });
+  }
+  return rows.slice(0, 12);
+}
+
 export function contributionMeasurement(resolution) {
   const seen = resolution.eligible.length + resolution.rejected.length;
   return {

@@ -60,11 +60,25 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       8b8b84332656812be401efc6e4fb08d86d699af5c3e1582583596553f52f3be5
+judge/*.js       df462599953cfc4ac7ccd1aef224db6d0cc1feb19708ca1c8865b67a71b93556
 execution/*.js   83c4ce652d38fda80265ae48c702e936331d9c5fc3e6058c64e4a9e85c423dd0
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   6166dc44ad3901715a0090b76072ebbd5add2b64c7eae545b4f532eac5994d4f
+all (48 files)   600eb05e7792f1ea19c5190dd5dfa4bdfcd0e20677d98cce7b6422f9447e9853
 ```
+
+### 4.20 Audited change — 2026-09-17 PUBLISH-FIX-38: the six prepared learning facts ride every decision's measurements (previous judge digest `8b8b84332656…`; now `df462599953c…`; execution and watch UNCHANGED)
+
+What changed: `judge/learning-intake.js` gains `learnedFactMeasurements(features)` — one measurement row per prepared
+fact (`id LEARNED_FACT`, `note` = the fact name, `ok` = KNOWN, `value` = the fact or null, `unit` as prepared); `judge/judge.js`
+prepares `learnedFactsOf(fast, frozen)` once per evaluation, hands it to the selector exactly as before, and — ONLY when a
+learning port is composed — appends the six rows (`rv60 fi15 fi60 spreadBps depthUsd10bps atrPct`) to the decision's
+measurements before the existing `LEARNED_RANK_ADJUSTMENT` row.
+
+What did NOT change: no status, refusal, sizing, risk, scenario, valuation or ranking input reads these rows; with the
+port absent the decision record is byte-identical to the baseline (`test/judge-differential.test.js` still passes
+unchanged; `test/judge-learning-intake.test.js` PRESERVATION now also asserts the six rows appear with the port and never
+without it). The rows exist so the learning bridge can record what the market looked like when the Judge decided —
+the input a learned "when" needs. Authority NONE; the Judge never reads its own trace.
 
 ### 4.19 Audited change — 2026-09-17 PUBLISH-FIX-23: the 0.80% policy binds a NEW paper account, `paper-reference-usd500-fee080` (frozen digests UNCHANGED: judge `8b8b84332656…`, execution `83c4ce652d38…`, watch/watch.js `0c6a43bf…`, all `6166dc44ad39…`)
 

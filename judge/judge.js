@@ -12,7 +12,7 @@ import { evaluateEntry, sizeSearch, liquidationValue, COST_MODEL_VERSION } from 
 import { admitCandidate, riskBudgetFor, rankCandidates, clusterIdOf } from './risk.js';
 import { makeDecision, decisionIdentity, decisionRecord } from './contract.js';
 import { intakeDecision, consumeCase, primaryConfirmedCatalyst } from './intake.js';
-import { JUDGE_FACT_RECIPE_VERSION, resolveLearningContribution, contributionMeasurement, contributionCandidateLog } from './learning-intake.js';
+import { JUDGE_FACT_RECIPE_VERSION, resolveLearningContribution, contributionMeasurement, contributionCandidateLog, learnedFactMeasurements } from './learning-intake.js';
 import { evaluateSizeLadder, sizingMeasurement, sizingCandidateLog } from './size-ladder.js';
 import { SETUP_SELECTION_VERSION, createUnderlyingClaimLedger, deterministicSetupTieOrder, selectionMeasurement, setupDurationBound, strategyFamilyOf } from './setup-selection.js';
 import { EDGE_POLICY_VERSION, EDGE_STATE_VERSION, EDGE_WATCH_VERSION, OPERATIONAL_EDGE_STRATEGY_VERSION, deriveOperationalEntryFacts, edgePositionManagement, edgeStatePortError, executableEdgeFromEvaluation, isEdgeSetup } from './edge-state.js';
@@ -310,8 +310,10 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     // learned contribution (dormant without the injected port): resolved from the prepared snapshot and THIS
     // decision's already-prepared facts only; any resolver fault falls back to baseline with the fault logged
     let learned = null;
-    if (learning) { try { learned = resolveLearningContribution({ snapshot: learning.snapshot(), facts: { setupType: setupId, regime: 'LIVE_UNCLASSIFIED', asset: c.assetId, venue: 'kraken', featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyVersion: policyDigest, features: learnedFactsOf(fast, frozen) }, mode, nowTs: D }); } catch (err) { log(`learned contribution resolver failed (baseline): ${err.message}`); learned = null; } }
-    let measurements = learned ? [...baseMeasurements, contributionMeasurement(learned), ...contributionCandidateLog(learned)] : baseMeasurements;
+    const learnedFacts = learnedFactsOf(fast, frozen); // PUBLISH-FIX-38: prepared once, handed to the selector AND recorded on the decision
+    if (learning) { try { learned = resolveLearningContribution({ snapshot: learning.snapshot(), facts: { setupType: setupId, regime: 'LIVE_UNCLASSIFIED', asset: c.assetId, venue: 'kraken', featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyVersion: policyDigest, features: learnedFacts }, mode, nowTs: D }); } catch (err) { log(`learned contribution resolver failed (baseline): ${err.message}`); learned = null; } }
+    const factRows = learning ? learnedFactMeasurements(learnedFacts) : []; // PUBLISH-FIX-38: with a learning port composed, the six facts ride every decision's measurements (ports absent: the baseline record, byte for byte)
+    let measurements = learned ? [...baseMeasurements, ...factRows, contributionMeasurement(learned), ...contributionCandidateLog(learned)] : [...baseMeasurements, ...factRows];
     if (setup.state !== 'ELIGIBLE') { if (setup.state === 'NEEDS_DATA') counters.needsData += 1; tracker.decide(setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'NO_TRADE', setup.refused, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
     funnel.setupQualified += 1;
     let operationalDurationMs = policy.execution.maxDurationMs;

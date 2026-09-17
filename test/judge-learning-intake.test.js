@@ -138,7 +138,7 @@ async function rig({ accountId, learning = null, dynamicSizing = null }) {
   async function ignite({ price = 100000, level = 100400, books = 3, spanMs = 2100 } = {}) { const start = Math.floor(clock.now() / 60_000) * 60_000 + 60_000; while (clock.now() < start) { adv(Math.min(1000, start - clock.now())); } for (let k = 0; k < 20; k += 1) { adv(2000); trade(price + 50, 'buy', 0.2); } if (clock.now() % 60_000 !== 0) adv(60_000 - clock.now() % 60_000); clock.advance(500); for (let i = 0; i < books; i += 1) { book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); trade(level + 10, 'buy', 0.1); await settle(); if (i < books - 1) clock.advance(Math.ceil(spanMs / (books - 1))); } await settle(); }
   return { judge, warm, ignite, state: () => dispatcher.state() };
 }
-const strip = (d) => ({ status: d.status, reasonCodes: d.reasonCodes, inputMode: d.inputMode, sizing: d.sizing, valuationRef: d.valuationRef, invalidation: d.invalidation, scenario: d.scenario, setupId: d.setupId, episodeId: d.episodeId, baseMeasurements: d.measurements.filter((m) => !['LEARNED_RANK_ADJUSTMENT', 'LEARNED_CANDIDATE'].includes(m.id)) });
+const strip = (d) => ({ status: d.status, reasonCodes: d.reasonCodes, inputMode: d.inputMode, sizing: d.sizing, valuationRef: d.valuationRef, invalidation: d.invalidation, scenario: d.scenario, setupId: d.setupId, episodeId: d.episodeId, baseMeasurements: d.measurements.filter((m) => !['LEARNED_RANK_ADJUSTMENT', 'LEARNED_CANDIDATE', 'LEARNED_FACT'].includes(m.id)) }); // PUBLISH-FIX-38: LEARNED_FACT rows are the learning port's own trace
 
 test('PRESERVATION through the REAL decide() path: port absent = byte-identical baseline; port present with nothing eligible = identical decisions plus only the exclusion measurement; one validated in-scope candidate = identical statuses/sizing/risk plus the applied bounded contribution', async () => {
   const rigA = await rig({ accountId: 'lp-a' }); await rigA.warm(); await rigA.ignite();
@@ -154,6 +154,11 @@ test('PRESERVATION through the REAL decide() path: port absent = byte-identical 
   assert.ok(dB, 'the empty-memory run still reserves');
   const mB = dB.measurements.find((m) => m.id === 'LEARNED_RANK_ADJUSTMENT');
   assert.ok(mB && mB.ok === false && mB.value === null, 'the exclusion is recorded, no contribution claimed');
+  // PUBLISH-FIX-38: with the port composed, the six prepared facts ride the decision; with it absent, none do
+  assert.ok(!dA.measurements.some((m) => m.id === 'LEARNED_FACT'), 'no LEARNED_FACT rows without a learning port');
+  const factsB = dB.measurements.filter((m) => m.id === 'LEARNED_FACT');
+  assert.deepEqual(factsB.map((m) => m.note).sort(), ['atrPct', 'depthUsd10bps', 'fi15', 'fi60', 'rv60', 'spreadBps'], 'the six facts are recorded by name');
+  assert.ok(factsB.every((m) => (m.ok ? Number.isFinite(m.value) : m.value === null) && typeof m.unit === 'string'), 'a KNOWN fact carries its value; an unknown one carries null, never zero');
   assert.match(mB.note, /NO_MATCHING_VALIDATED_CANDIDATE|SNAPSHOT_STALE/);
   assert.deepEqual(strip(dB), strip(dA), 'statuses, refusals, sizing, risk and scenario are unchanged');
 

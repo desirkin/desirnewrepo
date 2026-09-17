@@ -271,21 +271,41 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     try {
       const { startLearning } = await import('./learning/service.js');
       const { readLearningArchive } = await import('./learning/labels.js');
-      let archiveCache = null; let archiveTriedTs = 0;
+      // PUBLISH-FIX-38: the LIVE archive — the broad-Kraken rolling 1m capture presented in the archive shape labels.js
+      // reads (learning/live-archive.js). Production never had a promoted Childhood archive, so maturation reported
+      // ARCHIVE_UNAVAILABLE on every tick since launch (12,255 episodes, zero outcomes, zero pattern updates). The
+      // Childhood archive is still preferred when present; the live capture is the fallback, windowed and honest.
+      const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js');
+      const { createLiveArchiveSource } = await import('./learning/live-archive.js');
+      const liveArchive = createLiveArchiveSource({ seriesSource: createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log }), createdTs: Date.now() });
+      let archiveCache = null; let archiveTriedTs = 0; let archiveKind = null;
+      const archiveSource = () => {
+        if (archiveCache) return archiveCache;
+        const now = Date.now();
+        if (now - archiveTriedTs >= 3_600_000) {
+          archiveTriedTs = now;
+          try { archiveCache = readLearningArchive(path.join(dataDir(), 'childhood')); } catch { archiveCache = null; }
+          if (archiveCache && archiveKind !== 'CHILDHOOD') { archiveKind = 'CHILDHOOD'; console.log('LEARN-1 archive: the promoted Childhood archive'); }
+        }
+        if (archiveCache) return archiveCache;
+        const live = liveArchive();
+        if (live && archiveKind !== 'LIVE') { archiveKind = 'LIVE'; console.log(`LEARN-1 archive: LIVE broad-Kraken 1m capture (${live.oneMinute.size} coins, rolling window) — outcomes mature against it from now on`); }
+        return live;
+      };
+      // PUBLISH-FIX-38: the Judge decision bridge — every PAPER decision becomes a learning episode in the Judge's own
+      // setup vocabulary (learning/judge-decision-bridge.js); read-only over the composition's in-process ring
+      let decisionBridge = null;
+      if (judgeRun && judgeRun.kind === 'PAPER' && judgeRun.judge && typeof judgeRun.judge.decisions === 'function') {
+        const { createJudgeDecisionBridge } = await import('./learning/judge-decision-bridge.js');
+        const policyVersion = `judge-policy-${String(judgeRun.policyDigest ?? 'unknown').slice(0, 16)}`;
+        decisionBridge = (store) => createJudgeDecisionBridge({ store, decisionsSource: () => judgeRun.judge.decisions(), policyVersion, log: console.log });
+      }
       learningHandle = startLearning({
         dataDir: dataDir(), env: process.env, log: console.log,
         populationSource: wideEye ? () => wideEye.sweepPopulationSnapshot() : null,
-        // lazy, bounded archive open (re-tried at most hourly); absent archive = honest ARCHIVE_UNAVAILABLE pending
-        archiveSource: () => {
-          if (archiveCache) return archiveCache;
-          const now = Date.now();
-          if (now - archiveTriedTs < 3_600_000) return null;
-          archiveTriedTs = now;
-          try { archiveCache = readLearningArchive(path.join(dataDir(), 'childhood')); } catch { archiveCache = null; }
-          return archiveCache;
-        },
+        archiveSource, decisionBridge,
       });
-      console.log('LEARN-1 active (data-only, authority NONE): capture -> maturation -> provisional memory; PAPER adapter dormant');
+      console.log(`LEARN-1 active (data-only, authority NONE): capture -> maturation -> provisional memory; PAPER adapter dormant${decisionBridge ? '; JUDGE DECISION BRIDGE on (every paper decision becomes an episode)' : ''}`);
     } catch (err) {
       console.error(`LEARN-1 failed to start (dark; nothing else affected): ${err.message}`);
       learningHandle = null;
@@ -350,7 +370,16 @@ if (SERPENT_MODE === 'DATA_ONLY') {
         if (!changed && !force && now - ledger.lastLogTs < 15 * 60_000) return;
         const delta = recorded - ledger.recorded; const dm = matured - ledger.matured;
         const active = learningRankingStore ? [...learningRankingStore.activationHeads().values()].filter((a) => a.state === 'ACTIVE_PAPER').length : null;
-        console.log(`LEARNING LEDGER: ${recorded} paper decisions scored (5m bite + 15m continuation)${delta ? ` (+${delta}: ${summary?.recorded ?? delta} scored, ${summary?.unavailable ?? 0} outcome unavailable)` : ''}; ${matured} carry matured 1h/4h/24h research horizons${dm ? ` (+${dm})` : ''}; ${summary?.pendingSeq ? 'more decisions maturing' : 'nothing pending'}${active === null ? '' : `; memory: ACTIVE_PAPER activations ${active}`} — every scored outcome is learning, whether or not the Judge's choice changed`);
+        // PUBLISH-FIX-38: the pattern pipeline's stages ride the ledger line — cells (one per setup x regime), how many are
+        // accumulating evidence, how many candidates are in a forward test — so the climb is visible without a shell
+        const memoryLine = () => {
+          try {
+            const heads = [...learningRankingStore.patternHeads().values()]; const by = {}; for (const h of heads) by[h.state] = (by[h.state] ?? 0) + 1;
+            const judgeCells = heads.filter((h) => h.origin === 'LIVE_DESCRIPTIVE_CELL' && h.scope?.setupType && h.scope.setupType !== 'WIDEEYE_SWEEP').length;
+            return `${heads.length} pattern cells (${judgeCells} for the Judge's setups; ${by.ACCUMULATING ?? 0} accumulating, ${by.PROSPECTIVE_PENDING ?? 0} in forward test, ${by.VALIDATED_PAPER ?? 0} validated);`;
+          } catch { return ''; }
+        };
+        console.log(`LEARNING LEDGER: ${recorded} paper decisions scored (5m bite + 15m continuation)${delta ? ` (+${delta}: ${summary?.recorded ?? delta} scored, ${summary?.unavailable ?? 0} outcome unavailable)` : ''}; ${matured} carry matured 1h/4h/24h research horizons${dm ? ` (+${dm})` : ''}; ${summary?.pendingSeq ? 'more decisions maturing' : 'nothing pending'}${active === null ? '' : `; memory: ${memoryLine()} ACTIVE_PAPER activations ${active}`} — every scored outcome is learning, whether or not the Judge's choice changed`);
         ledger = { recorded, matured, lastLogTs: now };
       };
       const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
