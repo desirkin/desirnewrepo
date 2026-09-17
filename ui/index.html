@@ -1207,6 +1207,7 @@ function openAuthCard(then) {
         $('#authMsg').textContent =
           d.reason === 'RATE_LIMITED' ? `LOCKED OUT — retry in ${d.retryAfterSec ?? '?'}s`
           : d.reason === 'CONTROL_AUTH_UNCONFIGURED' ? 'CONTROL AUTH UNCONFIGURED'
+          : d.reason === 'SECOND_FACTOR_MISCONFIGURED' ? 'SECOND FACTOR MISCONFIGURED — the TOTP secret is present but unusable; fix or remove SERPENT_CONTROL_TOTP_SECRET'
           : 'AUTHENTICATION FAILED';
       }
     } catch { $('#authMsg').textContent = 'SHELL LINK LOST'; }

@@ -59,11 +59,14 @@ test('SF-2. secret provisioned: login REQUIRES password + a valid current code',
   assert.equal(auth.authorize(ok.sessionId, ok.csrfToken).ok, true); // the 2FA'd session then acts (KILL/CAGE/toggles ride it)
 });
 
-test('SF-3. a present-but-garbage secret is treated as DISABLED (checklist catches it), never a brick', () => {
-  const { auth } = mk({ totpSecret: '!!! not base32 !!!' });
-  assert.equal(auth.secondFactorConfigured(), false); // not usable -> not "configured"
-  assert.equal(auth.status(undefined).secondFactor, 'DISABLED');
-  assert.equal(auth.login(PW).authenticated, true); // falls back to today's password-only; the readiness checklist requires REQUIRED
+test('SF-3. PUBLISH-FIX-57: a present-but-garbage secret is INVALID, never a silent downgrade to password-only — status says INVALID, the acting login is refused with SECOND_FACTOR_MISCONFIGURED (no failure counted), the audit names it once; an absent secret stays DISABLED / password-only', () => {
+  const audits = []; const { auth } = mk({ totpSecret: '!!! not base32 !!!', audit: (e) => audits.push(e) });
+  assert.equal(auth.secondFactorConfigured(), false); // not usable -> can never verify
+  assert.equal(auth.secondFactorState(), 'INVALID'); assert.equal(auth.status(undefined).secondFactor, 'INVALID');
+  const r = auth.login(PW); assert.equal(r.authenticated, false); assert.equal(r.reason, 'SECOND_FACTOR_MISCONFIGURED');
+  assert.equal(auth.login(PW).reason, 'SECOND_FACTOR_MISCONFIGURED'); assert.equal(auth.lockRemainingSec(), 0, 'configuration is not an attack: nothing counted against the limiter');
+  assert.equal(audits.filter((e) => e.event === 'SECOND_FACTOR_MISCONFIGURED').length, 1, 'named once'); assert.ok(!JSON.stringify(audits).includes('!!! not base32'), 'the secret never reaches the audit');
+  const absent = mk({ totpSecret: '' }); assert.equal(absent.auth.secondFactorState(), 'DISABLED'); assert.equal(absent.auth.login(PW).authenticated, true, 'no secret provisioned: password-only exactly as before');
 });
 
 test('SF-4. the second factor rides the SAME limiter — no TOTP brute-force oracle', () => {

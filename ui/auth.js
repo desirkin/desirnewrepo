@@ -37,6 +37,7 @@ export class ControlAuth {
   #sessions = new Map(); // sessionId -> { csrf, expiresAt, tag }
   #failures = []; // failed credential-verification timestamps (ms) — password OR second factor
   #lockedUntil = 0;
+  #misconfigAudited = false;
   #accesses = 0;
 
   // CONTROL-0B replay guard: the durable floor is the last TOTP time-step accepted
@@ -90,6 +91,18 @@ export class ControlAuth {
     return totpSecretUsable(this.#totpSecret());
   }
 
+  // PUBLISH-FIX-57 (2026-09-17, independent review f32484ca finding 6): "deliberately disabled" and "provisioned but
+  // invalid" are different states. A present-but-undecodable secret used to read as DISABLED and the correct password
+  // alone then opened the acting session — an operator could believe the second factor was on while a configuration
+  // error had quietly turned it off. Now such a secret is INVALID: the status says so, and an acting login is refused
+  // with SECOND_FACTOR_MISCONFIGURED (no failure counted — it is configuration, not an attack) until the secret is fixed
+  // or removed. No secret provisioned stays exactly the former password-only law.
+  secondFactorState() {
+    const secret = this.#totpSecret();
+    if (typeof secret !== 'string' || secret.trim().length === 0) return 'DISABLED';
+    return totpSecretUsable(secret) ? 'REQUIRED' : 'INVALID';
+  }
+
   // ---- failed-auth rate limiter (shared by login AND CLEAR re-entry) ----
   #locked() {
     return this.now() < this.#lockedUntil;
@@ -119,6 +132,7 @@ export class ControlAuth {
   // configured this is exactly the former password-only check.
   #verifyCredentials(password, totp) {
     if (!this.configured()) return { ok: false, reason: 'CONTROL_AUTH_UNCONFIGURED' };
+    if (this.secondFactorState() === 'INVALID') { if (!this.#misconfigAudited) { this.#misconfigAudited = true; this.audit({ event: 'SECOND_FACTOR_MISCONFIGURED', detail: 'SERPENT_CONTROL_TOTP_SECRET is present but not a usable base32 secret: acting login refused until it is fixed or removed' }); } return { ok: false, reason: 'SECOND_FACTOR_MISCONFIGURED' }; }
     if (this.#locked()) return { ok: false, reason: 'RATE_LIMITED', retryAfterSec: this.lockRemainingSec() };
     const passwordOk = typeof password === 'string' && digestEqual(password, this.#password());
     const sf = this.secondFactorConfigured();
@@ -190,7 +204,7 @@ export class ControlAuth {
     const s = this.#session(sessionId);
     return {
       configured: this.configured(),
-      secondFactor: this.secondFactorConfigured() ? 'REQUIRED' : 'DISABLED',
+      secondFactor: this.secondFactorState(),
       authenticated: Boolean(s),
       ...(s ? { csrfToken: s.csrf, expiresAt: s.expiresAt } : {}),
     };
