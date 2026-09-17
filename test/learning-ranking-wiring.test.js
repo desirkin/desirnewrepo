@@ -57,6 +57,11 @@ test('F5 wiring: store -> steward -> ranking source -> Judge snapshot cache -> r
     assert.equal(refreshed.state, 'READY', `snapshot cache refused: ${JSON.stringify(cache.status())}`);
     const snapshot = cache.read();
     assert.ok(snapshot, 'admission reads an immutable snapshot'); assert.equal(Object.isFrozen(snapshot), true);
+    // PUBLISH-FIX-30: the Judge's cache runs on the venue-anchored permission clock, which can trail the local wall clock;
+    // the source prepares the snapshot on the CALLER'S clock, so a wall clock 5 s ahead of the permission clock is still READY
+    const behind = createLearningSnapshotCache({ source: ranking.source, clock: () => Date.now() - 5_000 });
+    const behindRefresh = await behind.refresh(); assert.equal(behindRefresh.state, 'READY', `a permission clock behind the wall clock must not make the snapshot "invalid or stale": ${JSON.stringify(behind.status())}`);
+    assert.ok(behind.read(), 'readable on the caller\'s clock'); assert.equal(behind.read().preparedTs <= Date.now() - 5_000 + 50, true, 'preparedTs is the caller\'s clock, not the wall clock');
     assert.equal(snapshot.view, 'DECISION'); assert.deepEqual(snapshot.withheld, []);
     assert.equal(snapshot.activations.length, 1); assert.equal(snapshot.activations[0].state, 'ACTIVE_PAPER');
     const nowTs = Date.now();
@@ -64,7 +69,7 @@ test('F5 wiring: store -> steward -> ranking source -> Judge snapshot cache -> r
     assert.equal(r.applied, true, `not applied: ${JSON.stringify({ reason: r.reason, rejected: r.rejected })}`);
     assert.equal(r.selected.activationId, activation.activationId);
     assert.ok(r.adjust !== 0 && Math.abs(r.adjust) <= r.selected.maxAbsAdjust + 1e-12 && r.selected.maxAbsAdjust === activation.allowedEffect.maxAbsAdjust, `the nudge (${r.adjust}) stays inside the activation bound`);
-    assert.equal(ranking.status().reads, 1); assert.equal(ranking.status().lastActivations, 1);
+    assert.equal(ranking.status().reads, 2, 'two cache refreshes read the source twice'); assert.equal(ranking.status().lastActivations, 1);
     assert.equal(learnedSelectionState(store, { env: { SERPENT_LEARNING_RANKING: 'true' }, run: { kind: 'PAPER', learningSnapshotStatus: () => cache.status() } }).startsWith('ON_RANKING_ONLY (snapshot prepared'), true);
     cache.dispose();
 
