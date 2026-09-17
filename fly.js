@@ -300,12 +300,23 @@ if (SERPENT_MODE === 'DATA_ONLY') {
         const policyVersion = `judge-policy-${String(judgeRun.policyDigest ?? 'unknown').slice(0, 16)}`;
         decisionBridge = (store) => createJudgeDecisionBridge({ store, decisionsSource: () => judgeRun.judge.decisions(), policyVersion, log: console.log });
       }
+      // PUBLISH-FIX-39: the promoter — the runtime owner of freeze -> forward test -> publish (learning/promoter.js). Its
+      // designs bind to THIS Judge's fact recipe and policy digest so a published activation is consumable by the Judge's
+      // selector; the cost model is the paper policy's own taker fee both ways plus a conservative slippage allowance.
+      let promoter = null;
+      if (judgeRun && judgeRun.kind === 'PAPER' && /^[a-f0-9]{64}$/.test(String(judgeRun.policyDigest ?? ''))) {
+        const { createPromoter } = await import('./learning/promoter.js');
+        const { JUDGE_FACT_RECIPE_VERSION } = await import('./judge/learning-intake.js');
+        const takerRate = Number(judgeRun.policy?.fees?.taker?.rate);
+        const costModel = { feePctPerSide: Number.isFinite(takerRate) ? Math.round(takerRate * 100 * 1e4) / 1e4 : 0.8, slippageBps: 10 };
+        promoter = (store) => createPromoter({ store, consumerBinding: { featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyDigest: judgeRun.policyDigest }, costModel, log: console.log });
+      }
       learningHandle = startLearning({
         dataDir: dataDir(), env: process.env, log: console.log,
         populationSource: wideEye ? () => wideEye.sweepPopulationSnapshot() : null,
-        archiveSource, decisionBridge,
+        archiveSource, decisionBridge, promoter,
       });
-      console.log(`LEARN-1 active (data-only, authority NONE): capture -> maturation -> provisional memory; PAPER adapter dormant${decisionBridge ? '; JUDGE DECISION BRIDGE on (every paper decision becomes an episode)' : ''}`);
+      console.log(`LEARN-1 active (data-only, authority NONE): capture -> maturation -> provisional memory; PAPER adapter dormant${decisionBridge ? '; JUDGE DECISION BRIDGE on (every paper decision becomes an episode)' : ''}${promoter ? '; PROMOTER on (freeze -> forward test -> publish)' : ''}`);
     } catch (err) {
       console.error(`LEARN-1 failed to start (dark; nothing else affected): ${err.message}`);
       learningHandle = null;

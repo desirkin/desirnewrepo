@@ -41,6 +41,9 @@ export function startLearning({
   // PUBLISH-FIX-38: the Judge decision bridge (learning/judge-decision-bridge.js) — every PAPER decision becomes an
   // episode in this store, in the Judge's own setup vocabulary. Injected by the composition; absent = no bridge.
   decisionBridge = null,
+  // PUBLISH-FIX-39: the promoter (learning/promoter.js) — proposes a one-clause "when" per cell, freezes it, records
+  // the forward captures/outcomes and settles the one terminal look. Injected (port or factory over this store).
+  promoter = null,
   clock = Date.now, timers = { setInterval, clearInterval }, tickMs = DEFAULT_TICK_MS,
   dailyTarget = DEFAULT_DAILY_TARGET, log = () => {},
   // CPU LANES (Ticket 6): measure how long each learning step occupies the main lane, so a heavy maintenance pass that
@@ -56,10 +59,12 @@ export function startLearning({
   const store = createLearningStore({ dataDir, log });
   if (typeof decisionBridge === 'function') decisionBridge = decisionBridge(store); // a factory receives THIS store (one writer, one journal)
   if (decisionBridge !== null && (!decisionBridge || typeof decisionBridge !== 'object' || typeof decisionBridge.step !== 'function' || typeof decisionBridge.status !== 'function')) throw new Error('DECISION_BRIDGE_PORT_INVALID');
+  if (typeof promoter === 'function') promoter = promoter(store);
+  if (promoter !== null && (!promoter || typeof promoter !== 'object' || typeof promoter.step !== 'function' || typeof promoter.status !== 'function')) throw new Error('PROMOTER_PORT_INVALID');
   let counters = rollCounters(null, clock());
   let lastTick = null; let ticking = false; let stopped = false;
   const lastCapturedBySymbol = new Map();
-  const errors = { capture: 0, maturation: 0, learning: 0, shadow: 0, opportunityAudit: 0, decisionBridge: 0 };
+  const errors = { capture: 0, maturation: 0, learning: 0, shadow: 0, opportunityAudit: 0, decisionBridge: 0, promoter: 0 };
 
   let lastRecordedSweepId = null; let summaryJob = null;
   function captureTick(nowTs) {
@@ -173,6 +178,7 @@ export function startLearning({
       shadowLane: shadowRunner ? (() => { try { return shadowRunner.status(nowTs); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
       opportunityAuditLane: opportunityAuditFollowup ? (() => { try { return opportunityAuditFollowup.status(); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
       decisionBridge: decisionBridge ? (() => { try { return decisionBridge.status(); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
+      promoter: promoter ? (() => { try { return promoter.status(); } catch { return { failed: 'STATUS_UNAVAILABLE' }; } })() : null,
       memory: (() => { try { const heads = [...store.patternHeads().values()]; const byState = {}; for (const h of heads) byState[h.state] = (byState[h.state] ?? 0) + 1; return { patterns: heads.length, byState, cells: heads.map((h) => ({ setupType: h.scope?.setupType ?? null, regime: h.scope?.regime ?? null, state: h.state, rawCount: h.evidence?.rawCount ?? null, groups: h.evidence?.groupCount ?? null, dates: h.evidence?.distinctUtcDates ?? null, assets: h.evidence?.distinctAssets ?? null })).slice(0, 64), activations: [...store.activationHeads().values()].filter((a) => a.state === 'ACTIVE_PAPER').length }; } catch { return null; } })(),
       killSwitch: kill, sourceDelayEvidence: PROVIDER_DELAY_EVIDENCE,
       mainLane: (() => { try { return meter.snapshot(); } catch { return null; } })(), // per-step main-lane occupancy (Ticket 6)
@@ -191,6 +197,7 @@ export function startLearning({
     if (decisionBridge) { try { report.decisionBridge = meter.time('decisionBridge', () => decisionBridge.step({ nowTs })); } catch (err) { errors.decisionBridge += 1; report.decisionBridge = { failed: String(err?.message ?? err).slice(0, 200) }; } }
     try { report.maturation = meter.time('maturation', () => maturationTick(nowTs)); } catch (err) { errors.maturation += 1; report.maturation = { failed: err.message }; }
     try { report.learning = meter.time('learning', () => learnTick(nowTs)); } catch (err) { errors.learning += 1; report.learning = { failed: err.message }; }
+    if (promoter) { try { report.promoter = meter.time('promoter', () => promoter.step({ nowTs })); } catch (err) { errors.promoter += 1; report.promoter = { failed: String(err?.message ?? err).slice(0, 200) }; } }
     // One optional step; failure is reported without suppressing other lanes.
     // Absent port performs no shadow work. The owner must keep any heavy
     // learning workload isolated from the trading/Watch event loop.
