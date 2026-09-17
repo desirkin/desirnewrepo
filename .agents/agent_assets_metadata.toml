@@ -42,3 +42,17 @@ mtime_ms = 1789647516222
 storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/962e7605-c7d1-4ce1-b01b-46cf98848d1a/919d7d40-3bd5-4a88-8ca2-d9ef7c7cf831"
 storage_version_token = "1789649223235007"
 content_type = "application/octet-stream"
+
+[[outputs]]
+id = "FfZ27RjWLOrJW7vu_-Z0Q"
+uri = "file://exports/serpent-complete-published-app-review-082e6f8.zip"
+type = "unspecified"
+title = "Serpent complete published-app review"
+description = "Complete review package for the currently published source revision 082e6f82cba6b460f497ff53f306cfd214a7aa7a. Contains 1,069 files: published code, tests, docs, doctrine, config, scripts, migrations, UI, attic/history context, deployment metadata, review instructions, inventory, and per-file hashes. Excludes credentials, Git internals, installed dependencies, production databases, and private runtime data."
+logical_id = "234784b1-894f-4b58-99e2-bd3f42c50a97"
+content_hash = "sha256:64c51bd7a79b51aabf9b2e5f516e140675efb2b3299dfc3b5e0c2347bdda937f"
+size = 7357214
+mtime_ms = 1789671858051
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/234784b1-894f-4b58-99e2-bd3f42c50a97/cb4e2aba-951f-46dd-bea4-2148cb2b9ec4"
+storage_version_token = "1789671865374696"
+content_type = "application/octet-stream"
