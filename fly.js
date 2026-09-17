@@ -160,7 +160,18 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // public discovery (GDELT / Polymarket / Kalshi). They ride the spine's checkpoints and blockers; the wide eye's
   // read-only catalog accessor gates the catalog-dependent ones exactly as in DATA_ONLY. Authority NONE.
   if (wideEye) { try { await wideEye._refreshCatalog(); } catch (err) { console.error(`catalog refresh failed (catalog-dependent additions withheld until the wide eye's own cadence recovers): ${String(err?.message ?? err).slice(0, 160)}`); } }
-  await serpentRuntime.startAdditions({ catalogAccessor: wideEye ? { snapshot: () => wideEye.catalogSnapshot() } : null });
+  // PUBLISH-FIX-44: the MOVER STUDY (learning/mover-study.js) — David's "what happened the hour before those movers went up,
+  // and the hour after" — rides the broad-Kraken closed-candle stream from the first record; its learning store is
+  // attached once LEARN-1 composes below. Authority NONE; a failure here is dark and nothing else is affected.
+  let moverStudy = null; let moverStudyTimer = null;
+  try {
+    const { createMoverStudy } = await import('./learning/mover-study.js');
+    moverStudy = createMoverStudy({ dataDir: dataDir(), log: console.log });
+    moverStudyTimer = setInterval(() => { try { moverStudy.tick(); } catch (err) { console.error(`MOVER STUDY tick: ${String(err?.message ?? err).slice(0, 160)}`); } }, 60_000);
+    if (typeof moverStudyTimer?.unref === 'function') moverStudyTimer.unref();
+    console.log('MOVER STUDY active (authority NONE): every >=10%/hour climb across the whole accepted catalog gets its hour-before / the move / hour-after written from closed candles, with control coins beside it; each becomes a graded DAILY_MOVER lesson');
+  } catch (err) { console.error(`MOVER STUDY failed to start (dark; nothing else affected): ${String(err?.message ?? err).slice(0, 160)}`); moverStudy = null; }
+  await serpentRuntime.startAdditions({ catalogAccessor: wideEye ? { snapshot: () => wideEye.catalogSnapshot() } : null, onBroadRecord: moverStudy ? moverStudy.onRecord : null });
   // RUMOR-2A dark multi-source rumor ear — no-ops (zero network, zero timers)
   // unless RUMOR2_ENABLED=true. Observation and memory ONLY: zero attention,
   // HYPED, stalking, eligibility, or execution authority; the durable
@@ -316,6 +327,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
         populationSource: wideEye ? () => wideEye.sweepPopulationSnapshot() : null,
         archiveSource, decisionBridge, promoter,
       });
+      if (moverStudy && learningHandle?.store) { moverStudy.attachStore(learningHandle.store); console.log('MOVER STUDY: learning store attached — movers and their controls become DAILY_MOVER episodes with outcomes'); }
       console.log(`LEARN-1 active (data-only, authority NONE): capture -> maturation -> provisional memory; PAPER adapter dormant${decisionBridge ? '; JUDGE DECISION BRIDGE on (every paper decision becomes an episode)' : ''}${promoter ? '; PROMOTER on (freeze -> forward test -> publish)' : ''}`);
     } catch (err) {
       console.error(`LEARN-1 failed to start (dark; nothing else affected): ${err.message}`);
