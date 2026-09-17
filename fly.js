@@ -28,6 +28,7 @@ import { openPaperRuntime, startDataOnlyRuntime } from './lib/serpent-runtime.js
 import { initPaperAccountAtBoot } from './lib/paper-account-init.js';
 import { logBootSelfCheck, startMemoryReport } from './lib/boot-self-check.js';
 import { startCpuProfileReport } from './lib/cpu-profile-report.js';
+import { startHeapSampleReport } from './lib/heap-sample-report.js';
 import { startMainThreadWatchdog } from './lib/main-thread-watchdog.js';
 import { createDeepMarketSource } from './market-lab/deep-market-adapter.js';
 
@@ -92,6 +93,8 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   startMemoryReport({ log: console.log });
   // PUBLISH-FIX-10 diagnostic: opt-in main-thread sampling so a blocked loop names the code that blocked it.
   if (process.env.SERPENT_CPU_PROFILE === 'true') startCpuProfileReport({ log: console.log });
+  // PUBLISH-FIX-15 diagnostic: opt-in live-retention sampling so a growing heap names the allocation sites holding it.
+  if (process.env.SERPENT_HEAP_SAMPLE === 'true') startHeapSampleReport({ log: console.log });
   // PUBLISH-FIX-10 diagnostic: a worker thread reports, from outside the loop, what a stalled main thread is stuck in.
   if (process.env.SERPENT_STALL_WATCHDOG === 'true') startMainThreadWatchdog({ log: console.log });
   // SERPENT PAPER profile (COBRA_PROFILE, applied by `cobra paper run`): the composition
@@ -204,7 +207,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // case directory, owns execution / Watch, publishes the read-only projection the cockpit and the posture machine
   // read, and registers itself with the cockpit so ARM_LIVE can bind to the actual account. Trade credentials come
   // only from the environment names the LIVE policy declares. Nothing here is constructed without the opt-in.
-  let judgeRun = null;
+  let judgeRun = null; let learningRankingStore = null; let learningStewardTimer = null;
   if (process.env.JUDGE_ENABLED === 'true') {
     try {
       const { composeJudge, loadSpecs } = await import('./judge/composition.js');
@@ -227,7 +230,26 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       // when the structural stop is within the cap, the bite shrinks on wider stops, upside is never capped). Pure all-in
       // (fraction 1 with the max-size-evidence gate) stays a REPLAY-only arm until SIZING qualifies, so it is NOT wired here.
       const paperSizing = process.env.JUDGE_MODE === 'PAPER' ? { fractions: ['0.25', '0.5', '0.75', '1'], allInEvidence: 'RISK_BOUNDED' } : null;
-      judgeRun = await composeJudge({ policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing, writerLockWait: { waitMs: 180_000, intervalMs: 5_000 } }); // PUBLISH-FIX-5 / PAPER-FLIP-PREP: the boot waits out a Republish overlap for the execution writer lock
+      // PUBLISH-FIX-14 (independent review F5): learning is WIRED INTO THE JUDGE, ranking-only. SERPENT_LEARNING_RANKING=true
+      // (PAPER only) composes lib/learning-ranking-source.js — the validated DECISION view of the learning store — as the
+      // Judge's learningActivationSource; the Judge's own snapshot cache refreshes it in maintenance and admission reads the
+      // immutable copy. The contribution is the allowlisted rank-order nudge (judge/learning-intake.js
+      // resolveLearningContribution, bounded by each activation's maxAbsAdjust) — statuses, refusals, sizing, risk and the
+      // Watch are untouched. BASELINE ARM / OFF SWITCH: the learned-influence kill file (`cobra learning kill` ->
+      // data/learning/kill.json KILLED) answers baseline for every decision while collection and learning continue;
+      // unsetting SERPENT_LEARNING_RANKING composes no source at all.
+      let learningActivationSource = null; let learningRankingLine = 'LEARNING RANKING: OFF (SERPENT_LEARNING_RANKING unset; every decision is baseline)';
+      if (process.env.JUDGE_MODE === 'PAPER' && process.env.SERPENT_LEARNING_RANKING === 'true') {
+        const { createLearningRankingSource } = await import('./lib/learning-ranking-source.js');
+        const rankingSource = createLearningRankingSource({ dataDir: dataDir(), log: console.log });
+        learningActivationSource = rankingSource.source;
+        learningRankingStore = rankingSource.store;
+        const kill = learningRankingStore.readKill();
+        const activeNow = [...learningRankingStore.activationHeads().values()].filter((a) => a.state === 'ACTIVE_PAPER').length;
+        learningRankingLine = `LEARNING RANKING: ON (ranking-only; learned influence ${kill.state}; ACTIVE_PAPER activations now: ${activeNow}; off switch: cobra learning kill; source ${rankingSource.version})`;
+      }
+      console.log(learningRankingLine);
+      judgeRun = await composeJudge({ learningActivationSource, policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing, writerLockWait: { waitMs: 180_000, intervalMs: 5_000 } }); // PUBLISH-FIX-5 / PAPER-FLIP-PREP: the boot waits out a Republish overlap for the execution writer lock
       const startup = await judgeRun.start();
       setJudgeRun(judgeRun);
       console.log(`JUDGE active: ${judgeRun.kind} account ${judgeRun.accountId} mode ${judgeRun.mode} (${judgeRun.kind === 'PAPER' ? 'NOT REAL MONEY' : 'LIVE: entries need an unexpired owner authorization'}); startup ${JSON.stringify({ uncertain: startup.uncertainOrders.length, exposed: startup.exposedPositions.length, authorizationEnded: startup.authorizationEnded })}`);
@@ -273,6 +295,27 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // data/learning/decision-outcomes. Dormant by construction: it reads the journal and writes only its own outcome
   // store; it never calls the Judge, grants authority, or touches entry / exit / sizing. It runs only for a PAPER Judge
   // run (it needs the journal + account), on a 60 s unref'd timer, and fails dark — a fault never affects trading.
+  // PUBLISH-FIX-14 (review F5): the activation steward — the ONE runtime act that takes a promotion-published activation
+  // (PUBLISHED_WAITING_FOR_PAPER) to ACTIVE_PAPER inside the authorized PAPER runtime, and retires it at its lifetime
+  // (lib/learning-activation-steward.js). 60 s unref'd cadence; every failure is contained; authority NONE beyond the
+  // bounded rank-order nudge the activation already carries. Without it no learned adjustment could ever go live.
+  if (judgeRun && judgeRun.kind === 'PAPER' && learningRankingStore) {
+    try {
+      const { stewardActivations } = await import('./lib/learning-activation-steward.js');
+      let lastState = null;
+      const runSteward = () => {
+        try {
+          const out = stewardActivations({ store: learningRankingStore, nowTs: Date.now(), paperActive: true, log: console.log });
+          const active = [...learningRankingStore.activationHeads().values()].filter((a) => a.state === 'ACTIVE_PAPER').length;
+          const snap = typeof judgeRun.learningSnapshotStatus === 'function' ? judgeRun.learningSnapshotStatus() : null;
+          const state = `${active}|${learningRankingStore.readKill().state}|${snap?.preparedTs ? 'SNAPSHOT_READY' : (snap?.lastError ?? 'NO_SNAPSHOT_YET')}`;
+          if (state !== lastState || out.activated.length || out.expired.length) { lastState = state; console.log(`LEARNING RANKING status: ACTIVE_PAPER activations ${active}; learned influence ${learningRankingStore.readKill().state}; Judge snapshot ${snap?.preparedTs ? `ready (prepared ${new Date(snap.preparedTs).toISOString()}, accepted ${snap.accepted}/${snap.attempts})` : `withheld (${snap?.lastError ?? 'no attempt yet'})`}`); }
+        } catch (err) { console.error(`LEARNING steward pass: ${err.message}`); }
+      };
+      learningStewardTimer = setInterval(runSteward, 60_000); if (typeof learningStewardTimer?.unref === 'function') learningStewardTimer.unref();
+      setTimeout(runSteward, 90_000).unref?.(); // the first status after the Judge's first maintenance refresh
+    } catch (err) { console.error(`LEARNING steward failed to start (dark; nothing else affected): ${err.message}`); learningStewardTimer = null; }
+  }
   let decisionOutcomeTimer = null;
   if (judgeRun && judgeRun.kind === 'PAPER' && judgeRun.journal && judgeRun.accountId) {
     try {
@@ -370,6 +413,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     if (marketResearch) { try { await marketResearch.stop(); } catch (err) { console.error(`MARKET RESEARCH stop failed: ${err.message}`); } }
     if (learningHandle) { try { learningHandle.stop(); } catch (err) { console.error(`LEARN-1 stop failed: ${err.message}`); } }
     if (decisionOutcomeTimer) { try { clearInterval(decisionOutcomeTimer); } catch { /* timer already cleared */ } decisionOutcomeTimer = null; }
+    if (learningStewardTimer) { try { clearInterval(learningStewardTimer); } catch { /* timer already cleared */ } learningStewardTimer = null; }
     if (caseTriggerTimer) { try { clearInterval(caseTriggerTimer); } catch { /* timer already cleared */ } caseTriggerTimer = null; }
     // paper launch seam: components the paper launcher started stop cleanly BEFORE the process exits
     if (typeof globalThis.serpentPaperShutdown === 'function') { try { await globalThis.serpentPaperShutdown(); } catch (err) { console.error(`PAPER shutdown seam failed: ${err.message}`); } }

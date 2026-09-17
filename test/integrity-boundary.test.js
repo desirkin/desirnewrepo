@@ -37,12 +37,13 @@ test('the size ladder consumes ONLY the existing cost law and money arithmetic: 
   assert.deepEqual(importsOf(src('judge/size-ladder.js')).sort(), ['../execution/money.js', './cost.js'].sort());
 });
 
-test('the consumer switches are ports, not imports: judge/judge.js takes learning and dynamicSizing as null-default parameters; the learned-selection port stays unwired; the dynamic-sizing port is wired ONLY as the LIVE paper depth-capped whole-nut sizing law (Ticket Z part B) — RISK_BOUNDED all-in, only for JUDGE_MODE PAPER — and pure all-in (evidence-gated) stays a REPLAY arm', () => {
+test('the consumer switches are ports, not imports: judge/judge.js takes learning and dynamicSizing as null-default parameters; the learned-selection port is wired only for PAPER under SERPENT_LEARNING_RANKING (PUBLISH-FIX-14); the dynamic-sizing port is wired ONLY as the LIVE paper depth-capped whole-nut sizing law (Ticket Z part B) — RISK_BOUNDED all-in, only for JUDGE_MODE PAPER — and pure all-in (evidence-gated) stays a REPLAY arm', () => {
   const judge = src('judge/judge.js');
   assert.match(judge, /learning = null/, 'the learned-selection port defaults off');
   assert.match(judge, /dynamicSizing = null/, 'the dynamic-sizing port defaults off');
   const fly = src('fly.js');
-  assert.ok(!fly.includes('learningActivationSource'), 'fly.js never wires the learned-selection port');
+  // PUBLISH-FIX-14 (review F5): the learned-selection port is wired ONLY for PAPER under SERPENT_LEARNING_RANKING, ranking-only
+  assert.ok(fly.includes("process.env.JUDGE_MODE === 'PAPER' && process.env.SERPENT_LEARNING_RANKING === 'true'"), 'fly.js wires the learned-selection port only for PAPER under the explicit enable');
   // fly.js wires dynamicSizing ONLY for the live PAPER sizing law: RISK_BOUNDED all-in, gated on JUDGE_MODE === 'PAPER'
   assert.ok(fly.includes("allInEvidence: 'RISK_BOUNDED'"), 'the live paper sizing law is the RISK_BOUNDED depth-capped ladder');
   assert.ok(fly.includes("process.env.JUDGE_MODE === 'PAPER' ? { fractions:"), 'the ladder is wired only for the PAPER mode');

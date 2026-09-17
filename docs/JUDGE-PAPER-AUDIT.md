@@ -66,6 +66,51 @@ watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f0
 all (48 files)   f0526120a8797ef53d5aa64e9c955f06a14f42b0bd0d0111afe1894a0d6cb272
 ```
 
+### 4.16 Audited change — 2026-09-17 PUBLISH-FIX-14 (independent review F5): learning wired into the Judge, ranking-only (frozen digests UNCHANGED: judge `8b8b84332656…`, execution `2551fcb6c4d0…`, watch/watch.js `0c6a43bf…`, all `f0526120a879…`)
+
+Scope: composition only — `fly.js`, `.replit`, `lib/learning-ranking-source.js` (new), `lib/learning-activation-steward.js`
+(new), `lib/learned-selection-state.js` (new), `ui/server.js`. No file under `judge/`, `execution/` or `watch/` changed.
+Finding: the review was right — learning was OFF twice over. `LEARNING_ENABLED` was never set for the deployment (LEARN-1
+capture / maturation / pattern memory never ran), and `composeJudge` was never given a `learningActivationSource`, so
+the consumer seam that ADDENDUM-2 §08 built and `test/judge-learning-intake.test.js` proves (a decision's rank changes by
+the bounded nudge, nothing else) was dormant in every boot. Two further structural blocks were measured and are recorded
+here, not hidden: (1) `lib/decision-memory-port.js` runs its reader in a worker thread whose V8 `resourceLimits` do NOT
+bind when the process carries a heap flag — the deployment runs under `NODE_OPTIONS=--max-old-space-size=1400`
+(PUBLISH-FIX-9), so the thread's measured heap limit was the parent's 1424 MB and the worker refused every request
+(`WORKER_RESOURCE_LIMIT_INVALID`); (2) the same worker withholds every activation the current promotion law can produce
+(`learning-activation-1` → `ACTIVATION_V1_EFFECT_AND_FEATURE_RECIPE_BODY_UNSEALED`). Through that port no learned
+adjustment could ever reach the Judge. Sealing the v2 activation contract it demands (feature-recipe body digest +
+effect transform in the artifact, verified by `judge/learning-intake.js`) touches the frozen core and is a separate
+ticket (BACKLOG B-14); the port stays dormant and unchanged.
+
+Law now: under `SERPENT_LEARNING_RANKING=true` (PAPER only; `.replit` production + development) fly.js composes
+`lib/learning-ranking-source.js` as the Judge's `learningActivationSource`: the validated DECISION view
+(`learning/memory-view.js readDecisionMemory` — an activation enters only when its pattern head is bound
+`ACTIVE_PAPER`, its sealed design / evidence / terminal digests, consumer binding (feature recipe version + policy
+digest), scope, validation block and null size limit re-verify against the prospective journal, with the kill file
+beside it). The Judge's own snapshot cache copies it immutably and refreshes it in the maintenance lane, never in
+admission; `resolveLearningContribution` applies at most the allowlisted rank-order nudge inside the activation's
+`maxAbsAdjust` — statuses, refusals, sizing, risk, exits and the Watch untouched. A fault in the source answers "no
+snapshot" and the Judge decides at baseline. The ACTIVATION STEWARD (`lib/learning-activation-steward.js`, 60 s,
+unref'd, PAPER only) is the one runtime act that takes a promotion-published activation from
+`PUBLISHED_WAITING_FOR_PAPER` to `ACTIVE_PAPER` (reason `PAPER_RUNTIME_ADOPTED`, both journals) and retires it at its
+lifetime (`EXPIRED` / pattern `RETIRED`); it creates, validates and scores nothing. BASELINE ARM: `cobra learning kill`
+(data/learning/kill.json `KILLED`) → every decision baseline while collection and learning continue; `cobra learning arm`
+restores. OFF SWITCH: unset `SERPENT_LEARNING_RANKING` → no source is composed. The cockpit's
+`integrity.switches.learnedSelection` now reports the live state (`ON_RANKING_ONLY (snapshot prepared …)`,
+`ON_RANKING_ONLY_BASELINE_ARM (learned influence KILLED)`, `ON_RANKING_ONLY_WAITING`, `OFF_NOT_ENABLED`,
+`OFF_NO_PAPER_JUDGE`) instead of the constant `OFF_NOT_WIRED`. Boot logs `LEARNING RANKING: ON (…)` and the steward logs
+`LEARNING RANKING status: …` on every change. `LEARNING_ENABLED=true` starts LEARN-1 as documented (authority NONE).
+
+Proof: `test/learning-activation-steward.test.js` (the real promotion fixture: waiting → invisible to the selector;
+one pass → both heads `ACTIVE_PAPER`, the contribution applies, idempotent; paper-not-active refuses; lifetime →
+`EXPIRED` + `RETIRED`; unreadable store contained), `test/learning-ranking-wiring.test.js` (store → steward → the composed
+source → the Judge's snapshot cache → the nudge applied inside the bound; kill file → baseline; enable unset → nothing
+composed), `test/judge-learning-intake.test.js` (unchanged: with the seam present and nothing eligible only the audit
+row differs; with one validated in-scope candidate only the rank contribution and its measurement appear),
+`test/learning-fences.test.js` and `test/integrity-boundary.test.js` (fences rewritten from "the seam is dormant" to
+"the seam is gated on PAPER + the explicit enable, through the one named source, the worker port not composed").
+
 ### 4.15 Audited change — 2026-09-17 PUBLISH-FIX-12 (independent review F2): fair rotation of the preparation slots (previous digests: judge `6b8908a4b256…`, all `b058952b3925…`; execution `2551fcb6c4d0…` and watch/watch.js `0c6a43bf…` UNCHANGED)
 
 Scope: `judge/readiness.js` (`selectPreparation`) and `judge/composition.js` (`admitNominations`). Finding: the standing

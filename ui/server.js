@@ -36,6 +36,7 @@ import { readDataOnlyRuntimeStatus, dataOnlyPublicStatus, dataOnlySensorSnapshot
 import { readBroadKrakenLatest } from '../market-lab/broad-kraken.js';
 import { assembleHuntTrail } from '../lib/hunt-trail.js';
 import { readPaperAccounts, accountProjectionFile } from '../lib/accounts.js';
+import { learnedSelectionState } from '../lib/learned-selection-state.js';
 
 const UI_DIR = path.dirname(fileURLToPath(import.meta.url));
 const config = loadConfig();
@@ -115,7 +116,9 @@ async function learningView() {
         const diagnostics = store.listDiagnostics().slice(0, 50).map((id) => { const m = store.readDiagnosticManifest(id); const s = store.readDiagnosticState(id); return { diagnosticId: id, model: m?.model ?? null, state: s?.state ?? m?.state ?? null, calls: s?.calls ?? 0, maxCalls: m?.maxCalls ?? null }; });
         return {
           evidenceByBasis: byBasis, diagnostics,
-          switches: { learnedSelection: 'OFF_NOT_WIRED', dynamicSizing: 'LIVE_PAPER_DEPTH_CAPPED_WHOLE_NUT_RISK_BOUNDED' },
+          // PUBLISH-FIX-14 (review F5): the learned-selection switch reports the LIVE wiring of this process (fly.js composes
+          // the decision-memory port under SERPENT_LEARNING_RANKING for a PAPER Judge); the kill file is the baseline arm.
+          switches: { learnedSelection: learnedSelectionState(store, { env: process.env, run: judgeRun }), dynamicSizing: 'LIVE_PAPER_DEPTH_CAPPED_WHOLE_NUT_RISK_BOUNDED' },
           selector: { version: SELECTOR_VERSION, snapshotMaxAgeMs: SNAPSHOT_MAX_AGE_MS },
           sizing: { version: SIZE_LADDER_VERSION, objective: SIZING_OBJECTIVE },
         };

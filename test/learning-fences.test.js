@@ -61,9 +61,16 @@ test('ADDENDUM-2 §06/§07: judge/learning-intake.js is the ONE named consumer s
       assert.ok(!src.includes('learning/'), `${dir}/${f} must not reference learning/ (only the named bridge may)`);
     }
   }
-  // the seam is DORMANT in every current composition: fly.js never passes a learning activation source to composeJudge
+  // PUBLISH-FIX-14 (independent review F5): the seam is ACTIVATED by fly.js — ONLY for a PAPER Judge, ONLY under the explicit
+  // SERPENT_LEARNING_RANKING enable, ONLY through lib/learning-ranking-source.js (the validated DECISION view), and the
+  // kill file stays the baseline arm. Nothing else in the composition may pass a learning activation source.
   const fly = readFileSync(path.join(process.cwd(), 'fly.js'), 'utf8');
-  assert.ok(!fly.includes('learningActivationSource'), 'fly.js does not activate the Judge learning seam in this ticket');
+  assert.ok(fly.includes("process.env.JUDGE_MODE === 'PAPER' && process.env.SERPENT_LEARNING_RANKING === 'true'"), 'the seam is gated on PAPER + the explicit enable');
+  assert.ok(fly.includes("import('./lib/learning-ranking-source.js')"), 'the one source is the validated decision view');
+  assert.equal((fly.match(/learningActivationSource/g) ?? []).length, 4, 'declared, assigned under the gate, passed to composeJudge — nothing else');
+  assert.ok(!fly.includes('decision-memory-port'), 'the worker port is not composed (it withholds every v1 activation)');
+  const composition = readFileSync(path.join(process.cwd(), 'judge', 'composition.js'), 'utf8');
+  assert.ok(composition.includes("learningActivationSource && mode === 'PAPER'"), 'composition builds the snapshot cache only for PAPER');
 });
 
 test('activation authority is exactly the one bounded paper adjustment; everything else is authority NONE', () => {

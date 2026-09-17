@@ -117,6 +117,23 @@ lines reach the log per minute per distinct message; the rest are counted and co
 log is rate-limited. Distinct messages are bounded independently, and the key set is capped (256) against ever-varying
 text. `test/provider-rejection-rate.test.js` feeds bursts and asserts all three. Full suite green + gate 0.
 
+## B-14. Learning decision-memory port — sealed activation v2 (after PAPER green; touches the frozen Judge core)
+
+PUBLISH-FIX-14 measured two structural blocks in `lib/decision-memory-port.js` and recorded them in
+`docs/JUDGE-PAPER-AUDIT.md` §4.16: (1) a worker thread's V8 `resourceLimits` do not bind under the
+deployment's `NODE_OPTIONS=--max-old-space-size=1400` (measured: the thread's heap limit was the parent's
+1424 MB), so the fixed worker refuses every request in production (`WORKER_RESOURCE_LIMIT_INVALID`) —
+a forked CHILD PROCESS with its own pinned flags (`--max-old-space-size=64 --max-semi-space-size=8`,
+measured 88 MB, verified from `v8.getHeapStatistics()` inside the child) binds correctly and was
+prototyped, not landed; (2) the worker withholds every `learning-activation-1` record
+(`ACTIVATION_V1_EFFECT_AND_FEATURE_RECIPE_BODY_UNSEALED`) and no v2 contract exists. The ticket: seal
+`featureRecipeDigest` (digest of the Judge's fact recipe BODY, not its name) and the effect transform /
+units in the activation artifact (`learning/contracts.js`, `learning/adapter.js`, `learning/promotion.js`,
+`learning/prospective.js` consumer binding), verify both in `judge/learning-intake.js` (frozen core → audit
+entry + re-pin), accept v2 in the worker, land the child-process task, then move
+`lib/learning-ranking-source.js` behind the port. Until then the composed source is the in-process
+validated DECISION view (same law, same digests, no isolation boundary), ranking-only, kill-file armed.
+
 ## B-13. Post-PAPER research drafts — DO NOT START UNTIL PAPER IS GREEN
 These are research/shadow strategy drafts. **None may begin until PAPER has run green** (a
 live paper account observing + deciding, per PAPER-FLIP.md). They are recorded here so the
