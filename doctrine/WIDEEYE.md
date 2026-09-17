@@ -30,9 +30,16 @@ ripple, not the wake. One ripple per symbol per cooldown window.
 ## Nomination, cap, and who verifies
 
 - A RIPPLE on a symbol **outside** the deep tape emits a NOMINATION record
-  proposing it for the **next session's** deep universe — if it clears the
-  relaxed floor of **$2M 24h volume**, re-verified at session reset against
-  the venue's own data, never the nomination's claim.
+  proposing it for the deep universe — if it clears the relaxed floor of
+  **$2M 24h volume**, re-verified against the venue's own data, never the
+  nomination's claim. Since PUBLISH-FIX-28 (2026-09-17, owner directive: "a
+  hot coin forming a possibility rushes to the front of the line") the deep
+  tape adopts a verified nominee **in-session** through its HOT LANE
+  (`tape/hot-lane.js`: at most 3 hot pairs, a 2-hour tenure after which the
+  oldest yields to a newer nominee; held exposure never yields; the resource
+  law applies to hot pairs like any other), and the Judge's nomination law
+  preempts the oldest preparation tenant for the newcomer. The next-session
+  merge at the session reset is unchanged.
 - The deep universe is hard-capped at **30 pairs**: majors always ride,
   minors compete by volume, lowest-volume shed first (logged).
 - The wide eye can never widen the biteable set by itself. Its output feeds

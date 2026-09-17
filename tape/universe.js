@@ -61,15 +61,12 @@ export function selectFromRaw(assetPairs, tickers, config = loadConfig()) {
 
 // Wide-eye nominations proposed for the next session (written by /survey).
 // Read as a plain file to keep the tape free of survey imports.
-function readWideEyeNominations() {
+function readWideEyeNominationsRaw() {
   const file = path.join(dataDir(), 'survey', 'nominations-current.json');
-  if (!existsSync(file)) return [];
-  try {
-    return JSON.parse(readFileSync(file, 'utf8')).nominations ?? [];
-  } catch {
-    return [];
-  }
+  if (!existsSync(file)) return null;
+  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
 }
+function readWideEyeNominations() { return readWideEyeNominationsRaw()?.nominations ?? []; }
 
 // Merge nominated symbols that clear the RELAXED floor, then enforce the hard
 // deep-universe cap: all eligible candidates compete by volume; lowest shed
@@ -146,6 +143,21 @@ export async function selectUniverse(config = loadConfig(), { fetchImpl = fetch 
     return unavailable(String(err.message).slice(0, 250));
   }
 }
+
+// PUBLISH-FIX-28: the tape carries hot-lane adoptions the daily selection did not list; the current record is kept a
+// SUPERSET of what the tape carries so the Judge's nomination pass (readCurrentUniverse) sees every carried pair.
+export function mergeCarriedIntoCurrentUniverse(carried) {
+  if (!existsSync(currentFile())) return { ok: false, reason: 'NO_CURRENT_RECORD' };
+  let record; try { record = JSON.parse(readFileSync(currentFile(), 'utf8')); } catch { return { ok: false, reason: 'UNREADABLE' }; }
+  if (!record || record.error || record.source === 'UNAVAILABLE' || !Array.isArray(record.pairs)) return { ok: false, reason: 'RECORD_UNAVAILABLE' };
+  const have = new Set(record.pairs.map((p) => p.symbol)); const added = [];
+  for (const p of carried) { if (have.has(p.symbol)) continue; record.pairs.push({ coin: p.coin, symbol: p.symbol, major: p.major === true, depth: p.depth, usdVol24h: p.usdVol24h ?? null, nominated: true, hot: true, hotSinceTs: p.hotSinceTs ?? null }); have.add(p.symbol); added.push(p.symbol); }
+  if (!added.length) return { ok: true, added };
+  record.count = record.pairs.length; atomicWriteJson(currentFile(), record, { pretty: true });
+  return { ok: true, added };
+}
+// PUBLISH-FIX-28 hot lane: only THIS session's proposals (the record's date is the ET session date it was written on)
+export function readWideEyeNominationsToday() { const raw = readWideEyeNominationsRaw(); if (!raw || (raw.date && raw.date !== sessionDate())) return []; return Array.isArray(raw.nominations) ? raw.nominations : []; }
 
 export function readCurrentUniverse() {
   if (!existsSync(currentFile())) return null;

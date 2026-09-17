@@ -9,7 +9,8 @@ import { nowIso, sessionDate } from '../lib/time.js';
 import { OrderBook, decimalsOf } from './book.js';
 import { TradeFlow, bookFeatures } from './features.js';
 import { classifyTape, PAIR_STATES } from './health.js';
-import { selectUniverse } from './universe.js';
+import { selectUniverse, readWideEyeNominationsToday, mergeCarriedIntoCurrentUniverse } from './universe.js';
+import { planHotAdoption, HOT_LANE_DEFAULTS } from './hot-lane.js';
 import {
   TAPE_STATES,
   writeTrade,
@@ -139,6 +140,31 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     log(`  ${[...pairs.values()].map((p) => p.coin + (p.major ? '*' : '')).join(' ')}`);
     return { added, removed };
   }
+
+  // ---- hot lane (PUBLISH-FIX-28): a WIDE EYE nominee joins the deep tape NOW, not next session -------------------------
+  let hotSeen = new Set(); let hotLaneBusy = false; const hotLane = { slots: xp.hotLane?.slots ?? HOT_LANE_DEFAULTS.slots, tenureMs: xp.hotLane?.tenureMs ?? HOT_LANE_DEFAULTS.tenureMs };
+  async function adoptHotNominations() {
+    if (stopping || hotLaneBusy) return;
+    const nominations = readWideEyeNominationsToday().filter((n) => n && typeof n.coin === 'string' && !hotSeen.has(n.coin));
+    if (!nominations.length) return;
+    hotLaneBusy = true;
+    try {
+      const selection = await selectUniverse(config); // the SAME venue verification as the daily selection (floor, status, exclusion, cap)
+      if (selection.error) { writeEvent('HOT_LANE_VERIFY_FAILED', { error: selection.error, coins: nominations.map((n) => n.coin) }); return; }
+      const plan = planHotAdoption({ nominations, carried: [...pairs.values()], verified: selection.pairs, pinned: pinnedSymbols(), seen: hotSeen, nowTs: Date.now(), slots: hotLane.slots, tenureMs: hotLane.tenureMs });
+      hotSeen = plan.seen;
+      for (const symbol of plan.evict) { const p = pairs.get(symbol); unsubscribePair(symbol); dropPair(symbol); writeEvent('PAIR_HOT_YIELDED', { symbol, hotForMs: Date.now() - (p?.hotSinceTs ?? Date.now()) }); log(`[${nowIso()}] HOT LANE: ${p?.coin ?? symbol} yields its hot slot after ${Math.round((Date.now() - (p?.hotSinceTs ?? Date.now())) / 60000)} min`); }
+      for (const p of plan.adopt) {
+        adoptPair(p); if (ws?.readyState === WebSocket.OPEN) subscribeSymbols([p.symbol]);
+        writeEvent('PAIR_HOT_ADOPTED', { symbol: p.symbol, coin: p.coin, usdVol24h: p.usdVol24h ?? null, cause: p.cause, nominatedTs: p.nominatedTs });
+        log(`[${nowIso()}] HOT LANE: ${p.coin} joins the deep tape now (${p.cause}; ${p.usdVol24h ? `$${(p.usdVol24h / 1e6).toFixed(1)}M 24h` : 'volume n/a'}; hot slots ${[...pairs.values()].filter((x) => x.hot).length}/${hotLane.slots}) — the Judge sees it on its next nomination pass`);
+      }
+      for (const k of plan.skipped) { if (k.reason !== 'ALREADY_CARRIED') log(`[${nowIso()}] HOT LANE: ${k.coin} not adopted (${k.reason})`); }
+      if (plan.adopt.length) { const m = mergeCarriedIntoCurrentUniverse([...pairs.values()].filter((x) => x.hot)); if (!m.ok) log(`[${nowIso()}] HOT LANE: current-universe record not updated (${m.reason}); the Judge sees the newcomer at the next selection`); }
+    } catch (err) { log(`[${nowIso()}] HOT LANE degraded (tape unaffected): ${String(err?.message ?? err).slice(0, 160)}`); }
+    finally { hotLaneBusy = false; }
+  }
+  const hotLaneTimer = setInterval(() => { adoptHotNominations().catch(() => {}); }, 60_000);
 
   // ---- websocket
   let ws = null;
@@ -528,6 +554,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       clearInterval(heartbeatTimer);
       clearInterval(snapshotTimer);
       clearInterval(resourceTimer);
+      clearInterval(hotLaneTimer);
       clearInterval(microTimer);
       if (chaosTimer) clearTimeout(chaosTimer);
       if (durationTimer) clearTimeout(durationTimer);

@@ -154,7 +154,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   try { startPress(); } catch { console.error('[press] startup withheld: observation storage requires review'); }
   // SOCIAL-4F: the wide eye's handle is RETAINED so its detached read-only catalog snapshot can
   // be injected into the RUMOR collector below (Social never starts the wide eye itself).
-  const wideEye = startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the biteable set
+  const wideEye = startWideEye(); // notice-only full-universe survey; cannot trade, cannot widen the BITEABLE set (its nominees join the WATCHED deep tape through tape/hot-lane.js, verified by the tape itself)
   // COLLECTOR ADDITIONS (runtime unification step 3): the three collectors the ship never ran while the two-process
   // split existed — market catalogs (durable quota journal), broad Kraken capture (whole accepted catalog, 1-min),
   // public discovery (GDELT / Polymarket / Kalshi). They ride the spine's checkpoints and blockers; the wide eye's
