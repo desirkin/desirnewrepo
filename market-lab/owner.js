@@ -301,6 +301,7 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
     if (started) fail('INVALID_REQUEST', 'owner already started'); if (lifecycle !== 'CREATED') fail('INVALID_REQUEST', `owner cannot start from ${lifecycle}`);
     if (typeof awaitInitialSweep !== 'boolean') fail('INVALID_REQUEST', 'awaitInitialSweep must be boolean');
     started = true; stopped = false; lifecycle = 'ACTIVE';
+    if (outDir) codeIdentity(); // PUBLISH-FIX-31: the process identity is computed once, here at start (git runs synchronously), never again at a seal
     // PUBLISH-FIX-22: under ROTATE_OLDEST_CAPTURES the owner makes room first (oldest prior capture runs), then the quota law applies unchanged
     if (outDir && researchRoot && policy.retention?.onQuotaExhausted === 'ROTATE_OLDEST_CAPTURES') rotateCaptureRuns({ root: researchRoot, quotaBytes: limits.researchRootQuotaBytes, reserveBytes: limits.runBytes, keep: [path.resolve(outDir)], log });
     if (outDir) { const q = rootQuota(); if (q && q.exhausted) { lifecycle = 'RECORDING_FAILED'; stopped = true; recording.error = { code: 'RESOURCE_LIMIT_EXCEEDED', message: 'research root quota exhausted before start' }; recording.failedTs = clock(); recording.where = 'START'; fail('RESOURCE_LIMIT_EXCEEDED', 'research root quota exhausted'); } segmentBase = path.resolve(outDir); openSegment(outDir); }

@@ -44,7 +44,20 @@ export const gitSeam = {
 
 export const CODE_IDENTITY_KEYS = Object.freeze(['identityVersion', 'labVersion', 'sourceTreeSha256', 'sourceFiles', 'sourceClosure', 'roots', 'gitCommit', 'gitSourceDirty', 'law']);
 export const CODE_IDENTITY_VERSION = 'market-code-identity-1';
-export function codeIdentity({ root = ROOT, roots = MARKET_RESEARCH_ROOTS, git = gitSeam } = {}) {
+// PUBLISH-FIX-31 (2026-09-17): the running process's source identity is fixed at module load — the closure bytes and the
+// git facts a seal records cannot change for the life of the process (ES modules load once; a later edit on disk is not
+// the code that produced the artifact). Before: EVERY segment seal (32 MiB, about every 10 min on the paper deployment)
+// re-read and re-hashed the closure and ran `git rev-parse` + `git status` through execFileSync (5 s timeout) on the
+// main thread — production showed MAIN THREAD STALLED 5s / RESOURCE NOTE lag 3-4 s at each seal. Now the default
+// identity is computed once per process and reused (a computed closure only — a missing source is never cached); a
+// caller that names its own root / roots / git seam (tests, preflight) still computes fresh.
+let processIdentity = null;
+export function codeIdentity(options) {
+  if (options !== undefined) return computeCodeIdentity(options);
+  if (!processIdentity) { const id = computeCodeIdentity({}); if (id.sourceTreeSha256 === null) return id; processIdentity = id; }
+  return processIdentity;
+}
+function computeCodeIdentity({ root = ROOT, roots = MARKET_RESEARCH_ROOTS, git = gitSeam } = {}) {
   let files;
   try { files = sourceClosure(roots, { root }); } catch (err) { return deepFreeze({ identityVersion: CODE_IDENTITY_VERSION, labVersion: MARKET_LAB_VERSION, sourceTreeSha256: null, sourceFiles: 0, sourceClosure: [], roots: [...roots], gitCommit: null, gitSourceDirty: null, law: 'NO_GIT_CHECKOUT', missing: err.rel ?? null }); }
   const parts = files.map((f) => `${f}\n${sha256Hex(readFileSync(path.join(root, f)))}\n`);
