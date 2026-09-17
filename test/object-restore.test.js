@@ -2,7 +2,7 @@
 // container filesystem, digest-verified, before any consumer reads them. FILESYSTEM backend, no network, no database.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openObjectStore, OBJECT_STORE_ENV } from '../persistence/object-store.js';
@@ -95,5 +95,21 @@ test('RS-6. a corrupt bucket manifest is refused, not acted on', async () => {
     await store.adapter.put(MANIFEST_OBJECT_KEY, Buffer.from('{not a manifest'));
     const summary = await restoreObjectStoreOnBoot({ store: await fsStore(bucket), dataRoot: data });
     assert.equal(summary.state, 'MANIFEST_CORRUPT'); assert.equal(summary.restored, 0);
+  } finally { rmSync(data, { recursive: true, force: true }); rmSync(bucket, { recursive: true, force: true }); }
+});
+
+test('RS-7 (PUBLISH-FIX-34). a restored file carries the manifest mtime, so the next upload pass finds it unchanged without re-reading it', async () => {
+  const data = tmp(); const bucket = tmp();
+  try {
+    writeFile(data, 'tape/2026-09-17/s.jsonl', 'a\nb\n');
+    const store = await fsStore(bucket);
+    await createObjectUploader({ store, dataRoot: data, now: () => 1 }).syncOnce();
+    const manifestMtime = JSON.parse(Buffer.from(await store.adapter.get(MANIFEST_OBJECT_KEY)).toString('utf8')).entries['tape/2026-09-17/s.jsonl'].mtimeMs;
+    rmSync(data, { recursive: true, force: true }); mkdirSync(data);
+    const summary = await restoreObjectStoreOnBoot({ store: await fsStore(bucket), dataRoot: data });
+    assert.equal(summary.restored, 1);
+    assert.equal(Math.floor(statSync(path.join(data, 'tape/2026-09-17/s.jsonl')).mtimeMs), manifestMtime, 'the restored file wears the manifest mtime');
+    const s = await createObjectUploader({ store: await fsStore(bucket), dataRoot: data, now: () => 2 }).syncOnce();
+    assert.equal(s.skippedUnchanged, 1); assert.equal(s.uploaded, 0);
   } finally { rmSync(data, { recursive: true, force: true }); rmSync(bucket, { recursive: true, force: true }); }
 });

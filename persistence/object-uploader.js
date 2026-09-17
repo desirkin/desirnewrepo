@@ -76,7 +76,18 @@ async function scanSources({ dataRoot, sources, maxFilesPerSource }) {
   return { files, skipped };
 }
 
-export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED_SOURCES, maxFilesPerSource = DEFAULT_MAX_FILES_PER_SOURCE, log = () => {}, now = () => Date.now() } = {}) {
+// PUBLISH-FIX-34 (2026-09-17): a GROWING append-only file is re-uploaded whole (there is no append to an object), so its
+// cadence scales with its size — 15 s per MiB, never under a minute, never over `maxDeferMs` (15 min): a 7 MB tape
+// snapshot file every ~2 min, a 32 MB segment every 8 min, the 70-150 MB daily learning coverage journal every 15 min.
+// Before: learning/coverage/<day>.jsonl (68 MB at 11:18 UTC, ~150 MB by midnight) was read, sha256'd and uploaded EVERY
+// minute — 200 MB of external memory churn and 68+ MB of network per minute for one file. The final sync at stop
+// (`final: true`) uploads everything regardless, so a graceful republish loses nothing; a hard crash loses at most the
+// deferral window of the largest file.
+export const REUPLOAD_MS_PER_MIB = 15_000;
+export const REUPLOAD_MAX_DEFER_MS = 15 * 60_000;
+export const reuploadIntervalMs = (bytes, { perMiB = REUPLOAD_MS_PER_MIB, maxDeferMs = REUPLOAD_MAX_DEFER_MS, minMs = 60_000 } = {}) => Math.min(maxDeferMs, Math.max(minMs, Math.ceil((Number(bytes) || 0) / 1048576) * perMiB));
+
+export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED_SOURCES, maxFilesPerSource = DEFAULT_MAX_FILES_PER_SOURCE, log = () => {}, now = () => Date.now(), perMiB = REUPLOAD_MS_PER_MIB, maxDeferMs = REUPLOAD_MAX_DEFER_MS } = {}) {
   if (!store || store.state !== 'ACTIVE' || !store.adapter) throw new Error('createObjectUploader requires an ACTIVE object store');
   const adapter = store.adapter;
   const root = path.resolve(dataRoot);
@@ -92,19 +103,20 @@ export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED
     return manifest;
   }
 
-  async function syncOnce() {
+  async function syncOnce({ final = false } = {}) {
     if (running) return lastSummary ?? { state: 'BUSY' };
     running = true;
     try {
       const current = await loadManifest();
       const nextEntries = { ...current.entries };
       const { files, skipped } = await scanSources({ dataRoot: root, sources, maxFilesPerSource });
-      let uploaded = 0; let skippedUnchanged = 0; let uploadedBytes = 0; const failures = [];
+      let uploaded = 0; let skippedUnchanged = 0; let deferred = 0; let uploadedBytes = 0; const failures = [];
       // a source scanned this pass keeps its manifest entries even when a file momentarily disappeared (durable, never pruned)
       for (const file of files) {
         if (Object.keys(nextEntries).length >= MAX_MANIFEST_ENTRIES && !nextEntries[file.relativePath]) { skipped.overCount.push(file.relativePath); continue; }
         const prior = nextEntries[file.relativePath];
         if (prior && prior.bytes === file.bytes && prior.mtimeMs === file.mtimeMs) { skippedUnchanged += 1; continue; }
+        if (prior && !final && now() - (Number(prior.uploadedTs) || 0) < reuploadIntervalMs(file.bytes, { perMiB, maxDeferMs })) { deferred += 1; continue; } // PUBLISH-FIX-34: a growing file waits its size-scaled turn
         let bytes;
         try { bytes = await readExact(file.abs, file.bytes); } catch (error) { failures.push({ relativePath: file.relativePath, reason: bounded(error?.code ?? error?.message ?? error) }); continue; }
         if (bytes === null) continue; // changed mid-read; next pass catches it
@@ -124,7 +136,7 @@ export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED
       } else { manifest.entries = nextEntries; }
       lastSummary = Object.freeze({
         version: OBJECT_UPLOADER_VERSION, tsMs: now(), state: failures.length ? 'DEGRADED' : 'OK',
-        scanned: files.length, uploaded, uploadedBytes, skippedUnchanged,
+        scanned: files.length, uploaded, uploadedBytes, skippedUnchanged, deferred, final,
         skippedTooLarge: skipped.tooLarge.length, skippedOverCount: skipped.overCount.length, skippedUnsafePath: skipped.unsafePath.length,
         backed: Object.keys(nextEntries).length, failures: failures.length,
         firstFailure: failures[0] ?? null,

@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, utimesSync } from 'node:
 import os from 'node:os';
 import path from 'node:path';
 import { openObjectStore, OBJECT_STORE_ENV } from '../persistence/object-store.js';
-import { createObjectUploader } from '../persistence/object-uploader.js';
+import { createObjectUploader, reuploadIntervalMs } from '../persistence/object-uploader.js';
 import { parseManifest, manifestError, objectKeyForPath, MANIFEST_OBJECT_KEY, serializeManifest, emptyManifest } from '../persistence/object-manifest.js';
 
 function tmp() { return mkdtempSync(path.join(os.tmpdir(), 'serpent-upl-')); }
@@ -63,13 +63,13 @@ test('UP-2. a grown file re-uploads; identical content at a new mtime re-digests
     await uploader.syncOnce();
     // append: bytes change -> re-upload
     writeFile(data, 'tape/s.jsonl', 'line1\nline2\n', 2000);
-    clock = 6000;
+    clock = 66_000; // PUBLISH-FIX-34: a grown file re-uploads once its size-scaled turn (never under a minute) has come
     const s = await uploader.syncOnce();
     assert.equal(s.uploaded, 1);
     assert.deepEqual(await store.adapter.get(objectKeyForPath('tape/s.jsonl')), Buffer.from('line1\nline2\n'));
     // touch only mtime, same bytes+content -> re-digested, NOT re-put, manifest mtime refreshed
     writeFile(data, 'tape/s.jsonl', 'line1\nline2\n', 3000);
-    clock = 7000;
+    clock = 130_000;
     const s2 = await uploader.syncOnce();
     assert.equal(s2.uploaded, 0); assert.equal(s2.skippedUnchanged, 1);
     assert.equal(uploader._manifest().entries['tape/s.jsonl'].mtimeMs, 3000 * 1000);
@@ -121,4 +121,28 @@ test('UP-6. the uploader refuses a non-ACTIVE store', async () => {
   const store = await openObjectStore({ env: {} });
   assert.throws(() => createObjectUploader({ store, dataRoot: tmp() }), /requires an ACTIVE object store/);
   void emptyManifest;
+});
+
+test('UP-7 (PUBLISH-FIX-34). a growing file waits its size-scaled turn — no read, no digest, no put — and the final sync uploads it regardless', async () => {
+  const data = tmp(); const bucket = tmp();
+  try {
+    writeFile(data, 'learning/coverage/2026-09-17.jsonl', 'a'.repeat(3 * 1048576), 1000); // 3 MiB -> 45 s per the law, floored to 60 s
+    const store = await fsStore(bucket);
+    let clock = 5000;
+    const uploader = createObjectUploader({ store, dataRoot: data, now: () => clock });
+    await uploader.syncOnce();
+    writeFile(data, 'learning/coverage/2026-09-17.jsonl', 'a'.repeat(3 * 1048576) + 'b', 2000);
+    clock = 5000 + 59_000;
+    const s = await uploader.syncOnce();
+    assert.equal(s.uploaded, 0); assert.equal(s.deferred, 1); assert.equal(s.final, false);
+    assert.equal((await store.adapter.get(objectKeyForPath('learning/coverage/2026-09-17.jsonl'))).length, 3 * 1048576, 'the bucket copy is the previous one');
+    const f = await uploader.syncOnce({ final: true });
+    assert.equal(f.uploaded, 1); assert.equal(f.deferred, 0); assert.equal(f.final, true);
+    assert.equal((await store.adapter.get(objectKeyForPath('learning/coverage/2026-09-17.jsonl'))).length, 3 * 1048576 + 1, 'the final sync uploads the grown file');
+    writeFile(data, 'learning/coverage/2026-09-17.jsonl', 'a'.repeat(3 * 1048576) + 'bc', 3000);
+    clock = 5000 + 59_000 + 60_000;
+    const g = await uploader.syncOnce();
+    assert.equal(g.uploaded, 1, 'sixty seconds after the last upload the file is due again');
+    assert.equal(reuploadIntervalMs(7 * 1048576), 105_000); assert.equal(reuploadIntervalMs(68 * 1048576), 15 * 60_000); assert.equal(reuploadIntervalMs(10), 60_000);
+  } finally { rmSync(data, { recursive: true, force: true }); rmSync(bucket, { recursive: true, force: true }); }
 });

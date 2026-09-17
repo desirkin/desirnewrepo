@@ -8,7 +8,7 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open, lstat, mkdir, rename, unlink } from 'node:fs/promises';
+import { open, lstat, mkdir, rename, unlink, utimes } from 'node:fs/promises';
 import { MANIFEST_OBJECT_KEY, parseManifest, relativePathError } from './object-manifest.js';
 
 export const OBJECT_RESTORE_VERSION = 'serpent-object-restore-2';
@@ -93,7 +93,11 @@ export async function restoreObjectStoreOnBoot({ store, dataRoot, log = () => {}
     if (bytes === null) { failures.push({ relativePath, reason: 'DURABLE_OBJECT_MISSING' }); continue; }
     if (bytes.byteLength !== entry.bytes || sha256(bytes) !== entry.sha256) { failures.push({ relativePath, reason: 'DURABLE_OBJECT_DIGEST_MISMATCH' }); continue; }
     try { await writeAtomic(abs, bytes); restored += 1; }
-    catch (error) { failures.push({ relativePath, reason: bounded(error?.code ?? error?.message ?? error) }); }
+    catch (error) { failures.push({ relativePath, reason: bounded(error?.code ?? error?.message ?? error) }); continue; }
+    // PUBLISH-FIX-34 (2026-09-17): a restored file carries the manifest's own mtime, so the uploader's cheap (bytes, mtime)
+    // check recognises it as already backed — before, every restored file (127 files, hundreds of MB) was re-read and
+    // re-hashed on the main thread by the first upload pass of every boot only to be found unchanged. Best effort.
+    if (Number.isSafeInteger(entry.mtimeMs) && entry.mtimeMs > 0) { const t = (entry.mtimeMs + 0.5) / 1000; try { await utimes(abs, t, t); } catch { /* the next pass re-hashes it instead */ } } // +0.5 ms: the uploader floors the stat, and seconds-as-float can land a hair under the integer millisecond
   }
   const state = failures.length ? 'DEGRADED' : 'OK';
   log(`OBJECT RESTORE ${state}: ${restored} restored, ${verifiedPresent} already intact, ${localAhead} local-ahead kept, ${failures.length} failed of ${entries.length} manifest entries${skipped ? `; ${skipped} prior capture files (${(skippedBytes / 1048576).toFixed(0)} MB) left in the bucket, not restored (${skipPrefixes.join(', ')})` : ''}`);
