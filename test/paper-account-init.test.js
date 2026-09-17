@@ -68,6 +68,27 @@ test('init at boot: any other failure → FAILED with the code, never throws int
   assert.equal(r.outcome, 'FAILED'); assert.equal(r.reason, 'OWNER_INTENT_REFUSED'); assert.match(h.logs[0], /init at boot failed: OWNER_INTENT_REFUSED/);
 });
 
+test('PUBLISH-FIX-58: PERSISTENCE_PERMISSION_LOCK at boot is waited out through the republish overlap (bounded), then the exact init path runs; any other code is never retried', async () => {
+  // lock twice, then the journal is ours: the account is created on the third attempt
+  let n = 0; const sleeps = [];
+  const h = harness();
+  const flaky = async () => ({ OWNER_PASSWORD_ENV: 'JUDGE_OWNER_PASSWORD', createCommands: ({ env }) => ({ async 'init-paper'(flags) { n += 1; h.calls.push({ flags, suppliedPassword: env.JUDGE_OWNER_PASSWORD }); if (n <= 2) throw Object.assign(new Error('PERSISTENCE_PERMISSION_LOCK'), { code: 'PERSISTENCE_PERMISSION_LOCK' }); return { ok: true, command: 'init-paper', accountId: 'paper-reference-usd500', revision: 1, initialCapital: '500', mode: 'PAPER' }; } }) });
+  const r = await initPaperAccountAtBoot({ env: baseEnv, log: h.log, readPolicy: h.readPolicy, loadCommands: flaky, lockRetryMs: 15_000, sleep: async (ms) => { sleeps.push(ms); } });
+  assert.equal(r.outcome, 'INITIALIZED'); assert.equal(r.attempts, 3); assert.deepEqual(sleeps, [15_000, 15_000]);
+  assert.equal(h.logs.filter((l) => /init at boot waiting: PERSISTENCE_PERMISSION_LOCK .*attempt 1 of 8/.test(l)).length, 1);
+  assert.match(h.logs.at(-1), /initialized at boot .* \(after 3 attempts\)/);
+  assert.ok(h.logs.every((l) => !l.includes('pw-secret-value')), 'no secret in any line');
+  // the lock never lifts: bounded, then FAILED with the code
+  const stuck = harness({ initError: Object.assign(new Error('PERSISTENCE_PERMISSION_LOCK'), { code: 'PERSISTENCE_PERMISSION_LOCK' }) }); const slept = [];
+  const r2 = await initPaperAccountAtBoot({ env: baseEnv, ...stuck, lockRetries: 3, lockRetryMs: 5, sleep: async (ms) => { slept.push(ms); } });
+  assert.equal(r2.outcome, 'FAILED'); assert.equal(r2.reason, 'PERSISTENCE_PERMISSION_LOCK'); assert.equal(r2.attempts, 3); assert.equal(slept.length, 2); assert.equal(stuck.calls.length, 3);
+  assert.match(stuck.logs.at(-1), /init at boot failed: PERSISTENCE_PERMISSION_LOCK \(after 3 attempts\)/);
+  // another code is not a timing matter: one attempt, no sleep
+  const other = harness({ initError: Object.assign(new Error('boom'), { code: 'OWNER_INTENT_REFUSED' }) }); const s3 = [];
+  const r3 = await initPaperAccountAtBoot({ env: baseEnv, ...other, sleep: async (ms) => { s3.push(ms); } });
+  assert.equal(r3.outcome, 'FAILED'); assert.equal(r3.attempts, 1); assert.equal(s3.length, 0); assert.equal(other.calls.length, 1);
+});
+
 test('boot self-check: names only — database host without credentials, secret NAMES present/absent, heap ceiling', () => {
   const env = { DATABASE_URL: 'postgres://user:hunter2@db.internal:5432/serpent?sslmode=require', SERPENT_CONTROL_PASSWORD: 'x', COINGLASS_API_KEY: '', SERPENT_DATA_GENERATION: 'gen1', COBRA_PROFILE: 'config/paper-runtime.json', JUDGE_MODE: 'PAPER' };
   const c = bootSelfCheck({ env, memory: { heapUsed: 100 * 1048576, rss: 200 * 1048576, external: 0 }, heapLimitBytes: 1400 * 1048576, nodeVersion: 'v22.0.0', execArgv: ['--max-old-space-size=1400'] });

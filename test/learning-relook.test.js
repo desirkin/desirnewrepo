@@ -26,6 +26,25 @@ test('RL-01. the learned gate: armed only with enough movers whose hour after he
   assert.equal(lateEntryEvidence([{ kind: 'CONTROL', hourAfter: { heldAboveStart: true } }]).movers, 0, 'controls are not movers');
 });
 
+test('RL-01b (PUBLISH-FIX-58). the gate learns from the day TOP boards too: DAILY_TOP climbs count once each, a board entry that also crossed the threshold is the same event as its MOVER record, controls never count', () => {
+  const top = (coin, eventTs, held, alsoMover = false) => ({ ...mover(coin, eventTs, held, { climbPct: 4 }), kind: 'DAILY_TOP', rank: 1, of: 30, alsoMover, recordedTs: eventTs + 6 * 60 * MIN });
+  // 4 threshold movers + 20 board climbs (2 of which are the same events as movers) = 22 distinct pictured climbs
+  const records = [
+    ...Array.from({ length: 4 }, (_, i) => mover(`M${i}`, T0 + i * MIN, true)),
+    ...Array.from({ length: 18 }, (_, i) => top(`B${i}`, T0 + (10 + i) * MIN, i < 10)),
+    top('M0', T0, true, true), top('M1', T0 + MIN, true, true),
+    { kind: 'DAILY_TOP_CONTROL', coin: 'X', eventTs: T0, hourAfter: { heldAboveStart: true } }, { kind: 'CONTROL', coin: 'Y', eventTs: T0, hourAfter: { heldAboveStart: true } },
+  ];
+  const ev = lateEntryEvidence(records);
+  assert.equal(ev.movers, 22); assert.equal(ev.threshold, 4); assert.equal(ev.board, 18); assert.equal(ev.held, 14);
+  assert.equal(ev.armed, true); assert.equal(ev.reason, 'HOUR_AFTER_HELD'); assert.equal(ev.heldShare, Math.round(14 / 22 * 1000) / 1000);
+  // boards alone can arm it: 20 board climbs, 11 held
+  const boards = lateEntryEvidence(Array.from({ length: 20 }, (_, i) => top(`C${i}`, T0 + i * MIN, i < 11)));
+  assert.equal(boards.armed, true); assert.equal(boards.threshold, 0); assert.equal(boards.board, 20);
+  // a board entry without its hour after (pictured too close to day close) does not count
+  assert.equal(lateEntryEvidence([{ kind: 'DAILY_TOP', coin: 'Z', eventTs: T0, hourAfter: null }]).movers, 0);
+});
+
 test('RL-02. missed rises: only the Judge\'s own not-taken decisions with a FAVORABLE 60m outcome of at least 2%, inside the lookback; taken trades and small moves are not re-looks', () => {
   const e1 = judgeEpisode('XMR', T0 - 70 * MIN, 'SKIPPED'); const e2 = judgeEpisode('ETH', T0 - 65 * MIN, 'NO_SETUP'); const e3 = judgeEpisode('BTC', T0 - 62 * MIN, 'SELECTED_FOR_PAPER'); const e4 = judgeEpisode('SOL', T0 - 4 * 60 * MIN, 'SKIPPED');
   const sweep = buildEpisode({ canonicalCoin: 'ADA', decisionTs: T0 - 66 * MIN, usableAtTs: T0 - 66 * MIN, datasetId: 'live-sweep', mode: 'PROSPECTIVE_SHADOW', evidenceBasis: 'PROSPECTIVE', fidelity: 'PROSPECTIVE_SHADOW', featureSet: { features: {} }, gates: [], decision: 'NO_SETUP', baselineRuleVersion: BASELINE_RULE_VERSION });

@@ -28,12 +28,24 @@ export const relookDir = (dataDir) => path.join(path.resolve(dataDir), 'learning
 export const relookFile = (dataDir) => path.join(relookDir(dataDir), 'current.json');
 
 // the learned gate: did the hour AFTER a climb hold, over the recent movers?
+// PUBLISH-FIX-58: the sample is every climb the mover study pictured with its hour after — the threshold MOVERS (>= 10% in
+// an hour, written the minute their hour after is known) AND the day's TOP board (the biggest hour-climbs of the UTC day
+// regardless of the 10% line, written at day close). A board entry that also crossed the threshold is the same event as
+// its MOVER record and counts once (coin + eventTs). The first boot saw "0 of 20" after four quiet hours: 10% climbs are
+// rare, the board gives up to 30 pictured climbs a day, and the question the gate asks — does the hour after a climb hold
+// — is the same question for both.
+const GATE_KINDS = new Set(['MOVER', 'DAILY_TOP']);
 export function lateEntryEvidence(records, { minMoverSample = RELOOK_DEFAULTS.minMoverSample, minHeldShare = RELOOK_DEFAULTS.minHeldShare } = {}) {
-  const movers = records.filter((r) => r && r.kind === 'MOVER' && r.hourAfter && typeof r.hourAfter.heldAboveStart === 'boolean');
+  const seen = new Set(); const movers = []; let threshold = 0; let board = 0;
+  for (const r of records) {
+    if (!r || !GATE_KINDS.has(r.kind) || !r.hourAfter || typeof r.hourAfter.heldAboveStart !== 'boolean') continue;
+    const key = `${r.coin}|${r.eventTs}`; if (seen.has(key)) continue; seen.add(key);
+    movers.push(r); if (r.kind === 'MOVER') threshold += 1; else board += 1;
+  }
   const held = movers.filter((r) => r.hourAfter.heldAboveStart).length;
   const heldShare = movers.length ? held / movers.length : null;
   const armed = movers.length >= minMoverSample && heldShare >= minHeldShare;
-  return { movers: movers.length, held, heldShare: heldShare === null ? null : Math.round(heldShare * 1000) / 1000, medianHeldPct: round2(median(movers.map((r) => r.hourAfter.heldPct))), medianMinutesToPeak: round2(median(movers.map((r) => r.theMove?.minutesToPeak))), armed, reason: armed ? 'HOUR_AFTER_HELD' : movers.length < minMoverSample ? `TOO_FEW_MOVERS (${movers.length} of ${minMoverSample})` : `HOUR_AFTER_FADED (${Math.round(heldShare * 100)}% held, need ${Math.round(minHeldShare * 100)}%)` };
+  return { movers: movers.length, threshold, board, held, heldShare: heldShare === null ? null : Math.round(heldShare * 1000) / 1000, medianHeldPct: round2(median(movers.map((r) => r.hourAfter.heldPct))), medianMinutesToPeak: round2(median(movers.map((r) => r.theMove?.minutesToPeak))), armed, reason: armed ? 'HOUR_AFTER_HELD' : movers.length < minMoverSample ? `TOO_FEW_MOVERS (${movers.length} of ${minMoverSample})` : `HOUR_AFTER_FADED (${Math.round(heldShare * 100)}% held, need ${Math.round(minHeldShare * 100)}%)` };
 }
 
 // missed rises among the Judge's own graded decisions: not taken, then up >= missedRisePct over the horizon
@@ -87,7 +99,7 @@ export function createRelookSource({ store, moverStudy = null, dataDir, clock = 
       relooks = selectRelooks(candidates, { nowTs, ...cfg });
     }
     current = { version: RELOOK_VERSION, ts: nowTs, armed: evidence.armed, evidence, relooks };
-    if (lastArmed !== evidence.armed) { lastArmed = evidence.armed; log(`LEARNED RE-LOOK ${evidence.armed ? 'ARMED' : 'DORMANT'}: ${evidence.reason} (${evidence.movers} movers, ${evidence.heldShare === null ? 'no' : `${Math.round(evidence.heldShare * 100)}%`} held the hour after, median held ${evidence.medianHeldPct ?? '?'}%, median minutes to peak ${evidence.medianMinutesToPeak ?? '?'})`); }
+    if (lastArmed !== evidence.armed) { lastArmed = evidence.armed; log(`LEARNED RE-LOOK ${evidence.armed ? 'ARMED' : 'DORMANT'}: ${evidence.reason} (${evidence.movers} pictured climbs: ${evidence.threshold} over the 10% line, ${evidence.board} from the day boards; ${evidence.heldShare === null ? 'no' : `${Math.round(evidence.heldShare * 100)}%`} held the hour after, median held ${evidence.medianHeldPct ?? '?'}%, median minutes to peak ${evidence.medianMinutesToPeak ?? '?'})`); }
     const keys = relooks.map((r) => `${r.coin}|${r.sinceTs}`).join(',');
     if (keys !== lastKeys) { lastKeys = keys; for (const r of relooks) { counters.nominated += 1; log(`LEARNED RE-LOOK: ${r.coin} back in the Judge's watch until ${new Date(r.untilTs).toISOString().slice(11, 16)} UTC — ${r.reason} (${r.kind === 'MISSED_RISE' ? `the Judge's own ${String(r.setupType ?? '').toLowerCase().replace(/_/g, ' ')} decision` : 'the mover study'}); the Judge's setups and gates decide the entry as always`); } }
     try { mkdirSync(relookDir(dataDir), { recursive: true }); atomicWriteJson(relookFile(dataDir), current, { pretty: true }); } catch (err) { counters.writesFailed += 1; log(`LEARNED RE-LOOK: current.json not written (${String(err?.message ?? err).slice(0, 120)})`); }
