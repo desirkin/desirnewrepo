@@ -79,7 +79,7 @@
    "model": { "desiredState": "REQUEST", "blockerPolicy": "PAID_GATE", "authority": "NONE", "credentialEnv": "ANTHROPIC_API_KEY", "budgetSource": "config/market-research.paper.json model.* (explicit USD caps; shipped 0 = blocked)" }
   },
   "judge": {
-   "judge": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "judge/composition.js", "mode": "PAPER", "enableEnv": "JUDGE_ENABLED", "policyFile": "config/judge.paper.json", "accountId": "paper-reference-usd500", "authority": "PAPER_SIMULATION_ONLY" }
+   "judge": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "judge/composition.js", "mode": "PAPER", "enableEnv": "JUDGE_ENABLED", "policyFile": "config/judge.paper.json", "accountId": "paper-reference-usd500-fee080", "authority": "PAPER_SIMULATION_ONLY" }
   },
   "watch": {
    "watch": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "watch/watch.js", "composedBy": "judge/composition.js", "authority": "PAPER_EXIT_INTENT_ONLY" }

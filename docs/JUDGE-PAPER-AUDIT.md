@@ -66,6 +66,26 @@ watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f0
 all (48 files)   6166dc44ad3901715a0090b76072ebbd5add2b64c7eae545b4f532eac5994d4f
 ```
 
+### 4.19 Audited change — 2026-09-17 PUBLISH-FIX-23: the 0.80% policy binds a NEW paper account, `paper-reference-usd500-fee080` (frozen digests UNCHANGED: judge `8b8b84332656…`, execution `83c4ce652d38…`, watch/watch.js `0c6a43bf…`, all `6166dc44ad39…`)
+
+Scope: `config/judge.paper.json` (+ byte-identical `judge/samples/policy.paper-reference.json`), `config/paper-runtime.json`
+(the profile's JUDGE_ACCOUNT), `fly.js` (one explanatory log line beside the existing failure line). No frozen file changed.
+Finding: production boot aac10add after PUBLISH-FIX-19 — `JUDGE failed to start … ACCOUNT_POLICY_MISMATCH:
+paper-reference-usd500 was initialized under another policy binding`. The law in `judge/composition.js` is exact and
+kept: an account's `policyDigest` / `policyVersion` are immutable, a mismatch is never an implicit migration or reset.
+Changing the fee changed the policy digest, so the old account can no longer run it.
+
+Law now: a changed policy names the account it binds. `policyName` and `account.accountId` are
+`paper-reference-usd500-fee080`; the boot initializes it ONCE under owner intent through the existing
+`lib/paper-account-init.js` path (`SERPENT_PAPER_INIT_ACCOUNT` = the same name, verified against the policy, password
+via `SERPENT_CONTROL_PASSWORD`, audit line written, refuses to reset). The previous account and its journal stay
+untouched and readable (history is never rewritten); the learning memory is not account-bound. When David's own Kraken
+tier replaces the UNVERIFIED 0.80%, the digest moves again and the policy names its next account the same way. The
+Judge failure line now states this law beside `ACCOUNT_POLICY_MISMATCH` / `ACCOUNT_UNINITIALIZED`. Proof:
+`test/paper-runtime.test.js` P-01 (the policy IS the reference byte for byte), `test/paper-account-init.test.js`
+(the boot init path refuses a name that differs from the policy's), `test/judge-composition-input-binding-review.test.js`
+(ACCOUNT_POLICY_MISMATCH still refuses).
+
 ### 4.18 Audited change — 2026-09-17 PUBLISH-FIX-19 (independent review F1 / F1b): the paper taker reference is an UNVERIFIED conservative 0.80%; null fee fields are never a verified tier (frozen digests UNCHANGED: judge `8b8b84332656…`, execution `83c4ce652d38…`, watch/watch.js `0c6a43bf…`, all `6166dc44ad39…`)
 
 Scope: `config/judge.paper.json` (+ its byte-identical reference `judge/samples/policy.paper-reference.json` and the

@@ -86,15 +86,16 @@ test('A01/A08. strict binding: the paper sample cannot arm (no live section, wro
 test('A02. ARM_LIVE over the real cockpit: GET is 405; unauthenticated 401; cookie without CSRF 403; cross-origin 403; confirm without the fresh password 403; a wrong / reused / expired phrase is refused; a payload naming another account is refused; nothing arms without a passed preflight; then a bound challenge + fresh password + exact phrase commits ONE authorization whose reasons are empty; the secret never appears in any response or log', async () => {
   process.env.SERPENT_CONTROL_PASSWORD = PW;
   assert.equal((await fetch(`${BASE}/api/judge/arm`)).status, 405, 'no GET arm');
-  const off = await (await fetch(`${BASE}/api/judge`)).json(); assert.equal(off.enabled, false); assert.equal(off.prominent, 'JUDGE OFF');
+  assert.equal((await fetch(`${BASE}/api/judge`)).status, 401, 'PUBLISH-FIX-20 (F7): the Judge view is a private read once control auth is configured');
   assert.equal((await post('/api/judge/arm', { step: 'challenge' })).status, 401);
   const login = await post('/api/auth/login', { password: PW }); const cookie = login.headers.get('set-cookie').split(';')[0]; const csrf = (await login.json()).csrfToken; const authed = (extra = {}) => ({ cookie, 'X-Serpent-CSRF': csrf, ...extra });
+  const off = await (await fetch(`${BASE}/api/judge`, { headers: { cookie } })).json(); assert.equal(off.enabled, false); assert.equal(off.prominent, 'JUDGE OFF');
   assert.equal((await post('/api/judge/arm', { step: 'challenge' }, { cookie })).status, 403, 'cookie without CSRF');
   assert.equal((await post('/api/judge/arm', { step: 'challenge' }, authed({ origin: 'https://evil.example' }))).status, 403, 'cross-origin');
   assert.equal((await (await post('/api/judge/arm', { step: 'challenge' }, authed())).json()).reason, 'JUDGE_NOT_RUNNING');
   const { approval } = approvedRelease(); const file = writeApproval(approval);
   const clock = fakeClock(); const journal = await liveJournal('live-t', clock, { canaryFor: approval }); const transport = transportDouble(liveRoutes()); const run = await liveRun({ journal, clock, transport, writeProjection: true }); await run.start(); setJudgeRun(run);
-  const view = await (await fetch(`${BASE}/api/judge`)).json(); assert.equal(view.enabled, true); assert.equal(view.running, true); assert.match(view.prominent, /^LIVE/); assert.ok(view.approvals.includes(path.basename(file))); assert.ok(!JSON.stringify(view).includes(SECRET) && !JSON.stringify(view).includes(KEY), 'no secret in the view');
+  const view = await (await fetch(`${BASE}/api/judge`, { headers: { cookie } })).json(); assert.equal(view.enabled, true); assert.equal(view.running, true); assert.match(view.prominent, /^LIVE/); assert.ok(view.approvals.includes(path.basename(file))); assert.ok(!JSON.stringify(view).includes(SECRET) && !JSON.stringify(view).includes(KEY), 'no secret in the view');
   const body = { accountId: 'live-t', allocationCeiling: '500', approvalId: approval.approvalId };
   assert.equal((await (await post('/api/judge/arm', { ...body, step: 'challenge', accountId: 'paper-reference-usd500' }, authed())).json()).reason, 'ACCOUNT_BINDING_MISMATCH', 'the payload cannot substitute another account');
   assert.equal((await (await post('/api/judge/arm', { ...body, step: 'challenge', approvalId: 'apr-' + '0'.repeat(24) }, authed())).json()).reason, 'APPROVAL_UNKNOWN');

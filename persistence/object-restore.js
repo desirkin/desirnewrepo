@@ -11,7 +11,11 @@ import { constants } from 'node:fs';
 import { open, lstat, mkdir, rename, unlink } from 'node:fs/promises';
 import { MANIFEST_OBJECT_KEY, parseManifest, relativePathError } from './object-manifest.js';
 
-export const OBJECT_RESTORE_VERSION = 'serpent-object-restore-1';
+export const OBJECT_RESTORE_VERSION = 'serpent-object-restore-2';
+// PUBLISH-FIX-22 (2026-09-17): prior market-research CAPTURE runs stay durable in the bucket but are NOT pulled back onto
+// disk at boot — restoring every past run refilled the 4 GiB research root on each publish and both research owners
+// refused to start (research root quota exhausted). Sealed cases, accounting and budget journals restore as before.
+export const DEFAULT_RESTORE_SKIP_PREFIXES = Object.freeze(['market-research/captures/']);
 const bounded = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').slice(0, 180);
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const inside = (root, target) => { const rel = path.relative(root, target); return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel); };
@@ -58,7 +62,7 @@ async function writeAtomic(abs, bytes) {
 
 // Restore the backed bulk files from the durable bucket onto local disk. Returns a bounded summary; it never throws for
 // a single-file failure (that file is counted and reported) so one bad object cannot block the rest of boot.
-export async function restoreObjectStoreOnBoot({ store, dataRoot, log = () => {}, now = () => Date.now() } = {}) {
+export async function restoreObjectStoreOnBoot({ store, dataRoot, log = () => {}, now = () => Date.now(), skipPrefixes = DEFAULT_RESTORE_SKIP_PREFIXES } = {}) {
   const base = { version: OBJECT_RESTORE_VERSION, tsMs: now() };
   if (!store || store.state !== 'ACTIVE' || !store.adapter) {
     // an absent or dark bucket is not a boot failure: there is simply nothing durable to restore
@@ -71,9 +75,10 @@ export async function restoreObjectStoreOnBoot({ store, dataRoot, log = () => {}
   const manifest = parseManifest(manifestBytes);
   if (!manifest) { if (manifestBytes) log('OBJECT RESTORE manifest is corrupt or foreign (nothing restored)'); return Object.freeze({ ...base, state: manifestBytes ? 'MANIFEST_CORRUPT' : 'MANIFEST_ABSENT', restored: 0, verifiedPresent: 0, failures: 0, manifestEntries: 0 }); }
 
-  let restored = 0; let verifiedPresent = 0; let localAhead = 0; const failures = [];
+  let restored = 0; let verifiedPresent = 0; let localAhead = 0; let skipped = 0; let skippedBytes = 0; const failures = [];
   const entries = Object.entries(manifest.entries);
   for (const [relativePath, entry] of entries) {
+    if (skipPrefixes.some((p) => relativePath.startsWith(p))) { skipped += 1; skippedBytes += Number(entry?.bytes) || 0; continue; } // durable, deliberately not on disk
     if (relativePathError(relativePath)) { failures.push({ relativePath, reason: 'UNSAFE_PATH' }); continue; }
     const abs = path.resolve(root, ...relativePath.split('/'));
     if (!inside(root, abs)) { failures.push({ relativePath, reason: 'PATH_ESCAPES_DATA_ROOT' }); continue; }
@@ -91,7 +96,7 @@ export async function restoreObjectStoreOnBoot({ store, dataRoot, log = () => {}
     catch (error) { failures.push({ relativePath, reason: bounded(error?.code ?? error?.message ?? error) }); }
   }
   const state = failures.length ? 'DEGRADED' : 'OK';
-  log(`OBJECT RESTORE ${state}: ${restored} restored, ${verifiedPresent} already intact, ${localAhead} local-ahead kept, ${failures.length} failed of ${entries.length} manifest entries`);
+  log(`OBJECT RESTORE ${state}: ${restored} restored, ${verifiedPresent} already intact, ${localAhead} local-ahead kept, ${failures.length} failed of ${entries.length} manifest entries${skipped ? `; ${skipped} prior capture files (${(skippedBytes / 1048576).toFixed(0)} MB) left in the bucket, not restored (${skipPrefixes.join(', ')})` : ''}`);
   if (failures.length) log(`OBJECT RESTORE first failure ${failures[0].relativePath}: ${failures[0].reason}`);
-  return Object.freeze({ ...base, state, restored, verifiedPresent, localAhead, failures: failures.length, manifestEntries: entries.length, firstFailure: failures[0] ?? null });
+  return Object.freeze({ ...base, state, restored, verifiedPresent, localAhead, skipped, skippedBytes, failures: failures.length, manifestEntries: entries.length, firstFailure: failures[0] ?? null });
 }

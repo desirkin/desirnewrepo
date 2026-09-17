@@ -90,7 +90,7 @@ const MODEL_KEYS = ['enabled', 'provider', 'model', 'credentialEnv', 'apiHost', 
 const PRICING_KEYS = ['inputUsdPerMTok', 'outputUsdPerMTok', 'cacheReadUsdPerMTok', 'cacheWriteUsdPerMTok', 'pricingSource', 'verifiedDate'];
 export const POLICY_KEYS = Object.freeze(['policyVersion', 'mode', 'providers', 'model', 'resources', 'cases', 'retention']);
 const RETENTION_KEYS = ['persistProviderText', 'onQuotaExhausted'];
-export const QUOTA_EXHAUSTED_POLICIES = Object.freeze(['STOP_CAPTURE', 'ROTATE_OLDEST_UNSEALED']);
+export const QUOTA_EXHAUSTED_POLICIES = Object.freeze(['STOP_CAPTURE', 'ROTATE_OLDEST_UNSEALED', 'ROTATE_OLDEST_CAPTURES']); // ROTATE_OLDEST_CAPTURES: PUBLISH-FIX-22 (market-lab/root-retention.js)
 
 const nonNegOrNull = (v) => v === null || (isFiniteNum(v) && v >= 0);
 export function policyError(raw, where = 'policy') {

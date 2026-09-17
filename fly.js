@@ -255,6 +255,8 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       console.log(`JUDGE active: ${judgeRun.kind} account ${judgeRun.accountId} mode ${judgeRun.mode} (${judgeRun.kind === 'PAPER' ? 'NOT REAL MONEY' : 'LIVE: entries need an unexpired owner authorization'}); startup ${JSON.stringify({ uncertain: startup.uncertainOrders.length, exposed: startup.exposedPositions.length, authorizationEnded: startup.authorizationEnded })}`);
     } catch (err) {
       console.error(`JUDGE failed to start (dark; nothing else affected; no orders): ${err.message}`);
+      // PUBLISH-FIX-23: a policy binding is immutable per account — a changed policy (fee tier, limits) names a NEW account
+      if (err?.code === 'ACCOUNT_POLICY_MISMATCH' || err?.code === 'ACCOUNT_UNINITIALIZED') console.error(`JUDGE account law: the policy ${process.env.JUDGE_POLICY} binds account ${process.env.JUDGE_ACCOUNT ?? '(policy account)'}; a changed policy must run under the account it names, initialized once under owner intent (SERPENT_PAPER_INIT_ACCOUNT = that account name + SERPENT_CONTROL_PASSWORD at boot, or init-paper --owner-stdin true). Never a reset.`);
       judgeRun = null;
     }
   }

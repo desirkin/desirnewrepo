@@ -16,8 +16,8 @@
     "quoteUsdPerMonth": null
    },
    "limits": {
-    "maxCallsPerDay": 1000,
-    "maxCallsPerMonth": 20000,
+    "maxCallsPerDay": 8000,
+    "maxCallsPerMonth": 250000,
     "maxConcurrency": 1
    },
    "permittedEndpoints": null,
@@ -56,8 +56,8 @@
     "quoteUsdPerMonth": null
    },
    "limits": {
-    "maxCallsPerDay": 1000,
-    "maxCallsPerMonth": 20000,
+    "maxCallsPerDay": 8000,
+    "maxCallsPerMonth": 250000,
     "maxConcurrency": 1
    },
    "permittedEndpoints": null,
@@ -388,7 +388,7 @@
   "packetLineBytes": 262144,
   "manifestBytes": 1048576,
   "segmentBytes": 33554432,
-  "runBytes": 1073741824,
+  "runBytes": 536870912,
   "contextBytes": 2097152,
   "researchRootQuotaBytes": 4294967296,
   "httpConcurrencyGlobal": 4,
@@ -418,6 +418,6 @@
  },
  "retention": {
   "persistProviderText": false,
-  "onQuotaExhausted": "STOP_CAPTURE"
+  "onQuotaExhausted": "ROTATE_OLDEST_CAPTURES"
  }
 }

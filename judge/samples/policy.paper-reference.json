@@ -1,13 +1,13 @@
 {
   "policyVersion": "judge-policy-1",
-  "policyName": "paper-reference-usd500",
+  "policyName": "paper-reference-usd500-fee080",
   "strategyVersion": "judge-strategy-paper-reference-1",
   "costModelVersion": "judge-cost-paper-reference-1",
   "watchVersion": "watch-paper-reference-1",
   "mode": "PAPER",
   "venue": "kraken",
   "quote": "USD",
-  "account": { "accountId": "paper-reference-usd500", "initialCapital": "500", "compounding": "NONE" },
+  "account": { "accountId": "paper-reference-usd500-fee080", "initialCapital": "500", "compounding": "NONE" },
   "limits": {
     "maxSimultaneousAssetPositions": 1,
     "maxModelledRiskPerPositionFraction": 0.03,

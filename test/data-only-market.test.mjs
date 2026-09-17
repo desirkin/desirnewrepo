@@ -43,7 +43,8 @@ test('data-only market policy is a zero-spend observation allowlist and missing 
   assert.equal(withKeys.providers.KRAKEN_SPOT.l3.enabled, false);
   assert.equal(withKeys.providers.KRAKEN_DERIVATIVES.charts.enabled, false);
   assert.deepEqual({ enabled: withKeys.model.enabled, perCase: withKeys.model.maxEstimatedUsdPerCase, day: withKeys.model.maxEstimatedUsdPerDay, month: withKeys.model.maxEstimatedUsdPerMonth }, { enabled: false, perCase: 0, day: 0, month: 0 });
-  assert.deepEqual(loadDataOnlyMarketSubjects().subjects.map((s) => s.canonicalCoin), ['BTC', 'ETH', 'SOL']);
+  const declared = loadDataOnlyMarketSubjects().subjects.map((s) => s.canonicalCoin); // PUBLISH-FIX-13 (F6): the registry declares the whole paper universe, BTC ETH SOL first
+  assert.deepEqual(declared.slice(0, 3), ['BTC', 'ETH', 'SOL']); assert.ok(declared.length >= 14, `the registry declares the paper universe (${declared.length})`); assert.equal(new Set(declared).size, declared.length, 'no duplicate subjects');
   assert.ok(DATA_ONLY_MARKET_FAMILIES.includes('SPOT_PRICE_CHART') && DATA_ONLY_MARKET_FAMILIES.includes('SPOT_FLOW'));
 });
 
@@ -65,7 +66,7 @@ test('fake provider transport starts scoped spot capture, publishes honest cap p
     assert.equal(handle.status().state, 'ACTIVE');
     await H.waitFor(() => handle.status().bootstrap.initialState === 'COMPLETE');
     const status = handle.status();
-    assert.deepEqual(status.scope.subjects, ['BTC', 'ETH', 'SOL']);
+    assert.deepEqual(status.scope.subjects, loadDataOnlyMarketSubjects().subjects.map((s) => s.canonicalCoin), 'the scope is the declared registry (PUBLISH-FIX-13)'); assert.deepEqual(status.scope.subjects.slice(0, 3), ['BTC', 'ETH', 'SOL']);
     assert.equal(status.scope.allAssetCoverageClaim, false);
     assert.equal(status.safety.orders, false);
     assert.equal(status.safety.modelEnabled, false);
@@ -77,8 +78,10 @@ test('fake provider transport starts scoped spot capture, publishes honest cap p
     assert.equal(status.sources.COINGLASS.state, 'DISABLED_ZERO_BUDGET');
     assert.deepEqual(status.streams, {}, 'the data-only status exposes the owner stream state (integrated fixture opens none)');
     assert.equal(status.quotaAudit.state, 'WITHIN_DECLARED_CAPS');
-    assert.deepEqual(status.quotaAudit.rows.KRAKEN_SPOT, { callsPerDay: 586, callsPerMonth: 18166, configuredDailyCap: 1000, configuredMonthlyCap: 20000, state: 'WITHIN_CAP' });
-    assert.deepEqual(status.quotaAudit.rows.COINBASE_SPOT, { callsPerDay: 577, callsPerMonth: 17887, configuredDailyCap: 1000, configuredMonthlyCap: 20000, state: 'WITHIN_CAP' });
+    // PUBLISH-FIX-22: sixteen declared subjects plan 3121 / 3073 REST calls a day; the declared caps (8000 / 250000, well under
+    // Kraken's ~1 req/s and Coinbase's 10 req/s public limits) leave the plan WITHIN_CAP — a 1000/day cap bound at a third of the day
+    assert.deepEqual(status.quotaAudit.rows.KRAKEN_SPOT, { callsPerDay: 3121, callsPerMonth: 96751, configuredDailyCap: 8000, configuredMonthlyCap: 250000, state: 'WITHIN_CAP' });
+    assert.deepEqual(status.quotaAudit.rows.COINBASE_SPOT, { callsPerDay: 3073, callsPerMonth: 95263, configuredDailyCap: 8000, configuredMonthlyCap: 250000, state: 'WITHIN_CAP' });
     assert.ok(status.counters.observations > 0);
     assert.deepEqual([...new Set(calls.map((c) => c.host))].sort(), ['api.exchange.coinbase.com', 'api.kraken.com']);
     assert.ok(calls.every((c) => c.method === 'GET'));

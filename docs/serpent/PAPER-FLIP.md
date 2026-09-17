@@ -43,7 +43,7 @@ node bin/judge.js init-paper --policy config/judge.paper.json --owner-stdin true
 ```
 
 Requires `SERPENT_CONTROL_PASSWORD` set and the password on stdin (owner intent). It
-creates the `paper-reference-usd500` account at $500 and refuses to reset an existing one.
+creates the account the policy names (`paper-reference-usd500-fee080` since PUBLISH-FIX-23) at $500 and refuses to reset an existing one.
 It applies migrations 1–10 and prints `durable core connected (schema 10)`.
 
 ## 4. Preflight (read-only, zero paid calls)

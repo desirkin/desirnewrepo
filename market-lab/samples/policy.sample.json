@@ -360,6 +360,6 @@
  },
  "retention": {
   "persistProviderText": false,
-  "onQuotaExhausted": "STOP_CAPTURE"
+  "onQuotaExhausted": "ROTATE_OLDEST_CAPTURES"
  }
 }

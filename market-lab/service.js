@@ -14,6 +14,7 @@ import { mkdirSync, openSync, closeSync, renameSync, readdirSync, existsSync, re
 import { deepFreeze, fail, canonicalJson, sha256Hex } from './contracts.js';
 import { RESOURCE_DEFAULTS } from './policy.js';
 import { createResearchOwner } from './owner.js';
+import { rotateCaptureRuns } from './root-retention.js';
 import { marketResearchRootFromEnv, CASE_DIR_NAME_RE } from './paths.js';
 import { writeAll, directoryBytes, quotaState } from './store.js';
 import { providerReadiness, liveReadinessManifest } from './readiness.js';
@@ -95,8 +96,10 @@ export function createResearchService({ policy, subjects, env = {}, researchRoot
   async function start() {
     if (state !== 'CREATED') fail('INVALID_REQUEST', `service cannot start from ${state}`); state = 'STARTING';
     mkdirSync(casesDir, { recursive: true }); mkdirSync(capturesDir, { recursive: true }); mkdirSync(budgetDir, { recursive: true });
-    const q = quota(); if (q && q.exhausted) { state = 'FAILED'; fail('RESOURCE_LIMIT_EXCEEDED', 'research root quota exhausted'); }
     const segmentDir = path.join(capturesDir, `cap-${String(startedTs).padStart(13, '0')}`);
+    // PUBLISH-FIX-22: rotate the oldest prior capture runs before the quota law is applied (policy ROTATE_OLDEST_CAPTURES)
+    if (policy.retention?.onQuotaExhausted === 'ROTATE_OLDEST_CAPTURES') rotateCaptureRuns({ root, quotaBytes: policy.resources?.researchRootQuotaBytes ?? limits.researchRootQuotaBytes, reserveBytes: policy.resources?.runBytes ?? limits.runBytes, keep: [segmentDir], log });
+    const q = quota(); if (q && q.exhausted) { state = 'FAILED'; fail('RESOURCE_LIMIT_EXCEEDED', 'research root quota exhausted'); }
     try { await owner.start({ outDir: segmentDir, families, rotation, awaitInitialSweep: false }); } catch (err) { state = 'FAILED'; lastError = String(err?.message ?? err).slice(0, 200); throw err; }
     if (recordingFailure) { state = 'RECORDING_FAILED'; writeStatus(); return { state, http: null, segmentDir, error: recordingFailure }; }
     if (httpPort !== null) { await new Promise((resolve, reject) => { server = http.createServer(handle); server.on('error', reject); server.listen(httpPort, httpHost, () => { boundPort = server.address().port; resolve(); }); }); }

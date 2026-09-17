@@ -24,6 +24,7 @@ import { resolveSubjects } from './subject-catalog.js';
 import { providerReadiness } from './readiness.js';
 import { createDispatchGuard, openQuotaJournal, createMemoryQuotaJournal } from './quota.js';
 import { createRetainedStore } from './retention.js';
+import { rotateCaptureRuns } from './root-retention.js';
 import { RECIPE_SET_VERSION } from './recipes.js';
 import { createKrakenSpotClient } from './providers/kraken-spot.js';
 import { createCoinbaseClient } from './providers/coinbase.js';
@@ -300,6 +301,8 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
     if (started) fail('INVALID_REQUEST', 'owner already started'); if (lifecycle !== 'CREATED') fail('INVALID_REQUEST', `owner cannot start from ${lifecycle}`);
     if (typeof awaitInitialSweep !== 'boolean') fail('INVALID_REQUEST', 'awaitInitialSweep must be boolean');
     started = true; stopped = false; lifecycle = 'ACTIVE';
+    // PUBLISH-FIX-22: under ROTATE_OLDEST_CAPTURES the owner makes room first (oldest prior capture runs), then the quota law applies unchanged
+    if (outDir && researchRoot && policy.retention?.onQuotaExhausted === 'ROTATE_OLDEST_CAPTURES') rotateCaptureRuns({ root: researchRoot, quotaBytes: limits.researchRootQuotaBytes, reserveBytes: limits.runBytes, keep: [path.resolve(outDir)], log });
     if (outDir) { const q = rootQuota(); if (q && q.exhausted) { lifecycle = 'RECORDING_FAILED'; stopped = true; recording.error = { code: 'RESOURCE_LIMIT_EXCEEDED', message: 'research root quota exhausted before start' }; recording.failedTs = clock(); recording.where = 'START'; fail('RESOURCE_LIMIT_EXCEEDED', 'research root quota exhausted'); } segmentBase = path.resolve(outDir); openSegment(outDir); }
     resolution = await guard.withPurpose('CATALOG', () => resolveSubjects({ subjects, clients, enabled: (id) => enabled(id) && mayCall(id, ENDPOINTS.find((e) => e.providerId === id && e.method !== 'WS')?.endpointId ?? ''), log }));
     for (const r of resolution.results) { const k = r.providers.KRAKEN_SPOT; const c = r.providers.COINBASE_SPOT; const g = r.providers.COINGECKO; markets.set(r.canonicalCoin, { kraken: k?.state === 'RESOLVED' ? k.market : null, coinbase: c?.state === 'RESOLVED' ? c.market : null, coingecko: g?.state === 'RESOLVED' ? g.asset : null }); if (k?.state === 'RESOLVED') { const o = clients.KRAKEN_SPOT.instrumentObservation(k.market, clock()); if (o) record([o]); } if (c?.state === 'RESOLVED') { const o = clients.COINBASE_SPOT.instrumentObservation(c.market, clock()); if (o) record([o]); } }
