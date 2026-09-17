@@ -44,7 +44,7 @@ export async function runEdgeCapture({ policy, subjects, env = {}, out, duration
   const chartsOn = chartsEnabled(policy); const l3On = l3Enabled(policy);
   if (!chartsOn && !l3On) fail('POLICY_REJECTED', 'no dark sense enabled: set providers.KRAKEN_DERIVATIVES.charts.enabled and/or providers.KRAKEN_SPOT.l3.enabled (each provider enabled too)');
   const root = requireRoot(researchRoot, 'edge-capture'); const real = prepareOutputTarget(out);
-  const journal = quotaJournal ?? openQuotaJournal({ dir: path.join(root, ACCOUNTING_DIR), clock }); const ownsJournal = quotaJournal === null;
+  const journal = quotaJournal ?? openQuotaJournal({ dir: path.join(root, ACCOUNTING_DIR), clock, log }); const ownsJournal = quotaJournal === null;
   let lifecycle = 'ACTIVE'; const guard = createDispatchGuard({ policy, env, journal, clock, mode: policy.mode, lifecycle: () => lifecycle, log });
   let http; if (transport) { transport.bindAdmission(guard); http = transport; } else http = createHttpTransport({ fetchImpl, clock, limits, log, admission: guard, requireAdmission: true });
   const cp = chartsPolicy(policy); const lp = l3Policy(policy);

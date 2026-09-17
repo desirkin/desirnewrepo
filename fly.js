@@ -7,7 +7,7 @@
 import http from 'node:http';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { dataDir, dataGeneration, purgeLegacyData } from './lib/config.js';
+import { dataDir, dataGeneration, purgeLegacyData, loadConfig } from './lib/config.js';
 import { runTape } from './tape/run.js';
 import { readCurrentUniverse } from './tape/universe.js';
 import { readCurrentFeatureSnapshot, readTapeStatus } from './tape/store.js';
@@ -177,7 +177,14 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       const { readPolicyFile, readSubjectsFile } = await import('./market-lab/commands.js');
       const { resolveSocratesActivation } = await import('./lib/explainer-toggles.js');
       if (!process.env.MARKET_RESEARCH_POLICY || !process.env.MARKET_RESEARCH_SUBJECTS) throw new Error('MARKET_RESEARCH_POLICY and MARKET_RESEARCH_SUBJECTS must name the policy / subjects JSON files');
-      marketResearchSubjects = readSubjectsFile(process.env.MARKET_RESEARCH_SUBJECTS);
+      // PUBLISH-FIX-13 (review F6): the subjects file is an identity REGISTRY; the SELECTION is the tape's current deep
+      // universe (today's record, or a fresh selection when none exists yet — the same law the tape applies at startup)
+      const { deriveMarketSubjects } = await import('./lib/market-subjects-live.js');
+      const { selectUniverse } = await import('./tape/universe.js');
+      const registry = readSubjectsFile(process.env.MARKET_RESEARCH_SUBJECTS);
+      let universe = readCurrentUniverse();
+      if (!universe) { try { const sel = await selectUniverse(loadConfig()); universe = sel?.error ? null : sel; } catch (err) { console.error(`MARKET RESEARCH: universe selection for subjects failed (${err.message}); registry fallback`); universe = null; } }
+      marketResearchSubjects = deriveMarketSubjects({ registry, universe, log: console.log }).subjects;
       marketResearch = createResearchService({ policy: readPolicyFile(process.env.MARKET_RESEARCH_POLICY), subjects: marketResearchSubjects, env: process.env, researchRoot: marketResearchRootFromEnv(process.env, dataDir()), mode: 'INTEGRATED', log: console.log,
         // SOCRATES cockpit toggle: paid Socrates dispatch is gated live by the durable toggle (default OFF) + the env daily cap; nothing spends until the operator flips it on the password-protected serpent page.
         socratesActivation: () => resolveSocratesActivation({ dataDir: dataDir(), env: process.env }),

@@ -107,7 +107,7 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
   const lifecycleForGuard = () => (lifecycle === 'STOPPED' || lifecycle === 'STOPPING' || lifecycle === 'RECORDING_FAILED' ? 'STOPPED' : 'ACTIVE');
   // ---- accounting authority: durable at the stable research root; process-local ONLY for free public providers -------------
   const accountingDir = researchRoot ? path.join(path.resolve(researchRoot), ACCOUNTING_DIR) : null;
-  const journal = quotaJournal ?? (accountingDir ? openQuotaJournal({ dir: accountingDir, clock }) : createMemoryQuotaJournal({ clock })); const ownsJournal = quotaJournal === null;
+  const journal = quotaJournal ?? (accountingDir ? openQuotaJournal({ dir: accountingDir, clock, log }) : createMemoryQuotaJournal({ clock })); const ownsJournal = quotaJournal === null;
   const guard = createDispatchGuard({ policy, env, journal, clock, mode: policy.mode, lifecycle: lifecycleForGuard, log });
   let http;
   if (transport) { if (typeof transport.bindAdmission !== 'function') fail('INVALID_REQUEST', 'an injected transport must accept the admission guard (bindAdmission)'); transport.bindAdmission(guard); http = transport; }

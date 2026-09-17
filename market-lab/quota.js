@@ -151,11 +151,45 @@ function journalApi(state, { append, clock, durable, close, files }) {
   };
 }
 // the durable single-owner journal at a STABLE accounting location (never a per-run output directory)
-export function openQuotaJournal({ dir, clock = () => Date.now(), pid = process.pid }) {
+// PUBLISH-FIX-13 (2026-09-17): the same dead-owner law the runtime and broad-Kraken locks use (PUBLISH-FIX-1/3). A quota
+// lock left by a PREVIOUS BOOT (a republished disk and the object-store restore both bring the old process's lock back)
+// is a stale artifact: it is recovered and logged, never "manual review". Staleness is decided by the kernel boot id
+// first (a different boot is always stale even if the recorded pid is now a live unrelated process), then by pid
+// liveness for a lock from THIS boot. A live owner from this boot still refuses (real contention); an unreadable or
+// invalid lock still refuses; a pid we cannot verify (EPERM) refuses rather than guess. Age is never the reason.
+export function currentBootId() { try { const id = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); return id.length ? id : null; } catch { return null; } }
+// when process `pid` started, in epoch ms (Linux /proc: boot time + start ticks) — null when it cannot be read
+export function processStartedAtMs(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'); const after = stat.slice(stat.lastIndexOf(')') + 2).split(' '); const startTicks = Number(after[19]);
+    const btime = Number((readFileSync('/proc/stat', 'utf8').match(/^btime (\d+)/m) ?? [])[1]);
+    if (!Number.isFinite(startTicks) || !Number.isFinite(btime)) return null;
+    return (btime + startTicks / 100) * 1000; // CLK_TCK is 100 on every Linux the app runs on
+  } catch { return null; }
+}
+export function recoverStaleQuotaLock(lockFile, { log = () => {}, bootId = currentBootId(), isAlive = (pid) => { process.kill(pid, 0); return true; }, startedAtMs = processStartedAtMs } = {}) {
+  if (!existsSync(lockFile)) return { recovered: false, reason: 'NO_LOCK' };
+  let payload; try { payload = JSON.parse(readFileSync(lockFile, 'utf8')); } catch { return { recovered: false, reason: 'UNREADABLE' }; }
+  const pid = payload?.pid; if (!Number.isSafeInteger(pid) || pid < 1) return { recovered: false, reason: 'INVALID_PID' };
+  if (typeof payload?.bootId === 'string' && payload.bootId.length && bootId && payload.bootId !== bootId) { unlinkSync(lockFile); log(`recovered stale provider quota journal lock from a previous boot (pid ${pid}; the pid may have been reused by this container)`); return { recovered: true, reason: 'PREVIOUS_BOOT', pid }; }
+  try { isAlive(pid); }
+  catch (error) {
+    if (error?.code !== 'ESRCH') return { recovered: false, reason: 'UNVERIFIABLE', pid };
+    unlinkSync(lockFile); log(`recovered stale provider quota journal lock from stopped pid ${pid}`); return { recovered: true, reason: 'DEAD_PID', pid };
+  }
+  // the pid is alive: a process that STARTED AFTER the lock was written cannot be the process that wrote it (a reused pid —
+  // the only way a legacy lock without a boot id, restored from a previous container, is ever told apart from a live owner)
+  // wallTs is the REAL clock at lock time (the journal's own clock may be injected / replayed); a legacy lock only has openedTs
+  const opened = Number.isFinite(payload?.wallTs) ? payload.wallTs : Number.isFinite(payload?.openedTs) ? payload.openedTs : null; const started = opened === null ? null : startedAtMs(pid);
+  if (opened !== null && Number.isFinite(started) && started > opened + 1000) { unlinkSync(lockFile); log(`recovered stale provider quota journal lock from reused pid ${pid} (that process started after the lock was written)`); return { recovered: true, reason: 'REUSED_PID', pid }; }
+  return { recovered: false, reason: 'LIVE_OWNER', pid };
+}
+export function openQuotaJournal({ dir, clock = () => Date.now(), pid = process.pid, log = () => {}, recoverStale = true }) {
   mkdirSync(dir, { recursive: true });
   const lockFile = path.join(dir, 'quota.lock'); const journalFile = path.join(dir, 'quota.jsonl');
   let lockFd = null;
-  try { lockFd = openSync(lockFile, 'wx'); writeAll(lockFd, Buffer.from(`${JSON.stringify({ pid, openedTs: clock(), version: QUOTA_JOURNAL_VERSION })}\n`), 'quota.lock'); fsyncSync(lockFd); }
+  if (recoverStale) recoverStaleQuotaLock(lockFile, { log });
+  try { lockFd = openSync(lockFile, 'wx'); writeAll(lockFd, Buffer.from(`${JSON.stringify({ pid, bootId: currentBootId(), openedTs: clock(), wallTs: Date.now(), version: QUOTA_JOURNAL_VERSION })}\n`), 'quota.lock'); fsyncSync(lockFd); }
   catch (err) { if (lockFd !== null) { const owned = lockFd; lockFd = null; try { closeSync(owned); } catch { /* released once */ } try { unlinkSync(lockFile); } catch { /* our own partial lock */ } } if (err?.code === 'EEXIST') fail('PERMISSION_FAILURE', 'the provider quota journal is locked by another owner (single-owner law; a stale lock is never deleted by age)'); fail('IO_FAILURE', `cannot lock the quota journal (${err?.code ?? 'error'})`); } // correction C: a failed initialization holds neither descriptor nor lock; another process's lock is never deleted
   const releaseLock = () => { if (lockFd !== null) { try { closeSync(lockFd); } catch { /* ignore */ } lockFd = null; try { unlinkSync(lockFile); } catch { /* ignore */ } } };
   const state = createState(); let bytes = 0;
