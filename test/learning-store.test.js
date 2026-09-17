@@ -109,3 +109,33 @@ test('a corrupt campaign checkpoint replays from results rather than crashing', 
   writeFileSync(path.join(learningDir(TEST_DATA), 'campaigns', 'lcmp-testimmutable', 'checkpoint.json'), '{corrupt');
   assert.equal(store.readCampaignCheckpoint('lcmp-testimmutable'), null);
 });
+
+test('PUBLISH-FIX-45. the immutable streams are read once and maintained on append: a second store instance writing the same files is seen (size check), the supersede law still holds through the cache, and 2,000 outcome appends do not re-parse the journal each time', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'cobra-learning-store-cache-'));
+  try {
+    const a = createLearningStore({ dataDir: dir }); const b = createLearningStore({ dataDir: dir });
+    const eps = [];
+    for (let i = 0; i < 2000; i += 1) {
+      const e = buildEpisode({ canonicalCoin: 'AAA', decisionTs: decisionTs + i * 60_000, usableAtTs: decisionTs + i * 60_000, datasetId: 'cache-fixture', mode: 'HISTORICAL_REPLAY', evidenceBasis: 'HISTORICAL_RECONSTRUCTION', fidelity: 'CANDLE_DESCRIPTIVE', featureSet: { features: {} }, gates: [], decision: 'NO_SETUP', baselineRuleVersion: BASELINE_RULE_VERSION });
+      eps.push(e); (i % 2 ? a : b).appendEpisode(e);
+    }
+    assert.equal(a.readEpisodes().length, 2000, 'instance a sees what instance b wrote (file grew)');
+    assert.equal(b.readEpisodes().length, 2000);
+    const t0 = archive.archiveCreatedTsMs + 1;
+    const started = Date.now();
+    for (const e of eps) a.appendOutcome(matureEpisode({ episode: e, archive, asOfTs: t0 + 300 * 60_000, attachedTs: t0 }));
+    const elapsed = Date.now() - started;
+    assert.equal(a.latestOutcomes().size, 2000);
+    assert.equal(b.latestOutcomes().size, 2000, 'the other instance rebuilds from the grown file');
+    assert.ok(elapsed < 8000, `2,000 appends took ${elapsed} ms — a re-parse per append would be far slower`);
+    // supersede law through the cache, from BOTH instances
+    const e0 = eps[0];
+    assert.throws(() => b.appendOutcome(matureEpisode({ episode: e0, archive, asOfTs: t0 + 300 * 60_000, attachedTs: t0 + 1, supersedes: null })), /supersede/);
+    assert.equal(b.appendOutcome(matureEpisode({ episode: e0, archive, asOfTs: t0 + 300 * 60_000, attachedTs: t0, supersedes: null })).duplicate, true, 'same attach clock is a duplicate');
+    assert.equal(a.appendOutcome(matureEpisode({ episode: e0, archive, asOfTs: t0 + 300 * 60_000, attachedTs: t0 + 2, supersedes: t0 })).appended, true);
+    assert.equal(a.latestOutcomes().get(e0.opportunityId).attachedTs, t0 + 2);
+    assert.equal(b.latestOutcomes().get(e0.opportunityId).attachedTs, t0 + 2, 'the other instance sees the superseding record');
+    const reopened = createLearningStore({ dataDir: dir });
+    assert.equal(reopened.readOutcomes().length, 2001); assert.equal(reopened.readEpisodes().length, 2000);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

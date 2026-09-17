@@ -4,7 +4,7 @@
 // repaired in place and nothing is deleted. Reads are bounded. The store owns bytes only; meaning lives in the
 // pure modules that produce and consume these records.
 import path from 'node:path';
-import { existsSync, mkdirSync, readdirSync, readFileSync, createReadStream } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, createReadStream, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { appendJsonl, atomicWriteJson, readJsonl, readJsonBounded } from '../lib/jsonl.js';
 import {
@@ -62,11 +62,33 @@ export function createLearningStore({ dataDir, log = () => {} }) {
     return out;
   }
 
+  // PUBLISH-FIX-45 (2026-09-17, production stall): appendOutcome re-read and re-validated the WHOLE outcomes journal on
+  // EVERY append (a maturation sweep attaches up to 500 per tick), and readEpisodes re-parsed every episode each tick —
+  // the main thread stalled 5 s at a time inside outcomeAttachError <- readValidated <- appendOutcome, and the tape's
+  // Postgres queries timed out behind it. The immutable streams (episodes, outcomes) are now read ONCE into memory and
+  // maintained on append; a size check against the file catches another writer and rebuilds. Same records, same laws.
+  const cached = new Map(); // stream -> { rows, bytes }
+  const fileBytes = (stream) => { try { return statSync(fileOf(stream)).size; } catch { return 0; } };
+  function cachedRows(stream) {
+    const bytes = fileBytes(stream); const c = cached.get(stream);
+    if (c && c.bytes === bytes) return c.rows;
+    const rows = readValidated(stream); cached.set(stream, { rows, bytes, byId: null }); return rows;
+  }
+  // maintained only when the file was exactly where the cache left it; another writer in between drops the cache
+  function noteAppended(stream, record, bytesBefore) { const c = cached.get(stream); if (!c) return; if (c.bytes !== bytesBefore) { cached.delete(stream); return; } c.rows.push(record); c.bytes = fileBytes(stream); if (c.byId && record.opportunityId) { const l = c.byId.get(record.opportunityId); if (l) l.push(record); else c.byId.set(record.opportunityId, [record]); } }
+  // outcomes by opportunity: built once per cache generation, maintained on append
+  function outcomesOf(opportunityId) {
+    cachedRows('outcomes'); const c = cached.get('outcomes');
+    if (!c.byId) { c.byId = new Map(); for (const r of c.rows) { const l = c.byId.get(r.opportunityId); if (l) l.push(r); else c.byId.set(r.opportunityId, [r]); } }
+    return c.byId.get(opportunityId) ?? [];
+  }
+  const CACHED_STREAMS = new Set(['episodes', 'outcomes']);
+
   function ensureIndex(stream) {
     if (idIndex.has(stream)) return idIndex.get(stream);
     const set = new Set();
     const field = idFieldOf[stream];
-    if (field) for (const r of readValidated(stream)) set.add(r[field]);
+    if (field) for (const r of (CACHED_STREAMS.has(stream) ? cachedRows(stream) : readValidated(stream))) set.add(r[field]);
     idIndex.set(stream, set);
     return set;
   }
@@ -80,7 +102,9 @@ export function createLearningStore({ dataDir, log = () => {} }) {
       if (idx.has(record[field])) { counters.duplicateSuppressed += 1; return { appended: false, duplicate: true }; }
       idx.add(record[field]);
     }
+    const bytesBefore = CACHED_STREAMS.has(stream) ? fileBytes(stream) : 0;
     appendJsonl(fileOf(stream), record, { sync: true });
+    if (CACHED_STREAMS.has(stream)) noteAppended(stream, record, bytesBefore);
     counters.appended += 1;
     return { appended: true, duplicate: false };
   }
@@ -88,21 +112,21 @@ export function createLearningStore({ dataDir, log = () => {} }) {
   // ---- episodes: immutable once written. Outcomes are attached by a SEPARATE record keyed by opportunityId — the
   // original snapshot is never mutated to insert a future explanation.
   const appendEpisode = (e) => append('episodes', e);
-  const readEpisodes = (opts) => readValidated('episodes', opts);
+  const readEpisodes = (opts) => (opts && (opts.file !== undefined || opts.maxRecords !== undefined) ? readValidated('episodes', opts) : cachedRows('episodes').slice());
 
   // ---- outcome attachments: keyed by opportunityId + attachedTs; a late-data correction is a SUPERSEDING record
   // (supersedes = the earlier attachedTs), never a silent edit. Readers select the latest per opportunity.
   const appendOutcome = (a) => {
-    const existing = readValidated('outcomes').filter((r) => r.opportunityId === a.opportunityId);
+    const existing = outcomesOf(a.opportunityId);
     const dup = existing.find((r) => r.attachedTs === a.attachedTs);
     if (dup) { counters.duplicateSuppressed += 1; return { appended: false, duplicate: true }; }
     if (existing.length > 0 && a.supersedes === null) throw new Error('learning store: a second outcome attachment must name the record it supersedes');
     return append('outcomes', a);
   };
-  const readOutcomes = (opts) => readValidated('outcomes', opts);
+  const readOutcomes = (opts) => (opts && (opts.file !== undefined || opts.maxRecords !== undefined) ? readValidated('outcomes', opts) : cachedRows('outcomes').slice());
   const latestOutcomes = () => {
     const byId = new Map();
-    for (const r of readValidated('outcomes')) { const prev = byId.get(r.opportunityId); if (!prev || r.attachedTs > prev.attachedTs) byId.set(r.opportunityId, r); }
+    for (const r of cachedRows('outcomes')) { const prev = byId.get(r.opportunityId); if (!prev || r.attachedTs > prev.attachedTs) byId.set(r.opportunityId, r); }
     return byId;
   };
 
