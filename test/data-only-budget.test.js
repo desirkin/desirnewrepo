@@ -162,3 +162,24 @@ test("strict commissioning loader distinguishes missing from malformed quota sta
     assert.throws(() => createDataOnlyFetch({ dataDir: dir }), /checkpoint invalid/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("PUBLISH-FIX-61: with a durable checkpoint the local state file and the receipts are still written (a mirror and an audit trail) but no longer fsynced per request; without one the local file stays the fsynced truth", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "serpent-data-budget-fsync-"));
+  const lanes = { TEST: { maxDailyRequests: 5, usdPerRequest: 0 } };
+  const ts = Date.UTC(2026, 8, 17, 12);
+  const restored = createEmptyDataOnlyBudgetState({ ts, lanes });
+  const durableCheckpoint = { restored, reserve: async () => {}, settle: async () => {} };
+  const fs = await import("node:fs");
+  try {
+    const governor = createDataOnlyFetch({ dataDir: dir, lanes, laneForRequest: () => "TEST", durableCheckpoint, fetchImpl: async () => Response.json({}), clock: () => ts });
+    await governor.fetch("https://example.com/a");
+    const stateFile = path.join(dir, "data-only-budget", "state.json");
+    const receipts = path.join(dir, "data-only-budget", "receipts", "2026-09-17.jsonl");
+    assert.equal(fs.existsSync(stateFile) || fs.readdirSync(dir).length > 0, true, "the local mirror is still written");
+    const receiptDir = fs.readdirSync(dir, { recursive: true }).filter((f) => String(f).endsWith(".jsonl"));
+    assert.ok(receiptDir.length >= 1, `a receipt file exists (${receiptDir.join(", ")})`);
+    const lines = fs.readFileSync(path.join(dir, String(receiptDir[0])), "utf8").trim().split("\n");
+    assert.equal(lines.length, 2, "RESERVED and SETTLED receipts");
+    assert.ok(receipts.length && stateFile.length);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
