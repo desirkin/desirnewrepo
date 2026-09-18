@@ -11,8 +11,9 @@
 //     not by this test — see the note inside the DIFFERENTIAL test);
 //   - decision ids, digests, measurements, reason codes, sizing, valuation, scenario, invalidation, funnel and
 //     dispatcher state are all inside the comparison.
-// The ONLY tolerated difference would be a documented normalization, and there are none: the assertion is raw
-// deepEqual over the full records. If this test fails, the working tree changed baseline Judge behavior.
+// The ONLY tolerated difference is a documented normalization, and there is exactly one (PUBLISH-FIX-69, see the state
+// comparison): answered hypotheses are evicted from the working-tree state. Everything else is raw deepEqual over the full
+// records. If this test fails, the working tree changed baseline Judge behavior.
 //
 // Latency (item 5): the same run measures REAL wall-clock duration of every host admission pass (judge.onTick +
 // scheduler drain + dispatcher idle) on both trees over the identical recorded inputs, and reports median / p95 /
@@ -105,7 +106,13 @@ test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports a
   const db = base.judge.decisions(); const dn = next.judge.decisions();
   assert.ok(db.some((d) => d.status === 'ENTRY_RESERVED'), `the base run reaches ENTRY_RESERVED: ${JSON.stringify(db.map((d) => [d.status, d.reasonCodes]))}`);
   assert.deepEqual(dn, db, 'EVERY decision record — statuses, refusals, rankings inputs, risk, sizing, scenario, valuation, measurements, ids, clocks — is identical');
-  assert.deepEqual(next.state(), base.state(), 'the complete account/execution state (positions, orders, reservations, protections, restrictions) is identical');
+  // PUBLISH-FIX-69 (the ONE documented normalization, docs/JUDGE-PAPER-AUDIT.md §4.25): the working-tree reducer evicts a hypothesis once
+  // its decision is recorded, the ea3bfbf reducer kept every one forever. So: every hypothesis the base still holds must have its
+  // decision recorded on BOTH sides (nothing was lost, only answered), and every other field of the state is compared raw.
+  { const { hypotheses: hb, ...restBase } = base.state(); const { hypotheses: hn, ...restNext } = next.state();
+    assert.deepEqual(restNext, restBase, 'the complete account/execution state (positions, orders, reservations, protections, restrictions) is identical');
+    for (const id of Object.keys(hb)) { assert.ok(restBase.decisions[id] && restNext.decisions[id], `hypothesis ${id} was answered by a recorded decision on both trees`); assert.equal(hn[id], undefined, 'and the working tree no longer carries it'); }
+    assert.deepEqual(Object.keys(hn), [], 'no unanswered hypothesis remains after the recorded inputs'); }
   assert.deepEqual(next.judge.status().funnel, base.judge.status().funnel, 'the admission funnel is identical');
   assert.deepEqual(next.judge.status().refusals, base.judge.status().refusals, 'the refusal census is identical');
   assert.deepEqual(next.judge.admissionGate(), base.judge.admissionGate(), 'the default admission-batch report retains the exact legacy shape');

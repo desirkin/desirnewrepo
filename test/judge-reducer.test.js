@@ -126,3 +126,14 @@ test('RED-07. restrictions and modes: KILL moves to REDUCE_ONLY and blocks reser
   const other = createMemoryJournal(); await other.create('z', { accountKind: 'PAPER' }); const w1 = await other.acquireWriter('z'); assert.equal(await other.acquireWriter('z'), null, 'one writer at a time'); await w1.release(); const w2 = await other.acquireWriter('z');
   const Z = eventsFor('z', fakeClock()); await assert.rejects(other.append('z', { expectedRevision: 0, writerEpoch: w1.epoch, events: [Z.init()] }), (e) => e.code === 'EPOCH_FENCED'); await other.append('z', { expectedRevision: 0, writerEpoch: w2.epoch, events: [Z.init()] }); await assert.rejects(other.append('z', { expectedRevision: 0, writerEpoch: w2.epoch, events: [Z.valuation()] }), (e) => e.code === 'REVISION_CONFLICT');
 });
+
+test('RED-08. PUBLISH-FIX-69: a hypothesis leaves the account state once its decision is recorded (sized or not); an undecided one is swept an hour past its expiry by the next lock; the price-blind law still refuses a sized decision without its lock; the state no longer grows with every lock', async () => {
+  const a = await paperAccount(); const { F, clock } = a;
+  await a.append([F.hypothesis('d1'), F.decision('d1')]); let s = await a.state(); assert.equal(s.hypotheses.d1, undefined, 'answered: gone'); assert.ok(s.decisions.d1, 'the decision record stays');
+  await a.append([F.hypothesis('d2'), F.decision('d2', { sizing: { q: '0.0001', entryLimitPrice: '100000', entryCashOut: '10.08', riskUsd: '1', bufferedScenarioNetProfit: '0.1' }, state: 'ENTRY_PROPOSED' })]); s = await a.state(); assert.equal(s.hypotheses.d2, undefined, 'a sized decision consumed its lock');
+  await refused(() => a.append(F.decision('d3', { sizing: { q: '0.0001', entryLimitPrice: '100000', entryCashOut: '10.08', riskUsd: '1', bufferedScenarioNetProfit: '0.1' }, state: 'ENTRY_PROPOSED' })), 'PRICE_BLIND_LAW');
+  await a.append(F.hypothesis('d-undecided')); s = await a.state(); assert.ok(s.hypotheses['d-undecided'], 'owed');
+  clock.advance(30 * 60_000); await a.append(F.hypothesis('d4')); s = await a.state(); assert.ok(s.hypotheses['d-undecided'], 'half an hour on: still kept'); assert.ok(s.hypotheses.d4);
+  clock.advance(45 * 60_000); await a.append(F.hypothesis('d5')); s = await a.state(); assert.equal(s.hypotheses['d-undecided'], undefined, 'an hour past its expiry: swept by the next lock'); assert.ok(s.hypotheses.d4, 'd4 (45 min old) stays'); assert.ok(s.hypotheses.d5);
+  for (let i = 0; i < 50; i += 1) { await a.append([F.hypothesis(`m${i}`), F.decision(`m${i}`)]); } s = await a.state(); assert.equal(Object.keys(s.hypotheses).length, 2, 'fifty lock/decide pairs leave nothing behind');
+});

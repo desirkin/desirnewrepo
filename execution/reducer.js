@@ -8,7 +8,7 @@ import { eventError, ACCOUNT_STATE_VERSION, TERMINAL_ORDER_STATES, digestOf } fr
 
 export class ReducerRefusal extends Error { constructor(code, message) { super(`${code}: ${message}`); this.code = code; } }
 const refuse = (code, message) => { throw new ReducerRefusal(code, message); };
-const MAX_RECENT = 256; const MAX_EXTERNAL = 64; // execution / adjustment identities are durable: never evicted (closeout R03 / R06)
+const MAX_RECENT = 256; const MAX_EXTERNAL = 64; const HYPOTHESIS_SWEEP_MS = 3_600_000; // PUBLISH-FIX-69: an undecided hypothesis is swept an hour past its expiry // execution / adjustment identities are durable: never evicted (closeout R03 / R06)
 const HARD_RESTRICTIONS = Object.freeze(['KILL', 'RECONCILIATION_REQUIRED', 'PROTECTION_MISMATCH', 'CLOCK_UNTRUSTED', 'WRITER_LOST', 'DB_UNAVAILABLE']);
 export const ENTRY_BLOCKING_RESTRICTIONS = Object.freeze([...HARD_RESTRICTIONS, 'CAGE', 'DAILY_LOSS', 'PEAK_DRAWDOWN', 'GAIN_LOCK_PROTECT', 'GAIN_LOCK_HARD', 'FEED_IMPAIRED', 'FEE_BOUND_MISMATCH', 'ARM_EXPIRED', 'OWNER_LIMITS_REQUIRED', 'OVERLOAD', 'PAPER_LIQUIDITY_UNCERTAIN']);
 
@@ -78,11 +78,18 @@ const HANDLERS = {
     // venue and therefore cannot be canary evidence.
     if (p.reason === 'COMPLETED') { if (a.kind !== 'CANARY') refuse('CANARY_ONLY', 'COMPLETED is the outcome of a canary authorization'); const entries = Object.values(s.orders).filter((o) => o.kind === 'CANARY_ENTRY'); if (!entries.length) refuse('CANARY_INCOMPLETE', 'no canary entry was dispatched'); if (entries.some((o) => !Array.isArray(o.attempts) || o.attempts.length === 0)) refuse('CANARY_INCOMPLETE', 'a canary entry never reached the durable dispatch-attempt boundary'); if (entries.some((o) => !TERMINAL_ORDER_STATES.includes(o.state))) refuse('CANARY_INCOMPLETE', 'a canary entry is not terminal'); if (Object.values(s.orders).some((o) => o.state === 'DISPATCH_UNCERTAIN')) refuse('CANARY_INCOMPLETE', 'an uncertain dispatch is unresolved'); if (entries.some((o) => s.positions[o.positionId] && s.positions[o.positionId].state !== 'FLAT')) refuse('CANARY_INCOMPLETE', 'the canary position is not flat'); s.canaryEvidence = { authorizationId: a.authorizationId, releaseDigest: a.releaseDigest, policyDigest: a.policyDigest, codeDigest: a.codeDigest, completedTs: p.ts, entries: entries.length, filled: entries.filter((o) => o.state === 'FILLED').length }; }
     a.ended = true; a.endedReason = p.reason; if (s.authorization?.authorizationId === p.authorizationId) { s.authorization = a; if (s.mode === 'LIVE_ARMED') s.mode = 'REDUCE_ONLY'; } },
-  HYPOTHESIS_LOCKED(s, p) { if (s.hypotheses[p.decisionId]) refuse('HYPOTHESIS_DUPLICATE', p.decisionId); if (p.expiresTs <= p.triggerTs) refuse('HYPOTHESIS_EXPIRY', 'expiry must follow the trigger'); s.hypotheses[p.decisionId] = { ...p, valuationAfterLock: null }; },
+  // PUBLISH-FIX-69: a hypothesis lives in the account state only while its decision is still owed. Before, every HYPOTHESIS_LOCKED
+  // stayed forever (9,303 in 20 h on 794afa2b) and the state JSON every commit re-reads and re-writes grew without bound — the
+  // journal commit went from 2 s to 10 s over one day and 65% of decisions ended NEEDS_DATA. The law is unchanged: a sized decision
+  // still needs its locked hypothesis (checked below, and the lock always precedes the decision by at most the 10 s proposal life).
+  // Eviction is a pure function of the event stream (deterministic on replay): the decision that answers a hypothesis removes it, and a
+  // hypothesis left undecided for an hour past its expiry is swept by the next lock.
+  HYPOTHESIS_LOCKED(s, p) { if (s.hypotheses[p.decisionId]) refuse('HYPOTHESIS_DUPLICATE', p.decisionId); if (p.expiresTs <= p.triggerTs) refuse('HYPOTHESIS_EXPIRY', 'expiry must follow the trigger'); for (const [id, h] of Object.entries(s.hypotheses)) if (h.expiresTs + HYPOTHESIS_SWEEP_MS < p.triggerTs) delete s.hypotheses[id]; s.hypotheses[p.decisionId] = { ...p, valuationAfterLock: null }; },
   DECISION_RECORDED(s, p, ev) {
     if (s.decisions[p.decisionId]) refuse('DECISION_DUPLICATE', p.decisionId);
     if (p.sizing !== null) { const h = s.hypotheses[p.decisionId] ?? refuse('PRICE_BLIND_LAW', 'a sized decision needs its hypothesis locked first'); if (h.frozenAtTs > p.decisionKnownAtTs) refuse('PRICE_BLIND_LAW', 'valuation precedes the hypothesis lock'); h.valuationAfterLock = true; if (h.episodeId !== p.episodeId) refuse('EPISODE_MISMATCH', 'decision episode differs from the locked hypothesis'); }
     if ((p.state === 'ENTRY_PROPOSED' || p.state === 'ENTRY_RESERVED') && p.sizing === null) refuse('SIZING_REQUIRED', `${p.state} needs a size`);
+    delete s.hypotheses[p.decisionId]; // PUBLISH-FIX-69: answered — the decision record carries what the law still needs
     s.decisions[p.decisionId] = { ...p, recordedTs: ev.knownAtTs }; pushBounded(s.decisionOrder, p.decisionId, MAX_RECENT); for (const id of Object.keys(s.decisions)) if (!s.decisionOrder.includes(id)) delete s.decisions[id];
     s.counters.decisions[p.state] = (s.counters.decisions[p.state] ?? 0) + 1;
   },

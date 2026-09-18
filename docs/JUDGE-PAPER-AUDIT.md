@@ -60,11 +60,51 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       12508ea61c864ab837dd0d0cc2d942f5e22bdbf3d0949b5508276460d3ac6d44
-execution/*.js   83c4ce652d38fda80265ae48c702e936331d9c5fc3e6058c64e4a9e85c423dd0
+judge/*.js       380e23374f2fe99132251842441ccfd5294ca53bdbb698106c47fd263f562093
+execution/*.js   d58aea0ebc0d5955d4cfb3be63c35fae6b44091798dc4f67a5571ec57f171740
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   247e0227dfc5004d48ceba52b8555a5e8168bfd43fa6ecb501cb43a12dbc3b74
+all (48 files)   8b9cf39e7d61b5b9e60087d45c25bb816fd5f3faf506cdcabb8bef717fb2f26a
 ```
+
+### 4.25 Audited change — 2026-09-18 PUBLISH-FIX-69: a hypothesis leaves the account state once its decision is recorded (previous execution digest `83c4ce652d38…`; now `d58aea0ebc0d…`; judge and watch UNCHANGED)
+
+What was happening: `execution/reducer.js` kept every HYPOTHESIS_LOCKED payload in `state.hypotheses` forever (9,303 after
+20 h on 794afa2b). Every journal commit re-reads and re-writes the whole account-state JSON, so the commit cost grew all day:
+journal commit p50 2.1 s three minutes after boot, 10.5 s (p95 217 s, max 491 s) after 20 h, with the main thread stalling on
+the parse (465 stalls, worst 6.1 s). That growth is what turned the lock-durability race of §4.24 from an edge case into
+65% of all decisions.
+
+The change (execution/reducer.js only): `DECISION_RECORDED` deletes `state.hypotheses[decisionId]` after its checks (the
+decision record carries what the law still reads); `HYPOTHESIS_LOCKED` sweeps any hypothesis still undecided an hour past
+its `expiresTs` (`HYPOTHESIS_SWEEP_MS`). Both are pure functions of the event stream, so a replay reaches the same state.
+The price-blind law is unchanged: a sized decision still needs its locked hypothesis, and the lock always precedes the
+decision by at most the 10 s proposal life (`test/judge-reducer.test.js` RED-02 still refuses PRICE_BLIND_LAW). Nothing
+outside the reducer reads `state.hypotheses`. Execution / adjustment identities stay durable (never evicted, closeout
+R03 / R06). Test: RED-08 — answered hypotheses (sized or not) are gone, an undecided one is kept for half an hour and
+swept an hour past its expiry by the next lock, a sized decision without its lock is still refused, fifty lock/decide
+pairs leave nothing behind. `test/paper-runtime.test.js` P-08 re-pinned.
+
+### 4.24 Audited change — 2026-09-18 PUBLISH-FIX-68: a decision that runs before its hypothesis lock is durable steps aside inside its 10 s and is re-offered when the lock lands (previous judge digest `12508ea61c86…`; now `380e23374f2f…`; execution and watch UNCHANGED)
+
+What was happening (794afa2b, 20 h): 4,058 paper decisions, 2,646 of them NEEDS_DATA / HYPOTHESIS_NOT_DURABLE (65%).
+The HYPOTHESIS_LOCKED commit is serialized behind every other journal write (execution/dispatcher.js commit chain), so a
+burst of crossings queues seconds of commits; the confirmation arrives ≥ 2 s after T and the decision job found the lock
+not yet durable — and `decide()` refused at once, although the proposal still had most of its 10 s.
+
+The change (judge/judge.js only): `decide()` on an unlocked hypothesis INSIDE the proposal's 10 s records nothing and
+steps aside (`frozen.awaitingLock`, counter `lockWaits`); `lockHypothesis()` — the moment its commit lands — reopens the
+still-pending episode through the PUBLISH-FIX-51 re-offer path (`ep.submitted = false; ep.reoffer = true`, counter
+`lockReoffered`): the next fresh book re-submits the SAME episode (same T, same 10 s, not a new confirmation), and the
+decision is made on a fresh snapshot against a durable lock. One re-offer per lock, never a polling loop. A lock still
+not durable when the 10 s end changes nothing: the episode expires exactly as before, and the EXPIRED record now carries
+`HYPOTHESIS_NOT_DURABLE` beside `PROPOSAL_EXPIRED_10S` so the cause stays visible; an unlocked hypothesis reaching
+`decide()` past the 10 s is the NEEDS_DATA / HYPOTHESIS_NOT_DURABLE it always was. Unchanged: T, the 10 s expiry, the
+100 ms staleness rule, the price-blind law (no valuation before the durable lock), the lock order, every gate and cost
+rule, the decision record contract (reason codes are a list). Test: `test/judge-decisions.test.js` J10d — held locks: the
+decisions step aside (nothing recorded, needsData 0), the landed locks reopen every offer, the fresh book re-submits, and
+the SAME episodes reach the SAME statuses as the unheld control inside their 10 s; a lock that never lands inside the 10 s
+expires with both codes and reopens nothing afterwards. The test fails on the previous judge (J10d not ok) and passes on
+this one. `test/paper-runtime.test.js` P-08 re-pinned.
 
 ### 4.23 Recorded change — 2026-09-18 PUBLISH-FIX-67: the paper profile's reference fee is the Kraken Pro public 0.40% taker (frozen core UNCHANGED; no digest moves)
 
