@@ -61,14 +61,14 @@ content_type = "application/octet-stream"
 id = "zW5Tg1gY_H_GrLd086r53"
 uri = "file://exports/serpent-everything-f32484ca.zip"
 type = "unspecified"
-title = "Serpent — everything (post-publish, current HEAD)"
-description = "1,088-file complete ZIP at f32484ca. All tracked source, tests, docs, doctrine, UI, config, scripts, attic, migrations — plus full diff patch from last publish, 150-entry Git log, file inventory, and per-file hashes. Excludes only credentials, .git internals, node_modules, raw databases, private runtime data, and prior generated ZIPs."
+title = "Serpent — everything ZIP (f32484ca)"
+description = "The exact verified archive requested: 1,088 files, 7,466,219 bytes, SHA-256 7cef437682574699762c21d331f934b89cc32382eff1646fc8bf996491afbd56."
 logical_id = "82dce918-4b02-4d52-b77d-18fda362c83f"
 content_hash = "sha256:7cef437682574699762c21d331f934b89cc32382eff1646fc8bf996491afbd56"
 size = 7466219
 mtime_ms = 1789679996011
-storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/82dce918-4b02-4d52-b77d-18fda362c83f/aee774cd-2873-4985-afaf-2956e2c67894"
-storage_version_token = "1789680002157799"
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/82dce918-4b02-4d52-b77d-18fda362c83f/d97fb15d-1347-4ff9-bdec-8b1e3e522d67"
+storage_version_token = "1789693204980529"
 content_type = "application/octet-stream"
 
 [[outputs]]
