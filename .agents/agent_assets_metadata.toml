@@ -84,3 +84,17 @@ mtime_ms = 1789692013557
 storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/fed1c93f-d544-451d-b3da-d4cf9baed460/9a879e47-6408-4112-a50c-1735eef5e883"
 storage_version_token = "1789693368251275"
 content_type = "application/octet-stream"
+
+[[outputs]]
+id = "5jCo5qwyEUDT5khUmAXrb"
+uri = "file://exports/serpent-total-complete-latest-published-c5babfc5.zip"
+type = "unspecified"
+title = "Download the total app — latest published revision"
+description = "Exact newest published commit c5babfc5. Includes 1,102 safe project and review files; 7,521,333 bytes; SHA-256 bee7ada967a9eec75eddf131beaf5d702bdb614db5a1cc600a9d36cde56301b0."
+logical_id = "c0ee6beb-d09a-42c8-921a-a37dbec04fa6"
+content_hash = "sha256:bee7ada967a9eec75eddf131beaf5d702bdb614db5a1cc600a9d36cde56301b0"
+size = 7521333
+mtime_ms = 1789773402419
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/c0ee6beb-d09a-42c8-921a-a37dbec04fa6/acae11e7-736e-45aa-9303-858108b878ad"
+storage_version_token = "1789773408685854"
+content_type = "application/octet-stream"
