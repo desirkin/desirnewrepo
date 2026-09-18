@@ -164,3 +164,30 @@ test('PUBLISH-FIX-63: the day board survives a republish — snapshotted after a
     assert.equal(fourth._internals.board().date, null); assert.equal(existsSync(path.join(dir, 'learning', 'mover-study', 'board-2026-09-16.json')), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('PUBLISH-FIX-64: a new instance seeds its rings from the broad-Kraken candles on disk and judges the same mover on its first tick; live minutes already in a ring win; a coin the seed does not know stays as it was', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-mover-seed-'));
+  try {
+    // the "disk": the same paths feed() would have streamed, as a series source ({ candles: [[openSec,o,h,l,c,v]...] })
+    const pathOf = (coin, opts) => { const probe = createMoverStudy({ dataDir: dir, clock: () => T0, options: { controlsPerMover: 2 } }); const end = feed(probe, coin, opts); return { candles: probe._internals?.rings?.get?.(coin)?.candles ?? null, end }; };
+    const paths = { PEPE: pathOf('PEPE', { top: 112 }), BTC: pathOf('BTC', { top: 101, after: () => 101 }), ETH: pathOf('ETH', { top: 101, after: () => 101 }), SOL: pathOf('SOL', { top: 101, after: () => 101 }) };
+    assert.ok(paths.PEPE.candles && paths.PEPE.candles.length >= 181, 'the probe ring exposes the candles');
+    const seriesSource = Object.assign((coin) => (paths[coin] ? { symbol: coin, intervalSec: 60, candles: paths[coin].candles, retrievedTsMs: T0 + 300 * MIN } : null), { coins: () => Object.keys(paths) });
+    const log = []; let now = paths.PEPE.end + MIN;
+    const fresh = createMoverStudy({ dataDir: dir, clock: () => now, log: (m) => log.push(m), options: { controlsPerMover: 2 } });
+    // one live minute already in PEPE's ring (newer than everything on disk): the seed must keep it and only add older minutes
+    fresh.onRecord(record('PEPE', paths.PEPE.end, 109, 109.1, 108.9, 109));
+    const seeded = fresh.seedFromSeries(seriesSource);
+    assert.equal(seeded.coins, 4); assert.ok(seeded.candles >= 4 * 181, `seeded ${seeded.candles} minutes`);
+    assert.ok(log.some((m) => /MOVER STUDY seeded from the broad-Kraken candles on disk: 4 coins/.test(m)), log.join(' | '));
+    const pepe = fresh._internals.rings.get('PEPE').candles; assert.equal(pepe[pepe.length - 1][0], paths.PEPE.end / 1000, 'the live minute is still the newest'); assert.ok(pepe.length <= 240);
+    for (let i = 1; i < pepe.length; i += 1) assert.ok(pepe[i][0] > pepe[i - 1][0], 'ascending, no duplicates');
+    // the seeded instance sees the PEPE climb on its FIRST tick (the live-only instance would have needed three hours of stream)
+    const r = fresh.tick(now); assert.equal(r.movers, 1, 'one mover from seeded rings'); assert.equal(r.controls, 2);
+    assert.equal(fresh.readDay('2026-09-17').filter((x) => x.kind === 'MOVER')[0].coin, 'PEPE');
+    // a source without coins() is ignored; seeding again never changes the newest minute nor grows a ring past its bound
+    assert.deepEqual(fresh.seedFromSeries(() => null), { coins: 0, candles: 0, skipped: 0 });
+    fresh.seedFromSeries(seriesSource); const again = fresh._internals.rings.get('PEPE').candles;
+    assert.equal(again[again.length - 1][0], paths.PEPE.end / 1000); assert.ok(again.length <= 240);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

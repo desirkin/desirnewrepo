@@ -310,9 +310,33 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
     return `MOVER STUDY ${s.date}: ${s.movers} climbs >=${cfg.moveThresholdPct}% in an hour across ${s.distinctCoins} coins (${s.controls} controls beside them); the hour BEFORE a climb (median): return ${b.retPct}%, 1m vol ${b.rv1mPct}%, range ${b.rangePct}%, volume ${b.volumeVsPriorHour}x the hour before it; the hour AFTER: return ${a.retPct}% (best ${a.mfePct}%, worst ${a.maePct}%), ${Math.round((a.heldAboveStartShare ?? 0) * 100)}% still above where the climb ended${top}`;
   }
 
+  // PUBLISH-FIX-64: seed the rings from the broad-Kraken candles already on disk (learning/broad-kraken-series.js keeps the
+  // last hours of every coin's closed minutes; the object-store restore brings them back on every boot). Without this a
+  // republish emptied every ring and the study was blind for three hours (the hour before, the move and the hour after
+  // must all be in the ring) — 2026-09-17's five republishes left the re-look gate at '0 of 20' all evening. Same
+  // acceptance law as onRecord (a newer live minute always wins); a coin already in a ring keeps what it has.
+  function seedFromSeries(seriesSource) {
+    if (typeof seriesSource !== 'function' || typeof seriesSource.coins !== 'function') return { coins: 0, candles: 0, skipped: 0 };
+    let coins = 0; let candles = 0; let skipped = 0;
+    for (const coin of seriesSource.coins()) {
+      if (rings.size >= cfg.maxCoins && !rings.has(coin)) { skipped += 1; continue; }
+      const series = seriesSource(coin); const src = series?.candles; if (!Array.isArray(src) || !src.length) continue;
+      let ring = rings.get(coin); if (!ring) { ring = { candles: [], receivedTs: 0 }; rings.set(coin, ring); }
+      const have = ring.candles; const firstLive = have.length ? have[0][0] : Infinity;
+      // only minutes OLDER than what the live stream has already given us; the live ring stays authoritative
+      const older = src.filter((c) => Array.isArray(c) && c.length === 6 && Number.isInteger(c[0]) && c[0] % 60 === 0 && c[0] < firstLive && [c[1], c[2], c[3], c[4]].every((n) => Number.isFinite(n) && n > 0));
+      if (!older.length) continue;
+      const merged = [...older.slice(-cfg.ringMin), ...have]; if (merged.length > cfg.ringMin) merged.splice(0, merged.length - cfg.ringMin);
+      ring.candles = merged; if (Number.isFinite(series.retrievedTsMs) && series.retrievedTsMs > ring.receivedTs) ring.receivedTs = series.retrievedTsMs;
+      coins += 1; candles += older.length;
+    }
+    counters.seededCoins = (counters.seededCoins ?? 0) + coins; counters.seededCandles = (counters.seededCandles ?? 0) + candles;
+    log(`MOVER STUDY seeded from the broad-Kraken candles on disk: ${coins} coins, ${candles} closed minutes (the hour before / the move / the hour after are judged from the first tick, not three hours after boot)${skipped ? `; ${skipped} coins skipped at the ${cfg.maxCoins}-coin bound` : ''}`);
+    return { coins, candles, skipped };
+  }
   function status() { return { version: MOVER_STUDY_VERSION, createdTs, lastTickTs, coins: rings.size, counters: { ...counters }, today: summary(), config: { ...cfg }, authority: 'NONE' }; }
   function attachStore(s) { learningStore = s; }
   function readDay(date) { try { const f = path.join(dir, `${date}.jsonl`); return existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : []; } catch { return []; } }
   restoreBoards(clock());
-  return { onRecord, tick, status, line, attachStore, readDay, closeDay: (nowTs = clock()) => finalizeBoard(nowTs), flush: () => { boardDirty = boardDirty || board.entries.size > 0; saveBoard(); }, _internals: { rings, summary, board: () => board } };
+  return { onRecord, tick, status, line, attachStore, seedFromSeries, readDay, closeDay: (nowTs = clock()) => finalizeBoard(nowTs), flush: () => { boardDirty = boardDirty || board.entries.size > 0; saveBoard(); }, _internals: { rings, summary, board: () => board } };
 }

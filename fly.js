@@ -170,6 +170,9 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   try {
     const { createMoverStudy } = await import('./learning/mover-study.js');
     moverStudy = createMoverStudy({ dataDir: dataDir(), log: console.log });
+    // PUBLISH-FIX-64: the rings start from the candles already on disk (restored from the bucket), not empty
+    try { const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js'); moverStudy.seedFromSeries(createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log })); }
+    catch (err) { console.error(`MOVER STUDY seed from disk failed (the rings fill from the live stream instead): ${String(err?.message ?? err).slice(0, 160)}`); }
     moverStudyTimer = setInterval(() => { try { moverStudy.tick(); } catch (err) { console.error(`MOVER STUDY tick: ${String(err?.message ?? err).slice(0, 160)}`); } }, 60_000);
     if (typeof moverStudyTimer?.unref === 'function') moverStudyTimer.unref();
     console.log('MOVER STUDY active (authority NONE): every >=10%/hour climb across the whole accepted catalog gets its hour-before / the move / hour-after written from closed candles, with control coins beside it; each becomes a graded DAILY_MOVER lesson');
