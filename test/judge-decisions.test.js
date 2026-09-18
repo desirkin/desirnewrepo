@@ -162,3 +162,33 @@ test('J10c. live path: a confirmed decision cancelled as stale (main thread bloc
   assert.equal(r2.judge.status().counters.staleReoffered, 0); assert.deepEqual(d.map((x) => [x.setupId, x.status]).sort(), c2.map((x) => [x.setupId, x.status]).sort());
   assert.deepEqual(d.map((x) => x.episodeId).sort(), c2.map((x) => x.episodeId).sort(), 'the original episodes (T) were kept, never restarted');
 });
+
+test('J10d. PUBLISH-FIX-68: a confirmation that runs before its hypothesis lock is durable steps aside inside the 10 s and is re-offered the moment the lock lands, deciding the SAME episodes as the unheld control; a lock that never lands inside the 10 s expires with HYPOTHESIS_NOT_DURABLE named', async () => {
+  // the production shape: the lock commit sits behind other journal writes for seconds, so the confirmation (2 s after T) arrives first
+  async function burst(r, { hold }) {
+    let release = null; const gate = new Promise((res) => { release = res; }); const orig = r.dispatcher.commit; let held = 0;
+    if (hold) r.dispatcher.commit = (e, o) => (!Array.isArray(e) && e?.type === 'HYPOTHESIS_LOCKED' ? (held += 1, gate.then(() => orig(e, o))) : orig(e, o));
+    const price = 100000; const level = 100400; const start = Math.floor(r.clock.now() / 60_000) * 60_000 + 60_000; while (r.clock.now() < start) r.clock.advance(1000);
+    for (let k = 0; k < 20; k += 1) { r.clock.advance(2000); r.trade(price + 50, 'buy', 0.2); } while (r.clock.now() % 60_000 !== 0) r.clock.advance(1000); r.clock.advance(500);
+    await r.judge.onTick(r.clock.now()); await r.dispatcher.idle();
+    for (let i = 0; i < 3; i += 1) { r.book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); r.trade(level + 10, 'buy', 0.1); if (i < 2) r.clock.advance(1050); }
+    await r.dispatcher.idle(); const n = r.judge.status().counters.confirmations; assert.ok(n >= 1, JSON.stringify(r.judge.status().counters));
+    r.clock.advance(25); await r.scheduler.tick(); await r.scheduler.drain(); await r.dispatcher.idle(); // the decision jobs run NOW, ~2.1 s after T
+    return { n, release, held };
+  }
+  // 1. held locks: the decisions step aside (nothing recorded, nothing refused), then the locks land and every episode is re-offered and DECIDED inside its 10 s
+  const r = await rig(); await r.warm(); const { n, release, held } = await burst(r, { hold: true });
+  assert.ok(held >= n, `every confirmed setup locked its hypothesis (${held} >= ${n})`); assert.equal(r.judge.status().counters.lockWaits, n, 'each decision stepped aside for its lock'); assert.equal(r.judge.decisions().length, 0, 'nothing recorded while the lock is in flight'); assert.equal(r.judge.status().counters.needsData, 0);
+  r.clock.advance(1500); release(); await r.dispatcher.idle(); assert.equal(r.judge.status().counters.lockReoffered, n, 'the landed lock reopened every offer');
+  r.book([[100420, 5], [100430, 5]], [[100400, 5], [100390, 5]]); assert.equal(r.scheduler.queuedCount(), n, 're-offered on the next fresh book'); assert.equal(r.judge.status().counters.confirmations, n, 'a re-offer is not a new confirmation');
+  r.clock.advance(25); await r.settle(); const d = r.judge.decisions(); assert.equal(d.length, n, JSON.stringify(r.judge.status().counters));
+  for (const x of d) { assert.ok(!x.reasonCodes.includes('HYPOTHESIS_NOT_DURABLE'), x.reasonCodes.join(',')); assert.notEqual(x.status, 'EXPIRED'); assert.ok(x.decisionKnownAtTs - x.triggerTs <= 10_000, 'inside the original 10 s'); }
+  // the control: the same data with the locks landing at once decides the same episodes to the same statuses (WHEN moved, WHAT did not)
+  const r2 = await rig(); await r2.warm(); await burst(r2, { hold: false }); await r2.settle(); const c2 = r2.judge.decisions();
+  assert.equal(r2.judge.status().counters.lockWaits, 0); assert.deepEqual(d.map((x) => [x.setupId, x.status]).sort(), c2.map((x) => [x.setupId, x.status]).sort()); assert.deepEqual(d.map((x) => x.episodeId).sort(), c2.map((x) => x.episodeId).sort());
+  // 2. a lock that never lands inside the 10 s: the episode expires as before, and the record NAMES the lock that was not durable
+  const r3 = await rig(); await r3.warm(); const b3 = await burst(r3, { hold: true }); assert.equal(r3.judge.status().counters.lockWaits, b3.n);
+  r3.clock.advance(10_100); await r3.judge.onTick(r3.clock.now()); await r3.dispatcher.idle(); const d3 = r3.judge.decisions(); assert.equal(d3.length, b3.n);
+  for (const x of d3) { assert.equal(x.status, 'EXPIRED'); assert.deepEqual(x.reasonCodes, ['PROPOSAL_EXPIRED_10S', 'HYPOTHESIS_NOT_DURABLE']); }
+  b3.release(); await r3.dispatcher.idle(); assert.equal(r3.judge.status().counters.lockReoffered, 0, 'a lock landing after the 10 s reopens nothing');
+});
