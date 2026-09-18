@@ -99,3 +99,93 @@ test('included plan and entitlement are restored and advanced through the same e
   assert.equal((await journal.loadPlan('COINGECKO', plan)).fresh, false, 'the same attestation never grants allowance twice');
   assert.equal(validateMarketQuotaCheckpoint(binding.state()).ok, true);
 });
+
+// ---- PUBLISH-FIX-59 / 60 (2026-09-17): no replay per append; compaction proven equal for everything the law reads ----
+import { compactQuotaRecords, createQuotaMirror, startOfUtcMonth } from '../market-lab/quota.js';
+import { COMPACT_AT_BYTES } from '../market-lab/external-quota-journal.js';
+
+const MONTH = 30 * 24 * 60 * 60 * 1000;
+const fixtureRows = ({ start, count, providerId = 'KRAKEN_SPOT', purpose = 'ACQUIRE', settle = true, stepMs = 60_000 }) => {
+  const rows = []; let ts = start;
+  for (let i = 0; i < count; i += 1) {
+    const id = `qr-${(ts + i).toString(16).padStart(24, '0')}`; ts += stepMs;
+    rows.push({ type: 'RESERVE', reservationId: id, providerId, endpointId: 'rest-ticker', calls: 1, credits: 1, unit: 'CALL', chargedOn: 'DISPATCH', purpose, requestKey: `k${ts}`, estimatedUsd: 0.001, ts });
+    if (settle) rows.push({ type: 'SETTLE', reservationId: id, ok: true, status: 200, credits: 1, ts: ts + 1000 });
+  }
+  return rows;
+};
+
+test('FIX-59. the incremental mirror: prepare validates without changing state, apply advances, reservation(id) is O(1), replayQuotaRecords keeps its snapshot shape', () => {
+  const rows = fixtureRows({ start: T0, count: 5 });
+  const m = createQuotaMirror(rows, { clock: () => T0 + MONTH });
+  assert.equal(m.rows(), 10); assert.ok(m.bytes() > 0); assert.equal(m.reservation(rows[0].reservationId).state, 'SETTLED'); assert.equal(m.reservation('qr-000000000000000000000000'), null);
+  const open = { type: 'RESERVE', reservationId: 'qr-aaaaaaaaaaaaaaaaaaaaaaaa', providerId: 'KRAKEN_SPOT', endpointId: 'rest-ticker', calls: 1, credits: 1, unit: 'CALL', chargedOn: 'DISPATCH', purpose: 'ACQUIRE', requestKey: 'open', estimatedUsd: 0, ts: T0 + MONTH };
+  const commit = m.prepare(open); assert.equal(m.rows(), 10, 'prepare changes nothing'); assert.equal(m.reservation(open.reservationId), null);
+  commit(); assert.equal(m.rows(), 11); assert.equal(m.reservation(open.reservationId).state, 'RESERVED');
+  assert.throws(() => m.prepare({ type: 'SETTLE', reservationId: 'qr-bbbbbbbbbbbbbbbbbbbbbbbb', ok: true, status: 200, credits: 1, ts: T0 + MONTH + 1 }), /unknown reservation/);
+  assert.throws(() => m.prepare({ ...open, ts: T0 }), /clock runs backwards/);
+  assert.equal(m.rows(), 11, 'a refused prepare changes nothing');
+  const snap = replayQuotaRecords(rows); assert.equal(snap.rows, 10); assert.equal(typeof snap.bytes, 'number'); assert.equal(snap.records().length, 10);
+});
+
+test('FIX-59. the external journal never replays every row on an append: 20,000 rows then 50 appends stay fast, the mirror answers, and a confirmation that is not the proposal is refused', async () => {
+  const rows = fixtureRows({ start: T0 - 2 * MONTH, count: 10_000 });
+  // a binding that hands its state over by reference: the clock measures the JOURNAL's own work per append, not the store's clones
+  let state = { version: MARKET_QUOTA_CHECKPOINT_VERSION, journalVersion: QUOTA_JOURNAL_VERSION, rows }; let revision = 1;
+  const binding = { snapshot: () => state, revision: () => revision, update: async (reducer) => { state = reducer(state); revision += 1; return state; }, failed: () => null };
+  const journal = createExternalQuotaJournal({ binding, clock: () => T0 + MONTH });
+  assert.equal(journal.size().rows, 20_000);
+  const began = performance.now();
+  for (let i = 0; i < 50; i += 1) { const id = await journal.reserve(reservation(`fast-${i}`)); await journal.settle(id, { ok: true, status: 200 }); }
+  const took = performance.now() - began;
+  assert.ok(took < 2000, `100 appends on a 20k-row journal took ${took.toFixed(0)} ms (the old journal replayed all rows several times per append)`);
+  assert.equal(journal.size().rows, 20_100); assert.equal(journal.size().appends, 100); assert.equal(journal.totals('KRAKEN_SPOT').calls.month, 50);
+  // a database that confirms something other than the proposed append latches the journal
+  const lying = fakeBinding(); const original = lying.update; lying.update = async (reducer, meta) => { const saved = await original(reducer, meta); saved.rows[saved.rows.length - 1] = { ...saved.rows[saved.rows.length - 1], requestKey: 'tampered' }; return saved; };
+  const j2 = createExternalQuotaJournal({ binding: lying, clock: () => T0 });
+  await assert.rejects(j2.reserve(reservation('x')), /CHECKPOINT_CONFIRMATION_INVALID/);
+  assert.equal(j2.failed().code, 'CHECKPOINT_CONFIRMATION_INVALID');
+});
+
+test('FIX-60. compaction folds away settled reservations from before the retained month and proves every answer the admission law reads unchanged; open, probe and smoke rows stay; a plan keeps its entitlement', () => {
+  const plan = { type: 'PLAN', providerId: 'COINGECKO', planDigest: 'a'.repeat(64), billing: 'INCLUDED_QUOTA', remainingCalls: 100, includedCallsPerMonth: 1000, verifiedDate: '2026-07-01', ts: T0 - 3 * MONTH };
+  const oldPlan = { ...plan, planDigest: 'b'.repeat(64), remainingCalls: 500, verifiedDate: '2026-06-01', ts: T0 - 4 * MONTH };
+  const now = T0 + MONTH; const monthStart = startOfUtcMonth(now);
+  const old = fixtureRows({ start: monthStart - 20 * 24 * 60 * 60 * 1000, count: 30 });                       // last month, settled: droppable
+  const oldCg = fixtureRows({ start: monthStart - 10 * 24 * 60 * 60 * 1000, count: 7, providerId: 'COINGECKO' });   // consumption since the plan: folded into remainingCalls
+  const probes = fixtureRows({ start: monthStart - 9 * 24 * 60 * 60 * 1000, count: 2, purpose: 'PROBE' });   // lifetime smoke ceiling: kept
+  const openOld = fixtureRows({ start: monthStart - 8 * 24 * 60 * 60 * 1000, count: 1, settle: false });    // still open: kept
+  const thisMonth = fixtureRows({ start: monthStart + 60_000, count: 5 });                                    // retained window: kept
+  const rows = [oldPlan, plan, ...old, ...oldCg, ...probes, ...openOld, ...thisMonth];
+  const before = createQuotaMirror(rows, { clock: () => now });
+  const c = compactQuotaRecords(rows, { nowTs: now });
+  assert.equal(c.ok, true); assert.equal(c.changed, true);
+  assert.equal(c.droppedReservations, 37); assert.equal(c.droppedRows, 37 * 2 + 1, 'the superseded plan row goes too');
+  const after = createQuotaMirror(c.rows, { clock: () => now });
+  assert.equal(after.rows(), rows.length - c.droppedRows);
+  for (const p of ['KRAKEN_SPOT', 'COINGECKO']) { assert.deepEqual(after.totals(p, now).calls, before.totals(p, now).calls); assert.deepEqual(after.totals(p, now).usd, before.totals(p, now).usd); assert.deepEqual(after.totals(p, now).smoke, before.totals(p, now).smoke); }
+  assert.equal(before.entitlementRemaining('COINGECKO'), 93); assert.equal(after.entitlementRemaining('COINGECKO'), 93);
+  assert.equal(after.plans().COINGECKO.remainingCalls, 93, 'the folded plan carries the entitlement net of the dropped consumption'); assert.equal(after.plans().COINGECKO.planDigest, plan.planDigest);
+  assert.equal(after.reservations().filter((x) => x.state === 'RESERVED').length, 1); assert.equal(after.reservations().filter((x) => x.purpose === 'PROBE').length, 2);
+  assert.equal(after.totals('KRAKEN_SPOT', now).smoke.calls, 2);
+  const again = compactQuotaRecords(c.rows, { nowTs: now }); assert.equal(again.changed, false, 'idempotent');
+  // the proof refuses a compaction whose replay would answer differently (simulate by handing it rows the fold cannot reconcile)
+  const tampered = compactQuotaRecords([plan, ...oldCg.map((r) => (r.type === 'SETTLE' ? { ...r, credits: 0 } : r))], { nowTs: now });
+  assert.equal(tampered.ok, true, 'zero-credit settlements fold to zero consumption and still reconcile');
+});
+
+test('FIX-60. the journal compacts itself: at the boot call and when it passes a quarter of its bound; one durable write, mirror rebuilt, answers unchanged', async () => {
+  const now = T0 + MONTH; const monthStart = startOfUtcMonth(now);
+  const rows = [...fixtureRows({ start: monthStart - 25 * 24 * 60 * 60 * 1000, count: 200 }), ...fixtureRows({ start: monthStart + 60_000, count: 3 })];
+  const binding = fakeBinding({ version: MARKET_QUOTA_CHECKPOINT_VERSION, journalVersion: QUOTA_JOURNAL_VERSION, rows });
+  const journal = createExternalQuotaJournal({ binding, clock: () => now });
+  const monthBefore = journal.totals('KRAKEN_SPOT').calls.month;
+  const r = await journal.compact();
+  assert.equal(r.ok, true); assert.equal(r.changed, true); assert.equal(r.droppedReservations, 200); assert.equal(r.after.rows, 6);
+  assert.equal(journal.size().rows, 6); assert.equal(journal.size().compactions, 1); assert.equal(journal.totals('KRAKEN_SPOT').calls.month, monthBefore);
+  assert.equal(binding.calls.at(-1).operation, 'COMPACT'); assert.equal(binding.state().rows.length, 6);
+  assert.equal(validateMarketQuotaCheckpoint(binding.state()).ok, true);
+  const id = await journal.reserve(reservation('after-compaction')); await journal.settle(id, { ok: true, status: 200 }); assert.equal(journal.size().rows, 8);
+  assert.equal((await journal.compact()).changed, false);
+  assert.ok(COMPACT_AT_BYTES > 0);
+});

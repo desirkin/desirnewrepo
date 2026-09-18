@@ -103,25 +103,98 @@ const spentUsd = (x) => (x.state === 'RELEASED' ? 0 : x.state === 'SETTLED' ? (x
 
 // Pure replay used by the external-checkpoint adapter. The append-only records remain the single accounting truth;
 // derived counters are rebuilt and every row/transition/clock/byte bound is checked before a restored mirror is usable.
-export function replayQuotaRecords(records, { clock = () => Date.now() } = {}) {
+// PUBLISH-FIX-59 (2026-09-17): the replay is now the birth of an INCREMENTAL mirror — createQuotaMirror — that also
+// accepts one strictly validated row at a time (prepare -> commit, the same two-phase law the filesystem journal uses),
+// answers a reservation by id in O(1), and keeps its own byte count under the journal bound. The external journal used
+// to REPLAY EVERY ROW on every append (and validate, digest and clone the whole checkpoint several times per append):
+// production boot 4dd77a32 / feda514a spent 132 s of its first 180 s blocked in replayQuotaRecords / canonicalJson /
+// structuredClone, and ~20% of the main thread after boot. replayQuotaRecords keeps its exact frozen snapshot shape.
+export function createQuotaMirror(records, { clock = () => Date.now() } = {}) {
   if (!Array.isArray(records)) fail('INVALID_INPUT', 'quota records must be an array');
-  const state = createState(); let bytes = 0;
-  for (let i = 0; i < records.length; i += 1) {
-    let encoded; try { encoded = Buffer.from(`${JSON.stringify(records[i])}\n`); } catch { fail('INVALID_INPUT', `quota journal row ${i + 1}: not serializable`); }
-    if (encoded.byteLength > MAX_QUOTA_ROW_BYTES) fail('INVALID_INPUT', `quota journal row ${i + 1}: too long`);
-    bytes += encoded.byteLength; if (bytes > MAX_QUOTA_JOURNAL_BYTES) fail('RESOURCE_LIMIT_EXCEEDED', 'quota records exceed the journal bound');
-    state.apply(records[i], i + 1, true);
-  }
+  const state = createState(); let bytes = 0; const kept = [];
+  const encodedBytes = (r, i) => {
+    let encoded; try { encoded = Buffer.from(`${JSON.stringify(r)}\n`); } catch { fail('INVALID_INPUT', `quota journal row ${i}: not serializable`); }
+    if (encoded.byteLength > MAX_QUOTA_ROW_BYTES) fail('INVALID_INPUT', `quota journal row ${i}: too long`);
+    if (bytes + encoded.byteLength > MAX_QUOTA_JOURNAL_BYTES) fail('RESOURCE_LIMIT_EXCEEDED', 'quota records exceed the journal bound');
+    return encoded.byteLength;
+  };
+  // validate the row and its transition against the CURRENT mirror without changing it; the returned commit applies it
+  const prepare = (r) => {
+    const i = state.rows() + 1; const n = encodedBytes(r, i); const commit = state.prepare(r, i, true);
+    return () => { commit(); bytes += n; kept.push(r); };
+  };
+  for (let i = 0; i < records.length; i += 1) prepare(records[i])();
   const now = () => Math.max(clock(), state.lastTs());
   const totals = (providerId, nowTs = now()) => state.totals(providerId, nowTs);
   function entitlementRemaining(providerId) { const p = state.plans.get(providerId); if (!p || p.remainingCalls === null) return null; let used = 0; for (const x of state.byId.values()) if (x.providerId === providerId && x.ts >= p.ts) used += spentCredits(x); return Math.max(0, p.remainingCalls - used); }
+  const strip = ({ dayKey: _d, monthKey: _m, ...x }) => ({ ...x });
   return Object.freeze({
-    now, totals, entitlementRemaining,
-    reservations: () => deepFreeze([...state.byId.values()].map(({ dayKey: _d, monthKey: _m, ...x }) => ({ ...x }))),
+    now, totals, entitlementRemaining, prepare, apply: (r) => prepare(r)(),
+    reservation: (id) => { const x = state.byId.get(id); return x ? deepFreeze(strip(x)) : null; },
+    reservations: () => deepFreeze([...state.byId.values()].map(strip)),
     plans: () => deepFreeze(Object.fromEntries([...state.plans.entries()].map(([k, v]) => [k, { ...v }]))),
-    records: () => deepFreeze(records.map((r) => ({ ...r }))),
-    rows: state.rows(), bytes,
+    records: () => deepFreeze(kept.map((r) => ({ ...r }))),
+    rows: () => state.rows(), bytes: () => bytes,
   });
+}
+export function replayQuotaRecords(records, { clock = () => Date.now() } = {}) {
+  const m = createQuotaMirror(records, { clock });
+  return Object.freeze({ now: m.now, totals: m.totals, entitlementRemaining: m.entitlementRemaining, reservations: m.reservations, plans: m.plans, records: m.records, rows: m.rows(), bytes: m.bytes() });
+}
+
+// PUBLISH-FIX-60 (2026-09-17): COMPACTION — the journal's only truth is its rows, and every durable append rewrites all of
+// them (the external checkpoint is one JSON value with a 16 MB bound: a full journal would stop the market lane cold).
+// Rows the admission law can no longer ask about are folded away, and NOTHING the law reads changes:
+//   - a reservation is dropped only when it is TERMINAL (SETTLED / RELEASED / UNRESOLVED), was RESERVED before the retained
+//     window (the current UTC month by default: day and month caps read only today's and this month's buckets, keyed by
+//     the RESERVE ts), and is not a PROBE / SMOKE (those count against LIFETIME smoke ceilings, so they are kept forever);
+//   - an open (RESERVED) reservation is kept whatever its age — compaction never resolves anything;
+//   - each provider keeps only its latest PLAN row (older plans are superseded on replay anyway); when that plan carries a
+//     remaining-calls entitlement, the consumption of the dropped rows since the plan's ts is folded into remainingCalls
+//     (never below 0), so entitlementRemaining answers exactly what it answered before;
+//   - order is preserved, so the strict replay (clock never runs backwards) accepts the result.
+// The result is proven, not trusted: a strict replay of the compacted rows must answer the same day / month calls, credits
+// and usd, the same lifetime smoke calls / usd, the same entitlement and the same open reservations for every provider the
+// journal has seen — any difference refuses the compaction and leaves the rows untouched. Lifetime state counts
+// (reserved / settled / unresolved / released / dispatched) are informational and do drop; no cap reads them.
+export const startOfUtcMonth = (ts) => { const d = new Date(ts); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); };
+export function compactQuotaRecords(records, { nowTs = Date.now(), retainFromTs = startOfUtcMonth(nowTs) } = {}) {
+  const before = createQuotaMirror(records, { clock: () => nowTs });
+  const byId = new Map(before.reservations().map((x) => [x.reservationId, x]));
+  const droppable = new Set(); const droppedSpentSincePlan = new Map(); // providerId -> credits consumed by dropped rows at/after the plan ts
+  const plans = before.plans();
+  for (const x of byId.values()) {
+    if (x.state === 'RESERVED' || x.purpose === 'PROBE' || x.purpose === 'SMOKE' || !(x.ts < retainFromTs)) continue;
+    droppable.add(x.reservationId);
+    const p = plans[x.providerId]; if (p && p.remainingCalls !== null && x.ts >= p.ts) droppedSpentSincePlan.set(x.providerId, (droppedSpentSincePlan.get(x.providerId) ?? 0) + spentCredits(x));
+  }
+  const latestPlanIndex = new Map(); records.forEach((r, i) => { if (r?.type === 'PLAN') latestPlanIndex.set(r.providerId, i); });
+  const out = []; let droppedRows = 0;
+  records.forEach((r, i) => {
+    if (r.type === 'PLAN') {
+      if (latestPlanIndex.get(r.providerId) !== i) { droppedRows += 1; return; }
+      const fold = droppedSpentSincePlan.get(r.providerId) ?? 0;
+      out.push(fold > 0 && r.remainingCalls !== null ? { ...r, remainingCalls: Math.max(0, r.remainingCalls - fold) } : r); return;
+    }
+    if (droppable.has(r.reservationId)) { droppedRows += 1; return; }
+    out.push(r);
+  });
+  if (droppedRows === 0) return { ok: true, changed: false, rows: records, droppedRows: 0, droppedReservations: 0, before: { rows: before.rows(), bytes: before.bytes() }, after: { rows: before.rows(), bytes: before.bytes() } };
+  let after; try { after = createQuotaMirror(out, { clock: () => nowTs }); } catch (error) { return { ok: false, reason: `COMPACTED_REPLAY_REFUSED: ${String(error?.message ?? error).slice(0, 160)}` }; }
+  // the proof: everything the admission law reads answers the same
+  const providers = new Set([...Object.keys(plans), ...[...byId.values()].map((x) => x.providerId)]);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  for (const providerId of providers) {
+    const a = before.totals(providerId, nowTs); const b = after.totals(providerId, nowTs);
+    if (!same(a.calls, b.calls) || !same(a.credits, b.credits) || !same(a.usd, b.usd) || !same(a.smoke, b.smoke)) return { ok: false, reason: `INVARIANT_TOTALS ${providerId}` };
+    if (before.entitlementRemaining(providerId) !== after.entitlementRemaining(providerId)) return { ok: false, reason: `INVARIANT_ENTITLEMENT ${providerId}` };
+    const pa = plans[providerId]; const pb = after.plans()[providerId];
+    if (Boolean(pa) !== Boolean(pb) || (pa && (pa.planDigest !== pb.planDigest || pa.verifiedDate !== pb.verifiedDate || pa.ts !== pb.ts || pa.billing !== pb.billing))) return { ok: false, reason: `INVARIANT_PLAN ${providerId}` };
+  }
+  const open = (m) => m.reservations().filter((x) => x.state === 'RESERVED').map((x) => x.reservationId).sort();
+  if (!same(open(before), open(after))) return { ok: false, reason: 'INVARIANT_OPEN_RESERVATIONS' };
+  for (const x of after.reservations()) { const o = byId.get(x.reservationId); if (!o || !same(o, x)) return { ok: false, reason: `INVARIANT_KEPT_RESERVATION ${x.reservationId}` }; }
+  return { ok: true, changed: true, rows: out, droppedRows, droppedReservations: droppable.size, retainFromTs, before: { rows: before.rows(), bytes: before.bytes() }, after: { rows: after.rows(), bytes: after.bytes() } };
 }
 
 export function validateQuotaRecords(records) {

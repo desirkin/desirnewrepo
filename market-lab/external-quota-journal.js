@@ -11,12 +11,16 @@ import {
   MAX_QUOTA_JOURNAL_BYTES,
   MAX_QUOTA_ROW_BYTES,
   QUOTA_JOURNAL_VERSION,
+  compactQuotaRecords,
+  createQuotaMirror,
   planIdentity,
-  replayQuotaRecords,
   validateQuotaRecords,
 } from './quota.js';
 
 export const MARKET_QUOTA_CHECKPOINT_VERSION = 'market-external-quota-checkpoint-1';
+// PUBLISH-FIX-60: self-compaction threshold (a quarter of the journal bound) and its minimum spacing
+export const COMPACT_AT_BYTES = MAX_QUOTA_JOURNAL_BYTES / 4;
+export const COMPACT_MIN_INTERVAL_MS = 60 * 60 * 1000;
 const CHECKPOINT_KEYS = Object.freeze(['journalVersion', 'rows', 'version']);
 const BILLING_VALUES = new Set(['FREE', 'INCLUDED_QUOTA', 'METERED', 'UNKNOWN']);
 const clone = (value) => structuredClone(value);
@@ -78,9 +82,18 @@ function requiredBinding(binding) {
   return binding;
 }
 
+// PUBLISH-FIX-59 note: the durable store still validates every persisted checkpoint with the full strict replay
+// (validateMarketQuotaCheckpoint) — measured, a canonical digest of the rows costs MORE than the replay, so an
+// "incremental" validator keyed on a prefix digest would be slower; the store's per-append cost is bounded by keeping
+// the journal SMALL (PUBLISH-FIX-60 compaction), not by a cleverer validator.
 export function createExternalQuotaJournal({ binding, clock = () => Date.now() } = {}) {
   const durable = requiredBinding(binding); let current = clone(durable.snapshot()); assertValidCheckpoint(current);
-  let mirror = replayQuotaRecords(current.rows, { clock }); let closed = false; let latchedFailure = null; let sequence = 0; let tail = Promise.resolve(); const pending = new Set();
+  // PUBLISH-FIX-59: one strict replay at birth builds the live mirror; every append is prepared against it (validated
+  // without changing it), written durably, then committed — never a replay of every row again. Conflict detection uses
+  // the binding's revision (the store passes the reducer exactly the state at that revision) instead of a canonical
+  // digest of the whole checkpoint; the confirmed write is adopted only when it is exactly the proposed rows.
+  let mirror = createQuotaMirror(current.rows, { clock }); let closed = false; let latchedFailure = null; let sequence = 0; let tail = Promise.resolve(); const pending = new Set();
+  const counters = { appends: 0, replays: 1, compactions: 0, compactionsRefused: 0 }; let lastCompactAttemptTs = 0;
   const failed = () => durable.failed() ?? (latchedFailure ? { ...latchedFailure } : null);
   const latch = (error) => { if (!latchedFailure) latchedFailure = { code: error?.code ?? 'CHECKPOINT_WRITE_FAILED', message: bounded(error?.message ?? error), ts: clock() }; return error; };
   const assertLive = () => { if (closed) throw new ExternalMarketQuotaError('JOURNAL_CLOSED', 'external market quota journal is closed'); const failure = failed(); if (failure) throw new ExternalMarketQuotaError('ACCOUNTING_UNAVAILABLE', `${failure.code}: ${failure.message}`); };
@@ -89,22 +102,49 @@ export function createExternalQuotaJournal({ binding, clock = () => Date.now() }
     const task = tail.then(async () => { assertLive(); return operation(); }); tail = task.catch(() => {});
     pending.add(task); task.then(() => pending.delete(task), () => pending.delete(task)); return task;
   };
+  const revisionOf = () => (typeof durable.revision === 'function' ? durable.revision() : null);
   async function persistRow(row, meta) {
-    const expectedDigest = canonicalDigest(current);
+    let commit; try { commit = mirror.prepare(row); } catch (error) { throw new ExternalMarketQuotaError(error?.code === 'RESOURCE_LIMIT_EXCEEDED' ? 'RESOURCE_LIMIT_EXCEEDED' : 'INVALID_REQUEST', error?.message ?? error); }
+    const expectedRows = current.rows.length; const expectedRevision = revisionOf();
     let saved;
     try {
       saved = await durable.update((stored) => {
-        assertValidCheckpoint(stored);
-        if (canonicalDigest(stored) !== expectedDigest) throw new ExternalMarketQuotaError('CHECKPOINT_MIRROR_CONFLICT', 'binding state changed outside this journal instance');
-        const next = checkpoint([...stored.rows, row]); assertValidCheckpoint(next); return next;
+        // the store passes exactly its state at the owned revision; a moved revision or a different row count is another writer
+        if ((expectedRevision !== null && revisionOf() !== expectedRevision) || !Array.isArray(stored?.rows) || stored.rows.length !== expectedRows) throw new ExternalMarketQuotaError('CHECKPOINT_MIRROR_CONFLICT', 'binding state changed outside this journal instance');
+        if (expectedRevision === null && canonicalDigest(stored) !== canonicalDigest(current)) throw new ExternalMarketQuotaError('CHECKPOINT_MIRROR_CONFLICT', 'binding state changed outside this journal instance');
+        return { version: MARKET_QUOTA_CHECKPOINT_VERSION, journalVersion: QUOTA_JOURNAL_VERSION, rows: [...stored.rows, row] };
       }, meta);
     } catch (error) { throw latch(error); }
-    try { assertValidCheckpoint(saved, 'CHECKPOINT_CONFIRMATION_INVALID'); }
-    catch (error) { throw latch(error); }
-    current = clone(saved); mirror = replayQuotaRecords(current.rows, { clock }); return row;
+    // the confirmed checkpoint must be exactly the proposal: the same count and the same last row; anything else is refused
+    if (!exactKeys(saved, CHECKPOINT_KEYS) || saved.version !== MARKET_QUOTA_CHECKPOINT_VERSION || saved.journalVersion !== QUOTA_JOURNAL_VERSION || !Array.isArray(saved.rows) || saved.rows.length !== expectedRows + 1 || canonicalDigest(saved.rows[expectedRows]) !== canonicalDigest(row)) {
+      throw latch(new ExternalMarketQuotaError('CHECKPOINT_CONFIRMATION_INVALID', 'database confirmed a checkpoint that is not the proposed append'));
+    }
+    current = saved; commit(); counters.appends += 1;
+    // PUBLISH-FIX-60: a journal past a quarter of its bound compacts itself (at most once an hour; never on the caller's path)
+    if (mirror.bytes() > COMPACT_AT_BYTES && clock() - lastCompactAttemptTs > COMPACT_MIN_INTERVAL_MS) { lastCompactAttemptTs = clock(); compact().catch(() => {}); }
+    return row;
   }
+  // PUBLISH-FIX-60: fold away what the admission law can no longer ask about (market-lab/quota.js compactQuotaRecords); the
+  // compacted rows replace the checkpoint in ONE durable write under the same conflict law, then the mirror is rebuilt once
+  function compact({ nowTs = null } = {}) { return enqueue(async () => {
+    const at = nowTs ?? now(); lastCompactAttemptTs = clock();
+    const plan = compactQuotaRecords(current.rows, { nowTs: at });
+    if (!plan.ok) { counters.compactionsRefused += 1; return { ok: false, reason: plan.reason, before: null }; }
+    if (!plan.changed) return { ok: true, changed: false, before: plan.before, after: plan.after };
+    const expectedRows = current.rows.length; const expectedRevision = revisionOf(); const nextRows = plan.rows.map((r) => ({ ...r }));
+    let saved;
+    try {
+      saved = await durable.update((stored) => {
+        if ((expectedRevision !== null && revisionOf() !== expectedRevision) || !Array.isArray(stored?.rows) || stored.rows.length !== expectedRows) throw new ExternalMarketQuotaError('CHECKPOINT_MIRROR_CONFLICT', 'binding state changed outside this journal instance');
+        return { version: MARKET_QUOTA_CHECKPOINT_VERSION, journalVersion: QUOTA_JOURNAL_VERSION, rows: nextRows };
+      }, { operation: 'COMPACT', droppedRows: plan.droppedRows });
+    } catch (error) { throw latch(error); }
+    if (!exactKeys(saved, CHECKPOINT_KEYS) || !Array.isArray(saved.rows) || saved.rows.length !== nextRows.length || canonicalDigest(saved.rows) !== canonicalDigest(nextRows)) throw latch(new ExternalMarketQuotaError('CHECKPOINT_CONFIRMATION_INVALID', 'database confirmed a checkpoint that is not the proposed compaction'));
+    current = saved; mirror = createQuotaMirror(current.rows, { clock }); counters.replays += 1; counters.compactions += 1;
+    return { ok: true, changed: true, droppedRows: plan.droppedRows, droppedReservations: plan.droppedReservations, retainFromTs: plan.retainFromTs, before: plan.before, after: plan.after };
+  }); }
   function recordTs() { return now(); }
-  function reservation(id) { return mirror.reservations().find((row) => row.reservationId === id) ?? null; }
+  function reservation(id) { return mirror.reservation(id); }
   function loadPlan(providerId, plan) { return enqueue(async () => {
     if (!PROVIDER_IDS.includes(providerId) || !plan || typeof plan !== 'object') throw new ExternalMarketQuotaError('INVALID_REQUEST', 'provider plan is malformed');
     const digest = planIdentity(plan); const prior = mirror.plans()[providerId];
@@ -150,6 +190,8 @@ export function createExternalQuotaJournal({ binding, clock = () => Date.now() }
     reservations: () => mirror.reservations(),
     plans: () => mirror.plans(),
     rows: () => clone(current.rows),
+    size: () => ({ rows: mirror.rows(), bytes: mirror.bytes(), maxBytes: MAX_QUOTA_JOURNAL_BYTES, appends: counters.appends, compactions: counters.compactions, compactionsRefused: counters.compactionsRefused }),
+    compact,
     now,
     failed,
     drained,
