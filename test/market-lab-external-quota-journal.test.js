@@ -101,7 +101,7 @@ test('included plan and entitlement are restored and advanced through the same e
 });
 
 // ---- PUBLISH-FIX-59 / 60 (2026-09-17): no replay per append; compaction proven equal for everything the law reads ----
-import { compactQuotaRecords, createQuotaMirror, startOfUtcMonth } from '../market-lab/quota.js';
+import { compactQuotaRecords, createQuotaMirror, startOfUtcMonth, startOfUtcDay } from '../market-lab/quota.js';
 import { COMPACT_AT_BYTES } from '../market-lab/external-quota-journal.js';
 
 const MONTH = 30 * 24 * 60 * 60 * 1000;
@@ -147,45 +147,69 @@ test('FIX-59. the external journal never replays every row on an append: 20,000 
   assert.equal(j2.failed().code, 'CHECKPOINT_CONFIRMATION_INVALID');
 });
 
-test('FIX-60. compaction folds away settled reservations from before the retained month and proves every answer the admission law reads unchanged; open, probe and smoke rows stay; a plan keeps its entitlement', () => {
+test('FIX-60/65. compaction folds settled reservations from before today into one CARRY row per provider-day and proves every answer the admission law reads unchanged; open rows stay; probe / smoke fold into the lifetime smoke fields; a plan keeps its entitlement; a later compaction merges carries', () => {
+  const DAY = 24 * 60 * 60 * 1000;
   const plan = { type: 'PLAN', providerId: 'COINGECKO', planDigest: 'a'.repeat(64), billing: 'INCLUDED_QUOTA', remainingCalls: 100, includedCallsPerMonth: 1000, verifiedDate: '2026-07-01', ts: T0 - 3 * MONTH };
   const oldPlan = { ...plan, planDigest: 'b'.repeat(64), remainingCalls: 500, verifiedDate: '2026-06-01', ts: T0 - 4 * MONTH };
-  const now = T0 + MONTH; const monthStart = startOfUtcMonth(now);
-  const old = fixtureRows({ start: monthStart - 20 * 24 * 60 * 60 * 1000, count: 30 });                       // last month, settled: droppable
-  const oldCg = fixtureRows({ start: monthStart - 10 * 24 * 60 * 60 * 1000, count: 7, providerId: 'COINGECKO' });   // consumption since the plan: folded into remainingCalls
-  const probes = fixtureRows({ start: monthStart - 9 * 24 * 60 * 60 * 1000, count: 2, purpose: 'PROBE' });   // lifetime smoke ceiling: kept
-  const openOld = fixtureRows({ start: monthStart - 8 * 24 * 60 * 60 * 1000, count: 1, settle: false });    // still open: kept
-  const thisMonth = fixtureRows({ start: monthStart + 60_000, count: 5 });                                    // retained window: kept
-  const rows = [oldPlan, plan, ...old, ...oldCg, ...probes, ...openOld, ...thisMonth];
+  const now = T0 + MONTH + 10 * 60 * 60 * 1000; const dayStart = startOfUtcDay(now); const monthStart = startOfUtcMonth(now);
+  const twoDaysAgo = fixtureRows({ start: dayStart - 2 * DAY + 60_000, count: 30 });                              // this month, earlier day: folds
+  const yesterdayCg = fixtureRows({ start: dayStart - DAY + 60_000, count: 7, providerId: 'COINGECKO' });       // consumption since the plan: netted into remainingCalls
+  const probes = fixtureRows({ start: dayStart - DAY + 3_600_000, count: 2, purpose: 'PROBE' });                // lifetime smoke: carried in the smoke fields
+  const openOld = fixtureRows({ start: dayStart - DAY + 7_200_000, count: 1, settle: false });                  // still open: kept
+  const lastMonth = fixtureRows({ start: monthStart - 5 * DAY, count: 4 });                                       // last month: folds into its own day's carry
+  const today = fixtureRows({ start: dayStart + 60_000, count: 5 });                                              // retained: kept row by row
+  const rows = [oldPlan, plan, ...lastMonth, ...twoDaysAgo, ...yesterdayCg, ...probes, ...openOld, ...today];
   const before = createQuotaMirror(rows, { clock: () => now });
   const c = compactQuotaRecords(rows, { nowTs: now });
   assert.equal(c.ok, true); assert.equal(c.changed, true);
-  assert.equal(c.droppedReservations, 37); assert.equal(c.droppedRows, 37 * 2 + 1, 'the superseded plan row goes too');
+  assert.equal(c.droppedReservations, 43, '30 + 7 + 2 probes + 4 last month'); assert.equal(c.carries, 4, 'KRAKEN two days ago, COINGECKO yesterday, KRAKEN probes yesterday, KRAKEN last month');
   const after = createQuotaMirror(c.rows, { clock: () => now });
-  assert.equal(after.rows(), rows.length - c.droppedRows);
-  for (const p of ['KRAKEN_SPOT', 'COINGECKO']) { assert.deepEqual(after.totals(p, now).calls, before.totals(p, now).calls); assert.deepEqual(after.totals(p, now).usd, before.totals(p, now).usd); assert.deepEqual(after.totals(p, now).smoke, before.totals(p, now).smoke); }
+  const carries = c.rows.filter((r) => r.type === 'CARRY'); assert.equal(carries.length, 4);
+  const kY = carries.find((r) => r.providerId === 'KRAKEN_SPOT' && r.dayKey === new Date(dayStart - DAY).toISOString().slice(0, 10));
+  assert.equal(kY.calls, 2); assert.equal(kY.smokeCalls, 2, 'the two probes ride the smoke fields'); assert.ok(kY.smokeUsd > 0);
+  const k2 = carries.find((r) => r.providerId === 'KRAKEN_SPOT' && r.dayKey === new Date(dayStart - 2 * DAY).toISOString().slice(0, 10));
+  assert.equal(k2.calls, 30); assert.equal(k2.credits, 30); assert.equal(k2.smokeCalls, 0);
+  for (const p of ['KRAKEN_SPOT', 'COINGECKO']) { assert.deepEqual(after.totals(p, now).calls, before.totals(p, now).calls); assert.deepEqual(after.totals(p, now).credits, before.totals(p, now).credits); assert.deepEqual(after.totals(p, now).usd, before.totals(p, now).usd); assert.deepEqual(after.totals(p, now).smoke, before.totals(p, now).smoke); }
+  assert.equal(before.totals('KRAKEN_SPOT', now).calls.month, 38, '30 + 2 probes + 1 open + 5 today this month');
   assert.equal(before.entitlementRemaining('COINGECKO'), 93); assert.equal(after.entitlementRemaining('COINGECKO'), 93);
-  assert.equal(after.plans().COINGECKO.remainingCalls, 93, 'the folded plan carries the entitlement net of the dropped consumption'); assert.equal(after.plans().COINGECKO.planDigest, plan.planDigest);
-  assert.equal(after.reservations().filter((x) => x.state === 'RESERVED').length, 1); assert.equal(after.reservations().filter((x) => x.purpose === 'PROBE').length, 2);
-  assert.equal(after.totals('KRAKEN_SPOT', now).smoke.calls, 2);
-  const again = compactQuotaRecords(c.rows, { nowTs: now }); assert.equal(again.changed, false, 'idempotent');
-  // the proof refuses a compaction whose replay would answer differently (simulate by handing it rows the fold cannot reconcile)
-  const tampered = compactQuotaRecords([plan, ...oldCg.map((r) => (r.type === 'SETTLE' ? { ...r, credits: 0 } : r))], { nowTs: now });
-  assert.equal(tampered.ok, true, 'zero-credit settlements fold to zero consumption and still reconcile');
+  assert.equal(after.plans().COINGECKO.remainingCalls, 93); assert.equal(after.plans().COINGECKO.planDigest, plan.planDigest);
+  assert.equal(after.reservations().filter((x) => x.state === 'RESERVED').length, 1); assert.equal(after.reservations().length, 6, "the open one and today's five");
+  // ordering law: the carry sits where its first folded row sat, so the replay's clock never runs backwards
+  for (let i = 1; i < c.rows.length; i += 1) assert.ok(c.rows[i].ts >= c.rows[i - 1].ts, `row ${i} keeps the clock`);
+  const again = compactQuotaRecords(c.rows, { nowTs: now }); assert.equal(again.changed, false, 'idempotent on the same day');
+  // the next day: today's rows fold into a new carry, and yesterday's carries (now before the window) merge unchanged
+  // the open reservation from yesterday settles today; tomorrow it folds INTO yesterday's existing KRAKEN carry (a merge)
+  const openId = openOld[0].reservationId; const settled = [...c.rows, { type: 'SETTLE', reservationId: openId, ok: true, status: 200, credits: 1, ts: now + 1000 }];
+  const tomorrow = now + DAY; const next = compactQuotaRecords(settled, { nowTs: tomorrow });
+  assert.equal(next.ok, true); assert.equal(next.droppedReservations, 6, "today's five and the settled one"); assert.equal(next.mergedCarries, 1, 'yesterday\'s KRAKEN carry absorbed the late settlement'); assert.equal(next.carries, 2, 'that merged carry and a new one for today');
+  const kY2 = next.rows.filter((r) => r.type === 'CARRY').find((r) => r.providerId === 'KRAKEN_SPOT' && r.dayKey === kY.dayKey); assert.equal(kY2.calls, 3); assert.equal(kY2.smokeCalls, 2);
+  assert.equal(next.rows.filter((r) => r.type === 'CARRY').length, 5, 'five carries in all (three untouched, one merged, one new): no duplicates for a provider-day');
+  const after2 = createQuotaMirror(next.rows, { clock: () => tomorrow }); const settledMirror = createQuotaMirror(settled, { clock: () => tomorrow });
+  assert.deepEqual(after2.totals('KRAKEN_SPOT', tomorrow).calls, settledMirror.totals('KRAKEN_SPOT', tomorrow).calls); assert.deepEqual(after2.totals('KRAKEN_SPOT', tomorrow).smoke, settledMirror.totals('KRAKEN_SPOT', tomorrow).smoke);
+  assert.equal(after2.reservations().length, 0, 'nothing is left row by row: everything settled and is carried');
+  // an old journal without carries still validates; a carry row with a malformed field is refused
+  assert.equal(validateMarketQuotaCheckpoint({ version: MARKET_QUOTA_CHECKPOINT_VERSION, journalVersion: QUOTA_JOURNAL_VERSION, rows: c.rows }).ok, true);
+  assert.equal(validateMarketQuotaCheckpoint({ version: MARKET_QUOTA_CHECKPOINT_VERSION, journalVersion: QUOTA_JOURNAL_VERSION, rows: [{ ...carries[0], calls: -1 }] }).ok, false);
 });
 
-test('FIX-60. the journal compacts itself: at the boot call and when it passes a quarter of its bound; one durable write, mirror rebuilt, answers unchanged', async () => {
-  const now = T0 + MONTH; const monthStart = startOfUtcMonth(now);
-  const rows = [...fixtureRows({ start: monthStart - 25 * 24 * 60 * 60 * 1000, count: 200 }), ...fixtureRows({ start: monthStart + 60_000, count: 3 })];
+test('FIX-60/65. the journal compacts itself: at the boot call, when it passes a quarter of its bound, and once a day; one durable write, mirror rebuilt, answers unchanged', async () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  let now = T0 + MONTH + 10 * 60 * 60 * 1000; const dayStart = startOfUtcDay(now);
+  const rows = [...fixtureRows({ start: dayStart - 2 * DAY, count: 200 }), ...fixtureRows({ start: dayStart + 60_000, count: 3 })];
   const binding = fakeBinding({ version: MARKET_QUOTA_CHECKPOINT_VERSION, journalVersion: QUOTA_JOURNAL_VERSION, rows });
   const journal = createExternalQuotaJournal({ binding, clock: () => now });
-  const monthBefore = journal.totals('KRAKEN_SPOT').calls.month;
+  const monthBefore = journal.totals('KRAKEN_SPOT').calls.month; const dayBefore = journal.totals('KRAKEN_SPOT').calls.day;
   const r = await journal.compact();
-  assert.equal(r.ok, true); assert.equal(r.changed, true); assert.equal(r.droppedReservations, 200); assert.equal(r.after.rows, 6);
-  assert.equal(journal.size().rows, 6); assert.equal(journal.size().compactions, 1); assert.equal(journal.totals('KRAKEN_SPOT').calls.month, monthBefore);
-  assert.equal(binding.calls.at(-1).operation, 'COMPACT'); assert.equal(binding.state().rows.length, 6);
+  assert.equal(r.ok, true); assert.equal(r.changed, true); assert.equal(r.droppedReservations, 200); assert.equal(r.carries, 1); assert.equal(r.after.rows, 7, "one carry + today's six rows");
+  assert.equal(journal.size().rows, 7); assert.equal(journal.size().compactions, 1);
+  assert.equal(journal.totals('KRAKEN_SPOT').calls.month, monthBefore); assert.equal(journal.totals('KRAKEN_SPOT').calls.day, dayBefore);
+  assert.equal(binding.calls.at(-1).operation, 'COMPACT'); assert.equal(binding.state().rows.length, 7);
   assert.equal(validateMarketQuotaCheckpoint(binding.state()).ok, true);
-  const id = await journal.reserve(reservation('after-compaction')); await journal.settle(id, { ok: true, status: 200 }); assert.equal(journal.size().rows, 8);
+  const id = await journal.reserve(reservation('after-compaction')); await journal.settle(id, { ok: true, status: 200 }); assert.equal(journal.size().rows, 9);
   assert.equal((await journal.compact()).changed, false);
+  // the day turns: the next append schedules a compaction by itself (off the caller's path), folding yesterday
+  now += DAY; const id2 = await journal.reserve(reservation('next-day')); await journal.settle(id2, { ok: true, status: 200 });
+  await journal.drained(); await new Promise((resolve) => setTimeout(resolve, 5)); await journal.drained();
+  assert.equal(journal.size().compactions, 2, 'the day change compacted'); assert.equal(journal.size().rows, 4, "two carries + today's two rows");
   assert.ok(COMPACT_AT_BYTES > 0);
 });

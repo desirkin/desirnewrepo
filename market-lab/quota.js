@@ -13,7 +13,7 @@ import { endpointOf, PROVIDERS } from './registry.js';
 import { credentialPresence, endpointPermitted } from './policy.js';
 
 export const QUOTA_JOURNAL_VERSION = 'market-provider-quota-1';
-export const QUOTA_RECORD_TYPES = Object.freeze(['PLAN', 'RESERVE', 'SETTLE', 'UNRESOLVED', 'RELEASE']);
+export const QUOTA_RECORD_TYPES = Object.freeze(['PLAN', 'RESERVE', 'SETTLE', 'UNRESOLVED', 'RELEASE', 'CARRY']);
 export const QUOTA_RESERVATION_STATES = Object.freeze(['RESERVED', 'SETTLED', 'UNRESOLVED', 'RELEASED']);
 export const DISPATCH_PURPOSES = Object.freeze(['ACQUIRE', 'CATALOG', 'BROKER', 'PROBE', 'SMOKE']);
 export const CHARGE_UNITS = Object.freeze(['CALL', 'CREDIT']);
@@ -28,6 +28,10 @@ const QUOTA_ROW_KEYS = Object.freeze({
   SETTLE: ['credits', 'ok', 'reservationId', 'status', 'ts', 'type'],
   UNRESOLVED: ['reason', 'reservationId', 'ts', 'type'],
   RELEASE: ['reason', 'reservationId', 'ts', 'type'],
+  // PUBLISH-FIX-65: one CARRY row = the folded consumption of one provider on one UTC day (compaction); it feeds the day /
+  // month / smoke aggregates exactly as the reservations it replaced did, names no reservation and never counts toward an
+  // entitlement (that was netted into the provider's PLAN row when the rows were folded)
+  CARRY: ['calls', 'credits', 'dayKey', 'providerId', 'smokeCalls', 'smokeUsd', 'ts', 'type', 'usd'],
 });
 
 // ---- the native charge of one actual request (documented accounting unit per request type) ------------------------------
@@ -49,6 +53,7 @@ function rowError(r, i) {
   if (!isPlainObject(r) || !QUOTA_RECORD_TYPES.includes(r.type) || !isTs(r.ts)) return `${w}: type/ts malformed`;
   const actual = Object.keys(r).sort(); const expected = QUOTA_ROW_KEYS[r.type]; if (actual.length !== expected.length || actual.some((key, n) => key !== expected[n])) return `${w}: keys malformed`;
   if (r.type === 'PLAN') { if (!PROVIDER_IDS.includes(r.providerId) || typeof r.planDigest !== 'string' || !/^[0-9a-f]{64}$/.test(r.planDigest) || !(r.remainingCalls === null || isCount(r.remainingCalls)) || !(r.includedCallsPerMonth === null || isCount(r.includedCallsPerMonth)) || !(r.verifiedDate === null || typeof r.verifiedDate === 'string') || !['FREE', 'INCLUDED_QUOTA', 'METERED', 'UNKNOWN'].includes(r.billing)) return `${w}: plan malformed`; return null; }
+  if (r.type === 'CARRY') { if (!PROVIDER_IDS.includes(r.providerId) || !isCount(r.calls) || !isCount(r.credits) || !(isFiniteNum(r.usd) && r.usd >= 0) || !isCount(r.smokeCalls) || !(isFiniteNum(r.smokeUsd) && r.smokeUsd >= 0) || !/^\d{4}-\d{2}-\d{2}$/.test(r.dayKey) || dayKey(r.ts) < r.dayKey) return `${w}: carry malformed`; return null; }
   if (typeof r.reservationId !== 'string' || !/^qr-[0-9a-f]{24,64}$/.test(r.reservationId)) return `${w}: reservationId malformed`;
   if (r.type === 'RESERVE') { if (!PROVIDER_IDS.includes(r.providerId) || !isId(r.endpointId) || r.calls !== 1 || !isCount(r.credits) || r.credits === 0 || !CHARGE_UNITS.includes(r.unit) || !DISPATCH_PURPOSES.includes(r.purpose) || typeof r.requestKey !== 'string' || r.requestKey.length > 512 || !(isFiniteNum(r.estimatedUsd) && r.estimatedUsd >= 0) || !['DISPATCH', 'SUCCESS'].includes(r.chargedOn)) return `${w}: reservation malformed`; return null; }
   if (r.type === 'SETTLE') { if (typeof r.ok !== 'boolean' || !isCount(r.credits) || !(r.status === null || isCount(r.status))) return `${w}: settlement malformed`; return null; }
@@ -72,6 +77,13 @@ function contribute(aggs, x, sign) {
   const m = bucketOf(a.byMonth, x.monthKey); m.calls += c; m.credits += cr; m.usd += u;
   if (x.purpose === 'PROBE' || x.purpose === 'SMOKE') { a.smoke.calls += c; a.smoke.usd += u; }
 }
+// PUBLISH-FIX-65: a CARRY row adds its folded totals to the provider's day / month / smoke buckets (never to byId)
+function contributeCarry(aggs, r) {
+  let a = aggs.get(r.providerId); if (!a) { a = emptyAgg(); aggs.set(r.providerId, a); }
+  const d = bucketOf(a.byDay, r.dayKey); d.calls += r.calls; d.credits += r.credits; d.usd += r.usd;
+  const m = bucketOf(a.byMonth, r.dayKey.slice(0, 7)); m.calls += r.calls; m.credits += r.credits; m.usd += r.usd;
+  a.smoke.calls += r.smokeCalls; a.smoke.usd += r.smokeUsd; a.carried = (a.carried ?? 0) + 1;
+}
 function createState() {
   const byId = new Map(); const plans = new Map(); const aggs = new Map(); let lastTs = 0; let rows = 0;
   // closeout P2: prepare() validates the row and the transition WITHOUT touching state and returns the nonthrowing commit;
@@ -81,6 +93,7 @@ function createState() {
     if (r.ts < lastTs && strict) fail('INVALID_INPUT', `quota journal row ${i}: clock runs backwards`);
     const advance = () => { lastTs = Math.max(lastTs, r.ts); rows += 1; };
     if (r.type === 'PLAN') return () => { advance(); plans.set(r.providerId, { ...r }); };
+    if (r.type === 'CARRY') return () => { advance(); contributeCarry(aggs, r); };
     if (r.type === 'RESERVE') { if (byId.has(r.reservationId)) fail('INVALID_INPUT', `quota journal row ${i}: duplicate reservation id`); return () => { advance(); const x = { ...r, state: 'RESERVED', settledCredits: null, ok: null, status: null, dayKey: dayKey(r.ts), monthKey: monthKey(r.ts) }; byId.set(r.reservationId, x); contribute(aggs, x, +1); }; }
     const x = byId.get(r.reservationId); if (!x) fail('INVALID_INPUT', `quota journal row ${i}: unknown reservation`);
     if (x.state !== 'RESERVED') fail('INVALID_INPUT', `quota journal row ${i}: impossible transition from ${x.state}`);
@@ -142,47 +155,76 @@ export function replayQuotaRecords(records, { clock = () => Date.now() } = {}) {
   return Object.freeze({ now: m.now, totals: m.totals, entitlementRemaining: m.entitlementRemaining, reservations: m.reservations, plans: m.plans, records: m.records, rows: m.rows(), bytes: m.bytes() });
 }
 
-// PUBLISH-FIX-60 (2026-09-17): COMPACTION — the journal's only truth is its rows, and every durable append rewrites all of
-// them (the external checkpoint is one JSON value with a 16 MB bound: a full journal would stop the market lane cold).
-// Rows the admission law can no longer ask about are folded away, and NOTHING the law reads changes:
-//   - a reservation is dropped only when it is TERMINAL (SETTLED / RELEASED / UNRESOLVED), was RESERVED before the retained
-//     window (the current UTC month by default: day and month caps read only today's and this month's buckets, keyed by
-//     the RESERVE ts), and is not a PROBE / SMOKE (those count against LIFETIME smoke ceilings, so they are kept forever);
-//   - an open (RESERVED) reservation is kept whatever its age — compaction never resolves anything;
+// PUBLISH-FIX-60 (2026-09-17) / PUBLISH-FIX-65 (2026-09-18): COMPACTION — the journal's only truth is its rows, and every
+// durable append rewrites all of them (the external checkpoint is one JSON value with a 16 MB bound; the database layer
+// also re-validates and canonicalizes the whole value on every write: at 8,196 rows / 1.9 MB that was ~20% of the main
+// thread on 2f1fcadc, growing all month). Rows the admission law can no longer ask about one by one are folded into
+// CARRY rows, and NOTHING the law reads changes:
+//   - a reservation is folded only when it is TERMINAL (SETTLED / RELEASED / UNRESOLVED) and was RESERVED before the
+//     retained window (the current UTC day by default: the day cap reads today's bucket row by row, the month cap reads
+//     this month's bucket, which the CARRY rows keep whole); an open (RESERVED) reservation is kept whatever its age —
+//     compaction never resolves anything;
+//   - one CARRY row per provider per UTC day carries the folded calls, credits, usd and (for PROBE / SMOKE purposes) the
+//     lifetime smoke calls and usd; it sits where the first folded row of that day sat (so the strict replay's clock law
+//     holds) and merges with an earlier CARRY row for the same provider-day on a later compaction;
 //   - each provider keeps only its latest PLAN row (older plans are superseded on replay anyway); when that plan carries a
-//     remaining-calls entitlement, the consumption of the dropped rows since the plan's ts is folded into remainingCalls
-//     (never below 0), so entitlementRemaining answers exactly what it answered before;
-//   - order is preserved, so the strict replay (clock never runs backwards) accepts the result.
+//     remaining-calls entitlement, the consumption of the folded rows since the plan's ts is netted into remainingCalls
+//     (never below 0), so entitlementRemaining answers exactly what it answered before (CARRY rows never count there).
 // The result is proven, not trusted: a strict replay of the compacted rows must answer the same day / month calls, credits
-// and usd, the same lifetime smoke calls / usd, the same entitlement and the same open reservations for every provider the
-// journal has seen — any difference refuses the compaction and leaves the rows untouched. Lifetime state counts
-// (reserved / settled / unresolved / released / dispatched) are informational and do drop; no cap reads them.
+// and usd, the same lifetime smoke calls / usd, the same entitlement, the same plans and the same open and kept
+// reservations for every provider the journal has seen — any difference refuses the compaction and leaves the rows
+// untouched. Lifetime state counts (reserved / settled / unresolved / released / dispatched) are informational and do
+// drop; no cap reads them.
 export const startOfUtcMonth = (ts) => { const d = new Date(ts); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); };
-export function compactQuotaRecords(records, { nowTs = Date.now(), retainFromTs = startOfUtcMonth(nowTs) } = {}) {
+export const startOfUtcDay = (ts) => { const d = new Date(ts); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()); };
+export function compactQuotaRecords(records, { nowTs = Date.now(), retainFromTs = startOfUtcDay(nowTs) } = {}) {
   const before = createQuotaMirror(records, { clock: () => nowTs });
   const byId = new Map(before.reservations().map((x) => [x.reservationId, x]));
-  const droppable = new Set(); const droppedSpentSincePlan = new Map(); // providerId -> credits consumed by dropped rows at/after the plan ts
   const plans = before.plans();
+  const foldable = new Set(); const droppedSpentSincePlan = new Map(); // providerId -> credits consumed by folded rows at/after the plan ts
   for (const x of byId.values()) {
-    if (x.state === 'RESERVED' || x.purpose === 'PROBE' || x.purpose === 'SMOKE' || !(x.ts < retainFromTs)) continue;
-    droppable.add(x.reservationId);
+    if (x.state === 'RESERVED' || !(x.ts < retainFromTs)) continue;
+    foldable.add(x.reservationId);
     const p = plans[x.providerId]; if (p && p.remainingCalls !== null && x.ts >= p.ts) droppedSpentSincePlan.set(x.providerId, (droppedSpentSincePlan.get(x.providerId) ?? 0) + spentCredits(x));
   }
+  // the carries: one per provider-day, placed at the first folded row (reservation or earlier CARRY) of that provider-day
+  const carries = new Map(); // key -> { row, at }
+  const carryKey = (providerId, day) => `${providerId}|${day}`;
+  const addCarry = (providerId, day, at, ts, calls, credits, usd, smokeCalls, smokeUsd) => {
+    const k = carryKey(providerId, day); let c = carries.get(k);
+    if (!c) { c = { at, row: { type: 'CARRY', providerId, dayKey: day, ts, calls: 0, credits: 0, usd: 0, smokeCalls: 0, smokeUsd: 0 } }; carries.set(k, c); }
+    c.row.calls += calls; c.row.credits += credits; c.row.usd += usd; c.row.smokeCalls += smokeCalls; c.row.smokeUsd += smokeUsd;
+  };
   const latestPlanIndex = new Map(); records.forEach((r, i) => { if (r?.type === 'PLAN') latestPlanIndex.set(r.providerId, i); });
-  const out = []; let droppedRows = 0;
+  let droppedRows = 0; let mergedCarries = 0;
+  const keep = new Array(records.length).fill(true);
+  // pass 1: which carry groups actually change — a lone CARRY row already before the window with nothing to merge stays as it is
+  const members = new Map(); // key -> { carries: [i...], reservations: [i...] }
+  const memberOf = (k) => { let m = members.get(k); if (!m) { m = { carries: [], reservations: [] }; members.set(k, m); } return m; };
   records.forEach((r, i) => {
-    if (r.type === 'PLAN') {
-      if (latestPlanIndex.get(r.providerId) !== i) { droppedRows += 1; return; }
-      const fold = droppedSpentSincePlan.get(r.providerId) ?? 0;
-      out.push(fold > 0 && r.remainingCalls !== null ? { ...r, remainingCalls: Math.max(0, r.remainingCalls - fold) } : r); return;
-    }
-    if (droppable.has(r.reservationId)) { droppedRows += 1; return; }
+    if (r.type === 'CARRY' && r.ts < retainFromTs) memberOf(carryKey(r.providerId, r.dayKey)).carries.push(i);
+    else if (r.type === 'RESERVE' && foldable.has(r.reservationId)) { const x = byId.get(r.reservationId); memberOf(carryKey(x.providerId, dayKey(x.ts))).reservations.push(i); }
+  });
+  const untouchedCarry = new Set(); for (const m of members.values()) if (m.reservations.length === 0 && m.carries.length === 1) untouchedCarry.add(m.carries[0]);
+  records.forEach((r, i) => {
+    if (r.type === 'PLAN') { if (latestPlanIndex.get(r.providerId) !== i) { keep[i] = false; droppedRows += 1; } return; }
+    if (r.type === 'CARRY') { if (r.ts < retainFromTs && !untouchedCarry.has(i)) { keep[i] = false; droppedRows += 1; mergedCarries += 1; addCarry(r.providerId, r.dayKey, i, r.ts, r.calls, r.credits, r.usd, r.smokeCalls, r.smokeUsd); } return; }
+    if (!foldable.has(r.reservationId)) return;
+    keep[i] = false; droppedRows += 1;
+    if (r.type === 'RESERVE') { const x = byId.get(r.reservationId); const smoke = x.purpose === 'PROBE' || x.purpose === 'SMOKE'; const usd = spentUsd(x); addCarry(x.providerId, dayKey(x.ts), i, x.ts, spentCalls(x), spentCredits(x), usd, smoke ? spentCalls(x) : 0, smoke ? usd : 0); }
+  });
+  if (droppedRows === 0) return { ok: true, changed: false, rows: records, droppedRows: 0, droppedReservations: 0, carries: 0, before: { rows: before.rows(), bytes: before.bytes() }, after: { rows: before.rows(), bytes: before.bytes() } };
+  const carryAt = new Map(); for (const c of carries.values()) carryAt.set(c.at, c.row);
+  const out = [];
+  records.forEach((r, i) => {
+    const carry = carryAt.get(i); if (carry) out.push(carry);
+    if (!keep[i]) return;
+    if (r.type === 'PLAN') { const fold = droppedSpentSincePlan.get(r.providerId) ?? 0; out.push(fold > 0 && r.remainingCalls !== null ? { ...r, remainingCalls: Math.max(0, r.remainingCalls - fold) } : r); return; }
     out.push(r);
   });
-  if (droppedRows === 0) return { ok: true, changed: false, rows: records, droppedRows: 0, droppedReservations: 0, before: { rows: before.rows(), bytes: before.bytes() }, after: { rows: before.rows(), bytes: before.bytes() } };
   let after; try { after = createQuotaMirror(out, { clock: () => nowTs }); } catch (error) { return { ok: false, reason: `COMPACTED_REPLAY_REFUSED: ${String(error?.message ?? error).slice(0, 160)}` }; }
   // the proof: everything the admission law reads answers the same
-  const providers = new Set([...Object.keys(plans), ...[...byId.values()].map((x) => x.providerId)]);
+  const providers = new Set([...Object.keys(plans), ...[...byId.values()].map((x) => x.providerId), ...records.filter((r) => r.type === 'CARRY').map((r) => r.providerId)]);
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   for (const providerId of providers) {
     const a = before.totals(providerId, nowTs); const b = after.totals(providerId, nowTs);
@@ -194,7 +236,7 @@ export function compactQuotaRecords(records, { nowTs = Date.now(), retainFromTs 
   const open = (m) => m.reservations().filter((x) => x.state === 'RESERVED').map((x) => x.reservationId).sort();
   if (!same(open(before), open(after))) return { ok: false, reason: 'INVARIANT_OPEN_RESERVATIONS' };
   for (const x of after.reservations()) { const o = byId.get(x.reservationId); if (!o || !same(o, x)) return { ok: false, reason: `INVARIANT_KEPT_RESERVATION ${x.reservationId}` }; }
-  return { ok: true, changed: true, rows: out, droppedRows, droppedReservations: droppable.size, retainFromTs, before: { rows: before.rows(), bytes: before.bytes() }, after: { rows: after.rows(), bytes: after.bytes() } };
+  return { ok: true, changed: true, rows: out, droppedRows, droppedReservations: foldable.size, carries: carries.size, mergedCarries, retainFromTs, before: { rows: before.rows(), bytes: before.bytes() }, after: { rows: after.rows(), bytes: after.bytes() } };
 }
 
 export function validateQuotaRecords(records) {

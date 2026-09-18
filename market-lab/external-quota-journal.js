@@ -93,7 +93,7 @@ export function createExternalQuotaJournal({ binding, clock = () => Date.now() }
   // the binding's revision (the store passes the reducer exactly the state at that revision) instead of a canonical
   // digest of the whole checkpoint; the confirmed write is adopted only when it is exactly the proposed rows.
   let mirror = createQuotaMirror(current.rows, { clock }); let closed = false; let latchedFailure = null; let sequence = 0; let tail = Promise.resolve(); const pending = new Set();
-  const counters = { appends: 0, replays: 1, compactions: 0, compactionsRefused: 0 }; let lastCompactAttemptTs = 0;
+  const counters = { appends: 0, replays: 1, compactions: 0, compactionsRefused: 0 }; let lastCompactAttemptTs = 0; let lastCompactDay = null;
   const failed = () => durable.failed() ?? (latchedFailure ? { ...latchedFailure } : null);
   const latch = (error) => { if (!latchedFailure) latchedFailure = { code: error?.code ?? 'CHECKPOINT_WRITE_FAILED', message: bounded(error?.message ?? error), ts: clock() }; return error; };
   const assertLive = () => { if (closed) throw new ExternalMarketQuotaError('JOURNAL_CLOSED', 'external market quota journal is closed'); const failure = failed(); if (failure) throw new ExternalMarketQuotaError('ACCOUNTING_UNAVAILABLE', `${failure.code}: ${failure.message}`); };
@@ -121,13 +121,15 @@ export function createExternalQuotaJournal({ binding, clock = () => Date.now() }
     }
     current = saved; commit(); counters.appends += 1;
     // PUBLISH-FIX-60: a journal past a quarter of its bound compacts itself (at most once an hour; never on the caller's path)
-    if (mirror.bytes() > COMPACT_AT_BYTES && clock() - lastCompactAttemptTs > COMPACT_MIN_INTERVAL_MS) { lastCompactAttemptTs = clock(); compact().catch(() => {}); }
+    // PUBLISH-FIX-65: and once per UTC day (yesterday's settled rows fold into CARRY rows the morning after)
+    const today = new Date(clock()).toISOString().slice(0, 10);
+    if ((mirror.bytes() > COMPACT_AT_BYTES && clock() - lastCompactAttemptTs > COMPACT_MIN_INTERVAL_MS) || (lastCompactDay !== null && today !== lastCompactDay)) { lastCompactAttemptTs = clock(); lastCompactDay = today; compact().catch(() => {}); }
     return row;
   }
   // PUBLISH-FIX-60: fold away what the admission law can no longer ask about (market-lab/quota.js compactQuotaRecords); the
   // compacted rows replace the checkpoint in ONE durable write under the same conflict law, then the mirror is rebuilt once
   function compact({ nowTs = null } = {}) { return enqueue(async () => {
-    const at = nowTs ?? now(); lastCompactAttemptTs = clock();
+    const at = nowTs ?? now(); lastCompactAttemptTs = clock(); lastCompactDay = new Date(at).toISOString().slice(0, 10);
     const plan = compactQuotaRecords(current.rows, { nowTs: at });
     if (!plan.ok) { counters.compactionsRefused += 1; return { ok: false, reason: plan.reason, before: null }; }
     if (!plan.changed) return { ok: true, changed: false, before: plan.before, after: plan.after };
@@ -141,7 +143,7 @@ export function createExternalQuotaJournal({ binding, clock = () => Date.now() }
     } catch (error) { throw latch(error); }
     if (!exactKeys(saved, CHECKPOINT_KEYS) || !Array.isArray(saved.rows) || saved.rows.length !== nextRows.length || canonicalDigest(saved.rows) !== canonicalDigest(nextRows)) throw latch(new ExternalMarketQuotaError('CHECKPOINT_CONFIRMATION_INVALID', 'database confirmed a checkpoint that is not the proposed compaction'));
     current = saved; mirror = createQuotaMirror(current.rows, { clock }); counters.replays += 1; counters.compactions += 1;
-    return { ok: true, changed: true, droppedRows: plan.droppedRows, droppedReservations: plan.droppedReservations, retainFromTs: plan.retainFromTs, before: plan.before, after: plan.after };
+    return { ok: true, changed: true, droppedRows: plan.droppedRows, droppedReservations: plan.droppedReservations, carries: plan.carries, mergedCarries: plan.mergedCarries, retainFromTs: plan.retainFromTs, before: plan.before, after: plan.after };
   }); }
   function recordTs() { return now(); }
   function reservation(id) { return mirror.reservation(id); }

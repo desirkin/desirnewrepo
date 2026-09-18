@@ -53,11 +53,11 @@ export async function openDataOnlyCheckpoints({ persistence, dataDir, env = proc
   const marketJournal = market ? createExternalQuotaJournal({ binding: market, clock }) : null;
   if (marketJournal) {
     const z = marketJournal.size(); log(`MARKET quota journal: ${z.rows} rows, ${Math.round(z.bytes / 1024)} KB of ${Math.round(z.maxBytes / 1024 / 1024)} MB (every append rewrites the whole checkpoint durably)`);
-    // PUBLISH-FIX-60: fold away last months' settled rows at every boot (proven equal for everything the law reads, else refused)
+    // PUBLISH-FIX-60/65: fold earlier days' settled rows into carry rows at every boot (proven equal for everything the law reads, else refused)
     try {
       const c = await marketJournal.compact();
       if (!c.ok) log(`MARKET quota journal compaction refused: ${c.reason} (rows untouched)`);
-      else if (c.changed) log(`MARKET quota journal compacted: ${c.before.rows} rows / ${Math.round(c.before.bytes / 1024)} KB -> ${c.after.rows} rows / ${Math.round(c.after.bytes / 1024)} KB (${c.droppedReservations} settled reservations before ${new Date(c.retainFromTs).toISOString().slice(0, 10)} folded away; day, month, smoke and entitlement answers unchanged)`);
+      else if (c.changed) log(`MARKET quota journal compacted: ${c.before.rows} rows / ${Math.round(c.before.bytes / 1024)} KB -> ${c.after.rows} rows / ${Math.round(c.after.bytes / 1024)} KB (${c.droppedReservations} settled reservations before ${new Date(c.retainFromTs).toISOString().slice(0, 10)} folded into ${c.carries} provider-day carry rows; day, month, smoke and entitlement answers unchanged)`);
       else log(`MARKET quota journal: nothing to compact (${c.after.rows} rows all inside the retained window or still open)`);
     } catch (error) { log(`MARKET quota journal compaction failed: ${error?.code ?? error?.message ?? error}`); }
   }
