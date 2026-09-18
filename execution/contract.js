@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { cmp, isCanonicalDecimal, isPositive, isNegative, isZero } from './money.js';
 
 export const EXECUTION_CONTRACT_VERSION = 'serpent-execution-1';
-export const ACCOUNT_STATE_VERSION = 'execution-account-state-2'; // 2: durable adjustment identities, net-basis realized P&L, unbounded execution identities (closeout R03 / R06)
+export const ACCOUNT_STATE_VERSION = 'execution-account-state-3'; // 2: durable adjustment identities, net-basis realized P&L, unbounded execution identities (closeout R03 / R06); 3 (PUBLISH-FIX-69b): answered hypotheses leave the state (PUBLISH-FIX-69), so a projection written under 2 is re-derived from the verified chain at the next start (judge/composition.js restoration law), never refused
 export const MODES = Object.freeze(['OBSERVE', 'REPLAY', 'PAPER', 'LIVE_UNARMED', 'LIVE_ARMED', 'REDUCE_ONLY', 'HALTED_UNRESOLVED']);
 export const ACCOUNT_KINDS = Object.freeze(['REPLAY', 'PAPER', 'LIVE', 'SHADOW']); // journal namespaces; PAPER never becomes LIVE
 export const ORDER_STATES = Object.freeze(['UNSENT', 'DISPATCH_UNCERTAIN', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'FILLED', 'CANCEL_PENDING', 'CANCELLED', 'REJECTED', 'EXPIRED', 'RECONCILIATION_REQUIRED']);

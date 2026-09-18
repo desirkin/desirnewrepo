@@ -109,7 +109,8 @@ test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports a
   // PUBLISH-FIX-69 (the ONE documented normalization, docs/JUDGE-PAPER-AUDIT.md §4.25): the working-tree reducer evicts a hypothesis once
   // its decision is recorded, the ea3bfbf reducer kept every one forever. So: every hypothesis the base still holds must have its
   // decision recorded on BOTH sides (nothing was lost, only answered), and every other field of the state is compared raw.
-  { const { hypotheses: hb, ...restBase } = base.state(); const { hypotheses: hn, ...restNext } = next.state();
+  // (and its stateVersion moved 2 -> 3 for exactly that reason, PUBLISH-FIX-69b, so the restoration law re-derives old projections)
+  { const { hypotheses: hb, stateVersion: vb, ...restBase } = base.state(); const { hypotheses: hn, stateVersion: vn, ...restNext } = next.state(); assert.equal(vb, 'execution-account-state-2'); assert.equal(vn, 'execution-account-state-3');
     assert.deepEqual(restNext, restBase, 'the complete account/execution state (positions, orders, reservations, protections, restrictions) is identical');
     for (const id of Object.keys(hb)) { assert.ok(restBase.decisions[id] && restNext.decisions[id], `hypothesis ${id} was answered by a recorded decision on both trees`); assert.equal(hn[id], undefined, 'and the working tree no longer carries it'); }
     assert.deepEqual(Object.keys(hn), [], 'no unanswered hypothesis remains after the recorded inputs'); }

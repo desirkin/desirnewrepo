@@ -61,10 +61,25 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 ```
 FROZEN_FOR_PAPER
 judge/*.js       380e23374f2fe99132251842441ccfd5294ca53bdbb698106c47fd263f562093
-execution/*.js   d58aea0ebc0d5955d4cfb3be63c35fae6b44091798dc4f67a5571ec57f171740
+execution/*.js   81bea0cccc0c9ef91b6cc6c7f89f3cb95289837325744605354eb712e6d0037c
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   8b9cf39e7d61b5b9e60087d45c25bb816fd5f3faf506cdcabb8bef717fb2f26a
+all (48 files)   4a06e8db93ef3cb996537ff4075362dcaa3455887752ffd4ea64b8ca05542b6b
 ```
+
+### 4.26 Audited change — 2026-09-18 PUBLISH-FIX-69b: ACCOUNT_STATE_VERSION 2 → 3 so the restoration law re-derives projections written before §4.25 (previous execution digest `d58aea0ebc0d…`; now `81bea0cccc0c…`; judge and watch UNCHANGED)
+
+What happened: 1e76a415 (fix64–69) booted 21:50 UTC and stopped right after "JUDGE specs" — no "JUDGE active". The
+restoration law (judge/composition.js start(), closeout R16) replays the durable chain with the CURRENT reducer and
+compares its digest to the STORED projection; §4.25's reducer evicts answered hypotheses, the projection stored by the
+previous instance still held them, and because `stateVersion` was unchanged the law took the refusal branch
+(RESTORE_FAILED) instead of the reprojection branch. My omission: a reducer change that alters the projection must move
+`ACCOUNT_STATE_VERSION` (execution/contract.js), which is the signal the law uses to re-derive the projection from the
+verified chain (`jr.reproject`, chain verified first, `RESTORE_FAILED` if the reprojection disagrees with the replay).
+The change: `ACCOUNT_STATE_VERSION = 'execution-account-state-3'` with the reason in its comment. Nothing else moves;
+`test/judge-repair-pg.test.js` R16-04 (a corrupted projection still refuses) and `test/judge-differential.test.js`
+(the version move is the second half of the one documented normalization) hold. Expected boot line on the next start:
+"account paper-starting-styles-usd500-fee040: projection re-derived from N events after a reducer version change
+(execution-account-state-2 -> execution-account-state-3)".
 
 ### 4.25 Audited change — 2026-09-18 PUBLISH-FIX-69: a hypothesis leaves the account state once its decision is recorded (previous execution digest `83c4ce652d38…`; now `d58aea0ebc0d…`; judge and watch UNCHANGED)
 
