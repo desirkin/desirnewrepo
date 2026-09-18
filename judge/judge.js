@@ -95,7 +95,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   }
   const cache = createFeatureCache({ max: 128 });
   const candidates = new Map(); // symbol -> runtime
-  const funnel = Object.fromEntries(FUNNEL_STAGES.map((s) => [s, 0])); const refusals = {}; const counters = { books: 0, trades: 0, crossings: 0, confirmations: 0, expired: 0, decisions: 0, entries: 0, needsData: 0, missedDuringWarmup: 0, modelWait: 0, modelStale: 0, missedDuringAnalysis: 0, revalidationRefusals: 0, queueDelayExpired: 0, snapshotPersistFailures: 0, staleReoffered: 0, lockWaits: 0, lockReoffered: 0 }; const decisions = []; let lastEntryMono = null; const provenance = new Map(); // episode|decision clock -> the already-known dependency identities (research report only)
+  const funnel = Object.fromEntries(FUNNEL_STAGES.map((s) => [s, 0])); const refusals = {}; const counters = { books: 0, trades: 0, crossings: 0, confirmations: 0, expired: 0, decisions: 0, entries: 0, needsData: 0, missedDuringWarmup: 0, modelWait: 0, modelStale: 0, missedDuringAnalysis: 0, revalidationRefusals: 0, queueDelayExpired: 0, snapshotPersistFailures: 0, staleReoffered: 0, lockWaits: 0, lockReoffered: 0, lockBatches: 0, lockCoalesced: 0 }; const decisions = []; let lastEntryMono = null; const provenance = new Map(); // episode|decision clock -> the already-known dependency identities (research report only)
   const now = () => clock.now(); const state = () => dispatcher.state(); const ev = dispatcher.ev;
   // Persistence integrity can only remove entry authority. Low-level callers
   // that do not inject this seam retain the historical isolated-test law;
@@ -282,7 +282,26 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
       const ep = tracker.current(); if (!ep) continue; const conf = c.confirmations.get(ep.episodeId); if (!conf) continue; const st = conf.observe(f.mid, snap.receiptTs, snap.receiptSequence); if (st === 'CONFIRMED' && !ep.submitted) { if (ep.reoffer) ep.reoffer = false; else counters.confirmations += 1; ep.submitted = true; S.submit({ key: `${c.assetId}|${ep.episodeId}`, episodeId: ep.episodeId, snapshotSeq: snap.receiptSequence, receiptMono: clock.monotonic(), job: () => decide(c, setupId, ep.episodeId).catch((err) => { log(`decision failed: ${err.message}`); return null; }), onStale: () => { if (ep.state === 'PENDING') { ep.submitted = false; ep.reoffer = true; counters.staleReoffered += 1; } } }); } else if (st === 'EXPIRED') { counters.expired += 1; tracker.expire(snap.receiptTs + policy.execution.proposalExpiryMs + 1); recordRefusal(c, setupId, ep.episodeId, 'EXPIRED', c.frozen.get(ep.episodeId)?.awaitingLock ? ['PROPOSAL_EXPIRED_10S', 'HYPOTHESIS_NOT_DURABLE'] : ['PROPOSAL_EXPIRED_10S'], snap).catch(() => {}); c.confirmations.delete(ep.episodeId); } }
   }
   function onTrade(e) { const c = candidates.get(e.symbol); if (!c) return; counters.trades += 1; c.flow.add(e.trade); }
-  async function lockHypothesis(c, setupId, frozen, episode) { const decisionId = decisionIdentity({ accountId, episodeId: episode.episodeId, setupId, decisionKnownAtTs: frozen.triggerTs, snapshotDigest: null }); frozen.decisionId = decisionId; await dispatcher.commit(ev('HYPOTHESIS_LOCKED', { decisionId, episodeId: episode.episodeId, setupId, assetId: c.assetId, pair: c.symbol, hypothesisDigest: hypothesisDigest(frozen), frozenAtTs: frozen.triggerTs, triggerTs: frozen.triggerTs, expiresTs: frozen.triggerTs + policy.execution.proposalExpiryMs })); frozen.locked = true;
+  // PUBLISH-FIX-70: lock commits COALESCE. Every crossing locks a hypothesis with its own serialized journal append; a coin that
+  // oscillates around its trigger level (AKE/USD: 301 crossings in the first 3 minutes of 1e76a415, 363 commits, journal commit
+  // p95 22 s) saturates the commit chain and every decision record queues behind it. Locks that arrive while a lock append is in
+  // flight are committed together as ONE append (the journal appends a list atomically; the reducer applies them in order), so
+  // the chain carries one append per round trip instead of one per crossing. A refused batch (one bad event) falls back to
+  // committing each lock on its own, so one refusal never sinks the others. Each lock's own promise resolves when ITS append
+  // lands; nothing about T, the lock-before-valuation law, the payload or the order of events changes.
+  let lockBatch = []; let lockFlushing = false;
+  async function flushLocks() {
+    if (lockFlushing || !lockBatch.length) return; lockFlushing = true;
+    try {
+      while (lockBatch.length) {
+        const batch = lockBatch; lockBatch = []; counters.lockBatches += 1; if (batch.length > 1) counters.lockCoalesced += batch.length - 1;
+        try { await dispatcher.commit(batch.map((b) => b.event)); for (const b of batch) b.resolve(); }
+        catch (err) { if (batch.length === 1) { batch[0].reject(err); continue; } for (const b of batch) { try { await dispatcher.commit(b.event); b.resolve(); } catch (e2) { b.reject(e2); } } }
+      }
+    } finally { lockFlushing = false; }
+  }
+  const commitLock = (event) => new Promise((resolve, reject) => { lockBatch.push({ event, resolve, reject }); flushLocks().catch(() => {}); });
+  async function lockHypothesis(c, setupId, frozen, episode) { const decisionId = decisionIdentity({ accountId, episodeId: episode.episodeId, setupId, decisionKnownAtTs: frozen.triggerTs, snapshotDigest: null }); frozen.decisionId = decisionId; await commitLock(ev('HYPOTHESIS_LOCKED', { decisionId, episodeId: episode.episodeId, setupId, assetId: c.assetId, pair: c.symbol, hypothesisDigest: hypothesisDigest(frozen), frozenAtTs: frozen.triggerTs, triggerTs: frozen.triggerTs, expiresTs: frozen.triggerTs + policy.execution.proposalExpiryMs })); frozen.locked = true;
     // PUBLISH-FIX-68: a decision that ran before this lock was durable stepped aside (decide() below) instead of refusing; now that the
     // hypothesis IS durable, the still-pending episode is offered again by the next fresh book (the fix51 re-offer path, same episode,
     // same T, same 10 s) — one re-offer per lock, never a polling loop; past its 10 s the confirmation's own EXPIRED branch closes it

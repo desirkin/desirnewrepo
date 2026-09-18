@@ -167,7 +167,8 @@ test('J10d. PUBLISH-FIX-68: a confirmation that runs before its hypothesis lock 
   // the production shape: the lock commit sits behind other journal writes for seconds, so the confirmation (2 s after T) arrives first
   async function burst(r, { hold }) {
     let release = null; const gate = new Promise((res) => { release = res; }); const orig = r.dispatcher.commit; let held = 0;
-    if (hold) r.dispatcher.commit = (e, o) => (!Array.isArray(e) && e?.type === 'HYPOTHESIS_LOCKED' ? (held += 1, gate.then(() => orig(e, o))) : orig(e, o));
+    const isLock = (e) => (Array.isArray(e) ? e.length > 0 && e.every((x) => x?.type === 'HYPOTHESIS_LOCKED') : e?.type === 'HYPOTHESIS_LOCKED'); // PUBLISH-FIX-70: locks may arrive coalesced
+    if (hold) r.dispatcher.commit = (e, o) => (isLock(e) ? (held += Array.isArray(e) ? e.length : 1, gate.then(() => orig(e, o))) : orig(e, o));
     const price = 100000; const level = 100400; const start = Math.floor(r.clock.now() / 60_000) * 60_000 + 60_000; while (r.clock.now() < start) r.clock.advance(1000);
     for (let k = 0; k < 20; k += 1) { r.clock.advance(2000); r.trade(price + 50, 'buy', 0.2); } while (r.clock.now() % 60_000 !== 0) r.clock.advance(1000); r.clock.advance(500);
     await r.judge.onTick(r.clock.now()); await r.dispatcher.idle();
@@ -178,8 +179,9 @@ test('J10d. PUBLISH-FIX-68: a confirmation that runs before its hypothesis lock 
   }
   // 1. held locks: the decisions step aside (nothing recorded, nothing refused), then the locks land and every episode is re-offered and DECIDED inside its 10 s
   const r = await rig(); await r.warm(); const { n, release, held } = await burst(r, { hold: true });
-  assert.ok(held >= n, `every confirmed setup locked its hypothesis (${held} >= ${n})`); assert.equal(r.judge.status().counters.lockWaits, n, 'each decision stepped aside for its lock'); assert.equal(r.judge.decisions().length, 0, 'nothing recorded while the lock is in flight'); assert.equal(r.judge.status().counters.needsData, 0);
+  assert.ok(held >= 1, `the first lock reached the journal and is held (${held})`); // the rest coalesce behind it (PUBLISH-FIX-70) until the gate opens assert.equal(r.judge.status().counters.lockWaits, n, 'each decision stepped aside for its lock'); assert.equal(r.judge.decisions().length, 0, 'nothing recorded while the lock is in flight'); assert.equal(r.judge.status().counters.needsData, 0);
   r.clock.advance(1500); release(); await r.dispatcher.idle(); assert.equal(r.judge.status().counters.lockReoffered, n, 'the landed lock reopened every offer');
+  if (n >= 3) { assert.ok(r.judge.status().counters.lockBatches >= 2 && r.judge.status().counters.lockCoalesced >= 1, `locks behind the held one were committed together (batches ${r.judge.status().counters.lockBatches}, coalesced ${r.judge.status().counters.lockCoalesced})`); }
   r.book([[100420, 5], [100430, 5]], [[100400, 5], [100390, 5]]); assert.equal(r.scheduler.queuedCount(), n, 're-offered on the next fresh book'); assert.equal(r.judge.status().counters.confirmations, n, 'a re-offer is not a new confirmation');
   r.clock.advance(25); await r.settle(); const d = r.judge.decisions(); assert.equal(d.length, n, JSON.stringify(r.judge.status().counters));
   for (const x of d) { assert.ok(!x.reasonCodes.includes('HYPOTHESIS_NOT_DURABLE'), x.reasonCodes.join(',')); assert.notEqual(x.status, 'EXPIRED'); assert.ok(x.decisionKnownAtTs - x.triggerTs <= 10_000, 'inside the original 10 s'); }

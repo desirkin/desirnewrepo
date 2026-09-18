@@ -60,11 +60,31 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       380e23374f2fe99132251842441ccfd5294ca53bdbb698106c47fd263f562093
+judge/*.js       d70c8fe64e223580da5a1c71fb6bfe774457b58e0b0c53edf2f7b69deb6fed51
 execution/*.js   81bea0cccc0c9ef91b6cc6c7f89f3cb95289837325744605354eb712e6d0037c
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   4a06e8db93ef3cb996537ff4075362dcaa3455887752ffd4ea64b8ca05542b6b
+all (48 files)   088d85146527b5898fba3bbace1638e0bcfd27416a7ddd6eb79bb2ed533042e4
 ```
+
+### 4.27 Audited change — 2026-09-18 PUBLISH-FIX-70: hypothesis locks that queue behind an in-flight lock append are committed together (previous judge digest `380e23374f2f…`; now `d70c8fe64e22…`; execution and watch UNCHANGED)
+
+What was happening (1e76a415, first 3 minutes after the §4.24/§4.25 boot): AKE/USD crossed its trigger 301 times (300
+resets) — a coin oscillating around the level — and every crossing locked a hypothesis with its own serialized journal
+append: 363 commits in 3 minutes, journal commit p50 3.7 s / p95 22 s / max 49 s, every decision record queued behind
+the locks. §4.24 keeps those decisions alive while the lock lands, but a saturated chain still lands most locks late.
+
+The change (judge/judge.js only): `lockHypothesis()` hands its HYPOTHESIS_LOCKED event to a coalescing queue. While a
+lock append is in flight, every further lock waits in the queue; when the append lands, the whole queue goes as ONE
+append (`dispatcher.commit([...events])`, the journal appends the list atomically and the reducer applies it in order).
+The chain carries one append per round trip instead of one per crossing. A refused batch falls back to one append per
+lock, so one refusal never sinks the others; each lock's own promise resolves when its append lands (so §4.24's
+re-offer fires per lock exactly as before). Counters `lockBatches` / `lockCoalesced` join `lockWaits` / `lockReoffered`
+on the JUDGE FUNNEL line (fly.js). Unchanged: T, the lock-before-valuation law, the lock payload, the order of events,
+the 10 s, every gate. The ONE observable difference: `portfolioRevision` (the account's append count at decision time)
+and the `decisionDigest` sealed over it move by the number of coalesced appends — `test/judge-differential.test.js`
+compares both trees with the revision set to 0 and the digest re-sealed through the working tree's own contract, and
+everything else raw (documented normalization 2). Test: J10d also proves the locks behind a held one are committed
+together (`lockBatches >= 2`, `lockCoalesced >= 1`). `test/paper-runtime.test.js` P-08 re-pinned.
 
 ### 4.26 Audited change — 2026-09-18 PUBLISH-FIX-69b: ACCOUNT_STATE_VERSION 2 → 3 so the restoration law re-derives projections written before §4.25 (previous execution digest `d58aea0ebc0d…`; now `81bea0cccc0c…`; judge and watch UNCHANGED)
 

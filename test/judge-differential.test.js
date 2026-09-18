@@ -11,9 +11,10 @@
 //     not by this test — see the note inside the DIFFERENTIAL test);
 //   - decision ids, digests, measurements, reason codes, sizing, valuation, scenario, invalidation, funnel and
 //     dispatcher state are all inside the comparison.
-// The ONLY tolerated difference is a documented normalization, and there is exactly one (PUBLISH-FIX-69, see the state
-// comparison): answered hypotheses are evicted from the working-tree state. Everything else is raw deepEqual over the full
-// records. If this test fails, the working tree changed baseline Judge behavior.
+// The ONLY tolerated differences are documented normalizations, and there are exactly two: PUBLISH-FIX-69 (answered hypotheses
+// are evicted from the working-tree state; stateVersion 2 -> 3) and PUBLISH-FIX-70 (coalesced lock appends move the account's
+// append count, so portfolioRevision is compared as 0 and the decision digest re-sealed). Everything else is raw deepEqual over
+// the full records. If this test fails, the working tree changed baseline Judge behavior.
 //
 // Latency (item 5): the same run measures REAL wall-clock duration of every host admission pass (judge.onTick +
 // scheduler drain + dispatcher idle) on both trees over the identical recorded inputs, and reports median / p95 /
@@ -105,12 +106,21 @@ test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports a
   await next.warm(); await next.ignite();
   const db = base.judge.decisions(); const dn = next.judge.decisions();
   assert.ok(db.some((d) => d.status === 'ENTRY_RESERVED'), `the base run reaches ENTRY_RESERVED: ${JSON.stringify(db.map((d) => [d.status, d.reasonCodes]))}`);
-  assert.deepEqual(dn, db, 'EVERY decision record — statuses, refusals, rankings inputs, risk, sizing, scenario, valuation, measurements, ids, clocks — is identical');
+  // PUBLISH-FIX-70 (documented normalization 2, docs/JUDGE-PAPER-AUDIT.md §4.27): the working-tree Judge commits hypothesis locks that
+  // queue behind an in-flight lock append TOGETHER (one journal append, one revision), so `portfolioRevision` — the account's append
+  // count at decision time — and the decisionDigest that seals it can differ by the number of coalesced appends. Both sides are
+  // compared with the revision set to 0 and the digest re-sealed over the same record through the working tree's own contract;
+  // every other field (statuses, refusals, rankings inputs, risk, sizing, scenario, valuation, measurements, ids, clocks) is raw.
+  const { makeDecision } = await import(pathToFileURL(path.join(ROOT, 'judge/contract.js')).href);
+  const reseal = (d) => { const { decisionDigest, decisionVersion, calibrationState, ...rest } = d; return makeDecision({ ...rest, decisionVersion, calibrationState, portfolioRevision: 0 }); };
+  assert.deepEqual(dn.map(reseal), db.map(reseal), 'EVERY decision record — statuses, refusals, rankings inputs, risk, sizing, scenario, valuation, measurements, ids, clocks — is identical');
+  assert.deepEqual(dn.map((d) => d.decisionId), db.map((d) => d.decisionId));
   // PUBLISH-FIX-69 (the ONE documented normalization, docs/JUDGE-PAPER-AUDIT.md §4.25): the working-tree reducer evicts a hypothesis once
   // its decision is recorded, the ea3bfbf reducer kept every one forever. So: every hypothesis the base still holds must have its
   // decision recorded on BOTH sides (nothing was lost, only answered), and every other field of the state is compared raw.
   // (and its stateVersion moved 2 -> 3 for exactly that reason, PUBLISH-FIX-69b, so the restoration law re-derives old projections)
-  { const { hypotheses: hb, stateVersion: vb, ...restBase } = base.state(); const { hypotheses: hn, stateVersion: vn, ...restNext } = next.state(); assert.equal(vb, 'execution-account-state-2'); assert.equal(vn, 'execution-account-state-3');
+  const stripSeal = (st) => ({ ...st, decisions: Object.fromEntries(Object.entries(st.decisions ?? {}).map(([id, d]) => { const { decisionDigest, portfolioRevision, ...rest } = d; return [id, rest]; })) }); // PUBLISH-FIX-70: the seal moves with the append count (proven equal above once re-sealed)
+  { const { hypotheses: hb, stateVersion: vb, ...restBase } = stripSeal(base.state()); const { hypotheses: hn, stateVersion: vn, ...restNext } = stripSeal(next.state()); assert.equal(vb, 'execution-account-state-2'); assert.equal(vn, 'execution-account-state-3');
     assert.deepEqual(restNext, restBase, 'the complete account/execution state (positions, orders, reservations, protections, restrictions) is identical');
     for (const id of Object.keys(hb)) { assert.ok(restBase.decisions[id] && restNext.decisions[id], `hypothesis ${id} was answered by a recorded decision on both trees`); assert.equal(hn[id], undefined, 'and the working tree no longer carries it'); }
     assert.deepEqual(Object.keys(hn), [], 'no unanswered hypothesis remains after the recorded inputs'); }
