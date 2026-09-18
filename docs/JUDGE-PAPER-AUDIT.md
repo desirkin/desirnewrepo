@@ -66,6 +66,25 @@ watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f0
 all (48 files)   247e0227dfc5004d48ceba52b8555a5e8168bfd43fa6ecb501cb43a12dbc3b74
 ```
 
+### 4.23 Recorded change — 2026-09-18 PUBLISH-FIX-67: the paper profile's reference fee is the Kraken Pro public 0.40% taker (frozen core UNCHANGED; no digest moves)
+
+Not a frozen change: `judge/`, `execution/` and `watch/watch.js` are byte-identical to §4.21. What changed is the paper
+PROFILE (`config/paper-runtime.json`): `files.judgePolicy` and `groups.judge.judge.policyFile` now name
+`config/judge.paper.starting-styles-fee040.json` (judge-policy-2, the same six setups as §4.22) whose `fees.taker.rate`
+is `0.004` — Kraken Pro's PUBLIC spot taker base rate — instead of the `0.008` placeholder of PUBLISH-FIX-19, and the
+account it binds, `paper-starting-styles-usd500-fee040`. The fee is still UNVERIFIED against the owner account (the
+`scheduleId` says so) and is replaced only by the owner tier read from `TradeVolume` (`lib/kraken-fee-tier.js`).
+Everything else in the policy — limits, execution controls, universe, evaluation, capital, the fee's rounding, scope,
+minimum and currency — is byte-identical to the reference policy, proven at module load by `test/paper-e2e-pg.test.js`
+(the profile policy IS `judge/samples/policy.paper-starting-styles-fee040.json` byte for byte; every section but `setups`
+and the taker `rate`/`scheduleId` equals the reference's). `test/paper-runtime.test.js` P-01 pins the file name. The
+same account law as §4.19/§4.22 applies: a changed policy names its own account, the boot creates it ONCE under owner
+intent (`SERPENT_PAPER_INIT_ACCOUNT` = `paper-starting-styles-usd500-fee040`), and the earlier accounts
+`paper-reference-usd500-fee080` and `paper-starting-styles-usd500` and their journals stay untouched and readable.
+Reason: the owner's directive and the independent review of f32484ca (fee finding): at 0.80% a side the 1.6% round
+trip was larger than every 20-minute target the setups can name, so the Judge was arithmetically inert; 0.40% is the
+published rate, not an assumption of the owner's tier. The cost model, its rounding and the NO_TRADE law are unchanged.
+
 ### 4.22 Recorded change — 2026-09-18 PUBLISH-FIX-62: the paper profile names the six-setup policy (frozen core UNCHANGED; no digest moves)
 
 Not a frozen change: `judge/`, `execution/` and `watch/watch.js` are byte-identical to §4.21. What changed is the
