@@ -160,8 +160,12 @@ test('SCOPE-5 (7). research configuration is closed: no wildcard, bounded caps, 
   assert.equal(current.paper.baseBalanceUsd, 500, 'paper bankroll matches the USD 500 Judge account');
   // TWO audited value changes since the pin: paper.baseBalanceUsd (above) and universe — PUBLISH-FIX-2 emptied the legacy
   // named-coin seed so no hardcoded coins live in any config. Every OTHER pre-existing key stays deep-equal to the pin.
+  // PUBLISH-FIX-66 (2026-09-18): universeExpansion gained ONE key, hotLane { slots 6, tenureMs } — the hot lane's bound
+  // (tape/run.js reads xp.hotLane) widened from the 3-slot default so the VOLATILITY WATCH's six movers all fit; every other
+  // universeExpansion key stays deep-equal to the pin.
   for (const k of Object.keys(baseline)) {
     if (k === 'universe') continue; // audited below
+    if (k === 'universeExpansion') { const { hotLane, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 6, tenureMs: 7_200_000 }); assert.deepEqual(rest, baseline[k], 'config.universeExpansion unchanged but for hotLane'); continue; }
     assert.deepEqual(k === 'paper' ? { ...current[k], baseBalanceUsd: baseline.paper.baseBalanceUsd } : current[k], baseline[k], `config.${k} unchanged`);
   }
   assert.deepEqual(current.universe, [], 'PUBLISH-FIX-2: the legacy named-coin universe seed is removed — no hardcoded coins remain in any config');
@@ -280,7 +284,12 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     // PUBLISH-FIX-28 (2026-09-17, owner directive — hot lane): mergeCarriedIntoCurrentUniverse (the current record stays a
     // superset of what the tape carries) + readWideEyeNominationsToday (this session's proposals only); the daily selection and
     // the next-session merge are unchanged. No trading/control/model surface. Tests: test/tape-hot-lane.test.js, test/universe.test.js.
-    'tape/universe.js': '001d5ea14f3b604c1d79336a0f9169e065f78d384a18f8487c95fdc9b9cf28be',
+    // PUBLISH-FIX-66 (2026-09-18, owner directive: "volume and volatility, never BTC"): selectUniverse also RETURNS (never
+    // writes) `verified` — every online USD pair above the relaxed nomination floor, uncapped — so the hot lane can adopt a
+    // mover outside the top-30-by-volume deep cap; catalogUsdSymbols lists every online USD pair (floor-free) so the Judge
+    // holds an instrument spec for any later adoptee. The deep universe, its floor and cap are unchanged; no named coin.
+    // Tests: test/universe.test.js (verified / catalog), test/learning-volatility-watch.test.js.
+    'tape/universe.js': '4771ba35272f96beba35cc33a2a618a5162bdbe9b34c5a4221287921eff9108a',
     // Ticket B (I/O lane, 2026-09-15): stopTapeWrites import + a single drain call in the clean-stop path (write-behind
     // buffer, opt-in SERPENT_TAPE_WRITE_BEHIND; no trading/control/model surface). Tests: test/write-behind.test.js,
     // test/tape-store-write-behind.test.js.
@@ -295,7 +304,10 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     // PUBLISH-FIX-54 (2026-09-17, owner directive): the LEARNED RE-LOOK's coins ride the hot lane beside the wide eye's
     // nominations (readLearnedRelooksToday; same venue verification, same slots, same tenure). Subscriptions only; no
     // trading/control/model surface. Tests: test/learning-relook.test.js RL-04/RL-05.
-    'tape/run.js': '29447af411585fa12999717996ed81f1d445bd354e3c6354fdbc2633fc2119bb',
+    // PUBLISH-FIX-66 (2026-09-18): the VOLATILITY WATCH's picks ride the hot lane too (readVolatilityWatchNow) and the lane
+    // verifies against the selection's uncapped `verified` list (floor, status, exclusion; the lane's own slots bound it).
+    // Subscriptions only; no trading/control/model surface. Tests: test/learning-volatility-watch.test.js VW-04.
+    'tape/run.js': '1ff295a241e9c7c7ff068824c9655f7b5d12a5abaf0d3ec7d248d405e2947925',
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
     // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the

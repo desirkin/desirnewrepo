@@ -4,6 +4,7 @@
 // display seeds grant no special depth or seats. Only actual held/pending
 // exposure receives protected resources; stale pairs cannot supply fresh data.
 import { readLearnedRelooksToday } from '../learning/relook.js';
+import { readVolatilityWatchNow } from '../learning/volatility-watch.js';
 import { raceUniverseLoad, startupOutcomeLine, startupNeedsRetry, createUniverseRetry, createTapeDownWatchdog, STARTUP_UNIVERSE_DEADLINE_MS } from './startup.js';
 import { loadConfig, coinFromSymbol, dataDir } from '../lib/config.js';
 import { createResourceLaw } from './resource-law.js';
@@ -148,13 +149,14 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   async function adoptHotNominations() {
     if (stopping || hotLaneBusy) return;
     // PUBLISH-FIX-54: the LEARNED RE-LOOK's coins ride the same hot lane and the same venue verification as the wide eye's
-    const nominations = [...readWideEyeNominationsToday(), ...readLearnedRelooksToday({ dataDir: dataDir() })].filter((n) => n && typeof n.coin === 'string' && !hotSeen.has(n.coin));
+    // PUBLISH-FIX-66: the VOLATILITY WATCH's movers ride the same hot lane (the owner: volume and volatility, never BTC)
+    const nominations = [...readWideEyeNominationsToday(), ...readLearnedRelooksToday({ dataDir: dataDir() }), ...readVolatilityWatchNow({ dataDir: dataDir() })].filter((n) => n && typeof n.coin === 'string' && !hotSeen.has(n.coin));
     if (!nominations.length) return;
     hotLaneBusy = true;
     try {
       const selection = await selectUniverse(config); // the SAME venue verification as the daily selection (floor, status, exclusion, cap)
       if (selection.error) { writeEvent('HOT_LANE_VERIFY_FAILED', { error: selection.error, coins: nominations.map((n) => n.coin) }); return; }
-      const plan = planHotAdoption({ nominations, carried: [...pairs.values()], verified: selection.pairs, pinned: pinnedSymbols(), seen: hotSeen, nowTs: Date.now(), slots: hotLane.slots, tenureMs: hotLane.tenureMs });
+      const plan = planHotAdoption({ nominations, carried: [...pairs.values()], verified: selection.verified ?? selection.pairs, pinned: pinnedSymbols(), seen: hotSeen, nowTs: Date.now(), slots: hotLane.slots, tenureMs: hotLane.tenureMs });
       hotSeen = plan.seen;
       for (const symbol of plan.evict) { const p = pairs.get(symbol); unsubscribePair(symbol); dropPair(symbol); writeEvent('PAIR_HOT_YIELDED', { symbol, hotForMs: Date.now() - (p?.hotSinceTs ?? Date.now()) }); log(`[${nowIso()}] HOT LANE: ${p?.coin ?? symbol} yields its hot slot after ${Math.round((Date.now() - (p?.hotSinceTs ?? Date.now())) / 60000)} min`); }
       for (const p of plan.adopt) {

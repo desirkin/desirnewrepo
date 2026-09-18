@@ -107,6 +107,21 @@ async function fetchJson(url, fetchImpl) {
   return body.result;
 }
 
+// PUBLISH-FIX-66: every online USD-quoted pair the venue lists, minus the excluded bases, as WS v2 symbols — the Judge
+// loads an instrument spec for each at boot so a later hot-lane adoptee is admissible. No floor: this is the catalog, not
+// the universe; it grants nothing but a spec.
+export async function catalogUsdSymbols(config = loadConfig(), { fetchImpl = fetch } = {}) {
+  const exclude = new Set((config.universeExpansion?.excludeBases ?? []).map((b) => b.toUpperCase()));
+  const assetPairs = await fetchJson(ASSET_PAIRS_URL, fetchImpl); const out = new Set();
+  for (const pair of Object.values(assetPairs)) {
+    if (pair.status !== 'online' || (pair.quote !== 'ZUSD' && pair.quote !== 'USD')) continue;
+    const wsname = pair.wsname; if (typeof wsname !== 'string' || !/^[A-Z0-9][A-Z0-9.]{0,14}\/USD$/.test(wsname)) continue;
+    const rawBase = wsname.split('/')[0]; const coin = BASE_ALIASES[rawBase] ?? rawBase; if (exclude.has(coin.toUpperCase())) continue;
+    out.add(`${coin}/USD`);
+  }
+  return [...out].sort();
+}
+
 // Select today's universe from the venue; persist it (atomic). On REST
 // failure returns UNAVAILABLE, never an unverified named-coin fallback.
 export async function selectUniverse(config = loadConfig(), { fetchImpl = fetch } = {}) {
@@ -126,6 +141,11 @@ export async function selectUniverse(config = loadConfig(), { fetchImpl = fetch 
     const base = selectFromRaw(assetPairs, tickers, config);
     const noms = readWideEyeNominations();
     const { pairs, shed } = mergeNominationsAndCap(base, noms, assetPairs, tickers, config);
+    // PUBLISH-FIX-66: every online USD pair above the RELAXED nomination floor, uncapped — the hot lane verifies a nominee
+    // against this (status, quote, exclusion, floor) and enforces its own bound (slots), so a coin that MOVES but sits
+    // outside the top-30-by-volume deep cap can still be adopted; the deep universe itself is unchanged
+    const relaxed = { ...config, universeExpansion: { ...config.universeExpansion, minUsdVolume24h: config.wideeye?.nominationFloorUsd ?? 2_000_000 } };
+    const verified = selectFromRaw(assetPairs, tickers, relaxed);
     if (shed.length) console.log(`[universe] deep cap ${config.wideeye?.deepUniverseCap ?? 30}: shed lowest-volume ${shed.join(', ')}`);
     const record = {
       date,
@@ -138,7 +158,7 @@ export async function selectUniverse(config = loadConfig(), { fetchImpl = fetch 
     };
     atomicWriteJson(path.join(universeDir(), `${date}.json`), record, { pretty: true });
     atomicWriteJson(currentFile(), record, { pretty: true });
-    return record;
+    return { ...record, verified }; // `verified` rides the return only, never the written record
   } catch (err) {
     return unavailable(String(err.message).slice(0, 250));
   }

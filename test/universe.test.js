@@ -8,7 +8,7 @@ import path from 'node:path';
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-universe-'));
 process.env.COBRA_DATA_DIR = TEST_DATA;
 
-const { selectFromRaw, selectUniverse, readCurrentUniverse } = await import('../tape/universe.js');
+const { selectFromRaw, selectUniverse, readCurrentUniverse, catalogUsdSymbols } = await import('../tape/universe.js');
 const { classifyTape } = await import('../tape/health.js');
 const { loadConfig } = await import('../lib/config.js');
 
@@ -114,6 +114,18 @@ test('a failed venue refresh withdraws new admission truth without inventing fal
   assert.deepEqual(failed.pairs, []);
   assert.equal(readCurrentUniverse(), null, 'stale current-file nominations do not remain eligible');
   assert.ok(existsSync(path.join(TEST_DATA, 'tape', 'universe', `${first.date}.json`)), 'prior dated evidence is preserved');
+});
+
+test('PUBLISH-FIX-66: the selection also returns `verified` — every online USD pair above the RELAXED nomination floor, uncapped — for the hot lane, and never writes it; catalogUsdSymbols lists every online USD pair minus excluded bases, floor-free, for the Judge\'s instrument specs', async () => {
+  const floorNom = config.wideeye?.nominationFloorUsd ?? 2_000_000;
+  const raw = { BIGUSD: { wsname: 'BIG/USD', quote: 'USD', status: 'online' }, MIDUSD: { wsname: 'MID/USD', quote: 'USD', status: 'online' }, TINYUSD: { wsname: 'TINY/USD', quote: 'USD', status: 'online' }, OFFUSD: { wsname: 'OFF/USD', quote: 'USD', status: 'cancel_only' }, USDTUSD: { wsname: 'USDT/USD', quote: 'USD', status: 'online' }, XXBTZUSD: { wsname: 'XBT/USD', quote: 'ZUSD', status: 'online' } };
+  const tick = { BIGUSD: ticker(FLOOR * 3), MIDUSD: ticker(floorNom * 1.5), TINYUSD: ticker(floorNom / 4), OFFUSD: ticker(FLOOR * 9), USDTUSD: ticker(FLOOR * 9), XXBTZUSD: ticker(FLOOR * 9) };
+  const fetchImpl = async (url) => ({ ok: true, json: async () => ({ error: [], result: url.includes('AssetPairs') ? raw : tick }) });
+  const sel = await selectUniverse(config, { fetchImpl });
+  assert.deepEqual(sel.pairs.map((p) => p.coin).sort(), ['BIG', 'BTC'], 'the deep universe keeps the strict floor');
+  assert.deepEqual(sel.verified.map((p) => p.coin).sort(), ['BIG', 'BTC', 'MID'], 'MID clears the relaxed floor for the hot lane; TINY, OFF and USDT do not');
+  assert.equal(readCurrentUniverse().verified, undefined, 'the written record carries no verified list');
+  assert.deepEqual(await catalogUsdSymbols(config, { fetchImpl }), ['BIG/USD', 'BTC/USD', 'MID/USD', 'TINY/USD'], 'the catalog is floor-free, online USD only, excluded bases out, aliases normalized');
 });
 
 test('per-asset health is name-blind; stale held/pending exposure or no usable pair degrades overall health', () => {

@@ -166,13 +166,24 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // PUBLISH-FIX-44: the MOVER STUDY (learning/mover-study.js) — David's "what happened the hour before those movers went up,
   // and the hour after" — rides the broad-Kraken closed-candle stream from the first record; its learning store is
   // attached once LEARN-1 composes below. Authority NONE; a failure here is dark and nothing else is affected.
-  let moverStudy = null; let moverStudyTimer = null;
+  let moverStudy = null; let moverStudyTimer = null; let volatilityWatch = null; let volatilityTimer = null;
   try {
     const { createMoverStudy } = await import('./learning/mover-study.js');
+    const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js');
     moverStudy = createMoverStudy({ dataDir: dataDir(), log: console.log });
     // PUBLISH-FIX-64: the rings start from the candles already on disk (restored from the bucket), not empty
-    try { const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js'); moverStudy.seedFromSeries(createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log })); }
+    try { moverStudy.seedFromSeries(createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log })); }
     catch (err) { console.error(`MOVER STUDY seed from disk failed (the rings fill from the live stream instead): ${String(err?.message ?? err).slice(0, 160)}`); }
+    // PUBLISH-FIX-66: the VOLATILITY WATCH ranks every broad-stream coin by the hour's range (with a traded-dollar floor) and
+    // keeps the top movers in front of the Judge — the owner: "volume and volatility, never BTC". Watch only; authority NONE.
+    try {
+      const { createVolatilityWatch } = await import('./learning/volatility-watch.js');
+      volatilityWatch = createVolatilityWatch({ seriesSource: createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log }), dataDir: dataDir(), log: console.log, excludeBases: loadConfig().universeExpansion?.excludeBases ?? [] });
+      volatilityWatch.refresh();
+      volatilityTimer = setInterval(() => { try { volatilityWatch.refresh(); } catch (err) { console.error(`VOLATILITY WATCH refresh: ${String(err?.message ?? err).slice(0, 160)}`); } }, 60_000);
+      if (typeof volatilityTimer?.unref === 'function') volatilityTimer.unref();
+      console.log(`VOLATILITY WATCH active (authority NONE; watch only): ${volatilityWatch.line()}`);
+    } catch (err) { console.error(`VOLATILITY WATCH failed to start (dark; nothing else affected): ${String(err?.message ?? err).slice(0, 160)}`); volatilityWatch = null; }
     moverStudyTimer = setInterval(() => { try { moverStudy.tick(); } catch (err) { console.error(`MOVER STUDY tick: ${String(err?.message ?? err).slice(0, 160)}`); } }, 60_000);
     if (typeof moverStudyTimer?.unref === 'function') moverStudyTimer.unref();
     console.log('MOVER STUDY active (authority NONE): every >=10%/hour climb across the whole accepted catalog gets its hour-before / the move / hour-after written from closed candles, with control coins beside it; each becomes a graded DAILY_MOVER lesson');
@@ -227,7 +238,8 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   let judgeRun = null; let learningRankingStore = null; let learningStewardTimer = null;
   // PUBLISH-FIX-54: the LEARNED RE-LOOK adds its coins to the Judge's nominations (set once learning is up; empty until then)
   let relookSource = null; let relookTimer = null;
-  const judgeNominations = () => { const u = readCurrentUniverse(); const base = (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); let extra = []; try { extra = relookSource ? relookSource.nominations() : []; } catch { extra = []; } return [...base, ...extra]; };
+  // PUBLISH-FIX-66: the VOLATILITY WATCH's picks carry an entry clock and so take the preparation slots ahead of the standing universe
+  const judgeNominations = () => { const u = readCurrentUniverse(); const base = (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); let extra = []; try { extra = relookSource ? relookSource.nominations() : []; } catch { extra = []; } let movers = []; try { movers = volatilityWatch ? volatilityWatch.nominations() : []; } catch { movers = []; } return [...movers, ...extra, ...base]; };
   if (process.env.JUDGE_ENABLED === 'true') {
     try {
       const { composeJudge, loadSpecs } = await import('./judge/composition.js');
@@ -238,7 +250,13 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       const { marketResearchRootFromEnv } = await import('./market-lab/paths.js');
       if (!process.env.JUDGE_POLICY || !process.env.JUDGE_MODE) throw new Error('JUDGE_POLICY (policy JSON file) and JUDGE_MODE (OBSERVE | PAPER | LIVE_UNARMED | LIVE_ARMED) are required');
       const universe = readCurrentUniverse(); const symbols = (universe?.pairs ?? []).map((p) => p.symbol);
-      const specs = await loadSpecs({ transport: (u, i) => fetch(u, i), symbols, nowTs: Date.now() });
+      // PUBLISH-FIX-66: instrument specs for EVERY online USD pair the venue lists (not just the boot universe) — a coin the
+      // hot lane adopts later (re-look, volatility watch, wide eye) has a spec waiting, so the Judge's nomination pass can
+      // admit it instead of silently dropping it (composition filters on specOf(symbol))
+      const catalogSymbols = await (async () => { try { const { catalogUsdSymbols } = await import('./tape/universe.js'); return await catalogUsdSymbols(loadConfig(), { fetchImpl: (u, i) => fetch(u, i) }); } catch (err) { console.error(`JUDGE specs: catalog read failed (${String(err?.message ?? err).slice(0, 120)}); boot universe only`); return []; } })();
+      const specSymbols = [...new Set([...symbols, ...catalogSymbols])];
+      const specs = await loadSpecs({ transport: (u, i) => fetch(u, i), symbols: specSymbols, nowTs: Date.now() });
+      console.log(`JUDGE specs: ${specs.length} instruments (${symbols.length} in the boot universe, ${catalogSymbols.length} in the venue's USD catalog)`);
       // Ticket P (paper realism): the paper fill delay is the live-measured Kraken round-trip from the gateway collector,
       // widened when Kraken reports degraded — read per fill, bounded, falling back to the conservative reference when the
       // gateway is dark or has no measurement. Ignored under REPLAY (composition forces null: an offline experiment stays
@@ -446,7 +464,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
           // bytes carried: the whole account state travels twice per commit) vs plain queries (the tape) — and the pool gauge
           let dbClocks = '';
           try { const c = getPersistence()?.db?.clocks?.() ?? null; if (c) { const kb = (x) => (x && Number.isFinite(x.p50) ? `p50 ${Math.round(x.p50 / 1024)} / max ${Math.round(x.max / 1024)} KB` : 'no samples'); dbClocks = `; DB: tx ${ms(c.tx)} (statements/tx p50 ${c.txStatements?.p50 ?? '?'}, bytes/tx ${kb(c.txParamBytes)}); pool checkout wait ${ms(c.checkoutWait)} (failures ${c.checkoutFailures}); query ${ms(c.query)}; pool ${c.pool?.total ?? '?'} open / ${c.pool?.idle ?? '?'} idle / ${c.pool?.waiting ?? '?'} waiting of ${c.pool?.max} (${c.pool?.lockSessions} held for life by locks)${c.slowestTx ? `; slowest tx ${c.slowestTx.ms} ms, ${c.slowestTx.statements} statements, ${Math.round(c.slowestTx.paramBytes / 1024)} KB, began '${c.slowestTx.first}'` : ''}`; } } catch (err) { dbClocks = `; DB clocks unavailable (${String(err?.message ?? err).slice(0, 80)})`; }
-          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}`);
+          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}`);
         } catch (err) { console.error(`JUDGE FUNNEL line: ${err.message}`); }
       };
       const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); logFunnel(); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
@@ -544,6 +562,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     if (relookTimer) { try { clearInterval(relookTimer); } catch { /* timer already cleared */ } relookTimer = null; }
     // PUBLISH-FIX-63: the day's mover board is snapshotted before the process goes, so a republish never forgets it
     if (moverStudyTimer) { try { clearInterval(moverStudyTimer); } catch { /* timer already cleared */ } moverStudyTimer = null; }
+    if (volatilityTimer) { try { clearInterval(volatilityTimer); } catch { /* timer already cleared */ } volatilityTimer = null; }
     if (moverStudy) { try { moverStudy.flush?.(); } catch (err) { console.error(`MOVER STUDY board snapshot at shutdown failed: ${String(err?.message ?? err).slice(0, 160)}`); } }
     if (caseTriggerTimer) { try { clearInterval(caseTriggerTimer); } catch { /* timer already cleared */ } caseTriggerTimer = null; }
     // paper launch seam: components the paper launcher started stop cleanly BEFORE the process exits
