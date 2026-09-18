@@ -66,6 +66,23 @@ watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f0
 all (48 files)   247e0227dfc5004d48ceba52b8555a5e8168bfd43fa6ecb501cb43a12dbc3b74
 ```
 
+### 4.22 Recorded change — 2026-09-18 PUBLISH-FIX-62: the paper profile names the six-setup policy (frozen core UNCHANGED; no digest moves)
+
+Not a frozen change: `judge/`, `execution/` and `watch/watch.js` are byte-identical to §4.21. What changed is the
+paper PROFILE (`config/paper-runtime.json`): `files.judgePolicy` and `groups.judge.judge.policyFile` now name
+`config/judge.paper.starting-styles.json` (judge-policy-2; setups MOMENTUM_CONTINUATION, RANGE_IGNITION,
+TREND_PULLBACK_CONTINUATION, ABSORPTION_RECLAIM, CATALYST_TRANSMISSION, MICRO_BITE) and the account it binds,
+`paper-starting-styles-usd500`. The same account law as §4.19 applies: a changed policy names its own account, the boot
+creates it ONCE under owner intent (`SERPENT_PAPER_INIT_ACCOUNT` = that name, PUBLISH-FIX-58 waits out the republish
+overlap), the reference account `paper-reference-usd500-fee080` and its journal stay untouched and readable, the Judge
+refuses to migrate a v1 ledger to v2 (`test/judge-starting-styles-composition.test.js` STRAT-C04). Fees (the UNVERIFIED
+0.80% taker), limits, execution controls, universe and evaluation are byte-identical to the reference policy — proven at
+module load by `test/paper-e2e-pg.test.js` (the profile policy IS `judge/samples/policy.paper-starting-styles.json` byte
+for byte, and every section but `setups` equals the reference's). `test/paper-runtime.test.js` P-01 pins the file name.
+Reason: the independent review of f32484ca (finding 5) and the owner's directive that every trade strategy be in front
+of the Judge. Learning is not account-bound; the promoter's sealed `policyDigest` binding means any lesson frozen under
+judge-policy-1 does not apply to judge-policy-2 (none had been published).
+
 ### 4.21 Audited change — 2026-09-17 PUBLISH-FIX-51: a decision cancelled as stale is offered again on the next fresh snapshot inside its own 10 s (previous judge digest `df462599953c…`; now `12508ea61c86…`; execution and watch UNCHANGED)
 
 Finding (production 4dd77a32, JUDGE FUNNEL 17:13 local, first line with the fix47 clocks): 17 confirmed decisions, 10

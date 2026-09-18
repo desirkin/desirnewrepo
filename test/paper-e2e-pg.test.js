@@ -9,7 +9,8 @@
 //          PAPER — no private call, no order path, a LIVE run over the paper policy refused.
 // The trade geometry uses the SAME synthetic 0.1% fixture fee as judge-e2e-pg (the reviewed 0.8% reference refuses the fixture
 // geometry by cost: that refusal is proven in judge-cost-capital). Nothing here lowers a threshold: the profile's policy file is
-// asserted byte-identical to judge/samples/policy.paper-reference.json before the fixture copy is derived.
+// asserted byte-identical to its reviewed sample under judge/samples/ (and its fees / limits / execution to the paper
+// reference) before the fixture copy is derived.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -29,7 +30,10 @@ const { loadProfile, applyProfileEnvironment, profileFileOf, FORCED_ENV } = awai
 const PROFILE = loadProfile(); const PENV = { DATABASE_URL: TEST_URL ?? '' }; const applied = applyProfileEnvironment(PROFILE, PENV);
 assert.equal(PENV.JUDGE_MODE, 'PAPER'); assert.equal(PENV.JUDGE_ALLOW_PRIVATE, 'false'); assert.equal(PENV.JUDGE_ALLOW_ORDERS, 'false'); assert.ok(applied.applied.includes('JUDGE_POLICY'));
 const PROFILE_POLICY_FILE = profileFileOf(PROFILE, 'judgePolicy'); assert.equal(path.resolve(PROFILE_POLICY_FILE), path.resolve(PENV.JUDGE_POLICY), 'the environment names the profile policy file');
-const profileRaw = readFileSync(PROFILE_POLICY_FILE, 'utf8'); assert.equal(profileRaw, readFileSync(path.resolve('judge/samples/policy.paper-reference.json'), 'utf8'), 'the paper profile Judge policy IS the reviewed reference, byte for byte');
+// PUBLISH-FIX-62: the profile names the six-setup starting-styles policy (judge-policy-2); it IS its reviewed sample byte for
+// byte, and everything but the setups (fees, limits, execution, universe, evaluation, account capital) is the reference's.
+const profileRaw = readFileSync(PROFILE_POLICY_FILE, 'utf8'); assert.equal(profileRaw, readFileSync(path.resolve('judge/samples/policy.paper-starting-styles.json'), 'utf8'), 'the paper profile Judge policy IS the reviewed starting-styles sample, byte for byte');
+{ const ref = JSON.parse(readFileSync(path.resolve('judge/samples/policy.paper-reference.json'), 'utf8')); const cur = JSON.parse(profileRaw); for (const k of ['fees', 'limits', 'execution', 'universe', 'evaluation', 'mode', 'venue', 'quote', 'costModelVersion']) assert.deepEqual(cur[k], ref[k], `${k} is the reference's`); assert.equal(cur.account.initialCapital, ref.account.initialCapital); assert.equal(cur.setups.enabled.length, 6); }
 const paperRaw = JSON.parse(profileRaw); assert.equal(paperRaw.mode, 'PAPER'); assert.equal(paperRaw.execution.adapter, 'PAPER'); assert.equal(paperRaw.fees.taker.rate, '0.008', 'the reference fee is the UNVERIFIED conservative 0.80% taker (PUBLISH-FIX-19, review F1)');
 const feeOver = { taker: { ...paperRaw.fees.taker, rate: '0.001', scheduleId: 'synthetic-test-fee' } };
 const policyFor = (acct) => { const f = path.join(TEST_DATA, `${acct}.json`); writeFileSync(f, JSON.stringify({ ...paperRaw, policyName: acct, account: { ...paperRaw.account, accountId: acct }, fees: feeOver })); return { file: f, ...loadJudgePolicy(f) }; };
