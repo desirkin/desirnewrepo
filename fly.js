@@ -539,6 +539,9 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     if (decisionOutcomeTimer) { try { clearInterval(decisionOutcomeTimer); } catch { /* timer already cleared */ } decisionOutcomeTimer = null; }
     if (learningStewardTimer) { try { clearInterval(learningStewardTimer); } catch { /* timer already cleared */ } learningStewardTimer = null; }
     if (relookTimer) { try { clearInterval(relookTimer); } catch { /* timer already cleared */ } relookTimer = null; }
+    // PUBLISH-FIX-63: the day's mover board is snapshotted before the process goes, so a republish never forgets it
+    if (moverStudyTimer) { try { clearInterval(moverStudyTimer); } catch { /* timer already cleared */ } moverStudyTimer = null; }
+    if (moverStudy) { try { moverStudy.flush?.(); } catch (err) { console.error(`MOVER STUDY board snapshot at shutdown failed: ${String(err?.message ?? err).slice(0, 160)}`); } }
     if (caseTriggerTimer) { try { clearInterval(caseTriggerTimer); } catch { /* timer already cleared */ } caseTriggerTimer = null; }
     // paper launch seam: components the paper launcher started stop cleanly BEFORE the process exits
     if (typeof globalThis.serpentPaperShutdown === 'function') { try { await globalThis.serpentPaperShutdown(); } catch (err) { console.error(`PAPER shutdown seam failed: ${err.message}`); } }

@@ -22,7 +22,7 @@
 // Authority NONE: it reads closed candles, writes study records and learning episodes. It never nominates, never ranks,
 // never touches the Judge, the wide eye, the controls or the venue.
 import path from 'node:path';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { buildEpisode } from './capture.js';
 import { matureEpisode } from './maturation.js';
@@ -203,6 +203,34 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
   // is written when the day closes, ranked, marking which entries also crossed the threshold. Threshold events remain
   // immediate; the board catches the day's biggest movers that never made 10%.
   let board = { date: null, entries: new Map() };
+  // PUBLISH-FIX-63 (2026-09-18): the day's board used to live only in memory until the day closed (~01:00 UTC, when the
+  // first moment dated tomorrow is an hour old) — every republish threw the day's board away (2026-09-17's board died at
+  // 00:07 UTC with instance 4a193fdc, and the re-look gate that learns from the boards stayed at 0). The board is now
+  // snapshotted to board-<date>.json whenever it changed (once per tick at most, atomic rename), restored at boot, and a
+  // snapshot whose day has already ended is finalized at boot exactly as the live close would have done it.
+  const boardFile = (date) => path.join(dir, `board-${date}.json`);
+  let boardDirty = false;
+  function saveBoard() {
+    if (!boardDirty || !board.date) return; boardDirty = false;
+    try {
+      mkdirSync(dir, { recursive: true }); const f = boardFile(board.date);
+      writeFileSync(`${f}.tmp`, JSON.stringify({ version: MOVER_STUDY_VERSION, date: board.date, savedTs: clock(), entries: [...board.entries.entries()].map(([coin, e]) => [coin, e]) })); renameSync(`${f}.tmp`, f);
+    } catch (err) { counters.errors += 1; log(`MOVER STUDY board snapshot failed: ${bounded(err?.message ?? err)}`); }
+  }
+  function restoreBoards(nowTs) {
+    let files = []; try { files = readdirSync(dir).filter((f) => /^board-\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort(); } catch { return; }
+    for (const f of files) {
+      const date = f.slice(6, 16);
+      let raw = null; try { raw = JSON.parse(readFileSync(path.join(dir, f), 'utf8')); } catch { raw = null; }
+      if (!raw || raw.version !== MOVER_STUDY_VERSION || raw.date !== date || !Array.isArray(raw.entries)) { try { unlinkSync(path.join(dir, f)); } catch { /* best effort */ } continue; }
+      const entries = new Map(raw.entries.filter((x) => Array.isArray(x) && typeof x[0] === 'string' && x[1] && Number.isFinite(x[1].climb) && x[1].picture).map(([coin, e]) => [coin, { climb: e.climb, picture: e.picture, controls: Array.isArray(e.controls) ? e.controls : [], lessons: Array.isArray(e.lessons) ? e.lessons : [], alsoMover: Boolean(e.alsoMover) }]));
+      if (existsSync(path.join(dir, `top-${date}.json`))) { try { unlinkSync(path.join(dir, f)); } catch { /* best effort */ } continue; } // already closed: the snapshot is stale
+      board = { date, entries };
+      // a board whose day has ended closes at the first evaluation of a later day (boardConsider's own date roll), by which
+      // time the learning store is attached and its lessons can be committed exactly as a live close commits them
+      log(`MOVER STUDY: restored the ${date} board from its snapshot (${entries.size} entries)${date === utcDateOf(nowTs - W * MIN) ? ' — a republish no longer forgets the day\'s biggest movers' : ' — its day ended while no instance was alive; it closes at the first evaluation of a later day'}`);
+    }
+  }
   const boardFloor = () => { if (board.entries.size < cfg.topMoversPerDay) return -Infinity; let m = Infinity; for (const e of board.entries.values()) if (e.climb < m) m = e.climb; return m; };
   function drawControls(coin, eventTs, eligible) {
     const seed = createHash('sha256').update(`${coin}|${eventTs}`).digest('hex');
@@ -220,6 +248,8 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
     try { mkdirSync(dir, { recursive: true }); const f = path.join(dir, `top-${board.date}.json`); writeFileSync(`${f}.tmp`, JSON.stringify({ version: MOVER_STUDY_VERSION, date: board.date, top: ranked.map((en, idx) => ({ rank: idx + 1, coin: en.picture.coin, climbPct: en.climb, eventTs: en.picture.eventTs, alsoMover: en.alsoMover, hourBefore: en.picture.hourBefore, hourAfter: en.picture.hourAfter })), closedTs: nowTs })); renameSync(`${f}.tmp`, f); }
     catch (err) { counters.errors += 1; log(`MOVER STUDY top board write failed: ${bounded(err?.message ?? err)}`); }
     const crossed = ranked.filter((en) => en.alsoMover).length;
+    try { unlinkSync(boardFile(board.date)); } catch { /* no snapshot to remove */ }
+    boardDirty = false;
     log(`MOVER STUDY ${board.date} TOP ${ranked.length}: ${ranked.slice(0, 10).map((en, idx) => `${idx + 1}. ${en.picture.coin} +${en.climb}%`).join(', ')}${ranked.length > 10 ? ', …' : ''} (${crossed} of them crossed ${cfg.moveThresholdPct}%; the rest are kept as the day's biggest movers regardless)`);
     board = { date: null, entries: new Map() };
   }
@@ -227,12 +257,12 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
     const date = utcDateOf(eventTs);
     if (board.date !== date) { finalizeBoard(nowTs); board = { date, entries: new Map() }; }
     const prev = board.entries.get(coin);
-    if (prev && climb <= prev.climb) { if (alsoMover) prev.alsoMover = true; return; }
+    if (prev && climb <= prev.climb) { if (alsoMover && !prev.alsoMover) { prev.alsoMover = true; boardDirty = true; } return; }
     if (!prev && board.entries.size >= cfg.topMoversPerDay && climb <= boardFloor()) return;
     const picture = pictureAt(coin, ring, i);
     const ctl = drawControls(coin, eventTs, eligible).map((e) => pictureAt(e.coin, e.ring, e.i));
     const lessons = [lesson(picture, 'TOP', nowTs), ...ctl.map((q) => lesson(q, 'CONTROL', nowTs))].filter(Boolean);
-    board.entries.set(coin, { climb, picture, controls: ctl, lessons, alsoMover: Boolean(alsoMover || prev?.alsoMover) });
+    board.entries.set(coin, { climb, picture, controls: ctl, lessons, alsoMover: Boolean(alsoMover || prev?.alsoMover) }); boardDirty = true;
     if (board.entries.size > cfg.topMoversPerDay) { let worst = null; for (const [c, e] of board.entries) if (!worst || e.climb < worst[1].climb) worst = [c, e]; if (worst) board.entries.delete(worst[0]); }
   }
 
@@ -268,6 +298,7 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
       }
     }
     if (movers) writeSummary();
+    saveBoard();
     if (nowTs - lastLogTs >= 60 * MIN || (movers && nowTs - lastLogTs >= 10 * MIN)) { lastLogTs = nowTs; log(line()); }
     return { movers, controls, coins: rings.size };
   }
@@ -282,5 +313,6 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
   function status() { return { version: MOVER_STUDY_VERSION, createdTs, lastTickTs, coins: rings.size, counters: { ...counters }, today: summary(), config: { ...cfg }, authority: 'NONE' }; }
   function attachStore(s) { learningStore = s; }
   function readDay(date) { try { const f = path.join(dir, `${date}.jsonl`); return existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : []; } catch { return []; } }
-  return { onRecord, tick, status, line, attachStore, readDay, closeDay: (nowTs = clock()) => finalizeBoard(nowTs), _internals: { rings, summary, board: () => board } };
+  restoreBoards(clock());
+  return { onRecord, tick, status, line, attachStore, readDay, closeDay: (nowTs = clock()) => finalizeBoard(nowTs), flush: () => { boardDirty = boardDirty || board.entries.size > 0; saveBoard(); }, _internals: { rings, summary, board: () => board } };
 }

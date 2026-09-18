@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createMoverStudy, candleOfRecord, windowMeasures, MOVER_SETUP_TYPE, MOVER_STUDY_DATASET } from '../learning/mover-study.js';
 import { createLearningStore } from '../learning/store.js';
@@ -119,5 +119,48 @@ test('PUBLISH-FIX-49: the day\'s TOP-N board keeps the biggest climbs regardless
     assert.ok(existsSync(path.join(dir, 'learning', 'mover-study', 'top-2026-09-17.json')));
     assert.ok(log.some((m) => /MOVER STUDY 2026-09-17 TOP 3: 1\. PEPE/.test(m)), log.join(' | '));
     assert.equal(study._internals.board().date, null, 'a fresh board for the next day');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('PUBLISH-FIX-63: the day board survives a republish — snapshotted after a tick and at shutdown, restored by a new instance, closed by the new instance with the same ranked rows and lessons; a snapshot whose day already closed is dropped', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-mover-board-restore-'));
+  try {
+    let now = T0; const log = [];
+    const store = createLearningStore({ dataDir: dir });
+    const first = createMoverStudy({ dataDir: dir, clock: () => now, store, log: (m) => log.push(m), options: { controlsPerMover: 1, topMoversPerDay: 3 } });
+    const end = feed(first, 'PEPE', { top: 112 });
+    feed(first, 'WIF', { top: 106, after: () => 106 });
+    feed(first, 'BONK', { top: 103, after: () => 103 });
+    feed(first, 'BTC', { top: 100.5, after: () => 100.5 });
+    now = end + MIN; first.tick(now);
+    const snapshot = path.join(dir, 'learning', 'mover-study', 'board-2026-09-17.json');
+    assert.ok(existsSync(snapshot), 'the tick snapshotted the board');
+    first.flush();
+    const saved = JSON.parse(readFileSync(snapshot, 'utf8'));
+    assert.equal(saved.date, '2026-09-17'); assert.equal(saved.entries.length, 3);
+    // the process is gone (a republish); a new instance with an EMPTY ring restores the board
+    const log2 = [];
+    const second = createMoverStudy({ dataDir: dir, clock: () => now, store, log: (m) => log2.push(m), options: { controlsPerMover: 1, topMoversPerDay: 3 } });
+    assert.ok(log2.some((m) => /restored the 2026-09-17 board from its snapshot \(3 entries\)/.test(m)), log2.join(' | '));
+    const board = second._internals.board();
+    assert.equal(board.date, '2026-09-17'); assert.deepEqual([...board.entries.keys()].sort(), ['BONK', 'PEPE', 'WIF']);
+    assert.equal(board.entries.get('WIF').lessons.length, 2, 'the lessons rode the snapshot');
+    // the new instance closes the day exactly as the live close would have
+    const before = store.readEpisodes().length;
+    second.closeDay(now + 60 * MIN);
+    const top = second.readDay('2026-09-17').filter((x) => x.kind === 'DAILY_TOP').sort((a, b) => a.rank - b.rank);
+    assert.deepEqual(top.map((x) => [x.rank, x.coin, x.alsoMover]), [[1, 'PEPE', true], [2, 'WIF', false], [3, 'BONK', false]]);
+    assert.ok(store.readEpisodes().length - before >= 2, `WIF and BONK became lessons through the restored board (+${store.readEpisodes().length - before}; their controls were already lessons of the MOVER event)`);
+    assert.ok(['WIF', 'BONK'].every((c) => store.readEpisodes().some((e) => e.canonicalCoin === c && e.setupType === MOVER_SETUP_TYPE)));
+    assert.equal(existsSync(snapshot), false, 'the snapshot is removed once the day is written');
+    assert.ok(existsSync(path.join(dir, 'learning', 'mover-study', 'top-2026-09-17.json')));
+    // a third instance finds a snapshot for a day that already has its top file: dropped, not restored
+    writeFileSync(snapshot, JSON.stringify(saved));
+    const third = createMoverStudy({ dataDir: dir, clock: () => now + 60 * MIN, store, options: { controlsPerMover: 1, topMoversPerDay: 3 } });
+    assert.equal(third._internals.board().date, null); assert.equal(existsSync(snapshot), false);
+    // a malformed snapshot is dropped too
+    writeFileSync(path.join(dir, 'learning', 'mover-study', 'board-2026-09-16.json'), '{not json');
+    const fourth = createMoverStudy({ dataDir: dir, clock: () => now, store, options: { topMoversPerDay: 3 } });
+    assert.equal(fourth._internals.board().date, null); assert.equal(existsSync(path.join(dir, 'learning', 'mover-study', 'board-2026-09-16.json')), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
