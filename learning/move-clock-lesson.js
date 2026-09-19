@@ -37,16 +37,27 @@ export function moveClockLessonOf(records, { armAt = MOVE_CLOCK_LESSON_DEFAULTS.
 export function createMoveClockLesson({ dataDir, clock = () => Date.now(), log = () => {}, options = {} } = {}) {
   const cfg = { ...MOVE_CLOCK_LESSON_DEFAULTS, ...options };
   const dir = path.join(dataDir, 'learning', 'mover-study');
+  // PUBLISH-FIX-78: the archive backfill (learning/mover-backfill.js) writes the same records under its own root; the lesson reads
+  // both, the live study's record winning when both saw the same climb (same coin, same minute)
+  const backfillDir = path.join(dataDir, 'mover-backfill', 'learning', 'mover-study');
   let lesson = moveClockLessonOf([], { ...cfg, nowTs: clock() });
-  let lastLogged = null;
-  function readDays(nowTs) {
+  let lastLogged = null; let sources = { live: 0, backfill: 0 };
+  function readDir(base, nowTs) {
     const out = [];
     for (let d = 0; d < cfg.days; d += 1) {
-      const f = path.join(dir, `${utcDateOf(nowTs - d * DAY)}.jsonl`);
+      const f = path.join(base, `${utcDateOf(nowTs - d * DAY)}.jsonl`);
       if (!existsSync(f)) continue;
       let text = ''; try { text = readFileSync(f, 'utf8'); } catch { continue; }
       for (const line of text.split('\n')) { if (!line) continue; try { const r = JSON.parse(line); if (r && r.kind === 'MOVER') out.push(r); } catch { /* a torn line is skipped */ } }
     }
+    return out;
+  }
+  function readDays(nowTs) {
+    const seen = new Set(); const out = []; const counts = { live: 0, backfill: 0 };
+    for (const [name, base] of [['live', dir], ['backfill', backfillDir]]) {
+      for (const r of readDir(base, nowTs)) { const k = Number.isFinite(r.eventTs) ? `${r.coin}|${r.eventTs}` : null; if (k) { if (seen.has(k)) continue; seen.add(k); } out.push(r); if (r.moveClock) counts[name] += 1; }
+    }
+    sources = counts;
     return out;
   }
   function refresh() {
@@ -57,10 +68,11 @@ export function createMoveClockLesson({ dataDir, clock = () => Date.now(), log =
     if (key !== lastLogged) { lastLogged = key; log(line()); }
     return lesson;
   }
+  const from = () => (sources.backfill ? ` (${sources.backfill} of them replayed from the archive)` : '');
   function line() {
     const l = lesson;
-    if (l.state !== 'ARMED') return `MOVE CLOCK: DORMANT (${l.movers} of ${l.armAt} movers measured over ${l.days} days; the Judge records each look's move age but refuses nothing on it yet)`;
-    return `MOVE CLOCK: ARMED from ${l.movers} movers — a move typically tops out at minute ${l.medianMin} (three of four by minute ${l.p75Min}); the Judge refuses a coin whose own move is ${l.lateMin}+ minutes old (MOVE_TOO_OLD)`;
+    if (l.state !== 'ARMED') return `MOVE CLOCK: DORMANT (${l.movers} of ${l.armAt} movers measured over ${l.days} days${from()}; the Judge records each look's move age but refuses nothing on it yet)`;
+    return `MOVE CLOCK: ARMED from ${l.movers} movers${from()} — a move typically tops out at minute ${l.medianMin} (three of four by minute ${l.p75Min}); the Judge refuses a coin whose own move is ${l.lateMin}+ minutes old (MOVE_TOO_OLD)`;
   }
-  return { refresh, lesson: () => lesson, line, status: () => ({ ...lesson, config: { ...cfg } }) };
+  return { refresh, lesson: () => lesson, line, status: () => ({ ...lesson, sources: { ...sources }, config: { ...cfg } }) };
 }
