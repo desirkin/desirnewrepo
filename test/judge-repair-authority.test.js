@@ -36,7 +36,7 @@ test('R01-01. KILL latched after the durable intent and before the send: deferre
   const blocker = r.d.enqueue('SAFETY', () => gate); const deferred = r.d.enqueue('SAFETY', () => r.d.dispatchEntry('o1'));
   await r.d.commit(r.F.restriction('KILL')); release(); await blocker; const res = await deferred;
   assert.equal(r.ad.calls.entries.length, 0, 'R01-01: zero new-entry transport calls after KILL'); assert.equal(res.sent, false); assert.match(res.reason, /KILL/);
-  const s = r.d.state(); assert.equal(s.orders.o1.state, 'CANCELLED'); assert.equal(s.reservations.r1.state, 'RELEASED'); assert.equal(s.reservations.r1.releaseReason, 'REFUSED_AT_REVALIDATION'); assert.equal(M.toStatistic(s.cash), 500); assert.equal(s.positions.p1.state, 'SHELL');
+  const s = r.d.state(); assert.equal(s.orders.o1.state, 'CANCELLED'); assert.equal(s.reservations.r1.state, 'RELEASED'); assert.equal(s.reservations.r1.releaseReason, 'REFUSED_AT_REVALIDATION'); assert.equal(M.toStatistic(s.cash), 500); assert.equal(s.positions.p1.state, 'FLAT', 'PUBLISH-FIX-83 item 3: the refused entry does not leave a SHELL holding the slot'); assert.equal(s.pins?.['XBT/USD'] ?? null, null, 'and its pin is released');
 });
 
 test('R01-02. the LIVE authorization expires between the durable intent and the send: zero sends; a still-active authorization sends exactly once', async () => {

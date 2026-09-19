@@ -7,7 +7,7 @@
 // Lease loss (EPOCH_FENCED / WRITER_LOST) closes admission and the sender immediately; late callbacks are fenced from
 // granting permission but their native fills stay recorded through the current owner's reconciliation.
 import { makeEvent } from './contract.js';
-import { JournalError } from './journal.js';
+import { JournalError, reduceBatch } from './journal.js';
 import { TERMINAL_ORDER_STATES } from './contract.js';
 import * as M from './money.js';
 import { entryAuthority, UNCHECKED } from './authority.js';
@@ -48,8 +48,8 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
   // an uncertain commit outcome (connection died after send): re-read by immutable event id; never append again
   async function rereadOrCommit(events) { counters.uncertainRereads += 1; if (typeof journal.findEvent === 'function') { const found = await journal.findEvent(accountId, events[0].eventId); if (found) { await load(); return { rereadSeq: found.seq, state }; } } return commit(events); }
   // ---- adapter events: safety class, receipt order, never dropped ------------------------------------------------------------
-  function mapAdapterEvent(ae) {
-    const p = ae.payload; const s = state;
+  function mapAdapterEvent(ae, against = state) {
+    const p = ae.payload; const s = against;
     // a child fill names its native id: booked against THAT child's journal order (any child of the set), never a convenient one
     if (ae.type === 'EXECUTION_RECORDED' && p.orderId === null && p.nativeOrderId) { for (const pos of Object.values(s.positions)) { const child = Object.values(pos.protection.children ?? {}).find((c) => c.nativeOrderId === p.nativeOrderId && c.orderId && s.orders[c.orderId]); if (child) return [ev('EXECUTION_RECORDED', { ...p, orderId: child.orderId })]; } if (p.ordRefId) return [ev('EXTERNAL_ACTIVITY', { kind: 'FILL', ref: p.execId, asset: null, amount: p.base, sourceTs: p.sourceTs, receiptTs: p.receiptTs, note: 'child fill without a recorded protective order' })]; }
     if (ae.type === 'EXECUTION_RECORDED' && p.orderId === null) return [ev('EXTERNAL_ACTIVITY', { kind: 'FILL', ref: p.execId, asset: null, amount: p.base, sourceTs: p.sourceTs, receiptTs: p.receiptTs, note: 'unattributed execution' })];
@@ -66,11 +66,31 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     if (ae.type === 'ORDER_STATE' && !s.orders[p.orderId]) return [ev('EXTERNAL_ACTIVITY', { kind: 'ORDER', ref: p.nativeOrderId ?? p.orderId, asset: null, amount: null, sourceTs: p.sourceTs, receiptTs: p.receiptTs, note: 'state for an unknown order' })];
     return [ev(ae.type, p)];
   }
+  // PUBLISH-FIX-83 (full review item 4): the paper adapter emits a fill, its ORDER_STATE and the protective stop's PENDING and ACTIVE
+  // in ONE synchronous burst, but every mapped event was committed in its own journal round trip (the ACTIVE expands to four) — on
+  // the production journal the stop became durable ~6 commits after the fill, and the Watch (protection ACTIVE within 2 s of the
+  // first fill) latched PROTECTION_MISMATCH and flattened the position at market on the very first bite. A burst is now committed as
+  // ONE append (the reducer applies the events in order); a reducer refusal of the batch falls back to the one-by-one law below, so
+  // duplicate executions and orphans are handled exactly as before. Receipt order is kept: bursts are drained in arrival order.
+  async function applyAdapterEvents(list) {
+    if (closed || writerLost) { counters.fencedCallbacks += list.length; log(`${list.length} adapter event(s) after ${closed ? 'close' : 'lease loss'}: fenced (owner reconciliation books them)`); return null; }
+    if (list.length === 1) return applyAdapterEvent(list[0]);
+    if (revision === null) await load();
+    // each event is mapped against the state the PREVIOUS events of the burst produce (the stop's qty is the filled base, the
+    // child is known once its intent is in the batch): the pure reducer projects, nothing is appended until the whole burst maps
+    let mapped = []; let batched = false;
+    try { let s = state; for (const ae of list) { const evs = mapAdapterEvent(ae, s); s = reduceBatch(s, evs).state; mapped.push(...evs); } }
+    catch (err) { if (err.code !== 'REDUCER_REFUSED') throw err; log(`adapter burst of ${list.length} does not project as one commit (${err.detail?.code ?? err.code}); applying one by one`); mapped = null; }
+    if (mapped && mapped.length) { try { await commit(mapped); counters.adapterEvents += list.length; counters.adapterBatches = (counters.adapterBatches ?? 0) + 1; batched = true; } catch (err) { if (err.code !== 'REDUCER_REFUSED' && err.code !== 'RECHECK_FAILED' && err.code !== 'REVISION_CONFLICT') throw err; log(`adapter burst of ${list.length} refused as one commit (${err.detail?.code ?? err.code}); applying one by one`); } }
+    if (!batched) { for (const ae of list) { try { await applyAdapterEvent(ae); } catch (err) { log(`adapter event ${ae?.type} failed: ${err.message}`); } } return null; } // each event isolated exactly as when each was its own job
+    for (const ae of list) await afterAdapterEvent(ae);
+    return null;
+  }
   async function applyAdapterEvent(ae) {
     // a late callback after close / lease loss is fenced here: logged, never committed, never thrown into the socket (closeout R16 / E09)
     if (closed || writerLost) { counters.fencedCallbacks += 1; log(`adapter event ${ae?.type} after ${closed ? 'close' : 'lease loss'}: fenced (owner reconciliation books it)`); return null; }
     counters.adapterEvents += 1; if (revision === null) await load();
-    const events = mapAdapterEvent(ae); for (const e of events) { try { await commit(e); } catch (err) { if (err.code === 'REDUCER_REFUSED' && ['DUPLICATE_EXECUTION'].includes(err.detail?.code)) continue; if (err.code === 'REDUCER_REFUSED') { log(`adapter event ${ae.type} refused: ${err.message}`); try { await commit(ev('RESTRICTION', { code: 'RECONCILIATION_REQUIRED', action: 'LATCH', scope: null, source: 'dispatcher', sessionDate: null, reason: `${ae.type} refused: ${err.detail?.code ?? err.code}`.slice(0, 200), ownerRef: null, ts: now() })); } catch { /* fenced or closed */ } continue; } throw err; } }
+    const events = mapAdapterEvent(ae); for (const e of events) { try { await commit(e); } catch (err) { if (err.code === 'EVENT_DUPLICATE') continue; /* PUBLISH-FIX-83: an identical event is already durable — booked once, never a failure */ if (err.code === 'REDUCER_REFUSED' && ['DUPLICATE_EXECUTION'].includes(err.detail?.code)) continue; if (err.code === 'REDUCER_REFUSED') { log(`adapter event ${ae.type} refused: ${err.message}`); try { await commit(ev('RESTRICTION', { code: 'RECONCILIATION_REQUIRED', action: 'LATCH', scope: null, source: 'dispatcher', sessionDate: null, reason: `${ae.type} refused: ${err.detail?.code ?? err.code}`.slice(0, 200), ownerRef: null, ts: now() })); } catch { /* fenced or closed */ } continue; } throw err; } }
     // RESERVATION SETTLEMENT (2026-09-14): a reservation is an entry's cash/risk hold. Once the venue reports the entry order
     // TERMINAL (FILLED / EXPIRED / CANCELLED / REJECTED), the hold must be settled EXACTLY ONCE: the consumed part becomes the
     // position's cost, the unused remainder is released. Before this seam the only settlement paths were pre-send refusals and
@@ -78,7 +98,10 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     // forever: available cash was double-debited (cash already spent AND still reserved), the asset stayed "held" after the
     // position went FLAT and the slot never came back. One trade froze the account. settleReservation is idempotent (it
     // refuses unless the reservation is still OPEN and the order is terminal) and its release math is the existing law.
-    if (ae.type === 'ORDER_STATE' && TERMINAL_ORDER_STATES.includes(ae.payload?.state)) { const o = state.orders[ae.payload.orderId]; if (o && o.reservationId && (o.kind === 'ENTRY' || o.kind === 'CANARY_ENTRY')) { try { await settleReservation(o.orderId); } catch (err) { if (err.code === 'REDUCER_REFUSED') { log(`reservation settlement refused for ${o.orderId}: ${err.message}`); } else throw err; } } }
+    await afterAdapterEvent(ae);
+  }
+  async function afterAdapterEvent(ae) {
+    if (ae.type === 'ORDER_STATE' && TERMINAL_ORDER_STATES.includes(ae.payload?.state)) { const o = state.orders[ae.payload.orderId]; if (o && o.reservationId && (o.kind === 'ENTRY' || o.kind === 'CANARY_ENTRY')) { try { await settleReservation(o.orderId); } catch (err) { if (err.code === 'REDUCER_REFUSED') { log(`reservation settlement refused for ${o.orderId}: ${err.message}`); } else throw err; } } if (o && entryKind(o)) await flattenUnfilledShell(o.orderId, `${ae.payload.state}: ${ae.payload.reason ?? 'no fill'}`); /* PUBLISH-FIX-83 item 3 */ }
   }
   // two INDEPENDENT serialized pumps (closeout R08): a slow entry send never holds fill / protection / reconciliation work; the safety
   // bound is never a drop — an overflow latches OVERLOAD (no new entries) with the fills still processed
@@ -88,7 +111,10 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
   async function pumpSafety() { if (pumping) return; pumping = true; try { for (;;) { const next = safety.shift(); if (!next) break; latency.queueToCompute.push(now() - next.enqueuedTs); if (latency.queueToCompute.length > 2048) latency.queueToCompute.shift(); try { next.resolve(await next.job()); } catch (err) { next.reject(err); } } } finally { pumping = false; } }
   async function pumpEntry() { if (pumpingEntry) return; pumpingEntry = true; try { for (;;) { const next = entries.shift(); if (!next) break; latency.queueToCompute.push(now() - next.enqueuedTs); if (latency.queueToCompute.length > 2048) latency.queueToCompute.shift(); try { next.resolve(await next.job()); } catch (err) { next.reject(err); } } } finally { pumpingEntry = false; } }
   const pump = () => { pumpSafety(); pumpEntry(); };
-  if (adapter?.subscribe) adapter.subscribe((ae) => { enqueue('SAFETY', () => applyAdapterEvent(ae)).catch((err) => log(`adapter event failed: ${err.message}`)); });
+  // PUBLISH-FIX-83 item 4: adapter events emitted in one synchronous burst are drained as one SAFETY job (one commit); a burst is
+  // closed by the microtask boundary, so events from different turns never mix and receipt order is kept
+  let burst = null;
+  if (adapter?.subscribe) adapter.subscribe((ae) => { if (burst) { burst.push(ae); return; } const list = [ae]; burst = list; queueMicrotask(() => { if (burst === list) burst = null; }); enqueue('SAFETY', async () => { await Promise.resolve(); if (burst === list) burst = null; return applyAdapterEvents(list); }).catch((err) => log(`adapter event failed: ${err.message}`)); });
   // ---- the durable outbox -> wire -> acknowledgement path ----------------------------------------------------------------------
   // the current entry authority for ONE unsent intent on the state the journal holds NOW (never a cached precomputation)
   function permissionIncreaseGate() {
@@ -129,7 +155,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
   // either wins first (compensation refuses) or loses its recheck (no send).
   async function compensateUnattemptedEntry(orderId, reasonCode = 'ENTRY_QUEUE_REFUSED') {
     await load(); // authoritative journal head, never an in-memory absence inference
-    if (compensatedEntry(state, orderId)) { try { feed?.release?.(state.orders[orderId].pair, { force: true }); } catch { /* journal truth already says unpinned */ } return { outcome: 'EXISTING', orderId }; }
+    if (compensatedEntry(state, orderId)) { try { (feed?.unpin ?? ((sym) => feed?.release?.(sym, { force: true })))(state.orders[orderId].pair); } catch { /* journal truth already says unpinned */ } return { outcome: 'EXISTING', orderId }; }
     const o = state.orders?.[orderId];
     if (!o) throw new JournalError('ORDER_UNKNOWN', orderId);
     if (!entryKind(o)) throw new JournalError('ENTRY_COMPENSATION_REFUSED', `${orderId} is ${o.kind}: exits/protection are never entry compensation`);
@@ -147,7 +173,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
       if (error?.code === 'RECHECK_FAILED') { await load(); if (compensatedEntry(state, orderId)) return { outcome: 'EXISTING', orderId }; }
       throw error;
     }
-    try { feed?.release?.(o.pair, { force: true }); } catch { /* durable release is authoritative; caller can reconcile its feed */ }
+    try { (feed?.unpin ?? ((sym) => feed?.release?.(sym, { force: true })))(o.pair); } catch { /* durable release is authoritative; caller can reconcile its feed */ }
     counters.queueCompensations += 1;
     return { outcome: 'COMPENSATED', orderId, reason };
   }
@@ -157,13 +183,28 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
       throw error;
     });
   }
-  async function refuseUnsent(o, reasons) { counters.authorityRefusals += 1; const t = now(); await commit(ev('ORDER_STATE', { orderId: o.orderId, state: 'CANCELLED', nativeOrderId: null, nativeCumQty: '0', reason: `authority refused before dispatch: ${reasons.join(',')}`.slice(0, 300), sourceTs: null, receiptTs: t })); const r = o.reservationId ? state.reservations[o.reservationId] : null; if (r && r.state === 'OPEN') await commit(ev('RESERVATION_RELEASED', { reservationId: r.reservationId, reason: 'REFUSED_AT_REVALIDATION', releasedCash: r.cashReserved, releasedRisk: r.riskReserved, ts: t })); return { outcome: 'REJECTED', nativeOrderId: null, reason: `AUTHORITY_REFUSED:${reasons.join(',')}`.slice(0, 120), guaranteesNoAcceptance: true, sent: false, reasons }; }
+  // PUBLISH-FIX-83 (full review item 3): an entry that ends TERMINAL with nothing filled left its position in SHELL, and a SHELL counts as
+  // a held slot (reducer heldPositions / slotsUsed) — with maxSimultaneousAssetPositions 1 the account was frozen after the first miss
+  // (SLOTS_EXHAUSTED) and nothing ever closed it. Now every such SHELL is closed FLAT with its pin released, idempotently, from every
+  // terminal path: the pre-send refusal, the venue REJECTED, the unfilled/expired adapter result. The same four-event law as
+  // compensateUnattemptedEntry, on the journal head, with a recheck.
+  const unfilledShell = (s, orderId) => { const o = s?.orders?.[orderId]; if (!o || !entryKind(o) || !TERMINAL_ORDER_STATES.includes(o.state) || !M.isZero(o.filledBase ?? '0')) return null; const pos = s.positions?.[o.positionId]; if (!pos || pos.state !== 'SHELL' || !M.isZero(pos.confirmedBase ?? '0') || !M.isZero(pos.pendingEntryBase ?? '0')) return null; if (Object.values(s.orders).some((x) => x.positionId === o.positionId && !TERMINAL_ORDER_STATES.includes(x.state))) return null; if (['ACTIVE', 'PENDING', 'AMEND_PENDING', 'CANCEL_PENDING', 'MISMATCH'].includes(pos.protection?.state)) return null; return { o, pos }; };
+  async function flattenUnfilledShell(orderId, why) {
+    if (revision === null) await load(); const found = unfilledShell(state, orderId); if (!found) return null;
+    const { o } = found; const t = now(); const reason = `entry unfilled: ${String(why).slice(0, 80)}`; counters.shellsFlattened = (counters.shellsFlattened ?? 0) + 1;
+    const events = [ev('POSITION_CLOSED', { positionId: o.positionId, reason, residualBase: '0', state: 'FLAT', ts: t }), ev('FEED_PIN', { symbol: o.pair, action: 'RELEASE', reason, ts: t })];
+    try { await commit(events, { retryOnConflict: true, recheck: (cur) => Boolean(unfilledShell(cur, orderId)) }); } catch (err) { if (err.code === 'RECHECK_FAILED' || err.code === 'REDUCER_REFUSED') { log(`shell flatten for ${orderId} not applied: ${err.message}`); return null; } throw err; }
+    try { (feed?.unpin ?? ((sym) => feed?.release?.(sym, { force: true })))(o.pair); } catch { /* journal truth already says unpinned */ }
+    return { positionId: o.positionId };
+  }
+  async function refuseUnsent(o, reasons) { counters.authorityRefusals += 1; const t = now(); await commit(ev('ORDER_STATE', { orderId: o.orderId, state: 'CANCELLED', nativeOrderId: null, nativeCumQty: '0', reason: `authority refused before dispatch: ${reasons.join(',')}`.slice(0, 300), sourceTs: null, receiptTs: t })); const r = o.reservationId ? state.reservations[o.reservationId] : null; if (r && r.state === 'OPEN') await commit(ev('RESERVATION_RELEASED', { reservationId: r.reservationId, reason: 'REFUSED_AT_REVALIDATION', releasedCash: r.cashReserved, releasedRisk: r.riskReserved, ts: t })); await flattenUnfilledShell(o.orderId, `refused before dispatch: ${reasons.join(',')}`); return { outcome: 'REJECTED', nativeOrderId: null, reason: `AUTHORITY_REFUSED:${reasons.join(',')}`.slice(0, 120), guaranteesNoAcceptance: true, sent: false, reasons }; }
   async function dispatchEntry(orderId) {
     if (revision === null) await load(); const o = state.orders[orderId]; if (!o) throw new JournalError('ORDER_UNKNOWN', orderId); if (o.state !== 'UNSENT') throw new JournalError('NOT_UNSENT', `${orderId} is ${o.state}: never resend`);
     // (1) after the queue wait, before the durable attempt: refuse and release while the intent is still unsent
     const a1 = authorityOf(orderId); if (!a1.ok) return refuseUnsent(o, a1.reasons);
     const attemptId = `att-${orderId}`; const t0 = now(); const revisionSeen = revision;
-    try { await commit(ev('DISPATCH_ATTEMPTED', { orderId, attemptId, adapter: adapter.kind, ts: t0 }), { retryOnConflict: true, recheck: () => authorityOf(orderId).ok }); }
+    const intentWindow = Number.isSafeInteger(o.deadlineTs) && Number.isSafeInteger(o.createdTs) ? o.deadlineTs - o.createdTs : null; // PUBLISH-FIX-83 item 2: the deadline clock restarts at the durable attempt
+    try { await commit(ev('DISPATCH_ATTEMPTED', { orderId, attemptId, adapter: adapter.kind, ts: t0, ...(intentWindow !== null && intentWindow > 0 ? { deadlineTs: t0 + intentWindow } : {}) }), { retryOnConflict: true, recheck: () => authorityOf(orderId).ok }); }
     catch (err) { if (err.code === 'RECHECK_FAILED') { const a2 = authorityOf(orderId); if (state.orders[orderId]?.state === 'UNSENT') return refuseUnsent(state.orders[orderId], a2.reasons.length ? a2.reasons : ['STATE_CHANGED']); } throw err; }
     // (2) after the commit await, immediately before the actual send: the attempt is durable, so a refusal is a REJECTED result that no venue ever saw
     // the revision may have moved (other safety commits are legitimate); what must hold is the current state's authority and that OUR attempt is the one unresolved attempt
@@ -173,7 +214,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     latency.journalToSend.push(now() - t0); if (latency.journalToSend.length > 2048) latency.journalToSend.shift();
     const res = ev('DISPATCH_RESULT', { orderId, attemptId, outcome: result.outcome, nativeOrderId: result.nativeOrderId ?? null, reason: result.reason ?? null, sourceTs: null, receiptTs: now(), guaranteesNoAcceptance: Boolean(result.guaranteesNoAcceptance) });
     try { await commit(res); } catch (err) { if (err.code === 'REVISION_CONFLICT' || err.code === 'RECHECK_FAILED') await rereadOrCommit([res]); else throw err; }
-    if (result.outcome === 'REJECTED' && result.guaranteesNoAcceptance && o.reservationId) { const r = state.reservations[o.reservationId]; if (r && r.state === 'OPEN') await commit(ev('RESERVATION_RELEASED', { reservationId: o.reservationId, reason: 'REJECTED_BY_VENUE', releasedCash: r.cashReserved, releasedRisk: r.riskReserved, ts: now() })); }
+    if (result.outcome === 'REJECTED' && result.guaranteesNoAcceptance && o.reservationId) { const r = state.reservations[o.reservationId]; if (r && r.state === 'OPEN') await commit(ev('RESERVATION_RELEASED', { reservationId: o.reservationId, reason: 'REJECTED_BY_VENUE', releasedCash: r.cashReserved, releasedRisk: r.riskReserved, ts: now() })); } if (result.outcome === 'REJECTED' && result.guaranteesNoAcceptance) await flattenUnfilledShell(orderId, `rejected: ${result.reason ?? 'venue'}`); /* PUBLISH-FIX-83 item 3 */
     return result;
   }
   // release a reservation exactly once after its entry order is terminal and reconciled (unused part only)

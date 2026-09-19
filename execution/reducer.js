@@ -13,7 +13,7 @@ const HARD_RESTRICTIONS = Object.freeze(['KILL', 'RECONCILIATION_REQUIRED', 'PRO
 export const ENTRY_BLOCKING_RESTRICTIONS = Object.freeze([...HARD_RESTRICTIONS, 'CAGE', 'DAILY_LOSS', 'PEAK_DRAWDOWN', 'GAIN_LOCK_PROTECT', 'GAIN_LOCK_HARD', 'FEED_IMPAIRED', 'FEE_BOUND_MISMATCH', 'ARM_EXPIRED', 'OWNER_LIMITS_REQUIRED', 'OVERLOAD', 'PAPER_LIQUIDITY_UNCERTAIN']);
 
 export function emptyAccountState(accountId) {
-  return { stateVersion: ACCOUNT_STATE_VERSION, accountId, initialized: false, accountKind: null, mode: 'OBSERVE', venue: null, quote: null, initialCapital: null, policyDigest: null, policyVersion: null, ownerRef: null, limits: null, compounding: null,
+  return { stateVersion: ACCOUNT_STATE_VERSION, accountId, initialized: false, accountKind: null, mode: 'OBSERVE', modeTs: null, venue: null, quote: null, initialCapital: null, policyDigest: null, policyVersion: null, ownerRef: null, limits: null, compounding: null,
     cash: '0', externalFlows: '0', flowsUnknown: false, reservations: {}, orders: {}, positions: {}, hypotheses: {}, decisions: {}, decisionOrder: [], execIds: {}, execOrder: [], externalActivity: [], authorization: null, authorizations: {}, canaryEvidence: null,
     restrictions: {}, vetoes: [], valuation: { ts: null, equity: null, cashComponent: null, liquidationComponent: null, unknown: true, reason: 'NO_VALUATION' },
     performance: { highWater: null, riskPerformanceEquity: null, drawdown: null, session: null }, realized: { pnl: '0', fees: '0', baseFees: {} }, lastReconciliation: null, clockAnchor: null, pins: {}, adjustments: {},
@@ -54,7 +54,7 @@ const HANDLERS = {
   ACCOUNT_INITIALIZED(s, p, ev) {
     if (s.initialized) refuse('ACCOUNT_ALREADY_INITIALIZED', 'refusing to reset an existing account (no implicit deposit)');
     Object.assign(s, { initialized: true, accountKind: p.accountKind, venue: p.venue, quote: p.quote, initialCapital: p.initialCapital, policyDigest: p.policyDigest, policyVersion: p.policyVersion, ownerRef: p.ownerRef, limits: p.limits, compounding: p.compounding, cash: p.initialCapital, externalFlows: '0' });
-    s.mode = p.accountKind === 'LIVE' ? 'LIVE_UNARMED' : p.accountKind === 'REPLAY' ? 'REPLAY' : p.accountKind === 'SHADOW' ? 'REPLAY' : 'PAPER';
+    s.mode = p.accountKind === 'LIVE' ? 'LIVE_UNARMED' : p.accountKind === 'REPLAY' ? 'REPLAY' : p.accountKind === 'SHADOW' ? 'REPLAY' : 'PAPER'; s.modeTs = p.clockAnchorTs ?? null;
     s.valuation = { ts: ev.knownAtTs, equity: p.initialCapital, cashComponent: p.initialCapital, liquidationComponent: '0', unknown: false, reason: 'INITIAL' };
     s.performance = { highWater: p.initialCapital, riskPerformanceEquity: p.initialCapital, drawdown: 0, session: { date: p.sessionDate, openingEquity: p.initialCapital, openingFlows: '0', dayPnl: '0', dayLossFraction: 0 } };
     s.clockAnchor = { anchorUtcTs: p.clockAnchorTs, trusted: true, source: 'LOCAL_WALL', watermarkTs: p.clockAnchorTs };
@@ -77,7 +77,7 @@ const HANDLERS = {
     // after queue refusal proves the opposite: it was never offered to the
     // venue and therefore cannot be canary evidence.
     if (p.reason === 'COMPLETED') { if (a.kind !== 'CANARY') refuse('CANARY_ONLY', 'COMPLETED is the outcome of a canary authorization'); const entries = Object.values(s.orders).filter((o) => o.kind === 'CANARY_ENTRY'); if (!entries.length) refuse('CANARY_INCOMPLETE', 'no canary entry was dispatched'); if (entries.some((o) => !Array.isArray(o.attempts) || o.attempts.length === 0)) refuse('CANARY_INCOMPLETE', 'a canary entry never reached the durable dispatch-attempt boundary'); if (entries.some((o) => !TERMINAL_ORDER_STATES.includes(o.state))) refuse('CANARY_INCOMPLETE', 'a canary entry is not terminal'); if (Object.values(s.orders).some((o) => o.state === 'DISPATCH_UNCERTAIN')) refuse('CANARY_INCOMPLETE', 'an uncertain dispatch is unresolved'); if (entries.some((o) => s.positions[o.positionId] && s.positions[o.positionId].state !== 'FLAT')) refuse('CANARY_INCOMPLETE', 'the canary position is not flat'); s.canaryEvidence = { authorizationId: a.authorizationId, releaseDigest: a.releaseDigest, policyDigest: a.policyDigest, codeDigest: a.codeDigest, completedTs: p.ts, entries: entries.length, filled: entries.filter((o) => o.state === 'FILLED').length }; }
-    a.ended = true; a.endedReason = p.reason; if (s.authorization?.authorizationId === p.authorizationId) { s.authorization = a; if (s.mode === 'LIVE_ARMED') s.mode = 'REDUCE_ONLY'; } },
+    a.ended = true; a.endedReason = p.reason; if (s.authorization?.authorizationId === p.authorizationId) { s.authorization = a; if (s.mode === 'LIVE_ARMED') { s.mode = 'REDUCE_ONLY'; s.modeTs = p.ts ?? s.modeTs; } } },
   // PUBLISH-FIX-69: a hypothesis lives in the account state only while its decision is still owed. Before, every HYPOTHESIS_LOCKED
   // stayed forever (9,303 in 20 h on 794afa2b) and the state JSON every commit re-reads and re-writes grew without bound — the
   // journal commit went from 2 s to 10 s over one day and 65% of decisions ended NEEDS_DATA. The law is unchanged: a sized decision
@@ -141,7 +141,12 @@ const HANDLERS = {
     }
     s.orders[p.orderId] = { ...p, state: 'UNSENT', filledBase: '0', filledQuote: '0', feesQuote: '0', feesBase: '0', attempts: [], nativeOrderId: null, priorState: null, guaranteesNoAcceptance: false, terminalTs: null, mismatch: null };
   },
-  DISPATCH_ATTEMPTED(s, p) { const o = orderOf(s, p.orderId); if (o.state !== 'UNSENT') refuse('DISPATCH_NOT_UNSENT', `${o.state}: never blind-resubmit`); if (o.attempts.length) refuse('DISPATCH_REPEATED', 'one dispatch attempt per order intent'); o.attempts.push({ attemptId: p.attemptId, ts: p.ts, adapter: p.adapter, outcome: null }); o.state = 'DISPATCH_UNCERTAIN'; },
+  // PUBLISH-FIX-83 (full review item 2): the intent's deadline was measured from the decision clock D and had to cover two serialized
+  // journal commits (the intent's and this attempt's) that take seconds each on the production journal — the entry was refused as
+  // INTENT_DEADLINE_PASSED before it was ever sent. The attempt may carry `deadlineTs` = its own durable clock + the intent's own window;
+  // the order's deadline moves to it (never earlier, never wider than the intent's window). Price staleness stays guarded by
+  // QUOTE_NOT_FRESH (a book at most 1 s old) and the limit price. The rebase is in the journal: `deadlineRebasedFrom` keeps the original.
+  DISPATCH_ATTEMPTED(s, p) { const o = orderOf(s, p.orderId); if (o.state !== 'UNSENT') refuse('DISPATCH_NOT_UNSENT', `${o.state}: never blind-resubmit`); if (o.attempts.length) refuse('DISPATCH_REPEATED', 'one dispatch attempt per order intent'); o.attempts.push({ attemptId: p.attemptId, ts: p.ts, adapter: p.adapter, outcome: null }); o.state = 'DISPATCH_UNCERTAIN'; if (Number.isSafeInteger(p.deadlineTs) && Number.isSafeInteger(o.deadlineTs) && p.deadlineTs > o.deadlineTs) { const window = Number.isSafeInteger(o.createdTs) ? o.deadlineTs - o.createdTs : null; if (window !== null && p.deadlineTs <= p.ts + window) { o.deadlineRebasedFrom = o.deadlineRebasedFrom ?? o.deadlineTs; o.deadlineTs = p.deadlineTs; } } },
   DISPATCH_RESULT(s, p) {
     const o = orderOf(s, p.orderId); const a = o.attempts.find((x) => x.attemptId === p.attemptId) ?? refuse('ATTEMPT_UNKNOWN', p.attemptId); if (a.outcome) refuse('ATTEMPT_RESOLVED', 'attempt already resolved'); a.outcome = p.outcome; a.receiptTs = p.receiptTs;
     if (p.nativeOrderId) o.nativeOrderId = p.nativeOrderId;
@@ -234,7 +239,7 @@ const HANDLERS = {
   EXTERNAL_ACTIVITY(s, p) { pushBounded(s.externalActivity, { ...p }, MAX_EXTERNAL); s.counters.externalActivity += 1; if (p.kind === 'WITHDRAWAL' || p.kind === 'DEPOSIT' || p.kind === 'BALANCE_MISMATCH' || p.kind === 'FILL') { s.flowsUnknown = true; s.valuation = { ...s.valuation, unknown: true, reason: `external ${p.kind} unreconciled` }; s.restrictions.RECONCILIATION_REQUIRED = s.restrictions.RECONCILIATION_REQUIRED ?? { ts: p.receiptTs, source: 'external', reason: `${p.kind} ${p.ref}` }; } },
   EXTERNAL_FLOW_ADMITTED(s, p) { if (Object.values(s.externalActivity).some((x) => x.flowId === p.flowId)) refuse('FLOW_DUPLICATE', p.flowId); const signed = p.direction === 'DEPOSIT' ? p.valuedUsd : M.neg(p.valuedUsd); if (p.asset === s.quote) { if (p.direction === 'WITHDRAWAL' && M.lt(availableCash(s), p.amount)) refuse('WITHDRAWAL_EXCEEDS_CASH', 'cannot withdraw reserved / absent cash'); s.cash = M.add(s.cash, p.direction === 'DEPOSIT' ? p.amount : M.neg(p.amount)); } s.externalFlows = M.add(s.externalFlows, signed); s.flowsUnknown = false; pushBounded(s.externalActivity, { kind: p.direction, ref: p.flowId, asset: p.asset, amount: p.amount, flowId: p.flowId, admitted: true, receiptTs: p.ts }, MAX_EXTERNAL); },
   RESTRICTION(s, p) {
-    if (p.action === 'LATCH') { if (p.code === 'VETO') { if (!p.scope) refuse('VETO_SCOPE', 'veto needs a scope'); if (!s.vetoes.includes(p.scope)) s.vetoes.push(p.scope); return; } s.restrictions[p.code] = { ts: p.ts, source: p.source, reason: p.reason, sessionDate: p.sessionDate, scope: p.scope }; if (p.code === 'KILL' && ['LIVE_ARMED', 'PAPER', 'REPLAY'].includes(s.mode)) s.mode = 'REDUCE_ONLY'; return; }
+    if (p.action === 'LATCH') { if (p.code === 'VETO') { if (!p.scope) refuse('VETO_SCOPE', 'veto needs a scope'); if (!s.vetoes.includes(p.scope)) s.vetoes.push(p.scope); return; } s.restrictions[p.code] = { ts: p.ts, source: p.source, reason: p.reason, sessionDate: p.sessionDate, scope: p.scope }; if (p.code === 'KILL' && ['LIVE_ARMED', 'PAPER', 'REPLAY'].includes(s.mode)) { s.mode = 'REDUCE_ONLY'; s.modeTs = p.ts; } return; }
     if (p.code === 'VETO') { s.vetoes = s.vetoes.filter((v) => v !== p.scope); return; }
     const cur = s.restrictions[p.code]; if (!cur) return;
     if (p.code === 'DAILY_LOSS' && cur.sessionDate === p.sessionDate) refuse('DAILY_LOSS_LATCHED', 'daily loss restriction stays latched through its session');
@@ -249,7 +254,7 @@ const HANDLERS = {
     if (to === 'REPLAY' && !['REPLAY', 'SHADOW'].includes(s.accountKind)) refuse('MODE_KIND_MISMATCH', `${s.accountKind} account cannot enter REPLAY`);
     if (to === 'LIVE_ARMED') { if (!authorizationActive(s, ev.knownAtTs) || !['LIVE_ARM', 'CANARY'].includes(s.authorization.kind)) refuse('ARM_REQUIRED', 'LIVE_ARMED needs an active LIVE_ARM or CANARY authorization'); if (p.authorizationId !== s.authorization.authorizationId) refuse('ARM_BINDING', 'transition must name the active authorization'); const hard = HARD_RESTRICTIONS.filter((c) => s.restrictions[c]); if (hard.length) refuse('ARM_BLOCKED', hard.join(',')); if (s.valuation.unknown) refuse('ARM_BLOCKED', 'valuation unknown'); }
     if (['PAPER', 'REPLAY'].includes(to) && s.restrictions.KILL) refuse('KILLED', 'a killed account stays reduce-only until owner CLEAR');
-    s.mode = to; s.modeReason = p.reason;
+    s.mode = to; s.modeReason = p.reason; s.modeTs = p.ts; // PUBLISH-FIX-83 item 6: when the mode was entered (an owner CLEAR after it resumes PAPER)
   },
   VALUATION(s, p) {
     const sessionChanged = s.performance.session && s.performance.session.date !== p.sessionDate;

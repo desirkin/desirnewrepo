@@ -493,7 +493,9 @@ test('PAPER latency refuses to invent a fill from a stale book after a valid fiv
     assert.equal(expired.state, 'EXPIRED');
     assert.ok(Number.isSafeInteger(expired.terminalTs));
     assert.equal(unfilled.confirmedBase, '0');
-    assert.equal(unfilled.state, 'SHELL');
+    // PUBLISH-FIX-83 (full review item 3): an unfilled terminal entry no longer leaves a SHELL holding the slot — it closes FLAT and its pin is released
+    assert.equal(unfilled.state, 'FLAT', JSON.stringify(unfilled));
+    assert.equal(state.pins?.[entry.pair] ?? null, null, 'the feed pin is released with the shell');
     assert.equal(Object.keys(state.execIds).length, 0);
     assert.equal(r.run.adapter.status().stops.length, 0);
     assert.equal(r.run.adapter.status().counters.unfilledCoverageUnknown, 1);

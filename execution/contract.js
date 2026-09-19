@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { cmp, isCanonicalDecimal, isPositive, isNegative, isZero } from './money.js';
 
 export const EXECUTION_CONTRACT_VERSION = 'serpent-execution-1';
-export const ACCOUNT_STATE_VERSION = 'execution-account-state-3'; // 2: durable adjustment identities, net-basis realized P&L, unbounded execution identities (closeout R03 / R06); 3 (PUBLISH-FIX-69b): answered hypotheses leave the state (PUBLISH-FIX-69), so a projection written under 2 is re-derived from the verified chain at the next start (judge/composition.js restoration law), never refused
+export const ACCOUNT_STATE_VERSION = 'execution-account-state-4'; // 2: durable adjustment identities, net-basis realized P&L, unbounded execution identities (closeout R03 / R06); 3 (PUBLISH-FIX-69b): answered hypotheses leave the state; 4 (PUBLISH-FIX-83): modeTs, when the current mode was entered (PUBLISH-FIX-69), so a projection written under 2 is re-derived from the verified chain at the next start (judge/composition.js restoration law), never refused
 export const MODES = Object.freeze(['OBSERVE', 'REPLAY', 'PAPER', 'LIVE_UNARMED', 'LIVE_ARMED', 'REDUCE_ONLY', 'HALTED_UNRESOLVED']);
 export const ACCOUNT_KINDS = Object.freeze(['REPLAY', 'PAPER', 'LIVE', 'SHADOW']); // journal namespaces; PAPER never becomes LIVE
 export const ORDER_STATES = Object.freeze(['UNSENT', 'DISPATCH_UNCERTAIN', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'FILLED', 'CANCEL_PENDING', 'CANCELLED', 'REJECTED', 'EXPIRED', 'RECONCILIATION_REQUIRED']);
@@ -119,7 +119,7 @@ export const EVENT_SCHEMAS = Object.freeze({
   RESERVATION_OPENED: { reservationId: T.id, decisionId: T.id, assetId: T.id, pair: T.id, cashReserved: T.posDec, riskReserved: T.posDec, clusterId: T.id, expiresTs: T.ts },
   RESERVATION_RELEASED: { reservationId: T.id, reason: T.en(['CONSUMED', 'EXPIRED', 'REFUSED_AT_REVALIDATION', 'REJECTED_BY_VENUE', 'CANCELLED_UNSENT', 'ORDER_TERMINAL', 'ORDER_UNFILLED']), releasedCash: T.nonNegDec, releasedRisk: T.nonNegDec, ts: T.ts },
   ORDER_INTENT: { intentId: T.id, orderId: T.id, clientOrderId: T.id, reservationId: T.idOrNull, positionId: T.id, kind: T.en(ORDER_KINDS), side: T.en(['buy', 'sell']), pair: T.id, qty: T.posDec, limitPrice: T.decOrNull, orderType: T.en(['limit', 'market', 'stop-loss']), timeInForce: T.en(['IOC', 'GTC']), protection: nullable(PROTECTION_TEMPLATE), deadlineTs: T.tsOrNull, feeDigest: T.hex64, specDigest: T.hex64, snapshotDigest: T.hex64OrNull, createdTs: T.ts },
-  DISPATCH_ATTEMPTED: { orderId: T.id, attemptId: T.id, adapter: T.en(['PAPER', 'KRAKEN']), ts: T.ts },
+  DISPATCH_ATTEMPTED: { orderId: T.id, attemptId: T.id, adapter: T.en(['PAPER', 'KRAKEN']), ts: T.ts, deadlineTs: T.opt(T.ts) }, // PUBLISH-FIX-83 item 2: the attempt may rebase the intent's deadline to its own durable clock
   DISPATCH_RESULT: { orderId: T.id, attemptId: T.id, outcome: T.en(DISPATCH_OUTCOMES), nativeOrderId: T.idOrNull, reason: T.textOrNull, sourceTs: T.tsOrNull, receiptTs: T.ts, guaranteesNoAcceptance: T.bool },
   EXECUTION_RECORDED: { orderId: T.idOrNull, execId: T.id, nativeOrderId: T.idOrNull, side: T.en(['buy', 'sell']), base: T.posDec, quote: T.posDec, price: T.posDec, fee: nullable(FEE), sourceTs: T.tsOrNull, receiptTs: T.ts, origin: T.en(EXECUTION_ORIGINS), ordRefId: T.idOrNull, nativeCumQty: T.decOrNull, sequence: (v) => v === null || T.count(v) },
   ORDER_STATE: { orderId: T.id, state: T.en(ORDER_STATES), nativeOrderId: T.idOrNull, nativeCumQty: T.decOrNull, reason: T.textOrNull, sourceTs: T.tsOrNull, receiptTs: T.ts },
