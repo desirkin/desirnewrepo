@@ -60,11 +60,43 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       d70c8fe64e223580da5a1c71fb6bfe774457b58e0b0c53edf2f7b69deb6fed51
+judge/*.js       f476916f654435029109ba9c8a3549c8e1adf9392188703f23601f2bccfc5b9c
 execution/*.js   81bea0cccc0c9ef91b6cc6c7f89f3cb95289837325744605354eb712e6d0037c
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (48 files)   088d85146527b5898fba3bbace1638e0bcfd27416a7ddd6eb79bb2ed533042e4
+all (49 files)   792495067bf5a8cac48909e2bb1988e0173f20315dcd515a6a01cb1252eb9d22
 ```
+
+### 4.28 Audited change — 2026-09-18 PUBLISH-FIX-73: the move clock — a look at a coin whose own move is as old as the minute most movers top out by is refused MOVE_TOO_OLD (previous judge digest `d70c8fe64e22…`; now `f476916f6544…`; the frozen set grows to 49 files with `judge/move-clock.js`; execution and watch UNCHANGED)
+
+The owner's rule (his son's question, his words): "if it comes down at 30 minutes every time and it's been 28 minutes while
+evaluated, then it should know not to get into it because it's probably too late." Until now the Judge measured a
+crossing without asking how far into its move the coin already was.
+
+What the mover study now measures (learning/mover-study.js, not frozen): every MOVER / control picture carries a
+`moveClock` — the minute of the move's lowest close in the hour before the event, minutes from that low to the event,
+minutes from that low to the highest close anywhere up to the end of the hour after (`minutesLowToPeak`), and the climb
+low-to-peak. What the lesson says (learning/move-clock-lesson.js, NEW, authority NONE): over the last 7 daily study
+files, the MOVER records that carry a move clock; DORMANT under 20 of them, ARMED at 20 with `lateMin` = the 75th
+percentile of `minutesLowToPeak` (three of four measured movers had topped out by then; floor 5) and the median for
+the record; re-read every 5 minutes; logged as `MOVE CLOCK: …` on every change and on the JUDGE FUNNEL line.
+Records written before this change carry no clock, so the count starts at zero and the lesson is DORMANT until the
+study has measured 20 new movers — the Judge records but refuses nothing on it until then.
+
+The change to the frozen tree (judge/move-clock.js NEW, pure; judge/judge.js): a new OPTIONAL port `moveClock`
+(`{ lesson() }`), null by default — with the port absent nothing new runs and every decision record is the baseline
+byte for byte (`test/judge-differential.test.js` unchanged). With the port composed (judge/composition.js →
+fly.js, wired only when the lesson reader started): for every decision that reaches the setup evaluation the Judge
+takes the bar block it already froze for the decision, finds the lowest close of the last 60 closed bars, and records
+two MEASUREMENT rows `MOVE_CLOCK` — the move's age in minutes at the decision (threshold: the learned late minute) and
+the climb since that low in percent (threshold: the lesson's minimum climb, 5% — under it the coin is not "in a move"
+and the clock does not apply). After the setup is ELIGIBLE (all existing gates passed, `funnel.setupQualified`
+counted), and ONLY while the lesson is ARMED and the coin is in a move at least `lateMin` minutes old, the decision is
+refused `NO_TRADE ['MOVE_TOO_OLD']` with the rows on the record and `counters.moveTooOld` on the funnel line. A port
+that throws reads as absent for that decision (logged). Unchanged: T, the lock-before-valuation law, every existing
+gate and its order, sizing, admission, the 10 s. Tests: `test/judge-move-clock.test.js` MC-01..03 (facts, verdict,
+rows, lesson from files) and `test/judge-decisions.test.js` MC-04 (live path: an ARMED lesson refuses a 46-minute-old
++8.7% move with the age and climb recorded; the same bars under a DORMANT lesson still reserve; a faulting port is
+baseline). `test/paper-runtime.test.js` P-08 re-pinned.
 
 ### 4.27 Audited change — 2026-09-18 PUBLISH-FIX-70: hypothesis locks that queue behind an in-flight lock append are committed together (previous judge digest `380e23374f2f…`; now `d70c8fe64e22…`; execution and watch UNCHANGED)
 

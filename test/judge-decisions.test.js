@@ -31,12 +31,12 @@ import { manifestIdentity } from '../market-lab/store.js';
 const POLICY = loadJudgePolicy(path.resolve('judge/samples/policy.paper-reference.json'));
 // 61 bars of range 400 around 100000 with ONE deep wick at bar 41 (L20 = 96000): H20 = 100200, low5 = 99800, ATR14 ~ 470 -> a lawful RANGE_IGNITION geometry
 function bars({ n = 61, endTs, close = 100000, range = 400, wickAt = 41, wickLow = 96000 } = {}) { const out = []; for (let i = 0; i < n; i += 1) out.push({ periodStartTs: endTs - (n - i) * 60_000, periodEndTs: endTs - (n - i - 1) * 60_000, open: close, high: close + range / 2, low: i === wickAt ? wickLow : close - range / 2, close, volumeQuote: 1000, volumeBase: 0.01, closed: true }); return out; }
-async function rig({ accountId = 'j-acct', mode = 'PAPER', history = null, caseSource = null, controls = { kill: false, cage: false, vetoes: [] }, clock = fakeClock() } = {}) {
+async function rig({ accountId = 'j-acct', mode = 'PAPER', history = null, caseSource = null, controls = { kill: false, cage: false, vetoes: [] }, clock = fakeClock(), moveClock = null } = {}) {
   const journal = createMemoryJournal(); await journal.create(accountId, { accountKind: 'PAPER' }); const writer = await journal.acquireWriter(accountId); const F = eventsFor(accountId, clock);
   const feed = createExecutionFeed({ clock: clock.now }); feed.onConnect(clock.now()); const adapter = createPaperAdapter({ accountId, clock: clock.now, feed, fee: TEST_FEE, specOf: () => SPEC });
   const pclock = { now: clock.now, monotonic: clock.monotonic, status: () => ({ trusted: true }) }; const dispatcher = createDispatcher({ accountId, journal, writer, adapter, clock: pclock, specOf: () => SPEC }); await dispatcher.load(); await dispatcher.commit(F.init({ accountKind: 'PAPER' }));
   const scheduler = createScheduler({ monotonic: clock.monotonic }); const hist = history ?? { bars: (symbol, nowTs) => bars({ endTs: Math.floor(nowTs / 60_000) * 60_000 }) };
-  const judge = createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, history: hist, caseSource: caseSource ?? { consumed: () => null }, controls: () => controls, scheduler, mode });
+  const judge = createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, history: hist, caseSource: caseSource ?? { consumed: () => null }, controls: () => controls, scheduler, mode, moveClock });
   const watch = createWatch({ accountId, dispatcher, adapter, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, controls: () => controls });
   judge.admit('XBT/USD', { assetId: 'BTC', source: 'TEST' }); feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'XBT/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now()); feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), clock.now());
   const book = (asks, bids, type = 'snapshot') => feed.ingest(JSON.stringify({ channel: 'book', type, data: [{ symbol: 'XBT/USD', asks: asks.map(([price, qty]) => ({ price, qty })), bids: bids.map(([price, qty]) => ({ price, qty })), checksum: crcFor(asks, bids), timestamp: new Date(clock.now()).toISOString() }] }), clock.now());
@@ -193,4 +193,22 @@ test('J10d. PUBLISH-FIX-68: a confirmation that runs before its hypothesis lock 
   r3.clock.advance(10_100); await r3.judge.onTick(r3.clock.now()); await r3.dispatcher.idle(); const d3 = r3.judge.decisions(); assert.equal(d3.length, b3.n);
   for (const x of d3) { assert.equal(x.status, 'EXPIRED'); assert.deepEqual(x.reasonCodes, ['PROPOSAL_EXPIRED_10S', 'HYPOTHESIS_NOT_DURABLE']); }
   b3.release(); await r3.dispatcher.idle(); assert.equal(r3.judge.status().counters.lockReoffered, 0, 'a lock landing after the 10 s reopens nothing');
+});
+
+test('MC-04. PUBLISH-FIX-73: with the move-clock port composed, an ELIGIBLE setup on a coin whose own move is as old as the learned late minute is refused NO_TRADE MOVE_TOO_OLD with the age and the climb on the record; the same bars under a DORMANT lesson still reserve (rows recorded, nothing refused)', async () => {
+  // the hour's low sits 45 bars before the end: 92 000 -> 100 000 (+8.7%), so the move is ~46 minutes old at the decision
+  const moveBars = (nowTs) => bars({ endTs: Math.floor(nowTs / 60_000) * 60_000 }).map((b, i) => (i === 15 ? { ...b, open: 92_000, high: 92_200, low: 91_800, close: 92_000 } : b));
+  const armed = { state: 'ARMED', lateMin: 40, medianMin: 30, p75Min: 40, movers: 24, minClimbPct: 5 };
+  const r = await rig({ history: { bars: (symbol, nowTs) => moveBars(nowTs) }, moveClock: { lesson: () => armed } }); await r.warm(); await r.ignite();
+  const d = r.judge.decisions().find((x) => x.reasonCodes.includes('MOVE_TOO_OLD')); assert.ok(d, `expected MOVE_TOO_OLD: ${JSON.stringify(r.judge.decisions().map((x) => [x.status, x.reasonCodes]))}`);
+  assert.equal(d.status, 'NO_TRADE'); assert.deepEqual(d.reasonCodes, ['MOVE_TOO_OLD']); assert.equal(r.judge.status().counters.moveTooOld, 1); assert.equal(r.judge.status().counters.entries, 0);
+  const rows = d.measurements.filter((m) => m.id === 'MOVE_CLOCK'); assert.equal(rows.length, 2); assert.equal(rows[0].ok, false); assert.ok(rows[0].value >= 45 && rows[0].value <= 47, `age ${rows[0].value}`); assert.equal(rows[0].threshold, 40); assert.match(rows[0].note, /age:in-move:lesson=ARMED:movers=24:median=30/); assert.ok(rows[1].value > 8 && rows[1].value < 9, `climb ${rows[1].value}`);
+  assert.equal(Object.keys(r.state().positions).length, 0, 'refused: no position');
+  const dormant = { state: 'DORMANT', lateMin: null, medianMin: null, p75Min: null, movers: 4, minClimbPct: 5 };
+  const q = await rig({ history: { bars: (symbol, nowTs) => moveBars(nowTs) }, moveClock: { lesson: () => dormant } }); await q.warm(); await q.ignite();
+  const e = q.judge.decisions().find((x) => x.status === 'ENTRY_RESERVED'); assert.ok(e, `dormant lesson must not refuse: ${JSON.stringify(q.judge.decisions().map((x) => [x.status, x.reasonCodes]))}`);
+  const qrows = e.measurements.filter((m) => m.id === 'MOVE_CLOCK'); assert.equal(qrows.length, 2); assert.equal(qrows[0].ok, true); assert.match(qrows[0].note, /lesson=DORMANT:movers=4/); assert.equal(q.judge.status().counters.moveTooOld, 0);
+  // a faulting port reads as absent for that decision: baseline rows, nothing refused
+  const f = await rig({ history: { bars: (symbol, nowTs) => moveBars(nowTs) }, moveClock: { lesson: () => { throw new Error('port down'); } } }); await f.warm(); await f.ignite();
+  const fe = f.judge.decisions().find((x) => x.status === 'ENTRY_RESERVED'); assert.ok(fe); assert.equal(fe.measurements.filter((m) => m.id === 'MOVE_CLOCK').length, 0);
 });

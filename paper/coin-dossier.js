@@ -40,6 +40,7 @@ export const GATE_MEANINGS = Object.freeze({
   FLOW_WARMING: 'the trade flow on the coin was still warming up (21 minutes needed)',
   HYPOTHESIS_NOT_DURABLE: 'the idea could not be written down durably in time (a plumbing delay, not a market reason)',
   PROPOSAL_EXPIRED_10S: 'the 10-second window to decide closed before a verdict',
+  MOVE_TOO_OLD: 'the coin was already as many minutes into its climb as the minute most movers top out by, so it was probably too late to get in (the move clock, fix73)',
   RECEIPT_TO_DECISION_LAG_EXCEEDED: 'the book snapshot was too old by the time the decision ran',
   NO_INDICATORS_OR_BOOK: 'no usable book or indicators at decision time',
   NO_TWO_SIDED_BOOK: 'the order book was one-sided or empty',

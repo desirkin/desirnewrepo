@@ -167,6 +167,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // and the hour after" — rides the broad-Kraken closed-candle stream from the first record; its learning store is
   // attached once LEARN-1 composes below. Authority NONE; a failure here is dark and nothing else is affected.
   let moverStudy = null; let moverStudyTimer = null; let volatilityWatch = null; let volatilityTimer = null;
+  let moveClockLesson = null; let moveClockTimer = null; // PUBLISH-FIX-73: what the mover study teaches the Judge about a move's clock
   try {
     const { createMoverStudy } = await import('./learning/mover-study.js');
     const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js');
@@ -184,6 +185,13 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       if (typeof volatilityTimer?.unref === 'function') volatilityTimer.unref();
       console.log(`VOLATILITY WATCH active (authority NONE; watch only): ${volatilityWatch.line()}`);
     } catch (err) { console.error(`VOLATILITY WATCH failed to start (dark; nothing else affected): ${String(err?.message ?? err).slice(0, 160)}`); volatilityWatch = null; }
+    try {
+      const { createMoveClockLesson } = await import('./learning/move-clock-lesson.js');
+      moveClockLesson = createMoveClockLesson({ dataDir: dataDir(), log: console.log });
+      moveClockLesson.refresh();
+      moveClockTimer = setInterval(() => { try { moveClockLesson.refresh(); } catch (err) { console.error(`MOVE CLOCK refresh: ${String(err?.message ?? err).slice(0, 160)}`); } }, 5 * 60_000);
+      if (typeof moveClockTimer?.unref === 'function') moveClockTimer.unref();
+    } catch (err) { console.error(`MOVE CLOCK failed to start (the Judge runs without it; nothing else affected): ${String(err?.message ?? err).slice(0, 160)}`); moveClockLesson = null; }
     moverStudyTimer = setInterval(() => { try { moverStudy.tick(); } catch (err) { console.error(`MOVER STUDY tick: ${String(err?.message ?? err).slice(0, 160)}`); } }, 60_000);
     if (typeof moverStudyTimer?.unref === 'function') moverStudyTimer.unref();
     console.log('MOVER STUDY active (authority NONE): every >=10%/hour climb across the whole accepted catalog gets its hour-before / the move / hour-after written from closed candles, with control coins beside it; each becomes a graded DAILY_MOVER lesson');
@@ -287,7 +295,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
         learningRankingLine = `LEARNING RANKING: ON (ranking-only; learned influence ${kill.state}; ACTIVE_PAPER activations now: ${activeNow}; off switch: cobra learning kill; source ${rankingSource.version})`;
       }
       console.log(learningRankingLine);
-      judgeRun = await composeJudge({ nominations: judgeNominations, learningActivationSource, policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing, writerLockWait: { waitMs: 180_000, intervalMs: 5_000 } }); // PUBLISH-FIX-5 / PAPER-FLIP-PREP: the boot waits out a Republish overlap for the execution writer lock
+      judgeRun = await composeJudge({ nominations: judgeNominations, learningActivationSource, policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing, writerLockWait: { waitMs: 180_000, intervalMs: 5_000 }, moveClock: moveClockLesson ? { lesson: moveClockLesson.lesson } : null }); // PUBLISH-FIX-5 / PAPER-FLIP-PREP: the boot waits out a Republish overlap for the execution writer lock
       const startup = await judgeRun.start();
       setJudgeRun(judgeRun);
       console.log(`JUDGE active: ${judgeRun.kind} account ${judgeRun.accountId} mode ${judgeRun.mode} (${judgeRun.kind === 'PAPER' ? 'NOT REAL MONEY' : 'LIVE: entries need an unexpired owner authorization'}); startup ${JSON.stringify({ uncertain: startup.uncertainOrders.length, exposed: startup.exposedPositions.length, authorizationEnded: startup.authorizationEnded })}`);
@@ -464,7 +472,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
           // bytes carried: the whole account state travels twice per commit) vs plain queries (the tape) — and the pool gauge
           let dbClocks = '';
           try { const c = getPersistence()?.db?.clocks?.() ?? null; if (c) { const kb = (x) => (x && Number.isFinite(x.p50) ? `p50 ${Math.round(x.p50 / 1024)} / max ${Math.round(x.max / 1024)} KB` : 'no samples'); dbClocks = `; DB: tx ${ms(c.tx)} (statements/tx p50 ${c.txStatements?.p50 ?? '?'}, bytes/tx ${kb(c.txParamBytes)}); pool checkout wait ${ms(c.checkoutWait)} (failures ${c.checkoutFailures}); query ${ms(c.query)}; pool ${c.pool?.total ?? '?'} open / ${c.pool?.idle ?? '?'} idle / ${c.pool?.waiting ?? '?'} waiting of ${c.pool?.max} (${c.pool?.lockSessions} held for life by locks)${c.slowestTx ? `; slowest tx ${c.slowestTx.ms} ms, ${c.slowestTx.statements} statements, ${Math.round(c.slowestTx.paramBytes / 1024)} KB, began '${c.slowestTx.first}'` : ''}`; } } catch (err) { dbClocks = `; DB clocks unavailable (${String(err?.message ?? err).slice(0, 80)})`; }
-          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}, lock waits ${k.lockWaits ?? 0} / re-offered ${k.lockReoffered ?? 0} / appends ${k.lockBatches ?? 0} / coalesced ${k.lockCoalesced ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}`);
+          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}, lock waits ${k.lockWaits ?? 0} / re-offered ${k.lockReoffered ?? 0} / appends ${k.lockBatches ?? 0} / coalesced ${k.lockCoalesced ?? 0}; move-too-old ${k.moveTooOld ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}; ${moveClockLesson ? moveClockLesson.line() : 'MOVE CLOCK: not started'}`);
         } catch (err) { console.error(`JUDGE FUNNEL line: ${err.message}`); }
       };
       const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); logFunnel(); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
@@ -563,6 +571,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     // PUBLISH-FIX-63: the day's mover board is snapshotted before the process goes, so a republish never forgets it
     if (moverStudyTimer) { try { clearInterval(moverStudyTimer); } catch { /* timer already cleared */ } moverStudyTimer = null; }
     if (volatilityTimer) { try { clearInterval(volatilityTimer); } catch { /* timer already cleared */ } volatilityTimer = null; }
+    if (moveClockTimer) { try { clearInterval(moveClockTimer); } catch { /* timer already cleared */ } moveClockTimer = null; }
     if (moverStudy) { try { moverStudy.flush?.(); } catch (err) { console.error(`MOVER STUDY board snapshot at shutdown failed: ${String(err?.message ?? err).slice(0, 160)}`); } }
     if (caseTriggerTimer) { try { clearInterval(caseTriggerTimer); } catch { /* timer already cleared */ } caseTriggerTimer = null; }
     // paper launch seam: components the paper launcher started stop cleanly BEFORE the process exits

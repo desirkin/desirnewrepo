@@ -124,8 +124,14 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
     const lowBeforeMove = Math.min(...arr.slice(i - W, i).map((c) => c[4]));
     const climbPct = round4(pct(arr[i][4], lowBeforeMove));
     const heldPct = round4(pct(arr[i + W][4], arr[i][4]));
+    // PUBLISH-FIX-73 (the move clock, David's son's question): where in the move window the climb started (its lowest close), and how
+    // many minutes from that low to the highest close anywhere up to the end of the hour after — "moves like this usually top out
+    // around minute N". The Judge's move-clock gate learns its lateness threshold from this column (learning/move-clock-lesson.js).
+    let lowIdx = i - W; for (let k = i - W; k < i; k += 1) if (arr[k][4] < arr[lowIdx][4]) lowIdx = k;
+    let peakIdx = lowIdx; for (let k = lowIdx; k <= i + W; k += 1) if (arr[k][4] > arr[peakIdx][4]) peakIdx = k;
+    const moveClock = { lowTs: arr[lowIdx][0] * 1000, minutesLowToEvent: i - lowIdx, minutesLowToPeak: peakIdx - lowIdx, peakClimbPct: round4(pct(arr[peakIdx][4], arr[lowIdx][4])) };
     return {
-      coin, eventTs: arr[i][0] * 1000, moveStartTs: arr[i - W][0] * 1000, climbPct,
+      coin, eventTs: arr[i][0] * 1000, moveStartTs: arr[i - W][0] * 1000, climbPct, moveClock,
       hourBefore: { ...before, volumeVsPriorHour: prior && prior.volume > 0 ? round4(before.volume / prior.volume) : null },
       theMove: { ...move, volumeVsHourBefore: before.volume > 0 ? round4(move.volume / before.volume) : null },
       hourAfter: { ...after, heldPct, heldAboveStart: arr[i + W][4] >= arr[i][4] },

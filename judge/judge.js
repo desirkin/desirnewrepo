@@ -27,6 +27,7 @@ import {
   ADAPTIVE_RANKING_UNITS, adaptiveRankingInputCaptureError,
   adaptiveRankingPortResultError,
 } from './adaptive-ranking-port.js';
+import { moveClockFacts, moveClockVerdict, moveClockMeasurements } from './move-clock.js'; // PUBLISH-FIX-73: the move clock (port-gated; absent -> baseline)
 export const VERDICT_RECORD_VERSION = 'judge-challenger-verdict-1';
 
 export const JUDGE_VERSION = 'judge-1';
@@ -42,7 +43,7 @@ export const canaryDurationBound = (s, policyMs) => { const a = s?.authorization
 export const FUNNEL_STAGES = Object.freeze(['discovered', 'recorded', 'warmed', 'nominated', 'setupQualified', 'costQualifiedAtLegalSize', 'reserved', 'sent', 'filled', 'protected', 'closedReconciled']);
 const inc = (obj, k, n = 1) => { obj[k] = (obj[k] ?? 0) + n; };
 
-export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null, setupSelection = null, edgeState = null, permissionIncreaseAllowed = null, adaptiveRanking = null }) {
+export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null, setupSelection = null, edgeState = null, permissionIncreaseAllowed = null, adaptiveRanking = null, moveClock = null }) {
   // LEARN-1 consumer seam (ADDENDUM-2 §08): `learning` is an OPTIONAL injected read accessor over the prepared
   // immutable decision-memory snapshot ({ snapshot: () => readDecisionMemory(...) }), refreshed outside this loop.
   // Absent (every current composition; fly.js passes nothing), every path below is byte-identical to the baseline
@@ -95,7 +96,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   }
   const cache = createFeatureCache({ max: 128 });
   const candidates = new Map(); // symbol -> runtime
-  const funnel = Object.fromEntries(FUNNEL_STAGES.map((s) => [s, 0])); const refusals = {}; const counters = { books: 0, trades: 0, crossings: 0, confirmations: 0, expired: 0, decisions: 0, entries: 0, needsData: 0, missedDuringWarmup: 0, modelWait: 0, modelStale: 0, missedDuringAnalysis: 0, revalidationRefusals: 0, queueDelayExpired: 0, snapshotPersistFailures: 0, staleReoffered: 0, lockWaits: 0, lockReoffered: 0, lockBatches: 0, lockCoalesced: 0 }; const decisions = []; let lastEntryMono = null; const provenance = new Map(); // episode|decision clock -> the already-known dependency identities (research report only)
+  const funnel = Object.fromEntries(FUNNEL_STAGES.map((s) => [s, 0])); const refusals = {}; const counters = { books: 0, trades: 0, crossings: 0, confirmations: 0, expired: 0, decisions: 0, entries: 0, needsData: 0, missedDuringWarmup: 0, modelWait: 0, modelStale: 0, missedDuringAnalysis: 0, revalidationRefusals: 0, queueDelayExpired: 0, snapshotPersistFailures: 0, staleReoffered: 0, lockWaits: 0, lockReoffered: 0, lockBatches: 0, lockCoalesced: 0, moveTooOld: 0 }; const decisions = []; let lastEntryMono = null; const provenance = new Map(); // episode|decision clock -> the already-known dependency identities (research report only)
   const now = () => clock.now(); const state = () => dispatcher.state(); const ev = dispatcher.ev;
   // Persistence integrity can only remove entry authority. Low-level callers
   // that do not inject this seam retain the historical isolated-test law;
@@ -343,8 +344,14 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     if (learning) { try { learned = resolveLearningContribution({ snapshot: learning.snapshot(), facts: { setupType: setupId, regime: 'LIVE_UNCLASSIFIED', asset: c.assetId, venue: 'kraken', featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyVersion: policyDigest, features: learnedFacts }, mode, nowTs: D }); } catch (err) { log(`learned contribution resolver failed (baseline): ${err.message}`); learned = null; } }
     const factRows = learning ? learnedFactMeasurements(learnedFacts) : []; // PUBLISH-FIX-38: with a learning port composed, the six facts ride every decision's measurements (ports absent: the baseline record, byte for byte)
     let measurements = learned ? [...baseMeasurements, ...factRows, contributionMeasurement(learned), ...contributionCandidateLog(learned)] : [...baseMeasurements, ...factRows];
+    // PUBLISH-FIX-73 (the move clock): with the port composed, every decision records where the coin is in its own move (age since the
+    // hour's low, climb since) beside the lesson the mover study taught; the refusal below fires only for an ELIGIBLE setup while the
+    // lesson is ARMED. Port absent: nothing here runs and the record is the baseline byte for byte. A faulting port reads as absent.
+    let moveClockVerdictNow = null;
+    if (moveClock) { try { const lesson = typeof moveClock.lesson === 'function' ? moveClock.lesson() : null; const facts = moveClockFacts(c.indicatorsRef.bars, D, { minClimbPct: lesson?.minClimbPct }); moveClockVerdictNow = moveClockVerdict(facts, lesson); measurements = [...measurements, ...moveClockMeasurements(facts, lesson, moveClockVerdictNow)]; } catch (err) { log(`move clock port failed (baseline for this decision): ${String(err?.message ?? err).slice(0, 160)}`); moveClockVerdictNow = null; } }
     if (setup.state !== 'ELIGIBLE') { if (setup.state === 'NEEDS_DATA') counters.needsData += 1; tracker.decide(setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'NO_TRADE', setup.refused, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
     funnel.setupQualified += 1;
+    if (moveClockVerdictNow && !moveClockVerdictNow.ok) { counters.moveTooOld += 1; tracker.decide('NO_TRADE'); return recordRefusal(c, setupId, episodeId, 'NO_TRADE', moveClockVerdictNow.refused, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); } // PUBLISH-FIX-73: the move is already as old as the minute most movers top out by
     let operationalDurationMs = policy.execution.maxDurationMs;
     if (setupSelectionEnabled && !isEdgeSetup(setupId)) {
       const duration = setupDurationBound({ policyMaxDurationMs: policy.execution.maxDurationMs, setupMaxDurationMs: setup.maxDurationMs });
