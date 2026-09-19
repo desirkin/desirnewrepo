@@ -40,7 +40,19 @@ export function createExecutionFeed({ clock = () => Date.now(), limits = FEED_DE
   const precisions = new Map(); const PRECISIONS_MAX = 4096; // comfortably above any venue's announced pair count
   let epoch = 0; let connected = false; let lastHeartbeatTs = null; let lastMessageTs = null; let tape = null; let receiptSequence = 0; counters.coverageGaps = 0; counters.futureTimestamps = 0; counters.laggedTrades = 0;
   // a liveness gap (no message / heartbeat within the impaired window) breaks every trade coverage: continuity restarts at the next message (closeout R09)
-  function liveness(receiptTs) { const last = lastHeartbeatTs === null ? lastMessageTs : Math.max(lastHeartbeatTs, lastMessageTs ?? 0); if (last !== null && receiptTs - last > L.impairedAfterMs) { counters.coverageGaps += 1; for (const c of tradeCoverage.values()) { c.startTs = receiptTs; c.lastTs = receiptTs; c.gapTs = receiptTs; } } }
+  // PUBLISH-FIX-83 (full review item 10): receiptTs is stamped when a message is PROCESSED, so a >5 s main-thread stall looked exactly like
+  // venue silence and reset every symbol's trade coverage (RV60 COVERAGE_INCOMPLETE for 21 minutes, every candidate, about once an hour).
+  // A receipt gap is now only SUSPECTED; it is resolved by the venue's own clock: the next timestamped message (book / trade, any
+  // symbol on the firehose) whose source clock continues within the impaired window proves the venue never went quiet (a stall,
+  // absorbed); a source clock that jumped, or no timestamped message for another impaired window, is real silence and breaks coverage.
+  let lastSourceTs = null; let pendingGap = null; counters.stallsAbsorbed = 0; counters.gapsSuspected = 0;
+  function breakCoverage() { const at = pendingGap.at; counters.coverageGaps += 1; for (const c of tradeCoverage.values()) { c.startTs = at; c.lastTs = at; c.gapTs = at; } pendingGap = null; } // coverage restarts where the messages resumed (the old law's clock)
+  function liveness(receiptTs) { const last = lastHeartbeatTs === null ? lastMessageTs : Math.max(lastHeartbeatTs, lastMessageTs ?? 0); if (last !== null && receiptTs - last > L.impairedAfterMs && !pendingGap) { pendingGap = { at: receiptTs, last }; counters.gapsSuspected += 1; } }
+  function resolveLiveness(receiptTs, sourceTs) {
+    if (Number.isFinite(sourceTs)) { const prev = lastSourceTs; if (prev === null || sourceTs > prev) lastSourceTs = sourceTs; if (pendingGap) { if (prev !== null && sourceTs - prev <= L.impairedAfterMs) { counters.stallsAbsorbed += 1; pendingGap = null; } else breakCoverage(); } return; }
+    if (pendingGap && receiptTs - pendingGap.at > L.impairedAfterMs) breakCoverage();
+  }
+  const sourceClockOf = (msg) => { const d = Array.isArray(msg?.data) ? msg.data : null; if (!d || !d.length) return null; let best = null; for (const row of d) { const t = typeof row?.timestamp === 'string' ? Date.parse(row.timestamp) : NaN; if (Number.isFinite(t) && (best === null || t > best)) best = t; } return best; };
   const emit = (ev) => { for (const fn of listeners) { try { fn(ev); } catch (err) { counters.listenerErrors += 1; if (counters.listenerErrors <= 3) log(`execution feed listener error (ignored): ${err?.message ?? err}`); } } };
   const bookOf = (symbol) => { if (!books.has(symbol)) { const p = precisions.get(symbol) ?? null; books.set(symbol, { bids: new Map(), asks: new Map(), synced: false, lastReceiptTs: null, lastSourceTs: null, receiptSequence: 0, priceDecimals: p ? p.priceDecimals : null, qtyDecimals: p ? p.qtyDecimals : null, crcFailures: 0, lastSnapshot: null, epoch }); } return books.get(symbol); };
   const sortedLevels = (map, side) => [...map.entries()].sort((a, b) => (side === 'bids' ? M.cmp(b[0], a[0]) : M.cmp(a[0], b[0])));
@@ -94,6 +106,7 @@ export function createExecutionFeed({ clock = () => Date.now(), limits = FEED_DE
   }
   function ingest(raw, receiptTs = clock()) {
     counters.messages += 1; liveness(receiptTs); lastMessageTs = receiptTs; let msg; try { msg = parseLexemes(raw); } catch { counters.parseErrors += 1; return; }
+    resolveLiveness(receiptTs, msg.channel === 'book' || msg.channel === 'trade' ? sourceClockOf(msg) : null);
     if (msg.channel === 'heartbeat') { lastHeartbeatTs = receiptTs; return; }
     if (msg.method === 'subscribe' && msg.success === true && msg.result?.channel === 'trade' && admitted.has(msg.result.symbol)) { tradeCoverage.set(msg.result.symbol, { epoch, startTs: receiptTs, lastTs: receiptTs }); return; }
     if (msg.channel === 'instrument') { for (const p of msg.data?.pairs ?? []) { const pp = p.price_precision !== undefined ? Number(p.price_precision) : null; const qp = p.qty_precision !== undefined ? Number(p.qty_precision) : null; if (!Number.isInteger(pp) || !Number.isInteger(qp) || typeof p.symbol !== 'string') continue; if (!precisions.has(p.symbol) && precisions.size >= PRECISIONS_MAX) { for (const k of precisions.keys()) if (!admitted.has(k)) { precisions.delete(k); break; } } /* never evict a pair the hot set is holding */ precisions.set(p.symbol, { priceDecimals: pp, qtyDecimals: qp }); if (books.has(p.symbol)) { const b = books.get(p.symbol); b.priceDecimals = pp; b.qtyDecimals = qp; } } return; }

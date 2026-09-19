@@ -138,7 +138,7 @@ export function fastClauses(setupId, frozen, fast, learned = null) {
   c.push(clause('BOOK_FRESH', fast.bookAgeMs !== null && fast.bookAgeMs <= 1000 && fast.crcVerified === true, fast.bookAgeMs, 1000, 'MS', 'CRC-verified book at most 1s old'));
   if (setupId === 'MOMENTUM_CONTINUATION' || setupId === 'MICRO_BITE') {
     const depth = fast.depth10bps ?? null;
-    c.push(clause('LIQUIDITY_PRESENT', safePositive(depth), depth, '0', 'QUOTE', 'observed bid notional within 10bps; zero or missing is not liquidity'));
+    c.push(clause('LIQUIDITY_PRESENT', safePositive(depth), depth, '0', 'QUOTE', 'observed bid notional within 10bps of the best bid; zero or missing is not liquidity'));
     const evidence = fast.continuationEvidence; const evidenceFresh = freshFact(evidence, fast.decisionTs, 60_000);
     const dimensions = evidenceFresh && Array.isArray(evidence.dimensions) && evidence.dimensions.every((x) => CONTINUATION_DIMENSIONS.includes(x)) && new Set(evidence.dimensions).size === evidence.dimensions.length ? evidence.dimensions : null;
     const groups = evidenceFresh && Array.isArray(evidence.relianceGroups) && evidence.relianceGroups.every((x) => typeof x === 'string' && x.length > 0 && x.length <= 60) ? [...new Set(evidence.relianceGroups)] : null;

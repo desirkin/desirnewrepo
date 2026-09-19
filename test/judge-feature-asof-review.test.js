@@ -83,7 +83,7 @@ test('actual feed delivering an old-event trade after trigger T cannot backfill 
 });
 
 function rvRows(D) {
-  const E = Math.floor(D / BAR_MS) * BAR_MS;
+  const E = D; // PUBLISH-FIX-83 item 7: windows trail the decision — numerator [D-60s, D), baselines [D-(k+1)60s, D-k*60s)
   const rows = [trade({ eventTs: E - 30_000, receiptTs: E - 29_900, nativeTradeId: 'numerator' })];
   for (let k = 1; k <= 20; k += 1) {
     const eventTs = E - (k + 1) * BAR_MS + 1_000;
@@ -174,9 +174,10 @@ test('actual feed recovers RV only after 21 complete post-gap minutes and retain
   assert.equal(tracker.rv60(beforeD, feed.coverage('XBT/USD', beforeD)).reason, 'COVERAGE_INCOMPLETE');
 
   ingestMinute(20);
-  const after = tracker.rv60(T + 5_000, feed.coverage('XBT/USD', T + 5_000));
-  assert.equal(after.state, 'KNOWN');
-  assert.equal(after.rv60, 1);
+  // PUBLISH-FIX-83 item 7: the numerator is the TRAILING 60 s ending at D (the minute-20 print at +1 s sits inside [D-60s, D) for D = T+0.5s)
+  const after = tracker.rv60(T + 500, feed.coverage('XBT/USD', T + 500));
+  assert.equal(after.state, 'KNOWN', JSON.stringify(after));
+  assert.equal(after.rv60, 1); assert.equal(after.window, 'TRAILING');
   assert.equal(feed.coverage('XBT/USD', T + 5_000).gapTs, gapTs, 'historical gap remains visible at the continuous-coverage start');
   assert.equal(feed.status().counters.coverageGaps, 1, 'recovery does not erase the gap counter');
 });

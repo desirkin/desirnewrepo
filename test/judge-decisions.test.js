@@ -299,3 +299,20 @@ test('GL-10. PUBLISH-FIX-82 GATE LEARNING: with the gate-learning port composed,
   const f = await rig({ gateLearning: { lesson: () => { throw new Error('boom'); } } }); await f.warm(); await earlyLook(f);
   const fd = f.judge.decisions().find((d) => d.setupId === 'RANGE_IGNITION'); assert.equal(fd.status, 'NO_TRADE'); assert.deepEqual(fd.reasonCodes, ['FI15']); assert.equal(fd.measurements.find((m) => m.id === 'FI15').threshold, 0.2);
 });
+
+test('DL-01. PUBLISH-FIX-83 item 13: a look refused ONLY for missing data (RV60 waiting on its 21-minute coverage) schedules a second look at the coverage clock\'s 21-minute mark; the coin still at its level is re-armed there and judged with the data present', async () => {
+  const r = await rig({ secondLook: { afterMs: 60_000, maxLooks: 2 } }); await r.warm({ minutes: 8 }); // 8 minutes of coverage: RV60 cannot be known yet
+  await r.ignite();
+  const first = r.judge.decisions().find((d) => d.setupId === 'RANGE_IGNITION'); assert.ok(first, JSON.stringify(r.judge.decisions().map((x) => [x.setupId, x.status, x.reasonCodes])));
+  assert.equal(first.status, 'NEEDS_DATA', `${first.status}: ${first.reasonCodes.join(',')}`); assert.ok(first.reasonCodes.includes('RV60'), first.reasonCodes.join(','));
+  assert.equal(r.judge.status().counters.dataLooksScheduled, 1, JSON.stringify(r.judge.status().counters)); const pending = r.judge.candidates()[0].secondLooks.RANGE_IGNITION; assert.ok(pending && pending.data === true && pending.state === 'WAITING', JSON.stringify(pending));
+  const cov = r.feed.coverage('XBT/USD', r.clock.now()); assert.equal(pending.dueTs, cov.startTs + 21 * 60_000 + 1000, 'due when the coverage clock reaches 21 minutes');
+  // the coin holds its level with two-sided flow until the data look is due, then a fresh crossing at the level is a fresh episode with RV60 KNOWN
+  const level = 100400; while (r.clock.now() < pending.dueTs + 2000) { r.clock.advance(5000); r.feed.ingest(JSON.stringify({ channel: 'heartbeat' }), r.clock.now()); r.book([[level + 20, 5], [level + 30, 5]], [[level + 5, 5], [level - 10, 5]]); r.trade(level + 15, 'buy', 0.2); r.trade(level + 14, 'sell', 0.19); await r.settle(); }
+  assert.equal(r.judge.status().counters.secondLooksArmed, 1, JSON.stringify(r.judge.status().counters));
+  for (let i = 0; i < 3; i += 1) { r.book([[level + 20, 5], [level + 30, 5]], [[level + 5, 5], [level - 10, 5]]); r.trade(level + 15, 'buy', 0.2); await r.settle(); if (i < 2) r.clock.advance(1050); }
+  r.clock.advance(1000); await r.settle();
+  const second = r.judge.decisions().find((d) => d.measurements.some((m) => m.id === 'SECOND_LOOK')); assert.ok(second, JSON.stringify(r.judge.decisions().map((x) => [x.status, x.reasonCodes])));
+  assert.match(second.measurements.find((m) => m.id === 'SECOND_LOOK').note, /after a data-only refusal \(RV60/); const rvRow = second.measurements.find((m) => m.id === 'RV60'); assert.ok(rvRow && Number.isFinite(rvRow.value), `RV60 is KNOWN on the data look (a number, judged on its merits): ${JSON.stringify(rvRow)} ${second.status} ${second.reasonCodes.join(',')}`); assert.equal(second.status === 'NEEDS_DATA', false);
+  assert.equal(r.judge.status().counters.infraRearms ?? 0, 0, 'no infrastructure re-arm was needed on this tape');
+});

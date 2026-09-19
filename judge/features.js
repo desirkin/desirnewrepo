@@ -55,33 +55,52 @@ function tradesAsOf(trades, startTs, endTs, { asOfTs = endTs, feedEpoch = null }
   const resolved = queryEpoch(trades, startTs, endTs, asOfTs, feedEpoch); if (!resolved.ok) return { ok: false, trades: [] };
   return { ok: true, trades: trades.filter((t) => t?.fromSubscriptionSnapshot === false && validTradeClock(t) && validEpoch(t.feedEpoch) && t.receiptTs <= asOfTs && t.eventTs >= startTs && t.eventTs < endTs && (resolved.epoch === null || t.feedEpoch === resolved.epoch)) };
 }
+// PUBLISH-FIX-83 (full review item 8): a flow imbalance over 1-3 prints is a coin flip (one $3 taker sell -> -1 -> refused; 369 scored
+// looks showed zero separation). With { minTrades, maxWindowMs } the window is widened backwards (x2, x4 ... up to maxWindowMs) until
+// it holds minTrades classified prints; below that at the widest window the reading is UNKNOWN 'TOO_FEW_TRADES', never a number.
+// The result always carries count, windowMs and widened so the ledger and the gate study see what was measured.
+export const FI_MIN_TRADES = 6;
 export function flowImbalance(trades, startTs, endTs, query = {}) {
-  const selected = tradesAsOf(trades, startTs, endTs, query); let buy = '0'; let sell = '0'; let unknown = '0'; let n = 0; for (const t of selected.trades) { n += 1; if (t.side === 'buy') buy = M.add(buy, t.quoteNotional); else if (t.side === 'sell') sell = M.add(sell, t.quoteNotional); else unknown = M.add(unknown, t.quoteNotional); }
+  const { minTrades = 0, maxWindowMs = null, ...q } = query ?? {}; const baseWindow = endTs - startTs;
+  const measure = (from) => { const selected = tradesAsOf(trades, from, endTs, q); let buy = '0'; let sell = '0'; let unknown = '0'; let n = 0; for (const t of selected.trades) { n += 1; if (t.side === 'buy') buy = M.add(buy, t.quoteNotional); else if (t.side === 'sell') sell = M.add(sell, t.quoteNotional); else unknown = M.add(unknown, t.quoteNotional); } return { selected, buy, sell, unknown, n, from }; };
+  let m = measure(startTs); let widened = false;
+  if (minTrades > 0 && Number.isFinite(maxWindowMs) && maxWindowMs > baseWindow) { let w = baseWindow; while (m.selected.ok && m.n < minTrades && w < maxWindowMs) { w = Math.min(maxWindowMs, w * 2); m = measure(endTs - w); widened = true; } }
+  const { selected, buy, sell, unknown, n, from } = m; const windowMs = endTs - from;
   const known = M.add(buy, sell); const total = M.add(known, unknown); const classified = M.isZero(total) ? null : M.toStatistic(M.div(known, total, 6, 'DOWN'));
-  if (!selected.ok) return { state: 'UNKNOWN', reason: 'AS_OF_OR_EPOCH_INVALID', fi: null, buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
-  if (M.isZero(known) || n === 0) return { state: 'UNKNOWN', reason: 'ZERO_DENOMINATOR', fi: null, buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
-  if (classified !== null && classified < FI_MIN_CLASSIFIED) return { state: 'UNKNOWN', reason: 'CLASSIFIED_BELOW_95PCT', fi: null, buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
-  return { state: 'KNOWN', reason: null, fi: M.toStatistic(M.div(M.sub(buy, sell), known, 8, 'HALF_UP')), buy, sell, unknown, count: n, classifiedFraction: classified, startTs, endTs };
+  const out = (state, reason, fi) => ({ state, reason, fi, buy, sell, unknown, count: n, classifiedFraction: classified, startTs: from, endTs, windowMs, widened, minTrades });
+  if (!selected.ok) return out('UNKNOWN', 'AS_OF_OR_EPOCH_INVALID', null);
+  if (M.isZero(known) || n === 0) return out('UNKNOWN', 'ZERO_DENOMINATOR', null);
+  if (classified !== null && classified < FI_MIN_CLASSIFIED) return out('UNKNOWN', 'CLASSIFIED_BELOW_95PCT', null);
+  if (minTrades > 0 && n < minTrades) return out('UNKNOWN', 'TOO_FEW_TRADES', null);
+  return out('KNOWN', null, M.toStatistic(M.div(M.sub(buy, sell), known, 8, 'HALF_UP')));
 }
 export function windowNotional(trades, startTs, endTs, query = {}) { const selected = tradesAsOf(trades, startTs, endTs, query); let q = '0'; let n = 0; for (const t of selected.trades) { q = M.add(q, t.quoteNotional); n += 1; } return { notional: q, count: n, startTs, endTs }; }
-// RV60: last complete 60s traded quote notional / median of the 20 preceding non-overlapping complete 60s windows; E = floor(D/60000)*60000
+// RV60 — PUBLISH-FIX-83 (full review item 7). Before: numerator = the last COMPLETE clock minute [E-60s, E), E = floor(D/60s)*60s; the
+// burst that caused the crossing lives in [E, D) and was discarded, so on an igniting thin coin the numerator was the empty minute
+// BEFORE the move -> rv60 = 0 KNOWN -> refused (300 of 335 RV60 refusals on 2026-09-19 read exactly 0). Now: numerator = the trailing
+// 60 s ending at the decision, [D-60s, D), against the median of the 20 preceding trailing-aligned 60 s windows. Coverage must be
+// continuous from D-21min to within RV60_COVERAGE_LAG_MS of D (the feed's coverage clock ends at its last message / heartbeat).
+export const RV60_COVERAGE_LAG_MS = 5000;
 export function relativeVolume60(trades, decisionTs, coverage) {
-  const validDecision = Number.isSafeInteger(decisionTs) && decisionTs >= 0; const E = validDecision ? Math.floor(decisionTs / BAR_MS) * BAR_MS : null; const unknown = (reason) => ({ state: 'UNKNOWN', reason, rv60: null, E, numerator: null, baseline: null, completedMinuteDelayMs: E === null ? null : decisionTs - E });
+  const validDecision = Number.isSafeInteger(decisionTs) && decisionTs >= 0; const E = validDecision ? decisionTs : null; const unknown = (reason) => ({ state: 'UNKNOWN', reason, rv60: null, E, window: 'TRAILING', numerator: null, baseline: null, completedMinuteDelayMs: 0 });
   if (!Array.isArray(trades) || !validDecision) return unknown('INPUT_INVALID');
   const historicalGap = !coverage || !Object.hasOwn(coverage, 'gapTs') || coverage.gapTs === null || (Number.isSafeInteger(coverage.gapTs) && coverage.gapTs >= 0 && Number.isSafeInteger(coverage.startTs) && coverage.gapTs <= coverage.startTs);
   const coverageClockValid = coverage && coverage.continuous === true && Number.isSafeInteger(coverage.startTs) && coverage.startTs >= 0 && Number.isSafeInteger(coverage.endTs) && coverage.endTs >= 0 && coverage.startTs <= coverage.endTs && coverage.endTs <= decisionTs && historicalGap;
   const need = { startTs: E - 21 * BAR_MS, endTs: E };
-  if (!coverageClockValid || coverage.startTs > need.startTs || coverage.endTs < need.endTs) return unknown('COVERAGE_INCOMPLETE');
+  if (!coverageClockValid || coverage.startTs > need.startTs || coverage.endTs < need.endTs - RV60_COVERAGE_LAG_MS) return unknown('COVERAGE_INCOMPLETE');
   const resolved = queryEpoch(trades, need.startTs, need.endTs, decisionTs, coverage.epoch); if (!resolved.ok) return unknown(resolved.reason === 'TRADE_INVALID' ? 'INPUT_INVALID' : 'EPOCH_AMBIGUOUS');
   const query = { asOfTs: decisionTs, feedEpoch: resolved.epoch }; const numerator = windowNotional(trades, E - BAR_MS, E, query); const base = []; for (let k = 1; k <= 20; k += 1) base.push(windowNotional(trades, E - (k + 1) * BAR_MS, E - k * BAR_MS, query).notional);
   const sorted = [...base].sort((a, b) => M.cmp(a, b)); const median = M.div(M.add(sorted[9], sorted[10]), '2', 8, 'HALF_UP');
-  if (M.isZero(median)) return { state: 'UNKNOWN', reason: 'ZERO_MEDIAN', rv60: null, E, numerator: numerator.notional, baseline: median, completedMinuteDelayMs: decisionTs - E };
-  return { state: 'KNOWN', reason: null, rv60: M.toStatistic(M.div(numerator.notional, median, 8, 'HALF_UP')), E, numerator: numerator.notional, baseline: median, baselineWindows: 20, completedMinuteDelayMs: decisionTs - E };
+  if (M.isZero(median)) return { state: 'UNKNOWN', reason: 'ZERO_MEDIAN', rv60: null, E, window: 'TRAILING', numerator: numerator.notional, numeratorCount: numerator.count, baseline: median, completedMinuteDelayMs: 0 };
+  return { state: 'KNOWN', reason: null, rv60: M.toStatistic(M.div(numerator.notional, median, 8, 'HALF_UP')), E, window: 'TRAILING', numerator: numerator.notional, numeratorCount: numerator.count, baseline: median, baselineWindows: 20, completedMinuteDelayMs: 0 };
 }
 export function vwap(trades, startTs, endTs, query = {}) { const selected = tradesAsOf(trades, startTs, endTs, query); let q = '0'; let b = '0'; for (const t of selected.trades) { q = M.add(q, t.quoteNotional); b = M.add(b, t.qty); } return M.isZero(b) ? null : M.div(q, b, 8, 'HALF_UP'); }
 // ---- book features on an exact snapshot ---------------------------------------------------------------------------------------
 export function bookFacts(snapshot) { if (!snapshot || !snapshot.bids.length || !snapshot.asks.length) return null; const bid = snapshot.bids[0][0]; const ask = snapshot.asks[0][0]; const mid = M.div(M.add(bid, ask), '2', 9, 'HALF_UP'); return { bestBid: bid, bestAsk: ask, mid, spread: M.sub(ask, bid) }; }
-export function bidDepthWithinBps(snapshot, bps) { const f = bookFacts(snapshot); if (!f) return null; const floor = M.mul(f.mid, M.sub('1', M.div(String(bps), '10000', 8, 'DOWN'))); let notional = '0'; for (const [p, q] of snapshot.bids) { if (M.lt(p, floor)) break; notional = M.add(notional, M.mul(p, q)); } return notional; }
+// PUBLISH-FIX-83 (full review item 12): the band is measured from the BEST BID, not the mid. From the mid, any spread wider than
+// 2 x bps put even the best bid below the floor -> depth 0 -> LIQUIDITY_PRESENT refused on every thin mover; the best bid IS
+// the liquidity a sell would hit, so the band starts there.
+export function bidDepthWithinBps(snapshot, bps) { const f = bookFacts(snapshot); if (!f) return null; const floor = M.mul(f.bestBid, M.sub('1', M.div(String(bps), '10000', 8, 'DOWN'))); let notional = '0'; for (const [p, q] of snapshot.bids) { if (M.lt(p, floor)) break; notional = M.add(notional, M.mul(p, q)); } return notional; }
 // PUBLISH-FIX-10: the exact median with a numeric fast path. Correctly rounded Number() is monotonic for lexemes of at
 // most 20 significant digits, so ordering by double is the exact ordering wherever the doubles differ; the exact BigInt
 // sort is used whenever any lexeme is long/non-plain or when the doubles around the middle collide (a tie could hide a
@@ -112,7 +131,7 @@ export function createFlowTracker({ retentionMs = 22 * BAR_MS, maxTrades = 50_00
   return {
     add(t) { if (t?.fromSubscriptionSnapshot !== false || !validTradeClock(t) || !validEpoch(t.feedEpoch)) return false; if (epoch !== null && t.feedEpoch < epoch) return false; if (epoch !== null && t.feedEpoch > epoch) { epochChanges += 1; trades.length = 0; ids.clear(); lastTs = 0; } epoch = t.feedEpoch; const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (ids.has(k)) { dropped += 1; return false; } ids.add(k); trades.push(t); lastTs = Math.max(lastTs, t.eventTs); if (trades.length > maxTrades) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); overflow += 1; } return true; },
     advance(now) { const cut = now - retentionMs; while (trades.length && trades[0].eventTs < cut) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); } },
-    fi(startTs, endTs, query = {}) { return flowImbalance(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, notional(startTs, endTs, query = {}) { return windowNotional(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, vwap(startTs, endTs, query = {}) { return vwap(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, rv60(decisionTs, coverage) { return relativeVolume60(trades, decisionTs, { ...coverage, epoch: coverage?.epoch ?? epoch }); },
+    fi(startTs, endTs, query = {}) { return flowImbalance(trades, startTs, endTs, { ...query, asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, notional(startTs, endTs, query = {}) { return windowNotional(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, vwap(startTs, endTs, query = {}) { return vwap(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, rv60(decisionTs, coverage) { return relativeVolume60(trades, decisionTs, { ...coverage, epoch: coverage?.epoch ?? epoch }); },
     // the trades inside [startTs, endTs) in receipt order: the challengers' window input (focused completion §5), never a copy of the whole tape
     window(startTs, endTs, query = {}) { return tradesAsOf(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }).trades; },
     snapshot: () => trades.slice(), status: () => ({ trades: trades.length, duplicatesDropped: dropped, overflow, epoch, epochChanges, lastTs }),
