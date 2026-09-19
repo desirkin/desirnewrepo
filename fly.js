@@ -255,6 +255,12 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       // PUBLISH-FIX-7: Replit's production PostgreSQL is separate from the workspace's; the owner initializes the paper
       // account at boot through the environment (SERPENT_PAPER_INIT_ACCOUNT + the control password). No-op when unset.
       await initPaperAccountAtBoot({ env: process.env, log: console.log });
+      // PUBLISH-FIX-75: the KILL / CAGE latches cleared at boot under owner intent (SERPENT_CLEAR_LATCHES_AT_BOOT=true + the
+      // control password): the exact cockpit CLEAR path, run before the Judge composes. No-op when unset.
+      try {
+        const [{ clearLatchesAtBoot }, { readControls }, { requestClear }] = await Promise.all([import('./lib/latch-clear-at-boot.js'), import('./state/controls.js'), import('./persistence/control-plane.js')]);
+        await clearLatchesAtBoot({ env: process.env, log: console.log, readControls, requestClear });
+      } catch (err) { console.error(`CONTROL: latch clear at boot threw (latches stand): ${String(err?.message ?? err).slice(0, 160)}`); }
       const { setJudgeRun } = await import('./ui/server.js');
       const { marketResearchRootFromEnv } = await import('./market-lab/paths.js');
       if (!process.env.JUDGE_POLICY || !process.env.JUDGE_MODE) throw new Error('JUDGE_POLICY (policy JSON file) and JUDGE_MODE (OBSERVE | PAPER | LIVE_UNARMED | LIVE_ARMED) are required');

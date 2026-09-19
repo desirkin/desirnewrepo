@@ -65,7 +65,7 @@ export function profileEnvironment(profile, { dataDir = null } = {}) {
   const env = {
     [PROFILE_ENV]: profile.file,
     ...FORCED_ENV,
-    JUDGE_ENABLED: on(g.judge.judge) ? 'true' : 'false', JUDGE_POLICY: profileFileOf(profile, 'judgePolicy'), JUDGE_ACCOUNT: g.judge.judge.accountId ?? '',
+    JUDGE_ENABLED: on(g.judge.judge) ? 'true' : 'false', SERPENT_CLEAR_LATCHES_AT_BOOT: on(g.judge.latchClearAtBoot) ? 'true' : 'false', JUDGE_POLICY: profileFileOf(profile, 'judgePolicy'), JUDGE_ACCOUNT: g.judge.judge.accountId ?? '',
     MARKET_RESEARCH_ENABLED: on(g.marketResearch.service) ? 'true' : 'false', MARKET_RESEARCH_POLICY: profileFileOf(profile, 'marketResearchPolicy'), MARKET_RESEARCH_SUBJECTS: profileFileOf(profile, 'marketResearchSubjects'),
     RUMOR2_ENABLED: on(g.rumorOfficial.rumor2) ? 'true' : 'false', RUMOR2_EDGAR_ENABLED: on(g.rumorOfficial.EDGAR_OFFICIAL) ? 'true' : 'false', RUMOR2_OFAC_ENABLED: on(g.rumorOfficial.OFAC_OFFICIAL) ? 'true' : 'false',
     RUMOR2_ALLOW_LOCAL_JOURNAL: on(g.persistence.localJournalFallback) ? 'true' : 'false',

@@ -43,6 +43,12 @@ Forced by the launcher regardless of the environment: `JUDGE_MODE=PAPER`, `JUDGE
 `JUDGE_ALLOW_ORDERS=false`, `RUMOR2_SOCIAL_MODE=LIVE`. Never present: a Kraken trading key. A Kraken L3 key, if any, is a
 dedicated DATA-ONLY key (`create-ws-token` only) and is proven before use (`SAFE_L3_DATA_KEY`), never an execution credential.
 
+Owner intent through the environment (production has no shell): `SERPENT_PAPER_INIT_ACCOUNT` (+ the control password)
+initializes the paper account at boot (PUBLISH-FIX-7); `SERPENT_CLEAR_LATCHES_AT_BOOT=true` (+ the control password,
+JUDGE_MODE=PAPER) clears a standing KILL / CAGE latch at boot through the exact cockpit CLEAR path (PUBLISH-FIX-75):
+durable decision first, two-phase local drop, a restriction that lands meanwhile wins, vetoes untouched. It clears on
+EVERY boot while set — the log line says so; remove it once it has done its job.
+
 ## 3. Composition order (fly.js, unchanged)
 
 persistence bootstrap (restrictive first) → cockpit status server → memory mirror → RUMINT legacy ear → gateway (exchange

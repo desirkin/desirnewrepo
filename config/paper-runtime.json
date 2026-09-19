@@ -79,7 +79,8 @@
    "model": { "desiredState": "REQUEST", "blockerPolicy": "PAID_GATE", "authority": "NONE", "credentialEnv": "ANTHROPIC_API_KEY", "budgetSource": "config/market-research.paper.json model.* (explicit USD caps; shipped 0 = blocked)" }
   },
   "judge": {
-   "judge": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "judge/composition.js", "mode": "PAPER", "enableEnv": "JUDGE_ENABLED", "policyFile": "config/judge.paper.starting-styles-fee040.json", "accountId": "paper-starting-styles-usd500-fee040", "authority": "PAPER_SIMULATION_ONLY" }
+   "judge": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "judge/composition.js", "mode": "PAPER", "enableEnv": "JUDGE_ENABLED", "policyFile": "config/judge.paper.starting-styles-fee040.json", "accountId": "paper-starting-styles-usd500-fee040", "authority": "PAPER_SIMULATION_ONLY" },
+   "latchClearAtBoot": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "lib/latch-clear-at-boot.js", "env": "SERPENT_CLEAR_LATCHES_AT_BOOT", "note": "PUBLISH-FIX-75, owner directive 2026-09-19 (David: 'let's get rid of it and anything that could get in the way'): a standing KILL / CAGE latch is cleared at every paper boot under owner intent (this row + SERPENT_CONTROL_PASSWORD present), through the exact cockpit CLEAR path; vetoes untouched. Set OFF to let a latch stand across boots again." }
   },
   "watch": {
    "watch": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "watch/watch.js", "composedBy": "judge/composition.js", "authority": "PAPER_EXIT_INTENT_ONLY" }
