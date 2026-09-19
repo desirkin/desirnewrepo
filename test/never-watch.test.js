@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import { neverWatchSet, filterNominations, canonicalBase, NEVER_WATCH_ENV } from '../lib/never-watch.js';
 import { loadProfile, profileEnvironment } from '../paper/profile.js';
 
-test('NW-01. the paper profile names BTC and ETH; the env carries them; the set parses, upper-cases, and ignores junk', () => {
+test('NW-01. the paper profile names BTC, ETH, SOL and LTC (fix77); the env carries them; the set parses, upper-cases, and ignores junk', () => {
   const env = profileEnvironment(loadProfile('config/paper-runtime.json'));
-  assert.equal(env[NEVER_WATCH_ENV], 'BTC,ETH');
+  assert.equal(env[NEVER_WATCH_ENV], 'BTC,ETH,SOL,LTC');
   assert.deepEqual([...neverWatchSet({ [NEVER_WATCH_ENV]: ' btc, Eth ,, x y, sol' })], ['BTC', 'ETH', 'SOL']);
   assert.equal(neverWatchSet({}).size, 0);
   assert.equal(canonicalBase('XBT'), 'BTC'); assert.equal(canonicalBase('xeth'), 'ETH'); assert.equal(canonicalBase('ARB'), 'ARB');

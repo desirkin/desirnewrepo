@@ -167,7 +167,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // PUBLISH-FIX-44: the MOVER STUDY (learning/mover-study.js) — David's "what happened the hour before those movers went up,
   // and the hour after" — rides the broad-Kraken closed-candle stream from the first record; its learning store is
   // attached once LEARN-1 composes below. Authority NONE; a failure here is dark and nothing else is affected.
-  // PUBLISH-FIX-76: the owner's never-watch list (JUDGE_NEVER_WATCH from the paper profile: BTC, ETH) is applied to EVERY nomination source
+  // PUBLISH-FIX-76: the owner's never-watch list (JUDGE_NEVER_WATCH from the paper profile: BTC, ETH; fix77 adds SOL, LTC) is applied to EVERY nomination source
   const neverWatch = neverWatchSet(process.env); if (neverWatch.size) console.log(`JUDGE never-watch (owner directive, paper profile): ${[...neverWatch].join(', ')} — dropped from every nomination source before the Judge hears of them`);
   let moverStudy = null; let moverStudyTimer = null; let volatilityWatch = null; let volatilityTimer = null;
   let moveClockLesson = null; let moveClockTimer = null; // PUBLISH-FIX-73: what the mover study teaches the Judge about a move's clock
