@@ -27,7 +27,11 @@ export const PREP_ROTATION_INTERVAL_MS = 10 * 60_000;
 export const emptyRotation = () => ({ ended: new Map(), lastRotationTs: null }); // ended: assetId -> ts its last preparation ended
 const REQUIREMENTS = Object.freeze({ RANGE_IGNITION: { bars: BARS_REQUIRED, flowMs: 21 * 60_000, book: true, caseRequired: false }, ABSORPTION_RECLAIM: { bars: BARS_REQUIRED, flowMs: 21 * 60_000, book: true, baselineBooks: 30, caseRequired: false }, TREND_PULLBACK_CONTINUATION: { bars: BARS_REQUIRED, flowMs: 21 * 60_000, book: true, caseRequired: false }, CATALYST_TRANSMISSION: { bars: BARS_REQUIRED, flowMs: 21 * 60_000, book: true, caseRequired: true } });
 // nominations: [{ assetId, symbol, nominationKnownAtTs, nominationLastSeenTs?, source }] ; held: Set of assetIds with exposure; capacity: remaining hot-set slots
-export function selectPreparation({ nominations, held = new Set(), remainingSlots, previous = new Map(), nowTs, nominationTtlMs = 3_600_000, tenureMs = PREP_TENURE_MS, rotationIntervalMs = PREP_ROTATION_INTERVAL_MS, rotation = emptyRotation() }) {
+// PUBLISH-FIX-83 (full review item 9): a tenant still inside its trade-coverage warm-up is never preempted by a newer nomination —
+// preempting it threw the warm-up away (21 minutes of coverage) for a coin that then had to start from zero itself. Fairness
+// rotation (an expired 60-minute tenure) is untouched; a held asset and a nomination expiry are untouched.
+export const PREP_WARMUP_PROTECT_MS = 22 * 60_000;
+export function selectPreparation({ nominations, held = new Set(), remainingSlots, previous = new Map(), nowTs, nominationTtlMs = 3_600_000, tenureMs = PREP_TENURE_MS, rotationIntervalMs = PREP_ROTATION_INTERVAL_MS, rotation = emptyRotation(), warmupProtectMs = PREP_WARMUP_PROTECT_MS }) {
   const slots = Math.max(0, Math.min(PREP_SLOTS_MAX, remainingSlots)); const byAsset = new Map();
   for (const n of nominations) {
     if (!Number.isSafeInteger(n.nominationKnownAtTs) || n.nominationKnownAtTs > nowTs) continue;
@@ -47,7 +51,10 @@ export function selectPreparation({ nominations, held = new Set(), remainingSlot
   // equal clocks: a current tenant outranks a non-tenant (a rotated-out candidate never bounces straight back), then asset id
   const tenant = (n) => (previous.has(n.assetId) ? 0 : 1);
   const ranked = [...byAsset.values()].sort((a, b) => rankTs(b) - rankTs(a) || tenant(a) - tenant(b) || cmpId(a, b));
-  let selected = ranked.slice(0, slots); let waiting = ranked.slice(slots);
+  // warm-up protection: tenants still warming keep their slot ahead of any newer nomination (only while still nominated and not held)
+  const warming = (n) => { const p = previous.get(n.assetId); return Boolean(p) && warmupProtectMs > 0 && Number.isSafeInteger(p.preparedSinceTs) && nowTs - p.preparedSinceTs < warmupProtectMs; };
+  const protectedTenants = ranked.filter(warming).slice(0, slots); const others = ranked.filter((n) => !protectedTenants.includes(n));
+  let selected = [...protectedTenants, ...others.slice(0, Math.max(0, slots - protectedTenants.length))].sort((a, b) => ranked.indexOf(a) - ranked.indexOf(b)); let waiting = ranked.filter((n) => !selected.includes(n));
   // ---- fair rotation: one expired tenant yields to the longest-waiting eligible nomination, at most once per interval ----
   const rotated = []; const ended = new Map(rotation?.ended ?? []); let lastRotationTs = rotation?.lastRotationTs ?? null;
   if (waiting.length > 0 && tenureMs > 0 && (lastRotationTs === null || nowTs - lastRotationTs >= rotationIntervalMs)) {
