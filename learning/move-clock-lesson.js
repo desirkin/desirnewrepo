@@ -21,7 +21,11 @@ function percentile(sorted, p) { if (!sorted.length) return null; const idx = Ma
 export function moveClockLessonOf(records, { armAt = MOVE_CLOCK_LESSON_DEFAULTS.armAt, minClimbPct = MOVE_CLOCK_LESSON_DEFAULTS.minClimbPct, latePercentile = MOVE_CLOCK_LESSON_DEFAULTS.latePercentile, floorMin = MOVE_CLOCK_LESSON_DEFAULTS.floorMin, nowTs = Date.now(), days = MOVE_CLOCK_LESSON_DEFAULTS.days } = {}) {
   const mins = [];
   for (const r of records ?? []) {
-    if (!r || r.kind !== 'MOVER') continue;
+    // PUBLISH-FIX-80: the day's board entries (DAILY_TOP — the day's biggest climbs, written at the day's close with the same
+    // picture and move clock) count too when their climb reaches the clock's own minClimbPct: the lesson's population is the
+    // population the gate judges (climbs >= minClimbPct), not only the >=10% threshold movers. The reader already keeps one
+    // record per coin+minute, so a mover that also topped its day's board counts once.
+    if (!r || (r.kind !== 'MOVER' && !(r.kind === 'DAILY_TOP' && Number.isFinite(r.climbPct) && r.climbPct >= minClimbPct))) continue;
     const m = r.moveClock?.minutesLowToPeak;
     if (!Number.isFinite(m) || m < 0) continue;
     mins.push(m);
@@ -48,14 +52,14 @@ export function createMoveClockLesson({ dataDir, clock = () => Date.now(), log =
       const f = path.join(base, `${utcDateOf(nowTs - d * DAY)}.jsonl`);
       if (!existsSync(f)) continue;
       let text = ''; try { text = readFileSync(f, 'utf8'); } catch { continue; }
-      for (const line of text.split('\n')) { if (!line) continue; try { const r = JSON.parse(line); if (r && r.kind === 'MOVER') out.push(r); } catch { /* a torn line is skipped */ } }
+      for (const line of text.split('\n')) { if (!line) continue; try { const r = JSON.parse(line); if (r && (r.kind === 'MOVER' || r.kind === 'DAILY_TOP')) out.push(r); } catch { /* a torn line is skipped */ } }
     }
     return out;
   }
   function readDays(nowTs) {
     const seen = new Set(); const out = []; const counts = { live: 0, backfill: 0 };
     for (const [name, base] of [['live', dir], ['backfill', backfillDir]]) {
-      for (const r of readDir(base, nowTs)) { const k = Number.isFinite(r.eventTs) ? `${r.coin}|${r.eventTs}` : null; if (k) { if (seen.has(k)) continue; seen.add(k); } out.push(r); if (r.moveClock) counts[name] += 1; }
+      for (const r of readDir(base, nowTs)) { const k = Number.isFinite(r.eventTs) ? `${r.coin}|${r.eventTs}` : null; if (k) { if (seen.has(k)) continue; seen.add(k); } out.push(r); if (r.moveClock && (r.kind === 'MOVER' || (r.kind === 'DAILY_TOP' && r.climbPct >= cfg.minClimbPct))) counts[name] += 1; }
     }
     sources = counts;
     return out;

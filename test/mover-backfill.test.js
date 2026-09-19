@@ -60,7 +60,8 @@ test('MB-02. runMoverBackfill replays the archive through the mover study with a
     assert.ok(mover.moveClock && mover.moveClock.minutesLowToPeak > 0, 'the move clock rides along (pictureAt)');
     assert.equal(rows.filter((x) => x.kind === 'CONTROL').length, 2);
     assert.ok(!existsSync(path.join(dir, 'learning', 'mover-study')), 'the live study directory is never written');
-    assert.match(logs.at(-1), /MOVER BACKFILL: 1 climbs >=10%\/hour \(with 2 controls\) replayed from 2 archived segments/);
+    assert.equal(r.pinned, 2, 'both segments were pinned with hard links'); assert.ok(!existsSync(path.join(dir, 'mover-backfill', 'segments')), 'the links are removed afterwards');
+    assert.match(logs.at(-1), /MOVER BACKFILL: 1 climbs >=10%\/hour \(with 2 controls\) replayed from 2 archived segments/); assert.equal(logs.filter((l) => /replayed \(/.test(l)).length, 2, 'one progress line per segment');
     // a second run starts clean: the same single record, not two
     const r2 = await runMoverBackfill({ dataDir: dir, studyOptions: { controlsPerMover: 2 } }); assert.equal(r2.movers, 1);
     assert.equal(readFileSync(f, 'utf8').split('\n').filter((l) => l.includes('"MOVER"')).length, 1);
@@ -96,5 +97,35 @@ test('MB-04. spawnMoverBackfill runs the replay in a child process and returns i
     assert.equal(r.outcome, 'DONE'); assert.equal(r.movers, 1); assert.equal(r.segments, 2); assert.ok(existsSync(path.join(backfillStudyDir(dir), '2026-09-16.jsonl')));
     const bad = await spawnMoverBackfill({ dataDir: '', log: (m) => logs.push(m) }); assert.equal(bad.outcome, 'FAILED'); assert.match(logs.at(-1), /without a result/);
     const slow = await spawnMoverBackfill({ dataDir: dir, timeoutMs: 1, log: (m) => logs.push(m) }); assert.equal(slow.outcome, 'TIMEOUT'); assert.match(logs.at(-1), /timed out/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('MB-05. PUBLISH-FIX-80: a segment that vanishes after the replay pinned it (ENOENT on read — the production failure) is skipped and named; the replay finishes on the rest and the result counts it', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-mb-'));
+  try {
+    writeArchive(dir); const logs = [];
+    // pinning is synchronous at the top of the run; the second segment's link (and its original) are removed before the loop
+    // reaches it, so its read stream fails with ENOENT exactly as the collector's prune did in production
+    const run = runMoverBackfill({ dataDir: dir, log: (m) => logs.push(m), studyOptions: { controlsPerMover: 2 } });
+    rmSync(path.join(dir, 'mover-backfill', 'segments', 'events-000002.jsonl')); rmSync(path.join(dir, 'broad-kraken', 'events-000002.jsonl'));
+    const r = await run;
+    assert.equal(r.skipped, 1); assert.equal(r.segments, 2); assert.equal(r.movers, 0, 'the climb straddled the two segments; half of it is not a climb');
+    assert.equal(r.candles, Math.floor(260 * 5 / 2) * 4 / 5, 'the first segment was read in full');
+    assert.ok(logs.some((l) => /events-000002\.jsonl could not be read \(ENOENT\) — skipped/.test(l)), logs.join(' | '));
+    assert.match(logs.at(-1), /replayed from 1 archived segments \(1 pruned under it, skipped\)/);
+    assert.equal(logs.filter((l) => / replayed \(/.test(l)).length, 1, 'one progress line per readable segment');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('MB-06. PUBLISH-FIX-80: a segment unlinked by the collector after the replay pinned it is still read in full (the hard link keeps the bytes)', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-mb-'));
+  try {
+    writeArchive(dir); const logs = []; const first = path.join(dir, 'broad-kraken', 'events-000001.jsonl');
+    // the study option hook is the only seam that runs after pinning and before reading: a tick callback is not available, so
+    // unlink from a microtask queued right after the call starts (pinning is synchronous at the top of the run)
+    const run = runMoverBackfill({ dataDir: dir, log: (m) => logs.push(m), studyOptions: { controlsPerMover: 2 } });
+    rmSync(first); assert.ok(!existsSync(first));
+    const r = await run;
+    assert.equal(r.skipped, 0); assert.equal(r.segments, 2); assert.equal(r.movers, 1); assert.equal(r.candles, 260 * 4, 'every minute of the unlinked segment was read through its link');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

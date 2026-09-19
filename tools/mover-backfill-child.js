@@ -9,6 +9,6 @@ try {
   process.stdout.write(`${JSON.stringify(result)}\n`);
   process.exit(0);
 } catch (err) {
-  process.stderr.write(`MOVER BACKFILL child failed: ${String(err?.message ?? err).slice(0, 200)}\n`);
+  process.stderr.write(`MOVER BACKFILL child failed: ${String(err?.stack ?? err?.message ?? err).slice(0, 600)}\n`);
   process.exit(1);
 }

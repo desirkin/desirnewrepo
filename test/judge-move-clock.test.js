@@ -37,13 +37,17 @@ test('MC-02. verdict: refuses MOVE_TOO_OLD only when the lesson is ARMED, the co
   const dormantRows = moveClockMeasurements({ state: 'NOT_KNOWN' }, null, moveClockVerdict({ state: 'NOT_KNOWN' }, null)); assert.equal(dormantRows[0].value, null); assert.equal(dormantRows[0].threshold, null); assert.equal(dormantRows[0].ok, true); assert.match(dormantRows[0].note, /lesson=ABSENT/);
 });
 
-test('MC-03. the lesson: DORMANT under 20 measured movers; ARMED at 20 with lateMin = the 75th percentile of minutes-low-to-peak (floor 5); only MOVER records with a move clock count; the reader takes the last 7 daily files and survives torn lines and missing files', () => {
+test('MC-03. the lesson: DORMANT under 20 measured movers; ARMED at 20 with lateMin = the 75th percentile of minutes-low-to-peak (floor 5); MOVER records with a move clock count, and (fix80) the day-board climbs at/above minClimbPct; the reader takes the last 7 daily files and survives torn lines and missing files', () => {
   const mover = (m, extra = {}) => ({ kind: 'MOVER', coin: 'X', climbPct: 12, moveClock: { minutesLowToPeak: m }, ...extra });
   const d = moveClockLessonOf([mover(10), mover(20), mover(30)], { nowTs: END }); assert.equal(d.state, 'DORMANT'); assert.equal(d.movers, 3); assert.equal(d.lateMin, null); assert.equal(d.medianMin, 20); assert.equal(d.version, MOVE_CLOCK_LESSON_VERSION);
   const twenty = Array.from({ length: 20 }, (_, i) => mover(i + 1)); // 1..20 minutes
   const a = moveClockLessonOf([...twenty, { kind: 'CONTROL', moveClock: { minutesLowToPeak: 300 } }, mover(NaN), { kind: 'MOVER', hourAfter: {} }], { nowTs: END });
   assert.equal(a.state, 'ARMED'); assert.equal(a.movers, 20, 'controls, NaN clocks and pre-fix73 movers without a clock never count'); assert.equal(a.medianMin, 10); assert.equal(a.p75Min, 15); assert.equal(a.lateMin, 15); assert.equal(a.minClimbPct, 5);
   assert.equal(moveClockLessonOf(Array.from({ length: 20 }, () => mover(2)), { nowTs: END }).lateMin, 5, 'the floor');
+  // PUBLISH-FIX-80: a day's-board entry (DAILY_TOP) counts when its climb reaches the clock's minClimbPct; a smaller one does not
+  const top = (m, climb) => ({ kind: 'DAILY_TOP', coin: 'Y', climbPct: climb, moveClock: { minutesLowToPeak: m } });
+  const t = moveClockLessonOf([mover(10), top(20, 7.5), top(30, 5), top(99, 4.9), { kind: 'DAILY_TOP_CONTROL', climbPct: 9, moveClock: { minutesLowToPeak: 99 } }], { nowTs: END });
+  assert.equal(t.movers, 3, 'the mover and the two board climbs at/above 5%'); assert.equal(t.medianMin, 20);
   const dir = mkdtempSync(path.join(tmpdir(), 'serpent-move-clock-'));
   try {
     const sub = path.join(dir, 'learning', 'mover-study'); mkdirSync(sub, { recursive: true });

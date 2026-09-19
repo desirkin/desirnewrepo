@@ -15,7 +15,7 @@
 // process (tools/mover-backfill-process.js spawnMoverBackfill owns the spawn; learning/ stays inside its fence) so the main thread — the tape, the Judge, the journal commit — never feels it (PUBLISH-FIX-53's
 // lesson). Authority NONE: it reads candles and writes study records. It never nominates, never touches the Judge.
 import path from 'node:path';
-import { createReadStream, existsSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, linkSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createMoverStudy, candleOfRecord } from './mover-study.js';
 
@@ -46,14 +46,27 @@ export async function runMoverBackfill({ dataDir, log = () => {}, maxBytes, maxS
   const root = path.join(dataDir, MOVER_BACKFILL_DIR);
   rmSync(root, { recursive: true, force: true });
   const segments = selectSegments(path.join(dataDir, 'broad-kraken'), { maxBytes, maxSegments });
-  const out = { version: MOVER_BACKFILL_VERSION, segments: segments.length, bytes: segments.reduce((a, s) => a + s.bytes, 0), lines: 0, records: 0, candles: 0, ticks: 0, movers: 0, controls: 0, coins: 0, firstTs: null, lastTs: null, days: [], ms: 0 };
+  const out = { version: MOVER_BACKFILL_VERSION, segments: segments.length, skipped: 0, pinned: 0, bytes: segments.reduce((a, s) => a + s.bytes, 0), lines: 0, records: 0, candles: 0, ticks: 0, movers: 0, controls: 0, coins: 0, firstTs: null, lastTs: null, days: [], ms: 0 };
   if (!segments.length) { out.ms = Date.now() - started; return out; }
+  // PUBLISH-FIX-80: the live collector unlinks the oldest segments when it rotates (64 kept; the restore puts back more), so the
+  // replay pins every selected segment with a HARD LINK under its own root before reading: an unlink of the original no longer
+  // takes the bytes away mid-read, and the whole selected set is replayed. A link that cannot be made (a foreign filesystem,
+  // a directory in the way) falls back to the original path; an unreadable segment is skipped and named, never fatal.
+  const pinDir = path.join(root, 'segments'); mkdirSync(pinDir, { recursive: true });
+  for (const seg of segments) { const pinned = path.join(pinDir, seg.name); try { linkSync(seg.file, pinned); seg.read = pinned; seg.pinned = true; } catch { seg.read = seg.file; seg.pinned = false; } }
+  out.pinned = segments.filter((s) => s.pinned).length;
   let virtualNow = 0;
   const study = createMoverStudy({ dataDir: root, clock: () => virtualNow, log: () => {}, options: studyOptions });
   let tickMinute = -1; const days = new Set();
   for (const seg of segments) {
-    const rl = createInterface({ input: createReadStream(seg.file, { encoding: 'utf8' }), crlfDelay: Infinity });
-    for await (const line of rl) {
+    // PUBLISH-FIX-80: the live collector keeps at most 64 segments on disk and unlinks the OLDEST when it opens a new one — the
+    // restore had put 95 back, so the first rotation after boot deleted ~30 while this replay was still walking them, oldest
+    // first; the read stream's ENOENT was an unhandled 'error' event and the child died with it. A segment that cannot be
+    // read is skipped and named; the replay carries on with what is there.
+    const input = createReadStream(seg.read, { encoding: 'utf8' }); let streamError = null;
+    const rl = createInterface({ input, crlfDelay: Infinity });
+    input.on('error', (err) => { streamError = err; try { rl.close(); } catch { /* closing */ } });
+    try { for await (const line of rl) {
       out.lines += 1;
       if (!line.includes('CONSERVATIVE_CLOSED')) continue; // only closed candles interest the study; skip the parse otherwise
       let r; try { r = JSON.parse(line); } catch { continue; }
@@ -68,11 +81,14 @@ export async function runMoverBackfill({ dataDir, log = () => {}, maxBytes, maxS
         const t = study.tick(virtualNow); out.ticks += 1; out.movers += t.movers; out.controls += t.controls;
         if (t.movers) days.add(utcDateOf(virtualNow));
       }
-    }
+    } } catch (err) { streamError = streamError ?? err; }
+    if (streamError) { out.skipped += 1; log(`MOVER BACKFILL: ${seg.name} could not be read (${streamError?.code ?? String(streamError?.message ?? streamError).slice(0, 80)}) — skipped; the live collector prunes the oldest segments while the replay walks them`); continue; }
+    log(`MOVER BACKFILL: ${seg.name} replayed (${out.candles} closed minutes, ${out.movers} climbs so far)`); // a crash mid-way names the segment it died in
   }
   if (virtualNow) study.closeDay(virtualNow);
   study.flush();
+  rmSync(pinDir, { recursive: true, force: true }); // the links served their purpose; the study's records stay
   out.coins = study.status().coins; out.days = [...days].sort(); out.ms = Date.now() - started;
-  log(`MOVER BACKFILL: ${out.movers} climbs >=10%/hour (with ${out.controls} controls) replayed from ${out.segments} archived segments (${(out.bytes / 1048576).toFixed(0)} MB, ${out.candles} closed minutes${out.firstTs ? `, ${new Date(out.firstTs).toISOString().slice(0, 16)}Z to ${new Date(out.lastTs).toISOString().slice(0, 16)}Z` : ''}) in ${(out.ms / 1000).toFixed(0)} s`);
+  log(`MOVER BACKFILL: ${out.movers} climbs >=10%/hour (with ${out.controls} controls) replayed from ${out.segments - out.skipped} archived segments${out.skipped ? ` (${out.skipped} pruned under it, skipped)` : ''} (${(out.bytes / 1048576).toFixed(0)} MB, ${out.candles} closed minutes${out.firstTs ? `, ${new Date(out.firstTs).toISOString().slice(0, 16)}Z to ${new Date(out.lastTs).toISOString().slice(0, 16)}Z` : ''}) in ${(out.ms / 1000).toFixed(0)} s`);
   return out;
 }

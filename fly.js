@@ -204,7 +204,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
         const { spawnMoverBackfill } = await import('./tools/mover-backfill-process.js');
         console.log('MOVER BACKFILL: replaying the archived broad-Kraken segments through the mover study in a child process (authority NONE) so the move clock can arm today');
         spawnMoverBackfill({ dataDir: dataDir(), log: console.log }).then((r) => {
-          if (r.outcome === 'DONE') console.log(`MOVER BACKFILL done: ${r.movers} climbs >=10%/hour (with ${r.controls} controls) from ${r.segments} archived segments (${(r.bytes / 1048576).toFixed(0)} MB, ${r.candles} closed minutes${r.firstTs ? `, ${new Date(r.firstTs).toISOString().slice(0, 16)}Z to ${new Date(r.lastTs).toISOString().slice(0, 16)}Z` : ''}) in ${(r.ms / 1000).toFixed(0)} s; days ${r.days.join(', ') || 'none'}`);
+          if (r.outcome === 'DONE') console.log(`MOVER BACKFILL done: ${r.movers} climbs >=10%/hour (with ${r.controls} controls) from ${r.segments - (r.skipped ?? 0)} archived segments${r.skipped ? ` (${r.skipped} pruned under it, skipped)` : ''} (${(r.bytes / 1048576).toFixed(0)} MB, ${r.candles} closed minutes${r.firstTs ? `, ${new Date(r.firstTs).toISOString().slice(0, 16)}Z to ${new Date(r.lastTs).toISOString().slice(0, 16)}Z` : ''}) in ${(r.ms / 1000).toFixed(0)} s; days ${r.days.join(', ') || 'none'}`);
           else console.log(`MOVER BACKFILL ${r.outcome}${r.reason ? ` (${r.reason})` : ''}: the move clock keeps learning from the live study only`);
           try { moveClockLesson?.refresh(); } catch (err) { console.error(`MOVE CLOCK refresh after backfill: ${String(err?.message ?? err).slice(0, 160)}`); }
         }).catch((err) => console.error(`MOVER BACKFILL: ${String(err?.message ?? err).slice(0, 160)}`));
