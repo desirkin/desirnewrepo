@@ -31,6 +31,7 @@ import { sensorSnapshot } from '../paper/readiness.js';
 import { loadProfile as loadPaperProfile, profileEnvironment as paperProfileEnvironment } from '../paper/profile.js';
 import { answerQuestion, boundHistory, SUGGESTED_QUESTIONS, COMPANION_VERSION, COMPANION_LABEL, MAX_QUESTION_CHARS } from '../paper/companion.js';
 import { createChatDispatcher } from '../paper/companion-chat.js';
+import { loadCoinDossier } from '../paper/coin-dossier.js';
 import { explainerControlsView, setExplainerToggles } from '../lib/explainer-toggles.js';
 import { readDataOnlyRuntimeStatus, dataOnlyPublicStatus, dataOnlySensorSnapshot, dataOnlyMarketView } from '../lib/data-only-status.js';
 import { readBroadKrakenLatest } from '../market-lab/broad-kraken.js';
@@ -151,7 +152,13 @@ async function askHandler(req, res, body) {
   const question = typeof body?.question === 'string' ? body.question.trim() : ''; if (!question.length || question.length > MAX_QUESTION_CHARS) { json(res, 400, { ok: false, reason: 'QUESTION_REQUIRED', max: MAX_QUESTION_CHARS }); return; }
   const history = boundHistory(body?.history); const mode = body?.mode === 'chat' ? 'chat' : 'evidence';
   let judge = null; let sensors = null; let research = null; try { judge = judgeView(); } catch (err) { judge = { enabled: false, error: String(err.message).slice(0, 120) }; } try { sensors = sensorsView(); } catch { sensors = null; } try { research = marketResearchSummary(); } catch { research = null; }
-  const answer = await answerQuestion({ question, judge, sensors, research, journalPage: askJournalPage });
+  let answer = await answerQuestion({ question, judge, sensors, research, journalPage: askJournalPage });
+  // PUBLISH-FIX-72: a question about a coin gets that coin's DOSSIER — every recorded look of the last 24 h with the gate that said no in
+  // plain words, what the coin did after each pass, the watch and the mover board — appended to the recorded-evidence answer and handed
+  // to the model as grounding. Read-only, bounded, best-effort: a dossier that cannot be built changes nothing.
+  let dossier = null;
+  if (answer.symbol && ['WHY_SKIP', 'WHY_BUY', 'STATUS', 'HELP', 'WATCH'].includes(answer.intent)) { try { dossier = await loadCoinDossier({ dataDir: dataDir(), coin: answer.symbol, journalPage: askJournalPage, log: (m) => console.error(m) }); } catch (err) { console.error(`coin dossier: ${String(err?.message ?? err).slice(0, 160)}`); dossier = null; } }
+  if (dossier && dossier.lines?.length) answer = { ...answer, answer: `${answer.answer}\n\nThe day's record for ${dossier.coin}:\n${dossier.lines.join('\n')}`, dossier: { coin: dossier.coin, looks: dossier.looks, byStatus: dossier.byStatus, topGates: dossier.topGates, after: dossier.after, onWatch: dossier.onWatch, onBoard: dossier.onBoard } };
   if (mode !== 'chat') { json(res, 200, { ...answer, chat: null }); return; }
   // a billed conversation request is an authenticated operator action: session + CSRF + same-origin, exactly like a control
   // PUBLISH-FIX-46: without SERPENT_PRIVATE_READS=strict a paid Ask needs only same-origin (the platform gate + the ASK
@@ -165,7 +172,7 @@ async function askHandler(req, res, body) {
   // TALK-TO-THEM grounding: when the question is about a coin, ground the model additionally in that coin's hunt-trail
   // (arrival -> research -> decision -> outcome, read-only). Bounded, best-effort, never blocks the answer.
   let trail = null; if (answer.symbol) { try { const t = huntTrail(answer.symbol); trail = { coin: t.coin, arrivals: (t.arrivals ?? []).slice(0, 6), research: (t.research ?? []).slice(0, 6), decisions: (t.decisions ?? []).slice(0, 6), linkage: t.linkage ?? null }; } catch { trail = null; } }
-  let r; try { r = await chat().ask({ question, history, evidence: { answer: answer.answer, availability: answer.availability, evidence: answer.evidence, intent: answer.intent, huntTrail: trail } }); } catch (err) { r = { ok: false, dispatched: false, reason: 'CHAT_FAILED', notice: String(err.message).slice(0, 160) }; }
+  let r; try { r = await chat().ask({ question, history, evidence: { answer: answer.answer, availability: answer.availability, evidence: answer.evidence, intent: answer.intent, huntTrail: trail, dossier: dossier ? { coin: dossier.coin, windowHours: dossier.windowHours, looks: dossier.looks, byStatus: dossier.byStatus, bySetup: dossier.bySetup, topGates: dossier.topGates, lastLook: dossier.lastLook, after: dossier.after, onWatch: dossier.onWatch, onBoard: dossier.onBoard, roundTripPct: dossier.roundTripPct } : null } }); } catch (err) { r = { ok: false, dispatched: false, reason: 'CHAT_FAILED', notice: String(err.message).slice(0, 160) }; }
   json(res, 200, { ...answer, chat: r });
 }
 function judgeArm(body, gate, res) {
