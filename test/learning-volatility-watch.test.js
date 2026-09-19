@@ -78,6 +78,8 @@ test('VW-04. end to end: the source writes current.json, nominates with the entr
     assert.equal(JSON.parse(readFileSync(volatilityFile(dir), 'utf8')).picks.length, 1);
     assert.equal(watch.status().authority, 'NONE'); assert.equal(watch.status().counters.entered, 2); assert.equal(watch.status().counters.left, 1);
     assert.throws(() => createVolatilityWatch({ seriesSource: () => null, dataDir: dir }), /coins\(\)/);
-    assert.ok(VOLATILITY_WATCH_DEFAULTS.picks === 6);
+    assert.ok(VOLATILITY_WATCH_DEFAULTS.picks === 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.minBars, 30, 'PUBLISH-FIX-71: 30 of the last 60 minutes rank a coin (a republish leaves 15–30 min on disk)');
+    // PUBLISH-FIX-71: a coin with 35 of the last 60 minutes on disk is ranked (was: not until 50)
+    { const r35 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 5_000, minutes: 35 }) }), nowTs: NOW }); assert.deepEqual(r35.ranked.map((x) => x.coin), ['ZZ']); const r25 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 5_000, minutes: 25 }) }), nowTs: NOW }); assert.deepEqual(r25.ranked, []); assert.equal(r25.skipped.thin, 1); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

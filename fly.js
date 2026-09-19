@@ -180,7 +180,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       const { createVolatilityWatch } = await import('./learning/volatility-watch.js');
       volatilityWatch = createVolatilityWatch({ seriesSource: createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log }), dataDir: dataDir(), log: console.log, excludeBases: loadConfig().universeExpansion?.excludeBases ?? [] });
       volatilityWatch.refresh();
-      volatilityTimer = setInterval(() => { try { volatilityWatch.refresh(); } catch (err) { console.error(`VOLATILITY WATCH refresh: ${String(err?.message ?? err).slice(0, 160)}`); } }, 60_000);
+      volatilityTimer = setInterval(() => { try { volatilityWatch.refresh(); } catch (err) { console.error(`VOLATILITY WATCH refresh: ${String(err?.message ?? err).slice(0, 160)}`); } }, 30_000); // PUBLISH-FIX-71: 30 s (was 60): a mover reaches the Judge's slots twice as fast; the ranking reads the on-disk candles through the incremental index, so the cost is small
       if (typeof volatilityTimer?.unref === 'function') volatilityTimer.unref();
       console.log(`VOLATILITY WATCH active (authority NONE; watch only): ${volatilityWatch.line()}`);
     } catch (err) { console.error(`VOLATILITY WATCH failed to start (dark; nothing else affected): ${String(err?.message ?? err).slice(0, 160)}`); volatilityWatch = null; }

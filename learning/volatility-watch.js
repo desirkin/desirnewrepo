@@ -22,7 +22,7 @@ export const VOLATILITY_WATCH_DEFAULTS = Object.freeze({
   band: 12,               // a listed coin stays while it is still inside the top `band` (hysteresis against churn)
   windowMin: 60,          // the hour that is ranked
   longWindowMin: 240,     // the four-hour range, reported beside it
-  minBars: 50,            // at least this many of the hour's minutes must be on disk
+  minBars: 30,            // at least this many of the hour's minutes must be on disk (PUBLISH-FIX-71: was 50 — after a republish the disk holds 15–30 min per coin, so the watch sat blind for half an hour)
   minUsdVol1h: 100_000,   // the hour's traded dollars: a range nobody traded is not a move
   minRange1hPct: 0.8,     // below this the hour did not move enough to matter against fees; the list may be shorter than `picks`
   maxStaleMin: 5,         // the newest candle must be this fresh, else the coin's stream is stale and it is not ranked
