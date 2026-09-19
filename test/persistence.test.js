@@ -399,3 +399,25 @@ if (!TEST_URL) {
     assert.ok(names.includes('serpent_memory_events'));
   });
 }
+
+import { validateControlState as validateControlStateFix83 } from '../state/control-validate.js';
+test('PUBLISH-FIX-83 (full review item 1): the CLEAR watermark — a latch OLDER than a CLEAR either side carries is the stale copy of something already cleared and does not resurrect; a latch set AFTER the clear still wins on either side; states without the watermark keep the old law byte for byte', () => {
+  const cageOld = { active: true, ts: '2026-09-11T23:43:23.286Z' };
+  const clearedRow = { kill: null, cage: null, vetoes: [], clearedAt: '2026-09-19T18:39:40.130Z' }; // the durable row after requestClear
+  const staleLocal = { kill: null, cage: cageOld, vetoes: [] }; // the OUTGOING instance's controls.json
+  // the outgoing instance's pump: merge(local, durable) — the production resurrection path
+  const m1 = mostRestrictiveControls(staleLocal, clearedRow); assert.equal(m1.cage, null, 'stale CAGE does not resurrect'); assert.equal(m1.clearedAt, clearedRow.clearedAt);
+  const m2 = mostRestrictiveControls(clearedRow, staleLocal); assert.equal(m2.cage, null, 'either argument order');
+  // a NEW restriction after the clear wins, on either side
+  const cageNew = { active: true, ts: '2026-09-19T19:00:00.000Z' };
+  assert.equal(mostRestrictiveControls({ kill: null, cage: cageNew, vetoes: [] }, clearedRow).cage, cageNew);
+  assert.equal(mostRestrictiveControls(clearedRow, { kill: null, cage: cageNew, vetoes: [] }).cage, cageNew);
+  // the newest watermark wins between two cleared states; an older kill between them is dropped, a newer kill kept
+  const later = { kill: { active: true, ts: '2026-09-19T20:00:00.000Z' }, cage: null, vetoes: [], clearedAt: '2026-09-19T19:30:00.000Z' };
+  const m3 = mostRestrictiveControls(clearedRow, later); assert.equal(m3.clearedAt, later.clearedAt); assert.equal(m3.kill.ts, later.kill.ts);
+  const m4 = mostRestrictiveControls({ kill: { active: true, ts: '2026-09-19T19:00:00.000Z' }, cage: null, vetoes: [] }, { ...later, kill: null }); assert.equal(m4.kill, null, 'a kill older than the later watermark is stale');
+  // no watermark anywhere -> the old law, and no clearedAt key appears
+  const m5 = mostRestrictiveControls(staleLocal, { kill: null, cage: null, vetoes: [] }); assert.equal(m5.cage, cageOld); assert.ok(!('clearedAt' in m5));
+  // the validator accepts the watermark and refuses garbage in it
+  assert.equal(validateControlStateFix83(clearedRow).ok, true); assert.equal(validateControlStateFix83({ ...clearedRow, clearedAt: 'yesterday' }).ok, false); assert.equal(validateControlStateFix83({ ...clearedRow, clearedAt: null }).ok, true);
+});

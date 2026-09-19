@@ -773,7 +773,7 @@ function api(state, log) {
           return { allow: false, reason: r.reason };
         }
         state.controlRevision = r.revision;
-        return { allow: true, mode: 'DURABLE_FIRST', revision: r.revision };
+        return { allow: true, mode: 'DURABLE_FIRST', revision: r.revision, clearedAt: r.state?.clearedAt ?? null };
       } catch (err) {
         log(`PERSISTENCE: durable CLEAR failed (${err.code ?? err.message}) — CLEAR refused, latches stand`);
         return { allow: false, reason: 'PERSISTENCE_WRITE_FAILED' };

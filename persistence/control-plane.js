@@ -73,7 +73,7 @@ export async function requestClear({ source = 'cli', _betweenPhases = null, _fai
   if (!gate.allow) return { ok: false, reason: gate.reason };
   if (_betweenPhases) _betweenPhases(); // test seam: a concurrent restriction lands here
   // phase 2: under the local lock, clear ONLY the state that was approved
-  const done = clearIfUnchanged(before.fingerprint, source, { _failWrite: _failLocalWrite });
+  const done = clearIfUnchanged(before.fingerprint, source, { _failWrite: _failLocalWrite, clearedAt: gate.clearedAt ?? null }); // PUBLISH-FIX-83: the local copy carries the same watermark as the durable row
   if (!done.ok) {
     // a newer restriction (or corruption fail-close, or a failed local
     // write) stands — reassert the restrictive truth durably right away;

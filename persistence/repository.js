@@ -134,7 +134,7 @@ export class Repository {
       }
       const prior = cur.rows[0]?.state ?? { kill: null, cage: null, vetoes: [] };
       const rev = cur.rows[0] ? Number(cur.rows[0].revision) : 0;
-      const next = { ...prior, kill: null, cage: null };
+      const next = { ...prior, kill: null, cage: null, clearedAt: new Date().toISOString() }; // PUBLISH-FIX-83: the CLEAR watermark
       if (cur.rows.length) {
         await q(`UPDATE serpent_control_state SET revision = $1, state = $2, updated_at = now() WHERE id = 'current'`, [rev + 1, next]);
       } else {

@@ -29,6 +29,9 @@ export function validateControlState(s) {
       errors.push(`${latch} is neither null nor {active:true, valid ts}`);
     }
   }
+  // PUBLISH-FIX-83 (full review 2026-09-19, item 1): the CLEAR watermark — when the latches were last cleared (ISO). Absent
+  // or null on states written before the watermark existed; anything else must be a valid ISO clock.
+  if (s.clearedAt !== undefined && s.clearedAt !== null && !isIsoTs(s.clearedAt)) errors.push('clearedAt is neither absent nor a valid ts');
   if (!Array.isArray(s.vetoes)) {
     errors.push('vetoes is not an array');
   } else {
@@ -45,14 +48,27 @@ export function validateControlState(s) {
 // MOST RESTRICTIVE STATE WINS: kill or cage active in either state is
 // active in the result; vetoes union. Restrictions merge — they may never
 // cancel each other accidentally.
+// PUBLISH-FIX-83 (full review 2026-09-19, item 1 — the CAGE that returned at every boot): the merge now honours the CLEAR
+// watermark. A latch is live only if it was set AFTER the latest clearedAt either side carries; a latch older than the clear
+// is the stale copy of something an owner already cleared (the outgoing instance's controls.json during a republish overlap
+// re-asserted the 2026-09-11 CAGE against every CLEAR for eight days). A latch set after the clear still wins, on either side.
+const clockOf = (v) => (typeof v === 'string' ? Date.parse(v) : NaN);
+export function clearWatermark(a = {}, b = {}) {
+  const ta = clockOf(a?.clearedAt); const tb = clockOf(b?.clearedAt);
+  if (Number.isNaN(ta) && Number.isNaN(tb)) return null;
+  if (Number.isNaN(tb) || ta >= tb) return a.clearedAt;
+  return b.clearedAt;
+}
 export function mostRestrictiveControls(a = {}, b = {}) {
-  const kill = a.kill?.active ? a.kill : b.kill?.active ? b.kill : null;
-  const cage = a.cage?.active ? a.cage : b.cage?.active ? b.cage : null;
+  const clearedAt = clearWatermark(a, b); const mark = clockOf(clearedAt);
+  const live = (latch) => (latch?.active && !(Number.isFinite(mark) && Number.isFinite(clockOf(latch.ts)) && clockOf(latch.ts) < mark) ? latch : null);
+  const kill = live(a.kill) ?? live(b.kill) ?? null;
+  const cage = live(a.cage) ?? live(b.cage) ?? null;
   const byId = new Map();
   for (const v of [...(a.vetoes ?? []), ...(b.vetoes ?? [])]) {
     if (v?.prediction_id && !byId.has(v.prediction_id)) byId.set(v.prediction_id, v);
   }
-  return { kill, cage, vetoes: [...byId.values()] };
+  return clearedAt ? { kill, cage, vetoes: [...byId.values()], clearedAt } : { kill, cage, vetoes: [...byId.values()] };
 }
 
 // canonical key-sorted JSON — the stable fingerprint form for control state

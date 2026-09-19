@@ -293,7 +293,7 @@ export function captureFingerprint() {
 // ...and clear ONLY if the local truth is still exactly that state. A
 // restriction that arrived meanwhile wins; corruption discovered here
 // fail-closes instead of clearing.
-export function clearIfUnchanged(expectedFingerprint, source = 'cli', { _failWrite = false } = {}) {
+export function clearIfUnchanged(expectedFingerprint, source = 'cli', { _failWrite = false, clearedAt = null } = {}) {
   return withLock(() => {
     const found = rawRead();
     if (found.corrupt) {
@@ -304,7 +304,7 @@ export function clearIfUnchanged(expectedFingerprint, source = 'cli', { _failWri
     if (controlFingerprint(cur) !== expectedFingerprint) {
       return { ok: false, reason: 'CLEAR_RACED_WITH_RESTRICTION', state: cur };
     }
-    const next = { ...cur, kill: null, cage: null };
+    const next = { ...cur, kill: null, cage: null, clearedAt: typeof clearedAt === 'string' && clearedAt ? clearedAt : nowIso() }; // PUBLISH-FIX-83: the CLEAR watermark (the durable clear's clock when there is one, so both copies agree)
     try {
       if (_failWrite) throw new Error('injected local clear-write failure (test seam)');
       atomicWriteJson(controlsFile(), next, { pretty: true });
