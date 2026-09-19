@@ -104,7 +104,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
   // ---- adapter ----
   const credentials = readCredentials(policy, env, mode); const fp = credentials ? keyFingerprint(credentials.key) : null;
   const adapter = kind === 'LIVE' ? createKrakenAdapter({ accountId: acct, clock: nowTs, credentials, nonceStore: fp ? createNonceStore({ dir: judgeDir(), fingerprint: fp, wall: nowTs }) : null, transport: transport ?? (mode.startsWith('LIVE') ? (u, i) => fetch(u, i) : null), WebSocketImpl: WebSocketImpl ?? globalThis.WebSocket ?? null, allowPrivate, allowOrders: () => mode === 'LIVE_ARMED' && allowOrders(), log, dataDir: judgeDir() }) : createPaperAdapter({ accountId: acct, clock: nowTs, feed: fd, fee, specOf, latencyMs: policy.execution.paperLatencyMs, maxObservationWaitMs: policy.execution.paperMaxObservationWaitMs, latencySource: mode === 'REPLAY' ? null : paperLatencySource, restore: { state: loadedAcct.state, checkpoint: mode === 'REPLAY' ? null : readPaperCheckpoint(acct) }, log });
-  const controlsRaw = controlsSource ?? (() => { const c = readControls(); return { kill: Boolean(c.kill?.active), cage: Boolean(c.cage?.active), vetoes: (c.vetoes ?? []).map((v) => v.prediction_id) }; });
+  const controlsRaw = controlsSource ?? (() => { const c = readControls(); return { kill: Boolean(c.kill?.active), cage: Boolean(c.cage?.active), vetoes: (c.vetoes ?? []).map((v) => v.prediction_id), clearedAt: c.clearedAt ?? null }; });
   let controlSeen = null; let controlRevision = 0; const controls = () => { const c = controlsRaw(); if (recorder) { const key = JSON.stringify([c.kill, c.cage, c.vetoes]); if (key !== controlSeen) { controlSeen = key; controlRevision += 1; captureInput('CONTROL', { kill: Boolean(c.kill), cage: Boolean(c.cage), vetoes: [...new Set((c.vetoes ?? []).map(String))], revision: controlRevision }); } } return c; };
   // Economic PAPER/LIVE compositions always bind increases to live
   // persistence health. An optional caller predicate may further restrict,
@@ -288,6 +288,28 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
     clockTask = new Promise((resolve) => setImmediate(resolve)).then(() => (stopped ? null : qualifyClock())).catch((err) => { laneReport.errors += 1; log(`clock qualification: ${err.message}`); }).finally(() => { laneReport.clockCompleted += 1; clockTask = null; });
     return clockTask;
   }
+  // PUBLISH-FIX-83 (full review item 6): the owner's CLEAR (phone / CLI) lifts the control-plane latches but left every JOURNAL latch
+  // standing — PEAK_DRAWDOWN, PROTECTION_MISMATCH, FEED_IMPAIRED, OVERLOAD, the KILL restriction, a REDUCE_ONLY or HALTED_UNRESOLVED
+  // mode — and nothing else could clear them: no command existed. Law: a restriction latched BEFORE the owner's last CLEAR is cleared
+  // by that CLEAR (ownerRef carried), and a PAPER account in REDUCE_ONLY / HALTED_UNRESOLVED entered before that CLEAR resumes PAPER.
+  // Refusals the reducer keeps (DAILY_LOSS inside its session, an unresolved liability) are logged once per CLEAR, never retried per tick.
+  const ownerClearTried = new Set(); let ownerClearMarkSeen = null;
+  async function applyOwnerClear(t) {
+    if (dispatcher.writerLost()) return null; const c = controls(); const mark = c?.clearedAt ? Date.parse(c.clearedAt) : NaN; if (!Number.isFinite(mark)) return null;
+    if (ownerClearMarkSeen !== c.clearedAt) { ownerClearMarkSeen = c.clearedAt; ownerClearTried.clear(); }
+    const s = dispatcher.state(); if (!s?.initialized) return null; const ownerRef = s.ownerRef ?? 'owner'; const applied = [];
+    for (const [code, r] of Object.entries(s.restrictions ?? {})) {
+      if (code === 'VETO' || !r || !Number.isFinite(r.ts) || r.ts >= mark) continue; const key = `${code}:${r.ts}`; if (ownerClearTried.has(key)) continue; ownerClearTried.add(key);
+      try { await dispatcher.commit(makeEvent({ type: 'RESTRICTION', accountId: acct, knownAtTs: t, payload: { code, action: 'CLEAR', scope: r.scope ?? null, source: 'owner-clear', sessionDate: r.sessionDate ?? null, reason: `owner CLEAR ${c.clearedAt} lifts ${code} latched ${new Date(r.ts).toISOString()} (${r.reason ?? r.source ?? ''})`.slice(0, 200), ownerRef, ts: t } })); applied.push(code); log(`OWNER CLEAR lifts ${code} (latched ${new Date(r.ts).toISOString()} by ${r.source ?? '?'})`); }
+      catch (err) { log(`OWNER CLEAR cannot lift ${code}: ${err.message}`); }
+    }
+    const cur = dispatcher.state();
+    if (cur.accountKind === 'PAPER' && ['REDUCE_ONLY', 'HALTED_UNRESOLVED'].includes(cur.mode) && Number.isFinite(cur.modeTs) && cur.modeTs < mark && !cur.restrictions.KILL) {
+      const key = `mode:${cur.mode}:${cur.modeTs}`;
+      if (!ownerClearTried.has(key)) { ownerClearTried.add(key); try { await dispatcher.commit(makeEvent({ type: 'MODE_TRANSITION', accountId: acct, knownAtTs: t, payload: { from: cur.mode, to: 'PAPER', reason: `owner CLEAR ${c.clearedAt} resumes PAPER after ${cur.mode} (${cur.modeReason ?? ''})`.slice(0, 200), authorizationId: null, ts: t } })); applied.push(`MODE:${cur.mode}->PAPER`); log(`OWNER CLEAR resumes PAPER after ${cur.mode}`); } catch (err) { log(`OWNER CLEAR cannot resume PAPER from ${cur.mode}: ${err.message}`); } }
+    }
+    return applied;
+  }
   async function coreTick(t, tickNumber) {
     const started = pclock.monotonic(); laneReport.coreStarted += 1;
     try {
@@ -298,6 +320,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
       await publishValuation(t); if (stopped) return;
       await judge.onTick(t); if (stopped) return;
       if (adapter.onTick) adapter.onTick(t); await fallbackReconcile(t); if (stopped) return;
+      if (tickNumber % 20 === 2) await applyOwnerClear(t); if (stopped) return;
       // a recorder that stopped recording closes admission (closeout R11): FEED_IMPAIRED latched (exits continue), never a silently partial recording
       if (recorder && !recorderLatched && recorder.status().state !== 'RECORDING' && !dispatcher.writerLost()) { recorderLatched = true; const st = recorder.status(); try { await dispatcher.commit(makeEvent({ type: 'RESTRICTION', accountId: acct, knownAtTs: t, payload: { code: 'FEED_IMPAIRED', action: 'LATCH', scope: null, source: 'recorder', sessionDate: null, reason: `feed recording ${st.state}: ${st.reason ?? 'not recording'}`.slice(0, 200), ownerRef: null, ts: t } })); } catch (err) { log(`recorder latch: ${err.message}`); } }
       if (tickNumber % 240 === 0) writePaperCheckpoint(); if (dirty) { dirty = false; publishProjection(); }
@@ -316,7 +339,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
     await coreTask; if (scheduledMaintenance && !maintenanceAlreadyInFlight) await scheduledMaintenance; return { state: 'COMPLETE' };
   }
   return {
-    compositionVersion: COMPOSITION_VERSION, accountId: acct, mode, kind, policy, policyDigest, codeDigest: treeDigest, journal: jr, writer, dispatcher, feed: fd, tapeFeed, adapter, judge, watch, history: hist, cases, clock: pclock, fee, specOf, credentialsPresent: Boolean(credentials), keyFingerprint: fp, projection, tick, preflight, arm, disarm, resumeLiveArmed, admitNominations, checkAuthorizationBinding, lastPreflight: () => lastPreflight, lockLevel, publishValuation,
+    compositionVersion: COMPOSITION_VERSION, accountId: acct, mode, kind, policy, policyDigest, codeDigest: treeDigest, journal: jr, writer, dispatcher, applyOwnerClear, feed: fd, tapeFeed, adapter, judge, watch, history: hist, cases, clock: pclock, fee, specOf, credentialsPresent: Boolean(credentials), keyFingerprint: fp, projection, tick, preflight, arm, disarm, resumeLiveArmed, admitNominations, checkAuthorizationBinding, lastPreflight: () => lastPreflight, lockLevel, publishValuation,
     registerSpec(spec) { captureSpec(spec); return spec; },
     learningSnapshotStatus: () => learningCache?.status() ?? null,
     async start({ heartbeatMs = 250, projectionMs = 2000, schedulerMs = SCHEDULER_TICK_MS } = {}) {
