@@ -26,6 +26,7 @@ import { rumor2JournalStore } from './persistence/rumor2-journal.js';
 import { getPersistence } from './persistence/runtime.js';
 import { startLoopLag } from './lib/loop-lag.js';
 import { createRelookSource } from './learning/relook.js';
+import { neverWatchSet, filterNominations } from './lib/never-watch.js';
 import { startMemoryMirror } from './memory/mirror.js';
 import { openPaperRuntime, startDataOnlyRuntime } from './lib/serpent-runtime.js';
 import { initPaperAccountAtBoot } from './lib/paper-account-init.js';
@@ -166,6 +167,8 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // PUBLISH-FIX-44: the MOVER STUDY (learning/mover-study.js) — David's "what happened the hour before those movers went up,
   // and the hour after" — rides the broad-Kraken closed-candle stream from the first record; its learning store is
   // attached once LEARN-1 composes below. Authority NONE; a failure here is dark and nothing else is affected.
+  // PUBLISH-FIX-76: the owner's never-watch list (JUDGE_NEVER_WATCH from the paper profile: BTC, ETH) is applied to EVERY nomination source
+  const neverWatch = neverWatchSet(process.env); if (neverWatch.size) console.log(`JUDGE never-watch (owner directive, paper profile): ${[...neverWatch].join(', ')} — dropped from every nomination source before the Judge hears of them`);
   let moverStudy = null; let moverStudyTimer = null; let volatilityWatch = null; let volatilityTimer = null;
   let moveClockLesson = null; let moveClockTimer = null; // PUBLISH-FIX-73: what the mover study teaches the Judge about a move's clock
   try {
@@ -179,7 +182,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     // keeps the top movers in front of the Judge — the owner: "volume and volatility, never BTC". Watch only; authority NONE.
     try {
       const { createVolatilityWatch } = await import('./learning/volatility-watch.js');
-      volatilityWatch = createVolatilityWatch({ seriesSource: createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log }), dataDir: dataDir(), log: console.log, excludeBases: loadConfig().universeExpansion?.excludeBases ?? [] });
+      volatilityWatch = createVolatilityWatch({ seriesSource: createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log }), dataDir: dataDir(), log: console.log, excludeBases: [...(loadConfig().universeExpansion?.excludeBases ?? []), ...neverWatch] });
       volatilityWatch.refresh();
       volatilityTimer = setInterval(() => { try { volatilityWatch.refresh(); } catch (err) { console.error(`VOLATILITY WATCH refresh: ${String(err?.message ?? err).slice(0, 160)}`); } }, 30_000); // PUBLISH-FIX-71: 30 s (was 60): a mover reaches the Judge's slots twice as fast; the ranking reads the on-disk candles through the incremental index, so the cost is small
       if (typeof volatilityTimer?.unref === 'function') volatilityTimer.unref();
@@ -248,7 +251,8 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   let relookSource = null; let relookTimer = null;
   let scoutSource = null; let scoutTimer = null; // PUBLISH-FIX-74: Socrates' audibles (sealed upward cases -> the Judge's watch; authority NONE)
   // PUBLISH-FIX-66: the VOLATILITY WATCH's picks carry an entry clock and so take the preparation slots ahead of the standing universe
-  const judgeNominations = () => { const u = readCurrentUniverse(); const base = (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); let extra = []; try { extra = relookSource ? relookSource.nominations() : []; } catch { extra = []; } let movers = []; try { movers = volatilityWatch ? volatilityWatch.nominations() : []; } catch { movers = []; } let audibles = []; try { audibles = scoutSource ? scoutSource.nominations() : []; } catch { audibles = []; } return [...audibles, ...movers, ...extra, ...base]; };
+  let neverWatchDropped = 0;
+  const judgeNominations = () => { const u = readCurrentUniverse(); const base = (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); let extra = []; try { extra = relookSource ? relookSource.nominations() : []; } catch { extra = []; } let movers = []; try { movers = volatilityWatch ? volatilityWatch.nominations() : []; } catch { movers = []; } let audibles = []; try { audibles = scoutSource ? scoutSource.nominations() : []; } catch { audibles = []; } const all = filterNominations([...audibles, ...movers, ...extra, ...base], neverWatch); neverWatchDropped = all.dropped?.length ?? 0; return all; };
   if (process.env.JUDGE_ENABLED === 'true') {
     try {
       const { composeJudge, loadSpecs } = await import('./judge/composition.js');
@@ -492,7 +496,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
           // bytes carried: the whole account state travels twice per commit) vs plain queries (the tape) — and the pool gauge
           let dbClocks = '';
           try { const c = getPersistence()?.db?.clocks?.() ?? null; if (c) { const kb = (x) => (x && Number.isFinite(x.p50) ? `p50 ${Math.round(x.p50 / 1024)} / max ${Math.round(x.max / 1024)} KB` : 'no samples'); dbClocks = `; DB: tx ${ms(c.tx)} (statements/tx p50 ${c.txStatements?.p50 ?? '?'}, bytes/tx ${kb(c.txParamBytes)}); pool checkout wait ${ms(c.checkoutWait)} (failures ${c.checkoutFailures}); query ${ms(c.query)}; pool ${c.pool?.total ?? '?'} open / ${c.pool?.idle ?? '?'} idle / ${c.pool?.waiting ?? '?'} waiting of ${c.pool?.max} (${c.pool?.lockSessions} held for life by locks)${c.slowestTx ? `; slowest tx ${c.slowestTx.ms} ms, ${c.slowestTx.statements} statements, ${Math.round(c.slowestTx.paramBytes / 1024)} KB, began '${c.slowestTx.first}'` : ''}`; } } catch (err) { dbClocks = `; DB clocks unavailable (${String(err?.message ?? err).slice(0, 80)})`; }
-          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}, lock waits ${k.lockWaits ?? 0} / re-offered ${k.lockReoffered ?? 0} / appends ${k.lockBatches ?? 0} / coalesced ${k.lockCoalesced ?? 0}; move-too-old ${k.moveTooOld ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}; ${moveClockLesson ? moveClockLesson.line() : 'MOVE CLOCK: not started'}; ${scoutSource ? scoutSource.line() : 'SOCRATES SCOUT: not started'}`);
+          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}, lock waits ${k.lockWaits ?? 0} / re-offered ${k.lockReoffered ?? 0} / appends ${k.lockBatches ?? 0} / coalesced ${k.lockCoalesced ?? 0}; move-too-old ${k.moveTooOld ?? 0}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}; ${moveClockLesson ? moveClockLesson.line() : 'MOVE CLOCK: not started'}; ${scoutSource ? scoutSource.line() : 'SOCRATES SCOUT: not started'}${neverWatch.size ? `; NEVER-WATCH: ${[...neverWatch].join(',')} (${neverWatchDropped} nominations dropped at the last pass)` : ''}`);
         } catch (err) { console.error(`JUDGE FUNNEL line: ${err.message}`); }
       };
       const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); logFunnel(); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
