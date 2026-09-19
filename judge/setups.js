@@ -182,11 +182,15 @@ export function createConfirmation({ level, triggerTs, expiryMs = REFERENCE.prop
 }
 // per (asset, setup) episode state: one episode per crossing; a reset (mid back below the level) is required before a new crossing; cooldown after a close
 export function createEpisodeTracker({ assetId, setupId, cooldownMs = REFERENCE.cooldownMs }) {
-  let episode = null; let below = true; let cooldownUntil = 0; let counter = 0; const counters = { crossings: 0, resets: 0, expired: 0, cooldownRefusals: 0 };
+  let episode = null; let below = true; let cooldownUntil = 0; let counter = 0; const counters = { crossings: 0, resets: 0, expired: 0, cooldownRefusals: 0, rearms: 0 };
   return {
     observeMid(mid, level, receiptTs) { if (M.lt(mid, level)) { if (!below) counters.resets += 1; below = true; if (episode && episode.state === 'PENDING') { episode.state = 'RESET'; episode = null; } return { crossing: false }; } if (below && !episode) { below = false; if (receiptTs < cooldownUntil) { counters.cooldownRefusals += 1; return { crossing: false, refused: 'COOLDOWN', cooldownUntil }; } counter += 1; counters.crossings += 1; episode = { episodeId: `ep-${assetId}-${setupId}-${receiptTs}-${counter}`, triggerTs: receiptTs, level, state: 'PENDING' }; return { crossing: true, episode }; } return { crossing: false }; },
     current: () => episode, expire(now) { if (episode && episode.state === 'PENDING' && now - episode.triggerTs > REFERENCE.proposalExpiryMs) { episode.state = 'EXPIRED'; counters.expired += 1; const e = episode; episode = null; return e; } return null; },
     decide(state) { if (episode) { episode.state = state; const e = episode; if (state !== 'PENDING') episode = null; return e; } return null; },
     closed(now) { cooldownUntil = now + cooldownMs; below = true; episode = null; }, status: () => ({ assetId, setupId, below, cooldownUntil, episode, counters: { ...counters } }),
+    // PUBLISH-FIX-79 (the second look): re-arm the tracker so the NEXT book at/above the level counts as a fresh crossing without the
+    // mid having to fall below the level first. Nothing else changes: the cooldown, the confirmation, the lock and every gate apply
+    // to the new episode exactly as to a natural crossing. Refused while an episode is pending.
+    rearm() { if (episode) return false; below = true; counters.rearms += 1; return true; },
   };
 }

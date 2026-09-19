@@ -31,12 +31,12 @@ import { manifestIdentity } from '../market-lab/store.js';
 const POLICY = loadJudgePolicy(path.resolve('judge/samples/policy.paper-reference.json'));
 // 61 bars of range 400 around 100000 with ONE deep wick at bar 41 (L20 = 96000): H20 = 100200, low5 = 99800, ATR14 ~ 470 -> a lawful RANGE_IGNITION geometry
 function bars({ n = 61, endTs, close = 100000, range = 400, wickAt = 41, wickLow = 96000 } = {}) { const out = []; for (let i = 0; i < n; i += 1) out.push({ periodStartTs: endTs - (n - i) * 60_000, periodEndTs: endTs - (n - i - 1) * 60_000, open: close, high: close + range / 2, low: i === wickAt ? wickLow : close - range / 2, close, volumeQuote: 1000, volumeBase: 0.01, closed: true }); return out; }
-async function rig({ accountId = 'j-acct', mode = 'PAPER', history = null, caseSource = null, controls = { kill: false, cage: false, vetoes: [] }, clock = fakeClock(), moveClock = null } = {}) {
+async function rig({ accountId = 'j-acct', mode = 'PAPER', history = null, caseSource = null, controls = { kill: false, cage: false, vetoes: [] }, clock = fakeClock(), moveClock = null, secondLook = null } = {}) {
   const journal = createMemoryJournal(); await journal.create(accountId, { accountKind: 'PAPER' }); const writer = await journal.acquireWriter(accountId); const F = eventsFor(accountId, clock);
   const feed = createExecutionFeed({ clock: clock.now }); feed.onConnect(clock.now()); const adapter = createPaperAdapter({ accountId, clock: clock.now, feed, fee: TEST_FEE, specOf: () => SPEC });
   const pclock = { now: clock.now, monotonic: clock.monotonic, status: () => ({ trusted: true }) }; const dispatcher = createDispatcher({ accountId, journal, writer, adapter, clock: pclock, specOf: () => SPEC }); await dispatcher.load(); await dispatcher.commit(F.init({ accountKind: 'PAPER' }));
   const scheduler = createScheduler({ monotonic: clock.monotonic }); const hist = history ?? { bars: (symbol, nowTs) => bars({ endTs: Math.floor(nowTs / 60_000) * 60_000 }) };
-  const judge = createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, history: hist, caseSource: caseSource ?? { consumed: () => null }, controls: () => controls, scheduler, mode, moveClock });
+  const judge = createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, history: hist, caseSource: caseSource ?? { consumed: () => null }, controls: () => controls, scheduler, mode, moveClock, secondLook });
   const watch = createWatch({ accountId, dispatcher, adapter, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, controls: () => controls });
   judge.admit('XBT/USD', { assetId: 'BTC', source: 'TEST' }); feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'XBT/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now()); feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), clock.now());
   const book = (asks, bids, type = 'snapshot') => feed.ingest(JSON.stringify({ channel: 'book', type, data: [{ symbol: 'XBT/USD', asks: asks.map(([price, qty]) => ({ price, qty })), bids: bids.map(([price, qty]) => ({ price, qty })), checksum: crcFor(asks, bids), timestamp: new Date(clock.now()).toISOString() }] }), clock.now());
@@ -211,4 +211,58 @@ test('MC-04. PUBLISH-FIX-73: with the move-clock port composed, an ELIGIBLE setu
   // a faulting port reads as absent for that decision: baseline rows, nothing refused
   const f = await rig({ history: { bars: (symbol, nowTs) => moveBars(nowTs) }, moveClock: { lesson: () => { throw new Error('port down'); } } }); await f.warm(); await f.ignite();
   const fe = f.judge.decisions().find((x) => x.status === 'ENTRY_RESERVED'); assert.ok(fe); assert.equal(fe.measurements.filter((m) => m.id === 'MOVE_CLOCK').length, 0);
+});
+
+test('SL-02. PUBLISH-FIX-79: with the second-look port composed, a look refused ONLY on a buying-pressure gate (FI15) is retaken after the wait at the same level — a fresh crossing, a fresh lock, every gate again — and reserves once the flow has shown up, with a SECOND_LOOK row on the record; port absent: one look, byte-for-byte baseline', async () => {
+  // an ignition whose last 15 s are neutralised by sells: structure right, FI15 ~0 -> NO_TRADE [FI15] and nothing else
+  async function earlyLook(r, { price = 100000, level = 100400 } = {}) {
+    const start = Math.floor(r.clock.now() / 60_000) * 60_000 + 60_000; while (r.clock.now() < start) { r.clock.advance(1000); r.feed.ingest(JSON.stringify({ channel: 'heartbeat' }), r.clock.now()); }
+    for (let k = 0; k < 20; k += 1) { r.clock.advance(2000); r.trade(price + 50, 'buy', 0.2); if (k >= 13) r.trade(price + 49, 'sell', 0.2); }
+    while (r.clock.now() % 60_000 !== 0) { r.clock.advance(1000); r.feed.ingest(JSON.stringify({ channel: 'heartbeat' }), r.clock.now()); }
+    r.clock.advance(500);
+    for (let i = 0; i < 3; i += 1) { r.book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); r.trade(level + 10, 'buy', 0.1); r.trade(level + 9, 'sell', 0.1); await r.settle(); if (i < 2) r.clock.advance(1050); }
+    await r.settle();
+  }
+  // the wait: books stay above the level (no re-cross), buyers arrive
+  async function flowArrives(r, { level = 100400, ms = 60_000 } = {}) {
+    for (let t = 0; t < ms; t += 5000) { r.clock.advance(5000); r.feed.ingest(JSON.stringify({ channel: 'heartbeat' }), r.clock.now()); r.book([[level + 20, 5], [level + 30, 5]], [[level + 5, 5], [level - 10, 5]]); r.trade(level + 15, 'buy', 0.2); await r.settle(); }
+  }
+  const r = await rig({ secondLook: { afterMs: 60_000, maxLooks: 2 } }); await r.warm(); await earlyLook(r);
+  const first = r.judge.decisions().find((d) => d.setupId === 'RANGE_IGNITION'); assert.ok(first, `a first look: ${JSON.stringify(r.judge.decisions().map((x) => [x.setupId, x.status, x.reasonCodes]))}`); assert.equal(first.status, 'NO_TRADE', `${first.status}: ${first.reasonCodes.join(',')}`); assert.deepEqual(first.reasonCodes, ['FI15'], 'refused only on buying pressure');
+  assert.equal(r.judge.status().counters.flowOnlyRefusals, 1); assert.equal(r.judge.status().counters.secondLooksArmed, 0, 'not before the wait');
+  await flowArrives(r); // the wait passes with the coin holding its level -> the tracker is re-armed -> the next book is a fresh crossing
+  assert.equal(r.judge.status().counters.secondLooksArmed, 1, JSON.stringify(r.judge.status().counters));
+  for (let i = 0; i < 3; i += 1) { r.book([[100420, 5], [100430, 5]], [[100405, 5], [100390, 5]]); r.trade(100415, 'buy', 0.1); await r.settle(); if (i < 2) r.clock.advance(1050); }
+  r.clock.advance(1000); await r.settle();
+  const second = r.judge.decisions().find((d) => d.measurements.some((m) => m.id === 'SECOND_LOOK'));
+  assert.ok(second, `a second-look decision: ${JSON.stringify(r.judge.decisions().map((x) => [x.status, x.reasonCodes]))} ${JSON.stringify(r.judge.status().counters)}`);
+  assert.equal(second.status, 'ENTRY_RESERVED', `${second.status}: ${second.reasonCodes.join(',')}`); assert.notEqual(second.episodeId, first.episodeId, 'a new episode, a new lock');
+  const row = second.measurements.find((m) => m.id === 'SECOND_LOOK'); assert.equal(row.value, 1); assert.equal(row.threshold, 2); assert.match(row.note, /look 1 of 2 after a flow-only refusal \(FI15\) 1 min earlier/);
+  assert.equal(r.judge.status().counters.secondLookCrossings, 1); assert.equal(r.judge.status().counters.entries, 1);
+  assert.equal(r.judge.candidates()[0].episodes.RANGE_IGNITION.counters.rearms, 1);
+  // port absent: the same tape gives the one early refusal and nothing more
+  const b = await rig({ accountId: 'j-base' }); await b.warm(); await earlyLook(b); await flowArrives(b);
+  for (let i = 0; i < 3; i += 1) { b.book([[100420, 5], [100430, 5]], [[100405, 5], [100390, 5]]); b.trade(100415, 'buy', 0.1); await b.settle(); if (i < 2) b.clock.advance(1050); }
+  b.clock.advance(1000); await b.settle();
+  assert.deepEqual(b.judge.decisions().filter((d) => d.setupId === 'RANGE_IGNITION').map((d) => [d.status, d.reasonCodes]), [['NO_TRADE', ['FI15']]], 'baseline: no second look');
+  assert.equal(b.judge.status().counters.secondLooksArmed, 0); assert.ok(!b.judge.decisions()[0].measurements.some((m) => m.id === 'SECOND_LOOK'));
+  assert.equal(b.judge.candidates()[0].episodes.RANGE_IGNITION.counters.rearms, 0);
+});
+
+test('SL-03. PUBLISH-FIX-79: a second look is dropped, nothing re-armed, when the coin falls below its level before the wait ends', async () => {
+  async function earlyLook(r, { price = 100000, level = 100400 } = {}) {
+    const start = Math.floor(r.clock.now() / 60_000) * 60_000 + 60_000; while (r.clock.now() < start) { r.clock.advance(1000); r.feed.ingest(JSON.stringify({ channel: 'heartbeat' }), r.clock.now()); }
+    for (let k = 0; k < 20; k += 1) { r.clock.advance(2000); r.trade(price + 50, 'buy', 0.2); if (k >= 13) r.trade(price + 49, 'sell', 0.2); }
+    while (r.clock.now() % 60_000 !== 0) { r.clock.advance(1000); r.feed.ingest(JSON.stringify({ channel: 'heartbeat' }), r.clock.now()); }
+    r.clock.advance(500);
+    for (let i = 0; i < 3; i += 1) { r.book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); r.trade(level + 10, 'buy', 0.1); r.trade(level + 9, 'sell', 0.1); await r.settle(); if (i < 2) r.clock.advance(1050); }
+    await r.settle();
+  }
+  const r = await rig({ secondLook: { afterMs: 60_000, maxLooks: 1 } }); await r.warm(); await earlyLook(r);
+  assert.deepEqual(r.judge.decisions().find((d) => d.setupId === 'RANGE_IGNITION').reasonCodes, ['FI15']); assert.equal(r.judge.status().counters.flowOnlyRefusals, 1);
+  // the coin gives the level back before the wait ends: the look is dropped, nothing re-armed
+  for (let t = 0; t < 60_000; t += 5000) { r.clock.advance(5000); r.feed.ingest(JSON.stringify({ channel: 'heartbeat' }), r.clock.now()); r.book([[99990, 5], [100000, 5]], [[99970, 5], [99960, 5]]); await r.settle(); }
+  r.clock.advance(5000); await r.settle();
+  assert.equal(r.judge.status().counters.secondLooksDropped, 1, JSON.stringify(r.judge.status().counters)); assert.equal(r.judge.status().counters.secondLooksArmed, 0);
+  assert.equal(r.judge.candidates()[0].episodes.RANGE_IGNITION.counters.rearms, 0);
 });

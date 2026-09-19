@@ -60,11 +60,48 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       f476916f654435029109ba9c8a3549c8e1adf9392188703f23601f2bccfc5b9c
+judge/*.js       4f8c9e59c77edc9549758fbefb7ce791eb77220dcd0d58153b2611896ec73c3f
 execution/*.js   81bea0cccc0c9ef91b6cc6c7f89f3cb95289837325744605354eb712e6d0037c
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (49 files)   792495067bf5a8cac48909e2bb1988e0173f20315dcd515a6a01cb1252eb9d22
+all (49 files)   daaa479652dcfe16a36a098445a59934626bdb6a06f205ad2cfde61a1ca92911
 ```
+
+### 4.29 Audited change — 2026-09-19 PUBLISH-FIX-79: THE SECOND LOOK — a look refused only on buying-pressure gates is retaken at the same level a few minutes later, every gate at full strength (previous judge digest `f476916f6544…`; now `4f8c9e59c77e…`; 49 files unchanged in number; execution and watch UNCHANGED)
+
+The owner's directive, in his words: "I don't want to loosen the gates, but I wanna match up the times and the studying
+because I know things have passed its eyes that fall within his parameters" and, this morning, "fix the thing that will
+make him miss the winners."
+
+The evidence (the gate match-up of 2026-09-19 over 807 graded live-judge episodes, 141 winners at >0.8% in 15 min or
+>1.6% in 1 h): on the winners the Judge actually judged and refused, the failing clauses were the buying-pressure gates
+— PRIOR_MID_RESPONSE_SMALL 10, PRIOR_FI_ABSORBED 8, FI15 7 (observed −0.33 against 0.2), FI60_POSITIVE 6, RV60 6 — the
+structure was right and the look came a few minutes early, before the flow showed up. And the crossing law made that
+final: `createEpisodeTracker` only reports a crossing on a below→above transition, so a coin that keeps climbing after
+an early look is never looked at again until it dips back under the level.
+
+The change, port-gated (`createJudge({ secondLook })`; `composeJudge` passes it; fly.js composes it from the paper profile
+`groups.judge.secondLook` → `JUDGE_SECOND_LOOK_AFTER_MS` / `JUDGE_SECOND_LOOK_MAX`; port absent → nothing here runs and the
+decision record is the baseline byte for byte, the judge-differential law):
+
+- `judge/setups.js` `createEpisodeTracker.rearm()`: refused while an episode is pending; otherwise sets `below = true` so
+  the NEXT book at/above the level is a fresh crossing (new episode id, new frozen references, new durable lock, new
+  confirmation). The cooldown, the reset on a dip, the expiry: unchanged. Counter `rearms`.
+- `judge/judge.js`: `SECOND_LOOK_FLOW_GATES` = FI15, FI60_POSITIVE, RV60, PRIOR_FI_ABSORBED, PRIOR_MID_RESPONSE_SMALL,
+  RECLAIM_FI15. A NO_TRADE whose refused clauses are ALL in that set schedules ONE second look per candidate/setup
+  (`WAITING`, due after `afterMs`, at the frozen trigger level, carrying the look count). A NEEDS_DATA or a structural
+  refusal ends the chain; an ELIGIBLE look ends the chain. On the tick: a due look whose coin still has a fresh book with
+  the mid at/above the level and no pending episode re-arms the tracker (`ARMED`; logged); a mid below the level drops it
+  (`secondLooksDropped`); a stale book past `staleMs` drops it. The next crossing on an ARMED look is `CROSSED` (counter
+  `secondLookCrossings`; `looks += 1`) and that decision carries one MEASUREMENT row `SECOND_LOOK` (value = look number,
+  threshold = maxLooks, note names the earlier refusal). A natural crossing on a non-armed look starts a new chain. Bounded:
+  `maxLooks` per chain (profile 2, hard cap 4), `afterMs` ≥ 15 s (profile 180 s).
+- No threshold, no clause, no size, no exit moved. The second look is a second EVALUATION, not a second chance: the coin
+  must pass FI15, FI60_POSITIVE, RV60 and every other clause exactly as at a natural crossing.
+
+Tests: `test/judge-second-look.test.js` SL-01 (the tracker law), `test/judge-decisions.test.js` SL-02 (live path: a
+FI15-only refusal, the wait with the coin holding its level, the re-armed crossing reserves with the SECOND_LOOK row;
+port absent → one refusal, no rearm, baseline) and SL-03 (a coin that gives the level back drops the look). The full
+suite ran green before the digests above were re-pinned.
 
 ### 4.28 Audited change — 2026-09-18 PUBLISH-FIX-73: the move clock — a look at a coin whose own move is as old as the minute most movers top out by is refused MOVE_TOO_OLD (previous judge digest `d70c8fe64e22…`; now `f476916f6544…`; the frozen set grows to 49 files with `judge/move-clock.js`; execution and watch UNCHANGED)
 
