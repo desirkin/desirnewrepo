@@ -7,7 +7,7 @@
 // of authenticated controls, account mode / release, risk and health. NO_TRADE is a successful decision.
 import * as M from '../execution/money.js';
 import { indicatorBlock, createFlowTracker, createFeatureCache, bookFacts, bidDepthWithinBps, medianDecimal, validateBarBlock, FEATURE_VERSION } from './features.js';
-import { SETUPS, SETUP_INPUT_MODES, REFERENCE, freezeReferences, evaluateSetup, evaluateStyleExecutionGate, createConfirmation, createEpisodeTracker, hypothesisDigest, setupDefinition, STRATEGY_VERSION } from './setups.js';
+import { SETUPS, SETUP_INPUT_MODES, REFERENCE, freezeReferences, evaluateSetup, evaluateStyleExecutionGate, createConfirmation, createEpisodeTracker, hypothesisDigest, setupDefinition, STRATEGY_VERSION, LEARNABLE_GATES, learnedOverrides } from './setups.js'; // PUBLISH-FIX-82: the learnable gate lines
 import { evaluateEntry, sizeSearch, liquidationValue, COST_MODEL_VERSION } from './cost.js';
 import { admitCandidate, riskBudgetFor, rankCandidates, clusterIdOf } from './risk.js';
 import { makeDecision, decisionIdentity, decisionRecord } from './contract.js';
@@ -43,7 +43,7 @@ export const canaryDurationBound = (s, policyMs) => { const a = s?.authorization
 export const FUNNEL_STAGES = Object.freeze(['discovered', 'recorded', 'warmed', 'nominated', 'setupQualified', 'costQualifiedAtLegalSize', 'reserved', 'sent', 'filled', 'protected', 'closedReconciled']);
 const inc = (obj, k, n = 1) => { obj[k] = (obj[k] ?? 0) + n; };
 
-export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null, setupSelection = null, edgeState = null, permissionIncreaseAllowed = null, adaptiveRanking = null, moveClock = null, secondLook = null }) {
+export function createJudge({ accountId, policy, policyDigest, dispatcher, feed, clock, specOf, feeOf, history = { bars: () => null }, caseSource = { consumed: () => null }, controls = () => ({ kill: false, cage: false, vetoes: [] }), lockLevel = () => 'NONE', clusters = () => null, log = () => {}, scheduler = null, enabledSetups = null, mode = 'PAPER', snapshotStore = null, armRule = null, verdictSink = null, learning = null, dynamicSizing = null, setupSelection = null, edgeState = null, permissionIncreaseAllowed = null, adaptiveRanking = null, moveClock = null, secondLook = null, gateLearning = null }) {
   // LEARN-1 consumer seam (ADDENDUM-2 §08): `learning` is an OPTIONAL injected read accessor over the prepared
   // immutable decision-memory snapshot ({ snapshot: () => readDecisionMemory(...) }), refreshed outside this loop.
   // Absent (every current composition; fly.js passes nothing), every path below is byte-identical to the baseline
@@ -106,6 +106,24 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   // (a natural crossing starts a new chain); a mid below the level drops the look (the thesis is gone; a natural re-cross will
   // come). No threshold moves. Port absent: nothing here runs and the record is the baseline byte for byte.
   const SECOND_LOOK_FLOW_GATES = new Set(['FI15', 'FI60_POSITIVE', 'RV60', 'PRIOR_FI_ABSORBED', 'PRIOR_MID_RESPONSE_SMALL', 'RECLAIM_FI15']);
+  // PUBLISH-FIX-82 GATE LEARNING (owner directive 2026-09-19): a port whose lesson() answers the learned lines { FI15: 0.15, ... }
+  // for judge/setups.js LEARNABLE_GATES; each decision reads the lesson ONCE (so one look is judged on one set of lines), only
+  // finite numbers inside a gate's band count, a faulting port reads as absent, and the decision carries a GATE_LEARNING row
+  // naming every line that differs from its reference. Port absent -> REFERENCE lines, the record byte for byte as before.
+  const gateLearningPort = gateLearning && typeof gateLearning === 'object' && typeof gateLearning.lesson === 'function' ? gateLearning : null;
+  function learnedLinesNow(setupId) {
+    if (!gateLearningPort) return null;
+    let raw = null; try { raw = gateLearningPort.lesson(setupId); } catch (err) { log(`gate learning port failed (reference lines for this decision): ${String(err?.message ?? err).slice(0, 160)}`); return null; }
+    const lines = raw && typeof raw === 'object' && raw.lines && typeof raw.lines === 'object' ? raw.lines : raw;
+    if (!lines || typeof lines !== 'object') return null;
+    const out = {}; for (const id of Object.keys(LEARNABLE_GATES)) { const v = lines[id]; if (typeof v === 'number' && Number.isFinite(v) && v >= LEARNABLE_GATES[id].min && v <= LEARNABLE_GATES[id].max) out[id] = v; }
+    return Object.keys(out).length ? out : null;
+  }
+  function gateLearningMeasurement(learned, setupId) {
+    if (!gateLearningPort || !learned) return [];
+    const moved = learnedOverrides(learned, setupId); if (!moved.length) return [];
+    return [{ id: 'GATE_LEARNING', ok: true, value: moved.length, threshold: null, unit: 'COUNT', note: `learned lines in force: ${moved.map((m) => `${m.id} ${m.reference}->${m.line}`).join(', ')}`.slice(0, 200), class: 'MEASUREMENT', ablated: false }];
+  }
   const secondLookCfg = secondLook && typeof secondLook === 'object' ? { afterMs: Number.isFinite(secondLook.afterMs) && secondLook.afterMs >= 15_000 ? secondLook.afterMs : 180_000, maxLooks: Number.isInteger(secondLook.maxLooks) && secondLook.maxLooks >= 1 ? Math.min(secondLook.maxLooks, 4) : 2, staleMs: 120_000 } : null;
   function scheduleSecondLook(c, setupId, frozen, refused, D) {
     if (!secondLookCfg) return;
@@ -359,7 +377,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
       ? deriveOperationalEntryFacts({ setupId, decisionTs: D, frozen, fast, books: c.books, catalyst: intake.event ?? c.catalystEvent ?? null })
       : null;
     const evaluatedFast = operationalFacts ? { ...fast, ...operationalFacts } : fast;
-    const setup = evaluateSetup({ setupId, frozen, ind, fast: atTrigger ? { ...evaluatedFast, atTrigger } : evaluatedFast, bars: c.indicatorsRef.bars, entry, decisionTs: D, event: intake.event ?? c.catalystEvent ?? null, ablate: armRule?.ablate ?? null }); const baseMeasurements = setup.clauses;
+    const learnedLines = learnedLinesNow(setupId); /* PUBLISH-FIX-82: one read per decision, per setup (RV60 is learned per setup) */ const setup = evaluateSetup({ setupId, frozen, ind, fast: atTrigger ? { ...evaluatedFast, atTrigger } : evaluatedFast, bars: c.indicatorsRef.bars, entry, decisionTs: D, event: intake.event ?? c.catalystEvent ?? null, ablate: armRule?.ablate ?? null, learned: learnedLines }); const baseMeasurements = [...setup.clauses, ...gateLearningMeasurement(learnedLines, setupId)];
     // learned contribution (dormant without the injected port): resolved from the prepared snapshot and THIS
     // decision's already-prepared facts only; any resolver fault falls back to baseline with the fault logged
     let learned = null;

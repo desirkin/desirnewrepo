@@ -60,11 +60,62 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       d86afbd55cf3d695d5afb5aa18b2088a051e8dcda095c2b9420240d610cb8d1c
+judge/*.js       25153eda5c3631c6121a00c3f3615b31bc22f975769b9ea03330bb028f6de044
 execution/*.js   81bea0cccc0c9ef91b6cc6c7f89f3cb95289837325744605354eb712e6d0037c
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (49 files)   e6fdda49e61cfe4d93a87c2e46da95d956fc0aaebb41e25658865054f9d3bc1f
+all (49 files)   ea28187cee2bd649955cff6cb90049d7acfc7b4c4accd8b44f6973190728c7a0
 ```
+
+### 4.31 Audited change — 2026-09-19 PUBLISH-FIX-82: GATE LEARNING — the Judge moves his own flow lines from his own scored looks, inside fixed bands, without the owner's say-so (previous judge digest `d86afbd55cf3…`; now `25153eda5c36…`; 49 files; execution and watch UNCHANGED)
+
+The owner's directive, in his words (2026-09-19 afternoon): "I want him to move the gate once it's tested enough and he
+should be doing thousands and thousands of tests every day before he can move the gate if we feel the patterns changed
+enough" and, that evening: "I don't want to have to see if I want him to adjust when he has enough evidence to adjust
+without me having to say so." The same evening's read of his ledger showed why: he had looked at the day's +50% mover 70
+times and the closest look read 19.6% buying pressure against the 20% line; across 369 scored looks the line separated
+nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line somebody typed, defended by nothing.
+
+- `judge/setups.js` `LEARNABLE_GATES`: the ONLY lines a lesson may move — FI15 (ref 0.2, band [−1, 0.5]), FI60_POSITIVE
+  (ref 0, band [−1, 0.3]), RV60 (ref = the setup's own rv60Min, band [0, 3]), RECLAIM_FI15 and FI15_FRESH_AT_D (ref 0.2,
+  band [−1, 0.5]); steps 0.05 / 0.25. `learnedLine(learned, id, reference)` answers the learned line only when it is a
+  finite number inside the band, else the reference. `evaluateSetup({..., learned })`, `structuralClauses` and
+  `fastClauses` thread it; each clause row's `threshold` is the line that judged it (the ledger scores later tests
+  against the line actually used). Structural clauses (levels, stops, geometry, compression, EMAs) are NOT learnable.
+  At a band's floor every KNOWN value passes; an unknown value still fails — a gate is moved, never blinded.
+- `judge/judge.js` port `gateLearning` ({ lesson(setupId) → { FI15: 0.15, RV60: 1.5, … } }): read ONCE per decision per
+  setup (one look is judged on one set of lines); lines re-validated against `LEARNABLE_GATES`; a faulting port reads as
+  absent; the record carries a `GATE_LEARNING` MEASUREMENT row naming every line in force that differs from its reference.
+  Port absent → reference lines, the record byte for byte as before. `judge/composition.js` passes it through.
+- `learning/gate-lesson.js` (not frozen; learning/ never imports judge/ — GL-08 proves the band table mirrors
+  `LEARNABLE_GATES` exactly): `testsOf` joins every look (episode gates: observed value, line, whether every OTHER real
+  gate passed) with its scored 15-minute continuation return (decision-outcome yardstick); `evaluateUnit` tests, for a
+  gate at line L, the first candidate below L whose NEWLY ADMITTED cohort (other gates ok) reaches `minCohort` and the
+  first above L whose EXCLUDED cohort does; a LOOSEN needs the newly admitted cohort's mean ≥ 0 and bootstrap confidence
+  ≥ `confidence` that the admitted set's mean does not fall by more than `tolerancePct`; a TIGHTEN needs the excluded
+  cohort's mean < 0 and the same confidence that the admitted mean rises. `computeGateLesson` runs the cycle per gate
+  (RV60 per setup): PROPOSED → forward test on `minForward` looks scored AFTER the proposal (the same test, on those
+  looks alone) → PUBLISHED (the Judge's line moves) → kept under forward test → REVERTED to the line before when the
+  cohort it admitted turns negative with confidence; WITHDRAWN when the forward looks do not hold a proposal. One step per
+  gate per cycle. Every transition is one log line with its numbers. The kill file (`data/learning/kill.json`, KILLED /
+  invalid / unreadable) → reference lines.
+- `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
+  after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
+  (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.
+- `learning/judge-decision-bridge.js`: `MOVE_CLOCK`, `SECOND_LOOK` and `GATE_LEARNING` rows are measurements, never
+  ledger gates (the move clock's "no move in progress" row had been landing as a failed gate on most looks).
+- Paper profile `groups.judge.gateLearning` ON → `JUDGE_GATE_LEARNING` + `JUDGE_GATE_MIN_SCORED` 1000 /
+  `JUDGE_GATE_MIN_COHORT` 100 / `JUDGE_GATE_MIN_FORWARD` 100 / `JUDGE_GATE_CONFIDENCE` 0.8 — the evidence minimums are
+  named there for the owner to change by name, never by asking.
+
+Tests: GL-01 (the join; measurement rows are not gates; lookback), GL-02 (below minScored nothing moves), GL-03 (LOOSEN
+one step, empty bands stepped over), GL-04 (LOOSEN refused when the cohort cost or would drag the mean), GL-05 (TIGHTEN),
+GL-06 (PROPOSED → PUBLISHED → REVERTED, one move per cycle, lines and log), GL-07 (RV60 per setup; the kill file),
+GL-08 (band mirror), GL-09 (the study end to end; idempotent), GL-10 (judge-decisions: the same FI15-only refusal
+reserves under a learned line with the GATE_LEARNING row; outside the band / faulting port / no port → the reference).
+Full suite green before re-pinning.
+
+Authority unchanged: the lines move inside their bands; no order, size, exit, strategy or structural clause is touched;
+`THRESHOLD CHANGES: NONE` remains the authority line for hand changes — these are the Judge's own, each one logged.
 
 ### 4.30 Audited change — 2026-09-19 PUBLISH-FIX-81: independent review cb305c6e, F4 + F5 on the move clock — the clock measures over the study's own two-hour horizon and honours the learned-influence kill file (previous judge digest `4f8c9e59c77e…`; now `d86afbd55cf3…`; 49 files; execution and watch UNCHANGED)
 

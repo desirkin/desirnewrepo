@@ -175,6 +175,22 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   console.log(secondLookPort ? `JUDGE second look (owner directive, paper profile): a look refused only on buying-pressure gates is retaken after ${Math.round(secondLookPort.afterMs / 60_000)} min at the same level, up to ${secondLookPort.maxLooks} times, every gate at full strength` : 'JUDGE second look: OFF (JUDGE_SECOND_LOOK_AFTER_MS unset)'); if (neverWatch.size) console.log(`JUDGE never-watch (owner directive, paper profile): ${[...neverWatch].join(', ')} — dropped from every nomination source before the Judge hears of them`);
   let moverStudy = null; let moverStudyTimer = null; let volatilityWatch = null; let volatilityTimer = null;
   let moveClockLesson = null; let moveClockTimer = null; // PUBLISH-FIX-73: what the mover study teaches the Judge about a move's clock
+  // PUBLISH-FIX-82 GATE LEARNING (owner directive 2026-09-19, David: "he moves the gate once it's tested enough — thousands of tests —
+  // without me having to say so"): the study (a child process; the main thread never reads the ledger) joins every scored look with
+  // its gate values, proposes a line move when the evidence supports one, forward-tests it, publishes it; the in-process lesson hands
+  // the Judge the published lines. Paper profile groups.judge.gateLearning -> JUDGE_GATE_LEARNING (+ the evidence minimums by name).
+  let gateLesson = null; let gateStudyTimer = null; let gateStudyRunning = false;
+  const gateLearningOn = process.env.JUDGE_GATE_LEARNING === 'true';
+  const gateStudyCfg = { minScored: Number(process.env.JUDGE_GATE_MIN_SCORED) || undefined, minCohort: Number(process.env.JUDGE_GATE_MIN_COHORT) || undefined, minForward: Number(process.env.JUDGE_GATE_MIN_FORWARD) || undefined, confidence: Number(process.env.JUDGE_GATE_CONFIDENCE) || undefined };
+  if (gateLearningOn) {
+    try {
+      const { createGateLesson } = await import('./learning/gate-lesson.js'); const { spawnGateStudy } = await import('./tools/gate-study-process.js');
+      gateLesson = createGateLesson({ dataDir: dataDir(), log: console.log }); gateLesson.refresh();
+      const runStudy = () => { if (gateStudyRunning) return; gateStudyRunning = true; spawnGateStudy({ dataDir: dataDir(), cfg: gateStudyCfg, log: console.log }).then((r) => { gateStudyRunning = false; if (r.outcome === 'DONE') { for (const e of r.events ?? []) console.log(e); console.log(`GATE STUDY done: ${r.looks} looks, ${r.scored} scored decisions, ${r.tests} gate tests, ${r.units} lines under test`); } else console.log(`GATE STUDY ${r.outcome}${r.reason ? ` (${r.reason})` : ''}: the previous lesson stays in force`); try { gateLesson?.refresh(); } catch (err) { console.error(`GATE LEARNING refresh: ${String(err?.message ?? err).slice(0, 160)}`); } }).catch((err) => { gateStudyRunning = false; console.error(`GATE STUDY: ${String(err?.message ?? err).slice(0, 160)}`); }); };
+      console.log(`JUDGE gate learning (owner directive, paper profile): he moves his own flow lines from his scored looks — a move needs ${gateStudyCfg.minScored ?? 1000} scored looks on the gate, ${gateStudyCfg.minCohort ?? 100} in the cohort it changes, confidence ${gateStudyCfg.confidence ?? 0.8}, then ${gateStudyCfg.minForward ?? 100} more scored looks that agree before the line moves; every move is one line in this log; off switch: cobra learning kill`);
+      setTimeout(runStudy, 90_000).unref?.(); gateStudyTimer = setInterval(runStudy, 30 * 60_000); if (typeof gateStudyTimer?.unref === 'function') gateStudyTimer.unref();
+    } catch (err) { console.error(`GATE LEARNING failed to start (the Judge runs on its reference lines; nothing else affected): ${String(err?.message ?? err).slice(0, 160)}`); gateLesson = null; }
+  } else console.log('JUDGE gate learning OFF (paper profile): reference lines');
   try {
     const { createMoverStudy } = await import('./learning/mover-study.js');
     const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js');
@@ -321,7 +337,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
         learningRankingLine = `LEARNING RANKING: ON (ranking-only; learned influence ${kill.state}; ACTIVE_PAPER activations now: ${activeNow}; off switch: cobra learning kill; source ${rankingSource.version})`;
       }
       console.log(learningRankingLine);
-      judgeRun = await composeJudge({ nominations: judgeNominations, learningActivationSource, policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing, writerLockWait: { waitMs: 180_000, intervalMs: 5_000 }, moveClock: moveClockLesson ? { lesson: moveClockLesson.lesson } : null, secondLook: secondLookPort }); // PUBLISH-FIX-5 / PAPER-FLIP-PREP: the boot waits out a Republish overlap for the execution writer lock
+      judgeRun = await composeJudge({ nominations: judgeNominations, learningActivationSource, policyFile: process.env.JUDGE_POLICY, mode: process.env.JUDGE_MODE, accountId: process.env.JUDGE_ACCOUNT ?? null, env: process.env, log: console.log, transport: (u, i) => fetch(u, i), specs, casesDir: path.join(marketResearchRootFromEnv(process.env, dataDir()), 'cases'), recordDir: process.env.JUDGE_RECORD_DIR ?? null, allowPrivate: () => process.env.JUDGE_ALLOW_PRIVATE === 'true', allowOrders: () => process.env.JUDGE_ALLOW_ORDERS === 'true', paperLatencySource, dynamicSizing: paperSizing, writerLockWait: { waitMs: 180_000, intervalMs: 5_000 }, moveClock: moveClockLesson ? { lesson: moveClockLesson.lesson } : null, secondLook: secondLookPort, gateLearning: gateLesson ? { lesson: gateLesson.lesson } : null }); // PUBLISH-FIX-5 / PAPER-FLIP-PREP: the boot waits out a Republish overlap for the execution writer lock
       const startup = await judgeRun.start();
       setJudgeRun(judgeRun);
       // PUBLISH-FIX-74: SOCRATES SCOUT — a fresh sealed LIVE_MODEL case reading UPWARD_PRESSURE on a coin calls an AUDIBLE: the coin is
@@ -612,6 +628,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     if (moverStudyTimer) { try { clearInterval(moverStudyTimer); } catch { /* timer already cleared */ } moverStudyTimer = null; }
     if (volatilityTimer) { try { clearInterval(volatilityTimer); } catch { /* timer already cleared */ } volatilityTimer = null; }
     if (moveClockTimer) { try { clearInterval(moveClockTimer); } catch { /* timer already cleared */ } moveClockTimer = null; }
+    if (gateStudyTimer) { try { clearInterval(gateStudyTimer); } catch { /* timer already cleared */ } gateStudyTimer = null; }
     if (moverStudy) { try { moverStudy.flush?.(); } catch (err) { console.error(`MOVER STUDY board snapshot at shutdown failed: ${String(err?.message ?? err).slice(0, 160)}`); } }
     if (caseTriggerTimer) { try { clearInterval(caseTriggerTimer); } catch { /* timer already cleared */ } caseTriggerTimer = null; }
     // paper launch seam: components the paper launcher started stop cleanly BEFORE the process exits

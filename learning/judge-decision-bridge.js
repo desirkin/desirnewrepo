@@ -16,7 +16,7 @@ import { buildEpisode } from './capture.js';
 export const JUDGE_DECISION_BRIDGE_VERSION = 'judge-decision-bridge-1';
 export const JUDGE_DATASET_PREFIX = 'live-judge-paper';
 export const LEARNED_FACT_ROW_ID = 'LEARNED_FACT'; // mirrors judge/learning-intake.js LEARNED_FACT_MEASUREMENT_ID (learning/ never imports judge/)
-const TRACE_ROW_IDS = new Set([LEARNED_FACT_ROW_ID, 'LEARNED_RANK_ADJUSTMENT', 'LEARNED_CANDIDATE', 'SIZE_CANDIDATE', 'DYNAMIC_SIZE_SELECTION']);
+const TRACE_ROW_IDS = new Set([LEARNED_FACT_ROW_ID, 'LEARNED_RANK_ADJUSTMENT', 'LEARNED_CANDIDATE', 'SIZE_CANDIDATE', 'DYNAMIC_SIZE_SELECTION', 'MOVE_CLOCK', 'SECOND_LOOK', 'GATE_LEARNING']); // PUBLISH-FIX-82: the move clock's, the second look's and the gate learning's rows are measurements beside the clauses, never gates the ledger scores (the move clock's 'no move in progress' row was landing as a failed gate on most looks)
 const MAX_SEEN = 4_096;
 
 // the Judge's decision states -> LEARN-1's decision kinds (closed vocabularies on both sides)

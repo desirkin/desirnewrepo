@@ -31,12 +31,12 @@ import { manifestIdentity } from '../market-lab/store.js';
 const POLICY = loadJudgePolicy(path.resolve('judge/samples/policy.paper-reference.json'));
 // 61 bars of range 400 around 100000 with ONE deep wick at bar 41 (L20 = 96000): H20 = 100200, low5 = 99800, ATR14 ~ 470 -> a lawful RANGE_IGNITION geometry
 function bars({ n = 61, endTs, close = 100000, range = 400, wickAt = 41, wickLow = 96000 } = {}) { const out = []; for (let i = 0; i < n; i += 1) out.push({ periodStartTs: endTs - (n - i) * 60_000, periodEndTs: endTs - (n - i - 1) * 60_000, open: close, high: close + range / 2, low: i === wickAt ? wickLow : close - range / 2, close, volumeQuote: 1000, volumeBase: 0.01, closed: true }); return out; }
-async function rig({ accountId = 'j-acct', mode = 'PAPER', history = null, caseSource = null, controls = { kill: false, cage: false, vetoes: [] }, clock = fakeClock(), moveClock = null, secondLook = null } = {}) {
+async function rig({ accountId = 'j-acct', mode = 'PAPER', history = null, caseSource = null, controls = { kill: false, cage: false, vetoes: [] }, clock = fakeClock(), moveClock = null, secondLook = null, gateLearning = null } = {}) {
   const journal = createMemoryJournal(); await journal.create(accountId, { accountKind: 'PAPER' }); const writer = await journal.acquireWriter(accountId); const F = eventsFor(accountId, clock);
   const feed = createExecutionFeed({ clock: clock.now }); feed.onConnect(clock.now()); const adapter = createPaperAdapter({ accountId, clock: clock.now, feed, fee: TEST_FEE, specOf: () => SPEC });
   const pclock = { now: clock.now, monotonic: clock.monotonic, status: () => ({ trusted: true }) }; const dispatcher = createDispatcher({ accountId, journal, writer, adapter, clock: pclock, specOf: () => SPEC }); await dispatcher.load(); await dispatcher.commit(F.init({ accountKind: 'PAPER' }));
   const scheduler = createScheduler({ monotonic: clock.monotonic }); const hist = history ?? { bars: (symbol, nowTs) => bars({ endTs: Math.floor(nowTs / 60_000) * 60_000 }) };
-  const judge = createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, history: hist, caseSource: caseSource ?? { consumed: () => null }, controls: () => controls, scheduler, mode, moveClock, secondLook });
+  const judge = createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, history: hist, caseSource: caseSource ?? { consumed: () => null }, controls: () => controls, scheduler, mode, moveClock, secondLook, gateLearning });
   const watch = createWatch({ accountId, dispatcher, adapter, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TEST_FEE, controls: () => controls });
   judge.admit('XBT/USD', { assetId: 'BTC', source: 'TEST' }); feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'XBT/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now()); feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), clock.now());
   const book = (asks, bids, type = 'snapshot') => feed.ingest(JSON.stringify({ channel: 'book', type, data: [{ symbol: 'XBT/USD', asks: asks.map(([price, qty]) => ({ price, qty })), bids: bids.map(([price, qty]) => ({ price, qty })), checksum: crcFor(asks, bids), timestamp: new Date(clock.now()).toISOString() }] }), clock.now());
@@ -271,4 +271,31 @@ test('SL-03. PUBLISH-FIX-79: a second look is dropped, nothing re-armed, when th
   r.clock.advance(5000); await r.settle();
   assert.equal(r.judge.status().counters.secondLooksDropped, 1, JSON.stringify(r.judge.status().counters)); assert.equal(r.judge.status().counters.secondLooksArmed, 0);
   assert.equal(r.judge.candidates()[0].episodes.RANGE_IGNITION.counters.rearms, 0);
+});
+
+test('GL-10. PUBLISH-FIX-82 GATE LEARNING: with the gate-learning port composed, the SAME look refused only on FI15 at the reference line is ELIGIBLE when the learned line admits it — the FI15 clause row carries the learned line as its threshold and the record carries a GATE_LEARNING row naming the move; a line outside the band, a faulting port, or no port -> the reference line, byte for byte', async () => {
+  async function earlyLook(r, { price = 100000, level = 100400 } = {}) {
+    const start = Math.floor(r.clock.now() / 60_000) * 60_000 + 60_000; while (r.clock.now() < start) { r.clock.advance(1000); r.feed.ingest(JSON.stringify({ channel: 'heartbeat' }), r.clock.now()); }
+    for (let k = 0; k < 20; k += 1) { r.clock.advance(2000); r.trade(price + 50, 'buy', 0.2); if (k >= 13) r.trade(price + 49, 'sell', 0.2); }
+    while (r.clock.now() % 60_000 !== 0) { r.clock.advance(1000); r.feed.ingest(JSON.stringify({ channel: 'heartbeat' }), r.clock.now()); }
+    r.clock.advance(500);
+    for (let i = 0; i < 3; i += 1) { r.book([[level + 20, 5], [level + 30, 5]], [[level, 5], [level - 10, 5]]); r.trade(level + 10, 'buy', 0.1); r.trade(level + 9, 'sell', 0.1); await r.settle(); if (i < 2) r.clock.advance(1050); }
+    await r.settle();
+  }
+  // baseline: refused on FI15 only, threshold 0.2, no GATE_LEARNING row
+  const b = await rig(); await b.warm(); await earlyLook(b);
+  const bd = b.judge.decisions().find((d) => d.setupId === 'RANGE_IGNITION'); assert.equal(bd.status, 'NO_TRADE'); assert.deepEqual(bd.reasonCodes, ['FI15']);
+  const bfi = bd.measurements.find((m) => m.id === 'FI15'); assert.equal(bfi.threshold, 0.2); assert.ok(!bd.measurements.some((m) => m.id === 'GATE_LEARNING'));
+  // learned: the port answers the band floor for FI15 (every KNOWN value passes) -> the same look reserves
+  const asked = []; const g = await rig({ gateLearning: { lesson: (setupId) => { asked.push(setupId); return { FI15: -1 }; } } }); await g.warm(); await earlyLook(g);
+  const gd = g.judge.decisions().find((d) => d.setupId === 'RANGE_IGNITION'); assert.equal(gd.status, 'ENTRY_RESERVED', JSON.stringify({ status: gd.status, reasons: gd.reasonCodes }));
+  const gfi = gd.measurements.find((m) => m.id === 'FI15'); assert.equal(gfi.threshold, -1); assert.equal(gfi.ok, true);
+  const row = gd.measurements.find((m) => m.id === 'GATE_LEARNING'); assert.ok(row, 'GATE_LEARNING row'); assert.equal(row.value, 1); assert.match(row.note, /FI15 0\.2->-1/);
+  assert.ok(asked.length >= 1 && asked.every((x) => typeof x === 'string'), 'the port is asked per setup');
+  // outside the band -> reference line
+  const o = await rig({ gateLearning: { lesson: () => ({ FI15: -2, RV60: 99 }) } }); await o.warm(); await earlyLook(o);
+  const od = o.judge.decisions().find((d) => d.setupId === 'RANGE_IGNITION'); assert.equal(od.status, 'NO_TRADE'); assert.equal(od.measurements.find((m) => m.id === 'FI15').threshold, 0.2); assert.ok(!od.measurements.some((m) => m.id === 'GATE_LEARNING'));
+  // a faulting port -> reference line, the decision still made
+  const f = await rig({ gateLearning: { lesson: () => { throw new Error('boom'); } } }); await f.warm(); await earlyLook(f);
+  const fd = f.judge.decisions().find((d) => d.setupId === 'RANGE_IGNITION'); assert.equal(fd.status, 'NO_TRADE'); assert.deepEqual(fd.reasonCodes, ['FI15']); assert.equal(fd.measurements.find((m) => m.id === 'FI15').threshold, 0.2);
 });

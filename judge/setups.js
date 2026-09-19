@@ -36,6 +36,30 @@ export const SETUP_INPUT_MODES = Object.freeze({ MOMENTUM_CONTINUATION: ['MARKET
 export const REFERENCE = Object.freeze({ persistenceBooks: 3, persistenceSpanMs: 2000, proposalExpiryMs: 10_000, cooldownMs: 60_000, maxDurationMs: 4 * 3_600_000, fi15Min: 0.2, rv60Ignition: 2.0, rv60Trend: 1.5, rv60Catalyst: 1.5, catalystKnownWithinMs: 600_000, caseMaxAgeMs: 300_000 });
 const d = (x, scale = 8) => (typeof x === 'string' ? x : M.fromStatistic(x, scale));
 const clause = (id, ok, value, threshold, unit, note = null) => ({ id, ok, value, threshold, unit, note });
+// GATE LEARNING (PUBLISH-FIX-82; owner directive 2026-09-19, David: "I want him to move the gate once it's tested enough — thousands
+// of tests — without me having to say so"): the flow lines a learned lesson may move, each inside a FIXED band it can never leave.
+// A learned line replaces the REFERENCE value as the clause's threshold, and the clause row records the line actually used (the
+// learning ledger reads that row, so every later test is scored against the line that judged it). No lesson -> REFERENCE, byte for
+// byte. `min` is the band's floor: at the floor every KNOWN value passes (an unknown value still fails — the gate is moved, never
+// blinded). Structural clauses (levels, stops, geometry) are NOT learnable: only these buying-pressure / volume lines are.
+export const LEARNABLE_GATES = Object.freeze({
+  FI15: Object.freeze({ reference: 0.2, min: -1, max: 0.5, step: 0.05, op: 'GTE', unit: 'FRACTION' }),
+  FI60_POSITIVE: Object.freeze({ reference: 0, min: -1, max: 0.3, step: 0.05, op: 'GT', unit: 'FRACTION' }),
+  RV60: Object.freeze({ reference: null, min: 0, max: 3, step: 0.25, op: 'GTE', unit: 'RATIO' }), // reference is the setup's own rv60Min
+  RECLAIM_FI15: Object.freeze({ reference: 0.2, min: -1, max: 0.5, step: 0.05, op: 'GTE', unit: 'FRACTION' }),
+  FI15_FRESH_AT_D: Object.freeze({ reference: 0.2, min: -1, max: 0.5, step: 0.05, op: 'GTE', unit: 'FRACTION' }),
+});
+// the line in force for a learnable gate: the learned one when it is a finite number inside the band, else the reference
+export function learnedLine(learned, id, reference) {
+  const g = LEARNABLE_GATES[id]; const v = learned && typeof learned === 'object' ? learned[id] : undefined;
+  return g && typeof v === 'number' && Number.isFinite(v) && v >= g.min && v <= g.max ? v : reference;
+}
+// the learned lines that differ from their references (for the decision's GATE_LEARNING row); RV60's reference is per setup
+export function learnedOverrides(learned, setupId = null) {
+  const out = [];
+  for (const id of Object.keys(LEARNABLE_GATES)) { const ref = id === 'RV60' ? (setupId && setupDefinition(setupId)?.rv60Min !== null && setupDefinition(setupId)?.rv60Min !== undefined ? setupDefinition(setupId).rv60Min : null) : LEARNABLE_GATES[id].reference; if (ref === null) continue; const line = learnedLine(learned, id, ref); if (line !== ref) out.push({ id, reference: ref, line }); }
+  return out;
+}
 const known = (x) => x && x.state === 'KNOWN';
 const safePositive = (x) => { try { return x !== null && x !== undefined && M.isPositive(x); } catch { return false; } };
 const safeNonNegative = (x) => { try { return x !== null && x !== undefined && M.gte(x, '0'); } catch { return false; } };
@@ -90,11 +114,11 @@ export function freezeReferences({ setupId, ind, spec, fast, event = null, trigg
 }
 export const hypothesisDigest = (frozen) => digestOf(frozen);
 // the slow / structural clauses judged at T (a breach of any is a refusal, not a later re-rating)
-export function structuralClauses(setupId, frozen, ind, fast, { decisionTs, event = null } = {}) {
+export function structuralClauses(setupId, frozen, ind, fast, { decisionTs, event = null, learned = null } = {}) {
   const c = [];
   if (setupId === 'RANGE_IGNITION') { c.push(clause('COMPRESSION_5BAR', M.lte(frozen.envelope5, M.mul('2', frozen.atr14)), frozen.envelope5, M.mul('2', frozen.atr14), 'QUOTE', 'prior 5 closed bars high-low envelope <= 2 ATR14')); }
   if (setupId === 'TREND_PULLBACK_CONTINUATION') { c.push(clause('EMA5_ABOVE_EMA20', M.gt(frozen.ema5, frozen.ema20), frozen.ema5, frozen.ema20, 'QUOTE')); c.push(clause('PRIOR20_RETURN_POSITIVE', frozen.prior20Return > 0, frozen.prior20Return, 0, 'FRACTION')); c.push(clause('PRIOR20_HIGH_BEFORE_LAST3', frozen.prior20HighBarsFromEnd >= 3, frozen.prior20HighBarsFromEnd, 3, 'BARS', 'the prior20 high occurred before the last 3 completed bars')); c.push(clause('PULLBACK_WITHIN_1_5_ATR', M.lte(M.sub(frozen.prior20High, frozen.last3Low), M.mul('1.5', frozen.atr14)), M.sub(frozen.prior20High, frozen.last3Low), M.mul('1.5', frozen.atr14), 'QUOTE')); }
-  if (setupId === 'ABSORPTION_RECLAIM') { c.push(clause('PRIOR_FI_ABSORBED', known(frozen.priorFi) && frozen.priorFi.fi <= -0.15, frozen.priorFi?.fi ?? null, -0.15, 'FRACTION', 'prior episode [T-75s,T-15s) taker imbalance')); c.push(clause('PRIOR_MID_RESPONSE_SMALL', frozen.priorMidChange !== null && M.lte(M.abs(frozen.priorMidChange), M.mul('0.15', frozen.atr14)), frozen.priorMidChange, M.mul('0.15', frozen.atr14), 'QUOTE', 'absolute mid change in EITHER direction')); c.push(clause('BASELINE_DEPTH_SUPPORT', frozen.priorDepthSamples >= 30, frozen.priorDepthSamples, 30, 'BOOKS')); const atT = fast.atTrigger ?? fast; c.push(clause('RECLAIM_FI15', known(atT.reclaimFi) && atT.reclaimFi.fi >= 0.2, atT.reclaimFi?.fi ?? null, 0.2, 'FRACTION', 'FI over [T-15s,T): the frozen episode window, never the decision window')); c.push(clause('SCENARIO_LEVEL_EXISTS', frozen.scenarioRaw !== null && M.gt(frozen.scenarioRaw, frozen.triggerLevel), frozen.scenarioRaw, frozen.triggerLevel, 'QUOTE', 'previously observed H20 above entry; none -> NO_TRADE')); }
+  if (setupId === 'ABSORPTION_RECLAIM') { c.push(clause('PRIOR_FI_ABSORBED', known(frozen.priorFi) && frozen.priorFi.fi <= -0.15, frozen.priorFi?.fi ?? null, -0.15, 'FRACTION', 'prior episode [T-75s,T-15s) taker imbalance')); c.push(clause('PRIOR_MID_RESPONSE_SMALL', frozen.priorMidChange !== null && M.lte(M.abs(frozen.priorMidChange), M.mul('0.15', frozen.atr14)), frozen.priorMidChange, M.mul('0.15', frozen.atr14), 'QUOTE', 'absolute mid change in EITHER direction')); c.push(clause('BASELINE_DEPTH_SUPPORT', frozen.priorDepthSamples >= 30, frozen.priorDepthSamples, 30, 'BOOKS')); const atT = fast.atTrigger ?? fast; const reclaimLine = learnedLine(learned, 'RECLAIM_FI15', 0.2); c.push(clause('RECLAIM_FI15', known(atT.reclaimFi) && atT.reclaimFi.fi >= reclaimLine, atT.reclaimFi?.fi ?? null, reclaimLine, 'FRACTION', 'FI over [T-15s,T): the frozen episode window, never the decision window')); c.push(clause('SCENARIO_LEVEL_EXISTS', frozen.scenarioRaw !== null && M.gt(frozen.scenarioRaw, frozen.triggerLevel), frozen.scenarioRaw, frozen.triggerLevel, 'QUOTE', 'previously observed H20 above entry; none -> NO_TRADE')); }
   if (setupId === 'CATALYST_TRANSMISSION') { const ev = frozen.event; c.push(clause('EVENT_PRIMARY_CONFIRMED', Boolean(event?.primaryConfirmed), event?.primaryConfirmed ?? null, true, 'BOOL')); c.push(clause('EVENT_KNOWN_WITHIN_10M', Boolean(ev) && decisionTs - ev.knownAtTs <= REFERENCE.catalystKnownWithinMs && decisionTs >= ev.knownAtTs, ev ? decisionTs - ev.knownAtTs : null, REFERENCE.catalystKnownWithinMs, 'MS')); c.push(clause('EVENT_OCCURRED_NOT_SCHEDULED', Boolean(event?.occurred), event?.occurred ?? null, true, 'BOOL', 'a future scheduled date is not an occurrence')); c.push(clause('MECHANISM_UPWARD_PRESSURE_CITED', event?.mechanismDirection === 'UPWARD_PRESSURE' && Boolean(event?.mechanismCitesEvent), event?.mechanismDirection ?? null, 'UPWARD_PRESSURE', 'ENUM', 'MIXED / UNKNOWN never becomes UPWARD by prose')); c.push(clause('P0_FROM_PRE_EVENT_SNAPSHOT', sameFrozenCatalyst(frozen, event), preEventSnapshotBound(event) ? event.p0Evidence.evidenceId : null, 'PRE_EVENT_SNAPSHOT_BOUND', 'EVIDENCE_ID')); }
   if (setupId === 'MOMENTUM_CONTINUATION') { c.push(clause('LAST_CLOSE_ABOVE_EMA5', M.gt(frozen.lastClose, frozen.ema5), frozen.lastClose, frozen.ema5, 'QUOTE')); c.push(clause('EMA5_ABOVE_EMA20', M.gt(frozen.ema5, frozen.ema20), frozen.ema5, frozen.ema20, 'QUOTE')); c.push(clause('PRIOR20_RETURN_POSITIVE', typeof frozen.prior20Return === 'number' && Number.isFinite(frozen.prior20Return) && frozen.prior20Return > 0, Number.isFinite(frozen.prior20Return) ? frozen.prior20Return : null, 0, 'FRACTION')); }
   if (setupId === 'MICRO_BITE') { c.push(clause('MICRO_PRICE_AT_OR_ABOVE_EMA5', M.gte(frozen.lastClose, frozen.ema5), frozen.lastClose, frozen.ema5, 'QUOTE')); c.push(clause('MICRO_RANGE_READY', M.lte(frozen.envelope5, M.mul('2', frozen.atr14)), frozen.envelope5, M.mul('2', frozen.atr14), 'QUOTE', 'five completed bars remain bounded before the micro ignition')); }
@@ -102,14 +126,14 @@ export function structuralClauses(setupId, frozen, ind, fast, { decisionTs, even
   return c;
 }
 // the fast clauses re-evaluated at D against the FROZEN references (extension cap, flow, relative volume, crossing)
-export function fastClauses(setupId, frozen, fast) {
+export function fastClauses(setupId, frozen, fast, learned = null) {
   const c = []; const mid = fast.mid;
   c.push(clause('MID_ABOVE_TRIGGER', M.gte(mid, frozen.triggerLevel), mid, frozen.triggerLevel, 'QUOTE', 'fresh mid at/above the full trigger level'));
   if (frozen.maxEntryLevel !== null) c.push(clause('EXTENSION_CAP', M.lte(mid, frozen.maxEntryLevel), mid, frozen.maxEntryLevel, 'QUOTE', 'do not chase'));
-  c.push(clause('FI15', known(fast.fi15) && fast.fi15.fi >= REFERENCE.fi15Min, fast.fi15?.fi ?? null, REFERENCE.fi15Min, 'FRACTION', fast.fi15?.reason ?? null));
-  c.push(clause('FI60_POSITIVE', known(fast.fi60) && fast.fi60.fi > 0, fast.fi60?.fi ?? null, 0, 'FRACTION', fast.fi60?.reason ?? null));
-  if (setupId !== 'ABSORPTION_RECLAIM') { const min = setupDefinition(setupId)?.rv60Min ?? REFERENCE.rv60Catalyst; c.push(clause('RV60', known(fast.rv60) && fast.rv60.rv60 >= min, fast.rv60?.rv60 ?? null, min, 'RATIO', fast.rv60?.reason ?? null)); }
-  else { c.push(clause('DEPTH_HOLDS_80PCT_OF_BASELINE', fast.depth10bps !== null && frozen.priorMedianDepth !== null && M.gte(fast.depth10bps, M.mul('0.8', frozen.priorMedianDepth)), fast.depth10bps, frozen.priorMedianDepth ? M.mul('0.8', frozen.priorMedianDepth) : null, 'QUOTE', 'current 10bps bid notional vs the SAME frozen median')); c.push(clause('FI15_FRESH_AT_D', known(fast.fi15) && fast.fi15.fi >= 0.2, fast.fi15?.fi ?? null, 0.2, 'FRACTION', 'may overlap prior data; not independent confirmation')); }
+  const fi15Line = learnedLine(learned, 'FI15', REFERENCE.fi15Min); c.push(clause('FI15', known(fast.fi15) && fast.fi15.fi >= fi15Line, fast.fi15?.fi ?? null, fi15Line, 'FRACTION', fast.fi15?.reason ?? null));
+  const fi60Line = learnedLine(learned, 'FI60_POSITIVE', 0); c.push(clause('FI60_POSITIVE', known(fast.fi60) && fast.fi60.fi > fi60Line, fast.fi60?.fi ?? null, fi60Line, 'FRACTION', fast.fi60?.reason ?? null));
+  if (setupId !== 'ABSORPTION_RECLAIM') { const min = learnedLine(learned, 'RV60', setupDefinition(setupId)?.rv60Min ?? REFERENCE.rv60Catalyst); c.push(clause('RV60', known(fast.rv60) && fast.rv60.rv60 >= min, fast.rv60?.rv60 ?? null, min, 'RATIO', fast.rv60?.reason ?? null)); }
+  else { c.push(clause('DEPTH_HOLDS_80PCT_OF_BASELINE', fast.depth10bps !== null && frozen.priorMedianDepth !== null && M.gte(fast.depth10bps, M.mul('0.8', frozen.priorMedianDepth)), fast.depth10bps, frozen.priorMedianDepth ? M.mul('0.8', frozen.priorMedianDepth) : null, 'QUOTE', 'current 10bps bid notional vs the SAME frozen median')); const freshLine = learnedLine(learned, 'FI15_FRESH_AT_D', 0.2); c.push(clause('FI15_FRESH_AT_D', known(fast.fi15) && fast.fi15.fi >= freshLine, fast.fi15?.fi ?? null, freshLine, 'FRACTION', 'may overlap prior data; not independent confirmation')); }
   c.push(clause('COVERAGE_60S', fast.coverage?.continuous === true && fast.coverage.startTs <= fast.decisionTs - 60_000, fast.coverage?.startTs ?? null, fast.decisionTs - 60_000, 'TS', '60s continuous trade coverage'));
   c.push(clause('BOOK_FRESH', fast.bookAgeMs !== null && fast.bookAgeMs <= 1000 && fast.crcVerified === true, fast.bookAgeMs, 1000, 'MS', 'CRC-verified book at most 1s old'));
   if (setupId === 'MOMENTUM_CONTINUATION' || setupId === 'MICRO_BITE') {
@@ -158,10 +182,10 @@ export function setupStrengthFacts(frozen, fast) {
   const evidenceKnown = known(fast?.continuationEvidence);
   return Object.freeze({ strengthFactsVersion: 'judge-setup-strength-facts-1', priceBeyondTriggerAtr, relativeVolume60: known(fast?.rv60) ? fast.rv60.rv60 : null, flow15: known(fast?.fi15) ? fast.fi15.fi : null, flow60: known(fast?.fi60) ? fast.fi60.fi : null, depth10bps: fast?.depth10bps ?? null, continuationPhase: evidenceKnown ? fast.continuationEvidence.phase ?? null : null, evidenceDimensions: evidenceKnown && Array.isArray(fast.continuationEvidence.dimensions) ? [...fast.continuationEvidence.dimensions] : null, exhausted: exhaustionKnown ? fast.exhaustion.exhausted : null, known: Object.freeze({ relativeVolume60: known(fast?.rv60), flow15: known(fast?.fi15), flow60: known(fast?.fi60), liquidity: fast?.depth10bps !== null && fast?.depth10bps !== undefined, continuation: evidenceKnown, exhaustion: exhaustionKnown }), sourceAgeMs: Object.freeze({ book: fast?.bookAgeMs ?? null, continuation: age(fast?.continuationEvidence), exhaustion: age(fast?.exhaustion) }) });
 }
-export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisionTs, event = null, ablate = null }) {
+export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisionTs, event = null, ablate = null, learned = null }) {
   if (!SETUP_EVALUATORS.includes(setupId)) throw new Error(`unknown setup ${setupId}`);
   if (ablate && ablate.setupId === setupId) { const allowed = ABLATABLE_CLAUSES[setupId] ?? []; const bad = (ablate.clauses ?? []).filter((id) => !allowed.includes(id)); if (bad.length) throw new Error(`clauses ${bad.join(',')} are not ablatable for ${setupId}`); }
-  const structural = structuralClauses(setupId, frozen, ind, fast, { decisionTs, event }); const quick = fastClauses(setupId, frozen, fast); const all = [...structural, ...quick];
+  const structural = structuralClauses(setupId, frozen, ind, fast, { decisionTs, event, learned }); const quick = fastClauses(setupId, frozen, fast, learned); const all = [...structural, ...quick];
   let ablated = []; if (ablate && ablate.setupId === setupId) ablated = all.filter((x) => ablate.clauses.includes(x.id)).map((x) => ({ ...x, ablated: true }));
   const clauses = ablated.length ? all.filter((x) => !ablate.clauses.includes(x.id)) : all;
   const needsData = clauses.filter((x) => x.value === null && !x.ok).map((x) => x.id); const refused = clauses.filter((x) => !x.ok).map((x) => x.id);
