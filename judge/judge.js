@@ -27,7 +27,7 @@ import {
   ADAPTIVE_RANKING_UNITS, adaptiveRankingInputCaptureError,
   adaptiveRankingPortResultError,
 } from './adaptive-ranking-port.js';
-import { moveClockFacts, moveClockVerdict, moveClockMeasurements } from './move-clock.js'; // PUBLISH-FIX-73: the move clock (port-gated; absent -> baseline)
+import { moveClockFacts, moveClockVerdict, moveClockMeasurements, MOVE_CLOCK_BARS } from './move-clock.js'; // PUBLISH-FIX-73: the move clock (port-gated; absent -> baseline)
 export const VERDICT_RECORD_VERSION = 'judge-challenger-verdict-1';
 
 export const JUDGE_VERSION = 'judge-1';
@@ -371,7 +371,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     // hour's low, climb since) beside the lesson the mover study taught; the refusal below fires only for an ELIGIBLE setup while the
     // lesson is ARMED. Port absent: nothing here runs and the record is the baseline byte for byte. A faulting port reads as absent.
     let moveClockVerdictNow = null;
-    if (moveClock) { try { const lesson = typeof moveClock.lesson === 'function' ? moveClock.lesson() : null; const facts = moveClockFacts(c.indicatorsRef.bars, D, { minClimbPct: lesson?.minClimbPct }); moveClockVerdictNow = moveClockVerdict(facts, lesson); measurements = [...measurements, ...moveClockMeasurements(facts, lesson, moveClockVerdictNow)]; } catch (err) { log(`move clock port failed (baseline for this decision): ${String(err?.message ?? err).slice(0, 160)}`); moveClockVerdictNow = null; } }
+    if (moveClock) { try { const lesson = typeof moveClock.lesson === 'function' ? moveClock.lesson() : null; let clockBars = null; try { clockBars = history.bars(c.symbol, D, MOVE_CLOCK_BARS); } catch { clockBars = null; } const facts = moveClockFacts(Array.isArray(clockBars) && clockBars.length >= c.indicatorsRef.bars.length ? clockBars : c.indicatorsRef.bars, D, { minClimbPct: lesson?.minClimbPct }); /* PUBLISH-FIX-81: a two-hour block when the history has it */ moveClockVerdictNow = moveClockVerdict(facts, lesson); measurements = [...measurements, ...moveClockMeasurements(facts, lesson, moveClockVerdictNow)]; } catch (err) { log(`move clock port failed (baseline for this decision): ${String(err?.message ?? err).slice(0, 160)}`); moveClockVerdictNow = null; } }
     if (secondLookCfg) measurements = [...measurements, ...secondLookMeasurement(c, setupId, episodeId)]; // PUBLISH-FIX-79: a decision made on a second look says so
     if (setup.state !== 'ELIGIBLE') { if (setup.state === 'NEEDS_DATA') counters.needsData += 1; else scheduleSecondLook(c, setupId, frozen, setup.refused, D); tracker.decide(setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'ENTRY_REFUSED'); return recordRefusal(c, setupId, episodeId, setup.state === 'NEEDS_DATA' ? 'NEEDS_DATA' : 'NO_TRADE', setup.refused, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
     funnel.setupQualified += 1; if (secondLookCfg) c.secondLook.delete(setupId); // PUBLISH-FIX-79: an eligible look ends the chain

@@ -55,7 +55,7 @@ NODE_OPTIONS = "--max-old-space-size=4096"
 SERPENT_TAPE_WRITE_BEHIND = "true"
 SERPENT_CPU_PROFILE = "true"
 SERPENT_STALL_WATCHDOG = "true"
-SERPENT_HEAP_SAMPLE = "true"
+SERPENT_HEAP_SAMPLE = "false"
 # PUBLISH-FIX-14 (independent review F5): learning ON — LEARN-1 capture/maturation/pattern memory (LEARNING_ENABLED) and the
 # Judge's ranking-only learned contribution (SERPENT_LEARNING_RANKING; PAPER only; off switch = `cobra learning kill`).
 LEARNING_ENABLED = "true"

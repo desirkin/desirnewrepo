@@ -86,9 +86,13 @@ test('RL-04. the source end to end: dormant until the mover evidence says late e
     assert.ok(existsSync(relookFile(dir))); const file = JSON.parse(readFileSync(relookFile(dir), 'utf8')); assert.equal(file.version, RELOOK_VERSION); assert.equal(file.relooks.length, 2);
     const tape = readLearnedRelooksToday({ dataDir: dir, nowTs: now }); assert.deepEqual(tape.map((n) => [n.coin, n.cause]), [['AAA', 'LEARNED_RELOOK HELD_MOVER +11%'], ['XMR', 'LEARNED_RELOOK MISSED_RISE +4.2%']]); assert.equal(typeof tape[0].ts, 'string');
     assert.ok(src.line().includes('ARMED') && src.line().includes('XMR until'), src.line());
+    // PUBLISH-FIX-81 (review F4): the learned-influence kill file switches the learned NOMINATION off too — evidence still measured, nothing offered
+    real.writeKill({ state: 'KILLED', reason: 'owner baseline', ts: now });
+    const killed = src.refresh(); assert.equal(killed.armed, false); assert.deepEqual(killed.relooks, []); assert.deepEqual(src.nominations(), []); assert.match(killed.evidence.reason, /^learned influence KILLED \(data\/learning\/kill.json: owner baseline\); HOUR_AFTER_HELD/); assert.equal(killed.evidence.killed, true);
+    real.writeKill({ state: 'ARMED', reason: null, ts: now }); assert.equal(src.refresh().armed, true);
     // the window closes: nothing nominated, nothing for the tape, the file says so
     now = T0 + 3 * 60 * MIN; const closed = src.refresh(); assert.deepEqual(closed.relooks, []); assert.deepEqual(src.nominations(), []); assert.deepEqual(readLearnedRelooksToday({ dataDir: dir, nowTs: now }), []);
-    assert.equal(src.status().authority, 'NONE'); assert.equal(src.status().counters.nominated, 2);
+    assert.equal(src.status().authority, 'NONE'); assert.equal(src.status().counters.nominated, 4, 'offered twice: before the kill and again after it was lifted');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

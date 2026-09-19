@@ -11,15 +11,20 @@ const END = Date.UTC(2026, 8, 18, 20, 0, 0);
 // 61 closed one-minute bars ending at END; closes from a function of the bar's index (0 = oldest)
 const bars = (closeAt) => Array.from({ length: 61 }, (_, i) => { const c = closeAt(i); return { periodStartTs: END - (61 - i) * 60_000, periodEndTs: END - (60 - i) * 60_000, open: c, high: c * 1.001, low: c * 0.999, close: c, volumeQuote: 1000, volumeBase: 0.01, closed: true }; });
 
-test('MC-01. facts: the move is measured from the lowest close of the last 60 bars — its age in minutes at the decision and the climb since; under the minimum climb there is no move; a bad block is NOT_KNOWN', () => {
+test('MC-01. facts: the move is measured from the lowest close of the lookback (two hours since fix81; 60 bars when asked) — its age in minutes at the decision and the climb since; under the minimum climb there is no move; a bad block is NOT_KNOWN', () => {
   const flat = moveClockFacts(bars(() => 100), END + 5_000); assert.equal(flat.state, 'KNOWN'); assert.equal(flat.present, false); assert.equal(flat.climbPct, 0);
   // the low sits 20 bars before the end (index 40 of 61): 100 -> 108 = +8% climb, 20 minutes + the 5 s past the last close = age 21
   const move = moveClockFacts(bars((i) => (i === 40 ? 100 : i > 40 ? 108 : 104)), END + 5_000);
   assert.equal(move.present, true); assert.equal(move.climbPct, 8); assert.equal(move.ageMin, 21); assert.equal(move.lowTs, END - 21 * 60_000); assert.equal(move.lowClose, 100); assert.equal(move.lastClose, 108);
   const small = moveClockFacts(bars((i) => (i === 40 ? 100 : 103)), END + 5_000); assert.equal(small.present, false, '3% from the hour low is not a move (minimum 5%)'); assert.equal(small.climbPct, 3);
   assert.equal(moveClockFacts(bars((i) => (i === 40 ? 100 : 103)), END + 5_000, { minClimbPct: 2 }).present, true, 'the minimum climb is the lesson\'s');
-  // only the last 60 bars count: a lower close 61 bars back is outside the hour
-  const old = moveClockFacts(bars((i) => (i === 0 ? 50 : 100)), END + 5_000); assert.equal(old.present, false); assert.equal(old.climbPct, 0);
+  // PUBLISH-FIX-81: the lookback is two hours (the mover study's own low-to-peak horizon); with a 61-bar block the whole block is the
+  // window, so a lower close 61 bars back IS the low; passed lookbackBars 60 explicitly, it is outside the hour as before
+  const old = moveClockFacts(bars((i) => (i === 0 ? 50 : 100)), END + 5_000); assert.equal(old.present, true); assert.equal(old.climbPct, 100); assert.equal(old.ageMin, 61);
+  const hour = moveClockFacts(bars((i) => (i === 0 ? 50 : 100)), END + 5_000, { lookbackBars: 60 }); assert.equal(hour.present, false); assert.equal(hour.climbPct, 0);
+  // a 121-bar block: a low 100 minutes back is measured (age 101) — the horizon the runtime could not see before fix81
+  const two = Array.from({ length: 121 }, (_, i) => ({ periodStartTs: END - (121 - i) * 60_000, periodEndTs: END - (120 - i) * 60_000, open: 100, high: 110, low: 90, close: i === 20 ? 100 : 108, volume: 1, knownAtTs: END - (120 - i) * 60_000 }));
+  const far = moveClockFacts(two, END + 5_000); assert.equal(far.present, true); assert.equal(far.ageMin, 101); assert.equal(far.climbPct, 8);
   assert.equal(moveClockFacts(null, END).state, 'NOT_KNOWN'); assert.equal(moveClockFacts([], END).state, 'NOT_KNOWN'); assert.equal(moveClockFacts([{ periodStartTs: END, close: null }], END).state, 'NOT_KNOWN');
 });
 
@@ -59,6 +64,12 @@ test('MC-03. the lesson: DORMANT under 20 measured movers; ARMED at 20 with late
     assert.equal(reader.lesson().state, 'DORMANT'); const l = reader.refresh();
     assert.equal(l.state, 'ARMED'); assert.equal(l.movers, 20); assert.equal(l.p75Min, 34, "sorted 20..37, 40, 44: the 15th of 20 is 34"); assert.equal(l.lateMin, 34); assert.match(logs.at(-1), /MOVE CLOCK: ARMED from 20 movers .* refuses a coin whose own move is 34\+ minutes old/);
     reader.refresh(); assert.equal(logs.length, 1, 'an unchanged lesson is not logged again');
+    // PUBLISH-FIX-81 (review F4): the learned-influence kill file switches the clock to baseline; an invalid file fails toward baseline too
+    mkdirSync(path.join(dir, 'learning'), { recursive: true });
+    writeFileSync(path.join(dir, 'learning', 'kill.json'), JSON.stringify({ state: 'KILLED', reason: 'owner baseline', ts: END }));
+    const k = reader.refresh(); assert.equal(k.state, 'DORMANT'); assert.equal(k.lateMin, null); assert.equal(k.movers, 20, 'still measured, not applied'); assert.deepEqual(k.killed, { reason: 'owner baseline' }); assert.match(logs.at(-1), /MOVE CLOCK: DORMANT — learned influence KILLED \(data\/learning\/kill.json: owner baseline\)/);
+    writeFileSync(path.join(dir, 'learning', 'kill.json'), '{ not json'); assert.equal(reader.refresh().state, 'DORMANT'); assert.equal(reader.lesson().killed.reason, 'KILL_FILE_UNREADABLE');
+    writeFileSync(path.join(dir, 'learning', 'kill.json'), JSON.stringify({ state: 'ARMED', reason: null, ts: END })); assert.equal(reader.refresh().state, 'ARMED'); assert.equal(reader.lesson().killed, undefined);
     const bare = createMoveClockLesson({ dataDir: path.join(dir, 'nowhere'), clock: () => END, log: (l) => logs.push(l) }); bare.refresh(); assert.equal(bare.lesson().state, 'DORMANT'); assert.match(bare.line(), /DORMANT \(0 of 20 movers/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

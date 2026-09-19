@@ -60,11 +60,38 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       4f8c9e59c77edc9549758fbefb7ce791eb77220dcd0d58153b2611896ec73c3f
+judge/*.js       d86afbd55cf3d695d5afb5aa18b2088a051e8dcda095c2b9420240d610cb8d1c
 execution/*.js   81bea0cccc0c9ef91b6cc6c7f89f3cb95289837325744605354eb712e6d0037c
 watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (49 files)   daaa479652dcfe16a36a098445a59934626bdb6a06f205ad2cfde61a1ca92911
+all (49 files)   e6fdda49e61cfe4d93a87c2e46da95d956fc0aaebb41e25658865054f9d3bc1f
 ```
+
+### 4.30 Audited change — 2026-09-19 PUBLISH-FIX-81: independent review cb305c6e, F4 + F5 on the move clock — the clock measures over the study's own two-hour horizon and honours the learned-influence kill file (previous judge digest `4f8c9e59c77e…`; now `d86afbd55cf3…`; 49 files; execution and watch UNCHANGED)
+
+The review's finding F5 was a real defect: the mover study measures low-to-peak over the hour before the event and the hour
+after (up to 120 minutes), but the runtime read the move's age from the Judge's 61-bar block only — a learned late minute
+above 60 could never be reached, so MOVE_TOO_OLD could never fire (the first nine archive measurements put the 75th
+percentile near 100 minutes). Finding F4: the move-clock lesson was wired beside the learning ranking source and did not
+consult `data/learning/kill.json`, so a KILLED (baseline) run still carried a learned timing refusal; the learned re-look
+nomination (learning/relook.js) had the same gap.
+
+- `judge/history.js` `bars(symbol, nowTs, count = BARS_REQUIRED)`: an optional count; the setups still receive exactly 61.
+- `judge/move-clock.js`: `MOVE_CLOCK_DEFAULTS.lookbackBars` 60 → 120; `MOVE_CLOCK_BARS = 121`.
+- `judge/judge.js`: the move-clock facts are read from `history.bars(symbol, D, 121)` when the history can serve a
+  contiguous two-hour block, else from the frozen 61-bar setup block (the fallback measures ages up to 60 as before).
+  The setup evaluation, the frozen references and every clause are untouched (`c.indicatorsRef.bars` unchanged).
+- `learning/move-clock-lesson.js` (not frozen): KILLED / unreadable / invalid kill file → the lesson reports DORMANT
+  (`lateMin` null, `killed.reason`), the line says so, the measurement continues. `learning/relook.js`: the same law for
+  the learned nomination — evidence measured and reported, nothing re-offered while KILLED.
+- Port absent → baseline byte for byte, as before.
+
+Tests: MC-01 (two-hour lookback; 60 when asked; a 121-bar block measures a 101-minute age), MC-03 (KILLED → DORMANT;
+invalid file → DORMANT; ARMED again), MC-04 (a 95-minute-old move refused under lateMin 80 through the two-hour block;
+the setups still reserve under a DORMANT lesson), RL-04 (the re-look under KILLED). Full suite green before re-pinning.
+
+Not changed, on purpose: F1 (the 0.40% taker reference is the owner's directive of PUBLISH-FIX-67 and is labelled
+UNVERIFIED in the policy itself; the owner decides) and F2 (the boot latch clear is the owner's explicit directive of
+PUBLISH-FIX-75; the durable CLEAR that does not persist across boots is the underlying defect, logged for repair).
 
 ### 4.29 Audited change — 2026-09-19 PUBLISH-FIX-79: THE SECOND LOOK — a look refused only on buying-pressure gates is retaken at the same level a few minutes later, every gate at full strength (previous judge digest `f476916f6544…`; now `4f8c9e59c77e…`; 49 files unchanged in number; execution and watch UNCHANGED)
 

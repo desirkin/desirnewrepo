@@ -44,8 +44,17 @@ export function createMoveClockLesson({ dataDir, clock = () => Date.now(), log =
   // PUBLISH-FIX-78: the archive backfill (learning/mover-backfill.js) writes the same records under its own root; the lesson reads
   // both, the live study's record winning when both saw the same climb (same coin, same minute)
   const backfillDir = path.join(dataDir, 'mover-backfill', 'learning', 'mover-study');
+  // PUBLISH-FIX-81 (independent review cb305c6e F4): the learned-influence kill file (data/learning/kill.json, `cobra learning kill`)
+  // is the ONE off switch for every learned influence on a decision; the move clock now honours it exactly as the ranking source
+  // does — KILLED (or an unreadable / invalid file: corruption fails toward LESS learned influence) reads as DORMANT, baseline.
+  const killFile = path.join(dataDir, 'learning', 'kill.json');
+  function killState() {
+    if (!existsSync(killFile)) return { state: 'ARMED', reason: null };
+    try { const k = JSON.parse(readFileSync(killFile, 'utf8')); return k && typeof k === 'object' && ['ARMED', 'KILLED'].includes(k.state) ? { state: k.state, reason: k.reason ?? null } : { state: 'KILLED', reason: 'KILL_FILE_INVALID' }; }
+    catch { return { state: 'KILLED', reason: 'KILL_FILE_UNREADABLE' }; }
+  }
   let lesson = moveClockLessonOf([], { ...cfg, nowTs: clock() });
-  let lastLogged = null; let sources = { live: 0, backfill: 0 };
+  let lastLogged = null; let sources = { live: 0, backfill: 0 }; let killed = null;
   function readDir(base, nowTs) {
     const out = [];
     for (let d = 0; d < cfg.days; d += 1) {
@@ -66,15 +75,18 @@ export function createMoveClockLesson({ dataDir, clock = () => Date.now(), log =
   }
   function refresh() {
     const nowTs = clock();
-    try { lesson = moveClockLessonOf(readDays(nowTs), { ...cfg, nowTs }); }
-    catch (err) { log(`MOVE CLOCK lesson refresh failed (previous lesson kept): ${String(err?.message ?? err).slice(0, 160)}`); return lesson; }
-    const key = `${lesson.state}:${lesson.movers}:${lesson.lateMin}`;
+    try {
+      const measured = moveClockLessonOf(readDays(nowTs), { ...cfg, nowTs }); const k = killState(); killed = k.state === 'KILLED' ? k : null;
+      lesson = killed ? { ...measured, state: 'DORMANT', lateMin: null, killed: { reason: killed.reason } } : measured;
+    } catch (err) { log(`MOVE CLOCK lesson refresh failed (previous lesson kept): ${String(err?.message ?? err).slice(0, 160)}`); return lesson; }
+    const key = `${lesson.state}:${lesson.movers}:${lesson.lateMin}:${killed ? 'KILLED' : 'ARMED'}`;
     if (key !== lastLogged) { lastLogged = key; log(line()); }
     return lesson;
   }
   const from = () => (sources.backfill ? ` (${sources.backfill} of them replayed from the archive)` : '');
   function line() {
     const l = lesson;
+    if (killed) return `MOVE CLOCK: DORMANT — learned influence KILLED (data/learning/kill.json${killed.reason ? `: ${killed.reason}` : ''}); ${l.movers} movers measured${from()}; the Judge records each look's move age but refuses nothing on it (baseline)`;
     if (l.state !== 'ARMED') return `MOVE CLOCK: DORMANT (${l.movers} of ${l.armAt} movers measured over ${l.days} days${from()}; the Judge records each look's move age but refuses nothing on it yet)`;
     return `MOVE CLOCK: ARMED from ${l.movers} movers${from()} — a move typically tops out at minute ${l.medianMin} (three of four by minute ${l.p75Min}); the Judge refuses a coin whose own move is ${l.lateMin}+ minutes old (MOVE_TOO_OLD)`;
   }

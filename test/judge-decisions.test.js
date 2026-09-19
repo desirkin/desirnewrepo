@@ -204,6 +204,12 @@ test('MC-04. PUBLISH-FIX-73: with the move-clock port composed, an ELIGIBLE setu
   assert.equal(d.status, 'NO_TRADE'); assert.deepEqual(d.reasonCodes, ['MOVE_TOO_OLD']); assert.equal(r.judge.status().counters.moveTooOld, 1); assert.equal(r.judge.status().counters.entries, 0);
   const rows = d.measurements.filter((m) => m.id === 'MOVE_CLOCK'); assert.equal(rows.length, 2); assert.equal(rows[0].ok, false); assert.ok(rows[0].value >= 45 && rows[0].value <= 47, `age ${rows[0].value}`); assert.equal(rows[0].threshold, 40); assert.match(rows[0].note, /age:in-move:lesson=ARMED:movers=24:median=30/); assert.ok(rows[1].value > 8 && rows[1].value < 9, `climb ${rows[1].value}`);
   assert.equal(Object.keys(r.state().positions).length, 0, 'refused: no position');
+  // PUBLISH-FIX-81 (review F5): with a history that serves a 121-bar block, a low 95 minutes back is measured (the 61-bar block alone
+  // could never see it) and a learned late minute of 80 refuses it; the setups still evaluate on their own 61 bars
+  const twoHours = (symbol, nowTs, count = 61) => bars({ n: count, endTs: Math.floor(nowTs / 60_000) * 60_000 }).map((b, i) => (count > 61 && i === count - 96 ? { ...b, open: 92_000, high: 92_200, low: 91_800, close: 92_000 } : b));
+  const far = await rig({ history: { bars: twoHours }, moveClock: { lesson: () => ({ state: 'ARMED', lateMin: 80, medianMin: 60, p75Min: 80, movers: 24, minClimbPct: 5 }) } }); await far.warm(); await far.ignite();
+  const fd = far.judge.decisions().find((x) => x.reasonCodes.includes('MOVE_TOO_OLD')); assert.ok(fd, `a 95-minute-old move is refused under lateMin 80 with the two-hour block: ${JSON.stringify(far.judge.decisions().map((x) => [x.status, x.reasonCodes]))}`);
+  const frow = fd.measurements.find((m) => m.id === 'MOVE_CLOCK'); assert.ok(frow.value >= 95 && frow.value <= 97, `age ${frow.value}`);
   const dormant = { state: 'DORMANT', lateMin: null, medianMin: null, p75Min: null, movers: 4, minClimbPct: 5 };
   const q = await rig({ history: { bars: (symbol, nowTs) => moveBars(nowTs) }, moveClock: { lesson: () => dormant } }); await q.warm(); await q.ignite();
   const e = q.judge.decisions().find((x) => x.status === 'ENTRY_RESERVED'); assert.ok(e, `dormant lesson must not refuse: ${JSON.stringify(q.judge.decisions().map((x) => [x.status, x.reasonCodes]))}`);

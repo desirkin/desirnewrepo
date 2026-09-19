@@ -54,7 +54,7 @@
    "REDDIT_OFFICIAL": {"desiredState": "REQUEST", "blockerPolicy": "DEGRADE", "authority": "NONE", "note": "Collector code present; requires its own approved scope, credentials and explicit request allowance. No approval or allowance is supplied by this profile.", "credentialEnv": "REDDIT_CLIENT_ID"}
   },
   "marketResearch": {
-   "service": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "market-lab/service.js", "authority": "NONE", "enableEnv": "MARKET_RESEARCH_ENABLED" },
+   "service": { "desiredState": "OFF", "blockerPolicy": "DEGRADE", "module": "market-lab/service.js", "authority": "NONE", "enableEnv": "MARKET_RESEARCH_ENABLED", "reason": "DEAD_WEIGHT_UNTIL_SOCRATES_FUNDED", "note": "PUBLISH-FIX-81 (2026-09-19 evening, owner: cut the dead weight for a 24-hour uninterrupted run): the research owner observed EVERY tape book on the main thread (kraken-spot bookSnapshotObservation -> payload validation -> retention), wrote 512 MB per instance and then stopped itself (recording failed (RUN_BOUND) at 00:45, 07:04 and 11:14 today) while nothing consumed it (Socrates unfunded: no sealed case). The instance ran at 75-96% event-loop load with 447 s of the hour blocked. OFF until Socrates is funded; set ON to restore the observer, the Socrates case runtime and the scout input." },
    "providers": {
     "KRAKEN_SPOT": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },
     "COINBASE_SPOT": { "desiredState": "ON", "blockerPolicy": "DEGRADE" },

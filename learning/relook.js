@@ -91,7 +91,12 @@ export function createRelookSource({ store, moverStudy = null, dataDir, clock = 
   function refresh(nowTs = clock()) {
     counters.refreshes += 1;
     const records = moverRecords();
-    const evidence = lateEntryEvidence(records, cfg);
+    let evidence = lateEntryEvidence(records, cfg);
+    // PUBLISH-FIX-81 (independent review cb305c6e F4): the learned-influence kill file (`cobra learning kill`) is the ONE off switch
+    // for every learned influence on a decision — a learned NOMINATION included. KILLED (or an unreadable / invalid file) reads
+    // DORMANT: nothing is re-offered; the evidence is still measured and reported.
+    let kill = { state: 'ARMED' }; try { kill = typeof store.readKill === 'function' ? store.readKill() : kill; } catch { kill = { state: 'KILLED', reason: 'KILL_FILE_UNREADABLE' }; }
+    if (kill && kill.state !== 'ARMED') evidence = { ...evidence, armed: false, reason: `learned influence KILLED (data/learning/kill.json${kill.reason ? `: ${kill.reason}` : ''}); ${evidence.reason}`, killed: true };
     let relooks = [];
     if (evidence.armed) {
       const episodes = store.readEpisodes(); const outcomes = typeof store.latestOutcomes === 'function' ? store.latestOutcomes() : new Map();

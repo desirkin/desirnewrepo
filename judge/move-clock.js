@@ -18,7 +18,12 @@
 export const MOVE_CLOCK_VERSION = 'judge-move-clock-1';
 export const MOVE_CLOCK_MEASUREMENT_ID = 'MOVE_CLOCK';
 export const MOVE_CLOCK_REFUSAL = 'MOVE_TOO_OLD';
-export const MOVE_CLOCK_DEFAULTS = Object.freeze({ minClimbPct: 5, lookbackBars: 60 });
+// PUBLISH-FIX-81 (independent review cb305c6e F5): the mover study measures low-to-peak over the hour before the event and the
+// hour after (up to 120 minutes), but the runtime read the move's age from the last 60 bars only — a learned late minute above 60
+// could never be reached, so the gate could never fire. The runtime now reads a two-hour block (the Judge hands it 121 bars when
+// its history has them, else the 61-bar setup block): the two clocks measure over the same horizon.
+export const MOVE_CLOCK_DEFAULTS = Object.freeze({ minClimbPct: 5, lookbackBars: 120 });
+export const MOVE_CLOCK_BARS = 121;
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const round2 = (v) => (v === null ? null : Math.round(v * 100) / 100);
