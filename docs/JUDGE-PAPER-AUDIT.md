@@ -60,11 +60,88 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       25153eda5c3631c6121a00c3f3615b31bc22f975769b9ea03330bb028f6de044
-execution/*.js   81bea0cccc0c9ef91b6cc6c7f89f3cb95289837325744605354eb712e6d0037c
-watch/watch.js   0c6a43bf1eada1168d8fe074848e000210e1829eb9dff5a13b61f28685209f06
-all (49 files)   ea28187cee2bd649955cff6cb90049d7acfc7b4c4accd8b44f6973190728c7a0
+judge/*.js       37959eac34a71bc53104fcbd464c6b0ca35eda648745cbc5f4f605b9a7196f8e
+execution/*.js   3d1fdb68416f9c097bc72f74f228d948bea45424d547ee0c7bdc68e7c58da8fa
+watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
+all (49 files)   be769408aa1077b78c8921436cf9771aaa909196e60822fe571f773166d8f34d
 ```
+
+### 4.32 Audited change — 2026-09-20 PUBLISH-FIX-83: the ONE full program review, every finding fixed (previous digests: judge `25153eda5c36…` → `37959eac34a7…`, execution `81bea0cccc0c…` → `3d1fdb68416f…`, watch/watch.js `0c6a43bf1ead…` → `6f319a1ee72a…`, all `ea28187cee2b…` → `be769408aa10…`; 49 files)
+
+The owner's directive (2026-09-19, after weeks of "fixed everything" that did not hold): ONE review of the whole program
+— "every door every closet every corner… under every rug" — then ONE list (38 items, `claude/serpent-full-review-2026-09-19.md`
+in the project), then fix EVERYTHING on it ("not just the things that stop a bite"), then one more pass over every file
+including the ones the surgery did not touch, then ONE publish. This entry records what changed inside the frozen trees.
+Two independent adversarial reviewers read every core diff before this re-pin; their 24 findings are fixed and named below.
+
+**execution/** (contract, dispatcher, feed, reducer)
+- Item 2: the entry deadline is rebased at DISPATCH_ATTEMPTED (the durable attempt), not at the hypothesis — a slow
+  append no longer eats the fill window. Item 3: an unfilled SHELL closes FLAT (`flattenUnfilledShell`) and settles its OPEN
+  reservation first — on the ordinary path, on the restart path and on the remainder-cancel path (reviewer finding: the
+  latter two had left reservations OPEN). Item 4: an adapter burst commits as ONE append, each event mapped against the
+  state PROJECTED through the events before it (`reduceBatch` / `mapAdapterEvent`; the first cut mapped against the pre-fill
+  state and read stop qty 0); a per-event failure isolates, EVENT_DUPLICATE counts as booked. `modeTs` joins the account
+  state (ACCOUNT_STATE_VERSION → `execution-account-state-4`, the restoration law re-derives older projections).
+- Item 16: a two-lane commit pump — `{ priority: true }` for entries, fills, exits and every Watch commit; ordinary commits
+  (refusals, probes, measurements) queue behind; `chainSettled` is the ONE drain (reviewer finding: leftover `chain`
+  references in reconcile/close broke 97 tests until every waiter used it). `bindStopOrder` is deferred until after the
+  append (`pendingBindings` / `applyBindings`; a binding during projection had raced the reducer).
+- Item 9 / 10 / 27 (feed): `unpin` steps a pin down without dropping its tracker or coverage; a receipt gap is only
+  SUSPECTED (`pendingGap`) and is resolved by the venue clock (`resolveLiveness` / `breakCoverage`) — a processing stall
+  whose messages carry a continuous venue clock is absorbed, real silence breaks coverage where messages resumed;
+  `coverage()` reports `LIVENESS_GAP_SUSPECTED` while pending; a book/trade message naming no admitted symbol skips the
+  lexeme parse on a symbol-named check (`SYMBOL_RE`; reviewer finding: the substring check was brittle) while its venue clock
+  still vouches for liveness (`cheapSourceClock`).
+- Item 6 (reducer): the owner's CLEAR carries a `clearedAt` watermark; RESTRICTION CLEAR events older latches by it; an
+  owner CLEAR of PEAK_DRAWDOWN rebases the high-water mark (reviewer finding: the next valuation re-latched it otherwise);
+  DAILY_LOSS inside its own session is still refused (logged once per CLEAR, never retried per tick).
+
+**judge/** (composition, features, judge, readiness, setups)
+- Item 7 (features): RV60 measures the TRAILING 60 s ending at the decision, 21 windows summed in one pass (item 26), with a
+  5 s coverage-lag allowance (`RV60_COVERAGE_LAG_MS`); the completed-minute law read the empty minute BEFORE the move.
+  Item 8: flow imbalance carries a trade-count floor (`FI_MIN_TRADES` 6) and widens its window 15 → 30 → 60 s
+  (60 → 120 → 180 s) before reading UNKNOWN `TOO_FEW_TRADES` — one $3 print no longer reads −1. Item 12: the 10 bps depth
+  band is measured from the best bid, not the mid. Item 11 (setups): RECLAIM_FI15 must be KNOWN by D.
+- Item 13 (judge): a refusal on data-only gates gets a second look (`scheduleDataLook`, `DATA_LOOK_GATES`); an
+  infrastructure refusal re-arms, bounded 3 per 5 min (`rearmAfterInfra`). Item 15: blind nominations are refused at
+  admission; a 30 s re-cross hold after a refusal (`RECROSS_MIN_MS` in `createEpisodeTracker`; reviewer finding: the clock
+  came from a future `expire()` and was counted per book — now `refusedAtTs`, counted once); refusal records coalesce
+  (`commitRefusal` / `flushRefusals`); a probe memo (`probeFor`). Item 23: the learning bridge drains a queue of EVERY
+  decision (`takeDecisions()`, 20k cap, 15-minute age bound) instead of sampling the cockpit ring. Item 37: counters
+  `secondLooksEnded / Replaced / Superseded`, `secondLooksPending`, `bridgeQueueDepth` (a line comment had swallowed the
+  block — `node --check` caught it; now a block comment). Readiness names the judged universe (`judgeExcludedCount`).
+- Item 5 / 6 / 33 (composition): PAPER holds through a feed gap — the Watch latches FEED_IMPAIRED (source 'watch') and
+  releases it when no open position is critical (`paperFeedHold` / `releasePaperFeedHold`; reviewer findings: a durable hold
+  is ADOPTED by a fresh Watch after a restart — the log line is "durable restriction adopted locally"; hysteresis, no
+  flapping); `applyOwnerClear` lifts every journal latch older than the owner's CLEAR and resumes PAPER after
+  REDUCE_ONLY / HALTED_UNRESOLVED (`MODE_TRANSITION`), refusing nothing silently; the boot sweep closes leftover unfilled
+  shells and releases pins no open position holds; ownerless CANDIDATE admissions are released in `admitNominations`;
+  the projection is written on its timer only when dirty (item 28). The control plane's `mostRestrictiveControls` honours
+  `clearedAt` EXCEPT for `integrityFailClosed` / `emergency` latches (reviewer finding: the watermark had silenced an
+  emergency overlay kill).
+- The 0.80% policy binding is NOT changed (a policy is immutable per account; a fee change is a new account — deliberate).
+
+**watch/watch.js**
+- Item 5: the paper feed hold (above) is the Watch's; every Watch commit rides the priority lane; `haltedLatched` re-arms
+  after an owner resume so a second halt is latched again (reviewer finding).
+
+Tests (all new or re-fixtured under the new laws): `test/publish-fix-83-execution.test.js` (FIX83-2, 3, 4, 9a, 9b, 16,
+R1), `test/publish-fix-83-owner-clear.test.js` (FIX83-6, 33), `test/publish-fix-83-features.test.js` (FIX83-7, 8, 10, 12,
+27), `test/publish-fix-83-collectors.test.js` (FIX83-29, ROT), judge-decisions DL-01 / BN-01 / BQ-01, judge-repair-runtime
+R09-05 (LIVENESS_GAP_SUSPECTED), and the fixtures that the deliberate law changes moved (SHELL→FLAT, warm-up protection,
+trailing RV60, re-cross hold, two-look forward groups, prefixes, digests). Learning, tape, ui, rumint, rumor2, survey,
+lanes, memory and lib changes of the same review live OUTSIDE the frozen trees and are recorded in the project doc.
+The full suite was run file by file (each file its own process) before this re-pin; the result is recorded in the project
+status doc for 2026-09-20.
+
+Authority unchanged: no order, size, exit or strategy law moved; no new sense, no new strategy (FREEZE stands); learning
+remains ranking-only and always ON with the kill file ARMED; `THRESHOLD CHANGES: NONE` remains the authority line for
+hand changes. What moved are rulers (RV60 window, FI floor, depth band), plumbing (batching, lanes, holds, sweeps) and the
+owner's CLEAR — each one named above with its test.
+
+The Judge differential (`test/judge-differential.test.js`) is re-based from `ea3bfbf` to `1bfa669`, the last commit of this
+review: the rulers above moved on purpose, so a byte-identical differential against the pre-review Judge is no longer the
+claim; the claim from here is that the working-tree Judge equals the audited tree at `1bfa669` until the next §4 entry.
 
 ### 4.31 Audited change — 2026-09-19 PUBLISH-FIX-82: GATE LEARNING — the Judge moves his own flow lines from his own scored looks, inside fixed bands, without the owner's say-so (previous judge digest `d86afbd55cf3…`; now `25153eda5c36…`; 49 files; execution and watch UNCHANGED)
 

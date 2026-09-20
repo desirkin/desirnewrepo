@@ -1,6 +1,11 @@
 // REVIEW CORRECTION item 2 + 5 — the DIFFERENTIAL preservation proof and the host latency measurement.
 //
-// This harness extracts the ACTUAL pre-change tree at ea3bfbf (the branch base) with `git archive`, builds the
+// PUBLISH-FIX-83 (2026-09-20): the base moved from ea3bfbf to 1bfa669 — the last commit of the ONE full review. The review
+// moved rulers on purpose (RV60 trails the decision, FI has a trade-count floor and widens its window, the depth band is
+// measured from the best bid, unfilled shells close FLAT, the re-cross hold, the second look on data-only refusals), each
+// audited in docs/JUDGE-PAPER-AUDIT.md §4.32 with its own test; a differential against ea3bfbf can no longer be identical and
+// says nothing new. From here the fence is: the working-tree Judge equals the AUDITED tree at 1bfa669 until the next audit.
+// This harness extracts the ACTUAL pre-change tree at BASE_COMMIT (the audited base) with `git archive`, builds the
 // full Judge rig TWICE — once entirely from the base tree's modules, once entirely from the working tree's — and
 // drives both with IDENTICAL recorded input streams (the same injected deterministic clock, the same venue event
 // bytes, the same policy file). It then compares the COMPLETE decision records, the refusals, and the final
@@ -33,7 +38,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { SETUP_SELECTION_VERSION } from '../judge/setup-selection.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const BASE_COMMIT = 'ea3bfbf';
+const BASE_COMMIT = '1bfa669'; // PUBLISH-FIX-83 audited base (docs/JUDGE-PAPER-AUDIT.md §4.32)
 const T0 = Date.parse('2026-09-08T12:00:00Z');
 const SAMPLE_LIMITS = Object.freeze({ maxSimultaneousAssetPositions: 3, maxModelledRiskPerPositionFraction: 0.01, maxAggregateModelledRiskFraction: 0.02, maxCorrelatedClusterModelledRiskFraction: 0.015, dailyLossRestrictionFraction: 0.05, peakEquityDrawdownRestrictionFraction: 0.1, maxGrossExposureFraction: 1, maxAssetExposureFraction: 1 });
 
@@ -120,7 +125,7 @@ test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports a
   // decision recorded on BOTH sides (nothing was lost, only answered), and every other field of the state is compared raw.
   // (and its stateVersion moved 2 -> 3 for exactly that reason, PUBLISH-FIX-69b, so the restoration law re-derives old projections)
   const stripSeal = (st) => ({ ...st, decisions: Object.fromEntries(Object.entries(st.decisions ?? {}).map(([id, d]) => { const { decisionDigest, portfolioRevision, ...rest } = d; return [id, rest]; })) }); // PUBLISH-FIX-70: the seal moves with the append count (proven equal above once re-sealed)
-  { const { hypotheses: hb, stateVersion: vb, ...restBase } = stripSeal(base.state()); const { hypotheses: hn, stateVersion: vn, ...restNext } = stripSeal(next.state()); assert.equal(vb, 'execution-account-state-2'); assert.equal(vn, 'execution-account-state-3');
+  { const { hypotheses: hb, stateVersion: vb, ...restBase } = stripSeal(base.state()); const { hypotheses: hn, stateVersion: vn, ...restNext } = stripSeal(next.state()); assert.equal(vb, 'execution-account-state-4'); assert.equal(vn, 'execution-account-state-4'); /* PUBLISH-FIX-83: both trees carry v4 (modeTs); the FIX-69 eviction holds on both sides, so the hypotheses compare raw too */ assert.deepEqual(hn, hb, 'the hypotheses held are identical');
     assert.deepEqual(restNext, restBase, 'the complete account/execution state (positions, orders, reservations, protections, restrictions) is identical');
     for (const id of Object.keys(hb)) { assert.ok(restBase.decisions[id] && restNext.decisions[id], `hypothesis ${id} was answered by a recorded decision on both trees`); assert.equal(hn[id], undefined, 'and the working tree no longer carries it'); }
     assert.deepEqual(Object.keys(hn), [], 'no unanswered hypothesis remains after the recorded inputs'); }
