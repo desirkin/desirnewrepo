@@ -23,7 +23,12 @@ export const VOLATILITY_WATCH_DEFAULTS = Object.freeze({
   windowMin: 60,          // the hour that is ranked
   longWindowMin: 240,     // the four-hour range, reported beside it
   minBars: 30,            // at least this many of the hour's minutes must be on disk (PUBLISH-FIX-71: was 50 — after a republish the disk holds 15–30 min per coin, so the watch sat blind for half an hour)
-  minUsdVol1h: 1_000_000, // PUBLISH-FIX-83 item 14 (was 100k): a 2%-spread coin prints bid/ask alternately and shows a 3-8% "range" on $200k; a range nobody traded is not a move
+  // PUBLISH-FIX-84 (2026-09-20, the owner's night): item 14 had raised this floor 100k -> 1M and it shut the mover pipe. On Kraken only
+  // six USD pairs in the whole exchange average $1M an hour; the coins that jumped that day (CELR +20%, G +11%, B2, COQ at $40-400k an
+  // hour) never got a single look, and the watch ranked ZERO coins all night ("stale 429, thin 102, quiet 2"). The floor is a sanity
+  // bar against bid/ask "ranges" nobody traded; the liquidity- and density-WEIGHTED score below (also item 14) is what keeps thin money
+  // ranked low. $150k an hour with at least a print a minute; the score does the rest.
+  minUsdVol1h: 150_000,
   minTrades1h: 60,        // PUBLISH-FIX-83 item 14: at least one print a minute across the hour, else the range is a handful of prints
   liquidityRefUsd: 100_000, // the liquidity weight: min(1, log10(usdVol / ref) / 2) — $100k -> 0, $1M -> 0.5, $10M -> 1
   tradesRef1h: 120,       // the print-density weight: min(1, trades / ref) — 2 prints a minute across the hour weighs 1

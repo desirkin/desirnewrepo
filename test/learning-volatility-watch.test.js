@@ -35,15 +35,17 @@ test('VW-02. the ranking: the coins that MOVED this hour first, BTC-like coins t
     BTC: candles({ base: 60_000, rangePct: 0.4, usdPerMin: 500_000 }),   // huge volume, no range: quiet
     PEPE: candles({ base: 0.00001, rangePct: 9, usdPerMin: 40_000 }),     // moved, tradeable ($2.4M this hour)
     WIF: candles({ base: 1.2, rangePct: 5, usdPerMin: 25_000 }),          // moved, tradeable ($1.5M)
-    ZZZ: candles({ base: 0.5, rangePct: 12, usdPerMin: 3_000 }),          // moved, but $180k traded: thin (PUBLISH-FIX-83 item 14: the floor is $1M)
+    ZZZ: candles({ base: 0.5, rangePct: 12, usdPerMin: 3_000 }),          // moved on $180k: RANKED (PUBLISH-FIX-84: the floor is $150k again) but weighted to the bottom
+    DEAD: candles({ base: 0.5, rangePct: 12, usdPerMin: 1_500 }),         // moved, but $90k traded: thin
     SPARSE: candles({ base: 0.5, rangePct: 6, usdPerMin: 30_000, tradesPerMin: 0 }), // $1.8M but 20 prints in the hour: a handful of prints, thin
     AVAX: candles({ base: 30, rangePct: 1.6, usdPerMin: 600_000, tradesPerMin: 40 }), // 1.6% on $36M: a real move that outranks a bigger range on thin money
     OLD: candles({ base: 3, rangePct: 7, usdPerMin: 5_000, gapLastMin: 20 }), // stream stale
     USDT: candles({ base: 1, rangePct: 6, usdPerMin: 9_000 }),            // excluded base
   });
   const { ranked, skipped } = rankByVolatility({ seriesSource: src, nowTs: NOW, exclude: new Set(['USDT']) });
-  assert.deepEqual(ranked.map((r) => r.coin), ['PEPE', 'WIF', 'AVAX'], JSON.stringify(ranked.map((r) => [r.coin, r.score, r.range1hPct, r.usdVol1h, r.trades1h])));
+  assert.deepEqual(ranked.map((r) => r.coin), ['PEPE', 'WIF', 'AVAX', 'ZZZ'], JSON.stringify(ranked.map((r) => [r.coin, r.score, r.range1hPct, r.usdVol1h, r.trades1h])));
   assert.equal(skipped.quiet, 1); assert.equal(skipped.thin, 2); assert.equal(skipped.stale, 1);
+  assert.ok(ranked[3].score < ranked[2].score && ranked[3].liquidityWeight < 0.2, 'a 12% range on $180k stays visible but ranks under a real 1.6% on $36M');
   assert.ok(ranked[0].range1hPct > 8 && ranked[0].usdVol1h > 2_000_000); assert.equal(ranked[0].symbol, 'PEPE/USD'); assert.ok(ranked[0].range4hPct !== null);
   // the rank is liquidity-weighted: PEPE 9% on $2.4M (weight ~0.69) scores ~6.2, WIF 5% on $1.5M (~0.59) ~3.0, AVAX 1.6% on $36M (weight 1, 2,400 prints over the 120 ref -> density 1) 1.6
   assert.ok(ranked[0].score > ranked[1].score && ranked[1].score > ranked[2].score); assert.equal(ranked[2].liquidityWeight, 1); assert.equal(ranked[2].trades1h, 2400);
