@@ -132,7 +132,7 @@ const LEDGER_STATUS = Object.freeze({ NO_SETUP: 'NO_TRADE', UNEVALUABLE: 'NEEDS_
 export async function ledgerLooksAsEvents({ dataDir, coin, since, log = () => {} } = {}) {
   const file = path.join(dataDir, 'learning', 'episodes.jsonl'); if (!existsSync(file)) return [];
   const c = canonicalCoinOf(coin); if (!c) return [];
-  const { readJsonlStream } = await import('../learning/gate-lesson.js');
+  const { readJsonlStream } = await import('../lib/jsonl.js');
   const rows = await readJsonlStream(file, (e) => typeof e?.datasetId === 'string' && e.datasetId.startsWith('live-judge') && sameCoin(e.canonicalCoin, c) && Number.isSafeInteger(e.decisionTs) && e.decisionTs >= since, { maxBytes: LEDGER_TAIL_BYTES });
   const out = [];
   for (const e of rows.slice(-LEDGER_MAX_LOOKS)) {
@@ -150,7 +150,7 @@ export async function loadCoinDossier({ dataDir, coin, journalPage = null, nowTs
   if (typeof journalPage === 'function') { try { const page = await journalPage({ limit: 500 }); events = Array.isArray(page) ? page : []; } catch (err) { log(`coin dossier: journal page failed: ${bounded(err?.message ?? err)}`); } }
   const since = nowTs - DAY_MS;
   // PUBLISH-FIX-84: the journal page is the last 500 events (an hour or two); the owner asked "why didn't you buy AKE" and was told
-  // "no recorded look" while the ledger held 263 looks on it that day. The 24-hour ledger (learning/episodes.jsonl, tail-read) now
+  // "no recorded look" while the ledger held 263 looks on it that day. The 24-hour ledger (episodes.jsonl under the learning data dir, tail-read) now
   // supplies every look the page does not carry: same shape, de-duplicated by coin + decision clock; failed gate ids are the reasons.
   try { const fromLedger = await ledgerLooksAsEvents({ dataDir, coin: c, since, log }); if (fromLedger.length) { const seen = new Set(events.map((row) => { const ev = row?.event ?? row; return ev?.type === 'DECISION_RECORDED' ? `${ev.payload?.assetId}|${ev.payload?.decisionKnownAtTs}|${ev.payload?.setupId}` : null; }).filter(Boolean)); for (const row of fromLedger) { const k = `${row.event.payload.assetId}|${row.event.payload.decisionKnownAtTs}|${row.event.payload.setupId}`; if (!seen.has(k)) { seen.add(k); events.push(row); } } } } catch (err) { log(`coin dossier: ledger read failed: ${bounded(err?.message ?? err)}`); }
   const outcomes = readJsonlFor(path.join(dataDir, 'learning', 'decision-outcomes', 'decision-outcomes.jsonl'), (r) => sameCoin(r?.assetId, c) && Number.isFinite(r?.decisionKnownAtTs) && r.decisionKnownAtTs >= since);
