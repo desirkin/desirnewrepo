@@ -21,6 +21,8 @@ import { parentPort, workerData, isMainThread } from 'node:worker_threads';
 export const RESEARCH_LANE_VERSION = 'serpent-research-lane-1';
 export const LANE_STATUS_INTERVAL_MS = 15_000;
 export const LANE_PROJECTION_INTERVAL_MS = 30_000;
+export const ATTACH_RETRY_MIN_MS = 30_000; // PUBLISH-FIX-83: a failed durable-core attachment is retried on a back-off
+export const ATTACH_RETRY_MAX_MS = 5 * 60_000;
 
 // runResearchLane({ port, ... }) — the whole worker behaviour over one MessagePort, injectable for tests.
 export async function runResearchLane({
@@ -57,6 +59,25 @@ export async function runResearchLane({
     log(`RESEARCH LANE: durable core attachment ${attachment.state}${attachment.error ? ` (${bounded(attachment.error)})` : ''} — the ear runs with its stores UNAVAILABLE (dark, nothing invented)`);
   } else if (attachment.state === 'ATTACHED') log(`RESEARCH LANE: attached to the durable core on its own connections (schema ${attachment.schemaVersion})`);
   const persistence = () => (attachment.state === 'ATTACHED' ? { repo: attachment.repo, health: attachment.health } : null);
+  // review finding (PUBLISH-FIX-83): an attachment that failed at boot (database asleep / unreachable for a moment) was
+  // permanent — the lane's stores stayed UNAVAILABLE and RUMOR-2 sat in FAILED_DURABILITY for the life of the process. The
+  // attach is retried on a back-off (30 s -> 5 min); the stores resolve `persistence()` lazily, so a later success is live
+  // at once (the collector's own re-initialization then restores from the durable core).
+  let attachRetryMs = 0; let attachTimer = null;
+  const scheduleAttachRetry = () => {
+    if (stopping || attachment.state === 'ATTACHED' || attachment.state === 'NOT_CONFIGURED') return;
+    attachRetryMs = Math.min(ATTACH_RETRY_MAX_MS, attachRetryMs ? attachRetryMs * 2 : ATTACH_RETRY_MIN_MS);
+    attachTimer = timers.setTimeout(async () => {
+      attachTimer = null; if (stopping) return;
+      let next = null; try { next = await attach(); } catch (err) { next = { state: 'UNREACHABLE', error: bounded(err?.message ?? err), stop: async () => {} }; }
+      if (stopping) { try { await next?.stop?.(); } catch { /* best effort */ } return; }
+      if (next.state === 'ATTACHED') { attachment = next; attachRetryMs = 0; log(`RESEARCH LANE: attached to the durable core on retry (schema ${next.schemaVersion}) — the ear's stores are live`); return; }
+      try { await next?.stop?.(); } catch { /* best effort */ }
+      attachment = next; scheduleAttachRetry();
+    }, attachRetryMs);
+    attachTimer?.unref?.();
+  };
+  scheduleAttachRetry();
 
   const researchCatalogSource = {
     snapshot: () => catalog?.snapshot ?? null,
@@ -108,6 +129,7 @@ export async function runResearchLane({
   async function stop() {
     if (stopping) return; stopping = true;
     for (const t of timersOn) timers.clearInterval(t); timersOn = [];
+    if (attachTimer) { timers.clearTimeout(attachTimer); attachTimer = null; }
     try { if (handle && typeof handle.stop === 'function') await handle.stop(); } catch (err) { log(`RESEARCH LANE: RUMOR-2 stop failed: ${bounded(err?.message ?? err)}`); }
     try { await attachment.stop(); } catch { /* best effort */ }
     post({ type: 'stopped', ts: now() });
@@ -122,5 +144,11 @@ export async function runResearchLane({
 
 if (!isMainThread && parentPort) {
   runResearchLane({ port: parentPort, env: process.env, log: console.log, ...(workerData?.laneOptions ?? {}) })
-    .catch((err) => { try { parentPort.postMessage({ type: 'fault', where: 'runResearchLane', error: String(err?.message ?? err).slice(0, 200) }); } catch { /* the parent sees the exit */ } console.error(`RESEARCH LANE failed: ${err?.stack ?? err}`); });
+    .catch((err) => {
+      try { parentPort.postMessage({ type: 'fault', where: 'runResearchLane', error: String(err?.message ?? err).slice(0, 200) }); } catch { /* the parent sees the exit */ }
+      console.error(`RESEARCH LANE failed: ${err?.stack ?? err}`);
+      // PUBLISH-FIX-83: a lane that failed to start must EXIT — before this it lingered alive with no 'ready', and the parent
+      // reported STARTING forever. The exit code reaches the parent as lane DOWN.
+      setTimeout(() => process.exit(1), 50).unref?.();
+    });
 }

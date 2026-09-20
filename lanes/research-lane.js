@@ -73,7 +73,8 @@ export function startResearchLane({
   worker.on('exit', (code) => { state.exitCode = code; state.lane = 'DOWN'; if (feedTimer) { timers.clearInterval(feedTimer); feedTimer = null; } if (!stopped) log(`RESEARCH LANE exited (code ${code}) — the ear is DOWN for this session (dark; the Judge never depended on it; restart the deployment to bring it back)`); if (stopResolve) stopResolve(`EXIT_${code}`); });
   feedTimer = timers.setInterval(feed, feedIntervalMs); if (typeof feedTimer?.unref === 'function') feedTimer.unref();
 
-  const stale = () => state.lastStatusTs !== null && now() - state.lastStatusTs > LANE_STALE_AFTER_MS;
+  // PUBLISH-FIX-83: a lane that never reported (no 'ready', no status) is stale by its START clock — STARTING is not a health
+  const stale = () => (state.lastStatusTs !== null ? now() - state.lastStatusTs : now() - state.startedTs) > LANE_STALE_AFTER_MS;
   return {
     enabled: true,
     lane: 'WORKER',
