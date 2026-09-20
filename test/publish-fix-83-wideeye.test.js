@@ -9,7 +9,7 @@ import path from 'node:path';
 import { trailingSample, AT_SLACK_EARLY_MS, AT_SLACK_LATE_MS } from '../survey/eyecore.js';
 
 const root = mkdtempSync(path.join(tmpdir(), 'serpent-fix83-wideeye-')); process.env.COBRA_DATA_DIR = root; process.env.WIDEEYE_ENABLED = 'true';
-const { startWideEye } = await import('../survey/wideeye.js'); const { loadConfig } = await import('../lib/config.js');
+const { startWideEye } = await import('../survey/wideeye.js'); const { loadConfig, dataDir } = await import('../lib/config.js'); const DATA = dataDir(); // generation-aware
 test.after(() => { delete process.env.WIDEEYE_ENABLED; rmSync(root, { recursive: true, force: true }); });
 
 test('FIX83-W8. trailingSample: the sample 1 minute ago is the one inside [-35 s, +5 s] of that age; after a gap the older sample is NOT relabelled', () => {
@@ -25,7 +25,7 @@ test('FIX83-W8. trailingSample: the sample 1 minute ago is the one inside [-35 s
 test('FIX83-W7. baselines persist: a coin with no surveyed hour in 7 days is dropped, the write is asynchronous and lands', async () => {
   const pairs = Object.fromEntries(['AAA'].map((coin) => [`${coin}USD`, { base: coin, quote: 'USD', wsname: `${coin}/USD`, altname: `${coin}USD`, status: 'online' }]));
   let now = Date.UTC(2026, 8, 13, 12); const logs = [];
-  const baselinesFile = path.join(root, 'survey', 'baselines.json');
+  const baselinesFile = path.join(DATA, 'survey', 'baselines.json');
   const { mkdirSync, writeFileSync } = await import('node:fs'); mkdirSync(path.dirname(baselinesFile), { recursive: true });
   const stale = new Date(now - 9 * 86_400_000).toISOString().slice(0, 13); // an hour key 9 days old: outside the 7-day window
   writeFileSync(baselinesFile, JSON.stringify({ GONE: { ret1: { [stale]: { n: 3, sum: 0, sumSq: 0 } }, ret5: {}, volRate: {} }, EMPTY: { ret1: {}, ret5: {}, volRate: {} } }));

@@ -15,7 +15,8 @@ test.after(() => { delete process.env.RUMINT_ENABLED; });
 
 const CFG = (coins = ['BTC']) => ({ universe: coins, rumint: { enabled: true, zThreshold: 3, stalkTtlMin: 60, pollHotSec: 300, pollWarmSec: 1200, hourlyBudget: 500, spacingMs: 1, backoffMin: 15 } });
 const dirs = [];
-const freshDir = () => { const d = mkdtempSync(path.join(tmpdir(), 'cobra-fix83-rumint-')); dirs.push(d); process.env.COBRA_DATA_DIR = d; return d; };
+const { dataDir } = await import('../lib/config.js');
+const freshDir = () => { const d = mkdtempSync(path.join(tmpdir(), 'cobra-fix83-rumint-')); dirs.push(d); process.env.COBRA_DATA_DIR = d; return dataDir(); }; // the generation-aware data dir (SERPENT_DATA_GENERATION may be set in the workspace)
 test.after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 const statusOf = (d) => JSON.parse(readFileSync(path.join(d, 'rumint', 'status.json'), 'utf8'));
 const T0 = Date.parse('2026-09-02T12:30:00Z');
