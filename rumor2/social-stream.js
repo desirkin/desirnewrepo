@@ -267,7 +267,7 @@ export function startSocialStream({
 } = {}) {
   const hosts = provider?.hosts ?? [];
   const state = {
-    mode, connected: false, stopped: false, reconnects: 0, receivedCursor: null,
+    mode, connected: false, stopped: false, reconnects: 0, backoffStreak: 0, receivedCursor: null,
     lastMessageTs: null, lastEventTs: null, oversized: 0, badJson: 0, badHost: 0, connectErrors: 0, opens: 0,
     backpressureEvents: 0, paused: false,
     // CURSOR-RESUME LAW (§11): a connect attempted WITH a resume cursor that
@@ -329,14 +329,18 @@ export function startSocialStream({
       socket = socketFactory({ url, subprotocol: provider?.subprotocol ?? null });
     } catch (err) { state.connectErrors += 1; scheduleReconnect('connect-throw'); return; }
     const mine = socket;
-    let opened = false;
-    socket.on('open', () => { if (mine !== socket) return; opened = true; state.connected = true; state.opens += 1; armStall(); log('social-stream: open'); });
+    let opened = false; let openedAt = null;
+    socket.on('open', () => { if (mine !== socket) return; opened = true; openedAt = now(); state.connected = true; state.opens += 1; armStall(); log('social-stream: open'); });
     socket.on('message', (data) => { if (mine === socket) handleRaw(data); });
     socket.on('error', () => { if (mine === socket) state.connectErrors += 1; });
     socket.on('close', (ev) => {
       if (mine !== socket) return;
       state.lastCloseCode = Number.isFinite(ev?.code) ? ev.code : null;
       state.lastCloseReason = typeof ev?.reason === 'string' && ev.reason.length > 0 ? ev.reason.slice(0, 200) : null;
+      // review finding (PUBLISH-FIX-83): the back-off used the LIFETIME reconnect count, so after a handful of reconnects over
+      // days every later drop waited the full maximum. A connection that stayed open for a stable period resets the streak;
+      // a socket that opens and dies at once does not (no tight loop against a refusing server).
+      if (opened && openedAt !== null && now() - openedAt >= backoffMaxMs) state.backoffStreak = 0;
       if (!opened && cursor !== null && cursor !== undefined) {
         // the handshake failed while presenting a resume cursor: fail closed —
         // the durable cursor is NOT advanced or dropped; the reconnect re-presents it
@@ -360,8 +364,8 @@ export function startSocialStream({
   function scheduleReconnect(why) {
     if (state.stopped) return;
     if (maxReconnects > 0 && state.reconnects >= maxReconnects) { log(`social-stream: max reconnects reached (${why})`); return; }
-    const delay = Math.min(backoffMaxMs, backoffBaseMs * 2 ** Math.min(state.reconnects, 16));
-    state.reconnects += 1;
+    const delay = Math.min(backoffMaxMs, backoffBaseMs * 2 ** Math.min(state.backoffStreak, 16));
+    state.reconnects += 1; state.backoffStreak += 1;
     setTimeoutImpl(() => { if (!state.stopped) connect(); }, delay);
   }
 
