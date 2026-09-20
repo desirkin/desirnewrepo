@@ -15,7 +15,7 @@
 // process (tools/mover-backfill-process.js spawnMoverBackfill owns the spawn; learning/ stays inside its fence) so the main thread — the tape, the Judge, the journal commit — never feels it (PUBLISH-FIX-53's
 // lesson). Authority NONE: it reads candles and writes study records. It never nominates, never touches the Judge.
 import path from 'node:path';
-import { createReadStream, existsSync, linkSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createMoverStudy, candleOfRecord } from './mover-study.js';
 
@@ -44,9 +44,15 @@ export async function runMoverBackfill({ dataDir, log = () => {}, maxBytes, maxS
   if (typeof dataDir !== 'string' || !dataDir.length) throw new Error('runMoverBackfill: dataDir required');
   const started = Date.now();
   const root = path.join(dataDir, MOVER_BACKFILL_DIR);
-  rmSync(root, { recursive: true, force: true });
-  const segments = selectSegments(path.join(dataDir, 'broad-kraken'), { maxBytes, maxSegments });
-  const out = { version: MOVER_BACKFILL_VERSION, segments: segments.length, skipped: 0, pinned: 0, bytes: segments.reduce((a, s) => a + s.bytes, 0), lines: 0, records: 0, candles: 0, ticks: 0, movers: 0, controls: 0, coins: 0, firstTs: null, lastTs: null, days: [], ms: 0 };
+  // PUBLISH-FIX-83 (full review item 22): the replay used to wipe its root and walk EVERY archived segment on EVERY boot (3 GB against a
+  // 10-minute clock — it never finished, and its records died with the next boot). Now a manifest names the segments already replayed
+  // (name + size); a boot replays only the new ones, appending to the records that survived, and the manifest is rewritten after each.
+  mkdirSync(root, { recursive: true }); const manifestFile = path.join(root, 'replayed.json');
+  let replayed = {}; try { if (existsSync(manifestFile)) { const m = JSON.parse(readFileSync(manifestFile, 'utf8')); if (m && m.version === MOVER_BACKFILL_VERSION && m.segments && typeof m.segments === 'object') replayed = m.segments; } } catch { replayed = {}; }
+  const all = selectSegments(path.join(dataDir, 'broad-kraken'), { maxBytes, maxSegments });
+  const segments = all.filter((s) => replayed[s.name] !== s.bytes);
+  const out = { version: MOVER_BACKFILL_VERSION, segments: segments.length, alreadyReplayed: all.length - segments.length, skipped: 0, pinned: 0, bytes: segments.reduce((a, s) => a + s.bytes, 0), lines: 0, records: 0, candles: 0, ticks: 0, movers: 0, controls: 0, coins: 0, firstTs: null, lastTs: null, days: [], ms: 0 };
+  const saveManifest = () => { try { writeFileSync(`${manifestFile}.tmp`, JSON.stringify({ version: MOVER_BACKFILL_VERSION, ts: Date.now(), segments: replayed })); renameSync(`${manifestFile}.tmp`, manifestFile); } catch { /* the next boot replays these again; idempotent by opportunity identity */ } };
   if (!segments.length) { out.ms = Date.now() - started; return out; }
   // PUBLISH-FIX-80: the live collector unlinks the oldest segments when it rotates (64 kept; the restore puts back more), so the
   // replay pins every selected segment with a HARD LINK under its own root before reading: an unlink of the original no longer
@@ -56,7 +62,7 @@ export async function runMoverBackfill({ dataDir, log = () => {}, maxBytes, maxS
   for (const seg of segments) { const pinned = path.join(pinDir, seg.name); try { linkSync(seg.file, pinned); seg.read = pinned; seg.pinned = true; } catch { seg.read = seg.file; seg.pinned = false; } }
   out.pinned = segments.filter((s) => s.pinned).length;
   let virtualNow = 0;
-  const study = createMoverStudy({ dataDir: root, clock: () => virtualNow, log: () => {}, options: studyOptions });
+  const study = createMoverStudy({ dataDir: root, clock: () => virtualNow, log: () => {}, options: { topMoversPerDay: 0, ...studyOptions } }); // PUBLISH-FIX-83 item 22: the threshold movers only — the day's board (pictures, controls and lessons for every coin near the top) is the live study's
   let tickMinute = -1; const days = new Set();
   for (const seg of segments) {
     // PUBLISH-FIX-80: the live collector keeps at most 64 segments on disk and unlinks the OLDEST when it opens a new one — the
@@ -83,6 +89,7 @@ export async function runMoverBackfill({ dataDir, log = () => {}, maxBytes, maxS
       }
     } } catch (err) { streamError = streamError ?? err; }
     if (streamError) { out.skipped += 1; log(`MOVER BACKFILL: ${seg.name} could not be read (${streamError?.code ?? String(streamError?.message ?? streamError).slice(0, 80)}) — skipped; the live collector prunes the oldest segments while the replay walks them`); continue; }
+    replayed[seg.name] = seg.bytes; saveManifest();
     log(`MOVER BACKFILL: ${seg.name} replayed (${out.candles} closed minutes, ${out.movers} climbs so far)`); // a crash mid-way names the segment it died in
   }
   if (virtualNow) study.closeDay(virtualNow);

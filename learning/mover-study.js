@@ -36,6 +36,7 @@ export const MOVER_STUDY_DEFAULTS = Object.freeze({
   moveThresholdPct: 10,   // "jump 10% or more" — close at T against the lowest close of [T-60m, T)
   windowMin: 60,          // the move window, the hour before it and the hour after it are all one hour
   ringMin: 240,           // closed minutes kept per coin (needs 181: hour before + move + hour after)
+  maxGapMin: 5,           // PUBLISH-FIX-83 item 22: a hole of at most this many minutes is forward-filled (last close, no volume)
   controlsPerMover: 3,    // non-movers written beside each mover, same minute, same measures
   dedupeMin: 120,         // one event per coin per two hours: a climb is not re-reported minute after minute
   maxCoins: 2_000,
@@ -107,7 +108,13 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
     if (!ring) { if (rings.size >= cfg.maxCoins) { counters.dropped += 1; return; } ring = { candles: [], receivedTs: 0 }; rings.set(c.coin, ring); }
     const arr = ring.candles; const last = arr.length ? arr[arr.length - 1] : null;
     if (last && c.candle[0] <= last[0]) { if (c.candle[0] === last[0]) arr[arr.length - 1] = c.candle; return; } // last write of a minute wins; older minutes never re-enter
+    // PUBLISH-FIX-83 (full review item 22): the collector closes a candle only when the coin's NEXT interval arrives, so a minute
+    // without a trade left a hole and the 181-minute picture was refused for exactly the thin coins that move. A gap of at most
+    // maxGapMin minutes is forward-filled (the last close, no volume; six numbers, the series shape labels.js validates) and the
+    // filled minutes are remembered; a wider gap stays a hole.
+    if (last && c.candle[0] > last[0] + 60 && (c.candle[0] - last[0]) / 60 - 1 <= (cfg.maxGapMin ?? 0)) { for (let sec = last[0] + 60; sec < c.candle[0]; sec += 60) { arr.push([sec, last[4], last[4], last[4], last[4], 0]); ring.filled = ring.filled ?? new Set(); ring.filled.add(sec); counters.filledMinutes = (counters.filledMinutes ?? 0) + 1; } }
     arr.push(c.candle); if (arr.length > cfg.ringMin) arr.splice(0, arr.length - cfg.ringMin);
+    if (ring.filled && ring.filled.size > cfg.ringMin) { const floorSec = arr[0][0]; for (const sec of ring.filled) if (sec < floorSec) ring.filled.delete(sec); }
     if (c.receivedTs && c.receivedTs > ring.receivedTs) ring.receivedTs = c.receivedTs;
     counters.candles += 1;
   }
@@ -260,6 +267,7 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
     board = { date: null, entries: new Map() };
   }
   function boardConsider({ coin, ring, i, climb, eventTs, alsoMover, eligible, nowTs }) {
+    if (!(cfg.topMoversPerDay > 0)) return; // PUBLISH-FIX-83 item 22: no board (the archive backfill studies the threshold movers only)
     const date = utcDateOf(eventTs);
     if (board.date !== date) { finalizeBoard(nowTs); board = { date, entries: new Map() }; }
     const prev = board.entries.get(coin);
@@ -267,7 +275,9 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
     if (!prev && board.entries.size >= cfg.topMoversPerDay && climb <= boardFloor()) return;
     const picture = pictureAt(coin, ring, i);
     const ctl = drawControls(coin, eventTs, eligible).map((e) => pictureAt(e.coin, e.ring, e.i));
-    const lessons = [lesson(picture, 'TOP', nowTs), ...ctl.map((q) => lesson(q, 'CONTROL', nowTs))].filter(Boolean);
+    // PUBLISH-FIX-83 item 22: a threshold mover's lesson is written by the MOVER path at its own minute; the board does not write a
+    // second DAILY_MOVER episode for the same climb (it used to: two rows a minute apart, counted twice by every study)
+    const lessons = (alsoMover || prev?.alsoMover ? [] : [lesson(picture, 'TOP', nowTs)]).concat(ctl.map((q) => lesson(q, 'CONTROL', nowTs))).filter(Boolean);
     board.entries.set(coin, { climb, picture, controls: ctl, lessons, alsoMover: Boolean(alsoMover || prev?.alsoMover) }); boardDirty = true;
     if (board.entries.size > cfg.topMoversPerDay) { let worst = null; for (const [c, e] of board.entries) if (!worst || e.climb < worst[1].climb) worst = [c, e]; if (worst) board.entries.delete(worst[0]); }
   }

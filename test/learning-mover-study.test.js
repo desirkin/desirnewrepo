@@ -191,3 +191,29 @@ test('PUBLISH-FIX-64: a new instance seeds its rings from the broad-Kraken candl
     assert.equal(again[again.length - 1][0], paths.PEPE.end / 1000); assert.ok(again.length <= 240);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('PUBLISH-FIX-83 item 22: a hole of up to maxGapMin minutes is forward-filled (last close, no volume) so a thin coin\'s climb is still judged; a wider hole stays a hole; the board writes no second DAILY_MOVER episode for a climb the MOVER path already wrote', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-mover-gap-'));
+  try {
+    let now = T0; const store = createLearningStore({ dataDir: dir });
+    const study = createMoverStudy({ dataDir: dir, clock: () => now, store, options: { controlsPerMover: 1 } });
+    // a thin coin: three separate one-minute holes inside the hour before the move, one three-minute hole during the move
+    const holes = new Set([40, 55, 70, 145, 146, 147]); let m = 0;
+    const push = (coin, px, v) => { if (!holes.has(m) || coin !== 'THIN') study.onRecord(record(coin, T0 + m * MIN, px, px * 1.001, px * 0.999, px, v)); m += 1; };
+    for (let k = 0; k < 130; k += 1) push('THIN', 100 + Math.sin(k) * 0.2, 100);
+    for (let k = 1; k <= 60; k += 1) push('THIN', 100 + 15 * (k / 60), 300);
+    for (let k = 1; k <= 60; k += 1) push('THIN', 115 - k * 0.05, 100);
+    const end = T0 + m * MIN; for (const coin of ['BTC']) feed(study, coin, { top: 100.5, after: () => 100.5 });
+    const ring = study._internals.rings.get('THIN'); assert.equal(ring.filled.size, 6, 'six minutes forward-filled'); assert.ok(ring.candles.every((c, i) => i === 0 || c[0] === ring.candles[i - 1][0] + 60), 'the ring is contiguous');
+    assert.ok(ring.candles.every((c) => c.length === 6), 'filled candles are six numbers (the series shape)'); assert.equal(study.status().counters.filledMinutes, 6);
+    now = end + MIN; const r = study.tick(now); assert.equal(r.movers, 1, 'the climb is judged despite the holes');
+    const episodes = store.readEpisodes().filter((e) => e.datasetId === MOVER_STUDY_DATASET && e.canonicalCoin === 'THIN');
+    assert.equal(episodes.length, 1, 'ONE DAILY_MOVER episode for the climb: the board did not write a second one beside the MOVER path');
+    assert.equal(study._internals.board().entries.get('THIN')?.alsoMover, true); assert.equal(study._internals.board().entries.get('THIN')?.lessons.filter((l) => l.episode.canonicalCoin === 'THIN').length, 0);
+    // a hole wider than maxGapMin is not filled: the picture is refused (no mover) until the ring is contiguous again
+    const wide = createMoverStudy({ dataDir: mkdtempSync(path.join(tmpdir(), 'serpent-mover-wide-')), clock: () => now, options: { controlsPerMover: 1 } }); let w = 0;
+    const pushW = (px, v) => { if (!(w >= 60 && w < 70)) wide.onRecord(record('WIDE', T0 + w * MIN, px, px * 1.001, px * 0.999, px, v)); w += 1; };
+    for (let k = 0; k < 130; k += 1) pushW(100, 100); for (let k = 1; k <= 60; k += 1) pushW(100 + 15 * (k / 60), 300); for (let k = 1; k <= 60; k += 1) pushW(115, 100);
+    const wr = wide._internals.rings.get('WIDE'); assert.ok(!wr.filled || wr.filled.size === 0, 'a ten-minute hole is not filled'); assert.equal(wide.tick(T0 + w * MIN + MIN).movers, 0, 'the picture with a hole is refused');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
