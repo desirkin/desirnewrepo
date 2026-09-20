@@ -316,3 +316,11 @@ test('DL-01. PUBLISH-FIX-83 item 13: a look refused ONLY for missing data (RV60 
   assert.match(second.measurements.find((m) => m.id === 'SECOND_LOOK').note, /after a data-only refusal \(RV60/); const rvRow = second.measurements.find((m) => m.id === 'RV60'); assert.ok(rvRow && Number.isFinite(rvRow.value), `RV60 is KNOWN on the data look (a number, judged on its merits): ${JSON.stringify(rvRow)} ${second.status} ${second.reasonCodes.join(',')}`); assert.equal(second.status === 'NEEDS_DATA', false);
   assert.equal(r.judge.status().counters.infraRearms ?? 0, 0, 'no infrastructure re-arm was needed on this tape');
 });
+
+test('BN-01. PUBLISH-FIX-83 item 15: a nomination the tape does not carry (subscription refused NOT_IN_TAPE_UNIVERSE) is refused at admission instead of holding a blind preparation slot; a carried pair admits as before', async () => {
+  const r = await rig({ accountId: 'j-blind' });
+  const carried = new Set(['XBT/USD', 'ETH/USD']); r.feed.bindTape({ ensureSubscribed: (symbol) => (carried.has(symbol) ? { ok: true, carried: true } : { ok: false, reason: 'NOT_IN_TAPE_UNIVERSE' }), depthOf: () => 25 });
+  assert.equal(r.judge.admit('ZZZ/USD', { assetId: 'ZZZ', source: 'VOLATILITY_WATCH' }), null, 'refused'); assert.equal(r.judge.status().refusals.FEED_NOT_IN_TAPE_UNIVERSE, 1); assert.equal(r.judge.status().counters.blindNominationsRefused, 1);
+  assert.equal(r.judge.candidates().some((c) => c.symbol === 'ZZZ/USD'), false); assert.equal(r.feed.health('ZZZ/USD').synced, false); assert.equal(r.feed.status().admitted, 1, 'the feed admission was released with the refusal');
+  assert.ok(r.judge.admit('ETH/USD', { assetId: 'ETH', source: 'VOLATILITY_WATCH' }), 'a carried pair admits'); assert.equal(r.feed.status().admitted, 2);
+});

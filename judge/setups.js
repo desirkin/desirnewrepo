@@ -205,16 +205,22 @@ export function createConfirmation({ level, triggerTs, expiryMs = REFERENCE.prop
   };
 }
 // per (asset, setup) episode state: one episode per crossing; a reset (mid back below the level) is required before a new crossing; cooldown after a close
-export function createEpisodeTracker({ assetId, setupId, cooldownMs = REFERENCE.cooldownMs }) {
-  let episode = null; let below = true; let cooldownUntil = 0; let counter = 0; const counters = { crossings: 0, resets: 0, expired: 0, cooldownRefusals: 0, rearms: 0 };
+// PUBLISH-FIX-83 (full review item 16): a coin oscillating around its level (ZAMA: 1,172 crossings and 1,172 resets in a day) made every
+// re-cross a hypothesis lock, a decision record and a projection write. After a look ends in a refusal (NO_TRADE / NEEDS_DATA /
+// ENTRY_REFUSED / EXPIRED) the next crossing needs RECROSS_MIN_MS to have passed — the thesis that was just refused is not a new
+// thesis 3 seconds later. A reset before any decision, a filled entry (its own cooldown) and a second-look re-arm are untouched.
+export const RECROSS_MIN_MS = 30_000;
+export function createEpisodeTracker({ assetId, setupId, cooldownMs = REFERENCE.cooldownMs, recrossMinMs = RECROSS_MIN_MS }) {
+  let episode = null; let below = true; let cooldownUntil = 0; let counter = 0; let refusedAtTs = null; const counters = { crossings: 0, resets: 0, expired: 0, cooldownRefusals: 0, rearms: 0, recrossRefusals: 0 };
+  const REFUSAL_STATES = new Set(['NO_TRADE', 'NEEDS_DATA', 'ENTRY_REFUSED', 'EXPIRED']);
   return {
-    observeMid(mid, level, receiptTs) { if (M.lt(mid, level)) { if (!below) counters.resets += 1; below = true; if (episode && episode.state === 'PENDING') { episode.state = 'RESET'; episode = null; } return { crossing: false }; } if (below && !episode) { below = false; if (receiptTs < cooldownUntil) { counters.cooldownRefusals += 1; return { crossing: false, refused: 'COOLDOWN', cooldownUntil }; } counter += 1; counters.crossings += 1; episode = { episodeId: `ep-${assetId}-${setupId}-${receiptTs}-${counter}`, triggerTs: receiptTs, level, state: 'PENDING' }; return { crossing: true, episode }; } return { crossing: false }; },
-    current: () => episode, expire(now) { if (episode && episode.state === 'PENDING' && now - episode.triggerTs > REFERENCE.proposalExpiryMs) { episode.state = 'EXPIRED'; counters.expired += 1; const e = episode; episode = null; return e; } return null; },
-    decide(state) { if (episode) { episode.state = state; const e = episode; if (state !== 'PENDING') episode = null; return e; } return null; },
+    observeMid(mid, level, receiptTs) { if (M.lt(mid, level)) { if (!below) counters.resets += 1; below = true; if (episode && episode.state === 'PENDING') { episode.state = 'RESET'; episode = null; } return { crossing: false }; } if (below && !episode) { if (receiptTs < cooldownUntil) { below = false; counters.cooldownRefusals += 1; return { crossing: false, refused: 'COOLDOWN', cooldownUntil }; } if (refusedAtTs !== null && receiptTs - refusedAtTs < recrossMinMs) { counters.recrossRefusals += 1; return { crossing: false, refused: 'RECROSS_TOO_SOON', recrossAfterTs: refusedAtTs + recrossMinMs }; } below = false; counter += 1; counters.crossings += 1; episode = { episodeId: `ep-${assetId}-${setupId}-${receiptTs}-${counter}`, triggerTs: receiptTs, level, state: 'PENDING' }; return { crossing: true, episode }; } return { crossing: false }; },
+    current: () => episode, expire(now) { if (episode && episode.state === 'PENDING' && now - episode.triggerTs > REFERENCE.proposalExpiryMs) { episode.state = 'EXPIRED'; counters.expired += 1; refusedAtTs = now; const e = episode; episode = null; return e; } return null; },
+    decide(state, nowTs = null) { if (episode) { episode.state = state; const e = episode; if (state !== 'PENDING') { episode = null; if (REFUSAL_STATES.has(state)) refusedAtTs = Number.isFinite(nowTs) ? nowTs : (e.decidedTs ?? e.triggerTs); } return e; } return null; },
     closed(now) { cooldownUntil = now + cooldownMs; below = true; episode = null; }, status: () => ({ assetId, setupId, below, cooldownUntil, episode, counters: { ...counters } }),
     // PUBLISH-FIX-79 (the second look): re-arm the tracker so the NEXT book at/above the level counts as a fresh crossing without the
     // mid having to fall below the level first. Nothing else changes: the cooldown, the confirmation, the lock and every gate apply
     // to the new episode exactly as to a natural crossing. Refused while an episode is pending.
-    rearm() { if (episode) return false; below = true; counters.rearms += 1; return true; },
+    rearm() { if (episode) return false; below = true; refusedAtTs = null; counters.rearms += 1; return true; },
   };
 }

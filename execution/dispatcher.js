@@ -20,7 +20,7 @@ export function latencyStats(samples) { return { count: samples.length, p50: pct
 
 export function createDispatcher({ accountId, journal, writer, adapter, clock, feed = null, specOf = null, feeOf = null, controls = null, authority = null, log = () => {}, limits = DISPATCHER_DEFAULTS } = {}) {
   const specLookup = specOf ?? (() => null);
-  const L = { ...DISPATCHER_DEFAULTS, ...limits }; let revision = null; let state = null; let chain = Promise.resolve(); let writerLost = false; let closed = false;
+  const L = { ...DISPATCHER_DEFAULTS, ...limits }; let revision = null; let state = null; let writerLost = false; let closed = false;
   // the authority context (closeout R01): run mode, binding digests / key, controls and clock trust supplied by the composition
   const ctx = { runMode: null, binding: null, clockTrusted: () => true, maxBookAgeMs: 1000, ...(authority ?? {}) };
   const writerHeld = () => (typeof writer?.held === 'function' ? writer.held() : true);
@@ -30,7 +30,16 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
   const ev = (type, payload, causeId = null, knownAtTs = now()) => makeEvent({ type, accountId, payload, causeId, knownAtTs });
   async function load() { const l = await journal.load(accountId); if (!l) throw new JournalError('ACCOUNT_UNKNOWN', accountId); revision = l.revision; state = l.state; return l; }
   // serialized commit; ONE revision-conflict reload, then refuse (stale precomputation fails the recheck, never overwrites)
-  function commit(events, { retryOnConflict = true, recheck = null } = {}) {
+  // PUBLISH-FIX-83 (full review item 16): two lanes on ONE serialized commit pump. A commit marked { priority: true } (the Judge's entry
+  // intent, the dispatch attempt, an adapter fill, a Watch exit) runs ahead of every WAITING ordinary commit (refusal records,
+  // valuations, the hypothesis locks of a crossing storm); order inside each lane is unchanged and a running commit is never interrupted.
+  const lanes = { priority: [], ordinary: [] }; let pumpingCommits = false; let chainSettled = Promise.resolve();
+  async function pumpCommits() {
+    if (pumpingCommits) return; pumpingCommits = true;
+    try { for (;;) { const next = lanes.priority.shift() ?? lanes.ordinary.shift(); if (!next) break; try { next.resolve(await next.run()); } catch (err) { next.reject(err); } } }
+    finally { pumpingCommits = false; }
+  }
+  function commit(events, { retryOnConflict = true, recheck = null, priority = false } = {}) {
     const list = Array.isArray(events) ? events : [events]; const t0 = now();
     const run = async () => {
       if (closed) throw new JournalError('DISPATCHER_CLOSED', 'no commits after close'); if (writerLost) throw new JournalError('WRITER_LOST', 'lease lost: admission closed');
@@ -43,7 +52,10 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
       }
       throw new JournalError('REVISION_CONFLICT', 'conflict persisted after reload');
     };
-    const p = chain.then(run); chain = p.catch(() => {}); return p;
+    if (priority) counters.priorityCommits = (counters.priorityCommits ?? 0) + 1;
+    const p = new Promise((resolve, reject) => { (priority ? lanes.priority : lanes.ordinary).push({ run, resolve, reject }); });
+    chainSettled = Promise.all([chainSettled, p.catch(() => {})]).then(() => {}); queueMicrotask(() => { pumpCommits(); });
+    return p;
   }
   // an uncertain commit outcome (connection died after send): re-read by immutable event id; never append again
   async function rereadOrCommit(events) { counters.uncertainRereads += 1; if (typeof journal.findEvent === 'function') { const found = await journal.findEvent(accountId, events[0].eventId); if (found) { await load(); return { rereadSeq: found.seq, state }; } } return commit(events); }
@@ -81,7 +93,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     let mapped = []; let batched = false;
     try { let s = state; for (const ae of list) { const evs = mapAdapterEvent(ae, s); s = reduceBatch(s, evs).state; mapped.push(...evs); } }
     catch (err) { if (err.code !== 'REDUCER_REFUSED') throw err; log(`adapter burst of ${list.length} does not project as one commit (${err.detail?.code ?? err.code}); applying one by one`); mapped = null; }
-    if (mapped && mapped.length) { try { await commit(mapped); counters.adapterEvents += list.length; counters.adapterBatches = (counters.adapterBatches ?? 0) + 1; batched = true; } catch (err) { if (err.code !== 'REDUCER_REFUSED' && err.code !== 'RECHECK_FAILED' && err.code !== 'REVISION_CONFLICT') throw err; log(`adapter burst of ${list.length} refused as one commit (${err.detail?.code ?? err.code}); applying one by one`); } }
+    if (mapped && mapped.length) { try { await commit(mapped, { priority: true }); counters.adapterEvents += list.length; counters.adapterBatches = (counters.adapterBatches ?? 0) + 1; batched = true; } catch (err) { if (err.code !== 'REDUCER_REFUSED' && err.code !== 'RECHECK_FAILED' && err.code !== 'REVISION_CONFLICT') throw err; log(`adapter burst of ${list.length} refused as one commit (${err.detail?.code ?? err.code}); applying one by one`); } }
     if (!batched) { for (const ae of list) { try { await applyAdapterEvent(ae); } catch (err) { log(`adapter event ${ae?.type} failed: ${err.message}`); } } return null; } // each event isolated exactly as when each was its own job
     for (const ae of list) await afterAdapterEvent(ae);
     return null;
@@ -90,7 +102,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     // a late callback after close / lease loss is fenced here: logged, never committed, never thrown into the socket (closeout R16 / E09)
     if (closed || writerLost) { counters.fencedCallbacks += 1; log(`adapter event ${ae?.type} after ${closed ? 'close' : 'lease loss'}: fenced (owner reconciliation books it)`); return null; }
     counters.adapterEvents += 1; if (revision === null) await load();
-    const events = mapAdapterEvent(ae); for (const e of events) { try { await commit(e); } catch (err) { if (err.code === 'EVENT_DUPLICATE') continue; /* PUBLISH-FIX-83: an identical event is already durable — booked once, never a failure */ if (err.code === 'REDUCER_REFUSED' && ['DUPLICATE_EXECUTION'].includes(err.detail?.code)) continue; if (err.code === 'REDUCER_REFUSED') { log(`adapter event ${ae.type} refused: ${err.message}`); try { await commit(ev('RESTRICTION', { code: 'RECONCILIATION_REQUIRED', action: 'LATCH', scope: null, source: 'dispatcher', sessionDate: null, reason: `${ae.type} refused: ${err.detail?.code ?? err.code}`.slice(0, 200), ownerRef: null, ts: now() })); } catch { /* fenced or closed */ } continue; } throw err; } }
+    const events = mapAdapterEvent(ae); for (const e of events) { try { await commit(e, { priority: true }); } catch (err) { if (err.code === 'EVENT_DUPLICATE') continue; /* PUBLISH-FIX-83: an identical event is already durable — booked once, never a failure */ if (err.code === 'REDUCER_REFUSED' && ['DUPLICATE_EXECUTION'].includes(err.detail?.code)) continue; if (err.code === 'REDUCER_REFUSED') { log(`adapter event ${ae.type} refused: ${err.message}`); try { await commit(ev('RESTRICTION', { code: 'RECONCILIATION_REQUIRED', action: 'LATCH', scope: null, source: 'dispatcher', sessionDate: null, reason: `${ae.type} refused: ${err.detail?.code ?? err.code}`.slice(0, 200), ownerRef: null, ts: now() })); } catch { /* fenced or closed */ } continue; } throw err; } }
     // RESERVATION SETTLEMENT (2026-09-14): a reservation is an entry's cash/risk hold. Once the venue reports the entry order
     // TERMINAL (FILLED / EXPIRED / CANCELLED / REJECTED), the hold must be settled EXACTLY ONCE: the consumed part becomes the
     // position's cost, the unused remainder is released. Before this seam the only settlement paths were pre-send refusals and
@@ -204,7 +216,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     const a1 = authorityOf(orderId); if (!a1.ok) return refuseUnsent(o, a1.reasons);
     const attemptId = `att-${orderId}`; const t0 = now(); const revisionSeen = revision;
     const intentWindow = Number.isSafeInteger(o.deadlineTs) && Number.isSafeInteger(o.createdTs) ? o.deadlineTs - o.createdTs : null; // PUBLISH-FIX-83 item 2: the deadline clock restarts at the durable attempt
-    try { await commit(ev('DISPATCH_ATTEMPTED', { orderId, attemptId, adapter: adapter.kind, ts: t0, ...(intentWindow !== null && intentWindow > 0 ? { deadlineTs: t0 + intentWindow } : {}) }), { retryOnConflict: true, recheck: () => authorityOf(orderId).ok }); }
+    try { await commit(ev('DISPATCH_ATTEMPTED', { orderId, attemptId, adapter: adapter.kind, ts: t0, ...(intentWindow !== null && intentWindow > 0 ? { deadlineTs: t0 + intentWindow } : {}) }), { retryOnConflict: true, recheck: () => authorityOf(orderId).ok, priority: true }); }
     catch (err) { if (err.code === 'RECHECK_FAILED') { const a2 = authorityOf(orderId); if (state.orders[orderId]?.state === 'UNSENT') return refuseUnsent(state.orders[orderId], a2.reasons.length ? a2.reasons : ['STATE_CHANGED']); } throw err; }
     // (2) after the commit await, immediately before the actual send: the attempt is durable, so a refusal is a REJECTED result that no venue ever saw
     // the revision may have moved (other safety commits are legitimate); what must hold is the current state's authority and that OUR attempt is the one unresolved attempt
@@ -213,7 +225,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     else { const spec = specLookup(o.pair); try { result = await adapter.submitEntryWithProtection({ intent: state.orders[orderId], spec }); } catch (err) { result = { outcome: 'UNCERTAIN', nativeOrderId: null, reason: String(err?.message ?? err).slice(0, 120), guaranteesNoAcceptance: false }; } }
     latency.journalToSend.push(now() - t0); if (latency.journalToSend.length > 2048) latency.journalToSend.shift();
     const res = ev('DISPATCH_RESULT', { orderId, attemptId, outcome: result.outcome, nativeOrderId: result.nativeOrderId ?? null, reason: result.reason ?? null, sourceTs: null, receiptTs: now(), guaranteesNoAcceptance: Boolean(result.guaranteesNoAcceptance) });
-    try { await commit(res); } catch (err) { if (err.code === 'REVISION_CONFLICT' || err.code === 'RECHECK_FAILED') await rereadOrCommit([res]); else throw err; }
+    try { await commit(res, { priority: true }); } catch (err) { if (err.code === 'REVISION_CONFLICT' || err.code === 'RECHECK_FAILED') await rereadOrCommit([res]); else throw err; }
     if (result.outcome === 'REJECTED' && result.guaranteesNoAcceptance && o.reservationId) { const r = state.reservations[o.reservationId]; if (r && r.state === 'OPEN') await commit(ev('RESERVATION_RELEASED', { reservationId: o.reservationId, reason: 'REJECTED_BY_VENUE', releasedCash: r.cashReserved, releasedRisk: r.riskReserved, ts: now() })); } if (result.outcome === 'REJECTED' && result.guaranteesNoAcceptance) await flattenUnfilledShell(orderId, `rejected: ${result.reason ?? 'venue'}`); /* PUBLISH-FIX-83 item 3 */
     return result;
   }
@@ -221,7 +233,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
   async function settleReservation(orderId) { if (revision === null) await load(); const o = state.orders[orderId]; if (!o || !o.reservationId) return null; const r = state.reservations[o.reservationId]; if (!r || r.state !== 'OPEN') return null; if (!TERMINAL_ORDER_STATES.includes(o.state)) return null; const used = M.add(o.filledQuote, o.feesQuote); const releasedCash = M.max('0', M.sub(r.cashReserved, used)); const pos = state.positions[o.positionId]; const riskKeep = pos && pos.riskReserved ? pos.riskReserved : M.isZero(o.filledBase) ? '0' : r.riskReserved; return commit(ev('RESERVATION_RELEASED', { reservationId: r.reservationId, reason: M.isZero(o.filledBase) ? 'ORDER_UNFILLED' : 'ORDER_TERMINAL', releasedCash, releasedRisk: M.max('0', M.sub(r.riskReserved, riskKeep)), ts: now() })); }
   // a reconciliation NOW, through the venue and the safety queue, awaited to completion (closeout R02): the caller sees the
   // journal AFTER every late fill / state the venue reported; the outcome is the RECONCILIATION event's
-  async function reconcileNow({ scope = 'REQUESTED', sinceTs = null } = {}) { if (revision === null) await load(); counters.reconciliations += 1; if (typeof adapter.hydrate === 'function') adapter.hydrate(state); const known = new Set(Object.keys(state.execIds).map((k) => k.split('|')[1])); const since = sinceTs ?? Math.min(now() - 86_400_000, ...Object.values(state.orders).filter((o) => !TERMINAL_ORDER_STATES.includes(o.state)).map((o) => o.createdTs)); const rec = await adapter.reconcile({ scope, sinceTs: since, knownExecIds: known, state }); await enqueue('SAFETY', async () => null); await chain.catch(() => {}); await load(); return rec; }
+  async function reconcileNow({ scope = 'REQUESTED', sinceTs = null } = {}) { if (revision === null) await load(); counters.reconciliations += 1; if (typeof adapter.hydrate === 'function') adapter.hydrate(state); const known = new Set(Object.keys(state.execIds).map((k) => k.split('|')[1])); const since = sinceTs ?? Math.min(now() - 86_400_000, ...Object.values(state.orders).filter((o) => !TERMINAL_ORDER_STATES.includes(o.state)).map((o) => o.createdTs)); const rec = await adapter.reconcile({ scope, sinceTs: since, knownExecIds: known, state }); await enqueue('SAFETY', async () => null); await chainSettled; await load(); return rec; }
   // ---- restart: exclusive writer already acquired by the composition; reconcile BEFORE any addition ------------------------
   async function restart({ scope = 'STARTUP' } = {}) {
     await load();
@@ -239,10 +251,10 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     }
     return report;
   }
-  async function close({ drainMs = L.drainMs } = {}) { closed = closed || false; try { adapter.stopAdmission(); } catch { /* none */ } const d = await adapter.drain({ maxWaitMs: drainMs }); await chain.catch(() => {}); closed = true; return { drained: d, revision, writerLost }; }
+  async function close({ drainMs = L.drainMs } = {}) { closed = closed || false; try { adapter.stopAdmission(); } catch { /* none */ } const d = await adapter.drain({ maxWaitMs: drainMs }); await chainSettled; closed = true; return { drained: d, revision, writerLost }; }
   return { commit, enqueue, queueEntry, compensateUnattemptedEntry, dispatchEntry, settleReservation, restart, reconcileNow, close, load, applyAdapterEvent, authorityOf, writerHeld, onCommit(fn) { commitListeners.add(fn); return () => commitListeners.delete(fn); }, ev,
     // test / shutdown helper: resolves when every queued job and the commit chain have settled
-    async idle() { for (let i = 0; i < 10_000; i += 1) { await chain.catch(() => {}); if (!safety.length && !entries.length && !pumping && !pumpingEntry) { await new Promise((r) => setImmediate(r)); if (!safety.length && !entries.length && !pumping && !pumpingEntry) return; } await new Promise((r) => setTimeout(r, 1)); } },
+    async idle() { for (let i = 0; i < 10_000; i += 1) { await chainSettled; if (!safety.length && !entries.length && !pumping && !pumpingEntry && !pumpingCommits && !lanes.priority.length && !lanes.ordinary.length) { await new Promise((r) => setImmediate(r)); if (!safety.length && !entries.length && !pumping && !pumpingEntry && !pumpingCommits && !lanes.priority.length && !lanes.ordinary.length) return; } await new Promise((r) => setTimeout(r, 1)); } },
     state: () => state, revision: () => revision, writerLost: () => writerLost,
     latency: () => ({ receiptToJournal: latencyStats(latency.receiptToJournal), journalToSend: latencyStats(latency.journalToSend), queueToCompute: latencyStats(latency.queueToCompute) }),
     status: () => ({ accountId, revision, writerLost, closed, overloaded, queues: { safety: safety.length, entry: entries.length }, counters: { ...counters } }) };

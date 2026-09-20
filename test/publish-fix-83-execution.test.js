@@ -109,3 +109,20 @@ test('FIX83-9b. a preparation tenant still inside its warm-up is not preempted b
   const gone = selectPreparation({ nominations: [n('BBB', t + 1000), n('CCC', now - 1000)], remainingSlots: 2, previous, nowTs: now });
   assert.deepEqual(gone.selected.map((s) => s.assetId).sort(), ['BBB', 'CCC']); assert.deepEqual(gone.lost.map((l) => [l.assetId, l.reason]), [['AAA', 'NOMINATION_EXPIRED']]);
 });
+
+test('FIX83-16. the commit pump has two lanes: a priority commit (entry, fill, exit) runs ahead of every WAITING ordinary commit, never interrupts a running one, and each lane keeps its order', async () => {
+  const clock = fakeClock(); const r = await paperAccount({ accountId: 'fix83-16', clock }); const { F } = r;
+  const slow = { ...r.journal, append: async (...args) => { await new Promise((res) => setTimeout(res, 5)); return r.journal.append(...args); } }; // every append takes a round trip
+  const d = createDispatcher({ accountId: r.accountId, journal: slow, writer: r.writer, adapter: { kind: 'PAPER', async drain() { return {}; }, async reconcile() { return { outcome: 'COMPLETE', unmatched: 0, pageIncomplete: false }; }, status() { return { stops: [], counters: {} }; } }, clock, specOf: () => SPEC, feeOf: () => TAKER_FEE }); await d.load();
+  const order = []; d.onCommit((_s, list) => order.push(list[0].payload.reason ?? list[0].type));
+  const val = (i) => F.ev('RESTRICTION', { code: 'VETO', action: 'LATCH', scope: `pred-${i}`, source: 'test', sessionDate: null, reason: `ordinary-${i}`, ownerRef: null, ts: clock.now() });
+  const a = d.commit(val(1)); const b = d.commit(val(2)); const c = d.commit(val(3)); // three ordinary commits queued
+  await new Promise((res) => setTimeout(res, 1)); // ordinary-1 is now RUNNING inside its slow append
+  const p = d.commit([F.hypothesis('d1'), F.decision('d1'), F.reserve('r1', 'd1'), F.position('p1', 'd1'), F.pin(), F.intent('o1', 'p1', 'r1')], { priority: true }); const q = d.commit(val(4), { priority: true });
+  await Promise.all([a, b, c, p, q]);
+  assert.deepEqual(order, ['ordinary-1', 'HYPOTHESIS_LOCKED', 'ordinary-4', 'ordinary-2', 'ordinary-3'], 'the running commit finishes, then the priority lane in its order, then the ordinary lane in its order');
+  assert.equal(d.status().counters.priorityCommits, 2);
+  // a refused priority commit rejects its own caller only; the pump carries on
+  await assert.rejects(d.commit(F.ev('ORDER_STATE', { orderId: 'ghost', state: 'FILLED', nativeOrderId: null, nativeCumQty: '1', reason: null, sourceTs: clock.now(), receiptTs: clock.now() }), { priority: true }), (e) => e.code === 'REDUCER_REFUSED');
+  await d.commit(val(5)); assert.equal(order[order.length - 1], 'ordinary-5'); await d.idle();
+});
