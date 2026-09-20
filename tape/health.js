@@ -45,3 +45,19 @@ export function classifyTape({ pairs, lastMsgMs, unavailable, lastAnyMsgMs, now,
     counts: { total: pairs.length, live, stale, unavailable: unavail },
   };
 }
+
+// PUBLISH-FIX-84 (reviewer finding, the owner's "it's not getting data"): the SILENT-FEED decision, pure. A feed is silent when no
+// message at all has arrived for the stale bound (connectionDead) or messages arrive but NO subscribed pair is live. The law waits one
+// more stale bound on top of the classifier's own (2x in all), never acts on a socket younger than a stale bound, and acts at most once
+// per cooldown. Returns the next silentSinceMs and whether to tear the socket down now.
+export function silentFeedDecision({ health, now, wsOpen, connectedAtMs, silentSinceMs, lastSilentReconnectMs, staleMs, cooldownMs }) {
+  if (!wsOpen || connectedAtMs === null || connectedAtMs === undefined || now - connectedAtMs < staleMs) return { silentSinceMs: null, act: false, reason: null };
+  const subscribed = (health?.counts?.total ?? 0) - (health?.counts?.unavailable ?? 0);
+  const silent = Boolean(health?.connectionDead) || Boolean(health?.anyData && health?.counts && health.counts.live === 0 && subscribed > 0);
+  if (!silent) return { silentSinceMs: null, act: false, reason: null };
+  const since = silentSinceMs ?? now;
+  const reason = health.connectionDead ? 'CONNECTION_DEAD' : 'NO_LIVE_PAIRS';
+  if (now - since < staleMs) return { silentSinceMs: since, act: false, reason };
+  if (now - (lastSilentReconnectMs ?? 0) < cooldownMs) return { silentSinceMs: since, act: false, reason };
+  return { silentSinceMs: null, act: true, reason };
+}

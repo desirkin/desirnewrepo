@@ -313,7 +313,12 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     // PUBLISH-FIX-83 item 15 (2026-09-20): a full hot lane with no tenure-eligible pair skips the venue verification (no REST, no record
     // rewrite) while nominees wait; the carried hot pairs are re-merged into the record after every selection; yielded pairs leave it.
     // Subscriptions only; no trading/control/model surface. Tests: test/tape-hot-lane.test.js.
-    'tape/run.js': '0900a763637862f18806c162ba96201362c579abbf3aa4f3e0f8e834f09a73c3',
+    // PUBLISH-FIX-84 (2026-09-20, reviewer finding — the owner's "it's not getting data"): the SILENT-FEED law. A socket that stays
+    // "open" while nothing arrives, or whose heartbeats flow while every subscribed pair goes stale, is torn down (handlers detached
+    // first) and reconnected on the normal back-off, at most once per 30 s; the back-off resets only once a connection has stayed
+    // open 30 s. The decision is pure (tape/health.js silentFeedDecision). Subscriptions and the socket only; no trading/control/model
+    // surface. Tests: test/publish-fix-84-silent-feed.test.js.
+    'tape/run.js': 'c96568a36164ad14079ec212217562411d5d3287cef4e494ceaf637348505eb8',
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
     // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the

@@ -11,7 +11,7 @@ import { createResourceLaw } from './resource-law.js';
 import { nowIso, sessionDate } from '../lib/time.js';
 import { OrderBook, decimalsOf } from './book.js';
 import { TradeFlow, bookFeatures } from './features.js';
-import { classifyTape, PAIR_STATES } from './health.js';
+import { classifyTape, PAIR_STATES, silentFeedDecision } from './health.js';
 import { selectUniverse, readWideEyeNominationsToday, mergeCarriedIntoCurrentUniverse } from './universe.js';
 import { planHotAdoption, HOT_LANE_DEFAULTS } from './hot-lane.js';
 import {
@@ -432,6 +432,14 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       }
     }
     publishStatus(health);
+    // PUBLISH-FIX-84 (reviewer finding, the owner's "it's not getting data"): a SILENT feed had no way back. The only path to a
+    // reconnect was ws.onclose, which fires only when the peer completes the close handshake or TCP tears down — a half-open link
+    // (NAT / balancer drop) stays "open" for ~12 minutes of kernel keep-alive, and a venue that keeps heart-beating while its
+    // channels go quiet stays "open" forever: DEGRADED, every pair stale, the Judge blind, no recovery. Now: when no message at
+    // all has arrived for 2x the stale bound, or messages arrive but NO pair is live for 2x the stale bound, the socket is torn
+    // down without waiting for the peer (handlers detached first, so a late close cannot double-reconnect), books desync, the
+    // execution feed sees a disconnect, and connect() runs on the normal back-off. At most once per SILENT_RECONNECT_COOLDOWN_MS.
+    silentFeedLaw(health);
 
     // MICRO-1 tracking bound: ACTIVE STALKING ∩ SUBSCRIBED ∩ SYNCED — all
     // three or nothing. Not a UI attention set; fallback majors on screen
@@ -538,11 +546,33 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     }
   }, 15_000);
 
+  // PUBLISH-FIX-84: the silent-feed law (see the heartbeat).
+  const SILENT_RECONNECT_COOLDOWN_MS = 30_000; let silentSinceMs = null; let lastSilentReconnectMs = 0; let silentReconnects = 0; let connectedAtMs = null;
+  function silentFeedLaw(health, now = Date.now()) {
+    if (stopping) return false;
+    const d = silentFeedDecision({ health, now, wsOpen: Boolean(ws && ws.readyState === WebSocket.OPEN), connectedAtMs, silentSinceMs, lastSilentReconnectMs, staleMs, cooldownMs: SILENT_RECONNECT_COOLDOWN_MS });
+    silentSinceMs = d.silentSinceMs; if (!d.act) return false;
+    lastSilentReconnectMs = now; silentReconnects += 1;
+    const why = d.reason === 'CONNECTION_DEAD' ? `no message for ${Math.round((now - (lastAnyMsgMs ?? now)) / 1000)}s` : `messages flow but no pair is live (${health.counts?.stale ?? '?'} stale)`;
+    log(`[${nowIso()}] SILENT FEED — ${why}; tearing the socket down and reconnecting (${silentReconnects} so far)`);
+    writeEvent('WS_SILENT_RECONNECT', { reason: d.reason, silentReconnects });
+    const old = ws; ws = null; old.onclose = null; old.onmessage = null; old.onerror = () => {};
+    try { old.close(); } catch { /* the peer may never answer; the handlers are detached */ }
+    for (const book of books.values()) book.desync();
+    feedGuard(() => executionFeed.onDisconnect(now));
+    writeEvent('WS_DISCONNECTED', { forced: true });
+    const delay = Math.max(reconnectDelayMs, Math.max(0, reconnectBlockedUntil - now));
+    setTimeout(connect, delay);
+    reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30_000);
+    return true;
+  }
   function connect() {
     if (stopping) return;
     ws = new WebSocket(config.tape.wsUrl);
     ws.onopen = () => {
-      reconnectDelayMs = 1000;
+      // PUBLISH-FIX-84 (reviewer finding): the back-off resets only once the connection has STAYED open (30 s) — a venue that accepts
+      // and closes at once used to get a 1-second loop of full re-subscriptions (and a plausible IP ban)
+      connectedAtMs = Date.now(); const openedAt = connectedAtMs; setTimeout(() => { if (ws && connectedAtMs === openedAt && ws.readyState === WebSocket.OPEN) reconnectDelayMs = 1000; }, 30_000).unref?.();
       writeEvent('WS_CONNECTED', { url: config.tape.wsUrl });
       log(`[${nowIso()}] connected ${config.tape.wsUrl}`);
       subscribeAll();
