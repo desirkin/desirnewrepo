@@ -112,3 +112,17 @@ mtime_ms = 1789836383731
 storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/c138b795-c62d-4977-8f25-d6f71a4797af/027cdf23-0a0c-4e4e-8f06-6c1a1aa38b92"
 storage_version_token = "1789836390386317"
 content_type = "application/octet-stream"
+
+[[outputs]]
+id = "F7vjdyvX8utkWJ1OkS_jU"
+uri = "file://exports/serpent-complete-latest-published-c6985361.zip"
+type = "unspecified"
+title = "Download the complete newest published Serpent app"
+description = "Exact latest published commit c6985361. Includes 1,139 safe app and review files; 7,894,407 bytes; SHA-256 da594d93328bd90b70d08854b71035201132c8d8bfbf0a81601f1c92bc0eea80."
+logical_id = "3d503aa7-56d6-4c39-9495-7353646eb1d5"
+content_hash = "sha256:da594d93328bd90b70d08854b71035201132c8d8bfbf0a81601f1c92bc0eea80"
+size = 7894407
+mtime_ms = 1789879723898
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/3d503aa7-56d6-4c39-9495-7353646eb1d5/73503993-982b-4584-94ac-d6f255cb9860"
+storage_version_token = "1789879728778642"
+content_type = "application/octet-stream"
