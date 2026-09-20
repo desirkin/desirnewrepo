@@ -46,7 +46,7 @@ export const BROAD_KRAKEN_DEFAULTS = Object.freeze({
   // Native socket ingestion is continuous. Replaceable current-market disk
   // state is coalesced to this bounded cadence to avoid full-catalog fsync
   // amplification on the shared host; the status discloses the resulting lag.
-  latestSnapshotMs: 5_000,
+  latestSnapshotMs: 15_000, // PUBLISH-FIX-83 item 28 (was 5 s): three times fewer 1.7 MB rewrites of a cache its readers poll far less often
   maxLatestBytes: 16 * 1024 * 1024,
 });
 
@@ -245,7 +245,7 @@ function openBroadStore({ dataDir, clock, segmentBytes, maxSegments, lineBytes, 
       if (bytes_.length > maxBytes) throw Object.assign(new Error(`broad market latest snapshot exceeds ${maxBytes} bytes`), { code: 'BROAD_MARKET_LATEST_LIMIT' });
       const target = path.join(dir, 'latest.json'); const tmp = path.join(dir, `latest.${process.pid}.${randomBytes(6).toString('hex')}.tmp`); let latestFd = null;
       try {
-        latestFd = openSync(tmp, 'wx'); writeAll(latestFd, bytes_); fsyncSync(latestFd); closeSync(latestFd); latestFd = null; renameSync(tmp, target);
+        latestFd = openSync(tmp, 'wx'); writeAll(latestFd, bytes_); closeSync(latestFd); latestFd = null; renameSync(tmp, target); // PUBLISH-FIX-83 item 28: no fsync — latest.json is a replaceable cache (the segments are the durable record); a 1.7 MB fsync every 5 s was a main-thread stall stack
       } catch (error) {
         if (latestFd !== null) try { closeSync(latestFd); } catch { /* preserve first error */ }
         try { unlinkSync(tmp); } catch { /* owned temp may already be renamed */ }

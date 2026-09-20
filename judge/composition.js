@@ -323,7 +323,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
       if (tickNumber % 20 === 2) await applyOwnerClear(t); if (stopped) return;
       // a recorder that stopped recording closes admission (closeout R11): FEED_IMPAIRED latched (exits continue), never a silently partial recording
       if (recorder && !recorderLatched && recorder.status().state !== 'RECORDING' && !dispatcher.writerLost()) { recorderLatched = true; const st = recorder.status(); try { await dispatcher.commit(makeEvent({ type: 'RESTRICTION', accountId: acct, knownAtTs: t, payload: { code: 'FEED_IMPAIRED', action: 'LATCH', scope: null, source: 'recorder', sessionDate: null, reason: `feed recording ${st.state}: ${st.reason ?? 'not recording'}`.slice(0, 200), ownerRef: null, ts: t } })); } catch (err) { log(`recorder latch: ${err.message}`); } }
-      if (tickNumber % 240 === 0) writePaperCheckpoint(); if (dirty) { dirty = false; publishProjection(); }
+      if (tickNumber % 240 === 0) writePaperCheckpoint(); // PUBLISH-FIX-83 item 28: the projection is published on its timer only (when dirty), never once per commit inside the core tick
     } finally { laneReport.coreCompleted += 1; laneReport.maxCoreMs = Math.max(laneReport.maxCoreMs, elapsed(started)); }
   }
   async function tick() {
@@ -359,7 +359,7 @@ export async function composeJudge({ policyFile, mode, accountId = null, env = p
       heartbeat = setInterval(() => { tick().catch((err) => log(`tick: ${err.message}`)); }, heartbeatMs); heartbeat.unref?.();
       // the scheduler's own cadence: bucket deadlines never wait for the heartbeat (closeout R08)
       schedulerTimer = setInterval(() => { judge.scheduler.tick().catch((err) => log(`scheduler: ${err.message}`)); }, Math.max(5, schedulerMs)); schedulerTimer.unref?.();
-      if (writeProjection) { projectionTimer = setInterval(publishProjection, projectionMs); projectionTimer.unref?.(); publishProjection(); } lifecycle.push('RUNNING'); return report; },
+      if (writeProjection) { projectionTimer = setInterval(() => { if (dirty) { dirty = false; publishProjection(); } }, projectionMs); projectionTimer.unref?.(); publishProjection(); } lifecycle.push('RUNNING'); return report; },
     // stop: producers first (feed no-op, timers cleared, admission closed), then the drain, the SHUTDOWN reconciliation and the owner
     // slot release ONLY after a verified handoff, the socket close, the checkpoint / projection, and the writer release LAST
     async stop({ drainMs = 10_000 } = {}) { if (stopped) return null; stopped = true; learningCache?.dispose(); lifecycle.push('PRODUCERS_STOPPED'); if (heartbeat) clearInterval(heartbeat); if (schedulerTimer) clearInterval(schedulerTimer); if (projectionTimer) clearInterval(projectionTimer); try { adapter.stopAdmission(); } catch { /* none */ }
