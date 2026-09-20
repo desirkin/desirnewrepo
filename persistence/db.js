@@ -5,9 +5,16 @@
 import pg from 'pg';
 
 const POOL_MAX = 5; // one personal app, one small pool
-const CONNECT_TIMEOUT_MS = 5000;
+// PUBLISH-FIX-84 (2026-09-20): the night's "tx checkout failed after 6455ms: Error" lines. The pool let an idle connection go after
+// 30 s, so every quiet minute meant the next transaction opened a FRESH connection to the managed Postgres (TLS through its proxy),
+// and a fresh connection that took over 5 s was a checkout failure — which also flipped `reachable` and engaged the permission lock
+// for a transient. Now: an idle connection is kept warm for 10 minutes (keep-alive is on), a fresh connection gets 15 s, and a
+// checkout that times out is retried once after a short pause before it counts as a failure (nothing has begun on it yet).
+const CONNECT_TIMEOUT_MS = 15_000;
 const QUERY_TIMEOUT_MS = 10_000;
-const IDLE_TIMEOUT_MS = 30_000;
+const IDLE_TIMEOUT_MS = 10 * 60_000;
+const CHECKOUT_RETRIES = 1; const CHECKOUT_RETRY_DELAY_MS = 500;
+const boundedText = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').slice(0, 120);
 const STARTUP_RETRIES = 3; // bounded — no infinite reconnect storm
 // every session of a Db names its owner in pg_stat_activity.application_name: production sessions are 'serpent'; a
 // schema-scoped Db (the TEST seam) is 'serpent-test:<schema>' so a test that simulates session loss can terminate ONLY
@@ -61,7 +68,7 @@ export class Db {
   #retries;
   #everConnected = false;
   #lockClients = new Set(); // advisory-lock sessions checked out for their lifetime
-  #clocks = { checkoutWait: [], tx: [], txStatements: [], txParamBytes: [], query: [], txCount: 0, queryCount: 0, checkoutFailures: 0, slowestTx: null }; // PUBLISH-FIX-50
+  #clocks = { checkoutWait: [], tx: [], txStatements: [], txParamBytes: [], query: [], txCount: 0, queryCount: 0, checkoutFailures: 0, checkoutRetries: 0, slowestTx: null }; // PUBLISH-FIX-50
 
   constructor({ url = process.env.DATABASE_URL, schema = null, log = () => {}, poolFactory = null, retries = STARTUP_RETRIES } = {}) {
     this.#url = url;
@@ -168,7 +175,7 @@ export class Db {
       // PUBLISH-FIX-3: a connection-class failure (ETIMEDOUT / reset / statement timeout) is logged with its code and the
       // elapsed ms before it propagates, so a query that hung to the timeout is never silent. Ordinary query errors
       // (constraint, syntax) are the caller's to surface and are not logged here.
-      if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE query failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}`);
+      if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE query failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}: ${boundedText(err.message)}`);
       throw err;
     }
   }
@@ -181,13 +188,16 @@ export class Db {
     if (!this.#pool) throw new Error('database not connected');
     const startedAt = Date.now();
     let client;
-    try {
-      client = await this.#pool.connect();
-    } catch (err) {
-      // PUBLISH-FIX-3: a checkout that hung to the connect timeout is logged with its code and elapsed ms.
-      this.#clocks.checkoutFailures += 1;
-      if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE tx checkout failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}`);
-      throw err;
+    for (let attempt = 1; ; attempt += 1) {
+      try { client = await this.#pool.connect(); break; }
+      catch (err) {
+        // PUBLISH-FIX-84: one retry for a connection-class checkout failure (a fresh connection that timed out) — nothing has begun
+        if (attempt <= CHECKOUT_RETRIES && isConnectionError(err)) { this.#clocks.checkoutRetries += 1; await sleep(CHECKOUT_RETRY_DELAY_MS); continue; }
+        // PUBLISH-FIX-3: a checkout that hung to the connect timeout is logged with its code, its message and elapsed ms.
+        this.#clocks.checkoutFailures += 1;
+        if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE tx checkout failed after ${Date.now() - startedAt}ms (${attempt} attempt${attempt > 1 ? 's' : ''}): ${err.code ?? err.constructor.name}: ${boundedText(err.message)}`);
+        throw err;
+      }
     }
     // PUBLISH-FIX-50: the checkout wait is what a pool of 5 shared with the tape costs this transaction; the transaction
     // clock starts once the client is in hand; statements and parameter bytes count what travelled
@@ -239,7 +249,7 @@ export class Db {
     const gauge = (k) => (pool && typeof pool[k] === 'number' ? pool[k] : null);
     return {
       tx: { ...clockStats(c.tx), total: c.txCount }, checkoutWait: clockStats(c.checkoutWait), txStatements: clockStats(c.txStatements), txParamBytes: clockStats(c.txParamBytes),
-      query: { ...clockStats(c.query), total: c.queryCount }, checkoutFailures: c.checkoutFailures, slowestTx: c.slowestTx ? { ...c.slowestTx } : null,
+      query: { ...clockStats(c.query), total: c.queryCount }, checkoutFailures: c.checkoutFailures, checkoutRetries: c.checkoutRetries, slowestTx: c.slowestTx ? { ...c.slowestTx } : null,
       pool: { max: POOL_MAX, total: gauge('totalCount'), idle: gauge('idleCount'), waiting: gauge('waitingCount'), lockSessions: this.#lockClients.size },
     };
   }
@@ -261,7 +271,7 @@ export class Db {
       client = await this.#pool.connect();
     } catch (err) {
       // PUBLISH-FIX-3: a lock-session checkout that hung to the connect timeout is logged with its code and elapsed ms.
-      if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE lock checkout failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}`);
+      if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE lock checkout failed after ${Date.now() - startedAt}ms: ${err.code ?? err.constructor.name}: ${boundedText(err.message)}`);
       throw err;
     }
     try {
