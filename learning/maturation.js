@@ -87,22 +87,45 @@ export function matureEpisode({ episode, archive, asOfTs, attachedTs, costAssump
 // counts, never one blended number: `matured` counts attachments carrying real label states, while an honest
 // UNAVAILABLE recording (missing series/archive for that asset) is written once but counted apart. Only episodes
 // without a settled attachment are considered pending.
+// PUBLISH-FIX-83 (full review item 25). Before: every horizon landed on a different sweep, so one episode grew 5-7 outcome rows
+// (~40-50k rows for 8,002 episodes, a 290 MB cache); an episode whose data could never arrive (window rolled off, series absent)
+// was re-labelled on every sweep forever. Now an episode is written at TWO stages — SHORT (the 1/3/5/15-minute horizons all
+// settled: the bite and the continuation) and FULL (every horizon settled) — plus the one UNAVAILABLE row; and past the
+// settle deadline (the longest horizon plus a grace window) whatever is still NOT_YET_KNOWN is settled CENSORED so the
+// episode leaves the pending set for good. An UNAVAILABLE row is re-tried at most every 15 minutes, never every sweep.
+export const SETTLE_GRACE_MS = 60 * 60_000; export const UNAVAILABLE_RETRY_MS = 15 * 60_000; const SHORT_HORIZONS = ['1m', '3m', '5m', '15m'];
+const settled = (h) => h && h.state !== 'NOT_YET_KNOWN';
+export const outcomeStage = (row) => { if (!row || !row.horizons) return 0; const hs = row.horizons; if (Object.values(hs).every(settled)) return 2; if (SHORT_HORIZONS.every((k) => settled(hs[k]))) return 1; return 0; };
+const longestHorizonMs = (row) => Math.max(...Object.keys(row?.horizons ?? {}).map((k) => Number.parseInt(k, 10) * 60_000).filter(Number.isFinite), 240 * 60_000);
+function settleAtDeadline(attach) {
+  const horizons = {}; let changed = false;
+  for (const [k, h] of Object.entries(attach.outcomeRow.horizons)) { if (h.state === 'NOT_YET_KNOWN') { horizons[k] = { ...h, state: 'CENSORED', reason: 'SETTLED_AT_DEADLINE' }; changed = true; } else horizons[k] = h; }
+  if (!changed) return attach;
+  return deepFreeze({ ...attach, outcomeRow: { ...attach.outcomeRow, horizons } });
+}
 export function maturationSweep({ episodes, latestOutcomes, archive, asOfTs, attachedTs, costAssumptions = null, maxPerSweep = 500 }) {
-  const attachments = []; let matured = 0; let pending = 0; let unavailable = 0;
+  const attachments = []; let matured = 0; let pending = 0; let unavailable = 0; let settledAtDeadline = 0; let skippedRecent = 0;
   for (const e of episodes) {
     if (attachments.length >= maxPerSweep) break;
     const existing = latestOutcomes.get(e.opportunityId);
+    const deadlineTs = e.usableAtTs + longestHorizonMs(existing?.outcomeRow) + SETTLE_GRACE_MS; const pastDeadline = asOfTs >= deadlineTs;
     if (existing && existing.outcomeRow.availability.state !== 'UNAVAILABLE') {
-      const allSettled = Object.values(existing.outcomeRow.horizons).every((h) => h.state !== 'NOT_YET_KNOWN');
-      if (allSettled) continue; // fully matured already
+      if (outcomeStage(existing.outcomeRow) === 2) continue; // fully matured already
+    } else if (existing) {
+      if (pastDeadline) continue; // UNAVAILABLE and the data can never arrive: settled as it stands
+      if (asOfTs - existing.attachedTs < UNAVAILABLE_RETRY_MS) { skippedRecent += 1; continue; }
     }
-    const attach = matureEpisode({ episode: e, archive, asOfTs, attachedTs, costAssumptions, supersedes: existing ? existing.attachedTs : null });
-    if (attach === null) { pending += 1; continue; }
+    let attach = matureEpisode({ episode: e, archive, asOfTs, attachedTs, costAssumptions, supersedes: existing ? existing.attachedTs : null });
+    if (attach === null) { if (pastDeadline && existing) { attach = settleAtDeadline(existing); } else if (pastDeadline) { pending += 1; continue; } else { pending += 1; continue; } }
     if (attach.outcomeRow.availability.state === 'UNAVAILABLE') { unavailable += 1; if (existing) continue; attachments.push(attach); continue; }
-    if (existing && JSON.stringify(existing.outcomeRow.horizons) === JSON.stringify(attach.outcomeRow.horizons)) continue; // nothing new matured
+    if (pastDeadline && outcomeStage(attach.outcomeRow) < 2) { attach = settleAtDeadline(attach); settledAtDeadline += 1; }
+    const stageNow = outcomeStage(attach.outcomeRow); const stageBefore = existing ? outcomeStage(existing.outcomeRow) : -1;
+    if (stageNow === 0) { pending += 1; continue; } // the bite and the continuation are not both in yet: no row that says half a thing
+    if (stageNow <= stageBefore) continue; // nothing new matured at a stage that is written
+    if (attach.supersedes !== (existing ? existing.attachedTs : null)) attach = deepFreeze({ ...attach, supersedes: existing ? existing.attachedTs : null });
     attachments.push(attach); matured += 1;
   }
-  return { attachments, matured, pending, unavailable };
+  return { attachments, matured, pending, unavailable, settledAtDeadline, skippedRecent };
 }
 
 export const OUTCOME_CLASS_SET = OUTCOME_CLASSES;

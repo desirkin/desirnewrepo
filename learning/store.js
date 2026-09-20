@@ -85,14 +85,14 @@ export function createLearningStore({ dataDir, log = () => {} }) {
     const rows = readValidated(stream); cached.set(stream, { rows, bytes, byId: null }); return rows;
   }
   // maintained only when the file was exactly where the cache left it; another writer in between drops the cache
-  function noteAppended(stream, record, bytesBefore) { const c = cached.get(stream); if (!c) return; if (c.bytes !== bytesBefore) { cached.delete(stream); return; } c.rows.push(record); c.bytes = fileBytes(stream); if (c.byId && record.opportunityId) { const l = c.byId.get(record.opportunityId); if (l) l.push(record); else c.byId.set(record.opportunityId, [record]); } }
+  function noteAppended(stream, record, bytesBefore) { const c = cached.get(stream); if (!c) return; if (c.bytes !== bytesBefore) { cached.delete(stream); return; } c.rows.push(record); c.bytes = fileBytes(stream); c.heads = null; if (c.latest && record.opportunityId) { const prev = c.latest.get(record.opportunityId); if (!prev || record.attachedTs > prev.attachedTs) c.latest.set(record.opportunityId, record); } if (c.byId && record.opportunityId) { const l = c.byId.get(record.opportunityId); if (l) l.push(record); else c.byId.set(record.opportunityId, [record]); } }
   // outcomes by opportunity: built once per cache generation, maintained on append
   function outcomesOf(opportunityId) {
     cachedRows('outcomes'); const c = cached.get('outcomes');
     if (!c.byId) { c.byId = new Map(); for (const r of c.rows) { const l = c.byId.get(r.opportunityId); if (l) l.push(r); else c.byId.set(r.opportunityId, [r]); } }
     return c.byId.get(opportunityId) ?? [];
   }
-  const CACHED_STREAMS = new Set(['episodes', 'outcomes']);
+  const CACHED_STREAMS = new Set(['episodes', 'outcomes', 'patterns']); // PUBLISH-FIX-83 item 24: patterns too — it was re-parsed and re-digested 8-14 times a minute on the main thread
 
   function ensureIndex(stream) {
     if (idIndex.has(stream)) return idIndex.get(stream);
@@ -134,16 +134,21 @@ export function createLearningStore({ dataDir, log = () => {} }) {
     return append('outcomes', a);
   };
   const readOutcomes = (opts) => (opts && (opts.file !== undefined || opts.maxRecords !== undefined) ? readValidated('outcomes', opts) : cachedRows('outcomes').slice());
+  // PUBLISH-FIX-83 item 25: the latest row per opportunity is derived once per cache generation and maintained on append (it was a
+  // full pass over every outcome row on every call, several calls a minute)
   const latestOutcomes = () => {
+    cachedRows('outcomes'); const c = cached.get('outcomes');
+    if (c && c.latest) return new Map(c.latest);
     const byId = new Map();
     for (const r of cachedRows('outcomes')) { const prev = byId.get(r.opportunityId); if (!prev || r.attachedTs > prev.attachedTs) byId.set(r.opportunityId, r); }
-    return byId;
+    if (c) c.latest = byId;
+    return new Map(byId);
   };
 
   // ---- patterns: append-only transition journal. Current state = validated replay (last record per patternId with
   // contiguous seq); a gap or an unlawful transition withholds the pattern and degrades health rather than guessing.
   const appendPattern = (p) => {
-    const rows = readValidated('patterns').filter((r) => r.patternId === p.patternId);
+    const rows = cachedRows('patterns').filter((r) => r.patternId === p.patternId);
     const expectedSeq = rows.length === 0 ? 0 : rows[rows.length - 1].seq + 1;
     if (p.seq !== expectedSeq) throw new Error(`learning store: pattern seq ${p.seq} is not the expected ${expectedSeq}`);
     if (rows.length > 0) {
@@ -152,18 +157,23 @@ export function createLearningStore({ dataDir, log = () => {} }) {
     }
     return append('patterns', p);
   };
+  // PUBLISH-FIX-83 (full review item 24): the heads are derived ONCE per cache generation (the rows are validated once, on read
+  // into the cache, and once more on append) and handed out as a fresh Map; an append invalidates the derived heads only
   const patternHeads = () => {
+    const rows = cachedRows('patterns'); const c = cached.get('patterns');
+    if (c && c.heads) return new Map(c.heads);
     const byId = new Map(); const invalid = new Set();
-    for (const r of readValidated('patterns')) {
+    for (const r of rows) {
       const prev = byId.get(r.patternId);
       const expected = prev ? prev.seq + 1 : 0;
       if (r.seq !== expected || (prev && r.previousState !== prev.state)) { invalid.add(r.patternId); continue; }
       byId.set(r.patternId, r);
     }
     for (const id of invalid) { byId.delete(id); counters.invalidRejected += 1; log(`learning store: pattern ${id} withheld (broken transition chain)`); }
-    return byId;
+    if (c) c.heads = byId;
+    return new Map(byId);
   };
-  const patternHistory = (patternId) => readValidated('patterns').filter((r) => r.patternId === patternId);
+  const patternHistory = (patternId) => cachedRows('patterns').filter((r) => r.patternId === patternId);
 
   // ---- prospective: the sealed-design / capture / outcome / terminal journal (validated by learning/prospective.js
   // replay — the store keeps bytes and framing only).

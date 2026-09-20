@@ -92,3 +92,22 @@ test('wall: buildFeatures refuses a bar closing after the decision clock (future
 
 // (mirror-parity test retired to attic with the offline research pipeline it verified — LEAN PASS 2, see attic/README.md;
 //  learning/labels.js labelOpportunity stays covered by the labels + maturation tests above.)
+
+test('PUBLISH-FIX-83 item 25: the sweep writes an episode at TWO stages (the short horizons settled, then all of them), never one row per horizon; an episode whose data can never arrive is settled CENSORED at the deadline and leaves the pending set; an UNAVAILABLE row is retried every 15 minutes, not every sweep', async () => {
+  const { maturationSweep, outcomeStage, SETTLE_GRACE_MS, UNAVAILABLE_RETRY_MS } = await import('../learning/maturation.js');
+  const MIN = 60_000; const dTs = decisionSec * 1000; const e = episodeAt(dTs, 'CANDLE_DESCRIPTIVE');
+  const latest = new Map(); const rows = []; const sweepAt = (asOfTs, arch = archive) => { const r = maturationSweep({ episodes: [e], latestOutcomes: latest, archive: arch, asOfTs, attachedTs: asOfTs }); for (const a of r.attachments) { rows.push(a); latest.set(a.opportunityId, a); } return r; };
+  // minute by minute through the first hour: the archive is created after the data (its clock is the knowledge floor), so use as-of after it
+  const floor = Math.max(archive.archiveCreatedTsMs, dTs);
+  for (let m = 1; m <= 60; m += 1) sweepAt(floor + m * MIN);
+  assert.ok(rows.length <= 1, `at most the SHORT-stage row inside the first hour, got ${rows.length}`);
+  for (let m = 61; m <= 300; m += 1) sweepAt(floor + m * MIN);
+  assert.ok(rows.length <= 2, `two rows for the whole life of an episode, got ${rows.length}: ${rows.map((r) => outcomeStage(r.outcomeRow)).join(',')}`);
+  assert.equal(outcomeStage(latest.get(e.opportunityId).outcomeRow), 2, 'fully settled'); assert.equal(sweepAt(floor + 400 * MIN).pending, 0);
+  // an episode whose series never appears: one UNAVAILABLE row, retried only every 15 minutes, then left alone past the deadline
+  const gone = episodeAt(floor + 10 * MIN, 'CANDLE_DESCRIPTIVE'); const latest2 = new Map(); let written = 0; let checked = 0; // decided after the knowledge floor, so its deadline is real
+  const sweep2 = (asOfTs) => { const r = maturationSweep({ episodes: [gone], latestOutcomes: latest2, archive: { ...archive, oneMinute: new Map() }, asOfTs, attachedTs: asOfTs }); checked += r.unavailable; for (const a of r.attachments) { written += 1; latest2.set(a.opportunityId, a); } return r; };
+  sweep2(floor + 20 * MIN); assert.equal(written, 1); for (let m = 21; m < 34; m += 1) { const r = sweep2(floor + m * MIN); assert.equal(r.skippedRecent, 1, 'inside the retry window nothing is re-labelled'); }
+  sweep2(floor + 20 * MIN + UNAVAILABLE_RETRY_MS + 1); assert.equal(written, 1, 'still unavailable: no second row'); assert.equal(checked, 2, 'one retry after the window');
+  const r = sweep2(floor + 10 * MIN + 240 * MIN + SETTLE_GRACE_MS + 1); assert.equal(r.unavailable + r.pending + r.skippedRecent + r.attachments.length, 0, 'past the deadline the episode is not looked at again');
+});

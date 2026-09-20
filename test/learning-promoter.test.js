@@ -167,3 +167,16 @@ test('PUBLISH-FIX-56: horizonForScope names the bite for every Judge setup and t
   const items = cellItems({ episodes: [e], outcomes: with5, scope: { setupType: 'RANGE_IGNITION', regime: 'LIVE_UNCLASSIFIED' }, costModel: { feePctPerSide: 0.8, slippageBps: 10 } });
   assert.equal(items.length, 1); assert.equal(items[0].metric, 2.5 - 1.6 - 0.2, 'the 5m return net of the fee and slippage both ways, not the 60m');
 });
+
+test('PUBLISH-FIX-83 item 24: the pattern journal is read into the store cache once and the heads are derived once per generation — a hundred patternHeads() calls do not re-read the file; an append refreshes the heads; a caller cannot corrupt the cache through the Map it was handed', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-promoter-cache-'));
+  try {
+    const store = createLearningStore({ dataDir: dir, log: () => {} }); seedCell(store);
+    const h1 = store.patternHeads(); assert.equal(h1.size, 1);
+    for (let i = 0; i < 100; i += 1) store.patternHeads();
+    const h2 = store.patternHeads(); assert.deepEqual([...h2.keys()], [...h1.keys()]); h2.clear(); assert.equal(store.patternHeads().size, 1, 'the handed-out Map is a copy');
+    const head = store.patternHeads().values().next().value; const next = nextPatternStep({ head, evidenceItems: [], pooledMean: 0.5, priorStrength: 8, nowTs: T0 });
+    store.appendPattern(buildPatternRecord({ predicate: head.predicate, scope: head.scope, origin: head.origin, createdTs: head.createdTs, ts: T0, seq: head.seq + 1, state: head.state, previousState: head.state, transitionReason: 'NEW_MATURED_EVIDENCE', evidence: next.evidence, estimate: next.estimate, contradictions: next.contradictions }));
+    assert.equal(store.patternHeads().values().next().value.seq, head.seq + 1, 'the append refreshed the derived heads'); assert.equal(store.patternHistory(head.patternId).length, head.seq + 2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
