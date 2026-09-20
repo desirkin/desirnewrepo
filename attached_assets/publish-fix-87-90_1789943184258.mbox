@@ -1,0 +1,1532 @@
+From 1d75a385e329039dcf1f1df0470a8c7a230646ca Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 20 Sep 2026 22:18:46 +0000
+Subject: [PATCH 1/4] =?UTF-8?q?PUBLISH-FIX-88:=20the=20Ask=20knows=20the?=
+ =?UTF-8?q?=20coins=20the=20run=20knows=20=E2=80=94=20a=20bare=20word=20('?=
+ =?UTF-8?q?brev',=20'gst')=20resolves=20against=20the=20universe,=20the=20?=
+ =?UTF-8?q?watch,=20the=20senses'=20attention=20and=20the=20Judge's=20cand?=
+ =?UTF-8?q?idates=20whatever=20its=20case;=20a=20coin=20the=20senses=20hav?=
+ =?UTF-8?q?e=20SEEN=20is=20answered=20from=20that=20memory=20(Wide=20Eye?=
+ =?UTF-8?q?=20ripple=20numbers,=20stalking,=20rumint,=20durable=20records)?=
+ =?UTF-8?q?=20even=20when=20the=20Judge=20never=20took=20a=20look;=20'why?=
+ =?UTF-8?q?=20didn't=20you=20buy=20X'=20/=20'why=20did=20you=20not=20buy?=
+ =?UTF-8?q?=20X'=20is=20a=20WHY=5FSKIP=20(it=20read=20as=20WHY=5FBUY)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ paper/companion.js                          | 21 ++++++++++---
+ test/publish-fix-88-ask-known-coins.test.js | 33 ++++++++++++++++++++
+ ui/attention-view.js                        |  8 +++++
+ ui/server.js                                | 34 +++++++++++++++++++--
+ 4 files changed, 89 insertions(+), 7 deletions(-)
+ create mode 100644 test/publish-fix-88-ask-known-coins.test.js
+
+diff --git a/paper/companion.js b/paper/companion.js
+index ce0a23f..39ea9a2 100644
+--- a/paper/companion.js
++++ b/paper/companion.js
+@@ -39,17 +39,28 @@ export const canonicalCoinOf = (symbol) => { const c = coinFromSymbol(String(sym
+ const sameCoin = (a, b) => Boolean(a && b) && canonicalCoinOf(a) === canonicalCoinOf(b);
+ 
+ // ---- question -> intent + symbol (nothing else is ever read from a question) ---------------------------------------------------
+-export function classify(question) {
++// PUBLISH-FIX-88 (2026-09-20): `knownCoins` — the coins the run actually knows (the universe, the watch, the Wide Eye / rumint
++// attention, the venue catalog). A bare word that names one of them is that coin whatever its case: the owner typed "brev" and
++// "gst" — coins the cockpit was showing him — and the Ask answered "no record", because a bare word only counted when the
++// question carried it in UPPER CASE. Aliases and the UPPER-CASE rule stay; the catalog check comes first.
++export function classify(question, { knownCoins = null } = {}) {
+   const q = clean(question); const up = q.toUpperCase();
+   let symbol = null; const pair = up.match(/\b([A-Z]{2,10})\/(USD|USDT|EUR|USDC)\b/); const cash = up.match(/\$([A-Z]{2,10})\b/);
+   if (pair) symbol = canonicalCoinOf(pair[1]); else if (cash) symbol = canonicalCoinOf(cash[1]);
+-  else { for (const w of up.replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/)) { if (!w || STOP.has(w)) continue; if (ALIASES[w]) { symbol = ALIASES[w]; break; } if (/^[A-Z][A-Z0-9]{1,9}$/.test(w) && q.includes(w)) { symbol = w; break; } } }
++  else {
++    const words = up.replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter((w) => w && !STOP.has(w));
++    for (const w of words) { if (ALIASES[w]) { symbol = ALIASES[w]; break; } }
++    if (!symbol && knownCoins && typeof knownCoins.has === 'function') for (const w of words) { const c = canonicalCoinOf(w); if (knownCoins.has(c)) { symbol = c; break; } }
++    if (!symbol) for (const w of words) { if (/^[A-Z][A-Z0-9]{1,9}$/.test(w) && q.includes(w)) { symbol = w; break; } }
++  }
+   const l = q.toLowerCase();
+   let intent = 'HELP';
+   if (/\b(sense|senses|sensor|blocked|working|provider|feed|ears?|socrates|disabled)\b/.test(l)) intent = 'SENSES';
+   if (/\b(account|p&l|pnl|profit|loss|equity|cash|balance|costs?|fees?|performance|doing after)\b/.test(l)) intent = 'ACCOUNT';
+   if (/\bwatch(ing)?\b|\bopen position|\bstop\b|\bexit\b|\bprotection\b/.test(l)) intent = 'WATCH';
+-  if (/\b(skip|skipped|refuse|refused|didn'?t (buy|enter|trade)|not (buy|enter|trade)|pass(ed)? on|no trade)\b/.test(l)) intent = 'WHY_SKIP';
++  // PUBLISH-FIX-88: the owner's own phrasing — "why didn't you buy X", "why did you not buy X", "why didn’t he buy X", "why no trade
++  // on X" — is a WHY_SKIP; it used to read as WHY_BUY because the pattern wanted "didn't buy" with nothing between the words
++  if (/\b(skip|skipped|refuse|refused|did ?n[’']?t (you |he |it |the judge )?(buy|enter|trade|take|bite)|did not (you |he |it )?(buy|enter|trade|take|bite)|not (buy|enter|trade|take|bite)|pass(ed)? on|no trade|why not|missed?)\b/.test(l)) intent = 'WHY_SKIP';
+   else if (/\b(buy|bought|enter|entered|entry|long|took|why did you (get|go))\b/.test(l)) intent = 'WHY_BUY';
+   if (/\b(what are you doing|right now|status|currently|up to|going on)\b/.test(l)) intent = 'STATUS';
+   return { intent, symbol, question: q };
+@@ -80,8 +91,8 @@ async function journalDecisions(journalPage, coin) {
+ }
+ 
+ // ---- the answer ------------------------------------------------------------------------------------------------------------------
+-export async function answerQuestion({ question, judge = null, sensors = null, research = null, journalPage = null, now = Date.now() } = {}) {
+-  const c = classify(question); const ev = []; const lines = []; let availability = 'RECORDED';
++export async function answerQuestion({ question, judge = null, sensors = null, research = null, journalPage = null, now = Date.now(), knownCoins = null } = {}) {
++  const c = classify(question, { knownCoins }); const ev = []; const lines = []; let availability = 'RECORDED';
+   const { p, availability: pa, note, ts } = projectionOf(judge); if (ts) ev.push({ kind: 'JUDGE_PROJECTION', ts, id: p?.revision !== undefined ? `revision ${p.revision}` : null });
+   const bind = p ? `account ${p.accountId} · ${p.accountKind} ${p.runMode} · adapter ${p.adapter}` : null;
+   const degrade = (a) => { if (a === 'UNAVAILABLE') availability = 'UNAVAILABLE'; else if (a === 'UNVERIFIED' && availability === 'RECORDED') availability = 'UNVERIFIED'; };
+diff --git a/test/publish-fix-88-ask-known-coins.test.js b/test/publish-fix-88-ask-known-coins.test.js
+new file mode 100644
+index 0000000..e1a8d9b
+--- /dev/null
++++ b/test/publish-fix-88-ask-known-coins.test.js
+@@ -0,0 +1,33 @@
++// PUBLISH-FIX-88 (2026-09-20) — the Ask knows the coins the run knows. The owner asked "why didn't you buy brev" and "gst" about
++// coins the cockpit was showing him (Wide Eye ripples); the Ask answered "no record for BREV in this run" because a bare word
++// only became a coin when the question carried it in UPPER CASE. classify() now resolves a bare word against `knownCoins` first
++// (case-insensitive, aliases still first), and ui/server.js hands it the union of the universe, the watch, the senses' attention
++// and the Judge's candidates, then grounds the answer in what the senses have SEEN (ui/server.js seenByTheSenses).
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++import { classify, answerQuestion } from '../paper/companion.js';
++
++test('FIX88-1. a lower-case bare word that names a known coin is that coin; unknown bare words still need UPPER CASE; aliases win', () => {
++  const known = new Set(['BREV', 'GST', 'AKE']);
++  assert.equal(classify('why didn\'t you buy brev', { knownCoins: known }).symbol, 'BREV');
++  assert.equal(classify('Why did you skip gst?', { knownCoins: known }).symbol, 'GST');
++  assert.equal(classify('why didn\'t you buy brev').symbol, null, 'without a catalog the old rule stands');
++  assert.equal(classify('why didn\'t you buy zzzq', { knownCoins: known }).symbol, null, 'a word the run does not know is not a coin');
++  assert.equal(classify('how is the weather', { knownCoins: new Set(['THE']) }).symbol, null, 'stop words never become coins');
++  assert.equal(classify('why didn\'t you buy bitcoin', { knownCoins: known }).symbol, 'BTC', 'aliases still win');
++  assert.equal(classify('why didn\'t you buy brev', { knownCoins: known }).intent, 'WHY_SKIP');
++});
++
++test('FIX88-2. answerQuestion threads knownCoins through to the symbol it answers about', async () => {
++  const a = await answerQuestion({ question: 'why did you not buy ake', knownCoins: new Set(['AKE']) });
++  assert.equal(a.symbol, 'AKE'); assert.equal(a.intent, 'WHY_SKIP');
++});
++
++test('FIX88-3. the cockpit server builds the catalog from the universe, the watch, the attention and the candidates, and grounds a coin answer in what the senses saw', () => {
++  const src = readFileSync(new URL('../ui/server.js', import.meta.url), 'utf8');
++  assert.match(src, /function knownCoinsForAsk\(\)/); assert.match(src, /attentionSymbols\(\)/); assert.match(src, /readCurrentUniverse\(\)/);
++  assert.match(src, /answerQuestion\(\{ question, judge, sensors, research, journalPage: askJournalPage, knownCoins \}\)/);
++  assert.match(src, /async function seenByTheSenses\(coin\)/); assert.match(src, /Seen by the senses/);
++  const av = readFileSync(new URL('../ui/attention-view.js', import.meta.url), 'utf8'); assert.match(av, /export function attentionSymbols/);
++});
+diff --git a/ui/attention-view.js b/ui/attention-view.js
+index da64795..0f6d928 100644
+--- a/ui/attention-view.js
++++ b/ui/attention-view.js
+@@ -420,3 +420,11 @@ export function attentionForCoin(coin, { now = Date.now() } = {}) {
+     focusReason: best?.reason ?? null,
+   };
+ }
++
++// PUBLISH-FIX-88: every coin the senses currently know by name (the stalking list, the Wide Eye's fresh ripples, rumint) — the
++// Ask's catalog for a bare word in a question. Best effort: a source that fails contributes nothing.
++export function attentionSymbols({ now = Date.now() } = {}) {
++  const out = new Set();
++  for (const fn of [stalkingEntries, wideEyeEntries, rumintEntries]) { try { for (const e of fn(now)) if (e?.symbol) out.add(e.symbol); } catch { /* one source down never empties the catalog */ } }
++  return out;
++}
+diff --git a/ui/server.js b/ui/server.js
+index 066b757..a933841 100644
+--- a/ui/server.js
++++ b/ui/server.js
+@@ -20,7 +20,7 @@ import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
+ import { nowIso } from '../lib/time.js';
+ import { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_MS } from './auth.js';
+ import { getPersistence } from '../persistence/runtime.js';
+-import { attentionSnapshot, attentionForCoin, earsRoom, wideEyeRoom } from './attention-view.js';
++import { attentionSnapshot, attentionForCoin, attentionSymbols, earsRoom, wideEyeRoom } from './attention-view.js';
+ import { MemoryView } from '../persistence/memory-view.js';
+ import { marketResearchRootFromEnv, CASE_DIR_NAME_RE } from '../market-lab/paths.js';
+ import { readExecutionProjection, projectionFile as executionProjectionFile } from '../state/execution-projection.js';
+@@ -32,6 +32,7 @@ import { loadProfile as loadPaperProfile, profileEnvironment as paperProfileEnvi
+ import { answerQuestion, boundHistory, SUGGESTED_QUESTIONS, COMPANION_VERSION, COMPANION_LABEL, MAX_QUESTION_CHARS, askWhyNotChatText } from '../paper/companion.js';
+ import { createChatDispatcher } from '../paper/companion-chat.js';
+ import { loadCoinDossier } from '../paper/coin-dossier.js';
++import { readCurrentUniverse } from '../tape/universe.js';
+ import { explainerControlsView, setExplainerToggles } from '../lib/explainer-toggles.js';
+ import { readDataOnlyRuntimeStatus, dataOnlyPublicStatus, dataOnlySensorSnapshot, dataOnlyMarketView } from '../lib/data-only-status.js';
+ import { readBroadKrakenLatest } from '../market-lab/broad-kraken.js';
+@@ -150,12 +151,41 @@ function explainerView() { let talkUsd = 0; try { talkUsd = Number(chat().status
+ // this wrapper reads the live chat status and the ASK meter
+ function askWhyNotChat() { let st; try { st = chat().status(); } catch { st = { state: 'NOT_CONFIGURED', reason: 'CHAT_UNAVAILABLE' }; } const meter = st?.state === 'READY' ? (explainerView()?.ask ?? null) : null; return askWhyNotChatText({ status: st, meter }); }
+ function askStatusView() { let c = null; try { c = chat().status(); } catch (err) { c = { state: 'NOT_CONFIGURED', reason: 'CHAT_UNAVAILABLE', notice: String(err.message).slice(0, 120) }; } return { label: COMPANION_LABEL, version: COMPANION_VERSION, suggestions: [...SUGGESTED_QUESTIONS], chat: c, explainer: explainerView(), authority: 'READ_ONLY' }; }
++function knownCoinsForAsk() {
++  const out = new Set();
++  try { for (const c of attentionSymbols()) out.add(c); } catch { /* best effort */ }
++  try { for (const p of (readCurrentUniverse()?.pairs ?? [])) if (p?.coin) out.add(String(p.coin).toUpperCase()); } catch { /* best effort */ }
++  try { const v = judgeView(); for (const c of (v?.projection?.candidates ?? v?.candidates ?? [])) { const id = c?.assetId ?? c?.coin ?? c?.symbol; if (id) out.add(String(id).split('/')[0].toUpperCase()); } } catch { /* best effort */ }
++  try { const w = JSON.parse(readFs(path.join(dataDir(), 'learning', 'volatility', 'current.json')).toString('utf8')); for (const e of (w?.ranked ?? w?.entrants ?? [])) { const id = e?.coin ?? e?.symbol; if (id) out.add(String(id).toUpperCase()); } } catch { /* best effort */ }
++  return out;
++}
++// what the senses know about one coin, in plain lines: the Wide Eye ripple with its numbers, the stalking / watch state, rumint,
++// and the durable memory's recent records — so "no recorded look" is never the whole answer for a coin the cockpit is showing
++async function seenByTheSenses(coin) {
++  const d = await coinDetail(coin); const lines = []; const facts = { coin, wideEye: null, stalking: null, rumint: null, memory: 0 };
++  const when = (ts) => (Number.isFinite(ts) ? new Date(ts).toISOString().slice(11, 16) + ' UTC' : '?');
++  const a = d.attention ?? {};
++  if (a.wideEye) { facts.wideEye = { zVol: a.wideEye.zVol ?? null, zRet: a.wideEye.zRet ?? null, ts: a.wideEye.ts ?? null }; lines.push(`- WIDE EYE saw it ripple at ${when(a.wideEye.ts)} (volume z ${a.wideEye.zVol ?? '?'}, return z ${a.wideEye.zRet ?? '?'}). A ripple is a survey sighting across 612 pairs; it is not a Judge look — the Judge only looks at coins admitted to his watch (the top movers, the hot lane, nominations).`); }
++  if (a.stalking) { facts.stalking = a.stalking.kind ?? a.stalking.reason ?? true; lines.push(`- On the stalking list: ${a.stalking.reason ?? a.stalking.kind ?? 'yes'} (since ${when(a.stalking.ts)}).`); }
++  if (a.rumint) { facts.rumint = a.rumint.kind ?? true; lines.push(`- Rumint: ${a.rumint.reason ?? a.rumint.kind ?? 'nominated'} at ${when(a.rumint.ts)}.`); }
++  const recs = d.memory?.records ?? []; facts.memory = recs.length;
++  if (recs.length) lines.push(`- Durable memory: ${recs.length} record(s), newest ${recs.slice(-3).reverse().map((r) => `${r.sourceModule ?? '?'}·${r.eventType ?? '?'} ${when(r.ts)}`).join('; ')}.`);
++  if (!lines.length && d.available === false) lines.push('- No sense has a record of this coin, and there is no synced book for it: it was never in the run\'s universe.');
++  return { lines, facts };
++}
+ async function askHandler(req, res, body) {
+   if (!askAllowed()) { json(res, 429, { ok: false, reason: 'RATE_LIMITED' }); return; }
+   const question = typeof body?.question === 'string' ? body.question.trim() : ''; if (!question.length || question.length > MAX_QUESTION_CHARS) { json(res, 400, { ok: false, reason: 'QUESTION_REQUIRED', max: MAX_QUESTION_CHARS }); return; }
+   const history = boundHistory(body?.history); const mode = body?.mode === 'chat' ? 'chat' : 'evidence';
+   let judge = null; let sensors = null; let research = null; try { judge = judgeView(); } catch (err) { judge = { enabled: false, error: String(err.message).slice(0, 120) }; } try { sensors = sensorsView(); } catch { sensors = null; } try { research = marketResearchSummary(); } catch { research = null; }
+-  let answer = await answerQuestion({ question, judge, sensors, research, journalPage: askJournalPage });
++  // PUBLISH-FIX-88: the Ask knows every coin the run knows — a bare word like "brev" resolves against the universe, the watch, the
++  // senses' attention and the Judge's candidates — and a coin the senses have SEEN is answered from that memory even when the Judge
++  // never took a look (the owner: "it says it hasn't seen these coins, but I only chose them because the snake was staring at them")
++  const knownCoins = knownCoinsForAsk();
++  let answer = await answerQuestion({ question, judge, sensors, research, journalPage: askJournalPage, knownCoins });
++  let seen = null;
++  if (answer.symbol) { try { seen = await seenByTheSenses(answer.symbol); } catch (err) { console.error(`ask seen-by: ${String(err?.message ?? err).slice(0, 120)}`); } }
++  if (seen && seen.lines.length) answer = { ...answer, answer: `${answer.answer}\n\nSeen by the senses (${answer.symbol}):\n${seen.lines.join('\n')}`, seen: seen.facts };
+   // PUBLISH-FIX-72: a question about a coin gets that coin's DOSSIER — every recorded look of the last 24 h with the gate that said no in
+   // plain words, what the coin did after each pass, the watch and the mover board — appended to the recorded-evidence answer and handed
+   // to the model as grounding. Read-only, bounded, best-effort: a dossier that cannot be built changes nothing.
+-- 
+2.43.0
+
+
+From 1372c3bf56b0f6537c60923dd3ae2caf6aa902b8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 20 Sep 2026 22:19:47 +0000
+Subject: [PATCH 2/4] =?UTF-8?q?PUBLISH-FIX-89:=20gate=20lessons=20?=
+ =?UTF-8?q?=E2=80=94=20a=20future-dated=20lesson=20(computedTs=20beyond=20?=
+ =?UTF-8?q?5=20min=20of=20clock=20skew)=20is=20rejected,=20and=20the=20age?=
+ =?UTF-8?q?=20limit=20is=20judged=20on=20every=20read,=20not=20only=20at?=
+ =?UTF-8?q?=20refresh=20(blind=20review=20864b4c3a=20F3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ learning/gate-lesson.js                     | 17 +++++++++++++++--
+ test/publish-fix-84-lesson-kill-age.test.js | 12 ++++++++++++
+ 2 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/learning/gate-lesson.js b/learning/gate-lesson.js
+index f7421f4..25fcac2 100644
+--- a/learning/gate-lesson.js
++++ b/learning/gate-lesson.js
+@@ -252,6 +252,7 @@ export function parseOwnerGateLines(raw) {
+ // running) is not a lesson — reference lines, with a line saying why.
+ export const GATE_LESSON_MAX_AGE_MS = 7 * 24 * 3_600_000;
+ export const KILL_RECHECK_MS = 5_000;
++export const MAX_FUTURE_SKEW_MS = 5 * 60_000;
+ export function createGateLesson({ dataDir, clock = () => Date.now(), log = () => {}, ownerLines = null, maxLessonAgeMs = GATE_LESSON_MAX_AGE_MS, killRecheckMs = KILL_RECHECK_MS } = {}) {
+   if (typeof dataDir !== 'string' || !dataDir) throw new Error('gate lesson: dataDir required');
+   const P = gateLessonPaths(dataDir); const killFile = path.join(dataDir, 'learning', 'kill.json');
+@@ -263,23 +264,35 @@ export function createGateLesson({ dataDir, clock = () => Date.now(), log = () =
+   function killState() { if (!existsSync(killFile)) return { state: 'ARMED', reason: null }; try { const k = JSON.parse(readFileSync(killFile, 'utf8')); return k && typeof k === 'object' && ['ARMED', 'KILLED'].includes(k.state) ? { state: k.state, reason: k.reason ?? null } : { state: 'KILLED', reason: 'KILL_FILE_INVALID' }; } catch { return { state: 'KILLED', reason: 'KILL_FILE_UNREADABLE' }; } }
+   const logKey = () => `${killed ? `KILLED:${killed.reason}` : 'ARMED'}:${stale ? `STALE:${stale.ageMs}` : ''}:${lesson ? JSON.stringify(lesson.lines) + ':' + lesson.computedTs : 'none'}`;
+   function checkKill(now) { killCheckedAt = now; const k = killState(); killed = k.state === 'KILLED' ? k : null; }
++  // PUBLISH-FIX-89 (blind review 864b4c3a F3): the lesson's clock is judged on EVERY read, not only at refresh — a lesson that
++  // crosses the age limit between refreshes drops to reference lines on the next look, and a lesson stamped in the FUTURE (a
++  // wrong clock, a hand-written file) is never a lesson: only MAX_FUTURE_SKEW_MS of skew is allowed, and it fails closed.
++  function clockVerdict(now) {
++    if (!lesson) return null;
++    const computedTs = Number.isSafeInteger(lesson.computedTs) ? lesson.computedTs : 0;
++    if (computedTs - now > MAX_FUTURE_SKEW_MS) return { future: true, ageMs: now - computedTs, computedTs };
++    const ageMs = now - computedTs;
++    if (Number.isFinite(maxLessonAgeMs) && maxLessonAgeMs > 0 && ageMs > maxLessonAgeMs) return { future: false, ageMs, computedTs };
++    return null;
++  }
+   function refresh() {
+     stale = null;
+     try { lesson = existsSync(P.lesson) ? readJsonBounded(P.lesson, 4 * 1024 * 1024) : null; if (lesson && lesson.version !== GATE_LESSON_VERSION) lesson = null; }
+     catch (err) { log(`GATE LEARNING lesson unreadable (reference lines): ${String(err?.message ?? err).slice(0, 120)}`); lesson = null; }
+     const now = clock();
+-    if (lesson && Number.isFinite(maxLessonAgeMs) && maxLessonAgeMs > 0) { const ageMs = now - (Number.isSafeInteger(lesson.computedTs) ? lesson.computedTs : 0); if (ageMs > maxLessonAgeMs) { stale = { ageMs, computedTs: lesson.computedTs ?? null }; lesson = null; } }
++    const v = clockVerdict(now); if (v) { stale = v; lesson = null; }
+     checkKill(now);
+     const key = logKey(); if (key !== lastLogged) { lastLogged = key; log(line()); }
+     return current();
+   }
+   function current() {
+     const now = clock(); if (now - killCheckedAt >= killRecheckMs) { const was = killed ? killed.reason : null; checkKill(now); const is = killed ? killed.reason : null; if (was !== is) { const key = logKey(); if (key !== lastLogged) { lastLogged = key; log(line()); } } }
++    const v = clockVerdict(now); if (v) { stale = v; lesson = null; const key = logKey(); if (key !== lastLogged) { lastLogged = key; log(line()); } }
+     return killed || !lesson ? { lines: {}, killed: killed ? { reason: killed.reason } : null, stale } : { lines: lesson.lines ?? {}, killed: null, stale: null };
+   }
+   // the Judge's port answers a flat { FI15: 0.15, RV60: 1.0, ... }; RV60 is learned per setup, the Judge asks per setup
+   function lessonFor(setupId = null) { const c = current(); const out = {}; for (const [id, v] of Object.entries(c.lines)) { if (id === 'RV60') { const s = setupId && v && typeof v === 'object' ? v[setupId] : undefined; if (typeof s === 'number') out.RV60 = s; } else if (typeof v === 'number') out[id] = v; } for (const id of ownerIds) out[id] = owner.lines[id]; return out; }
+   const ownerText = () => (ownerIds.length ? ` | OWNER LINES in force: ${ownerIds.map((id) => `${id} ${owner.lines[id]}`).join(', ')}` : '');
+-  function line() { if (killed) return `GATE LEARNING: DORMANT — learned influence KILLED (data/learning/kill.json${killed.reason ? `: ${killed.reason}` : ''}); reference lines in force${ownerText()}`; if (stale) return `GATE LEARNING: lesson STALE — computed ${Math.round(stale.ageMs / 3_600_000)} h ago, older than ${Math.round(maxLessonAgeMs / 3_600_000)} h; reference lines in force until the study runs again${ownerText()}`; return `${gateLessonLine(lesson)}${ownerText()}`; }
++  function line() { if (killed) return `GATE LEARNING: DORMANT — learned influence KILLED (data/learning/kill.json${killed.reason ? `: ${killed.reason}` : ''}); reference lines in force${ownerText()}`; if (stale) return stale.future ? `GATE LEARNING: lesson REJECTED — computedTs is ${Math.round(-stale.ageMs / 60_000)} min in the FUTURE (clock skew beyond ${Math.round(MAX_FUTURE_SKEW_MS / 60_000)} min); reference lines in force until a lesson with a sane clock lands${ownerText()}` : `GATE LEARNING: lesson STALE — computed ${Math.round(stale.ageMs / 3_600_000)} h ago, older than ${Math.round(maxLessonAgeMs / 3_600_000)} h; reference lines in force until the study runs again${ownerText()}`; return `${gateLessonLine(lesson)}${ownerText()}`; }
+   return { refresh, lesson: lessonFor, current, line, paths: P, ownerLines: () => ({ ...owner.lines }) };
+ }
+diff --git a/test/publish-fix-84-lesson-kill-age.test.js b/test/publish-fix-84-lesson-kill-age.test.js
+index 0f89e50..d610452 100644
+--- a/test/publish-fix-84-lesson-kill-age.test.js
++++ b/test/publish-fix-84-lesson-kill-age.test.js
+@@ -37,3 +37,15 @@ test('FIX84-L2 (F3). a lesson older than the age limit is reference lines, logge
+   const fresh = root(now - 6 * 24 * 3_600_000); const l2 = createGateLesson({ dataDir: fresh.dir, clock: () => now }); l2.refresh();
+   assert.deepEqual(l2.lesson('RANGE_IGNITION'), { FI15: 0.2 });
+ });
++
++test('FIX89-L3 (blind review 864b4c3a F3). a future-dated lesson is rejected on read; a lesson that ages past the limit between refreshes drops on the next read, not the next refresh', () => {
++  let now = 1_000_000_000_000; const r = root(now + 24 * 3_600_000); const logs = [];
++  const lesson = createGateLesson({ dataDir: r.dir, clock: () => now, log: (l) => logs.push(String(l)) }); lesson.refresh();
++  assert.deepEqual(lesson.lesson('RANGE_IGNITION'), {}, 'a lesson from tomorrow is not a lesson');
++  assert.match(lesson.line(), /REJECTED — computedTs is \d+ min in the FUTURE/);
++  // a sane lesson, then time passes beyond the limit with no refresh
++  const fresh = root(now - 60_000); const l2 = createGateLesson({ dataDir: fresh.dir, clock: () => now, maxLessonAgeMs: 3_600_000 }); l2.refresh();
++  assert.deepEqual(l2.lesson('RANGE_IGNITION'), { FI15: 0.2 });
++  now += 3_600_000 + 61_000;
++  assert.deepEqual(l2.lesson('RANGE_IGNITION'), {}, 'aged out on the read itself'); assert.match(l2.line(), /lesson STALE/);
++});
+-- 
+2.43.0
+
+
+From 8834fd495137a70c7d6b30b159c538eafd11aa1c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 20 Sep 2026 22:21:55 +0000
+Subject: [PATCH 3/4] =?UTF-8?q?PUBLISH-FIX-87:=20the=20paper=20fee=20is=20?=
+ =?UTF-8?q?the=20REAL=20Kraken=20Pro=20Tier-1=20taker,=200.80%=20a=20side?=
+ =?UTF-8?q?=20(1.60%=20a=20round=20trip)=20for=20a=20$500=20account=20buyi?=
+ =?UTF-8?q?ng=20at=20market=20=E2=80=94=20new=20policy=20+=20account=20pap?=
+ =?UTF-8?q?er-starting-styles-usd500-fee080=20with=20the=20tier,=20source?=
+ =?UTF-8?q?=20and=20date=20recorded=20(config/kraken-fee-snapshot.json=20c?=
+ =?UTF-8?q?arries=20the=20whole=20July-2026=20schedule);=20lib/kraken-fee-?=
+ =?UTF-8?q?tier.js=20corrected=20to=20that=20schedule;=20the=20bite=20dril?=
+ =?UTF-8?q?l=20proves=20what=20the=20real=20fee=20does=20(a=20~4%=20measur?=
+ =?UTF-8?q?ed=20move=20is=20refused=20REWARD=5FRISK=5FBELOW=5F1=5F5,=20a?=
+ =?UTF-8?q?=20~6%=20move=20buys=20$162=20of=20$500);=20authority=20line=20?=
+ =?UTF-8?q?THRESHOLD=20CHANGES=20no=20longer=20contradicts=20GATE=20LEARNI?=
+ =?UTF-8?q?NG=20ON=20(review=20F9);=20=C2=A74.36?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ .../judge.paper.starting-styles-fee080.json   | 121 ++++++++++++++++++
+ config/kraken-fee-snapshot.json               | 105 +++++++++++++++
+ config/paper-runtime.json                     |   4 +-
+ docs/JUDGE-PAPER-AUDIT.md                     |  27 +++-
+ docs/PAPER-RUNBOOK.md                         |   2 +-
+ .../policy.paper-starting-styles-fee080.json  | 121 ++++++++++++++++++
+ lib/kraken-fee-tier.js                        |  25 ++--
+ paper/profile.js                              |   2 +-
+ test/kraken-fee-tier.test.js                  |  16 +--
+ test/paper-bite-drill.test.js                 |  27 +++-
+ test/paper-e2e-pg.test.js                     |   6 +-
+ test/paper-runtime.test.js                    |   8 +-
+ 12 files changed, 425 insertions(+), 39 deletions(-)
+ create mode 100644 config/judge.paper.starting-styles-fee080.json
+ create mode 100644 config/kraken-fee-snapshot.json
+ create mode 100644 judge/samples/policy.paper-starting-styles-fee080.json
+
+diff --git a/config/judge.paper.starting-styles-fee080.json b/config/judge.paper.starting-styles-fee080.json
+new file mode 100644
+index 0000000..bf7ca5f
+--- /dev/null
++++ b/config/judge.paper.starting-styles-fee080.json
+@@ -0,0 +1,121 @@
++{
++  "policyVersion": "judge-policy-2",
++  "policyName": "paper-starting-styles-usd500-fee080",
++  "strategyVersion": "judge-strategy-starting-styles-edge-2",
++  "costModelVersion": "judge-cost-paper-reference-1",
++  "watchVersion": "watch-paper-edge-state-2",
++  "mode": "PAPER",
++  "venue": "kraken",
++  "quote": "USD",
++  "account": {
++    "accountId": "paper-starting-styles-usd500-fee080",
++    "initialCapital": "500",
++    "compounding": "NONE"
++  },
++  "limits": {
++    "maxSimultaneousAssetPositions": 1,
++    "maxModelledRiskPerPositionFraction": 0.03,
++    "maxAggregateModelledRiskFraction": 0.03,
++    "maxCorrelatedClusterModelledRiskFraction": 0.03,
++    "dailyLossRestrictionFraction": 0.05,
++    "peakEquityDrawdownRestrictionFraction": 0.1,
++    "maxGrossExposureFraction": 1,
++    "maxAssetExposureFraction": 1
++  },
++  "execution": {
++    "adapter": "PAPER",
++    "paperLatencyMs": 250,
++    "paperMaxObservationWaitMs": 1000,
++    "entryDeadlineMs": 3000,
++    "maxBookAgeMs": 1000,
++    "maxReceiptToDecisionLagMs": 500,
++    "admissionBucketMs": 25,
++    "queueExpiryMs": 100,
++    "proposalExpiryMs": 10000,
++    "cooldownMs": 60000,
++    "maxDurationMs": 14400000
++  },
++  "fees": {
++    "taker": {
++      "rate": "0.008",
++      "rateKind": "PAPER_REFERENCE",
++      "currency": "QUOTE",
++      "roundingQuantum": "0.01",
++      "roundingMode": "UP",
++      "minimumFee": "0",
++      "scope": "ORDER_TOTAL",
++      "maxExecutionsBound": null,
++      "boundSource": null,
++      "scheduleId": "Kraken Pro public spot TAKER Tier 1 ($0+ 30-day volume): 0.80% per side, 1.60% round trip; maker not assumed. Source kraken.com/features/fee-schedule (tiers effective 2026-07-09), read 2026-09-20 (PUBLISH-FIX-87). PUBLIC schedule, not the owner account; full snapshot: config/kraken-fee-snapshot.json"
++    }
++  },
++  "universe": {
++    "excludeBases": [
++      "USDT",
++      "USDC",
++      "DAI",
++      "TUSD",
++      "PYUSD",
++      "USDS",
++      "RLUSD",
++      "FDUSD",
++      "USDG",
++      "EURT",
++      "USDR",
++      "EUR",
++      "GBP",
++      "AUD",
++      "CHF",
++      "CAD",
++      "JPY",
++      "EURR"
++    ],
++    "maxCandidates": 6,
++    "maxResearch": 2,
++    "maxHotSet": 12,
++    "preparationSlots": 6
++  },
++  "setups": {
++    "enabled": [
++      "MOMENTUM_CONTINUATION",
++      "RANGE_IGNITION",
++      "TREND_PULLBACK_CONTINUATION",
++      "ABSORPTION_RECLAIM",
++      "CATALYST_TRANSMISSION",
++      "MICRO_BITE"
++    ],
++    "inputModes": [
++      "MARKET_DIRECT",
++      "CASE_ENRICHED",
++      "CATALYST_CASE"
++    ],
++    "selectionVersion": "judge-setup-selection-1",
++    "edgeStateVersion": "judge-edge-state-1"
++  },
++  "evaluation": {
++    "seed": "paper-reference-seed-2026-09-08",
++    "arms": [
++      "REF_RANGE_IGNITION",
++      "REF_ABSORPTION_RECLAIM",
++      "REF_TREND_PULLBACK_CONTINUATION",
++      "REF_CATALYST_TRANSMISSION",
++      "REF_COMBINED",
++      "D1_PRESSURE_TO_PROGRESS",
++      "D2_FLOW_EVENT_RESPONSE",
++      "D3_RESIDUAL_IGNITION",
++      "D4_PLANNED_TARGET_MATCHED",
++      "D4_PLANNED_TARGET_FUNDED",
++      "CASH",
++      "MOMENTUM_ABLATION",
++      "SEEDED_NOMINATION_CONTROL"
++    ],
++    "splits": {
++      "developmentFraction": 0.5,
++      "validationFraction": 0.25,
++      "holdoutFraction": 0.25,
++      "embargoMs": 14400000
++    }
++  },
++  "live": null,
++  "authorityNote": "The SELECTED paper policy (config/paper-runtime.json names it: the default, not opt-in). Limits unchanged. Existing accounts never reset: a fee binds an account for life, so this is a NEW account. NO_TRADE is valid. Strategies are unvalidated hypotheses. Fee 0.80% taker/side (Kraken Tier 1)."
++}
+diff --git a/config/kraken-fee-snapshot.json b/config/kraken-fee-snapshot.json
+new file mode 100644
+index 0000000..e754ff2
+--- /dev/null
++++ b/config/kraken-fee-snapshot.json
+@@ -0,0 +1,105 @@
++{
++ "tier": 1,
++ "makerPct": 0.4,
++ "takerPct": 0.8,
++ "volume30dUsdFrom": 0,
++ "assetsOnPlatformUsdFrom": null,
++ "source": "https://www.kraken.com/features/fee-schedule",
++ "asOf": "2026-09-20",
++ "verification": "PUBLIC_SCHEDULE_NOT_ACCOUNT",
++ "policyFile": "config/judge.paper.starting-styles-fee080.json",
++ "accountId": "paper-starting-styles-usd500-fee080",
++ "takerRateBound": "0.008",
++ "roundTripPct": 1.6,
++ "schedule": [
++  {
++   "tier": 1,
++   "volumeFromUsd": 0,
++   "aopFromUsd": null,
++   "makerPct": 0.4,
++   "takerPct": 0.8
++  },
++  {
++   "tier": 2,
++   "volumeFromUsd": 2500,
++   "aopFromUsd": null,
++   "makerPct": 0.3,
++   "takerPct": 0.6
++  },
++  {
++   "tier": 3,
++   "volumeFromUsd": 10000,
++   "aopFromUsd": 20000,
++   "makerPct": 0.22,
++   "takerPct": 0.38
++  },
++  {
++   "tier": 4,
++   "volumeFromUsd": 25000,
++   "aopFromUsd": 50000,
++   "makerPct": 0.2,
++   "takerPct": 0.35
++  },
++  {
++   "tier": 5,
++   "volumeFromUsd": 50000,
++   "aopFromUsd": 100000,
++   "makerPct": 0.15,
++   "takerPct": 0.3
++  },
++  {
++   "tier": 6,
++   "volumeFromUsd": 100000,
++   "aopFromUsd": 200000,
++   "makerPct": 0.12,
++   "takerPct": 0.25
++  },
++  {
++   "tier": 7,
++   "volumeFromUsd": 250000,
++   "aopFromUsd": 400000,
++   "makerPct": 0.1,
++   "takerPct": 0.22
++  },
++  {
++   "tier": 8,
++   "volumeFromUsd": 500000,
++   "aopFromUsd": 600000,
++   "makerPct": 0.08,
++   "takerPct": 0.2
++  },
++  {
++   "tier": 9,
++   "volumeFromUsd": 1000000,
++   "aopFromUsd": 1000000,
++   "makerPct": 0.06,
++   "takerPct": 0.18
++  },
++  {
++   "tier": 10,
++   "volumeFromUsd": 2500000,
++   "aopFromUsd": 2500000,
++   "makerPct": 0.04,
++   "takerPct": 0.15
++  },
++  {
++   "tier": 11,
++   "volumeFromUsd": 5000000,
++   "aopFromUsd": 5000000,
++   "makerPct": 0.02,
++   "takerPct": 0.12
++  },
++  {
++   "tier": 12,
++   "volumeFromUsd": 10000000,
++   "aopFromUsd": 10000000,
++   "makerPct": 0.0,
++   "takerPct": 0.1
++  }
++ ],
++ "sources": [
++  "https://www.kraken.com/features/fee-schedule",
++  "https://support.kraken.com/articles/cross-platform-fee-tier-changes"
++ ],
++ "note": "Tier = best of 30-day spot volume or Assets on Platform (effective 2026-07-09). The bound rate 0.008 is the Tier-1 taker (0.80%). This is the PUBLIC schedule; the owner account's actual per-pair fee is read only by lib/kraken-fee-tier.js from TradeVolume when a read-only key is set by NAME."
++}
+diff --git a/config/paper-runtime.json b/config/paper-runtime.json
+index 1ed323e..fcdc0fc 100644
+--- a/config/paper-runtime.json
++++ b/config/paper-runtime.json
+@@ -16,7 +16,7 @@
+   "config": "cobra.config.json",
+   "marketResearchPolicy": "config/market-research.paper.json",
+   "marketResearchSubjects": "config/market-subjects.paper.json",
+-  "judgePolicy": "config/judge.paper.starting-styles-fee040.json",
++  "judgePolicy": "config/judge.paper.starting-styles-fee080.json",
+   "envExample": ".env.paper.example",
+   "runbook": "docs/PAPER-RUNBOOK.md"
+  },
+@@ -79,7 +79,7 @@
+    "model": { "desiredState": "REQUEST", "blockerPolicy": "PAID_GATE", "authority": "NONE", "credentialEnv": "ANTHROPIC_API_KEY", "budgetSource": "config/market-research.paper.json model.* (explicit USD caps; shipped 0 = blocked)" }
+   },
+   "judge": {
+-   "judge": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "judge/composition.js", "mode": "PAPER", "enableEnv": "JUDGE_ENABLED", "policyFile": "config/judge.paper.starting-styles-fee040.json", "accountId": "paper-starting-styles-usd500-fee040", "authority": "PAPER_SIMULATION_ONLY" },
++   "judge": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "judge/composition.js", "mode": "PAPER", "enableEnv": "JUDGE_ENABLED", "policyFile": "config/judge.paper.starting-styles-fee080.json", "accountId": "paper-starting-styles-usd500-fee080", "authority": "PAPER_SIMULATION_ONLY" },
+    "neverWatch": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "lib/never-watch.js", "env": "JUDGE_NEVER_WATCH", "bases": ["BTC", "ETH", "SOL", "LTC"], "note": "PUBLISH-FIX-76, owner directive 2026-09-19 (David: 'BTC and ETH should never even be seen by us'); PUBLISH-FIX-77 adds SOL and LTC: of the 28 cage-blocked bites graded 2026-09-19, every FLAT one was BTC / ETH / SOL / LTC — the big coins do not move 0.8% in 15 minutes, so they cannot pay the round trip: these bases are dropped from every Judge nomination source (universe, volatility watch, re-look, scout) before the Judge hears of them; the tape still carries their books as market context." },
+    "secondLook": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "judge/judge.js", "env": ["JUDGE_SECOND_LOOK_AFTER_MS", "JUDGE_SECOND_LOOK_MAX"], "afterMs": 180000, "maxLooks": 2, "note": "PUBLISH-FIX-79, owner directive 2026-09-19 (David: 'fix the thing that will make him miss the winners'): a look refused ONLY on buying-pressure gates (FI15, FI60_POSITIVE, RV60, the absorption priors) is retaken 3 minutes later at the same level if the coin still holds it — a fresh crossing, a fresh lock, every gate at full strength — up to 2 times per chain. No threshold moves. Set OFF for the baseline Judge." },
+    "gateLearning": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "learning/gate-lesson.js", "env": ["JUDGE_GATE_LEARNING", "JUDGE_GATE_MIN_SCORED", "JUDGE_GATE_MIN_COHORT", "JUDGE_GATE_MIN_FORWARD", "JUDGE_GATE_CONFIDENCE", "JUDGE_GATE_COST_HURDLE_PCT"], "minScored": 1000, "minCohort": 100, "minForward": 100, "confidence": 0.9, "note": "PUBLISH-FIX-82, owner directive 2026-09-19 (David: 'I want him to move the gate once it's tested enough — thousands and thousands of tests — without me having to say so'): the Judge's flow lines (FI15, FI60_POSITIVE, RV60, RECLAIM_FI15, FI15_FRESH_AT_D; judge/setups.js LEARNABLE_GATES, each inside a fixed band) are moved by his own scored looks: a move needs minScored scored looks on the gate, minCohort in the cohort it changes and bootstrap confidence the admitted looks' 15-minute return does not fall; it is PROPOSED, forward-tested on minForward looks scored after the proposal, then PUBLISHED; a published line that stops holding is REVERTED. One step per gate per cycle; the study runs every 30 minutes in a child process. Every move is one line in the log. Set OFF for the reference lines." },
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 3597dc8..55bca41 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -66,6 +66,29 @@ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe
+ all (49 files)   6016f931e15531e63a2f0d734137f914d9f8c0e2831902e4cc7806333fcd4127
+ ```
+ 
++### 4.36 Audited change — 2026-09-20 PUBLISH-FIX-87: the paper fee is the REAL Kraken Pro Tier-1 taker (0.80% a side) for a $500 account; a new account; the fee-tier reader on the July 2026 schedule (frozen core UNCHANGED; no digest moves)
++
++Two independent reviews (and the owner, every day) said the 0.40% reference was wrong for the account he will open. Checked
++against Kraken's own pages on 2026-09-20: since the cross-platform tiers of 2026-07-09, Tier 1 (30-day volume $0+) is 0.40%
++maker / **0.80% taker** a side; 0.40% taker is Tier 3 ($10K+ volume or $20K assets on platform). The owner's directive: "$500,
++the fees have to be exactly what we would be charged, dumping it all in" — a market (taker) buy and sell at Tier 1: 1.60% a
++round trip. A fee is a policy binding, immutable for the life of an account (`ACCOUNT_POLICY_MISMATCH` on any byte of the
++policy), so this is a NEW policy and account: `config/judge.paper.starting-styles-fee080.json` (= `judge/samples/policy.paper-
++starting-styles-fee080.json` byte for byte), `paper-starting-styles-usd500-fee080`, fees.taker.rate `0.008`, scheduleId naming
++the tier, the source and the date; the machine-readable snapshot of the whole schedule (tiers, AoP thresholds, sources) is
++`config/kraken-fee-snapshot.json`. `config/paper-runtime.json` names the new policy and account; boot needs the Secret
++`SERPENT_PAPER_INIT_ACCOUNT=paper-starting-styles-usd500-fee080` (by NAME) to create the account once. `lib/kraken-fee-tier.js`
++carries the corrected base and tier table (the reader still replaces it with the owner tier from TradeVolume when a read-only
++key is set). The fee040 account's history stands untouched as what it was: a Tier-3-taker / Tier-1-maker assumption.
++What the real fee does, proven by the drill (test/paper-bite-drill.test.js): a textbook setup with a ~4% measured move against
++a 0.6% stop buys at 0.40% a side and is REFUSED at 0.80% (`REWARD_RISK_BELOW_1_5`, a CLOSE CALL); the same setup with a ~6%
++measured move buys at 0.80% (q 0.0016 BTC, $162 of $500). At Tier 1 the Judge needs roughly a 5%+ measured move against a
++0.6% stop — the movers the volatility watch admits, not the majors. This is the truth of a $500 taker account; it is not
++softened. Also in this change (blind review 864b4c3a F9): the authority line `THRESHOLD CHANGES: NONE` contradicted GATE
++LEARNING ON; it now reads `THRESHOLD CHANGES: NONE BY HAND (gate learning ON: the five flow lines may move inside fixed bands,
++every move logged)` in paper/profile.js, docs/PAPER-RUNBOOK.md and the tests that pin it; the fee080 policy's authorityNote
++says it is the SELECTED default, not "opt-in".
++
+ ### 4.35 Audited change — 2026-09-20 PUBLISH-FIX-85: the target-cap law honours the reward-to-risk law (previous digests: judge `c4b99b933a2b…` → `96f83523029c…`, all `55b67b8bc7b8…` → `6016f931e155…`; execution and watch/watch.js UNCHANGED; 49 files)
+ 
+ The first hour of PUBLISH-FIX-84 (deployment d6ab0259) wrote the line the owner had been asking for: `CLOSE CALL: ARB/USD
+@@ -189,7 +212,7 @@ The full suite was run file by file (each file its own process) before this re-p
+ status doc for 2026-09-20.
+ 
+ Authority unchanged: no order, size, exit or strategy law moved; no new sense, no new strategy (FREEZE stands); learning
+-remains ranking-only and always ON with the kill file ARMED; `THRESHOLD CHANGES: NONE` remains the authority line for
++remains ranking-only and always ON with the kill file ARMED; `THRESHOLD CHANGES: NONE BY HAND (…)` remains the authority line for
+ hand changes. What moved are rulers (RV60 window, FI floor, depth band), plumbing (batching, lanes, holds, sweeps) and the
+ owner's CLEAR — each one named above with its test.
+ 
+@@ -256,7 +279,7 @@ reserves under a learned line with the GATE_LEARNING row; outside the band / fau
+ Full suite green before re-pinning.
+ 
+ Authority unchanged: the lines move inside their bands; no order, size, exit, strategy or structural clause is touched;
+-`THRESHOLD CHANGES: NONE` remains the authority line for hand changes — these are the Judge's own, each one logged.
++`THRESHOLD CHANGES: NONE BY HAND (…)` remains the authority line for hand changes — these are the Judge's own, each one logged.
+ 
+ ### 4.30 Audited change — 2026-09-19 PUBLISH-FIX-81: independent review cb305c6e, F4 + F5 on the move clock — the clock measures over the study's own two-hour horizon and honours the learned-influence kill file (previous judge digest `4f8c9e59c77e…`; now `d86afbd55cf3…`; 49 files; execution and watch UNCHANGED)
+ 
+diff --git a/docs/PAPER-RUNBOOK.md b/docs/PAPER-RUNBOOK.md
+index bfafd61..552c8c9 100644
+--- a/docs/PAPER-RUNBOOK.md
++++ b/docs/PAPER-RUNBOOK.md
+@@ -107,7 +107,7 @@ WITHDRAW/FUNDING: DISABLED
+ PAPER MODE: <READY_FOR_PAPER | NOT_READY_FOR_PAPER>
+ DARK KRAKEN JUDGE AUTHORITY: NONE
+ DARK KRAKEN SOCRATES AUTHORITY: NONE
+-THRESHOLD CHANGES: NONE
++THRESHOLD CHANGES: NONE BY HAND (gate learning ON: the five flow lines may move inside fixed bands, every move logged)
+ ```
+ 
+ ## 7. Frozen components
+diff --git a/judge/samples/policy.paper-starting-styles-fee080.json b/judge/samples/policy.paper-starting-styles-fee080.json
+new file mode 100644
+index 0000000..bf7ca5f
+--- /dev/null
++++ b/judge/samples/policy.paper-starting-styles-fee080.json
+@@ -0,0 +1,121 @@
++{
++  "policyVersion": "judge-policy-2",
++  "policyName": "paper-starting-styles-usd500-fee080",
++  "strategyVersion": "judge-strategy-starting-styles-edge-2",
++  "costModelVersion": "judge-cost-paper-reference-1",
++  "watchVersion": "watch-paper-edge-state-2",
++  "mode": "PAPER",
++  "venue": "kraken",
++  "quote": "USD",
++  "account": {
++    "accountId": "paper-starting-styles-usd500-fee080",
++    "initialCapital": "500",
++    "compounding": "NONE"
++  },
++  "limits": {
++    "maxSimultaneousAssetPositions": 1,
++    "maxModelledRiskPerPositionFraction": 0.03,
++    "maxAggregateModelledRiskFraction": 0.03,
++    "maxCorrelatedClusterModelledRiskFraction": 0.03,
++    "dailyLossRestrictionFraction": 0.05,
++    "peakEquityDrawdownRestrictionFraction": 0.1,
++    "maxGrossExposureFraction": 1,
++    "maxAssetExposureFraction": 1
++  },
++  "execution": {
++    "adapter": "PAPER",
++    "paperLatencyMs": 250,
++    "paperMaxObservationWaitMs": 1000,
++    "entryDeadlineMs": 3000,
++    "maxBookAgeMs": 1000,
++    "maxReceiptToDecisionLagMs": 500,
++    "admissionBucketMs": 25,
++    "queueExpiryMs": 100,
++    "proposalExpiryMs": 10000,
++    "cooldownMs": 60000,
++    "maxDurationMs": 14400000
++  },
++  "fees": {
++    "taker": {
++      "rate": "0.008",
++      "rateKind": "PAPER_REFERENCE",
++      "currency": "QUOTE",
++      "roundingQuantum": "0.01",
++      "roundingMode": "UP",
++      "minimumFee": "0",
++      "scope": "ORDER_TOTAL",
++      "maxExecutionsBound": null,
++      "boundSource": null,
++      "scheduleId": "Kraken Pro public spot TAKER Tier 1 ($0+ 30-day volume): 0.80% per side, 1.60% round trip; maker not assumed. Source kraken.com/features/fee-schedule (tiers effective 2026-07-09), read 2026-09-20 (PUBLISH-FIX-87). PUBLIC schedule, not the owner account; full snapshot: config/kraken-fee-snapshot.json"
++    }
++  },
++  "universe": {
++    "excludeBases": [
++      "USDT",
++      "USDC",
++      "DAI",
++      "TUSD",
++      "PYUSD",
++      "USDS",
++      "RLUSD",
++      "FDUSD",
++      "USDG",
++      "EURT",
++      "USDR",
++      "EUR",
++      "GBP",
++      "AUD",
++      "CHF",
++      "CAD",
++      "JPY",
++      "EURR"
++    ],
++    "maxCandidates": 6,
++    "maxResearch": 2,
++    "maxHotSet": 12,
++    "preparationSlots": 6
++  },
++  "setups": {
++    "enabled": [
++      "MOMENTUM_CONTINUATION",
++      "RANGE_IGNITION",
++      "TREND_PULLBACK_CONTINUATION",
++      "ABSORPTION_RECLAIM",
++      "CATALYST_TRANSMISSION",
++      "MICRO_BITE"
++    ],
++    "inputModes": [
++      "MARKET_DIRECT",
++      "CASE_ENRICHED",
++      "CATALYST_CASE"
++    ],
++    "selectionVersion": "judge-setup-selection-1",
++    "edgeStateVersion": "judge-edge-state-1"
++  },
++  "evaluation": {
++    "seed": "paper-reference-seed-2026-09-08",
++    "arms": [
++      "REF_RANGE_IGNITION",
++      "REF_ABSORPTION_RECLAIM",
++      "REF_TREND_PULLBACK_CONTINUATION",
++      "REF_CATALYST_TRANSMISSION",
++      "REF_COMBINED",
++      "D1_PRESSURE_TO_PROGRESS",
++      "D2_FLOW_EVENT_RESPONSE",
++      "D3_RESIDUAL_IGNITION",
++      "D4_PLANNED_TARGET_MATCHED",
++      "D4_PLANNED_TARGET_FUNDED",
++      "CASH",
++      "MOMENTUM_ABLATION",
++      "SEEDED_NOMINATION_CONTROL"
++    ],
++    "splits": {
++      "developmentFraction": 0.5,
++      "validationFraction": 0.25,
++      "holdoutFraction": 0.25,
++      "embargoMs": 14400000
++    }
++  },
++  "live": null,
++  "authorityNote": "The SELECTED paper policy (config/paper-runtime.json names it: the default, not opt-in). Limits unchanged. Existing accounts never reset: a fee binds an account for life, so this is a NEW account. NO_TRADE is valid. Strategies are unvalidated hypotheses. Fee 0.80% taker/side (Kraken Tier 1)."
++}
+diff --git a/lib/kraken-fee-tier.js b/lib/kraken-fee-tier.js
+index 4914e98..c26b109 100644
+--- a/lib/kraken-fee-tier.js
++++ b/lib/kraken-fee-tier.js
+@@ -1,6 +1,6 @@
+-// FEES (Ticket A, 2026-09-15) — the paper fee reference is Kraken Pro's REAL base schedule, and this read-only reader can
+-// confirm the account's ACTUAL tier when a dedicated read-only key is present. The paper Judge policy carries the base
+-// taker (0.40%) as its fee; this module is the ceiling-check: it fetches the 30-day volume + current maker/taker from
++// FEES (Ticket A, 2026-09-15; schedule corrected PUBLISH-FIX-87, 2026-09-20) — the paper fee reference is Kraken Pro's REAL Tier-1
++// schedule, and this read-only reader can confirm the account's ACTUAL tier when a dedicated read-only key is present. The paper
++// Judge policy carries the Tier-1 taker (0.80%) as its fee; this module is the ceiling-check: it fetches the 30-day volume + current maker/taker from
+ // Kraken's private TradeVolume endpoint (keys by NAME, read-only, its own bounded transport), and FALLS BACK to the base
+ // schedule when no key is set or the call fails. It never places or cancels anything, never persists, and NEVER logs the
+ // key, secret, nonce or signature. A $500 paper account's 30-day volume is far under the first tier, so the base rate IS
+@@ -8,15 +8,18 @@
+ import { createHash, createHmac } from 'node:crypto';
+ 
+ export const KRAKEN_FEE_TIER_VERSION = 'kraken-fee-tier-1';
+-// Kraken Pro base (30-day USD volume < $10k), verified against the public fee schedule 2026-09-15. Percent AND fraction.
+-export const KRAKEN_PRO_BASE_SCHEDULE = Object.freeze({ makerPct: 0.25, takerPct: 0.40, maker: 0.0025, taker: 0.004, tierVolumeUsd: 0 });
+-// the documented volume tiers (30-day USD -> maker% / taker%); the schedule the reader derives from `volume` when the
+-// response omits the per-pair fee, and the table READINESS documents. Highest threshold at or below the volume wins.
++// Kraken Pro Tier 1 (30-day USD volume $0+), verified against the public fee schedule 2026-09-20 (PUBLISH-FIX-87; the
++// cross-platform tiers effective 2026-07-09 — a tier is the BEST of 30-day spot volume or Assets on Platform). Percent AND fraction.
++// The 2026-09-15 table below it (0.25/0.40 base) was the OLD schedule; two independent reviews flagged it and were right.
++export const KRAKEN_PRO_BASE_SCHEDULE = Object.freeze({ makerPct: 0.40, takerPct: 0.80, maker: 0.004, taker: 0.008, tierVolumeUsd: 0 });
++// the documented tiers (30-day USD volume -> maker% / taker%; the AoP thresholds live in config/kraken-fee-snapshot.json); the
++// schedule the reader derives from `volume` when the response omits the per-pair fee. Highest threshold at or below the volume wins.
+ export const KRAKEN_FEE_TIERS = Object.freeze([
+-  { fromUsd: 0, makerPct: 0.25, takerPct: 0.40 }, { fromUsd: 10_000, makerPct: 0.20, takerPct: 0.35 },
+-  { fromUsd: 50_000, makerPct: 0.14, takerPct: 0.24 }, { fromUsd: 100_000, makerPct: 0.12, takerPct: 0.22 },
+-  { fromUsd: 250_000, makerPct: 0.10, takerPct: 0.20 }, { fromUsd: 500_000, makerPct: 0.08, takerPct: 0.18 },
+-  { fromUsd: 1_000_000, makerPct: 0.06, takerPct: 0.16 }, { fromUsd: 2_500_000, makerPct: 0.04, takerPct: 0.14 },
++  { fromUsd: 0, makerPct: 0.40, takerPct: 0.80 }, { fromUsd: 2_500, makerPct: 0.30, takerPct: 0.60 },
++  { fromUsd: 10_000, makerPct: 0.22, takerPct: 0.38 }, { fromUsd: 25_000, makerPct: 0.20, takerPct: 0.35 },
++  { fromUsd: 50_000, makerPct: 0.15, takerPct: 0.30 }, { fromUsd: 100_000, makerPct: 0.12, takerPct: 0.25 },
++  { fromUsd: 250_000, makerPct: 0.10, takerPct: 0.22 }, { fromUsd: 500_000, makerPct: 0.08, takerPct: 0.20 },
++  { fromUsd: 1_000_000, makerPct: 0.06, takerPct: 0.18 }, { fromUsd: 2_500_000, makerPct: 0.04, takerPct: 0.15 },
+   { fromUsd: 5_000_000, makerPct: 0.02, takerPct: 0.12 }, { fromUsd: 10_000_000, makerPct: 0.00, takerPct: 0.10 },
+ ]);
+ export const KRAKEN_FEE_TIER_ENV = Object.freeze({ key: 'KRAKEN_FEE_TIER_API_KEY', secret: 'KRAKEN_FEE_TIER_API_SECRET' });
+diff --git a/paper/profile.js b/paper/profile.js
+index 042d1a7..a2b1d35 100644
+--- a/paper/profile.js
++++ b/paper/profile.js
+@@ -95,7 +95,7 @@ export function applyProfileEnvironment(profile, env = process.env, { dataDir =
+   return Object.freeze({ applied: Object.keys(derived), overridden });
+ }
+ // the exact authority lines every operator surface prints (preflight, launch): one fact per line, never joined
+-export const authorityLines = (paperMode) => Object.freeze(['REAL MONEY: DISABLED', 'LIVE ORDERS: DISABLED', 'WITHDRAW/FUNDING: DISABLED', `PAPER MODE: ${paperMode}`, 'DARK KRAKEN JUDGE AUTHORITY: NONE', 'DARK KRAKEN SOCRATES AUTHORITY: NONE', 'THRESHOLD CHANGES: NONE']);
++export const authorityLines = (paperMode) => Object.freeze(['REAL MONEY: DISABLED', 'LIVE ORDERS: DISABLED', 'WITHDRAW/FUNDING: DISABLED', `PAPER MODE: ${paperMode}`, 'DARK KRAKEN JUDGE AUTHORITY: NONE', 'DARK KRAKEN SOCRATES AUTHORITY: NONE', 'THRESHOLD CHANGES: NONE BY HAND (gate learning ON: the five flow lines may move inside fixed bands, every move logged)']);
+ export const secretPresence = (profile, env = process.env) => Object.freeze(Object.fromEntries(SECRET_ENV_NAMES.map((n) => [n, typeof env[n] === 'string' && env[n].length > 0])));
+ // deep-merge the profile's config overlay onto cobra.config.json (lib/config.js applies it when COBRA_PROFILE is set)
+ export function mergeOverlay(base, overlay) { if (!plain(overlay)) return base; const out = { ...base }; for (const [k, v] of Object.entries(overlay)) out[k] = plain(v) && plain(base?.[k]) ? mergeOverlay(base[k], v) : v; return out; }
+diff --git a/test/kraken-fee-tier.test.js b/test/kraken-fee-tier.test.js
+index e25a164..b978957 100644
+--- a/test/kraken-fee-tier.test.js
++++ b/test/kraken-fee-tier.test.js
+@@ -13,17 +13,17 @@ function stub({ status = 200, body = null, throwOn = false } = {}) {
+   return { fetchImpl, calls };
+ }
+ 
+-test('FEE-1. the base schedule is Kraken Pro base (0.25% maker / 0.40% taker) and the tier table lands a volume correctly', () => {
+-  assert.equal(KRAKEN_PRO_BASE_SCHEDULE.taker, 0.004); assert.equal(KRAKEN_PRO_BASE_SCHEDULE.maker, 0.0025);
+-  assert.equal(feeScheduleForVolume(0).takerPct, 0.40); assert.equal(feeScheduleForVolume(60_000).takerPct, 0.24); assert.equal(feeScheduleForVolume(60_000).makerPct, 0.14);
+-  assert.equal(feeScheduleForVolume(50_000_000).takerPct, 0.10); assert.equal(feeScheduleForVolume(-1).takerPct, 0.40);
++test('FEE-1. the base schedule is Kraken Pro Tier 1 (0.40% maker / 0.80% taker; the July 2026 cross-platform tiers, PUBLISH-FIX-87) and the tier table lands a volume correctly', () => {
++  assert.equal(KRAKEN_PRO_BASE_SCHEDULE.taker, 0.008); assert.equal(KRAKEN_PRO_BASE_SCHEDULE.maker, 0.004);
++  assert.equal(feeScheduleForVolume(0).takerPct, 0.80); assert.equal(feeScheduleForVolume(60_000).takerPct, 0.30); assert.equal(feeScheduleForVolume(60_000).makerPct, 0.15);
++  assert.equal(feeScheduleForVolume(12_000).takerPct, 0.38); assert.equal(feeScheduleForVolume(50_000_000).takerPct, 0.10); assert.equal(feeScheduleForVolume(-1).takerPct, 0.80);
+   assert.equal(baseScheduleResult('X').source, 'BASE_SCHEDULE'); assert.equal(baseScheduleResult('X').reason, 'X');
+ });
+ 
+ test('FEE-2. no key -> base schedule fallback, and NOTHING is fetched (read-only, keys by NAME)', async () => {
+   const s = stub();
+   const r = await readAccountFeeTier({ env: {}, fetchImpl: s.fetchImpl });
+-  assert.equal(r.source, 'BASE_SCHEDULE'); assert.equal(r.reason, 'CREDENTIAL_MISSING'); assert.equal(r.taker, 0.004);
++  assert.equal(r.source, 'BASE_SCHEDULE'); assert.equal(r.reason, 'CREDENTIAL_MISSING'); assert.equal(r.taker, 0.008);
+   assert.equal(s.calls.length, 0, 'no credential -> no call');
+ });
+ 
+@@ -42,12 +42,12 @@ test('FEE-4. a provider error, an HTTP failure, an unreachable host, or missing
+   assert.equal((await readAccountFeeTier({ env: ENV, fetchImpl: stub({ status: 500 }).fetchImpl })).reason, 'HTTP_500');
+   assert.equal((await readAccountFeeTier({ env: ENV, fetchImpl: stub({ throwOn: true }).fetchImpl })).reason, 'UNREACHABLE');
+   const byVol = await readAccountFeeTier({ env: ENV, fetchImpl: stub({ body: { error: [], result: { volume: '75000' } } }).fetchImpl });
+-  assert.equal(byVol.source, 'ACCOUNT_TIER_BY_VOLUME'); assert.equal(byVol.takerPct, 0.24); assert.equal(byVol.volume30dUsd, 75_000);
++  assert.equal(byVol.source, 'ACCOUNT_TIER_BY_VOLUME'); assert.equal(byVol.takerPct, 0.30); assert.equal(byVol.volume30dUsd, 75_000);
+ });
+ 
+ test('FEE-5. the status names the two env NAMES, present/absent, and carries no value', () => {
+   const off = feeTierStatus({}); assert.deepEqual(off.credentialNames, ['KRAKEN_FEE_TIER_API_KEY', 'KRAKEN_FEE_TIER_API_SECRET']); assert.equal(off.credentialPresent, false);
+-  const on = feeTierStatus(ENV); assert.equal(on.credentialPresent, true); assert.equal(on.base.taker, 0.004);
++  const on = feeTierStatus(ENV); assert.equal(on.credentialPresent, true); assert.equal(on.base.taker, 0.008);
+   assert.ok(!JSON.stringify(feeTierStatus(ENV)).includes(SECRET));
+ });
+ 
+@@ -55,7 +55,7 @@ test('FEE-5. the status names the two env NAMES, present/absent, and carries no
+ test('FEE-6. null, missing, boolean and empty fee fields fall back to FIELDS_MISSING (never a zero-percent ACCOUNT_TIER); a numeric string still resolves', async () => {
+   for (const bad of [{ fee: null }, {}, { fee: true }, { fee: '' }, { fee: 'abc' }]) {
+     const r = await readAccountFeeTier({ env: ENV, fetchImpl: stub({ body: { error: [], result: { fees: { XXBTZUSD: bad }, fees_maker: { XXBTZUSD: bad } } } }).fetchImpl });
+-    assert.equal(r.source, 'BASE_SCHEDULE', JSON.stringify(bad)); assert.equal(r.reason, 'FIELDS_MISSING'); assert.equal(r.taker, 0.004);
++    assert.equal(r.source, 'BASE_SCHEDULE', JSON.stringify(bad)); assert.equal(r.reason, 'FIELDS_MISSING'); assert.equal(r.taker, 0.008);
+   }
+   const nullVol = await readAccountFeeTier({ env: ENV, fetchImpl: stub({ body: { error: [], result: { volume: null, fees: { XXBTZUSD: { fee: null } } } } }).fetchImpl });
+   assert.equal(nullVol.source, 'BASE_SCHEDULE'); assert.equal(nullVol.reason, 'FIELDS_MISSING');
+diff --git a/test/paper-bite-drill.test.js b/test/paper-bite-drill.test.js
+index 2eb002b..13894a3 100644
+--- a/test/paper-bite-drill.test.js
++++ b/test/paper-bite-drill.test.js
+@@ -1,6 +1,6 @@
+ // PAPER BITE DRILL (PUBLISH-FIX-84, 2026-09-20 — the owner: "every day you tell me it's green and every day it hasn't been fixed").
+ // 420 test files proved every part; none asked the only question the owner has: given a clean, textbook setup, does the whole
+-// animal BUY under the PRODUCTION paper policy (config/judge.paper.starting-styles-fee040.json: USD 500, 0.40% taker each way,
++// animal BUY under the PRODUCTION paper policy (config/judge.paper.starting-styles-fee080.json: USD 500, 0.80% taker each way (Kraken Pro Tier 1, PUBLISH-FIX-87),
+ // 3% risk budget)? This drill feeds the real Judge, real cost law, real dispatcher and paper adapter a textbook RANGE_IGNITION on a
+ // synthetic pair — 22 minutes of two-sided prints inside a range, then a burst of buying, then a clean break above the range
+ // with a fillable book — and demands an ENTRY. When it cannot, it prints every decision's status and reasons so the rule that
+@@ -24,9 +24,10 @@ const SPEC = instrumentSpec({ venue: 'kraken', pairKey: 'XXBTZUSD', altname: 'XB
+ const feeAt = (rate) => feeContract({ venue: 'kraken', pairKey: null, orderType: 'TAKER', rate, rateKind: 'PAPER_REFERENCE', currency: 'QUOTE', roundingQuantum: '0.01', roundingMode: 'UP', minimumFee: '0', scope: 'ORDER_TOTAL', scheduleId: 'bite-drill', observedTs: T0 });
+ const fmt = (value, decimals) => value.toFixed(decimals).replace('.', '').replace(/^0+/, '');
+ const crcFor = (asks, bids) => crc32([...asks.slice(0, 10), ...bids.slice(0, 10)].map(([price, qty]) => fmt(price, 1) + fmt(qty, 8)).join(''));
+-const bars = (endTs, close = 100000) => Array.from({ length: 61 }, (_, index) => ({ periodStartTs: endTs - (61 - index) * MIN, periodEndTs: endTs - (60 - index) * MIN, open: close, high: close + 200, low: index === 41 ? close - 4000 : close - 200, close, volumeQuote: 1000, volumeBase: 0.01, closed: true }));
++// the 20-bar range: one deep bar 41 minutes back sets l20; RANGE_IGNITION's target is h20 + (h20 - l20), so `rangeDip` is the measured move
++const bars = (endTs, close = 100000, rangeDip = 4000) => Array.from({ length: 61 }, (_, index) => ({ periodStartTs: endTs - (61 - index) * MIN, periodEndTs: endTs - (60 - index) * MIN, open: close, high: close + 200, low: index === 41 ? close - rangeDip : close - 200, close, volumeQuote: 1000, volumeBase: 0.01, closed: true }));
+ 
+-async function rig({ policyFile, feeRate, limits = null, logs = [], production = false }) {
++async function rig({ policyFile, feeRate, limits = null, logs = [], production = false, rangeDip = 4000 }) {
+   const POLICY = loadJudgePolicy(path.resolve(policyFile)); const FEE = feeAt(feeRate);
+   const accountId = `bite-drill-${Math.random().toString(36).slice(2)}`; const clock = fakeClock();
+   const journal = createMemoryJournal(); await journal.create(accountId, { accountKind: 'PAPER' });
+@@ -39,7 +40,7 @@ async function rig({ policyFile, feeRate, limits = null, logs = [], production =
+   const scheduler = createScheduler({ monotonic: clock.monotonic });
+   // exactly as fly.js composes the paper run: the strategy ports come from the policy; PAPER sizing is the risk-bounded ladder
+   const ports = strategyRuntimePorts(POLICY.policy); const paperSizing = { fractions: ['0.25', '0.5', '0.75', '1'], allInEvidence: 'RISK_BOUNDED' };
+-  const judge = createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock, specOf: () => SPEC, feeOf: () => FEE, history: { bars: (symbol, nowTs) => bars(Math.floor(nowTs / MIN) * MIN) }, caseSource: { consumed: () => null }, controls: () => ({ kill: false, cage: false, vetoes: [] }), scheduler, mode: 'PAPER', log: (m) => logs.push(String(m)), dynamicSizing: production ? paperSizing : null, setupSelection: ports.setupSelection, edgeState: ports.edgeState });
++  const judge = createJudge({ accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock, specOf: () => SPEC, feeOf: () => FEE, history: { bars: (symbol, nowTs) => bars(Math.floor(nowTs / MIN) * MIN, 100000, rangeDip) }, caseSource: { consumed: () => null }, controls: () => ({ kill: false, cage: false, vetoes: [] }), scheduler, mode: 'PAPER', log: (m) => logs.push(String(m)), dynamicSizing: production ? paperSizing : null, setupSelection: ports.setupSelection, edgeState: ports.edgeState });
+   judge.admit('BTC/USD', { assetId: 'BTC', source: 'TEST' });
+   feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'BTC/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now());
+   feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'BTC/USD' } }), clock.now());
+@@ -71,11 +72,23 @@ test('BITE-0 (control). under the reference policy fixture the textbook setup en
+   assert.ok(r.judge.decisions().some((d) => ENTRY.has(d.status)), `no entry under the reference fixture:\n${r.report()}`);
+ });
+ 
+-test('BITE-1 (the owner\'s question). under the PRODUCTION paper policy (USD 500, 0.40% taker each way, 3% risk) the same textbook setup ends in an ENTRY; if it cannot, the rule that refuses a perfect setup is named here', async () => {
+-  const r = await rig({ policyFile: 'config/judge.paper.starting-styles-fee040.json', feeRate: '0.004', production: true });
++test('BITE-1 (the owner\'s question). under the PRODUCTION paper policy (USD 500, 0.80% taker each way — Kraken Pro Tier 1, the real fee for a $500 account buying at market) a textbook setup whose measured move is ~6% ends in an ENTRY; if it cannot, the rule that refuses it is named here', async () => {
++  const r = await rig({ policyFile: 'config/judge.paper.starting-styles-fee080.json', feeRate: '0.008', production: true, rangeDip: 6000 });
+   await r.textbook();
+   const entry = r.judge.decisions().find((d) => ENTRY.has(d.status));
+-  console.log(`BITE DRILL (production policy) decisions:\n${r.report()}\nCLOSE CALLS:\n${r.logs.filter((l) => l.startsWith('CLOSE CALL')).join('\n')}`);
++  console.log(`BITE DRILL (production policy, 0.80%/side, ~6% measured move) decisions:\n${r.report()}\nCLOSE CALLS:\n${r.logs.filter((l) => l.startsWith('CLOSE CALL')).join('\n')}`);
+   assert.ok(entry, `NO BITE under the production policy. Every decision:\n${r.report()}\n\nCLOSE CALL lines:\n${r.logs.filter((l) => l.startsWith('CLOSE CALL')).join('\n') || '(none)'}`);
+   assert.ok(Number(entry.sizing?.entryCashOut) > 0 && Number(entry.sizing?.entryCashOut) <= 500, `a real size inside the account: ${JSON.stringify(entry.sizing)}`);
+ });
++
++test('BITE-2 (what the real fee costs). the SAME textbook with a ~4% measured move buys at 0.40% a side and is refused at 0.80% a side — REWARD_RISK_BELOW_1_5 — so at Kraken Tier 1 a setup needs roughly a 5%+ measured move against a 0.6% stop before the Judge can size it', async () => {
++  const cheap = await rig({ policyFile: 'config/judge.paper.starting-styles-fee080.json', feeRate: '0.004', production: true, rangeDip: 4000 });
++  await cheap.textbook();
++  assert.ok(cheap.judge.decisions().some((d) => ENTRY.has(d.status)), `at 0.40%/side the 4% move buys:\n${cheap.report()}`);
++  const real = await rig({ policyFile: 'config/judge.paper.starting-styles-fee080.json', feeRate: '0.008', production: true, rangeDip: 4000 });
++  await real.textbook();
++  assert.ok(!real.judge.decisions().some((d) => ENTRY.has(d.status)), 'at 0.80%/side the same 4% move does not size');
++  const call = real.logs.find((l) => l.startsWith('CLOSE CALL') && l.includes('RANGE_IGNITION'));
++  assert.ok(call, `the refusal is a CLOSE CALL, named:\n${real.logs.filter((l) => l.startsWith('CLOSE CALL')).join('\n')}`);
++  console.log(`BITE-2 at 0.80%/side, 4% move: ${call}`);
++});
+diff --git a/test/paper-e2e-pg.test.js b/test/paper-e2e-pg.test.js
+index 574112b..3a72c39 100644
+--- a/test/paper-e2e-pg.test.js
++++ b/test/paper-e2e-pg.test.js
+@@ -33,10 +33,10 @@ const PROFILE_POLICY_FILE = profileFileOf(PROFILE, 'judgePolicy'); assert.equal(
+ // PUBLISH-FIX-62/67: the profile names the six-setup starting-styles policy (judge-policy-2) at the Kraken Pro public 0.40%
+ // taker reference; it IS its reviewed sample byte for byte; everything but the setups and the fee rate (limits, execution,
+ // universe, evaluation, account capital) is the reference's, and the fee differs from the reference ONLY in rate and scheduleId.
+-const profileRaw = readFileSync(PROFILE_POLICY_FILE, 'utf8'); assert.equal(profileRaw, readFileSync(path.resolve('judge/samples/policy.paper-starting-styles-fee040.json'), 'utf8'), 'the paper profile Judge policy IS the reviewed starting-styles-fee040 sample, byte for byte');
++const profileRaw = readFileSync(PROFILE_POLICY_FILE, 'utf8'); assert.equal(profileRaw, readFileSync(path.resolve('judge/samples/policy.paper-starting-styles-fee080.json'), 'utf8'), 'the paper profile Judge policy IS the reviewed starting-styles-fee080 sample, byte for byte');
+ { const ref = JSON.parse(readFileSync(path.resolve('judge/samples/policy.paper-reference.json'), 'utf8')); const cur = JSON.parse(profileRaw); for (const k of ['limits', 'execution', 'universe', 'evaluation', 'mode', 'venue', 'quote', 'costModelVersion']) assert.deepEqual(cur[k], ref[k], `${k} is the reference's`); assert.equal(cur.account.initialCapital, ref.account.initialCapital); assert.equal(cur.setups.enabled.length, 6);
+-  const { rate: rr, scheduleId: rs, ...refTaker } = ref.fees.taker; const { rate: cr, scheduleId: cs, ...curTaker } = cur.fees.taker; assert.deepEqual(curTaker, refTaker, 'the taker fee differs from the reference only in rate and scheduleId'); assert.equal(rr, '0.008'); assert.equal(cr, '0.004'); assert.ok(cs !== rs && cs.length <= 300); assert.equal(cur.account.accountId, 'paper-starting-styles-usd500-fee040'); }
+-const paperRaw = JSON.parse(profileRaw); assert.equal(paperRaw.mode, 'PAPER'); assert.equal(paperRaw.execution.adapter, 'PAPER'); assert.equal(paperRaw.fees.taker.rate, '0.004', 'the reference fee is the Kraken Pro public 0.40% taker, UNVERIFIED against the owner account (PUBLISH-FIX-67)');
++  const { rate: rr, scheduleId: rs, ...refTaker } = ref.fees.taker; const { rate: cr, scheduleId: cs, ...curTaker } = cur.fees.taker; assert.deepEqual(curTaker, refTaker, 'the taker fee differs from the reference only in rate and scheduleId'); assert.equal(rr, '0.008'); assert.equal(cr, '0.008', 'PUBLISH-FIX-87: the real Kraken Pro Tier-1 taker for a $500 account'); assert.ok(cs !== rs && cs.length <= 300); assert.equal(cur.account.accountId, 'paper-starting-styles-usd500-fee080'); }
++const paperRaw = JSON.parse(profileRaw); assert.equal(paperRaw.mode, 'PAPER'); assert.equal(paperRaw.execution.adapter, 'PAPER'); assert.equal(paperRaw.fees.taker.rate, '0.008', 'the reference fee is the Kraken Pro public Tier-1 0.80% taker (PUBLISH-FIX-87), the real fee for a $500 account buying at market; UNVERIFIED against the owner account');
+ const feeOver = { taker: { ...paperRaw.fees.taker, rate: '0.001', scheduleId: 'synthetic-test-fee' } };
+ const policyFor = (acct) => { const f = path.join(TEST_DATA, `${acct}.json`); writeFileSync(f, JSON.stringify({ ...paperRaw, policyName: acct, account: { ...paperRaw.account, accountId: acct }, fees: feeOver })); return { file: f, ...loadJudgePolicy(f) }; };
+ const CODE = 'd'.repeat(64);
+diff --git a/test/paper-runtime.test.js b/test/paper-runtime.test.js
+index 9245f70..fac64f4 100644
+--- a/test/paper-runtime.test.js
++++ b/test/paper-runtime.test.js
+@@ -42,7 +42,7 @@ test('P-01. the profile: closed law (runtimeMode PAPER, authority DISABLED, judg
+   bad((x) => { x.runtimeMode = 'LIVE'; }, /PAPER/); bad((x) => { x.authority.judgeMode = 'LIVE_ARMED'; }, /judgeMode PAPER/); bad((x) => { x.authority.judgeAllowOrders = true; }, /allowOrders false/); bad((x) => { x.authority.realMoney = 'ENABLED'; }, /DISABLED/); bad((x) => { x.groups.judge.judge.mode = 'LIVE_UNARMED'; }, /judge\.judge/); bad((x) => { x.configOverlay.locks = { hardPct: 50 }; }, /locks/); bad((x) => { x.configOverlay.fees = {}; }, /fees/); bad((x) => { x.groups.extra = {}; }, /groups must be exactly/); bad((x) => { x.groups.social.X_OFFICIAL.desiredState = 'MAYBE'; }, /desiredState/); bad((x) => { x.groups.social.X_OFFICIAL.blockerPolicy = 'IGNORE'; }, /blockerPolicy/); bad((x) => { x.groups.persistence.localJournalFallback.desiredState = 'ON'; }, /never a silent fallback/); bad((x) => { x.groups.darkEdgeCapture.krakenL3.gate = 'ANY_KEY'; }, /SAFE_L3_DATA_KEY/); bad((x) => { x.groups.social.X_OFFICIAL.note = 'sk-ant-FAKE-VALUE'; }, /value-like secret/); bad((x) => { x.groups.cockpit.server.SERPENT_CONTROL_PASSWORD = 'hunter2'; }, /assigns a value to the secret name/); bad((x) => { x.files.judgePolicy = '/etc/judge.json'; }, /repo-relative/);
+   for (const g of PROFILE_GROUPS) for (const [k, row] of Object.entries(p.groups[g])) { if (g === 'marketResearch' && k === 'providers') { for (const r of Object.values(row)) { assert.ok(DESIRED_STATES.includes(r.desiredState)); assert.ok(BLOCKER_POLICIES.includes(r.blockerPolicy)); } continue; } assert.ok(DESIRED_STATES.includes(row.desiredState), `${g}.${k}`); assert.ok(BLOCKER_POLICIES.includes(row.blockerPolicy)); }
+   const env = profileEnvironment(p); assert.equal(env.JUDGE_MODE, 'PAPER'); assert.equal(env.JUDGE_ALLOW_PRIVATE, 'false'); assert.equal(env.JUDGE_ALLOW_ORDERS, 'false'); assert.equal(env.JUDGE_ENABLED, 'true'); assert.equal(env.MARKET_RESEARCH_ENABLED, 'false'); /* PUBLISH-FIX-81: the research owner is OFF in the paper profile until Socrates is funded */ assert.equal(env.RUMOR2_ENABLED, 'true'); assert.equal(env.RUMOR2_SOCIAL_BLUESKY_ENABLED, 'true'); assert.equal(env.RUMOR2_EDGAR_ENABLED, 'true'); assert.equal(env.RUMOR2_OFAC_ENABLED, 'true'); assert.equal(env.RUMOR2_ALLOW_LOCAL_JOURNAL, 'false'); assert.equal(env.GATEWAY_ENABLED, 'true'); assert.equal(env.WIDEEYE_ENABLED, 'true'); assert.equal(env.RUMOR2_SOCIAL_X_ENABLED, 'true', 'requested: the X governor decides (credential -> budgets -> paid smoke)'); assert.equal(env.PRESS_ENABLED, 'true'); assert.equal(env.PRESS_SOURCES, 'COINDESK_NEWS,THEBLOCK_NEWS,COINTELEGRAPH_NEWS,DECRYPT_NEWS', 'only the ON publisher rows are selected; licensed / OFF rows are never named'); assert.equal(env.INFRA_OBS_ENABLED, undefined, 'LEAN PASS 4a retired the infra observation tier — the profile emits no INFRA env'); assert.equal(env.INFRA_SOURCES, undefined); assert.equal(env.SOCIAL_VIDEO_ENABLED, undefined, 'LEAN PASS 4a retired the social-video (YouTube) tier — the profile emits no SOCIAL_VIDEO env');
+-  assert.ok(env.JUDGE_POLICY.endsWith('config/judge.paper.starting-styles-fee040.json') && env.MARKET_RESEARCH_POLICY.endsWith('config/market-research.paper.json')); for (const n of SECRET_ENV_NAMES) assert.ok(!(n in env), `${n} never derived`);
++  assert.ok(env.JUDGE_POLICY.endsWith('config/judge.paper.starting-styles-fee080.json') && env.MARKET_RESEARCH_POLICY.endsWith('config/market-research.paper.json')); for (const n of SECRET_ENV_NAMES) assert.ok(!(n in env), `${n} never derived`);
+   const hostile = { JUDGE_MODE: 'LIVE_ARMED', JUDGE_ALLOW_PRIVATE: 'true', JUDGE_ALLOW_ORDERS: 'true', RUMOR2_SOCIAL_MODE: 'REPLAY', ...FAKE }; const applied = applyProfileEnvironment(p, hostile);
+   assert.equal(hostile.JUDGE_MODE, 'PAPER'); assert.equal(hostile.JUDGE_ALLOW_PRIVATE, 'false'); assert.equal(hostile.JUDGE_ALLOW_ORDERS, 'false'); assert.equal(hostile.RUMOR2_SOCIAL_MODE, 'LIVE'); assert.deepEqual(applied.overridden.map((o) => o.name).sort(), ['JUDGE_ALLOW_ORDERS', 'JUDGE_ALLOW_PRIVATE', 'JUDGE_MODE', 'RUMOR2_SOCIAL_MODE']); assert.ok(applied.overridden.every((o) => o.was === '<value>' || o.name === 'JUDGE_MODE'), 'overrides never echo a value except the mode word'); assert.equal(hostile.X_BEARER_TOKEN, FAKE.X_BEARER_TOKEN, 'secrets untouched'); assert.deepEqual(Object.keys(FORCED_ENV).sort(), ['JUDGE_ALLOW_ORDERS', 'JUDGE_ALLOW_PRIVATE', 'JUDGE_MODE', 'RUMOR2_SOCIAL_MODE']);
+   const pres = secretPresence(p, hostile); assert.equal(pres.X_BEARER_TOKEN, true); assert.equal(pres.COINGLASS_API_KEY, false); assert.ok(!leaks(JSON.stringify(pres)));
+@@ -129,7 +129,7 @@ test('P-05. the preflight is READ-ONLY and complete: sections A..L, blockers gro
+     assert.equal(ready.sections.B_STORAGE.database.schemaCurrent, true); assert.equal(ready.sections.B_STORAGE.database.accountInitialized, true); assert.equal(ready.sections.B_STORAGE.database.writerLockHeld, false); assert.equal(ready.sections.B_STORAGE.writable, true); assert.equal(ready.sections.K_CONTROLS.controlAuthConfigured, true); assert.equal(ready.sections.C_CORE_MARKET.wideEye.configEnabled, true, 'the profile overlay reached the config');
+     assert.deepEqual(ready.authority, { realMoney: 'DISABLED', liveOrders: 'DISABLED', withdrawFunding: 'DISABLED', paperMode: 'READY_FOR_PAPER', darkKrakenJudgeAuthority: 'NONE', darkKrakenSocratesAuthority: 'NONE', thresholdChanges: 'NONE' });
+     const text = JSON.stringify(ready); assert.ok(!leaks(text), 'no secret value in the report'); assert.deepEqual(ready.secretNamesPresent.sort(), Object.keys(FAKE).sort());
+-    const rendered = renderPreflight(ready); assert.ok(rendered.includes('L. FINAL     READY_FOR_PAPER')); for (const l of ['REAL MONEY: DISABLED', 'LIVE ORDERS: DISABLED', 'WITHDRAW/FUNDING: DISABLED', 'PAPER MODE: READY_FOR_PAPER', 'DARK KRAKEN JUDGE AUTHORITY: NONE', 'DARK KRAKEN SOCRATES AUTHORITY: NONE', 'THRESHOLD CHANGES: NONE']) assert.ok(rendered.split('\n').some((x) => x.trim() === l), `exact authority line: ${l}`); assert.ok(rendered.includes('FORCED JUDGE_MODE=PAPER')); assert.ok(!leaks(rendered));
++    const rendered = renderPreflight(ready); assert.ok(rendered.includes('L. FINAL     READY_FOR_PAPER')); for (const l of ['REAL MONEY: DISABLED', 'LIVE ORDERS: DISABLED', 'WITHDRAW/FUNDING: DISABLED', 'PAPER MODE: READY_FOR_PAPER', 'DARK KRAKEN JUDGE AUTHORITY: NONE', 'DARK KRAKEN SOCRATES AUTHORITY: NONE', 'THRESHOLD CHANGES: NONE BY HAND (gate learning ON: the five flow lines may move inside fixed bands, every move logged)']) assert.ok(rendered.split('\n').some((x) => x.trim() === l), `exact authority line: ${l}`); assert.ok(rendered.includes('FORCED JUDGE_MODE=PAPER')); assert.ok(!leaks(rendered));
+     const uninit = await runPreflight({ env, now: () => T, dbFactory: dbStub({ account: false }) }); assert.equal(uninit.ready, false); assert.ok(uninit.blockers.CORE_RUNTIME_BLOCKER.some((b) => b.id === 'JUDGE_ACCOUNT' && /init-paper/.test(b.remedy)));
+     const held = await runPreflight({ env, now: () => T, dbFactory: dbStub({ held: true }) }); assert.ok(held.blockers.CORE_RUNTIME_BLOCKER.some((b) => b.id === 'WRITER_HELD'));
+     const newer = await runPreflight({ env, now: () => T, dbFactory: dbStub({ schema: SCHEMA_VERSION + 1 }) }); assert.ok(newer.blockers.CORE_RUNTIME_BLOCKER.some((b) => b.id === 'SCHEMA'));
+@@ -185,7 +185,7 @@ test('P-07. the operator entry points and the static fences: `cobra paper prefli
+ test('P-08. the documents are fences, not prose: docs/PAPER-RUNBOOK.md names the ONE preflight and the ONE launch command, the forced authority names and the seven exact authority lines; docs/JUDGE-PAPER-AUDIT.md carries the verdict JUDGE_PAPER_COMPLETE and FROZEN_FOR_PAPER digests that EQUAL the working tree (judge/*.js, execution/*.js, watch/watch.js) — a silent edit of a frozen tree fails here; the launcher prints the same seven lines', () => {
+   const read = (f) => readFileSync(path.join(ROOT, f), 'utf8'); const runbook = read('docs/PAPER-RUNBOOK.md'); const audit = read('docs/JUDGE-PAPER-AUDIT.md');
+   for (const s of ['npm run paper:preflight', 'node bin/cobra.js paper preflight', 'npm run paper', 'node bin/cobra.js paper run', 'JUDGE_MODE=PAPER', 'JUDGE_ALLOW_PRIVATE=false', 'JUDGE_ALLOW_ORDERS=false', 'init-paper', 'FROZEN_FOR_PAPER', 'DISABLED_BY_PAPER_POLICY', 'SEALED_CASE_INPUT_ONLY']) assert.ok(runbook.includes(s), `runbook names ${s}`);
+-  for (const l of ['REAL MONEY: DISABLED', 'LIVE ORDERS: DISABLED', 'WITHDRAW/FUNDING: DISABLED', 'DARK KRAKEN JUDGE AUTHORITY: NONE', 'DARK KRAKEN SOCRATES AUTHORITY: NONE', 'THRESHOLD CHANGES: NONE']) assert.ok(runbook.includes(l), l);
++  for (const l of ['REAL MONEY: DISABLED', 'LIVE ORDERS: DISABLED', 'WITHDRAW/FUNDING: DISABLED', 'DARK KRAKEN JUDGE AUTHORITY: NONE', 'DARK KRAKEN SOCRATES AUTHORITY: NONE', 'THRESHOLD CHANGES: NONE BY HAND (gate learning ON: the five flow lines may move inside fixed bands, every move logged)']) assert.ok(runbook.includes(l), l);
+   assert.match(audit, /^Verdict: `JUDGE_PAPER_COMPLETE`$/m); assert.ok(!/JUDGE_PAPER_BLOCKED/.test(audit));
+   const files = [...readdirSync(path.join(ROOT, 'judge')).filter((f) => f.endsWith('.js')).map((f) => `judge/${f}`), ...readdirSync(path.join(ROOT, 'execution')).filter((f) => f.endsWith('.js')).map((f) => `execution/${f}`), 'watch/watch.js'].sort();
+   const digestOf = (list) => { const h = createHash('sha256'); for (const f of list) { h.update(`${f}\n`); h.update(readFileSync(path.join(ROOT, f))); } return h.digest('hex'); };
+@@ -194,5 +194,5 @@ test('P-08. the documents are fences, not prose: docs/PAPER-RUNBOOK.md names the
+   assert.equal(digestOf(files.filter((f) => f.startsWith('execution/'))), pinned('execution/*.js'), 'execution/ is FROZEN_FOR_PAPER');
+   assert.equal(digestOf(['watch/watch.js']), pinned('watch/watch.js'), 'watch/watch.js is FROZEN_FOR_PAPER');
+   assert.equal(digestOf(files), pinned(`all (${files.length} files)`), 'the whole frozen set');
+-  const logs = []; const env = { JUDGE_MODE: 'LIVE_ARMED' }; prepareLaunch({ env, log: (m) => logs.push(m) }); for (const l of ['REAL MONEY: DISABLED', 'LIVE ORDERS: DISABLED', 'WITHDRAW/FUNDING: DISABLED', 'PAPER MODE: PROFILE_APPLIED', 'DARK KRAKEN JUDGE AUTHORITY: NONE', 'DARK KRAKEN SOCRATES AUTHORITY: NONE', 'THRESHOLD CHANGES: NONE']) assert.ok(logs.some((x) => x.trim() === l), `launch prints ${l}`);
++  const logs = []; const env = { JUDGE_MODE: 'LIVE_ARMED' }; prepareLaunch({ env, log: (m) => logs.push(m) }); for (const l of ['REAL MONEY: DISABLED', 'LIVE ORDERS: DISABLED', 'WITHDRAW/FUNDING: DISABLED', 'PAPER MODE: PROFILE_APPLIED', 'DARK KRAKEN JUDGE AUTHORITY: NONE', 'DARK KRAKEN SOCRATES AUTHORITY: NONE', 'THRESHOLD CHANGES: NONE BY HAND (gate learning ON: the five flow lines may move inside fixed bands, every move logged)']) assert.ok(logs.some((x) => x.trim() === l), `launch prints ${l}`);
+ });
+-- 
+2.43.0
+
+
+From 12b95446d180dc2596b60c9c0145692e99bc3dd8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 20 Sep 2026 22:25:45 +0000
+Subject: [PATCH 4/4] =?UTF-8?q?PUBLISH-FIX-90:=20the=20suite=20is=20honest?=
+ =?UTF-8?q?=20in=20an=20export=20=E2=80=94=20fence=20tests=20read=20the=20?=
+ =?UTF-8?q?tracked=20file=20list=20from=20git=20when=20present=20and=20fro?=
+ =?UTF-8?q?m=20a=20filesystem=20walk=20otherwise=20(test/helpers/repo.js),?=
+ =?UTF-8?q?=20history-pinned=20tests=20SKIP=20with=20a=20reason=20when=20t?=
+ =?UTF-8?q?he=20pinned=20object=20is=20unreachable=20(evidence-v2=20B01,?=
+ =?UTF-8?q?=20judge-differential),=20and=20persistence/db.js=20loads=20the?=
+ =?UTF-8?q?=20postgres=20driver=20at=20connect=20time=20so=20the=2046=20fa?=
+ =?UTF-8?q?ke-pool=20tests=20never=20need=20it=20(a=20missing=20driver=20i?=
+ =?UTF-8?q?s=20a=20logged=20connect-time=20verdict);=20proven=20with=20.gi?=
+ =?UTF-8?q?t=20hidden=20and=20node=5Fmodules/pg=20removed?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ persistence/db.js                      | 11 +++++--
+ test/attic-fence.test.js               |  3 +-
+ test/empty-catch-audit.test.js         |  3 +-
+ test/evidence-v2.test.js               |  6 ++--
+ test/helpers/repo.js                   | 41 ++++++++++++++++++++++++++
+ test/judge-arming.test.js              |  3 +-
+ test/judge-differential.test.js        | 10 ++++---
+ test/market-kraken-edge-fences.test.js |  3 +-
+ test/market-lab-fences.test.js         |  3 +-
+ test/press.test.js                     |  3 +-
+ test/repo-dump-hygiene.test.js         |  3 +-
+ test/rumor2-authority.test.js          |  3 +-
+ test/social-4d-completion.test.js      |  3 +-
+ test/social-4f-scope.test.js           |  3 +-
+ test/social-closeout.test.js           |  3 +-
+ test/social-farcaster-access.test.js   |  3 +-
+ test/socrates-contract-0a.test.js      |  3 +-
+ test/socrates-contract-0b.test.js      |  3 +-
+ test/socrates-contract.test.js         |  3 +-
+ 19 files changed, 90 insertions(+), 23 deletions(-)
+ create mode 100644 test/helpers/repo.js
+
+diff --git a/persistence/db.js b/persistence/db.js
+index d9493e2..036bb87 100644
+--- a/persistence/db.js
++++ b/persistence/db.js
+@@ -2,7 +2,12 @@
+ // directly. DATABASE_URL comes from the environment alone; it is never
+ // logged, never echoed, never reachable from browser JavaScript. The
+ // deployment filesystem is a cache; this is the durable authority's door.
+-import pg from 'pg';
++// PUBLISH-FIX-90 (2026-09-20): the driver is loaded when the FIRST real pool is needed, not at import. Two blind reviews ran the
++// suite in a sandbox without `pg` installed and every test that imported this module — 46 files, all using the fake-pool seam —
++// died at import ("120 failures"). A missing driver is now a connect-time verdict with its own reason, and the fake pool never
++// touches it.
++let pgDriver = null; let pgLoadError = null;
++async function loadPg() { if (pgDriver || pgLoadError) return pgDriver; try { pgDriver = (await import('pg')).default; } catch (err) { pgLoadError = err; } return pgDriver; }
+ 
+ const POOL_MAX = 5; // one personal app, one small pool
+ // PUBLISH-FIX-84 (2026-09-20): the night's "tx checkout failed after 6455ms: Error" lines. The pool let an idle connection go after
+@@ -103,6 +108,7 @@ export class Db {
+ 
+   #ensurePool() {
+     if (this.#pool) return;
++    if (!this.#poolFactory && !pgDriver) throw Object.assign(new Error(`postgres driver unavailable: ${String(pgLoadError?.message ?? 'pg not loaded').slice(0, 120)}`), { code: 'PG_DRIVER_UNAVAILABLE' });
+     const opts = {
+       connectionString: this.#url,
+       max: POOL_MAX,
+@@ -117,7 +123,7 @@ export class Db {
+       allowExitOnIdle: true, // persistence never keeps a dying process alive
+       application_name: applicationNameOf(this.schema),
+     };
+-    this.#pool = this.#poolFactory ? this.#poolFactory(opts) : new pg.Pool(opts);
++    this.#pool = this.#poolFactory ? this.#poolFactory(opts) : new pgDriver.Pool(opts);
+     this.#pool.on('error', (err) => {
+       // PUBLISH-FIX-84: an IDLE pooled client died (proxy idle cutoff, server restart): counted, logged once a minute at most, never a
+       // reachability verdict — nothing was in flight on it; the next checkout or query decides (and marks) for real
+@@ -133,6 +139,7 @@ export class Db {
+   // never treated as permanently dead.
+   async connect() {
+     if (!this.configured()) return false;
++    if (!this.#poolFactory && !(await loadPg())) { this.log(`PERSISTENCE unavailable: the postgres driver could not be loaded (${String(pgLoadError?.message ?? 'pg').slice(0, 120)}); running without the database`); this.reachable = false; return false; }
+     this.#ensurePool();
+     const attempts = this.#everConnected || this.connectionErrors > 0 ? 1 : this.#retries;
+     for (let attempt = 1; attempt <= attempts; attempt++) {
+diff --git a/test/attic-fence.test.js b/test/attic-fence.test.js
+index 8272592..dcca834 100644
+--- a/test/attic-fence.test.js
++++ b/test/attic-fence.test.js
+@@ -1,6 +1,7 @@
+ // ATTIC FENCE (lean trim, 2026-09-14). attic/ holds retired code kept for history. It is never loaded by the running
+ // application: no tracked module outside attic/ may import from it (static or dynamic), the npm test glob never
+ // executes attic/test, and attic/ carries its own README naming what lives there and why.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { execSync } from 'node:child_process';
+@@ -9,7 +10,7 @@ import path from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ 
+ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+-const tracked = execSync("git ls-files '*.js' '*.mjs' '*.cjs' '*.json' '*.html'", { cwd: ROOT, encoding: 'utf8' }).trim().split('\n');
++const tracked = trackedFilesText("'*.js' '*.mjs' '*.cjs' '*.json' '*.html'").trim().split('\n');
+ 
+ test('ATTIC-1. nothing outside attic/ imports attic/ code, in any import form', () => {
+   const offenders = [];
+diff --git a/test/empty-catch-audit.test.js b/test/empty-catch-audit.test.js
+index ad5c855..f101265 100644
+--- a/test/empty-catch-audit.test.js
++++ b/test/empty-catch-audit.test.js
+@@ -13,6 +13,7 @@
+ // ONLY recognized cleanup/teardown verbs. A new empty catch over anything else
+ // fails here until its author logs the error, handles it, or (if it truly is a
+ // new cleanup primitive) adds that verb to the reviewed allowlist below.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync } from 'node:fs';
+@@ -78,7 +79,7 @@ test('R2-4: the empty-catch scanner classifies cleanup vs. meaningful swallow co
+ });
+ 
+ test('R2-4: every empty catch in the living tree guards only best-effort cleanup', () => {
+-  const files = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' })
++  const files = trackedFilesText("'*.js' '*.mjs'")
+     .trim().split('\n').filter((f) => f && !/^(test\/|attic\/)/.test(f));
+   const offenders = [];
+   let scanned = 0;
+diff --git a/test/evidence-v2.test.js b/test/evidence-v2.test.js
+index dbbe346..aedaba8 100644
+--- a/test/evidence-v2.test.js
++++ b/test/evidence-v2.test.js
+@@ -12,14 +12,16 @@ import { validateEvidencePacket, EVIDENCE_SCHEMA_VERSION } from '../evidence/con
+ import { buildSocialProjection, socialProjectionError, projectSocial, SOCIAL_PROJECTION_VERSION } from '../evidence/social-projection.js';
+ import { buildResearchEvidenceV2, buildEmptyResearchPacket } from '../evidence/research-builder.js';
+ import { makeCorpusPacket, byKind, corpusCases } from '../socrates/corpus.js';
++import { gitObject, HISTORY_SKIP } from './helpers/repo.js';
+ 
+ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+ const T0 = Date.parse('2026-09-08T12:00:00Z');
+ const chart = (over = {}) => ({ kind: 'MARKET_CHART_WINDOW', family: 'SPOT_PRICE_CHART', recipeId: 'window_ohlcv', windowStartTs: T0 - 61_000, windowEndTs: T0 - 1000, units: { close: 'USD' }, fields: { venue: 'kraken', quote: 'USD', windowMs: 60_000, open: 100, high: 101, low: 99.5, close: 100.8, vwap: 100.4, logReturn: 0.008, quoteNotional: 250_000, count: 120, relativeNotional: 1.1, relativeRange: 1.0, indicators: null, previous: null, ...over } });
+ const events = (headline) => ({ kind: 'MARKET_EVENT_CONTEXT', family: 'OFFICIAL_SOCIAL_EVENTS', recipeId: 'event_references', providers: ['SETTLED_RECORDS'], fields: { events: [{ eventKind: 'HEADLINE', sourceProvider: 'COINGLASS', nativeRef: 'a1', sourceEventTs: T0 - 7_200_000, knownAtTs: T0 - 7_000_000, status: 'UNVERIFIED', headline, untrusted: true }] } });
+ 
+-test('B01. v1 stays v1: evidence/contract.js and socrates/contract.js are byte-identical to the baseline commit; the dispatcher routes by schemaVersion and a v1 packet is judged by the v1 validator; the v2 vocabulary extends v1 (two new triggers, 20 market kinds + 2 Social kinds)', () => {
+-  const diff = execSync('git diff --stat d25b01992c59d7495cf608301a5ca74ef24be707 -- evidence/contract.js socrates/contract.js', { cwd: REPO, encoding: 'utf8' }).trim(); assert.equal(diff, '', 'v1 contracts untouched');
++test('B01. v1 stays v1: evidence/contract.js and socrates/contract.js are byte-identical to the baseline commit; the dispatcher routes by schemaVersion and a v1 packet is judged by the v1 validator; the v2 vocabulary extends v1 (two new triggers, 20 market kinds + 2 Social kinds)', (t) => {
++  const PIN = 'd25b01992c59d7495cf608301a5ca74ef24be707'; if (!gitObject(PIN)) { t.skip(HISTORY_SKIP(PIN)); return; } // PUBLISH-FIX-90
++  const diff = execSync(`git diff --stat ${PIN} -- evidence/contract.js socrates/contract.js`, { cwd: REPO, encoding: 'utf8' }).trim(); assert.equal(diff, '', 'v1 contracts untouched');
+   assert.equal(EVIDENCE_SCHEMA_VERSION, 'serpent-evidence-1'); assert.equal(EVIDENCE_SCHEMA_VERSION_2, 'serpent-evidence-2');
+   const v1 = validateEvidencePacketAny({ schemaVersion: EVIDENCE_SCHEMA_VERSION, packetId: 'sep-x' }); assert.equal(v1.valid, false); const direct = validateEvidencePacket({ schemaVersion: EVIDENCE_SCHEMA_VERSION, packetId: 'sep-x' }); assert.equal(v1.valid, direct.valid); assert.deepEqual([...v1.reasons], [...direct.reasons], 'v1 packets are judged by the v1 validator, unchanged');
+   assert.equal(validateEvidencePacketAny({ schemaVersion: 'serpent-evidence-9' }).valid, false); assert.equal(validateEvidencePacketAny(null).valid, false);
+diff --git a/test/helpers/repo.js b/test/helpers/repo.js
+new file mode 100644
+index 0000000..dfa39b6
+--- /dev/null
++++ b/test/helpers/repo.js
+@@ -0,0 +1,41 @@
++// PUBLISH-FIX-90 (2026-09-20): the repository file list for fence tests, WITHOUT a hard dependency on git. Two blind reviews
++// ran the suite from a zip export: every fence that shelled out to `git ls-files` failed at import, and every pin that ran
++// `git show <sha>` / `git diff <sha>` failed for want of history — 23 + 5 "failures" that were the harness, not the program.
++// `trackedFilesText(patterns)` answers exactly what `git ls-files <patterns>` answered (one path per line, sorted) — from git
++// when a repository is present, otherwise from a filesystem walk that honours the ignore roots below. `gitObject(sha)` says
++// whether a pinned object is reachable so a history-pinned test can SKIP with a reason instead of failing.
++import { execSync } from 'node:child_process';
++import { readdirSync, statSync } from 'node:fs';
++import path from 'node:path';
++
++export const REPO = path.resolve(new URL('../..', import.meta.url).pathname);
++const IGNORED_DIRS = new Set(['node_modules', '.git', 'data', '.scratch', 'attached_assets', 'exports', '.cache', '.upm', '.config', '.local']);
++
++function gitLsFiles(patterns) {
++  try { return execSync(`git ls-files ${patterns}`, { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
++  catch { return null; }
++}
++function parsePatterns(patterns) { const out = []; for (const m of String(patterns ?? '').matchAll(/'([^']+)'|"([^"]+)"|(\S+)/g)) out.push(m[1] ?? m[2] ?? m[3]); return out; }
++// git's pathspec glob: `*` spans directory separators; a pattern without a slash still matches at any depth
++const toRegex = (p) => new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
++function walk(dir, rel, out) {
++  for (const name of readdirSync(dir)) {
++    if (IGNORED_DIRS.has(name) || name.startsWith('.git')) continue;
++    const full = path.join(dir, name); const r = rel ? `${rel}/${name}` : name;
++    let st; try { st = statSync(full); } catch { continue; }
++    if (st.isDirectory()) walk(full, r, out); else out.push(r);
++  }
++  return out;
++}
++export function trackedFilesText(patterns = '') {
++  const fromGit = gitLsFiles(patterns);
++  if (fromGit !== null && fromGit.trim().length) return fromGit;
++  const pats = parsePatterns(patterns).map(toRegex); const all = walk(REPO, '', []).sort();
++  const kept = pats.length ? all.filter((f) => pats.some((re) => re.test(f))) : all;
++  return kept.join('\n') + (kept.length ? '\n' : '');
++}
++export function trackedFiles(patterns = '') { return trackedFilesText(patterns).trim().split('\n').filter(Boolean); }
++export function gitObject(sha) {
++  try { execSync(`git cat-file -e ${sha}^{commit}`, { cwd: REPO, stdio: 'ignore' }); return true; } catch { return false; }
++}
++export const HISTORY_SKIP = (sha) => `git history not available here (object ${String(sha).slice(0, 12)} unreachable — an export or a shallow clone); the pin is checked where history exists`;
+diff --git a/test/judge-arming.test.js b/test/judge-arming.test.js
+index 138d673..56d7787 100644
+--- a/test/judge-arming.test.js
++++ b/test/judge-arming.test.js
+@@ -1,6 +1,7 @@
+ // JUDGE — arming / security / composition (A01-A10) against the REAL cockpit server, the real composition over a memory
+ // journal, the real CLI parser and command set, and the posture machine. No socket to any venue: every transport is a
+ // loopback double; credentials are SYNTHETIC test strings; nothing here can place an order.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+@@ -146,7 +147,7 @@ test('A05/A06. no withdrawal / margin / transfer endpoint exists in the allowlis
+   const m = new PostureMachine(); assert.throws(() => m.transition('STALKING', 'x') && m.transition('STRIKE', 'no projection'), NotYetImplemented); if (m.posture === 'STALKING') m.transition('COILED', 'undo');
+   assert.throws(() => new PostureMachine().transition('STRIKE', 'stale projection', { execution: { state: 'STALE', exposure: true, posture: 'STRIKE' } }), Error);
+   // both-direction fences over the tracked tree
+-  const { execSync } = await import('node:child_process'); const tracked = execSync("git ls-files '*.js'", { encoding: 'utf8' }).trim().split('\n');
++  const tracked = trackedFilesText("'*.js'").trim().split('\n');
+   const imports = (f) => [...readFileSync(f, 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n').matchAll(/(?:import\s[^;]*?from\s*|import\s*\(\s*|export\s[^;]*?from\s*)['"]([^'"]+)['"]/g)].map((x) => x[1]);
+   const resolveRel = (f, spec) => (spec.startsWith('.') ? path.normalize(path.join(path.dirname(f), spec)).replace(/\\/g, '/') : spec);
+   const ALLOWED = { 'judge/intake.js': ['socrates/runtime.js', 'market-lab/store.js', 'market-lab/policy.js'], 'bin/judge.js': ['market-lab/time.js'] };
+diff --git a/test/judge-differential.test.js b/test/judge-differential.test.js
+index 74414bb..230f902 100644
+--- a/test/judge-differential.test.js
++++ b/test/judge-differential.test.js
+@@ -36,6 +36,7 @@ import { tmpdir } from 'node:os';
+ import path from 'node:path';
+ import { pathToFileURL, fileURLToPath } from 'node:url';
+ import { SETUP_SELECTION_VERSION } from '../judge/setup-selection.js';
++import { gitObject, HISTORY_SKIP } from './helpers/repo.js';
+ 
+ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+ const BASE_COMMIT = '1bfa669'; // PUBLISH-FIX-83 audited base (docs/JUDGE-PAPER-AUDIT.md §4.32)
+@@ -44,8 +45,9 @@ const SAMPLE_LIMITS = Object.freeze({ maxSimultaneousAssetPositions: 3, maxModel
+ 
+ function fakeClock(start = T0) { let wall = start; let mono = 0; return { now: () => wall, monotonic: () => mono, advance: (ms) => { wall += ms; mono += ms; return wall; }, status: () => ({ trusted: true }) }; }
+ 
+-let baseDir = null;
++let baseDir = null; const HAVE_BASE = gitObject(BASE_COMMIT); // PUBLISH-FIX-90: an export or a shallow clone has no base tree — the differential SKIPS with a reason there
+ test.before(() => {
++  if (!HAVE_BASE) return;
+   baseDir = mkdtempSync(path.join(tmpdir(), 'cobra-base-ea3bfbf-'));
+   mkdirSync(baseDir, { recursive: true });
+   const archive = path.join(baseDir, 'baseline.tar');
+@@ -96,7 +98,7 @@ async function rigFor(root, { accountId, setupSelection = null }) {
+ const pct = (arr, p) => { const s = [...arr].sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : null; };
+ const ms1 = (ns) => Math.round(ns / 1e4) / 100;
+ 
+-test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports absent) produce COMPLETE-record-identical decisions, refusals and account/execution state on identical recorded inputs — no substantive field stripped, no normalization applied', async () => {
++test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports absent) produce COMPLETE-record-identical decisions, refusals and account/execution state on identical recorded inputs — no substantive field stripped, no normalization applied', async (t) => { if (!HAVE_BASE) { t.skip(HISTORY_SKIP(BASE_COMMIT)); return; }
+   // 2026-09-14: the execution/ source-identity precondition that used to sit here (bytes equal to ea3bfbf except the
+   // book-comparison repair) is retired. execution/ has since changed by audited law — contract exit reasons, closeout
+   // classification, canary/queue integrity, reservation settlement — each recorded in docs/JUDGE-PAPER-AUDIT.md §4.5 and
+@@ -135,7 +137,7 @@ test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports a
+   assert.ok(dn.every((d) => d.measurements.every((m) => m.id !== 'STRATEGY_FAMILY_SELECTION')), 'the default path adds no strategy-selection measurement');
+ });
+ 
+-test('VERSIONED OPT-IN: the exact setupSelection port activates family-selection evidence and captured batch outcomes without changing the default composition', async () => {
++test('VERSIONED OPT-IN: the exact setupSelection port activates family-selection evidence and captured batch outcomes without changing the default composition', async (t) => { if (!HAVE_BASE) { t.skip(HISTORY_SKIP(BASE_COMMIT)); return; }
+   const next = await rigFor(ROOT, { accountId: 'selection-opt-in', setupSelection: { version: SETUP_SELECTION_VERSION } });
+   await next.warm(); await next.ignite();
+   const decisions = next.judge.decisions(); const reserved = decisions.find((d) => d.status === 'ENTRY_RESERVED');
+@@ -149,7 +151,7 @@ test('VERSIONED OPT-IN: the exact setupSelection port activates family-selection
+   assert.equal(position?.maxDurationMs, next.policy.execution.maxDurationMs, 'the opt-in preserves the existing setup/policy duration for the legacy evaluator');
+ });
+ 
+-test('HOST ADMISSION LATENCY measured on both trees over the identical recorded inputs (real wall-clock around judge.onTick + scheduler drain + dispatcher idle); deadline budgets reported against the policy receipt-to-decision limit and the 25ms admission bucket', async () => {
++test('HOST ADMISSION LATENCY measured on both trees over the identical recorded inputs (real wall-clock around judge.onTick + scheduler drain + dispatcher idle); deadline budgets reported against the policy receipt-to-decision limit and the 25ms admission bucket', async (t) => { if (!HAVE_BASE) { t.skip(HISTORY_SKIP(BASE_COMMIT)); return; }
+   const stats = {};
+   for (const [label, root] of [['ea3bfbf-base', baseDir], ['working-tree', ROOT]]) {
+     const durations = [];
+diff --git a/test/market-kraken-edge-fences.test.js b/test/market-kraken-edge-fences.test.js
+index 78be323..74ef59d 100644
+--- a/test/market-kraken-edge-fences.test.js
++++ b/test/market-kraken-edge-fences.test.js
+@@ -2,6 +2,7 @@
+ // live in market-lab's closed contracts / store / coverage / retention; they MUST be absent from Judge intake and
+ // features, Socrates broker requests, decision evidence, readiness, thresholds, execution, the Watch and the paper /
+ // live adapters. Positive tests prove the absence; static scans prove no order verb and no forbidden import exists.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync } from 'node:fs';
+@@ -26,7 +27,7 @@ import { SEALED_REF } from './helpers/market-closeout.js';
+ import { sampleSubjects } from '../market-lab/policy.js';
+ 
+ const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+-const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
++const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
+ const read = (f) => readFileSync(path.join(REPO, f), 'utf8');
+ const code = (f) => read(f).split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+ const imports = (f) => [...code(f).matchAll(/(?:^|\n)\s*(?:import\s[^;]*?from\s*|import\s*\(\s*|export\s[^;]*?from\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]);
+diff --git a/test/market-lab-fences.test.js b/test/market-lab-fences.test.js
+index 3e7d38e..72fa5e2 100644
+--- a/test/market-lab-fences.test.js
++++ b/test/market-lab-fences.test.js
+@@ -3,6 +3,7 @@
+ // risk, ledger, cost, Judge, Watch, Tape truth or the RUMOR-2 runtime. The live path (fly.js, tape, ledger, cost, state,
+ // controls, UI server) reaches the research modules only through the exact allowlisted seams below. Exact allowlists,
+ // never broad lexical removals. Samples ship disabled with environment variable NAMES only. The doctrine sentence stays.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync, existsSync } from 'node:fs';
+@@ -12,7 +13,7 @@ import { loadPolicy, loadSubjects } from '../market-lab/policy.js';
+ import { MARKET_RESEARCH_ROOTS } from '../market-lab/identity.js';
+ 
+ const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+-const tracked = execSync("git ls-files '*.js' '*.mjs' '*.json' '*.md' '*.html'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
++const tracked = trackedFilesText("'*.js' '*.mjs' '*.json' '*.md' '*.html'").trim().split('\n');
+ const read = (f) => readFileSync(path.join(REPO, f), 'utf8');
+ const code = (f) => read(f).split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+ const imports = (f) => [...code(f).matchAll(/(?:^|\n)\s*(?:import\s[^;]*?from\s*|import\s*\(\s*|export\s[^;]*?from\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]);
+diff --git a/test/press.test.js b/test/press.test.js
+index b1cc048..23e719d 100644
+--- a/test/press.test.js
++++ b/test/press.test.js
+@@ -4,6 +4,7 @@
+ // composition + authority fences. No network: every transport is injected; the offline guard would refuse otherwise.
+ // LEAN PASS 4a retired the non-crypto publishers with the AGGREGATOR + LICENSED_INTERFACE_REQUIRED machinery; the retired
+ // aggregator / licensed test cases are preserved in attic/senses/press/press-aggregator-licensed.test.js.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+@@ -83,7 +84,7 @@ test('PRESS-4. reader + snapshot: corrupt / forged lines are counted and never r
+ 
+ test('PRESS-5. composition + authority fences: fly.js starts the press collector after the gateway and before the tape; press/ imports no trading, control, research or RUMOR-2 runtime module (only the pure feed parser); no authority module imports press/; the frozen RUMOR-2 core still names no publisher; the registry carries no value-like secret', () => {
+   const fly = readFileSync(path.join(REPO, 'fly.js'), 'utf8'); assert.ok(fly.includes("import { startPress } from './press/collector.js';")); assert.ok(fly.indexOf('startGateway();') < fly.indexOf('startPress();')); assert.ok(fly.indexOf('startPress();') < fly.indexOf('await runTape('));
+-  const tracked = execSync('git ls-files', { cwd: REPO, encoding: 'utf8' }).split('\n').filter((f) => f.endsWith('.js'));
++  const tracked = trackedFilesText('').split('\n').filter((f) => f.endsWith('.js'));
+   const imports = (f) => [...readFileSync(path.join(REPO, f), 'utf8').matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
+   for (const f of tracked.filter((x) => x.startsWith('press/'))) for (const spec of imports(f)) { assert.ok(!/judge\/|execution\/|watch\/|tape\/|ledger\/|cost\/|state\/|market-lab\/|socrates\/|research\//.test(spec), `${f} -> ${spec}`); if (spec.includes('rumor2/')) assert.equal(spec, '../rumor2/feed.js', `${f} reuses only the pure parser`); }
+   for (const f of tracked.filter((x) => /^(judge|execution|watch|tape|ledger|cost|state|rumor2|market-lab|socrates)\//.test(x))) assert.ok(!imports(f).some((s) => s.includes('press/')), `${f} imports press/`);
+diff --git a/test/repo-dump-hygiene.test.js b/test/repo-dump-hygiene.test.js
+index a8f9f7c..c533818 100644
+--- a/test/repo-dump-hygiene.test.js
++++ b/test/repo-dump-hygiene.test.js
+@@ -5,6 +5,7 @@
+ // committed. This fence asserts no tracked file is a dump/backup, and that the
+ // dump/backup patterns stay ignored so a stray export is untracked by default.
+ // If a dump is ever staged, the suite fails here before it can be pushed.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync } from 'node:fs';
+@@ -19,7 +20,7 @@ const DUMP_EXT = /\.(dump|dmp|bak|sql|sql\.gz)$/i;
+ const DUMP_NAME = /(?:^|[_-])(?:postgres|postgresql|pg|db|database)[_-].*dump|dump.*(?:postgres|postgresql)|production-postgres\.dump/i;
+ 
+ test('R2-5: no database dump or backup file is tracked in the repository', () => {
+-  const tracked = execSync("git ls-files", { cwd: REPO, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
++  const tracked = trackedFilesText('').trim().split('\n').filter(Boolean);
+   const offenders = tracked.filter((f) => {
+     const base = f.split('/').pop();
+     return DUMP_EXT.test(base) || DUMP_NAME.test(base);
+diff --git a/test/rumor2-authority.test.js b/test/rumor2-authority.test.js
+index 31e67fe..9f9e260 100644
+--- a/test/rumor2-authority.test.js
++++ b/test/rumor2-authority.test.js
+@@ -10,6 +10,7 @@
+ //   The invariant evolved from "SOCIAL MUST NOT EXIST" to "SOCIAL MAY EXIST,
+ //   BUT SOCIAL MUST HAVE ZERO DIRECT AUTHORITY." Existence is allowed;
+ //   authority is not. This is a SEMANTIC test, not a word-ban contest.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync, existsSync } from 'node:fs';
+@@ -25,7 +26,7 @@ import { socialObservationToEvent, validateSocialEvent, SOCIAL_EVENT_TYPE } from
+ import { DATA_ONLY_COMPOSITION_ROOT, RUNTIME_SPINE_MODULES, RUNTIME_SPINE_IMPORTERS, OPERATOR_SETUP_SMOKE_TOOLS, RUMOR2_LIVE_WIRING_POINTS, RUMOR2_IMPORTING_WIRING_POINTS, TRADING_TIER_IMPORT_RE } from './helpers/composition-roots.js';
+ 
+ const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+-const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
++const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
+ const read = (f) => readFileSync(path.join(REPO, f), 'utf8');
+ // scan CODE, not doctrine prose: comment-only lines are dropped so a
+ // comment saying "zero HYPED authority" can never mask a real reference
+diff --git a/test/social-4d-completion.test.js b/test/social-4d-completion.test.js
+index 310b831..fea0ec2 100644
+--- a/test/social-4d-completion.test.js
++++ b/test/social-4d-completion.test.js
+@@ -6,6 +6,7 @@
+ // retained as an explicit reconciliation-pending record. Every path here is the real
+ // adapter -> normalization -> intake -> settlement -> journal -> replay/view chain.
+ // Wholly synthetic values. No provider transport, no wall clock, no sleeps.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { ownAdvisoryHolders } from './helpers/pg-fence.js';
+@@ -378,7 +379,7 @@ test('R. new records are Social evidence/diagnostics only: no authority fields,
+   const rp = replaySocialHistory(r.arr); assert.equal(rp.observed, 1); assert.equal(rp.durableIds.size, 1, 'one logical source before and after the annotation'); assert.equal(r.arr.length, 2, 'physical growth is legitimate');
+   const target = c.event; const bogus = socialClockInterpretationEvent({ target: { ...target, provider: 'REDDIT_OFFICIAL' }, clockRole: 'SOURCE_DECLARATION', basis: 'NEW_DELIVERY_SAME_EVENT', witness: temporalWitness('0', P.ISO8601_PROFILE), evidenceRetrievedTs: LATER, knownAtTs: LATER });
+   assert.match(validateSocialClockInterpretation(bogus, { target: { ...target, provider: 'REDDIT_OFFICIAL' } }), /RETENTION_NOT_APPROVED/);
+-  for (const f of execSync("git ls-files 'rumint/*.js' 'doctrine/MISSION.md' 'rumor2/truth.js' 'persistence/*.js'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n')) assert.ok(!readFileSync(path.join(REPO, f), 'utf8').includes('social-time') && !readFileSync(path.join(REPO, f), 'utf8').includes('social-reconcile'), `${f} untouched by the temporal integration`);
++  for (const f of trackedFilesText("'rumint/*.js' 'doctrine/MISSION.md' 'rumor2/truth.js' 'persistence/*.js'").trim().split('\n')) assert.ok(!readFileSync(path.join(REPO, f), 'utf8').includes('social-time') && !readFileSync(path.join(REPO, f), 'utf8').includes('social-reconcile'), `${f} untouched by the temporal integration`);
+   const mission = readFileSync(path.join(REPO, 'doctrine/MISSION.md'), 'utf8'); assert.ok(mission.includes('We do not reject pumps')); assert.ok(mission.includes('price extension is context'));
+ });
+ 
+diff --git a/test/social-4f-scope.test.js b/test/social-4f-scope.test.js
+index 83824b6..bfb317e 100644
+--- a/test/social-4f-scope.test.js
++++ b/test/social-4f-scope.test.js
+@@ -1,6 +1,7 @@
+ // SOCIAL-4F — SOCIAL_ADMISSION_SCOPE policy (G), versioned scope truth (C), research config,
+ // the observation-only watch planner + explicit X watch scope (E/L/P), and the protected-surface
+ // pins. Pure; synthetic identities; fixed seeds; no network.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync } from 'node:fs';
+@@ -386,7 +387,7 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
+ // historical byte-differential reports unrelated intentional source changes.
+ // The historical assertions above remain intact and still report those changes.
+ test('SCOPE-9. current catalog consumers and Social authority fences remain exact', () => {
+-  const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
++  const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
+   const read = (f) => readFileSync(path.join(REPO, f), 'utf8');
+   const code = (f) => read(f).split('\n').filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')); }).join('\n');
+   const imports = (f) => [...read(f).matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
+diff --git a/test/social-closeout.test.js b/test/social-closeout.test.js
+index 567bce8..66203a7 100644
+--- a/test/social-closeout.test.js
++++ b/test/social-closeout.test.js
+@@ -3,6 +3,7 @@
+ // the closeout: social evidence survives the authoritative journal with author,
+ // relationship, version, edit and deletion truth intact, and holds zero direct
+ // authority.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { execSync } from 'node:child_process';
+@@ -25,7 +26,7 @@ const bsky = (over = {}) => normalizeSocialObservation(jetstreamCommitToRaw({ pa
+ 
+ // ---- pure passes -----------------------------------------------------------
+ test('PASS 1 — OLD AUTHORITY: social files are tracked yet hold zero execution authority', () => {
+-  const tracked = execSync("git ls-files 'rumor2/social*.js' 'rumor2/providers/bluesky-official.js' 'rumor2/providers/farcaster-official.js'", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
++  const tracked = trackedFilesText("'rumor2/social*.js' 'rumor2/providers/bluesky-official.js' 'rumor2/providers/farcaster-official.js'").trim().split('\n').filter(Boolean);
+   assert.ok(tracked.length >= 6, 'social files are visible to git ls-files');
+   assert.equal(classifyOfficialItem({ providerKind: 'SOCIAL_MICROBLOG', title: 'FOO lists', summary: 'now' }), null);
+ });
+diff --git a/test/social-farcaster-access.test.js b/test/social-farcaster-access.test.js
+index 486c7e2..32fb038 100644
+--- a/test/social-farcaster-access.test.js
++++ b/test/social-farcaster-access.test.js
+@@ -5,6 +5,7 @@
+ // limits are never this account's entitlement; pagination is never complete
+ // coverage; unmeasured lag is never a real-time lead; webhook authentication is
+ // never delivery completeness, ordering, or replay; no runtime imports the boundary.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync } from 'node:fs';
+@@ -118,7 +119,7 @@ test('FC-ACCESS-4 (Stage-3 gate). a key, a published Free plan, an unrelated app
+ });
+ 
+ test('FC-ACCESS-5. only the scoped Farcaster runtime may consume the access boundary; the boundary stays pure and imports only the provider adapter and shared primitive', () => {
+-  const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
++  const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
+   assert.ok(tracked.includes('rumor2/social-farcaster-access.js'), 'the boundary is tracked');
+   const importers = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && /from\s+'[^']*social-farcaster-access/.test(read(f)));
+   assert.deepEqual(importers, ['rumor2/social-farcaster-runtime.js'], 'only the owner-requested, gated search runtime consumes the boundary');
+diff --git a/test/socrates-contract-0a.test.js b/test/socrates-contract-0a.test.js
+index ac71a3c..2458a58 100644
+--- a/test/socrates-contract-0a.test.js
++++ b/test/socrates-contract-0a.test.js
+@@ -5,6 +5,7 @@
+ // stronger claim statuses need their proving relation, clocks are causally
+ // coherent, and nested reference sets are order-insensitive but
+ // multiplicity-invalid.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync } from 'node:fs';
+@@ -627,7 +628,7 @@ test('0A-48. undeclared raw text cannot bypass excerpt bounds', () => {
+ // ---- authority boundary stays sealed ----------------------------------------
+ 
+ test('0A-52. no runtime module imports the Socrates/evidence contracts', () => {
+-  const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
++  const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
+   const runtime = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && !f.startsWith('evidence/') && !f.startsWith('socrates/'));
+   assert.ok(runtime.length > 50, 'the runtime scan actually covers the codebase');
+   // MARKET-LAB: the research service composition (market-lab/service.js) and the Socrates research CLI are the ONLY
+diff --git a/test/socrates-contract-0b.test.js b/test/socrates-contract-0b.test.js
+index 49cc135..6503d22 100644
+--- a/test/socrates-contract-0b.test.js
++++ b/test/socrates-contract-0b.test.js
+@@ -5,6 +5,7 @@
+ // is a pure diagnostic envelope: invalid evidence may not become analysis
+ // by hiding inside a withheld state, and a valid packet may never be
+ // labeled withheld.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync } from 'node:fs';
+@@ -464,7 +465,7 @@ test('0B-29. analysis identity remains deterministic for a valid withheld envelo
+ // ---- authority boundary stays sealed ----------------------------------------
+ 
+ test('0B-34. no runtime module imports the Socrates/evidence contracts', () => {
+-  const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
++  const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
+   const runtime = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && !f.startsWith('evidence/') && !f.startsWith('socrates/'));
+   assert.ok(runtime.length > 50, 'the runtime scan actually covers the codebase');
+   // MARKET-LAB: the research service composition (market-lab/service.js) and the Socrates research CLI are the ONLY
+diff --git a/test/socrates-contract.test.js b/test/socrates-contract.test.js
+index d7f491d..ea19f15 100644
+--- a/test/socrates-contract.test.js
++++ b/test/socrates-contract.test.js
+@@ -3,6 +3,7 @@
+ // (socrates-analysis-1). Point-in-time truth is rejected-not-clamped,
+ // unknown stays unknown, echoes are not corroboration, execution semantics
+ // fail validation, and nothing in the live runtime imports either contract.
++import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync } from 'node:fs';
+@@ -605,7 +606,7 @@ test('38. validators do not mutate caller objects', () => {
+ });
+ 
+ test('39. no runtime import of Socrates contract from execution/strike modules', () => {
+-  const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
++  const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
+   const runtime = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && !f.startsWith('evidence/') && !f.startsWith('socrates/'));
+   assert.ok(runtime.length > 50, 'the runtime scan actually covers the codebase');
+   // MARKET-LAB: the research service composition (market-lab/service.js) and the Socrates research CLI are the ONLY
+-- 
+2.43.0
+
