@@ -15,6 +15,8 @@ import path from 'node:path';
 import { existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { atomicWriteJson } from '../lib/jsonl.js';
 import { classifyOutcome } from './maturation.js';
+// the Judge's ledger rows: `live-judge-paper:RANGE_IGNITION` from learning/judge-decision-bridge.js (JUDGE_DATASET_PREFIX), or the bare `judge:` of fixtures
+export const isJudgeDataset = (id) => typeof id === 'string' && (id.startsWith('live-judge') || id.startsWith('judge:'));
 
 export const RELOOK_VERSION = 'learning-relook-1';
 export const RELOOK_SOURCE = 'LEARNED_RELOOK';
@@ -52,7 +54,7 @@ export function lateEntryEvidence(records, { minMoverSample = RELOOK_DEFAULTS.mi
 export function missedRises({ episodes, outcomes, nowTs, lookbackMin = RELOOK_DEFAULTS.lookbackMin, missedRisePct = RELOOK_DEFAULTS.missedRisePct, horizon = RELOOK_DEFAULTS.horizon }) {
   const out = []; const since = nowTs - lookbackMin * MIN;
   for (const e of episodes) {
-    if (!e || typeof e.datasetId !== 'string' || !e.datasetId.startsWith('judge:')) continue;
+    if (!e || typeof e.datasetId !== 'string' || !isJudgeDataset(e.datasetId)) continue; // PUBLISH-FIX-83 item 21: the bridge writes 'live-judge-<mode>:<setup>'; 'judge:' never matched a live row
     if (e.decision === 'SELECTED_FOR_PAPER' || !Number.isSafeInteger(e.decisionTs) || e.decisionTs < since) continue;
     const o = outcomes.get(e.opportunityId); const h = o?.outcomeRow?.horizons?.[horizon];
     if (classifyOutcome(h) !== 'FAVORABLE') continue;
