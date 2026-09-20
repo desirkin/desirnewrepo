@@ -512,12 +512,12 @@ function startPump(state, log) {
       // the store acquires the local lock, RE-READS local truth under it,
       // merges MOST RESTRICTIVE, and writes only on change — a restriction
       // that landed while we read the database can never be overwritten
-      const { state: merged, changed } = controlStore.mergeRestrictive(durable?.state ?? {}, 'persistence-sync');
+      const { state: merged, changed, watermarkOnly } = controlStore.mergeRestrictive(durable?.state ?? {}, 'persistence-sync');
       if (controlStore.integrityStatus().locked && !state.integrityLock) {
         state.integrityLock = true;
         log('PERSISTENCE INTEGRITY LOCK: local control state was corrupt during sync — fail-closed KILL stands');
       }
-      if (changed) log('PERSISTENCE control sync: durable restriction adopted locally (most restrictive wins)');
+      if (changed) log(watermarkOnly ? 'PERSISTENCE control sync: durable CLEAR watermark adopted locally' : 'PERSISTENCE control sync: durable restriction adopted locally (most restrictive wins)');
       // local lock is released before this network write
       if (!durable || canonicalJson(merged) !== canonicalJson(durable.state)) {
         const r = await state.repo.saveControlState(merged, durable?.revision ?? null);

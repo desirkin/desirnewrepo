@@ -328,15 +328,19 @@ export function mergeRestrictive(externalState, source = 'persistence-sync') {
   return withLock(() => {
     const cur = readUnderLock();
     const merged = mostRestrictiveControls(cur, externalState ?? {});
-    if (controlFingerprint(merged) === controlFingerprint(cur)) {
-      return { state: cur, changed: false };
+    const latchesSame = controlFingerprint(merged) === controlFingerprint(cur);
+    // review finding (PUBLISH-FIX-83 second pass): the change test ignored the CLEAR watermark, so a durable clearedAt was never
+    // adopted locally and the pump then saved the watermark-less local copy over the durable row — undoing the CLEAR fence
+    const watermarkSame = (merged.clearedAt ?? null) === (cur.clearedAt ?? null);
+    if (latchesSame && watermarkSame) {
+      return { state: cur, changed: false, watermarkOnly: false };
     }
     atomicWriteJson(controlsFile(), merged, { pretty: true });
     try {
-      appendJsonl(controlLogFile(), { ts: nowIso(), action: 'SYNC_MERGE', source }, { sync: true });
+      appendJsonl(controlLogFile(), { ts: nowIso(), action: latchesSame ? 'SYNC_WATERMARK' : 'SYNC_MERGE', source }, { sync: true });
     } catch {
       // merged state is on disk; audit best-effort
     }
-    return { state: merged, changed: true };
+    return { state: merged, changed: true, watermarkOnly: latchesSame };
   });
 }
