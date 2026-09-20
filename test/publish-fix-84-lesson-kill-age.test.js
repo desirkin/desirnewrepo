@@ -37,3 +37,15 @@ test('FIX84-L2 (F3). a lesson older than the age limit is reference lines, logge
   const fresh = root(now - 6 * 24 * 3_600_000); const l2 = createGateLesson({ dataDir: fresh.dir, clock: () => now }); l2.refresh();
   assert.deepEqual(l2.lesson('RANGE_IGNITION'), { FI15: 0.2 });
 });
+
+test('FIX89-L3 (blind review 864b4c3a F3). a future-dated lesson is rejected on read; a lesson that ages past the limit between refreshes drops on the next read, not the next refresh', () => {
+  let now = 1_000_000_000_000; const r = root(now + 24 * 3_600_000); const logs = [];
+  const lesson = createGateLesson({ dataDir: r.dir, clock: () => now, log: (l) => logs.push(String(l)) }); lesson.refresh();
+  assert.deepEqual(lesson.lesson('RANGE_IGNITION'), {}, 'a lesson from tomorrow is not a lesson');
+  assert.match(lesson.line(), /REJECTED — computedTs is \d+ min in the FUTURE/);
+  // a sane lesson, then time passes beyond the limit with no refresh
+  const fresh = root(now - 60_000); const l2 = createGateLesson({ dataDir: fresh.dir, clock: () => now, maxLessonAgeMs: 3_600_000 }); l2.refresh();
+  assert.deepEqual(l2.lesson('RANGE_IGNITION'), { FI15: 0.2 });
+  now += 3_600_000 + 61_000;
+  assert.deepEqual(l2.lesson('RANGE_IGNITION'), {}, 'aged out on the read itself'); assert.match(l2.line(), /lesson STALE/);
+});

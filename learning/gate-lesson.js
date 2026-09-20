@@ -252,6 +252,7 @@ export function parseOwnerGateLines(raw) {
 // running) is not a lesson — reference lines, with a line saying why.
 export const GATE_LESSON_MAX_AGE_MS = 7 * 24 * 3_600_000;
 export const KILL_RECHECK_MS = 5_000;
+export const MAX_FUTURE_SKEW_MS = 5 * 60_000;
 export function createGateLesson({ dataDir, clock = () => Date.now(), log = () => {}, ownerLines = null, maxLessonAgeMs = GATE_LESSON_MAX_AGE_MS, killRecheckMs = KILL_RECHECK_MS } = {}) {
   if (typeof dataDir !== 'string' || !dataDir) throw new Error('gate lesson: dataDir required');
   const P = gateLessonPaths(dataDir); const killFile = path.join(dataDir, 'learning', 'kill.json');
@@ -263,23 +264,35 @@ export function createGateLesson({ dataDir, clock = () => Date.now(), log = () =
   function killState() { if (!existsSync(killFile)) return { state: 'ARMED', reason: null }; try { const k = JSON.parse(readFileSync(killFile, 'utf8')); return k && typeof k === 'object' && ['ARMED', 'KILLED'].includes(k.state) ? { state: k.state, reason: k.reason ?? null } : { state: 'KILLED', reason: 'KILL_FILE_INVALID' }; } catch { return { state: 'KILLED', reason: 'KILL_FILE_UNREADABLE' }; } }
   const logKey = () => `${killed ? `KILLED:${killed.reason}` : 'ARMED'}:${stale ? `STALE:${stale.ageMs}` : ''}:${lesson ? JSON.stringify(lesson.lines) + ':' + lesson.computedTs : 'none'}`;
   function checkKill(now) { killCheckedAt = now; const k = killState(); killed = k.state === 'KILLED' ? k : null; }
+  // PUBLISH-FIX-89 (blind review 864b4c3a F3): the lesson's clock is judged on EVERY read, not only at refresh — a lesson that
+  // crosses the age limit between refreshes drops to reference lines on the next look, and a lesson stamped in the FUTURE (a
+  // wrong clock, a hand-written file) is never a lesson: only MAX_FUTURE_SKEW_MS of skew is allowed, and it fails closed.
+  function clockVerdict(now) {
+    if (!lesson) return null;
+    const computedTs = Number.isSafeInteger(lesson.computedTs) ? lesson.computedTs : 0;
+    if (computedTs - now > MAX_FUTURE_SKEW_MS) return { future: true, ageMs: now - computedTs, computedTs };
+    const ageMs = now - computedTs;
+    if (Number.isFinite(maxLessonAgeMs) && maxLessonAgeMs > 0 && ageMs > maxLessonAgeMs) return { future: false, ageMs, computedTs };
+    return null;
+  }
   function refresh() {
     stale = null;
     try { lesson = existsSync(P.lesson) ? readJsonBounded(P.lesson, 4 * 1024 * 1024) : null; if (lesson && lesson.version !== GATE_LESSON_VERSION) lesson = null; }
     catch (err) { log(`GATE LEARNING lesson unreadable (reference lines): ${String(err?.message ?? err).slice(0, 120)}`); lesson = null; }
     const now = clock();
-    if (lesson && Number.isFinite(maxLessonAgeMs) && maxLessonAgeMs > 0) { const ageMs = now - (Number.isSafeInteger(lesson.computedTs) ? lesson.computedTs : 0); if (ageMs > maxLessonAgeMs) { stale = { ageMs, computedTs: lesson.computedTs ?? null }; lesson = null; } }
+    const v = clockVerdict(now); if (v) { stale = v; lesson = null; }
     checkKill(now);
     const key = logKey(); if (key !== lastLogged) { lastLogged = key; log(line()); }
     return current();
   }
   function current() {
     const now = clock(); if (now - killCheckedAt >= killRecheckMs) { const was = killed ? killed.reason : null; checkKill(now); const is = killed ? killed.reason : null; if (was !== is) { const key = logKey(); if (key !== lastLogged) { lastLogged = key; log(line()); } } }
+    const v = clockVerdict(now); if (v) { stale = v; lesson = null; const key = logKey(); if (key !== lastLogged) { lastLogged = key; log(line()); } }
     return killed || !lesson ? { lines: {}, killed: killed ? { reason: killed.reason } : null, stale } : { lines: lesson.lines ?? {}, killed: null, stale: null };
   }
   // the Judge's port answers a flat { FI15: 0.15, RV60: 1.0, ... }; RV60 is learned per setup, the Judge asks per setup
   function lessonFor(setupId = null) { const c = current(); const out = {}; for (const [id, v] of Object.entries(c.lines)) { if (id === 'RV60') { const s = setupId && v && typeof v === 'object' ? v[setupId] : undefined; if (typeof s === 'number') out.RV60 = s; } else if (typeof v === 'number') out[id] = v; } for (const id of ownerIds) out[id] = owner.lines[id]; return out; }
   const ownerText = () => (ownerIds.length ? ` | OWNER LINES in force: ${ownerIds.map((id) => `${id} ${owner.lines[id]}`).join(', ')}` : '');
-  function line() { if (killed) return `GATE LEARNING: DORMANT — learned influence KILLED (data/learning/kill.json${killed.reason ? `: ${killed.reason}` : ''}); reference lines in force${ownerText()}`; if (stale) return `GATE LEARNING: lesson STALE — computed ${Math.round(stale.ageMs / 3_600_000)} h ago, older than ${Math.round(maxLessonAgeMs / 3_600_000)} h; reference lines in force until the study runs again${ownerText()}`; return `${gateLessonLine(lesson)}${ownerText()}`; }
+  function line() { if (killed) return `GATE LEARNING: DORMANT — learned influence KILLED (data/learning/kill.json${killed.reason ? `: ${killed.reason}` : ''}); reference lines in force${ownerText()}`; if (stale) return stale.future ? `GATE LEARNING: lesson REJECTED — computedTs is ${Math.round(-stale.ageMs / 60_000)} min in the FUTURE (clock skew beyond ${Math.round(MAX_FUTURE_SKEW_MS / 60_000)} min); reference lines in force until a lesson with a sane clock lands${ownerText()}` : `GATE LEARNING: lesson STALE — computed ${Math.round(stale.ageMs / 3_600_000)} h ago, older than ${Math.round(maxLessonAgeMs / 3_600_000)} h; reference lines in force until the study runs again${ownerText()}`; return `${gateLessonLine(lesson)}${ownerText()}`; }
   return { refresh, lesson: lessonFor, current, line, paths: P, ownerLines: () => ({ ...owner.lines }) };
 }
