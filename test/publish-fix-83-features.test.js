@@ -59,3 +59,16 @@ test('FIX83-12. the 10 bps liquidity band is measured from the best bid, not the
   const wide = { bids: [['99700', '2'], ['99500', '3']], asks: [['100000', '1']] }; assert.equal(bidDepthWithinBps(wide, 10), '199400', 'a bid 20 bps under the best bid is outside the band');
   assert.equal(bidDepthWithinBps({ bids: [], asks: [['1', '1']] }, 10), null);
 });
+
+test('FIX83-27. a book / trade message that names no admitted symbol is not lexeme-parsed (skipped on a substring check), yet its venue clock still vouches for liveness', () => {
+  const feed = createExecutionFeed({ clock: () => T }); feed.admit('XBT/USD', { priority: 'CANDIDATE' }); feed.onConnect(T - 60_000);
+  feed.ingest(JSON.stringify({ method: 'subscribe', success: true, result: { channel: 'trade', symbol: 'XBT/USD' } }), T - 60_000);
+  const other = (ts, receipt = ts) => feed.ingest(JSON.stringify({ channel: 'trade', type: 'update', data: [{ symbol: 'ETH/USD', side: 'buy', price: '1', qty: '1', ord_type: 'market', trade_id: ts, timestamp: new Date(ts).toISOString() }] }), receipt);
+  const mine = (ts, receipt = ts) => feed.ingest(JSON.stringify({ channel: 'trade', type: 'update', data: [{ symbol: 'XBT/USD', side: 'buy', price: '1', qty: '1', ord_type: 'market', trade_id: ts, timestamp: new Date(ts).toISOString() }] }), receipt);
+  for (let t = T - 59_000; t <= T - 10_000; t += 1000) other(t);
+  assert.equal(feed.status().counters.skippedParse, 50); assert.equal(feed.status().counters.trades, 0, 'nothing applied for a symbol nobody holds');
+  mine(T - 9_000); assert.equal(feed.status().counters.trades, 1, 'the admitted symbol is parsed and applied');
+  // a 7 s stall vouched for only by ETH prints (never admitted): coverage survives
+  for (let k = 8; k >= 2; k -= 1) other(T - k * 1000, T - 2000);
+  assert.equal(feed.status().counters.stallsAbsorbed, 1); assert.equal(feed.status().counters.coverageGaps, 0); assert.equal(feed.coverage('XBT/USD', T).startTs, T - 60_000);
+});

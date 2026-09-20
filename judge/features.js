@@ -89,7 +89,11 @@ export function relativeVolume60(trades, decisionTs, coverage) {
   const need = { startTs: E - 21 * BAR_MS, endTs: E };
   if (!coverageClockValid || coverage.startTs > need.startTs || coverage.endTs < need.endTs - RV60_COVERAGE_LAG_MS) return unknown('COVERAGE_INCOMPLETE');
   const resolved = queryEpoch(trades, need.startTs, need.endTs, decisionTs, coverage.epoch); if (!resolved.ok) return unknown(resolved.reason === 'TRADE_INVALID' ? 'INPUT_INVALID' : 'EPOCH_AMBIGUOUS');
-  const query = { asOfTs: decisionTs, feedEpoch: resolved.epoch }; const numerator = windowNotional(trades, E - BAR_MS, E, query); const base = []; for (let k = 1; k <= 20; k += 1) base.push(windowNotional(trades, E - (k + 1) * BAR_MS, E - k * BAR_MS, query).notional);
+  // PUBLISH-FIX-83 (full review item 26): the 21 windows are summed in ONE pass over the selected trades (it was 21 full passes with
+  // BigInt adds, ~18 ms per call at 20k trades — ~430 ms/s once liquid coins sit in the slots); same windows, same law, same values
+  const query = { asOfTs: decisionTs, feedEpoch: resolved.epoch }; const selected = tradesAsOf(trades, need.startTs, need.endTs, query); const sums = new Array(21).fill('0'); const counts = new Array(21).fill(0);
+  for (const t of selected.trades) { const k = Math.floor((E - t.eventTs - 1) / BAR_MS); if (k < 0 || k > 20) continue; sums[k] = M.add(sums[k], t.quoteNotional); counts[k] += 1; }
+  const numerator = { notional: sums[0], count: counts[0] }; const base = sums.slice(1);
   const sorted = [...base].sort((a, b) => M.cmp(a, b)); const median = M.div(M.add(sorted[9], sorted[10]), '2', 8, 'HALF_UP');
   if (M.isZero(median)) return { state: 'UNKNOWN', reason: 'ZERO_MEDIAN', rv60: null, E, window: 'TRAILING', numerator: numerator.notional, numeratorCount: numerator.count, baseline: median, completedMinuteDelayMs: 0 };
   return { state: 'KNOWN', reason: null, rv60: M.toStatistic(M.div(numerator.notional, median, 8, 'HALF_UP')), E, window: 'TRAILING', numerator: numerator.notional, numeratorCount: numerator.count, baseline: median, baselineWindows: 20, completedMinuteDelayMs: 0 };

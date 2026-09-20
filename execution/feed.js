@@ -52,6 +52,7 @@ export function createExecutionFeed({ clock = () => Date.now(), limits = FEED_DE
     if (Number.isFinite(sourceTs)) { const prev = lastSourceTs; if (prev === null || sourceTs > prev) lastSourceTs = sourceTs; if (pendingGap) { if (prev !== null && sourceTs - prev <= L.impairedAfterMs) { counters.stallsAbsorbed += 1; pendingGap = null; } else breakCoverage(); } return; }
     if (pendingGap && receiptTs - pendingGap.at > L.impairedAfterMs) breakCoverage();
   }
+  const cheapSourceClock = (raw) => { let best = null; let i = raw.lastIndexOf('"timestamp":"'); if (i < 0) return null; const j = raw.indexOf('"', i + 13); if (j < 0) return null; const t = Date.parse(raw.slice(i + 13, j)); if (Number.isFinite(t)) best = t; return best; };
   const sourceClockOf = (msg) => { const d = Array.isArray(msg?.data) ? msg.data : null; if (!d || !d.length) return null; let best = null; for (const row of d) { const t = typeof row?.timestamp === 'string' ? Date.parse(row.timestamp) : NaN; if (Number.isFinite(t) && (best === null || t > best)) best = t; } return best; };
   const emit = (ev) => { for (const fn of listeners) { try { fn(ev); } catch (err) { counters.listenerErrors += 1; if (counters.listenerErrors <= 3) log(`execution feed listener error (ignored): ${err?.message ?? err}`); } } };
   const bookOf = (symbol) => { if (!books.has(symbol)) { const p = precisions.get(symbol) ?? null; books.set(symbol, { bids: new Map(), asks: new Map(), synced: false, lastReceiptTs: null, lastSourceTs: null, receiptSequence: 0, priceDecimals: p ? p.priceDecimals : null, qtyDecimals: p ? p.qtyDecimals : null, crcFailures: 0, lastSnapshot: null, epoch }); } return books.get(symbol); };
@@ -105,7 +106,15 @@ export function createExecutionFeed({ clock = () => Date.now(), limits = FEED_DE
     emit({ kind: 'TRADE', symbol, trade });
   }
   function ingest(raw, receiptTs = clock()) {
-    counters.messages += 1; liveness(receiptTs); lastMessageTs = receiptTs; let msg; try { msg = parseLexemes(raw); } catch { counters.parseErrors += 1; return; }
+    counters.messages += 1; liveness(receiptTs); lastMessageTs = receiptTs;
+    // PUBLISH-FIX-83 (full review item 27): the firehose is parsed ONCE more here for every message although only the admitted symbols'
+    // book / trade rows are ever applied. A book / trade message that names no admitted symbol is skipped on a substring check (its
+    // venue clock is still read for the liveness law) — the full lexeme parse runs only for what can be applied.
+    if (typeof raw === 'string' && (raw.startsWith('{"channel":"book"') || raw.startsWith('{"channel":"trade"'))) {
+      let hit = false; for (const sym of admitted.keys()) { if (raw.includes(`"symbol":"${sym}"`)) { hit = true; break; } }
+      if (!hit) { counters.skippedParse = (counters.skippedParse ?? 0) + 1; resolveLiveness(receiptTs, cheapSourceClock(raw)); return; }
+    }
+    let msg; try { msg = parseLexemes(raw); } catch { counters.parseErrors += 1; return; }
     resolveLiveness(receiptTs, msg.channel === 'book' || msg.channel === 'trade' ? sourceClockOf(msg) : null);
     if (msg.channel === 'heartbeat') { lastHeartbeatTs = receiptTs; return; }
     if (msg.method === 'subscribe' && msg.success === true && msg.result?.channel === 'trade' && admitted.has(msg.result.symbol)) { tradeCoverage.set(msg.result.symbol, { epoch, startTs: receiptTs, lastTs: receiptTs }); return; }
