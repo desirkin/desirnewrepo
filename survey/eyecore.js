@@ -86,6 +86,17 @@ export function evaluateTick({ ret1, ret5, ret15Pct, volRate }, baselines, cfg, 
 // Seven-day trailing retention, identical semantics to the live pruner:
 // buckets keyed "YYYY-MM-DDTHH" (ET); drop keys whose date part is older
 // than the cutoff date. sessionDateOf is injected to avoid a time-lib cycle.
+// PUBLISH-FIX-83: the sample "minAgo minutes ago" for a trailing return. It must sit inside a bounded band around the wanted
+// age — [want - AT_SLACK_EARLY_MS, want + AT_SLACK_LATE_MS] — else the return is honestly unavailable (undefined). Before this
+// the newest sample OLDER than the wanted age was taken, so after a sweep gap a 3-minute move was scored as a 1-minute return.
+export const AT_SLACK_LATE_MS = 5_000;
+export const AT_SLACK_EARLY_MS = 35_000;
+export function trailingSample(series, nowMs, minAgo) {
+  const want = nowMs - minAgo * 60_000;
+  const p = series.findLast((q) => q.t <= want + AT_SLACK_LATE_MS);
+  return p && p.t >= want - AT_SLACK_EARLY_MS ? p : undefined;
+}
+
 export function pruneBaselineBuckets(buckets, nowMs, sessionDateOf, days = 7) {
   const cutoff = sessionDateOf(new Date(nowMs - days * 86_400_000));
   for (const key of Object.keys(buckets)) {

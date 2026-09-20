@@ -19,7 +19,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { loadConfig, dataDir } from '../lib/config.js';
-import { appendJsonl, atomicWriteJson, readJsonlTail } from '../lib/jsonl.js';
+import { appendJsonl, atomicWriteJson, atomicWriteJsonAsync, readJsonlTail } from '../lib/jsonl.js';
 import { nowIso, sessionDate, etHourKey } from '../lib/time.js';
 import { readCurrentUniverse } from '../tape/universe.js';
 import { krakenUsdSpotBase, normalizeKrakenAssetPairs, acceptCatalogCandidate, CATALOG_MAX_MARKETS_DEFAULT } from './catalog.js';
@@ -63,7 +63,7 @@ export function catalogResourceSettings(config = loadConfig()) {
 // Extracted VERBATIM to survey/eyecore.js (B-0B) so live and historical
 // replay share one implementation and cannot drift. Re-exported here so
 // every existing import path keeps working. Live behavior unchanged.
-import { bucketAdd, pooledStats, zScore, classifyRipple, evaluateTick, pruneBaselineBuckets, logReturn, extensionPct, volumeRate } from './eyecore.js';
+import { trailingSample, bucketAdd, pooledStats, zScore, classifyRipple, evaluateTick, pruneBaselineBuckets, logReturn, extensionPct, volumeRate } from './eyecore.js';
 export { bucketAdd, pooledStats, zScore, classifyRipple, evaluateTick, pruneBaselineBuckets, logReturn, extensionPct, volumeRate };
 
 // (Deep-tape cap/shed lives in tape/universe.js mergeNominationsAndCap —
@@ -116,6 +116,7 @@ export function startWideEye({
   let backoffUntil = 0;
   let backoffMs = 60_000;
   let lastPersist = 0;
+  let persistInFlight = false; // PUBLISH-FIX-83: one baselines write at a time (async)
   let stopping = false;
   // SOCIAL-4F catalog state: previously ACCEPTED truth is retained across refusals/failures
   const catalog = { accepted: null, lastAttemptTs: null, lastSuccessTs: null, lastError: null, lastRefusal: null, refreshes: 0, refusals: 0, failures: 0, lastChange: null };
@@ -263,7 +264,10 @@ export function startWideEye({
       series.set(coin, s);
       if (s.length < 2) { excluded.INSUFFICIENT_SERIES += 1; auditRows?.push({ coin, evaluated: false, reason: 'INSUFFICIENT_SERIES' }); continue; }
 
-      const at = (minAgo) => s.findLast((p) => p.t <= nowMs - minAgo * 60_000 + 5000);
+      // review finding (PUBLISH-FIX-83): a return "1 minute ago" used to be whatever sample was OLDER than a minute — after a
+      // sweep gap (back-off, a stalled sweep) ret1 silently measured a 3-minute return and the z-score judged it as 1 min.
+      // The sample must sit inside a bounded band around the wanted age; otherwise the return is honestly unavailable.
+      const at = (minAgo) => trailingSample(s, nowMs, minAgo);
       const p1 = at(1);
       const p5 = at(5);
       const p15 = at(15);
@@ -327,14 +331,20 @@ export function startWideEye({
       }
     }
 
-    if (nowMs - lastPersist > (cfg.persistSec ?? 600) * 1000) {
+    if (nowMs - lastPersist > (cfg.persistSec ?? 600) * 1000 && !persistInFlight) {
       lastPersist = nowMs;
-      for (const b of Object.values(baselines)) {
+      // PUBLISH-FIX-83: a coin whose every bucket aged out (delisted, or never surveyed again) leaves the baselines
+      // instead of staying as an empty entry forever; the write itself leaves the main thread (10-25 MB, every 10 min).
+      let dropped = 0;
+      for (const [coin, b] of Object.entries(baselines)) {
         pruneBuckets(b.ret1, nowMs);
         pruneBuckets(b.ret5, nowMs);
         pruneBuckets(b.volRate, nowMs);
+        if (!Object.keys(b.ret1).length && !Object.keys(b.ret5).length && !Object.keys(b.volRate).length) { delete baselines[coin]; dropped += 1; }
       }
-      atomicWriteJson(baselinesFile(), baselines); // compact; ~minutes cadence by design
+      if (dropped) log(`[${nowIso()}] WIDE EYE baselines: ${dropped} coin(s) with no surveyed hour in 7 days dropped`);
+      persistInFlight = true;
+      atomicWriteJsonAsync(baselinesFile(), baselines).catch((err) => log(`[${nowIso()}] WIDE EYE baselines write failed (contained): ${String(err?.message ?? err).slice(0, 160)}`)).finally(() => { persistInFlight = false; });
     }
     // SOCIAL-5 §36.6: publish the completed sweep's population (frozen, detached; identity from the sweep
     // clock + catalog + scanned count — a semantic id, never random)
