@@ -29,10 +29,15 @@ export function indicatorBlock(bars, { referenceTs = null } = {}) {
   const last3 = bars.slice(-3); const last3Low = Math.min(...last3.map((b) => num(b.low))); const last2High = Math.max(...bars.slice(-2).map((b) => num(b.high))); const low5 = Math.min(...last5.map((b) => num(b.low)));
   return Object.freeze({ featureVersion: FEATURE_VERSION, blockDigest: barBlockDigest(bars), referenceTs: bars[bars.length - 1].periodEndTs, atr14: atr, ema5: ema(5), ema20: ema(20), h20, l20, envelope5, low5, prior20Return: prior20Ret, prior20High: num(last20[prior20HighIdx].high), prior20HighBarsFromEnd: 19 - prior20HighIdx, prior20Low: l20, last3Low, last2High, lastClose: closes[closes.length - 1], bars: bars.length, trueRanges: trs.length });
 }
-// confirmed swing high: strictly above two bars on either side, all five closed before the reference; nearest strictly above `entry`
-export function nearestResistanceAbove(bars, entry, { referenceTs = null } = {}) {
+// confirmed swing high: strictly above two bars on either side, all five closed before the reference; nearest strictly above `entry`.
+// PUBLISH-FIX-85 (2026-09-20): `minAbove` — a swing high closer to the entry than this distance is noise, not a target: the nearest
+// swing AT LEAST minAbove above the entry is returned. The Judge sets it from the setup's own stop (REWARD_RISK_MIN × the stop
+// distance): a target nearer than that can never clear the reward-to-risk law, so capping to it only threw the whole setup away
+// (ARB/USD MICRO_BITE 2026-09-20: every gate passed, target 0.2125 capped by a swing one tick above the entry, no size).
+export function nearestResistanceAbove(bars, entry, { referenceTs = null, minAbove = 0 } = {}) {
   const swings = []; for (let i = 2; i < bars.length - 2; i += 1) { const h = num(bars[i].high); if (referenceTs !== null && bars[i + 2].periodEndTs > referenceTs) continue; if (h > num(bars[i - 1].high) && h > num(bars[i - 2].high) && h > num(bars[i + 1].high) && h > num(bars[i + 2].high)) swings.push({ price: h, periodStartTs: bars[i].periodStartTs }); }
-  const above = swings.filter((s) => s.price > entry).sort((a, b) => a.price - b.price); return above.length ? above[0] : null;
+  const floor = entry + (Number.isFinite(minAbove) && minAbove > 0 ? minAbove : 0);
+  const above = swings.filter((s) => s.price > floor).sort((a, b) => a.price - b.price); return above.length ? above[0] : null;
 }
 // ---- trade windows: half-open [start, end), native id dedup, taker side verbatim, unknown fraction retained ------------------
 export function dedupTrades(trades) { const seen = new Set(); const out = []; let dropped = 0; for (const t of trades) { const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (seen.has(k)) { dropped += 1; continue; } seen.add(k); out.push(t); } return { trades: out, duplicatesDropped: dropped }; }

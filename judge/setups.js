@@ -12,6 +12,7 @@ import { EDGE_EXECUTION_GATE_VERSION } from './edge-state.js';
 // setup geometry buffer: max(1 tick, 0.10 * ATR14) (the cost model's execution buffer is max(2 tick, 0.10 ATR) and lives in cost.js)
 const setupBuffer = (atr, tick) => (M.gt(tick, M.mul('0.1', atr)) ? tick : M.mul('0.1', atr));
 import { nearestResistanceAbove } from './features.js';
+import { REWARD_RISK_MIN } from './cost.js';
 
 export const STRATEGY_VERSION = 'judge-strategy-paper-reference-1';
 export const STARTING_STYLE_CATALOG_VERSION = 'judge-starting-styles-1';
@@ -109,7 +110,7 @@ export function freezeReferences({ setupId, ind, spec, fast, event = null, trigg
   if (setupId === 'ABSORPTION_RECLAIM') { const trigger = M.add(fast.vwap60, tick); return { ...base, priorFi: fast.priorFi, priorMidChange: fast.priorMidChange, priorMedianDepth: fast.priorMedianDepth, priorDepthSamples: fast.priorDepthSamples, priorLow: fast.priorLow60, vwap60: fast.vwap60, triggerLevel: trigger, structuralStop: M.sub(fast.priorLow60, buffer), scenarioRaw: d(ind.h20), maxEntryLevel: null }; }
   if (setupId === 'CATALYST_TRANSMISSION') { if (!preEventSnapshotBound(event)) return null; const p0 = event.p0; const trigger = M.add(p0, M.mul('0.1', atr)); return { ...base, event: Object.freeze({ eventId: event.eventId, knownAtTs: event.knownAtTs, taxonomy: event.taxonomy, caseId: event.caseId, analysisId: event.analysisId, p0Evidence: detachedPreEventEvidence(event.p0Evidence) }), p0, preEventH20: d(ind.h20), preEventL20: d(ind.l20), preEventLow5: d(ind.low5), triggerLevel: trigger, structuralStop: M.sub(M.min(p0, d(ind.low5)), buffer), scenarioRaw: M.add(p0, M.sub(d(ind.h20), d(ind.l20))), maxEntryLevel: M.add(p0, M.mul('1', atr)) }; }
   if (setupId === 'MOMENTUM_CONTINUATION') { const h20 = d(ind.h20); const l20 = d(ind.l20); return { ...base, ema5: d(ind.ema5), ema20: d(ind.ema20), lastClose: d(ind.lastClose), prior20Return: ind.prior20Return, triggerLevel: M.add(h20, buffer), structuralStop: M.sub(d(ind.low5), buffer), scenarioRaw: M.add(h20, M.mul('0.75', M.sub(h20, l20))), maxEntryLevel: null }; }
-  if (setupId === 'MICRO_BITE') { const trigger = M.add(d(ind.last2High), tick); return { ...base, ema5: d(ind.ema5), lastClose: d(ind.lastClose), envelope5: d(ind.envelope5), h20: d(ind.h20), triggerLevel: trigger, structuralStop: M.sub(d(ind.low5), buffer), scenarioRaw: d(ind.h20), maxEntryLevel: null }; }
+  if (setupId === 'MICRO_BITE') { const trigger = M.add(d(ind.last2High), tick); const h20 = d(ind.h20); const l20 = d(ind.l20); return { ...base, ema5: d(ind.ema5), lastClose: d(ind.lastClose), envelope5: d(ind.envelope5), h20, l20, triggerLevel: trigger, structuralStop: M.sub(d(ind.low5), buffer), scenarioRaw: h20, scenarioProjected: M.add(h20, M.sub(h20, l20)), maxEntryLevel: null }; } // PUBLISH-FIX-85: when the 20-bar high is already behind the entry the scenario projects one range above it (the RANGE_IGNITION measure)
   return null;
 }
 export const hypothesisDigest = (frozen) => digestOf(frozen);
@@ -151,7 +152,28 @@ export function fastClauses(setupId, frozen, fast, learned = null) {
   return c;
 }
 // the target scenario capped by a nearer confirmed resistance above the proposed entry (never an invented level)
-export function scenarioTarget(frozen, bars, entry, referenceTs) { const raw = frozen.scenarioRaw; if (raw === null) return { target: null, cappedBy: null }; const res = nearestResistanceAbove(bars, Number(entry), { referenceTs }); if (res && M.lt(d(res.price), raw)) return { target: d(res.price), cappedBy: { price: d(res.price), periodStartTs: res.periodStartTs } }; return { target: raw, cappedBy: null }; }
+// PUBLISH-FIX-85 (2026-09-20): the resistance cap honours the reward-to-risk law. A swing high nearer the entry than
+// REWARD_RISK_MIN × (entry − structural stop) can never size (reward below 1.5× risk before fees), so it is not a target: the cap
+// looks past it to the nearest swing that could, or leaves the setup's own target. The stop is the setup's own; no fee enters here
+// (the cost law still applies fees and haircuts to whatever target results — a poor setup is still refused, at sizing, with reasons).
+export const TARGET_MIN_REWARD_RISK = REWARD_RISK_MIN;
+export function minTargetDistance(entry, structuralStop) {
+  const e = Number(entry); const st = Number(structuralStop);
+  if (!Number.isFinite(e) || !Number.isFinite(st) || !(st > 0) || !(st < e)) return 0;
+  return (e - st) * Number(TARGET_MIN_REWARD_RISK);
+}
+// A setup whose own target is not at least that distance above the entry (the price already ran past it) has an EXHAUSTED scenario:
+// if the setup carries a projection (`scenarioProjected`, MICRO_BITE: one 20-bar range above the 20-bar high) that lies above the
+// entry, the projection is the scenario; otherwise the raw target stands and sizing refuses it with its reasons, as before.
+export function scenarioTarget(frozen, bars, entry, referenceTs) {
+  let raw = frozen.scenarioRaw; if (raw === null || raw === undefined) return { target: null, cappedBy: null };
+  const minAbove = minTargetDistance(entry, frozen.structuralStop);
+  const projected = frozen.scenarioProjected ?? null;
+  if (projected !== null && Number(raw) <= Number(entry) + minAbove && M.gt(projected, raw)) raw = projected;
+  const res = nearestResistanceAbove(bars, Number(entry), { referenceTs, minAbove });
+  if (res && M.lt(d(res.price), raw)) return { target: d(res.price), cappedBy: { price: d(res.price), periodStartTs: res.periodStartTs } };
+  return { target: raw, cappedBy: null };
+}
 // ablate (focused completion §5, MOMENTUM_ABLATION): an explicit research-only removal of NAMED entry clauses of ONE setup; the removed
 // clauses are still measured and reported (`ablated`), they simply do not decide. Nothing else changes; PAPER / LIVE never pass it.
 export const ABLATABLE_CLAUSES = Object.freeze({ RANGE_IGNITION: ['FI15', 'FI60_POSITIVE'] });

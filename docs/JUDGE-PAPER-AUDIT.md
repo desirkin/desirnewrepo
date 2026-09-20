@@ -60,11 +60,31 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       c4b99b933a2b2a080d74841d26eb3d3a32b283820fdb269bc21e294bdef5b4f2
+judge/*.js       96f83523029c1a5a9ffcac64120f667b8f84fbcd9f4eafea050804662f3e58bc
 execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   55b67b8bc7b8e2c6bf75f8fd92ed50fa8166729ee58304c46df0c702429e14f8
+all (49 files)   6016f931e15531e63a2f0d734137f914d9f8c0e2831902e4cc7806333fcd4127
 ```
+
+### 4.35 Audited change — 2026-09-20 PUBLISH-FIX-85: the target-cap law honours the reward-to-risk law (previous digests: judge `c4b99b933a2b…` → `96f83523029c…`, all `55b67b8bc7b8…` → `6016f931e155…`; execution and watch/watch.js UNCHANGED; 49 files)
+
+The first hour of PUBLISH-FIX-84 (deployment d6ab0259) wrote the line the owner had been asking for: `CLOSE CALL: ARB/USD
+MICRO_BITE passed every gate; no trade size — NO_BOUNDED_FEASIBLE_LOT (cash 500, risk budget 15, target 0.2125 capped at
+0.2125)`, twice. Every gate passed; the scenario target was capped to a confirmed swing high ONE TICK above the entry, so the
+reward was zero and no lot on the ladder could clear REWARD_RISK_MIN. AKE (09-19, +13.7% in the 15 minutes after) and the
+bite drill's MICRO_BITE died the sibling way: the 20-bar high — MICRO_BITE's own target — was already BELOW the entry.
+**judge/features.js** — `nearestResistanceAbove(bars, entry, { referenceTs, minAbove = 0 })`: the nearest confirmed swing AT
+LEAST `minAbove` above the entry (default 0: unchanged). **judge/setups.js** — `minTargetDistance(entry, stop)` =
+REWARD_RISK_MIN × (entry − structuralStop) (0 when the stop is unknown or not below the entry); `scenarioTarget` passes it as
+`minAbove`, so a swing the reward law could never accept is not a target — the cap looks past it to the nearest swing that
+could, or leaves the setup's own target; and a setup whose own target is not at least that distance above the entry (the
+price ran past it) uses its projection when it carries one: MICRO_BITE now freezes `l20` and `scenarioProjected` = h20 +
+(h20 − l20) (the RANGE_IGNITION measure). A setup without a projection keeps its raw target and is refused at sizing with
+its reasons, exactly as before. No gate, no threshold, no size law, no fee, no haircut, no ordering moved; the cost law
+still applies fees and haircuts to whatever target results. Proof: test/publish-fix-85-target-cap.test.js (T1–T4: the
+distance, the skipped one-tick swing, the ARB shape, the AKE/drill shape and the no-projection fallback);
+test/paper-bite-drill.test.js — MICRO_BITE now SIZES under the production policy (q=0.00160002, cashOut 161.40) and stands
+down only to STRATEGY_NOT_SELECTED_SAME_UNDERLYING (RANGE_IGNITION took the coin); judge-cost-capital, P-08 green.
 
 ### 4.34 Audited change — 2026-09-20 PUBLISH-FIX-84: the CLOSE CALL line (previous digests: judge `37959eac34a7…` → `c4b99b933a2b…`, all `6fbf8df680c8…` → `55b67b8bc7b8…`; execution as in 4.33; watch/watch.js UNCHANGED; 49 files)
 
