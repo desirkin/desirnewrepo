@@ -379,20 +379,41 @@ export function startRumint({
   // Law now: a checkpoint carries the tracked symbols first, then the most recently observed others, never more than the
   // bound; the in-flight transaction's symbol is always kept. Pruned symbols lose only their (unpolled) history.
   const lastObservedMs = (baseline) => { let best = 0; for (const k of Object.keys(baseline?.buckets ?? {})) { const ms = hourKeyMs(k); if (Number.isFinite(ms) && ms > best) best = ms; } return best; };
-  function pruneCheckpointSymbols() {
+  function pruneSymbolMaps(baselines, symbolHealth, { mustKeep = null } = {}) {
     const keep = new Set();
-    if (S.pollTransaction?.providerSymbol) keep.add(S.pollTransaction.providerSymbol);
+    if (mustKeep) keep.add(mustKeep);
     for (const coin of trackedCoins()) { const sym = providerSymbolFor(coin); if (sym && keep.size < MAX_SYMBOLS) keep.add(sym); }
-    const others = Object.keys(S.baselines).filter((sym) => !keep.has(sym)).sort((a, b) => lastObservedMs(S.baselines[b]) - lastObservedMs(S.baselines[a]) || a.localeCompare(b));
+    const others = Object.keys(baselines).filter((sym) => !keep.has(sym)).sort((a, b) => lastObservedMs(baselines[b]) - lastObservedMs(baselines[a]) || a.localeCompare(b));
     for (const sym of others) { if (keep.size >= MAX_SYMBOLS) break; keep.add(sym); }
     let pruned = 0;
-    for (const sym of Object.keys(S.baselines)) if (!keep.has(sym)) { delete S.baselines[sym]; pruned += 1; }
-    for (const sym of Object.keys(S.symbolHealth)) if (!keep.has(sym)) { delete S.symbolHealth[sym]; pruned += 1; }
+    for (const sym of Object.keys(baselines)) if (!keep.has(sym)) { delete baselines[sym]; pruned += 1; }
+    for (const sym of Object.keys(symbolHealth)) if (!keep.has(sym)) { delete symbolHealth[sym]; pruned += 1; }
+    return pruned;
+  }
+  function pruneCheckpointSymbols() {
+    const pruned = pruneSymbolMaps(S.baselines, S.symbolHealth, { mustKeep: S.pollTransaction?.providerSymbol ?? null });
     if (pruned > 0) log(`[${iso()}] RUMINT checkpoint pruned ${pruned} untracked symbol entries (bound ${MAX_SYMBOLS})`);
     return pruned;
   }
+  // second-pass review: a checkpoint saved by the OLD law can already be over the bound; refusing it forever would leave the ear
+  // WITHHELD for the life of the deployment. When the ONLY fault is the symbol bound, the loaded state is repaired the same way
+  // a save would prune it (tracked first, then most recently observed), its HYPED set to the never-rolled placeholder (re-rolled
+  // at the first tick from the kept baselines), and re-validated in full before adoption. Any other fault still withholds.
+  const OVER_BOUND_ERRORS = new Set(['baselines over symbol bound', 'providerHealth.symbols over bound']);
+  function repairOverBound(state, err) {
+    if (!OVER_BOUND_ERRORS.has(err)) return null;
+    const repaired = structuredClone(state);
+    const pruned = pruneSymbolMaps(repaired.baselines, repaired.providerHealth.symbols, { mustKeep: repaired.pollTransaction?.providerSymbol ?? null });
+    repaired.hyped = { sessionDate: null, state: 'BUILDING', symbols: [], finalizedTs: null, identity: null, coverage: null };
+    const again = validateCheckpoint(repaired);
+    if (again) return null;
+    log(`[${iso()}] RUMINT checkpoint repaired on load: ${pruned} symbol entries over the bound of ${MAX_SYMBOLS} pruned (${err}); HYPED re-rolls from the kept baselines`);
+    return repaired;
+  }
   function buildCheckpointState() {
-    pruneCheckpointSymbols();
+    // second-pass review: the prune must NOT run here — S.hyped was rolled on the un-pruned baselines and validateCheckpoint
+    // recomputes it from the pruned ones ('hyped snapshot contradicts its own baselines' refused the write-ahead save exactly
+    // when a symbol was pruned). The prune runs at the top of the tick and before the final save, each followed by a roll.
     return {
       version: RUMINT_CHECKPOINT_VERSION,
       savedTs: iso(),
@@ -493,14 +514,15 @@ export function startRumint({
     }
     if (outcome.outcome === 'LOADED') {
       const err = validateCheckpoint(outcome.state);
-      if (err) {
+      const repaired = err ? repairOverBound(outcome.state, err) : null;
+      if (err && !repaired) {
         // a parseable object is not trusted state: WITHHOLD, degrade, retry —
         // never guess, never overwrite the durable row with invented truth
         S.initState = 'WITHHELD_INVALID_CHECKPOINT';
         S.initDetail = boundedError(err);
         return false;
       }
-      adoptCheckpoint(outcome.state);
+      adoptCheckpoint(repaired ?? outcome.state);
       S.initState = 'RESTORED_DURABLE';
       S.initialized = true;
       return true;
@@ -510,7 +532,8 @@ export function startRumint({
     // UNREADABLE/CORRUPT local caches are DIFFERENT truths — a corrupt local
     // cache with no durable authority is never silently called fresh.
     const local = readLocalCheckpoint();
-    const localErr = local.outcome === 'LOADED' ? validateCheckpoint(local.state) : local.outcome === 'INVALID' ? local.error : null;
+    let localErr = local.outcome === 'LOADED' ? validateCheckpoint(local.state) : local.outcome === 'INVALID' ? local.error : null;
+    if (local.outcome === 'LOADED' && localErr) { const rep = repairOverBound(local.state, localErr); if (rep) { local.state = rep; localErr = null; } }
     const localCorrupt = local.outcome === 'INVALID' || (local.outcome === 'LOADED' && localErr !== null);
     if (local.outcome === 'LOADED' && !localErr) {
       adoptCheckpoint(local.state);
@@ -1089,6 +1112,7 @@ export function startRumint({
     running = true;
     try {
       if (!(await ensureInit())) return;
+      if (pruneCheckpointSymbols() > 0) rollHyped(); // the bound is kept BEFORE any save this tick, and HYPED re-rolled on the kept set
       // R1A §B1: an interrupted poll transaction is finished FIRST — no new
       // observation while an accepted advancement is still owed its finish
       if (!recoverTransaction()) return;
@@ -1132,8 +1156,9 @@ export function startRumint({
       running = false;
     }
   }
+  const healthSignature = () => { let n = 0; let sum = 0; for (const h of Object.values(S.symbolHealth)) { n += 1; sum += (h.failureStreak ?? 0) * 7 + (h.cooldownLevel ?? 0) * 3 + (h.unavailableUntil ?? 0) % 1000003; } return `${n}:${sum}`; };
   let lastSavedSignature = null; let lastSavedPolls = -1; let lastDurableSaveTs = 0; let lastDurableHadTxn = false; let lastStatusPublishTs = 0; let lastStatusSignature = null; const durableEveryMs = 60_000;
-  const stateSignature = () => `${S.initState}|${S.counters.polls}|${S.pending.length}|${S.hyped?.state ?? ''}|${S.hyped?.symbols?.length ?? 0}|${S.pollTransaction ? 'txn' : ''}|${S.durableSave ?? ''}|${S.localSave ?? ''}|${S.saveDetail ?? ''}`;
+  const stateSignature = () => `${S.initState}|${S.counters.polls}|${S.pending.length}|${S.hyped?.state ?? ''}|${S.hyped?.symbols?.length ?? 0}|${S.pollTransaction ? 'txn' : ''}|${S.durableSave ?? ''}|${S.localSave ?? ''}|${S.saveDetail ?? ''}|${budget.backoffUntil}|${budget.stamps.length}|${healthSignature()}`; // second-pass review: a 429 back-off, the hourly budget and a symbol's failure ladder are state too — an outage's truth is checkpointed
 
   const timer = setInterval(() => {
     tickOnce().catch((err) => log(`[${iso()}] RUMINT tick failed: ${err.message}`));
@@ -1148,7 +1173,7 @@ export function startRumint({
       S.stopped = true; // FIRST: every mutation path guards on this
       clearInterval(timer);
       abort.abort(); // CANCEL in-flight provider work (§55)
-      if (S.initialized) await saveCheckpoint(); // final truth snapshot
+      if (S.initialized) { if (pruneCheckpointSymbols() > 0) rollHyped(); await saveCheckpoint(); } // final truth snapshot (pruned + re-rolled first)
       publishStatus();
     })();
     return stopping;

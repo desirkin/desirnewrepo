@@ -46,11 +46,14 @@ test('FIX83-R2. a checkpoint at the symbol bound plus a newly tracked coin is sa
   const d = freshDir(); const store = memStore();
   const olds = Array.from({ length: MAX_SYMBOLS }, (_, i) => `OLD${String(i).padStart(2, '0')}.X`);
   const cp = fullCheckpoint(T0, olds); assert.equal(validateCheckpoint(cp), null, 'the fixture itself is a valid full checkpoint'); store.state = cp;
-  const clock = { ms: T0 }; const queue = [page([msg(50, T0 - 60_000)])]; const fetchImpl = scripted(queue);
-  const r = startRumint({ log: () => {}, config: CFG(['BTC']), fetchImpl, now: () => clock.ms, intervalMs: 3_600_000, checkpointStore: store });
+  const clock = { ms: T0 }; const queue = [page([msg(50, T0 - 60_000)])]; const fetchImpl = scripted(queue); const logs = [];
+  const r = startRumint({ log: (m) => logs.push(String(m)), config: CFG(['BTC']), fetchImpl, now: () => clock.ms, intervalMs: 3_600_000, checkpointStore: store });
   try {
     clock.ms += 5000; await r.tickOnce(); assert.equal(fetchImpl.calls.length, 1, 'restored and polling');
     assert.equal(statusOf(d).initState, 'RESTORED_DURABLE');
+    // second-pass review: the prune runs BEFORE the HYPED roll, so the poll's write-ahead save is never refused by the semantic recompute
+    assert.ok(!logs.some((l) => /checkpoint NOT saved/.test(l)), logs.filter((l) => /NOT saved|pruned/.test(l)).join(' | ')); assert.equal(statusOf(d).counters?.durableCheckpointFailures ?? 0, 0);
+    assert.ok(store.saves >= 2, `the write-ahead save and the tick-end save both landed: ${store.saves}`);
     const saved = store.state; assert.equal(validateCheckpoint(saved), null, `the saved checkpoint loads back: ${validateCheckpoint(saved)}`);
     const syms = Object.keys(saved.baselines); assert.equal(syms.length, MAX_SYMBOLS); assert.ok(syms.includes(providerSymbolFor('BTC')), 'the tracked symbol is kept');
     assert.ok(!syms.includes('OLD63.X'), 'the least recently observed untracked symbol was pruned'); assert.ok(syms.includes('OLD00.X'), 'the most recently observed untracked symbols stay');
@@ -85,5 +88,34 @@ test('FIX83-R1. the checkpoint is saved when the state ADVANCED and the durable 
     clock.ms += 5000; await r.tickOnce(); assert.equal(fetchImpl.calls.length, 1); const savesAfterPoll = store.saves; assert.ok(savesAfterPoll >= 1, 'the poll advancement is followed by its save');
     const before = store.saves; for (let i = 0; i < 30; i += 1) { clock.ms += 1000; await r.tickOnce(); } assert.equal(store.saves, before, '30 idle ticks: no durable rewrite of the same bytes');
     assert.equal(statusOf(d).status, 'HEALTHY');
+  } finally { await r.stop(); }
+});
+
+test('FIX83-R4. a checkpoint saved by the old law with MORE than 64 symbols is repaired on load (pruned to the bound, HYPED re-rolled), not WITHHELD forever; any other fault still withholds', async () => {
+  const d = freshDir(); const store = memStore();
+  const olds = Array.from({ length: MAX_SYMBOLS + 30 }, (_, i) => `OLD${String(i).padStart(2, '0')}.X`);
+  const cp = fullCheckpoint(T0, olds); assert.equal(validateCheckpoint(cp), 'baselines over symbol bound'); store.state = cp;
+  const clock = { ms: T0 }; const queue = [page([msg(50, T0 - 60_000)])]; const fetchImpl = scripted(queue); const logs = [];
+  const r = startRumint({ log: (m) => logs.push(String(m)), config: CFG(['BTC']), fetchImpl, now: () => clock.ms, intervalMs: 3_600_000, checkpointStore: store });
+  try {
+    clock.ms += 5000; await r.tickOnce();
+    assert.equal(statusOf(d).initState, 'RESTORED_DURABLE', statusOf(d).initDetail); assert.equal(fetchImpl.calls.length, 1, 'the ear is alive');
+    assert.ok(logs.some((l) => /checkpoint repaired on load: 62 symbol entries/.test(l)), logs.join(' | '));
+    assert.equal(validateCheckpoint(store.state), null); assert.equal(Object.keys(store.state.baselines).length, MAX_SYMBOLS); assert.ok('BTC.X' in store.state.baselines || Object.keys(store.state.baselines).includes(providerSymbolFor('BTC')));
+  } finally { await r.stop(); }
+  // a different fault (garbage version) is still withheld
+  const d2 = freshDir(); const store2 = memStore(); store2.state = { version: 99 }; const r2 = startRumint({ log: () => {}, config: CFG(), fetchImpl: scripted([]), now: () => clock.ms, intervalMs: 3_600_000, checkpointStore: store2 });
+  try { await r2.tickOnce(); assert.equal(statusOf(d2).status, 'WITHHELD_INVALID_CHECKPOINT'); } finally { await r2.stop(); }
+});
+
+test('FIX83-R5. a 429 back-off and a symbol failure ladder are checkpointed even when no poll advanced (an outage restarts with its back-off, not against the provider)', async () => {
+  const d = freshDir(); const store = memStore();
+  const clock = { ms: T0 }; const queue = []; const fetchImpl = scripted(queue);
+  const r = startRumint({ log: () => {}, config: CFG(['BTC']), fetchImpl, now: () => clock.ms, intervalMs: 3_600_000, checkpointStore: store });
+  try {
+    clock.ms += 5000; queue.push(page([msg(50, T0 - 60_000)])); await r.tickOnce(); const savesAfterPoll = store.saves; assert.ok(savesAfterPoll >= 1);
+    // the next poll answers 429: nothing advanced (no poll counted) but the back-off is state
+    clock.ms += 400_000; queue.push({ ok: false, status: 429, headers: { get: (h) => (h.toLowerCase() === 'retry-after' ? '120' : null) }, json: async () => ({}) }); await r.tickOnce();
+    assert.ok(store.saves > savesAfterPoll, 'the 429 back-off was checkpointed'); assert.ok(store.state.providerHealth.globalBackoffUntil > clock.ms, 'the durable row carries the back-off');
   } finally { await r.stop(); }
 });
