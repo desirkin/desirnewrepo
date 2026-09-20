@@ -3,6 +3,7 @@
 // the closeout: social evidence survives the authoritative journal with author,
 // relationship, version, edit and deletion truth intact, and holds zero direct
 // authority.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
@@ -25,7 +26,7 @@ const bsky = (over = {}) => normalizeSocialObservation(jetstreamCommitToRaw({ pa
 
 // ---- pure passes -----------------------------------------------------------
 test('PASS 1 — OLD AUTHORITY: social files are tracked yet hold zero execution authority', () => {
-  const tracked = execSync("git ls-files 'rumor2/social*.js' 'rumor2/providers/bluesky-official.js' 'rumor2/providers/farcaster-official.js'", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+  const tracked = trackedFilesText("'rumor2/social*.js' 'rumor2/providers/bluesky-official.js' 'rumor2/providers/farcaster-official.js'").trim().split('\n').filter(Boolean);
   assert.ok(tracked.length >= 6, 'social files are visible to git ls-files');
   assert.equal(classifyOfficialItem({ providerKind: 'SOCIAL_MICROBLOG', title: 'FOO lists', summary: 'now' }), null);
 });

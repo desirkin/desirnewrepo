@@ -13,6 +13,7 @@
 // ONLY recognized cleanup/teardown verbs. A new empty catch over anything else
 // fails here until its author logs the error, handles it, or (if it truly is a
 // new cleanup primitive) adds that verb to the reviewed allowlist below.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -78,7 +79,7 @@ test('R2-4: the empty-catch scanner classifies cleanup vs. meaningful swallow co
 });
 
 test('R2-4: every empty catch in the living tree guards only best-effort cleanup', () => {
-  const files = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' })
+  const files = trackedFilesText("'*.js' '*.mjs'")
     .trim().split('\n').filter((f) => f && !/^(test\/|attic\/)/.test(f));
   const offenders = [];
   let scanned = 0;

@@ -1,6 +1,7 @@
 // ATTIC FENCE (lean trim, 2026-09-14). attic/ holds retired code kept for history. It is never loaded by the running
 // application: no tracked module outside attic/ may import from it (static or dynamic), the npm test glob never
 // executes attic/test, and attic/ carries its own README naming what lives there and why.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
@@ -9,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tracked = execSync("git ls-files '*.js' '*.mjs' '*.cjs' '*.json' '*.html'", { cwd: ROOT, encoding: 'utf8' }).trim().split('\n');
+const tracked = trackedFilesText("'*.js' '*.mjs' '*.cjs' '*.json' '*.html'").trim().split('\n');
 
 test('ATTIC-1. nothing outside attic/ imports attic/ code, in any import form', () => {
   const offenders = [];

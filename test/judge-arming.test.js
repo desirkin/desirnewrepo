@@ -1,6 +1,7 @@
 // JUDGE — arming / security / composition (A01-A10) against the REAL cockpit server, the real composition over a memory
 // journal, the real CLI parser and command set, and the posture machine. No socket to any venue: every transport is a
 // loopback double; credentials are SYNTHETIC test strings; nothing here can place an order.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -146,7 +147,7 @@ test('A05/A06. no withdrawal / margin / transfer endpoint exists in the allowlis
   const m = new PostureMachine(); assert.throws(() => m.transition('STALKING', 'x') && m.transition('STRIKE', 'no projection'), NotYetImplemented); if (m.posture === 'STALKING') m.transition('COILED', 'undo');
   assert.throws(() => new PostureMachine().transition('STRIKE', 'stale projection', { execution: { state: 'STALE', exposure: true, posture: 'STRIKE' } }), Error);
   // both-direction fences over the tracked tree
-  const { execSync } = await import('node:child_process'); const tracked = execSync("git ls-files '*.js'", { encoding: 'utf8' }).trim().split('\n');
+  const tracked = trackedFilesText("'*.js'").trim().split('\n');
   const imports = (f) => [...readFileSync(f, 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n').matchAll(/(?:import\s[^;]*?from\s*|import\s*\(\s*|export\s[^;]*?from\s*)['"]([^'"]+)['"]/g)].map((x) => x[1]);
   const resolveRel = (f, spec) => (spec.startsWith('.') ? path.normalize(path.join(path.dirname(f), spec)).replace(/\\/g, '/') : spec);
   const ALLOWED = { 'judge/intake.js': ['socrates/runtime.js', 'market-lab/store.js', 'market-lab/policy.js'], 'bin/judge.js': ['market-lab/time.js'] };

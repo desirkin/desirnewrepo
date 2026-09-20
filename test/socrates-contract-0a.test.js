@@ -5,6 +5,7 @@
 // stronger claim statuses need their proving relation, clocks are causally
 // coherent, and nested reference sets are order-insensitive but
 // multiplicity-invalid.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -627,7 +628,7 @@ test('0A-48. undeclared raw text cannot bypass excerpt bounds', () => {
 // ---- authority boundary stays sealed ----------------------------------------
 
 test('0A-52. no runtime module imports the Socrates/evidence contracts', () => {
-  const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
+  const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
   const runtime = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && !f.startsWith('evidence/') && !f.startsWith('socrates/'));
   assert.ok(runtime.length > 50, 'the runtime scan actually covers the codebase');
   // MARKET-LAB: the research service composition (market-lab/service.js) and the Socrates research CLI are the ONLY

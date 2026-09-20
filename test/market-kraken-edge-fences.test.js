@@ -2,6 +2,7 @@
 // live in market-lab's closed contracts / store / coverage / retention; they MUST be absent from Judge intake and
 // features, Socrates broker requests, decision evidence, readiness, thresholds, execution, the Watch and the paper /
 // live adapters. Positive tests prove the absence; static scans prove no order verb and no forbidden import exists.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -26,7 +27,7 @@ import { SEALED_REF } from './helpers/market-closeout.js';
 import { sampleSubjects } from '../market-lab/policy.js';
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
+const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
 const read = (f) => readFileSync(path.join(REPO, f), 'utf8');
 const code = (f) => read(f).split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 const imports = (f) => [...code(f).matchAll(/(?:^|\n)\s*(?:import\s[^;]*?from\s*|import\s*\(\s*|export\s[^;]*?from\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]);

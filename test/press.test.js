@@ -4,6 +4,7 @@
 // composition + authority fences. No network: every transport is injected; the offline guard would refuse otherwise.
 // LEAN PASS 4a retired the non-crypto publishers with the AGGREGATOR + LICENSED_INTERFACE_REQUIRED machinery; the retired
 // aggregator / licensed test cases are preserved in attic/senses/press/press-aggregator-licensed.test.js.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -83,7 +84,7 @@ test('PRESS-4. reader + snapshot: corrupt / forged lines are counted and never r
 
 test('PRESS-5. composition + authority fences: fly.js starts the press collector after the gateway and before the tape; press/ imports no trading, control, research or RUMOR-2 runtime module (only the pure feed parser); no authority module imports press/; the frozen RUMOR-2 core still names no publisher; the registry carries no value-like secret', () => {
   const fly = readFileSync(path.join(REPO, 'fly.js'), 'utf8'); assert.ok(fly.includes("import { startPress } from './press/collector.js';")); assert.ok(fly.indexOf('startGateway();') < fly.indexOf('startPress();')); assert.ok(fly.indexOf('startPress();') < fly.indexOf('await runTape('));
-  const tracked = execSync('git ls-files', { cwd: REPO, encoding: 'utf8' }).split('\n').filter((f) => f.endsWith('.js'));
+  const tracked = trackedFilesText('').split('\n').filter((f) => f.endsWith('.js'));
   const imports = (f) => [...readFileSync(path.join(REPO, f), 'utf8').matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
   for (const f of tracked.filter((x) => x.startsWith('press/'))) for (const spec of imports(f)) { assert.ok(!/judge\/|execution\/|watch\/|tape\/|ledger\/|cost\/|state\/|market-lab\/|socrates\/|research\//.test(spec), `${f} -> ${spec}`); if (spec.includes('rumor2/')) assert.equal(spec, '../rumor2/feed.js', `${f} reuses only the pure parser`); }
   for (const f of tracked.filter((x) => /^(judge|execution|watch|tape|ledger|cost|state|rumor2|market-lab|socrates)\//.test(x))) assert.ok(!imports(f).some((s) => s.includes('press/')), `${f} imports press/`);

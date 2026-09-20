@@ -10,6 +10,7 @@
 //   The invariant evolved from "SOCIAL MUST NOT EXIST" to "SOCIAL MAY EXIST,
 //   BUT SOCIAL MUST HAVE ZERO DIRECT AUTHORITY." Existence is allowed;
 //   authority is not. This is a SEMANTIC test, not a word-ban contest.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
@@ -25,7 +26,7 @@ import { socialObservationToEvent, validateSocialEvent, SOCIAL_EVENT_TYPE } from
 import { DATA_ONLY_COMPOSITION_ROOT, RUNTIME_SPINE_MODULES, RUNTIME_SPINE_IMPORTERS, OPERATOR_SETUP_SMOKE_TOOLS, RUMOR2_LIVE_WIRING_POINTS, RUMOR2_IMPORTING_WIRING_POINTS, TRADING_TIER_IMPORT_RE } from './helpers/composition-roots.js';
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
+const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
 const read = (f) => readFileSync(path.join(REPO, f), 'utf8');
 // scan CODE, not doctrine prose: comment-only lines are dropped so a
 // comment saying "zero HYPED authority" can never mask a real reference

@@ -36,6 +36,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { SETUP_SELECTION_VERSION } from '../judge/setup-selection.js';
+import { gitObject, HISTORY_SKIP } from './helpers/repo.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASE_COMMIT = '1bfa669'; // PUBLISH-FIX-83 audited base (docs/JUDGE-PAPER-AUDIT.md §4.32)
@@ -44,8 +45,9 @@ const SAMPLE_LIMITS = Object.freeze({ maxSimultaneousAssetPositions: 3, maxModel
 
 function fakeClock(start = T0) { let wall = start; let mono = 0; return { now: () => wall, monotonic: () => mono, advance: (ms) => { wall += ms; mono += ms; return wall; }, status: () => ({ trusted: true }) }; }
 
-let baseDir = null;
+let baseDir = null; const HAVE_BASE = gitObject(BASE_COMMIT); // PUBLISH-FIX-90: an export or a shallow clone has no base tree — the differential SKIPS with a reason there
 test.before(() => {
+  if (!HAVE_BASE) return;
   baseDir = mkdtempSync(path.join(tmpdir(), 'cobra-base-ea3bfbf-'));
   mkdirSync(baseDir, { recursive: true });
   const archive = path.join(baseDir, 'baseline.tar');
@@ -96,7 +98,7 @@ async function rigFor(root, { accountId, setupSelection = null }) {
 const pct = (arr, p) => { const s = [...arr].sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : null; };
 const ms1 = (ns) => Math.round(ns / 1e4) / 100;
 
-test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports absent) produce COMPLETE-record-identical decisions, refusals and account/execution state on identical recorded inputs — no substantive field stripped, no normalization applied', async () => {
+test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports absent) produce COMPLETE-record-identical decisions, refusals and account/execution state on identical recorded inputs — no substantive field stripped, no normalization applied', async (t) => { if (!HAVE_BASE) { t.skip(HISTORY_SKIP(BASE_COMMIT)); return; }
   // 2026-09-14: the execution/ source-identity precondition that used to sit here (bytes equal to ea3bfbf except the
   // book-comparison repair) is retired. execution/ has since changed by audited law — contract exit reasons, closeout
   // classification, canary/queue integrity, reservation settlement — each recorded in docs/JUDGE-PAPER-AUDIT.md §4.5 and
@@ -135,7 +137,7 @@ test('DIFFERENTIAL: the ACTUAL ea3bfbf Judge and the working-tree Judge (ports a
   assert.ok(dn.every((d) => d.measurements.every((m) => m.id !== 'STRATEGY_FAMILY_SELECTION')), 'the default path adds no strategy-selection measurement');
 });
 
-test('VERSIONED OPT-IN: the exact setupSelection port activates family-selection evidence and captured batch outcomes without changing the default composition', async () => {
+test('VERSIONED OPT-IN: the exact setupSelection port activates family-selection evidence and captured batch outcomes without changing the default composition', async (t) => { if (!HAVE_BASE) { t.skip(HISTORY_SKIP(BASE_COMMIT)); return; }
   const next = await rigFor(ROOT, { accountId: 'selection-opt-in', setupSelection: { version: SETUP_SELECTION_VERSION } });
   await next.warm(); await next.ignite();
   const decisions = next.judge.decisions(); const reserved = decisions.find((d) => d.status === 'ENTRY_RESERVED');
@@ -149,7 +151,7 @@ test('VERSIONED OPT-IN: the exact setupSelection port activates family-selection
   assert.equal(position?.maxDurationMs, next.policy.execution.maxDurationMs, 'the opt-in preserves the existing setup/policy duration for the legacy evaluator');
 });
 
-test('HOST ADMISSION LATENCY measured on both trees over the identical recorded inputs (real wall-clock around judge.onTick + scheduler drain + dispatcher idle); deadline budgets reported against the policy receipt-to-decision limit and the 25ms admission bucket', async () => {
+test('HOST ADMISSION LATENCY measured on both trees over the identical recorded inputs (real wall-clock around judge.onTick + scheduler drain + dispatcher idle); deadline budgets reported against the policy receipt-to-decision limit and the 25ms admission bucket', async (t) => { if (!HAVE_BASE) { t.skip(HISTORY_SKIP(BASE_COMMIT)); return; }
   const stats = {};
   for (const [label, root] of [['ea3bfbf-base', baseDir], ['working-tree', ROOT]]) {
     const durations = [];

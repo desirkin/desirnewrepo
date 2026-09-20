@@ -1,6 +1,7 @@
 // SOCIAL-4F — SOCIAL_ADMISSION_SCOPE policy (G), versioned scope truth (C), research config,
 // the observation-only watch planner + explicit X watch scope (E/L/P), and the protected-surface
 // pins. Pure; synthetic identities; fixed seeds; no network.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -386,7 +387,7 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
 // historical byte-differential reports unrelated intentional source changes.
 // The historical assertions above remain intact and still report those changes.
 test('SCOPE-9. current catalog consumers and Social authority fences remain exact', () => {
-  const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
+  const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
   const read = (f) => readFileSync(path.join(REPO, f), 'utf8');
   const code = (f) => read(f).split('\n').filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')); }).join('\n');
   const imports = (f) => [...read(f).matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);

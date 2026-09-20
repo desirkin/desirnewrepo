@@ -6,6 +6,7 @@
 // retained as an explicit reconciliation-pending record. Every path here is the real
 // adapter -> normalization -> intake -> settlement -> journal -> replay/view chain.
 // Wholly synthetic values. No provider transport, no wall clock, no sleeps.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ownAdvisoryHolders } from './helpers/pg-fence.js';
@@ -378,7 +379,7 @@ test('R. new records are Social evidence/diagnostics only: no authority fields, 
   const rp = replaySocialHistory(r.arr); assert.equal(rp.observed, 1); assert.equal(rp.durableIds.size, 1, 'one logical source before and after the annotation'); assert.equal(r.arr.length, 2, 'physical growth is legitimate');
   const target = c.event; const bogus = socialClockInterpretationEvent({ target: { ...target, provider: 'REDDIT_OFFICIAL' }, clockRole: 'SOURCE_DECLARATION', basis: 'NEW_DELIVERY_SAME_EVENT', witness: temporalWitness('0', P.ISO8601_PROFILE), evidenceRetrievedTs: LATER, knownAtTs: LATER });
   assert.match(validateSocialClockInterpretation(bogus, { target: { ...target, provider: 'REDDIT_OFFICIAL' } }), /RETENTION_NOT_APPROVED/);
-  for (const f of execSync("git ls-files 'rumint/*.js' 'doctrine/MISSION.md' 'rumor2/truth.js' 'persistence/*.js'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n')) assert.ok(!readFileSync(path.join(REPO, f), 'utf8').includes('social-time') && !readFileSync(path.join(REPO, f), 'utf8').includes('social-reconcile'), `${f} untouched by the temporal integration`);
+  for (const f of trackedFilesText("'rumint/*.js' 'doctrine/MISSION.md' 'rumor2/truth.js' 'persistence/*.js'").trim().split('\n')) assert.ok(!readFileSync(path.join(REPO, f), 'utf8').includes('social-time') && !readFileSync(path.join(REPO, f), 'utf8').includes('social-reconcile'), `${f} untouched by the temporal integration`);
   const mission = readFileSync(path.join(REPO, 'doctrine/MISSION.md'), 'utf8'); assert.ok(mission.includes('We do not reject pumps')); assert.ok(mission.includes('price extension is context'));
 });
 

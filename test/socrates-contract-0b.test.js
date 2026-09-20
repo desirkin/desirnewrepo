@@ -5,6 +5,7 @@
 // is a pure diagnostic envelope: invalid evidence may not become analysis
 // by hiding inside a withheld state, and a valid packet may never be
 // labeled withheld.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -464,7 +465,7 @@ test('0B-29. analysis identity remains deterministic for a valid withheld envelo
 // ---- authority boundary stays sealed ----------------------------------------
 
 test('0B-34. no runtime module imports the Socrates/evidence contracts', () => {
-  const tracked = execSync("git ls-files '*.js' '*.mjs'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
+  const tracked = trackedFilesText("'*.js' '*.mjs'").trim().split('\n');
   const runtime = tracked.filter((f) => !f.startsWith('test/') && !f.startsWith('attic/') && !f.startsWith('evidence/') && !f.startsWith('socrates/'));
   assert.ok(runtime.length > 50, 'the runtime scan actually covers the codebase');
   // MARKET-LAB: the research service composition (market-lab/service.js) and the Socrates research CLI are the ONLY

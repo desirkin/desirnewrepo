@@ -12,14 +12,16 @@ import { validateEvidencePacket, EVIDENCE_SCHEMA_VERSION } from '../evidence/con
 import { buildSocialProjection, socialProjectionError, projectSocial, SOCIAL_PROJECTION_VERSION } from '../evidence/social-projection.js';
 import { buildResearchEvidenceV2, buildEmptyResearchPacket } from '../evidence/research-builder.js';
 import { makeCorpusPacket, byKind, corpusCases } from '../socrates/corpus.js';
+import { gitObject, HISTORY_SKIP } from './helpers/repo.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const T0 = Date.parse('2026-09-08T12:00:00Z');
 const chart = (over = {}) => ({ kind: 'MARKET_CHART_WINDOW', family: 'SPOT_PRICE_CHART', recipeId: 'window_ohlcv', windowStartTs: T0 - 61_000, windowEndTs: T0 - 1000, units: { close: 'USD' }, fields: { venue: 'kraken', quote: 'USD', windowMs: 60_000, open: 100, high: 101, low: 99.5, close: 100.8, vwap: 100.4, logReturn: 0.008, quoteNotional: 250_000, count: 120, relativeNotional: 1.1, relativeRange: 1.0, indicators: null, previous: null, ...over } });
 const events = (headline) => ({ kind: 'MARKET_EVENT_CONTEXT', family: 'OFFICIAL_SOCIAL_EVENTS', recipeId: 'event_references', providers: ['SETTLED_RECORDS'], fields: { events: [{ eventKind: 'HEADLINE', sourceProvider: 'COINGLASS', nativeRef: 'a1', sourceEventTs: T0 - 7_200_000, knownAtTs: T0 - 7_000_000, status: 'UNVERIFIED', headline, untrusted: true }] } });
 
-test('B01. v1 stays v1: evidence/contract.js and socrates/contract.js are byte-identical to the baseline commit; the dispatcher routes by schemaVersion and a v1 packet is judged by the v1 validator; the v2 vocabulary extends v1 (two new triggers, 20 market kinds + 2 Social kinds)', () => {
-  const diff = execSync('git diff --stat d25b01992c59d7495cf608301a5ca74ef24be707 -- evidence/contract.js socrates/contract.js', { cwd: REPO, encoding: 'utf8' }).trim(); assert.equal(diff, '', 'v1 contracts untouched');
+test('B01. v1 stays v1: evidence/contract.js and socrates/contract.js are byte-identical to the baseline commit; the dispatcher routes by schemaVersion and a v1 packet is judged by the v1 validator; the v2 vocabulary extends v1 (two new triggers, 20 market kinds + 2 Social kinds)', (t) => {
+  const PIN = 'd25b01992c59d7495cf608301a5ca74ef24be707'; if (!gitObject(PIN)) { t.skip(HISTORY_SKIP(PIN)); return; } // PUBLISH-FIX-90
+  const diff = execSync(`git diff --stat ${PIN} -- evidence/contract.js socrates/contract.js`, { cwd: REPO, encoding: 'utf8' }).trim(); assert.equal(diff, '', 'v1 contracts untouched');
   assert.equal(EVIDENCE_SCHEMA_VERSION, 'serpent-evidence-1'); assert.equal(EVIDENCE_SCHEMA_VERSION_2, 'serpent-evidence-2');
   const v1 = validateEvidencePacketAny({ schemaVersion: EVIDENCE_SCHEMA_VERSION, packetId: 'sep-x' }); assert.equal(v1.valid, false); const direct = validateEvidencePacket({ schemaVersion: EVIDENCE_SCHEMA_VERSION, packetId: 'sep-x' }); assert.equal(v1.valid, direct.valid); assert.deepEqual([...v1.reasons], [...direct.reasons], 'v1 packets are judged by the v1 validator, unchanged');
   assert.equal(validateEvidencePacketAny({ schemaVersion: 'serpent-evidence-9' }).valid, false); assert.equal(validateEvidencePacketAny(null).valid, false);

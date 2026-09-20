@@ -2,7 +2,12 @@
 // directly. DATABASE_URL comes from the environment alone; it is never
 // logged, never echoed, never reachable from browser JavaScript. The
 // deployment filesystem is a cache; this is the durable authority's door.
-import pg from 'pg';
+// PUBLISH-FIX-90 (2026-09-20): the driver is loaded when the FIRST real pool is needed, not at import. Two blind reviews ran the
+// suite in a sandbox without `pg` installed and every test that imported this module — 46 files, all using the fake-pool seam —
+// died at import ("120 failures"). A missing driver is now a connect-time verdict with its own reason, and the fake pool never
+// touches it.
+let pgDriver = null; let pgLoadError = null;
+async function loadPg() { if (pgDriver || pgLoadError) return pgDriver; try { pgDriver = (await import('pg')).default; } catch (err) { pgLoadError = err; } return pgDriver; }
 
 const POOL_MAX = 5; // one personal app, one small pool
 // PUBLISH-FIX-84 (2026-09-20): the night's "tx checkout failed after 6455ms: Error" lines. The pool let an idle connection go after
@@ -103,6 +108,7 @@ export class Db {
 
   #ensurePool() {
     if (this.#pool) return;
+    if (!this.#poolFactory && !pgDriver) throw Object.assign(new Error(`postgres driver unavailable: ${String(pgLoadError?.message ?? 'pg not loaded').slice(0, 120)}`), { code: 'PG_DRIVER_UNAVAILABLE' });
     const opts = {
       connectionString: this.#url,
       max: POOL_MAX,
@@ -117,7 +123,7 @@ export class Db {
       allowExitOnIdle: true, // persistence never keeps a dying process alive
       application_name: applicationNameOf(this.schema),
     };
-    this.#pool = this.#poolFactory ? this.#poolFactory(opts) : new pg.Pool(opts);
+    this.#pool = this.#poolFactory ? this.#poolFactory(opts) : new pgDriver.Pool(opts);
     this.#pool.on('error', (err) => {
       // PUBLISH-FIX-84: an IDLE pooled client died (proxy idle cutoff, server restart): counted, logged once a minute at most, never a
       // reachability verdict — nothing was in flight on it; the next checkout or query decides (and marks) for real
@@ -133,6 +139,7 @@ export class Db {
   // never treated as permanently dead.
   async connect() {
     if (!this.configured()) return false;
+    if (!this.#poolFactory && !(await loadPg())) { this.log(`PERSISTENCE unavailable: the postgres driver could not be loaded (${String(pgLoadError?.message ?? 'pg').slice(0, 120)}); running without the database`); this.reachable = false; return false; }
     this.#ensurePool();
     const attempts = this.#everConnected || this.connectionErrors > 0 ? 1 : this.#retries;
     for (let attempt = 1; attempt <= attempts; attempt++) {

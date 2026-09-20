@@ -3,6 +3,7 @@
 // risk, ledger, cost, Judge, Watch, Tape truth or the RUMOR-2 runtime. The live path (fly.js, tape, ledger, cost, state,
 // controls, UI server) reaches the research modules only through the exact allowlisted seams below. Exact allowlists,
 // never broad lexical removals. Samples ship disabled with environment variable NAMES only. The doctrine sentence stays.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
@@ -12,7 +13,7 @@ import { loadPolicy, loadSubjects } from '../market-lab/policy.js';
 import { MARKET_RESEARCH_ROOTS } from '../market-lab/identity.js';
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const tracked = execSync("git ls-files '*.js' '*.mjs' '*.json' '*.md' '*.html'", { cwd: REPO, encoding: 'utf8' }).trim().split('\n');
+const tracked = trackedFilesText("'*.js' '*.mjs' '*.json' '*.md' '*.html'").trim().split('\n');
 const read = (f) => readFileSync(path.join(REPO, f), 'utf8');
 const code = (f) => read(f).split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 const imports = (f) => [...code(f).matchAll(/(?:^|\n)\s*(?:import\s[^;]*?from\s*|import\s*\(\s*|export\s[^;]*?from\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]);

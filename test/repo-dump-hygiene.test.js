@@ -5,6 +5,7 @@
 // committed. This fence asserts no tracked file is a dump/backup, and that the
 // dump/backup patterns stay ignored so a stray export is untracked by default.
 // If a dump is ever staged, the suite fails here before it can be pushed.
+import { trackedFilesText } from './helpers/repo.js'; // PUBLISH-FIX-90: git when present, a walk otherwise
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -19,7 +20,7 @@ const DUMP_EXT = /\.(dump|dmp|bak|sql|sql\.gz)$/i;
 const DUMP_NAME = /(?:^|[_-])(?:postgres|postgresql|pg|db|database)[_-].*dump|dump.*(?:postgres|postgresql)|production-postgres\.dump/i;
 
 test('R2-5: no database dump or backup file is tracked in the repository', () => {
-  const tracked = execSync("git ls-files", { cwd: REPO, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+  const tracked = trackedFilesText('').trim().split('\n').filter(Boolean);
   const offenders = tracked.filter((f) => {
     const base = f.split('/').pop();
     return DUMP_EXT.test(base) || DUMP_NAME.test(base);
