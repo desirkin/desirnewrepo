@@ -8,10 +8,10 @@ import os from 'node:os';
 import { GATE_BANDS, GATE_LESSON_DEFAULTS, testsOf, evaluateUnit, computeGateLesson, gateLessonLine, runGateStudy, createGateLesson, gateLessonPaths, GATE_LESSON_VERSION } from '../learning/gate-lesson.js';
 import { LEARNABLE_GATES } from '../judge/setups.js';
 
-const CFG = { ...GATE_LESSON_DEFAULTS, minScored: 200, minCohort: 20, minForward: 20, confidence: 0.8, bootstraps: 200 };
+const CFG = { ...GATE_LESSON_DEFAULTS, minScored: 200, minCohort: 20, minForward: 20, confidence: 0.8, bootstraps: 200, costHurdlePct: 0.2 }; // PUBLISH-FIX-83 item 20: the synthetic returns are in 15-minute log %, the hurdle here is 0.2 (production: 1.0, the round trip)
 const T0 = Date.parse('2026-09-10T00:00:00Z');
 // a synthetic scored look: FI15 observed `value` judged against `line`, every other gate ok, 15-minute return `r`
-const look = (i, { value, line = 0.2, r, othersOk = true, ts = T0 + i * 60_000, gate = 'FI15', setup = 'RANGE_IGNITION' }) => ({ gate, setup, ts, value, line, othersOk, r });
+const look = (i, { value, line = 0.2, r, othersOk = true, ts = T0 + i * 60_000, gate = 'FI15', setup = 'RANGE_IGNITION', coin = `C${i % 12}` }) => ({ gate, setup, ts, coin, value, line, othersOk, r }); // twelve coins: every hour of looks is twelve bootstrap clusters
 // n looks with values spread over [lo, hi) and returns drawn deterministically around `mean` (spread ±0.4)
 function cohort(n, lo, hi, mean, { start = 0, line = 0.2, ts0 = T0, othersOk = true } = {}) {
   const out = []; for (let i = 0; i < n; i += 1) { const value = lo + ((i * 0.618033) % 1) * (hi - lo); const r = mean + (((i * 7919) % 81) / 100 - 0.4); out.push(look(start + i, { value, line, r, ts: ts0 + (start + i) * 60_000, othersOk })); } return out;
@@ -43,7 +43,7 @@ test('GL-01. testsOf joins looks with their scored 15-minute outcome by (coin, d
 test('GL-02. below minScored nothing moves, whatever the returns say — "thousands of tests" before the first move', () => {
   const tests = cohort(150, 0.0, 0.2, 2.0); // rich cohort below the line, but too few tests
   const ev = evaluateUnit(tests, GATE_BANDS.FI15, 0.2, CFG);
-  assert.equal(ev.move, null); assert.equal(ev.reason, 'SCORED_150_OF_200'); assert.equal(ev.scored, 150);
+  assert.equal(ev.move, null); assert.equal(ev.reason, 'USABLE_150_OF_200'); assert.equal(ev.scored, 150);
 });
 
 test('GL-03. LOOSEN: when the looks below the line (every other gate ok) paid, and admitting them does not lower the admitted mean with confidence, the line moves ONE step down — stepping over empty bands to the first candidate with a cohort of minCohort', () => {
@@ -118,11 +118,11 @@ test('GL-09. the study end to end on a temp ledger: streams episodes + decision 
   const tests = [...cohort(150, 0.5, 1.0, 0.3), ...cohort(60, 0.05, 0.15, 0.5, { start: 150 })];
   tests.forEach((t, i) => { const coin = `C${i}`; eps.push({ canonicalCoin: coin, decisionTs: t.ts, setupType: 'RANGE_IGNITION', datasetId: 'live-judge-paper:RANGE_IGNITION', gates: [{ id: 'FI15', ok: t.value >= 0.2, observed: t.value, threshold: 0.2 }, { id: 'RV60', ok: true, observed: 2.5, threshold: 2 }, { id: 'MOVE_CLOCK', ok: false, observed: null, threshold: null }] }); outs.push({ assetId: coin, decisionKnownAtTs: t.ts, yardstick: { continuation: { state: 'KNOWN', logReturnPct: t.r }, bite: { state: 'KNOWN', logReturnPct: t.r / 2 } } }); });
   writeFileSync(P.episodes, `${eps.map((e) => JSON.stringify(e)).join('\n')}\n{not json\n`); writeFileSync(P.outcomes, `${outs.map((o) => JSON.stringify(o)).join('\n')}\n`);
-  const lines = []; const r = await runGateStudy({ dataDir: root, cfg: { minScored: 200, minCohort: 20, minForward: 20, bootstraps: 200 }, nowTs: now, log: (l) => lines.push(l) });
+  const lines = []; const r = await runGateStudy({ dataDir: root, cfg: { minScored: 200, minCohort: 20, minForward: 20, bootstraps: 200, costHurdlePct: 0.2 }, nowTs: now, log: (l) => lines.push(l) });
   assert.equal(r.version, GATE_LESSON_VERSION); assert.equal(r.looks, 210); assert.equal(r.scored, 210); assert.equal(r.tests, 420, 'FI15 + RV60 per look'); assert.ok(existsSync(P.lesson) && existsSync(P.state));
   assert.equal(r.events.length, 1); assert.match(r.events[0], /FI15 PROPOSED 0\.2 -> 0\.1/); assert.match(r.line, /GATE LEARNING/);
   const lesson = JSON.parse(readFileSync(P.lesson, 'utf8')); assert.deepEqual(lesson.lines, {}); assert.equal(lesson.units.FI15.state, 'PROPOSED'); assert.ok(lesson.units['RV60@RANGE_IGNITION'], 'RV60 learned per setup');
-  const r2 = await runGateStudy({ dataDir: root, cfg: { minScored: 200, minCohort: 20, minForward: 20, bootstraps: 200 }, nowTs: now + 60_000, log: () => {} });
+  const r2 = await runGateStudy({ dataDir: root, cfg: { minScored: 200, minCohort: 20, minForward: 20, bootstraps: 200, costHurdlePct: 0.2 }, nowTs: now + 60_000, log: () => {} });
   assert.equal(r2.events.length, 0, 'the open proposal is kept, not re-proposed');
   rmSync(root, { recursive: true, force: true });
 });

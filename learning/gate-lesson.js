@@ -38,15 +38,17 @@ export const GATE_LESSON_DEFAULTS = Object.freeze({
   minScored: 1000,      // scored looks on the gate before any test counts ("thousands of tests")
   minCohort: 100,       // scored looks in the cohort a move changes
   minForward: 100,      // scored looks AFTER a proposal before it is published (and after a publication before it is judged)
-  confidence: 0.8,      // bootstrap probability the admitted set's mean 15-minute return does not fall
-  tolerancePct: 0.05,   // a move may not lower the admitted mean by more than this (log-return %)
+  confidence: 0.8,      // bootstrap probability the cohort a move changes clears (LOOSEN) / falls short of (TIGHTEN) the cost hurdle
+  tolerancePct: 0.05,   // kept for the ledger line; the test itself is against the cost hurdle (PUBLISH-FIX-83 item 20)
+  costHurdlePct: 1.0,   // PUBLISH-FIX-83 item 20: the round trip in log-return % (fee 0.4% x 2 + slippage 10 bps x 2); a newly admitted cohort must beat it, an excluded one must fall short of it
+  clusterMs: 3_600_000, // PUBLISH-FIX-83 item 20: looks of one coin inside one hour are one move, one bootstrap cluster
   maxLookbackDays: 30,  // looks older than this are not tests
   bootstraps: 400,
   yardstick: 'continuation', // 15-minute continuation log return (decision-outcome yardstick); 'bite' = 5-minute
   joinToleranceMs: 2000, // a scored outcome joins the look whose decision clock is within this of its own (nearest wins)
 });
 // rows in an episode's gates[] that are NOT gates (measurement rows the bridge records beside the clauses)
-const NOT_A_GATE = new Set(['MOVE_CLOCK', 'SECOND_LOOK', 'GATE_LEARNING', 'LEARNED_FACT', 'LEARNED_RANK_ADJUSTMENT', 'LEARNED_CANDIDATE', 'SIZE_CANDIDATE', 'DYNAMIC_SIZE_SELECTION']);
+const NOT_A_GATE = new Set(['MOVE_CLOCK', 'SECOND_LOOK', 'GATE_LEARNING', 'LEARNED_FACT', 'LEARNED_RANK_ADJUSTMENT', 'LEARNED_CANDIDATE', 'SIZE_CANDIDATE', 'DYNAMIC_SIZE_SELECTION', 'STRATEGY_FAMILY_SELECTION', 'QUALIFIED_ADAPTIVE_RANKING_RR_POINTS']); // PUBLISH-FIX-83 item 20: the two ranking rows are not gates either
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : null));
 const r4 = (v) => Math.round(v * 10_000) / 10_000;
 const passes = (op, value, line) => (op === 'GT' ? value > line : value >= line);
@@ -60,6 +62,15 @@ function bootstrapConfidence(a, b, tolerance, n = 400, seed = 7) {
   for (let i = 0; i < n; i += 1) { let sa = 0; for (let k = 0; k < a.length; k += 1) sa += a[Math.floor(rnd() * a.length)]; let sb = 0; for (let k = 0; k < b.length; k += 1) sb += b[Math.floor(rnd() * b.length)]; if (sa / a.length >= sb / b.length - tolerance) ok += 1; }
   return ok / n;
 }
+// PUBLISH-FIX-83 (full review item 20): a cohort's mean against the cost hurdle, resampled by CLUSTER (coin x hour = one move), so
+// forty looks at one ZAMA ignition count as one draw, not forty. Returns P(cluster-resampled mean >= hurdle) for ABOVE, <= for BELOW.
+function clusteredConfidence(rows, hurdle, side, { n = 400, seed = 7, clusterMs = 3_600_000 } = {}) {
+  if (!rows.length) return 0; const clusters = new Map(); for (const t of rows) { const k = `${t.coin ?? '?'}|${Math.floor((t.ts ?? 0) / clusterMs)}`; if (!clusters.has(k)) clusters.set(k, []); clusters.get(k).push(t.r); }
+  const C = [...clusters.values()]; let x = seed >>> 0; const rnd = () => { x = (Math.imul(x, 1664525) + 1013904223) >>> 0; return x / 4294967296; }; let ok = 0;
+  for (let i = 0; i < n; i += 1) { let sum = 0; let cnt = 0; for (let k = 0; k < C.length; k += 1) { const c = C[Math.floor(rnd() * C.length)]; for (const r of c) { sum += r; cnt += 1; } } const m = sum / cnt; if (side === 'ABOVE' ? m >= hurdle : m <= hurdle) ok += 1; }
+  return ok / n;
+}
+export const clusterCount = (rows, clusterMs = GATE_LESSON_DEFAULTS.clusterMs) => new Set(rows.map((t) => `${t.coin ?? '?'}|${Math.floor((t.ts ?? 0) / clusterMs)}`)).size;
 // ---- the join: one test per (look, gate) ------------------------------------------------------------------------------------
 // tests: [{ gate, setup, ts, value, line, othersOk, r }] — r is the scored 15-minute log return of THAT look
 export function testsOf(episodes, outcomes, { yardstick = GATE_LESSON_DEFAULTS.yardstick, nowTs = Date.now(), maxLookbackDays = GATE_LESSON_DEFAULTS.maxLookbackDays, joinToleranceMs = GATE_LESSON_DEFAULTS.joinToleranceMs } = {}) {
@@ -77,32 +88,43 @@ export function testsOf(episodes, outcomes, { yardstick = GATE_LESSON_DEFAULTS.y
     for (const g of real) {
       if (!GATE_BANDS[g.id]) continue; const value = num(g.observed); const line = num(g.threshold); if (value === null || line === null) continue;
       const othersOk = real.every((x) => x === g || x.ok === true);
-      out.push({ gate: g.id, setup: String(e.setupType ?? ''), ts: e.decisionTs, value, line, othersOk, r });
+      out.push({ gate: g.id, setup: String(e.setupType ?? ''), ts: e.decisionTs, coin: e.canonicalCoin, value, line, othersOk, r });
     }
   }
   return out;
 }
 // ---- one gate, one line: the candidate that the evidence supports, or null --------------------------------------------------
 // a "unit" is a gate, or (RV60) a gate within one setup; tests are that unit's rows
-export function evaluateUnit(tests, band, line, cfg, sinceTs = null) {
+export function evaluateUnit(tests, band, line, cfg, sinceTs = null, { atLine = null } = {}) {
   const T = sinceTs === null ? tests : tests.filter((t) => t.ts > sinceTs);
   const scored = T.length; const usable = T.filter((t) => t.othersOk);
   const admitted = (c) => usable.filter((t) => passes(band.op, t.value, c));
   const cur = admitted(line); const curR = cur.map((t) => t.r);
   const report = { scored, usable: usable.length, admittedNow: cur.length, meanNow: curR.length ? r4(mean(curR)) : null };
-  if (scored < cfg.minScored) return { move: null, reason: `SCORED_${scored}_OF_${cfg.minScored}`, ...report };
+  // PUBLISH-FIX-83 item 20: USABLE looks (every other gate passed, so this gate alone decided) count toward the minimum, not raw scored
+  if (usable.length < cfg.minScored) return { move: null, reason: `USABLE_${usable.length}_OF_${cfg.minScored}`, ...report };
   const candidates = [];
-  // loosen: the first candidate below the line whose NEWLY admitted cohort is big enough (empty bands are stepped over, one move)
-  for (let c = r4(line - band.step); c >= band.min - 1e-9; c = r4(c - band.step)) { const adm = admitted(c); const fresh = adm.filter((t) => !passes(band.op, t.value, line)); if (fresh.length >= cfg.minCohort) { candidates.push({ line: c, kind: 'LOOSEN', cohort: fresh, after: adm }); break; } }
-  // tighten: the first candidate above the line whose EXCLUDED cohort is big enough
-  for (let c = r4(line + band.step); c <= band.max + 1e-9; c = r4(c + band.step)) { const adm = admitted(c); const gone = cur.filter((t) => !passes(band.op, t.value, c)); if (gone.length >= cfg.minCohort) { candidates.push({ line: c, kind: 'TIGHTEN', cohort: gone, after: adm }); break; } }
-  let best = null;
+  const loosenAt = (c) => { const adm = admitted(c); const fresh = adm.filter((t) => !passes(band.op, t.value, line)); return { line: c, kind: 'LOOSEN', cohort: fresh, after: adm }; };
+  const tightenAt = (c) => { const adm = admitted(c); const gone = cur.filter((t) => !passes(band.op, t.value, c)); return { line: c, kind: 'TIGHTEN', cohort: gone, after: adm }; };
+  if (atLine !== null) { // PUBLISH-FIX-83 item 20: judge THIS line (a proposal's own, a publication's own), never "the first big-enough cohort"
+    if (atLine < line - 1e-9) candidates.push(loosenAt(atLine)); else if (atLine > line + 1e-9) candidates.push(tightenAt(atLine));
+  } else {
+    // loosen: the first candidate below the line whose NEWLY admitted cohort is big enough (empty bands are stepped over, one move)
+    for (let c = r4(line - band.step); c >= band.min - 1e-9; c = r4(c - band.step)) { const k = loosenAt(c); if (k.cohort.length >= cfg.minCohort) { candidates.push(k); break; } }
+    // tighten: the first candidate above the line whose EXCLUDED cohort is big enough
+    for (let c = r4(line + band.step); c <= band.max + 1e-9; c = r4(c + band.step)) { const k = tightenAt(c); if (k.cohort.length >= cfg.minCohort) { candidates.push(k); break; } }
+  }
+  let best = null; const hurdle = Number.isFinite(cfg.costHurdlePct) ? cfg.costHurdlePct : GATE_LESSON_DEFAULTS.costHurdlePct; const bopts = { n: cfg.bootstraps, clusterMs: cfg.clusterMs ?? GATE_LESSON_DEFAULTS.clusterMs };
   for (const k of candidates) {
     const afterR = k.after.map((t) => t.r); const cohortR = k.cohort.map((t) => t.r); const cohortMean = mean(cohortR); const afterMean = mean(afterR);
-    let supported = false; let conf = 0;
-    if (k.kind === 'LOOSEN') { conf = bootstrapConfidence(afterR, curR, cfg.tolerancePct, cfg.bootstraps); supported = cohortMean !== null && cohortMean >= 0 && conf >= cfg.confidence; }
-    else { conf = bootstrapConfidence(afterR, curR, -cfg.tolerancePct, cfg.bootstraps); supported = cohortMean !== null && cohortMean < 0 && conf >= cfg.confidence; } // tightening must RAISE the admitted mean by at least the tolerance
-    const cand = { line: k.line, kind: k.kind, cohort: k.cohort.length, cohortMean: r4(cohortMean ?? 0), admittedAfter: k.after.length, meanAfter: afterMean === null ? null : r4(afterMean), confidence: r4(conf), supported };
+    let supported = false; let conf = 0; const clusters = clusterCount(k.cohort, bopts.clusterMs);
+    // PUBLISH-FIX-83 item 20: the test is on the cohort the move CHANGES, against the round-trip cost, clustered by coin-hour.
+    // LOOSEN: the newly admitted looks must beat the round trip (they will be traded). TIGHTEN: the excluded looks must fall short
+    // of it AND the kept set must read better than what it sheds. The old test compared after ⊇ cur (a difference of thousandths
+    // inside the tolerance) on raw returns, so any cohort with mean >= 0 read as confident — a coin flip that ignored the fee.
+    if (k.kind === 'LOOSEN') { conf = clusteredConfidence(k.cohort, hurdle, 'ABOVE', bopts); supported = cohortMean !== null && cohortMean >= hurdle && conf >= cfg.confidence; }
+    else { conf = clusteredConfidence(k.cohort, hurdle, 'BELOW', bopts); supported = cohortMean !== null && cohortMean < hurdle && afterMean !== null && afterMean > cohortMean && conf >= cfg.confidence; }
+    const cand = { line: k.line, kind: k.kind, cohort: k.cohort.length, clusters, cohortMean: r4(cohortMean ?? 0), admittedAfter: k.after.length, meanAfter: afterMean === null ? null : r4(afterMean), hurdle, confidence: r4(conf), supported };
     if (supported && (!best || (afterMean ?? -Infinity) > (best.meanAfter ?? -Infinity))) best = cand;
     report[k.kind.toLowerCase()] = cand;
   }
@@ -125,8 +147,8 @@ export function computeGateLesson({ tests, state = null, nowTs = Date.now(), cfg
     const unit = { gate, setup: key.startsWith('RV60@') ? key.slice(5) : null, reference, inForce, state: 'DORMANT', evidence: { scored: ev.scored, usable: ev.usable, admittedNow: ev.admittedNow, meanNow: ev.meanNow, reason: ev.reason, loosen: ev.loosen ?? null, tighten: ev.tighten ?? null } };
     // 1. a published line is kept under forward test: revert when the looks it admitted since publication turned negative with confidence
     if (u.published !== null && u.before !== null) {
-      const fwd = evaluateUnit(T, band, u.before, { ...cfg, minScored: cfg.minForward }, u.publishedTs ?? 0); /* forward looks are judged by minForward, not the whole-history minimum */ const f = fwd.loosen && fwd.loosen.line === u.published ? fwd.loosen : (fwd.tighten && fwd.tighten.line === u.published ? fwd.tighten : null);
-      const forwardScored = T.filter((t) => t.ts > (u.publishedTs ?? 0)).length;
+      const fwd = evaluateUnit(T, band, u.before, { ...cfg, minScored: cfg.minForward }, u.publishedTs ?? 0, { atLine: u.published }); /* PUBLISH-FIX-83 item 20: the published line's OWN cohort, forward looks judged by minForward */ const f = fwd.loosen ?? fwd.tighten ?? null;
+      const forwardScored = T.filter((t) => t.ts > (u.publishedTs ?? 0) && t.othersOk).length;
       if (forwardScored >= cfg.minForward && f && !f.supported && f.cohort >= cfg.minCohort) {
         events.push(`GATE LEARNING: ${key} REVERTED ${u.published} -> ${u.before} — the ${forwardScored} looks scored since publication no longer support it (cohort ${f.cohort}, mean ${f.cohortMean}%, confidence ${f.confidence})`);
         u.history.push({ kind: 'REVERTED', from: u.published, to: u.before, ts: nowTs, forwardScored, cohort: f.cohort, cohortMean: f.cohortMean, confidence: f.confidence });
@@ -136,7 +158,7 @@ export function computeGateLesson({ tests, state = null, nowTs = Date.now(), cfg
     }
     // 2. a proposal under forward test: publish when the looks scored since the proposal support it on their own
     if (u.proposal) {
-      const p = u.proposal; const fwd = evaluateUnit(T, band, unit.inForce, { ...cfg, minScored: cfg.minForward }, p.ts); const forwardScored = T.filter((t) => t.ts > p.ts).length;
+      const p = u.proposal; const fwd = evaluateUnit(T, band, unit.inForce, { ...cfg, minScored: cfg.minForward }, p.ts, { atLine: p.line }); const forwardScored = T.filter((t) => t.ts > p.ts && t.othersOk).length; /* PUBLISH-FIX-83 item 20: the proposal's OWN line, usable looks */
       const f = p.kind === 'LOOSEN' ? fwd.loosen : fwd.tighten;
       unit.state = 'PROPOSED'; unit.proposal = { ...p, forwardScored, forwardCohort: f?.cohort ?? 0, forwardConfidence: f?.confidence ?? null, forwardSupported: Boolean(f?.supported && f.line === p.line) };
       if (forwardScored >= cfg.minForward && f && f.cohort >= cfg.minCohort) {
@@ -162,7 +184,7 @@ export function computeGateLesson({ tests, state = null, nowTs = Date.now(), cfg
     if (unit.inForce !== reference && Number.isFinite(unit.inForce)) { if (gate === 'RV60') { lines.RV60 = lines.RV60 ?? {}; lines.RV60[unit.setup] = unit.inForce; } else lines[gate] = unit.inForce; }
     st.units[key] = u; units[key] = unit;
   }
-  const lesson = { version: GATE_LESSON_VERSION, computedTs: nowTs, cfg: { minScored: cfg.minScored, minCohort: cfg.minCohort, minForward: cfg.minForward, confidence: cfg.confidence, tolerancePct: cfg.tolerancePct }, tests: tests.length, lines, units };
+  const lesson = { version: GATE_LESSON_VERSION, computedTs: nowTs, cfg: { minScored: cfg.minScored, minCohort: cfg.minCohort, minForward: cfg.minForward, confidence: cfg.confidence, tolerancePct: cfg.tolerancePct, costHurdlePct: cfg.costHurdlePct ?? GATE_LESSON_DEFAULTS.costHurdlePct, clusterMs: cfg.clusterMs ?? GATE_LESSON_DEFAULTS.clusterMs }, tests: tests.length, lines, units };
   return { lesson, state: st, events };
 }
 // one line for the log: what is learned, what is in force, what he is waiting for

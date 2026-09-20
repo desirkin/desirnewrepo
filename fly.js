@@ -181,7 +181,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // the Judge the published lines. Paper profile groups.judge.gateLearning -> JUDGE_GATE_LEARNING (+ the evidence minimums by name).
   let gateLesson = null; let gateStudyTimer = null; let gateStudyRunning = false;
   const gateLearningOn = process.env.JUDGE_GATE_LEARNING === 'true';
-  const gateStudyCfg = { minScored: Number(process.env.JUDGE_GATE_MIN_SCORED) || undefined, minCohort: Number(process.env.JUDGE_GATE_MIN_COHORT) || undefined, minForward: Number(process.env.JUDGE_GATE_MIN_FORWARD) || undefined, confidence: Number(process.env.JUDGE_GATE_CONFIDENCE) || undefined };
+  const gateStudyCfg = { minScored: Number(process.env.JUDGE_GATE_MIN_SCORED) || undefined, minCohort: Number(process.env.JUDGE_GATE_MIN_COHORT) || undefined, minForward: Number(process.env.JUDGE_GATE_MIN_FORWARD) || undefined, confidence: Number(process.env.JUDGE_GATE_CONFIDENCE) || undefined, costHurdlePct: Number(process.env.JUDGE_GATE_COST_HURDLE_PCT) || undefined /* PUBLISH-FIX-83 item 20: the round trip a newly admitted cohort must beat */ };
   if (gateLearningOn) {
     try {
       const { createGateLesson } = await import('./learning/gate-lesson.js'); const { spawnGateStudy } = await import('./tools/gate-study-process.js');
