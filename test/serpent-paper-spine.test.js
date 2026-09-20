@@ -59,7 +59,7 @@ test('PR-1. PAPER folds onto the spine: lock, honest status, quota restore order
     const catalogAccessor = { snapshot: () => ({ catalog: CATALOG }) };
     const additions = await rt.startAdditions({ catalogAccessor });
     assert.deepEqual(f.calls.map((c) => c.name), ['startPersistence', 'openDataOnlyCheckpoints', 'createDataOnlyFetch', 'startDataOnlyMarket', 'startBroadKraken'], 'LEAN PASS 4a: public discovery is retired — the PAPER additions are market + broad Kraken only');
-    assert.deepEqual(opt('startDataOnlyMarket'), { env: ENV, dataDir: root, log: opt('startDataOnlyMarket').log, quotaJournal: f.checkpoints.market });
+    assert.deepEqual(opt('startDataOnlyMarket'), { env: { ...ENV, SERPENT_MARKET_STREAM_SUBJECTS: '0' }, dataDir: root, log: opt('startDataOnlyMarket').log, quotaJournal: f.checkpoints.market }); // PUBLISH-FIX-83 item 29: PAPER starts the catalogs with the unread venue streams OFF
     assert.equal(opt('startBroadKraken').catalogSource, catalogAccessor); assert.equal(opt('startBroadKraken').dataDir, root);
     assert.equal(additions.catalog, CATALOG);
 

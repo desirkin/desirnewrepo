@@ -28,7 +28,7 @@ test('FIX83-6. an owner CLEAR lifts every journal latch older than it, resumes P
     // an owner CLEAR after the latches: every latch lifted with the owner's ref, the mode resumes PAPER
     ctl.clearedAt = new Date(clock.now()).toISOString(); clock.advance(1000);
     const applied = await run.applyOwnerClear(clock.now()); assert.deepEqual(applied.sort(), ['MODE:HALTED_UNRESOLVED->PAPER', 'OVERLOAD', 'PEAK_DRAWDOWN', 'PROTECTION_MISMATCH']);
-    const s1 = run.dispatcher.state(); assert.deepEqual(s1.restrictions, {}); assert.equal(s1.mode, 'PAPER'); assert.match(s1.modeReason, /owner CLEAR .* resumes PAPER after HALTED_UNRESOLVED/); assert.equal(s1.modeTs, clock.now());
+    const s1 = run.dispatcher.state(); assert.deepEqual(s1.restrictions, {}); assert.equal(s1.mode, 'PAPER'); assert.equal(s1.performance.highWater, s1.performance.riskPerformanceEquity, 'review finding: an owner CLEAR of PEAK_DRAWDOWN rebases the high-water mark, else the next valuation re-latches it'); assert.equal(s1.performance.drawdown, 0); assert.match(s1.modeReason, /owner CLEAR .* resumes PAPER after HALTED_UNRESOLVED/); assert.equal(s1.modeTs, clock.now());
     assert.ok(logs.some((l) => l.includes('OWNER CLEAR lifts PEAK_DRAWDOWN')) && logs.some((l) => l.includes('OWNER CLEAR resumes PAPER after HALTED_UNRESOLVED')));
     // a latch AFTER the CLEAR stands; a REDUCE_ONLY entered after it stands too
     clock.advance(1000); await run.dispatcher.commit(latch('PEAK_DRAWDOWN')); await run.dispatcher.commit(ev('MODE_TRANSITION', { from: 'PAPER', to: 'REDUCE_ONLY', reason: 'later', authorizationId: null, ts: clock.now() }));

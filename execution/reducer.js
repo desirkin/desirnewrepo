@@ -245,6 +245,9 @@ const HANDLERS = {
     if (p.code === 'DAILY_LOSS' && cur.sessionDate === p.sessionDate) refuse('DAILY_LOSS_LATCHED', 'daily loss restriction stays latched through its session');
     if (['KILL', 'PEAK_DRAWDOWN', 'RECONCILIATION_REQUIRED', 'PROTECTION_MISMATCH', 'FEE_BOUND_MISMATCH'].includes(p.code) && !p.ownerRef) refuse('OWNER_CLEAR_REQUIRED', `${p.code} clears only with owner intent`);
     if (p.code === 'RECONCILIATION_REQUIRED' && (Object.values(s.orders).some((o) => o.state === 'RECONCILIATION_REQUIRED') || s.flowsUnknown)) refuse('LIABILITY_UNRESOLVED', 'owner CLEAR does not clear an unresolved economic liability');
+    // review finding (PUBLISH-FIX-83 item 6): an owner CLEAR of PEAK_DRAWDOWN rebases the high-water mark to the current risk equity, else the
+    // next valuation re-latches the same drawdown one tick later and the CLEAR was a no-op ("a $50 drawdown ends the paper account")
+    if (p.code === 'PEAK_DRAWDOWN' && p.ownerRef && s.performance && s.performance.riskPerformanceEquity !== null) s.performance = { ...s.performance, highWater: s.performance.riskPerformanceEquity, drawdown: 0, highWaterRebasedTs: p.ts };
     delete s.restrictions[p.code];
   },
   MODE_TRANSITION(s, p, ev) {

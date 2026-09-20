@@ -126,3 +126,28 @@ test('FIX83-16. the commit pump has two lanes: a priority commit (entry, fill, e
   await assert.rejects(d.commit(F.ev('ORDER_STATE', { orderId: 'ghost', state: 'FILLED', nativeOrderId: null, nativeCumQty: '1', reason: null, sourceTs: clock.now(), receiptTs: clock.now() }), { priority: true }), (e) => e.code === 'REDUCER_REFUSED');
   await d.commit(val(5)); assert.equal(order[order.length - 1], 'ordinary-5'); await d.idle();
 });
+
+test('FIX83-R1. review findings on the entry path: a durable paper feed hold is adopted by a fresh Watch and released when no held coin is critical (not only when every book is 1 s fresh); a flattened shell settles its OPEN reservation; a stop binding is applied only after its append succeeds', async () => {
+  // (a) the hold outlives the process: a new Watch over the same journal adopts the durable latch and clears it once the feed is no longer critical
+  const { createWatch } = await import('../watch/watch.js'); const { createPaperAdapter } = await import('../execution/paper-adapter.js');
+  const clock = fakeClock(); const r = await paperAccount({ accountId: 'fix83-r1a', clock }); const { F } = r;
+  const feed = createExecutionFeed({ clock: clock.now }); feed.onConnect(clock.now()); feed.admit('XBT/USD', { priority: 'HELD', reason: 'p1' });
+  const adapter = createPaperAdapter({ accountId: r.accountId, clock: clock.now, feed, fee: TAKER_FEE, specOf: () => SPEC });
+  const pclock = { now: clock.now, monotonic: clock.monotonic }; const d = createDispatcher({ accountId: r.accountId, journal: r.journal, writer: r.writer, adapter, clock: pclock, specOf: () => SPEC, feeOf: () => TAKER_FEE, feed }); await d.load();
+  await d.commit([F.hypothesis('d1'), F.decision('d1'), F.reserve('r1', 'd1'), F.position('p1', 'd1'), F.pin(), F.intent('o1', 'p1', 'r1'), F.attempt('o1'), F.result('o1', 'ACKNOWLEDGED'), F.fill('o1', 'x1'), F.orderState('o1', 'FILLED', { nativeOrderId: 'nat-o1', nativeCumQty: '0.001' }), F.release('r1', { reason: 'ORDER_TERMINAL' }), F.ev('PROTECTION_STATE', { positionId: 'p1', orderId: null, nativeOrderId: 'nat-stop', state: 'ACTIVE', qty: '0.001', trigger: '99000', reason: 'stop', sourceTs: clock.now(), receiptTs: clock.now() })]);
+  await d.commit(F.ev('RESTRICTION', { code: 'FEED_IMPAIRED', action: 'LATCH', scope: null, source: 'watch', sessionDate: null, reason: 'paper feed unusable > 10s while holding p1 (the previous instance)', ownerRef: null, ts: clock.now() }));
+  const watch = createWatch({ accountId: r.accountId, dispatcher: d, adapter, feed, clock: pclock, specOf: () => SPEC, feeOf: () => TAKER_FEE, controls: () => ({ kill: false, cage: false }) });
+  clock.advance(20_000); await watch.onTick(clock.now()); await d.idle(); assert.equal(d.state().restrictions.FEED_IMPAIRED?.source, 'watch', 'still critical (no book at all): the adopted hold stands'); assert.equal(watch.status().counters.feedHoldsAdopted, 1);
+  feed.ingest(JSON.stringify({ channel: 'book', type: 'snapshot', data: [{ symbol: 'XBT/USD', asks: [{ price: '100010.0', qty: '5' }], bids: [{ price: '99990.0', qty: '5' }] }] }), clock.now()); clock.advance(3000); // a 3 s old book: impaired, not critical
+  await watch.onTick(clock.now()); await d.idle(); assert.equal(d.state().restrictions.FEED_IMPAIRED, undefined, 'released once no held coin is CRITICAL, not only when every book is fresh');
+  // (b) a shell reached with its reservation still OPEN (the Watch\'s remainder cancel) settles the hold before closing
+  const c2 = fakeClock(); const ad = { kind: 'PAPER', subscribe() {}, async drain() { return {}; }, async submitEntryWithProtection({ intent }) { return { outcome: 'ACKNOWLEDGED', nativeOrderId: `nat-${intent.orderId}`, reason: null, guaranteesNoAcceptance: false }; }, async reconcile() { return { outcome: 'COMPLETE', unmatched: 0, pageIncomplete: false }; }, status() { return { stops: [], counters: {} }; } };
+  const r2 = await rig({ accountId: 'fix83-r1b', adapter: ad, feed: freshFeed(c2), clock: c2 }); await r2.d.dispatchEntry('o1');
+  await r2.d.commit(r2.F.ev('ORDER_STATE', { orderId: 'o1', state: 'CANCELLED', nativeOrderId: 'nat-o1', nativeCumQty: '0', reason: 'remainder cancelled', sourceTs: c2.now(), receiptTs: c2.now() }));
+  assert.equal(r2.d.state().reservations.r1.state, 'OPEN'); await r2.d.flattenUnfilledShell('o1', 'test');
+  const s2 = r2.d.state(); assert.equal(s2.positions.p1.state, 'FLAT'); assert.equal(s2.reservations.r1.state, 'RELEASED', 'the hold is settled with the shell'); assert.equal(slotsUsed(s2), 0); assert.equal(availableCash(s2), s2.cash);
+  // (c) a stop binding never precedes its append: a burst whose projection is refused binds nothing
+  const bound = []; const c3 = fakeClock(); const ad3 = venue(); ad3.bindStopOrder = (...a) => bound.push(a); const r3 = await rig({ accountId: 'fix83-r1c', adapter: ad3, feed: freshFeed(c3), clock: c3 }); await r3.d.dispatchEntry('o1'); const t = c3.now();
+  ad3.emit([{ type: 'ORDER_STATE', payload: { orderId: 'ghost', state: 'FILLED', nativeOrderId: 'x', nativeCumQty: '1', reason: null, sourceTs: t, receiptTs: t } }, { type: 'PROTECTION_STATE', payload: { positionId: 'p1', orderId: null, nativeOrderId: 'nat-stop-z', state: 'ACTIVE', qty: '0.001', trigger: '99000', reason: 'stop', sourceTs: t, receiptTs: t } }]); await r3.d.idle();
+  const stop = Object.values(r3.d.state().orders).find((o) => o.kind === 'PROTECTIVE_STOP'); assert.equal(bound.length, stop ? 1 : 0, 'bound exactly when its journal order exists'); if (stop) assert.equal(bound[0][1], stop.orderId);
+});

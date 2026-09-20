@@ -61,7 +61,9 @@ export function clearWatermark(a = {}, b = {}) {
 }
 export function mostRestrictiveControls(a = {}, b = {}) {
   const clearedAt = clearWatermark(a, b); const mark = clockOf(clearedAt);
-  const live = (latch) => (latch?.active && !(Number.isFinite(mark) && Number.isFinite(clockOf(latch.ts)) && clockOf(latch.ts) < mark) ? latch : null);
+  // an emergency / integrity fail-closed latch is THIS process restricting itself regardless of any file (control-store §10): the owner's
+  // CLEAR watermark never lifts it — only the process proving the control file trustworthy again does (review finding, PUBLISH-FIX-83)
+  const live = (latch) => (latch?.active && (latch.integrityFailClosed === true || latch.emergency === true || !(Number.isFinite(mark) && Number.isFinite(clockOf(latch.ts)) && clockOf(latch.ts) < mark)) ? latch : null);
   const kill = live(a.kill) ?? live(b.kill) ?? null;
   const cage = live(a.cage) ?? live(b.cage) ?? null;
   const byId = new Map();

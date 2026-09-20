@@ -418,6 +418,9 @@ test('PUBLISH-FIX-83 (full review item 1): the CLEAR watermark — a latch OLDER
   const m4 = mostRestrictiveControls({ kill: { active: true, ts: '2026-09-19T19:00:00.000Z' }, cage: null, vetoes: [] }, { ...later, kill: null }); assert.equal(m4.kill, null, 'a kill older than the later watermark is stale');
   // no watermark anywhere -> the old law, and no clearedAt key appears
   const m5 = mostRestrictiveControls(staleLocal, { kill: null, cage: null, vetoes: [] }); assert.equal(m5.cage, cageOld); assert.ok(!('clearedAt' in m5));
+  // the emergency overlay (this process restricting itself after a control lock / write / integrity failure) is never lifted by the owner's watermark
+  const overlayKill = { active: true, ts: '2026-09-11T10:00:00.000Z', integrityFailClosed: true, reason: 'CONTROL_INTEGRITY' }; const m6 = mostRestrictiveControls(clearedRow, { kill: overlayKill, cage: null, vetoes: [] }); assert.equal(m6.kill, overlayKill, 'an integrity fail-closed kill stands under a later CLEAR');
+  const m7 = mostRestrictiveControls(clearedRow, { kill: { active: true, ts: '2026-09-11T10:00:00.000Z', emergency: true }, cage: null, vetoes: [] }); assert.equal(m7.kill?.emergency, true);
   // the validator accepts the watermark and refuses garbage in it
   assert.equal(validateControlStateFix83(clearedRow).ok, true); assert.equal(validateControlStateFix83({ ...clearedRow, clearedAt: 'yesterday' }).ok, false); assert.equal(validateControlStateFix83({ ...clearedRow, clearedAt: null }).ok, true);
 });
