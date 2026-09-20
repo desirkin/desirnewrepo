@@ -28,6 +28,11 @@ import { evaluatePredicate } from './features.js';
 export const PROMOTER_VERSION = 'learning-promoter-1';
 export const CANDIDATE_ORIGIN = 'CANDIDATE_STUMP';
 export const JUDGE_FACTS = Object.freeze(['rv60', 'fi15', 'fi60', 'spreadBps', 'depthUsd10bps', 'atrPct']);
+// PUBLISH-FIX-83 (full review item 19): the DAILY_MOVER cell's episodes carry the mover study's features (learning/mover-study.js), none of
+// which is a Judge fact, so that cell could never propose a stump. The consumable set is the union; a feature a cell does not carry
+// is simply never KNOWN there and is skipped by the coverage floor.
+export const MOVER_FEATURES = Object.freeze(['rangeBefore60', 'drawdownBefore60', 'volumeVsPriorHour', 'climbPct', 'moveVolumeVsHourBefore', 'minutesToPeak']);
+export const CONSUMABLE_FEATURES = Object.freeze([...JUDGE_FACTS, ...MOVER_FEATURES]);
 export const DEFAULT_MAX_PENDING = 4;
 export const PRIMARY_HORIZON_MIN = 60;
 // PUBLISH-FIX-56 (2026-09-17, independent review f32484ca finding 2): the promotion is judged on the horizon the trade
@@ -105,7 +110,7 @@ const floorsMet = (evidence, floors) => evidence && evidence.groupCount >= floor
 
 export function createPromoter({
   store, consumerBinding, costModel, log = () => {}, floors = DEFAULT_FLOORS, maxPending = DEFAULT_MAX_PENDING,
-  consumableFeatures = JUDGE_FACTS, commonShockDates = new Set(), priorStrength = 8,
+  consumableFeatures = CONSUMABLE_FEATURES, commonShockDates = new Set(), priorStrength = 8,
 } = {}) {
   if (!store || typeof store.patternHeads !== 'function') throw new Error('createPromoter: a learning store is required');
   if (!consumerBinding || typeof consumerBinding.featureRecipeVersion !== 'string' || !/^[a-f0-9]{64}$/.test(String(consumerBinding.policyDigest ?? ''))) throw new Error('createPromoter: consumerBinding {featureRecipeVersion, policyDigest(sha256)} is required');

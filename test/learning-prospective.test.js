@@ -22,17 +22,21 @@ const design = () => sealDesign({ patternId: 'lpat-test', predicate, scope, cost
 
 // build a lawful forward stream: `groups` dependence groups over `assets` assets and `days` days.
 // metric > 0 where the candidate is right; candidate/baseline decisions per scenario.
-function stream(d, { groups = 32, assets = 6, days = 8, metricOf = () => 1, candidateOf = () => 'SELECTED_FOR_SHADOW', baselineOf = () => 'SKIPPED', matureFraction = 1 }) {
+// PUBLISH-FIX-83 (full review item 19): the forward test is a RANKING test (the candidate's picks against every matured look of the
+// group), so every group carries a second look the candidate SKIPPED (`skippedMetricOf`, default 0) a minute after the first.
+function stream(d, { groups = 32, assets = 6, days = 8, metricOf = () => 1, skippedMetricOf = () => 0, candidateOf = () => 'SELECTED_FOR_SHADOW', baselineOf = () => 'SKIPPED', matureFraction = 1 }) {
   const records = [{ kind: 'DESIGN_SEALED', design: d }];
   for (let g = 0; g < groups; g += 1) {
     const coin = `A${g % assets}A`;
     const day = g % days;
     const decisionTs = T0 + HOUR + day * DAY + Math.floor(g / days) * 5 * HOUR; // distinct 4h windows => distinct groups
-    const opportunityId = `lop-p${g}`;
+    const opportunityId = `lop-p${g}`; const skippedId = `lop-q${g}`;
     const labelEndTs = decisionTs + 60 * 60_000;
     records.push({ kind: 'CAPTURE', candidateId: d.candidateId, opportunityId, canonicalCoin: coin, decisionTs, candidateDecision: candidateOf(g), baselineDecision: baselineOf(g), recordedTs: decisionTs + 1000, labelEndTs });
+    records.push({ kind: 'CAPTURE', candidateId: d.candidateId, opportunityId: skippedId, canonicalCoin: coin, decisionTs: decisionTs + 60_000, candidateDecision: 'SKIPPED', baselineDecision: 'SKIPPED', recordedTs: decisionTs + 61_000, labelEndTs: labelEndTs + 60_000 });
     if (g < Math.floor(groups * matureFraction)) {
       records.push({ kind: 'OUTCOME', candidateId: d.candidateId, opportunityId, outcomeClass: metricOf(g) > 0 ? 'FAVORABLE' : 'ADVERSE', metricValue: metricOf(g), outcomeKnownAtTs: labelEndTs, recordedTs: labelEndTs + 1000 });
+      records.push({ kind: 'OUTCOME', candidateId: d.candidateId, opportunityId: skippedId, outcomeClass: skippedMetricOf(g) > 0 ? 'FAVORABLE' : 'ADVERSE', metricValue: skippedMetricOf(g), outcomeKnownAtTs: labelEndTs + 60_000, recordedTs: labelEndTs + 61_000 });
     }
   }
   return records;

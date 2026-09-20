@@ -95,19 +95,22 @@ test('end to end: propose -> freeze -> capture new episodes -> outcomes -> the t
     // 2+3. forward evidence: new in-scope episodes after the seal, captured before their window closes, outcomes once matured
     let now = T0 + 3 * HOUR; let capturedTotal = 0; let outcomesTotal = 0; let settledAt = null;
     const pending = () => [...store.patternHeads().values()].some((p) => p.origin === CANDIDATE_ORIGIN && p.state === 'PROSPECTIVE_PENDING');
+    // PUBLISH-FIX-83 (full review item 19): the forward test is a RANKING test — the candidate's picks against every matured look of
+    // the same group — so each dependence group (one coin, one 4-hour window) carries TWO looks: one inside the stump (picked) and
+    // one outside (skipped), a minute apart, exactly as a live coin offers several looks in a window
     for (let g = 0; g < 48 && pending(); g += 1) {
-      const ts = T0 + 3 * HOUR + g * 5 * HOUR; const rv60 = 1 + (g % 4);
-      const e = episode({ coin: COINS[g % COINS.length], ts, rv60, decision: g % 2 ? 'SELECTED_FOR_PAPER' : 'SKIPPED' });
-      store.appendEpisode(e);
-      now = ts + 10_000; r = promoter.step({ nowTs: now }); // the tick right after the decision captures it
-      assert.equal(r.captured, 1, `episode ${g} captured before its label window closes`); capturedTotal += 1;
-      store.appendOutcome(outcomeAttach(e, rv60 >= 2 ? 2.5 : -0.5, ts + HOUR + 1_000));
-      now = ts + HOUR + 60_000; r = promoter.step({ nowTs: now }); // the tick after maturity records the outcome; the settle look runs every tick
-      assert.equal(r.outcomes, 1, `episode ${g} outcome recorded once matured`); outcomesTotal += 1;
+      const ts = T0 + 3 * HOUR + g * 5 * HOUR; const coin = COINS[g % COINS.length];
+      const inside = episode({ coin, ts, rv60: 2 + (g % 3), decision: g % 2 ? 'SELECTED_FOR_PAPER' : 'SKIPPED' }); const outside = episode({ coin, ts: ts + 60_000, rv60: 1, decision: 'SKIPPED' });
+      store.appendEpisode(inside); store.appendEpisode(outside);
+      now = ts + 70_000; r = promoter.step({ nowTs: now }); // the tick right after the decisions captures both
+      assert.equal(r.captured, 2, `group ${g}: both looks captured before their label windows close`); capturedTotal += 2;
+      store.appendOutcome(outcomeAttach(inside, 2.5, ts + HOUR + 1_000)); store.appendOutcome(outcomeAttach(outside, -0.5, ts + 60_000 + HOUR + 1_000));
+      now = ts + 60_000 + HOUR + 60_000; r = promoter.step({ nowTs: now }); // the tick after maturity records the outcomes; the settle look runs every tick
+      assert.equal(r.outcomes, 2, `group ${g}: outcomes recorded once matured`); outcomesTotal += 2;
       if (r.settled.length) settledAt = g;
     }
     assert.ok(settledAt !== null, 'the ONE terminal look ran once the predeclared sample (30 independent groups) was reached');
-    assert.ok(capturedTotal >= 30 && outcomesTotal === capturedTotal, `captures ${capturedTotal}, outcomes ${outcomesTotal}`);
+    assert.ok(capturedTotal >= 60 && outcomesTotal === capturedTotal, `captures ${capturedTotal}, outcomes ${outcomesTotal}`);
     const state = replayProspective(store.readProspective());
     assert.equal(state.errors.length, 0, state.errors.join('\n'));
     assert.equal(state.captures.get(stump.candidateId).size, capturedTotal);

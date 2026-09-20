@@ -32,6 +32,10 @@ function stream(d, groups, metricOf) {
       outcomeClass: metricOf(g) > 0 ? 'FAVORABLE' : 'ADVERSE', metricValue: metricOf(g),
       outcomeKnownAtTs: labelEndTs, recordedTs: labelEndTs + 1_000,
     });
+    // PUBLISH-FIX-83 (full review item 19): the forward test ranks the candidate's picks against the group's other looks — a second,
+    // SKIPPED look (metric 0) a minute later makes every group informative
+    records.push({ kind: 'CAPTURE', candidateId: d.candidateId, opportunityId: `${opportunityId}-skip`, canonicalCoin: `A${g % 6}A`, decisionTs: decisionTs + 60_000, candidateDecision: 'SKIPPED', baselineDecision: 'SKIPPED', recordedTs: decisionTs + 61_000, labelEndTs: labelEndTs + 60_000 });
+    records.push({ kind: 'OUTCOME', candidateId: d.candidateId, opportunityId: `${opportunityId}-skip`, outcomeClass: 'ADVERSE', metricValue: 0, outcomeKnownAtTs: labelEndTs + 60_000, recordedTs: labelEndTs + 61_000 });
   }
   return records;
 }

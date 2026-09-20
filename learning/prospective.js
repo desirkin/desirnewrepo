@@ -227,20 +227,26 @@ function terminalRecord(state, candidateId, { nowTs, commonShockDates = new Set(
   if (reasons.length > 0) {
     return deepFreeze({ kind: 'TERMINAL_EVALUATED', candidateId, verdict: 'INSUFFICIENT_COMPARISON', reasons, effect: null, coverage: round4(coverage), maturedGroups: countedGrouping.groupCount, distinctAssets: maturedGrouping.distinctAssets, distinctUtcDates: maturedGrouping.distinctUtcDates, recordedTs: nowTs, alpha: d.alpha, authority: AUTHORITY, purpose: PURPOSE });
   }
-  // per-group paired difference (candidate minus baseline) of the primary metric
+  // per-group paired difference of the primary metric.
+  // PUBLISH-FIX-83 (full review item 19): learning is RANKING-ONLY (owner law), so a candidate is judged as a ranking: the mean NET
+  // metric of the opportunities it SELECTED against the mean of every matured opportunity in the same group (its cell, its
+  // window). The old law scored it against a baseline that never selected (SKIPPED = 0), i.e. demanded an absolute net profit
+  // after the sealed 1.8% round trip on a 5-minute horizon — a bar no cohort of looks could clear, so every forward test ended
+  // FORWARD_NOT_SUPPORTED and re-proposed forever. Profitability is the gates' and the cost model's job; the ranking's job is to
+  // put the better looks first, and that is what is measured here. The adaptive-ranking trial keeps its own paired metric.
   const diffs = countedGrouping.groups.map((g) => {
-    let sum = 0; let n = 0;
+    let adaptiveSum = 0; let adaptiveN = 0; let selectedSum = 0; let selectedN = 0; let allSum = 0; let allN = 0;
     for (const idx of g.members) {
       const cap = countedCaps[idx]; const out = outs.get(cap.opportunityId);
       const adaptive = cap.comparisonKind === ADAPTIVE_RANKING_TRIAL_CAPTURE
         && out.comparisonKind === ADAPTIVE_RANKING_TRIAL_OUTCOME;
-      const metric = adaptive ? null : (isFiniteNum(out.metricValue) ? out.metricValue : null);
-      if (!adaptive && metric === null) continue;
-      const cand = adaptive ? out.candidateMetricValue : (cap.candidateDecision === 'SELECTED_FOR_SHADOW' ? metric : 0);
-      const base = adaptive ? out.baselineMetricValue : (cap.baselineDecision === 'SELECTED_FOR_SHADOW' ? metric : 0);
-      sum += cand - base; n += 1;
+      if (adaptive) { adaptiveSum += out.candidateMetricValue - out.baselineMetricValue; adaptiveN += 1; continue; }
+      const metric = isFiniteNum(out.metricValue) ? out.metricValue : null; if (metric === null) continue;
+      allSum += metric; allN += 1; if (cap.candidateDecision === 'SELECTED_FOR_SHADOW') { selectedSum += metric; selectedN += 1; }
     }
-    return n > 0 ? sum / n : null;
+    if (adaptiveN > 0) return adaptiveSum / adaptiveN;
+    if (selectedN === 0 || allN === 0) return null; // a group the candidate never picked from says nothing about its ranking
+    return selectedSum / selectedN - allSum / allN;
   }).filter((v) => v !== null);
   const est = normalShrinkageGrouped({ groupMeans: diffs, pooledMean: 0, priorStrength: 1 });
   // one-sided lower bound must clear zero at the sealed alpha (1.96 ≈ two-sided 5%; the sealed uncertainty method)
@@ -248,7 +254,7 @@ function terminalRecord(state, candidateId, { nowTs, commonShockDates = new Set(
   return deepFreeze({
     kind: 'TERMINAL_EVALUATED', candidateId, verdict: supported ? 'FORWARD_SUPPORTED' : 'FORWARD_NOT_SUPPORTED',
     reasons: supported ? ['PAIRED_LOWER_BOUND_ABOVE_ZERO'] : ['PAIRED_LOWER_BOUND_NOT_ABOVE_ZERO'],
-    effect: { pairedMeanDiff: est.posteriorMean, lower95: est.lower95, upper95: est.upper95, groups: est.effectiveGroups, metric: d.primaryMetric },
+    effect: { pairedMeanDiff: est.posteriorMean, lower95: est.lower95, upper95: est.upper95, groups: est.effectiveGroups, metric: d.primaryMetric, comparison: 'SELECTED_VS_GROUP_MEAN' },
     coverage: round4(coverage), maturedGroups: countedGrouping.groupCount, distinctAssets: maturedGrouping.distinctAssets, distinctUtcDates: maturedGrouping.distinctUtcDates,
     allGroups: allGrouping.groupCount, recordedTs: nowTs, alpha: d.alpha, authority: AUTHORITY, purpose: PURPOSE,
   });
