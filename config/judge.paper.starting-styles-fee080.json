@@ -1,0 +1,121 @@
+{
+  "policyVersion": "judge-policy-2",
+  "policyName": "paper-starting-styles-usd500-fee080",
+  "strategyVersion": "judge-strategy-starting-styles-edge-2",
+  "costModelVersion": "judge-cost-paper-reference-1",
+  "watchVersion": "watch-paper-edge-state-2",
+  "mode": "PAPER",
+  "venue": "kraken",
+  "quote": "USD",
+  "account": {
+    "accountId": "paper-starting-styles-usd500-fee080",
+    "initialCapital": "500",
+    "compounding": "NONE"
+  },
+  "limits": {
+    "maxSimultaneousAssetPositions": 1,
+    "maxModelledRiskPerPositionFraction": 0.03,
+    "maxAggregateModelledRiskFraction": 0.03,
+    "maxCorrelatedClusterModelledRiskFraction": 0.03,
+    "dailyLossRestrictionFraction": 0.05,
+    "peakEquityDrawdownRestrictionFraction": 0.1,
+    "maxGrossExposureFraction": 1,
+    "maxAssetExposureFraction": 1
+  },
+  "execution": {
+    "adapter": "PAPER",
+    "paperLatencyMs": 250,
+    "paperMaxObservationWaitMs": 1000,
+    "entryDeadlineMs": 3000,
+    "maxBookAgeMs": 1000,
+    "maxReceiptToDecisionLagMs": 500,
+    "admissionBucketMs": 25,
+    "queueExpiryMs": 100,
+    "proposalExpiryMs": 10000,
+    "cooldownMs": 60000,
+    "maxDurationMs": 14400000
+  },
+  "fees": {
+    "taker": {
+      "rate": "0.008",
+      "rateKind": "PAPER_REFERENCE",
+      "currency": "QUOTE",
+      "roundingQuantum": "0.01",
+      "roundingMode": "UP",
+      "minimumFee": "0",
+      "scope": "ORDER_TOTAL",
+      "maxExecutionsBound": null,
+      "boundSource": null,
+      "scheduleId": "Kraken Pro public spot TAKER Tier 1 ($0+ 30-day volume): 0.80% per side, 1.60% round trip; maker not assumed. Source kraken.com/features/fee-schedule (tiers effective 2026-07-09), read 2026-09-20 (PUBLISH-FIX-87). PUBLIC schedule, not the owner account; full snapshot: config/kraken-fee-snapshot.json"
+    }
+  },
+  "universe": {
+    "excludeBases": [
+      "USDT",
+      "USDC",
+      "DAI",
+      "TUSD",
+      "PYUSD",
+      "USDS",
+      "RLUSD",
+      "FDUSD",
+      "USDG",
+      "EURT",
+      "USDR",
+      "EUR",
+      "GBP",
+      "AUD",
+      "CHF",
+      "CAD",
+      "JPY",
+      "EURR"
+    ],
+    "maxCandidates": 6,
+    "maxResearch": 2,
+    "maxHotSet": 12,
+    "preparationSlots": 6
+  },
+  "setups": {
+    "enabled": [
+      "MOMENTUM_CONTINUATION",
+      "RANGE_IGNITION",
+      "TREND_PULLBACK_CONTINUATION",
+      "ABSORPTION_RECLAIM",
+      "CATALYST_TRANSMISSION",
+      "MICRO_BITE"
+    ],
+    "inputModes": [
+      "MARKET_DIRECT",
+      "CASE_ENRICHED",
+      "CATALYST_CASE"
+    ],
+    "selectionVersion": "judge-setup-selection-1",
+    "edgeStateVersion": "judge-edge-state-1"
+  },
+  "evaluation": {
+    "seed": "paper-reference-seed-2026-09-08",
+    "arms": [
+      "REF_RANGE_IGNITION",
+      "REF_ABSORPTION_RECLAIM",
+      "REF_TREND_PULLBACK_CONTINUATION",
+      "REF_CATALYST_TRANSMISSION",
+      "REF_COMBINED",
+      "D1_PRESSURE_TO_PROGRESS",
+      "D2_FLOW_EVENT_RESPONSE",
+      "D3_RESIDUAL_IGNITION",
+      "D4_PLANNED_TARGET_MATCHED",
+      "D4_PLANNED_TARGET_FUNDED",
+      "CASH",
+      "MOMENTUM_ABLATION",
+      "SEEDED_NOMINATION_CONTROL"
+    ],
+    "splits": {
+      "developmentFraction": 0.5,
+      "validationFraction": 0.25,
+      "holdoutFraction": 0.25,
+      "embargoMs": 14400000
+    }
+  },
+  "live": null,
+  "authorityNote": "The SELECTED paper policy (config/paper-runtime.json names it: the default, not opt-in). Limits unchanged. Existing accounts never reset: a fee binds an account for life, so this is a NEW account. NO_TRADE is valid. Strategies are unvalidated hypotheses. Fee 0.80% taker/side (Kraken Tier 1)."
+}

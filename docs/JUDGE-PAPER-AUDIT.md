@@ -66,6 +66,29 @@ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe
 all (49 files)   6016f931e15531e63a2f0d734137f914d9f8c0e2831902e4cc7806333fcd4127
 ```
 
+### 4.36 Audited change — 2026-09-20 PUBLISH-FIX-87: the paper fee is the REAL Kraken Pro Tier-1 taker (0.80% a side) for a $500 account; a new account; the fee-tier reader on the July 2026 schedule (frozen core UNCHANGED; no digest moves)
+
+Two independent reviews (and the owner, every day) said the 0.40% reference was wrong for the account he will open. Checked
+against Kraken's own pages on 2026-09-20: since the cross-platform tiers of 2026-07-09, Tier 1 (30-day volume $0+) is 0.40%
+maker / **0.80% taker** a side; 0.40% taker is Tier 3 ($10K+ volume or $20K assets on platform). The owner's directive: "$500,
+the fees have to be exactly what we would be charged, dumping it all in" — a market (taker) buy and sell at Tier 1: 1.60% a
+round trip. A fee is a policy binding, immutable for the life of an account (`ACCOUNT_POLICY_MISMATCH` on any byte of the
+policy), so this is a NEW policy and account: `config/judge.paper.starting-styles-fee080.json` (= `judge/samples/policy.paper-
+starting-styles-fee080.json` byte for byte), `paper-starting-styles-usd500-fee080`, fees.taker.rate `0.008`, scheduleId naming
+the tier, the source and the date; the machine-readable snapshot of the whole schedule (tiers, AoP thresholds, sources) is
+`config/kraken-fee-snapshot.json`. `config/paper-runtime.json` names the new policy and account; boot needs the Secret
+`SERPENT_PAPER_INIT_ACCOUNT=paper-starting-styles-usd500-fee080` (by NAME) to create the account once. `lib/kraken-fee-tier.js`
+carries the corrected base and tier table (the reader still replaces it with the owner tier from TradeVolume when a read-only
+key is set). The fee040 account's history stands untouched as what it was: a Tier-3-taker / Tier-1-maker assumption.
+What the real fee does, proven by the drill (test/paper-bite-drill.test.js): a textbook setup with a ~4% measured move against
+a 0.6% stop buys at 0.40% a side and is REFUSED at 0.80% (`REWARD_RISK_BELOW_1_5`, a CLOSE CALL); the same setup with a ~6%
+measured move buys at 0.80% (q 0.0016 BTC, $162 of $500). At Tier 1 the Judge needs roughly a 5%+ measured move against a
+0.6% stop — the movers the volatility watch admits, not the majors. This is the truth of a $500 taker account; it is not
+softened. Also in this change (blind review 864b4c3a F9): the authority line `THRESHOLD CHANGES: NONE` contradicted GATE
+LEARNING ON; it now reads `THRESHOLD CHANGES: NONE BY HAND (gate learning ON: the five flow lines may move inside fixed bands,
+every move logged)` in paper/profile.js, docs/PAPER-RUNBOOK.md and the tests that pin it; the fee080 policy's authorityNote
+says it is the SELECTED default, not "opt-in".
+
 ### 4.35 Audited change — 2026-09-20 PUBLISH-FIX-85: the target-cap law honours the reward-to-risk law (previous digests: judge `c4b99b933a2b…` → `96f83523029c…`, all `55b67b8bc7b8…` → `6016f931e155…`; execution and watch/watch.js UNCHANGED; 49 files)
 
 The first hour of PUBLISH-FIX-84 (deployment d6ab0259) wrote the line the owner had been asking for: `CLOSE CALL: ARB/USD
@@ -189,7 +212,7 @@ The full suite was run file by file (each file its own process) before this re-p
 status doc for 2026-09-20.
 
 Authority unchanged: no order, size, exit or strategy law moved; no new sense, no new strategy (FREEZE stands); learning
-remains ranking-only and always ON with the kill file ARMED; `THRESHOLD CHANGES: NONE` remains the authority line for
+remains ranking-only and always ON with the kill file ARMED; `THRESHOLD CHANGES: NONE BY HAND (…)` remains the authority line for
 hand changes. What moved are rulers (RV60 window, FI floor, depth band), plumbing (batching, lanes, holds, sweeps) and the
 owner's CLEAR — each one named above with its test.
 
@@ -256,7 +279,7 @@ reserves under a learned line with the GATE_LEARNING row; outside the band / fau
 Full suite green before re-pinning.
 
 Authority unchanged: the lines move inside their bands; no order, size, exit, strategy or structural clause is touched;
-`THRESHOLD CHANGES: NONE` remains the authority line for hand changes — these are the Judge's own, each one logged.
+`THRESHOLD CHANGES: NONE BY HAND (…)` remains the authority line for hand changes — these are the Judge's own, each one logged.
 
 ### 4.30 Audited change — 2026-09-19 PUBLISH-FIX-81: independent review cb305c6e, F4 + F5 on the move clock — the clock measures over the study's own two-hour horizon and honours the learned-influence kill file (previous judge digest `4f8c9e59c77e…`; now `d86afbd55cf3…`; 49 files; execution and watch UNCHANGED)
 

@@ -1,0 +1,105 @@
+{
+ "tier": 1,
+ "makerPct": 0.4,
+ "takerPct": 0.8,
+ "volume30dUsdFrom": 0,
+ "assetsOnPlatformUsdFrom": null,
+ "source": "https://www.kraken.com/features/fee-schedule",
+ "asOf": "2026-09-20",
+ "verification": "PUBLIC_SCHEDULE_NOT_ACCOUNT",
+ "policyFile": "config/judge.paper.starting-styles-fee080.json",
+ "accountId": "paper-starting-styles-usd500-fee080",
+ "takerRateBound": "0.008",
+ "roundTripPct": 1.6,
+ "schedule": [
+  {
+   "tier": 1,
+   "volumeFromUsd": 0,
+   "aopFromUsd": null,
+   "makerPct": 0.4,
+   "takerPct": 0.8
+  },
+  {
+   "tier": 2,
+   "volumeFromUsd": 2500,
+   "aopFromUsd": null,
+   "makerPct": 0.3,
+   "takerPct": 0.6
+  },
+  {
+   "tier": 3,
+   "volumeFromUsd": 10000,
+   "aopFromUsd": 20000,
+   "makerPct": 0.22,
+   "takerPct": 0.38
+  },
+  {
+   "tier": 4,
+   "volumeFromUsd": 25000,
+   "aopFromUsd": 50000,
+   "makerPct": 0.2,
+   "takerPct": 0.35
+  },
+  {
+   "tier": 5,
+   "volumeFromUsd": 50000,
+   "aopFromUsd": 100000,
+   "makerPct": 0.15,
+   "takerPct": 0.3
+  },
+  {
+   "tier": 6,
+   "volumeFromUsd": 100000,
+   "aopFromUsd": 200000,
+   "makerPct": 0.12,
+   "takerPct": 0.25
+  },
+  {
+   "tier": 7,
+   "volumeFromUsd": 250000,
+   "aopFromUsd": 400000,
+   "makerPct": 0.1,
+   "takerPct": 0.22
+  },
+  {
+   "tier": 8,
+   "volumeFromUsd": 500000,
+   "aopFromUsd": 600000,
+   "makerPct": 0.08,
+   "takerPct": 0.2
+  },
+  {
+   "tier": 9,
+   "volumeFromUsd": 1000000,
+   "aopFromUsd": 1000000,
+   "makerPct": 0.06,
+   "takerPct": 0.18
+  },
+  {
+   "tier": 10,
+   "volumeFromUsd": 2500000,
+   "aopFromUsd": 2500000,
+   "makerPct": 0.04,
+   "takerPct": 0.15
+  },
+  {
+   "tier": 11,
+   "volumeFromUsd": 5000000,
+   "aopFromUsd": 5000000,
+   "makerPct": 0.02,
+   "takerPct": 0.12
+  },
+  {
+   "tier": 12,
+   "volumeFromUsd": 10000000,
+   "aopFromUsd": 10000000,
+   "makerPct": 0.0,
+   "takerPct": 0.1
+  }
+ ],
+ "sources": [
+  "https://www.kraken.com/features/fee-schedule",
+  "https://support.kraken.com/articles/cross-platform-fee-tier-changes"
+ ],
+ "note": "Tier = best of 30-day spot volume or Assets on Platform (effective 2026-07-09). The bound rate 0.008 is the Tier-1 taker (0.80%). This is the PUBLIC schedule; the owner account's actual per-pair fee is read only by lib/kraken-fee-tier.js from TradeVolume when a read-only key is set by NAME."
+}

@@ -95,7 +95,7 @@ export function applyProfileEnvironment(profile, env = process.env, { dataDir = 
   return Object.freeze({ applied: Object.keys(derived), overridden });
 }
 // the exact authority lines every operator surface prints (preflight, launch): one fact per line, never joined
-export const authorityLines = (paperMode) => Object.freeze(['REAL MONEY: DISABLED', 'LIVE ORDERS: DISABLED', 'WITHDRAW/FUNDING: DISABLED', `PAPER MODE: ${paperMode}`, 'DARK KRAKEN JUDGE AUTHORITY: NONE', 'DARK KRAKEN SOCRATES AUTHORITY: NONE', 'THRESHOLD CHANGES: NONE']);
+export const authorityLines = (paperMode) => Object.freeze(['REAL MONEY: DISABLED', 'LIVE ORDERS: DISABLED', 'WITHDRAW/FUNDING: DISABLED', `PAPER MODE: ${paperMode}`, 'DARK KRAKEN JUDGE AUTHORITY: NONE', 'DARK KRAKEN SOCRATES AUTHORITY: NONE', 'THRESHOLD CHANGES: NONE BY HAND (gate learning ON: the five flow lines may move inside fixed bands, every move logged)']);
 export const secretPresence = (profile, env = process.env) => Object.freeze(Object.fromEntries(SECRET_ENV_NAMES.map((n) => [n, typeof env[n] === 'string' && env[n].length > 0])));
 // deep-merge the profile's config overlay onto cobra.config.json (lib/config.js applies it when COBRA_PROFILE is set)
 export function mergeOverlay(base, overlay) { if (!plain(overlay)) return base; const out = { ...base }; for (const [k, v] of Object.entries(overlay)) out[k] = plain(v) && plain(base?.[k]) ? mergeOverlay(base[k], v) : v; return out; }

@@ -13,17 +13,17 @@ function stub({ status = 200, body = null, throwOn = false } = {}) {
   return { fetchImpl, calls };
 }
 
-test('FEE-1. the base schedule is Kraken Pro base (0.25% maker / 0.40% taker) and the tier table lands a volume correctly', () => {
-  assert.equal(KRAKEN_PRO_BASE_SCHEDULE.taker, 0.004); assert.equal(KRAKEN_PRO_BASE_SCHEDULE.maker, 0.0025);
-  assert.equal(feeScheduleForVolume(0).takerPct, 0.40); assert.equal(feeScheduleForVolume(60_000).takerPct, 0.24); assert.equal(feeScheduleForVolume(60_000).makerPct, 0.14);
-  assert.equal(feeScheduleForVolume(50_000_000).takerPct, 0.10); assert.equal(feeScheduleForVolume(-1).takerPct, 0.40);
+test('FEE-1. the base schedule is Kraken Pro Tier 1 (0.40% maker / 0.80% taker; the July 2026 cross-platform tiers, PUBLISH-FIX-87) and the tier table lands a volume correctly', () => {
+  assert.equal(KRAKEN_PRO_BASE_SCHEDULE.taker, 0.008); assert.equal(KRAKEN_PRO_BASE_SCHEDULE.maker, 0.004);
+  assert.equal(feeScheduleForVolume(0).takerPct, 0.80); assert.equal(feeScheduleForVolume(60_000).takerPct, 0.30); assert.equal(feeScheduleForVolume(60_000).makerPct, 0.15);
+  assert.equal(feeScheduleForVolume(12_000).takerPct, 0.38); assert.equal(feeScheduleForVolume(50_000_000).takerPct, 0.10); assert.equal(feeScheduleForVolume(-1).takerPct, 0.80);
   assert.equal(baseScheduleResult('X').source, 'BASE_SCHEDULE'); assert.equal(baseScheduleResult('X').reason, 'X');
 });
 
 test('FEE-2. no key -> base schedule fallback, and NOTHING is fetched (read-only, keys by NAME)', async () => {
   const s = stub();
   const r = await readAccountFeeTier({ env: {}, fetchImpl: s.fetchImpl });
-  assert.equal(r.source, 'BASE_SCHEDULE'); assert.equal(r.reason, 'CREDENTIAL_MISSING'); assert.equal(r.taker, 0.004);
+  assert.equal(r.source, 'BASE_SCHEDULE'); assert.equal(r.reason, 'CREDENTIAL_MISSING'); assert.equal(r.taker, 0.008);
   assert.equal(s.calls.length, 0, 'no credential -> no call');
 });
 
@@ -42,12 +42,12 @@ test('FEE-4. a provider error, an HTTP failure, an unreachable host, or missing 
   assert.equal((await readAccountFeeTier({ env: ENV, fetchImpl: stub({ status: 500 }).fetchImpl })).reason, 'HTTP_500');
   assert.equal((await readAccountFeeTier({ env: ENV, fetchImpl: stub({ throwOn: true }).fetchImpl })).reason, 'UNREACHABLE');
   const byVol = await readAccountFeeTier({ env: ENV, fetchImpl: stub({ body: { error: [], result: { volume: '75000' } } }).fetchImpl });
-  assert.equal(byVol.source, 'ACCOUNT_TIER_BY_VOLUME'); assert.equal(byVol.takerPct, 0.24); assert.equal(byVol.volume30dUsd, 75_000);
+  assert.equal(byVol.source, 'ACCOUNT_TIER_BY_VOLUME'); assert.equal(byVol.takerPct, 0.30); assert.equal(byVol.volume30dUsd, 75_000);
 });
 
 test('FEE-5. the status names the two env NAMES, present/absent, and carries no value', () => {
   const off = feeTierStatus({}); assert.deepEqual(off.credentialNames, ['KRAKEN_FEE_TIER_API_KEY', 'KRAKEN_FEE_TIER_API_SECRET']); assert.equal(off.credentialPresent, false);
-  const on = feeTierStatus(ENV); assert.equal(on.credentialPresent, true); assert.equal(on.base.taker, 0.004);
+  const on = feeTierStatus(ENV); assert.equal(on.credentialPresent, true); assert.equal(on.base.taker, 0.008);
   assert.ok(!JSON.stringify(feeTierStatus(ENV)).includes(SECRET));
 });
 
@@ -55,7 +55,7 @@ test('FEE-5. the status names the two env NAMES, present/absent, and carries no 
 test('FEE-6. null, missing, boolean and empty fee fields fall back to FIELDS_MISSING (never a zero-percent ACCOUNT_TIER); a numeric string still resolves', async () => {
   for (const bad of [{ fee: null }, {}, { fee: true }, { fee: '' }, { fee: 'abc' }]) {
     const r = await readAccountFeeTier({ env: ENV, fetchImpl: stub({ body: { error: [], result: { fees: { XXBTZUSD: bad }, fees_maker: { XXBTZUSD: bad } } } }).fetchImpl });
-    assert.equal(r.source, 'BASE_SCHEDULE', JSON.stringify(bad)); assert.equal(r.reason, 'FIELDS_MISSING'); assert.equal(r.taker, 0.004);
+    assert.equal(r.source, 'BASE_SCHEDULE', JSON.stringify(bad)); assert.equal(r.reason, 'FIELDS_MISSING'); assert.equal(r.taker, 0.008);
   }
   const nullVol = await readAccountFeeTier({ env: ENV, fetchImpl: stub({ body: { error: [], result: { volume: null, fees: { XXBTZUSD: { fee: null } } } } }).fetchImpl });
   assert.equal(nullVol.source, 'BASE_SCHEDULE'); assert.equal(nullVol.reason, 'FIELDS_MISSING');
