@@ -11,7 +11,7 @@ import { openBudgetJournal, staleLockOwner } from '../socrates/budget.js';
 test('FIX83-K11. a stale lock (dead pid) is reclaimed; a live owner\'s lock is not; garbage is not', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'cobra-fix83-budget-')); const lock = path.join(dir, 'budget.lock'); const logs = [];
   try {
-    writeFileSync(lock, `${JSON.stringify({ pid: 424242, openedTs: Date.now() - 3_600_000, version: 'x' })}\n`);
+    writeFileSync(lock, `${JSON.stringify({ pid: 424242, openedTs: Date.now() - 5_000, version: "x" })}\n`); // opened seconds ago (a lock older than the machine's boot is stale by physics, whatever an injected liveness says)
     assert.throws(() => openBudgetJournal({ dir, pidAlive: () => true }), /locked/, 'the owner is alive (by the injected liveness): fail closed');
     const j = openBudgetJournal({ dir, log: (m) => logs.push(String(m)), pidAlive: () => false });
     assert.ok(logs.some((l) => /stale lock reclaimed/.test(l)), logs.join(' | ')); assert.equal(JSON.parse(readFileSync(lock, 'utf8')).pid, process.pid, 'the lock is ours now');
