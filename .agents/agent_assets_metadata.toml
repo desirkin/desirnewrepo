@@ -126,3 +126,17 @@ mtime_ms = 1789879723898
 storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/3d503aa7-56d6-4c39-9495-7353646eb1d5/73503993-982b-4584-94ac-d6f255cb9860"
 storage_version_token = "1789879728778642"
 content_type = "application/octet-stream"
+
+[[outputs]]
+id = "rjXEs-SyKiWm_7LH77OVB"
+uri = "file://exports/serpent-total-complete-llm-review-latest-864b4c3a.zip"
+type = "unspecified"
+title = "Download the complete latest Serpent LLM-review ZIP"
+description = "Exact newest published commit 864b4c3a, including the full safe app, Publish Fix review mailboxes, history, publish-to-publish patch, inventories, and hashes. 1,155 files; 7,847,040 bytes; SHA-256 38f7080b7694ee32bc80b893c8f2c81386b0cb2afa077458b6b5e782d77d5fbe."
+logical_id = "39522083-b704-46bc-9d40-033955a32455"
+content_hash = "sha256:38f7080b7694ee32bc80b893c8f2c81386b0cb2afa077458b6b5e782d77d5fbe"
+size = 7847040
+mtime_ms = 1789938336184
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/39522083-b704-46bc-9d40-033955a32455/d154e767-a11c-4d06-9cc7-84411c3036d4"
+storage_version_token = "1789938342092577"
+content_type = "application/octet-stream"
