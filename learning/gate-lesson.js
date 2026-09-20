@@ -20,7 +20,7 @@
 // size, no exit, no strategy is touched here. learning/ never imports judge/ — the band table is mirrored below and the Judge
 // re-validates every line against its own table before use.
 import path from 'node:path';
-import { existsSync, readFileSync, mkdirSync, createReadStream } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, createReadStream, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { atomicWriteJson, readJsonBounded } from '../lib/jsonl.js';
 
@@ -209,10 +209,13 @@ export function gateLessonLine(lesson) {
   return `GATE LEARNING: ${moved ? `${moved} learned line(s) in force` : 'reference lines in force'} — ${parts.join(' | ')}`;
 }
 // ---- the study (runs in the child): stream the ledger, join, compute, persist ----------------------------------------------
-async function readJsonlStream(file, keep, { maxBytes = 1024 * 1024 * 1024 } = {}) {
+export async function readJsonlStream(file, keep, { maxBytes = 1024 * 1024 * 1024 } = {}) {
   const out = []; if (!existsSync(file)) return out;
-  const rl = createInterface({ input: createReadStream(file, { encoding: 'utf8', highWaterMark: 1 << 20 }), crlfDelay: Infinity }); let bytes = 0;
-  for await (const line of rl) { bytes += line.length + 1; if (bytes > maxBytes) break; if (!line) continue; let o = null; try { o = JSON.parse(line); } catch { continue; } if (o && keep(o)) out.push(o); }
+  // PUBLISH-FIX-83: the byte cap is a TAIL — a ledger past the cap yields its newest rows (the ones the study is about), not
+  // its oldest; the first (possibly partial) line after the cut is dropped
+  const size = statSync(file).size; const start = size > maxBytes ? size - maxBytes : 0;
+  const rl = createInterface({ input: createReadStream(file, { encoding: 'utf8', highWaterMark: 1 << 20, start }), crlfDelay: Infinity }); let first = start > 0;
+  for await (const line of rl) { if (first) { first = false; continue; } if (!line) continue; let o = null; try { o = JSON.parse(line); } catch { continue; } if (o && keep(o)) out.push(o); }
   return out;
 }
 export const gateLessonPaths = (dataDir) => { const dir = path.join(dataDir, 'learning', GATE_LESSON_DIR); return { dir, lesson: path.join(dir, 'lesson.json'), state: path.join(dir, 'state.json'), episodes: path.join(dataDir, 'learning', 'episodes.jsonl'), outcomes: path.join(dataDir, 'learning', 'decision-outcomes', 'decision-outcomes.jsonl') }; };
