@@ -140,14 +140,14 @@ export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED
         const prior = nextEntries[file.relativePath];
         if (prior && prior.bytes === file.bytes && prior.mtimeMs === file.mtimeMs) { skippedUnchanged += 1; continue; }
         if (prior && !final && now() - (Number(prior.uploadedTs) || 0) < reuploadIntervalMs(file.bytes, { perMiB, maxDeferMs })) { deferred += 1; continue; } // PUBLISH-FIX-34: a growing file waits its size-scaled turn
+        if (final && now() - passStartedTs > finalBudgetMs) { deferred += 1; continue; } // the final sync stops at its deadline BEFORE reading the next file; what landed is already in the manifest
         let bytes;
         try { bytes = await readExact(file.abs, file.bytes); } catch (error) { failures.push({ relativePath: file.relativePath, reason: bounded(error?.code ?? error?.message ?? error) }); continue; }
         if (bytes === null) continue; // changed mid-read; next pass catches it
-        if (final && now() - passStartedTs > finalBudgetMs) { deferred += 1; continue; } // the final sync stops uploading at its deadline; what landed is already in the manifest
         const digest = await sha256Async(bytes);
         if (prior && prior.sha256 === digest) { nextEntries[file.relativePath] = { ...prior, bytes: file.bytes, mtimeMs: file.mtimeMs }; skippedUnchanged += 1; continue; }
         const key = objectKeyForPath(file.relativePath);
-        try { const put = await adapter.put(key, bytes, { sha256: digest }); if (put.sha256 !== digest) throw new Error('object digest mismatch after put'); }
+        try { await adapter.put(key, bytes, { sha256: digest }); }
         catch (error) { failures.push({ relativePath: file.relativePath, reason: bounded(error?.code ?? error?.message ?? error) }); continue; }
         nextEntries[file.relativePath] = { key, bytes: file.bytes, sha256: digest, mtimeMs: file.mtimeMs, uploadedTs: now() };
         uploaded += 1; uploadedBytes += file.bytes; sinceManifest += 1;

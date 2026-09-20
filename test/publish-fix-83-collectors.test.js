@@ -52,5 +52,15 @@ test('FIX83-TAIL. rotation is detected by file identity: a cursor that lags behi
     appendJsonlRotating(file, row(35), { maxBytes: 1 }); appendJsonlRotating(file, row(36), { maxBytes: 100_000 });
     const fresh = new Tail(file, { fromStart: true }); fresh.resume(cur); got = []; for (let k = 0; k < 10; k += 1) got.push(...fresh.readNew().records);
     assert.deepEqual(got.map((r) => r.i), [31, 32, 33, 34, 35, 36], 'resumed inside the archive, then the new file');
+    // rotated TWICE while the consumer was down: the archive chain is drained in order, nothing between is lost
+    const cur2 = fresh.cursor();
+    for (let i = 37; i < 40; i += 1) appendJsonlRotating(file, row(i), { maxBytes: 100_000 });
+    appendJsonlRotating(file, row(40), { maxBytes: 1 }); appendJsonlRotating(file, row(41), { maxBytes: 100_000 }); appendJsonlRotating(file, row(42), { maxBytes: 1 }); appendJsonlRotating(file, row(43), { maxBytes: 100_000 });
+    const twice = new Tail(file, { fromStart: true }); twice.resume(cur2); got = []; for (let k = 0; k < 10; k += 1) got.push(...twice.readNew().records);
+    assert.deepEqual(got.map((r) => r.i), [37, 38, 39, 40, 41, 42, 43], 'both archives and the live file, in order');
+    // the same, in-process: a tail that did not read across two rotations
+    const lag = new Tail(file, { fromStart: true }); got = []; for (let k = 0; k < 20; k += 1) got.push(...lag.readNew().records); const before = got.length;
+    for (let i = 44; i < 46; i += 1) appendJsonlRotating(file, row(i), { maxBytes: 100_000 }); appendJsonlRotating(file, row(46), { maxBytes: 1 }); appendJsonlRotating(file, row(47), { maxBytes: 100_000 }); appendJsonlRotating(file, row(48), { maxBytes: 1 }); appendJsonlRotating(file, row(49), { maxBytes: 100_000 });
+    got = []; for (let k = 0; k < 20; k += 1) got.push(...lag.readNew().records); assert.deepEqual(got.map((r) => r.i), [44, 45, 46, 47, 48, 49], `in-process double rotation (${before} read before)`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, openSync, closeSync, wri
 import { appendJsonl, atomicWriteJson as writeAtomicJson, readJsonlTail, readJsonBounded } from '../lib/jsonl.js';
 import { dataDir as defaultDataDir } from '../lib/config.js';
 import { fetchTextBounded } from '../lib/bounded-fetch.js';
-import { reclaimStaleLock } from '../lib/stale-lock.js';
+import { reclaimStaleLock, machineBootId } from '../lib/stale-lock.js';
 import { parseFeed } from '../rumor2/feed.js'; // the hostile-XML-safe parser is a PURE export; the official-ear transport is not shared
 import { PRESS_SOURCES, pressRegistryError } from './registry.js';
 import { itemToObservation, pressObservationError, PRESS_LIMITS } from './parse.js';
@@ -45,7 +45,7 @@ export function startPress({ env = process.env, dataDir = defaultDataDir(), fetc
   let writerFd; try { writerFd = openSync(writerFile, 'wx', 0o600); } catch (err) { if (err.code === 'EEXIST') throw new Error('press writer already locked; stop the existing news collector before starting another'); throw err; }
   const stop = () => { if (stopping) return; stopping = true; for (const t of timerSet) { timers.clearTimeout(t); timers.clearInterval(t); } timerSet.clear(); active.delete(dataDir); process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); try { closeSync(writerFd); } finally { unlinkSync(writerFile); } };
   try {
-    writeFileSync(writerFd, JSON.stringify({ pid: process.pid, openedTs: clock() }));
+    writeFileSync(writerFd, JSON.stringify({ pid: process.pid, openedTs: Date.now(), bootId: machineBootId(), domainTs: clock() })); // openedTs is a wall-clock claim for the stale-lock law
   for (const s of sources) {
     const cp = readCheckpoint(dataDir, s.id);
     S.set(s.id, { source: s, selected: selected.has(s.id), state: !selected.has(s.id) ? 'DISABLED' : 'IDLE', etag: cp?.etag ?? null, lastModified: cp?.lastModified ?? null, seen: cp?.seen ?? [], seenSet: new Set(cp?.seen ?? []), lastSuccessTs: cp?.lastSuccessTs ?? null, lastReceiptTs: null, lastOutcome: null, lastError: null, backoffUntil: null, delayMs: 0, running: false, coverage: 'HEADLINE_LINK_ONLY', counters: { polls: 0, observed: 0, admitted: 0, duplicates: 0, skipped: 0, failed: 0, rateLimited: 0, notModified: 0, emptyFeeds: 0, parseFailed: 0 } });

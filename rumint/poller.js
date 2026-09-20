@@ -402,6 +402,7 @@ export function startRumint({
   const OVER_BOUND_ERRORS = new Set(['baselines over symbol bound', 'providerHealth.symbols over bound']);
   function repairOverBound(state, err) {
     if (!OVER_BOUND_ERRORS.has(err)) return null;
+    if (!state?.baselines || typeof state.baselines !== 'object' || !state?.providerHealth?.symbols || typeof state.providerHealth.symbols !== 'object') return null;
     const repaired = structuredClone(state);
     const pruned = pruneSymbolMaps(repaired.baselines, repaired.providerHealth.symbols, { mustKeep: repaired.pollTransaction?.providerSymbol ?? null });
     repaired.hyped = { sessionDate: null, state: 'BUILDING', symbols: [], finalizedTs: null, identity: null, coverage: null };
@@ -1112,7 +1113,7 @@ export function startRumint({
     running = true;
     try {
       if (!(await ensureInit())) return;
-      if (pruneCheckpointSymbols() > 0) rollHyped(); // the bound is kept BEFORE any save this tick, and HYPED re-rolled on the kept set
+      if (S.pending.length < maxPendingEvents && pruneCheckpointSymbols() > 0) rollHyped(); // the bound is kept BEFORE any save this tick and HYPED re-rolled on the kept set; never at the pending cap (baselines and HYPED are frozen there, §B3)
       // R1A §B1: an interrupted poll transaction is finished FIRST — no new
       // observation while an accepted advancement is still owed its finish
       if (!recoverTransaction()) return;
@@ -1173,7 +1174,7 @@ export function startRumint({
       S.stopped = true; // FIRST: every mutation path guards on this
       clearInterval(timer);
       abort.abort(); // CANCEL in-flight provider work (§55)
-      if (S.initialized) { if (pruneCheckpointSymbols() > 0) rollHyped(); await saveCheckpoint(); } // final truth snapshot (pruned + re-rolled first)
+      if (S.initialized) await saveCheckpoint(); // final truth snapshot (the tick-top prune already bounds the maps; a re-roll while stopped would drop its own HYPED evidence as CANCELLED_STOPPED — an over-bound final save is repaired on load)
       publishStatus();
     })();
     return stopping;

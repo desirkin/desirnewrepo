@@ -8,7 +8,7 @@ import { openSync, closeSync, writeSync, fsyncSync, mkdirSync, readFileSync, exi
 import path from 'node:path';
 import { parseStrictJson, fail, deepFreeze, isFiniteNum, isCount, isTs, isPlainObject } from '../market-lab/contracts.js';
 import { writeAll } from '../market-lab/store.js';
-import { lockOwnerState } from '../lib/stale-lock.js';
+import { lockOwnerState, machineBootId } from '../lib/stale-lock.js';
 
 export const BUDGET_JOURNAL_VERSION = 'socrates-budget-journal-1';
 export const RESERVATION_STATES = Object.freeze(['RESERVED', 'SETTLED', 'UNRESOLVED', 'RELEASED']);
@@ -46,7 +46,7 @@ export function openBudgetJournal({ dir, clock = () => Date.now(), pid = process
   mkdirSync(dir, { recursive: true });
   const lockFile = path.join(dir, 'budget.lock'); const journalFile = path.join(dir, 'journal.jsonl');
   let lockFd = null;
-  const acquire = () => { lockFd = openSync(lockFile, 'wx'); writeAll(lockFd, Buffer.from(`${JSON.stringify({ pid, openedTs: clock(), version: BUDGET_JOURNAL_VERSION })}\n`), 'budget.lock'); fsyncSync(lockFd); };
+  const acquire = () => { lockFd = openSync(lockFile, 'wx'); writeAll(lockFd, Buffer.from(`${JSON.stringify({ pid, openedTs: Date.now(), bootId: machineBootId(), domainTs: clock(), version: BUDGET_JOURNAL_VERSION })}\n`), 'budget.lock'); fsyncSync(lockFd); }; // openedTs is a WALL-clock claim (the stale-lock law compares it to boot time); the journal's domain clock rides beside it
   try {
     try { acquire(); }
     catch (first) {
