@@ -230,11 +230,9 @@ function usage() {
   cobra paper run                                  launch the complete PAPER system (profile config/paper-runtime.json)
   cobra paper inventory | snapshot                 machine-readable sensor inventory / sensor readiness snapshot
   cobra press status | tail [--source ID] [--limit N]   publisher headline observations (dark tier; read-only)
-  cobra infra status | tail [--source ID] [--kind K] [--limit N]   NOAA / RIPE RIS / Cloudflare Radar observations (dark tier)
-  cobra video status | tail [--query Q] [--limit N]     YouTube public video metadata observations (dark social-video tier)
   cobra learning <sub>                             LEARN-1: status | preflight | campaign-* | patterns | summary | kill | arm
-  cobra discovery status | tail | receipts [--source ID] [--limit N]   GDELT/Polymarket/Kalshi persistent read-only discovery
-  cobra state clear                                clear KILL/CAGE latches`);
+  cobra state clear                                clear KILL/CAGE latches
+  (PUBLISH-FIX-83 item 38: the infra / video / discovery commands this screen used to advertise have no handler; they are gone from the screen, not the code they never had)`);
   process.exitCode = 1;
 }
 

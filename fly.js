@@ -5,7 +5,7 @@
 // start — a bare `node fly.js` has no mode and composes nothing. The display still never decides, and the default is
 // NO TRADE.
 import http from 'node:http';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { dataDir, dataGeneration, purgeLegacyData, loadConfig } from './lib/config.js';
 import { runTape } from './tape/run.js';
@@ -181,9 +181,11 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // the Judge the published lines. Paper profile groups.judge.gateLearning -> JUDGE_GATE_LEARNING (+ the evidence minimums by name).
   let gateLesson = null; let gateStudyTimer = null; let gateStudyRunning = false;
   const gateLearningOn = process.env.JUDGE_GATE_LEARNING === 'true';
-  const gateStudyCfg = { minScored: Number(process.env.JUDGE_GATE_MIN_SCORED) || undefined, minCohort: Number(process.env.JUDGE_GATE_MIN_COHORT) || undefined, minForward: Number(process.env.JUDGE_GATE_MIN_FORWARD) || undefined, confidence: Number(process.env.JUDGE_GATE_CONFIDENCE) || undefined, costHurdlePct: Number(process.env.JUDGE_GATE_COST_HURDLE_PCT) || undefined /* PUBLISH-FIX-83 item 20: the round trip a newly admitted cohort must beat */ };
+  const gateStudyCfg = { minScored: Number(process.env.JUDGE_GATE_MIN_SCORED) || undefined, minCohort: Number(process.env.JUDGE_GATE_MIN_COHORT) || undefined, minForward: Number(process.env.JUDGE_GATE_MIN_FORWARD) || undefined, confidence: Number(process.env.JUDGE_GATE_CONFIDENCE) || undefined, costHurdlePct: Number(process.env.JUDGE_GATE_COST_HURDLE_PCT) || undefined /* PUBLISH-FIX-83 item 20: the round trip a newly admitted cohort must beat; unset -> derived from the running policy's taker fee below (item 38: one fee, one truth) */ };
   if (gateLearningOn) {
     try {
+      // PUBLISH-FIX-83 item 38: the cost hurdle is the RUNNING policy's round trip (taker both ways + 10 bps slippage both ways) unless set by hand
+      if (gateStudyCfg.costHurdlePct === undefined) { try { const pol = JSON.parse(readFileSync(process.env.JUDGE_POLICY, 'utf8')); const taker = Number(pol?.fees?.taker?.rate); if (Number.isFinite(taker) && taker > 0) gateStudyCfg.costHurdlePct = Math.round((taker * 100 * 2 + 0.2) * 1e4) / 1e4; } catch { /* the default (1.0) stands */ } }
       const { createGateLesson } = await import('./learning/gate-lesson.js'); const { spawnGateStudy } = await import('./tools/gate-study-process.js');
       gateLesson = createGateLesson({ dataDir: dataDir(), log: console.log }); gateLesson.refresh();
       const runStudy = () => { if (gateStudyRunning) return; gateStudyRunning = true; spawnGateStudy({ dataDir: dataDir(), cfg: gateStudyCfg, log: console.log }).then((r) => { gateStudyRunning = false; if (r.outcome === 'DONE') { for (const e of r.events ?? []) console.log(e); console.log(`GATE STUDY done: ${r.looks} looks, ${r.scored} scored decisions, ${r.tests} gate tests, ${r.units} lines under test`); } else console.log(`GATE STUDY ${r.outcome}${r.reason ? ` (${r.reason})` : ''}: the previous lesson stays in force`); try { gateLesson?.refresh(); } catch (err) { console.error(`GATE LEARNING refresh: ${String(err?.message ?? err).slice(0, 160)}`); } }).catch((err) => { gateStudyRunning = false; console.error(`GATE STUDY: ${String(err?.message ?? err).slice(0, 160)}`); }); };
