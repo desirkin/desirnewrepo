@@ -27,6 +27,16 @@ const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 // synchronous hash stalled the loop ~0.5-1 s per big file every pass; the digest is then handed to put() so it is hashed once
 const sha256Async = async (bytes) => (bytes.byteLength < 1 << 20 ? sha256(bytes) : Buffer.from(await globalThis.crypto.subtle.digest('SHA-256', bytes)).toString('hex'));
 export const FINAL_SYNC_BUDGET_MS = 15_000; // the final sync at stop gets its own deadline inside the shutdown budget
+// PUBLISH-FIX-84 (2026-09-20, own mistake from the 83 second pass): the manifest was rewritten after every 3 uploads in a pass and
+// after EVERY upload in the final sync — but Google Cloud Storage (Replit App Storage underneath) refuses more than ONE write per
+// second to the SAME object (429 rateLimitExceeded), so a pass with 30 changed files failed most of its manifest writes and logged
+// "degraded ... first manifest.json: OBJECT_PUT_FAILED" every two minutes all night. The objects themselves landed; the entries
+// the refused writes carried were re-uploaded next pass (churn, never loss). Now: a mid-pass manifest write happens only when the
+// gap since the last manifest write has elapsed (otherwise the next upload tries again); the end-of-pass write always happens,
+// waiting out the remainder of the gap first, and retries once after another gap. The gap is measured on the wall clock (it is
+// the provider's rate limit, not domain time) and the wait is injectable so tests never sleep.
+export const MANIFEST_MIN_WRITE_GAP_MS = 1_500;
+const failureReason = (error) => bounded(error?.name === 'ObjectStoreError' ? error.message : (error?.code ?? error?.message ?? error));
 const inside = (root, target) => { const rel = path.relative(root, target); return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel); };
 
 async function readExact(file, size) {
@@ -97,29 +107,29 @@ export const reuploadIntervalMs = (bytes, { perMiB = REUPLOAD_MS_PER_MIB, maxDef
 // run epoch (the boot clock). Every sync re-reads it first; a run that finds a NEWER epoch yields — it uploads nothing and writes
 // nothing, final sync included. The first sync of a boot claims ownership.
 export const OWNER_OBJECT_KEY = 'manifest-owner.json';
-export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED_SOURCES, maxFilesPerSource = DEFAULT_MAX_FILES_PER_SOURCE, log = () => {}, now = () => Date.now(), perMiB = REUPLOAD_MS_PER_MIB, maxDeferMs = REUPLOAD_MAX_DEFER_MS, runEpoch = null, finalBudgetMs = FINAL_SYNC_BUDGET_MS } = {}) {
+export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED_SOURCES, maxFilesPerSource = DEFAULT_MAX_FILES_PER_SOURCE, log = () => {}, now = () => Date.now(), perMiB = REUPLOAD_MS_PER_MIB, maxDeferMs = REUPLOAD_MAX_DEFER_MS, runEpoch = null, finalBudgetMs = FINAL_SYNC_BUDGET_MS, manifestGapMs = MANIFEST_MIN_WRITE_GAP_MS, wallClock = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   if (!store || store.state !== 'ACTIVE' || !store.adapter) throw new Error('createObjectUploader requires an ACTIVE object store');
   const adapter = store.adapter;
   const root = path.resolve(dataRoot);
   const epoch = Number.isSafeInteger(runEpoch) ? runEpoch : now(); const pid = process.pid;
   let manifest = null; // loaded lazily from the bucket on the first sync
   let running = false;
-  let lastSummary = null; let yielded = false; let claimed = false;
+  let lastSummary = null; let yielded = false; let claimed = false; let lastManifestWriteWallMs = 0; // wall clock of the last manifest put (any outcome)
   async function ownership() {
-    let bytes = null; try { bytes = await adapter.get(OWNER_OBJECT_KEY); } catch (error) { log(`OBJECT UPLOADER owner read failed (claiming): ${bounded(error?.code ?? error?.message ?? error)}`); }
+    let bytes = null; try { bytes = await adapter.get(OWNER_OBJECT_KEY); } catch (error) { log(`OBJECT UPLOADER owner read failed (claiming): ${failureReason(error)}`); }
     let owner = null; if (Buffer.isBuffer(bytes) && bytes.byteLength) { try { owner = JSON.parse(bytes.toString('utf8')); } catch { owner = null; } }
     const theirs = owner && Number.isSafeInteger(owner.runEpoch) ? owner.runEpoch : null;
     if (theirs !== null && theirs > epoch) { if (!yielded) { yielded = true; log(`OBJECT UPLOADER yields: a newer run (epoch ${new Date(theirs).toISOString()}, pid ${owner.pid ?? '?'}) owns the bucket; this run (epoch ${new Date(epoch).toISOString()}) uploads nothing more, final sync included`); } return false; }
     if (theirs === epoch && claimed) return true;
     try { await adapter.put(OWNER_OBJECT_KEY, Buffer.from(JSON.stringify({ version: 'serpent-object-owner-1', runEpoch: epoch, pid, claimedTs: now() }))); claimed = true; if (theirs !== null && theirs < epoch) log(`OBJECT UPLOADER claims the bucket from the previous run (epoch ${new Date(theirs).toISOString()})`); }
-    catch (error) { log(`OBJECT UPLOADER owner claim failed (proceeding unfenced this pass): ${bounded(error?.code ?? error?.message ?? error)}`); }
+    catch (error) { log(`OBJECT UPLOADER owner claim failed (proceeding unfenced this pass): ${failureReason(error)}`); }
     return true;
   }
 
   async function loadManifest() {
     if (manifest) return manifest;
     let bytes = null;
-    try { bytes = await adapter.get(MANIFEST_OBJECT_KEY); } catch (error) { log(`OBJECT UPLOADER manifest read failed (starting empty): ${bounded(error?.code ?? error?.message ?? error)}`); }
+    try { bytes = await adapter.get(MANIFEST_OBJECT_KEY); } catch (error) { log(`OBJECT UPLOADER manifest read failed (starting empty): ${failureReason(error)}`); }
     manifest = parseManifest(bytes) ?? emptyManifest();
     return manifest;
   }
@@ -133,7 +143,19 @@ export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED
       const nextEntries = { ...current.entries };
       const { files, skipped } = await scanSources({ dataRoot: root, sources, maxFilesPerSource });
       let uploaded = 0; let skippedUnchanged = 0; let deferred = 0; let uploadedBytes = 0; const failures = []; let sinceManifest = 0; const passStartedTs = now();
-      const flushManifest = async () => { const nextManifest = { version: OBJECT_MANIFEST_VERSION, updatedTs: now(), entries: { ...nextEntries } }; try { await adapter.put(MANIFEST_OBJECT_KEY, serializeManifest(nextManifest)); manifest = nextManifest; sinceManifest = 0; } catch (error) { failures.push({ relativePath: MANIFEST_OBJECT_KEY, reason: bounded(error?.code ?? error?.message ?? error) }); } };
+      const gapLeft = () => Math.max(0, lastManifestWriteWallMs + manifestGapMs - wallClock());
+      const putManifest = async () => { const nextManifest = { version: OBJECT_MANIFEST_VERSION, updatedTs: now(), entries: { ...nextEntries } }; lastManifestWriteWallMs = wallClock(); await adapter.put(MANIFEST_OBJECT_KEY, serializeManifest(nextManifest)); manifest = nextManifest; sinceManifest = 0; };
+      // force: the end-of-pass write — waits out the gap, retries once; otherwise a mid-pass write is skipped while the gap is open
+      const flushManifest = async ({ force = false } = {}) => {
+        if (!force && gapLeft() > 0) return;
+        if (force && gapLeft() > 0) await sleep(gapLeft());
+        try { await putManifest(); return; }
+        catch (error) {
+          if (!force) { failures.push({ relativePath: MANIFEST_OBJECT_KEY, reason: failureReason(error) }); return; }
+          await sleep(Math.max(gapLeft(), manifestGapMs));
+          try { await putManifest(); } catch (again) { failures.push({ relativePath: MANIFEST_OBJECT_KEY, reason: failureReason(again) }); }
+        }
+      };
       // a source scanned this pass keeps its manifest entries even when a file momentarily disappeared (durable, never pruned)
       for (const file of files) {
         if (Object.keys(nextEntries).length >= MAX_MANIFEST_ENTRIES && !nextEntries[file.relativePath]) { skipped.overCount.push(file.relativePath); continue; }
@@ -142,21 +164,22 @@ export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED
         if (prior && !final && now() - (Number(prior.uploadedTs) || 0) < reuploadIntervalMs(file.bytes, { perMiB, maxDeferMs })) { deferred += 1; continue; } // PUBLISH-FIX-34: a growing file waits its size-scaled turn
         if (final && now() - passStartedTs > finalBudgetMs) { deferred += 1; continue; } // the final sync stops at its deadline BEFORE reading the next file; what landed is already in the manifest
         let bytes;
-        try { bytes = await readExact(file.abs, file.bytes); } catch (error) { failures.push({ relativePath: file.relativePath, reason: bounded(error?.code ?? error?.message ?? error) }); continue; }
+        try { bytes = await readExact(file.abs, file.bytes); } catch (error) { failures.push({ relativePath: file.relativePath, reason: failureReason(error) }); continue; }
         if (bytes === null) continue; // changed mid-read; next pass catches it
         const digest = await sha256Async(bytes);
         if (prior && prior.sha256 === digest) { nextEntries[file.relativePath] = { ...prior, bytes: file.bytes, mtimeMs: file.mtimeMs }; skippedUnchanged += 1; continue; }
         const key = objectKeyForPath(file.relativePath);
         try { await adapter.put(key, bytes, { sha256: digest }); }
-        catch (error) { failures.push({ relativePath: file.relativePath, reason: bounded(error?.code ?? error?.message ?? error) }); continue; }
+        catch (error) { failures.push({ relativePath: file.relativePath, reason: failureReason(error) }); continue; }
         nextEntries[file.relativePath] = { key, bytes: file.bytes, sha256: digest, mtimeMs: file.mtimeMs, uploadedTs: now() };
         uploaded += 1; uploadedBytes += file.bytes; sinceManifest += 1;
         // PUBLISH-FIX-83 second pass: the manifest follows the objects it names — after EVERY upload in the final sync and every
         // few in a regular pass — so a process cut off mid-pass never leaves objects newer than the manifest that describes them
-        // (the restore refused such a file as DURABLE_OBJECT_DIGEST_MISMATCH)
+        // (the restore refused such a file as DURABLE_OBJECT_DIGEST_MISMATCH). PUBLISH-FIX-84: only once the provider's per-object
+        // write gap has elapsed; the end-of-pass write below always lands.
         if (final || sinceManifest >= 3) { await flushManifest(); }
       }
-      if (uploaded > 0 && sinceManifest > 0) await flushManifest();
+      if (uploaded > 0 && sinceManifest > 0) await flushManifest({ force: true });
       else if (uploaded === 0) manifest.entries = nextEntries;
       lastSummary = Object.freeze({
         version: OBJECT_UPLOADER_VERSION, tsMs: now(), state: failures.length ? 'DEGRADED' : 'OK',

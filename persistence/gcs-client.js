@@ -23,6 +23,17 @@ const MAX_RESPONSE_BYTES = 300 * 1024 * 1024;
 const TOKEN_SKEW_MS = 60_000; // refresh a minute before expiry; never ride a token to its edge
 
 const bounded = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').slice(0, 180);
+// PUBLISH-FIX-84 (2026-09-20): a refused put carries the provider's own reason (GCS answers a JSON error body: `rateLimitExceeded`
+// for more than one write per second to the SAME object, `forbidden`, ...). The deployment log showed only OBJECT_PUT_FAILED for a
+// whole night — the status and the reason were hidden two wrappers down. Bounded, never the body verbatim; a body that is not
+// JSON, or a response double without text(), contributes nothing.
+async function providerReason(res) {
+  if (typeof res?.text !== 'function') return '';
+  let body = ''; try { body = String(await res.text()).slice(0, 4096); } catch { return ''; }
+  let reason = null;
+  try { const json = JSON.parse(body); reason = json?.error?.errors?.[0]?.reason ?? json?.error?.status ?? json?.error?.message ?? null; } catch { reason = null; }
+  return reason ? ` (${bounded(reason).slice(0, 60)})` : '';
+}
 const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -70,7 +81,7 @@ function createStorageMethods({ provider, bucket, fetchImpl, accessToken }) {
     const headers = { ...(await authHeader()), 'content-type': contentType }; let res;
     try { res = await fetchImpl(url, { method: 'POST', headers, body: bytes }); }
     catch (e) { throw new GcsClientError(E('PUT_UNREACHABLE'), e?.code ?? e?.message ?? 'put unreachable'); }
-    if (!res.ok) throw new GcsClientError(E('PUT_FAILED'), `put returned ${res.status}`, res.status);
+    if (!res.ok) throw new GcsClientError(E('PUT_FAILED'), `put returned ${res.status}${await providerReason(res)}`, res.status);
     return { key: name, bytes: bytes.byteLength, sha256: sha256(bytes) };
   }
   async function getObject(name) {

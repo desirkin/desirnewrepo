@@ -39,6 +39,10 @@ const PREFIX_RE = /^[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9._-]+)*$/;
 const bounded = (value) => String(value ?? '').replace(/[\r\n]+/g, ' ').slice(0, 180);
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
+// PUBLISH-FIX-84: a client error's message already reads `<CODE>: put returned 429 (rateLimitExceeded)` — carrying only its
+// code hid the status and the provider's reason from every log line above it.
+const clientReason = (error) => (error?.name === 'GcsClientError' ? error.message : (error?.code ?? error?.message ?? error));
+
 export class ObjectStoreError extends Error {
   constructor(code, message) {
     super(`${code}: ${bounded(message)}`);
@@ -208,10 +212,10 @@ function createGcsBackend({ client, prefix, log }) {
       if (!Buffer.isBuffer(bytes)) throw new ObjectStoreError('OBJECT_PAYLOAD_INVALID', 'put requires a Buffer');
       if (bytes.byteLength > MAX_OBJECT_BYTES) throw new ObjectStoreError('OBJECT_TOO_LARGE', `${bytes.byteLength} bytes exceeds the ${MAX_OBJECT_BYTES} object cap`);
       try { await client.putObject(fullName(key), bytes, { contentType: contentType ?? 'application/octet-stream' }); return { key, bytes: bytes.byteLength, sha256: known ?? sha256(bytes) }; }
-      catch (error) { if (error instanceof ObjectStoreError) throw error; throw new ObjectStoreError('OBJECT_PUT_FAILED', error?.code ?? error?.message ?? error); }
+      catch (error) { if (error instanceof ObjectStoreError) throw error; throw new ObjectStoreError('OBJECT_PUT_FAILED', clientReason(error)); }
     },
     async get(key) {
-      let bytes; try { bytes = await client.getObject(fullName(key)); } catch (error) { throw new ObjectStoreError('OBJECT_GET_FAILED', error?.code ?? error?.message ?? error); }
+      let bytes; try { bytes = await client.getObject(fullName(key)); } catch (error) { throw new ObjectStoreError('OBJECT_GET_FAILED', clientReason(error)); }
       if (bytes === null || bytes === undefined) return null;
       if (!Buffer.isBuffer(bytes)) throw new ObjectStoreError('OBJECT_GET_FAILED', 'client returned a non-buffer');
       if (bytes.byteLength > MAX_OBJECT_BYTES) throw new ObjectStoreError('OBJECT_TOO_LARGE', `${bytes.byteLength} bytes exceeds the ${MAX_OBJECT_BYTES} object cap`);
@@ -219,12 +223,12 @@ function createGcsBackend({ client, prefix, log }) {
     },
     async head(key) {
       try { const meta = await client.headObject(fullName(key)); return meta ? { key, bytes: Number(meta.bytes) || 0 } : null; }
-      catch (error) { throw new ObjectStoreError('OBJECT_HEAD_FAILED', error?.code ?? error?.message ?? error); }
+      catch (error) { throw new ObjectStoreError('OBJECT_HEAD_FAILED', clientReason(error)); }
     },
     async list(listPrefix = '') {
       if (listPrefix) { const e = objectKeyError(`${listPrefix.replace(/\/$/, '')}/probe`); if (e) throw new ObjectStoreError('OBJECT_PREFIX_INVALID', e); }
       const full = listPrefix ? `${keyPrefix}${listPrefix.replace(/\/$/, '')}` : keyPrefix;
-      let items; try { items = await client.listObjects(full); } catch (error) { throw new ObjectStoreError('OBJECT_LIST_FAILED', error?.code ?? error?.message ?? error); }
+      let items; try { items = await client.listObjects(full); } catch (error) { throw new ObjectStoreError('OBJECT_LIST_FAILED', clientReason(error)); }
       const out = [];
       for (const item of items ?? []) {
         const name = typeof item?.key === 'string' ? item.key : null; if (name === null) continue;
@@ -237,7 +241,7 @@ function createGcsBackend({ client, prefix, log }) {
     },
     async delete(key) {
       try { return (await client.deleteObject(fullName(key))) === true; }
-      catch (error) { throw new ObjectStoreError('OBJECT_DELETE_FAILED', error?.code ?? error?.message ?? error); }
+      catch (error) { throw new ObjectStoreError('OBJECT_DELETE_FAILED', clientReason(error)); }
     },
     describe: () => ({ provider: label, bucket: client.bucket ?? null, prefix: prefix ?? null }),
     log,
@@ -264,8 +268,8 @@ export async function openObjectStore({ env = process.env, log = () => {}, gcsCl
         const { createGcsObjectClient } = await import('./gcs-client.js');
         client = createGcsObjectClient({ serviceAccount: env[OBJECT_STORE_CREDENTIAL_NAMES.GCS[0]], bucket: config.bucket, fetchImpl: globalThis.fetch, log });
       } catch (error) {
-        log(`OBJECT STORE misconfigured: GCS client could not be built (${bounded(error?.code ?? error?.message ?? error)})`);
-        return Object.freeze({ ...config, state: 'MISCONFIGURED', adapter: null, reason: `GCS client could not be built: ${bounded(error?.code ?? error?.message ?? error)}`, describe: () => ({ provider: 'GCS', state: 'MISCONFIGURED' }) });
+        log(`OBJECT STORE misconfigured: GCS client could not be built (${bounded(clientReason(error))})`);
+        return Object.freeze({ ...config, state: 'MISCONFIGURED', adapter: null, reason: `GCS client could not be built: ${bounded(clientReason(error))}`, describe: () => ({ provider: 'GCS', state: 'MISCONFIGURED' }) });
       }
     }
     const adapter = createGcsBackend({ client, prefix: config.prefix, log });
@@ -283,8 +287,8 @@ export async function openObjectStore({ env = process.env, log = () => {}, gcsCl
       } else if (!bucket) bucket = client.bucket;
     } catch (error) {
       // a sidecar that is unreachable / refuses is a MISCONFIGURED gate (dark uploader + restore), never a boot crash loop
-      log(`OBJECT STORE misconfigured: REPLIT client could not be built (${bounded(error?.code ?? error?.message ?? error)})`);
-      return Object.freeze({ ...config, state: 'MISCONFIGURED', adapter: null, reason: `REPLIT client could not be built: ${bounded(error?.code ?? error?.message ?? error)}`, describe: () => ({ provider: 'REPLIT', state: 'MISCONFIGURED' }) });
+      log(`OBJECT STORE misconfigured: REPLIT client could not be built (${bounded(clientReason(error))})`);
+      return Object.freeze({ ...config, state: 'MISCONFIGURED', adapter: null, reason: `REPLIT client could not be built: ${bounded(clientReason(error))}`, describe: () => ({ provider: 'REPLIT', state: 'MISCONFIGURED' }) });
     }
     const adapter = createGcsBackend({ client, prefix: config.prefix, log });
     log(`OBJECT STORE active: REPLIT bucket ${bucket}${config.prefix ? ` prefix ${config.prefix}` : ''}`);
@@ -293,8 +297,8 @@ export async function openObjectStore({ env = process.env, log = () => {}, gcsCl
   try {
     await mkdir(config.prefix ? path.join(config.dir, ...config.prefix.split('/')) : config.dir, { recursive: true });
   } catch (error) {
-    log(`OBJECT STORE misconfigured: filesystem root not writable (${bounded(error?.code ?? error?.message ?? error)})`);
-    return Object.freeze({ ...config, state: 'MISCONFIGURED', adapter: null, reason: `filesystem root not writable: ${bounded(error?.code ?? error?.message ?? error)}`, describe: () => ({ provider: 'FILESYSTEM', state: 'MISCONFIGURED' }) });
+    log(`OBJECT STORE misconfigured: filesystem root not writable (${bounded(clientReason(error))})`);
+    return Object.freeze({ ...config, state: 'MISCONFIGURED', adapter: null, reason: `filesystem root not writable: ${bounded(clientReason(error))}`, describe: () => ({ provider: 'FILESYSTEM', state: 'MISCONFIGURED' }) });
   }
   const adapter = createFilesystemBackend({ dir: config.dir, prefix: config.prefix, log });
   log(`OBJECT STORE active: FILESYSTEM root ${adapter.describe().root}`);
