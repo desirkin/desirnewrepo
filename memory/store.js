@@ -15,7 +15,7 @@
 // positive would silently lose evidence, which is unacceptable.
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, openSync, readSync, closeSync, renameSync, mkdirSync } from 'node:fs';
 import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { dataDir } from '../lib/config.js';
 import { MEMORY_SCHEMA_VERSION, MEMORY_VERSION } from './schema.js';
@@ -55,6 +55,11 @@ const ATTENTION_FUTURE_GUARD_MS = 60_000;
 const TAIL_SCAN_BYTES = 8 * 1024 * 1024; // queries beyond the cache scan at most this much file tail
 const MANIFEST_EVERY = 25; // manifest refresh cadence (also on flush/close)
 const RECOVERY_CHUNK_BYTES = 1 << 20; // 1MB streaming-recovery chunks
+// PUBLISH-FIX-83 review finding: events.jsonl and the id index grew without bound (the documented gap), and every boot
+// re-validated the whole file synchronously. The live segment now ROTATES at this size: the full file is moved (never
+// deleted) to memory/archive/events.<ts>.jsonl, a fresh segment starts, and the id index covers the live segment. Boot
+// recovery scans the live segment only. Lifetime counts stay cumulative through the manifest.
+export const MEMORY_ROTATE_BYTES = 128 * 1024 * 1024;
 
 const clamp = (limit) => Math.max(1, Math.min(Number.isFinite(limit) ? limit : DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT));
 // compact persisted-content digest (MEMORY-0C §3): sha1 of the exact
@@ -91,6 +96,9 @@ export class MemoryStore {
     this.unknownCreation = false; // records exist but their true creation time is unknowable
     this.sinceManifest = 0;
     this.status = 'HEALTHY';
+    this.liveBytes = 0; // bytes in the live segment (rotation law)
+    this.rotations = 0; // lifetime (manifest)
+    this.rotateBytes = MEMORY_ROTATE_BYTES;
     this.#loadManifestIdentity();
     this.#recover(recoveryChunkBytes);
   }
@@ -107,6 +115,7 @@ export class MemoryStore {
       this.lastWriteTs = m.lastWriteTs ?? null;
       this.duplicateSuppressedCount = m.duplicateSuppressedCount ?? 0;
       this.invalidRejectedCount = m.invalidRejectedCount ?? 0;
+      this.rotations = m.rotations ?? 0;
       this.manifestRecovered = true;
     } catch {
       // fail honestly: the manifest is unreadable; evidence still recovers,
@@ -171,10 +180,10 @@ export class MemoryStore {
     if (!existsSync(this.eventsFile)) return;
     const fd = openSync(this.eventsFile, 'r');
     let lineNo = 0;
+    let pos = 0;
     try {
       const buf = Buffer.alloc(chunkBytes);
       let partial = Buffer.alloc(0);
-      let pos = 0;
       for (;;) {
         const bytesRead = readSync(fd, buf, 0, chunkBytes, pos);
         if (bytesRead <= 0) break;
@@ -196,6 +205,7 @@ export class MemoryStore {
     } finally {
       closeSync(fd);
     }
+    this.liveBytes = pos;
     if (this.recordCount && this.createdTs === null) this.unknownCreation = true; // never invent a creation time
     if (this.corruptLines || this.invalidRecovered) {
       this.log(
@@ -298,7 +308,9 @@ export class MemoryStore {
       return { accepted: false, reason: 'duplicate' };
     }
     try {
+      if (this.liveBytes >= this.rotateBytes) this.#rotate();
       appendJsonl(this.eventsFile, env);
+      this.liveBytes += Buffer.byteLength(JSON.stringify(env)) + 1;
     } catch (err) {
       // FAIL DARK: memory failure never crashes collection or fakes success
       this.persistenceErrors++;
@@ -311,6 +323,21 @@ export class MemoryStore {
     this.#index(env, lineDigest(JSON.stringify(env)));
     if (++this.sinceManifest >= MANIFEST_EVERY) this.flush();
     return { accepted: true };
+  }
+
+  // the live segment is moved aside whole (git-mv discipline: nothing is ever deleted); the id index restarts with the segment
+  #rotate() {
+    const archiveDir = path.join(this.dir, 'archive');
+    mkdirSync(archiveDir, { recursive: true });
+    const stamp = new Date(this.now()).toISOString().replace(/[:.]/g, '-');
+    let target = path.join(archiveDir, `events.${stamp}.jsonl`);
+    for (let k = 2; existsSync(target); k += 1) target = path.join(archiveDir, `events.${stamp}.${k}.jsonl`); // never onto an existing archive
+    renameSync(this.eventsFile, target);
+    this.rotations += 1;
+    this.ids = new Map();
+    this.liveBytes = 0;
+    this.log(`MEMORY rotated: live segment (${this.ids.size} records indexed) archived as ${path.basename(target)}; index restarts with the new segment`);
+    this.flush();
   }
 
   flush() {
@@ -326,8 +353,8 @@ export class MemoryStore {
 
   manifest() {
     const gaps = [
-      'retention/compaction is a later operational ticket — nothing is auto-deleted in MEMORY-0',
-      'the in-memory dedup/integrity index (id + compact persisted-content digest) grows with the store until the retention/compaction ticket (no probabilistic structures: a false positive would silently lose evidence)',
+      'retention/compaction is a later operational ticket — nothing is auto-deleted in MEMORY-0; the live segment rotates whole into memory/archive/ at MEMORY_ROTATE_BYTES (PUBLISH-FIX-83)',
+      'the in-memory dedup/integrity index (id + compact persisted-content digest) covers the LIVE segment; an id archived by a rotation is not deduplicated against (no probabilistic structures: a false positive would silently lose evidence)',
       'tape MARKET_SNAPSHOT envelopes are sampled (bounded), not every raw book tick — high-frequency microstructure storage is a later dedicated design',
     ];
     if (this.unknownCreation) gaps.push('createdTs unknowable: records predate the oldest surviving manifest; a creation time is never invented');
@@ -347,6 +374,8 @@ export class MemoryStore {
       corruptLinesQuarantined: this.corruptLines,
       invalidRecoveredQuarantined: this.invalidRecovered,
       idContentConflictsQuarantined: this.idConflicts,
+      rotations: this.rotations,
+      liveSegmentBytes: this.liveBytes,
       knownGaps: gaps,
     };
   }
