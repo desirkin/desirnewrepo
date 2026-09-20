@@ -59,13 +59,13 @@ export function createIncrementalIndex({ dir, maxSegments, maxBytes, log, retent
     try { names = readdirSync(dir).map((n) => n.match(SEGMENT_RE)).filter(Boolean).map((m) => ({ name: m[0], index: Number(m[1]) })).sort((a, b) => b.index - a.index).slice(0, maxSegments); }
     catch (error) { log(`broad-kraken series: segment list failed: ${bounded(error?.message ?? error)}`); return out; }
     const inWindow = new Set(names.map((n) => n.name));
-    for (const name of [...segments.keys()]) if (!inWindow.has(name)) segments.delete(name); // a rolled segment: its bars stay until retention evicts them
+    for (const name of [...segments.keys()]) if (!inWindow.has(name)) { bytesTotal -= segments.get(name)?.counted ?? 0; segments.delete(name); } // a rolled segment: its bars stay until retention evicts them; PUBLISH-FIX-84: its bytes leave the budget with it (they never did — after ~1-2 weeks of rotations the budget was spent on segments long gone and every new segment but one per rotation was skipped: the watch read "stale" for every coin, outcomes OUTCOME_UNAVAILABLE, no log line)
     let changed = false;
     for (const { name } of [...names].reverse()) {
       const file = path.join(dir, name);
       let size; try { size = statSync(file).size; } catch { continue; }
       let seg = segments.get(name);
-      if (!seg) { if (bytesTotal + size > maxBytes && segments.size) continue; seg = { offset: 0, rest: '' }; segments.set(name, seg); stats.fullReads += 1; bytesTotal += size; } else if (size > seg.offset) { stats.deltaReads += 1; } else continue;
+      if (!seg) { if (bytesTotal + size > maxBytes && segments.size) { stats.skippedOverBudget = (stats.skippedOverBudget ?? 0) + 1; if ((stats.skippedOverBudget % 50) === 1) log(`broad-kraken series: segment ${name} skipped — index budget ${Math.round(bytesTotal / 1048576)} of ${Math.round(maxBytes / 1048576)} MB in use across ${segments.size} segment(s)`); continue; } seg = { offset: 0, rest: '', counted: size }; segments.set(name, seg); stats.fullReads += 1; bytesTotal += size; } else if (size > seg.offset) { stats.deltaReads += 1; } else continue;
       try { if (readDelta(file, seg, size) > 0) changed = true; } catch (error) { log(`broad-kraken series: read failed ${name}: ${bounded(error?.message ?? error)}`); }
     }
     if (changed || dirty) {

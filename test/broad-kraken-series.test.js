@@ -96,3 +96,23 @@ test('BKS-6 (PUBLISH-FIX-83 review). a hole of up to five minutes is forward-fil
   assert.equal(s.candles.every((c) => c.length === 6), true, 'six numbers, the shape labels.js validates');
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('BKS-7 (PUBLISH-FIX-84). the index byte budget is returned when a segment rotates out of the window: after many rotations new segments are still read (before: the budget was spent on segments long gone and every new segment but one per rotation was skipped — the watch read "stale" for every coin, no log line)', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'serpent-bks7-')); const seg = path.join(dir, 'broad-kraken'); mkdirSync(seg, { recursive: true });
+  const T = 1_800_000_000; const rec = (coin, openSec, close) => JSON.stringify({ recordType: 'OHLC', quality: 'CONSERVATIVE_CLOSED', market: { canonicalCoin: coin }, periodStartTs: openSec * 1000, periodEndTs: openSec * 1000 + 60_000, receivedTs: openSec * 1000 + 61_000, payload: { open: close, high: close, low: close, close, volume: 1, trades: 1 } });
+  try {
+    const { createBroadKrakenSeriesSource } = await import('../learning/broad-kraken-series.js');
+    // each segment is ~one candle (~250 bytes); the budget holds about four segments; the window keeps three
+    const line = rec('BTC', T, 100); const segBytes = line.length + 1; let clock = T;
+    const src = createBroadKrakenSeriesSource({ dataDir: dir, maxSegments: 3, maxBytes: segBytes * 4 + 10, ttlMs: 0, now: () => clock * 1000 });
+    let seen = 0;
+    for (let i = 1; i <= 30; i += 1) {
+      const openSec = T + i * 60; writeFileSync(path.join(seg, `events-${String(i).padStart(6, '0')}.jsonl`), `${rec('BTC', openSec, 100 + i)}\n`);
+      if (i > 3) rmSync(path.join(seg, `events-${String(i - 3).padStart(6, '0')}.jsonl`)); // the collector's rotation: only the newest three stay
+      clock = openSec + 120; const s = src('BTC'); const last = s?.candles?.[s.candles.length - 1];
+      if (last && last[0] === openSec) seen += 1;
+    }
+    assert.equal(seen, 30, `every new segment was read as it arrived (${seen} of 30) — the budget follows the window`);
+    assert.equal(src.stats?.().skippedOverBudget ?? 0, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
