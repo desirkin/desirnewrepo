@@ -117,7 +117,7 @@ function createFilesystemBackend({ dir, prefix, log }) {
 
   return Object.freeze({
     provider: 'FILESYSTEM',
-    async put(key, bytes, { contentType = null } = {}) {
+    async put(key, bytes, { contentType = null, sha256: known = null } = {}) {
       void contentType; // the filesystem backend stores raw bytes; content type rides the manifest, not the object
       if (!Buffer.isBuffer(bytes)) throw new ObjectStoreError('OBJECT_PAYLOAD_INVALID', 'put requires a Buffer');
       if (bytes.byteLength > MAX_OBJECT_BYTES) throw new ObjectStoreError('OBJECT_TOO_LARGE', `${bytes.byteLength} bytes exceeds the ${MAX_OBJECT_BYTES} object cap`);
@@ -132,7 +132,7 @@ function createFilesystemBackend({ dir, prefix, log }) {
       } finally { await handle?.close(); }
       try { await rename(tmp, file); }
       catch (error) { try { await unlink(tmp); } catch { /* best effort */ } throw new ObjectStoreError('OBJECT_PUT_FAILED', error?.code ?? error?.message ?? error); }
-      return { key, bytes: bytes.byteLength, sha256: sha256(bytes) };
+      return { key, bytes: bytes.byteLength, sha256: known ?? sha256(bytes) };
     },
     async get(key) {
       const file = fileFor(key);
@@ -204,10 +204,10 @@ function createGcsBackend({ client, prefix, log }) {
   const label = client.provider === 'REPLIT' ? 'REPLIT' : 'GCS'; // same GCS JSON API; the label tracks the auth mode
   return Object.freeze({
     provider: label,
-    async put(key, bytes, { contentType = null } = {}) {
+    async put(key, bytes, { contentType = null, sha256: known = null } = {}) { // PUBLISH-FIX-83 second pass: a caller that already hashed the bytes passes the digest (one pass, not two, over a 150 MB file)
       if (!Buffer.isBuffer(bytes)) throw new ObjectStoreError('OBJECT_PAYLOAD_INVALID', 'put requires a Buffer');
       if (bytes.byteLength > MAX_OBJECT_BYTES) throw new ObjectStoreError('OBJECT_TOO_LARGE', `${bytes.byteLength} bytes exceeds the ${MAX_OBJECT_BYTES} object cap`);
-      try { await client.putObject(fullName(key), bytes, { contentType: contentType ?? 'application/octet-stream' }); return { key, bytes: bytes.byteLength, sha256: sha256(bytes) }; }
+      try { await client.putObject(fullName(key), bytes, { contentType: contentType ?? 'application/octet-stream' }); return { key, bytes: bytes.byteLength, sha256: known ?? sha256(bytes) }; }
       catch (error) { if (error instanceof ObjectStoreError) throw error; throw new ObjectStoreError('OBJECT_PUT_FAILED', error?.code ?? error?.message ?? error); }
     },
     async get(key) {

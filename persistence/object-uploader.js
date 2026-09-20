@@ -23,6 +23,10 @@ export const DEFAULT_BACKED_SOURCES = Object.freeze(['tape', 'broad-kraken', 'ma
 
 const bounded = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').slice(0, 180);
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+// PUBLISH-FIX-83 second pass: a 100-150 MB file is hashed OFF the main thread (WebCrypto runs in the thread pool) — the
+// synchronous hash stalled the loop ~0.5-1 s per big file every pass; the digest is then handed to put() so it is hashed once
+const sha256Async = async (bytes) => (bytes.byteLength < 1 << 20 ? sha256(bytes) : Buffer.from(await globalThis.crypto.subtle.digest('SHA-256', bytes)).toString('hex'));
+export const FINAL_SYNC_BUDGET_MS = 15_000; // the final sync at stop gets its own deadline inside the shutdown budget
 const inside = (root, target) => { const rel = path.relative(root, target); return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel); };
 
 async function readExact(file, size) {
@@ -93,7 +97,7 @@ export const reuploadIntervalMs = (bytes, { perMiB = REUPLOAD_MS_PER_MIB, maxDef
 // run epoch (the boot clock). Every sync re-reads it first; a run that finds a NEWER epoch yields — it uploads nothing and writes
 // nothing, final sync included. The first sync of a boot claims ownership.
 export const OWNER_OBJECT_KEY = 'manifest-owner.json';
-export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED_SOURCES, maxFilesPerSource = DEFAULT_MAX_FILES_PER_SOURCE, log = () => {}, now = () => Date.now(), perMiB = REUPLOAD_MS_PER_MIB, maxDeferMs = REUPLOAD_MAX_DEFER_MS, runEpoch = null } = {}) {
+export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED_SOURCES, maxFilesPerSource = DEFAULT_MAX_FILES_PER_SOURCE, log = () => {}, now = () => Date.now(), perMiB = REUPLOAD_MS_PER_MIB, maxDeferMs = REUPLOAD_MAX_DEFER_MS, runEpoch = null, finalBudgetMs = FINAL_SYNC_BUDGET_MS } = {}) {
   if (!store || store.state !== 'ACTIVE' || !store.adapter) throw new Error('createObjectUploader requires an ACTIVE object store');
   const adapter = store.adapter;
   const root = path.resolve(dataRoot);
@@ -128,7 +132,8 @@ export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED
       const current = await loadManifest();
       const nextEntries = { ...current.entries };
       const { files, skipped } = await scanSources({ dataRoot: root, sources, maxFilesPerSource });
-      let uploaded = 0; let skippedUnchanged = 0; let deferred = 0; let uploadedBytes = 0; const failures = [];
+      let uploaded = 0; let skippedUnchanged = 0; let deferred = 0; let uploadedBytes = 0; const failures = []; let sinceManifest = 0; const passStartedTs = now();
+      const flushManifest = async () => { const nextManifest = { version: OBJECT_MANIFEST_VERSION, updatedTs: now(), entries: { ...nextEntries } }; try { await adapter.put(MANIFEST_OBJECT_KEY, serializeManifest(nextManifest)); manifest = nextManifest; sinceManifest = 0; } catch (error) { failures.push({ relativePath: MANIFEST_OBJECT_KEY, reason: bounded(error?.code ?? error?.message ?? error) }); } };
       // a source scanned this pass keeps its manifest entries even when a file momentarily disappeared (durable, never pruned)
       for (const file of files) {
         if (Object.keys(nextEntries).length >= MAX_MANIFEST_ENTRIES && !nextEntries[file.relativePath]) { skipped.overCount.push(file.relativePath); continue; }
@@ -138,20 +143,21 @@ export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED
         let bytes;
         try { bytes = await readExact(file.abs, file.bytes); } catch (error) { failures.push({ relativePath: file.relativePath, reason: bounded(error?.code ?? error?.message ?? error) }); continue; }
         if (bytes === null) continue; // changed mid-read; next pass catches it
-        const digest = sha256(bytes);
+        if (final && now() - passStartedTs > finalBudgetMs) { deferred += 1; continue; } // the final sync stops uploading at its deadline; what landed is already in the manifest
+        const digest = await sha256Async(bytes);
         if (prior && prior.sha256 === digest) { nextEntries[file.relativePath] = { ...prior, bytes: file.bytes, mtimeMs: file.mtimeMs }; skippedUnchanged += 1; continue; }
         const key = objectKeyForPath(file.relativePath);
-        try { const put = await adapter.put(key, bytes); if (put.sha256 !== digest) throw new Error('object digest mismatch after put'); }
+        try { const put = await adapter.put(key, bytes, { sha256: digest }); if (put.sha256 !== digest) throw new Error('object digest mismatch after put'); }
         catch (error) { failures.push({ relativePath: file.relativePath, reason: bounded(error?.code ?? error?.message ?? error) }); continue; }
         nextEntries[file.relativePath] = { key, bytes: file.bytes, sha256: digest, mtimeMs: file.mtimeMs, uploadedTs: now() };
-        uploaded += 1; uploadedBytes += file.bytes;
+        uploaded += 1; uploadedBytes += file.bytes; sinceManifest += 1;
+        // PUBLISH-FIX-83 second pass: the manifest follows the objects it names — after EVERY upload in the final sync and every
+        // few in a regular pass — so a process cut off mid-pass never leaves objects newer than the manifest that describes them
+        // (the restore refused such a file as DURABLE_OBJECT_DIGEST_MISMATCH)
+        if (final || sinceManifest >= 3) { await flushManifest(); }
       }
-      const nextManifest = { version: OBJECT_MANIFEST_VERSION, updatedTs: now(), entries: nextEntries };
-      // write the manifest only when something changed, so a quiet cycle costs one scan and no writes
-      if (uploaded > 0) {
-        try { await adapter.put(MANIFEST_OBJECT_KEY, serializeManifest(nextManifest)); manifest = nextManifest; }
-        catch (error) { failures.push({ relativePath: MANIFEST_OBJECT_KEY, reason: bounded(error?.code ?? error?.message ?? error) }); }
-      } else { manifest.entries = nextEntries; }
+      if (uploaded > 0 && sinceManifest > 0) await flushManifest();
+      else if (uploaded === 0) manifest.entries = nextEntries;
       lastSummary = Object.freeze({
         version: OBJECT_UPLOADER_VERSION, tsMs: now(), state: failures.length ? 'DEGRADED' : 'OK',
         scanned: files.length, uploaded, uploadedBytes, skippedUnchanged, deferred, final,
