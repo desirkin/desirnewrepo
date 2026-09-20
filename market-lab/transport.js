@@ -256,14 +256,25 @@ export function createWsClient({ providerId, endpointId, WebSocketImpl = globalT
   let messagedSinceOpen = false;
   const counters = { messages: 0, bytes: 0, dropped: 0, invalidJson: 0, reconnects: 0, lastMessageTs: null, openedTs: null };
   const epochId = () => `${providerId}:${endpoint()}:${epoch}`; const endpoint = () => endpointId;
-  const armIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => { if (ws && state === 'OPEN') { if (messagedSinceOpen) log(`ws idle ${idleTimeoutMs} ms — reconnecting`); try { ws.close(); } catch { /* best effort */ } } }, idleTimeoutMs); };
+  // PUBLISH-FIX-84 (reviewer finding): the idle watchdog used to call ws.close() and wait for onclose — which fires only when the peer
+  // completes the close handshake or TCP tears down. On a half-open link that is never (CLOSING forever, state still "OPEN", no
+  // reconnect for ~12 minutes of kernel keep-alive). Now the socket is detached first, closed best-effort, and the reconnect is
+  // scheduled here; a late close from the old socket is ignored.
+  const armIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => { if (ws && state === 'OPEN') { if (messagedSinceOpen) log(`ws idle ${idleTimeoutMs} ms — reconnecting`); /* B-11: the pre-subscribe quiet window is not logged */ dropSocket('IDLE'); } }, idleTimeoutMs); };
+  function dropSocket(reason) {
+    if (state === 'STOPPING' || state === 'STOPPED') return false;
+    const old = ws; if (!old) return false; ws = null; old.onclose = null; old.onmessage = null; old.onerror = () => {};
+    try { old.close(); } catch { /* best effort */ }
+    try { onClose({ epochId: epochId(), reason }); } catch { /* contained */ }
+    state = 'BACKOFF'; counters.reconnects += 1; counters.forcedDrops = (counters.forcedDrops ?? 0) + 1; schedule(); return true;
+  }
   function connect() {
     if (state === 'STOPPING' || state === 'STOPPED' && epoch > 0 && !reconnectTimer) return;
     state = 'CONNECTING'; epoch += 1;
     let sock;
     try { sock = new WebSocketImpl(target); } catch (err) { state = 'BACKOFF'; schedule(); return; }
     ws = sock;
-    sock.onopen = () => { state = 'OPEN'; attempt = 0; messagedSinceOpen = false; counters.openedTs = clock(); armIdle(); try { onOpen({ epochId: epochId(), send }); } catch (err) { log(`ws onOpen failed: ${String(err?.message).slice(0, 120)}`); } };
+    sock.onopen = () => { if (state === 'STOPPING' || state === 'STOPPED') return; /* PUBLISH-FIX-84: a socket that opens after stop() never revives the client */ state = 'OPEN'; attempt = 0; messagedSinceOpen = false; counters.openedTs = clock(); armIdle(); try { onOpen({ epochId: epochId(), send }); } catch (err) { log(`ws onOpen failed: ${String(err?.message).slice(0, 120)}`); } };
     sock.onmessage = (ev) => {
       const receivedTs = clock(); counters.lastMessageTs = receivedTs; messagedSinceOpen = true; armIdle();
       const raw = typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data);
@@ -284,6 +295,8 @@ export function createWsClient({ providerId, endpointId, WebSocketImpl = globalT
     // stop never hangs: a peer that ignores the close handshake is cut after a bounded grace period
     stop: ({ graceMs = 2000 } = {}) => new Promise((resolve) => { if (state === 'STOPPED') return resolve(); clearTimeout(reconnectTimer); reconnectTimer = null; clearTimeout(idleTimer); if (!ws) { state = 'STOPPED'; return resolve(); } state = 'STOPPING'; const sock = ws; let done = false; const finish = () => { if (done) return; done = true; clearTimeout(grace); state = 'STOPPED'; ws = null; resolve(); }; const prev = sock.onclose; sock.onclose = (ev) => { try { prev?.(ev); } catch { /* contained */ } finish(); }; const grace = setTimeout(() => { log('ws close handshake timed out — terminating'); try { sock.onclose = null; sock.close(); } catch { /* ignore */ } try { onClose({ epochId: epochId(), reason: 'STOPPED' }); } catch { /* contained */ } finish(); }, graceMs); grace.unref?.(); try { sock.close(); } catch { finish(); } }),
     send,
+    // PUBLISH-FIX-84: a consumer that sees its DATA go stale while the socket reads OPEN forces a fresh connection (the same detached drop)
+    reconnect: (reason = 'CONSUMER') => (state === 'OPEN' && ws ? dropSocket(reason) : false),
     status: () => deepFreeze({ state, epoch, epochId: epochId(), attempt, ...counters }),
   };
 }

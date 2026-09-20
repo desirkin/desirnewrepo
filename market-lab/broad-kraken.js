@@ -36,6 +36,7 @@ export const BROAD_KRAKEN_DEFAULTS = Object.freeze({
   maxCatalogAgeMs: 900_000,
   clockSkewMs: 2_000,
   tickerFreshMs: 120_000,
+  dataSilenceMs: 180_000, // PUBLISH-FIX-84: no ticker / candle message at all for 3 min with markets subscribed -> reconnect
   candleFreshMs: 180_000,
   segmentBytes: 16 * 1024 * 1024,
   maxSegments: 64,
@@ -428,6 +429,20 @@ export function startBroadKraken({
   const store = openBroadStore({ dataDir, clock, ...cfg, log });
   const sessionId = `bks-${randomBytes(12).toString('hex')}`;
   let state = 'WAITING_CATALOG'; let startedTs = clock(); let stoppedTs = null; let stopping = false; let sequence = 0; let ws = null; let currentEpoch = null;
+  // PUBLISH-FIX-84 (reviewer finding): the DATA-SILENCE law. Heartbeats keep a socket "OPEN" while the venue can drop the ticker /
+  // ohlc channels; before, the broad eye then reported ACTIVE with 613 stale markets for good. Now: with markets subscribed and no
+  // ticker or candle message for dataSilenceMs (3 minutes across 600+ pairs is silence, not a quiet market), the socket is torn
+  // down and rebuilt through the client's detached drop (subscriptions re-queue on the new epoch as they always did after a close).
+  let lastDataTs = null; let dataSilentReconnects = 0; let lastDataSilenceCheckTs = 0;
+  function dataSilenceLaw(now) {
+    if (stopping || !ws || ws.status?.().state !== 'OPEN' || typeof ws.reconnect !== 'function') return false;
+    const subscribed = [...markets.values()].filter((m) => m.channels.ticker === 'SUBSCRIBED' || m.channels.ohlc === 'SUBSCRIBED').length; if (!subscribed) return false;
+    const since = lastDataTs ?? ws.status().openedTs ?? now; if (now - since < cfg.dataSilenceMs) return false;
+    if (now - lastDataSilenceCheckTs < cfg.dataSilenceMs) return false; lastDataSilenceCheckTs = now;
+    dataSilentReconnects += 1; counters.dataSilentReconnects = dataSilentReconnects;
+    log(`BROAD KRAKEN: DATA SILENCE — ${subscribed} market(s) subscribed, no ticker or candle for ${Math.round((now - since) / 1000)} s while the socket reads OPEN; reconnecting (${dataSilentReconnects} so far)`);
+    return ws.reconnect('DATA_SILENT');
+  }
   let acceptedCatalog = null; let lastInstrumentTs = null; let instrumentState = 'AWAITING'; let instrumentError = null;
   let catalogLastCheckedTs = null; let catalogLastError = null; let subscribeTimer = null; let catalogTimer = null; let drainTimer = null; let latestTimer = null; let draining = false; let stopPromise = null;
   const instrumentPairs = new Map(); const markets = new Map(); const byWsSymbol = new Map(); const requestMap = new Map(); const subscriptionQueue = []; const writeQueue = [];
@@ -684,10 +699,12 @@ export function startBroadKraken({
       lastInstrumentTs = meta.receivedTs; reconcileMappings(meta.receivedTs); return;
     }
     if (msg?.channel === 'ticker' && Array.isArray(msg.data)) {
+      lastDataTs = meta.receivedTs;
       for (const row of msg.data) { counters.nativeRows += 1; if (plain(row)) nativeTicker({ ...row, __messageType: msg.type === 'snapshot' ? 'snapshot' : 'update' }, meta.receivedTs, meta.epochId); else counters.rejectedRows += 1; }
       return;
     }
     if (msg?.channel === 'ohlc' && Array.isArray(msg.data)) {
+      lastDataTs = meta.receivedTs;
       for (const row of msg.data) { counters.nativeRows += 1; if (plain(row)) nativeOhlc({ ...row, __messageType: msg.type === 'snapshot' ? 'snapshot-provisional' : 'update-provisional' }, meta.receivedTs, meta.epochId); else counters.rejectedRows += 1; }
     }
   }
@@ -782,6 +799,6 @@ export function startBroadKraken({
   };
 
   adoptCatalog();
-  catalogTimer = timers.setInterval(adoptCatalog, cfg.catalogPollMs); catalogTimer?.unref?.();
-  return { status, latest, drain, stop, dataDir: store.status().dir };
+  catalogTimer = timers.setInterval(() => { adoptCatalog(); try { dataSilenceLaw(clock()); } catch (err) { log(`BROAD KRAKEN: data-silence law failed (contained): ${String(err?.message ?? err).slice(0, 120)}`); } }, cfg.catalogPollMs); catalogTimer?.unref?.();
+  return { status, latest, drain, stop, dataDir: store.status().dir, _dataSilenceLaw: dataSilenceLaw };
 }
