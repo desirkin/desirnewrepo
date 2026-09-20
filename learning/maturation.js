@@ -63,9 +63,16 @@ export function matureEpisode({ episode, archive, asOfTs, attachedTs, costAssump
   const anyKnowable = Object.values(row.horizons).some((h) => h.state !== 'NOT_YET_KNOWN');
   if (!anyKnowable && row.availability.state !== 'UNAVAILABLE') return null; // nothing matured; do not write a record that says nothing
   let counterfactual = null;
-  if (costAssumptions && episode.fidelity === 'CANDLE_SIMULATED_EXECUTION') {
+  // PUBLISH-FIX-86 (2026-09-20): the simulated round trip (entry at the next bar's open, exit at the 60-minute close, taker fee both
+  // sides, slippage against us) had only ever run for the offline childhood campaign (fidelity CANDLE_SIMULATED_EXECUTION): the live
+  // service never passed costAssumptions and every live episode is PROSPECTIVE_SHADOW, so 14,623 of 14,707 attaches in production
+  // carried counterfactual null. A live episode labelled from the live 1-minute capture is the same candle simulation — it runs.
+  if (costAssumptions && (episode.fidelity === 'CANDLE_SIMULATED_EXECUTION' || episode.fidelity === 'PROSPECTIVE_SHADOW')) {
     const series = archive?.oneMinute?.get(episode.canonicalCoin) ?? null;
-    const sim = simulateExecution({ series, anchorTsMs: row.anchorTsMs, horizonMin: 60, feePctPerSide: costAssumptions.feePctPerSide, slippageBps: costAssumptions.slippageBps, entryDelayBars: costAssumptions.entryDelayBars });
+    // PUBLISH-FIX-86: the round trip obeys the same knowledge floor as the 60m label — a series that already holds the exit bar
+    // (a historical archive) never lets an as-of before the horizon claim the result
+    const h60 = row.horizons?.['60m'];
+    const sim = h60 && h60.state === 'NOT_YET_KNOWN' ? { state: 'UNPROVEN_NO_EXECUTION_SUPPORT', grossPct: null, netPct: null, entryPrice: null, reasons: ['NOT_YET_KNOWN_AT_AS_OF'] } : simulateExecution({ series, anchorTsMs: row.anchorTsMs, horizonMin: 60, feePctPerSide: costAssumptions.feePctPerSide, slippageBps: costAssumptions.slippageBps, entryDelayBars: costAssumptions.entryDelayBars });
     counterfactual = {
       state: sim.state, fidelity: 'CANDLE_SIMULATED_EXECUTION', entryDelayBars: costAssumptions.entryDelayBars,
       entryPrice: sim.entryPrice, exitRule: 'HORIZON_60M_FINAL_CLOSE', grossPct: sim.state === 'ESTABLISHED' ? sim.grossPct : null,
@@ -121,7 +128,8 @@ export function maturationSweep({ episodes, latestOutcomes, archive, asOfTs, att
     if (pastDeadline && outcomeStage(attach.outcomeRow) < 2) { attach = settleAtDeadline(attach); settledAtDeadline += 1; }
     const stageNow = outcomeStage(attach.outcomeRow); const stageBefore = existing ? outcomeStage(existing.outcomeRow) : -1;
     if (stageNow === 0) { pending += 1; continue; } // the bite and the continuation are not both in yet: no row that says half a thing
-    if (stageNow <= stageBefore) continue; // nothing new matured at a stage that is written
+    const cfEstablished = attach.counterfactual?.state === 'ESTABLISHED' && existing?.counterfactual?.state !== 'ESTABLISHED'; // PUBLISH-FIX-86: the 60-minute round trip landing is worth a row of its own
+    if (stageNow <= stageBefore && !cfEstablished) continue; // nothing new matured at a stage that is written
     if (attach.supersedes !== (existing ? existing.attachedTs : null)) attach = deepFreeze({ ...attach, supersedes: existing ? existing.attachedTs : null });
     attachments.push(attach); matured += 1;
   }

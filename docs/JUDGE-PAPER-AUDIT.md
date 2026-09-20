@@ -231,6 +231,14 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
   invalid / unreadable) → reference lines; the reader re-reads it on the Judge's own reads (at most every 5 s), so a KILL
   or RESUME takes effect on the next look, not at the next scheduled refresh (review c6985361 F2). A lesson whose
   `computedTs` is older than 7 days (the study stopped) is not a lesson: reference lines, one STALE line saying so (F3).
+- `learning/maturation.js` / `learning/service.js` / `fly.js` (PUBLISH-FIX-86, 2026-09-20; not frozen): the simulated 60-minute
+  round trip (entry at the next bar's open, exit at the 60-minute close, the paper policy's taker fee both sides + 10 bps
+  slippage against us) now runs for every LIVE episode — the service passes the paper cost model, matureEpisode simulates
+  PROSPECTIVE_SHADOW episodes under the same knowledge floor as the 60m label, and a round trip that becomes ESTABLISHED is a
+  row of its own. Production had counterfactual null on 14,623 of 14,707 opportunities: the live service never passed costs, and
+  the broad-Kraken reader's boot window (3 newest segments, ~43 min) could not hold 60 minutes after a restart. The process now
+  reads ONE broad-Kraken series (BROAD_SERIES_SEGMENTS = 12, ~2.8 h) shared by the mover seed, the volatility watch, the live
+  archive and the decision-outcome recorder. Tests: publish-fix-86-live-counterfactual.
 - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.

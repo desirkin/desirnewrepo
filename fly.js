@@ -51,6 +51,8 @@ async function waitForDurableCore({ env, log, waitMs = DURABLE_CORE_BOOT_WAIT_MS
   }
 }
 const SHUTDOWN_BUDGET_MS = 40_000; // PUBLISH-FIX-83: the ordered shutdown's watchdog (a deployment's stop grace is finite)
+// PUBLISH-FIX-86: the one broad-Kraken 1-minute reader and its window (see the mover-study block)
+let broadSeriesShared = null; const BROAD_SERIES_SEGMENTS = 12; const BROAD_SERIES_MAX_BYTES = 200 * 1024 * 1024;
 const SERPENT_MODE = process.env.SERPENT_DATA_ONLY === 'true' ? 'DATA_ONLY'
   : process.env.COBRA_PROFILE && process.env.JUDGE_MODE === 'PAPER' && process.env.JUDGE_ALLOW_PRIVATE === 'false' && process.env.JUDGE_ALLOW_ORDERS === 'false' ? 'PAPER'
     : null;
@@ -219,15 +221,20 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   try {
     const { createMoverStudy } = await import('./learning/mover-study.js');
     const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js');
+    // PUBLISH-FIX-86: ONE broad-Kraken 1-minute reader for the whole process (the mover seed, the volatility watch, LEARN-1's live
+    // archive and the decision-outcome recorder each built their own — four parses of the same files at boot) with a window that
+    // holds the 60-minute simulated round trip and the 4-hour label horizon: 12 newest segments (~2.8 h of the full catalog) instead
+    // of 3 (~43 min). With 3, every attempt at the 60-minute counterfactual found its starting bar already gone after a restart.
+    broadSeriesShared = createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log, maxSegments: BROAD_SERIES_SEGMENTS, maxBytes: BROAD_SERIES_MAX_BYTES });
     moverStudy = createMoverStudy({ dataDir: dataDir(), log: console.log });
     // PUBLISH-FIX-64: the rings start from the candles already on disk (restored from the bucket), not empty
-    try { moverStudy.seedFromSeries(createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log })); }
+    try { moverStudy.seedFromSeries(broadSeriesShared); }
     catch (err) { console.error(`MOVER STUDY seed from disk failed (the rings fill from the live stream instead): ${String(err?.message ?? err).slice(0, 160)}`); }
     // PUBLISH-FIX-66: the VOLATILITY WATCH ranks every broad-stream coin by the hour's range (with a traded-dollar floor) and
     // keeps the top movers in front of the Judge — the owner: "volume and volatility, never BTC". Watch only; authority NONE.
     try {
       const { createVolatilityWatch } = await import('./learning/volatility-watch.js');
-      volatilityWatch = createVolatilityWatch({ seriesSource: createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log }), dataDir: dataDir(), log: console.log, excludeBases: [...(loadConfig().universeExpansion?.excludeBases ?? []), ...neverWatch] });
+      volatilityWatch = createVolatilityWatch({ seriesSource: broadSeriesShared, dataDir: dataDir(), log: console.log, excludeBases: [...(loadConfig().universeExpansion?.excludeBases ?? []), ...neverWatch] });
       volatilityWatch.refresh();
       volatilityTimer = setInterval(() => { try { volatilityWatch.refresh(); } catch (err) { console.error(`VOLATILITY WATCH refresh: ${String(err?.message ?? err).slice(0, 160)}`); } }, 30_000); // PUBLISH-FIX-71: 30 s (was 60): a mover reaches the Judge's slots twice as fast; the ranking reads the on-disk candles through the incremental index, so the cost is small
       if (typeof volatilityTimer?.unref === 'function') volatilityTimer.unref();
@@ -403,7 +410,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       // Childhood archive is still preferred when present; the live capture is the fallback, windowed and honest.
       const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js');
       const { createLiveArchiveSource } = await import('./learning/live-archive.js');
-      const liveArchive = createLiveArchiveSource({ seriesSource: createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log }), createdTs: Date.now() });
+      const liveArchive = createLiveArchiveSource({ seriesSource: broadSeriesShared ?? createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log, maxSegments: BROAD_SERIES_SEGMENTS, maxBytes: BROAD_SERIES_MAX_BYTES }), createdTs: Date.now() });
       let archiveCache = null; let archiveTriedTs = 0; let archiveKind = null;
       const archiveSource = () => {
         if (archiveCache) return archiveCache;
@@ -429,19 +436,19 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       // PUBLISH-FIX-39: the promoter — the runtime owner of freeze -> forward test -> publish (learning/promoter.js). Its
       // designs bind to THIS Judge's fact recipe and policy digest so a published activation is consumable by the Judge's
       // selector; the cost model is the paper policy's own taker fee both ways plus a conservative slippage allowance.
-      let promoter = null;
+      let promoter = null; let costModel = null;
+      if (judgeRun && judgeRun.kind === 'PAPER') { const takerRate = Number(judgeRun.policy?.fees?.taker?.rate); costModel = { feePctPerSide: Number.isFinite(takerRate) ? Math.round(takerRate * 100 * 1e4) / 1e4 : 0.8, slippageBps: 10 }; }
       if (judgeRun && judgeRun.kind === 'PAPER' && /^[a-f0-9]{64}$/.test(String(judgeRun.policyDigest ?? ''))) {
         const { createPromoter } = await import('./learning/promoter.js');
         const { JUDGE_FACT_RECIPE_VERSION } = await import('./judge/learning-intake.js');
-        const takerRate = Number(judgeRun.policy?.fees?.taker?.rate);
-        const costModel = { feePctPerSide: Number.isFinite(takerRate) ? Math.round(takerRate * 100 * 1e4) / 1e4 : 0.8, slippageBps: 10 };
         promoter = (store) => createPromoter({ store, consumerBinding: { featureRecipeVersion: JUDGE_FACT_RECIPE_VERSION, policyDigest: judgeRun.policyDigest }, costModel, log: console.log });
       }
       learningHandle = startLearning({
         dataDir: dataDir(), env: process.env, log: console.log,
         populationSource: wideEye ? () => wideEye.sweepPopulationSnapshot() : null,
-        archiveSource, decisionBridge, promoter,
+        archiveSource, decisionBridge, promoter, costModel, // PUBLISH-FIX-86: the live 60-minute round trip, net of the paper fee and slippage
       });
+      if (costModel) console.log(`LEARN-1 counterfactual: ON — every live episode's outcome carries the simulated 60-minute round trip (taker ${costModel.feePctPerSide}% per side + ${costModel.slippageBps} bps slippage against us, entry at the next bar's open, exit at the 60-minute close)`);
       if (moverStudy && learningHandle?.store) { moverStudy.attachStore(learningHandle.store); console.log('MOVER STUDY: learning store attached — movers and their controls become DAILY_MOVER episodes with outcomes'); }
       // PUBLISH-FIX-54: LEARNED RE-LOOK — a coin that rose after the Judge passed on it, or a mover whose hour after held, is
       // offered to the Judge's watch again for two hours (through the tape's hot lane and the Judge's own nomination law),
@@ -498,7 +505,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       const outcomesDir = path.join(dataDir(), 'learning', 'decision-outcomes');
       const store = openDecisionOutcomeStore({ dir: outcomesDir, log: console.log });
       const researchStore = openResearchOutcomeStore({ dir: outcomesDir, log: console.log });
-      const seriesSource = createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log });
+      const seriesSource = broadSeriesShared ?? createBroadKrakenSeriesSource({ dataDir: dataDir(), log: console.log, maxSegments: BROAD_SERIES_SEGMENTS, maxBytes: BROAD_SERIES_MAX_BYTES });
       const recorder = createDecisionOutcomeRecorder({ readPage: (afterSeq, limit) => judgeRun.journal.page(judgeRun.accountId, { afterSeq, limit }), seriesSource, store, clock: () => Date.now(), log: console.log });
       // B-2: after the recorder writes the 5m/15m outcome, mature the 1h/4h/24h research horizons of ALREADY-recorded
       // decisions whose longer windows have since elapsed — re-scored from the fuller tape, appended as supersede

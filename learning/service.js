@@ -44,6 +44,9 @@ export function startLearning({
   // PUBLISH-FIX-39: the promoter (learning/promoter.js) — proposes a one-clause "when" per cell, freezes it, records
   // the forward captures/outcomes and settles the one terminal look. Injected (port or factory over this store).
   promoter = null,
+  // PUBLISH-FIX-86: the paper policy's own cost model {feePctPerSide, slippageBps} — with it every live episode's outcome carries the
+  // simulated 60-minute round trip (net of fees and slippage); without it (data-only) the counterfactual stays null, as before.
+  costModel = null,
   clock = Date.now, timers = { setInterval, clearInterval }, tickMs = DEFAULT_TICK_MS,
   dailyTarget = DEFAULT_DAILY_TARGET, log = () => {},
   // CPU LANES (Ticket 6): measure how long each learning step occupies the main lane, so a heavy maintenance pass that
@@ -116,12 +119,13 @@ export function startLearning({
     return { captured, coverage, plan: { selected: plan.selected.length, shed: plan.shed } };
   }
 
+  const costAssumptions = costModel && Number.isFinite(costModel.feePctPerSide) && Number.isFinite(costModel.slippageBps) ? Object.freeze({ feePctPerSide: costModel.feePctPerSide, slippageBps: costModel.slippageBps, entryDelayBars: 1 }) : null;
   function maturationTick(nowTs) {
     const archive = archiveSource ? archiveSource() : null;
     if (!archive) return { matured: 0, pending: null, reason: 'ARCHIVE_UNAVAILABLE' };
     const episodes = store.readEpisodes();
     const latest = store.latestOutcomes();
-    const sweep = maturationSweep({ episodes, latestOutcomes: latest, archive, asOfTs: nowTs, attachedTs: nowTs, maxPerSweep: MAX_MATURATION_PER_TICK });
+    const sweep = maturationSweep({ episodes, latestOutcomes: latest, archive, asOfTs: nowTs, attachedTs: nowTs, maxPerSweep: MAX_MATURATION_PER_TICK, costAssumptions });
     for (const attach of sweep.attachments) { try { store.appendOutcome(attach); if (attach.outcomeRow.availability.state !== 'UNAVAILABLE') counters.newlyMatured += 1; } catch (err) { errors.maturation += 1; log(`learning maturation: ${err.message}`); } }
     return { matured: sweep.matured, pending: sweep.pending, unavailable: sweep.unavailable };
   }
