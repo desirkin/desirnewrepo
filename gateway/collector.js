@@ -7,7 +7,7 @@
 import path from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { loadConfig, dataDir } from '../lib/config.js';
-import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
+import { appendJsonl, atomicWriteJson, readJsonlTail } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
 import { readCurrentUniverse } from '../tape/universe.js';
 import { readCurrentBook, readTapeStatus, TAPE_STATES } from '../tape/store.js';
@@ -99,9 +99,11 @@ function latestAggression(coin) {
     if (!latest) return {};
     const file = path.join(dir, latest, 'snapshots.jsonl');
     if (!existsSync(file)) return {};
-    const lines = readFileSync(file, 'utf8').trimEnd().split('\n');
+    // PUBLISH-FIX-83 second pass: only the TAIL is read (the day's file runs to hundreds of MB and was read whole, on the main
+    // thread, once per affected coin per mark); the last 200 lines are inside 2 MB by a wide margin
+    const lines = readJsonlTail(file, { maxBytes: 2 * 1024 * 1024 }).lines;
     for (let i = lines.length - 1; i >= Math.max(0, lines.length - 200); i--) {
-      const row = JSON.parse(lines[i]);
+      let row; try { row = JSON.parse(lines[i]); } catch { continue; }
       if (row.coin === coin) {
         return { tradeImbalance1m: row.tradeImbalance1m ?? null, tradeImbalance5m: row.tradeImbalance5m ?? null, cvd: row.cvd ?? null };
       }
@@ -146,17 +148,26 @@ export function startGateway({ log = console.log, config = loadConfig(), fetchIm
   let lastNoEventHourly = 0;
   let stopping = false;
 
+  // PUBLISH-FIX-83 second pass: nothing the gateway writes may throw out of a bare timer — in PAPER there is no process-level
+  // handler, so a full disk or a corrupt archive file at an incident mark killed the tape and the Judge with it
+  let logFailures = 0;
   function logEvent(type, detail = {}) {
-    appendJsonl(eventsFile(dataRoot), { ts: nowIso(), type, ...detail });
+    try { appendJsonl(eventsFile(dataRoot), { ts: nowIso(), type, ...detail }); } catch (err) { logFailures += 1; if (logFailures === 1 || logFailures % 100 === 0) console.error(`GATEWAY event log write failed (${logFailures}): ${String(err?.message ?? err).slice(0, 120)}`); }
   }
 
   function snapshotIncident(key, label, assets) {
-    const coins = assets.filter((a) => universeCoins(config, universeSource).includes(a));
-    const snaps = coins.map((c) => tapeSnapshot(c, config));
-    const file = archiveFile(key, dataRoot);
-    const arch = readJsonIf(file, { key, snapshots: [] });
-    arch.snapshots.push({ ts: nowIso(), label, tape: snaps.length ? snaps : [{ available: false, reason: 'no affected symbols in our universe' }] });
-    atomicWriteJson(file, arch, { pretty: true });
+    try {
+      const universe = universeCoins(config, universeSource);
+      const coins = assets.filter((a) => universe.includes(a));
+      const snaps = coins.map((c) => tapeSnapshot(c, config));
+      const file = archiveFile(key, dataRoot);
+      let arch; try { arch = readJsonIf(file, { key, snapshots: [] }); } catch { arch = { key, snapshots: [], note: 'previous archive unreadable; restarted' }; }
+      if (!Array.isArray(arch?.snapshots)) arch = { key, snapshots: [] };
+      arch.snapshots.push({ ts: nowIso(), label, tape: snaps.length ? snaps : [{ available: false, reason: 'no affected symbols in our universe' }] });
+      atomicWriteJson(file, arch, { pretty: true });
+    } catch (err) {
+      logEvent('GATEWAY_SNAPSHOT_ERROR', { key, label, error: String(err?.message ?? err).slice(0, 160) });
+    }
   }
 
   function scheduleMarks(key, assets) {
@@ -165,6 +176,7 @@ export function startGateway({ log = console.log, config = loadConfig(), fetchIm
         markTimers.delete(t);
         if (!stopping) snapshotIncident(key, `+${min}m`, assets);
       }, min * 60_000);
+      t.unref?.(); // a pending mark never keeps a stopping process alive
       markTimers.add(t);
     }
   }
@@ -290,7 +302,7 @@ export function startGateway({ log = console.log, config = loadConfig(), fetchIm
     try {
       await cycle();
     } catch (err) {
-      logEvent('GATEWAY_CYCLE_ERROR', { error: err.message });
+      logEvent('GATEWAY_CYCLE_ERROR', { error: String(err?.message ?? err).slice(0, 160) });
     } finally {
       running = false;
     }

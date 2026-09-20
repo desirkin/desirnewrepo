@@ -74,3 +74,8 @@ test('PFL-6. the accessor and the model compose: a matrix DEGRADED signal produc
     assert.equal(effectiveFillLatencyMs(sig), Math.min(PAPER_FILL_LATENCY.maxMs, 300 * PAPER_FILL_LATENCY.degradedMs));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('PUBLISH-FIX-83 second pass: a null gateway reading is "no measurement" -> the reference delay, never a throw', async () => {
+  const { effectiveFillLatencyMs, PAPER_FILL_LATENCY } = await import('../lib/paper-fill-latency.js');
+  assert.equal(effectiveFillLatencyMs(null), PAPER_FILL_LATENCY.referenceMs); assert.equal(effectiveFillLatencyMs(undefined), PAPER_FILL_LATENCY.referenceMs);
+});
