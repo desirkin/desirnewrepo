@@ -86,7 +86,7 @@ test('K11. UNIVERSE, EARS, WIDE EYE, coin, auth, CLEAR and VETO all use the shar
     `showCard({ kicker: 'SCANNER', title: 'WIDE EYE' })`,
     `showCard({ kicker: 'COIN DETAIL', title: coin, coin: true })`,
     `showCard({ kicker: 'CONTROL', title: 'CONTROL AUTH' })`,
-    `showCard({ kicker: 'CONTROL', title: 'CLEAR / RE-ARM' })`,
+    `showCard({ kicker: 'CONTROL', title: killed ? 'RESUME HUNTING' : 'CLEAR / RE-ARM' })`, // PUBLISH-FIX-84: the card reads RESUME while killed
     `showCard({ kicker: 'CONTROL', title: 'VETO' })`,
   ]) {
     assert.ok(SCRIPT.includes(opener), opener);

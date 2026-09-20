@@ -62,8 +62,15 @@ test('7. no fabricated per-coin daily change — the mock’s percentages stay o
   assert.ok(!/dayChange|pctChange|change24/i.test(SCRIPT), 'no invented change field');
 });
 
-test('8. control buttons carry icons but arm/confirm rewrites only the label span', () => {
-  for (const b of ['btnKill', 'btnCage', 'btnLedger']) {
+test('8. control buttons carry icons but arm/confirm rewrites only the label span; PUBLISH-FIX-84: no CAGE button, KILL is the one visible toggle (KILL / RESUME)', () => {
+  assert.ok(!HTML.includes('id="btnCage"'), 'the CAGE button is gone (the owner: cage and lock are useless to me)');
+  assert.ok(!SCRIPT.includes("postControl('cage')"), 'nothing in the cockpit can latch a cage');
+  assert.ok(SCRIPT.includes("armThen($('#btnKill'), 'RESUME'") && SCRIPT.includes("armThen($('#btnKill'), 'KILL'"), 'one button, two states');
+  assert.ok(SCRIPT.includes("kb.hidden = false"), 'the toggle is always visible');
+  assert.ok(SCRIPT.includes("value=\"CLEAR SERPENT\"") || SCRIPT.includes('value="CLEAR SERPENT"'), 'RESUME pre-fills the phrase; the password stays');
+  assert.ok(!SCRIPT.includes('${L.daysOnWatch} SESSION${L.daysOnWatch === 1'), 'PUBLISH-FIX-84: no "undefined SESSIONS"');
+  assert.ok(SCRIPT.includes('LEDGER CATCHING UP') && SCRIPT.includes('LEDGER NOT PUBLISHED YET'), 'a stale or absent projection is named, never "$0.00 untouched"');
+  for (const b of ['btnKill', 'btnLedger']) {
     const m = HTML.match(new RegExp(`<button id="${b}">([\\s\\S]*?)</button>`));
     assert.ok(m && m[1].includes('<svg') && m[1].includes('<span>'), `${b} has icon + span`);
   }

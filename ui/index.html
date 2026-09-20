@@ -276,14 +276,13 @@
   }
   #controls button svg { flex: none; opacity: .9; }
   #btnKill  { color: #ff6b52; border: 1px solid #7c2f22; }
-  #btnCage  { color: #ffb454; border: 1px solid #7a5526; }
+  #btnKill.latched { color: #06090f; background: #ff6b52; } /* PUBLISH-FIX-84: the ONE toggle reads its state — KILLED, press to RESUME */
   #btnVeto  { color: #69d2ff; border: 1px solid #2a5a78; }
   #btnClear { color: #9fb4c8; border: 1px solid #3a4a62; }
   #btnLedger { color: #7fc7de; border: 1px solid #2c4a5c; } /* neutral slate-cyan: display, not danger */
   #btnResearch { color: #c9b27f; border: 1px solid #4a4230; } /* neutral sand: read-only research files, never an order */
   #controls button.armed { color: #06090f; }
   #btnKill.armed  { background: #ff6b52; box-shadow: 0 0 16px rgba(255,107,82,.7); }
-  #btnCage.armed  { background: #ffb454; box-shadow: 0 0 16px rgba(255,180,84,.7); }
   #btnClear.armed { background: #9fb4c8; }
   #controls button[hidden] { display: none; }
   #card .vrow { display: flex; justify-content: space-between; align-items: center;
@@ -600,7 +599,6 @@
 <div id="clockchip" class="chip"><span id="stripdot"></span><span id="striptext">— · ET --:-- · SESSION ----------</span><svg id="pulse" viewBox="0 0 40 12" width="34" height="11" aria-hidden="true"><path d="M0 6 H11 L15 2.5 L19 9.5 L23 6 H40"></path></svg></div>
 <div id="controls">
   <button id="btnKill"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M12 1.5 V6 M12 18 V22.5 M1.5 12 H6 M18 12 H22.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg><span>KILL</span></button>
-  <button id="btnCage"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect><path d="M8.7 5 V20 M15.3 5 V20" stroke="currentColor" stroke-width="1.6"></path></svg><span>CAGE</span></button>
   <button id="btnVeto" hidden><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M6 6 L18 18" stroke="currentColor" stroke-width="2"></path></svg><span>VETO</span></button>
   <button id="btnClear" hidden><span>CLEAR</span></button>
   <button id="btnLedger"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4.5" y="3.5" width="15" height="17" rx="2" fill="none" stroke="currentColor" stroke-width="2"></rect><path d="M8.5 8 H15.5 M8.5 12 H15.5 M8.5 16 H13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg><span>LEDGER</span></button>
@@ -1231,14 +1229,15 @@ function openAuthCard(then) {
   });
 }
 function ensureAuth(fire) { if (csrfToken) fire(); else openAuthCard(fire); }
-function openClearCard() {
-  showCard({ kicker: 'CONTROL', title: 'CLEAR / RE-ARM' });
+function openClearCard({ prefillPhrase = false } = {}) {
+  const killed = Boolean(lastStatus?.controls?.kill);
+  showCard({ kicker: 'CONTROL', title: killed ? 'RESUME HUNTING' : 'CLEAR / RE-ARM' });
   $('#cardBody').innerHTML = `
-    <div class="rows"><span>restoring permission requires fresh intent — password again${secondFactorRequired ? ', a fresh code,' : ''} and the exact phrase</span></div>
+    <div class="rows"><span>${killed ? 'the animal is KILLED (reduce only). ' : ''}restoring permission takes the password${secondFactorRequired ? ' and a fresh code' : ''}${prefillPhrase ? '' : ' and the exact phrase'}</span></div>
     <input id="clrPw" type="password" placeholder="control password" autocomplete="off">
     ${secondFactorRequired ? '<input id="clrTotp" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="6-digit code" autocomplete="one-time-code">' : ''}
-    <input id="clrPhrase" type="text" placeholder="type: CLEAR SERPENT" autocomplete="off" autocapitalize="characters">
-    <button id="clrGo">CLEAR</button>
+    <input id="clrPhrase" type="text" placeholder="type: CLEAR SERPENT" autocomplete="off" autocapitalize="characters"${prefillPhrase ? ' value="CLEAR SERPENT"' : ''}>
+    <button id="clrGo">${killed ? 'RESUME' : 'CLEAR'}</button>
     <div id="clrMsg" class="rows"></div>`;
   $('#clrGo').addEventListener('click', async () => {
     const password = $('#clrPw').value;
@@ -1248,7 +1247,7 @@ function openClearCard() {
     if ($('#clrTotp')) $('#clrTotp').value = '';
     const d = await postControl('clear', secondFactorRequired ? { password, confirmPhrase, totp } : { password, confirmPhrase });
     if (d.ok) closeSheets();
-    else if (d.reason === 'UNAUTHENTICATED') { openAuthCard(openClearCard); } // PUBLISH-FIX-83 item 35: re-authenticate, then straight back to this card
+    else if (d.reason === 'UNAUTHENTICATED') { openAuthCard(() => openClearCard({ prefillPhrase })); } // PUBLISH-FIX-83 item 35: re-authenticate, then straight back to this card
     else $('#clrMsg').textContent =
       d.reason === 'RATE_LIMITED' ? `LOCKED OUT — retry in ${d.retryAfterSec ?? '?'}s`
       : d.reason === 'CLEAR_PHRASE_MISMATCH' ? 'PHRASE MISMATCH — type exactly: CLEAR SERPENT (no password try was spent)'
@@ -1296,9 +1295,11 @@ async function postControl(action, extra = {}) {
     return { ok: false, reason: 'LINK_LOST' };
   }
 }
-$('#btnKill').addEventListener('click', () => armThen($('#btnKill'), 'KILL', () => ensureAuth(() => postControl('kill'))));
-$('#btnCage').addEventListener('click', () => armThen($('#btnCage'), 'CAGE', () => ensureAuth(() => postControl('cage'))));
-$('#btnClear').addEventListener('click', () => ensureAuth(openClearCard));
+// PUBLISH-FIX-84: KILL is ONE visible toggle (the owner: "make it a toggle switch"). Hunting: KILL -> CONFIRM? -> session password ->
+// killed. Killed: the same button reads RESUME -> CONFIRM? -> the clear card with the phrase already filled (the password stays;
+// the server law is unchanged). The CAGE button is gone (cleared at boot since fix75; nothing in this cockpit can latch it).
+$('#btnKill').addEventListener('click', () => { if (lastStatus?.controls?.kill) armThen($('#btnKill'), 'RESUME', () => ensureAuth(() => openClearCard({ prefillPhrase: true }))); else armThen($('#btnKill'), 'KILL', () => ensureAuth(() => postControl('kill'))); });
+$('#btnClear').addEventListener('click', () => ensureAuth(() => openClearCard({ prefillPhrase: true })));
 $('#btnVeto').addEventListener('click', () => openVetoSheet());
 
 function openVetoSheet() {
@@ -1329,13 +1330,22 @@ function renderLedger(L) {
   // PUBLISH-FIX-83 item 37: the ledger names its own staleness — a projection that is not fresh is shown as such, never as current truth
   const ledgerStale = L.projectionFresh === false ? `<div class="line" style="color:var(--warn,#e0a94a)"><span>STALE — the account projection is not fresh${L.rejected ? ` (${esc(L.rejected)})` : ''}; figures below are the last published ones</span></div>` : '';
   const renderedAt = () => { if (ledgerStale) b.insertAdjacentHTML('afterbegin', ledgerStale); }; queueMicrotask(renderedAt);
-  if (L.totalTrades === 0 && !L.openPositions.length) {
-    b.innerHTML = `
-      <div class="net">$${(L.startingBalance ?? 0).toFixed(2)} <span style="color:var(--dim)">— untouched</span></div>
+  // PUBLISH-FIX-84: while the projection is STALE or absent (a boot replay in progress, a republish) the empty state says so in
+  // words — never "$0.00 untouched" and "undefined SESSIONS" (what the cockpit showed during the six-minute replay on 09-20)
+  const noProjection = L.empty === true || L.projectionFresh === false || !Number.isFinite(Number(L.startingBalance));
+  if (L.totalTrades === 0 && !(L.openPositions ?? []).length) {
+    const sessions = Number.isFinite(Number(L.daysOnWatch)) ? ` · ${L.daysOnWatch} SESSION${Number(L.daysOnWatch) === 1 ? '' : 'S'}` : ''; // the ledger view carries no session count today: say nothing rather than "undefined SESSIONS"
+    b.innerHTML = noProjection ? `
+      <div class="net"><span style="color:var(--dim)">balance — waiting for the account to come up</span></div>
+      <div class="empty">
+        <div class="big">${L.empty ? 'LEDGER NOT PUBLISHED YET' : 'LEDGER CATCHING UP'}</div>
+        <div class="sub">${L.empty ? 'the Judge has not published his account yet (a boot replay, or a republish in progress)' : 'the last published figures are older than they should be; he is replaying his journal'}</div>
+      </div>` : `
+      <div class="net">$${Number(L.startingBalance).toFixed(2)} <span style="color:var(--dim)">— untouched</span></div>
       <div class="empty">
         <div class="big">NO STRIKES YET</div>
         <div class="sub">the snake declines bad meals</div>
-        <div class="sub">ON WATCH · ${L.daysOnWatch} SESSION${L.daysOnWatch === 1 ? '' : 'S'}</div>
+        <div class="sub">ON WATCH${sessions}</div>
       </div>`;
     return;
   }
@@ -1632,10 +1642,11 @@ function renderStatus(s) {
   // the animal's quiet: KILL = dormant, CAGE = restrained (real state only)
   body.classList.toggle('killed', Boolean(s.controls?.kill));
   body.classList.toggle('caged', Boolean(s.controls?.cage) && !s.controls?.kill);
-  const latched = s.controls && (s.controls.kill || s.controls.cage);
-  $('#btnClear').hidden = !latched;
-  $('#btnKill').hidden = Boolean(s.controls?.kill);
-  $('#btnCage').hidden = Boolean(s.controls?.cage);
+  // PUBLISH-FIX-84: KILL is the one toggle and always visible — KILL while hunting, RESUME (latched, red) while killed; CLEAR
+  // shows only for a cage latch (no cockpit button can set one any more; cleared at boot since fix75)
+  const killed = Boolean(s.controls?.kill); const kb = $('#btnKill');
+  kb.hidden = false; kb.classList.toggle('latched', killed); if (!kb.classList.contains('armed')) btnLabel(kb).textContent = killed ? 'RESUME' : 'KILL';
+  $('#btnClear').hidden = !(s.controls?.cage && !killed);
   $('#btnVeto').hidden = !(s.pendingStrikes && s.pendingStrikes.length);
   if (!demo) {
     const why = s.posture === 'RETREAT' ? s.retreatCauses.map((c) => c.key).join(' · ') : (s.advisories[0] || '');
