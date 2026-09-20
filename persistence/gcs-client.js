@@ -21,6 +21,10 @@ export const REPLIT_TOKEN_URL = `${REPLIT_SIDECAR_ORIGIN}/token`;
 export const REPLIT_DEFAULT_BUCKET_URL = `${REPLIT_SIDECAR_ORIGIN}/object-storage/default-bucket`;
 const MAX_RESPONSE_BYTES = 300 * 1024 * 1024;
 const TOKEN_SKEW_MS = 60_000; // refresh a minute before expiry; never ride a token to its edge
+// PUBLISH-FIX-84 (reviewer finding): every call carries a deadline — a stalled put or token exchange used to hold an upload pass for
+// undici's 300 s header timeout, and the final sync at shutdown could eat the whole 40 s budget waiting on one request
+export const GCS_REQUEST_TIMEOUT_MS = 60_000; export const GCS_PUT_TIMEOUT_MS = 120_000; export const GCS_TOKEN_TIMEOUT_MS = 20_000;
+const deadline = (ms) => (typeof AbortSignal?.timeout === 'function' ? { signal: AbortSignal.timeout(ms) } : {});
 
 const bounded = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').slice(0, 180);
 // PUBLISH-FIX-84 (2026-09-20): a refused put carries the provider's own reason (GCS answers a JSON error body: `rateLimitExceeded`
@@ -79,14 +83,14 @@ function createStorageMethods({ provider, bucket, fetchImpl, accessToken }) {
     if (!Buffer.isBuffer(bytes)) throw new GcsClientError(E('PAYLOAD_INVALID'), 'put requires a Buffer');
     const url = `${GCS_STORAGE_HOST}/upload/storage/v1/b/${encodeURIComponent(bucket)}/o?uploadType=media&name=${encodeURIComponent(name)}`;
     const headers = { ...(await authHeader()), 'content-type': contentType }; let res;
-    try { res = await fetchImpl(url, { method: 'POST', headers, body: bytes }); }
+    try { res = await fetchImpl(url, { method: 'POST', headers, body: bytes, ...deadline(GCS_PUT_TIMEOUT_MS) }); }
     catch (e) { throw new GcsClientError(E('PUT_UNREACHABLE'), e?.code ?? e?.message ?? 'put unreachable'); }
     if (!res.ok) throw new GcsClientError(E('PUT_FAILED'), `put returned ${res.status}${await providerReason(res)}`, res.status);
     return { key: name, bytes: bytes.byteLength, sha256: sha256(bytes) };
   }
   async function getObject(name) {
     const headers = await authHeader(); let res;
-    try { res = await fetchImpl(`${objectUrl(name)}?alt=media`, { method: 'GET', headers }); }
+    try { res = await fetchImpl(`${objectUrl(name)}?alt=media`, { method: 'GET', headers, ...deadline(GCS_PUT_TIMEOUT_MS) }); }
     catch (e) { throw new GcsClientError(E('GET_UNREACHABLE'), e?.code ?? e?.message ?? 'get unreachable'); }
     if (res.status === 404) return null;
     if (!res.ok) throw new GcsClientError(E('GET_FAILED'), `get returned ${res.status}`, res.status);
@@ -96,7 +100,7 @@ function createStorageMethods({ provider, bucket, fetchImpl, accessToken }) {
   }
   async function headObject(name) {
     const headers = await authHeader(); let res;
-    try { res = await fetchImpl(objectUrl(name), { method: 'GET', headers }); }
+    try { res = await fetchImpl(objectUrl(name), { method: 'GET', headers, ...deadline(GCS_REQUEST_TIMEOUT_MS) }); }
     catch (e) { throw new GcsClientError(E('HEAD_UNREACHABLE'), e?.code ?? e?.message ?? 'head unreachable'); }
     if (res.status === 404) return null;
     if (!res.ok) throw new GcsClientError(E('HEAD_FAILED'), `head returned ${res.status}`, res.status);
@@ -108,7 +112,7 @@ function createStorageMethods({ provider, bucket, fetchImpl, accessToken }) {
     do {
       const params = new URLSearchParams(); if (prefix) params.set('prefix', prefix); if (pageToken) params.set('pageToken', pageToken);
       const headers = await authHeader(); let res;
-      try { res = await fetchImpl(`${GCS_STORAGE_HOST}/storage/v1/b/${encodeURIComponent(bucket)}/o?${params.toString()}`, { method: 'GET', headers }); }
+      try { res = await fetchImpl(`${GCS_STORAGE_HOST}/storage/v1/b/${encodeURIComponent(bucket)}/o?${params.toString()}`, { method: 'GET', headers, ...deadline(GCS_REQUEST_TIMEOUT_MS) }); }
       catch (e) { throw new GcsClientError(E('LIST_UNREACHABLE'), e?.code ?? e?.message ?? 'list unreachable'); }
       if (!res.ok) throw new GcsClientError(E('LIST_FAILED'), `list returned ${res.status}`, res.status);
       let json; try { json = await res.json(); } catch { throw new GcsClientError(E('LIST_FAILED'), 'list response was not JSON'); }
@@ -120,7 +124,7 @@ function createStorageMethods({ provider, bucket, fetchImpl, accessToken }) {
   }
   async function deleteObject(name) {
     const headers = await authHeader(); let res;
-    try { res = await fetchImpl(objectUrl(name), { method: 'DELETE', headers }); }
+    try { res = await fetchImpl(objectUrl(name), { method: 'DELETE', headers, ...deadline(GCS_REQUEST_TIMEOUT_MS) }); }
     catch (e) { throw new GcsClientError(E('DELETE_UNREACHABLE'), e?.code ?? e?.message ?? 'delete unreachable'); }
     if (res.status === 404) return false;
     if (!res.ok) throw new GcsClientError(E('DELETE_FAILED'), `delete returned ${res.status}`, res.status);
@@ -141,7 +145,7 @@ export function createGcsObjectClient({ serviceAccount, bucket, fetchImpl = glob
     const assertion = buildAssertion({ ...sa, nowMs });
     const body = new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }).toString();
     let res;
-    try { res = await fetchImpl(sa.tokenUri, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body }); }
+    try { res = await fetchImpl(sa.tokenUri, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body, ...deadline(GCS_TOKEN_TIMEOUT_MS) }); }
     catch (e) { throw new GcsClientError('GCS_TOKEN_UNREACHABLE', e?.code ?? e?.message ?? 'token endpoint unreachable'); }
     if (!res.ok) throw new GcsClientError('GCS_TOKEN_REFUSED', `token exchange returned ${res.status}`, res.status);
     let json;
@@ -161,7 +165,7 @@ export function createGcsObjectClient({ serviceAccount, bucket, fetchImpl = glob
 export async function fetchReplitDefaultBucket(fetchImpl = globalThis.fetch) {
   if (typeof fetchImpl !== 'function') throw new GcsClientError('REPLIT_CLIENT_MISCONFIGURED', 'a fetch implementation is required');
   let res;
-  try { res = await fetchImpl(REPLIT_DEFAULT_BUCKET_URL, { method: 'GET' }); }
+  try { res = await fetchImpl(REPLIT_DEFAULT_BUCKET_URL, { method: 'GET', ...deadline(GCS_TOKEN_TIMEOUT_MS) }); }
   catch (e) { throw new GcsClientError('REPLIT_SIDECAR_UNREACHABLE', e?.code ?? e?.message ?? 'default-bucket unreachable'); }
   if (!res.ok) throw new GcsClientError('REPLIT_BUCKET_REFUSED', `default-bucket returned ${res.status}`, res.status);
   let json; try { json = await res.json(); } catch { throw new GcsClientError('REPLIT_BUCKET_REFUSED', 'default-bucket response was not JSON'); }
@@ -185,7 +189,7 @@ export function createReplitObjectClient({ bucket, fetchImpl = globalThis.fetch,
     if (token && nowMs < tokenExpiresMs - TOKEN_SKEW_MS) return token;
     // 1. subject token from the sidecar credential endpoint
     let credRes;
-    try { credRes = await fetchImpl(REPLIT_CREDENTIAL_URL, { method: 'GET' }); }
+    try { credRes = await fetchImpl(REPLIT_CREDENTIAL_URL, { method: 'GET', ...deadline(GCS_TOKEN_TIMEOUT_MS) }); }
     catch (e) { throw new GcsClientError('REPLIT_SIDECAR_UNREACHABLE', e?.code ?? e?.message ?? 'credential endpoint unreachable'); }
     if (!credRes.ok) throw new GcsClientError('REPLIT_CREDENTIAL_REFUSED', `credential returned ${credRes.status}`, credRes.status);
     let credJson; try { credJson = await credRes.json(); } catch { throw new GcsClientError('REPLIT_CREDENTIAL_REFUSED', 'credential response was not JSON'); }
@@ -201,7 +205,7 @@ export function createReplitObjectClient({ bucket, fetchImpl = globalThis.fetch,
       subject_token: subjectToken,
     }).toString();
     let res;
-    try { res = await fetchImpl(REPLIT_TOKEN_URL, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body }); }
+    try { res = await fetchImpl(REPLIT_TOKEN_URL, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body, ...deadline(GCS_TOKEN_TIMEOUT_MS) }); }
     catch (e) { throw new GcsClientError('REPLIT_SIDECAR_UNREACHABLE', e?.code ?? e?.message ?? 'token endpoint unreachable'); }
     if (!res.ok) throw new GcsClientError('REPLIT_TOKEN_REFUSED', `token exchange returned ${res.status}`, res.status);
     let json; try { json = await res.json(); } catch { throw new GcsClientError('REPLIT_TOKEN_REFUSED', 'token response was not JSON'); }

@@ -248,7 +248,7 @@ export function parseOwnerGateLines(raw) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { lines: {}, rejected: [`${OWNER_GATE_LINES_ENV} is not an object`] };
   const lines = {}; const rejected = [];
   for (const [id, v] of Object.entries(obj)) {
-    const band = GATE_BANDS[id]; const n = Number(v);
+    const band = GATE_BANDS[id]; const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim().length && Number.isFinite(Number(v)) ? Number(v) : NaN; // reviewer finding: null / '' / [] / true never become a line
     if (!band) { rejected.push(`${id}: not a learnable gate (${Object.keys(GATE_BANDS).join(', ')})`); continue; }
     if (!Number.isFinite(n)) { rejected.push(`${id}: not a number`); continue; }
     const clamped = Math.min(band.max, Math.max(band.min, n)); if (clamped !== n) rejected.push(`${id}: ${n} clamped to the band ${band.min}..${band.max} -> ${clamped}`);

@@ -12,7 +12,11 @@ const POOL_MAX = 5; // one personal app, one small pool
 // checkout that times out is retried once after a short pause before it counts as a failure (nothing has begun on it yet).
 const CONNECT_TIMEOUT_MS = 15_000;
 const QUERY_TIMEOUT_MS = 10_000;
-const IDLE_TIMEOUT_MS = 10 * 60_000;
+// reviewer finding on the 10-minute idle: a managed Postgres proxy commonly drops an idle connection at ~5 min, and pg surfaces that
+// as a pool 'error' — which used to flip `reachable` and engage the permission lock on a transient. Idle is 4 minutes (under the
+// usual proxy cutoff, well above the 30 s that forced a fresh TLS connection every quiet minute), and an idle client dying is
+// counted and logged, never a verdict on reachability: nothing was in flight on it; the next checkout or query decides.
+const IDLE_TIMEOUT_MS = 4 * 60_000;
 const CHECKOUT_RETRIES = 1; const CHECKOUT_RETRY_DELAY_MS = 500;
 const boundedText = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').slice(0, 120);
 const STARTUP_RETRIES = 3; // bounded — no infinite reconnect storm
@@ -68,7 +72,8 @@ export class Db {
   #retries;
   #everConnected = false;
   #lockClients = new Set(); // advisory-lock sessions checked out for their lifetime
-  #clocks = { checkoutWait: [], tx: [], txStatements: [], txParamBytes: [], query: [], txCount: 0, queryCount: 0, checkoutFailures: 0, checkoutRetries: 0, slowestTx: null }; // PUBLISH-FIX-50
+  #clocks = { checkoutWait: [], tx: [], txStatements: [], txParamBytes: [], query: [], txCount: 0, queryCount: 0, checkoutFailures: 0, checkoutRetries: 0, idleClientErrors: 0, slowestTx: null }; // PUBLISH-FIX-50
+  #lastIdleErrorLogMs = 0;
 
   constructor({ url = process.env.DATABASE_URL, schema = null, log = () => {}, poolFactory = null, retries = STARTUP_RETRIES } = {}) {
     this.#url = url;
@@ -113,9 +118,11 @@ export class Db {
       application_name: applicationNameOf(this.schema),
     };
     this.#pool = this.#poolFactory ? this.#poolFactory(opts) : new pg.Pool(opts);
-    this.#pool.on('error', () => {
-      this.connectionErrors++;
-      this.reachable = false;
+    this.#pool.on('error', (err) => {
+      // PUBLISH-FIX-84: an IDLE pooled client died (proxy idle cutoff, server restart): counted, logged once a minute at most, never a
+      // reachability verdict — nothing was in flight on it; the next checkout or query decides (and marks) for real
+      this.#clocks.idleClientErrors = (this.#clocks.idleClientErrors ?? 0) + 1;
+      const now = Date.now(); if (now - (this.#lastIdleErrorLogMs ?? 0) > 60_000) { this.#lastIdleErrorLogMs = now; this.log(`PERSISTENCE idle pooled connection dropped (${err?.code ?? err?.constructor?.name ?? 'Error'}: ${boundedText(err?.message)}); not a reachability verdict`); }
     });
   }
 
@@ -191,8 +198,10 @@ export class Db {
     for (let attempt = 1; ; attempt += 1) {
       try { client = await this.#pool.connect(); break; }
       catch (err) {
-        // PUBLISH-FIX-84: one retry for a connection-class checkout failure (a fresh connection that timed out) — nothing has begun
-        if (attempt <= CHECKOUT_RETRIES && isConnectionError(err)) { this.#clocks.checkoutRetries += 1; await sleep(CHECKOUT_RETRY_DELAY_MS); continue; }
+        // PUBLISH-FIX-84: one retry for a connection-class checkout failure — nothing has begun on it. Reviewer finding: only a FAST
+        // failure is retried (a reset, a refused connect); a checkout that already waited the full connect timeout is a dead or
+        // exhausted database and retrying would only double the time before the permission lock engages.
+        if (attempt <= CHECKOUT_RETRIES && isConnectionError(err) && Date.now() - startedAt < CONNECT_TIMEOUT_MS / 2) { this.#clocks.checkoutRetries += 1; await sleep(CHECKOUT_RETRY_DELAY_MS); continue; }
         // PUBLISH-FIX-3: a checkout that hung to the connect timeout is logged with its code, its message and elapsed ms.
         this.#clocks.checkoutFailures += 1;
         if (this.#markConnectionFailure(err)) this.log(`PERSISTENCE tx checkout failed after ${Date.now() - startedAt}ms (${attempt} attempt${attempt > 1 ? 's' : ''}): ${err.code ?? err.constructor.name}: ${boundedText(err.message)}`);
@@ -249,7 +258,7 @@ export class Db {
     const gauge = (k) => (pool && typeof pool[k] === 'number' ? pool[k] : null);
     return {
       tx: { ...clockStats(c.tx), total: c.txCount }, checkoutWait: clockStats(c.checkoutWait), txStatements: clockStats(c.txStatements), txParamBytes: clockStats(c.txParamBytes),
-      query: { ...clockStats(c.query), total: c.queryCount }, checkoutFailures: c.checkoutFailures, checkoutRetries: c.checkoutRetries, slowestTx: c.slowestTx ? { ...c.slowestTx } : null,
+      query: { ...clockStats(c.query), total: c.queryCount }, checkoutFailures: c.checkoutFailures, checkoutRetries: c.checkoutRetries, idleClientErrors: c.idleClientErrors ?? 0, slowestTx: c.slowestTx ? { ...c.slowestTx } : null,
       pool: { max: POOL_MAX, total: gauge('totalCount'), idle: gauge('idleCount'), waiting: gauge('waitingCount'), lockSessions: this.#lockClients.size },
     };
   }

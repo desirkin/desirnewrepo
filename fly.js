@@ -215,7 +215,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       console.log(`JUDGE gate learning (owner directive, paper profile): he moves his own flow lines from his scored looks — a move needs ${gateStudyCfg.minScored ?? 1000} scored looks on the gate, ${gateStudyCfg.minCohort ?? 100} in the cohort it changes, confidence ${gateStudyCfg.confidence ?? 0.8}, then ${gateStudyCfg.minForward ?? 100} more scored looks that agree before the line moves; every move is one line in this log; off switch: cobra learning kill`);
       setTimeout(runStudy, 90_000).unref?.(); gateStudyTimer = setInterval(runStudy, 30 * 60_000); if (typeof gateStudyTimer?.unref === 'function') gateStudyTimer.unref();
     } catch (err) { console.error(`GATE LEARNING failed to start (the Judge runs on its reference lines; nothing else affected): ${String(err?.message ?? err).slice(0, 160)}`); gateLesson = null; }
-  } else console.log('JUDGE gate learning OFF (paper profile): reference lines');
+  } else console.log(`JUDGE gate learning OFF (paper profile): reference lines${process.env.SERPENT_OWNER_GATE_LINES ? ' — NOTE: SERPENT_OWNER_GATE_LINES is set but the owner\'s lines ride the gate-learning port, which is off; they are NOT in force' : ''}`);
   try {
     const { createMoverStudy } = await import('./learning/mover-study.js');
     const { createBroadKrakenSeriesSource } = await import('./learning/broad-kraken-series.js');
@@ -638,6 +638,14 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     return { ...current };
   });
   serpentRuntime.markActive();
+
+  // PUBLISH-FIX-84 (reviewer finding): the PAPER spine bound no unhandledRejection / uncaughtException handler (only the DATA_ONLY
+  // spine does), so ONE stray rejection anywhere was a hard process exit — a Replit restart with the full restore and replay cost
+  // and no last line. Now: logged with its stack head and counted; the process keeps running (every subsystem already fails closed
+  // on its own errors); an uncaught EXCEPTION still ends the process through the same ordered shutdown as SIGTERM, with a line first.
+  let strayRejections = 0;
+  process.on('unhandledRejection', (err) => { strayRejections += 1; if (strayRejections <= 20 || strayRejections % 100 === 0) console.error(`UNHANDLED REJECTION #${strayRejections} (contained; the run continues): ${String(err?.stack ?? err?.message ?? err).split('\n').slice(0, 3).join(' | ').slice(0, 400)}`); });
+  process.once('uncaughtException', (err) => { console.error(`UNCAUGHT EXCEPTION — ordered shutdown: ${String(err?.stack ?? err?.message ?? err).split('\n').slice(0, 4).join(' | ').slice(0, 500)}`); process.kill(process.pid, 'SIGTERM'); setTimeout(() => process.exit(1), SHUTDOWN_BUDGET_MS + 5000).unref(); });
 
   try {
     await runTape({ executionFeed: judgeRun ? judgeRun.tapeFeed : null, observer: marketResearch ? marketResearch.observer : null }); // resolves on SIGTERM/SIGINT after the tape's clean shutdown

@@ -72,6 +72,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   const lastMsgMs = {}; // symbol -> ms
   const unavailable = new Set(); // subscribe-failed or shed symbols
   const subFailures = new Map(); // symbol -> attempt count
+  const subFailedUnavailable = new Set(); // PUBLISH-FIX-84: the subset of `unavailable` that a subscribe failure (not a resource shed) put there
   const bookSnapshotAsked = new Map(); // symbol -> clock of the last execution-feed book-snapshot request
   let lastAnyMsgMs = null;
 
@@ -242,6 +243,9 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
 
   function subscribeAll() {
     send({ method: 'subscribe', params: { channel: 'instrument' } });
+    // PUBLISH-FIX-84 (reviewer finding): a NEW connection gives every subscribe-failed pair another chance (a resource-SHED pair stays
+    // out until the resource law re-admits it) — `unavailable` used to be a one-way door for the life of the process
+    for (const symbol of [...unavailable]) { if (subFailedUnavailable.has(symbol)) { unavailable.delete(symbol); subFailedUnavailable.delete(symbol); subFailures.delete(symbol); writeEvent('PAIR_RETRIED_ON_RECONNECT', { symbol }); } }
     subscribeSymbols([...pairs.keys()].filter((s) => !unavailable.has(s)));
   }
 
@@ -250,7 +254,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     subFailures.set(symbol, attempts);
     writeEvent('SUBSCRIBE_FAILED', { symbol, channel, error, attempts });
     if (attempts >= 3) {
-      unavailable.add(symbol);
+      unavailable.add(symbol); subFailedUnavailable.add(symbol);
       writeEvent('PAIR_UNAVAILABLE', { symbol, reason: `subscribe failed ${attempts}x: ${error}` });
       log(`[${nowIso()}] ${symbol} UNAVAILABLE after ${attempts} subscribe failures — no invented data`);
       return;
@@ -283,6 +287,9 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       else writeEvent('SUBSCRIBE_FAILED', { result: msg });
       return;
     }
+    // PUBLISH-FIX-84 (reviewer finding): a subscribe ACK clears the pair's failure count — it accumulated over the process lifetime, so
+    // the third transient refusal EVER (days apart, across reconnects) darkened a pair for good
+    if (msg.method === 'subscribe' && msg.success === true) { const symbol = msg.result?.symbol ?? null; if (symbol && subFailures.has(symbol)) subFailures.delete(symbol); }
     switch (msg.channel) {
       case 'instrument': {
         for (const pair of msg.data?.pairs ?? []) {

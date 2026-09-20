@@ -317,8 +317,10 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     // "open" while nothing arrives, or whose heartbeats flow while every subscribed pair goes stale, is torn down (handlers detached
     // first) and reconnected on the normal back-off, at most once per 30 s; the back-off resets only once a connection has stayed
     // open 30 s. The decision is pure (tape/health.js silentFeedDecision). Subscriptions and the socket only; no trading/control/model
-    // surface. Tests: test/publish-fix-84-silent-feed.test.js.
-    'tape/run.js': 'c96568a36164ad14079ec212217562411d5d3287cef4e494ceaf637348505eb8',
+    // surface. Tests: test/publish-fix-84-silent-feed.test.js. Same publish, reviewer finding: a subscribe ACK clears the pair's failure
+    // count and a NEW connection re-tries every subscribe-failed pair (`unavailable` was a one-way door for the life of the process; a
+    // resource-shed pair still waits for the resource law). Subscriptions only.
+    'tape/run.js': '4ae7c8a9a65e35d5ca085af1fffdfc426ac8f3cba1738f0931b4e07ff2cca369',
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
     // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the

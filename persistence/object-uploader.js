@@ -146,14 +146,18 @@ export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED
       const gapLeft = () => Math.max(0, lastManifestWriteWallMs + manifestGapMs - wallClock());
       const putManifest = async () => { const nextManifest = { version: OBJECT_MANIFEST_VERSION, updatedTs: now(), entries: { ...nextEntries } }; lastManifestWriteWallMs = wallClock(); await adapter.put(MANIFEST_OBJECT_KEY, serializeManifest(nextManifest)); manifest = nextManifest; sinceManifest = 0; };
       // force: the end-of-pass write — waits out the gap, retries once; otherwise a mid-pass write is skipped while the gap is open
+      // reviewer findings: a mid-pass manifest refusal that the end-of-pass write then repairs is not a failure of the pass (the
+      // entries landed); and the final sync never sleeps for a retry past its budget
+      const dropManifestFailures = () => { for (let i = failures.length - 1; i >= 0; i -= 1) if (failures[i].relativePath === MANIFEST_OBJECT_KEY) failures.splice(i, 1); };
       const flushManifest = async ({ force = false } = {}) => {
         if (!force && gapLeft() > 0) return;
         if (force && gapLeft() > 0) await sleep(gapLeft());
-        try { await putManifest(); return; }
+        try { await putManifest(); if (force) dropManifestFailures(); return; }
         catch (error) {
           if (!force) { failures.push({ relativePath: MANIFEST_OBJECT_KEY, reason: failureReason(error) }); return; }
+          if (final && now() - passStartedTs > finalBudgetMs) { failures.push({ relativePath: MANIFEST_OBJECT_KEY, reason: failureReason(error) }); return; }
           await sleep(Math.max(gapLeft(), manifestGapMs));
-          try { await putManifest(); } catch (again) { failures.push({ relativePath: MANIFEST_OBJECT_KEY, reason: failureReason(again) }); }
+          try { await putManifest(); dropManifestFailures(); } catch (again) { failures.push({ relativePath: MANIFEST_OBJECT_KEY, reason: failureReason(again) }); }
         }
       };
       // a source scanned this pass keeps its manifest entries even when a file momentarily disappeared (durable, never pruned)
