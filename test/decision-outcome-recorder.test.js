@@ -100,3 +100,18 @@ test('DOR-5. the durable JSONL store is idempotent and cursor-durable across reo
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('DOR-6. PUBLISH-FIX-83 item 17: a horizon CENSORED because the closed-bar coverage is one bar short, or a series that is absent / lagging, waits (NOT final) until the hard deadline; the bar arriving later records KNOWN; the cursor is written once per page, not per row', async () => {
+  const anchor = 5_000_000 * 60 + 60;
+  const events = [decisionEvent(1, 'dec-a', 'BTC', anchor, 'NO_TRADE'), otherEvent(2), decisionEvent(3, 'dec-b', 'ETH', anchor + 60, 'NO_TRADE')];
+  const store = fakeStore(); let cursorWrites = 0; const counting = { ...store, setCursor: (s) => { cursorWrites += 1; store.setCursor(s); } };
+  let bars = 14; // one bar short of the 15-minute continuation at first look
+  let clockNow = (anchor + 16 * 60) * 1000;
+  const rec = createDecisionOutcomeRecorder({ readPage: pager(events), seriesSource: (coin) => (coin === 'BTC' ? seriesFor(anchor, bars) : null), store: counting, clock: () => clockNow });
+  const s0 = await rec.tick(); assert.equal(s0.recorded, 0, 'CENSORED at first look is not written'); assert.equal(s0.pendingSeq, 1); assert.equal(s0.waiting, 1); assert.equal(store.cursor(), 0);
+  bars = 15; clockNow += 3 * 60_000; // the thin coin's bar lands three minutes later
+  const s1 = await rec.tick(); assert.equal(s1.recorded, 1); assert.equal(store.rows()[0].yardstick.continuation.state, 'KNOWN', 'the late bar made it KNOWN instead of a permanent CENSORED');
+  assert.equal(s1.pendingSeq, 3, 'ETH: no series yet -> waiting, not OUTCOME_UNAVAILABLE'); assert.equal(store.cursor(), 2, 'the cursor advanced over the recorded row and the interleaved event'); assert.equal(cursorWrites, 1, 'ONE cursor write for the tick, not one per row');
+  clockNow = (anchor + 61 * 60) * 1000; // past the 60-minute hard deadline: whatever stands is written, the cursor cannot wedge
+  const s2 = await rec.tick(); assert.equal(s2.recorded, 1); assert.equal(store.rows()[1].yardstick.availability.state, 'OUTCOME_UNAVAILABLE'); assert.equal(store.cursor(), 3); assert.equal(cursorWrites, 2);
+});

@@ -19,6 +19,7 @@ export const DEFAULT_MAX_WAIT_MS = 60 * 60_000;   // hard deadline: record whate
 export const DEFAULT_PAGE_LIMIT = 500;
 
 const bounded = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').slice(0, 180);
+const LAGGING_STATES = new Set(['CENSORED']); const LAGGING_REASONS = new Set(['SERIES_ABSENT_FOR_ASSET', 'NO_TEMPORAL_OVERLAP', 'REFERENCE_BAR_MISSING', 'SERIES_MALFORMED']);
 
 export function createDecisionOutcomeRecorder({
   readPage, seriesSource, store, clock = () => Date.now(), log = () => {},
@@ -35,9 +36,12 @@ export function createDecisionOutcomeRecorder({
     if (running) return lastSummary ?? { state: 'BUSY' };
     running = true;
     const nowTs = clock();
-    let scanned = 0; let recorded = 0; let unavailable = 0; let failures = 0; let pendingSeq = null;
+    let scanned = 0; let recorded = 0; let unavailable = 0; let waiting = 0; let failures = 0; let pendingSeq = null;
     try {
-      let after = store.cursor();
+      let after = store.cursor(); let cursorDirty = false; const advance = (seq) => { after = seq; cursorDirty = true; }; const flushCursor = () => { if (cursorDirty) { store.setCursor(after); cursorDirty = false; } };
+      // PUBLISH-FIX-83 (full review item 18): the cursor is written ONCE per page / per tick (it was an fsync per row: a rename + fsync for
+      // every decision, thousands a day); a crash between flushes re-reads at most one page, and re-maturation is idempotent (store.has)
+      try {
       outer: for (;;) {
         let page;
         try { page = await readPage(after, pageLimit); } catch (error) { failures += 1; log(`decision outcome recorder: page read failed: ${bounded(error?.message ?? error)}`); break; }
@@ -45,32 +49,39 @@ export function createDecisionOutcomeRecorder({
         for (const row of page) {
           const seq = row?.seq; const event = row?.event;
           if (!Number.isSafeInteger(seq) || !event) { failures += 1; continue; }
-          if (event.type !== 'DECISION_RECORDED') { store.setCursor(seq); after = seq; continue; }
+          if (event.type !== 'DECISION_RECORDED') { advance(seq); continue; }
           scanned += 1;
           const p = event.payload ?? {};
           const decisionId = p.decisionId; const assetId = p.assetId; const decisionKnownAtTs = p.decisionKnownAtTs; const decisionState = p.state;
-          if (store.has(decisionId)) { store.setCursor(seq); after = seq; continue; } // already recorded on a prior run
-          if (typeof decisionId !== 'string' || !Number.isSafeInteger(decisionKnownAtTs)) { store.setCursor(seq); after = seq; failures += 1; continue; }
+          if (store.has(decisionId)) { advance(seq); continue; } // already recorded on a prior run
+          if (typeof decisionId !== 'string' || !Number.isSafeInteger(decisionKnownAtTs)) { advance(seq); failures += 1; continue; }
           if (nowTs < decisionKnownAtTs + maturityMs) { pendingSeq = seq; break outer; } // not yet due; every later decision is at least as un-mature
           const deadlineReached = nowTs >= decisionKnownAtTs + maxWaitMs;
           let series = null;
           try { series = seriesSource(assetId, { asOfTs: nowTs }); } catch (error) { failures += 1; log(`decision outcome recorder: series source failed for ${bounded(assetId)}: ${bounded(error?.message ?? error)}`); }
           let yardstick;
           try { yardstick = scoreDecisionYardstick({ canonicalCoin: assetId, decisionKnownAtTs, series, asOfTs: nowTs }); }
-          catch (error) { failures += 1; log(`decision outcome recorder: score failed for ${bounded(decisionId)}: ${bounded(error?.message ?? error)}`); store.setCursor(seq); after = seq; continue; }
+          catch (error) { failures += 1; log(`decision outcome recorder: score failed for ${bounded(decisionId)}: ${bounded(error?.message ?? error)}`); advance(seq); continue; }
           const stillMaturing = yardstick.bite.state === 'NOT_YET_KNOWN' || yardstick.continuation.state === 'NOT_YET_KNOWN';
-          if (stillMaturing && !deadlineReached) { pendingSeq = seq; break outer; } // due, but the candle data has not caught up; retry next tick
+          // PUBLISH-FIX-83 (full review item 17): a horizon CENSORED because the coin's closed-bar coverage is one bar short, or a series
+          // that is absent / does not overlap yet (thin coins lag minutes; a restart drops the pending candle), is NOT final at first
+          // look — it is "not yet known" until maxWaitMs, and only then written as it stands. Scored decisions fell from 2,707 a day
+          // to 37 when this wrote CENSORED permanently at anchor + 15 minutes.
+          const lagging = LAGGING_STATES.has(yardstick.bite.state) || LAGGING_STATES.has(yardstick.continuation.state) || (yardstick.availability?.state === 'OUTCOME_UNAVAILABLE' && LAGGING_REASONS.has(yardstick.availability?.reason));
+          if ((stillMaturing || lagging) && !deadlineReached) { pendingSeq = seq; waiting += 1; break outer; } // due, but the candle data has not caught up; retry next tick
           const record = { recordVersion: DECISION_OUTCOME_VERSION, decisionId, assetId, decisionKnownAtTs, seq, recordedTs: nowTs, decisionState, yardstick };
           try {
             const appended = store.append(record);
             if (appended) { recorded += 1; if (yardstick.availability.state === 'OUTCOME_UNAVAILABLE') unavailable += 1; }
           } catch (error) { failures += 1; log(`decision outcome recorder: append failed for ${bounded(decisionId)}: ${bounded(error?.message ?? error)}`); }
-          store.setCursor(seq); after = seq;
+          advance(seq);
         }
+        flushCursor();
         if (page.length < pageLimit) break;
       }
+      } finally { flushCursor(); }
     } finally { running = false; }
-    lastSummary = Object.freeze({ version: DECISION_OUTCOME_RECORDER_VERSION, tsMs: nowTs, state: failures ? 'DEGRADED' : 'OK', scanned, recorded, unavailable, failures, pendingSeq, cursor: store.cursor(), recordedTotal: store.count?.() ?? null });
+    lastSummary = Object.freeze({ version: DECISION_OUTCOME_RECORDER_VERSION, tsMs: nowTs, state: failures ? 'DEGRADED' : 'OK', scanned, recorded, unavailable, waiting, failures, pendingSeq, cursor: store.cursor(), recordedTotal: store.count?.() ?? null });
     return lastSummary;
   }
 
