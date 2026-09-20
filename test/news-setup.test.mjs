@@ -78,16 +78,19 @@ test('a startup status-write failure releases the new writer lock', async () => 
 });
 
 
-test('malformed history after taking the writer fence aborts startup and releases the fence', async () => {
+test('malformed history after taking the writer fence is skipped and COUNTED (PUBLISH-FIX-83 second pass: one bad line no longer darkens PRESS at every later boot); the fence is held through the run and released on stop', async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'news-hydration-fail-'));
+  let stop = null;
   try {
     mkdirSync(path.join(dir, 'press'));
     writeFileSync(path.join(dir, 'press', 'observations.jsonl'), '{}\n');
-    let calls = 0; let fenceRecorded = 0;
+    let calls = 0; let fenceRecorded = 0; const logs = [];
     const clock = () => { fenceRecorded++; assert.equal(existsSync(path.join(dir, 'press', 'writer.lock')), true); return now; };
-    await assert.rejects(setupNews({ dataDir: dir, env: {}, clock, log: () => {}, fetchImpl: async () => { calls++; return new Response(fixture); } }), /history invalid/);
-    assert.equal(calls, 0); assert.equal(fenceRecorded, 1, 'writer acquired before malformed history is read');
-    assert.equal(existsSync(path.join(dir, 'press', 'writer.lock')), false);
-    assert.equal(existsSync(path.join(dir, 'press', 'status.json')), false);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+    let report; ({ report, stop } = await setupNews({ dataDir: dir, env: {}, clock, log: (m) => logs.push(String(m)), fetchImpl: async () => { calls++; return new Response(fixture); } }));
+    assert.ok(fenceRecorded >= 1, 'writer acquired before the history is read');
+    assert.ok(logs.some((l) => /observation history: 1 unreadable line\(s\) skipped on load/.test(l)), logs.join(' | '));
+    assert.equal(report.mode, 'NEWS_ONLY_ONCE', 'the once-pass ran to its report');
+    stop(); stop();
+    assert.equal(existsSync(path.join(dir, 'press', 'writer.lock')), false, 'released after the once-pass');
+  } finally { stop?.(); rmSync(dir, { recursive: true, force: true }); }
 });
