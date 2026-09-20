@@ -645,7 +645,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // on its own errors); an uncaught EXCEPTION still ends the process through the same ordered shutdown as SIGTERM, with a line first.
   let strayRejections = 0;
   process.on('unhandledRejection', (err) => { strayRejections += 1; if (strayRejections <= 20 || strayRejections % 100 === 0) console.error(`UNHANDLED REJECTION #${strayRejections} (contained; the run continues): ${String(err?.stack ?? err?.message ?? err).split('\n').slice(0, 3).join(' | ').slice(0, 400)}`); });
-  process.once('uncaughtException', (err) => { console.error(`UNCAUGHT EXCEPTION — ordered shutdown: ${String(err?.stack ?? err?.message ?? err).split('\n').slice(0, 4).join(' | ').slice(0, 500)}`); process.kill(process.pid, 'SIGTERM'); setTimeout(() => process.exit(1), SHUTDOWN_BUDGET_MS + 5000).unref(); });
+  process.once('uncaughtException', (err) => { console.error(`UNCAUGHT EXCEPTION — ordered shutdown: ${String(err?.stack ?? err?.message ?? err).split('\n').slice(0, 4).join(' | ').slice(0, 500)}`); process.kill(process.pid, 'SIGTERM'); setTimeout(() => process.exit(2), SHUTDOWN_BUDGET_MS + 5000).unref(); /* exit 2: the ordered shutdown itself overran (exit 1 is the ONE mode refusal, serpent-mode-law MODE-3) */ });
 
   try {
     await runTape({ executionFeed: judgeRun ? judgeRun.tapeFeed : null, observer: marketResearch ? marketResearch.observer : null }); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
