@@ -20,7 +20,7 @@
 import path from 'node:path';
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { loadConfig, dataDir } from '../lib/config.js';
-import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
+import { appendJsonl, appendJsonlRotating, atomicWriteJson } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
 import { readCurrentUniverse } from '../tape/universe.js';
 import { rumintEnabled, fetchSymbolPage, readLocalCheckpoint } from './stocktwits.js';
@@ -204,7 +204,7 @@ export function startRumint({
 
   function tryAppend(record) {
     try {
-      appendJsonl(eventsFile(), record);
+      appendJsonlRotating(eventsFile(), record, { onRotate: (t) => log(`[${iso()}] RUMINT events rotated into ${path.basename(t)}`) });
       return true;
     } catch {
       S.counters.sourceWriteFailures += 1;

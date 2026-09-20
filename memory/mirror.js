@@ -9,7 +9,7 @@
 // parse failures, adapter failures and read failures are counted and
 // degrade memory health (§10). Sensor-owned files are never rewritten.
 import path from 'node:path';
-import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'node:fs';
 import { dataDir } from '../lib/config.js';
 import { sessionDate, nowIso } from '../lib/time.js';
 import { MemoryStore } from './store.js';
@@ -45,21 +45,12 @@ export class Tail {
     this.partial = '';
   }
 
-  readNew() {
-    if (!existsSync(this.file)) return { records: [], parseErrors: 0 };
-    const size = statSync(this.file).size;
-    if (size < this.offset) this.offset = 0; // rotated/replaced: start over
-    if (size === this.offset) return { records: [], parseErrors: 0 };
-    const fd = openSync(this.file, 'r');
-    let chunk;
-    try {
-      const buf = Buffer.alloc(size - this.offset);
-      readSync(fd, buf, 0, buf.length, this.offset);
-      chunk = buf.toString('utf8');
-    } finally {
-      closeSync(fd);
-    }
-    this.offset = size;
+  // read [from, to) of one file into text
+  #slice(file, from, to) {
+    const fd = openSync(file, 'r');
+    try { const buf = Buffer.alloc(to - from); readSync(fd, buf, 0, buf.length, from); return buf.toString('utf8'); } finally { closeSync(fd); }
+  }
+  #parse(chunk) {
     const text = this.partial + chunk;
     const lines = text.split('\n');
     this.partial = lines.pop() ?? ''; // an unterminated final line waits for its newline
@@ -75,6 +66,36 @@ export class Tail {
       }
     }
     return { records, parseErrors };
+  }
+  // PUBLISH-FIX-83: when the live file restarted (rotated whole into <dir>/archive/ by appendJsonlRotating, or replaced), the
+  // bytes appended after the last read but before the rotation are drained from the newest archive first — nothing is lost,
+  // nothing glues onto the new file. A replaced file with no matching archive simply starts over (the old law).
+  readNew() {
+    if (!existsSync(this.file)) return { records: [], parseErrors: 0 };
+    const size = statSync(this.file).size;
+    let records = []; let parseErrors = 0;
+    if (size < this.offset) {
+      const archived = this.#newestArchive();
+      if (archived && archived.size >= this.offset) { const r = this.#parse(this.#slice(archived.file, this.offset, archived.size)); records = r.records; parseErrors = r.parseErrors; if (this.partial.trim()) { const r2 = this.#parse('\n'); records.push(...r2.records); parseErrors += r2.parseErrors; } }
+      this.offset = 0; this.partial = '';
+    }
+    if (size === this.offset) return { records, parseErrors };
+    const chunk = this.#slice(this.file, this.offset, size);
+    this.offset = size;
+    const r = this.#parse(chunk);
+    return { records: records.concat(r.records), parseErrors: parseErrors + r.parseErrors };
+  }
+  #newestArchive() {
+    const dir = path.join(path.dirname(this.file), 'archive'); const base = path.basename(this.file, path.extname(this.file));
+    let best = null;
+    try {
+      for (const f of readdirSync(dir)) {
+        if (!f.startsWith(`${base}.`) || !f.endsWith('.jsonl')) continue;
+        const full = path.join(dir, f); const st = statSync(full);
+        if (!best || st.mtimeMs > best.mtimeMs) best = { file: full, size: st.size, mtimeMs: st.mtimeMs };
+      }
+    } catch { return null; }
+    return best;
   }
 }
 

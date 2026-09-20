@@ -12,3 +12,19 @@ test('FIX83-29. startPaperCollectorAdditions starts the market catalogs with SER
   assert.deepEqual(seen, ['0', '0', '3']);
   assert.equal(logs.filter((l) => l.includes('venue streams OFF in PAPER')).length, 2);
 });
+
+test('FIX83-ROT. appendJsonlRotating moves a full stream whole into archive/ (unique name, nothing deleted) and the mirror tail restarts cleanly', async () => {
+  const { mkdtempSync, rmSync, readdirSync, readFileSync, statSync } = await import('node:fs'); const { tmpdir } = await import('node:os'); const path = (await import('node:path')).default;
+  const { appendJsonlRotating, rotateJsonlIfLarge } = await import('../lib/jsonl.js'); const { Tail } = await import('../memory/mirror.js');
+  const dir = mkdtempSync(path.join(tmpdir(), 'cobra-fix83-rot-')); const file = path.join(dir, 'events.jsonl');
+  try {
+    const rotated = []; const tail = new Tail(file, { fromStart: true }); let seen = 0;
+    for (let i = 0; i < 50; i += 1) { appendJsonlRotating(file, { i, pad: 'x'.repeat(40) }, { maxBytes: 500, onRotate: (t) => rotated.push(t) }); if (i % 7 === 0) seen += tail.readNew().records.length; }
+    seen += tail.readNew().records.length;
+    assert.ok(rotated.length >= 4, `rotations happened: ${rotated.length}`); assert.equal(new Set(rotated).size, rotated.length, 'unique archive names');
+    const archived = readdirSync(path.join(dir, 'archive')).reduce((n, f) => n + readFileSync(path.join(dir, 'archive', f), 'utf8').split('\n').filter(Boolean).length, 0);
+    const live = readFileSync(file, 'utf8').split('\n').filter(Boolean).length; assert.equal(archived + live, 50, 'every line is on disk'); assert.ok(statSync(file).size < 500 + 80);
+    assert.equal(seen, 50, 'the mirror tail saw every record across rotations, none glued or lost');
+    assert.equal(rotateJsonlIfLarge(path.join(dir, 'missing.jsonl')), null);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

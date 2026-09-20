@@ -19,7 +19,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { loadConfig, dataDir } from '../lib/config.js';
-import { appendJsonl, atomicWriteJson, atomicWriteJsonAsync, readJsonlTail } from '../lib/jsonl.js';
+import { appendJsonl, appendJsonlRotating, atomicWriteJson, atomicWriteJsonAsync, readJsonlTail } from '../lib/jsonl.js';
 import { nowIso, sessionDate, etHourKey } from '../lib/time.js';
 import { readCurrentUniverse } from '../tape/universe.js';
 import { krakenUsdSpotBase, normalizeKrakenAssetPairs, acceptCatalogCandidate, CATALOG_MAX_MARKETS_DEFAULT } from './catalog.js';
@@ -161,7 +161,7 @@ export function startWideEye({
   }
 
   function logEvent(type, detail = {}) {
-    appendJsonl(eventsFile(), { ts: nowIso(), type, ...detail });
+    appendJsonlRotating(eventsFile(), { ts: nowIso(), type, ...detail }, { onRotate: (t) => log(`[${nowIso()}] WIDE EYE events rotated into ${path.basename(t)}`) });
   }
   const deepFreeze = (o) => { if (o === null || typeof o !== 'object' || Object.isFrozen(o)) return o; Object.freeze(o); for (const k of Object.keys(o)) deepFreeze(o[k]); return o; };
 
