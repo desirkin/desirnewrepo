@@ -399,7 +399,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
       if (judgeRun && judgeRun.kind === 'PAPER' && judgeRun.judge && typeof judgeRun.judge.decisions === 'function') {
         const { createJudgeDecisionBridge } = await import('./learning/judge-decision-bridge.js');
         const policyVersion = `judge-policy-${String(judgeRun.policyDigest ?? 'unknown').slice(0, 16)}`;
-        decisionBridge = (store) => createJudgeDecisionBridge({ store, decisionsSource: () => judgeRun.judge.decisions(), policyVersion, log: console.log });
+        decisionBridge = (store) => createJudgeDecisionBridge({ store, decisionsSource: () => (typeof judgeRun.judge.takeDecisions === 'function' ? judgeRun.judge.takeDecisions() : judgeRun.judge.decisions()), policyVersion, log: console.log }); // PUBLISH-FIX-83 item 23: the bridge drains every decision, not a 256-deep sample
       }
       // PUBLISH-FIX-39: the promoter — the runtime owner of freeze -> forward test -> publish (learning/promoter.js). Its
       // designs bind to THIS Judge's fact recipe and policy digest so a published activation is consumable by the Judge's

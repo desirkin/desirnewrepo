@@ -70,7 +70,7 @@ test('the bridge appends each decision once (idempotent across steps and re-read
     const r3 = bridge.step({ nowTs: T0 + 3 * MIN });
     assert.equal(r3.appended, 1); assert.equal(r3.malformed, 1);
     assert.equal(store.readEpisodes().length, 3);
-    assert.deepEqual(bridge.status().counters, { scanned: 4, appended: 3, duplicates: 0, refused: 0, skippedMalformed: 1, retried: 0, givenUp: 0 });
+    assert.deepEqual(bridge.status().counters, { scanned: 4, appended: 3, duplicates: 0, refused: 0, skippedMalformed: 1, retried: 0, givenUp: 0, carried: 0 });
     // a second bridge over the same store and the same ring appends nothing new (recipe identity)
     const again = createJudgeDecisionBridge({ store: createLearningStore({ dataDir: dir, log: () => {} }), decisionsSource: () => ring, policyVersion: 'judge-policy-abc' });
     const r4 = again.step({ nowTs: T0 + 4 * MIN });
@@ -177,5 +177,20 @@ test('PUBLISH-FIX-55: a store hiccup does not lose a decision — the write is r
     failing = true; ring.push(decision({ decisionId: 'dead', ts: T0 + 400_000 }));
     for (let i = 0; i < 5; i += 1) bridge.step({ nowTs: T0 + (10 + i) * MIN });
     assert.equal(bridge.status().counters.givenUp, 1); assert.equal(bridge.step({ nowTs: T0 + 20 * MIN }).handled, 0, 'given up = seen'); assert.ok(logs.some((m) => m.includes('given up')));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('PUBLISH-FIX-83 item 23: with a DRAINING source (the Judge\'s takeDecisions queue) nothing is lost: a burst larger than one step is carried to the next step, a refused write is carried and retried, and the Judge queues every decision it records', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-judge-bridge-83-'));
+  try {
+    const real = createLearningStore({ dataDir: dir, log: () => {} }); let failing = false;
+    const store = { ...real, appendEpisode: (e) => { if (failing && e.canonicalCoin === 'BTC') throw new Error('hiccup'); return real.appendEpisode(e); } };
+    let queue = []; const bridge = createJudgeDecisionBridge({ store, decisionsSource: () => queue.splice(0, queue.length), policyVersion: 'judge-policy-abc', maxPerStep: 100 });
+    for (let i = 0; i < 250; i += 1) queue.push(decision({ decisionId: `q${i}`, ts: T0 + i * 1000 }));
+    const r1 = bridge.step({ nowTs: T0 + MIN }); assert.equal(r1.appended, 100); assert.equal(r1.carried, 150, 'the rest is carried, not lost (the source was drained)'); assert.equal(queue.length, 0);
+    const r2 = bridge.step({ nowTs: T0 + 2 * MIN }); assert.equal(r2.appended, 100); assert.equal(r2.carried, 50);
+    const r3 = bridge.step({ nowTs: T0 + 3 * MIN }); assert.equal(r3.appended, 50); assert.equal(r3.carried, 0); assert.equal(real.readEpisodes().length, 250);
+    failing = true; queue.push(decision({ decisionId: 'retry-me', ts: T0 + 400_000 })); const r4 = bridge.step({ nowTs: T0 + 4 * MIN }); assert.equal(r4.refused, 1); assert.equal(r4.carried, 1);
+    failing = false; const r5 = bridge.step({ nowTs: T0 + 5 * MIN }); assert.equal(r5.appended, 1, 'the refused decision was carried and landed');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

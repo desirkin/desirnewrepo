@@ -74,22 +74,24 @@ export function episodeOfDecision(d, { policyVersion }) {
 // refused write is NOT remembered: the decision is offered again on the next step, up to MAX_RETRIES times, before it is
 // given up on (logged). Same episodes, same law; nothing new is captured, nothing captured is lost to a hiccup.
 const MAX_RETRIES = 5;
+const MAX_CARRY = 20_000;
 export function createJudgeDecisionBridge({ store, decisionsSource, policyVersion, log = () => {}, maxPerStep = 512 } = {}) {
   if (!store || typeof store.appendEpisode !== 'function') throw new Error('createJudgeDecisionBridge: a learning store is required');
   if (typeof decisionsSource !== 'function') throw new Error('createJudgeDecisionBridge: decisionsSource() is required');
   if (typeof policyVersion !== 'string' || !policyVersion.length) throw new Error('createJudgeDecisionBridge: policyVersion is required');
   const seen = new Set(); const seenOrder = []; const retries = new Map();
-  const counters = { scanned: 0, appended: 0, duplicates: 0, refused: 0, skippedMalformed: 0, retried: 0, givenUp: 0 };
-  let last = null;
+  const counters = { scanned: 0, appended: 0, duplicates: 0, refused: 0, skippedMalformed: 0, retried: 0, givenUp: 0, carried: 0 };
+  let last = null; let carry = []; // PUBLISH-FIX-83 item 23: the source may DRAIN (takeDecisions); what this step could not handle is carried to the next
   const remember = (id) => { seen.add(id); seenOrder.push(id); if (seenOrder.length > MAX_SEEN) seen.delete(seenOrder.shift()); };
   function step({ nowTs }) {
-    let decisions;
-    try { decisions = decisionsSource(); } catch (err) { last = { nowTs, failed: String(err?.message ?? err).slice(0, 160) }; return last; }
-    if (!Array.isArray(decisions)) { last = { nowTs, failed: 'DECISIONS_SOURCE_NOT_A_LIST' }; return last; }
+    let fresh;
+    try { fresh = decisionsSource(); } catch (err) { last = { nowTs, failed: String(err?.message ?? err).slice(0, 160) }; return last; }
+    if (!Array.isArray(fresh)) { last = { nowTs, failed: 'DECISIONS_SOURCE_NOT_A_LIST' }; return last; }
+    const decisions = carry.length ? [...carry, ...fresh] : fresh; carry = []; const later = []; const inStep = new Set();
     let appended = 0; let duplicates = 0; let refused = 0; let malformed = 0; let handled = 0;
     for (const d of decisions) {
-      const id = d?.decisionId; if (typeof id !== 'string' || seen.has(id)) continue;
-      if (handled >= maxPerStep) break;
+      const id = d?.decisionId; if (typeof id !== 'string' || seen.has(id) || inStep.has(id)) continue; inStep.add(id);
+      if (handled >= maxPerStep) { later.push(d); continue; }
       handled += 1; counters.scanned += 1;
       let episode = null;
       try { episode = episodeOfDecision(d, { policyVersion }); } catch (err) { refused += 1; counters.refused += 1; log(`judge decision bridge: episode refused for ${id}: ${String(err?.message ?? err).slice(0, 160)}`); remember(id); continue; }
@@ -99,12 +101,13 @@ export function createJudgeDecisionBridge({ store, decisionsSource, policyVersio
         if (r && r.appended) { appended += 1; counters.appended += 1; } else { duplicates += 1; counters.duplicates += 1; }
       } catch (err) {
         refused += 1; counters.refused += 1; const n = (retries.get(id) ?? 0) + 1;
-        if (n < MAX_RETRIES) { retries.set(id, n); counters.retried += 1; log(`judge decision bridge: store refused ${id} (attempt ${n}/${MAX_RETRIES}, will retry): ${String(err?.message ?? err).slice(0, 160)}`); continue; }
+        if (n < MAX_RETRIES) { retries.set(id, n); counters.retried += 1; later.push(d); log(`judge decision bridge: store refused ${id} (attempt ${n}/${MAX_RETRIES}, will retry): ${String(err?.message ?? err).slice(0, 160)}`); continue; }
         retries.delete(id); counters.givenUp += 1; log(`judge decision bridge: store refused ${id} ${MAX_RETRIES} times — given up: ${String(err?.message ?? err).slice(0, 160)}`);
       }
       retries.delete(id); remember(id);
     }
-    last = { nowTs, handled, appended, duplicates, refused, malformed, authority: 'NONE' };
+    if (later.length) { carry = later.slice(0, MAX_CARRY); counters.carried += carry.length; if (later.length > MAX_CARRY) counters.givenUp += later.length - MAX_CARRY; }
+    last = { nowTs, handled, appended, duplicates, refused, malformed, carried: carry.length, authority: 'NONE' };
     return last;
   }
   return { version: JUDGE_DECISION_BRIDGE_VERSION, step, status: () => ({ version: JUDGE_DECISION_BRIDGE_VERSION, counters: { ...counters }, last, authority: 'NONE' }) };

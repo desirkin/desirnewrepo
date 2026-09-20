@@ -324,3 +324,9 @@ test('BN-01. PUBLISH-FIX-83 item 15: a nomination the tape does not carry (subsc
   assert.equal(r.judge.candidates().some((c) => c.symbol === 'ZZZ/USD'), false); assert.equal(r.feed.health('ZZZ/USD').synced, false); assert.equal(r.feed.status().admitted, 1, 'the feed admission was released with the refusal');
   assert.ok(r.judge.admit('ETH/USD', { assetId: 'ETH', source: 'VOLATILITY_WATCH' }), 'a carried pair admits'); assert.equal(r.feed.status().admitted, 2);
 });
+
+test('BQ-01. PUBLISH-FIX-83 item 23: every decision the Judge records is queued for the learning bridge and takeDecisions() drains the queue; the cockpit ring stays', async () => {
+  const r = await rig({ accountId: 'j-bq' }); await r.warm(); await r.ignite();
+  const n = r.judge.decisions().length; assert.ok(n >= 1); assert.equal(r.judge.bridgeQueueDepth(), n);
+  const taken = r.judge.takeDecisions(); assert.equal(taken.length, n); assert.deepEqual(taken.map((d) => d.decisionId), r.judge.decisions().map((d) => d.decisionId)); assert.equal(r.judge.bridgeQueueDepth(), 0); assert.equal(r.judge.decisions().length, n, 'the cockpit ring is untouched');
+});
