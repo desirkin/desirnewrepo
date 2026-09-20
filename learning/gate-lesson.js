@@ -256,27 +256,39 @@ export function parseOwnerGateLines(raw) {
   }
   return { lines, rejected };
 }
-export function createGateLesson({ dataDir, clock = () => Date.now(), log = () => {}, ownerLines = null } = {}) {
+// PUBLISH-FIX-84 (review c6985361 F2/F3): the kill file is re-read on the Judge's own reads (at most every killRecheckMs), so a
+// KILL takes effect on the next look, not at the next scheduled refresh; a lesson older than maxLessonAgeMs (a study that stopped
+// running) is not a lesson — reference lines, with a line saying why.
+export const GATE_LESSON_MAX_AGE_MS = 7 * 24 * 3_600_000;
+export const KILL_RECHECK_MS = 5_000;
+export function createGateLesson({ dataDir, clock = () => Date.now(), log = () => {}, ownerLines = null, maxLessonAgeMs = GATE_LESSON_MAX_AGE_MS, killRecheckMs = KILL_RECHECK_MS } = {}) {
   if (typeof dataDir !== 'string' || !dataDir) throw new Error('gate lesson: dataDir required');
   const P = gateLessonPaths(dataDir); const killFile = path.join(dataDir, 'learning', 'kill.json');
-  let lesson = null; let killed = null; let lastLogged = null;
+  let lesson = null; let killed = null; let lastLogged = null; let stale = null; let killCheckedAt = -Infinity;
   const owner = parseOwnerGateLines(typeof ownerLines === 'string' ? ownerLines : ownerLines && typeof ownerLines === 'object' ? JSON.stringify(ownerLines) : '');
   const ownerIds = Object.keys(owner.lines);
   if (ownerIds.length) log(`GATE LINES: OWNER-SET ${ownerIds.map((id) => `${id} ${owner.lines[id]} (reference ${GATE_BANDS[id].reference ?? 'the setup\'s own'}, band ${GATE_BANDS[id].min}..${GATE_BANDS[id].max})`).join('; ')} — the owner's lines outrank learned ones; the kill file never silences them`);
   for (const r of owner.rejected) log(`GATE LINES: owner line ignored — ${r}`);
   function killState() { if (!existsSync(killFile)) return { state: 'ARMED', reason: null }; try { const k = JSON.parse(readFileSync(killFile, 'utf8')); return k && typeof k === 'object' && ['ARMED', 'KILLED'].includes(k.state) ? { state: k.state, reason: k.reason ?? null } : { state: 'KILLED', reason: 'KILL_FILE_INVALID' }; } catch { return { state: 'KILLED', reason: 'KILL_FILE_UNREADABLE' }; } }
+  const logKey = () => `${killed ? `KILLED:${killed.reason}` : 'ARMED'}:${stale ? `STALE:${stale.ageMs}` : ''}:${lesson ? JSON.stringify(lesson.lines) + ':' + lesson.computedTs : 'none'}`;
+  function checkKill(now) { killCheckedAt = now; const k = killState(); killed = k.state === 'KILLED' ? k : null; }
   function refresh() {
+    stale = null;
     try { lesson = existsSync(P.lesson) ? readJsonBounded(P.lesson, 4 * 1024 * 1024) : null; if (lesson && lesson.version !== GATE_LESSON_VERSION) lesson = null; }
     catch (err) { log(`GATE LEARNING lesson unreadable (reference lines): ${String(err?.message ?? err).slice(0, 120)}`); lesson = null; }
-    const k = killState(); killed = k.state === 'KILLED' ? k : null;
-    const key = `${killed ? `KILLED:${killed.reason}` : 'ARMED'}:${lesson ? JSON.stringify(lesson.lines) + ':' + lesson.computedTs : 'none'}`;
-    if (key !== lastLogged) { lastLogged = key; log(line()); }
+    const now = clock();
+    if (lesson && Number.isFinite(maxLessonAgeMs) && maxLessonAgeMs > 0) { const ageMs = now - (Number.isSafeInteger(lesson.computedTs) ? lesson.computedTs : 0); if (ageMs > maxLessonAgeMs) { stale = { ageMs, computedTs: lesson.computedTs ?? null }; lesson = null; } }
+    checkKill(now);
+    const key = logKey(); if (key !== lastLogged) { lastLogged = key; log(line()); }
     return current();
   }
-  function current() { return killed || !lesson ? { lines: {}, killed: killed ? { reason: killed.reason } : null } : { lines: lesson.lines ?? {}, killed: null }; }
+  function current() {
+    const now = clock(); if (now - killCheckedAt >= killRecheckMs) { const was = killed ? killed.reason : null; checkKill(now); const is = killed ? killed.reason : null; if (was !== is) { const key = logKey(); if (key !== lastLogged) { lastLogged = key; log(line()); } } }
+    return killed || !lesson ? { lines: {}, killed: killed ? { reason: killed.reason } : null, stale } : { lines: lesson.lines ?? {}, killed: null, stale: null };
+  }
   // the Judge's port answers a flat { FI15: 0.15, RV60: 1.0, ... }; RV60 is learned per setup, the Judge asks per setup
   function lessonFor(setupId = null) { const c = current(); const out = {}; for (const [id, v] of Object.entries(c.lines)) { if (id === 'RV60') { const s = setupId && v && typeof v === 'object' ? v[setupId] : undefined; if (typeof s === 'number') out.RV60 = s; } else if (typeof v === 'number') out[id] = v; } for (const id of ownerIds) out[id] = owner.lines[id]; return out; }
   const ownerText = () => (ownerIds.length ? ` | OWNER LINES in force: ${ownerIds.map((id) => `${id} ${owner.lines[id]}`).join(', ')}` : '');
-  function line() { if (killed) return `GATE LEARNING: DORMANT — learned influence KILLED (data/learning/kill.json${killed.reason ? `: ${killed.reason}` : ''}); reference lines in force${ownerText()}`; return `${gateLessonLine(lesson)}${ownerText()}`; }
+  function line() { if (killed) return `GATE LEARNING: DORMANT — learned influence KILLED (data/learning/kill.json${killed.reason ? `: ${killed.reason}` : ''}); reference lines in force${ownerText()}`; if (stale) return `GATE LEARNING: lesson STALE — computed ${Math.round(stale.ageMs / 3_600_000)} h ago, older than ${Math.round(maxLessonAgeMs / 3_600_000)} h; reference lines in force until the study runs again${ownerText()}`; return `${gateLessonLine(lesson)}${ownerText()}`; }
   return { refresh, lesson: lessonFor, current, line, paths: P, ownerLines: () => ({ ...owner.lines }) };
 }

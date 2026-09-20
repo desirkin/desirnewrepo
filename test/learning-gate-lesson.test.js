@@ -96,7 +96,7 @@ test('GL-06. the cycle: PROPOSED (nothing moves yet) -> forward test on looks sc
 
 test('GL-07. RV60 is learned per setup (its reference is the setup\'s own) and the reader hands the Judge a flat lesson per setup; the ONE learned-influence kill file (KILLED / invalid / unreadable) -> reference lines', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'gl7-')); const P = gateLessonPaths(root); mkdirSync(P.dir, { recursive: true }); mkdirSync(path.join(root, 'learning'), { recursive: true });
-  writeFileSync(P.lesson, JSON.stringify({ version: GATE_LESSON_VERSION, computedTs: 1, cfg: CFG, tests: 1, lines: { FI15: 0.1, RV60: { RANGE_IGNITION: 1.5 } }, units: {} }));
+  writeFileSync(P.lesson, JSON.stringify({ version: GATE_LESSON_VERSION, computedTs: Date.now(), cfg: CFG, tests: 1, lines: { FI15: 0.1, RV60: { RANGE_IGNITION: 1.5 } }, units: {} }));
   const lines = []; const lesson = createGateLesson({ dataDir: root, log: (l) => lines.push(l) }); lesson.refresh();
   assert.deepEqual(lesson.lesson('RANGE_IGNITION'), { FI15: 0.1, RV60: 1.5 }); assert.deepEqual(lesson.lesson('MICRO_BITE'), { FI15: 0.1 }); assert.deepEqual(lesson.lesson(), { FI15: 0.1 });
   writeFileSync(path.join(root, 'learning', 'kill.json'), JSON.stringify({ state: 'KILLED', reason: 'owner', ts: 1 })); lesson.refresh();

@@ -208,7 +208,9 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
   looks alone) → PUBLISHED (the Judge's line moves) → kept under forward test → REVERTED to the line before when the
   cohort it admitted turns negative with confidence; WITHDRAWN when the forward looks do not hold a proposal. One step per
   gate per cycle. Every transition is one log line with its numbers. The kill file (`data/learning/kill.json`, KILLED /
-  invalid / unreadable) → reference lines.
+  invalid / unreadable) → reference lines; the reader re-reads it on the Judge's own reads (at most every 5 s), so a KILL
+  or RESUME takes effect on the next look, not at the next scheduled refresh (review c6985361 F2). A lesson whose
+  `computedTs` is older than 7 days (the study stopped) is not a lesson: reference lines, one STALE line saying so (F3).
 - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.
