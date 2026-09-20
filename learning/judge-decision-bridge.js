@@ -42,9 +42,14 @@ export function featuresOf(measurements) {
 
 // the setup's clause measurements -> episode gates (already-observed facts; the learning side never re-evaluates them)
 export function gatesOf(measurements) {
-  const gates = [];
+  const gates = []; let sizingRows = 0;
   for (const m of Array.isArray(measurements) ? measurements : []) {
-    if (!m || typeof m.id !== 'string' || TRACE_ROW_IDS.has(m.id)) continue;
+    if (!m || typeof m.id !== 'string') continue;
+    // PUBLISH-FIX-84: a REFUSED sizing candidate rides into the ledger with its note (p=…;r=…;risk=…;REWARD_RISK_BELOW_1_5), at most
+    // three — the ledger used to record only that no size was found, never why, so the closest calls he ever had (every gate
+    // passed, no size) were unreadable. The gate learning ignores SIZE_CANDIDATE rows (learning/gate-lesson.js NOT_A_GATE).
+    if (m.id === 'SIZE_CANDIDATE') { if (m.ok === true || sizingRows >= 3 || typeof m.note !== 'string' || !m.note.length) continue; sizingRows += 1; gates.push({ id: m.id, ok: false, observed: m.value ?? null, threshold: m.threshold ?? null, class: 'SOFT', note: m.note.slice(0, 160) }); if (gates.length >= 32) break; continue; }
+    if (TRACE_ROW_IDS.has(m.id)) continue;
     gates.push({ id: m.id.slice(0, 64), ok: m.ok === true, observed: m.value ?? null, threshold: m.threshold ?? null, class: 'SOFT' });
     if (gates.length >= 32) break;
   }
@@ -63,7 +68,8 @@ export function episodeOfDecision(d, { policyVersion }) {
     featureSet: { features: featuresOf(d.measurements) }, gates: gatesOf(d.measurements),
     decision,
     baselineScore: d.valuationRef && Number.isFinite(Number(d.valuationRef.rewardRiskRatio)) ? Number(d.valuationRef.rewardRiskRatio) : null,
-    rejection: decision === 'SKIPPED' ? { reasonCode: (reasons[0] ?? 'ENTRY_REFUSED').slice(0, 64), observedValue: null, threshold: null, class: 'HARD' } : null,
+    // PUBLISH-FIX-84: the WHOLE reason list, '+'-joined (NO_TRADE_SIZE+NO_BOUNDED_FEASIBLE_LOT+REWARD_RISK_BELOW_1_5), not only the first
+    rejection: decision === 'SKIPPED' ? { reasonCode: (reasons.length ? reasons.join('+') : 'ENTRY_REFUSED').slice(0, 64), observedValue: null, threshold: null, class: 'HARD' } : null,
     setupType: setupId.slice(0, 64), regime: 'LIVE_UNCLASSIFIED', baselineRuleVersion: policyVersion,
   });
 }

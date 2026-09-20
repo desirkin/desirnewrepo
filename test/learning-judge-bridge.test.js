@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createJudgeDecisionBridge, episodeOfDecision, decisionKindOf, featuresOf, gatesOf } from '../learning/judge-decision-bridge.js';
+import { episodeError } from '../learning/contracts.js';
 import { createLiveArchiveSource } from '../learning/live-archive.js';
 import { createLearningStore } from '../learning/store.js';
 import { startLearning } from '../learning/service.js';
@@ -27,7 +28,7 @@ const facts = (over = {}) => [
 const decision = (over = {}) => ({
   decisionId: over.decisionId ?? 'dec-1', asset: { canonicalCoin: over.coin ?? 'BTC', venue: 'kraken', pair: 'BTC/USD' }, setupId: over.setupId ?? 'MOMENTUM_IGNITION',
   status: over.status ?? 'NO_TRADE', reasonCodes: over.reasonCodes ?? ['NO_SCENARIO_TARGET'], decisionKnownAtTs: over.ts ?? T0,
-  measurements: [{ id: 'RV60_GTE', ok: true, value: 2.4, threshold: 2, unit: 'ratio', note: null }, ...facts(), { id: 'LEARNED_RANK_ADJUSTMENT', ok: false, value: null, threshold: null, unit: 'RANK_SCORE_UNITS', note: 'x' }],
+  measurements: over.measurements ?? [{ id: 'RV60_GTE', ok: true, value: 2.4, threshold: 2, unit: 'ratio', note: null }, ...facts(), { id: 'LEARNED_RANK_ADJUSTMENT', ok: false, value: null, threshold: null, unit: 'RANK_SCORE_UNITS', note: 'x' }],
   valuationRef: over.valuationRef ?? null,
 });
 
@@ -45,7 +46,13 @@ test('the vocabulary: Judge decision states -> LEARN-1 decision kinds; facts -> 
 test('episodeOfDecision: a valid LEARN-1 episode in the Judge\'s setup vocabulary; SKIPPED carries the refusal reason; identity is per setup', () => {
   const e = episodeOfDecision(decision({ status: 'ENTRY_REFUSED', reasonCodes: ['CAGE', 'KILL'] }), { policyVersion: 'judge-policy-abc' });
   assert.equal(e.setupType, 'MOMENTUM_IGNITION'); assert.equal(e.regime, 'LIVE_UNCLASSIFIED'); assert.equal(e.decision, 'SKIPPED');
-  assert.deepEqual(e.rejection, { reasonCode: 'CAGE', observedValue: null, threshold: null, class: 'HARD' });
+  assert.deepEqual(e.rejection, { reasonCode: 'CAGE+KILL', observedValue: null, threshold: null, class: 'HARD' }, 'PUBLISH-FIX-84: the whole reason list, not only the first');
+  // PUBLISH-FIX-84: the sizing refusal names its number, and a sizing candidate's note reaches the ledger
+  const sized = episodeOfDecision(decision({ status: 'ENTRY_REFUSED', reasonCodes: ['NO_TRADE_SIZE', 'NO_BOUNDED_FEASIBLE_LOT', 'REWARD_RISK_BELOW_1_5'], measurements: [{ id: 'RV60_GTE', ok: true, value: 2.4, threshold: 2, unit: 'ratio', note: null }, { id: 'SIZE_CANDIDATE', ok: false, value: 0.25, threshold: 1, unit: 'FRACTION_OF_RISK_BOUNDED_SPENDABLE', note: 'REWARD_RISK_BELOW_1_5' }, { id: 'SIZE_CANDIDATE', ok: true, value: 0.5, threshold: 1, unit: 'FRACTION_OF_RISK_BOUNDED_SPENDABLE', note: 'p=0.41;r=0.8%;risk=3.1;NOT_SELECTED' }] }), { policyVersion: 'judge-policy-abc' });
+  assert.equal(sized.rejection.reasonCode, 'NO_TRADE_SIZE+NO_BOUNDED_FEASIBLE_LOT+REWARD_RISK_BELOW_1_5');
+  assert.deepEqual(sized.gates.filter((g) => g.id === 'SIZE_CANDIDATE').map((g) => g.note), ['REWARD_RISK_BELOW_1_5'], 'the refused sizing candidate rides in with its note; an accepted one does not');
+  assert.equal(sized.gates.find((g) => g.id === 'RV60_GTE').note, undefined, 'only sizing rows carry a note');
+  assert.equal(episodeError(sized), null, 'still a valid episode');
   assert.equal(e.datasetId, 'live-judge-paper:MOMENTUM_IGNITION'); assert.equal(e.baselineRuleVersion, 'judge-policy-abc');
   assert.equal(e.features.rv60.value, 2.4); assert.equal(e.authority, 'NONE');
   const other = episodeOfDecision(decision({ setupId: 'BREAKOUT_CONFIRM' }), { policyVersion: 'judge-policy-abc' });
