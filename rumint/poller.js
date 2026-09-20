@@ -43,6 +43,7 @@ import {
   pollEventIdentity,
   nominationEventIdentity,
   utcHourKey,
+  hourKeyMs,
   validateCheckpoint,
   validateSourceRecord,
   validatePendingEntry,
@@ -138,6 +139,9 @@ export class Budget {
 // R1A: a recent partial-continuation failure keeps the cycle honestly
 // DEGRADED for this long — bounded, so one blip never degrades forever.
 const CONTINUATION_DEGRADE_MS = 15 * 60_000;
+// PUBLISH-FIX-83: a withheld initialization retries its durable load on a bounded back-off, never once per tick
+const INIT_RETRY_MIN_MS = 5_000;
+const INIT_RETRY_MAX_MS = 5 * 60_000;
 
 export function startRumint({
   log = console.log,
@@ -191,10 +195,12 @@ export function startRumint({
     lastPollTs: null,
     lastSuccessTs: null,
     localSave: 'NOT_YET_SAVED', // NOT_YET_SAVED | SAVED | FAILED
+    saveDetail: null, // PUBLISH-FIX-83: why the last checkpoint was refused before writing (null when the last build validated)
     durableSave: checkpointStore ? 'NOT_YET_SAVED' : 'NOT_CONFIGURED', // + DURABLE | AT_RISK
   };
 
   const iso = () => new Date(now()).toISOString();
+  let lastInvalidSaveLogged = null;
 
   function tryAppend(record) {
     try {
@@ -367,7 +373,26 @@ export function startRumint({
   }
 
   // ---- checkpoint build / adopt -------------------------------------------
+  // review finding (PUBLISH-FIX-83): baselines and symbolHealth were only ever ADDED to. The tracked set follows the tape's
+  // universe, so over days the ear accumulated more than MAX_SYMBOLS provider symbols — the checkpoint it then saved was one
+  // validateCheckpoint refuses ('baselines over symbol bound'), and the next restart was WITHHELD_INVALID_CHECKPOINT forever.
+  // Law now: a checkpoint carries the tracked symbols first, then the most recently observed others, never more than the
+  // bound; the in-flight transaction's symbol is always kept. Pruned symbols lose only their (unpolled) history.
+  const lastObservedMs = (baseline) => { let best = 0; for (const k of Object.keys(baseline?.buckets ?? {})) { const ms = hourKeyMs(k); if (Number.isFinite(ms) && ms > best) best = ms; } return best; };
+  function pruneCheckpointSymbols() {
+    const keep = new Set();
+    if (S.pollTransaction?.providerSymbol) keep.add(S.pollTransaction.providerSymbol);
+    for (const coin of trackedCoins()) { const sym = providerSymbolFor(coin); if (sym && keep.size < MAX_SYMBOLS) keep.add(sym); }
+    const others = Object.keys(S.baselines).filter((sym) => !keep.has(sym)).sort((a, b) => lastObservedMs(S.baselines[b]) - lastObservedMs(S.baselines[a]) || a.localeCompare(b));
+    for (const sym of others) { if (keep.size >= MAX_SYMBOLS) break; keep.add(sym); }
+    let pruned = 0;
+    for (const sym of Object.keys(S.baselines)) if (!keep.has(sym)) { delete S.baselines[sym]; pruned += 1; }
+    for (const sym of Object.keys(S.symbolHealth)) if (!keep.has(sym)) { delete S.symbolHealth[sym]; pruned += 1; }
+    if (pruned > 0) log(`[${iso()}] RUMINT checkpoint pruned ${pruned} untracked symbol entries (bound ${MAX_SYMBOLS})`);
+    return pruned;
+  }
   function buildCheckpointState() {
+    pruneCheckpointSymbols();
     return {
       version: RUMINT_CHECKPOINT_VERSION,
       savedTs: iso(),
@@ -446,8 +471,17 @@ export function startRumint({
   }
 
   // ---- durable initialization gate (§11) ----------------------------------
+  // review finding (PUBLISH-FIX-83): a WITHHELD init used to retry the durable load EVERY tick (1 Hz) — a rejected or unreachable
+  // checkpoint became a one-per-second database read for the life of the process. The retry now backs off 5 s -> 5 min.
+  let initRetryAt = 0; let initRetryMs = 0; let lastInitStateLogged = null;
+  const withhold = () => { initRetryMs = Math.min(INIT_RETRY_MAX_MS, initRetryMs ? initRetryMs * 2 : INIT_RETRY_MIN_MS); initRetryAt = now() + initRetryMs; const key = `${S.initState}:${S.initDetail}`; if (key !== lastInitStateLogged) { log(`[${iso()}] RUMINT ${S.initState} — ${S.initDetail} (retry in ${Math.round(initRetryMs / 1000)} s)`); lastInitStateLogged = key; } return false; };
   async function ensureInit() {
     if (S.initialized) return true;
+    if (now() < initRetryAt) return false;
+    const ok = await ensureInitOnce();
+    return ok ? true : withhold();
+  }
+  async function ensureInitOnce() {
     let outcome;
     if (!checkpointStore) outcome = { outcome: 'NOT_CONFIGURED' };
     else {
@@ -517,8 +551,17 @@ export function startRumint({
   }
 
   // ---- checkpoint save: local + durable, both truthfully reported ---------
-  async function saveCheckpoint() {
+  async function saveCheckpoint({ durable: wantDurable = true } = {}) {
     const state = buildCheckpointState();
+    // review finding (PUBLISH-FIX-83): a checkpoint the loader would refuse is never written — writing it would poison the
+    // next restart (WITHHELD_INVALID_CHECKPOINT) while this run keeps polling as if all were well. It is named and counted.
+    const invalid = validateCheckpoint(state);
+    if (invalid) {
+      S.localSave = 'FAILED'; S.durableSave = checkpointStore ? 'AT_RISK' : 'NOT_CONFIGURED'; S.counters.durableCheckpointFailures += 1; S.saveDetail = boundedError(invalid);
+      if (S.saveDetail !== lastInvalidSaveLogged) { log(`[${iso()}] RUMINT checkpoint NOT saved — it would not load back: ${S.saveDetail}`); lastInvalidSaveLogged = S.saveDetail; }
+      return { localOk: false, durableOk: false, invalid: S.saveDetail };
+    }
+    S.saveDetail = null;
     let localOk = false;
     try {
       atomicWriteJson(checkpointFile(), state, { pretty: false });
@@ -528,9 +571,10 @@ export function startRumint({
       S.localSave = 'FAILED';
     }
     let durable = { durable: false, reason: 'NOT_CONFIGURED' };
+    if (checkpointStore && !wantDurable) return { localOk, durableOk: S.durableSave === 'DURABLE', deferred: true }; // the durable row is rewritten at most every durableEveryMs (the local file carries the transaction)
     if (checkpointStore) {
       try {
-        durable = await checkpointStore.save(state);
+        durable = await checkpointStore.save(state); if (durable.durable) { lastDurableSaveTs = now(); lastDurableHadTxn = Boolean(state.pollTransaction); }
       } catch (err) {
         durable = { durable: false, reason: 'UNAVAILABLE', error: boundedError(err.message) };
       }
@@ -998,6 +1042,7 @@ export function startRumint({
         status,
         initState: S.initState,
         initDetail: S.initDetail,
+        saveDetail: S.saveDetail,
         symbolsTracked: coins.length,
         symbolsReady: counts.READY,
         symbolsWarming: counts.WARMING,
@@ -1077,12 +1122,18 @@ export function startRumint({
       rollHyped();
     } finally {
       // save-then-publish: durability failures must be visible in the same
-      // status the failure happened in; no checkpoint save while withheld
-      if (!S.stopped && S.initialized) await saveCheckpoint();
-      publishStatus();
+      // status the failure happened in; no checkpoint save while withheld.
+      // review finding (PUBLISH-FIX-83): this used to run EVERY second — a 1-2 MB stringify + local write + a Postgres row rewrite of
+      // the same bytes 86,400 times a day through the pool the Judge's commits share. The checkpoint is saved when the state
+      // ADVANCED (a poll, a drained event, a HYPED roll — the R1A transaction law is kept: every advancement is followed by its save)
+      // and never more often than durableEveryMs for the durable row; the status is published when it changed or every 10 s.
+      if (!S.stopped && S.initialized) { const sig = stateSignature(); if (sig !== lastSavedSignature) { const forceDurable = Boolean(S.pollTransaction) || lastDurableHadTxn || (S.pending.length > 0 && S.counters.polls !== lastSavedPolls); /* a durable row that carries a prepared transaction is closed by the next durable save, never left open for a minute */ await saveCheckpoint({ durable: forceDurable || now() - lastDurableSaveTs >= durableEveryMs }); lastSavedSignature = sig; lastSavedPolls = S.counters.polls; } }
+      if (now() - lastStatusPublishTs >= 10_000 || stateSignature() !== lastStatusSignature) { publishStatus(); lastStatusPublishTs = now(); lastStatusSignature = stateSignature(); }
       running = false;
     }
   }
+  let lastSavedSignature = null; let lastSavedPolls = -1; let lastDurableSaveTs = 0; let lastDurableHadTxn = false; let lastStatusPublishTs = 0; let lastStatusSignature = null; const durableEveryMs = 60_000;
+  const stateSignature = () => `${S.initState}|${S.counters.polls}|${S.pending.length}|${S.hyped?.state ?? ''}|${S.hyped?.symbols?.length ?? 0}|${S.pollTransaction ? 'txn' : ''}|${S.durableSave ?? ''}|${S.localSave ?? ''}|${S.saveDetail ?? ''}`;
 
   const timer = setInterval(() => {
     tickOnce().catch((err) => log(`[${iso()}] RUMINT tick failed: ${err.message}`));
