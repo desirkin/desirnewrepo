@@ -38,13 +38,36 @@ const TAPE_SAMPLE_SEC = 60;
 //   fromStart=true — a file first seen AFTER the mirror opened (e.g. a new
 //     daily tape session): it is new live evidence; read from byte zero.
 // A malformed line is skipped and COUNTED — never repaired, never silent.
+export const TAIL_MAX_READ_BYTES = 8 * 1024 * 1024; // PUBLISH-FIX-83 second pass: one read never materializes more than this
 export class Tail {
-  constructor(file, { fromStart = false } = {}) {
+  constructor(file, { fromStart = false, maxBytes = TAIL_MAX_READ_BYTES } = {}) {
     this.file = file;
     this.offset = fromStart ? 0 : existsSync(file) ? statSync(file).size : 0;
     this.partial = '';
+    this.maxBytes = maxBytes;
+    // the inode of the file the offset belongs to (null until the first read): a rotation is detected by IDENTITY, never by
+    // size — before this, a live file that had already outgrown a lagging offset was read from that offset as if nothing
+    // happened, and the archived remainder plus the new file's head were silently skipped (second-pass review finding)
+    this.ino = null;
+    this.draining = null; // { file, size } — the archived file still owed its tail after a rotation
   }
 
+  // a cursor the caller can rewind to when its consumer failed after the read (the pump's outage law): offset AND which file
+  mark() { return { offset: this.offset, ino: this.ino, draining: this.draining, partial: this.partial }; }
+  rewind(m) { this.offset = m.offset; this.ino = m.ino; this.draining = m.draining; this.partial = m.partial; }
+  // resume from a persisted cursor { offset, ino }: when the file at `ino` is no longer the live one (rotated while the
+  // consumer was down), the matching archive is drained from the offset first; an unknown ino with a live file shorter than
+  // the offset starts over (the old law); an unknown ino with a longer live file keeps the offset (a same-file cursor from
+  // before inodes were recorded)
+  resume({ offset = 0, ino = null } = {}) {
+    this.offset = offset; this.partial = ''; this.draining = null; this.ino = null;
+    if (!existsSync(this.file)) return;
+    const st = statSync(this.file);
+    if (ino !== null && ino !== st.ino) { const archived = this.#archiveWithInode(ino); if (archived && archived.size > offset) { this.draining = archived; } else { this.offset = 0; } this.ino = st.ino; return; }
+    this.ino = st.ino;
+    if (st.size < this.offset) this.offset = 0;
+  }
+  cursor() { return { offset: this.offset, ino: this.draining ? this.draining.ino : this.ino }; }
   // read [from, to) of one file into text
   #slice(file, from, to) {
     const fd = openSync(file, 'r');
@@ -67,35 +90,48 @@ export class Tail {
     }
     return { records, parseErrors };
   }
-  // PUBLISH-FIX-83: when the live file restarted (rotated whole into <dir>/archive/ by appendJsonlRotating, or replaced), the
-  // bytes appended after the last read but before the rotation are drained from the newest archive first — nothing is lost,
-  // nothing glues onto the new file. A replaced file with no matching archive simply starts over (the old law).
-  readNew() {
-    if (!existsSync(this.file)) return { records: [], parseErrors: 0 };
-    const size = statSync(this.file).size;
-    let records = []; let parseErrors = 0;
-    if (size < this.offset) {
-      const archived = this.#newestArchive();
-      if (archived && archived.size >= this.offset) { const r = this.#parse(this.#slice(archived.file, this.offset, archived.size)); records = r.records; parseErrors = r.parseErrors; if (this.partial.trim()) { const r2 = this.#parse('\n'); records.push(...r2.records); parseErrors += r2.parseErrors; } }
-      this.offset = 0; this.partial = '';
-    }
-    if (size === this.offset) return { records, parseErrors };
-    const chunk = this.#slice(this.file, this.offset, size);
-    this.offset = size;
-    const r = this.#parse(chunk);
-    return { records: records.concat(r.records), parseErrors: parseErrors + r.parseErrors };
+  // bounded read of [offset, min(size, offset + maxBytes)) from `file`; the offset advances by what was read
+  #readFrom(file, size) {
+    const to = Math.min(size, this.offset + this.maxBytes);
+    if (to <= this.offset) return { records: [], parseErrors: 0, complete: true };
+    const r = this.#parse(this.#slice(file, this.offset, to));
+    this.offset = to;
+    return { ...r, complete: to >= size };
   }
-  #newestArchive() {
+  // PUBLISH-FIX-83: when the live file's inode changed (rotated whole into <dir>/archive/ by appendJsonlRotating / the memory
+  // store, or replaced), the archived file that carries the old inode is drained from the offset FIRST (bounded per call, across
+  // calls if needed), then the new file is read from byte 0. A replaced file with no matching archive starts over at 0.
+  readNew() {
+    if (this.draining) {
+      const r = this.#readFrom(this.draining.file, this.draining.size);
+      if (!r.complete) return { records: r.records, parseErrors: r.parseErrors };
+      if (this.partial.trim()) { const r2 = this.#parse('\n'); r.records.push(...r2.records); r.parseErrors += r2.parseErrors; }
+      this.draining = null; this.offset = 0; this.partial = '';
+      const more = this.readNew();
+      return { records: r.records.concat(more.records), parseErrors: r.parseErrors + more.parseErrors };
+    }
+    if (!existsSync(this.file)) return { records: [], parseErrors: 0 };
+    const st = statSync(this.file);
+    if (this.ino === null) this.ino = st.ino;
+    else if (st.ino !== this.ino) {
+      const archived = this.#archiveWithInode(this.ino);
+      this.ino = st.ino;
+      if (archived && archived.size > this.offset) { this.draining = archived; return this.readNew(); }
+      this.offset = 0; this.partial = '';
+    } else if (st.size < this.offset) { this.offset = 0; this.partial = ''; } // truncated in place: start over (the old law)
+    const r = this.#readFrom(this.file, st.size);
+    return { records: r.records, parseErrors: r.parseErrors };
+  }
+  #archiveWithInode(ino) {
     const dir = path.join(path.dirname(this.file), 'archive'); const base = path.basename(this.file, path.extname(this.file));
-    let best = null;
     try {
       for (const f of readdirSync(dir)) {
         if (!f.startsWith(`${base}.`) || !f.endsWith('.jsonl')) continue;
         const full = path.join(dir, f); const st = statSync(full);
-        if (!best || st.mtimeMs > best.mtimeMs) best = { file: full, size: st.size, mtimeMs: st.mtimeMs };
+        if (st.ino === ino) return { file: full, size: st.size, ino };
       }
     } catch { return null; }
-    return best;
+    return null;
   }
 }
 

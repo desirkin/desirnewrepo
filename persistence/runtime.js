@@ -452,7 +452,7 @@ function startPump(state, log) {
     try {
       const parsed = JSON.parse(rawCursors);
       const numMap = (o) => o === undefined || (o !== null && typeof o === 'object' && Object.values(o).every((v) => Number.isInteger(v) && v >= 0));
-      if (parsed === null || typeof parsed !== 'object' || !numMap(parsed.offsets) || !numMap(parsed.lineCounts)) {
+      if (parsed === null || typeof parsed !== 'object' || !numMap(parsed.offsets) || !numMap(parsed.lineCounts) || !numMap(parsed.inos)) {
         throw new Error('invalid cursor shape');
       }
       cursors = parsed;
@@ -467,9 +467,9 @@ function startPump(state, log) {
   const lineCounts = { ...(cursors.lineCounts ?? {}) };
   for (const s of pumpSources()) {
     const t = new Tail(s.file, { fromStart: true });
-    t.offset = cursors.offsets?.[s.key] ?? 0; // resume exactly where durability left off
+    t.resume({ offset: cursors.offsets?.[s.key] ?? 0, ino: cursors.inos?.[s.key] ?? null }); // resume exactly where durability left off (PUBLISH-FIX-83: in WHICH file — a rotation while down drains the archive first)
     if (state.resetCursorKeys.has(s.key)) {
-      t.offset = 0; // file was re-materialized during restore; replay is idempotent
+      t.resume({ offset: 0 }); // file was re-materialized during restore; replay is idempotent
       lineCounts[s.key] = 0;
     }
     tails.set(s.key, t);
@@ -601,7 +601,7 @@ function startPump(state, log) {
     let pendingNow = 0;
     for (const s of pumpSources()) {
       const t = tails.get(s.key);
-      const beforeOffset = t.offset;
+      const beforeMark = t.mark(); // PUBLISH-FIX-83: the rewind restores WHICH file too (a rotation drained mid-cycle)
       const beforeCount = lineCounts[s.key] ?? 0;
       let result;
       try {
@@ -634,8 +634,7 @@ function startPump(state, log) {
         }
       }
       if (failed) {
-        t.offset = beforeOffset;
-        t.partial = '';
+        t.rewind(beforeMark);
         lineCounts[s.key] = beforeCount;
         break; // outage: stop pumping this round; health shows pending
       }
@@ -644,6 +643,7 @@ function startPump(state, log) {
     pendingNow += await snapshotCurrentState();
     state.pump.pendingWrites = pendingNow;
     cursors.offsets = Object.fromEntries([...tails.entries()].map(([k, t]) => [k, t.offset]));
+    cursors.inos = Object.fromEntries([...tails.entries()].map(([k, t]) => [k, t.cursor().ino]).filter(([, ino]) => Number.isInteger(ino)));
     cursors.lineCounts = lineCounts;
     try {
       atomicWriteJson(CURSORS_FILE(), cursors);
