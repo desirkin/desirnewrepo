@@ -89,7 +89,7 @@ export function evaluateTick({ ret1, ret5, ret15Pct, volRate }, baselines, cfg, 
 // PUBLISH-FIX-83: the sample "minAgo minutes ago" for a trailing return. It must sit inside a bounded band around the wanted
 // age — [want - AT_SLACK_EARLY_MS, want + AT_SLACK_LATE_MS] — else the return is honestly unavailable (undefined). Before this
 // the newest sample OLDER than the wanted age was taken, so after a sweep gap a 3-minute move was scored as a 1-minute return.
-export const AT_SLACK_LATE_MS = 5_000;
+export const AT_SLACK_LATE_MS = 30_000; // second-pass review: a sample up to half a sweep YOUNGER than the wanted age is still that age (fetch latency varies sweep to sweep); the 120 s sample after a gap stays refused
 export const AT_SLACK_EARLY_MS = 35_000;
 export function trailingSample(series, nowMs, minAgo) {
   const want = nowMs - minAgo * 60_000;

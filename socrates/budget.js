@@ -40,6 +40,10 @@ export const actualCostUsd = ({ usage, pricing }) => { const e = usageError(usag
 export function staleLockOwner(lockFile, { pidAlive = (p) => { try { process.kill(p, 0); return true; } catch (err) { return err?.code !== 'ESRCH'; } } } = {}) {
   let rec; try { rec = JSON.parse(readFileSync(lockFile, 'utf8').split('\n')[0]); } catch { return null; }
   if (!isPlainObject(rec) || !isCount(rec.pid) || rec.pid === 0) return null;
+  // second-pass review: a container restart reuses low pids — a lock carrying OUR pid but opened before this process booted
+  // was provably written by a previous life of this pid, never by us (we hold no lock yet at open time)
+  const bootedAt = Date.now() - process.uptime() * 1000;
+  if (rec.pid === process.pid && isCount(rec.openedTs) && rec.openedTs < bootedAt - 1000) return rec;
   return pidAlive(rec.pid) ? null : rec;
 }
 export function openBudgetJournal({ dir, clock = () => Date.now(), pid = process.pid, log = () => {}, pidAlive = undefined }) {

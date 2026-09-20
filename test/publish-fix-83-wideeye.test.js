@@ -15,11 +15,11 @@ test.after(() => { delete process.env.WIDEEYE_ENABLED; rmSync(root, { recursive:
 test('FIX83-W8. trailingSample: the sample 1 minute ago is the one inside [-35 s, +5 s] of that age; after a gap the older sample is NOT relabelled', () => {
   const T = Date.UTC(2026, 8, 13, 12); const s = [{ t: T - 180_000, price: 1 }, { t: T - 120_000, price: 2 }, { t: T - 60_000, price: 3 }, { t: T, price: 4 }];
   assert.equal(trailingSample(s, T, 1).price, 3); assert.equal(trailingSample(s, T, 2).price, 2); assert.equal(trailingSample(s, T, 3).price, 1);
-  assert.equal(trailingSample(s, T + 4_000, 1).price, 3, 'a few seconds of sweep jitter is fine');
+  assert.equal(trailingSample(s, T + 25_000, 1).price, 3, 'up to half a sweep of jitter is fine');
   const gapped = [{ t: T - 180_000, price: 1 }, { t: T, price: 4 }]; // the sweeps at -2 min and -1 min were missed
   assert.equal(trailingSample(gapped, T, 1), undefined, 'no 1-minute sample: the 3-minute-old one is not it'); assert.equal(trailingSample(gapped, T, 2), undefined); assert.equal(trailingSample(gapped, T, 3).price, 1);
   assert.equal(trailingSample(s, T, 5), undefined, 'older than the series');
-  assert.equal(AT_SLACK_EARLY_MS, 35_000); assert.equal(AT_SLACK_LATE_MS, 5_000);
+  assert.equal(AT_SLACK_EARLY_MS, 35_000); assert.equal(AT_SLACK_LATE_MS, 30_000);
 });
 
 test('FIX83-W7. baselines persist: a coin with no surveyed hour in 7 days is dropped, the write is asynchronous and lands', async () => {

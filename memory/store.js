@@ -98,6 +98,7 @@ export class MemoryStore {
     this.status = 'HEALTHY';
     this.liveBytes = 0; // bytes in the live segment (rotation law)
     this.rotations = 0; // lifetime (manifest)
+    this.recordCountArchived = 0; // lifetime: records archived by rotations (manifest); recordCount counts the live segment
     this.rotateBytes = MEMORY_ROTATE_BYTES;
     this.#loadManifestIdentity();
     this.#recover(recoveryChunkBytes);
@@ -116,6 +117,7 @@ export class MemoryStore {
       this.duplicateSuppressedCount = m.duplicateSuppressedCount ?? 0;
       this.invalidRejectedCount = m.invalidRejectedCount ?? 0;
       this.rotations = m.rotations ?? 0;
+      this.recordCountArchived = m.recordCountArchived ?? 0;
       this.manifestRecovered = true;
     } catch {
       // fail honestly: the manifest is unreadable; evidence still recovers,
@@ -334,9 +336,11 @@ export class MemoryStore {
     for (let k = 2; existsSync(target); k += 1) target = path.join(archiveDir, `events.${stamp}.${k}.jsonl`); // never onto an existing archive
     renameSync(this.eventsFile, target);
     this.rotations += 1;
+    const indexed = this.ids.size;
+    this.recordCountArchived += indexed; // lifetime: records that left the live segment (the manifest adds them back)
     this.ids = new Map();
     this.liveBytes = 0;
-    this.log(`MEMORY rotated: live segment (${this.ids.size} records indexed) archived as ${path.basename(target)}; index restarts with the new segment`);
+    this.log(`MEMORY rotated: live segment (${indexed} records indexed) archived as ${path.basename(target)}; index restarts with the new segment`);
     this.flush();
   }
 
@@ -375,6 +379,8 @@ export class MemoryStore {
       invalidRecoveredQuarantined: this.invalidRecovered,
       idContentConflictsQuarantined: this.idConflicts,
       rotations: this.rotations,
+      recordCountArchived: this.recordCountArchived,
+      recordCountLifetime: this.recordCount + this.recordCountArchived,
       liveSegmentBytes: this.liveBytes,
       knownGaps: gaps,
     };

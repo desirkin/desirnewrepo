@@ -493,10 +493,12 @@ export function startWideEye({
     clearIntervalImpl(timer);
     clearIntervalImpl(silence);
     clearTimeoutImpl(first);
-    try {
-      atomicWriteJson(baselinesFile(), baselines);
-    } catch {
-      // disk refused the final flush; sweeps already logged what mattered
+    if (!persistInFlight) { // second-pass review: an in-flight async write must not be overtaken by an older snapshot's rename
+      try {
+        atomicWriteJson(baselinesFile(), baselines);
+      } catch {
+        // disk refused the final flush; sweeps already logged what mattered
+      }
     }
   };
   if (registerSignals) {

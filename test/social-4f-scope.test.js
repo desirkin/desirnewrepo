@@ -326,7 +326,8 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     // wanted age, so a missed sweep no longer relabels a 3-minute move as a 1-minute return. The formulas (bucketAdd, pooledStats,
     // zScore, classifyRipple, evaluateTick, pruneBaselineBuckets, logReturn, extensionPct, volumeRate) are byte-unchanged. A
     // sensor ruler; no trading/control/model surface. Tests: test/publish-fix-83-wideeye.test.js FIX83-W8, test/wideeye.test.js.
-    'survey/eyecore.js': '5b29eea219513820a0b9becd44640b9a0d8da2ab126b85ba2ea8244058bcb966',
+    // (second-pass review: AT_SLACK_LATE_MS 5 s -> 30 s, half a sweep of fetch jitter; digest re-pinned)
+    'survey/eyecore.js': 'ca12ca3dfaf53203f809d79575a86fa29d0cf89298b7050080f90ec70d5f9548',
   };
   // R2-3: the 9c17372 baseline is committed, not read from `git show`, so the fence
   // survives a shallow clone or a rewritten ancestor (CI checks out no deep history).
