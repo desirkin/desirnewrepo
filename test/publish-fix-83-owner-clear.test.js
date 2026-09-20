@@ -43,3 +43,20 @@ test('FIX83-6. an owner CLEAR lifts every journal latch older than it, resumes P
     const third = await run.applyOwnerClear(clock.now()); assert.ok(third.includes('KILL') && third.includes('MODE:REDUCE_ONLY->PAPER'), JSON.stringify(third)); assert.equal(run.dispatcher.state().mode, 'PAPER'); assert.equal(run.dispatcher.state().restrictions.KILL, undefined);
   } finally { await run.stop(); }
 });
+
+test('FIX83-33. the boot sweep: a SHELL left by an unfilled terminal entry (the old law) is closed FLAT at composition, and a durable pin no open position holds is released — the slot and the hot set are free again', async () => {
+  const { eventsFor } = await import('./helpers/judge.js');
+  const clock = fakeClock(); const journal = createMemoryJournal(); const P = loadJudgePolicy(PAPER_POLICY); const acct = 'fix83-sweep';
+  await initAccount({ journal, policy: P.policy, policyDigest: P.digest, mode: 'OBSERVE', ownerRef: 'owner-test', nowTs: clock.now(), accountId: acct });
+  const F = eventsFor(acct, clock); const w = await journal.acquireWriter(acct); const l0 = await journal.load(acct);
+  await journal.append(acct, { expectedRevision: l0.revision, writerEpoch: w.epoch, writer: w, events: [F.hypothesis('d1'), F.decision('d1'), F.reserve('r1', 'd1'), F.position('p1', 'd1'), F.pin(), F.intent('o1', 'p1', 'r1'), F.attempt('o1'), F.result('o1', 'ACKNOWLEDGED'), F.orderState('o1', 'EXPIRED', { nativeOrderId: 'nat-o1', nativeCumQty: '0', reason: 'unfilled' }), F.release('r1', { reason: 'ORDER_TERMINAL', releasedCash: '100.8', releasedRisk: '4' }), F.pin('ETH/USD', 'PIN')] });
+  await w.release();
+  const before = (await journal.load(acct)).state; assert.equal(before.positions.p1.state, 'SHELL'); assert.deepEqual(Object.keys(before.pins).sort(), ['ETH/USD', 'XBT/USD']);
+  const logs = []; const run = await composeJudge({ policyFile: PAPER_POLICY, mode: 'OBSERVE', accountId: acct, journal, clock: { now: clock.now, monotonic: clock.monotonic, observeWall: () => null, status: () => ({ trusted: true }), expired: (t) => clock.now() > t }, specs: [SPEC], nominations: () => [], controlsSource: () => ({ kill: false, cage: false, vetoes: [] }), writeProjection: false, codeDigest: 'c'.repeat(64), log: (m) => logs.push(String(m)) });
+  try {
+    await run.start({ heartbeatMs: 250 }); // the boot block runs at start()
+    const s = run.dispatcher.state(); assert.equal(s.positions.p1.state, 'FLAT', `the leftover shell is closed: ${logs.filter((l) => l.includes('sweep')).join(' | ')} :: ${JSON.stringify({ orders: Object.values(s.orders).map((o) => [o.orderId, o.kind, o.state, o.filledBase]), pos: { state: s.positions.p1.state, confirmedBase: s.positions.p1.confirmedBase, pendingEntryBase: s.positions.p1.pendingEntryBase, protection: s.positions.p1.protection?.state, entryOrderId: s.positions.p1.entryOrderId } })}`); assert.deepEqual(s.pins, {}, 'both pins released (the shell\'s with the flatten, the orphan by the sweep)');
+    assert.ok(logs.some((l) => /boot sweep: 1 unfilled shell/.test(l)) && logs.some((l) => /boot sweep: 1 leaked feed pin/.test(l)), logs.filter((l) => l.includes('boot sweep')).join(' | '));
+    assert.equal(run.feed.pinned().size, 0, 'nothing is re-admitted HELD');
+  } finally { await run.stop(); }
+});

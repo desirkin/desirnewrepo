@@ -252,7 +252,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     return report;
   }
   async function close({ drainMs = L.drainMs } = {}) { closed = closed || false; try { adapter.stopAdmission(); } catch { /* none */ } const d = await adapter.drain({ maxWaitMs: drainMs }); await chainSettled; closed = true; return { drained: d, revision, writerLost }; }
-  return { commit, enqueue, queueEntry, compensateUnattemptedEntry, dispatchEntry, settleReservation, restart, reconcileNow, close, load, applyAdapterEvent, authorityOf, writerHeld, onCommit(fn) { commitListeners.add(fn); return () => commitListeners.delete(fn); }, ev,
+  return { commit, enqueue, queueEntry, compensateUnattemptedEntry, flattenUnfilledShell, dispatchEntry, settleReservation, restart, reconcileNow, close, load, applyAdapterEvent, authorityOf, writerHeld, onCommit(fn) { commitListeners.add(fn); return () => commitListeners.delete(fn); }, ev,
     // test / shutdown helper: resolves when every queued job and the commit chain have settled
     async idle() { for (let i = 0; i < 10_000; i += 1) { await chainSettled; if (!safety.length && !entries.length && !pumping && !pumpingEntry && !pumpingCommits && !lanes.priority.length && !lanes.ordinary.length) { await new Promise((r) => setImmediate(r)); if (!safety.length && !entries.length && !pumping && !pumpingEntry && !pumpingCommits && !lanes.priority.length && !lanes.ordinary.length) return; } await new Promise((r) => setTimeout(r, 1)); } },
     state: () => state, revision: () => revision, writerLost: () => writerLost,
