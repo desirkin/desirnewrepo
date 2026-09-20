@@ -140,3 +140,17 @@ mtime_ms = 1789938336184
 storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/39522083-b704-46bc-9d40-033955a32455/d154e767-a11c-4d06-9cc7-84411c3036d4"
 storage_version_token = "1789938342092577"
 content_type = "application/octet-stream"
+
+[[outputs]]
+id = "UJHsD1qVGT9tiz-f7iaCo"
+uri = "file://exports/serpent-total-app-complete-review-34a25ad2.zip"
+type = "unspecified"
+title = "Download the total Serpent app review package"
+description = "Exact newest published commit 34a25ad2. Full safe codebase, tests, docs, doctrine, configuration, migrations, review mailboxes through Publish Fix 91, Git history, publish diff, inventories, and hashes. 1,162 files; 7,892,183 bytes; SHA-256 6a3659b2bcb56a8aad0eb2708fb9a9bb06c57e71dc97ab1e8c4361ae28f45f0d."
+logical_id = "a4bd3e5e-5a04-4a6a-9fee-59e8abc80c7d"
+content_hash = "sha256:6a3659b2bcb56a8aad0eb2708fb9a9bb06c57e71dc97ab1e8c4361ae28f45f0d"
+size = 7892183
+mtime_ms = 1789947454503
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:0bf4facd-0e3c-4540-b57f-43398a032d45/a4bd3e5e-5a04-4a6a-9fee-59e8abc80c7d/a0b108c8-7c60-45df-95eb-1a803ea3b080"
+storage_version_token = "1789947459024281"
+content_type = "application/octet-stream"
