@@ -158,3 +158,24 @@ export function boundHistory(history) {
   if (!Array.isArray(history)) return [];
   return history.slice(-MAX_HISTORY_TURNS).map((h) => ({ role: h?.role === 'assistant' ? 'assistant' : 'user', text: clean(h?.text).slice(0, MAX_HISTORY_CHARS) })).filter((h) => h.text.length);
 }
+
+// PUBLISH-FIX-84: one plain sentence naming what keeps the free-form answer off (Replit Secret NAMES only, never values); null when
+// it is on. The owner asked "why didn't you buy X" and "how is the weather" and was told the box can't answer — the notice above
+// the box was not enough, so the answer itself now starts with this.
+export function askWhyNotChatText({ status = null, meter = null } = {}) {
+  if (status?.state !== 'READY') {
+    const r = status?.reason;
+    if (r === 'CREDENTIAL_MISSING') return 'Free-form answers are OFF: the ANTHROPIC_API_KEY secret is not set in Replit. Until then I can only quote the recorded evidence.';
+    if (r === 'BUDGET_NOT_CONFIGURED') return 'Free-form answers are OFF: the two spend ceilings are not set in Replit Secrets — SERPENT_CHAT_MAX_USD_PER_REQUEST (per question, e.g. 0.25) and SERPENT_TALK_DAILY_USD (per day, e.g. 2). Until then I can only quote the recorded evidence.';
+    if (r === 'MODEL_NOT_KNOWN') return 'Free-form answers are OFF: SERPENT_CHAT_MODEL names a model this build does not know. Until then I can only quote the recorded evidence.';
+    return `Free-form answers are OFF (${r ?? 'not configured'}). Until then I can only quote the recorded evidence.`;
+  }
+  if (meter && meter.dormant) {
+    if (meter.reason === 'TOGGLE_OFF') return 'Free-form answers are OFF: the ASK switch in this panel is off — tap ASK: OFF to turn it on (it asks for the control password once).';
+    if (meter.reason === 'CAP_REACHED') return `Free-form answers are paused: today's spend ceiling (${meter.capUsd} USD) is reached; it resets at midnight UTC.`;
+    if (meter.reason === 'CAP_DISABLED') return 'Free-form answers are OFF: SERPENT_TALK_DAILY_USD is not set in Replit Secrets (e.g. 2).';
+    if (meter.reason === 'CREDENTIAL_MISSING') return 'Free-form answers are OFF: the ANTHROPIC_API_KEY secret is not set in Replit.';
+    return `Free-form answers are OFF (${meter.reason}).`;
+  }
+  return null;
+}
