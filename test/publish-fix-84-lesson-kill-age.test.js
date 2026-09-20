@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createGateLesson, GATE_LESSON_VERSION, gateLessonPaths } from '../learning/gate-lesson.js';
+import { createGateLesson, GATE_LESSON_VERSION, gateLessonPaths, testsOf } from '../learning/gate-lesson.js';
 
 function root(computedTs) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fix84-lesson-')); const P = gateLessonPaths(dir);
@@ -48,4 +48,19 @@ test('FIX89-L3 (blind review 864b4c3a F3). a future-dated lesson is rejected on 
   assert.deepEqual(l2.lesson('RANGE_IGNITION'), { FI15: 0.2 });
   now += 3_600_000 + 61_000;
   assert.deepEqual(l2.lesson('RANGE_IGNITION'), {}, 'aged out on the read itself'); assert.match(l2.line(), /lesson STALE/);
+});
+
+test('FIX91 (the starved learner). a look counts toward a flow gate\'s study when every gate OUTSIDE the flow family passed — the other flow gates may fail too; a structural refusal still excludes it', () => {
+  const T0 = 1_000_000_000_000;
+  const ep = (i, gates) => ({ datasetId: 'live-judge-x', canonicalCoin: 'AAA', decisionTs: T0 + i * 60_000, setupType: 'RANGE_IGNITION', gates });
+  const g = (id, ok, observed, threshold) => ({ id, ok, observed, threshold });
+  const episodes = [
+    ep(1, [g('FI15', false, -0.5, 0.2), g('FI60_POSITIVE', false, -0.1, 0), g('RV60', false, 0.8, 1), g('RANGE_BREAK', true, 1, 1)]), // flow family fails together, structure OK
+    ep(2, [g('FI15', false, -0.5, 0.2), g('RANGE_BREAK', false, 0, 1)]),                                                             // a structural refusal
+    ep(3, [g('FI15', true, 0.5, 0.2), g('RV60', true, 1.5, 1), g('RANGE_BREAK', true, 1, 1)]),                                       // passed
+  ];
+  const outcomes = episodes.map((e) => ({ assetId: 'AAA', decisionKnownAtTs: e.decisionTs, yardstick: { continuation: { state: 'KNOWN', logReturnPct: 1 }, bite: { state: 'KNOWN', logReturnPct: 0.5 } } }));
+  const tests = testsOf(episodes, outcomes, { nowTs: T0 + 3_600_000 });
+  const fi15 = tests.filter((t) => t.gate === 'FI15').map((t) => [t.ts, t.othersOk]);
+  assert.deepEqual(fi15, [[T0 + 60_000, true], [T0 + 120_000, false], [T0 + 180_000, true]], JSON.stringify(tests));
 });

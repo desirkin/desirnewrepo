@@ -35,8 +35,8 @@ test('GL-01. testsOf joins looks with their scored 15-minute outcome by (coin, d
   assert.equal(tests.length, 5, JSON.stringify(tests));
   assert.ok(tests.some((t) => t.value === 0.7 && t.r === 0.9), 'a 1.5 s clock gap still joins'); assert.equal(tests.filter((t) => t.value === 0.7).length, 1, 'a 5 s gap does not');
   const ake = tests.filter((t) => t.gate === 'FI15' && t.value === 0.196); assert.equal(ake.length, 1); assert.equal(ake[0].othersOk, true, 'MOVE_CLOCK ok:false is not a gate'); assert.equal(ake[0].r, 1.2); assert.equal(ake[0].line, 0.2);
-  const akeRv = tests.find((t) => t.gate === 'RV60' && t.value === 2.5); assert.equal(akeRv.othersOk, false, 'FI15 failed beside it');
-  const zamaFi = tests.find((t) => t.gate === 'FI15' && t.value === 0.6); assert.equal(zamaFi.othersOk, false, 'RV60 failed beside it');
+  const akeRv = tests.find((t) => t.gate === 'RV60' && t.value === 2.5); assert.equal(akeRv.othersOk, true, 'PUBLISH-FIX-91: FI15 failing beside it is the flow family, not a structural refusal');
+  const zamaFi = tests.find((t) => t.gate === 'FI15' && t.value === 0.6); assert.equal(zamaFi.othersOk, true, 'PUBLISH-FIX-91: RV60 failing beside it is the flow family');
   assert.ok(!tests.some((t) => t.r === 5), 'the old look is outside the lookback');
 });
 

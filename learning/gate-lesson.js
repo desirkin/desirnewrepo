@@ -95,7 +95,11 @@ export function testsOf(episodes, outcomes, { yardstick = GATE_LESSON_DEFAULTS.y
     const real = e.gates.filter((g) => g && typeof g.id === 'string' && !NOT_A_GATE.has(g.id));
     for (const g of real) {
       if (!GATE_BANDS[g.id]) continue; const value = num(g.observed); const line = num(g.threshold); if (value === null || line === null) continue;
-      const othersOk = real.every((x) => x === g || x.ok === true);
+      // PUBLISH-FIX-91 (2026-09-20): a look is USABLE for a flow gate when every gate OUTSIDE the flow family passed. Item 20 demanded
+      // every other gate including the other four flow gates, and the flow gates fail together (4-5 at once on most looks): 9-34
+      // usable looks a day per gate against the 1,000 needed — the learner the owner built was starved by that one clause. The
+      // family moves together, so the family is judged together; a structural refusal (range, trend, book, stop) still excludes the look.
+      const othersOk = real.every((x) => x === g || x.ok === true || GATE_BANDS[x.id] !== undefined);
       out.push({ gate: g.id, setup: String(e.setupType ?? ''), ts: e.decisionTs, coin: e.canonicalCoin, value, line, othersOk, r });
     }
   }

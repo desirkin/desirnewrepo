@@ -253,7 +253,11 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
   gate per cycle. Every transition is one log line with its numbers. The kill file (`data/learning/kill.json`, KILLED /
   invalid / unreadable) → reference lines; the reader re-reads it on the Judge's own reads (at most every 5 s), so a KILL
   or RESUME takes effect on the next look, not at the next scheduled refresh (review c6985361 F2). A lesson whose
-  `computedTs` is older than 7 days (the study stopped) is not a lesson: reference lines, one STALE line saying so (F3).
+  `computedTs` is older than 7 days (the study stopped) is not a lesson: reference lines, one STALE line saying so (F3); a
+  future-dated lesson (beyond 5 min of skew) is rejected and the clock is judged on every read (PUBLISH-FIX-89).
+  PUBLISH-FIX-91 (2026-09-20): a look is USABLE for a flow gate's study when every gate outside the flow family passed — item
+  20's "every other gate" counted the other four flow gates, which fail together on most looks, and left the learner 9-34
+  usable looks a day per gate against 1,000. The family is judged as a family; a structural refusal still excludes the look.
 - `learning/maturation.js` / `learning/service.js` / `fly.js` (PUBLISH-FIX-86, 2026-09-20; not frozen): the simulated 60-minute
   round trip (entry at the next bar's open, exit at the 60-minute close, the paper policy's taker fee both sides + 10 bps
   slippage against us) now runs for every LIVE episode — the service passes the paper cost model, matureEpisode simulates
