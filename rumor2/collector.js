@@ -73,6 +73,11 @@ import { readinessMatrix } from './social-readiness.js';
 
 const iso = (ms) => new Date(ms).toISOString();
 
+// PUBLISH-FIX-83: lifecycles whose re-initialization is expensive (checkpoint load + full journal read + social replay) retry on a back-off
+const INIT_BACKOFF_LIFECYCLES = new Set(['WITHHELD_INVALID_CHECKPOINT', 'FAILED_DURABILITY']);
+const INIT_RETRY_MIN_MS = 15_000;
+const INIT_RETRY_MAX_MS = 5 * 60_000;
+
 export function startRumor2({
   log = console.log,
   config = loadConfig(),
@@ -408,6 +413,7 @@ export function startRumor2({
   let startedAnnounced = false;
   let closed = false;
   let inFlight = Promise.resolve();
+  let initRetryAt = 0; let initRetryMs = 0; let lastInitFailureLogged = null; // PUBLISH-FIX-83: bounded re-initialization retry
 
   // ---- LIVE WRITER FENCE (writer-fence closeout) ---------------------------
   // ONE authoritative live check. Writer authority is NEVER trusted from a
@@ -1409,7 +1415,13 @@ export function startRumor2({
     // between ticks, drop to standby immediately so ensureInit re-attempts
     // acquisition rather than proceeding as a stale writer.
     if (writerFenced) fenceHeld();
+    // review finding (PUBLISH-FIX-83): a WITHHELD / FAILED_DURABILITY collector re-ran its whole initialization EVERY tick —
+    // checkpoint load, a full journal read and a full social replay every 15 s for the life of the process. The retry now
+    // backs off (2x per failure, capped at 5 min); STANDBY_WRITER keeps probing the fence each tick (one cheap lock attempt).
+    if (INIT_BACKOFF_LIFECYCLES.has(lifecycle) && now() < initRetryAt) { stopSocial('collector not initialized'); writeStatus(); return; }
     const ok = await ensureInit();
+    if (ok) initRetryMs = 0;
+    else if (INIT_BACKOFF_LIFECYCLES.has(lifecycle)) { initRetryMs = Math.min(INIT_RETRY_MAX_MS, initRetryMs ? initRetryMs * 2 : INIT_RETRY_MIN_MS); initRetryAt = now() + initRetryMs; const key = `${lifecycle}:${withholdReason}`; if (key !== lastInitFailureLogged) { log(`RUMOR2 ${lifecycle} — ${withholdReason} (initialization retried in ${Math.round(initRetryMs / 1000)} s)`); lastInitFailureLogged = key; } }
     if (!startedAnnounced && cp) {
       startedAnnounced = true;
       // startup announcement is best-effort; observation truth is per-item
@@ -1461,8 +1473,14 @@ export function startRumor2({
     writeStatus();
   }
 
+  // review finding (PUBLISH-FIX-83): the interval used to CHAIN a tick behind the running one unconditionally — a tick slower
+  // than the interval (a journal replay, a slow provider) queued ticks without bound and the chain never drained. An interval
+  // firing while a tick is still running is skipped and counted; explicit tickOnce() callers still chain.
+  let tickQueued = false; let overlappedTicks = 0;
   const timer = setInterval(() => {
-    inFlight = inFlight.then(() => tickOnce()).catch((err) => log(`RUMOR2 tick failed (contained): ${boundedError(err.message)}`));
+    if (tickQueued) { overlappedTicks += 1; if (overlappedTicks % 20 === 1) log(`RUMOR2 tick still running — interval tick skipped (${overlappedTicks} skipped so far)`); return; }
+    tickQueued = true;
+    inFlight = inFlight.then(() => tickOnce()).catch((err) => log(`RUMOR2 tick failed (contained): ${boundedError(err.message)}`)).finally(() => { tickQueued = false; });
   }, intervalMs);
   timer.unref?.();
 

@@ -24,6 +24,10 @@ export const RESEARCH_SHADOW_ROW_REASONS = Object.freeze(['SHADOW_CONTROL_NOT_NO
 export const RESEARCH_SHADOW_EXCLUSION_REASONS = Object.freeze(['NO_TICKER_ROW', 'PRICE_INVALID', 'INSUFFICIENT_SERIES']);
 export const RESEARCH_SHADOW_EVENT_KEYS = Object.freeze(['type', 'ts', 'sourceEventId', 'sweepId', 'sweepTsMs', 'sessionDate', 'catalogContentId', 'catalogStatus', 'populationVersion', 'populationDefinition', 'recipeVersion', 'population', 'populationDigest', 'sampleCap', 'selected', 'coverage', 'authority', 'purpose', 'knownAtTs']);
 export const RESEARCH_SHADOW_ROW_KEYS = Object.freeze(['coin', 'rank', 'reason', 'zVol', 'zRet', 'extension', 'usdVol24h', 'preCooldownVerdict', 'cooldownSuppressed', 'inDeepTape']);
+// PUBLISH-FIX-83 review finding: one sample per completed sweep was one durable journal event per MINUTE (1,440 a day, ~3 KB
+// each) — the journal every restart replays in full grew ~100 MB a month for a control population nobody reads that densely.
+// RESEARCH RESOURCE constant (I/O bound, never a trade threshold): a new sample is taken at most this often.
+export const RESEARCH_SHADOW_MIN_INTERVAL_MS = 15 * 60_000;
 export const RESEARCH_SHADOW_MAX_REPLAY_RECORDS = 256; // bounded replay ring (count is exact; records are the most recent)
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isTs = (v) => Number.isSafeInteger(v) && v > 0;

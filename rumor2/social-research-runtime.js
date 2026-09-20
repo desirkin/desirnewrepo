@@ -24,7 +24,7 @@ import { SOCIAL_OBSERVATION_TYPES, SOCIAL_SCOPE_EVENT_TYPE, SOCIAL_CATALOG_EVENT
 import { createScopeResolver, createCoverageTimeline, attributeSocialObservation, researchObservationOf, buildResearchDossier, RESEARCH_ENTRANCE_WINDOW_MS, RESEARCH_MAX_OBSERVATIONS_PER_SUBJECT } from './social-research-strainer.js';
 import { buildResearchPacket } from './social-research-packet.js';
 import { researchDossierEvent, validateResearchDossierEvent, replayResearchDossierEvent, RESEARCH_DOSSIER_EVENT_TYPE, RESEARCH_AUTHORITY, RESEARCH_PURPOSE } from './social-research-dossier.js';
-import { buildShadowSample, validateResearchShadowEvent, replayResearchShadowEvent, emptyShadowState, RESEARCH_SHADOW_EVENT_TYPE, RESEARCH_SHADOW_SAMPLE_CAP, RESEARCH_SHADOW_RECIPE_VERSION } from './social-research-shadow.js';
+import { buildShadowSample, validateResearchShadowEvent, replayResearchShadowEvent, emptyShadowState, RESEARCH_SHADOW_EVENT_TYPE, RESEARCH_SHADOW_SAMPLE_CAP, RESEARCH_SHADOW_RECIPE_VERSION, RESEARCH_SHADOW_MIN_INTERVAL_MS } from './social-research-shadow.js';
 import { validateDeepMarketWindow } from './social-research-market.js';
 import { createSourceProfileIndex, retentionCapability } from './social-research-profile.js';
 import { compositeResearchView } from './social-research-composite.js';
@@ -45,6 +45,7 @@ export function createResearchStrainer({
   maxObservationsPerSubject = RESEARCH_MAX_OBSERVATIONS_PER_SUBJECT,
   emissionMinIntervalMs = RESEARCH_EMISSION_MIN_INTERVAL_MS,
   researchIdleTtlMs = RESEARCH_IDLE_TTL_MS,
+  shadowMinIntervalMs = RESEARCH_SHADOW_MIN_INTERVAL_MS, // PUBLISH-FIX-83: a shadow sample at most this often (I/O bound)
   deepMarketSource = null, // PURE injected adapter: (canonicalCoin, { knownAtTs }) => a deep-market window input | null. Absent => NOT_CONNECTED.
   marketSnapshot = null, // §36.7 read-only OWNER accessor: (canonicalCoin) => { snapshot, owner } | snapshot | null (the tape's current feature snapshot + its status)
   populationSource = null, // §36.6 read-only accessor: () => the wide eye's latest completed sweep population | null (the shadow control seam)
@@ -246,7 +247,10 @@ export function createResearchStrainer({
     let shadowEv = null;
     if (typeof populationSource === 'function') {
       let pop = null; try { pop = populationSource(); } catch { pop = null; }
-      if (pop && typeof pop === 'object' && typeof pop.sweepId === 'string' && pop.sweepId !== lastSampledSweepId && !shadow.bySweep.has(pop.sweepId) && Number.isSafeInteger(pop.tsMs) && pop.tsMs <= t) {
+      // PUBLISH-FIX-83: at most one sample per RESEARCH_SHADOW_MIN_INTERVAL_MS (the latest durable sample's known-at clock decides)
+      const lastShadow = shadow.order.length ? shadow.bySweep.get(shadow.order[shadow.order.length - 1]) : null;
+      const shadowDue = !lastShadow || t - lastShadow.knownAtTs >= shadowMinIntervalMs;
+      if (shadowDue && pop && typeof pop === 'object' && typeof pop.sweepId === 'string' && pop.sweepId !== lastSampledSweepId && !shadow.bySweep.has(pop.sweepId) && Number.isSafeInteger(pop.tsMs) && pop.tsMs <= t) {
         const b = buildShadowSample(pop, { knownAtTs: t });
         if (b.ok) { const dry = { bySweep: new Map(shadow.bySweep), order: shadow.order.slice(), count: shadow.count }; const dr = replayResearchShadowEvent(dry, b.event); if (dr.ok) shadowEv = b.event; else { stats.shadowSkipped += 1; lastError = dr.error; } }
         else { stats.shadowSkipped += 1; lastError = b.error; }
@@ -289,7 +293,7 @@ export function createResearchStrainer({
       subjectList: list.slice(0, RESEARCH_STATUS_MAX_SUBJECTS), durableDossiers: research.count, episodes: { active: list.filter((x) => x.episode.state !== 'DORMANT' && x.episode.state !== 'LIGHT_OBSERVING').length, lightObserving: list.filter((x) => x.episode.state === 'LIGHT_OBSERVING').length, dormant: dormantCoins.length, idleTtlMs: researchIdleTtlMs, note: 'DORMANT = research-resource idle law only; never a verdict on the asset' },
       coverageTimeline: timeline.snapshot(), scopeResolver: resolver.size(),
       pendingOperation: pendingOp ? { coin: pendingOp.coin, dossierId: pendingOp.adopt.dossierId, sweepId: pendingOp.adopt.sweepId, attempts: pendingOp.attempts } : null, journalAhead,
-      bounds: { maxSubjects, maxObservationsPerSubject, emissionMinIntervalMs, researchIdleTtlMs, shadowSampleCap: RESEARCH_SHADOW_SAMPLE_CAP, label: 'RESEARCH RESOURCE bounds (housekeeping/I-O), never trade thresholds' },
+      bounds: { maxSubjects, maxObservationsPerSubject, emissionMinIntervalMs, researchIdleTtlMs, shadowSampleCap: RESEARCH_SHADOW_SAMPLE_CAP, shadowMinIntervalMs, label: 'RESEARCH RESOURCE bounds (housekeeping/I-O), never trade thresholds' },
       deepMarket: typeof deepMarketSource === 'function' ? 'INJECTED_ADAPTER' : typeof marketSnapshot === 'function' ? 'OWNER_SNAPSHOT_ACCESSOR' : 'NOT_CONNECTED',
       marketBridge: typeof marketSnapshot === 'function' ? 'OWNER_SNAPSHOT_ACCESSOR' : 'NOT_CONNECTED',
       shadowControl: { status: typeof populationSource !== 'function' ? 'NOT_CONNECTED' : shadow.count === 0 && lastSampledSweepId === null ? 'AWAITING_COMPLETED_SWEEP' : 'SAMPLING', recipeVersion: RESEARCH_SHADOW_RECIPE_VERSION, sampleCap: RESEARCH_SHADOW_SAMPLE_CAP, durableSamples: shadow.count, lastSweepId: lastSampledSweepId, latest: shadow.order.length ? { ...shadow.bySweep.get(shadow.order[shadow.order.length - 1]) } : null },
