@@ -169,14 +169,18 @@ export function createResearchScopeSource({ research = SOCIAL_RESEARCH_DEFAULTS,
     lastSnapshot = snap;
     if (!isPlainObject(snap)) return unavailable('CATALOG_SNAPSHOT_MALFORMED');
     if (snap.status !== 'ACCEPTED' || !snap.catalog) return unavailable(`CATALOG_NOT_ACCEPTED: ${typeof snap.lastError === 'string' ? snap.lastError.slice(0, 160) : snap.status ?? 'no accepted catalog yet'}`);
-    if (memo === null || memo.catalogRef !== snap.catalog) {
+    // PUBLISH-FIX-83: on the research lane the snapshot arrives serialized (a NEW object every feed), so reference identity
+    // alone missed the memo every 30 s; a copy carrying the same content id, observation clock and market count is the same
+    // accepted catalog (the id is a content hash the main thread computed from the same bytes)
+    const sameContent = memo !== null && isPlainObject(snap.catalog) && memo.catalog.contentId === snap.catalog.contentId && memo.catalog.observedTs === snap.catalog.observedTs && Array.isArray(snap.catalog.markets) && memo.catalog.markets.length === snap.catalog.markets.length;
+    if (memo === null || (memo.catalogRef !== snap.catalog && !sameContent)) {
       const v = validateCatalogContent(snap.catalog, { maxMarkets: research.catalog.maxMarkets });
       lastValidation = v.error ?? null;
       if (v.error) { memo = null; return unavailable(`CATALOG_INVALID: ${v.error}`); }
       const bases = catalogBases(v.catalog);
       const c = compileAdmissionScope({ mode: 'CATALOG_BACKED', catalogContentId: v.catalog.contentId, terms: bases, aliases: aliasFactsFor(bases) });
       memo = { catalogRef: snap.catalog, catalog: v.catalog, scope: c.error ? null : c.scope, compileError: c.error ?? null };
-    } else lastValidation = null;
+    } else { lastValidation = null; memo.catalogRef = snap.catalog; }
     const { catalog: vc, scope, compileError } = memo;
     const freshness = catalogFreshness(vc, knownAtTs, research.catalog.maxAgeSec);
     if (freshness === 'FUTURE') return unavailable('CATALOG_OBSERVED_IN_FUTURE: the acquisition clock is ahead of the evaluation clock', { catalog: vc, freshness });
