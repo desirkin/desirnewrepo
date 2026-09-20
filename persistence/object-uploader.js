@@ -87,13 +87,30 @@ export const REUPLOAD_MS_PER_MIB = 15_000;
 export const REUPLOAD_MAX_DEFER_MS = 15 * 60_000;
 export const reuploadIntervalMs = (bytes, { perMiB = REUPLOAD_MS_PER_MIB, maxDeferMs = REUPLOAD_MAX_DEFER_MS, minMs = 60_000 } = {}) => Math.min(maxDeferMs, Math.max(minMs, Math.ceil((Number(bytes) || 0) / 1048576) * perMiB));
 
-export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED_SOURCES, maxFilesPerSource = DEFAULT_MAX_FILES_PER_SOURCE, log = () => {}, now = () => Date.now(), perMiB = REUPLOAD_MS_PER_MIB, maxDeferMs = REUPLOAD_MAX_DEFER_MS } = {}) {
+// PUBLISH-FIX-83 (full review item 32): OLD and NEW instances both uploaded to the same keys during a republish overlap — the old
+// instance's FINAL sync at shutdown overwrote files the new one had already restored and then wrote ITS manifest over the new one's
+// (next restore: digest mismatch, a file silently not restored, or older data over newer). The bucket now carries an OWNER record: a
+// run epoch (the boot clock). Every sync re-reads it first; a run that finds a NEWER epoch yields — it uploads nothing and writes
+// nothing, final sync included. The first sync of a boot claims ownership.
+export const OWNER_OBJECT_KEY = 'manifest-owner.json';
+export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED_SOURCES, maxFilesPerSource = DEFAULT_MAX_FILES_PER_SOURCE, log = () => {}, now = () => Date.now(), perMiB = REUPLOAD_MS_PER_MIB, maxDeferMs = REUPLOAD_MAX_DEFER_MS, runEpoch = null } = {}) {
   if (!store || store.state !== 'ACTIVE' || !store.adapter) throw new Error('createObjectUploader requires an ACTIVE object store');
   const adapter = store.adapter;
   const root = path.resolve(dataRoot);
+  const epoch = Number.isSafeInteger(runEpoch) ? runEpoch : now(); const pid = process.pid;
   let manifest = null; // loaded lazily from the bucket on the first sync
   let running = false;
-  let lastSummary = null;
+  let lastSummary = null; let yielded = false; let claimed = false;
+  async function ownership() {
+    let bytes = null; try { bytes = await adapter.get(OWNER_OBJECT_KEY); } catch (error) { log(`OBJECT UPLOADER owner read failed (claiming): ${bounded(error?.code ?? error?.message ?? error)}`); }
+    let owner = null; if (Buffer.isBuffer(bytes) && bytes.byteLength) { try { owner = JSON.parse(bytes.toString('utf8')); } catch { owner = null; } }
+    const theirs = owner && Number.isSafeInteger(owner.runEpoch) ? owner.runEpoch : null;
+    if (theirs !== null && theirs > epoch) { if (!yielded) { yielded = true; log(`OBJECT UPLOADER yields: a newer run (epoch ${new Date(theirs).toISOString()}, pid ${owner.pid ?? '?'}) owns the bucket; this run (epoch ${new Date(epoch).toISOString()}) uploads nothing more, final sync included`); } return false; }
+    if (theirs === epoch && claimed) return true;
+    try { await adapter.put(OWNER_OBJECT_KEY, Buffer.from(JSON.stringify({ version: 'serpent-object-owner-1', runEpoch: epoch, pid, claimedTs: now() }))); claimed = true; if (theirs !== null && theirs < epoch) log(`OBJECT UPLOADER claims the bucket from the previous run (epoch ${new Date(theirs).toISOString()})`); }
+    catch (error) { log(`OBJECT UPLOADER owner claim failed (proceeding unfenced this pass): ${bounded(error?.code ?? error?.message ?? error)}`); }
+    return true;
+  }
 
   async function loadManifest() {
     if (manifest) return manifest;
@@ -107,6 +124,7 @@ export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED
     if (running) return lastSummary ?? { state: 'BUSY' };
     running = true;
     try {
+      if (!(await ownership())) { lastSummary = Object.freeze({ version: OBJECT_UPLOADER_VERSION, tsMs: now(), state: 'YIELDED', scanned: 0, uploaded: 0, uploadedBytes: 0, skippedUnchanged: 0, deferred: 0, final, skippedTooLarge: 0, skippedOverCount: 0, skippedUnsafePath: 0, backed: manifest ? Object.keys(manifest.entries).length : null, failures: 0, firstFailure: null }); return lastSummary; }
       const current = await loadManifest();
       const nextEntries = { ...current.entries };
       const { files, skipped } = await scanSources({ dataRoot: root, sources, maxFilesPerSource });
@@ -150,6 +168,7 @@ export function createObjectUploader({ store, dataRoot, sources = DEFAULT_BACKED
     version: OBJECT_UPLOADER_VERSION,
     syncOnce,
     status: () => lastSummary ?? Object.freeze({ version: OBJECT_UPLOADER_VERSION, state: 'IDLE', backed: manifest ? Object.keys(manifest.entries).length : null }),
+    runEpoch: epoch,
     _manifest: () => (manifest ? structuredClone(manifest) : null),
   });
 }

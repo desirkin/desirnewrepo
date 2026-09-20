@@ -146,3 +146,26 @@ test('UP-7 (PUBLISH-FIX-34). a growing file waits its size-scaled turn — no re
     assert.equal(reuploadIntervalMs(7 * 1048576), 105_000); assert.equal(reuploadIntervalMs(68 * 1048576), 15 * 60_000); assert.equal(reuploadIntervalMs(10), 60_000);
   } finally { rmSync(data, { recursive: true, force: true }); rmSync(bucket, { recursive: true, force: true }); }
 });
+
+test('UP-8 (PUBLISH-FIX-83 item 32). run-epoch fencing: the bucket carries an OWNER record; an OLD run whose final sync comes after a NEWER run claimed the bucket uploads NOTHING and writes no manifest; the newer run keeps syncing; an equal or older claim never fences', async () => {
+  const data = tmp(); const data2 = tmp(); const bucket = tmp(); const logs = [];
+  try {
+    writeFile(data, 'tape/2026-09-14/session.jsonl', 'old\n', 1000); writeFile(data2, 'tape/2026-09-14/session.jsonl', 'new\n', 2000);
+    const store = await fsStore(bucket);
+    const oldRun = createObjectUploader({ store, dataRoot: data, now: () => 1000, runEpoch: 1000, log: (m) => logs.push(m) });
+    assert.equal((await oldRun.syncOnce()).uploaded, 1); assert.equal(oldRun.runEpoch, 1000);
+    const owner = JSON.parse((await store.adapter.get('manifest-owner.json')).toString('utf8')); assert.equal(owner.runEpoch, 1000);
+    // the republish: a NEW run boots (later epoch), restores, claims the bucket and syncs its own file
+    const newRun = createObjectUploader({ store, dataRoot: data2, now: () => 200_000, runEpoch: 200_000, log: (m) => logs.push(m) }); // two minutes later: past the size-scaled re-upload deferral
+    const n1 = await newRun.syncOnce(); assert.equal(n1.state, 'OK'); assert.equal(n1.uploaded, 1); assert.deepEqual(await store.adapter.get(objectKeyForPath('tape/2026-09-14/session.jsonl')), Buffer.from('new\n'));
+    assert.ok(logs.some((l) => l.includes('claims the bucket from the previous run')));
+    // the OLD run's final sync at shutdown: it must not overwrite the new run's file or manifest
+    writeFile(data, 'tape/2026-09-14/session.jsonl', 'old-final\n', 3000); writeFile(data, 'tape/2026-09-14/extra.jsonl', 'x\n', 3000);
+    const f = await oldRun.syncOnce({ final: true }); assert.equal(f.state, 'YIELDED'); assert.equal(f.uploaded, 0);
+    assert.deepEqual(await store.adapter.get(objectKeyForPath('tape/2026-09-14/session.jsonl')), Buffer.from('new\n'), 'the newer run\'s bytes stand');
+    assert.equal(parseManifest(await store.adapter.get(MANIFEST_OBJECT_KEY)).entries['tape/2026-09-14/extra.jsonl'], undefined, 'the old run wrote no manifest');
+    assert.equal(logs.filter((l) => l.includes('yields: a newer run')).length, 1, 'logged once'); assert.equal((await oldRun.syncOnce()).state, 'YIELDED');
+    // the newer run is unaffected by the yielded one
+    assert.equal((await newRun.syncOnce()).state, 'OK');
+  } finally { for (const d of [data, data2, bucket]) rmSync(d, { recursive: true, force: true }); }
+});
