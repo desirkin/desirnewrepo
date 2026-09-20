@@ -234,10 +234,36 @@ export async function runGateStudy({ dataDir, cfg = {}, nowTs = Date.now(), log 
   return { version: GATE_LESSON_VERSION, looks: episodes.length, scored: outcomes.length, tests: tests.length, units: Object.keys(lesson.units).length, lines: lesson.lines, events, line: gateLessonLine(lesson) };
 }
 // ---- the in-process reader the Judge's port is built from --------------------------------------------------------------------
-export function createGateLesson({ dataDir, clock = () => Date.now(), log = () => {} } = {}) {
+// PUBLISH-FIX-84 (2026-09-20, the owner's night): OWNER LINES. The learner moves a line only from looks where EVERY OTHER gate
+// passed (item 20: "this gate alone decided"); with the median look failing four or five gates at once, those looks arrive at a
+// few dozen a day per gate against a 1,000 minimum — the autonomous mover is starved for months. The owner can set the flow lines
+// himself, by NAME (an env JSON: {"FI15":-1,"FI60_POSITIVE":-1,"RECLAIM_FI15":-1,"FI15_FRESH_AT_D":-1,"RV60":0}), inside the
+// SAME bands the learner is bound to, through the SAME port the Judge already reads — no policy file, no frozen tree, no account
+// re-binding. An owner line outranks a learned one; the kill file silences learned influence, never the owner's. Every owner
+// line is logged at boot and rides in each decision's GATE_LEARNING row exactly like a learned move (the ledger stays honest).
+export const OWNER_GATE_LINES_ENV = 'SERPENT_OWNER_GATE_LINES';
+export function parseOwnerGateLines(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return { lines: {}, rejected: [] };
+  let obj; try { obj = JSON.parse(raw); } catch { return { lines: {}, rejected: [`${OWNER_GATE_LINES_ENV} is not JSON`] }; }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { lines: {}, rejected: [`${OWNER_GATE_LINES_ENV} is not an object`] };
+  const lines = {}; const rejected = [];
+  for (const [id, v] of Object.entries(obj)) {
+    const band = GATE_BANDS[id]; const n = Number(v);
+    if (!band) { rejected.push(`${id}: not a learnable gate (${Object.keys(GATE_BANDS).join(', ')})`); continue; }
+    if (!Number.isFinite(n)) { rejected.push(`${id}: not a number`); continue; }
+    const clamped = Math.min(band.max, Math.max(band.min, n)); if (clamped !== n) rejected.push(`${id}: ${n} clamped to the band ${band.min}..${band.max} -> ${clamped}`);
+    lines[id] = clamped;
+  }
+  return { lines, rejected };
+}
+export function createGateLesson({ dataDir, clock = () => Date.now(), log = () => {}, ownerLines = null } = {}) {
   if (typeof dataDir !== 'string' || !dataDir) throw new Error('gate lesson: dataDir required');
   const P = gateLessonPaths(dataDir); const killFile = path.join(dataDir, 'learning', 'kill.json');
   let lesson = null; let killed = null; let lastLogged = null;
+  const owner = parseOwnerGateLines(typeof ownerLines === 'string' ? ownerLines : ownerLines && typeof ownerLines === 'object' ? JSON.stringify(ownerLines) : '');
+  const ownerIds = Object.keys(owner.lines);
+  if (ownerIds.length) log(`GATE LINES: OWNER-SET ${ownerIds.map((id) => `${id} ${owner.lines[id]} (reference ${GATE_BANDS[id].reference ?? 'the setup\'s own'}, band ${GATE_BANDS[id].min}..${GATE_BANDS[id].max})`).join('; ')} — the owner's lines outrank learned ones; the kill file never silences them`);
+  for (const r of owner.rejected) log(`GATE LINES: owner line ignored — ${r}`);
   function killState() { if (!existsSync(killFile)) return { state: 'ARMED', reason: null }; try { const k = JSON.parse(readFileSync(killFile, 'utf8')); return k && typeof k === 'object' && ['ARMED', 'KILLED'].includes(k.state) ? { state: k.state, reason: k.reason ?? null } : { state: 'KILLED', reason: 'KILL_FILE_INVALID' }; } catch { return { state: 'KILLED', reason: 'KILL_FILE_UNREADABLE' }; } }
   function refresh() {
     try { lesson = existsSync(P.lesson) ? readJsonBounded(P.lesson, 4 * 1024 * 1024) : null; if (lesson && lesson.version !== GATE_LESSON_VERSION) lesson = null; }
@@ -249,7 +275,8 @@ export function createGateLesson({ dataDir, clock = () => Date.now(), log = () =
   }
   function current() { return killed || !lesson ? { lines: {}, killed: killed ? { reason: killed.reason } : null } : { lines: lesson.lines ?? {}, killed: null }; }
   // the Judge's port answers a flat { FI15: 0.15, RV60: 1.0, ... }; RV60 is learned per setup, the Judge asks per setup
-  function lessonFor(setupId = null) { const c = current(); const out = {}; for (const [id, v] of Object.entries(c.lines)) { if (id === 'RV60') { const s = setupId && v && typeof v === 'object' ? v[setupId] : undefined; if (typeof s === 'number') out.RV60 = s; } else if (typeof v === 'number') out[id] = v; } return out; }
-  function line() { if (killed) return `GATE LEARNING: DORMANT — learned influence KILLED (data/learning/kill.json${killed.reason ? `: ${killed.reason}` : ''}); reference lines in force`; return gateLessonLine(lesson); }
-  return { refresh, lesson: lessonFor, current, line, paths: P };
+  function lessonFor(setupId = null) { const c = current(); const out = {}; for (const [id, v] of Object.entries(c.lines)) { if (id === 'RV60') { const s = setupId && v && typeof v === 'object' ? v[setupId] : undefined; if (typeof s === 'number') out.RV60 = s; } else if (typeof v === 'number') out[id] = v; } for (const id of ownerIds) out[id] = owner.lines[id]; return out; }
+  const ownerText = () => (ownerIds.length ? ` | OWNER LINES in force: ${ownerIds.map((id) => `${id} ${owner.lines[id]}`).join(', ')}` : '');
+  function line() { if (killed) return `GATE LEARNING: DORMANT — learned influence KILLED (data/learning/kill.json${killed.reason ? `: ${killed.reason}` : ''}); reference lines in force${ownerText()}`; return `${gateLessonLine(lesson)}${ownerText()}`; }
+  return { refresh, lesson: lessonFor, current, line, paths: P, ownerLines: () => ({ ...owner.lines }) };
 }
