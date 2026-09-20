@@ -15,7 +15,7 @@
 import { Worker } from 'node:worker_threads';
 
 export const LANE_FEED_INTERVAL_MS = 30_000;
-export const LANE_STOP_TIMEOUT_MS = 45_000;
+export const LANE_STOP_TIMEOUT_MS = 15_000; // PUBLISH-FIX-83: was 45 s — alone longer than a deployment's stop grace; the lane is terminated after it
 export const LANE_STALE_AFTER_MS = 120_000;
 
 const DARK_SOCIAL = Object.freeze({ authority: 'NONE', retention: 'RAM_ONLY_MAX_5_MINUTES', observations: [] });

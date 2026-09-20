@@ -36,6 +36,7 @@ import { startHeapSampleReport } from './lib/heap-sample-report.js';
 import { startMainThreadWatchdog } from './lib/main-thread-watchdog.js';
 import { createDeepMarketSource } from './market-lab/deep-market-adapter.js';
 
+const SHUTDOWN_BUDGET_MS = 40_000; // PUBLISH-FIX-83: the ordered shutdown's watchdog (a deployment's stop grace is finite)
 const SERPENT_MODE = process.env.SERPENT_DATA_ONLY === 'true' ? 'DATA_ONLY'
   : process.env.COBRA_PROFILE && process.env.JUDGE_MODE === 'PAPER' && process.env.JUDGE_ALLOW_PRIVATE === 'false' && process.env.JUDGE_ALLOW_ORDERS === 'false' ? 'PAPER'
     : null;
@@ -618,9 +619,17 @@ if (SERPENT_MODE === 'DATA_ONLY') {
 
   try {
     await runTape({ executionFeed: judgeRun ? judgeRun.tapeFeed : null, observer: marketResearch ? marketResearch.observer : null }); // resolves on SIGTERM/SIGINT after the tape's clean shutdown
+    // review finding (PUBLISH-FIX-83): the ordered shutdown ran every stop in series (judge, research, a 45 s lane timeout, the
+    // spine) — longer than a deployment's stop grace, so a slow stop was a SIGKILL with no log line. The Judge still stops first
+    // (it owns the feed); the market-research owner and the research lane stop in parallel; a watchdog names a shutdown that
+    // exceeds its budget and exits so the last words are logged rather than killed.
+    const shutdownStartedTs = Date.now();
+    const shutdownWatchdog = setTimeout(() => { console.error(`SHUTDOWN exceeded ${SHUTDOWN_BUDGET_MS / 1000} s — exiting now (state files are atomic; the durable core rolls back an open transaction)`); process.exit(0); }, SHUTDOWN_BUDGET_MS); shutdownWatchdog.unref?.();
     if (judgeRun) { try { await judgeRun.stop(); } catch (err) { console.error(`JUDGE stop failed: ${err.message}`); } }
-    if (marketResearch) { try { await marketResearch.stop(); } catch (err) { console.error(`MARKET RESEARCH stop failed: ${err.message}`); } }
-    if (rumor2Handle && rumor2Handle.lane === 'WORKER') { try { const out = await rumor2Handle.stop(); console.log(`RESEARCH LANE stopped (${out})`); } catch (err) { console.error(`RESEARCH LANE stop failed: ${err.message}`); } } // PUBLISH-FIX-36: the in-process ear stops on the signal it already binds
+    await Promise.allSettled([
+      marketResearch ? marketResearch.stop().catch((err) => console.error(`MARKET RESEARCH stop failed: ${err.message}`)) : null,
+      rumor2Handle && rumor2Handle.lane === 'WORKER' ? rumor2Handle.stop().then((out) => console.log(`RESEARCH LANE stopped (${out})`)).catch((err) => console.error(`RESEARCH LANE stop failed: ${err.message}`)) : null, // PUBLISH-FIX-36: the in-process ear stops on the signal it already binds
+    ]);
     if (learningHandle) { try { learningHandle.stop(); } catch (err) { console.error(`LEARN-1 stop failed: ${err.message}`); } }
     if (decisionOutcomeTimer) { try { clearInterval(decisionOutcomeTimer); } catch { /* timer already cleared */ } decisionOutcomeTimer = null; }
     if (learningStewardTimer) { try { clearInterval(learningStewardTimer); } catch { /* timer already cleared */ } learningStewardTimer = null; }
@@ -638,6 +647,8 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     // the spine stops LAST — collector additions in reverse, quota checkpoints closed, persistence stopped, lock
     // released — after every component above has drained into it
     try { await serpentRuntime.shutdown('TAPE_DRAINED'); } catch (err) { console.error(`runtime spine stop failed: ${err.message}`); }
+    clearTimeout(shutdownWatchdog);
+    console.log(`SHUTDOWN complete in ${((Date.now() - shutdownStartedTs) / 1000).toFixed(1)} s`);
     process.exit(0);
   } catch (err) {
     // Tape died hard (e.g. unwritable disk mid-run). Keep the cockpit serving
