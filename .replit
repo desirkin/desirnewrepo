@@ -13,13 +13,20 @@ localPort = 3000
 externalPort = 80
 
 [deployment]
-run = ["npm", "run", "data:only-ui"]
+run = ["npm", "run", "paper"]
 deploymentTarget = "vm"
 
 [userenv]
 
 [userenv.shared]
 COBRA_DATA_DIR = "./data"
+# The runtime writes under ./data/<generation> so a new generation is a clean crib on a disk the republish did not wipe.
+# Bump to gen2, gen3, … for a future fresh start; the legacy purge (SERPENT_PURGE_LEGACY_DATA=1) clears the old flat data.
+SERPENT_DATA_GENERATION = "gen1"
+# Durable object store = Replit App Storage (no service-account JSON; the sidecar supplies credentials). Boot logs the
+# resolved provider ("OBJECT STORE active/disabled"). These are not secrets.
+SERPENT_OBJECT_STORE_PROVIDER = "REPLIT"
+SERPENT_OBJECT_STORE_BUCKET = "replit-objstore-3adc1924-46b0-4b42-9d2d-898e6cda4f1a"
 PORT = "3000"
 DISCOVERY_SOURCES = "GDELT_NEWS_DISCOVERY,POLYMARKET_PUBLIC_DATA,KALSHI_PUBLIC_DATA"
 DISCOVERY_GDELT_MAX_DAILY_REQUESTS = "16"
@@ -29,23 +36,37 @@ DISCOVERY_POLYMARKET_MAX_DAILY_REQUESTS = "24"
 DISCOVERY_POLYMARKET_PAGE_LIMIT = "100"
 DISCOVERY_KALSHI_MAX_DAILY_REQUESTS = "24"
 DISCOVERY_KALSHI_PAGE_LIMIT = "1000"
-SERPENT_OBJECT_STORE_PROVIDER = "REPLIT"
-SERPENT_OBJECT_STORE_BUCKET = "replit-objstore-3adc1924-46b0-4b42-9d2d-898e6cda4f1a"
+SERPENT_RESEARCH_LANE = "worker"
 
 [userenv.development]
 COBRA_PROFILE = "config/paper-runtime.json"
 DISCOVERY_ENABLED = "true"
+SERPENT_RESEARCH_LANE = "worker"
+# PUBLISH-FIX-14 (independent review F5): learning ON — LEARN-1 capture/maturation/pattern memory (LEARNING_ENABLED) and the
+# Judge's ranking-only learned contribution (SERPENT_LEARNING_RANKING; PAPER only; off switch = `cobra learning kill`).
+LEARNING_ENABLED = "true"
+SERPENT_LEARNING_RANKING = "true"
 
 [userenv.production]
 COBRA_PROFILE = "config/paper-runtime.json"
 DISCOVERY_ENABLED = "true"
+# PUBLISH-FIX-83 item 38: the RUMOR-2 ear runs on the second lane (worker thread) — it was only a Secret, if set at all; now it is on record
+SERPENT_RESEARCH_LANE = "worker"
+# PUBLISH-FIX-9: explicit heap ceiling for the ONE paper process — V8's default (~512MB on a 2 GiB machine) froze the
+# paper tape at 515MB (boot f7173376). The learning study child sets its own bounded ceiling and never inherits this.
+NODE_OPTIONS = "--max-old-space-size=4096"
+SERPENT_TAPE_WRITE_BEHIND = "true"
+SERPENT_CPU_PROFILE = "true"
+SERPENT_STALL_WATCHDOG = "true"
+SERPENT_HEAP_SAMPLE = "false"
+# PUBLISH-FIX-14 (independent review F5): learning ON — LEARN-1 capture/maturation/pattern memory (LEARNING_ENABLED) and the
+# Judge's ranking-only learned contribution (SERPENT_LEARNING_RANKING; PAPER only; off switch = `cobra learning kill`).
+LEARNING_ENABLED = "true"
+SERPENT_LEARNING_RANKING = "true"
 
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 120000
-
-[objectStorage]
-defaultBucketID = "replit-objstore-3adc1924-46b0-4b42-9d2d-898e6cda4f1a"
 
 # [userenv.shared] removed: provider keys must live in Replit Secrets (host private config), never in this tracked file.
 # Optional sources only (CoinGecko demo, FRED). Set them as Secrets if wanted; absent, those senses report their
