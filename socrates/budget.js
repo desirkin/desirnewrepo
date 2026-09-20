@@ -34,11 +34,30 @@ export const USAGE_KEYS = Object.freeze(['inputTokens', 'outputTokens', 'cacheCr
 export const usageError = (u) => { if (!u || typeof u !== 'object' || Array.isArray(u)) return 'usage must be an object'; for (const k of USAGE_KEYS) if (!isCount(u[k])) return `usage.${k} is not a non-negative safe integer`; return null; };
 export const actualCostUsd = ({ usage, pricing }) => { const e = usageError(usage); if (e) fail('INVALID_REQUEST', e); const u = usage; return Number(((u.inputTokens * pricing.inputUsdPerMTok + u.cacheCreationInputTokens * pricing.cacheWriteUsdPerMTok + u.cacheReadInputTokens * pricing.cacheReadUsdPerMTok + u.outputTokens * pricing.outputUsdPerMTok) / 1e6).toFixed(6)); };
 
-export function openBudgetJournal({ dir, clock = () => Date.now(), pid = process.pid }) {
+// PUBLISH-FIX-83 review finding: a lock left by a crashed / killed owner (the VM restarts, the file stays) locked the journal
+// FOREVER — every later open was PERMISSION_FAILURE. A lock is stale only when its recorded pid provably no longer runs
+// (ESRCH); a live pid, an unreadable lock, or a permission error still fails closed (single-owner law kept).
+export function staleLockOwner(lockFile, { pidAlive = (p) => { try { process.kill(p, 0); return true; } catch (err) { return err?.code !== 'ESRCH'; } } } = {}) {
+  let rec; try { rec = JSON.parse(readFileSync(lockFile, 'utf8').split('\n')[0]); } catch { return null; }
+  if (!isPlainObject(rec) || !isCount(rec.pid) || rec.pid === 0) return null;
+  return pidAlive(rec.pid) ? null : rec;
+}
+export function openBudgetJournal({ dir, clock = () => Date.now(), pid = process.pid, log = () => {}, pidAlive = undefined }) {
   mkdirSync(dir, { recursive: true });
   const lockFile = path.join(dir, 'budget.lock'); const journalFile = path.join(dir, 'journal.jsonl');
   let lockFd = null;
-  try { lockFd = openSync(lockFile, 'wx'); writeAll(lockFd, Buffer.from(`${JSON.stringify({ pid, openedTs: clock(), version: BUDGET_JOURNAL_VERSION })}\n`), 'budget.lock'); fsyncSync(lockFd); }
+  const acquire = () => { lockFd = openSync(lockFile, 'wx'); writeAll(lockFd, Buffer.from(`${JSON.stringify({ pid, openedTs: clock(), version: BUDGET_JOURNAL_VERSION })}\n`), 'budget.lock'); fsyncSync(lockFd); };
+  try {
+    try { acquire(); }
+    catch (first) {
+      if (first?.code !== 'EEXIST') throw first;
+      const stale = staleLockOwner(lockFile, pidAlive ? { pidAlive } : {});
+      if (!stale) throw first;
+      log(`socrates budget: lock held by pid ${stale.pid} (opened ${new Date(stale.openedTs ?? 0).toISOString()}) which no longer runs — stale lock reclaimed`);
+      try { unlinkSync(lockFile); } catch { /* raced with the owner's own cleanup */ }
+      acquire();
+    }
+  }
   catch (err) { if (lockFd !== null) { const owned = lockFd; lockFd = null; try { closeSync(owned); } catch { /* released once */ } try { unlinkSync(lockFile); } catch { /* our own partial lock */ } } if (err?.code === 'EEXIST') fail('PERMISSION_FAILURE', 'the budget journal is locked by another owner (single-owner law)'); fail('IO_FAILURE', `cannot lock the budget journal (${err?.code ?? 'error'})`); } // correction C: a failed initialization holds neither descriptor nor lock; another process's lock is never deleted
   const records = []; const byId = new Map(); let lastTs = 0; let closed = false; let bytes = 0;
   // every row is validated (types, ids, quantities) and every transition is lawful; a malformed or impossible row rejects the journal
