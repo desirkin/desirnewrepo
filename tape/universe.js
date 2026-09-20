@@ -166,15 +166,18 @@ export async function selectUniverse(config = loadConfig(), { fetchImpl = fetch 
 
 // PUBLISH-FIX-28: the tape carries hot-lane adoptions the daily selection did not list; the current record is kept a
 // SUPERSET of what the tape carries so the Judge's nomination pass (readCurrentUniverse) sees every carried pair.
-export function mergeCarriedIntoCurrentUniverse(carried) {
+export function mergeCarriedIntoCurrentUniverse(carried, { yielded = [] } = {}) {
   if (!existsSync(currentFile())) return { ok: false, reason: 'NO_CURRENT_RECORD' };
   let record; try { record = JSON.parse(readFileSync(currentFile(), 'utf8')); } catch { return { ok: false, reason: 'UNREADABLE' }; }
   if (!record || record.error || record.source === 'UNAVAILABLE' || !Array.isArray(record.pairs)) return { ok: false, reason: 'RECORD_UNAVAILABLE' };
+  // PUBLISH-FIX-83 (full review item 15): a HOT pair that yielded its slot is no longer carried by the tape, so it leaves the record too —
+  // otherwise the Judge kept nominating a pair with no subscription (a preparation slot with no books for up to an hour)
+  const gone = new Set(yielded); const removed = []; if (gone.size) { record.pairs = record.pairs.filter((p) => { const out = p.hot === true && gone.has(p.symbol); if (out) removed.push(p.symbol); return !out; }); }
   const have = new Set(record.pairs.map((p) => p.symbol)); const added = [];
   for (const p of carried) { if (have.has(p.symbol)) continue; record.pairs.push({ coin: p.coin, symbol: p.symbol, major: p.major === true, depth: p.depth, usdVol24h: p.usdVol24h ?? null, nominated: true, hot: true, hotSinceTs: p.hotSinceTs ?? null }); have.add(p.symbol); added.push(p.symbol); }
-  if (!added.length) return { ok: true, added };
+  if (!added.length && !removed.length) return { ok: true, added, removed };
   record.count = record.pairs.length; atomicWriteJson(currentFile(), record, { pretty: true });
-  return { ok: true, added };
+  return { ok: true, added, removed };
 }
 // PUBLISH-FIX-28 hot lane: only THIS session's proposals (the record's date is the ET session date it was written on)
 export function readWideEyeNominationsToday() { const raw = readWideEyeNominationsRaw(); if (!raw || (raw.date && raw.date !== sessionDate())) return []; return Array.isArray(raw.nominations) ? raw.nominations : []; }

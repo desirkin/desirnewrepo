@@ -165,7 +165,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
         log(`[${nowIso()}] HOT LANE: ${p.coin} joins the deep tape now (${p.cause}; ${p.usdVol24h ? `$${(p.usdVol24h / 1e6).toFixed(1)}M 24h` : 'volume n/a'}; hot slots ${[...pairs.values()].filter((x) => x.hot).length}/${hotLane.slots}) — the Judge sees it on its next nomination pass`);
       }
       for (const k of plan.skipped) { if (k.reason !== 'ALREADY_CARRIED') log(`[${nowIso()}] HOT LANE: ${k.coin} not adopted (${k.reason})`); }
-      if (plan.adopt.length) { const m = mergeCarriedIntoCurrentUniverse([...pairs.values()].filter((x) => x.hot)); if (!m.ok) log(`[${nowIso()}] HOT LANE: current-universe record not updated (${m.reason}); the Judge sees the newcomer at the next selection`); }
+      if (plan.adopt.length || plan.evict.length) { const m = mergeCarriedIntoCurrentUniverse([...pairs.values()].filter((x) => x.hot), { yielded: plan.evict }); if (!m.ok) log(`[${nowIso()}] HOT LANE: current-universe record not updated (${m.reason}); the Judge sees the newcomer at the next selection`); } // PUBLISH-FIX-83 item 15: yielded pairs leave the record
     } catch (err) { log(`[${nowIso()}] HOT LANE degraded (tape unaffected): ${String(err?.message ?? err).slice(0, 160)}`); }
     finally { hotLaneBusy = false; }
   }

@@ -27,11 +27,12 @@ test('the hot lane is bounded: with three hot pairs a fourth nominee waits until
   const hot = [pair('A', { hot: true, hotSinceTs: T - 3 * H }), pair('B', { hot: true, hotSinceTs: T - 2.5 * H }), pair('C', { hot: true, hotSinceTs: T - 10 * 60_000 })];
   const carried = [pair('BTC'), ...hot]; const verified = [...carried, pair('D'), pair('E')];
   const full = planHotAdoption({ nominations: [{ coin: 'D' }], carried, verified, nowTs: T, slots: 3, tenureMs: 4 * H });
-  assert.deepEqual(full.adopt, []); assert.deepEqual(full.skipped, [{ coin: 'D', reason: 'HOT_LANE_FULL' }]);
+  assert.deepEqual(full.adopt, []); assert.deepEqual(full.skipped, [{ coin: 'D', reason: 'HOT_LANE_FULL', retry: true }]); assert.equal(full.seen.has('D'), false, 'PUBLISH-FIX-83 item 15: a nominee refused for a full lane is retried on the next pass, not remembered as seen');
   const yields = planHotAdoption({ nominations: [{ coin: 'D' }, { coin: 'E' }], carried, verified, nowTs: T, slots: 3, tenureMs: 2 * H });
-  assert.deepEqual(yields.evict, ['A/USD', 'B/USD'], 'the two hot pairs past their tenure yield, oldest first'); assert.deepEqual(yields.adopt.map((p) => p.coin), ['D', 'E']);
+  assert.deepEqual(yields.evict, ['A/USD', 'B/USD'], 'the two hot pairs past their tenure yield, oldest first'); assert.deepEqual(yields.adopt.map((p) => p.coin), ['D', 'E']); assert.deepEqual([...yields.seen].sort(), ['D', 'E']);
+  const back = planHotAdoption({ nominations: [{ coin: 'A' }], carried: [pair('BTC'), pair('C', { hot: true, hotSinceTs: T }), pair('D', { hot: true, hotSinceTs: T }), pair('E', { hot: true, hotSinceTs: T })], verified: [...verified], seen: yields.seen, nowTs: T + 1000, slots: 4, tenureMs: 2 * H }); assert.deepEqual(back.adopt.map((p) => p.coin), ['A'], 'an evicted coin can be nominated and adopted again later');
   const pinned = planHotAdoption({ nominations: [{ coin: 'D' }], carried, verified, pinned: new Set(['A/USD', 'B/USD']), nowTs: T, slots: 3, tenureMs: 2 * H });
-  assert.deepEqual(pinned.evict, []); assert.deepEqual(pinned.skipped, [{ coin: 'D', reason: 'HOT_LANE_FULL' }], 'held exposure is never evicted for a nominee');
+  assert.deepEqual(pinned.evict, []); assert.deepEqual(pinned.skipped, [{ coin: 'D', reason: 'HOT_LANE_FULL', retry: true }], 'held exposure is never evicted for a nominee');
   assert.deepEqual(HOT_LANE_DEFAULTS, { slots: 3, tenureMs: 2 * H });
 });
 
@@ -44,9 +45,11 @@ test('the current-universe record becomes a superset of the carried hot pairs; o
     const record = { date: sessionDate(), selectedAt: 'x', source: 'kraken REST AssetPairs+Ticker', selectionVersion: DEEP_UNIVERSE_SELECTION_VERSION, count: 1, pairs: [pair('BTC')] };
     writeFileSync(path.join(uDir, 'current.json'), JSON.stringify(record));
     const before = readCurrentUniverse(); assert.ok(before, 'the fixture record is readable as the current universe');
-    const m = mergeCarriedIntoCurrentUniverse([pair('PUMP', { hot: true, hotSinceTs: T })]); assert.deepEqual(m, { ok: true, added: ['PUMP/USD'] });
+    const m = mergeCarriedIntoCurrentUniverse([pair('PUMP', { hot: true, hotSinceTs: T })]); assert.deepEqual(m, { ok: true, added: ['PUMP/USD'], removed: [] });
     const after = readCurrentUniverse(); assert.deepEqual(after.pairs.map((p) => p.symbol), ['BTC/USD', 'PUMP/USD']); assert.equal(after.count, 2); assert.equal(after.pairs[1].hot, true);
-    assert.deepEqual(mergeCarriedIntoCurrentUniverse([pair('PUMP')]), { ok: true, added: [] }, 'idempotent');
+    assert.deepEqual(mergeCarriedIntoCurrentUniverse([pair('PUMP')]), { ok: true, added: [], removed: [] }, 'idempotent');
+    // PUBLISH-FIX-83 item 15: a yielded hot pair leaves the record (the Judge stops nominating a pair the tape no longer carries); a non-hot pair is never removed
+    assert.deepEqual(mergeCarriedIntoCurrentUniverse([], { yielded: ['PUMP/USD', 'BTC/USD'] }), { ok: true, added: [], removed: ['PUMP/USD'] }); assert.deepEqual(readCurrentUniverse().pairs.map((p) => p.symbol), ['BTC/USD']); assert.equal(readCurrentUniverse().count, 1);
     writeFileSync(path.join(dir, 'survey', 'nominations-current.json'), JSON.stringify({ date: '2020-01-01', nominations: [{ coin: 'OLD' }] }));
     assert.deepEqual(readWideEyeNominationsToday(), [], 'a previous session\'s proposals are not hot today');
     writeFileSync(path.join(dir, 'survey', 'nominations-current.json'), JSON.stringify({ date: sessionDate(), nominations: [{ coin: 'PUMP', ts: 'now' }] }));

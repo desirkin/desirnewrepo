@@ -19,17 +19,20 @@ export function planHotAdoption({ nominations = [], carried = [], verified = [],
   const carriedByCoin = new Map(carried.map((p) => [p.coin, p]));
   const hotNow = carried.filter((p) => p.hot === true).sort((a, b) => (a.hotSinceTs ?? 0) - (b.hotSinceTs ?? 0)); // oldest first
   const fresh = nominations.filter((n) => n && typeof n.coin === 'string' && !seen.has(n.coin));
+  // PUBLISH-FIX-83 (full review item 15): `seen` used to be "seen once, refused forever" — a mover nominated while the hot slots were
+  // full was never retried, and an evicted coin could never come back. Now a HOT_LANE_FULL skip is NOT remembered (retried on the
+  // next pass), and an evicted coin leaves `seen` so a later nomination can re-adopt it. NOT_VERIFIED and ALREADY_CARRIED stay remembered.
   for (const n of fresh) {
-    nextSeen.add(n.coin);
-    if (carriedByCoin.has(n.coin)) { skipped.push({ coin: n.coin, reason: 'ALREADY_CARRIED' }); continue; }
+    if (carriedByCoin.has(n.coin)) { nextSeen.add(n.coin); skipped.push({ coin: n.coin, reason: 'ALREADY_CARRIED' }); continue; }
     const v = verified.find((p) => p.coin === n.coin);
-    if (!v) { skipped.push({ coin: n.coin, reason: 'NOT_VERIFIED_BY_VENUE_SELECTION' }); continue; } // floor, status, exclusion, cap: the selection said no
+    if (!v) { nextSeen.add(n.coin); skipped.push({ coin: n.coin, reason: 'NOT_VERIFIED_BY_VENUE_SELECTION' }); continue; } // floor, status, exclusion, cap: the selection said no
     const hotCount = hotNow.length + adopt.length - evict.length;
     if (hotCount >= slots) {
       const victim = hotNow.find((p) => !pinned.has(p.symbol) && !evict.includes(p.symbol) && nowTs - (p.hotSinceTs ?? 0) >= tenureMs);
-      if (!victim) { skipped.push({ coin: n.coin, reason: 'HOT_LANE_FULL' }); continue; }
-      evict.push(victim.symbol);
+      if (!victim) { skipped.push({ coin: n.coin, reason: 'HOT_LANE_FULL', retry: true }); continue; }
+      evict.push(victim.symbol); nextSeen.delete(victim.coin);
     }
+    nextSeen.add(n.coin);
     adopt.push({ ...v, hot: true, hotSinceTs: nowTs, cause: typeof n.cause === 'string' ? n.cause.slice(0, 80) : 'WIDE_EYE_NOMINATION', nominatedTs: n.ts ?? null });
   }
   return { version: HOT_LANE_VERSION, adopt, evict, skipped, seen: nextSeen };
