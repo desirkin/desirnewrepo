@@ -223,7 +223,7 @@ function qualifiedInputAtFactory(snapshots, {
   };
 }
 
-async function rig({ adaptiveRanking = null, snapshotSink = null, controls = () => ({ kill: false, cage: false, vetoes: [] }) } = {}) {
+async function rig({ adaptiveRanking = null, snapshotSink = null, controls = () => ({ kill: false, cage: false, vetoes: [] }), logs = null } = {}) {
   const accountId = `adaptive-hook-${Math.random().toString(36).slice(2)}`;
   const clock = fakeClock();
   const journal = createMemoryJournal(); await journal.create(accountId, { accountKind: 'PAPER' });
@@ -244,7 +244,7 @@ async function rig({ adaptiveRanking = null, snapshotSink = null, controls = () 
     accountId, policy: POLICY.policy, policyDigest: POLICY.digest, dispatcher, feed, clock: pclock,
     specOf: () => SPEC, feeOf: () => TEST_FEE,
     history: { bars: (symbol, nowTs) => bars(Math.floor(nowTs / MIN) * MIN) },
-    caseSource: { consumed: () => null }, controls, scheduler, mode: 'PAPER', adaptiveRanking,
+    caseSource: { consumed: () => null }, controls, scheduler, mode: 'PAPER', adaptiveRanking, ...(logs ? { log: (m) => logs.push(String(m)) } : {}),
   });
   judge.admit('BTC/USD', { assetId: 'BTC', source: 'TEST' });
   feed.ingest(JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: 'BTC/USD', price_precision: 1, qty_precision: 8 }] } }), clock.now());
@@ -462,12 +462,16 @@ test('entry gates and rejected executable costs cannot be bypassed or invoke the
 
   const costCalls = { count: 0 }; const costSnapshots = new Map();
   const costPort = qualifiedInputAtFactory(costSnapshots, { resolverCalls: costCalls });
-  const rejected = await rig({ adaptiveRanking: costPort });
+  const logs = []; const rejected = await rig({ adaptiveRanking: costPort, logs });
   await rejected.run({ finalDepth: 0.000001 });
   assert.equal(costCalls.count, 0);
   assert.equal(costCalls.readerCalls ?? 0, 0, 'an executable-cost refusal never reads adaptive evidence');
   assert.equal(rejected.judge.decisions().some((row) => row.status === 'ENTRY_RESERVED'), false);
   assert.ok(rejected.judge.decisions().some((row) => row.reasonCodes.includes('NO_TRADE_SIZE')));
+  // PUBLISH-FIX-84: a look that passed every gate and died at sizing says which number stopped it, in the log and in the counters
+  const closeCall = logs.find((l) => l.startsWith('CLOSE CALL: BTC/USD'));
+  assert.ok(closeCall, logs.filter((l) => /CLOSE|NO_TRADE/.test(l)).join('\n') || 'no CLOSE CALL line');
+  assert.match(closeCall, /passed every gate; no trade size — [A-Z_]+/); assert.match(closeCall, /cash [0-9.]+, risk budget [0-9.]+, target [0-9.]+/);
 });
 
 test('actual normal batch ordering reverses a small baseline lead with one typed adaptive RR influence, never adds the legacy rank unit, and is deterministic across restart', async () => {

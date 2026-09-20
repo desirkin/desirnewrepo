@@ -60,11 +60,45 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       37959eac34a71bc53104fcbd464c6b0ca35eda648745cbc5f4f605b9a7196f8e
-execution/*.js   3d1fdb68416f9c097bc72f74f228d948bea45424d547ee0c7bdc68e7c58da8fa
+judge/*.js       c4b99b933a2b2a080d74841d26eb3d3a32b283820fdb269bc21e294bdef5b4f2
+execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   be769408aa1077b78c8921436cf9771aaa909196e60822fe571f773166d8f34d
+all (49 files)   55b67b8bc7b8e2c6bf75f8fd92ed50fa8166729ee58304c46df0c702429e14f8
 ```
+
+### 4.34 Audited change — 2026-09-20 PUBLISH-FIX-84: the CLOSE CALL line (previous digests: judge `37959eac34a7…` → `c4b99b933a2b…`, all `6fbf8df680c8…` → `55b67b8bc7b8…`; execution as in 4.33; watch/watch.js UNCHANGED; 49 files)
+
+The owner's night: 3,574 looks on 17 coins in 26 hours, zero entries. Eighteen of those looks passed EVERY gate and were
+refused at sizing (NO_TRADE_SIZE) — the closest the Judge has ever come to a bite — and the log said one word about each.
+**judge/judge.js** — `closeCall(...)`: at both sizing refusals (the dynamic ladder's NO_ELIGIBLE_SIZE_ON_LADDER and the bounded
+search's `found.reason` + binding) one log line, `CLOSE CALL: <pair> <setup> passed every gate; no trade size — <reasons>
+[<candidate detail>] (cash, risk budget, target, capped-by)`, and a counter `closeCalls` (shown in the JUDGE FUNNEL line as
+"close calls (every gate passed, no size)"). NOTHING about the decision changes: same refusal, same reason codes, same
+record, same second look; the line is written before `recordRefusal` from values the refusal already carries. No gate, no
+threshold, no size law, no ordering moved. Proof: test/judge-adaptive-ranking-hook.test.js (the executable-cost refusal
+now also asserts the CLOSE CALL line and its numbers); judge-differential, judge-reducer, judge-decisions, P-08 green.
+
+### 4.33 Audited change — 2026-09-20 PUBLISH-FIX-84: the boot replay applies events in place (previous digests: execution `3d1fdb68416f…` → `bfcff6846d4d…`, all `be769408aa10…` → `6fbf8df680c8…`; judge and watch/watch.js UNCHANGED; 49 files)
+
+The first boot of PUBLISH-FIX-83 replayed 27,467 journal events in SIX MINUTES at 99% CPU (04:00:15 → 04:06:11 UTC), and
+`replayVerify` runs at EVERY boot over a journal that grows by thousands of events a day. A CPU profile of a synthetic
+8,001-event replay put 79% of the time in `structuredClone` of the whole account state ONCE PER EVENT — `applyEvent`'s
+purity, right for the append path (a refusal must leave the projection whole), wasted on a replay that owns its working
+state and discards it on any refusal.
+
+**execution/reducer.js** — `applyEventInPlace(state, ev)`: the same validation, the same handler, the same counters as
+`applyEvent`, on the state it is given; only the event's payload is copied (a handler that keeps a payload object in the
+state can never write back into the journal's own event objects — the memory journal keeps them). `applyEvent` is unchanged
+in behaviour (validate, clone, run) and stays the ONLY step of `reduceBatch` / the append path. `DECISION_RECORDED` evicts
+decisions outside the 256-window through a Set instead of a 256×256 `includes` scan per decision (same result).
+**execution/journal.js** — `replayVerify` and `reproject` step with `applyEventInPlace`. Every law is untouched: page
+bounds, sequence contiguity, per-event contract check, head digest, projection digest, the 1,000,000-event bound.
+
+Proof: `test/publish-fix-84-replay.test.js` — over a busy synthetic journal (looks, reservations, positions, buys, sells,
+closes) the in-place replay's state digest EQUALS the pure `replayEvents` digest and the stored projection's; the journal's
+event objects are byte-identical before and after; `reproject` rewrites the same digest; `applyEvent` still never touches
+its input and a refusal leaves it whole; the decision window evicts exactly as before. Measured on the synthetic journal:
+11,522 ms → 615 ms for 8,001 events (19×). judge-differential, judge-reducer and P-08 green.
 
 ### 4.32 Audited change — 2026-09-20 PUBLISH-FIX-83: the ONE full program review, every finding fixed (previous digests: judge `25153eda5c36…` → `37959eac34a7…`, execution `81bea0cccc0c…` → `3d1fdb68416f…`, watch/watch.js `0c6a43bf1ead…` → `6f319a1ee72a…`, all `ea28187cee2b…` → `be769408aa10…`; 49 files)
 

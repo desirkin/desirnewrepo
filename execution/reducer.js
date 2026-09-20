@@ -40,13 +40,16 @@ const orderOf = (s, id) => s.orders[id] ?? refuse('ORDER_UNKNOWN', `order ${id} 
 const positionOf = (s, id) => s.positions[id] ?? refuse('POSITION_UNKNOWN', `position ${id} unknown`);
 const requireInit = (s) => { if (!s.initialized) refuse('ACCOUNT_UNINITIALIZED', 'account not initialized'); };
 
-export function applyEvent(prev, ev) {
-  const e = eventError(ev); if (e) refuse('EVENT_INVALID', e);
-  if (ev.accountId !== prev.accountId) refuse('ACCOUNT_MISMATCH', 'event belongs to another account');
-  const s = clone(prev); const p = ev.payload; const H = HANDLERS[ev.type]; if (!H) refuse('EVENT_TYPE_UNKNOWN', ev.type);
-  if (ev.type !== 'ACCOUNT_INITIALIZED') requireInit(s);
-  H(s, p, ev); s.counters.events += 1; return s;
-}
+const validateFor = (prev, ev) => { const e = eventError(ev); if (e) refuse('EVENT_INVALID', e); if (ev.accountId !== prev.accountId) refuse('ACCOUNT_MISMATCH', 'event belongs to another account'); const H = HANDLERS[ev.type]; if (!H) refuse('EVENT_TYPE_UNKNOWN', ev.type); return H; };
+const runHandler = (s, ev, H) => { if (ev.type !== 'ACCOUNT_INITIALIZED') requireInit(s); H(s, ev.payload, ev); s.counters.events += 1; return s; };
+// the pure step: the previous state is never touched (a refusal leaves it intact — the append path's projection stays whole)
+export function applyEvent(prev, ev) { const H = validateFor(prev, ev); return runHandler(clone(prev), ev, H); }
+// PUBLISH-FIX-84 (2026-09-20): the replay step. replayVerify at every boot walked 27,467 events in six minutes at 99% CPU, and
+// 79% of it was structuredClone of the whole account state ONCE PER EVENT (applyEvent's purity). A replay owns its working
+// state and discards it on any refusal, so it applies each event in place — same handlers, same order, same resulting state
+// (digest-identical); only the payload is copied, so a handler that keeps a payload object in the state can never write back
+// into the journal's own event objects (a memory journal keeps them). NEVER the append path: reduceBatch keeps applyEvent.
+export function applyEventInPlace(state, ev) { const H = validateFor(state, ev); return runHandler(state, { ...ev, payload: clone(ev.payload) }, H); }
 export function replayEvents(accountId, events) { let s = emptyAccountState(accountId); for (const ev of events) s = applyEvent(s, ev); return s; }
 export const stateDigest = (s) => digestOf({ ...s, counters: null });
 
@@ -90,7 +93,7 @@ const HANDLERS = {
     if (p.sizing !== null) { const h = s.hypotheses[p.decisionId] ?? refuse('PRICE_BLIND_LAW', 'a sized decision needs its hypothesis locked first'); if (h.frozenAtTs > p.decisionKnownAtTs) refuse('PRICE_BLIND_LAW', 'valuation precedes the hypothesis lock'); h.valuationAfterLock = true; if (h.episodeId !== p.episodeId) refuse('EPISODE_MISMATCH', 'decision episode differs from the locked hypothesis'); }
     if ((p.state === 'ENTRY_PROPOSED' || p.state === 'ENTRY_RESERVED') && p.sizing === null) refuse('SIZING_REQUIRED', `${p.state} needs a size`);
     delete s.hypotheses[p.decisionId]; // PUBLISH-FIX-69: answered — the decision record carries what the law still needs
-    s.decisions[p.decisionId] = { ...p, recordedTs: ev.knownAtTs }; pushBounded(s.decisionOrder, p.decisionId, MAX_RECENT); for (const id of Object.keys(s.decisions)) if (!s.decisionOrder.includes(id)) delete s.decisions[id];
+    s.decisions[p.decisionId] = { ...p, recordedTs: ev.knownAtTs }; pushBounded(s.decisionOrder, p.decisionId, MAX_RECENT); { const kept = new Set(s.decisionOrder); for (const id of Object.keys(s.decisions)) if (!kept.has(id)) delete s.decisions[id]; } // PUBLISH-FIX-84: a set, not a 256×256 scan per decision (same result)
     s.counters.decisions[p.state] = (s.counters.decisions[p.state] ?? 0) + 1;
   },
   RESERVATION_OPENED(s, p, ev) {
