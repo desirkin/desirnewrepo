@@ -78,7 +78,7 @@ test('BKS-3. incremental: appends are picked up from the last byte (no full re-r
   const btc = source('BTC'); assert.equal(btc.candles[3][4], 999); assert.equal(btc.retrievedTsMs, 5); assert.equal(btc.coverageEndSec, T + 240); assert.deepEqual(source.coins(), ['BTC', 'ETH']);
   assert.equal(source.stats().segments, 2);
   // the shape is the one the yardstick consumes
-  assert.deepEqual(Object.keys(btc).sort(), ['candles', 'count', 'coverageEndSec', 'firstOpenSec', 'index', 'intervalSec', 'lastOpenSec', 'retrievedTsMs', 'symbol']); assert.equal(btc.index.get(T + 120), 2);
+  assert.deepEqual(Object.keys(btc).sort(), ['candles', 'count', 'coverageEndSec', 'firstOpenSec', 'index', 'intervalSec', 'lastOpenSec', 'retrievedTsMs', 'symbol', 'trades']); assert.equal(btc.index.get(T + 120), 2); assert.equal(btc.trades.length, btc.candles.length, 'PUBLISH-FIX-83 item 14: one print count per candle (null when the venue did not say)');
   // retention: a bar older than 6 h before the newest is evicted on the next change
   appendFileSync(seg2, closedCandle('BTC', T + 7 * 3600, 5, 6) + '\n'); assert.equal(source('BTC').count, 1, 'only the newest bar survives a 7 h gap');
   rmSync(dataDir, { recursive: true, force: true });

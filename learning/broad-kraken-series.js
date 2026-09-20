@@ -34,8 +34,8 @@ function parseLine(t, coins) {
   if (!nums.every((n) => typeof n === 'number' && Number.isFinite(n) && n > 0)) return;
   const openSec = r.periodStartTs / 1000; if (!Number.isInteger(openSec) || openSec % 60 !== 0) return;
   const coin = r.market.canonicalCoin;
-  let c = coins.get(coin); if (!c) { c = { bars: new Map(), maxReceivedTs: 0 }; coins.set(coin, c); }
-  c.bars.set(openSec, [openSec, p.open, p.high, p.low, p.close, typeof p.volumeBase === 'number' && Number.isFinite(p.volumeBase) ? p.volumeBase : 0]);
+  let c = coins.get(coin); if (!c) { c = { bars: new Map(), trades: new Map(), maxReceivedTs: 0 }; coins.set(coin, c); }
+  c.bars.set(openSec, [openSec, p.open, p.high, p.low, p.close, typeof p.volumeBase === 'number' && Number.isFinite(p.volumeBase) ? p.volumeBase : 0]); c.trades.set(openSec, Number.isSafeInteger(p.trades) && p.trades >= 0 ? p.trades : null); // PUBLISH-FIX-83 item 14: the minute's print count beside the candle (the candle itself stays six numbers: labels.js validates that shape)
   if (Number.isSafeInteger(r.receivedTs) && r.receivedTs > c.maxReceivedTs) c.maxReceivedTs = r.receivedTs;
 }
 export function createIncrementalIndex({ dir, maxSegments, maxBytes, log, retentionSec = RETENTION_SEC }) {
@@ -78,7 +78,7 @@ export function createIncrementalIndex({ dir, maxSegments, maxBytes, log, retent
         const candles = [...c.bars.values()].sort((a, b) => a[0] - b[0]);
         const index = new Map(candles.map((cd, i) => [cd[0], i]));
         const lastOpenSec = candles[candles.length - 1][0];
-        next.set(coin, { symbol: coin, intervalSec: 60, retrievedTsMs: c.maxReceivedTs, coverageEndSec: lastOpenSec + 60, candles, index, count: candles.length, firstOpenSec: candles[0][0], lastOpenSec });
+        next.set(coin, { symbol: coin, intervalSec: 60, retrievedTsMs: c.maxReceivedTs, coverageEndSec: lastOpenSec + 60, candles, trades: candles.map((cd) => c.trades.get(cd[0]) ?? null), index, count: candles.length, firstOpenSec: candles[0][0], lastOpenSec });
       }
       out = next; dirty = false;
     }

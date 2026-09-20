@@ -23,7 +23,10 @@ export const VOLATILITY_WATCH_DEFAULTS = Object.freeze({
   windowMin: 60,          // the hour that is ranked
   longWindowMin: 240,     // the four-hour range, reported beside it
   minBars: 30,            // at least this many of the hour's minutes must be on disk (PUBLISH-FIX-71: was 50 — after a republish the disk holds 15–30 min per coin, so the watch sat blind for half an hour)
-  minUsdVol1h: 100_000,   // the hour's traded dollars: a range nobody traded is not a move
+  minUsdVol1h: 1_000_000, // PUBLISH-FIX-83 item 14 (was 100k): a 2%-spread coin prints bid/ask alternately and shows a 3-8% "range" on $200k; a range nobody traded is not a move
+  minTrades1h: 60,        // PUBLISH-FIX-83 item 14: at least one print a minute across the hour, else the range is a handful of prints
+  liquidityRefUsd: 100_000, // the liquidity weight: min(1, log10(usdVol / ref) / 2) — $100k -> 0, $1M -> 0.5, $10M -> 1
+  tradesRef1h: 120,       // the print-density weight: min(1, trades / ref) — 2 prints a minute across the hour weighs 1
   minRange1hPct: 0.8,     // below this the hour did not move enough to matter against fees; the list may be shorter than `picks`
   maxStaleMin: 5,         // the newest candle must be this fresh, else the coin's stream is stale and it is not ranked
 });
@@ -33,18 +36,18 @@ export const volatilityDir = (dataDir) => path.join(path.resolve(dataDir), 'lear
 export const volatilityFile = (dataDir) => path.join(volatilityDir(dataDir), 'current.json');
 
 // the measures of the last `windowMin` closed minutes of one coin's candles ([openSec, o, h, l, c, v] ascending)
-export function rangeMeasures(candles, { nowTs, windowMin, minBars, maxStaleMin }) {
+export function rangeMeasures(candles, { nowTs, windowMin, minBars, maxStaleMin, trades: tradeCounts = null }) {
   if (!Array.isArray(candles) || !candles.length) return null;
   const last = candles[candles.length - 1]; const lastEndMs = (last[0] + 60) * 1000;
   if (nowTs - lastEndMs > maxStaleMin * MIN) return { stale: true };
-  const fromSec = last[0] - (windowMin - 1) * 60; let hi = -Infinity; let lo = Infinity; let usd = 0; let bars = 0; let first = null;
+  const fromSec = last[0] - (windowMin - 1) * 60; let hi = -Infinity; let lo = Infinity; let usd = 0; let bars = 0; let first = null; let trades = null;
   for (let i = candles.length - 1; i >= 0; i -= 1) {
     const c = candles[i]; if (c[0] < fromSec) break;
     if (!(c[2] > 0 && c[3] > 0 && c[4] > 0)) continue;
-    if (c[2] > hi) hi = c[2]; if (c[3] < lo) lo = c[3]; usd += (c[5] ?? 0) * c[4]; bars += 1; first = c;
+    if (c[2] > hi) hi = c[2]; if (c[3] < lo) lo = c[3]; usd += (c[5] ?? 0) * c[4]; bars += 1; first = c; const tc = Array.isArray(tradeCounts) ? tradeCounts[i] : null; if (Number.isSafeInteger(tc)) trades = (trades ?? 0) + tc;
   }
   if (bars < minBars || !(lo > 0) || !first) return { bars, tooFew: true };
-  return { bars, rangePct: (hi / lo - 1) * 100, retPct: (last[4] / first[1] - 1) * 100, usdVol: usd, lastClose: last[4], lastOpenSec: last[0] };
+  return { bars, rangePct: (hi / lo - 1) * 100, retPct: (last[4] / first[1] - 1) * 100, usdVol: usd, trades, lastClose: last[4], lastOpenSec: last[0] };
 }
 
 // pure: rank the coins of a series source; returns the ranked eligible list (best first)
@@ -53,14 +56,18 @@ export function rankByVolatility({ seriesSource, nowTs, cfg = VOLATILITY_WATCH_D
   for (const coin of seriesSource.coins()) {
     if (exclude.has(coin)) continue;
     const series = seriesSource(coin); const candles = series?.candles; if (!Array.isArray(candles) || !candles.length) continue;
-    const h = rangeMeasures(candles, { nowTs, windowMin: cfg.windowMin, minBars: cfg.minBars, maxStaleMin: cfg.maxStaleMin });
+    const h = rangeMeasures(candles, { nowTs, windowMin: cfg.windowMin, minBars: cfg.minBars, maxStaleMin: cfg.maxStaleMin, trades: Array.isArray(series.trades) && series.trades.length === candles.length ? series.trades : null });
     if (!h || h.stale) { stale += 1; continue; }
-    if (h.tooFew || h.usdVol < cfg.minUsdVol1h) { thin += 1; continue; }
+    if (h.tooFew || h.usdVol < cfg.minUsdVol1h || (h.trades !== null && h.trades < (cfg.minTrades1h ?? 0))) { thin += 1; continue; }
     if (h.rangePct < cfg.minRange1hPct) { quiet += 1; continue; }
     const l = rangeMeasures(candles, { nowTs, windowMin: cfg.longWindowMin, minBars: Math.min(cfg.minBars, cfg.longWindowMin), maxStaleMin: cfg.maxStaleMin });
-    out.push({ coin, symbol: `${coin}/USD`, range1hPct: round3(h.rangePct), ret1hPct: round3(h.retPct), usdVol1h: Math.round(h.usdVol), range4hPct: l && !l.stale && !l.tooFew ? round3(l.rangePct) : null, lastClose: h.lastClose, lastOpenSec: h.lastOpenSec });
+    // PUBLISH-FIX-83 item 14: the rank is the range WEIGHTED by liquidity and print density, so a 3% "range" on $200k of alternating
+    // bid/ask prints no longer outranks a 1.5% move on $20M; the raw range is still reported beside it
+    const liquidityWeight = Math.min(1, Math.max(0, Math.log10(h.usdVol / (cfg.liquidityRefUsd ?? 100_000)) / 2)); const densityWeight = h.trades === null ? 1 : Math.min(1, h.trades / (cfg.tradesRef1h ?? 120));
+    const score = h.rangePct * liquidityWeight * densityWeight;
+    out.push({ coin, symbol: `${coin}/USD`, range1hPct: round3(h.rangePct), score: round3(score), liquidityWeight: round3(liquidityWeight), densityWeight: round3(densityWeight), trades1h: h.trades, ret1hPct: round3(h.retPct), usdVol1h: Math.round(h.usdVol), range4hPct: l && !l.stale && !l.tooFew ? round3(l.rangePct) : null, lastClose: h.lastClose, lastOpenSec: h.lastOpenSec });
   }
-  out.sort((a, b) => b.range1hPct - a.range1hPct || b.usdVol1h - a.usdVol1h || a.coin.localeCompare(b.coin));
+  out.sort((a, b) => b.score - a.score || b.range1hPct - a.range1hPct || b.usdVol1h - a.usdVol1h || a.coin.localeCompare(b.coin));
   return { ranked: out, skipped: { stale, thin, quiet } };
 }
 
@@ -74,9 +81,9 @@ export function selectPicks(ranked, previous, { nowTs, picks = VOLATILITY_WATCH_
   for (const r of kept) list.push({ ...r, sinceTs: prevBy.get(r.coin).sinceTs, entries: prevBy.get(r.coin).entries ?? 1 });
   for (const r of entrants) { if (list.length >= picks) break; list.push({ ...r, sinceTs: nowTs, entries: 1 }); }
   // more kept than picks can only happen while the band shrinks; the oldest leave first
-  list.sort((a, b) => b.range1hPct - a.range1hPct);
+  const rank = (a, b) => (b.score ?? b.range1hPct) - (a.score ?? a.range1hPct) || b.range1hPct - a.range1hPct; list.sort(rank);
   const trimmed = list.length > picks ? [...list].sort((a, b) => a.sinceTs - b.sinceTs).slice(list.length - picks) : list;
-  return trimmed.sort((a, b) => b.range1hPct - a.range1hPct).map((p) => ({ ...p, affirmedTs: nowTs }));
+  return trimmed.sort(rank).map((p) => ({ ...p, affirmedTs: nowTs }));
 }
 
 export function createVolatilityWatch({ seriesSource, dataDir, clock = () => Date.now(), log = () => {}, excludeBases = [], options = {} } = {}) {
@@ -91,7 +98,7 @@ export function createVolatilityWatch({ seriesSource, dataDir, clock = () => Dat
     const before = new Set(current.picks.map((p) => p.coin)); const after = new Set(picks.map((p) => p.coin));
     for (const p of picks) if (!before.has(p.coin)) { counters.entered += 1; log(`VOLATILITY WATCH: ${p.coin} enters the Judge's watch — ${p.range1hPct}% range this hour (${p.ret1hPct >= 0 ? '+' : ''}${p.ret1hPct}% net, $${Math.round(p.usdVol1h / 1000)}k traded${p.range4hPct !== null ? `, ${p.range4hPct}% over four hours` : ''})`); }
     for (const p of current.picks) if (!after.has(p.coin)) { counters.left += 1; log(`VOLATILITY WATCH: ${p.coin} leaves the watch (no longer among the top ${cfg.band} movers)`); }
-    current = { version: VOLATILITY_WATCH_VERSION, ts: nowTs, picks, ranked: ranked.length, skipped, top: ranked.slice(0, cfg.band).map((r) => ({ coin: r.coin, range1hPct: r.range1hPct, usdVol1h: r.usdVol1h })) };
+    current = { version: VOLATILITY_WATCH_VERSION, ts: nowTs, picks, ranked: ranked.length, skipped, top: ranked.slice(0, cfg.band).map((r) => ({ coin: r.coin, range1hPct: r.range1hPct, score: r.score, usdVol1h: r.usdVol1h, trades1h: r.trades1h })) };
     const keys = picks.map((p) => `${p.coin}|${p.sinceTs}`).join(',');
     if (keys !== lastKeys || counters.refreshes === 1) { lastKeys = keys; try { mkdirSync(volatilityDir(dataDir), { recursive: true }); atomicWriteJson(volatilityFile(dataDir), current, { pretty: true }); } catch (err) { counters.writesFailed += 1; log(`VOLATILITY WATCH: current.json not written (${String(err?.message ?? err).slice(0, 120)})`); } }
     return current;
