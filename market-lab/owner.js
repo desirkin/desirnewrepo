@@ -136,7 +136,16 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
   const duplicate = (o) => { if (o.sourceKey === null || o.sourceKey === undefined) return false; const key = `${o.provider}|${o.endpointId}|${subjectId(o.subject)}|${o.kind}|${o.sourceKey}|${o.sourceRevision ?? ''}|${canonicalDigest(o.payload)}`; if (seenKeys.has(key)) return true; seenKeys.add(key); seenOrder.push(key); if (seenOrder.length > SEEN_CAP) seenKeys.delete(seenOrder.shift()); return false; };
   // ---- segments: bounded immutable rotation, explicit recording failure ---------------------------------------------------------
   let segment = null; let segmentBase = null; let segmentOrdinal = 0; const sealed = []; let sealedCount = 0; let runBytes = 0; let policyNonsecretForSeal = null;
-  const rootQuota = () => { if (!researchRoot) return null; try { return quotaState(directoryBytes(path.resolve(researchRoot)), limits.researchRootQuotaBytes); } catch (err) { return { exhausted: true, error: String(err?.message ?? err).slice(0, 120) }; } };
+  // PUBLISH-FIX-83 second pass: the research root's byte count (a readdir + stat per file, up to 200k entries, synchronous)
+  // is memoized for ROOT_QUOTA_CACHE_MS — status() called it every minute (every 15 s during boot) on the main thread
+  let rootQuotaMemo = null; let rootQuotaMemoTs = 0;
+  const ROOT_QUOTA_CACHE_MS = 10 * 60_000;
+  const rootQuota = ({ fresh = false } = {}) => {
+    if (!researchRoot) return null;
+    const t = clock(); if (!fresh && rootQuotaMemo && t - rootQuotaMemoTs < ROOT_QUOTA_CACHE_MS) return rootQuotaMemo;
+    try { rootQuotaMemo = quotaState(directoryBytes(path.resolve(researchRoot)), limits.researchRootQuotaBytes); } catch (err) { rootQuotaMemo = { exhausted: true, error: String(err?.message ?? err).slice(0, 120) }; }
+    rootQuotaMemoTs = t; return rootQuotaMemo;
+  };
   function recordingFailure(err, where) {
     if (recording.error) return; recording.error = toJsonError(err); recording.failedTs = clock(); recording.where = where; recording.segmentDir = segment?.dir ?? null;
     log(`recording failed (${where}): ${recording.error.message} — capture stopped, no seal for the failed segment`);
@@ -172,7 +181,7 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
     try {
       sealSegment(); counters.segmentRotations += 1;
       if (runBytes >= limits.runBytes) throw new MarketLabError('RESOURCE_LIMIT_EXCEEDED', `run bytes ${runBytes} reached the run bound ${limits.runBytes} (${policy.retention.onQuotaExhausted})`);
-      const q = rootQuota(); if (q && q.exhausted) throw new MarketLabError('RESOURCE_LIMIT_EXCEEDED', `research root quota exhausted (${policy.retention.onQuotaExhausted})`);
+      const q = rootQuota({ fresh: true }); if (q && q.exhausted) throw new MarketLabError('RESOURCE_LIMIT_EXCEEDED', `research root quota exhausted (${policy.retention.onQuotaExhausted})`);
       openSegment(nextSegmentDir());
       return true;
     } catch (err) { recordingFailure(err, `ROTATE_${reason}`); return false; }
@@ -304,7 +313,7 @@ export function createResearchOwner({ policy, subjects, env = {}, researchRoot =
     if (outDir) codeIdentity(); // PUBLISH-FIX-31: the process identity is computed once, here at start (git runs synchronously), never again at a seal
     // PUBLISH-FIX-22: under ROTATE_OLDEST_CAPTURES the owner makes room first (oldest prior capture runs), then the quota law applies unchanged
     if (outDir && researchRoot && policy.retention?.onQuotaExhausted === 'ROTATE_OLDEST_CAPTURES') rotateCaptureRuns({ root: researchRoot, quotaBytes: limits.researchRootQuotaBytes, reserveBytes: limits.runBytes, keep: [path.resolve(outDir)], log });
-    if (outDir) { const q = rootQuota(); if (q && q.exhausted) { lifecycle = 'RECORDING_FAILED'; stopped = true; recording.error = { code: 'RESOURCE_LIMIT_EXCEEDED', message: 'research root quota exhausted before start' }; recording.failedTs = clock(); recording.where = 'START'; fail('RESOURCE_LIMIT_EXCEEDED', 'research root quota exhausted'); } segmentBase = path.resolve(outDir); openSegment(outDir); }
+    if (outDir) { const q = rootQuota({ fresh: true }); if (q && q.exhausted) { lifecycle = 'RECORDING_FAILED'; stopped = true; recording.error = { code: 'RESOURCE_LIMIT_EXCEEDED', message: 'research root quota exhausted before start' }; recording.failedTs = clock(); recording.where = 'START'; fail('RESOURCE_LIMIT_EXCEEDED', 'research root quota exhausted'); } segmentBase = path.resolve(outDir); openSegment(outDir); }
     resolution = await guard.withPurpose('CATALOG', () => resolveSubjects({ subjects, clients, enabled: (id) => enabled(id) && mayCall(id, ENDPOINTS.find((e) => e.providerId === id && e.method !== 'WS')?.endpointId ?? ''), log }));
     for (const r of resolution.results) { const k = r.providers.KRAKEN_SPOT; const c = r.providers.COINBASE_SPOT; const g = r.providers.COINGECKO; markets.set(r.canonicalCoin, { kraken: k?.state === 'RESOLVED' ? k.market : null, coinbase: c?.state === 'RESOLVED' ? c.market : null, coingecko: g?.state === 'RESOLVED' ? g.asset : null }); if (k?.state === 'RESOLVED') { const o = clients.KRAKEN_SPOT.instrumentObservation(k.market, clock()); if (o) record([o]); } if (c?.state === 'RESOLVED') { const o = clients.COINBASE_SPOT.instrumentObservation(c.market, clock()); if (o) record([o]); } }
     if (mode === 'STANDALONE') {

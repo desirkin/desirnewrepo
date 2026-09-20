@@ -31,6 +31,7 @@ test('B08 (research -> live): no research module imports orders, ledger, cost, s
     'market-lab/providers/kraken-spot.js': ['tape/book.js', 'survey/catalog.js'], // the pure L2 book state machine + the Kraken catalog normalizer (no tape runtime)
     'market-lab/providers/coinbase.js': ['tape/book.js'],
     'market-lab/providers/kraken-futures-stream.js': ['tape/book.js'],
+    'socrates/budget.js': ['lib/stale-lock.js'], // PUBLISH-FIX-83 second pass: the ONE pure stale-lock law (pid / boot-time arithmetic, node:fs + node:os only; no live state)
   };
   assert.ok(RESEARCH_FILES.length >= 40, `research files ${RESEARCH_FILES.length}`);
   for (const f of RESEARCH_FILES) {
