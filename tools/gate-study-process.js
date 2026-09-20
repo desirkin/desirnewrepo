@@ -2,6 +2,7 @@
 // spawn exactly as tools/mover-backfill-process.js does; learning/ never imports child_process) so the main thread never reads the
 // ledger; resolves with the child's one JSON result line. Authority NONE.
 import { spawn } from 'node:child_process';
+import { trackChild } from '../lib/child-registry.js';
 import { fileURLToPath } from 'node:url';
 export const CHILD_HEAP_MB = 768; // the child's own V8 ceiling; never the parent's
 import { GATE_LESSON_VERSION } from '../learning/gate-lesson.js';
@@ -15,7 +16,7 @@ export function spawnGateStudy({ dataDir, cfg = {}, log = () => {}, timeoutMs = 
     const timer = setTimeout(() => { try { child?.kill('SIGKILL'); } catch { /* gone */ } log(`GATE STUDY: timed out after ${Math.round(timeoutMs / 1000)} s (the previous lesson stays in force)`); done({ outcome: 'TIMEOUT' }); }, timeoutMs);
     if (typeof timer?.unref === 'function') timer.unref();
     // review finding (PUBLISH-FIX-83): the child never inherits the parent's NODE_OPTIONS heap flag (4 GB on a 4 GB machine); it runs under its own bounded ceiling
-    try { child = spawn(process.execPath, [`--max-old-space-size=${CHILD_HEAP_MB}`, script, dataDir, JSON.stringify(cfg ?? {})], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } }); }
+    try { child = trackChild(spawn(process.execPath, [`--max-old-space-size=${CHILD_HEAP_MB}`, script, dataDir, JSON.stringify(cfg ?? {})], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } })); }
     catch (err) { clearTimeout(timer); log(`GATE STUDY: could not start (${String(err?.message ?? err).slice(0, 120)})`); resolve({ outcome: 'FAILED', reason: 'SPAWN' }); return; }
     child.stdout.on('data', (d) => { stdout += d; if (stdout.length > 65_536) stdout = stdout.slice(-65_536); });
     child.stderr.on('data', (d) => { stderr += d; if (stderr.length > 8_192) stderr = stderr.slice(-8_192); });

@@ -2,6 +2,7 @@
 // spawn, exactly as tools/daily-study-process.js does for the daily study; learning/ never imports child_process) so the main
 // thread never parses the archive; resolves with the child's one JSON result line. Authority NONE.
 import { spawn } from 'node:child_process';
+import { trackChild } from '../lib/child-registry.js';
 import { fileURLToPath } from 'node:url';
 export const CHILD_HEAP_MB = 768; // the child's own V8 ceiling; never the parent's
 import { MOVER_BACKFILL_VERSION, MOVER_BACKFILL_DEFAULTS } from '../learning/mover-backfill.js';
@@ -16,7 +17,7 @@ export function spawnMoverBackfill({ dataDir, log = () => {}, timeoutMs = MOVER_
     if (typeof timer?.unref === 'function') timer.unref();
     try {
       // review finding (PUBLISH-FIX-83): the child never inherits the parent's NODE_OPTIONS heap flag (4 GB on a 4 GB machine); it runs under its own bounded ceiling
-      child = spawn(process.execPath, [`--max-old-space-size=${CHILD_HEAP_MB}`, script, dataDir, JSON.stringify({ maxBytes, maxSegments })], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } });
+      child = trackChild(spawn(process.execPath, [`--max-old-space-size=${CHILD_HEAP_MB}`, script, dataDir, JSON.stringify({ maxBytes, maxSegments })], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } }));
     } catch (err) { clearTimeout(timer); log(`MOVER BACKFILL: could not start (${String(err?.message ?? err).slice(0, 120)})`); resolve({ outcome: 'FAILED', reason: 'SPAWN' }); return; }
     child.stdout.on('data', (d) => { stdout += d; if (stdout.length > 65_536) stdout = stdout.slice(-65_536); });
     child.stderr.on('data', (d) => { stderr += d; if (stderr.length > 8_192) stderr = stderr.slice(-8_192); }); // PUBLISH-FIX-80: the child's own words are kept for the failure line (the first production run exited 1 and the reason was thrown away)

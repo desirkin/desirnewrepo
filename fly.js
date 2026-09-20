@@ -646,6 +646,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     // (it owns the feed); the market-research owner and the research lane stop in parallel; a watchdog names a shutdown that
     // exceeds its budget and exits so the last words are logged rather than killed.
     const shutdownStartedTs = Date.now();
+    { const { killChildren } = await import('./lib/child-registry.js'); const n = killChildren('SIGTERM'); if (n) console.log(`SHUTDOWN: ${n} study child process(es) sent SIGTERM`); } // PUBLISH-FIX-83 second pass
     const shutdownWatchdog = setTimeout(() => { console.error(`SHUTDOWN exceeded ${SHUTDOWN_BUDGET_MS / 1000} s — exiting now (state files are atomic; the durable core rolls back an open transaction)`); process.exit(0); }, SHUTDOWN_BUDGET_MS); shutdownWatchdog.unref?.();
     if (judgeRun) { try { await judgeRun.stop(); } catch (err) { console.error(`JUDGE stop failed: ${err.message}`); } }
     await Promise.allSettled([
