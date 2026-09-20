@@ -19,7 +19,7 @@ export const DEFAULT_MAX_WAIT_MS = 60 * 60_000;   // hard deadline: record whate
 export const DEFAULT_PAGE_LIMIT = 500;
 
 const bounded = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').slice(0, 180);
-const LAGGING_STATES = new Set(['CENSORED']); const LAGGING_REASONS = new Set(['SERIES_ABSENT_FOR_ASSET', 'NO_TEMPORAL_OVERLAP', 'REFERENCE_BAR_MISSING', 'SERIES_MALFORMED']);
+const LAGGING_HORIZON_REASONS = new Set(['SOURCE_COVERAGE_ENDS_BEFORE_HORIZON']); const LAGGING_REASONS = new Set(['SERIES_ABSENT_FOR_ASSET', 'NO_TEMPORAL_OVERLAP', 'REFERENCE_BAR_MISSING', 'SERIES_MALFORMED']); // review finding: an INTERIOR hole or an invalid price is final at first look (the series now forward-fills short holes); only coverage that has not reached the horizon waits
 
 export function createDecisionOutcomeRecorder({
   readPage, seriesSource, store, clock = () => Date.now(), log = () => {},
@@ -67,7 +67,7 @@ export function createDecisionOutcomeRecorder({
           // that is absent / does not overlap yet (thin coins lag minutes; a restart drops the pending candle), is NOT final at first
           // look — it is "not yet known" until maxWaitMs, and only then written as it stands. Scored decisions fell from 2,707 a day
           // to 37 when this wrote CENSORED permanently at anchor + 15 minutes.
-          const lagging = LAGGING_STATES.has(yardstick.bite.state) || LAGGING_STATES.has(yardstick.continuation.state) || (yardstick.availability?.state === 'OUTCOME_UNAVAILABLE' && LAGGING_REASONS.has(yardstick.availability?.reason));
+          const lagH = (h) => h?.state === 'CENSORED' && LAGGING_HORIZON_REASONS.has(h.reason); const lagging = lagH(yardstick.bite) || lagH(yardstick.continuation) || (yardstick.availability?.state === 'OUTCOME_UNAVAILABLE' && LAGGING_REASONS.has(yardstick.availability?.reason));
           if ((stillMaturing || lagging) && !deadlineReached) { pendingSeq = seq; waiting += 1; break outer; } // due, but the candle data has not caught up; retry next tick
           const record = { recordVersion: DECISION_OUTCOME_VERSION, decisionId, assetId, decisionKnownAtTs, seq, recordedTs: nowTs, decisionState, yardstick };
           try {

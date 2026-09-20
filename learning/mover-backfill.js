@@ -49,7 +49,8 @@ export async function runMoverBackfill({ dataDir, log = () => {}, maxBytes, maxS
   // (name + size); a boot replays only the new ones, appending to the records that survived, and the manifest is rewritten after each.
   mkdirSync(root, { recursive: true }); const manifestFile = path.join(root, 'replayed.json');
   let replayed = {}; try { if (existsSync(manifestFile)) { const m = JSON.parse(readFileSync(manifestFile, 'utf8')); if (m && m.version === MOVER_BACKFILL_VERSION && m.segments && typeof m.segments === 'object') replayed = m.segments; } } catch { replayed = {}; }
-  const all = selectSegments(path.join(dataDir, 'broad-kraken'), { maxBytes, maxSegments });
+  const listed = selectSegments(path.join(dataDir, 'broad-kraken'), { maxBytes, maxSegments });
+  const all = listed; const liveName = listed.length ? listed[listed.length - 1].name : null; // the newest segment is the collector's LIVE file: replayed now, never remembered as done (it grows), and the study skips the rows it already wrote
   const segments = all.filter((s) => replayed[s.name] !== s.bytes);
   const out = { version: MOVER_BACKFILL_VERSION, segments: segments.length, alreadyReplayed: all.length - segments.length, skipped: 0, pinned: 0, bytes: segments.reduce((a, s) => a + s.bytes, 0), lines: 0, records: 0, candles: 0, ticks: 0, movers: 0, controls: 0, coins: 0, firstTs: null, lastTs: null, days: [], ms: 0 };
   const saveManifest = () => { try { writeFileSync(`${manifestFile}.tmp`, JSON.stringify({ version: MOVER_BACKFILL_VERSION, ts: Date.now(), segments: replayed })); renameSync(`${manifestFile}.tmp`, manifestFile); } catch { /* the next boot replays these again; idempotent by opportunity identity */ } };
@@ -89,7 +90,7 @@ export async function runMoverBackfill({ dataDir, log = () => {}, maxBytes, maxS
       }
     } } catch (err) { streamError = streamError ?? err; }
     if (streamError) { out.skipped += 1; log(`MOVER BACKFILL: ${seg.name} could not be read (${streamError?.code ?? String(streamError?.message ?? streamError).slice(0, 80)}) — skipped; the live collector prunes the oldest segments while the replay walks them`); continue; }
-    replayed[seg.name] = seg.bytes; saveManifest();
+    if (seg.name !== liveName) { replayed[seg.name] = seg.bytes; saveManifest(); }
     log(`MOVER BACKFILL: ${seg.name} replayed (${out.candles} closed minutes, ${out.movers} climbs so far)`); // a crash mid-way names the segment it died in
   }
   if (virtualNow) study.closeDay(virtualNow);

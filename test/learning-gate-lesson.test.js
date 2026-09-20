@@ -126,3 +126,16 @@ test('GL-09. the study end to end on a temp ledger: streams episodes + decision 
   assert.equal(r2.events.length, 0, 'the open proposal is kept, not re-proposed');
   rmSync(root, { recursive: true, force: true });
 });
+
+test('GL-11 (review finding). on pure noise — gate values independent of the returns — the lesson moves nothing: no TIGHTEN ratchet, no LOOSEN; a cohort behind a move must span at least minClusters coin-hours', () => {
+  let x = 12345; const rnd = () => { x = (Math.imul(x, 1664525) + 1013904223) >>> 0; return x / 4294967296; }; const gauss = () => { const u = rnd() || 1e-9; const v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+  let supported = 0; let evaluations = 0; let loosened = 0;
+  for (let trial = 0; trial < 12; trial += 1) {
+    const tests = []; for (let i = 0; i < 1500; i += 1) tests.push(look(i, { value: -1 + rnd() * 2, r: gauss() * 1.2, ts: T0 + i * 60_000, coin: `C${i % 12}` }));
+    for (const line of [0.1, 0.2, 0.3]) { const ev = evaluateUnit(tests, GATE_BANDS.FI15, line, CFG); evaluations += 1; if (ev.move) { supported += 1; if (ev.move.kind === 'LOOSEN') loosened += 1; } }
+  }
+  assert.ok(supported / evaluations <= 1 - CFG.confidence, `noise moved the line ${supported} of ${evaluations} times — above the declared false-positive rate ${1 - CFG.confidence} (was: TIGHTEN in ~half of them, whatever the confidence)`); assert.equal(loosened, 0, 'LOOSEN never on noise');
+  // the cluster floor: the same cohort from ONE coin in ONE hour cannot move the line however good it reads
+  const one = []; for (let i = 0; i < 400; i += 1) one.push(look(i, { value: i < 300 ? 0.6 : 0.1, r: i < 300 ? 0.3 : 2.0, ts: T0 + i * 100, coin: 'ONLY' }));
+  const ev = evaluateUnit(one, GATE_BANDS.FI15, 0.2, CFG); assert.equal(ev.move, null, JSON.stringify(ev.loosen)); assert.equal(ev.loosen.enoughClusters, false); assert.equal(ev.loosen.clusters, 1);
+});

@@ -156,7 +156,7 @@ export function replayProspective(records, { adaptiveRankingTrialValidator = nul
       // A terminal is trusted only when it is the deterministic result of the evidence that precedes it. This also
       // refuses a hand-written verdict, an early terminal and a terminal clock backdated before existing evidence.
       try {
-        const expected = terminalRecord({ designs, captures, outcomes, terminals }, r.candidateId, { nowTs: r.recordedTs, commonShockDates: new Set() });
+        const expected = terminalRecord({ designs, captures, outcomes, terminals }, r.candidateId, { nowTs: r.recordedTs, commonShockDates: new Set(), comparison: r.effect && typeof r.effect === 'object' && r.effect.comparison === TERMINAL_COMPARISON ? TERMINAL_COMPARISON : LEGACY_TERMINAL_COMPARISON });
         if (expected.reasons.includes('TERMINAL_SAMPLE_NOT_REACHED')) { at('terminal sample not reached'); continue; }
         if (canonicalDigest(r) !== canonicalDigest(expected)) { at('terminal does not match the replayed prospective evidence'); continue; }
       } catch (err) { at(`terminal invalid (${err.message})`); continue; }
@@ -186,7 +186,11 @@ export function interimView(state, candidateId, { commonShockDates = new Set() }
 // the candidate takes the metric where it decided to select and 0 where it skipped, and vice versa for the baseline,
 // so newly admitted losers and forgone gains both count. Floors and coverage are machine-enforced before any effect
 // is read.
-function terminalRecord(state, candidateId, { nowTs, commonShockDates = new Set() }) {
+// the terminal law in force: SELECTED_VS_GROUP_MEAN (PUBLISH-FIX-83 item 19, the ranking law) — a terminal written under the OLD law
+// (candidate minus a never-selecting baseline) carries no `effect.comparison` and is replayed under that law, so the journal's history
+// stays valid (review finding: the first deploy would otherwise have refused every settle forever)
+export const TERMINAL_COMPARISON = 'SELECTED_VS_GROUP_MEAN'; export const LEGACY_TERMINAL_COMPARISON = 'SELECTED_VS_BASELINE';
+function terminalRecord(state, candidateId, { nowTs, commonShockDates = new Set(), comparison = TERMINAL_COMPARISON }) {
   const d = state.designs.get(candidateId); if (!d) throw new Error('evaluateTerminal: unknown candidate');
   formalShockDates(commonShockDates);
   if (!isTs(nowTs)) throw new Error('evaluateTerminal: terminal clock malformed');
@@ -234,18 +238,21 @@ function terminalRecord(state, candidateId, { nowTs, commonShockDates = new Set(
   // after the sealed 1.8% round trip on a 5-minute horizon — a bar no cohort of looks could clear, so every forward test ended
   // FORWARD_NOT_SUPPORTED and re-proposed forever. Profitability is the gates' and the cost model's job; the ranking's job is to
   // put the better looks first, and that is what is measured here. The adaptive-ranking trial keeps its own paired metric.
+  const legacy = comparison === LEGACY_TERMINAL_COMPARISON;
   const diffs = countedGrouping.groups.map((g) => {
-    let adaptiveSum = 0; let adaptiveN = 0; let selectedSum = 0; let selectedN = 0; let allSum = 0; let allN = 0;
+    let adaptiveSum = 0; let adaptiveN = 0; let selectedSum = 0; let selectedN = 0; let allSum = 0; let allN = 0; let legacySum = 0; let legacyN = 0;
     for (const idx of g.members) {
       const cap = countedCaps[idx]; const out = outs.get(cap.opportunityId);
       const adaptive = cap.comparisonKind === ADAPTIVE_RANKING_TRIAL_CAPTURE
         && out.comparisonKind === ADAPTIVE_RANKING_TRIAL_OUTCOME;
       if (adaptive) { adaptiveSum += out.candidateMetricValue - out.baselineMetricValue; adaptiveN += 1; continue; }
       const metric = isFiniteNum(out.metricValue) ? out.metricValue : null; if (metric === null) continue;
+      if (legacy) { const cand = cap.candidateDecision === 'SELECTED_FOR_SHADOW' ? metric : 0; const base = cap.baselineDecision === 'SELECTED_FOR_SHADOW' ? metric : 0; legacySum += cand - base; legacyN += 1; continue; }
       allSum += metric; allN += 1; if (cap.candidateDecision === 'SELECTED_FOR_SHADOW') { selectedSum += metric; selectedN += 1; }
     }
+    if (legacy) { const n = adaptiveN + legacyN; return n > 0 ? (adaptiveSum + legacySum) / n : null; }
     if (adaptiveN > 0) return adaptiveSum / adaptiveN;
-    if (selectedN === 0 || allN === 0) return null; // a group the candidate never picked from says nothing about its ranking
+    if (selectedN === 0 || allN === 0 || selectedN === allN) return null; // no contrast: a group the candidate picked all or none of says nothing about its ranking (review finding)
     return selectedSum / selectedN - allSum / allN;
   }).filter((v) => v !== null);
   const est = normalShrinkageGrouped({ groupMeans: diffs, pooledMean: 0, priorStrength: 1 });
@@ -254,7 +261,7 @@ function terminalRecord(state, candidateId, { nowTs, commonShockDates = new Set(
   return deepFreeze({
     kind: 'TERMINAL_EVALUATED', candidateId, verdict: supported ? 'FORWARD_SUPPORTED' : 'FORWARD_NOT_SUPPORTED',
     reasons: supported ? ['PAIRED_LOWER_BOUND_ABOVE_ZERO'] : ['PAIRED_LOWER_BOUND_NOT_ABOVE_ZERO'],
-    effect: { pairedMeanDiff: est.posteriorMean, lower95: est.lower95, upper95: est.upper95, groups: est.effectiveGroups, metric: d.primaryMetric, comparison: 'SELECTED_VS_GROUP_MEAN' },
+    effect: legacy ? { pairedMeanDiff: est.posteriorMean, lower95: est.lower95, upper95: est.upper95, groups: est.effectiveGroups, metric: d.primaryMetric } : { pairedMeanDiff: est.posteriorMean, lower95: est.lower95, upper95: est.upper95, groups: est.effectiveGroups, metric: d.primaryMetric, comparison: TERMINAL_COMPARISON },
     coverage: round4(coverage), maturedGroups: countedGrouping.groupCount, distinctAssets: maturedGrouping.distinctAssets, distinctUtcDates: maturedGrouping.distinctUtcDates,
     allGroups: allGrouping.groupCount, recordedTs: nowTs, alpha: d.alpha, authority: AUTHORITY, purpose: PURPOSE,
   });

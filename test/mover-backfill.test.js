@@ -64,9 +64,10 @@ test('MB-02. runMoverBackfill replays the archive through the mover study with a
     assert.match(logs.at(-1), /MOVER BACKFILL: 1 climbs >=10%\/hour \(with 2 controls\) replayed from 2 archived segments/); assert.equal(logs.filter((l) => /replayed \(/.test(l)).length, 2, 'one progress line per segment');
     // PUBLISH-FIX-83 item 22: a second run replays NOTHING it already replayed (the manifest names both segments): the single record stays single,
     // the records survive the boot; a segment that grew (more bytes) is replayed again, idempotently
-    const r2 = await runMoverBackfill({ dataDir: dir, studyOptions: { controlsPerMover: 2 } }); assert.equal(r2.segments, 0); assert.equal(r2.alreadyReplayed, 2); assert.equal(r2.movers, 0);
-    assert.equal(readFileSync(f, 'utf8').split('\n').filter((l) => l.includes('"MOVER"')).length, 1, 'the records written before survive');
-    const manifest = JSON.parse(readFileSync(path.join(dir, 'mover-backfill', 'replayed.json'), 'utf8')); assert.equal(Object.keys(manifest.segments).length, 2);
+    // the NEWEST segment is the collector's live file: it is replayed again (it may have grown) but the rows it already wrote are not written twice
+    const r2 = await runMoverBackfill({ dataDir: dir, studyOptions: { controlsPerMover: 2 } }); assert.equal(r2.segments, 1, 'only the live segment is walked again'); assert.equal(r2.alreadyReplayed, 1);
+    assert.equal(readFileSync(f, 'utf8').split('\n').filter((l) => l.includes('"MOVER"')).length, 1, 'the records written before survive, and no duplicate row is appended');
+    const manifest = JSON.parse(readFileSync(path.join(dir, 'mover-backfill', 'replayed.json'), 'utf8')); assert.equal(Object.keys(manifest.segments).length, 1, 'the live segment is never remembered as done');
     // no archive at all: nothing found, nothing thrown
     const empty = mkdtempSync(path.join(tmpdir(), 'serpent-mb-empty-')); try { const e = await runMoverBackfill({ dataDir: empty }); assert.equal(e.segments, 0); assert.equal(e.movers, 0); } finally { rmSync(empty, { recursive: true, force: true }); }
   } finally { rmSync(dir, { recursive: true, force: true }); }

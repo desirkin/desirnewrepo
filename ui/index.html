@@ -1169,9 +1169,10 @@ function renderAuthDot(state) {
 // PUBLISH-FIX-83 (full review item 34): every fetch here has a timeout, and a reply that is not JSON is named for what it is —
 // the deployment's password gate (its cookie expired: PAGE EXPIRED) or the boot responder (BOOTING) — never a lost server.
 const FETCH_TIMEOUT_MS = 8000;
+const fetchSignal = () => (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(FETCH_TIMEOUT_MS) : undefined);
 const fetchJson = async (url, init = {}) => {
-  const r = await fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  if (!/json/i.test(r.headers.get('content-type') || '')) { const e = new Error('NOT_JSON'); e.code = 'NOT_JSON'; e.status = r.status; throw e; }
+  const r = await fetch(url, { ...init, signal: fetchSignal() });
+  if (!/json/i.test(r.headers.get('content-type') || '')) { const e = new Error(r.status >= 500 ? 'SERVER_DOWN' : 'NOT_JSON'); e.code = r.status >= 500 ? 'SERVER_DOWN' : 'NOT_JSON'; e.status = r.status; throw e; } // review finding: a proxy's 5xx page is a dead server, never an expired sign-in
   return { r, d: await r.json() };
 };
 let pageState = 'LIVE'; // LIVE | EXPIRED | BOOTING | LOST
@@ -1218,7 +1219,7 @@ function openAuthCard(then) {
         csrfToken = d.csrfToken;
         closeSheets();
         refreshAuth();
-        if (then) then();
+        if (then) afterSheetsClosed(then); // review finding: the queued history traversal used to close the very card `then` reopened
       } else {
         $('#authMsg').textContent =
           d.reason === 'RATE_LIMITED' ? `LOCKED OUT — retry in ${d.retryAfterSec ?? '?'}s`
@@ -2078,6 +2079,8 @@ function closeSheets({ viaHistory = false } = {}) {
   }
 }
 addEventListener('popstate', () => { if (anySheetOpen()) closeSheets({ viaHistory: true }); else drawerPushed = false; });
+// run `fn` once a closeSheets() history traversal (asynchronous) has settled — or at once when no traversal is pending
+function afterSheetsClosed(fn) { if (!drawerPushed && !anySheetOpen()) { setTimeout(fn, 0); return; } let done = false; const go = () => { if (done) return; done = true; removeEventListener('popstate', go); setTimeout(fn, 0); }; addEventListener('popstate', go); setTimeout(go, 400); }
 $('#cardClose').addEventListener('click', () => closeSheets());
 $('#ledgerClose').addEventListener('click', () => closeSheets());
 $('#researchClose').addEventListener('click', () => closeSheets());

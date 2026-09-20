@@ -73,12 +73,16 @@ export function createIncrementalIndex({ dir, maxSegments, maxBytes, log, retent
       const floor = newest - retentionSec;
       const next = new Map();
       for (const [coin, c] of coins) {
-        for (const k of [...c.bars.keys()]) if (k < floor) c.bars.delete(k);
+        for (const k of [...c.bars.keys()]) if (k < floor) { c.bars.delete(k); c.trades.delete(k); } // the print counts age out with their candles (review finding: this Map used to grow forever)
         if (!c.bars.size || !c.maxReceivedTs) continue;
-        const candles = [...c.bars.values()].sort((a, b) => a[0] - b[0]);
+        // review finding (PUBLISH-FIX-83 items 17 / 22): the collector closes a candle only when the coin's NEXT interval arrives, so a minute
+        // without a trade is a hole that made every yardstick CENSORED (INTERIOR_BAR_MISSING) on exactly the thin coins the Judge looks at.
+        // A hole of at most FILL_GAP_MIN minutes is forward-filled (last close, no volume, no prints) — the series shape labels.js validates
+        const sorted = [...c.bars.values()].sort((a, b) => a[0] - b[0]); const candles = [];
+        for (const cd of sorted) { const prev = candles[candles.length - 1]; if (prev && cd[0] > prev[0] + 60 && (cd[0] - prev[0]) / 60 - 1 <= FILL_GAP_MIN) { for (let sec = prev[0] + 60; sec < cd[0]; sec += 60) candles.push([sec, prev[4], prev[4], prev[4], prev[4], 0]); } candles.push(cd); }
         const index = new Map(candles.map((cd, i) => [cd[0], i]));
         const lastOpenSec = candles[candles.length - 1][0];
-        next.set(coin, { symbol: coin, intervalSec: 60, retrievedTsMs: c.maxReceivedTs, coverageEndSec: lastOpenSec + 60, candles, trades: candles.map((cd) => c.trades.get(cd[0]) ?? null), index, count: candles.length, firstOpenSec: candles[0][0], lastOpenSec });
+        next.set(coin, { symbol: coin, intervalSec: 60, retrievedTsMs: c.maxReceivedTs, coverageEndSec: lastOpenSec + 60, candles, trades: candles.map((cd) => c.trades.get(cd[0]) ?? null), filled: candles.length - sorted.length, index, count: candles.length, firstOpenSec: candles[0][0], lastOpenSec });
       }
       out = next; dirty = false;
     }
@@ -92,6 +96,7 @@ export function buildIndex({ dir, maxSegments = DEFAULT_MAX_SEGMENTS, maxBytes =
 
 // Returns a source function (canonicalCoin, { asOfTs }) => series|null, with a bounded, TTL-cached index rebuild so one
 // recorder tick over several decisions reads the segments at most once.
+export const FILL_GAP_MIN = 5;
 export function createBroadKrakenSeriesSource({ dataDir, log = () => {}, maxSegments = DEFAULT_MAX_SEGMENTS, maxBytes = DEFAULT_MAX_BYTES, ttlMs = DEFAULT_TTL_MS, now = () => Date.now() } = {}) {
   if (typeof dataDir !== 'string' || !dataDir.trim()) throw new Error('createBroadKrakenSeriesSource: dataDir required');
   const dir = path.join(path.resolve(dataDir), 'broad-kraken');

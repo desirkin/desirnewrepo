@@ -80,3 +80,16 @@ test('a terminal cannot be backdated before evidence and a forged replayed verdi
   const forged = { ...terminal, verdict: 'FORWARD_SUPPORTED', reasons: ['PAIRED_LOWER_BOUND_ABOVE_ZERO'] };
   assert.match(replayProspective([...records, forged]).errors[0], /terminal does not match/);
 });
+
+test('review finding (PUBLISH-FIX-83 item 19): a terminal written under the OLD law (no effect.comparison) replays clean under the new code — the journal\'s history stays valid, settling never wedges', async () => {
+  const { LEGACY_TERMINAL_COMPARISON, TERMINAL_COMPARISON } = await import('../learning/prospective.js');
+  const d = design(); const records = stream(d, 40, () => -1);
+  const state = replayProspective(records); assert.deepEqual(state.errors, []);
+  const legacy = evaluateTerminal(state, d.candidateId, { nowTs: T0 + 90 * DAY, comparison: LEGACY_TERMINAL_COMPARISON });
+  assert.equal(legacy.verdict, 'FORWARD_NOT_SUPPORTED'); assert.equal(legacy.effect.comparison, undefined, 'the old shape: no comparison field');
+  const replayed = replayProspective([...records, legacy]); assert.deepEqual(replayed.errors, [], 'the legacy terminal is verified under the legacy law'); assert.equal(replayed.terminals.get(d.candidateId).verdict, 'FORWARD_NOT_SUPPORTED');
+  // a terminal under the new law carries its law and is verified under it
+  const fresh = evaluateTerminal(state, d.candidateId, { nowTs: T0 + 90 * DAY }); assert.equal(fresh.effect.comparison, TERMINAL_COMPARISON); assert.deepEqual(replayProspective([...records, fresh]).errors, []);
+  // a forged legacy-shaped verdict still does not replay
+  const forged = { ...legacy, verdict: 'FORWARD_SUPPORTED', reasons: ['PAIRED_LOWER_BOUND_ABOVE_ZERO'] }; assert.ok(replayProspective([...records, forged]).errors.length > 0);
+});

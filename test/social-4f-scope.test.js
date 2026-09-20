@@ -165,7 +165,8 @@ test('SCOPE-5 (7). research configuration is closed: no wildcard, bounded caps, 
   // universeExpansion key stays deep-equal to the pin.
   for (const k of Object.keys(baseline)) {
     if (k === 'universe') continue; // audited below
-    if (k === 'universeExpansion') { const { hotLane, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 6, tenureMs: 7_200_000 }); assert.deepEqual(rest, baseline[k], 'config.universeExpansion unchanged but for hotLane'); continue; }
+    // PUBLISH-FIX-83 item 38 (2026-09-20): universeExpansion.resource.maxHeapMb 512 -> 3000, ONE value with the paper profile's overlay (config/paper-runtime.json) — the two used to disagree
+    if (k === 'universeExpansion') { const { hotLane, resource, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 6, tenureMs: 7_200_000 }); assert.deepEqual(resource, { ...baseline[k].resource, maxHeapMb: 3000 }); const { resource: _r, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.universeExpansion unchanged but for hotLane and the heap ceiling'); continue; }
     assert.deepEqual(k === 'paper' ? { ...current[k], baseBalanceUsd: baseline.paper.baseBalanceUsd } : current[k], baseline[k], `config.${k} unchanged`);
   }
   assert.deepEqual(current.universe, [], 'PUBLISH-FIX-2: the legacy named-coin universe seed is removed — no hardcoded coins remain in any config');
@@ -289,7 +290,9 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     // mover outside the top-30-by-volume deep cap; catalogUsdSymbols lists every online USD pair (floor-free) so the Judge
     // holds an instrument spec for any later adoptee. The deep universe, its floor and cap are unchanged; no named coin.
     // Tests: test/universe.test.js (verified / catalog), test/learning-volatility-watch.test.js.
-    'tape/universe.js': '4771ba35272f96beba35cc33a2a618a5162bdbe9b34c5a4221287921eff9108a',
+    // PUBLISH-FIX-83 item 15 (2026-09-20): mergeCarriedIntoCurrentUniverse also drops the hot pairs that YIELDED their slot (the record
+    // no longer nominates a pair the tape does not carry). Subscriptions only; no trading/control/model surface. Tests: test/tape-hot-lane.test.js.
+    'tape/universe.js': 'd50423aa41aa5738b1e7829046f13e694dc549fac223b159f88799262c802fa9',
     // Ticket B (I/O lane, 2026-09-15): stopTapeWrites import + a single drain call in the clean-stop path (write-behind
     // buffer, opt-in SERPENT_TAPE_WRITE_BEHIND; no trading/control/model surface). Tests: test/write-behind.test.js,
     // test/tape-store-write-behind.test.js.
@@ -307,7 +310,10 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     // PUBLISH-FIX-66 (2026-09-18): the VOLATILITY WATCH's picks ride the hot lane too (readVolatilityWatchNow) and the lane
     // verifies against the selection's uncapped `verified` list (floor, status, exclusion; the lane's own slots bound it).
     // Subscriptions only; no trading/control/model surface. Tests: test/learning-volatility-watch.test.js VW-04.
-    'tape/run.js': '1ff295a241e9c7c7ff068824c9655f7b5d12a5abaf0d3ec7d248d405e2947925',
+    // PUBLISH-FIX-83 item 15 (2026-09-20): a full hot lane with no tenure-eligible pair skips the venue verification (no REST, no record
+    // rewrite) while nominees wait; the carried hot pairs are re-merged into the record after every selection; yielded pairs leave it.
+    // Subscriptions only; no trading/control/model surface. Tests: test/tape-hot-lane.test.js.
+    'tape/run.js': '0900a763637862f18806c162ba96201362c579abbf3aa4f3e0f8e834f09a73c3',
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
     // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the

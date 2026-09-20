@@ -78,8 +78,21 @@ test('BKS-3. incremental: appends are picked up from the last byte (no full re-r
   const btc = source('BTC'); assert.equal(btc.candles[3][4], 999); assert.equal(btc.retrievedTsMs, 5); assert.equal(btc.coverageEndSec, T + 240); assert.deepEqual(source.coins(), ['BTC', 'ETH']);
   assert.equal(source.stats().segments, 2);
   // the shape is the one the yardstick consumes
-  assert.deepEqual(Object.keys(btc).sort(), ['candles', 'count', 'coverageEndSec', 'firstOpenSec', 'index', 'intervalSec', 'lastOpenSec', 'retrievedTsMs', 'symbol', 'trades']); assert.equal(btc.index.get(T + 120), 2); assert.equal(btc.trades.length, btc.candles.length, 'PUBLISH-FIX-83 item 14: one print count per candle (null when the venue did not say)');
+  assert.deepEqual(Object.keys(btc).sort(), ['candles', 'count', 'coverageEndSec', 'filled', 'firstOpenSec', 'index', 'intervalSec', 'lastOpenSec', 'retrievedTsMs', 'symbol', 'trades']); assert.equal(btc.index.get(T + 120), 2); assert.equal(btc.trades.length, btc.candles.length, 'PUBLISH-FIX-83 item 14: one print count per candle (null when the venue did not say)');
   // retention: a bar older than 6 h before the newest is evicted on the next change
   appendFileSync(seg2, closedCandle('BTC', T + 7 * 3600, 5, 6) + '\n'); assert.equal(source('BTC').count, 1, 'only the newest bar survives a 7 h gap');
   rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('BKS-6 (PUBLISH-FIX-83 review). a hole of up to five minutes is forward-filled (last close, no volume, no prints) so the yardstick sees a continuous series; a wider hole stays a hole; the print counts age out with their candles', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'serpent-bks6-')); const seg = path.join(dir, 'broad-kraken'); mkdirSync(seg, { recursive: true });
+  const T = 1_800_000_000; const rec = (coin, openSec, close, trades) => JSON.stringify({ recordType: 'OHLC', quality: 'CONSERVATIVE_CLOSED', market: { canonicalCoin: coin }, periodStartTs: openSec * 1000, periodEndTs: openSec * 1000 + 60_000, receivedTs: openSec * 1000 + 61_000, payload: { open: close, high: close, low: close, close, vwap: close, trades, volumeBase: 1 } });
+  const lines = [rec('THIN', T, 10, 3), rec('THIN', T + 60, 11, 2), rec('THIN', T + 300, 12, 4), rec('THIN', T + 360, 13, 1), rec('THIN', T + 1200, 14, 5)]; // holes: 3 minutes (filled), 13 minutes (kept)
+  writeFileSync(path.join(seg, 'events-000001.jsonl'), `${lines.join('\n')}\n`);
+  const { createBroadKrakenSeriesSource } = await import('../learning/broad-kraken-series.js'); const src = createBroadKrakenSeriesSource({ dataDir: dir, now: () => (T + 1300) * 1000 });
+  const s = src('THIN'); assert.ok(s, 'series present');
+  assert.deepEqual(s.candles.map((c) => c[0]), [T, T + 60, T + 120, T + 180, T + 240, T + 300, T + 360, T + 1200], 'the three-minute hole is filled, the thirteen-minute hole is not');
+  assert.deepEqual(s.candles[2], [T + 120, 11, 11, 11, 11, 0], 'a filled minute carries the last close and no volume'); assert.equal(s.filled, 3); assert.deepEqual(s.trades, [3, 2, null, null, null, 4, 1, 5], 'no print count for a filled minute');
+  assert.equal(s.candles.every((c) => c.length === 6), true, 'six numbers, the shape labels.js validates');
+  rmSync(dir, { recursive: true, force: true });
 });

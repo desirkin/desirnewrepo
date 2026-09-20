@@ -117,7 +117,7 @@ export function maturationSweep({ episodes, latestOutcomes, archive, asOfTs, att
     }
     let attach = matureEpisode({ episode: e, archive, asOfTs, attachedTs, costAssumptions, supersedes: existing ? existing.attachedTs : null });
     if (attach === null) { if (pastDeadline && existing) { attach = settleAtDeadline(existing); } else if (pastDeadline) { pending += 1; continue; } else { pending += 1; continue; } }
-    if (attach.outcomeRow.availability.state === 'UNAVAILABLE') { unavailable += 1; if (existing) continue; attachments.push(attach); continue; }
+    if (attach.outcomeRow.availability.state === 'UNAVAILABLE') { unavailable += 1; if (existing && pastDeadline && existing.outcomeRow.availability.state !== 'UNAVAILABLE') { attachments.push(settleAtDeadline(existing)); settledAtDeadline += 1; continue; } /* review finding: a SHORT-stage row whose data then left the window settles, instead of being re-labelled every sweep */ if (existing) continue; attachments.push(attach); continue; }
     if (pastDeadline && outcomeStage(attach.outcomeRow) < 2) { attach = settleAtDeadline(attach); settledAtDeadline += 1; }
     const stageNow = outcomeStage(attach.outcomeRow); const stageBefore = existing ? outcomeStage(existing.outcomeRow) : -1;
     if (stageNow === 0) { pending += 1; continue; } // the bite and the continuation are not both in yet: no row that says half a thing

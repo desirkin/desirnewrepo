@@ -155,10 +155,16 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
     };
   }
 
+  // review finding (PUBLISH-FIX-83 item 22): a day's file is written once per (kind, coin, event minute, control coin) — a replay that
+  // walks a segment again (the collector's live segment grows between boots) appends no duplicate rows
+  const writtenKeys = new Map(); // date -> Set of keys, loaded from the file on first use
+  const recordKey = (rec) => `${rec.kind}|${rec.coin}|${rec.eventTs}|${rec.controlOf ? `${rec.controlOf.coin}@${rec.controlOf.eventTs}` : ''}`;
   function writeRecord(rec) {
     try {
-      mkdirSync(dir, { recursive: true });
-      appendFileSync(path.join(dir, `${utcDateOf(rec.eventTs)}.jsonl`), `${JSON.stringify(rec)}\n`);
+      mkdirSync(dir, { recursive: true }); const date = utcDateOf(rec.eventTs); const f = path.join(dir, `${date}.jsonl`);
+      let keys = writtenKeys.get(date); if (!keys) { keys = new Set(); if (existsSync(f)) { for (const l of readFileSync(f, 'utf8').split('\n')) { if (!l) continue; try { keys.add(recordKey(JSON.parse(l))); } catch { /* a torn line */ } } } writtenKeys.set(date, keys); if (writtenKeys.size > 8) writtenKeys.delete(writtenKeys.keys().next().value); }
+      const key = recordKey(rec); if (keys.has(key)) { counters.duplicateRecordsSkipped = (counters.duplicateRecordsSkipped ?? 0) + 1; return; } keys.add(key);
+      appendFileSync(f, `${JSON.stringify(rec)}\n`);
     } catch (err) { counters.errors += 1; log(`MOVER STUDY write failed: ${bounded(err?.message ?? err)}`); }
   }
 
@@ -342,7 +348,7 @@ export function createMoverStudy({ dataDir, clock = () => Date.now(), log = () =
       // only minutes OLDER than what the live stream has already given us; the live ring stays authoritative
       const older = src.filter((c) => Array.isArray(c) && c.length === 6 && Number.isInteger(c[0]) && c[0] % 60 === 0 && c[0] < firstLive && [c[1], c[2], c[3], c[4]].every((n) => Number.isFinite(n) && n > 0));
       if (!older.length) continue;
-      const merged = [...older.slice(-cfg.ringMin), ...have]; if (merged.length > cfg.ringMin) merged.splice(0, merged.length - cfg.ringMin);
+      const merged0 = [...older.slice(-cfg.ringMin), ...have]; const merged = []; for (const cd of merged0) { const prev = merged[merged.length - 1]; if (prev && cd[0] > prev[0] + 60 && (cd[0] - prev[0]) / 60 - 1 <= (cfg.maxGapMin ?? 0)) { for (let sec = prev[0] + 60; sec < cd[0]; sec += 60) { merged.push([sec, prev[4], prev[4], prev[4], prev[4], 0]); ring.filled = ring.filled ?? new Set(); ring.filled.add(sec); } } if (!prev || cd[0] > prev[0]) merged.push(cd); } /* review finding: the seed fills short holes exactly as the live ingest does */ if (merged.length > cfg.ringMin) merged.splice(0, merged.length - cfg.ringMin);
       ring.candles = merged; if (Number.isFinite(series.retrievedTsMs) && series.retrievedTsMs > ring.receivedTs) ring.receivedTs = series.retrievedTsMs;
       coins += 1; candles += older.length;
     }
