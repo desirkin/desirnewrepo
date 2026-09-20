@@ -75,14 +75,14 @@ test('ACCEPTANCE: rejected opportunities -> learning records -> evidence -> prom
     // ---- 1. observed & rejected opportunities become learning records; the tape grades them an hour later ----------
     // 20 days, 12 coins, one decision every 5 hours; rv60 cycles 1..4 — when rv60 >= 2 the coin paid +2.5% an hour later
     let i = 0;
-    for (; i < 96; i += 1) {
-      now = T0 + i * 5 * HOUR; judgeDecides({ coin: COINS[i % COINS.length], ts: now, rv60: 1 + (i % 4) });
-      svc.tick(); now += HOUR + 2_000; tapeGrades(); svc.tick();
+    for (; i < 96; i += 1) { // PUBLISH-FIX-83 item 19: two looks a window (one inside the eventual stump, one outside) so a forward test can rank them
+      now = T0 + i * 5 * HOUR; judgeDecides({ coin: COINS[i % COINS.length], ts: now, rv60: 1 + (i % 4) }); judgeDecides({ coin: COINS[i % COINS.length], ts: now + 60_000, rv60: 1 }); now += 60_000;
+      svc.tick(); now += 2 * HOUR + 2_000; tapeGrades(); svc.tick();
     }
     const episodes = store.readEpisodes().filter((e) => e.setupType === SETUP);
-    assert.equal(episodes.length, 96, 'every rejected decision became a LEARN-1 episode through the bridge');
+    assert.equal(episodes.length, 192, 'every rejected decision became a LEARN-1 episode through the bridge (two a window)');
     assert.ok(episodes.every((e) => e.decision === 'SKIPPED' && e.rejection?.reasonCode === 'AFTER_COST_EDGE_INSUFFICIENT'), 'the record keeps that the Judge refused, and why');
-    assert.equal(store.latestOutcomes().size, 96, 'every episode carries its matured outcome');
+    assert.equal(store.latestOutcomes().size, 192, 'every episode carries its matured outcome');
 
     // ---- 2. evidence accumulates into the cell (PUBLISH-FIX-41: refusals count) and the promoter proposes + freezes ----
     const heads = () => [...store.patternHeads().values()];
@@ -94,12 +94,14 @@ test('ACCEPTANCE: rejected opportunities -> learning records -> evidence -> prom
     assert.ok(['PROSPECTIVE_PENDING', 'VALIDATED_PAPER'].includes(stump.state), `frozen for the forward test: ${stump.state} :: ${log.filter((l) => /settle|demot|FORWARD|publish|frozen|propos/i.test(l)).join(' | ')}`);
 
     // ---- 3. the forward test on NEW decisions the candidate never saw; the ONE terminal look; publish ---------------
+    // PUBLISH-FIX-83 item 19: the forward test is a RANKING test (the candidate's picks against the other looks of the same group), so each
+    // forward window carries TWO looks of the same coin a minute apart: one inside the stump (rv60 >= 2) and one outside (rv60 1)
     for (let g = 0; g < 60 && !heads().some((p) => p.origin === CANDIDATE_ORIGIN && ['VALIDATED_PAPER', 'ACCUMULATING', 'RETIRED'].includes(p.state)); g += 1, i += 1) {
-      now = T0 + i * 5 * HOUR; judgeDecides({ coin: COINS[i % COINS.length], ts: now, rv60: 1 + (i % 4) });
-      svc.tick(); now += HOUR + 2_000; tapeGrades(); svc.tick();
+      now = T0 + i * 5 * HOUR; judgeDecides({ coin: COINS[i % COINS.length], ts: now, rv60: 2 + (i % 3) }); judgeDecides({ coin: COINS[i % COINS.length], ts: now + 60_000, rv60: 1 }); now += 60_000;
+      svc.tick(); now += 2 * HOUR + 2_000; tapeGrades(); svc.tick();
     }
     const validated = heads().find((p) => p.origin === CANDIDATE_ORIGIN);
-    assert.equal(validated.state, 'VALIDATED_PAPER', `the forward evidence supports the when (${log.filter((l) => /FORWARD|settled|demoted/.test(l)).slice(-2).join(' | ')})`);
+    assert.equal(validated.state, 'VALIDATED_PAPER', `the forward evidence supports the when (${log.filter((l) => /FORWARD|settled|demoted|promoter/.test(l)).slice(-4).join(' | ')}) prospective=${JSON.stringify(store.readProspective().reduce((a, r) => { a[r.kind] = (a[r.kind] ?? 0) + 1; return a; }, {}))}`);
     let acts = [...store.activationHeads().values()];
     assert.equal(acts.length, 1); assert.equal(acts[0].state, 'PUBLISHED_WAITING_FOR_PAPER');
     assert.equal(acts[0].policyVersion, POLICY_DIGEST, 'bound to THIS Judge\'s policy'); assert.equal(acts[0].featureRecipeVersion, JUDGE_FACT_RECIPE_VERSION);

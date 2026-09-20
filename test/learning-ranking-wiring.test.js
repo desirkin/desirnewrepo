@@ -35,6 +35,8 @@ function publishedStore(dataDir) {
     const decisionTs = design.sealedTs + HOUR + (g % 8) * DAY + Math.floor(g / 8) * 5 * HOUR; const id = `lop-forward-${g}`; const labelEndTs = decisionTs + HOUR;
     store.appendProspective({ kind: 'CAPTURE', candidateId: design.candidateId, opportunityId: id, canonicalCoin: `A${g % 6}A`, decisionTs, candidateDecision: 'SELECTED_FOR_SHADOW', baselineDecision: 'SKIPPED', recordedTs: decisionTs + 1_000, labelEndTs });
     store.appendProspective({ kind: 'OUTCOME', candidateId: design.candidateId, opportunityId: id, outcomeClass: 'FAVORABLE', metricValue: 1.5, outcomeKnownAtTs: labelEndTs, recordedTs: labelEndTs + 1_000 });
+    store.appendProspective({ kind: 'CAPTURE', candidateId: design.candidateId, opportunityId: `${id}-skip`, canonicalCoin: `A${g % 6}A`, decisionTs: decisionTs + 60_000, candidateDecision: 'SKIPPED', baselineDecision: 'SKIPPED', recordedTs: decisionTs + 61_000, labelEndTs: labelEndTs + 60_000 }); // PUBLISH-FIX-83 item 19: the ranking's other look in the group
+    store.appendProspective({ kind: 'OUTCOME', candidateId: design.candidateId, opportunityId: `${id}-skip`, outcomeClass: 'ADVERSE', metricValue: 0, outcomeKnownAtTs: labelEndTs + 60_000, recordedTs: labelEndTs + 61_000 });
   }
   const settledTs = T0 + 40 * DAY;
   const result = settleCandidate({ store, candidateId: design.candidateId, nowTs: settledTs });

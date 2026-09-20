@@ -62,6 +62,8 @@ function appendForwardEvidence(store, design) {
       outcomeClass: 'FAVORABLE', metricValue: 1.5,
       outcomeKnownAtTs: labelEndTs, recordedTs: labelEndTs + 1_000,
     });
+    store.appendProspective({ kind: 'CAPTURE', candidateId: design.candidateId, opportunityId: `${opportunityId}-skip`, canonicalCoin: `A${group % 6}A`, decisionTs: decisionTs + 60_000, candidateDecision: 'SKIPPED', baselineDecision: 'SKIPPED', recordedTs: decisionTs + 61_000, labelEndTs: labelEndTs + 60_000 }); // PUBLISH-FIX-83 item 19: the ranking's other look in the group
+    store.appendProspective({ kind: 'OUTCOME', candidateId: design.candidateId, opportunityId: `${opportunityId}-skip`, outcomeClass: 'ADVERSE', metricValue: 0, outcomeKnownAtTs: labelEndTs + 60_000, recordedTs: labelEndTs + 61_000 });
   }
 }
 
