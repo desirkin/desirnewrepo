@@ -1,0 +1,109 @@
+From 50edcdbf52328d3349ea726004cb46570c65e7b7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 20 Sep 2026 22:48:20 +0000
+Subject: [PATCH] =?UTF-8?q?PUBLISH-FIX-91:=20the=20starved=20gate=20learne?=
+ =?UTF-8?q?r=20=E2=80=94=20a=20look=20counts=20toward=20a=20flow=20gate's?=
+ =?UTF-8?q?=20study=20when=20every=20gate=20OUTSIDE=20the=20flow=20family?=
+ =?UTF-8?q?=20passed=20(item=2020=20counted=20the=20other=20flow=20gates,?=
+ =?UTF-8?q?=20which=20fail=20together:=209-34=20usable=20looks=20a=20day?=
+ =?UTF-8?q?=20per=20gate=20against=20the=201,000=20needed);=20a=20structur?=
+ =?UTF-8?q?al=20refusal=20still=20excludes=20the=20look;=20the=20cost=20hu?=
+ =?UTF-8?q?rdle,=20the=20clustered=20confidence=20and=20the=20forward=20te?=
+ =?UTF-8?q?st=20are=20unchanged?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                   |  6 +++++-
+ learning/gate-lesson.js                     |  6 +++++-
+ test/learning-gate-lesson.test.js           |  4 ++--
+ test/publish-fix-84-lesson-kill-age.test.js | 17 ++++++++++++++++-
+ 4 files changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 55bca41..a5556e2 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -253,7 +253,11 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
+   gate per cycle. Every transition is one log line with its numbers. The kill file (`data/learning/kill.json`, KILLED /
+   invalid / unreadable) → reference lines; the reader re-reads it on the Judge's own reads (at most every 5 s), so a KILL
+   or RESUME takes effect on the next look, not at the next scheduled refresh (review c6985361 F2). A lesson whose
+-  `computedTs` is older than 7 days (the study stopped) is not a lesson: reference lines, one STALE line saying so (F3).
++  `computedTs` is older than 7 days (the study stopped) is not a lesson: reference lines, one STALE line saying so (F3); a
++  future-dated lesson (beyond 5 min of skew) is rejected and the clock is judged on every read (PUBLISH-FIX-89).
++  PUBLISH-FIX-91 (2026-09-20): a look is USABLE for a flow gate's study when every gate outside the flow family passed — item
++  20's "every other gate" counted the other four flow gates, which fail together on most looks, and left the learner 9-34
++  usable looks a day per gate against 1,000. The family is judged as a family; a structural refusal still excludes the look.
+ - `learning/maturation.js` / `learning/service.js` / `fly.js` (PUBLISH-FIX-86, 2026-09-20; not frozen): the simulated 60-minute
+   round trip (entry at the next bar's open, exit at the 60-minute close, the paper policy's taker fee both sides + 10 bps
+   slippage against us) now runs for every LIVE episode — the service passes the paper cost model, matureEpisode simulates
+diff --git a/learning/gate-lesson.js b/learning/gate-lesson.js
+index 25fcac2..a4a3cd8 100644
+--- a/learning/gate-lesson.js
++++ b/learning/gate-lesson.js
+@@ -95,7 +95,11 @@ export function testsOf(episodes, outcomes, { yardstick = GATE_LESSON_DEFAULTS.y
+     const real = e.gates.filter((g) => g && typeof g.id === 'string' && !NOT_A_GATE.has(g.id));
+     for (const g of real) {
+       if (!GATE_BANDS[g.id]) continue; const value = num(g.observed); const line = num(g.threshold); if (value === null || line === null) continue;
+-      const othersOk = real.every((x) => x === g || x.ok === true);
++      // PUBLISH-FIX-91 (2026-09-20): a look is USABLE for a flow gate when every gate OUTSIDE the flow family passed. Item 20 demanded
++      // every other gate including the other four flow gates, and the flow gates fail together (4-5 at once on most looks): 9-34
++      // usable looks a day per gate against the 1,000 needed — the learner the owner built was starved by that one clause. The
++      // family moves together, so the family is judged together; a structural refusal (range, trend, book, stop) still excludes the look.
++      const othersOk = real.every((x) => x === g || x.ok === true || GATE_BANDS[x.id] !== undefined);
+       out.push({ gate: g.id, setup: String(e.setupType ?? ''), ts: e.decisionTs, coin: e.canonicalCoin, value, line, othersOk, r });
+     }
+   }
+diff --git a/test/learning-gate-lesson.test.js b/test/learning-gate-lesson.test.js
+index 253cb15..9fa96c6 100644
+--- a/test/learning-gate-lesson.test.js
++++ b/test/learning-gate-lesson.test.js
+@@ -35,8 +35,8 @@ test('GL-01. testsOf joins looks with their scored 15-minute outcome by (coin, d
+   assert.equal(tests.length, 5, JSON.stringify(tests));
+   assert.ok(tests.some((t) => t.value === 0.7 && t.r === 0.9), 'a 1.5 s clock gap still joins'); assert.equal(tests.filter((t) => t.value === 0.7).length, 1, 'a 5 s gap does not');
+   const ake = tests.filter((t) => t.gate === 'FI15' && t.value === 0.196); assert.equal(ake.length, 1); assert.equal(ake[0].othersOk, true, 'MOVE_CLOCK ok:false is not a gate'); assert.equal(ake[0].r, 1.2); assert.equal(ake[0].line, 0.2);
+-  const akeRv = tests.find((t) => t.gate === 'RV60' && t.value === 2.5); assert.equal(akeRv.othersOk, false, 'FI15 failed beside it');
+-  const zamaFi = tests.find((t) => t.gate === 'FI15' && t.value === 0.6); assert.equal(zamaFi.othersOk, false, 'RV60 failed beside it');
++  const akeRv = tests.find((t) => t.gate === 'RV60' && t.value === 2.5); assert.equal(akeRv.othersOk, true, 'PUBLISH-FIX-91: FI15 failing beside it is the flow family, not a structural refusal');
++  const zamaFi = tests.find((t) => t.gate === 'FI15' && t.value === 0.6); assert.equal(zamaFi.othersOk, true, 'PUBLISH-FIX-91: RV60 failing beside it is the flow family');
+   assert.ok(!tests.some((t) => t.r === 5), 'the old look is outside the lookback');
+ });
+ 
+diff --git a/test/publish-fix-84-lesson-kill-age.test.js b/test/publish-fix-84-lesson-kill-age.test.js
+index d610452..f3dc63b 100644
+--- a/test/publish-fix-84-lesson-kill-age.test.js
++++ b/test/publish-fix-84-lesson-kill-age.test.js
+@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
+ import fs from 'node:fs';
+ import os from 'node:os';
+ import path from 'node:path';
+-import { createGateLesson, GATE_LESSON_VERSION, gateLessonPaths } from '../learning/gate-lesson.js';
++import { createGateLesson, GATE_LESSON_VERSION, gateLessonPaths, testsOf } from '../learning/gate-lesson.js';
+ 
+ function root(computedTs) {
+   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fix84-lesson-')); const P = gateLessonPaths(dir);
+@@ -49,3 +49,18 @@ test('FIX89-L3 (blind review 864b4c3a F3). a future-dated lesson is rejected on
+   now += 3_600_000 + 61_000;
+   assert.deepEqual(l2.lesson('RANGE_IGNITION'), {}, 'aged out on the read itself'); assert.match(l2.line(), /lesson STALE/);
+ });
++
++test('FIX91 (the starved learner). a look counts toward a flow gate\'s study when every gate OUTSIDE the flow family passed — the other flow gates may fail too; a structural refusal still excludes it', () => {
++  const T0 = 1_000_000_000_000;
++  const ep = (i, gates) => ({ datasetId: 'live-judge-x', canonicalCoin: 'AAA', decisionTs: T0 + i * 60_000, setupType: 'RANGE_IGNITION', gates });
++  const g = (id, ok, observed, threshold) => ({ id, ok, observed, threshold });
++  const episodes = [
++    ep(1, [g('FI15', false, -0.5, 0.2), g('FI60_POSITIVE', false, -0.1, 0), g('RV60', false, 0.8, 1), g('RANGE_BREAK', true, 1, 1)]), // flow family fails together, structure OK
++    ep(2, [g('FI15', false, -0.5, 0.2), g('RANGE_BREAK', false, 0, 1)]),                                                             // a structural refusal
++    ep(3, [g('FI15', true, 0.5, 0.2), g('RV60', true, 1.5, 1), g('RANGE_BREAK', true, 1, 1)]),                                       // passed
++  ];
++  const outcomes = episodes.map((e) => ({ assetId: 'AAA', decisionKnownAtTs: e.decisionTs, yardstick: { continuation: { state: 'KNOWN', logReturnPct: 1 }, bite: { state: 'KNOWN', logReturnPct: 0.5 } } }));
++  const tests = testsOf(episodes, outcomes, { nowTs: T0 + 3_600_000 });
++  const fi15 = tests.filter((t) => t.gate === 'FI15').map((t) => [t.ts, t.othersOk]);
++  assert.deepEqual(fi15, [[T0 + 60_000, true], [T0 + 120_000, false], [T0 + 180_000, true]], JSON.stringify(tests));
++});
+-- 
+2.43.0
+
