@@ -52,6 +52,21 @@ test('DOS-03. loadCoinDossier reads the engine files under the data dir (bounded
     const journalPage = async ({ limit }) => { assert.equal(limit, 500); return [dec('d1', 100, 'NO_TRADE', ['RV60']), dec('d2', 50, 'NO_TRADE', ['FI15'])]; };
     const d = await loadCoinDossier({ dataDir: dir, coin: 'PEPE/USD', journalPage, nowTs: NOW });
     assert.equal(d.looks, 2); assert.equal(d.after.known15, 2); assert.equal(d.after.up08, 1); assert.equal(d.after.known1h, 1); assert.equal(d.after.best1h, 1.5, 'the newest attachment is the head'); assert.equal(d.onWatch.range1hPct, 2.2); assert.equal(d.onBoard.climbPct, 11);
+    // PUBLISH-FIX-84: looks older than the 500-event journal page come from the 24-hour ledger (same shape, de-duplicated with the page);
+    // a ledger look carries its failed gate ids and the '+'-joined refusal reasons; a NO_SETUP row reads NO_TRADE
+    const ep = (ts, decision, gates, reasonCode = null) => JSON.stringify({ datasetId: 'live-judge-paper:RANGE_IGNITION', canonicalCoin: 'PEPE', decisionTs: ts, setupType: 'RANGE_IGNITION', decision, gates, rejection: reasonCode ? { reasonCode, observedValue: null, threshold: null, class: 'HARD' } : null, opportunityId: `lop-${ts}` });
+    writeFileSync(path.join(dir, 'learning', 'episodes.jsonl'), [
+      ep(NOW - 20 * 3600_000, 'NO_SETUP', [{ id: 'FI15', ok: false }, { id: 'RV60', ok: true }, { id: 'MOVE_CLOCK', ok: false }]),
+      ep(NOW - 10 * 3600_000, 'SKIPPED', [{ id: 'FI15', ok: true }, { id: 'SIZE_CANDIDATE', ok: false, note: 'REWARD_RISK_BELOW_1_5' }], 'NO_TRADE_SIZE+NO_BOUNDED_FEASIBLE_LOT+REWARD_RISK_BELOW_1_5'),
+      ep(NOW - 100 * 60_000, 'NO_SETUP', [{ id: 'RV60', ok: false }]), // the same look the page carries (d1, 100 min ago, same setup): de-duplicated
+      ep(NOW - 30 * 3600_000, 'NO_SETUP', [{ id: 'FI15', ok: false }]), // outside 24 h
+      JSON.stringify({ datasetId: 'wideeye', canonicalCoin: 'PEPE', decisionTs: NOW - 3600_000, gates: [] }), // not a judge row
+    ].join('\n') + '\n');
+    const withLedger = await loadCoinDossier({ dataDir: dir, coin: 'PEPE/USD', journalPage, nowTs: NOW });
+    assert.equal(withLedger.looks, 4, 'page 2 + ledger 2 new (one duplicate, one too old, one not a judge row)');
+    assert.equal(withLedger.byStatus.NO_TRADE, 3); assert.equal(withLedger.byStatus.ENTRY_REFUSED, 1);
+    assert.ok(withLedger.topGates.some((g) => g.code === 'NO_TRADE_SIZE') && withLedger.topGates.some((g) => g.code === 'REWARD_RISK_BELOW_1_5'), JSON.stringify(withLedger.topGates));
+    assert.ok(!withLedger.topGates.some((g) => g.code === 'MOVE_CLOCK'), 'a measurement row is not a gate');
     const bare = await loadCoinDossier({ dataDir: path.join(dir, 'nowhere'), coin: 'PEPE', journalPage: null, nowTs: NOW }); assert.equal(bare.looks, 0); assert.equal(bare.onWatch, null);
     assert.equal(await loadCoinDossier({ dataDir: dir, coin: '', nowTs: NOW }), null);
   } finally { rmSync(dir, { recursive: true, force: true }); }

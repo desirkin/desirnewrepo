@@ -125,11 +125,34 @@ function readJson(file) { try { if (!existsSync(file) || statSync(file).size > M
 function readJsonlFor(file, keep) { const out = []; try { if (!existsSync(file) || statSync(file).size > MAX_FILE_BYTES) return out; for (const line of readFileSync(file, 'utf8').split('\n')) { const t = line.trim(); if (!t) continue; let r; try { r = JSON.parse(t); } catch { continue; } if (keep(r)) out.push(r); } } catch { /* absent */ } return out; }
 const utcDate = (ts) => new Date(ts).toISOString().slice(0, 10);
 
+// PUBLISH-FIX-84: the learning ledger's looks for one coin, in the journal's DECISION_RECORDED shape (tail-read, bounded)
+const LEDGER_TAIL_BYTES = 48 * 1024 * 1024; const LEDGER_MAX_LOOKS = 4000;
+const NOT_A_GATE = new Set(['MOVE_CLOCK', 'SECOND_LOOK', 'GATE_LEARNING', 'LEARNED_FACT', 'LEARNED_RANK_ADJUSTMENT', 'LEARNED_CANDIDATE', 'SIZE_CANDIDATE', 'DYNAMIC_SIZE_SELECTION', 'STRATEGY_FAMILY_SELECTION', 'QUALIFIED_ADAPTIVE_RANKING_RR_POINTS']);
+const LEDGER_STATUS = Object.freeze({ NO_SETUP: 'NO_TRADE', UNEVALUABLE: 'NEEDS_DATA', SKIPPED: 'ENTRY_REFUSED', ENTERED: 'ENTRY_PROPOSED' });
+export async function ledgerLooksAsEvents({ dataDir, coin, since, log = () => {} } = {}) {
+  const file = path.join(dataDir, 'learning', 'episodes.jsonl'); if (!existsSync(file)) return [];
+  const c = canonicalCoinOf(coin); if (!c) return [];
+  const { readJsonlStream } = await import('../learning/gate-lesson.js');
+  const rows = await readJsonlStream(file, (e) => typeof e?.datasetId === 'string' && e.datasetId.startsWith('live-judge') && sameCoin(e.canonicalCoin, c) && Number.isSafeInteger(e.decisionTs) && e.decisionTs >= since, { maxBytes: LEDGER_TAIL_BYTES });
+  const out = [];
+  for (const e of rows.slice(-LEDGER_MAX_LOOKS)) {
+    const failed = (Array.isArray(e.gates) ? e.gates : []).filter((g) => g && g.ok === false && typeof g.id === 'string' && !NOT_A_GATE.has(g.id)).map((g) => g.id);
+    const rejection = typeof e.rejection?.reasonCode === 'string' ? e.rejection.reasonCode.split('+').filter(Boolean) : [];
+    const reasonCodes = [...new Set([...rejection, ...failed])].slice(0, 8);
+    out.push({ event: { type: 'DECISION_RECORDED', payload: { decisionId: e.opportunityId, assetId: e.canonicalCoin, pair: `${e.canonicalCoin}/USD`, state: LEDGER_STATUS[e.decision] ?? 'NO_TRADE', setupId: e.setupType ?? null, reasonCodes, decisionKnownAtTs: e.decisionTs } } });
+  }
+  if (out.length) log(`coin dossier: ${out.length} look(s) for ${c} from the ledger`);
+  return out;
+}
 export async function loadCoinDossier({ dataDir, coin, journalPage = null, nowTs = Date.now(), log = () => {} } = {}) {
   const c = canonicalCoinOf(coin); if (!c) return null;
   let events = [];
   if (typeof journalPage === 'function') { try { const page = await journalPage({ limit: 500 }); events = Array.isArray(page) ? page : []; } catch (err) { log(`coin dossier: journal page failed: ${bounded(err?.message ?? err)}`); } }
   const since = nowTs - DAY_MS;
+  // PUBLISH-FIX-84: the journal page is the last 500 events (an hour or two); the owner asked "why didn't you buy AKE" and was told
+  // "no recorded look" while the ledger held 263 looks on it that day. The 24-hour ledger (learning/episodes.jsonl, tail-read) now
+  // supplies every look the page does not carry: same shape, de-duplicated by coin + decision clock; failed gate ids are the reasons.
+  try { const fromLedger = await ledgerLooksAsEvents({ dataDir, coin: c, since, log }); if (fromLedger.length) { const seen = new Set(events.map((row) => { const ev = row?.event ?? row; return ev?.type === 'DECISION_RECORDED' ? `${ev.payload?.assetId}|${ev.payload?.decisionKnownAtTs}|${ev.payload?.setupId}` : null; }).filter(Boolean)); for (const row of fromLedger) { const k = `${row.event.payload.assetId}|${row.event.payload.decisionKnownAtTs}|${row.event.payload.setupId}`; if (!seen.has(k)) { seen.add(k); events.push(row); } } } } catch (err) { log(`coin dossier: ledger read failed: ${bounded(err?.message ?? err)}`); }
   const outcomes = readJsonlFor(path.join(dataDir, 'learning', 'decision-outcomes', 'decision-outcomes.jsonl'), (r) => sameCoin(r?.assetId, c) && Number.isFinite(r?.decisionKnownAtTs) && r.decisionKnownAtTs >= since);
   const researchHeads = new Map();
   for (const r of readJsonlFor(path.join(dataDir, 'learning', 'research-outcomes', 'research-outcomes.jsonl'), (r) => typeof r?.decisionId === 'string')) { const prev = researchHeads.get(r.decisionId); if (!prev || (r.attachedTs ?? 0) >= (prev.attachedTs ?? 0)) researchHeads.set(r.decisionId, r); }
