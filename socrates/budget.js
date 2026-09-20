@@ -8,6 +8,7 @@ import { openSync, closeSync, writeSync, fsyncSync, mkdirSync, readFileSync, exi
 import path from 'node:path';
 import { parseStrictJson, fail, deepFreeze, isFiniteNum, isCount, isTs, isPlainObject } from '../market-lab/contracts.js';
 import { writeAll } from '../market-lab/store.js';
+import { lockOwnerState } from '../lib/stale-lock.js';
 
 export const BUDGET_JOURNAL_VERSION = 'socrates-budget-journal-1';
 export const RESERVATION_STATES = Object.freeze(['RESERVED', 'SETTLED', 'UNRESOLVED', 'RELEASED']);
@@ -37,14 +38,9 @@ export const actualCostUsd = ({ usage, pricing }) => { const e = usageError(usag
 // PUBLISH-FIX-83 review finding: a lock left by a crashed / killed owner (the VM restarts, the file stays) locked the journal
 // FOREVER — every later open was PERMISSION_FAILURE. A lock is stale only when its recorded pid provably no longer runs
 // (ESRCH); a live pid, an unreadable lock, or a permission error still fails closed (single-owner law kept).
-export function staleLockOwner(lockFile, { pidAlive = (p) => { try { process.kill(p, 0); return true; } catch (err) { return err?.code !== 'ESRCH'; } } } = {}) {
-  let rec; try { rec = JSON.parse(readFileSync(lockFile, 'utf8').split('\n')[0]); } catch { return null; }
-  if (!isPlainObject(rec) || !isCount(rec.pid) || rec.pid === 0) return null;
-  // second-pass review: a container restart reuses low pids — a lock carrying OUR pid but opened before this process booted
-  // was provably written by a previous life of this pid, never by us (we hold no lock yet at open time)
-  const bootedAt = Date.now() - process.uptime() * 1000;
-  if (rec.pid === process.pid && isCount(rec.openedTs) && rec.openedTs < bootedAt - 1000) return rec;
-  return pidAlive(rec.pid) ? null : rec;
+export function staleLockOwner(lockFile, opts = {}) {
+  const o = lockOwnerState(lockFile, opts);
+  return o.state === 'STALE' ? o.rec : null;
 }
 export function openBudgetJournal({ dir, clock = () => Date.now(), pid = process.pid, log = () => {}, pidAlive = undefined }) {
   mkdirSync(dir, { recursive: true });

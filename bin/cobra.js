@@ -236,7 +236,13 @@ function usage() {
   process.exitCode = 1;
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error(err.message);
   process.exitCode = 1;
+  // second-pass review: a failed `paper run` boot must EXIT — before this the bootstrap STARTING responder, the dark-capture
+  // timers and the spine heartbeat kept the process alive and the deployment looked healthy with nothing running inside.
+  try { await globalThis.serpentPaperShutdown?.(); } catch { /* best effort */ }
+  try { await globalThis.serpentBootstrapClose?.(); } catch { /* best effort */ }
+  console.error(`BOOT FAILED — exiting so the deployment restarts instead of idling: ${String(err?.stack ?? err).slice(0, 600)}`);
+  setTimeout(() => process.exit(1), 250).unref?.();
 });

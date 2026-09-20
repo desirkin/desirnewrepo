@@ -69,6 +69,9 @@ const bootstrap = await (async () => {
   console.log(`PORT ${server.address().port} bound (bootstrap STARTING responder) — cockpit takes over after the spine`);
   return { close: async () => { await new Promise((resolve) => server.close(resolve)); server.closeAllConnections?.(); } };
 })();
+// second-pass review: a throw anywhere in the boot below (runtime lock held, port in use, purge error) used to leave this
+// STARTING responder listening — a zombie that answered the healthcheck for days. The launcher closes it on a failed boot.
+globalThis.serpentBootstrapClose = bootstrap.close;
 
 // PUBLISH-FIX-1 — before any lock, journal or write: announce the data generation and run the one-shot legacy purge (a
 // republished VM keeps the old flat app's data). This runs once for BOTH modes, before the spine or the paper composition

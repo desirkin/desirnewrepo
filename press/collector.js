@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, openSync, closeSync, wri
 import { appendJsonl, atomicWriteJson as writeAtomicJson, readJsonlTail, readJsonBounded } from '../lib/jsonl.js';
 import { dataDir as defaultDataDir } from '../lib/config.js';
 import { fetchTextBounded } from '../lib/bounded-fetch.js';
+import { reclaimStaleLock } from '../lib/stale-lock.js';
 import { parseFeed } from '../rumor2/feed.js'; // the hostile-XML-safe parser is a PURE export; the official-ear transport is not shared
 import { PRESS_SOURCES, pressRegistryError } from './registry.js';
 import { itemToObservation, pressObservationError, PRESS_LIMITS } from './parse.js';
@@ -38,6 +39,9 @@ export function startPress({ env = process.env, dataDir = defaultDataDir(), fetc
   // processes hydrate stale checkpoints or append duplicate observations. The
   // fence is acquired before reading any checkpoint or observation history.
   const writerFile = path.join(pressDir(dataDir), 'writer.lock');
+  // PUBLISH-FIX-83 second pass: a lock left by a crashed / killed owner refused every later boot forever (PRESS dark until a
+  // human deleted the file); the ONE stale-lock law (lib/stale-lock.js) reclaims a provably dead owner's lock first
+  reclaimStaleLock(writerFile, { label: '[press] writer', log });
   let writerFd; try { writerFd = openSync(writerFile, 'wx', 0o600); } catch (err) { if (err.code === 'EEXIST') throw new Error('press writer already locked; stop the existing news collector before starting another'); throw err; }
   const stop = () => { if (stopping) return; stopping = true; for (const t of timerSet) { timers.clearTimeout(t); timers.clearInterval(t); } timerSet.clear(); active.delete(dataDir); process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); try { closeSync(writerFd); } finally { unlinkSync(writerFile); } };
   try {
@@ -47,8 +51,13 @@ export function startPress({ env = process.env, dataDir = defaultDataDir(), fetc
     S.set(s.id, { source: s, selected: selected.has(s.id), state: !selected.has(s.id) ? 'DISABLED' : 'IDLE', etag: cp?.etag ?? null, lastModified: cp?.lastModified ?? null, seen: cp?.seen ?? [], seenSet: new Set(cp?.seen ?? []), lastSuccessTs: cp?.lastSuccessTs ?? null, lastReceiptTs: null, lastOutcome: null, lastError: null, backoffUntil: null, delayMs: 0, running: false, coverage: 'HEADLINE_LINK_ONLY', counters: { polls: 0, observed: 0, admitted: 0, duplicates: 0, skipped: 0, failed: 0, rateLimited: 0, notModified: 0, emptyFeeds: 0, parseFailed: 0 } });
   }
   const durable = readJsonlTail(pressObservationsFile(dataDir), { maxBytes: PRESS_LIMITS_RUNTIME.maxObservationsBytes });
-  if (durable.truncated || durable.torn) throw new Error('press observation history incomplete; collection withheld');
-  for (const line of durable.lines) { if (!line.trim()) continue; const o = JSON.parse(line); if (pressObservationError(o)) throw new Error('press observation history invalid; collection withheld'); S.get(o.sourceId)?.seenSet.add(o.observationId); }
+  if (durable.truncated) throw new Error('press observation history incomplete; collection withheld');
+  // PUBLISH-FIX-83 second pass: a torn last line (a crash mid-append) or one malformed historic line used to darken PRESS at
+  // every later boot; a bad line is skipped and COUNTED (its observation may be re-observed once — duplicates collapse on id)
+  let skippedLines = 0;
+  for (const line of durable.lines) { if (!line.trim()) continue; let o = null; try { o = JSON.parse(line); } catch { skippedLines += 1; continue; } if (pressObservationError(o)) { skippedLines += 1; continue; } S.get(o.sourceId)?.seenSet.add(o.observationId); }
+  if (durable.torn) skippedLines += 1;
+  if (skippedLines) log(`[press] observation history: ${skippedLines} unreadable line(s) skipped on load (counted, never repaired)`);
   function writeStatus() { const now = clock(); const sourcesOut = {}; for (const [id, st] of S) sourcesOut[id] = { kind: st.source.kind, route: st.source.route, desired: st.selected ? 'ON' : 'OFF', state: st.state, cadenceSec: st.source.cadenceSec, terms: st.source.terms, coverage: st.coverage, lastReceiptTs: st.lastReceiptTs, lastSuccessTs: st.lastSuccessTs, lastOutcome: st.lastOutcome, lastError: st.lastError, backoffUntil: st.backoffUntil, counters: { ...st.counters } }; atomicWriteJson(pressStatusFile(dataDir), { v: PRESS_STATUS_VERSION, tsMs: now, enabled: true, authority: 'NONE', sources: sourcesOut }); }
   async function poll(id) {
     const st = S.get(id); if (!st || stopping || !st.selected || st.running) return null; const now = clock(); if (st.backoffUntil !== null && now < st.backoffUntil) return null;
