@@ -420,3 +420,11 @@ export function attentionForCoin(coin, { now = Date.now() } = {}) {
     focusReason: best?.reason ?? null,
   };
 }
+
+// PUBLISH-FIX-88: every coin the senses currently know by name (the stalking list, the Wide Eye's fresh ripples, rumint) — the
+// Ask's catalog for a bare word in a question. Best effort: a source that fails contributes nothing.
+export function attentionSymbols({ now = Date.now() } = {}) {
+  const out = new Set();
+  for (const fn of [stalkingEntries, wideEyeEntries, rumintEntries]) { try { for (const e of fn(now)) if (e?.symbol) out.add(e.symbol); } catch { /* one source down never empties the catalog */ } }
+  return out;
+}

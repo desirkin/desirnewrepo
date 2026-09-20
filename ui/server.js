@@ -20,7 +20,7 @@ import { appendJsonl, atomicWriteJson } from '../lib/jsonl.js';
 import { nowIso } from '../lib/time.js';
 import { ControlAuth, gateControl, parseCookies, cookieSecure, SESSION_LIFETIME_MS } from './auth.js';
 import { getPersistence } from '../persistence/runtime.js';
-import { attentionSnapshot, attentionForCoin, earsRoom, wideEyeRoom } from './attention-view.js';
+import { attentionSnapshot, attentionForCoin, attentionSymbols, earsRoom, wideEyeRoom } from './attention-view.js';
 import { MemoryView } from '../persistence/memory-view.js';
 import { marketResearchRootFromEnv, CASE_DIR_NAME_RE } from '../market-lab/paths.js';
 import { readExecutionProjection, projectionFile as executionProjectionFile } from '../state/execution-projection.js';
@@ -32,6 +32,7 @@ import { loadProfile as loadPaperProfile, profileEnvironment as paperProfileEnvi
 import { answerQuestion, boundHistory, SUGGESTED_QUESTIONS, COMPANION_VERSION, COMPANION_LABEL, MAX_QUESTION_CHARS, askWhyNotChatText } from '../paper/companion.js';
 import { createChatDispatcher } from '../paper/companion-chat.js';
 import { loadCoinDossier } from '../paper/coin-dossier.js';
+import { readCurrentUniverse } from '../tape/universe.js';
 import { explainerControlsView, setExplainerToggles } from '../lib/explainer-toggles.js';
 import { readDataOnlyRuntimeStatus, dataOnlyPublicStatus, dataOnlySensorSnapshot, dataOnlyMarketView } from '../lib/data-only-status.js';
 import { readBroadKrakenLatest } from '../market-lab/broad-kraken.js';
@@ -150,12 +151,41 @@ function explainerView() { let talkUsd = 0; try { talkUsd = Number(chat().status
 // this wrapper reads the live chat status and the ASK meter
 function askWhyNotChat() { let st; try { st = chat().status(); } catch { st = { state: 'NOT_CONFIGURED', reason: 'CHAT_UNAVAILABLE' }; } const meter = st?.state === 'READY' ? (explainerView()?.ask ?? null) : null; return askWhyNotChatText({ status: st, meter }); }
 function askStatusView() { let c = null; try { c = chat().status(); } catch (err) { c = { state: 'NOT_CONFIGURED', reason: 'CHAT_UNAVAILABLE', notice: String(err.message).slice(0, 120) }; } return { label: COMPANION_LABEL, version: COMPANION_VERSION, suggestions: [...SUGGESTED_QUESTIONS], chat: c, explainer: explainerView(), authority: 'READ_ONLY' }; }
+function knownCoinsForAsk() {
+  const out = new Set();
+  try { for (const c of attentionSymbols()) out.add(c); } catch { /* best effort */ }
+  try { for (const p of (readCurrentUniverse()?.pairs ?? [])) if (p?.coin) out.add(String(p.coin).toUpperCase()); } catch { /* best effort */ }
+  try { const v = judgeView(); for (const c of (v?.projection?.candidates ?? v?.candidates ?? [])) { const id = c?.assetId ?? c?.coin ?? c?.symbol; if (id) out.add(String(id).split('/')[0].toUpperCase()); } } catch { /* best effort */ }
+  try { const w = JSON.parse(readFs(path.join(dataDir(), 'learning', 'volatility', 'current.json')).toString('utf8')); for (const e of (w?.ranked ?? w?.entrants ?? [])) { const id = e?.coin ?? e?.symbol; if (id) out.add(String(id).toUpperCase()); } } catch { /* best effort */ }
+  return out;
+}
+// what the senses know about one coin, in plain lines: the Wide Eye ripple with its numbers, the stalking / watch state, rumint,
+// and the durable memory's recent records — so "no recorded look" is never the whole answer for a coin the cockpit is showing
+async function seenByTheSenses(coin) {
+  const d = await coinDetail(coin); const lines = []; const facts = { coin, wideEye: null, stalking: null, rumint: null, memory: 0 };
+  const when = (ts) => (Number.isFinite(ts) ? new Date(ts).toISOString().slice(11, 16) + ' UTC' : '?');
+  const a = d.attention ?? {};
+  if (a.wideEye) { facts.wideEye = { zVol: a.wideEye.zVol ?? null, zRet: a.wideEye.zRet ?? null, ts: a.wideEye.ts ?? null }; lines.push(`- WIDE EYE saw it ripple at ${when(a.wideEye.ts)} (volume z ${a.wideEye.zVol ?? '?'}, return z ${a.wideEye.zRet ?? '?'}). A ripple is a survey sighting across 612 pairs; it is not a Judge look — the Judge only looks at coins admitted to his watch (the top movers, the hot lane, nominations).`); }
+  if (a.stalking) { facts.stalking = a.stalking.kind ?? a.stalking.reason ?? true; lines.push(`- On the stalking list: ${a.stalking.reason ?? a.stalking.kind ?? 'yes'} (since ${when(a.stalking.ts)}).`); }
+  if (a.rumint) { facts.rumint = a.rumint.kind ?? true; lines.push(`- Rumint: ${a.rumint.reason ?? a.rumint.kind ?? 'nominated'} at ${when(a.rumint.ts)}.`); }
+  const recs = d.memory?.records ?? []; facts.memory = recs.length;
+  if (recs.length) lines.push(`- Durable memory: ${recs.length} record(s), newest ${recs.slice(-3).reverse().map((r) => `${r.sourceModule ?? '?'}·${r.eventType ?? '?'} ${when(r.ts)}`).join('; ')}.`);
+  if (!lines.length && d.available === false) lines.push('- No sense has a record of this coin, and there is no synced book for it: it was never in the run\'s universe.');
+  return { lines, facts };
+}
 async function askHandler(req, res, body) {
   if (!askAllowed()) { json(res, 429, { ok: false, reason: 'RATE_LIMITED' }); return; }
   const question = typeof body?.question === 'string' ? body.question.trim() : ''; if (!question.length || question.length > MAX_QUESTION_CHARS) { json(res, 400, { ok: false, reason: 'QUESTION_REQUIRED', max: MAX_QUESTION_CHARS }); return; }
   const history = boundHistory(body?.history); const mode = body?.mode === 'chat' ? 'chat' : 'evidence';
   let judge = null; let sensors = null; let research = null; try { judge = judgeView(); } catch (err) { judge = { enabled: false, error: String(err.message).slice(0, 120) }; } try { sensors = sensorsView(); } catch { sensors = null; } try { research = marketResearchSummary(); } catch { research = null; }
-  let answer = await answerQuestion({ question, judge, sensors, research, journalPage: askJournalPage });
+  // PUBLISH-FIX-88: the Ask knows every coin the run knows — a bare word like "brev" resolves against the universe, the watch, the
+  // senses' attention and the Judge's candidates — and a coin the senses have SEEN is answered from that memory even when the Judge
+  // never took a look (the owner: "it says it hasn't seen these coins, but I only chose them because the snake was staring at them")
+  const knownCoins = knownCoinsForAsk();
+  let answer = await answerQuestion({ question, judge, sensors, research, journalPage: askJournalPage, knownCoins });
+  let seen = null;
+  if (answer.symbol) { try { seen = await seenByTheSenses(answer.symbol); } catch (err) { console.error(`ask seen-by: ${String(err?.message ?? err).slice(0, 120)}`); } }
+  if (seen && seen.lines.length) answer = { ...answer, answer: `${answer.answer}\n\nSeen by the senses (${answer.symbol}):\n${seen.lines.join('\n')}`, seen: seen.facts };
   // PUBLISH-FIX-72: a question about a coin gets that coin's DOSSIER — every recorded look of the last 24 h with the gate that said no in
   // plain words, what the coin did after each pass, the watch and the mover board — appended to the recorded-evidence answer and handed
   // to the model as grounding. Read-only, bounded, best-effort: a dossier that cannot be built changes nothing.

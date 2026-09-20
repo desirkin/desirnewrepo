@@ -39,17 +39,28 @@ export const canonicalCoinOf = (symbol) => { const c = coinFromSymbol(String(sym
 const sameCoin = (a, b) => Boolean(a && b) && canonicalCoinOf(a) === canonicalCoinOf(b);
 
 // ---- question -> intent + symbol (nothing else is ever read from a question) ---------------------------------------------------
-export function classify(question) {
+// PUBLISH-FIX-88 (2026-09-20): `knownCoins` — the coins the run actually knows (the universe, the watch, the Wide Eye / rumint
+// attention, the venue catalog). A bare word that names one of them is that coin whatever its case: the owner typed "brev" and
+// "gst" — coins the cockpit was showing him — and the Ask answered "no record", because a bare word only counted when the
+// question carried it in UPPER CASE. Aliases and the UPPER-CASE rule stay; the catalog check comes first.
+export function classify(question, { knownCoins = null } = {}) {
   const q = clean(question); const up = q.toUpperCase();
   let symbol = null; const pair = up.match(/\b([A-Z]{2,10})\/(USD|USDT|EUR|USDC)\b/); const cash = up.match(/\$([A-Z]{2,10})\b/);
   if (pair) symbol = canonicalCoinOf(pair[1]); else if (cash) symbol = canonicalCoinOf(cash[1]);
-  else { for (const w of up.replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/)) { if (!w || STOP.has(w)) continue; if (ALIASES[w]) { symbol = ALIASES[w]; break; } if (/^[A-Z][A-Z0-9]{1,9}$/.test(w) && q.includes(w)) { symbol = w; break; } } }
+  else {
+    const words = up.replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter((w) => w && !STOP.has(w));
+    for (const w of words) { if (ALIASES[w]) { symbol = ALIASES[w]; break; } }
+    if (!symbol && knownCoins && typeof knownCoins.has === 'function') for (const w of words) { const c = canonicalCoinOf(w); if (knownCoins.has(c)) { symbol = c; break; } }
+    if (!symbol) for (const w of words) { if (/^[A-Z][A-Z0-9]{1,9}$/.test(w) && q.includes(w)) { symbol = w; break; } }
+  }
   const l = q.toLowerCase();
   let intent = 'HELP';
   if (/\b(sense|senses|sensor|blocked|working|provider|feed|ears?|socrates|disabled)\b/.test(l)) intent = 'SENSES';
   if (/\b(account|p&l|pnl|profit|loss|equity|cash|balance|costs?|fees?|performance|doing after)\b/.test(l)) intent = 'ACCOUNT';
   if (/\bwatch(ing)?\b|\bopen position|\bstop\b|\bexit\b|\bprotection\b/.test(l)) intent = 'WATCH';
-  if (/\b(skip|skipped|refuse|refused|didn'?t (buy|enter|trade)|not (buy|enter|trade)|pass(ed)? on|no trade)\b/.test(l)) intent = 'WHY_SKIP';
+  // PUBLISH-FIX-88: the owner's own phrasing — "why didn't you buy X", "why did you not buy X", "why didn’t he buy X", "why no trade
+  // on X" — is a WHY_SKIP; it used to read as WHY_BUY because the pattern wanted "didn't buy" with nothing between the words
+  if (/\b(skip|skipped|refuse|refused|did ?n[’']?t (you |he |it |the judge )?(buy|enter|trade|take|bite)|did not (you |he |it )?(buy|enter|trade|take|bite)|not (buy|enter|trade|take|bite)|pass(ed)? on|no trade|why not|missed?)\b/.test(l)) intent = 'WHY_SKIP';
   else if (/\b(buy|bought|enter|entered|entry|long|took|why did you (get|go))\b/.test(l)) intent = 'WHY_BUY';
   if (/\b(what are you doing|right now|status|currently|up to|going on)\b/.test(l)) intent = 'STATUS';
   return { intent, symbol, question: q };
@@ -80,8 +91,8 @@ async function journalDecisions(journalPage, coin) {
 }
 
 // ---- the answer ------------------------------------------------------------------------------------------------------------------
-export async function answerQuestion({ question, judge = null, sensors = null, research = null, journalPage = null, now = Date.now() } = {}) {
-  const c = classify(question); const ev = []; const lines = []; let availability = 'RECORDED';
+export async function answerQuestion({ question, judge = null, sensors = null, research = null, journalPage = null, now = Date.now(), knownCoins = null } = {}) {
+  const c = classify(question, { knownCoins }); const ev = []; const lines = []; let availability = 'RECORDED';
   const { p, availability: pa, note, ts } = projectionOf(judge); if (ts) ev.push({ kind: 'JUDGE_PROJECTION', ts, id: p?.revision !== undefined ? `revision ${p.revision}` : null });
   const bind = p ? `account ${p.accountId} · ${p.accountKind} ${p.runMode} · adapter ${p.adapter}` : null;
   const degrade = (a) => { if (a === 'UNAVAILABLE') availability = 'UNAVAILABLE'; else if (a === 'UNVERIFIED' && availability === 'RECORDED') availability = 'UNVERIFIED'; };
