@@ -36,6 +36,20 @@ import { startHeapSampleReport } from './lib/heap-sample-report.js';
 import { startMainThreadWatchdog } from './lib/main-thread-watchdog.js';
 import { createDeepMarketSource } from './market-lab/deep-market-adapter.js';
 
+const DURABLE_CORE_BOOT_WAIT_MS = 180_000; // PUBLISH-FIX-83 second pass: how long a boot waits for PostgreSQL before composing without it
+async function waitForDurableCore({ env, log, waitMs = DURABLE_CORE_BOOT_WAIT_MS, intervalMs = 5_000 }) {
+  if (!env.DATABASE_URL) return true;
+  const { Db } = await import('./persistence/db.js');
+  const t0 = Date.now(); let attempts = 0;
+  for (;;) {
+    attempts += 1; const probe = new Db({ log: () => {} });
+    let ok = false; try { ok = await probe.connect(); } catch { ok = false; } finally { try { await probe.end(); } catch { /* probe only */ } }
+    if (ok) { if (attempts > 1) log(`DURABLE CORE reachable after ${attempts} attempts (${Math.round((Date.now() - t0) / 1000)} s) — composing on it`); return true; }
+    if (Date.now() - t0 >= waitMs) { log(`DURABLE CORE unreachable for ${Math.round(waitMs / 1000)} s at boot — composing without it (the spine keeps retrying; the Judge cannot compose without its journal until the next boot)`); return false; }
+    if (attempts === 1) log(`DURABLE CORE unreachable at boot — waiting up to ${Math.round(waitMs / 1000)} s before composing (retry every ${intervalMs / 1000} s)`);
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
 const SHUTDOWN_BUDGET_MS = 40_000; // PUBLISH-FIX-83: the ordered shutdown's watchdog (a deployment's stop grace is finite)
 const SERPENT_MODE = process.env.SERPENT_DATA_ONLY === 'true' ? 'DATA_ONLY'
   : process.env.COBRA_PROFILE && process.env.JUDGE_MODE === 'PAPER' && process.env.JUDGE_ALLOW_PRIVATE === 'false' && process.env.JUDGE_ALLOW_ORDERS === 'false' ? 'PAPER'
@@ -133,6 +147,11 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   // PERSISTENCE_PERMISSION_LOCK; restore failure never stops observation (the spine records the blocker and the
   // governor refuses paid work). Signals stay with the Tape: the spine binds none, and its ordered shutdown runs after
   // the tape has drained.
+  // PUBLISH-FIX-83 second pass: a database that is asleep or unreachable for a moment at boot used to cost the WHOLE deployment
+  // — the spine blocked the quota / market additions for good and the Judge (whose journal authority is PostgreSQL) failed to
+  // compose and was never retried, until the next republish. The boot now waits for the durable core, bounded (the same
+  // 3 minutes the Judge already waits for its writer lock across a republish overlap), before anything composes on it.
+  await waitForDurableCore({ env: process.env, log: console.log });
   const serpentRuntime = await openPaperRuntime({ env: process.env, log: console.log });
   if (serpentRuntime.blockers.PERSISTENCE) console.error(`PERSIST-0 restore unavailable (observation continues; permission-increasing behavior locked): ${serpentRuntime.blockers.PERSISTENCE}`);
   // PERSIST-0A §2: the cockpit begins listening only AFTER the persistence
