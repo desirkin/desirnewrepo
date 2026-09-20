@@ -121,7 +121,7 @@ test('CLEAR INTENT: fresh password AND the exact phrase, both server-verified, r
   assert.equal(auth.authorizeClear(s.sessionId, s.csrfToken, 'wrong', CLEAR_PHRASE).reason, 'CLEAR_REFUSED');
   const badPhrase = auth.authorizeClear(s.sessionId, s.csrfToken, PW, 'clear serpent'); // case matters: exact phrase
   assert.equal(badPhrase.ok, false);
-  assert.equal(badPhrase.reason, 'CLEAR_REFUSED'); // same reason either way — nothing disclosed
+  assert.equal(badPhrase.reason, 'CLEAR_PHRASE_MISMATCH'); // PUBLISH-FIX-83 item 35: the phrase is public text, its mismatch is named; the password's failure still is not
   // wrong PHRASE with a correct password never feeds the limiter
   for (let i = 0; i < RATE_LIMIT.maxFailures + 2; i++) {
     assert.equal(auth.authorizeClear(s.sessionId, s.csrfToken, PW, 'NOT THE PHRASE').ok, false);

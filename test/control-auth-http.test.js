@@ -130,7 +130,8 @@ test('AUTHORIZED CONTROLS: KILL, CAGE, VETO work exactly as before once authoriz
 test('CLEAR INTENT over HTTP: session+CSRF alone never clears; wrong password/phrase refused with state intact', async () => {
   const noPw = await post('/api/control', { action: 'clear' }, authed());
   assert.equal(noPw.status, 403);
-  assert.equal((await noPw.json()).reason, 'CLEAR_REFUSED');
+  assert.equal((await noPw.json()).reason, 'CLEAR_PHRASE_MISMATCH'); // no phrase at all: named as such (PUBLISH-FIX-83 item 35); a wrong PASSWORD below still reads CLEAR_REFUSED
+  const noPhrase = await post('/api/control', { action: 'clear', password: 'wrong', confirmPhrase: 'CLEAR SERPENT' }, authed()); assert.equal((await noPhrase.json()).reason, 'CLEAR_REFUSED');
   const wrongPw = await post('/api/control', { action: 'clear', password: 'wrong', confirmPhrase: 'CLEAR SERPENT' }, authed());
   assert.equal(wrongPw.status, 403);
   const wrongPhrase = await post('/api/control', { action: 'clear', password: PW, confirmPhrase: 'CLEAR THE SERPENT' }, authed());

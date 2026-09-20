@@ -225,15 +225,17 @@ export class ControlAuth {
   authorizeClear(sessionId, csrfHeader, password, phrase, totp) {
     const a = this.authorize(sessionId, csrfHeader);
     if (!a.ok) return a;
+    // PUBLISH-FIX-83 (full review item 35): the phrase is public text (the card shows it); a mistyped phrase is named as such and is
+    // checked BEFORE the password, so it never burns one of the five credential tries (a typo used to cost a 15-minute lockout)
+    if (phrase !== CLEAR_PHRASE) {
+      this.audit({ event: 'CLEAR_REFUSED', category: 'BAD_PHRASE', sessionTag: a.sessionTag });
+      return { ok: false, code: 403, reason: 'CLEAR_PHRASE_MISMATCH' };
+    }
     const v = this.#verifyCredentials(password, totp);
     if (!v.ok) {
       const code = v.reason === 'RATE_LIMITED' ? 429 : 403;
       this.audit({ event: 'CLEAR_REFUSED', category: v.reason, sessionTag: a.sessionTag });
       return { ok: false, code, reason: v.reason === 'RATE_LIMITED' ? 'RATE_LIMITED' : 'CLEAR_REFUSED', ...(v.retryAfterSec ? { retryAfterSec: v.retryAfterSec } : {}) };
-    }
-    if (phrase !== CLEAR_PHRASE) {
-      this.audit({ event: 'CLEAR_REFUSED', category: 'BAD_PHRASE', sessionTag: a.sessionTag });
-      return { ok: false, code: 403, reason: 'CLEAR_REFUSED' };
     }
     this.audit({ event: 'CLEAR_AUTHORIZED', sessionTag: a.sessionTag });
     return { ok: true, sessionTag: a.sessionTag };

@@ -66,6 +66,9 @@
   body.caged { --breath: 13s; }
   body.caged #scene { filter: saturate(.62) brightness(.86); }
   body.killed #scene { filter: saturate(.22) brightness(.68); }
+  /* PUBLISH-FIX-83 item 34: a page that is not live (expired gate, boot, lost link) keeps its last values, visibly dimmed */
+  body.stale .cap, body.stale #scene { filter: saturate(.35) brightness(.72); }
+  body.stale .cap::after { content: ' · STALE'; font-size: .7em; opacity: .7; }
   body.killed #ringGroup { animation: none; }
   @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.018); } }
   /* UI-1A/UI-1C2: the coil is a BODY — dark, heavy, rim-lit. The mass is
@@ -1163,14 +1166,27 @@ function renderAuthDot(state) {
     : 'control locked — tap to authenticate');
   $('#authwarn').classList.toggle('show', state === 'warn');
 }
+// PUBLISH-FIX-83 (full review item 34): every fetch here has a timeout, and a reply that is not JSON is named for what it is —
+// the deployment's password gate (its cookie expired: PAGE EXPIRED) or the boot responder (BOOTING) — never a lost server.
+const FETCH_TIMEOUT_MS = 8000;
+const fetchJson = async (url, init = {}) => {
+  const r = await fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  if (!/json/i.test(r.headers.get('content-type') || '')) { const e = new Error('NOT_JSON'); e.code = 'NOT_JSON'; e.status = r.status; throw e; }
+  return { r, d: await r.json() };
+};
+let pageState = 'LIVE'; // LIVE | EXPIRED | BOOTING | LOST
+function setPageState(next) {
+  if (pageState === next) return; pageState = next;
+  body.classList.toggle('stale', next !== 'LIVE'); // the tiles keep their last values, dimmed: stale is visible, never a blank screen
+}
 async function refreshAuth() {
   try {
-    const r = await fetch('/api/auth/status');
-    const d = await r.json();
+    const { d } = await fetchJson('/api/auth/status');
     csrfToken = d.authenticated ? d.csrfToken : null;
     secondFactorRequired = d.secondFactor === 'REQUIRED';
     renderAuthDot(d.controlAuth === 'CONTROL_AUTH_UNCONFIGURED' ? 'warn' : d.authenticated ? 'authed' : 'locked');
-  } catch {
+  } catch (err) {
+    if (err?.code === 'NOT_JSON') { setPageState('EXPIRED'); renderAuthDot('locked'); return; } // the platform's page gate, not our server
     renderAuthDot('warn'); // an auth endpoint we cannot read is a real problem
   }
 }
@@ -1231,10 +1247,14 @@ function openClearCard() {
     if ($('#clrTotp')) $('#clrTotp').value = '';
     const d = await postControl('clear', secondFactorRequired ? { password, confirmPhrase, totp } : { password, confirmPhrase });
     if (d.ok) closeSheets();
+    else if (d.reason === 'UNAUTHENTICATED') { openAuthCard(openClearCard); } // PUBLISH-FIX-83 item 35: re-authenticate, then straight back to this card
     else $('#clrMsg').textContent =
       d.reason === 'RATE_LIMITED' ? `LOCKED OUT — retry in ${d.retryAfterSec ?? '?'}s`
-      : d.reason === 'UNAUTHENTICATED' ? 'AUTHENTICATE FIRST'
-      : 'CLEAR REFUSED';
+      : d.reason === 'CLEAR_PHRASE_MISMATCH' ? 'PHRASE MISMATCH — type exactly: CLEAR SERPENT (no password try was spent)'
+      : d.reason === 'CLEAR_REFUSED' ? 'CLEAR REFUSED — password or code wrong'
+      : d.reason === 'PAGE_EXPIRED' ? 'PAGE EXPIRED — close this tab, open the app fresh and sign in again'
+      : d.reason === 'LINK_LOST' ? 'SHELL LINK LOST — the server did not answer'
+      : `CLEAR REFUSED — ${String(d.reason ?? 'no reason given').replace(/[^A-Za-z0-9 _:./-]/g, '').slice(0, 120)}`; // PUBLISH-FIX-83 item 35: the persistence gate's own reason (e.g. DURABILITY_BLOCKED), never a blank wall
   });
 }
 refreshAuth();
@@ -1260,19 +1280,19 @@ function armThen(btn, label, fire) {
 }
 async function postControl(action, extra = {}) {
   try {
-    const r = await fetch('/api/control', {
+    const { r, d } = await fetchJson('/api/control', {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(csrfToken ? { 'X-Serpent-CSRF': csrfToken } : {}) },
       body: JSON.stringify({ action, ...extra }),
     });
-    const d = await r.json();
-    if (r.status === 401) { csrfToken = null; refreshAuth(); }
+    if (r.status === 401) { csrfToken = null; refreshAuth(); return { ok: false, reason: 'UNAUTHENTICATED', status: 401 }; } // PUBLISH-FIX-83 item 35: the session died (a restart): re-authenticate, never a dead end
     if (d.ok && d.status) renderStatus(d.status);
     return d;
-  } catch {
-    $('#striptext').textContent = 'SHELL LINK LOST';
+  } catch (err) {
+    if (err?.code === 'NOT_JSON') { setPageState('EXPIRED'); return { ok: false, reason: 'PAGE_EXPIRED' }; }
+    setPageState('LOST'); $('#striptext').textContent = 'SHELL LINK LOST';
     $('#clockchip').classList.remove('live'); // a dead link never keeps a heartbeat
-    return { ok: false };
+    return { ok: false, reason: 'LINK_LOST' };
   }
 }
 $('#btnKill').addEventListener('click', () => armThen($('#btnKill'), 'KILL', () => ensureAuth(() => postControl('kill'))));
@@ -1305,6 +1325,9 @@ const cls = (v) => (v >= 0 ? 'pos' : 'neg');
 function renderLedger(L) {
   const b = $('#ledgerBody');
   if (!L) { b.innerHTML = '<div class="line"><span>ledger unreadable — shell link lost</span></div>'; return; }
+  // PUBLISH-FIX-83 item 37: the ledger names its own staleness — a projection that is not fresh is shown as such, never as current truth
+  const ledgerStale = L.projectionFresh === false ? `<div class="line" style="color:var(--warn,#e0a94a)"><span>STALE — the account projection is not fresh${L.rejected ? ` (${esc(L.rejected)})` : ''}; figures below are the last published ones</span></div>` : '';
+  const renderedAt = () => { if (ledgerStale) b.insertAdjacentHTML('afterbegin', ledgerStale); }; queueMicrotask(renderedAt);
   if (L.totalTrades === 0 && !L.openPositions.length) {
     b.innerHTML = `
       <div class="net">$${(L.startingBalance ?? 0).toFixed(2)} <span style="color:var(--dim)">— untouched</span></div>
@@ -1616,7 +1639,10 @@ function renderStatus(s) {
   if (!demo) {
     const why = s.posture === 'RETREAT' ? s.retreatCauses.map((c) => c.key).join(' · ') : (s.advisories[0] || '');
     const sub = s.posture === 'STALKING' && s.stalking?.length ? s.stalking.join(' · ') : null;
-    applyPosture(s.posture, { why, ...(sub ? { sub } : {}) });
+    // PUBLISH-FIX-83 item 37: a caged / killed animal never reads WATCHING — the word says what the latch means
+    if (s.controls?.kill) applyPosture(s.posture, { why: why || 'KILL latched — reduce only until CLEAR', sub: 'DORMANT · KILLED' });
+    else if (s.controls?.cage) applyPosture(s.posture, { why: why || 'CAGE latched — no new entries until CLEAR', sub: 'RESTRAINED · CAGED' });
+    else applyPosture(s.posture, { why, ...(sub ? { sub } : {}) });
   }
   // UI-1A: top capsules — small, honest, always rewarding the tap
   const r = s.rumint;
@@ -1637,7 +1663,7 @@ function renderStatus(s) {
   // once it exists, "WAKING" until then. The market-subjects registry count is a
   // research roster, never a WATCHED live count — SENSE-CULL-2 removed it from this tile.
   $('#capUniverse').classList.toggle('off', !u);
-  $('#capUniverseV').textContent = u ? `${u.total} · ${u.live} LIVE` : 'WAKING';
+  $('#capUniverseV').textContent = u ? `${u.total} · ${u.live} LIVE${Number.isInteger(u.judgeExcluded) && u.judgeExcluded > 0 ? ` · ${u.total - u.judgeExcluded} JUDGED` : ''}` : 'WAKING'; // PUBLISH-FIX-83 item 37: the tape carries coins the Judge never trades
   const w = s.wideeye;
   $('#capEye').classList.toggle('off', !(w && w.enabled && w.fresh));
   // truthful abbreviation beats truncation ("3R", never "3 r…")
@@ -1659,21 +1685,25 @@ function renderStrip(t, sess) {
   // UI-1C: heartbeat glyph rides the SAME freshness truth as the dot
   $('#clockchip').classList.toggle('live', t?.effective === 'LIVE');
 }
+let pollInFlight = false;
 async function poll() {
+  if (pollInFlight) return; pollInFlight = true; // PUBLISH-FIX-83 item 34: one poll at a time — a slow answer never stacks requests behind it
   try {
-    const s = await (await fetch('/api/status', { cache: 'no-store' })).json();
-    renderStatus(s);
-    if ($('#ledger').classList.contains('open')) refreshLedger(); // piggyback, no extra loop
-  } catch {
+    const { d: s } = await fetchJson('/api/status', { cache: 'no-store' });
+    if (s && s.lifecycle === 'STARTING' && !s.tape) { // the boot responder: the spine is still restoring — say BOOTING, keep what is on screen
+      setPageState('BOOTING'); const dot = $('#stripdot'); dot.className = ''; $('#striptext').textContent = `BOOTING · ${String(s.startupPhase ?? 'starting').replace(/[^A-Za-z0-9_ -]/g, '').slice(0, 40)}`; $('#clockchip').classList.remove('live');
+    } else { setPageState('LIVE'); renderStatus(s); if ($('#ledger').classList.contains('open')) refreshLedger(); } // piggyback, no extra loop
+  } catch (err) {
     const dot = $('#stripdot'); dot.className = '';
-    $('#striptext').textContent = 'SHELL LINK LOST';
+    if (err?.code === 'NOT_JSON') { setPageState('EXPIRED'); $('#striptext').textContent = 'PAGE EXPIRED — open the app fresh and sign in again'; }
+    else { setPageState('LOST'); $('#striptext').textContent = err?.name === 'TimeoutError' ? 'SHELL LINK LOST — no answer in 8 s' : 'SHELL LINK LOST'; }
     $('#clockchip').classList.remove('live'); // a dead link never keeps a heartbeat
-  }
+  } finally { pollInFlight = false; }
   // display attention rides the SAME cadence — no extra polling loop; a
   // failure falls back to the selected universe (empty if none), never a broken screen
-  if (!demo) {
+  if (!demo && pageState === 'LIVE') {
     try {
-      applyAttention(await (await fetch('/api/attention', { cache: 'no-store' })).json());
+      applyAttention((await fetchJson('/api/attention', { cache: 'no-store' })).d);
     } catch {
       applyAttention(null);
     }

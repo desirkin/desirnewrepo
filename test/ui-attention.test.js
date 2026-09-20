@@ -159,8 +159,9 @@ test('19. no service worker, no offline caching of dynamic APIs', () => {
   assert.ok(!HTML.includes('serviceWorker'), 'UI-1 ships no service worker');
   assert.ok(!existsSyncSafe(path.join(REPO, 'ui', 'sw.js')));
   // dynamic fetches explicitly refuse caches
-  assert.ok(HTML.includes(`fetch('/api/status', { cache: 'no-store' })`));
-  assert.ok(HTML.includes(`fetch('/api/attention', { cache: 'no-store' })`));
+  assert.ok(HTML.includes(`fetchJson('/api/status', { cache: 'no-store' })`)); // PUBLISH-FIX-83 item 34: through the one JSON-checked, timed fetch
+  assert.ok(HTML.includes(`fetchJson('/api/attention', { cache: 'no-store' })`));
+  assert.ok(HTML.includes('AbortSignal.timeout(FETCH_TIMEOUT_MS)'), 'every dynamic fetch has a timeout'); assert.ok(HTML.includes('if (pollInFlight) return;'), 'one poll in flight at a time');
 });
 function existsSyncSafe(p) {
   try {

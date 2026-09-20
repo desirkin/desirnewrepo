@@ -238,7 +238,10 @@ function tapeReport() {
       ageSec: c.lastMsgMs ? (Date.now() - c.lastMsgMs) / 1000 : null,
     };
   }
-  return { effective, ageSec, staleFeedSec, coins, universe: status.universe ?? null };
+  // PUBLISH-FIX-83 (full review item 37): the tape's universe count includes coins the Judge's policy excludes (stablecoins, forbidden
+  // bases); the cockpit shows how many of the tape's pairs the Judge actually judges
+  const universe = status.universe ? { ...status.universe, judgeExcluded: judgeExcludedCount(status.coins ?? {}) } : null;
+  return { effective, ageSec, staleFeedSec, coins, universe };
 }
 
 const ET_CLOCK = new Intl.DateTimeFormat('en-US', {
@@ -280,6 +283,13 @@ function pendingStrikes() {
 // real ear — RUMOR-2, the official/social ears + research strainer (on the second lane since fix36) — was running. When
 // the legacy file is absent the tile now reads RUMOR-2's own atomic status file: ON with the count of listening providers
 // and the social ear's state, fresh within its 5-minute heartbeat. Read-only, no authority, nothing else changes.
+let judgeExcludeBases = null;
+function judgeExcludedCount(coins) {
+  try {
+    if (judgeExcludeBases === null) { const f = process.env.JUDGE_POLICY_FILE || process.env.JUDGE_POLICY || path.resolve('config', 'judge.paper.json'); const pol = existsSync(f) ? JSON.parse(readFs(f, 'utf8')) : null; judgeExcludeBases = new Set((pol?.universe?.excludeBases ?? []).map((b) => String(b).toUpperCase())); }
+    let n = 0; for (const coin of Object.keys(coins)) if (judgeExcludeBases.has(String(coin).toUpperCase())) n += 1; return n;
+  } catch { return null; }
+}
 function rumor2EarsReport() {
   const file = path.join(dataDir(), 'rumor2', 'status.json');
   if (!existsSync(file)) return { enabled: false };
@@ -309,6 +319,9 @@ function rumintReport() {
   if (!existsSync(file)) return rumor2EarsReport();
   try {
     const s = JSON.parse(readFs(file, 'utf8'));
+    // PUBLISH-FIX-83 (full review item 36): the legacy RUMINT poller is retired; its status file, restored from the bucket, is days old.
+    // A stale legacy file must not paint EARS OFF over a live RUMOR-2 — when it is older than its own 30-second window, RUMOR-2 answers.
+    if (Date.now() - (s.tsMs ?? 0) >= 30_000) { const r2 = rumor2EarsReport(); if (r2 && r2.enabled) return { ...r2, legacyStale: true }; }
     const h = s.hyped && typeof s.hyped === 'object' && !Array.isArray(s.hyped) ? s.hyped : null;
     const state = typeof h?.state === 'string' ? h.state : 'UNAVAILABLE';
     const symbols = Array.isArray(h?.symbols) ? h.symbols : [];

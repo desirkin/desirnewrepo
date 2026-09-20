@@ -185,3 +185,17 @@ test('12. control mutations remain fully gated server-side (auth untouched by UI
   assert.equal(r.status, 503); // CONTROL_AUTH_UNCONFIGURED fails closed, exactly as before
   assert.equal((await r.json()).reason, 'CONTROL_AUTH_UNCONFIGURED');
 });
+
+test('PUBLISH-FIX-83 item 36. EARS: a legacy RUMINT status file older than its 30-second window no longer paints EARS OFF over a live RUMOR-2 — the status answers from RUMOR-2 and says the legacy file is stale; a fresh legacy file still wins', async () => {
+  const { writeFileSync: w, readFileSync: rd } = await import('node:fs');
+  const legacy = path.join(TEST_DATA, 'rumint', 'status.json'); const keep = rd(legacy, 'utf8');
+  try {
+    mkdirSync(path.join(TEST_DATA, 'rumor2'), { recursive: true });
+    w(path.join(TEST_DATA, 'rumor2', 'status.json'), JSON.stringify({ tsMs: Date.now(), providers: { bluesky: { state: 'HEALTHY', symbols: 12 } } }));
+    w(legacy, JSON.stringify({ enabled: true, status: 'HEALTHY', symbolsTracked: 15, symbolsPolled: 15, tsMs: Date.now() - 3 * 86_400_000, hyped: HYPED_SNAP })); // restored from the bucket, three days old
+    const stale = await (await fetch(`${BASE}/api/status`)).json();
+    assert.equal(stale.rumint.legacyStale, true, JSON.stringify(stale.rumint)); assert.equal(stale.rumint.enabled, true, 'RUMOR-2 is live: ears are ON');
+    w(legacy, JSON.stringify({ enabled: true, status: 'HEALTHY', symbolsTracked: 15, symbolsPolled: 15, tsMs: Date.now(), hyped: HYPED_SNAP }));
+    const fresh = await (await fetch(`${BASE}/api/status`)).json(); assert.equal(fresh.rumint.legacyStale, undefined); assert.equal(fresh.rumint.symbolsPolled, 15);
+  } finally { w(legacy, keep); rmSync(path.join(TEST_DATA, 'rumor2'), { recursive: true, force: true }); }
+});
